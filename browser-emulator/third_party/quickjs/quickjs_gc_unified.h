@@ -385,12 +385,11 @@ void gc_type_iterator_next(GCTypeIterator *it);
 GCHandle gc_type_iterator_handle(GCTypeIterator *it);
 
 /* ============================================================================
- * MULTITHREADED GC - Double-Buffered Design
+ * MULTITHREADED GC - Double-Buffered Design (Lock-Free)
  * ============================================================================
  *
  * Two GCBuffer structs, each with handles[] (pointer table) and storage (object heap).
  * active_handle_table: atomic void** pointer to current active table.
- * compaction_target: which buffer GC is compacting into.
  *
  * Handles are plain indices (no encoding).
  * gc_deref(handle): atomic_load(active_handle_table)[handle] — one atomic load + array index.
@@ -400,6 +399,11 @@ GCHandle gc_type_iterator_handle(GCTypeIterator *it);
  * in-place) → atomic swap active_handle_table.
  *
  * No forwarding map, no handle remapping — tables kept consistent during compaction.
+ * 
+ * Lock-free allocation:
+ * - Handle allocation: atomic increment of handle_count to reserve slot
+ * - Memory allocation: atomic increment of bump_offset to reserve space
+ * - Compaction sorts live objects by handle before moving (allocations may be out-of-order)
  * ============================================================================ */
 
 typedef enum {
@@ -413,10 +417,10 @@ typedef enum {
 typedef struct GCBuffer {
     uint8_t *storage;           /* Bump-allocated object heap */
     size_t storage_size;        /* Total size of storage */
-    size_t bump_offset;         /* Current allocation offset */
+    size_t bump_offset;         /* Current allocation offset (atomic access) */
     
     void **handles;             /* Handle-to-pointer table */
-    uint32_t handle_count;      /* Next handle index to allocate */
+    uint32_t handle_count;      /* Next handle index to allocate (atomic access) */
     uint32_t handle_capacity;   /* Allocated capacity of handles[] */
 } GCBuffer;
 
@@ -426,11 +430,10 @@ typedef struct GCState {
     
     /* Atomic pointer to the currently active handle table */
     void *volatile active_handle_table;   /* Points to one of buffers[0].handles or buffers[1].handles */
-    uint32_t active_buffer_index;         /* 0 or 1: which buffer is currently active */
     
-    /* GC phase machine state */
-    GCPhase gc_phase;                     /* Current GC phase */
-    uint32_t compaction_target;           /* Which buffer (0 or 1) GC is compacting INTO */
+    /* Atomic GC phase machine state */
+    uint32_t volatile gc_phase;           /* GCPhase enum, atomic */
+    uint32_t volatile compaction_target;  /* Which buffer (0 or 1) GC is compacting INTO, atomic */
     
     /* Handle free list (shared between both buffers - handles are indices) */
     uint32_t *free_list;
@@ -473,7 +476,12 @@ extern GCState g_gc;
 
 /* Backward-compatible macros for code that accesses g_gc.handles directly */
 #define g_gc_handles_ptrs (g_gc.active_handle_table)
-#define g_gc_handles_count (g_gc.buffers[g_gc.active_buffer_index].handle_count)
+
+/* Derive active buffer index from active_handle_table pointer comparison */
+static inline uint32_t gc_active_buffer_index(void) {
+    return (g_gc.active_handle_table == g_gc.buffers[0].handles) ? 0 : 1;
+}
+#define g_gc_handles_count (g_gc.buffers[gc_active_buffer_index()].handle_count)
 
 /* ============================================================================
  * GC Thread Control
