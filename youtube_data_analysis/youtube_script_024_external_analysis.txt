@@ -1,0 +1,394 @@
+================================================================================
+BROWSER API ANALYSIS: youtube_script_024_external.js
+================================================================================
+
+File Size: 3,461,065 bytes
+Total Unique APIs Found: 304
+Categories with APIs: 34
+
+--------------------------------------------------------------------------------
+Window APIs (107 unique)
+--------------------------------------------------------------------------------
+  - window.AbortController
+  - window.AudioContext
+  - window.EGn
+  - window.Float32Array
+  - window.FormData
+  - window.H5vccPlatformService
+  - window.H5vccScreen
+  - window.H5vccScreen.GetDiagonal
+  - window.HTMLMediaElement
+  - window.HTMLVideoElement
+  - window.Int32Array
+  - window.IntersectionObserver
+  - window.JSON
+  - window.ManagedMediaSource
+  - window.ManagedMediaSource.isTypeSupported
+  - window.MediaMetadata
+  - window.MediaSource
+  - window.MediaSource.isTypeSupported
+  - window.PressureObserver
+  - window.Profiler
+  - window.ReadableStream
+  - window.Request
+  - window.SourceBuffer
+  - window.TextDecoder
+  - window.TextEncoder
+  - window.URL
+  - window.URL.createObjectURL
+  - window.WebAssembly
+  - window.WebKitMediaSource
+  - window.WebKitPlaybackTargetAvailabilityEvent
+  - window.addEventListener
+  - window.android
+  - window.android.webview
+  - window.android.webview.getExperimentalMediaIntegrityTokenProvider
+  - window.attmp
+  - window.bgens
+  - window.botguard
+  - window.cast.receiver.platform.canDisplayType
+  - window.clearInterval
+  - window.clearTimeout
+  - window.close
+  - window.console.log
+  - window.crypto
+  - window.crypto.getRandomValues
+  - window.devicePixelRatio
+  - window.dispatchEvent
+  - window.document
+  - window.document.documentElement
+  - window.document.elementFromPoint
+  - window.document.pictureInPictureEnabled
+
+--------------------------------------------------------------------------------
+Document APIs (48 unique)
+--------------------------------------------------------------------------------
+  - document.activeElement
+  - document.activeElement.blur
+  - document.addEventListener
+  - document.body
+  - document.body.scrollLeft
+  - document.body.scrollTop
+  - document.createElement
+  - document.createElementNS
+  - document.createEvent
+  - document.createRange
+  - document.createTextNode
+  - document.documentElement
+  - document.documentElement.getAttribute
+  - document.documentElement.scrollLeft
+  - document.documentElement.scrollTop
+  - document.documentElement.style
+  - document.documentMode
+  - document.domain
+  - document.elementFromPoint
+  - document.execCommand
+  - document.exitFullscreen
+  - document.exitPictureInPicture
+  - document.featurePolicy
+  - document.getElementById
+  - document.getElementsByClassName
+  - document.getElementsByTagName
+  - document.hasFocus
+  - document.head.appendChild
+  - document.head.removeChild
+  - document.implementation.createHTMLDocument
+  - document.location
+  - document.location.hostname
+  - document.location.hostname.endsWith
+  - document.location.href
+  - document.location.origin
+  - document.location.port
+  - document.location.protocol
+  - document.location.toString
+  - document.pictureInPictureElement
+  - document.pictureInPictureEnabled
+  - document.queryCommandSupported
+  - document.querySelector
+  - document.querySelectorAll
+  - document.readyState
+  - document.referrer
+  - document.referrer.substring
+  - document.removeEventListener
+  - document.visibilityState
+
+--------------------------------------------------------------------------------
+Navigator APIs (22 unique)
+--------------------------------------------------------------------------------
+  - navigator.clipboard.writeText
+  - navigator.connection
+  - navigator.cookieEnabled
+  - navigator.geolocation
+  - navigator.geolocation.getCurrentPosition
+  - navigator.getBattery
+  - navigator.hardwareConcurrency
+  - navigator.mediaCapabilities
+  - navigator.mediaCapabilities.decodingInfo
+  - navigator.mediaSession
+  - navigator.mediaSession.metadata
+  - navigator.mediaSession.playbackState
+  - navigator.mediaSession.setActionHandler
+  - navigator.mediaSession.setPositionState
+  - navigator.msPointerEnabled
+  - navigator.onLine
+  - navigator.requestMediaKeySystemAccess
+  - navigator.sendBeacon
+  - navigator.share
+  - navigator.standalone
+  - navigator.userAgent
+  - navigator.vendor
+
+--------------------------------------------------------------------------------
+Fetch API (1 unique)
+--------------------------------------------------------------------------------
+  - fetch(
+
+--------------------------------------------------------------------------------
+XMLHttpRequest (1 unique)
+--------------------------------------------------------------------------------
+  - XMLHttpRequest
+
+--------------------------------------------------------------------------------
+MediaSource APIs (3 unique)
+--------------------------------------------------------------------------------
+  - ManagedMediaSource
+  - MediaSource
+  - WebKitMediaSource
+
+--------------------------------------------------------------------------------
+EventTarget APIs (3 unique)
+--------------------------------------------------------------------------------
+  - addEventListener(
+  - dispatchEvent(
+  - removeEventListener(
+
+--------------------------------------------------------------------------------
+Timeout/Interval (4 unique)
+--------------------------------------------------------------------------------
+  - clearInterval(
+  - clearTimeout(
+  - setInterval(
+  - setTimeout(
+
+--------------------------------------------------------------------------------
+Performance APIs (13 unique)
+--------------------------------------------------------------------------------
+  - performance.clearResourceTimings
+  - performance.getEntriesByName
+  - performance.mark
+  - performance.measure
+  - performance.memory
+  - performance.memory.jsHeapSizeLimit
+  - performance.memory.totalJSHeapSize
+  - performance.memory.usedJSHeapSize
+  - performance.now
+  - performance.onresourcetimingbufferfull
+  - performance.timeOrigin
+  - performance.timing
+  - performance.timing.navigationStart
+
+--------------------------------------------------------------------------------
+Observer APIs (3 unique)
+--------------------------------------------------------------------------------
+  - IntersectionObserver
+  - MutationObserver
+  - ResizeObserver
+
+--------------------------------------------------------------------------------
+AbortController (1 unique)
+--------------------------------------------------------------------------------
+  - AbortController
+
+--------------------------------------------------------------------------------
+Array Method Calls (19 unique)
+--------------------------------------------------------------------------------
+  - concat(
+  - every(
+  - filter(
+  - find(
+  - forEach(
+  - includes(
+  - indexOf(
+  - join(
+  - map(
+  - pop(
+  - push(
+  - reduce(
+  - reverse(
+  - shift(
+  - slice(
+  - some(
+  - sort(
+  - splice(
+  - unshift(
+
+--------------------------------------------------------------------------------
+Blob/File APIs (2 unique)
+--------------------------------------------------------------------------------
+  - Blob
+  - File
+
+--------------------------------------------------------------------------------
+Console APIs (5 unique)
+--------------------------------------------------------------------------------
+  - console.error
+  - console.groupCollapsed
+  - console.groupEnd
+  - console.log
+  - console.warn
+
+--------------------------------------------------------------------------------
+Crypto APIs (3 unique)
+--------------------------------------------------------------------------------
+  - Crypto
+  - crypto.getRandomValues
+  - crypto.subtle
+
+--------------------------------------------------------------------------------
+DOMParser (1 unique)
+--------------------------------------------------------------------------------
+  - DOMParser
+
+--------------------------------------------------------------------------------
+Event Constructors (2 unique)
+--------------------------------------------------------------------------------
+  - new CustomEvent
+  - new Event
+
+--------------------------------------------------------------------------------
+FormData (1 unique)
+--------------------------------------------------------------------------------
+  - FormData
+
+--------------------------------------------------------------------------------
+HTML Element Constructors (4 unique)
+--------------------------------------------------------------------------------
+  - HTMLElement
+  - HTMLMediaElement
+  - HTMLStyleElement
+  - HTMLVideoElement
+
+--------------------------------------------------------------------------------
+History APIs (1 unique)
+--------------------------------------------------------------------------------
+  - history.length
+
+--------------------------------------------------------------------------------
+JSON APIs (2 unique)
+--------------------------------------------------------------------------------
+  - JSON.parse
+  - JSON.stringify
+
+--------------------------------------------------------------------------------
+LocalStorage APIs (4 unique)
+--------------------------------------------------------------------------------
+  - localStorage.get
+  - localStorage.remove
+  - localStorage.removeItem
+  - localStorage.set
+
+--------------------------------------------------------------------------------
+Location APIs (13 unique)
+--------------------------------------------------------------------------------
+  - location.ZE
+  - location.ancestorOrigins
+  - location.clone
+  - location.hash
+  - location.hostname
+  - location.href
+  - location.origin
+  - location.port
+  - location.protocol
+  - location.reload
+  - location.search
+  - location.set
+  - location.toString
+
+--------------------------------------------------------------------------------
+Object APIs (16 unique)
+--------------------------------------------------------------------------------
+  - Object.assign
+  - Object.create
+  - Object.defineProperties
+  - Object.defineProperty
+  - Object.entries
+  - Object.freeze
+  - Object.fromEntries
+  - Object.getOwnPropertyDescriptor
+  - Object.getPrototypeOf
+  - Object.is
+  - Object.isExtensible
+  - Object.isFrozen
+  - Object.keys
+  - Object.prototype
+  - Object.setPrototypeOf
+  - Object.values
+
+--------------------------------------------------------------------------------
+Promise APIs (5 unique)
+--------------------------------------------------------------------------------
+  - Promise.all
+  - Promise.race
+  - Promise.reject
+  - Promise.resolve
+  - Promise.withResolvers
+
+--------------------------------------------------------------------------------
+RequestAnimationFrame (2 unique)
+--------------------------------------------------------------------------------
+  - cancelAnimationFrame(
+  - requestAnimationFrame(
+
+--------------------------------------------------------------------------------
+Screen APIs (5 unique)
+--------------------------------------------------------------------------------
+  - screen.availTop
+  - screen.availWidth
+  - screen.height
+  - screen.pixelDepth
+  - screen.width
+
+--------------------------------------------------------------------------------
+SessionStorage APIs (3 unique)
+--------------------------------------------------------------------------------
+  - sessionStorage.getItem
+  - sessionStorage.removeItem
+  - sessionStorage.setItem
+
+--------------------------------------------------------------------------------
+URL APIs (2 unique)
+--------------------------------------------------------------------------------
+  - URL.createObjectURL
+  - URL.revokeObjectURL
+
+--------------------------------------------------------------------------------
+Worker APIs (1 unique)
+--------------------------------------------------------------------------------
+  - Worker
+
+--------------------------------------------------------------------------------
+btoa/atob (2 unique)
+--------------------------------------------------------------------------------
+  - atob(
+  - btoa(
+
+--------------------------------------------------------------------------------
+encodeURIComponent (2 unique)
+--------------------------------------------------------------------------------
+  - decodeURIComponent(
+  - encodeURIComponent(
+
+--------------------------------------------------------------------------------
+escape/unescape (2 unique)
+--------------------------------------------------------------------------------
+  - escape(
+  - unescape(
+
+--------------------------------------------------------------------------------
+matchMedia (1 unique)
+--------------------------------------------------------------------------------
+  - matchMedia(
+
+================================================================================
+END OF ANALYSIS
+================================================================================

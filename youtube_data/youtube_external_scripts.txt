@@ -1,0 +1,10 @@
+Script 6: https://www.youtube.com/s/desktop/c376667c/jsbin/web-animations-next-lite.min.vflset/web-animations-next-lite.min.js
+Script 7: https://www.youtube.com/s/desktop/c376667c/jsbin/custom-elements-es5-adapter.vflset/custom-elements-es5-adapter.js
+Script 8: https://www.youtube.com/s/desktop/c376667c/jsbin/webcomponents-sd.vflset/webcomponents-sd.js
+Script 9: https://www.youtube.com/s/desktop/c376667c/jsbin/intersection-observer.min.vflset/intersection-observer.min.js
+Script 14: https://www.youtube.com/s/desktop/c376667c/jsbin/scheduler.vflset/scheduler.js
+Script 15: https://www.youtube.com/s/desktop/c376667c/jsbin/www-i18n-constants-en_US.vflset/www-i18n-constants.js
+Script 24: /s/player/f4f314f0/player_es6.vflset/en_US/base.js
+Script 28: https://www.youtube.com/s/desktop/c376667c/jsbin/spf.vflset/spf.js
+Script 30: https://www.youtube.com/s/desktop/c376667c/jsbin/network.vflset/network.js
+Script 37: https://www.youtube.com/s/_/ytmainappweb/_/js/k=ytmainappweb.kevlar_base.en_US.WCzKWUsvIE0.es5.O/am=AAAAEAAAQAI/d=1/rs=AGKMywEhucy0sRYo-LnL71RW1sW2eFA6TQ/m=kevlar_base_module,kevlar_main_module

@@ -1,0 +1,35 @@
+================================================================================
+BROWSER API ANALYSIS: youtube_script_026_inline.js
+================================================================================
+
+File Size: 1,303 bytes
+Total Unique APIs Found: 16
+Categories with APIs: 2
+
+--------------------------------------------------------------------------------
+Window APIs (15 unique)
+--------------------------------------------------------------------------------
+  - window.pis
+  - window.yt
+  - window.yt.config_
+  - window.yt.config_.WEB_PLAYER_CONTEXT_CONFIGS
+  - window.yt.player
+  - window.yt.player.Application
+  - window.yt.player.Application.create
+  - window.yt.player.Application.createAlternate
+  - window.ytcsi
+  - window.ytcsi.tick
+  - window.ytplayer
+  - window.ytplayer.bootstrapPlayerContainer
+  - window.ytplayer.bootstrapPlayerResponse
+  - window.ytplayer.bootstrapWebPlayerContextConfig
+  - window.ytplayer.config
+
+--------------------------------------------------------------------------------
+Document APIs (1 unique)
+--------------------------------------------------------------------------------
+  - document.getElementById
+
+================================================================================
+END OF ANALYSIS
+================================================================================

@@ -1,0 +1,21 @@
+================================================================================
+BROWSER API ANALYSIS: youtube_script_003_inline.js
+================================================================================
+
+File Size: 299 bytes
+Total Unique APIs Found: 6
+Categories with APIs: 1
+
+--------------------------------------------------------------------------------
+Window APIs (6 unique)
+--------------------------------------------------------------------------------
+  - window.Polymer
+  - window.Polymer.legacyOptimizations
+  - window.Polymer.setPassiveTouchGestures
+  - window.ShadyCSS
+  - window.ShadyDOM
+  - window.polymerSkipLoadingFontRoboto
+
+================================================================================
+END OF ANALYSIS
+================================================================================

@@ -1,0 +1,2595 @@
+{
+  "total_files": 51,
+  "total_unique_apis": 535,
+  "api_usage_frequency": [
+    [
+      "window.ytcsi",
+      20
+    ],
+    [
+      "window.ytcsi.tick",
+      18
+    ],
+    [
+      "addEventListener(",
+      12
+    ],
+    [
+      "Object.defineProperty",
+      11
+    ],
+    [
+      "indexOf(",
+      11
+    ],
+    [
+      "push(",
+      11
+    ],
+    [
+      "removeEventListener(",
+      11
+    ],
+    [
+      "join(",
+      9
+    ],
+    [
+      "Object.defineProperties",
+      8
+    ],
+    [
+      "setTimeout(",
+      8
+    ],
+    [
+      "shift(",
+      8
+    ],
+    [
+      "performance.now",
+      7
+    ],
+    [
+      "document.createElement",
+      7
+    ],
+    [
+      "concat(",
+      7
+    ],
+    [
+      "forEach(",
+      7
+    ],
+    [
+      "slice(",
+      7
+    ],
+    [
+      "window.addEventListener",
+      7
+    ],
+    [
+      "Object.prototype",
+      7
+    ],
+    [
+      "Object.create",
+      6
+    ],
+    [
+      "requestAnimationFrame(",
+      6
+    ],
+    [
+      "filter(",
+      6
+    ],
+    [
+      "map(",
+      6
+    ],
+    [
+      "pop(",
+      6
+    ],
+    [
+      "sort(",
+      6
+    ],
+    [
+      "some(",
+      6
+    ],
+    [
+      "document.querySelector",
+      6
+    ],
+    [
+      "location.href",
+      5
+    ],
+    [
+      "Object.getOwnPropertyDescriptor",
+      5
+    ],
+    [
+      "Object.keys",
+      5
+    ],
+    [
+      "performance.timing",
+      5
+    ],
+    [
+      "performance.timing.navigationStart",
+      5
+    ],
+    [
+      "console.warn",
+      5
+    ],
+    [
+      "splice(",
+      5
+    ],
+    [
+      "Object.setPrototypeOf",
+      5
+    ],
+    [
+      "window.removeEventListener",
+      5
+    ],
+    [
+      "document.addEventListener",
+      5
+    ],
+    [
+      "XMLHttpRequest",
+      5
+    ],
+    [
+      "clearTimeout(",
+      5
+    ],
+    [
+      "Object.getOwnPropertyNames",
+      4
+    ],
+    [
+      "encodeURIComponent(",
+      4
+    ],
+    [
+      "window.performance",
+      4
+    ],
+    [
+      "window.document",
+      4
+    ],
+    [
+      "document.documentElement",
+      4
+    ],
+    [
+      "reverse(",
+      4
+    ],
+    [
+      "unshift(",
+      4
+    ],
+    [
+      "HTMLElement",
+      4
+    ],
+    [
+      "document.body",
+      4
+    ],
+    [
+      "document.createTextNode",
+      4
+    ],
+    [
+      "document.removeEventListener",
+      4
+    ],
+    [
+      "MutationObserver",
+      4
+    ],
+    [
+      "Object.values",
+      4
+    ],
+    [
+      "performance.getEntriesByName",
+      4
+    ],
+    [
+      "JSON.parse",
+      4
+    ],
+    [
+      "FormData",
+      4
+    ],
+    [
+      "window.yt",
+      3
+    ],
+    [
+      "window.customElements",
+      3
+    ],
+    [
+      "window.location.href",
+      3
+    ],
+    [
+      "window.Polymer",
+      3
+    ],
+    [
+      "window.performance.now",
+      3
+    ],
+    [
+      "window.performance.timing",
+      3
+    ],
+    [
+      "window.performance.timing.navigationStart",
+      3
+    ],
+    [
+      "navigator.userAgent",
+      3
+    ],
+    [
+      "document.createElementNS",
+      3
+    ],
+    [
+      "navigator.userAgent.match",
+      3
+    ],
+    [
+      "customElements.define",
+      3
+    ],
+    [
+      "document.activeElement",
+      3
+    ],
+    [
+      "document.readyState",
+      3
+    ],
+    [
+      "console.error",
+      3
+    ],
+    [
+      "fetch(",
+      3
+    ],
+    [
+      "Promise.resolve",
+      3
+    ],
+    [
+      "Object.assign",
+      3
+    ],
+    [
+      "Object.getPrototypeOf",
+      3
+    ],
+    [
+      "reduce(",
+      3
+    ],
+    [
+      "new Event",
+      3
+    ],
+    [
+      "matchMedia(",
+      3
+    ],
+    [
+      "IntersectionObserver",
+      3
+    ],
+    [
+      "clearInterval(",
+      3
+    ],
+    [
+      "setInterval(",
+      3
+    ],
+    [
+      "window.setTimeout",
+      3
+    ],
+    [
+      "cancelAnimationFrame(",
+      3
+    ],
+    [
+      "document.getElementsByTagName",
+      3
+    ],
+    [
+      "Object.isExtensible",
+      3
+    ],
+    [
+      "document.createEvent",
+      3
+    ],
+    [
+      "document.getElementById",
+      3
+    ],
+    [
+      "location.hash",
+      3
+    ],
+    [
+      "location.reload",
+      3
+    ],
+    [
+      "dispatchEvent(",
+      3
+    ],
+    [
+      "every(",
+      3
+    ],
+    [
+      "window.onerror",
+      2
+    ],
+    [
+      "window.Polymer.legacyOptimizations",
+      2
+    ],
+    [
+      "window.Polymer.setPassiveTouchGestures",
+      2
+    ],
+    [
+      "window.ShadyCSS",
+      2
+    ],
+    [
+      "window.ShadyDOM",
+      2
+    ],
+    [
+      "window.cancelAnimationFrame",
+      2
+    ],
+    [
+      "window.getComputedStyle",
+      2
+    ],
+    [
+      "window.requestAnimationFrame",
+      2
+    ],
+    [
+      "document.documentElement.style",
+      2
+    ],
+    [
+      "window.customElements.define",
+      2
+    ],
+    [
+      "customElements.get",
+      2
+    ],
+    [
+      "window.CSS",
+      2
+    ],
+    [
+      "window.HTMLImports",
+      2
+    ],
+    [
+      "window.HTMLImports.whenReady",
+      2
+    ],
+    [
+      "window.HTMLTemplateElement",
+      2
+    ],
+    [
+      "window.MouseEvent",
+      2
+    ],
+    [
+      "document.createComment",
+      2
+    ],
+    [
+      "document.createDocumentFragment",
+      2
+    ],
+    [
+      "document.createTreeWalker",
+      2
+    ],
+    [
+      "document.head.appendChild",
+      2
+    ],
+    [
+      "document.implementation.createHTMLDocument",
+      2
+    ],
+    [
+      "customElements.polyfillWrapFlushCallback",
+      2
+    ],
+    [
+      "HTMLTemplateElement",
+      2
+    ],
+    [
+      "new MouseEvent",
+      2
+    ],
+    [
+      "window.ytplayer",
+      2
+    ],
+    [
+      "window.ytAtN",
+      2
+    ],
+    [
+      "window.clearTimeout",
+      2
+    ],
+    [
+      "document.body.appendChild",
+      2
+    ],
+    [
+      "Object.seal",
+      2
+    ],
+    [
+      "window.AbortController",
+      2
+    ],
+    [
+      "window.AudioContext",
+      2
+    ],
+    [
+      "window.FormData",
+      2
+    ],
+    [
+      "window.Int32Array",
+      2
+    ],
+    [
+      "window.IntersectionObserver",
+      2
+    ],
+    [
+      "window.JSON",
+      2
+    ],
+    [
+      "window.ManagedMediaSource",
+      2
+    ],
+    [
+      "window.ManagedMediaSource.isTypeSupported",
+      2
+    ],
+    [
+      "window.MediaSource",
+      2
+    ],
+    [
+      "window.MediaSource.isTypeSupported",
+      2
+    ],
+    [
+      "window.ReadableStream",
+      2
+    ],
+    [
+      "window.Request",
+      2
+    ],
+    [
+      "document.activeElement.blur",
+      2
+    ],
+    [
+      "document.body.scrollLeft",
+      2
+    ],
+    [
+      "document.body.scrollTop",
+      2
+    ],
+    [
+      "document.createRange",
+      2
+    ],
+    [
+      "document.referrer",
+      2
+    ],
+    [
+      "navigator.clipboard.writeText",
+      2
+    ],
+    [
+      "navigator.cookieEnabled",
+      2
+    ],
+    [
+      "navigator.geolocation",
+      2
+    ],
+    [
+      "navigator.geolocation.getCurrentPosition",
+      2
+    ],
+    [
+      "navigator.hardwareConcurrency",
+      2
+    ],
+    [
+      "navigator.onLine",
+      2
+    ],
+    [
+      "navigator.sendBeacon",
+      2
+    ],
+    [
+      "navigator.share",
+      2
+    ],
+    [
+      "navigator.standalone",
+      2
+    ],
+    [
+      "navigator.vendor",
+      2
+    ],
+    [
+      "location.hostname",
+      2
+    ],
+    [
+      "location.origin",
+      2
+    ],
+    [
+      "location.port",
+      2
+    ],
+    [
+      "location.protocol",
+      2
+    ],
+    [
+      "location.search",
+      2
+    ],
+    [
+      "location.toString",
+      2
+    ],
+    [
+      "console.groupCollapsed",
+      2
+    ],
+    [
+      "console.groupEnd",
+      2
+    ],
+    [
+      "console.log",
+      2
+    ],
+    [
+      "localStorage.get",
+      2
+    ],
+    [
+      "localStorage.remove",
+      2
+    ],
+    [
+      "localStorage.removeItem",
+      2
+    ],
+    [
+      "localStorage.set",
+      2
+    ],
+    [
+      "sessionStorage.getItem",
+      2
+    ],
+    [
+      "sessionStorage.removeItem",
+      2
+    ],
+    [
+      "sessionStorage.setItem",
+      2
+    ],
+    [
+      "history.length",
+      2
+    ],
+    [
+      "screen.availTop",
+      2
+    ],
+    [
+      "screen.availWidth",
+      2
+    ],
+    [
+      "screen.height",
+      2
+    ],
+    [
+      "screen.width",
+      2
+    ],
+    [
+      "performance.clearResourceTimings",
+      2
+    ],
+    [
+      "performance.mark",
+      2
+    ],
+    [
+      "performance.measure",
+      2
+    ],
+    [
+      "performance.timeOrigin",
+      2
+    ],
+    [
+      "Worker",
+      2
+    ],
+    [
+      "ResizeObserver",
+      2
+    ],
+    [
+      "ManagedMediaSource",
+      2
+    ],
+    [
+      "MediaSource",
+      2
+    ],
+    [
+      "URL.createObjectURL",
+      2
+    ],
+    [
+      "URL.revokeObjectURL",
+      2
+    ],
+    [
+      "Promise.all",
+      2
+    ],
+    [
+      "Promise.race",
+      2
+    ],
+    [
+      "Promise.reject",
+      2
+    ],
+    [
+      "JSON.stringify",
+      2
+    ],
+    [
+      "Object.entries",
+      2
+    ],
+    [
+      "Object.freeze",
+      2
+    ],
+    [
+      "Object.fromEntries",
+      2
+    ],
+    [
+      "Object.is",
+      2
+    ],
+    [
+      "Object.isFrozen",
+      2
+    ],
+    [
+      "find(",
+      2
+    ],
+    [
+      "includes(",
+      2
+    ],
+    [
+      "crypto.getRandomValues",
+      2
+    ],
+    [
+      "crypto.subtle",
+      2
+    ],
+    [
+      "AbortController",
+      2
+    ],
+    [
+      "HTMLStyleElement",
+      2
+    ],
+    [
+      "HTMLVideoElement",
+      2
+    ],
+    [
+      "new CustomEvent",
+      2
+    ],
+    [
+      "Blob",
+      2
+    ],
+    [
+      "File",
+      2
+    ],
+    [
+      "atob(",
+      2
+    ],
+    [
+      "btoa(",
+      2
+    ],
+    [
+      "decodeURIComponent(",
+      2
+    ],
+    [
+      "escape(",
+      2
+    ],
+    [
+      "unescape(",
+      2
+    ],
+    [
+      "window._spf_state",
+      2
+    ],
+    [
+      "window.attachEvent",
+      2
+    ],
+    [
+      "window.chrome",
+      2
+    ],
+    [
+      "window.detachEvent",
+      2
+    ],
+    [
+      "window.performance.getEntriesByName",
+      2
+    ],
+    [
+      "window.postMessage",
+      2
+    ],
+    [
+      "document.dispatchEvent",
+      2
+    ],
+    [
+      "navigator.userAgent.indexOf",
+      2
+    ],
+    [
+      "history.back",
+      2
+    ],
+    [
+      "history.pushState",
+      2
+    ],
+    [
+      "history.replaceState",
+      2
+    ],
+    [
+      "history.state",
+      2
+    ],
+    [
+      "document.body.clientWidth",
+      2
+    ],
+    [
+      "window.WIZ_global_data",
+      1
+    ],
+    [
+      "window.ytcfg.set",
+      1
+    ],
+    [
+      "window.emergencyTimeoutImg",
+      1
+    ],
+    [
+      "window.unhandledErrorCount",
+      1
+    ],
+    [
+      "window.unhandledErrorMessages",
+      1
+    ],
+    [
+      "window.yterr",
+      1
+    ],
+    [
+      "window.polymerSkipLoadingFontRoboto",
+      1
+    ],
+    [
+      "navigator.userAgentData",
+      1
+    ],
+    [
+      "navigator.userAgentData.brands",
+      1
+    ],
+    [
+      "navigator.userAgentData.brands.length",
+      1
+    ],
+    [
+      "performance.timing.responseStart",
+      1
+    ],
+    [
+      "window.Animation",
+      1
+    ],
+    [
+      "window.Element.prototype.animate",
+      1
+    ],
+    [
+      "window.Element.prototype.getAnimations",
+      1
+    ],
+    [
+      "window.GroupEffect",
+      1
+    ],
+    [
+      "window.GroupEffect.prototype",
+      1
+    ],
+    [
+      "window.KeyframeEffect",
+      1
+    ],
+    [
+      "window.Promise",
+      1
+    ],
+    [
+      "window.SequenceEffect",
+      1
+    ],
+    [
+      "window.SequenceEffect.prototype",
+      1
+    ],
+    [
+      "window.Symbol",
+      1
+    ],
+    [
+      "window.document.timeline",
+      1
+    ],
+    [
+      "document.documentElement.animate",
+      1
+    ],
+    [
+      "document.timeline",
+      1
+    ],
+    [
+      "document.timeline.getAnimations",
+      1
+    ],
+    [
+      "window.HTMLElement",
+      1
+    ],
+    [
+      "window.HTMLElement.es5Shimmed",
+      1
+    ],
+    [
+      "window.HTMLElement.prototype",
+      1
+    ],
+    [
+      "window.customElements.get",
+      1
+    ],
+    [
+      "window.CustomElementRegistry.prototype",
+      1
+    ],
+    [
+      "window.CustomEvent",
+      1
+    ],
+    [
+      "window.Event",
+      1
+    ],
+    [
+      "window.EventTarget",
+      1
+    ],
+    [
+      "window.EventTarget.prototype",
+      1
+    ],
+    [
+      "window.HTMLSlotElement",
+      1
+    ],
+    [
+      "window.HTMLTemplateElement.prototype",
+      1
+    ],
+    [
+      "window.ShadowRoot",
+      1
+    ],
+    [
+      "window.ShadyCSS.ApplyShim",
+      1
+    ],
+    [
+      "window.ShadyCSS.CustomStyleInterface",
+      1
+    ],
+    [
+      "window.ShadyCSS.ScopingShim",
+      1
+    ],
+    [
+      "window.ShadyCSS.cssBuild",
+      1
+    ],
+    [
+      "window.ShadyCSS.disableRuntime",
+      1
+    ],
+    [
+      "window.ShadyCSS.nativeCss",
+      1
+    ],
+    [
+      "window.ShadyDOM.handlesDynamicScoping",
+      1
+    ],
+    [
+      "window.ShadyDOM.inUse",
+      1
+    ],
+    [
+      "window.ShadyDOM.nativeMethods.querySelectorAll.call",
+      1
+    ],
+    [
+      "window.ShadyDOM.nativeMethods.setAttribute.call",
+      1
+    ],
+    [
+      "window.ShadyDOM.wrap",
+      1
+    ],
+    [
+      "window.WebComponents",
+      1
+    ],
+    [
+      "window.WebComponents.flags",
+      1
+    ],
+    [
+      "window.__shady_native_addEventListener",
+      1
+    ],
+    [
+      "window.console.error",
+      1
+    ],
+    [
+      "window.customElements.polyfillWrapFlushCallback",
+      1
+    ],
+    [
+      "window.enableHotReplacement",
+      1
+    ],
+    [
+      "window.matchMedia",
+      1
+    ],
+    [
+      "window.shadyCSSStyleTransformHooks",
+      1
+    ],
+    [
+      "document.__shady_native_activeElement",
+      1
+    ],
+    [
+      "document.contains",
+      1
+    ],
+    [
+      "document.documentElement.__shady_native_contains",
+      1
+    ],
+    [
+      "document.head",
+      1
+    ],
+    [
+      "document.head.querySelector",
+      1
+    ],
+    [
+      "HTMLSlotElement",
+      1
+    ],
+    [
+      "window.innerHeight",
+      1
+    ],
+    [
+      "window.innerWidth",
+      1
+    ],
+    [
+      "window.ytcfg",
+      1
+    ],
+    [
+      "window.ytcfg.obfuscatedData_",
+      1
+    ],
+    [
+      "performance.js",
+      1
+    ],
+    [
+      "performance.vflset",
+      1
+    ],
+    [
+      "window.ytAtP",
+      1
+    ],
+    [
+      "window.cancelIdleCallback",
+      1
+    ],
+    [
+      "window.requestIdleCallback",
+      1
+    ],
+    [
+      "document.hidden",
+      1
+    ],
+    [
+      "document.fonts",
+      1
+    ],
+    [
+      "document.fonts.load",
+      1
+    ],
+    [
+      "window.EGn",
+      1
+    ],
+    [
+      "window.Float32Array",
+      1
+    ],
+    [
+      "window.H5vccPlatformService",
+      1
+    ],
+    [
+      "window.H5vccScreen",
+      1
+    ],
+    [
+      "window.H5vccScreen.GetDiagonal",
+      1
+    ],
+    [
+      "window.HTMLMediaElement",
+      1
+    ],
+    [
+      "window.HTMLVideoElement",
+      1
+    ],
+    [
+      "window.MediaMetadata",
+      1
+    ],
+    [
+      "window.PressureObserver",
+      1
+    ],
+    [
+      "window.Profiler",
+      1
+    ],
+    [
+      "window.SourceBuffer",
+      1
+    ],
+    [
+      "window.TextDecoder",
+      1
+    ],
+    [
+      "window.TextEncoder",
+      1
+    ],
+    [
+      "window.URL",
+      1
+    ],
+    [
+      "window.URL.createObjectURL",
+      1
+    ],
+    [
+      "window.WebAssembly",
+      1
+    ],
+    [
+      "window.WebKitMediaSource",
+      1
+    ],
+    [
+      "window.WebKitPlaybackTargetAvailabilityEvent",
+      1
+    ],
+    [
+      "window.android",
+      1
+    ],
+    [
+      "window.android.webview",
+      1
+    ],
+    [
+      "window.android.webview.getExperimentalMediaIntegrityTokenProvider",
+      1
+    ],
+    [
+      "window.attmp",
+      1
+    ],
+    [
+      "window.bgens",
+      1
+    ],
+    [
+      "window.botguard",
+      1
+    ],
+    [
+      "window.cast.receiver.platform.canDisplayType",
+      1
+    ],
+    [
+      "window.clearInterval",
+      1
+    ],
+    [
+      "window.close",
+      1
+    ],
+    [
+      "window.console.log",
+      1
+    ],
+    [
+      "window.crypto",
+      1
+    ],
+    [
+      "window.crypto.getRandomValues",
+      1
+    ],
+    [
+      "window.devicePixelRatio",
+      1
+    ],
+    [
+      "window.dispatchEvent",
+      1
+    ],
+    [
+      "window.document.documentElement",
+      1
+    ],
+    [
+      "window.document.elementFromPoint",
+      1
+    ],
+    [
+      "window.document.pictureInPictureEnabled",
+      1
+    ],
+    [
+      "document.documentElement.getAttribute",
+      1
+    ],
+    [
+      "document.documentElement.scrollLeft",
+      1
+    ],
+    [
+      "document.documentElement.scrollTop",
+      1
+    ],
+    [
+      "document.documentMode",
+      1
+    ],
+    [
+      "document.domain",
+      1
+    ],
+    [
+      "document.elementFromPoint",
+      1
+    ],
+    [
+      "document.execCommand",
+      1
+    ],
+    [
+      "document.exitFullscreen",
+      1
+    ],
+    [
+      "document.exitPictureInPicture",
+      1
+    ],
+    [
+      "document.featurePolicy",
+      1
+    ],
+    [
+      "document.getElementsByClassName",
+      1
+    ],
+    [
+      "document.hasFocus",
+      1
+    ],
+    [
+      "document.head.removeChild",
+      1
+    ],
+    [
+      "document.location",
+      1
+    ],
+    [
+      "document.location.hostname",
+      1
+    ],
+    [
+      "document.location.hostname.endsWith",
+      1
+    ],
+    [
+      "document.location.href",
+      1
+    ],
+    [
+      "document.location.origin",
+      1
+    ],
+    [
+      "document.location.port",
+      1
+    ],
+    [
+      "document.location.protocol",
+      1
+    ],
+    [
+      "document.location.toString",
+      1
+    ],
+    [
+      "document.pictureInPictureElement",
+      1
+    ],
+    [
+      "document.pictureInPictureEnabled",
+      1
+    ],
+    [
+      "document.queryCommandSupported",
+      1
+    ],
+    [
+      "document.querySelectorAll",
+      1
+    ],
+    [
+      "document.referrer.substring",
+      1
+    ],
+    [
+      "document.visibilityState",
+      1
+    ],
+    [
+      "navigator.connection",
+      1
+    ],
+    [
+      "navigator.getBattery",
+      1
+    ],
+    [
+      "navigator.mediaCapabilities",
+      1
+    ],
+    [
+      "navigator.mediaCapabilities.decodingInfo",
+      1
+    ],
+    [
+      "navigator.mediaSession",
+      1
+    ],
+    [
+      "navigator.mediaSession.metadata",
+      1
+    ],
+    [
+      "navigator.mediaSession.playbackState",
+      1
+    ],
+    [
+      "navigator.mediaSession.setActionHandler",
+      1
+    ],
+    [
+      "navigator.mediaSession.setPositionState",
+      1
+    ],
+    [
+      "navigator.msPointerEnabled",
+      1
+    ],
+    [
+      "navigator.requestMediaKeySystemAccess",
+      1
+    ],
+    [
+      "location.ZE",
+      1
+    ],
+    [
+      "location.ancestorOrigins",
+      1
+    ],
+    [
+      "location.clone",
+      1
+    ],
+    [
+      "location.set",
+      1
+    ],
+    [
+      "screen.pixelDepth",
+      1
+    ],
+    [
+      "performance.memory",
+      1
+    ],
+    [
+      "performance.memory.jsHeapSizeLimit",
+      1
+    ],
+    [
+      "performance.memory.totalJSHeapSize",
+      1
+    ],
+    [
+      "performance.memory.usedJSHeapSize",
+      1
+    ],
+    [
+      "performance.onresourcetimingbufferfull",
+      1
+    ],
+    [
+      "WebKitMediaSource",
+      1
+    ],
+    [
+      "Promise.withResolvers",
+      1
+    ],
+    [
+      "Crypto",
+      1
+    ],
+    [
+      "HTMLMediaElement",
+      1
+    ],
+    [
+      "DOMParser",
+      1
+    ],
+    [
+      "window.pis",
+      1
+    ],
+    [
+      "window.yt.config_",
+      1
+    ],
+    [
+      "window.yt.config_.WEB_PLAYER_CONTEXT_CONFIGS",
+      1
+    ],
+    [
+      "window.yt.player",
+      1
+    ],
+    [
+      "window.yt.player.Application",
+      1
+    ],
+    [
+      "window.yt.player.Application.create",
+      1
+    ],
+    [
+      "window.yt.player.Application.createAlternate",
+      1
+    ],
+    [
+      "window.ytplayer.bootstrapPlayerContainer",
+      1
+    ],
+    [
+      "window.ytplayer.bootstrapPlayerResponse",
+      1
+    ],
+    [
+      "window.ytplayer.bootstrapWebPlayerContextConfig",
+      1
+    ],
+    [
+      "window.ytplayer.config",
+      1
+    ],
+    [
+      "window.history",
+      1
+    ],
+    [
+      "window.history.back",
+      1
+    ],
+    [
+      "window.history.pushState",
+      1
+    ],
+    [
+      "window.history.state",
+      1
+    ],
+    [
+      "window.location.hash",
+      1
+    ],
+    [
+      "window.location.reload",
+      1
+    ],
+    [
+      "window.navigator.maxTouchPoints",
+      1
+    ],
+    [
+      "window.navigator.msMaxTouchPoints",
+      1
+    ],
+    [
+      "window.pageXOffset",
+      1
+    ],
+    [
+      "window.pageYOffset",
+      1
+    ],
+    [
+      "window.performance.clearResourceTimings",
+      1
+    ],
+    [
+      "window.performance.mozClearResourceTimings",
+      1
+    ],
+    [
+      "window.performance.msClearResourceTimings",
+      1
+    ],
+    [
+      "window.performance.oClearResourceTimings",
+      1
+    ],
+    [
+      "window.performance.webkitClearResourceTimings",
+      1
+    ],
+    [
+      "window.scroll",
+      1
+    ],
+    [
+      "window.scroll.apply",
+      1
+    ],
+    [
+      "document.attachEvent",
+      1
+    ],
+    [
+      "document.detachEvent",
+      1
+    ],
+    [
+      "document.title",
+      1
+    ],
+    [
+      "navigator.maxTouchPoints",
+      1
+    ],
+    [
+      "navigator.msMaxTouchPoints",
+      1
+    ],
+    [
+      "performance.mozClearResourceTimings",
+      1
+    ],
+    [
+      "performance.msClearResourceTimings",
+      1
+    ],
+    [
+      "performance.oClearResourceTimings",
+      1
+    ],
+    [
+      "performance.webkitClearResourceTimings",
+      1
+    ],
+    [
+      "window.COMPILED",
+      1
+    ],
+    [
+      "window.CSS.supports",
+      1
+    ],
+    [
+      "window.Hammer",
+      1
+    ],
+    [
+      "window.JSCompiler_renameProperty",
+      1
+    ],
+    [
+      "window.MutationObserver",
+      1
+    ],
+    [
+      "window.Notification",
+      1
+    ],
+    [
+      "window.OfflineAudioContext",
+      1
+    ],
+    [
+      "window.PROPERTY_ACCESS_MAP",
+      1
+    ],
+    [
+      "window.PointerEvent",
+      1
+    ],
+    [
+      "window.Polymer.Element",
+      1
+    ],
+    [
+      "window.Polymer._polymerFn",
+      1
+    ],
+    [
+      "window.Polymer.allowTemplateFromDomModule",
+      1
+    ],
+    [
+      "window.Polymer.fastDomIf",
+      1
+    ],
+    [
+      "window.Polymer.legacyNoObservedAttributes",
+      1
+    ],
+    [
+      "window.Polymer.legacyUndefined",
+      1
+    ],
+    [
+      "window.Polymer.legacyWarnings",
+      1
+    ],
+    [
+      "window.Polymer.orderedComputed",
+      1
+    ],
+    [
+      "window.Polymer.removeNestedTemplates",
+      1
+    ],
+    [
+      "window.Polymer.rootPath",
+      1
+    ],
+    [
+      "window.Polymer.sanitizeDOMValue",
+      1
+    ],
+    [
+      "window.Polymer.strictTemplatePolicy",
+      1
+    ],
+    [
+      "window.Polymer.suppressTemplateNotifications",
+      1
+    ],
+    [
+      "window.Polymer.syncInitialRender",
+      1
+    ],
+    [
+      "window.Polymer.useAdoptedStyleSheetsWithBuiltCSS",
+      1
+    ],
+    [
+      "window.PolymerFakeBaseClass",
+      1
+    ],
+    [
+      "window.PolymerFakeBaseClassWithoutHtml",
+      1
+    ],
+    [
+      "window.Proxy",
+      1
+    ],
+    [
+      "window.Reflect",
+      1
+    ],
+    [
+      "window.Reflect.getMetadata",
+      1
+    ],
+    [
+      "window.ResizeObserver",
+      1
+    ],
+    [
+      "document.JSC$8385_onVisibilityChange.pipe",
+      1
+    ],
+    [
+      "document.activeElement.tagName",
+      1
+    ],
+    [
+      "document.adoptedStyleSheets",
+      1
+    ],
+    [
+      "document.adoptedStyleSheets.length",
+      1
+    ],
+    [
+      "document.all",
+      1
+    ],
+    [
+      "document.baseURI",
+      1
+    ],
+    [
+      "document.body.addEventListener",
+      1
+    ],
+    [
+      "document.body.animate",
+      1
+    ],
+    [
+      "document.body.classList.add",
+      1
+    ],
+    [
+      "document.body.classList.contains",
+      1
+    ],
+    [
+      "document.body.classList.remove",
+      1
+    ],
+    [
+      "document.body.className.indexOf",
+      1
+    ],
+    [
+      "document.body.clientHeight",
+      1
+    ],
+    [
+      "document.body.contains",
+      1
+    ],
+    [
+      "document.body.getAttribute",
+      1
+    ],
+    [
+      "document.body.hasAttribute",
+      1
+    ],
+    [
+      "document.body.prepend",
+      1
+    ],
+    [
+      "document.body.removeAttribute",
+      1
+    ],
+    [
+      "document.body.removeChild",
+      1
+    ],
+    [
+      "document.body.setAttribute",
+      1
+    ],
+    [
+      "document.body.style.backgroundColor",
+      1
+    ],
+    [
+      "document.body.style.colorScheme",
+      1
+    ],
+    [
+      "document.body.style.cursor",
+      1
+    ],
+    [
+      "document.body.style.overflow",
+      1
+    ],
+    [
+      "document.body.style.overflowY",
+      1
+    ],
+    [
+      "document.body.style.overscrollBehavior",
+      1
+    ],
+    [
+      "document.body.style.top",
+      1
+    ],
+    [
+      "document.cookie",
+      1
+    ],
+    [
+      "document.currentScript",
+      1
+    ],
+    [
+      "document.currentScript.src.indexOf",
+      1
+    ],
+    [
+      "document.defaultView",
+      1
+    ],
+    [
+      "document.documentElement.clientHeight",
+      1
+    ],
+    [
+      "navigator.clipboard",
+      1
+    ],
+    [
+      "navigator.clipboard.write",
+      1
+    ],
+    [
+      "navigator.deviceMemory",
+      1
+    ],
+    [
+      "navigator.keyboard",
+      1
+    ],
+    [
+      "navigator.locks",
+      1
+    ],
+    [
+      "navigator.mediaDevices",
+      1
+    ],
+    [
+      "navigator.mediaDevices.getUserMedia",
+      1
+    ],
+    [
+      "navigator.permissions",
+      1
+    ],
+    [
+      "navigator.permissions.query",
+      1
+    ],
+    [
+      "navigator.presentation",
+      1
+    ],
+    [
+      "navigator.serviceWorker",
+      1
+    ],
+    [
+      "navigator.serviceWorker.addEventListener",
+      1
+    ],
+    [
+      "navigator.serviceWorker.getRegistration",
+      1
+    ],
+    [
+      "navigator.serviceWorker.getRegistrations",
+      1
+    ],
+    [
+      "navigator.serviceWorker.ready.then",
+      1
+    ],
+    [
+      "navigator.serviceWorker.register",
+      1
+    ],
+    [
+      "navigator.storage",
+      1
+    ],
+    [
+      "navigator.storage.estimate",
+      1
+    ],
+    [
+      "navigator.userActivation",
+      1
+    ],
+    [
+      "navigator.userAgent.includes",
+      1
+    ],
+    [
+      "navigator.userAgentData.getHighEntropyValues",
+      1
+    ],
+    [
+      "location.host",
+      1
+    ],
+    [
+      "location.pathname",
+      1
+    ],
+    [
+      "console.debug",
+      1
+    ],
+    [
+      "console.info",
+      1
+    ],
+    [
+      "console.time",
+      1
+    ],
+    [
+      "console.timeEnd",
+      1
+    ],
+    [
+      "localStorage.setItem",
+      1
+    ],
+    [
+      "sessionStorage.remove",
+      1
+    ],
+    [
+      "sessionStorage.set",
+      1
+    ],
+    [
+      "history.forward",
+      1
+    ],
+    [
+      "history.scrollRestoration",
+      1
+    ],
+    [
+      "screen.availHeight",
+      1
+    ],
+    [
+      "performance.getEntriesByType",
+      1
+    ],
+    [
+      "performance.now.bind",
+      1
+    ],
+    [
+      "Promise.allSettled",
+      1
+    ],
+    [
+      "Promise.prototype",
+      1
+    ],
+    [
+      "Promise.toString",
+      1
+    ],
+    [
+      "JSON.parseWrapper",
+      1
+    ],
+    [
+      "Object.getOwnPropertyDescriptors",
+      1
+    ],
+    [
+      "Object.getOwnPropertySymbols",
+      1
+    ],
+    [
+      "Object.hasOwn",
+      1
+    ],
+    [
+      "Object.hasOwnProperty",
+      1
+    ],
+    [
+      "Object.my_load",
+      1
+    ],
+    [
+      "AbortSignal",
+      1
+    ],
+    [
+      "HTMLAnchorElement",
+      1
+    ],
+    [
+      "HTMLButtonElement",
+      1
+    ],
+    [
+      "HTMLCanvasElement",
+      1
+    ],
+    [
+      "HTMLDivElement",
+      1
+    ],
+    [
+      "HTMLFencedFrameElement",
+      1
+    ],
+    [
+      "HTMLFormElement",
+      1
+    ],
+    [
+      "HTMLIFrameElement",
+      1
+    ],
+    [
+      "HTMLImageElement",
+      1
+    ],
+    [
+      "HTMLInputElement",
+      1
+    ],
+    [
+      "HTMLLinkElement",
+      1
+    ],
+    [
+      "HTMLOptionElement",
+      1
+    ],
+    [
+      "HTMLSelectElement",
+      1
+    ],
+    [
+      "HTMLTextAreaElement",
+      1
+    ],
+    [
+      "HTMLUnknownElement",
+      1
+    ],
+    [
+      "FileReader",
+      1
+    ],
+    [
+      "new Image(",
+      1
+    ],
+    [
+      "XMLSerializer",
+      1
+    ]
+  ],
+  "file_summaries": {
+    "youtube_script_000_inline.js": {
+      "apis_count": 1,
+      "categories": [
+        "Window APIs"
+      ]
+    },
+    "youtube_script_001_inline.js": {
+      "apis_count": 2,
+      "categories": [
+        "Window APIs"
+      ]
+    },
+    "youtube_script_002_inline.js": {
+      "apis_count": 18,
+      "categories": [
+        "Window APIs",
+        "Location APIs",
+        "Object APIs",
+        "Array Method Calls",
+        "encodeURIComponent"
+      ]
+    },
+    "youtube_script_003_inline.js": {
+      "apis_count": 6,
+      "categories": [
+        "Window APIs"
+      ]
+    },
+    "youtube_script_004_inline.js": {
+      "apis_count": 0,
+      "categories": []
+    },
+    "youtube_script_005_inline.js": {
+      "apis_count": 18,
+      "categories": [
+        "Window APIs",
+        "Navigator APIs",
+        "Performance APIs",
+        "EventTarget APIs",
+        "Timeout/Interval",
+        "RequestAnimationFrame",
+        "Array Method Calls"
+      ]
+    },
+    "youtube_script_006_external.js": {
+      "apis_count": 46,
+      "categories": [
+        "Window APIs",
+        "Document APIs",
+        "Console APIs",
+        "Performance APIs",
+        "EventTarget APIs",
+        "Timeout/Interval",
+        "RequestAnimationFrame",
+        "Object APIs",
+        "Array Method Calls"
+      ]
+    },
+    "youtube_script_007_external.js": {
+      "apis_count": 13,
+      "categories": [
+        "Window APIs",
+        "Navigator APIs",
+        "Custom Elements",
+        "Object APIs",
+        "Array Method Calls",
+        "HTML Element Constructors"
+      ]
+    },
+    "youtube_script_008_external.js": {
+      "apis_count": 98,
+      "categories": [
+        "Window APIs",
+        "Document APIs",
+        "Navigator APIs",
+        "Console APIs",
+        "Fetch API",
+        "XMLHttpRequest",
+        "Observer APIs",
+        "EventTarget APIs",
+        "RequestAnimationFrame",
+        "Custom Elements",
+        "Promise APIs",
+        "Object APIs",
+        "Array Method Calls",
+        "HTML Element Constructors",
+        "Event Constructors",
+        "matchMedia"
+      ]
+    },
+    "youtube_script_009_external.js": {
+      "apis_count": 19,
+      "categories": [
+        "Performance APIs",
+        "Observer APIs",
+        "EventTarget APIs",
+        "Timeout/Interval",
+        "Object APIs",
+        "Array Method Calls"
+      ]
+    },
+    "youtube_script_010_inline.js": {
+      "apis_count": 2,
+      "categories": [
+        "Window APIs"
+      ]
+    },
+    "youtube_script_011_inline.js": {
+      "apis_count": 8,
+      "categories": [
+        "Window APIs",
+        "Performance APIs"
+      ]
+    },
+    "youtube_script_012_inline.js": {
+      "apis_count": 2,
+      "categories": [
+        "Window APIs"
+      ]
+    },
+    "youtube_script_013_inline.js": {
+      "apis_count": 4,
+      "categories": [
+        "Window APIs",
+        "EventTarget APIs"
+      ]
+    },
+    "youtube_script_014_external.js": {
+      "apis_count": 24,
+      "categories": [
+        "Window APIs",
+        "Document APIs",
+        "EventTarget APIs",
+        "Timeout/Interval",
+        "RequestAnimationFrame",
+        "Object APIs",
+        "Array Method Calls"
+      ]
+    },
+    "youtube_script_015_external.js": {
+      "apis_count": 3,
+      "categories": [
+        "Object APIs",
+        "Array Method Calls"
+      ]
+    },
+    "youtube_script_016_inline.js": {
+      "apis_count": 2,
+      "categories": [
+        "Window APIs"
+      ]
+    },
+    "youtube_script_017_inline.js": {
+      "apis_count": 2,
+      "categories": [
+        "Document APIs"
+      ]
+    },
+    "youtube_script_018_inline.js": {
+      "apis_count": 0,
+      "categories": []
+    },
+    "youtube_script_019_inline.js": {
+      "apis_count": 2,
+      "categories": [
+        "Window APIs"
+      ]
+    },
+    "youtube_script_020_inline.js": {
+      "apis_count": 2,
+      "categories": [
+        "Document APIs"
+      ]
+    },
+    "youtube_script_021_inline.js": {
+      "apis_count": 13,
+      "categories": [
+        "Window APIs",
+        "Document APIs",
+        "Object APIs",
+        "Array Method Calls"
+      ]
+    },
+    "youtube_script_022_inline.js": {
+      "apis_count": 1,
+      "categories": [
+        "Document APIs"
+      ]
+    },
+    "youtube_script_023_inline.js": {
+      "apis_count": 2,
+      "categories": [
+        "Window APIs"
+      ]
+    },
+    "youtube_script_024_external.js": {
+      "apis_count": 304,
+      "categories": [
+        "Window APIs",
+        "Document APIs",
+        "Navigator APIs",
+        "Location APIs",
+        "Console APIs",
+        "LocalStorage APIs",
+        "SessionStorage APIs",
+        "History APIs",
+        "Screen APIs",
+        "Performance APIs",
+        "Fetch API",
+        "XMLHttpRequest",
+        "Worker APIs",
+        "Observer APIs",
+        "EventTarget APIs",
+        "Timeout/Interval",
+        "RequestAnimationFrame",
+        "MediaSource APIs",
+        "URL APIs",
+        "Promise APIs",
+        "JSON APIs",
+        "Object APIs",
+        "Array Method Calls",
+        "Crypto APIs",
+        "AbortController",
+        "HTML Element Constructors",
+        "Event Constructors",
+        "FormData",
+        "Blob/File APIs",
+        "DOMParser",
+        "matchMedia",
+        "btoa/atob",
+        "encodeURIComponent",
+        "escape/unescape"
+      ]
+    },
+    "youtube_script_025_inline.js": {
+      "apis_count": 1,
+      "categories": [
+        "Document APIs"
+      ]
+    },
+    "youtube_script_026_inline.js": {
+      "apis_count": 16,
+      "categories": [
+        "Window APIs",
+        "Document APIs"
+      ]
+    },
+    "youtube_script_027_inline.js": {
+      "apis_count": 1,
+      "categories": [
+        "Document APIs"
+      ]
+    },
+    "youtube_script_028_external.js": {
+      "apis_count": 91,
+      "categories": [
+        "Window APIs",
+        "Document APIs",
+        "Navigator APIs",
+        "Location APIs",
+        "Console APIs",
+        "History APIs",
+        "Performance APIs",
+        "XMLHttpRequest",
+        "EventTarget APIs",
+        "Timeout/Interval",
+        "JSON APIs",
+        "Object APIs",
+        "Array Method Calls",
+        "FormData",
+        "encodeURIComponent"
+      ]
+    },
+    "youtube_script_029_inline.js": {
+      "apis_count": 0,
+      "categories": []
+    },
+    "youtube_script_030_external.js": {
+      "apis_count": 40,
+      "categories": [
+        "Window APIs",
+        "Document APIs",
+        "Location APIs",
+        "Console APIs",
+        "Performance APIs",
+        "XMLHttpRequest",
+        "EventTarget APIs",
+        "Timeout/Interval",
+        "JSON APIs",
+        "Object APIs",
+        "Array Method Calls",
+        "FormData"
+      ]
+    },
+    "youtube_script_031_inline.js": {
+      "apis_count": 2,
+      "categories": [
+        "Window APIs"
+      ]
+    },
+    "youtube_script_032_inline.js": {
+      "apis_count": 1,
+      "categories": [
+        "Document APIs"
+      ]
+    },
+    "youtube_script_033_inline.js": {
+      "apis_count": 2,
+      "categories": [
+        "Window APIs"
+      ]
+    },
+    "youtube_script_034_inline.js": {
+      "apis_count": 2,
+      "categories": [
+        "Window APIs"
+      ]
+    },
+    "youtube_script_035_inline.js": {
+      "apis_count": 2,
+      "categories": [
+        "Window APIs"
+      ]
+    },
+    "youtube_script_036_inline.js": {
+      "apis_count": 2,
+      "categories": [
+        "Window APIs"
+      ]
+    },
+    "youtube_script_037_external.js": {
+      "apis_count": 525,
+      "categories": [
+        "Window APIs",
+        "Document APIs",
+        "Navigator APIs",
+        "Location APIs",
+        "Console APIs",
+        "LocalStorage APIs",
+        "SessionStorage APIs",
+        "History APIs",
+        "Screen APIs",
+        "Performance APIs",
+        "Fetch API",
+        "XMLHttpRequest",
+        "Worker APIs",
+        "Observer APIs",
+        "EventTarget APIs",
+        "Timeout/Interval",
+        "RequestAnimationFrame",
+        "MediaSource APIs",
+        "URL APIs",
+        "Custom Elements",
+        "Promise APIs",
+        "JSON APIs",
+        "Object APIs",
+        "Array Method Calls",
+        "Crypto APIs",
+        "AbortController",
+        "HTML Element Constructors",
+        "Event Constructors",
+        "FormData",
+        "Blob/File APIs",
+        "Image APIs",
+        "XMLSerializer",
+        "matchMedia",
+        "btoa/atob",
+        "encodeURIComponent",
+        "escape/unescape"
+      ]
+    },
+    "youtube_script_038_inline.js": {
+      "apis_count": 2,
+      "categories": [
+        "Window APIs"
+      ]
+    },
+    "youtube_script_039_inline.js": {
+      "apis_count": 2,
+      "categories": [
+        "Window APIs"
+      ]
+    },
+    "youtube_script_040_inline.js": {
+      "apis_count": 2,
+      "categories": [
+        "Window APIs"
+      ]
+    },
+    "youtube_script_041_inline.js": {
+      "apis_count": 8,
+      "categories": [
+        "Window APIs",
+        "Document APIs",
+        "EventTarget APIs",
+        "Array Method Calls"
+      ]
+    },
+    "youtube_script_042_inline.js": {
+      "apis_count": 2,
+      "categories": [
+        "Window APIs"
+      ]
+    },
+    "youtube_script_043_inline.js": {
+      "apis_count": 7,
+      "categories": [
+        "Window APIs",
+        "EventTarget APIs"
+      ]
+    },
+    "youtube_script_044_inline.js": {
+      "apis_count": 1,
+      "categories": [
+        "Window APIs"
+      ]
+    },
+    "youtube_script_045_inline.js": {
+      "apis_count": 2,
+      "categories": [
+        "Window APIs"
+      ]
+    },
+    "youtube_script_046_inline.js": {
+      "apis_count": 0,
+      "categories": []
+    },
+    "youtube_script_047_inline.js": {
+      "apis_count": 2,
+      "categories": [
+        "Window APIs"
+      ]
+    },
+    "youtube_script_048_inline.js": {
+      "apis_count": 0,
+      "categories": []
+    },
+    "youtube_script_049_inline.js": {
+      "apis_count": 0,
+      "categories": []
+    },
+    "youtube_script_050_inline.js": {
+      "apis_count": 1,
+      "categories": [
+        "Window APIs"
+      ]
+    }
+  }
+}

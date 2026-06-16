@@ -1,0 +1,80 @@
+# Android build outputs
+build/
+*.apk
+*.aar
+*.ap_
+*.aab
+
+# Gradle
+.gradle/
+gradle-app.setting
+!gradle-wrapper.jar
+!gradle-wrapper.properties
+
+# Android Studio
+.idea/
+*.iml
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/gradle.xml
+.idea/dictionaries
+.idea/libraries
+.idea/caches
+.idea/modules.xml
+.idea/misc.xml
+.idea/modules
+*.iml
+*.ipr
+*.iws
+.idea_modules/
+
+# NDK build outputs
+obj/
+libs/
+**/obj/
+**/libs/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Local configuration
+local.properties
+captures/
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+app/build_macos/
+
+# Browser-emulator build/distribution directories
+browser-emulator/build/
+browser-emulator/build-msvc/
+browser-emulator/dist/
+
+# Root build artifacts
+bgmdwnldr-desktop.exe
+bgmdwnldr-desktop.ilk
+bgmdwnldr-desktop.pdb
+bgmdwnldr-mac
+
+# Object files
+*.o
+*.obj
+
+# Media samples/downloads
+*.m4a
+*.mp3
+*.mp4
+
+# OS metadata (ensure nested directories are covered)
+**/.DS_Store

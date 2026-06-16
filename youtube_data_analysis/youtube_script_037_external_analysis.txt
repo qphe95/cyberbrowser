@@ -1,0 +1,452 @@
+================================================================================
+BROWSER API ANALYSIS: youtube_script_037_external.js
+================================================================================
+
+File Size: 13,076,818 bytes
+Total Unique APIs Found: 525
+Categories with APIs: 36
+
+--------------------------------------------------------------------------------
+Window APIs (227 unique)
+--------------------------------------------------------------------------------
+  - window.AbortController
+  - window.AudioContext
+  - window.COMPILED
+  - window.CSS
+  - window.CSS.supports
+  - window.FormData
+  - window.HTMLImports
+  - window.HTMLImports.whenReady
+  - window.HTMLTemplateElement
+  - window.Hammer
+  - window.Int32Array
+  - window.IntersectionObserver
+  - window.JSCompiler_renameProperty
+  - window.JSON
+  - window.ManagedMediaSource
+  - window.ManagedMediaSource.isTypeSupported
+  - window.MediaSource
+  - window.MediaSource.isTypeSupported
+  - window.MouseEvent
+  - window.MutationObserver
+  - window.Notification
+  - window.OfflineAudioContext
+  - window.PROPERTY_ACCESS_MAP
+  - window.PointerEvent
+  - window.Polymer
+  - window.Polymer.Element
+  - window.Polymer._polymerFn
+  - window.Polymer.allowTemplateFromDomModule
+  - window.Polymer.fastDomIf
+  - window.Polymer.legacyNoObservedAttributes
+  - window.Polymer.legacyOptimizations
+  - window.Polymer.legacyUndefined
+  - window.Polymer.legacyWarnings
+  - window.Polymer.orderedComputed
+  - window.Polymer.removeNestedTemplates
+  - window.Polymer.rootPath
+  - window.Polymer.sanitizeDOMValue
+  - window.Polymer.setPassiveTouchGestures
+  - window.Polymer.strictTemplatePolicy
+  - window.Polymer.suppressTemplateNotifications
+  - window.Polymer.syncInitialRender
+  - window.Polymer.useAdoptedStyleSheetsWithBuiltCSS
+  - window.PolymerFakeBaseClass
+  - window.PolymerFakeBaseClassWithoutHtml
+  - window.Proxy
+  - window.ReadableStream
+  - window.Reflect
+  - window.Reflect.getMetadata
+  - window.Request
+  - window.ResizeObserver
+
+--------------------------------------------------------------------------------
+Document APIs (101 unique)
+--------------------------------------------------------------------------------
+  - document.JSC$8385_onVisibilityChange.pipe
+  - document.activeElement
+  - document.activeElement.blur
+  - document.activeElement.tagName
+  - document.addEventListener
+  - document.adoptedStyleSheets
+  - document.adoptedStyleSheets.length
+  - document.all
+  - document.baseURI
+  - document.body
+  - document.body.addEventListener
+  - document.body.animate
+  - document.body.appendChild
+  - document.body.classList.add
+  - document.body.classList.contains
+  - document.body.classList.remove
+  - document.body.className.indexOf
+  - document.body.clientHeight
+  - document.body.clientWidth
+  - document.body.contains
+  - document.body.getAttribute
+  - document.body.hasAttribute
+  - document.body.prepend
+  - document.body.removeAttribute
+  - document.body.removeChild
+  - document.body.scrollLeft
+  - document.body.scrollTop
+  - document.body.setAttribute
+  - document.body.style.backgroundColor
+  - document.body.style.colorScheme
+  - document.body.style.cursor
+  - document.body.style.overflow
+  - document.body.style.overflowY
+  - document.body.style.overscrollBehavior
+  - document.body.style.top
+  - document.cookie
+  - document.createComment
+  - document.createDocumentFragment
+  - document.createElement
+  - document.createElementNS
+  - document.createEvent
+  - document.createRange
+  - document.createTextNode
+  - document.createTreeWalker
+  - document.currentScript
+  - document.currentScript.src.indexOf
+  - document.defaultView
+  - document.dispatchEvent
+  - document.documentElement
+  - document.documentElement.clientHeight
+
+--------------------------------------------------------------------------------
+Navigator APIs (34 unique)
+--------------------------------------------------------------------------------
+  - navigator.clipboard
+  - navigator.clipboard.write
+  - navigator.clipboard.writeText
+  - navigator.cookieEnabled
+  - navigator.deviceMemory
+  - navigator.geolocation
+  - navigator.geolocation.getCurrentPosition
+  - navigator.hardwareConcurrency
+  - navigator.keyboard
+  - navigator.locks
+  - navigator.mediaDevices
+  - navigator.mediaDevices.getUserMedia
+  - navigator.onLine
+  - navigator.permissions
+  - navigator.permissions.query
+  - navigator.presentation
+  - navigator.sendBeacon
+  - navigator.serviceWorker
+  - navigator.serviceWorker.addEventListener
+  - navigator.serviceWorker.getRegistration
+  - navigator.serviceWorker.getRegistrations
+  - navigator.serviceWorker.ready.then
+  - navigator.serviceWorker.register
+  - navigator.share
+  - navigator.standalone
+  - navigator.storage
+  - navigator.storage.estimate
+  - navigator.userActivation
+  - navigator.userAgent
+  - navigator.userAgent.includes
+  - navigator.userAgent.indexOf
+  - navigator.userAgent.match
+  - navigator.userAgentData.getHighEntropyValues
+  - navigator.vendor
+
+--------------------------------------------------------------------------------
+Fetch API (1 unique)
+--------------------------------------------------------------------------------
+  - fetch(
+
+--------------------------------------------------------------------------------
+XMLHttpRequest (1 unique)
+--------------------------------------------------------------------------------
+  - XMLHttpRequest
+
+--------------------------------------------------------------------------------
+MediaSource APIs (2 unique)
+--------------------------------------------------------------------------------
+  - ManagedMediaSource
+  - MediaSource
+
+--------------------------------------------------------------------------------
+EventTarget APIs (3 unique)
+--------------------------------------------------------------------------------
+  - addEventListener(
+  - dispatchEvent(
+  - removeEventListener(
+
+--------------------------------------------------------------------------------
+Timeout/Interval (4 unique)
+--------------------------------------------------------------------------------
+  - clearInterval(
+  - clearTimeout(
+  - setInterval(
+  - setTimeout(
+
+--------------------------------------------------------------------------------
+Performance APIs (9 unique)
+--------------------------------------------------------------------------------
+  - performance.getEntriesByName
+  - performance.getEntriesByType
+  - performance.mark
+  - performance.measure
+  - performance.now
+  - performance.now.bind
+  - performance.timeOrigin
+  - performance.timing
+  - performance.timing.navigationStart
+
+--------------------------------------------------------------------------------
+Observer APIs (3 unique)
+--------------------------------------------------------------------------------
+  - IntersectionObserver
+  - MutationObserver
+  - ResizeObserver
+
+--------------------------------------------------------------------------------
+AbortController (2 unique)
+--------------------------------------------------------------------------------
+  - AbortController
+  - AbortSignal
+
+--------------------------------------------------------------------------------
+Array Method Calls (19 unique)
+--------------------------------------------------------------------------------
+  - concat(
+  - every(
+  - filter(
+  - find(
+  - forEach(
+  - includes(
+  - indexOf(
+  - join(
+  - map(
+  - pop(
+  - push(
+  - reduce(
+  - reverse(
+  - shift(
+  - slice(
+  - some(
+  - sort(
+  - splice(
+  - unshift(
+
+--------------------------------------------------------------------------------
+Blob/File APIs (3 unique)
+--------------------------------------------------------------------------------
+  - Blob
+  - File
+  - FileReader
+
+--------------------------------------------------------------------------------
+Console APIs (9 unique)
+--------------------------------------------------------------------------------
+  - console.debug
+  - console.error
+  - console.groupCollapsed
+  - console.groupEnd
+  - console.info
+  - console.log
+  - console.time
+  - console.timeEnd
+  - console.warn
+
+--------------------------------------------------------------------------------
+Crypto APIs (2 unique)
+--------------------------------------------------------------------------------
+  - crypto.getRandomValues
+  - crypto.subtle
+
+--------------------------------------------------------------------------------
+Custom Elements (3 unique)
+--------------------------------------------------------------------------------
+  - customElements.define
+  - customElements.get
+  - customElements.polyfillWrapFlushCallback
+
+--------------------------------------------------------------------------------
+Event Constructors (3 unique)
+--------------------------------------------------------------------------------
+  - new CustomEvent
+  - new Event
+  - new MouseEvent
+
+--------------------------------------------------------------------------------
+FormData (1 unique)
+--------------------------------------------------------------------------------
+  - FormData
+
+--------------------------------------------------------------------------------
+HTML Element Constructors (18 unique)
+--------------------------------------------------------------------------------
+  - HTMLAnchorElement
+  - HTMLButtonElement
+  - HTMLCanvasElement
+  - HTMLDivElement
+  - HTMLElement
+  - HTMLFencedFrameElement
+  - HTMLFormElement
+  - HTMLIFrameElement
+  - HTMLImageElement
+  - HTMLInputElement
+  - HTMLLinkElement
+  - HTMLOptionElement
+  - HTMLSelectElement
+  - HTMLStyleElement
+  - HTMLTemplateElement
+  - HTMLTextAreaElement
+  - HTMLUnknownElement
+  - HTMLVideoElement
+
+--------------------------------------------------------------------------------
+History APIs (7 unique)
+--------------------------------------------------------------------------------
+  - history.back
+  - history.forward
+  - history.length
+  - history.pushState
+  - history.replaceState
+  - history.scrollRestoration
+  - history.state
+
+--------------------------------------------------------------------------------
+Image APIs (1 unique)
+--------------------------------------------------------------------------------
+  - new Image(
+
+--------------------------------------------------------------------------------
+JSON APIs (3 unique)
+--------------------------------------------------------------------------------
+  - JSON.parse
+  - JSON.parseWrapper
+  - JSON.stringify
+
+--------------------------------------------------------------------------------
+LocalStorage APIs (5 unique)
+--------------------------------------------------------------------------------
+  - localStorage.get
+  - localStorage.remove
+  - localStorage.removeItem
+  - localStorage.set
+  - localStorage.setItem
+
+--------------------------------------------------------------------------------
+Location APIs (11 unique)
+--------------------------------------------------------------------------------
+  - location.hash
+  - location.host
+  - location.hostname
+  - location.href
+  - location.origin
+  - location.pathname
+  - location.port
+  - location.protocol
+  - location.reload
+  - location.search
+  - location.toString
+
+--------------------------------------------------------------------------------
+Object APIs (23 unique)
+--------------------------------------------------------------------------------
+  - Object.assign
+  - Object.create
+  - Object.defineProperties
+  - Object.defineProperty
+  - Object.entries
+  - Object.freeze
+  - Object.fromEntries
+  - Object.getOwnPropertyDescriptor
+  - Object.getOwnPropertyDescriptors
+  - Object.getOwnPropertyNames
+  - Object.getOwnPropertySymbols
+  - Object.getPrototypeOf
+  - Object.hasOwn
+  - Object.hasOwnProperty
+  - Object.is
+  - Object.isExtensible
+  - Object.isFrozen
+  - Object.keys
+  - Object.my_load
+  - Object.prototype
+  - Object.seal
+  - Object.setPrototypeOf
+  - Object.values
+
+--------------------------------------------------------------------------------
+Promise APIs (7 unique)
+--------------------------------------------------------------------------------
+  - Promise.all
+  - Promise.allSettled
+  - Promise.prototype
+  - Promise.race
+  - Promise.reject
+  - Promise.resolve
+  - Promise.toString
+
+--------------------------------------------------------------------------------
+RequestAnimationFrame (2 unique)
+--------------------------------------------------------------------------------
+  - cancelAnimationFrame(
+  - requestAnimationFrame(
+
+--------------------------------------------------------------------------------
+Screen APIs (5 unique)
+--------------------------------------------------------------------------------
+  - screen.availHeight
+  - screen.availTop
+  - screen.availWidth
+  - screen.height
+  - screen.width
+
+--------------------------------------------------------------------------------
+SessionStorage APIs (5 unique)
+--------------------------------------------------------------------------------
+  - sessionStorage.getItem
+  - sessionStorage.remove
+  - sessionStorage.removeItem
+  - sessionStorage.set
+  - sessionStorage.setItem
+
+--------------------------------------------------------------------------------
+URL APIs (2 unique)
+--------------------------------------------------------------------------------
+  - URL.createObjectURL
+  - URL.revokeObjectURL
+
+--------------------------------------------------------------------------------
+Worker APIs (1 unique)
+--------------------------------------------------------------------------------
+  - Worker
+
+--------------------------------------------------------------------------------
+XMLSerializer (1 unique)
+--------------------------------------------------------------------------------
+  - XMLSerializer
+
+--------------------------------------------------------------------------------
+btoa/atob (2 unique)
+--------------------------------------------------------------------------------
+  - atob(
+  - btoa(
+
+--------------------------------------------------------------------------------
+encodeURIComponent (2 unique)
+--------------------------------------------------------------------------------
+  - decodeURIComponent(
+  - encodeURIComponent(
+
+--------------------------------------------------------------------------------
+escape/unescape (2 unique)
+--------------------------------------------------------------------------------
+  - escape(
+  - unescape(
+
+--------------------------------------------------------------------------------
+matchMedia (1 unique)
+--------------------------------------------------------------------------------
+  - matchMedia(
+
+================================================================================
+END OF ANALYSIS
+================================================================================

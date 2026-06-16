@@ -1,0 +1,173 @@
+================================================================================
+BROWSER API ANALYSIS: youtube_script_008_external.js
+================================================================================
+
+File Size: 110,925 bytes
+Total Unique APIs Found: 98
+Categories with APIs: 16
+
+--------------------------------------------------------------------------------
+Window APIs (40 unique)
+--------------------------------------------------------------------------------
+  - window.CSS
+  - window.CustomElementRegistry.prototype
+  - window.CustomEvent
+  - window.Event
+  - window.EventTarget
+  - window.EventTarget.prototype
+  - window.HTMLImports
+  - window.HTMLImports.whenReady
+  - window.HTMLSlotElement
+  - window.HTMLTemplateElement
+  - window.HTMLTemplateElement.prototype
+  - window.MouseEvent
+  - window.ShadowRoot
+  - window.ShadyCSS
+  - window.ShadyCSS.ApplyShim
+  - window.ShadyCSS.CustomStyleInterface
+  - window.ShadyCSS.ScopingShim
+  - window.ShadyCSS.cssBuild
+  - window.ShadyCSS.disableRuntime
+  - window.ShadyCSS.nativeCss
+  - window.ShadyDOM
+  - window.ShadyDOM.handlesDynamicScoping
+  - window.ShadyDOM.inUse
+  - window.ShadyDOM.nativeMethods.querySelectorAll.call
+  - window.ShadyDOM.nativeMethods.setAttribute.call
+  - window.ShadyDOM.wrap
+  - window.WebComponents
+  - window.WebComponents.flags
+  - window.__shady_native_addEventListener
+  - window.addEventListener
+  - window.console.error
+  - window.customElements
+  - window.customElements.define
+  - window.customElements.polyfillWrapFlushCallback
+  - window.document
+  - window.enableHotReplacement
+  - window.getComputedStyle
+  - window.matchMedia
+  - window.removeEventListener
+  - window.shadyCSSStyleTransformHooks
+
+--------------------------------------------------------------------------------
+Document APIs (18 unique)
+--------------------------------------------------------------------------------
+  - document.__shady_native_activeElement
+  - document.activeElement
+  - document.addEventListener
+  - document.body
+  - document.contains
+  - document.createComment
+  - document.createDocumentFragment
+  - document.createElement
+  - document.createTextNode
+  - document.createTreeWalker
+  - document.documentElement
+  - document.documentElement.__shady_native_contains
+  - document.head
+  - document.head.appendChild
+  - document.head.querySelector
+  - document.implementation.createHTMLDocument
+  - document.readyState
+  - document.removeEventListener
+
+--------------------------------------------------------------------------------
+Navigator APIs (1 unique)
+--------------------------------------------------------------------------------
+  - navigator.userAgent.match
+
+--------------------------------------------------------------------------------
+Fetch API (1 unique)
+--------------------------------------------------------------------------------
+  - fetch(
+
+--------------------------------------------------------------------------------
+XMLHttpRequest (1 unique)
+--------------------------------------------------------------------------------
+  - XMLHttpRequest
+
+--------------------------------------------------------------------------------
+EventTarget APIs (2 unique)
+--------------------------------------------------------------------------------
+  - addEventListener(
+  - removeEventListener(
+
+--------------------------------------------------------------------------------
+Observer APIs (1 unique)
+--------------------------------------------------------------------------------
+  - MutationObserver
+
+--------------------------------------------------------------------------------
+Array Method Calls (15 unique)
+--------------------------------------------------------------------------------
+  - filter(
+  - forEach(
+  - indexOf(
+  - join(
+  - map(
+  - pop(
+  - push(
+  - reduce(
+  - reverse(
+  - shift(
+  - slice(
+  - some(
+  - sort(
+  - splice(
+  - unshift(
+
+--------------------------------------------------------------------------------
+Console APIs (1 unique)
+--------------------------------------------------------------------------------
+  - console.error
+
+--------------------------------------------------------------------------------
+Custom Elements (2 unique)
+--------------------------------------------------------------------------------
+  - customElements.define
+  - customElements.polyfillWrapFlushCallback
+
+--------------------------------------------------------------------------------
+Event Constructors (2 unique)
+--------------------------------------------------------------------------------
+  - new Event
+  - new MouseEvent
+
+--------------------------------------------------------------------------------
+HTML Element Constructors (3 unique)
+--------------------------------------------------------------------------------
+  - HTMLElement
+  - HTMLSlotElement
+  - HTMLTemplateElement
+
+--------------------------------------------------------------------------------
+Object APIs (8 unique)
+--------------------------------------------------------------------------------
+  - Object.assign
+  - Object.create
+  - Object.defineProperties
+  - Object.defineProperty
+  - Object.getOwnPropertyDescriptor
+  - Object.getOwnPropertyNames
+  - Object.getPrototypeOf
+  - Object.setPrototypeOf
+
+--------------------------------------------------------------------------------
+Promise APIs (1 unique)
+--------------------------------------------------------------------------------
+  - Promise.resolve
+
+--------------------------------------------------------------------------------
+RequestAnimationFrame (1 unique)
+--------------------------------------------------------------------------------
+  - requestAnimationFrame(
+
+--------------------------------------------------------------------------------
+matchMedia (1 unique)
+--------------------------------------------------------------------------------
+  - matchMedia(
+
+================================================================================
+END OF ANALYSIS
+================================================================================

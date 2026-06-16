@@ -1,0 +1,162 @@
+================================================================================
+BROWSER API ANALYSIS: youtube_script_028_external.js
+================================================================================
+
+File Size: 55,996 bytes
+Total Unique APIs Found: 91
+Categories with APIs: 15
+
+--------------------------------------------------------------------------------
+Window APIs (31 unique)
+--------------------------------------------------------------------------------
+  - window._spf_state
+  - window.addEventListener
+  - window.attachEvent
+  - window.chrome
+  - window.detachEvent
+  - window.history
+  - window.history.back
+  - window.history.pushState
+  - window.history.state
+  - window.location.hash
+  - window.location.href
+  - window.location.reload
+  - window.navigator.maxTouchPoints
+  - window.navigator.msMaxTouchPoints
+  - window.pageXOffset
+  - window.pageYOffset
+  - window.performance
+  - window.performance.clearResourceTimings
+  - window.performance.getEntriesByName
+  - window.performance.mozClearResourceTimings
+  - window.performance.msClearResourceTimings
+  - window.performance.now
+  - window.performance.oClearResourceTimings
+  - window.performance.timing
+  - window.performance.timing.navigationStart
+  - window.performance.webkitClearResourceTimings
+  - window.postMessage
+  - window.removeEventListener
+  - window.scroll
+  - window.scroll.apply
+  - window.setTimeout
+
+--------------------------------------------------------------------------------
+Document APIs (14 unique)
+--------------------------------------------------------------------------------
+  - document.addEventListener
+  - document.attachEvent
+  - document.body
+  - document.createElement
+  - document.createEvent
+  - document.createTextNode
+  - document.detachEvent
+  - document.dispatchEvent
+  - document.getElementById
+  - document.getElementsByTagName
+  - document.readyState
+  - document.referrer
+  - document.removeEventListener
+  - document.title
+
+--------------------------------------------------------------------------------
+Navigator APIs (3 unique)
+--------------------------------------------------------------------------------
+  - navigator.maxTouchPoints
+  - navigator.msMaxTouchPoints
+  - navigator.userAgent.indexOf
+
+--------------------------------------------------------------------------------
+XMLHttpRequest (1 unique)
+--------------------------------------------------------------------------------
+  - XMLHttpRequest
+
+--------------------------------------------------------------------------------
+EventTarget APIs (3 unique)
+--------------------------------------------------------------------------------
+  - addEventListener(
+  - dispatchEvent(
+  - removeEventListener(
+
+--------------------------------------------------------------------------------
+Timeout/Interval (2 unique)
+--------------------------------------------------------------------------------
+  - clearTimeout(
+  - setTimeout(
+
+--------------------------------------------------------------------------------
+Performance APIs (9 unique)
+--------------------------------------------------------------------------------
+  - performance.clearResourceTimings
+  - performance.getEntriesByName
+  - performance.mozClearResourceTimings
+  - performance.msClearResourceTimings
+  - performance.now
+  - performance.oClearResourceTimings
+  - performance.timing
+  - performance.timing.navigationStart
+  - performance.webkitClearResourceTimings
+
+--------------------------------------------------------------------------------
+Array Method Calls (13 unique)
+--------------------------------------------------------------------------------
+  - concat(
+  - every(
+  - filter(
+  - forEach(
+  - indexOf(
+  - join(
+  - map(
+  - pop(
+  - push(
+  - shift(
+  - slice(
+  - some(
+  - sort(
+
+--------------------------------------------------------------------------------
+Console APIs (1 unique)
+--------------------------------------------------------------------------------
+  - console.warn
+
+--------------------------------------------------------------------------------
+FormData (1 unique)
+--------------------------------------------------------------------------------
+  - FormData
+
+--------------------------------------------------------------------------------
+History APIs (4 unique)
+--------------------------------------------------------------------------------
+  - history.back
+  - history.pushState
+  - history.replaceState
+  - history.state
+
+--------------------------------------------------------------------------------
+JSON APIs (1 unique)
+--------------------------------------------------------------------------------
+  - JSON.parse
+
+--------------------------------------------------------------------------------
+Location APIs (3 unique)
+--------------------------------------------------------------------------------
+  - location.hash
+  - location.href
+  - location.reload
+
+--------------------------------------------------------------------------------
+Object APIs (4 unique)
+--------------------------------------------------------------------------------
+  - Object.defineProperties
+  - Object.defineProperty
+  - Object.keys
+  - Object.prototype
+
+--------------------------------------------------------------------------------
+encodeURIComponent (1 unique)
+--------------------------------------------------------------------------------
+  - encodeURIComponent(
+
+================================================================================
+END OF ANALYSIS
+================================================================================

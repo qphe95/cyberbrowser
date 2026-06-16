@@ -1,0 +1,93 @@
+================================================================================
+BROWSER API ANALYSIS: youtube_script_006_external.js
+================================================================================
+
+File Size: 75,627 bytes
+Total Unique APIs Found: 46
+Categories with APIs: 9
+
+--------------------------------------------------------------------------------
+Window APIs (16 unique)
+--------------------------------------------------------------------------------
+  - window.Animation
+  - window.Element.prototype.animate
+  - window.Element.prototype.getAnimations
+  - window.GroupEffect
+  - window.GroupEffect.prototype
+  - window.KeyframeEffect
+  - window.Promise
+  - window.SequenceEffect
+  - window.SequenceEffect.prototype
+  - window.Symbol
+  - window.cancelAnimationFrame
+  - window.document
+  - window.document.timeline
+  - window.getComputedStyle
+  - window.performance
+  - window.requestAnimationFrame
+
+--------------------------------------------------------------------------------
+Document APIs (7 unique)
+--------------------------------------------------------------------------------
+  - document.createElement
+  - document.createElementNS
+  - document.documentElement
+  - document.documentElement.animate
+  - document.documentElement.style
+  - document.timeline
+  - document.timeline.getAnimations
+
+--------------------------------------------------------------------------------
+EventTarget APIs (2 unique)
+--------------------------------------------------------------------------------
+  - addEventListener(
+  - removeEventListener(
+
+--------------------------------------------------------------------------------
+Timeout/Interval (1 unique)
+--------------------------------------------------------------------------------
+  - setTimeout(
+
+--------------------------------------------------------------------------------
+Performance APIs (1 unique)
+--------------------------------------------------------------------------------
+  - performance.now
+
+--------------------------------------------------------------------------------
+Array Method Calls (14 unique)
+--------------------------------------------------------------------------------
+  - concat(
+  - filter(
+  - forEach(
+  - indexOf(
+  - join(
+  - map(
+  - pop(
+  - push(
+  - reverse(
+  - shift(
+  - slice(
+  - sort(
+  - splice(
+  - unshift(
+
+--------------------------------------------------------------------------------
+Console APIs (1 unique)
+--------------------------------------------------------------------------------
+  - console.warn
+
+--------------------------------------------------------------------------------
+Object APIs (3 unique)
+--------------------------------------------------------------------------------
+  - Object.create
+  - Object.defineProperty
+  - Object.getOwnPropertyNames
+
+--------------------------------------------------------------------------------
+RequestAnimationFrame (1 unique)
+--------------------------------------------------------------------------------
+  - requestAnimationFrame(
+
+================================================================================
+END OF ANALYSIS
+================================================================================

@@ -1,0 +1,268 @@
+================================================================================
+OVERALL BROWSER API ANALYSIS SUMMARY
+================================================================================
+
+Total Files Analyzed: 51
+
+Total Unique APIs Across All Files: 535
+
+--------------------------------------------------------------------------------
+TOP 50 MOST FREQUENTLY USED APIs
+--------------------------------------------------------------------------------
+
+   1. window.ytcsi                                       (used in 20 files)
+   2. window.ytcsi.tick                                  (used in 18 files)
+   3. addEventListener(                                  (used in 12 files)
+   4. Object.defineProperty                              (used in 11 files)
+   5. indexOf(                                           (used in 11 files)
+   6. push(                                              (used in 11 files)
+   7. removeEventListener(                               (used in 11 files)
+   8. join(                                              (used in 9 files)
+   9. Object.defineProperties                            (used in 8 files)
+  10. setTimeout(                                        (used in 8 files)
+  11. shift(                                             (used in 8 files)
+  12. performance.now                                    (used in 7 files)
+  13. document.createElement                             (used in 7 files)
+  14. concat(                                            (used in 7 files)
+  15. forEach(                                           (used in 7 files)
+  16. slice(                                             (used in 7 files)
+  17. window.addEventListener                            (used in 7 files)
+  18. Object.prototype                                   (used in 7 files)
+  19. Object.create                                      (used in 6 files)
+  20. requestAnimationFrame(                             (used in 6 files)
+  21. filter(                                            (used in 6 files)
+  22. map(                                               (used in 6 files)
+  23. pop(                                               (used in 6 files)
+  24. sort(                                              (used in 6 files)
+  25. some(                                              (used in 6 files)
+  26. document.querySelector                             (used in 6 files)
+  27. location.href                                      (used in 5 files)
+  28. Object.getOwnPropertyDescriptor                    (used in 5 files)
+  29. Object.keys                                        (used in 5 files)
+  30. performance.timing                                 (used in 5 files)
+  31. performance.timing.navigationStart                 (used in 5 files)
+  32. console.warn                                       (used in 5 files)
+  33. splice(                                            (used in 5 files)
+  34. Object.setPrototypeOf                              (used in 5 files)
+  35. window.removeEventListener                         (used in 5 files)
+  36. document.addEventListener                          (used in 5 files)
+  37. XMLHttpRequest                                     (used in 5 files)
+  38. clearTimeout(                                      (used in 5 files)
+  39. Object.getOwnPropertyNames                         (used in 4 files)
+  40. encodeURIComponent(                                (used in 4 files)
+  41. window.performance                                 (used in 4 files)
+  42. window.document                                    (used in 4 files)
+  43. document.documentElement                           (used in 4 files)
+  44. reverse(                                           (used in 4 files)
+  45. unshift(                                           (used in 4 files)
+  46. HTMLElement                                        (used in 4 files)
+  47. document.body                                      (used in 4 files)
+  48. document.createTextNode                            (used in 4 files)
+  49. document.removeEventListener                       (used in 4 files)
+  50. MutationObserver                                   (used in 4 files)
+
+--------------------------------------------------------------------------------
+FILES SUMMARY
+--------------------------------------------------------------------------------
+
+youtube_script_000_inline.js
+  APIs: 1, Categories: 1
+  Main categories: Window APIs
+
+youtube_script_001_inline.js
+  APIs: 2, Categories: 1
+  Main categories: Window APIs
+
+youtube_script_002_inline.js
+  APIs: 18, Categories: 5
+  Main categories: Window APIs, Location APIs, Object APIs, Array Method Calls, encodeURIComponent
+
+youtube_script_003_inline.js
+  APIs: 6, Categories: 1
+  Main categories: Window APIs
+
+youtube_script_004_inline.js
+  APIs: 0, Categories: 0
+
+youtube_script_005_inline.js
+  APIs: 18, Categories: 7
+  Main categories: Window APIs, Navigator APIs, Performance APIs, EventTarget APIs, Timeout/Interval
+
+youtube_script_006_external.js
+  APIs: 46, Categories: 9
+  Main categories: Window APIs, Document APIs, Console APIs, Performance APIs, EventTarget APIs
+
+youtube_script_007_external.js
+  APIs: 13, Categories: 6
+  Main categories: Window APIs, Navigator APIs, Custom Elements, Object APIs, Array Method Calls
+
+youtube_script_008_external.js
+  APIs: 98, Categories: 16
+  Main categories: Window APIs, Document APIs, Navigator APIs, Console APIs, Fetch API
+
+youtube_script_009_external.js
+  APIs: 19, Categories: 6
+  Main categories: Performance APIs, Observer APIs, EventTarget APIs, Timeout/Interval, Object APIs
+
+youtube_script_010_inline.js
+  APIs: 2, Categories: 1
+  Main categories: Window APIs
+
+youtube_script_011_inline.js
+  APIs: 8, Categories: 2
+  Main categories: Window APIs, Performance APIs
+
+youtube_script_012_inline.js
+  APIs: 2, Categories: 1
+  Main categories: Window APIs
+
+youtube_script_013_inline.js
+  APIs: 4, Categories: 2
+  Main categories: Window APIs, EventTarget APIs
+
+youtube_script_014_external.js
+  APIs: 24, Categories: 7
+  Main categories: Window APIs, Document APIs, EventTarget APIs, Timeout/Interval, RequestAnimationFrame
+
+youtube_script_015_external.js
+  APIs: 3, Categories: 2
+  Main categories: Object APIs, Array Method Calls
+
+youtube_script_016_inline.js
+  APIs: 2, Categories: 1
+  Main categories: Window APIs
+
+youtube_script_017_inline.js
+  APIs: 2, Categories: 1
+  Main categories: Document APIs
+
+youtube_script_018_inline.js
+  APIs: 0, Categories: 0
+
+youtube_script_019_inline.js
+  APIs: 2, Categories: 1
+  Main categories: Window APIs
+
+youtube_script_020_inline.js
+  APIs: 2, Categories: 1
+  Main categories: Document APIs
+
+youtube_script_021_inline.js
+  APIs: 13, Categories: 4
+  Main categories: Window APIs, Document APIs, Object APIs, Array Method Calls
+
+youtube_script_022_inline.js
+  APIs: 1, Categories: 1
+  Main categories: Document APIs
+
+youtube_script_023_inline.js
+  APIs: 2, Categories: 1
+  Main categories: Window APIs
+
+youtube_script_024_external.js
+  APIs: 304, Categories: 34
+  Main categories: Window APIs, Document APIs, Navigator APIs, Location APIs, Console APIs
+
+youtube_script_025_inline.js
+  APIs: 1, Categories: 1
+  Main categories: Document APIs
+
+youtube_script_026_inline.js
+  APIs: 16, Categories: 2
+  Main categories: Window APIs, Document APIs
+
+youtube_script_027_inline.js
+  APIs: 1, Categories: 1
+  Main categories: Document APIs
+
+youtube_script_028_external.js
+  APIs: 91, Categories: 15
+  Main categories: Window APIs, Document APIs, Navigator APIs, Location APIs, Console APIs
+
+youtube_script_029_inline.js
+  APIs: 0, Categories: 0
+
+youtube_script_030_external.js
+  APIs: 40, Categories: 12
+  Main categories: Window APIs, Document APIs, Location APIs, Console APIs, Performance APIs
+
+youtube_script_031_inline.js
+  APIs: 2, Categories: 1
+  Main categories: Window APIs
+
+youtube_script_032_inline.js
+  APIs: 1, Categories: 1
+  Main categories: Document APIs
+
+youtube_script_033_inline.js
+  APIs: 2, Categories: 1
+  Main categories: Window APIs
+
+youtube_script_034_inline.js
+  APIs: 2, Categories: 1
+  Main categories: Window APIs
+
+youtube_script_035_inline.js
+  APIs: 2, Categories: 1
+  Main categories: Window APIs
+
+youtube_script_036_inline.js
+  APIs: 2, Categories: 1
+  Main categories: Window APIs
+
+youtube_script_037_external.js
+  APIs: 525, Categories: 36
+  Main categories: Window APIs, Document APIs, Navigator APIs, Location APIs, Console APIs
+
+youtube_script_038_inline.js
+  APIs: 2, Categories: 1
+  Main categories: Window APIs
+
+youtube_script_039_inline.js
+  APIs: 2, Categories: 1
+  Main categories: Window APIs
+
+youtube_script_040_inline.js
+  APIs: 2, Categories: 1
+  Main categories: Window APIs
+
+youtube_script_041_inline.js
+  APIs: 8, Categories: 4
+  Main categories: Window APIs, Document APIs, EventTarget APIs, Array Method Calls
+
+youtube_script_042_inline.js
+  APIs: 2, Categories: 1
+  Main categories: Window APIs
+
+youtube_script_043_inline.js
+  APIs: 7, Categories: 2
+  Main categories: Window APIs, EventTarget APIs
+
+youtube_script_044_inline.js
+  APIs: 1, Categories: 1
+  Main categories: Window APIs
+
+youtube_script_045_inline.js
+  APIs: 2, Categories: 1
+  Main categories: Window APIs
+
+youtube_script_046_inline.js
+  APIs: 0, Categories: 0
+
+youtube_script_047_inline.js
+  APIs: 2, Categories: 1
+  Main categories: Window APIs
+
+youtube_script_048_inline.js
+  APIs: 0, Categories: 0
+
+youtube_script_049_inline.js
+  APIs: 0, Categories: 0
+
+youtube_script_050_inline.js
+  APIs: 1, Categories: 1
+  Main categories: Window APIs
+
+================================================================================
+END OF SUMMARY
+================================================================================
