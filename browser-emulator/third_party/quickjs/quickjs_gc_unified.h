@@ -358,41 +358,6 @@ static inline GCObjectBucketType gc_type_to_bucket(JSGCObjectTypeEnum type) {
     }
 }
 
-typedef struct GCState {
-    uint8_t *heap;
-    size_t heap_size;
-    struct {
-        uint8_t *base;
-        size_t offset;
-        size_t capacity;
-    } bump;
-    struct {
-        void **ptrs;
-        uint32_t count;
-        uint32_t capacity;
-        uint32_t *free_list;
-        uint32_t free_count;
-        uint32_t free_capacity;
-    } handles;
-    struct {
-        GCHandle *roots;
-        uint32_t count;
-        uint32_t capacity;
-    } root_set;
-    /* Type buckets for fast iteration by object type */
-    GCTypeBucket type_buckets[GC_BUCKET_COUNT];
-    /* Typed handle arrays for special cases */
-    JSHandleArray atom_handles;
-    /* Weak reference tracking - separate arrays by type for fast GC sweep (no type dispatch) */
-    JSHandleArray weakmap_handles;   /* JSMapState with is_weak=true */
-    JSHandleArray weakref_handles;   /* JSWeakRefData */
-    JSHandleArray finrec_handles;    /* JSFinalizationRegistryData */
-    size_t bytes_allocated;
-    size_t gc_threshold;
-    GCHandle rt;  /* Runtime handle for GC operations */
-    bool initialized;
-} GCState;
-
 /* Type bucket iteration functions */
 void gc_type_bucket_init(GCTypeBucket *bucket);
 void gc_type_bucket_free(GCTypeBucket *bucket);
@@ -419,7 +384,115 @@ bool gc_type_iterator_valid(GCTypeIterator *it);
 void gc_type_iterator_next(GCTypeIterator *it);
 GCHandle gc_type_iterator_handle(GCTypeIterator *it);
 
+/* ============================================================================
+ * MULTITHREADED GC - Double-Buffered Design
+ * ============================================================================
+ *
+ * Two GCBuffer structs, each with handles[] (pointer table) and storage (object heap).
+ * active_handle_table: atomic void** pointer to current active table.
+ * compaction_target: which buffer GC is compacting into.
+ *
+ * Handles are plain indices (no encoding).
+ * gc_deref(handle): atomic_load(active_handle_table)[handle] — one atomic load + array index.
+ *
+ * During compaction: main thread allocates into post-compaction buffer, writes handle
+ * to BOTH tables. GC cycle: Mark → set compaction_target → Compact (update active table
+ * in-place) → atomic swap active_handle_table.
+ *
+ * No forwarding map, no handle remapping — tables kept consistent during compaction.
+ * ============================================================================ */
+
+typedef enum {
+    GC_PHASE_IDLE = 0,
+    GC_PHASE_MARKING,
+    GC_PHASE_COMPACTING,
+    GC_PHASE_SWAPPING,
+} GCPhase;
+
+/* Per-buffer state: object storage + handle pointer table */
+typedef struct GCBuffer {
+    uint8_t *storage;           /* Bump-allocated object heap */
+    size_t storage_size;        /* Total size of storage */
+    size_t bump_offset;         /* Current allocation offset */
+    
+    void **handles;             /* Handle-to-pointer table */
+    uint32_t handle_count;      /* Next handle index to allocate */
+    uint32_t handle_capacity;   /* Allocated capacity of handles[] */
+} GCBuffer;
+
+typedef struct GCState {
+    /* Double buffers: [0] and [1] alternate as active/compact-target */
+    GCBuffer buffers[2];
+    
+    /* Atomic pointer to the currently active handle table */
+    void *volatile active_handle_table;   /* Points to one of buffers[0].handles or buffers[1].handles */
+    uint32_t active_buffer_index;         /* 0 or 1: which buffer is currently active */
+    
+    /* GC phase machine state */
+    GCPhase gc_phase;                     /* Current GC phase */
+    uint32_t compaction_target;           /* Which buffer (0 or 1) GC is compacting INTO */
+    
+    /* Handle free list (shared between both buffers - handles are indices) */
+    uint32_t *free_list;
+    uint32_t free_count;
+    uint32_t free_capacity;
+    
+    /* Root set */
+    struct {
+        GCHandle *roots;
+        uint32_t count;
+        uint32_t capacity;
+    } root_set;
+    
+    /* Type buckets for fast iteration by object type */
+    GCTypeBucket type_buckets[GC_BUCKET_COUNT];
+    
+    /* Typed handle arrays for special cases */
+    JSHandleArray atom_handles;
+    JSHandleArray weakmap_handles;
+    JSHandleArray weakref_handles;
+    JSHandleArray finrec_handles;
+    
+    /* Backward-compatible handle access shim (points to active buffer) */
+    struct {
+        void **ptrs;
+        uint32_t count;
+        uint32_t capacity;
+        uint32_t *free_list;
+        uint32_t free_count;
+        uint32_t free_capacity;
+    } handles;
+    
+    size_t bytes_allocated;
+    size_t gc_threshold;
+    GCHandle rt;  /* Runtime handle for GC operations */
+    bool initialized;
+} GCState;
+
 extern GCState g_gc;
+
+/* Backward-compatible macros for code that accesses g_gc.handles directly */
+#define g_gc_handles_ptrs (g_gc.active_handle_table)
+#define g_gc_handles_count (g_gc.buffers[g_gc.active_buffer_index].handle_count)
+
+/* ============================================================================
+ * GC Thread Control
+ * ============================================================================ */
+
+/* Start the background GC thread. Called once during init. */
+bool gc_thread_start(void);
+
+/* Stop the background GC thread. Called during cleanup. */
+void gc_thread_stop(void);
+
+/* Request a background GC cycle. Non-blocking; returns immediately. */
+void gc_request_background(void);
+
+/* Wait for any in-progress background GC to complete. Blocking. */
+void gc_wait_for_completion(void);
+
+/* Check if a background GC is currently running. */
+bool gc_is_background_running(void);
 
 /* ============================================================================
  * GC-Safe Linked Lists (GCListHead)

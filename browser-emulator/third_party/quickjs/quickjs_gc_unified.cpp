@@ -9,6 +9,13 @@
 #include "quickjs_gc_unified.h"
 #include "quickjs-internal.h"
 
+/* Platform threading support */
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <pthread.h>
+#endif
+
 /* 
  * Debug logging for GC - controlled via QJS_DEBUG environment variable
  * Set QJS_DEBUG=1 for info level, QJS_DEBUG=2 for verbose debug
@@ -42,8 +49,7 @@ extern "C" {
     typedef void JS_MarkFunc(JSRuntimeHandle rt, GCHandle handle);
     void mark_children(JSRuntimeHandle rt, GCHandle handle, JS_MarkFunc *mark_func);
     
-    /* JS_MarkValue - marks a JSValue if it contains GC references
-     * Note: GCValue is defined in quickjs_types.h */
+    /* JS_MarkValue - marks a JSValue if it contains GC references */
     void JS_MarkValue(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func);
     
     /* JS_MarkContext - marks all roots in a JSContext */
@@ -124,54 +130,260 @@ static inline void gc_set_canaries(GCHeader *hdr);
 static inline void gc_corrupt_canaries(GCHeader *hdr);
 static GCCanaryStatus gc_validate_canaries_hdr(GCHeader *hdr, void **out_ptr);
 
+/* ============================================================================
+ * DOUBLE-BUFFERED GC - Buffer Management
+ * ============================================================================
+ */
+
+static inline GCBuffer *gc_active_buffer(void) {
+    return &g_gc.buffers[g_gc.active_buffer_index];
+}
+
+static inline GCBuffer *gc_inactive_buffer(void) {
+    return &g_gc.buffers[1 - g_gc.active_buffer_index];
+}
+
+static inline uint8_t *gc_active_heap(void) {
+    return gc_active_buffer()->storage;
+}
+
+static inline size_t gc_active_heap_size(void) {
+    return gc_active_buffer()->storage_size;
+}
+
+static inline size_t gc_active_bump_offset(void) {
+    return gc_active_buffer()->bump_offset;
+}
+
+/* Get the active handle table (the one currently being used for dereferencing) */
+static inline void **gc_active_handles(void) {
+    return (void **)g_gc.active_handle_table;
+}
+
+static inline uint32_t gc_active_handle_count(void) {
+    return gc_active_buffer()->handle_count;
+}
+
+static inline uint32_t gc_active_handle_capacity(void) {
+    return gc_active_buffer()->handle_capacity;
+}
+
+/* ============================================================================
+ * GC THREADING
+ * ============================================================================
+ */
+
+#ifdef _WIN32
+typedef HANDLE GCThreadHandle;
+typedef CRITICAL_SECTION GCMutex;
+#define GC_MUTEX_INIT(m) InitializeCriticalSection(&(m))
+#define GC_MUTEX_LOCK(m) EnterCriticalSection(&(m))
+#define GC_MUTEX_UNLOCK(m) LeaveCriticalSection(&(m))
+#define GC_MUTEX_DESTROY(m) DeleteCriticalSection(&(m))
+#else
+typedef pthread_t GCThreadHandle;
+typedef pthread_mutex_t GCMutex;
+#define GC_MUTEX_INIT(m) pthread_mutex_init(&(m), NULL)
+#define GC_MUTEX_LOCK(m) pthread_mutex_lock(&(m))
+#define GC_MUTEX_UNLOCK(m) pthread_mutex_unlock(&(m))
+#define GC_MUTEX_DESTROY(m) pthread_mutex_destroy(&(m))
+#endif
+
+static struct {
+    GCThreadHandle thread;
+    GCMutex phase_mutex;
+    GCMutex alloc_mutex;
+    bool thread_running;
+    bool gc_requested;
+} g_gc_thread = {0};
+
+/* Background GC thread function */
+#ifdef _WIN32
+static DWORD WINAPI gc_thread_func(LPVOID arg) {
+#else
+static void *gc_thread_func(void *arg) {
+#endif
+    (void)arg;
+    GC_LOGI("GC background thread started");
+    
+    while (g_gc_thread.thread_running) {
+        GC_MUTEX_LOCK(g_gc_thread.phase_mutex);
+        if (g_gc_thread.gc_requested && g_gc.gc_phase == GC_PHASE_IDLE) {
+            g_gc_thread.gc_requested = false;
+            g_gc.gc_phase = GC_PHASE_MARKING;
+            GC_MUTEX_UNLOCK(g_gc_thread.phase_mutex);
+            gc_run_internal();
+        } else {
+            GC_MUTEX_UNLOCK(g_gc_thread.phase_mutex);
+            /* Small sleep to avoid busy-waiting */
+#ifdef _WIN32
+            Sleep(1);
+#else
+            usleep(1000);
+#endif
+        }
+    }
+    
+    GC_LOGI("GC background thread exiting");
+#ifdef _WIN32
+    return 0;
+#else
+    return NULL;
+#endif
+}
+
+bool gc_thread_start(void) {
+    if (g_gc_thread.thread_running) return true;
+    
+    GC_MUTEX_INIT(g_gc_thread.phase_mutex);
+    GC_MUTEX_INIT(g_gc_thread.alloc_mutex);
+    g_gc_thread.thread_running = true;
+    g_gc_thread.gc_requested = false;
+    
+#ifdef _WIN32
+    g_gc_thread.thread = CreateThread(NULL, 0, gc_thread_func, NULL, 0, NULL);
+    if (!g_gc_thread.thread) {
+        g_gc_thread.thread_running = false;
+        return false;
+    }
+#else
+    if (pthread_create(&g_gc_thread.thread, NULL, gc_thread_func, NULL) != 0) {
+        g_gc_thread.thread_running = false;
+        return false;
+    }
+#endif
+    
+    GC_LOGI("GC background thread started successfully");
+    return true;
+}
+
+void gc_thread_stop(void) {
+    if (!g_gc_thread.thread_running) return;
+    
+    g_gc_thread.thread_running = false;
+    
+#ifdef _WIN32
+    WaitForSingleObject(g_gc_thread.thread, INFINITE);
+    CloseHandle(g_gc_thread.thread);
+#else
+    pthread_join(g_gc_thread.thread, NULL);
+#endif
+    
+    GC_MUTEX_DESTROY(g_gc_thread.phase_mutex);
+    GC_MUTEX_DESTROY(g_gc_thread.alloc_mutex);
+    
+    g_gc_thread.thread = 0;
+    GC_LOGI("GC background thread stopped");
+}
+
+void gc_request_background(void) {
+    GC_MUTEX_LOCK(g_gc_thread.phase_mutex);
+    g_gc_thread.gc_requested = true;
+    GC_MUTEX_UNLOCK(g_gc_thread.phase_mutex);
+}
+
+void gc_wait_for_completion(void) {
+    while (true) {
+        GC_MUTEX_LOCK(g_gc_thread.phase_mutex);
+        GCPhase phase = g_gc.gc_phase;
+        bool requested = g_gc_thread.gc_requested;
+        GC_MUTEX_UNLOCK(g_gc_thread.phase_mutex);
+        
+        if (phase == GC_PHASE_IDLE && !requested) break;
+        
+#ifdef _WIN32
+        Sleep(1);
+#else
+        usleep(1000);
+#endif
+    }
+}
+
+bool gc_is_background_running(void) {
+    GC_MUTEX_LOCK(g_gc_thread.phase_mutex);
+    bool running = (g_gc.gc_phase != GC_PHASE_IDLE);
+    GC_MUTEX_UNLOCK(g_gc_thread.phase_mutex);
+    return running;
+}
+
+/* ============================================================================
+ * GC INITIALIZATION & CLEANUP
+ * ============================================================================
+ */
+
+static bool gc_buffer_init(GCBuffer *buf, size_t storage_size, uint32_t handle_capacity) {
+    buf->storage = (uint8_t*)malloc(storage_size);
+    if (!buf->storage) return false;
+    buf->storage_size = storage_size;
+    buf->bump_offset = 0;
+    
+    buf->handles = (void**)malloc(handle_capacity * sizeof(void*));
+    if (!buf->handles) {
+        free(buf->storage);
+        buf->storage = NULL;
+        return false;
+    }
+    memset(buf->handles, 0, handle_capacity * sizeof(void*));
+    buf->handle_capacity = handle_capacity;
+    buf->handle_count = 1;  /* Handle 0 is reserved as GC_HANDLE_NULL */
+    
+    return true;
+}
+
+static void gc_buffer_cleanup(GCBuffer *buf) {
+    if (buf->storage) {
+        free(buf->storage);
+        buf->storage = NULL;
+    }
+    buf->storage_size = 0;
+    buf->bump_offset = 0;
+    
+    if (buf->handles) {
+        free(buf->handles);
+        buf->handles = NULL;
+    }
+    buf->handle_capacity = 0;
+    buf->handle_count = 0;
+}
+
 bool gc_init(void) {
     if (g_gc.initialized) return true;
     
-    g_gc.heap = (uint8_t*)malloc(GC_HEAP_SIZE);
-    if (!g_gc.heap) return false;
-    
-    g_gc.heap_size = GC_HEAP_SIZE;
-    g_gc.bump.base = g_gc.heap;
-    g_gc.bump.offset = 0;
-    g_gc.bump.capacity = GC_HEAP_SIZE;
-    
-    /* Allocate handle table separately with malloc for dynamic growth */
-    g_gc.handles.ptrs = (void**)malloc(GC_INITIAL_HANDLES * sizeof(void*));
-    if (!g_gc.handles.ptrs) {
-        free(g_gc.heap);
-        g_gc.heap = NULL;
+    /* Initialize both buffers */
+    if (!gc_buffer_init(&g_gc.buffers[0], GC_HEAP_SIZE, GC_INITIAL_HANDLES)) {
         return false;
     }
-    memset(g_gc.handles.ptrs, 0, GC_INITIAL_HANDLES * sizeof(void*));
-    g_gc.handles.capacity = GC_INITIAL_HANDLES;
-    g_gc.handles.count = 1;
-    g_gc.handles.free_list = (uint32_t*)malloc(GC_INITIAL_HANDLES * sizeof(uint32_t));
-    if (!g_gc.handles.free_list) {
-        free(g_gc.handles.ptrs);
-        g_gc.handles.ptrs = NULL;
-        free(g_gc.heap);
-        g_gc.heap = NULL;
+    if (!gc_buffer_init(&g_gc.buffers[1], GC_HEAP_SIZE, GC_INITIAL_HANDLES)) {
+        gc_buffer_cleanup(&g_gc.buffers[0]);
         return false;
     }
-    g_gc.handles.free_count = 0;
-    g_gc.handles.free_capacity = GC_INITIAL_HANDLES;
     
-    /* Initialize root set with dynamic allocation */
+    /* Buffer 0 is active initially */
+    g_gc.active_buffer_index = 0;
+    g_gc.active_handle_table = g_gc.buffers[0].handles;
+    
+    /* Initialize free list */
+    g_gc.free_list = (uint32_t*)malloc(GC_INITIAL_HANDLES * sizeof(uint32_t));
+    if (!g_gc.free_list) {
+        gc_buffer_cleanup(&g_gc.buffers[0]);
+        gc_buffer_cleanup(&g_gc.buffers[1]);
+        return false;
+    }
+    g_gc.free_count = 0;
+    g_gc.free_capacity = GC_INITIAL_HANDLES;
+    
+    /* Initialize root set */
     g_gc.root_set.capacity = 256;
     g_gc.root_set.roots = (GCHandle*)malloc(g_gc.root_set.capacity * sizeof(GCHandle));
     if (!g_gc.root_set.roots) {
-        free(g_gc.handles.ptrs);
-        g_gc.handles.ptrs = NULL;
-        free(g_gc.heap);
-        g_gc.heap = NULL;
+        free(g_gc.free_list);
+        gc_buffer_cleanup(&g_gc.buffers[0]);
+        gc_buffer_cleanup(&g_gc.buffers[1]);
         return false;
     }
     g_gc.root_set.count = 0;
-    g_gc.bytes_allocated = 0;
-    g_gc.gc_threshold = GC_DEFAULT_THRESHOLD;
-    g_gc.rt = GC_HANDLE_NULL;
     
-    /* Initialize typed handle arrays (atoms and weakrefs) */
+    /* Initialize typed handle arrays */
     gc_handle_array_init(&g_gc.weakmap_handles, 100);
     gc_handle_array_init(&g_gc.weakref_handles, 100);
     gc_handle_array_init(&g_gc.finrec_handles, 100);
@@ -182,7 +394,25 @@ bool gc_init(void) {
         gc_type_bucket_init(&g_gc.type_buckets[i]);
     }
     
+    g_gc.gc_phase = GC_PHASE_IDLE;
+    g_gc.compaction_target = 0;
+    g_gc.bytes_allocated = 0;
+    g_gc.gc_threshold = GC_DEFAULT_THRESHOLD;
+    g_gc.rt = GC_HANDLE_NULL;
+    
+    /* Initialize backward-compatible handles shim */
+    g_gc.handles.ptrs = g_gc.buffers[0].handles;
+    g_gc.handles.count = g_gc.buffers[0].handle_count;
+    g_gc.handles.capacity = g_gc.buffers[0].handle_capacity;
+    g_gc.handles.free_list = g_gc.free_list;
+    g_gc.handles.free_count = g_gc.free_count;
+    g_gc.handles.free_capacity = g_gc.free_capacity;
+    
     g_gc.initialized = true;
+    
+    /* Start background GC thread */
+    gc_thread_start();
+    
     return true;
 }
 
@@ -191,7 +421,10 @@ bool gc_is_initialized(void) {
 }
 
 void gc_cleanup(void) {
-    /* Free typed handle arrays (atoms and weakrefs) */
+    /* Stop background GC thread first */
+    gc_thread_stop();
+    
+    /* Free typed handle arrays */
     gc_handle_array_free(&g_gc.weakmap_handles);
     gc_handle_array_free(&g_gc.weakref_handles);
     gc_handle_array_free(&g_gc.finrec_handles);
@@ -208,20 +441,16 @@ void gc_cleanup(void) {
         g_gc.root_set.roots = NULL;
     }
     
-    /* Free handle table */
-    if (g_gc.handles.ptrs) {
-        free(g_gc.handles.ptrs);
-        g_gc.handles.ptrs = NULL;
-    }
-    if (g_gc.handles.free_list) {
-        free(g_gc.handles.free_list);
-        g_gc.handles.free_list = NULL;
+    /* Free handle free list */
+    if (g_gc.free_list) {
+        free(g_gc.free_list);
+        g_gc.free_list = NULL;
     }
     
-    if (g_gc.heap) {
-        free(g_gc.heap);
-        g_gc.heap = NULL;
-    }
+    /* Free both buffers */
+    gc_buffer_cleanup(&g_gc.buffers[0]);
+    gc_buffer_cleanup(&g_gc.buffers[1]);
+    
     memset(&g_gc, 0, sizeof(g_gc));
 }
 
@@ -234,9 +463,9 @@ JSRuntimeHandle gc_get_runtime(void) {
 }
 
 void gc_set_handle_finalizer(GCHandle handle, GCFinalizerFunc *finalizer) {
-    if (handle == GC_HANDLE_NULL || handle >= g_gc.handles.count) return;
+    if (handle == GC_HANDLE_NULL || handle >= gc_active_handle_count()) return;
     
-    void *ptr = g_gc.handles.ptrs[handle];
+    void *ptr = gc_active_handles()[handle];
     if (!ptr) return;
     
     GCHeader *hdr = gc_header(ptr);
@@ -246,9 +475,9 @@ void gc_set_handle_finalizer(GCHandle handle, GCFinalizerFunc *finalizer) {
 }
 
 GCFinalizerFunc *gc_get_handle_finalizer(GCHandle handle) {
-    if (handle == GC_HANDLE_NULL || handle >= g_gc.handles.count) return NULL;
+    if (handle == GC_HANDLE_NULL || handle >= gc_active_handle_count()) return NULL;
     
-    void *ptr = g_gc.handles.ptrs[handle];
+    void *ptr = gc_active_handles()[handle];
     if (!ptr) return NULL;
     
     GCHeader *hdr = gc_header(ptr);
@@ -295,11 +524,6 @@ int gc_handle_array_add(JSHandleArray *arr, GCHandle handle) {
     return 0;
 }
 
-/*
- * gc_handle_array_push_with_index - Add a handle and return the index where it was stored.
- * Similar to gc_handle_array_add but returns the array index via out_index.
- * Returns 0 on success, -1 on failure.
- */
 int gc_handle_array_push_with_index(JSHandleArray *arr, GCHandle handle, uint32_t *out_index) {
     if (!arr || handle == GC_HANDLE_NULL) return -1;
     
@@ -307,7 +531,6 @@ int gc_handle_array_push_with_index(JSHandleArray *arr, GCHandle handle, uint32_
     if (arr->count >= arr->capacity) {
         uint32_t new_capacity = arr->capacity * 2;
         if (new_capacity < arr->capacity) {
-            /* Overflow check - would exceed uint32_t max */
             GC_LOGE("gc_handle_array_push_with_index: capacity overflow, cannot grow");
             return -1;
         }
@@ -369,10 +592,6 @@ void gc_handle_array_compact(JSHandleArray *arr) {
 
 /* ============================================================================
  * TYPE BUCKET MANAGEMENT
- * 
- * Type buckets allow fast iteration over all objects of a specific type.
- * Each bucket is a dynamic array of handles that is automatically maintained
- * during allocation and GC.
  * ============================================================================ */
 
 void gc_type_bucket_init(GCTypeBucket *bucket) {
@@ -520,32 +739,50 @@ GCHandle gc_type_iterator_handle(GCTypeIterator *it) {
     return it->bucket->handles[it->index];
 }
 
-/* 
+/* ============================================================================
+ * BUMP ALLOCATOR & HANDLE TABLE - Double-Buffered
+ * ============================================================================
+ */
+
+/*
  * CANARY-ENABLED BUMP ALLOCATOR
  * 
  * Layout: [8-byte prefix] [64-byte GCHeader] [user data] [8-byte suffix]
  * Total overhead: 16 bytes per allocation
+ * 
+ * During normal operation (non-compaction): allocates from active buffer.
+ * During compaction: allocates from compaction_target buffer.
  */
 static void *bump_alloc(size_t size) {
+    GCBuffer *buf = gc_active_buffer();
+    
+    /* During compaction, allocate from the compaction target buffer */
+    GC_MUTEX_LOCK(g_gc_thread.phase_mutex);
+    if (g_gc.gc_phase == GC_PHASE_COMPACTING) {
+        buf = &g_gc.buffers[g_gc.compaction_target];
+    }
+    GC_MUTEX_UNLOCK(g_gc_thread.phase_mutex);
+    
     /* Add space for prefix and suffix canaries */
     size_t user_size = ALIGN16(size);
     size_t total_size = 8 + sizeof(GCHeader) + user_size + 8; /* canaries + header + data */
     
-    /* Simple bump allocation (no threading, no CAS needed) */
-    size_t old_offset = g_gc.bump.offset;
+    /* Simple bump allocation (single-threaded for main thread, 
+     * GC thread doesn't allocate during compaction) */
+    size_t old_offset = buf->bump_offset;
     /* CRITICAL: Ensure offset is 16-byte aligned before allocation */
     size_t aligned_offset = ALIGN16(old_offset);
     /* Prefix canary starts 8 bytes before the aligned position */
     size_t alloc_start = aligned_offset + 8;
     size_t new_offset = aligned_offset + total_size;
-    if (new_offset > g_gc.heap_size) return NULL;
+    if (new_offset > buf->storage_size) return NULL;
     
-    /* Update bump pointer (single-threaded, no CAS needed) */
-    g_gc.bump.offset = new_offset;
+    /* Update bump pointer */
+    buf->bump_offset = new_offset;
     
     /* Set up canaries and header */
-    uint8_t *prefix_ptr = g_gc.heap + aligned_offset;
-    uint8_t *hdr_ptr = g_gc.heap + alloc_start;
+    uint8_t *prefix_ptr = buf->storage + aligned_offset;
+    uint8_t *hdr_ptr = buf->storage + alloc_start;
     GCHeader *hdr = (GCHeader*)hdr_ptr;
     uint8_t *user_ptr = hdr_ptr + sizeof(GCHeader);
     uint8_t *suffix_ptr = user_ptr + user_size;
@@ -577,74 +814,116 @@ static void *bump_alloc(size_t size) {
     return user_ptr;
 }
 
-/* Grow the handle table when needed */
-static bool grow_handle_table(void) {
-    uint32_t new_capacity = g_gc.handles.capacity * 2;
+/* Grow both handle tables when needed */
+static bool grow_handle_tables(void) {
+    uint32_t new_capacity = gc_active_buffer()->handle_capacity * 2;
     if (new_capacity < 1000) new_capacity = 1000;
     
-    void **new_ptrs = (void**)realloc(g_gc.handles.ptrs, new_capacity * sizeof(void*));
-    if (!new_ptrs) {
-        fprintf(stderr, "[FATAL] Failed to grow handle table to %u entries\n", new_capacity);
-        return false;
+    /* Grow both buffers' handle tables together */
+    for (int i = 0; i < 2; i++) {
+        void **new_ptrs = (void**)realloc(g_gc.buffers[i].handles, new_capacity * sizeof(void*));
+        if (!new_ptrs) {
+            fprintf(stderr, "[FATAL] Failed to grow handle table %d to %u entries\n", i, new_capacity);
+            return false;
+        }
+        
+        /* Zero out the new slots */
+        memset(&new_ptrs[g_gc.buffers[i].handle_capacity], 0, 
+               (new_capacity - g_gc.buffers[i].handle_capacity) * sizeof(void*));
+        
+        g_gc.buffers[i].handles = new_ptrs;
+        g_gc.buffers[i].handle_capacity = new_capacity;
     }
     
-    /* Zero out the new slots */
-    memset(&new_ptrs[g_gc.handles.capacity], 0, (new_capacity - g_gc.handles.capacity) * sizeof(void*));
+    /* Update active_handle_table pointer in case realloc moved it */
+    g_gc.active_handle_table = g_gc.buffers[g_gc.active_buffer_index].handles;
     
-    g_gc.handles.ptrs = new_ptrs;
-    g_gc.handles.capacity = new_capacity;
-    GC_LOGI("Grew handle table to %u entries", new_capacity);
+    GC_LOGI("Grew handle tables to %u entries", new_capacity);
     return true;
 }
 
 static inline void push_free_handle(GCHandle handle) {
-    if (g_gc.handles.free_count >= g_gc.handles.free_capacity) {
-        uint32_t new_cap = g_gc.handles.free_capacity * 2;
+    if (g_gc.free_count >= g_gc.free_capacity) {
+        uint32_t new_cap = g_gc.free_capacity * 2;
         if (new_cap < 1000) new_cap = 1000;
-        uint32_t *new_list = (uint32_t*)realloc(g_gc.handles.free_list, new_cap * sizeof(uint32_t));
+        uint32_t *new_list = (uint32_t*)realloc(g_gc.free_list, new_cap * sizeof(uint32_t));
         if (new_list) {
-            g_gc.handles.free_list = new_list;
-            g_gc.handles.free_capacity = new_cap;
+            g_gc.free_list = new_list;
+            g_gc.free_capacity = new_cap;
         }
     }
-    if (g_gc.handles.free_count < g_gc.handles.free_capacity) {
-        g_gc.handles.free_list[g_gc.handles.free_count++] = handle;
+    if (g_gc.free_count < g_gc.free_capacity) {
+        g_gc.free_list[g_gc.free_count++] = handle;
     }
 }
 
+/*
+ * allocate_handle - Allocate a handle index and write the pointer.
+ * 
+ * During normal operation: writes to active buffer's handle table only.
+ * During compaction: writes to BOTH handle tables (active and compaction target).
+ */
 static GCHandle allocate_handle(void *ptr) {
     if (!ptr) return GC_HANDLE_NULL;
     
+    GC_MUTEX_LOCK(g_gc_thread.alloc_mutex);
+    
     /* Fast path: reuse a handle from the free list */
-    if (g_gc.handles.free_count > 0) {
-        GCHandle handle = g_gc.handles.free_list[--g_gc.handles.free_count];
-        g_gc.handles.ptrs[handle] = ptr;
+    if (g_gc.free_count > 0) {
+        GCHandle handle = g_gc.free_list[--g_gc.free_count];
+        
+        /* Write to active buffer */
+        gc_active_buffer()->handles[handle] = ptr;
+        
+        /* During compaction, also write to compaction target */
+        GC_MUTEX_LOCK(g_gc_thread.phase_mutex);
+        if (g_gc.gc_phase == GC_PHASE_COMPACTING) {
+            g_gc.buffers[g_gc.compaction_target].handles[handle] = ptr;
+        }
+        GC_MUTEX_UNLOCK(g_gc_thread.phase_mutex);
+        
+        GC_MUTEX_UNLOCK(g_gc_thread.alloc_mutex);
         return handle;
     }
     
     /* Need to allocate a new slot */
-    if (g_gc.handles.count >= g_gc.handles.capacity) {
-        /* Try to grow the handle table */
-        if (!grow_handle_table()) {
+    GCBuffer *active = gc_active_buffer();
+    if (active->handle_count >= active->handle_capacity) {
+        if (!grow_handle_tables()) {
             fprintf(stderr, "[FATAL] Out of handles (count=%u, capacity=%u) - grow failed\n", 
-                    g_gc.handles.count, g_gc.handles.capacity);
+                    active->handle_count, active->handle_capacity);
+            GC_MUTEX_UNLOCK(g_gc_thread.alloc_mutex);
             return GC_HANDLE_NULL;
         }
-        GC_LOGI("Grew handle table, now capacity=%u", g_gc.handles.capacity);
+        GC_LOGI("Grew handle tables, now capacity=%u", active->handle_capacity);
     }
     
-    GCHandle handle = g_gc.handles.count++;
-    g_gc.handles.ptrs[handle] = ptr;
+    GCHandle handle = active->handle_count++;
+    active->handles[handle] = ptr;
+    
+    /* Also update the other buffer's handle count and write the pointer */
+    GCBuffer *other = gc_inactive_buffer();
+    if (other->handle_count < handle + 1) {
+        other->handle_count = handle + 1;
+    }
+    other->handles[handle] = ptr;
+    
+    GC_MUTEX_UNLOCK(g_gc_thread.alloc_mutex);
     return handle;
 }
 
 bool gc_ptr_is_valid(void *ptr) {
     if (!ptr) return false;
     if (!g_gc.initialized) return false;
-    /* Check if pointer is within heap range */
-    if ((uint8_t*)ptr < g_gc.heap || (uint8_t*)ptr >= g_gc.heap + g_gc.heap_size)
-        return false;
-    return true;
+    
+    /* Check if pointer is within either buffer's storage range */
+    for (int i = 0; i < 2; i++) {
+        uint8_t *storage = g_gc.buffers[i].storage;
+        size_t size = g_gc.buffers[i].storage_size;
+        if (storage && (uint8_t*)ptr >= storage && (uint8_t*)ptr < storage + size)
+            return true;
+    }
+    return false;
 }
 
 GCHandle gc_alloc(size_t size, JSGCObjectTypeEnum gc_obj_type) {
@@ -657,8 +936,7 @@ GCHandle gc_alloc_ex(size_t size, JSGCObjectTypeEnum gc_obj_type,
     
     void *ptr = bump_alloc(size);
     if (!ptr) {
-        fprintf(stderr, "[FATAL] bump_alloc failed: out of memory (requested %zu bytes, heap size %zu, used %zu)\n",
-                size, g_gc.heap_size, (size_t)g_gc.bump.offset);
+        fprintf(stderr, "[FATAL] bump_alloc failed: out of memory (requested %zu bytes)\n", size);
         fprintf(stderr, "[FATAL] GC would have been triggered, but this is disabled to prevent handle corruption.\n");
         fflush(stderr);
         abort();
@@ -743,16 +1021,23 @@ GCHandle gc_realloc(GCHandle handle, size_t new_size) {
     GCHeader *new_hdr = gc_header(new_ptr);
     new_hdr->handle = handle;
     
-    /* Update original handle entry to point to new memory */
-    g_gc.handles.ptrs[handle] = new_ptr;
+    /* Update handle tables to point to new memory */
+    GC_MUTEX_LOCK(g_gc_thread.alloc_mutex);
     
-    /* Clear the temporary handle slot to prevent handle aliasing.
-     * The temp_handle was allocated by gc_alloc above, but we only need
-     * the original handle to point to the new memory. Without clearing
-     * the temp slot, we'd have two handles pointing to the same memory,
-     * which confuses the GC sweep phase.
-     */
-    g_gc.handles.ptrs[temp_handle] = NULL;
+    /* Update active buffer */
+    gc_active_buffer()->handles[handle] = new_ptr;
+    
+    /* During compaction, also update compaction target */
+    GC_MUTEX_LOCK(g_gc_thread.phase_mutex);
+    if (g_gc.gc_phase == GC_PHASE_COMPACTING) {
+        g_gc.buffers[g_gc.compaction_target].handles[handle] = new_ptr;
+    }
+    GC_MUTEX_UNLOCK(g_gc_thread.phase_mutex);
+    
+    GC_MUTEX_UNLOCK(g_gc_thread.alloc_mutex);
+    
+    /* Clear the temporary handle slot to prevent handle aliasing */
+    gc_active_buffer()->handles[temp_handle] = NULL;
     push_free_handle(temp_handle);
     
     return handle;  /* Original handle, now pointing to new memory */
@@ -767,18 +1052,31 @@ GCHandle gc_realloc2(GCHandle handle, size_t new_size, size_t *pslack) {
     return new_handle;
 }
 
+/*
+ * gc_deref - Dereference a handle to get the object pointer.
+ * 
+ * Uses atomic load of active_handle_table for thread safety.
+ * During compaction: after the atomic swap, this automatically returns
+ * pointers from the new buffer. Before the swap, returns pointers from
+ * the old buffer (which are still valid since live objects haven't moved yet).
+ */
 void *gc_deref(GCHandle handle) {
-    if (handle == GC_HANDLE_NULL || handle >= g_gc.handles.count) {
-        return NULL;
-    }
-    return g_gc.handles.ptrs[handle];
+    if (handle == GC_HANDLE_NULL) return NULL;
+    
+    /* Atomic load of active handle table pointer */
+    void **table = (void **)g_gc.active_handle_table;
+    
+    /* Get handle count from active buffer */
+    uint32_t count = gc_active_buffer()->handle_count;
+    if (handle >= count) return NULL;
+    
+    return table[handle];
 }
 
 bool gc_handle_is_valid(GCHandle handle) {
-    if (handle == GC_HANDLE_NULL || handle >= g_gc.handles.count) {
-        return false;
-    }
-    void *ptr = g_gc.handles.ptrs[handle];
+    if (handle == GC_HANDLE_NULL) return false;
+    
+    void *ptr = gc_deref(handle);
     if (!ptr) return false;
     GCHeader *hdr = gc_header(ptr);
     return (hdr->size & 0x7FFFFFFF) > 0;
@@ -787,6 +1085,11 @@ bool gc_handle_is_valid(GCHandle handle) {
 JSGCObjectTypeEnum gc_handle_get_type(GCHandle handle) {
     return gc_handle_get_type_inline(handle);
 }
+
+/* ============================================================================
+ * MARK PHASE
+ * ============================================================================
+ */
 
 /* Forward declarations */
 static void gc_mark_value(GCValue val);
@@ -953,12 +1256,17 @@ static void gc_unified_mark_recursive(JSRuntimeHandle rt, GCHandle handle) {
 
 /* Clear all mark bits before marking phase */
 static void gc_clear_marks(void) {
-    for (uint32_t i = 1; i < g_gc.handles.count; i++) {
-        void *user_ptr = g_gc.handles.ptrs[i];
-        if (user_ptr) {
-            GCHeader *hdr = gc_header(user_ptr);
-            if ((hdr->size & 0x7FFFFFFF) > 0) {
-                hdr->mark = 0;
+    /* Clear marks in both buffers - only active buffer has live objects during normal operation,
+     * but during compaction both may have objects */
+    for (int buf_idx = 0; buf_idx < 2; buf_idx++) {
+        GCBuffer *buf = &g_gc.buffers[buf_idx];
+        for (uint32_t i = 1; i < buf->handle_count; i++) {
+            void *user_ptr = buf->handles[i];
+            if (user_ptr) {
+                GCHeader *hdr = gc_header(user_ptr);
+                if ((hdr->size & 0x7FFFFFFF) > 0) {
+                    hdr->mark = 0;
+                }
             }
         }
     }
@@ -1060,7 +1368,7 @@ static void gc_mark_comprehensive(JSRuntimeHandle rt) {
     }
     
     /* Phase 9: Mark atoms referenced by shapes (Tier 2) */
-    for (uint32_t i = 1; i < g_gc.handles.count; i++) {
+    for (uint32_t i = 1; i < gc_active_handle_count(); i++) {
         GCHandle handle = (GCHandle)i;
         if (!gc_handle_array_entry_is_valid(handle)) continue;
         if (gc_handle_is_freed(handle)) continue;
@@ -1079,8 +1387,10 @@ static void gc_mark(void) {
         gc_clear_marks();
         for (uint32_t i = 0; i < g_gc.root_set.count; i++) {
             GCHandle h = g_gc.root_set.roots[i];
-            if (h < g_gc.handles.count && g_gc.handles.ptrs[h]) {
-                void *ptr = g_gc.handles.ptrs[h];
+            void **table = gc_active_handles();
+            uint32_t count = gc_active_handle_count();
+            if (h < count && table[h]) {
+                void *ptr = table[h];
                 GCHeader *hdr = gc_header(ptr);
                 if ((hdr->size & 0x7FFFFFFF) > 0 && !hdr->mark) {
                     hdr->mark = 1;
@@ -1099,13 +1409,18 @@ static void gc_mark(void) {
     gc_mark_comprehensive(rt);
 }
 
-/*
- * Forwarding-based GC compaction
- * 
- * Phase 1: Build forwarding table - compute new locations for live objects
- * Phase 2: Update internal pointers using forwarding table
- * Phase 3: Move objects to new locations
- * Phase 4: Update handle table
+/* ============================================================================
+ * COMPACTION - Double-Buffered Design
+ * ============================================================================
+ *
+ * The compaction phase moves live objects from the active buffer to the
+ * compaction target buffer, then atomically swaps the active buffer pointer.
+ *
+ * Key invariants:
+ * - During compaction, new allocations go to the compaction target buffer.
+ * - New allocations write their handle to BOTH handle tables.
+ * - After compaction completes, we atomically swap active_handle_table.
+ * - No forwarding map needed: active table is updated in-place during move.
  */
 
 /* Helper: Get user pointer from GCHeader */
@@ -1113,185 +1428,62 @@ static inline void *gc_header_to_ptr(GCHeader *hdr) {
     return (uint8_t*)hdr + sizeof(GCHeader);
 }
 
-/* Helper: Get GCHeader from heap offset */
-static inline GCHeader *gc_offset_to_header(size_t offset) {
-    if (offset == 0 || offset >= g_gc.bump.offset) return NULL;
-    uint64_t *prefix = (uint64_t*)(g_gc.heap + offset);
-    if (*prefix == GC_CANARY_PREFIX || *prefix == GC_CANARY_CORRUPTED) {
-        return (GCHeader*)(g_gc.heap + offset + 8);
-    }
-    return (GCHeader*)(g_gc.heap + offset);
-}
-
-/* Helper: Check if a pointer points into the GC heap */
-static inline bool gc_ptr_in_heap(void *ptr) {
-    if (!ptr || !g_gc.heap) return false;
+/* Helper: Check if a pointer points into a specific buffer */
+static inline bool gc_ptr_in_buffer(void *ptr, GCBuffer *buf) {
+    if (!ptr || !buf || !buf->storage) return false;
     uint8_t *p = (uint8_t*)ptr;
-    return p >= g_gc.heap && p < g_gc.heap + g_gc.heap_size;
+    return p >= buf->storage && p < buf->storage + buf->storage_size;
 }
 
-/* Helper: Get heap offset from pointer */
-static inline size_t gc_ptr_to_offset(void *ptr) {
-    if (!gc_ptr_in_heap(ptr)) return 0;
-    return (uint8_t*)ptr - g_gc.heap;
-}
-
-/* Helper: Forward a pointer if it points to a moved object */
-static inline void *gc_forward_ptr(void *ptr) {
-    if (!gc_ptr_in_heap(ptr)) return ptr;
-    
-    /* Find the header for this pointer */
-    GCHeader *hdr = gc_header(ptr);
-    if (!hdr || hdr->size == 0) return ptr;
-    
-    /* Check if forwarding pointer is set (stored in reserved1) */
-    size_t fwd_offset = hdr->reserved1;
-    if (fwd_offset != 0 && fwd_offset != (size_t)-1) {
-        GCHeader *fwd_hdr = gc_offset_to_header(fwd_offset);
-        if (fwd_hdr) {
-            return gc_header_to_ptr(fwd_hdr);
-        }
+/* Helper: Get buffer index (0 or 1) that contains this pointer, or -1 */
+static inline int gc_ptr_to_buffer_index(void *ptr) {
+    if (!ptr) return -1;
+    for (int i = 0; i < 2; i++) {
+        if (gc_ptr_in_buffer(ptr, &g_gc.buffers[i])) return i;
     }
-    return ptr;
+    return -1;
 }
 
-static void gc_compact_build_forwarding_table(uint8_t **new_write_ptr) {
-    /* Handle table is now allocated separately, start from heap beginning */
-    uint8_t *read = g_gc.heap;
-    uint8_t *write = read;
-    size_t bump = g_gc.bump.offset;
+/*
+ * gc_compact_move_objects - Move live objects from active buffer to compaction target.
+ * 
+ * This is the core compaction function. It:
+ * 1. Scans the active buffer for live (marked) objects
+ * 2. Copies them to the compaction target buffer
+ * 3. Updates the active handle table to point to new locations
+ * 4. Leaves the compaction target handle table with the new pointers
+ * 5. After this, we atomically swap which table is "active"
+ */
+static void gc_compact_move_objects(void) {
+    GCBuffer *src = gc_active_buffer();
+    GCBuffer *dst = &g_gc.buffers[g_gc.compaction_target];
     
-    while ((size_t)(read - g_gc.heap) < bump) {
-        uint64_t *prefix_ptr = (uint64_t*)read;
-        GCHeader *hdr;
-        
-        if (*prefix_ptr == GC_CANARY_PREFIX || *prefix_ptr == GC_CANARY_CORRUPTED) {
-            hdr = (GCHeader*)(read + 8);
-        }
-        
-        uint32_t raw_size = hdr->size;
-        int is_freed = (raw_size & 0x80000000) != 0;
-        
-        if (raw_size == 0) {
-            read += MIN_OBJECT_SIZE;
-            continue;
-        }
-        
-        size_t total_size = gc_alloc_total_size(hdr);
-        
-        if (is_freed) {
-            read += total_size;
-            continue;
-        }
-        
-        if (hdr->mark) {
-            /* Store forwarding info: reserved1 = new offset */
-            hdr->reserved1 = (uint64_t)(write - g_gc.heap);
-            write += total_size;
-        } else {
-            /* Dead object - clear reserved1 */
-            hdr->reserved1 = 0;
-        }
-        
-        read += total_size;
-    }
+    GC_LOGI("gc_compact_move_objects: src=%d (bump=%zu) dst=%d (bump=%zu)",
+            g_gc.active_buffer_index, src->bump_offset,
+            g_gc.compaction_target, dst->bump_offset);
     
-    *new_write_ptr = write;
-}
-
-static void gc_compact_update_pointers(void) {
-    /* Handle table is now allocated separately, start from heap beginning */
-    uint8_t *read = g_gc.heap;
-    size_t bump = g_gc.bump.offset;
-    
-    while ((size_t)(read - g_gc.heap) < bump) {
-        uint64_t *prefix_ptr = (uint64_t*)read;
-        GCHeader *hdr;
-        
-        if (*prefix_ptr == GC_CANARY_PREFIX || *prefix_ptr == GC_CANARY_CORRUPTED) {
-            hdr = (GCHeader*)(read + 8);
-        }
-        
-        uint32_t raw_size = hdr->size;
-        int is_freed = (raw_size & 0x80000000) != 0;
-        
-        if (raw_size == 0 || is_freed) {
-            size_t total_size = gc_alloc_total_size(hdr);
-            read += total_size;
-            continue;
-        }
-        
-        size_t total_size = gc_alloc_total_size(hdr);
-        
-        if (hdr->mark) {
-            /* Update internal pointers based on object type */
-            JSGCObjectTypeEnum obj_type = (JSGCObjectTypeEnum)hdr->gc_obj_type;
-            void *user_ptr = gc_header_to_ptr(hdr);
-            
-            switch (obj_type) {
-            case JS_GC_OBJ_TYPE_JS_OBJECT: {
-                JSObject *p = (JSObject*)user_ptr;
-                /* Update shape handle pointer if stored directly */
-                /* Shape is accessed via handle, not direct pointer - no update needed */
-                /* Update prototype value if it's a pointer */
-                if (!JS_IsUndefined(p->prototype) && !JS_IsNull(p->prototype)) {
-                    int tag = JS_VALUE_GET_TAG(p->prototype);
-                    if (tag == JS_TAG_OBJECT || tag == JS_TAG_STRING || tag == JS_TAG_SYMBOL) {
-                        /* Safe handle-based forwarding during compaction */
-                        GCHandle old_handle = GC_VALUE_GET_HANDLE(p->prototype);
-                        void *old_ptr = gc_deref(old_handle);
-                        void *new_ptr = gc_forward_ptr(old_ptr);
-                        if (new_ptr != old_ptr) {
-                            /* Get handle from new pointer's GC header */
-                            GCHeader *new_hdr = gc_header(new_ptr);
-                            p->prototype = GC_MKHANDLE(tag, new_hdr->handle);
-                        }
-                    }
-                }
-                /* Property values are GCValue which use handles - no update needed */
-                break;
-            }
-            case JS_GC_OBJ_TYPE_VAR_REF: {
-                /* JSVarRef uses dynamic pointer resolution - no update needed */
-                break;
-            }
-            case JS_GC_OBJ_TYPE_JS_STRING_ROPE: {
-                /* Get handle directly from GC header */
-                JSStringRopeHandle rope(hdr->handle);
-                /* Rope components are GCValue - handled via handles */
-                break;
-            }
-            /* Add other object types as needed */
-            default:
-                break;
-            }
-        }
-        
-        read += total_size;
-    }
-}
-
-static void gc_compact_move_objects(uint8_t *new_end) {
-    /* Handle table is now allocated separately, start from heap beginning */
-    uint8_t *read = g_gc.heap;
-    uint8_t *write = read;
-    size_t bump = g_gc.bump.offset;
+    uint8_t *read = src->storage;
+    uint8_t *write = dst->storage + dst->bump_offset;
+    size_t bump = src->bump_offset;
     JSRuntimeHandle rt(g_gc.rt);
     size_t new_bytes = 0;
     int corrupted_objects = 0;
     (void)corrupted_objects;
     
-    while ((size_t)(read - g_gc.heap) < bump) {
+    while ((size_t)(read - src->storage) < bump) {
         uint64_t *prefix_ptr = (uint64_t*)read;
         GCHeader *hdr;
         
         if (*prefix_ptr == GC_CANARY_PREFIX || *prefix_ptr == GC_CANARY_CORRUPTED) {
             hdr = (GCHeader*)(read + 8);
-        }        
-
+        } else {
+            /* Invalid prefix - skip minimum object size */
+            read += MIN_OBJECT_SIZE;
+            continue;
+        }
+        
         uint32_t raw_size = hdr->size;
         int is_freed = (raw_size & 0x80000000) != 0;
-        void *user_ptr = gc_header_to_ptr(hdr);
         
         if (raw_size == 0) {
             read += MIN_OBJECT_SIZE;
@@ -1313,74 +1505,156 @@ static void gc_compact_move_objects(uint8_t *new_end) {
         }
         
         if (hdr->mark) {
-            /* Get target location from forwarding info */
-            size_t target_offset = (size_t)hdr->reserved1;
-            uint8_t *target = g_gc.heap + target_offset;
+            /* Live object - copy to destination buffer */
+            uint8_t *target = write;
+            memcpy(target, read, total_size);
             
-            if (read != target) {
-                memmove(target, read, total_size);
-            }
-            
-            /* Update handle table */
+            /* Update handle table to point to new location */
             GCHeader *new_hdr = (GCHeader*)(target + 8);
-            if (new_hdr->handle < g_gc.handles.count) {
-                g_gc.handles.ptrs[new_hdr->handle] = gc_header_to_ptr(new_hdr);
+            if (new_hdr->handle < src->handle_count) {
+                void *new_ptr = gc_header_to_ptr(new_hdr);
+                
+                /* Update active handle table */
+                src->handles[new_hdr->handle] = new_ptr;
+                
+                /* Also write to destination handle table */
+                dst->handles[new_hdr->handle] = new_ptr;
             }
             
-            /* Clear forwarding info */
-            new_hdr->reserved1 = 0;
+            /* Clear mark bit in new location */
             new_hdr->mark = 0;
+            new_hdr->reserved1 = 0;
             
-            if (target == write) {
-                write += total_size;
-                new_bytes += total_size;
-            }
+            write += total_size;
+            new_bytes += total_size;
         } else {
-            /* Object is being freed */
-            if (hdr->handle < g_gc.handles.count) {
-                if (hdr->finalizer && status == GC_CANARY_OK) {
-                    hdr->finalizer(rt, hdr->handle, user_ptr);
-                }
-                g_gc.handles.ptrs[hdr->handle] = NULL;
-                push_free_handle(hdr->handle);
+            /* Dead object - call finalizer if present */
+            if (hdr->finalizer && status == GC_CANARY_OK) {
+                hdr->finalizer(rt, hdr->handle, gc_header_to_ptr(hdr));
             }
+            
+            /* Free the handle */
+            if (hdr->handle < src->handle_count) {
+                src->handles[hdr->handle] = NULL;
+                /* Don't push to free list here - we'll rebuild it after compaction */
+            }
+            
             gc_corrupt_canaries(hdr);
         }
         
         read += total_size;
     }
     
-    g_gc.bump.offset = new_end - g_gc.heap;
-    g_gc.bytes_allocated = new_bytes;
+    /* Update destination buffer bump pointer */
+    dst->bump_offset = write - dst->storage;
+    
+    GC_LOGI("gc_compact_move_objects: DONE, moved %zu bytes to buffer %d, new bump=%zu",
+            new_bytes, g_gc.compaction_target, dst->bump_offset);
 }
 
+/*
+ * gc_compact_rebuild_free_list - Rebuild the free list after compaction.
+ * 
+ * After compaction, scan the handle table and add all NULL entries to the free list.
+ */
+static void gc_compact_rebuild_free_list(void) {
+    g_gc.free_count = 0;
+    
+    GCBuffer *active = gc_active_buffer();
+    for (uint32_t i = 1; i < active->handle_count; i++) {
+        if (active->handles[i] == NULL) {
+            push_free_handle(i);
+        }
+    }
+    
+    GC_LOGI("gc_compact_rebuild_free_list: rebuilt with %u free handles", g_gc.free_count);
+}
+
+/*
+ * gc_compact - Full compaction cycle.
+ * 
+ * Phase 1: Move live objects from active buffer to compaction target.
+ * Phase 2: Rebuild free list.
+ * Phase 3: Atomically swap active buffer.
+ * Phase 4: Reset old buffer for next cycle.
+ */
 static void gc_compact(void) {
-    uint8_t *new_end;
+    GC_LOGI("gc_compact: ENTER");
     
-    /* Phase 1: Build forwarding table */
-    gc_compact_build_forwarding_table(&new_end);
+    /* Phase 1: Move objects */
+    gc_compact_move_objects();
     
-    /* Phase 2: Update internal pointers */
-    gc_compact_update_pointers();
+    /* Phase 2: Rebuild free list */
+    gc_compact_rebuild_free_list();
     
-    /* Phase 3: Move objects and update handle table */
-    gc_compact_move_objects(new_end);
+    /* Phase 3: Atomically swap active buffer */
+    uint32_t old_active = g_gc.active_buffer_index;
+    uint32_t new_active = g_gc.compaction_target;
+    
+    GC_LOGI("gc_compact: swapping active buffer %d -> %d", old_active, new_active);
+    
+    /* Atomically update active_handle_table pointer, then active_buffer_index */
+    g_gc.active_handle_table = g_gc.buffers[new_active].handles;
+    g_gc.active_buffer_index = new_active;
+    
+    /* Update backward-compatible handles shim */
+    g_gc.handles.ptrs = g_gc.buffers[new_active].handles;
+    g_gc.handles.count = g_gc.buffers[new_active].handle_count;
+    g_gc.handles.capacity = g_gc.buffers[new_active].handle_capacity;
+    g_gc.handles.free_list = g_gc.free_list;
+    g_gc.handles.free_count = g_gc.free_count;
+    g_gc.handles.free_capacity = g_gc.free_capacity;
+    
+    /* Phase 4: Reset old buffer for next compaction cycle */
+    GCBuffer *old_buf = &g_gc.buffers[old_active];
+    old_buf->bump_offset = 0;
+    /* Zero out handles in old buffer (they're now in the new buffer) */
+    memset(old_buf->handles, 0, old_buf->handle_capacity * sizeof(void*));
+    /* Keep handle_count the same - the free list tracks available slots */
+    old_buf->handle_count = g_gc.buffers[new_active].handle_count;
+    
+    /* Update bytes_allocated */
+    g_gc.bytes_allocated = 0;
+    GCBuffer *new_buf = gc_active_buffer();
+    uint8_t *scan = new_buf->storage;
+    while ((size_t)(scan - new_buf->storage) < new_buf->bump_offset) {
+        uint64_t *prefix = (uint64_t*)scan;
+        if (*prefix == GC_CANARY_PREFIX || *prefix == GC_CANARY_CORRUPTED) {
+            GCHeader *hdr = (GCHeader*)(scan + 8);
+            if (hdr->size != 0 && (hdr->size & 0x80000000) == 0) {
+                g_gc.bytes_allocated += hdr->size;
+            }
+            scan += gc_alloc_total_size(hdr);
+        } else {
+            scan += MIN_OBJECT_SIZE;
+        }
+    }
+    
+    GC_LOGI("gc_compact: DONE, new active buffer=%d, bytes_allocated=%zu",
+            new_active, g_gc.bytes_allocated);
 }
 
-/* Sweep phase - free unmarked objects */
+/* ============================================================================
+ * SWEEP PHASE - Free unmarked objects
+ * ============================================================================
+ */
+
 static void gc_sweep_unified(JSRuntimeHandle rt) {
-    GC_LOGI("gc_sweep_unified: ENTER, handles.count=%u", g_gc.handles.count);
+    GC_LOGI("gc_sweep_unified: ENTER, handles.count=%u", gc_active_handle_count());
     
-    for (uint32_t i = 1; i < g_gc.handles.count; i++) {
+    void **table = gc_active_handles();
+    uint32_t count = gc_active_handle_count();
+    
+    for (uint32_t i = 1; i < count; i++) {
         GCHandle handle = (GCHandle)i;
-        void *user_ptr = g_gc.handles.ptrs[i];
+        void *user_ptr = table[i];
         
         if (!user_ptr) continue;
         
         /* Safety check: user_ptr must point to valid memory in GC heap */
         if (!gc_ptr_is_valid(user_ptr)) {
             GC_LOGW("gc_sweep_unified: entry %d user_ptr=%p not in GC heap, clearing", i, user_ptr);
-            g_gc.handles.ptrs[i] = NULL;
+            table[i] = NULL;
             push_free_handle((GCHandle)i);
             continue;
         }
@@ -1389,7 +1663,7 @@ static void gc_sweep_unified(JSRuntimeHandle rt) {
         
         /* Check if already freed */
         if (hdr->size == 0) {
-            g_gc.handles.ptrs[i] = NULL;
+            table[i] = NULL;
             push_free_handle((GCHandle)i);
             continue;
         }
@@ -1406,13 +1680,18 @@ static void gc_sweep_unified(JSRuntimeHandle rt) {
             /* Mark as freed - set FREED flag but keep size for compaction */
             hdr->size |= 0x80000000;  /* Set FREED flag */
             gc_corrupt_canaries(hdr);
-            g_gc.handles.ptrs[i] = NULL;
+            table[i] = NULL;
             push_free_handle((GCHandle)i);
         }
     }
     
     GC_LOGI("gc_sweep_unified: DONE");
 }
+
+/* ============================================================================
+ * GC RUN CYCLE
+ * ============================================================================
+ */
 
 static void gc_run_internal(void) {
     if (!g_gc.initialized) return;
@@ -1421,6 +1700,11 @@ static void gc_run_internal(void) {
     bool has_runtime = (g_gc.rt != GC_HANDLE_NULL);
     
     GC_LOGI("gc_run_internal: ENTER has_runtime=%d", has_runtime);
+    
+    /* Enter MARKING phase */
+    GC_MUTEX_LOCK(g_gc_thread.phase_mutex);
+    g_gc.gc_phase = GC_PHASE_MARKING;
+    GC_MUTEX_UNLOCK(g_gc_thread.phase_mutex);
     
     if (has_runtime) {
         /* Phase 0: Remove weak objects (WeakMap, WeakSet, WeakRef) */
@@ -1447,9 +1731,23 @@ static void gc_run_internal(void) {
         gc_sweep_atoms(rt);
     }
     
+    /* Enter COMPACTING phase */
+    GC_MUTEX_LOCK(g_gc_thread.phase_mutex);
+    g_gc.gc_phase = GC_PHASE_COMPACTING;
+    /* Set compaction target to the inactive buffer */
+    g_gc.compaction_target = 1 - g_gc.active_buffer_index;
+    GC_MUTEX_UNLOCK(g_gc_thread.phase_mutex);
+    
     /* Phase 5: Compact phase - move live objects and update handles */
-    GC_LOGI("gc_run_internal: Phase 5 - compacting");
+    GC_LOGI("gc_run_internal: Phase 5 - compacting into buffer %d", g_gc.compaction_target);
     gc_compact();
+    
+    /* Enter SWAPPING phase (brief) then back to IDLE */
+    GC_MUTEX_LOCK(g_gc_thread.phase_mutex);
+    g_gc.gc_phase = GC_PHASE_SWAPPING;
+    g_gc.compaction_target = 0;
+    g_gc.gc_phase = GC_PHASE_IDLE;
+    GC_MUTEX_UNLOCK(g_gc_thread.phase_mutex);
     
     /* Phase 6: Compact typed handle arrays */
     GC_LOGI("gc_run_internal: Phase 6 - compacting handle arrays");
@@ -1462,33 +1760,40 @@ static void gc_run_internal(void) {
 
 static void gc_maybe_run(void) {
     if (g_gc.bytes_allocated > g_gc.gc_threshold) {
-        gc_run_internal();
+        gc_request_background();
     }
 }
 
 void gc_run(void) {
-    gc_run_internal();
+    gc_request_background();
+    gc_wait_for_completion();
 }
 
 void gc_reset(void) {
     if (!g_gc.initialized) return;
     
-    /* Handle table is now allocated separately, start from heap beginning */
-    g_gc.bump.offset = 0;
+    /* Wait for any background GC to complete */
+    gc_wait_for_completion();
     
-    for (uint32_t i = 1; i < g_gc.handles.count; i++) {
-        g_gc.handles.ptrs[i] = NULL;
+    /* Reset active buffer */
+    GCBuffer *active = gc_active_buffer();
+    active->bump_offset = 0;
+    
+    /* Clear handle table */
+    for (uint32_t i = 1; i < active->handle_count; i++) {
+        active->handles[i] = NULL;
     }
-    g_gc.handles.count = 1;
-    g_gc.handles.free_count = 0;
+    active->handle_count = 1;
     
-    /* Reset root set - keep the allocated array but reset count */
+    /* Reset root set */
     g_gc.root_set.count = 0;
     
     g_gc.bytes_allocated = 0;
+    g_gc.free_count = 0;
 }
 
 void gc_reset_full(void) {
+    gc_wait_for_completion();
     browser_api_impl_reset();
     js_quickjs_reset_class_ids();
     gc_cleanup();
@@ -1523,16 +1828,18 @@ void gc_remove_root(GCHandle handle) {
 
 size_t gc_used_bytes(void) {
     if (!g_gc.initialized) return 0;
-    return g_gc.bump.offset;
+    return gc_active_buffer()->bump_offset;
 }
 
 size_t gc_available_bytes(void) {
     if (!g_gc.initialized) return 0;
-    return g_gc.heap_size - g_gc.bump.offset;
+    GCBuffer *active = gc_active_buffer();
+    return active->storage_size - active->bump_offset;
 }
 
 size_t gc_total_bytes(void) {
-    return g_gc.heap_size;
+    if (!g_gc.initialized) return 0;
+    return gc_active_buffer()->storage_size;
 }
 
 /* ============================================================================
@@ -1592,7 +1899,7 @@ static GCCanaryStatus gc_validate_canaries_hdr(GCHeader *hdr, void **out_ptr) {
     if (!hdr) return GC_CANARY_NULL_POINTER;
     
     /* Check if handle is valid */
-    if (hdr->handle == GC_HANDLE_NULL || hdr->handle >= g_gc.handles.count) {
+    if (hdr->handle == GC_HANDLE_NULL || hdr->handle >= gc_active_handle_count()) {
         return GC_CANARY_INVALID_HANDLE;
     }
     
@@ -1617,9 +1924,9 @@ static GCCanaryStatus gc_validate_canaries_hdr(GCHeader *hdr, void **out_ptr) {
 /* Public API: Validate canaries for a handle */
 GCCanaryStatus gc_validate_canaries(GCHandle handle) {
     if (handle == GC_HANDLE_NULL) return GC_CANARY_INVALID_HANDLE;
-    if (handle >= g_gc.handles.count) return GC_CANARY_INVALID_HANDLE;
+    if (handle >= gc_active_handle_count()) return GC_CANARY_INVALID_HANDLE;
     
-    void *ptr = g_gc.handles.ptrs[handle];
+    void *ptr = gc_active_handles()[handle];
     if (!ptr) return GC_CANARY_NULL_POINTER;
     
     GCHeader *hdr = gc_header(ptr);
@@ -1674,13 +1981,13 @@ void gc_print_corruption_info(GCHandle handle, GCCanaryStatus status) {
     fprintf(stderr, "Handle: %u\n", handle);
     fprintf(stderr, "Status: %s\n", gc_canary_status_string(status));
     
-    if (handle == GC_HANDLE_NULL || handle >= g_gc.handles.count) {
+    if (handle == GC_HANDLE_NULL || handle >= gc_active_handle_count()) {
         fprintf(stderr, "Invalid handle, cannot print details\n");
         fprintf(stderr, "=================================================\n");
         return;
     }
     
-    void *ptr = g_gc.handles.ptrs[handle];
+    void *ptr = gc_active_handles()[handle];
     if (!ptr) {
         fprintf(stderr, "Pointer is NULL\n");
         fprintf(stderr, "=================================================\n");
@@ -1756,8 +2063,11 @@ int gc_validate_all_canaries(bool verbose) {
     
     int corrupted_count = 0;
     
-    for (uint32_t i = 1; i < g_gc.handles.count; i++) {
-        void *ptr = g_gc.handles.ptrs[i];
+    void **table = gc_active_handles();
+    uint32_t count = gc_active_handle_count();
+    
+    for (uint32_t i = 1; i < count; i++) {
+        void *ptr = table[i];
         if (!ptr) continue;
         
         GCHeader *hdr = gc_header(ptr);
@@ -1806,12 +2116,12 @@ GCCanaryStatus gc_validate_shape_canaries(uint32_t shape_handle) {
  * which object caused the overflow
  */
 void gc_diagnose_corruption_context(GCHandle handle) {
-    if (handle == GC_HANDLE_NULL || handle >= g_gc.handles.count) {
+    if (handle == GC_HANDLE_NULL || handle >= gc_active_handle_count()) {
         fprintf(stderr, "[DIAGNOSE] Invalid handle %u\n", handle);
         return;
     }
     
-    void *ptr = g_gc.handles.ptrs[handle];
+    void *ptr = gc_active_handles()[handle];
     if (!ptr) {
         fprintf(stderr, "[DIAGNOSE] Handle %u has NULL pointer\n", handle);
         return;
@@ -1829,10 +2139,12 @@ void gc_diagnose_corruption_context(GCHandle handle) {
     int start = (int)handle - 5;
     if (start < 1) start = 1;
     int end = (int)handle + 5;
-    if (end > (int)g_gc.handles.count) end = (int)g_gc.handles.count;
+    uint32_t count = gc_active_handle_count();
+    if (end > (int)count) end = (int)count;
     
+    void **table = gc_active_handles();
     for (int i = start; i < end; i++) {
-        void *near_ptr = g_gc.handles.ptrs[i];
+        void *near_ptr = table[i];
         if (near_ptr) {
             GCHeader *near_hdr = gc_header(near_ptr);
             GCCanaryStatus status = gc_validate_canaries(i);
@@ -1867,12 +2179,15 @@ void gc_dump_heap_for_analysis(const char *filename) {
     
     fprintf(f, "GC Heap Dump\n");
     fprintf(f, "============\n\n");
-    fprintf(f, "Total handles: %u\n", g_gc.handles.count);
+    fprintf(f, "Total handles: %u\n", gc_active_handle_count());
     fprintf(f, "Used bytes: %zu\n", gc_used_bytes());
     fprintf(f, "\n");
     
-    for (uint32_t i = 1; i < g_gc.handles.count; i++) {
-        void *ptr = g_gc.handles.ptrs[i];
+    void **table = gc_active_handles();
+    uint32_t count = gc_active_handle_count();
+    
+    for (uint32_t i = 1; i < count; i++) {
+        void *ptr = table[i];
         if (!ptr) {
             fprintf(f, "Handle %u: FREE\n", i);
             continue;

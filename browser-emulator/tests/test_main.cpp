@@ -27,6 +27,7 @@ extern "C" {
 #endif
 extern void run_browser_api_impl_tests(void);
 extern void run_gc_unified_tests(void);
+extern void register_multithreaded_gc_tests(void);
 extern void run_exception_debug_tests(void);
 extern void run_logical_operator_tests(void);
 extern void run_nested_iife_tests(void);
@@ -174,6 +175,7 @@ int main(int argc, char *argv[]) {
 
     /* Run all test suites - they will use the shared context */
     run_gc_unified_tests();
+    register_multithreaded_gc_tests();
     run_browser_api_impl_tests();
     run_exception_debug_tests();
     run_logical_operator_tests();

@@ -5,6 +5,7 @@ add_executable(browser-emulator-tests
     test_main.cpp
     test_browser_api_impl.cpp
     test_gc_unified.cpp
+    test_gc_multithreaded.cpp
     test_exception_debug.cpp
     test_logical_operators.cpp
     test_nested_iife.cpp
