@@ -10,6 +10,7 @@
 #include <quickjs.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include "preorder_compaction_array.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -43,35 +44,29 @@ typedef struct HtmlAttribute {
     struct HtmlAttribute *next;
 } HtmlAttribute;
 
-/* HTML node structure */
+/* HTML node payload stored in PreOrderCompactionArray (header must be first). */
 struct HtmlNode {
+    PreOrderCompactionArrayNode array_node;  /* Tree links and state */
     HtmlNodeType type;
-    char tag_name[HTML_MAX_TAG_NAME_LEN];  /* For element nodes */
-    char *text_content;                     /* For text/comment nodes */
+    char tag_name[HTML_MAX_TAG_NAME_LEN];    /* For element nodes */
+    char *text_content;                      /* For text/comment nodes */
     size_t text_len;
-    
     HtmlAttribute *attributes;
-    HtmlNode *first_child;
-    HtmlNode *last_child;
-    HtmlNode *next_sibling;
-    HtmlNode *prev_sibling;
-    HtmlNode *parent;
-    
-    /* QuickJS object reference (created when node is added to document) */
-    GCValue js_object;
-    int has_js_object;  /* Flag to track if js_object is valid */
+    GCValue js_object;                       /* QuickJS object reference */
+    int has_js_object;                       /* Flag to track if js_object is valid */
 };
 
 /* HTML document structure */
 struct HtmlDocument {
-    HtmlNode *root;           /* Document root (usually <html>) */
-    HtmlNode *head;           /* Reference to <head> element */
-    HtmlNode *body;           /* Reference to <body> element */
-    char *title;              /* Document title */
+    PreOrderCompactionArray array;  /* Owns all HtmlNode nodes */
+    int root_idx;                 /* Index of document root (usually <html>) */
+    int head_idx;                 /* Index of <head> element */
+    int body_idx;                 /* Index of <body> element */
+    char *title;                  /* Document title */
     
     /* Parser state */
     int nesting_depth;
-    HtmlNode *current_parent;
+    int current_parent_idx;
 };
 
 /* Parser state structure */
@@ -79,8 +74,7 @@ typedef struct {
     const char *html;
     size_t html_len;
     size_t pos;
-    int line;
-    int column;
+    int line, column;
     int nesting_depth;
     HtmlDocument *document;
 } HtmlParser;
@@ -108,6 +102,18 @@ GCValue html_create_element_js(JSContextHandle ctx, const char *tag_name, HtmlAt
 
 /* Create a single HTML element using document.createElement() if available */
 GCValue html_create_element_js_with_document(JSContextHandle ctx, GCValue js_doc, const char *tag_name, HtmlAttribute *attrs);
+
+/* Access well-known document nodes (transient pointers; valid until tree mutates). */
+HtmlNode* html_document_root(HtmlDocument *doc);
+HtmlNode* html_document_head(HtmlDocument *doc);
+HtmlNode* html_document_body(HtmlDocument *doc);
+
+/* Tree navigation helpers (transient pointers; valid until tree mutates). */
+HtmlNode* html_node_parent(HtmlDocument *doc, HtmlNode *node);
+HtmlNode* html_node_first_child(HtmlDocument *doc, HtmlNode *node);
+HtmlNode* html_node_last_child(HtmlDocument *doc, HtmlNode *node);
+HtmlNode* html_node_next_sibling(HtmlDocument *doc, HtmlNode *node);
+HtmlNode* html_node_prev_sibling(HtmlDocument *doc, HtmlNode *node);
 
 /* Helper to get element by tag name from document */
 HtmlNode* html_document_get_element_by_tag(HtmlDocument *doc, const char *tag_name);

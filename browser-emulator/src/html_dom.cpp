@@ -4,6 +4,9 @@
  * A lightweight HTML parser that creates proper DOM nodes in the QuickJS engine.
  * This allows JavaScript running in the engine to interact with the parsed HTML
  * structure through standard DOM APIs.
+ * 
+ * Nodes are stored in a PreOrderCompactionArray for cache-friendly pre-order
+ * layout.
  */
 
 #include <string.h>
@@ -111,18 +114,23 @@ int html_decode_entities(char *str, size_t len) {
 }
 
 /* ============================================================================
- * Memory Management
+ * Tree / Node Helpers
  * ============================================================================ */
 
-static HtmlNode* html_node_create(HtmlNodeType type) {
-    HtmlNode *node = (HtmlNode*)calloc(1, sizeof(HtmlNode));
-    if (!node) return NULL;
-    
+static HtmlNode* html_node_at(HtmlDocument *doc, int idx) {
+    if (!doc || idx < 0) return NULL;
+    return (HtmlNode*)po_array_payload(&doc->array, idx);
+}
+
+static int html_node_create(HtmlDocument *doc, HtmlNodeType type, int parent_idx) {
+    int idx = po_array_add(&doc->array, parent_idx);
+    if (idx < 0) return -1;
+
+    HtmlNode *node = html_node_at(doc, idx);
     node->type = type;
     node->js_object = JS_UNDEFINED;
     node->has_js_object = 0;
-    
-    return node;
+    return idx;
 }
 
 static HtmlAttribute* html_attribute_create(const char *name, const char *value) {
@@ -141,10 +149,9 @@ static HtmlAttribute* html_attribute_create(const char *name, const char *value)
     return attr;
 }
 
-static void html_node_free(HtmlNode *node) {
+static void html_node_free_contents(HtmlNode *node) {
     if (!node) return;
     
-    /* Free attributes */
     HtmlAttribute *attr = node->attributes;
     while (attr) {
         HtmlAttribute *next = attr->next;
@@ -152,58 +159,23 @@ static void html_node_free(HtmlNode *node) {
         attr = next;
     }
     
-    /* Free text content */
     if (node->text_content) {
         free(node->text_content);
     }
     
     /* Note: We don't free js_object here - that's managed by QuickJS GC */
-    
-    free(node);
 }
 
 void html_document_free(HtmlDocument *doc) {
     if (!doc) return;
     
-    /* Free all nodes recursively starting from root */
-    HtmlNode *current = doc->root;
-    while (current) {
-        HtmlNode *next = current->next_sibling;
-        
-        /* Free children recursively */
-        HtmlNode *child = current->first_child;
-        while (child) {
-            HtmlNode *child_next = child->next_sibling;
-            
-            /* Recursively free grandchildren */
-            if (child->first_child) {
-                /* Use a simple stack-based approach for grandchildren */
-                HtmlNode *stack[HTML_MAX_NESTING_DEPTH];
-                int stack_top = 0;
-                
-                HtmlNode *gc = child->first_child;
-                while (gc || stack_top > 0) {
-                    if (gc) {
-                        if (stack_top < HTML_MAX_NESTING_DEPTH) {
-                            stack[stack_top++] = gc;
-                        }
-                        gc = gc->first_child;
-                    } else {
-                        gc = stack[--stack_top];
-                        HtmlNode *gc_next = gc->next_sibling;
-                        html_node_free(gc);
-                        gc = gc_next;
-                    }
-                }
-            }
-            
-            html_node_free(child);
-            child = child_next;
-        }
-        
-        html_node_free(current);
-        current = next;
+    size_t n = po_array_count(&doc->array);
+    for (size_t i = 0; i < n; i++) {
+        HtmlNode *node = html_node_at(doc, (int)i);
+        if (node) html_node_free_contents(node);
     }
+    
+    po_array_free(&doc->array);
     
     if (doc->title) free(doc->title);
     free(doc);
@@ -332,8 +304,8 @@ static HtmlAttribute* parser_read_attribute(HtmlParser *p) {
     return html_attribute_create(name, value[0] ? value : NULL);
 }
 
-static HtmlNode* parser_parse_element(HtmlParser *p);
-static HtmlNode* parser_parse_text(HtmlParser *p);
+static int parser_parse_element(HtmlParser *p, int parent_idx);
+static int parser_parse_text(HtmlParser *p, int parent_idx);
 
 static void parser_skip_comment(HtmlParser *p) {
     if (parser_match(p, "<!--")) {
@@ -384,9 +356,9 @@ static char* parser_read_raw_content(HtmlParser *p, const char *end_tag) {
     return content;
 }
 
-static HtmlNode* parser_parse_element(HtmlParser *p) {
+static int parser_parse_element(HtmlParser *p, int parent_idx) {
     if (p->pos >= p->html_len || p->html[p->pos] != '<') {
-        return NULL;
+        return -1;
     }
     
     p->pos++; /* skip < */
@@ -395,7 +367,7 @@ static HtmlNode* parser_parse_element(HtmlParser *p) {
     if (p->pos < p->html_len && p->html[p->pos] == '/') {
         /* Closing tag - let caller handle */
         p->pos--; /* back up */
-        return NULL;
+        return -1;
     }
     
     /* Read tag name */
@@ -404,13 +376,14 @@ static HtmlNode* parser_parse_element(HtmlParser *p) {
         /* Skip malformed tag */
         while (p->pos < p->html_len && p->html[p->pos] != '>') p->pos++;
         if (p->pos < p->html_len) p->pos++;
-        return NULL;
+        return -1;
     }
     
     /* Create element node */
-    HtmlNode *node = html_node_create(HTML_NODE_ELEMENT);
-    if (!node) return NULL;
+    int node_idx = html_node_create(p->document, HTML_NODE_ELEMENT, parent_idx);
+    if (node_idx < 0) return -1;
     
+    HtmlNode *node = html_node_at(p->document, node_idx);
     strncpy(node->tag_name, tag_name, HTML_MAX_TAG_NAME_LEN - 1);
     node->tag_name[HTML_MAX_TAG_NAME_LEN - 1] = '\0';
     
@@ -429,8 +402,7 @@ static HtmlNode* parser_parse_element(HtmlParser *p) {
         
         if (p->html[p->pos] == '/' && p->pos + 1 < p->html_len && p->html[p->pos + 1] == '>') {
             p->pos += 2; /* skip /> */
-            node->type = HTML_NODE_ELEMENT; /* Self-closing */
-            return node;
+            return node_idx;
         }
         
         /* Parse attribute */
@@ -448,10 +420,6 @@ static HtmlNode* parser_parse_element(HtmlParser *p) {
         
         *attr_tail = attr;
         attr_tail = &attr->next;
-        
-        if (node->attributes && strcmp(attr->name, "id") == 0) {
-            /* Store ID for quick access */
-        }
     }
     
     /* Handle raw content tags (script, style, etc.) */
@@ -473,7 +441,7 @@ static HtmlNode* parser_parse_element(HtmlParser *p) {
             }
         }
         
-        return node;
+        return node_idx;
     }
     
     /* Parse children for non-self-closing tags */
@@ -503,43 +471,25 @@ static HtmlNode* parser_parse_element(HtmlParser *p) {
             
             /* Parse child element or text */
             if (p->html[p->pos] == '<') {
-                HtmlNode *child = parser_parse_element(p);
-                if (child) {
-                    child->parent = node;
-                    if (node->last_child) {
-                        node->last_child->next_sibling = child;
-                        child->prev_sibling = node->last_child;
-                    } else {
-                        node->first_child = child;
-                    }
-                    node->last_child = child;
-                } else {
+                int child_idx = parser_parse_element(p, node_idx);
+                if (child_idx < 0) {
                     /* Try to recover from parsing error */
                     p->pos++;
                 }
             } else {
-                HtmlNode *text = parser_parse_text(p);
-                if (text) {
-                    text->parent = node;
-                    if (node->last_child) {
-                        node->last_child->next_sibling = text;
-                        text->prev_sibling = node->last_child;
-                    } else {
-                        node->first_child = text;
-                    }
-                    node->last_child = text;
-                }
+                int text_idx = parser_parse_text(p, node_idx);
+                (void)text_idx;
             }
         }
         
         p->nesting_depth--;
     }
     
-    return node;
+    return node_idx;
 }
 
-static HtmlNode* parser_parse_text(HtmlParser *p) {
-    if (p->pos >= p->html_len) return NULL;
+static int parser_parse_text(HtmlParser *p, int parent_idx) {
+    if (p->pos >= p->html_len) return -1;
     
     size_t start = p->pos;
     
@@ -548,22 +498,23 @@ static HtmlNode* parser_parse_text(HtmlParser *p) {
     }
     
     size_t len = p->pos - start;
-    if (len == 0) return NULL;
+    if (len == 0) return -1;
     
     /* Trim trailing whitespace but preserve leading for preformatted text */
     while (len > 0 && isspace((unsigned char)p->html[start + len - 1])) {
         len--;
     }
     
-    if (len == 0) return NULL;
+    if (len == 0) return -1;
     
-    HtmlNode *node = html_node_create(HTML_NODE_TEXT);
-    if (!node) return NULL;
+    int node_idx = html_node_create(p->document, HTML_NODE_TEXT, parent_idx);
+    if (node_idx < 0) return -1;
     
+    HtmlNode *node = html_node_at(p->document, node_idx);
     node->text_content = (char*)malloc(len + 1);
     if (!node->text_content) {
-        free(node);
-        return NULL;
+        /* Cannot safely remove from tree here; leave as empty text node */
+        return node_idx;
     }
     
     memcpy(node->text_content, p->html + start, len);
@@ -573,7 +524,7 @@ static HtmlNode* parser_parse_text(HtmlParser *p) {
     /* Decode entities */
     html_decode_entities(node->text_content, len);
     
-    return node;
+    return node_idx;
 }
 
 HtmlDocument* html_parse(const char *html, size_t html_len) {
@@ -581,6 +532,15 @@ HtmlDocument* html_parse(const char *html, size_t html_len) {
     
     HtmlDocument *doc = (HtmlDocument*)calloc(1, sizeof(HtmlDocument));
     if (!doc) return NULL;
+    
+    if (!po_array_init(&doc->array, sizeof(HtmlNode), 64)) {
+        free(doc);
+        return NULL;
+    }
+    doc->root_idx = -1;
+    doc->head_idx = -1;
+    doc->body_idx = -1;
+    doc->current_parent_idx = -1;
     
     HtmlParser parser = {
         .html = html,
@@ -606,8 +566,6 @@ HtmlDocument* html_parse(const char *html, size_t html_len) {
     }
     
     /* Parse root elements */
-    HtmlNode **root_tail = &doc->root;
-    
     while (parser.pos < parser.html_len) {
         parser_skip_whitespace(&parser);
         
@@ -619,26 +577,35 @@ HtmlDocument* html_parse(const char *html, size_t html_len) {
         }
         
         if (parser.html[parser.pos] == '<') {
-            HtmlNode *node = parser_parse_element(&parser);
-            if (node) {
-                *root_tail = node;
-                root_tail = &node->next_sibling;
+            int node_idx = parser_parse_element(&parser, -1);
+            if (node_idx >= 0) {
+                HtmlNode *node = html_node_at(doc, node_idx);
+                
+                /* Track root. The parser produces a single root in normal HTML. */
+                if (doc->root_idx < 0) {
+                    doc->root_idx = node_idx;
+                }
                 
                 /* Track head and body */
-                if (strcasecmp(node->tag_name, "head") == 0) {
-                    doc->head = node;
-                } else if (strcasecmp(node->tag_name, "body") == 0) {
-                    doc->body = node;
-                } else if (strcasecmp(node->tag_name, "html") == 0) {
-                    /* Look for head and body in html element children */
-                    HtmlNode *child = node->first_child;
-                    while (child) {
-                        if (strcasecmp(child->tag_name, "head") == 0) {
-                            doc->head = child;
-                        } else if (strcasecmp(child->tag_name, "body") == 0) {
-                            doc->body = child;
+                if (node && node->type == HTML_NODE_ELEMENT) {
+                    if (strcasecmp(node->tag_name, "head") == 0) {
+                        doc->head_idx = node_idx;
+                    } else if (strcasecmp(node->tag_name, "body") == 0) {
+                        doc->body_idx = node_idx;
+                    } else if (strcasecmp(node->tag_name, "html") == 0) {
+                        /* Look for head and body in html element children */
+                        int child_idx = po_array_first_child(&doc->array, node_idx);
+                        while (child_idx >= 0) {
+                            HtmlNode *child = html_node_at(doc, child_idx);
+                            if (child && child->type == HTML_NODE_ELEMENT) {
+                                if (strcasecmp(child->tag_name, "head") == 0) {
+                                    doc->head_idx = child_idx;
+                                } else if (strcasecmp(child->tag_name, "body") == 0) {
+                                    doc->body_idx = child_idx;
+                                }
+                            }
+                            child_idx = po_array_next_sibling(&doc->array, child_idx);
                         }
-                        child = child->next_sibling;
                     }
                 }
             } else {
@@ -649,16 +616,20 @@ HtmlDocument* html_parse(const char *html, size_t html_len) {
             }
         } else {
             /* Text node at root level - usually whitespace, skip it */
-            HtmlNode *text = parser_parse_text(&parser);
-            if (text) {
-                html_node_free(text);
+            int text_idx = parser_parse_text(&parser, -1);
+            if (text_idx >= 0) {
+                HtmlNode *text = html_node_at(doc, text_idx);
+                html_node_free_contents(text);
+                text->text_content = NULL;
+                text->text_len = 0;
+                po_array_delete(&doc->array, text_idx);
             }
         }
     }
     
     LOG_INFO("Parsed HTML document: found %s, %s",
-             doc->head ? "<head>" : "no <head>",
-             doc->body ? "<body>" : "no <body>");
+             doc->head_idx >= 0 ? "<head>" : "no <head>",
+             doc->body_idx >= 0 ? "<body>" : "no <body>");
     
     return doc;
 }
@@ -778,8 +749,11 @@ GCValue html_create_element_js_with_document(JSContextHandle ctx, GCValue js_doc
 }
 
 /* Recursively create DOM nodes in JS with automatic GC memory management */
-static bool html_node_create_js_recursive(JSContextHandle ctx, HtmlNode *node, GCValue parent) {
-    if (!ctx || !node) return false;
+static bool html_node_create_js_recursive(JSContextHandle ctx, HtmlDocument *doc, int node_idx, GCValue parent) {
+    if (!ctx || !doc || node_idx < 0) return false;
+    
+    HtmlNode *node = html_node_at(doc, node_idx);
+    if (!node) return false;
     
     GCValue js_node = JS_UNDEFINED;
     
@@ -789,10 +763,10 @@ static bool html_node_create_js_recursive(JSContextHandle ctx, HtmlNode *node, G
             
             /* Process children */
             if (!JS_IsNull(js_node)) {
-                HtmlNode *child = node->first_child;
-                while (child) {
-                    html_node_create_js_recursive(ctx, child, js_node);
-                    child = child->next_sibling;
+                int child_idx = po_array_first_child(&doc->array, node_idx);
+                while (child_idx >= 0) {
+                    html_node_create_js_recursive(ctx, doc, child_idx, js_node);
+                    child_idx = po_array_next_sibling(&doc->array, child_idx);
                 }
                 
                 /* For raw content tags (script, style), set textContent from node's text_content */
@@ -809,9 +783,8 @@ static bool html_node_create_js_recursive(JSContextHandle ctx, HtmlNode *node, G
                     if (!JS_IsUndefined(appendChild) && !JS_IsNull(appendChild)) {
                         GCValue args[1] = { js_node };
                         GCValue result = JS_Call(ctx, appendChild, parent, 1, args);
-                        
+                        (void)result;
                     }
-                    
                 }
             }
             break;
@@ -830,10 +803,8 @@ static bool html_node_create_js_recursive(JSContextHandle ctx, HtmlNode *node, G
                         GCValue push = JS_GetPropertyStr(ctx, childNodes, "push");
                         GCValue args[1] = { js_node };
                         GCValue result = JS_Call(ctx, push, childNodes, 1, args);
-                        
-                        
+                        (void)result;
                     }
-                    
                 }
             }
             break;
@@ -865,14 +836,15 @@ GCValue html_create_js_document(JSContextHandle ctx, HtmlDocument *doc) {
     
     /* Create documentElement (html or first root element) */
     GCValue doc_element = JS_NULL;
-    if (doc->root) {
-        doc_element = html_create_element_js(ctx, doc->root->tag_name, doc->root->attributes);
+    HtmlNode *root = html_document_root(doc);
+    if (root) {
+        doc_element = html_create_element_js(ctx, root->tag_name, root->attributes);
         
         /* Process children of root */
-        HtmlNode *child = doc->root->first_child;
-        while (child) {
-            html_node_create_js_recursive(ctx, child, doc_element);
-            child = child->next_sibling;
+        int child_idx = po_array_first_child(&doc->array, doc->root_idx);
+        while (child_idx >= 0) {
+            html_node_create_js_recursive(ctx, doc, child_idx, doc_element);
+            child_idx = po_array_next_sibling(&doc->array, child_idx);
         }
     } else {
         /* Create a minimal html element */
@@ -883,14 +855,15 @@ GCValue html_create_js_document(JSContextHandle ctx, HtmlDocument *doc) {
     
     /* Create body element reference */
     GCValue body_element = JS_NULL;
-    if (doc->body) {
-        body_element = html_create_element_js(ctx, "body", doc->body->attributes);
+    HtmlNode *body = html_document_body(doc);
+    if (body) {
+        body_element = html_create_element_js(ctx, body->tag_name, body->attributes);
         
         /* Process body children */
-        HtmlNode *child = doc->body->first_child;
-        while (child) {
-            html_node_create_js_recursive(ctx, child, body_element);
-            child = child->next_sibling;
+        int child_idx = po_array_first_child(&doc->array, doc->body_idx);
+        while (child_idx >= 0) {
+            html_node_create_js_recursive(ctx, doc, child_idx, body_element);
+            child_idx = po_array_next_sibling(&doc->array, child_idx);
         }
     } else {
         body_element = html_create_element_js(ctx, "body", NULL);
@@ -901,14 +874,15 @@ GCValue html_create_js_document(JSContextHandle ctx, HtmlDocument *doc) {
     
     /* Create head element reference */
     GCValue head_element = JS_NULL;
-    if (doc->head) {
-        head_element = html_create_element_js(ctx, "head", doc->head->attributes);
+    HtmlNode *head = html_document_head(doc);
+    if (head) {
+        head_element = html_create_element_js(ctx, head->tag_name, head->attributes);
         
         /* Process head children */
-        HtmlNode *child = doc->head->first_child;
-        while (child) {
-            html_node_create_js_recursive(ctx, child, head_element);
-            child = child->next_sibling;
+        int child_idx = po_array_first_child(&doc->array, doc->head_idx);
+        while (child_idx >= 0) {
+            html_node_create_js_recursive(ctx, doc, child_idx, head_element);
+            child_idx = po_array_next_sibling(&doc->array, child_idx);
         }
     } else {
         head_element = html_create_element_js(ctx, "head", NULL);
@@ -948,16 +922,17 @@ bool html_create_dom_in_js(JSContextHandle ctx, HtmlDocument *doc) {
         JS_SetPropertyStr(ctx, global, "documentElement", doc_elem);
     }
     
-    
-    
     LOG_INFO("DOM created successfully in JS context");
     return true;
 }
 
 /* Recursively populate JS DOM from parsed HTML using document.createElement().
  * This ensures elements get proper DOM prototypes. */
-static bool html_node_populate_js_recursive(JSContextHandle ctx, GCValue js_doc, HtmlNode *node, GCValue parent) {
-    if (!ctx || !node) return false;
+static bool html_node_populate_js_recursive(JSContextHandle ctx, GCValue js_doc, HtmlDocument *doc, int node_idx, GCValue parent) {
+    if (!ctx || !doc || node_idx < 0) return false;
+    
+    HtmlNode *node = html_node_at(doc, node_idx);
+    if (!node) return false;
     
     GCValue js_node = JS_UNDEFINED;
     
@@ -967,10 +942,10 @@ static bool html_node_populate_js_recursive(JSContextHandle ctx, GCValue js_doc,
             
             /* Process children */
             if (!JS_IsNull(js_node) && !JS_IsUndefined(js_node)) {
-                HtmlNode *child = node->first_child;
-                while (child) {
-                    html_node_populate_js_recursive(ctx, js_doc, child, js_node);
-                    child = child->next_sibling;
+                int child_idx = po_array_first_child(&doc->array, node_idx);
+                while (child_idx >= 0) {
+                    html_node_populate_js_recursive(ctx, js_doc, doc, child_idx, js_node);
+                    child_idx = po_array_next_sibling(&doc->array, child_idx);
                 }
                 
                 /* For raw content tags (script, style), set textContent */
@@ -979,6 +954,10 @@ static bool html_node_populate_js_recursive(JSContextHandle ctx, GCValue js_doc,
                                       JS_NewString(ctx, node->text_content));
                 }
                 
+                /* Remember the JS object so the CSS applier can find it. */
+                node->js_object = js_node;
+                node->has_js_object = 1;
+
                 /* If we have a parent, append this element */
                 if (!JS_IsUndefined(parent) && !JS_IsNull(parent)) {
                     GCValue appendChild = JS_GetPropertyStr(ctx, parent, "appendChild");
@@ -1084,21 +1063,25 @@ bool html_populate_js_document(JSContextHandle ctx, GCValue js_doc, HtmlDocument
     GCValue old_body_element = JS_GetPropertyStr(ctx, js_doc, "body");
     GCValue old_head_element = JS_GetPropertyStr(ctx, js_doc, "head");
     
+    HtmlNode *root = html_document_root(doc);
+    HtmlNode *head = html_document_head(doc);
+    HtmlNode *body = html_document_body(doc);
+    
     /* Create NEW elements from the parsed HTML tags */
     GCValue new_doc_element = html_create_element_js_with_document(
         ctx, js_doc,
-        doc->root ? doc->root->tag_name : "html",
-        doc->root ? doc->root->attributes : NULL);
+        root ? root->tag_name : "html",
+        root ? root->attributes : NULL);
     
     GCValue new_head_element = html_create_element_js_with_document(
         ctx, js_doc,
-        doc->head ? doc->head->tag_name : "head",
-        doc->head ? doc->head->attributes : NULL);
+        head ? head->tag_name : "head",
+        head ? head->attributes : NULL);
     
     GCValue new_body_element = html_create_element_js_with_document(
         ctx, js_doc,
-        doc->body ? doc->body->tag_name : "body",
-        doc->body ? doc->body->attributes : NULL);
+        body ? body->tag_name : "body",
+        body ? body->attributes : NULL);
     
     /* Transfer critical properties (dimensions, style) from old skeleton */
     html_transfer_element_properties(ctx, new_doc_element, old_doc_element);
@@ -1106,20 +1089,20 @@ bool html_populate_js_document(JSContextHandle ctx, GCValue js_doc, HtmlDocument
     html_transfer_element_properties(ctx, new_head_element, old_head_element);
     
     /* Populate new head with parsed head children */
-    if (doc->head) {
-        HtmlNode *child = doc->head->first_child;
-        while (child) {
-            html_node_populate_js_recursive(ctx, js_doc, child, new_head_element);
-            child = child->next_sibling;
+    if (doc->head_idx >= 0) {
+        int child_idx = po_array_first_child(&doc->array, doc->head_idx);
+        while (child_idx >= 0) {
+            html_node_populate_js_recursive(ctx, js_doc, doc, child_idx, new_head_element);
+            child_idx = po_array_next_sibling(&doc->array, child_idx);
         }
     }
     
     /* Populate new body with parsed body children */
-    if (doc->body) {
-        HtmlNode *child = doc->body->first_child;
-        while (child) {
-            html_node_populate_js_recursive(ctx, js_doc, child, new_body_element);
-            child = child->next_sibling;
+    if (doc->body_idx >= 0) {
+        int child_idx = po_array_first_child(&doc->array, doc->body_idx);
+        while (child_idx >= 0) {
+            html_node_populate_js_recursive(ctx, js_doc, doc, child_idx, new_body_element);
+            child_idx = po_array_next_sibling(&doc->array, child_idx);
         }
     }
     
@@ -1135,18 +1118,19 @@ bool html_populate_js_document(JSContextHandle ctx, GCValue js_doc, HtmlDocument
     }
     
     /* Add other children of parsed root to documentElement (skip head/body) */
-    if (doc->root) {
-        HtmlNode *child = doc->root->first_child;
-        while (child) {
-            if (child->type == HTML_NODE_ELEMENT) {
+    if (doc->root_idx >= 0) {
+        int child_idx = po_array_first_child(&doc->array, doc->root_idx);
+        while (child_idx >= 0) {
+            HtmlNode *child = html_node_at(doc, child_idx);
+            if (child && child->type == HTML_NODE_ELEMENT) {
                 if (strcasecmp(child->tag_name, "head") == 0 ||
                     strcasecmp(child->tag_name, "body") == 0) {
-                    child = child->next_sibling;
+                    child_idx = po_array_next_sibling(&doc->array, child_idx);
                     continue;
                 }
             }
-            html_node_populate_js_recursive(ctx, js_doc, child, new_doc_element);
-            child = child->next_sibling;
+            html_node_populate_js_recursive(ctx, js_doc, doc, child_idx, new_doc_element);
+            child_idx = po_array_next_sibling(&doc->array, child_idx);
         }
     }
     
@@ -1161,44 +1145,92 @@ bool html_populate_js_document(JSContextHandle ctx, GCValue js_doc, HtmlDocument
     return true;
 }
 
+/* ============================================================================
+ * Document accessors and search
+ * ============================================================================ */
+
+HtmlNode* html_document_root(HtmlDocument *doc) {
+    return html_node_at(doc, doc ? doc->root_idx : -1);
+}
+
+HtmlNode* html_document_head(HtmlDocument *doc) {
+    return html_node_at(doc, doc ? doc->head_idx : -1);
+}
+
+HtmlNode* html_document_body(HtmlDocument *doc) {
+    return html_node_at(doc, doc ? doc->body_idx : -1);
+}
+
+HtmlNode* html_node_parent(HtmlDocument *doc, HtmlNode *node) {
+    int idx = po_array_index_from_payload(&doc->array, node);
+    int p = po_array_parent(&doc->array, idx);
+    return html_node_at(doc, p);
+}
+
+HtmlNode* html_node_first_child(HtmlDocument *doc, HtmlNode *node) {
+    int idx = po_array_index_from_payload(&doc->array, node);
+    int c = po_array_first_child(&doc->array, idx);
+    return html_node_at(doc, c);
+}
+
+HtmlNode* html_node_last_child(HtmlDocument *doc, HtmlNode *node) {
+    int idx = po_array_index_from_payload(&doc->array, node);
+    int c = po_array_last_child(&doc->array, idx);
+    return html_node_at(doc, c);
+}
+
+HtmlNode* html_node_next_sibling(HtmlDocument *doc, HtmlNode *node) {
+    int idx = po_array_index_from_payload(&doc->array, node);
+    int s = po_array_next_sibling(&doc->array, idx);
+    return html_node_at(doc, s);
+}
+
+HtmlNode* html_node_prev_sibling(HtmlDocument *doc, HtmlNode *node) {
+    int idx = po_array_index_from_payload(&doc->array, node);
+    int s = po_array_prev_sibling(&doc->array, idx);
+    return html_node_at(doc, s);
+}
+
 /* Helper to get element by tag name from document */
 HtmlNode* html_document_get_element_by_tag(HtmlDocument *doc, const char *tag_name) {
     if (!doc || !tag_name) return NULL;
     
     /* Check head */
-    if (doc->head && strcasecmp(doc->head->tag_name, tag_name) == 0) {
-        return doc->head;
+    HtmlNode *head = html_document_head(doc);
+    if (head && strcasecmp(head->tag_name, tag_name) == 0) {
+        return head;
     }
     
     /* Check body */
-    if (doc->body && strcasecmp(doc->body->tag_name, tag_name) == 0) {
-        return doc->body;
+    HtmlNode *body = html_document_body(doc);
+    if (body && strcasecmp(body->tag_name, tag_name) == 0) {
+        return body;
     }
     
     /* Search in root */
-    HtmlNode *root = doc->root;
+    HtmlNode *root = html_document_root(doc);
     if (root && strcasecmp(root->tag_name, tag_name) == 0) {
         return root;
     }
     
-    /* Search recursively in children */
-    /* Simple breadth-first search */
-    HtmlNode *queue[HTML_MAX_NESTING_DEPTH];
-    int head = 0, tail = 0;
+    /* Breadth-first search over the tree */
+    int queue[HTML_MAX_NESTING_DEPTH];
+    int head_q = 0, tail = 0;
     
-    if (root) queue[tail++] = root;
+    if (doc->root_idx >= 0) queue[tail++] = doc->root_idx;
     
-    while (head < tail) {
-        HtmlNode *current = queue[head++];
+    while (head_q < tail) {
+        int current_idx = queue[head_q++];
+        HtmlNode *current = html_node_at(doc, current_idx);
         
-        if (strcasecmp(current->tag_name, tag_name) == 0) {
+        if (current && strcasecmp(current->tag_name, tag_name) == 0) {
             return current;
         }
         
-        HtmlNode *child = current->first_child;
-        while (child && tail < HTML_MAX_NESTING_DEPTH) {
-            queue[tail++] = child;
-            child = child->next_sibling;
+        int child_idx = po_array_first_child(&doc->array, current_idx);
+        while (child_idx >= 0 && tail < HTML_MAX_NESTING_DEPTH) {
+            queue[tail++] = child_idx;
+            child_idx = po_array_next_sibling(&doc->array, child_idx);
         }
     }
     
@@ -1213,26 +1245,27 @@ int html_document_get_elements_by_tag(HtmlDocument *doc, const char *tag_name,
     int count = 0;
     
     /* Search recursively using a stack */
-    HtmlNode *stack[HTML_MAX_NESTING_DEPTH];
+    int stack[HTML_MAX_NESTING_DEPTH];
     int stack_top = 0;
     
-    if (doc->root) stack[stack_top++] = doc->root;
+    if (doc->root_idx >= 0) stack[stack_top++] = doc->root_idx;
     
     while (stack_top > 0 && count < max_nodes) {
-        HtmlNode *current = stack[--stack_top];
+        int current_idx = stack[--stack_top];
+        HtmlNode *current = html_node_at(doc, current_idx);
         
-        if (strcasecmp(current->tag_name, tag_name) == 0) {
+        if (current && strcasecmp(current->tag_name, tag_name) == 0) {
             out_nodes[count++] = current;
         }
         
         /* Add children to stack (in reverse order for correct order) */
-        HtmlNode *child = current->first_child;
-        HtmlNode *children[HTML_MAX_NESTING_DEPTH];
+        int child_idx = po_array_first_child(&doc->array, current_idx);
+        int children[HTML_MAX_NESTING_DEPTH];
         int child_count = 0;
         
-        while (child && child_count < HTML_MAX_NESTING_DEPTH) {
-            children[child_count++] = child;
-            child = child->next_sibling;
+        while (child_idx >= 0 && child_count < HTML_MAX_NESTING_DEPTH) {
+            children[child_count++] = child_idx;
+            child_idx = po_array_next_sibling(&doc->array, child_idx);
         }
         
         for (int i = child_count - 1; i >= 0 && stack_top < HTML_MAX_NESTING_DEPTH; i--) {

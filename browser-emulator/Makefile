@@ -28,7 +28,7 @@ PLATFORM_SRC = src/platform/platform.c src/platform/platform_posix.c src/platfor
 # Core browser-emulator sources (C and C++)
 CORE_SRC_C = src/url_analyzer.c src/http_download.c src/tls_client.c
 CORE_SRC_CPP = src/html_media_extract.cpp src/js_quickjs.cpp src/browser_api_impl.cpp \
-    src/html_dom.cpp
+    src/html_dom.cpp src/preorder_compaction_array.cpp src/css_parser.cpp
 
 # QuickJS sources (C and C++)
 QUICKJS_SRC_C = third_party/quickjs/libregexp.c \
@@ -116,7 +116,7 @@ MBEDTLS_SRC = \
 
 # Test sources
 TEST_SRC_C =
-TEST_SRC_CPP = tests/test_main.cpp tests/test_browser_api_impl.cpp tests/test_gc_unified.cpp tests/test_logical_operators.cpp tests/test_exception_debug.cpp tests/test_nested_iife.cpp
+TEST_SRC_CPP = tests/test_main.cpp tests/test_browser_api_impl.cpp tests/test_gc_unified.cpp tests/test_logical_operators.cpp tests/test_exception_debug.cpp tests/test_nested_iife.cpp tests/test_preorder_compaction_array.cpp tests/test_css_parser.cpp
 
 # All C sources
 ALL_SRC_C = $(PLATFORM_SRC) $(CORE_SRC_C) $(QUICKJS_SRC_C) $(MBEDTLS_SRC)

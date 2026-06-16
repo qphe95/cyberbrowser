@@ -170,22 +170,22 @@ static bool execute_script(JSContextHandle ctx, const char *script, size_t scrip
  * ============================================================================ */
 
 /* Recursively create JS elements from parsed HTML nodes and append to parent */
-static void append_parsed_children_to_js_element(JSContextHandle ctx, GCValue js_doc, HtmlNode *parent_node, GCValue js_parent) {
-    if (!parent_node) return;
+static void append_parsed_children_to_js_element(JSContextHandle ctx, GCValue js_doc, HtmlDocument *doc, HtmlNode *parent_node, GCValue js_parent) {
+    if (!doc || !parent_node) return;
     
-    HtmlNode *child = parent_node->first_child;
+    HtmlNode *child = html_node_first_child(doc, parent_node);
     while (child) {
         if (child->type == HTML_NODE_ELEMENT) {
             /* Skip script tags - we execute them manually */
             if (strcasecmp(child->tag_name, "script") == 0) {
-                child = child->next_sibling;
+                child = html_node_next_sibling(doc, child);
                 continue;
             }
             
             GCValue elem = html_create_element_js_with_document(ctx, js_doc, child->tag_name, child->attributes);
             if (!JS_IsNull(elem) && !JS_IsUndefined(elem)) {
                 /* Recursively add children */
-                append_parsed_children_to_js_element(ctx, js_doc, child, elem);
+                append_parsed_children_to_js_element(ctx, js_doc, doc, child, elem);
                 
                 /* Append to parent */
                 GCValue appendChild = JS_GetPropertyStr(ctx, js_parent, "appendChild");
@@ -206,7 +206,7 @@ static void append_parsed_children_to_js_element(JSContextHandle ctx, GCValue js
                 }
             }
         }
-        child = child->next_sibling;
+        child = html_node_next_sibling(doc, child);
     }
 }
 
@@ -228,13 +228,15 @@ static bool populate_dom_from_html(JSContextHandle ctx, const char *html, size_t
     GCValue head = JS_GetPropertyStr(ctx, js_doc, "head");
     
     /* Populate body from parsed HTML body children */
-    if (doc->body && !JS_IsUndefined(body) && !JS_IsNull(body)) {
-        append_parsed_children_to_js_element(ctx, js_doc, doc->body, body);
+    HtmlNode *doc_body = html_document_body(doc);
+    if (doc_body && !JS_IsUndefined(body) && !JS_IsNull(body)) {
+        append_parsed_children_to_js_element(ctx, js_doc, doc, doc_body, body);
     }
     
     /* Populate head from parsed HTML head children */
-    if (doc->head && !JS_IsUndefined(head) && !JS_IsNull(head)) {
-        append_parsed_children_to_js_element(ctx, js_doc, doc->head, head);
+    HtmlNode *doc_head = html_document_head(doc);
+    if (doc_head && !JS_IsUndefined(head) && !JS_IsNull(head)) {
+        append_parsed_children_to_js_element(ctx, js_doc, doc, doc_head, head);
     }
     
     html_document_free(doc);

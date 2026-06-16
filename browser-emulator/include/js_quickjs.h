@@ -40,6 +40,11 @@ typedef struct JsExecResult {
     char thumbnailUrl[2048];
 } JsExecResult;
 
+/* CSSStyleDeclaration helper functions exposed for the CSS parser. */
+GCValue js_style_remove_property(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_style_set_property(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_style_get_property_value(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+
 /* Initialize QuickJS runtime (called once in android_main) */
 bool js_quickjs_init(void);
 

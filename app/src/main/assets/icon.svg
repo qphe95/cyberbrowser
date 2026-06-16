@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" rx="205" ry="205" fill="#08081e"/>
+  <text x="512" y="720" font-family="Hiragino Sans GB, PingFang SC, sans-serif"
+        font-size="720" font-weight="bold" fill="#0ee" text-anchor="middle">音</text>
+  <circle cx="820" cy="200" r="30" fill="#fff" opacity="0.9"/>
+</svg>

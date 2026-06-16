@@ -168,6 +168,10 @@ cl %CXXFLAGS% /c "%ROOT%\src\browser_api_impl.cpp"    /Fo"%BUILD%\browser_api_im
 if errorlevel 1 exit /b 1
 cl %CXXFLAGS% /c "%ROOT%\src\html_dom.cpp"            /Fo"%BUILD%\html_dom.obj"
 if errorlevel 1 exit /b 1
+cl %CXXFLAGS% /c "%ROOT%\src\preorder_compaction_array.cpp"       /Fo"%BUILD%\preorder_compaction_array.obj"
+if errorlevel 1 exit /b 1
+cl %CXXFLAGS% /c "%ROOT%\src\css_parser.cpp"                       /Fo"%BUILD%\css_parser.obj"
+if errorlevel 1 exit /b 1
 cl %CFLAGS%   /c "%ROOT%\src\url_analyzer.c"          /Fo"%BUILD%\url_analyzer.obj"
 if errorlevel 1 exit /b 1
 cl %CFLAGS%   /c "%ROOT%\src\tls_client.c"            /Fo"%BUILD%\tls_client.obj"
@@ -224,6 +228,8 @@ echo "%BUILD%\html_media_extract.obj" >> "%RSP%"
 echo "%BUILD%\js_quickjs.obj" >> "%RSP%"
 echo "%BUILD%\browser_api_impl.obj" >> "%RSP%"
 echo "%BUILD%\html_dom.obj" >> "%RSP%"
+echo "%BUILD%\preorder_compaction_array.obj" >> "%RSP%"
+echo "%BUILD%\css_parser.obj" >> "%RSP%"
 echo "%BUILD%\url_analyzer.obj" >> "%RSP%"
 echo "%BUILD%\tls_client.obj" >> "%RSP%"
 echo "%BUILD%\http_download.obj" >> "%RSP%"

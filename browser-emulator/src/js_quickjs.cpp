@@ -10,6 +10,7 @@
 #include "quickjs_gc_unified.h"
 #include "browser_api_impl.h"
 #include "html_dom.h"
+#include "css_parser.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
 #include "browser_api_impl_types.h"
@@ -45,7 +46,7 @@ void js_quickjs_set_asset_manager(AAssetManager *mgr) {
 static GCValue js_dummy_function(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 
 // CSSStyleDeclaration.removeProperty stub
-static GCValue js_style_remove_property(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_style_remove_property(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
     if (argc < 1) return JS_NewString(ctx, "");
     const char *prop = JS_ToCString(ctx, argv[0]);
@@ -61,7 +62,7 @@ static GCValue js_style_remove_property(JSContextHandle ctx, GCValue this_val, i
 }
 
 // CSSStyleDeclaration.setProperty stub
-static GCValue js_style_set_property(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_style_set_property(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
     if (argc < 2) return JS_UNDEFINED;
     const char *prop = JS_ToCString(ctx, argv[0]);
@@ -73,7 +74,7 @@ static GCValue js_style_set_property(JSContextHandle ctx, GCValue this_val, int 
 }
 
 // CSSStyleDeclaration.getPropertyValue stub
-static GCValue js_style_get_property_value(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_style_get_property_value(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
     if (argc < 1) return JS_NewString(ctx, "");
     const char *prop = JS_ToCString(ctx, argv[0]);
@@ -1662,64 +1663,58 @@ static int create_dom_nodes_from_parsed_html(JSContextHandle ctx, HtmlDocument *
     int count = 0;
     
     /* Create elements from body children */
-    if (doc->body && doc->body->first_child) {
-        HtmlNode *node = doc->body->first_child;
-        
-        while (node) {
-            if (node->type == HTML_NODE_ELEMENT) {
-                /* Create the element */
-                GCValue elem = html_create_element_js(ctx, node->tag_name, node->attributes);
-                
-                if (!JS_IsNull(elem) && !JS_IsException(elem)) {
-                    /* Check for video elements specifically */
-                    if (strcasecmp(node->tag_name, "video") == 0) {
-                        
-                        /* Extract src attribute if present */
-                        HtmlAttribute *attr = node->attributes;
-                        while (attr) {
-                            if (strcasecmp(attr->name, "src") == 0 && attr->value[0]) {
-                                GCValue src_val = JS_NewString(ctx, attr->value);
-                                JS_SetPropertyStr(ctx, elem, "src", src_val);
-                                
-                                record_captured_url(attr->value);
-                            }
-                            if (strcasecmp(attr->name, "id") == 0 && attr->value[0]) {
-                                GCValue id_val = JS_NewString(ctx, attr->value);
-                                JS_SetPropertyStr(ctx, elem, "id", id_val);
-                                
-                            }
-                            attr = attr->next;
-                        }
-                        
-                        count++;
-                    }
+    HtmlNode *body = html_document_body(doc);
+    HtmlNode *node = body ? html_node_first_child(doc, body) : NULL;
+    
+    while (node) {
+        if (node->type == HTML_NODE_ELEMENT) {
+            /* Create the element */
+            GCValue elem = html_create_element_js(ctx, node->tag_name, node->attributes);
+            
+            if (!JS_IsNull(elem) && !JS_IsException(elem)) {
+                /* Check for video elements specifically */
+                if (strcasecmp(node->tag_name, "video") == 0) {
                     
-                    /* Add to document.body */
-                    GCValue global = JS_GetGlobalObject(ctx);
-                    GCValue body = JS_GetPropertyStr(ctx, global, "document");
-                    
-                    if (!JS_IsUndefined(body) && !JS_IsNull(body)) {
-                        GCValue doc_body = JS_GetPropertyStr(ctx, body, "body");
-                        
-                        if (!JS_IsUndefined(doc_body) && !JS_IsNull(doc_body)) {
-                            GCValue appendChild = JS_GetPropertyStr(ctx, doc_body, "appendChild");
+                    /* Extract src attribute if present */
+                    HtmlAttribute *attr = node->attributes;
+                    while (attr) {
+                        if (strcasecmp(attr->name, "src") == 0 && attr->value[0]) {
+                            GCValue src_val = JS_NewString(ctx, attr->value);
+                            JS_SetPropertyStr(ctx, elem, "src", src_val);
                             
-                            if (!JS_IsUndefined(appendChild) && !JS_IsNull(appendChild)) {
-                                GCValue args[1] = { elem };
-                                GCValue result = JS_Call(ctx, appendChild, doc_body, 1, args);
-                                
-                            }
+                            record_captured_url(attr->value);
+                        }
+                        if (strcasecmp(attr->name, "id") == 0 && attr->value[0]) {
+                            GCValue id_val = JS_NewString(ctx, attr->value);
+                            JS_SetPropertyStr(ctx, elem, "id", id_val);
                             
                         }
-                        
+                        attr = attr->next;
                     }
                     
-                    
+                    count++;
                 }
                 
+                /* Add to document.body */
+                GCValue global = JS_GetGlobalObject(ctx);
+                GCValue js_doc = JS_GetPropertyStr(ctx, global, "document");
+                
+                if (!JS_IsUndefined(js_doc) && !JS_IsNull(js_doc)) {
+                    GCValue doc_body = JS_GetPropertyStr(ctx, js_doc, "body");
+                    
+                    if (!JS_IsUndefined(doc_body) && !JS_IsNull(doc_body)) {
+                        GCValue appendChild = JS_GetPropertyStr(ctx, doc_body, "appendChild");
+                        
+                        if (!JS_IsUndefined(appendChild) && !JS_IsNull(appendChild)) {
+                            GCValue args[1] = { elem };
+                            GCValue result = JS_Call(ctx, appendChild, doc_body, 1, args);
+                            (void)result;
+                        }
+                    }
+                }
             }
-            node = node->next_sibling;
         }
+        node = html_node_next_sibling(doc, node);
     }
     
     return count;
@@ -1757,24 +1752,28 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
     // Parse the full HTML and populate the DOM tree in JS.
     // This replaces the hardcoded minimal skeleton with the actual page structure,
     // allowing scripts to find real elements via getElementById/querySelector.
+    HtmlDocument *doc = NULL;
     if (html && strlen(html) > 0) {
-        HtmlDocument *doc = html_parse(html, strlen(html));
+        doc = html_parse(html, strlen(html));
         if (doc) {
             GCValue global = JS_GetGlobalObject(ctx);
             GCValue js_doc = JS_GetPropertyStr(ctx, global, "document");
             if (!JS_IsUndefined(js_doc) && !JS_IsNull(js_doc)) {
                 if (html_populate_js_document(ctx, js_doc, doc)) {
+                    HtmlNode *doc_root = html_document_root(doc);
                     platform_log(LOG_LEVEL_INFO, "js_quickjs",
                         "Full DOM populated from parsed HTML (root=%s, head=%s, body=%s)",
-                        doc->root ? doc->root->tag_name : "none",
-                        doc->head ? "yes" : "no",
-                        doc->body ? "yes" : "no");
+                        doc_root ? doc_root->tag_name : "none",
+                        html_document_head(doc) ? "yes" : "no",
+                        html_document_body(doc) ? "yes" : "no");
+
+                    /* Parse and apply inline/external CSS before scripts run. */
+                    css_apply_document_styles(ctx, js_doc, doc, NULL);
                 } else {
                     platform_log(LOG_LEVEL_WARN, "js_quickjs",
                         "Failed to populate DOM from parsed HTML");
                 }
             }
-            html_document_free(doc);
         }
     }
 
@@ -2046,6 +2045,10 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
     }
     pthread_mutex_unlock(&g_url_mutex);
     
+    if (doc) {
+        html_document_free(doc);
+    }
+
     out_result->status = (success_count > 0) ? JS_EXEC_SUCCESS : JS_EXEC_ERROR;
     
     log_to_file("js_quickjs", "Finished, captured %d URLs, status=%d", 
