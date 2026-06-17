@@ -110,6 +110,7 @@ JSRuntimeHandle gc_get_runtime(void);
 GCHandle gc_alloc(size_t size, JSGCObjectTypeEnum gc_obj_type);
 GCHandle gc_alloc_ex(size_t size, JSGCObjectTypeEnum gc_obj_type,
                      GCHandleArrayType array_type);
+void gc_free(GCHandle handle);
 GCHandle gc_realloc(GCHandle handle, size_t new_size);
 GCHandle gc_realloc2(GCHandle handle, size_t new_size, size_t *pslack);
 

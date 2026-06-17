@@ -316,6 +316,114 @@ TEST(test_gc_memory_limits) {
     return true;
 }
 
+TEST(test_gc_lockfree_allocation) {
+    /* Verify the lock-free allocation path: handle slot reserved first,
+     * then memory reserved, then pointer published. */
+    
+    /* Allocate several objects and verify each gets a valid handle and pointer */
+    GCHandle handles[10];
+    for (int i = 0; i < 10; i++) {
+        handles[i] = gc_alloc(64, JS_GC_OBJ_TYPE_DATA);
+        ASSERT_TRUE(handles[i] != GC_HANDLE_NULL);
+        
+        void *ptr = gc_deref(handles[i]);
+        ASSERT_TRUE(ptr != NULL);
+        
+        /* Write a unique pattern to verify the object is usable */
+        memset(ptr, (unsigned char)(0xA0 + i), 64);
+    }
+    
+    /* Verify all pointers are distinct (no handle aliasing) */
+    for (int i = 0; i < 10; i++) {
+        for (int j = i + 1; j < 10; j++) {
+            ASSERT_TRUE(gc_deref(handles[i]) != gc_deref(handles[j]));
+        }
+    }
+    
+    /* Verify data is still intact */
+    for (int i = 0; i < 10; i++) {
+        unsigned char *data = (unsigned char *)gc_deref(handles[i]);
+        for (int j = 0; j < 64; j++) {
+            ASSERT_EQ((unsigned char)(0xA0 + i), data[j]);
+        }
+    }
+    
+    return true;
+}
+
+TEST(test_gc_compaction_sorts_by_handle) {
+    /* Test that compaction sorts live objects by handle in memory.
+     * 
+     * We deliberately create out-of-handle-order memory by freeing an object
+     * in the middle and then allocating a new object that reuses that handle.
+     * Before compaction the memory order may be:
+     *   A(handle=1), freed B, C(handle=3), D(handle=2), E(handle=4)
+     * After compaction the live objects must be in handle order:
+     *   A(handle=1), D(handle=2), C(handle=3), E(handle=4)
+     */
+    
+    /* Start fresh to avoid interference from previous tests */
+    gc_wait_for_completion();
+    gc_reset();
+    
+    /* Allocate objects A, B, C. Handles will be 1, 2, 3. */
+    GCHandle hA = gc_alloc(64, JS_GC_OBJ_TYPE_DATA);
+    GCHandle hB = gc_alloc(64, JS_GC_OBJ_TYPE_DATA);
+    GCHandle hC = gc_alloc(64, JS_GC_OBJ_TYPE_DATA);
+    ASSERT_TRUE(hA != GC_HANDLE_NULL);
+    ASSERT_TRUE(hB != GC_HANDLE_NULL);
+    ASSERT_TRUE(hC != GC_HANDLE_NULL);
+    
+    /* Free B so its handle goes back to the free list */
+    gc_free(hB);
+    
+    /* Allocate D and E. D should reuse handle 2, E gets handle 4.
+     * Memory order is now A, old-B(freed), C, D, E. */
+    GCHandle hD = gc_alloc(64, JS_GC_OBJ_TYPE_DATA);
+    GCHandle hE = gc_alloc(64, JS_GC_OBJ_TYPE_DATA);
+    ASSERT_TRUE(hD != GC_HANDLE_NULL);
+    ASSERT_TRUE(hE != GC_HANDLE_NULL);
+    ASSERT_EQ(hB, hD); /* D must reuse B's handle */
+    
+    /* Root all live objects so they survive compaction */
+    gc_add_root(hA);
+    gc_add_root(hC);
+    gc_add_root(hD);
+    gc_add_root(hE);
+    
+    /* Run GC which compacts live objects */
+    gc_run();
+    
+    /* All handles must still be valid */
+    ASSERT_TRUE(gc_handle_is_valid(hA));
+    ASSERT_TRUE(gc_handle_is_valid(hC));
+    ASSERT_TRUE(gc_handle_is_valid(hD));
+    ASSERT_TRUE(gc_handle_is_valid(hE));
+    
+    /* After compaction, live objects in the active buffer must be sorted by handle */
+    void *ptrA = gc_deref(hA);
+    void *ptrC = gc_deref(hC);
+    void *ptrD = gc_deref(hD);
+    void *ptrE = gc_deref(hE);
+    ASSERT_TRUE(ptrA != NULL);
+    ASSERT_TRUE(ptrC != NULL);
+    ASSERT_TRUE(ptrD != NULL);
+    ASSERT_TRUE(ptrE != NULL);
+    
+    /* Because all pointers come from the same active buffer, pointer order
+     * reflects memory order. Handle order is A(1) < D(2) < C(3) < E(4). */
+    ASSERT_TRUE(ptrA < ptrD);
+    ASSERT_TRUE(ptrD < ptrC);
+    ASSERT_TRUE(ptrC < ptrE);
+    
+    gc_remove_root(hA);
+    gc_remove_root(hC);
+    gc_remove_root(hD);
+    gc_remove_root(hE);
+    
+    return true;
+}
+
 /* ============================================================================
  * QuickJS Integration Tests
  * ============================================================================ */
@@ -405,6 +513,8 @@ extern "C" void run_gc_unified_tests(void) {
     RUN_TEST(test_gc_size_tracking);
     RUN_TEST(test_gc_null_handle);
     RUN_TEST(test_gc_memory_limits);
+    RUN_TEST(test_gc_lockfree_allocation);
+    RUN_TEST(test_gc_compaction_sorts_by_handle);
     
     /* Run QuickJS integration tests using shared context */
     printf("\n  QuickJS integration tests use shared context from test_main.cpp\n");

@@ -58,6 +58,7 @@ app/build_macos/
 
 # Browser-emulator build/distribution directories
 browser-emulator/build/
+browser-emulator/build-mingw/
 browser-emulator/build-msvc/
 browser-emulator/dist/
 

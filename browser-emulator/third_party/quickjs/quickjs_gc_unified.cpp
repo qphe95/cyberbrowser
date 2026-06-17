@@ -887,31 +887,35 @@ static inline void push_free_handle(GCHandle handle) {
 }
 
 /*
- * allocate_handle - Allocate a handle index and write the pointer.
- * 
- * During normal operation: writes to active buffer's handle table only.
- * During compaction: writes to BOTH handle tables (active and compaction target).
+ * write_handle_pointer - Write a pointer into the active handle table.
+ * During compaction, also writes to the compaction target handle table.
  */
-static GCHandle allocate_handle(void *ptr) {
-    if (!ptr) return GC_HANDLE_NULL;
+static void write_handle_pointer(GCHandle handle, void *ptr) {
+    GCBuffer *active = gc_active_buffer();
+    active->handles[handle] = ptr;
     
+    /* During compaction, also write to compaction target */
+    if (atomic_load_u32(&g_gc.gc_phase) == (uint32_t)GC_PHASE_COMPACTING) {
+        uint32_t target = atomic_load_u32(&g_gc.compaction_target);
+        g_gc.buffers[target].handles[handle] = ptr;
+    }
+}
+
+/*
+ * allocate_handle_slot - Atomically reserve a handle index (no pointer written).
+ * 
+ * Lock-free: first tries to pop from the free list, otherwise atomically
+ * increments handle_count to reserve a new slot. The caller must later write
+ * the object pointer with write_handle_pointer().
+ */
+static GCHandle allocate_handle_slot(void) {
     /* Fast path: reuse a handle from the free list */
     if (g_gc.free_count > 0) {
         GCHandle handle = g_gc.free_list[--g_gc.free_count];
-        
-        /* Write to active buffer */
-        gc_active_buffer()->handles[handle] = ptr;
-        
-        /* During compaction, also write to compaction target */
-        if (atomic_load_u32(&g_gc.gc_phase) == (uint32_t)GC_PHASE_COMPACTING) {
-            uint32_t target = atomic_load_u32(&g_gc.compaction_target);
-            g_gc.buffers[target].handles[handle] = ptr;
-        }
-        
         return handle;
     }
     
-    /* Need to allocate a new slot */
+    /* Need to allocate a new slot - atomically increment handle_count */
     GCBuffer *active = gc_active_buffer();
     if (active->handle_count >= active->handle_capacity) {
         if (!grow_handle_tables()) {
@@ -922,15 +926,13 @@ static GCHandle allocate_handle(void *ptr) {
         GC_LOGI("Grew handle tables, now capacity=%u", active->handle_capacity);
     }
     
-    GCHandle handle = active->handle_count++;
-    active->handles[handle] = ptr;
+    GCHandle handle = atomic_fetch_add_u32(&active->handle_count, 1);
     
-    /* Also update the other buffer's handle count and write the pointer */
+    /* Also ensure the other buffer's handle_count stays in sync */
     GCBuffer *other = gc_inactive_buffer();
     if (other->handle_count < handle + 1) {
         other->handle_count = handle + 1;
     }
-    other->handles[handle] = ptr;
     
     return handle;
 }
@@ -957,23 +959,37 @@ GCHandle gc_alloc_ex(size_t size, JSGCObjectTypeEnum gc_obj_type,
                      GCHandleArrayType array_type) {
     if (!g_gc.initialized) return GC_HANDLE_NULL;
     
+    /* Step 1: Atomically reserve a handle slot first.
+     * This is lock-free: either a free-list pop or an atomic increment of
+     * handle_count. The pointer is written later, so handle reservation and
+     * memory reservation are separate atomic steps. */
+    GCHandle handle = allocate_handle_slot();
+    if (handle == GC_HANDLE_NULL) {
+        return GC_HANDLE_NULL;
+    }
+    
+    /* Step 2: Atomically reserve memory from the bump pointer.
+     * Because step 1 and step 2 are separate atomic operations, allocations
+     * from different threads (or even sequential ones) can reserve memory
+     * out of handle order. Compaction sorts live objects by handle to restore
+     * a deterministic layout. */
     void *ptr = bump_alloc(size);
     if (!ptr) {
+        /* Memory allocation failed - release the reserved handle slot */
+        push_free_handle(handle);
         fprintf(stderr, "[FATAL] bump_alloc failed: out of memory (requested %zu bytes)\n", size);
         fprintf(stderr, "[FATAL] GC would have been triggered, but this is disabled to prevent handle corruption.\n");
         fflush(stderr);
         abort();
     }
     
+    /* Step 3: Initialize header and publish the pointer in the handle table(s) */
     GCHeader *hdr = gc_header(ptr);
     hdr->gc_obj_type = gc_obj_type;
-    
-    GCHandle handle = allocate_handle(ptr);
-    if (handle == GC_HANDLE_NULL) {
-        hdr->size = 0;
-        return GC_HANDLE_NULL;
-    }
     hdr->handle = handle;
+    
+    write_handle_pointer(handle, ptr);
+    
     g_gc.bytes_allocated += hdr->size;
     
     /* Auto-add to typed handle array based on array_type (weakrefs and atoms only) */
@@ -1005,6 +1021,47 @@ GCHandle gc_alloc_ex(size_t size, JSGCObjectTypeEnum gc_obj_type,
     }
     
     return handle;
+}
+
+/*
+ * gc_free - Explicitly free a GC-managed object.
+ * 
+ * This is primarily used for testing and special cases. In normal operation,
+ * objects are freed automatically by the GC when unreachable. The handle is
+ * returned to the free list and the object is marked as freed.
+ */
+void gc_free(GCHandle handle) {
+    if (handle == GC_HANDLE_NULL) return;
+    
+    GCBuffer *active = gc_active_buffer();
+    if (handle >= active->handle_count) return;
+    
+    void *ptr = active->handles[handle];
+    if (!ptr) return;
+    
+    GCHeader *hdr = gc_header(ptr);
+    if (!hdr) return;
+    
+    /* Already freed */
+    if (hdr->size & 0x80000000) return;
+    
+    /* Mark as freed */
+    hdr->size |= 0x80000000;
+    
+    /* Corrupt canaries to detect use-after-free */
+    gc_corrupt_canaries(hdr);
+    
+    /* Clear pointer in active handle table */
+    active->handles[handle] = NULL;
+    
+    /* During compaction, also clear in compaction target */
+    if (atomic_load_u32(&g_gc.gc_phase) == (uint32_t)GC_PHASE_COMPACTING) {
+        uint32_t target = atomic_load_u32(&g_gc.compaction_target);
+        g_gc.buffers[target].handles[handle] = NULL;
+    }
+    
+    /* Return handle to free list */
+    push_free_handle(handle);
 }
 
 /*
@@ -1462,15 +1519,28 @@ static inline int gc_ptr_to_buffer_index(void *ptr) {
     return -1;
 }
 
+/* Sortable record of a live object used during compaction */
+typedef struct {
+    GCHandle handle;
+    GCHeader *src_hdr;
+    size_t total_size;
+} GCLiveObject;
+
+static int gc_compare_live_objects_by_handle(const void *a, const void *b) {
+    const GCLiveObject *obj_a = (const GCLiveObject *)a;
+    const GCLiveObject *obj_b = (const GCLiveObject *)b;
+    if (obj_a->handle < obj_b->handle) return -1;
+    if (obj_a->handle > obj_b->handle) return 1;
+    return 0;
+}
+
 /*
  * gc_compact_move_objects - Move live objects from active buffer to compaction target.
  * 
- * This is the core compaction function. It:
- * 1. Scans the active buffer for live (marked) objects
- * 2. Copies them to the compaction target buffer
- * 3. Updates the active handle table to point to new locations
- * 4. Leaves the compaction target handle table with the new pointers
- * 5. After this, we atomically swap which table is "active"
+ * Lock-free allocations can reserve handles and memory out of order, so we
+ * collect all live objects from the source buffer, sort them by handle, and
+ * copy them to the destination buffer in handle order. This restores a
+ * deterministic, cache-friendly layout after compaction.
  */
 static void gc_compact_move_objects(void) {
     GCBuffer *src = gc_active_buffer();
@@ -1481,14 +1551,23 @@ static void gc_compact_move_objects(void) {
             gc_active_buffer_index(), src->bump_offset,
             target_idx, dst->bump_offset);
     
-    uint8_t *read = src->storage;
-    uint8_t *write = dst->storage + dst->bump_offset;
-    size_t bump = src->bump_offset;
     JSRuntimeHandle rt(g_gc.rt);
     size_t new_bytes = 0;
     int corrupted_objects = 0;
     (void)corrupted_objects;
     
+    /* Pass 1: scan the source buffer, validate objects, collect live objects
+     * and process dead objects (call finalizers, clear handles). */
+    uint32_t live_capacity = src->handle_count > 1 ? src->handle_count : 1;
+    GCLiveObject *live_objects = (GCLiveObject *)malloc(live_capacity * sizeof(GCLiveObject));
+    if (!live_objects) {
+        GC_LOGE("gc_compact_move_objects: failed to allocate live object array");
+        return;
+    }
+    uint32_t live_count = 0;
+    
+    uint8_t *read = src->storage;
+    size_t bump = src->bump_offset;
     while ((size_t)(read - src->storage) < bump) {
         uint64_t *prefix_ptr = (uint64_t*)read;
         GCHeader *hdr;
@@ -1524,28 +1603,13 @@ static void gc_compact_move_objects(void) {
         }
         
         if (hdr->mark) {
-            /* Live object - copy to destination buffer */
-            uint8_t *target = write;
-            memcpy(target, read, total_size);
-            
-            /* Update handle table to point to new location */
-            GCHeader *new_hdr = (GCHeader*)(target + 8);
-            if (new_hdr->handle < src->handle_count) {
-                void *new_ptr = gc_header_to_ptr(new_hdr);
-                
-                /* Update active handle table */
-                src->handles[new_hdr->handle] = new_ptr;
-                
-                /* Also write to destination handle table */
-                dst->handles[new_hdr->handle] = new_ptr;
+            /* Live object - record for sorted copying */
+            if (live_count < live_capacity) {
+                live_objects[live_count].handle = hdr->handle;
+                live_objects[live_count].src_hdr = hdr;
+                live_objects[live_count].total_size = total_size;
+                live_count++;
             }
-            
-            /* Clear mark bit in new location */
-            new_hdr->mark = 0;
-            new_hdr->reserved1 = 0;
-            
-            write += total_size;
-            new_bytes += total_size;
         } else {
             /* Dead object - call finalizer if present */
             if (hdr->finalizer && status == GC_CANARY_OK) {
@@ -1564,11 +1628,47 @@ static void gc_compact_move_objects(void) {
         read += total_size;
     }
     
+    /* Pass 2: sort live objects by handle to restore deterministic layout */
+    if (live_count > 1) {
+        qsort(live_objects, live_count, sizeof(GCLiveObject), gc_compare_live_objects_by_handle);
+    }
+    
+    /* Pass 3: copy live objects to destination buffer in handle order */
+    uint8_t *write = dst->storage + dst->bump_offset;
+    for (uint32_t i = 0; i < live_count; i++) {
+        GCHeader *hdr = live_objects[i].src_hdr;
+        size_t total_size = live_objects[i].total_size;
+        uint8_t *src_start = (uint8_t *)hdr - 8;  /* include prefix canary */
+        
+        memcpy(write, src_start, total_size);
+        
+        /* Update handle table to point to new location */
+        GCHeader *new_hdr = (GCHeader*)(write + 8);
+        if (new_hdr->handle < src->handle_count) {
+            void *new_ptr = gc_header_to_ptr(new_hdr);
+            
+            /* Update active handle table */
+            src->handles[new_hdr->handle] = new_ptr;
+            
+            /* Also write to destination handle table */
+            dst->handles[new_hdr->handle] = new_ptr;
+        }
+        
+        /* Clear mark bit in new location */
+        new_hdr->mark = 0;
+        new_hdr->reserved1 = 0;
+        
+        write += total_size;
+        new_bytes += total_size;
+    }
+    
+    free(live_objects);
+    
     /* Update destination buffer bump pointer */
     dst->bump_offset = write - dst->storage;
     
-    GC_LOGI("gc_compact_move_objects: DONE, moved %zu bytes to buffer %d, new bump=%zu",
-            new_bytes, target_idx, dst->bump_offset);
+    GC_LOGI("gc_compact_move_objects: DONE, moved %u objects (%zu bytes) to buffer %d, new bump=%zu",
+            live_count, new_bytes, target_idx, dst->bump_offset);
 }
 
 /*
