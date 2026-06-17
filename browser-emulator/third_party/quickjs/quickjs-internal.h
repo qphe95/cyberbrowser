@@ -10,6 +10,7 @@
 
 #include "quickjs_types.h"
 #include "quickjs_gc_unified.h"
+#include "lockfree_hash_table.h"
 #include "cutils.h"
 #include "list.h"
 

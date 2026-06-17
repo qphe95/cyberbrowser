@@ -18,73 +18,6 @@
 #include <sched.h>
 #endif
 
-/* Atomic helpers using volatile + compiler barriers for lock-free operations.
- * On Windows with MSVC/MinGW, we use compiler intrinsics to avoid std::atomic
- * conflicts with pthread headers. */
-#ifdef _WIN32
-#include <intrin.h>
-static inline uint32_t atomic_load_u32(volatile uint32_t *p) {
-    uint32_t val = *p;
-    _ReadWriteBarrier();
-    return val;
-}
-static inline void atomic_store_u32(volatile uint32_t *p, uint32_t val) {
-    _ReadWriteBarrier();
-    *p = val;
-    _ReadWriteBarrier();
-}
-static inline void *atomic_load_ptr(void *volatile *p) {
-    void *val = *p;
-    _ReadWriteBarrier();
-    return val;
-}
-static inline void atomic_store_ptr(void *volatile *p, void *val) {
-    _ReadWriteBarrier();
-    *p = val;
-    _ReadWriteBarrier();
-}
-static inline size_t atomic_fetch_add_zu(volatile size_t *p, size_t val) {
-    return _InterlockedExchangeAdd64((volatile __int64 *)p, val);
-}
-static inline uint32_t atomic_fetch_add_u32(volatile uint32_t *p, uint32_t val) {
-    return _InterlockedExchangeAdd((volatile long *)p, val);
-}
-static inline uint32_t atomic_compare_exchange_u32(volatile uint32_t *p, uint32_t expected, uint32_t desired) {
-    return (uint32_t)_InterlockedCompareExchange((volatile long *)p, (long)desired, (long)expected);
-}
-#else
-/* POSIX fallback - still uses volatile with compiler barriers */
-static inline uint32_t atomic_load_u32(volatile uint32_t *p) {
-    uint32_t val = *p;
-    __sync_synchronize();
-    return val;
-}
-static inline void atomic_store_u32(volatile uint32_t *p, uint32_t val) {
-    __sync_synchronize();
-    *p = val;
-    __sync_synchronize();
-}
-static inline void *atomic_load_ptr(void *volatile *p) {
-    void *val = *p;
-    __sync_synchronize();
-    return val;
-}
-static inline void atomic_store_ptr(void *volatile *p, void *val) {
-    __sync_synchronize();
-    *p = val;
-    __sync_synchronize();
-}
-static inline size_t atomic_fetch_add_zu(volatile size_t *p, size_t val) {
-    return __sync_fetch_and_add(p, val);
-}
-static inline uint32_t atomic_fetch_add_u32(volatile uint32_t *p, uint32_t val) {
-    return __sync_fetch_and_add(p, val);
-}
-static inline uint32_t atomic_compare_exchange_u32(volatile uint32_t *p, uint32_t expected, uint32_t desired) {
-    return __sync_val_compare_and_swap(p, expected, desired);
-}
-#endif
-
 /* 
  * Debug logging for GC - controlled via QJS_DEBUG environment variable
  * Set QJS_DEBUG=1 for info level, QJS_DEBUG=2 for verbose debug
@@ -1012,21 +945,34 @@ bool gc_init(void) {
     /* Buffer 0 is active initially */
     g_gc.active_handle_table = g_gc.buffers[0].handles;
     
-    /* Initialize free list */
-    g_gc.free_list = (uint32_t*)malloc(GC_INITIAL_HANDLES * sizeof(uint32_t));
-    if (!g_gc.free_list) {
+    /* Initialize lock-free free-list next-links */
+    g_gc.free_next = (uint32_t*)malloc(GC_INITIAL_HANDLES * sizeof(uint32_t));
+    if (!g_gc.free_next) {
         gc_buffer_cleanup(&g_gc.buffers[0]);
         gc_buffer_cleanup(&g_gc.buffers[1]);
         return false;
     }
+    g_gc.free_head = GC_HANDLE_NULL;
+    g_gc.free_next_capacity = GC_INITIAL_HANDLES;
     g_gc.free_count = 0;
-    g_gc.free_capacity = GC_INITIAL_HANDLES;
+    
+    /* Initialize per-handle publication state */
+    g_gc.publish_state = (uint32_t*)calloc(GC_INITIAL_HANDLES, sizeof(uint32_t));
+    if (!g_gc.publish_state) {
+        free(g_gc.free_next);
+        g_gc.free_next = NULL;
+        gc_buffer_cleanup(&g_gc.buffers[0]);
+        gc_buffer_cleanup(&g_gc.buffers[1]);
+        return false;
+    }
+    g_gc.publish_state_capacity = GC_INITIAL_HANDLES;
     
     /* Initialize root set */
     g_gc.root_set.capacity = 256;
     g_gc.root_set.roots = (GCHandle*)malloc(g_gc.root_set.capacity * sizeof(GCHandle));
     if (!g_gc.root_set.roots) {
-        free(g_gc.free_list);
+        free(g_gc.free_next);
+        g_gc.free_next = NULL;
         gc_buffer_cleanup(&g_gc.buffers[0]);
         gc_buffer_cleanup(&g_gc.buffers[1]);
         return false;
@@ -1054,9 +1000,9 @@ bool gc_init(void) {
     g_gc.handles.ptrs = g_gc.buffers[0].handles;
     g_gc.handles.count = g_gc.buffers[0].handle_count;
     g_gc.handles.capacity = g_gc.buffers[0].handle_capacity;
-    g_gc.handles.free_list = g_gc.free_list;
-    g_gc.handles.free_count = g_gc.free_count;
-    g_gc.handles.free_capacity = g_gc.free_capacity;
+    g_gc.handles.free_list = NULL;   /* legacy array replaced by lock-free stack */
+    g_gc.handles.free_count = 0;
+    g_gc.handles.free_capacity = g_gc.free_next_capacity;
     
     g_gc.initialized = true;
     
@@ -1102,10 +1048,17 @@ void gc_cleanup(void) {
         g_gc.root_set.roots = NULL;
     }
     
-    /* Free handle free list */
-    if (g_gc.free_list) {
-        free(g_gc.free_list);
-        g_gc.free_list = NULL;
+    /* Free handle free list next-links */
+    if (g_gc.free_next) {
+        free(g_gc.free_next);
+        g_gc.free_next = NULL;
+    }
+    
+    /* Free publication state array */
+    if (g_gc.publish_state) {
+        free(g_gc.publish_state);
+        g_gc.publish_state = NULL;
+        g_gc.publish_state_capacity = 0;
     }
     
     /* Free both buffers */
@@ -1253,7 +1206,23 @@ void gc_handle_array_compact(JSHandleArray *arr) {
 
 /* ============================================================================
  * TYPE BUCKET MANAGEMENT
- * ============================================================================ */
+ * ============================================================================
+ *
+ * Type buckets are append-only arrays that are lock-free for inserts.
+ * - `count` and `capacity` are atomic.
+ * - Growth uses CAS on the handles pointer; the old array is intentionally
+ *   leaked until a quiescence/retirement mechanism is added.
+ * - Compaction is only called during stop-the-world GC.
+ * - Scans count/live-check entries on demand so they remain correct outside GC.
+ */
+
+static inline bool gc_handle_is_alive_in_bucket(GCHandle handle) {
+    if (handle == GC_HANDLE_NULL || handle == (GCHandle)(uintptr_t)-1) return false;
+    void *ptr = gc_deref(handle);
+    if (!ptr) return false;
+    GCHeader *hdr = gc_header(ptr);
+    return hdr && hdr->size != 0;
+}
 
 void gc_type_bucket_init(GCTypeBucket *bucket) {
     if (!bucket) return;
@@ -1277,29 +1246,54 @@ void gc_type_bucket_free(GCTypeBucket *bucket) {
 int gc_type_bucket_add(GCTypeBucket *bucket, GCHandle handle) {
     if (!bucket || handle == GC_HANDLE_NULL) return -1;
     
-    /* Grow if needed */
-    if (bucket->count >= bucket->capacity) {
-        uint32_t new_capacity = bucket->capacity == 0 ? 64 : bucket->capacity * 2;
-        GCHandle *new_handles = (GCHandle*)realloc(bucket->handles, 
-                                                    new_capacity * sizeof(GCHandle));
+    for (;;) {
+        uint32_t cap = atomic_load_u32(&bucket->capacity);
+        uint32_t cnt = atomic_load_u32(&bucket->count);
+        
+        if (cnt < cap) {
+            uint32_t idx = atomic_fetch_add_u32(&bucket->count, 1);
+            if (idx < cap) {
+                bucket->handles[idx] = handle;
+                atomic_fetch_add_u32(&bucket->version, 1);
+                return 0;
+            }
+            /* Another thread grew the table; retry with new capacity/count. */
+            continue;
+        }
+        
+        /* Need to grow the array. */
+        uint32_t new_cap = cap == 0 ? 64 : cap * 2;
+        GCHandle *new_handles = (GCHandle*)malloc(new_cap * sizeof(GCHandle));
         if (!new_handles) return -1;
-        bucket->handles = new_handles;
-        bucket->capacity = new_capacity;
+        if (cap > 0 && bucket->handles) {
+            memcpy(new_handles, bucket->handles, cap * sizeof(GCHandle));
+        }
+        memset(new_handles + cap, 0, (new_cap - cap) * sizeof(GCHandle));
+        
+        /* Attempt to install the new array. */
+        GCHandle *old_handles = (GCHandle *)atomic_load_ptr((void *volatile *)&bucket->handles);
+        void *swapped = atomic_compare_exchange_ptr((void *volatile *)&bucket->handles,
+                                                    old_handles, new_handles);
+        if (swapped == old_handles) {
+            atomic_store_u32(&bucket->capacity, new_cap);
+            /* Old array is intentionally not freed here to avoid racing
+             * with readers that loaded the old pointer before the CAS. */
+        } else {
+            free(new_handles);
+        }
+        /* Retry append with (hopefully) larger capacity. */
     }
-    
-    bucket->handles[bucket->count++] = handle;
-    bucket->version++;
-    return 0;
 }
 
 void gc_type_bucket_remove(GCTypeBucket *bucket, GCHandle handle) {
     if (!bucket || handle == GC_HANDLE_NULL) return;
     
-    for (uint32_t i = 0; i < bucket->count; i++) {
+    uint32_t n = atomic_load_u32(&bucket->count);
+    for (uint32_t i = 0; i < n; i++) {
         if (bucket->handles[i] == handle) {
             /* Mark as removed (compaction will clean up) */
             bucket->handles[i] = (GCHandle)(uintptr_t)-1;
-            bucket->version++;
+            atomic_fetch_add_u32(&bucket->version, 1);
             return;
         }
     }
@@ -1308,23 +1302,17 @@ void gc_type_bucket_remove(GCTypeBucket *bucket, GCHandle handle) {
 void gc_type_bucket_compact(GCTypeBucket *bucket) {
     if (!bucket) return;
     
+    /* Compaction is only called during stop-the-world GC, so no lock is needed. */
     uint32_t j = 0;
-    for (uint32_t i = 0; i < bucket->count; i++) {
+    uint32_t n = atomic_load_u32(&bucket->count);
+    for (uint32_t i = 0; i < n; i++) {
         GCHandle handle = bucket->handles[i];
-        if (handle == GC_HANDLE_NULL || handle == (GCHandle)(uintptr_t)-1) {
-            continue;  /* Skip freed/invalid entries */
-        }
-        /* Check if object still exists (size != 0 in header) */
-        void *ptr = gc_deref(handle);
-        if (ptr) {
-            GCHeader *hdr = gc_header(ptr);
-            if (hdr && hdr->size != 0) {
-                bucket->handles[j++] = handle;
-            }
+        if (gc_handle_is_alive_in_bucket(handle)) {
+            bucket->handles[j++] = handle;
         }
     }
-    bucket->count = j;
-    bucket->version++;
+    atomic_store_u32(&bucket->count, j);
+    atomic_fetch_add_u32(&bucket->version, 1);
 }
 
 void gc_for_each_object_of_type(JSGCObjectTypeEnum type, GCTypeIteratorFunc func, void *user_data) {
@@ -1333,13 +1321,10 @@ void gc_for_each_object_of_type(JSGCObjectTypeEnum type, GCTypeIteratorFunc func
     GCObjectBucketType bucket_type = gc_type_to_bucket(type);
     GCTypeBucket *bucket = &g_gc.type_buckets[bucket_type];
     
-    /* Compact first to remove dead entries */
-    gc_type_bucket_compact(bucket);
-    
-    /* Iterate over valid handles */
-    for (uint32_t i = 0; i < bucket->count; i++) {
+    uint32_t n = atomic_load_u32(&bucket->count);
+    for (uint32_t i = 0; i < n; i++) {
         GCHandle handle = bucket->handles[i];
-        if (handle != GC_HANDLE_NULL && handle != (GCHandle)(uintptr_t)-1) {
+        if (gc_handle_is_alive_in_bucket(handle)) {
             func(handle, user_data);
         }
     }
@@ -1348,8 +1333,16 @@ void gc_for_each_object_of_type(JSGCObjectTypeEnum type, GCTypeIteratorFunc func
 uint32_t gc_count_objects_of_type(JSGCObjectTypeEnum type) {
     GCObjectBucketType bucket_type = gc_type_to_bucket(type);
     GCTypeBucket *bucket = &g_gc.type_buckets[bucket_type];
-    gc_type_bucket_compact(bucket);
-    return bucket->count;
+    
+    uint32_t count = 0;
+    uint32_t n = atomic_load_u32(&bucket->count);
+    for (uint32_t i = 0; i < n; i++) {
+        GCHandle handle = bucket->handles[i];
+        if (gc_handle_is_alive_in_bucket(handle)) {
+            count++;
+        }
+    }
+    return count;
 }
 
 GCTypeIterator gc_type_iterator_begin(JSGCObjectTypeEnum type) {
@@ -1357,12 +1350,30 @@ GCTypeIterator gc_type_iterator_begin(JSGCObjectTypeEnum type) {
     GCObjectBucketType bucket_type = gc_type_to_bucket(type);
     it.bucket = &g_gc.type_buckets[bucket_type];
     it.index = 0;
-    it.version = it.bucket->version;
+    it.version = atomic_load_u32(&it.bucket->version);
     
-    /* Compact and skip to first valid entry */
-    gc_type_bucket_compact(it.bucket);
-    while (it.index < it.bucket->count) {
+    /* Skip to first valid entry */
+    uint32_t n = atomic_load_u32(&it.bucket->count);
+    while (it.index < n) {
         GCHandle handle = it.bucket->handles[it.index];
+        if (gc_handle_is_alive_in_bucket(handle)) {
+            break;
+        }
+        it.index++;
+    }
+    
+    return it;
+}
+
+GCTypeIterator gc_type_iterator_begin_for_bucket(GCTypeBucket *bucket) {
+    GCTypeIterator it = {0};
+    it.bucket = bucket;
+    it.index = 0;
+    it.version = atomic_load_u32(&bucket->version);
+    
+    uint32_t n = atomic_load_u32(&bucket->count);
+    while (it.index < n) {
+        GCHandle handle = bucket->handles[it.index];
         if (handle != GC_HANDLE_NULL && handle != (GCHandle)(uintptr_t)-1) {
             break;
         }
@@ -1375,18 +1386,18 @@ GCTypeIterator gc_type_iterator_begin(JSGCObjectTypeEnum type) {
 bool gc_type_iterator_valid(GCTypeIterator *it) {
     if (!it || !it->bucket) return false;
     /* Check if bucket was modified during iteration */
-    if (it->version != it->bucket->version) return false;
-    return it->index < it->bucket->count;
+    if (it->version != atomic_load_u32(&it->bucket->version)) return false;
+    return it->index < atomic_load_u32(&it->bucket->count);
 }
 
 void gc_type_iterator_next(GCTypeIterator *it) {
     if (!it || !it->bucket) return;
     
     it->index++;
-    /* Skip invalid entries */
-    while (it->index < it->bucket->count) {
+    uint32_t n = atomic_load_u32(&it->bucket->count);
+    while (it->index < n) {
         GCHandle handle = it->bucket->handles[it->index];
-        if (handle != GC_HANDLE_NULL && handle != (GCHandle)(uintptr_t)-1) {
+        if (gc_handle_is_alive_in_bucket(handle)) {
             break;
         }
         it->index++;
@@ -1394,9 +1405,9 @@ void gc_type_iterator_next(GCTypeIterator *it) {
 }
 
 GCHandle gc_type_iterator_handle(GCTypeIterator *it) {
-    if (!it || !it->bucket || it->index >= it->bucket->count) {
-        return GC_HANDLE_NULL;
-    }
+    if (!it || !it->bucket) return GC_HANDLE_NULL;
+    uint32_t n = atomic_load_u32(&it->bucket->count);
+    if (it->index >= n) return GC_HANDLE_NULL;
     return it->bucket->handles[it->index];
 }
 
@@ -1494,23 +1505,50 @@ static bool grow_handle_tables(void) {
     /* Update active_handle_table pointer in case realloc moved it */
     g_gc.active_handle_table = g_gc.buffers[gc_active_buffer_index()].handles;
     
+    /* Grow the publication-state array in lock-step with handle tables */
+    if (new_capacity > g_gc.publish_state_capacity) {
+        uint32_t *new_pub = (uint32_t*)realloc(g_gc.publish_state, new_capacity * sizeof(uint32_t));
+        if (!new_pub) {
+            fprintf(stderr, "[FATAL] Failed to grow publish state to %u entries\n", new_capacity);
+            return false;
+        }
+        memset(&new_pub[g_gc.publish_state_capacity], 0,
+               (new_capacity - g_gc.publish_state_capacity) * sizeof(uint32_t));
+        g_gc.publish_state = new_pub;
+        g_gc.publish_state_capacity = new_capacity;
+    }
+    
+    /* Grow the free-list next-link array in lock-step with handle tables */
+    if (new_capacity > g_gc.free_next_capacity) {
+        uint32_t *new_next = (uint32_t*)realloc(g_gc.free_next, new_capacity * sizeof(uint32_t));
+        if (!new_next) {
+            fprintf(stderr, "[FATAL] Failed to grow free next-links to %u entries\n", new_capacity);
+            return false;
+        }
+        g_gc.free_next = new_next;
+        g_gc.free_next_capacity = new_capacity;
+    }
+    
     GC_LOGI("Grew handle tables to %u entries", new_capacity);
     return true;
 }
 
+/*
+ * push_free_handle - Lock-free push onto the handle free list (Treiber stack).
+ *
+ * free_next[handle] stores the previous head.  We CAS free_head until our
+ * snapshot matches.  free_next is grown in lock-step with handle tables, so
+ * capacity is always sufficient.
+ */
 static inline void push_free_handle(GCHandle handle) {
-    if (g_gc.free_count >= g_gc.free_capacity) {
-        uint32_t new_cap = g_gc.free_capacity * 2;
-        if (new_cap < 1000) new_cap = 1000;
-        uint32_t *new_list = (uint32_t*)realloc(g_gc.free_list, new_cap * sizeof(uint32_t));
-        if (new_list) {
-            g_gc.free_list = new_list;
-            g_gc.free_capacity = new_cap;
-        }
-    }
-    if (g_gc.free_count < g_gc.free_capacity) {
-        g_gc.free_list[g_gc.free_count++] = handle;
-    }
+    if (handle == GC_HANDLE_NULL || handle >= g_gc.free_next_capacity) return;
+    
+    uint32_t old_head = atomic_load_u32(&g_gc.free_head);
+    do {
+        g_gc.free_next[handle] = old_head;
+    } while (atomic_compare_exchange_u32(&g_gc.free_head, old_head, handle) != old_head);
+    
+    atomic_fetch_add_u32(&g_gc.free_count, 1);
 }
 
 /*
@@ -1536,10 +1574,20 @@ static void write_handle_pointer(GCHandle handle, void *ptr) {
  * the object pointer with write_handle_pointer().
  */
 static GCHandle allocate_handle_slot(void) {
-    /* Fast path: reuse a handle from the free list */
-    if (g_gc.free_count > 0) {
-        GCHandle handle = g_gc.free_list[--g_gc.free_count];
-        return handle;
+    /* Fast path: lock-free pop from the handle free list (Treiber stack). */
+    uint32_t old_head = atomic_load_u32(&g_gc.free_head);
+    while (old_head != GC_HANDLE_NULL) {
+        uint32_t new_head = g_gc.free_next[old_head];
+        uint32_t swapped = atomic_compare_exchange_u32(&g_gc.free_head, old_head, new_head);
+        if (swapped == old_head) {
+            GCHandle handle = old_head;
+            if (handle < g_gc.publish_state_capacity) {
+                atomic_store_u32(&g_gc.publish_state[handle], (uint32_t)PUBLISH_UNBORN);
+            }
+            atomic_fetch_sub_u32(&g_gc.free_count, 1);
+            return handle;
+        }
+        old_head = swapped;
     }
     
     /* Need to allocate a new slot - atomically increment handle_count */
@@ -1559,6 +1607,11 @@ static GCHandle allocate_handle_slot(void) {
     GCBuffer *other = gc_inactive_buffer();
     if (other->handle_count < handle + 1) {
         other->handle_count = handle + 1;
+    }
+    
+    /* New slots start as UNBORN until the allocation publishes them */
+    if (handle < g_gc.publish_state_capacity) {
+        atomic_store_u32(&g_gc.publish_state[handle], (uint32_t)PUBLISH_UNBORN);
     }
     
     return handle;
@@ -1647,7 +1700,46 @@ GCHandle gc_alloc_ex(size_t size, JSGCObjectTypeEnum gc_obj_type,
         gc_type_bucket_add(&g_gc.type_buckets[bucket_type], handle);
     }
     
+    /* Ordinary allocations are fully published immediately for backward
+     * compatibility.  Grey-state allocations should use gc_alloc_grey()
+     * and publish explicitly when construction is complete. */
+    if (handle < g_gc.publish_state_capacity) {
+        atomic_store_u32(&g_gc.publish_state[handle], (uint32_t)PUBLISH_BLACK);
+    }
+    
     return handle;
+}
+
+GCHandle gc_alloc_grey(size_t size, JSGCObjectTypeEnum gc_obj_type) {
+    GCHandle handle = gc_alloc(size, gc_obj_type);
+    if (handle != GC_HANDLE_NULL && handle < g_gc.publish_state_capacity) {
+        atomic_store_u32(&g_gc.publish_state[handle], (uint32_t)PUBLISH_GREY);
+    }
+    return handle;
+}
+
+void gc_publish_state_init(GCHandle handle, GCPublishState state) {
+    if (handle == GC_HANDLE_NULL || handle >= g_gc.publish_state_capacity) return;
+    atomic_store_u32(&g_gc.publish_state[handle], (uint32_t)state);
+}
+
+void gc_publish(GCHandle handle) {
+    if (handle == GC_HANDLE_NULL || handle >= g_gc.publish_state_capacity) return;
+    atomic_store_u32(&g_gc.publish_state[handle], (uint32_t)PUBLISH_BLACK);
+}
+
+void gc_unpublish(GCHandle handle) {
+    if (handle == GC_HANDLE_NULL || handle >= g_gc.publish_state_capacity) return;
+    atomic_store_u32(&g_gc.publish_state[handle], (uint32_t)PUBLISH_UNBORN);
+}
+
+GCPublishState gc_publish_state_load(GCHandle handle) {
+    if (handle == GC_HANDLE_NULL || handle >= g_gc.publish_state_capacity) return PUBLISH_UNBORN;
+    return (GCPublishState)atomic_load_u32(&g_gc.publish_state[handle]);
+}
+
+bool gc_is_published(GCHandle handle) {
+    return gc_publish_state_load(handle) == PUBLISH_BLACK;
 }
 
 /*
@@ -2050,11 +2142,6 @@ static void gc_mark_roots(JSRuntimeHandle rt) {
     }
 
     /* Runtime handle arrays. */
-    uint32_t shape_hash_handle = JSRuntime_get_shape_hash_handle(rt);
-    if (shape_hash_handle != GC_HANDLE_NULL) {
-        gc_shade(shape_hash_handle);
-    }
-
     uint32_t atom_array_handle = JSRuntime_get_atom_array_handle(rt);
     if (atom_array_handle != GC_HANDLE_NULL) {
         gc_shade(atom_array_handle);
@@ -2404,7 +2491,9 @@ static void gc_compact_move_objects(void) {
  * After compaction, scan the handle table and add all NULL entries to the free list.
  */
 static void gc_compact_rebuild_free_list(void) {
-    g_gc.free_count = 0;
+    /* Compaction is single-threaded; reset the lock-free stack and rebuild. */
+    atomic_store_u32(&g_gc.free_head, GC_HANDLE_NULL);
+    atomic_store_u32(&g_gc.free_count, 0);
     
     GCBuffer *active = gc_active_buffer();
     for (uint32_t i = 1; i < active->handle_count; i++) {
@@ -2413,7 +2502,7 @@ static void gc_compact_rebuild_free_list(void) {
         }
     }
     
-    GC_LOGI("gc_compact_rebuild_free_list: rebuilt with %u free handles", g_gc.free_count);
+    GC_LOGI("gc_compact_rebuild_free_list: rebuilt with %u free handles", atomic_load_u32(&g_gc.free_count));
 }
 
 /*
@@ -2446,9 +2535,9 @@ static void gc_compact(void) {
     g_gc.handles.ptrs = g_gc.buffers[new_active].handles;
     g_gc.handles.count = g_gc.buffers[new_active].handle_count;
     g_gc.handles.capacity = g_gc.buffers[new_active].handle_capacity;
-    g_gc.handles.free_list = g_gc.free_list;
-    g_gc.handles.free_count = g_gc.free_count;
-    g_gc.handles.free_capacity = g_gc.free_capacity;
+    g_gc.handles.free_list = NULL;
+    g_gc.handles.free_count = atomic_load_u32(&g_gc.free_count);
+    g_gc.handles.free_capacity = g_gc.free_next_capacity;
     
     /* Phase 4: Reset old buffer for next compaction cycle */
     GCBuffer *old_buf = &g_gc.buffers[old_active];
@@ -2632,7 +2721,8 @@ void gc_reset(void) {
     g_gc.root_set.count = 0;
     
     g_gc.bytes_allocated = 0;
-    g_gc.free_count = 0;
+    atomic_store_u32(&g_gc.free_head, GC_HANDLE_NULL);
+    atomic_store_u32(&g_gc.free_count, 0);
 }
 
 void gc_reset_full(void) {

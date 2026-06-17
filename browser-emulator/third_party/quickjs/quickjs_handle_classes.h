@@ -1065,51 +1065,66 @@ public:
         if (p) p->strip_flags = flags;
     }
     
-    /* shape_hash_bits access */
+    /* Lock-free shape hash table access.  The table pointer itself is owned by
+       the runtime and is swapped only during resize; readers dereference the
+       pointer without locks. */
+    LFHashTable *shape_hash() const {
+        JSRuntime* p = get_ptr();
+        if (!p) return nullptr;
+        return (LFHashTable *)atomic_load_ptr((void *volatile *)&p->shape_hash);
+    }
+    
+    void set_shape_hash(LFHashTable *t) {
+        JSRuntime* p = get_ptr();
+        if (p) atomic_store_ptr((void *volatile *)&p->shape_hash, (void *)t);
+    }
+    
+    /* Address of the shape_hash pointer (for CAS resize). */
+    LFHashTable **shape_hash_ptr_addr() {
+        JSRuntime* p = get_ptr();
+        return p ? &p->shape_hash : nullptr;
+    }
+    
+    LFHashTable *shape_hash_retired() const {
+        JSRuntime* p = get_ptr();
+        if (!p) return nullptr;
+        return (LFHashTable *)atomic_load_ptr((void *volatile *)&p->shape_hash_retired);
+    }
+    
+    void set_shape_hash_retired(LFHashTable *t) {
+        JSRuntime* p = get_ptr();
+        if (p) atomic_store_ptr((void *volatile *)&p->shape_hash_retired, (void *)t);
+    }
+    
     int shape_hash_bits() const {
-        JSRuntime* p = get_ptr();
-        return p ? p->shape_hash_bits : 0;
+        LFHashTable *t = shape_hash();
+        return t ? (int)t->bucket_bits : 0;
     }
     
-    void set_shape_hash_bits(int bits) {
-        JSRuntime* p = get_ptr();
-        if (p) p->shape_hash_bits = bits;
-    }
-    
-    /* shape_hash_size access */
     int shape_hash_size() const {
-        JSRuntime* p = get_ptr();
-        return p ? p->shape_hash_size : 0;
+        LFHashTable *t = shape_hash();
+        return t ? (int)t->bucket_count : 0;
     }
     
-    void set_shape_hash_size(int size) {
-        JSRuntime* p = get_ptr();
-        if (p) p->shape_hash_size = size;
-    }
-    
-    /* shape_hash_count access */
+    /* shape_hash_count access - stored atomically by insert/delete wrappers */
     int shape_hash_count() const {
         JSRuntime* p = get_ptr();
-        return p ? p->shape_hash_count : 0;
+        return p ? (int)atomic_load_u32(&p->shape_hash_count) : 0;
     }
     
     void set_shape_hash_count(int count) {
         JSRuntime* p = get_ptr();
-        if (p) p->shape_hash_count = count;
+        if (p) atomic_store_u32(&p->shape_hash_count, (uint32_t)count);
     }
     
-    /* shape_hash_handle access */
-    GCHandle shape_hash_handle() const {
+    void shape_hash_count_inc() {
         JSRuntime* p = get_ptr();
-        return p ? p->shape_hash_handle : GC_HANDLE_NULL;
+        if (p) atomic_fetch_add_u32(&p->shape_hash_count, 1);
     }
     
-    void set_shape_hash_handle(GCHandle h) {
+    void shape_hash_count_dec() {
         JSRuntime* p = get_ptr();
-        if (p) {
-            p->shape_hash_handle = h;
-            gc_write_barrier_for_heap_slot(&p->shape_hash_handle, h);
-        }
+        if (p) atomic_fetch_sub_u32(&p->shape_hash_count, 1);
     }
     
     /* user_opaque access */
@@ -1168,12 +1183,6 @@ public:
     uint32_t* atom_gc_marks_ptr() const {
         JSRuntime* p = get_ptr();
         return p ? (uint32_t*)gc_deref(p->atom_gc_marks_handle) : nullptr;
-    }
-    
-    /* shape_hash - returns pointer to GCHandle array */
-    GCHandle* shape_hash_ptr() const {
-        JSRuntime* p = get_ptr();
-        return p ? (GCHandle*)gc_deref(p->shape_hash_handle) : nullptr;
     }
     
     /* =========================================================================

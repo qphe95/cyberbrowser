@@ -39,6 +39,7 @@ set(BE_SOURCES
     src/html_dom.cpp
     src/preorder_compaction_array.cpp
     src/css_parser.cpp
+    src/lockfree_hash_table.cpp
     src/url_analyzer.c
     src/tls_client.c
     src/http_download.c

@@ -19,6 +19,104 @@
 extern "C" {
 #endif
 
+/* Atomic helpers using volatile + compiler barriers for lock-free operations.
+ * On Windows with MSVC/MinGW, we use compiler intrinsics to avoid std::atomic
+ * conflicts with pthread headers. */
+#ifdef _WIN32
+#include <intrin.h>
+static inline uint32_t atomic_load_u32(volatile uint32_t *p) {
+    uint32_t val = *p;
+    _ReadWriteBarrier();
+    return val;
+}
+static inline void atomic_store_u32(volatile uint32_t *p, uint32_t val) {
+    _ReadWriteBarrier();
+    *p = val;
+    _ReadWriteBarrier();
+}
+static inline void *atomic_load_ptr(void *volatile *p) {
+    void *val = *p;
+    _ReadWriteBarrier();
+    return val;
+}
+static inline void atomic_store_ptr(void *volatile *p, void *val) {
+    _ReadWriteBarrier();
+    *p = val;
+    _ReadWriteBarrier();
+}
+static inline void *atomic_compare_exchange_ptr(void *volatile *p, void *expected, void *desired) {
+    return _InterlockedCompareExchangePointer(p, desired, expected);
+}
+static inline size_t atomic_fetch_add_zu(volatile size_t *p, size_t val) {
+    return _InterlockedExchangeAdd64((volatile __int64 *)p, val);
+}
+static inline uint32_t atomic_fetch_add_u32(volatile uint32_t *p, uint32_t val) {
+    return _InterlockedExchangeAdd((volatile long *)p, val);
+}
+static inline uint32_t atomic_fetch_sub_u32(volatile uint32_t *p, uint32_t val) {
+    return (uint32_t)_InterlockedExchangeAdd((volatile long *)p, -(long)val);
+}
+static inline uint32_t atomic_compare_exchange_u32(volatile uint32_t *p, uint32_t expected, uint32_t desired) {
+    return (uint32_t)_InterlockedCompareExchange((volatile long *)p, (long)desired, (long)expected);
+}
+#else
+/* POSIX fallback - still uses volatile with compiler barriers */
+static inline uint32_t atomic_load_u32(volatile uint32_t *p) {
+    uint32_t val = *p;
+    __sync_synchronize();
+    return val;
+}
+static inline void atomic_store_u32(volatile uint32_t *p, uint32_t val) {
+    __sync_synchronize();
+    *p = val;
+    __sync_synchronize();
+}
+static inline void *atomic_load_ptr(void *volatile *p) {
+    void *val = *p;
+    __sync_synchronize();
+    return val;
+}
+static inline void atomic_store_ptr(void *volatile *p, void *val) {
+    __sync_synchronize();
+    *p = val;
+    __sync_synchronize();
+}
+static inline void *atomic_compare_exchange_ptr(void *volatile *p, void *expected, void *desired) {
+    return __sync_val_compare_and_swap(p, expected, desired);
+}
+static inline size_t atomic_fetch_add_zu(volatile size_t *p, size_t val) {
+    return __sync_fetch_and_add(p, val);
+}
+static inline uint32_t atomic_fetch_add_u32(volatile uint32_t *p, uint32_t val) {
+    return __sync_fetch_and_add(p, val);
+}
+static inline uint32_t atomic_fetch_sub_u32(volatile uint32_t *p, uint32_t val) {
+    return __sync_fetch_and_sub(p, val);
+}
+static inline uint32_t atomic_compare_exchange_u32(volatile uint32_t *p, uint32_t expected, uint32_t desired) {
+    return __sync_val_compare_and_swap(p, expected, desired);
+}
+#endif
+
+/* Simple spinlock used for coarse-grained thread safety (e.g. type buckets) */
+typedef struct GCSpinLock {
+    volatile uint32_t lock;
+} GCSpinLock;
+
+static inline void gc_spinlock_init(GCSpinLock *sl) {
+    sl->lock = 0;
+}
+
+static inline void gc_spinlock_acquire(GCSpinLock *sl) {
+    while (atomic_compare_exchange_u32(&sl->lock, 0, 1) != 0) {
+        /* spin */
+    }
+}
+
+static inline void gc_spinlock_release(GCSpinLock *sl) {
+    atomic_store_u32(&sl->lock, 0);
+}
+
 #define GC_HEAP_SIZE (4ULL * 1024 * 1024 * 1024)
 #define GC_INITIAL_HANDLES 100000
 #define GC_DEFAULT_THRESHOLD (256 * 1024)
@@ -119,6 +217,7 @@ JSRuntimeHandle gc_get_runtime(void);
 GCHandle gc_alloc(size_t size, JSGCObjectTypeEnum gc_obj_type);
 GCHandle gc_alloc_ex(size_t size, JSGCObjectTypeEnum gc_obj_type,
                      GCHandleArrayType array_type);
+GCHandle gc_alloc_grey(size_t size, JSGCObjectTypeEnum gc_obj_type);
 void gc_free(GCHandle handle);
 GCHandle gc_realloc(GCHandle handle, size_t new_size);
 GCHandle gc_realloc2(GCHandle handle, size_t new_size, size_t *pslack);
@@ -272,7 +371,20 @@ static inline size_t gc_usable_size(GCHandle handle) {
     if (var_name.valid()) { code; } \
 } while(0)
 
+/* Publication state for grey-state construction */
+typedef enum GCPublishState {
+    PUBLISH_UNBORN = 0,
+    PUBLISH_GREY   = 1,
+    PUBLISH_BLACK  = 2,
+} GCPublishState;
+
 bool gc_ptr_is_valid(void *ptr);
+
+void gc_publish_state_init(GCHandle handle, GCPublishState state);
+void gc_publish(GCHandle handle);
+void gc_unpublish(GCHandle handle);
+GCPublishState gc_publish_state_load(GCHandle handle);
+bool gc_is_published(GCHandle handle);
 
 /* Validate that a handle points to a valid object in the GC heap */
 static inline bool gc_ptr_is_valid_handle(GCHandle handle) {
@@ -390,6 +502,7 @@ typedef struct GCTypeIterator {
 } GCTypeIterator;
 
 GCTypeIterator gc_type_iterator_begin(JSGCObjectTypeEnum type);
+GCTypeIterator gc_type_iterator_begin_for_bucket(GCTypeBucket *bucket);
 bool gc_type_iterator_valid(GCTypeIterator *it);
 void gc_type_iterator_next(GCTypeIterator *it);
 GCHandle gc_type_iterator_handle(GCTypeIterator *it);
@@ -447,10 +560,15 @@ typedef struct GCState {
     uint32_t volatile gc_phase;           /* GCPhase enum, atomic */
     uint32_t volatile compaction_target;  /* Which buffer (0 or 1) GC is compacting INTO, atomic */
     
-    /* Handle free list (shared between both buffers - handles are indices) */
-    uint32_t *free_list;
-    uint32_t free_count;
-    uint32_t free_capacity;
+    /*
+     * Lock-free handle free list (Treiber stack).
+     * free_head is the top handle (GC_HANDLE_NULL == empty stack).
+     * free_next[handle] stores the next free handle for each free slot.
+     */
+    uint32_t volatile free_head;    /* atomic */
+    uint32_t *free_next;
+    uint32_t free_next_capacity;
+    uint32_t volatile free_count;   /* diagnostic count, atomic */
     
     /* Root set */
     struct {
@@ -473,15 +591,20 @@ typedef struct GCState {
         void **ptrs;
         uint32_t count;
         uint32_t capacity;
-        uint32_t *free_list;
-        uint32_t free_count;
-        uint32_t free_capacity;
+        uint32_t *free_list;    /* legacy, now NULL */
+        uint32_t free_count;    /* diagnostic */
+        uint32_t free_capacity; /* legacy, now free_next_capacity */
     } handles;
     
     size_t bytes_allocated;
     size_t gc_threshold;
     GCHandle rt;  /* Runtime handle for GC operations */
     bool initialized;
+
+    /* Per-handle publication state for grey-state construction.
+     * Indexed by GCHandle; 0 = UNBORN, 1 = GREY, 2 = BLACK. */
+    uint32_t *publish_state;
+    uint32_t publish_state_capacity;
 } GCState;
 
 extern GCState g_gc;

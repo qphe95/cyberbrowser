@@ -19,9 +19,14 @@
 #include "quickjs.h"
 #include "quickjs_gc_unified.h"
 #include "quickjs-internal.h"
+#include "lockfree_hash_table.h"
+#include "browser_api_impl_handles.h"
 
 /* External reference to g_gc for testing */
 extern GCState g_gc;
+
+extern "C" uint32_t JSRuntime_get_shape_hash_count(JSRuntimeHandle rt);
+extern "C" uint32_t JSRuntime_get_shape_hash_size(JSRuntimeHandle rt);
 
 /* Shared QuickJS context accessor declared in test_main.cpp */
 extern "C" JSContextHandle get_shared_test_context(void);
@@ -606,6 +611,403 @@ TEST(test_gc_write_barrier_heap_slot) {
     return true;
 }
 
+TEST(test_gc_publish_state) {
+    /* Ordinary allocations are published immediately (BLACK) */
+    GCHandle h1 = gc_alloc(sizeof(JSObject), JS_GC_OBJ_TYPE_JS_OBJECT);
+    ASSERT_TRUE(h1 != GC_HANDLE_NULL);
+    ASSERT_EQ((int)PUBLISH_BLACK, (int)gc_publish_state_load(h1));
+    ASSERT_TRUE(gc_is_published(h1));
+
+    /* Grey allocations are visible to the allocator but not yet published */
+    GCHandle h2 = gc_alloc_grey(sizeof(JSObject), JS_GC_OBJ_TYPE_JS_OBJECT);
+    ASSERT_TRUE(h2 != GC_HANDLE_NULL);
+    ASSERT_EQ((int)PUBLISH_GREY, (int)gc_publish_state_load(h2));
+    ASSERT_TRUE(!gc_is_published(h2));
+
+    /* Publishing transitions to BLACK */
+    gc_publish(h2);
+    ASSERT_EQ((int)PUBLISH_BLACK, (int)gc_publish_state_load(h2));
+    ASSERT_TRUE(gc_is_published(h2));
+
+    /* Reused handles start UNBORN and become BLACK after ordinary allocation */
+    gc_free(h1);
+    GCHandle h3 = gc_alloc(sizeof(JSObject), JS_GC_OBJ_TYPE_JS_OBJECT);
+    ASSERT_TRUE(h3 != GC_HANDLE_NULL);
+    ASSERT_EQ((int)PUBLISH_BLACK, (int)gc_publish_state_load(h3));
+
+    return true;
+}
+
+TEST(test_grey_lifecycle) {
+    GCHandle h = gc_alloc_grey(64, JS_GC_OBJ_TYPE_DATA);
+    ASSERT_TRUE(h != GC_HANDLE_NULL);
+    ASSERT_EQ((int)PUBLISH_GREY, (int)gc_publish_state_load(h));
+    ASSERT_TRUE(!gc_is_published(h));
+
+    /* Simulate partial initialization by writing through the handle */
+    uint32_t *data = (uint32_t *)gc_deref(h);
+    ASSERT_TRUE(data != NULL);
+    data[0] = 0xDEADBEEF;
+
+    gc_publish(h);
+    ASSERT_EQ((int)PUBLISH_BLACK, (int)gc_publish_state_load(h));
+    ASSERT_TRUE(gc_is_published(h));
+    ASSERT_EQ(0xDEADBEEFu, data[0]);
+    return true;
+}
+
+TEST(test_js_object_published) {
+    JSContextHandle ctx = get_shared_test_context();
+    if (!ctx.valid()) {
+        printf("    (skipped - no shared context)");
+        return true;
+    }
+
+    GCValue obj = JS_NewObject(ctx);
+    ASSERT_TRUE(!JS_IsException(obj));
+    GCHandle h = JS_VALUE_GET_HANDLE(obj);
+    ASSERT_TRUE(h != GC_HANDLE_NULL);
+    ASSERT_TRUE(gc_is_published(h));
+    return true;
+}
+
+TEST(test_dom_node_published) {
+    JSContextHandle ctx = get_shared_test_context();
+    if (!ctx.valid()) {
+        printf("    (skipped - no shared context)");
+        return true;
+    }
+
+    DOMNodeHandle node = DOMNodeHandle::create(ctx, 1 /* ELEMENT_NODE */, "DIV");
+    ASSERT_TRUE(node.valid());
+    ASSERT_TRUE(gc_is_published(node.handle()));
+    return true;
+}
+
+TEST(test_nested_js_objects_published) {
+    JSContextHandle ctx = get_shared_test_context();
+    if (!ctx.valid()) {
+        printf("    (skipped - no shared context)");
+        return true;
+    }
+
+    GCValue arr = JS_NewArray(ctx);
+    ASSERT_TRUE(!JS_IsException(arr));
+    ASSERT_TRUE(gc_is_published(JS_VALUE_GET_HANDLE(arr)));
+
+    for (int i = 0; i < 16; i++) {
+        GCValue elem = JS_NewObject(ctx);
+        ASSERT_TRUE(!JS_IsException(elem));
+        ASSERT_TRUE(gc_is_published(JS_VALUE_GET_HANDLE(elem)));
+        ASSERT_TRUE(JS_SetPropertyUint32(ctx, arr, (uint32_t)i, elem) >= 0);
+    }
+
+    /* Verify array and all elements are still published and reachable */
+    ASSERT_TRUE(gc_is_published(JS_VALUE_GET_HANDLE(arr)));
+    for (int i = 0; i < 16; i++) {
+        GCValue elem = JS_GetPropertyUint32(ctx, arr, (uint32_t)i);
+        ASSERT_TRUE(!JS_IsException(elem));
+        ASSERT_TRUE(gc_is_published(JS_VALUE_GET_HANDLE(elem)));
+    }
+    return true;
+}
+
+/* ============================================================================
+ * Lock-free handle free-list tests
+ * ============================================================================ */
+
+TEST(test_gc_free_list_reuse) {
+    GCHandle a = gc_alloc(64, JS_GC_OBJ_TYPE_DATA);
+    ASSERT_TRUE(a != GC_HANDLE_NULL);
+    ASSERT_TRUE(gc_is_published(a));
+
+    gc_free(a);
+
+    /* A subsequent allocation should reuse the freed handle */
+    GCHandle b = gc_alloc(64, JS_GC_OBJ_TYPE_DATA);
+    ASSERT_TRUE(b != GC_HANDLE_NULL);
+    ASSERT_EQ((int)a, (int)b);
+    ASSERT_TRUE(gc_is_published(b));
+
+    /* Reused handle starts UNBORN then becomes BLACK; old data is zeroed by gc_allocz semantics? */
+    return true;
+}
+
+TEST(test_gc_free_list_compaction_rebuild) {
+    GCHandle handles[32];
+    for (int i = 0; i < 32; i++) {
+        handles[i] = gc_alloc(64, JS_GC_OBJ_TYPE_DATA);
+        ASSERT_TRUE(handles[i] != GC_HANDLE_NULL);
+    }
+
+    /* Free every other handle */
+    for (int i = 0; i < 32; i += 2) {
+        gc_free(handles[i]);
+    }
+
+    /* Run GC/compaction, which rebuilds the lock-free free list */
+    gc_run();
+
+    /* After compaction we must still be able to allocate valid, published objects. */
+    for (int i = 0; i < 16; i++) {
+        GCHandle h = gc_alloc(64, JS_GC_OBJ_TYPE_DATA);
+        ASSERT_TRUE(h != GC_HANDLE_NULL);
+        ASSERT_TRUE(gc_is_published(h));
+    }
+    return true;
+}
+
+struct FreeListThreadArg {
+    GCHandle *handles;
+    uint32_t start;
+    uint32_t count;
+};
+
+static void free_list_alloc_job(void *arg) {
+    FreeListThreadArg *a = (FreeListThreadArg *)arg;
+    for (uint32_t i = 0; i < a->count; i++) {
+        GCHandle h = gc_alloc(64, JS_GC_OBJ_TYPE_DATA);
+        a->handles[a->start + i] = h;
+    }
+}
+
+TEST(test_gc_free_list_threaded_alloc) {
+    static const int THREADS = 4;
+    static const int PER_THREAD = 256;
+    static const int TOTAL = THREADS * PER_THREAD;
+    static const int MAX_HANDLE = TOTAL * 16;  /* generous upper bound for this test run */
+    GCHandle handles[TOTAL];
+    FreeListThreadArg args[THREADS];
+
+    for (int i = 0; i < THREADS; i++) {
+        args[i].handles = handles;
+        args[i].start = (uint32_t)(i * PER_THREAD);
+        args[i].count = PER_THREAD;
+        ASSERT_TRUE(gc_thread_pool_submit_test_job(free_list_alloc_job, &args[i]));
+    }
+    gc_thread_pool_wait_empty();
+
+    /* All handles must be valid, published, and unique. */
+    bool *seen = (bool *)calloc(MAX_HANDLE, sizeof(bool));
+    ASSERT_TRUE(seen != NULL);
+    for (int i = 0; i < TOTAL; i++) {
+        GCHandle h = handles[i];
+        ASSERT_TRUE(h != GC_HANDLE_NULL);
+        ASSERT_TRUE(h < (GCHandle)MAX_HANDLE);
+        ASSERT_TRUE(gc_is_published(h));
+        ASSERT_TRUE(!seen[h]);
+        seen[h] = true;
+    }
+    free(seen);
+    return true;
+}
+
+/* ============================================================================
+ * Type bucket tests
+ * ============================================================================ */
+
+TEST(test_type_bucket_basic) {
+    GCTypeBucket bucket;
+    gc_type_bucket_init(&bucket);
+    ASSERT_EQ(0, (int)atomic_load_u32(&bucket.count));
+    
+    ASSERT_EQ(0, gc_type_bucket_add(&bucket, 1));
+    ASSERT_EQ(0, gc_type_bucket_add(&bucket, 2));
+    ASSERT_EQ(0, gc_type_bucket_add(&bucket, 3));
+    ASSERT_EQ(3, (int)atomic_load_u32(&bucket.count));
+    
+    gc_type_bucket_remove(&bucket, 2);
+    ASSERT_EQ(3, (int)atomic_load_u32(&bucket.count)); /* removal is a tombstone */
+    
+    gc_type_bucket_compact(&bucket);
+    ASSERT_EQ(2, (int)atomic_load_u32(&bucket.count));
+    
+    gc_type_bucket_free(&bucket);
+    return true;
+}
+
+TEST(test_type_bucket_remove) {
+    GCTypeBucket bucket;
+    gc_type_bucket_init(&bucket);
+    
+    gc_type_bucket_add(&bucket, 10);
+    gc_type_bucket_add(&bucket, 20);
+    gc_type_bucket_add(&bucket, 30);
+    gc_type_bucket_remove(&bucket, 20);
+    gc_type_bucket_compact(&bucket);
+    
+    ASSERT_EQ(2, (int)atomic_load_u32(&bucket.count));
+    
+    /* Verify iteration sees the remaining handles */
+    GCTypeIterator it = gc_type_iterator_begin_for_bucket(&bucket);
+    int found = 0;
+    while (gc_type_iterator_valid(&it)) {
+        GCHandle h = gc_type_iterator_handle(&it);
+        ASSERT_TRUE(h == 10 || h == 30);
+        found++;
+        gc_type_iterator_next(&it);
+    }
+    ASSERT_EQ(2, found);
+    
+    gc_type_bucket_free(&bucket);
+    return true;
+}
+
+struct TypeBucketThreadArg {
+    GCTypeBucket *bucket;
+    uint32_t base;
+    uint32_t count;
+};
+
+static void type_bucket_add_job(void *arg) {
+    TypeBucketThreadArg *a = (TypeBucketThreadArg *)arg;
+    for (uint32_t i = 0; i < a->count; i++) {
+        gc_type_bucket_add(a->bucket, a->base + i + 1);
+    }
+}
+
+TEST(test_type_bucket_threaded) {
+    static const int THREADS = 4;
+    static const int PER_THREAD = 256;
+    GCTypeBucket bucket;
+    gc_type_bucket_init(&bucket);
+    TypeBucketThreadArg args[THREADS];
+    
+    for (int i = 0; i < THREADS; i++) {
+        args[i].bucket = &bucket;
+        args[i].base = (uint32_t)(i * PER_THREAD);
+        args[i].count = PER_THREAD;
+        ASSERT_TRUE(gc_thread_pool_submit_test_job(type_bucket_add_job, &args[i]));
+    }
+    gc_thread_pool_wait_empty();
+    
+    ASSERT_EQ(THREADS * PER_THREAD, (int)atomic_load_u32(&bucket.count));
+    
+    /* Verify uniqueness of inserted handles */
+    bool *seen = (bool *)calloc(THREADS * PER_THREAD + 1, sizeof(bool));
+    ASSERT_TRUE(seen != NULL);
+    GCTypeIterator it = gc_type_iterator_begin_for_bucket(&bucket);
+    while (gc_type_iterator_valid(&it)) {
+        GCHandle h = gc_type_iterator_handle(&it);
+        ASSERT_TRUE(h > 0 && h <= (GCHandle)(THREADS * PER_THREAD));
+        ASSERT_TRUE(!seen[h]);
+        seen[h] = true;
+        gc_type_iterator_next(&it);
+    }
+    free(seen);
+    
+    gc_type_bucket_free(&bucket);
+    return true;
+}
+
+/* ============================================================================
+ * Lock-free hash table tests
+ * ============================================================================ */
+
+static uint32_t test_hash_u32(uint32_t key) {
+    /* Knuth's multiplicative hash */
+    return key * 2654435761u;
+}
+
+TEST(test_lf_hash_basic) {
+    LFHashTable *t = lf_hash_create(16);
+    ASSERT_TRUE(t != NULL);
+    ASSERT_EQ(16, (int)t->bucket_count);
+
+    ASSERT_TRUE(lf_hash_insert(t, test_hash_u32(42), 42, 142));
+    ASSERT_EQ(142, (int)lf_hash_lookup(t, test_hash_u32(42), 42));
+    ASSERT_EQ((int)GC_HANDLE_NULL, (int)lf_hash_lookup(t, test_hash_u32(43), 43));
+
+    lf_hash_destroy(t);
+    return true;
+}
+
+TEST(test_lf_hash_update) {
+    LFHashTable *t = lf_hash_create(16);
+    ASSERT_TRUE(lf_hash_insert(t, test_hash_u32(7), 7, 100));
+    ASSERT_EQ(100, (int)lf_hash_lookup(t, test_hash_u32(7), 7));
+
+    ASSERT_TRUE(lf_hash_insert(t, test_hash_u32(7), 7, 200));
+    ASSERT_EQ(200, (int)lf_hash_lookup(t, test_hash_u32(7), 7));
+    ASSERT_EQ(1, (int)lf_hash_count(t));
+
+    lf_hash_destroy(t);
+    return true;
+}
+
+TEST(test_lf_hash_remove) {
+    LFHashTable *t = lf_hash_create(16);
+    ASSERT_TRUE(lf_hash_insert(t, test_hash_u32(5), 5, 55));
+    ASSERT_EQ(55, (int)lf_hash_lookup(t, test_hash_u32(5), 5));
+
+    ASSERT_TRUE(lf_hash_remove(t, test_hash_u32(5), 5));
+    ASSERT_EQ((int)GC_HANDLE_NULL, (int)lf_hash_lookup(t, test_hash_u32(5), 5));
+    ASSERT_EQ(0, (int)lf_hash_count(t));
+
+    lf_hash_destroy(t);
+    return true;
+}
+
+TEST(test_lf_hash_resize) {
+    LFHashTable *t = lf_hash_create(128);
+    for (int i = 1; i <= 64; i++) {
+        ASSERT_TRUE(lf_hash_insert(t, test_hash_u32((uint32_t)i), (GCHandle)i, (GCHandle)(i * 2)));
+    }
+    ASSERT_EQ(64, (int)lf_hash_count(t));
+
+    ASSERT_TRUE(lf_hash_resize(&t, 256));
+    ASSERT_TRUE(t->bucket_count >= 256);
+    ASSERT_EQ(64, (int)lf_hash_count(t));
+
+    for (int i = 1; i <= 64; i++) {
+        ASSERT_EQ(i * 2, (int)lf_hash_lookup(t, test_hash_u32((uint32_t)i), (GCHandle)i));
+    }
+
+    lf_hash_destroy(t);
+    return true;
+}
+
+struct LFHashThreadArg {
+    LFHashTable *t;
+    uint32_t base;
+    uint32_t count;
+};
+
+static void lf_hash_insert_job(void *arg) {
+    LFHashThreadArg *a = (LFHashThreadArg *)arg;
+    for (uint32_t i = 0; i < a->count; i++) {
+        GCHandle key = a->base + i;
+        lf_hash_insert(a->t, test_hash_u32((uint32_t)key), key, key * 10);
+    }
+}
+
+TEST(test_lf_hash_threaded) {
+    LFHashTable *t = lf_hash_create(4096);
+    ASSERT_TRUE(t != NULL);
+
+    static const int THREADS = 4;
+    static const int PER_THREAD = 256;
+    LFHashThreadArg args[THREADS];
+    for (int i = 0; i < THREADS; i++) {
+        args[i].t = t;
+        args[i].base = (uint32_t)(i * PER_THREAD + 1);
+        args[i].count = PER_THREAD;
+        ASSERT_TRUE(gc_thread_pool_submit_test_job(lf_hash_insert_job, &args[i]));
+    }
+    gc_thread_pool_wait_empty();
+
+    ASSERT_EQ(THREADS * PER_THREAD, (int)lf_hash_count(t));
+    for (int i = 0; i < THREADS; i++) {
+        for (int j = 0; j < PER_THREAD; j++) {
+            GCHandle key = (GCHandle)(i * PER_THREAD + j + 1);
+            ASSERT_EQ((int)(key * 10), (int)lf_hash_lookup(t, test_hash_u32((uint32_t)key), key));
+        }
+    }
+
+    lf_hash_destroy(t);
+    return true;
+}
+
 /* ============================================================================
  * QuickJS Integration Tests
  * ============================================================================ */
@@ -805,6 +1207,99 @@ TEST(test_barrier_js_promise) {
 }
 
 /* ============================================================================
+ * Shape hash table integration tests
+ * ============================================================================ */
+
+TEST(test_shape_hash_empty_shape_sharing) {
+    JSContextHandle ctx = get_test_ctx();
+    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
+    JSRuntimeHandle rt = JSRuntimeHandle(JS_GetRuntime(ctx));
+
+    /* Create objects directly so we do not pollute the global object and
+       create unrelated shape changes. */
+    GCValue o1 = JS_NewObject(ctx);
+    ASSERT_TRUE(JS_IsObject(o1));
+    uint32_t count_after_first = JSRuntime_get_shape_hash_count(rt);
+
+    GCValue o2 = JS_NewObject(ctx);
+    ASSERT_TRUE(JS_IsObject(o2));
+    uint32_t count_after_second = JSRuntime_get_shape_hash_count(rt);
+
+    /* The second object must reuse the hashed empty shape; the entry count
+       should not grow. */
+    ASSERT_EQ(count_after_first, count_after_second);
+    return true;
+}
+
+TEST(test_shape_hash_property_shape_sharing) {
+    JSContextHandle ctx = get_test_ctx();
+    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
+    JSRuntimeHandle rt = JSRuntimeHandle(JS_GetRuntime(ctx));
+
+    GCValue o1 = JS_NewObject(ctx);
+    ASSERT_TRUE(JS_IsObject(o1));
+    ASSERT_TRUE(JS_SetPropertyStr(ctx, o1, "x", JS_NewInt32(ctx, 1)) >= 0);
+    ASSERT_TRUE(JS_SetPropertyStr(ctx, o1, "y", JS_NewInt32(ctx, 2)) >= 0);
+    uint32_t count_after_first = JSRuntime_get_shape_hash_count(rt);
+
+    GCValue o2 = JS_NewObject(ctx);
+    ASSERT_TRUE(JS_IsObject(o2));
+    ASSERT_TRUE(JS_SetPropertyStr(ctx, o2, "x", JS_NewInt32(ctx, 3)) >= 0);
+    ASSERT_TRUE(JS_SetPropertyStr(ctx, o2, "y", JS_NewInt32(ctx, 4)) >= 0);
+    uint32_t count_after_second = JSRuntime_get_shape_hash_count(rt);
+
+    /* The {x,y} shape chain should be shared, so the count should not grow
+       by another full property chain. */
+    ASSERT_EQ(count_after_first, count_after_second);
+    return true;
+}
+
+TEST(test_shape_hash_resize) {
+    JSContextHandle ctx = get_test_ctx();
+    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
+    JSRuntimeHandle rt = JSRuntimeHandle(JS_GetRuntime(ctx));
+    uint32_t count_before = JSRuntime_get_shape_hash_count(rt);
+
+    GCValue r = eval_test(ctx,
+        "var __sh_arr = [];"
+        "for (var i = 0; i < 300; i++) {"
+        "  var o = {}; o['prop' + i] = i; __sh_arr.push(o);"
+        "}"
+        "__sh_arr.length;");
+    ASSERT_TRUE(is_exception_free(ctx, r));
+    ASSERT_EQ(300, JS_VALUE_GET_INT(r));
+
+    uint32_t count_after = JSRuntime_get_shape_hash_count(rt);
+    ASSERT_TRUE(count_after > count_before);
+    return true;
+}
+
+TEST(test_shape_hash_gc_cleanup) {
+    JSContextHandle ctx = get_test_ctx();
+    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
+    GCValue r = eval_test(ctx,
+        "var __sh_e = {a:1, b:2, c:3}; __sh_e");
+    ASSERT_TRUE(is_exception_free(ctx, r));
+    JSObjectHandle o = JS_VALUE_GET_OBJ_HANDLE(r);
+    ASSERT_TRUE(o.valid());
+
+    JSRuntimeHandle rt = JSRuntimeHandle(JS_GetRuntime(ctx));
+    uint32_t count_before = JSRuntime_get_shape_hash_count(rt);
+    ASSERT_TRUE(count_before > 0);
+
+    /* Drop the object and run GC.  Dead shapes should be removed by the
+       cleanup pass without crashing. */
+    r = eval_test(ctx, "__sh_e = null; 42");
+    ASSERT_TRUE(is_exception_free(ctx, r));
+    JS_RunGC(rt);
+
+    /* The exact count is non-deterministic because other tests may have
+       populated the table, but the runtime must stay consistent. */
+    (void)JSRuntime_get_shape_hash_count(rt);
+    return true;
+}
+
+/* ============================================================================
  * Test Runner
  * ============================================================================ */
 
@@ -844,7 +1339,28 @@ extern "C" void run_gc_unified_tests(void) {
     RUN_TEST(test_gc_thread_pool_gc_job);
     RUN_TEST(test_gc_write_barrier);
     RUN_TEST(test_gc_write_barrier_heap_slot);
-    
+    RUN_TEST(test_gc_publish_state);
+    RUN_TEST(test_grey_lifecycle);
+    RUN_TEST(test_js_object_published);
+    RUN_TEST(test_dom_node_published);
+    RUN_TEST(test_nested_js_objects_published);
+    RUN_TEST(test_gc_free_list_reuse);
+    RUN_TEST(test_gc_free_list_compaction_rebuild);
+    RUN_TEST(test_gc_free_list_threaded_alloc);
+    RUN_TEST(test_type_bucket_basic);
+    RUN_TEST(test_type_bucket_remove);
+    RUN_TEST(test_type_bucket_threaded);
+    RUN_TEST(test_lf_hash_basic);
+    RUN_TEST(test_lf_hash_update);
+    RUN_TEST(test_lf_hash_remove);
+    RUN_TEST(test_lf_hash_resize);
+    RUN_TEST(test_lf_hash_threaded);
+
+    RUN_TEST(test_shape_hash_empty_shape_sharing);
+    RUN_TEST(test_shape_hash_property_shape_sharing);
+    RUN_TEST(test_shape_hash_resize);
+    RUN_TEST(test_shape_hash_gc_cleanup);
+
     /* Run QuickJS integration tests using shared context */
     printf("\n  QuickJS integration tests use shared context from test_main.cpp\n");
     

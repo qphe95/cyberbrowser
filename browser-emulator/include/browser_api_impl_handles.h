@@ -2323,7 +2323,9 @@ public:
     
     // Create a new DOM node
     static DOMNodeHandle create(JSContextHandle ctx, int node_type, const char* node_name) {
-        GCHandle h = gc_alloc(sizeof(DOMNode), JS_GC_OBJ_TYPE_DATA);
+        /* Allocate grey so the node is invisible to readers/GC while its
+         * fields are being written. */
+        GCHandle h = gc_alloc_grey(sizeof(DOMNode), JS_GC_OBJ_TYPE_DATA);
         if (h == GC_HANDLE_NULL) return DOMNodeHandle();
         
         DOMNode* node = (DOMNode*)gc_deref(h);
@@ -2344,6 +2346,8 @@ public:
         node->owner_document = JS_NULL;
         node->shadow_root = JS_NULL;
         
+        /* Fully initialized; publish so traversal and GC can see it. */
+        gc_publish(h);
         return DOMNodeHandle(h);
     }
     

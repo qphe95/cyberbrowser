@@ -1302,6 +1302,9 @@ struct JSContext {
     struct JSAtomCache atom_cache;
 };
 
+/* Forward declaration for the lock-free hash table used by the shape cache. */
+typedef struct LFHashTable LFHashTable;
+
 struct JSRuntime {
     JSMallocState malloc_state;
     const char *rt_info;
@@ -1361,11 +1364,13 @@ struct JSRuntime {
     /* see JS_SetStripInfo() */
     uint8_t strip_flags;
     
-    /* Shape hash table */
-    int shape_hash_bits;
-    int shape_hash_size;
-    int shape_hash_count; /* number of hashed shapes */
-    GCHandle shape_hash_handle;  /* Handle to JSShape* array */
+    /* Lock-free shape hash table keyed by (proto_handle, property signature hash).
+       Keys and values are GCHandle references to JSShape objects. */
+    LFHashTable *shape_hash;
+    /* Retired tables from lock-free resize.  Freed at runtime destruction after
+       all readers are guaranteed gone. */
+    LFHashTable *shape_hash_retired;
+    uint32_t shape_hash_count; /* approximate atomic entry count */
     void *user_opaque;
     
     /* Instruction counter for GC triggering */

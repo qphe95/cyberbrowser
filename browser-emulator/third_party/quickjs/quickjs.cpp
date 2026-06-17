@@ -371,7 +371,6 @@ typedef struct JSObject JSObject;
 #define rt_atom_array (rt.atom_array_ptr())
 #define rt_class_array (rt.class_array_ptr())
 #define rt_atom_gc_marks (rt.atom_gc_marks_ptr())
-#define rt_shape_hash (rt.shape_hash_ptr())
 
 /* Context accessors - use ctx_rt to get runtime (handles GC compaction) */
 #define ctx_rt (JSRuntimeHandle(ctx.rt_handle()))
@@ -1920,7 +1919,19 @@ void JS_FreeRuntime(JSRuntimeHandle rt)
     }
     /* GC frees: js_free_rt(rt, rt.atom_array_handle()); */
     /* GC frees: js_free_rt(rt, rt.atom_hash_handle()); */
-    /* GC frees: js_free_rt(rt, rt.shape_hash_handle()); */
+    {
+        LFHashTable *t = rt.shape_hash();
+        LFHashTable *r = rt.shape_hash_retired();
+        rt.set_shape_hash(NULL);
+        rt.set_shape_hash_retired(NULL);
+        while (r) {
+            LFHashTable *next = r->next_retired;
+            lf_hash_destroy(r);
+            r = next;
+        }
+        if (t)
+            lf_hash_destroy(t);
+    }
     /* Typed handle arrays are freed in gc_cleanup() */
 #ifdef DUMP_LEAKS
     {
@@ -5073,13 +5084,12 @@ GCHandle gc_obj_get_prototype_handle(GCHandle obj_handle)
 
 static int init_shape_hash(JSRuntimeHandle rt)
 {
-    rt.set_shape_hash_bits(4);   /* 16 shapes */
-    rt.set_shape_hash_size(1 << rt.shape_hash_bits());
-    rt.set_shape_hash_count(0);
-    rt.set_shape_hash_handle(gc_allocz(sizeof(JSShapeHandle) *
-                                   rt.shape_hash_size(), JS_GC_OBJ_TYPE_DATA));
-    if (rt.shape_hash_handle() == GC_HANDLE_NULL)
+    LFHashTable *t = lf_hash_create(256);
+    if (!t)
         return -1;
+    rt.set_shape_hash(t);
+    rt.set_shape_hash_retired(NULL);
+    rt.set_shape_hash_count(0);
     return 0;
 }
 
@@ -5087,12 +5097,6 @@ static int init_shape_hash(JSRuntimeHandle rt)
 static uint32_t shape_hash(uint32_t h, uint32_t val)
 {
     return (h + val) * 0x9e370001;
-}
-
-/* truncate the shape hash to 'hash_bits' bits */
-static uint32_t get_shape_hash(uint32_t h, int hash_bits)
-{
-    return h >> (32 - hash_bits);
 }
 
 static uint32_t shape_initial_hash(JSObjectHandle proto)
@@ -5104,124 +5108,65 @@ static uint32_t shape_initial_hash(JSObjectHandle proto)
     return h;
 }
 
-/* Shape hash table using quadratic probing */
-static int resize_shape_hash(JSRuntimeHandle rt, int new_shape_hash_bits)
+static void js_shape_hash_resize(JSRuntimeHandle rt, uint32_t new_bucket_count)
 {
-    int new_shape_hash_size, i;
-    uint32_t h, idx;
-    GCHandle *new_shape_hash;
-    GCHandle sh_handle;
-    JSShapeHandle sh;
-    int probe;
-
-    QJS_LOGD("resize_shape_hash: START new_bits=%d", new_shape_hash_bits);
-    new_shape_hash_size = 1 << new_shape_hash_bits;
-    QJS_LOGD("resize_shape_hash: allocating new hash table size=%d", new_shape_hash_size);
-    GCHandle new_shape_hash_handle = gc_allocz(sizeof(GCHandle) *
-                                   new_shape_hash_size, JS_GC_OBJ_TYPE_DATA);
-    if (new_shape_hash_handle == 0)
-        return -1;
-    new_shape_hash = static_cast<GCHandle *>(GCPin<GCHandle>(new_shape_hash_handle).ptr());  /* Direct access after gc_alloc */
-    QJS_LOGD("resize_shape_hash: old_size=%d", rt.shape_hash_size());
-    
-    /* Iterate through old table and re-insert all shapes using quadratic probing */
-    uint32_t moved_count = 0;
-    for(i = 0; i < rt.shape_hash_size(); i++) {
-        sh_handle = rt_shape_hash[i];
-        if (sh_handle == GC_HANDLE_NULL) {
-            continue;  /* Empty slot */
-        }
-        
-        sh = JSShapeHandle(sh_handle);
-        if (!sh) {
-            QJS_LOGD("resize_shape_hash: NULL shape dereferenced, handle=%u at slot %d", sh_handle, i);
-            continue;
-        }
-        
-        /* Insert into new table using quadratic probing */
-        h = get_shape_hash(sh.hash(), new_shape_hash_bits);
-        idx = h;
-        probe = 0;
-        
-        while (new_shape_hash[idx] != GC_HANDLE_NULL) {
-            probe++;
-            idx = (h + probe * probe) & (new_shape_hash_size - 1);
-            if (probe >= new_shape_hash_size) {
-                QJS_LOGD("resize_shape_hash: ERROR - new table is full!");
-                return -1;
-            }
-        }
-        
-        new_shape_hash[idx] = sh_handle;
-        moved_count++;
-    }
-    
-    QJS_LOGD("resize_shape_hash: DONE, moved %u shapes", moved_count);
-    /* GC frees: js_free_rt(rt, rt.shape_hash_handle()); */
-    rt.set_shape_hash_bits(new_shape_hash_bits);
-    rt.set_shape_hash_size(new_shape_hash_size);
-    rt.set_shape_hash_handle(new_shape_hash_handle);
-    return 0;
-}
-
-/* Quadratic probing insertion into shape hash table */
-static void js_shape_hash_insert(JSRuntimeHandle rt, JSShapeHandle sh)
-{
-    uint32_t h, idx;
-    GCHandle sh_handle = sh.shape_handle();
-    int probe = 0;
-    
-    h = get_shape_hash(sh.hash(), rt.shape_hash_bits());
-    idx = h;
-    
-    /* Quadratic probing: h, h+1, h+4, h+9, h+16... */
-    while (rt_shape_hash[idx] != GC_HANDLE_NULL) {
-        probe++;
-        idx = (h + probe * probe) & (rt.shape_hash_size() - 1);
-        /* Safety check - table should never be full when we call this */
-        if (probe >= rt.shape_hash_size()) {
-            QJS_LOGD("js_shape_hash_insert: ERROR - table is full!");
-            return;
-        }
-    }
-    
-    rt_shape_hash[idx] = sh_handle;
-    rt.set_shape_hash_count(rt.shape_hash_count() + 1);
-}
-
-/* Quadratic probing deletion from shape hash table */
-static void js_shape_hash_delete(JSRuntimeHandle rt, JSShapeHandle sh)
-{
-    uint32_t h, idx;
-    GCHandle sh_handle = sh.shape_handle();
-    int probe = 0;
-    JSShapeHandle current_sh;
-    
-    if (!sh || sh_handle == GC_HANDLE_NULL) {
+    LFHashTable **pt = rt.shape_hash_ptr_addr();
+    if (!pt)
         return;
+    LFHashTable *old_t = rt.shape_hash();
+    if (!old_t)
+        return;
+    if (lf_hash_resize(pt, new_bucket_count)) {
+        /* The old table may still be read by concurrent lookups.  Retire it
+           and reclaim memory at runtime destruction. */
+        old_t->next_retired = rt.shape_hash_retired();
+        rt.set_shape_hash_retired(old_t);
     }
-    
-    h = get_shape_hash(sh.hash(), rt.shape_hash_bits());
-    idx = h;
-    
-    /* Quadratic probing to find the shape */
-    while (rt_shape_hash[idx] != GC_HANDLE_NULL) {
-        if (rt_shape_hash[idx] == sh_handle) {
-            /* Found it - mark as deleted by setting to GC_HANDLE_NULL */
-            rt_shape_hash[idx] = GC_HANDLE_NULL;
-            rt.set_shape_hash_count(rt.shape_hash_count() - 1);
-            return;
-        }
-        probe++;
-        idx = (h + probe * probe) & (rt.shape_hash_size() - 1);
-        if (probe >= rt.shape_hash_size()) {
-            QJS_LOGD("js_shape_hash_delete: ERROR - shape not found!");
-            return;
-        }
+}
+
+static void js_shape_hash_ensure_capacity(JSRuntimeHandle rt)
+{
+    LFHashTable *t = rt.shape_hash();
+    if (!t)
+        return;
+    uint32_t count = (uint32_t)rt.shape_hash_count();
+    if (2 * (count + 1) > t->bucket_count) {
+        js_shape_hash_resize(rt, t->bucket_count * 2);
     }
-    
-    /* Shape not found - already deleted or never inserted */
-    QJS_LOGD("js_shape_hash_delete: WARNING - shape handle=%u not in table", sh_handle);
+}
+
+/* Lock-free insertion into the shape hash table.  Grows the table and retries
+   if the insert reports the table is full. */
+static bool js_shape_hash_insert(JSRuntimeHandle rt, JSShapeHandle sh)
+{
+    if (!sh)
+        return false;
+    uint32_t h = sh.hash();
+    GCHandle sh_handle = sh.handle();
+
+    for (;;) {
+        LFHashTable *t = rt.shape_hash();
+        if (!t)
+            return false;
+        if (lf_hash_insert(t, h, sh_handle, sh_handle)) {
+            rt.shape_hash_count_inc();
+            return true;
+        }
+        js_shape_hash_resize(rt, t->bucket_count * 2);
+    }
+}
+
+static bool js_shape_hash_delete(JSRuntimeHandle rt, JSShapeHandle sh)
+{
+    if (!sh)
+        return false;
+    LFHashTable *t = rt.shape_hash();
+    if (!t)
+        return false;
+    bool ok = lf_hash_remove(t, sh.hash(), sh.handle());
+    if (ok)
+        rt.shape_hash_count_dec();
+    return ok;
 }
 
 /* create a new empty shape with prototype 'proto'. It is not hashed */
@@ -5282,12 +5227,8 @@ static no_inline JSShapeHandle js_new_shape2(JSContextHandle ctx, JSObjectHandle
     JSRuntimeHandle rt = ctx_rt;
     JSShapeHandle sh;
 
-    /* resize the shape hash table if necessary */
-    if (2 * (rt.shape_hash_count() + 1) > rt.shape_hash_size()) {
-        QJS_LOGD("js_new_shape2: resizing shape hash");
-        resize_shape_hash(rt, rt.shape_hash_bits() + 1);
-        QJS_LOGD("js_new_shape2: resize done");
-    }
+    /* grow the lock-free shape hash table if the load factor is high */
+    js_shape_hash_ensure_capacity(rt);
 
     QJS_LOGD("js_new_shape2: calling js_new_shape_nohash");
     sh = js_new_shape_nohash(ctx, proto, hash_size, prop_size);
@@ -5626,45 +5567,32 @@ static int add_shape_property(JSContextHandle ctx, GCHandle *psh_handle,
     JSRuntimeHandle rt = ctx_rt;
     JSShapeHandle sh = GC_SHAPE_DEREF(*psh_handle);
     JSShapeProperty *pr, *prop;
-    uint32_t hash_mask, new_shape_hash = 0;
+    uint32_t hash_mask;
     intptr_t h;
-    
+    uint32_t new_shape_hash;
 
-
-    /* update the shape hash */
+    /* Hashed shapes are shared and must stay immutable.  Clone before
+       mutating so only this object (or shape builder) sees the change. */
     if (sh.is_hashed()) {
-        js_shape_hash_delete(rt, sh);
-        new_shape_hash = shape_hash(sh.hash(), atom);
-        new_shape_hash = shape_hash(new_shape_hash, prop_flags);
+        JSShapeHandle new_sh = js_clone_shape(ctx, sh);
+        if (!new_sh)
+            return -1;
+        *psh_handle = new_sh.handle();
+        if (p)
+            p.set_shape_handle(new_sh.handle());
+        sh = new_sh;
     }
 
     if (unlikely(sh.prop_count() >= sh.prop_size())) {
-        /* CRITICAL FIX: If shape would be resized and is shared (was hashed),
-         * clone the shape first so only this object gets the resized shape.
-         * Mutating a shared shape corrupts other objects' property arrays. */
-        if (sh.is_hashed()) {
-            /* Shape was hashed (shared), clone it before resizing */
-            JSShapeHandle new_sh = js_clone_shape(ctx, sh);
-            if (!new_sh)
-                return -1;
-            /* Update object to use the new unshared shape */
-            p.set_shape_handle(new_sh.shape_handle());
-            *psh_handle = new_sh.shape_handle();
-            sh = new_sh;
-        }
-        if (resize_properties(ctx, psh_handle, p, sh.prop_count() + 1)) {
-            /* in case of error, reinsert in the hash table.
-               sh is still valid if resize_properties() failed */
-            if (sh.is_hashed())
-                js_shape_hash_insert(rt, sh);
+        if (resize_properties(ctx, psh_handle, p, sh.prop_count() + 1))
             return -1;
-        }
         sh = GC_SHAPE_DEREF(*psh_handle);
     }
-    if (sh.is_hashed()) {
-        sh.set_hash(new_shape_hash);
-        js_shape_hash_insert(rt, sh);
-    }
+
+    new_shape_hash = shape_hash(sh.hash(), atom);
+    new_shape_hash = shape_hash(new_shape_hash, prop_flags);
+    sh.set_hash(new_shape_hash);
+
     /* Initialize the new shape property.
        The object property at p_prop[sh.prop_count()] is uninitialized */
     int prop_idx = sh.prop_count();
@@ -5678,84 +5606,79 @@ static int add_shape_property(JSContextHandle ctx, GCHandle *psh_handle,
     h = atom & hash_mask;
     pr->hash_next = prop_hash_start(sh)[h];
     prop_hash_start(sh)[h] = sh.prop_count();
+
+    /* The new shape is now suitable for sharing. */
+    sh.set_is_hashed(TRUE);
+    js_shape_hash_insert(rt, sh);
     return 0;
+}
+
+/* Lock-free lookup: equality callback for empty shapes matching a prototype. */
+static bool shape_proto_eq(GCHandle key, uint32_t hash, void *lookup_key, void *user_data)
+{
+    GCHandle proto_handle = *(GCHandle *)lookup_key;
+    JSShapeHandle cand(key);
+    return cand &&
+           cand.hash() == hash &&
+           cand.proto_handle() == proto_handle &&
+           cand.prop_count() == 0;
 }
 
 /* find a hashed empty shape matching the prototype. Return NULL if
    not found */
 static JSShapeHandle find_hashed_shape_proto(JSRuntimeHandle rt, JSObjectHandle proto)
 {
-    JSShapeHandle sh1;
-    uint32_t h, h1, idx, i;
-    GCHandle sh1_handle;
+    uint32_t h = shape_initial_hash(proto);
     GCHandle proto_handle = proto.handle();
+    GCHandle sh_handle = lf_hash_lookup_ex(rt.shape_hash(), h, &proto_handle,
+                                           shape_proto_eq, NULL);
+    return JSShapeHandle(sh_handle);
+}
 
-    h = shape_initial_hash(proto);
-    h1 = get_shape_hash(h, rt.shape_hash_bits());
-    idx = h1;
-    i = 0;
-    while (i < rt.shape_hash_size()) {
-        sh1_handle = rt_shape_hash[idx];
-        if (sh1_handle == GC_HANDLE_NULL) {
-            return JSShapeHandle();
-        }
-        sh1 = JSShapeHandle(sh1_handle);
-        if (sh1 && sh1.hash() == h &&
-            sh1.proto_handle() == proto_handle &&
-            sh1.prop_count() == 0) {
-            return sh1;
-        }
-        /* Quadratic probe */
-        i++;
-        idx = (h1 + i * i) & (rt.shape_hash_size() - 1);
+typedef struct ShapePropLookup {
+    JSShapeHandle parent_sh;
+    JSAtom atom;
+    int prop_flags;
+} ShapePropLookup;
+
+/* Lock-free lookup: equality callback for shapes matching parent + new prop. */
+static bool shape_prop_eq(GCHandle key, uint32_t hash, void *lookup_key, void *user_data)
+{
+    ShapePropLookup *lk = (ShapePropLookup *)lookup_key;
+    JSShapeHandle cand(key);
+    if (!cand || cand.hash() != hash)
+        return false;
+    uint32_t n = lk->parent_sh.prop_count();
+    if (cand.prop_count() != n + 1)
+        return false;
+    if (cand.proto_handle() != lk->parent_sh.proto_handle())
+        return false;
+    for (uint32_t i = 0; i < n; i++) {
+        if (cand.prop()[i].atom != lk->parent_sh.prop()[i].atom ||
+            cand.prop()[i].flags != lk->parent_sh.prop()[i].flags)
+            return false;
     }
-    return JSShapeHandle();
+    if (cand.prop()[n].atom != lk->atom ||
+        cand.prop()[n].flags != lk->prop_flags)
+        return false;
+    return true;
 }
 
 /* find a hashed shape matching sh + (prop, prop_flags). Return NULL if
    not found */
 static JSShapeHandle find_hashed_shape_prop(JSRuntimeHandle rt, JSShapeHandle sh,
-                                       JSAtom atom, int prop_flags)
+                                            JSAtom atom, int prop_flags)
 {
-    JSShapeHandle sh1;
-    uint32_t h, h1, idx, i, n, probe_count;
-    GCHandle sh1_handle;
-
-    h = sh.hash();
+    uint32_t h = sh.hash();
     h = shape_hash(h, atom);
     h = shape_hash(h, prop_flags);
-    h1 = get_shape_hash(h, rt.shape_hash_bits());
-    idx = h1;
-    probe_count = 0;
-    while (probe_count < rt.shape_hash_size()) {
-        sh1_handle = rt_shape_hash[idx];
-        if (sh1_handle == GC_HANDLE_NULL) {
-            return JSShapeHandle();
-        }
-        sh1 = JSShapeHandle(sh1_handle);
-        if (sh1) {
-            /* we test the hash first so that the rest is done only if the
-               shapes really match */
-            if (sh1.hash() == h &&
-                sh1.proto_handle() == sh.proto_handle() &&
-                sh1.prop_count() == ((n = sh.prop_count()) + 1)) {
-                for(i = 0; i < n; i++) {
-                    if (unlikely(sh1.prop()[i].atom != sh.prop()[i].atom) ||
-                        unlikely(sh1.prop()[i].flags != sh.prop()[i].flags))
-                        goto next;
-                }
-                if (unlikely(sh1.prop()[n].atom != atom) ||
-                    unlikely(sh1.prop()[n].flags != prop_flags))
-                    goto next;
-                return sh1;
-            }
-        }
-    next:
-        /* Quadratic probe */
-        probe_count++;
-        idx = (h1 + probe_count * probe_count) & (rt.shape_hash_size() - 1);
-    }
-    return JSShapeHandle();
+    ShapePropLookup lk;
+    lk.parent_sh = sh;
+    lk.atom = atom;
+    lk.prop_flags = prop_flags;
+    GCHandle sh_handle = lf_hash_lookup_ex(rt.shape_hash(), h, &lk,
+                                           shape_prop_eq, NULL);
+    return JSShapeHandle(sh_handle);
 }
 
 static __maybe_unused void JS_DumpShape(JSRuntimeHandle rt, int i, JSShapeHandle sh)
@@ -5785,13 +5708,20 @@ static __maybe_unused void JS_DumpShapes(JSRuntimeHandle rt)
 
     printf("JSShapes: {\n");
     printf("%5s %4s %14s %5s %5s %s\n", "SLOT", "REFS", "PROTO", "SIZE", "COUNT", "PROPS");
-    for(i = 0; i < rt.shape_hash_size(); i++) {
-        sh_handle = rt_shape_hash[i];
-        if (sh_handle != GC_HANDLE_NULL) {
-            sh = JSShapeHandle(sh_handle);
-            if (sh) {
-                JS_DumpShape(rt, i, sh);
-                assert(sh.is_hashed());
+    {
+        LFHashTable *t = rt.shape_hash();
+        if (t) {
+            int slot = 0;
+            for (i = 0; i < t->bucket_count; i++) {
+                if (atomic_load_u32(&t->buckets[i].state) == LF_HASH_OCCUPIED) {
+                    sh_handle = t->buckets[i].value;
+                    sh = JSShapeHandle(sh_handle);
+                    if (sh) {
+                        JS_DumpShape(rt, slot, sh);
+                        assert(sh.is_hashed());
+                    }
+                    slot++;
+                }
             }
         }
     }
@@ -5839,8 +5769,10 @@ static GCValue JS_NewObjectFromShape(JSContextHandle ctx, JSShapeHandle sh, JSCl
     /* GC is automatically triggered by gc_object_alloc if needed */
     QJS_LOGD("JS_NewObjectFromShape: allocating object...");
     
-    /* Use atomic allocation that sets gc_obj_type immediately */
-    obj_handle = gc_alloc_js_object(sizeof(JSObject), JS_GC_OBJ_TYPE_JS_OBJECT);
+    /* Allocate grey so partially-initialized objects are invisible to
+     * concurrent readers and the GC marker.  We publish at the end of this
+     * function once all fields are written. */
+    obj_handle = gc_alloc_grey(sizeof(JSObject), JS_GC_OBJ_TYPE_JS_OBJECT);
     if (obj_handle == GC_HANDLE_NULL) {
         fprintf(stderr, "JS_NewObjectFromShape: allocation failed!\n");
         return JS_ThrowOutOfMemory(ctx);
@@ -5970,6 +5902,8 @@ static GCValue JS_NewObjectFromShape(JSContextHandle ctx, JSShapeHandle sh, JSCl
     }
     p_ptr = (void*)(uintptr_t)(uint32_t)p.handle();  /* Just for printf, never dereferenced */
     ret = GC_MKHANDLE(JS_TAG_OBJECT, p.handle());
+    /* Object is fully initialized; make it visible to readers and the GC. */
+    gc_publish(obj_handle);
     QJS_LOGI("JS_NewObjectFromShape: returning obj=%u tag=%d", p.handle(), (int)JS_VALUE_GET_TAG(ret));
     return ret;
 fail:
@@ -6055,6 +5989,10 @@ static GCValue JS_NewObjectProtoClassAlloc(JSContextHandle ctx, GCValue proto_va
         JS_ThrowOutOfMemory(ctx);
         return JS_EXCEPTION;
     }
+    /* Even though this shape is private (not hashed), initialize its
+       signature hash so that property additions can find matching shared
+       shapes in the lock-free shape cache. */
+    sh.set_hash(shape_initial_hash(proto));
     QJS_LOGI("JS_NewObjectProtoClassAlloc: calling JS_NewObjectFromShape...");
     return JS_NewObjectFromShape(ctx, sh, class_id, NULL);
 }
@@ -7173,11 +7111,8 @@ extern "C" void mark_children(JSRuntimeHandle rt, GCHandle handle,
             }
             
             /* Mark shape_hash - hash table for shape deduplication */
-            GCHandle shape_hash_h = runtime.shape_hash_handle();
-            if (shape_hash_h != GC_HANDLE_NULL) {
-                QJS_LOGI("mark_children: marking shape_hash handle=%u", shape_hash_h);
-                mark_func(rt, shape_hash_h);
-            }
+            /* The lock-free shape hash table is not a GC allocation; the
+               shapes it references are kept alive by their objects and roots. */
             
             /* Mark atom_gc_marks - mark bits for atoms during GC */
             GCHandle atom_gc_marks_h = runtime.atom_gc_marks_handle();
@@ -7425,47 +7360,40 @@ static void gc_mark_roots(JSRuntimeHandle rt)
  */
 extern "C" void gc_cleanup_shape_hash_table(JSRuntimeHandle rt)
 {
-    int i;
-    
+    uint32_t i;
+
     QJS_LOGI("gc_cleanup_shape_hash_table: ENTER");
-    
-    if (rt.shape_hash_handle() == GC_HANDLE_NULL) {
+
+    LFHashTable *t = rt.shape_hash();
+    if (!t) {
         QJS_LOGI("gc_cleanup_shape_hash_table: no hash table");
         return;
     }
-    
-    GCHandle *shape_hash = rt_shape_hash;
-    if (shape_hash == NULL) {
-        QJS_LOGI("gc_cleanup_shape_hash_table: shape_hash pointer is NULL");
-        return;
-    }
-    
-    uint32_t hash_size = rt.shape_hash_size();
-    
-    for (i = 0; i < hash_size; i++) {
-        GCHandle sh_handle = shape_hash[i];
-        
-        if (sh_handle != GC_HANDLE_NULL) {
-            JSShapeHandle sh = JSShapeHandle(sh_handle);
-            if (!sh) {
-                /* Shape pointer is invalid, clear the slot */
-                QJS_LOGI("gc_cleanup_shape_hash_table: clearing invalid handle from hash[%d]", i);
-                shape_hash[i] = GC_HANDLE_NULL;
-                rt.set_shape_hash_count(rt.shape_hash_count() - 1);
-            } else {
-                /* Check if this shape will be freed (unmarked and size > 0) */
-                if (gc_handle_get_size(sh.handle()) > 0 && !gc_handle_get_mark(sh.handle())) {
-                    /* This shape will be freed - remove it from the hash table */
-                    QJS_LOGI("gc_cleanup_shape_hash_table: removing shape handle=%u from hash[%d]", 
-                             sh_handle, i);
-                    shape_hash[i] = GC_HANDLE_NULL;
-                    sh.set_is_hashed(FALSE);
-                    rt.set_shape_hash_count(rt.shape_hash_count() - 1);
-                }
-            }
+
+    for (i = 0; i < t->bucket_count; i++) {
+        LFHashBucket *b = &t->buckets[i];
+        if (atomic_load_u32(&b->state) != LF_HASH_OCCUPIED)
+            continue;
+
+        GCHandle sh_handle = b->value;
+        JSShapeHandle sh = JSShapeHandle(sh_handle);
+        bool remove = false;
+        if (!sh) {
+            QJS_LOGI("gc_cleanup_shape_hash_table: clearing invalid handle from bucket[%u]", i);
+            remove = true;
+        } else if (gc_handle_get_size(sh.handle()) > 0 && !gc_handle_get_mark(sh.handle())) {
+            QJS_LOGI("gc_cleanup_shape_hash_table: removing shape handle=%u from bucket[%u]",
+                     sh_handle, i);
+            remove = true;
+        }
+
+        if (remove) {
+            uint32_t prev = atomic_compare_exchange_u32(&b->state, LF_HASH_OCCUPIED, LF_HASH_TOMBSTONE);
+            if (prev == LF_HASH_OCCUPIED)
+                rt.shape_hash_count_dec();
         }
     }
-    
+
     QJS_LOGI("gc_cleanup_shape_hash_table: DONE");
 }
 
@@ -8078,18 +8006,21 @@ void JS_ComputeMemoryUsage(JSRuntimeHandle rt, JSMemoryUsage *s)
     s->obj_size += s->obj_count * sizeof(JSObject);
 
     /* hashed shapes */
-    s->memory_used_count++; /* rt->shape_hash */
-    s->memory_used_size += sizeof(rt_shape_hash[0]) * rt.shape_hash_size();
-    for(i = 0; i < rt.shape_hash_size(); i++) {
-        JSShapeHandle sh;
-        GCHandle sh_handle;
-        sh_handle = rt_shape_hash[i];
-        if (sh_handle != GC_HANDLE_NULL) {
-            sh = JSShapeHandle(sh_handle);
-            if (sh) {
-                int hash_size = sh.prop_hash_mask() + 1;
-                s->shape_count++;
-                s->shape_size += get_shape_size(hash_size, sh.prop_size());
+    {
+        LFHashTable *t = rt.shape_hash();
+        if (t) {
+            s->memory_used_count++; /* rt->shape_hash */
+            s->memory_used_size += sizeof(LFHashTable) +
+                                   (t->bucket_count - 1) * sizeof(LFHashBucket);
+            for (i = 0; i < t->bucket_count; i++) {
+                if (atomic_load_u32(&t->buckets[i].state) == LF_HASH_OCCUPIED) {
+                    JSShapeHandle sh = JSShapeHandle(t->buckets[i].value);
+                    if (sh) {
+                        int hash_size = sh.prop_hash_mask() + 1;
+                        s->shape_count++;
+                        s->shape_size += get_shape_size(hash_size, sh.prop_size());
+                    }
+                }
             }
         }
     }
@@ -10146,40 +10077,25 @@ static JSProperty *add_property(JSContextHandle ctx,
         }
     }
     sh = GC_SHAPE_DEREF(p.shape_handle());
-    if (sh.is_hashed()) {
-        /* try to find an existing shape */
-        new_sh = find_hashed_shape_prop(ctx_rt, sh, prop, prop_flags);
-        if (new_sh.valid()) {
-            /* matching shape found: use it */
-            /*  the property array may need to be resized */
-            if (new_sh.prop_size() != sh.prop_size()) {
-                GCHandle new_prop_handle = gc_realloc(p.prop_handle(), 
-                                      sizeof(p_prop[0]) * new_sh.prop_size());
-                if (new_prop_handle == GC_HANDLE_NULL)
-                    return NULL;
-                p.set_prop_handle(new_prop_handle);
-                p.set_prop_handle(new_prop_handle);
-            }
-            p.set_shape_handle(new_sh.shape_handle());
-            /* CRITICAL: Remove old shape from hash table since no objects reference it.
-             * The old shape will be freed during GC since nothing references it.
-             * We must remove it from hash table to prevent hash table pollution. */
-            if (sh.is_hashed()) {
-                js_shape_hash_delete(ctx_rt, sh);
-                sh.set_is_hashed(FALSE);
-            }
-            return &p_prop[new_sh.prop_count() - 1];
-        } else if (0) {
-            /* if the shape is shared, clone it */
-            new_sh = js_clone_shape(ctx, sh);
-            if (!new_sh)
+    /* Always try to find an existing shape for the next property, whether the
+       current shape is shared or private.  This maximizes shape sharing and
+       avoids creating duplicate hashed shapes when growing private shapes. */
+    new_sh = find_hashed_shape_prop(ctx_rt, sh, prop, prop_flags);
+    if (new_sh.valid()) {
+        /* matching shape found: use it */
+        /*  the property array may need to be resized */
+        if (new_sh.prop_size() != sh.prop_size()) {
+            GCHandle new_prop_handle = gc_realloc(p.prop_handle(),
+                                  sizeof(p_prop[0]) * new_sh.prop_size());
+            if (new_prop_handle == GC_HANDLE_NULL)
                 return NULL;
-            /* hash the cloned shape */
-            new_sh.set_is_hashed(TRUE);
-            js_shape_hash_insert(ctx_rt, new_sh);
-            /* Don't free old shape here - let GC collect it when unreachable */
-            p.set_shape_handle(new_sh.shape_handle());
+            p.set_prop_handle(new_prop_handle);
+            p.set_prop_handle(new_prop_handle);
         }
+        p.set_shape_handle(new_sh.shape_handle());
+        /* The old shape may still be referenced by other objects; leave it
+           in the shared hash table and let GC cleanup remove it if dead. */
+        return &p_prop[new_sh.prop_count() - 1];
     }
     GCHandle sh_handle = p.shape_handle();
     if (add_shape_property(ctx, &sh_handle, p, prop, prop_flags))
@@ -64675,7 +64591,7 @@ extern "C" void JSRuntime_set_shape_hash_count(JSRuntimeHandle rt, uint32_t coun
 }
 
 extern "C" uint32_t *JSRuntime_get_shape_hash(JSRuntimeHandle rt) {
-    return rt.shape_hash_ptr();
+    return NULL;
 }
 
 extern "C" int JSShape_is_hashed(uint32_t shape_handle) {
@@ -64746,7 +64662,7 @@ extern "C" GCValue JSJobEntry_get_argv(uint32_t job_handle, int index) {
 
 /* Handle array getters */
 extern "C" uint32_t JSRuntime_get_shape_hash_handle(JSRuntimeHandle rt) {
-    return rt.shape_hash_handle();
+    return GC_HANDLE_NULL;
 }
 
 extern "C" uint32_t JSRuntime_get_atom_array_handle(JSRuntimeHandle rt) {
