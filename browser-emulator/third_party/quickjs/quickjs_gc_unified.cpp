@@ -944,6 +944,15 @@ void gc_write_barrier(GCHandle source, GCHandle target) {
     }
 }
 
+bool gc_ptr_in_heap(void *ptr) {
+    if (!ptr) return false;
+    uint32_t idx = gc_active_buffer_index();
+    GCBuffer *buf = &g_gc.buffers[idx];
+    uint8_t *start = buf->storage;
+    uint8_t *end = start + buf->bump_offset;
+    return (uint8_t *)ptr >= start && (uint8_t *)ptr < end;
+}
+
 /* ============================================================================
  * GC INITIALIZATION & CLEANUP
  * ============================================================================
@@ -3033,15 +3042,23 @@ void gc_list_add_between(GCHandle new_node,
     
     new_link->prev = prev;
     new_link->next = next;
+    gc_write_barrier_for_heap_slot(&new_link->prev, prev);
+    gc_write_barrier_for_heap_slot(&new_link->next, next);
     
     if (prev != GC_HANDLE_NULL) {
         GCListHead *prev_link = gc_list_head_from_handle(prev, link_offset);
-        if (prev_link) prev_link->next = new_node;
+        if (prev_link) {
+            prev_link->next = new_node;
+            gc_write_barrier_for_heap_slot(&prev_link->next, new_node);
+        }
     }
     
     if (next != GC_HANDLE_NULL) {
         GCListHead *next_link = gc_list_head_from_handle(next, link_offset);
-        if (next_link) next_link->prev = new_node;
+        if (next_link) {
+            next_link->prev = new_node;
+            gc_write_barrier_for_heap_slot(&next_link->prev, new_node);
+        }
     }
 }
 
@@ -3054,8 +3071,10 @@ void gc_list_add(GCHandle new_node, struct GCListHead *head,
     gc_list_add_between(new_node, GC_HANDLE_NULL, first, link_offset);
     
     head->next = new_node;
+    gc_write_barrier_for_heap_slot(&head->next, new_node);
     if (head->prev == GC_HANDLE_NULL) {
         head->prev = new_node;
+        gc_write_barrier_for_heap_slot(&head->prev, new_node);
     }
 }
 
@@ -3068,8 +3087,10 @@ void gc_list_add_tail(GCHandle new_node, struct GCListHead *head,
     gc_list_add_between(new_node, last, GC_HANDLE_NULL, link_offset);
     
     head->prev = new_node;
+    gc_write_barrier_for_heap_slot(&head->prev, new_node);
     if (head->next == GC_HANDLE_NULL) {
         head->next = new_node;
+        gc_write_barrier_for_heap_slot(&head->next, new_node);
     }
 }
 

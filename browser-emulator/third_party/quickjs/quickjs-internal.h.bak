@@ -294,10 +294,7 @@ public:
     
     void set_frame_handle(GCHandle val) {
         JSVarRef* p = get_ptr();
-        if (p && !p->is_detached) {
-            p->frame_ref.frame_handle = val;
-            gc_write_barrier_for_heap_slot(&p->frame_ref.frame_handle, val);
-        }
+        if (p && !p->is_detached) p->frame_ref.frame_handle = val;
     }
     
     /* Get frame pointer (for sync frames) */
@@ -348,11 +345,7 @@ public:
      */
     void set_value(const GCValue& val) {
         GCValue* pv = pvalue();
-        if (pv) {
-            *pv = val;
-            if (gc_ptr_in_heap(pv))
-                gc_write_barrier_for_heap_slot(pv, GC_VALUE_GET_HANDLE(val));
-        }
+        if (pv) *pv = val;
     }
     
     /*
@@ -418,10 +411,7 @@ public:
      */
     void set_detached_value(const GCValue& val) {
         JSVarRef* p = get_ptr();
-        if (p && p->is_detached) {
-            p->frame_ref.value = val;
-            gc_write_barrier_for_heap_slot(&p->frame_ref.value, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p && p->is_detached) p->frame_ref.value = val;
     }
     
     /* =========================================================================
@@ -442,7 +432,6 @@ public:
         GCValue* current = pvalue();
         if (current) {
             p->frame_ref.value = *current;
-            gc_write_barrier_for_heap_slot(&p->frame_ref.value, GC_VALUE_GET_HANDLE(*current));
         } else {
             p->frame_ref.value = GC_UNDEFINED;
         }
@@ -460,7 +449,6 @@ public:
         if (!p) return;
         
         p->frame_ref.value = val;
-        gc_write_barrier_for_heap_slot(&p->frame_ref.value, GC_VALUE_GET_HANDLE(val));
         p->is_detached = TRUE;
     }
     
@@ -482,7 +470,6 @@ public:
         GCHandle* array = (GCHandle*)gc_deref(array_handle);
         if (!array) return;
         array[index] = var_ref.handle();
-        gc_write_barrier_for_heap_slot(&array[index], var_ref.handle());
     }
     
     /* =========================================================================

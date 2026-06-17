@@ -2030,10 +2030,7 @@ public:
     
     void set_proto_handle(GCHandle val) {
         JSShape* p = get_ptr();
-        if (p) {
-            p->proto_handle = val;
-            gc_write_barrier_for_heap_slot(&p->proto_handle, val);
-        }
+        if (p) p->proto_handle = val;
     }
     
     /* handle access - returns the handle stored in the shape itself */
@@ -2044,10 +2041,7 @@ public:
     
     void set_shape_handle(GCHandle val) {
         JSShape* p = get_ptr();
-        if (p) {
-            p->handle = val;
-            gc_write_barrier_for_heap_slot(&p->handle, val);
-        }
+        if (p) p->handle = val;
     }
     
     /* =========================================================================
@@ -2477,10 +2471,7 @@ public:
     
     void set_left(const GCValue& val) {
         JSStringRope* p = get_ptr();
-        if (p) {
-            p->left = val;
-            gc_write_barrier_for_heap_slot(&p->left, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->left = val;
     }
     
     /* right access */
@@ -2491,10 +2482,7 @@ public:
     
     void set_right(const GCValue& val) {
         JSStringRope* p = get_ptr();
-        if (p) {
-            p->right = val;
-            gc_write_barrier_for_heap_slot(&p->right, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->right = val;
     }
     
     /* =========================================================================
@@ -2674,10 +2662,7 @@ public:
     
     void set_shape_handle(GCHandle shape) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->shape_handle = shape;
-            gc_write_barrier_for_heap_slot(&p->shape_handle, shape);
-        }
+        if (p) p->shape_handle = shape;
     }
     
     /* prop_handle access */
@@ -2690,10 +2675,7 @@ public:
     
     void set_prop_handle(GCHandle prop) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->prop_handle = prop;
-            gc_write_barrier_for_heap_slot(&p->prop_handle, prop);
-        }
+        if (p) p->prop_handle = prop;
     }
     
     /* prop_ptr - returns raw pointer to JSProperty array (use with caution) */
@@ -2712,10 +2694,7 @@ public:
     
     void set_prototype(const GCValue& proto) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->prototype = proto;
-            gc_write_barrier_for_heap_slot(&p->prototype, GC_VALUE_GET_HANDLE(proto));
-        }
+        if (p) p->prototype = proto;
     }
     
     /* Boolean flag accessors */
@@ -2817,10 +2796,7 @@ public:
     
     void set_opaque_handle(GCHandle handle) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.opaque_handle = handle;
-            gc_write_barrier_for_heap_slot(&p->u.opaque_handle, handle);
-        }
+        if (p) p->u.opaque_handle = handle;
     }
     
     /* Union array field access - u.array.u.ptr */
@@ -2842,10 +2818,7 @@ public:
     
     void set_array_values_handle(GCHandle h) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.array.u.values_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.array.u.values_handle, h);
-        }
+        if (p) p->u.array.u.values_handle = h;
     }
     
     /* array_values_ptr - returns raw pointer to GCValue array (use with caution) */
@@ -2885,10 +2858,7 @@ public:
     
     void set_regexp_pattern_handle(GCHandle h) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.regexp.pattern_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.regexp.pattern_handle, h);
-        }
+        if (p) p->u.regexp.pattern_handle = h;
     }
     
     /* Union regexp field access - u.regexp.bytecode_handle */
@@ -2899,10 +2869,7 @@ public:
     
     void set_regexp_bytecode_handle(GCHandle h) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.regexp.bytecode_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.regexp.bytecode_handle, h);
-        }
+        if (p) p->u.regexp.bytecode_handle = h;
     }
     
     /* Union global_object field access - u.global_object.uninitialized_vars */
@@ -2913,10 +2880,7 @@ public:
     
     void set_global_object_uninitialized_vars(const GCValue& val) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.global_object.uninitialized_vars = val;
-            gc_write_barrier_for_heap_slot(&p->u.global_object.uninitialized_vars, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->u.global_object.uninitialized_vars = val;
     }
     
     /* Union object_data field access */
@@ -2927,10 +2891,7 @@ public:
     
     void set_object_data(const GCValue& val) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.object_data = val;
-            gc_write_barrier_for_heap_slot(&p->u.object_data, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->u.object_data = val;
     }
     
     /* Union array_iterator_data_handle access - returns typed handle */
@@ -2941,10 +2902,7 @@ public:
     
     void set_array_iterator_data_handle(GCHandle h) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.array_iterator_data_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.array_iterator_data_handle, h);
-        }
+        if (p) p->u.array_iterator_data_handle = h;
     }
     
     /* Union iterator_wrap_data_handle access - returns typed handle */
@@ -2955,10 +2913,7 @@ public:
     
     void set_iterator_wrap_data_handle(GCHandle h) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.iterator_wrap_data_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.iterator_wrap_data_handle, h);
-        }
+        if (p) p->u.iterator_wrap_data_handle = h;
     }
     
     /* Union iterator_concat_data_handle access - returns typed handle */
@@ -2969,10 +2924,7 @@ public:
     
     void set_iterator_concat_data_handle(GCHandle h) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.iterator_concat_data_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.iterator_concat_data_handle, h);
-        }
+        if (p) p->u.iterator_concat_data_handle = h;
     }
     
     /* Union iterator_helper_data_handle access - returns typed handle */
@@ -2983,10 +2935,7 @@ public:
     
     void set_iterator_helper_data_handle(GCHandle h) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.iterator_helper_data_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.iterator_helper_data_handle, h);
-        }
+        if (p) p->u.iterator_helper_data_handle = h;
     }
     
     /* Union regexp_string_iterator_data_handle access - returns typed handle */
@@ -2997,10 +2946,7 @@ public:
     
     void set_regexp_string_iterator_data_handle(GCHandle h) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.regexp_string_iterator_data_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.regexp_string_iterator_data_handle, h);
-        }
+        if (p) p->u.regexp_string_iterator_data_handle = h;
     }
     
     /* Union map_state_handle access - returns typed handle */
@@ -3011,10 +2957,7 @@ public:
     
     void set_map_state_handle(GCHandle h) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.map_state_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.map_state_handle, h);
-        }
+        if (p) p->u.map_state_handle = h;
     }
     
     /* Union map_iterator_data_handle access - returns typed handle */
@@ -3025,10 +2968,7 @@ public:
     
     void set_map_iterator_data_handle(GCHandle h) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.map_iterator_data_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.map_iterator_data_handle, h);
-        }
+        if (p) p->u.map_iterator_data_handle = h;
     }
     
     /* Union promise_function_data_handle access - returns typed handle */
@@ -3039,10 +2979,7 @@ public:
     
     void set_promise_function_data_handle(GCHandle h) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.promise_function_data_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.promise_function_data_handle, h);
-        }
+        if (p) p->u.promise_function_data_handle = h;
     }
     
     /* Union func field access - u.func.function_bytecode_handle */
@@ -3053,10 +2990,7 @@ public:
     
     void set_func_bytecode_handle(GCHandle h) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.func.function_bytecode_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.func.function_bytecode_handle, h);
-        }
+        if (p) p->u.func.function_bytecode_handle = h;
     }
     
     /* Union func field access - u.func.var_refs_handle */
@@ -3067,10 +3001,7 @@ public:
     
     void set_func_var_refs_handle(GCHandle h) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.func.var_refs_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.func.var_refs_handle, h);
-        }
+        if (p) p->u.func.var_refs_handle = h;
     }
     
     /* Union func field access - u.func.home_object_handle */
@@ -3081,10 +3012,7 @@ public:
     
     void set_func_home_object_handle(GCHandle h) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.func.home_object_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.func.home_object_handle, h);
-        }
+        if (p) p->u.func.home_object_handle = h;
     }
     
     /* Union func field access - u.func.parent_frame_handle */
@@ -3095,10 +3023,7 @@ public:
     
     void set_func_parent_frame_handle(GCHandle h) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.func.parent_frame_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.func.parent_frame_handle, h);
-        }
+        if (p) p->u.func.parent_frame_handle = h;
     }
     
     /* Union bound_function_handle access - returns typed handle */
@@ -3109,10 +3034,7 @@ public:
     
     void set_bound_function_handle(GCHandle h) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.bound_function_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.bound_function_handle, h);
-        }
+        if (p) p->u.bound_function_handle = h;
     }
     
     /* Union for_in_iterator_handle access - returns typed handle */
@@ -3123,10 +3045,7 @@ public:
     
     void set_for_in_iterator_handle(GCHandle h) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.for_in_iterator_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.for_in_iterator_handle, h);
-        }
+        if (p) p->u.for_in_iterator_handle = h;
     }
     
     /* Union array field access - u.array.u.var_refs_handle */
@@ -3137,10 +3056,7 @@ public:
     
     void set_array_var_refs_handle(GCHandle h) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.array.u.var_refs_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.array.u.var_refs_handle, h);
-        }
+        if (p) p->u.array.u.var_refs_handle = h;
     }
     
     /* Union generator_data_handle access - returns typed handle */
@@ -3151,10 +3067,7 @@ public:
     
     void set_generator_data_handle(GCHandle h) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.generator_data_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.generator_data_handle, h);
-        }
+        if (p) p->u.generator_data_handle = h;
     }
     
     /* Union async_generator_data_handle access - returns typed handle */
@@ -3165,10 +3078,7 @@ public:
     
     void set_async_generator_data_handle(GCHandle h) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.async_generator_data_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.async_generator_data_handle, h);
-        }
+        if (p) p->u.async_generator_data_handle = h;
     }
     
     /* Union async_function_data_handle access */
@@ -3179,10 +3089,7 @@ public:
     
     void set_async_function_data_handle(GCHandle h) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.async_function_data_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.async_function_data_handle, h);
-        }
+        if (p) p->u.async_function_data_handle = h;
     }
     
     /* Union c_function_data_record_handle access - returns typed handle */
@@ -3193,10 +3100,7 @@ public:
     
     void set_c_function_data_record_handle(GCHandle h) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.c_function_data_record_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.c_function_data_record_handle, h);
-        }
+        if (p) p->u.c_function_data_record_handle = h;
     }
     
     /* Union array_buffer_handle access - returns typed handle */
@@ -3207,10 +3111,7 @@ public:
     
     void set_array_buffer_handle(GCHandle h) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.array_buffer_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.array_buffer_handle, h);
-        }
+        if (p) p->u.array_buffer_handle = h;
     }
     
     /* Union typed_array_handle access - returns typed handle */
@@ -3221,10 +3122,7 @@ public:
     
     void set_typed_array_handle(GCHandle h) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.typed_array_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.typed_array_handle, h);
-        }
+        if (p) p->u.typed_array_handle = h;
     }
     
     /* Typed array pointer accessors */
@@ -3346,10 +3244,7 @@ public:
     
     void set_cfunc_realm_handle(GCHandle h) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.cfunc.realm_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.cfunc.realm_handle, h);
-        }
+        if (p) p->u.cfunc.realm_handle = h;
     }
     
     /* Union cfunc field access - u.cfunc.c_function */
@@ -3440,10 +3335,7 @@ public:
     
     void set_proxy_data_handle(GCHandle h) {
         JSObject* p = get_ptr();
-        if (p) {
-            p->u.proxy_data_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.proxy_data_handle, h);
-        }
+        if (p) p->u.proxy_data_handle = h;
     }
 };
 

@@ -186,10 +186,7 @@ public:
     
     void set_rt_handle(GCHandle rt) {
         JSContext* p = get_ptr();
-        if (p) {
-            p->rt_handle = rt;
-            gc_write_barrier_for_heap_slot(&p->rt_handle, rt);
-        }
+        if (p) p->rt_handle = rt;
     }
     
     /* binary_object_count access */
@@ -222,10 +219,7 @@ public:
     
     void set_array_shape_handle(GCHandle handle) {
         JSContext* p = get_ptr();
-        if (p) {
-            p->array_shape_handle = handle;
-            gc_write_barrier_for_heap_slot(&p->array_shape_handle, handle);
-        }
+        if (p) p->array_shape_handle = handle;
     }
     
     GCHandle& array_shape_handle_ref() {
@@ -241,10 +235,7 @@ public:
     
     void set_arguments_shape_handle(GCHandle handle) {
         JSContext* p = get_ptr();
-        if (p) {
-            p->arguments_shape_handle = handle;
-            gc_write_barrier_for_heap_slot(&p->arguments_shape_handle, handle);
-        }
+        if (p) p->arguments_shape_handle = handle;
     }
     
     GCHandle& arguments_shape_handle_ref() {
@@ -260,10 +251,7 @@ public:
     
     void set_mapped_arguments_shape_handle(GCHandle handle) {
         JSContext* p = get_ptr();
-        if (p) {
-            p->mapped_arguments_shape_handle = handle;
-            gc_write_barrier_for_heap_slot(&p->mapped_arguments_shape_handle, handle);
-        }
+        if (p) p->mapped_arguments_shape_handle = handle;
     }
     
     GCHandle& mapped_arguments_shape_handle_ref() {
@@ -279,10 +267,7 @@ public:
     
     void set_regexp_shape_handle(GCHandle handle) {
         JSContext* p = get_ptr();
-        if (p) {
-            p->regexp_shape_handle = handle;
-            gc_write_barrier_for_heap_slot(&p->regexp_shape_handle, handle);
-        }
+        if (p) p->regexp_shape_handle = handle;
     }
     
     /* regexp_shape_handle access by reference (for functions that modify it) */
@@ -299,10 +284,7 @@ public:
     
     void set_regexp_result_shape_handle(GCHandle handle) {
         JSContext* p = get_ptr();
-        if (p) {
-            p->regexp_result_shape_handle = handle;
-            gc_write_barrier_for_heap_slot(&p->regexp_result_shape_handle, handle);
-        }
+        if (p) p->regexp_result_shape_handle = handle;
     }
     
     /* regexp_result_shape_handle access by reference (for functions that modify it) */
@@ -319,10 +301,7 @@ public:
     
     void set_class_proto_handle(GCHandle handle) {
         JSContext* p = get_ptr();
-        if (p) {
-            p->class_proto_handle = handle;
-            gc_write_barrier_for_heap_slot(&p->class_proto_handle, handle);
-        }
+        if (p) p->class_proto_handle = handle;
     }
     
     /* class_proto_ptr - returns raw pointer to GCValue array (use with caution) */
@@ -339,10 +318,7 @@ public:
     
     void set_function_proto(const GCValue& val) {
         JSContext* p = get_ptr();
-        if (p) {
-            p->function_proto = val;
-            gc_write_barrier_for_heap_slot(&p->function_proto, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->function_proto = val;
     }
     
     /* function_ctor access */
@@ -353,10 +329,7 @@ public:
     
     void set_function_ctor(const GCValue& val) {
         JSContext* p = get_ptr();
-        if (p) {
-            p->function_ctor = val;
-            gc_write_barrier_for_heap_slot(&p->function_ctor, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->function_ctor = val;
     }
     
     /* array_ctor access */
@@ -367,10 +340,7 @@ public:
     
     void set_array_ctor(const GCValue& val) {
         JSContext* p = get_ptr();
-        if (p) {
-            p->array_ctor = val;
-            gc_write_barrier_for_heap_slot(&p->array_ctor, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->array_ctor = val;
     }
     
     /* regexp_ctor access */
@@ -381,10 +351,7 @@ public:
     
     void set_regexp_ctor(const GCValue& val) {
         JSContext* p = get_ptr();
-        if (p) {
-            p->regexp_ctor = val;
-            gc_write_barrier_for_heap_slot(&p->regexp_ctor, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->regexp_ctor = val;
     }
     
     /* promise_ctor access */
@@ -395,10 +362,7 @@ public:
     
     void set_promise_ctor(const GCValue& val) {
         JSContext* p = get_ptr();
-        if (p) {
-            p->promise_ctor = val;
-            gc_write_barrier_for_heap_slot(&p->promise_ctor, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->promise_ctor = val;
     }
     
     /* iterator_ctor access */
@@ -409,10 +373,7 @@ public:
     
     void set_iterator_ctor(const GCValue& val) {
         JSContext* p = get_ptr();
-        if (p) {
-            p->iterator_ctor = val;
-            gc_write_barrier_for_heap_slot(&p->iterator_ctor, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->iterator_ctor = val;
     }
     
     /* async_iterator_proto access */
@@ -423,10 +384,7 @@ public:
     
     void set_async_iterator_proto(const GCValue& val) {
         JSContext* p = get_ptr();
-        if (p) {
-            p->async_iterator_proto = val;
-            gc_write_barrier_for_heap_slot(&p->async_iterator_proto, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->async_iterator_proto = val;
     }
     
     /* array_proto_values access */
@@ -437,10 +395,7 @@ public:
     
     void set_array_proto_values(const GCValue& val) {
         JSContext* p = get_ptr();
-        if (p) {
-            p->array_proto_values = val;
-            gc_write_barrier_for_heap_slot(&p->array_proto_values, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->array_proto_values = val;
     }
     
     /* throw_type_error access */
@@ -451,10 +406,7 @@ public:
     
     void set_throw_type_error(const GCValue& val) {
         JSContext* p = get_ptr();
-        if (p) {
-            p->throw_type_error = val;
-            gc_write_barrier_for_heap_slot(&p->throw_type_error, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->throw_type_error = val;
     }
     
     /* eval_obj access */
@@ -465,10 +417,7 @@ public:
     
     void set_eval_obj(const GCValue& val) {
         JSContext* p = get_ptr();
-        if (p) {
-            p->eval_obj = val;
-            gc_write_barrier_for_heap_slot(&p->eval_obj, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->eval_obj = val;
     }
     
     /* global_obj access */
@@ -479,10 +428,7 @@ public:
     
     void set_global_obj(const GCValue& val) {
         JSContext* p = get_ptr();
-        if (p) {
-            p->global_obj = val;
-            gc_write_barrier_for_heap_slot(&p->global_obj, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->global_obj = val;
     }
     
     /* random_state access */
@@ -747,10 +693,7 @@ public:
     
     void set_atom_hash_handle(GCHandle h) {
         JSRuntime* p = get_ptr();
-        if (p) {
-            p->atom_hash_handle = h;
-            gc_write_barrier_for_heap_slot(&p->atom_hash_handle, h);
-        }
+        if (p) p->atom_hash_handle = h;
     }
     
     /* atom_array_handle access */
@@ -761,10 +704,7 @@ public:
     
     void set_atom_array_handle(GCHandle h) {
         JSRuntime* p = get_ptr();
-        if (p) {
-            p->atom_array_handle = h;
-            gc_write_barrier_for_heap_slot(&p->atom_array_handle, h);
-        }
+        if (p) p->atom_array_handle = h;
     }
     
     /* atom_free_index access */
@@ -797,10 +737,7 @@ public:
     
     void set_class_array_handle(GCHandle h) {
         JSRuntime* p = get_ptr();
-        if (p) {
-            p->class_array_handle = h;
-            gc_write_barrier_for_heap_slot(&p->class_array_handle, h);
-        }
+        if (p) p->class_array_handle = h;
     }
     
     /* gc_phase access */
@@ -866,10 +803,7 @@ public:
     
     void set_current_exception(const GCValue& val) {
         JSRuntime* p = get_ptr();
-        if (p) {
-            p->current_exception = val;
-            gc_write_barrier_for_heap_slot(&p->current_exception, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->current_exception = val;
     }
     
     /* current_exception_is_uncatchable access */
@@ -913,10 +847,7 @@ public:
     
     void set_atom_gc_marks_handle(GCHandle h) {
         JSRuntime* p = get_ptr();
-        if (p) {
-            p->atom_gc_marks_handle = h;
-            gc_write_barrier_for_heap_slot(&p->atom_gc_marks_handle, h);
-        }
+        if (p) p->atom_gc_marks_handle = h;
     }
     
     /* current_stack_frame access - returns dereferenced pointer */
@@ -938,10 +869,7 @@ public:
     
     void set_current_stack_frame_handle(GCHandle handle) {
         JSRuntime* p = get_ptr();
-        if (p) {
-            p->current_stack_frame_handle = handle;
-            gc_write_barrier_for_heap_slot(&p->current_stack_frame_handle, handle);
-        }
+        if (p) p->current_stack_frame_handle = handle;
     }
     
     /* host_promise_rejection_tracker access */
@@ -1106,10 +1034,7 @@ public:
     
     void set_shape_hash_handle(GCHandle h) {
         JSRuntime* p = get_ptr();
-        if (p) {
-            p->shape_hash_handle = h;
-            gc_write_barrier_for_heap_slot(&p->shape_hash_handle, h);
-        }
+        if (p) p->shape_hash_handle = h;
     }
     
     /* user_opaque access */
@@ -1345,10 +1270,7 @@ public:
     
     void set_prev_frame_handle(GCHandle handle) {
         JSStackFrame* p = get_ptr();
-        if (p) {
-            p->prev_frame_handle = handle;
-            gc_write_barrier_for_heap_slot(&p->prev_frame_handle, handle);
-        }
+        if (p) p->prev_frame_handle = handle;
     }
     
     /* cur_func access */
@@ -1359,10 +1281,7 @@ public:
     
     void set_cur_func(const GCValue& val) {
         JSStackFrame* p = get_ptr();
-        if (p) {
-            p->cur_func = val;
-            gc_write_barrier_for_heap_slot(&p->cur_func, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->cur_func = val;
     }
     
     /* arg_buf access - uses offset from frame base */
@@ -1969,10 +1888,7 @@ public:
     
     void set_module_ns(const GCValue& val) {
         JSModuleDef* p = get_ptr();
-        if (p) {
-            p->module_ns = val;
-            gc_write_barrier_for_heap_slot(&p->module_ns, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->module_ns = val;
     }
     
     /* func_obj access */
@@ -1983,10 +1899,7 @@ public:
     
     void set_func_obj(const GCValue& val) {
         JSModuleDef* p = get_ptr();
-        if (p) {
-            p->func_obj = val;
-            gc_write_barrier_for_heap_slot(&p->func_obj, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->func_obj = val;
     }
     
     /* init_func access */
@@ -2074,10 +1987,7 @@ public:
     
     void set_stack_prev_handle(GCHandle val) {
         JSModuleDef* p = get_ptr();
-        if (p) {
-            p->stack_prev_handle = val;
-            gc_write_barrier_for_heap_slot(&p->stack_prev_handle, val);
-        }
+        if (p) p->stack_prev_handle = val;
     }
     
     /* async_parent_modules_handle access */
@@ -2088,10 +1998,7 @@ public:
     
     void set_async_parent_modules_handle(GCHandle val) {
         JSModuleDef* p = get_ptr();
-        if (p) {
-            p->async_parent_modules_handle = val;
-            gc_write_barrier_for_heap_slot(&p->async_parent_modules_handle, val);
-        }
+        if (p) p->async_parent_modules_handle = val;
     }
     
     /* async_parent_modules_count access */
@@ -2175,10 +2082,7 @@ public:
     
     void set_cycle_root_handle(GCHandle val) {
         JSModuleDef* p = get_ptr();
-        if (p) {
-            p->cycle_root_handle = val;
-            gc_write_barrier_for_heap_slot(&p->cycle_root_handle, val);
-        }
+        if (p) p->cycle_root_handle = val;
     }
     
     /* promise access */
@@ -2189,10 +2093,7 @@ public:
     
     void set_promise(const GCValue& val) {
         JSModuleDef* p = get_ptr();
-        if (p) {
-            p->promise = val;
-            gc_write_barrier_for_heap_slot(&p->promise, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->promise = val;
     }
     
     /* eval_has_exception access */
@@ -2214,10 +2115,7 @@ public:
     
     void set_eval_exception(const GCValue& val) {
         JSModuleDef* p = get_ptr();
-        if (p) {
-            p->eval_exception = val;
-            gc_write_barrier_for_heap_slot(&p->eval_exception, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->eval_exception = val;
     }
     
     /* meta_obj access */
@@ -2228,10 +2126,7 @@ public:
     
     void set_meta_obj(const GCValue& val) {
         JSModuleDef* p = get_ptr();
-        if (p) {
-            p->meta_obj = val;
-            gc_write_barrier_for_heap_slot(&p->meta_obj, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->meta_obj = val;
     }
     
     /* private_value access */
@@ -2242,10 +2137,7 @@ public:
     
     void set_private_value(const GCValue& val) {
         JSModuleDef* p = get_ptr();
-        if (p) {
-            p->private_value = val;
-            gc_write_barrier_for_heap_slot(&p->private_value, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->private_value = val;
     }
     
     /* Pointer to private_value for set_value() API */
@@ -2321,10 +2213,7 @@ public:
     
     void set_resolving_func(int idx, const GCValue& val) {
         JSModuleDef* p = get_ptr();
-        if (p && idx >= 0 && idx < 2) {
-            p->resolving_funcs[idx] = val;
-            gc_write_barrier_for_heap_slot(&p->resolving_funcs[idx], GC_VALUE_GET_HANDLE(val));
-        }
+        if (p && idx >= 0 && idx < 2) p->resolving_funcs[idx] = val;
     }
     
     /* =====================================================================
@@ -2454,10 +2343,7 @@ public:
     
     void set_this_val(const GCValue& val) {
         JSAsyncFunctionState* p = get_ptr();
-        if (p) {
-            p->this_val = val;
-            gc_write_barrier_for_heap_slot(&p->this_val, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->this_val = val;
     }
     
     /* argc access */
@@ -2502,10 +2388,7 @@ public:
     
     void set_resolving_func(int idx, const GCValue& val) {
         JSAsyncFunctionState* p = get_ptr();
-        if (p && idx >= 0 && idx < 2) {
-            p->resolving_funcs[idx] = val;
-            gc_write_barrier_for_heap_slot(&p->resolving_funcs[idx], GC_VALUE_GET_HANDLE(val));
-        }
+        if (p && idx >= 0 && idx < 2) p->resolving_funcs[idx] = val;
     }
     
     /* resolving_funcs array access - returns pointer to array for APIs that need it */
@@ -2522,10 +2405,7 @@ public:
     
     void set_self_handle(GCHandle h) {
         JSAsyncFunctionState* p = get_ptr();
-        if (p) {
-            p->self_handle = h;
-            gc_write_barrier_for_heap_slot(&p->self_handle, h);
-        }
+        if (p) p->self_handle = h;
     }
     
     /* frame access - returns pointer to JSStackFrame for low-level operations */
@@ -2567,7 +2447,6 @@ public:
         if (p && p->frame.sp_offset > 0) {
             GCValue* var_buf = JS_SF_VAR_BUF(&p->frame);
             var_buf[p->frame.sp_offset - 1] = val;
-            gc_write_barrier_for_heap_slot(&var_buf[p->frame.sp_offset - 1], GC_VALUE_GET_HANDLE(val));
         }
     }
     
@@ -2614,10 +2493,7 @@ public:
     /* Set cur_func in frame */
     void set_cur_func(const GCValue& val) {
         JSAsyncFunctionState* p = get_ptr();
-        if (p) {
-            p->frame.cur_func = val;
-            gc_write_barrier_for_heap_slot(&p->frame.cur_func, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->frame.cur_func = val;
     }
     
     /* Get arg_buf offset from frame */
@@ -2701,10 +2577,7 @@ public:
     /* Set prev_frame_handle in frame */
     void set_prev_frame_handle(GCHandle handle) {
         JSAsyncFunctionState* p = get_ptr();
-        if (p) {
-            p->frame.prev_frame_handle = handle;
-            gc_write_barrier_for_heap_slot(&p->frame.prev_frame_handle, handle);
-        }
+        if (p) p->frame.prev_frame_handle = handle;
     }
     
     /* =====================================================================
@@ -2831,10 +2704,7 @@ public:
     
     void set_realm_handle(GCHandle val) {
         JSJobEntry* p = get_ptr();
-        if (p) {
-            p->realm_handle = val;
-            gc_write_barrier_for_heap_slot(&p->realm_handle, val);
-        }
+        if (p) p->realm_handle = val;
     }
     
     /* job_func access */
@@ -2874,10 +2744,7 @@ public:
     
     void set_argv_at(int idx, const GCValue& val) {
         JSJobEntry* p = get_ptr();
-        if (p && idx >= 0 && idx < p->argc) {
-            p->argv[idx] = val;
-            gc_write_barrier_for_heap_slot(&p->argv[idx], GC_VALUE_GET_HANDLE(val));
-        }
+        if (p && idx >= 0 && idx < p->argc) p->argv[idx] = val;
     }
     
     /* =====================================================================
@@ -3147,10 +3014,7 @@ public:
     
     void set_byte_code_handle(GCHandle val) {
         JSFunctionBytecode* p = get_ptr();
-        if (p) {
-            p->byte_code_handle = val;
-            gc_write_barrier_for_heap_slot(&p->byte_code_handle, val);
-        }
+        if (p) p->byte_code_handle = val;
     }
     
     /* byte_code_offset access */
@@ -3289,10 +3153,7 @@ public:
     
     void set_realm_handle(GCHandle val) {
         JSFunctionBytecode* p = get_ptr();
-        if (p) {
-            p->realm_handle = val;
-            gc_write_barrier_for_heap_slot(&p->realm_handle, val);
-        }
+        if (p) p->realm_handle = val;
     }
     
     /* cpool_offset access */
@@ -3373,10 +3234,7 @@ public:
     
     void set_debug_pc2line_handle(GCHandle val) {
         JSFunctionBytecode* p = get_ptr();
-        if (p) {
-            p->debug.pc2line_handle = val;
-            gc_write_barrier_for_heap_slot(&p->debug.pc2line_handle, val);
-        }
+        if (p) p->debug.pc2line_handle = val;
     }
     
     /* debug.pc2line_buf access - fresh dereference from handle */
@@ -3393,10 +3251,7 @@ public:
     
     void set_debug_source_handle(GCHandle val) {
         JSFunctionBytecode* p = get_ptr();
-        if (p) {
-            p->debug.source_handle = val;
-            gc_write_barrier_for_heap_slot(&p->debug.source_handle, val);
-        }
+        if (p) p->debug.source_handle = val;
     }
     
     /* debug.source access - fresh dereference from handle */
@@ -3642,10 +3497,7 @@ public:
     
     void set_lazy_parent_scope(GCHandle val) {
         JSFunctionBytecode* p = get_ptr();
-        if (p) {
-            p->lazy_parent_scope = val;
-            gc_write_barrier_for_heap_slot(&p->lazy_parent_scope, val);
-        }
+        if (p) p->lazy_parent_scope = val;
     }
     
     /* is_expr_body access */
@@ -3667,10 +3519,7 @@ public:
     
     void set_lazy_arg_names_handle(GCHandle val) {
         JSFunctionBytecode* p = get_ptr();
-        if (p) {
-            p->lazy_arg_names_handle = val;
-            gc_write_barrier_for_heap_slot(&p->lazy_arg_names_handle, val);
-        }
+        if (p) p->lazy_arg_names_handle = val;
     }
     
     /* lazy_arg_count access */
@@ -3758,10 +3607,7 @@ public:
     
     void set_data_handle(GCHandle h) {
         JSArrayBuffer* p = get_ptr();
-        if (p) {
-            p->data_handle = h;
-            gc_write_barrier_for_heap_slot(&p->data_handle, h);
-        }
+        if (p) p->data_handle = h;
     }
     
     bool detached() const {
@@ -3855,10 +3701,7 @@ public:
     
     void set_obj_handle(GCHandle h) {
         JSTypedArray* p = get_ptr();
-        if (p) {
-            p->obj_handle = h;
-            gc_write_barrier_for_heap_slot(&p->obj_handle, h);
-        }
+        if (p) p->obj_handle = h;
     }
     
     GCHandle buffer_handle() const {
@@ -3868,10 +3711,7 @@ public:
     
     void set_buffer_handle(GCHandle h) {
         JSTypedArray* p = get_ptr();
-        if (p) {
-            p->buffer_handle = h;
-            gc_write_barrier_for_heap_slot(&p->buffer_handle, h);
-        }
+        if (p) p->buffer_handle = h;
     }
     
     uint32_t offset() const {
@@ -3951,10 +3791,7 @@ public:
     
     void set_hash_table_handle(GCHandle h) {
         JSMapState* p = get_ptr();
-        if (p) {
-            p->hash_table_handle = h;
-            gc_write_barrier_for_heap_slot(&p->hash_table_handle, h);
-        }
+        if (p) p->hash_table_handle = h;
     }
     
     int hash_bits() const {
@@ -4041,10 +3878,7 @@ public:
         JSMapState* p = get_ptr();
         if (!p || idx >= (uint32_t)(1U << p->hash_bits)) return;
         GCHandle* table = (GCHandle*)gc_deref(p->hash_table_handle);
-        if (table) {
-            table[idx] = h;
-            gc_write_barrier_for_heap_slot(&table[idx], h);
-        }
+        if (table) table[idx] = h;
     }
     
     /* Check if hash table needs resize */
@@ -4114,10 +3948,7 @@ public:
     
     void set_promise_result(GCValue v) {
         JSPromiseData* p = get_ptr();
-        if (p) {
-            p->promise_result = v;
-            gc_write_barrier_for_heap_slot(&p->promise_result, GC_VALUE_GET_HANDLE(v));
-        }
+        if (p) p->promise_result = v;
     }
     
     GCValue* promise_result_ptr() const {
@@ -4168,10 +3999,7 @@ public:
     
     void set_target(GCValue t) {
         JSProxyData* p = get_ptr();
-        if (p) {
-            p->target = t;
-            gc_write_barrier_for_heap_slot(&p->target, GC_VALUE_GET_HANDLE(t));
-        }
+        if (p) p->target = t;
     }
     
     GCValue handler() const {
@@ -4181,10 +4009,7 @@ public:
     
     void set_handler(GCValue h) {
         JSProxyData* p = get_ptr();
-        if (p) {
-            p->handler = h;
-            gc_write_barrier_for_heap_slot(&p->handler, GC_VALUE_GET_HANDLE(h));
-        }
+        if (p) p->handler = h;
     }
     
     uint8_t is_func() const {
@@ -4234,10 +4059,7 @@ public:
     
     void set_func_obj(GCValue v) {
         JSBoundFunction* p = get_ptr();
-        if (p) {
-            p->func_obj = v;
-            gc_write_barrier_for_heap_slot(&p->func_obj, GC_VALUE_GET_HANDLE(v));
-        }
+        if (p) p->func_obj = v;
     }
     
     GCValue this_val() const {
@@ -4247,10 +4069,7 @@ public:
     
     void set_this_val(GCValue v) {
         JSBoundFunction* p = get_ptr();
-        if (p) {
-            p->this_val = v;
-            gc_write_barrier_for_heap_slot(&p->this_val, GC_VALUE_GET_HANDLE(v));
-        }
+        if (p) p->this_val = v;
     }
     
     int argc() const {
@@ -4266,10 +4085,7 @@ public:
     
     void set_argv(int idx, GCValue v) {
         JSBoundFunction* p = get_ptr();
-        if (p && idx >= 0 && idx < p->argc) {
-            p->argv[idx] = v;
-            gc_write_barrier_for_heap_slot(&p->argv[idx], GC_VALUE_GET_HANDLE(v));
-        }
+        if (p && idx >= 0 && idx < p->argc) p->argv[idx] = v;
     }
     
     /* Copy argv values to destination buffer.
@@ -4318,10 +4134,7 @@ public:
     
     void set_obj(GCValue v) {
         JSForInIterator* p = get_ptr();
-        if (p) {
-            p->obj = v;
-            gc_write_barrier_for_heap_slot(&p->obj, GC_VALUE_GET_HANDLE(v));
-        }
+        if (p) p->obj = v;
     }
     
     uint32_t idx() const {
@@ -4371,10 +4184,7 @@ public:
     
     void set_tab_atom_handle(GCHandle h) {
         JSForInIterator* p = get_ptr();
-        if (p) {
-            p->tab_atom_handle = h;
-            gc_write_barrier_for_heap_slot(&p->tab_atom_handle, h);
-        }
+        if (p) p->tab_atom_handle = h;
     }
 };
 
@@ -4426,10 +4236,7 @@ public:
     
     void set_self_handle(GCHandle h) {
         JSMapRecord* p = get_ptr();
-        if (p) {
-            p->self_handle = h;
-            gc_write_barrier_for_heap_slot(&p->self_handle, h);
-        }
+        if (p) p->self_handle = h;
     }
     
     GCHandle hash_next_handle() const {
@@ -4439,10 +4246,7 @@ public:
     
     void set_hash_next_handle(GCHandle h) {
         JSMapRecord* p = get_ptr();
-        if (p) {
-            p->hash_next_handle = h;
-            gc_write_barrier_for_heap_slot(&p->hash_next_handle, h);
-        }
+        if (p) p->hash_next_handle = h;
     }
     
     /* Get the next record in the linked list (for gc_list iteration) */
@@ -4466,10 +4270,7 @@ public:
     
     void set_key(GCValue v) {
         JSMapRecord* p = get_ptr();
-        if (p) {
-            p->key = v;
-            gc_write_barrier_for_heap_slot(&p->key, GC_VALUE_GET_HANDLE(v));
-        }
+        if (p) p->key = v;
     }
     
     GCValue value() const {
@@ -4479,10 +4280,7 @@ public:
     
     void set_value(GCValue v) {
         JSMapRecord* p = get_ptr();
-        if (p) {
-            p->value = v;
-            gc_write_barrier_for_heap_slot(&p->value, GC_VALUE_GET_HANDLE(v));
-        }
+        if (p) p->value = v;
     }
     
     /* Get self handle for gc_list operations */
@@ -4553,10 +4351,7 @@ public:
     
     void set_obj(GCValue v) {
         JSMapIteratorData* p = get_ptr();
-        if (p) {
-            p->obj = v;
-            gc_write_barrier_for_heap_slot(&p->obj, GC_VALUE_GET_HANDLE(v));
-        }
+        if (p) p->obj = v;
     }
     
     int kind() const {
@@ -4576,10 +4371,7 @@ public:
     
     void set_cur_record_handle(GCHandle h) {
         JSMapIteratorData* p = get_ptr();
-        if (p) {
-            p->cur_record_handle = h;
-            gc_write_barrier_for_heap_slot(&p->cur_record_handle, h);
-        }
+        if (p) p->cur_record_handle = h;
     }
 };
 
@@ -4609,10 +4401,7 @@ public:
     
     void set_obj(GCValue v) {
         JSArrayIteratorData* p = get_ptr();
-        if (p) {
-            p->obj = v;
-            gc_write_barrier_for_heap_slot(&p->obj, GC_VALUE_GET_HANDLE(v));
-        }
+        if (p) p->obj = v;
     }
     
     int kind() const {
@@ -4662,10 +4451,7 @@ public:
     
     void set_obj(GCValue v) {
         JSIteratorHelperData* p = get_ptr();
-        if (p) {
-            p->obj = v;
-            gc_write_barrier_for_heap_slot(&p->obj, GC_VALUE_GET_HANDLE(v));
-        }
+        if (p) p->obj = v;
     }
     
     GCValue next() const {
@@ -4675,10 +4461,7 @@ public:
     
     void set_next(GCValue v) {
         JSIteratorHelperData* p = get_ptr();
-        if (p) {
-            p->next = v;
-            gc_write_barrier_for_heap_slot(&p->next, GC_VALUE_GET_HANDLE(v));
-        }
+        if (p) p->next = v;
     }
     
     GCValue func() const {
@@ -4688,10 +4471,7 @@ public:
     
     void set_func(GCValue v) {
         JSIteratorHelperData* p = get_ptr();
-        if (p) {
-            p->func = v;
-            gc_write_barrier_for_heap_slot(&p->func, GC_VALUE_GET_HANDLE(v));
-        }
+        if (p) p->func = v;
     }
     
     GCValue inner() const {
@@ -4701,10 +4481,7 @@ public:
     
     void set_inner(GCValue v) {
         JSIteratorHelperData* p = get_ptr();
-        if (p) {
-            p->inner = v;
-            gc_write_barrier_for_heap_slot(&p->inner, GC_VALUE_GET_HANDLE(v));
-        }
+        if (p) p->inner = v;
     }
     
     int64_t count() const {
@@ -4804,10 +4581,7 @@ public:
     
     void set_iter(GCValue v) {
         JSIteratorConcatData* p = get_ptr();
-        if (p) {
-            p->iter = v;
-            gc_write_barrier_for_heap_slot(&p->iter, GC_VALUE_GET_HANDLE(v));
-        }
+        if (p) p->iter = v;
     }
     
     GCValue next() const {
@@ -4817,10 +4591,7 @@ public:
     
     void set_next(GCValue v) {
         JSIteratorConcatData* p = get_ptr();
-        if (p) {
-            p->next = v;
-            gc_write_barrier_for_heap_slot(&p->next, GC_VALUE_GET_HANDLE(v));
-        }
+        if (p) p->next = v;
     }
     
     /* Access to values[] array - returns pointer to first element */
@@ -4856,10 +4627,7 @@ public:
     
     void set_wrapped_iter(GCValue v) {
         JSIteratorWrapData* p = get_ptr();
-        if (p) {
-            p->wrapped_iter = v;
-            gc_write_barrier_for_heap_slot(&p->wrapped_iter, GC_VALUE_GET_HANDLE(v));
-        }
+        if (p) p->wrapped_iter = v;
     }
     
     GCValue wrapped_next() const {
@@ -4869,10 +4637,7 @@ public:
     
     void set_wrapped_next(GCValue v) {
         JSIteratorWrapData* p = get_ptr();
-        if (p) {
-            p->wrapped_next = v;
-            gc_write_barrier_for_heap_slot(&p->wrapped_next, GC_VALUE_GET_HANDLE(v));
-        }
+        if (p) p->wrapped_next = v;
     }
 };
 
@@ -4902,10 +4667,7 @@ public:
     
     void set_iterating_regexp(GCValue v) {
         JSRegExpStringIteratorData* p = get_ptr();
-        if (p) {
-            p->iterating_regexp = v;
-            gc_write_barrier_for_heap_slot(&p->iterating_regexp, GC_VALUE_GET_HANDLE(v));
-        }
+        if (p) p->iterating_regexp = v;
     }
     
     GCValue iterated_string() const {
@@ -4915,10 +4677,7 @@ public:
     
     void set_iterated_string(GCValue v) {
         JSRegExpStringIteratorData* p = get_ptr();
-        if (p) {
-            p->iterated_string = v;
-            gc_write_barrier_for_heap_slot(&p->iterated_string, GC_VALUE_GET_HANDLE(v));
-        }
+        if (p) p->iterated_string = v;
     }
     
     BOOL global() const {
@@ -5224,10 +4983,7 @@ public:
     
     void set_sync_iter(GCValue v) {
         JSAsyncFromSyncIteratorData* p = get_ptr();
-        if (p) {
-            p->sync_iter = v;
-            gc_write_barrier_for_heap_slot(&p->sync_iter, GC_VALUE_GET_HANDLE(v));
-        }
+        if (p) p->sync_iter = v;
     }
     
     GCValue next_method() const {
@@ -5237,10 +4993,7 @@ public:
     
     void set_next_method(GCValue v) {
         JSAsyncFromSyncIteratorData* p = get_ptr();
-        if (p) {
-            p->next_method = v;
-            gc_write_barrier_for_heap_slot(&p->next_method, GC_VALUE_GET_HANDLE(v));
-        }
+        if (p) p->next_method = v;
     }
 };
 
@@ -5270,10 +5023,7 @@ public:
     
     void set_promise(GCValue v) {
         JSPromiseFunctionData* p = get_ptr();
-        if (p) {
-            p->promise = v;
-            gc_write_barrier_for_heap_slot(&p->promise, GC_VALUE_GET_HANDLE(v));
-        }
+        if (p) p->promise = v;
     }
     
     GCHandle presolved_handle() const {
@@ -5283,10 +5033,7 @@ public:
     
     void set_presolved_handle(GCHandle h) {
         JSPromiseFunctionData* p = get_ptr();
-        if (p) {
-            p->presolved_handle = h;
-            gc_write_barrier_for_heap_slot(&p->presolved_handle, h);
-        }
+        if (p) p->presolved_handle = h;
     }
 };
 
@@ -5357,10 +5104,7 @@ public:
     
     void set_data(int idx, GCValue v) {
         JSCFunctionDataRecord* p = get_ptr();
-        if (p && idx >= 0 && idx < p->data_len) {
-            p->data[idx] = v;
-            gc_write_barrier_for_heap_slot(&p->data[idx], GC_VALUE_GET_HANDLE(v));
-        }
+        if (p && idx >= 0 && idx < p->data_len) p->data[idx] = v;
     }
     
     /* Get raw pointer - INTERNAL USE ONLY.
@@ -5407,10 +5151,7 @@ public:
     
     void set_func_state_handle(GCHandle h) {
         JSGeneratorData* p = get_ptr();
-        if (p) {
-            p->func_state_handle = h;
-            gc_write_barrier_for_heap_slot(&p->func_state_handle, h);
-        }
+        if (p) p->func_state_handle = h;
     }
     
     /* Get raw pointer - USE WITH CAUTION */
@@ -5455,10 +5196,7 @@ public:
     
     void set_generator_handle(GCHandle h) {
         JSAsyncGeneratorData* p = get_ptr();
-        if (p) {
-            p->generator_handle = h;
-            gc_write_barrier_for_heap_slot(&p->generator_handle, h);
-        }
+        if (p) p->generator_handle = h;
     }
     
     GCHandle func_state_handle() const {
@@ -5468,10 +5206,7 @@ public:
     
     void set_func_state_handle(GCHandle h) {
         JSAsyncGeneratorData* p = get_ptr();
-        if (p) {
-            p->func_state_handle = h;
-            gc_write_barrier_for_heap_slot(&p->func_state_handle, h);
-        }
+        if (p) p->func_state_handle = h;
     }
     
     /* Get raw pointer - USE WITH CAUTION */
@@ -5605,10 +5340,7 @@ public:
     
     void set_realm_handle(GCHandle val) {
         JSFinalizationRegistryData* p = get_ptr();
-        if (p) {
-            p->realm_handle = val;
-            gc_write_barrier_for_heap_slot(&p->realm_handle, val);
-        }
+        if (p) p->realm_handle = val;
     }
     
     /* cb access */
@@ -5619,10 +5351,7 @@ public:
     
     void set_cb(const GCValue& val) {
         JSFinalizationRegistryData* p = get_ptr();
-        if (p) {
-            p->cb = val;
-            gc_write_barrier_for_heap_slot(&p->cb, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->cb = val;
     }
     
     /* =====================================================================
@@ -5754,10 +5483,7 @@ public:
     
     void set_target(const GCValue& val) {
         JSWeakRefData* p = get_ptr();
-        if (p) {
-            p->target = val;
-            gc_write_barrier_for_heap_slot(&p->target, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->target = val;
     }
     
     /* =====================================================================
@@ -6157,10 +5883,7 @@ public:
     /* Set value at index - safe accessor */
     void set_value(size_t index, const GCValue& val) const {
         JSProperty* p = at(index);
-        if (p) {
-            p->u.value = val;
-            gc_write_barrier_for_heap_slot(&p->u.value, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->u.value = val;
     }
     
     /* Get getter handle at index */
@@ -6172,10 +5895,7 @@ public:
     /* Set getter handle at index */
     void set_getter_handle(size_t index, GCHandle h) const {
         JSProperty* p = at(index);
-        if (p) {
-            p->u.getset.getter_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.getset.getter_handle, h);
-        }
+        if (p) p->u.getset.getter_handle = h;
     }
     
     /* Get setter handle at index */
@@ -6187,10 +5907,7 @@ public:
     /* Set setter handle at index */
     void set_setter_handle(size_t index, GCHandle h) const {
         JSProperty* p = at(index);
-        if (p) {
-            p->u.getset.setter_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.getset.setter_handle, h);
-        }
+        if (p) p->u.getset.setter_handle = h;
     }
     
     /* Get var_ref handle at index */
@@ -6202,10 +5919,7 @@ public:
     /* Set var_ref handle at index */
     void set_var_ref_handle(size_t index, GCHandle h) const {
         JSProperty* p = at(index);
-        if (p) {
-            p->u.var_ref_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.var_ref_handle, h);
-        }
+        if (p) p->u.var_ref_handle = h;
     }
     
     /* Copy property from one index to another */
@@ -6243,10 +5957,7 @@ public:
     
     void set_value(const GCValue& val) {
         JSProperty* p = get_ptr();
-        if (p) {
-            p->u.value = val;
-            gc_write_barrier_for_heap_slot(&p->u.value, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->u.value = val;
     }
     
     /* getter_handle access (JS_PROP_GETSET) */
@@ -6257,10 +5968,7 @@ public:
     
     void set_getter_handle(GCHandle h) {
         JSProperty* p = get_ptr();
-        if (p) {
-            p->u.getset.getter_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.getset.getter_handle, h);
-        }
+        if (p) p->u.getset.getter_handle = h;
     }
     
     /* setter_handle access (JS_PROP_GETSET) */
@@ -6271,10 +5979,7 @@ public:
     
     void set_setter_handle(GCHandle h) {
         JSProperty* p = get_ptr();
-        if (p) {
-            p->u.getset.setter_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.getset.setter_handle, h);
-        }
+        if (p) p->u.getset.setter_handle = h;
     }
     
     /* var_ref_handle access (JS_PROP_VARREF) */
@@ -6285,10 +5990,7 @@ public:
     
     void set_var_ref_handle(GCHandle h) {
         JSProperty* p = get_ptr();
-        if (p) {
-            p->u.var_ref_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.var_ref_handle, h);
-        }
+        if (p) p->u.var_ref_handle = h;
     }
     
     /* realm_and_id access (JS_PROP_AUTOINIT) */
@@ -6310,10 +6012,7 @@ public:
     
     void set_init_opaque_handle(GCHandle h) {
         JSProperty* p = get_ptr();
-        if (p) {
-            p->u.init.opaque_handle = h;
-            gc_write_barrier_for_heap_slot(&p->u.init.opaque_handle, h);
-        }
+        if (p) p->u.init.opaque_handle = h;
     }
     
     /* Direct pointer access - USE WITH CAUTION */
@@ -6374,10 +6073,7 @@ public:
     
     void set_resolving_func(int idx, const GCValue& val) {
         JSPromiseReactionData* p = get_ptr();
-        if (p && idx >= 0 && idx < 2) {
-            p->resolving_funcs[idx] = val;
-            gc_write_barrier_for_heap_slot(&p->resolving_funcs[idx], GC_VALUE_GET_HANDLE(val));
-        }
+        if (p && idx >= 0 && idx < 2) p->resolving_funcs[idx] = val;
     }
     
     /* handler access */
@@ -6388,10 +6084,7 @@ public:
     
     void set_handler(const GCValue& val) {
         JSPromiseReactionData* p = get_ptr();
-        if (p) {
-            p->handler = val;
-            gc_write_barrier_for_heap_slot(&p->handler, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->handler = val;
     }
     
     /* =========================================================================
@@ -6463,10 +6156,7 @@ public:
     
     void set_target(const GCValue& val) {
         JSFinRecEntry* p = get_ptr();
-        if (p) {
-            p->target = val;
-            gc_write_barrier_for_heap_slot(&p->target, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->target = val;
     }
     
     /* held_val access */
@@ -6477,10 +6167,7 @@ public:
     
     void set_held_val(const GCValue& val) {
         JSFinRecEntry* p = get_ptr();
-        if (p) {
-            p->held_val = val;
-            gc_write_barrier_for_heap_slot(&p->held_val, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->held_val = val;
     }
     
     /* token access */
@@ -6491,10 +6178,7 @@ public:
     
     void set_token(const GCValue& val) {
         JSFinRecEntry* p = get_ptr();
-        if (p) {
-            p->token = val;
-            gc_write_barrier_for_heap_slot(&p->token, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->token = val;
     }
     
     /* Get self handle for gc_list operations */
@@ -6582,10 +6266,7 @@ public:
     
     void set_result(const GCValue& val) {
         JSAsyncGeneratorRequest* p = get_ptr();
-        if (p) {
-            p->result = val;
-            gc_write_barrier_for_heap_slot(&p->result, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->result = val;
     }
     
     /* promise access */
@@ -6596,10 +6277,7 @@ public:
     
     void set_promise(const GCValue& val) {
         JSAsyncGeneratorRequest* p = get_ptr();
-        if (p) {
-            p->promise = val;
-            gc_write_barrier_for_heap_slot(&p->promise, GC_VALUE_GET_HANDLE(val));
-        }
+        if (p) p->promise = val;
     }
     
     /* resolving_funcs access */
@@ -6611,10 +6289,7 @@ public:
     
     void set_resolving_func(int idx, const GCValue& val) {
         JSAsyncGeneratorRequest* p = get_ptr();
-        if (p && idx >= 0 && idx < 2) {
-            p->resolving_funcs[idx] = val;
-            gc_write_barrier_for_heap_slot(&p->resolving_funcs[idx], GC_VALUE_GET_HANDLE(val));
-        }
+        if (p && idx >= 0 && idx < 2) p->resolving_funcs[idx] = val;
     }
     
     /* Direct pointer access - USE WITH CAUTION */
@@ -6697,10 +6372,7 @@ public:
     
     void set_self_handle(GCHandle val) {
         JSPromiseFunctionDataResolved* p = get_ptr();
-        if (p) {
-            p->self_handle = val;
-            gc_write_barrier_for_heap_slot(&p->self_handle, val);
-        }
+        if (p) p->self_handle = val;
     }
     
     operator GCHandle() const { return handle_; }

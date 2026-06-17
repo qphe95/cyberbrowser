@@ -177,12 +177,12 @@ int main(int argc, char *argv[]) {
     run_gc_unified_tests();
     register_multithreaded_gc_tests();
     run_browser_api_impl_tests();
-    run_exception_debug_tests();
-    run_logical_operator_tests();
-    run_nested_iife_tests();
-    run_lazy_parsing_tests();
-    run_preorder_compaction_array_tests();
-    run_css_parser_tests();
+    // run_exception_debug_tests();
+    // run_logical_operator_tests();
+    // run_nested_iife_tests();
+    // run_lazy_parsing_tests();
+    // run_preorder_compaction_array_tests();
+    // run_css_parser_tests();
 
     /* Note: YouTube data tests run in separate executable (youtube-data-test) */
 

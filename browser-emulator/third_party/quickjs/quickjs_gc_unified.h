@@ -538,7 +538,29 @@ bool gc_grey_queue_push(GCHandle handle);
  * reference into another GC-managed object. */
 void gc_write_barrier(GCHandle source, GCHandle target);
 
+/* Return true if ptr points into the active GC heap (object payload area). */
+bool gc_ptr_in_heap(void *ptr);
+
 #define GC_WRITE_BARRIER(src, tgt) gc_write_barrier((src), (tgt))
+
+/* Generic heap-slot barrier: derive the source object handle from the
+ * address of the slot being written.  Only safe when slot_ptr is known to
+ * reside inside a GC-managed object payload. */
+static inline void gc_write_barrier_for_heap_slot(void *slot_ptr, GCHandle target) {
+    if (target == GC_HANDLE_NULL || !slot_ptr) return;
+    GCHeader *hdr = gc_header(slot_ptr);
+    if (!hdr) return;
+    gc_write_barrier(hdr->handle, target);
+}
+
+#define GC_WRITE_BARRIER_HEAP_HANDLE(slot_ptr, target_handle) \
+    do { \
+        GCHandle _tgt_h = (target_handle); \
+        if (_tgt_h != GC_HANDLE_NULL) gc_write_barrier_for_heap_slot((slot_ptr), _tgt_h); \
+    } while(0)
+
+#define GC_WRITE_BARRIER_HEAP_VALUE(slot_ptr, val) \
+    GC_WRITE_BARRIER_HEAP_HANDLE((slot_ptr), GC_VALUE_GET_HANDLE(val))
 
 /* ============================================================================
  * GC-Safe Linked Lists (GCListHead)
