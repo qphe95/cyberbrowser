@@ -366,11 +366,11 @@ extern "C" void register_multithreaded_gc_tests(void) {
     RUN_TEST(test_gc_multiple_cycles);
     RUN_TEST(test_gc_canary_after_swap);
     RUN_TEST(test_gc_dead_objects_freed);
-    // RUN_TEST(test_gc_root_survives_compaction);
-    // RUN_TEST(test_gc_phase_transitions);
-    // RUN_TEST(test_gc_table_consistency_during_compaction);
-    // RUN_TEST(test_gc_buffer_swap_changes_deref);
-    // RUN_TEST(test_gc_handle_valid_after_multiple_swaps);
-    // RUN_TEST(test_gc_free_list_preserved_across_swap);
-    // RUN_TEST(test_gc_background_thread_exists);
+    RUN_TEST(test_gc_root_survives_compaction);
+    RUN_TEST(test_gc_phase_transitions);
+    RUN_TEST(test_gc_table_consistency_during_compaction);
+    RUN_TEST(test_gc_buffer_swap_changes_deref);
+    RUN_TEST(test_gc_handle_valid_after_multiple_swaps);
+    RUN_TEST(test_gc_free_list_preserved_across_swap);
+    RUN_TEST(test_gc_background_thread_exists);
 }

@@ -543,14 +543,22 @@ bool gc_ptr_in_heap(void *ptr);
 
 #define GC_WRITE_BARRIER(src, tgt) gc_write_barrier((src), (tgt))
 
+/* Map an interior pointer to the handle of the owning GC object. */
+GCHandle gc_ptr_to_handle(void *ptr);
+
+/* True when the collector is in the mark phase. */
+bool gc_is_marking_phase(void);
+
 /* Generic heap-slot barrier: derive the source object handle from the
  * address of the slot being written.  Only safe when slot_ptr is known to
  * reside inside a GC-managed object payload. */
 static inline void gc_write_barrier_for_heap_slot(void *slot_ptr, GCHandle target) {
     if (target == GC_HANDLE_NULL || !slot_ptr) return;
-    GCHeader *hdr = gc_header(slot_ptr);
-    if (!hdr) return;
-    gc_write_barrier(hdr->handle, target);
+    /* The expensive interior-pointer lookup is only needed while marking. */
+    if (!gc_is_marking_phase()) return;
+    GCHandle source = gc_ptr_to_handle(slot_ptr);
+    if (source == GC_HANDLE_NULL) return;
+    gc_write_barrier(source, target);
 }
 
 #define GC_WRITE_BARRIER_HEAP_HANDLE(slot_ptr, target_handle) \

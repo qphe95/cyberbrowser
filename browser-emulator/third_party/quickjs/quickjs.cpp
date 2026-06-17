@@ -6287,6 +6287,8 @@ static void js_c_function_data_mark(JSRuntimeHandle rt, GCValue val,
     int i;
 
     if (s.valid()) {
+        /* The C-function-data record is a separate GC allocation; keep it alive. */
+        mark_func(rt, s_handle);
         for(i = 0; i < s.data_len(); i++) {
             JS_MarkValue(rt, s.data(i), mark_func);
         }
@@ -6654,6 +6656,11 @@ static void js_bound_function_mark(JSRuntimeHandle rt, GCValue val,
     JSObjectHandle p = JS_VALUE_GET_OBJ(val);
     JSBoundFunctionHandle bf = p.bound_function_handle();
     int i;
+
+    /* The bound-function data is a separate GC object; keep it alive. */
+    if (bf.valid()) {
+        mark_func(rt, bf.handle());
+    }
 
     JS_MarkValue(rt, bf.func_obj(), mark_func);
     JS_MarkValue(rt, bf.this_val(), mark_func);
@@ -22722,6 +22729,8 @@ static void js_generator_mark(JSRuntimeHandle rt, GCValue val,
 
     if (!s.valid())
         return;
+    /* The generator data object is a separate GC allocation; keep it alive. */
+    mark_func(rt, s.handle());
     func_state_handle = s.func_state_handle();
     if (func_state_handle != GC_HANDLE_NULL)
         mark_func(rt, func_state_handle);
@@ -23065,6 +23074,8 @@ static void js_async_generator_mark(JSRuntimeHandle rt, GCValue val,
     JSAsyncGeneratorDataHandle s(s_handle);
     GCHandle req_handle;
     if (s.valid()) {
+        /* The async-generator data object is a separate GC allocation; keep it alive. */
+        mark_func(rt, s_handle);
         /* GC-safe linked list iteration using container handle */
         gc_list_for_each_from_container(req_handle, s_handle, 
                                         offsetof(JSAsyncGeneratorData, queue), 
@@ -47659,6 +47670,8 @@ static void js_array_iterator_mark(JSRuntimeHandle rt, GCValue val,
     JSObjectHandle p = JS_VALUE_GET_OBJ(val);
     JSArrayIteratorDataHandle it = p.array_iterator_data_handle();
     if (it.valid()) {
+        /* The array-iterator data object is a separate GC allocation; keep it alive. */
+        mark_func(rt, it.handle());
         JS_MarkValue(rt, it.obj(), mark_func);
     }
 }
@@ -47778,6 +47791,8 @@ static void js_iterator_wrap_mark(JSRuntimeHandle rt, GCValue val,
     JSObjectHandle p = JS_VALUE_GET_OBJ(val);
     JSIteratorWrapDataHandle it = p.iterator_wrap_data_handle();
     if (it.valid()) {
+        /* The iterator-wrap data object is a separate GC allocation; keep it alive. */
+        mark_func(rt, it.handle());
         JS_MarkValue(rt, it.wrapped_iter(), mark_func);
         JS_MarkValue(rt, it.wrapped_next(), mark_func);
     }
@@ -47874,6 +47889,8 @@ static void js_iterator_concat_mark(JSRuntimeHandle rt, GCValue val,
     JSObjectHandle p = JS_VALUE_GET_OBJ(val);
     JSIteratorConcatDataHandle it = p.iterator_concat_data_handle();
     if (it.valid()) {
+        /* The iterator-concat data object is a separate GC allocation; keep it alive. */
+        mark_func(rt, it.handle());
         JS_MarkValue(rt, it.iter(), mark_func);
         JS_MarkValue(rt, it.next(), mark_func);
         /* Access values through handle */
@@ -48482,6 +48499,8 @@ static void js_iterator_helper_mark(JSRuntimeHandle rt, GCValue val,
     JSObjectHandle p = JS_VALUE_GET_OBJ(val);
     JSIteratorHelperDataHandle it = p.iterator_helper_data_handle();
     if (it.valid()) {
+        /* The iterator-helper data object is a separate GC allocation; keep it alive. */
+        mark_func(rt, it.handle());
         JS_MarkValue(rt, it.obj(), mark_func);
         JS_MarkValue(rt, it.func(), mark_func);
         JS_MarkValue(rt, it.next(), mark_func);
@@ -52635,6 +52654,8 @@ static void js_regexp_string_iterator_mark(JSRuntimeHandle rt, GCValue val,
     JSObjectHandle p = JS_VALUE_GET_OBJ(val);
     JSRegExpStringIteratorDataHandle it = p.regexp_string_iterator_data_handle();
     if (it.valid()) {
+        /* The regexp-string-iterator data object is a separate GC allocation; keep it alive. */
+        mark_func(rt, it.handle());
         JS_MarkValue(rt, it.iterating_regexp(), mark_func);
         JS_MarkValue(rt, it.iterated_string(), mark_func);
     }
@@ -54337,6 +54358,8 @@ static void js_proxy_mark(JSRuntimeHandle rt, GCValue val,
     GCHandle s_handle = JS_GetOpaqueHandle(val, JS_CLASS_PROXY);
     JSProxyDataHandle s(s_handle);
     if (s.valid()) {
+        /* The proxy data object is a separate GC allocation; keep it alive. */
+        mark_func(rt, s_handle);
         JS_MarkValue(rt, s.target(), mark_func);
         JS_MarkValue(rt, s.handler(), mark_func);
     }
@@ -56444,6 +56467,8 @@ static void js_map_iterator_mark(JSRuntimeHandle rt, GCValue val,
     JSObjectHandle p = JS_VALUE_GET_OBJ(val);
     JSMapIteratorDataHandle it = p.map_iterator_data_handle();
     if (it.valid()) {
+        /* The map-iterator data object is a separate GC allocation; keep it alive. */
+        mark_func(rt, it.handle());
         /* the record is already marked by the object */
         JS_MarkValue(rt, it.obj(), mark_func);
     }
@@ -57481,7 +57506,12 @@ static void js_promise_resolve_function_mark(JSRuntimeHandle rt, GCValue val,
     JSObjectHandle p = JS_VALUE_GET_OBJ(val);
     JSPromiseFunctionDataHandle s = p.promise_function_data_handle();
     if (s.valid()) {
+        /* The promise-function data object is a separate GC allocation; keep it alive. */
+        mark_func(rt, s.handle());
         JS_MarkValue(rt, s.promise(), mark_func);
+        GCHandle presolved_handle = s.presolved_handle();
+        if (presolved_handle != GC_HANDLE_NULL)
+            mark_func(rt, presolved_handle);
     }
 }
 
@@ -57570,6 +57600,8 @@ static void js_promise_mark(JSRuntimeHandle rt, GCValue val,
 
     if (s == GC_HANDLE_NULL)
         return;
+    /* The promise data object is a separate GC allocation; keep it alive. */
+    mark_func(rt, s);
     JSPromiseDataHandle ph(s);
     for(i = 0; i < 2; i++) {
         GCHandle rd_handle;
@@ -58341,6 +58373,8 @@ static void js_async_from_sync_iterator_mark(JSRuntimeHandle rt, GCValue val,
 {
     GCHandle s_handle = JS_GetOpaqueHandle(val, JS_CLASS_ASYNC_FROM_SYNC_ITERATOR);
     if (s_handle != GC_HANDLE_NULL) {
+        /* The async-from-sync-iterator data object is a separate GC allocation; keep it alive. */
+        mark_func(rt, s_handle);
         JSAsyncFromSyncIteratorDataHandle s(s_handle);
         JS_MarkValue(rt, s.sync_iter(), mark_func);
         JS_MarkValue(rt, s.next_method(), mark_func);

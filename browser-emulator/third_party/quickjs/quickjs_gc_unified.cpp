@@ -666,6 +666,10 @@ void gc_wait_for_completion(void) {
 bool gc_is_background_running(void) {
     return atomic_load_u32(&g_gc.gc_phase) != GC_PHASE_IDLE;
 }
+bool gc_is_marking_phase(void) {
+    return atomic_load_u32(&g_gc.gc_phase) == (uint32_t)GC_PHASE_MARKING;
+}
+
 
 /* ============================================================================
  * THREAD POOL PUBLIC TEST HELPERS
@@ -2197,6 +2201,49 @@ static inline int gc_ptr_to_buffer_index(void *ptr) {
         if (gc_ptr_in_buffer(ptr, &g_gc.buffers[i])) return i;
     }
     return -1;
+}
+
+/* Helper: Map an interior pointer to the handle of the GC object that owns it.
+ * This walks the buffer layout to find the object whose payload contains ptr.
+ * It is only safe when ptr is known to point into a GC-managed object payload. */
+GCHandle gc_ptr_to_handle(void *ptr) {
+    if (!ptr) return GC_HANDLE_NULL;
+    int buf_idx = gc_ptr_to_buffer_index(ptr);
+    if (buf_idx < 0) return GC_HANDLE_NULL;
+    GCBuffer *buf = &g_gc.buffers[buf_idx];
+    uint8_t *p = (uint8_t *)ptr;
+    uint8_t *read = buf->storage;
+    size_t bump = buf->bump_offset;
+
+    while ((size_t)(read - buf->storage) < bump) {
+        uint64_t *prefix_ptr = (uint64_t *)read;
+        GCHeader *hdr;
+        if (*prefix_ptr == GC_CANARY_PREFIX || *prefix_ptr == GC_CANARY_CORRUPTED) {
+            hdr = (GCHeader *)(read + 8);
+        } else {
+            read += MIN_OBJECT_SIZE;
+            continue;
+        }
+
+        uint32_t raw_size = hdr->size;
+        if (raw_size == 0) {
+            read += MIN_OBJECT_SIZE;
+            continue;
+        }
+        bool is_freed = (raw_size & 0x80000000) != 0;
+        uint32_t user_size = raw_size & 0x7FFFFFFF;
+        size_t total_size = gc_alloc_total_size(hdr);
+
+        if (!is_freed) {
+            uint8_t *payload_start = (uint8_t *)gc_header_to_ptr(hdr);
+            uint8_t *payload_end = payload_start + user_size;
+            if (p >= payload_start && p < payload_end) {
+                return hdr->handle;
+            }
+        }
+        read += total_size;
+    }
+    return GC_HANDLE_NULL;
 }
 
 /* Sortable record of a live object used during compaction */

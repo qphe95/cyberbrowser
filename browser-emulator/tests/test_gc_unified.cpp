@@ -574,6 +574,38 @@ TEST(test_gc_write_barrier) {
     return true;
 }
 
+TEST(test_gc_write_barrier_heap_slot) {
+    /* Verify the heap-slot barrier derives the correct source object even when
+     * the written slot is not at the start of the object payload. */
+    GCHandle src = gc_alloc(64, JS_GC_OBJ_TYPE_DATA);
+    GCHandle tgt = gc_alloc(64, JS_GC_OBJ_TYPE_DATA);
+    ASSERT_TRUE(src != GC_HANDLE_NULL);
+    ASSERT_TRUE(tgt != GC_HANDLE_NULL);
+
+    GCHeader *src_hdr = gc_header_from_handle(src);
+    GCHeader *tgt_hdr = gc_header_from_handle(tgt);
+    ASSERT_TRUE(src_hdr != NULL);
+    ASSERT_TRUE(tgt_hdr != NULL);
+
+    /* Write target into the source object at a non-zero offset. */
+    void *src_payload = gc_deref(src);
+    GCValue *slot = (GCValue *)((uint8_t *)src_payload + sizeof(GCValue));
+    *slot = GC_MKHANDLE(JS_TAG_OBJECT, tgt);
+
+    src_hdr->gc_color_state = GC_COLOR_BLACK;
+    tgt_hdr->gc_color_state = GC_COLOR_WHITE;
+
+    uint32_t saved_phase = g_gc.gc_phase;
+    g_gc.gc_phase = GC_PHASE_MARKING;
+
+    gc_write_barrier_for_heap_slot(slot, tgt);
+
+    ASSERT_EQ((uint32_t)GC_COLOR_GREY, tgt_hdr->gc_color_state);
+
+    g_gc.gc_phase = saved_phase;
+    return true;
+}
+
 /* ============================================================================
  * QuickJS Integration Tests
  * ============================================================================ */
@@ -811,6 +843,7 @@ extern "C" void run_gc_unified_tests(void) {
     RUN_TEST(test_gc_thread_pool_multiple_jobs);
     RUN_TEST(test_gc_thread_pool_gc_job);
     RUN_TEST(test_gc_write_barrier);
+    RUN_TEST(test_gc_write_barrier_heap_slot);
     
     /* Run QuickJS integration tests using shared context */
     printf("\n  QuickJS integration tests use shared context from test_main.cpp\n");
@@ -825,9 +858,9 @@ extern "C" void run_gc_unified_tests(void) {
     RUN_TEST(test_barrier_js_private_field);
     RUN_TEST(test_barrier_js_closure);
     RUN_TEST(test_barrier_js_bound_function);
-    // RUN_TEST(test_barrier_js_generator);
-    // RUN_TEST(test_barrier_js_typed_array);
-    // RUN_TEST(test_barrier_js_map);
-    // RUN_TEST(test_barrier_js_weakref);
-    // RUN_TEST(test_barrier_js_promise);
+    RUN_TEST(test_barrier_js_generator);
+    RUN_TEST(test_barrier_js_typed_array);
+    RUN_TEST(test_barrier_js_map);
+    RUN_TEST(test_barrier_js_weakref);
+    RUN_TEST(test_barrier_js_promise);
 }
