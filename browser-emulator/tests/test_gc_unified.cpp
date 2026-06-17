@@ -447,6 +447,86 @@ TEST(test_gc_compaction_sorts_by_handle) {
 }
 
 /* ============================================================================
+ * Thread Pool Tests
+ * ============================================================================ */
+
+static volatile int g_thread_pool_counter = 0;
+static volatile int g_thread_pool_job_count = 0;
+
+static void thread_pool_increment_job(void *arg) {
+    int value = *(int *)arg;
+    __sync_fetch_and_add(&g_thread_pool_counter, value);
+    __sync_fetch_and_add(&g_thread_pool_job_count, 1);
+}
+
+TEST(test_gc_thread_pool_thread_count) {
+    uint32_t thread_count = gc_thread_pool_get_thread_count();
+    ASSERT_TRUE(thread_count > 0);
+    ASSERT_TRUE(thread_count >= 2);
+    
+    /* Thread count should be 2x the number of processor cores */
+    uint32_t cores = thread_count / 2;
+    ASSERT_TRUE(cores >= 1);
+    ASSERT_TRUE(thread_count == cores * 2);
+    
+    return true;
+}
+
+TEST(test_gc_thread_pool_basic_job) {
+    g_thread_pool_counter = 0;
+    g_thread_pool_job_count = 0;
+    
+    int value = 42;
+    ASSERT_TRUE(gc_thread_pool_submit_test_job(thread_pool_increment_job, &value));
+    
+    gc_thread_pool_wait_empty();
+    
+    ASSERT_EQ(42, g_thread_pool_counter);
+    ASSERT_EQ(1, g_thread_pool_job_count);
+    
+    return true;
+}
+
+TEST(test_gc_thread_pool_multiple_jobs) {
+    g_thread_pool_counter = 0;
+    g_thread_pool_job_count = 0;
+    
+    const int job_count = 100;
+    int values[job_count];
+    for (int i = 0; i < job_count; i++) {
+        values[i] = 1;
+        ASSERT_TRUE(gc_thread_pool_submit_test_job(thread_pool_increment_job, &values[i]));
+    }
+    
+    gc_thread_pool_wait_empty();
+    
+    ASSERT_EQ(job_count, g_thread_pool_counter);
+    ASSERT_EQ(job_count, g_thread_pool_job_count);
+    
+    return true;
+}
+
+TEST(test_gc_thread_pool_gc_job) {
+    /* Submit a GC job directly to the thread pool and verify it runs */
+    ASSERT_TRUE(gc_thread_pool_get_thread_count() > 0);
+    
+    /* Ensure phase is idle before submitting */
+    gc_wait_for_completion();
+    ASSERT_EQ((uint32_t)GC_PHASE_IDLE, g_gc.gc_phase);
+    
+    /* Request a background GC */
+    gc_request_background();
+    
+    /* Wait for it to complete */
+    gc_wait_for_completion();
+    
+    /* Phase should return to idle */
+    ASSERT_EQ((uint32_t)GC_PHASE_IDLE, g_gc.gc_phase);
+    
+    return true;
+}
+
+/* ============================================================================
  * QuickJS Integration Tests
  * ============================================================================ */
 
@@ -537,6 +617,10 @@ extern "C" void run_gc_unified_tests(void) {
     RUN_TEST(test_gc_memory_limits);
     RUN_TEST(test_gc_lockfree_allocation);
     RUN_TEST(test_gc_compaction_sorts_by_handle);
+    RUN_TEST(test_gc_thread_pool_thread_count);
+    RUN_TEST(test_gc_thread_pool_basic_job);
+    RUN_TEST(test_gc_thread_pool_multiple_jobs);
+    RUN_TEST(test_gc_thread_pool_gc_job);
     
     /* Run QuickJS integration tests using shared context */
     printf("\n  QuickJS integration tests use shared context from test_main.cpp\n");

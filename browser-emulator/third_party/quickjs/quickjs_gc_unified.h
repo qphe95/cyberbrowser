@@ -506,6 +506,20 @@ void gc_wait_for_completion(void);
 bool gc_is_background_running(void);
 
 /* ============================================================================
+ * Thread Pool Test Helpers
+ * ============================================================================ */
+
+/* Get the number of threads in the GC thread pool (0 if not initialized) */
+uint32_t gc_thread_pool_get_thread_count(void);
+
+/* Wait until the thread pool has no active or pending jobs */
+void gc_thread_pool_wait_empty(void);
+
+/* Submit a custom job to the thread pool (for testing). Returns true on success. */
+typedef void (*GCThreadPoolJobFunc)(void *arg);
+bool gc_thread_pool_submit_test_job(GCThreadPoolJobFunc func, void *arg);
+
+/* ============================================================================
  * GC-Safe Linked Lists (GCListHead)
  * ============================================================================
  * 

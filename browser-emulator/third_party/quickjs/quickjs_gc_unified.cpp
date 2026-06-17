@@ -14,6 +14,7 @@
 #include <windows.h>
 #else
 #include <pthread.h>
+#include <unistd.h>
 #endif
 
 /* Atomic helpers using volatile + compiler barriers for lock-free operations.
@@ -230,48 +231,138 @@ static inline uint32_t gc_active_handle_capacity(void) {
 }
 
 /* ============================================================================
- * GC THREADING
+ * THREAD POOL
  * ============================================================================
  */
 
+#define GC_THREAD_POOL_MIN_THREADS 2
+#define GC_SCHEDULER_PERIOD_MS 1000
+
+typedef void (*GCThreadPoolJobFunc)(void *arg);
+
+typedef struct GCThreadPoolJob {
+    GCThreadPoolJobFunc func;
+    void *arg;
+    struct GCThreadPoolJob *next;
+} GCThreadPoolJob;
+
+typedef struct {
 #ifdef _WIN32
-typedef HANDLE GCThreadHandle;
+    HANDLE *threads;
+    CRITICAL_SECTION mutex;
+    CONDITION_VARIABLE cond;
+    CONDITION_VARIABLE completion_cond;
 #else
-typedef pthread_t GCThreadHandle;
+    pthread_t *threads;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    pthread_cond_t completion_cond;
+#endif
+    uint32_t thread_count;
+    GCThreadPoolJob *job_queue_head;
+    GCThreadPoolJob *job_queue_tail;
+    volatile bool shutdown;
+    volatile uint32_t active_jobs;
+    volatile uint32_t pending_jobs;
+} GCThreadPool;
+
+static GCThreadPool g_gc_pool = {0};
+static bool g_gc_pool_initialized = false;
+static volatile bool g_gc_scheduler_running = false;
+static volatile bool g_gc_requested = false;
+#ifdef _WIN32
+static HANDLE g_gc_scheduler_thread = NULL;
+#else
+static pthread_t g_gc_scheduler_thread = 0;
 #endif
 
-static struct {
-    GCThreadHandle thread;
-    bool thread_running;
-    volatile bool gc_requested;
-} g_gc_thread = {0};
-
-/* Background GC thread function */
+static uint32_t gc_get_processor_count(void) {
 #ifdef _WIN32
-static DWORD WINAPI gc_thread_func(LPVOID arg) {
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return si.dwNumberOfProcessors;
 #else
-static void *gc_thread_func(void *arg) {
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n < 1) n = 1;
+    return (uint32_t)n;
 #endif
-    (void)arg;
-    GC_LOGI("GC background thread started");
+}
+
+static void gc_thread_pool_lock(GCThreadPool *pool) {
+#ifdef _WIN32
+    EnterCriticalSection(&pool->mutex);
+#else
+    pthread_mutex_lock(&pool->mutex);
+#endif
+}
+
+static void gc_thread_pool_unlock(GCThreadPool *pool) {
+#ifdef _WIN32
+    LeaveCriticalSection(&pool->mutex);
+#else
+    pthread_mutex_unlock(&pool->mutex);
+#endif
+}
+
+static GCThreadPoolJob *gc_thread_pool_pop_job(GCThreadPool *pool) {
+    GCThreadPoolJob *job = pool->job_queue_head;
+    if (job) {
+        pool->job_queue_head = job->next;
+        if (!pool->job_queue_head) {
+            pool->job_queue_tail = NULL;
+        }
+        job->next = NULL;
+    }
+    return job;
+}
+
+#ifdef _WIN32
+static DWORD WINAPI gc_thread_pool_worker(LPVOID arg) {
+#else
+static void *gc_thread_pool_worker(void *arg) {
+#endif
+    GCThreadPool *pool = (GCThreadPool *)arg;
     
-    while (g_gc_thread.thread_running) {
-        uint32_t phase = atomic_load_u32(&g_gc.gc_phase);
-        if (g_gc_thread.gc_requested && phase == GC_PHASE_IDLE) {
-            g_gc_thread.gc_requested = false;
-            atomic_store_u32(&g_gc.gc_phase, GC_PHASE_MARKING);
-            gc_run_internal();
-        } else {
-            /* Small sleep to avoid busy-waiting */
+    while (true) {
+        gc_thread_pool_lock(pool);
+        
+        while (!pool->shutdown && pool->job_queue_head == NULL) {
 #ifdef _WIN32
-            Sleep(1);
+            SleepConditionVariableCS(&pool->cond, &pool->mutex, INFINITE);
 #else
-            usleep(1000);
+            pthread_cond_wait(&pool->cond, &pool->mutex);
 #endif
+        }
+        
+        if (pool->shutdown) {
+            gc_thread_pool_unlock(pool);
+            break;
+        }
+        
+        GCThreadPoolJob *job = gc_thread_pool_pop_job(pool);
+        if (job) {
+            atomic_fetch_add_u32((volatile uint32_t *)&pool->active_jobs, 1);
+            atomic_fetch_add_u32((volatile uint32_t *)&pool->pending_jobs, (uint32_t)-1);
+        }
+        gc_thread_pool_unlock(pool);
+        
+        if (job) {
+            job->func(job->arg);
+            free(job);
+            
+            gc_thread_pool_lock(pool);
+            atomic_fetch_add_u32((volatile uint32_t *)&pool->active_jobs, (uint32_t)-1);
+            if (pool->active_jobs == 0 && pool->pending_jobs == 0) {
+#ifdef _WIN32
+                WakeAllConditionVariable(&pool->completion_cond);
+#else
+                pthread_cond_broadcast(&pool->completion_cond);
+#endif
+            }
+            gc_thread_pool_unlock(pool);
         }
     }
     
-    GC_LOGI("GC background thread exiting");
 #ifdef _WIN32
     return 0;
 #else
@@ -279,56 +370,284 @@ static void *gc_thread_func(void *arg) {
 #endif
 }
 
-bool gc_thread_start(void) {
-    if (g_gc_thread.thread_running) return true;
+static bool gc_thread_pool_init(void) {
+    if (g_gc_pool_initialized) return true;
     
-    g_gc_thread.thread_running = true;
-    g_gc_thread.gc_requested = false;
+    uint32_t cores = gc_get_processor_count();
+    uint32_t thread_count = cores * 2;
+    if (thread_count < GC_THREAD_POOL_MIN_THREADS) {
+        thread_count = GC_THREAD_POOL_MIN_THREADS;
+    }
+    
+    g_gc_pool.thread_count = thread_count;
+    g_gc_pool.threads = (HANDLE *)malloc(thread_count * sizeof(HANDLE));
+    if (!g_gc_pool.threads) return false;
     
 #ifdef _WIN32
-    g_gc_thread.thread = CreateThread(NULL, 0, gc_thread_func, NULL, 0, NULL);
-    if (!g_gc_thread.thread) {
-        g_gc_thread.thread_running = false;
+    InitializeCriticalSection(&g_gc_pool.mutex);
+    InitializeConditionVariable(&g_gc_pool.cond);
+    InitializeConditionVariable(&g_gc_pool.completion_cond);
+#else
+    pthread_mutex_init(&g_gc_pool.mutex, NULL);
+    pthread_cond_init(&g_gc_pool.cond, NULL);
+    pthread_cond_init(&g_gc_pool.completion_cond, NULL);
+#endif
+    
+    g_gc_pool.shutdown = false;
+    g_gc_pool.active_jobs = 0;
+    g_gc_pool.pending_jobs = 0;
+    g_gc_pool.job_queue_head = NULL;
+    g_gc_pool.job_queue_tail = NULL;
+    
+    for (uint32_t i = 0; i < thread_count; i++) {
+#ifdef _WIN32
+        g_gc_pool.threads[i] = CreateThread(NULL, 0, gc_thread_pool_worker, &g_gc_pool, 0, NULL);
+        if (!g_gc_pool.threads[i]) {
+            /* Shutdown already created threads */
+            g_gc_pool.shutdown = true;
+            WakeAllConditionVariable(&g_gc_pool.cond);
+            for (uint32_t j = 0; j < i; j++) {
+                WaitForSingleObject(g_gc_pool.threads[j], INFINITE);
+                CloseHandle(g_gc_pool.threads[j]);
+            }
+            free(g_gc_pool.threads);
+            g_gc_pool.threads = NULL;
+            DeleteCriticalSection(&g_gc_pool.mutex);
+            return false;
+        }
+#else
+        if (pthread_create(&g_gc_pool.threads[i], NULL, gc_thread_pool_worker, &g_gc_pool) != 0) {
+            g_gc_pool.shutdown = true;
+            pthread_cond_broadcast(&g_gc_pool.cond);
+            for (uint32_t j = 0; j < i; j++) {
+                pthread_join(g_gc_pool.threads[j], NULL);
+            }
+            free(g_gc_pool.threads);
+            g_gc_pool.threads = NULL;
+            pthread_mutex_destroy(&g_gc_pool.mutex);
+            pthread_cond_destroy(&g_gc_pool.cond);
+            pthread_cond_destroy(&g_gc_pool.completion_cond);
+            return false;
+        }
+#endif
+    }
+    
+    g_gc_pool_initialized = true;
+    GC_LOGI("GC thread pool initialized with %u threads (%u cores)", thread_count, cores);
+    return true;
+}
+
+static void gc_thread_pool_shutdown(void) {
+    if (!g_gc_pool_initialized) return;
+    
+    gc_thread_pool_lock(&g_gc_pool);
+    g_gc_pool.shutdown = true;
+    gc_thread_pool_unlock(&g_gc_pool);
+    
+#ifdef _WIN32
+    WakeAllConditionVariable(&g_gc_pool.cond);
+#else
+    pthread_cond_broadcast(&g_gc_pool.cond);
+#endif
+    
+    for (uint32_t i = 0; i < g_gc_pool.thread_count; i++) {
+#ifdef _WIN32
+        WaitForSingleObject(g_gc_pool.threads[i], INFINITE);
+        CloseHandle(g_gc_pool.threads[i]);
+#else
+        pthread_join(g_gc_pool.threads[i], NULL);
+#endif
+    }
+    
+    /* Free any remaining jobs */
+    GCThreadPoolJob *job = g_gc_pool.job_queue_head;
+    while (job) {
+        GCThreadPoolJob *next = job->next;
+        free(job);
+        job = next;
+    }
+    
+    free(g_gc_pool.threads);
+    g_gc_pool.threads = NULL;
+    g_gc_pool.thread_count = 0;
+    g_gc_pool.job_queue_head = NULL;
+    g_gc_pool.job_queue_tail = NULL;
+    g_gc_pool.active_jobs = 0;
+    g_gc_pool.pending_jobs = 0;
+    g_gc_pool_initialized = false;
+    
+#ifdef _WIN32
+    DeleteCriticalSection(&g_gc_pool.mutex);
+#else
+    pthread_mutex_destroy(&g_gc_pool.mutex);
+    pthread_cond_destroy(&g_gc_pool.cond);
+    pthread_cond_destroy(&g_gc_pool.completion_cond);
+#endif
+    
+    GC_LOGI("GC thread pool shut down");
+}
+
+static bool gc_thread_pool_submit(GCThreadPoolJobFunc func, void *arg) {
+    if (!g_gc_pool_initialized) return false;
+    
+    GCThreadPoolJob *job = (GCThreadPoolJob *)malloc(sizeof(GCThreadPoolJob));
+    if (!job) return false;
+    job->func = func;
+    job->arg = arg;
+    job->next = NULL;
+    
+    gc_thread_pool_lock(&g_gc_pool);
+    if (g_gc_pool.shutdown) {
+        gc_thread_pool_unlock(&g_gc_pool);
+        free(job);
+        return false;
+    }
+    if (g_gc_pool.job_queue_tail) {
+        g_gc_pool.job_queue_tail->next = job;
+    } else {
+        g_gc_pool.job_queue_head = job;
+    }
+    g_gc_pool.job_queue_tail = job;
+    atomic_fetch_add_u32((volatile uint32_t *)&g_gc_pool.pending_jobs, 1);
+    gc_thread_pool_unlock(&g_gc_pool);
+    
+#ifdef _WIN32
+    WakeAllConditionVariable(&g_gc_pool.cond);
+#else
+    pthread_cond_broadcast(&g_gc_pool.cond);
+#endif
+    
+    return true;
+}
+
+/* ============================================================================
+ * GC SCHEDULER & JOB
+ * ============================================================================
+ */
+
+static void gc_job_func(void *arg) {
+    (void)arg;
+    
+    /* Only run if GC is idle. Multiple jobs may be submitted while one is
+     * running; redundant ones exit quickly. */
+    uint32_t phase = atomic_load_u32(&g_gc.gc_phase);
+    if (phase != GC_PHASE_IDLE) return;
+    
+    g_gc_requested = false;
+    atomic_store_u32(&g_gc.gc_phase, GC_PHASE_MARKING);
+    gc_run_internal();
+}
+
+#ifdef _WIN32
+static DWORD WINAPI gc_scheduler_thread_func(LPVOID arg) {
+#else
+static void *gc_scheduler_thread_func(void *arg) {
+#endif
+    (void)arg;
+    GC_LOGI("GC scheduler thread started");
+    
+    while (g_gc_scheduler_running) {
+        /* Wait first so that startup (runtime/context creation) is not
+         * racing with a background GC cycle. */
+#ifdef _WIN32
+        Sleep(GC_SCHEDULER_PERIOD_MS);
+#else
+        usleep(GC_SCHEDULER_PERIOD_MS * 1000);
+#endif
+        if (!g_gc_scheduler_running) break;
+
+        /* The scheduler only services outstanding GC requests; it does not
+         * generate new ones. This keeps behavior equivalent to the previous
+         * dedicated background thread, which only ran when requested. */
+        uint32_t phase = atomic_load_u32(&g_gc.gc_phase);
+        bool requested = g_gc_requested;
+        if (phase == GC_PHASE_IDLE && requested) {
+            gc_request_background();
+        }
+    }
+    
+    GC_LOGI("GC scheduler thread exiting");
+#ifdef _WIN32
+    return 0;
+#else
+    return NULL;
+#endif
+}
+
+/* ============================================================================
+ * GC THREAD CONTROL (compatibility wrappers around the thread pool)
+ * ============================================================================
+ */
+
+bool gc_thread_start(void) {
+    if (g_gc_pool_initialized) return true;
+    
+    if (!gc_thread_pool_init()) return false;
+    
+    /* Start the periodic scheduler thread */
+    g_gc_scheduler_running = true;
+#ifdef _WIN32
+    g_gc_scheduler_thread = CreateThread(NULL, 0, gc_scheduler_thread_func, NULL, 0, NULL);
+    if (!g_gc_scheduler_thread) {
+        g_gc_scheduler_running = false;
+        gc_thread_pool_shutdown();
         return false;
     }
 #else
-    if (pthread_create(&g_gc_thread.thread, NULL, gc_thread_func, NULL) != 0) {
-        g_gc_thread.thread_running = false;
+    if (pthread_create(&g_gc_scheduler_thread, NULL, gc_scheduler_thread_func, NULL) != 0) {
+        g_gc_scheduler_running = false;
+        gc_thread_pool_shutdown();
         return false;
     }
 #endif
     
-    GC_LOGI("GC background thread started successfully");
+    GC_LOGI("GC thread pool and scheduler started");
     return true;
 }
 
 void gc_thread_stop(void) {
-    if (!g_gc_thread.thread_running) return;
+    if (!g_gc_pool_initialized) return;
     
-    g_gc_thread.thread_running = false;
-    
+    /* Stop scheduler first */
+    g_gc_scheduler_running = false;
 #ifdef _WIN32
-    WaitForSingleObject(g_gc_thread.thread, INFINITE);
-    CloseHandle(g_gc_thread.thread);
+    if (g_gc_scheduler_thread) {
+        WaitForSingleObject(g_gc_scheduler_thread, INFINITE);
+        CloseHandle(g_gc_scheduler_thread);
+        g_gc_scheduler_thread = NULL;
+    }
 #else
-    pthread_join(g_gc_thread.thread, NULL);
+    if (g_gc_scheduler_thread) {
+        pthread_join(g_gc_scheduler_thread, NULL);
+        g_gc_scheduler_thread = 0;
+    }
 #endif
     
-    g_gc_thread.thread = 0;
-    GC_LOGI("GC background thread stopped");
+    /* Wait for any in-progress GC, then shut down the pool */
+    gc_wait_for_completion();
+    gc_thread_pool_shutdown();
 }
 
 void gc_request_background(void) {
-    g_gc_thread.gc_requested = true;
+    if (!g_gc_pool_initialized) return;
+    if (g_gc.rt == GC_HANDLE_NULL) return;
+    
+    uint32_t phase = atomic_load_u32(&g_gc.gc_phase);
+    if (phase != GC_PHASE_IDLE) {
+        /* Mark that a GC was requested; the running GC or a later scheduler
+         * tick will handle it. */
+        g_gc_requested = true;
+        return;
+    }
+    
+    g_gc_requested = true;
+    gc_thread_pool_submit(gc_job_func, NULL);
 }
 
 void gc_wait_for_completion(void) {
-    while (true) {
-        uint32_t phase = atomic_load_u32(&g_gc.gc_phase);
-        bool requested = g_gc_thread.gc_requested;
-        
-        if (phase == GC_PHASE_IDLE && !requested) break;
-        
+    /* Wait for all submitted pool jobs to finish, then for phase to go idle */
+    gc_thread_pool_wait_empty();
+    while (atomic_load_u32(&g_gc.gc_phase) != GC_PHASE_IDLE) {
 #ifdef _WIN32
         Sleep(1);
 #else
@@ -339,6 +658,33 @@ void gc_wait_for_completion(void) {
 
 bool gc_is_background_running(void) {
     return atomic_load_u32(&g_gc.gc_phase) != GC_PHASE_IDLE;
+}
+
+/* ============================================================================
+ * THREAD POOL PUBLIC TEST HELPERS
+ * ============================================================================
+ */
+
+uint32_t gc_thread_pool_get_thread_count(void) {
+    return g_gc_pool_initialized ? g_gc_pool.thread_count : 0;
+}
+
+void gc_thread_pool_wait_empty(void) {
+    if (!g_gc_pool_initialized) return;
+    
+    gc_thread_pool_lock(&g_gc_pool);
+    while (g_gc_pool.active_jobs > 0 || g_gc_pool.pending_jobs > 0) {
+#ifdef _WIN32
+        SleepConditionVariableCS(&g_gc_pool.completion_cond, &g_gc_pool.mutex, INFINITE);
+#else
+        pthread_cond_wait(&g_gc_pool.completion_cond, &g_gc_pool.mutex);
+#endif
+    }
+    gc_thread_pool_unlock(&g_gc_pool);
+}
+
+bool gc_thread_pool_submit_test_job(GCThreadPoolJobFunc func, void *arg) {
+    return gc_thread_pool_submit(func, arg);
 }
 
 /* ============================================================================
