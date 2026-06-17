@@ -15,6 +15,7 @@
 #else
 #include <pthread.h>
 #include <unistd.h>
+#include <sched.h>
 #endif
 
 /* Atomic helpers using volatile + compiler barriers for lock-free operations.
@@ -48,6 +49,9 @@ static inline size_t atomic_fetch_add_zu(volatile size_t *p, size_t val) {
 static inline uint32_t atomic_fetch_add_u32(volatile uint32_t *p, uint32_t val) {
     return _InterlockedExchangeAdd((volatile long *)p, val);
 }
+static inline uint32_t atomic_compare_exchange_u32(volatile uint32_t *p, uint32_t expected, uint32_t desired) {
+    return (uint32_t)_InterlockedCompareExchange((volatile long *)p, (long)desired, (long)expected);
+}
 #else
 /* POSIX fallback - still uses volatile with compiler barriers */
 static inline uint32_t atomic_load_u32(volatile uint32_t *p) {
@@ -75,6 +79,9 @@ static inline size_t atomic_fetch_add_zu(volatile size_t *p, size_t val) {
 }
 static inline uint32_t atomic_fetch_add_u32(volatile uint32_t *p, uint32_t val) {
     return __sync_fetch_and_add(p, val);
+}
+static inline uint32_t atomic_compare_exchange_u32(volatile uint32_t *p, uint32_t expected, uint32_t desired) {
+    return __sync_val_compare_and_swap(p, expected, desired);
 }
 #endif
 
@@ -683,8 +690,258 @@ void gc_thread_pool_wait_empty(void) {
     gc_thread_pool_unlock(&g_gc_pool);
 }
 
-bool gc_thread_pool_submit_test_job(GCThreadPoolJobFunc func, void *arg) {
+bool gc_thread_pool_submit_job(GCThreadPoolJobFunc func, void *arg) {
     return gc_thread_pool_submit(func, arg);
+}
+
+bool gc_thread_pool_submit_test_job(GCThreadPoolJobFunc func, void *arg) {
+    return gc_thread_pool_submit_job(func, arg);
+}
+
+/* ============================================================================
+ * GREY WORK QUEUE - thread-safe work list for concurrent marking
+ * ============================================================================ */
+
+/* ============================================================================
+ * GREY WORK QUEUE (continued)
+ * ============================================================================ */
+
+typedef struct GCGreyNode {
+    GCHandle handle;
+    struct GCGreyNode *next;
+} GCGreyNode;
+
+typedef struct {
+#ifdef _WIN32
+    CRITICAL_SECTION mutex;
+    CONDITION_VARIABLE cond;
+#else
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+#endif
+    GCGreyNode *head;
+    GCGreyNode *tail;
+    volatile uint32_t count;
+    volatile bool shutdown;
+} GCGreyQueue;
+
+static GCGreyQueue g_grey_queue = {0};
+static bool g_grey_queue_initialized = false;
+
+/* Synchronization primitive used by the mark job to signal completion to the
+ * thread that submitted it. Using a dedicated event avoids the deadlock that
+ * would occur if a pool job tried to wait on gc_thread_pool_wait_empty(). */
+#ifdef _WIN32
+static HANDLE g_gc_mark_done_event = NULL;
+#else
+static pthread_cond_t g_gc_mark_done_cond = PTHREAD_COND_INITIALIZER;
+static pthread_mutex_t g_gc_mark_done_mutex = PTHREAD_MUTEX_INITIALIZER;
+static volatile bool g_gc_mark_done = false;
+#endif
+
+static void gc_mark_signal_done(void) {
+#ifdef _WIN32
+    if (g_gc_mark_done_event) SetEvent(g_gc_mark_done_event);
+#else
+    pthread_mutex_lock(&g_gc_mark_done_mutex);
+    g_gc_mark_done = true;
+    pthread_cond_broadcast(&g_gc_mark_done_cond);
+    pthread_mutex_unlock(&g_gc_mark_done_mutex);
+#endif
+}
+
+static void gc_mark_wait_done(void) {
+#ifdef _WIN32
+    if (g_gc_mark_done_event) {
+        WaitForSingleObject(g_gc_mark_done_event, INFINITE);
+        ResetEvent(g_gc_mark_done_event);
+    }
+#else
+    pthread_mutex_lock(&g_gc_mark_done_mutex);
+    while (!g_gc_mark_done) {
+        pthread_cond_wait(&g_gc_mark_done_cond, &g_gc_mark_done_mutex);
+    }
+    g_gc_mark_done = false;
+    pthread_mutex_unlock(&g_gc_mark_done_mutex);
+#endif
+}
+
+static void gc_grey_queue_lock(GCGreyQueue *q) {
+#ifdef _WIN32
+    EnterCriticalSection(&q->mutex);
+#else
+    pthread_mutex_lock(&q->mutex);
+#endif
+}
+
+static void gc_grey_queue_unlock(GCGreyQueue *q) {
+#ifdef _WIN32
+    LeaveCriticalSection(&q->mutex);
+#else
+    pthread_mutex_unlock(&q->mutex);
+#endif
+}
+
+static bool gc_grey_queue_init(void) {
+    if (g_grey_queue_initialized) return true;
+#ifdef _WIN32
+    if (!g_gc_mark_done_event) {
+        g_gc_mark_done_event = CreateEvent(NULL, TRUE, FALSE, NULL);
+    }
+    InitializeCriticalSection(&g_grey_queue.mutex);
+    InitializeConditionVariable(&g_grey_queue.cond);
+#else
+    g_gc_mark_done = false;
+    pthread_mutex_init(&g_grey_queue.mutex, NULL);
+    pthread_cond_init(&g_grey_queue.cond, NULL);
+#endif
+    g_grey_queue.head = NULL;
+    g_grey_queue.tail = NULL;
+    g_grey_queue.count = 0;
+    g_grey_queue.shutdown = false;
+    g_grey_queue_initialized = true;
+    return true;
+}
+
+static void gc_grey_queue_cleanup(void) {
+    if (!g_grey_queue_initialized) return;
+    gc_grey_queue_lock(&g_grey_queue);
+    g_grey_queue.shutdown = true;
+    GCGreyNode *node = g_grey_queue.head;
+    while (node) {
+        GCGreyNode *next = node->next;
+        free(node);
+        node = next;
+    }
+    g_grey_queue.head = NULL;
+    g_grey_queue.tail = NULL;
+    g_grey_queue.count = 0;
+    gc_grey_queue_unlock(&g_grey_queue);
+#ifdef _WIN32
+    if (g_gc_mark_done_event) {
+        CloseHandle(g_gc_mark_done_event);
+        g_gc_mark_done_event = NULL;
+    }
+    DeleteCriticalSection(&g_grey_queue.mutex);
+#else
+    g_gc_mark_done = false;
+    pthread_mutex_destroy(&g_grey_queue.mutex);
+    pthread_cond_destroy(&g_grey_queue.cond);
+#endif
+    g_grey_queue_initialized = false;
+}
+
+bool gc_grey_queue_push(GCHandle handle) {
+    if (handle == GC_HANDLE_NULL) return false;
+    if (!g_grey_queue_initialized) return false;
+
+    GCGreyNode *node = (GCGreyNode*)malloc(sizeof(GCGreyNode));
+    if (!node) return false;
+    node->handle = handle;
+    node->next = NULL;
+
+    gc_grey_queue_lock(&g_grey_queue);
+    if (g_grey_queue.shutdown) {
+        gc_grey_queue_unlock(&g_grey_queue);
+        free(node);
+        return false;
+    }
+    if (g_grey_queue.tail) {
+        g_grey_queue.tail->next = node;
+    } else {
+        g_grey_queue.head = node;
+    }
+    g_grey_queue.tail = node;
+    atomic_fetch_add_u32((volatile uint32_t *)&g_grey_queue.count, 1);
+    gc_grey_queue_unlock(&g_grey_queue);
+
+#ifdef _WIN32
+    WakeConditionVariable(&g_grey_queue.cond);
+#else
+    pthread_cond_signal(&g_grey_queue.cond);
+#endif
+    return true;
+}
+
+static bool gc_grey_queue_pop(GCHandle *out_handle) {
+    gc_grey_queue_lock(&g_grey_queue);
+    while (!g_grey_queue.shutdown && g_grey_queue.head == NULL) {
+#ifdef _WIN32
+        SleepConditionVariableCS(&g_grey_queue.cond, &g_grey_queue.mutex, INFINITE);
+#else
+        pthread_cond_wait(&g_grey_queue.cond, &g_grey_queue.mutex);
+#endif
+    }
+    if (g_grey_queue.head == NULL) {
+        gc_grey_queue_unlock(&g_grey_queue);
+        return false;
+    }
+    GCGreyNode *node = g_grey_queue.head;
+    g_grey_queue.head = node->next;
+    if (!g_grey_queue.head) g_grey_queue.tail = NULL;
+    *out_handle = node->handle;
+    atomic_fetch_add_u32((volatile uint32_t *)&g_grey_queue.count, (uint32_t)-1);
+    gc_grey_queue_unlock(&g_grey_queue);
+    free(node);
+    return true;
+}
+
+static bool gc_grey_queue_try_pop(GCHandle *out_handle) {
+    gc_grey_queue_lock(&g_grey_queue);
+    if (g_grey_queue.head == NULL) {
+        gc_grey_queue_unlock(&g_grey_queue);
+        return false;
+    }
+    GCGreyNode *node = g_grey_queue.head;
+    g_grey_queue.head = node->next;
+    if (!g_grey_queue.head) g_grey_queue.tail = NULL;
+    *out_handle = node->handle;
+    atomic_fetch_add_u32((volatile uint32_t *)&g_grey_queue.count, (uint32_t)-1);
+    gc_grey_queue_unlock(&g_grey_queue);
+    free(node);
+    return true;
+}
+
+static void gc_grey_queue_drain(void) {
+    gc_grey_queue_lock(&g_grey_queue);
+    g_grey_queue.shutdown = true;
+    gc_grey_queue_unlock(&g_grey_queue);
+#ifdef _WIN32
+    WakeAllConditionVariable(&g_grey_queue.cond);
+#else
+    pthread_cond_broadcast(&g_grey_queue.cond);
+#endif
+}
+
+/* ============================================================================
+ * WRITE BARRIER
+ * ============================================================================
+ *
+ * Dijkstra-style barrier: when the mutator writes a reference to a white
+ * object into a black object, shade the target grey immediately. This is safe
+ * even without a mutator read barrier.
+ */
+
+void gc_write_barrier(GCHandle source, GCHandle target) {
+    if (source == GC_HANDLE_NULL || target == GC_HANDLE_NULL) return;
+    if (atomic_load_u32(&g_gc.gc_phase) != (uint32_t)GC_PHASE_MARKING) return;
+
+    GCHeader *src_hdr = gc_header_from_handle(source);
+    if (!src_hdr) return;
+    uint32_t src_color = atomic_load_u32(&src_hdr->gc_color_state);
+    if (src_color != GC_COLOR_BLACK) return;
+
+    GCHeader *tgt_hdr = gc_header_from_handle(target);
+    if (!tgt_hdr) return;
+
+    uint32_t old_color = atomic_load_u32(&tgt_hdr->gc_color_state);
+    if (old_color != GC_COLOR_WHITE) return;
+
+    uint32_t swapped = atomic_compare_exchange_u32(&tgt_hdr->gc_color_state,
+                                                    GC_COLOR_WHITE, GC_COLOR_GREY);
+    if (swapped == GC_COLOR_WHITE) {
+        gc_grey_queue_push(target);
+    }
 }
 
 /* ============================================================================
@@ -790,8 +1047,16 @@ bool gc_init(void) {
     
     g_gc.initialized = true;
     
-    /* Start background GC thread */
+    /* Start background GC thread / thread pool */
     gc_thread_start();
+    
+    /* Initialize the grey work queue used by concurrent marking */
+    if (!gc_grey_queue_init()) {
+        gc_thread_stop();
+        /* Cleanup already-initialized state */
+        gc_cleanup();
+        return false;
+    }
     
     return true;
 }
@@ -803,6 +1068,9 @@ bool gc_is_initialized(void) {
 void gc_cleanup(void) {
     /* Stop background GC thread first */
     gc_thread_stop();
+    
+    /* Free the grey work queue */
+    gc_grey_queue_cleanup();
     
     /* Free typed handle arrays */
     gc_handle_array_free(&g_gc.weakmap_handles);
@@ -1167,7 +1435,7 @@ static void *bump_alloc(size_t size) {
     
     /* Initialize header */
     hdr->gc_obj_type = 0;
-    hdr->mark = 0;
+    hdr->gc_color_state = GC_COLOR_WHITE;
     hdr->flags = 0;
     memset(hdr->pad, 0, sizeof(hdr->pad));
     hdr->link.next = NULL;
@@ -1520,9 +1788,9 @@ static void gc_mark_object(JSObject *p);
 static void gc_mark_ptr(void *ptr) {
     if (!ptr) return;
     GCHeader *hdr = gc_header(ptr);
-    if (hdr->size == 0 || hdr->mark) return;
+    if (hdr->size == 0 || hdr->gc_color_state != GC_COLOR_WHITE) return;
     
-    hdr->mark = 1;
+    hdr->gc_color_state = GC_COLOR_BLACK;
     
     /* For JSVarRef, mark its value and the referenced frame (to keep parent frames alive) */
     if (hdr->gc_obj_type == JS_GC_OBJ_TYPE_VAR_REF) {
@@ -1535,8 +1803,8 @@ static void gc_mark_ptr(void *ptr) {
             void *frame_ptr = gc_deref(frame_handle);
             if (frame_ptr) {
                 GCHeader *frame_hdr = gc_header(frame_ptr);
-                if ((frame_hdr->size & 0x7FFFFFFF) > 0 && !frame_hdr->mark) {
-                    frame_hdr->mark = 1;
+                if ((frame_hdr->size & 0x7FFFFFFF) > 0 && frame_hdr->gc_color_state == GC_COLOR_WHITE) {
+                    frame_hdr->gc_color_state = GC_COLOR_BLACK;
                 }
             }
         }
@@ -1557,8 +1825,8 @@ static void gc_mark_value(GCValue val) {
                 void *ptr = gc_deref(handle);
                 if (ptr) {
                     GCHeader *hdr = gc_header(ptr);
-                    if ((hdr->size & 0x7FFFFFFF) > 0 && !hdr->mark) {
-                        hdr->mark = 1;
+                    if ((hdr->size & 0x7FFFFFFF) > 0 && hdr->gc_color_state == GC_COLOR_WHITE) {
+                        hdr->gc_color_state = GC_COLOR_BLACK;
                         if (tag == JS_TAG_OBJECT) {
                             gc_mark_object((JSObject*)ptr);
                         }
@@ -1583,7 +1851,7 @@ static void gc_mark_object(JSObject *p) {
     JSShapeHandle shape = JSShapeHandle(p->shape_handle);
     if (shape.valid()) {
         GCHeader *shape_hdr = gc_header(gc_deref(shape.handle()));
-        if ((shape_hdr->size & 0x7FFFFFFF) > 0) shape_hdr->mark = 1;
+        if ((shape_hdr->size & 0x7FFFFFFF) > 0) shape_hdr->gc_color_state = GC_COLOR_BLACK;
         
         /* Mark the shape's prototype handle - CRITICAL: shapes reference
          * prototype objects that must be kept alive */
@@ -1591,7 +1859,7 @@ static void gc_mark_object(JSObject *p) {
             void *proto = gc_deref(shape.proto_handle());
             if (proto) {
                 GCHeader *proto_hdr = gc_header(proto);
-                if ((proto_hdr->size & 0x7FFFFFFF) > 0) proto_hdr->mark = 1;
+                if ((proto_hdr->size & 0x7FFFFFFF) > 0) proto_hdr->gc_color_state = GC_COLOR_BLACK;
             }
         }
     }
@@ -1643,42 +1911,55 @@ static void gc_mark_object(JSObject *p) {
  * UNIFIED GC BRIDGE - Integration with QuickJS comprehensive marking
  * ============================================================================ */
 
-/* Bridge mark function - sets mark bit and recursively marks children via mark_children */
-static void gc_unified_mark_recursive(JSRuntimeHandle rt, GCHandle handle);
+/* ============================================================================
+ * CONCURRENT MARKING - tri-color marker with grey work queue
+ * ============================================================================ */
 
-static void gc_unified_mark_func(JSRuntimeHandle rt, GCHandle handle) {
+/* Shade a white object grey and enqueue it for scanning. Called by the marker
+ * when it discovers a child, and by the write barrier when the mutator stores
+ * a reference into a black object. */
+static void gc_shade(GCHandle handle) {
     if (handle == GC_HANDLE_NULL) return;
-    
-    /* Check if already marked */
     GCHeader *hdr = gc_header_from_handle(handle);
     if (!hdr) return;
-    if ((hdr->size & 0x7FFFFFFF) == 0) return;  /* Already freed */
-    if (hdr->mark) return;        /* Already marked */
-    
-    /* Set mark bit */
-    hdr->mark = 1;
-    
-    /* Recursively mark children through QuickJS's mark_children function */
-    /* This handles all object types: JSObject, JSShape, JSVarRef, JSFunctionBytecode, etc. */
-    gc_unified_mark_recursive(rt, handle);
+    if ((hdr->size & 0x7FFFFFFF) == 0) return;  /* Freed slot */
+
+    uint32_t old_color = atomic_load_u32(&hdr->gc_color_state);
+    if (old_color != GC_COLOR_WHITE) return;
+
+    uint32_t swapped = atomic_compare_exchange_u32(&hdr->gc_color_state,
+                                                    GC_COLOR_WHITE, GC_COLOR_GREY);
+    if (swapped == GC_COLOR_WHITE) {
+        gc_grey_queue_push(handle);
+    }
 }
 
-static void gc_unified_mark_recursive(JSRuntimeHandle rt, GCHandle handle) {
+/* Bridge mark callback used by QuickJS's mark_children(). Instead of recursing,
+ * it shades children grey and lets the marker thread scan them later. */
+static void gc_unified_mark_func(JSRuntimeHandle rt, GCHandle handle) {
+    (void)rt;
+    gc_shade(handle);
+}
+
+/* Scan one grey object: mark all its children grey, then turn it black. */
+static void gc_scan_object(JSRuntimeHandle rt, GCHandle handle) {
     if (handle == GC_HANDLE_NULL) return;
-    
-    /* Skip uninitialized objects */
-    JSGCObjectTypeEnum gc_obj_type = gc_handle_get_type_inline(handle);
-    (void)gc_obj_type; /* Type is validated in mark_children */
-    
-    /* Call mark_children to recursively mark all children */
-    /* mark_children is defined in quickjs.cpp and handles all object types */
+    GCHeader *hdr = gc_header_from_handle(handle);
+    if (!hdr) return;
+    if ((hdr->size & 0x7FFFFFFF) == 0) return;
+
+    uint32_t color = atomic_load_u32(&hdr->gc_color_state);
+    if (color != GC_COLOR_GREY) return;
+
+    /* Ask QuickJS to visit every child reference; gc_unified_mark_func shades them. */
     mark_children(rt, handle, gc_unified_mark_func);
+
+    atomic_store_u32(&hdr->gc_color_state, GC_COLOR_BLACK);
 }
 
-/* Clear all mark bits before marking phase */
+/* Clear all object colors before a new marking phase. The mutator must be
+ * paused (or not yet started) during this step. */
 static void gc_clear_marks(void) {
-    /* Clear marks in both buffers - only active buffer has live objects during normal operation,
-     * but during compaction both may have objects */
     for (int buf_idx = 0; buf_idx < 2; buf_idx++) {
         GCBuffer *buf = &g_gc.buffers[buf_idx];
         for (uint32_t i = 1; i < buf->handle_count; i++) {
@@ -1686,122 +1967,167 @@ static void gc_clear_marks(void) {
             if (user_ptr) {
                 GCHeader *hdr = gc_header(user_ptr);
                 if ((hdr->size & 0x7FFFFFFF) > 0) {
-                    hdr->mark = 0;
+                    hdr->gc_color_state = GC_COLOR_WHITE;
                 }
             }
         }
     }
 }
 
-/* Context marking callback */
-static void gc_mark_context_callback(uint32_t ctx_handle, void *user_data) {
-    JSRuntimeHandle rt = *(JSRuntimeHandle*)user_data;
-    if (ctx_handle == GC_HANDLE_NULL) return;
-    
-    /* Mark the context itself */
-    GCHeader *hdr = gc_header_from_handle(ctx_handle);
-    if (hdr && (hdr->size & 0x7FFFFFFF) > 0 && !hdr->mark) {
-        hdr->mark = 1;
-        /* Mark all children of this context via mark_children */
-        gc_unified_mark_recursive(rt, ctx_handle);
+/* Helper: mark an object black immediately (used for leaf roots such as
+ * permanent atoms that have no children to scan). */
+static void gc_mark_black(GCHandle handle) {
+    if (handle == GC_HANDLE_NULL) return;
+    GCHeader *hdr = gc_header_from_handle(handle);
+    if (hdr && (hdr->size & 0x7FFFFFFF) > 0) {
+        atomic_store_u32(&hdr->gc_color_state, GC_COLOR_BLACK);
     }
 }
 
-/* Comprehensive mark phase - replaces the old gc_mark() */
-static void gc_mark_comprehensive(JSRuntimeHandle rt) {
-    /* Phase 1: Clear all marks */
-    gc_clear_marks();
-    
-    /* Phase 2: Mark permanent atoms (Tier 1 roots) */
+/* Context marking callback: shade each context so the marker scans its roots. */
+static void gc_mark_context_callback(uint32_t ctx_handle, void *user_data) {
+    (void)user_data;
+    gc_shade(ctx_handle);
+}
+
+/* Enqueue all roots for marking. Does not drain the queue. */
+static void gc_mark_roots(JSRuntimeHandle rt) {
+    /* Permanent atoms are leaf roots. */
     for (uint32_t i = 0; i < g_gc.atom_handles.count; i++) {
         GCHandle atom_handle = g_gc.atom_handles.handles[i];
         if (gc_handle_array_entry_is_valid(atom_handle)) {
-            GCHeader *hdr = gc_header_from_handle(atom_handle);
-            if (hdr && (hdr->size & 0x7FFFFFFF) > 0 && !hdr->mark) {
-                hdr->mark = 1;
-            }
+            gc_mark_black(atom_handle);
         }
     }
-    
-    /* Phase 3: Mark all contexts and their roots */
-    /* This marks global objects, prototypes, constructors, shapes, etc. */
+
+    /* Contexts are scanned for globals, shapes, prototypes, etc. */
     JSRuntime_for_each_context(rt, gc_mark_context_callback, &rt);
-    
-    /* Phase 4: Mark the runtime's current_exception */
+
+    /* Current exception. */
     GCValue exc = JSRuntime_get_current_exception(rt);
     GCHandle exc_handle = GC_VALUE_GET_HANDLE(exc);
     if (exc_handle != GC_HANDLE_NULL) {
-        gc_unified_mark_func(rt, exc_handle);
+        gc_shade(exc_handle);
     }
-    
-    /* Phase 5: Mark jobs in the job list */
+
+    /* Job queue entries. */
     int job_count = JSRuntime_job_queue_count(rt);
     for (int i = 0; i < job_count; i++) {
         uint32_t job_handle = JSRuntime_job_queue_get_handle(rt, i);
         if (job_handle == GC_HANDLE_NULL) continue;
-        
-        /* Mark the job's realm */
+
         uint32_t realm_handle = JSJobEntry_get_realm_handle(job_handle);
         if (realm_handle != GC_HANDLE_NULL) {
-            gc_unified_mark_func(rt, realm_handle);
+            gc_shade(realm_handle);
         }
-        
-        /* Mark job arguments */
+
         int argc = JSJobEntry_get_argc(job_handle);
         for (int j = 0; j < argc; j++) {
             GCValue arg = JSJobEntry_get_argv(job_handle, j);
             GCHandle arg_handle = GC_VALUE_GET_HANDLE(arg);
             if (arg_handle != GC_HANDLE_NULL) {
-                gc_unified_mark_func(rt, arg_handle);
+                gc_shade(arg_handle);
             }
         }
     }
-    
-    /* Phase 6: Mark root set objects (user-added roots) */
+
+    /* User-added roots. */
     for (uint32_t i = 0; i < g_gc.root_set.count; i++) {
-        GCHandle h = g_gc.root_set.roots[i];
-        gc_unified_mark_func(rt, h);
+        gc_shade(g_gc.root_set.roots[i]);
     }
-    
-    /* Phase 7: Mark runtime handle arrays */
+
+    /* Runtime handle arrays. */
     uint32_t shape_hash_handle = JSRuntime_get_shape_hash_handle(rt);
     if (shape_hash_handle != GC_HANDLE_NULL) {
-        gc_unified_mark_func(rt, shape_hash_handle);
+        gc_shade(shape_hash_handle);
     }
-    
+
     uint32_t atom_array_handle = JSRuntime_get_atom_array_handle(rt);
     if (atom_array_handle != GC_HANDLE_NULL) {
-        gc_unified_mark_func(rt, atom_array_handle);
+        gc_shade(atom_array_handle);
     }
-    
-    /* Phase 8: Mark objects on the JS stack (active function calls) */
+
+    /* JS stack frames. */
     JSStackFrame *sf = JSRuntime_get_current_stack_frame(rt);
     while (sf != NULL) {
-        /* Mark the function object in this stack frame */
         GCValue cur_func = JSStackFrame_get_cur_func(sf);
         GCHandle func_handle = GC_VALUE_GET_HANDLE(cur_func);
         if (func_handle != GC_HANDLE_NULL) {
-            gc_unified_mark_func(rt, func_handle);
+            gc_shade(func_handle);
         }
-        
-        /* Move to previous frame */
         sf = JSStackFrame_get_prev(sf);
     }
-    
-    /* Phase 9: Mark atoms referenced by shapes (Tier 2) */
+
+    /* Shapes are roots for the atoms they reference. */
     for (uint32_t i = 1; i < gc_active_handle_count(); i++) {
         GCHandle handle = (GCHandle)i;
         if (!gc_handle_array_entry_is_valid(handle)) continue;
         if (gc_handle_is_freed(handle)) continue;
-        
         if (gc_handle_get_type_inline(handle) == JS_GC_OBJ_TYPE_SHAPE) {
-            /* Mark the shape itself first */
-            gc_unified_mark_func(rt, handle);
+            gc_shade(handle);
         }
     }
 }
 
-/* Legacy gc_mark() - now redirects to comprehensive marking */
+/* Synchronous mark phase: clear colors, enqueue roots, and drain the queue on
+ * the calling thread. Used when no mutator concurrency is desired. */
+static void gc_mark_phase(JSRuntimeHandle rt) {
+    gc_clear_marks();
+    gc_mark_roots(rt);
+
+    GCHandle handle;
+    while (gc_grey_queue_pop(&handle)) {
+        gc_scan_object(rt, handle);
+    }
+}
+
+/* Background mark job submitted to the GC thread pool. It drains the grey
+ * queue until gc_grey_queue_drain() signals completion (the handshake). */
+#ifdef _WIN32
+static DWORD WINAPI gc_mark_job_func(LPVOID arg) {
+#else
+static void *gc_mark_job_func(void *arg) {
+#endif
+    (void)arg;
+    JSRuntimeHandle rt(g_gc.rt);
+
+    GC_LOGI("mark job: starting");
+
+    gc_clear_marks();
+    gc_mark_roots(rt);
+
+    /* Drain the grey queue. In this first implementation the mutator is
+     * paused while the mark job runs, so an empty queue means marking is done.
+     * For true concurrent marking this loop must keep spinning until the
+     * mutator calls the end-of-marking handshake. */
+    GCHandle handle;
+    for (;;) {
+        if (gc_grey_queue_try_pop(&handle)) {
+            gc_scan_object(rt, handle);
+        } else if (atomic_load_u32((volatile uint32_t *)&g_grey_queue.count) == 0) {
+            break;
+        } else {
+            /* A worker may have popped the last item but not yet decremented
+             * the count; yield briefly and retry. */
+#ifdef _WIN32
+            Sleep(0);
+#else
+            sched_yield();
+#endif
+        }
+    }
+
+    GC_LOGI("mark job: finished");
+    gc_mark_signal_done();
+
+#ifdef _WIN32
+    return 0;
+#else
+    return NULL;
+#endif
+}
+
+/* Legacy gc_mark() - now redirects to the synchronous tri-color mark phase */
 static void gc_mark(void) {
     if (g_gc.rt == GC_HANDLE_NULL) {
         /* No runtime set, fall back to simple root marking */
@@ -1813,8 +2139,8 @@ static void gc_mark(void) {
             if (h < count && table[h]) {
                 void *ptr = table[h];
                 GCHeader *hdr = gc_header(ptr);
-                if ((hdr->size & 0x7FFFFFFF) > 0 && !hdr->mark) {
-                    hdr->mark = 1;
+                if ((hdr->size & 0x7FFFFFFF) > 0 && hdr->gc_color_state == GC_COLOR_WHITE) {
+                    hdr->gc_color_state = GC_COLOR_BLACK;
                     JSGCObjectTypeEnum obj_type = (JSGCObjectTypeEnum)hdr->gc_obj_type;
                     if (obj_type == JS_GC_OBJ_TYPE_JS_OBJECT) {
                         gc_mark_object((JSObject*)ptr);
@@ -1824,10 +2150,9 @@ static void gc_mark(void) {
         }
         return;
     }
-    
-    /* Use comprehensive marking with QuickJS bridge */
+
     JSRuntimeHandle rt(g_gc.rt);
-    gc_mark_comprehensive(rt);
+    gc_mark_phase(rt);
 }
 
 /* ============================================================================
@@ -1948,7 +2273,7 @@ static void gc_compact_move_objects(void) {
             continue;
         }
         
-        if (hdr->mark) {
+        if (hdr->gc_color_state != GC_COLOR_WHITE) {
             /* Live object - record for sorted copying */
             if (live_count < live_capacity) {
                 live_objects[live_count].handle = hdr->handle;
@@ -2001,7 +2326,7 @@ static void gc_compact_move_objects(void) {
         }
         
         /* Clear mark bit in new location */
-        new_hdr->mark = 0;
+        new_hdr->gc_color_state = GC_COLOR_WHITE;
         new_hdr->reserved1 = 0;
         
         write += total_size;
@@ -2133,7 +2458,7 @@ static void gc_sweep_unified(JSRuntimeHandle rt) {
         }
         
         /* Check if marked */
-        if (!hdr->mark) {
+        if (hdr->gc_color_state == GC_COLOR_WHITE) {
             /* Object is unreachable - call finalizer */
             if (hdr->finalizer) {
                 hdr->finalizer(rt, handle, user_ptr);
@@ -2175,9 +2500,12 @@ static void gc_run_internal(void) {
         gc_remove_weak_objects(rt);
     }
     
-    /* Phase 1: Mark phase - mark all reachable objects */
-    GC_LOGI("gc_run_internal: Phase 1 - marking");
-    gc_mark();
+    /* Phase 1: Mark phase - run on a pool worker while the mutator is paused.
+     * The mark job signals g_gc_mark_done_event when it has drained the grey
+     * queue. */
+    GC_LOGI("gc_run_internal: Phase 1 - marking (background)");
+    gc_thread_pool_submit_job(gc_mark_job_func, NULL);
+    gc_mark_wait_done();
     
     if (has_runtime) {
         /* Phase 2: Clean up shape hash table before compaction */
@@ -2659,7 +2987,7 @@ void gc_dump_heap_for_analysis(const char *filename) {
         fprintf(f, "  Address: %p\n", ptr);
         fprintf(f, "  Size: %u\n", hdr->size);
         fprintf(f, "  Type: %s (%d)\n", gc_obj_type_name((JSGCObjectTypeEnum)hdr->gc_obj_type), hdr->gc_obj_type);
-        fprintf(f, "  Mark: %d\n", hdr->mark);
+        fprintf(f, "  Mark: %d\n", hdr->gc_color_state != GC_COLOR_WHITE);
         fprintf(f, "  Canary Status: %s\n", gc_canary_status_string(status));
         
         if (status != GC_CANARY_OK) {

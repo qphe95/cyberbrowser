@@ -73,11 +73,20 @@ typedef struct JSHandleArray {
 /*
  * GCHeader - 64-byte aligned header for all GC-managed objects.
  */
+/* Object colors for tri-state incremental/concurrent marking.
+ * WHITE: not yet reached by the marker (candidate for collection).
+ * GREY:  reachable, but children not yet scanned.
+ * BLACK: reachable and fully scanned. */
+#define GC_COLOR_WHITE 0
+#define GC_COLOR_GREY  1
+#define GC_COLOR_BLACK 2
+
 typedef struct GCHeader {
     unsigned int gc_obj_type : 4;
-    unsigned int mark : 1;
+    unsigned int : 4;  /* padding */
     uint8_t flags;
-    uint8_t pad[7];
+    uint32_t gc_color_state;  /* atomic GCColor value */
+    uint8_t pad[3];
     
     struct {
         void *next;
@@ -132,12 +141,12 @@ static inline JSGCObjectTypeEnum gc_handle_get_type_inline(GCHandle handle) {
 
 static inline uint8_t gc_handle_get_mark(GCHandle handle) {
     GCHeader *hdr = gc_header_from_handle(handle);
-    return hdr ? hdr->mark : 0;
+    return hdr ? (hdr->gc_color_state != GC_COLOR_WHITE) : 0;
 }
 
 static inline void gc_handle_set_mark(GCHandle handle, uint8_t mark) {
     GCHeader *hdr = gc_header_from_handle(handle);
-    if (hdr) hdr->mark = mark;
+    if (hdr) hdr->gc_color_state = mark ? GC_COLOR_BLACK : GC_COLOR_WHITE;
 }
 
 static inline size_t gc_handle_get_size(GCHandle handle) {
@@ -515,9 +524,21 @@ uint32_t gc_thread_pool_get_thread_count(void);
 /* Wait until the thread pool has no active or pending jobs */
 void gc_thread_pool_wait_empty(void);
 
-/* Submit a custom job to the thread pool (for testing). Returns true on success. */
+/* Submit a custom job to the thread pool. Returns true on success. */
 typedef void (*GCThreadPoolJobFunc)(void *arg);
+bool gc_thread_pool_submit_job(GCThreadPoolJobFunc func, void *arg);
+
+/* Backward-compatible alias used by existing tests. */
 bool gc_thread_pool_submit_test_job(GCThreadPoolJobFunc func, void *arg);
+
+/* Grey work queue used by the concurrent marker. */
+bool gc_grey_queue_push(GCHandle handle);
+
+/* Write barrier for concurrent marking. Must be called before storing a GC
+ * reference into another GC-managed object. */
+void gc_write_barrier(GCHandle source, GCHandle target);
+
+#define GC_WRITE_BARRIER(src, tgt) gc_write_barrier((src), (tgt))
 
 /* ============================================================================
  * GC-Safe Linked Lists (GCListHead)

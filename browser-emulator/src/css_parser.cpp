@@ -612,8 +612,9 @@ static bool css_selector_matches(const char *selector, HtmlDocument *doc, HtmlNo
             bool ok = css_selector_matches_one(part, doc, node);
             free(part);
             if (ok) return true;
+        } else {
+            free(part);
         }
-        free(part);
         if (i < len && selector[i] == ',') i++;
     }
     return false;
@@ -814,58 +815,173 @@ next:
 
 static int css_specificity_from_selector_text(const char *selector);
 
-static void css_apply_node_styles(JSContextHandle ctx, HtmlDocument *doc, int node_idx,
-                                  CssSheetList *list) {
-    if (node_idx < 0) return;
+/* Per-element result produced by the parallel matching phase. */
+typedef struct CssElementResult {
+    int node_idx;
+    CssAppliedDecl *applied;
+    int applied_count;
+} CssElementResult;
+
+/* Match selectors for a single element and store the resulting declarations.
+ * This runs on worker threads and only reads shared DOM/CSS data; it does not
+ * touch the JS heap. */
+static void css_match_one_node(HtmlDocument *doc, int node_idx, CssSheetList *list,
+                               CssElementResult *result) {
+    result->node_idx = node_idx;
+    result->applied = NULL;
+    result->applied_count = 0;
+
     HtmlNode *node = (HtmlNode*)po_array_payload(&doc->array, node_idx);
+    if (!node || node->type != HTML_NODE_ELEMENT || !node->has_js_object) return;
 
-    if (node && node->type == HTML_NODE_ELEMENT && node->has_js_object) {
-        GCValue element = node->js_object;
-        if (!JS_IsUndefined(element) && !JS_IsNull(element)) {
-            /* Build matching declarations from stylesheets. */
-            int applied_cap = 64;
-            int applied_count = 0;
-            CssAppliedDecl *applied = (CssAppliedDecl*)malloc(applied_cap * sizeof(CssAppliedDecl));
-            if (applied) {
-                for (int s = 0; s < list->count; s++) {
-                    CssStylesheet *sheet = list->sheets[s];
-                    for (int r = 0; r < sheet->rule_count; r++) {
-                        CssRule *rule = &sheet->rules[r];
-                        if (!rule->selector_text || !rule->selector_text[0]) continue;
-                        if (!css_selector_matches(rule->selector_text, doc, node)) continue;
-                        int spec = rule->specificity;
-                        if (spec == 0) spec = css_specificity_from_selector_text(rule->selector_text);
-                        for (int d = 0; d < rule->declaration_count; d++) {
-                            if (applied_count >= applied_cap) {
-                                int new_cap = applied_cap * 2;
-                                CssAppliedDecl *new_app = (CssAppliedDecl*)realloc(applied,
-                                                                                    new_cap * sizeof(CssAppliedDecl));
-                                if (!new_app) break;
-                                applied = new_app;
-                                applied_cap = new_cap;
-                            }
-                            applied[applied_count].decl = &rule->declarations[d];
-                            applied[applied_count].specificity = spec;
-                            applied[applied_count].order = s * 1000000 + r * 1000 + d;
-                            applied_count++;
-                        }
-                    }
+    int applied_cap = 64;
+    int applied_count = 0;
+    CssAppliedDecl *applied = (CssAppliedDecl*)malloc(applied_cap * sizeof(CssAppliedDecl));
+    if (!applied) return;
+
+    for (int s = 0; s < list->count; s++) {
+        CssStylesheet *sheet = list->sheets[s];
+        for (int r = 0; r < sheet->rule_count; r++) {
+            CssRule *rule = &sheet->rules[r];
+            if (!rule->selector_text || !rule->selector_text[0]) continue;
+            if (!css_selector_matches(rule->selector_text, doc, node)) continue;
+            int spec = rule->specificity;
+            if (spec == 0) spec = css_specificity_from_selector_text(rule->selector_text);
+            for (int d = 0; d < rule->declaration_count; d++) {
+                if (applied_count >= applied_cap) {
+                    int new_cap = applied_cap * 2;
+                    CssAppliedDecl *new_app = (CssAppliedDecl*)realloc(applied,
+                                                                        new_cap * sizeof(CssAppliedDecl));
+                    if (!new_app) break;
+                    applied = new_app;
+                    applied_cap = new_cap;
                 }
-
-                css_apply_declarations(ctx, element, applied, applied_count);
-                free(applied);
+                applied[applied_count].decl = &rule->declarations[d];
+                applied[applied_count].specificity = spec;
+                applied[applied_count].order = s * 1000000 + r * 1000 + d;
+                applied_count++;
             }
-
-            /* Inline style wins over stylesheets. */
-            css_apply_inline_style(ctx, element, node);
         }
     }
 
-    int child = po_array_first_child(&doc->array, node_idx);
-    while (child >= 0) {
-        css_apply_node_styles(ctx, doc, child, list);
-        child = po_array_next_sibling(&doc->array, child);
+    if (applied_count == 0) {
+        free(applied);
+    } else {
+        result->applied = applied;
+        result->applied_count = applied_count;
     }
+}
+
+typedef struct CssMatchJob {
+    HtmlDocument *doc;
+    CssSheetList *list;
+    CssElementResult *results;
+    int start;
+    int end;
+} CssMatchJob;
+
+static void css_match_node_styles_job(void *arg) {
+    CssMatchJob *job = (CssMatchJob*)arg;
+    for (int i = job->start; i < job->end; i++) {
+        css_match_one_node(job->doc, job->results[i].node_idx, job->list, &job->results[i]);
+    }
+}
+
+/* Collect every element node that has a backing JS object into a results array. */
+static CssElementResult* css_collect_element_results(HtmlDocument *doc, int *out_count) {
+    int cap = 64;
+    int count = 0;
+    CssElementResult *results = (CssElementResult*)malloc(cap * sizeof(CssElementResult));
+    if (!results) {
+        *out_count = 0;
+        return NULL;
+    }
+
+    size_t n = po_array_count(&doc->array);
+    for (size_t i = 0; i < n; i++) {
+        HtmlNode *node = (HtmlNode*)po_array_payload(&doc->array, (int)i);
+        if (!node || node->type != HTML_NODE_ELEMENT || !node->has_js_object) continue;
+
+        if (count >= cap) {
+            int new_cap = cap * 2;
+            CssElementResult *new_results = (CssElementResult*)realloc(results,
+                                                                        new_cap * sizeof(CssElementResult));
+            if (!new_results) break;
+            results = new_results;
+            cap = new_cap;
+        }
+        results[count].node_idx = (int)i;
+        results[count].applied = NULL;
+        results[count].applied_count = 0;
+        count++;
+    }
+
+    *out_count = count;
+    return results;
+}
+
+/* Phase 1 (parallel): use the GC thread pool to match selectors for every
+ * element and build a per-element declaration list.
+ * Phase 2 (serial): apply the matched declarations and inline styles on the
+ * main thread. The current QuickJS runtime is not thread-safe for object
+ * mutation, so JS writes must stay on the mutator thread even though each
+ * node is logically independent. */
+static void css_apply_node_styles_parallel(JSContextHandle ctx, HtmlDocument *doc,
+                                           CssSheetList *list) {
+    int element_count = 0;
+    CssElementResult *results = css_collect_element_results(doc, &element_count);
+    if (!results || element_count == 0) {
+        free(results);
+        return;
+    }
+
+    uint32_t thread_count = gc_thread_pool_get_thread_count();
+    if (thread_count < 1) thread_count = 1;
+    int num_jobs = (int)thread_count;
+    if (num_jobs > element_count) num_jobs = element_count;
+
+    CssMatchJob *jobs = (CssMatchJob*)calloc((size_t)num_jobs, sizeof(CssMatchJob));
+    if (!jobs) {
+        /* Allocation failed: fall back to serial matching. */
+        for (int i = 0; i < element_count; i++) {
+            css_match_one_node(doc, results[i].node_idx, list, &results[i]);
+        }
+    } else {
+        int chunk = element_count / num_jobs;
+        int remainder = element_count % num_jobs;
+        int start = 0;
+        for (int j = 0; j < num_jobs; j++) {
+            int end = start + chunk + (j < remainder ? 1 : 0);
+            jobs[j].doc = doc;
+            jobs[j].list = list;
+            jobs[j].results = results;
+            jobs[j].start = start;
+            jobs[j].end = end;
+            if (end > start) {
+                gc_thread_pool_submit_job(css_match_node_styles_job, &jobs[j]);
+            }
+            start = end;
+        }
+
+        gc_thread_pool_wait_empty();
+        free(jobs);
+    }
+
+    /* Apply on the main thread where JS mutation is safe. */
+    for (int i = 0; i < element_count; i++) {
+        int node_idx = results[i].node_idx;
+        HtmlNode *node = (HtmlNode*)po_array_payload(&doc->array, node_idx);
+        if (!node || node->type != HTML_NODE_ELEMENT || !node->has_js_object) continue;
+
+        GCValue element = node->js_object;
+        if (JS_IsUndefined(element) || JS_IsNull(element)) continue;
+
+        css_apply_declarations(ctx, element, results[i].applied, results[i].applied_count);
+        css_apply_inline_style(ctx, element, node);
+        free(results[i].applied);
+    }
+
+    free(results);
 }
 
 /* Recompute specificity from raw selector text (used when not precomputed). */
@@ -899,7 +1015,7 @@ void css_apply_document_styles(JSContextHandle ctx, GCValue js_doc,
     css_collect_stylesheets_recursive(doc, root_idx, &list, base_url);
     LOG_INFO("Collected %d stylesheet(s), applying to DOM", list.count);
 
-    css_apply_node_styles(ctx, doc, root_idx, &list);
+    css_apply_node_styles_parallel(ctx, doc, &list);
 
     css_sheet_list_free(&list);
 }

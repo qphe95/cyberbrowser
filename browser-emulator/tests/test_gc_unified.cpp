@@ -526,6 +526,33 @@ TEST(test_gc_thread_pool_gc_job) {
     return true;
 }
 
+TEST(test_gc_write_barrier) {
+    /* Verify the Dijkstra write barrier shades a white target grey when the
+     * source is black and the GC is in the marking phase. */
+    GCHandle src = gc_alloc(64, JS_GC_OBJ_TYPE_DATA);
+    GCHandle tgt = gc_alloc(64, JS_GC_OBJ_TYPE_DATA);
+    ASSERT_TRUE(src != GC_HANDLE_NULL);
+    ASSERT_TRUE(tgt != GC_HANDLE_NULL);
+
+    GCHeader *src_hdr = gc_header_from_handle(src);
+    GCHeader *tgt_hdr = gc_header_from_handle(tgt);
+    ASSERT_TRUE(src_hdr != NULL);
+    ASSERT_TRUE(tgt_hdr != NULL);
+
+    src_hdr->gc_color_state = GC_COLOR_BLACK;
+    tgt_hdr->gc_color_state = GC_COLOR_WHITE;
+
+    uint32_t saved_phase = g_gc.gc_phase;
+    g_gc.gc_phase = GC_PHASE_MARKING;
+
+    gc_write_barrier(src, tgt);
+
+    ASSERT_EQ((uint32_t)GC_COLOR_GREY, tgt_hdr->gc_color_state);
+
+    g_gc.gc_phase = saved_phase;
+    return true;
+}
+
 /* ============================================================================
  * QuickJS Integration Tests
  * ============================================================================ */
@@ -621,6 +648,7 @@ extern "C" void run_gc_unified_tests(void) {
     RUN_TEST(test_gc_thread_pool_basic_job);
     RUN_TEST(test_gc_thread_pool_multiple_jobs);
     RUN_TEST(test_gc_thread_pool_gc_job);
+    RUN_TEST(test_gc_write_barrier);
     
     /* Run QuickJS integration tests using shared context */
     printf("\n  QuickJS integration tests use shared context from test_main.cpp\n");

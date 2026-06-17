@@ -6855,7 +6855,7 @@ static void add_gc_object(JSRuntimeHandle rt, GCHeader *h,
         abort();
     }
     
-    h->mark = 0;
+    h->gc_color_state = GC_COLOR_WHITE;
     h->gc_obj_type = type;
     
     /* Handle must already be registered during gc_alloc. */
@@ -7391,7 +7391,7 @@ static void gc_mark_roots(JSRuntimeHandle rt)
 
 /* CRITICAL FIX: Clean up freed shapes from the shape hash table.
  * 
- * This must be called AFTER gc_sweep marks objects as freed (hdr->mark == 0)
+ * This must be called AFTER gc_sweep marks objects as freed (hdr->gc_color_state != GC_COLOR_WHITE == 0)
  * but BEFORE gc_compact moves the memory. We iterate through the shape hash
  * table and remove any entries that point to shapes which will be freed.
  * 
@@ -8857,6 +8857,9 @@ static int JS_SetPrototypeInternal(JSContextHandle ctx, GCValue obj,
     if (sh.proto_handle() != GC_HANDLE_NULL)
         ;
     sh.set_proto_handle((proto ? proto.handle() : GC_HANDLE_NULL));
+    if (proto) {
+        gc_write_barrier(p.shape_handle(), proto.handle());
+    }
     p.set_is_std_array_prototype(FALSE); 
     return TRUE;
 }
@@ -9324,6 +9327,7 @@ static int JS_SetPrivateField(JSContextHandle ctx, GCValue obj,
         return -1;
     }
     set_value(ctx, &pr->u.value, val);
+    gc_write_barrier(GC_VALUE_GET_HANDLE(obj), GC_VALUE_GET_HANDLE(val));
     return 0;
 }
 
@@ -10491,6 +10495,7 @@ static inline int add_fast_array_element(JSContextHandle ctx, JSObjectHandle p,
         }
     }
     p_array_values[new_len - 1] = val;
+    gc_write_barrier(p.handle(), GC_VALUE_GET_HANDLE(val));
     p.set_array_count(new_len);
     return TRUE;
 }
@@ -10674,6 +10679,7 @@ int JS_SetPropertyInternal(JSContextHandle ctx, GCValue obj,
             /* fast case */
             QJS_LOGD("JS_SetPropertyInternal: fast path, pr=%p pr->u.value=...", (void*)pr);
             set_value(ctx, &pr->u.value, val);
+            gc_write_barrier(GC_VALUE_GET_HANDLE(this_obj), GC_VALUE_GET_HANDLE(val));
             QJS_LOGD("JS_SetPropertyInternal: fast path done");
             return TRUE;
         } else if (prs->flags & JS_PROP_LENGTH) {
@@ -10859,6 +10865,7 @@ int JS_SetPropertyInternal(JSContextHandle ctx, GCValue obj,
                 return -1;
             }
             pr->u.value = val;
+            gc_write_barrier(GC_VALUE_GET_HANDLE(this_obj), GC_VALUE_GET_HANDLE(val));
             return TRUE;
         }
     } else {
@@ -10960,11 +10967,13 @@ static int JS_SetPropertyValue(JSContextHandle ctx, GCValue this_obj,
                 return add_fast_array_element(ctx, p, val, flags);
             }
             set_value(ctx, &p_array_values[idx], val);
+            gc_write_barrier(p.handle(), GC_VALUE_GET_HANDLE(val));
             break;
         case JS_CLASS_ARGUMENTS:
             if (unlikely(idx >= (uint32_t)p.array_count()))
                 goto slow_path;
             set_value(ctx, &p_array_values[idx], val);
+            gc_write_barrier(p.handle(), GC_VALUE_GET_HANDLE(val));
             break;
         case JS_CLASS_MAPPED_ARGUMENTS:
             if (unlikely(idx >= (uint32_t)p.array_count()))
@@ -20976,6 +20985,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                                               JS_PROP_LENGTH)) == JS_PROP_WRITABLE)) {
                         /* fast path */
                         set_value(ctx, &pr->u.value, sp[-1]);
+                        gc_write_barrier(GC_VALUE_GET_HANDLE(obj), GC_VALUE_GET_HANDLE(sp[-1]));
                     } else {
                         goto put_field_slow_path;
                     }
