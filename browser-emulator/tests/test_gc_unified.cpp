@@ -354,72 +354,94 @@ TEST(test_gc_lockfree_allocation) {
 TEST(test_gc_compaction_sorts_by_handle) {
     /* Test that compaction sorts live objects by handle in memory.
      * 
-     * We deliberately create out-of-handle-order memory by freeing an object
-     * in the middle and then allocating a new object that reuses that handle.
-     * Before compaction the memory order may be:
-     *   A(handle=1), freed B, C(handle=3), D(handle=2), E(handle=4)
-     * After compaction the live objects must be in handle order:
-     *   A(handle=1), D(handle=2), C(handle=3), E(handle=4)
+     * Lock-free allocations reserve the handle slot and memory in separate
+     * atomic steps, so objects can end up out of handle order in memory.
+     * We create that situation by freeing objects in the middle of a block
+     * and allocating new objects that reuse those freed handles. After
+     * compaction, live objects must be laid out in handle order.
+     * 
+     * We do NOT call gc_reset() because it would destroy the shared runtime
+     * and context that later tests depend on.
      */
     
-    /* Start fresh to avoid interference from previous tests */
-    gc_wait_for_completion();
-    gc_reset();
+    /* Allocate an initial block of objects with monotonically increasing handles */
+    const int initial_count = 8;
+    GCHandle initial[initial_count];
+    for (int i = 0; i < initial_count; i++) {
+        initial[i] = gc_alloc(64, JS_GC_OBJ_TYPE_DATA);
+        ASSERT_TRUE(initial[i] != GC_HANDLE_NULL);
+    }
     
-    /* Allocate objects A, B, C. Handles will be 1, 2, 3. */
-    GCHandle hA = gc_alloc(64, JS_GC_OBJ_TYPE_DATA);
-    GCHandle hB = gc_alloc(64, JS_GC_OBJ_TYPE_DATA);
-    GCHandle hC = gc_alloc(64, JS_GC_OBJ_TYPE_DATA);
-    ASSERT_TRUE(hA != GC_HANDLE_NULL);
-    ASSERT_TRUE(hB != GC_HANDLE_NULL);
-    ASSERT_TRUE(hC != GC_HANDLE_NULL);
+    /* Free every other object; their handles go to the free list */
+    const int freed_count = 4;
+    GCHandle freed[freed_count];
+    for (int i = 0; i < freed_count; i++) {
+        freed[i] = initial[i * 2 + 1];
+        gc_free(freed[i]);
+    }
     
-    /* Free B so its handle goes back to the free list */
-    gc_free(hB);
+    /* Allocate new objects; they will reuse handles from the free list.
+     * Because the free list is LIFO and may contain handles from earlier
+     * tests, the new handles are interleaved with the kept initial handles,
+     * producing out-of-handle-order memory. */
+    const int new_count = 4;
+    GCHandle new_handles[new_count];
+    for (int i = 0; i < new_count; i++) {
+        new_handles[i] = gc_alloc(64, JS_GC_OBJ_TYPE_DATA);
+        ASSERT_TRUE(new_handles[i] != GC_HANDLE_NULL);
+    }
     
-    /* Allocate D and E. D should reuse handle 2, E gets handle 4.
-     * Memory order is now A, old-B(freed), C, D, E. */
-    GCHandle hD = gc_alloc(64, JS_GC_OBJ_TYPE_DATA);
-    GCHandle hE = gc_alloc(64, JS_GC_OBJ_TYPE_DATA);
-    ASSERT_TRUE(hD != GC_HANDLE_NULL);
-    ASSERT_TRUE(hE != GC_HANDLE_NULL);
-    ASSERT_EQ(hB, hD); /* D must reuse B's handle */
+    /* Collect all live handles (kept initial objects + new objects) */
+    const int live_count = initial_count - freed_count + new_count;
+    GCHandle live[live_count];
+    int idx = 0;
+    for (int i = 0; i < initial_count; i += 2) {
+        live[idx++] = initial[i];
+    }
+    for (int i = 0; i < new_count; i++) {
+        live[idx++] = new_handles[i];
+    }
+    ASSERT_EQ(idx, live_count);
     
     /* Root all live objects so they survive compaction */
-    gc_add_root(hA);
-    gc_add_root(hC);
-    gc_add_root(hD);
-    gc_add_root(hE);
+    for (int i = 0; i < live_count; i++) {
+        gc_add_root(live[i]);
+    }
     
     /* Run GC which compacts live objects */
     gc_run();
     
-    /* All handles must still be valid */
-    ASSERT_TRUE(gc_handle_is_valid(hA));
-    ASSERT_TRUE(gc_handle_is_valid(hC));
-    ASSERT_TRUE(gc_handle_is_valid(hD));
-    ASSERT_TRUE(gc_handle_is_valid(hE));
+    /* All live handles must still be valid */
+    for (int i = 0; i < live_count; i++) {
+        ASSERT_TRUE(gc_handle_is_valid(live[i]));
+    }
     
-    /* After compaction, live objects in the active buffer must be sorted by handle */
-    void *ptrA = gc_deref(hA);
-    void *ptrC = gc_deref(hC);
-    void *ptrD = gc_deref(hD);
-    void *ptrE = gc_deref(hE);
-    ASSERT_TRUE(ptrA != NULL);
-    ASSERT_TRUE(ptrC != NULL);
-    ASSERT_TRUE(ptrD != NULL);
-    ASSERT_TRUE(ptrE != NULL);
+    /* Sort the live handles */
+    GCHandle sorted[live_count];
+    memcpy(sorted, live, sizeof(sorted));
+    for (int i = 0; i < live_count; i++) {
+        for (int j = i + 1; j < live_count; j++) {
+            if (sorted[j] < sorted[i]) {
+                GCHandle tmp = sorted[i];
+                sorted[i] = sorted[j];
+                sorted[j] = tmp;
+            }
+        }
+    }
     
-    /* Because all pointers come from the same active buffer, pointer order
-     * reflects memory order. Handle order is A(1) < D(2) < C(3) < E(4). */
-    ASSERT_TRUE(ptrA < ptrD);
-    ASSERT_TRUE(ptrD < ptrC);
-    ASSERT_TRUE(ptrC < ptrE);
+    /* After compaction, pointers must be in handle order */
+    for (int i = 1; i < live_count; i++) {
+        void *ptr_prev = gc_deref(sorted[i-1]);
+        void *ptr_curr = gc_deref(sorted[i]);
+        ASSERT_TRUE(ptr_prev != NULL);
+        ASSERT_TRUE(ptr_curr != NULL);
+        ASSERT_TRUE(ptr_prev < ptr_curr);
+    }
     
-    gc_remove_root(hA);
-    gc_remove_root(hC);
-    gc_remove_root(hD);
-    gc_remove_root(hE);
+    /* Remove roots */
+    for (int i = 0; i < live_count; i++) {
+        gc_remove_root(live[i]);
+    }
     
     return true;
 }
