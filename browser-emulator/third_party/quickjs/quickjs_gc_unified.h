@@ -428,6 +428,8 @@ typedef struct GCState {
     /* Double buffers: [0] and [1] alternate as active/compact-target */
     GCBuffer buffers[2];
     
+    uint32_t active_buffer_index;         /* 0 or 1, kept in sync with active_handle_table for compat */
+    
     /* Atomic pointer to the currently active handle table */
     void *volatile active_handle_table;   /* Points to one of buffers[0].handles or buffers[1].handles */
     

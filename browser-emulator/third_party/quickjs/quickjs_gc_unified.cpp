@@ -16,6 +16,67 @@
 #include <pthread.h>
 #endif
 
+/* Atomic helpers using volatile + compiler barriers for lock-free operations.
+ * On Windows with MSVC/MinGW, we use compiler intrinsics to avoid std::atomic
+ * conflicts with pthread headers. */
+#ifdef _WIN32
+#include <intrin.h>
+static inline uint32_t atomic_load_u32(volatile uint32_t *p) {
+    uint32_t val = *p;
+    _ReadWriteBarrier();
+    return val;
+}
+static inline void atomic_store_u32(volatile uint32_t *p, uint32_t val) {
+    _ReadWriteBarrier();
+    *p = val;
+    _ReadWriteBarrier();
+}
+static inline void *atomic_load_ptr(void *volatile *p) {
+    void *val = *p;
+    _ReadWriteBarrier();
+    return val;
+}
+static inline void atomic_store_ptr(void *volatile *p, void *val) {
+    _ReadWriteBarrier();
+    *p = val;
+    _ReadWriteBarrier();
+}
+static inline size_t atomic_fetch_add_zu(volatile size_t *p, size_t val) {
+    return _InterlockedExchangeAdd64((volatile __int64 *)p, val);
+}
+static inline uint32_t atomic_fetch_add_u32(volatile uint32_t *p, uint32_t val) {
+    return _InterlockedExchangeAdd((volatile long *)p, val);
+}
+#else
+/* POSIX fallback - still uses volatile with compiler barriers */
+static inline uint32_t atomic_load_u32(volatile uint32_t *p) {
+    uint32_t val = *p;
+    __sync_synchronize();
+    return val;
+}
+static inline void atomic_store_u32(volatile uint32_t *p, uint32_t val) {
+    __sync_synchronize();
+    *p = val;
+    __sync_synchronize();
+}
+static inline void *atomic_load_ptr(void *volatile *p) {
+    void *val = *p;
+    __sync_synchronize();
+    return val;
+}
+static inline void atomic_store_ptr(void *volatile *p, void *val) {
+    __sync_synchronize();
+    *p = val;
+    __sync_synchronize();
+}
+static inline size_t atomic_fetch_add_zu(volatile size_t *p, size_t val) {
+    return __sync_fetch_and_add(p, val);
+}
+static inline uint32_t atomic_fetch_add_u32(volatile uint32_t *p, uint32_t val) {
+    return __sync_fetch_and_add(p, val);
+}
+#endif
+
 /* 
  * Debug logging for GC - controlled via QJS_DEBUG environment variable
  * Set QJS_DEBUG=1 for info level, QJS_DEBUG=2 for verbose debug
@@ -136,11 +197,11 @@ static GCCanaryStatus gc_validate_canaries_hdr(GCHeader *hdr, void **out_ptr);
  */
 
 static inline GCBuffer *gc_active_buffer(void) {
-    return &g_gc.buffers[g_gc.active_buffer_index];
+    return &g_gc.buffers[gc_active_buffer_index()];
 }
 
 static inline GCBuffer *gc_inactive_buffer(void) {
-    return &g_gc.buffers[1 - g_gc.active_buffer_index];
+    return &g_gc.buffers[1 - gc_active_buffer_index()];
 }
 
 static inline uint8_t *gc_active_heap(void) {
@@ -175,26 +236,14 @@ static inline uint32_t gc_active_handle_capacity(void) {
 
 #ifdef _WIN32
 typedef HANDLE GCThreadHandle;
-typedef CRITICAL_SECTION GCMutex;
-#define GC_MUTEX_INIT(m) InitializeCriticalSection(&(m))
-#define GC_MUTEX_LOCK(m) EnterCriticalSection(&(m))
-#define GC_MUTEX_UNLOCK(m) LeaveCriticalSection(&(m))
-#define GC_MUTEX_DESTROY(m) DeleteCriticalSection(&(m))
 #else
 typedef pthread_t GCThreadHandle;
-typedef pthread_mutex_t GCMutex;
-#define GC_MUTEX_INIT(m) pthread_mutex_init(&(m), NULL)
-#define GC_MUTEX_LOCK(m) pthread_mutex_lock(&(m))
-#define GC_MUTEX_UNLOCK(m) pthread_mutex_unlock(&(m))
-#define GC_MUTEX_DESTROY(m) pthread_mutex_destroy(&(m))
 #endif
 
 static struct {
     GCThreadHandle thread;
-    GCMutex phase_mutex;
-    GCMutex alloc_mutex;
     bool thread_running;
-    bool gc_requested;
+    volatile bool gc_requested;
 } g_gc_thread = {0};
 
 /* Background GC thread function */
@@ -207,14 +256,12 @@ static void *gc_thread_func(void *arg) {
     GC_LOGI("GC background thread started");
     
     while (g_gc_thread.thread_running) {
-        GC_MUTEX_LOCK(g_gc_thread.phase_mutex);
-        if (g_gc_thread.gc_requested && g_gc.gc_phase == GC_PHASE_IDLE) {
+        uint32_t phase = atomic_load_u32(&g_gc.gc_phase);
+        if (g_gc_thread.gc_requested && phase == GC_PHASE_IDLE) {
             g_gc_thread.gc_requested = false;
-            g_gc.gc_phase = GC_PHASE_MARKING;
-            GC_MUTEX_UNLOCK(g_gc_thread.phase_mutex);
+            atomic_store_u32(&g_gc.gc_phase, GC_PHASE_MARKING);
             gc_run_internal();
         } else {
-            GC_MUTEX_UNLOCK(g_gc_thread.phase_mutex);
             /* Small sleep to avoid busy-waiting */
 #ifdef _WIN32
             Sleep(1);
@@ -235,8 +282,6 @@ static void *gc_thread_func(void *arg) {
 bool gc_thread_start(void) {
     if (g_gc_thread.thread_running) return true;
     
-    GC_MUTEX_INIT(g_gc_thread.phase_mutex);
-    GC_MUTEX_INIT(g_gc_thread.alloc_mutex);
     g_gc_thread.thread_running = true;
     g_gc_thread.gc_requested = false;
     
@@ -269,25 +314,18 @@ void gc_thread_stop(void) {
     pthread_join(g_gc_thread.thread, NULL);
 #endif
     
-    GC_MUTEX_DESTROY(g_gc_thread.phase_mutex);
-    GC_MUTEX_DESTROY(g_gc_thread.alloc_mutex);
-    
     g_gc_thread.thread = 0;
     GC_LOGI("GC background thread stopped");
 }
 
 void gc_request_background(void) {
-    GC_MUTEX_LOCK(g_gc_thread.phase_mutex);
     g_gc_thread.gc_requested = true;
-    GC_MUTEX_UNLOCK(g_gc_thread.phase_mutex);
 }
 
 void gc_wait_for_completion(void) {
     while (true) {
-        GC_MUTEX_LOCK(g_gc_thread.phase_mutex);
-        GCPhase phase = g_gc.gc_phase;
+        uint32_t phase = atomic_load_u32(&g_gc.gc_phase);
         bool requested = g_gc_thread.gc_requested;
-        GC_MUTEX_UNLOCK(g_gc_thread.phase_mutex);
         
         if (phase == GC_PHASE_IDLE && !requested) break;
         
@@ -300,10 +338,7 @@ void gc_wait_for_completion(void) {
 }
 
 bool gc_is_background_running(void) {
-    GC_MUTEX_LOCK(g_gc_thread.phase_mutex);
-    bool running = (g_gc.gc_phase != GC_PHASE_IDLE);
-    GC_MUTEX_UNLOCK(g_gc_thread.phase_mutex);
-    return running;
+    return atomic_load_u32(&g_gc.gc_phase) != GC_PHASE_IDLE;
 }
 
 /* ============================================================================
@@ -359,7 +394,6 @@ bool gc_init(void) {
     }
     
     /* Buffer 0 is active initially */
-    g_gc.active_buffer_index = 0;
     g_gc.active_handle_table = g_gc.buffers[0].handles;
     
     /* Initialize free list */
@@ -394,8 +428,8 @@ bool gc_init(void) {
         gc_type_bucket_init(&g_gc.type_buckets[i]);
     }
     
-    g_gc.gc_phase = GC_PHASE_IDLE;
-    g_gc.compaction_target = 0;
+    atomic_store_u32(&g_gc.gc_phase, (uint32_t)GC_PHASE_IDLE);
+    atomic_store_u32(&g_gc.compaction_target, (uint32_t)0);
     g_gc.bytes_allocated = 0;
     g_gc.gc_threshold = GC_DEFAULT_THRESHOLD;
     g_gc.rt = GC_HANDLE_NULL;
@@ -757,28 +791,23 @@ static void *bump_alloc(size_t size) {
     GCBuffer *buf = gc_active_buffer();
     
     /* During compaction, allocate from the compaction target buffer */
-    GC_MUTEX_LOCK(g_gc_thread.phase_mutex);
-    if (g_gc.gc_phase == GC_PHASE_COMPACTING) {
-        buf = &g_gc.buffers[g_gc.compaction_target];
+    if (atomic_load_u32(&g_gc.gc_phase) == (uint32_t)GC_PHASE_COMPACTING) {
+        uint32_t target = atomic_load_u32(&g_gc.compaction_target);
+        buf = &g_gc.buffers[target];
     }
-    GC_MUTEX_UNLOCK(g_gc_thread.phase_mutex);
     
     /* Add space for prefix and suffix canaries */
     size_t user_size = ALIGN16(size);
     size_t total_size = 8 + sizeof(GCHeader) + user_size + 8; /* canaries + header + data */
     
-    /* Simple bump allocation (single-threaded for main thread, 
-     * GC thread doesn't allocate during compaction) */
-    size_t old_offset = buf->bump_offset;
+    /* Atomic bump allocation using fetch_add */
+    size_t old_offset = atomic_fetch_add_zu(&buf->bump_offset, total_size);
     /* CRITICAL: Ensure offset is 16-byte aligned before allocation */
     size_t aligned_offset = ALIGN16(old_offset);
     /* Prefix canary starts 8 bytes before the aligned position */
     size_t alloc_start = aligned_offset + 8;
     size_t new_offset = aligned_offset + total_size;
     if (new_offset > buf->storage_size) return NULL;
-    
-    /* Update bump pointer */
-    buf->bump_offset = new_offset;
     
     /* Set up canaries and header */
     uint8_t *prefix_ptr = buf->storage + aligned_offset;
@@ -836,7 +865,7 @@ static bool grow_handle_tables(void) {
     }
     
     /* Update active_handle_table pointer in case realloc moved it */
-    g_gc.active_handle_table = g_gc.buffers[g_gc.active_buffer_index].handles;
+    g_gc.active_handle_table = g_gc.buffers[gc_active_buffer_index()].handles;
     
     GC_LOGI("Grew handle tables to %u entries", new_capacity);
     return true;
@@ -866,8 +895,6 @@ static inline void push_free_handle(GCHandle handle) {
 static GCHandle allocate_handle(void *ptr) {
     if (!ptr) return GC_HANDLE_NULL;
     
-    GC_MUTEX_LOCK(g_gc_thread.alloc_mutex);
-    
     /* Fast path: reuse a handle from the free list */
     if (g_gc.free_count > 0) {
         GCHandle handle = g_gc.free_list[--g_gc.free_count];
@@ -876,13 +903,11 @@ static GCHandle allocate_handle(void *ptr) {
         gc_active_buffer()->handles[handle] = ptr;
         
         /* During compaction, also write to compaction target */
-        GC_MUTEX_LOCK(g_gc_thread.phase_mutex);
-        if (g_gc.gc_phase == GC_PHASE_COMPACTING) {
-            g_gc.buffers[g_gc.compaction_target].handles[handle] = ptr;
+        if (atomic_load_u32(&g_gc.gc_phase) == (uint32_t)GC_PHASE_COMPACTING) {
+            uint32_t target = atomic_load_u32(&g_gc.compaction_target);
+            g_gc.buffers[target].handles[handle] = ptr;
         }
-        GC_MUTEX_UNLOCK(g_gc_thread.phase_mutex);
         
-        GC_MUTEX_UNLOCK(g_gc_thread.alloc_mutex);
         return handle;
     }
     
@@ -892,7 +917,6 @@ static GCHandle allocate_handle(void *ptr) {
         if (!grow_handle_tables()) {
             fprintf(stderr, "[FATAL] Out of handles (count=%u, capacity=%u) - grow failed\n", 
                     active->handle_count, active->handle_capacity);
-            GC_MUTEX_UNLOCK(g_gc_thread.alloc_mutex);
             return GC_HANDLE_NULL;
         }
         GC_LOGI("Grew handle tables, now capacity=%u", active->handle_capacity);
@@ -908,7 +932,6 @@ static GCHandle allocate_handle(void *ptr) {
     }
     other->handles[handle] = ptr;
     
-    GC_MUTEX_UNLOCK(g_gc_thread.alloc_mutex);
     return handle;
 }
 
@@ -1022,19 +1045,14 @@ GCHandle gc_realloc(GCHandle handle, size_t new_size) {
     new_hdr->handle = handle;
     
     /* Update handle tables to point to new memory */
-    GC_MUTEX_LOCK(g_gc_thread.alloc_mutex);
-    
     /* Update active buffer */
     gc_active_buffer()->handles[handle] = new_ptr;
     
     /* During compaction, also update compaction target */
-    GC_MUTEX_LOCK(g_gc_thread.phase_mutex);
-    if (g_gc.gc_phase == GC_PHASE_COMPACTING) {
-        g_gc.buffers[g_gc.compaction_target].handles[handle] = new_ptr;
+    if (atomic_load_u32(&g_gc.gc_phase) == (uint32_t)GC_PHASE_COMPACTING) {
+        uint32_t target = atomic_load_u32(&g_gc.compaction_target);
+        g_gc.buffers[target].handles[handle] = new_ptr;
     }
-    GC_MUTEX_UNLOCK(g_gc_thread.phase_mutex);
-    
-    GC_MUTEX_UNLOCK(g_gc_thread.alloc_mutex);
     
     /* Clear the temporary handle slot to prevent handle aliasing */
     gc_active_buffer()->handles[temp_handle] = NULL;
@@ -1456,11 +1474,12 @@ static inline int gc_ptr_to_buffer_index(void *ptr) {
  */
 static void gc_compact_move_objects(void) {
     GCBuffer *src = gc_active_buffer();
-    GCBuffer *dst = &g_gc.buffers[g_gc.compaction_target];
+    uint32_t target_idx = atomic_load_u32(&g_gc.compaction_target);
+    GCBuffer *dst = &g_gc.buffers[target_idx];
     
     GC_LOGI("gc_compact_move_objects: src=%d (bump=%zu) dst=%d (bump=%zu)",
-            g_gc.active_buffer_index, src->bump_offset,
-            g_gc.compaction_target, dst->bump_offset);
+            gc_active_buffer_index(), src->bump_offset,
+            target_idx, dst->bump_offset);
     
     uint8_t *read = src->storage;
     uint8_t *write = dst->storage + dst->bump_offset;
@@ -1549,7 +1568,7 @@ static void gc_compact_move_objects(void) {
     dst->bump_offset = write - dst->storage;
     
     GC_LOGI("gc_compact_move_objects: DONE, moved %zu bytes to buffer %d, new bump=%zu",
-            new_bytes, g_gc.compaction_target, dst->bump_offset);
+            new_bytes, target_idx, dst->bump_offset);
 }
 
 /*
@@ -1588,12 +1607,11 @@ static void gc_compact(void) {
     gc_compact_rebuild_free_list();
     
     /* Phase 3: Atomically swap active buffer */
-    uint32_t old_active = g_gc.active_buffer_index;
-    uint32_t new_active = g_gc.compaction_target;
+    uint32_t old_active = gc_active_buffer_index();
+    uint32_t new_active = atomic_load_u32(&g_gc.compaction_target);
     
     GC_LOGI("gc_compact: swapping active buffer %d -> %d", old_active, new_active);
     
-    /* Atomically update active_handle_table pointer, then active_buffer_index */
     g_gc.active_handle_table = g_gc.buffers[new_active].handles;
     g_gc.active_buffer_index = new_active;
     
@@ -1702,9 +1720,7 @@ static void gc_run_internal(void) {
     GC_LOGI("gc_run_internal: ENTER has_runtime=%d", has_runtime);
     
     /* Enter MARKING phase */
-    GC_MUTEX_LOCK(g_gc_thread.phase_mutex);
-    g_gc.gc_phase = GC_PHASE_MARKING;
-    GC_MUTEX_UNLOCK(g_gc_thread.phase_mutex);
+    atomic_store_u32(&g_gc.gc_phase, (uint32_t)GC_PHASE_MARKING);
     
     if (has_runtime) {
         /* Phase 0: Remove weak objects (WeakMap, WeakSet, WeakRef) */
@@ -1732,22 +1748,19 @@ static void gc_run_internal(void) {
     }
     
     /* Enter COMPACTING phase */
-    GC_MUTEX_LOCK(g_gc_thread.phase_mutex);
-    g_gc.gc_phase = GC_PHASE_COMPACTING;
+    atomic_store_u32(&g_gc.gc_phase, (uint32_t)GC_PHASE_COMPACTING);
     /* Set compaction target to the inactive buffer */
-    g_gc.compaction_target = 1 - g_gc.active_buffer_index;
-    GC_MUTEX_UNLOCK(g_gc_thread.phase_mutex);
+    atomic_store_u32(&g_gc.compaction_target, (uint32_t)(1 - gc_active_buffer_index()));
     
     /* Phase 5: Compact phase - move live objects and update handles */
-    GC_LOGI("gc_run_internal: Phase 5 - compacting into buffer %d", g_gc.compaction_target);
+    GC_LOGI("gc_run_internal: Phase 5 - compacting into buffer %d",
+            atomic_load_u32(&g_gc.compaction_target));
     gc_compact();
     
     /* Enter SWAPPING phase (brief) then back to IDLE */
-    GC_MUTEX_LOCK(g_gc_thread.phase_mutex);
-    g_gc.gc_phase = GC_PHASE_SWAPPING;
-    g_gc.compaction_target = 0;
-    g_gc.gc_phase = GC_PHASE_IDLE;
-    GC_MUTEX_UNLOCK(g_gc_thread.phase_mutex);
+    atomic_store_u32(&g_gc.gc_phase, (uint32_t)GC_PHASE_SWAPPING);
+    atomic_store_u32(&g_gc.compaction_target, (uint32_t)0);
+    atomic_store_u32(&g_gc.gc_phase, (uint32_t)GC_PHASE_IDLE);
     
     /* Phase 6: Compact typed handle arrays */
     GC_LOGI("gc_run_internal: Phase 6 - compacting handle arrays");
