@@ -512,15 +512,16 @@ lock-free.  Nearly all higher-level shared state is unprotected:
 | 3 | **Plumb grey state through DOM/JS creation** — `DOMNodeHandle::create`, `JS_NewObject` now allocate grey and publish black before returning; GC mark callback deferred | **Done** (tests verify published state of JS objects and DOM nodes) |
 | 4 | **Property-array allocator** — per-object versioning, atomic slot CAS | Not started |
 | 5 | **Shape hash table** — lock-free open-addressing handle table | **Done** (`LFHashTable` integrated into QuickJS; immutable hashed shapes; CAS resize; retired-table reclamation; sharing + resize + GC cleanup tests passing) |
-| 6 | **Atom cache / atom hash** — lock-free atom hash table + atomic class ID | Not started |
+| 6 | **Atom cache / atom hash** — lock-free atom hash table + atomic class ID | **Done** (`LFHashTable` replaced the chained `rt_atom_hash[]`; `LFHashTable` content-equality lookup by string hash/content; CAS resize with retired-table reclamation; `JS_NewClassID` uses atomic fetch-add; class registration uses a runtime spinlock; interning/resize/GC cleanup/class-ID tests passing) |
 | 7 | **Class array / prototypes** — freeze after init; atomic handle loads | Not started |
 | 8 | **Job queue** — lock-free ring buffer | Not started |
 | 9 | **GC free list / type buckets** — **Done** (`Treiber stack` free list + lock-free append-only type buckets; atomic pointer CAS added) |
 | 10 | **Move CSS inline-style parsing and stylesheet matching into workers**, keep JS-object writes serial | Not started |
 
-Phases 1, 2, 3, 5 and 9 are complete.  These provide the foundational building
+Phases 1, 2, 3, 5, 6 and 9 are complete.  These provide the foundational building
 blocks (publication state, lock-free containers, thread-safe shape cache,
-thread-safe allocation metadata) for the remaining QuickJS core changes.
+thread-safe atom cache, atomic class IDs, thread-safe allocation metadata)
+for the remaining QuickJS core changes.
 
 ### 7.4 Grey-state integration points
 

@@ -73,6 +73,7 @@ extern "C" {
     /* Atom marking helpers */
     uint32_t JSRuntime_get_permanent_atom_count(JSRuntimeHandle rt);
     uint32_t JSRuntime_get_atom_hash_size(JSRuntimeHandle rt);
+    uint32_t JSRuntime_get_atom_hash_count(JSRuntimeHandle rt);
     uint32_t *JSRuntime_get_atom_hash(JSRuntimeHandle rt);
     uint32_t JSString_get_hash_next(uint32_t atom_idx);
     void JSString_set_hash_next(uint32_t atom_idx, uint32_t next);

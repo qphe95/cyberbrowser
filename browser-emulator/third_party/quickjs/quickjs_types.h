@@ -1309,16 +1309,20 @@ struct JSRuntime {
     JSMallocState malloc_state;
     const char *rt_info;
 
-    int atom_hash_size; /* power of two */
-    int atom_count;
-    int atom_size;
-    int atom_count_resize; /* resize hash table at this count */
-    GCHandle atom_hash_handle;  /* Handle to uint32_t array */
-    GCHandle atom_array_handle; /* Handle to GCHandle array - use gc_deref to access */
-    int atom_free_index; /* 0 = none */
+    /* Lock-free atom hash table: maps string hash to atom index for
+       non-symbol atoms.  Symbol atoms are found via JSString.hash_next. */
+    LFHashTable *atom_hash;
+    LFHashTable *atom_hash_retired;
+    uint32_t atom_hash_count; /* approximate number of non-symbol entries */
 
-    int class_count;    /* size of class_array */
-    GCHandle class_array_handle;  /* Handle to JSClass array */
+    int atom_count;   /* total number of atoms (treated atomically) */
+    int atom_size;    /* allocated size of atom_array (treated atomically) */
+    GCHandle atom_array_handle; /* Handle to GCHandle array - atomic load */
+    int atom_free_index; /* 0 = none (treated atomically) */
+
+    int class_count;    /* size of class_array (treated atomically) */
+    GCHandle class_array_handle;  /* Handle to JSClass array (atomic load) */
+    uint32_t class_array_lock;    /* spinlock for class registration */
 
     /* Job queue - ring buffer for O(1) push/pop operations */
     GCHandleRingBuffer job_queue;

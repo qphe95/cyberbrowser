@@ -367,7 +367,6 @@ typedef struct JSObject JSObject;
 
 
 /* Accessor macros for handle-based fields - deref immediately before use */
-#define rt_atom_hash (rt.atom_hash_ptr())
 #define rt_atom_array (rt.atom_array_ptr())
 #define rt_class_array (rt.class_array_ptr())
 #define rt_atom_gc_marks (rt.atom_gc_marks_ptr())
@@ -1008,7 +1007,7 @@ extern JSClassExoticMethods js_arguments_exotic_methods;
 extern JSClassExoticMethods js_string_exotic_methods;
 extern JSClassExoticMethods js_proxy_exotic_methods;
 extern JSClassExoticMethods js_module_ns_exotic_methods;
-static JSClassID js_class_id_alloc = JS_CLASS_INIT_COUNT;
+static volatile uint32_t js_class_id_alloc = JS_CLASS_INIT_COUNT;
 
 /* Forward declaration for unified GC functions */
 extern bool gc_should_run(void);
@@ -1932,6 +1931,19 @@ void JS_FreeRuntime(JSRuntimeHandle rt)
         if (t)
             lf_hash_destroy(t);
     }
+    {
+        LFHashTable *t = rt.atom_hash();
+        LFHashTable *r = rt.atom_hash_retired();
+        rt.set_atom_hash(NULL);
+        rt.set_atom_hash_retired(NULL);
+        while (r) {
+            LFHashTable *next = r->next_retired;
+            lf_hash_destroy(r);
+            r = next;
+        }
+        if (t)
+            lf_hash_destroy(t);
+    }
     /* Typed handle arrays are freed in gc_cleanup() */
 #ifdef DUMP_LEAKS
     {
@@ -2453,30 +2465,31 @@ static __maybe_unused void JS_DumpString(JSRuntimeHandle rt, JSStringHandle p)
 static __maybe_unused void JS_DumpAtoms(JSRuntimeHandle rt)
 {
     JSStringHandle p;
-    int h, i;
+    uint32_t i;
     /* This only dumps hashed atoms, not JS_ATOM_TYPE_SYMBOL atoms */
-    printf("JSAtom count=%d size=%d hash_size=%d:\n",
-           rt.atom_count(), rt.atom_size(), rt.atom_hash_size());
+    LFHashTable *t = rt.atom_hash();
+    printf("JSAtom count=%d size=%d hash_buckets=%u:\n",
+           rt.atom_count(), rt.atom_size(), t ? t->bucket_count : 0);
     printf("JSAtom hash table: {\n");
-    for(i = 0; i < rt.atom_hash_size(); i++) {
-        h = rt_atom_hash[i];
-        if (h) {
-            printf("  %d:", i);
-            while (h) {
-                p = js_atom_array_get_handle(rt, h);
-                printf(" ");
-                JS_DumpString(rt, p);
-                h = p.hash_next();
+    if (t) {
+        for (i = 0; i < t->bucket_count; i++) {
+            if (atomic_load_u32(&t->buckets[i].state) == LF_HASH_OCCUPIED) {
+                JSAtom atom_idx = (JSAtom)t->buckets[i].value;
+                p = js_atom_array_get_handle(rt, atom_idx);
+                if (p) {
+                    printf("  %u: ", i);
+                    JS_DumpString(rt, p);
+                    printf("\n");
+                }
             }
-            printf("\n");
         }
     }
     printf("}\n");
     printf("JSAtom table: {\n");
-    for(i = 0; i < rt.atom_size(); i++) {
+    for(i = 0; i < (uint32_t)rt.atom_size(); i++) {
         p = js_atom_array_get_handle(rt, i);
         if (p) {
-            printf("  %d: { %d %08x ", i, p.atom_type(), p.hash());
+            printf("  %u: { %d %08x ", i, p.atom_type(), p.hash());
             if (!(p.len() == 0 && p.is_wide_char() != 0))
                 JS_DumpString(rt, p);
             printf(" %d }\n", p.hash_next());
@@ -2485,36 +2498,109 @@ static __maybe_unused void JS_DumpAtoms(JSRuntimeHandle rt)
     printf("}\n");
 }
 
-static int JS_ResizeAtomHash(JSRuntimeHandle rt, int new_hash_size)
+static int init_atom_hash(JSRuntimeHandle rt)
 {
-    JSStringHandle p;
-    uint32_t new_hash_mask, h, i, hash_next1, j;
-    GCHandle new_hash_handle;
-    uint32_t *new_hash;
-
-    assert((new_hash_size & (new_hash_size - 1)) == 0); /* power of two */
-    new_hash_mask = new_hash_size - 1;
-    new_hash_handle = gc_allocz(sizeof(uint32_t) * new_hash_size, JS_GC_OBJ_TYPE_DATA);
-    if (new_hash_handle == 0)
+    LFHashTable *t = lf_hash_create(512);
+    if (!t)
         return -1;
-    new_hash = GCPin<uint32_t>(new_hash_handle).ptr();
-    for(i = 0; i < rt.atom_hash_size(); i++) {
-        h = rt_atom_hash[i];
-        while (h != 0) {
-            p = js_atom_array_get(rt, h);
-            hash_next1 = p.hash_next();
-            /* add in new hash table */
-            j = p.hash() & new_hash_mask;
-            p.set_hash_next(new_hash[j]);
-            new_hash[j] = h;
-            h = hash_next1;
-        }
-    }
-    /* GC frees: js_free_rt(rt, rt.atom_hash_handle()); */
-    rt.set_atom_hash_handle(new_hash_handle);
-    rt.set_atom_hash_size(new_hash_size);
-    rt.set_atom_count_resize(JS_ATOM_COUNT_RESIZE(new_hash_size));
+    rt.set_atom_hash(t);
+    rt.set_atom_hash_retired(NULL);
+    rt.set_atom_hash_count(0);
     return 0;
+}
+
+static void js_atom_hash_resize(JSRuntimeHandle rt, uint32_t new_bucket_count)
+{
+    LFHashTable **pt = rt.atom_hash_ptr_addr();
+    if (!pt)
+        return;
+    LFHashTable *old_t = rt.atom_hash();
+    if (!old_t)
+        return;
+    if (lf_hash_resize(pt, new_bucket_count)) {
+        old_t->next_retired = rt.atom_hash_retired();
+        rt.set_atom_hash_retired(old_t);
+    }
+}
+
+static void js_atom_hash_ensure_capacity(JSRuntimeHandle rt)
+{
+    LFHashTable *t = rt.atom_hash();
+    if (!t)
+        return;
+    uint32_t count = (uint32_t)rt.atom_hash_count();
+    if (2 * (count + 1) > t->bucket_count) {
+        js_atom_hash_resize(rt, t->bucket_count * 2);
+    }
+}
+
+static bool js_atom_hash_insert(JSRuntimeHandle rt, JSAtom atom_idx)
+{
+    if (atom_idx == JS_ATOM_NULL)
+        return false;
+    JSStringHandle p = js_atom_array_get_handle(rt, atom_idx);
+    if (!p || p.atom_type() == JS_ATOM_TYPE_SYMBOL)
+        return false;
+    uint32_t h = p.hash();
+    for (;;) {
+        LFHashTable *t = rt.atom_hash();
+        if (!t)
+            return false;
+        if (lf_hash_insert(t, h, (GCHandle)atom_idx, (GCHandle)atom_idx)) {
+            rt.atom_hash_count_inc();
+            return true;
+        }
+        js_atom_hash_resize(rt, t->bucket_count * 2);
+    }
+}
+
+static bool js_atom_hash_remove(JSRuntimeHandle rt, JSAtom atom_idx)
+{
+    if (atom_idx == JS_ATOM_NULL)
+        return false;
+    JSStringHandle p = js_atom_array_get_handle(rt, atom_idx);
+    if (!p)
+        return false;
+    LFHashTable *t = rt.atom_hash();
+    if (!t)
+        return false;
+    bool ok = lf_hash_remove(t, p.hash(), (GCHandle)atom_idx);
+    if (ok)
+        rt.atom_hash_count_dec();
+    return ok;
+}
+
+typedef struct AtomHashLookup {
+    JSStringHandle str_handle;  /* valid for __JS_NewAtom path */
+    const uint8_t *str8;        /* valid for __JS_FindAtom path */
+    int len;
+    int atom_type;
+    bool use_handle;
+} AtomHashLookup;
+
+static bool atom_hash_eq(GCHandle key, uint32_t hash, void *lookup_key,
+                         void *user_data)
+{
+    JSAtom atom_idx = (JSAtom)key;
+    AtomHashLookup *lk = (AtomHashLookup *)lookup_key;
+    JSRuntimeHandle rt((GCHandle)(uintptr_t)user_data);
+    JSStringHandle p = js_atom_array_get_handle(rt, atom_idx);
+    if (!p || p.hash() != hash || p.atom_type() != lk->atom_type || p.len() != lk->len)
+        return false;
+    if (lk->use_handle) {
+        return js_string_memcmp(p, 0, lk->str_handle, 0, p.len()) == 0;
+    } else {
+        if (p.is_wide_char()) {
+            const uint16_t *s = p.str16();
+            int i;
+            for (i = 0; i < lk->len; i++) {
+                if (s[i] != lk->str8[i])
+                    return false;
+            }
+            return true;
+        }
+        return memcmp(p.str8(), lk->str8, lk->len) == 0;
+    }
 }
 
 static int js_handle_array_init(JSRuntimeHandle rt, JSHandleArray *arr)
@@ -2604,16 +2690,18 @@ static int JS_InitAtoms(JSRuntimeHandle rt)
     QJS_LOGI("JS_InitAtoms: Starting...");
     js_verify_string_layout();
 
-    rt.set_atom_hash_size(0);
-    rt.set_atom_hash_handle(0);
+    rt.set_atom_hash(NULL);
+    rt.set_atom_hash_retired(NULL);
+    rt.set_atom_hash_count(0);
     rt.set_atom_count(0);
     rt.set_atom_size(0);
     rt.set_atom_free_index(0);
     rt.set_atom_array_handle(GC_HANDLE_NULL);
-    
-    QJS_LOGI("JS_InitAtoms: Resizing atom hash...");
-    if (JS_ResizeAtomHash(rt, 512)) {     /* there are at least 504 predefined atoms */
-        QJS_LOGD("JS_InitAtoms: JS_ResizeAtomHash failed");
+    rt.set_class_array_lock(0);
+
+    QJS_LOGI("JS_InitAtoms: Creating atom hash...");
+    if (init_atom_hash(rt)) {
+        QJS_LOGD("JS_InitAtoms: init_atom_hash failed");
         return -1;
     }
 
@@ -2793,26 +2881,15 @@ static BOOL JS_AtomIsString(JSContextHandle ctx, JSAtom v)
 
 static JSAtom js_get_atom_index(JSRuntimeHandle rt, JSStringHandle p)
 {
-    uint32_t i = p.hash_next();  /* atom_index */
-    if (p.atom_type() != JS_ATOM_TYPE_SYMBOL) {
-        JSStringHandle p1;
-
-        i = rt_atom_hash[p.hash() & (rt.atom_hash_size() - 1)];
-        p1 = js_atom_array_get(rt, i);
-        while (p1.handle() != p.handle()) {
-            assert(i != 0);
-            i = p1.hash_next();
-            p1 = js_atom_array_get(rt, i);
-        }
-    }
-    return i;
+    /* Every atom stores its own atom index in JSString.hash_next. */
+    return p.hash_next();
 }
 
 /* string case (internal). Return JS_ATOM_NULL if error. 'str' is
    freed. */
 static JSAtom __JS_NewAtom(JSRuntimeHandle rt, JSStringHandle str, int atom_type)
 {
-    uint32_t h, h1, i;
+    uint32_t h, i;
     JSStringHandle p;
     int len;
 
@@ -2836,25 +2913,20 @@ static JSAtom __JS_NewAtom(JSRuntimeHandle rt, JSStringHandle str, int atom_type
         len = str.len();
         h = hash_string(str, atom_type);
         h &= JS_ATOM_HASH_MASK;
-        h1 = h & (rt.atom_hash_size() - 1);
-        i = rt_atom_hash[h1];
-        while (i != 0) {
-            JSStringHandle p = js_atom_array_get_handle(rt, i);
-            if (unlikely(!p)) {
-                /* Defensive: null atom entry, skip */
-                break;
-            }
-            if (p.hash() == h &&
-                p.atom_type() == atom_type &&
-                p.len() == len &&
-                js_string_memcmp(p, 0, str, 0, len) == 0) {
+        {
+            AtomHashLookup lk;
+            lk.str_handle = str;
+            lk.str8 = NULL;
+            lk.len = len;
+            lk.atom_type = atom_type;
+            lk.use_handle = true;
+            i = lf_hash_lookup_ex(rt.atom_hash(), h, &lk, atom_hash_eq, (void *)rt.handle());
+            if (i != 0) {
                 /* ref_count removed - using mark-and-sweep GC */
                 goto done;
             }
-            i = p.hash_next();
         }
     } else {
-        h1 = 0; /* avoid warning */
         if (atom_type == JS_ATOM_TYPE_SYMBOL) {
             h = 0;
         } else {
@@ -2897,7 +2969,7 @@ static JSAtom __JS_NewAtom(JSRuntimeHandle rt, JSStringHandle str, int atom_type
             p.set_atom_type(JS_ATOM_TYPE_SYMBOL);
             /* Handle already in atom_handles from gc_allocz_ex */
             new_array[0] = handle0;
-            rt.set_atom_count(rt.atom_count() + 1);
+            rt.atom_count_inc();
             start = 1;
         }
         rt.set_atom_size(new_size);
@@ -2935,15 +3007,14 @@ static JSAtom __JS_NewAtom(JSRuntimeHandle rt, JSStringHandle str, int atom_type
             }
             
             /* use next free slot (sequential allocation) */
-            i = rt.atom_free_index();
-            if (i == 0 || i >= rt.atom_size()) {
+            i = rt.atom_free_index_fetch_add(1);
+            if (i == 0 || i >= (uint32_t)rt.atom_size()) {
                 QJS_LOGD("__JS_NewAtom: invalid atom_free_index=%u, atom_size=%u", i, rt.atom_size());
                 goto fail;
             }
-            rt.set_atom_free_index(rt.atom_free_index() + 1);
-            if (rt.atom_free_index() >= rt.atom_size())
+            if (i + 1 >= (uint32_t)rt.atom_size())
                 rt.set_atom_free_index(0);
-            
+
             /* MANUAL HANDLE REGISTRATION: This is the string reuse optimization case.
              * The string 'p' was allocated as a regular GC object via gc_alloc() when 
              * created, so it was NOT automatically added to atom_handles. We must 
@@ -2971,15 +3042,14 @@ static JSAtom __JS_NewAtom(JSRuntimeHandle rt, JSStringHandle str, int atom_type
                    1 - str.is_wide_char());
             
             /* use next free slot (sequential allocation) */
-            i = rt.atom_free_index();
-            if (i == 0 || i >= rt.atom_size()) {
+            i = rt.atom_free_index_fetch_add(1);
+            if (i == 0 || i >= (uint32_t)rt.atom_size()) {
                 QJS_LOGD("__JS_NewAtom: invalid atom_free_index=%u, atom_size=%u", i, rt.atom_size());
                 goto fail;
             }
-            rt.set_atom_free_index(rt.atom_free_index() + 1);
-            if (rt.atom_free_index() >= rt.atom_size())
+            if (i + 1 >= (uint32_t)rt.atom_size())
                 rt.set_atom_free_index(0);
-            
+
             /* Handle already in atom_handles from gc_alloc_ex */
             rt_atom_array[i] = handle;
         }
@@ -2998,15 +3068,14 @@ static JSAtom __JS_NewAtom(JSRuntimeHandle rt, JSStringHandle str, int atom_type
 #endif
         
         /* use next free slot (sequential allocation) */
-        i = rt.atom_free_index();
-        if (i == 0 || i >= rt.atom_size()) {
+        i = rt.atom_free_index_fetch_add(1);
+        if (i == 0 || i >= (uint32_t)rt.atom_size()) {
             QJS_LOGD("__JS_NewAtom: invalid atom_free_index=%u, atom_size=%u", i, rt.atom_size());
             return JS_ATOM_NULL;
         }
-        rt.set_atom_free_index(rt.atom_free_index() + 1);
-        if (rt.atom_free_index() >= rt.atom_size())
+        if (i + 1 >= (uint32_t)rt.atom_size())
             rt.set_atom_free_index(0);
-        
+
         /* Handle already in atom_handles from gc_allocz_ex */
         rt_atom_array[i] = handle;
     }
@@ -3015,13 +3084,11 @@ static JSAtom __JS_NewAtom(JSRuntimeHandle rt, JSStringHandle str, int atom_type
     p.set_hash_next(i);   /* atom_index */
     p.set_atom_type(atom_type);
 
-    rt.set_atom_count(rt.atom_count() + 1);
+    rt.atom_count_inc();
 
     if (atom_type != JS_ATOM_TYPE_SYMBOL) {
-        p.set_hash_next(rt_atom_hash[h1]);
-        rt_atom_hash[h1] = i;
-        if (unlikely(rt.atom_count() >= rt.atom_count_resize()))
-            JS_ResizeAtomHash(rt, rt.atom_hash_size() * 2);
+        js_atom_hash_ensure_capacity(rt);
+        js_atom_hash_insert(rt, i);
     }
 
     //    JS_DumpAtoms(rt);
@@ -3078,45 +3145,21 @@ static JSAtom __JS_NewAtomInit(JSRuntimeHandle rt, const char *str, int len,
 static JSAtom __JS_FindAtom(JSRuntimeHandle rt, const char *str, size_t len,
                             int atom_type)
 {
-    uint32_t h, h1, i;
-    JSStringHandle p;
+    uint32_t h, i;
 
     h = hash_string8((const uint8_t *)str, len, JS_ATOM_TYPE_STRING);
     h &= JS_ATOM_HASH_MASK;
-    h1 = h & (rt.atom_hash_size() - 1);
-    i = rt_atom_hash[h1];
-    int loop_count = 0;
-    while (i != 0) {
-        JSStringHandle p = js_atom_array_get_handle(rt, i);
-        if (!p) {
-            QJS_LOGD("__JS_FindAtom: NULL atom %u", i);
-            return JS_ATOM_NULL;
-        }
-        /* Debug: log hash comparison details for 'parseInt' */
-        if (len == 7 && memcmp(str, "parseInt", 7) == 0) {
-            QJS_LOGD("__JS_FindAtom: parseInt i=%u p->hash=%u h=%u type=%d len=%d is_wide=%d", 
-                     i, p.hash(), h, p.atom_type(), p.len(), p.is_wide_char());
-        }
-        if (p.hash() == h &&
-            p.atom_type() == JS_ATOM_TYPE_STRING &&
-            p.len() == len &&
-            p.is_wide_char() == 0 &&
-            memcmp(p.str8(), str, len) == 0) {
-            if (len == 7 && memcmp(str, "parseInt", 7) == 0) {
-                QJS_LOGD("__JS_FindAtom: FOUND parseInt at atom %u", i);
-            }
-            if (!__JS_AtomIsConst(i))
-                /* ref_count removed - using mark-and-sweep GC */
-            return i;
-        }
-        i = p.hash_next();
-        if (++loop_count > 10000) {
-            QJS_LOGD("__JS_FindAtom: INFINITE LOOP for '%.*s'", len, str);
-            return JS_ATOM_NULL;
-        }
-    }
-    if (len == 7 && memcmp(str, "parseInt", 7) == 0) {
-        QJS_LOGD("__JS_FindAtom: NOT FOUND parseInt");
+    AtomHashLookup lk;
+    lk.str_handle = JSStringHandle();
+    lk.str8 = (const uint8_t *)str;
+    lk.len = (int)len;
+    lk.atom_type = atom_type;
+    lk.use_handle = false;
+    i = lf_hash_lookup_ex(rt.atom_hash(), h, &lk, atom_hash_eq, (void *)rt.handle());
+    if (i != 0) {
+        if (!__JS_AtomIsConst(i))
+            /* ref_count removed - using mark-and-sweep GC */;
+        return i;
     }
     return JS_ATOM_NULL;
 }
@@ -3640,17 +3683,11 @@ static pthread_mutex_t js_class_id_mutex = PTHREAD_MUTEX_INITIALIZER;
 JSClassID JS_NewClassID(JSClassID *pclass_id)
 {
     JSClassID class_id;
-#ifdef CONFIG_ATOMICS
-    pthread_mutex_lock(&js_class_id_mutex);
-#endif
     class_id = *pclass_id;
     if (class_id == 0) {
-        class_id = js_class_id_alloc++;
+        class_id = atomic_fetch_add_u32(&js_class_id_alloc, 1);
         *pclass_id = class_id;
     }
-#ifdef CONFIG_ATOMICS
-    pthread_mutex_unlock(&js_class_id_mutex);
-#endif
     return class_id;
 }
 
@@ -3676,13 +3713,17 @@ static int JS_NewClass1(JSRuntimeHandle rt, JSClassID class_id,
 {
     int new_size, i;
     JSClass *cl, *new_class_array;
-    struct list_head *el;
 
     if (class_id >= (1 << 16))
         return -1;
+
+    rt.class_array_lock_acquire();
+
     if (class_id < rt.class_count() &&
-        ((JSClass*)rt_class_array)[class_id].class_id != 0)
+        ((JSClass*)rt_class_array)[class_id].class_id != 0) {
+        rt.class_array_lock_release();
         return -1;
+    }
 
     if (class_id >= rt.class_count()) {
         new_size = max_int(JS_CLASS_INIT_COUNT,
@@ -3712,13 +3753,17 @@ static int JS_NewClass1(JSRuntimeHandle rt, JSClassID class_id,
         };
         
         gc_for_each_object_of_type(JS_GC_OBJ_TYPE_JS_CONTEXT, ctx_resize_callback, &ctx_iter_data);
-        if (ctx_iter_data.result < 0)
+        if (ctx_iter_data.result < 0) {
+            rt.class_array_lock_release();
             return -1;
+        }
         /* reallocate the class array */
         GCHandle new_class_array_handle = gc_realloc(rt.class_array_handle(),
                                         sizeof(JSClass) * new_size);
-        if (new_class_array_handle == GC_HANDLE_NULL)
+        if (new_class_array_handle == GC_HANDLE_NULL) {
+            rt.class_array_lock_release();
             return -1;
+        }
         new_class_array = (JSClass*)GCPin<GCHandle>(new_class_array_handle).ptr();
         memset(new_class_array + rt.class_count(), 0,
                (new_size - rt.class_count()) * sizeof(JSClass));
@@ -3732,6 +3777,7 @@ static int JS_NewClass1(JSRuntimeHandle rt, JSClassID class_id,
     cl->gc_mark = class_def->gc_mark;
     cl->call = class_def->call;
     cl->exotic = class_def->exotic;
+    rt.class_array_lock_release();
     return 0;
 }
 
@@ -7103,13 +7149,9 @@ extern "C" void mark_children(JSRuntimeHandle rt, GCHandle handle,
                 mark_func(rt, atom_array_h);
             }
             
-            /* Mark atom_hash - hash table for atom lookup */
-            GCHandle atom_hash_h = runtime.atom_hash_handle();
-            if (atom_hash_h != GC_HANDLE_NULL) {
-                QJS_LOGI("mark_children: marking atom_hash handle=%u", atom_hash_h);
-                mark_func(rt, atom_hash_h);
-            }
-            
+            /* The lock-free atom_hash table is not a GC allocation; the atoms
+               it references are kept alive by atom_array and roots. */
+
             /* Mark shape_hash - hash table for shape deduplication */
             /* The lock-free shape hash table is not a GC allocation; the
                shapes it references are kept alive by their objects and roots. */
@@ -7485,26 +7527,9 @@ extern "C" void gc_sweep_atoms(JSRuntimeHandle rt)
         if (!gc_handle_get_mark(atom_handle)) {
             /* Remove from atom_hash so it can't be looked up anymore */
             if (p.atom_type() != JS_ATOM_TYPE_SYMBOL) {
-                uint32_t h0 = p.hash() & (rt.atom_hash_size() - 1);
-                uint32_t idx = rt_atom_hash[h0];
-                JSStringHandle p1 = js_atom_array_get(rt, idx);
-                if (p1.handle() == p.handle()) {
-                    rt_atom_hash[h0] = p1.hash_next();
-                } else if (p1.valid()) {
-                    JSStringHandle p0;
-                    for(;;) {
-                        if (idx == 0) break;
-                        p0 = p1;
-                        idx = p0.hash_next();
-                        p1 = js_atom_array_get(rt, idx);
-                        if (p1.handle() == p.handle()) {
-                            p0.set_hash_next(p1.hash_next());
-                            break;
-                        }
-                    }
-                }
+                js_atom_hash_remove(rt, p.hash_next());
             }
-            
+
             /* Mark as dead so shapes know to skip it */
             QJS_LOGI("gc_sweep_atoms: marking atom %u as DEAD", i);
             p.set_atom_type(JS_ATOM_TYPE_DEAD);
@@ -8026,11 +8051,18 @@ void JS_ComputeMemoryUsage(JSRuntimeHandle rt, JSMemoryUsage *s)
     }
 
     /* atoms */
-    s->memory_used_count += 2; /* rt_atom_array, rt_atom_hash */
+    s->memory_used_count += 1; /* rt_atom_array */
     s->atom_count = rt.atom_count();
-    s->atom_size = sizeof(GCHandle) * rt.atom_size() +
-        sizeof(rt_atom_hash[0]) * rt.atom_hash_size();
-    for(i = 0; i < rt.atom_size(); i++) {
+    s->atom_size = sizeof(GCHandle) * rt.atom_size();
+    {
+        LFHashTable *t = rt.atom_hash();
+        if (t) {
+            s->memory_used_count++;
+            s->atom_size += sizeof(LFHashTable) +
+                            (t->bucket_count - 1) * sizeof(LFHashBucket);
+        }
+    }
+    for(i = 0; i < (uint32_t)rt.atom_size(); i++) {
         JSStringHandle p = js_atom_array_get(rt, i);
         if (p.valid()) {
             s->atom_size += (sizeof(JSString) + (p.len() << p.is_wide_char()) +
@@ -64571,11 +64603,16 @@ extern "C" uint32_t JSRuntime_get_permanent_atom_count(JSRuntimeHandle rt) {
 }
 
 extern "C" uint32_t JSRuntime_get_atom_hash_size(JSRuntimeHandle rt) {
-    return rt.atom_hash_size();
+    LFHashTable *t = rt.atom_hash();
+    return t ? t->bucket_count : 0;
+}
+
+extern "C" uint32_t JSRuntime_get_atom_hash_count(JSRuntimeHandle rt) {
+    return rt.atom_hash_count();
 }
 
 extern "C" uint32_t *JSRuntime_get_atom_hash(JSRuntimeHandle rt) {
-    return rt.atom_hash_ptr();
+    return NULL;
 }
 
 extern "C" uint32_t JSRuntime_get_shape_hash_size(JSRuntimeHandle rt) {

@@ -695,112 +695,160 @@ public:
         if (p) p->rt_info = info;
     }
     
-    /* atom_hash_size access */
-    int atom_hash_size() const {
+    /* Lock-free atom hash table accessors. */
+    LFHashTable *atom_hash() const {
         JSRuntime* p = get_ptr();
-        return p ? p->atom_hash_size : 0;
+        if (!p) return nullptr;
+        return (LFHashTable *)atomic_load_ptr((void *volatile *)&p->atom_hash);
     }
     
-    void set_atom_hash_size(int size) {
+    void set_atom_hash(LFHashTable *t) {
         JSRuntime* p = get_ptr();
-        if (p) p->atom_hash_size = size;
+        if (p) atomic_store_ptr((void *volatile *)&p->atom_hash, (void *)t);
     }
     
-    /* atom_count access */
+    LFHashTable **atom_hash_ptr_addr() {
+        JSRuntime* p = get_ptr();
+        return p ? &p->atom_hash : nullptr;
+    }
+    
+    LFHashTable *atom_hash_retired() const {
+        JSRuntime* p = get_ptr();
+        if (!p) return nullptr;
+        return (LFHashTable *)atomic_load_ptr((void *volatile *)&p->atom_hash_retired);
+    }
+    
+    void set_atom_hash_retired(LFHashTable *t) {
+        JSRuntime* p = get_ptr();
+        if (p) atomic_store_ptr((void *volatile *)&p->atom_hash_retired, (void *)t);
+    }
+    
+    int atom_hash_count() const {
+        JSRuntime* p = get_ptr();
+        return p ? (int)atomic_load_u32(&p->atom_hash_count) : 0;
+    }
+    
+    void set_atom_hash_count(int count) {
+        JSRuntime* p = get_ptr();
+        if (p) atomic_store_u32(&p->atom_hash_count, (uint32_t)count);
+    }
+    
+    void atom_hash_count_inc() {
+        JSRuntime* p = get_ptr();
+        if (p) atomic_fetch_add_u32(&p->atom_hash_count, 1);
+    }
+    
+    void atom_hash_count_dec() {
+        JSRuntime* p = get_ptr();
+        if (p) atomic_fetch_sub_u32(&p->atom_hash_count, 1);
+    }
+    
+    /* atom_count access - treated atomically */
     int atom_count() const {
         JSRuntime* p = get_ptr();
-        return p ? p->atom_count : 0;
+        return p ? (int)atomic_load_u32((volatile uint32_t *)&p->atom_count) : 0;
     }
     
     void set_atom_count(int count) {
         JSRuntime* p = get_ptr();
-        if (p) p->atom_count = count;
+        if (p) atomic_store_u32((volatile uint32_t *)&p->atom_count, (uint32_t)count);
     }
     
-    /* atom_size access */
+    void atom_count_inc() {
+        JSRuntime* p = get_ptr();
+        if (p) atomic_fetch_add_u32((volatile uint32_t *)&p->atom_count, 1);
+    }
+
+    void atom_count_dec() {
+        JSRuntime* p = get_ptr();
+        if (p) atomic_fetch_sub_u32((volatile uint32_t *)&p->atom_count, 1);
+    }
+
+    /* atom_size access - treated atomically */
     int atom_size() const {
         JSRuntime* p = get_ptr();
-        return p ? p->atom_size : 0;
+        return p ? (int)atomic_load_u32((volatile uint32_t *)&p->atom_size) : 0;
     }
     
     void set_atom_size(int size) {
         JSRuntime* p = get_ptr();
-        if (p) p->atom_size = size;
+        if (p) atomic_store_u32((volatile uint32_t *)&p->atom_size, (uint32_t)size);
     }
     
-    /* atom_count_resize access */
-    int atom_count_resize() const {
-        JSRuntime* p = get_ptr();
-        return p ? p->atom_count_resize : 0;
-    }
-    
-    void set_atom_count_resize(int count) {
-        JSRuntime* p = get_ptr();
-        if (p) p->atom_count_resize = count;
-    }
-    
-    /* atom_hash_handle access */
-    GCHandle atom_hash_handle() const {
-        JSRuntime* p = get_ptr();
-        return p ? p->atom_hash_handle : GC_HANDLE_NULL;
-    }
-    
-    void set_atom_hash_handle(GCHandle h) {
-        JSRuntime* p = get_ptr();
-        if (p) {
-            p->atom_hash_handle = h;
-            gc_write_barrier_for_heap_slot(&p->atom_hash_handle, h);
-        }
-    }
-    
-    /* atom_array_handle access */
+    /* atom_array_handle access - treated atomically */
     GCHandle atom_array_handle() const {
         JSRuntime* p = get_ptr();
-        return p ? p->atom_array_handle : GC_HANDLE_NULL;
+        if (!p) return GC_HANDLE_NULL;
+        return atomic_load_u32((volatile uint32_t *)&p->atom_array_handle);
     }
     
     void set_atom_array_handle(GCHandle h) {
         JSRuntime* p = get_ptr();
         if (p) {
-            p->atom_array_handle = h;
+            atomic_store_u32((volatile uint32_t *)&p->atom_array_handle, h);
             gc_write_barrier_for_heap_slot(&p->atom_array_handle, h);
         }
     }
     
-    /* atom_free_index access */
+    /* atom_free_index access - treated atomically */
     int atom_free_index() const {
         JSRuntime* p = get_ptr();
-        return p ? p->atom_free_index : 0;
+        return p ? (int)atomic_load_u32((volatile uint32_t *)&p->atom_free_index) : 0;
     }
     
     void set_atom_free_index(int index) {
         JSRuntime* p = get_ptr();
-        if (p) p->atom_free_index = index;
+        if (p) atomic_store_u32((volatile uint32_t *)&p->atom_free_index, (uint32_t)index);
     }
     
-    /* class_count access */
+    uint32_t atom_free_index_fetch_add(int delta) {
+        JSRuntime* p = get_ptr();
+        if (!p) return 0;
+        return atomic_fetch_add_u32((volatile uint32_t *)&p->atom_free_index, (uint32_t)delta);
+    }
+    
+    /* class_count access - treated atomically */
     int class_count() const {
         JSRuntime* p = get_ptr();
-        return p ? p->class_count : 0;
+        return p ? (int)atomic_load_u32((volatile uint32_t *)&p->class_count) : 0;
     }
     
     void set_class_count(int count) {
         JSRuntime* p = get_ptr();
-        if (p) p->class_count = count;
+        if (p) atomic_store_u32((volatile uint32_t *)&p->class_count, (uint32_t)count);
     }
     
-    /* class_array_handle access */
+    /* class_array_handle access - treated atomically */
     GCHandle class_array_handle() const {
         JSRuntime* p = get_ptr();
-        return p ? p->class_array_handle : GC_HANDLE_NULL;
+        if (!p) return GC_HANDLE_NULL;
+        return atomic_load_u32((volatile uint32_t *)&p->class_array_handle);
     }
     
     void set_class_array_handle(GCHandle h) {
         JSRuntime* p = get_ptr();
         if (p) {
-            p->class_array_handle = h;
+            atomic_store_u32((volatile uint32_t *)&p->class_array_handle, h);
             gc_write_barrier_for_heap_slot(&p->class_array_handle, h);
         }
+    }
+    
+    void class_array_lock_acquire() {
+        JSRuntime* p = get_ptr();
+        if (!p) return;
+        while (atomic_compare_exchange_u32(&p->class_array_lock, 0, 1) != 0) {
+            /* spin */
+        }
+    }
+    
+    void class_array_lock_release() {
+        JSRuntime* p = get_ptr();
+        if (p) atomic_store_u32(&p->class_array_lock, 0);
+    }
+    
+    void set_class_array_lock(uint32_t val) {
+        JSRuntime* p = get_ptr();
+        if (p) atomic_store_u32(&p->class_array_lock, val);
     }
     
     /* gc_phase access */
@@ -1161,22 +1209,16 @@ public:
      * Use with caution - pointers are only valid until next GC point
      * ========================================================================= */
     
-    /* atom_hash - returns pointer to uint32_t array */
-    uint32_t* atom_hash_ptr() const {
-        JSRuntime* p = get_ptr();
-        return p ? (uint32_t*)gc_deref(p->atom_hash_handle) : nullptr;
-    }
-    
     /* atom_array - returns pointer to GCHandle array */
     GCHandle* atom_array_ptr() const {
-        JSRuntime* p = get_ptr();
-        return p ? (GCHandle*)gc_deref(p->atom_array_handle) : nullptr;
+        GCHandle h = atom_array_handle();
+        return h != GC_HANDLE_NULL ? (GCHandle*)gc_deref(h) : nullptr;
     }
     
     /* class_array - returns pointer to JSClass array (forward declared, defined in quickjs.cpp) */
     void* class_array_ptr() const {
-        JSRuntime* p = get_ptr();
-        return p ? gc_deref(p->class_array_handle) : nullptr;
+        GCHandle h = class_array_handle();
+        return h != GC_HANDLE_NULL ? gc_deref(h) : nullptr;
     }
     
     /* atom_gc_marks - returns pointer to uint32_t array */

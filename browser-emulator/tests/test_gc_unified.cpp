@@ -27,6 +27,8 @@ extern GCState g_gc;
 
 extern "C" uint32_t JSRuntime_get_shape_hash_count(JSRuntimeHandle rt);
 extern "C" uint32_t JSRuntime_get_shape_hash_size(JSRuntimeHandle rt);
+extern "C" uint32_t JSRuntime_get_atom_hash_count(JSRuntimeHandle rt);
+extern "C" uint32_t JSRuntime_get_atom_hash_size(JSRuntimeHandle rt);
 
 /* Shared QuickJS context accessor declared in test_main.cpp */
 extern "C" JSContextHandle get_shared_test_context(void);
@@ -1300,6 +1302,74 @@ TEST(test_shape_hash_gc_cleanup) {
 }
 
 /* ============================================================================
+ * Lock-free atom hash + atomic class ID tests
+ * ============================================================================ */
+
+TEST(test_atom_hash_interning) {
+    JSContextHandle ctx = get_test_ctx();
+    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
+    JSAtom a1 = JS_NewAtom(ctx, "__atom_hash_intern_test");
+    JSAtom a2 = JS_NewAtom(ctx, "__atom_hash_intern_test");
+    ASSERT_TRUE(a1 != JS_ATOM_NULL);
+    ASSERT_EQ(a1, a2);
+    JS_FreeAtom(ctx, a1);
+    JS_FreeAtom(ctx, a2);
+    return true;
+}
+
+TEST(test_atom_hash_resize) {
+    JSContextHandle ctx = get_test_ctx();
+    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
+    JSRuntimeHandle rt = JSRuntimeHandle(JS_GetRuntime(ctx));
+    uint32_t count_before = JSRuntime_get_atom_hash_count(rt);
+
+    JSAtom atoms[300];
+    char buf[64];
+    for (int i = 0; i < 300; i++) {
+        snprintf(buf, sizeof(buf), "__atom_resize_%d", i);
+        atoms[i] = JS_NewAtom(ctx, buf);
+        ASSERT_TRUE(atoms[i] != JS_ATOM_NULL);
+    }
+
+    uint32_t count_after = JSRuntime_get_atom_hash_count(rt);
+    ASSERT_TRUE(count_after > count_before);
+
+    for (int i = 0; i < 300; i++) {
+        JS_FreeAtom(ctx, atoms[i]);
+    }
+    return true;
+}
+
+TEST(test_atom_hash_gc_cleanup) {
+    JSContextHandle ctx = get_test_ctx();
+    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
+    JSRuntimeHandle rt = JSRuntimeHandle(JS_GetRuntime(ctx));
+
+    JSAtom a = JS_NewAtom(ctx, "__atom_gc_cleanup_temp");
+    ASSERT_TRUE(a != JS_ATOM_NULL);
+    JS_FreeAtom(ctx, a);
+    JS_RunGC(rt);
+
+    /* Re-creating the same string should still work after GC cleanup. */
+    JSAtom b = JS_NewAtom(ctx, "__atom_gc_cleanup_temp");
+    ASSERT_TRUE(b != JS_ATOM_NULL);
+    JS_FreeAtom(ctx, b);
+    return true;
+}
+
+TEST(test_class_id_atomic) {
+    JSClassID id1 = 0, id2 = 0;
+    JSClassID r1 = JS_NewClassID(&id1);
+    JSClassID r2 = JS_NewClassID(&id2);
+    ASSERT_TRUE(r1 != 0);
+    ASSERT_TRUE(r2 != 0);
+    ASSERT_TRUE(r1 != r2);
+    ASSERT_EQ((int)id1, (int)r1);
+    ASSERT_EQ((int)id2, (int)r2);
+    return true;
+}
+
+/* ============================================================================
  * Test Runner
  * ============================================================================ */
 
@@ -1360,6 +1430,11 @@ extern "C" void run_gc_unified_tests(void) {
     RUN_TEST(test_shape_hash_property_shape_sharing);
     RUN_TEST(test_shape_hash_resize);
     RUN_TEST(test_shape_hash_gc_cleanup);
+
+    RUN_TEST(test_atom_hash_interning);
+    RUN_TEST(test_atom_hash_resize);
+    RUN_TEST(test_atom_hash_gc_cleanup);
+    RUN_TEST(test_class_id_atomic);
 
     /* Run QuickJS integration tests using shared context */
     printf("\n  QuickJS integration tests use shared context from test_main.cpp\n");
