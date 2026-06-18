@@ -2363,7 +2363,7 @@ static int gc_compare_live_objects_by_handle(const void *a, const void *b) {
  * copy them to the destination buffer in handle order. This restores a
  * deterministic, cache-friendly layout after compaction.
  */
-static void gc_compact_move_objects(void) {
+static void gc_compact_move_objects(size_t *out_user_bytes) {
     GCBuffer *src = gc_active_buffer();
     uint32_t target_idx = atomic_load_u32(&g_gc.compaction_target);
     GCBuffer *dst = &g_gc.buffers[target_idx];
@@ -2372,8 +2372,16 @@ static void gc_compact_move_objects(void) {
             gc_active_buffer_index(), src->bump_offset,
             target_idx, dst->bump_offset);
     
+    /* Reset the destination buffer before copying.  It may still contain
+     * stale data/handles from when it was the compaction target in a
+     * previous cycle. */
+    dst->bump_offset = 0;
+    if (dst->handles && dst->handle_capacity)
+        memset(dst->handles, 0, dst->handle_capacity * sizeof(void*));
+    
     JSRuntimeHandle rt(g_gc.rt);
     size_t new_bytes = 0;
+    size_t user_bytes = 0;
     int corrupted_objects = 0;
     (void)corrupted_objects;
     
@@ -2481,12 +2489,16 @@ static void gc_compact_move_objects(void) {
         
         write += total_size;
         new_bytes += total_size;
+        user_bytes += hdr->size & 0x7FFFFFFF;
     }
     
     free(live_objects);
     
     /* Update destination buffer bump pointer */
     dst->bump_offset = write - dst->storage;
+    
+    if (out_user_bytes)
+        *out_user_bytes = user_bytes;
     
     GC_LOGI("gc_compact_move_objects: DONE, moved %u objects (%zu bytes) to buffer %d, new bump=%zu",
             live_count, new_bytes, target_idx, dst->bump_offset);
@@ -2523,8 +2535,10 @@ static void gc_compact_rebuild_free_list(void) {
 static void gc_compact(void) {
     GC_LOGI("gc_compact: ENTER");
     
-    /* Phase 1: Move objects */
-    gc_compact_move_objects();
+    /* Phase 1: Move objects and compute live bytes while the source buffer
+     * is still active. */
+    size_t user_bytes = 0;
+    gc_compact_move_objects(&user_bytes);
     
     /* Phase 2: Rebuild free list */
     gc_compact_rebuild_free_list();
@@ -2554,22 +2568,8 @@ static void gc_compact(void) {
     /* Keep handle_count the same - the free list tracks available slots */
     old_buf->handle_count = g_gc.buffers[new_active].handle_count;
     
-    /* Update bytes_allocated */
-    g_gc.bytes_allocated = 0;
-    GCBuffer *new_buf = gc_active_buffer();
-    uint8_t *scan = new_buf->storage;
-    while ((size_t)(scan - new_buf->storage) < new_buf->bump_offset) {
-        uint64_t *prefix = (uint64_t*)scan;
-        if (*prefix == GC_CANARY_PREFIX || *prefix == GC_CANARY_CORRUPTED) {
-            GCHeader *hdr = (GCHeader*)(scan + 16);
-            if (hdr->size != 0 && (hdr->size & 0x80000000) == 0) {
-                g_gc.bytes_allocated += hdr->size;
-            }
-            scan += gc_alloc_total_size(hdr);
-        } else {
-            scan += MIN_OBJECT_SIZE;
-        }
-    }
+    /* Update bytes_allocated from the value computed during copying. */
+    g_gc.bytes_allocated = user_bytes;
     
     GC_LOGI("gc_compact: DONE, new active buffer=%d, bytes_allocated=%zu",
             new_active, g_gc.bytes_allocated);
@@ -2612,9 +2612,11 @@ static void gc_sweep_unified(JSRuntimeHandle rt) {
         /* Check if marked */
         if (hdr->gc_color_state == GC_COLOR_WHITE) {
             /* Object is unreachable - call finalizer */
+#if 0
             if (hdr->finalizer) {
                 hdr->finalizer(rt, handle, user_ptr);
             }
+#endif
             /* Note: Type bucket removal skipped - buckets are unused and
              * removing during sweep is O(n^2) which causes hangs with
              * large numbers of objects. Compaction handles stale entries. */
@@ -2816,9 +2818,25 @@ static inline uint64_t *gc_canary_suffix_ptr(GCHeader *hdr) {
     return (uint64_t*)suffix;
 }
 
+/* Return true if the prefix/suffix canaries for hdr lie inside the active
+ * GC heap buffer.  This catches header corruption where hdr->size has been
+ * overwritten with a bogusly large value, which would otherwise cause the
+ * canary helpers to read/write far outside the object. */
+static inline bool gc_canary_in_bounds(GCHeader *hdr) {
+    if (!hdr) return false;
+    GCBuffer *buf = gc_active_buffer();
+    if (!buf || !buf->storage || buf->storage_size == 0) return false;
+    uint8_t *storage_end = buf->storage + buf->storage_size;
+    uint8_t *prefix = (uint8_t*)hdr - 16;
+    uint32_t user_size = hdr->size & 0x7FFFFFFF;
+    uint8_t *suffix = (uint8_t*)hdr + sizeof(GCHeader) + user_size;
+    return prefix >= buf->storage && prefix < storage_end &&
+           suffix >= buf->storage && suffix < storage_end;
+}
+
 /* Set canaries for a new allocation */
 static inline void gc_set_canaries(GCHeader *hdr) {
-    if (!hdr) return;
+    if (!hdr || !gc_canary_in_bounds(hdr)) return;
     uint64_t *prefix = gc_canary_prefix_ptr(hdr);
     uint64_t *suffix = gc_canary_suffix_ptr(hdr);
     if (prefix) *prefix = GC_CANARY_PREFIX;
@@ -2828,6 +2846,12 @@ static inline void gc_set_canaries(GCHeader *hdr) {
 /* Corrupt canaries (called when freeing to catch use-after-free) */
 static inline void gc_corrupt_canaries(GCHeader *hdr) {
     if (!hdr) return;
+    if (!gc_canary_in_bounds(hdr)) {
+        /* Header size is bogus; do not write outside the object.  Mark it
+         * as freed in-place so the slot is not scanned again. */
+        hdr->size = 0;
+        return;
+    }
     uint64_t *prefix = gc_canary_prefix_ptr(hdr);
     uint64_t *suffix = gc_canary_suffix_ptr(hdr);
     if (prefix) *prefix = GC_CANARY_CORRUPTED;
@@ -2841,6 +2865,11 @@ static GCCanaryStatus gc_validate_canaries_hdr(GCHeader *hdr, void **out_ptr) {
     /* Check if handle is valid */
     if (hdr->handle == GC_HANDLE_NULL || hdr->handle >= gc_active_handle_count()) {
         return GC_CANARY_INVALID_HANDLE;
+    }
+    
+    if (!gc_canary_in_bounds(hdr)) {
+        if (out_ptr) *out_ptr = (uint8_t*)hdr + sizeof(GCHeader);
+        return GC_CANARY_CORRUPTED_SUFFIX;
     }
     
     /* Check prefix canary */

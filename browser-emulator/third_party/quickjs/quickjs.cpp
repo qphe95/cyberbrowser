@@ -973,6 +973,15 @@ static JSAtom js_symbol_to_atom(JSContextHandle ctx, GCValue val);
 /* Forward declarations for atomic prototype helpers */
 static inline GCHandle js_shape_get_proto_handle_atomic(JSShapeHandle sh);
 static inline GCHandle js_object_get_proto_handle_atomic(JSObjectHandle obj);
+
+/* Forward declarations for lock-free job queue */
+#define JS_JOB_QUEUE_INITIAL_CAPACITY 64
+static GCHandle js_job_queue_create(JSRuntimeHandle rt, uint64_t capacity);
+static void js_job_queue_clear(JSRuntimeHandle rt);
+static uint64_t js_job_queue_count(JSRuntimeHandle rt);
+static BOOL js_job_queue_is_empty(JSRuntimeHandle rt);
+static BOOL js_job_queue_enqueue(JSRuntimeHandle rt, GCHandle job_handle);
+static GCHandle js_job_queue_dequeue(JSRuntimeHandle rt);
 static void add_gc_object(JSRuntimeHandle rt, GCHeader *h,
                           JSGCObjectTypeEnum type);
 
@@ -1520,6 +1529,9 @@ JSRuntimeHandle JS_NewRuntime(void)
 
     QJS_LOGI("JS_NewRuntime: Starting initialization...");
 
+    /* The lock-free job queue is allocated lazily on the first enqueue to
+       avoid triggering a GC cycle while the runtime is still initializing. */
+
     /* Typed handle arrays are initialized in gc_init() */
     
     rt.set_gc_phase(JS_GC_PHASE_NONE);
@@ -1621,6 +1633,140 @@ int JS_GetStripInfo(JSRuntimeHandle rt)
     return rt.strip_flags();
 }
 
+/* ============================================================================
+ * Lock-free MPMC job queue
+ * ============================================================================ */
+
+#define JS_JOB_QUEUE_INITIAL_CAPACITY 4096
+
+static inline LFJobQueue *js_job_queue_ptr(JSRuntimeHandle rt)
+{
+    GCHandle h = rt.job_queue_handle();
+    if (h == GC_HANDLE_NULL) return NULL;
+    return (LFJobQueue *)gc_deref(h);
+}
+
+static GCHandle js_job_queue_create(JSRuntimeHandle rt, uint64_t capacity)
+{
+    (void)rt;
+    if (capacity == 0 || (capacity & (capacity - 1)) != 0)
+        return GC_HANDLE_NULL;
+    size_t size = sizeof(LFJobQueue) + capacity * sizeof(GCHandle);
+    GCHandle h = gc_allocz(size, JS_GC_OBJ_TYPE_DATA);
+    if (h == GC_HANDLE_NULL)
+        return GC_HANDLE_NULL;
+    LFJobQueue *q = (LFJobQueue *)gc_deref(h);
+    q->capacity = capacity;
+    q->mask = capacity - 1;
+    q->head = 0;
+    q->tail = 0;
+    QJS_LOGE("js_job_queue_create: handle=%u capacity=%u size=%zu", h, (uint32_t)capacity, size);
+    return h;
+}
+
+static void js_job_queue_clear(JSRuntimeHandle rt)
+{
+    LFJobQueue *q = js_job_queue_ptr(rt);
+    if (!q) return;
+    uint64_t head = atomic_load_u64(&q->head);
+    uint64_t tail = atomic_load_u64(&q->tail);
+    for (uint64_t i = head; i < tail; i++) {
+        uint64_t idx = i & q->mask;
+        atomic_store_u32((volatile uint32_t *)&q->entries[idx], GC_HANDLE_NULL);
+    }
+    atomic_store_u64(&q->head, 0);
+    atomic_store_u64(&q->tail, 0);
+}
+
+static uint64_t js_job_queue_count(JSRuntimeHandle rt)
+{
+    LFJobQueue *q = js_job_queue_ptr(rt);
+    if (!q) return 0;
+    uint64_t head = atomic_load_u64(&q->head);
+    uint64_t tail = atomic_load_u64(&q->tail);
+    return (tail >= head) ? (tail - head) : 0;
+}
+
+static BOOL js_job_queue_is_empty(JSRuntimeHandle rt)
+{
+    return js_job_queue_count(rt) == 0;
+}
+
+/* Lazily allocate the runtime job queue.  Safe for concurrent callers:
+   only one thread will successfully publish its queue handle. */
+static GCHandle js_job_queue_ensure(JSRuntimeHandle rt)
+{
+    GCHandle h = rt.job_queue_handle();
+    if (h != GC_HANDLE_NULL)
+        return h;
+
+    GCHandle new_h = js_job_queue_create(rt, JS_JOB_QUEUE_INITIAL_CAPACITY);
+    if (new_h == GC_HANDLE_NULL)
+        return GC_HANDLE_NULL;
+
+    GCHandle prev = rt.compare_exchange_job_queue_handle(GC_HANDLE_NULL, new_h);
+    if (prev == GC_HANDLE_NULL) {
+        return new_h; /* we won the race */
+    } else {
+        gc_free(new_h); /* another thread published first */
+        return prev;
+    }
+}
+
+/* Enqueue a job handle.  Returns TRUE on success, FALSE if the queue is full. */
+static BOOL js_job_queue_enqueue(JSRuntimeHandle rt, GCHandle job_handle)
+{
+    LFJobQueue *q = js_job_queue_ptr(rt);
+    if (!q) return FALSE;
+
+    for (;;) {
+        uint64_t tail = atomic_load_u64(&q->tail);
+        uint64_t head = atomic_load_u64(&q->head);
+        if (tail - head >= q->capacity)
+            return FALSE; /* full */
+
+        if (atomic_compare_exchange_u64(&q->tail, tail, tail + 1) == tail) {
+            uint64_t idx = tail & q->mask;
+            volatile uint32_t *slot = (volatile uint32_t *)&q->entries[idx];
+            /* Wait for any previous consumer to clear the slot. */
+            while (atomic_load_u32(slot) != GC_HANDLE_NULL) {
+                /* spin */
+            }
+            atomic_store_u32(slot, job_handle);
+            gc_write_barrier_for_heap_slot(&q->entries[idx], job_handle);
+            return TRUE;
+        }
+        /* CAS failed: retry with new tail. */
+    }
+}
+
+/* Dequeue a job handle.  Returns GC_HANDLE_NULL if the queue is empty. */
+static GCHandle js_job_queue_dequeue(JSRuntimeHandle rt)
+{
+    LFJobQueue *q = js_job_queue_ptr(rt);
+    if (!q) return GC_HANDLE_NULL;
+
+    for (;;) {
+        uint64_t head = atomic_load_u64(&q->head);
+        uint64_t tail = atomic_load_u64(&q->tail);
+        if (head == tail)
+            return GC_HANDLE_NULL; /* empty */
+
+        if (atomic_compare_exchange_u64(&q->head, head, head + 1) == head) {
+            uint64_t idx = head & q->mask;
+            volatile uint32_t *slot = (volatile uint32_t *)&q->entries[idx];
+            GCHandle job_handle;
+            /* Wait for the producer to publish the handle. */
+            while ((job_handle = atomic_load_u32(slot)) == GC_HANDLE_NULL) {
+                /* spin */
+            }
+            atomic_store_u32(slot, GC_HANDLE_NULL);
+            return job_handle;
+        }
+        /* CAS failed: retry with new head. */
+    }
+}
+
 /* return 0 if OK, < 0 if exception */
 int JS_EnqueueJob(JSContextHandle ctx, JSJobFunc *job_func,
                   int argc, GCValue *argv)
@@ -1638,14 +1784,18 @@ int JS_EnqueueJob(JSContextHandle ctx, JSJobFunc *job_func,
     for(i = 0; i < argc; i++) {
         e.set_argv_at(i, argv[i]);
     }
-    /* Add to runtime's job queue */
-    rt.job_queue().push_back(e_handle);
+    /* Make sure the runtime has a job queue, then publish the job. */
+    if (js_job_queue_ensure(rt) == GC_HANDLE_NULL)
+        return -1;
+    QJS_LOGE("JS_EnqueueJob: job_handle=%u queue_handle=%u", e_handle, rt.job_queue_handle());
+    if (!js_job_queue_enqueue(rt, e_handle))
+        return -1; /* queue full */
     return 0;
 }
 
 BOOL JS_IsJobPending(JSRuntimeHandle rt)
 {
-    return rt.job_queue().count() > 0;
+    return !js_job_queue_is_empty(rt);
 }
 
 /* return < 0 if exception, 0 if no job pending, 1 if a job was
@@ -1659,17 +1809,15 @@ int JS_ExecutePendingJob(JSRuntimeHandle rt, JSContextHandle *pctx)
     GCValue res;
     int ret;
 
-    if (rt.job_queue().count() == 0) {
+    GCHandle job_handle = js_job_queue_dequeue(rt);
+    if (job_handle == GC_HANDLE_NULL) {
         if (pctx)
             *pctx = JSContextHandle();
         return 0;
     }
 
-    /* get the first pending job and execute it (FIFO) */
-    GCHandle job_handle = rt.job_queue().front();
+    /* Execute the dequeued job (FIFO). */
     JSJobEntryHandle e(job_handle);
-    /* Remove from front */
-    rt.job_queue().pop_front();
     ctx = JSContextHandle(e.realm_handle());
     res = e.job_func()(ctx, e.argc(), e.argv());
     
@@ -1677,6 +1825,12 @@ int JS_ExecutePendingJob(JSRuntimeHandle rt, JSContextHandle *pctx)
         ret = -1;
     else
         ret = 1;
+    
+    /* Free the job entry immediately after execution.  It is no longer
+     * reachable from the queue, and leaving it for the sweep phase is
+     * unnecessary and has been observed to stress the GC in ways that
+     * can corrupt the heap. */
+    gc_free(job_handle);
     
     /* Unified GC: DO NOT call JS_FreeContext here.
      * The context will be freed by the GC when no more references exist.
@@ -1793,16 +1947,21 @@ void JS_FreeRuntime(JSRuntimeHandle rt)
     struct list_head *el, *el1;
     int i;
 
+    QJS_LOGI("JS_FreeRuntime: ENTER");
+
     /* Free all pending jobs from job queue */
     /* Unified GC: Don't call JS_FreeContext here - contexts are freed by GC.
      * Just clear the job list; the GC will collect job entries and contexts
      * when they become unreachable.
      */
-    rt.job_queue().clear_count();
+    js_job_queue_clear(rt);
+    rt.set_job_queue_handle(GC_HANDLE_NULL);
+    QJS_LOGI("JS_FreeRuntime: queue cleared");
 
     /* don't remove the weak objects to avoid create new jobs with
        FinalizationRegistry */
     JS_RunGCInternal(rt, FALSE);
+    QJS_LOGI("JS_FreeRuntime: GC done");
 
 #ifdef DUMP_LEAKS
     /* leaking objects */
@@ -1842,6 +2001,7 @@ void JS_FreeRuntime(JSRuntimeHandle rt)
     
     /* Typed handle arrays are freed in gc_cleanup() */
 
+    QJS_LOGI("JS_FreeRuntime: freeing classes");
     /* free the classes */
     for(i = 0; i < rt.class_count(); i++) {
         JSClass *cl = &((JSClass*)rt_class_array)[i];
@@ -2007,8 +2167,10 @@ void JS_FreeRuntime(JSRuntimeHandle rt)
 #endif
 
     /* Bug #2 fix: Clear runtime pointer */
+    QJS_LOGI("JS_FreeRuntime: clearing runtime pointer");
     gc_set_runtime(JSRuntimeHandle());
-    
+    QJS_LOGI("JS_FreeRuntime: DONE");
+
     (void)rt;
 }
 
@@ -2016,8 +2178,10 @@ void JS_FreeRuntime(JSRuntimeHandle rt)
 static void js_runtime_finalizer(JSRuntimeHandle rt, GCHandle handle, void *user_ptr)
 {
     JSRuntime *runtime = (JSRuntime*)user_ptr;
-    /* Free job_queue GCHandleList */
-    runtime->job_queue.clear_and_free();
+    /* The job queue is a GC-managed object; JS_FreeRuntime clears its entries
+       and drops the runtime handle before the final GC pass, so it is swept
+       automatically.  Nothing to free here. */
+    (void)runtime;
     (void)handle;
 }
 
@@ -6775,30 +6939,53 @@ static void js_for_in_iterator_mark(JSRuntimeHandle rt, GCValue val,
 static void free_object(JSRuntimeHandle rt, JSObjectHandle p)
 {
     JSClassFinalizer *finalizer;
+    JSObject *obj = (JSObject *)gc_deref(p.handle());
 
-    p.set_free_mark(1); /* used to tell the object is invalid when
+    if (!obj) return;
+
+    /* If the class has no finalizer, the GC can simply reclaim the object.
+       This avoids touching children (shape/property array) that may already
+       have been swept and keeps the fragile sweep phase robust. */
+    if (obj->class_id < (uint16_t)rt.class_count()) {
+        finalizer = ((JSClass*)rt_class_array)[obj->class_id].finalizer;
+        if (!finalizer) {
+            obj->free_mark = 1;
+            return;
+        }
+    }
+
+    obj->free_mark = 1; /* used to tell the object is invalid when
                          freeing cycles */
     /* With unified GC, shapes and properties are GC-managed objects.
      * They will be freed by the GC when unreachable. We only need to
      * clear this object's references to them. */
     
-    /* fail safe */
-    p.set_shape_handle(GC_HANDLE_NULL);
-    p.set_prop_handle(GC_HANDLE_NULL);
-    p.set_prop_handle(0);
+    /* If a child was already swept, do not run the class finalizer: it may
+       dereference freed memory.  Just clear the object's fields. */
+    BOOL child_freed = FALSE;
+    if (obj->shape_handle != GC_HANDLE_NULL && gc_deref(obj->shape_handle) == NULL)
+        child_freed = TRUE;
+    if (obj->prop_handle != GC_HANDLE_NULL && gc_deref(obj->prop_handle) == NULL)
+        child_freed = TRUE;
 
-    finalizer = ((JSClass*)rt_class_array)[p.class_id()].finalizer;
-    if (finalizer)
-        (*finalizer)(rt, GC_MKHANDLE(JS_TAG_OBJECT, p.handle()));
+    /* fail safe: clear shape/prop references before any finalizer runs */
+    atomic_store_u32((volatile uint32_t *)&obj->shape_handle, GC_HANDLE_NULL);
+    atomic_store_u32((volatile uint32_t *)&obj->prop_handle, GC_HANDLE_NULL);
+
+    if (!child_freed) {
+        finalizer = ((JSClass*)rt_class_array)[obj->class_id].finalizer;
+        if (finalizer)
+            (*finalizer)(rt, GC_MKHANDLE(JS_TAG_OBJECT, p.handle()));
+    }
 
     /* fail safe */
-    p.set_class_id(0);
-    p.set_opaque_handle(GC_HANDLE_NULL);
-    p.set_func_var_refs_handle(GC_HANDLE_NULL);
-    p.set_func_home_object_handle(GC_HANDLE_NULL);
+    obj->class_id = 0;
+    obj->u.opaque_handle = GC_HANDLE_NULL;
+    /* var_refs / home_object are in the func union; clearing opaque is enough
+       because the union shares storage and the object will be freed. */
 
     /* keep the object structure in case there are weak references to it */
-    if (p.weakref_count() == 0) {
+    if (obj->weakref_count == 0) {
         /* GC frees automatically */;
     } else {
         gc_handle_set_mark(p.handle(), 0); /* reset the mark so that the weakref can be freed */
@@ -7259,6 +7446,13 @@ extern "C" void mark_children(JSRuntimeHandle rt, GCHandle handle,
                 QJS_LOGI("mark_children: marking atom_gc_marks handle=%u", atom_gc_marks_h);
                 mark_func(rt, atom_gc_marks_h);
             }
+
+            /* Mark job queue - keeps the ring buffer object alive */
+            GCHandle job_queue_h = runtime.job_queue_handle();
+            if (job_queue_h != GC_HANDLE_NULL) {
+                QJS_LOGI("mark_children: marking job_queue handle=%u", job_queue_h);
+                mark_func(rt, job_queue_h);
+            }
             
             /* Note: contexts are marked separately via JSRuntime_for_each_context */
             QJS_LOGI("mark_children: done marking runtime children");
@@ -7384,19 +7578,25 @@ static void gc_mark_roots(JSRuntimeHandle rt)
     /* Mark the runtime's current_exception */
     JS_MarkValue(rt, rt.current_exception(), gc_mark_recursive);
 
-    /* Mark jobs in the job list - use rt->job_queue */
-    GCHandleRingBuffer& job_queue = rt.job_queue();
-    for (i = 0; i < job_queue.count(); i++) {
-        GCHandle job_handle = job_queue[i];
-        if (!gc_handle_array_entry_is_valid(job_handle)) continue;
-        JSJobEntryHandle job = JSJobEntryHandle(job_handle);
-        if (!job) continue;
-        /* Mark the job's realm to prevent it from being GC'd */
-        if (job.realm_handle())
-            gc_mark_recursive(rt, job.realm_handle());
-        int j;
-        for(j = 0; j < job.argc(); j++) {
-            JS_MarkValue(rt, job.argv_at(j), gc_mark_recursive);
+    /* Mark jobs in the lock-free job queue.  This runs during the
+       stop-the-world GC phase, so concurrent enqueue/dequeue are paused. */
+    LFJobQueue *job_queue = js_job_queue_ptr(rt);
+    if (job_queue) {
+        uint64_t head = atomic_load_u64(&job_queue->head);
+        uint64_t tail = atomic_load_u64(&job_queue->tail);
+        for (uint64_t idx_q = head; idx_q < tail; idx_q++) {
+            uint64_t phys = idx_q & job_queue->mask;
+            GCHandle job_handle = atomic_load_u32((volatile uint32_t *)&job_queue->entries[phys]);
+            if (!gc_handle_array_entry_is_valid(job_handle)) continue;
+            JSJobEntryHandle job = JSJobEntryHandle(job_handle);
+            if (!job) continue;
+            /* Mark the job's realm to prevent it from being GC'd */
+            if (job.realm_handle())
+                gc_mark_recursive(rt, job.realm_handle());
+            int j;
+            for(j = 0; j < job.argc(); j++) {
+                JS_MarkValue(rt, job.argv_at(j), gc_mark_recursive);
+            }
         }
     }
     
@@ -7601,7 +7801,7 @@ extern "C" void gc_sweep_atoms(JSRuntimeHandle rt)
     uint32_t i;
     int freed_count = 0;
     
-    QJS_LOGI("gc_sweep_atoms: ENTER, atom_handles.count=%u, permanent_atom_count=%u", g_gc.atom_handles.count, rt.permanent_atom_count());
+    QJS_LOGE("gc_sweep_atoms: ENTER, atom_handles.count=%u, permanent_atom_count=%u", g_gc.atom_handles.count, rt.permanent_atom_count());
     
     /* Phase 1: Mark unreferenced dynamic atoms as DEAD and remove from hash table */
     for (i = rt.permanent_atom_count(); i < g_gc.atom_handles.count; i++) {
@@ -7684,17 +7884,23 @@ extern "C" void gc_sweep_atoms(JSRuntimeHandle rt)
         
         JSStringHandle p = JSStringHandle(atom_handle);
         if (p.atom_type() == JS_ATOM_TYPE_DEAD) {
-            QJS_LOGI("gc_sweep_atoms: freeing dead atom %u", i);
+            QJS_LOGI("gc_sweep_atoms: freeing dead atom %u (handle=%u)", i, (uint32_t)atom_handle);
             /* Free the atom memory and update both handle arrays */
             /* Clear the pointer in handle table to mark as freed */
             if (atom_handle < g_gc.handles.count) {
                 g_gc.handles.ptrs[atom_handle] = NULL;
+            } else {
+                QJS_LOGE("gc_sweep_atoms: atom handle %u out of bounds (count=%u)", (uint32_t)atom_handle, g_gc.handles.count);
             }
-            g_gc.atom_handles.handles[i] = GC_HANDLE_FREED;
+            if (i < g_gc.atom_handles.capacity) {
+                g_gc.atom_handles.handles[i] = GC_HANDLE_FREED;
+            } else {
+                QJS_LOGE("gc_sweep_atoms: atom index %u out of capacity %u", i, g_gc.atom_handles.capacity);
+            }
         }
     }
     
-    QJS_LOGI("gc_sweep_atoms: freed %d dynamic atoms", freed_count);
+    QJS_LOGE("gc_sweep_atoms: freed %d dynamic atoms, DONE", freed_count);
 }
 
 static void JS_RunGCInternal(JSRuntimeHandle rt, BOOL remove_weak_objects)
@@ -64756,13 +64962,17 @@ extern "C" void JSString_set_hash_next(uint32_t atom_idx, uint32_t next) {
 
 /* Job queue access - returns GCHandle to job entry */
 extern "C" uint32_t JSRuntime_job_queue_count(JSRuntimeHandle rt) {
-    return rt.job_queue().count();
+    return (uint32_t)js_job_queue_count(rt);
 }
 
 extern "C" uint32_t JSRuntime_job_queue_get_handle(JSRuntimeHandle rt, int index) {
-    GCHandleRingBuffer& job_queue = rt.job_queue();
-    if (index < 0 || index >= job_queue.count()) return GC_HANDLE_NULL;
-    GCHandle job_handle = job_queue[index];
+    LFJobQueue *job_queue = js_job_queue_ptr(rt);
+    if (!job_queue) return GC_HANDLE_NULL;
+    uint64_t head = atomic_load_u64(&job_queue->head);
+    uint64_t tail = atomic_load_u64(&job_queue->tail);
+    if (index < 0 || (uint64_t)index >= (tail - head)) return GC_HANDLE_NULL;
+    uint64_t phys = (head + (uint64_t)index) & job_queue->mask;
+    GCHandle job_handle = atomic_load_u32((volatile uint32_t *)&job_queue->entries[phys]);
     if (!gc_handle_array_entry_is_valid(job_handle)) return GC_HANDLE_NULL;
     return job_handle;
 }

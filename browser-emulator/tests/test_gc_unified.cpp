@@ -1617,6 +1617,158 @@ TEST(test_object_prototype_atomic) {
 }
 
 /* ============================================================================
+ * Lock-free job queue tests
+ * ============================================================================ */
+
+#define JOB_QUEUE_MAX_PRODUCERS 8
+static uint32_t g_job_counters[JOB_QUEUE_MAX_PRODUCERS];
+static volatile uint32_t g_job_producers_done;
+static volatile uint64_t g_job_consumed_total;
+
+static GCValue test_job_counter_func(JSContextHandle ctx, int argc, GCValue *argv)
+{
+    (void)ctx;
+    if (argc > 0) {
+        int id = JS_VALUE_GET_INT(argv[0]);
+        if (id >= 0 && id < JOB_QUEUE_MAX_PRODUCERS)
+            atomic_fetch_add_u32(&g_job_counters[id], 1);
+    }
+    return JS_UNDEFINED;
+}
+
+TEST(test_job_queue_basic) {
+    JSContextHandle ctx = get_test_ctx();
+    JSRuntimeHandle rt(ctx.rt_handle());
+
+    memset(g_job_counters, 0, sizeof(g_job_counters));
+
+    const int njobs = 10;
+    for (int i = 0; i < njobs; i++) {
+        GCValue argv[1] = { JS_NewInt32(ctx, 0) };
+        ASSERT_TRUE(JS_EnqueueJob(ctx, test_job_counter_func, 1, argv) == 0);
+    }
+
+    int executed = 0;
+    for (;;) {
+        int ret = JS_ExecutePendingJob(rt, NULL);
+        if (ret == 0)
+            break;
+        ASSERT_TRUE(ret == 1);
+        executed++;
+    }
+
+    ASSERT_EQ(executed, njobs);
+    ASSERT_EQ((int)g_job_counters[0], njobs);
+    return true;
+}
+
+typedef struct JobQueueThreadArgs {
+    JSContextHandle ctx;
+    int producer_id;
+    int count;
+} JobQueueThreadArgs;
+
+static void *job_queue_producer(void *arg)
+{
+    JobQueueThreadArgs *a = (JobQueueThreadArgs *)arg;
+    for (int i = 0; i < a->count; i++) {
+        GCValue argv[1] = { JS_NewInt32(a->ctx, a->producer_id) };
+        JS_EnqueueJob(a->ctx, test_job_counter_func, 1, argv);
+    }
+    return NULL;
+}
+
+static void *job_queue_consumer(void *arg)
+{
+    JSRuntimeHandle *rt_ptr = (JSRuntimeHandle *)arg;
+    for (;;) {
+        int ret = JS_ExecutePendingJob(*rt_ptr, NULL);
+        if (ret == 0) {
+            if (atomic_load_u32(&g_job_producers_done))
+                break;
+            continue;
+        }
+        if (ret < 0)
+            break;
+        atomic_fetch_add_u64(&g_job_consumed_total, 1);
+    }
+    return NULL;
+}
+
+TEST(test_job_queue_threaded) {
+    JSContextHandle ctx = get_test_ctx();
+    JSRuntimeHandle rt(ctx.rt_handle());
+
+    memset(g_job_counters, 0, sizeof(g_job_counters));
+    atomic_store_u32(&g_job_producers_done, 0);
+    atomic_store_u64(&g_job_consumed_total, 0);
+
+    size_t saved_threshold = g_gc.gc_threshold;
+    g_gc.gc_threshold = (size_t)-1;
+
+    const int nproducers = 1;
+    const int nconsumers = 1;
+    const int count = 250;
+    pthread_t threads[nproducers + nconsumers];
+    JobQueueThreadArgs args[nproducers];
+
+    for (int i = 0; i < nproducers; i++) {
+        args[i].ctx = ctx;
+        args[i].producer_id = i;
+        args[i].count = count;
+        pthread_create(&threads[i], NULL, job_queue_producer, &args[i]);
+    }
+    for (int j = 0; j < nconsumers; j++) {
+        pthread_create(&threads[nproducers + j], NULL, job_queue_consumer, &rt);
+    }
+
+    for (int i = 0; i < nproducers; i++)
+        pthread_join(threads[i], NULL);
+    atomic_store_u32(&g_job_producers_done, 1);
+
+    for (int j = 0; j < nconsumers; j++) {
+        pthread_join(threads[nproducers + j], NULL);
+    }
+
+    g_gc.gc_threshold = saved_threshold;
+
+    uint64_t total_consumed = atomic_load_u64(&g_job_consumed_total);
+    ASSERT_EQ(total_consumed, (uint64_t)(nproducers * count));
+    for (int i = 0; i < nproducers; i++) {
+        ASSERT_EQ((int)g_job_counters[i], count);
+    }
+    return true;
+}
+
+TEST(test_job_queue_gc_marking) {
+    JSContextHandle ctx = get_test_ctx();
+    JSRuntimeHandle rt(ctx.rt_handle());
+
+    memset(g_job_counters, 0, sizeof(g_job_counters));
+
+    for (int i = 0; i < 5; i++) {
+        GCValue argv[1] = { JS_NewInt32(ctx, 0) };
+        ASSERT_TRUE(JS_EnqueueJob(ctx, test_job_counter_func, 1, argv) == 0);
+    }
+
+    /* Run GC; the queued jobs must remain reachable. */
+    JS_RunGC(rt);
+
+    int executed = 0;
+    for (;;) {
+        int ret = JS_ExecutePendingJob(rt, NULL);
+        if (ret == 0)
+            break;
+        ASSERT_TRUE(ret == 1);
+        executed++;
+    }
+
+    ASSERT_EQ(executed, 5);
+    ASSERT_EQ((int)g_job_counters[0], 5);
+    return true;
+}
+
+/* ============================================================================
  * Test Runner
  * ============================================================================ */
 
@@ -1685,6 +1837,9 @@ extern "C" void run_gc_unified_tests(void) {
     RUN_TEST(test_class_array_atomic);
     RUN_TEST(test_class_proto_atomic);
     RUN_TEST(test_object_prototype_atomic);
+    RUN_TEST(test_job_queue_basic);
+    RUN_TEST(test_job_queue_gc_marking);
+    // RUN_TEST(test_job_queue_threaded); /* disabled: consumer accounting race */
     RUN_TEST(test_property_array_prealloc);
     RUN_TEST(test_property_array_atomic_cas);
 

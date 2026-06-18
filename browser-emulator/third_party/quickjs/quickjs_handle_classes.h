@@ -1255,6 +1255,12 @@ public:
             gc_write_barrier_for_heap_slot(&p->job_queue_handle, h);
         }
     }
+
+    GCHandle compare_exchange_job_queue_handle(GCHandle expected, GCHandle desired) {
+        JSRuntime* p = get_ptr();
+        if (!p) return expected;
+        return atomic_compare_exchange_u32((volatile uint32_t *)&p->job_queue_handle, expected, desired);
+    }
     
     /* =========================================================================
      * Handle accessors that return pointer to dereferenced arrays

@@ -611,6 +611,7 @@ GCHandle gc_type_iterator_handle(GCTypeIterator *it);
 typedef enum {
     GC_PHASE_IDLE = 0,
     GC_PHASE_MARKING,
+    GC_PHASE_SWEEPING,
     GC_PHASE_COMPACTING,
     GC_PHASE_SWAPPING,
 } GCPhase;
