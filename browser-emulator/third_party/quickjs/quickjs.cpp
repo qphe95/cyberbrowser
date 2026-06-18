@@ -5907,7 +5907,6 @@ static GCValue JS_NewObjectFromShape(JSContextHandle ctx, JSShapeHandle sh, JSCl
     p.set_is_HTMLDDA(0);
     p.set_weakref_count(0);
     p.set_prop_version(2); /* start stable (even) */
-    p.prop_lock_init();
     p.set_opaque_handle(GC_HANDLE_NULL);
     /* Use sh.shape_handle() instead of sh.handle() because shapes are offset from alloc base */
     p.set_shape_handle(sh.shape_handle());
@@ -64829,6 +64828,20 @@ static inline JSProperty *js_object_get_prop_slot(JSObjectHandle p, uint32_t pro
     return arr.at(prop_idx);
 }
 
+static inline void gcvalue_to_raw(GCValue v, uint64_t *low, uint64_t *high)
+{
+    memcpy(low, &v, sizeof(uint64_t));
+    memcpy(high, (char *)&v + sizeof(uint64_t), sizeof(uint64_t));
+}
+
+static inline GCValue raw_to_gcvalue(uint64_t low, uint64_t high)
+{
+    GCValue v;
+    memcpy(&v, &low, sizeof(uint64_t));
+    memcpy((char *)&v + sizeof(uint64_t), &high, sizeof(uint64_t));
+    return v;
+}
+
 extern "C" bool js_object_prealloc_properties(JSContextHandle ctx, GCHandle obj_handle, uint32_t min_count)
 {
     return ::js_object_prealloc_properties(ctx, JSObjectHandle(obj_handle), min_count);
@@ -64852,24 +64865,22 @@ extern "C" bool js_object_set_property_value_atomic(JSContextHandle ctx, GCHandl
             /* resize in progress - spin */
             continue;
         }
-        p.prop_lock_acquire();
-        /* Re-check version under the lock; if a resize happened, release and retry. */
-        uint32_t v1 = p.prop_version();
-        if (v1 != v0) {
-            p.prop_lock_release();
-            continue;
-        }
         JSProperty *slot = js_object_get_prop_slot(p, prop_idx);
-        if (!slot) {
-            p.prop_lock_release();
+        if (!slot)
             return false;
+
+        uint64_t low, high;
+        gcvalue_to_raw(val, &low, &high);
+        atomic_store_128((volatile uint64_t *)&slot->u.value, low, high);
+
+        uint32_t v1 = p.prop_version();
+        if (v1 == v0) {
+            GCHandle target = GC_VALUE_GET_HANDLE(val);
+            if (target != GC_HANDLE_NULL)
+                gc_write_barrier_for_heap_slot(&slot->u.value, target);
+            return true;
         }
-        slot->u.value = val;
-        GCHandle target = GC_VALUE_GET_HANDLE(val);
-        if (target != GC_HANDLE_NULL)
-            gc_write_barrier_for_heap_slot(&slot->u.value, target);
-        p.prop_lock_release();
-        return true;
+        /* Version changed: retry with the (possibly) new array. */
     }
 }
 
@@ -64886,30 +64897,29 @@ extern "C" bool js_object_cas_property_value_atomic(JSContextHandle ctx, GCHandl
         if ((v0 & 1) != 0) {
             continue;
         }
-        p.prop_lock_acquire();
-        uint32_t v1 = p.prop_version();
-        if (v1 != v0) {
-            p.prop_lock_release();
-            continue;
-        }
         JSProperty *slot = js_object_get_prop_slot(p, prop_idx);
-        if (!slot) {
-            p.prop_lock_release();
+        if (!slot)
             return false;
-        }
-        GCValue actual = slot->u.value;
-        bool success = (actual.u.handle == expected.u.handle &&
-                        actual.tag == expected.tag);
-        if (success) {
-            slot->u.value = desired;
-            GCHandle target = GC_VALUE_GET_HANDLE(desired);
-            if (target != GC_HANDLE_NULL)
-                gc_write_barrier_for_heap_slot(&slot->u.value, target);
-        }
+
+        uint64_t exp_low, exp_high, des_low, des_high;
+        gcvalue_to_raw(expected, &exp_low, &exp_high);
+        gcvalue_to_raw(desired, &des_low, &des_high);
+
+        bool success = atomic_compare_exchange_128((volatile uint64_t *)&slot->u.value,
+                                                   &exp_low, &exp_high,
+                                                   des_low, des_high);
         if (out_actual)
-            *out_actual = actual;
-        p.prop_lock_release();
-        return success;
+            *out_actual = raw_to_gcvalue(exp_low, exp_high);
+
+        uint32_t v1 = p.prop_version();
+        if (v1 == v0) {
+            if (success) {
+                GCHandle target = GC_VALUE_GET_HANDLE(desired);
+                if (target != GC_HANDLE_NULL)
+                    gc_write_barrier_for_heap_slot(&slot->u.value, target);
+            }
+            return success;
+        }
     }
 }
 
@@ -64925,16 +64935,15 @@ extern "C" GCValue js_object_get_property_value_atomic(JSContextHandle ctx, GCHa
         uint32_t v0 = p.prop_version();
         if ((v0 & 1) != 0)
             continue;
-        p.prop_lock_acquire();
-        uint32_t v1 = p.prop_version();
-        if (v1 != v0) {
-            p.prop_lock_release();
-            continue;
-        }
         JSProperty *slot = js_object_get_prop_slot(p, prop_idx);
-        if (slot)
-            result = slot->u.value;
-        p.prop_lock_release();
-        return result;
+        if (!slot)
+            return result;
+
+        uint64_t low = 0, high = 0;
+        atomic_load_128((volatile uint64_t *)&slot->u.value, &low, &high);
+        result = raw_to_gcvalue(low, high);
+
+        if (p.prop_version() == v0)
+            return result;
     }
 }

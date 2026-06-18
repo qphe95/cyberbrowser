@@ -479,7 +479,7 @@ lock-free.  Nearly all higher-level shared state is unprotected:
 |----------|--------------|--------------------|-------------------------|
 | **Atoms** | `atom_hash_*`, `atom_array_handle`, `atom_free_index`, `atom_gc_marks_handle`, per-context `atom_cache` | None | Lock-free open-addressing atom hash table; per-context atom cache stays per-context but insertions must use CAS. |
 | **Shapes** | `shape_hash_*`, `shape_hash_handle`, `JSShape` hash chains | None | Lock-free shape hash table (open addressing or chained handles); shape transition cache per context. |
-| **Property arrays** | `JSObject.prop_handle` reallocations, `JSProperty[]` contents | Underlying bump allocator is atomic; no higher-level protection | Per-object property-array version + per-object spinlock; pre-sized property arrays for DOM nodes. (Atomic slot CAS is the end-state goal; current phase uses a per-object spinlock to stay safe with the existing 8-byte-aligned GC allocator.) |
+| **Property arrays** | `JSObject.prop_handle` reallocations, `JSProperty[]` contents | Underlying bump allocator is atomic; no higher-level protection | Per-object property-array version + atomic slot CAS; pre-sized property arrays for DOM nodes. Requires 16-byte aligned GC user data. |
 | **Classes** | `class_count`, `class_array_handle`, `ctx_class_proto[]` | None | Immutable class array after init; RCU-style swap for rare additions; class prototypes stored as handles with atomic loads. |
 | **Exceptions** | `current_exception`, `current_exception_is_uncatchable` | None | Thread-local exception slot per worker; main thread merges/owns runtime exception. |
 | **Job queue** | `job_queue` ring buffer | None | Lock-free MPMC ring buffer with atomic head/tail. |
@@ -510,7 +510,7 @@ lock-free.  Nearly all higher-level shared state is unprotected:
 | 1 | **Object publication state** — per-handle `PUBLISH_UNBORN`/`GREY`/`BLACK` array, `gc_alloc_grey()`, `gc_publish()` | **Done** (`quickjs_gc_unified.h/cpp`, unit tests passing) |
 | 2 | **Reusable lock-free hash table** — open addressing, CAS insert, resize | **Done** (`lockfree_hash_table.h/cpp`, single + multi-threaded tests passing) |
 | 3 | **Plumb grey state through DOM/JS creation** — `DOMNodeHandle::create`, `JS_NewObject` now allocate grey and publish black before returning; GC mark callback deferred | **Done** (tests verify published state of JS objects and DOM nodes) |
-| 4 | **Property-array allocator** — per-object versioning, per-object spinlock, pre-sized arrays; atomic slot CAS deferred until allocator guarantees 16-byte alignment | Done |
+| 4 | **Property-array allocator** — per-object versioning, atomic slot CAS, pre-sized arrays; GC allocator now returns 16-byte aligned user data | Done |
 | 5 | **Shape hash table** — lock-free open-addressing handle table | **Done** (`LFHashTable` integrated into QuickJS; immutable hashed shapes; CAS resize; retired-table reclamation; sharing + resize + GC cleanup tests passing) |
 | 6 | **Atom cache / atom hash** — lock-free atom hash table + atomic class ID | **Done** (`LFHashTable` replaced the chained `rt_atom_hash[]`; `LFHashTable` content-equality lookup by string hash/content; CAS resize with retired-table reclamation; `JS_NewClassID` uses atomic fetch-add; class registration uses a runtime spinlock; interning/resize/GC cleanup/class-ID tests passing) |
 | 7 | **Class array / prototypes** — freeze after init; atomic handle loads | Not started |

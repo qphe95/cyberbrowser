@@ -108,17 +108,20 @@ extern "C" {
 }
 
 #define ALIGN16(size) (((size) + 15) & ~15)
-#define MIN_OBJECT_SIZE (sizeof(GCHeader) + 16)  /* 64 + 16 = 80 bytes minimum */
+/* Layout: [16-byte prefix] [64-byte GCHeader] [user data (ALIGN16(size))] [16-byte suffix].
+ * The 16-byte prefix ensures the user pointer is 16-byte aligned while keeping
+ * objects contiguous on 16-byte boundaries. */
+#define MIN_OBJECT_SIZE (sizeof(GCHeader) + 32)  /* 64 + 32 = 96 bytes minimum */
 
 /* 
  * Calculate total allocation size from header.
- * Layout: [8-byte prefix] [64-byte GCHeader] [user data (aligned)] [8-byte suffix]
+ * Layout: [16-byte prefix] [64-byte GCHeader] [user data (aligned)] [16-byte suffix]
  */
 static inline size_t gc_alloc_total_size(GCHeader *hdr) {
     if (!hdr) return MIN_OBJECT_SIZE;
     /* Mask out FREED flag (bit 31) when calculating size */
     uint32_t user_size = hdr->size & 0x7FFFFFFF;
-    return 8 + sizeof(GCHeader) + ALIGN16(user_size) + 8;
+    return 16 + sizeof(GCHeader) + ALIGN16(user_size) + 16;
 }
 
 GCState g_gc = {0};
@@ -1420,8 +1423,8 @@ GCHandle gc_type_iterator_handle(GCTypeIterator *it) {
 /*
  * CANARY-ENABLED BUMP ALLOCATOR
  * 
- * Layout: [8-byte prefix] [64-byte GCHeader] [user data] [8-byte suffix]
- * Total overhead: 16 bytes per allocation
+ * Layout: [16-byte prefix] [64-byte GCHeader] [user data] [16-byte suffix]
+ * Total overhead: 32 bytes per allocation
  * 
  * During normal operation (non-compaction): allocates from active buffer.
  * During compaction: allocates from compaction_target buffer.
@@ -1435,16 +1438,19 @@ static void *bump_alloc(size_t size) {
         buf = &g_gc.buffers[target];
     }
     
-    /* Add space for prefix and suffix canaries */
+    /* Add space for prefix and suffix canaries.
+     * Prefix is 16 bytes: 8-byte canary + 8-byte padding so that the user
+     * pointer (header + 64) is 16-byte aligned while objects stay contiguous
+     * on 16-byte boundaries.  Suffix is 16 bytes for the same alignment. */
     size_t user_size = ALIGN16(size);
-    size_t total_size = 8 + sizeof(GCHeader) + user_size + 8; /* canaries + header + data */
+    size_t total_size = 16 + sizeof(GCHeader) + user_size + 16; /* canaries + header + data */
     
     /* Atomic bump allocation using fetch_add */
     size_t old_offset = atomic_fetch_add_zu(&buf->bump_offset, total_size);
     /* CRITICAL: Ensure offset is 16-byte aligned before allocation */
     size_t aligned_offset = ALIGN16(old_offset);
-    /* Prefix canary starts 8 bytes before the aligned position */
-    size_t alloc_start = aligned_offset + 8;
+    /* Header starts 16 bytes after the prefix canary */
+    size_t alloc_start = aligned_offset + 16;
     size_t new_offset = aligned_offset + total_size;
     if (new_offset > buf->storage_size) return NULL;
     
@@ -2307,7 +2313,7 @@ GCHandle gc_ptr_to_handle(void *ptr) {
         uint64_t *prefix_ptr = (uint64_t *)read;
         GCHeader *hdr;
         if (*prefix_ptr == GC_CANARY_PREFIX || *prefix_ptr == GC_CANARY_CORRUPTED) {
-            hdr = (GCHeader *)(read + 8);
+            hdr = (GCHeader *)(read + 16);
         } else {
             read += MIN_OBJECT_SIZE;
             continue;
@@ -2388,7 +2394,7 @@ static void gc_compact_move_objects(void) {
         GCHeader *hdr;
         
         if (*prefix_ptr == GC_CANARY_PREFIX || *prefix_ptr == GC_CANARY_CORRUPTED) {
-            hdr = (GCHeader*)(read + 8);
+            hdr = (GCHeader*)(read + 16);
         } else {
             /* Invalid prefix - skip minimum object size */
             read += MIN_OBJECT_SIZE;
@@ -2453,12 +2459,12 @@ static void gc_compact_move_objects(void) {
     for (uint32_t i = 0; i < live_count; i++) {
         GCHeader *hdr = live_objects[i].src_hdr;
         size_t total_size = live_objects[i].total_size;
-        uint8_t *src_start = (uint8_t *)hdr - 8;  /* include prefix canary */
+        uint8_t *src_start = (uint8_t *)hdr - 16;  /* include prefix canary */
         
         memcpy(write, src_start, total_size);
         
         /* Update handle table to point to new location */
-        GCHeader *new_hdr = (GCHeader*)(write + 8);
+        GCHeader *new_hdr = (GCHeader*)(write + 16);
         if (new_hdr->handle < src->handle_count) {
             void *new_ptr = gc_header_to_ptr(new_hdr);
             
@@ -2555,7 +2561,7 @@ static void gc_compact(void) {
     while ((size_t)(scan - new_buf->storage) < new_buf->bump_offset) {
         uint64_t *prefix = (uint64_t*)scan;
         if (*prefix == GC_CANARY_PREFIX || *prefix == GC_CANARY_CORRUPTED) {
-            GCHeader *hdr = (GCHeader*)(scan + 8);
+            GCHeader *hdr = (GCHeader*)(scan + 16);
             if (hdr->size != 0 && (hdr->size & 0x80000000) == 0) {
                 g_gc.bytes_allocated += hdr->size;
             }
@@ -2792,10 +2798,10 @@ size_t gc_total_bytes(void) {
  * - Explicit validation calls
  */
 
-/* Get pointer to prefix canary (8 bytes before GCHeader) */
+/* Get pointer to prefix canary (16 bytes before GCHeader) */
 static inline uint64_t *gc_canary_prefix_ptr(GCHeader *hdr) {
     if (!hdr) return NULL;
-    return (uint64_t*)((uint8_t*)hdr - 8);
+    return (uint64_t*)((uint8_t*)hdr - 16);
 }
 
 /* Get pointer to suffix canary (after user data) */

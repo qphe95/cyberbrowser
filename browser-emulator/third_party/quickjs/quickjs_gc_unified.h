@@ -130,6 +130,52 @@ static inline uint64_t atomic_compare_exchange_u64(volatile uint64_t *p, uint64_
 }
 #endif
 
+/* 128-bit atomic helpers for GCValue-sized slots (used by lock-free property arrays).
+ * addr must be 16-byte aligned at runtime.  We use explicit inline assembly for
+ * cmpxchg16b to avoid stack-alignment / libgcc issues with compiler-generated
+ * 128-bit atomics on MinGW. */
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+static inline void atomic_load_128(volatile uint64_t *addr, uint64_t *low, uint64_t *high) {
+    uint64_t rax = 0, rdx = 0;
+    __asm__ __volatile__ (
+        "lock; cmpxchg16b %0"
+        : "+m"(*(volatile __int128 *)addr), "+a"(rax), "+d"(rdx)
+        : "b"((uint64_t)0), "c"((uint64_t)0)
+        : "cc", "memory"
+    );
+    *low = rax;
+    *high = rdx;
+}
+static inline bool atomic_compare_exchange_128(volatile uint64_t *addr,
+                                               uint64_t *expected_low, uint64_t *expected_high,
+                                               uint64_t desired_low, uint64_t desired_high) {
+    uint64_t rax = *expected_low;
+    uint64_t rdx = *expected_high;
+    uint8_t success;
+    __asm__ __volatile__ (
+        "lock; cmpxchg16b %3\n\t"
+        "sete %0"
+        : "=q"(success), "+a"(rax), "+d"(rdx), "+m"(*(volatile __int128 *)addr)
+        : "b"(desired_low), "c"(desired_high)
+        : "cc", "memory"
+    );
+    if (!success) {
+        *expected_low = rax;
+        *expected_high = rdx;
+    }
+    return success;
+}
+static inline void atomic_store_128(volatile uint64_t *addr, uint64_t low, uint64_t high) {
+    uint64_t expected_low = 0, expected_high = 0;
+    atomic_load_128(addr, &expected_low, &expected_high);
+    while (!atomic_compare_exchange_128(addr, &expected_low, &expected_high, low, high)) {
+        /* retry with current value already in expected_* */
+    }
+}
+#else
+#error "128-bit atomic operations not implemented for this target"
+#endif
+
 
 /* Simple spinlock used for coarse-grained thread safety (e.g. type buckets) */
 typedef struct GCSpinLock {
