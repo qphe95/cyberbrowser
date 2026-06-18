@@ -1242,11 +1242,18 @@ public:
         if (p) p->instruction_counter = counter;
     }
     
-    /* Job queue access */
-    GCHandleRingBuffer& job_queue() {
+    /* Job queue handle access - atomic */
+    GCHandle job_queue_handle() const {
         JSRuntime* p = get_ptr();
-        static GCHandleRingBuffer dummy;
-        return p ? p->job_queue : dummy;
+        return p ? atomic_load_u32((volatile uint32_t *)&p->job_queue_handle) : GC_HANDLE_NULL;
+    }
+    
+    void set_job_queue_handle(GCHandle h) {
+        JSRuntime* p = get_ptr();
+        if (p) {
+            atomic_store_u32((volatile uint32_t *)&p->job_queue_handle, h);
+            gc_write_barrier_for_heap_slot(&p->job_queue_handle, h);
+        }
     }
     
     /* =========================================================================

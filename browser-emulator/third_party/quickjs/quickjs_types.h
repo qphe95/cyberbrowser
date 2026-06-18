@@ -823,147 +823,25 @@ public:
 };
 
 /* ============================================================================
- * GCHandleRingBuffer - Circular buffer for efficient FIFO operations
+ * LFJobQueue - Lock-free MPMC ring buffer for JS job entries
  * ============================================================================
- * 
- * This class implements a ring buffer for O(1) push_back and pop_front operations.
- * When the buffer fills up, it grows by allocating new space and unwrapping the
- * ring buffer into the new linear space.
+ *
+ * Stores GCHandle values pointing to JSJobEntry objects.  head/tail are
+ * monotonically increasing uint64_t counters; the slot index is masked by
+ * (capacity - 1).  An empty slot is GC_HANDLE_NULL.
+ *
+ * Producers reserve a slot with atomic_fetch_add_u64(&tail, 1), spin until the
+ * slot is GC_HANDLE_NULL, then CAS null -> handle.  Consumers reserve a slot
+ * with atomic_fetch_add_u64(&head, 1), spin until the slot is non-null, load
+ * it, then CAS it back to GC_HANDLE_NULL.
  */
-class GCHandleRingBuffer {
-private:
-    GCHandle *data_;    /* Raw buffer */
-    int head_;          /* Index of first element */
-    int tail_;          /* Index where next element will be inserted */
-    int count_;         /* Number of elements */
-    int capacity_;      /* Total capacity */
-
-    /* Advance head (for pop) */
-    static inline int advance(int idx, int cap) { return (idx + 1) % cap; }
-    
-    /* Grow and unwrap the ring buffer into new linear space */
-    bool grow_and_unwrap() {
-        int new_cap = capacity_ < 4 ? 4 : capacity_ * 2;
-        GCHandle *new_data = (GCHandle*)realloc(data_, sizeof(GCHandle) * new_cap);
-        if (!new_data) return false;
-        
-        if (count_ > 0 && head_ >= tail_) {
-            /* Buffer is wrapped: [head..capacity-1] [0..tail-1]
-             * Unwrap to: [head..capacity-1] [0..count-(capacity-head)-1]
-             * Move the wrapped portion to the end */
-            int first_part = capacity_ - head_;
-            int second_part = count_ - first_part;
-            
-            /* Move second part to after first part in new buffer */
-            /* new_data already has first_part at [0..first_part-1] if head_==0,
-             * but we need to shift to make room for second part */
-            if (head_ != 0) {
-                /* Shift first part to start of new buffer */
-                for (int i = 0; i < first_part; i++) {
-                    new_data[i] = new_data[head_ + i];
-                }
-            }
-            /* Copy second part after first part */
-            for (int i = 0; i < second_part; i++) {
-                new_data[first_part + i] = data_[i];
-            }
-            head_ = 0;
-            tail_ = count_;
-        } else if (count_ > 0 && head_ != 0) {
-            /* Not wrapped but head not at 0: shift to start */
-            for (int i = 0; i < count_; i++) {
-                new_data[i] = new_data[head_ + i];
-            }
-            head_ = 0;
-            tail_ = count_;
-        }
-        /* Zero new space */
-        if (new_cap > capacity_) {
-            memset(new_data + tail_, 0, sizeof(GCHandle) * (new_cap - capacity_));
-        }
-        
-        data_ = new_data;
-        capacity_ = new_cap;
-        return true;
-    }
-
-public:
-    /* Default constructor - empty buffer */
-    GCHandleRingBuffer() : data_(nullptr), head_(0), tail_(0), count_(0), capacity_(0) {}
-    
-    /* Destructor - DOES NOT free data by design (like GCHandleList) */
-    ~GCHandleRingBuffer() = default;
-    
-    /* Get element count */
-    int count() const { return count_; }
-    
-    /* Check if empty */
-    bool empty() const { return count_ == 0; }
-    
-    /* Access element at logical index (0 = head/front) */
-    GCHandle& operator[](size_t index) {
-        return data_[(head_ + index) % capacity_];
-    }
-    const GCHandle& operator[](size_t index) const {
-        return data_[(head_ + index) % capacity_];
-    }
-    
-    /* Add handle to back (tail) - O(1) amortized */
-    bool push_back(GCHandle handle) {
-        if (count_ >= capacity_) {
-            if (!grow_and_unwrap()) return false;
-        }
-        data_[tail_] = handle;
-        tail_ = (tail_ + 1) % capacity_;
-        count_++;
-        return true;
-    }
-    
-    /* Remove handle from front (head) - O(1) */
-    void pop_front() {
-        if (count_ == 0) return;
-        data_[head_] = GC_HANDLE_NULL;  /* Clear for GC safety */
-        head_ = (head_ + 1) % capacity_;
-        count_--;
-    }
-    
-    /* Get front element without removing */
-    GCHandle front() const {
-        return count_ > 0 ? data_[head_] : GC_HANDLE_NULL;
-    }
-    
-    /* Get back element without removing */
-    GCHandle back() const {
-        if (count_ == 0) return GC_HANDLE_NULL;
-        int back_idx = (tail_ - 1 + capacity_) % capacity_;
-        return data_[back_idx];
-    }
-    
-    /* Clear count but keep allocated memory */
-    void clear_count() {
-        if (data_ && count_ > 0) {
-            /* Clear all elements for GC safety */
-            for (int i = 0; i < count_; i++) {
-                data_[(head_ + i) % capacity_] = GC_HANDLE_NULL;
-            }
-        }
-        head_ = 0;
-        tail_ = 0;
-        count_ = 0;
-    }
-    
-    /* Free memory and reset */
-    void clear_and_free() {
-        if (data_) {
-            js_bc_free(data_);
-            data_ = nullptr;
-        }
-        head_ = 0;
-        tail_ = 0;
-        count_ = 0;
-        capacity_ = 0;
-    }
-};
+typedef struct LFJobQueue {
+    uint64_t capacity;          /* power of two */
+    uint64_t mask;              /* capacity - 1 */
+    volatile uint64_t head;     /* next index to dequeue */
+    volatile uint64_t tail;     /* next index to enqueue */
+    GCHandle entries[0];        /* capacity slots */
+} LFJobQueue;
 
 /* ============================================================================
  * GCHandleArray<T> - Malloc'd array wrapper for structures containing GC refs
@@ -1327,8 +1205,8 @@ struct JSRuntime {
     uint32_t class_array_lock;    /* spinlock for class registration */
     uint32_t class_array_version; /* even = stable, odd = updating */
 
-    /* Job queue - ring buffer for O(1) push/pop operations */
-    GCHandleRingBuffer job_queue;
+    /* Job queue - handle to lock-free MPMC ring buffer (LFJobQueue) */
+    GCHandle job_queue_handle;
     
     /* GC phase tracking */
     JSGCPhaseEnum gc_phase : 8;
