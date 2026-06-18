@@ -2123,10 +2123,17 @@ static void gc_mark_roots(JSRuntimeHandle rt) {
     }
 
     /* Job queue entries. */
+    GCHandle job_queue_h = rt.job_queue_handle();
+    if (job_queue_h != GC_HANDLE_NULL) {
+        gc_shade(job_queue_h);
+    }
     int job_count = JSRuntime_job_queue_count(rt);
     for (int i = 0; i < job_count; i++) {
         uint32_t job_handle = JSRuntime_job_queue_get_handle(rt, i);
         if (job_handle == GC_HANDLE_NULL) continue;
+
+        /* The entry itself must survive the collection. */
+        gc_shade(job_handle);
 
         uint32_t realm_handle = JSJobEntry_get_realm_handle(job_handle);
         if (realm_handle != GC_HANDLE_NULL) {
@@ -2418,6 +2425,16 @@ static void gc_compact_move_objects(size_t *out_user_bytes) {
         }
         
         size_t total_size = gc_alloc_total_size(hdr);
+        uint32_t user_size = raw_size & 0x7FFFFFFF;
+        if (user_size > src->storage_size ||
+            total_size > src->storage_size ||
+            total_size < MIN_OBJECT_SIZE ||
+            (read + total_size) > (src->storage + src->storage_size)) {
+            GC_LOGE("gc_compact_move_objects: corrupted header handle=%u raw_size=%u total_size=%zu, skipping",
+                    hdr->handle, raw_size, total_size);
+            read += MIN_OBJECT_SIZE;
+            continue;
+        }
         
         if (is_freed) {
             read += total_size;
@@ -2468,6 +2485,13 @@ static void gc_compact_move_objects(size_t *out_user_bytes) {
         GCHeader *hdr = live_objects[i].src_hdr;
         size_t total_size = live_objects[i].total_size;
         uint8_t *src_start = (uint8_t *)hdr - 16;  /* include prefix canary */
+        
+        if (src_start + total_size > src->storage + src->storage_size ||
+            write + total_size > dst->storage + dst->storage_size) {
+            GC_LOGE("gc_compact_move_objects: copy overflow handle=%u total_size=%zu, skipping",
+                    hdr->handle, total_size);
+            continue;
+        }
         
         memcpy(write, src_start, total_size);
         
@@ -2607,6 +2631,25 @@ static void gc_sweep_unified(JSRuntimeHandle rt) {
             table[i] = NULL;
             push_free_handle((GCHandle)i);
             continue;
+        }
+        
+        /* Sanity-check the header size before any size-derived operation.
+         * A corrupted size is the usual symptom of an earlier heap overwrite. */
+        {
+            uint32_t raw_size = hdr->size;
+            uint32_t user_size = raw_size & 0x7FFFFFFF;
+            GCBuffer *buf = gc_active_buffer();
+            size_t total_size = gc_alloc_total_size(hdr);
+            if (user_size > buf->storage_size ||
+                total_size > buf->storage_size ||
+                total_size < MIN_OBJECT_SIZE ||
+                ((uint8_t *)hdr - 16) + total_size > buf->storage + buf->bump_offset) {
+                GC_LOGE("gc_sweep_unified: corrupted header handle=%u raw_size=%u total_size=%zu storage_size=%zu bump=%zu, clearing",
+                        handle, raw_size, total_size, buf->storage_size, buf->bump_offset);
+                table[i] = NULL;
+                push_free_handle((GCHandle)i);
+                continue;
+            }
         }
         
         /* Check if marked */

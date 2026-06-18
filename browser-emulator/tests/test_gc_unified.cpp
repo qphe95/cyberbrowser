@@ -1839,7 +1839,7 @@ extern "C" void run_gc_unified_tests(void) {
     RUN_TEST(test_object_prototype_atomic);
     RUN_TEST(test_job_queue_basic);
     RUN_TEST(test_job_queue_gc_marking);
-    // RUN_TEST(test_job_queue_threaded); /* disabled: consumer accounting race */
+    // RUN_TEST(test_job_queue_threaded); /* disabled: producer/consumer race remains */
     RUN_TEST(test_property_array_prealloc);
     RUN_TEST(test_property_array_atomic_cas);
 

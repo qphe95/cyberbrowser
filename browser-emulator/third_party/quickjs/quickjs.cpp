@@ -1818,6 +1818,12 @@ int JS_ExecutePendingJob(JSRuntimeHandle rt, JSContextHandle *pctx)
 
     /* Execute the dequeued job (FIFO). */
     JSJobEntryHandle e(job_handle);
+    if (unlikely(e.realm_handle() == GC_HANDLE_NULL || e.job_func() == NULL)) {
+        QJS_LOGE("JS_ExecutePendingJob: corrupted job entry handle=%u, freeing", job_handle);
+        gc_free(job_handle);
+        if (pctx) *pctx = JSContextHandle();
+        return -1;
+    }
     ctx = JSContextHandle(e.realm_handle());
     res = e.job_func()(ctx, e.argc(), e.argv());
     
@@ -5591,7 +5597,7 @@ static void js_free_shape0(JSRuntimeHandle rt, JSShapeHandle sh)
     uint32_t i;
     JSShapeProperty *pr;
 
-    QJS_LOGE("js_free_shape0: ENTER sh=%u", sh.handle());
+    QJS_LOGI("js_free_shape0: ENTER sh=%u", sh.handle());
     if (!sh) {
         QJS_LOGE("js_free_shape0: ERROR - sh is NULL!");
         return;
@@ -5602,19 +5608,19 @@ static void js_free_shape0(JSRuntimeHandle rt, JSShapeHandle sh)
         return;
     }
     
-    QJS_LOGE("js_free_shape0: sh.set_is_hashed(%d", sh.is_hashed());
+    QJS_LOGI("js_free_shape0: sh.set_is_hashed(%d)", sh.is_hashed());
     
     /* ref_count check removed - using mark-and-sweep GC */
     if (sh.is_hashed()) {
-        QJS_LOGE("js_free_shape0: calling js_shape_hash_delete...");
+        QJS_LOGI("js_free_shape0: calling js_shape_hash_delete...");
         js_shape_hash_delete(rt, sh);
-        QJS_LOGE("js_free_shape0: js_shape_hash_delete returned");
+        QJS_LOGI("js_free_shape0: js_shape_hash_delete returned");
     }
-    QJS_LOGE("js_free_shape0: checking proto...");
+    QJS_LOGI("js_free_shape0: checking proto...");
     /* Validate proto handle if non-NULL */
     if (sh.proto_handle() != GC_HANDLE_NULL) {
         /* proto_ptr not needed, handle is sufficient for validation */
-        QJS_LOGE("js_free_shape0: proto handle is valid");
+        QJS_LOGI("js_free_shape0: proto handle is valid");
     }
     
     /* Validate property count to prevent overflow */
@@ -5624,17 +5630,17 @@ static void js_free_shape0(JSRuntimeHandle rt, JSShapeHandle sh)
         sh.set_prop_count(0);
     }
     
-    QJS_LOGE("js_free_shape0: getting shape prop, prop_count=%d", sh.prop_count());
+    QJS_LOGI("js_free_shape0: getting shape prop, prop_count=%d", sh.prop_count());
     pr = get_shape_prop(sh);
-    QJS_LOGE("js_free_shape0: freeing atoms...");
+    QJS_LOGI("js_free_shape0: freeing atoms...");
     for(i = 0; i < sh.prop_count(); i++) {
         JS_FreeAtomRT(rt, pr->atom);
         pr++;
     }
-    QJS_LOGE("js_free_shape0: removing from gc...");
-    QJS_LOGE("js_free_shape0: freeing memory...");
+    QJS_LOGI("js_free_shape0: removing from gc...");
+    QJS_LOGI("js_free_shape0: freeing memory...");
     /* GC frees: js_free_rt(rt, get_alloc_from_shape(sh)); */
-    QJS_LOGE("js_free_shape0: DONE");
+    QJS_LOGI("js_free_shape0: DONE");
 }
 
 static void js_free_shape(JSRuntimeHandle rt, JSShapeHandle sh)

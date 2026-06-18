@@ -178,7 +178,6 @@ int main(int argc, char *argv[]) {
 
     /* Run all test suites - they will use the shared context */
     run_gc_unified_tests();
-    return 0; /* DEBUG: stop after gc_unified tests */
     register_multithreaded_gc_tests();
     run_browser_api_impl_tests();
     run_exception_debug_tests();
