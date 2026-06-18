@@ -1471,6 +1471,151 @@ TEST(test_class_id_atomic) {
     return true;
 }
 
+TEST(test_class_array_atomic) {
+    JSContextHandle ctx = get_test_ctx();
+    JSRuntimeHandle rt(ctx.rt_handle());
+    ASSERT_TRUE(rt.valid());
+
+    /* Version must be stable (even) after init. */
+    uint32_t ver = rt.class_array_version();
+    ASSERT_TRUE((ver & 1) == 0);
+
+    /* Register a custom class and read the descriptor back through the
+       atomic accessor (JS_IsRegisteredClass uses rt_class_array). */
+    JSClassID class_id = 0;
+    ASSERT_TRUE(JS_NewClassID(&class_id) != 0);
+    JSClassDef class_def = {};
+    class_def.class_name = "TestClassArrayAtomic";
+    ASSERT_TRUE(JS_NewClass(rt, class_id, &class_def) == 0);
+    ASSERT_TRUE(JS_IsRegisteredClass(rt, class_id));
+    return true;
+}
+
+TEST(test_class_proto_atomic) {
+    JSContextHandle ctx = get_test_ctx();
+
+    /* Register a custom class so we have a free prototype slot to play with. */
+    JSClassID class_id = 0;
+    ASSERT_TRUE(JS_NewClassID(&class_id) != 0);
+    JSClassDef class_def = {};
+    class_def.class_name = "TestClassProtoAtomic";
+    ASSERT_TRUE(JS_NewClass(JSRuntimeHandle(ctx.rt_handle()), class_id, &class_def) == 0);
+
+    GCValue proto = JS_NewObject(ctx);
+    ASSERT_TRUE(JS_IsObject(proto));
+
+    /* Atomically install and read back the class prototype. */
+    js_ctx_class_proto_set(ctx, class_id, proto);
+    GCValue got = js_ctx_class_proto_get(ctx, class_id);
+    ASSERT_TRUE(JS_IsObject(got));
+    ASSERT_EQ((int64_t)JS_VALUE_GET_HANDLE(got),
+              (int64_t)JS_VALUE_GET_HANDLE(proto));
+
+    ASSERT_TRUE((ctx.class_proto_version() & 1) == 0);
+    return true;
+}
+
+typedef struct ProtoThreadArgs {
+    JSContextHandle ctx;
+    GCHandle obj;
+    GCHandle proto_a;
+    GCHandle proto_b;
+    int iters;
+} ProtoThreadArgs;
+
+static void *proto_reader_worker(void *arg)
+{
+    ProtoThreadArgs *a = (ProtoThreadArgs *)arg;
+    intptr_t errors = 0;
+    for (int i = 0; i < a->iters; i++) {
+        GCValue proto = JS_GetPrototype(a->ctx, GC_MKHANDLE(JS_TAG_OBJECT, a->obj));
+        if (JS_IsNull(proto))
+            continue;
+        if (!JS_IsObject(proto)) {
+            errors++;
+            break;
+        }
+        GCHandle h = JS_VALUE_GET_HANDLE(proto);
+        if (h != a->proto_a && h != a->proto_b) {
+            errors++;
+            break;
+        }
+    }
+    return (void *)errors;
+}
+
+static void *proto_writer_worker(void *arg)
+{
+    ProtoThreadArgs *a = (ProtoThreadArgs *)arg;
+    intptr_t errors = 0;
+    for (int i = 0; i < a->iters; i++) {
+        GCValue target = GC_MKHANDLE(JS_TAG_OBJECT, (i & 1) ? a->proto_b : a->proto_a);
+        int ret = JS_SetPrototype(a->ctx, GC_MKHANDLE(JS_TAG_OBJECT, a->obj), target);
+        if (ret != TRUE) {
+            errors++;
+            break;
+        }
+    }
+    return (void *)errors;
+}
+
+TEST(test_object_prototype_atomic) {
+    JSContextHandle ctx = get_test_ctx();
+
+    GCValue a_val = JS_NewObjectProto(ctx, JS_NULL);
+    GCValue b_val = JS_NewObjectProto(ctx, JS_NULL);
+    GCValue obj_val = JS_NewObjectProto(ctx, JS_NULL);
+    ASSERT_TRUE(JS_IsObject(a_val));
+    ASSERT_TRUE(JS_IsObject(b_val));
+    ASSERT_TRUE(JS_IsObject(obj_val));
+
+    GCHandle a = JS_VALUE_GET_HANDLE(a_val);
+    GCHandle b = JS_VALUE_GET_HANDLE(b_val);
+    GCHandle obj = JS_VALUE_GET_HANDLE(obj_val);
+
+    gc_add_root(a);
+    gc_add_root(b);
+    gc_add_root(obj);
+
+    size_t saved_threshold = g_gc.gc_threshold;
+    g_gc.gc_threshold = (size_t)-1;
+
+    const int iters = 500;
+    const int nreaders = 3;
+    pthread_t threads[nreaders + 1];
+    ProtoThreadArgs args[nreaders + 1];
+
+    for (int i = 0; i < nreaders; i++) {
+        args[i].ctx = ctx;
+        args[i].obj = obj;
+        args[i].proto_a = a;
+        args[i].proto_b = b;
+        args[i].iters = iters;
+        pthread_create(&threads[i], NULL, proto_reader_worker, &args[i]);
+    }
+    args[nreaders].ctx = ctx;
+    args[nreaders].obj = obj;
+    args[nreaders].proto_a = a;
+    args[nreaders].proto_b = b;
+    args[nreaders].iters = iters;
+    pthread_create(&threads[nreaders], NULL, proto_writer_worker, &args[nreaders]);
+
+    intptr_t total_errors = 0;
+    for (int i = 0; i <= nreaders; i++) {
+        void *ret;
+        pthread_join(threads[i], &ret);
+        total_errors += (intptr_t)ret;
+    }
+
+    g_gc.gc_threshold = saved_threshold;
+    gc_remove_root(obj);
+    gc_remove_root(b);
+    gc_remove_root(a);
+
+    ASSERT_EQ((int64_t)0, (int64_t)total_errors);
+    return true;
+}
+
 /* ============================================================================
  * Test Runner
  * ============================================================================ */
@@ -1537,6 +1682,9 @@ extern "C" void run_gc_unified_tests(void) {
     RUN_TEST(test_atom_hash_resize);
     RUN_TEST(test_atom_hash_gc_cleanup);
     RUN_TEST(test_class_id_atomic);
+    RUN_TEST(test_class_array_atomic);
+    RUN_TEST(test_class_proto_atomic);
+    RUN_TEST(test_object_prototype_atomic);
     RUN_TEST(test_property_array_prealloc);
     RUN_TEST(test_property_array_atomic_cas);
 

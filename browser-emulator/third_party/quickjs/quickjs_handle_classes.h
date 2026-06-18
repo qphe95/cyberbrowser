@@ -330,6 +330,35 @@ public:
         JSContext* p = get_ptr();
         return p ? (GCValue*)gc_deref(p->class_proto_handle) : nullptr;
     }
+
+    uint32_t class_proto_version() const {
+        JSContext* p = get_ptr();
+        return p ? atomic_load_u32((volatile uint32_t *)&p->class_proto_version) : 0;
+    }
+
+    void set_class_proto_version(uint32_t val) {
+        JSContext* p = get_ptr();
+        if (p) atomic_store_u32((volatile uint32_t *)&p->class_proto_version, val);
+    }
+
+    uint32_t class_proto_version_fetch_add(uint32_t delta) {
+        JSContext* p = get_ptr();
+        if (!p) return 0;
+        return atomic_fetch_add_u32((volatile uint32_t *)&p->class_proto_version, delta);
+    }
+
+    void class_proto_lock_acquire() {
+        JSContext* p = get_ptr();
+        if (!p) return;
+        while (atomic_compare_exchange_u32(&p->class_proto_lock, 0, 1) != 0) {
+            /* spin */
+        }
+    }
+
+    void class_proto_lock_release() {
+        JSContext* p = get_ptr();
+        if (p) atomic_store_u32(&p->class_proto_lock, 0);
+    }
     
     /* function_proto access */
     GCValue function_proto() const {
@@ -850,6 +879,22 @@ public:
         JSRuntime* p = get_ptr();
         if (p) atomic_store_u32(&p->class_array_lock, val);
     }
+
+    uint32_t class_array_version() const {
+        JSRuntime* p = get_ptr();
+        return p ? atomic_load_u32((volatile uint32_t *)&p->class_array_version) : 0;
+    }
+
+    void set_class_array_version(uint32_t val) {
+        JSRuntime* p = get_ptr();
+        if (p) atomic_store_u32((volatile uint32_t *)&p->class_array_version, val);
+    }
+
+    uint32_t class_array_version_fetch_add(uint32_t delta) {
+        JSRuntime* p = get_ptr();
+        if (!p) return 0;
+        return atomic_fetch_add_u32((volatile uint32_t *)&p->class_array_version, delta);
+    }
     
     /* gc_phase access */
     JSGCPhaseEnum gc_phase() const {
@@ -1217,8 +1262,14 @@ public:
     
     /* class_array - returns pointer to JSClass array (forward declared, defined in quickjs.cpp) */
     void* class_array_ptr() const {
-        GCHandle h = class_array_handle();
-        return h != GC_HANDLE_NULL ? gc_deref(h) : nullptr;
+        for (;;) {
+            uint32_t v0 = class_array_version();
+            if ((v0 & 1) != 0) continue;
+            GCHandle h = class_array_handle();
+            void *ptr = h != GC_HANDLE_NULL ? gc_deref(h) : nullptr;
+            if (class_array_version() == v0)
+                return ptr;
+        }
     }
     
     /* atom_gc_marks - returns pointer to uint32_t array */

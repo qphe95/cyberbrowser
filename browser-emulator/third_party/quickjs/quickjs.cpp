@@ -550,7 +550,7 @@ void gc_obj_set_prop_handle(GCHandle obj_handle, GCHandle val) {
 GCHandle gc_shape_get_proto_handle(GCHandle shape_handle) {
     JSShapeHandle sh(shape_handle);
     if (sh.valid()) {
-        return sh.proto_handle();
+        return sh.proto_handle_atomic_load();
     }
     return GC_HANDLE_NULL;
 }
@@ -558,8 +558,19 @@ GCHandle gc_shape_get_proto_handle(GCHandle shape_handle) {
 void gc_shape_set_proto_handle(GCHandle shape_handle, GCHandle val) {
     JSShapeHandle sh(shape_handle);
     if (sh.valid()) {
-        sh.set_proto_handle(val);
+        sh.proto_handle_atomic_store(val);
     }
+}
+
+static inline GCHandle js_shape_get_proto_handle_atomic(JSShapeHandle sh)
+{
+    return sh.proto_handle_atomic_load();
+}
+
+static inline GCHandle js_object_get_proto_handle_atomic(JSObjectHandle obj)
+{
+    JSShapeHandle sh = GC_SHAPE_DEREF(obj.shape_handle());
+    return js_shape_get_proto_handle_atomic(sh);
 }
 
 /* JSObject boolean checks */
@@ -958,6 +969,10 @@ static GCValue js_c_function_data_call(JSContextHandle ctx, GCValue func_obj,
                                        GCValue this_val,
                                        int argc, GCValue *argv, int flags);
 static JSAtom js_symbol_to_atom(JSContextHandle ctx, GCValue val);
+
+/* Forward declarations for atomic prototype helpers */
+static inline GCHandle js_shape_get_proto_handle_atomic(JSShapeHandle sh);
+static inline GCHandle js_object_get_proto_handle_atomic(JSObjectHandle obj);
 static void add_gc_object(JSRuntimeHandle rt, GCHeader *h,
                           JSGCObjectTypeEnum type);
 
@@ -2164,7 +2179,7 @@ GCValue JS_GetClassProto(JSContextHandle ctx, JSClassID class_id)
 {
     JSRuntimeHandle rt = ctx_rt;
     assert(class_id < rt.class_count());
-    return ctx_class_proto[class_id];
+    return js_ctx_class_proto_get(ctx, class_id);
 }
 
 typedef enum JSFreeModuleEnum {
@@ -2231,7 +2246,7 @@ static void JS_MarkContext(JSRuntimeHandle rt, JSContextHandle ctx,
     }
     QJS_LOGI("JS_MarkContext: ctx_class_proto=%p", (void*)ctx_class_proto);
     for(i = 0; i < rt.class_count(); i++) {
-        GCValue val = ctx_class_proto[i];
+        GCValue val = js_ctx_class_proto_get(ctx, i);
         int tag = JS_VALUE_GET_TAG(val);
         QJS_LOGI("JS_MarkContext: class_proto[%d] tag=%u", i, (unsigned)tag);
         if (tag == JS_TAG_OBJECT) {
@@ -3718,9 +3733,12 @@ static int JS_NewClass1(JSRuntimeHandle rt, JSClassID class_id,
         return -1;
 
     rt.class_array_lock_acquire();
+    rt.class_array_version_fetch_add(1); /* odd: update in progress */
 
+    JSClass *class_array = (JSClass*)gc_deref(rt.class_array_handle());
     if (class_id < rt.class_count() &&
-        ((JSClass*)rt_class_array)[class_id].class_id != 0) {
+        class_array[class_id].class_id != 0) {
+        rt.class_array_version_fetch_add(1); /* even: abort */
         rt.class_array_lock_release();
         return -1;
     }
@@ -3740,9 +3758,13 @@ static int JS_NewClass1(JSRuntimeHandle rt, JSClassID class_id,
             auto *data = (decltype(ctx_iter_data)*)user_data;
             JSContextHandle ctx(handle);
             if (!ctx) return;
+            ctx.class_proto_lock_acquire();
+            ctx.class_proto_version_fetch_add(1); /* odd */
             GCHandle new_tab_handle = gc_realloc(ctx.class_proto_handle(),
                                     sizeof(GCValue) * data->new_size);
             if (new_tab_handle == GC_HANDLE_NULL) {
+                ctx.class_proto_version_fetch_add(1); /* even */
+                ctx.class_proto_lock_release();
                 data->result = -1;
                 return;
             }
@@ -3750,10 +3772,13 @@ static int JS_NewClass1(JSRuntimeHandle rt, JSClassID class_id,
             for(int i = data->class_count; i < data->new_size; i++)
                 new_tab[i] = JS_NULL;
             ctx.set_class_proto_handle(new_tab_handle);
+            ctx.class_proto_version_fetch_add(1); /* even */
+            ctx.class_proto_lock_release();
         };
         
         gc_for_each_object_of_type(JS_GC_OBJ_TYPE_JS_CONTEXT, ctx_resize_callback, &ctx_iter_data);
         if (ctx_iter_data.result < 0) {
+            rt.class_array_version_fetch_add(1); /* even: abort */
             rt.class_array_lock_release();
             return -1;
         }
@@ -3761,6 +3786,7 @@ static int JS_NewClass1(JSRuntimeHandle rt, JSClassID class_id,
         GCHandle new_class_array_handle = gc_realloc(rt.class_array_handle(),
                                         sizeof(JSClass) * new_size);
         if (new_class_array_handle == GC_HANDLE_NULL) {
+            rt.class_array_version_fetch_add(1); /* even: abort */
             rt.class_array_lock_release();
             return -1;
         }
@@ -3769,14 +3795,16 @@ static int JS_NewClass1(JSRuntimeHandle rt, JSClassID class_id,
                (new_size - rt.class_count()) * sizeof(JSClass));
         rt.set_class_array_handle(new_class_array_handle);
         rt.set_class_count(new_size);
+        class_array = new_class_array;
     }
-    cl = &((JSClass*)rt_class_array)[class_id];
+    cl = &class_array[class_id];
     cl->class_id = class_id;
     cl->class_name = JS_DupAtomRT(rt, name);
     cl->finalizer = class_def->finalizer;
     cl->gc_mark = class_def->gc_mark;
     cl->call = class_def->call;
     cl->exotic = class_def->exotic;
+    rt.class_array_version_fetch_add(1); /* even */
     rt.class_array_lock_release();
     return 0;
 }
@@ -5242,6 +5270,7 @@ static JSShapeHandle js_new_shape_nohash(JSContextHandle ctx, JSObjectHandle pro
     QJS_LOGI("js_new_shape_nohash: sh=%u", sh.handle());
     /* Store handle in shape for later retrieval */
     sh.set_shape_handle(sh_handle);
+    sh.set_proto_version(0);            /* even: stable */
     /* Object already registered with GC by gc_alloc_js_object */
     sh.set_proto_handle(proto_handle);  /* Use saved handle */
     /* CRITICAL FIX: Initialize property array to zero (contains JSShapeProperty structs).
@@ -7161,9 +7190,10 @@ extern "C" void mark_children(JSRuntimeHandle rt, GCHandle handle,
             JSShapeHandle sh = JSShapeHandle(handle);
             JSShapeProperty *prs;
             int i;
-            QJS_LOGI("mark_children: SHAPE sh=%u, proto_handle=%u, prop_count=%d", sh.handle(), sh.proto_handle(), sh.prop_count());
-            if (sh.proto_handle() != GC_HANDLE_NULL) {
-                GCValue proto_val = GC_MKHANDLE(JS_TAG_OBJECT, sh.proto_handle());
+            GCHandle shape_proto = sh.proto_handle_atomic_load();
+            QJS_LOGI("mark_children: SHAPE sh=%u, proto_handle=%u, prop_count=%d", sh.handle(), shape_proto, sh.prop_count());
+            if (shape_proto != GC_HANDLE_NULL) {
+                GCValue proto_val = GC_MKHANDLE(JS_TAG_OBJECT, shape_proto);
                 JS_MarkValue(rt, proto_val, mark_func);
             }
             /* Mark atoms referenced by this shape's properties.
@@ -8457,9 +8487,10 @@ static const char *get_prop_string(JSContextHandle ctx, GCValue obj, JSAtom prop
     if (!prs) {
         /* we look at one level in the prototype to handle the 'name'
            field of the Error objects */
-        if (GC_SHAPE_DEREF(p.shape_handle()).proto_handle() == GC_HANDLE_NULL)
+        GCHandle proto_handle = js_object_get_proto_handle_atomic(p);
+        if (proto_handle == GC_HANDLE_NULL)
             return NULL;
-        p = JSObjectHandle(GC_SHAPE_DEREF(p.shape_handle()).proto_handle());
+        p = JSObjectHandle(proto_handle);
         if (!p)
             return NULL;
         prs = find_own_property(&pr, p, prop);
@@ -8900,21 +8931,16 @@ static int JS_SetPrototypeInternal(JSContextHandle ctx, GCValue obj,
                 }
             }
             /* Note: for Proxy objects, proto is NULL */
-            JSShapeHandle p1_sh = GC_SHAPE_DEREF(p1.shape_handle());
-            if (!p1_sh || p1_sh.proto_handle() == GC_HANDLE_NULL) break;
-            p1 = JSObjectHandle(p1_sh.proto_handle());
+            GCHandle p1_proto = js_object_get_proto_handle_atomic(p1);
+            if (p1_proto == GC_HANDLE_NULL) break;
+            p1 = JSObjectHandle(p1_proto);
         } while (p1);
     }
 
     if (js_shape_prepare_update(ctx, p, NULL))
         return -1;
     sh = GC_SHAPE_DEREF(p.shape_handle());
-    if (sh.proto_handle() != GC_HANDLE_NULL)
-        ;
-    sh.set_proto_handle((proto ? proto.handle() : GC_HANDLE_NULL));
-    if (proto) {
-        gc_write_barrier(p.shape_handle(), proto.handle());
-    }
+    sh.proto_handle_atomic_store(proto ? proto.handle() : GC_HANDLE_NULL);
     p.set_is_std_array_prototype(FALSE); 
     return TRUE;
 }
@@ -8931,21 +8957,21 @@ static GCValue JS_GetPrototypePrimitive(JSContextHandle ctx, GCValue val)
     switch(JS_VALUE_GET_NORM_TAG(val)) {
     case JS_TAG_SHORT_BIG_INT:
     case JS_TAG_BIG_INT:
-        val = ctx_class_proto[JS_CLASS_BIG_INT];
+        val = js_ctx_class_proto_get(ctx, JS_CLASS_BIG_INT);
         break;
     case JS_TAG_INT:
     case JS_TAG_FLOAT64:
-        val = ctx_class_proto[JS_CLASS_NUMBER];
+        val = js_ctx_class_proto_get(ctx, JS_CLASS_NUMBER);
         break;
     case JS_TAG_BOOL:
-        val = ctx_class_proto[JS_CLASS_BOOLEAN];
+        val = js_ctx_class_proto_get(ctx, JS_CLASS_BOOLEAN);
         break;
     case JS_TAG_STRING:
     case JS_TAG_STRING_ROPE:
-        val = ctx_class_proto[JS_CLASS_STRING];
+        val = js_ctx_class_proto_get(ctx, JS_CLASS_STRING);
         break;
     case JS_TAG_SYMBOL:
-        val = ctx_class_proto[JS_CLASS_SYMBOL];
+        val = js_ctx_class_proto_get(ctx, JS_CLASS_SYMBOL);
         break;
     case JS_TAG_OBJECT:
     case JS_TAG_NULL:
@@ -8970,10 +8996,11 @@ GCValue JS_GetPrototype(JSContextHandle ctx, GCValue obj)
                 return em->get_prototype(ctx, obj);
             }
         }
-        if (GC_SHAPE_DEREF(p.shape_handle()).proto_handle() == GC_HANDLE_NULL)
+        GCHandle proto_handle = js_object_get_proto_handle_atomic(p);
+        if (proto_handle == GC_HANDLE_NULL)
             val = JS_NULL;
         else
-            val = GC_MKHANDLE(JS_TAG_OBJECT, GC_SHAPE_DEREF(p.shape_handle()).proto_handle());
+            val = GC_MKHANDLE(JS_TAG_OBJECT, proto_handle);
     } else {
         val = JS_GetPrototypePrimitive(ctx, obj);
     }
@@ -9019,10 +9046,11 @@ static int JS_OrdinaryIsInstanceOf(JSContextHandle ctx, GCValue val,
     proto = JS_VALUE_GET_OBJ(obj_proto);
     p = JS_VALUE_GET_OBJ(val);
     for(;;) {
-        if (GC_SHAPE_DEREF(p.shape_handle()).proto_handle() == GC_HANDLE_NULL) {
+        GCHandle proto_handle = js_object_get_proto_handle_atomic(p);
+        if (proto_handle == GC_HANDLE_NULL) {
             proto1 = JSObjectHandle();
         } else {
-            proto1 = JSObjectHandle(GC_SHAPE_DEREF(p.shape_handle()).proto_handle());
+            proto1 = JSObjectHandle(proto_handle);
         }
         if (!proto1) {
             /* slow case if exotic object in the prototype chain */
@@ -9935,9 +9963,10 @@ int JS_HasProperty(JSContextHandle ctx, GCValue obj, JSAtom prop)
                 return FALSE;
             }
         }
-        if (GC_SHAPE_DEREF(p.shape_handle()).proto_handle() == GC_HANDLE_NULL)
+        GCHandle proto_handle = js_object_get_proto_handle_atomic(p);
+        if (proto_handle == GC_HANDLE_NULL)
             break;
-        p = JSObjectHandle(GC_SHAPE_DEREF(p.shape_handle()).proto_handle());
+        p = JSObjectHandle(proto_handle);
         if (!p)
             break;
     }
@@ -10849,7 +10878,7 @@ int JS_SetPropertyInternal(JSContextHandle ctx, GCValue obj,
             QJS_LOGD("JS_SetPropertyInternal: ERROR - p1.shape_handle dereferences to NULL!");
             break;
         }
-        p1 = JSObjectHandle(sh_p1.proto_handle());
+        p1 = JSObjectHandle(js_shape_get_proto_handle_atomic(sh_p1));
         QJS_LOGD("JS_SetPropertyInternal: got proto p1=%u", p1.handle());
     prototype_lookup:
         if (!p1)
@@ -10971,7 +11000,7 @@ static force_inline BOOL can_extend_fast_array(JSObjectHandle p)
     JSObjectHandle proto;
     if (!p.extensible())
         return FALSE;
-    GCHandle proto_handle = GC_SHAPE_DEREF(p.shape_handle()).proto_handle();
+    GCHandle proto_handle = js_object_get_proto_handle_atomic(p);
     if (proto_handle == GC_HANDLE_NULL)
         return TRUE;
     proto = JSObjectHandle(proto_handle);
@@ -20965,11 +20994,12 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                             obj = GC_MKHANDLE(JS_TAG_OBJECT, p.handle());           \
                             goto name ## _slow_path;                    \
                         }                                               \
-                        if (GC_SHAPE_DEREF(p.shape_handle()).proto_handle() == GC_HANDLE_NULL) { \
+                        GCHandle proto_handle = js_object_get_proto_handle_atomic(p); \
+                        if (proto_handle == GC_HANDLE_NULL) {        \
                             val = JS_UNDEFINED;                         \
                             break;                                      \
                         }                                                   \
-                        p = JSObjectHandle(GC_SHAPE_DEREF(p.shape_handle()).proto_handle());           \
+                        p = JSObjectHandle(proto_handle);                \
                         if (!p) {                                       \
                             val = JS_UNDEFINED;                         \
                             break;                                      \
@@ -52890,9 +52920,10 @@ static JSShapeProperty *find_property_regexp(JSProperty **ppr,
         prs = find_own_property(ppr, p, atom);
         if (prs)
             return prs;
-        if (GC_SHAPE_DEREF(p.shape_handle()).proto_handle() == GC_HANDLE_NULL)
+        GCHandle proto_handle = js_object_get_proto_handle_atomic(p);
+        if (proto_handle == GC_HANDLE_NULL)
             return NULL;
-        p = JSObjectHandle(GC_SHAPE_DEREF(p.shape_handle()).proto_handle());
+        p = JSObjectHandle(proto_handle);
         if (!p)
             return NULL;
         if (p.is_exotic())
@@ -64946,4 +64977,43 @@ extern "C" GCValue js_object_get_property_value_atomic(JSContextHandle ctx, GCHa
         if (p.prop_version() == v0)
             return result;
     }
+}
+
+/* Atomic load of a context class-prototype entry.  The context prototype array
+   is immutable after init except during rare class registration, so readers
+   use an odd/even version check to avoid observing a torn GCValue. */
+extern "C" GCValue js_ctx_class_proto_get(JSContextHandle ctx, JSClassID class_id)
+{
+    for (;;) {
+        uint32_t v0 = ctx.class_proto_version();
+        if ((v0 & 1) != 0)
+            continue;
+        GCValue *tab = ctx.class_proto_ptr();
+        if (!tab || class_id >= (JSClassID)ctx_rt.class_count())
+            return JS_NULL;
+        uint64_t low = 0, high = 0;
+        atomic_load_128((volatile uint64_t *)&tab[class_id], &low, &high);
+        GCValue val = raw_to_gcvalue(low, high);
+        if (ctx.class_proto_version() == v0)
+            return val;
+    }
+}
+
+/* Atomic store of a context class-prototype entry.  Called during context init
+   and when JS_NewClass1 resizes the per-context prototype table. */
+extern "C" void js_ctx_class_proto_set(JSContextHandle ctx, JSClassID class_id, GCValue val)
+{
+    ctx.class_proto_lock_acquire();
+    ctx.class_proto_version_fetch_add(1); /* odd */
+    GCValue *tab = ctx.class_proto_ptr();
+    if (tab && class_id < (JSClassID)ctx_rt.class_count()) {
+        uint64_t low, high;
+        gcvalue_to_raw(val, &low, &high);
+        atomic_store_128((volatile uint64_t *)&tab[class_id], low, high);
+        GCHandle target = GC_VALUE_GET_HANDLE(val);
+        if (target != GC_HANDLE_NULL)
+            gc_write_barrier_for_heap_slot(&tab[class_id], target);
+    }
+    ctx.class_proto_version_fetch_add(1); /* even */
+    ctx.class_proto_lock_release();
 }

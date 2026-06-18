@@ -376,6 +376,10 @@ void gc_obj_set_prop_handle(GCHandle obj_handle, GCHandle val);
 GCHandle gc_shape_get_proto_handle(GCHandle shape_handle);
 void gc_shape_set_proto_handle(GCHandle shape_handle, GCHandle val);
 
+/* Atomic context class-prototype accessors - defined in quickjs.c */
+GCValue js_ctx_class_proto_get(JSContextHandle ctx, JSClassID class_id);
+void js_ctx_class_proto_set(JSContextHandle ctx, JSClassID class_id, GCValue val);
+
 /*
  * GC_FIELD_GET_PTR - Get a non-GC pointer field from a GC-managed object.
  * This is for data pointers (like byte_code_buf), not GC object pointers.
@@ -1767,6 +1771,7 @@ struct JSShape {
     int prop_size; /* allocated properties */
     int prop_count; /* include deleted properties */
     int deleted_prop_count;
+    uint32_t proto_version;       /* even = stable, odd = prototype update */
     GCHandle proto_handle; /* Handle to prototype object (GC_HANDLE_NULL if none) */
     GCHandle handle; /* Handle to this shape */
     JSShapeProperty prop[]; /* prop_size elements - C99 flexible array member */
@@ -2037,6 +2042,38 @@ public:
             p->proto_handle = val;
             gc_write_barrier_for_heap_slot(&p->proto_handle, val);
         }
+    }
+
+    /* Atomic prototype handle access for lock-free prototype reads/writes. */
+    GCHandle proto_handle_atomic_load() const {
+        JSShape* p = get_ptr();
+        if (!p) return GC_HANDLE_NULL;
+        for (;;) {
+            uint32_t v0 = atomic_load_u32((volatile uint32_t *)&p->proto_version);
+            if ((v0 & 1) != 0) continue;
+            GCHandle h = atomic_load_u32((volatile uint32_t *)&p->proto_handle);
+            if (atomic_load_u32((volatile uint32_t *)&p->proto_version) == v0)
+                return h;
+        }
+    }
+
+    void proto_handle_atomic_store(GCHandle val) {
+        JSShape* p = get_ptr();
+        if (!p) return;
+        atomic_fetch_add_u32((volatile uint32_t *)&p->proto_version, 1); /* odd */
+        atomic_store_u32((volatile uint32_t *)&p->proto_handle, val);
+        gc_write_barrier_for_heap_slot(&p->proto_handle, val);
+        atomic_fetch_add_u32((volatile uint32_t *)&p->proto_version, 1); /* even */
+    }
+
+    uint32_t proto_version() const {
+        JSShape* p = get_ptr();
+        return p ? atomic_load_u32((volatile uint32_t *)&p->proto_version) : 0;
+    }
+
+    void set_proto_version(uint32_t val) {
+        JSShape* p = get_ptr();
+        if (p) atomic_store_u32((volatile uint32_t *)&p->proto_version, val);
     }
     
     /* handle access - returns the handle stored in the shape itself */

@@ -1270,6 +1270,8 @@ struct JSContext {
     GCHandle regexp_result_shape_handle;  /* handle to shape for regexp result objects */
 
     GCHandle class_proto_handle;  /* Handle to GCValue array */
+    uint32_t class_proto_version; /* even = stable, odd = updating */
+    uint32_t class_proto_lock;    /* spinlock for context proto array writes */
     GCValue function_proto;
     GCValue function_ctor;
     GCValue array_ctor;
@@ -1323,6 +1325,7 @@ struct JSRuntime {
     int class_count;    /* size of class_array (treated atomically) */
     GCHandle class_array_handle;  /* Handle to JSClass array (atomic load) */
     uint32_t class_array_lock;    /* spinlock for class registration */
+    uint32_t class_array_version; /* even = stable, odd = updating */
 
     /* Job queue - ring buffer for O(1) push/pop operations */
     GCHandleRingBuffer job_queue;

@@ -513,15 +513,15 @@ lock-free.  Nearly all higher-level shared state is unprotected:
 | 4 | **Property-array allocator** — per-object versioning, atomic slot CAS, pre-sized arrays; GC allocator now returns 16-byte aligned user data | Done |
 | 5 | **Shape hash table** — lock-free open-addressing handle table | **Done** (`LFHashTable` integrated into QuickJS; immutable hashed shapes; CAS resize; retired-table reclamation; sharing + resize + GC cleanup tests passing) |
 | 6 | **Atom cache / atom hash** — lock-free atom hash table + atomic class ID | **Done** (`LFHashTable` replaced the chained `rt_atom_hash[]`; `LFHashTable` content-equality lookup by string hash/content; CAS resize with retired-table reclamation; `JS_NewClassID` uses atomic fetch-add; class registration uses a runtime spinlock; interning/resize/GC cleanup/class-ID tests passing) |
-| 7 | **Class array / prototypes** — freeze after init; atomic handle loads | Not started |
+| 7 | **Class array / prototypes** — freeze after init; atomic handle loads | **Done** (`JSRuntime.class_array_handle` is an RCU-style immutable snapshot with odd/even versioning; `JSContext.class_proto_handle` entries are read/written with 128-bit atomic load/store + per-context versioning; `JSShape.proto_handle` uses odd/even version + atomic load/store, and all prototype-chain readers/writers use the atomic accessors) |
 | 8 | **Job queue** — lock-free ring buffer | Not started |
 | 9 | **GC free list / type buckets** — **Done** (`Treiber stack` free list + lock-free append-only type buckets; atomic pointer CAS added) |
 | 10 | **Move CSS inline-style parsing and stylesheet matching into workers**, keep JS-object writes serial | Not started |
 
-Phases 1, 2, 3, 4, 5, 6 and 9 are complete.  These provide the foundational building
+Phases 1, 2, 3, 4, 5, 6, 7 and 9 are complete.  These provide the foundational building
 blocks (publication state, lock-free containers, thread-safe property-array
 allocator, thread-safe shape cache, thread-safe atom cache, atomic class IDs,
-thread-safe allocation metadata)
+immutable class array + atomic prototypes, thread-safe allocation metadata)
 for the remaining QuickJS core changes.
 
 ### 7.4 Grey-state integration points
