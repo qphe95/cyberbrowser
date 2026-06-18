@@ -1802,6 +1802,10 @@ struct JSObject {
     /* count the number of weak references to this object. The object
        structure is freed only if weakref_count = 0 */
     uint32_t weakref_count;
+    /* atomic version counter for lock-free property-array resizes.
+       Odd = resize in progress, even = stable. */
+    uint32_t prop_version;
+    GCSpinLock prop_lock;  /* protects property-array resizes and slot writes */
     GCHandle shape_handle; /* Handle to shape (prototype and property names + flag) */
     GCHandle prop_handle; /* Handle to prop array */
     union {
@@ -2666,34 +2670,74 @@ public:
         if (p) p->class_id = id;
     }
     
-    /* shape_handle access */
+    /* shape_handle access (atomic load/store for thread-safe transitions) */
     GCHandle shape_handle() const {
-        JSObject* p = get_ptr();
-        return p ? p->shape_handle : GC_HANDLE_NULL;
+        if (handle_ == GC_HANDLE_NULL) return GC_HANDLE_NULL;
+        JSObject* ptr = (JSObject*)gc_deref(handle_);
+        if (!ptr) return GC_HANDLE_NULL;
+        return atomic_load_u32((volatile uint32_t *)&ptr->shape_handle);
     }
     
     void set_shape_handle(GCHandle shape) {
         JSObject* p = get_ptr();
         if (p) {
-            p->shape_handle = shape;
+            atomic_store_u32((volatile uint32_t *)&p->shape_handle, shape);
             gc_write_barrier_for_heap_slot(&p->shape_handle, shape);
         }
     }
     
-    /* prop_handle access */
+    /* prop_handle access (atomic load/store for lock-free resizes) */
     GCHandle prop_handle() const {
         if (handle_ == GC_HANDLE_NULL) return GC_HANDLE_NULL;
         JSObject* ptr = (JSObject*)gc_deref(handle_);
         if (!ptr) return GC_HANDLE_NULL;
-        return ptr->prop_handle;
+        return atomic_load_u32((volatile uint32_t *)&ptr->prop_handle);
     }
     
     void set_prop_handle(GCHandle prop) {
         JSObject* p = get_ptr();
         if (p) {
-            p->prop_handle = prop;
+            atomic_store_u32((volatile uint32_t *)&p->prop_handle, prop);
             gc_write_barrier_for_heap_slot(&p->prop_handle, prop);
         }
+    }
+    
+    /* prop_version access (atomic, for lock-free property-array resizes) */
+    uint32_t prop_version() const {
+        if (handle_ == GC_HANDLE_NULL) return 0;
+        JSObject* ptr = (JSObject*)gc_deref(handle_);
+        if (!ptr) return 0;
+        return atomic_load_u32((volatile uint32_t *)&ptr->prop_version);
+    }
+    
+    void set_prop_version(uint32_t v) {
+        JSObject* p = get_ptr();
+        if (p) {
+            atomic_store_u32((volatile uint32_t *)&p->prop_version, v);
+        }
+    }
+    
+    uint32_t prop_version_fetch_add(uint32_t delta) {
+        JSObject* p = get_ptr();
+        if (p) {
+            return atomic_fetch_add_u32((volatile uint32_t *)&p->prop_version, delta);
+        }
+        return 0;
+    }
+    
+    void prop_lock_init() {
+        JSObject* p = get_ptr();
+        if (p) p->prop_lock.lock = 0;
+    }
+    
+    void prop_lock_acquire() {
+        JSObject* p = get_ptr();
+        if (p) gc_spinlock_acquire(&p->prop_lock);
+    }
+    
+    void prop_lock_release() {
+        JSObject* p = get_ptr();
+        if (p) gc_spinlock_release(&p->prop_lock);
     }
     
     /* prop_ptr - returns raw pointer to JSProperty array (use with caution) */

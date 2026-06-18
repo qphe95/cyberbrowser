@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <pthread.h>
 
 #include "test_runner.h"
 #include "quickjs.h"
@@ -1357,6 +1358,107 @@ TEST(test_atom_hash_gc_cleanup) {
     return true;
 }
 
+static GCValue int32_value(int32_t v) {
+    GCValue r;
+    r.tag = JS_TAG_INT;
+    r.u.int32 = v;
+    return r;
+}
+
+TEST(test_property_array_prealloc) {
+    JSContextHandle ctx = get_test_ctx();
+    GCValue obj_val = JS_NewObject(ctx);
+    ASSERT_TRUE(JS_IsObject(obj_val));
+    JSObjectHandle obj = JS_VALUE_GET_OBJ_HANDLE(obj_val);
+    ASSERT_TRUE(obj.valid());
+
+    /* Version starts stable (even). */
+    uint32_t v0 = obj.prop_version();
+    ASSERT_TRUE((v0 & 1) == 0);
+
+    ASSERT_TRUE(js_object_prealloc_properties(ctx, obj.handle(), 16));
+
+    /* After pre-sizing the version is still stable. */
+    uint32_t v1 = obj.prop_version();
+    ASSERT_TRUE((v1 & 1) == 0);
+
+    JSShapeHandle sh(obj.shape_handle());
+    ASSERT_TRUE(sh.valid());
+    ASSERT_TRUE(sh.prop_size() >= 16);
+
+    GCValue val = int32_value(42);
+    ASSERT_TRUE(js_object_set_property_value_atomic(ctx, obj.handle(), 0, val));
+    GCValue got = js_object_get_property_value_atomic(ctx, obj.handle(), 0);
+    ASSERT_TRUE(JS_IsNumber(got));
+    ASSERT_EQ(JS_VALUE_GET_INT(got), 42);
+    return true;
+}
+
+typedef struct PropArrayThreadArgs {
+    JSContextHandle ctx;
+    GCHandle obj;
+    int iters;
+} PropArrayThreadArgs;
+
+static void *prop_array_cas_worker(void *arg)
+{
+    PropArrayThreadArgs *a = (PropArrayThreadArgs *)arg;
+    for (int i = 0; i < a->iters; i++) {
+        for (;;) {
+            GCValue cur = js_object_get_property_value_atomic(a->ctx, a->obj, 0);
+            int cur_i = JS_VALUE_GET_INT(cur);
+            GCValue next = int32_value(cur_i + 1);
+            GCValue actual;
+            if (js_object_cas_property_value_atomic(a->ctx, a->obj, 0,
+                                                    cur, next, &actual))
+                break;
+        }
+    }
+    return NULL;
+}
+
+TEST(test_property_array_atomic_cas) {
+    JSContextHandle ctx = get_test_ctx();
+    GCValue obj_val = JS_NewObject(ctx);
+    ASSERT_TRUE(JS_IsObject(obj_val));
+    JSObjectHandle obj = JS_VALUE_GET_OBJ_HANDLE(obj_val);
+    ASSERT_TRUE(obj.valid());
+    ASSERT_TRUE(js_object_prealloc_properties(ctx, obj.handle(), 16));
+
+    /* Keep the object and its property array alive and prevent GC from being
+     * triggered by allocations during the threaded portion of the test. */
+    gc_add_root(obj.handle());
+    GCHandle prop_handle = obj.prop_handle();
+    gc_add_root(prop_handle);
+
+    size_t saved_threshold = g_gc.gc_threshold;
+    g_gc.gc_threshold = (size_t)-1;
+
+    const int iters = 500;
+    const int nthreads = 4;
+    pthread_t threads[nthreads];
+    PropArrayThreadArgs args[nthreads];
+
+    for (int i = 0; i < nthreads; i++) {
+        args[i].ctx = ctx;
+        args[i].obj = obj.handle();
+        args[i].iters = iters;
+        pthread_create(&threads[i], NULL, prop_array_cas_worker, &args[i]);
+    }
+    for (int i = 0; i < nthreads; i++) {
+        pthread_join(threads[i], NULL);
+    }
+
+    g_gc.gc_threshold = saved_threshold;
+
+    GCValue final_val = js_object_get_property_value_atomic(ctx, obj.handle(), 0);
+    ASSERT_EQ(JS_VALUE_GET_INT(final_val), nthreads * iters);
+
+    gc_remove_root(prop_handle);
+    gc_remove_root(obj.handle());
+    return true;
+}
+
 TEST(test_class_id_atomic) {
     JSClassID id1 = 0, id2 = 0;
     JSClassID r1 = JS_NewClassID(&id1);
@@ -1435,6 +1537,8 @@ extern "C" void run_gc_unified_tests(void) {
     RUN_TEST(test_atom_hash_resize);
     RUN_TEST(test_atom_hash_gc_cleanup);
     RUN_TEST(test_class_id_atomic);
+    RUN_TEST(test_property_array_prealloc);
+    RUN_TEST(test_property_array_atomic_cas);
 
     /* Run QuickJS integration tests using shared context */
     printf("\n  QuickJS integration tests use shared context from test_main.cpp\n");

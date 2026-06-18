@@ -59,6 +59,22 @@ static inline uint32_t atomic_fetch_sub_u32(volatile uint32_t *p, uint32_t val) 
 static inline uint32_t atomic_compare_exchange_u32(volatile uint32_t *p, uint32_t expected, uint32_t desired) {
     return (uint32_t)_InterlockedCompareExchange((volatile long *)p, (long)desired, (long)expected);
 }
+static inline uint64_t atomic_load_u64(volatile uint64_t *p) {
+    uint64_t val = *p;
+    _ReadWriteBarrier();
+    return val;
+}
+static inline void atomic_store_u64(volatile uint64_t *p, uint64_t val) {
+    _ReadWriteBarrier();
+    *p = val;
+    _ReadWriteBarrier();
+}
+static inline uint64_t atomic_fetch_add_u64(volatile uint64_t *p, uint64_t val) {
+    return (uint64_t)_InterlockedExchangeAdd64((volatile __int64 *)p, (__int64)val);
+}
+static inline uint64_t atomic_compare_exchange_u64(volatile uint64_t *p, uint64_t expected, uint64_t desired) {
+    return (uint64_t)_InterlockedCompareExchange64((volatile __int64 *)p, (__int64)desired, (__int64)expected);
+}
 #else
 /* POSIX fallback - still uses volatile with compiler barriers */
 static inline uint32_t atomic_load_u32(volatile uint32_t *p) {
@@ -96,7 +112,24 @@ static inline uint32_t atomic_fetch_sub_u32(volatile uint32_t *p, uint32_t val) 
 static inline uint32_t atomic_compare_exchange_u32(volatile uint32_t *p, uint32_t expected, uint32_t desired) {
     return __sync_val_compare_and_swap(p, expected, desired);
 }
+static inline uint64_t atomic_load_u64(volatile uint64_t *p) {
+    uint64_t val = *p;
+    __sync_synchronize();
+    return val;
+}
+static inline void atomic_store_u64(volatile uint64_t *p, uint64_t val) {
+    __sync_synchronize();
+    *p = val;
+    __sync_synchronize();
+}
+static inline uint64_t atomic_fetch_add_u64(volatile uint64_t *p, uint64_t val) {
+    return __sync_fetch_and_add(p, val);
+}
+static inline uint64_t atomic_compare_exchange_u64(volatile uint64_t *p, uint64_t expected, uint64_t desired) {
+    return __sync_val_compare_and_swap(p, expected, desired);
+}
 #endif
+
 
 /* Simple spinlock used for coarse-grained thread safety (e.g. type buckets) */
 typedef struct GCSpinLock {
@@ -838,6 +871,19 @@ static inline bool gc_list_empty_from_container(GCHandle container, size_t list_
 /* Get the struct containing this list entry */
 #define gc_list_entry(handle, type, member) \
     ((handle) == GC_HANDLE_NULL ? NULL : (type *)((uint8_t*)gc_deref(handle) - offsetof(type, member)))
+
+/* ============================================================================
+ * Lock-free property-array allocator API
+ * ============================================================================ */
+bool js_object_prealloc_properties(JSContextHandle ctx, GCHandle obj_handle, uint32_t min_count);
+uint32_t js_object_prop_version_load(GCHandle obj_handle);
+bool js_object_set_property_value_atomic(JSContextHandle ctx, GCHandle obj_handle,
+                                         uint32_t prop_idx, GCValue val);
+bool js_object_cas_property_value_atomic(JSContextHandle ctx, GCHandle obj_handle,
+                                         uint32_t prop_idx, GCValue expected,
+                                         GCValue desired, GCValue *out_actual);
+GCValue js_object_get_property_value_atomic(JSContextHandle ctx, GCHandle obj_handle,
+                                            uint32_t prop_idx);
 
 #ifdef __cplusplus
 }

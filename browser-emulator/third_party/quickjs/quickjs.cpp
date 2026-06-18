@@ -5457,6 +5457,9 @@ static void js_free_shape_null(JSRuntimeHandle rt, JSShapeHandle sh)
 }
 
 /* make space to hold at least 'count' properties */
+static inline void js_object_begin_resize(JSObjectHandle p);
+static inline void js_object_end_resize(JSObjectHandle p);
+
 static no_inline int resize_properties(JSContextHandle ctx, GCHandle *psh_handle,
                                        JSObjectHandle p, uint32_t count)
 {
@@ -5467,6 +5470,8 @@ static no_inline int resize_properties(JSContextHandle ctx, GCHandle *psh_handle
     intptr_t h;
     GCHandle sh_handle;
 
+    js_object_begin_resize(p);
+
     sh = GC_SHAPE_DEREF(*psh_handle);
     sh_handle = *psh_handle;
     new_size = max_int(count, sh.prop_size() * 3 / 2);
@@ -5474,8 +5479,10 @@ static no_inline int resize_properties(JSContextHandle ctx, GCHandle *psh_handle
        in case of memory allocation failure */
     if (p) {
         GCHandle new_prop_handle = gc_realloc(p.prop_handle(), sizeof(JSProperty) * new_size);
-        if (unlikely(new_prop_handle == GC_HANDLE_NULL))
+        if (unlikely(new_prop_handle == GC_HANDLE_NULL)) {
+            js_object_end_resize(p);
             return -1;
+        }
         p.set_prop_handle(new_prop_handle);
     }
     new_hash_size = sh.prop_hash_mask() + 1;
@@ -5485,8 +5492,10 @@ static no_inline int resize_properties(JSContextHandle ctx, GCHandle *psh_handle
     /* CRITICAL: Use gc_realloc which preserves the handle.
      * The handle stays the same, only the memory location changes. */
     uint32_t old_hash_size = sh.prop_hash_mask() + 1;
-    if (gc_realloc(sh_handle, get_shape_size(new_hash_size, new_size)) == GC_HANDLE_NULL)
+    if (gc_realloc(sh_handle, get_shape_size(new_hash_size, new_size)) == GC_HANDLE_NULL) {
+        js_object_end_resize(p);
         return -1;
+    }
     
     /* After gc_realloc, the same handle points to new memory */
     /* The JSShapeHandle is still valid - no need to recreate it */
@@ -5527,7 +5536,59 @@ static no_inline int resize_properties(JSContextHandle ctx, GCHandle *psh_handle
             prop_hash_start(sh)[h] = i + 1;
         }
     }
+    js_object_end_resize(p);
     return 0;
+}
+
+/* Per-object property-array version helpers for lock-free resizes.
+ * Odd version = resize in progress; even = stable. */
+static inline void js_object_begin_resize(JSObjectHandle p) {
+    if (p)
+        p.prop_version_fetch_add(1);
+}
+
+static inline void js_object_end_resize(JSObjectHandle p) {
+    if (p)
+        p.prop_version_fetch_add(1);
+}
+
+/* Pre-size the property array for an object so that workers can write
+ * slots concurrently without triggering a resize.  The shape is cloned if
+ * it is shared/hashed, then resized to at least min_count. */
+static bool js_object_prealloc_properties(JSContextHandle ctx, JSObjectHandle p, uint32_t min_count)
+{
+    JSShapeHandle sh;
+    GCHandle sh_handle;
+
+    if (!p || min_count == 0)
+        return true;
+
+    sh = GC_SHAPE_DEREF(p.shape_handle());
+    if (!sh)
+        return false;
+
+    sh_handle = p.shape_handle();
+
+    /* Shared/hashed shapes must not be mutated; clone to a private shape. */
+    if (sh.is_hashed()) {
+        JSShapeHandle new_sh = js_clone_shape(ctx, sh);
+        if (!new_sh)
+            return false;
+        sh_handle = new_sh.handle();
+        sh = new_sh;
+    }
+
+    if (min_count > (uint32_t)sh.prop_size()) {
+        js_object_begin_resize(p);
+        if (resize_properties(ctx, &sh_handle, p, min_count)) {
+            js_object_end_resize(p);
+            return false;
+        }
+        js_object_end_resize(p);
+    }
+
+    p.set_shape_handle(sh_handle);
+    return true;
 }
 
 /* remove the deleted properties. */
@@ -5539,6 +5600,8 @@ static int compact_properties(JSContextHandle ctx, JSObjectHandle p)
     JSShapeProperty *old_pr, *pr;
     JSProperty *prop;
     GCHandle sh_handle;
+
+    js_object_begin_resize(p);
 
     sh = GC_SHAPE_DEREF(p.shape_handle());
     sh_handle = p.shape_handle();
@@ -5580,8 +5643,10 @@ static int compact_properties(JSContextHandle ctx, JSObjectHandle p)
 
     /* Now safe to reallocate: all live properties are in the first j slots
      * and j <= new_size, so gc_realloc's copy will not lose data. */
-    if (gc_realloc(sh_handle, get_shape_size(new_hash_size, new_size)) == GC_HANDLE_NULL)
+    if (gc_realloc(sh_handle, get_shape_size(new_hash_size, new_size)) == GC_HANDLE_NULL) {
+        js_object_end_resize(p);
         return -1;
+    }
 
     /* Re-dereference shape after realloc since memory may have moved */
     sh = GC_SHAPE_DEREF(sh_handle);
@@ -5604,6 +5669,7 @@ static int compact_properties(JSContextHandle ctx, JSObjectHandle p)
     if (new_prop_handle != GC_HANDLE_NULL) {
         p.set_prop_handle(new_prop_handle);
     }
+    js_object_end_resize(p);
     return 0;
 }
 
@@ -5840,6 +5906,8 @@ static GCValue JS_NewObjectFromShape(JSContextHandle ctx, JSShapeHandle sh, JSCl
     p.set_tmp_mark(0);
     p.set_is_HTMLDDA(0);
     p.set_weakref_count(0);
+    p.set_prop_version(2); /* start stable (even) */
+    p.prop_lock_init();
     p.set_opaque_handle(GC_HANDLE_NULL);
     /* Use sh.shape_handle() instead of sh.handle() because shapes are offset from alloc base */
     p.set_shape_handle(sh.shape_handle());
@@ -64744,3 +64812,129 @@ extern "C" void JSRuntime_for_each_context(JSRuntimeHandle rt, ContextIteratorFu
 
 /* GCValue conversion helper for JS_MarkValue bridge - not needed since we use GCValue directly */
 /* extern "C" void JS_MarkValue_bridge(JSRuntimeHandle rt, GCValue *val, JS_MarkFunc *mark_func); */
+
+/* ============================================================================
+ * Lock-free property-array allocator API
+ * ============================================================================
+ * These functions provide the versioning + atomic-slot-CAS machinery described
+ * in PARALLEL_CSS_APPLICATION.md.  They are safe for concurrent worker writes
+ * to the property slots of a single object, provided the object is pre-sized
+ * so that no resize occurs while workers are active.
+ */
+
+static inline JSProperty *js_object_get_prop_slot(JSObjectHandle p, uint32_t prop_idx)
+{
+    GCHandle ph = p.prop_handle();
+    JSPropertyArrayHandle arr(ph);
+    return arr.at(prop_idx);
+}
+
+extern "C" bool js_object_prealloc_properties(JSContextHandle ctx, GCHandle obj_handle, uint32_t min_count)
+{
+    return ::js_object_prealloc_properties(ctx, JSObjectHandle(obj_handle), min_count);
+}
+
+extern "C" uint32_t js_object_prop_version_load(GCHandle obj_handle)
+{
+    return JSObjectHandle(obj_handle).prop_version();
+}
+
+extern "C" bool js_object_set_property_value_atomic(JSContextHandle ctx, GCHandle obj_handle,
+                                                      uint32_t prop_idx, GCValue val)
+{
+    JSObjectHandle p(obj_handle);
+    if (!p)
+        return false;
+
+    for (;;) {
+        uint32_t v0 = p.prop_version();
+        if ((v0 & 1) != 0) {
+            /* resize in progress - spin */
+            continue;
+        }
+        p.prop_lock_acquire();
+        /* Re-check version under the lock; if a resize happened, release and retry. */
+        uint32_t v1 = p.prop_version();
+        if (v1 != v0) {
+            p.prop_lock_release();
+            continue;
+        }
+        JSProperty *slot = js_object_get_prop_slot(p, prop_idx);
+        if (!slot) {
+            p.prop_lock_release();
+            return false;
+        }
+        slot->u.value = val;
+        GCHandle target = GC_VALUE_GET_HANDLE(val);
+        if (target != GC_HANDLE_NULL)
+            gc_write_barrier_for_heap_slot(&slot->u.value, target);
+        p.prop_lock_release();
+        return true;
+    }
+}
+
+extern "C" bool js_object_cas_property_value_atomic(JSContextHandle ctx, GCHandle obj_handle,
+                                                      uint32_t prop_idx, GCValue expected,
+                                                      GCValue desired, GCValue *out_actual)
+{
+    JSObjectHandle p(obj_handle);
+    if (!p)
+        return false;
+
+    for (;;) {
+        uint32_t v0 = p.prop_version();
+        if ((v0 & 1) != 0) {
+            continue;
+        }
+        p.prop_lock_acquire();
+        uint32_t v1 = p.prop_version();
+        if (v1 != v0) {
+            p.prop_lock_release();
+            continue;
+        }
+        JSProperty *slot = js_object_get_prop_slot(p, prop_idx);
+        if (!slot) {
+            p.prop_lock_release();
+            return false;
+        }
+        GCValue actual = slot->u.value;
+        bool success = (actual.u.handle == expected.u.handle &&
+                        actual.tag == expected.tag);
+        if (success) {
+            slot->u.value = desired;
+            GCHandle target = GC_VALUE_GET_HANDLE(desired);
+            if (target != GC_HANDLE_NULL)
+                gc_write_barrier_for_heap_slot(&slot->u.value, target);
+        }
+        if (out_actual)
+            *out_actual = actual;
+        p.prop_lock_release();
+        return success;
+    }
+}
+
+extern "C" GCValue js_object_get_property_value_atomic(JSContextHandle ctx, GCHandle obj_handle,
+                                                         uint32_t prop_idx)
+{
+    JSObjectHandle p(obj_handle);
+    GCValue result = GC_UNDEFINED;
+    if (!p)
+        return result;
+
+    for (;;) {
+        uint32_t v0 = p.prop_version();
+        if ((v0 & 1) != 0)
+            continue;
+        p.prop_lock_acquire();
+        uint32_t v1 = p.prop_version();
+        if (v1 != v0) {
+            p.prop_lock_release();
+            continue;
+        }
+        JSProperty *slot = js_object_get_prop_slot(p, prop_idx);
+        if (slot)
+            result = slot->u.value;
+        p.prop_lock_release();
+        return result;
+    }
+}
