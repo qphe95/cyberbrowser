@@ -18,6 +18,14 @@
 #include <sched.h>
 #endif
 
+static inline void gc_thread_yield(void) {
+#ifdef _WIN32
+    Sleep(0);
+#else
+    sched_yield();
+#endif
+}
+
 /* 
  * Debug logging for GC - controlled via QJS_DEBUG environment variable
  * Set QJS_DEBUG=1 for info level, QJS_DEBUG=2 for verbose debug
@@ -1551,8 +1559,13 @@ static inline void push_free_handle(GCHandle handle) {
     if (handle == GC_HANDLE_NULL || handle >= g_gc.free_next_capacity) return;
     
     uint32_t old_head = atomic_load_u32(&g_gc.free_head);
+    int spin = 0;
     do {
         g_gc.free_next[handle] = old_head;
+        if (++spin >= 1000) {
+            spin = 0;
+            gc_thread_yield();
+        }
     } while (atomic_compare_exchange_u32(&g_gc.free_head, old_head, handle) != old_head);
     
     atomic_fetch_add_u32(&g_gc.free_count, 1);
@@ -1583,6 +1596,7 @@ static void write_handle_pointer(GCHandle handle, void *ptr) {
 static GCHandle allocate_handle_slot(void) {
     /* Fast path: lock-free pop from the handle free list (Treiber stack). */
     uint32_t old_head = atomic_load_u32(&g_gc.free_head);
+    int spin = 0;
     while (old_head != GC_HANDLE_NULL) {
         uint32_t new_head = g_gc.free_next[old_head];
         uint32_t swapped = atomic_compare_exchange_u32(&g_gc.free_head, old_head, new_head);
@@ -1595,6 +1609,10 @@ static GCHandle allocate_handle_slot(void) {
             return handle;
         }
         old_head = swapped;
+        if (++spin >= 1000) {
+            spin = 0;
+            gc_thread_yield();
+        }
     }
     
     /* Need to allocate a new slot - atomically increment handle_count */

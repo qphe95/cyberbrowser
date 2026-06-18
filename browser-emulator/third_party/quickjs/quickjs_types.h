@@ -823,25 +823,43 @@ public:
 };
 
 /* ============================================================================
- * LFJobQueue - Lock-free MPMC ring buffer for JS job entries
+ * JobBuffer - Flat array of pending JS job handles
  * ============================================================================
  *
- * Stores GCHandle values pointing to JSJobEntry objects.  head/tail are
- * monotonically increasing uint64_t counters; the slot index is masked by
- * (capacity - 1).  An empty slot is GC_HANDLE_NULL.
- *
- * Producers reserve a slot with atomic_fetch_add_u64(&tail, 1), spin until the
- * slot is GC_HANDLE_NULL, then CAS null -> handle.  Consumers reserve a slot
- * with atomic_fetch_add_u64(&head, 1), spin until the slot is non-null, load
- * it, then CAS it back to GC_HANDLE_NULL.
+ * Jobs are stored contiguously at indices [head, tail).  Indices below head
+ * are dead space (already consumed).  Indices at or above tail are unused.
+ * Buffers are linked into a short chain through `next`.  Each `next` pointer
+ * holds a reference to the following buffer.  The JobQueue wrapper that points
+ * to the chain is GC-managed.
  */
-typedef struct LFJobQueue {
-    uint64_t capacity;          /* power of two */
-    uint64_t mask;              /* capacity - 1 */
-    volatile uint64_t head;     /* next index to dequeue */
-    volatile uint64_t tail;     /* next index to enqueue */
-    GCHandle entries[0];        /* capacity slots */
-} LFJobQueue;
+typedef struct JobBuffer {
+    uint64_t                   capacity;      /* current size of jobs[] */
+    volatile uint64_t          head;          /* next dequeue index */
+    volatile uint64_t          tail;          /* next enqueue index */
+    volatile uint32_t          refcount;      /* queue refs + in-flight readers/writers + next link */
+    struct JobBuffer *volatile next;          /* next block in the chain, or NULL */
+    GCHandle                   jobs[0];       /* flat array of capacity slots */
+} JobBuffer;
+
+/* ============================================================================
+ * JobQueue - Lock-free MPMC job queue with chained blocks
+ * ============================================================================
+ *
+ * The queue is a short linked list of large flat-array blocks.  Producers write
+ * to tail_block; consumers read from head_block.  In steady state both pointers
+ * refer to the same block.  When the tail block is full or half consumed, a new
+ * larger block is allocated, linked after it, and published as tail_block.
+ * Consumers drain head_block and then advance head_block to the next block.
+ * An old block is freed once the queue and all in-flight readers have released
+ * it.
+ *
+ * Jobs are never copied between blocks: each pending job lives in exactly one
+ * block until it is consumed, so a job can never be executed twice.
+ */
+typedef struct JobQueue {
+    JobBuffer *volatile head_block;  /* block consumers read from */
+    JobBuffer *volatile tail_block;  /* block producers write to */
+} JobQueue;
 
 /* ============================================================================
  * GCHandleArray<T> - Malloc'd array wrapper for structures containing GC refs
@@ -1205,7 +1223,7 @@ struct JSRuntime {
     uint32_t class_array_lock;    /* spinlock for class registration */
     uint32_t class_array_version; /* even = stable, odd = updating */
 
-    /* Job queue - handle to lock-free MPMC ring buffer (LFJobQueue) */
+    /* Job queue - handle to lock-free compacting job queue (JobQueue) */
     GCHandle job_queue_handle;
     
     /* GC phase tracking */

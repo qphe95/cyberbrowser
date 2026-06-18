@@ -68,6 +68,15 @@ extern "C" {
 /* Include internal types header for shared struct definitions */
 #include "quickjs-internal.h"
 
+/* Cross-platform hint to yield the CPU inside lock-free spin loops. */
+#ifdef _WIN32
+#include <windows.h>
+static inline void js_thread_yield(void) { Sleep(0); }
+#else
+#include <sched.h>
+static inline void js_thread_yield(void) { sched_yield(); }
+#endif
+
 /* GC Shape Dereference - convert GCHandle to JSShapeHandle */
 #define GC_SHAPE_DEREF(handle) JSShapeHandle(handle)
 
@@ -974,14 +983,16 @@ static JSAtom js_symbol_to_atom(JSContextHandle ctx, GCValue val);
 static inline GCHandle js_shape_get_proto_handle_atomic(JSShapeHandle sh);
 static inline GCHandle js_object_get_proto_handle_atomic(JSObjectHandle obj);
 
-/* Forward declarations for lock-free job queue */
+/* Forward declarations for lock-free compacting job queue */
 #define JS_JOB_QUEUE_INITIAL_CAPACITY 64
-static GCHandle js_job_queue_create(JSRuntimeHandle rt, uint64_t capacity);
+#define JS_JOB_QUEUE_HEADROOM_FACTOR  3
+static JobQueue *js_job_queue_ptr(JSRuntimeHandle rt);
 static void js_job_queue_clear(JSRuntimeHandle rt);
 static uint64_t js_job_queue_count(JSRuntimeHandle rt);
 static BOOL js_job_queue_is_empty(JSRuntimeHandle rt);
 static BOOL js_job_queue_enqueue(JSRuntimeHandle rt, GCHandle job_handle);
 static GCHandle js_job_queue_dequeue(JSRuntimeHandle rt);
+
 static void add_gc_object(JSRuntimeHandle rt, GCHeader *h,
                           JSGCObjectTypeEnum type);
 
@@ -1634,57 +1645,113 @@ int JS_GetStripInfo(JSRuntimeHandle rt)
 }
 
 /* ============================================================================
- * Lock-free MPMC job queue
- * ============================================================================ */
+ * Lock-free MPMC compacting job queue
+ * ============================================================================
+ *
+ * A JobQueue holds two flat-array JobBuffer pointers: active (read) and
+ * new_alloc (write).  Producers always append to new_alloc; consumers always
+ * read from active.  When the write buffer is full or half consumed, a new
+ * buffer is allocated, the active jobs are copied to its front, and new_alloc
+ * is published.  New jobs go straight into the new buffer and are never copied.
+ * Consumers finish draining the old active buffer and then advance active to
+ * new_alloc.
+ */
 
-#define JS_JOB_QUEUE_INITIAL_CAPACITY 4096
-
-static inline LFJobQueue *js_job_queue_ptr(JSRuntimeHandle rt)
+static inline JobQueue *js_job_queue_ptr(JSRuntimeHandle rt)
 {
     GCHandle h = rt.job_queue_handle();
     if (h == GC_HANDLE_NULL) return NULL;
-    return (LFJobQueue *)gc_deref(h);
+    return (JobQueue *)gc_deref(h);
 }
 
-static GCHandle js_job_queue_create(JSRuntimeHandle rt, uint64_t capacity)
+static JobBuffer *job_buffer_alloc(uint64_t capacity);
+static void job_buffer_free(JobBuffer *b);
+static inline void acquire_buffer(JobBuffer *b);
+static inline void release_buffer(JobBuffer *b);
+
+static JobBuffer *job_buffer_alloc(uint64_t capacity)
 {
-    (void)rt;
-    if (capacity == 0 || (capacity & (capacity - 1)) != 0)
-        return GC_HANDLE_NULL;
-    size_t size = sizeof(LFJobQueue) + capacity * sizeof(GCHandle);
-    GCHandle h = gc_allocz(size, JS_GC_OBJ_TYPE_DATA);
-    if (h == GC_HANDLE_NULL)
-        return GC_HANDLE_NULL;
-    LFJobQueue *q = (LFJobQueue *)gc_deref(h);
-    q->capacity = capacity;
-    q->mask = capacity - 1;
-    q->head = 0;
-    q->tail = 0;
-    QJS_LOGE("js_job_queue_create: handle=%u capacity=%u size=%zu", h, (uint32_t)capacity, size);
-    return h;
+    size_t size = offsetof(JobBuffer, jobs) + capacity * sizeof(GCHandle);
+    JobBuffer *b = (JobBuffer *)qjs_realloc(NULL, size);
+    if (!b) return NULL;
+    memset(b, 0, size);
+    b->capacity = capacity;
+    b->refcount = 0;
+    return b;
+}
+
+static inline void acquire_buffer(JobBuffer *b)
+{
+    if (b) atomic_fetch_add_u32(&b->refcount, 1);
+}
+
+static inline void release_buffer(JobBuffer *b)
+{
+    if (!b) return;
+    if (atomic_fetch_sub_u32(&b->refcount, 1) == 1) {
+        job_buffer_free(b);
+    }
+}
+
+static void job_buffer_free(JobBuffer *b)
+{
+    if (!b) return;
+    /* When a block is freed, release the reference its next pointer held. */
+    JobBuffer *next = (JobBuffer *)atomic_load_ptr((void *volatile *)&b->next);
+    qjs_free(b);
+    release_buffer(next);
+}
+
+/* Atomically replace *ptr with desired, updating refcounts so the old target
+   is freed once the queue and all in-flight threads are done with it. */
+static BOOL rc_pointer_cas(JobBuffer *volatile *ptr,
+                           JobBuffer *expected,
+                           JobBuffer *desired)
+{
+    acquire_buffer(desired);
+    if (atomic_compare_exchange_ptr((void *volatile *)ptr,
+                                    (void *)expected,
+                                    (void *)desired)
+        == expected) {
+        release_buffer(expected);  /* queue drops its reference */
+        return TRUE;
+    }
+    release_buffer(desired);       /* undo the acquire */
+    return FALSE;
 }
 
 static void js_job_queue_clear(JSRuntimeHandle rt)
 {
-    LFJobQueue *q = js_job_queue_ptr(rt);
+    JobQueue *q = js_job_queue_ptr(rt);
     if (!q) return;
-    uint64_t head = atomic_load_u64(&q->head);
-    uint64_t tail = atomic_load_u64(&q->tail);
-    for (uint64_t i = head; i < tail; i++) {
-        uint64_t idx = i & q->mask;
-        atomic_store_u32((volatile uint32_t *)&q->entries[idx], GC_HANDLE_NULL);
+    JobBuffer *b = atomic_load_ptr((void *volatile *)&q->head_block);
+    while (b) {
+        JobBuffer *next = (JobBuffer *)atomic_load_ptr((void *volatile *)&b->next);
+        qjs_free(b);
+        b = next;
     }
-    atomic_store_u64(&q->head, 0);
-    atomic_store_u64(&q->tail, 0);
+    atomic_store_ptr((void *volatile *)&q->head_block, NULL);
+    atomic_store_ptr((void *volatile *)&q->tail_block, NULL);
 }
 
 static uint64_t js_job_queue_count(JSRuntimeHandle rt)
 {
-    LFJobQueue *q = js_job_queue_ptr(rt);
+    JobQueue *q = js_job_queue_ptr(rt);
     if (!q) return 0;
-    uint64_t head = atomic_load_u64(&q->head);
-    uint64_t tail = atomic_load_u64(&q->tail);
-    return (tail >= head) ? (tail - head) : 0;
+    uint64_t count = 0;
+    JobBuffer *b = atomic_load_ptr((void *volatile *)&q->head_block);
+    if (!b) return 0;
+    acquire_buffer(b);
+    while (b) {
+        uint64_t head = atomic_load_u64(&b->head);
+        uint64_t tail = atomic_load_u64(&b->tail);
+        count += (tail >= head) ? (tail - head) : 0;
+        JobBuffer *next = (JobBuffer *)atomic_load_ptr((void *volatile *)&b->next);
+        if (next) acquire_buffer(next);
+        release_buffer(b);
+        b = next;
+    }
+    return count;
 }
 
 static BOOL js_job_queue_is_empty(JSRuntimeHandle rt)
@@ -1692,80 +1759,158 @@ static BOOL js_job_queue_is_empty(JSRuntimeHandle rt)
     return js_job_queue_count(rt) == 0;
 }
 
-/* Lazily allocate the runtime job queue.  Safe for concurrent callers:
-   only one thread will successfully publish its queue handle. */
+/* Lazily allocate the runtime job queue. Safe for concurrent callers: only one
+   thread will successfully publish its queue handle. */
 static GCHandle js_job_queue_ensure(JSRuntimeHandle rt)
 {
     GCHandle h = rt.job_queue_handle();
     if (h != GC_HANDLE_NULL)
         return h;
 
-    GCHandle new_h = js_job_queue_create(rt, JS_JOB_QUEUE_INITIAL_CAPACITY);
+    size_t size = sizeof(JobQueue);
+    GCHandle new_h = gc_allocz(size, JS_GC_OBJ_TYPE_DATA);
     if (new_h == GC_HANDLE_NULL)
         return GC_HANDLE_NULL;
+    JobQueue *q = (JobQueue *)gc_deref(new_h);
+
+    JobBuffer *buf = job_buffer_alloc(JS_JOB_QUEUE_INITIAL_CAPACITY);
+    if (!buf) {
+        gc_free(new_h);
+        return GC_HANDLE_NULL;
+    }
+
+    atomic_fetch_add_u32(&buf->refcount, 1);
+    atomic_store_ptr((void *volatile *)&q->head_block, buf);
+    atomic_fetch_add_u32(&buf->refcount, 1);
+    atomic_store_ptr((void *volatile *)&q->tail_block, buf);
 
     GCHandle prev = rt.compare_exchange_job_queue_handle(GC_HANDLE_NULL, new_h);
     if (prev == GC_HANDLE_NULL) {
         return new_h; /* we won the race */
     } else {
-        gc_free(new_h); /* another thread published first */
+        /* Another thread published first. Free our buffer and queue object. */
+        release_buffer(buf);
+        release_buffer(buf);
+        gc_free(new_h);
         return prev;
     }
 }
 
-/* Enqueue a job handle.  Returns TRUE on success, FALSE if the queue is full. */
+/* Enqueue a job handle. Returns TRUE on success.  Producers always write to
+   tail_block; when it is full or half consumed, a new larger block is linked
+   after it and published as the new tail. */
 static BOOL js_job_queue_enqueue(JSRuntimeHandle rt, GCHandle job_handle)
 {
-    LFJobQueue *q = js_job_queue_ptr(rt);
+    JobQueue *q = js_job_queue_ptr(rt);
     if (!q) return FALSE;
 
     for (;;) {
-        uint64_t tail = atomic_load_u64(&q->tail);
-        uint64_t head = atomic_load_u64(&q->head);
-        if (tail - head >= q->capacity)
-            return FALSE; /* full */
+        JobBuffer *tb = atomic_load_ptr((void *volatile *)&q->tail_block);
+        acquire_buffer(tb);
 
-        if (atomic_compare_exchange_u64(&q->tail, tail, tail + 1) == tail) {
-            uint64_t idx = tail & q->mask;
-            volatile uint32_t *slot = (volatile uint32_t *)&q->entries[idx];
-            /* Wait for any previous consumer to clear the slot. */
-            while (atomic_load_u32(slot) != GC_HANDLE_NULL) {
-                /* spin */
+        uint64_t head = atomic_load_u64(&tb->head);
+        uint64_t tail = atomic_load_u64(&tb->tail);
+
+        if (tail < tb->capacity && head < tb->capacity / 2) {
+            if (atomic_compare_exchange_u64(&tb->tail, tail, tail + 1) == tail) {
+                atomic_store_u32((volatile uint32_t *)&tb->jobs[tail], job_handle);
+                release_buffer(tb);
+                return TRUE;
             }
-            atomic_store_u32(slot, job_handle);
-            gc_write_barrier_for_heap_slot(&q->entries[idx], job_handle);
-            return TRUE;
+            release_buffer(tb);
+            continue;
         }
-        /* CAS failed: retry with new tail. */
+
+        /* tail_block is full or half consumed.  Link a successor while we hold
+           our reference to tb, so tb cannot be freed while we touch tb->next. */
+        JobBuffer *next = (JobBuffer *)atomic_load_ptr((void *volatile *)&tb->next);
+        if (!next) {
+            uint64_t count = (tail >= head) ? (tail - head) : 0;
+            uint64_t new_capacity = count * JS_JOB_QUEUE_HEADROOM_FACTOR;
+            if (new_capacity < JS_JOB_QUEUE_INITIAL_CAPACITY)
+                new_capacity = JS_JOB_QUEUE_INITIAL_CAPACITY;
+            JobBuffer *newb = job_buffer_alloc(new_capacity);
+            if (!newb) { release_buffer(tb); return FALSE; }
+            atomic_store_u64(&newb->head, 0);
+            atomic_store_u64(&newb->tail, 0);
+
+            /* Acquire newb before linking.  If we win the CAS, this reference
+               becomes the link reference and must not be released. */
+            acquire_buffer(newb);
+            JobBuffer *prev = (JobBuffer *)atomic_compare_exchange_ptr(
+                (void *volatile *)&tb->next, NULL, (void *)newb);
+            if (prev == NULL) {
+                next = newb;
+            } else {
+                next = prev;
+                release_buffer(newb);  /* someone else linked first; free ours */
+            }
+        }
+
+        /* Advance tail_block so future producers write to next. */
+        if (rc_pointer_cas(&q->tail_block, tb, next)) {
+            /* Queue dropped its ref to tb; drop ours too. */
+            release_buffer(tb);
+        } else {
+            release_buffer(tb);
+        }
+
+        js_thread_yield();
     }
 }
 
-/* Dequeue a job handle.  Returns GC_HANDLE_NULL if the queue is empty. */
+/* Dequeue a job handle. Returns GC_HANDLE_NULL if the queue is empty.  Consumers
+   drain head_block; when it is empty they advance head_block to the next block
+   in the chain and continue draining. */
 static GCHandle js_job_queue_dequeue(JSRuntimeHandle rt)
 {
-    LFJobQueue *q = js_job_queue_ptr(rt);
+    JobQueue *q = js_job_queue_ptr(rt);
     if (!q) return GC_HANDLE_NULL;
 
     for (;;) {
-        uint64_t head = atomic_load_u64(&q->head);
-        uint64_t tail = atomic_load_u64(&q->tail);
-        if (head == tail)
-            return GC_HANDLE_NULL; /* empty */
+        JobBuffer *hb = atomic_load_ptr((void *volatile *)&q->head_block);
+        if (!hb) return GC_HANDLE_NULL;
+        acquire_buffer(hb);
 
-        if (atomic_compare_exchange_u64(&q->head, head, head + 1) == head) {
-            uint64_t idx = head & q->mask;
-            volatile uint32_t *slot = (volatile uint32_t *)&q->entries[idx];
-            GCHandle job_handle;
-            /* Wait for the producer to publish the handle. */
-            while ((job_handle = atomic_load_u32(slot)) == GC_HANDLE_NULL) {
-                /* spin */
+        uint64_t head = atomic_load_u64(&hb->head);
+        uint64_t tail = atomic_load_u64(&hb->tail);
+
+        if (head < tail) {
+            if (atomic_compare_exchange_u64(&hb->head, head, head + 1)
+                == head) {
+                uint64_t idx = head;
+                GCHandle job_handle;
+                /* Wait for the producer to publish the handle. */
+                while ((job_handle = atomic_load_u32((volatile uint32_t *)&hb->jobs[idx]))
+                       == GC_HANDLE_NULL) {
+                    js_thread_yield();
+                }
+                atomic_store_u32((volatile uint32_t *)&hb->jobs[idx],
+                                 GC_HANDLE_NULL);
+                release_buffer(hb);
+                return job_handle;
             }
-            atomic_store_u32(slot, GC_HANDLE_NULL);
-            return job_handle;
+            release_buffer(hb);
+            continue;
         }
-        /* CAS failed: retry with new head. */
+
+        /* head_block is empty.  Move to the next block if one has been linked. */
+        JobBuffer *next = (JobBuffer *)atomic_load_ptr((void *volatile *)&hb->next);
+        if (next) {
+            if (rc_pointer_cas(&q->head_block, hb, next)) {
+                release_buffer(hb);  /* queue dropped its ref to hb */
+            } else {
+                release_buffer(hb);  /* head_block changed under us */
+            }
+            js_thread_yield();
+            continue;
+        }
+
+        release_buffer(hb);
+        return GC_HANDLE_NULL;
     }
 }
+
 
 /* return 0 if OK, < 0 if exception */
 int JS_EnqueueJob(JSContextHandle ctx, JSJobFunc *job_func,
@@ -7586,23 +7731,26 @@ static void gc_mark_roots(JSRuntimeHandle rt)
 
     /* Mark jobs in the lock-free job queue.  This runs during the
        stop-the-world GC phase, so concurrent enqueue/dequeue are paused. */
-    LFJobQueue *job_queue = js_job_queue_ptr(rt);
+    JobQueue *job_queue = js_job_queue_ptr(rt);
     if (job_queue) {
-        uint64_t head = atomic_load_u64(&job_queue->head);
-        uint64_t tail = atomic_load_u64(&job_queue->tail);
-        for (uint64_t idx_q = head; idx_q < tail; idx_q++) {
-            uint64_t phys = idx_q & job_queue->mask;
-            GCHandle job_handle = atomic_load_u32((volatile uint32_t *)&job_queue->entries[phys]);
-            if (!gc_handle_array_entry_is_valid(job_handle)) continue;
-            JSJobEntryHandle job = JSJobEntryHandle(job_handle);
-            if (!job) continue;
-            /* Mark the job's realm to prevent it from being GC'd */
-            if (job.realm_handle())
-                gc_mark_recursive(rt, job.realm_handle());
-            int j;
-            for(j = 0; j < job.argc(); j++) {
-                JS_MarkValue(rt, job.argv_at(j), gc_mark_recursive);
+        JobBuffer *buf = atomic_load_ptr((void *volatile *)&job_queue->head_block);
+        while (buf) {
+            uint64_t head = atomic_load_u64(&buf->head);
+            uint64_t tail = atomic_load_u64(&buf->tail);
+            for (uint64_t idx_q = head; idx_q < tail; idx_q++) {
+                GCHandle job_handle = atomic_load_u32((volatile uint32_t *)&buf->jobs[idx_q]);
+                if (!gc_handle_array_entry_is_valid(job_handle)) continue;
+                JSJobEntryHandle job = JSJobEntryHandle(job_handle);
+                if (!job) continue;
+                /* Mark the job's realm to prevent it from being GC'd */
+                if (job.realm_handle())
+                    gc_mark_recursive(rt, job.realm_handle());
+                int j;
+                for(j = 0; j < job.argc(); j++) {
+                    JS_MarkValue(rt, job.argv_at(j), gc_mark_recursive);
+                }
             }
+            buf = (JobBuffer *)atomic_load_ptr((void *volatile *)&buf->next);
         }
     }
     
@@ -64968,19 +65116,39 @@ extern "C" void JSString_set_hash_next(uint32_t atom_idx, uint32_t next) {
 
 /* Job queue access - returns GCHandle to job entry */
 extern "C" uint32_t JSRuntime_job_queue_count(JSRuntimeHandle rt) {
-    return (uint32_t)js_job_queue_count(rt);
+    JobQueue *job_queue = js_job_queue_ptr(rt);
+    if (!job_queue) return 0;
+    uint64_t count = 0;
+    JobBuffer *b = atomic_load_ptr((void *volatile *)&job_queue->head_block);
+    while (b) {
+        uint64_t head = atomic_load_u64(&b->head);
+        uint64_t tail = atomic_load_u64(&b->tail);
+        count += (tail >= head) ? (tail - head) : 0;
+        b = (JobBuffer *)atomic_load_ptr((void *volatile *)&b->next);
+    }
+    return (uint32_t)count;
 }
 
 extern "C" uint32_t JSRuntime_job_queue_get_handle(JSRuntimeHandle rt, int index) {
-    LFJobQueue *job_queue = js_job_queue_ptr(rt);
-    if (!job_queue) return GC_HANDLE_NULL;
-    uint64_t head = atomic_load_u64(&job_queue->head);
-    uint64_t tail = atomic_load_u64(&job_queue->tail);
-    if (index < 0 || (uint64_t)index >= (tail - head)) return GC_HANDLE_NULL;
-    uint64_t phys = (head + (uint64_t)index) & job_queue->mask;
-    GCHandle job_handle = atomic_load_u32((volatile uint32_t *)&job_queue->entries[phys]);
-    if (!gc_handle_array_entry_is_valid(job_handle)) return GC_HANDLE_NULL;
-    return job_handle;
+    JobQueue *job_queue = js_job_queue_ptr(rt);
+    if (!job_queue || index < 0) return GC_HANDLE_NULL;
+
+    JobBuffer *b = atomic_load_ptr((void *volatile *)&job_queue->head_block);
+    while (b) {
+        uint64_t head = atomic_load_u64(&b->head);
+        uint64_t tail = atomic_load_u64(&b->tail);
+        uint64_t count = (tail >= head) ? (tail - head) : 0;
+        if ((uint64_t)index < count) {
+            uint64_t idx = head + (uint64_t)index;
+            GCHandle job_handle = atomic_load_u32((volatile uint32_t *)&b->jobs[idx]);
+            if (!gc_handle_array_entry_is_valid(job_handle)) return GC_HANDLE_NULL;
+            return job_handle;
+        }
+        index -= (int)count;
+        b = (JobBuffer *)atomic_load_ptr((void *volatile *)&b->next);
+    }
+
+    return GC_HANDLE_NULL;
 }
 
 /* Access job entry fields directly via handle */

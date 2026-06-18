@@ -16,6 +16,7 @@
 #include <assert.h>
 #include <pthread.h>
 
+#include "platform.h"
 #include "test_runner.h"
 #include "quickjs.h"
 #include "quickjs_gc_unified.h"
@@ -1686,6 +1687,9 @@ static void *job_queue_consumer(void *arg)
         if (ret == 0) {
             if (atomic_load_u32(&g_job_producers_done))
                 break;
+            /* Yield so the producer can make progress; a tight empty-loop
+             * can starve the producer thread on single-core/scheduling setups. */
+            platform_sleep_ms(1);
             continue;
         }
         if (ret < 0)
@@ -1839,7 +1843,7 @@ extern "C" void run_gc_unified_tests(void) {
     RUN_TEST(test_object_prototype_atomic);
     RUN_TEST(test_job_queue_basic);
     RUN_TEST(test_job_queue_gc_marking);
-    // RUN_TEST(test_job_queue_threaded); /* disabled: producer/consumer race remains */
+    RUN_TEST(test_job_queue_threaded);
     RUN_TEST(test_property_array_prealloc);
     RUN_TEST(test_property_array_atomic_cas);
 
