@@ -1,7 +1,14 @@
 #!/bin/bash
-# Wrapper to build_msvc.bat for Git Bash / WSL users
+# Build browser-emulator on Windows with MSVC using CMake.
+# Run this from a Developer Command Prompt for VS 2022 (or ensure cl.exe is in PATH).
 set -e
 cd "$(dirname "$0")"
 
-echo "Building with MSVC via build_msvc.bat..."
-MSYS_NO_PATHCONV=1 cmd.exe /s /c 'build_msvc.bat'
+mkdir -p build-msvc
+cd build-msvc
+
+cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+cmake --build . --config Release --target browser-emulator-tests -j4
+
+echo ""
+echo "Build complete. Test binary: $(pwd)/tests/Release/browser-emulator-tests.exe"
