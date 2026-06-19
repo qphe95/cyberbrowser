@@ -1,15 +1,17 @@
-#ifndef FT_VULKAN_RENDERER_H
-#define FT_VULKAN_RENDERER_H
-
-#ifdef __cplusplus
-extern "C" {
-#endif
+#ifndef VULKAN_RENDERER_H
+#define VULKAN_RENDERER_H
 
 #include <vulkan/vulkan.h>
 #include <stdbool.h>
 #include <stdint.h>
 
-typedef struct FtVulkanRenderer {
+#include "display_list.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct VulkanRenderer {
     VkInstance instance;
     VkPhysicalDevice physicalDevice;
     VkDevice device;
@@ -73,17 +75,17 @@ typedef struct FtVulkanRenderer {
     size_t vertShaderSize;
     const uint8_t *fragShaderData;
     size_t fragShaderSize;
-} FtVulkanRenderer;
+} VulkanRenderer;
 
-bool ft_vk_renderer_init(FtVulkanRenderer *r, VkInstance instance, VkSurfaceKHR surface,
-                         const uint8_t *vert_data, size_t vert_size,
-                         const uint8_t *frag_data, size_t frag_size);
-void ft_vk_renderer_cleanup(FtVulkanRenderer *r);
-bool ft_vk_renderer_recreate_swapchain(FtVulkanRenderer *r);
-bool ft_vk_renderer_update_vertices(FtVulkanRenderer *r, const void *vertexData, uint32_t vertexCount);
-bool ft_vk_renderer_draw(FtVulkanRenderer *r, const void *vertexData, uint32_t vertexCount);
-bool ft_vk_renderer_display_list(FtVulkanRenderer *r, const struct FtDisplayList *dl);
-bool ft_vk_renderer_capture_framebuffer(FtVulkanRenderer *r, const char *bmpPath);
+bool vk_renderer_init(VulkanRenderer *r, VkInstance instance, VkSurfaceKHR surface,
+                      const uint8_t *vert_data, size_t vert_size,
+                      const uint8_t *frag_data, size_t frag_size);
+void vk_renderer_cleanup(VulkanRenderer *r);
+bool vk_renderer_recreate_swapchain(VulkanRenderer *r);
+bool vk_renderer_update_vertices(VulkanRenderer *r, const void *vertexData, uint32_t vertexCount);
+bool vk_renderer_draw(VulkanRenderer *r, const void *vertexData, uint32_t vertexCount);
+bool vk_renderer_display_list(VulkanRenderer *r, const DisplayList *dl);
+bool vk_renderer_capture_framebuffer(VulkanRenderer *r, const char *bmpPath);
 
 #ifdef __cplusplus
 }

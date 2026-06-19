@@ -34,6 +34,7 @@ extern void run_nested_iife_tests(void);
 extern void run_lazy_parsing_tests(void);
 extern void run_preorder_compaction_array_tests(void);
 extern void run_css_parser_tests(void);
+extern void run_css_layout_tests(void);
 /* Note: YouTube data tests run in separate executable (youtube-data-test) */
 
 /* Accessor for the shared context */
@@ -186,6 +187,7 @@ int main(int argc, char *argv[]) {
     run_lazy_parsing_tests();
     run_preorder_compaction_array_tests();
     run_css_parser_tests();
+    run_css_layout_tests();
 
     /* Note: YouTube data tests run in separate executable (youtube-data-test) */
 

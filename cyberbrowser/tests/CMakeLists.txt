@@ -12,6 +12,7 @@ add_executable(browser-emulator-tests
     test_lazy_parsing.cpp
     test_preorder_compaction_array.cpp
     test_css_parser.cpp
+    test_css_layout.cpp
 )
 
 # Standalone YouTube data test executable (complex test with its own main)

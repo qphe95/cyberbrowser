@@ -54,6 +54,7 @@ struct HtmlNode {
     HtmlAttribute *attributes;
     GCValue js_object;                       /* QuickJS object reference */
     int has_js_object;                       /* Flag to track if js_object is valid */
+    GCHandle layout_box_handle;              /* Optional cached LayoutBox handle */
 };
 
 /* HTML document structure */

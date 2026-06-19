@@ -1,25 +1,90 @@
-#include "ft_vulkan_renderer.h"
-#include "ft_ui_layout.h"
-#include "ft_ui_display_list.h"
-#include "ft_font_system.h"
-#include "ft_platform.h"
+#include "vulkan_renderer.h"
+#include "display_list.h"
+
+#include "vulkan_font_stub.h"
+#include "platform.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
-#define LOG_TAG "freetext-vk"
-#define LOGI(...) ft_platform_log(FT_LOG_LEVEL_INFO, LOG_TAG, __VA_ARGS__)
-#define LOGE(...) ft_platform_log(FT_LOG_LEVEL_ERROR, LOG_TAG, __VA_ARGS__)
+#define LOG_TAG "vulkan-renderer"
+#define LOGI(...) platform_log(LOG_LEVEL_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGE(...) platform_log(LOG_LEVEL_ERROR, LOG_TAG, __VA_ARGS__)
 
 static bool g_captureRequested = false;
+static int g_subpixelMode = 0;
+
+/* ========================================================================
+   Vertex format and display-list tessellation
+   ======================================================================== */
+
+typedef struct {
+    float pos[2];
+    float uv[2];
+    float color[3];
+} Vertex;
+
+static void emit_vertex(Vertex *out, uint32_t *count, float x, float y, float u, float v_in,
+                        float r, float g, float b, float screenW, float screenH)
+{
+    Vertex *vert = &out[(*count)++];
+    vert->pos[0] = (x / screenW) * 2.0f - 1.0f;
+    vert->pos[1] = 1.0f - (y / screenH) * 2.0f;
+    vert->uv[0] = u;
+    vert->uv[1] = v_in;
+    vert->color[0] = r;
+    vert->color[1] = g;
+    vert->color[2] = b;
+}
+
+static void append_rect(Vertex *out, uint32_t *count, float x, float y, float w, float h,
+                        float screenW, float screenH, bool textured,
+                        float r, float g, float b)
+{
+    (void)textured;
+    emit_vertex(out, count, x,     y,     0, 0, r, g, b, screenW, screenH);
+    emit_vertex(out, count, x + w, y,     1, 0, r, g, b, screenW, screenH);
+    emit_vertex(out, count, x + w, y + h, 1, 1, r, g, b, screenW, screenH);
+
+    emit_vertex(out, count, x,     y,     0, 0, r, g, b, screenW, screenH);
+    emit_vertex(out, count, x + w, y + h, 1, 1, r, g, b, screenW, screenH);
+    emit_vertex(out, count, x,     y + h, 0, 1, r, g, b, screenW, screenH);
+}
+
+static void append_border(Vertex *out, uint32_t *count, float x, float y, float w, float h,
+                          float thickness, float screenW, float screenH, bool textured,
+                          float r, float g, float b)
+{
+    (void)textured;
+    float t = thickness > 0 ? thickness : 1.0f;
+    append_rect(out, count, x,         y,         w, t, screenW, screenH, false, r, g, b);
+    append_rect(out, count, x,         y + h - t, w, t, screenW, screenH, false, r, g, b);
+    append_rect(out, count, x,         y,         t, h, screenW, screenH, false, r, g, b);
+    append_rect(out, count, x + w - t, y,         t, h, screenW, screenH, false, r, g, b);
+}
+
+static void append_glyph(Vertex *out, uint32_t *count, float x, float y, float w, float h,
+                         float u0, float v0, float u1, float v1,
+                         float screenW, float screenH, bool textured,
+                         float r, float g, float b)
+{
+    (void)textured;
+    emit_vertex(out, count, x,     y,     u0, v0, r, g, b, screenW, screenH);
+    emit_vertex(out, count, x + w, y,     u1, v0, r, g, b, screenW, screenH);
+    emit_vertex(out, count, x + w, y + h, u1, v1, r, g, b, screenW, screenH);
+
+    emit_vertex(out, count, x,     y,     u0, v0, r, g, b, screenW, screenH);
+    emit_vertex(out, count, x + w, y + h, u1, v1, r, g, b, screenW, screenH);
+    emit_vertex(out, count, x,     y + h, u0, v1, r, g, b, screenW, screenH);
+}
 
 /* ========================================================================
    Helpers
    ======================================================================== */
 
-static uint32_t find_memory_type(FtVulkanRenderer *r, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+static uint32_t find_memory_type(VulkanRenderer *r, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
     VkPhysicalDeviceMemoryProperties memProperties;
     vkGetPhysicalDeviceMemoryProperties(r->physicalDevice, &memProperties);
     for (uint32_t i = 0; i < memProperties.memoryTypeCount; ++i) {
@@ -37,7 +102,7 @@ static uint32_t find_memory_type(FtVulkanRenderer *r, uint32_t typeFilter, VkMem
     return UINT32_MAX;
 }
 
-static bool create_buffer(FtVulkanRenderer *r, VkDeviceSize size, VkBufferUsageFlags usage,
+static bool create_buffer(VulkanRenderer *r, VkDeviceSize size, VkBufferUsageFlags usage,
                           VkMemoryPropertyFlags properties, VkBuffer *buffer, VkDeviceMemory *bufferMemory) {
     VkBufferCreateInfo bufferInfo = {};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -67,7 +132,7 @@ static bool create_buffer(FtVulkanRenderer *r, VkDeviceSize size, VkBufferUsageF
     return true;
 }
 
-static VkCommandBuffer begin_single_time_commands(FtVulkanRenderer *r) {
+static VkCommandBuffer begin_single_time_commands(VulkanRenderer *r) {
     VkCommandBufferAllocateInfo allocInfo = {};
     allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
@@ -84,7 +149,7 @@ static VkCommandBuffer begin_single_time_commands(FtVulkanRenderer *r) {
     return commandBuffer;
 }
 
-static void end_single_time_commands(FtVulkanRenderer *r, VkCommandBuffer commandBuffer) {
+static void end_single_time_commands(VulkanRenderer *r, VkCommandBuffer commandBuffer) {
     vkEndCommandBuffer(commandBuffer);
     VkSubmitInfo submitInfo = {};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -95,7 +160,7 @@ static void end_single_time_commands(FtVulkanRenderer *r, VkCommandBuffer comman
     vkFreeCommandBuffers(r->device, r->commandPool, 1, &commandBuffer);
 }
 
-static bool create_capture_buffer(FtVulkanRenderer *r) {
+static bool create_capture_buffer(VulkanRenderer *r) {
     if (r->captureBuffer != VK_NULL_HANDLE) {
         vkDestroyBuffer(r->device, r->captureBuffer, NULL);
         vkFreeMemory(r->device, r->captureBufferMemory, NULL);
@@ -216,7 +281,7 @@ static void analyze_subpixel_pattern(const uint8_t *pixels, uint32_t width, uint
     printf("==========================\n\n");
 }
 
-static bool create_image(FtVulkanRenderer *r, uint32_t width, uint32_t height, VkFormat format,
+static bool create_image(VulkanRenderer *r, uint32_t width, uint32_t height, VkFormat format,
                          VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties,
                          VkImage *image, VkDeviceMemory *imageMemory, uint32_t mipLevels) {
     VkImageCreateInfo imageInfo = {};
@@ -256,7 +321,7 @@ static bool create_image(FtVulkanRenderer *r, uint32_t width, uint32_t height, V
     return true;
 }
 
-static VkImageView create_image_view(FtVulkanRenderer *r, VkImage image, VkFormat format, uint32_t mipLevels) {
+static VkImageView create_image_view(VulkanRenderer *r, VkImage image, VkFormat format, uint32_t mipLevels) {
     VkImageViewCreateInfo viewInfo = {};
     viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     viewInfo.image = image;
@@ -274,7 +339,7 @@ static VkImageView create_image_view(FtVulkanRenderer *r, VkImage image, VkForma
     return imageView;
 }
 
-static void transition_image_layout(FtVulkanRenderer *r, VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout) {
+static void transition_image_layout(VulkanRenderer *r, VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout) {
     VkCommandBuffer cmd = begin_single_time_commands(r);
     VkImageMemoryBarrier barrier = {};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -308,7 +373,7 @@ static void transition_image_layout(FtVulkanRenderer *r, VkImage image, VkImageL
     end_single_time_commands(r, cmd);
 }
 
-static void copy_buffer_to_image(FtVulkanRenderer *r, VkBuffer buffer, VkImage image, uint32_t width, uint32_t height) {
+static void copy_buffer_to_image(VulkanRenderer *r, VkBuffer buffer, VkImage image, uint32_t width, uint32_t height) {
     VkCommandBuffer cmd = begin_single_time_commands(r);
     VkBufferImageCopy region = {};
     region.bufferOffset = 0;
@@ -328,7 +393,7 @@ static void copy_buffer_to_image(FtVulkanRenderer *r, VkBuffer buffer, VkImage i
    Device & Swapchain
    ======================================================================== */
 
-static bool pick_device_and_queue(FtVulkanRenderer *r) {
+static bool pick_device_and_queue(VulkanRenderer *r) {
     if (r->device != VK_NULL_HANDLE) return true;
     uint32_t deviceCount = 0;
     vkEnumeratePhysicalDevices(r->instance, &deviceCount, NULL);
@@ -384,7 +449,7 @@ static bool pick_device_and_queue(FtVulkanRenderer *r) {
     return true;
 }
 
-static bool create_swapchain(FtVulkanRenderer *r) {
+static bool create_swapchain(VulkanRenderer *r) {
     VkSurfaceCapabilitiesKHR caps;
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(r->physicalDevice, r->surface, &caps);
 
@@ -469,7 +534,7 @@ static bool create_swapchain(FtVulkanRenderer *r) {
     return true;
 }
 
-static bool create_render_pass(FtVulkanRenderer *r) {
+static bool create_render_pass(VulkanRenderer *r) {
     VkAttachmentDescription colorAttachment = {};
     colorAttachment.format = r->swapchainFormat;
     colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -510,7 +575,7 @@ static bool create_render_pass(FtVulkanRenderer *r) {
     return true;
 }
 
-static VkShaderModule create_shader_module(FtVulkanRenderer *r, const uint8_t *data, size_t size) {
+static VkShaderModule create_shader_module(VulkanRenderer *r, const uint8_t *data, size_t size) {
     VkShaderModuleCreateInfo info = {};
     info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
     info.codeSize = size;
@@ -525,7 +590,7 @@ static VkShaderModule create_shader_module(FtVulkanRenderer *r, const uint8_t *d
    Font Atlas
    ======================================================================== */
 
-static bool upload_font_atlas(FtVulkanRenderer *r, uint8_t *atlas) {
+static bool upload_font_atlas(VulkanRenderer *r, uint8_t *atlas) {
     VkBuffer stagingBuffer = VK_NULL_HANDLE;
     VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
     if (!create_buffer(r, FONT_ATLAS_SIZE * FONT_ATLAS_SIZE,
@@ -562,7 +627,7 @@ static bool upload_font_atlas(FtVulkanRenderer *r, uint8_t *atlas) {
     return true;
 }
 
-static bool create_font_resources(FtVulkanRenderer *r) {
+static bool create_font_resources(VulkanRenderer *r) {
     uint8_t *atlas = (uint8_t *)malloc(FONT_ATLAS_SIZE * FONT_ATLAS_SIZE);
     if (!atlas) { LOGE("Failed to allocate font atlas"); return false; }
     if (!build_ttf_atlas(atlas)) {
@@ -646,7 +711,7 @@ static bool create_font_resources(FtVulkanRenderer *r) {
    Pipeline
    ======================================================================== */
 
-static bool create_pipeline(FtVulkanRenderer *r, const uint8_t *vert_data, size_t vert_size,
+static bool create_pipeline(VulkanRenderer *r, const uint8_t *vert_data, size_t vert_size,
                             const uint8_t *frag_data, size_t frag_size) {
     VkShaderModule vertModule = create_shader_module(r, vert_data, vert_size);
     VkShaderModule fragModule = create_shader_module(r, frag_data, frag_size);
@@ -785,7 +850,7 @@ static bool create_pipeline(FtVulkanRenderer *r, const uint8_t *vert_data, size_
    Framebuffers & Commands
    ======================================================================== */
 
-static bool create_framebuffers(FtVulkanRenderer *r) {
+static bool create_framebuffers(VulkanRenderer *r) {
     r->framebuffers = (VkFramebuffer *)malloc(sizeof(VkFramebuffer) * r->imageCount);
     for (uint32_t i = 0; i < r->imageCount; ++i) {
         VkImageView attachments[] = { r->imageViews[i] };
@@ -803,7 +868,7 @@ static bool create_framebuffers(FtVulkanRenderer *r) {
     return true;
 }
 
-static void destroy_hi_res_resources(FtVulkanRenderer *r) {
+static void destroy_hi_res_resources(VulkanRenderer *r) {
     if (r->hiResFramebuffer != VK_NULL_HANDLE) {
         vkDestroyFramebuffer(r->device, r->hiResFramebuffer, NULL);
         r->hiResFramebuffer = VK_NULL_HANDLE;
@@ -838,7 +903,7 @@ static void destroy_hi_res_resources(FtVulkanRenderer *r) {
     }
 }
 
-static bool create_hi_res_resources(FtVulkanRenderer *r) {
+static bool create_hi_res_resources(VulkanRenderer *r) {
     destroy_hi_res_resources(r);
 
     uint32_t w8 = r->swapchainExtent.width * 8;
@@ -898,7 +963,7 @@ static bool create_hi_res_resources(FtVulkanRenderer *r) {
     return true;
 }
 
-static bool create_command_pool_and_buffers(FtVulkanRenderer *r) {
+static bool create_command_pool_and_buffers(VulkanRenderer *r) {
     VkCommandPoolCreateInfo poolInfo = {};
     poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -917,7 +982,7 @@ static bool create_command_pool_and_buffers(FtVulkanRenderer *r) {
     return true;
 }
 
-static bool create_sync_objects(FtVulkanRenderer *r) {
+static bool create_sync_objects(VulkanRenderer *r) {
     VkSemaphoreCreateInfo semInfo = {};
     semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
     VkFenceCreateInfo fenceInfo = {};
@@ -937,7 +1002,7 @@ static bool create_sync_objects(FtVulkanRenderer *r) {
    Vertex Buffer
    ======================================================================== */
 
-static bool create_vertex_buffer(FtVulkanRenderer *r) {
+static bool create_vertex_buffer(VulkanRenderer *r) {
     r->vertexCapacity = 65536;
     VkDeviceSize bufferSize = r->vertexCapacity * sizeof(Vertex);
     return create_buffer(r, bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
@@ -945,7 +1010,7 @@ static bool create_vertex_buffer(FtVulkanRenderer *r) {
                          &r->vertexBuffer, &r->vertexBufferMemory);
 }
 
-bool ft_vk_renderer_update_vertices(FtVulkanRenderer *r, const void *vertexData, uint32_t vertexCount) {
+bool vk_renderer_update_vertices(VulkanRenderer *r, const void *vertexData, uint32_t vertexCount) {
     if (vertexCount > r->vertexCapacity) vertexCount = r->vertexCapacity;
     r->vertexCount = vertexCount;
     if (vertexCount == 0) return true;
@@ -960,7 +1025,7 @@ bool ft_vk_renderer_update_vertices(FtVulkanRenderer *r, const void *vertexData,
    Cleanup
    ======================================================================== */
 
-static void cleanup_swapchain(FtVulkanRenderer *r) {
+static void cleanup_swapchain(VulkanRenderer *r) {
     if (r->device == VK_NULL_HANDLE) return;
     destroy_hi_res_resources(r);
     if (r->framebuffers) {
@@ -1011,7 +1076,7 @@ static void cleanup_swapchain(FtVulkanRenderer *r) {
     r->imageCount = 0;
 }
 
-void ft_vk_renderer_cleanup(FtVulkanRenderer *r) {
+void vk_renderer_cleanup(VulkanRenderer *r) {
     cleanup_swapchain(r);
     if (r->vertexBuffer != VK_NULL_HANDLE) {
         vkDestroyBuffer(r->device, r->vertexBuffer, NULL);
@@ -1085,7 +1150,7 @@ void ft_vk_renderer_cleanup(FtVulkanRenderer *r) {
    Public API
    ======================================================================== */
 
-bool ft_vk_renderer_init(FtVulkanRenderer *r, VkInstance instance, VkSurfaceKHR surface,
+bool vk_renderer_init(VulkanRenderer *r, VkInstance instance, VkSurfaceKHR surface,
                          const uint8_t *vert_data, size_t vert_size,
                          const uint8_t *frag_data, size_t frag_size) {
     memset(r, 0, sizeof(*r));
@@ -1115,7 +1180,7 @@ bool ft_vk_renderer_init(FtVulkanRenderer *r, VkInstance instance, VkSurfaceKHR 
     return true;
 }
 
-bool ft_vk_renderer_recreate_swapchain(FtVulkanRenderer *r) {
+bool vk_renderer_recreate_swapchain(VulkanRenderer *r) {
     vkDeviceWaitIdle(r->device);
     cleanup_swapchain(r);
     if (!create_swapchain(r)) return false;
@@ -1132,9 +1197,9 @@ bool ft_vk_renderer_recreate_swapchain(FtVulkanRenderer *r) {
    Display list → vertices
    ======================================================================== */
 
-bool ft_vk_renderer_display_list(FtVulkanRenderer *r, const FtDisplayList *dl) {
+bool vk_renderer_display_list(VulkanRenderer *r, const DisplayList *dl) {
     if (!dl || dl->count == 0) {
-        return ft_vk_renderer_draw(r, NULL, 0);
+        return vk_renderer_draw(r, NULL, 0);
     }
 
     static Vertex vertices[65536];
@@ -1144,17 +1209,17 @@ bool ft_vk_renderer_display_list(FtVulkanRenderer *r, const FtDisplayList *dl) {
     float screenH = (float)r->swapchainExtent.height;
 
     for (int i = 0; i < dl->count && count + 24 < capacity; i++) {
-        const FtDisplayListCmd *c = &dl->cmds[i];
+        const DisplayListCmd *c = &dl->cmds[i];
         switch (c->type) {
-            case FT_DL_RECT:
+            case DL_RECT:
                 append_rect(vertices, &count, c->x, c->y, c->w, c->h,
                             screenW, screenH, false, c->r, c->g, c->b);
                 break;
-            case FT_DL_BORDER:
+            case DL_BORDER:
                 append_border(vertices, &count, c->x, c->y, c->w, c->h, c->u.border.thickness,
                               screenW, screenH, false, c->r, c->g, c->b);
                 break;
-            case FT_DL_GLYPH:
+            case DL_GLYPH:
                 append_glyph(vertices, &count, c->x, c->y, c->w, c->h,
                              c->u.glyph.u0, c->u.glyph.v0, c->u.glyph.u1, c->u.glyph.v1,
                              screenW, screenH, false, c->r, c->g, c->b);
@@ -1162,13 +1227,13 @@ bool ft_vk_renderer_display_list(FtVulkanRenderer *r, const FtDisplayList *dl) {
         }
     }
 
-    return ft_vk_renderer_draw(r, vertices, count);
+    return vk_renderer_draw(r, vertices, count);
 }
 
-bool ft_vk_renderer_draw(FtVulkanRenderer *r, const void *vertexData, uint32_t vertexCount) {
+bool vk_renderer_draw(VulkanRenderer *r, const void *vertexData, uint32_t vertexCount) {
     if (!r->ready) return false;
 
-    ft_vk_renderer_update_vertices(r, vertexData, vertexCount);
+    vk_renderer_update_vertices(r, vertexData, vertexCount);
 
     vkWaitForFences(r->device, 1, &r->inFlightFence, VK_TRUE, UINT64_MAX);
 
@@ -1176,7 +1241,7 @@ bool ft_vk_renderer_draw(FtVulkanRenderer *r, const void *vertexData, uint32_t v
     VkResult result = vkAcquireNextImageKHR(r->device, r->swapchain, UINT64_MAX,
                                             r->imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
-        ft_vk_renderer_recreate_swapchain(r);
+        vk_renderer_recreate_swapchain(r);
         return true;
     }
     if (result != VK_SUCCESS) { LOGE("vkAcquireNextImageKHR failed: %d", result); return false; }
@@ -1429,7 +1494,7 @@ bool ft_vk_renderer_draw(FtVulkanRenderer *r, const void *vertexData, uint32_t v
         uint8_t *pixels = NULL;
         vkMapMemory(r->device, r->captureBufferMemory, 0, r->captureBufferSize, 0, (void **)&pixels);
 
-        const char *bmpPath = "freetext_capture.bmp";
+        const char *bmpPath = "cyberbrowser_capture.bmp";
         save_bmp(bmpPath, pixels, r->swapchainExtent.width, r->swapchainExtent.height);
         printf("Framebuffer saved to: %s\n", bmpPath);
 
@@ -1449,14 +1514,14 @@ bool ft_vk_renderer_draw(FtVulkanRenderer *r, const void *vertexData, uint32_t v
 
     result = vkQueuePresentKHR(r->graphicsQueue, &presentInfo);
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
-        ft_vk_renderer_recreate_swapchain(r);
+        vk_renderer_recreate_swapchain(r);
     } else if (result != VK_SUCCESS) {
         LOGE("vkQueuePresentKHR failed: %d", result);
     }
     return true;
 }
 
-bool ft_vk_renderer_capture_framebuffer(FtVulkanRenderer *r, const char *bmpPath) {
+bool vk_renderer_capture_framebuffer(VulkanRenderer *r, const char *bmpPath) {
     (void)bmpPath; /* path is hardcoded inside draw for simplicity */
     if (!r || !r->ready) return false;
     g_captureRequested = true;

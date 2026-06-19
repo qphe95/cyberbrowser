@@ -9,6 +9,7 @@ project(browser-emulator VERSION 1.0.0 LANGUAGES C CXX)
 # =============================================================================
 option(BE_BUILD_TESTS "Build tests" ON)
 option(BE_BUILD_SHARED "Build as shared library" OFF)
+option(BE_BUILD_VULKAN "Build Vulkan renderer backend" OFF)
 
 # =============================================================================
 # Platform detection
@@ -52,6 +53,8 @@ set(BE_SOURCES
     src/html_dom.cpp
     src/preorder_compaction_array.cpp
     src/css_parser.cpp
+    src/css_layout.cpp
+    src/display_list.cpp
     src/lockfree_hash_table.cpp
     src/url_analyzer.c
     src/tls_client.c
@@ -74,6 +77,14 @@ elseif(BE_PLATFORM_ANDROID)
 elseif(BE_PLATFORM_WINDOWS)
     list(APPEND BE_SOURCES
         src/platform/platform_windows.c
+    )
+endif()
+
+# Vulkan renderer backend (optional)
+if(BE_BUILD_VULKAN)
+    list(APPEND BE_SOURCES
+        src/vulkan_renderer.cpp
+        src/vulkan_font_stub.cpp
     )
 endif()
 
@@ -136,6 +147,12 @@ if(BE_PLATFORM_WINDOWS)
     target_include_directories(browser-emulator BEFORE PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include/win32
     )
+endif()
+
+if(BE_BUILD_VULKAN)
+    find_package(Vulkan REQUIRED)
+    target_include_directories(browser-emulator PRIVATE ${Vulkan_INCLUDE_DIRS})
+    target_link_libraries(browser-emulator PRIVATE ${Vulkan_LIBRARIES})
 endif()
 
 # =============================================================================
