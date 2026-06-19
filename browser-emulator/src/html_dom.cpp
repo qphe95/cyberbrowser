@@ -16,6 +16,8 @@
 #include "html_dom.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
+#include "browser_api_impl.h"
+#include "browser_api_impl_handles.h"
 
 #define LOG_TAG "html_dom"
 #define LOG_INFO(...) platform_log(LOG_LEVEL_INFO, LOG_TAG, __VA_ARGS__)
@@ -653,8 +655,15 @@ GCValue html_create_element_js(JSContextHandle ctx, const char *tag_name, HtmlAt
         extern GCValue js_video_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
         element = js_video_constructor(ctx, JS_NULL, 0, NULL);
     } else {
-        /* Create generic element */
-        element = JS_NewObject(ctx);
+        /* Create generic element with DOMNode backing data so parallel CSS
+         * computed-style tables and index tables can attach to it. */
+        element = JS_NewObjectClass(ctx, js_dom_node_class_id);
+        if (!JS_IsException(element)) {
+            DOMNodeHandle node = DOMNodeHandle::create(ctx, DOM_NODE_TYPE_ELEMENT, tag_name);
+            if (node.valid()) {
+                node.attach_to_object(element);
+            }
+        }
     }
     
     if (JS_IsException(element)) {
@@ -738,6 +747,8 @@ GCValue html_create_element_js_with_document(JSContextHandle ctx, GCValue js_doc
                     }
                     attr = attr->next;
                 }
+                DOMNodeHandle node = DOMNodeHandle::from_object(element);
+                if (node.valid()) css_index_insert_node(ctx, node);
                 return element;
             }
             /* Fall through to plain object if createElement failed */
@@ -745,7 +756,12 @@ GCValue html_create_element_js_with_document(JSContextHandle ctx, GCValue js_doc
     }
     
     /* Fallback to plain object if document.createElement not available */
-    return html_create_element_js(ctx, tag_name, attrs);
+    element = html_create_element_js(ctx, tag_name, attrs);
+    {
+        DOMNodeHandle node = DOMNodeHandle::from_object(element);
+        if (node.valid()) css_index_insert_node(ctx, node);
+    }
+    return element;
 }
 
 /* Recursively create DOM nodes in JS with automatic GC memory management */

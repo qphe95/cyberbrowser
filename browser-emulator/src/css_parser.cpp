@@ -8,6 +8,9 @@
 #include "http_download.h"
 #include "platform.h"
 #include "js_quickjs.h"
+#include "browser_api_impl.h"
+#include "browser_api_impl_handles.h"
+#include "html_dom.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -73,7 +76,7 @@ static void css_strncpy_lower(char *dst, const char *src, size_t n, size_t dst_s
 }
 
 /* Convert a CSS property like "background-color" to "backgroundColor". */
-static char* css_to_camel_case(const char *prop) {
+char* css_to_camel_case(const char *prop) {
     size_t len = strlen(prop);
     char *out = (char*)malloc(len + 1);
     if (!out) return NULL;
@@ -672,8 +675,17 @@ static void css_apply_inline_style(JSContextHandle ctx, GCValue element, HtmlNod
     CssDeclaration *decls = css_parse_inline_style(style_attr, &count);
     if (!decls) return;
     GCValue style = css_ensure_style_object(ctx, element);
+
+    DOMNodeHandle dom_node = DOMNodeHandle::from_object(element);
     for (int i = 0; i < count; i++) {
         css_set_style_property(ctx, style, decls[i].property, decls[i].value);
+        if (dom_node.valid()) {
+            JSAtom atom = JS_NewAtom(ctx, decls[i].property);
+            if (atom != JS_ATOM_NULL) {
+                css_computed_set_property(ctx, dom_node, atom, decls[i].value);
+                JS_FreeAtom(ctx, atom);
+            }
+        }
     }
     css_declarations_free(decls, count);
 }
@@ -683,8 +695,17 @@ static void css_apply_declarations(JSContextHandle ctx, GCValue element,
     if (count <= 0) return;
     qsort(applied, (size_t)count, sizeof(CssAppliedDecl), css_applied_decl_compare);
     GCValue style = css_ensure_style_object(ctx, element);
+
+    DOMNodeHandle dom_node = DOMNodeHandle::from_object(element);
     for (int i = 0; i < count; i++) {
         css_set_style_property(ctx, style, applied[i].decl->property, applied[i].decl->value);
+        if (dom_node.valid()) {
+            JSAtom atom = JS_NewAtom(ctx, applied[i].decl->property);
+            if (atom != JS_ATOM_NULL) {
+                css_computed_set_property(ctx, dom_node, atom, applied[i].decl->value);
+                JS_FreeAtom(ctx, atom);
+            }
+        }
     }
 }
 

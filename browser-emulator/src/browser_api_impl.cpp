@@ -10,6 +10,7 @@
 #include <quickjs_gc_unified.h>
 #include "browser_api_impl.h"
 #include "html_dom.h"
+#include "css_parser.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
 #include "browser_api_impl_types.h"
@@ -2520,46 +2521,53 @@ static GCValue js_console_clear(JSContextHandle ctx, GCValue this_val, int argc,
     return JS_UNDEFINED;
 }
 
-// getComputedStyle stub - returns a CSSStyleDeclaration-like object
+// getComputedStyle - reads from the per-element computed-style table.
 static GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)this_val; (void)argc; (void)argv;
-    // Return an object with getPropertyValue method
+    (void)this_val;
+    GCValue element = argc > 0 ? argv[0] : JS_UNDEFINED;
+    GCValue pseudo = argc > 1 ? argv[1] : JS_UNDEFINED;
+    (void)pseudo;
+
     GCValue style = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, style, "getPropertyValue", 
-        JS_NewCFunction(ctx, js_empty_string, "getPropertyValue", 1));
-    JS_SetPropertyStr(ctx, style, "width", JS_NewString(ctx, "auto"));
-    JS_SetPropertyStr(ctx, style, "height", JS_NewString(ctx, "auto"));
-    JS_SetPropertyStr(ctx, style, "display", JS_NewString(ctx, "block"));
-    JS_SetPropertyStr(ctx, style, "position", JS_NewString(ctx, "static"));
-    JS_SetPropertyStr(ctx, style, "fontSize", JS_NewString(ctx, "16px"));
-    JS_SetPropertyStr(ctx, style, "fontFamily", JS_NewString(ctx, "sans-serif"));
-    JS_SetPropertyStr(ctx, style, "color", JS_NewString(ctx, "rgb(0, 0, 0)"));
-    JS_SetPropertyStr(ctx, style, "backgroundColor", JS_NewString(ctx, "rgba(0, 0, 0, 0)"));
-    JS_SetPropertyStr(ctx, style, "margin", JS_NewString(ctx, "0px"));
-    JS_SetPropertyStr(ctx, style, "padding", JS_NewString(ctx, "0px"));
-    JS_SetPropertyStr(ctx, style, "border", JS_NewString(ctx, "0px none rgb(0, 0, 0)"));
-    JS_SetPropertyStr(ctx, style, "top", JS_NewString(ctx, "auto"));
-    JS_SetPropertyStr(ctx, style, "left", JS_NewString(ctx, "auto"));
-    JS_SetPropertyStr(ctx, style, "right", JS_NewString(ctx, "auto"));
-    JS_SetPropertyStr(ctx, style, "bottom", JS_NewString(ctx, "auto"));
-    JS_SetPropertyStr(ctx, style, "visibility", JS_NewString(ctx, "visible"));
-    JS_SetPropertyStr(ctx, style, "opacity", JS_NewString(ctx, "1"));
-    JS_SetPropertyStr(ctx, style, "zIndex", JS_NewString(ctx, "auto"));
-    JS_SetPropertyStr(ctx, style, "transform", JS_NewString(ctx, "none"));
-    JS_SetPropertyStr(ctx, style, "pointerEvents", JS_NewString(ctx, "auto"));
-    JS_SetPropertyStr(ctx, style, "cursor", JS_NewString(ctx, "auto"));
-    JS_SetPropertyStr(ctx, style, "overflow", JS_NewString(ctx, "visible"));
-    JS_SetPropertyStr(ctx, style, "textAlign", JS_NewString(ctx, "start"));
-    JS_SetPropertyStr(ctx, style, "lineHeight", JS_NewString(ctx, "normal"));
-    JS_SetPropertyStr(ctx, style, "letterSpacing", JS_NewString(ctx, "normal"));
-    JS_SetPropertyStr(ctx, style, "whiteSpace", JS_NewString(ctx, "normal"));
-    JS_SetPropertyStr(ctx, style, "flexDirection", JS_NewString(ctx, "row"));
-    JS_SetPropertyStr(ctx, style, "justifyContent", JS_NewString(ctx, "normal"));
-    JS_SetPropertyStr(ctx, style, "alignItems", JS_NewString(ctx, "normal"));
-    JS_SetPropertyStr(ctx, style, "maxWidth", JS_NewString(ctx, "none"));
-    JS_SetPropertyStr(ctx, style, "minWidth", JS_NewString(ctx, "0px"));
-    JS_SetPropertyStr(ctx, style, "maxHeight", JS_NewString(ctx, "none"));
-    JS_SetPropertyStr(ctx, style, "minHeight", JS_NewString(ctx, "0px"));
+    if (JS_IsException(style)) return style;
+
+    DOMNodeHandle node = DOMNodeHandle::from_object_check(ctx, element);
+    if (node.valid()) {
+        /* Attach a getPropertyValue method that reads from the computed table. */
+        GCValue closure = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, closure, "__node_handle",
+                          JS_NewInt32(ctx, (int32_t)node.handle()));
+
+        JS_SetPropertyStr(ctx, style, "getPropertyValue",
+            JS_NewCFunction(ctx, js_empty_string, "getPropertyValue", 1));
+
+        /* Also materialize the known computed properties as direct properties
+         * so common reads like cs.color work. */
+        GCHandle cs_handle = node.computed_style_handle();
+        if (cs_handle != GC_HANDLE_NULL) {
+            CssComputedStyle *cs = (CssComputedStyle *)gc_deref(cs_handle);
+            if (cs && cs->properties) {
+                LFHashTable *t = cs->properties;
+                for (uint32_t i = 0; i < t->bucket_count; i++) {
+                    if (t->buckets[i].state == LF_HASH_OCCUPIED &&
+                        t->buckets[i].value != GC_HANDLE_NULL) {
+                        JSAtom prop_atom = (JSAtom)t->buckets[i].key;
+                        const char *prop_str = JS_AtomToCString(ctx, prop_atom);
+                        if (prop_str) {
+                            GCValue val = GC_MKHANDLE(JS_TAG_STRING, t->buckets[i].value);
+                            JS_SetPropertyStr(ctx, style, prop_str, val);
+                            /* JS_ToCString/JS_AtomToCString in this QuickJS
+                             * fork return pointers into GC-managed strings; no
+                             * explicit free is required. */
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        JS_SetPropertyStr(ctx, style, "getPropertyValue",
+            JS_NewCFunction(ctx, js_empty_string, "getPropertyValue", 1));
+    }
     return style;
 }
 
@@ -3473,18 +3481,358 @@ static void query_selector_all_recursive(JSContextHandle ctx, GCValue elem, cons
 
 static void js_dom_node_finalizer(JSRuntimeHandle rt, GCValue val) {
     (void)rt;
-    (void)val;
-    // Note: We don't try to access or clear references here because
-    // during garbage collection, we cannot safely create or manipulate JS values.
-    // The DOMNode memory will be freed by the GC when the handle is released.
-    // Any JS value references (parent_node, child_nodes, etc.) will be freed
-    // automatically by the GC when those objects are no longer referenced.
+    // Free the lock-free computed-style hash table.  The table itself is
+    // malloc'd; the GC will reclaim the CssComputedStyle object separately.
+    GCHandle node_handle = JS_GetOpaqueHandle(val, js_dom_node_class_id);
+    if (node_handle != GC_HANDLE_NULL) {
+        DOMNodeHandle node(node_handle);
+        if (node.valid()) {
+            GCHandle cs_handle = node.computed_style_handle();
+            if (cs_handle != GC_HANDLE_NULL) {
+                CssComputedStyle *cs = (CssComputedStyle *)gc_deref(cs_handle);
+                if (cs && cs->properties) {
+                    lf_hash_destroy(cs->properties);
+                    cs->properties = NULL;
+                }
+            }
+        }
+    }
+}
+
+static void js_dom_node_mark(JSRuntimeHandle rt, GCValue val,
+                             JS_MarkFunc *mark_func)
+{
+    (void)rt;
+    GCHandle node_handle = JS_GetOpaqueHandle(val, js_dom_node_class_id);
+    if (node_handle == GC_HANDLE_NULL) return;
+
+    /* Keep the DOMNode data object alive; it is opaque data, not scanned
+     * automatically by the generic object marker. */
+    mark_func(rt, node_handle);
+
+    DOMNodeHandle node(node_handle);
+    if (!node.valid()) return;
+
+    /* Tree links are stored as GCValue JS object references. */
+    JS_MarkValue(rt, node.js_object(), mark_func);
+    JS_MarkValue(rt, node.parent_node(), mark_func);
+    JS_MarkValue(rt, node.first_child(), mark_func);
+    JS_MarkValue(rt, node.last_child(), mark_func);
+    JS_MarkValue(rt, node.previous_sibling(), mark_func);
+    JS_MarkValue(rt, node.next_sibling(), mark_func);
+    JS_MarkValue(rt, node.owner_document(), mark_func);
+    JS_MarkValue(rt, node.shadow_root(), mark_func);
+
+    /* Computed-style table.  Keep the table object alive, then mark every
+     * value handle stored inside it (they are JS strings). */
+    GCHandle cs_handle = node.computed_style_handle();
+    if (cs_handle != GC_HANDLE_NULL) {
+        mark_func(rt, cs_handle);
+        CssComputedStyle *cs = (CssComputedStyle *)gc_deref(cs_handle);
+        if (cs && cs->properties) {
+            LFHashTable *t = cs->properties;
+            for (uint32_t i = 0; i < t->bucket_count; i++) {
+                if (t->buckets[i].state == LF_HASH_OCCUPIED &&
+                    t->buckets[i].value != GC_HANDLE_NULL) {
+                    mark_func(rt, t->buckets[i].value);
+                }
+            }
+        }
+    }
+
+    /* Index-table list chaining refers to other DOMNode data handles. */
+    GCHandle class_sib = node.next_class_sibling();
+    if (class_sib != GC_HANDLE_NULL) mark_func(rt, class_sib);
+    GCHandle tag_sib = node.next_tag_sibling();
+    if (tag_sib != GC_HANDLE_NULL) mark_func(rt, tag_sib);
 }
 
 static JSClassDef js_dom_node_class_def = {
     .class_name = "DOMNode",
     .finalizer = js_dom_node_finalizer,
+    .gc_mark   = js_dom_node_mark,
 };
+
+/* ============================================================================
+ * Parallel CSS support: per-element computed-style table and index tables
+ * ============================================================================ */
+
+#define CSS_COMPUTED_STYLE_BUCKETS 16
+#define CSS_ID_TABLE_BUCKETS       64
+#define CSS_CLASS_TABLE_BUCKETS    64
+#define CSS_TAG_TABLE_BUCKETS      64
+
+/* Allocate or return the existing computed-style object for a DOM node. */
+GCHandle css_ensure_computed_style(DOMNodeHandle node)
+{
+    GCHandle h = node.computed_style_handle();
+    if (h != GC_HANDLE_NULL) return h;
+
+    h = gc_allocz(sizeof(CssComputedStyle), JS_GC_OBJ_TYPE_DATA);
+    if (h == GC_HANDLE_NULL) return GC_HANDLE_NULL;
+
+    CssComputedStyle *cs = (CssComputedStyle *)gc_deref(h);
+    cs->properties = lf_hash_create(CSS_COMPUTED_STYLE_BUCKETS);
+    if (!cs->properties) {
+        /* Cannot free the GC handle individually in unified GC; leak is
+         * harmless because the handle will be reclaimed at next collection. */
+        return GC_HANDLE_NULL;
+    }
+
+    node.set_computed_style_handle(h);
+    return h;
+}
+
+/* Store a computed CSS property for a node.  The value is copied into a JS
+ * string handle that is kept alive by the DOMNode's gc_mark callback. */
+void css_computed_set_property(JSContextHandle ctx, DOMNodeHandle node,
+                               JSAtom prop_atom, const char *value)
+{
+    if (prop_atom == JS_ATOM_NULL || !value) return;
+
+    GCHandle cs_handle = css_ensure_computed_style(node);
+    if (cs_handle == GC_HANDLE_NULL) return;
+
+    CssComputedStyle *cs = (CssComputedStyle *)gc_deref(cs_handle);
+    if (!cs || !cs->properties) return;
+
+    GCValue str_val = JS_NewString(ctx, value);
+    GCHandle str_handle = GC_VALUE_GET_HANDLE(str_val);
+    if (str_handle == GC_HANDLE_NULL) return;
+
+    lf_hash_insert(cs->properties, (uint32_t)prop_atom,
+                   (GCHandle)prop_atom, str_handle);
+
+    /* Also store the camelCase alias so getComputedStyle().fontSize works. */
+    const char *prop_str = JS_AtomToCString(ctx, prop_atom);
+    if (prop_str) {
+        char *camel = css_to_camel_case(prop_str);
+        if (camel && strcmp(camel, prop_str) != 0) {
+            JSAtom camel_atom = JS_NewAtom(ctx, camel);
+            if (camel_atom != JS_ATOM_NULL) {
+                lf_hash_insert(cs->properties, (uint32_t)camel_atom,
+                               (GCHandle)camel_atom, str_handle);
+                JS_FreeAtom(ctx, camel_atom);
+            }
+        }
+        free(camel);
+    }
+}
+
+/* Look up a computed CSS property and return it as a JS value.  Returns
+ * JS_UNDEFINED if no computed value exists. */
+GCValue css_computed_get_property(JSContextHandle ctx, DOMNodeHandle node,
+                                  JSAtom prop_atom)
+{
+    if (prop_atom == JS_ATOM_NULL) return JS_UNDEFINED;
+
+    GCHandle cs_handle = node.computed_style_handle();
+    if (cs_handle == GC_HANDLE_NULL) return JS_UNDEFINED;
+
+    CssComputedStyle *cs = (CssComputedStyle *)gc_deref(cs_handle);
+    if (!cs || !cs->properties) return JS_UNDEFINED;
+
+    GCHandle str_handle = lf_hash_lookup(cs->properties, (uint32_t)prop_atom,
+                                         (GCHandle)prop_atom);
+    if (str_handle == GC_HANDLE_NULL) return JS_UNDEFINED;
+
+    return GC_MKHANDLE(JS_TAG_STRING, str_handle);
+}
+
+/* Allocate and attach the per-document CSS index tables. */
+CssDocumentState *css_document_state_ensure(JSRuntimeHandle rt)
+{
+    CssDocumentState *state = (CssDocumentState *)JS_GetRuntimeOpaque(rt);
+    if (state) return state;
+
+    state = (CssDocumentState *)calloc(1, sizeof(CssDocumentState));
+    if (!state) return NULL;
+
+    state->id_table    = lf_hash_create(CSS_ID_TABLE_BUCKETS);
+    state->class_table = lf_hash_create(CSS_CLASS_TABLE_BUCKETS);
+    state->tag_table   = lf_hash_create(CSS_TAG_TABLE_BUCKETS);
+
+    if (!state->id_table || !state->class_table || !state->tag_table) {
+        if (state->id_table) lf_hash_destroy(state->id_table);
+        if (state->class_table) lf_hash_destroy(state->class_table);
+        if (state->tag_table) lf_hash_destroy(state->tag_table);
+        free(state);
+        return NULL;
+    }
+
+    JS_SetRuntimeOpaque(rt, state);
+    return state;
+}
+
+/* Free the per-document CSS index tables.  Call before gc_cleanup(). */
+void css_document_state_destroy(JSRuntimeHandle rt)
+{
+    CssDocumentState *state = (CssDocumentState *)JS_GetRuntimeOpaque(rt);
+    if (!state) return;
+
+    JS_SetRuntimeOpaque(rt, NULL);
+    if (state->id_table) lf_hash_destroy(state->id_table);
+    if (state->class_table) lf_hash_destroy(state->class_table);
+    if (state->tag_table) lf_hash_destroy(state->tag_table);
+    free(state);
+}
+
+/* Insert a DOM node into the id/class/tag index tables.  Must be called after
+ * the node's id, class, and tag attributes are initialized and the node is
+ * attached to its public JS object. */
+void css_index_insert_node(JSContextHandle ctx, DOMNodeHandle node)
+{
+    if (!node.valid()) return;
+
+    JSRuntimeHandle rt = JS_GetRuntime(ctx);
+    CssDocumentState *state = css_document_state_ensure(rt);
+    if (!state) return;
+
+    GCHandle node_handle = node.handle();
+    GCValue js_obj = node.js_object();
+
+    /* Read id/className from the JS object when available; the DOMNode fields
+     * are not always kept in sync by the current property setters. */
+    const char *id = node.id();
+    char id_buf[256];
+    if ((!id || !id[0]) && !JS_IsNull(js_obj) && !JS_IsUndefined(js_obj)) {
+        GCValue id_val = JS_GetPropertyStr(ctx, js_obj, "id");
+        const char *id_str = JS_ToCString(ctx, id_val);
+        if (id_str) {
+            strncpy(id_buf, id_str, sizeof(id_buf) - 1);
+            id_buf[sizeof(id_buf) - 1] = '\0';
+            id = id_buf;
+        }
+    }
+    if (id && id[0]) {
+        JSAtom id_atom = JS_NewAtom(ctx, id);
+        if (id_atom != JS_ATOM_NULL) {
+            lf_hash_insert(state->id_table, (uint32_t)id_atom,
+                           (GCHandle)id_atom, node_handle);
+            JS_FreeAtom(ctx, id_atom);
+        }
+    }
+
+    const char *class_name = node.class_name();
+    char class_buf[1024];
+    if ((!class_name || !class_name[0]) && !JS_IsNull(js_obj) && !JS_IsUndefined(js_obj)) {
+        GCValue class_val = JS_GetPropertyStr(ctx, js_obj, "className");
+        const char *class_str = JS_ToCString(ctx, class_val);
+        if (class_str) {
+            strncpy(class_buf, class_str, sizeof(class_buf) - 1);
+            class_buf[sizeof(class_buf) - 1] = '\0';
+            class_name = class_buf;
+        }
+    }
+    if (class_name && class_name[0]) {
+        /* Class attribute may contain multiple classes separated by spaces. */
+        char *copy = strdup(class_name);
+        if (copy) {
+            char *saveptr = NULL;
+            for (char *tok = strtok_r(copy, " \t\r\n", &saveptr);
+                 tok != NULL;
+                 tok = strtok_r(NULL, " \t\r\n", &saveptr)) {
+                if (!tok[0]) continue;
+                JSAtom class_atom = JS_NewAtom(ctx, tok);
+                if (class_atom == JS_ATOM_NULL) continue;
+
+                GCHandle prev_head = lf_hash_lookup(state->class_table,
+                                                    (uint32_t)class_atom,
+                                                    (GCHandle)class_atom);
+                node.set_next_class_sibling(prev_head);
+                lf_hash_insert(state->class_table, (uint32_t)class_atom,
+                               (GCHandle)class_atom, node_handle);
+                JS_FreeAtom(ctx, class_atom);
+            }
+            free(copy);
+        }
+    }
+
+    const char *tag = node.node_name();
+    if (tag && tag[0]) {
+        JSAtom tag_atom = JS_NewAtom(ctx, tag);
+        if (tag_atom != JS_ATOM_NULL) {
+            GCHandle prev_head = lf_hash_lookup(state->tag_table,
+                                                (uint32_t)tag_atom,
+                                                (GCHandle)tag_atom);
+            node.set_next_tag_sibling(prev_head);
+            lf_hash_insert(state->tag_table, (uint32_t)tag_atom,
+                           (GCHandle)tag_atom, node_handle);
+            JS_FreeAtom(ctx, tag_atom);
+        }
+    }
+}
+
+/* Return the DOM node JS object with the given id, or JS_NULL if none. */
+GCValue css_get_element_by_id(JSContextHandle ctx, JSAtom id)
+{
+    if (id == JS_ATOM_NULL) return JS_NULL;
+
+    JSRuntimeHandle rt = JS_GetRuntime(ctx);
+    CssDocumentState *state = (CssDocumentState *)JS_GetRuntimeOpaque(rt);
+    if (!state || !state->id_table) return JS_NULL;
+
+    GCHandle node_handle = lf_hash_lookup(state->id_table, (uint32_t)id,
+                                          (GCHandle)id);
+    if (node_handle == GC_HANDLE_NULL) return JS_NULL;
+
+    DOMNodeHandle node(node_handle);
+    if (!node.valid()) return JS_NULL;
+
+    GCValue obj = node.js_object();
+    if (JS_IsNull(obj) || JS_IsUndefined(obj)) return JS_NULL;
+    return obj;
+}
+
+/* Return an array of DOM node JS objects with the given class name. */
+GCValue css_get_elements_by_class_name(JSContextHandle ctx, JSAtom class_atom)
+{
+    if (class_atom == JS_ATOM_NULL) return JS_NewArray(ctx);
+
+    JSRuntimeHandle rt = JS_GetRuntime(ctx);
+    CssDocumentState *state = (CssDocumentState *)JS_GetRuntimeOpaque(rt);
+    if (!state || !state->class_table) return JS_NewArray(ctx);
+
+    GCValue arr = JS_NewArray(ctx);
+    uint32_t idx = 0;
+    GCHandle cur = lf_hash_lookup(state->class_table, (uint32_t)class_atom,
+                                  (GCHandle)class_atom);
+    while (cur != GC_HANDLE_NULL) {
+        DOMNodeHandle node(cur);
+        if (!node.valid()) break;
+        GCValue obj = node.js_object();
+        if (!JS_IsNull(obj) && !JS_IsUndefined(obj)) {
+            JS_SetPropertyUint32(ctx, arr, idx++, obj);
+        }
+        cur = node.next_class_sibling();
+    }
+    return arr;
+}
+
+/* Return an array of DOM node JS objects with the given tag name. */
+GCValue css_get_elements_by_tag_name(JSContextHandle ctx, JSAtom tag_atom)
+{
+    if (tag_atom == JS_ATOM_NULL) return JS_NewArray(ctx);
+
+    JSRuntimeHandle rt = JS_GetRuntime(ctx);
+    CssDocumentState *state = (CssDocumentState *)JS_GetRuntimeOpaque(rt);
+    if (!state || !state->tag_table) return JS_NewArray(ctx);
+
+    GCValue arr = JS_NewArray(ctx);
+    uint32_t idx = 0;
+    GCHandle cur = lf_hash_lookup(state->tag_table, (uint32_t)tag_atom,
+                                  (GCHandle)tag_atom);
+    while (cur != GC_HANDLE_NULL) {
+        DOMNodeHandle node(cur);
+        if (!node.valid()) break;
+        GCValue obj = node.js_object();
+        if (!JS_IsNull(obj) && !JS_IsUndefined(obj)) {
+            JS_SetPropertyUint32(ctx, arr, idx++, obj);
+        }
+        cur = node.next_tag_sibling();
+    }
+    return arr;
+}
 
 // URL capture callback for intercepted media URLs
 static URLCaptureCallback g_url_capture_callback = NULL;
@@ -5273,6 +5621,21 @@ static GCValue js_document_get_elements_by_tag_name(JSContextHandle ctx, GCValue
     return arr;
 }
 
+// Document.prototype.getElementsByClassName - use the lock-free class index table.
+static GCValue js_document_getElementsByClassName(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NewArray(ctx);
+
+    const char *class_name = JS_ToCString(ctx, argv[0]);
+    if (!class_name || !class_name[0]) return JS_NewArray(ctx);
+
+    JSAtom class_atom = JS_NewAtom(ctx, class_name);
+    if (class_atom == JS_ATOM_NULL) return JS_NewArray(ctx);
+    GCValue arr = css_get_elements_by_class_name(ctx, class_atom);
+    JS_FreeAtom(ctx, class_atom);
+    return arr;
+}
+
 // Element.prototype.setAttribute
 static GCValue js_element_set_attribute(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 2) return JS_ThrowTypeError(ctx, "requires at least 2 argument(s)");
@@ -5445,22 +5808,17 @@ static GCValue create_generic_element_stub(JSContextHandle ctx) {
     return stub;
 }
 
-// Document.getElementById - traverse DOM tree from documentElement
+// Document.getElementById - use the lock-free id index table.
 static GCValue js_document_getElementById(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1) return JS_NULL;
     
     const char *id = JS_ToCString(ctx, argv[0]);
     if (!id || !*id) return JS_NULL;
     
-    // Get document.documentElement
-    GCValue doc_elem = JS_GetPropertyStr(ctx, this_val, "documentElement");
-    if (JS_IsNull(doc_elem) || JS_IsUndefined(doc_elem)) return JS_NULL;
-    
-    // Build #id selector and search
-    char selector[256];
-    snprintf(selector, sizeof(selector), "#%s", id);
-    GCValue result = query_selector_recursive(ctx, doc_elem, selector);
-    
+    JSAtom id_atom = JS_NewAtom(ctx, id);
+    if (id_atom == JS_ATOM_NULL) return JS_NULL;
+    GCValue result = css_get_element_by_id(ctx, id_atom);
+    JS_FreeAtom(ctx, id_atom);
     return result;
 }
 
@@ -10119,7 +10477,7 @@ skip_dom_exception:
     DEF_FUNC(ctx, document, "querySelector", js_document_querySelector, 1);
     DEF_FUNC(ctx, document, "querySelectorAll", js_document_querySelectorAll, 1);
     DEF_FUNC(ctx, document, "getElementsByTagName", js_document_get_elements_by_tag_name, 1);
-    DEF_FUNC(ctx, document, "getElementsByClassName", js_empty_array, 1);
+    DEF_FUNC(ctx, document, "getElementsByClassName", js_document_getElementsByClassName, 1);
     DEF_FUNC(ctx, document, "getElementsByName", js_empty_array, 1);
     DEF_FUNC(ctx, document, "elementFromPoint", js_document_element_from_point, 2);
     DEF_FUNC(ctx, document, "addEventListener", js_event_target_addEventListener, 2);

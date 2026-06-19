@@ -10,6 +10,7 @@
 
 #include "quickjs.h"
 #include "quickjs_gc_unified.h"
+#include "lockfree_hash_table.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -330,6 +331,10 @@ typedef struct DOMAttribute {
     char value[2048];
 } DOMAttribute;
 
+typedef struct CssComputedStyle {
+    LFHashTable *properties;          /* atom handle -> JS string value handle */
+} CssComputedStyle;
+
 typedef struct DOMNode {
     int node_type;                    // DOM_NODE_TYPE_*
     char node_name[64];               // tag name for elements, "#text" for text, etc.
@@ -349,13 +354,30 @@ typedef struct DOMNode {
     char id[256];
     char class_name[1024];
     
+    // Computed CSS properties produced by parallel CSS application.
+    GCHandle computed_style_handle;   // handle to CssComputedStyle, or GC_HANDLE_NULL
+    
+    // Index-table list chaining (class/tag tables hold lists of elements).
+    GCHandle next_class_sibling;      // next element with same class atom, or NULL
+    GCHandle next_tag_sibling;        // next element with same tag atom, or NULL
+    
     // Shadow DOM
     GCValue shadow_root;              // Attached shadow root or null
+    
+    // Back-reference to the JS object that owns this DOMNode data.
+    // Used by index tables to return the public element object.
+    GCValue js_object;
     
     // Internal reference to the JS object this data belongs to
     // Used for callbacks and reference management
     JSContextHandle ctx;
 } DOMNode;
+
+typedef struct CssDocumentState {
+    LFHashTable *id_table;            /* atom handle -> DOMNode handle */
+    LFHashTable *class_table;         /* atom handle -> head DOMNode handle (chained) */
+    LFHashTable *tag_table;           /* atom handle -> head DOMNode handle (chained) */
+} CssDocumentState;
 
 /* ============================================================================
  * Location object data

@@ -2345,6 +2345,10 @@ public:
         node->next_sibling = JS_NULL;
         node->owner_document = JS_NULL;
         node->shadow_root = JS_NULL;
+        node->computed_style_handle = GC_HANDLE_NULL;
+        node->next_class_sibling = GC_HANDLE_NULL;
+        node->next_tag_sibling = GC_HANDLE_NULL;
+        node->js_object = JS_NULL;
         
         /* Fully initialized; publish so traversal and GC can see it. */
         gc_publish(h);
@@ -2364,9 +2368,21 @@ public:
         return DOMNodeHandle(h);
     }
     
+    GCValue js_object() const {
+        DOMNode* p = get_ptr();
+        return p ? p->js_object : JS_NULL;
+    }
+    
+    void set_js_object(GCValue val) {
+        DOMNode* p = get_ptr();
+        if (p) p->js_object = val;
+    }
+    
     void attach_to_object(GCValue obj) const {
         if (valid()) {
             JS_SetOpaqueHandle(obj, handle_);
+            DOMNode* p = get_ptr();
+            if (p) p->js_object = obj;
         }
     }
     
@@ -2478,6 +2494,36 @@ public:
     void set_shadow_root(GCValue val) {
         DOMNode* p = get_ptr();
         if (p) p->shadow_root = val;
+    }
+    
+    GCHandle computed_style_handle() const {
+        DOMNode* p = get_ptr();
+        return p ? p->computed_style_handle : GC_HANDLE_NULL;
+    }
+    
+    void set_computed_style_handle(GCHandle val) {
+        DOMNode* p = get_ptr();
+        if (p) p->computed_style_handle = val;
+    }
+    
+    GCHandle next_class_sibling() const {
+        DOMNode* p = get_ptr();
+        return p ? p->next_class_sibling : GC_HANDLE_NULL;
+    }
+    
+    void set_next_class_sibling(GCHandle val) {
+        DOMNode* p = get_ptr();
+        if (p) p->next_class_sibling = val;
+    }
+    
+    GCHandle next_tag_sibling() const {
+        DOMNode* p = get_ptr();
+        return p ? p->next_tag_sibling : GC_HANDLE_NULL;
+    }
+    
+    void set_next_tag_sibling(GCHandle val) {
+        DOMNode* p = get_ptr();
+        if (p) p->next_tag_sibling = val;
     }
     
     // ID

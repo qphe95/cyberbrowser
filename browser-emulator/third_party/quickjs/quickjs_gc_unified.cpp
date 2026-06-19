@@ -1951,6 +1951,14 @@ static void gc_mark_ptr(void *ptr) {
     GCHeader *hdr = gc_header(ptr);
     if (hdr->size == 0 || hdr->gc_color_state != GC_COLOR_WHITE) return;
     
+    /* Opaque grey roots: keep alive but do not scan children. */
+    GCPublishState pub = gc_publish_state_load(hdr->handle);
+    if (pub == PUBLISH_UNBORN) return;
+    if (pub == PUBLISH_GREY) {
+        hdr->gc_color_state = GC_COLOR_BLACK;
+        return;
+    }
+    
     hdr->gc_color_state = GC_COLOR_BLACK;
     
     /* For JSVarRef, mark its value and the referenced frame (to keep parent frames alive) */
@@ -1987,6 +1995,13 @@ static void gc_mark_value(GCValue val) {
                 if (ptr) {
                     GCHeader *hdr = gc_header(ptr);
                     if ((hdr->size & 0x7FFFFFFF) > 0 && hdr->gc_color_state == GC_COLOR_WHITE) {
+                        /* Opaque grey roots: keep alive but do not scan children. */
+                        GCPublishState pub = gc_publish_state_load(handle);
+                        if (pub == PUBLISH_UNBORN) break;
+                        if (pub == PUBLISH_GREY) {
+                            hdr->gc_color_state = GC_COLOR_BLACK;
+                            break;
+                        }
                         hdr->gc_color_state = GC_COLOR_BLACK;
                         if (tag == JS_TAG_OBJECT) {
                             gc_mark_object((JSObject*)ptr);
@@ -2087,6 +2102,16 @@ static void gc_shade(GCHandle handle) {
 
     uint32_t old_color = atomic_load_u32(&hdr->gc_color_state);
     if (old_color != GC_COLOR_WHITE) return;
+
+    /* Objects that are still under construction (PUBLISH_GREY) are opaque
+     * roots: keep them alive but do not scan their children.  The constructing
+     * thread is responsible for publishing.  Unborn slots are invisible. */
+    GCPublishState pub = gc_publish_state_load(handle);
+    if (pub == PUBLISH_UNBORN) return;
+    if (pub == PUBLISH_GREY) {
+        atomic_store_u32(&hdr->gc_color_state, GC_COLOR_BLACK);
+        return;
+    }
 
     uint32_t swapped = atomic_compare_exchange_u32(&hdr->gc_color_state,
                                                     GC_COLOR_WHITE, GC_COLOR_GREY);
@@ -2303,6 +2328,12 @@ static void gc_mark(void) {
                 void *ptr = table[h];
                 GCHeader *hdr = gc_header(ptr);
                 if ((hdr->size & 0x7FFFFFFF) > 0 && hdr->gc_color_state == GC_COLOR_WHITE) {
+                    GCPublishState pub = gc_publish_state_load(h);
+                    if (pub == PUBLISH_UNBORN) continue;
+                    if (pub == PUBLISH_GREY) {
+                        hdr->gc_color_state = GC_COLOR_BLACK;
+                        continue;
+                    }
                     hdr->gc_color_state = GC_COLOR_BLACK;
                     JSGCObjectTypeEnum obj_type = (JSGCObjectTypeEnum)hdr->gc_obj_type;
                     if (obj_type == JS_GC_OBJ_TYPE_JS_OBJECT) {

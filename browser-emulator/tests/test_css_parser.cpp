@@ -9,6 +9,7 @@
 #include "css_parser.h"
 #include "quickjs.h"
 #include "js_quickjs.h"
+#include "browser_api_impl_handles.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -157,6 +158,63 @@ TEST(test_css_apply_parallel) {
     return true;
 }
 
+TEST(test_css_computed_style_and_indexes) {
+    JSContextHandle ctx = get_shared_test_context();
+    if (!ctx.valid()) {
+        printf("    (skipped - no shared context)");
+        return true;
+    }
+
+    const char *html =
+        "<html><head>"
+        "<style>div { color: red; } .box { display: block; } p { margin: 0; }</style>"
+        "</head><body>"
+        "<div id=\"a\" class=\"box\" style=\"font-size: 12px\">hello</div>"
+        "<p>world</p>"
+        "</body></html>";
+
+    HtmlDocument *doc = html_parse(html, strlen(html));
+    ASSERT_TRUE(doc != NULL);
+
+    GCValue js_doc = html_create_js_document(ctx, doc);
+    ASSERT_TRUE(!JS_IsUndefined(js_doc) && !JS_IsNull(js_doc) && !JS_IsException(js_doc));
+
+    ASSERT_TRUE(html_populate_js_document(ctx, js_doc, doc));
+    css_apply_document_styles(ctx, js_doc, doc, "https://example.com/");
+
+    /* getComputedStyle returns real values from the per-element table. */
+    HtmlNode *div = html_document_get_element_by_tag(doc, "div");
+    ASSERT_TRUE(div != NULL && div->has_js_object);
+
+    DOMNodeHandle dom_node = DOMNodeHandle::from_object(div->js_object);
+    ASSERT_TRUE(dom_node.valid());
+
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue get_cs = JS_GetPropertyStr(ctx, global, "getComputedStyle");
+    ASSERT_TRUE(!JS_IsUndefined(get_cs) && !JS_IsNull(get_cs) && !JS_IsException(get_cs));
+    GCValue args[1] = { div->js_object };
+    GCValue cs = JS_Call(ctx, get_cs, global, 1, args);
+    ASSERT_TRUE(!JS_IsUndefined(cs) && !JS_IsNull(cs) && !JS_IsException(cs));
+
+    GCValue color = JS_GetPropertyStr(ctx, cs, "color");
+    const char *color_str = JS_ToCString(ctx, color);
+    ASSERT_TRUE(color_str != NULL);
+    ASSERT_STR_EQ("red", color_str);
+
+    GCValue display = JS_GetPropertyStr(ctx, cs, "display");
+    const char *display_str = JS_ToCString(ctx, display);
+    ASSERT_TRUE(display_str != NULL);
+    ASSERT_STR_EQ("block", display_str);
+
+    GCValue font_size = JS_GetPropertyStr(ctx, cs, "fontSize");
+    const char *font_size_str = JS_ToCString(ctx, font_size);
+    ASSERT_TRUE(font_size_str != NULL);
+    ASSERT_STR_EQ("12px", font_size_str);
+
+    html_document_free(doc);
+    return true;
+}
+
 void run_css_parser_tests(void) {
     printf("\n--- CSS Parser Tests ---\n");
     RUN_TEST(test_parse_empty);
@@ -167,6 +225,7 @@ void run_css_parser_tests(void) {
     RUN_TEST(test_parse_inline_style);
     RUN_TEST(test_parse_inline_style_empty);
     RUN_TEST(test_css_apply_parallel);
+    RUN_TEST(test_css_computed_style_and_indexes);
 }
 
 #ifdef __cplusplus

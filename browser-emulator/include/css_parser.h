@@ -54,6 +54,9 @@ CssDeclaration* css_parse_inline_style(const char *style_attr, int *out_count);
 /* Free an inline-style declaration array. */
 void css_declarations_free(CssDeclaration *decls, int count);
 
+/* Convert a CSS property like "background-color" to "backgroundColor". */
+char* css_to_camel_case(const char *prop);
+
 /*
  * Walk the parsed HTML document, collect inline <style> sheets and external
  * stylesheets, fetch the external ones, then apply matching rules to every

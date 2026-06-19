@@ -5,6 +5,7 @@
 #define BROWSER_API_IMPL_H
 
 #include <quickjs.h>
+#include "browser_api_impl_handles.h"
 
 // Class IDs for DOM/Browser APIs
 extern JSClassID js_shadow_root_class_id;
@@ -38,5 +39,37 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global);
 
 // Helper to get a prototype from a constructor: Constructor.prototype
 GCValue js_get_prototype(JSContextHandle ctx, GCValueConst ctor);
+
+/* ============================================================================
+ * Parallel CSS support helpers
+ * ============================================================================ */
+
+typedef struct CssComputedStyle CssComputedStyle;
+typedef struct CssDocumentState CssDocumentState;
+
+/* Allocate or return the existing computed-style object for a DOM node. */
+GCHandle css_ensure_computed_style(DOMNodeHandle node);
+
+/* Store a computed CSS property for a node. */
+void css_computed_set_property(JSContextHandle ctx, DOMNodeHandle node,
+                               JSAtom prop_atom, const char *value);
+
+/* Look up a computed CSS property and return it as a JS value. */
+GCValue css_computed_get_property(JSContextHandle ctx, DOMNodeHandle node,
+                                  JSAtom prop_atom);
+
+/* Allocate and attach the per-document CSS index tables. */
+CssDocumentState *css_document_state_ensure(JSRuntimeHandle rt);
+
+/* Free the per-document CSS index tables.  Call before gc_cleanup(). */
+void css_document_state_destroy(JSRuntimeHandle rt);
+
+/* Insert a DOM node into the id/class/tag index tables. */
+void css_index_insert_node(JSContextHandle ctx, DOMNodeHandle node);
+
+/* Index-table readers. */
+GCValue css_get_element_by_id(JSContextHandle ctx, JSAtom id);
+GCValue css_get_elements_by_class_name(JSContextHandle ctx, JSAtom class_atom);
+GCValue css_get_elements_by_tag_name(JSContextHandle ctx, JSAtom tag_atom);
 
 #endif // BROWSER_API_IMPL_H

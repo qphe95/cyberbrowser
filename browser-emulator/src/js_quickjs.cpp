@@ -1435,6 +1435,9 @@ bool js_quickjs_create_runtime(void) {
     }
     platform_log(LOG_LEVEL_INFO, "js_quickjs", "Global runtime created: %u", g_js_runtime.handle());
     
+    // Allocate per-document CSS index tables (id/class/tag).
+    css_document_state_ensure(g_js_runtime);
+    
     // Set limits after successful runtime creation
     JS_SetMemoryLimit(g_js_runtime, 256 * 1024 * 1024); // 256MB
     JS_SetMaxStackSize(g_js_runtime, 8 * 1024 * 1024);  // 8MB
@@ -1554,6 +1557,9 @@ void js_quickjs_cleanup(void) {
      * Instead, we just reset the global pointers and let gc_cleanup() free
      * the entire heap in one operation.
      */
+    // Free CSS index tables before the runtime pointer is reset.
+    css_document_state_destroy(g_js_runtime);
+
     g_js_context = JSContextHandle();
     g_js_runtime = JSRuntimeHandle();
     
