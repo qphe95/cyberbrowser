@@ -11,7 +11,7 @@ option(BE_BUILD_TESTS "Build tests" ON)
 option(BE_BUILD_SHARED "Build as shared library" OFF)
 
 # =============================================================================
-# Platform detection (must be before find_package so we know which curl to use)
+# Platform detection
 # =============================================================================
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     set(BE_PLATFORM_MACOS ON)
@@ -26,7 +26,6 @@ endif()
 # =============================================================================
 # Find dependencies
 # =============================================================================
-find_package(CURL REQUIRED)
 find_package(Threads REQUIRED)
 
 # =============================================================================
@@ -186,13 +185,13 @@ set(BE_SOURCES
     
     # Platform abstraction
     src/platform/platform.c
+    src/platform/platform_http.c
 )
 
 # Platform-specific sources
 if(BE_PLATFORM_MACOS OR BE_PLATFORM_LINUX)
     list(APPEND BE_SOURCES
         src/platform/platform_posix.c
-        src/platform/http_curl.c
     )
 elseif(BE_PLATFORM_ANDROID)
     list(APPEND BE_SOURCES
@@ -201,7 +200,6 @@ elseif(BE_PLATFORM_ANDROID)
 elseif(BE_PLATFORM_WINDOWS)
     list(APPEND BE_SOURCES
         src/platform/platform_windows.c
-        src/platform/http_curl.c
     )
 endif()
 
@@ -328,7 +326,6 @@ endif()
 # =============================================================================
 target_link_libraries(browser-emulator
     PUBLIC
-        CURL::libcurl
         Threads::Threads
 )
 

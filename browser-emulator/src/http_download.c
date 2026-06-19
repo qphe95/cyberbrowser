@@ -19,9 +19,6 @@
 #include <pthread.h>
 #include "platform.h"
 
-#ifndef BE_PLATFORM_ANDROID
-#include <curl/curl.h>
-#endif
 
 #define LOG_TAG "http_download"
 #define LOGI(...) platform_log(LOG_LEVEL_INFO, LOG_TAG, __VA_ARGS__)
@@ -82,10 +79,6 @@ static void download_state_set(DownloadState *state, int new_state, const char *
         vsnprintf(state->status, sizeof(state->status), fmt, args);
         va_end(args);
     }
-}
-
-static void download_state_add_bytes(DownloadState *state, size_t bytes) {
-    __atomic_add_fetch(&state->bytes_downloaded, bytes, __ATOMIC_RELAXED);
 }
 
 static void download_state_set_progress(DownloadState *state, size_t downloaded, size_t total) {
@@ -941,17 +934,10 @@ static bool http_get_to_memory_resumable(const char *url, HttpBuffer *outBuffer,
  * Public API: callback-free file download with shared-state progress
  * ============================================================================ */
 
-#ifndef BE_PLATFORM_ANDROID
-static bool http_download_parallel_curl_state(const char *url, const char *filePath,
-                                               int num_connections,
-                                               DownloadState *state,
-                                               char *err, size_t errLen);
-#else
 static bool http_download_parallel_state(const char *url, const char *filePath,
                                           int num_connections,
                                           DownloadState *state,
                                           char *err, size_t errLen);
-#endif
 
 bool http_download_to_file(const char *url, const char *filePath,
                            DownloadState *state,
@@ -963,11 +949,7 @@ bool http_download_to_file(const char *url, const char *filePath,
 
     /* For googlevideo.com, use parallel range download to bypass CDN throttling */
     if (strstr(url, "googlevideo.com")) {
-#ifndef BE_PLATFORM_ANDROID
-        return http_download_parallel_curl_state(url, filePath, 32, state, err, errLen);
-#else
         return http_download_parallel_state(url, filePath, 32, state, err, errLen);
-#endif
     }
 
     FILE *file = fopen_utf8(filePath, "wb");
@@ -998,410 +980,8 @@ bool http_download_to_file(const char *url, const char *filePath,
     return true;
 }
 
-#ifndef BE_PLATFORM_ANDROID
 /* ============================================================================
- * Desktop: parallel range download using libcurl multi (async I/O)
- * ============================================================================ */
-
-#define CURL_MAX_CHUNKS 32
-#define CURL_MIN_CHUNK_SIZE (1024 * 1024)
-
-typedef struct {
-    FILE *file;
-    DownloadState *state;
-    size_t written;
-    char temp_path[512];
-    bool done;
-    CURLcode result;
-    size_t start;
-    size_t end;
-} CurlChunk;
-
-/* Try to locate a CA bundle for libcurl on Windows */
-static const char* find_ca_bundle_path(void) {
-    static const char *paths[] = {
-        "C:/msys64/mingw64/etc/ssl/certs/ca-bundle.crt",
-        "C:/msys64/mingw64/ssl/certs/ca-bundle.crt",
-        "C:/msys64/usr/ssl/certs/ca-bundle.crt",
-        "C:/Program Files/Git/mingw64/ssl/certs/ca-bundle.crt",
-        "C:/Program Files/Git/usr/ssl/certs/ca-bundle.crt",
-        NULL
-    };
-    static const char *found = NULL;
-    if (found) return found;
-    for (int i = 0; paths[i]; i++) {
-        FILE *f = fopen(paths[i], "r");
-        if (f) {
-            fclose(f);
-            found = paths[i];
-            LOGI("Using CA bundle: %s", found);
-            return found;
-        }
-    }
-    return NULL;
-}
-
-static void curl_set_ssl_opts(CURL *curl) {
-    const char *ca_path = find_ca_bundle_path();
-    if (ca_path) {
-        curl_easy_setopt(curl, CURLOPT_CAINFO, ca_path);
-    } else {
-        LOGW("No CA bundle found, disabling SSL peer verification");
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-    }
-}
-
-static size_t curl_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
-    CurlChunk *chunk = (CurlChunk *)userdata;
-    size_t bytes = size * nmemb;
-    size_t written = fwrite(ptr, 1, bytes, chunk->file);
-    if (written > 0) {
-        chunk->written += written;
-        download_state_add_bytes(chunk->state, written);
-    }
-    return written;
-}
-
-static bool http_download_parallel_curl_state(const char *url, const char *filePath,
-                                               int num_connections,
-                                               DownloadState *state,
-                                               char *err, size_t errLen) {
-    if (!url || !filePath || num_connections < 1) {
-        snprintf(err, errLen, "Invalid arguments");
-        return false;
-    }
-    if (num_connections > CURL_MAX_CHUNKS) {
-        num_connections = CURL_MAX_CHUNKS;
-    }
-
-    /* Step 1: Probe file size */
-    if (state) download_state_set(state, 1, "Getting file size...");
-    size_t total_size = 0;
-    {
-        HttpBuffer buffer = {0};
-        int status = 0;
-        const char *headers[] = { "Range: bytes=0-0" };
-        if (!http_request_with_method_internal(url, "GET", NULL, 0,
-                                                headers, 1, &buffer, &status,
-                                                err, errLen, g_youtube_cookies,
-                                                NULL, NULL, &total_size)) {
-            http_free_buffer(&buffer);
-            snprintf(err, errLen, "Failed to get file size");
-            if (state) download_state_set(state, 5, "Failed to get file size");
-            return false;
-        }
-        http_free_buffer(&buffer);
-        if (status != 200 && status != 206) {
-            snprintf(err, errLen, "Server returned HTTP %d", status);
-            if (state) download_state_set(state, 5, "Range requests not supported");
-            return false;
-        }
-        if (total_size == 0) {
-            snprintf(err, errLen, "Could not determine file size");
-            if (state) download_state_set(state, 5, "Could not determine file size");
-            return false;
-        }
-    }
-
-    if (state) {
-        download_state_set(state, 2, "Downloading...");
-        download_state_set_progress(state, 0, total_size);
-    }
-
-    /* Step 2: Calculate chunks */
-    CurlChunk chunks[CURL_MAX_CHUNKS];
-    int num_chunks = num_connections;
-    size_t chunk_size = total_size / num_chunks;
-    if (chunk_size < CURL_MIN_CHUNK_SIZE) {
-        chunk_size = CURL_MIN_CHUNK_SIZE;
-        num_chunks = (int)((total_size + chunk_size - 1) / chunk_size);
-        if (num_chunks > CURL_MAX_CHUNKS) {
-            num_chunks = CURL_MAX_CHUNKS;
-            chunk_size = total_size / num_chunks;
-        }
-    }
-
-    for (int i = 0; i < num_chunks; i++) {
-        chunks[i].written = 0;
-        chunks[i].done = false;
-        chunks[i].result = CURLE_OK;
-        chunks[i].start = (size_t)i * chunk_size;
-        chunks[i].end = (i == num_chunks - 1) ? total_size - 1 : chunks[i].start + chunk_size - 1;
-        snprintf(chunks[i].temp_path, sizeof(chunks[i].temp_path), "%s.part_%03d", filePath, i);
-        chunks[i].file = fopen_utf8(chunks[i].temp_path, "wb");
-        if (!chunks[i].file) {
-            for (int j = 0; j < i; j++) {
-                fclose(chunks[j].file);
-                remove_utf8(chunks[j].temp_path);
-            }
-            snprintf(err, errLen, "Failed to open temp file");
-            if (state) download_state_set(state, 5, "Failed to open temp file");
-            return false;
-        }
-        chunks[i].state = state;
-    }
-
-    /* Step 3: Create curl multi handle */
-    CURLM *multi = curl_multi_init();
-    if (!multi) {
-        for (int i = 0; i < num_chunks; i++) {
-            fclose(chunks[i].file);
-            remove_utf8(chunks[i].temp_path);
-        }
-        snprintf(err, errLen, "curl_multi_init failed");
-        if (state) download_state_set(state, 5, "curl_multi_init failed");
-        return false;
-    }
-
-    int added = 0;
-    for (int i = 0; i < num_chunks; i++) {
-        CURL *curl = curl_easy_init();
-        if (!curl) {
-            LOGE("curl_easy_init failed for chunk %d", i);
-            continue;
-        }
-        curl_easy_setopt(curl, CURLOPT_URL, url);
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &chunks[i]);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-        curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
-        curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
-        curl_easy_setopt(curl, CURLOPT_USERAGENT,
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
-        curl_easy_setopt(curl, CURLOPT_REFERER, "https://www.youtube.com/");
-        if (g_youtube_cookies[0]) {
-            curl_easy_setopt(curl, CURLOPT_COOKIE, g_youtube_cookies);
-        }
-        curl_set_ssl_opts(curl);
-        char range[64];
-        snprintf(range, sizeof(range), "%zu-%zu", chunks[i].start, chunks[i].end);
-        curl_easy_setopt(curl, CURLOPT_RANGE, range);
-        curl_easy_setopt(curl, CURLOPT_PRIVATE, &chunks[i]);
-        CURLMcode mcode = curl_multi_add_handle(multi, curl);
-        if (mcode == CURLM_OK) {
-            added++;
-        } else {
-            LOGE("curl_multi_add_handle failed for chunk %d: %d", i, mcode);
-            curl_easy_cleanup(curl);
-        }
-    }
-    LOGI("Added %d/%d chunks to curl multi handle", added, num_chunks);
-
-    /* Step 4: Async event loop */
-    int running = 0;
-    CURLMcode mcode = curl_multi_perform(multi, &running);
-    LOGI("curl_multi initial perform=%d running=%d", mcode, running);
-    time_t loop_start = time(NULL);
-    time_t last_log = loop_start;
-    int loop_count = 0;
-    while (running > 0) {
-        CURLMsg *msg;
-        int msgs_left;
-        while ((msg = curl_multi_info_read(multi, &msgs_left))) {
-            if (msg->msg == CURLMSG_DONE) {
-                CURL *easy = msg->easy_handle;
-                CurlChunk *chunk = NULL;
-                curl_easy_getinfo(easy, CURLINFO_PRIVATE, &chunk);
-                long response_code = 0;
-                curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &response_code);
-                if (chunk) {
-                    chunk->done = true;
-                    chunk->result = msg->data.result;
-                    LOGI("Chunk done: start=%zu result=%d written=%zu http=%ld", chunk->start, msg->data.result, chunk->written, response_code);
-                } else {
-                    LOGI("Chunk done (no chunk!): result=%d http=%ld", msg->data.result, response_code);
-                }
-                curl_multi_remove_handle(multi, easy);
-                curl_easy_cleanup(easy);
-            }
-        }
-        if (running > 0) {
-            CURLMcode poll_code = curl_multi_poll(multi, NULL, 0, 100, NULL);
-            if (poll_code != CURLM_OK) {
-                LOGI("curl_multi_poll error: %d", poll_code);
-            }
-            CURLMcode perf_code = curl_multi_perform(multi, &running);
-            if (perf_code != CURLM_OK) {
-                LOGI("curl_multi_perform error: %d", perf_code);
-            }
-        }
-        loop_count++;
-        time_t now = time(NULL);
-        if (now - last_log >= 5) {
-            size_t total_written = 0;
-            for (int i = 0; i < num_chunks; i++) total_written += chunks[i].written;
-            LOGI("curl_multi progress: %ds running=%d total_written=%zu", (int)(now - loop_start), running, total_written);
-            last_log = now;
-        }
-    }
-    LOGI("curl_multi loop exited after %d iterations", loop_count);
-
-    /* Clean up any remaining easy handles */
-    {
-        CURLMsg *msg;
-        int msgs_left;
-        while ((msg = curl_multi_info_read(multi, &msgs_left))) {
-            if (msg->msg == CURLMSG_DONE) {
-                CURL *easy = msg->easy_handle;
-                CurlChunk *chunk = NULL;
-                curl_easy_getinfo(easy, CURLINFO_PRIVATE, &chunk);
-                if (chunk) {
-                    chunk->done = true;
-                    chunk->result = msg->data.result;
-                }
-                curl_multi_remove_handle(multi, easy);
-                curl_easy_cleanup(easy);
-            }
-        }
-    }
-    curl_multi_cleanup(multi);
-
-    /* Step 5: Retry failed chunks sequentially */
-    bool all_success = true;
-    for (int i = 0; i < num_chunks; i++) {
-        if (chunks[i].result != CURLE_OK || chunks[i].written == 0) {
-            all_success = false;
-        }
-    }
-
-    if (!all_success) {
-        for (int retry = 0; retry < 2; retry++) {
-            bool any_failed = false;
-            for (int i = 0; i < num_chunks; i++) {
-                if (chunks[i].result != CURLE_OK || chunks[i].written == 0) {
-                    LOGI("Retrying chunk %d (attempt %d)", i, retry + 1);
-                    /* Reset progress for this chunk before retry */
-                    if (state) {
-                        size_t current = __atomic_load_n(&state->bytes_downloaded, __ATOMIC_RELAXED);
-                        if (current >= chunks[i].written) {
-                            __atomic_sub_fetch(&state->bytes_downloaded, chunks[i].written, __ATOMIC_RELAXED);
-                        }
-                    }
-                    chunks[i].written = 0;
-                    fclose(chunks[i].file);
-                    chunks[i].file = fopen_utf8(chunks[i].temp_path, "wb");
-                    if (!chunks[i].file) {
-                        LOGE("Failed to reopen temp file for retry: %s", chunks[i].temp_path);
-                        any_failed = true;
-                        continue;
-                    }
-                    CURL *curl = curl_easy_init();
-                    if (curl) {
-                        curl_easy_setopt(curl, CURLOPT_URL, url);
-                        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
-                        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &chunks[i]);
-                        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-                        curl_easy_setopt(curl, CURLOPT_USERAGENT,
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
-                        curl_easy_setopt(curl, CURLOPT_REFERER, "https://www.youtube.com/");
-                        if (g_youtube_cookies[0]) {
-                            curl_easy_setopt(curl, CURLOPT_COOKIE, g_youtube_cookies);
-                        }
-                        curl_set_ssl_opts(curl);
-                        char range[64];
-                        snprintf(range, sizeof(range), "%zu-%zu", chunks[i].start, chunks[i].end);
-                        curl_easy_setopt(curl, CURLOPT_RANGE, range);
-                        CURLcode res = curl_easy_perform(curl);
-                        chunks[i].result = res;
-                        LOGI("Chunk retry %d result=%d written=%zu", i, res, chunks[i].written);
-                        curl_easy_cleanup(curl);
-                    }
-                    if (chunks[i].result != CURLE_OK || chunks[i].written == 0) {
-                        any_failed = true;
-                    }
-                }
-            }
-            if (!any_failed) {
-                all_success = true;
-                break;
-            }
-        }
-    }
-
-    /* Sync progress to actual sum of all chunks (fixes any overcounting) */
-    if (state) {
-        size_t actual_total = 0;
-        for (int i = 0; i < num_chunks; i++) {
-            actual_total += chunks[i].written;
-        }
-        download_state_set_progress(state, actual_total, total_size);
-    }
-
-    for (int i = 0; i < num_chunks; i++) {
-        fclose(chunks[i].file);
-    }
-
-    if (!all_success) {
-        for (int i = 0; i < num_chunks; i++) {
-            remove_utf8(chunks[i].temp_path);
-        }
-        snprintf(err, errLen, "Some chunks failed to download");
-        if (state) download_state_set(state, 5, "Some chunks failed to download");
-        return false;
-    }
-
-    /* Step 6: Concatenate with incremental progress */
-    if (state) download_state_set(state, 3, "Finishing...");
-    FILE *out = fopen_utf8(filePath, "wb");
-    if (!out) {
-        for (int i = 0; i < num_chunks; i++) {
-            remove_utf8(chunks[i].temp_path);
-        }
-        snprintf(err, errLen, "Failed to open output file");
-        if (state) download_state_set(state, 5, "Failed to open output file");
-        return false;
-    }
-
-    size_t concat_total = 0;
-    for (int i = 0; i < num_chunks; i++) {
-        FILE *in = fopen_utf8(chunks[i].temp_path, "rb");
-        if (!in) {
-            fclose(out);
-            remove_utf8(filePath);
-            for (int j = 0; j < num_chunks; j++) {
-                remove_utf8(chunks[j].temp_path);
-            }
-            snprintf(err, errLen, "Failed to open temp file %d", i);
-            if (state) download_state_set(state, 5, "Failed to open temp file");
-            return false;
-        }
-
-        char buf[CHUNK_SIZE];
-        size_t n;
-        while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
-            if (fwrite(buf, 1, n, out) != n) {
-                fclose(in);
-                fclose(out);
-                remove_utf8(filePath);
-                for (int j = 0; j < num_chunks; j++) {
-                    remove_utf8(chunks[j].temp_path);
-                }
-                snprintf(err, errLen, "Failed to write to output file");
-                if (state) download_state_set(state, 5, "Failed to write to output file");
-                return false;
-            }
-            concat_total += n;
-            if (state) download_state_set_progress(state, concat_total, total_size);
-        }
-        fclose(in);
-        remove_utf8(chunks[i].temp_path);
-    }
-
-    fclose(out);
-    if (state) {
-        download_state_set_progress(state, total_size, total_size);
-        download_state_set(state, 4, "Download complete");
-    }
-    LOGI("Parallel download complete: %s (%zu bytes)", filePath, total_size);
-    return true;
-}
-
-#else /* BE_PLATFORM_ANDROID */
-/* ============================================================================
- * Android: parallel range download using pthreads (fallback)
+ * Parallel range download using pthreads (native TLS stack)
  * ============================================================================ */
 
 #define MAX_PARALLEL_CONNECTIONS 32
@@ -1428,11 +1008,11 @@ typedef struct {
     ParallelState *shared;
 } ThreadArgs;
 
-static void* parallel_download_thread_android(void *arg) {
+static void* parallel_download_thread(void *arg) {
     ThreadArgs *args = (ThreadArgs *)arg;
     ChunkInfo *chunk = args->chunk;
 
-    FILE *file = fopen(chunk->temp_path, "wb");
+    FILE *file = fopen_utf8(chunk->temp_path, "wb");
     if (!file) {
         snprintf(chunk->err, sizeof(chunk->err), "Failed to open temp file");
         chunk->success = false;
@@ -1559,7 +1139,7 @@ static bool http_download_parallel_state(const char *url, const char *filePath,
         thread_args[i].cookies = g_youtube_cookies;
         thread_args[i].chunk = &chunks[i];
         thread_args[i].shared = &shared;
-        if (pthread_create(&threads[i], NULL, parallel_download_thread_android, &thread_args[i]) != 0) {
+        if (pthread_create(&threads[i], NULL, parallel_download_thread, &thread_args[i]) != 0) {
             for (int j = 0; j < i; j++) pthread_join(threads[j], NULL);
             platform_mutex_destroy(shared.mutex);
             for (int j = 0; j < i; j++) remove_utf8(chunks[j].temp_path);
@@ -1586,7 +1166,7 @@ static bool http_download_parallel_state(const char *url, const char *filePath,
                     LOGI("Retrying chunk %d (attempt %d)", i, retry + 1);
                     ThreadArgs args = { .url = url, .cookies = g_youtube_cookies,
                                         .chunk = &chunks[i], .shared = &shared };
-                    parallel_download_thread_android(&args);
+                    parallel_download_thread(&args);
                     if (!chunks[i].success) any_failed = true;
                 }
             }
@@ -1604,7 +1184,7 @@ static bool http_download_parallel_state(const char *url, const char *filePath,
     }
 
     if (state) download_state_set(state, 3, "Finishing...");
-    FILE *out = fopen(filePath, "wb");
+    FILE *out = fopen_utf8(filePath, "wb");
     if (!out) {
         for (int i = 0; i < num_chunks; i++) remove_utf8(chunks[i].temp_path);
         snprintf(err, errLen, "Failed to open output file");
@@ -1613,7 +1193,7 @@ static bool http_download_parallel_state(const char *url, const char *filePath,
     }
 
     for (int i = 0; i < num_chunks; i++) {
-        FILE *in = fopen(chunks[i].temp_path, "rb");
+        FILE *in = fopen_utf8(chunks[i].temp_path, "rb");
         if (!in) {
             fclose(out); remove_utf8(filePath);
             for (int j = 0; j < num_chunks; j++) remove_utf8(chunks[j].temp_path);
@@ -1644,7 +1224,6 @@ static bool http_download_parallel_state(const char *url, const char *filePath,
     LOGI("Parallel download complete: %s (%zu bytes)", filePath, total_size);
     return true;
 }
-#endif /* BE_PLATFORM_ANDROID */
 
 /* Legacy WebView functions - now no-ops */
 void http_download_via_webview(const char *url, void *app) {

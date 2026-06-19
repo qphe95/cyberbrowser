@@ -19,11 +19,10 @@ CFLAGS = -Wall -Wextra -O2 -g -DBE_PLATFORM_MACOS \
 
 CXXFLAGS = $(CFLAGS) -std=c++17
 
-LDFLAGS = -L/opt/homebrew/opt/curl/lib -lcurl -lpthread -lm -lstdc++
-CFLAGS += -I/opt/homebrew/opt/curl/include
+LDFLAGS = -lpthread -lm -lstdc++
 
-# Platform abstraction sources (using curl for HTTP)
-PLATFORM_SRC = src/platform/platform.c src/platform/platform_posix.c src/platform/http_curl.c
+# Platform abstraction sources (using native http_download.c / tls_client.c stack)
+PLATFORM_SRC = src/platform/platform.c src/platform/platform_posix.c src/platform/platform_http.c
 
 # Core browser-emulator sources (C and C++)
 CORE_SRC_C = src/url_analyzer.c src/http_download.c src/tls_client.c

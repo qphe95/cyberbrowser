@@ -83,10 +83,9 @@ set INC=%INC% /I"%PROJ_ROOT%\app\src\main\cpp"
 set INC=%INC% /I"%BUILD%\embedded_shaders"
 
 if defined VULKAN_INC set "INC=%INC% %VULKAN_INC%"
-if defined CURL_INC set "INC=%INC% %CURL_INC%"
 if defined GLFW_INC set "INC=%INC% %GLFW_INC%"
 
-set "DEFS=/DCONFIG_VERSION=\"2024-02-14\" /D_GNU_SOURCE /DBE_PLATFORM_WINDOWS /DCURL_STATICLIB /DWIN32_LEAN_AND_MEAN /DNOMINMAX /DVK_USE_PLATFORM_WIN32_KHR"
+set "DEFS=/DCONFIG_VERSION=\"2024-02-14\" /D_GNU_SOURCE /DBE_PLATFORM_WINDOWS /DWIN32_LEAN_AND_MEAN /DNOMINMAX /DVK_USE_PLATFORM_WIN32_KHR"
 set "CFLAGS=/W4 /O2 /Zi /nologo /MT /Fd%BUILD%\ %INC% %DEFS%"
 set "CXXFLAGS=%CFLAGS% /EHsc /std:c++20"
 
@@ -182,7 +181,7 @@ cl %CFLAGS%   /c "%ROOT%\src\platform\platform.c"     /Fo"%BUILD%\platform.obj"
 if errorlevel 1 exit /b 1
 cl %CFLAGS%   /c "%ROOT%\src\platform\platform_windows.c" /Fo"%BUILD%\platform_windows.obj"
 if errorlevel 1 exit /b 1
-cl %CFLAGS%   /c "%ROOT%\src\platform\http_curl.c"    /Fo"%BUILD%\http_curl.obj"
+cl %CFLAGS%   /c "%ROOT%\src\platform\platform_http.c" /Fo"%BUILD%\platform_http.obj"
 if errorlevel 1 exit /b 1
 
 :: ============================================================================
@@ -235,7 +234,7 @@ echo "%BUILD%\tls_client.obj" >> "%RSP%"
 echo "%BUILD%\http_download.obj" >> "%RSP%"
 echo "%BUILD%\platform.obj" >> "%RSP%"
 echo "%BUILD%\platform_windows.obj" >> "%RSP%"
-echo "%BUILD%\http_curl.obj" >> "%RSP%"
+echo "%BUILD%\platform_http.obj" >> "%RSP%"
 echo "%BUILD%\main_windows.obj" >> "%RSP%"
 echo "%BUILD%\vulkan_ui.obj" >> "%RSP%"
 echo "%BUILD%\ui_layout.obj" >> "%RSP%"
@@ -245,7 +244,6 @@ echo "%BUILD%\embedded_shaders.obj" >> "%RSP%"
 
 echo %VULKAN_LIB% >> "%RSP%"
 echo %GLFW_LIB% >> "%RSP%"
-echo %CURL_LIB% >> "%RSP%"
 echo gdi32.lib >> "%RSP%"
 echo user32.lib >> "%RSP%"
 echo kernel32.lib >> "%RSP%"
@@ -308,26 +306,6 @@ if exist "%LOCALAPPDATA%\Temp\vulkan-1.lib" (
 )
 
 :vulkan_done
-
-:: --- curl ---
-if exist "C:\vcpkg\installed\x64-windows-static\include\curl\curl.h" (
-    set "CURL_INC=/I"C:\vcpkg\installed\x64-windows-static\include""
-    set "CURL_LIB=C:\vcpkg\installed\x64-windows-static\lib\libcurl.lib"
-    echo Found curl in C:\vcpkg (x64-windows-static)
-    goto :curl_done
-)
-if exist "C:\vcpkg\installed\x64-windows\include\curl\curl.h" (
-    set "CURL_INC=/I"C:\vcpkg\installed\x64-windows\include""
-    set "CURL_LIB=C:\vcpkg\installed\x64-windows\lib\libcurl.lib"
-    echo Found curl in C:\vcpkg (x64-windows)
-    goto :curl_done
-)
-
-echo ERROR: Could not find curl. Set CURL_ROOT or install via vcpkg:
-echo   vcpkg install curl
-exit /b 1
-
-:curl_done
 
 :: --- glfw3 ---
 if exist "C:\vcpkg\installed\x64-windows-static\include\GLFW\glfw3.h" (

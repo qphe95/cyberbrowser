@@ -23,12 +23,6 @@ if ! command -v cmake &> /dev/null; then
     exit 1
 fi
 
-if ! pkg-config --exists libcurl; then
-    echo -e "${RED}Error: libcurl is not installed${NC}"
-    echo "Install with: brew install curl"
-    exit 1
-fi
-
 # Create build directory
 mkdir -p "${BUILD_DIR}"
 cd "${BUILD_DIR}"
