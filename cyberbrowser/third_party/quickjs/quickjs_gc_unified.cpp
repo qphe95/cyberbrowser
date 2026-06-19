@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <stddef.h>
 #include <string.h>
 #include <assert.h>
 #include <stdio.h>
@@ -135,6 +136,8 @@ GCState g_gc = {0};
 
 static void gc_run_internal(void);
 static void gc_maybe_run(void);
+static bool free_queue_init(void);
+static void free_queue_cleanup(void);
 
 /* Forward declarations for canary functions (defined later) */
 static inline uint64_t *gc_canary_prefix_ptr(GCHeader *hdr);
@@ -956,22 +959,13 @@ bool gc_init(void) {
     /* Buffer 0 is active initially */
     g_gc.active_handle_table = g_gc.buffers[0].handles;
     
-    /* Initialize lock-free free-list next-links */
-    g_gc.free_next = (uint32_t*)malloc(GC_INITIAL_HANDLES * sizeof(uint32_t));
-    if (!g_gc.free_next) {
-        gc_buffer_cleanup(&g_gc.buffers[0]);
-        gc_buffer_cleanup(&g_gc.buffers[1]);
-        return false;
-    }
-    g_gc.free_head = GC_HANDLE_NULL;
-    g_gc.free_next_capacity = GC_INITIAL_HANDLES;
+    /* Initialize lock-free handle free list (ABA-safe MPMC queue) */
+    memset(&g_gc.free_queue, 0, sizeof(g_gc.free_queue));
     g_gc.free_count = 0;
     
     /* Initialize per-handle publication state */
     g_gc.publish_state = (uint32_t*)calloc(GC_INITIAL_HANDLES, sizeof(uint32_t));
     if (!g_gc.publish_state) {
-        free(g_gc.free_next);
-        g_gc.free_next = NULL;
         gc_buffer_cleanup(&g_gc.buffers[0]);
         gc_buffer_cleanup(&g_gc.buffers[1]);
         return false;
@@ -982,8 +976,6 @@ bool gc_init(void) {
     g_gc.root_set.capacity = 256;
     g_gc.root_set.roots = (GCHandle*)malloc(g_gc.root_set.capacity * sizeof(GCHandle));
     if (!g_gc.root_set.roots) {
-        free(g_gc.free_next);
-        g_gc.free_next = NULL;
         gc_buffer_cleanup(&g_gc.buffers[0]);
         gc_buffer_cleanup(&g_gc.buffers[1]);
         return false;
@@ -1008,8 +1000,6 @@ bool gc_init(void) {
             free(g_gc.root_set.roots);
             g_gc.root_set.roots = NULL;
         }
-        free(g_gc.free_next);
-        g_gc.free_next = NULL;
         free(g_gc.publish_state);
         g_gc.publish_state = NULL;
         g_gc.publish_state_capacity = 0;
@@ -1024,6 +1014,12 @@ bool gc_init(void) {
         gc_type_bucket_init(&g_gc.type_buckets[i]);
     }
     
+    if (!free_queue_init()) {
+        /* Cleanup already-initialized state */
+        gc_cleanup();
+        return false;
+    }
+    
     atomic_store_u32(&g_gc.gc_phase, (uint32_t)GC_PHASE_IDLE);
     atomic_store_u32(&g_gc.compaction_target, (uint32_t)0);
     g_gc.bytes_allocated = 0;
@@ -1034,9 +1030,9 @@ bool gc_init(void) {
     g_gc.handles.ptrs = g_gc.buffers[0].handles;
     g_gc.handles.count = g_gc.buffers[0].handle_count;
     g_gc.handles.capacity = g_gc.buffers[0].handle_capacity;
-    g_gc.handles.free_list = NULL;   /* legacy array replaced by lock-free stack */
+    g_gc.handles.free_list = NULL;   /* legacy array replaced by lock-free queue */
     g_gc.handles.free_count = 0;
-    g_gc.handles.free_capacity = g_gc.free_next_capacity;
+    g_gc.handles.free_capacity = 0;
     
     g_gc.initialized = true;
     
@@ -1090,11 +1086,8 @@ void gc_cleanup(void) {
         g_gc.root_set.roots = NULL;
     }
     
-    /* Free handle free list next-links */
-    if (g_gc.free_next) {
-        free(g_gc.free_next);
-        g_gc.free_next = NULL;
-    }
+    /* Free handle free list queue buffers */
+    free_queue_cleanup();
     
     /* Free publication state array */
     if (g_gc.publish_state) {
@@ -1563,42 +1556,198 @@ static bool grow_handle_tables(void) {
         g_gc.publish_state_capacity = new_capacity;
     }
     
-    /* Grow the free-list next-link array in lock-step with handle tables */
-    if (new_capacity > g_gc.free_next_capacity) {
-        uint32_t *new_next = (uint32_t*)realloc(g_gc.free_next, new_capacity * sizeof(uint32_t));
-        if (!new_next) {
-            fprintf(stderr, "[FATAL] Failed to grow free next-links to %u entries\n", new_capacity);
-            return false;
-        }
-        g_gc.free_next = new_next;
-        g_gc.free_next_capacity = new_capacity;
-    }
-    
     GC_LOGI("Grew handle tables to %u entries", new_capacity);
     return true;
 }
 
-/*
- * push_free_handle - Lock-free push onto the handle free list (Treiber stack).
+/* ============================================================================
+ * Lock-free handle free list (MPMC queue, ABA-safe)
  *
- * free_next[handle] stores the previous head.  We CAS free_head until our
- * snapshot matches.  free_next is grown in lock-step with handle tables, so
- * capacity is always sufficient.
+ * Reuses the JobBuffer/JobQueue design from the JS job queue.  Handles are
+ * stored in flat-array blocks chained together; producers append to tail_block
+ * and consumers drain from head_block.  Refcounting protects in-flight readers
+ * from freeing blocks under them, eliminating the classic ABA problem of a
+ * single-word Treiber stack.
+ * ============================================================================ */
+
+#define GC_FREE_QUEUE_INITIAL_CAPACITY 1024
+#define GC_FREE_QUEUE_HEADROOM_FACTOR  2
+
+static JobBuffer *free_queue_buffer_alloc(uint64_t capacity)
+{
+    size_t size = offsetof(JobBuffer, jobs) + capacity * sizeof(GCHandle);
+    JobBuffer *b = (JobBuffer *)malloc(size);
+    if (!b) return NULL;
+    memset(b, 0, size);
+    b->capacity = capacity;
+    b->refcount = 0;
+    return b;
+}
+
+static inline void free_queue_acquire_buffer(JobBuffer *b)
+{
+    if (b) atomic_fetch_add_u32(&b->refcount, 1);
+}
+
+static inline void free_queue_release_buffer(JobBuffer *b)
+{
+    if (!b) return;
+    if (atomic_fetch_sub_u32(&b->refcount, 1) == 1) {
+        JobBuffer *next = (JobBuffer *)atomic_load_ptr((void *volatile *)&b->next);
+        free(b);
+        free_queue_release_buffer(next);
+    }
+}
+
+/* Atomically replace *ptr with desired, updating refcounts so the old target
+   is freed once the queue and all in-flight threads are done with it. */
+static BOOL free_queue_rc_pointer_cas(JobBuffer *volatile *ptr,
+                                      JobBuffer *expected,
+                                      JobBuffer *desired)
+{
+    free_queue_acquire_buffer(desired);
+    if (atomic_compare_exchange_ptr((void *volatile *)ptr,
+                                    (void *)expected,
+                                    (void *)desired)
+        == expected) {
+        free_queue_release_buffer(expected);  /* queue drops its reference */
+        return TRUE;
+    }
+    free_queue_release_buffer(desired);       /* undo the acquire */
+    return FALSE;
+}
+
+static bool free_queue_init(void)
+{
+    JobBuffer *buf = free_queue_buffer_alloc(GC_FREE_QUEUE_INITIAL_CAPACITY);
+    if (!buf) return false;
+    atomic_fetch_add_u32(&buf->refcount, 1);
+    atomic_store_ptr((void *volatile *)&g_gc.free_queue.head_block, buf);
+    atomic_fetch_add_u32(&buf->refcount, 1);
+    atomic_store_ptr((void *volatile *)&g_gc.free_queue.tail_block, buf);
+    return true;
+}
+
+static void free_queue_cleanup(void)
+{
+    JobBuffer *b = atomic_load_ptr((void *volatile *)&g_gc.free_queue.head_block);
+    while (b) {
+        JobBuffer *next = (JobBuffer *)atomic_load_ptr((void *volatile *)&b->next);
+        free(b);
+        b = next;
+    }
+    atomic_store_ptr((void *volatile *)&g_gc.free_queue.head_block, NULL);
+    atomic_store_ptr((void *volatile *)&g_gc.free_queue.tail_block, NULL);
+}
+
+/*
+ * push_free_handle - Lock-free enqueue onto the handle free list.
  */
 static inline void push_free_handle(GCHandle handle) {
-    if (handle == GC_HANDLE_NULL || handle >= g_gc.free_next_capacity) return;
+    if (handle == GC_HANDLE_NULL) return;
     
-    uint32_t old_head = atomic_load_u32(&g_gc.free_head);
-    int spin = 0;
-    do {
-        g_gc.free_next[handle] = old_head;
-        if (++spin >= 1000) {
-            spin = 0;
-            gc_thread_yield();
+    for (;;) {
+        JobBuffer *tb = atomic_load_ptr((void *volatile *)&g_gc.free_queue.tail_block);
+        free_queue_acquire_buffer(tb);
+        
+        uint64_t head = atomic_load_u64(&tb->head);
+        uint64_t tail = atomic_load_u64(&tb->tail);
+        
+        if (tail < tb->capacity && head < tb->capacity / 2) {
+            if (atomic_compare_exchange_u64(&tb->tail, tail, tail + 1) == tail) {
+                atomic_store_u32((volatile uint32_t *)&tb->jobs[tail], handle);
+                free_queue_release_buffer(tb);
+                atomic_fetch_add_u32(&g_gc.free_count, 1);
+                return;
+            }
+            free_queue_release_buffer(tb);
+            continue;
         }
-    } while (atomic_compare_exchange_u32(&g_gc.free_head, old_head, handle) != old_head);
-    
-    atomic_fetch_add_u32(&g_gc.free_count, 1);
+        
+        /* tail_block is full or half consumed.  Link a successor while we hold
+           our reference to tb, so tb cannot be freed while we touch tb->next. */
+        JobBuffer *next = (JobBuffer *)atomic_load_ptr((void *volatile *)&tb->next);
+        if (!next) {
+            uint64_t count = (tail >= head) ? (tail - head) : 0;
+            uint64_t new_capacity = count * GC_FREE_QUEUE_HEADROOM_FACTOR;
+            if (new_capacity < GC_FREE_QUEUE_INITIAL_CAPACITY)
+                new_capacity = GC_FREE_QUEUE_INITIAL_CAPACITY;
+            JobBuffer *newb = free_queue_buffer_alloc(new_capacity);
+            if (!newb) { free_queue_release_buffer(tb); return; }
+            atomic_store_u64(&newb->head, 0);
+            atomic_store_u64(&newb->tail, 0);
+            
+            /* Acquire newb before linking.  If we win the CAS, this reference
+               becomes the link reference and must not be released. */
+            free_queue_acquire_buffer(newb);
+            JobBuffer *prev = (JobBuffer *)atomic_compare_exchange_ptr(
+                (void *volatile *)&tb->next, NULL, (void *)newb);
+            if (prev == NULL) {
+                next = newb;
+            } else {
+                next = prev;
+                free_queue_release_buffer(newb);  /* someone else linked first; free ours */
+            }
+        }
+        
+        /* Advance tail_block so future producers write to next. */
+        if (free_queue_rc_pointer_cas(&g_gc.free_queue.tail_block, tb, next)) {
+            /* Queue dropped its ref to tb; drop ours too. */
+            free_queue_release_buffer(tb);
+        } else {
+            free_queue_release_buffer(tb);
+        }
+        
+        gc_thread_yield();
+    }
+}
+
+/*
+ * pop_free_handle - Lock-free dequeue from the handle free list.
+ * Returns GC_HANDLE_NULL if the queue is empty.
+ */
+static GCHandle pop_free_handle(void) {
+    for (;;) {
+        JobBuffer *hb = atomic_load_ptr((void *volatile *)&g_gc.free_queue.head_block);
+        if (!hb) return GC_HANDLE_NULL;
+        free_queue_acquire_buffer(hb);
+        
+        uint64_t head = atomic_load_u64(&hb->head);
+        uint64_t tail = atomic_load_u64(&hb->tail);
+        
+        if (head < tail) {
+            if (atomic_compare_exchange_u64(&hb->head, head, head + 1) == head) {
+                uint64_t idx = head;
+                GCHandle handle;
+                /* Wait for the producer to publish the handle. */
+                while ((handle = atomic_load_u32((volatile uint32_t *)&hb->jobs[idx]))
+                       == GC_HANDLE_NULL) {
+                    gc_thread_yield();
+                }
+                atomic_store_u32((volatile uint32_t *)&hb->jobs[idx], GC_HANDLE_NULL);
+                free_queue_release_buffer(hb);
+                atomic_fetch_sub_u32(&g_gc.free_count, 1);
+                return handle;
+            }
+            free_queue_release_buffer(hb);
+            continue;
+        }
+        
+        /* head_block is empty.  Move to the next block if one has been linked. */
+        JobBuffer *next = (JobBuffer *)atomic_load_ptr((void *volatile *)&hb->next);
+        if (next) {
+            if (free_queue_rc_pointer_cas(&g_gc.free_queue.head_block, hb, next)) {
+                free_queue_release_buffer(hb);  /* queue dropped its ref to hb */
+            } else {
+                free_queue_release_buffer(hb);  /* head_block changed under us */
+            }
+            gc_thread_yield();
+            continue;
+        }
+        
+        free_queue_release_buffer(hb);
+        return GC_HANDLE_NULL;
+    }
 }
 
 /*
@@ -1624,25 +1773,13 @@ static void write_handle_pointer(GCHandle handle, void *ptr) {
  * the object pointer with write_handle_pointer().
  */
 static GCHandle allocate_handle_slot(void) {
-    /* Fast path: lock-free pop from the handle free list (Treiber stack). */
-    uint32_t old_head = atomic_load_u32(&g_gc.free_head);
-    int spin = 0;
-    while (old_head != GC_HANDLE_NULL) {
-        uint32_t new_head = g_gc.free_next[old_head];
-        uint32_t swapped = atomic_compare_exchange_u32(&g_gc.free_head, old_head, new_head);
-        if (swapped == old_head) {
-            GCHandle handle = old_head;
-            if (handle < g_gc.publish_state_capacity) {
-                atomic_store_u32(&g_gc.publish_state[handle], (uint32_t)PUBLISH_UNBORN);
-            }
-            atomic_fetch_sub_u32(&g_gc.free_count, 1);
-            return handle;
+    /* Fast path: lock-free dequeue from the handle free list. */
+    GCHandle handle = pop_free_handle();
+    if (handle != GC_HANDLE_NULL) {
+        if (handle < g_gc.publish_state_capacity) {
+            atomic_store_u32(&g_gc.publish_state[handle], (uint32_t)PUBLISH_UNBORN);
         }
-        old_head = swapped;
-        if (++spin >= 1000) {
-            spin = 0;
-            gc_thread_yield();
-        }
+        return handle;
     }
     
     /* Need to allocate a new slot - atomically increment handle_count */
@@ -1656,7 +1793,7 @@ static GCHandle allocate_handle_slot(void) {
         GC_LOGI("Grew handle tables, now capacity=%u", active->handle_capacity);
     }
     
-    GCHandle handle = atomic_fetch_add_u32(&active->handle_count, 1);
+    handle = atomic_fetch_add_u32(&active->handle_count, 1);
     
     /* Also ensure the other buffer's handle_count stays in sync */
     GCBuffer *other = gc_inactive_buffer();
@@ -2607,8 +2744,12 @@ static void gc_compact_move_objects(size_t *out_user_bytes) {
  * After compaction, scan the handle table and add all NULL entries to the free list.
  */
 static void gc_compact_rebuild_free_list(void) {
-    /* Compaction is single-threaded; reset the lock-free stack and rebuild. */
-    atomic_store_u32(&g_gc.free_head, GC_HANDLE_NULL);
+    /* Compaction is single-threaded; reset the lock-free queue and rebuild. */
+    free_queue_cleanup();
+    if (!free_queue_init()) {
+        GC_LOGE("gc_compact_rebuild_free_list: failed to reinitialize free queue");
+        return;
+    }
     atomic_store_u32(&g_gc.free_count, 0);
     
     GCBuffer *active = gc_active_buffer();
@@ -2655,7 +2796,7 @@ static void gc_compact(void) {
     g_gc.handles.capacity = g_gc.buffers[new_active].handle_capacity;
     g_gc.handles.free_list = NULL;
     g_gc.handles.free_count = atomic_load_u32(&g_gc.free_count);
-    g_gc.handles.free_capacity = g_gc.free_next_capacity;
+    g_gc.handles.free_capacity = 0;
     
     /* Phase 4: Reset old buffer for next compaction cycle */
     GCBuffer *old_buf = &g_gc.buffers[old_active];
@@ -2899,7 +3040,10 @@ void gc_reset(void) {
     g_gc.root_set.count = 0;
     
     g_gc.bytes_allocated = 0;
-    atomic_store_u32(&g_gc.free_head, GC_HANDLE_NULL);
+    free_queue_cleanup();
+    if (!free_queue_init()) {
+        GC_LOGE("gc_reset: failed to reinitialize free queue");
+    }
     atomic_store_u32(&g_gc.free_count, 0);
 }
 

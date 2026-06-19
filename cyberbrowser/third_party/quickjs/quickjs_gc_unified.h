@@ -659,13 +659,10 @@ typedef struct GCState {
     uint32_t volatile compaction_target;  /* Which buffer (0 or 1) GC is compacting INTO, atomic */
     
     /*
-     * Lock-free handle free list (Treiber stack).
-     * free_head is the top handle (GC_HANDLE_NULL == empty stack).
-     * free_next[handle] stores the next free handle for each free slot.
+     * Lock-free handle free list (MPMC queue, ABA-safe).
+     * Reuses the same JobBuffer/JobQueue design as the JS job queue.
      */
-    uint32_t volatile free_head;    /* atomic */
-    uint32_t *free_next;
-    uint32_t free_next_capacity;
+    JobQueue free_queue;
     uint32_t volatile free_count;   /* diagnostic count, atomic */
     
     /* Root set */
@@ -697,7 +694,7 @@ typedef struct GCState {
         uint32_t capacity;
         uint32_t *free_list;    /* legacy, now NULL */
         uint32_t free_count;    /* diagnostic */
-        uint32_t free_capacity; /* legacy, now free_next_capacity */
+        uint32_t free_capacity; /* legacy, now 0 */
     } handles;
     
     size_t bytes_allocated;
