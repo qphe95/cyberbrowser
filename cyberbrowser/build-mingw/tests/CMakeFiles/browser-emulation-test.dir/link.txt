@@ -1,0 +1,3 @@
+C:\msys64\mingw64\bin\cmake.exe -E rm -f CMakeFiles\browser-emulation-test.dir/objects.a
+C:\msys64\mingw64\bin\ar.exe qc CMakeFiles\browser-emulation-test.dir/objects.a @CMakeFiles\browser-emulation-test.dir\objects1.rsp
+C:\msys64\mingw64\bin\c++.exe -O3 -DNDEBUG -Wl,--whole-archive CMakeFiles\browser-emulation-test.dir/objects.a -Wl,--no-whole-archive -o browser-emulation-test.exe -Wl,--out-implib,libbrowser-emulation-test.dll.a -Wl,--major-image-version,0,--minor-image-version,0 @CMakeFiles\browser-emulation-test.dir\linkLibs.rsp
