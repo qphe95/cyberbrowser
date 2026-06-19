@@ -1,17 +1,16 @@
 # BGMDWLDR — YouTube BGM Downloader
 
-A native **macOS & Android** app for downloading background music from YouTube videos. Built from scratch with a custom browser emulation engine, Vulkan rendering, and native MP4 metadata injection — no Electron, no webviews, no Qt.
+A native **browser emulation engine** for extracting media URLs from JavaScript-heavy sites like YouTube. Built from scratch with QuickJS, a custom DOM implementation, and native TLS/HTTP — no Electron, no webviews, no Qt.
 
 ---
 
 ## What Makes It Different
 
-Most YouTube downloaders are either command-line tools or bloated web apps wrapped in Electron. BGMDWLDR is a **fully native, self-contained binary** that:
+Most YouTube downloaders are either command-line tools or bloated web apps wrapped in Electron. BGMDWLDR is a **fully native, self-contained library** that:
 
 - **Executes YouTube's actual player JavaScript** in an embedded QuickJS engine to extract media stream URLs
-- **Renders its own UI in Vulkan** with a hand-rolled 8×8 bitmap font and a cyberpunk cyan/magenta color palette
 - **Embeds album art and title metadata directly into M4A files** using native MP4 atom injection
-- Runs on **macOS (desktop) and Android** from a single C/C++ codebase
+- Runs on **macOS, Linux, and Windows** from a single C/C++ codebase
 
 ---
 
@@ -38,17 +37,12 @@ Most YouTube downloaders are either command-line tools or bloated web apps wrapp
 - Text selection, drag-to-select, and full clipboard support (copy/paste/cut) on both fields
 - The filename field has **no focus concept** — cursor and selection persist even when you click into the URL box
 
-### Vulkan UI
-- Hand-rolled bitmap font renderer (8×8 glyphs, ASCII range) drawn as textured quads
-- Dynamic layout that accounts for multi-line status text, wrapped download paths, and video titles
-- Resizable window with density-independent scaling
-- Retro cyberpunk aesthetic: cyan borders, magenta progress bars, block cursor
-
 ### Cross-Platform
-| Platform | UI | HTTP | File Save | Metadata |
-|----------|-----|------|-----------|----------|
-| **macOS** | GLFW + Vulkan + MoltenVK | libcurl | `~/BGMDWLDR/` | Album art + title |
-| **Android** | NativeActivity + Vulkan | Native Android HTTP | MediaStore | *(album art via MediaStore API)* |
+| Platform | HTTP | TLS |
+|----------|------|-----|
+| **macOS** | native sockets | mbedtls |
+| **Linux** | native sockets | mbedtls |
+| **Windows** | native sockets | mbedtls |
 
 ---
 
@@ -81,30 +75,7 @@ open app/build_macos/BGMDWLDR.app
 
 ---
 
-## Quick Start (Android)
 
-### Prerequisites
-- Android SDK + NDK (26.2.11394342)
-- `$ANDROID_SDK_ROOT` set
-- ADB in `$ANDROID_SDK_ROOT/platform-tools/`
-
-### Build & Install
-```bash
-./rebuild.sh
-```
-
-Or step by step:
-```bash
-./gradlew assembleDebug
-adb install -r app/build/outputs/apk/debug/app-debug.apk
-```
-
-### Launch
-```bash
-adb shell am start -n com.bgmdwldr.vulkan/.MainActivity
-```
-
----
 
 ## Usage
 
@@ -123,42 +94,29 @@ adb shell am start -n com.bgmdwldr.vulkan/.MainActivity
 ## Architecture
 
 ```
-bgmdwnldr/
-├── browser-emulator/          # Custom browser emulation library
+cyberbrowser/
+├── cyberbrowser/              # Custom browser emulation library
 │   ├── src/
 │   │   ├── js_quickjs.cpp     # QuickJS JS engine integration
 │   │   ├── html_media_extract.cpp
-│   │   ├── browser_api_impl.cpp    # DOM stubs, XHR, console
+│   │   ├── browser/           # Split browser API implementations
 │   │   ├── http_download.c
-│   │   └── platform/          # macOS/Linux/Android abstractions
+│   │   └── platform/          # macOS/Linux/Windows abstractions
 │   ├── include/               # Public headers
 │   ├── tests/
 │   └── third_party/
 │       ├── quickjs/           # QuickJS JavaScript engine (MIT)
 │       └── mbedtls/           # TLS/SSL library (Apache 2.0)
 │
-├── app/                       # Application code
-│   ├── src/main/cpp/
-│   │   ├── vulkan_ui.cpp      # Vulkan renderer, worker thread, input handling
-│   │   ├── ui_layout.cpp      # Bitmap font, text layout, word wrapping
-│   │   ├── mp4_metadata.cpp   # M4A album art & title metadata injection
-│   │   ├── main_macos.cpp     # GLFW entry point (macOS desktop)
-│   │   └── default_album_art.c    # Embedded 512×512 JPEG (~17KB)
-│   └── src/main/assets/
-│       ├── triangle.vert.spv  # Vulkan shaders
-│       └── triangle.frag.spv
-│
-├── build_macos_app.sh         # macOS build script
-└── rebuild.sh                 # Android build & install script
+├── build.sh                   # MSVC build wrapper
+├── build_macos_app.sh         # macOS build script (legacy)
+└── scripts/                   # Helper scripts
 ```
 
 ### Key Design Decisions
 
 **Why QuickJS instead of a headless browser?**  
 Headless Chrome or Safari would add 100+ MB of dependencies. QuickJS is a complete ES2020 engine in ~1 MB that can execute YouTube's player code directly with our stubbed DOM APIs.
-
-**Why Vulkan instead of OpenGL or a UI toolkit?**  
-The Android version uses Vulkan via NativeActivity (no Java UI). Using the same API on macOS (via MoltenVK) lets us share 100% of the rendering code between platforms.
 
 **Why native MP4 atom injection instead of FFmpeg or taglib?**  
 FFmpeg is a massive dependency. Our minimal MP4 parser finds the existing `moov/udta/meta/ilst` hierarchy, inserts `covr` (album art) and `©nam` (title) atoms, patches chunk offsets, and writes the file — all in ~400 lines of C with zero external dependencies.
@@ -168,20 +126,11 @@ FFmpeg is a massive dependency. Our minimal MP4 parser finds the existing `moov/
 ## Tests
 
 ```bash
-# MP4 metadata injection test
-cd app/build_macos
-./test-mp4-metadata
-
-# Text render invariance test
-./test-text-render
-
-# Resize capture test
-./test-resize-capture
-
-# Browser emulator tests (native)
-cd browser-emulator
-./build.sh
-./build/tests/browser-emulator-tests
+cd cyberbrowser
+mkdir -p build && cd build
+cmake .. -DBE_BUILD_TESTS=ON
+cmake --build . --target browser-emulator-tests -j4
+./tests/browser-emulator-tests
 ```
 
 ---

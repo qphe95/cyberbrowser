@@ -1,3 +1,0 @@
-C:\msys64\mingw64\bin\cmake.exe -E rm -f CMakeFiles\youtube-live-fetch-test.dir/objects.a
-C:\msys64\mingw64\bin\ar.exe qc CMakeFiles\youtube-live-fetch-test.dir/objects.a @CMakeFiles\youtube-live-fetch-test.dir\objects1.rsp
-C:\msys64\mingw64\bin\c++.exe -O3 -DNDEBUG -Wl,--whole-archive CMakeFiles\youtube-live-fetch-test.dir/objects.a -Wl,--no-whole-archive -o youtube-live-fetch-test.exe -Wl,--out-implib,libyoutube-live-fetch-test.dll.a -Wl,--major-image-version,0,--minor-image-version,0 @CMakeFiles\youtube-live-fetch-test.dir\linkLibs.rsp

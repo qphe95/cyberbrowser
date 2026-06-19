@@ -1,3 +1,0 @@
-C:\msys64\mingw64\bin\cmake.exe -E rm -f CMakeFiles\atom-cache-bench.dir/objects.a
-C:\msys64\mingw64\bin\ar.exe qc CMakeFiles\atom-cache-bench.dir/objects.a @CMakeFiles\atom-cache-bench.dir\objects1.rsp
-C:\msys64\mingw64\bin\c++.exe -O3 -DNDEBUG -Wl,--whole-archive CMakeFiles\atom-cache-bench.dir/objects.a -Wl,--no-whole-archive -o atom-cache-bench.exe -Wl,--out-implib,libatom-cache-bench.dll.a -Wl,--major-image-version,0,--minor-image-version,0 @CMakeFiles\atom-cache-bench.dir\linkLibs.rsp

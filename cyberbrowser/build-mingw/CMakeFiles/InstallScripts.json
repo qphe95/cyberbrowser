@@ -1,8 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/build-mingw/cmake_install.cmake",
-		"C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/build-mingw/tests/cmake_install.cmake"
-	],
-	"Parallel" : false
-}

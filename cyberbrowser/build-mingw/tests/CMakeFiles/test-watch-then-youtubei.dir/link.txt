@@ -1,3 +1,0 @@
-C:\msys64\mingw64\bin\cmake.exe -E rm -f CMakeFiles\test-watch-then-youtubei.dir/objects.a
-C:\msys64\mingw64\bin\ar.exe qc CMakeFiles\test-watch-then-youtubei.dir/objects.a @CMakeFiles\test-watch-then-youtubei.dir\objects1.rsp
-C:\msys64\mingw64\bin\c++.exe -O3 -DNDEBUG -Wl,--whole-archive CMakeFiles\test-watch-then-youtubei.dir/objects.a -Wl,--no-whole-archive -o test-watch-then-youtubei.exe -Wl,--out-implib,libtest-watch-then-youtubei.dll.a -Wl,--major-image-version,0,--minor-image-version,0 @CMakeFiles\test-watch-then-youtubei.dir\linkLibs.rsp
