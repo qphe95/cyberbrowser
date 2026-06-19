@@ -237,6 +237,33 @@ elseif(BE_PLATFORM_WINDOWS)
 endif()
 
 # =============================================================================
+# CyberBrowser executable (hardcoded YouTube loader)
+# =============================================================================
+add_executable(cyberbrowser
+    src/cyberbrowser_main.cpp
+)
+
+target_compile_features(cyberbrowser PRIVATE cxx_std_11)
+
+target_include_directories(cyberbrowser
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/quickjs
+)
+
+target_link_libraries(cyberbrowser
+    PRIVATE
+        browser-emulator
+)
+
+if(BE_PLATFORM_WINDOWS)
+    target_include_directories(cyberbrowser BEFORE PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/win32
+    )
+endif()
+
+# =============================================================================
 # Tests
 # =============================================================================
 if(BE_BUILD_TESTS)
