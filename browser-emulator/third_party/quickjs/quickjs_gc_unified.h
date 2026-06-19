@@ -253,10 +253,12 @@ typedef struct JSHandleArray {
 /* Object colors for tri-state incremental/concurrent marking.
  * WHITE: not yet reached by the marker (candidate for collection).
  * GREY:  reachable, but children not yet scanned.
- * BLACK: reachable and fully scanned. */
+ * BLACK: reachable and fully scanned.
+ * DEAD:  unreachable, memory-valid, pending reclamation. */
 #define GC_COLOR_WHITE 0
 #define GC_COLOR_GREY  1
 #define GC_COLOR_BLACK 2
+#define GC_COLOR_DEAD  3
 
 typedef struct GCHeader {
     unsigned int gc_obj_type : 4;
@@ -317,9 +319,21 @@ static inline JSGCObjectTypeEnum gc_handle_get_type_inline(GCHandle handle) {
     return hdr ? (JSGCObjectTypeEnum)hdr->gc_obj_type : JS_GC_OBJ_TYPE_DATA;
 }
 
+static inline uint32_t gc_color_state(GCHandle handle) {
+    GCHeader *hdr = gc_header_from_handle(handle);
+    return hdr ? hdr->gc_color_state : GC_COLOR_WHITE;
+}
+
+static inline BOOL gc_object_is_dead(GCHandle handle) {
+    return gc_color_state(handle) == GC_COLOR_DEAD;
+}
+
 static inline uint8_t gc_handle_get_mark(GCHandle handle) {
     GCHeader *hdr = gc_header_from_handle(handle);
-    return hdr ? (hdr->gc_color_state != GC_COLOR_WHITE) : 0;
+    if (!hdr) return 0;
+    /* DEAD objects are not marked; they are scheduled for reclamation. */
+    return (hdr->gc_color_state == GC_COLOR_GREY ||
+            hdr->gc_color_state == GC_COLOR_BLACK) ? 1 : 0;
 }
 
 static inline void gc_handle_set_mark(GCHandle handle, uint8_t mark) {
@@ -665,6 +679,12 @@ typedef struct GCState {
     JSHandleArray weakmap_handles;
     JSHandleArray weakref_handles;
     JSHandleArray finrec_handles;
+    
+    /* Dead-list: handles marked GC_COLOR_DEAD during sweep, awaiting
+     * finalization and reclamation. */
+    GCHandle *dead_list;
+    uint32_t dead_count;
+    uint32_t dead_capacity;
     
     /* Backward-compatible handle access shim (points to active buffer) */
     struct {

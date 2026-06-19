@@ -997,6 +997,29 @@ bool gc_init(void) {
     gc_handle_array_init(&g_gc.finrec_handles, 100);
     gc_handle_array_init(&g_gc.atom_handles, 1000);
     
+    /* Initialize dead-list */
+    g_gc.dead_capacity = 256;
+    g_gc.dead_list = (GCHandle *)malloc(g_gc.dead_capacity * sizeof(GCHandle));
+    if (!g_gc.dead_list) {
+        gc_handle_array_free(&g_gc.weakmap_handles);
+        gc_handle_array_free(&g_gc.weakref_handles);
+        gc_handle_array_free(&g_gc.finrec_handles);
+        gc_handle_array_free(&g_gc.atom_handles);
+        if (g_gc.root_set.roots) {
+            free(g_gc.root_set.roots);
+            g_gc.root_set.roots = NULL;
+        }
+        free(g_gc.free_next);
+        g_gc.free_next = NULL;
+        free(g_gc.publish_state);
+        g_gc.publish_state = NULL;
+        g_gc.publish_state_capacity = 0;
+        gc_buffer_cleanup(&g_gc.buffers[0]);
+        gc_buffer_cleanup(&g_gc.buffers[1]);
+        return false;
+    }
+    g_gc.dead_count = 0;
+    
     /* Initialize type buckets */
     for (int i = 0; i < GC_BUCKET_COUNT; i++) {
         gc_type_bucket_init(&g_gc.type_buckets[i]);
@@ -1048,6 +1071,14 @@ void gc_cleanup(void) {
     gc_handle_array_free(&g_gc.weakref_handles);
     gc_handle_array_free(&g_gc.finrec_handles);
     gc_handle_array_free(&g_gc.atom_handles);
+    
+    /* Free dead-list */
+    if (g_gc.dead_list) {
+        free(g_gc.dead_list);
+        g_gc.dead_list = NULL;
+        g_gc.dead_count = 0;
+        g_gc.dead_capacity = 0;
+    }
     
     /* Free type buckets */
     for (int i = 0; i < GC_BUCKET_COUNT; i++) {
@@ -2466,7 +2497,8 @@ static void gc_compact_move_objects(size_t *out_user_bytes) {
             continue;
         }
         
-        if (hdr->gc_color_state != GC_COLOR_WHITE) {
+        if (hdr->gc_color_state == GC_COLOR_BLACK ||
+            hdr->gc_color_state == GC_COLOR_GREY) {
             /* Live object - record for sorted copying */
             if (live_count < live_capacity) {
                 live_objects[live_count].handle = hdr->handle;
@@ -2475,18 +2507,14 @@ static void gc_compact_move_objects(size_t *out_user_bytes) {
                 live_count++;
             }
         } else {
-            /* Dead object - call finalizer if present */
-            if (hdr->finalizer && status == GC_CANARY_OK) {
-                hdr->finalizer(rt, hdr->handle, gc_header_to_ptr(hdr));
-            }
-            
-            /* Free the handle */
-            if (hdr->handle < src->handle_count) {
+            /* Unreachable (WHITE) or pending-deletion (DEAD) object.
+             * Do not copy it.  DEAD objects are finalized and reclaimed later
+             * by gc_reclaim_dead(); WHITE objects should not exist here after
+             * sweep, but are treated as dead for robustness. */
+            if (hdr->gc_color_state == GC_COLOR_WHITE &&
+                hdr->handle < src->handle_count) {
                 src->handles[hdr->handle] = NULL;
-                /* Don't push to free list here - we'll rebuild it after compaction */
             }
-            
-            gc_corrupt_canaries(hdr);
         }
         
         read += total_size;
@@ -2618,7 +2646,66 @@ static void gc_compact(void) {
 }
 
 /* ============================================================================
- * SWEEP PHASE - Free unmarked objects
+ * DEAD-LIST MANAGEMENT
+ * ============================================================================
+ */
+
+static void push_dead_handle(GCHandle handle)
+{
+    uint32_t count = g_gc.dead_count;
+    uint32_t capacity = g_gc.dead_capacity;
+    if (count >= capacity) {
+        uint32_t new_capacity = capacity ? capacity * 2 : 256;
+        GCHandle *new_list = (GCHandle *)realloc(g_gc.dead_list,
+                                                  new_capacity * sizeof(GCHandle));
+        if (!new_list) {
+            GC_LOGE("push_dead_handle: out of memory for dead list");
+            return;
+        }
+        g_gc.dead_list = new_list;
+        g_gc.dead_capacity = new_capacity;
+    }
+    g_gc.dead_list[count] = handle;
+    g_gc.dead_count = count + 1;
+}
+
+/* Finalize and reclaim all handles on the dead-list.  Call this only after
+ * accessors have had a chance to purge references to dead objects. */
+static void gc_reclaim_dead(JSRuntimeHandle rt)
+{
+    GC_LOGI("gc_reclaim_dead: ENTER, count=%u", g_gc.dead_count);
+    void **table = gc_active_handles();
+    uint32_t count = gc_active_handle_count();
+    
+    for (uint32_t i = 0; i < g_gc.dead_count; i++) {
+        GCHandle handle = g_gc.dead_list[i];
+        if (handle == GC_HANDLE_NULL || handle >= count) continue;
+        
+        void *user_ptr = table[handle];
+        if (!user_ptr) continue;
+        
+        GCHeader *hdr = gc_header(user_ptr);
+        if (hdr->gc_color_state != GC_COLOR_DEAD) {
+            /* Object was rescued by a write barrier or marking. */
+            continue;
+        }
+        
+        if (hdr->finalizer) {
+            hdr->finalizer(rt, handle, user_ptr);
+        }
+        
+        hdr->size |= 0x80000000;  /* freed flag */
+        gc_corrupt_canaries(hdr);
+        table[handle] = NULL;
+        push_free_handle(handle);
+    }
+    
+    g_gc.dead_count = 0;
+    GC_LOGI("gc_reclaim_dead: DONE");
+}
+
+/* ============================================================================
+ * SWEEP PHASE - Mark unmarked objects as DEAD
  * ============================================================================
  */
 
@@ -2672,24 +2759,14 @@ static void gc_sweep_unified(JSRuntimeHandle rt) {
         
         /* Check if marked */
         if (hdr->gc_color_state == GC_COLOR_WHITE) {
-            /* Object is unreachable - call finalizer */
-#if 0
-            if (hdr->finalizer) {
-                hdr->finalizer(rt, handle, user_ptr);
-            }
-#endif
-            /* Note: Type bucket removal skipped - buckets are unused and
-             * removing during sweep is O(n^2) which causes hangs with
-             * large numbers of objects. Compaction handles stale entries. */
-            /* Mark as freed - set FREED flag but keep size for compaction */
-            hdr->size |= 0x80000000;  /* Set FREED flag */
-            gc_corrupt_canaries(hdr);
-            table[i] = NULL;
-            push_free_handle((GCHandle)i);
+            /* Object is unreachable.  Mark it DEAD (memory-valid but scheduled
+             * for deletion) so accessors have a chance to purge references. */
+            hdr->gc_color_state = GC_COLOR_DEAD;
+            push_dead_handle((GCHandle)i);
         }
     }
     
-    GC_LOGI("gc_sweep_unified: DONE");
+    GC_LOGI("gc_sweep_unified: DONE, dead_count=%u", g_gc.dead_count);
 }
 
 /* ============================================================================
@@ -2708,13 +2785,6 @@ static void gc_run_internal(void) {
     /* Enter MARKING phase */
     atomic_store_u32(&g_gc.gc_phase, (uint32_t)GC_PHASE_MARKING);
     
-    if (has_runtime) {
-        /* Phase 0: Remove weak objects (WeakMap, WeakSet, WeakRef) */
-        /* This must happen BEFORE marking so weak refs are properly cleared */
-        GC_LOGI("gc_run_internal: Phase 0 - removing weak objects");
-        gc_remove_weak_objects(rt);
-    }
-    
     /* Phase 1: Mark phase - run on a pool worker while the mutator is paused.
      * The mark job signals g_gc_mark_done_event when it has drained the grey
      * queue. */
@@ -2727,13 +2797,25 @@ static void gc_run_internal(void) {
         GC_LOGI("gc_run_internal: Phase 2 - cleaning shape hash table");
         gc_cleanup_shape_hash_table(rt);
         
-        /* Phase 3: Sweep phase - free unmarked objects */
+        /* Phase 3: Sweep phase - mark unmarked objects as DEAD */
         GC_LOGI("gc_run_internal: Phase 3 - sweeping");
         gc_sweep_unified(rt);
         
-        /* Phase 4: Sweep atoms */
-        GC_LOGI("gc_run_internal: Phase 4 - sweeping atoms");
+        /* Phase 4: Remove weak objects now that DEAD objects are known.
+         * Accessors also filter dead entries, but this pass eagerly cleans
+         * the typed weak-reference arrays before reclamation. */
+        GC_LOGI("gc_run_internal: Phase 4 - removing weak objects");
+        gc_remove_weak_objects(rt);
+        
+        /* Phase 5: Sweep atoms */
+        GC_LOGI("gc_run_internal: Phase 5 - sweeping atoms");
         gc_sweep_atoms(rt);
+        
+        /* Phase 6: Finalize and reclaim DEAD objects.
+         * All accessor-visible references to dead objects must be purged
+         * before this point. */
+        GC_LOGI("gc_run_internal: Phase 6 - reclaiming dead objects");
+        gc_reclaim_dead(rt);
     }
     
     /* Enter COMPACTING phase */

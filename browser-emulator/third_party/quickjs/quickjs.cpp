@@ -1803,6 +1803,8 @@ static BOOL js_job_queue_enqueue(JSRuntimeHandle rt, GCHandle job_handle)
 {
     JobQueue *q = js_job_queue_ptr(rt);
     if (!q) return FALSE;
+    if (job_handle != GC_HANDLE_NULL && gc_object_is_dead(job_handle))
+        return FALSE;
 
     for (;;) {
         JobBuffer *tb = atomic_load_ptr((void *volatile *)&q->tail_block);
@@ -1887,6 +1889,12 @@ static GCHandle js_job_queue_dequeue(JSRuntimeHandle rt)
                 }
                 atomic_store_u32((volatile uint32_t *)&hb->jobs[idx],
                                  GC_HANDLE_NULL);
+                /* If the job entry itself became unreachable, skip it and
+                 * try the next job.  Accessors must never return dead refs. */
+                if (job_handle != GC_HANDLE_NULL && gc_object_is_dead(job_handle)) {
+                    release_buffer(hb);
+                    continue;
+                }
                 release_buffer(hb);
                 return job_handle;
             }
@@ -6088,6 +6096,8 @@ static JSShapeHandle find_hashed_shape_proto(JSRuntimeHandle rt, JSObjectHandle 
     GCHandle proto_handle = proto.handle();
     GCHandle sh_handle = lf_hash_lookup_ex(rt.shape_hash(), h, &proto_handle,
                                            shape_proto_eq, NULL);
+    if (sh_handle != GC_HANDLE_NULL && gc_object_is_dead(sh_handle))
+        return JSShapeHandle();
     return JSShapeHandle(sh_handle);
 }
 
@@ -6134,6 +6144,8 @@ static JSShapeHandle find_hashed_shape_prop(JSRuntimeHandle rt, JSShapeHandle sh
     lk.prop_flags = prop_flags;
     GCHandle sh_handle = lf_hash_lookup_ex(rt.shape_hash(), h, &lk,
                                            shape_prop_eq, NULL);
+    if (sh_handle != GC_HANDLE_NULL && gc_object_is_dead(sh_handle))
+        return JSShapeHandle();
     return JSShapeHandle(sh_handle);
 }
 
@@ -33050,7 +33062,10 @@ static JSModuleDefHandle js_find_loaded_module(JSContextHandle ctx, JSAtom name)
     /* first look at the loaded modules */
     GCHandleList& modules = ctx.loaded_modules();
     for (int i = 0; i < modules.count(); i++) {
-        JSModuleDefHandle m = JSModuleDefHandle(modules[i]);
+        GCHandle h = modules[i];
+        if (h == GC_HANDLE_NULL || gc_object_is_dead(h))
+            continue;
+        JSModuleDefHandle m = JSModuleDefHandle(h);
         if (m.valid() && m.module_name() == name) {
             return m;
         }
@@ -55892,9 +55907,9 @@ static BOOL js_weakref_is_live(GCValue val)
     GCHandle handle = GC_VALUE_GET_HANDLE(val);
     if (handle == GC_HANDLE_NULL)
         return FALSE;
-    /* Unified GC uses mark-and-sweep, not reference counting.
-     * Any valid handle is considered referenced. */
-    return TRUE;
+    /* In the unified GC, an object scheduled for deletion (GC_COLOR_DEAD)
+     * is no longer live from the point of view of weak references. */
+    return !gc_object_is_dead(handle);
 }
 
 /* 'val' can be JS_UNDEFINED */
@@ -65123,7 +65138,11 @@ extern "C" uint32_t JSRuntime_job_queue_count(JSRuntimeHandle rt) {
     while (b) {
         uint64_t head = atomic_load_u64(&b->head);
         uint64_t tail = atomic_load_u64(&b->tail);
-        count += (tail >= head) ? (tail - head) : 0;
+        for (uint64_t idx = head; idx < tail; idx++) {
+            GCHandle job_handle = atomic_load_u32((volatile uint32_t *)&b->jobs[idx]);
+            if (gc_handle_array_entry_is_valid(job_handle) && !gc_object_is_dead(job_handle))
+                count++;
+        }
         b = (JobBuffer *)atomic_load_ptr((void *volatile *)&b->next);
     }
     return (uint32_t)count;
@@ -65137,14 +65156,13 @@ extern "C" uint32_t JSRuntime_job_queue_get_handle(JSRuntimeHandle rt, int index
     while (b) {
         uint64_t head = atomic_load_u64(&b->head);
         uint64_t tail = atomic_load_u64(&b->tail);
-        uint64_t count = (tail >= head) ? (tail - head) : 0;
-        if ((uint64_t)index < count) {
-            uint64_t idx = head + (uint64_t)index;
+        for (uint64_t idx = head; idx < tail; idx++) {
             GCHandle job_handle = atomic_load_u32((volatile uint32_t *)&b->jobs[idx]);
-            if (!gc_handle_array_entry_is_valid(job_handle)) return GC_HANDLE_NULL;
-            return job_handle;
+            if (!gc_handle_array_entry_is_valid(job_handle)) continue;
+            if (gc_object_is_dead(job_handle)) continue;
+            if (index == 0) return job_handle;
+            index--;
         }
-        index -= (int)count;
         b = (JobBuffer *)atomic_load_ptr((void *volatile *)&b->next);
     }
 

@@ -148,11 +148,45 @@ Under stop-the-world marking this cannot happen because mutators are paused whil
 
 Finalizers run during the reclamation pass, after accessors have had a chance to drop references. A finalizer therefore cannot observe the object through WeakMap, WeakSet, the job queue, or any other auxiliary table.
 
+## Implementation status
+
+Implemented in `browser-emulator/third_party/quickjs/quickjs_gc_unified.cpp`,
+`quickjs_gc_unified.h`, and `quickjs.cpp`.
+
+- `GC_COLOR_DEAD` added to the color enum.
+- `gc_color_state()` and `gc_object_is_dead()` helpers added.
+- `gc_sweep_unified()` transitions white objects to `DEAD` and pushes handles onto
+  `g_gc.dead_list`.
+- `gc_compact_move_objects()` skips `DEAD` and `WHITE` objects instead of copying
+  them.
+- `gc_reclaim_dead()` finalizes and reclaims handles from `dead_list` before
+  compaction runs.
+- `gc_run_internal()` reordered so weak-reference cleanup and atom sweeping happen
+  while objects are `DEAD`, and reclamation happens before compaction.
+- Updated accessors:
+  - `js_weakref_is_live()` now treats `GC_COLOR_DEAD` targets as not live, so
+    WeakMap / WeakSet / WeakRef / FinalizationRegistry accessors automatically
+    filter dead entries.
+  - `find_hashed_shape_proto()` and `find_hashed_shape_prop()` return NULL for
+    dead shapes.
+  - Job queue enqueue/dequeue and the C accessors reject/skip dead job entries.
+- Atoms continue to use their existing `JS_ATOM_TYPE_DEAD` mechanism, which
+  cooperates with the new color state: atoms are marked `DEAD` by sweep and then
+  finalized/freed by `gc_sweep_atoms()`; `gc_reclaim_dead()` skips any handle
+  that has already been cleared.
+
+Property arrays, module tables, and debugger maps are not updated with explicit
+`DEAD` checks because their entries are owned by live GC objects; a dead object
+cannot be reached through those tables in the stop-the-world implementation. If
+concurrent mutators are introduced later, per-property value checks can be added
+using the same helper pattern.
+
 ## Implementation sketch
 
 1. Add `GC_COLOR_DEAD` to `GCColor`.
 2. Add `gc_color_state(GCHandle)` and `gc_object_is_dead(GCHandle)` helpers.
-3. In sweep/compaction, transition white objects to `DEAD` and push handles onto `dead_list`.
+3. In sweep/compaction, transition white objects to `DEAD` and push handles onto
+   `dead_list`.
 4. Audit and update accessors in every subsystem that holds GC handles:
    - atom hash / atom array
    - shape hash / shape list
@@ -164,7 +198,8 @@ Finalizers run during the reclamation pass, after accessors have had a chance to
    - debugger maps / source tables
 5. Update iterators to skip and remove dead entries.
 6. Update write accessors to reject dead handles.
-7. Run finalizers and reclaim `dead_list` handles at a safe point after accessors have purged references.
+7. Run finalizers and reclaim `dead_list` handles at a safe point after accessors
+   have purged references.
 
 ## Advantages
 
