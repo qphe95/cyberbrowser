@@ -127,8 +127,7 @@ extern "C" {
  */
 static inline size_t gc_alloc_total_size(GCHeader *hdr) {
     if (!hdr) return MIN_OBJECT_SIZE;
-    /* Mask out FREED flag (bit 31) when calculating size */
-    uint32_t user_size = hdr->size & 0x7FFFFFFF;
+    uint32_t user_size = hdr->size;
     return 16 + sizeof(GCHeader) + ALIGN16(user_size) + 16;
 }
 
@@ -1818,10 +1817,10 @@ void gc_free(GCHandle handle) {
     if (!hdr) return;
     
     /* Already freed */
-    if (hdr->size & 0x80000000) return;
+    if (hdr->flags & GC_FLAG_FREED) return;
     
     /* Mark as freed */
-    hdr->size |= 0x80000000;
+    hdr->flags |= GC_FLAG_FREED;
     
     /* Corrupt canaries to detect use-after-free */
     gc_corrupt_canaries(hdr);
@@ -1862,7 +1861,7 @@ GCHandle gc_realloc(GCHandle handle, size_t new_size) {
     JSGCObjectTypeEnum old_type = (JSGCObjectTypeEnum)old_hdr->gc_obj_type;
     size_t old_user_size = old_hdr->size;
     
-    old_hdr->size = old_user_size | 0x80000000;
+    old_hdr->flags |= GC_FLAG_FREED;
     
     /* Allocate new memory (gets a temporary handle) */
     GCHandle temp_handle = gc_alloc(new_size, old_type);
@@ -1929,7 +1928,7 @@ bool gc_handle_is_valid(GCHandle handle) {
     void *ptr = gc_deref(handle);
     if (!ptr) return false;
     GCHeader *hdr = gc_header(ptr);
-    return (hdr->size & 0x7FFFFFFF) > 0;
+    return hdr->size > 0 && !(hdr->flags & GC_FLAG_FREED);
 }
 
 JSGCObjectTypeEnum gc_handle_get_type(GCHandle handle) {
@@ -1949,7 +1948,7 @@ static void gc_mark_object(JSObject *p);
 static void gc_mark_ptr(void *ptr) {
     if (!ptr) return;
     GCHeader *hdr = gc_header(ptr);
-    if (hdr->size == 0 || hdr->gc_color_state != GC_COLOR_WHITE) return;
+    if ((hdr->flags & GC_FLAG_FREED) || hdr->gc_color_state != GC_COLOR_WHITE) return;
     
     /* Opaque grey roots: keep alive but do not scan children. */
     GCPublishState pub = gc_publish_state_load(hdr->handle);
@@ -1972,7 +1971,7 @@ static void gc_mark_ptr(void *ptr) {
             void *frame_ptr = gc_deref(frame_handle);
             if (frame_ptr) {
                 GCHeader *frame_hdr = gc_header(frame_ptr);
-                if ((frame_hdr->size & 0x7FFFFFFF) > 0 && frame_hdr->gc_color_state == GC_COLOR_WHITE) {
+                if (frame_hdr->size > 0 && !(frame_hdr->flags & GC_FLAG_FREED) && frame_hdr->gc_color_state == GC_COLOR_WHITE) {
                     frame_hdr->gc_color_state = GC_COLOR_BLACK;
                 }
             }
@@ -1994,7 +1993,7 @@ static void gc_mark_value(GCValue val) {
                 void *ptr = gc_deref(handle);
                 if (ptr) {
                     GCHeader *hdr = gc_header(ptr);
-                    if ((hdr->size & 0x7FFFFFFF) > 0 && hdr->gc_color_state == GC_COLOR_WHITE) {
+                    if (hdr->size > 0 && !(hdr->flags & GC_FLAG_FREED) && hdr->gc_color_state == GC_COLOR_WHITE) {
                         /* Opaque grey roots: keep alive but do not scan children. */
                         GCPublishState pub = gc_publish_state_load(handle);
                         if (pub == PUBLISH_UNBORN) break;
@@ -2027,7 +2026,7 @@ static void gc_mark_object(JSObject *p) {
     JSShapeHandle shape = JSShapeHandle(p->shape_handle);
     if (shape.valid()) {
         GCHeader *shape_hdr = gc_header(gc_deref(shape.handle()));
-        if ((shape_hdr->size & 0x7FFFFFFF) > 0) shape_hdr->gc_color_state = GC_COLOR_BLACK;
+        if (shape_hdr->size > 0 && !(shape_hdr->flags & GC_FLAG_FREED)) shape_hdr->gc_color_state = GC_COLOR_BLACK;
         
         /* Mark the shape's prototype handle - CRITICAL: shapes reference
          * prototype objects that must be kept alive */
@@ -2035,7 +2034,7 @@ static void gc_mark_object(JSObject *p) {
             void *proto = gc_deref(shape.proto_handle());
             if (proto) {
                 GCHeader *proto_hdr = gc_header(proto);
-                if ((proto_hdr->size & 0x7FFFFFFF) > 0) proto_hdr->gc_color_state = GC_COLOR_BLACK;
+                if (proto_hdr->size > 0 && !(proto_hdr->flags & GC_FLAG_FREED)) proto_hdr->gc_color_state = GC_COLOR_BLACK;
             }
         }
     }
@@ -2098,7 +2097,7 @@ static void gc_shade(GCHandle handle) {
     if (handle == GC_HANDLE_NULL) return;
     GCHeader *hdr = gc_header_from_handle(handle);
     if (!hdr) return;
-    if ((hdr->size & 0x7FFFFFFF) == 0) return;  /* Freed slot */
+    if ((hdr->flags & GC_FLAG_FREED) || hdr->size == 0) return;  /* Freed slot */
 
     uint32_t old_color = atomic_load_u32(&hdr->gc_color_state);
     if (old_color != GC_COLOR_WHITE) return;
@@ -2132,7 +2131,7 @@ static void gc_scan_object(JSRuntimeHandle rt, GCHandle handle) {
     if (handle == GC_HANDLE_NULL) return;
     GCHeader *hdr = gc_header_from_handle(handle);
     if (!hdr) return;
-    if ((hdr->size & 0x7FFFFFFF) == 0) return;
+    if ((hdr->flags & GC_FLAG_FREED) || hdr->size == 0) return;
 
     uint32_t color = atomic_load_u32(&hdr->gc_color_state);
     if (color != GC_COLOR_GREY) return;
@@ -2152,7 +2151,7 @@ static void gc_clear_marks(void) {
             void *user_ptr = buf->handles[i];
             if (user_ptr) {
                 GCHeader *hdr = gc_header(user_ptr);
-                if ((hdr->size & 0x7FFFFFFF) > 0) {
+                if (hdr->size > 0 && !(hdr->flags & GC_FLAG_FREED)) {
                     hdr->gc_color_state = GC_COLOR_WHITE;
                 }
             }
@@ -2165,7 +2164,7 @@ static void gc_clear_marks(void) {
 static void gc_mark_black(GCHandle handle) {
     if (handle == GC_HANDLE_NULL) return;
     GCHeader *hdr = gc_header_from_handle(handle);
-    if (hdr && (hdr->size & 0x7FFFFFFF) > 0) {
+    if (hdr && hdr->size > 0 && !(hdr->flags & GC_FLAG_FREED)) {
         atomic_store_u32(&hdr->gc_color_state, GC_COLOR_BLACK);
     }
 }
@@ -2327,7 +2326,7 @@ static void gc_mark(void) {
             if (h < count && table[h]) {
                 void *ptr = table[h];
                 GCHeader *hdr = gc_header(ptr);
-                if ((hdr->size & 0x7FFFFFFF) > 0 && hdr->gc_color_state == GC_COLOR_WHITE) {
+                if (hdr->size > 0 && !(hdr->flags & GC_FLAG_FREED) && hdr->gc_color_state == GC_COLOR_WHITE) {
                     GCPublishState pub = gc_publish_state_load(h);
                     if (pub == PUBLISH_UNBORN) continue;
                     if (pub == PUBLISH_GREY) {
@@ -2406,18 +2405,16 @@ GCHandle gc_ptr_to_handle(void *ptr) {
             continue;
         }
 
-        uint32_t raw_size = hdr->size;
-        if (raw_size == 0) {
+        if (hdr->size == 0) {
             read += MIN_OBJECT_SIZE;
             continue;
         }
-        bool is_freed = (raw_size & 0x80000000) != 0;
-        uint32_t user_size = raw_size & 0x7FFFFFFF;
+        bool is_freed = (hdr->flags & GC_FLAG_FREED) != 0;
         size_t total_size = gc_alloc_total_size(hdr);
 
         if (!is_freed) {
             uint8_t *payload_start = (uint8_t *)gc_header_to_ptr(hdr);
-            uint8_t *payload_end = payload_start + user_size;
+            uint8_t *payload_end = payload_start + hdr->size;
             if (p >= payload_start && p < payload_end) {
                 return hdr->handle;
             }
@@ -2496,22 +2493,21 @@ static void gc_compact_move_objects(size_t *out_user_bytes) {
             continue;
         }
         
-        uint32_t raw_size = hdr->size;
-        int is_freed = (raw_size & 0x80000000) != 0;
+        int is_freed = (hdr->flags & GC_FLAG_FREED) != 0;
         
-        if (raw_size == 0) {
+        if (hdr->size == 0) {
             read += MIN_OBJECT_SIZE;
             continue;
         }
         
         size_t total_size = gc_alloc_total_size(hdr);
-        uint32_t user_size = raw_size & 0x7FFFFFFF;
+        uint32_t user_size = hdr->size;
         if (user_size > src->storage_size ||
             total_size > src->storage_size ||
             total_size < MIN_OBJECT_SIZE ||
             (read + total_size) > (src->storage + src->storage_size)) {
-            GC_LOGE("gc_compact_move_objects: corrupted header handle=%u raw_size=%u total_size=%zu, skipping",
-                    hdr->handle, raw_size, total_size);
+            GC_LOGE("gc_compact_move_objects: corrupted header handle=%u user_size=%u total_size=%zu, skipping",
+                    hdr->handle, user_size, total_size);
             read += MIN_OBJECT_SIZE;
             continue;
         }
@@ -2590,7 +2586,7 @@ static void gc_compact_move_objects(size_t *out_user_bytes) {
         
         write += total_size;
         new_bytes += total_size;
-        user_bytes += hdr->size & 0x7FFFFFFF;
+        user_bytes += hdr->size;
     }
     
     free(live_objects);
@@ -2725,7 +2721,7 @@ static void gc_reclaim_dead(JSRuntimeHandle rt)
             hdr->finalizer(rt, handle, user_ptr);
         }
         
-        hdr->size |= 0x80000000;  /* freed flag */
+        hdr->flags |= GC_FLAG_FREED;  /* freed flag */
         gc_corrupt_canaries(hdr);
         table[handle] = NULL;
         push_free_handle(handle);
@@ -2763,7 +2759,7 @@ static void gc_sweep_unified(JSRuntimeHandle rt) {
         GCHeader *hdr = gc_header(user_ptr);
         
         /* Check if already freed */
-        if (hdr->size == 0) {
+        if (hdr->flags & GC_FLAG_FREED) {
             table[i] = NULL;
             push_free_handle((GCHandle)i);
             continue;
@@ -2772,16 +2768,15 @@ static void gc_sweep_unified(JSRuntimeHandle rt) {
         /* Sanity-check the header size before any size-derived operation.
          * A corrupted size is the usual symptom of an earlier heap overwrite. */
         {
-            uint32_t raw_size = hdr->size;
-            uint32_t user_size = raw_size & 0x7FFFFFFF;
+            uint32_t user_size = hdr->size;
             GCBuffer *buf = gc_active_buffer();
             size_t total_size = gc_alloc_total_size(hdr);
             if (user_size > buf->storage_size ||
                 total_size > buf->storage_size ||
                 total_size < MIN_OBJECT_SIZE ||
                 ((uint8_t *)hdr - 16) + total_size > buf->storage + buf->bump_offset) {
-                GC_LOGE("gc_sweep_unified: corrupted header handle=%u raw_size=%u total_size=%zu storage_size=%zu bump=%zu, clearing",
-                        handle, raw_size, total_size, buf->storage_size, buf->bump_offset);
+                GC_LOGE("gc_sweep_unified: corrupted header handle=%u user_size=%u total_size=%zu storage_size=%zu bump=%zu, clearing",
+                        handle, user_size, total_size, buf->storage_size, buf->bump_offset);
                 table[i] = NULL;
                 push_free_handle((GCHandle)i);
                 continue;
@@ -2983,11 +2978,8 @@ static inline uint64_t *gc_canary_prefix_ptr(GCHeader *hdr) {
 /* Get pointer to suffix canary (after user data) */
 static inline uint64_t *gc_canary_suffix_ptr(GCHeader *hdr) {
     if (!hdr) return NULL;
-    /* With hdr->size = user_size:
-     * suffix is at hdr + sizeof(GCHeader) + user_size
-     * Note: mask out FREED flag (bit 31) if set
-     */
-    uint32_t user_size = hdr->size & 0x7FFFFFFF;
+    /* suffix is at hdr + sizeof(GCHeader) + user_size */
+    uint32_t user_size = hdr->size;
     uint8_t *suffix = (uint8_t*)hdr + sizeof(GCHeader) + user_size;
     return (uint64_t*)suffix;
 }
@@ -3002,7 +2994,7 @@ static inline bool gc_canary_in_bounds(GCHeader *hdr) {
     if (!buf || !buf->storage || buf->storage_size == 0) return false;
     uint8_t *storage_end = buf->storage + buf->storage_size;
     uint8_t *prefix = (uint8_t*)hdr - 16;
-    uint32_t user_size = hdr->size & 0x7FFFFFFF;
+    uint32_t user_size = hdr->size;
     uint8_t *suffix = (uint8_t*)hdr + sizeof(GCHeader) + user_size;
     return prefix >= buf->storage && prefix < storage_end &&
            suffix >= buf->storage && suffix < storage_end;
@@ -3023,7 +3015,7 @@ static inline void gc_corrupt_canaries(GCHeader *hdr) {
     if (!gc_canary_in_bounds(hdr)) {
         /* Header size is bogus; do not write outside the object.  Mark it
          * as freed in-place so the slot is not scanned again. */
-        hdr->size = 0;
+        hdr->flags |= GC_FLAG_FREED;
         return;
     }
     uint64_t *prefix = gc_canary_prefix_ptr(hdr);

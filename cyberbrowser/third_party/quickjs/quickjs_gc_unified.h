@@ -260,6 +260,9 @@ typedef struct JSHandleArray {
 #define GC_COLOR_BLACK 2
 #define GC_COLOR_DEAD  3
 
+/* GC header flags */
+#define GC_FLAG_FREED 0x01  /* object has been freed */
+
 typedef struct GCHeader {
     unsigned int gc_obj_type : 4;
     unsigned int : 4;  /* padding */
@@ -347,7 +350,8 @@ static inline size_t gc_handle_get_size(GCHandle handle) {
 }
 
 static inline BOOL gc_handle_is_freed(GCHandle handle) {
-    return gc_handle_get_size(handle) == 0;
+    GCHeader *hdr = gc_header_from_handle(handle);
+    return hdr ? (hdr->flags & GC_FLAG_FREED) != 0 : TRUE;
 }
 
 /* Reallocate memory by handle - safe wrapper that avoids exposing pointers */
