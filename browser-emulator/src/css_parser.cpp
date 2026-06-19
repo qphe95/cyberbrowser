@@ -627,12 +627,6 @@ static bool css_selector_matches(const char *selector, HtmlDocument *doc, HtmlNo
  * Style application
  * ============================================================================ */
 
-typedef struct CssAppliedDecl {
-    const CssDeclaration *decl;
-    int specificity;
-    int order;
-} CssAppliedDecl;
-
 static int css_applied_decl_compare(const void *a, const void *b) {
     const CssAppliedDecl *da = (const CssAppliedDecl*)a;
     const CssAppliedDecl *db = (const CssAppliedDecl*)b;
@@ -676,16 +670,8 @@ static void css_apply_inline_style(JSContextHandle ctx, GCValue element, HtmlNod
     if (!decls) return;
     GCValue style = css_ensure_style_object(ctx, element);
 
-    DOMNodeHandle dom_node = DOMNodeHandle::from_object(element);
     for (int i = 0; i < count; i++) {
         css_set_style_property(ctx, style, decls[i].property, decls[i].value);
-        if (dom_node.valid()) {
-            JSAtom atom = JS_NewAtom(ctx, decls[i].property);
-            if (atom != JS_ATOM_NULL) {
-                css_computed_set_property(ctx, dom_node, atom, decls[i].value);
-                JS_FreeAtom(ctx, atom);
-            }
-        }
     }
     css_declarations_free(decls, count);
 }
@@ -693,19 +679,10 @@ static void css_apply_inline_style(JSContextHandle ctx, GCValue element, HtmlNod
 static void css_apply_declarations(JSContextHandle ctx, GCValue element,
                                    CssAppliedDecl *applied, int count) {
     if (count <= 0) return;
-    qsort(applied, (size_t)count, sizeof(CssAppliedDecl), css_applied_decl_compare);
     GCValue style = css_ensure_style_object(ctx, element);
 
-    DOMNodeHandle dom_node = DOMNodeHandle::from_object(element);
     for (int i = 0; i < count; i++) {
         css_set_style_property(ctx, style, applied[i].decl->property, applied[i].decl->value);
-        if (dom_node.valid()) {
-            JSAtom atom = JS_NewAtom(ctx, applied[i].decl->property);
-            if (atom != JS_ATOM_NULL) {
-                css_computed_set_property(ctx, dom_node, atom, applied[i].decl->value);
-                JS_FreeAtom(ctx, atom);
-            }
-        }
     }
 }
 
@@ -894,6 +871,7 @@ static void css_match_one_node(HtmlDocument *doc, int node_idx, CssSheetList *li
 }
 
 typedef struct CssMatchJob {
+    JSContextHandle ctx;
     HtmlDocument *doc;
     CssSheetList *list;
     CssElementResult *results;
@@ -901,10 +879,46 @@ typedef struct CssMatchJob {
     int end;
 } CssMatchJob;
 
+/* Worker job: match selectors, sort declarations by specificity, write the
+ * computed-style table, and parse/apply inline styles to the computed-style
+ * table.  The applied array is left intact for the main thread to flush to
+ * element.style. */
 static void css_match_node_styles_job(void *arg) {
     CssMatchJob *job = (CssMatchJob*)arg;
+    JSContextHandle ctx = job->ctx;
+
     for (int i = job->start; i < job->end; i++) {
-        css_match_one_node(job->doc, job->results[i].node_idx, job->list, &job->results[i]);
+        CssElementResult *res = &job->results[i];
+        css_match_one_node(job->doc, res->node_idx, job->list, res);
+
+        HtmlNode *node = (HtmlNode*)po_array_payload(&job->doc->array, res->node_idx);
+        if (!node || node->type != HTML_NODE_ELEMENT || !node->has_js_object) continue;
+
+        GCValue element = node->js_object;
+        if (JS_IsUndefined(element) || JS_IsNull(element)) continue;
+
+        DOMNodeHandle dom_node = DOMNodeHandle::from_object(element);
+        if (!dom_node.valid()) continue;
+
+        /* Ensure the computed-style object exists (main thread normally
+         * pre-allocates, but be defensive for serial fallback paths). */
+        if (dom_node.computed_style_handle() == GC_HANDLE_NULL) {
+            css_ensure_computed_style(dom_node);
+        }
+
+        /* Write matched declarations to the computed-style table. */
+        if (res->applied_count > 0) {
+            qsort(res->applied, (size_t)res->applied_count,
+                  sizeof(CssAppliedDecl), css_applied_decl_compare);
+            css_computed_apply_declarations(ctx, dom_node,
+                                            res->applied, res->applied_count);
+        }
+
+        /* Write inline style to the computed-style table. */
+        const char *style_attr = html_node_attr_value(node, "style");
+        if (style_attr && style_attr[0]) {
+            css_computed_apply_inline_style(ctx, dom_node, style_attr);
+        }
     }
 }
 
@@ -942,11 +956,9 @@ static CssElementResult* css_collect_element_results(HtmlDocument *doc, int *out
 }
 
 /* Phase 1 (parallel): use the GC thread pool to match selectors for every
- * element and build a per-element declaration list.
- * Phase 2 (serial): apply the matched declarations and inline styles on the
- * main thread. The current QuickJS runtime is not thread-safe for object
- * mutation, so JS writes must stay on the mutator thread even though each
- * node is logically independent. */
+ * element, sort declarations, and write the computed-style table.
+ * Phase 2 (serial): flush the matched declarations and inline styles to the
+ * JS element.style object on the main thread. */
 static void css_apply_node_styles_parallel(JSContextHandle ctx, HtmlDocument *doc,
                                            CssSheetList *list) {
     int element_count = 0;
@@ -956,6 +968,19 @@ static void css_apply_node_styles_parallel(JSContextHandle ctx, HtmlDocument *do
         return;
     }
 
+    /* Pre-allocate computed-style objects on the main thread so workers can
+     * write lock-free without racing on lazy allocation. */
+    for (int i = 0; i < element_count; i++) {
+        HtmlNode *node = (HtmlNode*)po_array_payload(&doc->array, results[i].node_idx);
+        if (!node || !node->has_js_object) continue;
+        GCValue element = node->js_object;
+        if (JS_IsUndefined(element) || JS_IsNull(element)) continue;
+        DOMNodeHandle dom_node = DOMNodeHandle::from_object(element);
+        if (dom_node.valid()) {
+            css_ensure_computed_style(dom_node);
+        }
+    }
+
     uint32_t thread_count = gc_thread_pool_get_thread_count();
     if (thread_count < 1) thread_count = 1;
     int num_jobs = (int)thread_count;
@@ -963,16 +988,22 @@ static void css_apply_node_styles_parallel(JSContextHandle ctx, HtmlDocument *do
 
     CssMatchJob *jobs = (CssMatchJob*)calloc((size_t)num_jobs, sizeof(CssMatchJob));
     if (!jobs) {
-        /* Allocation failed: fall back to serial matching. */
-        for (int i = 0; i < element_count; i++) {
-            css_match_one_node(doc, results[i].node_idx, list, &results[i]);
-        }
+        /* Allocation failed: fall back to serial matching/application. */
+        CssMatchJob job;
+        job.ctx = ctx;
+        job.doc = doc;
+        job.list = list;
+        job.results = results;
+        job.start = 0;
+        job.end = element_count;
+        css_match_node_styles_job(&job);
     } else {
         int chunk = element_count / num_jobs;
         int remainder = element_count % num_jobs;
         int start = 0;
         for (int j = 0; j < num_jobs; j++) {
             int end = start + chunk + (j < remainder ? 1 : 0);
+            jobs[j].ctx = ctx;
             jobs[j].doc = doc;
             jobs[j].list = list;
             jobs[j].results = results;
@@ -988,7 +1019,7 @@ static void css_apply_node_styles_parallel(JSContextHandle ctx, HtmlDocument *do
         free(jobs);
     }
 
-    /* Apply on the main thread where JS mutation is safe. */
+    /* Flush to element.style on the main thread (JS object mutation). */
     for (int i = 0; i < element_count; i++) {
         int node_idx = results[i].node_idx;
         HtmlNode *node = (HtmlNode*)po_array_payload(&doc->array, node_idx);

@@ -3639,6 +3639,42 @@ GCValue css_computed_get_property(JSContextHandle ctx, DOMNodeHandle node,
     return GC_MKHANDLE(JS_TAG_STRING, str_handle);
 }
 
+/* Apply a declaration list to the computed-style table.  The caller is
+ * responsible for sorting by specificity if needed. */
+void css_computed_apply_declarations(JSContextHandle ctx, DOMNodeHandle node,
+                                     CssAppliedDecl *applied, int count)
+{
+    if (!node.valid() || count <= 0) return;
+    for (int i = 0; i < count; i++) {
+        JSAtom atom = JS_NewAtom(ctx, applied[i].decl->property);
+        if (atom != JS_ATOM_NULL) {
+            css_computed_set_property(ctx, node, atom, applied[i].decl->value);
+            JS_FreeAtom(ctx, atom);
+        }
+    }
+}
+
+/* Parse an inline style attribute and store its declarations in the
+ * computed-style table. */
+void css_computed_apply_inline_style(JSContextHandle ctx, DOMNodeHandle node,
+                                     const char *style_attr)
+{
+    if (!node.valid() || !style_attr || !style_attr[0]) return;
+
+    int count = 0;
+    CssDeclaration *decls = css_parse_inline_style(style_attr, &count);
+    if (!decls) return;
+
+    for (int i = 0; i < count; i++) {
+        JSAtom atom = JS_NewAtom(ctx, decls[i].property);
+        if (atom != JS_ATOM_NULL) {
+            css_computed_set_property(ctx, node, atom, decls[i].value);
+            JS_FreeAtom(ctx, atom);
+        }
+    }
+    css_declarations_free(decls, count);
+}
+
 /* Allocate and attach the per-document CSS index tables. */
 CssDocumentState *css_document_state_ensure(JSRuntimeHandle rt)
 {
@@ -3675,6 +3711,18 @@ void css_document_state_destroy(JSRuntimeHandle rt)
     if (state->class_table) lf_hash_destroy(state->class_table);
     if (state->tag_table) lf_hash_destroy(state->tag_table);
     free(state);
+}
+
+/* Clear all entries from the CSS index tables.  Call when a new document is
+ * populated so lookups do not return nodes from a previous document. */
+void css_document_state_clear(JSRuntimeHandle rt)
+{
+    CssDocumentState *state = (CssDocumentState *)JS_GetRuntimeOpaque(rt);
+    if (!state) return;
+
+    if (state->id_table) { lf_hash_destroy(state->id_table); state->id_table = lf_hash_create(CSS_ID_TABLE_BUCKETS); }
+    if (state->class_table) { lf_hash_destroy(state->class_table); state->class_table = lf_hash_create(CSS_CLASS_TABLE_BUCKETS); }
+    if (state->tag_table) { lf_hash_destroy(state->tag_table); state->tag_table = lf_hash_create(CSS_TAG_TABLE_BUCKETS); }
 }
 
 /* Insert a DOM node into the id/class/tag index tables.  Must be called after

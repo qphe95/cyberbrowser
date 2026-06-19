@@ -919,6 +919,9 @@ bool html_create_dom_in_js(JSContextHandle ctx, HtmlDocument *doc) {
     
     LOG_INFO("Creating DOM in JS context");
     
+    /* CSS index tables are per-runtime state; clear them for the new doc. */
+    css_document_state_clear(JS_GetRuntime(ctx));
+    
     /* Create the document object in JS first (not tracked - persistent) */
     GCValue js_doc = html_create_js_document(ctx, doc);
     
@@ -1071,6 +1074,10 @@ static void html_transfer_element_properties(JSContextHandle ctx, GCValue new_el
 bool html_populate_js_document(JSContextHandle ctx, GCValue js_doc, HtmlDocument *doc) {
     if (!ctx || !doc) return false;
     if (JS_IsUndefined(js_doc) || JS_IsNull(js_doc)) return false;
+    
+    /* The CSS index tables are per-runtime state; clear them before populating
+     * a new document so lookups do not return stale nodes. */
+    css_document_state_clear(JS_GetRuntime(ctx));
     
     LOG_INFO("Populating JS document from parsed HTML");
     
@@ -1247,6 +1254,41 @@ HtmlNode* html_document_get_element_by_tag(HtmlDocument *doc, const char *tag_na
         while (child_idx >= 0 && tail < HTML_MAX_NESTING_DEPTH) {
             queue[tail++] = child_idx;
             child_idx = po_array_next_sibling(&doc->array, child_idx);
+        }
+    }
+    
+    return NULL;
+}
+
+/* Helper to get element by id */
+HtmlNode* html_document_get_element_by_id(HtmlDocument *doc, const char *id) {
+    if (!doc || !id || !id[0]) return NULL;
+    
+    int stack[HTML_MAX_NESTING_DEPTH];
+    int stack_top = 0;
+    
+    if (doc->root_idx >= 0) stack[stack_top++] = doc->root_idx;
+    
+    while (stack_top > 0) {
+        int current_idx = stack[--stack_top];
+        HtmlNode *current = html_node_at(doc, current_idx);
+        if (!current) continue;
+        
+        for (HtmlAttribute *attr = current->attributes; attr != NULL; attr = attr->next) {
+            if (strcasecmp(attr->name, "id") == 0 && strcasecmp(attr->value, id) == 0) {
+                return current;
+            }
+        }
+        
+        int child_idx = po_array_first_child(&doc->array, current_idx);
+        int children[HTML_MAX_NESTING_DEPTH];
+        int child_count = 0;
+        while (child_idx >= 0 && child_count < HTML_MAX_NESTING_DEPTH) {
+            children[child_count++] = child_idx;
+            child_idx = po_array_next_sibling(&doc->array, child_idx);
+        }
+        for (int i = child_count - 1; i >= 0 && stack_top < HTML_MAX_NESTING_DEPTH; i--) {
+            stack[stack_top++] = children[i];
         }
     }
     

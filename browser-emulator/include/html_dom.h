@@ -118,6 +118,9 @@ HtmlNode* html_node_prev_sibling(HtmlDocument *doc, HtmlNode *node);
 /* Helper to get element by tag name from document */
 HtmlNode* html_document_get_element_by_tag(HtmlDocument *doc, const char *tag_name);
 
+/* Helper to get element by id from document */
+HtmlNode* html_document_get_element_by_id(HtmlDocument *doc, const char *id);
+
 /* Helper to get all elements by tag name */
 int html_document_get_elements_by_tag(HtmlDocument *doc, const char *tag_name, 
                                        HtmlNode **out_nodes, int max_nodes);
