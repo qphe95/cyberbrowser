@@ -51,7 +51,25 @@ lazily on first read or during whichever pass needs them.
 
 ---
 
-## 2. Layout tree representation
+## 2. Required spin-wait dependencies
+
+Because the two passes traverse the same tree in opposite directions, workers
+must block on unresolved dependencies. The blocking is implemented as a
+short, fine-grained spin-wait on per-node atomic flags/counters:
+
+* **Top-down pass:** each child spin-waits until its parent's `top_down_done`
+  flag is set. The root has no parent and starts immediately.
+* **Bottom-up pass:** each parent spin-waits until its `children_remaining`
+  counter reaches zero (i.e., every child has finished and decremented the
+  counter). Leaf nodes start immediately.
+
+These waits are the core synchronization mechanism; they cannot be removed or
+replaced by naive scheduling because chunk boundaries cut across parent/child
+edges and workers may otherwise overtake their dependencies.
+
+---
+
+## 3. Layout tree representation
 
 The layout pass works directly on the existing DOM tree (`DOMNode` handles and
 their `parent_node`, `first_child`, `next_sibling` links). To avoid contention
@@ -84,7 +102,7 @@ is different.
 
 ---
 
-## 3. Per-node synchronization state
+## 4. Per-node synchronization state
 
 Each `LayoutNodeRef` gets a small synchronization block:
 
@@ -102,7 +120,7 @@ typedef struct LayoutNodeState {
 A single `LayoutNodeState states[]` array parallels the `LayoutTree.nodes[]`
 array.
 
-### 3.1 Initialization
+### 4.1 Initialization
 
 ```c
 for (int i = 0; i < tree.count; i++) {
@@ -116,16 +134,16 @@ atomic_store(&states[root].top_down_done, 0);
 
 ---
 
-## 4. Top-down pass (pre-order)
+## 5. Top-down pass (pre-order)
 
-### 4.1 Work distribution
+### 5.1 Work distribution
 
 The `preorder[]` array is split into contiguous chunks and submitted to the
 `gc_thread_pool`. A node appears in `preorder[]` before its descendants, so
 most of the time a worker reaches a node only after its parent has already been
 processed by an earlier thread.
 
-### 4.2 Per-node algorithm
+### 5.2 Per-node algorithm
 
 ```c
 static void layout_top_down_node(LayoutContext *ctx, int idx)
@@ -150,7 +168,7 @@ static void layout_top_down_node(LayoutContext *ctx, int idx)
 }
 ```
 
-### 4.3 Worker job
+### 5.3 Worker job
 
 ```c
 static void layout_top_down_job(void *arg)
@@ -162,7 +180,7 @@ static void layout_top_down_job(void *arg)
 }
 ```
 
-### 4.4 Scheduling
+### 5.4 Scheduling
 
 ```c
 layout_build_preorder(&ctx->tree, preorder);
@@ -170,7 +188,7 @@ layout_dispatch_chunks(ctx, preorder, ctx->tree.count, layout_top_down_job);
 gc_thread_pool_wait_empty();
 ```
 
-### 4.5 Why spin-wait is safe
+### 5.5 Why spin-wait is safe
 
 Every node in `preorder[]` has its parent somewhere earlier in the array. If a
 worker reaches a child before the parent is done, it yields and retries. The
@@ -179,14 +197,14 @@ the parent's chunk (or will be). No deadlocks: the dependency graph is a tree.
 
 ---
 
-## 5. Bottom-up pass (post-order)
+## 6. Bottom-up pass (post-order)
 
-### 5.1 Work distribution
+### 6.1 Work distribution
 
 The `postorder[]` array is split into chunks. A node appears in `postorder[]`
 after all of its descendants, so most nodes are processed after their children.
 
-### 5.2 Per-node algorithm
+### 6.2 Per-node algorithm
 
 ```c
 static void layout_bottom_up_node(LayoutContext *ctx, int idx)
@@ -213,7 +231,7 @@ static void layout_bottom_up_node(LayoutContext *ctx, int idx)
 }
 ```
 
-### 5.3 Worker job
+### 6.3 Worker job
 
 ```c
 static void layout_bottom_up_job(void *arg)
@@ -225,12 +243,12 @@ static void layout_bottom_up_job(void *arg)
 }
 ```
 
-### 5.4 Leaf optimization
+### 6.4 Leaf optimization
 
 Leaf nodes have `children_remaining == 0` immediately, so they never spin. This
 gives the pass a large amount of ready work up front.
 
-### 5.5 Why spin-wait is safe
+### 6.5 Why spin-wait is safe
 
 Every node in `postorder[]` appears after all descendants. If a worker reaches
 a parent before all children are done, the parent's counter is still positive
@@ -239,7 +257,7 @@ last child to finish leaves the counter at zero and unblocks the parent.
 
 ---
 
-## 6. Layout value storage
+## 7. Layout value storage
 
 A new `LayoutBox` struct is attached to each `DOMNode` (or stored in a parallel
 array keyed by DOMNode handle):
@@ -263,7 +281,7 @@ the mark callback only needs to keep the `LayoutBox` object alive.
 
 ---
 
-## 7. Integration with computed-style table
+## 8. Integration with computed-style table
 
 Both layout passes read from the per-element `CssComputedStyle` table:
 
@@ -278,7 +296,7 @@ read-only during layout, so no additional synchronization is required.
 
 ---
 
-## 8. Handling incremental layout
+## 9. Handling incremental layout
 
 When a subset of the DOM changes:
 
@@ -292,7 +310,7 @@ For the first implementation, always do a full document layout.
 
 ---
 
-## 9. Memory ordering
+## 10. Memory ordering
 
 All synchronization variables use `memory_order_seq_cst` (or the default
 `atomic_*` operations) for simplicity. The hot path is the property computation
@@ -307,7 +325,7 @@ If profiling shows contention, switch to:
 
 ---
 
-## 10. Pseudocode: full layout function
+## 11. Pseudocode: full layout function
 
 ```c
 void css_layout_document(JSContextHandle ctx, HtmlDocument *doc)
@@ -347,14 +365,14 @@ void css_layout_document(JSContextHandle ctx, HtmlDocument *doc)
 
 ---
 
-## 11. Execution order
+## 12. Execution order
 
 1. Add `LayoutBox` struct and `layout_box_handle` to `DOMNode`.
 2. Add DOMNode `gc_mark` callback updates to mark the layout box.
 3. Implement `layout_tree_from_dom`, `layout_build_preorder`,
    `layout_build_postorder`.
-4. Implement top-down pass with parent spin-wait.
-5. Implement bottom-up pass with children-remaining spin-wait.
+4. Implement top-down pass with parent spin-wait (see section 5).
+5. Implement bottom-up pass with children-remaining spin-wait (see section 6).
 6. Resolve simple top-down properties (inheritance, containing-block width).
 7. Resolve simple bottom-up properties (`height: auto`, scroll extents).
 8. Add tests for both passes.
@@ -362,7 +380,7 @@ void css_layout_document(JSContextHandle ctx, HtmlDocument *doc)
 
 ---
 
-## 12. Success criteria
+## 13. Success criteria
 
 * A full-document layout runs in two parallel passes.
 * Top-down properties produce correct values when children depend on parents.
