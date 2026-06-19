@@ -68,6 +68,14 @@ bgmdwnldr-desktop.ilk
 bgmdwnldr-desktop.pdb
 bgmdwnldr-mac
 
+# Debug symbols generated at project root
+*.ilk
+*.pdb
+vc140.pdb
+
+# Backup files
+*.bak
+
 # Object files
 *.o
 *.obj

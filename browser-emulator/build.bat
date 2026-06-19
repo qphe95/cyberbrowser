@@ -32,7 +32,6 @@ REM Configure with CMake
 echo Configuring with CMake...
 cmake .. ^
     -DBE_BUILD_TESTS=ON ^
-    -DBE_BUILD_DESKTOP_APP=ON ^
     -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded$<$<CONFIG:Debug>:Debug>"
 
 if %ERRORLEVEL% NEQ 0 (
@@ -54,6 +53,3 @@ echo Build complete!
 echo.
 echo To run tests:
 echo   %BUILD_DIR%\tests\Release\browser-emulator-tests.exe
-echo.
-echo Desktop app:
-echo   %BUILD_DIR%\Release\bgmdwnldr-desktop.exe
