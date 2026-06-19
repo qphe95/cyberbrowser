@@ -9632,90 +9632,84 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_NewCFunction(ctx, js_reflect_has, "has", 2));
     JS_SetPropertyStr(ctx, global, "Reflect", reflect_obj);
     
-    // DOMException constructor
-    GCValue dom_exception_proto = JS_NewObject(ctx);
-    
-    JS_SetClassProto(ctx, js_dom_exception_class_id, dom_exception_proto);
-    
-    JS_SetPropertyFunctionList(ctx, dom_exception_proto, js_dom_exception_proto_funcs,
-        sizeof(js_dom_exception_proto_funcs) / sizeof(js_dom_exception_proto_funcs[0]));
-    
-    // Set up prototype chain: DOMException.prototype -> Error.prototype using Object.setPrototypeOf
-    GCValue error_ctor = JS_GetPropertyStr(ctx, global, "Error");
-    if (!JS_IsException(error_ctor)) {
-        GCValue error_proto = JS_GetPropertyStr(ctx, error_ctor, "prototype");
-        if (!JS_IsException(error_proto)) {
-            GCValue obj_ctor = JS_GetPropertyStr(ctx, global, "Object");
-            GCValue set_proto = JS_GetPropertyStr(ctx, obj_ctor, "setPrototypeOf");
-            GCValue args[2] = { dom_exception_proto, error_proto };
-
-
-
-
+    // DOMException setup, isolated in a lambda so failures can exit early
+    // without goto and without affecting the rest of initialization.
+    auto setup_dom_exception = [&]() -> bool {
+        GCValue dom_exception_proto = JS_NewObject(ctx);
+        if (JS_IsException(dom_exception_proto)) {
+            LOG_ERROR("Failed to create DOMException prototype");
+            return false;
         }
-
+        
+        JS_SetClassProto(ctx, js_dom_exception_class_id, dom_exception_proto);
+        JS_SetPropertyFunctionList(ctx, dom_exception_proto, js_dom_exception_proto_funcs,
+            sizeof(js_dom_exception_proto_funcs) / sizeof(js_dom_exception_proto_funcs[0]));
+        
+        // Set up prototype chain: DOMException.prototype -> Error.prototype
+        GCValue error_ctor = JS_GetPropertyStr(ctx, global, "Error");
+        if (!JS_IsException(error_ctor) && !JS_IsUndefined(error_ctor)) {
+            GCValue error_proto = JS_GetPropertyStr(ctx, error_ctor, "prototype");
+            if (!JS_IsException(error_proto) && !JS_IsUndefined(error_proto)) {
+                JS_SetPrototype(ctx, dom_exception_proto, error_proto);
+            }
+        }
+        
+        GCValue dom_exception_ctor = JS_NewCFunction2(ctx, js_dom_exception_constructor, "DOMException", 2, JS_CFUNC_constructor, 0);
+        if (JS_IsException(dom_exception_ctor)) {
+            LOG_ERROR("dom_exception_ctor not usable after creation - SKIPPING DOMException setup");
+            return false;
+        }
+        JS_SetConstructor(ctx, dom_exception_ctor, dom_exception_proto);
+        if (JS_IsException(dom_exception_ctor)) {
+            LOG_ERROR("dom_exception_ctor not usable after SetConstructor - SKIPPING DOMException setup");
+            return false;
+        }
+        
+        /* HELPER: Set an integer constant on dom_exception_ctor. */
+        #define SET_ERR_CONST(name, value) do { \
+            GCValue err_val = JS_NewInt32(ctx, value); \
+            JS_SetPropertyStr(ctx, dom_exception_ctor, #name, err_val); \
+        } while(0)
+        
+        // Add static error code constants with validation before each set
+        SET_ERR_CONST(INDEX_SIZE_ERR, DOM_EXCEPTION_INDEX_SIZE_ERR);
+        SET_ERR_CONST(HIERARCHY_REQUEST_ERR, DOM_EXCEPTION_HIERARCHY_REQUEST_ERR);
+        SET_ERR_CONST(WRONG_DOCUMENT_ERR, DOM_EXCEPTION_WRONG_DOCUMENT_ERR);
+        SET_ERR_CONST(INVALID_CHARACTER_ERR, DOM_EXCEPTION_INVALID_CHARACTER_ERR);
+        SET_ERR_CONST(NO_MODIFICATION_ALLOWED_ERR, DOM_EXCEPTION_NO_MODIFICATION_ALLOWED_ERR);
+        SET_ERR_CONST(NOT_FOUND_ERR, DOM_EXCEPTION_NOT_FOUND_ERR);
+        SET_ERR_CONST(NOT_SUPPORTED_ERR, DOM_EXCEPTION_NOT_SUPPORTED_ERR);
+        SET_ERR_CONST(INVALID_STATE_ERR, DOM_EXCEPTION_INVALID_STATE_ERR);
+        SET_ERR_CONST(SYNTAX_ERR, DOM_EXCEPTION_SYNTAX_ERR);
+        SET_ERR_CONST(INVALID_MODIFICATION_ERR, DOM_EXCEPTION_INVALID_MODIFICATION_ERR);
+        SET_ERR_CONST(NAMESPACE_ERR, DOM_EXCEPTION_NAMESPACE_ERR);
+        SET_ERR_CONST(INVALID_ACCESS_ERR, DOM_EXCEPTION_INVALID_ACCESS_ERR);
+        SET_ERR_CONST(TYPE_MISMATCH_ERR, DOM_EXCEPTION_TYPE_MISMATCH_ERR);
+        SET_ERR_CONST(SECURITY_ERR, DOM_EXCEPTION_SECURITY_ERR);
+        SET_ERR_CONST(NETWORK_ERR, DOM_EXCEPTION_NETWORK_ERR);
+        SET_ERR_CONST(ABORT_ERR, DOM_EXCEPTION_ABORT_ERR);
+        SET_ERR_CONST(URL_MISMATCH_ERR, DOM_EXCEPTION_URL_MISMATCH_ERR);
+        SET_ERR_CONST(QUOTA_EXCEEDED_ERR, DOM_EXCEPTION_QUOTA_EXCEEDED_ERR);
+        SET_ERR_CONST(TIMEOUT_ERR, DOM_EXCEPTION_TIMEOUT_ERR);
+        SET_ERR_CONST(INVALID_NODE_TYPE_ERR, DOM_EXCEPTION_INVALID_NODE_TYPE_ERR);
+        SET_ERR_CONST(DATA_CLONE_ERR, DOM_EXCEPTION_DATA_CLONE_ERR);
+        
+        #undef SET_ERR_CONST
+        
+        // Final validation before exposing to global object
+        if (JS_IsException(dom_exception_ctor)) {
+            LOG_ERROR("dom_exception_ctor corrupted before global assignment - aborting DOMException setup");
+            return false;
+        }
+        
+        JS_SetPropertyStr(ctx, global, "DOMException", dom_exception_ctor);
+        return true;
+    };
+    
+    if (!setup_dom_exception()) {
+        LOG_ERROR("DOMException setup FAILED - continuing without DOMException (YouTube player may have reduced functionality)");
     }
-    
-    GCValue dom_exception_ctor = JS_NewCFunction2(ctx, js_dom_exception_constructor, "DOMException", 2, JS_CFUNC_constructor, 0);
-    if (JS_IsException(dom_exception_ctor)) {
-        LOG_ERROR("dom_exception_ctor not usable after creation - SKIPPING DOMException setup");
-        goto skip_dom_exception;
-    }
-    JS_SetConstructor(ctx, dom_exception_ctor, dom_exception_proto);
-    if (JS_IsException(dom_exception_ctor)) {
-        LOG_ERROR("dom_exception_ctor not usable after SetConstructor - SKIPPING DOMException setup");
-        goto skip_dom_exception;
-    }
-    
-    /* HELPER: Set an integer constant on dom_exception_ctor. */
-    #define SET_ERR_CONST(name, value) do { \
-        GCValue err_val = JS_NewInt32(ctx, value); \
-        JS_SetPropertyStr(ctx, dom_exception_ctor, #name, err_val); \
-    } while(0)
-    
-    // Add static error code constants with validation before each set
-    SET_ERR_CONST(INDEX_SIZE_ERR, DOM_EXCEPTION_INDEX_SIZE_ERR);
-    SET_ERR_CONST(HIERARCHY_REQUEST_ERR, DOM_EXCEPTION_HIERARCHY_REQUEST_ERR);
-    SET_ERR_CONST(WRONG_DOCUMENT_ERR, DOM_EXCEPTION_WRONG_DOCUMENT_ERR);
-    SET_ERR_CONST(INVALID_CHARACTER_ERR, DOM_EXCEPTION_INVALID_CHARACTER_ERR);
-    SET_ERR_CONST(NO_MODIFICATION_ALLOWED_ERR, DOM_EXCEPTION_NO_MODIFICATION_ALLOWED_ERR);
-    SET_ERR_CONST(NOT_FOUND_ERR, DOM_EXCEPTION_NOT_FOUND_ERR);
-    SET_ERR_CONST(NOT_SUPPORTED_ERR, DOM_EXCEPTION_NOT_SUPPORTED_ERR);
-    SET_ERR_CONST(INVALID_STATE_ERR, DOM_EXCEPTION_INVALID_STATE_ERR);
-    SET_ERR_CONST(SYNTAX_ERR, DOM_EXCEPTION_SYNTAX_ERR);
-    SET_ERR_CONST(INVALID_MODIFICATION_ERR, DOM_EXCEPTION_INVALID_MODIFICATION_ERR);
-    SET_ERR_CONST(NAMESPACE_ERR, DOM_EXCEPTION_NAMESPACE_ERR);
-    SET_ERR_CONST(INVALID_ACCESS_ERR, DOM_EXCEPTION_INVALID_ACCESS_ERR);
-    SET_ERR_CONST(TYPE_MISMATCH_ERR, DOM_EXCEPTION_TYPE_MISMATCH_ERR);
-    SET_ERR_CONST(SECURITY_ERR, DOM_EXCEPTION_SECURITY_ERR);
-    SET_ERR_CONST(NETWORK_ERR, DOM_EXCEPTION_NETWORK_ERR);
-    SET_ERR_CONST(ABORT_ERR, DOM_EXCEPTION_ABORT_ERR);
-    SET_ERR_CONST(URL_MISMATCH_ERR, DOM_EXCEPTION_URL_MISMATCH_ERR);
-    SET_ERR_CONST(QUOTA_EXCEEDED_ERR, DOM_EXCEPTION_QUOTA_EXCEEDED_ERR);
-    SET_ERR_CONST(TIMEOUT_ERR, DOM_EXCEPTION_TIMEOUT_ERR);
-    SET_ERR_CONST(INVALID_NODE_TYPE_ERR, DOM_EXCEPTION_INVALID_NODE_TYPE_ERR);
-    SET_ERR_CONST(DATA_CLONE_ERR, DOM_EXCEPTION_DATA_CLONE_ERR);
-    
-    #undef SET_ERR_CONST
-    
-    // Final validation before exposing to global object
-    if (JS_IsException(dom_exception_ctor)) {
-        LOG_ERROR("dom_exception_ctor corrupted before global assignment - aborting DOMException setup");
-        goto dom_exception_cleanup;
-    }
-    
-    JS_SetPropertyStr(ctx, global, "DOMException", dom_exception_ctor);
-    
-    // Success - skip cleanup
-    goto skip_dom_exception;
-    
-dom_exception_cleanup:
-    /* Constructor or property setting failed - log and continue without DOMException */
-    LOG_ERROR("DOMException setup FAILED - continuing without DOMException (YouTube player may have reduced functionality)");
-skip_dom_exception:
-    /* Always log when we reach the skip label for debugging */
-    LOG_INFO("Reached skip_dom_exception - continuing with rest of browser stubs initialization");
-    ;
+    LOG_INFO("Continuing with rest of browser stubs initialization");
     
     // Map constructor
     LOG_INFO("Setting up Map constructor...");
