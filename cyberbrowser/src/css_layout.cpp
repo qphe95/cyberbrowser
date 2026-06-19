@@ -7,6 +7,7 @@
 #include "css_layout.h"
 #include "platform.h"
 #include "quickjs_gc_unified.h"
+#include "http_download.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -62,6 +63,9 @@ static inline LayoutNodeState* layout_state(LayoutContext *ctx, int idx)
 {
     return &ctx->states[idx];
 }
+
+/* Forward declarations for display/visibility helpers used during tree build. */
+static CssDisplay layout_default_display(const char *tag_name);
 
 /* ============================================================================
  * Layout tree construction
@@ -127,6 +131,18 @@ static bool layout_build_nodes(LayoutContext *ctx, const int *map)
         }
     }
     if (ctx->tree.root_idx < 0 && active > 0) ctx->tree.root_idx = 0;
+
+    /* Initialize default display/visibility for each box. */
+    for (int i = 0; i < active; i++) {
+        LayoutBox *box = &ctx->boxes[i];
+        HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx);
+        if (node && node->type == HTML_NODE_ELEMENT) {
+            box->display = layout_default_display(node->tag_name);
+        } else {
+            box->display = CSS_DISPLAY_INLINE;
+        }
+        box->visibility = CSS_VISIBILITY_VISIBLE;
+    }
 
     return true;
 }
@@ -294,6 +310,39 @@ static void layout_apply_shorthand_sides(LayoutBox *box, const char *value,
     }
 }
 
+static CssDisplay layout_default_display(const char *tag_name) {
+    if (!tag_name || !tag_name[0]) return CSS_DISPLAY_BLOCK;
+    /* Common replaced/phrasing elements default to inline. */
+    static const char *inline_tags[] = {
+        "span", "a", "em", "strong", "b", "i", "u", "s", "small",
+        "img", "br", "wbr", "code", "pre", "sub", "sup", "label",
+        "input", "button", "textarea", "select", "iframe", "canvas",
+        "script", "style", "link", "meta", "title", NULL
+    };
+    for (int i = 0; inline_tags[i]; i++) {
+        if (strcasecmp(tag_name, inline_tags[i]) == 0) return CSS_DISPLAY_INLINE;
+    }
+    return CSS_DISPLAY_BLOCK;
+}
+
+static CssDisplay css_parse_display(const char *value) {
+    if (!value) return CSS_DISPLAY_OTHER;
+    if (strcasecmp(value, "none") == 0) return CSS_DISPLAY_NONE;
+    if (strcasecmp(value, "block") == 0) return CSS_DISPLAY_BLOCK;
+    if (strcasecmp(value, "inline") == 0) return CSS_DISPLAY_INLINE;
+    if (strcasecmp(value, "inline-block") == 0) return CSS_DISPLAY_INLINE_BLOCK;
+    if (strcasecmp(value, "flex") == 0) return CSS_DISPLAY_FLEX;
+    if (strcasecmp(value, "grid") == 0) return CSS_DISPLAY_GRID;
+    return CSS_DISPLAY_OTHER;
+}
+
+static CssVisibility css_parse_visibility(const char *value) {
+    if (!value) return CSS_VISIBILITY_VISIBLE;
+    if (strcasecmp(value, "hidden") == 0) return CSS_VISIBILITY_HIDDEN;
+    if (strcasecmp(value, "collapse") == 0) return CSS_VISIBILITY_COLLAPSE;
+    return CSS_VISIBILITY_VISIBLE;
+}
+
 static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                                      double parent_width, double viewport_width)
 {
@@ -301,7 +350,11 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     const char *value = decl->value;
     if (!prop || !value) return;
 
-    if (strcasecmp(prop, "width") == 0) {
+    if (strcasecmp(prop, "display") == 0) {
+        box->display = css_parse_display(value);
+    } else if (strcasecmp(prop, "visibility") == 0) {
+        box->visibility = css_parse_visibility(value);
+    } else if (strcasecmp(prop, "width") == 0) {
         box->width = css_parse_length(value, parent_width, viewport_width);
     } else if (strcasecmp(prop, "height") == 0) {
         box->height = css_parse_length(value, parent_width, viewport_width);
@@ -359,30 +412,239 @@ static void layout_apply_inline_style(LayoutBox *box, HtmlNode *node,
     }
 }
 
-/* Apply a stylesheet to all nodes before layout (stores used values in boxes). */
-static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
-{
-    for (int i = 0; i < ctx->tree.count; i++) {
-        LayoutBox *box = layout_box(ctx, i);
-        HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx);
-        if (!node || node->type != HTML_NODE_ELEMENT) continue;
+/* ============================================================================
+ * Stylesheet collection and parallel application
+ * ============================================================================ */
 
+typedef struct LayoutStyleSheetList {
+    CssStylesheet **sheets;
+    int count;
+    int capacity;
+} LayoutStyleSheetList;
+
+static bool layout_sheet_list_add(LayoutStyleSheetList *list, CssStylesheet *sheet) {
+    if (!sheet) return false;
+    if (list->count >= list->capacity) {
+        int new_cap = list->capacity ? list->capacity * 2 : 4;
+        CssStylesheet **new_sheets = (CssStylesheet**)realloc(list->sheets,
+                                                               new_cap * sizeof(CssStylesheet*));
+        if (!new_sheets) { css_stylesheet_free(sheet); return false; }
+        list->sheets = new_sheets;
+        list->capacity = new_cap;
+    }
+    list->sheets[list->count++] = sheet;
+    return true;
+}
+
+static void layout_sheet_list_free(LayoutStyleSheetList *list) {
+    if (!list) return;
+    for (int i = 0; i < list->count; i++) css_stylesheet_free(list->sheets[i]);
+    free(list->sheets);
+    list->sheets = NULL;
+    list->count = list->capacity = 0;
+}
+
+static char* layout_resolve_url(const char *base_url, const char *href) {
+    if (!href || !href[0]) return NULL;
+    if (strncmp(href, "http://", 7) == 0 || strncmp(href, "https://", 8) == 0) return strdup(href);
+    if (strncmp(href, "//", 2) == 0) {
+        char buf[2048];
+        snprintf(buf, sizeof(buf), "https:%s", href);
+        return strdup(buf);
+    }
+    if (href[0] == '/') {
+        const char *base = base_url && base_url[0] ? base_url : "https://www.youtube.com";
+        char buf[2048];
+        snprintf(buf, sizeof(buf), "%s%s", base, href);
+        return strdup(buf);
+    }
+    const char *base = base_url && base_url[0] ? base_url : "https://www.youtube.com/";
+    char buf[2048];
+    if (base[strlen(base) - 1] == '/') {
+        snprintf(buf, sizeof(buf), "%s%s", base, href);
+    } else {
+        const char *last_slash = strrchr(base, '/');
+        if (last_slash) {
+            size_t base_len = (size_t)(last_slash - base) + 1;
+            snprintf(buf, sizeof(buf), "%.*s%s", (int)base_len, base, href);
+        } else {
+            snprintf(buf, sizeof(buf), "%s/%s", base, href);
+        }
+    }
+    return strdup(buf);
+}
+
+static CssStylesheet* layout_fetch_stylesheet(const char *base_url, const char *href) {
+    char *url = layout_resolve_url(base_url, href);
+    if (!url) return NULL;
+    LOG_INFO("Fetching stylesheet: %.80s", url);
+
+    HttpBuffer buffer = {0};
+    char err[256] = {0};
+    bool ok = http_get_to_memory(url, &buffer, err, sizeof(err));
+    CssStylesheet *sheet = NULL;
+    if (ok && buffer.data && buffer.size > 0) {
+        LOG_INFO("Fetched stylesheet (%zu bytes)", buffer.size);
+        sheet = css_stylesheet_parse(buffer.data, buffer.size);
+    } else {
+        LOG_WARN("Failed to fetch stylesheet %.80s: %s", url, err[0] ? err : "unknown");
+    }
+    free(url);
+    if (buffer.data) free(buffer.data);
+    return sheet;
+}
+
+static void layout_collect_stylesheets_recursive(LayoutContext *ctx, int layout_idx,
+                                                  LayoutStyleSheetList *list,
+                                                  const char *base_url) {
+    if (layout_idx < 0 || layout_idx >= ctx->tree.count) return;
+    HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[layout_idx].dom_node_idx);
+    if (!node || node->type != HTML_NODE_ELEMENT) goto next;
+
+    if (strcasecmp(node->tag_name, "style") == 0 && node->text_content && node->text_content[0]) {
+        CssStylesheet *sheet = css_stylesheet_parse(node->text_content, strlen(node->text_content));
         if (sheet) {
-            for (int r = 0; r < sheet->rule_count; r++) {
-                CssRule *rule = &sheet->rules[r];
-                /* Minimal matching: tag name only for now. */
-                if (strcasecmp(rule->selector_text, node->tag_name) == 0) {
-                    for (int d = 0; d < rule->declaration_count; d++) {
-                        layout_apply_declaration(box, &rule->declarations[d],
-                                                 ctx->viewport_width, ctx->viewport_width);
-                    }
+            LOG_INFO("Parsed inline <style> stylesheet with %d rules", sheet->rule_count);
+            layout_sheet_list_add(list, sheet);
+        }
+    } else if (strcasecmp(node->tag_name, "link") == 0) {
+        const char *rel = NULL;
+        const char *href = NULL;
+        for (HtmlAttribute *a = node->attributes; a; a = a->next) {
+            if (strcasecmp(a->name, "rel") == 0) rel = a->value;
+            else if (strcasecmp(a->name, "href") == 0) href = a->value;
+        }
+        if (rel && href && strcasecmp(rel, "stylesheet") == 0) {
+            CssStylesheet *sheet = layout_fetch_stylesheet(base_url, href);
+            if (sheet) layout_sheet_list_add(list, sheet);
+        }
+    }
+
+next:
+    for (int c = ctx->tree.nodes[layout_idx].first_child_idx; c >= 0;
+         c = ctx->tree.nodes[c].next_sibling_idx) {
+        layout_collect_stylesheets_recursive(ctx, c, list, base_url);
+    }
+}
+
+static bool layout_collect_document_stylesheets(LayoutContext *ctx, LayoutStyleSheetList *list,
+                                                 const char *base_url) {
+    if (!ctx || !list || ctx->tree.count == 0) return false;
+    int root_dom_idx = ctx->tree.nodes[ctx->tree.root_idx].dom_node_idx;
+    layout_collect_stylesheets_recursive(ctx, root_dom_idx, list, base_url);
+    return true;
+}
+
+/* Collect matching declarations for one node, sort by cascade, and apply. */
+static void layout_apply_stylesheet_node(LayoutContext *ctx, int idx,
+                                          LayoutStyleSheetList *list)
+{
+    LayoutBox *box = layout_box(ctx, idx);
+    HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+    if (!node || node->type != HTML_NODE_ELEMENT) return;
+
+    int cap = 64;
+    int count = 0;
+    CssAppliedDecl *applied = (CssAppliedDecl*)malloc(cap * sizeof(CssAppliedDecl));
+    if (!applied) return;
+
+    for (int s = 0; s < list->count; s++) {
+        CssStylesheet *sheet = list->sheets[s];
+        for (int r = 0; r < sheet->rule_count; r++) {
+            CssRule *rule = &sheet->rules[r];
+            if (!rule->selector_text || !rule->selector_text[0]) continue;
+            if (!css_selector_matches(rule->selector_text, ctx->doc, node)) continue;
+            int spec = rule->specificity;
+            if (spec == 0) spec = css_specificity_from_selector_text(rule->selector_text);
+            for (int d = 0; d < rule->declaration_count; d++) {
+                if (count >= cap) {
+                    int new_cap = cap * 2;
+                    CssAppliedDecl *new_app = (CssAppliedDecl*)realloc(applied,
+                                                                        new_cap * sizeof(CssAppliedDecl));
+                    if (!new_app) break;
+                    applied = new_app;
+                    cap = new_cap;
                 }
+                applied[count].decl = &rule->declarations[d];
+                applied[count].specificity = spec;
+                applied[count].order = s * 1000000 + r * 1000 + d;
+                count++;
             }
         }
-
-        /* Inline styles have higher precedence. */
-        layout_apply_inline_style(box, node, ctx->viewport_width, ctx->viewport_width);
     }
+
+    if (count > 0) {
+        qsort(applied, (size_t)count, sizeof(CssAppliedDecl), css_applied_decl_compare);
+        for (int d = 0; d < count; d++) {
+            layout_apply_declaration(box, applied[d].decl,
+                                     ctx->viewport_width, ctx->viewport_width);
+        }
+    }
+    free(applied);
+
+    /* Inline styles override stylesheet rules. */
+    layout_apply_inline_style(box, node, ctx->viewport_width, ctx->viewport_width);
+}
+
+typedef struct StyleApplyChunk {
+    LayoutContext *ctx;
+    LayoutStyleSheetList *list;
+    int start;
+    int end;
+} StyleApplyChunk;
+
+static void layout_apply_stylesheet_job(void *arg)
+{
+    StyleApplyChunk *chunk = (StyleApplyChunk*)arg;
+    for (int i = chunk->start; i < chunk->end; i++) {
+        layout_apply_stylesheet_node(chunk->ctx, i, chunk->list);
+    }
+    free(chunk);
+}
+
+static bool layout_apply_stylesheets_parallel(LayoutContext *ctx, LayoutStyleSheetList *list)
+{
+    int n = ctx->tree.count;
+    if (n == 0 || list->count == 0) return true;
+
+    uint32_t thread_count = gc_thread_pool_get_thread_count();
+    if (thread_count < 1) thread_count = 1;
+    int num_jobs = (int)thread_count;
+    if (num_jobs > n) num_jobs = n;
+
+    int chunk = n / num_jobs;
+    int remainder = n % num_jobs;
+    int start = 0;
+    for (int j = 0; j < num_jobs; j++) {
+        int end = start + chunk + (j < remainder ? 1 : 0);
+        if (end <= start) continue;
+        StyleApplyChunk *c = (StyleApplyChunk*)malloc(sizeof(StyleApplyChunk));
+        if (!c) return false;
+        c->ctx = ctx;
+        c->list = list;
+        c->start = start;
+        c->end = end;
+        if (!gc_thread_pool_submit_job(layout_apply_stylesheet_job, c)) {
+            free(c);
+            return false;
+        }
+        start = end;
+    }
+
+    gc_thread_pool_wait_empty();
+    return true;
+}
+
+static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
+{
+    LayoutStyleSheetList list = {0};
+    const char *base_url = "https://www.youtube.com/";
+    layout_collect_document_stylesheets(ctx, &list, base_url);
+    if (sheet) layout_sheet_list_add(&list, sheet);
+
+    LOG_INFO("Applying %d stylesheet(s) to %d layout nodes in parallel", list.count, ctx->tree.count);
+    layout_apply_stylesheets_parallel(ctx, &list);
+    layout_sheet_list_free(&list);
 }
 
 /* ============================================================================

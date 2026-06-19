@@ -586,13 +586,13 @@ static bool css_chain_matches(const CssSelectorPart *parts, int count,
     return true;
 }
 
-static bool css_selector_matches_one(const char *selector, HtmlDocument *doc, HtmlNode *node) {
+bool css_selector_matches_one(const char *selector, HtmlDocument *doc, HtmlNode *node) {
     CssSelectorPart parts[CSS_MAX_SIMPLE_PARTS];
     int count = css_parse_selector_chain(selector, parts, CSS_MAX_SIMPLE_PARTS);
     return css_chain_matches(parts, count, doc, node);
 }
 
-static bool css_selector_matches(const char *selector, HtmlDocument *doc, HtmlNode *node) {
+bool css_selector_matches(const char *selector, HtmlDocument *doc, HtmlNode *node) {
     size_t len = strlen(selector);
     size_t i = 0;
     while (i < len) {
@@ -627,7 +627,7 @@ static bool css_selector_matches(const char *selector, HtmlDocument *doc, HtmlNo
  * Style application
  * ============================================================================ */
 
-static int css_applied_decl_compare(const void *a, const void *b) {
+int css_applied_decl_compare(const void *a, const void *b) {
     const CssAppliedDecl *da = (const CssAppliedDecl*)a;
     const CssAppliedDecl *db = (const CssAppliedDecl*)b;
     if (da->specificity != db->specificity) return da->specificity - db->specificity;
@@ -1037,7 +1037,7 @@ static void css_apply_node_styles_parallel(JSContextHandle ctx, HtmlDocument *do
 }
 
 /* Recompute specificity from raw selector text (used when not precomputed). */
-static int css_specificity_from_selector_text(const char *selector) {
+int css_specificity_from_selector_text(const char *selector) {
     CssSelectorPart parts[CSS_MAX_SIMPLE_PARTS];
     int count = css_parse_selector_chain(selector, parts, CSS_MAX_SIMPLE_PARTS);
     return css_specificity_from_chain(parts, count);

@@ -57,6 +57,15 @@ void css_declarations_free(CssDeclaration *decls, int count);
 /* Convert a CSS property like "background-color" to "backgroundColor". */
 char* css_to_camel_case(const char *prop);
 
+/* Selector matching: returns true if the selector matches the given DOM node. */
+bool css_selector_matches(const char *selector, HtmlDocument *doc, HtmlNode *node);
+
+/* qsort comparator for CssAppliedDecl (specificity ascending, then order). */
+int css_applied_decl_compare(const void *a, const void *b);
+
+/* Compute specificity from raw selector text. */
+int css_specificity_from_selector_text(const char *selector);
+
 /* One matched declaration with specificity/order for cascading. */
 typedef struct CssAppliedDecl {
     const CssDeclaration *decl;

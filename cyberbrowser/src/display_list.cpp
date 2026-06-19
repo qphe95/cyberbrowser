@@ -95,8 +95,10 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
     for (int i = 0; i < ctx->tree.count; i++) {
         LayoutBox *box = &ctx->boxes[i];
         if (!(box->flags & LAYOUT_HAS_LAYOUT)) continue;
+        if (box->display == CSS_DISPLAY_NONE) continue;
+        if (box->visibility == CSS_VISIBILITY_HIDDEN) continue;
 
-        /* Background rectangle. */
+        /* Background rectangle when a color is explicitly set. */
         if (box->background_color_a > 0.0f) {
             if (!display_list_add_rect(dl,
                                        (float)box->x, (float)box->y,
@@ -109,7 +111,7 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
             }
         }
 
-        /* Border. */
+        /* Explicit border. */
         if (box->border_top > 0 || box->border_right > 0 ||
             box->border_bottom > 0 || box->border_left > 0) {
             float thickness = (float)(box->border_top + box->border_right +
@@ -123,6 +125,16 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                                          (float)box->color_g,
                                          (float)box->color_b,
                                          (float)box->color_a)) {
+                return false;
+            }
+        } else {
+            /* Every visible element gets at least a wireframe outline so the
+             * layout structure is observable even without explicit styles. */
+            if (!display_list_add_border(dl,
+                                         (float)box->x, (float)box->y,
+                                         (float)box->width, (float)box->height,
+                                         1.0f,
+                                         0.75f, 0.75f, 0.75f, 1.0f)) {
                 return false;
             }
         }

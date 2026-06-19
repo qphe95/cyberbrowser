@@ -27,6 +27,24 @@ extern "C" {
 #define LAYOUT_NEEDS_LAYOUT 0x01
 #define LAYOUT_HAS_LAYOUT   0x02
 
+/* CSS display value used for visibility decisions. */
+typedef enum {
+    CSS_DISPLAY_INLINE,
+    CSS_DISPLAY_BLOCK,
+    CSS_DISPLAY_INLINE_BLOCK,
+    CSS_DISPLAY_FLEX,
+    CSS_DISPLAY_GRID,
+    CSS_DISPLAY_NONE,
+    CSS_DISPLAY_OTHER
+} CssDisplay;
+
+/* CSS visibility value. */
+typedef enum {
+    CSS_VISIBILITY_VISIBLE,
+    CSS_VISIBILITY_HIDDEN,
+    CSS_VISIBILITY_COLLAPSE
+} CssVisibility;
+
 /* Layout values for a single DOM node. */
 typedef struct LayoutBox {
     double x, y;
@@ -40,6 +58,9 @@ typedef struct LayoutBox {
     /* Resolved colors (RGBA, 0..1). */
     double color_r, color_g, color_b, color_a;
     double background_color_r, background_color_g, background_color_b, background_color_a;
+
+    CssDisplay display;
+    CssVisibility visibility;
 
     uint32_t flags;
     uint32_t _pad;
