@@ -48,6 +48,14 @@ typedef enum {
     CSS_VISIBILITY_COLLAPSE
 } CssVisibility;
 
+/* CSS flex-direction value. */
+typedef enum {
+    CSS_FLEX_DIRECTION_ROW,
+    CSS_FLEX_DIRECTION_ROW_REVERSE,
+    CSS_FLEX_DIRECTION_COLUMN,
+    CSS_FLEX_DIRECTION_COLUMN_REVERSE
+} CssFlexDirection;
+
 /* Layout values for a single DOM node. */
 typedef struct LayoutBox {
     double x, y;

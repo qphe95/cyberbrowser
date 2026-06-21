@@ -150,6 +150,7 @@ static bool layout_build_nodes(LayoutContext *ctx, const int *map)
             box->display = CSS_DISPLAY_INLINE;
         }
         box->visibility = CSS_VISIBILITY_VISIBLE;
+        box->flex_direction = CSS_FLEX_DIRECTION_ROW;
     }
 
     return true;
@@ -347,8 +348,17 @@ static CssDisplay css_parse_display(const char *value) {
     if (strcasecmp(value, "inline") == 0) return CSS_DISPLAY_INLINE;
     if (strcasecmp(value, "inline-block") == 0) return CSS_DISPLAY_INLINE_BLOCK;
     if (strcasecmp(value, "flex") == 0) return CSS_DISPLAY_FLEX;
+    if (strcasecmp(value, "inline-flex") == 0) return CSS_DISPLAY_FLEX;
     if (strcasecmp(value, "grid") == 0) return CSS_DISPLAY_GRID;
     return CSS_DISPLAY_OTHER;
+}
+
+static CssFlexDirection css_parse_flex_direction(const char *value) {
+    if (!value) return CSS_FLEX_DIRECTION_ROW;
+    if (strcasecmp(value, "row-reverse") == 0) return CSS_FLEX_DIRECTION_ROW_REVERSE;
+    if (strcasecmp(value, "column") == 0) return CSS_FLEX_DIRECTION_COLUMN;
+    if (strcasecmp(value, "column-reverse") == 0) return CSS_FLEX_DIRECTION_COLUMN_REVERSE;
+    return CSS_FLEX_DIRECTION_ROW;
 }
 
 static CssVisibility css_parse_visibility(const char *value) {

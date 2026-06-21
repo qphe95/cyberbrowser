@@ -1027,6 +1027,7 @@ static void css_apply_node_styles_parallel(JSContextHandle ctx, HtmlDocument *do
     /* Dispatch selector matching and style application to worker threads.
      * Each worker owns a disjoint chunk of elements, so JS object mutation
      * and computed-style writes are safe without additional locking. */
+    bool fallback_serial = false;
     int chunk = element_count / num_jobs;
     int remainder = element_count % num_jobs;
     int start = 0;
