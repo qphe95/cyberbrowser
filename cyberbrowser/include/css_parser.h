@@ -28,6 +28,7 @@ typedef struct CssDeclaration {
 /* One rule: a selector string plus its declarations. */
 typedef struct CssRule {
     char *selector_text;
+    char *media_query;   /* enclosing @media condition, e.g. "(min-width:792px)" */
     int specificity;
     CssDeclaration *declarations;
     int declaration_count;
@@ -65,6 +66,9 @@ int css_applied_decl_compare(const void *a, const void *b);
 
 /* Compute specificity from raw selector text. */
 int css_specificity_from_selector_text(const char *selector);
+
+/* Returns true if a rule's enclosing @media condition matches the viewport. */
+bool css_rule_media_matches(const CssRule *rule, double viewport_width);
 
 /* One matched declaration with specificity/order for cascading. */
 typedef struct CssAppliedDecl {

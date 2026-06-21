@@ -297,6 +297,13 @@ static void css_parse_at_rule(const char *s, size_t len, size_t *pos, CssStylesh
     while (*pos < len && (isalnum((unsigned char)s[*pos]) || s[*pos] == '-')) (*pos)++;
     css_skip_space_and_comments(s, len, pos);
     if (*pos < len && s[*pos] == '{') {
+        /* Capture the media/supports condition before consuming the block. */
+        size_t cond_start = *pos;
+        /* condition starts after any leading space and ends at the '{' */
+        size_t cond_end = *pos;
+        while (cond_start > 0 && css_is_space(s[cond_start - 1])) cond_start--;
+        char *media_cond = css_strndup_trim(s + cond_start, cond_end - cond_start);
+
         /* Block-form at-rule: parse nested rules. */
         (*pos)++;
         while (*pos < len) {
@@ -315,17 +322,21 @@ static void css_parse_at_rule(const char *s, size_t len, size_t *pos, CssStylesh
             }
             if (*pos >= len || s[*pos] != '{') {
                 free(selector);
+                free(media_cond);
                 continue;
             }
             (*pos)++; /* skip '{' */
             CssRule *rule = css_stylesheet_add_rule(sheet);
             if (!rule) {
                 free(selector);
+                free(media_cond);
                 break;
             }
             rule->selector_text = selector;
+            rule->media_query = media_cond ? strdup(media_cond) : NULL;
             css_parse_declaration_block(s, len, pos, rule);
         }
+        free(media_cond);
     } else {
         /* Statement form; skip until ';' or block end. */
         while (*pos < len && s[*pos] != ';' && s[*pos] != '}') (*pos)++;
@@ -382,6 +393,7 @@ void css_stylesheet_free(CssStylesheet *sheet) {
     for (int i = 0; i < sheet->rule_count; i++) {
         CssRule *rule = &sheet->rules[i];
         free(rule->selector_text);
+        free(rule->media_query);
         css_declarations_free(rule->declarations, rule->declaration_count);
     }
     free(sheet->rules);
@@ -857,6 +869,7 @@ static void css_match_one_node(HtmlDocument *doc, int node_idx, CssSheetList *li
             CssRule *rule = &sheet->rules[r];
             if (!rule->selector_text || !rule->selector_text[0]) continue;
             if (!css_selector_matches(rule->selector_text, doc, node)) continue;
+            if (!css_rule_media_matches(rule, 1024.0)) continue; /* viewport unknown here; use a default */
             int spec = rule->specificity;
             if (spec == 0) spec = css_specificity_from_selector_text(rule->selector_text);
             for (int d = 0; d < rule->declaration_count; d++) {
@@ -1060,6 +1073,65 @@ static void css_apply_node_styles_parallel(JSContextHandle ctx, HtmlDocument *do
         free(results[i].applied);
     }
     free(results);
+}
+
+bool css_rule_media_matches(const CssRule *rule, double viewport_width) {
+    if (!rule || !rule->media_query || !rule->media_query[0]) return true;
+    const char *s = rule->media_query;
+    bool result = true;
+    bool expect_and = false;  /* we only support 'and'-joined media features */
+
+    while (*s) {
+        while (*s && css_is_space(*s)) s++;
+        if (!*s) break;
+
+        if (strncasecmp(s, "only", 4) == 0) {
+            s += 4;
+            while (*s && css_is_space(*s)) s++;
+        }
+        if (strncasecmp(s, "screen", 6) == 0 ||
+            strncasecmp(s, "all", 3) == 0 ||
+            strncasecmp(s, "print", 5) == 0) {
+            while (*s && !css_is_space(*s) && *s != '(') s++;
+            while (*s && css_is_space(*s)) s++;
+        }
+
+        if (*s == '(') {
+            s++;
+            while (*s && css_is_space(*s)) s++;
+            bool is_min = false, is_max = false;
+            const char *prop = s;
+            while (*s && *s != ':' && *s != ')') s++;
+            size_t prop_len = (size_t)(s - prop);
+            if (*s == ':') {
+                s++;
+                while (*s && css_is_space(*s)) s++;
+                char *end = NULL;
+                double val = strtod(s, &end);
+                if (prop_len >= 8 && strncasecmp(prop, "min-width", 9) == 0) is_min = true;
+                else if (prop_len >= 8 && strncasecmp(prop, "max-width", 9) == 0) is_max = true;
+                bool matches = true;
+                if (is_min) matches = viewport_width >= val - 0.5;
+                else if (is_max) matches = viewport_width <= val + 0.5;
+                if (expect_and) result = result && matches;
+                else result = matches;
+                expect_and = true;
+                s = end;
+            }
+            while (*s && *s != ')') s++;
+            if (*s == ')') s++;
+        } else if (strncasecmp(s, "and", 3) == 0) {
+            s += 3;
+            expect_and = true;
+            continue;
+        } else {
+            /* Unknown token; skip until next space/paren. */
+            while (*s && !css_is_space(*s) && *s != '(') s++;
+        }
+        while (*s && css_is_space(*s)) s++;
+        if (*s == ',' || strncasecmp(s, "or", 2) == 0) return true; /* be permissive for comma/or */
+    }
+    return result;
 }
 
 /* Recompute specificity from raw selector text (used when not precomputed). */

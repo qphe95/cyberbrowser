@@ -56,6 +56,31 @@ typedef enum {
     CSS_FLEX_DIRECTION_COLUMN_REVERSE
 } CssFlexDirection;
 
+/* CSS flex-wrap value. */
+typedef enum {
+    CSS_FLEX_WRAP_NOWRAP,
+    CSS_FLEX_WRAP_WRAP,
+    CSS_FLEX_WRAP_WRAP_REVERSE
+} CssFlexWrap;
+
+/* CSS justify-content value. */
+typedef enum {
+    CSS_JUSTIFY_FLEX_START,
+    CSS_JUSTIFY_FLEX_END,
+    CSS_JUSTIFY_CENTER,
+    CSS_JUSTIFY_SPACE_BETWEEN,
+    CSS_JUSTIFY_SPACE_AROUND,
+    CSS_JUSTIFY_SPACE_EVENLY
+} CssJustifyContent;
+
+/* CSS align-items value. */
+typedef enum {
+    CSS_ALIGN_STRETCH,
+    CSS_ALIGN_FLEX_START,
+    CSS_ALIGN_FLEX_END,
+    CSS_ALIGN_CENTER
+} CssAlignItems;
+
 /* Layout values for a single DOM node. */
 typedef struct LayoutBox {
     double x, y;
@@ -72,6 +97,22 @@ typedef struct LayoutBox {
 
     CssDisplay display;
     CssVisibility visibility;
+    CssFlexDirection flex_direction;
+    CssFlexWrap flex_wrap;
+    CssJustifyContent justify_content;
+    CssAlignItems align_items;
+
+    double flex_basis;
+    double flex_grow;
+    double flex_shrink;
+
+    double min_width, max_width;
+    double min_height, max_height;
+    double gap_row, gap_col;
+
+    /* Aspect ratio derived from percentage padding-top/bottom when height
+     * is otherwise auto (common thumbnail placeholder technique). */
+    double aspect_ratio;
 
     /* Temporary line-flow state used during the top-down pass.  Each parent
      * box tracks the current line position; children update it sequentially

@@ -7,6 +7,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 #define LOG_TAG "display_list"
 #define LOG_ERROR(...) platform_log(LOG_LEVEL_ERROR, LOG_TAG, __VA_ARGS__)
@@ -87,6 +88,27 @@ bool display_list_add_glyph(DisplayList *dl, float x, float y, float w, float h,
     return true;
 }
 
+static bool node_has_hidden_class(LayoutContext *ctx, int node_idx)
+{
+    if (node_idx < 0 || node_idx >= ctx->tree.count) return false;
+    HtmlNode *node = (HtmlNode*)po_array_payload(&ctx->doc->array,
+                                                  ctx->tree.nodes[node_idx].dom_node_idx);
+    if (!node || node->type != HTML_NODE_ELEMENT) return false;
+    for (HtmlAttribute *a = node->attributes; a; a = a->next) {
+        if (strcasecmp(a->name, "class") == 0 && a->value) {
+            const char *p = a->value;
+            size_t len = strlen(p);
+            for (size_t i = 0; i < len; ) {
+                while (i < len && isspace((unsigned char)p[i])) i++;
+                size_t start = i;
+                while (i < len && !isspace((unsigned char)p[i])) i++;
+                if (i - start == 6 && strncasecmp(p + start, "hidden", 6) == 0) return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
 {
     if (!ctx || !dl) return false;
@@ -97,6 +119,7 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
         if (!(box->flags & LAYOUT_HAS_LAYOUT)) continue;
         if (box->display == CSS_DISPLAY_NONE) continue;
         if (box->visibility == CSS_VISIBILITY_HIDDEN) continue;
+        if (node_has_hidden_class(ctx, i)) continue;
 
         /* Background rectangle when a color is explicitly set. */
         if (box->background_color_a > 0.0f) {
