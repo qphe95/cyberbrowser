@@ -288,29 +288,43 @@ static char* css_read_selector(const char *s, size_t len, size_t *pos) {
     return css_strndup_trim(s + start, *pos - start);
 }
 
-/* Skip an at-rule (e.g. @media { ... } or @import ...;). */
-static void css_skip_at_rule(const char *s, size_t len, size_t *pos) {
+/* Parse an at-rule. Block-form at-rules (e.g. @media, @supports) contain
+ * regular style rules; we extract those rules so layout can use them.
+ * Statement at-rules (e.g. @import) are skipped. */
+static void css_parse_at_rule(const char *s, size_t len, size_t *pos, CssStylesheet *sheet) {
     /* Skip '@' and identifier. */
     (*pos)++;
     while (*pos < len && (isalnum((unsigned char)s[*pos]) || s[*pos] == '-')) (*pos)++;
     css_skip_space_and_comments(s, len, pos);
     if (*pos < len && s[*pos] == '{') {
-        /* Skip balanced block. */
-        int depth = 1;
+        /* Block-form at-rule: parse nested rules. */
         (*pos)++;
-        bool in_quote = false;
-        char quote_char = 0;
-        while (*pos < len && depth > 0) {
-            char c = s[*pos];
-            if (!in_quote) {
-                if (c == '"' || c == '\'') { in_quote = true; quote_char = c; }
-                else if (c == '{') depth++;
-                else if (c == '}') depth--;
-            } else {
-                if (c == quote_char) in_quote = false;
-                else if (c == '\\' && *pos + 1 < len) (*pos)++;
+        while (*pos < len) {
+            css_skip_space_and_comments(s, len, pos);
+            if (*pos >= len) break;
+            if (s[*pos] == '}') { (*pos)++; break; }
+            if (s[*pos] == '@') {
+                css_parse_at_rule(s, len, pos, sheet);
+                continue;
             }
-            (*pos)++;
+            char *selector = css_read_selector(s, len, pos);
+            if (!selector) {
+                /* Could be malformed; try to recover. */
+                (*pos)++;
+                continue;
+            }
+            if (*pos >= len || s[*pos] != '{') {
+                free(selector);
+                continue;
+            }
+            (*pos)++; /* skip '{' */
+            CssRule *rule = css_stylesheet_add_rule(sheet);
+            if (!rule) {
+                free(selector);
+                break;
+            }
+            rule->selector_text = selector;
+            css_parse_declaration_block(s, len, pos, rule);
         }
     } else {
         /* Statement form; skip until ';' or block end. */
@@ -330,7 +344,7 @@ CssStylesheet* css_stylesheet_parse(const char *css, size_t len) {
         if (pos >= len) break;
 
         if (css[pos] == '@') {
-            css_skip_at_rule(css, len, &pos);
+            css_parse_at_rule(css, len, &pos, sheet);
             continue;
         }
         if (css[pos] == '}') { pos++; continue; }
@@ -879,47 +893,71 @@ typedef struct CssMatchJob {
     int end;
 } CssMatchJob;
 
-/* Worker job: match selectors, sort declarations by specificity, write the
- * computed-style table, and parse/apply inline styles to the computed-style
- * table.  The applied array is left intact for the main thread to flush to
- * element.style. */
-static void css_match_node_styles_job(void *arg) {
-    CssMatchJob *job = (CssMatchJob*)arg;
-    JSContextHandle ctx = job->ctx;
-
+/* Worker implementation: match selectors, sort declarations by specificity,
+ * and apply them to both the JS element.style object and the lock-free
+ * computed-style table.  Each element is owned by exactly one worker, so JS
+ * object mutation is safe even though the context is shared. */
+static void css_match_node_styles_job_impl(CssMatchJob *job)
+{
     for (int i = job->start; i < job->end; i++) {
         CssElementResult *res = &job->results[i];
         css_match_one_node(job->doc, res->node_idx, job->list, res);
 
-        HtmlNode *node = (HtmlNode*)po_array_payload(&job->doc->array, res->node_idx);
-        if (!node || node->type != HTML_NODE_ELEMENT || !node->has_js_object) continue;
-
-        GCValue element = node->js_object;
-        if (JS_IsUndefined(element) || JS_IsNull(element)) continue;
-
-        DOMNodeHandle dom_node = DOMNodeHandle::from_object(element);
-        if (!dom_node.valid()) continue;
-
-        /* Ensure the computed-style object exists (main thread normally
-         * pre-allocates, but be defensive for serial fallback paths). */
-        if (dom_node.computed_style_handle() == GC_HANDLE_NULL) {
-            css_ensure_computed_style(dom_node);
-        }
-
-        /* Write matched declarations to the computed-style table. */
+        /* Sort the matched declarations so they can be applied in cascade order. */
         if (res->applied_count > 0) {
             qsort(res->applied, (size_t)res->applied_count,
                   sizeof(CssAppliedDecl), css_applied_decl_compare);
-            css_computed_apply_declarations(ctx, dom_node,
-                                            res->applied, res->applied_count);
         }
 
-        /* Write inline style to the computed-style table. */
+        HtmlNode *node = (HtmlNode*)po_array_payload(&job->doc->array, res->node_idx);
+        if (!node || node->type != HTML_NODE_ELEMENT || !node->has_js_object) {
+            free(res->applied);
+            res->applied = NULL;
+            res->applied_count = 0;
+            continue;
+        }
+
+        GCValue element = node->js_object;
+        if (JS_IsUndefined(element) || JS_IsNull(element)) {
+            free(res->applied);
+            res->applied = NULL;
+            res->applied_count = 0;
+            continue;
+        }
+
+        DOMNodeHandle dom_node = DOMNodeHandle::from_object(element);
+        if (!dom_node.valid()) {
+            free(res->applied);
+            res->applied = NULL;
+            res->applied_count = 0;
+            continue;
+        }
+
+        /* Apply stylesheet declarations and inline styles to the JS element.style
+         * object.  Each element is owned by exactly one worker, so this is safe. */
+        css_apply_declarations(job->ctx, element, res->applied, res->applied_count);
+        css_apply_inline_style(job->ctx, element, node);
+
+        /* Mirror the same values in getComputedStyle's lock-free table. */
+        if (res->applied_count > 0) {
+            css_computed_apply_declarations(job->ctx, dom_node,
+                                            res->applied, res->applied_count);
+        }
         const char *style_attr = html_node_attr_value(node, "style");
         if (style_attr && style_attr[0]) {
-            css_computed_apply_inline_style(ctx, dom_node, style_attr);
+            css_computed_apply_inline_style(job->ctx, dom_node, style_attr);
         }
+
+        free(res->applied);
+        res->applied = NULL;
+        res->applied_count = 0;
     }
+}
+
+static void css_match_node_styles_job(void *arg) {
+    CssMatchJob *job = (CssMatchJob*)arg;
+    css_match_node_styles_job_impl(job);
+    free(job);
 }
 
 /* Collect every element node that has a backing JS object into a results array. */
@@ -955,10 +993,10 @@ static CssElementResult* css_collect_element_results(HtmlDocument *doc, int *out
     return results;
 }
 
-/* Phase 1 (parallel): use the GC thread pool to match selectors for every
- * element, sort declarations, and write the computed-style table.
- * Phase 2 (serial): flush the matched declarations and inline styles to the
- * JS element.style object on the main thread. */
+/* Use the GC thread pool to match selectors for every element, sort
+ * declarations, and apply them to both the JS element.style object and the
+ * lock-free computed-style table.  Each worker owns a disjoint chunk of
+ * elements, so all style application is parallel. */
 static void css_apply_node_styles_parallel(JSContextHandle ctx, HtmlDocument *doc,
                                            CssSheetList *list) {
     int element_count = 0;
@@ -986,53 +1024,40 @@ static void css_apply_node_styles_parallel(JSContextHandle ctx, HtmlDocument *do
     int num_jobs = (int)thread_count;
     if (num_jobs > element_count) num_jobs = element_count;
 
-    CssMatchJob *jobs = (CssMatchJob*)calloc((size_t)num_jobs, sizeof(CssMatchJob));
-    if (!jobs) {
-        /* Allocation failed: fall back to serial matching/application. */
-        CssMatchJob job;
-        job.ctx = ctx;
-        job.doc = doc;
-        job.list = list;
-        job.results = results;
-        job.start = 0;
-        job.end = element_count;
-        css_match_node_styles_job(&job);
-    } else {
-        int chunk = element_count / num_jobs;
-        int remainder = element_count % num_jobs;
-        int start = 0;
-        for (int j = 0; j < num_jobs; j++) {
-            int end = start + chunk + (j < remainder ? 1 : 0);
-            jobs[j].ctx = ctx;
-            jobs[j].doc = doc;
-            jobs[j].list = list;
-            jobs[j].results = results;
-            jobs[j].start = start;
-            jobs[j].end = end;
-            if (end > start) {
-                gc_thread_pool_submit_job(css_match_node_styles_job, &jobs[j]);
-            }
-            start = end;
+    /* Dispatch selector matching and style application to worker threads.
+     * Each worker owns a disjoint chunk of elements, so JS object mutation
+     * and computed-style writes are safe without additional locking. */
+    int chunk = element_count / num_jobs;
+    int remainder = element_count % num_jobs;
+    int start = 0;
+    for (int j = 0; j < num_jobs; j++) {
+        int end = start + chunk + (j < remainder ? 1 : 0);
+        if (end <= start) continue;
+        CssMatchJob *job = (CssMatchJob*)malloc(sizeof(CssMatchJob));
+        if (!job) {
+            LOG_ERROR("Failed to create job returning");
+            return;
         }
-
-        gc_thread_pool_wait_empty();
-        free(jobs);
+        job->ctx = ctx;
+        job->doc = doc;
+        job->list = list;
+        job->results = results;
+        job->start = start;
+        job->end = end;
+        if (!gc_thread_pool_submit_job(css_match_node_styles_job, job)) {
+            free(job);
+            fallback_serial = true;
+            break;
+        }
+        start = end;
     }
 
-    /* Flush to element.style on the main thread (JS object mutation). */
+    gc_thread_pool_wait_empty();
+
+    /* Results arrays are freed by workers; this loop is a safety net. */
     for (int i = 0; i < element_count; i++) {
-        int node_idx = results[i].node_idx;
-        HtmlNode *node = (HtmlNode*)po_array_payload(&doc->array, node_idx);
-        if (!node || node->type != HTML_NODE_ELEMENT || !node->has_js_object) continue;
-
-        GCValue element = node->js_object;
-        if (JS_IsUndefined(element) || JS_IsNull(element)) continue;
-
-        css_apply_declarations(ctx, element, results[i].applied, results[i].applied_count);
-        css_apply_inline_style(ctx, element, node);
         free(results[i].applied);
     }
-
     free(results);
 }
 

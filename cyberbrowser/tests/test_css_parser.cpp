@@ -298,25 +298,34 @@ TEST(test_css_index_tables) {
         return true;
     }
 
+    printf("    [index] start\n");
     const char *html =
         "<html><head></head><body>"
         "<div id=\"target\" class=\"box\">hello</div>"
         "<span class=\"box\">world</span>"
         "</body></html>";
 
+    printf("    [index] parsing\n");
     HtmlDocument *doc = html_parse(html, strlen(html));
     ASSERT_TRUE(doc != NULL);
 
+    printf("    [index] creating js doc\n");
     GCValue js_doc = html_create_js_document(ctx, doc);
     ASSERT_TRUE(!JS_IsUndefined(js_doc) && !JS_IsNull(js_doc) && !JS_IsException(js_doc));
+
+    printf("    [index] populating\n");
     ASSERT_TRUE(html_populate_js_document(ctx, js_doc, doc));
+    printf("    [index] populated\n");
 
     /* Test the lock-free index tables directly. */
+    printf("    [index] get by id\n");
     JSAtom target_id = JS_NewAtom(ctx, "target");
     GCValue by_id = css_get_element_by_id(ctx, target_id);
     JS_FreeAtom(ctx, target_id);
     ASSERT_TRUE(JS_IsObject(by_id));
+    printf("    [index] by id ok\n");
 
+    printf("    [index] get by class\n");
     JSAtom box_class = JS_NewAtom(ctx, "box");
     GCValue by_class = css_get_elements_by_class_name(ctx, box_class);
     JS_FreeAtom(ctx, box_class);
@@ -325,8 +334,11 @@ TEST(test_css_index_tables) {
     uint32_t len = 0;
     JS_ToUint32(ctx, &len, len_val);
     ASSERT_EQ(2, (int)len);
+    printf("    [index] by class ok\n");
 
+    printf("    [index] freeing doc\n");
     html_document_free(doc);
+    printf("    [index] done\n");
     return true;
 }
 

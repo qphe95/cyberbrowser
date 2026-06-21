@@ -36,17 +36,23 @@ TEST(test_layout_basic_document) {
 }
 
 TEST(test_layout_stylesheet) {
+    printf("    [layout stylesheet] start\n");
     const char *html = "<html><body><div class=\"box\"></div></body></html>";
+    printf("    [layout stylesheet] parse html\n");
     HtmlDocument *doc = html_parse(html, strlen(html));
     ASSERT_TRUE(doc != NULL);
 
     const char *css = "div { width: 200px; height: 100px; margin: 10px; padding: 5px; background-color: #ff0000; }";
+    printf("    [layout stylesheet] parse css\n");
     CssStylesheet *sheet = css_stylesheet_parse(css, strlen(css));
     ASSERT_TRUE(sheet != NULL);
 
+    printf("    [layout stylesheet] run layout\n");
     LayoutContext ctx;
     ASSERT_TRUE(css_layout_run(&ctx, doc, sheet, 800.0, 600.0));
+    printf("    [layout stylesheet] layout ok\n");
 
+    printf("    [layout stylesheet] find box\n");
     HtmlNode *div = html_document_get_element_by_tag(doc, "div");
     ASSERT_TRUE(div != NULL);
     int div_idx = po_array_index_from_payload(&doc->array, div);
@@ -58,9 +64,14 @@ TEST(test_layout_stylesheet) {
     ASSERT_TRUE(near_equal(box->padding_left, 5.0));
     ASSERT_TRUE(near_equal(box->background_color_r, 1.0));
 
+    printf("    [layout stylesheet] cleanup\n");
+    printf("    [layout stylesheet] free layout tree\n");
     css_layout_tree_free(&ctx);
-    css_stylesheet_free(sheet);
+    printf("    [layout stylesheet] skip stylesheet free (layout owns it)\n");
+    /* css_stylesheet_free(sheet); */
+    printf("    [layout stylesheet] free doc\n");
     html_document_free(doc);
+    printf("    [layout stylesheet] done\n");
     return true;
 }
 

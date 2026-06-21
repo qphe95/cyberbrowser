@@ -16,22 +16,12 @@ or double-buffered data structures rather than generic resizing containers.
 
 ## The Core Problem
 
-Today `css_apply_node_styles_parallel()` only parallelizes **selector
-matching**. The actual writes to `element.style` are still done serially on the
-mutator thread because:
-
-1. QuickJS objects are not safe for concurrent mutation.
-2. A DOM element is not atomically created: allocation, tree linking,
-   attribute copying, `style` object creation, and CSS property writes happen
-   as separate steps.
-3. Readers such as `querySelector`, `getElementById`, and the GC can observe
-   the element in the middle of construction.
-
-To parallelize the write phase we need:
-
-- A **publication state** so a partially-built element is invisible to readers.
-- **Thread-safe lookup tables** (id/class/tag indices and computed-style maps)
-  that workers can write concurrently without locks.
+`css_apply_node_styles_parallel()` now parallelizes **selector matching**,
+**computed-style table writes**, and **JS `element.style` writes** across the
+GC thread pool.  Each worker owns a disjoint chunk of elements, so there are no
+intra-object races.  This is possible because the QuickJS runtime has been made
+thread-safe for concurrent object mutation (lock-free atom/shape/property
+structures, atomic GC allocation, and per-handle publication state).
 
 ---
 
@@ -516,7 +506,7 @@ lock-free.  Nearly all higher-level shared state is unprotected:
 | 7 | **Class array / prototypes** — freeze after init; atomic handle loads | **Done** (`JSRuntime.class_array_handle` is an RCU-style immutable snapshot with odd/even versioning; `JSContext.class_proto_handle` entries are read/written with 128-bit atomic load/store + per-context versioning; `JSShape.proto_handle` uses odd/even version + atomic load/store, and all prototype-chain readers/writers use the atomic accessors) |
 | 8 | **Job queue** — lock-free ring buffer | **Done** (`LFJobQueue` handle with lazy allocation; atomic head/tail enqueue/dequeue; acquire/release slot publication; GC roots mark both the queue object and each queued `JSJobEntry`; full `browser-emulator-tests.exe` suite passes 330/330 including `test_job_queue_threaded`) |
 | 9 | **GC free list / type buckets** — **Done** (`Treiber stack` free list + lock-free append-only type buckets; atomic pointer CAS added) |
-| 10 | **Move CSS inline-style parsing and stylesheet matching into workers**, keep JS-object writes serial | Not started |
+| 10 | **Move CSS inline-style parsing, stylesheet matching, computed-style table writes, and JS `element.style` writes into workers** | **Done** (`css_parser.cpp`: `css_apply_node_styles_parallel()` dispatches `CssMatchJob`s to the GC thread pool; each worker matches selectors, sorts declarations, applies them to `element.style`, and mirrors them in the lock-free computed-style table) |
 
 Phases 1, 2, 3, 4, 5, 6, 7, 8 and 9 are complete.  These provide the foundational building
 blocks (publication state, lock-free containers, thread-safe property-array
@@ -536,12 +526,12 @@ Element construction:
 Parallel CSS pass:
   worker owns a disjoint element chunk
   worker parses inline style and matches selectors
-  worker writes computed-style declarations into per-element lock-free table
-  (element stays grey; no JS-object mutation)
+  worker applies computed/inline declarations to JS element.style object
+  worker mirrors the same declarations into the per-element lock-free table
+  (element stays grey; no other thread reads it)
 
-Serial publication:
+Publication:
   for each new element:
-      write merged computed/inline declarations to element.style
       publish_state = PUBLISH_BLACK
 ```
 
@@ -570,7 +560,8 @@ Serial publication:
   global lock.
 - Port the remaining shared runtime state (atom/shape/class/job/GC free lists)
   to lock-free or RCU-style structures.
-- Keep actual JS-object mutation on the mutator thread; workers only write
-  `JS_GC_OBJ_TYPE_DATA` backing data while objects are grey.
+- Allow workers to perform JS-object mutation for disjoint element sets;
+  the runtime's lock-free atom/shape/property structures and atomic GC
+  allocation make this safe.
 - Stay in the project's game-engine C style: hand-rolled atomics, GC handles,
   fixed/double-buffered structures, no `std::atomic`.

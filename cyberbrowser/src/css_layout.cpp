@@ -312,12 +312,19 @@ static void layout_apply_shorthand_sides(LayoutBox *box, const char *value,
 
 static CssDisplay layout_default_display(const char *tag_name) {
     if (!tag_name || !tag_name[0]) return CSS_DISPLAY_BLOCK;
+    /* Non-rendered metadata tags should not generate boxes. */
+    static const char *none_tags[] = {
+        "head", "script", "style", "link", "meta", "title",
+        "base", "template", "noscript", NULL
+    };
+    for (int i = 0; none_tags[i]; i++) {
+        if (strcasecmp(tag_name, none_tags[i]) == 0) return CSS_DISPLAY_NONE;
+    }
     /* Common replaced/phrasing elements default to inline. */
     static const char *inline_tags[] = {
         "span", "a", "em", "strong", "b", "i", "u", "s", "small",
         "img", "br", "wbr", "code", "pre", "sub", "sup", "label",
-        "input", "button", "textarea", "select", "iframe", "canvas",
-        "script", "style", "link", "meta", "title", NULL
+        "input", "button", "textarea", "select", "iframe", "canvas", NULL
     };
     for (int i = 0; inline_tags[i]; i++) {
         if (strcasecmp(tag_name, inline_tags[i]) == 0) return CSS_DISPLAY_INLINE;
@@ -341,6 +348,13 @@ static CssVisibility css_parse_visibility(const char *value) {
     if (strcasecmp(value, "hidden") == 0) return CSS_VISIBILITY_HIDDEN;
     if (strcasecmp(value, "collapse") == 0) return CSS_VISIBILITY_COLLAPSE;
     return CSS_VISIBILITY_VISIBLE;
+}
+
+static bool layout_is_block_like(CssDisplay display) {
+    return display == CSS_DISPLAY_BLOCK ||
+           display == CSS_DISPLAY_FLEX ||
+           display == CSS_DISPLAY_GRID ||
+           display == CSS_DISPLAY_INLINE_BLOCK;
 }
 
 static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
@@ -791,6 +805,95 @@ static bool layout_dispatch_chunks(LayoutContext *ctx, const int *order, int cou
 }
 
 /* ============================================================================
+ * Block-flow sibling stacking
+ *
+ * The parallel top-down pass gives every child the same y coordinate, so we
+ * run a single-threaded post-pass that walks the tree in pre-order and stacks
+ * block-level siblings vertically.  Inline/inline-block children are flowed on
+ * lines and wrap to the next line when they exceed the containing-block width.
+ * ============================================================================ */
+
+static void layout_stack_node(LayoutContext *ctx, int idx)
+{
+    LayoutNodeRef *node = layout_node_ref(ctx, idx);
+    LayoutBox *box = layout_box(ctx, idx);
+
+    double y_offset = box->padding_top + box->border_top;
+    double line_height = 0.0;
+    double line_x = box->padding_left + box->border_left;
+    double avail_width = box->width - box->padding_left - box->padding_right
+                         - box->border_left - box->border_right;
+    if (avail_width < 0.0) avail_width = 0.0;
+
+    for (int c = node->first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+        LayoutBox *child = layout_box(ctx, c);
+        if (child->display == CSS_DISPLAY_NONE) continue;
+
+        if (layout_is_block_like(child->display)) {
+            /* Finish any current inline line before a block. */
+            y_offset += line_height;
+            line_height = 0.0;
+            line_x = box->padding_left + box->border_left;
+
+            /* Block children fill the available width if not explicitly set. */
+            if (child->width == 0.0) {
+                child->width = avail_width - child->margin_left - child->margin_right;
+                if (child->width < 0.0) child->width = 0.0;
+                child->content_width = child->width - child->padding_left - child->padding_right
+                                       - child->border_left - child->border_right;
+                if (child->content_width < 0.0) child->content_width = 0.0;
+            }
+
+            child->x = box->x + box->padding_left + box->border_left + child->margin_left;
+            child->y = box->y + y_offset + child->margin_top;
+
+            layout_stack_node(ctx, c);
+
+            y_offset += child->margin_top + child->height + child->margin_bottom;
+        } else {
+            /* Inline/inline-block children are flowed on lines. */
+            if (child->width == 0.0) child->width = 80.0;
+            if (child->height == 0.0) child->height = 20.0;
+            child->content_width = child->width - child->padding_left - child->padding_right
+                                   - child->border_left - child->border_right;
+            if (child->content_width < 0.0) child->content_width = 0.0;
+            child->content_height = child->height - child->padding_top - child->padding_bottom
+                                    - child->border_top - child->border_bottom;
+            if (child->content_height < 0.0) child->content_height = 0.0;
+
+            double child_span = child->margin_left + child->width + child->margin_right;
+            if (line_x + child_span > box->padding_left + box->border_left + avail_width
+                && line_x > box->padding_left + box->border_left) {
+                y_offset += line_height;
+                line_height = 0.0;
+                line_x = box->padding_left + box->border_left;
+            }
+
+            child->x = box->x + line_x + child->margin_left;
+            child->y = box->y + y_offset + child->margin_top;
+
+            layout_stack_node(ctx, c);
+
+            line_x += child_span;
+            double h = child->margin_top + child->height + child->margin_bottom;
+            if (h > line_height) line_height = h;
+        }
+    }
+    y_offset += line_height;
+
+    /* Recompute auto height from the stacked children if the box had no
+     * explicit height.  We detect auto height by checking whether the current
+     * height equals the bottom-up estimate of child margins + padding/border.
+     * This keeps explicit sizes from CSS intact while fixing up containers. */
+    if (box->height == 0.0 && node->first_child_idx >= 0) {
+        box->content_height = y_offset - box->padding_top - box->border_top;
+        if (box->content_height < 0.0) box->content_height = 0.0;
+        box->height = box->content_height + box->padding_top + box->padding_bottom
+                      + box->border_top + box->border_bottom;
+    }
+}
+
+/* ============================================================================
  * Public API
  * ============================================================================ */
 
@@ -815,6 +918,11 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
     /* Bottom-up pass. */
     if (!layout_dispatch_chunks(ctx, ctx->tree.postorder, ctx->tree.count, layout_bottom_up_job)) {
         return false;
+    }
+
+    /* Post-pass: stack siblings so block children do not overlap vertically. */
+    if (ctx->tree.root_idx >= 0) {
+        layout_stack_node(ctx, ctx->tree.root_idx);
     }
 
     for (int i = 0; i < ctx->tree.count; i++) {

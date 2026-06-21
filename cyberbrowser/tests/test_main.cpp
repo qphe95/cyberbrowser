@@ -124,12 +124,14 @@ int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
     
+    /* Unbuffered stdout so a crash reveals the exact last line printed. */
+    setvbuf(stdout, NULL, _IONBF, 0);
+
     printf("========================================\n");
     printf("Browser Emulator Test Suite\n");
     printf("(Single Context Model)\n");
     printf("========================================\n");
     printf("Starting tests...\n\n");
-    fflush(stdout);
 
     /* Initialize platform */
     if (!platform_init()) {

@@ -284,8 +284,11 @@ Recommended implementation order:
 3. Add `computed_style_handle` to `DOMNode` and implement `getComputedStyle()`
    using it.
 4. Add CSS index tables and update DOM node publication to populate them.
-5. Parallelize inline-style parsing into the computed-style table.
-6. Optimize: let the renderer read computed-style tables directly for
+5. Parallelize inline-style parsing and stylesheet declaration application
+   into the computed-style table.
+6. Parallelize JS `element.style` writes (safe because each element is owned
+   by exactly one worker and the runtime supports concurrent object mutation).
+7. Optimize: let the renderer read computed-style tables directly for
    render-only properties.
 
 ---
@@ -293,7 +296,8 @@ Recommended implementation order:
 ## 6. Success criteria
 
 - `css_apply_node_styles_parallel()` dispatches selector matching,
-  computed-style construction, and inline-style parsing to workers.
+  computed-style construction, inline-style parsing, and JS `element.style`
+  writes to workers.
 - `getComputedStyle()` returns real values from the per-element table.
 - DOM tree links survive GC when only `DOMNode` references keep a subtree alive.
 - Grey DOM nodes under construction are not collected before publication.

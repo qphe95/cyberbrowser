@@ -2,13 +2,15 @@
  * CyberBrowser - minimal hardcoded YouTube loader
  *
  * Fetches https://www.youtube.com/, parses the HTML, runs the CSS layout
- * engine, builds a display list, and prints a summary.  This is intended as
- * a quick smoke-test executable for the browser-emulator core.
+ * engine, builds a display list, renders a wireframe to a JPEG, and prints a
+ * summary.  This is intended as a quick smoke-test executable for the
+ * browser-emulator core.
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <math.h>
 
 #include "platform.h"
 #include "quickjs.h"
@@ -20,6 +22,9 @@
 #include "css_parser.h"
 #include "css_layout.h"
 #include "display_list.h"
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
 
 #define LOG_TAG "cyberbrowser"
 
@@ -204,6 +209,136 @@ static void print_body_snippet(HtmlDocument *doc) {
     printf("\"\n");
 }
 
+/* ------------------------------------------------------------------------- */
+/* Simple software rasterizer for the display list -> JPEG wireframe         */
+/* ------------------------------------------------------------------------- */
+
+#define WIREFRAME_WIDTH  1024
+#define WIREFRAME_HEIGHT 800
+
+typedef struct {
+    uint8_t r, g, b;
+} RGB;
+
+static inline void set_pixel(RGB *pixels, int width, int height, int x, int y, RGB c) {
+    if (x < 0 || y < 0 || x >= width || y >= height) return;
+    pixels[y * width + x] = c;
+}
+
+static inline RGB blend_over(RGB dst, float sr, float sg, float sb, float sa) {
+    if (sa <= 0.0f) return dst;
+    if (sa >= 1.0f) {
+        RGB r = { (uint8_t)(sr * 255.0f + 0.5f),
+                  (uint8_t)(sg * 255.0f + 0.5f),
+                  (uint8_t)(sb * 255.0f + 0.5f) };
+        return r;
+    }
+    RGB out;
+    out.r = (uint8_t)(dst.r * (1.0f - sa) + sr * 255.0f * sa + 0.5f);
+    out.g = (uint8_t)(dst.g * (1.0f - sa) + sg * 255.0f * sa + 0.5f);
+    out.b = (uint8_t)(dst.b * (1.0f - sa) + sb * 255.0f * sa + 0.5f);
+    return out;
+}
+
+static void fill_rect(RGB *pixels, int width, int height,
+                      int x0, int y0, int x1, int y1,
+                      float r, float g, float b, float a) {
+    if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
+    if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 >= width) x1 = width - 1;
+    if (y1 >= height) y1 = height - 1;
+    for (int y = y0; y <= y1; y++) {
+        RGB *row = &pixels[y * width];
+        for (int x = x0; x <= x1; x++) {
+            row[x] = blend_over(row[x], r, g, b, a);
+        }
+    }
+}
+
+static void draw_hline(RGB *pixels, int width, int height,
+                       int x0, int x1, int y,
+                       float r, float g, float b, float a) {
+    if (y < 0 || y >= height) return;
+    if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
+    if (x0 < 0) x0 = 0;
+    if (x1 >= width) x1 = width - 1;
+    RGB *row = &pixels[y * width];
+    for (int x = x0; x <= x1; x++) {
+        row[x] = blend_over(row[x], r, g, b, a);
+    }
+}
+
+static void draw_vline(RGB *pixels, int width, int height,
+                       int x, int y0, int y1,
+                       float r, float g, float b, float a) {
+    if (x < 0 || x >= width) return;
+    if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
+    if (y0 < 0) y0 = 0;
+    if (y1 >= height) y1 = height - 1;
+    for (int y = y0; y <= y1; y++) {
+        RGB *p = &pixels[y * width + x];
+        *p = blend_over(*p, r, g, b, a);
+    }
+}
+
+static void draw_rect_outline(RGB *pixels, int width, int height,
+                              int x0, int y0, int x1, int y1,
+                              float r, float g, float b, float a) {
+    draw_hline(pixels, width, height, x0, x1, y0, r, g, b, a);
+    draw_hline(pixels, width, height, x0, x1, y1, r, g, b, a);
+    draw_vline(pixels, width, height, x0, y0, y1, r, g, b, a);
+    draw_vline(pixels, width, height, x1, y0, y1, r, g, b, a);
+}
+
+static bool render_display_list_to_jpg(const DisplayList *dl, const char *path,
+                                       int img_width, int img_height) {
+    size_t pixel_count = (size_t)img_width * (size_t)img_height;
+    RGB *pixels = (RGB *)calloc(pixel_count, sizeof(RGB));
+    if (!pixels) {
+        printf("FATAL: out of memory allocating %dx%d image buffer\n", img_width, img_height);
+        return false;
+    }
+
+    /* White background. */
+    for (size_t i = 0; i < pixel_count; i++) {
+        pixels[i].r = 255;
+        pixels[i].g = 255;
+        pixels[i].b = 255;
+    }
+
+    for (int i = 0; i < dl->count; i++) {
+        const DisplayListCmd *cmd = &dl->cmds[i];
+        int x0 = (int)floorf(cmd->x);
+        int y0 = (int)floorf(cmd->y);
+        int x1 = (int)floorf(cmd->x + cmd->w);
+        int y1 = (int)floorf(cmd->y + cmd->h);
+
+        if (cmd->type == DL_RECT) {
+            /* For the wireframe view we intentionally ignore background fills
+             * so the box outlines remain clearly visible on the white canvas. */
+            (void)fill_rect;
+        } else if (cmd->type == DL_BORDER) {
+            float thickness = cmd->u.border.thickness;
+            if (thickness <= 0) thickness = 1.0f;
+            int t = (int)ceilf(thickness);
+            for (int offset = 0; offset < t; offset++) {
+                draw_rect_outline(pixels, img_width, img_height,
+                                  x0 + offset, y0 + offset,
+                                  x1 - offset, y1 - offset,
+                                  cmd->r, cmd->g, cmd->b, cmd->a);
+            }
+        }
+        /* DL_GLYPH is intentionally ignored for the wireframe view. */
+    }
+
+    /* stbi_write_jpg expects interleaved RGB. */
+    int ok = stbi_write_jpg(path, img_width, img_height, 3, pixels, 95);
+    free(pixels);
+    return ok != 0;
+}
+
 int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
@@ -264,10 +399,12 @@ int main(int argc, char *argv[]) {
 
     print_body_snippet(doc);
 
-    printf("Running CSS layout ...\n");
+    printf("Running CSS layout (%dx%d) ...\n", WIREFRAME_WIDTH, WIREFRAME_HEIGHT);
     LayoutContext layout;
     memset(&layout, 0, sizeof(layout));
-    bool layout_ok = css_layout_run(&layout, doc, NULL, 1280.0, 720.0);
+    bool layout_ok = css_layout_run(&layout, doc, NULL,
+                                    (double)WIREFRAME_WIDTH,
+                                    (double)WIREFRAME_HEIGHT);
     if (layout_ok) {
         printf("Layout boxes: %d\n", layout.tree.count);
 
@@ -275,6 +412,15 @@ int main(int argc, char *argv[]) {
         display_list_init(&dl);
         if (css_layout_build_display_list(&layout, &dl)) {
             printf("Display list commands: %d\n", dl.count);
+
+            printf("Rendering wireframe to youtube_wireframe.jpg ...\n");
+            if (render_display_list_to_jpg(&dl, "youtube_wireframe.jpg",
+                                           WIREFRAME_WIDTH, WIREFRAME_HEIGHT)) {
+                printf("Saved wireframe: youtube_wireframe.jpg (%dx%d)\n",
+                       WIREFRAME_WIDTH, WIREFRAME_HEIGHT);
+            } else {
+                printf("WARNING: failed to write youtube_wireframe.jpg\n");
+            }
         } else {
             printf("WARNING: css_layout_build_display_list() failed\n");
         }
