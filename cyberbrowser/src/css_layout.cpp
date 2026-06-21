@@ -926,6 +926,64 @@ typedef struct {
     double cross_size;
 } FlexLine;
 
+static void layout_flex_container(LayoutContext *ctx, int idx);
+
+/* Recursively resolve a subtree under a flex item (or block wrapper) so that
+ * its content-based height/width is known before the flex container distributes
+ * space.  This is a simple serial pass used only for the flex item itself; the
+ * normal parallel top-down/bottom-up passes will skip nodes already marked done. */
+static void layout_resolve_subtree(LayoutContext *ctx, int idx, double avail_width)
+{
+    LayoutBox *box = layout_box(ctx, idx);
+    LayoutNodeRef *node = layout_node_ref(ctx, idx);
+
+    if (box->display == CSS_DISPLAY_INLINE) {
+        /* Inline boxes are not laid out as blocks; leave them zero-sized so
+         * the display list ignores them. */
+        atomic_store_u32(&layout_state(ctx, idx)->top_down_done, 1);
+        return;
+    }
+
+    if (box->display == CSS_DISPLAY_FLEX) {
+        if (box->width == 0) {
+            box->width = avail_width - box->margin_left - box->margin_right;
+            if (box->width < 0) box->width = 0;
+        }
+        box->width = layout_clamp_size(box->width, box->min_width, box->max_width);
+        box->x = 0.0;
+        box->y = 0.0;
+        layout_update_content_sizes(box);
+        atomic_store_u32(&layout_state(ctx, idx)->top_down_done, 1);
+        layout_flex_container(ctx, idx);
+    } else {
+        layout_resolve_used_sizes(box, avail_width);
+        box->x = 0.0;
+        box->y = 0.0;
+        atomic_store_u32(&layout_state(ctx, idx)->top_down_done, 1);
+
+        double content_left = box->padding_left + box->border_left;
+        double content_top  = box->padding_top + box->border_top;
+        double y_offset = 0.0;
+
+        for (int c = node->first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+            LayoutBox *child = layout_box(ctx, c);
+            if (child->display == CSS_DISPLAY_NONE) continue;
+            if (child->display == CSS_DISPLAY_INLINE) continue;
+            if (child->visibility == CSS_VISIBILITY_HIDDEN) continue;
+            layout_resolve_subtree(ctx, c, box->content_width);
+            child->x = content_left + child->margin_left;
+            child->y = content_top + y_offset + child->margin_top;
+            y_offset = (child->y + child->height + child->margin_bottom) - content_top;
+        }
+
+        if (box->height == 0) {
+            box->height = y_offset + box->padding_top + box->padding_bottom
+                          + box->border_top + box->border_bottom;
+            layout_update_content_sizes(box);
+        }
+    }
+}
+
 static void layout_flex_container(LayoutContext *ctx, int idx)
 {
     LayoutBox *container = layout_box(ctx, idx);
@@ -962,32 +1020,26 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
     }
     if (n == 0) { free(children); return; }
 
-    /* Phase 0: give each child an initial size and lay out nested flex
-     * containers first so their content-based heights/widths are known when
-     * this container distributes space. */
+    /* Phase 0: resolve each child's intrinsic size.  Flex children get their
+     * main-axis size from flex-basis/width/height; block children are laid out
+     * serially so their content height is known. */
     for (int i = 0; i < n; i++) {
         int c = children[i];
         LayoutBox *child = layout_box(ctx, c);
-        if (child->display == CSS_DISPLAY_FLEX) {
-            if (is_row) {
-                double w = child->flex_basis >= 0.0 ? child->flex_basis :
-                           (child->width > 0.0 ? child->width : content_w);
-                if (w < 0.0) w = 0.0;
-                child->width = layout_clamp_size(w, child->min_width, child->max_width);
-                layout_update_content_sizes(child);
-            } else {
-                double h = child->flex_basis >= 0.0 ? child->flex_basis :
-                           (child->height > 0.0 ? child->height : content_h);
-                if (h < 0.0) h = 0.0;
-                child->height = layout_clamp_size(h, child->min_height, child->max_height);
-                layout_update_content_sizes(child);
-            }
-            atomic_store_u32(&layout_state(ctx, c)->top_down_done, 1);
-            layout_flex_container(ctx, c);
+        double min_main = is_row ? child->min_width : child->min_height;
+        double max_main = is_row ? child->max_width : child->max_height;
+        double prelim_main = 0.0;
+        if (child->flex_basis >= 0.0) {
+            prelim_main = child->flex_basis;
+        } else if (is_row) {
+            if (child->width > 0.0) prelim_main = child->width;
         } else {
-            layout_resolve_used_sizes(child, content_w);
-            atomic_store_u32(&layout_state(ctx, c)->top_down_done, 1);
+            if (child->height > 0.0) prelim_main = child->height;
         }
+        prelim_main = layout_clamp_size(prelim_main, min_main, max_main);
+        double pass_width = is_row ? prelim_main : content_w;
+        if (pass_width < 0.0) pass_width = 0.0;
+        layout_resolve_subtree(ctx, c, pass_width);
     }
 
     FlexItemData *items = (FlexItemData*)calloc(n, sizeof(FlexItemData));

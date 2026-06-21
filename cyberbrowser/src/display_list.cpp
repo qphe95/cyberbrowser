@@ -120,6 +120,8 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
         if (box->display == CSS_DISPLAY_NONE) continue;
         if (box->visibility == CSS_VISIBILITY_HIDDEN) continue;
         if (node_has_hidden_class(ctx, i)) continue;
+        if (box->width < 2.0f || box->height < 2.0f) continue;
+        if (box->width * box->height < 6.0f) continue;
 
         /* Background rectangle when a color is explicitly set. */
         if (box->background_color_a > 0.0f) {
