@@ -115,6 +115,14 @@ static bool layout_build_nodes(LayoutContext *ctx, const int *map)
         node->first_child_idx = (hdr->first_child >= 0) ? map[hdr->first_child] : -1;
         node->next_sibling_idx = (hdr->next_sibling >= 0) ? map[hdr->next_sibling] : -1;
 
+        /* Find the previous active sibling, skipping tombstones. */
+        int prev_dom = hdr->prev_sibling;
+        while (prev_dom >= 0 && map[prev_dom] < 0) {
+            PreOrderCompactionArrayNode *prev_hdr = po_array_node(&ctx->doc->array, prev_dom);
+            prev_dom = prev_hdr ? prev_hdr->prev_sibling : -1;
+        }
+        node->prev_sibling_idx = (prev_dom >= 0) ? map[prev_dom] : -1;
+
         int child_count = 0;
         for (int c = hdr->first_child; c >= 0; c = po_array_next_sibling(&ctx->doc->array, c)) {
             if (po_array_is_active(&ctx->doc->array, c)) child_count++;
@@ -350,11 +358,13 @@ static CssVisibility css_parse_visibility(const char *value) {
     return CSS_VISIBILITY_VISIBLE;
 }
 
-static bool layout_is_block_like(CssDisplay display) {
+/* Block-level formatting context: these generate a block box that stacks
+ * vertically with siblings.  Inline-block is sized like a block but flows
+ * on a line with other inline content. */
+static bool layout_is_block_flow(CssDisplay display) {
     return display == CSS_DISPLAY_BLOCK ||
            display == CSS_DISPLAY_FLEX ||
-           display == CSS_DISPLAY_GRID ||
-           display == CSS_DISPLAY_INLINE_BLOCK;
+           display == CSS_DISPLAY_GRID;
 }
 
 static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
@@ -671,14 +681,22 @@ static void layout_top_down_node(LayoutContext *ctx, int idx)
     LayoutNodeState *state = layout_state(ctx, idx);
     LayoutBox *box = layout_box(ctx, idx);
 
-    /* Wait for parent. */
     if (node->parent_idx >= 0) {
+        /* Wait for parent. */
         while (atomic_load_u32(&ctx->states[node->parent_idx].top_down_done) == 0) {
             layout_thread_yield();
         }
         LayoutBox *parent = layout_box(ctx, node->parent_idx);
-        box->x = parent->x + parent->padding_left + box->margin_left;
-        box->y = parent->y + parent->padding_top + box->margin_top;
+
+        /* Default width fills containing block if not set. */
+        if (box->width == 0) {
+            box->width = parent->content_width - box->margin_left - box->margin_right;
+            if (box->width < 0) box->width = 0;
+        }
+
+        box->content_width = box->width - box->padding_left - box->padding_right
+                             - box->border_left - box->border_right;
+        if (box->content_width < 0) box->content_width = 0;
 
         /* Inherit color if not explicitly set (simple heuristic). */
         if (box->color_r == 0 && box->color_g == 0 && box->color_b == 0 && box->color_a == 0) {
@@ -687,23 +705,79 @@ static void layout_top_down_node(LayoutContext *ctx, int idx)
             box->color_b = parent->color_b;
             box->color_a = parent->color_a;
         }
+
+        /* Wait for previous sibling before reading/updating the parent's
+         * temporary line-flow state.  Siblings form a dependency chain that
+         * gives a valid topological order for parallel execution. */
+        if (node->prev_sibling_idx >= 0) {
+            while (atomic_load_u32(&ctx->states[node->prev_sibling_idx].top_down_done) == 0) {
+                layout_thread_yield();
+            }
+        }
+
+        double content_left = parent->x + parent->padding_left + parent->border_left;
+        double content_top  = parent->y + parent->padding_top + parent->border_top;
+        double avail_width  = parent->content_width;
+
+        if (node->prev_sibling_idx < 0) {
+            /* First child initializes the parent's line state. */
+            parent->line_x = content_left;
+            parent->line_y_offset = 0.0;
+            parent->line_height = 0.0;
+        }
+
+        if (box->display == CSS_DISPLAY_NONE) {
+            /* No box generated; leave line state untouched. */
+        } else if (layout_is_block_flow(box->display)) {
+            /* Block-level boxes start a new line and stack vertically. */
+            parent->line_y_offset += parent->line_height;
+            parent->line_height = 0.0;
+            parent->line_x = content_left;
+
+            box->x = content_left + box->margin_left;
+            box->y = content_top + parent->line_y_offset + box->margin_top;
+
+            /* Subsequent siblings begin below this block. */
+            parent->line_y_offset = (box->y + box->height + box->margin_bottom) - content_top;
+        } else {
+            /* Inline / inline-block boxes flow on lines and wrap when needed. */
+            if (box->width == 0.0) box->width = 80.0;
+            if (box->height == 0.0) box->height = 20.0;
+            box->content_width = box->width - box->padding_left - box->padding_right
+                                 - box->border_left - box->border_right;
+            if (box->content_width < 0.0) box->content_width = 0.0;
+            box->content_height = box->height - box->padding_top - box->padding_bottom
+                                  - box->border_top - box->border_bottom;
+            if (box->content_height < 0.0) box->content_height = 0.0;
+
+            double child_span = box->margin_left + box->width + box->margin_right;
+
+            /* Wrap to next line if we would overflow and aren't at line start. */
+            if (parent->line_x + child_span > content_left + avail_width
+                && parent->line_x > content_left) {
+                parent->line_y_offset += parent->line_height;
+                parent->line_height = 0.0;
+                parent->line_x = content_left;
+            }
+
+            box->x = parent->line_x + box->margin_left;
+            box->y = content_top + parent->line_y_offset + box->margin_top;
+
+            parent->line_x += child_span;
+            double h = box->margin_top + box->height + box->margin_bottom;
+            if (h > parent->line_height) parent->line_height = h;
+        }
     } else {
+        /* Root forms the initial containing block. */
         box->x = 0;
         box->y = 0;
         if (box->width == 0) box->width = ctx->viewport_width;
         if (box->height == 0) box->height = ctx->viewport_height;
-    }
 
-    /* Default width fills containing block if not set. */
-    if (box->width == 0 && node->parent_idx >= 0) {
-        LayoutBox *parent = layout_box(ctx, node->parent_idx);
-        box->width = parent->content_width - box->margin_left - box->margin_right;
-        if (box->width < 0) box->width = 0;
+        box->content_width = box->width - box->padding_left - box->padding_right
+                             - box->border_left - box->border_right;
+        if (box->content_width < 0) box->content_width = 0;
     }
-
-    box->content_width = box->width - box->padding_left - box->padding_right
-                         - box->border_left - box->border_right;
-    if (box->content_width < 0) box->content_width = 0;
 
     atomic_store_u32(&state->top_down_done, 1);
 }
@@ -732,15 +806,20 @@ static void layout_bottom_up_node(LayoutContext *ctx, int idx)
         layout_thread_yield();
     }
 
-    /* Compute auto height from children. */
+    /* Compute auto height from children.  Because the top-down pass already
+     * stacked siblings and flowed inline boxes on lines, the parent's height
+     * is determined by the bottom-most child. */
     if (box->height == 0) {
-        double child_height = 0;
+        double content_top = box->y + box->padding_top + box->border_top;
+        double max_bottom = content_top;
         for (int c = node->first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
             LayoutBox *child = layout_box(ctx, c);
-            double h = child->margin_top + child->height + child->margin_bottom;
-            child_height += h;
+            if (child->display == CSS_DISPLAY_NONE) continue;
+            double child_bottom = child->y + child->height + child->margin_bottom;
+            if (child_bottom > max_bottom) max_bottom = child_bottom;
         }
-        box->content_height = child_height;
+        box->content_height = max_bottom - content_top;
+        if (box->content_height < 0) box->content_height = 0;
         box->height = box->content_height + box->padding_top + box->padding_bottom
                       + box->border_top + box->border_bottom;
     } else {
@@ -805,95 +884,6 @@ static bool layout_dispatch_chunks(LayoutContext *ctx, const int *order, int cou
 }
 
 /* ============================================================================
- * Block-flow sibling stacking
- *
- * The parallel top-down pass gives every child the same y coordinate, so we
- * run a single-threaded post-pass that walks the tree in pre-order and stacks
- * block-level siblings vertically.  Inline/inline-block children are flowed on
- * lines and wrap to the next line when they exceed the containing-block width.
- * ============================================================================ */
-
-static void layout_stack_node(LayoutContext *ctx, int idx)
-{
-    LayoutNodeRef *node = layout_node_ref(ctx, idx);
-    LayoutBox *box = layout_box(ctx, idx);
-
-    double y_offset = box->padding_top + box->border_top;
-    double line_height = 0.0;
-    double line_x = box->padding_left + box->border_left;
-    double avail_width = box->width - box->padding_left - box->padding_right
-                         - box->border_left - box->border_right;
-    if (avail_width < 0.0) avail_width = 0.0;
-
-    for (int c = node->first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
-        LayoutBox *child = layout_box(ctx, c);
-        if (child->display == CSS_DISPLAY_NONE) continue;
-
-        if (layout_is_block_like(child->display)) {
-            /* Finish any current inline line before a block. */
-            y_offset += line_height;
-            line_height = 0.0;
-            line_x = box->padding_left + box->border_left;
-
-            /* Block children fill the available width if not explicitly set. */
-            if (child->width == 0.0) {
-                child->width = avail_width - child->margin_left - child->margin_right;
-                if (child->width < 0.0) child->width = 0.0;
-                child->content_width = child->width - child->padding_left - child->padding_right
-                                       - child->border_left - child->border_right;
-                if (child->content_width < 0.0) child->content_width = 0.0;
-            }
-
-            child->x = box->x + box->padding_left + box->border_left + child->margin_left;
-            child->y = box->y + y_offset + child->margin_top;
-
-            layout_stack_node(ctx, c);
-
-            y_offset += child->margin_top + child->height + child->margin_bottom;
-        } else {
-            /* Inline/inline-block children are flowed on lines. */
-            if (child->width == 0.0) child->width = 80.0;
-            if (child->height == 0.0) child->height = 20.0;
-            child->content_width = child->width - child->padding_left - child->padding_right
-                                   - child->border_left - child->border_right;
-            if (child->content_width < 0.0) child->content_width = 0.0;
-            child->content_height = child->height - child->padding_top - child->padding_bottom
-                                    - child->border_top - child->border_bottom;
-            if (child->content_height < 0.0) child->content_height = 0.0;
-
-            double child_span = child->margin_left + child->width + child->margin_right;
-            if (line_x + child_span > box->padding_left + box->border_left + avail_width
-                && line_x > box->padding_left + box->border_left) {
-                y_offset += line_height;
-                line_height = 0.0;
-                line_x = box->padding_left + box->border_left;
-            }
-
-            child->x = box->x + line_x + child->margin_left;
-            child->y = box->y + y_offset + child->margin_top;
-
-            layout_stack_node(ctx, c);
-
-            line_x += child_span;
-            double h = child->margin_top + child->height + child->margin_bottom;
-            if (h > line_height) line_height = h;
-        }
-    }
-    y_offset += line_height;
-
-    /* Recompute auto height from the stacked children if the box had no
-     * explicit height.  We detect auto height by checking whether the current
-     * height equals the bottom-up estimate of child margins + padding/border.
-     * This keeps explicit sizes from CSS intact while fixing up containers. */
-    if (box->height == 0.0 && node->first_child_idx >= 0) {
-        box->content_height = y_offset - box->padding_top - box->border_top;
-        if (box->content_height < 0.0) box->content_height = 0.0;
-        box->height = box->content_height + box->padding_top + box->padding_bottom
-                      + box->border_top + box->border_bottom;
-    }
-}
-
-/* ============================================================================
  * Public API
  * ============================================================================ */
 
@@ -918,11 +908,6 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
     /* Bottom-up pass. */
     if (!layout_dispatch_chunks(ctx, ctx->tree.postorder, ctx->tree.count, layout_bottom_up_job)) {
         return false;
-    }
-
-    /* Post-pass: stack siblings so block children do not overlap vertically. */
-    if (ctx->tree.root_idx >= 0) {
-        layout_stack_node(ctx, ctx->tree.root_idx);
     }
 
     for (int i = 0; i < ctx->tree.count; i++) {

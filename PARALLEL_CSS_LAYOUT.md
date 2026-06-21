@@ -58,7 +58,11 @@ must block on unresolved dependencies. The blocking is implemented as a
 short, fine-grained spin-wait on per-node atomic flags/counters:
 
 * **Top-down pass:** each child spin-waits until its parent's `top_down_done`
-  flag is set. The root has no parent and starts immediately.
+  flag is set, and until its previous sibling's `top_down_done` flag is set.
+  The previous-sibling edge creates a dependency chain that serializes sibling
+  layout while still allowing unrelated subtrees to run in parallel.  The root
+  has no parent and starts immediately; first children have no previous sibling
+  and initialize their parent's line-flow state.
 * **Bottom-up pass:** each parent spin-waits until its `children_remaining`
   counter reaches zero (i.e., every child has finished and decremented the
   counter). Leaf nodes start immediately.
@@ -82,6 +86,7 @@ typedef struct LayoutNodeRef {
     int parent_idx;             /* index in layout array, or -1 for root */
     int first_child_idx;
     int next_sibling_idx;
+    int prev_sibling_idx;       /* previous sibling index, or -1 for first child */
     int child_count;
 } LayoutNodeRef;
 
@@ -108,7 +113,7 @@ Each `LayoutNodeRef` gets a small synchronization block:
 
 ```c
 typedef struct LayoutNodeState {
-    /* Top-down pass */
+    /* Top-down pass: also reused as the previous-sibling completion flag. */
     _Atomic(uint32_t) top_down_done;   /* 0 = pending, 1 = done */
 
     /* Bottom-up pass */
@@ -145,24 +150,58 @@ processed by an earlier thread.
 
 ### 5.2 Per-node algorithm
 
+The top-down pass resolves inherited/containing-block values **and** performs
+block sibling stacking and inline line-flow.  Each node waits for its previous
+sibling before reading or updating the parent's temporary line state, so
+siblings are laid out in order without a serial post-pass.
+
 ```c
 static void layout_top_down_node(LayoutContext *ctx, int idx)
 {
     LayoutNodeRef *node = &ctx->tree.nodes[idx];
     LayoutNodeState *state = &ctx->states[idx];
+    LayoutBox *box = &ctx->boxes[idx];
 
-    /* Wait for parent.  The root (parent_idx == -1) skips this. */
     if (node->parent_idx >= 0) {
+        /* Wait for parent. */
         while (atomic_load(&ctx->states[node->parent_idx].top_down_done) == 0) {
-            js_thread_yield();   /* or _mm_pause() + yield */
+            js_thread_yield();
         }
-    }
+        LayoutBox *parent = &ctx->boxes[node->parent_idx];
 
-    /* Compute top-down properties. */
-    DOMNodeHandle dom(node->dom_node_handle);
-    layout_resolve_inherited(ctx, dom);
-    layout_resolve_containing_block(ctx, dom);
-    layout_resolve_position(ctx, dom);
+        layout_resolve_inherited(ctx, box, parent);
+        layout_resolve_width(ctx, box, parent);
+
+        /* Wait for previous sibling before touching parent's line state. */
+        if (node->prev_sibling_idx >= 0) {
+            while (atomic_load(&ctx->states[node->prev_sibling_idx].top_down_done) == 0) {
+                js_thread_yield();
+            }
+        } else {
+            /* First child initializes the line state. */
+            parent->line_x = parent->content_left;
+            parent->line_y_offset = 0;
+            parent->line_height = 0;
+        }
+
+        /* Stack block boxes, flow inline/inline-block boxes on lines. */
+        if (is_block_flow(box)) {
+            parent->line_y_offset += parent->line_height;
+            parent->line_height = 0;
+            box->x = parent->content_left + box->margin_left;
+            box->y = parent->content_top + parent->line_y_offset + box->margin_top;
+            parent->line_y_offset = box->y + box->height + box->margin_bottom
+                                    - parent->content_top;
+        } else {
+            layout_flow_inline_box(ctx, box, parent);
+        }
+    } else {
+        /* Root forms the initial containing block. */
+        box->x = 0;
+        box->y = 0;
+        box->width = ctx->viewport_width;
+        box->height = ctx->viewport_height;
+    }
 
     atomic_store(&state->top_down_done, 1);
 }
@@ -190,10 +229,12 @@ gc_thread_pool_wait_empty();
 
 ### 5.5 Why spin-wait is safe
 
-Every node in `preorder[]` has its parent somewhere earlier in the array. If a
-worker reaches a child before the parent is done, it yields and retries. The
-parent is guaranteed to finish because some worker has already been assigned
-the parent's chunk (or will be). No deadlocks: the dependency graph is a tree.
+Every node in `preorder[]` has its parent and its previous sibling somewhere
+earlier in the array (pre-order is a valid topological order for both the
+parent/child and sibling/sibling edges). If a worker reaches a child before the
+parent is done, or reaches a sibling before the previous sibling is done, it
+yields and retries. The dependency graph is still a DAG (a tree plus a
+left-to-right sibling chain), so no deadlocks are possible.
 
 ---
 
@@ -217,7 +258,8 @@ static void layout_bottom_up_node(LayoutContext *ctx, int idx)
         js_thread_yield();
     }
 
-    /* Compute bottom-up properties. */
+    /* Compute bottom-up properties.  Auto height is derived from the
+     * bottom-most child's position, which was set during the top-down pass. */
     DOMNodeHandle dom(node->dom_node_handle);
     layout_resolve_auto_height(ctx, dom);
     layout_resolve_scroll_extents(ctx, dom);
@@ -271,6 +313,14 @@ typedef struct LayoutBox {
     double border_top, border_right, border_bottom, border_left;
     double content_width, content_height;
     double baseline;
+
+    /* Temporary line-flow state used during the top-down pass.  The parent box
+     * tracks the current line; children update it sequentially through the
+     * previous-sibling dependency chain. */
+    double line_x;
+    double line_y_offset;
+    double line_height;
+
     uint32_t flags;  /* LAYOUT_NEEDS_LAYOUT, etc. */
 } LayoutBox;
 ```
@@ -348,11 +398,14 @@ void css_layout_document(JSContextHandle ctx, HtmlDocument *doc)
     layout_build_preorder(&ctx.tree, preorder);
     layout_build_postorder(&ctx.tree, postorder);
 
-    /* 2. Top-down pass. */
+    /* 2. Top-down pass: inheritance, containing-block widths, block sibling
+     *    stacking, and inline line-flow (parallel, with parent + previous-
+     *    sibling spin-waits). */
     layout_dispatch_chunks(&ctx, preorder, ctx.tree.count, layout_top_down_job);
     gc_thread_pool_wait_empty();
 
-    /* 3. Bottom-up pass. */
+    /* 3. Bottom-up pass: auto heights from stacked child positions (parallel,
+     *    with children_remaining spin-waits). */
     layout_dispatch_chunks(&ctx, postorder, ctx.tree.count, layout_bottom_up_job);
     gc_thread_pool_wait_empty();
 
@@ -371,19 +424,24 @@ void css_layout_document(JSContextHandle ctx, HtmlDocument *doc)
 2. Add DOMNode `gc_mark` callback updates to mark the layout box.
 3. Implement `layout_tree_from_dom`, `layout_build_preorder`,
    `layout_build_postorder`.
-4. Implement top-down pass with parent spin-wait (see section 5).
-5. Implement bottom-up pass with children-remaining spin-wait (see section 6).
-6. Resolve simple top-down properties (inheritance, containing-block width).
-7. Resolve simple bottom-up properties (`height: auto`, scroll extents).
-8. Add tests for both passes.
-9. Profile and tune spin-wait behavior.
+4. Implement top-down pass with parent + previous-sibling spin-waits
+   (see section 5).
+5. Implement block sibling stacking and inline line-flow inside the top-down
+   pass.
+6. Implement bottom-up pass with children-remaining spin-wait (see section 6).
+7. Resolve simple top-down properties (inheritance, containing-block width).
+8. Resolve bottom-up properties (`height: auto` from child positions, scroll
+   extents).
+9. Add tests for both passes.
+10. Profile and tune spin-wait behavior.
 
 ---
 
 ## 13. Success criteria
 
 * A full-document layout runs in two parallel passes.
-* Top-down properties produce correct values when children depend on parents.
+* Top-down properties produce correct values when children depend on parents
+  and siblings depend on previous siblings.
 * Bottom-up properties produce correct values when parents depend on children.
 * No deadlocks or livelocks under multi-core load.
 * Layout results match a serial reference implementation on a diverse set of

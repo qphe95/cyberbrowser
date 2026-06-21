@@ -4,7 +4,10 @@
  * Parallel CSS layout as described in PARALLEL_CSS_LAYOUT.md.
  *
  * Two passes over a flat layout tree built from an HtmlDocument:
- *   - Top-down (pre-order): inherited / containing-block values.
+ *   - Top-down (pre-order): inherited / containing-block values, plus block
+ *     sibling stacking and inline line-flow.  Each node spin-waits on both its
+ *     parent and its previous sibling, forming a dependency chain that gives a
+ *     valid topological order for parallel execution.
  *   - Bottom-up (post-order): auto heights, content sizes, scroll extents.
  *
  * Both passes are dispatched to the GC thread pool and synchronize with
@@ -62,6 +65,13 @@ typedef struct LayoutBox {
     CssDisplay display;
     CssVisibility visibility;
 
+    /* Temporary line-flow state used during the top-down pass.  Each parent
+     * box tracks the current line position; children update it sequentially
+     * through the previous-sibling dependency chain. */
+    double line_x;
+    double line_y_offset;
+    double line_height;
+
     uint32_t flags;
     uint32_t _pad;
 } LayoutBox;
@@ -72,6 +82,7 @@ typedef struct LayoutNodeRef {
     int parent_idx;         /* index in layout array, or -1 for root */
     int first_child_idx;
     int next_sibling_idx;
+    int prev_sibling_idx;   /* previous sibling in layout array, or -1 for first child */
     int child_count;
 } LayoutNodeRef;
 
