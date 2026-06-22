@@ -7375,7 +7375,6 @@ extern "C" void mark_children(JSRuntimeHandle rt, GCHandle handle,
 {
     JSGCObjectTypeEnum gc_obj_type = gc_handle_get_type_inline(handle);
     int i;  /* Shared loop variable for all cases */
-    QJS_LOGI("mark_children: ENTER handle=%u gc_obj_type=%u", handle, (unsigned)gc_obj_type);
     switch(gc_obj_type) {
     case JS_GC_OBJ_TYPE_JS_OBJECT:
         {
@@ -7405,8 +7404,6 @@ extern "C" void mark_children(JSRuntimeHandle rt, GCHandle handle,
                          p.handle(), sh.handle());
                 break;
             }
-            QJS_LOGI("mark_children: OBJECT %p marking shape %p (handle=%u)", 
-                     p.handle(), sh.handle(), p.shape_handle());
             mark_func(rt, sh.handle());
             /* Mark the property array handle - CRITICAL: prevents property array from being freed
              * The property array is a separate GC object that must be marked to prevent it
@@ -7563,7 +7560,7 @@ extern "C" void mark_children(JSRuntimeHandle rt, GCHandle handle,
             JSShapeProperty *prs;
             int i;
             GCHandle shape_proto = sh.proto_handle_atomic_load();
-            QJS_LOGI("mark_children: SHAPE sh=%u, proto_handle=%u, prop_count=%d", sh.handle(), shape_proto, sh.prop_count());
+
             if (shape_proto != GC_HANDLE_NULL) {
                 GCValue proto_val = GC_MKHANDLE(JS_TAG_OBJECT, shape_proto);
                 JS_MarkValue(rt, proto_val, mark_func);
@@ -7585,8 +7582,6 @@ extern "C" void mark_children(JSRuntimeHandle rt, GCHandle handle,
                         QJS_LOGE("mark_children: shape atom %d at index %d is NULL! sh=%u prop_count=%d prop_size=%d", atom, i, sh.handle(), sh.prop_count(), sh.prop_size());
                         continue;
                     }
-                    QJS_LOGI("mark_children: marking shape atom %d at index %d, handle=%u", 
-                             atom, i, atom_ptr.handle());
                     mark_func(rt, atom_ptr.handle());
                 }
             }
@@ -7602,19 +7597,15 @@ extern "C" void mark_children(JSRuntimeHandle rt, GCHandle handle,
         {
             /* Mark all runtime-owned arrays to prevent them from being freed */
             JSRuntimeHandle runtime(handle);
-            QJS_LOGI("mark_children: marking runtime children, handle=%u", handle);
-            
             /* Mark class_array - needed for accessing JSClass finalizers */
             GCHandle class_array_h = runtime.class_array_handle();
             if (class_array_h != GC_HANDLE_NULL) {
-                QJS_LOGI("mark_children: marking class_array handle=%u", class_array_h);
                 mark_func(rt, class_array_h);
             }
             
             /* Mark atom_array - contains all atoms */
             GCHandle atom_array_h = runtime.atom_array_handle();
             if (atom_array_h != GC_HANDLE_NULL) {
-                QJS_LOGI("mark_children: marking atom_array handle=%u", atom_array_h);
                 mark_func(rt, atom_array_h);
             }
             
@@ -7628,19 +7619,16 @@ extern "C" void mark_children(JSRuntimeHandle rt, GCHandle handle,
             /* Mark atom_gc_marks - mark bits for atoms during GC */
             GCHandle atom_gc_marks_h = runtime.atom_gc_marks_handle();
             if (atom_gc_marks_h != GC_HANDLE_NULL) {
-                QJS_LOGI("mark_children: marking atom_gc_marks handle=%u", atom_gc_marks_h);
                 mark_func(rt, atom_gc_marks_h);
             }
 
             /* Mark job queue - keeps the ring buffer object alive */
             GCHandle job_queue_h = runtime.job_queue_handle();
             if (job_queue_h != GC_HANDLE_NULL) {
-                QJS_LOGI("mark_children: marking job_queue handle=%u", job_queue_h);
                 mark_func(rt, job_queue_h);
             }
             
             /* Note: contexts are marked separately via JSRuntime_for_each_context */
-            QJS_LOGI("mark_children: done marking runtime children");
         }
         break;
     case JS_GC_OBJ_TYPE_MODULE:
@@ -7713,7 +7701,6 @@ static void gc_mark_recursive(JSRuntimeHandle rt, GCHandle handle);
 
 static void gc_mark_recursive(JSRuntimeHandle rt, GCHandle handle)
 {
-    QJS_LOGI("gc_mark_recursive: ENTER handle=%u", handle);
     if (handle == GC_HANDLE_NULL) {
         QJS_LOGE("gc_mark_recursive: handle is NULL!");
         return;
@@ -7723,11 +7710,9 @@ static void gc_mark_recursive(JSRuntimeHandle rt, GCHandle handle)
     if (gc_handle_get_type_inline(handle) == JS_GC_OBJ_TYPE_AUTO) {
         return;
     }
-    QJS_LOGI("gc_mark_recursive: mark=%d", gc_handle_get_mark(handle));
     if (gc_handle_get_mark(handle))
         return;  /* Already marked */
     gc_handle_set_mark(handle, 1);
-    QJS_LOGI("gc_mark_recursive: calling mark_children");
     mark_children(rt, handle, gc_mark_recursive);
 }
 
@@ -7736,26 +7721,18 @@ static void gc_mark_roots(JSRuntimeHandle rt)
 {
     int i;
 
-    QJS_LOGI("gc_mark_roots: ENTER, g_gc.handles.count=%d", g_gc.handles.count);
-    QJS_LOGI("gc_mark_roots: handles=%p", (void*)g_gc.handles.ptrs);
-    
     /* First, clear all marks from unified GC handles */
     for (i = 1; i < g_gc.handles.count; i++) {
-        QJS_LOGI("gc_mark_roots: accessing entry %d", i);
         void *user_ptr = g_gc.handles.ptrs[i];
-        QJS_LOGI("gc_mark_roots: entry %d ptr=%p", i, user_ptr);
         if (user_ptr) {
             GCHandle handle = (GCHandle)i;
-            QJS_LOGI("gc_mark_roots: clearing mark for entry %d, handle=%u", i, handle);
             gc_handle_set_mark(handle, 0);
         }
     }
 
     /* Mark from contexts (roots) - use type bucket iteration */
-    QJS_LOGI("gc_mark_roots: marking all contexts");
     auto ctx_mark_callback = [](GCHandle handle, void *user_data) {
         (void)user_data;
-        QJS_LOGI("gc_mark_roots: marking context handle %u", handle);
         gc_mark_recursive(gc_get_runtime(), handle);
     };
     gc_for_each_object_of_type(JS_GC_OBJ_TYPE_JS_CONTEXT, ctx_mark_callback, NULL);
@@ -7792,20 +7769,17 @@ static void gc_mark_roots(JSRuntimeHandle rt)
      * Tier 1: Permanent atoms (0 to permanent_atom_count-1) are always roots
      * Tier 2: Dynamic atoms are marked through shape references below
      */
-    QJS_LOGI("gc_mark_roots: Tier 1 - marking %u permanent atoms", rt.permanent_atom_count());
     for (i = 0; i < rt.permanent_atom_count() && i < rt.atom_size(); i++) {
         GCHandle atom_handle = rt_atom_array[i];
         if (!js_handle_array_entry_is_valid(atom_handle)) {
             continue;
         }
-        QJS_LOGI("gc_mark_roots: marking permanent atom %d, handle=%u", i, atom_handle);
         gc_mark_recursive(rt, atom_handle);
     }
     
     /* Tier 2: Mark atoms referenced by shapes.
      * Dynamic atoms must be reachable through shapes to stay alive.
      */
-    QJS_LOGI("gc_mark_roots: Tier 2 - marking atoms referenced by shapes");
     for (i = 1; i < g_gc.handles.count; i++) {
         GCHandle handle = (GCHandle)i;
         void *user_ptr = g_gc.handles.ptrs[i];
@@ -7823,7 +7797,6 @@ static void gc_mark_roots(JSRuntimeHandle rt)
                         if (js_handle_array_entry_is_valid(atom_handle)) {
                             JSStringHandle p = JSStringHandle(atom_handle);
                             if (p.atom_type() != JS_ATOM_TYPE_DEAD) {
-                                QJS_LOGI("gc_mark_roots: marking shape-referenced atom %d", atom_idx);
                                 gc_mark_recursive(rt, atom_handle);
                             }
                         }
@@ -7841,16 +7814,13 @@ static void gc_mark_roots(JSRuntimeHandle rt)
     /* Mark the runtime and all its children (class_array, atom_array, etc.) */
     /* This is critical: mark_children for JS_RUNTIME marks all internal arrays */
     if (rt.handle() != GC_HANDLE_NULL) {
-        QJS_LOGI("gc_mark_roots: marking runtime and its children");
         gc_mark_recursive(rt, rt.handle());
     }
     
     /* Mark objects on the JS stack (active function calls) */
     /* This is critical: functions currently executing must not be collected */
-    QJS_LOGI("gc_mark_roots: Marking JS stack frames");
     JSStackFrame *sf = rt.current_stack_frame();
     while (sf != NULL) {
-        QJS_LOGI("gc_mark_roots: marking stack frame func, sf=%p", sf);
         /* Mark the function object in this stack frame */
         JS_MarkValue(rt, sf->cur_func, gc_mark_recursive);
         /* Also mark var_refs if present.
@@ -7868,10 +7838,8 @@ static void gc_mark_roots(JSRuntimeHandle rt)
     
     /* Mark handles in the temporary root set */
     /* This is critical: handles added via gc_add_root() must be marked */
-    QJS_LOGI("gc_mark_roots: marking %u temporary roots", g_gc.root_set.count);
     for (i = 0; i < g_gc.root_set.count; i++) {
         GCHandle root_handle = g_gc.root_set.roots[i];
-        QJS_LOGI("gc_mark_roots: marking temporary root %d, handle=%u", i, root_handle);
         gc_mark_recursive(rt, root_handle);
     }
 }

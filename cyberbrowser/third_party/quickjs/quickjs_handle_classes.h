@@ -3844,7 +3844,7 @@ public:
     explicit JSArrayBufferHandle(GCHandle handle) : handle_(handle) {}
     
     GCHandle handle() const { return handle_; }
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
+    bool valid() const { return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_); }
     
     int byte_length() const {
         JSArrayBuffer* p = get_ptr();
@@ -3961,7 +3961,7 @@ public:
     explicit JSTypedArrayHandle(GCHandle handle) : handle_(handle) {}
     
     GCHandle handle() const { return handle_; }
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
+    bool valid() const { return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_); }
     
     GCHandle obj_handle() const {
         JSTypedArray* p = get_ptr();
@@ -4037,7 +4037,7 @@ public:
     explicit JSMapStateHandle(GCHandle handle) : handle_(handle) {}
     
     GCHandle handle() const { return handle_; }
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
+    bool valid() const { return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_); }
     
     bool is_weak() const {
         JSMapState* p = get_ptr();
@@ -4200,7 +4200,7 @@ public:
     explicit JSPromiseDataHandle(GCHandle handle) : handle_(handle) {}
     
     GCHandle handle() const { return handle_; }
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
+    bool valid() const { return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_); }
     
     int promise_state() const {
         JSPromiseData* p = get_ptr();
@@ -4274,7 +4274,7 @@ public:
     explicit JSProxyDataHandle(GCHandle handle) : handle_(handle) {}
     
     GCHandle handle() const { return handle_; }
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
+    bool valid() const { return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_); }
     
     GCValue target() const {
         JSProxyData* p = get_ptr();
@@ -4340,7 +4340,7 @@ public:
     explicit JSBoundFunctionHandle(GCHandle handle) : handle_(handle) {}
     
     GCHandle handle() const { return handle_; }
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
+    bool valid() const { return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_); }
     
     GCValue func_obj() const {
         JSBoundFunction* p = get_ptr();
@@ -4424,7 +4424,7 @@ public:
     explicit JSForInIteratorHandle(GCHandle handle) : handle_(handle) {}
     
     GCHandle handle() const { return handle_; }
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
+    bool valid() const { return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_); }
     
     GCValue obj() const {
         JSForInIterator* p = get_ptr();
@@ -4510,7 +4510,7 @@ public:
     explicit JSMapRecordHandle(GCHandle handle) : handle_(handle) {}
     
     GCHandle handle() const { return handle_; }
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
+    bool valid() const { return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_); }
     
     JSMapRecord* ptr() const { return get_ptr(); }
     
@@ -4659,7 +4659,7 @@ public:
     explicit JSMapIteratorDataHandle(GCHandle handle) : handle_(handle) {}
     
     GCHandle handle() const { return handle_; }
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
+    bool valid() const { return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_); }
     
     GCValue obj() const {
         JSMapIteratorData* p = get_ptr();
@@ -4715,7 +4715,7 @@ public:
     explicit JSArrayIteratorDataHandle(GCHandle handle) : handle_(handle) {}
     
     GCHandle handle() const { return handle_; }
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
+    bool valid() const { return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_); }
     
     GCValue obj() const {
         JSArrayIteratorData* p = get_ptr();
@@ -4768,7 +4768,7 @@ public:
     explicit JSIteratorHelperDataHandle(GCHandle handle) : handle_(handle) {}
     
     GCHandle handle() const { return handle_; }
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
+    bool valid() const { return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_); }
     
     GCValue obj() const {
         JSIteratorHelperData* p = get_ptr();
@@ -4880,7 +4880,7 @@ public:
     explicit JSIteratorConcatDataHandle(GCHandle handle) : handle_(handle) {}
     
     GCHandle handle() const { return handle_; }
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
+    bool valid() const { return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_); }
     
     int index() const {
         JSIteratorConcatData* p = get_ptr();
@@ -4962,7 +4962,7 @@ public:
     explicit JSIteratorWrapDataHandle(GCHandle handle) : handle_(handle) {}
     
     GCHandle handle() const { return handle_; }
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
+    bool valid() const { return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_); }
     
     GCValue wrapped_iter() const {
         JSIteratorWrapData* p = get_ptr();
@@ -5008,7 +5008,7 @@ public:
     explicit JSRegExpStringIteratorDataHandle(GCHandle handle) : handle_(handle) {}
     
     GCHandle handle() const { return handle_; }
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
+    bool valid() const { return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_); }
     
     GCValue iterating_regexp() const {
         JSRegExpStringIteratorData* p = get_ptr();
@@ -5096,7 +5096,7 @@ public:
     explicit JSVarDefArrayHandle(GCHandle handle) : handle_(handle) {}
     
     GCHandle handle() const { return handle_; }
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
+    bool valid() const { return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_); }
     explicit operator bool() const { return valid(); }
     
     /* Element access - returns handle for safe field access */
@@ -5330,7 +5330,7 @@ public:
     explicit JSAsyncFromSyncIteratorDataHandle(GCHandle handle) : handle_(handle) {}
     
     GCHandle handle() const { return handle_; }
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
+    bool valid() const { return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_); }
     
     GCValue sync_iter() const {
         JSAsyncFromSyncIteratorData* p = get_ptr();
@@ -5376,7 +5376,7 @@ public:
     explicit JSPromiseFunctionDataHandle(GCHandle handle) : handle_(handle) {}
     
     GCHandle handle() const { return handle_; }
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
+    bool valid() const { return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_); }
     
     GCValue promise() const {
         JSPromiseFunctionData* p = get_ptr();
@@ -5422,7 +5422,7 @@ public:
     explicit JSCFunctionDataRecordHandle(GCHandle handle) : handle_(handle) {}
     
     GCHandle handle() const { return handle_; }
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
+    bool valid() const { return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_); }
     
     JSCFunctionData* func() const {
         JSCFunctionDataRecord* p = get_ptr();
@@ -5503,7 +5503,7 @@ public:
     explicit JSGeneratorDataHandle(GCHandle handle) : handle_(handle) {}
     
     GCHandle handle() const { return handle_; }
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
+    bool valid() const { return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_); }
     
     int state() const {
         JSGeneratorData* p = get_ptr();
@@ -5551,7 +5551,7 @@ public:
     explicit JSAsyncGeneratorDataHandle(GCHandle handle) : handle_(handle) {}
     
     GCHandle handle() const { return handle_; }
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
+    bool valid() const { return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_); }
     
     int state() const {
         JSAsyncGeneratorData* p = get_ptr();
@@ -6240,7 +6240,7 @@ public:
     GCHandle handle() const { return handle_; }
     
     /* Check if valid */
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
+    bool valid() const { return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_); }
     explicit operator bool() const { return valid(); }
     
     /* Get property at index - fresh dereference each time for GC safety */
@@ -6348,7 +6348,7 @@ public:
     explicit JSPropertyHandle(GCHandle handle) : handle_(handle) {}
     
     GCHandle handle() const { return handle_; }
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
+    bool valid() const { return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_); }
     
     /* value access (JS_PROP_NORMAL) */
     GCValue value() const {
@@ -6478,7 +6478,7 @@ public:
     explicit JSPromiseReactionDataHandle(GCHandle handle) : handle_(handle) {}
     
     GCHandle handle() const { return handle_; }
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
+    bool valid() const { return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_); }
     
     /* resolving_funcs access */
     GCValue resolving_func(int idx) const {
@@ -6568,7 +6568,7 @@ public:
     explicit JSFinRecEntryHandle(GCHandle handle) : handle_(handle) {}
     
     GCHandle handle() const { return handle_; }
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
+    bool valid() const { return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_); }
     
     /* target access */
     GCValue target() const {
@@ -6676,7 +6676,7 @@ public:
     explicit JSAsyncGeneratorRequestHandle(GCHandle handle) : handle_(handle) {}
     
     GCHandle handle() const { return handle_; }
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
+    bool valid() const { return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_); }
     
     /* completion_type access */
     int completion_type() const {
@@ -6883,7 +6883,7 @@ public:
     explicit JSObjectListEntryArrayHandle(GCHandle handle) : handle_(handle) {}
     
     GCHandle handle() const { return handle_; }
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
+    bool valid() const { return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_); }
     explicit operator bool() const { return valid(); }
     
     /* Array access - returns pointer to element at index */
