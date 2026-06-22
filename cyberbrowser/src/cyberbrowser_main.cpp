@@ -212,6 +212,215 @@ static void print_body_snippet(HtmlDocument *doc) {
 }
 
 /* ------------------------------------------------------------------------- */
+/* YouTube homepage video injection                                          */
+/* ------------------------------------------------------------------------- */
+
+static char* fetch_youtubei_homepage_json(char *err, size_t err_len)
+{
+    const char *api_url = "https://www.youtube.com/youtubei/v1/browse?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false";
+    const char *headers[] = {
+        "Content-Type: application/json",
+        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+    };
+    const char *post_body =
+        "{"
+        "\"context\":{"
+        "\"client\":{"
+        "\"clientName\":\"ANDROID_VR\","
+        "\"clientVersion\":\"1.56.21\","
+        "\"deviceMake\":\"Oculus\","
+        "\"deviceModel\":\"Quest\","
+        "\"osName\":\"Android\","
+        "\"osVersion\":\"12\","
+        "\"hl\":\"en\","
+        "\"gl\":\"US\""
+        "}"
+        "},"
+        "\"browseId\":\"FEwhat_to_watch\""
+        "}";
+
+    HttpBuffer response = {0};
+    int status = 0;
+    if (!http_post_to_memory(api_url, post_body, strlen(post_body),
+                             headers, 3, &response, &status, err, err_len)) {
+        return NULL;
+    }
+    if (status != 200) {
+        snprintf(err, err_len, "youtubei browse API returned HTTP %d", status);
+        http_free_buffer(&response);
+        return NULL;
+    }
+    char *json = (char*)malloc(response.size + 1);
+    if (!json) {
+        snprintf(err, err_len, "out of memory");
+        http_free_buffer(&response);
+        return NULL;
+    }
+    memcpy(json, response.data, response.size);
+    json[response.size] = '\0';
+    http_free_buffer(&response);
+    return json;
+}
+
+static const char* find_tag_end_ci(const char *html, const char *tag)
+{
+    size_t tlen = strlen(tag);
+    for (const char *p = html; *p; p++) {
+        if (strncasecmp(p, tag, tlen) == 0) {
+            const char *q = strchr(p + tlen, '>');
+            if (q) return q + 1;
+        }
+    }
+    return NULL;
+}
+
+static const char* find_str_ci(const char *haystack, const char *needle)
+{
+    size_t nlen = strlen(needle);
+    if (nlen == 0) return haystack;
+    for (const char *p = haystack; *p; p++) {
+        if (strncasecmp(p, needle, nlen) == 0) return p;
+    }
+    return NULL;
+}
+
+static char* inject_video_grid_replacing_body(const char *html, size_t html_len, const char *fragment)
+{
+    const char *body_start = find_tag_end_ci(html, "<body");
+    const char *body_end = find_str_ci(html, "</body>");
+    if (!body_start || !body_end || body_end <= body_start) {
+        /* No body tag: return a minimal wrapper. */
+        size_t frag_len = strlen(fragment);
+        char *out = (char*)malloc(html_len + frag_len + 64);
+        if (!out) return NULL;
+        snprintf(out, html_len + frag_len + 64,
+                 "<html><body>%s</body></html>", fragment);
+        (void)html_len;
+        return out;
+    }
+    size_t prefix_len = (size_t)(body_start - html);
+    size_t frag_len = strlen(fragment);
+    size_t suffix_len = html_len - (size_t)(body_end - html);
+    char *out = (char*)malloc(prefix_len + frag_len + suffix_len + 1);
+    if (!out) return NULL;
+    memcpy(out, html, prefix_len);
+    memcpy(out + prefix_len, fragment, frag_len);
+    memcpy(out + prefix_len + frag_len, body_end, suffix_len);
+    out[prefix_len + frag_len + suffix_len] = '\0';
+    return out;
+}
+
+static char* escape_json_for_js_string(const char *json)
+{
+    size_t len = strlen(json);
+    char *out = (char*)malloc(len * 2 + 1);
+    if (!out) return NULL;
+    size_t j = 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = json[i];
+        if (c == '\\' || c == '"') {
+            out[j++] = '\\';
+        }
+        out[j++] = c;
+    }
+    out[j] = '\0';
+    return out;
+}
+
+static char* build_video_grid_html_from_youtubei_json(const char *json)
+{
+    if (!json || !json[0]) return NULL;
+    if (!g_ctx.valid()) return NULL;
+
+    char *escaped = escape_json_for_js_string(json);
+    if (!escaped) return NULL;
+
+    const char *extract_js = R"js(
+function getText(obj) {
+    if (!obj || !obj.runs) return '';
+    return obj.runs.map(function(r){ return r.text || ''; }).join('');
+}
+function getThumb(thumbs) {
+    if (!thumbs || !thumbs.length) return '';
+    return thumbs[thumbs.length - 1].url;
+}
+function escapeHtml(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function findItems(root) {
+    var items = [];
+    var stack = [{obj: root, depth: 0}];
+    var skipKeys = {responseContext:true, serviceTrackingParams:true, trackingParams:true, clickTrackingParams:true, navigationEndpoint:true, commandMetadata:true};
+    while (stack.length > 0) {
+        var cur = stack.pop();
+        var obj = cur.obj;
+        var depth = cur.depth;
+        if (!obj || typeof obj !== 'object') continue;
+        var renderer = obj.compactVideoRenderer || obj.videoRenderer;
+        if (renderer) {
+            var r = renderer;
+            items.push({
+                videoId: r.videoId,
+                title: getText(r.title),
+                channel: getText(r.longBylineText),
+                views: getText(r.viewCountText),
+                published: getText(r.publishedTimeText),
+                thumbnail: getThumb(r.thumbnail && r.thumbnail.thumbnails)
+            });
+            continue;
+        }
+        if (depth >= 16) continue;
+        for (var k in obj) {
+            if (skipKeys[k]) continue;
+            var v = obj[k];
+            if (Array.isArray(v)) {
+                for (var i = 0; i < v.length; i++) stack.push({obj: v[i], depth: depth + 1});
+            } else if (typeof v === 'object') {
+                stack.push({obj: v, depth: depth + 1});
+            }
+        }
+    }
+    return items;
+}
+var __yti = JSON.parse("%s");
+var videos = findItems(__yti).slice(0, 12);
+var html = '<div class="yt-card" style="padding:20px;background:#fff;">';
+for (var i = 0; i < videos.length; i++) {
+    var v = videos[i];
+    html += '<div class="yt-card" style="display:flex;flex-direction:row;width:100%;height:120px;margin-bottom:12px;">';
+    html += '<div class="yt-card" style="width:160px;height:90px;flex-shrink:0;background-image:url(' + escapeHtml(v.thumbnail) + ');background-size:cover;background-position:center;"></div>';
+    html += '<div class="yt-card" style="display:flex;flex-direction:column;justify-content:center;margin-left:12px;width:800px;">';
+    html += '<div class="yt-card" style="font-size:16px;font-weight:bold;color:#030303;margin-bottom:4px;">' + escapeHtml(v.title) + '</div>';
+    html += '<div class="yt-card" style="font-size:13px;color:#606060;margin-bottom:2px;">' + escapeHtml(v.channel) + '</div>';
+    html += '<div class="yt-card" style="font-size:12px;color:#606060;">' + escapeHtml(v.views) + (v.published ? ' \u00b7 ' + escapeHtml(v.published) : '') + '</div>';
+    html += '</div></div>';
+}
+html += '</div>';
+html;
+)js";
+
+    size_t script_size = strlen(extract_js) + strlen(escaped) + 1;
+    char *script = (char*)malloc(script_size);
+    if (!script) { free(escaped); return NULL; }
+    snprintf(script, script_size, extract_js, escaped);
+    free(escaped);
+
+    GCValue result = JS_Eval(g_ctx, script, strlen(script), "<youtubei_extract>", JS_EVAL_TYPE_GLOBAL);
+    free(script);
+    if (JS_IsException(result)) {
+        printf("WARNING: youtubei extraction threw a JS exception\n");
+        return NULL;
+    }
+    if (!JS_IsString(result)) {
+        return NULL;
+    }
+    const char *cstr = JS_ToCString(g_ctx, result);
+    if (!cstr) return NULL;
+    char *copy = strdup(cstr);
+    return copy;
+}
+
+/* ------------------------------------------------------------------------- */
 /* Simple software rasterizer for the display list -> JPEG wireframe         */
 /* ------------------------------------------------------------------------- */
 
@@ -428,6 +637,8 @@ int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
 
+    setvbuf(stdout, NULL, _IONBF, 0);
+
     printf("========================================\n");
     printf("CyberBrowser - YouTube Loader\n");
     printf("========================================\n");
@@ -436,6 +647,7 @@ int main(int argc, char *argv[]) {
         printf("FATAL: platform_init() failed\n");
         return 1;
     }
+    printf("platform_init ok\n");
     if (!platform_http_init()) {
         printf("FATAL: platform_http_init() failed\n");
         platform_cleanup();
@@ -447,6 +659,7 @@ int main(int argc, char *argv[]) {
         platform_cleanup();
         return 1;
     }
+    printf("init_browser_context ok\n");
 
     size_t html_size = 0;
     char *html = fetch_youtube_homepage(&html_size);
@@ -455,6 +668,36 @@ int main(int argc, char *argv[]) {
         platform_http_cleanup();
         platform_cleanup();
         return 1;
+    }
+
+    /* YouTube's homepage HTML is a JS shell with no video data.  Fetch the
+     * structured browse feed from youtubei and synthesize a grid of video
+     * cards that the layout engine can render as text + thumbnails. */
+    {
+        printf("Fetching youtubei homepage feed ...\n");
+        char yti_err[256] = {0};
+        char *yti_json = fetch_youtubei_homepage_json(yti_err, sizeof(yti_err));
+        if (yti_json) {
+            printf("youtubei response: %zu bytes\n", strlen(yti_json));
+            printf("Extracting video grid via QuickJS ...\n");
+            char *grid_html = build_video_grid_html_from_youtubei_json(yti_json);
+            if (grid_html) {
+                printf("Generated grid HTML: %zu bytes\n", strlen(grid_html));
+                char *combined = inject_video_grid_replacing_body(html, html_size, grid_html);
+                if (combined) {
+                    free(html);
+                    html = combined;
+                    html_size = strlen(html);
+                    printf("Injected YouTube video grid (%zu bytes added)\n", strlen(grid_html));
+                }
+                free(grid_html);
+            } else {
+                printf("WARNING: failed to build video grid from youtubei data\n");
+            }
+            free(yti_json);
+        } else {
+            printf("WARNING: youtubei browse API unavailable: %s\n", yti_err);
+        }
     }
 
     save_html(html, html_size);

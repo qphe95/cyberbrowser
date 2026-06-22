@@ -146,12 +146,10 @@ static bool text_is_whitespace(const char *s)
     return true;
 }
 
-static bool node_has_hidden_class(LayoutContext *ctx, int node_idx)
+static bool node_has_class(HtmlNode *node, const char *needle)
 {
-    if (node_idx < 0 || node_idx >= ctx->tree.count) return false;
-    HtmlNode *node = (HtmlNode*)po_array_payload(&ctx->doc->array,
-                                                  ctx->tree.nodes[node_idx].dom_node_idx);
-    if (!node || node->type != HTML_NODE_ELEMENT) return false;
+    if (!node || node->type != HTML_NODE_ELEMENT || !needle) return false;
+    size_t needle_len = strlen(needle);
     for (HtmlAttribute *a = node->attributes; a; a = a->next) {
         if (strcasecmp(a->name, "class") == 0 && a->value) {
             const char *p = a->value;
@@ -160,11 +158,19 @@ static bool node_has_hidden_class(LayoutContext *ctx, int node_idx)
                 while (i < len && isspace((unsigned char)p[i])) i++;
                 size_t start = i;
                 while (i < len && !isspace((unsigned char)p[i])) i++;
-                if (i - start == 6 && strncasecmp(p + start, "hidden", 6) == 0) return true;
+                if (i - start == needle_len && strncasecmp(p + start, needle, needle_len) == 0) return true;
             }
         }
     }
     return false;
+}
+
+static bool node_has_hidden_class(LayoutContext *ctx, int node_idx)
+{
+    if (node_idx < 0 || node_idx >= ctx->tree.count) return false;
+    HtmlNode *node = (HtmlNode*)po_array_payload(&ctx->doc->array,
+                                                  ctx->tree.nodes[node_idx].dom_node_idx);
+    return node_has_class(node, "hidden");
 }
 
 static const char* node_attribute_value(HtmlNode *node, const char *name)
@@ -312,7 +318,7 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                                          (float)box->color_a)) {
                 return false;
             }
-        } else {
+        } else if (!node_has_class(node, "yt-card")) {
             /* Every visible element gets at least a wireframe outline so the
              * layout structure is observable even without explicit styles. */
             if (!display_list_add_border(dl,
