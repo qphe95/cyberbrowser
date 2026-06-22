@@ -862,8 +862,19 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
     layout_collect_document_stylesheets(ctx, &list, base_url);
     if (sheet) layout_sheet_list_add(&list, sheet);
 
-    LOG_INFO("Applying %d stylesheet(s) to %d layout nodes in parallel", list.count, ctx->tree.count);
-    layout_apply_stylesheets_parallel(ctx, &list);
+    if (list.count == 0) {
+        /* No stylesheets to apply, but inline styles still need to be resolved. */
+        for (int i = 0; i < ctx->tree.count; i++) {
+            LayoutBox *box = layout_box(ctx, i);
+            HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx);
+            if (node && node->type == HTML_NODE_ELEMENT) {
+                layout_apply_inline_style(box, node, ctx->viewport_width, ctx->viewport_width);
+            }
+        }
+    } else {
+        LOG_INFO("Applying %d stylesheet(s) to %d layout nodes in parallel", list.count, ctx->tree.count);
+        layout_apply_stylesheets_parallel(ctx, &list);
+    }
     layout_sheet_list_free(&list);
 }
 
@@ -927,6 +938,7 @@ typedef struct {
 } FlexLine;
 
 static void layout_flex_container(LayoutContext *ctx, int idx);
+static void layout_offset_children(LayoutContext *ctx, int idx, double dx, double dy);
 
 /* Recursively resolve a subtree under a flex item (or block wrapper) so that
  * its content-based height/width is known before the flex container distributes
@@ -971,9 +983,12 @@ static void layout_resolve_subtree(LayoutContext *ctx, int idx, double avail_wid
             if (child->display == CSS_DISPLAY_INLINE) continue;
             if (child->visibility == CSS_VISIBILITY_HIDDEN) continue;
             layout_resolve_subtree(ctx, c, box->content_width);
-            child->x = content_left + child->margin_left;
-            child->y = content_top + y_offset + child->margin_top;
-            y_offset = (child->y + child->height + child->margin_bottom) - content_top;
+            double nx = content_left + child->margin_left;
+            double ny = content_top + y_offset + child->margin_top;
+            layout_offset_children(ctx, c, nx, ny);
+            child->x = nx;
+            child->y = ny;
+            y_offset = (ny + child->height + child->margin_bottom) - content_top;
         }
 
         if (box->height == 0) {
@@ -981,6 +996,18 @@ static void layout_resolve_subtree(LayoutContext *ctx, int idx, double avail_wid
                           + box->border_top + box->border_bottom;
             layout_update_content_sizes(box);
         }
+    }
+}
+
+static void layout_offset_children(LayoutContext *ctx, int idx, double dx, double dy)
+{
+    if (dx == 0.0 && dy == 0.0) return;
+    LayoutNodeRef *node = layout_node_ref(ctx, idx);
+    for (int c = node->first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+        LayoutBox *child = layout_box(ctx, c);
+        child->x += dx;
+        child->y += dy;
+        layout_offset_children(ctx, c, dx, dy);
     }
 }
 
@@ -1210,12 +1237,21 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
                                             + it->cross_margin_start;
                     break;
                 case CSS_ALIGN_STRETCH:
+                    cross_offset_in_line = it->cross_margin_start;
+                    {
+                        double stretched = line->cross_size - it->cross_margin_start - it->cross_margin_end;
+                        stretched = layout_clamp_size(stretched, it->min_cross, it->max_cross);
+                        if (stretched > it->cross_size) it->cross_size = stretched;
+                    }
+                    break;
                 case CSS_ALIGN_FLEX_START:
                 default:
                     cross_offset_in_line = it->cross_margin_start;
                     break;
             }
 
+            double old_x = child->x;
+            double old_y = child->y;
             if (is_row) {
                 child->x = content_left + main_offset;
                 child->y = content_top + cross_offset + cross_offset_in_line;
@@ -1227,6 +1263,7 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
                 child->width = it->cross_size;
                 child->height = it->main_size;
             }
+            layout_offset_children(ctx, c, child->x - old_x, child->y - old_y);
 
             layout_update_content_sizes(child);
             atomic_store_u32(&layout_state(ctx, c)->top_down_done, 1);
