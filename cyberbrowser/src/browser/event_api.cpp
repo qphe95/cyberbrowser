@@ -23,9 +23,20 @@ void js_event_finalizer(JSRuntimeHandle rt, GCValue val) {
     (void)val;
 }
 
+void js_event_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func) {
+    GCHandle ev_handle = JS_GetOpaqueHandle(val, js_event_class_id);
+    if (ev_handle == GC_HANDLE_NULL) return;
+    mark_func(rt, ev_handle);
+    EventData *ev = (EventData *)gc_deref(ev_handle);
+    if (!ev) return;
+    JS_MarkValue(rt, ev->target, mark_func);
+    JS_MarkValue(rt, ev->currentTarget, mark_func);
+}
+
 JSClassDef js_event_class_def = {
     .class_name = "Event",
     .finalizer = js_event_finalizer,
+    .gc_mark   = js_event_mark,
 };
 
 GCValue js_event_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
@@ -179,9 +190,21 @@ void js_custom_event_finalizer(JSRuntimeHandle rt, GCValue val) {
     (void)val;
 }
 
+void js_custom_event_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func) {
+    GCHandle ev_handle = JS_GetOpaqueHandle(val, js_custom_event_class_id);
+    if (ev_handle == GC_HANDLE_NULL) return;
+    mark_func(rt, ev_handle);
+    CustomEventData *ev = (CustomEventData *)gc_deref(ev_handle);
+    if (!ev) return;
+    JS_MarkValue(rt, ev->base.target, mark_func);
+    JS_MarkValue(rt, ev->base.currentTarget, mark_func);
+    JS_MarkValue(rt, ev->detail, mark_func);
+}
+
 JSClassDef js_custom_event_class_def = {
     .class_name = "CustomEvent",
     .finalizer = js_custom_event_finalizer,
+    .gc_mark   = js_custom_event_mark,
 };
 
 GCValue js_custom_event_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
@@ -317,9 +340,21 @@ void js_focus_event_finalizer(JSRuntimeHandle rt, GCValue val) {
     (void)val;
 }
 
+void js_focus_event_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func) {
+    GCHandle ev_handle = JS_GetOpaqueHandle(val, js_focus_event_class_id);
+    if (ev_handle == GC_HANDLE_NULL) return;
+    mark_func(rt, ev_handle);
+    FocusEventData *ev = (FocusEventData *)gc_deref(ev_handle);
+    if (!ev) return;
+    JS_MarkValue(rt, ev->base.target, mark_func);
+    JS_MarkValue(rt, ev->base.currentTarget, mark_func);
+    JS_MarkValue(rt, ev->relatedTarget, mark_func);
+}
+
 JSClassDef js_focus_event_class_def = {
     .class_name = "FocusEvent",
     .finalizer = js_focus_event_finalizer,
+    .gc_mark   = js_focus_event_mark,
 };
 
 // ServiceWorker class definitions (minimal - no finalizers needed for simple stubs)

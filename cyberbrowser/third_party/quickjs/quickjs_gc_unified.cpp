@@ -2266,9 +2266,13 @@ static void gc_unified_mark_func(JSRuntimeHandle rt, GCHandle handle) {
 /* Scan one grey object: mark all its children grey, then turn it black. */
 static void gc_scan_object(JSRuntimeHandle rt, GCHandle handle) {
     if (handle == GC_HANDLE_NULL) return;
+    if (!gc_handle_is_valid(handle)) {
+        GC_LOGE("gc_scan_object: skipping invalid handle %u", handle);
+        return;
+    }
+
     GCHeader *hdr = gc_header_from_handle(handle);
     if (!hdr) return;
-    if ((hdr->flags & GC_FLAG_FREED) || hdr->size == 0) return;
 
     uint32_t color = atomic_load_u32(&hdr->gc_color_state);
     if (color != GC_COLOR_GREY) return;
@@ -2949,6 +2953,11 @@ static void gc_run_internal(void) {
     
     GC_LOGI("gc_run_internal: ENTER has_runtime=%d", has_runtime);
     
+    /* Guard: validate heap canaries before starting. */
+    if (gc_validate_all_canaries(false) != GC_CANARY_OK) {
+        GC_LOGE("gc_run_internal: heap canary corruption detected BEFORE GC");
+    }
+    
     /* Enter MARKING phase */
     atomic_store_u32(&g_gc.gc_phase, (uint32_t)GC_PHASE_MARKING);
     
@@ -2961,28 +2970,43 @@ static void gc_run_internal(void) {
     
     if (has_runtime) {
         /* Phase 2: Clean up shape hash table before compaction */
-        GC_LOGI("gc_run_internal: Phase 2 - cleaning shape hash table");
+        fprintf(stderr, "[GC] Phase 2 - cleaning shape hash table\n");
+        fflush(stderr);
         gc_cleanup_shape_hash_table(rt);
+        fprintf(stderr, "[GC] Phase 2 done\n");
+        fflush(stderr);
         
         /* Phase 3: Sweep phase - mark unmarked objects as DEAD */
-        GC_LOGI("gc_run_internal: Phase 3 - sweeping");
+        fprintf(stderr, "[GC] Phase 3 - sweeping\n");
+        fflush(stderr);
         gc_sweep_unified(rt);
+        fprintf(stderr, "[GC] Phase 3 done\n");
+        fflush(stderr);
         
         /* Phase 4: Remove weak objects now that DEAD objects are known.
          * Accessors also filter dead entries, but this pass eagerly cleans
          * the typed weak-reference arrays before reclamation. */
-        GC_LOGI("gc_run_internal: Phase 4 - removing weak objects");
+        fprintf(stderr, "[GC] Phase 4 - removing weak objects\n");
+        fflush(stderr);
         gc_remove_weak_objects(rt);
+        fprintf(stderr, "[GC] Phase 4 done\n");
+        fflush(stderr);
         
         /* Phase 5: Sweep atoms */
-        GC_LOGI("gc_run_internal: Phase 5 - sweeping atoms");
+        fprintf(stderr, "[GC] Phase 5 - sweeping atoms\n");
+        fflush(stderr);
         gc_sweep_atoms(rt);
+        fprintf(stderr, "[GC] Phase 5 done\n");
+        fflush(stderr);
         
         /* Phase 6: Finalize and reclaim DEAD objects.
          * All accessor-visible references to dead objects must be purged
          * before this point. */
-        GC_LOGI("gc_run_internal: Phase 6 - reclaiming dead objects");
+        fprintf(stderr, "[GC] Phase 6 - reclaiming dead objects\n");
+        fflush(stderr);
         gc_reclaim_dead(rt);
+        fprintf(stderr, "[GC] Phase 6 done\n");
+        fflush(stderr);
     }
     
     /* Enter COMPACTING phase */
@@ -2991,9 +3015,12 @@ static void gc_run_internal(void) {
     atomic_store_u32(&g_gc.compaction_target, (uint32_t)(1 - gc_active_buffer_index()));
     
     /* Phase 5: Compact phase - move live objects and update handles */
-    GC_LOGI("gc_run_internal: Phase 5 - compacting into buffer %d",
+    fprintf(stderr, "[GC] Phase 7 - compacting into buffer %d\n",
             atomic_load_u32(&g_gc.compaction_target));
+    fflush(stderr);
     gc_compact();
+    fprintf(stderr, "[GC] Phase 7 done\n");
+    fflush(stderr);
     
     /* Enter SWAPPING phase (brief) then back to IDLE */
     atomic_store_u32(&g_gc.gc_phase, (uint32_t)GC_PHASE_SWAPPING);
@@ -3002,9 +3029,15 @@ static void gc_run_internal(void) {
     
     /* Phase 6: Compact typed handle arrays */
     GC_LOGI("gc_run_internal: Phase 6 - compacting handle arrays");
+    gc_handle_array_compact(&g_gc.weakmap_handles);
     gc_handle_array_compact(&g_gc.weakref_handles);
     gc_handle_array_compact(&g_gc.finrec_handles);
     gc_handle_array_compact(&g_gc.atom_handles);
+    
+    /* Guard: validate heap canaries after GC. */
+    if (gc_validate_all_canaries(false) != GC_CANARY_OK) {
+        GC_LOGE("gc_run_internal: heap canary corruption detected AFTER GC");
+    }
     
     GC_LOGI("gc_run_internal: DONE");
 }

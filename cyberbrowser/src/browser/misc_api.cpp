@@ -615,9 +615,19 @@ void js_map_finalizer(JSRuntimeHandle rt, GCValue val) {
     (void)val;
 }
 
+void js_map_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func) {
+    GCHandle map_handle = JS_GetOpaqueHandle(val, js_map_class_id);
+    if (map_handle == GC_HANDLE_NULL) return;
+    mark_func(rt, map_handle);
+    MapData *map = (MapData *)gc_deref(map_handle);
+    if (!map) return;
+    JS_MarkValue(rt, map->entries, mark_func);
+}
+
 JSClassDef js_map_class_def = {
     .class_name = "Map",
     .finalizer = js_map_finalizer,
+    .gc_mark   = js_map_mark,
 };
 
 GCValue js_map_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
@@ -977,20 +987,42 @@ void js_animation_finalizer(JSRuntimeHandle rt, GCValue val) {
     (void)val;
 }
 
+void js_animation_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func) {
+    GCHandle anim_handle = JS_GetOpaqueHandle(val, js_animation_class_id);
+    if (anim_handle == GC_HANDLE_NULL) return;
+    mark_func(rt, anim_handle);
+    AnimationData *anim = (AnimationData *)gc_deref(anim_handle);
+    if (!anim) return;
+    JS_MarkValue(rt, anim->onfinish, mark_func);
+    JS_MarkValue(rt, anim->effect, mark_func);
+}
+
 void js_keyframe_effect_finalizer(JSRuntimeHandle rt, GCValue val) {
     // KeyFrameEffectData memory is managed by GC, no manual cleanup needed
     (void)rt;
     (void)val;
 }
 
+void js_keyframe_effect_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func) {
+    GCHandle effect_handle = JS_GetOpaqueHandle(val, js_keyframe_effect_class_id);
+    if (effect_handle == GC_HANDLE_NULL) return;
+    mark_func(rt, effect_handle);
+    KeyFrameEffectData *effect = (KeyFrameEffectData *)gc_deref(effect_handle);
+    if (!effect) return;
+    JS_MarkValue(rt, effect->target, mark_func);
+    JS_MarkValue(rt, effect->keyframes, mark_func);
+}
+
 JSClassDef js_animation_class_def = {
     .class_name = "Animation",
     .finalizer = js_animation_finalizer,
+    .gc_mark   = js_animation_mark,
 };
 
 JSClassDef js_keyframe_effect_class_def = {
     .class_name = "KeyframeEffect",
     .finalizer = js_keyframe_effect_finalizer,
+    .gc_mark   = js_keyframe_effect_mark,
 };
 
 // Animation constructor
@@ -1221,6 +1253,15 @@ void js_font_face_set_finalizer(JSRuntimeHandle rt, GCValue val) {
     (void)val;
 }
 
+void js_font_face_set_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func) {
+    GCHandle ffs_handle = JS_GetOpaqueHandle(val, js_font_face_set_class_id);
+    if (ffs_handle == GC_HANDLE_NULL) return;
+    mark_func(rt, ffs_handle);
+    FontFaceSetData *ffs = (FontFaceSetData *)gc_deref(ffs_handle);
+    if (!ffs) return;
+    JS_MarkValue(rt, ffs->loaded_fonts, mark_func);
+}
+
 JSClassDef js_font_face_class_def = {
     .class_name = "FontFace",
     .finalizer = js_font_face_finalizer,
@@ -1229,6 +1270,7 @@ JSClassDef js_font_face_class_def = {
 JSClassDef js_font_face_set_class_def = {
     .class_name = "FontFaceSet",
     .finalizer = js_font_face_set_finalizer,
+    .gc_mark   = js_font_face_set_mark,
 };
 
 // FontFace constructor
@@ -1396,9 +1438,19 @@ void js_mutation_observer_finalizer(JSRuntimeHandle rt, GCValue val) {
     (void)val;
 }
 
+void js_mutation_observer_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func) {
+    GCHandle mo_handle = JS_GetOpaqueHandle(val, js_mutation_observer_class_id);
+    if (mo_handle == GC_HANDLE_NULL) return;
+    mark_func(rt, mo_handle);
+    MutationObserverData *mo = (MutationObserverData *)gc_deref(mo_handle);
+    if (!mo) return;
+    JS_MarkValue(rt, mo->callback, mark_func);
+}
+
 JSClassDef js_mutation_observer_class_def = {
     .class_name = "MutationObserver",
     .finalizer = js_mutation_observer_finalizer,
+    .gc_mark   = js_mutation_observer_mark,
 };
 
 // MutationObserver constructor
@@ -1449,9 +1501,19 @@ void js_resize_observer_finalizer(JSRuntimeHandle rt, GCValue val) {
     (void)val;
 }
 
+void js_resize_observer_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func) {
+    GCHandle ro_handle = JS_GetOpaqueHandle(val, js_resize_observer_class_id);
+    if (ro_handle == GC_HANDLE_NULL) return;
+    mark_func(rt, ro_handle);
+    ResizeObserverData *ro = (ResizeObserverData *)gc_deref(ro_handle);
+    if (!ro) return;
+    JS_MarkValue(rt, ro->callback, mark_func);
+}
+
 JSClassDef js_resize_observer_class_def = {
     .class_name = "ResizeObserver",
     .finalizer = js_resize_observer_finalizer,
+    .gc_mark   = js_resize_observer_mark,
 };
 
 // ResizeObserver constructor
@@ -1611,6 +1673,15 @@ void js_performance_observer_finalizer(JSRuntimeHandle rt, GCValue val) {
     (void)val;
 }
 
+void js_performance_observer_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func) {
+    GCHandle po_handle = JS_GetOpaqueHandle(val, js_performance_observer_class_id);
+    if (po_handle == GC_HANDLE_NULL) return;
+    mark_func(rt, po_handle);
+    PerformanceObserverData *po = (PerformanceObserverData *)gc_deref(po_handle);
+    if (!po) return;
+    JS_MarkValue(rt, po->callback, mark_func);
+}
+
 JSClassDef js_performance_class_def = {
     .class_name = "Performance",
     .finalizer = js_performance_finalizer,
@@ -1624,6 +1695,7 @@ JSClassDef js_performance_entry_class_def = {
 JSClassDef js_performance_observer_class_def = {
     .class_name = "PerformanceObserver",
     .finalizer = js_performance_observer_finalizer,
+    .gc_mark   = js_performance_observer_mark,
 };
 
 // Performance.now() - high resolution timestamp

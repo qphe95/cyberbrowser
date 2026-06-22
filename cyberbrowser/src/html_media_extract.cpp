@@ -1016,11 +1016,10 @@ static bool is_unsafe_external_script(const char *url) {
         "webcomponents-sd",
         "webcomponents-sd-shadycss",
         "webcomponents-all-noPatch",
-        // The main ~10 MB kevlar/base bundle executes but triggers a latent
-        // unified-GC crash in a subsequent collection.  Keep it skipped until
-        // the GC marking/finalizer paths for the browser API handles are fully
-        // audited.
-        "kevlar_base",
+        // (Previously the ~10 MB kevlar_base bundle was skipped here due to a
+        // latent GC crash.  The unified GC now marks opaque handles owned by
+        // JS objects, which keeps the browser API C data alive, so this entry
+        // has been removed.)
         NULL
     };
     for (const char **p = skip_patterns; *p; p++) {

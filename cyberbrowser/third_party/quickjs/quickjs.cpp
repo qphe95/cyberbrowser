@@ -7222,29 +7222,41 @@ extern "C" void gc_remove_weak_objects(JSRuntimeHandle rt)
     rt.set_gc_phase(JS_GC_PHASE_DECREF);
     
     /* 1. Clean WeakMaps (remove entries with dead keys) */
+    fprintf(stderr, "[GC] remove_weak: weakmaps=%u\n", g_gc.weakmap_handles.count);
+    fflush(stderr);
     for (i = 0; i < g_gc.weakmap_handles.count; i++) {
         GCHandle handle = g_gc.weakmap_handles.handles[i];
         if (!js_handle_array_entry_is_valid(handle)) continue;
         JSMapStateHandle s(handle);
         if (!s.valid()) continue;
+        fprintf(stderr, "[GC] remove_weak: weakmap %d handle=%u\n", i, handle);
+        fflush(stderr);
         map_delete_weakrefs(rt, s);
     }
     
     /* 2. Clear dead WeakRefs */
+    fprintf(stderr, "[GC] remove_weak: weakrefs=%u\n", g_gc.weakref_handles.count);
+    fflush(stderr);
     for (i = 0; i < g_gc.weakref_handles.count; i++) {
         GCHandle handle = g_gc.weakref_handles.handles[i];
         if (!js_handle_array_entry_is_valid(handle)) continue;
         JSWeakRefDataHandle wrd(handle);
         if (!wrd) continue;
+        fprintf(stderr, "[GC] remove_weak: weakref %d handle=%u\n", i, handle);
+        fflush(stderr);
         weakref_delete_weakref(rt, wrd.ptr());
     }
     
     /* 3. Queue FinalizationRegistry callbacks for dead targets */
+    fprintf(stderr, "[GC] remove_weak: finrecs=%u\n", g_gc.finrec_handles.count);
+    fflush(stderr);
     for (i = 0; i < g_gc.finrec_handles.count; i++) {
         GCHandle handle = g_gc.finrec_handles.handles[i];
         if (!js_handle_array_entry_is_valid(handle)) continue;
         JSFinalizationRegistryDataHandle frd(handle);
         if (!frd) continue;
+        fprintf(stderr, "[GC] remove_weak: finrec %d handle=%u\n", i, handle);
+        fflush(stderr);
         finrec_delete_weakref(rt, frd);
     }
 
@@ -7325,7 +7337,7 @@ static void add_gc_object(JSRuntimeHandle rt, GCHeader *h,
  * The handle is stable across GC compaction, unlike raw pointers. */
 static inline void JS_MarkHandle(JSRuntimeHandle rt, GCHandle handle, JS_MarkFunc *mark_func)
 {
-    if (handle != GC_HANDLE_NULL) {
+    if (handle != GC_HANDLE_NULL && gc_handle_is_valid(handle)) {
         mark_func(rt, handle);
     }
 }
@@ -7436,6 +7448,16 @@ extern "C" void mark_children(JSRuntimeHandle rt, GCHandle handle,
                 gc_mark = ((JSClass*)rt_class_array)[p.class_id()].gc_mark;
                 if (gc_mark)
                     gc_mark(rt, GC_MKHANDLE(JS_TAG_OBJECT, p.handle()), mark_func);
+            }
+
+            /* SAFETY: browser API objects store GC-managed data via
+             * JS_SetOpaqueHandle().  The generic object marker does not
+             * otherwise see this handle, so the data blob can be freed while
+             * the JS object is still reachable.  Mark it explicitly to keep
+             * opaque C data alive for every object that has it. */
+            GCHandle opaque = p.opaque_handle();
+            if (opaque != GC_HANDLE_NULL) {
+                mark_func(rt, opaque);
             }
         }
         break;
@@ -7881,6 +7903,27 @@ extern "C" void gc_cleanup_shape_hash_table(JSRuntimeHandle rt)
             continue;
 
         GCHandle sh_handle = b->value;
+        if (sh_handle == GC_HANDLE_NULL || !gc_handle_is_valid(sh_handle)) {
+            QJS_LOGI("gc_cleanup_shape_hash_table: clearing invalid handle %u from bucket[%u]",
+                     sh_handle, i);
+            uint32_t prev = atomic_compare_exchange_u32(&b->state, LF_HASH_OCCUPIED, LF_HASH_TOMBSTONE);
+            if (prev == LF_HASH_OCCUPIED)
+                rt.shape_hash_count_dec();
+            continue;
+        }
+
+        /* Verify the handle actually points to a shape.  Freed handles can be
+         * reused for other GC object types, leaving stale entries in the hash. */
+        JSGCObjectTypeEnum typ = gc_handle_get_type_inline(sh_handle);
+        if (typ != JS_GC_OBJ_TYPE_SHAPE) {
+            QJS_LOGE("gc_cleanup_shape_hash_table: bucket[%u] handle=%u is not a shape (type=%d), clearing",
+                     i, sh_handle, (int)typ);
+            uint32_t prev = atomic_compare_exchange_u32(&b->state, LF_HASH_OCCUPIED, LF_HASH_TOMBSTONE);
+            if (prev == LF_HASH_OCCUPIED)
+                rt.shape_hash_count_dec();
+            continue;
+        }
+
         JSShapeHandle sh = JSShapeHandle(sh_handle);
         bool remove = false;
         if (!sh) {
@@ -56397,42 +56440,89 @@ static void map_decref_record(JSRuntimeHandle rt, JSMapRecord *mr)
 
 static void map_delete_weakrefs(JSRuntimeHandle rt, JSMapStateHandle s_h)
 {
-    GCHandle mr_handle, mr_next;
     GCHandle *hash_table;
     GCHandle *pmr_handle;
     uint32_t h;
 
-    gc_list_for_each_safe_from_container(mr_handle, mr_next, s_h.handle(), offsetof(JSMapState, records), offsetof(JSMapRecord, link)) {
-        JSMapRecordHandle mr_h(mr_handle);
-        /* Use fresh pointer for each record - safe because used immediately */
-        JSMapRecord *mr = mr_h.__unsafe_internal_ptr();
-        if (!mr || js_weakref_is_live(mr->key))
-            continue;
-            
-        /* even if key is not live it can be hashed as a pointer */
-        h = map_hash_key(mr->key, s_h.hash_bits());
-        hash_table = (GCHandle *)GCPin<void>(s_h.hash_table_handle()).ptr();
-        if (!hash_table)
-            continue;
-        pmr_handle = &hash_table[h];
-        JSMapRecord *mr1 = nullptr;
-        for(;;) {
-            if (*pmr_handle == GC_HANDLE_NULL)
-                goto done;
-            JSMapRecordHandle mr1_handle(*pmr_handle);
-            mr1 = mr1_handle.__unsafe_internal_ptr();
-            if (!mr1)
-                goto done; /* Stale handle in hash chain */
-            if (mr1 == mr)
-                break;
-            pmr_handle = &mr1->hash_next_handle;
-        }
-        /* remove from the hash table */
-        if (mr1)
-            *pmr_handle = mr1->hash_next_handle;
-    done:
-        map_delete_record_internal(rt, s_h, mr);
+    QJS_LOGI("map_delete_weakrefs: ENTER map=%u", s_h.handle());
+
+    /* Validate the map state handle itself. */
+    if (s_h.handle() == GC_HANDLE_NULL || !gc_handle_is_valid(s_h.handle())) {
+        QJS_LOGE("map_delete_weakrefs: invalid map state handle %u", s_h.handle());
+        return;
     }
+
+    /* Manually walk the record list so every handle can be validated before
+     * dereferencing.  The gc_list_for_each_safe macro dereferences handles
+     * unconditionally, which crashes if a list link points to a freed/reused
+     * handle left behind by an incomplete cleanup. */
+    GCHandle container = s_h.handle();
+    GCListHead *head = (GCListHead *)((uint8_t*)gc_deref(container) + offsetof(JSMapState, records));
+    if (!head) {
+        QJS_LOGI("map_delete_weakrefs: NULL list head");
+        return;
+    }
+
+    GCHandle mr_handle = head->next;
+    int record_idx = 0;
+    while (mr_handle != GC_HANDLE_NULL) {
+        if (mr_handle == GC_HANDLE_NULL || !gc_handle_is_valid(mr_handle)) {
+            QJS_LOGE("map_delete_weakrefs: invalid record handle %u, breaking list walk", mr_handle);
+            break;
+        }
+
+        JSMapRecordHandle mr_h(mr_handle);
+        JSMapRecord *mr = mr_h.__unsafe_internal_ptr();
+        if (!mr) {
+            QJS_LOGE("map_delete_weakrefs: record handle %u derefs to NULL, breaking", mr_handle);
+            break;
+        }
+
+        /* Snapshot next before we potentially mutate/delete the record. */
+        GCHandle mr_next = mr->link.next;
+
+        if (!js_weakref_is_live(mr->key)) {
+            /* even if key is not live it can be hashed as a pointer */
+            h = map_hash_key(mr->key, s_h.hash_bits());
+            GCHandle ht_handle = s_h.hash_table_handle();
+            if (ht_handle == GC_HANDLE_NULL || !gc_handle_is_valid(ht_handle)) {
+                QJS_LOGE("map_delete_weakrefs: invalid hash table handle %u", ht_handle);
+            } else {
+                hash_table = (GCHandle *)GCPin<void>(ht_handle).ptr();
+                if (hash_table) {
+                    pmr_handle = &hash_table[h];
+                    JSMapRecord *mr1 = nullptr;
+                    for(;;) {
+                        if (*pmr_handle == GC_HANDLE_NULL)
+                            break;
+                        if (!gc_handle_is_valid(*pmr_handle)) {
+                            QJS_LOGE("map_delete_weakrefs: invalid hash chain handle %u", *pmr_handle);
+                            break;
+                        }
+                        JSMapRecordHandle mr1_handle(*pmr_handle);
+                        mr1 = mr1_handle.__unsafe_internal_ptr();
+                        if (!mr1)
+                            break; /* Stale handle in hash chain */
+                        if (mr1 == mr)
+                            break;
+                        pmr_handle = &mr1->hash_next_handle;
+                    }
+                    /* remove from the hash table */
+                    if (mr1)
+                        *pmr_handle = mr1->hash_next_handle;
+                }
+            }
+            map_delete_record_internal(rt, s_h, mr);
+        }
+
+        mr_handle = mr_next;
+        record_idx++;
+        if (record_idx > 1000000) {
+            QJS_LOGE("map_delete_weakrefs: infinite loop detected, aborting");
+            break;
+        }
+    }
+
 }
 
 static GCValue js_map_set(JSContextHandle ctx, GCValue this_val,

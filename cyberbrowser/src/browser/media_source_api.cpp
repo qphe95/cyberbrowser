@@ -24,19 +24,45 @@ void js_media_source_finalizer(JSRuntimeHandle rt, GCValue val) {
     (void)val;
 }
 
+void js_media_source_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func) {
+    GCHandle ms_handle = JS_GetOpaqueHandle(val, js_media_source_class_id);
+    if (ms_handle == GC_HANDLE_NULL) return;
+    mark_func(rt, ms_handle);
+    MediaSourceData *ms = (MediaSourceData *)gc_deref(ms_handle);
+    if (!ms) return;
+    JS_MarkValue(rt, ms->onsourceopen, mark_func);
+    JS_MarkValue(rt, ms->onsourceended, mark_func);
+    JS_MarkValue(rt, ms->onsourceclose, mark_func);
+}
+
 void js_source_buffer_finalizer(JSRuntimeHandle rt, GCValue val) {
     (void)rt;
     (void)val;
 }
 
+void js_source_buffer_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func) {
+    GCHandle sb_handle = JS_GetOpaqueHandle(val, js_source_buffer_class_id);
+    if (sb_handle == GC_HANDLE_NULL) return;
+    mark_func(rt, sb_handle);
+    SourceBufferData *sb = (SourceBufferData *)gc_deref(sb_handle);
+    if (!sb) return;
+    JS_MarkValue(rt, sb->onupdatestart, mark_func);
+    JS_MarkValue(rt, sb->onupdate, mark_func);
+    JS_MarkValue(rt, sb->onupdateend, mark_func);
+    JS_MarkValue(rt, sb->onerror, mark_func);
+    JS_MarkValue(rt, sb->onabort, mark_func);
+}
+
 JSClassDef js_media_source_class_def = {
     .class_name = "MediaSource",
     .finalizer = js_media_source_finalizer,
+    .gc_mark   = js_media_source_mark,
 };
 
 JSClassDef js_source_buffer_class_def = {
     .class_name = "SourceBuffer",
     .finalizer = js_source_buffer_finalizer,
+    .gc_mark   = js_source_buffer_mark,
 };
 
 // MediaSource constructor

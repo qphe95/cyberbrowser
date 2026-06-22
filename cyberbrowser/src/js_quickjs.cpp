@@ -218,6 +218,18 @@ static void js_xhr_finalizer(JSRuntimeHandle rt, GCValue val) {
     (void)val;
 }
 
+static void js_xhr_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func) {
+    GCHandle xhr_handle = JS_GetOpaqueHandle(val, js_xhr_class_id);
+    if (xhr_handle == GC_HANDLE_NULL) return;
+    mark_func(rt, xhr_handle);
+    XMLHttpRequest *xhr = (XMLHttpRequest *)gc_deref(xhr_handle);
+    if (!xhr) return;
+    JS_MarkValue(rt, xhr->onload, mark_func);
+    JS_MarkValue(rt, xhr->onerror, mark_func);
+    JS_MarkValue(rt, xhr->onreadystatechange, mark_func);
+    JS_MarkValue(rt, xhr->headers, mark_func);
+}
+
 GCValue js_xhr_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
     XMLHttpRequestHandle xhr = XMLHttpRequestHandle::create(ctx);
     if (!xhr.valid()) return JS_ThrowTypeError(ctx, "XMLHttpRequest internal error");
@@ -469,6 +481,20 @@ static void js_video_finalizer(JSRuntimeHandle rt, GCValue val) {
     // GCValue fields are automatically garbage collected
     (void)rt;
     (void)val;
+}
+
+static void js_video_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func) {
+    GCHandle video_handle = JS_GetOpaqueHandle(val, js_video_class_id);
+    if (video_handle == GC_HANDLE_NULL) return;
+    mark_func(rt, video_handle);
+    HTMLVideoElement *vid = (HTMLVideoElement *)gc_deref(video_handle);
+    if (!vid) return;
+    JS_MarkValue(rt, vid->onloadstart, mark_func);
+    JS_MarkValue(rt, vid->onloadedmetadata, mark_func);
+    JS_MarkValue(rt, vid->oncanplay, mark_func);
+    JS_MarkValue(rt, vid->onplay, mark_func);
+    JS_MarkValue(rt, vid->onplaying, mark_func);
+    JS_MarkValue(rt, vid->onerror, mark_func);
 }
 
 GCValue js_video_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
@@ -1716,8 +1742,8 @@ bool js_quickjs_create_runtime(void) {
     JS_AddIntrinsicJSON(g_js_context);
     
     // Register custom classes
-    JSClassDef xhr_def = {.class_name = "XMLHttpRequest", .finalizer = js_xhr_finalizer};
-    JSClassDef video_def = {.class_name = "HTMLVideoElement", .finalizer = js_video_finalizer};
+    JSClassDef xhr_def = {.class_name = "XMLHttpRequest", .finalizer = js_xhr_finalizer, .gc_mark = js_xhr_mark};
+    JSClassDef video_def = {.class_name = "HTMLVideoElement", .finalizer = js_video_finalizer, .gc_mark = js_video_mark};
     if (JS_NewClass(g_js_runtime, js_xhr_class_id, &xhr_def) < 0) {
         platform_log(LOG_LEVEL_WARN, "js_quickjs", "Failed to register XMLHttpRequest class");
     }
