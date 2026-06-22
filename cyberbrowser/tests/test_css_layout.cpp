@@ -9,6 +9,7 @@
 #include "css_parser.h"
 #include "css_layout.h"
 #include "display_list.h"
+#include "text_shaper.h"
 
 extern "C" void run_css_layout_tests(void);
 
@@ -125,10 +126,45 @@ TEST(test_layout_display_list) {
     return true;
 }
 
+TEST(test_text_shaper_basic) {
+    const char *paths[] = {
+        "../../third_party/fonts/Roboto-Regular.ttf",
+        "../third_party/fonts/Roboto-Regular.ttf",
+        "third_party/fonts/Roboto-Regular.ttf",
+        NULL
+    };
+    TextShaper *shaper = NULL;
+    for (int i = 0; paths[i]; i++) {
+        shaper = text_shaper_create(paths[i], 16.0f);
+        if (shaper) break;
+    }
+    ASSERT_TRUE(shaper != NULL);
+
+    float w = 0, h = 0;
+    ASSERT_TRUE(text_shaper_measure(shaper, "Hello", &w, &h));
+    ASSERT_TRUE(w > 0.0f && h > 0.0f);
+
+    /* Kerning should not break measurement and should differ from unkerned for some pairs. */
+    float w_kern = 0;
+    ASSERT_TRUE(text_shaper_measure(shaper, "AV", &w_kern, NULL));
+    ASSERT_TRUE(w_kern > 0.0f);
+
+    DisplayList dl;
+    display_list_init(&dl);
+    ASSERT_TRUE(text_shaper_shape_to_display_list(shaper, "Hi \u00E9", 10.0f, 20.0f,
+                                                   0.0f, 0.0f, 0.0f, 1.0f, &dl));
+    ASSERT_TRUE(dl.count > 0);
+    display_list_free(&dl);
+
+    text_shaper_destroy(shaper);
+    return true;
+}
+
 extern "C" void run_css_layout_tests(void) {
     printf("\n--- CSS Layout Engine Tests ---\n");
     RUN_TEST(test_layout_basic_document);
     RUN_TEST(test_layout_stylesheet);
     RUN_TEST(test_layout_auto_height);
     RUN_TEST(test_layout_display_list);
+    RUN_TEST(test_text_shaper_basic);
 }

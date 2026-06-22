@@ -58,6 +58,7 @@ bool display_list_add_border(DisplayList *dl, float x, float y, float w, float h
                              float thickness, float r, float g, float b, float a);
 bool display_list_add_glyph(DisplayList *dl, float x, float y, float w, float h,
                             float u0, float v0, float u1, float v1,
+                            uint32_t glyph_index,
                             float r, float g, float b, float a);
 
 /* Build a display list from a resolved LayoutContext. */

@@ -55,6 +55,7 @@ set(BE_SOURCES
     src/css_parser.cpp
     src/css_layout.cpp
     src/display_list.cpp
+    src/text_shaper.cpp
     src/lockfree_hash_table.cpp
     src/url_analyzer.c
     src/tls_client.c
@@ -134,6 +135,7 @@ target_include_directories(browser-emulator
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/quickjs
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/include
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/tf-psa-crypto/include

@@ -75,6 +75,7 @@ bool display_list_add_border(DisplayList *dl, float x, float y, float w, float h
 
 bool display_list_add_glyph(DisplayList *dl, float x, float y, float w, float h,
                             float u0, float v0, float u1, float v1,
+                            uint32_t glyph_index,
                             float r, float g, float b, float a)
 {
     if (!display_list_reserve(dl, 1)) return false;
@@ -85,6 +86,7 @@ bool display_list_add_glyph(DisplayList *dl, float x, float y, float w, float h,
     cmd->r = r; cmd->g = g; cmd->b = b; cmd->a = a;
     cmd->u.glyph.u0 = u0; cmd->u.glyph.v0 = v0;
     cmd->u.glyph.u1 = u1; cmd->u.glyph.v1 = v1;
+    cmd->u.glyph.glyph_index = glyph_index;
     return true;
 }
 
