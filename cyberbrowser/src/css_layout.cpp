@@ -66,6 +66,7 @@ static inline LayoutNodeState* layout_state(LayoutContext *ctx, int idx)
 
 /* Forward declarations for display/visibility helpers used during tree build. */
 static CssDisplay layout_default_display(const char *tag_name);
+static char* layout_resolve_url(const char *base_url, const char *href);
 
 /* ============================================================================
  * Layout tree construction
@@ -156,6 +157,7 @@ static bool layout_build_nodes(LayoutContext *ctx, const int *map)
         box->align_items = CSS_ALIGN_STRETCH;
         box->font_size = 16.0;
         box->font_family[0] = '\0';
+        box->background_image_url[0] = '\0';
         box->color_r = 0.0;
         box->color_g = 0.0;
         box->color_b = 0.0;
@@ -502,8 +504,35 @@ static bool layout_is_block_flow(CssDisplay display) {
            display == CSS_DISPLAY_GRID;
 }
 
+static bool css_parse_url_value(const char *value, char *out, size_t out_size)
+{
+    out[0] = '\0';
+    if (!value || !*value) return false;
+    while (*value && isspace((unsigned char)*value)) value++;
+    if (strncasecmp(value, "url(", 4) != 0) {
+        if (strcasecmp(value, "none") == 0) return true;
+        return false;
+    }
+    value += 4;
+    while (*value && isspace((unsigned char)*value)) value++;
+    char quote = 0;
+    if (*value == '"' || *value == '\'') { quote = *value; value++; }
+    const char *end = value;
+    if (quote) {
+        while (*end && *end != quote) end++;
+    } else {
+        while (*end && *end != ')' && !isspace((unsigned char)*end)) end++;
+    }
+    size_t len = (size_t)(end - value);
+    if (len >= out_size) len = out_size - 1;
+    memcpy(out, value, len);
+    out[len] = '\0';
+    return true;
+}
+
 static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
-                                     double parent_width, double viewport_width)
+                                     double parent_width, double viewport_width,
+                                     const char *base_url)
 {
     const char *prop = decl->property;
     const char *value = decl->value;
@@ -589,6 +618,17 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     } else if (strcasecmp(prop, "background-color") == 0) {
         css_parse_color(value, &box->background_color_r, &box->background_color_g,
                         &box->background_color_b, &box->background_color_a);
+    } else if (strcasecmp(prop, "background-image") == 0) {
+        char url[1024];
+        if (css_parse_url_value(value, url, sizeof(url)) && url[0]) {
+            char *abs = layout_resolve_url(base_url, url);
+            if (abs) {
+                snprintf(box->background_image_url, sizeof(box->background_image_url), "%s", abs);
+                free(abs);
+            }
+        } else {
+            box->background_image_url[0] = '\0';
+        }
     } else if (strcasecmp(prop, "font-size") == 0) {
         box->font_size = css_parse_length(value, parent_width, viewport_width);
         if (box->font_size <= 0.0) box->font_size = 16.0;
@@ -606,14 +646,15 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
 }
 
 static void layout_apply_inline_style(LayoutBox *box, HtmlNode *node,
-                                      double parent_width, double viewport_width)
+                                      double parent_width, double viewport_width,
+                                      const char *base_url)
 {
     for (HtmlAttribute *attr = node->attributes; attr; attr = attr->next) {
         if (strcasecmp(attr->name, "style") != 0) continue;
         int count = 0;
         CssDeclaration *decls = css_parse_inline_style(attr->value, &count);
         for (int i = 0; i < count; i++) {
-            layout_apply_declaration(box, &decls[i], parent_width, viewport_width);
+            layout_apply_declaration(box, &decls[i], parent_width, viewport_width, base_url);
         }
         css_declarations_free(decls, count);
     }
@@ -662,7 +703,11 @@ static char* layout_resolve_url(const char *base_url, const char *href) {
     if (href[0] == '/') {
         const char *base = base_url && base_url[0] ? base_url : "https://www.youtube.com";
         char buf[2048];
-        snprintf(buf, sizeof(buf), "%s%s", base, href);
+        if (base[strlen(base) - 1] == '/') {
+            snprintf(buf, sizeof(buf), "%s%s", base, href + 1);
+        } else {
+            snprintf(buf, sizeof(buf), "%s%s", base, href);
+        }
         return strdup(buf);
     }
     const char *base = base_url && base_url[0] ? base_url : "https://www.youtube.com/";
@@ -816,13 +861,15 @@ static void layout_apply_stylesheet_node(LayoutContext *ctx, int idx,
         qsort(applied, (size_t)count, sizeof(CssAppliedDecl), css_applied_decl_compare);
         for (int d = 0; d < count; d++) {
             layout_apply_declaration(box, applied[d].decl,
-                                     ctx->viewport_width, ctx->viewport_width);
+                                     ctx->viewport_width, ctx->viewport_width,
+                                     ctx->base_url);
         }
     }
     free(applied);
 
     /* Inline styles override stylesheet rules. */
-    layout_apply_inline_style(box, node, ctx->viewport_width, ctx->viewport_width);
+    layout_apply_inline_style(box, node, ctx->viewport_width, ctx->viewport_width,
+                              ctx->base_url);
 }
 
 typedef struct StyleApplyChunk {
@@ -877,8 +924,7 @@ static bool layout_apply_stylesheets_parallel(LayoutContext *ctx, LayoutStyleShe
 static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
 {
     LayoutStyleSheetList list = {0};
-    const char *base_url = "https://www.youtube.com/";
-    layout_collect_document_stylesheets(ctx, &list, base_url);
+    layout_collect_document_stylesheets(ctx, &list, ctx->base_url);
     if (sheet) layout_sheet_list_add(&list, sheet);
 
     if (list.count == 0) {
@@ -887,7 +933,8 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
             LayoutBox *box = layout_box(ctx, i);
             HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx);
             if (node && node->type == HTML_NODE_ELEMENT) {
-                layout_apply_inline_style(box, node, ctx->viewport_width, ctx->viewport_width);
+                layout_apply_inline_style(box, node, ctx->viewport_width, ctx->viewport_width,
+                                          ctx->base_url);
             }
         }
     } else {
@@ -1559,6 +1606,9 @@ bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
     if (!css_layout_tree_build(ctx, doc)) return false;
     ctx->viewport_width = viewport_width;
     ctx->viewport_height = viewport_height;
+    const char *default_base = "https://www.youtube.com/";
+    strncpy(ctx->base_url, default_base, sizeof(ctx->base_url) - 1);
+    ctx->base_url[sizeof(ctx->base_url) - 1] = '\0';
     bool ok = css_layout_document(ctx, sheet);
     if (!ok) css_layout_tree_free(ctx);
     return ok;

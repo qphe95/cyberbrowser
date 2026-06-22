@@ -56,6 +56,7 @@ set(BE_SOURCES
     src/css_layout.cpp
     src/display_list.cpp
     src/text_shaper.cpp
+    src/image_cache.cpp
     src/lockfree_hash_table.cpp
     src/url_analyzer.c
     src/tls_client.c

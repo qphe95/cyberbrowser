@@ -4,7 +4,9 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
 #include "test_runner.h"
+#include "image_cache.h"
 #include "html_dom.h"
 #include "css_parser.h"
 #include "css_layout.h"
@@ -126,6 +128,98 @@ TEST(test_layout_display_list) {
     return true;
 }
 
+static bool write_minimal_bmp(const char *path)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    /* 1x1 24-bit BMP */
+    uint8_t file_header[14] = {
+        'B', 'M',
+        58, 0, 0, 0,       /* file size */
+        0, 0, 0, 0,
+        54, 0, 0, 0        /* pixel offset */
+    };
+    uint8_t dib_header[40] = {
+        40, 0, 0, 0,
+        1, 0, 0, 0,        /* width */
+        1, 0, 0, 0,        /* height */
+        1, 0,              /* planes */
+        24, 0,             /* bpp */
+        0, 0, 0, 0,        /* compression */
+        4, 0, 0, 0,        /* image size */
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 0
+    };
+    uint8_t pixel[4] = { 0, 0, 255, 0 }; /* BGR + pad */
+    fwrite(file_header, 1, sizeof(file_header), f);
+    fwrite(dib_header, 1, sizeof(dib_header), f);
+    fwrite(pixel, 1, sizeof(pixel), f);
+    fclose(f);
+    return true;
+}
+
+TEST(test_layout_background_image_url) {
+    const char *html = "<html><body><div style=\"width:100px; height:50px; background-image:url(/red.png)\"></div></body></html>";
+    HtmlDocument *doc = html_parse(html, strlen(html));
+    ASSERT_TRUE(doc != NULL);
+
+    LayoutContext ctx;
+    ASSERT_TRUE(css_layout_run(&ctx, doc, NULL, 800.0, 600.0));
+
+    HtmlNode *div = html_document_get_element_by_tag(doc, "div");
+    ASSERT_TRUE(div != NULL);
+    int div_idx = po_array_index_from_payload(&doc->array, div);
+    LayoutBox *box = css_layout_box_for_node(&ctx, div_idx);
+    ASSERT_TRUE(box != NULL);
+    ASSERT_STR_EQ("https://www.youtube.com/red.png", box->background_image_url);
+
+    css_layout_tree_free(&ctx);
+    html_document_free(doc);
+    return true;
+}
+
+TEST(test_layout_img_display_list) {
+    const char *bmp_name = "test_image_tmp.bmp";
+    ASSERT_TRUE(write_minimal_bmp(bmp_name));
+
+    const char *html = "<html><body><img src=\"test_image_tmp.bmp\" style=\"width:32px; height:32px\"></body></html>";
+    HtmlDocument *doc = html_parse(html, strlen(html));
+    ASSERT_TRUE(doc != NULL);
+
+    LayoutContext ctx;
+    ASSERT_TRUE(css_layout_run(&ctx, doc, NULL, 800.0, 600.0));
+    /* Use an empty base URL so the relative image path is passed through to the
+     * local image cache as-is. */
+    ctx.base_url[0] = '\0';
+
+    ImageCache *cache = image_cache_create();
+    ASSERT_TRUE(cache != NULL);
+    display_list_set_image_cache(cache);
+
+    DisplayList dl;
+    display_list_init(&dl);
+    ASSERT_TRUE(css_layout_build_display_list(&ctx, &dl));
+
+    bool found_image = false;
+    for (int i = 0; i < dl.count; i++) {
+        if (dl.cmds[i].type == DL_IMAGE) {
+            found_image = true;
+            ASSERT_TRUE(dl.cmds[i].u.image.image_handle >= 0);
+        }
+    }
+    ASSERT_TRUE(found_image);
+
+    display_list_free(&dl);
+    display_list_set_image_cache(NULL);
+    image_cache_destroy(cache);
+    css_layout_tree_free(&ctx);
+    html_document_free(doc);
+    remove(bmp_name);
+    return true;
+}
+
 TEST(test_text_shaper_basic) {
     const char *paths[] = {
         "../../third_party/fonts/Roboto-Regular.ttf",
@@ -166,5 +260,7 @@ extern "C" void run_css_layout_tests(void) {
     RUN_TEST(test_layout_stylesheet);
     RUN_TEST(test_layout_auto_height);
     RUN_TEST(test_layout_display_list);
+    RUN_TEST(test_layout_background_image_url);
+    RUN_TEST(test_layout_img_display_list);
     RUN_TEST(test_text_shaper_basic);
 }

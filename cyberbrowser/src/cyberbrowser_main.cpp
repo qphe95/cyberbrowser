@@ -23,6 +23,7 @@
 #include "css_layout.h"
 #include "display_list.h"
 #include "text_shaper.h"
+#include "image_cache.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -324,6 +325,49 @@ static void draw_glyph(RGB *pixels, int img_width, int img_height,
     }
 }
 
+static void draw_image(RGB *pixels, int img_width, int img_height,
+                       ImageCache *cache, const DisplayListCmd *cmd)
+{
+    int src_w = 0, src_h = 0, src_ch = 0;
+    uint8_t *src = NULL;
+    if (!image_cache_get(cache, cmd->u.image.image_handle,
+                         &src_w, &src_h, &src_ch, &src)) {
+        return;
+    }
+    if (src_w <= 0 || src_h <= 0) return;
+
+    int dx0 = (int)floorf(cmd->x);
+    int dy0 = (int)floorf(cmd->y);
+    int dx1 = (int)floorf(cmd->x + cmd->w);
+    int dy1 = (int)floorf(cmd->y + cmd->h);
+    if (dx0 < 0) dx0 = 0;
+    if (dy0 < 0) dy0 = 0;
+    if (dx1 > img_width) dx1 = img_width;
+    if (dy1 > img_height) dy1 = img_height;
+    if (dx0 >= dx1 || dy0 >= dy1) return;
+
+    for (int dy = dy0; dy < dy1; dy++) {
+        float v = (cmd->h > 0.0f) ? ((float)(dy - dy0) / cmd->h) : 0.0f;
+        int sy = (int)floorf(v * (float)src_h);
+        if (sy < 0) sy = 0;
+        if (sy >= src_h) sy = src_h - 1;
+        for (int dx = dx0; dx < dx1; dx++) {
+            float u = (cmd->w > 0.0f) ? ((float)(dx - dx0) / cmd->w) : 0.0f;
+            int sx = (int)floorf(u * (float)src_w);
+            if (sx < 0) sx = 0;
+            if (sx >= src_w) sx = src_w - 1;
+            int si = (sy * src_w + sx) * 4;
+            uint8_t a = src[si + 3];
+            if (a == 0) continue;
+            pixels[dy * img_width + dx] = blend_over(pixels[dy * img_width + dx],
+                                                     src[si] / 255.0f,
+                                                     src[si + 1] / 255.0f,
+                                                     src[si + 2] / 255.0f,
+                                                     a / 255.0f);
+        }
+    }
+}
+
 static bool render_display_list_to_jpg(const DisplayList *dl, const char *path,
                                        int img_width, int img_height) {
     size_t pixel_count = (size_t)img_width * (size_t)img_height;
@@ -368,6 +412,9 @@ static bool render_display_list_to_jpg(const DisplayList *dl, const char *path,
             }
         } else if (cmd->type == DL_GLYPH && atlas) {
             draw_glyph(pixels, img_width, img_height, atlas, atlas_w, atlas_h, cmd);
+        } else if (cmd->type == DL_IMAGE) {
+            ImageCache *cache = display_list_get_image_cache();
+            if (cache) draw_image(pixels, img_width, img_height, cache, cmd);
         }
     }
 
@@ -448,6 +495,9 @@ int main(int argc, char *argv[]) {
 
         DisplayList dl;
         display_list_init(&dl);
+        ImageCache *image_cache = image_cache_create();
+        display_list_set_image_cache(image_cache);
+
         const char *font_paths[] = {
             "third_party/fonts/Roboto-Regular.ttf",
             "../third_party/fonts/Roboto-Regular.ttf",
@@ -472,6 +522,8 @@ int main(int argc, char *argv[]) {
             printf("WARNING: css_layout_build_display_list() failed\n");
         }
         display_list_free(&dl);
+        display_list_set_image_cache(NULL);
+        image_cache_destroy(image_cache);
         css_layout_tree_free(&layout);
     } else {
         printf("WARNING: css_layout_run() failed\n");

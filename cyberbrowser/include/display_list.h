@@ -21,6 +21,7 @@ typedef enum {
     DL_RECT,
     DL_BORDER,
     DL_GLYPH,
+    DL_IMAGE,
 } DisplayListCmdType;
 
 typedef struct {
@@ -34,12 +35,18 @@ typedef struct {
 } DisplayGlyph;
 
 typedef struct {
+    int image_handle;
+    float u0, v0, u1, v1;
+} DisplayImage;
+
+typedef struct {
     DisplayListCmdType type;
     float x, y, w, h;
     float r, g, b, a;
     union {
         DisplayBorder border;
         DisplayGlyph glyph;
+        DisplayImage image;
     } u;
 } DisplayListCmd;
 
@@ -60,6 +67,15 @@ bool display_list_add_glyph(DisplayList *dl, float x, float y, float w, float h,
                             float u0, float v0, float u1, float v1,
                             uint32_t glyph_index,
                             float r, float g, float b, float a);
+bool display_list_add_image(DisplayList *dl, float x, float y, float w, float h,
+                            int image_handle,
+                            float u0, float v0, float u1, float v1);
+
+typedef struct ImageCache ImageCache;
+
+/* Set the image cache used to resolve background images and <img> elements. */
+void display_list_set_image_cache(ImageCache *cache);
+ImageCache *display_list_get_image_cache(void);
 
 /* Set a TTF font to use when rendering text nodes. Pass NULL to unload. */
 bool display_list_set_default_font(const char *ttf_path, float size_pixels);

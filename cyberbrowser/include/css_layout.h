@@ -99,6 +99,9 @@ typedef struct LayoutBox {
     double font_size;
     char   font_family[64];
 
+    /* Background image URL, if any. */
+    char   background_image_url[256];
+
     CssDisplay display;
     CssVisibility visibility;
     CssFlexDirection flex_direction;
@@ -164,6 +167,9 @@ typedef struct LayoutContext {
     /* Viewport / initial containing block dimensions. */
     double viewport_width;
     double viewport_height;
+
+    /* Base URL used to resolve relative image / stylesheet URLs. */
+    char base_url[512];
 } LayoutContext;
 
 /* Build a flat layout tree from a parsed HTML document. */

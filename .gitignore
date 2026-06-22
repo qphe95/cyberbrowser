@@ -17,6 +17,7 @@ Thumbs.db
 # Build/distribution directories
 cyberbrowser/build/
 cyberbrowser/build-mingw/
+cyberbrowser/build-mingw2/
 cyberbrowser/build-mingw-asan/
 cyberbrowser/build-msvc/
 cyberbrowser/dist/
