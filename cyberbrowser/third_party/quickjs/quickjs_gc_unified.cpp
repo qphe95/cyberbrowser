@@ -1784,16 +1784,28 @@ static GCHandle allocate_handle_slot(void) {
     
     /* Need to allocate a new slot - atomically increment handle_count */
     GCBuffer *active = gc_active_buffer();
-    if (active->handle_count >= active->handle_capacity) {
+    uint32_t cap = active->handle_capacity;
+    /* Grow early (at 87.5% full) to avoid racing against handle exhaustion
+     * when a burst of allocations follows a long sequence of frees. */
+    if (active->handle_count + (cap >> 3) >= cap) {
         if (!grow_handle_tables()) {
             fprintf(stderr, "[FATAL] Out of handles (count=%u, capacity=%u) - grow failed\n", 
                     active->handle_count, active->handle_capacity);
             return GC_HANDLE_NULL;
         }
         GC_LOGI("Grew handle tables, now capacity=%u", active->handle_capacity);
+        cap = active->handle_capacity;
     }
     
     handle = atomic_fetch_add_u32(&active->handle_count, 1);
+    
+    /* Defensive: if we somehow exceeded capacity after the atomic increment,
+     * the table has already been grown above, so this should not happen. */
+    if (handle >= cap) {
+        fprintf(stderr, "[FATAL] Handle overflow after allocation (handle=%u, capacity=%u)\n",
+                handle, cap);
+        return GC_HANDLE_NULL;
+    }
     
     /* Also ensure the other buffer's handle_count stays in sync */
     GCBuffer *other = gc_inactive_buffer();
@@ -3117,6 +3129,20 @@ void gc_remove_root(GCHandle handle) {
 size_t gc_used_bytes(void) {
     if (!g_gc.initialized) return 0;
     return gc_active_buffer()->bump_offset;
+}
+
+uint32_t gc_get_handle_count(void) {
+    if (!g_gc.initialized) return 0;
+    return gc_active_buffer()->handle_count;
+}
+
+uint32_t gc_get_handle_capacity(void) {
+    if (!g_gc.initialized) return 0;
+    return gc_active_buffer()->handle_capacity;
+}
+
+size_t gc_get_used_bytes(void) {
+    return gc_used_bytes();
 }
 
 size_t gc_available_bytes(void) {

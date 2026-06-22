@@ -1242,6 +1242,36 @@ public:
         if (p) p->instruction_counter = counter;
     }
     
+    uint32_t instruction_counter_init() const {
+        JSRuntime* p = get_ptr();
+        return p ? p->instruction_counter_init : 0;
+    }
+    
+    void set_instruction_counter_init(uint32_t init) {
+        JSRuntime* p = get_ptr();
+        if (p) p->instruction_counter_init = init;
+    }
+    
+    JSInterruptHandler *interrupt_handler() const {
+        JSRuntime* p = get_ptr();
+        return p ? p->interrupt_handler : nullptr;
+    }
+    
+    void set_interrupt_handler(JSInterruptHandler *handler) {
+        JSRuntime* p = get_ptr();
+        if (p) p->interrupt_handler = handler;
+    }
+    
+    void *interrupt_opaque() const {
+        JSRuntime* p = get_ptr();
+        return p ? p->interrupt_opaque : nullptr;
+    }
+    
+    void set_interrupt_opaque(void *opaque) {
+        JSRuntime* p = get_ptr();
+        if (p) p->interrupt_opaque = opaque;
+    }
+    
     /* Job queue handle access - atomic */
     GCHandle job_queue_handle() const {
         JSRuntime* p = get_ptr();

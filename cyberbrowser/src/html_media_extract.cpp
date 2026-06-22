@@ -1005,10 +1005,11 @@ static void pump_timers_and_jobs_after_fetch(void) {
     }
 }
 
-// Some third-party polyfills (and the very large YouTube base application
-// bundle) currently leave our emulator's JS heap in a state where a later GC
-// cycle crashes.  Skip them by URL substring so the surrounding inline scripts
-// and smaller auxiliary bundles still execute in document order.
+// Some third-party polyfills are not safe to execute inside this emulator:
+// they monkey-patch native DOM prototypes and corrupt state.  Skip only those
+// known-bad polyfills; the large YouTube application bundles (kevlar_base,
+// ytmainappweb) must be allowed to run because they carry player bootstrap
+// logic that the page expects.
 static bool is_unsafe_external_script(const char *url) {
     if (!url) return false;
     static const char *skip_patterns[] = {
@@ -1016,10 +1017,6 @@ static bool is_unsafe_external_script(const char *url) {
         "webcomponents-sd",
         "webcomponents-sd-shadycss",
         "webcomponents-all-noPatch",
-        // (Previously the ~10 MB kevlar_base bundle was skipped here due to a
-        // latent GC crash.  The unified GC now marks opaque handles owned by
-        // JS objects, which keeps the browser API C data alive, so this entry
-        // has been removed.)
         NULL
     };
     for (const char **p = skip_patterns; *p; p++) {
@@ -1061,25 +1058,34 @@ extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_re
                 scripts[i].url[0] = '\0';
                 continue;
             }
+
+            /* Skip known-unsafe / unnecessarily large bundles before fetching. */
+            if (is_unsafe_external_script(scripts[i].url)) {
+                LOG_WARN("Skipping unsafe external script [%d]: %.200s",
+                         scripts[i].parse_order, scripts[i].url);
+                scripts[i].url[0] = '\0';
+                continue;
+            }
+
             HttpBuffer buffer = {0};
             char error[256] = {0};
             LOG_INFO("Fetching external script [%d]: %.80s",
                      scripts[i].parse_order, scripts[i].url);
-            
+
             bool result = http_get_to_memory(scripts[i].url, &buffer, error, sizeof(error));
             if (result && buffer.data && buffer.size > 0) {
                 const char *content = buffer.data;
-                while (*content && (isspace((unsigned char)*content) || 
-                       (unsigned char)*content == 0xEF || 
-                       (unsigned char)*content == 0xBB || 
+                while (*content && (isspace((unsigned char)*content) ||
+                       (unsigned char)*content == 0xEF ||
+                       (unsigned char)*content == 0xBB ||
                        (unsigned char)*content == 0xBF)) {
                     content++;
                 }
-                
+
                 bool is_html = (strncasecmp(content, "<!doctype", 9) == 0 ||
                                strncasecmp(content, "<html", 5) == 0 ||
                                strncasecmp(content, "<?xml", 5) == 0);
-                
+
                 if (is_html) {
                     LOG_WARN("Script [%d] is HTML not JS, skipping", scripts[i].parse_order);
                     http_free_buffer(&buffer);
@@ -1087,11 +1093,6 @@ extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_re
                 } else if (buffer.size > MAX_EXTERNAL_SCRIPT_SIZE) {
                     LOG_WARN("Script [%d] is %zu bytes, skipping external script execution",
                              scripts[i].parse_order, buffer.size);
-                    http_free_buffer(&buffer);
-                    scripts[i].url[0] = '\0';
-                } else if (is_unsafe_external_script(scripts[i].url)) {
-                    LOG_WARN("Skipping unsafe external script [%d]: %.200s",
-                             scripts[i].parse_order, scripts[i].url);
                     http_free_buffer(&buffer);
                     scripts[i].url[0] = '\0';
                 } else {
@@ -1105,7 +1106,7 @@ extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_re
                 if (buffer.data) http_free_buffer(&buffer);
                 scripts[i].url[0] = '\0';
             }
-            
+
             // Pump timers and microtasks after each network response
             pump_timers_and_jobs_after_fetch();
         }
@@ -1196,188 +1197,6 @@ static bool extract_yt_video_id(const char *url, char *out_id, size_t out_len) {
 
 // Execute player scripts and get captured URLs
 // Returns number of URLs captured, fills urls array
-static int execute_scripts_and_get_urls(const char *html, char urls[][2048], int max_urls,
-                                        JsExecResult *outResult) {
-    if (!html || !urls || max_urls <= 0) return 0;
-    
-    LOG_INFO("Executing player scripts to capture URLs...");
-    
-    // Extract all scripts in parse order
-    ScriptInfo scripts[MAX_SCRIPTS];
-    memset(scripts, 0, sizeof(scripts));
-    int script_count = extract_scripts_in_order(html, scripts, MAX_SCRIPTS);
-    
-    if (script_count == 0) {
-        LOG_ERROR("No scripts found in HTML");
-        return 0;
-    }
-    
-    LOG_INFO("Found %d scripts to execute", script_count);
-    
-    // Fetch external scripts
-    for (int i = 0; i < script_count; i++) {
-        if (scripts[i].type == SCRIPT_TYPE_EXTERNAL) {
-            HttpBuffer buffer;
-            memset(&buffer, 0, sizeof(HttpBuffer));
-            
-            char error[256];
-            LOG_INFO("Fetching external script [%d]: %.80s", 
-                     scripts[i].parse_order, scripts[i].url);
-            
-            bool result = http_get_to_memory(scripts[i].url, &buffer, error, sizeof(error));
-            if (result && buffer.data && buffer.size > 0) {
-                // Validate it's actually JavaScript, not HTML
-                const char *content = buffer.data;
-                while (*content && (isspace((unsigned char)*content) || 
-                       (unsigned char)*content == 0xEF || 
-                       (unsigned char)*content == 0xBB || 
-                       (unsigned char)*content == 0xBF)) {
-                    content++;
-                }
-                
-                bool is_html = (strncasecmp(content, "<!doctype", 9) == 0 ||
-                               strncasecmp(content, "<html", 5) == 0 ||
-                               strncasecmp(content, "<?xml", 5) == 0);
-                
-                if (is_html) {
-                    LOG_WARN("Script [%d] is HTML not JS, skipping", scripts[i].parse_order);
-                    http_free_buffer(&buffer);
-                    scripts[i].url[0] = '\0';  // Mark as invalid
-                } else {
-                    scripts[i].content = buffer.data;
-                    scripts[i].content_len = buffer.size;
-                    LOG_INFO("Loaded external script [%d]: %zu bytes", 
-                             scripts[i].parse_order, buffer.size);
-                }
-            } else {
-                LOG_WARN("Failed to fetch script [%d]: %s", scripts[i].parse_order, error);
-                if (buffer.data) http_free_buffer(&buffer);
-                scripts[i].url[0] = '\0';  // Mark as invalid
-            }
-        }
-    }
-    
-    // Build execution arrays
-    const char *exec_scripts[MAX_SCRIPTS];
-    size_t exec_script_lens[MAX_SCRIPTS];
-    int exec_count = 0;
-    
-    for (int i = 0; i < script_count && exec_count < MAX_SCRIPTS; i++) {
-        for (int j = 0; j < script_count; j++) {
-            if (scripts[j].parse_order == i) {
-                // Skip invalid external scripts
-                if (scripts[j].type == SCRIPT_TYPE_EXTERNAL && scripts[j].url[0] == '\0') {
-                    break;
-                }
-                // Skip empty inline scripts
-                if (scripts[j].type == SCRIPT_TYPE_INLINE && 
-                    (!scripts[j].content || scripts[j].content_len == 0)) {
-                    break;
-                }
-                // Skip JSON-LD structured data (not JavaScript)
-                if (scripts[j].type == SCRIPT_TYPE_JSON_LD) {
-                    LOG_INFO("Skipping JSON-LD script [%d] during JS execution", scripts[j].parse_order);
-                    break;
-                }
-                exec_scripts[exec_count] = scripts[j].content;
-                exec_script_lens[exec_count] = scripts[j].content_len;
-                exec_count++;
-                break;
-            }
-        }
-    }
-    
-    if (exec_count == 0) {
-        LOG_ERROR("No valid scripts to execute");
-        free_script_infos(scripts, script_count);
-        return 0;
-    }
-    
-    LOG_INFO("Executing %d scripts...", exec_count);
-    log_to_file("html_media", "Executing %d scripts...", exec_count);
-    
-    // Check for ytcfg usage patterns in each script
-    for (int i = 0; i < exec_count; i++) {
-        if (exec_scripts[i] && exec_script_lens[i] > 0) {
-            if (strstr(exec_scripts[i], "ytcfg.set") || strstr(exec_scripts[i], "ytcfg.get")) {
-                LOG_INFO("Script %d uses ytcfg (len=%zu)", i, exec_script_lens[i]);
-            }
-            if (strstr(exec_scripts[i], "var ytcfg=") || strstr(exec_scripts[i], "window.ytcfg=")) {
-                LOG_INFO("Script %d DEFINES ytcfg (len=%zu)", i, exec_script_lens[i]);
-                // Log the full ytcfg definition script for debugging
-                LOG_INFO("Script %d FULL CONTENT:\n%.*s", i, (int)exec_script_lens[i], exec_scripts[i]);
-            }
-        }
-    }
-    
-    // Log first 100 chars of each script for debugging
-    for (int i = 0; i < exec_count; i++) {
-        if (exec_scripts[i] && exec_script_lens[i] > 0) {
-            char preview[101];
-            size_t len = exec_script_lens[i] < 100 ? exec_script_lens[i] : 100;
-            memcpy(preview, exec_scripts[i], len);
-            preview[len] = '\0';
-            // Replace newlines with spaces
-            for (size_t j = 0; j < len; j++) {
-                if (preview[j] == '\n' || preview[j] == '\r') preview[j] = ' ';
-            }
-            LOG_INFO("Script %d preview: %.100s%s", i, preview, exec_script_lens[i] > 100 ? "..." : "");
-        }
-    }
-    
-    JsExecResult js_result_local;
-    JsExecResult *js_result = outResult ? outResult : &js_result_local;
-    memset(js_result, 0, sizeof(JsExecResult));
-    
-    log_to_file("html_media", "About to call js_quickjs_exec_scripts...");
-    LOG_INFO("About to call js_quickjs_exec_scripts...");
-    
-    bool js_success = js_quickjs_exec_scripts(
-        exec_scripts, exec_script_lens, exec_count,
-        html, js_result
-    );
-    
-    log_to_file("html_media", "js_quickjs_exec_scripts returned, success=%d", js_success);
-    LOG_INFO("js_quickjs_exec_scripts returned, success=%d", js_success);
-    
-    free_script_infos(scripts, script_count);
-    
-    if (!js_success) {
-        LOG_ERROR("JavaScript execution failed");
-        return 0;
-    }
-    
-    LOG_INFO("JavaScript execution successful, captured %d URLs", js_result->captured_url_count);
-    log_to_file("html_media", "JS execution complete, captured %d URLs", js_result->captured_url_count);
-    
-    // Copy captured URLs to output array
-    int count = 0;
-    int encrypted_count = 0;
-    int decrypted_count = 0;
-    for (int i = 0; i < js_result->captured_url_count && count < max_urls; i++) {
-        log_to_file("html_media", "URL %d: %s", i, js_result->captured_urls[i]);
-        // Only keep googlevideo.com URLs (the actual media URLs)
-        if (strstr(js_result->captured_urls[i], "googlevideo.com")) {
-            strncpy(urls[count], js_result->captured_urls[i], 2047);
-            urls[count][2047] = '\0';
-            // Check if URL has signature (decrypted) or needs decryption
-            if (strstr(urls[count], "sig=") || strstr(urls[count], "signature=")) {
-                LOG_INFO("Captured DECRYPTED media URL %d: %.100s...", count, urls[count]);
-                decrypted_count++;
-            } else if (strstr(urls[count], "signatureCipher=") || strstr(urls[count], "sc=")) {
-                LOG_INFO("Captured ENCRYPTED media URL %d: %.100s...", count, urls[count]);
-                encrypted_count++;
-            } else {
-                LOG_INFO("Captured media URL %d (no sig): %.100s...", count, urls[count]);
-            }
-            count++;
-        }
-    }
-    
-    LOG_INFO("Found %d googlevideo.com URLs (%d decrypted, %d encrypted)", count, decrypted_count, encrypted_count);
-    return count;
-}
-
 /* Extract visitorData from HTML by executing inline scripts in QuickJS.
  * This performs true browser emulation: the watch page scripts run and populate
  * window.ytcfg, then we read ytcfg.get('VISITOR_DATA') from the live JS objects.
@@ -1580,6 +1399,197 @@ extern "C" bool html_select_best_media_url(const JsExecResult *result,
     return true;
 }
 
+/* Find the URL of YouTube's base.js player bundle in the HTML.
+ * Returns true if a base.js URL was found and written to out_url. */
+static bool find_base_js_url(const char *html, char *out_url, size_t out_len) {
+    if (!html || !out_url || out_len == 0) return false;
+    out_url[0] = '\0';
+
+    const char *needle = "/base.js";
+    const char *p = html;
+    while ((p = strstr(p, needle)) != NULL) {
+        const char *end = p + strlen(needle);
+        const char *start = p;
+        while (start > html && start[-1] != '"' && start[-1] != '\'' && start[-1] != ' ') start--;
+        size_t len = (size_t)(end - start);
+        if (len > 0 && len < out_len) {
+            memcpy(out_url, start, len);
+            out_url[len] = '\0';
+            /* Resolve relative URL */
+            if (out_url[0] == '/' && out_url[1] != '/') {
+                char tmp[2048];
+                snprintf(tmp, sizeof(tmp), "https://www.youtube.com%s", out_url);
+                strncpy(out_url, tmp, out_len - 1);
+                out_url[out_len - 1] = '\0';
+            }
+            return true;
+        }
+        p = end;
+    }
+    return false;
+}
+
+/* Execute YouTube's base.js in the current JS context so that _yt_player is
+ * defined. Returns true if _yt_player is present after execution. */
+static bool load_and_execute_base_js(JSContextHandle ctx, const char *html) {
+    if (!ctx || !html) return false;
+
+    char base_js_url[2048] = {0};
+    if (!find_base_js_url(html, base_js_url, sizeof(base_js_url))) {
+        LOG_WARN("base.js URL not found in HTML");
+        return false;
+    }
+    LOG_INFO("Fetching base.js from %s", base_js_url);
+
+    HttpBuffer buf = {0};
+    char err[512] = {0};
+    if (!http_get_to_memory(base_js_url, &buf, err, sizeof(err))) {
+        LOG_WARN("Failed to fetch base.js: %s", err);
+        return false;
+    }
+
+    GCValue r = JS_Eval(ctx, buf.data, buf.size, "<base.js>", JS_EVAL_TYPE_GLOBAL);
+    http_free_buffer(&buf);
+    if (JS_IsException(r)) {
+        LOG_WARN("base.js execution threw exception");
+        return false;
+    }
+
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue ytp = JS_GetPropertyStr(ctx, global, "_yt_player");
+    if (JS_IsUndefined(ytp) || JS_IsNull(ytp)) {
+        LOG_WARN("_yt_player not defined after base.js execution");
+        return false;
+    }
+    return true;
+}
+
+/* Decrypt YouTube signatureCipher strings using the _yt_player decryptor.
+ * The input json_cstr is the stringified ytInitialPlayerResponse.
+ * Decrypted URLs are appended to js_result. Returns true if at least one
+ * decrypted URL was produced. */
+static bool decrypt_youtube_streaming_urls(JSContextHandle ctx, const char *html,
+                                           const char *json_cstr,
+                                           JsExecResult *js_result) {
+    if (!ctx || !json_cstr || !js_result) return false;
+
+    /* If no signatureCiphers are present, there is nothing to decrypt. */
+    if (!strstr(json_cstr, "signatureCipher")) {
+        return false;
+    }
+
+    /* Ensure _yt_player is loaded. */
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue ytp = JS_GetPropertyStr(ctx, global, "_yt_player");
+    if (JS_IsUndefined(ytp) || JS_IsNull(ytp)) {
+        if (!load_and_execute_base_js(ctx, html)) {
+            return false;
+        }
+    }
+
+    const char *decrypt_js =
+        "(function() {"
+        "  var result = { urls: [], error: null, fnName: null };"
+        "  try {"
+        "    var decryptFn = null;"
+        "    var fnName = null;"
+        "    function isDecryptFn(f) {"
+        "      if (typeof f !== 'function') return false;"
+        "      var s = f.toString();"
+        "      return (s.indexOf('split') > -1 || s.indexOf('reverse') > -1 || s.indexOf('slice') > -1 || s.indexOf('splice') > -1) &&"
+        "             s.length > 30 && s.length < 3000 && s.indexOf('native code') === -1 &&"
+        "             s.indexOf('class') !== 0 && s.indexOf('function') === 0;"
+        "    }"
+        "    if (typeof window._yt_player !== 'undefined') {"
+        "      var keys1 = Object.keys(_yt_player);"
+        "      for (var i = 0; i < keys1.length && i < 600 && !decryptFn; i++) {"
+        "        try {"
+        "          var v1 = _yt_player[keys1[i]];"
+        "          if (isDecryptFn(v1)) { decryptFn = v1; fnName = '_yt_player.' + keys1[i]; break; }"
+        "          if (typeof v1 === 'object' && v1 !== null && !decryptFn) {"
+        "            var keys2 = Object.keys(v1);"
+        "            for (var j = 0; j < keys2.length && j < 100 && !decryptFn; j++) {"
+        "              try {"
+        "                var v2 = v1[keys2[j]];"
+        "                if (isDecryptFn(v2)) { decryptFn = v2; fnName = '_yt_player.' + keys1[i] + '.' + keys2[j]; break; }"
+        "              } catch(e) {}"
+        "            }"
+        "          }"
+        "        } catch(e) {}"
+        "      }"
+        "    }"
+        "    if (!decryptFn) { result.error = 'No decrypt function found'; return result; }"
+        "    result.fnName = fnName;"
+        "    var ytip = window.ytInitialPlayerResponse;"
+        "    if (!ytip || !ytip.streamingData) { result.error = 'No streamingData'; return result; }"
+        "    var formats = ytip.streamingData.formats || [];"
+        "    var adaptive = ytip.streamingData.adaptiveFormats || [];"
+        "    function processFormat(fmt) {"
+        "      if (fmt.signatureCipher) {"
+        "        var params = {};"
+        "        var parts = fmt.signatureCipher.split('&');"
+        "        for (var j = 0; j < parts.length; j++) {"
+        "          var kv = parts[j].split('=');"
+        "          if (kv.length === 2) {"
+        "            params[decodeURIComponent(kv[0])] = decodeURIComponent(kv[1]);"
+        "          }"
+        "        }"
+        "        if (params.s && params.url) {"
+        "          try {"
+        "            var sig = decryptFn(params.s);"
+        "            var sp = params.sp || 'sig';"
+        "            var url = params.url + '&' + sp + '=' + encodeURIComponent(sig);"
+        "            result.urls.push(url);"
+        "          } catch(e) { result.error = (result.error ? result.error + '; ' : '') + e.message; }"
+        "        }"
+        "      } else if (fmt.url) {"
+        "        result.urls.push(fmt.url);"
+        "      }"
+        "    }"
+        "    for (var i = 0; i < formats.length; i++) processFormat(formats[i]);"
+        "    for (var i = 0; i < adaptive.length; i++) processFormat(adaptive[i]);"
+        "  } catch(e) {"
+        "    result.error = (e && e.message) ? e.message : String(e);"
+        "  }"
+        "  return result;"
+        "})();";
+
+    GCValue r = JS_Eval(ctx, decrypt_js, strlen(decrypt_js), "<yt_decrypt>", JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(r)) {
+        LOG_WARN("Signature decryption JS threw exception");
+        return false;
+    }
+
+    GCValue err_val = JS_GetPropertyStr(ctx, r, "error");
+    const char *err_str = JS_ToCString(ctx, err_val);
+    if (err_str && err_str[0]) {
+        LOG_WARN("Signature decryption error: %s", err_str);
+    }
+
+    GCValue urls_val = JS_GetPropertyStr(ctx, r, "urls");
+    GCValue len_val = JS_GetPropertyStr(ctx, urls_val, "length");
+    int count = JS_VALUE_GET_INT(len_val);
+    bool added = false;
+    for (int i = 0; i < count && js_result->captured_url_count < JS_MAX_CAPTURED_URLS; i++) {
+        GCValue v = JS_GetPropertyUint32(ctx, urls_val, i);
+        const char *s = JS_ToCString(ctx, v);
+        if (s && strstr(s, "googlevideo.com")) {
+            strncpy(js_result->captured_urls[js_result->captured_url_count], s, JS_MAX_URL_LEN - 1);
+            js_result->captured_urls[js_result->captured_url_count][JS_MAX_URL_LEN - 1] = '\0';
+            js_result->captured_url_count++;
+            added = true;
+        }
+    }
+
+    GCValue fn_val = JS_GetPropertyStr(ctx, r, "fnName");
+    const char *fn_str = JS_ToCString(ctx, fn_val);
+    if (fn_str && fn_str[0]) {
+        LOG_INFO("YouTube decryptor: %s", fn_str);
+    }
+
+    return added;
+}
+
 /* Lightweight watch-page emulation: extract ytInitialPlayerResponse from the
  * HTML, evaluate the inline data script, and pick the best streaming URL from
  * streamingData.formats / adaptiveFormats. This avoids fetching and executing
@@ -1779,19 +1789,11 @@ extern "C" bool html_extract_yt_player_response_media(const char *html, bool pre
         scan = url_start;
     }
 
-    scan = json_cstr;
-    while ((scan = strstr(scan, "\"signatureCipher\":\"")) != NULL) {
-        const char *cipher_start = scan + 19;
-        const char *end = strchr(cipher_start, '"');
-        if (end) {
-            size_t len = (size_t)(end - cipher_start);
-            if (len > 0 && len < JS_MAX_URL_LEN && js_result.captured_url_count < JS_MAX_CAPTURED_URLS) {
-                memcpy(js_result.captured_urls[js_result.captured_url_count], cipher_start, len);
-                js_result.captured_urls[js_result.captured_url_count][len] = '\0';
-                js_result.captured_url_count++;
-            }
-        }
-        scan = cipher_start;
+    /* If encrypted signatureCipher streams are present, load base.js and
+     * decrypt them with the _yt_player decryptor. This produces real
+     * googlevideo.com URLs with a valid signature parameter. */
+    if (strstr(json_cstr, "\"signatureCipher\":\"")) {
+        decrypt_youtube_streaming_urls(g_js_context, html, json_cstr, &js_result);
     }
 
     if (js_result.captured_url_count == 0) {
@@ -1808,7 +1810,10 @@ extern "C" bool html_extract_yt_player_response_media(const char *html, bool pre
     return ok;
 }
 
-// Backward compatibility wrapper for html_extract_media_url
+// Backward compatibility wrapper for html_extract_media_url.
+// Uses the guarded html_execute_page_scripts path so the unprotected
+// execute_scripts_and_get_urls fallback cannot be forced to run the large
+// player bundle.
 bool html_extract_media_url(const char *html, HtmlMediaCandidate *outCandidate,
                             char *err, size_t errLen) {
     if (!html || !outCandidate) {
@@ -1822,14 +1827,10 @@ bool html_extract_media_url(const char *html, HtmlMediaCandidate *outCandidate,
     // Clear output
     memset(outCandidate, 0, sizeof(HtmlMediaCandidate));
 
-    // Execute scripts and capture URLs
-    char urls[32][2048];
     JsExecResult js_result;
     memset(&js_result, 0, sizeof(JsExecResult));
-    int url_count = execute_scripts_and_get_urls(html, urls, 32, &js_result);
-
-    if (url_count == 0) {
-        LOG_WARN("No URLs captured from script execution");
+    if (!html_execute_page_scripts(html, &js_result)) {
+        LOG_WARN("Page script execution failed or produced no URLs");
         if (err && errLen > 0) {
             strncpy(err, "No media URLs found", errLen - 1);
             err[errLen - 1] = '\0';

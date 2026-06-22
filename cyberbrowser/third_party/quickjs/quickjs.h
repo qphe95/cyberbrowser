@@ -1494,6 +1494,11 @@ void JS_SetHostPromiseRejectionTracker(JSRuntimeHandle rt, JSHostPromiseRejectio
 
 /* if can_block is TRUE, Atomics.wait() can be used */
 void JS_SetCanBlock(JSRuntimeHandle rt, JS_BOOL can_block);
+
+/* Interrupt handler: called periodically during execution. Return non-zero to
+ * stop execution and throw an InterruptError. */
+void JS_SetInterruptHandler(JSRuntimeHandle rt, JSInterruptHandler *handler, void *opaque);
+void JS_ResetInstructionCounter(JSRuntimeHandle rt, uint32_t count);
 /* select which debug info is stripped from the compiled code */
 #define JS_STRIP_SOURCE (1 << 0) /* strip source code */
 #define JS_STRIP_DEBUG  (1 << 1) /* strip all debug info including source code */

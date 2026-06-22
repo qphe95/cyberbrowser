@@ -1203,6 +1203,9 @@ struct JSContext {
 /* Forward declaration for the lock-free hash table used by the shape cache. */
 typedef struct LFHashTable LFHashTable;
 
+/* Interrupt handler callback type. Return non-zero to abort execution. */
+typedef int JSInterruptHandler(JSRuntimeHandle rt, void *opaque);
+
 struct JSRuntime {
     JSMallocState malloc_state;
     const char *rt_info;
@@ -1276,8 +1279,14 @@ struct JSRuntime {
     uint32_t shape_hash_count; /* approximate atomic entry count */
     void *user_opaque;
     
-    /* Instruction counter for GC triggering */
+    /* Instruction counter for interrupt / GC triggering */
     uint32_t instruction_counter;
+    uint32_t instruction_counter_init;
+    
+    /* Optional interrupt handler: called when instruction_counter reaches 0.
+     * If it returns non-zero, execution aborts with an exception. */
+    JSInterruptHandler *interrupt_handler;
+    void *interrupt_opaque;
 };
 
 /* ============================================================================

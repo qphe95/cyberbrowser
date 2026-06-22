@@ -20,6 +20,24 @@ add_executable(youtube-data-test
     test_youtube_data_scripts.cpp
 )
 
+# Interrupt handler regression test
+add_executable(test-interrupt
+    test_interrupt.cpp
+)
+
+
+target_compile_features(test-interrupt PRIVATE cxx_std_11)
+target_include_directories(test-interrupt
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/third_party/quickjs
+)
+target_link_libraries(test-interrupt PRIVATE browser-emulator)
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    target_include_directories(test-interrupt BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
+endif()
+
 # Live YouTube fetch test (fetches fresh data from youtube.com)
 add_executable(youtube-live-fetch-test
     test_youtube_live_fetch.cpp
@@ -62,11 +80,17 @@ target_link_libraries(youtube-data-test
     PRIVATE
         browser-emulator
 )
+if(MINGW)
+    target_link_options(youtube-data-test PRIVATE "-Wl,--stack,67108864")
+endif()
 
 target_link_libraries(youtube-live-fetch-test
     PRIVATE
         browser-emulator
 )
+if(MINGW)
+    target_link_options(youtube-live-fetch-test PRIVATE "-Wl,--stack,67108864")
+endif()
 
 # Add tests
 add_test(NAME browser-emulator-tests COMMAND browser-emulator-tests)

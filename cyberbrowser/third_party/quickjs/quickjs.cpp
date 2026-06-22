@@ -1628,6 +1628,20 @@ void JS_SetCanBlock(JSRuntimeHandle rt, BOOL can_block)
     rt.set_can_block(can_block);
 }
 
+void JS_SetInterruptHandler(JSRuntimeHandle rt, JSInterruptHandler *handler, void *opaque)
+{
+    rt.set_interrupt_handler(handler);
+    rt.set_interrupt_opaque(opaque);
+    rt.set_instruction_counter_init(10000);
+    rt.set_instruction_counter(10000);
+}
+
+void JS_ResetInstructionCounter(JSRuntimeHandle rt, uint32_t count)
+{
+    rt.set_instruction_counter_init(count ? count : 10000);
+    rt.set_instruction_counter(count ? count : 10000);
+}
+
 void JS_SetSharedArrayBufferFunctions(JSRuntimeHandle rt,
                                       const JSSharedArrayBufferFunctions *sf)
 {
@@ -20025,6 +20039,23 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
     for(;;) {
         int call_argc;
         GCValue *call_argv;
+        
+        /* Cooperative interrupt check. Only active when an interrupt handler
+         * has been installed and the counter has been primed. */
+        if (rt.interrupt_handler() && rt.instruction_counter()) {
+            uint32_t cnt = rt.instruction_counter() - 1;
+            rt.set_instruction_counter(cnt);
+            if (cnt == 0) {
+                JSInterruptHandler *handler = rt.interrupt_handler();
+                if (handler) {
+                    if (handler(rt, rt.interrupt_opaque())) {
+                        JS_ThrowInternalError(ctx, "execution interrupted");
+                        goto exception;
+                    }
+                }
+                rt.set_instruction_counter(rt.instruction_counter_init() ? rt.instruction_counter_init() : 10000);
+            }
+        }
         
 #if EXEC_TRACE_ENABLED
         /* Trace bytecode execution for debugging */

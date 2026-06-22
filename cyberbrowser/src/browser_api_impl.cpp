@@ -1001,11 +1001,10 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
             JS_NewCFunction(ctx, js_object_set_prototype_of, "setPrototypeOf", 2));
     }
     
-    // Object.defineProperty
-    if (!JS_IsException(object_ctor)) {
-        JS_SetPropertyStr(ctx, object_ctor, "defineProperty",
-            JS_NewCFunction(ctx, js_object_define_property, "defineProperty", 3));
-    }
+    // Object.defineProperty: use native QuickJS implementation. The custom
+    // polyfill caused crashes with large scripts (e.g., YouTube's kevlar_base
+    // app shell) due to descriptor/value lifetime issues.
+    // (Native Object.defineProperty is available once base objects are enabled.)
     
     // Object.getOwnPropertyDescriptor
     if (!JS_IsException(object_ctor)) {

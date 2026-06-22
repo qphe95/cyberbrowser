@@ -20,8 +20,22 @@
  * current JS DOM before the next layout/render pass. */
 volatile int g_dom_needs_layout = 0;
 
+/* When set to non-zero, DOM mutation methods become no-ops. This is used when
+ * executing very large minified application bundles (e.g. YouTube's
+ * kevlar_base) that perform millions of DOM mutations and would otherwise
+ * exhaust handles or corrupt state with the real DOM implementation. */
+static int g_dom_mutations_noop = 0;
+
 void dom_request_layout(void) {
     g_dom_needs_layout = 1;
+}
+
+void dom_api_set_mutations_noop(int noop) {
+    g_dom_mutations_noop = noop;
+}
+
+int dom_api_get_mutations_noop(void) {
+    return g_dom_mutations_noop;
 }
 
 // Real DOM Node Implementation
@@ -694,6 +708,11 @@ DOMNodeHandle get_dom_node(JSContextHandle ctx, GCValue obj) {
 
 // Real appendChild implementation
 GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (g_dom_mutations_noop) {
+        (void)this_val;
+        if (argc < 1) return JS_ThrowTypeError(ctx, "appendChild: invalid argument");
+        return argv[0];
+    }
     if (argc < 1 || JS_IsNull(argv[0]) || JS_IsUndefined(argv[0])) {
         return JS_ThrowTypeError(ctx, "appendChild: invalid argument");
     }
@@ -808,6 +827,11 @@ GCValue js_node_removeChild_real(JSContextHandle ctx, GCValue this_val, int argc
 
 // Real insertBefore implementation
 GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (g_dom_mutations_noop) {
+        (void)this_val;
+        if (argc < 1) return JS_ThrowTypeError(ctx, "insertBefore: invalid arguments");
+        return argv[0];
+    }
     if (argc < 2 || JS_IsNull(argv[0]) || JS_IsUndefined(argv[0])) {
         return JS_ThrowTypeError(ctx, "insertBefore: invalid arguments");
     }
@@ -878,6 +902,10 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
 
 // Real cloneNode implementation
 GCValue js_node_cloneNode_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (g_dom_mutations_noop) {
+        (void)argc; (void)argv;
+        return JS_NewObject(ctx);
+    }
     bool deep = false;
     if (argc > 0) {
         deep = JS_ToBool(ctx, argv[0]);

@@ -22,6 +22,7 @@
 #include "quickjs.h"
 #include "quickjs_gc_unified.h"
 #include "browser_api_impl.h"
+#include "browser_api_impl_types.h"
 #include "js_quickjs.h"
 #include "html_media_extract.h"
 
@@ -46,6 +47,22 @@ static int tests_failed = 0;
         printf("  ✗ %s\n", #test_func); \
     } \
 } while(0)
+
+/* Cooperative execution timeout state */
+static struct timespec g_exec_start;
+static double g_exec_timeout_seconds = 60.0;
+
+static int exec_timeout_handler(JSRuntimeHandle rt, void *opaque) {
+    struct timespec *start = (struct timespec *)opaque;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    double elapsed = (now.tv_sec - start->tv_sec) + (now.tv_nsec - start->tv_nsec) / 1e9;
+    if (elapsed > g_exec_timeout_seconds) {
+        fprintf(stderr, "[TIMEOUT] Interrupting script after %.1f seconds\n", elapsed);
+        return 1;
+    }
+    return 0;
+}
 
 /* Path to youtube_data directory - will try multiple locations */
 static const char* get_youtube_data_dir(void) {
@@ -165,6 +182,7 @@ static char* read_file(const char *path, size_t *out_size) {
     return content;
 }
 
+
 /* Initialize test context */
 static bool init_test_context(void) {
     /* Initialize GC */
@@ -172,6 +190,9 @@ static bool init_test_context(void) {
         printf("    ERROR: gc_init() failed\n");
         return false;
     }
+    printf("    GC initialized, handles=%u/%u, heap=%.1fMB\n",
+           gc_get_handle_count(), gc_get_handle_capacity(),
+           gc_get_used_bytes() / (1024.0 * 1024.0));
     
     /* Create runtime */
     g_rt = JS_NewRuntime();
@@ -179,6 +200,15 @@ static bool init_test_context(void) {
         printf("    ERROR: JS_NewRuntime() failed\n");
         return false;
     }
+    
+    /* Raise limits so the large YouTube bundles have room to execute. */
+    JS_SetMemoryLimit(g_rt, 1024 * 1024 * 1024);   /* 1 GB */
+    JS_SetMaxStackSize(g_rt, 64 * 1024 * 1024);    /* 64 MB */
+    
+    /* Install a cooperative timeout handler so a single hanging script
+     * cannot block the whole test suite. */
+    clock_gettime(CLOCK_MONOTONIC, &g_exec_start);
+    JS_SetInterruptHandler(g_rt, exec_timeout_handler, &g_exec_start);
     
     /* Create context */
     g_ctx = JS_NewContext(g_rt);
@@ -218,6 +248,14 @@ static bool init_test_context(void) {
     }
     
     js_quickjs_setup_initial_dom();
+    
+    /* Use no-op DOM mutations and lightweight getComputedStyle: this test
+     * only needs scripts to execute and ytInitialPlayerResponse/_yt_player to
+     * be available for URL decryption. The real DOM implementation cannot
+     * handle the millions of mutations performed by YouTube's kevlar_base app
+     * shell. */
+    dom_api_set_mutations_noop(1);
+    css_api_set_computed_style_noop(1);
     
     return true;
 }
@@ -303,15 +341,24 @@ static bool execute_script(JSContextHandle ctx, const char *script, size_t scrip
         return true;
     }
     
+    fflush(stdout);
+    
     /* Log script size for large scripts */
     if (script_len > 1 * 1024 * 1024) {
         printf("    [DEBUG] Script %03d is large: %.1fMB, starting execution...\n", 
                script_num, script_len / (1024.0 * 1024.0));
+        fflush(stdout);
     }
     
-    /* Record start time */
+    /* Record start time and reset the global timeout deadline for this script. */
     struct timespec start_time, end_time;
     clock_gettime(CLOCK_MONOTONIC, &start_time);
+    g_exec_start = start_time;
+    
+    printf("    [DEBUG] Script %03d about to call JS_Eval (handles=%u/%u, heap=%.1fMB)\n",
+           script_num, gc_get_handle_count(), gc_get_handle_capacity(),
+           gc_get_used_bytes() / (1024.0 * 1024.0));
+    fflush(stdout);
     
     /* Execute the script */
     GCValue result = JS_Eval(ctx, script, script_len, name, JS_EVAL_TYPE_GLOBAL);
@@ -367,7 +414,10 @@ static bool execute_script(JSContextHandle ctx, const char *script, size_t scrip
         return false;
     }
     
-    printf("    ✓ Script %03d executed successfully\n", script_num);
+    printf("    ✓ Script %03d executed successfully (handles=%u/%u, heap=%.1fMB)\n",
+           script_num, gc_get_handle_count(), gc_get_handle_capacity(),
+           gc_get_used_bytes() / (1024.0 * 1024.0));
+    fflush(stdout);
     return true;
 }
 

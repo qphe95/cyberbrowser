@@ -197,7 +197,7 @@ static inline void gc_spinlock_release(GCSpinLock *sl) {
 }
 
 #define GC_HEAP_SIZE (4ULL * 1024 * 1024 * 1024)
-#define GC_INITIAL_HANDLES 1000000
+#define GC_INITIAL_HANDLES 8000000
 #define GC_DEFAULT_THRESHOLD (256 * 1024)
 
 /* 
@@ -292,6 +292,9 @@ bool gc_init(void);
 bool gc_is_initialized(void);
 void gc_cleanup(void);
 void gc_set_runtime(JSRuntimeHandle rt);
+uint32_t gc_get_handle_count(void);
+uint32_t gc_get_handle_capacity(void);
+size_t gc_get_used_bytes(void);
 #ifdef __cplusplus
 extern "C++" JSRuntimeHandle gc_get_runtime(void);
 #else

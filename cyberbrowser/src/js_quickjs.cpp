@@ -4,6 +4,7 @@
 #include <stdarg.h>
 #include <pthread.h>
 #include <ctype.h>
+#include <time.h>
 #include "js_quickjs.h"
 #include "cutils.h"
 #include "quickjs.h"
@@ -1809,13 +1810,18 @@ void js_quickjs_pump_timers_and_jobs(void) {
     if (!g_js_context.valid()) return;
     JSRuntimeHandle rt = JS_GetRuntime(g_js_context);
     int iterations = 0;
-    while (iterations < 100) {
+    int callbacks_remaining = 1000;  /* Guard against runaway interval loops */
+    while (iterations < 100 && callbacks_remaining > 0) {
         int processed = timer_process_due(g_js_context);
+        if (processed > callbacks_remaining) processed = callbacks_remaining;
+        callbacks_remaining -= processed;
         int jobs = 0;
         JSContextHandle pctx;
         int ret;
-        while ((ret = JS_ExecutePendingJob(rt, &pctx)) > 0) {
+        while (callbacks_remaining > 0 &&
+               (ret = JS_ExecutePendingJob(rt, &pctx)) > 0) {
             jobs++;
+            callbacks_remaining--;
         }
         (void)ret;
         if (processed == 0 && jobs == 0) break;
@@ -2024,6 +2030,24 @@ static int create_dom_nodes_from_parsed_html(JSContextHandle ctx, HtmlDocument *
     return count;
 }
 
+/* Cooperative execution timeout. The QuickJS interpreter checks the handler
+ * between bytecode instructions, so pure-JS infinite loops are caught safely.
+ * Hangs inside C functions still require those functions to be fixed. */
+struct js_exec_timeout_state {
+    struct timespec start;
+    double limit_seconds;
+};
+
+static int js_exec_timeout_handler(JSRuntimeHandle rt, void *opaque) {
+    (void)rt;
+    struct js_exec_timeout_state *state = (struct js_exec_timeout_state *)opaque;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    double elapsed = (now.tv_sec - state->start.tv_sec) +
+                     (now.tv_nsec - state->start.tv_nsec) / 1e9;
+    return elapsed > state->limit_seconds ? 1 : 0;
+}
+
 bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens, 
                              int script_count, const char *html,
                              JsExecResult *out_result) {
@@ -2104,8 +2128,21 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
         platform_log(LOG_LEVEL_INFO, "js_quickjs",
             "[EXEC] Executing script %d: %zu bytes", i, script_lens[i]);
 
+        // Limit per-script wall-clock time. Large application bundles can enter
+        // long-running initialization loops; this prevents them from blocking
+        // the whole pipeline. The limit scales with script size.
+        struct js_exec_timeout_state timeout_state;
+        clock_gettime(CLOCK_MONOTONIC, &timeout_state.start);
+        timeout_state.limit_seconds = 5.0 + (script_lens[i] / (1024.0 * 1024.0)) * 2.0;
+        if (timeout_state.limit_seconds > 60.0) timeout_state.limit_seconds = 60.0;
+        JS_SetInterruptHandler(JS_GetRuntime(ctx), js_exec_timeout_handler, &timeout_state);
+
         // Execute script directly
         GCValue result = JS_Eval(ctx, scripts[i], script_lens[i], filename, JS_EVAL_TYPE_GLOBAL);
+
+        // Clear the interrupt handler so later operations (pumping timers, GC)
+        // are not subject to the per-script deadline.
+        JS_SetInterruptHandler(JS_GetRuntime(ctx), NULL, NULL);
 
         if (JS_IsException(result)) {
             char log_msg[64];
@@ -2135,30 +2172,18 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
             }
         }
         
-        // Process any due timers after each script
-        int timers_processed = timer_process_due(ctx);
-        if (timers_processed > 0) {
-            log_to_file("js_quickjs", "Processed %d timers after script %d", timers_processed, i);
-        }
-        
+        // Drain both timers and pending Promise jobs after each script so that
+        // fetch()/XHR .then() chains and player bootstrap callbacks run.
+        js_quickjs_pump_timers_and_jobs();
+
         // Run a GC cycle after every script to prevent handle exhaustion /
         // memory pressure when many large scripts execute in sequence.
         JS_RunGC(JS_GetRuntime(ctx));
     }
-    
-    // Process all remaining due timers after all scripts complete
-    // Keep processing until no more timers are ready (handles cascading timers)
-    int total_timers = 0;
-    int iterations = 0;
-    while (iterations < 100) {  // Safety limit
-        int processed = timer_process_due(ctx);
-        if (processed == 0) break;
-        total_timers += processed;
-        iterations++;
-    }
-    if (total_timers > 0) {
-        log_to_file("js_quickjs", "Processed %d total timers after all scripts", total_timers);
-    }
+
+    // Process all remaining timers and jobs after all scripts complete.
+    js_quickjs_pump_timers_and_jobs();
+    log_to_file("js_quickjs", "Drained remaining timers/jobs after all scripts");
     
     log_to_file("js_quickjs", "All %d scripts executed, running discovery...", script_count);
     
