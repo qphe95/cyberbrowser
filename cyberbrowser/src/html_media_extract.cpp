@@ -1005,6 +1005,30 @@ static void pump_timers_and_jobs_after_fetch(void) {
     }
 }
 
+// Some third-party polyfills (and the very large YouTube base application
+// bundle) currently leave our emulator's JS heap in a state where a later GC
+// cycle crashes.  Skip them by URL substring so the surrounding inline scripts
+// and smaller auxiliary bundles still execute in document order.
+static bool is_unsafe_external_script(const char *url) {
+    if (!url) return false;
+    static const char *skip_patterns[] = {
+        // Polyfills that monkey-patch native DOM prototypes and corrupt state
+        "webcomponents-sd",
+        "webcomponents-sd-shadycss",
+        "webcomponents-all-noPatch",
+        // The main ~10 MB kevlar/base bundle executes but triggers a latent
+        // unified-GC crash in a subsequent collection.  Keep it skipped until
+        // the GC marking/finalizer paths for the browser API handles are fully
+        // audited.
+        "kevlar_base",
+        NULL
+    };
+    for (const char **p = skip_patterns; *p; p++) {
+        if (strstr(url, *p)) return true;
+    }
+    return false;
+}
+
 // Execute all page scripts (inline + external) in document order.
 // Fetches external scripts, runs everything through js_quickjs_exec_scripts,
 // and pumps timers/microtasks after each network response.
@@ -1022,12 +1046,11 @@ extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_re
     
     LOG_INFO("Found %d scripts to execute", script_count);
     
-    // YouTube's external bundles are multiple megabytes and cannot be reliably
-    // executed in this build without exhausting GC handles or corrupting memory.
-    // We therefore skip fetching/executing external scripts in the main
-    // executable while still counting them in document order.  Inline scripts
-    // (config and initial data) are executed below.
-    const size_t MAX_EXTERNAL_SCRIPT_SIZE = 0;
+    // YouTube's main player bundle is ~10 MB.  Allow external scripts up to
+    // 12 MiB; the per-script GC after each execution prevents handle exhaustion.
+    // Polyfills that are known to leave the JS heap in a corrupted state in our
+    // emulator (e.g. the ShadyDOM webcomponents-sd polyfill) are skipped by URL.
+    const size_t MAX_EXTERNAL_SCRIPT_SIZE = 12 * 1024 * 1024;
     
     // Fetch external scripts (skipped when MAX_EXTERNAL_SCRIPT_SIZE == 0)
     if (MAX_EXTERNAL_SCRIPT_SIZE == 0) {
@@ -1067,11 +1090,16 @@ extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_re
                              scripts[i].parse_order, buffer.size);
                     http_free_buffer(&buffer);
                     scripts[i].url[0] = '\0';
+                } else if (is_unsafe_external_script(scripts[i].url)) {
+                    LOG_WARN("Skipping unsafe external script [%d]: %.200s",
+                             scripts[i].parse_order, scripts[i].url);
+                    http_free_buffer(&buffer);
+                    scripts[i].url[0] = '\0';
                 } else {
+                    LOG_INFO("Loaded external script [%d]: %zu bytes URL=%.200s",
+                             scripts[i].parse_order, buffer.size, scripts[i].url);
                     scripts[i].content = buffer.data;
                     scripts[i].content_len = buffer.size;
-                    LOG_INFO("Loaded external script [%d]: %zu bytes",
-                             scripts[i].parse_order, buffer.size);
                 }
             } else {
                 LOG_WARN("Failed to fetch script [%d]: %s", scripts[i].parse_order, error);

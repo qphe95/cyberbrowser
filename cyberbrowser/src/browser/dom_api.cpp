@@ -616,9 +616,28 @@ void js_shadow_root_finalizer(JSRuntimeHandle rt, GCValue val) {
     (void)val;
 }
 
+void js_shadow_root_mark(JSRuntimeHandle rt, GCValue val,
+                         JS_MarkFunc *mark_func) {
+    GCHandle sr_handle = JS_GetOpaqueHandle(val, js_shadow_root_class_id);
+    if (sr_handle == GC_HANDLE_NULL) return;
+
+    /* Keep the ShadowRoot data object alive. */
+    mark_func(rt, sr_handle);
+
+    ShadowRootData *sr = (ShadowRootData *)gc_deref(sr_handle);
+    if (!sr) return;
+
+    /* Mark JSValue fields stored in C memory so the GC sees them. */
+    JS_MarkValue(rt, sr->host, mark_func);
+    JS_MarkValue(rt, sr->innerHTML, mark_func);
+    JS_MarkValue(rt, sr->first_child, mark_func);
+    JS_MarkValue(rt, sr->last_child, mark_func);
+}
+
 JSClassDef js_shadow_root_class_def = {
     .class_name = "ShadowRoot",
     .finalizer = js_shadow_root_finalizer,
+    .gc_mark   = js_shadow_root_mark,
 };
 
 // ShadowRoot constructor - called when new ShadowRoot() is invoked

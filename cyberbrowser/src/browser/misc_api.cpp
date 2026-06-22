@@ -897,9 +897,25 @@ void js_custom_element_registry_finalizer(JSRuntimeHandle rt, GCValue val) {
     (void)val;
 }
 
+void js_custom_element_registry_mark(JSRuntimeHandle rt, GCValue val,
+                                     JS_MarkFunc *mark_func) {
+    GCHandle reg_handle = JS_GetOpaqueHandle(val, js_custom_element_registry_class_id);
+    if (reg_handle == GC_HANDLE_NULL) return;
+
+    /* Keep the registry data object alive. */
+    mark_func(rt, reg_handle);
+
+    CustomElementRegistryData *reg = (CustomElementRegistryData *)gc_deref(reg_handle);
+    if (!reg) return;
+
+    /* Mark the JS object that stores tag-name -> constructor mappings. */
+    JS_MarkValue(rt, reg->registry, mark_func);
+}
+
 JSClassDef js_custom_element_registry_class_def = {
     .class_name = "CustomElementRegistry",
     .finalizer = js_custom_element_registry_finalizer,
+    .gc_mark   = js_custom_element_registry_mark,
 };
 
 // customElements.define(name, constructor, options)
@@ -1486,9 +1502,26 @@ void js_intersection_observer_finalizer(JSRuntimeHandle rt, GCValue val) {
     (void)val;
 }
 
+void js_intersection_observer_mark(JSRuntimeHandle rt, GCValue val,
+                                   JS_MarkFunc *mark_func) {
+    GCHandle io_handle = JS_GetOpaqueHandle(val, js_intersection_observer_class_id);
+    if (io_handle == GC_HANDLE_NULL) return;
+
+    /* Keep the IntersectionObserver data object alive. */
+    mark_func(rt, io_handle);
+
+    IntersectionObserverData *io = (IntersectionObserverData *)gc_deref(io_handle);
+    if (!io) return;
+
+    /* Mark callback and root so they are not collected. */
+    JS_MarkValue(rt, io->callback, mark_func);
+    JS_MarkValue(rt, io->root, mark_func);
+}
+
 JSClassDef js_intersection_observer_class_def = {
     .class_name = "IntersectionObserver",
     .finalizer = js_intersection_observer_finalizer,
+    .gc_mark   = js_intersection_observer_mark,
 };
 
 // IntersectionObserver constructor

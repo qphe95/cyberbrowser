@@ -2080,6 +2080,10 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
         if (timers_processed > 0) {
             log_to_file("js_quickjs", "Processed %d timers after script %d", timers_processed, i);
         }
+        
+        // Run a GC cycle after every script to prevent handle exhaustion /
+        // memory pressure when many large scripts execute in sequence.
+        JS_RunGC(JS_GetRuntime(ctx));
     }
     
     // Process all remaining due timers after all scripts complete
