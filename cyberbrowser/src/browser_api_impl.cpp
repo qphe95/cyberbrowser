@@ -1739,10 +1739,11 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_FreeAtom(ctx, dataset_atom);
     
     // ===== Node Content Properties (on Node.prototype) =====
-    // textContent getter/setter - use simple property instead of getter/setter
+    // textContent getter/setter
+    GCValue text_content_getter = JS_NewCFunction(ctx, js_node_get_text_content, "get textContent", 0);
+    GCValue text_content_setter = JS_NewCFunction(ctx, js_node_set_text_content, "set textContent", 1);
     JSAtom text_content_atom = JS_NewAtom(ctx, "textContent");
-    JS_DefinePropertyValue(ctx, node_proto, text_content_atom, 
-        JS_NewCFunction(ctx, js_node_get_text_content, "textContent", 0), JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, node_proto, text_content_atom, text_content_getter, text_content_setter, JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, text_content_atom);
     
     // nodeValue getter/setter

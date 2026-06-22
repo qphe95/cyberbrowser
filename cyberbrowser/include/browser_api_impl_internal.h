@@ -91,6 +91,7 @@ GCValue js_dom_token_list_add(JSContextHandle ctx, GCValue this_val, int argc, G
 GCValue js_dom_token_list_remove(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_dom_token_list_toggle(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_dom_token_list_item(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_dom_token_list_get_length(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_dom_token_list_for_each(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_service_worker_register(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_service_worker_get_registration(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
@@ -184,6 +185,7 @@ GCValue js_element_set_inner_html(JSContextHandle ctx, GCValue this_val, int arg
 GCValue js_element_get_outer_html(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_set_outer_html(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_node_get_text_content(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_node_set_text_content(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_node_get_node_value(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_node_set_node_value(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_document_create_range(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);

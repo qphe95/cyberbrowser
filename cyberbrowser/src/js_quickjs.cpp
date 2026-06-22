@@ -15,7 +15,9 @@
 #include "platform.h"
 #include "browser_api_impl_types.h"
 #include "browser_api_impl_handles.h"
-#include "browser_api_impl_internal.h"
+
+// Forward declaration from dom_api.cpp (used to set ownerDocument on created nodes)
+extern "C" void dom_node_set_owner_document(JSContextHandle ctx, GCValue node, GCValue doc);
 
 /* Timer API functions from browser_api_impl.cpp */
 extern "C" int timer_process_due(JSContextHandle ctx);

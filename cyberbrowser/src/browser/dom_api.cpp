@@ -1692,7 +1692,10 @@ GCValue js_element_get_classList(JSContextHandle ctx, GCValue this_val, int argc
     JS_SetPropertyStr(ctx, classList, "contains", JS_NewCFunction(ctx, js_dom_token_list_contains, "contains", 1));
     JS_SetPropertyStr(ctx, classList, "item", JS_NewCFunction(ctx, js_dom_token_list_item, "item", 1));
     JS_SetPropertyStr(ctx, classList, "forEach", JS_NewCFunction(ctx, js_dom_token_list_for_each, "forEach", 1));
-    JS_SetPropertyStr(ctx, classList, "length", JS_NewInt32(ctx, 0));
+    GCValue length_getter = JS_NewCFunction(ctx, js_dom_token_list_get_length, "get length", 0);
+    JSAtom length_atom = JS_NewAtom(ctx, "length");
+    JS_DefinePropertyGetSet(ctx, classList, length_atom, length_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_FreeAtom(ctx, length_atom);
     // Store on element for reuse
     JS_SetPropertyStr(ctx, this_val, "__classList", classList);
     return classList;
@@ -1713,18 +1716,119 @@ GCValue js_element_get_dataset(JSContextHandle ctx, GCValue this_val, int argc, 
     return dataset;
 }
 
-// Element.prototype.innerHTML getter
+// Element.prototype.innerHTML getter - basic serialization
+static void serialize_inner_html(JSContextHandle ctx, GCValue node, char *buf, size_t buf_size, size_t *pos);
+
+static const char* safe_string(JSContextHandle ctx, GCValue val) {
+    if (JS_IsUndefined(val) || JS_IsNull(val)) return NULL;
+    const char *s = JS_ToCString(ctx, val);
+    return (s && s[0]) ? s : NULL;
+}
+
+static void serialize_element_html(JSContextHandle ctx, DOMNodeHandle node, char *buf, size_t buf_size, size_t *pos) {
+    const char *tag = node.node_name();
+    if (!tag || !tag[0]) tag = "DIV";
+    size_t tag_len = strlen(tag);
+    if (*pos + tag_len + 2 >= buf_size) return;
+    buf[(*pos)++] = '<';
+    memcpy(buf + *pos, tag, tag_len);
+    *pos += tag_len;
+
+    // Serialize class and id attributes explicitly
+    GCValue class_val = JS_GetPropertyStr(ctx, node.js_object(), "className");
+    const char *class_str = safe_string(ctx, class_val);
+    if (class_str) {
+        size_t len = strlen(class_str);
+        if (*pos + len + 9 < buf_size) {
+            memcpy(buf + *pos, " class=\"", 8);
+            *pos += 8;
+            memcpy(buf + *pos, class_str, len);
+            *pos += len;
+            buf[(*pos)++] = '"';
+        }
+    }
+    GCValue id_val = JS_GetPropertyStr(ctx, node.js_object(), "id");
+    const char *id_str = safe_string(ctx, id_val);
+    if (id_str) {
+        size_t len = strlen(id_str);
+        if (*pos + len + 5 < buf_size) {
+            memcpy(buf + *pos, " id=\"", 5);
+            *pos += 5;
+            memcpy(buf + *pos, id_str, len);
+            *pos += len;
+            buf[(*pos)++] = '"';
+        }
+    }
+
+    if (*pos + 1 >= buf_size) return;
+    buf[(*pos)++] = '>';
+    buf[*pos] = '\0';
+
+    // Serialize children
+    GCValue child = node.first_child();
+    while (!JS_IsNull(child)) {
+        serialize_inner_html(ctx, child, buf, buf_size, pos);
+        DOMNodeHandle child_node = get_dom_node(ctx, child);
+        if (!child_node.valid()) break;
+        child = child_node.next_sibling();
+    }
+
+    if (*pos + tag_len + 3 >= buf_size) return;
+    buf[(*pos)++] = '<';
+    buf[(*pos)++] = '/';
+    memcpy(buf + *pos, tag, tag_len);
+    *pos += tag_len;
+    buf[(*pos)++] = '>';
+    buf[*pos] = '\0';
+}
+
+static void serialize_inner_html(JSContextHandle ctx, GCValue node, char *buf, size_t buf_size, size_t *pos) {
+    DOMNodeHandle dom_node = get_dom_node(ctx, node);
+    if (dom_node.valid() && dom_node.node_type() == DOM_NODE_TYPE_TEXT) {
+        const char *val = dom_node.node_value();
+        if (val && val[0]) {
+            size_t len = strlen(val);
+            if (*pos + len < buf_size) {
+                memcpy(buf + *pos, val, len);
+                *pos += len;
+                buf[*pos] = '\0';
+            }
+        }
+        return;
+    }
+    if (dom_node.valid() && dom_node.node_type() == DOM_NODE_TYPE_ELEMENT) {
+        serialize_element_html(ctx, dom_node, buf, buf_size, pos);
+    }
+}
+
 GCValue js_element_get_inner_html(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    // Return empty string for stub
-    return JS_NewString(ctx, "");
+    char buf[4096];
+    buf[0] = '\0';
+    size_t pos = 0;
+    // innerHTML serializes children, not the element itself.
+    DOMNodeHandle node = get_dom_node(ctx, this_val);
+    if (node.valid()) {
+        GCValue child = node.first_child();
+        while (!JS_IsNull(child)) {
+            serialize_inner_html(ctx, child, buf, sizeof(buf), &pos);
+            DOMNodeHandle child_node = get_dom_node(ctx, child);
+            if (!child_node.valid()) break;
+            child = child_node.next_sibling();
+        }
+    }
+    if (pos < sizeof(buf)) buf[pos] = '\0';
+    return JS_NewString(ctx, buf);
 }
 
 // Element.prototype.innerHTML setter
 GCValue js_element_set_inner_html(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    platform_log(LOG_LEVEL_INFO, "dom_api", "js_element_set_inner_html called, argc=%d", argc);
     if (argc < 1) return JS_UNDEFINED;
-    // No-op for stub - in real implementation would parse HTML
-    (void)argv;
+    const char *html = JS_ToCString(ctx, argv[0]);
+    if (!html) html = "";
+    platform_log(LOG_LEVEL_INFO, "dom_api", "js_element_set_inner_html: html=%.50s", html);
+    html_element_set_inner_html(ctx, this_val, html);
     return JS_UNDEFINED;
 }
 
@@ -1747,18 +1851,91 @@ GCValue js_element_set_outer_html(JSContextHandle ctx, GCValue this_val, int arg
 // Node Content Getters/Setters
 // ============================================================================
 
+// Helper: recursively collect text content from an element's descendants.
+static void collect_text_content(JSContextHandle ctx, DOMNodeHandle node, char *buf, size_t buf_size, size_t *pos) {
+    if (!node.valid()) return;
+    if (node.node_type() == DOM_NODE_TYPE_TEXT) {
+        const char *val = node.node_value();
+        if (val && val[0]) {
+            size_t len = strlen(val);
+            if (*pos + len < buf_size) {
+                memcpy(buf + *pos, val, len);
+                *pos += len;
+                buf[*pos] = '\0';
+            }
+        }
+        return;
+    }
+    GCValue child = node.first_child();
+    while (!JS_IsNull(child)) {
+        DOMNodeHandle child_node = get_dom_node(ctx, child);
+        collect_text_content(ctx, child_node, buf, buf_size, pos);
+        if (child_node.valid()) {
+            child = child_node.next_sibling();
+        } else {
+            break;
+        }
+    }
+}
+
 // Node.prototype.textContent getter
 GCValue js_node_get_text_content(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    // Return empty string for stub
-    return JS_NewString(ctx, "");
+    DOMNodeHandle node = get_dom_node(ctx, this_val);
+    if (!node.valid()) {
+        return JS_NewString(ctx, "");
+    }
+    if (node.node_type() == DOM_NODE_TYPE_TEXT) {
+        const char *val = node.node_value();
+        return JS_NewString(ctx, val ? val : "");
+    }
+    char buf[4096];
+    buf[0] = '\0';
+    size_t pos = 0;
+    collect_text_content(ctx, node, buf, sizeof(buf), &pos);
+    return JS_NewString(ctx, buf);
 }
 
 // Node.prototype.textContent setter
 GCValue js_node_set_text_content(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1) return JS_UNDEFINED;
-    // No-op for stub
-    (void)argv;
+    const char *text = JS_ToCString(ctx, argv[0]);
+    if (!text) text = "";
+
+    DOMNodeHandle node = get_dom_node(ctx, this_val);
+    if (!node.valid()) return JS_UNDEFINED;
+
+    // Remove all children
+    GCValue child = node.first_child();
+    while (!JS_IsNull(child)) {
+        DOMNodeHandle child_node = get_dom_node(ctx, child);
+        GCValue next = JS_NULL;
+        if (child_node.valid()) {
+            next = child_node.next_sibling();
+        }
+        GCValue remove_args[1] = { child };
+        js_node_removeChild_real(ctx, this_val, 1, remove_args);
+        child = next;
+    }
+
+    // Insert a single text node if text is non-empty
+    if (text[0]) {
+        GCValue doc = node.owner_document();
+        GCValue text_node = JS_NULL;
+        if (!JS_IsUndefined(doc) && !JS_IsNull(doc)) {
+            GCValue createTextNode = JS_GetPropertyStr(ctx, doc, "createTextNode");
+            if (!JS_IsUndefined(createTextNode) && !JS_IsNull(createTextNode)) {
+                GCValue args[1] = { JS_NewString(ctx, text) };
+                text_node = JS_Call(ctx, createTextNode, doc, 1, args);
+            }
+        }
+        if (JS_IsNull(text_node) || JS_IsUndefined(text_node)) {
+            text_node = JS_NewString(ctx, text);
+        }
+        GCValue append_args[1] = { text_node };
+        js_node_appendChild_real(ctx, this_val, 1, append_args);
+    }
+
     return JS_UNDEFINED;
 }
 

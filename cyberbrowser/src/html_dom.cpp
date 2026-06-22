@@ -694,9 +694,6 @@ GCValue html_create_element_js(JSContextHandle ctx, const char *tag_name, HtmlAt
     
     JS_SetPropertyStr(ctx, element, "attributes", attr_map);
     
-    /* Set innerHTML to empty initially */
-    JS_SetPropertyStr(ctx, element, "innerHTML", JS_NewString(ctx, ""));
-    
     /* Add childNodes array */
     JS_SetPropertyStr(ctx, element, "childNodes", JS_NewArray(ctx));
     
@@ -985,9 +982,11 @@ static bool html_node_populate_js_recursive(JSContextHandle ctx, GCValue js_doc,
                 /* If we have a parent, append this element */
                 if (!JS_IsUndefined(parent) && !JS_IsNull(parent)) {
                     GCValue appendChild = JS_GetPropertyStr(ctx, parent, "appendChild");
-                    if (!JS_IsUndefined(appendChild) && !JS_IsNull(appendChild)) {
-                        GCValue args[1] = { js_node };
+                    GCValue args[1] = { js_node };
+                    if (JS_IsFunction(ctx, appendChild)) {
                         JS_Call(ctx, appendChild, parent, 1, args);
+                    } else {
+                        js_node_appendChild_real(ctx, parent, 1, args);
                     }
                 }
             }
@@ -1007,9 +1006,11 @@ static bool html_node_populate_js_recursive(JSContextHandle ctx, GCValue js_doc,
                 
                 if (!JS_IsUndefined(parent) && !JS_IsNull(parent)) {
                     GCValue appendChild = JS_GetPropertyStr(ctx, parent, "appendChild");
-                    if (!JS_IsUndefined(appendChild) && !JS_IsNull(appendChild)) {
-                        GCValue args[1] = { js_node };
+                    GCValue args[1] = { js_node };
+                    if (JS_IsFunction(ctx, appendChild)) {
                         JS_Call(ctx, appendChild, parent, 1, args);
+                    } else {
+                        js_node_appendChild_real(ctx, parent, 1, args);
                     }
                 }
             }
@@ -1175,6 +1176,70 @@ bool html_populate_js_document(JSContextHandle ctx, GCValue js_doc, HtmlDocument
     JS_SetPropertyStr(ctx, new_doc_element, "body", new_body_element);
     
     LOG_INFO("JS document populated: new docElem/head/body from parsed HTML");
+    return true;
+}
+
+/* Set the innerHTML of an element by parsing the HTML string and replacing
+ * the element's children with the parsed nodes. Uses document.createElement()
+ * from the element's ownerDocument so nodes get proper prototypes. */
+bool html_element_set_inner_html(JSContextHandle ctx, GCValue elem, const char *html) {
+    if (!ctx || JS_IsUndefined(elem) || JS_IsNull(elem) || !html) return false;
+
+    GCValue doc = JS_GetPropertyStr(ctx, elem, "ownerDocument");
+    if (JS_IsUndefined(doc) || JS_IsNull(doc)) {
+        GCValue global = JS_GetGlobalObject(ctx);
+        doc = JS_GetPropertyStr(ctx, global, "document");
+    }
+
+    HtmlDocument *frag_doc = html_parse(html, strlen(html));
+    if (!frag_doc) return false;
+
+    // Remove existing children
+    DOMNodeHandle elem_node = DOMNodeHandle::from_object(elem);
+    if (elem_node.valid()) {
+        GCValue child = elem_node.first_child();
+        while (!JS_IsNull(child)) {
+            DOMNodeHandle child_node = DOMNodeHandle::from_object(child);
+            GCValue next = child_node.valid() ? child_node.next_sibling() : JS_NULL;
+            GCValue remove_args[1] = { child };
+            js_node_removeChild_real(ctx, elem, 1, remove_args);
+            child = next;
+        }
+    }
+
+    // Append parsed children. For full documents use <body>; otherwise append the
+    // root-level fragment node(s) directly (e.g. innerHTML = '<div>...</div>').
+    int start_idx = -1;
+    if (frag_doc->body_idx >= 0) {
+        start_idx = po_array_first_child(&frag_doc->array, frag_doc->body_idx);
+    }
+    if (start_idx < 0 && frag_doc->root_idx >= 0) {
+        start_idx = frag_doc->root_idx;
+    }
+
+    int child_idx = start_idx;
+    while (child_idx >= 0) {
+        html_node_populate_js_recursive(ctx, doc, frag_doc, child_idx, elem);
+        child_idx = po_array_next_sibling(&frag_doc->array, child_idx);
+    }
+
+    // If the parser produced no nodes (e.g. plain text), append a text node.
+    if (start_idx < 0 && html[0]) {
+        GCValue createTextNode = JS_GetPropertyStr(ctx, doc, "createTextNode");
+        if (!JS_IsUndefined(createTextNode) && !JS_IsNull(createTextNode)) {
+            GCValue args[1] = { JS_NewString(ctx, html) };
+            GCValue text_node = JS_Call(ctx, createTextNode, doc, 1, args);
+            if (!JS_IsException(text_node) && !JS_IsUndefined(text_node) && !JS_IsNull(text_node)) {
+                GCValue appendChild = JS_GetPropertyStr(ctx, elem, "appendChild");
+                if (!JS_IsUndefined(appendChild) && !JS_IsNull(appendChild)) {
+                    GCValue aargs[1] = { text_node };
+                    JS_Call(ctx, appendChild, elem, 1, aargs);
+                }
+            }
+        }
+    }
+
+    html_document_free(frag_doc);
     return true;
 }
 

@@ -2100,6 +2100,169 @@ TEST(test_node_child_nodes) {
     return true;
 }
 
+/* Test ownerDocument is set on created elements and text nodes */
+TEST(test_owner_document_set) {
+    JSContextHandle ctx = get_test_context();
+    if (!ctx) return false;
+
+    const char *js_code = R"(
+        var el = document.createElement('div');
+        var txt = document.createTextNode('hello');
+        el.ownerDocument === document && txt.ownerDocument === document;
+    )";
+
+    GCValue result = JS_Eval(ctx, js_code, strlen(js_code), "<test>", 0);
+    bool success = JS_ToBool(ctx, result);
+
+    ASSERT_TRUE(success);
+    return true;
+}
+
+/* Test window.addEventListener is the real inherited method */
+TEST(test_window_add_event_listener_real) {
+    JSContextHandle ctx = get_test_context();
+    if (!ctx) return false;
+
+    const char *js_code = R"(
+        var called = false;
+        window.addEventListener('test', function() { called = true; });
+        var listeners = window.__listeners_test;
+        Array.isArray(listeners) && listeners.length === 1 && typeof listeners[0] === 'function';
+    )";
+
+    GCValue result = JS_Eval(ctx, js_code, strlen(js_code), "<test>", 0);
+    bool success = JS_ToBool(ctx, result);
+
+    ASSERT_TRUE(success);
+    return true;
+}
+
+/* Test classList reflects and modifies className */
+TEST(test_class_list_functional) {
+    JSContextHandle ctx = get_test_context();
+    if (!ctx) return false;
+
+    const char *js_code = R"(
+        var el = document.createElement('div');
+        el.classList.add('foo');
+        el.classList.add('bar');
+        var checks = [
+            ['contains foo', el.classList.contains('foo')],
+            ['contains bar', el.classList.contains('bar')],
+            ['className', el.className],
+            ['length', el.classList.length],
+            ['item0', el.classList.item(0)],
+            ['item1', el.classList.item(1)]
+        ];
+        JSON.stringify(checks);
+    )";
+
+    GCValue result = JS_Eval(ctx, js_code, strlen(js_code), "<test>", 0);
+    const char *str = JS_ToCString(ctx, result);
+    printf("    classList debug: %s\n", str ? str : "(null)");
+
+    // Re-evaluate the actual assertion separately
+    const char *assert_js = R"(
+        var el = document.createElement('div');
+        el.classList.add('foo');
+        el.classList.add('bar');
+        el.classList.contains('foo') && el.classList.contains('bar') &&
+        el.className === 'foo bar' && el.classList.length === 2;
+    )";
+    GCValue assert_result = JS_Eval(ctx, assert_js, strlen(assert_js), "<test>", 0);
+    bool success = JS_ToBool(ctx, assert_result);
+
+    ASSERT_TRUE(success);
+    return true;
+}
+
+/* Test classList.remove updates className */
+TEST(test_class_list_remove) {
+    JSContextHandle ctx = get_test_context();
+    if (!ctx) return false;
+
+    const char *js_code = R"(
+        var el = document.createElement('div');
+        el.className = 'foo bar baz';
+        el.classList.remove('bar');
+        el.className === 'foo baz' && el.classList.length === 2;
+    )";
+
+    GCValue result = JS_Eval(ctx, js_code, strlen(js_code), "<test>", 0);
+    bool success = JS_ToBool(ctx, result);
+
+    ASSERT_TRUE(success);
+    return true;
+}
+
+/* Test textContent getter/setter */
+TEST(test_text_content) {
+    JSContextHandle ctx = get_test_context();
+    if (!ctx) return false;
+
+    const char *js_code = R"(
+        var parent = document.createElement('div');
+        var child = document.createElement('span');
+        child.textContent = 'hello';
+        parent.appendChild(child);
+        JSON.stringify({parent: parent.textContent, child: child.textContent, firstChild: parent.firstChild && parent.firstChild.nodeName});
+    )";
+
+    GCValue result = JS_Eval(ctx, js_code, strlen(js_code), "<test>", 0);
+    const char *str = JS_ToCString(ctx, result);
+    printf("    textContent debug: %s\n", str ? str : "(null)");
+
+    const char *assert_js = R"(
+        var parent = document.createElement('div');
+        var child = document.createElement('span');
+        child.textContent = 'hello';
+        parent.appendChild(child);
+        parent.textContent === 'hello' && child.textContent === 'hello';
+    )";
+    GCValue assert_result = JS_Eval(ctx, assert_js, strlen(assert_js), "<test>", 0);
+    bool success = JS_ToBool(ctx, assert_result);
+
+    ASSERT_TRUE(success);
+    return true;
+}
+
+/* Test innerHTML setter parses and replaces children and getter serializes them */
+TEST(test_inner_html_setter) {
+    JSContextHandle ctx = get_test_context();
+    if (!ctx) return false;
+
+    const char *js_code = R"(
+        var parent = document.createElement('div');
+        parent.innerHTML = '<div class="x" id="y">hello</div>';
+        var child = parent.firstChild;
+        JSON.stringify({
+            hasChild: !!child,
+            tagName: child && child.tagName,
+            className: child && child.className,
+            id: child && child.id,
+            textContent: child && child.textContent,
+            hasInnerHTML: parent.innerHTML.indexOf('class="x"') >= 0
+        });
+    )";
+
+    GCValue result = JS_Eval(ctx, js_code, strlen(js_code), "<test>", 0);
+    const char *str = JS_ToCString(ctx, result);
+    printf("    innerHTML debug: %s\n", str ? str : "(null)");
+
+    const char *assert_js = R"(
+        var parent = document.createElement('div');
+        parent.innerHTML = '<div class="x" id="y">hello</div>';
+        var child = parent.firstChild;
+        child && child.tagName === 'DIV' && child.className === 'x' &&
+        child.id === 'y' && child.textContent === 'hello';
+    )";
+    GCValue assert_result = JS_Eval(ctx, assert_js, strlen(assert_js), "<test>", 0);
+    bool success = JS_ToBool(ctx, assert_result);
+
+    ASSERT_TRUE(success);
+    return true;
+}
+
 /* Test Node.contains works correctly */
 TEST(test_node_contains) {
     JSContextHandle ctx = get_test_context();
@@ -4434,6 +4597,12 @@ extern "C" void run_browser_api_impl_tests(void) {
     RUN_TEST(test_node_siblings);
     RUN_TEST(test_node_parent_node);
     RUN_TEST(test_node_child_nodes);
+    RUN_TEST(test_owner_document_set);
+    RUN_TEST(test_window_add_event_listener_real);
+    RUN_TEST(test_class_list_functional);
+    RUN_TEST(test_class_list_remove);
+    RUN_TEST(test_text_content);
+    RUN_TEST(test_inner_html_setter);
     RUN_TEST(test_node_contains);
     RUN_TEST(test_node_get_root_node);
     RUN_TEST(test_element_children);

@@ -104,6 +104,10 @@ GCValue html_create_element_js(JSContextHandle ctx, const char *tag_name, HtmlAt
 /* Create a single HTML element using document.createElement() if available */
 GCValue html_create_element_js_with_document(JSContextHandle ctx, GCValue js_doc, const char *tag_name, HtmlAttribute *attrs);
 
+/* Set the innerHTML of an element by parsing the HTML string and replacing
+ * the element's children with the parsed nodes. */
+bool html_element_set_inner_html(JSContextHandle ctx, GCValue elem, const char *html);
+
 /* Access well-known document nodes (transient pointers; valid until tree mutates). */
 HtmlNode* html_document_root(HtmlDocument *doc);
 HtmlNode* html_document_head(HtmlDocument *doc);

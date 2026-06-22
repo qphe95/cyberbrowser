@@ -226,110 +226,204 @@ GCValue js_css_style_decl_get_property_priority(JSContextHandle ctx, GCValue thi
     return JS_NewString(ctx, "");
 }
 
-// DOMTokenList.add(...tokens)
-GCValue js_dom_token_list_add(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)this_val;
-    
-    // Get tokens array
-    GCValue tokens = JS_GetPropertyStr(ctx, this_val, "__tokens");
-    if (!JS_IsArray(ctx, tokens)) {
-        tokens = JS_NewArray(ctx);
-        JS_SetPropertyStr(ctx, this_val, "__tokens", tokens);
+/* Helpers: DOMTokenList is backed by the associated element's className. */
+
+static GCValue token_list_get_element(JSContextHandle ctx, GCValue this_val) {
+    return JS_GetPropertyStr(ctx, this_val, "__element");
+}
+
+static char* token_list_get_class_name(JSContextHandle ctx, GCValue elem) {
+    GCValue class_val = JS_GetPropertyStr(ctx, elem, "className");
+    if (JS_IsUndefined(class_val) || JS_IsNull(class_val)) {
+        return strdup("");
     }
-    
-    // Add each token
-    for (int i = 0; i < argc; i++) {
-        if (JS_IsString(argv[i])) {
-            const char *token = JS_ToCString(ctx, argv[i]);
-            // Check if already exists
-            GCValue exists = js_dom_token_list_contains(ctx, this_val, 1, &argv[i]);
-            int has_token = JS_ToBool(ctx, exists);
-            if (!has_token) {
-                // Get length and append
-                GCValue len_val = JS_GetPropertyStr(ctx, tokens, "length");
-                int len;
-                JS_ToInt32(ctx, &len, len_val);
-                JS_SetPropertyUint32(ctx, tokens, len, JS_NewString(ctx, token ? token : ""));
-            }
+    const char *s = JS_ToCString(ctx, class_val);
+    return strdup(s ? s : "");
+}
+
+static void token_list_set_class_name(JSContextHandle ctx, GCValue elem, const char *class_name) {
+    const char *new_val = class_name ? class_name : "";
+    JS_SetPropertyStr(ctx, elem, "className", JS_NewString(ctx, new_val));
+    DOMNodeHandle node = DOMNodeHandle::from_object(elem);
+    if (node.valid()) {
+        node.set_class_name(new_val);
+        css_index_insert_node(ctx, node);
+    }
+}
+
+/* Parse className into tokens. Writes up to max_tokens tokens into tokens_out.
+ * Returns the actual token count. */
+static int token_list_parse(const char *class_name, char **tokens_out, int max_tokens) {
+    if (!class_name || !class_name[0]) return 0;
+    char *copy = strdup(class_name);
+    if (!copy) return 0;
+    int count = 0;
+    char *saveptr = NULL;
+    for (char *tok = strtok_r(copy, " \t\r\n", &saveptr);
+         tok && count < max_tokens;
+         tok = strtok_r(NULL, " \t\r\n", &saveptr)) {
+        if (!tok[0]) continue;
+        tokens_out[count] = strdup(tok);
+        if (tokens_out[count]) count++;
+    }
+    free(copy);
+    return count;
+}
+
+static void token_list_free_tokens(char **tokens, int count) {
+    for (int i = 0; i < count; i++) free(tokens[i]);
+}
+
+// DOMTokenList.length getter
+GCValue js_dom_token_list_get_length(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    GCValue elem = token_list_get_element(ctx, this_val);
+    if (JS_IsUndefined(elem) || JS_IsNull(elem)) return JS_NewInt32(ctx, 0);
+    char *class_name = token_list_get_class_name(ctx, elem);
+    char *tokens[256];
+    int count = token_list_parse(class_name, tokens, 256);
+    token_list_free_tokens(tokens, count);
+    free(class_name);
+    return JS_NewInt32(ctx, count);
+}
+
+// DOMTokenList.item(index)
+GCValue js_dom_token_list_item(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1 || !JS_IsNumber(argv[0])) return JS_NULL;
+    int index;
+    JS_ToInt32(ctx, &index, argv[0]);
+    if (index < 0) return JS_NULL;
+
+    GCValue elem = token_list_get_element(ctx, this_val);
+    if (JS_IsUndefined(elem) || JS_IsNull(elem)) return JS_NULL;
+
+    char *class_name = token_list_get_class_name(ctx, elem);
+    char *tokens[256];
+    int count = token_list_parse(class_name, tokens, 256);
+    GCValue result = JS_NULL;
+    if (index < count && tokens[index]) {
+        result = JS_NewString(ctx, tokens[index]);
+    }
+    token_list_free_tokens(tokens, count);
+    free(class_name);
+    return result;
+}
+
+// DOMTokenList.contains(token)
+GCValue js_dom_token_list_contains(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1 || !JS_IsString(argv[0])) return JS_FALSE;
+    const char *token = JS_ToCString(ctx, argv[0]);
+    if (!token || !token[0]) return JS_FALSE;
+
+    GCValue elem = token_list_get_element(ctx, this_val);
+    if (JS_IsUndefined(elem) || JS_IsNull(elem)) return JS_FALSE;
+
+    char *class_name = token_list_get_class_name(ctx, elem);
+    char *tokens[256];
+    int count = token_list_parse(class_name, tokens, 256);
+    bool found = false;
+    for (int i = 0; i < count; i++) {
+        if (tokens[i] && strcmp(tokens[i], token) == 0) {
+            found = true;
+            break;
         }
     }
-    
+    token_list_free_tokens(tokens, count);
+    free(class_name);
+    return JS_NewBool(ctx, found ? 1 : 0);
+}
+
+// DOMTokenList.add(...tokens)
+GCValue js_dom_token_list_add(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    GCValue elem = token_list_get_element(ctx, this_val);
+    if (JS_IsUndefined(elem) || JS_IsNull(elem)) return JS_UNDEFINED;
+
+    char *class_name = token_list_get_class_name(ctx, elem);
+    char *tokens[256];
+    int count = token_list_parse(class_name, tokens, 256);
+
+    for (int i = 0; i < argc; i++) {
+        if (!JS_IsString(argv[i])) continue;
+        const char *token = JS_ToCString(ctx, argv[i]);
+        if (!token || !token[0]) continue;
+        bool found = false;
+        for (int j = 0; j < count; j++) {
+            if (tokens[j] && strcmp(tokens[j], token) == 0) {
+                found = true;
+                break;
+            }
+        }
+        if (!found && count < 256) {
+            tokens[count] = strdup(token);
+            if (tokens[count]) count++;
+        }
+    }
+
+    // Rebuild className
+    char new_class[4096];
+    new_class[0] = '\0';
+    size_t pos = 0;
+    for (int i = 0; i < count; i++) {
+        size_t len = strlen(tokens[i]);
+        if (pos + len + 1 >= sizeof(new_class)) break;
+        if (pos > 0) new_class[pos++] = ' ';
+        memcpy(new_class + pos, tokens[i], len);
+        pos += len;
+    }
+    new_class[pos] = '\0';
+    token_list_set_class_name(ctx, elem, new_class);
+
+    token_list_free_tokens(tokens, count);
+    free(class_name);
     return JS_UNDEFINED;
 }
 
 // DOMTokenList.remove(...tokens)
 GCValue js_dom_token_list_remove(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)this_val;
-    
-    GCValue tokens = JS_GetPropertyStr(ctx, this_val, "__tokens");
-    if (!JS_IsArray(ctx, tokens)) return JS_UNDEFINED;
-    
-    // Get current length
-    GCValue len_val = JS_GetPropertyStr(ctx, tokens, "length");
-    int len;
-    JS_ToInt32(ctx, &len, len_val);
-    
-    // Remove each token
+    GCValue elem = token_list_get_element(ctx, this_val);
+    if (JS_IsUndefined(elem) || JS_IsNull(elem)) return JS_UNDEFINED;
+
+    char *class_name = token_list_get_class_name(ctx, elem);
+    char *tokens[256];
+    int count = token_list_parse(class_name, tokens, 256);
+
     for (int i = 0; i < argc; i++) {
         if (!JS_IsString(argv[i])) continue;
         const char *token = JS_ToCString(ctx, argv[i]);
-        if (!token) continue;
-        
-        // Find and remove
-        for (int j = 0; j < len; j++) {
-            GCValue item = JS_GetPropertyUint32(ctx, tokens, j);
-            const char *item_str = JS_ToCString(ctx, item);
-            if (item_str && strcmp(item_str, token) == 0) {
-                // Shift remaining elements
-                for (int k = j; k < len - 1; k++) {
-                    GCValue next = JS_GetPropertyUint32(ctx, tokens, k + 1);
-                    JS_SetPropertyUint32(ctx, tokens, k, next);
-                }
-                JS_SetPropertyUint32(ctx, tokens, len - 1, JS_UNDEFINED);
-                len--;
-                j--;  // Check same index again
-                break;
+        if (!token || !token[0]) continue;
+        for (int j = 0; j < count; j++) {
+            if (tokens[j] && strcmp(tokens[j], token) == 0) {
+                free(tokens[j]);
+                tokens[j] = NULL;
             }
         }
     }
-    
-    return JS_UNDEFINED;
-}
 
-// DOMTokenList.contains(token) - defined before toggle
-GCValue js_dom_token_list_contains(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)this_val;
-    if (argc < 1) return JS_FALSE;
-    if (!JS_IsString(argv[0])) return JS_FALSE;
-    
-    const char *token = JS_ToCString(ctx, argv[0]);
-    if (!token) return JS_FALSE;
-    
-    GCValue tokens = JS_GetPropertyStr(ctx, this_val, "__tokens");
-    if (!JS_IsArray(ctx, tokens)) return JS_FALSE;
-    
-    // Get length
-    GCValue len_val = JS_GetPropertyStr(ctx, tokens, "length");
-    int len;
-    JS_ToInt32(ctx, &len, len_val);
-    
-    // Search for token
-    for (int i = 0; i < len; i++) {
-        GCValue item = JS_GetPropertyUint32(ctx, tokens, i);
-        const char *item_str = JS_ToCString(ctx, item);
-        if (item_str && strcmp(item_str, token) == 0) {
-            return JS_NewBool(ctx, 1);
-        }
+    char new_class[4096];
+    new_class[0] = '\0';
+    size_t pos = 0;
+    for (int i = 0; i < count; i++) {
+        if (!tokens[i]) continue;
+        size_t len = strlen(tokens[i]);
+        if (pos + len + 1 >= sizeof(new_class)) break;
+        if (pos > 0) new_class[pos++] = ' ';
+        memcpy(new_class + pos, tokens[i], len);
+        pos += len;
     }
-    
-    return JS_NewBool(ctx, 0);
+    new_class[pos] = '\0';
+    token_list_set_class_name(ctx, elem, new_class);
+
+    token_list_free_tokens(tokens, count);
+    free(class_name);
+    return JS_UNDEFINED;
 }
 
 // DOMTokenList.toggle(token, force)
 GCValue js_dom_token_list_toggle(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)this_val;
-    if (argc < 1) return JS_NewBool(ctx, 0);
-    
+    if (argc < 1 || !JS_IsString(argv[0])) return JS_NewBool(ctx, 0);
+    const char *token = JS_ToCString(ctx, argv[0]);
+    if (!token || !token[0]) return JS_NewBool(ctx, 0);
+
     int force = -1;  // -1 means auto
     if (argc >= 2) {
         int bool_val = JS_ToBool(ctx, argv[1]);
@@ -337,45 +431,45 @@ GCValue js_dom_token_list_toggle(JSContextHandle ctx, GCValue this_val, int argc
             force = bool_val ? 1 : 0;
         }
     }
-    
-    // Check if token exists
-    GCValue exists = js_dom_token_list_contains(ctx, this_val, 1, argv);
+
+    GCValue elem = token_list_get_element(ctx, this_val);
+    if (JS_IsUndefined(elem) || JS_IsNull(elem)) return JS_NewBool(ctx, 0);
+
+    GCValue contains_args[1] = { argv[0] };
+    GCValue exists = js_dom_token_list_contains(ctx, this_val, 1, contains_args);
     int has_token = JS_ToBool(ctx, exists);
-    
+
     if (force == 1 || (force == -1 && !has_token)) {
-        // Add token
         js_dom_token_list_add(ctx, this_val, 1, argv);
         return JS_NewBool(ctx, 1);
     } else if (force == 0 || (force == -1 && has_token)) {
-        // Remove token
         js_dom_token_list_remove(ctx, this_val, 1, argv);
         return JS_NewBool(ctx, 0);
     }
-    
+
     return JS_NewBool(ctx, has_token);
 }
 
 // DOMTokenList.forEach(callback)
 GCValue js_dom_token_list_for_each(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)this_val;
     if (argc < 1 || !JS_IsFunction(ctx, argv[0])) return JS_UNDEFINED;
-    
-    GCValue tokens = JS_GetPropertyStr(ctx, this_val, "__tokens");
-    if (!JS_IsArray(ctx, tokens)) return JS_UNDEFINED;
-    
-    // Get length
-    GCValue len_val = JS_GetPropertyStr(ctx, tokens, "length");
-    int len;
-    JS_ToInt32(ctx, &len, len_val);
-    
-    // Call callback for each token
+
+    GCValue elem = token_list_get_element(ctx, this_val);
+    if (JS_IsUndefined(elem) || JS_IsNull(elem)) return JS_UNDEFINED;
+
+    char *class_name = token_list_get_class_name(ctx, elem);
+    char *tokens[256];
+    int count = token_list_parse(class_name, tokens, 256);
+
     GCValue callback = argv[0];
-    for (int i = 0; i < len; i++) {
-        GCValue item = JS_GetPropertyUint32(ctx, tokens, i);
+    for (int i = 0; i < count; i++) {
+        GCValue item = JS_NewString(ctx, tokens[i] ? tokens[i] : "");
         GCValue args[3] = { item, JS_NewInt32(ctx, i), this_val };
         JS_Call(ctx, callback, JS_UNDEFINED, 3, args);
     }
-    
+
+    token_list_free_tokens(tokens, count);
+    free(class_name);
     return JS_UNDEFINED;
 }
 
