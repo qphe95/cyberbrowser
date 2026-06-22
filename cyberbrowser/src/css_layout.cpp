@@ -156,6 +156,10 @@ static bool layout_build_nodes(LayoutContext *ctx, const int *map)
         box->align_items = CSS_ALIGN_STRETCH;
         box->font_size = 16.0;
         box->font_family[0] = '\0';
+        box->color_r = 0.0;
+        box->color_g = 0.0;
+        box->color_b = 0.0;
+        box->color_a = 1.0;
         box->flex_basis = -1.0;
         box->flex_grow = 0.0;
         box->flex_shrink = 1.0;
