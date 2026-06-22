@@ -11,6 +11,8 @@
 extern "C" {
 #endif
 
+struct TextShaper;
+
 typedef struct VulkanRenderer {
     VkInstance instance;
     VkPhysicalDevice physicalDevice;
@@ -75,6 +77,8 @@ typedef struct VulkanRenderer {
     size_t vertShaderSize;
     const uint8_t *fragShaderData;
     size_t fragShaderSize;
+
+    struct TextShaper *fontShaper;
 } VulkanRenderer;
 
 bool vk_renderer_init(VulkanRenderer *r, VkInstance instance, VkSurfaceKHR surface,
@@ -86,6 +90,8 @@ bool vk_renderer_update_vertices(VulkanRenderer *r, const void *vertexData, uint
 bool vk_renderer_draw(VulkanRenderer *r, const void *vertexData, uint32_t vertexCount);
 bool vk_renderer_display_list(VulkanRenderer *r, const DisplayList *dl);
 bool vk_renderer_capture_framebuffer(VulkanRenderer *r, const char *bmpPath);
+bool vk_renderer_load_font(VulkanRenderer *r, const char *ttf_path, float size_pixels);
+struct TextShaper *vk_renderer_get_font_shaper(VulkanRenderer *r);
 
 #ifdef __cplusplus
 }

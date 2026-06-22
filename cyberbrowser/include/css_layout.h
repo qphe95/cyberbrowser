@@ -95,6 +95,10 @@ typedef struct LayoutBox {
     double color_r, color_g, color_b, color_a;
     double background_color_r, background_color_g, background_color_b, background_color_a;
 
+    /* Resolved typography. */
+    double font_size;
+    char   font_family[64];
+
     CssDisplay display;
     CssVisibility visibility;
     CssFlexDirection flex_direction;

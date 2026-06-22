@@ -410,6 +410,15 @@ int main(int argc, char *argv[]) {
 
         DisplayList dl;
         display_list_init(&dl);
+        const char *font_paths[] = {
+            "third_party/fonts/Roboto-Regular.ttf",
+            "../third_party/fonts/Roboto-Regular.ttf",
+            "../../third_party/fonts/Roboto-Regular.ttf",
+            NULL
+        };
+        for (int i = 0; font_paths[i]; i++) {
+            if (display_list_set_default_font(font_paths[i], 16.0f)) break;
+        }
         if (css_layout_build_display_list(&layout, &dl)) {
             printf("Display list commands: %d\n", dl.count);
 

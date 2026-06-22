@@ -1,5 +1,6 @@
 #include "vulkan_renderer.h"
 #include "display_list.h"
+#include "text_shaper.h"
 
 #include "vulkan_font_stub.h"
 #include "platform.h"
@@ -362,6 +363,12 @@ static void transition_image_layout(VulkanRenderer *r, VkImage image, VkImageLay
         barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
         destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    } else if (oldLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL &&
+               newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+        barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        sourceStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
     } else {
         barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
@@ -590,10 +597,24 @@ static VkShaderModule create_shader_module(VulkanRenderer *r, const uint8_t *dat
    Font Atlas
    ======================================================================== */
 
-static bool upload_font_atlas(VulkanRenderer *r, uint8_t *atlas) {
+static bool upload_font_atlas(VulkanRenderer *r, uint8_t *atlas, int width, int height) {
+    if (r->fontImageView != VK_NULL_HANDLE) {
+        vkDestroyImageView(r->device, r->fontImageView, NULL);
+        r->fontImageView = VK_NULL_HANDLE;
+    }
+    if (r->fontImage != VK_NULL_HANDLE) {
+        vkDestroyImage(r->device, r->fontImage, NULL);
+        r->fontImage = VK_NULL_HANDLE;
+    }
+    if (r->fontImageMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(r->device, r->fontImageMemory, NULL);
+        r->fontImageMemory = VK_NULL_HANDLE;
+    }
+
+    size_t bytes = (size_t)width * (size_t)height;
     VkBuffer stagingBuffer = VK_NULL_HANDLE;
     VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
-    if (!create_buffer(r, FONT_ATLAS_SIZE * FONT_ATLAS_SIZE,
+    if (!create_buffer(r, bytes,
                        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                        &stagingBuffer, &stagingMemory)) {
@@ -601,11 +622,11 @@ static bool upload_font_atlas(VulkanRenderer *r, uint8_t *atlas) {
     }
 
     void *data = NULL;
-    vkMapMemory(r->device, stagingMemory, 0, FONT_ATLAS_SIZE * FONT_ATLAS_SIZE, 0, &data);
-    memcpy(data, atlas, FONT_ATLAS_SIZE * FONT_ATLAS_SIZE);
+    vkMapMemory(r->device, stagingMemory, 0, bytes, 0, &data);
+    memcpy(data, atlas, bytes);
     vkUnmapMemory(r->device, stagingMemory);
 
-    if (!create_image(r, FONT_ATLAS_SIZE, FONT_ATLAS_SIZE, VK_FORMAT_R8_UNORM,
+    if (!create_image(r, (uint32_t)width, (uint32_t)height, VK_FORMAT_R8_UNORM,
                       VK_IMAGE_TILING_OPTIMAL,
                       VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
@@ -615,7 +636,7 @@ static bool upload_font_atlas(VulkanRenderer *r, uint8_t *atlas) {
         return false;
     }
     transition_image_layout(r, r->fontImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    copy_buffer_to_image(r, stagingBuffer, r->fontImage, FONT_ATLAS_SIZE, FONT_ATLAS_SIZE);
+    copy_buffer_to_image(r, stagingBuffer, r->fontImage, (uint32_t)width, (uint32_t)height);
     transition_image_layout(r, r->fontImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     vkDestroyBuffer(r->device, stagingBuffer, NULL);
@@ -627,16 +648,31 @@ static bool upload_font_atlas(VulkanRenderer *r, uint8_t *atlas) {
     return true;
 }
 
+static bool update_font_descriptor_set(VulkanRenderer *r)
+{
+    if (r->descriptorSet == VK_NULL_HANDLE || r->fontImageView == VK_NULL_HANDLE) return false;
+    VkDescriptorImageInfo imageInfo = {};
+    imageInfo.sampler = r->fontSampler;
+    imageInfo.imageView = r->fontImageView;
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkWriteDescriptorSet write = {};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = r->descriptorSet;
+    write.dstBinding = 0;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.descriptorCount = 1;
+    write.pImageInfo = &imageInfo;
+    vkUpdateDescriptorSets(r->device, 1, &write, 0, NULL);
+    return true;
+}
+
 static bool create_font_resources(VulkanRenderer *r) {
     uint8_t *atlas = (uint8_t *)malloc(FONT_ATLAS_SIZE * FONT_ATLAS_SIZE);
     if (!atlas) { LOGE("Failed to allocate font atlas"); return false; }
-    if (!build_ttf_atlas(atlas)) {
-        LOGE("Failed to build TTF atlas");
-        free(atlas);
-        return false;
-    }
+    memset(atlas, 0, FONT_ATLAS_SIZE * FONT_ATLAS_SIZE);
 
-    if (!upload_font_atlas(r, atlas)) {
+    if (!upload_font_atlas(r, atlas, FONT_ATLAS_SIZE, FONT_ATLAS_SIZE)) {
         free(atlas);
         return false;
     }
@@ -690,21 +726,39 @@ static bool create_font_resources(VulkanRenderer *r) {
     result = vkAllocateDescriptorSets(r->device, &allocInfo, &r->descriptorSet);
     if (result != VK_SUCCESS) { LOGE("vkAllocateDescriptorSets failed: %d", result); return false; }
 
-    VkDescriptorImageInfo imageInfo = {};
-    imageInfo.sampler = r->fontSampler;
-    imageInfo.imageView = r->fontImageView;
-    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-    VkWriteDescriptorSet write = {};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = r->descriptorSet;
-    write.dstBinding = 0;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    write.descriptorCount = 1;
-    write.pImageInfo = &imageInfo;
-    vkUpdateDescriptorSets(r->device, 1, &write, 0, NULL);
-
+    if (!update_font_descriptor_set(r)) return false;
     return true;
+}
+
+bool vk_renderer_load_font(VulkanRenderer *r, const char *ttf_path, float size_pixels)
+{
+    if (!r || !ttf_path) return false;
+    if (r->fontShaper) {
+        text_shaper_destroy(r->fontShaper);
+        r->fontShaper = NULL;
+    }
+    TextShaper *shaper = text_shaper_create(ttf_path, size_pixels);
+    if (!shaper) {
+        LOGE("Failed to load font: %s", ttf_path);
+        return false;
+    }
+    if (!upload_font_atlas(r, (uint8_t *)text_shaper_atlas_pixels(shaper),
+                           text_shaper_atlas_width(shaper),
+                           text_shaper_atlas_height(shaper))) {
+        text_shaper_destroy(shaper);
+        return false;
+    }
+    if (!update_font_descriptor_set(r)) {
+        text_shaper_destroy(shaper);
+        return false;
+    }
+    r->fontShaper = shaper;
+    return true;
+}
+
+TextShaper *vk_renderer_get_font_shaper(VulkanRenderer *r)
+{
+    return r ? r->fontShaper : NULL;
 }
 
 /* ========================================================================
@@ -1078,6 +1132,10 @@ static void cleanup_swapchain(VulkanRenderer *r) {
 
 void vk_renderer_cleanup(VulkanRenderer *r) {
     cleanup_swapchain(r);
+    if (r->fontShaper) {
+        text_shaper_destroy(r->fontShaper);
+        r->fontShaper = NULL;
+    }
     if (r->vertexBuffer != VK_NULL_HANDLE) {
         vkDestroyBuffer(r->device, r->vertexBuffer, NULL);
         r->vertexBuffer = VK_NULL_HANDLE;

@@ -61,6 +61,9 @@ bool display_list_add_glyph(DisplayList *dl, float x, float y, float w, float h,
                             uint32_t glyph_index,
                             float r, float g, float b, float a);
 
+/* Set a TTF font to use when rendering text nodes. Pass NULL to unload. */
+bool display_list_set_default_font(const char *ttf_path, float size_pixels);
+
 /* Build a display list from a resolved LayoutContext. */
 bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl);
 

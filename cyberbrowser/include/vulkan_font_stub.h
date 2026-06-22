@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define FONT_ATLAS_SIZE 256
+#define FONT_ATLAS_SIZE 1024
 
 /* Stub font atlas builder: fills the atlas with a neutral gray. */
 bool build_ttf_atlas(uint8_t *atlas);

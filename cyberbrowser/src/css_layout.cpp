@@ -154,6 +154,8 @@ static bool layout_build_nodes(LayoutContext *ctx, const int *map)
         box->flex_wrap = CSS_FLEX_WRAP_NOWRAP;
         box->justify_content = CSS_JUSTIFY_FLEX_START;
         box->align_items = CSS_ALIGN_STRETCH;
+        box->font_size = 16.0;
+        box->font_family[0] = '\0';
         box->flex_basis = -1.0;
         box->flex_grow = 0.0;
         box->flex_shrink = 1.0;
@@ -583,6 +585,19 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     } else if (strcasecmp(prop, "background-color") == 0) {
         css_parse_color(value, &box->background_color_r, &box->background_color_g,
                         &box->background_color_b, &box->background_color_a);
+    } else if (strcasecmp(prop, "font-size") == 0) {
+        box->font_size = css_parse_length(value, parent_width, viewport_width);
+        if (box->font_size <= 0.0) box->font_size = 16.0;
+    } else if (strcasecmp(prop, "font-family") == 0) {
+        /* Keep only the first comma-separated family name, stripped of quotes and whitespace. */
+        const char *p = value;
+        while (*p && isspace((unsigned char)*p)) p++;
+        if (*p == '"' || *p == '\'') p++;
+        size_t len = 0;
+        while (p[len] && p[len] != ',' && p[len] != '"' && p[len] != '\'' && !isspace((unsigned char)p[len])) len++;
+        if (len >= sizeof(box->font_family)) len = sizeof(box->font_family) - 1;
+        memcpy(box->font_family, p, len);
+        box->font_family[len] = '\0';
     }
 }
 
@@ -1314,6 +1329,14 @@ static void layout_top_down_node(LayoutContext *ctx, int idx)
             box->color_g = parent->color_g;
             box->color_b = parent->color_b;
             box->color_a = parent->color_a;
+        }
+
+        /* Inherit font properties. */
+        if (box->font_size <= 0.0 || (box->font_size == 16.0 && parent->font_size != 16.0)) {
+            box->font_size = parent->font_size;
+        }
+        if (box->font_family[0] == '\0') {
+            memcpy(box->font_family, parent->font_family, sizeof(box->font_family));
         }
 
         if (parent->display == CSS_DISPLAY_FLEX) {

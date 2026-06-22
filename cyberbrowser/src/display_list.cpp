@@ -4,6 +4,7 @@
 
 #include "display_list.h"
 #include "platform.h"
+#include "text_shaper.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -90,6 +91,28 @@ bool display_list_add_glyph(DisplayList *dl, float x, float y, float w, float h,
     return true;
 }
 
+/* Global default font used when the display list encounters text nodes. */
+static TextShaper *g_default_font = NULL;
+
+bool display_list_set_default_font(const char *ttf_path, float size_pixels)
+{
+    if (g_default_font) {
+        text_shaper_destroy(g_default_font);
+        g_default_font = NULL;
+    }
+    if (!ttf_path) return true;
+    g_default_font = text_shaper_create(ttf_path, size_pixels);
+    return g_default_font != NULL;
+}
+
+static bool text_is_whitespace(const char *s)
+{
+    for (; *s; s++) {
+        if (!isspace((unsigned char)*s)) return false;
+    }
+    return true;
+}
+
 static bool node_has_hidden_class(LayoutContext *ctx, int node_idx)
 {
     if (node_idx < 0 || node_idx >= ctx->tree.count) return false;
@@ -163,6 +186,26 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                                          1.0f,
                                          0.75f, 0.75f, 0.75f, 1.0f)) {
                 return false;
+            }
+        }
+
+        /* Emit glyphs for text nodes when a default font is available. */
+        if (g_default_font && ctx->doc) {
+            HtmlNode *node = (HtmlNode *)po_array_payload(&ctx->doc->array,
+                                                          ctx->tree.nodes[i].dom_node_idx);
+            if (node && node->type == HTML_NODE_TEXT &&
+                node->text_content && node->text_len > 0 &&
+                !text_is_whitespace(node->text_content)) {
+                if (!text_shaper_shape_to_display_list(g_default_font,
+                                                       node->text_content,
+                                                       (float)box->x, (float)box->y,
+                                                       (float)box->color_r,
+                                                       (float)box->color_g,
+                                                       (float)box->color_b,
+                                                       (float)box->color_a,
+                                                       dl)) {
+                    return false;
+                }
             }
         }
     }
