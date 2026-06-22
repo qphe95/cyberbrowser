@@ -27,6 +27,7 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
 GCValue js_node_cloneNode_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_node_contains_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_node_getRootNode_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_node_get_ownerDocument(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_querySelector_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_querySelectorAll_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 
@@ -977,6 +978,30 @@ GCValue js_node_get_previousSibling(JSContextHandle ctx, GCValue this_val, int a
     return JS_IsNull(prev) ? JS_NULL : prev;
 }
 
+/* Set both the internal DOMNode ownerDocument and the JS ownerDocument property. */
+void dom_node_set_owner_document(JSContextHandle ctx, GCValue node, GCValue doc) {
+    DOMNodeHandle dom_node = get_dom_node(ctx, node);
+    if (dom_node.valid()) {
+        dom_node.set_owner_document(doc);
+    }
+    // Also set as own property for code that reads it before the getter is available
+    // or for nodes without DOMNode data.
+    JS_SetPropertyStr(ctx, node, "ownerDocument", doc);
+}
+
+GCValue js_node_get_ownerDocument(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    DOMNodeHandle node = get_dom_node(ctx, this_val);
+    if (!node.valid()) {
+        return JS_NULL;
+    }
+    GCValue doc = node.owner_document();
+    if (JS_IsUndefined(doc) || JS_IsNull(doc)) {
+        return JS_NULL;
+    }
+    return doc;
+}
+
 GCValue js_node_get_parentNode(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     DOMNodeHandle node = get_dom_node(ctx, this_val);
@@ -1649,7 +1674,7 @@ GCValue js_element_querySelectorAll_real(JSContextHandle ctx, GCValue this_val, 
 // Element Content Getters/Setters
 // ============================================================================
 
-// classList getter - returns DOMTokenList stub
+// classList getter - returns a functional DOMTokenList backed by className
 GCValue js_element_get_classList(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     // Check if element already has a classList
@@ -1657,13 +1682,16 @@ GCValue js_element_get_classList(JSContextHandle ctx, GCValue this_val, int argc
     if (!JS_IsUndefined(existing) && !JS_IsNull(existing)) {
         return existing;
     }
-    // Create DOMTokenList stub
+    // Create functional DOMTokenList
     GCValue classList = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, classList, "add", JS_NewCFunction(ctx, js_dummy_function, "add", 1));
-    JS_SetPropertyStr(ctx, classList, "remove", JS_NewCFunction(ctx, js_dummy_function, "remove", 1));
-    JS_SetPropertyStr(ctx, classList, "toggle", JS_NewCFunction(ctx, js_dummy_function_true, "toggle", 1));
-    JS_SetPropertyStr(ctx, classList, "contains", JS_NewCFunction(ctx, js_false, "contains", 1));
-    JS_SetPropertyStr(ctx, classList, "item", JS_NewCFunction(ctx, js_null, "item", 1));
+    // Back-reference to the element so token methods can sync className
+    JS_SetPropertyStr(ctx, classList, "__element", this_val);
+    JS_SetPropertyStr(ctx, classList, "add", JS_NewCFunction(ctx, js_dom_token_list_add, "add", 1));
+    JS_SetPropertyStr(ctx, classList, "remove", JS_NewCFunction(ctx, js_dom_token_list_remove, "remove", 1));
+    JS_SetPropertyStr(ctx, classList, "toggle", JS_NewCFunction(ctx, js_dom_token_list_toggle, "toggle", 2));
+    JS_SetPropertyStr(ctx, classList, "contains", JS_NewCFunction(ctx, js_dom_token_list_contains, "contains", 1));
+    JS_SetPropertyStr(ctx, classList, "item", JS_NewCFunction(ctx, js_dom_token_list_item, "item", 1));
+    JS_SetPropertyStr(ctx, classList, "forEach", JS_NewCFunction(ctx, js_dom_token_list_for_each, "forEach", 1));
     JS_SetPropertyStr(ctx, classList, "length", JS_NewInt32(ctx, 0));
     // Store on element for reuse
     JS_SetPropertyStr(ctx, this_val, "__classList", classList);

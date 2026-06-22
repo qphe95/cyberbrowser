@@ -15,6 +15,7 @@
 #include "platform.h"
 #include "browser_api_impl_types.h"
 #include "browser_api_impl_handles.h"
+#include "browser_api_impl_internal.h"
 
 /* Timer API functions from browser_api_impl.cpp */
 extern "C" int timer_process_due(JSContextHandle ctx);
@@ -1200,6 +1201,11 @@ GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int ar
                 }
             }
         }
+    }
+    
+    // Set ownerDocument on newly created elements.
+    if (!JS_IsNull(elem) && !JS_IsUndefined(elem)) {
+        dom_node_set_owner_document(ctx, elem, this_val);
     }
     
     return elem;

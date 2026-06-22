@@ -90,6 +90,7 @@ GCValue js_css_style_decl_get_property_priority(JSContextHandle ctx, GCValue thi
 GCValue js_dom_token_list_add(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_dom_token_list_remove(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_dom_token_list_toggle(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_dom_token_list_item(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_dom_token_list_for_each(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_service_worker_register(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_service_worker_get_registration(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
@@ -129,6 +130,8 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
 GCValue js_node_cloneNode_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_node_contains_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_node_getRootNode_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_node_get_ownerDocument(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+void dom_node_set_owner_document(JSContextHandle ctx, GCValue node, GCValue doc);
 GCValue js_element_querySelector_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_querySelectorAll_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 bool matches_selector(JSContextHandle ctx, GCValue elem, const char* selector);

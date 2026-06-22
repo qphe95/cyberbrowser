@@ -128,6 +128,9 @@ static GCValue js_document_create_text_node(JSContextHandle ctx, GCValue this_va
     JS_SetPropertyStr(ctx, node, "textContent", JS_NewString(ctx, text));
     JS_SetPropertyStr(ctx, node, "length", JS_NewInt32(ctx, (int)strlen(text)));
     
+    // Set ownerDocument on the text node.
+    dom_node_set_owner_document(ctx, node, this_val);
+    
     return node;
 }
 
@@ -1232,10 +1235,6 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // - JS_SetPropertyStr: duplicates the value (refcount +1)
     // After setting a property, we MUST free the local reference!
     
-    // Helper to set up prototype chain using Object.setPrototypeOf
-    object_ctor = JS_GetPropertyStr(ctx, global, "Object");
-    GCValue set_proto_of = JS_GetPropertyStr(ctx, object_ctor, "setPrototypeOf");
-    
     // EventTarget constructor (base of all DOM constructors)
     GCValue event_target_ctor = JS_NewCFunction2(ctx, js_dummy_function, "EventTarget", 0, JS_CFUNC_constructor, 0);
     GCValue event_target_proto = JS_NewObject(ctx);
@@ -1505,57 +1504,10 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, window, "ProcessingInstruction", processing_instruction_ctor);
 
 
-    // ===== Ensure DOM Prototype Chain Integrity =====
-    // Re-fetch prototypes from global to ensure chains are properly linked
-    // This handles cases where JS code may have modified prototypes
-    
-    GCValue event_target_check = JS_GetPropertyStr(ctx, global, "EventTarget");
-    GCValue node_check = JS_GetPropertyStr(ctx, global, "Node");
-    GCValue element_check = JS_GetPropertyStr(ctx, global, "Element");
-    GCValue html_element_check = JS_GetPropertyStr(ctx, global, "HTMLElement");
-    GCValue doc_fragment_check = JS_GetPropertyStr(ctx, global, "DocumentFragment");
-    
-    GCValue event_target_proto_check = js_get_prototype(ctx, event_target_check);
-    GCValue node_proto_check = js_get_prototype(ctx, node_check);
-    GCValue element_proto_check = js_get_prototype(ctx, element_check);
-    GCValue html_element_proto_check = js_get_prototype(ctx, html_element_check);
-    GCValue doc_fragment_proto_check = js_get_prototype(ctx, doc_fragment_check);
-    
-    // Ensure prototype chains using Object.setPrototypeOf
-    if (!JS_IsUndefined(node_proto_check) && !JS_IsNull(node_proto_check) &&
-        !JS_IsUndefined(event_target_proto_check) && !JS_IsNull(event_target_proto_check)) {
-        GCValue args1[2] = { node_proto_check, event_target_proto_check };
-
-    }
-    
-    if (!JS_IsUndefined(element_proto_check) && !JS_IsNull(element_proto_check) &&
-        !JS_IsUndefined(node_proto_check) && !JS_IsNull(node_proto_check)) {
-        GCValue args2[2] = { element_proto_check, node_proto_check };
-
-    }
-    
-    if (!JS_IsUndefined(html_element_proto_check) && !JS_IsNull(html_element_proto_check) &&
-        !JS_IsUndefined(element_proto_check) && !JS_IsNull(element_proto_check)) {
-        GCValue args3[2] = { html_element_proto_check, element_proto_check };
-
-    }
-    
-    if (!JS_IsUndefined(doc_fragment_proto_check) && !JS_IsNull(doc_fragment_proto_check) &&
-        !JS_IsUndefined(node_proto_check) && !JS_IsNull(node_proto_check)) {
-        GCValue args4[2] = { doc_fragment_proto_check, node_proto_check };
-
-    }
-
-
-
-
-
-
-
-
-
-
-    // Clean up Object.setPrototypeOf helper
+    // ===== DOM Prototype Chain =====
+    // Prototype chains are already wired above via JS_SetPrototype().
+    // The previous Object.setPrototypeOf integrity block was inert (it built
+    // argument arrays but never invoked the function), so it is removed.
 
 
     // node_proto will be freed after adding methods below
@@ -1636,6 +1588,12 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JSAtom node_name_atom = JS_NewAtom(ctx, "nodeName");
     JS_DefinePropertyGetSet(ctx, node_proto, node_name_atom, node_name_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, node_name_atom);
+    
+    // ownerDocument getter
+    GCValue owner_document_getter = JS_NewCFunction(ctx, js_node_get_ownerDocument, "get ownerDocument", 0);
+    JSAtom owner_document_atom = JS_NewAtom(ctx, "ownerDocument");
+    JS_DefinePropertyGetSet(ctx, node_proto, owner_document_atom, owner_document_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_FreeAtom(ctx, owner_document_atom);
     
     // ===== HTMLElement prototype methods =====
     // attachShadow (same as Element)
@@ -1845,8 +1803,9 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     DEF_FUNC(ctx, window, "scroll", js_undefined, 2);  // Alias to scrollTo
     DEF_FUNC(ctx, window, "print", js_undefined, 0);
     DEF_FUNC(ctx, window, "postMessage", js_undefined, 2);
-    DEF_FUNC(ctx, window, "addEventListener", js_undefined, 2);
-    DEF_FUNC(ctx, window, "removeEventListener", js_undefined, 2);
+    // window.addEventListener/removeEventListener/dispatchEvent are inherited
+    // from Window.prototype (which is set to EventTarget.prototype methods).
+    // Do NOT define own-property stubs here or they will shadow the real methods.
     DEF_FUNC(ctx, window, "dispatchEvent", js_true, 1);
     DEF_FUNC(ctx, window, "getComputedStyle", js_get_computed_style, 1);
     DEF_FUNC(ctx, window, "getSelection", js_get_selection, 0);
@@ -1963,6 +1922,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         LOG_ERROR("Failed to create doc_element, creating basic object");
         doc_element = JS_NewObject(ctx);
     }
+    dom_node_set_owner_document(ctx, doc_element, document);
     
     // Add Element methods to documentElement
     JS_SetPropertyStr(ctx, doc_element, "querySelector",
@@ -2021,6 +1981,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         LOG_ERROR("Failed to create body_element, creating basic object");
         body_element = JS_NewObject(ctx);
     }
+    dom_node_set_owner_document(ctx, body_element, document);
     
     JS_SetPropertyStr(ctx, body_element, "appendChild",
         JS_NewCFunction(ctx, js_node_appendChild_real, "appendChild", 1));
@@ -2055,6 +2016,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     if (JS_IsException(head_element)) {
         head_element = JS_NewObject(ctx);
     }
+    dom_node_set_owner_document(ctx, head_element, document);
     JS_SetPropertyStr(ctx, head_element, "appendChild",
         JS_NewCFunction(ctx, js_node_appendChild_real, "appendChild", 1));
     JS_SetPropertyStr(ctx, head_element, "insertBefore",

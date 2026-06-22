@@ -18,6 +18,7 @@
 #include "platform.h"
 #include "browser_api_impl.h"
 #include "browser_api_impl_handles.h"
+#include "browser_api_impl_internal.h"
 
 #define LOG_TAG "html_dom"
 #define LOG_INFO(...) platform_log(LOG_LEVEL_INFO, LOG_TAG, __VA_ARGS__)
@@ -761,6 +762,10 @@ GCValue html_create_element_js_with_document(JSContextHandle ctx, GCValue js_doc
         DOMNodeHandle node = DOMNodeHandle::from_object(element);
         if (node.valid()) css_index_insert_node(ctx, node);
     }
+    /* Ensure ownerDocument is set even for fallback-created elements. */
+    if (!JS_IsUndefined(js_doc) && !JS_IsNull(js_doc)) {
+        dom_node_set_owner_document(ctx, element, js_doc);
+    }
     return element;
 }
 
@@ -1105,6 +1110,11 @@ bool html_populate_js_document(JSContextHandle ctx, GCValue js_doc, HtmlDocument
         ctx, js_doc,
         body ? body->tag_name : "body",
         body ? body->attributes : NULL);
+    
+    /* Ensure the root elements point back to the document. */
+    dom_node_set_owner_document(ctx, new_doc_element, js_doc);
+    dom_node_set_owner_document(ctx, new_head_element, js_doc);
+    dom_node_set_owner_document(ctx, new_body_element, js_doc);
     
     /* Transfer critical properties (dimensions, style) from old skeleton */
     html_transfer_element_properties(ctx, new_doc_element, old_doc_element);
