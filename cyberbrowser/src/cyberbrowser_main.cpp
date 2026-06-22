@@ -22,6 +22,7 @@
 #include "css_parser.h"
 #include "css_layout.h"
 #include "display_list.h"
+#include "text_shaper.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -292,6 +293,37 @@ static void draw_rect_outline(RGB *pixels, int width, int height,
     draw_vline(pixels, width, height, x1, y0, y1, r, g, b, a);
 }
 
+static void draw_glyph(RGB *pixels, int img_width, int img_height,
+                       const uint8_t *atlas, int atlas_w, int atlas_h,
+                       const DisplayListCmd *cmd)
+{
+    int ax0 = (int)floorf(cmd->u.glyph.u0 * (float)atlas_w);
+    int ay0 = (int)floorf(cmd->u.glyph.v0 * (float)atlas_h);
+    int ax1 = (int)floorf(cmd->u.glyph.u1 * (float)atlas_w);
+    int ay1 = (int)floorf(cmd->u.glyph.v1 * (float)atlas_h);
+    int gw = ax1 - ax0;
+    int gh = ay1 - ay0;
+    if (gw <= 0 || gh <= 0) return;
+
+    int dx0 = (int)floorf(cmd->x);
+    int dy0 = (int)floorf(cmd->y);
+    for (int gy = 0; gy < gh; gy++) {
+        for (int gx = 0; gx < gw; gx++) {
+            int sx = ax0 + gx;
+            int sy = ay0 + gy;
+            if (sx < 0 || sx >= atlas_w || sy < 0 || sy >= atlas_h) continue;
+            uint8_t a8 = atlas[sy * atlas_w + sx];
+            if (a8 == 0) continue;
+            int dx = dx0 + gx;
+            int dy = dy0 + gy;
+            if (dx < 0 || dx >= img_width || dy < 0 || dy >= img_height) continue;
+            float alpha = (a8 / 255.0f) * cmd->a;
+            pixels[dy * img_width + dx] = blend_over(pixels[dy * img_width + dx],
+                                                      cmd->r, cmd->g, cmd->b, alpha);
+        }
+    }
+}
+
 static bool render_display_list_to_jpg(const DisplayList *dl, const char *path,
                                        int img_width, int img_height) {
     size_t pixel_count = (size_t)img_width * (size_t)img_height;
@@ -307,6 +339,11 @@ static bool render_display_list_to_jpg(const DisplayList *dl, const char *path,
         pixels[i].g = 255;
         pixels[i].b = 255;
     }
+
+    TextShaper *font = display_list_get_default_font();
+    const uint8_t *atlas = font ? text_shaper_atlas_pixels(font) : NULL;
+    int atlas_w = font ? text_shaper_atlas_width(font) : 0;
+    int atlas_h = font ? text_shaper_atlas_height(font) : 0;
 
     for (int i = 0; i < dl->count; i++) {
         const DisplayListCmd *cmd = &dl->cmds[i];
@@ -329,8 +366,9 @@ static bool render_display_list_to_jpg(const DisplayList *dl, const char *path,
                                   x1 - offset, y1 - offset,
                                   cmd->r, cmd->g, cmd->b, cmd->a);
             }
+        } else if (cmd->type == DL_GLYPH && atlas) {
+            draw_glyph(pixels, img_width, img_height, atlas, atlas_w, atlas_h, cmd);
         }
-        /* DL_GLYPH is intentionally ignored for the wireframe view. */
     }
 
     /* stbi_write_jpg expects interleaved RGB. */
@@ -422,13 +460,13 @@ int main(int argc, char *argv[]) {
         if (css_layout_build_display_list(&layout, &dl)) {
             printf("Display list commands: %d\n", dl.count);
 
-            printf("Rendering wireframe to youtube_wireframe.jpg ...\n");
-            if (render_display_list_to_jpg(&dl, "youtube_wireframe.jpg",
+            printf("Rendering screenshot to youtube_screenshot.jpg ...\n");
+            if (render_display_list_to_jpg(&dl, "youtube_screenshot.jpg",
                                            WIREFRAME_WIDTH, WIREFRAME_HEIGHT)) {
-                printf("Saved wireframe: youtube_wireframe.jpg (%dx%d)\n",
+                printf("Saved screenshot: youtube_screenshot.jpg (%dx%d)\n",
                        WIREFRAME_WIDTH, WIREFRAME_HEIGHT);
             } else {
-                printf("WARNING: failed to write youtube_wireframe.jpg\n");
+                printf("WARNING: failed to write youtube_screenshot.jpg\n");
             }
         } else {
             printf("WARNING: css_layout_build_display_list() failed\n");

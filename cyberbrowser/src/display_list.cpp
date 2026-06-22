@@ -105,6 +105,11 @@ bool display_list_set_default_font(const char *ttf_path, float size_pixels)
     return g_default_font != NULL;
 }
 
+struct TextShaper *display_list_get_default_font(void)
+{
+    return g_default_font;
+}
+
 static bool text_is_whitespace(const char *s)
 {
     for (; *s; s++) {
