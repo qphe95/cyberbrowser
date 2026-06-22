@@ -663,6 +663,13 @@ GCValue html_create_element_js(JSContextHandle ctx, const char *tag_name, HtmlAt
             DOMNodeHandle node = DOMNodeHandle::create(ctx, DOM_NODE_TYPE_ELEMENT, tag_name);
             if (node.valid()) {
                 node.attach_to_object(element);
+                /* Copy parsed attributes into the DOMNode so the JS DOM can be
+                 * serialized back to HTML without losing information. */
+                HtmlAttribute *attr = attrs;
+                while (attr) {
+                    node.set_attribute(attr->name, attr->value);
+                    attr = attr->next;
+                }
             }
         }
     }
@@ -746,7 +753,15 @@ GCValue html_create_element_js_with_document(JSContextHandle ctx, GCValue js_doc
                     attr = attr->next;
                 }
                 DOMNodeHandle node = DOMNodeHandle::from_object(element);
-                if (node.valid()) css_index_insert_node(ctx, node);
+                if (node.valid()) {
+                    /* Copy parsed attributes into the DOMNode for HTML serialization. */
+                    attr = attrs;
+                    while (attr) {
+                        node.set_attribute(attr->name, attr->value);
+                        attr = attr->next;
+                    }
+                    css_index_insert_node(ctx, node);
+                }
                 return element;
             }
             /* Fall through to plain object if createElement failed */
@@ -1407,4 +1422,281 @@ int html_document_get_elements_by_tag(HtmlDocument *doc, const char *tag_name,
     }
     
     return count;
+}
+
+/* ============================================================================
+ * JS DOM serialization - rebuild native HTML from the JS DOM tree
+ * ============================================================================
+ * The browser maintains two DOM trees: the native HtmlDocument used by the
+ * layout engine and the JavaScript DOM mutated by page scripts.  These helpers
+ * serialize the JS DOM back to HTML so we can re-parse it into a fresh native
+ * document after mutations occur.
+ */
+
+typedef struct {
+    char *data;
+    size_t len;
+    size_t cap;
+} SerializeBuffer;
+
+static bool serialize_buf_init(SerializeBuffer *buf) {
+    if (!buf) return false;
+    buf->data = (char *)malloc(4096);
+    if (!buf->data) return false;
+    buf->data[0] = '\0';
+    buf->len = 0;
+    buf->cap = 4096;
+    return true;
+}
+
+static void serialize_buf_free(SerializeBuffer *buf) {
+    if (!buf) return;
+    free(buf->data);
+    buf->data = NULL;
+    buf->len = 0;
+    buf->cap = 0;
+}
+
+static bool serialize_buf_grow(SerializeBuffer *buf, size_t extra) {
+    if (!buf || !buf->data) return false;
+    size_t needed = buf->len + extra + 1;
+    if (needed <= buf->cap) return true;
+    size_t new_cap = buf->cap * 2;
+    while (new_cap < needed) new_cap *= 2;
+    char *new_data = (char *)realloc(buf->data, new_cap);
+    if (!new_data) return false;
+    buf->data = new_data;
+    buf->cap = new_cap;
+    return true;
+}
+
+static bool serialize_buf_append_raw(SerializeBuffer *buf, const char *s, size_t n) {
+    if (!buf || !s) return false;
+    if (n == 0) return true;
+    if (!serialize_buf_grow(buf, n)) return false;
+    memcpy(buf->data + buf->len, s, n);
+    buf->len += n;
+    buf->data[buf->len] = '\0';
+    return true;
+}
+
+static bool serialize_buf_append(SerializeBuffer *buf, const char *s) {
+    if (!s) return true;
+    return serialize_buf_append_raw(buf, s, strlen(s));
+}
+
+static void serialize_buf_append_escaped(SerializeBuffer *buf, const char *s) {
+    if (!s) return;
+    for (const char *p = s; *p; p++) {
+        switch (*p) {
+            case '&': serialize_buf_append(buf, "&amp;"); break;
+            case '<': serialize_buf_append(buf, "&lt;"); break;
+            case '>': serialize_buf_append(buf, "&gt;"); break;
+            case '"': serialize_buf_append(buf, "&quot;"); break;
+            case '\'': serialize_buf_append(buf, "&#39;"); break;
+            default:
+                if ((unsigned char)*p < 0x20 && !isspace((unsigned char)*p)) {
+                    char tmp[8];
+                    snprintf(tmp, sizeof(tmp), "&#%d;", (unsigned char)*p);
+                    serialize_buf_append(buf, tmp);
+                } else {
+                    char tmp[2] = { *p, '\0' };
+                    serialize_buf_append(buf, tmp);
+                }
+                break;
+        }
+    }
+}
+
+static void serialize_buf_append_attr(SerializeBuffer *buf, const char *name, const char *value) {
+    serialize_buf_append(buf, " ");
+    serialize_buf_append(buf, name);
+    serialize_buf_append(buf, "=\"");
+    serialize_buf_append_escaped(buf, value);
+    serialize_buf_append(buf, "\"");
+}
+
+/* Read a string property from a JS object. Returns a freshly allocated string
+ * that the caller must free, or NULL if the property is missing/undefined. */
+static char *js_object_get_string(JSContextHandle ctx, GCValue obj, const char *prop) {
+    if (JS_IsUndefined(obj) || JS_IsNull(obj)) return NULL;
+    GCValue val = JS_GetPropertyStr(ctx, obj, prop);
+    if (JS_IsUndefined(val) || JS_IsNull(val)) return NULL;
+    if (!JS_IsString(val)) return NULL;
+    const char *s = JS_ToCString(ctx, val);
+    if (!s) return NULL;
+    return strdup(s);
+}
+
+/* Return true if the attribute name is already present in the DOMNode table. */
+static bool dom_node_has_attribute(DOMNodeHandle node, const char *name) {
+    if (!node.valid() || !name) return false;
+    for (int i = 0; i < node.attribute_count(); i++) {
+        if (strcasecmp(node.attributes()[i].name, name) == 0) return true;
+    }
+    return false;
+}
+
+static void html_serialize_js_node_internal(JSContextHandle ctx, GCValue node, SerializeBuffer *buf);
+
+static void html_serialize_js_element(JSContextHandle ctx, DOMNodeHandle node, GCValue node_val, SerializeBuffer *buf) {
+    const char *tag = node.node_name();
+    if (!tag || !tag[0]) tag = "div";
+    
+    /* Normalize tag name to lowercase for HTML serialization. */
+    char tag_lower[64];
+    size_t tag_len = strlen(tag);
+    if (tag_len >= sizeof(tag_lower)) tag_len = sizeof(tag_lower) - 1;
+    for (size_t i = 0; i < tag_len; i++) tag_lower[i] = (char)tolower((unsigned char)tag[i]);
+    tag_lower[tag_len] = '\0';
+    
+    serialize_buf_append(buf, "<");
+    serialize_buf_append(buf, tag_lower);
+    
+    /* Emit attributes from the internal DOMNode attribute table. */
+    for (int i = 0; i < node.attribute_count(); i++) {
+        const char *name = node.attributes()[i].name;
+        const char *value = node.attributes()[i].value;
+        if (!name || !name[0]) continue;
+        serialize_buf_append_attr(buf, name, value ? value : "");
+    }
+    
+    /* Catch attributes that were set as JS properties but not reflected into
+     * the DOMNode table (e.g. direct property assignments by scripts). */
+    struct { const char *prop; const char *attr; } extra_attrs[] = {
+        { "id", "id" },
+        { "className", "class" },
+        { "class", "class" },
+        { "src", "src" },
+        { "href", "href" },
+        { "style", "style" },
+        { "alt", "alt" },
+        { "title", "title" },
+        { "width", "width" },
+        { "height", "height" },
+        { "type", "type" },
+        { "value", "value" },
+        { "name", "name" },
+        { "placeholder", "placeholder" },
+        { NULL, NULL }
+    };
+    for (int i = 0; extra_attrs[i].prop; i++) {
+        if (dom_node_has_attribute(node, extra_attrs[i].attr)) continue;
+        char *value = js_object_get_string(ctx, node_val, extra_attrs[i].prop);
+        if (value && value[0]) {
+            serialize_buf_append_attr(buf, extra_attrs[i].attr, value);
+        }
+        free(value);
+    }
+    
+    bool is_void = html_is_self_closing_tag(tag_lower);
+    bool is_raw = html_is_raw_content_tag(tag_lower);
+    
+    if (is_void) {
+        serialize_buf_append(buf, ">");
+        return;
+    }
+    
+    serialize_buf_append(buf, ">");
+    
+    if (is_raw) {
+        /* For raw tags emit text content directly without escaping. */
+        GCValue tc = JS_GetPropertyStr(ctx, node_val, "textContent");
+        const char *text = JS_ToCString(ctx, tc);
+        if (text) {
+            serialize_buf_append(buf, text);
+        }
+    } else {
+        /* Recurse into children. */
+        GCValue child = node.first_child();
+        while (!JS_IsNull(child)) {
+            html_serialize_js_node_internal(ctx, child, buf);
+            DOMNodeHandle child_node = get_dom_node(ctx, child);
+            if (!child_node.valid()) break;
+            child = child_node.next_sibling();
+        }
+    }
+    
+    serialize_buf_append(buf, "</");
+    serialize_buf_append(buf, tag_lower);
+    serialize_buf_append(buf, ">");
+}
+
+static void html_serialize_js_node_internal(JSContextHandle ctx, GCValue node, SerializeBuffer *buf) {
+    if (JS_IsUndefined(node) || JS_IsNull(node)) return;
+    
+    /* Plain string children may exist from older DOM creation paths. */
+    if (JS_IsString(node)) {
+        const char *s = JS_ToCString(ctx, node);
+        if (s) serialize_buf_append_escaped(buf, s);
+        return;
+    }
+    
+    DOMNodeHandle dom_node = get_dom_node(ctx, node);
+    if (!dom_node.valid()) {
+        /* Unknown object child: try to serialize children recursively. */
+        GCValue first = JS_GetPropertyStr(ctx, node, "firstChild");
+        if (!JS_IsUndefined(first) && !JS_IsNull(first)) {
+            html_serialize_js_node_internal(ctx, first, buf);
+        }
+        return;
+    }
+    
+    int node_type = dom_node.node_type();
+    if (node_type == DOM_NODE_TYPE_TEXT) {
+        const char *val = dom_node.node_value();
+        serialize_buf_append_escaped(buf, val ? val : "");
+        return;
+    }
+    if (node_type == DOM_NODE_TYPE_COMMENT) {
+        return; /* Skip comments in serialization. */
+    }
+    if (node_type == DOM_NODE_TYPE_ELEMENT) {
+        html_serialize_js_element(ctx, dom_node, node, buf);
+    }
+}
+
+/* Serialize a JS DOM node (and its descendants) to a heap-allocated HTML
+ * string. The caller must free the returned pointer. */
+char *html_serialize_js_node(JSContextHandle ctx, GCValue node) {
+    SerializeBuffer buf;
+    if (!serialize_buf_init(&buf)) return NULL;
+    html_serialize_js_node_internal(ctx, node, &buf);
+    char *result = strdup(buf.data);
+    serialize_buf_free(&buf);
+    return result;
+}
+
+/* Build a fresh native HtmlDocument from the JS document's current DOM. */
+HtmlDocument *html_document_from_js_dom(JSContextHandle ctx, GCValue js_doc) {
+    if (!ctx) return NULL;
+    
+    GCValue doc_elem = JS_NULL;
+    if (!JS_IsUndefined(js_doc) && !JS_IsNull(js_doc)) {
+        doc_elem = JS_GetPropertyStr(ctx, js_doc, "documentElement");
+    }
+    if (JS_IsUndefined(doc_elem) || JS_IsNull(doc_elem)) {
+        /* Fallback: look for documentElement on the global object. */
+        GCValue global = JS_GetGlobalObject(ctx);
+        doc_elem = JS_GetPropertyStr(ctx, global, "documentElement");
+    }
+    if (JS_IsUndefined(doc_elem) || JS_IsNull(doc_elem)) {
+        return NULL;
+    }
+    
+    char *inner = html_serialize_js_node(ctx, doc_elem);
+    if (!inner) return NULL;
+    
+    size_t html_len = strlen(inner) + 32;
+    char *html = (char *)malloc(html_len);
+    if (!html) {
+        free(inner);
+        return NULL;
+    }
+    snprintf(html, html_len, "<!doctype html>\n%s", inner);
+    free(inner);
+    
+    HtmlDocument *doc = html_parse(html, strlen(html));
+    free(html);
+    return doc;
 }

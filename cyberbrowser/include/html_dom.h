@@ -133,6 +133,13 @@ int html_document_get_elements_by_tag(HtmlDocument *doc, const char *tag_name,
 /* Create JavaScript document object with parsed HTML elements */
 GCValue html_create_js_document(JSContextHandle ctx, HtmlDocument *doc);
 
+/* Serialize a JS DOM node (and its descendants) to a heap-allocated HTML
+ * string. The caller must free the returned pointer. */
+char *html_serialize_js_node(JSContextHandle ctx, GCValue node);
+
+/* Build a fresh native HtmlDocument from the JS document's current DOM. */
+HtmlDocument *html_document_from_js_dom(JSContextHandle ctx, GCValue js_doc);
+
 /* ============================================================================
  * HTML Utility Functions
  * ============================================================================ */

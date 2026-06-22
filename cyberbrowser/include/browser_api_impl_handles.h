@@ -1821,6 +1821,16 @@ public:
         return p ? p->attribute_count : 0;
     }
 
+    const DOMAttribute* attributes() const {
+        DOMNode* p = get_ptr();
+        return p ? p->attributes : nullptr;
+    }
+
+    DOMAttribute* attributes() {
+        DOMNode* p = get_ptr();
+        return p ? p->attributes : nullptr;
+    }
+
     const char* get_attribute(const char* name) const {
         DOMNode* p = get_ptr();
         if (!p || !name) return nullptr;

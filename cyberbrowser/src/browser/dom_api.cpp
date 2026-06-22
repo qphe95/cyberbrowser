@@ -15,6 +15,15 @@
 #include "gc_value_helpers.h"
 #include "platform.h"
 
+/* Global layout-invalidation flag. DOM mutation functions set this to 1 so the
+ * main loop knows the native HtmlDocument is stale and must be rebuilt from the
+ * current JS DOM before the next layout/render pass. */
+volatile int g_dom_needs_layout = 0;
+
+void dom_request_layout(void) {
+    g_dom_needs_layout = 1;
+}
+
 // Real DOM Node Implementation
 // ============================================================================
 
@@ -735,6 +744,7 @@ GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc
         parent.set_last_child(child);
     }
     
+    dom_request_layout();
     return child;
 }
 
@@ -792,6 +802,7 @@ GCValue js_node_removeChild_real(JSContextHandle ctx, GCValue this_val, int argc
     child_node.set_previous_sibling(JS_NULL);
     child_node.set_next_sibling(JS_NULL);
     
+    dom_request_layout();
     return child;
 }
 
@@ -861,6 +872,7 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
         parent.set_first_child(new_child);
     }
     
+    dom_request_layout();
     return new_child;
 }
 
@@ -1331,11 +1343,19 @@ GCValue js_element_set_attribute(JSContextHandle ctx, GCValue this_val, int argc
         // Store attribute on the object itself
         JS_SetPropertyStr(ctx, this_val, name, JS_NewString(ctx, value));
         
+        // Keep the internal DOMNode attribute table in sync so serialization
+        // back to HTML produces the mutated attributes.
+        DOMNodeHandle node = get_dom_node(ctx, this_val);
+        if (node.valid()) {
+            node.set_attribute(name, value);
+        }
+        
         // Capture URL if src is being set on any element
         if (name && strcmp(name, "src") == 0 && value && value[0]) {
             capture_url_debug(value, "element_setAttribute_src");
         }
     }
+    dom_request_layout();
     return JS_UNDEFINED;
 }
 
@@ -1368,7 +1388,13 @@ GCValue js_element_remove_attribute(JSContextHandle ctx, GCValue this_val, int a
         JSAtom atom = JS_NewAtom(ctx, name);
         JS_DeleteProperty(ctx, this_val, atom, 0);
         JS_FreeAtom(ctx, atom);
+        
+        DOMNodeHandle node = get_dom_node(ctx, this_val);
+        if (node.valid()) {
+            node.remove_attribute(name);
+        }
     }
+    dom_request_layout();
     return JS_UNDEFINED;
 }
 
@@ -1396,11 +1422,13 @@ GCValue js_element_toggle_attribute(JSContextHandle ctx, GCValue this_val, int a
         // Add attribute (empty string)
         JS_SetPropertyStr(ctx, this_val, name, JS_NewString(ctx, ""));
         JS_FreeAtom(ctx, atom);
+        dom_request_layout();
         return JS_TRUE;
     } else {
         // Remove attribute
         JS_DeleteProperty(ctx, this_val, atom, 0);
         JS_FreeAtom(ctx, atom);
+        dom_request_layout();
         return JS_FALSE;
     }
 }
@@ -1409,7 +1437,9 @@ GCValue js_element_toggle_attribute(JSContextHandle ctx, GCValue this_val, int a
 GCValue js_element_set_attribute_ns(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 3) return JS_ThrowTypeError(ctx, "setAttributeNS requires 3 arguments");
     // Ignore namespace, treat as regular setAttribute
-    return js_element_set_attribute(ctx, this_val, argc - 1, argv + 1);
+    GCValue r = js_element_set_attribute(ctx, this_val, argc - 1, argv + 1);
+    dom_request_layout();
+    return r;
 }
 
 // Element.prototype.getAttributeNS
@@ -1423,7 +1453,9 @@ GCValue js_element_get_attribute_ns(JSContextHandle ctx, GCValue this_val, int a
 GCValue js_element_remove_attribute_ns(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 2) return JS_UNDEFINED;
     // Ignore namespace, treat as regular removeAttribute
-    return js_element_remove_attribute(ctx, this_val, argc - 1, argv + 1);
+    GCValue r = js_element_remove_attribute(ctx, this_val, argc - 1, argv + 1);
+    dom_request_layout();
+    return r;
 }
 
 // Helper to create a generic element stub for querySelector fallback
@@ -1848,6 +1880,7 @@ GCValue js_element_set_inner_html(JSContextHandle ctx, GCValue this_val, int arg
     if (!html) html = "";
     platform_log(LOG_LEVEL_INFO, "dom_api", "js_element_set_inner_html: html=%.50s", html);
     html_element_set_inner_html(ctx, this_val, html);
+    dom_request_layout();
     return JS_UNDEFINED;
 }
 
@@ -1863,6 +1896,7 @@ GCValue js_element_set_outer_html(JSContextHandle ctx, GCValue this_val, int arg
     if (argc < 1) return JS_UNDEFINED;
     // No-op for stub - in real implementation would replace element
     (void)argv;
+    dom_request_layout();
     return JS_UNDEFINED;
 }
 
@@ -1955,6 +1989,7 @@ GCValue js_node_set_text_content(JSContextHandle ctx, GCValue this_val, int argc
         js_node_appendChild_real(ctx, this_val, 1, append_args);
     }
 
+    dom_request_layout();
     return JS_UNDEFINED;
 }
 

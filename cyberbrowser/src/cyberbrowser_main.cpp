@@ -690,9 +690,10 @@ static bool render_display_list_to_jpg(const DisplayList *dl, const char *path,
 /* Phase 3 event loop helpers                                                */
 /* ------------------------------------------------------------------------- */
 
-static void pump_timers_and_jobs(JSContextHandle ctx) {
-    if (!ctx.valid()) return;
+static bool pump_timers_and_jobs(JSContextHandle ctx) {
+    if (!ctx.valid()) return false;
     JSRuntimeHandle rt = JS_GetRuntime(ctx);
+    bool did_work = false;
     int iterations = 0;
     while (iterations < 100) {
         int processed = timer_process_due(ctx);
@@ -704,8 +705,10 @@ static void pump_timers_and_jobs(JSContextHandle ctx) {
         }
         (void)ret;
         if (processed == 0 && jobs == 0) break;
+        did_work = true;
         iterations++;
     }
+    return did_work;
 }
 
 static void dispatch_page_lifecycle_events(JSContextHandle ctx) {
@@ -721,6 +724,94 @@ static void dispatch_page_lifecycle_events(JSContextHandle ctx) {
     GCValue result = JS_Eval(ctx, lifecycle_js, strlen(lifecycle_js),
                              "<lifecycle>", JS_EVAL_TYPE_GLOBAL);
     (void)result;
+}
+
+static GCValue get_global_document(JSContextHandle ctx) {
+    if (!ctx.valid()) return JS_NULL;
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue doc = JS_GetPropertyStr(ctx, global, "document");
+    return doc;
+}
+
+/* Escape a string for insertion into a single-quoted JavaScript literal. */
+static char *escape_js_string_literal(const char *s) {
+    if (!s) return strdup("");
+    size_t len = strlen(s);
+    char *out = (char *)malloc(len * 2 + 1);
+    if (!out) return NULL;
+    size_t j = 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = s[i];
+        if (c == '\\' || c == '\'') {
+            out[j++] = '\\';
+        } else if (c == '\n') {
+            out[j++] = '\\';
+            out[j++] = 'n';
+            continue;
+        } else if (c == '\r') {
+            out[j++] = '\\';
+            out[j++] = 'r';
+            continue;
+        }
+        out[j++] = c;
+    }
+    out[j] = '\0';
+    return out;
+}
+
+static void inject_grid_into_js_dom(JSContextHandle ctx, const char *grid_html) {
+    if (!ctx.valid() || !grid_html || !grid_html[0]) return;
+    char *escaped = escape_js_string_literal(grid_html);
+    if (!escaped) return;
+    size_t script_size = strlen(escaped) + 64;
+    char *script = (char *)malloc(script_size);
+    if (script) {
+        snprintf(script, script_size, "document.body.innerHTML = '%s';", escaped);
+        GCValue result = JS_Eval(ctx, script, strlen(script), "<yti_grid>", JS_EVAL_TYPE_GLOBAL);
+        (void)result;
+        free(script);
+        dom_request_layout();
+    }
+    free(escaped);
+}
+
+static bool render_document_to_jpg(HtmlDocument *doc, ImageCache *image_cache,
+                                   const char *out_path)
+{
+    if (!doc || !image_cache || !out_path) return false;
+
+    printf("Running CSS layout (%dx%d) ...\n", WIREFRAME_WIDTH, WIREFRAME_HEIGHT);
+    LayoutContext layout;
+    memset(&layout, 0, sizeof(layout));
+    bool layout_ok = css_layout_run(&layout, doc, NULL,
+                                    (double)WIREFRAME_WIDTH,
+                                    (double)WIREFRAME_HEIGHT);
+    if (!layout_ok) {
+        printf("WARNING: css_layout_run() failed\n");
+        return false;
+    }
+    printf("Layout boxes: %d\n", layout.tree.count);
+
+    DisplayList dl;
+    display_list_init(&dl);
+
+    if (css_layout_build_display_list(&layout, &dl)) {
+        printf("Display list commands: %d\n", dl.count);
+        printf("Rendering screenshot to %s ...\n", out_path);
+        if (render_display_list_to_jpg(&dl, out_path,
+                                       WIREFRAME_WIDTH, WIREFRAME_HEIGHT)) {
+            printf("Saved screenshot: %s (%dx%d)\n", out_path,
+                   WIREFRAME_WIDTH, WIREFRAME_HEIGHT);
+        } else {
+            printf("WARNING: failed to write %s\n", out_path);
+        }
+    } else {
+        printf("WARNING: css_layout_build_display_list() failed\n");
+    }
+
+    display_list_free(&dl);
+    css_layout_tree_free(&layout);
+    return true;
 }
 
 static void print_captured_googlevideo_urls(JSContextHandle ctx) {
@@ -802,9 +893,13 @@ int main(int argc, char *argv[]) {
         print_captured_googlevideo_urls(g_ctx);
     }
 
+    /* The JS DOM populated by html_execute_page_scripts is now the source of
+     * truth.  Mark it dirty so the quiescence loop performs an initial layout. */
+    dom_request_layout();
+
     /* YouTube's homepage HTML is a JS shell with no video data.  Fetch the
      * structured browse feed from youtubei and synthesize a grid of video
-     * cards that the layout engine can render as text + thumbnails. */
+     * cards directly into the JS DOM. */
     {
         printf("Fetching youtubei homepage feed ...\n");
         char yti_err[256] = {0};
@@ -815,13 +910,8 @@ int main(int argc, char *argv[]) {
             char *grid_html = build_video_grid_html_from_youtubei_json(yti_json);
             if (grid_html) {
                 printf("Generated grid HTML: %zu bytes\n", strlen(grid_html));
-                char *combined = inject_video_grid_replacing_body(html, html_size, grid_html);
-                if (combined) {
-                    free(html);
-                    html = combined;
-                    html_size = strlen(html);
-                    printf("Injected YouTube video grid (%zu bytes added)\n", strlen(grid_html));
-                }
+                inject_grid_into_js_dom(g_ctx, grid_html);
+                printf("Injected YouTube video grid (%zu bytes added)\n", strlen(grid_html));
                 free(grid_html);
             } else {
                 printf("WARNING: failed to build video grid from youtubei data\n");
@@ -832,79 +922,71 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    save_html(html, html_size);
-
-    printf("Parsing HTML ...\n");
-    HtmlDocument *doc = html_parse(html, html_size);
-    if (!doc) {
-        printf("FATAL: html_parse() failed\n");
-        free(html);
-        cleanup_browser_context();
-        platform_http_cleanup();
-        platform_cleanup();
-        return 1;
-    }
-
-    char title_buf[256];
-    const char *title = get_title_text(doc);
-    if (!title) {
-        extract_title_from_html(html, html_size, title_buf, sizeof(title_buf));
-        title = title_buf[0] ? title_buf : NULL;
-    }
-    printf("Title: %s\n", title ? title : "(none)");
-    printf("DOM nodes: %d\n", doc->array.count);
-    printf("<script> tags: %d\n", count_substrings(html, "<script"));
-    printf("ytInitialPlayerResponse marker: %s\n",
-           strstr(html, "ytInitialPlayerResponse") ? "FOUND" : "NOT FOUND");
-
-    print_body_snippet(doc);
-
-    printf("Running CSS layout (%dx%d) ...\n", WIREFRAME_WIDTH, WIREFRAME_HEIGHT);
-    LayoutContext layout;
-    memset(&layout, 0, sizeof(layout));
-    bool layout_ok = css_layout_run(&layout, doc, NULL,
-                                    (double)WIREFRAME_WIDTH,
-                                    (double)WIREFRAME_HEIGHT);
-    if (layout_ok) {
-        printf("Layout boxes: %d\n", layout.tree.count);
-
-        DisplayList dl;
-        display_list_init(&dl);
-        ImageCache *image_cache = image_cache_create();
-        display_list_set_image_cache(image_cache);
-
-        const char *font_paths[] = {
-            "third_party/fonts/Roboto-Regular.ttf",
-            "../third_party/fonts/Roboto-Regular.ttf",
-            "../../third_party/fonts/Roboto-Regular.ttf",
-            NULL
-        };
-        for (int i = 0; font_paths[i]; i++) {
-            if (display_list_set_default_font(font_paths[i], 16.0f)) break;
+    /* Save the serialized JS DOM so it can be inspected post-run. */
+    {
+        GCValue js_doc = get_global_document(g_ctx);
+        GCValue doc_elem = JS_GetPropertyStr(g_ctx, js_doc, "documentElement");
+        char *serialized = html_serialize_js_node(g_ctx, doc_elem);
+        if (serialized) {
+            save_html(serialized, strlen(serialized));
+            free(serialized);
         }
-        if (css_layout_build_display_list(&layout, &dl)) {
-            printf("Display list commands: %d\n", dl.count);
+    }
 
-            printf("Rendering screenshot to youtube_screenshot.jpg ...\n");
-            if (render_display_list_to_jpg(&dl, "youtube_screenshot.jpg",
-                                           WIREFRAME_WIDTH, WIREFRAME_HEIGHT)) {
-                printf("Saved screenshot: youtube_screenshot.jpg (%dx%d)\n",
-                       WIREFRAME_WIDTH, WIREFRAME_HEIGHT);
+    /* Phase 4: quiescence loop.  Pump timers/jobs, process completed async
+     * image loads, and rebuild the native HtmlDocument from the JS DOM whenever
+     * a mutation invalidates it.  Exit when nothing is left to do. */
+    HtmlDocument *doc = NULL;
+    ImageCache *image_cache = image_cache_create();
+    display_list_set_image_cache(image_cache);
+
+    const char *font_paths[] = {
+        "third_party/fonts/Roboto-Regular.ttf",
+        "../third_party/fonts/Roboto-Regular.ttf",
+        "../../third_party/fonts/Roboto-Regular.ttf",
+        NULL
+    };
+    for (int i = 0; font_paths[i]; i++) {
+        if (display_list_set_default_font(font_paths[i], 16.0f)) break;
+    }
+
+    int loop_iterations = 0;
+    while (loop_iterations < 100) {
+        loop_iterations++;
+
+        bool had_timers = pump_timers_and_jobs(g_ctx);
+        bool had_images = image_cache_process_pending(image_cache);
+
+        if (g_dom_needs_layout) {
+            g_dom_needs_layout = 0;
+
+            GCValue js_doc = get_global_document(g_ctx);
+            HtmlDocument *new_doc = html_document_from_js_dom(g_ctx, js_doc);
+            if (new_doc) {
+                if (doc) html_document_free(doc);
+                doc = new_doc;
+
+                /* Print metadata from the rebuilt native document. */
+                const char *title = get_title_text(doc);
+                printf("Title: %s\n", title ? title : "(none)");
+                printf("DOM nodes: %d\n", doc->array.count);
+                print_body_snippet(doc);
+
+                render_document_to_jpg(doc, image_cache, "youtube_screenshot.jpg");
             } else {
-                printf("WARNING: failed to write youtube_screenshot.jpg\n");
+                printf("WARNING: failed to rebuild native document from JS DOM\n");
             }
-        } else {
-            printf("WARNING: css_layout_build_display_list() failed\n");
         }
-        display_list_free(&dl);
-        display_list_set_image_cache(NULL);
-        image_cache_destroy(image_cache);
-        css_layout_tree_free(&layout);
-    } else {
-        printf("WARNING: css_layout_run() failed\n");
+
+        if (!had_timers && !had_images && !g_dom_needs_layout &&
+            !image_cache_has_pending(image_cache)) {
+            break;
+        }
     }
 
-    html_document_free(doc);
+    if (doc) html_document_free(doc);
+    display_list_set_image_cache(NULL);
+    image_cache_destroy(image_cache);
     free(html);
 
     printf("\nYouTube homepage loaded successfully.\n");

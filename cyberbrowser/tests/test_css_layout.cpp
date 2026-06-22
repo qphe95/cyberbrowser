@@ -6,6 +6,7 @@
 #include <string.h>
 #include <stdint.h>
 #include "test_runner.h"
+#include "quickjs.h"
 #include "image_cache.h"
 #include "html_dom.h"
 #include "css_parser.h"
@@ -14,6 +15,8 @@
 #include "text_shaper.h"
 
 extern "C" void run_css_layout_tests(void);
+extern "C" JSContextHandle get_shared_test_context(void);
+extern "C" GCValue get_shared_test_global(void);
 
 static bool near_equal(double a, double b) {
     return (a > b ? a - b : b - a) < 0.001;
@@ -202,6 +205,14 @@ TEST(test_layout_img_display_list) {
     display_list_init(&dl);
     ASSERT_TRUE(css_layout_build_display_list(&ctx, &dl));
 
+    /* <img> src loading is asynchronous; the first display list contains a
+     * placeholder.  Wait for pending loads and rebuild to get the real image. */
+    image_cache_wait_pending(cache);
+
+    display_list_free(&dl);
+    display_list_init(&dl);
+    ASSERT_TRUE(css_layout_build_display_list(&ctx, &dl));
+
     bool found_image = false;
     for (int i = 0; i < dl.count; i++) {
         if (dl.cmds[i].type == DL_IMAGE) {
@@ -254,6 +265,73 @@ TEST(test_text_shaper_basic) {
     return true;
 }
 
+TEST(test_dom_mutation_sync_to_native) {
+    JSContextHandle ctx = get_shared_test_context();
+    GCValue g_global = get_shared_test_global();
+
+    /* Reset the shared document body to a known state. */
+    const char *reset_js =
+        "document.body.innerHTML = '';"
+        "var __test_div = document.createElement('div');"
+        "__test_div.id = 'mutation-test-div';"
+        "__test_div.setAttribute('style', 'width:100px; height:50px;');"
+        "document.body.appendChild(__test_div);";
+    GCValue result = JS_Eval(ctx, reset_js, strlen(reset_js),
+                             "<test_mutation>", JS_EVAL_TYPE_GLOBAL);
+    (void)result;
+
+    GCValue document = JS_GetPropertyStr(ctx, g_global, "document");
+    HtmlDocument *doc = html_document_from_js_dom(ctx, document);
+    ASSERT_TRUE(doc != NULL);
+
+    LayoutContext ctx_layout;
+    ASSERT_TRUE(css_layout_run(&ctx_layout, doc, NULL, 800.0, 600.0));
+
+    HtmlNode *div = html_document_get_element_by_id(doc, "mutation-test-div");
+    ASSERT_TRUE(div != NULL);
+    int div_idx = po_array_index_from_payload(&doc->array, div);
+    LayoutBox *box = css_layout_box_for_node(&ctx_layout, div_idx);
+    ASSERT_TRUE(box != NULL);
+    ASSERT_TRUE(near_equal(box->width, 100.0));
+    ASSERT_TRUE(near_equal(box->height, 50.0));
+
+    css_layout_tree_free(&ctx_layout);
+    html_document_free(doc);
+    return true;
+}
+
+static int g_async_cb_count = 0;
+static void async_image_cb(const char *url, void *user_data) {
+    (void)url;
+    (void)user_data;
+    g_async_cb_count++;
+}
+
+TEST(test_async_image_load_callback) {
+    const char *bmp_name = "test_async_image_tmp.bmp";
+    ASSERT_TRUE(write_minimal_bmp(bmp_name));
+
+    g_async_cb_count = 0;
+    ImageCache *cache = image_cache_create();
+    ASSERT_TRUE(cache != NULL);
+
+    int handle = image_cache_load_async(cache, bmp_name, async_image_cb, NULL);
+    ASSERT_TRUE(handle >= 0);
+    ASSERT_TRUE(g_async_cb_count == 0);
+
+    image_cache_wait_pending(cache);
+    ASSERT_TRUE(g_async_cb_count == 1);
+
+    int w = 0, h = 0, ch = 0;
+    uint8_t *pix = NULL;
+    ASSERT_TRUE(image_cache_get(cache, handle, &w, &h, &ch, &pix));
+    ASSERT_TRUE(w > 0 && h > 0);
+
+    image_cache_destroy(cache);
+    remove(bmp_name);
+    return true;
+}
+
 extern "C" void run_css_layout_tests(void) {
     printf("\n--- CSS Layout Engine Tests ---\n");
     RUN_TEST(test_layout_basic_document);
@@ -263,4 +341,6 @@ extern "C" void run_css_layout_tests(void) {
     RUN_TEST(test_layout_background_image_url);
     RUN_TEST(test_layout_img_display_list);
     RUN_TEST(test_text_shaper_basic);
+    RUN_TEST(test_dom_mutation_sync_to_native);
+    RUN_TEST(test_async_image_load_callback);
 }

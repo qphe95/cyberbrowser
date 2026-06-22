@@ -381,6 +381,18 @@ typedef struct CssDocumentState {
 } CssDocumentState;
 
 /* ============================================================================
+ * DOM mutation / layout invalidation
+ * ============================================================================ */
+
+/* Set to 1 by DOM mutation APIs. The main loop reads this flag to decide when
+ * to rebuild the native HtmlDocument from the JS DOM and re-run layout. */
+extern volatile int g_dom_needs_layout;
+
+/* Mark the document as needing a layout pass. May be called from any thread
+ * that holds the JS context (e.g. async image load callbacks). */
+void dom_request_layout(void);
+
+/* ============================================================================
  * Location object data
  * ============================================================================ */
 typedef struct {

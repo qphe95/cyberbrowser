@@ -6,6 +6,7 @@
 #include "platform.h"
 #include "text_shaper.h"
 #include "image_cache.h"
+#include "browser_api_impl_types.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -242,6 +243,36 @@ static void emit_image(DisplayList *dl, float x, float y, float w, float h, int 
     display_list_add_image(dl, x, y, w, h, handle, 0.0f, 0.0f, 1.0f, 1.0f);
 }
 
+static void on_async_image_loaded(const char *url, void *user_data)
+{
+    (void)url;
+    (void)user_data;
+    dom_request_layout();
+}
+
+static void emit_image_async(DisplayList *dl, float x, float y, float w, float h, const char *url)
+{
+    if (!g_image_cache || !url || !url[0]) return;
+    int handle = image_cache_load_async(g_image_cache, url, on_async_image_loaded, NULL);
+    if (handle < 0) return;
+
+    int img_w = 0, img_h = 0, ch = 0;
+    uint8_t *pix = NULL;
+    if (image_cache_get(g_image_cache, handle, &img_w, &img_h, &ch, &pix)) {
+        /* Image already available (local or cached): emit normally. */
+        if (w <= 0.0f) w = (float)img_w;
+        if (h <= 0.0f) h = (float)img_h;
+        if (w > 0.0f && h > 0.0f) {
+            display_list_add_image(dl, x, y, w, h, handle, 0.0f, 0.0f, 1.0f, 1.0f);
+        }
+    } else {
+        /* Still loading: draw a placeholder border so the layout box is visible. */
+        float pw = (w > 0.0f) ? w : 32.0f;
+        float ph = (h > 0.0f) ? h : 32.0f;
+        display_list_add_border(dl, x, y, pw, ph, 1.0f, 0.6f, 0.6f, 0.6f, 1.0f);
+    }
+}
+
 bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
 {
     if (!ctx || !dl) return false;
@@ -267,12 +298,9 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
             if (src && src[0]) {
                 char *url = dl_resolve_url(ctx->base_url, src);
                 if (url) {
-                    int handle = image_cache_load(g_image_cache, url);
-                    if (handle >= 0) {
-                        float w = (float)box->width;
-                        float h = (float)box->height;
-                        emit_image(dl, (float)box->x, (float)box->y, w, h, handle);
-                    }
+                    float w = (float)box->width;
+                    float h = (float)box->height;
+                    emit_image_async(dl, (float)box->x, (float)box->y, w, h, url);
                     free(url);
                 }
             }
