@@ -59,6 +59,7 @@ set(BE_SOURCES
     src/image_cache.cpp
     src/lockfree_hash_table.cpp
     src/url_analyzer.c
+    src/session_state.c
     src/tls_client.c
     src/http_download.c
     

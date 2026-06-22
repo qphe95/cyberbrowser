@@ -27,6 +27,7 @@
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
+#include "session_state.h"
 
 #define LOG_TAG "cyberbrowser"
 
@@ -209,6 +210,55 @@ static void print_body_snippet(HtmlDocument *doc) {
         child = html_node_next_sibling(doc, child);
     }
     printf("\"\n");
+}
+
+/* ------------------------------------------------------------------------- */
+/* Session continuity: visitor tokens from homepage into JS context          */
+/* ------------------------------------------------------------------------- */
+
+static void js_escape_string(const char *in, char *out, size_t out_len) {
+    size_t i = 0, j = 0;
+    while (in[i] && j + 3 < out_len) {
+        if (in[i] == '\\' || in[i] == '\'') {
+            out[j++] = '\\';
+        }
+        out[j++] = in[i++];
+    }
+    out[j] = '\0';
+}
+
+static void inject_session_tokens(JSContextHandle ctx, GCValue global, const char *html) {
+    char visitor[256] = {0};
+    const char *cookies = platform_http_get_cookies();
+    if (cookies && cookies[0]) {
+        session_extract_cookie_value(cookies, "VISITOR_INFO1_LIVE", visitor, sizeof(visitor));
+    }
+    if (!visitor[0] && html && html[0]) {
+        session_extract_json_field(html, "visitorData", visitor, sizeof(visitor));
+    }
+    if (!visitor[0]) {
+        return;
+    }
+
+    session_set_visitor_data(visitor);
+
+    char escaped[512] = {0};
+    js_escape_string(visitor, escaped, sizeof(escaped));
+
+    char script[2048];
+    snprintf(script, sizeof(script),
+        "window.ytcfg = window.ytcfg || {};"
+        "window.ytcfg.set = function(k,v){ this[k]=v; return v; };"
+        "window.ytcfg.get = function(k){ return this[k]; };"
+        "window.ytcfg.set('VISITOR_DATA', '%s');"
+        "window.ytcfg.set('CLIENT_VERSION', '2.20250122.04.00');"
+        "document.cookie = 'VISITOR_INFO1_LIVE=%s; path=/; domain=.youtube.com';"
+        "window.yt = window.yt || {};"
+        "window.yt.config_ = window.yt.config_ || {};"
+        "window.yt.config_.INNERTUBE_CLIENT_VERSION = '2.20250122.04.00';",
+        escaped, escaped);
+
+    JS_Eval(ctx, script, strlen(script), "<session>", JS_EVAL_TYPE_GLOBAL);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -669,6 +719,10 @@ int main(int argc, char *argv[]) {
         platform_cleanup();
         return 1;
     }
+
+    /* Extract VISITOR_INFO1_LIVE / visitorData and inject into JS so that
+     * fetch() and XHR can send a consistent session with youtubei calls. */
+    inject_session_tokens(g_ctx, g_global, html);
 
     /* YouTube's homepage HTML is a JS shell with no video data.  Fetch the
      * structured browse feed from youtubei and synthesize a grid of video

@@ -26,6 +26,7 @@ typedef struct {
     int status;
     char response_text[2097152];  // 256KB for large JSON responses
     char response_headers[2048];
+    char request_body[262144];    // request payload for send()
     GCValue onload;
     GCValue onerror;
     GCValue onreadystatechange;

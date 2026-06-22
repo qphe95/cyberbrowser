@@ -238,6 +238,19 @@ public:
         if (p) p->headers = val;
     }
 
+    const char* request_body() const {
+        XMLHttpRequest* p = get_ptr();
+        return p ? p->request_body : "";
+    }
+
+    void set_request_body(const char* body) {
+        XMLHttpRequest* p = get_ptr();
+        if (p) {
+            strncpy(p->request_body, body, sizeof(p->request_body) - 1);
+            p->request_body[sizeof(p->request_body) - 1] = '\0';
+        }
+    }
+
     JSContextHandle context() const {
         XMLHttpRequest* p = get_ptr();
         return p ? p->ctx : JSContextHandle();

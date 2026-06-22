@@ -15,6 +15,7 @@
 #include "platform.h"
 #include "browser_api_impl_types.h"
 #include "browser_api_impl_handles.h"
+#include "session_state.h"
 
 // Forward declaration from dom_api.cpp (used to set ownerDocument on created nodes)
 extern "C" void dom_node_set_owner_document(JSContextHandle ctx, GCValue node, GCValue doc);
@@ -47,6 +48,11 @@ void js_quickjs_set_asset_manager(AAssetManager *mgr) {
 
 // Forward declarations
 static GCValue js_dummy_function(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+static bool is_youtube_url(const char *url);
+static int collect_user_headers(JSContextHandle ctx, GCValue headers_obj,
+                                char header_bufs[][512], const char **headers_out,
+                                int max_count);
+static const char* resolve_visitor_id(JSContextHandle ctx, char *out_buf, size_t out_len);
 
 // CSSStyleDeclaration.removeProperty stub
 GCValue js_style_remove_property(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
@@ -226,6 +232,14 @@ GCValue js_xhr_constructor(JSContextHandle ctx, GCValue new_target, int argc, GC
     return obj;
 }
 
+static void js_xhr_fire_state(JSContextHandle ctx, XMLHttpRequestHandle xhr, GCValue this_val, int state) {
+    xhr.set_ready_state(state);
+    GCValue cb = JS_GetPropertyStr(ctx, this_val, "onreadystatechange");
+    if (JS_IsFunction(ctx, cb)) {
+        JS_Call(ctx, cb, this_val, 0, NULL);
+    }
+}
+
 static GCValue js_xhr_open(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     XMLHttpRequestHandle xhr = XMLHttpRequestHandle::from_object_check(ctx, this_val);
     if (!xhr.valid()) return JS_ThrowTypeError(ctx, "XMLHttpRequest internal error");
@@ -237,6 +251,10 @@ static GCValue js_xhr_open(JSContextHandle ctx, GCValue this_val, int argc, GCVa
         xhr.set_method(method);
         xhr.set_url(url);
         xhr.set_ready_state(1); // OPENED
+        xhr.set_status(0);
+        xhr.set_response_text("");
+        xhr.set_response_headers("");
+        xhr.set_request_body("");
         
         // Capture the URL - this is where we intercept requests
         record_captured_url(url);
@@ -249,19 +267,109 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
     XMLHttpRequestHandle xhr = XMLHttpRequestHandle::from_object_check(ctx, this_val);
     if (!xhr.valid()) return JS_ThrowTypeError(ctx, "XMLHttpRequest internal error");
     
+    // Store request body
+    if (argc > 0 && !JS_IsUndefined(argv[0]) && !JS_IsNull(argv[0])) {
+        if (JS_IsString(argv[0])) {
+            const char *s = JS_ToCString(ctx, argv[0]);
+            if (s) xhr.set_request_body(s);
+        } else if (JS_IsObject(argv[0])) {
+            GCValue json_str = JS_JSONStringify(ctx, argv[0], JS_UNDEFINED, JS_UNDEFINED);
+            if (!JS_IsException(json_str) && JS_IsString(json_str)) {
+                const char *s = JS_ToCString(ctx, json_str);
+                if (s) xhr.set_request_body(s);
+            }
+        }
+    }
+    
+    const char *url = xhr.url();
+    if (url && is_youtube_url(url)) {
+        bool is_post = (strcasecmp(xhr.method(), "POST") == 0);
+        char header_bufs[16][512];
+        const char *headers[16];
+        int header_count = 0;
+        
+        // User headers stored on the XHR object
+        header_count = collect_user_headers(ctx, xhr.headers(), header_bufs, headers, 16);
+        
+        if (is_post) {
+            headers[header_count++] = "Content-Type: application/json";
+        }
+        headers[header_count++] = "X-YouTube-Client-Name: 1";
+        
+        char client_version_header[128] = {0};
+        snprintf(client_version_header, sizeof(client_version_header),
+                 "X-YouTube-Client-Version: 2.20250122.04.00");
+        headers[header_count++] = client_version_header;
+        
+        char visitor_id_header[256] = {0};
+        char visitor_buf[256] = {0};
+        const char *visitor_id = resolve_visitor_id(ctx, visitor_buf, sizeof(visitor_buf));
+        if (visitor_id && visitor_id[0]) {
+            snprintf(visitor_id_header, sizeof(visitor_id_header),
+                     "X-Goog-Visitor-Id: %s", visitor_id);
+            headers[header_count++] = visitor_id_header;
+        }
+        
+        char cookie_header[1024] = {0};
+        const char *cookies = platform_http_get_cookies();
+        if (cookies && cookies[0]) {
+            snprintf(cookie_header, sizeof(cookie_header), "Cookie: %s", cookies);
+            headers[header_count++] = cookie_header;
+        }
+        
+        PlatformHttpBuffer response_buffer = {0};
+        char error_buf[256] = {0};
+        bool success = false;
+        int status_code = 0;
+        const char *req_body = xhr.request_body();
+        size_t req_body_len = strlen(req_body);
+        
+        if (is_post && req_body_len > 0) {
+            success = platform_http_post(url, req_body, req_body_len,
+                                         headers, header_count, &response_buffer,
+                                         &status_code, error_buf, sizeof(error_buf));
+        } else {
+            success = platform_http_get_with_headers(url, headers, header_count,
+                                                     &response_buffer, error_buf,
+                                                     sizeof(error_buf));
+            status_code = success ? 200 : 0;
+        }
+        
+        if (success && response_buffer.data && response_buffer.size > 0 && status_code >= 200 && status_code < 300) {
+            xhr.set_status(status_code);
+            xhr.set_response_text(response_buffer.data);
+            char rh[2048];
+            snprintf(rh, sizeof(rh), "HTTP/1.1 %d OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n", status_code, response_buffer.size);
+            xhr.set_response_headers(rh);
+            platform_http_free_buffer(&response_buffer);
+            js_xhr_fire_state(ctx, xhr, this_val, 2); // HEADERS_RECEIVED
+            js_xhr_fire_state(ctx, xhr, this_val, 3); // LOADING
+            js_xhr_fire_state(ctx, xhr, this_val, 4); // DONE
+            GCValue onload = JS_GetPropertyStr(ctx, this_val, "onload");
+            if (JS_IsFunction(ctx, onload)) JS_Call(ctx, onload, this_val, 0, NULL);
+            return JS_UNDEFINED;
+        } else {
+            platform_http_free_buffer(&response_buffer);
+            xhr.set_status(0);
+            xhr.set_response_text("");
+            js_xhr_fire_state(ctx, xhr, this_val, 4); // DONE
+            GCValue onerror = JS_GetPropertyStr(ctx, this_val, "onerror");
+            if (JS_IsFunction(ctx, onerror)) JS_Call(ctx, onerror, this_val, 0, NULL);
+            return JS_UNDEFINED;
+        }
+    }
+    
+    // Fallback for non-YouTube / non-network URLs
     xhr.set_ready_state(4); // DONE
     xhr.set_status(200);
     xhr.set_response_text("{}");
     
-    // Fire onreadystatechange
-    GCValue onreadystatechange = xhr.onreadystatechange();
-    if (!JS_IsNull(onreadystatechange)) {
+    GCValue onreadystatechange = JS_GetPropertyStr(ctx, this_val, "onreadystatechange");
+    if (JS_IsFunction(ctx, onreadystatechange)) {
         JS_Call(ctx, onreadystatechange, this_val, 0, NULL);
     }
-    
-    // Fire onload
-    GCValue onload = xhr.onload();
-    if (!JS_IsNull(onload)) {
+    GCValue onload = JS_GetPropertyStr(ctx, this_val, "onload");
+    if (JS_IsFunction(ctx, onload)) {
         JS_Call(ctx, onload, this_val, 0, NULL);
     }
     
@@ -269,10 +377,49 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
 }
 
 static GCValue js_xhr_set_request_header(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    XMLHttpRequestHandle xhr = XMLHttpRequestHandle::from_object_check(ctx, this_val);
+    if (!xhr.valid()) return JS_ThrowTypeError(ctx, "XMLHttpRequest internal error");
+    if (argc < 2) return JS_UNDEFINED;
+    const char *name = JS_ToCString(ctx, argv[0]);
+    const char *value = JS_ToCString(ctx, argv[1]);
+    if (name && value) {
+        JS_SetPropertyStr(ctx, xhr.headers(), name, JS_NewString(ctx, value));
+    }
     return JS_UNDEFINED;
 }
 
 static GCValue js_xhr_get_response_header(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    XMLHttpRequestHandle xhr = XMLHttpRequestHandle::from_object_check(ctx, this_val);
+    if (!xhr.valid()) return JS_ThrowTypeError(ctx, "XMLHttpRequest internal error");
+    if (argc < 1) return JS_NULL;
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name) return JS_NULL;
+    const char *headers = xhr.response_headers();
+    size_t name_len = strlen(name);
+    const char *p = headers;
+    while (*p) {
+        const char *line_end = strchr(p, '\n');
+        if (!line_end) line_end = p + strlen(p);
+        const char *colon = (const char*)memchr(p, ':', line_end - p);
+        if (colon) {
+            const char *key = p;
+            size_t key_len = colon - p;
+            while (key_len > 0 && (key[key_len - 1] == ' ' || key[key_len - 1] == '\t')) key_len--;
+            if (key_len == name_len && strncasecmp(key, name, name_len) == 0) {
+                const char *val = colon + 1;
+                while (val < line_end && (*val == ' ' || *val == '\t')) val++;
+                size_t val_len = line_end - val;
+                while (val_len > 0 && (val[val_len - 1] == '\r' || val[val_len - 1] == '\n')) val_len--;
+                char buf[512];
+                if (val_len >= sizeof(buf)) val_len = sizeof(buf) - 1;
+                memcpy(buf, val, val_len);
+                buf[val_len] = '\0';
+                return JS_NewString(ctx, buf);
+            }
+        }
+        p = line_end;
+        if (*p == '\n') p++;
+    }
     return JS_NULL;
 }
 
@@ -423,6 +570,24 @@ static GCValue js_video_set_src(JSContextHandle ctx, GCValue this_val, GCValue v
     if (src) {
         vid.set_src(src);
         record_captured_url(src);
+        
+        // Resolve blob: URLs back to the registered object (MediaSource, Blob, etc.)
+        if (strncmp(src, "blob:", 5) == 0) {
+            GCValue global_obj = JS_GetGlobalObject(ctx);
+            GCValue registry = JS_GetPropertyStr(ctx, global_obj, "__blobRegistry");
+            if (!JS_IsUndefined(registry) && !JS_IsNull(registry)) {
+                GCValue obj = JS_GetPropertyStr(ctx, registry, src);
+                if (!JS_IsUndefined(obj) && !JS_IsNull(obj)) {
+                    JS_SetPropertyStr(ctx, this_val, "__mediaSource", obj);
+                    // If it's a MediaSource, transition to open if needed
+                    MediaSourceDataHandle ms = MediaSourceDataHandle::from_object(obj);
+                    if (ms.valid()) {
+                        ms.set_ready_state(1);
+                        JS_SetPropertyStr(ctx, this_val, "__blobUrl", JS_NewString(ctx, src));
+                    }
+                }
+            }
+        }
     } else {
         vid.set_src("");
     }
@@ -563,12 +728,115 @@ extern "C" const JSCFunctionListEntry js_video_proto_funcs[] = {
 extern "C" const size_t js_video_proto_funcs_count = sizeof(js_video_proto_funcs) / sizeof(js_video_proto_funcs[0]);
 
 // Global fetch implementation
+
+static bool is_youtube_url(const char *url) {
+    if (!url) return false;
+    const char *p = url;
+    if (strncmp(p, "http://", 7) == 0) p += 7;
+    else if (strncmp(p, "https://", 8) == 0) p += 8;
+    else return false;
+    const char *end = p;
+    while (*end && *end != '/' && *end != '?' && *end != '#') end++;
+    size_t len = end - p;
+    return (len >= 11 && strncasecmp(p + len - 11, ".youtube.com", 11) == 0) ||
+           (len == 11 && strncasecmp(p, "youtube.com", 11) == 0);
+}
+
+static int collect_user_headers(JSContextHandle ctx, GCValue headers_obj,
+                                char header_bufs[][512], const char **headers_out,
+                                int max_count) {
+    if (!JS_IsObject(headers_obj)) return 0;
+    JSPropertyEnum *props = NULL;
+    uint32_t prop_count = 0;
+    if (JS_GetOwnPropertyNames(ctx, &props, &prop_count, headers_obj,
+                               JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) != 0) {
+        return 0;
+    }
+    int count = 0;
+    for (uint32_t i = 0; i < prop_count && count < max_count; i++) {
+        const char *name = JS_AtomToCString(ctx, props[i].atom);
+        if (!name) continue;
+        GCValue val = JS_GetProperty(ctx, headers_obj, props[i].atom);
+        const char *val_str = JS_ToCString(ctx, val);
+        if (val_str) {
+            snprintf(header_bufs[count], 512, "%s: %s", name, val_str);
+            headers_out[count] = header_bufs[count];
+            count++;
+        }
+    }
+    JS_FreePropertyEnum(ctx, props, prop_count);
+    return count;
+}
+
+static const char* resolve_visitor_id(JSContextHandle ctx, char *out_buf, size_t out_len) {
+    if (!ctx || !out_buf || out_len == 0) return g_visitor_data;
+    out_buf[0] = '\0';
+    GCValue global_obj = JS_GetGlobalObject(ctx);
+    GCValue ytcfg = JS_GetPropertyStr(ctx, global_obj, "ytcfg");
+    if (!JS_IsUndefined(ytcfg) && !JS_IsNull(ytcfg)) {
+        GCValue vd = JS_Eval(ctx,
+            "(typeof ytcfg !== 'undefined' && ytcfg.get) ? ytcfg.get('VISITOR_DATA') : null",
+            69, "<ytcfg_vd>", JS_EVAL_TYPE_GLOBAL);
+        if (!JS_IsUndefined(vd) && !JS_IsNull(vd)) {
+            const char *s = JS_ToCString(ctx, vd);
+            if (s && s[0]) {
+                snprintf(out_buf, out_len, "%s", s);
+                return out_buf;
+            }
+        }
+    }
+    return g_visitor_data;
+}
+
+static GCValue resolve_blob_url_response(JSContextHandle ctx, const char *url) {
+    GCValue global_obj = JS_GetGlobalObject(ctx);
+    GCValue registry = JS_GetPropertyStr(ctx, global_obj, "__blobRegistry");
+    GCValue result = JS_UNDEFINED;
+    if (!JS_IsUndefined(registry) && !JS_IsNull(registry)) {
+        GCValue obj = JS_GetPropertyStr(ctx, registry, url);
+        if (!JS_IsUndefined(obj) && !JS_IsNull(obj)) {
+            GCValue response = JS_NewObject(ctx);
+            JS_SetPropertyStr(ctx, response, "ok", JS_TRUE);
+            JS_SetPropertyStr(ctx, response, "status", JS_NewInt32(ctx, 200));
+            JS_SetPropertyStr(ctx, response, "statusText", JS_NewString(ctx, "OK"));
+            JS_SetPropertyStr(ctx, response, "headers", JS_NewObject(ctx));
+            JS_SetPropertyStr(ctx, response, "body", JS_NULL);
+            JS_SetPropertyStr(ctx, response, "redirected", JS_FALSE);
+            JS_SetPropertyStr(ctx, response, "type", JS_NewString(ctx, "basic"));
+            JS_SetPropertyStr(ctx, response, "url", JS_NewString(ctx, url ? url : ""));
+            JS_SetPropertyStr(ctx, response, "__body_text", JS_NewString(ctx, url ? url : ""));
+            JS_SetPropertyStr(ctx, response, "text", JS_NewCFunction(ctx, [](JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) -> GCValue {
+                GCValue global = JS_GetGlobalObject(ctx);
+                GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
+                GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
+                GCValue body_text = JS_GetPropertyStr(ctx, this_val, "__body_text");
+                GCValue args[1] = { body_text };
+                return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
+            }, "text", 0));
+            JS_SetPropertyStr(ctx, response, "json", JS_NewCFunction(ctx, [](JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) -> GCValue {
+                GCValue global = JS_GetGlobalObject(ctx);
+                GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
+                GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
+                GCValue empty = JS_NewObject(ctx);
+                GCValue args[1] = { empty };
+                return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
+            }, "json", 0));
+            GCValue global = JS_GetGlobalObject(ctx);
+            GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
+            GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
+            GCValue args[1] = { response };
+            result = JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
+        }
+    }
+    return result;
+}
+
 // Helper to create a Response object from HTTP response data
-static GCValue create_response_from_data(JSContextHandle ctx, const char *url, const char *data, size_t data_len, int status) {
+static GCValue create_response_from_data(JSContextHandle ctx, const char *url, const char *data, size_t data_len, int status, const char *statusText) {
     GCValue response = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, response, "ok", JS_NewBool(ctx, status >= 200 && status < 300));
     JS_SetPropertyStr(ctx, response, "status", JS_NewInt32(ctx, status));
-    JS_SetPropertyStr(ctx, response, "statusText", JS_NewString(ctx, status >= 200 && status < 300 ? "OK" : "Error"));
+    JS_SetPropertyStr(ctx, response, "statusText", JS_NewString(ctx, statusText ? statusText : (status >= 200 && status < 300 ? "OK" : "Error")));
     JS_SetPropertyStr(ctx, response, "headers", JS_NewObject(ctx));
     JS_SetPropertyStr(ctx, response, "body", JS_NULL);
     JS_SetPropertyStr(ctx, response, "redirected", JS_FALSE);
@@ -638,6 +906,7 @@ static GCValue create_response_from_data(JSContextHandle ctx, const char *url, c
     return response;
 }
 
+
 GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     const char *url = NULL;
     
@@ -660,7 +929,7 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
         record_captured_url(url);
     }
     
-    // Get method from Request object
+    // Get method from Request/init object
     const char *method = "GET";
     if (argc > 0 && JS_IsObject(argv[0])) {
         GCValue method_prop = JS_GetPropertyStr(ctx, argv[0], "method");
@@ -669,17 +938,20 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
             if (m) method = m;
         }
     }
+    if (argc > 1 && JS_IsObject(argv[1])) {
+        GCValue method_prop = JS_GetPropertyStr(ctx, argv[1], "method");
+        if (!JS_IsUndefined(method_prop)) {
+            const char *m = JS_ToCString(ctx, method_prop);
+            if (m) method = m;
+        }
+    }
     
     // Extract POST body from fetch() arguments
-    // YouTube trick: constructs Request("data:application/json;base64,...")
-    // then overrides url/method/body getters. The REAL body is in __original_url.
     char *post_body = NULL;
     size_t post_body_len = 0;
     
-    // Helper to extract body as string from a JS value
     auto extract_body = [&](GCValue body_val) -> char* {
         if (JS_IsUndefined(body_val) || JS_IsNull(body_val)) return NULL;
-        
         if (JS_IsString(body_val)) {
             const char *s = JS_ToCString(ctx, body_val);
             if (s) {
@@ -690,7 +962,6 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
             }
             return NULL;
         }
-        
         if (JS_IsObject(body_val)) {
             GCValue json_str = JS_JSONStringify(ctx, body_val, JS_UNDEFINED, JS_UNDEFINED);
             if (!JS_IsException(json_str) && JS_IsString(json_str)) {
@@ -713,213 +984,177 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
         return NULL;
     };
     
-    // PRIORITY 1: Check __original_url for base64 data URL body (YouTube's hidden payload)
+    // Priority 1: base64 data URL body (YouTube's hidden payload in Request.__original_url)
     if (argc > 0 && JS_IsObject(argv[0])) {
         GCValue orig_url_val = JS_GetPropertyStr(ctx, argv[0], "__original_url");
         if (!JS_IsUndefined(orig_url_val)) {
             const char *orig_url = JS_ToCString(ctx, orig_url_val);
-            if (orig_url) {
-                if (orig_url && strncmp(orig_url, "data:application/json;base64,", 29) == 0) {
-                    const char *b64 = orig_url + 29;
-                    size_t b64_len = strlen(b64);
-                    static const char b64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-                    size_t out_len = (b64_len / 4) * 3;
-                    if (b64_len > 0 && b64[b64_len - 1] == '=') out_len--;
-                    if (b64_len > 1 && b64[b64_len - 2] == '=') out_len--;
-                    post_body = (char*)malloc(out_len + 1);
-                    if (post_body) {
-                        int val = 0, valb = -8;
-                        size_t j = 0;
-                        for (size_t i = 0; i < b64_len && b64[i] != '='; i++) {
-                            char c = b64[i];
-                            const char *p = strchr(b64_table, c);
-                            if (p) {
-                                val = (val << 6) + (p - b64_table);
-                                valb += 6;
-                                if (valb >= 0) {
-                                    post_body[j++] = (char)((val >> valb) & 0xFF);
-                                    valb -= 8;
-                                }
+            if (orig_url && strncmp(orig_url, "data:application/json;base64,", 29) == 0) {
+                const char *b64 = orig_url + 29;
+                size_t b64_len = strlen(b64);
+                static const char b64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                size_t out_len = (b64_len / 4) * 3;
+                if (b64_len > 0 && b64[b64_len - 1] == '=') out_len--;
+                if (b64_len > 1 && b64[b64_len - 2] == '=') out_len--;
+                post_body = (char*)malloc(out_len + 1);
+                if (post_body) {
+                    int val = 0, valb = -8;
+                    size_t j = 0;
+                    for (size_t i = 0; i < b64_len && b64[i] != '='; i++) {
+                        const char *p = strchr(b64_table, b64[i]);
+                        if (p) {
+                            val = (val << 6) + (p - b64_table);
+                            valb += 6;
+                            if (valb >= 0) {
+                                post_body[j++] = (char)((val >> valb) & 0xFF);
+                                valb -= 8;
                             }
                         }
-                        post_body[j] = '\0';
-                        post_body_len = j;
                     }
+                    post_body[j] = '\0';
+                    post_body_len = j;
                 }
             }
         }
     }
     
-    // PRIORITY 2: Check argv[1] (init options) for body
+    // Priority 2: init.body
     if (!post_body && argc > 1 && JS_IsObject(argv[1])) {
         GCValue body_prop = JS_GetPropertyStr(ctx, argv[1], "body");
         post_body = extract_body(body_prop);
         if (post_body) post_body_len = strlen(post_body);
     }
     
-    // PRIORITY 3: Check argv[0] (Request object) for body
-    // Note: YouTube overrides req.body getter to return new ReadableStream(),
-    // so this usually gives garbage. __original_url is the reliable source.
+    // Priority 3: Request.body
     if (!post_body && argc > 0 && JS_IsObject(argv[0])) {
         GCValue body_prop = JS_GetPropertyStr(ctx, argv[0], "body");
         post_body = extract_body(body_prop);
         if (post_body) post_body_len = strlen(post_body);
     }
     
-    // For real HTTP(S) URLs, make actual network requests
-    if (url && (strncmp(url, "http://", 7) == 0 || strncmp(url, "https://", 8) == 0)) {
-        bool is_youtubei_player = (strstr(url, "youtubei/v1/player") != NULL);
-        bool use_ytip_mock = false;
+    // Resolve blob: URLs locally
+    if (url && strncmp(url, "blob:", 5) == 0) {
+        if (post_body) free(post_body);
+        GCValue blob_resp = resolve_blob_url_response(ctx, url);
+        if (!JS_IsUndefined(blob_resp)) return blob_resp;
+        // Fall through to default empty response
+    }
+    
+    // Real HTTP(S) handling for YouTube endpoints
+    if (url && is_youtube_url(url)) {
+        bool is_post = (strcasecmp(method, "POST") == 0);
         
-        if (is_youtubei_player && post_body && post_body_len > 0) {
-            // Make real POST request to YouTube with decoded body
-            printf("[JS_FETCH] Real POST to %s with body len=%zu\n", url, post_body_len);
-            printf("[JS_FETCH] Body preview: %.200s\n", post_body);
-            
-            // Read dynamic headers from window.ytcfg if available
-            char client_version_header[128] = "X-YouTube-Client-Version: 2.20250122.04.00";
-            char visitor_id_header[256] = {0};
-            GCValue global_obj = JS_GetGlobalObject(ctx);
-            GCValue ytcfg = JS_GetPropertyStr(ctx, global_obj, "ytcfg");
-            if (!JS_IsUndefined(ytcfg) && !JS_IsNull(ytcfg)) {
-                // Try ytcfg.get('CLIENT_VERSION') first, then fall back to yt.config_.INNERTUBE_CLIENT_VERSION
-                GCValue cv = JS_Eval(ctx, "(function() { var v = (typeof ytcfg !== 'undefined' && ytcfg.get) ? ytcfg.get('CLIENT_VERSION') : null; if (!v && typeof yt !== 'undefined' && yt.config_ && yt.config_.INNERTUBE_CLIENT_VERSION) v = yt.config_.INNERTUBE_CLIENT_VERSION; return v; })()", 230, "<ytcfg_cv>", JS_EVAL_TYPE_GLOBAL);
-                if (!JS_IsUndefined(cv) && !JS_IsNull(cv)) {
-                    const char *cv_str = JS_ToCString(ctx, cv);
-                    if (cv_str && cv_str[0]) {
-                        snprintf(client_version_header, sizeof(client_version_header), "X-YouTube-Client-Version: %s", cv_str);
-                    }
-                }
-                GCValue vd = JS_Eval(ctx, "(typeof ytcfg !== 'undefined' && ytcfg.get) ? ytcfg.get('VISITOR_DATA') : null", 69, "<ytcfg_vd>", JS_EVAL_TYPE_GLOBAL);
-                if (!JS_IsUndefined(vd) && !JS_IsNull(vd)) {
-                    const char *vd_str = JS_ToCString(ctx, vd);
-                    if (vd_str && vd_str[0]) {
-                        snprintf(visitor_id_header, sizeof(visitor_id_header), "X-Goog-Visitor-Id: %s", vd_str);
-                    }
-                }
-            }
-            
-            const char *headers[4];
-            int header_count = 2;
-            headers[0] = "Content-Type: application/json";
-            headers[1] = client_version_header;
-            headers[2] = "X-YouTube-Client-Name: 1";
-            if (visitor_id_header[0]) {
-                headers[3] = visitor_id_header;
-                header_count = 4;
-            } else {
-                header_count = 3;
-            }
-            
-            PlatformHttpBuffer response_buffer = {0};
-            char error_buf[256] = {0};
-            
-            int status_code = 0;
-            bool success = platform_http_post(url, post_body, post_body_len,
-                                               headers, header_count, &response_buffer, &status_code,
-                                               error_buf, sizeof(error_buf));
-            
-            printf("[JS_FETCH] POST result: success=%d, status=%d, size=%zu, error=%s\n",
-                   (int)success, status_code, response_buffer.size, error_buf);
-            
-            if (success && response_buffer.data && response_buffer.size > 0 && status_code >= 200 && status_code < 300) {
-                printf("[JS_FETCH] Real POST response (first 500 chars): %.500s\n", response_buffer.data);
-                
-                // Scan response for googlevideo URLs and capture them
-                char *gv_url = strstr(response_buffer.data, "googlevideo.com");
-                if (gv_url) {
-                    // Find the start of the URL
-                    char *url_start = gv_url;
-                    while (url_start > response_buffer.data && url_start[-1] != '"' && url_start[-1] != '\'' && url_start[-1] != ' ') {
-                        url_start--;
-                    }
-                    char *url_end = gv_url + strlen("googlevideo.com");
-                    while (*url_end && *url_end != '"' && *url_end != '\'' && *url_end != ' ' && *url_end != '\\') {
-                        url_end++;
-                    }
-                    size_t len = url_end - url_start;
-                    if (len > 0 && len < URL_MAX_LEN) {
-                        char captured[URL_MAX_LEN];
-                        strncpy(captured, url_start, len);
-                        captured[len] = '\0';
-                        record_captured_url(captured);
-                        platform_log(LOG_LEVEL_INFO, "js_fetch", "CAPTURED googlevideo URL from response: %s", captured);
-                    }
-                }
-                
-                GCValue response_obj = create_response_from_data(ctx, url, response_buffer.data, response_buffer.size, status_code);
-                platform_http_free_buffer(&response_buffer);
-                if (post_body) free(post_body);
-                
-                GCValue global = JS_GetGlobalObject(ctx);
-                GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
-                GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
-                GCValue args[1] = { response_obj };
-                return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
-            } else {
-                printf("[JS_FETCH] Real POST failed, falling back to mock. Error: %s\n", error_buf[0] ? error_buf : "unknown");
-                platform_http_free_buffer(&response_buffer);
-                use_ytip_mock = true;
-            }
-        } else if (is_youtubei_player) {
-            use_ytip_mock = true;
-        } else {
-            // Real GET request for other URLs
-            platform_log(LOG_LEVEL_INFO, "js_fetch", "Real GET to %s", url);
-            
-            PlatformHttpBuffer response_buffer = {0};
-            char error_buf[256] = {0};
-            bool success = platform_http_get(url, &response_buffer, error_buf, sizeof(error_buf));
-            
-            if (success && response_buffer.data && response_buffer.size > 0) {
-                platform_log(LOG_LEVEL_INFO, "js_fetch", "Real GET success, response size=%zu", response_buffer.size);
-                
-                // Scan for googlevideo URLs
-                char *gv_url = strstr(response_buffer.data, "googlevideo.com");
-                if (gv_url) {
-                    char *url_start = gv_url;
-                    while (url_start > response_buffer.data && url_start[-1] != '"' && url_start[-1] != '\'' && url_start[-1] != ' ') {
-                        url_start--;
-                    }
-                    char *url_end = gv_url + strlen("googlevideo.com");
-                    while (*url_end && *url_end != '"' && *url_end != '\'' && *url_end != ' ' && *url_end != '\\') {
-                        url_end++;
-                    }
-                    size_t len = url_end - url_start;
-                    if (len > 0 && len < URL_MAX_LEN) {
-                        char captured[URL_MAX_LEN];
-                        strncpy(captured, url_start, len);
-                        captured[len] = '\0';
-                        record_captured_url(captured);
-                        platform_log(LOG_LEVEL_INFO, "js_fetch", "CAPTURED googlevideo URL from response: %s", captured);
-                    }
-                }
-                
-                GCValue response_obj = create_response_from_data(ctx, url, response_buffer.data, response_buffer.size, 200);
-                platform_http_free_buffer(&response_buffer);
-                if (post_body) free(post_body);
-                
-                GCValue global = JS_GetGlobalObject(ctx);
-                GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
-                GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
-                GCValue args[1] = { response_obj };
-                return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
-            } else {
-                platform_log(LOG_LEVEL_WARN, "js_fetch", "Real GET failed: %s", error_buf[0] ? error_buf : "unknown");
-                platform_http_free_buffer(&response_buffer);
-                // Fall through to default mock response
-            }
+        char header_bufs[16][512];
+        const char *headers[16];
+        int header_count = 0;
+        
+        // Collect user-provided headers
+        if (argc > 1 && JS_IsObject(argv[1])) {
+            GCValue headers_obj = JS_GetPropertyStr(ctx, argv[1], "headers");
+            header_count = collect_user_headers(ctx, headers_obj, header_bufs, headers, 16);
         }
         
-        if (use_ytip_mock) {
-            // youtubei/v1/player - return ytInitialPlayerResponse as fallback
+        // Default YouTube headers
+        if (is_post) {
+            headers[header_count++] = "Content-Type: application/json";
+        }
+        headers[header_count++] = "X-YouTube-Client-Name: 1";
+        
+        char client_version_header[128] = {0};
+        snprintf(client_version_header, sizeof(client_version_header),
+                 "X-YouTube-Client-Version: 2.20250122.04.00");
+        GCValue global_obj = JS_GetGlobalObject(ctx);
+        GCValue ytcfg = JS_GetPropertyStr(ctx, global_obj, "ytcfg");
+        if (!JS_IsUndefined(ytcfg) && !JS_IsNull(ytcfg)) {
+            GCValue cv = JS_Eval(ctx,
+                "(function() { var v = (typeof ytcfg !== 'undefined' && ytcfg.get) ? ytcfg.get('CLIENT_VERSION') : null; if (!v && typeof yt !== 'undefined' && yt.config_ && yt.config_.INNERTUBE_CLIENT_VERSION) v = yt.config_.INNERTUBE_CLIENT_VERSION; return v; })()",
+                230, "<ytcfg_cv>", JS_EVAL_TYPE_GLOBAL);
+            if (!JS_IsUndefined(cv) && !JS_IsNull(cv)) {
+                const char *cv_str = JS_ToCString(ctx, cv);
+                if (cv_str && cv_str[0]) {
+                    snprintf(client_version_header, sizeof(client_version_header),
+                             "X-YouTube-Client-Version: %s", cv_str);
+                }
+            }
+        }
+        headers[header_count++] = client_version_header;
+        
+        char visitor_id_header[256] = {0};
+        char visitor_buf[256] = {0};
+        const char *visitor_id = resolve_visitor_id(ctx, visitor_buf, sizeof(visitor_buf));
+        if (visitor_id && visitor_id[0]) {
+            snprintf(visitor_id_header, sizeof(visitor_id_header),
+                     "X-Goog-Visitor-Id: %s", visitor_id);
+            headers[header_count++] = visitor_id_header;
+        }
+        
+        char cookie_header[1024] = {0};
+        const char *cookies = platform_http_get_cookies();
+        if (cookies && cookies[0]) {
+            snprintf(cookie_header, sizeof(cookie_header), "Cookie: %s", cookies);
+            headers[header_count++] = cookie_header;
+        }
+        
+        PlatformHttpBuffer response_buffer = {0};
+        char error_buf[256] = {0};
+        bool success = false;
+        int status_code = 0;
+        
+        if (is_post && post_body && post_body_len > 0) {
+            success = platform_http_post(url, post_body, post_body_len,
+                                         headers, header_count, &response_buffer,
+                                         &status_code, error_buf, sizeof(error_buf));
+        } else {
+            success = platform_http_get_with_headers(url, headers, header_count,
+                                                     &response_buffer, error_buf,
+                                                     sizeof(error_buf));
+            status_code = success ? 200 : 0;
+        }
+        
+        if (success && response_buffer.data && response_buffer.size > 0 && status_code >= 200 && status_code < 300) {
+            // Capture googlevideo URLs from response
+            char *gv_url = strstr(response_buffer.data, "googlevideo.com");
+            if (gv_url) {
+                char *url_start = gv_url;
+                while (url_start > response_buffer.data && url_start[-1] != '"' && url_start[-1] != '\'' && url_start[-1] != ' ') {
+                    url_start--;
+                }
+                char *url_end = gv_url + strlen("googlevideo.com");
+                while (*url_end && *url_end != '"' && *url_end != '\'' && *url_end != ' ' && *url_end != '\\') {
+                    url_end++;
+                }
+                size_t len = url_end - url_start;
+                if (len > 0 && len < URL_MAX_LEN) {
+                    char captured[URL_MAX_LEN];
+                    strncpy(captured, url_start, len);
+                    captured[len] = '\0';
+                    record_captured_url(captured);
+                }
+            }
+            
+            GCValue response_obj = create_response_from_data(ctx, url, response_buffer.data,
+                                                             response_buffer.size, status_code, "OK");
+            platform_http_free_buffer(&response_buffer);
+            if (post_body) free(post_body);
+            GCValue global = JS_GetGlobalObject(ctx);
+            GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
+            GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
+            GCValue args[1] = { response_obj };
+            return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
+        } else {
+            platform_http_free_buffer(&response_buffer);
+            platform_log(LOG_LEVEL_WARN, "js_fetch", "Real request failed: %s", error_buf[0] ? error_buf : "unknown");
+            // Fall through to fallback for youtubei player, otherwise default mock
+        }
+        
+        // youtubei/v1/player fallback: use ytInitialPlayerResponse
+        if (strstr(url, "youtubei/v1/player") != NULL) {
             GCValue global2 = JS_GetGlobalObject(ctx);
             GCValue ytip = JS_GetPropertyStr(ctx, global2, "ytInitialPlayerResponse");
             if (!JS_IsUndefined(ytip) && !JS_IsNull(ytip)) {
                 GCValue json_str = JS_JSONStringify(ctx, ytip, JS_UNDEFINED, JS_UNDEFINED);
                 const char *json_cstr = JS_ToCString(ctx, json_str);
                 if (json_cstr) {
-                    // Scan mock response for googlevideo URLs (SABR, DASH, HLS) and capture them
                     const char *scan = json_cstr;
                     while ((scan = strstr(scan, "googlevideo.com")) != NULL) {
                         const char *url_start = scan;
@@ -936,11 +1171,10 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
                             strncpy(captured, url_start, len);
                             captured[len] = '\0';
                             record_captured_url(captured);
-                            platform_log(LOG_LEVEL_INFO, "js_fetch", "CAPTURED googlevideo URL from mock response: %s", captured);
                         }
                         scan = url_end;
                     }
-                    GCValue response_obj = create_response_from_data(ctx, url, json_cstr, strlen(json_cstr), 200);
+                    GCValue response_obj = create_response_from_data(ctx, url, json_cstr, strlen(json_cstr), 200, "OK");
                     if (post_body) free(post_body);
                     GCValue global = JS_GetGlobalObject(ctx);
                     GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
@@ -965,7 +1199,6 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
     JS_SetPropertyStr(ctx, response, "type", JS_NewString(ctx, "basic"));
     JS_SetPropertyStr(ctx, response, "url", JS_NewString(ctx, url ? url : ""));
     
-    // text() -> Promise.resolve("")
     JS_SetPropertyStr(ctx, response, "text", JS_NewCFunction(ctx, [](JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) -> GCValue {
         GCValue global = JS_GetGlobalObject(ctx);
         GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
@@ -975,7 +1208,6 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
         return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
     }, "text", 0));
     
-    // json() -> Promise.resolve({})
     JS_SetPropertyStr(ctx, response, "json", JS_NewCFunction(ctx, [](JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) -> GCValue {
         GCValue global = JS_GetGlobalObject(ctx);
         GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
@@ -985,7 +1217,6 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
         return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
     }, "json", 0));
     
-    // arrayBuffer() -> Promise.resolve(new ArrayBuffer(0))
     JS_SetPropertyStr(ctx, response, "arrayBuffer", JS_NewCFunction(ctx, [](JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) -> GCValue {
         GCValue global = JS_GetGlobalObject(ctx);
         GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
@@ -995,7 +1226,6 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
         return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
     }, "arrayBuffer", 0));
     
-    // blob() -> Promise.resolve(new Blob([]))
     JS_SetPropertyStr(ctx, response, "blob", JS_NewCFunction(ctx, [](JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) -> GCValue {
         GCValue global = JS_GetGlobalObject(ctx);
         GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
@@ -1007,13 +1237,13 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
         return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
     }, "blob", 0));
     
-    // Return Promise.resolve(response)
     GCValue global = JS_GetGlobalObject(ctx);
     GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
     GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
     GCValue args[1] = { response };
     return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
 }
+
 
 // External reference to DOM node class ID
 extern JSClassID js_dom_node_class_id;

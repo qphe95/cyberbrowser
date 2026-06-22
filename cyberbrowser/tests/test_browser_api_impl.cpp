@@ -2263,6 +2263,140 @@ TEST(test_inner_html_setter) {
     return true;
 }
 
+/* Test URL base resolution and searchParams */
+TEST(test_url_with_base) {
+    JSContextHandle ctx = get_test_context();
+    if (!ctx) return false;
+
+    const char *js_code = R"(
+        var url = new URL('/watch?v=abc123', 'https://www.youtube.com');
+        url.href === 'https://www.youtube.com/watch?v=abc123' &&
+        url.hostname === 'www.youtube.com' &&
+        url.pathname === '/watch' &&
+        url.search === '?v=abc123' &&
+        url.searchParams.get('v') === 'abc123';
+    )";
+    GCValue result = JS_Eval(ctx, js_code, strlen(js_code), "<test>", 0);
+    bool success = JS_ToBool(ctx, result);
+    ASSERT_TRUE(success);
+    return true;
+}
+
+/* Test URLSearchParams basic operations */
+TEST(test_url_search_params) {
+    JSContextHandle ctx = get_test_context();
+    if (!ctx) return false;
+
+    const char *js_code = R"(
+        var usp = new URLSearchParams('a=1&b=2&a=3');
+        var ok = usp.get('a') === '1' &&
+                 usp.getAll('a').length === 2 &&
+                 usp.has('b') &&
+                 !usp.has('c');
+        usp.append('c', '4');
+        ok = ok && usp.get('c') === '4';
+        usp.set('a', 'x');
+        ok = ok && usp.get('a') === 'x' && usp.getAll('a').length === 1;
+        usp.delete('b');
+        ok = ok && !usp.has('b') && usp.toString().indexOf('a=x') >= 0;
+        var entries = usp.entries();
+        ok = ok && Array.isArray(entries) && entries.length >= 2;
+        ok;
+    )";
+    GCValue result = JS_Eval(ctx, js_code, strlen(js_code), "<test>", 0);
+    bool success = JS_ToBool(ctx, result);
+    ASSERT_TRUE(success);
+    return true;
+}
+
+/* Test blob URL registry create/revoke */
+TEST(test_blob_url_registry) {
+    JSContextHandle ctx = get_test_context();
+    if (!ctx) return false;
+
+    const char *js_code = R"(
+        var obj = { data: 'test' };
+        var url = URL.createObjectURL(obj);
+        var ok = typeof url === 'string' && url.indexOf('blob:') === 0;
+        ok = ok && window.__blobRegistry[url] === obj;
+        URL.revokeObjectURL(url);
+        ok = ok && window.__blobRegistry[url] === undefined;
+        ok;
+    )";
+    GCValue result = JS_Eval(ctx, js_code, strlen(js_code), "<test>", 0);
+    bool success = JS_ToBool(ctx, result);
+    ASSERT_TRUE(success);
+    return true;
+}
+
+/* Test MediaSource creates a blob URL and addSourceBuffer works */
+TEST(test_media_source_blob_url) {
+    JSContextHandle ctx = get_test_context();
+    if (!ctx) return false;
+
+    const char *js_code = R"(
+        try {
+            var ms = new MediaSource();
+            var dbg = {url: ms.url, readyState: ms.readyState, inRegistry: window.__blobRegistry[ms.url] === ms};
+            JSON.stringify(dbg);
+        } catch (e) {
+            'ERROR: ' + (e && e.stack ? e.stack : e);
+        }
+    )";
+    GCValue result = JS_Eval(ctx, js_code, strlen(js_code), "<test>", 0);
+    const char *str = JS_ToCString(ctx, result);
+    printf("    mediaSource debug: %s\n", str ? str : "(null)");
+
+    const char *assert_js = R"(
+        var ms = new MediaSource();
+        var ok = typeof ms.url === 'string' && ms.url.indexOf('blob:') === 0;
+        ok = ok && ms.readyState === 'open';
+        ok = ok && window.__blobRegistry[ms.url] === ms;
+        var sb = ms.addSourceBuffer('video/mp4');
+        ok = ok && !!sb && sb.mimeType === 'video/mp4';
+        ok = ok && ms.sourceBuffers.length === 1 && ms.sourceBuffers[0] === sb;
+        ok = ok && ms.activeSourceBuffers.length === 1;
+        ok;
+    )";
+    GCValue assert_result = JS_Eval(ctx, assert_js, strlen(assert_js), "<test>", 0);
+    bool success = JS_ToBool(ctx, assert_result);
+
+    ASSERT_TRUE(success);
+    return true;
+}
+
+/* Test XMLHttpRequest readyState transitions for fallback path */
+TEST(test_xhr_state_transitions) {
+    JSContextHandle ctx = get_test_context();
+    if (!ctx) return false;
+
+    const char *js_code = R"(
+        var states = [];
+        var xhr = new XMLHttpRequest();
+        xhr.onreadystatechange = function() { states.push(xhr.readyState); };
+        xhr.open('GET', 'data:text/plain,hello');
+        xhr.send();
+        JSON.stringify({states: states, status: xhr.status, readyState: xhr.readyState, responseText: xhr.responseText});
+    )";
+    GCValue result = JS_Eval(ctx, js_code, strlen(js_code), "<test>", 0);
+    const char *str = JS_ToCString(ctx, result);
+    printf("    xhr debug: %s\n", str ? str : "(null)");
+
+    const char *assert_js = R"(
+        var states = [];
+        var xhr = new XMLHttpRequest();
+        xhr.onreadystatechange = function() { states.push(xhr.readyState); };
+        xhr.open('GET', 'data:text/plain,hello');
+        xhr.send();
+        states.length === 1 && states[0] === 4 && xhr.status === 200;
+    )";
+    GCValue assert_result = JS_Eval(ctx, assert_js, strlen(assert_js), "<test>", 0);
+    bool success = JS_ToBool(ctx, assert_result);
+
+    ASSERT_TRUE(success);
+    return true;
+}
+
 /* Test Node.contains works correctly */
 TEST(test_node_contains) {
     JSContextHandle ctx = get_test_context();
@@ -4603,6 +4737,11 @@ extern "C" void run_browser_api_impl_tests(void) {
     RUN_TEST(test_class_list_remove);
     RUN_TEST(test_text_content);
     RUN_TEST(test_inner_html_setter);
+    RUN_TEST(test_url_with_base);
+    RUN_TEST(test_url_search_params);
+    RUN_TEST(test_blob_url_registry);
+    RUN_TEST(test_media_source_blob_url);
+    RUN_TEST(test_xhr_state_transitions);
     RUN_TEST(test_node_contains);
     RUN_TEST(test_node_get_root_node);
     RUN_TEST(test_element_children);

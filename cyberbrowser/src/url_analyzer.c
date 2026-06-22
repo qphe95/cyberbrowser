@@ -1,6 +1,7 @@
 #include "url_analyzer.h"
 #include "html_media_extract.h"
 #include "http_download.h"
+#include "session_state.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -306,13 +307,30 @@ static bool try_youtubei_api(const char *video_id, const char *visitor_data,
                               MediaUrl *outMedia, char *err, size_t errLen,
                               bool prefer_video) {
     const char *api_url = "https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false";
-    const char *headers[] = {
+
+    const char *effective_visitor = (visitor_data && visitor_data[0]) ? visitor_data : g_visitor_data;
+
+    char client_version_header[128] = {0};
+    char visitor_id_header[256] = {0};
+    const char *headers[5] = {
         "Content-Type: application/json",
-        "X-Goog-Api-Format-Version: 2"
+        "X-Goog-Api-Format-Version: 2",
+        "X-YouTube-Client-Name: 1",
+        NULL,
+        NULL
     };
+    size_t header_count = 3;
+    snprintf(client_version_header, sizeof(client_version_header),
+             "X-YouTube-Client-Version: 1.56.21");
+    headers[header_count++] = client_version_header;
+    if (effective_visitor && effective_visitor[0]) {
+        snprintf(visitor_id_header, sizeof(visitor_id_header),
+                 "X-Goog-Visitor-Id: %s", effective_visitor);
+        headers[header_count++] = visitor_id_header;
+    }
 
     char post_body[2048];
-    if (visitor_data && visitor_data[0]) {
+    if (effective_visitor && effective_visitor[0]) {
         snprintf(post_body, sizeof(post_body),
             "{"
             "\"context\":{"
@@ -329,7 +347,7 @@ static bool try_youtubei_api(const char *video_id, const char *visitor_data,
             "}"
             "},"
             "\"videoId\":\"%s\""
-            "}", visitor_data, video_id);
+            "}", effective_visitor, video_id);
     } else {
         snprintf(post_body, sizeof(post_body),
             "{"
@@ -355,7 +373,7 @@ static bool try_youtubei_api(const char *video_id, const char *visitor_data,
     HttpBuffer response = {0};
     int status = 0;
     if (!http_post_to_memory(api_url, post_body, strlen(post_body),
-                             headers, 2, &response, &status, err, errLen)) {
+                             headers, header_count, &response, &status, err, errLen)) {
         LOGE("youtubei API request failed: %s", err);
         file_log("youtubei API request failed: %s", err);
         return false;

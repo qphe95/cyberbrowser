@@ -44,10 +44,24 @@ GCValue js_media_source_constructor(JSContextHandle ctx, GCValue new_target, int
     MediaSourceDataHandle ms = MediaSourceDataHandle::create(ctx);
     if (!ms.valid()) return JS_ThrowTypeError(ctx, "Invalid MediaSource");
     
-    ms.set_ready_state(0); // closed
+    ms.set_ready_state(1); // open
     
     GCValue obj = JS_NewObjectClass(ctx, js_media_source_class_id);
     ms.attach_to_object(obj);
+    
+    // Register a stable blob URL for this MediaSource
+    GCValue url_args[1] = { obj };
+    GCValue blob_url = js_url_create_object_url(ctx, JS_UNDEFINED, 1, url_args);
+    const char *url_str = JS_ToCString(ctx, blob_url);
+    if (url_str) {
+        JS_SetPropertyStr(ctx, obj, "url", JS_NewString(ctx, url_str));
+        JS_SetPropertyStr(ctx, obj, "__blobUrl", JS_NewString(ctx, url_str));
+    }
+    
+    // Initialize source buffer lists
+    JS_SetPropertyStr(ctx, obj, "__sourceBuffers", JS_NewArray(ctx));
+    JS_SetPropertyStr(ctx, obj, "__activeSourceBuffers", JS_NewArray(ctx));
+    
     return obj;
 }
 
@@ -99,17 +113,28 @@ GCValue js_media_source_add_source_buffer(JSContextHandle ctx, GCValue this_val,
     const char *mime_type = JS_ToCString(ctx, argv[0]);
     if (!mime_type) return JS_ThrowTypeError(ctx, "Invalid MIME type");
     
-    // Create a mock blob URL for this source buffer
-    char blob_url[512];
-    static int blob_counter = 0;
-    snprintf(blob_url, sizeof(blob_url), "blob:media-source:%d?type=%s", ++blob_counter, mime_type);
-    
-    // Capture the blob URL
-    capture_url_debug(blob_url, "media_source_add_source_buffer");
-    
     // Create SourceBuffer object
     GCValue sb_args[1] = { JS_NewString(ctx, mime_type) };
     GCValue sb = js_source_buffer_constructor(ctx, JS_UNDEFINED, 1, sb_args);
+    
+    JS_SetPropertyStr(ctx, sb, "mimeType", JS_NewString(ctx, mime_type));
+    JS_SetPropertyStr(ctx, sb, "updating", JS_NewBool(ctx, false));
+    JS_SetPropertyStr(ctx, sb, "mode", JS_NewString(ctx, "segments"));
+    JS_SetPropertyStr(ctx, sb, "timestampOffset", JS_NewInt32(ctx, 0));
+    
+    // Append to sourceBuffers / activeSourceBuffers
+    const char *lists[] = { "__sourceBuffers", "__activeSourceBuffers" };
+    for (int i = 0; i < 2; i++) {
+        GCValue arr = JS_GetPropertyStr(ctx, this_val, lists[i]);
+        if (JS_IsUndefined(arr) || JS_IsNull(arr) || !JS_IsObject(arr)) {
+            arr = JS_NewArray(ctx);
+            JS_SetPropertyStr(ctx, this_val, lists[i], arr);
+        }
+        int32_t len = 0;
+        GCValue len_val = JS_GetPropertyStr(ctx, arr, "length");
+        JS_ToInt32(ctx, &len, len_val);
+        JS_SetPropertyUint32(ctx, arr, len, sb);
+    }
     
     return sb;
 }
@@ -159,12 +184,22 @@ GCValue js_media_source_set_duration(JSContextHandle ctx, GCValue this_val, GCVa
 
 // MediaSource.sourceBuffers getter
 GCValue js_media_source_get_source_buffers(JSContextHandle ctx, GCValue this_val) {
-    return JS_NewArray(ctx);
+    GCValue arr = JS_GetPropertyStr(ctx, this_val, "__sourceBuffers");
+    if (JS_IsUndefined(arr) || JS_IsNull(arr) || !JS_IsObject(arr)) {
+        arr = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, this_val, "__sourceBuffers", arr);
+    }
+    return arr;
 }
 
 // MediaSource.activeSourceBuffers getter
 GCValue js_media_source_get_active_source_buffers(JSContextHandle ctx, GCValue this_val) {
-    return JS_NewArray(ctx);
+    GCValue arr = JS_GetPropertyStr(ctx, this_val, "__activeSourceBuffers");
+    if (JS_IsUndefined(arr) || JS_IsNull(arr) || !JS_IsObject(arr)) {
+        arr = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, this_val, "__activeSourceBuffers", arr);
+    }
+    return arr;
 }
 
 const JSCFunctionListEntry js_media_source_proto_funcs[] = {
@@ -183,10 +218,45 @@ GCValue js_source_buffer_append_buffer(JSContextHandle ctx, GCValue this_val, in
     SourceBufferDataHandle sb = SourceBufferDataHandle::from_object_check(ctx, this_val);
     if (!sb.valid()) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
     
+    if (argc < 1) return JS_ThrowTypeError(ctx, "requires at least 1 argument(s)");
+    
+    // Accept ArrayBuffer, TypedArray, ArrayBufferView, Blob, or plain buffer object
+    size_t data_len = 0;
+    const uint8_t *data = NULL;
+    GCValue buffer_val = argv[0];
+    
+    if (JS_IsObject(buffer_val)) {
+        GCValue byte_length = JS_GetPropertyStr(ctx, buffer_val, "byteLength");
+        if (!JS_IsUndefined(byte_length)) {
+            JS_ToInt64(ctx, (int64_t*)&data_len, byte_length);
+        }
+        // For ArrayBuffer / TypedArray, try to get a pointer via QuickJS
+        size_t size = 0;
+        uint8_t *ptr = JS_GetArrayBuffer(ctx, &size, buffer_val);
+        if (!ptr && JS_IsObject(buffer_val)) {
+            GCValue buf_prop = JS_GetPropertyStr(ctx, buffer_val, "buffer");
+            if (JS_IsObject(buf_prop)) {
+                ptr = JS_GetArrayBuffer(ctx, &size, buf_prop);
+                if (ptr) data_len = size;
+            }
+        }
+        data = ptr;
+    }
+    
+    (void)data;
+    (void)data_len;
+    
+    JS_SetPropertyStr(ctx, this_val, "updating", JS_TRUE);
     sb.set_updating(1);
     
-    // Simulate async update completion
+    // Simulate async update completion synchronously
+    JS_SetPropertyStr(ctx, this_val, "updating", JS_FALSE);
     sb.set_updating(0);
+    
+    GCValue updateend = JS_GetPropertyStr(ctx, this_val, "onupdateend");
+    if (!JS_IsNull(updateend) && !JS_IsUndefined(updateend)) {
+        JS_Call(ctx, updateend, this_val, 0, NULL);
+    }
     
     return JS_UNDEFINED;
 }

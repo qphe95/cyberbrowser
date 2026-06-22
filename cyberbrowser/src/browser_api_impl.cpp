@@ -2133,6 +2133,9 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, document, "defaultView", window);
     LOG_INFO("Document set on global");
     
+    // Blob / object URL registry used by URL.createObjectURL/revokeObjectURL
+    JS_SetPropertyStr(ctx, global, "__blobRegistry", JS_NewObject(ctx));
+    
     // ===== Location =====
     // Create Location object with getters/setters and shared data
     GCValue location = JS_NewObject(ctx);
@@ -3245,6 +3248,43 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_NewCFunction(ctx, js_url_revoke_object_url, "revokeObjectURL", 1));
     JS_SetPropertyStr(ctx, global, "URL", url_ctor);
     JS_SetPropertyStr(ctx, window, "URL", url_ctor);
+    
+    // URL.prototype.searchParams getter
+    JSAtom search_params_atom = JS_NewAtom(ctx, "searchParams");
+    JS_DefinePropertyGetSet(ctx, url_proto, search_params_atom,
+        JS_NewCFunction(ctx, js_url_get_search_params, "get searchParams", 0),
+        JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_FreeAtom(ctx, search_params_atom);
+    
+    // URLSearchParams constructor and prototype
+    GCValue usp_ctor = JS_NewCFunction2(ctx, js_url_search_params_constructor, "URLSearchParams", 1, JS_CFUNC_constructor, 0);
+    GCValue usp_proto = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, usp_proto, "constructor", usp_ctor);
+    JS_SetConstructor(ctx, usp_ctor, usp_proto);
+    JS_SetConstructorBit(ctx, usp_ctor, TRUE);
+    JS_SetPropertyStr(ctx, usp_proto, "append",
+        JS_NewCFunction(ctx, js_url_search_params_append, "append", 2));
+    JS_SetPropertyStr(ctx, usp_proto, "delete",
+        JS_NewCFunction(ctx, js_url_search_params_delete, "delete", 1));
+    JS_SetPropertyStr(ctx, usp_proto, "get",
+        JS_NewCFunction(ctx, js_url_search_params_get, "get", 1));
+    JS_SetPropertyStr(ctx, usp_proto, "getAll",
+        JS_NewCFunction(ctx, js_url_search_params_get_all, "getAll", 1));
+    JS_SetPropertyStr(ctx, usp_proto, "has",
+        JS_NewCFunction(ctx, js_url_search_params_has, "has", 1));
+    JS_SetPropertyStr(ctx, usp_proto, "set",
+        JS_NewCFunction(ctx, js_url_search_params_set, "set", 2));
+    JS_SetPropertyStr(ctx, usp_proto, "toString",
+        JS_NewCFunction(ctx, js_url_search_params_to_string, "toString", 0));
+    JS_SetPropertyStr(ctx, usp_proto, "entries",
+        JS_NewCFunction(ctx, js_url_search_params_entries, "entries", 0));
+    JS_SetPropertyStr(ctx, usp_proto, "keys",
+        JS_NewCFunction(ctx, js_url_search_params_keys, "keys", 0));
+    JS_SetPropertyStr(ctx, usp_proto, "values",
+        JS_NewCFunction(ctx, js_url_search_params_values, "values", 0));
+    JS_SetPropertyStr(ctx, global, "URLSearchParams", usp_ctor);
+    JS_SetPropertyStr(ctx, window, "URLSearchParams", usp_ctor);
+    
     LOG_INFO("URL API set");
     
     // ===== Request/Response API =====
