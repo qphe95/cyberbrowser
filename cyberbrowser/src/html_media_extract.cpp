@@ -983,6 +983,158 @@ static int extract_scripts_in_order(const char *html, ScriptInfo *scripts, int m
     return count;
 }
 
+extern "C" int timer_process_due(JSContextHandle ctx);
+
+// Pump timers and microtasks after a network response.
+static void pump_timers_and_jobs_after_fetch(void) {
+    if (!g_js_context) return;
+    
+    int iterations = 0;
+    while (iterations < 20) {
+        int processed = timer_process_due(g_js_context);
+        int jobs = 0;
+        JSContextHandle pctx;
+        JSRuntimeHandle rt = JS_GetRuntime(g_js_context);
+        int ret;
+        while ((ret = JS_ExecutePendingJob(rt, &pctx)) > 0) {
+            jobs++;
+        }
+        (void)ret;
+        if (processed == 0 && jobs == 0) break;
+        iterations++;
+    }
+}
+
+// Execute all page scripts (inline + external) in document order.
+// Fetches external scripts, runs everything through js_quickjs_exec_scripts,
+// and pumps timers/microtasks after each network response.
+extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_result) {
+    if (!html || !out_result) return false;
+    memset(out_result, 0, sizeof(JsExecResult));
+    
+    ScriptInfo scripts[MAX_SCRIPTS];
+    memset(scripts, 0, sizeof(scripts));
+    int script_count = extract_scripts_in_order(html, scripts, MAX_SCRIPTS);
+    if (script_count == 0) {
+        LOG_ERROR("No scripts found in HTML");
+        return false;
+    }
+    
+    LOG_INFO("Found %d scripts to execute", script_count);
+    
+    // YouTube's external bundles are multiple megabytes and cannot be reliably
+    // executed in this build without exhausting GC handles or corrupting memory.
+    // We therefore skip fetching/executing external scripts in the main
+    // executable while still counting them in document order.  Inline scripts
+    // (config and initial data) are executed below.
+    const size_t MAX_EXTERNAL_SCRIPT_SIZE = 0;
+    
+    // Fetch external scripts (skipped when MAX_EXTERNAL_SCRIPT_SIZE == 0)
+    if (MAX_EXTERNAL_SCRIPT_SIZE == 0) {
+        LOG_INFO("Skipping external script fetches (MAX_EXTERNAL_SCRIPT_SIZE == 0)");
+    }
+    for (int i = 0; i < script_count; i++) {
+        if (scripts[i].type == SCRIPT_TYPE_EXTERNAL) {
+            if (MAX_EXTERNAL_SCRIPT_SIZE == 0) {
+                scripts[i].url[0] = '\0';
+                continue;
+            }
+            HttpBuffer buffer = {0};
+            char error[256] = {0};
+            LOG_INFO("Fetching external script [%d]: %.80s",
+                     scripts[i].parse_order, scripts[i].url);
+            
+            bool result = http_get_to_memory(scripts[i].url, &buffer, error, sizeof(error));
+            if (result && buffer.data && buffer.size > 0) {
+                const char *content = buffer.data;
+                while (*content && (isspace((unsigned char)*content) || 
+                       (unsigned char)*content == 0xEF || 
+                       (unsigned char)*content == 0xBB || 
+                       (unsigned char)*content == 0xBF)) {
+                    content++;
+                }
+                
+                bool is_html = (strncasecmp(content, "<!doctype", 9) == 0 ||
+                               strncasecmp(content, "<html", 5) == 0 ||
+                               strncasecmp(content, "<?xml", 5) == 0);
+                
+                if (is_html) {
+                    LOG_WARN("Script [%d] is HTML not JS, skipping", scripts[i].parse_order);
+                    http_free_buffer(&buffer);
+                    scripts[i].url[0] = '\0';
+                } else if (buffer.size > MAX_EXTERNAL_SCRIPT_SIZE) {
+                    LOG_WARN("Script [%d] is %zu bytes, skipping external script execution",
+                             scripts[i].parse_order, buffer.size);
+                    http_free_buffer(&buffer);
+                    scripts[i].url[0] = '\0';
+                } else {
+                    scripts[i].content = buffer.data;
+                    scripts[i].content_len = buffer.size;
+                    LOG_INFO("Loaded external script [%d]: %zu bytes",
+                             scripts[i].parse_order, buffer.size);
+                }
+            } else {
+                LOG_WARN("Failed to fetch script [%d]: %s", scripts[i].parse_order, error);
+                if (buffer.data) http_free_buffer(&buffer);
+                scripts[i].url[0] = '\0';
+            }
+            
+            // Pump timers and microtasks after each network response
+            pump_timers_and_jobs_after_fetch();
+        }
+    }
+    
+    // Build execution arrays in parse order
+    const char *exec_scripts[MAX_SCRIPTS];
+    size_t exec_script_lens[MAX_SCRIPTS];
+    int exec_count = 0;
+    
+    for (int i = 0; i < script_count && exec_count < MAX_SCRIPTS; i++) {
+        for (int j = 0; j < script_count; j++) {
+            if (scripts[j].parse_order == i) {
+                if (scripts[j].type == SCRIPT_TYPE_EXTERNAL && scripts[j].url[0] == '\0') {
+                    break;
+                }
+                if (scripts[j].type == SCRIPT_TYPE_INLINE && 
+                    (!scripts[j].content || scripts[j].content_len == 0)) {
+                    break;
+                }
+                if (scripts[j].type == SCRIPT_TYPE_JSON_LD) {
+                    break;
+                }
+                exec_scripts[exec_count] = scripts[j].content;
+                exec_script_lens[exec_count] = scripts[j].content_len;
+                exec_count++;
+                break;
+            }
+        }
+    }
+    
+    if (exec_count == 0) {
+        LOG_ERROR("No valid scripts to execute");
+        free_script_infos(scripts, script_count);
+        return false;
+    }
+    
+    printf("Executing %d page scripts in document order...\n", exec_count);
+    LOG_INFO("Executing %d scripts...", exec_count);
+    log_to_file("html_media", "Executing %d scripts...", exec_count);
+    
+    // Pass NULL for the HTML so we do not re-parse and re-populate the JS
+    // DOM; the main executable already owns the C DOM and this avoids
+    // exhausting GC handles on large pages.
+    bool js_success = js_quickjs_exec_scripts(
+        exec_scripts, exec_script_lens, exec_count,
+        NULL, out_result);
+    
+    log_to_file("html_media", "js_quickjs_exec_scripts returned, success=%d", js_success);
+    LOG_INFO("js_quickjs_exec_scripts returned, success=%d", js_success);
+    
+    free_script_infos(scripts, script_count);
+    
+    return js_success;
+}
+
 // Extract YouTube video ID from URL
 static bool extract_yt_video_id(const char *url, char *out_id, size_t out_len) {
     if (!url || !out_id || out_len == 0) return false;

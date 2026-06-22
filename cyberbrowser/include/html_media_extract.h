@@ -8,6 +8,9 @@
 extern "C" {
 #endif
 
+/* Forward declaration of JsExecResult (defined in js_quickjs.h) */
+struct JsExecResult;
+
 typedef struct HtmlMediaCandidate {
     char url[2048];
     char mime[64];
@@ -30,6 +33,12 @@ int html_extract_inline_scripts(const char *html, char **out_scripts, int max_sc
  * Returns true if visitorData was successfully extracted.
  */
 bool html_extract_visitor_data(const char *html, char *out_vd, size_t out_len);
+
+/* Execute all page scripts (inline + external) in document order.
+ * Fetches external scripts, runs them through QuickJS, and pumps timers/microtasks
+ * after each network response. Captured URLs are returned in out_result.
+ */
+bool html_execute_page_scripts(const char *html, struct JsExecResult *out_result);
 
 #ifdef __cplusplus
 }

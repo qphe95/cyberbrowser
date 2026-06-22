@@ -28,6 +28,9 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 #include "session_state.h"
+#include "html_media_extract.h"
+
+extern "C" int timer_process_due(JSContextHandle ctx);
 
 #define LOG_TAG "cyberbrowser"
 
@@ -683,6 +686,56 @@ static bool render_display_list_to_jpg(const DisplayList *dl, const char *path,
     return ok != 0;
 }
 
+/* ------------------------------------------------------------------------- */
+/* Phase 3 event loop helpers                                                */
+/* ------------------------------------------------------------------------- */
+
+static void pump_timers_and_jobs(JSContextHandle ctx) {
+    if (!ctx.valid()) return;
+    JSRuntimeHandle rt = JS_GetRuntime(ctx);
+    int iterations = 0;
+    while (iterations < 100) {
+        int processed = timer_process_due(ctx);
+        int jobs = 0;
+        JSContextHandle pctx;
+        int ret;
+        while ((ret = JS_ExecutePendingJob(rt, &pctx)) > 0) {
+            jobs++;
+        }
+        (void)ret;
+        if (processed == 0 && jobs == 0) break;
+        iterations++;
+    }
+}
+
+static void dispatch_page_lifecycle_events(JSContextHandle ctx) {
+    const char *lifecycle_js =
+        "document.readyState = 'interactive';"
+        "var dcl = new Event('DOMContentLoaded', { bubbles: true });"
+        "document.dispatchEvent(dcl);"
+        "window.dispatchEvent(dcl);"
+        "document.readyState = 'complete';"
+        "var loadEvt = new Event('load');"
+        "window.dispatchEvent(loadEvt);"
+        "document.dispatchEvent(loadEvt);";
+    GCValue result = JS_Eval(ctx, lifecycle_js, strlen(lifecycle_js),
+                             "<lifecycle>", JS_EVAL_TYPE_GLOBAL);
+    (void)result;
+}
+
+static void print_captured_googlevideo_urls(JSContextHandle ctx) {
+    char urls[JS_MAX_CAPTURED_URLS][JS_MAX_URL_LEN];
+    int count = js_quickjs_get_captured_urls(urls, JS_MAX_CAPTURED_URLS);
+    int gv_count = 0;
+    for (int i = 0; i < count; i++) {
+        if (strstr(urls[i], "googlevideo.com")) {
+            printf("Captured googlevideo URL: %s\n", urls[i]);
+            gv_count++;
+        }
+    }
+    printf("Captured googlevideo.com URLs: %d\n", gv_count);
+}
+
 int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
@@ -723,6 +776,31 @@ int main(int argc, char *argv[]) {
     /* Extract VISITOR_INFO1_LIVE / visitorData and inject into JS so that
      * fetch() and XHR can send a consistent session with youtubei calls. */
     inject_session_tokens(g_ctx, g_global, html);
+
+    /* Phase 3: execute page scripts, drain timers, dispatch lifecycle events,
+     * and print any googlevideo.com URLs captured by the hooks. */
+    {
+        printf("Executing page scripts ...\n");
+        js_quickjs_clear_captured_urls();
+        JsExecResult js_result;
+        bool exec_ok = html_execute_page_scripts(html, &js_result);
+        if (exec_ok) {
+            printf("Scripts executed: %d captured URLs\n", js_result.captured_url_count);
+        } else {
+            printf("WARNING: page script execution did not complete successfully\n");
+        }
+        pump_timers_and_jobs(g_ctx);
+
+        // Force a GC cycle to reclaim handles allocated by script execution
+        // before the heavier youtubei grid extraction runs.
+        JS_RunGC(JS_GetRuntime(g_ctx));
+
+        printf("Dispatching DOMContentLoaded and load events ...\n");
+        dispatch_page_lifecycle_events(g_ctx);
+        pump_timers_and_jobs(g_ctx);
+
+        print_captured_googlevideo_urls(g_ctx);
+    }
 
     /* YouTube's homepage HTML is a JS shell with no video data.  Fetch the
      * structured browse feed from youtubei and synthesize a grid of video

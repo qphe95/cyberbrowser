@@ -2137,6 +2137,69 @@ TEST(test_window_add_event_listener_real) {
     return true;
 }
 
+/* Test DOMContentLoaded and load events dispatch on window and document */
+TEST(test_dom_content_loaded_and_load_events) {
+    JSContextHandle ctx = get_test_context();
+    if (!ctx) return false;
+
+    const char *js_code = R"(
+        var dclWindow = false, dclDoc = false, loadWindow = false, loadDoc = false;
+        window.addEventListener('DOMContentLoaded', function() { dclWindow = true; });
+        document.addEventListener('DOMContentLoaded', function() { dclDoc = true; });
+        window.addEventListener('load', function() { loadWindow = true; });
+        document.addEventListener('load', function() { loadDoc = true; });
+        document.readyState = 'interactive';
+        var dcl = new Event('DOMContentLoaded', { bubbles: true });
+        document.dispatchEvent(dcl);
+        window.dispatchEvent(dcl);
+        document.readyState = 'complete';
+        var loadEvt = new Event('load');
+        window.dispatchEvent(loadEvt);
+        document.dispatchEvent(loadEvt);
+        dclWindow && dclDoc && loadWindow && loadDoc;
+    )";
+
+    GCValue result = JS_Eval(ctx, js_code, strlen(js_code), "<test>", 0);
+    bool success = JS_ToBool(ctx, result);
+
+    ASSERT_TRUE(success);
+    return true;
+}
+
+/* Test timer and microtask pump drains setTimeout and Promise callbacks */
+TEST(test_timer_and_promise_pump) {
+    JSContextHandle ctx = get_test_context();
+    if (!ctx) return false;
+
+    const char *js_code = R"(
+        var timeoutRan = false;
+        var promiseRan = false;
+        setTimeout(function() { timeoutRan = true; }, 0);
+        Promise.resolve().then(function() { promiseRan = true; });
+        !timeoutRan && !promiseRan;
+    )";
+
+    GCValue result = JS_Eval(ctx, js_code, strlen(js_code), "<test>", 0);
+    if (!JS_ToBool(ctx, result)) return false;
+
+    JSRuntimeHandle rt = JS_GetRuntime(ctx);
+    JSContextHandle pctx;
+    for (int i = 0; i < 50; i++) {
+        int processed = timer_process_due(ctx);
+        int jobs = 0;
+        int ret;
+        while ((ret = JS_ExecutePendingJob(rt, &pctx)) > 0) jobs++;
+        if (processed == 0 && jobs == 0) break;
+    }
+
+    const char *check_js = "timeoutRan && promiseRan;";
+    GCValue check_result = JS_Eval(ctx, check_js, strlen(check_js), "<test>", 0);
+    bool success = JS_ToBool(ctx, check_result);
+
+    ASSERT_TRUE(success);
+    return true;
+}
+
 /* Test classList reflects and modifies className */
 TEST(test_class_list_functional) {
     JSContextHandle ctx = get_test_context();
@@ -4733,6 +4796,8 @@ extern "C" void run_browser_api_impl_tests(void) {
     RUN_TEST(test_node_child_nodes);
     RUN_TEST(test_owner_document_set);
     RUN_TEST(test_window_add_event_listener_real);
+    RUN_TEST(test_dom_content_loaded_and_load_events);
+    RUN_TEST(test_timer_and_promise_pump);
     RUN_TEST(test_class_list_functional);
     RUN_TEST(test_class_list_remove);
     RUN_TEST(test_text_content);

@@ -1807,7 +1807,6 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // window.addEventListener/removeEventListener/dispatchEvent are inherited
     // from Window.prototype (which is set to EventTarget.prototype methods).
     // Do NOT define own-property stubs here or they will shadow the real methods.
-    DEF_FUNC(ctx, window, "dispatchEvent", js_true, 1);
     DEF_FUNC(ctx, window, "getComputedStyle", js_get_computed_style, 1);
     DEF_FUNC(ctx, window, "getSelection", js_get_selection, 0);
     LOG_INFO("Window properties set");
