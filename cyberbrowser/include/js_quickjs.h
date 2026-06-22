@@ -61,6 +61,12 @@ void js_quickjs_reset_class_ids(void);
 void js_quickjs_clear_captured_urls(void);
 void js_quickjs_cleanup(void);
 
+/* Drain timers and pending JS jobs until quiescent. */
+void js_quickjs_pump_timers_and_jobs(void);
+
+/* Dispatch DOMContentLoaded and load events on document/window. */
+void js_quickjs_dispatch_lifecycle_events(void);
+
 /* Execute multiple JS scripts in a browser-like environment
  * Data payload scripts (ytInitialPlayerResponse, ytInitialData, etc.) will
  * execute naturally and define global variables, just like in a real browser.

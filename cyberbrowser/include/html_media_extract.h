@@ -40,6 +40,26 @@ bool html_extract_visitor_data(const char *html, char *out_vd, size_t out_len);
  */
 bool html_execute_page_scripts(const char *html, struct JsExecResult *out_result);
 
+/* Select the best playable media URL from a JS execution result.
+ * Filters captured URLs to googlevideo.com, decodes signatureCipher if needed,
+ * deprioritizes SABR/initplayback URLs, and derives MIME from the URL.
+ */
+bool html_select_best_media_url(const struct JsExecResult *result,
+                                bool prefer_video,
+                                char *out_url, size_t out_url_len,
+                                char *out_mime, size_t out_mime_len);
+
+/* Extract media URL directly from ytInitialPlayerResponse embedded in the
+ * watch-page HTML. This is lightweight watch-page emulation: it evaluates the
+ * single inline data script and reads streamingData, avoiding the heavy
+ * external player bundle that can hang/crash the emulator.
+ */
+bool html_extract_yt_player_response_media(const char *html, bool prefer_video,
+                                           char *out_url, size_t out_url_len,
+                                           char *out_mime, size_t out_mime_len,
+                                           char *out_title, size_t out_title_len,
+                                           char *out_thumbnail, size_t out_thumbnail_len);
+
 #ifdef __cplusplus
 }
 #endif

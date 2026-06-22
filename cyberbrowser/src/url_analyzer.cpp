@@ -2,6 +2,8 @@
 #include "html_media_extract.h"
 #include "http_download.h"
 #include "session_state.h"
+#include "js_quickjs.h"
+#include "quickjs.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -66,6 +68,45 @@ static void resolve_url(const char *baseUrl, const char *candidate,
     snprintf(out, outLen, "%.*s://%.*s/%s",
              (int)schemeLen, baseUrl,
              (int)hostLen, hostStart, candidate);
+}
+
+/* Escape a string for insertion into a single-quoted JavaScript literal. */
+static void escape_js_string_literal(const char *in, char *out, size_t out_len) {
+    size_t i = 0, j = 0;
+    while (in[i] && j + 3 < out_len) {
+        if (in[i] == '\\' || in[i] == '\'') {
+            out[j++] = '\\';
+        }
+        out[j++] = in[i++];
+    }
+    out[j] = '\0';
+}
+
+/* Inject visitorData into the shared session state and, if QuickJS is ready,
+ * into window.ytcfg and document.cookie so that emulated fetch/XHR calls
+ * carry the same session as the watch-page fetch. */
+static void inject_session_for_analyzer(const char *visitor_data) {
+    if (!visitor_data || !visitor_data[0]) return;
+    session_set_visitor_data(visitor_data);
+    if (!g_js_context) return;
+
+    char escaped[512] = {0};
+    escape_js_string_literal(visitor_data, escaped, sizeof(escaped));
+
+    char script[2048];
+    snprintf(script, sizeof(script),
+        "window.ytcfg = window.ytcfg || {};"
+        "window.ytcfg.set = function(k,v){ this[k]=v; return v; };"
+        "window.ytcfg.get = function(k){ return this[k]; };"
+        "window.ytcfg.set('VISITOR_DATA', '%s');"
+        "window.ytcfg.set('CLIENT_VERSION', '2.20250122.04.00');"
+        "document.cookie = 'VISITOR_INFO1_LIVE=%s; path=/; domain=.youtube.com';"
+        "window.yt = window.yt || {};"
+        "window.yt.config_ = window.yt.config_ || {};"
+        "window.yt.config_.INNERTUBE_CLIENT_VERSION = '2.20250122.04.00';",
+        escaped, escaped);
+
+    JS_Eval(g_js_context, script, strlen(script), "<session>", JS_EVAL_TYPE_GLOBAL);
 }
 
 /* Extract video ID from YouTube URL */
@@ -160,21 +201,6 @@ static bool find_any_googlevideo_url(const char *json, char *out_url, size_t out
     return false;
 }
 
-/* Extract visitorData from youtubei JSON response */
-static bool extract_visitor_data(const char *json, char *out_vd, size_t out_len) {
-    const char *key = "\"visitorData\":\"";
-    const char *p = strstr(json, key);
-    if (!p) return false;
-    p += strlen(key);
-    const char *end = strchr(p, '"');
-    if (!end) return false;
-    size_t len = (size_t)(end - p);
-    if (len == 0 || len >= out_len) return false;
-    memcpy(out_vd, p, len);
-    out_vd[len] = '\0';
-    return true;
-}
-
 /* Fallback: extract visitorData from YouTube HTML page via string scanning.
  * Used only when the JS execution path fails. */
 static bool extract_visitor_data_from_html_fallback(const char *html, size_t html_len, char *out_vd, size_t out_len) {
@@ -241,7 +267,11 @@ static bool extract_visitor_data_from_html_fallback(const char *html, size_t htm
  * QuickJS headers require C++ compilation. This function orchestrates the
  * page fetch and delegates script execution.
  */
+/* Fetch the watch page and extract visitorData. If out_html is non-NULL the
+ * caller receives ownership of the fetched HTML buffer and must free it with
+ * http_free_buffer(); otherwise the buffer is freed here. */
 static bool fetch_visitor_data_from_watch_page(const char *video_id, char *out_vd, size_t out_len,
+                                                HttpBuffer *out_html,
                                                 char *err, size_t errLen) {
     char url[256];
     snprintf(url, sizeof(url), "https://www.youtube.com/watch?v=%s", video_id);
@@ -278,7 +308,11 @@ static bool fetch_visitor_data_from_watch_page(const char *video_id, char *out_v
         }
     }
 
-    http_free_buffer(&html);
+    if (out_html) {
+        *out_html = html;
+    } else {
+        http_free_buffer(&html);
+    }
 
     if (!found) {
         LOGE("visitorData not found in watch page");
@@ -286,18 +320,6 @@ static bool fetch_visitor_data_from_watch_page(const char *video_id, char *out_v
         snprintf(err, errLen, "visitorData not found in watch page");
     }
     return found;
-}
-
-/* Check if playabilityStatus indicates LOGIN_REQUIRED */
-static bool is_login_required(const char *json) {
-    const char *p = strstr(json, "\"playabilityStatus\"");
-    if (!p) return false;
-    const char *status = strstr(p, "\"status\":\"");
-    if (!status) return false;
-    status += 10; /* skip "status":" */
-    size_t len = 0;
-    while (status[len] && status[len] != '"') len++;
-    return (len == 14 && strncasecmp(status, "LOGIN_REQUIRED", 14) == 0);
 }
 
 /* Try to get a direct media URL via the YouTube youtubei/v1/player API
@@ -553,23 +575,51 @@ bool url_analyze_with_options(const char *inputUrl, MediaUrl *outMedia, char *er
     }
 
     /* Proper browser emulation: first establish a session by loading the watch page,
-     * then extract visitorData, then call the youtubei API with the session token.
-     * This mirrors exactly what a real browser does. */
+     * then run the page's scripts in QuickJS, and finally fall back to the
+     * youtubei API JSON scan if emulation does not capture a playable URL. */
     char video_id[32] = {0};
     if (extract_video_id(inputUrl, video_id, sizeof(video_id))) {
         char visitor_data[1024] = {0};
-        bool has_vd = fetch_visitor_data_from_watch_page(video_id, visitor_data, sizeof(visitor_data), err, errLen);
+        HttpBuffer watch_html = {0};
+        bool has_vd = fetch_visitor_data_from_watch_page(video_id, visitor_data, sizeof(visitor_data),
+                                                         &watch_html, err, errLen);
         if (!has_vd) {
             /* If watch page fetch failed, clear error and continue to fallback */
             if (err) err[0] = '\0';
         }
+
+        /* Primary path: lightweight watch-page emulation via ytInitialPlayerResponse. */
+        bool emulation_ok = false;
+        if (g_js_context && watch_html.data && watch_html.size > 0) {
+            LOGI("Running watch-page script emulation");
+            file_log("Running watch-page script emulation");
+            inject_session_for_analyzer(has_vd ? visitor_data : NULL);
+            if (html_extract_yt_player_response_media(watch_html.data, prefer_video,
+                                                      outMedia->url, sizeof(outMedia->url),
+                                                      outMedia->mime, sizeof(outMedia->mime),
+                                                      outMedia->title, sizeof(outMedia->title),
+                                                      outMedia->thumbnailUrl, sizeof(outMedia->thumbnailUrl))) {
+                emulation_ok = true;
+                LOGI("URL analysis complete via watch-page emulation");
+                file_log("URL analysis complete via watch-page emulation");
+            }
+        }
+
+        if (emulation_ok) {
+            http_free_buffer(&watch_html);
+            return true;
+        }
+
+        /* Fallback: youtubei/v1/player JSON scan. */
         if (try_youtubei_api(video_id, has_vd ? visitor_data : NULL, outMedia, err, errLen, prefer_video)) {
             LOGI("URL analysis complete via youtubei API");
             file_log("URL analysis complete via youtubei API");
+            http_free_buffer(&watch_html);
             return true;
         }
-        /* Clear error for fallback */
+        /* Clear error for final fallback */
         if (err) err[0] = '\0';
+        http_free_buffer(&watch_html);
     }
 
     /* Fallback: HTML scraping + JS execution */

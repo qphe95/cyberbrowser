@@ -1805,6 +1805,40 @@ void js_quickjs_clear_captured_urls(void) {
     pthread_mutex_unlock(&g_url_mutex);
 }
 
+void js_quickjs_pump_timers_and_jobs(void) {
+    if (!g_js_context.valid()) return;
+    JSRuntimeHandle rt = JS_GetRuntime(g_js_context);
+    int iterations = 0;
+    while (iterations < 100) {
+        int processed = timer_process_due(g_js_context);
+        int jobs = 0;
+        JSContextHandle pctx;
+        int ret;
+        while ((ret = JS_ExecutePendingJob(rt, &pctx)) > 0) {
+            jobs++;
+        }
+        (void)ret;
+        if (processed == 0 && jobs == 0) break;
+        iterations++;
+    }
+}
+
+void js_quickjs_dispatch_lifecycle_events(void) {
+    if (!g_js_context.valid()) return;
+    const char *lifecycle_js =
+        "document.readyState = 'interactive';"
+        "var dcl = new Event('DOMContentLoaded', { bubbles: true });"
+        "document.dispatchEvent(dcl);"
+        "window.dispatchEvent(dcl);"
+        "document.readyState = 'complete';"
+        "var loadEvt = new Event('load');"
+        "window.dispatchEvent(loadEvt);"
+        "document.dispatchEvent(loadEvt);";
+    GCValue result = JS_Eval(g_js_context, lifecycle_js, strlen(lifecycle_js),
+                             "<lifecycle>", JS_EVAL_TYPE_GLOBAL);
+    (void)result;
+}
+
 void js_quickjs_cleanup(void) {
     pthread_mutex_lock(&g_url_mutex);
     g_captured_url_count = 0;

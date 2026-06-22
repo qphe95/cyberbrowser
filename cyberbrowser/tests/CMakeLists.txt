@@ -102,10 +102,24 @@ add_executable(long-video-test
     test_long_video_analyze.cpp
 )
 
-# Simple URL analyze test (no QuickJS)
+# Simple URL analyze test (now uses QuickJS for watch-page emulation)
 add_executable(analyze-long-video-test
-    test_analyze_long_video.c
+    test_analyze_long_video.cpp
 )
+target_compile_features(analyze-long-video-test PRIVATE cxx_std_11)
+target_include_directories(analyze-long-video-test
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}/third_party/quickjs
+)
+target_link_libraries(analyze-long-video-test
+    PRIVATE
+        browser-emulator
+)
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    target_include_directories(analyze-long-video-test BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
+endif()
 
 # YouTubei API probe (no QuickJS)
 add_executable(youtubei-probe

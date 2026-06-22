@@ -13,6 +13,8 @@
 #include "css_layout.h"
 #include "display_list.h"
 #include "text_shaper.h"
+#include "html_media_extract.h"
+#include "js_quickjs.h"
 
 extern "C" void run_css_layout_tests(void);
 extern "C" JSContextHandle get_shared_test_context(void);
@@ -332,6 +334,91 @@ TEST(test_async_image_load_callback) {
     return true;
 }
 
+TEST(test_select_best_media_url) {
+    JsExecResult result;
+    memset(&result, 0, sizeof(result));
+    result.captured_url_count = 5;
+
+    snprintf(result.captured_urls[0], sizeof(result.captured_urls[0]),
+             "https://r1---sn-foo.googlevideo.com/videoplayback?mime=video/mp4&itag=137&sabr=1&sig=abc");
+    snprintf(result.captured_urls[1], sizeof(result.captured_urls[1]),
+             "https://r2---sn-bar.googlevideo.com/videoplayback?mime=audio/mp4&itag=140&sig=def");
+    snprintf(result.captured_urls[2], sizeof(result.captured_urls[2]),
+             "https://r3---sn-baz.googlevideo.com/videoplayback?mime=video/mp4&itag=18");
+    snprintf(result.captured_urls[3], sizeof(result.captured_urls[3]),
+             "https://example.com/not-a-googlevideo-url.mp4");
+    snprintf(result.captured_urls[4], sizeof(result.captured_urls[4]),
+             "https://r4---sn-qux.googlevideo.com/videoplayback?mime=video/mp4&itag=22");
+
+    char url[2048] = {0};
+    char mime[64] = {0};
+
+    /* Audio preference should pick the audio itag=140 URL. */
+    ASSERT_TRUE(html_select_best_media_url(&result, false, url, sizeof(url), mime, sizeof(mime)));
+    ASSERT_TRUE(strstr(url, "itag=140") != NULL);
+    ASSERT_TRUE(strcmp(mime, "audio/mp4") == 0);
+
+    /* Video preference should pick a preferred video itag (18 or 22),
+     * not the SABR URL and not the audio URL. */
+    memset(url, 0, sizeof(url));
+    memset(mime, 0, sizeof(mime));
+    ASSERT_TRUE(html_select_best_media_url(&result, true, url, sizeof(url), mime, sizeof(mime)));
+    ASSERT_TRUE(strstr(url, "sabr=1") == NULL);
+    ASSERT_TRUE(strstr(url, "itag=140") == NULL);
+    ASSERT_TRUE(strstr(url, "itag=18") != NULL || strstr(url, "itag=22") != NULL);
+    ASSERT_TRUE(strcmp(mime, "video/mp4") == 0);
+
+    return true;
+}
+
+TEST(test_extract_yt_player_response_media) {
+    const char *html =
+        "<!DOCTYPE html><html><head>"
+        "<script>var ytInitialPlayerResponse = {"
+        "  \"videoDetails\": {"
+        "    \"title\": \"Test Video\","
+        "    \"thumbnails\": ["
+        "      {\"url\": \"https://thumb1.example.com/low.jpg\"},"
+        "      {\"url\": \"https://thumb2.example.com/high.jpg\"}"
+        "    ]"
+        "  },"
+        "  \"streamingData\": {"
+        "    \"formats\": ["
+        "      {\"itag\": 18, \"mimeType\": \"video/mp4; codecs=...\", \"url\": \"https://r1---sn-foo.googlevideo.com/videoplayback?itag=18&mime=video/mp4\"}"
+        "    ],"
+        "    \"adaptiveFormats\": ["
+        "      {\"itag\": 140, \"mimeType\": \"audio/mp4; codecs=...\", \"url\": \"https://r2---sn-bar.googlevideo.com/videoplayback?itag=140&mime=audio/mp4\"}"
+        "    ]"
+        "  }"
+        "};</script></head><body></body></html>";
+
+    char url[2048] = {0};
+    char mime[64] = {0};
+    char title[256] = {0};
+    char thumbnail[2048] = {0};
+
+    ASSERT_TRUE(html_extract_yt_player_response_media(html, false,
+                                                       url, sizeof(url),
+                                                       mime, sizeof(mime),
+                                                       title, sizeof(title),
+                                                       thumbnail, sizeof(thumbnail)));
+    ASSERT_TRUE(strstr(url, "itag=140") != NULL);
+    ASSERT_TRUE(strcmp(mime, "audio/mp4") == 0);
+    ASSERT_TRUE(strcmp(title, "Test Video") == 0);
+    ASSERT_TRUE(strcmp(thumbnail, "https://thumb2.example.com/high.jpg") == 0);
+
+    memset(url, 0, sizeof(url));
+    memset(mime, 0, sizeof(mime));
+    ASSERT_TRUE(html_extract_yt_player_response_media(html, true,
+                                                       url, sizeof(url),
+                                                       mime, sizeof(mime),
+                                                       NULL, 0, NULL, 0));
+    ASSERT_TRUE(strstr(url, "itag=18") != NULL);
+    ASSERT_TRUE(strcmp(mime, "video/mp4") == 0);
+
+    return true;
+}
+
 extern "C" void run_css_layout_tests(void) {
     printf("\n--- CSS Layout Engine Tests ---\n");
     RUN_TEST(test_layout_basic_document);
@@ -343,4 +430,6 @@ extern "C" void run_css_layout_tests(void) {
     RUN_TEST(test_text_shaper_basic);
     RUN_TEST(test_dom_mutation_sync_to_native);
     RUN_TEST(test_async_image_load_callback);
+    RUN_TEST(test_select_best_media_url);
+    RUN_TEST(test_extract_yt_player_response_media);
 }

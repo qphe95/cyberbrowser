@@ -58,7 +58,7 @@ set(BE_SOURCES
     src/text_shaper.cpp
     src/image_cache.cpp
     src/lockfree_hash_table.cpp
-    src/url_analyzer.c
+    src/url_analyzer.cpp
     src/session_state.c
     src/tls_client.c
     src/http_download.c
