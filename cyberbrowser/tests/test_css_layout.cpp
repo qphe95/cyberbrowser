@@ -66,8 +66,10 @@ TEST(test_layout_stylesheet) {
     int div_idx = po_array_index_from_payload(&doc->array, div);
     LayoutBox *box = css_layout_box_for_node(&ctx, div_idx);
     ASSERT_TRUE(box != NULL);
-    ASSERT_TRUE(near_equal(box->width, 200.0));
-    ASSERT_TRUE(near_equal(box->height, 100.0));
+    /* Default box model is content-box: width/height apply to the content box,
+     * so the stored border-box totals include padding. */
+    ASSERT_TRUE(near_equal(box->width, 210.0));
+    ASSERT_TRUE(near_equal(box->height, 110.0));
     ASSERT_TRUE(near_equal(box->margin_top, 10.0));
     ASSERT_TRUE(near_equal(box->padding_left, 5.0));
     ASSERT_TRUE(near_equal(box->background_color_r, 1.0));
@@ -98,6 +100,152 @@ TEST(test_layout_auto_height) {
     ASSERT_TRUE(box != NULL);
     ASSERT_TRUE(near_equal(box->width, 100.0));
     ASSERT_TRUE(box->height >= 0.0);
+
+    css_layout_tree_free(&ctx);
+    html_document_free(doc);
+    return true;
+}
+
+TEST(test_layout_box_sizing_content_box) {
+    const char *html = "<html><body><div class=\"box\"></div></body></html>";
+    HtmlDocument *doc = html_parse(html, strlen(html));
+    ASSERT_TRUE(doc != NULL);
+
+    /* Explicit content-box with padding should expand the border-box total. */
+    const char *css = ".box { box-sizing: content-box; width: 200px; height: 100px; padding: 10px; }";
+    CssStylesheet *sheet = css_stylesheet_parse(css, strlen(css));
+    ASSERT_TRUE(sheet != NULL);
+
+    LayoutContext ctx;
+    ASSERT_TRUE(css_layout_run(&ctx, doc, sheet, 800.0, 600.0));
+
+    HtmlNode *div = html_document_get_element_by_tag(doc, "div");
+    ASSERT_TRUE(div != NULL);
+    int div_idx = po_array_index_from_payload(&doc->array, div);
+    LayoutBox *box = css_layout_box_for_node(&ctx, div_idx);
+    ASSERT_TRUE(box != NULL);
+    ASSERT_TRUE(near_equal(box->width, 200.0 + 20.0));
+    ASSERT_TRUE(near_equal(box->height, 100.0 + 20.0));
+
+    css_layout_tree_free(&ctx);
+    html_document_free(doc);
+    return true;
+}
+
+TEST(test_layout_box_sizing_border_box) {
+    const char *html = "<html><body><div class=\"box\"></div></body></html>";
+    HtmlDocument *doc = html_parse(html, strlen(html));
+    ASSERT_TRUE(doc != NULL);
+
+    /* Border-box: width/height include padding and border, so the total stays
+     * at the declared value and the content box shrinks. */
+    const char *css = ".box { box-sizing: border-box; width: 200px; height: 100px; padding: 10px; }";
+    CssStylesheet *sheet = css_stylesheet_parse(css, strlen(css));
+    ASSERT_TRUE(sheet != NULL);
+
+    LayoutContext ctx;
+    ASSERT_TRUE(css_layout_run(&ctx, doc, sheet, 800.0, 600.0));
+
+    HtmlNode *div = html_document_get_element_by_tag(doc, "div");
+    ASSERT_TRUE(div != NULL);
+    int div_idx = po_array_index_from_payload(&doc->array, div);
+    LayoutBox *box = css_layout_box_for_node(&ctx, div_idx);
+    ASSERT_TRUE(box != NULL);
+    ASSERT_TRUE(near_equal(box->width, 200.0));
+    ASSERT_TRUE(near_equal(box->height, 100.0));
+
+    css_layout_tree_free(&ctx);
+    html_document_free(doc);
+    return true;
+}
+
+TEST(test_layout_box_sizing_min_max) {
+    const char *html = "<html><body><div class=\"box\"></div></body></html>";
+    HtmlDocument *doc = html_parse(html, strlen(html));
+    ASSERT_TRUE(doc != NULL);
+
+    /* min-width/max-width refer to the same box as width.  For content-box
+     * they constrain the content width, so the total includes padding. */
+    const char *css = ".box { box-sizing: content-box; width: 50px; min-width: 100px; max-width: 300px; padding: 5px; }";
+    CssStylesheet *sheet = css_stylesheet_parse(css, strlen(css));
+    ASSERT_TRUE(sheet != NULL);
+
+    LayoutContext ctx;
+    ASSERT_TRUE(css_layout_run(&ctx, doc, sheet, 800.0, 600.0));
+
+    HtmlNode *div = html_document_get_element_by_tag(doc, "div");
+    ASSERT_TRUE(div != NULL);
+    int div_idx = po_array_index_from_payload(&doc->array, div);
+    LayoutBox *box = css_layout_box_for_node(&ctx, div_idx);
+    ASSERT_TRUE(box != NULL);
+    ASSERT_TRUE(near_equal(box->width, 100.0 + 10.0));
+
+    css_layout_tree_free(&ctx);
+    html_document_free(doc);
+    return true;
+}
+
+TEST(test_layout_flex_box_sizing) {
+    const char *html = "<html><body><div id=\"flex\"><div id=\"a\"></div><div id=\"b\"></div></div></body></html>";
+    HtmlDocument *doc = html_parse(html, strlen(html));
+    ASSERT_TRUE(doc != NULL);
+
+    /* In a row flex container, the main-axis size of each item is its
+     * border-box width.  Content-box items add padding; border-box items keep
+     * the declared total. */
+    const char *css =
+        "#flex { display: flex; width: 300px; }"
+        "#a { box-sizing: content-box; width: 100px; padding: 10px; }"
+        "#b { box-sizing: border-box; width: 100px; padding: 10px; }";
+    CssStylesheet *sheet = css_stylesheet_parse(css, strlen(css));
+    ASSERT_TRUE(sheet != NULL);
+
+    LayoutContext ctx;
+    ASSERT_TRUE(css_layout_run(&ctx, doc, sheet, 800.0, 600.0));
+
+    HtmlNode *flex = html_document_get_element_by_id(doc, "flex");
+    HtmlNode *a = html_document_get_element_by_id(doc, "a");
+    HtmlNode *b = html_document_get_element_by_id(doc, "b");
+    ASSERT_TRUE(flex != NULL);
+    ASSERT_TRUE(a != NULL);
+    ASSERT_TRUE(b != NULL);
+    int flex_idx = po_array_index_from_payload(&doc->array, flex);
+    LayoutBox *box_flex = css_layout_box_for_node(&ctx, flex_idx);
+    int a_idx = po_array_index_from_payload(&doc->array, a);
+    int b_idx = po_array_index_from_payload(&doc->array, b);
+    LayoutBox *box_a = css_layout_box_for_node(&ctx, a_idx);
+    LayoutBox *box_b = css_layout_box_for_node(&ctx, b_idx);
+    ASSERT_TRUE(box_a != NULL);
+    ASSERT_TRUE(box_b != NULL);
+    ASSERT_TRUE(near_equal(box_a->width, 100.0 + 20.0));
+    ASSERT_TRUE(near_equal(box_b->width, 100.0));
+
+    css_layout_tree_free(&ctx);
+    html_document_free(doc);
+    return true;
+}
+
+TEST(test_layout_flex_basis_box_sizing) {
+    const char *html = "<html><body><div id=\"flex\"><div id=\"item\"></div></div></body></html>";
+    HtmlDocument *doc = html_parse(html, strlen(html));
+    ASSERT_TRUE(doc != NULL);
+
+    /* flex-basis follows the same box model as width/height for length values. */
+    const char *css =
+        "#flex { display: flex; width: 300px; }"
+        "#item { box-sizing: content-box; flex-basis: 100px; padding: 10px; }";
+    CssStylesheet *sheet = css_stylesheet_parse(css, strlen(css));
+    ASSERT_TRUE(sheet != NULL);
+
+    LayoutContext ctx;
+    ASSERT_TRUE(css_layout_run(&ctx, doc, sheet, 800.0, 600.0));
+
+    HtmlNode *item = html_document_get_element_by_id(doc, "item");
+    ASSERT_TRUE(item != NULL);
+    int item_idx = po_array_index_from_payload(&doc->array, item);
+    LayoutBox *box = css_layout_box_for_node(&ctx, item_idx);
+    ASSERT_TRUE(box != NULL);
+    ASSERT_TRUE(near_equal(box->width, 100.0 + 20.0));
 
     css_layout_tree_free(&ctx);
     html_document_free(doc);
@@ -425,6 +573,11 @@ extern "C" void run_css_layout_tests(void) {
     RUN_TEST(test_layout_basic_document);
     RUN_TEST(test_layout_stylesheet);
     RUN_TEST(test_layout_auto_height);
+    RUN_TEST(test_layout_box_sizing_content_box);
+    RUN_TEST(test_layout_box_sizing_border_box);
+    RUN_TEST(test_layout_box_sizing_min_max);
+    RUN_TEST(test_layout_flex_box_sizing);
+    RUN_TEST(test_layout_flex_basis_box_sizing);
     RUN_TEST(test_layout_display_list);
     RUN_TEST(test_layout_background_image_url);
     RUN_TEST(test_layout_img_display_list);

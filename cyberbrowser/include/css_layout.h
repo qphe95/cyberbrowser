@@ -100,6 +100,9 @@ typedef enum {
 typedef struct LayoutBox {
     double x, y;
     double width, height;
+    /* Parsed CSS width/height values before box-sizing conversion.  width/height
+     * above always store the final border-box totals. */
+    double css_width, css_height;
     double margin_top, margin_right, margin_bottom, margin_left;
     double padding_top, padding_right, padding_bottom, padding_left;
     double border_top, border_right, border_bottom, border_left;

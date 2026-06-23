@@ -585,17 +585,17 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     } else if (strcasecmp(prop, "width") == 0) {
         if (css_value_is_percent(value)) {
             box->width_percent = css_parse_percent_ratio(value);
-            box->width = 0.0;
+            box->css_width = 0.0;
         } else {
-            box->width = css_parse_length(value, parent_width, viewport_width);
+            box->css_width = css_parse_length(value, parent_width, viewport_width);
             box->width_percent = 0.0;
         }
     } else if (strcasecmp(prop, "height") == 0) {
         if (css_value_is_percent(value)) {
             box->height_percent = css_parse_percent_ratio(value);
-            box->height = 0.0;
+            box->css_height = 0.0;
         } else {
-            box->height = css_parse_length(value, parent_width, viewport_width);
+            box->css_height = css_parse_length(value, parent_width, viewport_width);
             box->height_percent = 0.0;
         }
     } else if (strcasecmp(prop, "min-width") == 0) {
@@ -1027,6 +1027,67 @@ static void layout_update_content_sizes(LayoutBox *box)
     }
 }
 
+static double layout_horizontal_border_padding(const LayoutBox *box)
+{
+    return box->padding_left + box->padding_right +
+           box->border_left + box->border_right;
+}
+
+static double layout_vertical_border_padding(const LayoutBox *box)
+{
+    return box->padding_top + box->padding_bottom +
+           box->border_top + box->border_bottom;
+}
+
+/* Convert a content-box dimension to the total border-box dimension. */
+static double layout_content_to_total_width(const LayoutBox *box, double content_width)
+{
+    return content_width + layout_horizontal_border_padding(box);
+}
+
+static double layout_content_to_total_height(const LayoutBox *box, double content_height)
+{
+    return content_height + layout_vertical_border_padding(box);
+}
+
+/* Convert a total border-box dimension to the content-box dimension. */
+static double layout_total_to_content_width(const LayoutBox *box, double total_width)
+{
+    double bp = layout_horizontal_border_padding(box);
+    return total_width > bp ? total_width - bp : 0.0;
+}
+
+static double layout_total_to_content_height(const LayoutBox *box, double total_height)
+{
+    double bp = layout_vertical_border_padding(box);
+    return total_height > bp ? total_height - bp : 0.0;
+}
+
+/* Convert a content-box flex constraint (flex-basis, min-width, max-width) into
+ * the total border-box main/cross size used by the flex algorithm.  Values <= 0
+ * mean "no constraint" (or a zero flex-basis) and are left as-is. */
+static double layout_flex_main_total(const LayoutBox *box, double value, bool is_row)
+{
+    if (value < 0.0) return value;
+    if (box->box_sizing == CSS_BOX_SIZING_CONTENT_BOX) {
+        double inset = is_row ? layout_horizontal_border_padding(box)
+                              : layout_vertical_border_padding(box);
+        return value + inset;
+    }
+    return value;
+}
+
+static double layout_flex_cross_total(const LayoutBox *box, double value, bool is_row)
+{
+    if (value < 0.0) return value;
+    if (box->box_sizing == CSS_BOX_SIZING_CONTENT_BOX) {
+        double inset = is_row ? layout_vertical_border_padding(box)
+                              : layout_horizontal_border_padding(box);
+        return value + inset;
+    }
+    return value;
+}
+
 static bool layout_node_class_contains(HtmlNode *node, const char *needle)
 {
     if (!node || node->type != HTML_NODE_ELEMENT) return false;
@@ -1035,39 +1096,140 @@ static bool layout_node_class_contains(HtmlNode *node, const char *needle)
     return strstr(cls, needle) != NULL;
 }
 
-static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node, double parent_content_width)
+/* Resolve width/height into the authoritative border-box size stored in
+ * box->width / box->height.  content_width / content_height are then derived
+ * by subtracting padding and border.  This function must handle both
+ * box-sizing models correctly:
+ *
+ *   content-box: the CSS width/height specifies the content box; padding and
+ *                border are added outside.
+ *   border-box:  the CSS width/height specifies the full border box.
+ *
+ * min-width/max-width/min-height/max-height apply to the same box as the
+ * width/height property, i.e. content-box for content-box sizing and
+ * border-box for border-box sizing.
+ */
+static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
+                                      double parent_content_width,
+                                      double parent_content_height)
 {
+    /* Throughout the engine box->width / box->height are the total border-box
+     * sizes, and content_width / content_height are derived from them.  This
+     * function converts CSS-used values (which may be content-box or border-box
+     * depending on box-sizing) into those totals. */
+
+    /* ---------- width ---------- */
+    bool width_auto = true;
+    double used_content_width = 0.0; /* valid when !width_auto */
+    double used_total_width = 0.0;   /* valid when !width_auto */
+
     if (box->width_percent > 0.0) {
-        /* Percentage width resolves against the containing block content width. */
-        box->width = parent_content_width * box->width_percent;
+        if (box->box_sizing == CSS_BOX_SIZING_BORDER_BOX) {
+            used_total_width = parent_content_width * box->width_percent;
+        } else {
+            used_content_width = parent_content_width * box->width_percent;
+        }
+        width_auto = false;
+    } else if (box->css_width > 0.0) {
+        if (box->box_sizing == CSS_BOX_SIZING_BORDER_BOX) {
+            used_total_width = box->css_width;
+        } else {
+            used_content_width = box->css_width;
+        }
+        width_auto = false;
     }
-    if (box->width == 0) {
-        box->width = parent_content_width - box->margin_left - box->margin_right;
-        if (box->width < 0) box->width = 0;
+
+    if (width_auto) {
+        /* Auto width fills the containing block content width; that is the
+         * total border-box width before margins are applied. */
+        used_total_width = parent_content_width - box->margin_left - box->margin_right;
+        if (used_total_width < 0.0) used_total_width = 0.0;
+    } else if (box->box_sizing == CSS_BOX_SIZING_CONTENT_BOX) {
+        used_total_width = layout_content_to_total_width(box, used_content_width);
     }
-    box->width = layout_clamp_size(box->width, box->min_width, box->max_width);
+
+    /* min/max-width constrains the same box that width specified. */
+    if (box->min_width > 0.0 || box->max_width > 0.0) {
+        if (box->box_sizing == CSS_BOX_SIZING_BORDER_BOX) {
+            used_total_width = layout_clamp_size(used_total_width,
+                                                  box->min_width, box->max_width);
+        } else {
+            double cw = layout_clamp_size(used_content_width,
+                                          box->min_width, box->max_width);
+            used_total_width = layout_content_to_total_width(box, cw);
+        }
+    }
+    box->width = used_total_width;
+
+    /* ---------- height ---------- */
+    bool height_auto = true;
+    double used_content_height = 0.0;
+    double used_total_height = 0.0;
 
     if (box->height_percent > 0.0) {
-        box->height = parent_content_width * box->height_percent;
-    } else if (box->height == 0 && box->aspect_ratio > 0) {
-        box->height = box->width * box->aspect_ratio;
+        /* Percentage height resolves against the containing block height. */
+        if (box->box_sizing == CSS_BOX_SIZING_BORDER_BOX) {
+            used_total_height = parent_content_height * box->height_percent;
+        } else {
+            used_content_height = parent_content_height * box->height_percent;
+        }
+        height_auto = false;
+    } else if (box->css_height > 0.0) {
+        if (box->box_sizing == CSS_BOX_SIZING_BORDER_BOX) {
+            used_total_height = box->css_height;
+        } else {
+            used_content_height = box->css_height;
+        }
+        height_auto = false;
+    } else if (box->aspect_ratio > 0.0) {
+        /* Aspect ratio relates the content box dimensions. */
+        double content_width = layout_total_to_content_width(box, box->width);
+        used_content_height = content_width * box->aspect_ratio;
+        height_auto = false;
     }
 
     /* Fallback for YouTube thumbnail placeholders: when the JS-injected CSS
      * that sets padding-top:56.25% is not visible to the layout engine, the
-     * thumbnail box collapses to zero height.  Recognise the common class
-     * names and apply a 16:9 aspect ratio so the grid renders correctly. */
-    if (box->height == 0 && box->aspect_ratio == 0 && box->width > 0) {
+     * thumbnail box collapses to zero height.  Recognise common class names
+     * and apply a 16:9 aspect ratio so the grid renders correctly. */
+    if (height_auto && box->width > 0.0) {
         if (layout_node_class_contains(node, "rich-thumbnail") ||
             layout_node_class_contains(node, "video-thumbnail") ||
             layout_node_class_contains(node, "ytd-thumbnail")) {
+            double content_width = layout_total_to_content_width(box, box->width);
             box->aspect_ratio = 9.0 / 16.0;
-            box->height = box->width * box->aspect_ratio;
+            used_content_height = content_width * box->aspect_ratio;
+            height_auto = false;
         }
     }
 
-    if (box->height > 0) {
-        box->height = layout_clamp_size(box->height, box->min_height, box->max_height);
+    if (height_auto) {
+        /* Height stays 0; it will be resolved from children in the bottom-up pass. */
+        box->height = 0.0;
+    } else if (box->box_sizing == CSS_BOX_SIZING_CONTENT_BOX) {
+        box->height = layout_content_to_total_height(box, used_content_height);
+    } else {
+        /* border-box: used_total_height already holds the total for explicit
+         * and percentage sizes; aspect-ratio produced a content height that
+         * must still be converted to a total. */
+        if (box->aspect_ratio > 0.0 &&
+            !(box->height_percent > 0.0) && box->css_height == 0.0) {
+            box->height = layout_content_to_total_height(box, used_content_height);
+        } else {
+            box->height = used_total_height;
+        }
+    }
+
+    /* min/max-height constrains the same box that height specified. */
+    if (box->min_height > 0.0 || box->max_height > 0.0) {
+        if (box->box_sizing == CSS_BOX_SIZING_BORDER_BOX) {
+            box->height = layout_clamp_size(box->height,
+                                            box->min_height, box->max_height);
+        } else {
+            double ch = layout_total_to_content_height(box, box->height);
+            ch = layout_clamp_size(ch, box->min_height, box->max_height);
+            box->height = layout_content_to_total_height(box, ch);
+        }
     }
 
     layout_update_content_sizes(box);
@@ -1098,7 +1260,8 @@ static void layout_offset_children(LayoutContext *ctx, int idx, double dx, doubl
  * its content-based height/width is known before the flex container distributes
  * space.  This is a simple serial pass used only for the flex item itself; the
  * normal parallel top-down/bottom-up passes will skip nodes already marked done. */
-static void layout_resolve_subtree(LayoutContext *ctx, int idx, double avail_width)
+static void layout_resolve_subtree(LayoutContext *ctx, int idx,
+                                   double avail_width, double avail_height)
 {
     LayoutBox *box = layout_box(ctx, idx);
     LayoutNodeRef *node = layout_node_ref(ctx, idx);
@@ -1115,14 +1278,16 @@ static void layout_resolve_subtree(LayoutContext *ctx, int idx, double avail_wid
             box->width = avail_width - box->margin_left - box->margin_right;
             if (box->width < 0) box->width = 0;
         }
-        box->width = layout_clamp_size(box->width, box->min_width, box->max_width);
+        /* Width is already a border-box total; the flex container clamps with
+         * content-box-aware min/max below. */
         box->x = 0.0;
         box->y = 0.0;
         layout_update_content_sizes(box);
         atomic_store_u32(&layout_state(ctx, idx)->top_down_done, 1);
         layout_flex_container(ctx, idx);
     } else {
-        layout_resolve_used_sizes(box, layout_node_dom(ctx, node->dom_node_idx), avail_width);
+        layout_resolve_used_sizes(box, layout_node_dom(ctx, node->dom_node_idx),
+                                  avail_width, avail_height);
         box->x = 0.0;
         box->y = 0.0;
         atomic_store_u32(&layout_state(ctx, idx)->top_down_done, 1);
@@ -1136,7 +1301,7 @@ static void layout_resolve_subtree(LayoutContext *ctx, int idx, double avail_wid
             if (child->display == CSS_DISPLAY_NONE) continue;
             if (child->display == CSS_DISPLAY_INLINE) continue;
             if (child->visibility == CSS_VISIBILITY_HIDDEN) continue;
-            layout_resolve_subtree(ctx, c, box->content_width);
+            layout_resolve_subtree(ctx, c, box->content_width, box->content_height);
             double nx = content_left + child->margin_left;
             double ny = content_top + y_offset + child->margin_top;
             layout_offset_children(ctx, c, nx, ny);
@@ -1207,20 +1372,31 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
     for (int i = 0; i < n; i++) {
         int c = children[i];
         LayoutBox *child = layout_box(ctx, c);
-        double min_main = is_row ? child->min_width : child->min_height;
-        double max_main = is_row ? child->max_width : child->max_height;
+        /* Flex constraints refer to the content box when box-sizing is
+         * content-box.  Convert them to the border-box totals the flex
+         * algorithm uses for main/cross sizing. */
+        double raw_min_main = is_row ? child->min_width : child->min_height;
+        double raw_max_main = is_row ? child->max_width : child->max_height;
+        double min_main = raw_min_main > 0.0
+            ? layout_flex_main_total(child, raw_min_main, is_row) : 0.0;
+        double max_main = raw_max_main > 0.0
+            ? layout_flex_main_total(child, raw_max_main, is_row) : 0.0;
         double prelim_main = 0.0;
         if (child->flex_basis >= 0.0) {
-            prelim_main = child->flex_basis;
+            prelim_main = layout_flex_main_total(child, child->flex_basis, is_row);
         } else if (is_row) {
-            if (child->width > 0.0) prelim_main = child->width;
+            if (child->css_width > 0.0)
+                prelim_main = layout_flex_main_total(child, child->css_width, true);
         } else {
-            if (child->height > 0.0) prelim_main = child->height;
+            if (child->css_height > 0.0)
+                prelim_main = layout_flex_main_total(child, child->css_height, false);
         }
         prelim_main = layout_clamp_size(prelim_main, min_main, max_main);
         double pass_width = is_row ? prelim_main : content_w;
+        double pass_height = is_row ? content_h : prelim_main;
         if (pass_width < 0.0) pass_width = 0.0;
-        layout_resolve_subtree(ctx, c, pass_width);
+        if (pass_height < 0.0) pass_height = 0.0;
+        layout_resolve_subtree(ctx, c, pass_width, pass_height);
     }
 
     FlexItemData *items = (FlexItemData*)calloc(n, sizeof(FlexItemData));
@@ -1239,15 +1415,27 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
             it->main_margin_end   = child->margin_right;
             it->cross_margin_start = child->margin_top;
             it->cross_margin_end   = child->margin_bottom;
-            it->min_main = child->min_width;  it->max_main = child->max_width;
-            it->min_cross = child->min_height; it->max_cross = child->max_height;
+            it->min_main  = child->min_width > 0.0
+                ? layout_flex_main_total(child, child->min_width, true) : 0.0;
+            it->max_main  = child->max_width > 0.0
+                ? layout_flex_main_total(child, child->max_width, true) : 0.0;
+            it->min_cross = child->min_height > 0.0
+                ? layout_flex_cross_total(child, child->min_height, true) : 0.0;
+            it->max_cross = child->max_height > 0.0
+                ? layout_flex_cross_total(child, child->max_height, true) : 0.0;
         } else {
             it->main_margin_start = child->margin_top;
             it->main_margin_end   = child->margin_bottom;
             it->cross_margin_start = child->margin_left;
             it->cross_margin_end   = child->margin_right;
-            it->min_main = child->min_height; it->max_main = child->max_height;
-            it->min_cross = child->min_width;  it->max_cross = child->max_width;
+            it->min_main  = child->min_height > 0.0
+                ? layout_flex_main_total(child, child->min_height, false) : 0.0;
+            it->max_main  = child->max_height > 0.0
+                ? layout_flex_main_total(child, child->max_height, false) : 0.0;
+            it->min_cross = child->min_width > 0.0
+                ? layout_flex_cross_total(child, child->min_width, false) : 0.0;
+            it->max_cross = child->max_width > 0.0
+                ? layout_flex_cross_total(child, child->max_width, false) : 0.0;
         }
 
         double main = is_row ? child->width : child->height;
@@ -1455,8 +1643,10 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
         double old_x = child->x;
         double old_y = child->y;
         double pass_width = is_row ? it->main_size : it->cross_size;
+        double pass_height = is_row ? content_h : it->main_size;
         if (pass_width < 0.0) pass_width = 0.0;
-        layout_resolve_subtree(ctx, c, pass_width);
+        if (pass_height < 0.0) pass_height = 0.0;
+        layout_resolve_subtree(ctx, c, pass_width, pass_height);
         child->x = old_x;
         child->y = old_y;
         layout_offset_children(ctx, c, old_x, old_y);
@@ -1517,26 +1707,24 @@ static void layout_top_down_node(LayoutContext *ctx, int idx)
             /* The flex container has already positioned and sized this item. */
             layout_update_content_sizes(box);
         } else {
-            /* Normal flow: resolve width/height, then stack or flow. */
-            layout_resolve_used_sizes(box, layout_node_dom(ctx, node->dom_node_idx), parent->content_width);
-
+            /* Normal flow: resolve width/height, then stack or flow.
+             * Fixed boxes use the viewport as their containing block. */
             if (box->position == CSS_POSITION_FIXED) {
-                /* Fixed boxes are positioned relative to the viewport and
-                 * removed from normal document flow.  Do not touch the
-                 * parent's line state. */
-                if (box->width_percent > 0.0) {
-                    box->width = ctx->viewport_width * box->width_percent;
-                }
-                if (box->height_percent > 0.0) {
-                    box->height = ctx->viewport_height * box->height_percent;
-                }
+                layout_resolve_used_sizes(box, layout_node_dom(ctx, node->dom_node_idx),
+                                          ctx->viewport_width, ctx->viewport_height);
+
                 if (box->width == 0.0) {
                     box->width = ctx->viewport_width - box->margin_left - box->margin_right;
-                    if (box->width < 0) box->width = 0;
+                    if (box->width < 0.0) box->width = 0.0;
+                    layout_update_content_sizes(box);
                 }
                 if (box->height == 0.0 && box->aspect_ratio > 0.0) {
-                    box->height = box->width * box->aspect_ratio;
+                    double content_width = layout_total_to_content_width(box, box->width);
+                    box->height = layout_content_to_total_height(box,
+                                                                 content_width * box->aspect_ratio);
+                    layout_update_content_sizes(box);
                 }
+
                 if (box->right > 0.0 && box->left == 0.0) {
                     box->x = ctx->viewport_width - box->right - box->width;
                 } else {
@@ -1547,8 +1735,10 @@ static void layout_top_down_node(LayoutContext *ctx, int idx)
                 } else {
                     box->y = box->top + box->margin_top;
                 }
-                layout_update_content_sizes(box);
             } else {
+                layout_resolve_used_sizes(box, layout_node_dom(ctx, node->dom_node_idx),
+                                          parent->content_width, parent->content_height);
+
                 /* Wait for previous sibling before touching parent's line state. */
                 if (node->prev_sibling_idx >= 0) {
                     while (atomic_load_u32(&ctx->states[node->prev_sibling_idx].top_down_done) == 0) {
@@ -1606,12 +1796,16 @@ static void layout_top_down_node(LayoutContext *ctx, int idx)
             }
         }
     } else {
-        /* Root forms the initial containing block. */
+        /* Root forms the initial containing block.  Resolve against the
+         * viewport so percentages and auto sizes are correct; do not pass a
+         * manually-filled total as the containing block size. */
         box->x = 0;
         box->y = 0;
+        layout_resolve_used_sizes(box, layout_node_dom(ctx, node->dom_node_idx),
+                                  ctx->viewport_width, ctx->viewport_height);
         if (box->width == 0) box->width = ctx->viewport_width;
         if (box->height == 0) box->height = ctx->viewport_height;
-        layout_resolve_used_sizes(box, layout_node_dom(ctx, node->dom_node_idx), box->width);
+        layout_update_content_sizes(box);
     }
 
     if (box->display == CSS_DISPLAY_FLEX) {
@@ -1776,7 +1970,7 @@ static void layout_dump_boxes(LayoutContext *ctx, const char *path)
 {
     FILE *fp = fopen(path, "w");
     if (!fp) return;
-    fprintf(fp, "idx\ttag\tid\tclass\tdisplay\tx\ty\twidth\theight\tmargin_t\tmargin_r\tmargin_b\tmargin_l\tpadding_t\tpadding_r\tpadding_b\tpadding_l\tborder_t\tborder_r\tborder_b\tborder_l\tflex_grow\tflex_shrink\tposition\n");
+    fprintf(fp, "idx\ttag\tid\tclass\tdisplay\tx\ty\twidth\theight\tmargin_t\tmargin_r\tmargin_b\tmargin_l\tpadding_t\tpadding_r\tpadding_b\tpadding_l\tborder_t\tborder_r\tborder_b\tborder_l\tflex_grow\tflex_shrink\tposition\tbox_sizing\n");
     for (int i = 0; i < ctx->tree.count; i++) {
         LayoutBox *b = &ctx->boxes[i];
         HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx);
@@ -1810,13 +2004,15 @@ static void layout_dump_boxes(LayoutContext *ctx, const char *path)
             case CSS_POSITION_STICKY:   pname = "sticky"; break;
             default: break;
         }
-        fprintf(fp, "%d\t%s\t%s\t%s\t%s\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%s\n",
+        const char *bsname = "content-box";
+        if (b->box_sizing == CSS_BOX_SIZING_BORDER_BOX) bsname = "border-box";
+        fprintf(fp, "%d\t%s\t%s\t%s\t%s\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%s\t%s\n",
                 i, tag, id_buf, cls_buf, dname,
                 b->x, b->y, b->width, b->height,
                 b->margin_top, b->margin_right, b->margin_bottom, b->margin_left,
                 b->padding_top, b->padding_right, b->padding_bottom, b->padding_left,
                 b->border_top, b->border_right, b->border_bottom, b->border_left,
-                b->flex_grow, b->flex_shrink, pname);
+                b->flex_grow, b->flex_shrink, pname, bsname);
     }
     fclose(fp);
 }
