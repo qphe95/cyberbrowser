@@ -316,7 +316,7 @@ static GCValue get_global_document(JSContextHandle ctx) {
 /* ------------------------------------------------------------------------- */
 
 #define WIREFRAME_WIDTH  1024
-#define WIREFRAME_HEIGHT 800
+#define WIREFRAME_HEIGHT 2400
 
 typedef struct {
     uint8_t r, g, b;
@@ -665,6 +665,7 @@ int main(int argc, char *argv[]) {
     display_list_set_image_cache(image_cache);
 
     const char *font_paths[] = {
+        "cyberbrowser/third_party/fonts/Roboto-Regular.ttf",
         "third_party/fonts/Roboto-Regular.ttf",
         "../third_party/fonts/Roboto-Regular.ttf",
         "../../third_party/fonts/Roboto-Regular.ttf",

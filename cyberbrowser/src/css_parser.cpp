@@ -967,12 +967,6 @@ static void css_match_node_styles_job_impl(CssMatchJob *job)
     }
 }
 
-static void css_match_node_styles_job(void *arg) {
-    CssMatchJob *job = (CssMatchJob*)arg;
-    css_match_node_styles_job_impl(job);
-    free(job);
-}
-
 /* Collect every element node that has a backing JS object into a results array. */
 static CssElementResult* css_collect_element_results(HtmlDocument *doc, int *out_count) {
     int cap = 64;
@@ -1019,8 +1013,8 @@ static void css_apply_node_styles_parallel(JSContextHandle ctx, HtmlDocument *do
         return;
     }
 
-    /* Pre-allocate computed-style objects on the main thread so workers can
-     * write lock-free without racing on lazy allocation. */
+    /* Pre-allocate computed-style objects on the main thread so the serial
+     * pass below can write lock-free without racing on lazy allocation. */
     for (int i = 0; i < element_count; i++) {
         HtmlNode *node = (HtmlNode*)po_array_payload(&doc->array, results[i].node_idx);
         if (!node || !node->has_js_object) continue;
@@ -1032,43 +1026,18 @@ static void css_apply_node_styles_parallel(JSContextHandle ctx, HtmlDocument *do
         }
     }
 
-    uint32_t thread_count = gc_thread_pool_get_thread_count();
-    if (thread_count < 1) thread_count = 1;
-    int num_jobs = (int)thread_count;
-    if (num_jobs > element_count) num_jobs = element_count;
+    /* Run style matching and application serially on the main thread.
+     * The previous worker-thread implementation shared the JS context across
+     * threads, which is not safe for QuickJS and caused intermittent segfaults. */
+    CssMatchJob job;
+    job.ctx = ctx;
+    job.doc = doc;
+    job.list = list;
+    job.results = results;
+    job.start = 0;
+    job.end = element_count;
+    css_match_node_styles_job_impl(&job);
 
-    /* Dispatch selector matching and style application to worker threads.
-     * Each worker owns a disjoint chunk of elements, so JS object mutation
-     * and computed-style writes are safe without additional locking. */
-    bool fallback_serial = false;
-    int chunk = element_count / num_jobs;
-    int remainder = element_count % num_jobs;
-    int start = 0;
-    for (int j = 0; j < num_jobs; j++) {
-        int end = start + chunk + (j < remainder ? 1 : 0);
-        if (end <= start) continue;
-        CssMatchJob *job = (CssMatchJob*)malloc(sizeof(CssMatchJob));
-        if (!job) {
-            LOG_ERROR("Failed to create job returning");
-            return;
-        }
-        job->ctx = ctx;
-        job->doc = doc;
-        job->list = list;
-        job->results = results;
-        job->start = start;
-        job->end = end;
-        if (!gc_thread_pool_submit_job(css_match_node_styles_job, job)) {
-            free(job);
-            fallback_serial = true;
-            break;
-        }
-        start = end;
-    }
-
-    gc_thread_pool_wait_empty();
-
-    /* Results arrays are freed by workers; this loop is a safety net. */
     for (int i = 0; i < element_count; i++) {
         free(results[i].applied);
     }

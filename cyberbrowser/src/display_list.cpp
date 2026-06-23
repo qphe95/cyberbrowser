@@ -152,7 +152,7 @@ static bool node_has_class(HtmlNode *node, const char *needle)
     if (!node || node->type != HTML_NODE_ELEMENT || !needle) return false;
     size_t needle_len = strlen(needle);
     for (HtmlAttribute *a = node->attributes; a; a = a->next) {
-        if (strcasecmp(a->name, "class") == 0 && a->value) {
+        if (strcasecmp(a->name, "class") == 0 && a->value[0]) {
             const char *p = a->value;
             size_t len = strlen(p);
             for (size_t i = 0; i < len; ) {
@@ -161,6 +161,19 @@ static bool node_has_class(HtmlNode *node, const char *needle)
                 while (i < len && !isspace((unsigned char)p[i])) i++;
                 if (i - start == needle_len && strncasecmp(p + start, needle, needle_len) == 0) return true;
             }
+        }
+    }
+    return false;
+}
+
+static bool node_class_contains_any(HtmlNode *node, const char **needles)
+{
+    if (!node || node->type != HTML_NODE_ELEMENT || !needles) return false;
+    for (HtmlAttribute *a = node->attributes; a; a = a->next) {
+        if (strcasecmp(a->name, "class") != 0 || !a->value[0]) continue;
+        const char *cls = a->value;
+        for (const char **n = needles; *n; n++) {
+            if (strstr(cls, *n) != NULL) return true;
         }
     }
     return false;
@@ -273,10 +286,30 @@ static void emit_image_async(DisplayList *dl, float x, float y, float w, float h
     }
 }
 
+/* Return true if the document is in a dark theme (e.g. YouTube dark mode).
+ * This is used to make default-black text visible on dark backgrounds. */
+static bool document_is_dark_mode(LayoutContext *ctx)
+{
+    if (!ctx || !ctx->doc) return false;
+    for (size_t i = 0; i < ctx->doc->array.count; i++) {
+        HtmlNode *node = (HtmlNode *)po_array_payload(&ctx->doc->array, i);
+        if (!node || node->type != HTML_NODE_ELEMENT) continue;
+        if (strcasecmp(node->tag_name, "html") == 0 ||
+            strcasecmp(node->tag_name, "body") == 0) {
+            if (node_attribute_value(node, "darker-dark-theme") != NULL) return true;
+            if (node_attribute_value(node, "dark") != NULL) return true;
+            static const char *dark_needles[] = {"dark", "darker-dark-theme", NULL};
+            if (node_class_contains_any(node, dark_needles)) return true;
+        }
+    }
+    return false;
+}
+
 bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
 {
     if (!ctx || !dl) return false;
     display_list_init(dl);
+    bool dark_mode = document_is_dark_mode(ctx);
 
     for (int i = 0; i < ctx->tree.count; i++) {
         LayoutBox *box = &ctx->boxes[i];
@@ -307,6 +340,40 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
             continue;
         }
 
+        /* Emit glyphs for text nodes when a default font is available.
+         * Text nodes often have no measured box size in this layout engine,
+         * so emit them before the visibility/size filters.
+         * Skip nodes whose box has collapsed to the viewport root; they have
+         * not been positioned and would all overlap at the origin. */
+        if (g_default_font && ctx->doc) {
+            if (node && node->type == HTML_NODE_TEXT &&
+                node->text_content && node->text_len > 0 &&
+                !text_is_whitespace(node->text_content)) {
+                bool root_sized = (box->x == 0.0 && box->y == 0.0 &&
+                                   box->width == ctx->viewport_width &&
+                                   box->height == ctx->viewport_height);
+                if (!root_sized) {
+                    float tr = (float)box->color_r;
+                    float tg = (float)box->color_g;
+                    float tb = (float)box->color_b;
+                    float ta = (float)box->color_a;
+                    if (ta <= 0.0f) ta = 1.0f;
+                    /* In dark mode, default-black text is invisible on dark
+                     * backgrounds.  Render it white so labels are readable. */
+                    if (dark_mode && tr < 0.1f && tg < 0.1f && tb < 0.1f) {
+                        tr = 1.0f; tg = 1.0f; tb = 1.0f;
+                    }
+                    if (!text_shaper_shape_to_display_list(g_default_font,
+                                                           node->text_content,
+                                                           (float)box->x, (float)box->y,
+                                                           tr, tg, tb, ta,
+                                                           dl)) {
+                        return false;
+                    }
+                }
+            }
+        }
+
         if (box->width < 2.0f || box->height < 2.0f) continue;
         if (box->width * box->height < 6.0f) continue;
 
@@ -330,6 +397,56 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                        (float)box->width, (float)box->height, handle);
         }
 
+        /* Placeholder fills for content shells that YouTube injects without
+         * visible CSS in our engine.  This makes skeleton thumbnails, avatars,
+         * and text shells visible instead of transparent.  Colors are chosen
+         * to contrast with YouTube's dark (#0f0f0f) background.
+         * These intentionally override any near-black CSS background so the
+         * skeleton shapes remain visible. */
+        if (!box->background_image_url[0]) {
+            static const char *thumbnail_needles[] = {
+                "rich-thumbnail", "video-thumbnail", "thumbnail", NULL
+            };
+            static const char *avatar_needles[] = {
+                "channel-avatar", "avatar", NULL
+            };
+            static const char *title_needles[] = {
+                "rich-video-title", "video-title", "text-shell", NULL
+            };
+            static const char *meta_needles[] = {
+                "rich-video-meta", "video-meta", NULL
+            };
+            static const char *details_needles[] = {
+                "details-text-shell", NULL
+            };
+            static const char *skeleton_needles[] = {
+                "skeleton-bg-color", "video-skeleton",
+                "skeleton-light-border-bottom", NULL
+            };
+            float pr = 0.0f, pg = 0.0f, pb = 0.0f, pa = 0.0f;
+            if (node_class_contains_any(node, thumbnail_needles)) {
+                pr = 0.25f; pg = 0.25f; pb = 0.32f; pa = 1.0f; /* slate thumbnail */
+            } else if (node_class_contains_any(node, avatar_needles)) {
+                pr = 0.50f; pg = 0.50f; pb = 0.50f; pa = 1.0f; /* #808080 */
+            } else if (node_class_contains_any(node, title_needles)) {
+                pr = 0.35f; pg = 0.35f; pb = 0.35f; pa = 1.0f; /* #595959 */
+            } else if (node_class_contains_any(node, meta_needles)) {
+                pr = 0.28f; pg = 0.28f; pb = 0.28f; pa = 1.0f; /* #474747 */
+            } else if (node_class_contains_any(node, details_needles)) {
+                pr = 0.22f; pg = 0.22f; pb = 0.22f; pa = 1.0f; /* #383838 */
+            } else if (node_class_contains_any(node, skeleton_needles)) {
+                pr = 0.40f; pg = 0.40f; pb = 0.40f; pa = 1.0f; /* #666666 */
+            }
+            if (pa > 0.0f) {
+                if (!display_list_add_rect(dl,
+                                           (float)box->x, (float)box->y,
+                                           (float)box->width, (float)box->height,
+                                           pr, pg, pb, pa)) {
+                    return false;
+                }
+            }
+        }
+
         /* Explicit border. */
         if (box->border_top > 0 || box->border_right > 0 ||
             box->border_bottom > 0 || box->border_left > 0) {
@@ -346,35 +463,8 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                                          (float)box->color_a)) {
                 return false;
             }
-        } else if (!node_has_class(node, "yt-card")) {
-            /* Every visible element gets at least a wireframe outline so the
-             * layout structure is observable even without explicit styles. */
-            if (!display_list_add_border(dl,
-                                         (float)box->x, (float)box->y,
-                                         (float)box->width, (float)box->height,
-                                         1.0f,
-                                         0.75f, 0.75f, 0.75f, 1.0f)) {
-                return false;
-            }
         }
 
-        /* Emit glyphs for text nodes when a default font is available. */
-        if (g_default_font && ctx->doc) {
-            if (node && node->type == HTML_NODE_TEXT &&
-                node->text_content && node->text_len > 0 &&
-                !text_is_whitespace(node->text_content)) {
-                if (!text_shaper_shape_to_display_list(g_default_font,
-                                                       node->text_content,
-                                                       (float)box->x, (float)box->y,
-                                                       (float)box->color_r,
-                                                       (float)box->color_g,
-                                                       (float)box->color_b,
-                                                       (float)box->color_a,
-                                                       dl)) {
-                    return false;
-                }
-            }
-        }
     }
 
     return true;

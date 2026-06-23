@@ -2126,6 +2126,22 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
     // will execute naturally as part of the scripts array, defining global
     // variables just like in a real browser. No manual injection needed.
 
+    /* Defensive DOM normalization: ensure the root elements have style objects.
+     * YouTube's web-animations polyfill does 'prop in document.documentElement.style'
+     * and crashes if style is undefined. */
+    {
+        const char *guard = "(function(){"
+            "var de=document.documentElement;"
+            "if(de&&(!de.style||typeof de.style!='object')) de.style={};"
+            "var b=document.body;"
+            "if(b&&(!b.style||typeof b.style!='object')) b.style={};"
+            "var h=document.head;"
+            "if(h&&(!h.style||typeof h.style!='object')) h.style={};"
+            "})();";
+        GCValue guard_val = JS_Eval(ctx, guard, strlen(guard), "<dom_normalize>", JS_EVAL_TYPE_GLOBAL);
+        (void)guard_val; /* GC-managed, no explicit free */
+    }
+
     // Execute all scripts
     int success_count = 0;
     const size_t MAX_EXEC_SCRIPT_SIZE = 64 * 1024 * 1024; /* 64 MiB safety limit */
