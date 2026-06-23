@@ -349,9 +349,11 @@ typedef struct DOMNode {
     GCValue next_sibling;             // Next sibling or null
     GCValue owner_document;           // Owning document
     
-    // Element-specific data
-    DOMAttribute attributes[DOM_MAX_ATTRIBUTES];
+    // Element-specific data. Attributes are allocated on demand so empty
+    // elements don't waste the large fixed attribute buffer.
+    DOMAttribute *attributes;
     int attribute_count;
+    int attribute_capacity;
     char id[256];
     char class_name[1024];
     
@@ -391,20 +393,6 @@ extern volatile int g_dom_needs_layout;
 /* Mark the document as needing a layout pass. May be called from any thread
  * that holds the JS context (e.g. async image load callbacks). */
 void dom_request_layout(void);
-
-/* Toggle no-op mode for DOM mutation methods (appendChild, insertBefore,
- * cloneNode). When enabled, these methods return the expected value without
- * modifying the DOM tree. This is used when executing large minified bundles
- * whose massive DOM mutation patterns would otherwise exhaust handles or
- * corrupt state. */
-void dom_api_set_mutations_noop(int noop);
-int dom_api_get_mutations_noop(void);
-
-/* Toggle lightweight stub mode for getComputedStyle. The real implementation
- * walks the per-element computed-style table; the stub is sufficient for
- * large minified bundles that call it thousands of times. */
-void css_api_set_computed_style_noop(int noop);
-int css_api_get_computed_style_noop(void);
 
 /* ============================================================================
  * Location object data

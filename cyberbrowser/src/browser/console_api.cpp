@@ -22,18 +22,6 @@
 // Global console data for timers, counters, and groups
 static ConsoleData g_console_data = {0};
 
-/* When non-zero, getComputedStyle returns a lightweight stub instead of
- * walking the per-element computed-style table. */
-static int g_computed_style_noop = 0;
-
-void css_api_set_computed_style_noop(int noop) {
-    g_computed_style_noop = noop;
-}
-
-int css_api_get_computed_style_noop(void) {
-    return g_computed_style_noop;
-}
-
 // Helper to format a single value for console output
 void console_format_value(JSContextHandle ctx, GCValue val, char *out_buf, size_t out_len) {
     (void)ctx;
@@ -455,8 +443,6 @@ GCValue js_console_clear(JSContextHandle ctx, GCValue this_val, int argc, GCValu
 }
 
 // getComputedStyle - reads from the per-element computed-style table.
-// A lightweight stub can be enabled via css_api_set_computed_style_noop()
-// for large minified scripts that call it thousands of times.
 GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
     GCValue element = argc > 0 ? argv[0] : JS_UNDEFINED;
@@ -465,13 +451,6 @@ GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, G
 
     GCValue style = JS_NewObject(ctx);
     if (JS_IsException(style)) return style;
-
-    if (g_computed_style_noop) {
-        JS_SetPropertyStr(ctx, style, "getPropertyValue",
-            JS_NewCFunction(ctx, js_empty_string, "getPropertyValue", 1));
-        JS_SetPropertyStr(ctx, style, "length", JS_NewInt32(ctx, 0));
-        return style;
-    }
 
     DOMNodeHandle node = DOMNodeHandle::from_object_check(ctx, element);
     if (node.valid()) {

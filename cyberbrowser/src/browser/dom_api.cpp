@@ -20,22 +20,8 @@
  * current JS DOM before the next layout/render pass. */
 volatile int g_dom_needs_layout = 0;
 
-/* When set to non-zero, DOM mutation methods become no-ops. This is used when
- * executing very large minified application bundles (e.g. YouTube's
- * kevlar_base) that perform millions of DOM mutations and would otherwise
- * exhaust handles or corrupt state with the real DOM implementation. */
-static int g_dom_mutations_noop = 0;
-
 void dom_request_layout(void) {
     g_dom_needs_layout = 1;
-}
-
-void dom_api_set_mutations_noop(int noop) {
-    g_dom_mutations_noop = noop;
-}
-
-int dom_api_get_mutations_noop(void) {
-    return g_dom_mutations_noop;
 }
 
 // Real DOM Node Implementation
@@ -69,6 +55,7 @@ void js_dom_node_finalizer(JSRuntimeHandle rt, GCValue val) {
     if (node_handle != GC_HANDLE_NULL) {
         DOMNodeHandle node(node_handle);
         if (node.valid()) {
+            node.free_attributes();
             GCHandle cs_handle = node.computed_style_handle();
             if (cs_handle != GC_HANDLE_NULL) {
                 CssComputedStyle *cs = (CssComputedStyle *)gc_deref(cs_handle);
@@ -708,11 +695,6 @@ DOMNodeHandle get_dom_node(JSContextHandle ctx, GCValue obj) {
 
 // Real appendChild implementation
 GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    if (g_dom_mutations_noop) {
-        (void)this_val;
-        if (argc < 1) return JS_ThrowTypeError(ctx, "appendChild: invalid argument");
-        return argv[0];
-    }
     if (argc < 1 || JS_IsNull(argv[0]) || JS_IsUndefined(argv[0])) {
         return JS_ThrowTypeError(ctx, "appendChild: invalid argument");
     }
@@ -827,11 +809,6 @@ GCValue js_node_removeChild_real(JSContextHandle ctx, GCValue this_val, int argc
 
 // Real insertBefore implementation
 GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    if (g_dom_mutations_noop) {
-        (void)this_val;
-        if (argc < 1) return JS_ThrowTypeError(ctx, "insertBefore: invalid arguments");
-        return argv[0];
-    }
     if (argc < 2 || JS_IsNull(argv[0]) || JS_IsUndefined(argv[0])) {
         return JS_ThrowTypeError(ctx, "insertBefore: invalid arguments");
     }
@@ -902,10 +879,6 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
 
 // Real cloneNode implementation
 GCValue js_node_cloneNode_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    if (g_dom_mutations_noop) {
-        (void)argc; (void)argv;
-        return JS_NewObject(ctx);
-    }
     bool deep = false;
     if (argc > 0) {
         deep = JS_ToBool(ctx, argv[0]);
@@ -930,7 +903,11 @@ GCValue js_node_cloneNode_real(JSContextHandle ctx, GCValue this_val, int argc, 
     clone_node.set_class_name(original.class_name());
     
     // Copy attributes
-    // (This would need iteration over all attributes in a full implementation)
+    int attr_count = original.attribute_count();
+    const DOMAttribute *attrs = original.attributes();
+    for (int i = 0; i < attr_count && attrs; i++) {
+        clone_node.set_attribute(attrs[i].name, attrs[i].value);
+    }
     
     // If deep clone, clone all children
     if (deep) {
@@ -2142,48 +2119,5 @@ GCValue js_document_import_node(JSContextHandle ctx, GCValue this_val, int argc,
 GCValue js_document_element_from_point(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     // Return documentElement for any point
     return JS_GetPropertyStr(ctx, this_val, "documentElement");
-}
-
-// ============================================================================
-// Node Implementation
-// ============================================================================
-
-GCValue js_node_appendChild(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    if (argc < 1) return JS_NULL;
-    // Return the appended child
-    return argv[0];
-}
-
-GCValue js_node_insertBefore(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    if (argc < 1) return JS_NULL;
-    return argv[0];
-}
-
-GCValue js_node_removeChild(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    if (argc < 1) return JS_NULL;
-    return argv[0];
-}
-
-GCValue js_node_cloneNode(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    // Return a new empty object as cloned node
-    return JS_NewObject(ctx);
-}
-
-GCValue js_node_contains(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    return JS_FALSE;
-}
-
-// Node.prototype.getRootNode - CRITICAL for Shadow DOM
-GCValue js_node_get_root_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    // Return document.documentElement as root
-    GCValue document = JS_GetPropertyStr(ctx, this_val, "ownerDocument");
-    if (JS_IsUndefined(document)) {
-        return this_val; // Return self if no owner
-    }
-    GCValue root = JS_GetPropertyStr(ctx, document, "documentElement");
-    if (JS_IsUndefined(root) || JS_IsNull(root)) {
-        return this_val;
-    }
-    return root;
 }
 

@@ -1815,6 +1815,18 @@ public:
         }
     }
 
+    // Free the heap-allocated attribute array. Called from the DOMNode finalizer
+    // before the DOMNode data object itself is reclaimed.
+    void free_attributes() {
+        DOMNode* p = get_ptr();
+        if (p && p->attributes) {
+            free(p->attributes);
+            p->attributes = nullptr;
+            p->attribute_count = 0;
+            p->attribute_capacity = 0;
+        }
+    }
+
     // Attributes
     int attribute_count() const {
         DOMNode* p = get_ptr();
@@ -1855,18 +1867,34 @@ public:
             }
         }
         
-        // Add new attribute
-        if (p->attribute_count < DOM_MAX_ATTRIBUTES) {
-            strncpy(p->attributes[p->attribute_count].name, name, 
-                    sizeof(p->attributes[p->attribute_count].name) - 1);
-            p->attributes[p->attribute_count].name[
-                sizeof(p->attributes[p->attribute_count].name) - 1] = '\0';
-            strncpy(p->attributes[p->attribute_count].value, value,
-                    sizeof(p->attributes[p->attribute_count].value) - 1);
-            p->attributes[p->attribute_count].value[
-                sizeof(p->attributes[p->attribute_count].value) - 1] = '\0';
-            p->attribute_count++;
+        // Allocate or grow the attribute array on demand. It is owned by the
+        // DOMNode and freed in the destructor/finalizer.
+        if (p->attribute_count >= p->attribute_capacity) {
+            int new_cap = p->attribute_capacity ? p->attribute_capacity * 2 : 4;
+            if (new_cap < 4) new_cap = 4;
+            if (new_cap > DOM_MAX_ATTRIBUTES) new_cap = DOM_MAX_ATTRIBUTES;
+            if (p->attribute_count >= new_cap) return; // at hard limit
+            DOMAttribute* new_attrs = (DOMAttribute*)malloc(sizeof(DOMAttribute) * new_cap);
+            if (!new_attrs) return; // allocation failure
+            if (p->attributes) {
+                memcpy(new_attrs, p->attributes, sizeof(DOMAttribute) * p->attribute_count);
+                free(p->attributes);
+            }
+            p->attributes = new_attrs;
+            p->attribute_capacity = new_cap;
         }
+        
+        // Add new attribute
+        memset(&p->attributes[p->attribute_count], 0, sizeof(DOMAttribute));
+        strncpy(p->attributes[p->attribute_count].name, name, 
+                sizeof(p->attributes[p->attribute_count].name) - 1);
+        p->attributes[p->attribute_count].name[
+            sizeof(p->attributes[p->attribute_count].name) - 1] = '\0';
+        strncpy(p->attributes[p->attribute_count].value, value,
+                sizeof(p->attributes[p->attribute_count].value) - 1);
+        p->attributes[p->attribute_count].value[
+            sizeof(p->attributes[p->attribute_count].value) - 1] = '\0';
+        p->attribute_count++;
     }
 
     bool has_attribute(const char* name) const {

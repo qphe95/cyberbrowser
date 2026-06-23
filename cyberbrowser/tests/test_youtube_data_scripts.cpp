@@ -249,14 +249,6 @@ static bool init_test_context(void) {
     
     js_quickjs_setup_initial_dom();
     
-    /* Use no-op DOM mutations and lightweight getComputedStyle: this test
-     * only needs scripts to execute and ytInitialPlayerResponse/_yt_player to
-     * be available for URL decryption. The real DOM implementation cannot
-     * handle the millions of mutations performed by YouTube's kevlar_base app
-     * shell. */
-    dom_api_set_mutations_noop(1);
-    css_api_set_computed_style_noop(1);
-    
     return true;
 }
 

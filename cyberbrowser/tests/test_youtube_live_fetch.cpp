@@ -124,12 +124,6 @@ static bool init_test_context(void) {
         (void)pending_exc;
     }
     js_quickjs_setup_initial_dom();
-    /* No-op DOM mutations and computed style stubs: this test only verifies
-     * player bootstrap and media URL availability. The real DOM implementation
-     * cannot handle the heavy mutation patterns produced by YouTube's player
-     * code on large pages. */
-    dom_api_set_mutations_noop(1);
-    css_api_set_computed_style_noop(1);
     return true;
 }
 
