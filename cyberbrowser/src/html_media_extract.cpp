@@ -1044,11 +1044,14 @@ extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_re
     
     LOG_INFO("Found %d scripts to execute", script_count);
     
-    // YouTube's main player bundle is ~10 MB.  Allow external scripts up to
-    // 12 MiB; the per-script GC after each execution prevents handle exhaustion.
+    // External scripts up to ~64 MiB are now safe to fetch.  The parser
+    // nesting-state buffer has been moved from the C stack to the GC heap,
+    // and cyberbrowser.exe is linked with a 64 MiB C stack, so YouTube's
+    // ~10 MiB kevlar_base bundle no longer overflows during JS_Eval.
     // Polyfills that are known to leave the JS heap in a corrupted state in our
-    // emulator (e.g. the ShadyDOM webcomponents-sd polyfill) are skipped by URL.
-    const size_t MAX_EXTERNAL_SCRIPT_SIZE = 12 * 1024 * 1024;
+    // emulator (e.g. the ShadyDOM webcomponents-sd polyfill) are still skipped
+    // by URL.
+    const size_t MAX_EXTERNAL_SCRIPT_SIZE = 64 * 1024 * 1024;
     
     // Fetch external scripts (skipped when MAX_EXTERNAL_SCRIPT_SIZE == 0)
     if (MAX_EXTERNAL_SCRIPT_SIZE == 0) {
@@ -1073,8 +1076,14 @@ extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_re
             char error[256] = {0};
             LOG_INFO("Fetching external script [%d]: %.80s",
                      scripts[i].parse_order, scripts[i].url);
+            fprintf(stderr, "[html_extract] FETCH external script [%d]: %.200s\n",
+                    scripts[i].parse_order, scripts[i].url);
+            fflush(stderr);
 
             bool result = http_get_to_memory(scripts[i].url, &buffer, error, sizeof(error));
+            fprintf(stderr, "[html_extract] FETCH external script [%d] result=%s size=%zu\n",
+                    scripts[i].parse_order, result ? "ok" : "fail", result ? buffer.size : 0);
+            fflush(stderr);
             if (result && buffer.data && buffer.size > 0) {
                 const char *content = buffer.data;
                 while (*content && (isspace((unsigned char)*content) ||
@@ -1149,14 +1158,25 @@ extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_re
     printf("Executing %d page scripts in document order...\n", exec_count);
     LOG_INFO("Executing %d scripts...", exec_count);
     log_to_file("html_media", "Executing %d scripts...", exec_count);
-    
+    for (int i = 0; i < exec_count; i++) {
+        fprintf(stderr, "[html_extract] EXEC queue script %d/%d size=%zu\n",
+                i, exec_count, exec_script_lens[i]);
+    }
+    fflush(stderr);
+
+    fprintf(stderr, "[html_extract] CALL js_quickjs_exec_scripts exec_count=%d\n", exec_count);
+    fflush(stderr);
+
     // Pass the original HTML so QuickJS can parse and populate the JS DOM.
     // Without this the page scripts see only the hardcoded skeleton document,
     // which is why YouTube rendered as a blank white screen.
     bool js_success = js_quickjs_exec_scripts(
         exec_scripts, exec_script_lens, exec_count,
         html, out_result);
-    
+
+    fprintf(stderr, "[html_extract] RETURN js_quickjs_exec_scripts success=%d\n", js_success);
+    fflush(stderr);
+
     log_to_file("html_media", "js_quickjs_exec_scripts returned, success=%d", js_success);
     LOG_INFO("js_quickjs_exec_scripts returned, success=%d", js_success);
     

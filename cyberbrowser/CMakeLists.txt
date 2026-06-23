@@ -266,6 +266,13 @@ if(BE_PLATFORM_WINDOWS)
     target_include_directories(cyberbrowser BEFORE PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include/win32
     )
+    # Give the main executable the same generous C stack that the test
+    # executables use.  YouTube's minified bundles can recurse deeply
+    # through nested IIFEs during both parsing and execution; a 64 MiB
+    # stack prevents C stack overflow in JS_Eval.
+    if(MINGW)
+        target_link_options(cyberbrowser PRIVATE "-Wl,--stack,67108864")
+    endif()
 endif()
 
 # =============================================================================

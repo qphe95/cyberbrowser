@@ -27662,25 +27662,57 @@ static BOOL has_lf_in_range(const uint8_t *p1, const uint8_t *p2)
    regexp parsing heuristics to handle most cases */
 static int js_parse_skip_parens_token(JSParseState *s, int *pbits, BOOL no_line_terminator)
 {
-    char state[256];
+    size_t state_size = 256;
+    GCHandle state_handle = GC_HANDLE_NULL;
+    char *state = NULL;
     size_t level = 0;
     JSParsePos pos;
     int last_tok, tok = TOK_EOF;
     int c, tok_len, bits = 0;
     const uint8_t *last_token_ptr;
-    
+
+    /* Move the nesting-state buffer off the C stack onto the GC heap so
+     * that destructuring / parameter patterns with very deep nesting do
+     * not consume C stack.  The buffer is registered as a temporary root
+     * because js_parse_regexp() / js_parse_template_part() may trigger GC. */
+    state_handle = gc_alloc(state_size, JS_GC_OBJ_TYPE_DATA);
+    if (state_handle == GC_HANDLE_NULL)
+        return -1;
+    gc_add_root(state_handle);
+    state = (char *)GCPin<char>(state_handle).ptr();
+    if (!state) {
+        gc_remove_root(state_handle);
+        return -1;
+    }
     /* protect from underflow */
     state[level++] = 0;
 
     js_parse_get_pos(s, &pos);
     last_tok = 0;
     for (;;) {
+        /* Re-pin after any operation that may have triggered GC. */
+        state = (char *)GCPin<char>(state_handle).ptr();
+
         switch(s->token.val) {
         case '(':
         case '[':
         case '{':
-            if (level >= sizeof(state))
-                goto done;
+            if (level >= state_size) {
+                size_t new_size = state_size * 2;
+                GCHandle new_handle = gc_realloc(state_handle, new_size);
+                if (new_handle == GC_HANDLE_NULL) {
+                    /* Old handle was already freed by gc_realloc; nothing to root. */
+                    state_handle = GC_HANDLE_NULL;
+                    goto done;
+                }
+                gc_remove_root(state_handle);
+                state_handle = new_handle;
+                gc_add_root(state_handle);
+                state = (char *)GCPin<char>(state_handle).ptr();
+                if (!state)
+                    goto done;
+                state_size = new_size;
+            }
             state[level++] = s->token.val;
             break;
         case ')':
@@ -27711,8 +27743,21 @@ static int js_parse_skip_parens_token(JSParseState *s, int *pbits, BOOL no_line_
             if (s->token.u.str.sep != '`') {
                 /* '${' inside the template : closing '}' and continue
                    parsing the template */
-                if (level >= sizeof(state))
-                    goto done;
+                if (level >= state_size) {
+                    size_t new_size = state_size * 2;
+                    GCHandle new_handle = gc_realloc(state_handle, new_size);
+                    if (new_handle == GC_HANDLE_NULL) {
+                        state_handle = GC_HANDLE_NULL;
+                        goto done;
+                    }
+                    gc_remove_root(state_handle);
+                    state_handle = new_handle;
+                    gc_add_root(state_handle);
+                    state = (char *)GCPin<char>(state_handle).ptr();
+                    if (!state)
+                        goto done;
+                    state_size = new_size;
+                }
                 state[level++] = '`';
             }
             break;
@@ -27773,6 +27818,8 @@ static int js_parse_skip_parens_token(JSParseState *s, int *pbits, BOOL no_line_
     if (pbits) {
         *pbits = bits;
     }
+    if (state_handle != GC_HANDLE_NULL)
+        gc_remove_root(state_handle);
     if (js_parse_seek_token(s, &pos))
         return -1;
     return tok;

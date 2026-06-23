@@ -2109,7 +2109,11 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
                         html_document_body(doc) ? "yes" : "no");
 
                     /* Parse and apply inline/external CSS before scripts run. */
+                    fprintf(stderr, "[js_quickjs] Applying document styles...\n");
+                    fflush(stderr);
                     css_apply_document_styles(ctx, js_doc, doc, NULL);
+                    fprintf(stderr, "[js_quickjs] Document styles applied.\n");
+                    fflush(stderr);
                 } else {
                     platform_log(LOG_LEVEL_WARN, "js_quickjs",
                         "Failed to populate DOM from parsed HTML");
@@ -2124,13 +2128,26 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
 
     // Execute all scripts
     int success_count = 0;
-    platform_log(LOG_LEVEL_INFO, "js_quickjs", 
+    const size_t MAX_EXEC_SCRIPT_SIZE = 64 * 1024 * 1024; /* 64 MiB safety limit */
+    platform_log(LOG_LEVEL_INFO, "js_quickjs",
         "[EXEC] Starting execution of %d scripts", script_count);
+    fprintf(stderr, "[js_quickjs] START exec loop script_count=%d\n", script_count);
+    fflush(stderr);
 
     for (int i = 0; i < script_count; i++) {
         if (!scripts[i] || script_lens[i] == 0) {
             platform_log(LOG_LEVEL_WARN, "js_quickjs",
                 "[EXEC] Script %d is empty or NULL, skipping", i);
+            continue;
+        }
+
+        if (script_lens[i] > MAX_EXEC_SCRIPT_SIZE) {
+            platform_log(LOG_LEVEL_WARN, "js_quickjs",
+                "[EXEC] Script %d is %zu bytes, exceeds %zu byte safety limit, skipping",
+                i, script_lens[i], MAX_EXEC_SCRIPT_SIZE);
+            fprintf(stderr, "[js_quickjs] SKIP script %d size=%zu > limit=%zu\n",
+                    i, script_lens[i], MAX_EXEC_SCRIPT_SIZE);
+            fflush(stderr);
             continue;
         }
 
@@ -2140,6 +2157,9 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
         log_to_file("js_quickjs", "Executing script %d: %zu bytes", i, script_lens[i]);
         platform_log(LOG_LEVEL_INFO, "js_quickjs",
             "[EXEC] Executing script %d: %zu bytes", i, script_lens[i]);
+        fprintf(stderr, "[js_quickjs] >>> EVAL script %d/%d size=%zu\n",
+                i, script_count, script_lens[i]);
+        fflush(stderr);
 
         // Limit per-script wall-clock time. Large application bundles can enter
         // long-running initialization loops; this prevents them from blocking
@@ -2165,9 +2185,12 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
             success_count++;
             platform_log(LOG_LEVEL_INFO, "js_quickjs",
                 "[EXEC] Script %d executed successfully", i);
-            
+
         }
-        
+        fprintf(stderr, "[js_quickjs] <<< EVAL script %d/%d result=%s\n",
+                i, script_count, JS_IsException(result) ? "exception" : "ok");
+        fflush(stderr);
+
         // Drain both timers and pending Promise jobs after each script so that
         // fetch()/XHR .then() chains and player bootstrap callbacks run.
         js_quickjs_pump_timers_and_jobs();
@@ -2381,8 +2404,12 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
     }
 
     out_result->status = (success_count > 0) ? JS_EXEC_SUCCESS : JS_EXEC_ERROR;
-    
-    log_to_file("js_quickjs", "Finished, captured %d URLs, status=%d", 
+
+    fprintf(stderr, "[js_quickjs] END exec success_count=%d captured=%d status=%d\n",
+            success_count, out_result->captured_url_count, out_result->status);
+    fflush(stderr);
+
+    log_to_file("js_quickjs", "Finished, captured %d URLs, status=%d",
                 out_result->captured_url_count, out_result->status);
     
     // NOTE: We do NOT free the context or runtime here.
