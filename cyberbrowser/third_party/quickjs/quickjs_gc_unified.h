@@ -197,7 +197,7 @@ static inline void gc_spinlock_release(GCSpinLock *sl) {
 }
 
 #define GC_HEAP_SIZE (4ULL * 1024 * 1024 * 1024)
-#define GC_INITIAL_HANDLES 8000000
+#define GC_INITIAL_HANDLES 32000000
 #define GC_DEFAULT_THRESHOLD (256 * 1024)
 
 /* 

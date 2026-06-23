@@ -442,7 +442,31 @@ GCValue js_console_clear(JSContextHandle ctx, GCValue this_val, int argc, GCValu
     return JS_UNDEFINED;
 }
 
-// getComputedStyle - reads from the per-element computed-style table.
+/* getPropertyValue for a computed-style object. Reads from the object's own
+ * properties (which are populated below), converting kebab-case names to
+ * camelCase as a fallback. */
+static GCValue js_computed_style_get_property_value(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1) return JS_NewString(ctx, "");
+    const char *prop = JS_ToCString(ctx, argv[0]);
+    if (!prop || !prop[0]) return JS_NewString(ctx, "");
+
+    GCValue val = JS_GetPropertyStr(ctx, this_val, prop);
+    if (!JS_IsUndefined(val) && !JS_IsNull(val)) return val;
+
+    char *camel = css_to_camel_case(prop);
+    if (camel) {
+        val = JS_GetPropertyStr(ctx, this_val, camel);
+        if (!JS_IsUndefined(val) && !JS_IsNull(val)) {
+            free(camel);
+            return val;
+        }
+        free(camel);
+    }
+    return JS_NewString(ctx, "");
+}
+
+// getComputedStyle - reads from the per-element computed-style table and
+// falls back to sensible defaults so scripts can safely call .replace() etc.
 GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
     GCValue element = argc > 0 ? argv[0] : JS_UNDEFINED;
@@ -452,18 +476,65 @@ GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, G
     GCValue style = JS_NewObject(ctx);
     if (JS_IsException(style)) return style;
 
+    /* Provide defaults for properties that large minified bundles read
+     * directly. This prevents non-fatal TypeErrors such as
+     * "cannot read property 'replace' of undefined". */
+    static const char *default_props[][2] = {
+        {"fontSize", "16px"},
+        {"color", "rgb(0, 0, 0)"},
+        {"backgroundColor", "rgba(0, 0, 0, 0)"},
+        {"display", "block"},
+        {"visibility", "visible"},
+        {"overflow", "visible"},
+        {"overflowX", "visible"},
+        {"overflowY", "visible"},
+        {"direction", "ltr"},
+        {"zIndex", "auto"},
+        {"lineHeight", "normal"},
+        {"opacity", "1"},
+        {"transitionDuration", "0s"},
+        {"width", "auto"},
+        {"height", "auto"},
+        {"marginTop", "0px"},
+        {"marginRight", "0px"},
+        {"marginBottom", "0px"},
+        {"marginLeft", "0px"},
+        {"paddingTop", "0px"},
+        {"paddingRight", "0px"},
+        {"paddingBottom", "0px"},
+        {"paddingLeft", "0px"},
+        {"border", "0px none rgb(0, 0, 0)"},
+        {"position", "static"},
+        {"top", "auto"},
+        {"left", "auto"},
+        {"right", "auto"},
+        {"bottom", "auto"},
+        {"transform", "none"},
+        {"pointerEvents", "auto"},
+        {"whiteSpace", "normal"},
+        {"textAlign", "start"},
+        {"float", "none"},
+        {"clear", "none"},
+        {"boxSizing", "content-box"},
+        {"fontFamily", "\"Times New Roman\""},
+        {"fontWeight", "400"},
+        {"letterSpacing", "normal"},
+        {"wordSpacing", "normal"},
+        {"verticalAlign", "baseline"},
+        {"cursor", "auto"},
+    };
+    for (size_t i = 0; i < sizeof(default_props)/sizeof(default_props[0]); i++) {
+        JS_SetPropertyStr(ctx, style, default_props[i][0],
+                          JS_NewString(ctx, default_props[i][1]));
+    }
+
+    JS_SetPropertyStr(ctx, style, "getPropertyValue",
+        JS_NewCFunction(ctx, js_computed_style_get_property_value, "getPropertyValue", 1));
+
     DOMNodeHandle node = DOMNodeHandle::from_object_check(ctx, element);
     if (node.valid()) {
-        /* Attach a getPropertyValue method that reads from the computed table. */
-        GCValue closure = JS_NewObject(ctx);
-        JS_SetPropertyStr(ctx, closure, "__node_handle",
-                          JS_NewInt32(ctx, (int32_t)node.handle()));
-
-        JS_SetPropertyStr(ctx, style, "getPropertyValue",
-            JS_NewCFunction(ctx, js_empty_string, "getPropertyValue", 1));
-
-        /* Also materialize the known computed properties as direct properties
-         * so common reads like cs.color work. */
+        /* Override defaults with the actual computed properties stored for
+         * this node (the table contains both kebab-case and camelCase keys). */
         GCHandle cs_handle = node.computed_style_handle();
         if (cs_handle != GC_HANDLE_NULL) {
             CssComputedStyle *cs = (CssComputedStyle *)gc_deref(cs_handle);
@@ -485,9 +556,6 @@ GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, G
                 }
             }
         }
-    } else {
-        JS_SetPropertyStr(ctx, style, "getPropertyValue",
-            JS_NewCFunction(ctx, js_empty_string, "getPropertyValue", 1));
     }
     return style;
 }
