@@ -1544,10 +1544,23 @@ static GCValue js_bgmdwnldr_log(JSContextHandle ctx, GCValue this_val, int argc,
 }
 
 static GCValue js_console_log(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    char msg[4096] = "";
+    size_t off = 0;
     for (int i = 0; i < argc; i++) {
         const char *str = JS_ToCString(ctx, argv[i]);
         if (str) {
+            size_t len = strlen(str);
+            if (off + len + 2 < sizeof(msg)) {
+                if (off > 0) msg[off++] = ' ';
+                memcpy(msg + off, str, len);
+                off += len;
+                msg[off] = '\0';
+            }
         }
+    }
+    if (off > 0) {
+        platform_log(LOG_LEVEL_INFO, "console", "%s", msg);
     }
     return JS_UNDEFINED;
 }

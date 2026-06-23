@@ -3056,6 +3056,98 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_Eval(ctx, shady_dom_js, strlen(shady_dom_js), "<shady_dom_api>", JS_EVAL_TYPE_GLOBAL);
     }
 
+    // ===== YouTube logging stub =====
+    // YouTube's error logger (_.$p) expects yt.logging.errors.log to be a
+    // callable. Wrap any value assigned here so non-object errors and logging
+    // failures do not produce secondary "not a function" timer warnings.
+    {
+        const char *yt_log_js =
+            "(function(){"
+            "  if (typeof window === 'undefined') return;"
+            "  if (!window.yt) window.yt = {};"
+            "  if (!window.yt.logging) window.yt.logging = {};"
+            "  if (!window.yt.logging.errors) window.yt.logging.errors = {};"
+            "  var actual = null;"
+            "  function safeLog(err, severity, a, b, c, d, e) {"
+            "    if (err == null || (typeof err !== 'object' && typeof err !== 'function')) {"
+            "      err = new Error(String(err));"
+            "    }"
+            "    if (actual && typeof actual === 'function') {"
+            "      try { return actual.call(this, err, severity, a, b, c, d, e); } catch(x) {}"
+            "    }"
+            "  }"
+            "  Object.defineProperty(window.yt.logging.errors, 'log', {"
+            "    get: function() { return actual || safeLog; },"
+            "    set: function(v) { actual = (typeof v === 'function') ? v : null; },"
+            "    configurable: true"
+            "  });"
+            "})();";
+        JS_Eval(ctx, yt_log_js, strlen(yt_log_js), "<yt_log_stub>", JS_EVAL_TYPE_GLOBAL);
+    }
+
+    // ===== ParentNode / ChildNode convenience methods =====
+    // Polymer's ShadyDOM patch loop (V6k) wraps before/after/replaceWith and
+    // prepend/append. If these methods are missing, the wrappers call undefined
+    // and later timer-driven DOM code throws "not a function".
+    {
+        const char *dom_methods_js =
+            "(function(){"
+            "  if (typeof Node === 'undefined') return;"
+            "  function toNodes(args) {"
+            "    var out = [];"
+            "    for (var i = 0; i < args.length; i++) {"
+            "      var n = args[i];"
+            "      if (n == null) continue;"
+            "      if (typeof n === 'string' || typeof n === 'number') {"
+            "        out.push(document.createTextNode(String(n)));"
+            "      } else if (n instanceof DocumentFragment) {"
+            "        while (n.firstChild) out.push(n.removeChild(n.firstChild));"
+            "      } else if (n instanceof Node) {"
+            "        out.push(n);"
+            "      }"
+            "    }"
+            "    return out;"
+            "  }"
+            "  function insertNodes(parent, nodes, ref) {"
+            "    for (var i = 0; i < nodes.length; i++) parent.insertBefore(nodes[i], ref);"
+            "  }"
+            "  var childProto = Element.prototype;"
+            "  if (!childProto.before) {"
+            "    childProto.before = function() {"
+            "      var p = this.parentNode; if (!p) return; insertNodes(p, toNodes(arguments), this);"
+            "    };"
+            "  }"
+            "  if (!childProto.after) {"
+            "    childProto.after = function() {"
+            "      var p = this.parentNode; if (!p) return; insertNodes(p, toNodes(arguments), this.nextSibling);"
+            "    };"
+            "  }"
+            "  if (!childProto.replaceWith) {"
+            "    childProto.replaceWith = function() {"
+            "      var p = this.parentNode; if (!p) return;"
+            "      var nodes = toNodes(arguments); insertNodes(p, nodes, this); p.removeChild(this);"
+            "    };"
+            "  }"
+            "  if (!childProto.remove) {"
+            "    childProto.remove = function() { if (this.parentNode) this.parentNode.removeChild(this); };"
+            "  }"
+            "  var parentProtos = [Document.prototype, DocumentFragment.prototype, Element.prototype];"
+            "  if (typeof ShadowRoot !== 'undefined') parentProtos.push(ShadowRoot.prototype);"
+            "  for (var i = 0; i < parentProtos.length; i++) {"
+            "    var proto = parentProtos[i]; if (!proto) continue;"
+            "    (function(p){"
+            "      if (!p.append) p.append = function() {"
+            "        var nodes = toNodes(arguments); for (var j = 0; j < nodes.length; j++) this.appendChild(nodes[j]);"
+            "      };"
+            "      if (!p.prepend) p.prepend = function() {"
+            "        var nodes = toNodes(arguments); insertNodes(this, nodes, this.firstChild);"
+            "      };"
+            "    })(proto);"
+            "  }"
+            "})();";
+        JS_Eval(ctx, dom_methods_js, strlen(dom_methods_js), "<dom_methods>", JS_EVAL_TYPE_GLOBAL);
+    }
+
     // ===== Web Animations API =====
     LOG_INFO("Setting up Web Animations API...");
     LOG_INFO("About to create Animation class...");
