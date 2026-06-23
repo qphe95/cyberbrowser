@@ -1150,12 +1150,12 @@ extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_re
     LOG_INFO("Executing %d scripts...", exec_count);
     log_to_file("html_media", "Executing %d scripts...", exec_count);
     
-    // Pass NULL for the HTML so we do not re-parse and re-populate the JS
-    // DOM; the main executable already owns the C DOM and this avoids
-    // exhausting GC handles on large pages.
+    // Pass the original HTML so QuickJS can parse and populate the JS DOM.
+    // Without this the page scripts see only the hardcoded skeleton document,
+    // which is why YouTube rendered as a blank white screen.
     bool js_success = js_quickjs_exec_scripts(
         exec_scripts, exec_script_lens, exec_count,
-        NULL, out_result);
+        html, out_result);
     
     log_to_file("html_media", "js_quickjs_exec_scripts returned, success=%d", js_success);
     LOG_INFO("js_quickjs_exec_scripts returned, success=%d", js_success);

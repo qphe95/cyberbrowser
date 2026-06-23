@@ -497,9 +497,9 @@ static bool render_display_list_to_jpg(const DisplayList *dl, const char *path,
         int y1 = (int)floorf(cmd->y + cmd->h);
 
         if (cmd->type == DL_RECT) {
-            /* For the wireframe view we intentionally ignore background fills
-             * so the box outlines remain clearly visible on the white canvas. */
-            (void)fill_rect;
+            fill_rect(pixels, img_width, img_height,
+                      x0, y0, x1, y1,
+                      cmd->r, cmd->g, cmd->b, cmd->a);
         } else if (cmd->type == DL_BORDER) {
             float thickness = cmd->u.border.thickness;
             if (thickness <= 0) thickness = 1.0f;
