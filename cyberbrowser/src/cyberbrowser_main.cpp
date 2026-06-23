@@ -631,8 +631,8 @@ int main(int argc, char *argv[]) {
         }
         pump_timers_and_jobs(g_ctx);
 
-        // Force a GC cycle to reclaim handles allocated by script execution
-        // before the heavier youtubei grid extraction runs.
+        // Reclaim handles allocated by script execution before dispatching
+        // lifecycle events.
         JS_RunGC(JS_GetRuntime(g_ctx));
 
         printf("Dispatching DOMContentLoaded and load events ...\n");

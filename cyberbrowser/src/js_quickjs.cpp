@@ -140,7 +140,7 @@ static void js_quickjs_log_exception(JSContextHandle ctx, const char *tag, const
         if (!JS_IsUndefined(stack_val) && !JS_IsNull(stack_val)) {
             const char *stack = JS_ToCString(ctx, stack_val);
             if (stack) {
-                platform_log(LOG_LEVEL_DEBUG, tag, "Stack: %s", stack);
+                platform_log(LOG_LEVEL_WARN, tag, "Stack: %s", stack);
             }
         }
         // Also try to get the exception name/type
@@ -148,7 +148,7 @@ static void js_quickjs_log_exception(JSContextHandle ctx, const char *tag, const
         if (!JS_IsUndefined(name_val) && !JS_IsNull(name_val)) {
             const char *name = JS_ToCString(ctx, name_val);
             if (name) {
-                platform_log(LOG_LEVEL_DEBUG, tag, "Exception type: %s", name);
+                platform_log(LOG_LEVEL_WARN, tag, "Exception type: %s", name);
             }
         }
     }
@@ -2153,25 +2153,9 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
             platform_log(LOG_LEVEL_INFO, "js_quickjs",
                 "[EXEC] Script %d executed successfully", i);
             
-            // After base.js (script 0) executes, check what it created
-            if (i == 0 && script_lens[i] > 1000000) {
-                const char *check_base_js = 
-                    "console.log('=== BASE.JS CHECK ===');"
-                    "console.log('window.yt type: ' + typeof window.yt);"
-                    "console.log('window.ytcfg type: ' + typeof window.ytcfg);"
-                    "console.log('window.ytplayer type: ' + typeof window.ytplayer);"
-                    "if (typeof window.yt === 'object') {"
-                    "  console.log('yt keys: ' + Object.keys(window.yt).join(', '));"
-                    "}"
-                    "if (typeof window.ytcfg === 'object') {"
-                    "  console.log('ytcfg keys: ' + Object.keys(window.ytcfg).join(', '));"
-                    "}"
-                    "console.log('=== END BASE.JS CHECK ===');";
-                GCValue check_result = JS_Eval(ctx, check_base_js, strlen(check_base_js), "<check_base>", JS_EVAL_TYPE_GLOBAL);
-
-            }
         }
         
+
         // Drain both timers and pending Promise jobs after each script so that
         // fetch()/XHR .then() chains and player bootstrap callbacks run.
         js_quickjs_pump_timers_and_jobs();

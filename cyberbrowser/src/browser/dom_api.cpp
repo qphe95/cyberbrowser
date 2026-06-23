@@ -47,6 +47,48 @@ DOMNodeHandle get_or_create_dom_node(JSContextHandle ctx, GCValue obj, int node_
 GCValue query_selector_recursive(JSContextHandle ctx, GCValue elem, const char* selector);
 void query_selector_all_recursive(JSContextHandle ctx, GCValue elem, const char* selector, GCValue result_arr, int* idx);
 
+// Custom element lifecycle helpers
+static void invoke_custom_element_callback(JSContextHandle ctx, GCValue elem, const char *name) {
+    GCValue cb = JS_GetPropertyStr(ctx, elem, name);
+    if (JS_IsException(cb)) {
+        JS_FreeValue(ctx, cb);
+        return;
+    }
+    if (!JS_IsUndefined(cb) && !JS_IsNull(cb) && JS_IsFunction(ctx, cb)) {
+        GCValue ret = JS_Call(ctx, cb, elem, 0, NULL);
+        if (JS_IsException(ret)) {
+            JS_FreeValue(ctx, JS_GetException(ctx));
+        }
+        JS_FreeValue(ctx, ret);
+    }
+    JS_FreeValue(ctx, cb);
+}
+
+static void invoke_attribute_changed(JSContextHandle ctx, GCValue elem,
+                                     const char *name, const char *old_val,
+                                     const char *new_val) {
+    GCValue cb = JS_GetPropertyStr(ctx, elem, "attributeChangedCallback");
+    if (JS_IsException(cb)) {
+        JS_FreeValue(ctx, cb);
+        return;
+    }
+    if (!JS_IsUndefined(cb) && !JS_IsNull(cb) && JS_IsFunction(ctx, cb)) {
+        GCValue args[3];
+        args[0] = JS_NewString(ctx, name);
+        args[1] = old_val ? JS_NewString(ctx, old_val) : JS_NULL;
+        args[2] = new_val ? JS_NewString(ctx, new_val) : JS_NULL;
+        GCValue ret = JS_Call(ctx, cb, elem, 3, args);
+        if (JS_IsException(ret)) {
+            JS_FreeValue(ctx, JS_GetException(ctx));
+        }
+        JS_FreeValue(ctx, ret);
+        JS_FreeValue(ctx, args[0]);
+        JS_FreeValue(ctx, args[1]);
+        JS_FreeValue(ctx, args[2]);
+    }
+    JS_FreeValue(ctx, cb);
+}
+
 void js_dom_node_finalizer(JSRuntimeHandle rt, GCValue val) {
     (void)rt;
     // Free the lock-free computed-style hash table.  The table itself is
@@ -746,6 +788,10 @@ GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc
     }
     
     dom_request_layout();
+
+    // Trigger custom element connectedCallback if present.
+    invoke_custom_element_callback(ctx, child, "connectedCallback");
+
     return child;
 }
 
@@ -802,8 +848,12 @@ GCValue js_node_removeChild_real(JSContextHandle ctx, GCValue this_val, int argc
     child_node.set_parent_node(JS_NULL);
     child_node.set_previous_sibling(JS_NULL);
     child_node.set_next_sibling(JS_NULL);
-    
+
     dom_request_layout();
+
+    // Trigger custom element disconnectedCallback if present.
+    invoke_custom_element_callback(ctx, child, "disconnectedCallback");
+
     return child;
 }
 
@@ -874,6 +924,10 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
     }
     
     dom_request_layout();
+
+    // Trigger custom element connectedCallback if present.
+    invoke_custom_element_callback(ctx, new_child, "connectedCallback");
+
     return new_child;
 }
 
@@ -1345,12 +1399,18 @@ GCValue js_element_set_attribute(JSContextHandle ctx, GCValue this_val, int argc
     const char *value = JS_ToCString(ctx, argv[1]);
     
     if (name && value) {
+        // Capture the old value before overwriting.
+        const char *old_value = NULL;
+        DOMNodeHandle node = get_dom_node(ctx, this_val);
+        if (node.valid()) {
+            old_value = node.get_attribute(name);
+        }
+
         // Store attribute on the object itself
         JS_SetPropertyStr(ctx, this_val, name, JS_NewString(ctx, value));
         
         // Keep the internal DOMNode attribute table in sync so serialization
         // back to HTML produces the mutated attributes.
-        DOMNodeHandle node = get_dom_node(ctx, this_val);
         if (node.valid()) {
             node.set_attribute(name, value);
         }
@@ -1359,6 +1419,9 @@ GCValue js_element_set_attribute(JSContextHandle ctx, GCValue this_val, int argc
         if (name && strcmp(name, "src") == 0 && value && value[0]) {
             capture_url_debug(value, "element_setAttribute_src");
         }
+
+        // Notify custom elements.
+        invoke_attribute_changed(ctx, this_val, name, old_value, value);
     }
     dom_request_layout();
     return JS_UNDEFINED;
@@ -1390,14 +1453,18 @@ GCValue js_element_remove_attribute(JSContextHandle ctx, GCValue this_val, int a
     
     const char *name = JS_ToCString(ctx, argv[0]);
     if (name) {
+        DOMNodeHandle node = get_dom_node(ctx, this_val);
+        const char *old_value = node.valid() ? node.get_attribute(name) : NULL;
+
         JSAtom atom = JS_NewAtom(ctx, name);
         JS_DeleteProperty(ctx, this_val, atom, 0);
         JS_FreeAtom(ctx, atom);
         
-        DOMNodeHandle node = get_dom_node(ctx, this_val);
         if (node.valid()) {
             node.remove_attribute(name);
         }
+
+        invoke_attribute_changed(ctx, this_val, name, old_value, NULL);
     }
     dom_request_layout();
     return JS_UNDEFINED;
