@@ -51,17 +51,15 @@ void query_selector_all_recursive(JSContextHandle ctx, GCValue elem, const char*
 static void invoke_custom_element_callback(JSContextHandle ctx, GCValue elem, const char *name) {
     GCValue cb = JS_GetPropertyStr(ctx, elem, name);
     if (JS_IsException(cb)) {
-        JS_FreeValue(ctx, cb);
+        JS_GetException(ctx); // clear
         return;
     }
     if (!JS_IsUndefined(cb) && !JS_IsNull(cb) && JS_IsFunction(ctx, cb)) {
         GCValue ret = JS_Call(ctx, cb, elem, 0, NULL);
         if (JS_IsException(ret)) {
-            JS_FreeValue(ctx, JS_GetException(ctx));
+            JS_GetException(ctx); // clear
         }
-        JS_FreeValue(ctx, ret);
     }
-    JS_FreeValue(ctx, cb);
 }
 
 static void invoke_attribute_changed(JSContextHandle ctx, GCValue elem,
@@ -69,7 +67,7 @@ static void invoke_attribute_changed(JSContextHandle ctx, GCValue elem,
                                      const char *new_val) {
     GCValue cb = JS_GetPropertyStr(ctx, elem, "attributeChangedCallback");
     if (JS_IsException(cb)) {
-        JS_FreeValue(ctx, cb);
+        JS_GetException(ctx); // clear
         return;
     }
     if (!JS_IsUndefined(cb) && !JS_IsNull(cb) && JS_IsFunction(ctx, cb)) {
@@ -79,14 +77,9 @@ static void invoke_attribute_changed(JSContextHandle ctx, GCValue elem,
         args[2] = new_val ? JS_NewString(ctx, new_val) : JS_NULL;
         GCValue ret = JS_Call(ctx, cb, elem, 3, args);
         if (JS_IsException(ret)) {
-            JS_FreeValue(ctx, JS_GetException(ctx));
+            JS_GetException(ctx); // clear
         }
-        JS_FreeValue(ctx, ret);
-        JS_FreeValue(ctx, args[0]);
-        JS_FreeValue(ctx, args[1]);
-        JS_FreeValue(ctx, args[2]);
     }
-    JS_FreeValue(ctx, cb);
 }
 
 void js_dom_node_finalizer(JSRuntimeHandle rt, GCValue val) {

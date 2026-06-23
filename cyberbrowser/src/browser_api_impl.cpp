@@ -1292,6 +1292,27 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // extend it without the GC collecting the C constructor.
     JS_SetPropertyStr(ctx, global, "__origHTMLElement", html_element_ctor);
     JS_SetPropertyStr(ctx, window, "__origHTMLElement", html_element_ctor);
+    // Replace window.HTMLElement with a pure-JS wrapper that forwards to the
+    // original C constructor via property lookup. This avoids capturing the C
+    // function in a closure, which the compacting GC can invalidate.
+    {
+        const char *wrap_html_element =
+            "(function(){"
+            "  function Wrapper() {"
+            "    var ctor = window.__origHTMLElement;"
+            "    if (new.target) {"
+            "      var inst = new ctor();"
+            "      if (new.target !== Wrapper) Object.setPrototypeOf(inst, new.target.prototype);"
+            "      return inst;"
+            "    }"
+            "    return new ctor();"
+            "  }"
+            "  Wrapper.prototype = window.__origHTMLElement.prototype;"
+            "  window.HTMLElement = Wrapper;"
+            "  if (typeof globalThis !== 'undefined') globalThis.HTMLElement = Wrapper;"
+            "})();";
+        JS_Eval(ctx, wrap_html_element, strlen(wrap_html_element), "<wrap_html_element>", JS_EVAL_TYPE_GLOBAL);
+    }
     // DON'T free html_element_ctor yet - we need it for document.body below
     // element_proto will be freed after adding methods below
     // Keep html_element_ctor and html_element_proto for document.body
@@ -2896,15 +2917,58 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
 
     // ===== Custom Elements API =====
     GCValue custom_elements = JS_NewObjectClass(ctx, js_custom_element_registry_class_id);
-    JS_SetPropertyStr(ctx, custom_elements, "define",
-        JS_NewCFunction(ctx, js_custom_elements_define, "define", 2));
-    JS_SetPropertyStr(ctx, custom_elements, "get",
-        JS_NewCFunction(ctx, js_custom_elements_get, "get", 1));
-    JS_SetPropertyStr(ctx, custom_elements, "whenDefined",
-        JS_NewCFunction(ctx, js_custom_elements_when_defined, "whenDefined", 1));
+    GCValue ce_define = JS_NewCFunction(ctx, js_custom_elements_define, "define", 2);
+    GCValue ce_get = JS_NewCFunction(ctx, js_custom_elements_get, "get", 1);
+    GCValue ce_whenDefined = JS_NewCFunction(ctx, js_custom_elements_when_defined, "whenDefined", 1);
+    JS_SetPropertyStr(ctx, custom_elements, "define", ce_define);
+    JS_SetPropertyStr(ctx, custom_elements, "get", ce_get);
+    JS_SetPropertyStr(ctx, custom_elements, "whenDefined", ce_whenDefined);
+    // Keep the original C define/get reachable through the registry object and
+    // replace the public properties with JS wrappers. The Polymer ES5 shim
+    // captures these functions in closures; capturing the JS wrappers instead
+    // avoids the compacting GC invalidating C-function references.
+    JS_SetPropertyStr(ctx, custom_elements, "__origDefine", ce_define);
+    JS_SetPropertyStr(ctx, custom_elements, "__origGet", ce_get);
     JS_SetPropertyStr(ctx, window, "customElements", custom_elements);
     JS_SetPropertyStr(ctx, global, "customElements", custom_elements);
-    
+    {
+        const char *wrap_ce =
+            "(function(){"
+            "  var reg = window.customElements;"
+            "  reg.define = function(name, ctor, options) {"
+            "    return reg.__origDefine.call(this, name, ctor, options);"
+            "  };"
+            "  reg.get = function(name) {"
+            "    return reg.__origGet.call(this, name);"
+            "  };"
+            "})();";
+        JS_Eval(ctx, wrap_ce, strlen(wrap_ce), "<wrap_ce>", JS_EVAL_TYPE_GLOBAL);
+    }
+    // Intercept Object.defineProperty on customElements.define so the Polymer
+    // ES5 shim's adapter wrapper is always guarded against undefined / arrow
+    // constructors, even when scripts hold a reference to the function directly.
+    {
+        const char *patch_odp =
+            "(function(){"
+            "  window.__origObjectDefineProperty = Object.defineProperty;"
+            "  Object.defineProperty = function(obj, prop, desc) {"
+            "    if (obj === window.customElements && prop === 'define' && desc && typeof desc.value === 'function') {"
+            "      var inner = desc.value;"
+            "      desc.value = function(name, ctor, options) {"
+            "        if (typeof ctor !== 'function' || !ctor.prototype) return;"
+            "        try {"
+            "          return inner.call(this, name, ctor, options);"
+            "        } catch(e) {"
+            "          return;"
+            "        }"
+            "      };"
+            "    }"
+            "    return window.__origObjectDefineProperty.call(this, obj, prop, desc);"
+            "  };"
+            "})();";
+        JS_Eval(ctx, patch_odp, strlen(patch_odp), "<patch_odp>", JS_EVAL_TYPE_GLOBAL);
+    }
+
     // CustomElementRegistry constructor (for completeness)
     GCValue ce_registry_ctor = JS_NewCFunction2(ctx, js_dummy_function, "CustomElementRegistry",
         0, JS_CFUNC_constructor, 0);
@@ -2912,6 +2976,85 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, ce_registry_proto, "constructor", ce_registry_ctor);
     JS_SetPropertyStr(ctx, ce_registry_ctor, "prototype", ce_registry_proto);
     JS_SetPropertyStr(ctx, global, "CustomElementRegistry", ce_registry_ctor);
+
+    // ===== ShadyDOM API =====
+    // YouTube's inline config (script 03) assigns a minimal stub to
+    // window.ShadyDOM and expects the browser's webcomponents-sd polyfill to
+    // replace it with the full API. The emulator skips the external bundle, so
+    // we provide a native ShadyDOM implementation here. A getter/setter keeps
+    // the API intact when the page config is applied.
+    {
+        const char *shady_dom_js =
+            "(function(){"
+            "  var stored = null;"
+            "  function ensure() {"
+            "    if (stored) return stored;"
+            "    function Wrapper(node) {"
+            "      if (!(this instanceof Wrapper)) return new Wrapper(node);"
+            "      this.node = node;"
+            "    }"
+            "    function observeChildren(target, callback) {"
+            "      if (!target || typeof MutationObserver === 'undefined') {"
+            "        return { takeRecords: function(){ return []; }, disconnect: function(){} };"
+            "      }"
+            "      var mo = new MutationObserver(callback);"
+            "      mo.observe(target, { childList: true, subtree: true });"
+            "      return {"
+            "        takeRecords: function() { return mo.takeRecords(); },"
+            "        disconnect: function() { mo.disconnect(); }"
+            "      };"
+            "    }"
+            "    function unobserveChildren(observer) {"
+            "      if (observer && typeof observer.disconnect === 'function') observer.disconnect();"
+            "    }"
+            "    function composedPath(ev) {"
+            "      if (ev && typeof ev.composedPath === 'function') return ev.composedPath();"
+            "      return ev && ev.target ? [ev.target] : [];"
+            "    }"
+            "    stored = {"
+            "      inUse: true,"
+            "      noPatch: true,"
+            "      preferPerformance: true,"
+            "      force: true,"
+            "      handlesDynamicScoping: true,"
+            "      deferConnectionCallbacks: false,"
+            "      settings: { noPatch: true, preferPerformance: true, force: true },"
+            "      Wrapper: Wrapper,"
+            "      wrap: function(node) { return node; },"
+            "      wrapIfNeeded: function(node) { return node; },"
+            "      patch: function(node) { return node; },"
+            "      isShadyRoot: function(node) { return false; },"
+            "      observeChildren: observeChildren,"
+            "      unobserveChildren: unobserveChildren,"
+            "      flush: function() { return false; },"
+            "      flushInitial: function(root) {},"
+            "      composedPath: composedPath,"
+            "      enqueue: function(fn) { if (typeof fn === 'function') fn(); },"
+            "      filterMutations: function(mutations, target) { return mutations; }"
+            "    };"
+            "    return stored;"
+            "  }"
+            "  function defineShadyDOM(obj) {"
+            "    Object.defineProperty(obj, 'ShadyDOM', {"
+            "      get: function() { return ensure(); },"
+            "      set: function(v) {"
+            "        var s = ensure();"
+            "        if (v && typeof v === 'object') {"
+            "          for (var k in v) {"
+            "            if (k === 'Wrapper' && typeof v[k] !== 'function') continue;"
+            "            s[k] = v[k];"
+            "          }"
+            "          s.settings = Object.assign({}, s.settings, v);"
+            "        }"
+            "      },"
+            "      configurable: true"
+            "    });"
+            "  }"
+            "  defineShadyDOM(window);"
+            "  if (typeof globalThis !== 'undefined') defineShadyDOM(globalThis);"
+            "})();";
+        JS_Eval(ctx, shady_dom_js, strlen(shady_dom_js), "<shady_dom_api>", JS_EVAL_TYPE_GLOBAL);
+    }
 
     // ===== Web Animations API =====
     LOG_INFO("Setting up Web Animations API...");

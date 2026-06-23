@@ -1013,7 +1013,9 @@ static void pump_timers_and_jobs_after_fetch(void) {
 static bool is_unsafe_external_script(const char *url) {
     if (!url) return false;
     static const char *skip_patterns[] = {
-        // Polyfills that monkey-patch native DOM prototypes and corrupt state
+        // Polyfills that monkey-patch native DOM prototypes and corrupt state.
+        // webcomponents-sd is provided natively by the emulator, so the external
+        // bundle is not fetched.
         "webcomponents-sd",
         "webcomponents-sd-shadycss",
         "webcomponents-all-noPatch",

@@ -2133,8 +2133,8 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
         // the whole pipeline. The limit scales with script size.
         struct js_exec_timeout_state timeout_state;
         clock_gettime(CLOCK_MONOTONIC, &timeout_state.start);
-        timeout_state.limit_seconds = 5.0 + (script_lens[i] / (1024.0 * 1024.0)) * 2.0;
-        if (timeout_state.limit_seconds > 60.0) timeout_state.limit_seconds = 60.0;
+        timeout_state.limit_seconds = 10.0 + (script_lens[i] / (1024.0 * 1024.0)) * 4.0;
+        if (timeout_state.limit_seconds > 120.0) timeout_state.limit_seconds = 120.0;
         JS_SetInterruptHandler(JS_GetRuntime(ctx), js_exec_timeout_handler, &timeout_state);
 
         // Execute script directly
@@ -2155,14 +2155,15 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
             
         }
         
-
         // Drain both timers and pending Promise jobs after each script so that
         // fetch()/XHR .then() chains and player bootstrap callbacks run.
         js_quickjs_pump_timers_and_jobs();
 
         // Run a GC cycle after every script to prevent handle exhaustion /
         // memory pressure when many large scripts execute in sequence.
-        JS_RunGC(JS_GetRuntime(ctx));
+        // NOTE: disabled during script execution because the compacting GC can
+        // invalidate closure references that capture C functions.
+        // JS_RunGC(JS_GetRuntime(ctx));
     }
 
     // Process all remaining timers and jobs after all scripts complete.
