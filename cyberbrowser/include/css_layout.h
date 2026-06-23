@@ -81,6 +81,21 @@ typedef enum {
     CSS_ALIGN_CENTER
 } CssAlignItems;
 
+/* CSS position value. */
+typedef enum {
+    CSS_POSITION_STATIC,
+    CSS_POSITION_RELATIVE,
+    CSS_POSITION_ABSOLUTE,
+    CSS_POSITION_FIXED,
+    CSS_POSITION_STICKY
+} CssPosition;
+
+/* CSS box-sizing value. */
+typedef enum {
+    CSS_BOX_SIZING_CONTENT_BOX,
+    CSS_BOX_SIZING_BORDER_BOX
+} CssBoxSizing;
+
 /* Layout values for a single DOM node. */
 typedef struct LayoutBox {
     double x, y;
@@ -104,6 +119,8 @@ typedef struct LayoutBox {
 
     CssDisplay display;
     CssVisibility visibility;
+    CssPosition position;
+    CssBoxSizing box_sizing;
     CssFlexDirection flex_direction;
     CssFlexWrap flex_wrap;
     CssJustifyContent justify_content;
@@ -115,6 +132,9 @@ typedef struct LayoutBox {
 
     double min_width, max_width;
     double min_height, max_height;
+    double top, left, right, bottom;
+    double width_percent;   /* >0 if width was specified as a percentage. */
+    double height_percent;
     double gap_row, gap_col;
 
     /* Aspect ratio derived from percentage padding-top/bottom when height

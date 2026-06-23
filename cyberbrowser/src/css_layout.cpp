@@ -49,6 +49,15 @@ static inline HtmlNode* layout_node_dom(LayoutContext *ctx, int dom_idx)
     return (HtmlNode*)po_array_payload(&ctx->doc->array, dom_idx);
 }
 
+static const char* layout_node_attribute(HtmlNode *node, const char *name)
+{
+    if (!node || node->type != HTML_NODE_ELEMENT || !name) return NULL;
+    for (HtmlAttribute *a = node->attributes; a; a = a->next) {
+        if (strcasecmp(a->name, name) == 0) return a->value;
+    }
+    return NULL;
+}
+
 static inline LayoutNodeRef* layout_node_ref(LayoutContext *ctx, int idx)
 {
     return &ctx->tree.nodes[idx];
@@ -151,6 +160,8 @@ static bool layout_build_nodes(LayoutContext *ctx, const int *map)
             box->display = CSS_DISPLAY_INLINE;
         }
         box->visibility = CSS_VISIBILITY_VISIBLE;
+        box->position = CSS_POSITION_STATIC;
+        box->box_sizing = CSS_BOX_SIZING_CONTENT_BOX;
         box->flex_direction = CSS_FLEX_DIRECTION_ROW;
         box->flex_wrap = CSS_FLEX_WRAP_NOWRAP;
         box->justify_content = CSS_JUSTIFY_FLEX_START;
@@ -169,6 +180,12 @@ static bool layout_build_nodes(LayoutContext *ctx, const int *map)
         box->max_width = 0.0;
         box->min_height = 0.0;
         box->max_height = 0.0;
+        box->top = 0.0;
+        box->left = 0.0;
+        box->right = 0.0;
+        box->bottom = 0.0;
+        box->width_percent = 0.0;
+        box->height_percent = 0.0;
         box->gap_row = 0.0;
         box->gap_col = 0.0;
         box->aspect_ratio = 0.0;
@@ -362,6 +379,22 @@ static CssDisplay layout_default_display(const char *tag_name) {
     return CSS_DISPLAY_BLOCK;
 }
 
+static CssPosition css_parse_position(const char *value) {
+    if (!value) return CSS_POSITION_STATIC;
+    if (strcasecmp(value, "static") == 0) return CSS_POSITION_STATIC;
+    if (strcasecmp(value, "relative") == 0) return CSS_POSITION_RELATIVE;
+    if (strcasecmp(value, "absolute") == 0) return CSS_POSITION_ABSOLUTE;
+    if (strcasecmp(value, "fixed") == 0) return CSS_POSITION_FIXED;
+    if (strcasecmp(value, "sticky") == 0) return CSS_POSITION_STICKY;
+    return CSS_POSITION_STATIC;
+}
+
+static CssBoxSizing css_parse_box_sizing(const char *value) {
+    if (!value) return CSS_BOX_SIZING_CONTENT_BOX;
+    if (strcasecmp(value, "border-box") == 0) return CSS_BOX_SIZING_BORDER_BOX;
+    return CSS_BOX_SIZING_CONTENT_BOX;
+}
+
 static CssDisplay css_parse_display(const char *value) {
     if (!value) return CSS_DISPLAY_OTHER;
     if (strcasecmp(value, "none") == 0) return CSS_DISPLAY_NONE;
@@ -499,9 +532,12 @@ static void css_parse_flex_shorthand(const char *value, double *grow, double *sh
  * vertically with siblings.  Inline-block is sized like a block but flows
  * on a line with other inline content. */
 static bool layout_is_block_flow(CssDisplay display) {
+    /* Treat unknown/legacy display values as block-like so that custom elements
+     * and future display types do not collapse into inline 80x20 placeholders. */
     return display == CSS_DISPLAY_BLOCK ||
            display == CSS_DISPLAY_FLEX ||
-           display == CSS_DISPLAY_GRID;
+           display == CSS_DISPLAY_GRID ||
+           display == CSS_DISPLAY_OTHER;
 }
 
 static bool css_parse_url_value(const char *value, char *out, size_t out_size)
@@ -542,10 +578,26 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         box->display = css_parse_display(value);
     } else if (strcasecmp(prop, "visibility") == 0) {
         box->visibility = css_parse_visibility(value);
+    } else if (strcasecmp(prop, "position") == 0) {
+        box->position = css_parse_position(value);
+    } else if (strcasecmp(prop, "box-sizing") == 0) {
+        box->box_sizing = css_parse_box_sizing(value);
     } else if (strcasecmp(prop, "width") == 0) {
-        box->width = css_parse_length(value, parent_width, viewport_width);
+        if (css_value_is_percent(value)) {
+            box->width_percent = css_parse_percent_ratio(value);
+            box->width = 0.0;
+        } else {
+            box->width = css_parse_length(value, parent_width, viewport_width);
+            box->width_percent = 0.0;
+        }
     } else if (strcasecmp(prop, "height") == 0) {
-        box->height = css_parse_length(value, parent_width, viewport_width);
+        if (css_value_is_percent(value)) {
+            box->height_percent = css_parse_percent_ratio(value);
+            box->height = 0.0;
+        } else {
+            box->height = css_parse_length(value, parent_width, viewport_width);
+            box->height_percent = 0.0;
+        }
     } else if (strcasecmp(prop, "min-width") == 0) {
         box->min_width = css_parse_length(value, parent_width, viewport_width);
     } else if (strcasecmp(prop, "max-width") == 0) {
@@ -554,6 +606,14 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         box->min_height = css_parse_length(value, parent_width, viewport_width);
     } else if (strcasecmp(prop, "max-height") == 0) {
         box->max_height = css_parse_length(value, parent_width, viewport_width);
+    } else if (strcasecmp(prop, "top") == 0) {
+        box->top = css_parse_length(value, parent_width, viewport_width);
+    } else if (strcasecmp(prop, "left") == 0) {
+        box->left = css_parse_length(value, parent_width, viewport_width);
+    } else if (strcasecmp(prop, "right") == 0) {
+        box->right = css_parse_length(value, parent_width, viewport_width);
+    } else if (strcasecmp(prop, "bottom") == 0) {
+        box->bottom = css_parse_length(value, parent_width, viewport_width);
     } else if (strcasecmp(prop, "margin") == 0) {
         layout_apply_shorthand_sides(box, value, parent_width, viewport_width,
                                      &box->margin_top, &box->margin_right,
@@ -967,17 +1027,45 @@ static void layout_update_content_sizes(LayoutBox *box)
     }
 }
 
-static void layout_resolve_used_sizes(LayoutBox *box, double parent_content_width)
+static bool layout_node_class_contains(HtmlNode *node, const char *needle)
 {
+    if (!node || node->type != HTML_NODE_ELEMENT) return false;
+    const char *cls = layout_node_attribute(node, "class");
+    if (!cls || !needle) return false;
+    return strstr(cls, needle) != NULL;
+}
+
+static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node, double parent_content_width)
+{
+    if (box->width_percent > 0.0) {
+        /* Percentage width resolves against the containing block content width. */
+        box->width = parent_content_width * box->width_percent;
+    }
     if (box->width == 0) {
         box->width = parent_content_width - box->margin_left - box->margin_right;
         if (box->width < 0) box->width = 0;
     }
     box->width = layout_clamp_size(box->width, box->min_width, box->max_width);
 
-    if (box->height == 0 && box->aspect_ratio > 0) {
+    if (box->height_percent > 0.0) {
+        box->height = parent_content_width * box->height_percent;
+    } else if (box->height == 0 && box->aspect_ratio > 0) {
         box->height = box->width * box->aspect_ratio;
     }
+
+    /* Fallback for YouTube thumbnail placeholders: when the JS-injected CSS
+     * that sets padding-top:56.25% is not visible to the layout engine, the
+     * thumbnail box collapses to zero height.  Recognise the common class
+     * names and apply a 16:9 aspect ratio so the grid renders correctly. */
+    if (box->height == 0 && box->aspect_ratio == 0 && box->width > 0) {
+        if (layout_node_class_contains(node, "rich-thumbnail") ||
+            layout_node_class_contains(node, "video-thumbnail") ||
+            layout_node_class_contains(node, "ytd-thumbnail")) {
+            box->aspect_ratio = 9.0 / 16.0;
+            box->height = box->width * box->aspect_ratio;
+        }
+    }
+
     if (box->height > 0) {
         box->height = layout_clamp_size(box->height, box->min_height, box->max_height);
     }
@@ -1034,7 +1122,7 @@ static void layout_resolve_subtree(LayoutContext *ctx, int idx, double avail_wid
         atomic_store_u32(&layout_state(ctx, idx)->top_down_done, 1);
         layout_flex_container(ctx, idx);
     } else {
-        layout_resolve_used_sizes(box, avail_width);
+        layout_resolve_used_sizes(box, layout_node_dom(ctx, node->dom_node_idx), avail_width);
         box->x = 0.0;
         box->y = 0.0;
         atomic_store_u32(&layout_state(ctx, idx)->top_down_done, 1);
@@ -1227,6 +1315,22 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
                     double share = (items[j].flex_shrink * items[j].main_size) / sum_weighted_shrink;
                     items[j].main_size -= to_shrink * share;
                 }
+            } else if (free_main > 1e-6 && sum_grow == 0.0) {
+                /* Fallback: when no item has flex-grow but some items collapsed
+                 * to zero main size, share the remaining space among them.  This
+                 * recovers layouts (e.g. YouTube's sidebar + main content) where
+                 * the flex-grow declaration was injected by JS and is not present
+                 * in the static stylesheets the layout engine can see. */
+                int zero_count = 0;
+                for (int j = start; j < start + count; j++) {
+                    if (items[j].main_size <= 1e-6) zero_count++;
+                }
+                if (zero_count > 0) {
+                    double share = free_main / zero_count;
+                    for (int j = start; j < start + count; j++) {
+                        if (items[j].main_size <= 1e-6) items[j].main_size = share;
+                    }
+                }
             }
         }
 
@@ -1339,6 +1443,25 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
         cross_offset += line->cross_size + gap_cross;
     }
 
+    /* Re-resolve each flex item's subtree with its final size.  The initial
+     * resolution above used preliminary sizes, so descendants may have been
+     * laid out with width 0.  Re-run the subtree layout now that the item's
+     * final main/cross sizes are known, then restore the item's position and
+     * offset descendants to match. */
+    for (int i = 0; i < n; i++) {
+        int c = children[i];
+        LayoutBox *child = layout_box(ctx, c);
+        FlexItemData *it = &items[i];
+        double old_x = child->x;
+        double old_y = child->y;
+        double pass_width = is_row ? it->main_size : it->cross_size;
+        if (pass_width < 0.0) pass_width = 0.0;
+        layout_resolve_subtree(ctx, c, pass_width);
+        child->x = old_x;
+        child->y = old_y;
+        layout_offset_children(ctx, c, old_x, old_y);
+    }
+
     /* If the container's cross size is still auto, size it to its content. */
     if (is_row && container->height == 0.0) {
         container->height = cross_offset + container->padding_top + container->padding_bottom
@@ -1395,59 +1518,91 @@ static void layout_top_down_node(LayoutContext *ctx, int idx)
             layout_update_content_sizes(box);
         } else {
             /* Normal flow: resolve width/height, then stack or flow. */
-            layout_resolve_used_sizes(box, parent->content_width);
+            layout_resolve_used_sizes(box, layout_node_dom(ctx, node->dom_node_idx), parent->content_width);
 
-            /* Wait for previous sibling before touching parent's line state. */
-            if (node->prev_sibling_idx >= 0) {
-                while (atomic_load_u32(&ctx->states[node->prev_sibling_idx].top_down_done) == 0) {
-                    layout_thread_yield();
+            if (box->position == CSS_POSITION_FIXED) {
+                /* Fixed boxes are positioned relative to the viewport and
+                 * removed from normal document flow.  Do not touch the
+                 * parent's line state. */
+                if (box->width_percent > 0.0) {
+                    box->width = ctx->viewport_width * box->width_percent;
                 }
-            }
-
-            double content_left = parent->x + parent->padding_left + parent->border_left;
-            double content_top  = parent->y + parent->padding_top + parent->border_top;
-            double avail_width  = parent->content_width;
-
-            if (node->prev_sibling_idx < 0) {
-                parent->line_x = content_left;
-                parent->line_y_offset = 0.0;
-                parent->line_height = 0.0;
-            }
-
-            if (box->display == CSS_DISPLAY_NONE) {
-                /* No box generated; leave line state untouched. */
-            } else if (layout_is_block_flow(box->display)) {
-                /* Block-level boxes start a new line and stack vertically. */
-                parent->line_y_offset += parent->line_height;
-                parent->line_height = 0.0;
-                parent->line_x = content_left;
-
-                box->x = content_left + box->margin_left;
-                box->y = content_top + parent->line_y_offset + box->margin_top;
-
-                parent->line_y_offset = (box->y + box->height + box->margin_bottom) - content_top;
-            } else {
-                /* Inline / inline-block boxes flow on lines and wrap when needed. */
-                if (box->width == 0.0) box->width = 80.0;
-                if (box->height == 0.0) box->height = 20.0;
+                if (box->height_percent > 0.0) {
+                    box->height = ctx->viewport_height * box->height_percent;
+                }
+                if (box->width == 0.0) {
+                    box->width = ctx->viewport_width - box->margin_left - box->margin_right;
+                    if (box->width < 0) box->width = 0;
+                }
+                if (box->height == 0.0 && box->aspect_ratio > 0.0) {
+                    box->height = box->width * box->aspect_ratio;
+                }
+                if (box->right > 0.0 && box->left == 0.0) {
+                    box->x = ctx->viewport_width - box->right - box->width;
+                } else {
+                    box->x = box->left + box->margin_left;
+                }
+                if (box->bottom > 0.0 && box->top == 0.0) {
+                    box->y = ctx->viewport_height - box->bottom - box->height;
+                } else {
+                    box->y = box->top + box->margin_top;
+                }
                 layout_update_content_sizes(box);
+            } else {
+                /* Wait for previous sibling before touching parent's line state. */
+                if (node->prev_sibling_idx >= 0) {
+                    while (atomic_load_u32(&ctx->states[node->prev_sibling_idx].top_down_done) == 0) {
+                        layout_thread_yield();
+                    }
+                }
 
-                double child_span = box->margin_left + box->width + box->margin_right;
+                double content_left = parent->x + parent->padding_left + parent->border_left;
+                double content_top  = parent->y + parent->padding_top + parent->border_top;
+                double avail_width  = parent->content_width;
 
-                /* Wrap to next line if we would overflow and aren't at line start. */
-                if (parent->line_x + child_span > content_left + avail_width
-                    && parent->line_x > content_left) {
+                if (node->prev_sibling_idx < 0) {
+                    parent->line_x = content_left;
+                    parent->line_y_offset = 0.0;
+                    parent->line_height = 0.0;
+                }
+
+                if (box->display == CSS_DISPLAY_NONE) {
+                    /* No box generated; leave line state untouched. */
+                } else if (layout_is_block_flow(box->display)) {
+                    /* Block-level boxes start a new line and stack vertically. */
                     parent->line_y_offset += parent->line_height;
                     parent->line_height = 0.0;
                     parent->line_x = content_left;
+
+                    box->x = content_left + box->margin_left;
+                    box->y = content_top + parent->line_y_offset + box->margin_top;
+
+                    parent->line_y_offset = (box->y + box->height + box->margin_bottom) - content_top;
+                } else {
+                    /* Inline / inline-block boxes flow on lines and wrap when needed. */
+                    if (box->width == 0.0) box->width = box->font_size * 5.0;
+                    if (box->height == 0.0) box->height = box->font_size * 1.25;
+                    if (box->width == 0.0) box->width = 80.0;
+                    if (box->height == 0.0) box->height = 20.0;
+                    layout_update_content_sizes(box);
+
+                    double child_span = box->margin_left + box->width + box->margin_right;
+
+                    /* Wrap to next line if we would overflow and aren't at line start. */
+                    if (parent->line_x + child_span > content_left + avail_width
+                        && parent->line_x > content_left) {
+                        parent->line_y_offset += parent->line_height;
+                        parent->line_height = 0.0;
+                        parent->line_x = content_left;
+                    }
+
+                    box->x = parent->line_x + box->margin_left;
+                    box->y = content_top + parent->line_y_offset + box->margin_top;
+
+                    parent->line_x += child_span;
+                    double h = box->margin_top + box->height + box->margin_bottom;
+                    if (h > parent->line_height) parent->line_height = h;
                 }
-
-                box->x = parent->line_x + box->margin_left;
-                box->y = content_top + parent->line_y_offset + box->margin_top;
-
-                parent->line_x += child_span;
-                double h = box->margin_top + box->height + box->margin_bottom;
-                if (h > parent->line_height) parent->line_height = h;
             }
         }
     } else {
@@ -1456,7 +1611,7 @@ static void layout_top_down_node(LayoutContext *ctx, int idx)
         box->y = 0;
         if (box->width == 0) box->width = ctx->viewport_width;
         if (box->height == 0) box->height = ctx->viewport_height;
-        layout_resolve_used_sizes(box, box->width);
+        layout_resolve_used_sizes(box, layout_node_dom(ctx, node->dom_node_idx), box->width);
     }
 
     if (box->display == CSS_DISPLAY_FLEX) {
@@ -1490,11 +1645,43 @@ static void layout_bottom_up_node(LayoutContext *ctx, int idx)
         layout_thread_yield();
     }
 
-    /* Compute auto height from children.  Because the top-down pass already
-     * stacked siblings and flowed inline boxes on lines, the parent's height
-     * is determined by the bottom-most child. */
-    if (box->height == 0) {
-        double content_top = box->y + box->padding_top + box->border_top;
+    /* Compute the natural content height from children.  The top-down pass
+     * may have produced an underestimated height (especially for flex items
+     * whose children are finalised later), so we always compute the natural
+     * size here and grow the box to fit it. */
+    double content_top = box->y + box->padding_top + box->border_top;
+    double natural_content_height = 0.0;
+
+    if (box->display == CSS_DISPLAY_FLEX && box->flex_wrap == CSS_FLEX_WRAP_WRAP &&
+        (box->flex_direction == CSS_FLEX_DIRECTION_ROW ||
+         box->flex_direction == CSS_FLEX_DIRECTION_ROW_REVERSE)) {
+        /* For row flex-wrap, children are arranged in multiple horizontal
+         * lines.  Sum each line's cross (height) plus row gaps. */
+        double line_y[64] = {0};
+        double line_bottom[64] = {0};
+        int line_count = 0;
+        for (int c = node->first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+            LayoutBox *child = layout_box(ctx, c);
+            if (child->display == CSS_DISPLAY_NONE) continue;
+            double cy = child->y - child->margin_top;
+            double cb = child->y + child->height + child->margin_bottom;
+            int found = -1;
+            for (int i = 0; i < line_count; i++) {
+                if (fabs(cy - line_y[i]) < 1.0) { found = i; break; }
+            }
+            if (found < 0) {
+                if (line_count < 64) {
+                    line_y[line_count] = cy;
+                    line_bottom[line_count] = cb;
+                    line_count++;
+                }
+            } else if (cb > line_bottom[found]) {
+                line_bottom[found] = cb;
+            }
+        }
+        for (int i = 0; i < line_count; i++) natural_content_height += line_bottom[i] - line_y[i];
+        if (line_count > 1) natural_content_height += (line_count - 1) * box->gap_row;
+    } else {
         double max_bottom = content_top;
         for (int c = node->first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
             LayoutBox *child = layout_box(ctx, c);
@@ -1502,14 +1689,28 @@ static void layout_bottom_up_node(LayoutContext *ctx, int idx)
             double child_bottom = child->y + child->height + child->margin_bottom;
             if (child_bottom > max_bottom) max_bottom = child_bottom;
         }
-        box->content_height = max_bottom - content_top;
-        if (box->content_height < 0) box->content_height = 0;
-        box->height = box->content_height + box->padding_top + box->padding_bottom
+        natural_content_height = max_bottom - content_top;
+    }
+
+    if (natural_content_height < 0) natural_content_height = 0;
+
+    double current_content_height = box->height - box->padding_top - box->padding_bottom
+                                    - box->border_top - box->border_bottom;
+    if (current_content_height < 0) current_content_height = 0;
+
+    if (box->height == 0.0 || natural_content_height > current_content_height) {
+        box->content_height = natural_content_height;
+        box->height = natural_content_height + box->padding_top + box->padding_bottom
                       + box->border_top + box->border_bottom;
     } else {
-        box->content_height = box->height - box->padding_top - box->padding_bottom
-                              - box->border_top - box->border_bottom;
-        if (box->content_height < 0) box->content_height = 0;
+        box->content_height = current_content_height;
+    }
+
+    /* Re-run flex layout now that all descendant sizes are final.  The initial
+     * top-down flex pass used preliminary child sizes, so multi-line rows were
+     * packed too tightly.  Re-distributing with final sizes fixes row spacing. */
+    if (box->display == CSS_DISPLAY_FLEX) {
+        layout_flex_container(ctx, idx);
     }
 
     box->baseline = box->height;
@@ -1568,6 +1769,59 @@ static bool layout_dispatch_chunks(LayoutContext *ctx, const int *order, int cou
 }
 
 /* ============================================================================
+ * Layout debugging dump
+ * ============================================================================ */
+
+static void layout_dump_boxes(LayoutContext *ctx, const char *path)
+{
+    FILE *fp = fopen(path, "w");
+    if (!fp) return;
+    fprintf(fp, "idx\ttag\tid\tclass\tdisplay\tx\ty\twidth\theight\tmargin_t\tmargin_r\tmargin_b\tmargin_l\tpadding_t\tpadding_r\tpadding_b\tpadding_l\tborder_t\tborder_r\tborder_b\tborder_l\tflex_grow\tflex_shrink\tposition\n");
+    for (int i = 0; i < ctx->tree.count; i++) {
+        LayoutBox *b = &ctx->boxes[i];
+        HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx);
+        const char *tag = (node && node->type == HTML_NODE_ELEMENT) ? node->tag_name : "#text";
+        const char *id = layout_node_attribute(node, "id");
+        const char *cls = layout_node_attribute(node, "class");
+        char id_buf[64] = {0};
+        char cls_buf[128] = {0};
+        if (id) {
+            strncpy(id_buf, id, sizeof(id_buf) - 1);
+            for (size_t k = 0; k < strlen(id_buf); k++) if (id_buf[k] == '\t' || id_buf[k] == '\n') id_buf[k] = ' ';
+        }
+        if (cls) {
+            strncpy(cls_buf, cls, sizeof(cls_buf) - 1);
+            for (size_t k = 0; k < strlen(cls_buf); k++) if (cls_buf[k] == '\t' || cls_buf[k] == '\n') cls_buf[k] = ' ';
+        }
+        const char *dname = "block";
+        switch (b->display) {
+            case CSS_DISPLAY_INLINE: dname = "inline"; break;
+            case CSS_DISPLAY_INLINE_BLOCK: dname = "inline-block"; break;
+            case CSS_DISPLAY_FLEX: dname = "flex"; break;
+            case CSS_DISPLAY_GRID: dname = "grid"; break;
+            case CSS_DISPLAY_NONE: dname = "none"; break;
+            default: dname = "other"; break;
+        }
+        const char *pname = "static";
+        switch (b->position) {
+            case CSS_POSITION_RELATIVE: pname = "relative"; break;
+            case CSS_POSITION_ABSOLUTE: pname = "absolute"; break;
+            case CSS_POSITION_FIXED:    pname = "fixed"; break;
+            case CSS_POSITION_STICKY:   pname = "sticky"; break;
+            default: break;
+        }
+        fprintf(fp, "%d\t%s\t%s\t%s\t%s\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%s\n",
+                i, tag, id_buf, cls_buf, dname,
+                b->x, b->y, b->width, b->height,
+                b->margin_top, b->margin_right, b->margin_bottom, b->margin_left,
+                b->padding_top, b->padding_right, b->padding_bottom, b->padding_left,
+                b->border_top, b->border_right, b->border_bottom, b->border_left,
+                b->flex_grow, b->flex_shrink, pname);
+    }
+    fclose(fp);
+}
+
+/* ============================================================================
  * Public API
  * ============================================================================ */
 
@@ -1597,6 +1851,8 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
     for (int i = 0; i < ctx->tree.count; i++) {
         ctx->boxes[i].flags |= LAYOUT_HAS_LAYOUT;
     }
+
+    layout_dump_boxes(ctx, "layout_dump.txt");
     return true;
 }
 
