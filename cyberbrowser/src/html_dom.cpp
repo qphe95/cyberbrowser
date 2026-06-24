@@ -1142,6 +1142,12 @@ bool html_populate_js_document(JSContextHandle ctx, GCValue js_doc, HtmlDocument
     dom_node_set_owner_document(ctx, new_head_element, js_doc);
     dom_node_set_owner_document(ctx, new_body_element, js_doc);
     
+    /* Attach the root <html> element to the document so parentNode / isConnected work. */
+    {
+        GCValue args[1] = { new_doc_element };
+        js_node_appendChild_real(ctx, js_doc, 1, args);
+    }
+    
     /* Transfer critical properties (dimensions, style) from old skeleton */
     html_transfer_element_properties(ctx, new_doc_element, old_doc_element);
     html_transfer_element_properties(ctx, new_body_element, old_body_element);

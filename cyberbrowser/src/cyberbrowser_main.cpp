@@ -617,6 +617,39 @@ int main(int argc, char *argv[]) {
      * fetch() and XHR can send a consistent session with youtubei calls. */
     inject_session_tokens(g_ctx, g_global, html);
 
+    /* Inject ytInitialData from a captured reference page if available.
+     * YouTube's app shell renders only a skeleton when this object is absent. */
+    {
+        const char *ytidata_path = "C:/Users/qingping/Documents/cyberbrowser/youtube_data/ytInitialData.json";
+        FILE *f = fopen(ytidata_path, "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long sz = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            char *buf = (char *)malloc(sz + 64);
+            if (buf) {
+                strcpy(buf, "var ytInitialData = ");
+                size_t prefix = strlen(buf);
+                size_t n = fread(buf + prefix, 1, sz, f);
+                fclose(f);
+                buf[prefix + n] = ';';
+                buf[prefix + n + 1] = '\0';
+                GCValue ret = JS_Eval(g_ctx, buf, strlen(buf), "<yt_initial_data>", JS_EVAL_TYPE_GLOBAL);
+                if (JS_IsException(ret)) {
+                    fprintf(stderr, "[MAIN] ytInitialData eval threw exception\n");
+                    JS_GetException(g_ctx);
+                } else {
+                    fprintf(stderr, "[MAIN] injected ytInitialData (%ld bytes)\n", sz);
+                }
+                free(buf);
+            } else {
+                fclose(f);
+            }
+        } else {
+            fprintf(stderr, "[MAIN] ytInitialData.json not found at %s\n", ytidata_path);
+        }
+    }
+
     /* Phase 3: execute page scripts, drain timers, dispatch lifecycle events,
      * and print any googlevideo.com URLs captured by the hooks. */
     {

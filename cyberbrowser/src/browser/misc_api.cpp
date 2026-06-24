@@ -77,6 +77,19 @@ GCValue js_element_constructor(JSContextHandle ctx, GCValue new_target, int argc
 // Uses js_dom_node_class_id so DOM node data can be retrieved via JS_GetOpaqueHandle
 GCValue js_html_element_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
     (void)argc; (void)argv;
+    // If we are upgrading an existing DOMNode-backed element, reuse that object
+    // as the constructed instance instead of creating a new one. This lets
+    // Polymer/Closure constructors initialize __data on the actual element.
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue upgrade_target = JS_GetPropertyStr(ctx, global, "__cyber_upgrade_target");
+    if (!JS_IsUndefined(upgrade_target) && !JS_IsNull(upgrade_target) && JS_IsObject(upgrade_target)) {
+        GCValue proto = JS_GetPropertyStr(ctx, new_target, "prototype");
+        if (!JS_IsException(proto) && JS_IsObject(proto)) {
+            JS_SetPrototype(ctx, upgrade_target, proto);
+        }
+        return upgrade_target;
+    }
+
     GCValue obj = JS_NewObjectClass(ctx, js_dom_node_class_id);
     if (JS_IsException(obj))
         return JS_EXCEPTION;
@@ -941,6 +954,8 @@ GCValue js_custom_elements_define(JSContextHandle ctx, GCValue this_val, int arg
     if (!name) return JS_ThrowTypeError(ctx, "Invalid name");
     
     platform_log(LOG_LEVEL_INFO, "customElements", "define called with name='%s' (argc=%d)", name, argc);
+    fprintf(stderr, "[CE-DEFINE] name='%s' argc=%d\n", name, argc);
+    fflush(stderr);
     
     // Validate name format (must contain hyphen)
     // NOTE: Relaxed for browser emulation - some scripts may pass invalid names

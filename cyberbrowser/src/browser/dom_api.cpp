@@ -62,6 +62,13 @@ static bool dom_node_is_connected(JSContextHandle ctx, GCValue node) {
     return false;
 }
 
+GCValue js_node_is_connected_getter(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc;
+    (void)argv;
+    bool connected = dom_node_is_connected(ctx, this_val);
+    return JS_NewBool(ctx, connected);
+}
+
 static void invoke_custom_element_callback(JSContextHandle ctx, GCValue elem, const char *name) {
     GCValue cb = JS_GetPropertyStr(ctx, elem, name);
     if (JS_IsException(cb)) {

@@ -68,6 +68,9 @@ extern "C" {
 /* Include internal types header for shared struct definitions */
 #include "quickjs-internal.h"
 
+/* Debug: last property accessed on undefined/null (for browser diagnostics) */
+char g_last_undefined_prop[256] = {0};
+
 /* Cross-platform hint to yield the CPU inside lock-free spin loops. */
 #ifdef _WIN32
 #include <windows.h>
@@ -10466,7 +10469,11 @@ static GCValue JS_GetPropertyValue(JSContextHandle ctx, GCValue this_obj,
     slow_path:
         /* ToObject() must be done before ToPropertyKey() */
         if (JS_IsNull(this_obj) || JS_IsUndefined(this_obj)) {
-            
+            GCValue prop_str_val = JS_ToString(ctx, prop);
+            const char *prop_str = JS_IsException(prop_str_val) ? NULL : JS_ToCString(ctx, prop_str_val);
+            snprintf(g_last_undefined_prop, sizeof(g_last_undefined_prop), "%s", prop_str ? prop_str : "?");
+            fprintf(stderr, "[QJS DEBUG] prop='%s' of %s\n", prop_str ? prop_str : "?", JS_IsNull(this_obj) ? "null" : "undefined");
+            /* deliberately not freed - diagnostic only */
             return JS_ThrowTypeError(ctx, "cannot read property of %s", JS_IsNull(this_obj) ? "null" : "undefined");
         }
         atom = JS_ValueToAtom(ctx, prop);

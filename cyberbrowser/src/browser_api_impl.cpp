@@ -1258,6 +1258,14 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // Node.prototype -> EventTarget.prototype
     JS_SetPrototype(ctx, node_proto, event_target_proto);
 
+    // isConnected getter used by custom element lifecycle
+    {
+        GCValue is_conn_getter = JS_NewCFunction(ctx, js_node_is_connected_getter, "get isConnected", 0);
+        JSAtom is_conn_atom = JS_NewAtom(ctx, "isConnected");
+        JS_DefinePropertyGetSet(ctx, node_proto, is_conn_atom, is_conn_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+        JS_FreeAtom(ctx, is_conn_atom);
+    }
+
     JS_SetPropertyStr(ctx, node_ctor, "prototype", node_proto);
     JS_SetPropertyStr(ctx, global, "Node", node_ctor);
     JS_SetPropertyStr(ctx, window, "Node", node_ctor);
@@ -1482,6 +1490,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // HTMLTemplateElement constructor (needed by ShadyDOM polyfill)
     GCValue template_ctor = JS_NewCFunction2(ctx, js_dummy_function, "HTMLTemplateElement", 0, JS_CFUNC_constructor, 0);
     GCValue template_proto = JS_NewObject(ctx);
+    JS_SetPrototype(ctx, template_proto, html_element_proto);
     JS_SetPropertyStr(ctx, template_proto, "constructor", template_ctor);
     JS_SetPropertyStr(ctx, template_ctor, "prototype", template_proto);
     JS_SetPropertyStr(ctx, global, "HTMLTemplateElement", template_ctor);
@@ -1489,6 +1498,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // HTMLSlotElement constructor (needed by ShadyDOM polyfill)
     GCValue slot_ctor = JS_NewCFunction2(ctx, js_dummy_function, "HTMLSlotElement", 0, JS_CFUNC_constructor, 0);
     GCValue slot_proto = JS_NewObject(ctx);
+    JS_SetPrototype(ctx, slot_proto, html_element_proto);
     JS_SetPropertyStr(ctx, slot_proto, "constructor", slot_ctor);
     JS_SetPropertyStr(ctx, slot_ctor, "prototype", slot_proto);
     JS_SetPropertyStr(ctx, global, "HTMLSlotElement", slot_ctor);
@@ -1497,6 +1507,8 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     GCValue doc_fragment_ctor = JS_NewCFunction2(ctx, js_dummy_function, "DocumentFragment", 0, JS_CFUNC_constructor, 0);
     GCValue doc_fragment_proto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, doc_fragment_proto, "constructor", doc_fragment_ctor);
+    // Inherit Node methods (appendChild, insertBefore, removeChild, cloneNode, ...)
+    JS_SetPrototype(ctx, doc_fragment_proto, node_proto);
     // DocumentFragment needs querySelector(All) for template.content usage.
     JS_SetPropertyStr(ctx, doc_fragment_proto, "querySelector",
         JS_NewCFunction(ctx, js_element_querySelector_real, "querySelector", 1));
@@ -1895,8 +1907,18 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // ===== Document =====
     LOG_INFO("Creating document object...");
     LOG_INFO("Setting up Document...");
-    GCValue document = JS_NewObject(ctx);
+    GCValue document = JS_NewObjectClass(ctx, js_dom_node_class_id);
+    if (JS_IsException(document)) {
+        document = JS_NewObject(ctx);
+    }
     LOG_INFO("Document object created");
+    {
+        DOMNodeHandle doc_node = DOMNodeHandle::create(ctx, DOM_NODE_TYPE_DOCUMENT, "#document");
+        if (doc_node.valid()) {
+            doc_node.attach_to_object(document);
+            doc_node.set_owner_document(document);
+        }
+    }
     DEF_PROP_INT(ctx, document, "nodeType", 9);
     DEF_PROP_STR(ctx, document, "readyState", "complete");
     DEF_PROP_STR(ctx, document, "characterSet", "UTF-8");
@@ -2999,17 +3021,18 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
             "(function(){"
             "  window.__cyber_upgradeElement = function(el) {"
             "    if (!el || el.__CE_upgraded || el.nodeType !== 1) return;"
-            "    var name = el.tagName.toLowerCase();"
+            "    var name = el.tagName ? el.tagName.toLowerCase() : '(none)';"
             "    var ctor = window.customElements && window.customElements.get(name);"
             "    if (!ctor || !ctor.prototype) return;"
             "    el.removeAttribute && el.removeAttribute('disable-upgrade');"
             "    el.__proto__ = ctor.prototype;"
             "    el.__CE_upgraded = true;"
+            "    window.__cyber_upgrade_target = el;"
             "    try { ctor.call(el); } catch(e) {"
             "      var log = (typeof __bgmdwnldr_log !== 'undefined') ? __bgmdwnldr_log : (typeof console !== 'undefined' ? console.log : null);"
             "      if (log) try { log('[CE-UPGRADE] ctor ' + name + ' threw: ' + e.message + ' stack=' + (e.stack||'(none)')); } catch(x) {}"
-            "    }"
-            "    if (ctor.prototype.connectedCallback) {"
+            "    } finally { window.__cyber_upgrade_target = void 0; }"
+            "    if (ctor.prototype.connectedCallback && el.isConnected) {"
             "      try { ctor.prototype.connectedCallback.call(el); } catch(e) {"
             "        var log2 = (typeof __bgmdwnldr_log !== 'undefined') ? __bgmdwnldr_log : (typeof console !== 'undefined' ? console.log : null);"
             "        if (log2) try { log2('[CE-UPGRADE] connectedCallback ' + name + ' threw: ' + e.message); } catch(x) {}"
@@ -3021,6 +3044,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
             "    var ctor = window.customElements.get(name);"
             "    if (!ctor || !ctor.prototype) return;"
             "    var list = document.getElementsByTagName(name);"
+            "    if (typeof console !== 'undefined' && console.error) try { console.error('[CE-UPGRADE] upgradeAll ' + name + ' found=' + list.length); } catch(x) {}"
             "    for (var i = 0; i < list.length; i++) {"
             "      window.__cyber_upgradeElement(list[i]);"
             "    }"
