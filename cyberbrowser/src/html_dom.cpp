@@ -1210,7 +1210,25 @@ bool html_populate_js_document(JSContextHandle ctx, GCValue js_doc, HtmlDocument
 bool html_element_set_inner_html(JSContextHandle ctx, GCValue elem, const char *html) {
     if (!ctx || JS_IsUndefined(elem) || JS_IsNull(elem) || !html) return false;
 
-    GCValue doc = JS_GetPropertyStr(ctx, elem, "ownerDocument");
+    // Templates store their children in the content DocumentFragment, not in
+    // the template element itself.
+    bool is_template = false;
+    GCValue tag_val = JS_GetPropertyStr(ctx, elem, "tagName");
+    if (JS_IsString(tag_val)) {
+        const char *tag_str = JS_ToCString(ctx, tag_val);
+        if (tag_str && strcasecmp(tag_str, "template") == 0) {
+            is_template = true;
+        }
+    }
+    GCValue target = elem;
+    if (is_template) {
+        GCValue content = JS_GetPropertyStr(ctx, elem, "content");
+        if (!JS_IsUndefined(content) && !JS_IsNull(content) && JS_IsObject(content)) {
+            target = content;
+        }
+    }
+
+    GCValue doc = JS_GetPropertyStr(ctx, target, "ownerDocument");
     if (JS_IsUndefined(doc) || JS_IsNull(doc)) {
         GCValue global = JS_GetGlobalObject(ctx);
         doc = JS_GetPropertyStr(ctx, global, "document");
@@ -1219,15 +1237,15 @@ bool html_element_set_inner_html(JSContextHandle ctx, GCValue elem, const char *
     HtmlDocument *frag_doc = html_parse(html, strlen(html));
     if (!frag_doc) return false;
 
-    // Remove existing children
-    DOMNodeHandle elem_node = DOMNodeHandle::from_object(elem);
-    if (elem_node.valid()) {
-        GCValue child = elem_node.first_child();
+    // Remove existing children from the target (template content or element)
+    DOMNodeHandle target_node = DOMNodeHandle::from_object(target);
+    if (target_node.valid()) {
+        GCValue child = target_node.first_child();
         while (!JS_IsNull(child)) {
             DOMNodeHandle child_node = DOMNodeHandle::from_object(child);
             GCValue next = child_node.valid() ? child_node.next_sibling() : JS_NULL;
             GCValue remove_args[1] = { child };
-            js_node_removeChild_real(ctx, elem, 1, remove_args);
+            js_node_removeChild_real(ctx, target, 1, remove_args);
             child = next;
         }
     }
@@ -1244,7 +1262,7 @@ bool html_element_set_inner_html(JSContextHandle ctx, GCValue elem, const char *
 
     int child_idx = start_idx;
     while (child_idx >= 0) {
-        html_node_populate_js_recursive(ctx, doc, frag_doc, child_idx, elem);
+        html_node_populate_js_recursive(ctx, doc, frag_doc, child_idx, target);
         child_idx = po_array_next_sibling(&frag_doc->array, child_idx);
     }
 
@@ -1255,10 +1273,10 @@ bool html_element_set_inner_html(JSContextHandle ctx, GCValue elem, const char *
             GCValue args[1] = { JS_NewString(ctx, html) };
             GCValue text_node = JS_Call(ctx, createTextNode, doc, 1, args);
             if (!JS_IsException(text_node) && !JS_IsUndefined(text_node) && !JS_IsNull(text_node)) {
-                GCValue appendChild = JS_GetPropertyStr(ctx, elem, "appendChild");
+                GCValue appendChild = JS_GetPropertyStr(ctx, target, "appendChild");
                 if (!JS_IsUndefined(appendChild) && !JS_IsNull(appendChild)) {
                     GCValue aargs[1] = { text_node };
-                    JS_Call(ctx, appendChild, elem, 1, aargs);
+                    JS_Call(ctx, appendChild, target, 1, aargs);
                 }
             }
         }

@@ -60,6 +60,10 @@ static GCValue js_subtle_decrypt(JSContextHandle ctx, GCValue this_val, int argc
 // External symbols from js_quickjs.c
 extern GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 
+// DOM querySelector helpers from dom_api.cpp
+extern "C" GCValue js_element_querySelector_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+extern "C" GCValue js_element_querySelectorAll_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+
 // Forward declarations for internal functions
 static GCValue js_dummy_function(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 static GCValue js_dummy_function_true(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
@@ -1284,6 +1288,41 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // HTMLElement.prototype -> Element.prototype
     JS_SetPrototype(ctx, html_element_proto, element_proto);
 
+    // Polymer legacy elements expect these transform helpers on the prototype.
+    static auto js_element_transform = [](JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+        (void)argc; (void)argv;
+        if (JS_IsObject(this_val)) {
+            GCValue style = JS_GetPropertyStr(ctx, this_val, "style");
+            if (JS_IsObject(style) && argc >= 1) {
+                GCValue val = argv[0];
+                JS_SetPropertyStr(ctx, style, "transform", val);
+                JS_SetPropertyStr(ctx, style, "webkitTransform", val);
+            }
+        }
+        return JS_UNDEFINED;
+    };
+    static auto js_element_translate3d = [](JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+        if (argc < 3) return JS_UNDEFINED;
+        const char *x = JS_ToCString(ctx, argv[0]);
+        const char *y = JS_ToCString(ctx, argv[1]);
+        const char *z = JS_ToCString(ctx, argv[2]);
+        GCValue target = (argc >= 4 && JS_IsObject(argv[3])) ? argv[3] : this_val;
+        if (x && y && z && JS_IsObject(target)) {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "translate3d(%s,%s,%s)", x, y, z);
+            GCValue style = JS_GetPropertyStr(ctx, target, "style");
+            if (JS_IsObject(style)) {
+                JS_SetPropertyStr(ctx, style, "transform", JS_NewString(ctx, buf));
+                JS_SetPropertyStr(ctx, style, "webkitTransform", JS_NewString(ctx, buf));
+            }
+        }
+        return JS_UNDEFINED;
+    };
+    JS_SetPropertyStr(ctx, html_element_proto, "transform",
+        JS_NewCFunction(ctx, js_element_transform, "transform", 2));
+    JS_SetPropertyStr(ctx, html_element_proto, "translate3d",
+        JS_NewCFunction(ctx, js_element_translate3d, "translate3d", 4));
+
     JS_SetPropertyStr(ctx, html_element_ctor, "prototype", html_element_proto);
     JS_SetPropertyStr(ctx, global, "HTMLElement", html_element_ctor);
     JS_SetPropertyStr(ctx, window, "HTMLElement", html_element_ctor);
@@ -1458,8 +1497,11 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     GCValue doc_fragment_ctor = JS_NewCFunction2(ctx, js_dummy_function, "DocumentFragment", 0, JS_CFUNC_constructor, 0);
     GCValue doc_fragment_proto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, doc_fragment_proto, "constructor", doc_fragment_ctor);
-    // DocumentFragment.prototype -> Node.prototype
-    // Note: Prototype chain setup removed - add methods directly to doc_fragment_proto if needed
+    // DocumentFragment needs querySelector(All) for template.content usage.
+    JS_SetPropertyStr(ctx, doc_fragment_proto, "querySelector",
+        JS_NewCFunction(ctx, js_element_querySelector_real, "querySelector", 1));
+    JS_SetPropertyStr(ctx, doc_fragment_proto, "querySelectorAll",
+        JS_NewCFunction(ctx, js_element_querySelectorAll_real, "querySelectorAll", 1));
 
     JS_SetPropertyStr(ctx, doc_fragment_ctor, "prototype", doc_fragment_proto);
     JS_SetPropertyStr(ctx, global, "DocumentFragment", doc_fragment_ctor);
@@ -2963,9 +3005,15 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
             "    el.removeAttribute && el.removeAttribute('disable-upgrade');"
             "    el.__proto__ = ctor.prototype;"
             "    el.__CE_upgraded = true;"
-            "    try { ctor.call(el); } catch(e) {}"
+            "    try { ctor.call(el); } catch(e) {"
+            "      var log = (typeof __bgmdwnldr_log !== 'undefined') ? __bgmdwnldr_log : (typeof console !== 'undefined' ? console.log : null);"
+            "      if (log) try { log('[CE-UPGRADE] ctor ' + name + ' threw: ' + e.message + ' stack=' + (e.stack||'(none)')); } catch(x) {}"
+            "    }"
             "    if (ctor.prototype.connectedCallback) {"
-            "      try { ctor.prototype.connectedCallback.call(el); } catch(e) {}"
+            "      try { ctor.prototype.connectedCallback.call(el); } catch(e) {"
+            "        var log2 = (typeof __bgmdwnldr_log !== 'undefined') ? __bgmdwnldr_log : (typeof console !== 'undefined' ? console.log : null);"
+            "        if (log2) try { log2('[CE-UPGRADE] connectedCallback ' + name + ' threw: ' + e.message); } catch(x) {}"
+            "      }"
             "    }"
             "  };"
             "  window.__cyber_upgradeAll = function(name) {"

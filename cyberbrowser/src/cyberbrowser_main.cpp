@@ -645,11 +645,18 @@ int main(int argc, char *argv[]) {
         // This lets Polymer run connectedCallback and stamp shadow-DOM content
         // on the existing server-rendered skeleton.
         {
+            fprintf(stderr, "[UPGRADE-DOC] invoking customElements.upgrade\n");
+            fflush(stderr);
             const char *upgrade_doc_js =
                 "if (window.customElements && typeof window.customElements.upgrade === 'function' && document && document.documentElement) {"
                 "  try { window.customElements.upgrade(document.documentElement); } catch(e) {}"
+                "} else {"
+                "  var log = (typeof __bgmdwnldr_log !== 'undefined') ? __bgmdwnldr_log : null;"
+                "  if (log) try { log('[UPGRADE-DOC] no upgrade function'); } catch(x) {}"
                 "}";
             JS_Eval(g_ctx, upgrade_doc_js, strlen(upgrade_doc_js), "<upgrade_doc>", JS_EVAL_TYPE_GLOBAL);
+            fprintf(stderr, "[UPGRADE-DOC] done\n");
+            fflush(stderr);
         }
     }
 

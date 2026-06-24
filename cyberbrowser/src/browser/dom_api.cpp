@@ -48,6 +48,20 @@ GCValue query_selector_recursive(JSContextHandle ctx, GCValue elem, const char* 
 void query_selector_all_recursive(JSContextHandle ctx, GCValue elem, const char* selector, GCValue result_arr, int* idx);
 
 // Custom element lifecycle helpers
+static bool dom_node_is_connected(JSContextHandle ctx, GCValue node) {
+    GCValue cur = node;
+    while (!JS_IsUndefined(cur) && !JS_IsNull(cur) && JS_IsObject(cur)) {
+        DOMNodeHandle n = get_dom_node(ctx, cur);
+        if (!n.valid()) break;
+        if (n.node_type() == DOM_NODE_TYPE_DOCUMENT) return true;
+        // Nodes inside a template content or any disconnected fragment are not
+        // connected; don't fire connectedCallback for them.
+        if (n.node_type() == DOM_NODE_TYPE_DOCUMENT_FRAGMENT) return false;
+        cur = n.parent_node();
+    }
+    return false;
+}
+
 static void invoke_custom_element_callback(JSContextHandle ctx, GCValue elem, const char *name) {
     GCValue cb = JS_GetPropertyStr(ctx, elem, name);
     if (JS_IsException(cb)) {
@@ -782,8 +796,11 @@ GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc
     
     dom_request_layout();
 
-    // Trigger custom element connectedCallback if present.
-    invoke_custom_element_callback(ctx, child, "connectedCallback");
+    // Trigger custom element connectedCallback only when the node is actually
+    // connected to the document (not inside a template fragment).
+    if (dom_node_is_connected(ctx, child)) {
+        invoke_custom_element_callback(ctx, child, "connectedCallback");
+    }
 
     return child;
 }
@@ -844,8 +861,23 @@ GCValue js_node_removeChild_real(JSContextHandle ctx, GCValue this_val, int argc
 
     dom_request_layout();
 
-    // Trigger custom element disconnectedCallback if present.
-    invoke_custom_element_callback(ctx, child, "disconnectedCallback");
+    // Trigger custom element disconnectedCallback only if it was connected.
+    // We already removed it, so check via the saved parent chain: if the old
+    // parent chain reached the document, fire the callback.
+    {
+        bool was_connected = false;
+        GCValue cur = this_val;
+        while (!JS_IsUndefined(cur) && !JS_IsNull(cur) && JS_IsObject(cur)) {
+            DOMNodeHandle n = get_dom_node(ctx, cur);
+            if (!n.valid()) break;
+            if (n.node_type() == DOM_NODE_TYPE_DOCUMENT) { was_connected = true; break; }
+            if (n.node_type() == DOM_NODE_TYPE_DOCUMENT_FRAGMENT) break;
+            cur = n.parent_node();
+        }
+        if (was_connected) {
+            invoke_custom_element_callback(ctx, child, "disconnectedCallback");
+        }
+    }
 
     return child;
 }
@@ -918,8 +950,11 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
     
     dom_request_layout();
 
-    // Trigger custom element connectedCallback if present.
-    invoke_custom_element_callback(ctx, new_child, "connectedCallback");
+    // Trigger custom element connectedCallback only when the node is actually
+    // connected to the document.
+    if (dom_node_is_connected(ctx, new_child)) {
+        invoke_custom_element_callback(ctx, new_child, "connectedCallback");
+    }
 
     return new_child;
 }
@@ -955,7 +990,42 @@ GCValue js_node_cloneNode_real(JSContextHandle ctx, GCValue this_val, int argc, 
     for (int i = 0; i < attr_count && attrs; i++) {
         clone_node.set_attribute(attrs[i].name, attrs[i].value);
     }
-    
+
+    // Wire up a sensible prototype so the clone has DOM methods.
+    {
+        GCValue global_obj = JS_GetGlobalObject(ctx);
+        if (original.node_type() == DOM_NODE_TYPE_ELEMENT) {
+            bool is_template = (strcmp(original.node_name(), "TEMPLATE") == 0);
+            GCValue ctor = JS_GetPropertyStr(ctx, global_obj,
+                is_template ? "HTMLTemplateElement" : "HTMLElement");
+            if (!JS_IsUndefined(ctor) && !JS_IsException(ctor)) {
+                GCValue proto = JS_GetPropertyStr(ctx, ctor, "prototype");
+                if (!JS_IsUndefined(proto) && !JS_IsException(proto)) {
+                    JS_SetPrototype(ctx, clone, proto);
+                }
+            }
+        } else {
+            GCValue node_ctor = JS_GetPropertyStr(ctx, global_obj, "Node");
+            if (!JS_IsUndefined(node_ctor) && !JS_IsException(node_ctor)) {
+                GCValue node_proto = JS_GetPropertyStr(ctx, node_ctor, "prototype");
+                if (!JS_IsUndefined(node_proto) && !JS_IsException(node_proto)) {
+                    JS_SetPrototype(ctx, clone, node_proto);
+                }
+            }
+        }
+    }
+
+    // Templates store their children in .content, not in the light DOM.
+    if (original.node_type() == DOM_NODE_TYPE_ELEMENT && strcmp(original.node_name(), "TEMPLATE") == 0) {
+        GCValue orig_content = JS_GetPropertyStr(ctx, this_val, "content");
+        if (!JS_IsUndefined(orig_content) && !JS_IsNull(orig_content) && JS_IsObject(orig_content)) {
+            GCValue cloned_content = js_node_cloneNode_real(ctx, orig_content, 1, argv);
+            if (!JS_IsException(cloned_content) && !JS_IsUndefined(cloned_content) && !JS_IsNull(cloned_content)) {
+                JS_SetPropertyStr(ctx, clone, "content", cloned_content);
+            }
+        }
+    }
+
     // If deep clone, clone all children
     if (deep) {
         GCValue child = original.first_child();

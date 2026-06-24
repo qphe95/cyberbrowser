@@ -1,0 +1,1 @@
+[57140:40516:0624/095805.667:ERROR:components\device_event_log\device_event_log_impl.cc:200] [09:58:05.667] USB: usb_service_win.cc:108 SetupDiGetDeviceProperty({{A45C254E-DF1C-4EFD-8020-67D146A850E0}, 6}) failed: Element not found. (0x490)

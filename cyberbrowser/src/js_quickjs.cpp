@@ -1364,6 +1364,32 @@ static GCValue js_canvas_get_context(JSContextHandle ctx, GCValue this_val, int 
     return ctx2d;
 }
 
+// Helper: create a real DocumentFragment backed by the DOM node tree.
+static GCValue js_create_document_fragment(JSContextHandle ctx) {
+    GCValue frag = JS_NewObjectClass(ctx, js_dom_node_class_id);
+    if (JS_IsException(frag)) return frag;
+
+    DOMNodeHandle frag_node = DOMNodeHandle::create(ctx, DOM_NODE_TYPE_DOCUMENT_FRAGMENT, "#document-fragment");
+    if (!frag_node.valid()) {
+        return JS_ThrowInternalError(ctx, "failed to create DocumentFragment");
+    }
+    frag_node.attach_to_object(frag);
+
+    // Wire prototype to Node.prototype so firstChild/childNodes/etc work.
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue node_ctor = JS_GetPropertyStr(ctx, global, "Node");
+    if (!JS_IsUndefined(node_ctor) && !JS_IsException(node_ctor)) {
+        GCValue node_proto = JS_GetPropertyStr(ctx, node_ctor, "prototype");
+        if (!JS_IsUndefined(node_proto) && !JS_IsException(node_proto)) {
+            JS_SetPrototype(ctx, frag, node_proto);
+        }
+    }
+    // nodeType is defined as a getter on Node.prototype, but the getter uses
+    // the DOMNode data; set nodeName explicitly as well.
+    JS_SetPropertyStr(ctx, frag, "nodeName", JS_NewString(ctx, "#document-fragment"));
+    return frag;
+}
+
 // Document and Element stubs with createElement support
 GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     // Handle createElementNS which passes (namespace, tagName)
@@ -1445,18 +1471,23 @@ GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int ar
                 JS_SetPropertyStr(ctx, elem, "height", JS_NewInt32(ctx, 0));
             }
             
-            // Add content property for template elements (needed by Polymer)
+            // Template elements need a real DocumentFragment content so Polymer
+            // can parse, query, and clone templates.
             if (strcasecmp(tag, "template") == 0) {
-                GCValue content = JS_NewObject(ctx);
-                if (!JS_IsException(content)) {
-                    JS_SetPropertyStr(ctx, content, "insertBefore",
-                        JS_NewCFunction(ctx, js_dummy_function, "insertBefore", 2));
-                    JS_SetPropertyStr(ctx, content, "appendChild",
-                        JS_NewCFunction(ctx, js_dummy_function, "appendChild", 1));
-                    JS_SetPropertyStr(ctx, content, "cloneNode",
-                        JS_NewCFunction(ctx, js_dummy_function, "cloneNode", 1));
-                    JS_SetPropertyStr(ctx, content, "firstChild", JS_NULL);
+                GCValue content = js_create_document_fragment(ctx);
+                if (!JS_IsException(content) && !JS_IsUndefined(content) && !JS_IsNull(content)) {
+                    dom_node_set_owner_document(ctx, content, this_val);
                     JS_SetPropertyStr(ctx, elem, "content", content);
+                }
+
+                // Use HTMLTemplateElement.prototype if available.
+                GCValue global_obj = JS_GetGlobalObject(ctx);
+                GCValue template_ctor = JS_GetPropertyStr(ctx, global_obj, "HTMLTemplateElement");
+                if (!JS_IsUndefined(template_ctor) && !JS_IsException(template_ctor)) {
+                    GCValue template_proto = JS_GetPropertyStr(ctx, template_ctor, "prototype");
+                    if (!JS_IsUndefined(template_proto) && !JS_IsException(template_proto)) {
+                        JS_SetPrototype(ctx, elem, template_proto);
+                    }
                 }
             }
         }
