@@ -4,6 +4,7 @@
 
 #include "display_list.h"
 #include "platform.h"
+#include "url_utils.h"
 #include "text_shaper.h"
 #include "image_cache.h"
 #include "browser_api_impl_types.h"
@@ -212,25 +213,17 @@ static const char* node_attribute_value(HtmlNode *node, const char *name)
     return NULL;
 }
 
-static bool is_absolute_local_path(const char *href)
-{
-    if (href[0] == '/') return true;
-    const char *colon = strchr(href, ':');
-    if (colon && strncmp(colon, "://", 3) != 0) return true;
-    return false;
-}
-
 static char* dl_resolve_url(const char *base_url, const char *href)
 {
     if (!href || !href[0]) return NULL;
-    if (strncasecmp(href, "http://", 7) == 0 || strncasecmp(href, "https://", 8) == 0)
+    if (url_has_scheme(href))
         return strdup(href);
     if (strncmp(href, "//", 2) == 0) {
         char buf[2048];
         snprintf(buf, sizeof(buf), "https:%s", href);
         return strdup(buf);
     }
-    if (is_absolute_local_path(href))
+    if (href[0] == '/')
         return strdup(href);
     if (!base_url || !base_url[0])
         return strdup(href);

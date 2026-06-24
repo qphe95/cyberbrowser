@@ -8,6 +8,7 @@
 #include "http_download.h"
 #include "js_quickjs.h"
 #include "platform.h"
+#include "url_utils.h"
 
 /* Logging wrapper that uses platform abstraction */
 static void log_to_file(const char *tag, const char *fmt, ...) {
@@ -301,8 +302,8 @@ typedef struct {
 static char *url_normalize(const char *base, const char *rel, char *out, size_t out_len) {
     if (!rel || !out || out_len == 0) return NULL;
     
-    // Already absolute
-    if (strncmp(rel, "http://", 7) == 0 || strncmp(rel, "https://", 8) == 0) {
+    // Already absolute (including data:, blob:, javascript:, etc.)
+    if (url_has_scheme(rel)) {
         strncpy(out, rel, out_len - 1);
         out[out_len - 1] = '\0';
         return out;

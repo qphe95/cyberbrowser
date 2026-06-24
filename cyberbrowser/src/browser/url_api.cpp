@@ -14,6 +14,7 @@
 #include "css_parser.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
+#include "url_utils.h"
 
 // URL API Implementation
 // ============================================================================
@@ -143,7 +144,7 @@ static void url_resolve(const char *url, const char *base, UrlComponents *out) {
     UrlComponents base_comp;
     url_parse_components(base ? base : "", &base_comp);
 
-    if (strstr(url, "://")) {
+    if (url_has_scheme(url)) {
         url_parse_components(url, out);
         return;
     }

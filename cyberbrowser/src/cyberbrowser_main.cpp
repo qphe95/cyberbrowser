@@ -93,8 +93,8 @@ static void cleanup_browser_context(void) {
     }
 }
 
-static char *fetch_youtube_homepage(size_t *out_size) {
-    const char *url = "https://www.youtube.com/";
+static char *fetch_youtube_page(size_t *out_size) {
+    const char *url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
     printf("Fetching %s ...\n", url);
 
     HttpBuffer buffer = {0};
@@ -605,7 +605,7 @@ int main(int argc, char *argv[]) {
     printf("init_browser_context ok\n");
 
     size_t html_size = 0;
-    char *html = fetch_youtube_homepage(&html_size);
+    char *html = fetch_youtube_page(&html_size);
     if (!html) {
         cleanup_browser_context();
         platform_http_cleanup();
@@ -765,7 +765,7 @@ int main(int argc, char *argv[]) {
     image_cache_destroy(image_cache);
     free(html);
 
-    printf("\nYouTube homepage loaded successfully.\n");
+    printf("\nYouTube page loaded successfully.\n");
 
     cleanup_browser_context();
     platform_http_cleanup();

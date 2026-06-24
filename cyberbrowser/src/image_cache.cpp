@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <ctype.h>
+#include "url_utils.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -20,6 +22,7 @@
 
 #define LOG_TAG "image_cache"
 #define LOG_ERROR(...) platform_log(LOG_LEVEL_ERROR, LOG_TAG, __VA_ARGS__)
+#define LOG_INFO(...) platform_log(LOG_LEVEL_INFO, LOG_TAG, __VA_ARGS__)
 
 enum {
     ENTRY_STATE_IDLE = 0,
@@ -54,9 +57,74 @@ struct ImageCache {
     int              capacity;
 };
 
-static bool is_url(const char *s)
+static bool is_network_url(const char *s)
 {
-    return strncasecmp(s, "http://", 7) == 0 || strncasecmp(s, "https://", 8) == 0;
+    return url_is_network_url(s);
+}
+
+/* Decode a base64-encoded string into newly allocated binary data.
+ * Returns allocated buffer on success, or NULL on failure.  out_len is set to
+ * the decoded size. */
+static uint8_t *base64_decode(const char *in, size_t in_len, size_t *out_len)
+{
+    static const char b64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    if (!in || in_len == 0) return NULL;
+
+    size_t max_len = (in_len / 4) * 3 + 2;
+    uint8_t *out = (uint8_t *)malloc(max_len);
+    if (!out) return NULL;
+
+    int val = 0, valb = -8;
+    size_t j = 0;
+    for (size_t i = 0; i < in_len && in[i] != '='; i++) {
+        const char *p = strchr(b64_table, in[i]);
+        if (p) {
+            val = (val << 6) + (int)(p - b64_table);
+            valb += 6;
+            if (valb >= 0) {
+                out[j++] = (uint8_t)((val >> valb) & 0xFF);
+                valb -= 8;
+            }
+        }
+    }
+    *out_len = j;
+    return out;
+}
+
+/* Supported image MIME types for data: URLs.  SVG is intentionally omitted
+ * because stb_image does not support vector graphics. */
+static bool is_supported_image_mime(const char *header, size_t header_len)
+{
+    if (header_len >= 9 && strncasecmp(header, "image/png", 9) == 0) return true;
+    if (header_len >= 10 && strncasecmp(header, "image/jpeg", 10) == 0) return true;
+    if (header_len >= 9 && strncasecmp(header, "image/gif", 9) == 0) return true;
+    if (header_len >= 9 && strncasecmp(header, "image/bmp", 9) == 0) return true;
+    if (header_len >= 10 && strncasecmp(header, "image/webp", 10) == 0) return true;
+    return false;
+}
+
+/* Parse a data: URL and return the decoded payload if it is a supported image
+ * type.  Only base64-encoded raster image data URLs are handled.  Returns an
+ * allocated buffer on success, or NULL on failure. */
+static uint8_t *decode_data_url(const char *url, size_t *out_len)
+{
+    if (!url_is_data_url(url)) return NULL;
+    const char *comma = strchr(url, ',');
+    if (!comma) return NULL;
+
+    const char *header = url + 5; /* after "data:" */
+    size_t header_len = (size_t)(comma - header);
+
+    bool base64 = false;
+    if (header_len >= 7 && strncasecmp(header + header_len - 7, ";base64", 7) == 0) {
+        base64 = true;
+        header_len -= 7;
+    }
+    if (!base64) return NULL;
+
+    if (!is_supported_image_mime(header, header_len)) return NULL;
+
+    return base64_decode(comma + 1, strlen(comma + 1), out_len);
 }
 
 ImageCache *image_cache_create(void)
@@ -158,7 +226,20 @@ int image_cache_load(ImageCache *cache, const char *url_or_path)
     if (!e) return -1;
     e->source = strdup(url_or_path);
 
-    if (is_url(url_or_path)) {
+    if (url_is_data_url(url_or_path)) {
+        size_t decoded_len = 0;
+        uint8_t *decoded = decode_data_url(url_or_path, &decoded_len);
+        if (!decoded) {
+            /* Unsupported or malformed data URL (e.g. SVG).  Not an error:
+             * just skip it rather than making a bogus network request. */
+            LOG_INFO("Skipping unsupported/malformed data URL %.80s", url_or_path);
+            cache->count--;
+            free(e);
+            return -1;
+        }
+        e->download_data = (char *)decoded;
+        e->download_size = decoded_len;
+    } else if (is_network_url(url_or_path)) {
         HttpBuffer buffer = {0};
         char err[256] = {0};
         if (!http_get_to_memory(url_or_path, &buffer, err, sizeof(err))) {
@@ -251,7 +332,7 @@ int image_cache_load_async(ImageCache *cache, const char *url_or_path,
      * backend is not guaranteed to be thread-safe for concurrent calls, and
      * this keeps the existing blocking behavior for network images while still
      * providing the async API entry point. */
-    if (is_url(url_or_path)) {
+    if (is_network_url(url_or_path) || url_is_data_url(url_or_path)) {
         int handle = image_cache_load(cache, url_or_path);
         if (handle >= 0 && callback) callback(url_or_path, user_data);
         return handle;

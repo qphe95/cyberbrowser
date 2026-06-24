@@ -7,6 +7,7 @@
 #include "css_parser.h"
 #include "http_download.h"
 #include "platform.h"
+#include "url_utils.h"
 #include "js_quickjs.h"
 #include "browser_api_impl.h"
 #include "browser_api_impl_handles.h"
@@ -161,15 +162,20 @@ static void css_parse_declaration_block(const char *s, size_t len, size_t *pos,
         size_t prop_end = *pos;
         if (*pos < len && s[*pos] == ':') {
             (*pos)++;
-            /* Read value until ';' or '}', respecting quotes. */
+            /* Read value until ';' or '}', respecting quotes and balanced
+             * parentheses so data URLs such as url(data:image/png;base64,...)
+             * are not truncated at the semicolon. */
             css_skip_space(s, len, pos);
             size_t val_start = *pos;
             in_quote = false; quote_char = 0;
+            int paren_depth = 0;
             while (*pos < len) {
                 char c = s[*pos];
                 if (!in_quote) {
                     if (c == '"' || c == '\'') { in_quote = true; quote_char = c; }
-                    else if (c == ';' || c == '}') break;
+                    else if (c == '(') { paren_depth++; }
+                    else if (c == ')') { if (paren_depth > 0) paren_depth--; }
+                    else if (paren_depth == 0 && (c == ';' || c == '}')) break;
                 } else {
                     if (c == quote_char) in_quote = false;
                     else if (c == '\\' && *pos + 1 < len) (*pos)++;
@@ -210,7 +216,14 @@ CssDeclaration* css_parse_inline_style(const char *style_attr, int *out_count) {
             pos++;
             css_skip_space(style_attr, len, &pos);
             size_t val_start = pos;
-            while (pos < len && style_attr[pos] != ';') pos++;
+            int paren_depth = 0;
+            while (pos < len) {
+                char c = style_attr[pos];
+                if (c == '(') { paren_depth++; }
+                else if (c == ')') { if (paren_depth > 0) paren_depth--; }
+                else if (paren_depth == 0 && c == ';') break;
+                pos++;
+            }
             size_t val_end = pos;
 
             char *p = css_strndup_trim(style_attr + prop_start, prop_end - prop_start);
@@ -741,7 +754,7 @@ static void css_apply_declarations(JSContextHandle ctx, GCValue element,
 
 static char* css_resolve_url(const char *base_url, const char *href) {
     if (!href || !href[0]) return NULL;
-    if (strncmp(href, "http://", 7) == 0 || strncmp(href, "https://", 8) == 0) {
+    if (url_has_scheme(href)) {
         return strdup(href);
     }
     if (strncmp(href, "//", 2) == 0) {

@@ -6,6 +6,7 @@
 
 #include "css_layout.h"
 #include "platform.h"
+#include "url_utils.h"
 #include "quickjs_gc_unified.h"
 #include "http_download.h"
 #include "html_dom.h"
@@ -755,7 +756,7 @@ static void layout_sheet_list_free(LayoutStyleSheetList *list) {
 
 static char* layout_resolve_url(const char *base_url, const char *href) {
     if (!href || !href[0]) return NULL;
-    if (strncmp(href, "http://", 7) == 0 || strncmp(href, "https://", 8) == 0) return strdup(href);
+    if (url_has_scheme(href)) return strdup(href);
     if (strncmp(href, "//", 2) == 0) {
         char buf[2048];
         snprintf(buf, sizeof(buf), "https:%s", href);
