@@ -1292,27 +1292,6 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // extend it without the GC collecting the C constructor.
     JS_SetPropertyStr(ctx, global, "__origHTMLElement", html_element_ctor);
     JS_SetPropertyStr(ctx, window, "__origHTMLElement", html_element_ctor);
-    // Replace window.HTMLElement with a pure-JS wrapper that forwards to the
-    // original C constructor via property lookup. This avoids capturing the C
-    // function in a closure, which the compacting GC can invalidate.
-    {
-        const char *wrap_html_element =
-            "(function(){"
-            "  function Wrapper() {"
-            "    var ctor = window.__origHTMLElement;"
-            "    if (new.target) {"
-            "      var inst = new ctor();"
-            "      if (new.target !== Wrapper) Object.setPrototypeOf(inst, new.target.prototype);"
-            "      return inst;"
-            "    }"
-            "    return new ctor();"
-            "  }"
-            "  Wrapper.prototype = window.__origHTMLElement.prototype;"
-            "  window.HTMLElement = Wrapper;"
-            "  if (typeof globalThis !== 'undefined') globalThis.HTMLElement = Wrapper;"
-            "})();";
-        JS_Eval(ctx, wrap_html_element, strlen(wrap_html_element), "<wrap_html_element>", JS_EVAL_TYPE_GLOBAL);
-    }
     // DON'T free html_element_ctor yet - we need it for document.body below
     // element_proto will be freed after adding methods below
     // Keep html_element_ctor and html_element_proto for document.body
@@ -2969,11 +2948,10 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_Eval(ctx, patch_odp, strlen(patch_odp), "<patch_odp>", JS_EVAL_TYPE_GLOBAL);
     }
 
-    // Minimal custom-element upgrade: set the element's prototype to the
-    // registered constructor's prototype so Polymer methods are visible.
-    // We deliberately do not call the constructor here; the kevlar bundle's
-    // ES5-shimmed constructors are unsafe to invoke on existing DOMNode-backed
-    // objects and caused crashes during the large application script.
+    // Custom-element upgrade: set the element's prototype to the registered
+    // constructor's prototype, then run the constructor and connectedCallback
+    // lifecycle methods. The constructors are now safe to invoke because
+    // Reflect.construct preserves the explicit new.target.
     {
         const char *upgrade_js =
             "(function(){"
@@ -2985,6 +2963,10 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
             "    el.removeAttribute && el.removeAttribute('disable-upgrade');"
             "    el.__proto__ = ctor.prototype;"
             "    el.__CE_upgraded = true;"
+            "    try { ctor.call(el); } catch(e) {}"
+            "    if (ctor.prototype.connectedCallback) {"
+            "      try { ctor.prototype.connectedCallback.call(el); } catch(e) {}"
+            "    }"
             "  };"
             "  window.__cyber_upgradeAll = function(name) {"
             "    if (!window.customElements) return;"
@@ -2994,6 +2976,17 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
             "    for (var i = 0; i < list.length; i++) {"
             "      window.__cyber_upgradeElement(list[i]);"
             "    }"
+            "  };"
+            "  window.customElements.upgrade = function(root) {"
+            "    if (!root) return;"
+            "    var walk = function(node) {"
+            "      if (node.nodeType === 1) {"
+            "        window.__cyber_upgradeElement(node);"
+            "        var children = node.childNodes;"
+            "        for (var i = 0; i < children.length; i++) walk(children[i]);"
+            "      }"
+            "    };"
+            "    walk(root);"
             "  };"
             "})();";
         JS_Eval(ctx, upgrade_js, strlen(upgrade_js), "<ce_upgrade>", JS_EVAL_TYPE_GLOBAL);

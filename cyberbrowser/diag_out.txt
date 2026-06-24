@@ -1,0 +1,2321 @@
+========================================
+CyberBrowser - YouTube Loader
+========================================
+platform_init ok
+[E/quickjs] JS_NewContextRaw returned ctx=242
+[I/browser_api_impl] Continuing with rest of browser stubs initialization
+[I/browser_api_impl] Setting up Map constructor...
+[I/browser_api_impl] Map constructor set on global
+[I/browser_api_impl] Map Symbol.toStringTag done
+[I/browser_api_impl] Map Symbol.iterator set via JS_Eval
+[I/browser_api_impl] About to get Promise constructor...
+[I/browser_api_impl] Got Promise constructor
+[I/browser_api_impl] Promise ctor not exception, getting prototype...
+[I/browser_api_impl] Got Promise prototype
+[I/browser_api_impl] Promise proto not exception, setting finally...
+[I/browser_api_impl] Promise.prototype.finally set
+[I/browser_api_impl] Promise.prototype.finally done
+[I/browser_api_impl] Array methods done
+[I/browser_api_impl] Setting up Window object...
+[I/browser_api_impl] DOM prototype methods set
+[I/browser_api_impl] Window properties set
+[I/browser_api_impl] Getting DOMException...
+[I/browser_api_impl] Got DOMException
+[I/browser_api_impl] Setting DOMException on window...
+[I/browser_api_impl] DOMException set on window
+[I/browser_api_impl] DOMException setup done
+[I/browser_api_impl] Creating NodeFilter object...
+[I/browser_api_impl] NodeFilter object created, setting properties...
+[I/browser_api_impl] NodeFilter set
+[I/browser_api_impl] Creating document object...
+[I/browser_api_impl] Setting up Document...
+[I/browser_api_impl] Document object created
+[I/browser_api_impl] Document documentElement set
+[I/browser_api_impl] Document body set
+[I/browser_api_impl] Document head set
+[I/browser_api_impl] YouTube DOM skeleton created
+[I/browser_api_impl] Document fonts set
+[I/browser_api_impl] Document featurePolicy set
+[I/browser_api_impl] Document set on global
+[I/browser_api_impl] Location set
+[I/browser_api_impl] Navigator clipboard set
+[I/browser_api_impl] MediaMetadata class set
+[I/browser_api_impl] Navigator mediaSession set
+[I/browser_api_impl] Navigator mediaCapabilities set
+[I/browser_api_impl] Navigator permissions set
+[I/browser_api_impl] Navigator storage set
+[I/browser_api_impl] Navigator serviceWorker set
+[I/browser_api_impl] Navigator geolocation set
+[I/browser_api_impl] Navigator share set
+[I/browser_api_impl] Navigator userAgentData set
+[I/browser_api_impl] Navigator getBattery set
+[I/browser_api_impl] Navigator connection set
+[I/browser_api_impl] Navigator set
+[I/browser_api_impl] Screen set
+[I/browser_api_impl] Timer API set
+[I/browser_api_impl] Setting up XMLHttpRequest...
+[I/browser_api_impl] Setting up Web Animations API...
+[I/browser_api_impl] About to create Animation class...
+[I/browser_api_impl] Creating animation_proto...
+[I/browser_api_impl] Setting Animation property function list...
+[I/browser_api_impl] Setting Animation class proto...
+[I/browser_api_impl] Creating Animation constructor...
+[I/browser_api_impl] Animation constructor created, checking validity...
+[I/browser_api_impl] Setting Animation constructor...
+[I/browser_api_impl] About to set Animation on global...
+[I/browser_api_impl] Checking animation_ctor validity...
+[I/browser_api_impl] animation_ctor appears valid, attempting JS_SetPropertyStr...
+[I/browser_api_impl] Animation setup completed successfully
+[I/browser_api_impl] MediaSource API set
+[I/browser_api_impl] ManagedMediaSource API set
+[I/browser_api_impl] WebKitMediaSource API set
+[I/browser_api_impl] HTMLMediaElement API set
+[I/browser_api_impl] URL API set
+[I/browser_api_impl] Request/Response API set
+[I/browser_api_impl] Navigator sendBeacon set
+[I/browser_api_impl] Missing APIs for script 024 set
+[I/browser_api_impl] Intl stub set
+[I/js_quickjs] Initial DOM setup complete
+init_browser_context ok
+Fetching https://www.youtube.com/ ...
+[I/tls_client] Loaded CA certs from C:/msys64/mingw64/etc/ssl/certs/ca-bundle.crt (0 certs)
+[I/tls_client] Connecting to www.youtube.com:443...
+[I/tls_client] TCP connected to www.youtube.com:443
+[I/tls_client] Configured perfect Android TCP stack simulation
+[I/tls_client] Using default TLS configuration for macOS/Linux
+[I/tls_client] Starting TLS handshake with www.youtube.com:443...
+[I/tls_client] TLS handshake completed successfully
+[I/tls_client] TLS version: TLSv1.3, Cipher: TLS1-3-CHACHA20-POLY1305-SHA256
+[I/http_download] HTTP request sent: 582 bytes
+[I/http_download] Request headers:
+GET / HTTP/1.1
+Host: www.youtube.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8
+Accept-Language: en-US,en;q=0.9
+Accept-Encoding: identity
+Connection: close
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36
+Accept: text/html,application/xhtml+x
+[I/http_download] Set socket timeout (read=60s, write=10s)
+[I/http_download] Starting to read HTTP response...
+[I/tls_client] TLS connection EOF
+[I/http_download] Finished reading response: 780808 bytes total
+[I/http_download] Received 780808 bytes response
+[I/http_download] Response start: [HTTP/1.1 200 OK..Content-Type: text/html; charset=utf-8..X-Content-Type-Options: nosniff..Content-Se]
+[I/http_download] HTTP status: 200
+[I/http_download] Captured cookie: __Secure-YNID=...
+[I/http_download] Captured cookie: GPS=...
+[I/http_download] Captured cookie: YSC=...
+[I/http_download] Captured cookie: __Secure-ROLLOUT_TOKEN=...
+[I/http_download] Captured cookie: __Secure-YEC=...
+[I/http_download] Captured cookie: VISITOR_INFO1_LIVE=...
+[I/http_download] Captured cookie: VISITOR_PRIVACY_METADATA=...
+[I/http_download] Detected chunked transfer encoding
+[I/http_download] Decoded chunked response: 775273 bytes -> 775028 bytes
+Executing page scripts ...
+[I/html_extract] Found inline script [0]: 796 bytes (type: text/javascript)
+[I/html_extract] Found inline script [1]: 400 bytes (type: text/javascript)
+[I/html_extract] Found inline script [2]: 3427 bytes (type: text/javascript)
+[I/html_extract] Found inline script [3]: 268 bytes (type: text/javascript)
+[I/html_extract] Found inline script [4]: 108 bytes (type: text/javascript)
+[I/html_extract] Found inline script [5]: 2084 bytes (type: text/javascript)
+[I/html_extract] Found external script [6]: https://www.youtube.com/s/desktop/395dc19a/jsbin/web-animations-next-lite.min.vf... (type: text/javascript)
+[I/html_extract] Found external script [7]: https://www.youtube.com/s/desktop/395dc19a/jsbin/custom-elements-es5-adapter.vfl... (type: text/javascript)
+[I/html_extract] Found external script [8]: https://www.youtube.com/s/desktop/395dc19a/jsbin/webcomponents-sd.vflset/webcomp... (type: text/javascript)
+[I/html_extract] Found external script [9]: https://www.youtube.com/s/desktop/395dc19a/jsbin/intersection-observer.min.vflse... (type: text/javascript)
+[I/html_extract] Found inline script [10]: 56 bytes (type: text/javascript)
+[I/html_extract] Found large inline script: 616054 bytes (may be data payload)
+[I/html_extract] Found inline script [11]: 616054 bytes (type: text/javascript)
+[I/html_extract] Found inline script [12]: 56 bytes (type: text/javascript)
+[I/html_extract] Found inline script [13]: 145 bytes (type: text/javascript)
+[I/html_extract] Found external script [14]: https://www.youtube.com/s/desktop/395dc19a/jsbin/scheduler.vflset/scheduler.js... (type: text/javascript)
+[I/html_extract] Found external script [15]: https://www.youtube.com/s/desktop/395dc19a/jsbin/www-i18n-constants-en_US.vflset... (type: text/javascript)
+[I/html_extract] Found external script [16]: https://www.youtube.com/s/desktop/395dc19a/jsbin/spf.vflset/spf.js... (type: text/javascript)
+[I/html_extract] Found inline script [17]: 95 bytes (type: text/javascript)
+[I/html_extract] Found external script [18]: https://www.youtube.com/s/desktop/395dc19a/jsbin/network.vflset/network.js... (type: text/javascript)
+[I/html_extract] Found inline script [19]: 55 bytes (type: text/javascript)
+[I/html_extract] Found inline script [20]: 132 bytes (type: text/javascript)
+[I/html_extract] Found inline script [21]: 54 bytes (type: text/javascript)
+[I/html_extract] Found inline script [22]: 63 bytes (type: text/javascript)
+[I/html_extract] Found inline script [23]: 54 bytes (type: text/javascript)
+[I/html_extract] Found inline script [24]: 55 bytes (type: text/javascript)
+[I/html_extract] Found inline script [25]: 57 bytes (type: text/javascript)
+[I/html_extract] Found inline script [26]: 60 bytes (type: text/javascript)
+[I/html_extract] Found inline script [27]: 57 bytes (type: text/javascript)
+[I/html_extract] Found external script [28]: https://www.youtube.com/s/_/ytmainappweb/_/js/k=ytmainappweb.kevlar_base.en_US.R... (type: text/javascript)
+[I/html_extract] Found inline script [29]: 60 bytes (type: text/javascript)
+[I/html_extract] Found inline script [30]: 60 bytes (type: text/javascript)
+[I/html_extract] Found inline script [31]: 56 bytes (type: text/javascript)
+[I/html_extract] Found inline script [32]: 54 bytes (type: text/javascript)
+[I/html_extract] Found inline script [33]: 284 bytes (type: text/javascript)
+[I/html_extract] Found inline script [34]: 38554 bytes (type: text/javascript)
+[I/html_extract] Found inline script [35]: 55 bytes (type: text/javascript)
+[I/html_extract] Found inline script [36]: 74769 bytes (type: text/javascript)
+[I/html_extract] Found inline script [37]: 55 bytes (type: text/javascript)
+[I/html_extract] Found inline script [38]: 974 bytes (type: text/javascript)
+[I/html_extract] Found inline script [39]: 55 bytes (type: text/javascript)
+[I/html_extract] Found inline script [40]: 97 bytes (type: text/javascript)
+[I/html_extract] Found inline script [41]: 63 bytes (type: text/javascript)
+[I/html_extract] Extracted 42 scripts in parse order
+[I/html_extract] Found 42 scripts to execute
+[I/html_extract] Fetching external script [6]: https://www.youtube.com/s/desktop/395dc19a/jsbin/web-animations-next-lite.min.vf
+[html_extract] FETCH external script [6]: https://www.youtube.com/s/desktop/395dc19a/jsbin/web-animations-next-lite.min.vflset/web-animations-next-lite.min.js
+[I/tls_client] Loaded CA certs from C:/msys64/mingw64/etc/ssl/certs/ca-bundle.crt (0 certs)
+[I/tls_client] Connecting to www.youtube.com:443...
+[I/tls_client] TCP connected to www.youtube.com:443
+[I/tls_client] Configured perfect Android TCP stack simulation
+[I/tls_client] Using default TLS configuration for macOS/Linux
+[I/tls_client] Starting TLS handshake with www.youtube.com:443...
+[I/tls_client] TLS handshake completed successfully
+[I/tls_client] TLS version: TLSv1.3, Cipher: TLS1-3-CHACHA20-POLY1305-SHA256
+[I/http_download] HTTP request sent: 432 bytes
+[I/http_download] Request headers:
+GET /s/desktop/395dc19a/jsbin/web-animations-next-lite.min.vflset/web-animations-next-lite.min.js HTTP/1.1
+Host: www.youtube.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8
+Accept-Language: en-US,en;q=0.9
+Accept-Encoding: identity
+Connection: close
+
+
+[I/http_download] Set socket timeout (read=60s, write=10s)
+[I/http_download] Starting to read HTTP response...
+[I/http_download] Content-Length: 50864 bytes, body timeout: 300 seconds
+[I/http_download] Finished reading response: 51539 bytes total
+[I/http_download] Received 51539 bytes response
+[I/http_download] Response start: [HTTP/1.1 200 OK..Accept-Ranges: bytes..Vary: Accept-Encoding, Origin..Content-Type: text/javascript.]
+[I/http_download] HTTP status: 200
+[html_extract] FETCH external script [6] result=ok size=50864
+[I/html_extract] Loaded external script [6]: 50864 bytes URL=https://www.youtube.com/s/desktop/395dc19a/jsbin/web-animations-next-lite.min.vflset/web-animations-next-lite.min.js
+[W/html_extract] Skipping unsafe external script [7]: https://www.youtube.com/s/desktop/395dc19a/jsbin/custom-elements-es5-adapter.vflset/custom-elements-es5-adapter.js
+[W/html_extract] Skipping unsafe external script [8]: https://www.youtube.com/s/desktop/395dc19a/jsbin/webcomponents-sd.vflset/webcomponents-sd.js
+[I/html_extract] Fetching external script [9]: https://www.youtube.com/s/desktop/395dc19a/jsbin/intersection-observer.min.vflse
+[html_extract] FETCH external script [9]: https://www.youtube.com/s/desktop/395dc19a/jsbin/intersection-observer.min.vflset/intersection-observer.min.js
+[I/tls_client] Loaded CA certs from C:/msys64/mingw64/etc/ssl/certs/ca-bundle.crt (0 certs)
+[I/tls_client] Connecting to www.youtube.com:443...
+[I/tls_client] TCP connected to www.youtube.com:443
+[I/tls_client] Configured perfect Android TCP stack simulation
+[I/tls_client] Using default TLS configuration for macOS/Linux
+[I/tls_client] Starting TLS handshake with www.youtube.com:443...
+[I/tls_client] TLS handshake completed successfully
+[I/tls_client] TLS version: TLSv1.3, Cipher: TLS1-3-CHACHA20-POLY1305-SHA256
+[I/http_download] HTTP request sent: 426 bytes
+[I/http_download] Request headers:
+GET /s/desktop/395dc19a/jsbin/intersection-observer.min.vflset/intersection-observer.min.js HTTP/1.1
+Host: www.youtube.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8
+Accept-Language: en-US,en;q=0.9
+Accept-Encoding: identity
+Connection: close
+
+
+[I/http_download] Set socket timeout (read=60s, write=10s)
+[I/http_download] Starting to read HTTP response...
+[I/http_download] Content-Length: 5559 bytes, body timeout: 300 seconds
+[I/http_download] Finished reading response: 6233 bytes total
+[I/http_download] Received 6233 bytes response
+[I/http_download] Response start: [HTTP/1.1 200 OK..Accept-Ranges: bytes..Vary: Accept-Encoding, Origin..Content-Type: text/javascript.]
+[I/http_download] HTTP status: 200
+[html_extract] FETCH external script [9] result=ok size=5559
+[I/html_extract] Loaded external script [9]: 5559 bytes URL=https://www.youtube.com/s/desktop/395dc19a/jsbin/intersection-observer.min.vflset/intersection-observer.min.js
+[I/html_extract] Fetching external script [14]: https://www.youtube.com/s/desktop/395dc19a/jsbin/scheduler.vflset/scheduler.js
+[html_extract] FETCH external script [14]: https://www.youtube.com/s/desktop/395dc19a/jsbin/scheduler.vflset/scheduler.js
+[I/tls_client] Loaded CA certs from C:/msys64/mingw64/etc/ssl/certs/ca-bundle.crt (0 certs)
+[I/tls_client] Connecting to www.youtube.com:443...
+[I/tls_client] TCP connected to www.youtube.com:443
+[I/tls_client] Configured perfect Android TCP stack simulation
+[I/tls_client] Using default TLS configuration for macOS/Linux
+[I/tls_client] Starting TLS handshake with www.youtube.com:443...
+[I/tls_client] TLS handshake completed successfully
+[I/tls_client] TLS version: TLSv1.3, Cipher: TLS1-3-CHACHA20-POLY1305-SHA256
+[I/http_download] HTTP request sent: 394 bytes
+[I/http_download] Request headers:
+GET /s/desktop/395dc19a/jsbin/scheduler.vflset/scheduler.js HTTP/1.1
+Host: www.youtube.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8
+Accept-Language: en-US,en;q=0.9
+Accept-Encoding: identity
+Connection: close
+
+
+[I/http_download] Set socket timeout (read=60s, write=10s)
+[I/http_download] Starting to read HTTP response...
+[I/http_download] Content-Length: 8757 bytes, body timeout: 300 seconds
+[I/http_download] Finished reading response: 9431 bytes total
+[I/http_download] Received 9431 bytes response
+[I/http_download] Response start: [HTTP/1.1 200 OK..Accept-Ranges: bytes..Vary: Accept-Encoding, Origin..Content-Type: text/javascript.]
+[I/http_download] HTTP status: 200
+[html_extract] FETCH external script [14] result=ok size=8757
+[I/html_extract] Loaded external script [14]: 8757 bytes URL=https://www.youtube.com/s/desktop/395dc19a/jsbin/scheduler.vflset/scheduler.js
+[I/html_extract] Fetching external script [15]: https://www.youtube.com/s/desktop/395dc19a/jsbin/www-i18n-constants-en_US.vflset
+[html_extract] FETCH external script [15]: https://www.youtube.com/s/desktop/395dc19a/jsbin/www-i18n-constants-en_US.vflset/www-i18n-constants.js
+[I/tls_client] Loaded CA certs from C:/msys64/mingw64/etc/ssl/certs/ca-bundle.crt (0 certs)
+[I/tls_client] Connecting to www.youtube.com:443...
+[I/tls_client] TCP connected to www.youtube.com:443
+[I/tls_client] Configured perfect Android TCP stack simulation
+[I/tls_client] Using default TLS configuration for macOS/Linux
+[I/tls_client] Starting TLS handshake with www.youtube.com:443...
+[I/tls_client] TLS handshake completed successfully
+[I/tls_client] TLS version: TLSv1.3, Cipher: TLS1-3-CHACHA20-POLY1305-SHA256
+[I/http_download] HTTP request sent: 418 bytes
+[I/http_download] Request headers:
+GET /s/desktop/395dc19a/jsbin/www-i18n-constants-en_US.vflset/www-i18n-constants.js HTTP/1.1
+Host: www.youtube.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8
+Accept-Language: en-US,en;q=0.9
+Accept-Encoding: identity
+Connection: close
+
+
+[I/http_download] Set socket timeout (read=60s, write=10s)
+[I/http_download] Starting to read HTTP response...
+[I/http_download] Content-Length: 5794 bytes, body timeout: 300 seconds
+[I/http_download] Finished reading response: 6468 bytes total
+[I/http_download] Received 6468 bytes response
+[I/http_download] Response start: [HTTP/1.1 200 OK..Accept-Ranges: bytes..Vary: Accept-Encoding, Origin..Content-Type: text/javascript.]
+[I/http_download] HTTP status: 200
+[html_extract] FETCH external script [15] result=ok size=5794
+[I/html_extract] Loaded external script [15]: 5794 bytes URL=https://www.youtube.com/s/desktop/395dc19a/jsbin/www-i18n-constants-en_US.vflset/www-i18n-constants.js
+[I/html_extract] Fetching external script [16]: https://www.youtube.com/s/desktop/395dc19a/jsbin/spf.vflset/spf.js
+[html_extract] FETCH external script [16]: https://www.youtube.com/s/desktop/395dc19a/jsbin/spf.vflset/spf.js
+[I/tls_client] Loaded CA certs from C:/msys64/mingw64/etc/ssl/certs/ca-bundle.crt (0 certs)
+[I/tls_client] Connecting to www.youtube.com:443...
+[I/tls_client] TCP connected to www.youtube.com:443
+[I/tls_client] Configured perfect Android TCP stack simulation
+[I/tls_client] Using default TLS configuration for macOS/Linux
+[I/tls_client] Starting TLS handshake with www.youtube.com:443...
+[I/tls_client] TLS handshake completed successfully
+[I/tls_client] TLS version: TLSv1.3, Cipher: TLS1-3-CHACHA20-POLY1305-SHA256
+[I/http_download] HTTP request sent: 382 bytes
+[I/http_download] Request headers:
+GET /s/desktop/395dc19a/jsbin/spf.vflset/spf.js HTTP/1.1
+Host: www.youtube.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8
+Accept-Language: en-US,en;q=0.9
+Accept-Encoding: identity
+Connection: close
+
+
+[I/http_download] Set socket timeout (read=60s, write=10s)
+[I/http_download] Starting to read HTTP response...
+[I/http_download] Content-Length: 38138 bytes, body timeout: 300 seconds
+[I/http_download] Finished reading response: 38813 bytes total
+[I/http_download] Received 38813 bytes response
+[I/http_download] Response start: [HTTP/1.1 200 OK..Accept-Ranges: bytes..Vary: Accept-Encoding, Origin..Content-Type: text/javascript.]
+[I/http_download] HTTP status: 200
+[html_extract] FETCH external script [16] result=ok size=38138
+[I/html_extract] Loaded external script [16]: 38138 bytes URL=https://www.youtube.com/s/desktop/395dc19a/jsbin/spf.vflset/spf.js
+[I/html_extract] Fetching external script [18]: https://www.youtube.com/s/desktop/395dc19a/jsbin/network.vflset/network.js
+[html_extract] FETCH external script [18]: https://www.youtube.com/s/desktop/395dc19a/jsbin/network.vflset/network.js
+[I/tls_client] Loaded CA certs from C:/msys64/mingw64/etc/ssl/certs/ca-bundle.crt (0 certs)
+[I/tls_client] Connecting to www.youtube.com:443...
+[I/tls_client] TCP connected to www.youtube.com:443
+[I/tls_client] Configured perfect Android TCP stack simulation
+[I/tls_client] Using default TLS configuration for macOS/Linux
+[I/tls_client] Starting TLS handshake with www.youtube.com:443...
+[I/tls_client] TLS handshake completed successfully
+[I/tls_client] TLS version: TLSv1.3, Cipher: TLS1-3-CHACHA20-POLY1305-SHA256
+[I/http_download] HTTP request sent: 390 bytes
+[I/http_download] Request headers:
+GET /s/desktop/395dc19a/jsbin/network.vflset/network.js HTTP/1.1
+Host: www.youtube.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8
+Accept-Language: en-US,en;q=0.9
+Accept-Encoding: identity
+Connection: close
+
+
+[I/http_download] Set socket timeout (read=60s, write=10s)
+[I/http_download] Starting to read HTTP response...
+[I/http_download] Content-Length: 14141 bytes, body timeout: 300 seconds
+[I/http_download] Finished reading response: 14816 bytes total
+[I/http_download] Received 14816 bytes response
+[I/http_download] Response start: [HTTP/1.1 200 OK..Accept-Ranges: bytes..Vary: Accept-Encoding, Origin..Content-Type: text/javascript.]
+[I/http_download] HTTP status: 200
+[html_extract] FETCH external script [18] result=ok size=14141
+[I/html_extract] Loaded external script [18]: 14141 bytes URL=https://www.youtube.com/s/desktop/395dc19a/jsbin/network.vflset/network.js
+[I/html_extract] Fetching external script [28]: https://www.youtube.com/s/_/ytmainappweb/_/js/k=ytmainappweb.kevlar_base.en_US.R
+[html_extract] FETCH external script [28]: https://www.youtube.com/s/_/ytmainappweb/_/js/k=ytmainappweb.kevlar_base.en_US.Rc-99vOvpXI.es5.O/am=AAAAAAQAQABADA/d=1/rs=AGKMywEMGcPqpUC-OE_KrbU0FhUAZjk-Ag/m=kevlar_base_module,kevlar_main_module,kev
+[I/tls_client] Loaded CA certs from C:/msys64/mingw64/etc/ssl/certs/ca-bundle.crt (0 certs)
+[I/tls_client] Connecting to www.youtube.com:443...
+[I/tls_client] TCP connected to www.youtube.com:443
+[I/tls_client] Configured perfect Android TCP stack simulation
+[I/tls_client] Using default TLS configuration for macOS/Linux
+[I/tls_client] Starting TLS handshake with www.youtube.com:443...
+[I/tls_client] TLS handshake completed successfully
+[I/tls_client] TLS version: TLSv1.3, Cipher: TLS1-3-CHACHA20-POLY1305-SHA256
+[I/http_download] HTTP request sent: 539 bytes
+[I/http_download] Request headers:
+GET /s/_/ytmainappweb/_/js/k=ytmainappweb.kevlar_base.en_US.Rc-99vOvpXI.es5.O/am=AAAAAAQAQABADA/d=1/rs=AGKMywEMGcPqpUC-OE_KrbU0FhUAZjk-Ag/m=kevlar_base_module,kevlar_main_module,kevlar_base_sync_mod_chunk HTTP/1.1
+Host: www.youtube.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8
+Accept-Language: en-US,en;q=0.9
+Accept-En
+[I/http_download] Set socket timeout (read=60s, write=10s)
+[I/http_download] Starting to read HTTP response...
+[I/http_download] Content-Length: 10576066 bytes, body timeout: 1230 seconds
+[E/http_download] [DL] Received 1049010 bytes so far
+[E/http_download] [DL] Received 2103998 bytes so far
+[E/http_download] [DL] Received 3160766 bytes so far
+[E/http_download] [DL] Received 4217534 bytes so far
+[E/http_download] [DL] Received 5274302 bytes so far
+[E/http_download] [DL] Received 6331070 bytes so far
+[E/http_download] [DL] Received 7387838 bytes so far
+[E/http_download] [DL] Received 8444606 bytes so far
+[E/http_download] [DL] Received 9501374 bytes so far
+[E/http_download] [DL] Received 10558142 bytes so far
+[I/http_download] Finished reading response: 10576970 bytes total
+[I/http_download] Received 10576970 bytes response
+[I/http_download] Response start: [HTTP/1.1 200 OK..Accept-Ranges: bytes..Vary: Accept-Encoding..Content-Type: text/javascript; charset]
+[I/http_download] HTTP status: 200
+[html_extract] FETCH external script [28] result=ok size=10576066
+[I/html_extract] Loaded external script [28]: 10576066 bytes URL=https://www.youtube.com/s/_/ytmainappweb/_/js/k=ytmainappweb.kevlar_base.en_US.Rc-99vOvpXI.es5.O/am=AAAAAAQAQABADA/d=1/rs=AGKMywEMGcPqpUC-OE_KrbU0FhUAZjk-Ag/m=kevlar_base_module,kevlar_main_module,kev
+Executing 40 page scripts in document order...
+[I/html_extract] Executing 40 scripts...
+[I/html_media] Executing 40 scripts...
+[html_extract] EXEC queue script 0/40 size=796
+[html_extract] EXEC queue script 1/40 size=400
+[html_extract] EXEC queue script 2/40 size=3427
+[html_extract] EXEC queue script 3/40 size=268
+[html_extract] EXEC queue script 4/40 size=108
+[html_extract] EXEC queue script 5/40 size=2084
+[html_extract] EXEC queue script 6/40 size=50864
+[html_extract] EXEC queue script 7/40 size=5559
+[html_extract] EXEC queue script 8/40 size=56
+[html_extract] EXEC queue script 9/40 size=616054
+[html_extract] EXEC queue script 10/40 size=56
+[html_extract] EXEC queue script 11/40 size=145
+[html_extract] EXEC queue script 12/40 size=8757
+[html_extract] EXEC queue script 13/40 size=5794
+[html_extract] EXEC queue script 14/40 size=38138
+[html_extract] EXEC queue script 15/40 size=95
+[html_extract] EXEC queue script 16/40 size=14141
+[html_extract] EXEC queue script 17/40 size=55
+[html_extract] EXEC queue script 18/40 size=132
+[html_extract] EXEC queue script 19/40 size=54
+[html_extract] EXEC queue script 20/40 size=63
+[html_extract] EXEC queue script 21/40 size=54
+[html_extract] EXEC queue script 22/40 size=55
+[html_extract] EXEC queue script 23/40 size=57
+[html_extract] EXEC queue script 24/40 size=60
+[html_extract] EXEC queue script 25/40 size=57
+[html_extract] EXEC queue script 26/40 size=10576066
+[html_extract] EXEC queue script 27/40 size=60
+[html_extract] EXEC queue script 28/40 size=60
+[html_extract] EXEC queue script 29/40 size=56
+[html_extract] EXEC queue script 30/40 size=54
+[html_extract] EXEC queue script 31/40 size=284
+[html_extract] EXEC queue script 32/40 size=38554
+[html_extract] EXEC queue script 33/40 size=55
+[html_extract] EXEC queue script 34/40 size=74769
+[html_extract] EXEC queue script 35/40 size=55
+[html_extract] EXEC queue script 36/40 size=974
+[html_extract] EXEC queue script 37/40 size=55
+[html_extract] EXEC queue script 38/40 size=97
+[html_extract] EXEC queue script 39/40 size=63
+[html_extract] CALL js_quickjs_exec_scripts exec_count=40
+[I/js_quickjs] js_quickjs_exec_scripts called, script_count=40
+[I/js_quickjs] Using global runtime=1, context=242
+[I/html_dom] Parsed HTML document: found <head>, <body>
+[I/html_dom] Populating JS document from parsed HTML
+[I/html_dom] JS document populated: new docElem/head/body from parsed HTML
+[I/js_quickjs] Full DOM populated from parsed HTML (root=html, head=yes, body=yes)
+[js_quickjs] Applying document styles...
+[I/css_parser] Collecting stylesheets from DOM...
+[I/css_parser] Fetching stylesheet: https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&family=YouT
+[I/tls_client] Loaded CA certs from C:/msys64/mingw64/etc/ssl/certs/ca-bundle.crt (0 certs)
+[I/tls_client] Connecting to fonts.googleapis.com:443...
+[I/tls_client] TCP connected to fonts.googleapis.com:443
+[I/tls_client] Configured perfect Android TCP stack simulation
+[I/tls_client] Using default TLS configuration for macOS/Linux
+[I/tls_client] Starting TLS handshake with fonts.googleapis.com:443...
+[I/tls_client] TLS handshake completed successfully
+[I/tls_client] TLS version: TLSv1.3, Cipher: TLS1-3-AES-256-GCM-SHA384
+[I/http_download] HTTP request sent: 431 bytes
+[I/http_download] Request headers:
+GET /css2?family=Roboto:wght@300;400;500;700&family=YouTube+Sans:wght@300..900&display=swap HTTP/1.1
+Host: fonts.googleapis.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8
+Accept-Language: en-US,en;q=0.9
+Accept-Encoding: identity
+Connection: close
+
+
+[I/http_download] Set socket timeout (read=60s, write=10s)
+[I/http_download] Starting to read HTTP response...
+[I/tls_client] TLS connection EOF
+[I/http_download] Finished reading response: 86977 bytes total
+[I/http_download] Received 86977 bytes response
+[I/http_download] Response start: [HTTP/1.1 200 OK..Content-Type: text/css; charset=utf-8..Access-Control-Allow-Origin: *..Timing-Allow]
+[I/http_download] HTTP status: 200
+[I/http_download] Detected chunked transfer encoding
+[I/http_download] Decoded chunked response: 86172 bytes -> 86143 bytes
+[I/css_parser] Fetched stylesheet (86143 bytes)
+[I/css_parser] Fetching stylesheet: https://www.youtube.com/s/desktop/395dc19a/cssbin/www-main-desktop-home-page-ske
+[I/tls_client] Loaded CA certs from C:/msys64/mingw64/etc/ssl/certs/ca-bundle.crt (0 certs)
+[I/tls_client] Connecting to www.youtube.com:443...
+[I/tls_client] TCP connected to www.youtube.com:443
+[I/tls_client] Configured perfect Android TCP stack simulation
+[I/tls_client] Using default TLS configuration for macOS/Linux
+[I/tls_client] Starting TLS handshake with www.youtube.com:443...
+[I/tls_client] TLS handshake completed successfully
+[I/tls_client] TLS version: TLSv1.3, Cipher: TLS1-3-CHACHA20-POLY1305-SHA256
+[I/http_download] HTTP request sent: 405 bytes
+[I/http_download] Request headers:
+GET /s/desktop/395dc19a/cssbin/www-main-desktop-home-page-skeleton.css HTTP/1.1
+Host: www.youtube.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8
+Accept-Language: en-US,en;q=0.9
+Accept-Encoding: identity
+Connection: close
+
+
+[I/http_download] Set socket timeout (read=60s, write=10s)
+[I/http_download] Starting to read HTTP response...
+[I/http_download] Content-Length: 4348 bytes, body timeout: 300 seconds
+[I/http_download] Finished reading response: 5024 bytes total
+[I/http_download] Received 5024 bytes response
+[I/http_download] Response start: [HTTP/1.1 200 OK..Accept-Ranges: bytes..Cross-Origin-Resource-Policy: cross-origin..Cross-Origin-Open]
+[I/http_download] HTTP status: 200
+[I/css_parser] Fetched stylesheet (4348 bytes)
+[I/css_parser] Fetching stylesheet: https://www.youtube.com/s/desktop/395dc19a/cssbin/www-onepick.css
+[I/tls_client] Loaded CA certs from C:/msys64/mingw64/etc/ssl/certs/ca-bundle.crt (0 certs)
+[I/tls_client] Connecting to www.youtube.com:443...
+[I/tls_client] TCP connected to www.youtube.com:443
+[I/tls_client] Configured perfect Android TCP stack simulation
+[I/tls_client] Using default TLS configuration for macOS/Linux
+[I/tls_client] Starting TLS handshake with www.youtube.com:443...
+[I/tls_client] TLS handshake completed successfully
+[I/tls_client] TLS version: TLSv1.3, Cipher: TLS1-3-CHACHA20-POLY1305-SHA256
+[I/http_download] HTTP request sent: 381 bytes
+[I/http_download] Request headers:
+GET /s/desktop/395dc19a/cssbin/www-onepick.css HTTP/1.1
+Host: www.youtube.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8
+Accept-Language: en-US,en;q=0.9
+Accept-Encoding: identity
+Connection: close
+
+
+[I/http_download] Set socket timeout (read=60s, write=10s)
+[I/http_download] Starting to read HTTP response...
+[I/http_download] Content-Length: 822 bytes, body timeout: 300 seconds
+[I/http_download] Finished reading response: 1497 bytes total
+[I/http_download] Received 1497 bytes response
+[I/http_download] Response start: [HTTP/1.1 200 OK..Accept-Ranges: bytes..Cross-Origin-Resource-Policy: cross-origin..Cross-Origin-Open]
+[I/http_download] HTTP status: 200
+[I/css_parser] Fetched stylesheet (822 bytes)
+[I/css_parser] Fetching stylesheet: https://www.youtube.com/s/_/ytmainappweb/_/ss/k=ytmainappweb.kevlar_base.KTHbHKS
+[I/tls_client] Loaded CA certs from C:/msys64/mingw64/etc/ssl/certs/ca-bundle.crt (0 certs)
+[I/tls_client] Connecting to www.youtube.com:443...
+[I/tls_client] TCP connected to www.youtube.com:443
+[I/tls_client] Configured perfect Android TCP stack simulation
+[I/tls_client] Using default TLS configuration for macOS/Linux
+[I/tls_client] Starting TLS handshake with www.youtube.com:443...
+[I/tls_client] TLS handshake completed successfully
+[I/tls_client] TLS version: TLSv1.3, Cipher: TLS1-3-CHACHA20-POLY1305-SHA256
+[I/http_download] HTTP request sent: 467 bytes
+[I/http_download] Request headers:
+GET /s/_/ytmainappweb/_/ss/k=ytmainappweb.kevlar_base.KTHbHKS4zWs.L.B1.O/am=AAAAAAQAQgBgDg/d=0/rs=AGKMywHZsKIX9TD5OrPm2QlVjqTPM-PYSA HTTP/1.1
+Host: www.youtube.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8
+Accept-Language: en-US,en;q=0.9
+Accept-Encoding: identity
+Connection: close
+
+
+[I/http_download] Set socket timeout (read=60s, write=10s)
+[I/http_download] Starting to read HTTP response...
+[I/http_download] Content-Length: 2822394 bytes, body timeout: 300 seconds
+[E/http_download] [DL] Received 1049246 bytes so far
+[E/http_download] [DL] Received 2100024 bytes so far
+[I/http_download] Finished reading response: 2823290 bytes total
+[I/http_download] Received 2823290 bytes response
+[I/http_download] Response start: [HTTP/1.1 200 OK..Accept-Ranges: bytes..Vary: Accept-Encoding..Content-Type: text/css; charset=UTF-8.]
+[I/http_download] HTTP status: 200
+[I/css_parser] Fetched stylesheet (2822394 bytes)
+[I/css_parser] Parsed inline <style> stylesheet with 7 rules
+[I/css_parser] Parsed inline <style> stylesheet with 27 rules
+[I/css_parser] Parsed inline <style> stylesheet with 3 rules
+[I/css_parser] Parsed inline <style> stylesheet with 5 rules
+[I/css_parser] Parsed inline <style> stylesheet with 3 rules
+[I/css_parser] Fetching stylesheet: https://www.youtube.com/s/desktop/395dc19a/cssbin/www-main-desktop-watch-page-sk
+[I/tls_client] Loaded CA certs from C:/msys64/mingw64/etc/ssl/certs/ca-bundle.crt (0 certs)
+[I/tls_client] Connecting to www.youtube.com:443...
+[I/tls_client] TCP connected to www.youtube.com:443
+[I/tls_client] Configured perfect Android TCP stack simulation
+[I/tls_client] Using default TLS configuration for macOS/Linux
+[I/tls_client] Starting TLS handshake with www.youtube.com:443...
+[I/tls_client] TLS handshake completed successfully
+[I/tls_client] TLS version: TLSv1.3, Cipher: TLS1-3-CHACHA20-POLY1305-SHA256
+[I/http_download] HTTP request sent: 406 bytes
+[I/http_download] Request headers:
+GET /s/desktop/395dc19a/cssbin/www-main-desktop-watch-page-skeleton.css HTTP/1.1
+Host: www.youtube.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8
+Accept-Language: en-US,en;q=0.9
+Accept-Encoding: identity
+Connection: close
+
+
+[I/http_download] Set socket timeout (read=60s, write=10s)
+[I/http_download] Starting to read HTTP response...
+[I/http_download] Content-Length: 8539 bytes, body timeout: 300 seconds
+[I/http_download] Finished reading response: 9215 bytes total
+[I/http_download] Received 9215 bytes response
+[I/http_download] Response start: [HTTP/1.1 200 OK..Accept-Ranges: bytes..Cross-Origin-Resource-Policy: cross-origin..Cross-Origin-Open]
+[I/http_download] HTTP status: 200
+[I/css_parser] Fetched stylesheet (8539 bytes)
+[I/css_parser] Collected 9 stylesheet(s), applying to DOM
+[js_quickjs] Document styles applied.
+[I/js_quickjs] [EXEC] Starting execution of 40 scripts
+[js_quickjs] START exec loop script_count=40
+[I/js_quickjs] Executing script 0: 796 bytes
+[I/js_quickjs] [EXEC] Executing script 0: 796 bytes
+[js_quickjs] >>> EVAL script 0/40 size=796
+[I/js_quickjs] [EXEC] Script 0 executed successfully
+[js_quickjs] <<< EVAL script 0/40 result=ok
+[I/js_quickjs] Executing script 1: 400 bytes
+[I/js_quickjs] [EXEC] Executing script 1: 400 bytes
+[js_quickjs] >>> EVAL script 1/40 size=400
+[I/js_quickjs] [EXEC] Script 1 executed successfully
+[js_quickjs] <<< EVAL script 1/40 result=ok
+[I/js_quickjs] Executing script 2: 3427 bytes
+[I/js_quickjs] [EXEC] Executing script 2: 3427 bytes
+[js_quickjs] >>> EVAL script 2/40 size=3427
+[I/js_quickjs] [EXEC] Script 2 executed successfully
+[js_quickjs] <<< EVAL script 2/40 result=ok
+[I/js_quickjs] Executing script 3: 268 bytes
+[I/js_quickjs] [EXEC] Executing script 3: 268 bytes
+[js_quickjs] >>> EVAL script 3/40 size=268
+[I/js_quickjs] [EXEC] Script 3 executed successfully
+[js_quickjs] <<< EVAL script 3/40 result=ok
+[I/js_quickjs] Executing script 4: 108 bytes
+[I/js_quickjs] [EXEC] Executing script 4: 108 bytes
+[js_quickjs] >>> EVAL script 4/40 size=108
+[I/js_quickjs] [EXEC] Script 4 executed successfully
+[js_quickjs] <<< EVAL script 4/40 result=ok
+[I/js_quickjs] Executing script 5: 2084 bytes
+[I/js_quickjs] [EXEC] Executing script 5: 2084 bytes
+[js_quickjs] >>> EVAL script 5/40 size=2084
+[I/js_quickjs] [EXEC] Script 5 executed successfully
+[js_quickjs] <<< EVAL script 5/40 result=ok
+[I/js_quickjs] Executing script 6: 50864 bytes
+[I/js_quickjs] [EXEC] Executing script 6: 50864 bytes
+[js_quickjs] >>> EVAL script 6/40 size=50864
+[I/js_quickjs] [EXEC] Script 6 executed successfully
+[js_quickjs] <<< EVAL script 6/40 result=ok
+[I/js_quickjs] Executing script 7: 5559 bytes
+[I/js_quickjs] [EXEC] Executing script 7: 5559 bytes
+[js_quickjs] >>> EVAL script 7/40 size=5559
+[I/js_quickjs] [EXEC] Script 7 executed successfully
+[js_quickjs] <<< EVAL script 7/40 result=ok
+[I/js_quickjs] Executing script 8: 56 bytes
+[I/js_quickjs] [EXEC] Executing script 8: 56 bytes
+[js_quickjs] >>> EVAL script 8/40 size=56
+[I/js_quickjs] [EXEC] Script 8 executed successfully
+[js_quickjs] <<< EVAL script 8/40 result=ok
+[I/js_quickjs] Executing script 9: 616054 bytes
+[I/js_quickjs] [EXEC] Executing script 9: 616054 bytes
+[js_quickjs] >>> EVAL script 9/40 size=616054
+[I/js_quickjs] [EXEC] Script 9 executed successfully
+[js_quickjs] <<< EVAL script 9/40 result=ok
+[I/js_quickjs] Executing script 10: 56 bytes
+[I/js_quickjs] [EXEC] Executing script 10: 56 bytes
+[js_quickjs] >>> EVAL script 10/40 size=56
+[I/js_quickjs] [EXEC] Script 10 executed successfully
+[js_quickjs] <<< EVAL script 10/40 result=ok
+[I/js_quickjs] Executing script 11: 145 bytes
+[I/js_quickjs] [EXEC] Executing script 11: 145 bytes
+[js_quickjs] >>> EVAL script 11/40 size=145
+[I/js_quickjs] [EXEC] Script 11 executed successfully
+[js_quickjs] <<< EVAL script 11/40 result=ok
+[I/js_quickjs] Executing script 12: 8757 bytes
+[I/js_quickjs] [EXEC] Executing script 12: 8757 bytes
+[js_quickjs] >>> EVAL script 12/40 size=8757
+[I/js_quickjs] [EXEC] Script 12 executed successfully
+[js_quickjs] <<< EVAL script 12/40 result=ok
+[I/js_quickjs] Executing script 13: 5794 bytes
+[I/js_quickjs] [EXEC] Executing script 13: 5794 bytes
+[js_quickjs] >>> EVAL script 13/40 size=5794
+[I/js_quickjs] [EXEC] Script 13 executed successfully
+[js_quickjs] <<< EVAL script 13/40 result=ok
+[I/js_quickjs] Executing script 14: 38138 bytes
+[I/js_quickjs] [EXEC] Executing script 14: 38138 bytes
+[js_quickjs] >>> EVAL script 14/40 size=38138
+[I/js_quickjs] [EXEC] Script 14 executed successfully
+[js_quickjs] <<< EVAL script 14/40 result=ok
+[I/js_quickjs] Executing script 15: 95 bytes
+[I/js_quickjs] [EXEC] Executing script 15: 95 bytes
+[js_quickjs] >>> EVAL script 15/40 size=95
+[I/js_quickjs] [EXEC] Script 15 executed successfully
+[js_quickjs] <<< EVAL script 15/40 result=ok
+[I/js_quickjs] Executing script 16: 14141 bytes
+[I/js_quickjs] [EXEC] Executing script 16: 14141 bytes
+[js_quickjs] >>> EVAL script 16/40 size=14141
+[I/js_quickjs] [EXEC] Script 16 executed successfully
+[js_quickjs] <<< EVAL script 16/40 result=ok
+[I/js_quickjs] Executing script 17: 55 bytes
+[I/js_quickjs] [EXEC] Executing script 17: 55 bytes
+[js_quickjs] >>> EVAL script 17/40 size=55
+[I/js_quickjs] [EXEC] Script 17 executed successfully
+[js_quickjs] <<< EVAL script 17/40 result=ok
+[I/js_quickjs] Executing script 18: 132 bytes
+[I/js_quickjs] [EXEC] Executing script 18: 132 bytes
+[js_quickjs] >>> EVAL script 18/40 size=132
+[I/js_quickjs] [EXEC] Script 18 executed successfully
+[js_quickjs] <<< EVAL script 18/40 result=ok
+[I/js_quickjs] Executing script 19: 54 bytes
+[I/js_quickjs] [EXEC] Executing script 19: 54 bytes
+[js_quickjs] >>> EVAL script 19/40 size=54
+[I/js_quickjs] [EXEC] Script 19 executed successfully
+[js_quickjs] <<< EVAL script 19/40 result=ok
+[I/js_quickjs] Executing script 20: 63 bytes
+[I/js_quickjs] [EXEC] Executing script 20: 63 bytes
+[js_quickjs] >>> EVAL script 20/40 size=63
+[I/js_quickjs] [EXEC] Script 20 executed successfully
+[js_quickjs] <<< EVAL script 20/40 result=ok
+[I/js_quickjs] Executing script 21: 54 bytes
+[I/js_quickjs] [EXEC] Executing script 21: 54 bytes
+[js_quickjs] >>> EVAL script 21/40 size=54
+[I/js_quickjs] [EXEC] Script 21 executed successfully
+[js_quickjs] <<< EVAL script 21/40 result=ok
+[I/js_quickjs] Executing script 22: 55 bytes
+[I/js_quickjs] [EXEC] Executing script 22: 55 bytes
+[js_quickjs] >>> EVAL script 22/40 size=55
+[I/js_quickjs] [EXEC] Script 22 executed successfully
+[js_quickjs] <<< EVAL script 22/40 result=ok
+[I/js_quickjs] Executing script 23: 57 bytes
+[I/js_quickjs] [EXEC] Executing script 23: 57 bytes
+[js_quickjs] >>> EVAL script 23/40 size=57
+[I/js_quickjs] [EXEC] Script 23 executed successfully
+[js_quickjs] <<< EVAL script 23/40 result=ok
+[I/js_quickjs] Executing script 24: 60 bytes
+[I/js_quickjs] [EXEC] Executing script 24: 60 bytes
+[js_quickjs] >>> EVAL script 24/40 size=60
+[I/js_quickjs] [EXEC] Script 24 executed successfully
+[js_quickjs] <<< EVAL script 24/40 result=ok
+[I/js_quickjs] Executing script 25: 57 bytes
+[I/js_quickjs] [EXEC] Executing script 25: 57 bytes
+[js_quickjs] >>> EVAL script 25/40 size=57
+[I/js_quickjs] [EXEC] Script 25 executed successfully
+[js_quickjs] <<< EVAL script 25/40 result=ok
+[I/js_quickjs] Executing script 26: 10576066 bytes
+[I/js_quickjs] [EXEC] Executing script 26: 10576066 bytes
+[js_quickjs] >>> EVAL script 26/40 size=10576066
+[I/DOMException] DOMException constructor called
+[I/customElements] define called with name='dom-module' (argc=3)
+[I/customElements] define called with name='array-selector' (argc=3)
+[I/customElements] define called with name='custom-style' (argc=3)
+[I/customElements] define called with name='dom-bind' (argc=3)
+[I/customElements] define called with name='dom-if' (argc=3)
+[I/customElements] define called with name='dom-repeat' (argc=3)
+[I/customElements] define called with name='iron-a11y-keys' (argc=3)
+[I/customElements] define called with name='iron-meta' (argc=3)
+[I/customElements] define called with name='iron-iconset-svg' (argc=3)
+[I/customElements] define called with name='iron-selector' (argc=3)
+[I/customElements] define called with name='fade-in-animation' (argc=3)
+[I/customElements] define called with name='fade-out-animation' (argc=3)
+[I/console] LegacyDataMixin will be applied to all legacy elements.
+Set `_legacyUndefinedCheck: true` on element class to enable.
+[I/customElements] define called with name='tp-yt-app-toolbar' (argc=3)
+[I/customElements] define called with name='tp-yt-iron-a11y-announcer' (argc=3)
+[I/customElements] define called with name='tp-yt-iron-autogrow-textarea' (argc=3)
+[I/customElements] define called with name='tp-yt-iron-collapse' (argc=3)
+[I/customElements] define called with name='tp-yt-iron-overlay-backdrop' (argc=3)
+[I/customElements] define called with name='tp-yt-iron-dropdown' (argc=3)
+[I/customElements] define called with name='tp-yt-iron-icon' (argc=3)
+[I/customElements] define called with name='tp-yt-iron-input' (argc=3)
+[I/customElements] define called with name='tp-yt-iron-list' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-ripple' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-button' (argc=3)
+[I/dom_api] js_element_set_inner_html called, argc=1
+[I/dom_api] js_element_set_inner_html: html=<custom-style><style is="custom-style">/* autopref
+[I/html_dom] Parsed HTML document: found no <head>, no <body>
+[I/dom_api] js_element_set_inner_html called, argc=1
+[I/dom_api] js_element_set_inner_html: html=<custom-style><style is="custom-style"></style></c
+[I/html_dom] Parsed HTML document: found no <head>, no <body>
+[I/customElements] define called with name='tp-yt-paper-dialog' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-dialog-scrollable' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-icon-button' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-icon-item' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-input-char-counter' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-input-container' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-input-error' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-input' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-item' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-item-body' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-listbox' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-menu-grow-height-animation' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-menu-grow-width-animation' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-menu-shrink-width-animation' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-menu-shrink-height-animation' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-menu-button' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-spinner' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-spinner-lite' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-tab' (argc=3)
+[I/dom_api] js_element_set_inner_html called, argc=1
+[I/dom_api] js_element_set_inner_html: html=<iron-iconset-svg name="paper-tabs" size="24">
+<sv
+[I/html_dom] Parsed HTML document: found no <head>, no <body>
+[I/customElements] define called with name='tp-yt-paper-tabs' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-textarea' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-toggle-button' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-tooltip' (argc=3)
+[I/customElements] define called with name='ps-dom-if' (argc=3)
+[I/customElements] define called with name='ps-dom-repeat' (argc=3)
+[I/customElements] define called with name='yt-image' (argc=3)
+[I/customElements] define called with name='yt-attributed-string' (argc=3)
+[I/customElements] define called with name='yt-bumper-user-edu-content-view-model' (argc=3)
+[I/customElements] define called with name='yt-countdown' (argc=3)
+[I/customElements] define called with name='yt-button-view-model' (argc=3)
+[I/customElements] define called with name='yt-button-shape' (argc=3)
+[I/customElements] define called with name='yt-creator-goal-progress-flow-view-model' (argc=3)
+[I/customElements] define called with name='yt-live-chat-item-bumper-view-model' (argc=3)
+[I/customElements] define called with name='ytd-lottie-player' (argc=3)
+[I/customElements] define called with name='yt-animated-icon' (argc=3)
+[I/customElements] define called with name='yt-icon' (argc=3)
+[I/dom_api] js_element_set_inner_html called, argc=1
+[I/dom_api] js_element_set_inner_html: html=<!--css-build:shady-->
+[I/html_dom] Parsed HTML document: found no <head>, no <body>
+[I/dom_api] js_element_set_inner_html called, argc=1
+[I/dom_api] js_element_set_inner_html: html=<!--css-build:shady-->
+[I/html_dom] Parsed HTML document: found no <head>, no <body>
+[I/dom_api] js_element_set_inner_html called, argc=1
+[I/dom_api] js_element_set_inner_html: html=<!--css-build:shady-->
+[I/html_dom] Parsed HTML document: found no <head>, no <body>
+[I/customElements] define called with name='yt-formatted-string' (argc=3)
+[I/customElements] define called with name='yt-interaction' (argc=3)
+[I/customElements] define called with name='yt-icon-button' (argc=3)
+[I/dom_api] js_element_set_inner_html called, argc=1
+[I/dom_api] js_element_set_inner_html: html=<!--css-build:shady--><svg style="position: absolu
+[I/html_dom] Parsed HTML document: found no <head>, no <body>
+[I/customElements] define called with name='yt-button-renderer' (argc=3)
+[I/customElements] define called with name='ytd-button-renderer' (argc=3)
+[I/dom_api] js_element_set_inner_html called, argc=1
+[I/dom_api] js_element_set_inner_html: html=<!--css-build:shady-->
+[I/html_dom] Parsed HTML document: found no <head>, no <body>
+[I/dom_api] js_element_set_inner_html called, argc=1
+[I/dom_api] js_element_set_inner_html: html=<!--css-build:shady-->
+[I/html_dom] Parsed HTML document: found no <head>, no <body>
+[I/dom_api] js_element_set_inner_html called, argc=1
+[I/dom_api] js_element_set_inner_html: html=<!--css-build:shady-->
+[I/html_dom] Parsed HTML document: found no <head>, no <body>
+[I/customElements] define called with name='yt-img-shadow' (argc=3)
+[I/customElements] define called with name='yt-toggle-button-view-model' (argc=3)
+[I/customElements] define called with name='yt-live-chat-like-button-view-model' (argc=3)
+[I/customElements] define called with name='yt-live-chat-paid-message-footer-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-reply-button-view-model' (argc=3)
+[I/customElements] define called with name='yt-live-chat-author-badge-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-author-chip' (argc=3)
+[I/customElements] define called with name='yt-live-chat-creator-heart-view-model' (argc=3)
+[I/customElements] define called with name='yt-live-chat-text-input-field-suggestion' (argc=3)
+[I/customElements] define called with name='yt-live-chat-participants-manager' (argc=3)
+[I/customElements] define called with name='yt-live-chat-text-input-field-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-paid-message-renderer' (argc=3)
+[I/dom_api] js_element_set_inner_html called, argc=1
+[I/dom_api] js_element_set_inner_html: html=<!--css-build:shady-->
+[I/html_dom] Parsed HTML document: found no <head>, no <body>
+[I/customElements] define called with name='yt-live-chat-paid-sticker-renderer' (argc=3)
+[I/dom_api] js_element_set_inner_html called, argc=1
+[I/dom_api] js_element_set_inner_html: html=<!--css-build:shady-->
+[I/html_dom] Parsed HTML document: found no <head>, no <body>
+[I/dom_api] js_element_set_inner_html called, argc=1
+[I/dom_api] js_element_set_inner_html: html=<!--css-build:shady-->
+[I/html_dom] Parsed HTML document: found no <head>, no <body>
+[I/customElements] define called with name='yt-emoji-multi-person-selector' (argc=3)
+[I/customElements] define called with name='yt-emoji-picker-category-button-renderer' (argc=3)
+[I/customElements] define called with name='yt-emoji-picker-category-renderer' (argc=3)
+[I/customElements] define called with name='yt-emoji-picker-upsell-category-renderer' (argc=3)
+[I/customElements] define called with name='yt-emoji-variant-selector' (argc=3)
+[I/customElements] define called with name='yt-emoji-picker-renderer' (argc=3)
+[I/customElements] define called with name='yt-emoji-customization-panel-view-model' (argc=3)
+[I/customElements] define called with name='yt-live-chat-text-message-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-auto-mod-message-renderer' (argc=3)
+[I/customElements] define called with name='factoid-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-channel-activity-reputation-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-donation-announcement-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-empty-feed-view-model' (argc=3)
+[I/customElements] define called with name='yt-live-chat-identity-view-model' (argc=3)
+[I/customElements] define called with name='yt-live-chat-legacy-paid-message-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-membership-item-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-mode-change-message-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-moderation-message-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-placeholder-item-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-server-error-message' (argc=3)
+[I/customElements] define called with name='yt-live-chat-viewer-engagement-message-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sponsorships-live-chat-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sponsorships-live-chat-gift-purchase-announcement-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sponsorships-live-chat-gift-redemption-announcement-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-item-display-list-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-item-display-renderer' (argc=3)
+[I/customElements] define called with name='ytw-player-with-controls' (argc=3)
+[I/customElements] define called with name='ytd-player' (argc=3)
+[I/customElements] define called with name='ytd-account-link-button-renderer' (argc=3)
+[I/customElements] define called with name='ytd-playlist-loop-button-renderer' (argc=3)
+[I/customElements] define called with name='ytd-download-button-renderer' (argc=3)
+[I/customElements] define called with name='ytd-toggle-button-renderer' (argc=3)
+[I/customElements] define called with name='yt-smartimation' (argc=3)
+[I/customElements] define called with name='ytd-segmented-like-dislike-button-renderer' (argc=3)
+[I/customElements] define called with name='yt-flexible-actions-view-model' (argc=3)
+[I/customElements] define called with name='segmented-like-dislike-button-view-model' (argc=3)
+[I/customElements] define called with name='account-link-button-view-model' (argc=3)
+[I/customElements] define called with name='ytd-menu-renderer' (argc=3)
+[I/customElements] define called with name='badge-shape' (argc=3)
+[I/customElements] define called with name='yt-badge-supported-renderer' (argc=3)
+[I/customElements] define called with name='ytd-badge-supported-renderer' (argc=3)
+[I/customElements] define called with name='ytd-display-ad-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-name' (argc=3)
+[I/customElements] define called with name='ytd-author-comment-badge-renderer' (argc=3)
+[I/customElements] define called with name='ytd-backstage-image-renderer' (argc=3)
+[I/customElements] define called with name='ytd-backstage-poll-renderer' (argc=3)
+[I/customElements] define called with name='ytd-backstage-quiz-renderer' (argc=3)
+[I/customElements] define called with name='ytd-post-uploaded-video-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sponsors-only-badge-renderer' (argc=3)
+[I/customElements] define called with name='ytd-child-video-renderer' (argc=3)
+[I/customElements] define called with name='ytd-playlist-custom-thumbnail-renderer' (argc=3)
+[I/customElements] define called with name='ytd-playlist-video-thumbnail-renderer' (argc=3)
+[I/customElements] define called with name='ytd-show-custom-thumbnail-renderer' (argc=3)
+[I/customElements] define called with name='ytd-thumbnail-overlay-bottom-panel-renderer' (argc=3)
+[I/customElements] define called with name='ytd-thumbnail-overlay-downloading-renderer' (argc=3)
+[I/customElements] define called with name='ytd-thumbnail-overlay-hover-text-renderer' (argc=3)
+[I/customElements] define called with name='ytd-thumbnail-overlay-equalizer' (argc=3)
+[I/customElements] define called with name='ytd-thumbnail-overlay-now-playing-renderer' (argc=3)
+[I/customElements] define called with name='ytd-thumbnail-overlay-playback-status-renderer' (argc=3)
+[I/customElements] define called with name='ytd-thumbnail-overlay-resume-playback-renderer' (argc=3)
+[I/customElements] define called with name='ytd-thumbnail-overlay-side-panel-renderer' (argc=3)
+[I/customElements] define called with name='ytd-thumbnail-overlay-time-status-renderer' (argc=3)
+[I/customElements] define called with name='ytd-tvfilm-show-watch-forward-overlay-renderer' (argc=3)
+[I/customElements] define called with name='yt-collections-stack' (argc=3)
+[I/customElements] define called with name='ytd-playlist-thumbnail' (argc=3)
+[I/customElements] define called with name='yt-text-view-model' (argc=3)
+[I/customElements] define called with name='ytd-video-meta-block' (argc=3)
+[I/customElements] define called with name='ytd-playlist-renderer' (argc=3)
+[I/customElements] define called with name='ytd-search-refinement-card-renderer' (argc=3)
+[I/customElements] define called with name='ytd-game-details-renderer' (argc=3)
+[I/customElements] define called with name='ytd-subscription-notification-toggle-button-renderer' (argc=3)
+[I/customElements] define called with name='ytd-subscription-notification-toggle-button-renderer-next' (argc=3)
+[I/customElements] define called with name='yt-animated-action' (argc=3)
+[I/customElements] define called with name='ytd-subscribe-button-renderer' (argc=3)
+[I/customElements] define called with name='ytd-game-card-renderer' (argc=3)
+[I/customElements] define called with name='ytd-notification-multi-action-renderer' (argc=3)
+[I/customElements] define called with name='ytd-notification-text-renderer' (argc=3)
+[I/customElements] define called with name='ytd-moving-thumbnail-renderer' (argc=3)
+[I/customElements] define called with name='ytd-thumbnail-overlay-button-renderer' (argc=3)
+[I/customElements] define called with name='ytd-thumbnail-overlay-endorsement-renderer' (argc=3)
+[I/customElements] define called with name='ytd-thumbnail-overlay-icon-renderer' (argc=3)
+[I/customElements] define called with name='ytd-thumbnail-overlay-inline-unplayable-renderer' (argc=3)
+[I/customElements] define called with name='ytd-thumbnail-overlay-loading-preview-renderer' (argc=3)
+[I/customElements] define called with name='ytd-thumbnail-overlay-pinking-renderer' (argc=3)
+[I/customElements] define called with name='ytd-thumbnail-overlay-toggle-button-renderer' (argc=3)
+[I/customElements] define called with name='yt-thumbnail-bottom-overlay-view-model' (argc=3)
+[I/customElements] define called with name='thumbnail-overlay-avatar-stack-view-model' (argc=3)
+[I/customElements] define called with name='yt-thumbnail-overlay-title-view-model' (argc=3)
+[I/customElements] define called with name='yt-thumbnail-overlay-badge-view-model' (argc=3)
+[I/customElements] define called with name='yt-page-indicator-view-model' (argc=3)
+[I/customElements] define called with name='ytd-thumbnail' (argc=3)
+[I/customElements] define called with name='ytd-grid-video-renderer' (argc=3)
+[I/customElements] define called with name='ytd-info-panel-content-renderer' (argc=3)
+[I/customElements] define called with name='yt-channel-thumbnail-with-link-renderer' (argc=3)
+[I/customElements] define called with name='ytd-rich-list-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-preview-card-renderer' (argc=3)
+[I/customElements] define called with name='ytd-compact-channel-recommendation-card-renderer' (argc=3)
+[I/customElements] define called with name='ytd-expander' (argc=3)
+[I/customElements] define called with name='ytd-media-upsell-renderer' (argc=3)
+[I/customElements] define called with name='ytd-macro-markers-list-item-renderer' (argc=3)
+[I/customElements] define called with name='ytd-title-and-button-list-header-renderer' (argc=3)
+[I/customElements] define called with name='mini-game-card-view-model' (argc=3)
+[I/customElements] define called with name='dismissed-mini-game-card-view-model' (argc=3)
+[I/customElements] define called with name='ytd-mini-game-card-view-model' (argc=3)
+[I/customElements] define called with name='yt-reload-continuation' (argc=3)
+[I/customElements] define called with name='yt-dropdown-menu' (argc=3)
+[I/customElements] define called with name='yt-sort-filter-sub-menu-renderer' (argc=3)
+[I/customElements] define called with name='place-data-view-model' (argc=3)
+[I/customElements] define called with name='yt-lockup-view-model' (argc=3)
+[I/customElements] define called with name='yt-video-attribute-view-model' (argc=3)
+[I/customElements] define called with name='ytd-horizontal-card-list-renderer' (argc=3)
+[I/customElements] define called with name='video-summary-content-view-model' (argc=3)
+[I/customElements] define called with name='ytd-expandable-metadata-renderer' (argc=3)
+[I/customElements] define called with name='yt-avatar-stack-view-model' (argc=3)
+[I/customElements] define called with name='ytd-video-renderer' (argc=3)
+[I/customElements] define called with name='ytd-post-renderer' (argc=3)
+[I/customElements] define called with name='ytd-post-multi-image-renderer' (argc=3)
+[I/customElements] define called with name='ytd-backstage-post-renderer' (argc=3)
+[I/customElements] define called with name='ytd-shared-post-renderer' (argc=3)
+[I/customElements] define called with name='ytd-reload-page-button-renderer' (argc=3)
+[I/customElements] define called with name='ytd-background-promo-renderer' (argc=3)
+[I/customElements] define called with name='ytd-compact-station-renderer' (argc=3)
+[I/customElements] define called with name='ytd-grid-channel-renderer' (argc=3)
+[I/customElements] define called with name='ytd-grid-movie-playlist-renderer' (argc=3)
+[I/customElements] define called with name='ytd-grid-playlist-renderer' (argc=3)
+[I/customElements] define called with name='ytd-grid-radio-renderer' (argc=3)
+[I/customElements] define called with name='ytd-grid-show-renderer' (argc=3)
+[I/customElements] define called with name='ytd-shopping-companion-item-renderer' (argc=3)
+[I/customElements] define called with name='ytd-vertical-product-card-renderer' (argc=3)
+[I/customElements] define called with name='ytd-grid-movie-renderer' (argc=3)
+[I/customElements] define called with name='ytd-merch-shelf-item-renderer' (argc=3)
+[I/customElements] define called with name='button-card-view-model' (argc=3)
+[I/customElements] define called with name='ytd-shopping-item-card' (argc=3)
+[I/customElements] define called with name='ytm-shorts-lockup-view-model-v2' (argc=3)
+[I/customElements] define called with name='yt-sponsorships-channel-upsell-view-model' (argc=3)
+[I/customElements] define called with name='yt-horizontal-list-renderer' (argc=3)
+[I/customElements] define called with name='yt-dynamic-sizing-formatted-string' (argc=3)
+[I/customElements] define called with name='ytd-account-item-renderer' (argc=3)
+[I/customElements] define called with name='ytd-identity-chip-renderer' (argc=3)
+[I/customElements] define called with name='ytd-ghost-grid-renderer' (argc=3)
+[I/customElements] define called with name='yt-ghost-comments' (argc=3)
+[I/customElements] define called with name='ytd-continuation-item-renderer' (argc=3)
+[I/customElements] define called with name='yt-next-continuation' (argc=3)
+[I/customElements] define called with name='yt-music-pass-small-feature-info-renderer' (argc=3)
+[I/customElements] define called with name='ytd-grid-renderer' (argc=3)
+[I/customElements] define called with name='ytd-carousel-ad-renderer' (argc=3)
+[I/customElements] define called with name='ytd-promoted-sparkles-text-search-renderer' (argc=3)
+[I/customElements] define called with name='ytd-promoted-sparkles-web-renderer' (argc=3)
+[I/customElements] define called with name='ytd-promoted-video-renderer' (argc=3)
+[I/customElements] define called with name='ytd-text-image-no-button-layout-renderer' (argc=3)
+[I/customElements] define called with name='ytd-ad-inline-playback-meta-block' (argc=3)
+[I/customElements] define called with name='ytd-video-display-full-buttoned-and-button-group-renderer' (argc=3)
+[I/customElements] define called with name='ytd-video-display-full-buttoned-renderer' (argc=3)
+[I/customElements] define called with name='compact-landscape-no-button-layout-view-model' (argc=3)
+[I/customElements] define called with name='square-image-layout-view-model' (argc=3)
+[I/customElements] define called with name='top-landscape-image-layout-view-model' (argc=3)
+[I/customElements] define called with name='text-image-no-button-layout-view-model' (argc=3)
+[I/customElements] define called with name='video-display-button-group-layout-view-model' (argc=3)
+[I/customElements] define called with name='video-display-compact-button-group-layout-view-model' (argc=3)
+[I/customElements] define called with name='video-display-compact-buttoned-layout-view-model' (argc=3)
+[I/customElements] define called with name='video-display-compact-carousel-button-group-layout-view-model' (argc=3)
+[I/customElements] define called with name='video-display-compact-layout-view-model' (argc=3)
+[I/customElements] define called with name='video-display-full-buttoned-layout-view-model' (argc=3)
+[I/customElements] define called with name='video-display-full-layout-view-model' (argc=3)
+[I/customElements] define called with name='reels-player-overlay-layout-view-model' (argc=3)
+[I/customElements] define called with name='ytd-in-feed-ad-layout-renderer' (argc=3)
+[I/customElements] define called with name='ad-badge-view-model' (argc=3)
+[I/customElements] define called with name='ad-button-view-model' (argc=3)
+[I/customElements] define called with name='ytd-video-masthead-ad-advertiser-info-renderer' (argc=3)
+[I/customElements] define called with name='ytd-video-masthead-ad-expandable-thumbnail-tile-renderer' (argc=3)
+[I/customElements] define called with name='ytd-video-masthead-ad-expandable-video-tile-renderer' (argc=3)
+[I/customElements] define called with name='ytd-video-masthead-ad-primary-video-overlay-renderer' (argc=3)
+[I/customElements] define called with name='ytd-video-masthead-ad-primary-video-renderer' (argc=3)
+[I/customElements] define called with name='ytd-video-masthead-ad-v3-renderer' (argc=3)
+[I/customElements] define called with name='ytd-page-top-ad-layout-renderer' (argc=3)
+[I/customElements] define called with name='ytd-ad-slot-renderer' (argc=3)
+[I/customElements] define called with name='ytd-compact-promoted-video-renderer' (argc=3)
+[I/customElements] define called with name='ytd-search-pyv-renderer' (argc=3)
+[I/customElements] define called with name='ytd-backstage-post-thread-renderer' (argc=3)
+[I/customElements] define called with name='ytd-backstage-prefilled-post-dialog-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-backstage-zero-state-renderer' (argc=3)
+[I/customElements] define called with name='ytd-post-filter-zero-state-renderer' (argc=3)
+[I/customElements] define called with name='ytd-post-scheduling-zero-state-renderer' (argc=3)
+[I/customElements] define called with name='ytd-post-stream-filter-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-age-gate-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-owner-empty-state-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-switcher-search-box-renderer' (argc=3)
+[I/customElements] define called with name='ytd-search-box-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-switcher-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-alert-with-button-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-switcher-page-renderer' (argc=3)
+[I/customElements] define called with name='ytd-backstage-image-preview-renderer' (argc=3)
+[I/customElements] define called with name='ytd-backstage-multi-image-thumbnail-renderer' (argc=3)
+[I/customElements] define called with name='ytd-backstage-multi-image-reposition-renderer' (argc=3)
+[I/customElements] define called with name='ytd-backstage-image-poll-editor-renderer' (argc=3)
+[I/customElements] define called with name='yt-img-crop-picker' (argc=3)
+[I/customElements] define called with name='ytd-backstage-image-select-renderer' (argc=3)
+[I/customElements] define called with name='ytd-backstage-multi-image-select-renderer' (argc=3)
+[I/customElements] define called with name='ytd-privacy-dropdown-item-renderer' (argc=3)
+[I/customElements] define called with name='ytd-flat-dropdown-renderer' (argc=3)
+[I/customElements] define called with name='ytd-backstage-quiz-editor-renderer' (argc=3)
+[I/customElements] define called with name='ytd-emoji-suggestion' (argc=3)
+[I/customElements] define called with name='ytd-emoji-input' (argc=3)
+[I/customElements] define called with name='yt-user-mention-suggestion-renderer' (argc=3)
+[I/customElements] define called with name='yt-user-mention-suggestions-dropdown' (argc=3)
+[I/customElements] define called with name='yt-user-mention-autosuggest-input' (argc=3)
+[I/customElements] define called with name='yt-posts-creation-options-editor-view-model' (argc=3)
+[I/customElements] define called with name='ytd-commentbox' (argc=3)
+[I/customElements] define called with name='ytd-backstage-post-dialog-renderer' (argc=3)
+[I/customElements] define called with name='ytd-creator-heart-renderer' (argc=3)
+[I/customElements] define called with name='ytd-comment-action-buttons-renderer' (argc=3)
+[I/customElements] define called with name='ytd-comment-dialog-renderer' (argc=3)
+[I/customElements] define called with name='ytd-comment-engagement-bar' (argc=3)
+[I/customElements] define called with name='ytd-comment-inline-thumbnail-renderer' (argc=3)
+[I/customElements] define called with name='ytd-comment-pause-composer-renderer' (argc=3)
+[I/customElements] define called with name='ytd-comment-reply-dialog-renderer' (argc=3)
+[I/customElements] define called with name='ytd-pinned-comment-badge-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sponsor-comment-badge-renderer' (argc=3)
+[I/customElements] define called with name='ytd-tri-state-button-view-model' (argc=3)
+[I/customElements] define called with name='yt-pdg-comment-chip-renderer' (argc=3)
+[I/customElements] define called with name='ytd-comment-view-model' (argc=3)
+[I/customElements] define called with name='yt-sub-thread' (argc=3)
+[I/customElements] define called with name='ytd-comment-replies-renderer' (argc=3)
+[I/customElements] define called with name='ytd-comment-simplebox-renderer' (argc=3)
+[I/customElements] define called with name='ytd-comment-thread-renderer' (argc=3)
+[I/customElements] define called with name='ytd-comments-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-destination-button-renderer' (argc=3)
+[I/customElements] define called with name='ytd-destination-shelf-renderer' (argc=3)
+[I/customElements] define called with name='ytd-rating-survey-option-renderer' (argc=3)
+[I/customElements] define called with name='ytd-rating-survey-renderer' (argc=3)
+[I/customElements] define called with name='ytd-scrollable-calendar' (argc=3)
+[I/customElements] define called with name='yt-text-input-form-field-renderer' (argc=3)
+[I/customElements] define called with name='ytd-date-period-picker-renderer' (argc=3)
+[I/customElements] define called with name='ytd-report-history-section-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-report-history-table-text-cell-renderer' (argc=3)
+[I/customElements] define called with name='ytd-report-history-table-reason-cell-renderer' (argc=3)
+[I/customElements] define called with name='ytd-report-history-table-cell-renderer' (argc=3)
+[I/customElements] define called with name='ytd-report-history-table-row-renderer' (argc=3)
+[I/customElements] define called with name='ytd-table-renderer' (argc=3)
+[I/customElements] define called with name='ytd-report-reason-history-modal-renderer' (argc=3)
+[I/customElements] define called with name='ytd-profile-column-stats-entry-renderer' (argc=3)
+[I/customElements] define called with name='ytd-profile-column-stats-renderer' (argc=3)
+[I/customElements] define called with name='ytd-profile-column-user-info-renderer' (argc=3)
+[I/customElements] define called with name='ytd-profile-column-renderer' (argc=3)
+[I/customElements] define called with name='ytd-page-introduction-renderer' (argc=3)
+[I/customElements] define called with name='ytd-report-description-renderer' (argc=3)
+[I/customElements] define called with name='ytd-video-report-renderer' (argc=3)
+[I/customElements] define called with name='ytd-message-renderer' (argc=3)
+[I/customElements] define called with name='ytd-report-history-section-renderer' (argc=3)
+[I/customElements] define called with name='ytd-handles-claiming-faq-renderer' (argc=3)
+[I/customElements] define called with name='ytd-handles-claiming-faq-section-renderer' (argc=3)
+[I/customElements] define called with name='ytd-handles-claiming-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-handles-claiming-title-images-section-renderer' (argc=3)
+[I/customElements] define called with name='ytd-handles-claiming-update-social-renderer' (argc=3)
+[I/customElements] define called with name='ytd-handles-claiming-vanity-info-renderer' (argc=3)
+[I/customElements] define called with name='ytd-handles-claiming-video-item-renderer' (argc=3)
+[I/customElements] define called with name='chip-shape' (argc=3)
+[I/customElements] define called with name='yt-chip-cloud-chip-renderer' (argc=3)
+[I/customElements] define called with name='ytd-feed-customization-form-view-model' (argc=3)
+[I/customElements] define called with name='yt-chip-content-loader-view-model' (argc=3)
+[I/customElements] define called with name='ytd-feed-filter-chip-bar-renderer' (argc=3)
+[I/customElements] define called with name='yt-nudge-form-view-model' (argc=3)
+[I/customElements] define called with name='ytd-feed-nudge-renderer' (argc=3)
+[I/customElements] define called with name='ytd-slimline-survey-renderer' (argc=3)
+[I/customElements] define called with name='ytd-endorsement-header-renderer' (argc=3)
+[I/customElements] define called with name='yt-decorated-avatar-view-model' (argc=3)
+[I/customElements] define called with name='ytd-rich-grid-media' (argc=3)
+[I/customElements] define called with name='ytd-rich-grid-slim-media' (argc=3)
+[I/customElements] define called with name='ytd-expand-on-hover-card-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-renderer' (argc=3)
+[I/customElements] define called with name='ytd-radio-renderer' (argc=3)
+[I/customElements] define called with name='ytd-show-renderer' (argc=3)
+[I/customElements] define called with name='ytd-feed-entry-renderer' (argc=3)
+[I/customElements] define called with name='ytd-link-card-renderer' (argc=3)
+[I/customElements] define called with name='ytd-lumiere-promo-item-image-renderer' (argc=3)
+[I/customElements] define called with name='ytd-lumiere-shelf-details-renderer' (argc=3)
+[I/customElements] define called with name='teaser-card-view-model' (argc=3)
+[I/customElements] define called with name='yt-edu-card-view-model' (argc=3)
+[I/customElements] define called with name='yt-feedback-item-renderer' (argc=3)
+[I/customElements] define called with name='ytd-rich-item-renderer' (argc=3)
+[I/customElements] define called with name='ytd-rich-shelf-renderer' (argc=3)
+[I/customElements] define called with name='yt-thumbnail-view-model' (argc=3)
+[I/customElements] define called with name='yt-badge-view-model' (argc=3)
+[I/customElements] define called with name='yt-slimline-survey-view-model' (argc=3)
+[I/customElements] define called with name='ytd-statement-banner-renderer' (argc=3)
+[I/customElements] define called with name='ytd-reel-shelf-renderer' (argc=3)
+[I/customElements] define called with name='yt-channel-external-link-view-model' (argc=3)
+[I/customElements] define called with name='ytd-about-channel-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-list-sub-menu-avatar-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-list-sub-menu-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-sub-menu-renderer' (argc=3)
+[I/customElements] define called with name='ytd-media-lockup-renderer' (argc=3)
+[I/customElements] define called with name='ytd-structured-description-channel-lockup-renderer' (argc=3)
+[I/customElements] define called with name='ytd-structured-description-playlist-lockup-renderer' (argc=3)
+[I/customElements] define called with name='ytd-structured-description-video-lockup-renderer' (argc=3)
+[I/customElements] define called with name='ytd-compact-infocard-renderer' (argc=3)
+[I/customElements] define called with name='ytd-compact-playlist-renderer' (argc=3)
+[I/customElements] define called with name='ytd-compact-promoted-item-renderer' (argc=3)
+[I/customElements] define called with name='ytd-compact-radio-renderer' (argc=3)
+[I/customElements] define called with name='ytd-compact-text-promo-renderer' (argc=3)
+[I/customElements] define called with name='ytd-compact-video-renderer' (argc=3)
+[I/customElements] define called with name='ytd-counterfactual-renderer' (argc=3)
+[I/customElements] define called with name='ytd-single-action-emergency-support-renderer' (argc=3)
+[I/customElements] define called with name='ytd-emergency-onebox-renderer' (argc=3)
+[I/customElements] define called with name='ytd-expanded-shelf-contents-renderer' (argc=3)
+[I/customElements] define called with name='ytd-feed-channel-filter-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-medical-panel-section-renderer' (argc=3)
+[I/customElements] define called with name='ytd-medical-panel-content-renderer' (argc=3)
+[I/customElements] define called with name='ytd-info-panel-container-renderer' (argc=3)
+[I/customElements] define called with name='ytd-item-section-header-renderer' (argc=3)
+[I/customElements] define called with name='engagement-bar-view-model' (argc=3)
+[I/customElements] define called with name='ytd-playlist-video-renderer' (argc=3)
+[I/customElements] define called with name='ytd-premium-browse-footer-renderer' (argc=3)
+[I/customElements] define called with name='ytd-recognition-shelf-renderer' (argc=3)
+[I/customElements] define called with name='yt-card-view-model' (argc=3)
+[I/customElements] define called with name='ytd-vertical-list-renderer' (argc=3)
+[I/customElements] define called with name='ytd-shelf-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sort-filter-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-video-description-infocards-section-renderer' (argc=3)
+[I/customElements] define called with name='ytd-eom-settings-disclaimer-renderer' (argc=3)
+[I/customElements] define called with name='ytd-product-list-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-hashtag-tile-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sponsorships-alert-renderer' (argc=3)
+[I/customElements] define called with name='ytd-compact-movie-renderer' (argc=3)
+[I/customElements] define called with name='ytd-text-inline-expander' (argc=3)
+[I/customElements] define called with name='ytd-expandable-video-description-body-renderer' (argc=3)
+[I/customElements] define called with name='upload-time-factoid-renderer' (argc=3)
+[I/customElements] define called with name='view-count-factoid-renderer' (argc=3)
+[I/customElements] define called with name='ytd-video-description-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-list-item-view-model' (argc=3)
+[I/customElements] define called with name='yt-copy-link-renderer' (argc=3)
+[I/customElements] define called with name='yt-toggle-form-field-renderer' (argc=3)
+[I/customElements] define called with name='yt-chip-cloud-renderer' (argc=3)
+[I/customElements] define called with name='yt-related-chip-cloud-renderer' (argc=3)
+[I/dom_api] js_element_set_inner_html called, argc=1
+[I/dom_api] js_element_set_inner_html: html=
+[I/customElements] define called with name='yt-section-group-view-model' (argc=3)
+[I/customElements] define called with name='chip-bar-view-model' (argc=3)
+[I/customElements] define called with name='divider-view-model' (argc=3)
+[I/customElements] define called with name='grid-shelf-view-model' (argc=3)
+[I/customElements] define called with name='horizontal-shelf-view-model' (argc=3)
+[I/customElements] define called with name='yt-section-header-view-model' (argc=3)
+[I/customElements] define called with name='yt-alert-banner-view-model' (argc=3)
+[I/customElements] define called with name='yt-linear-layout-view-model' (argc=3)
+[I/customElements] define called with name='chips-shelf-view-model' (argc=3)
+[I/customElements] define called with name='yt-comment-filter-context-view-model' (argc=3)
+[I/customElements] define called with name='yt-course-perks-view-model' (argc=3)
+[I/customElements] define called with name='yt-course-progress-view-model' (argc=3)
+[I/customElements] define called with name='yt-course-ratings-view-model' (argc=3)
+[I/customElements] define called with name='yt-learning-journey-loader-view-model' (argc=3)
+[I/customElements] define called with name='learning-journey-quiz-view-model' (argc=3)
+[I/customElements] define called with name='yt-accordion-view-model' (argc=3)
+[I/customElements] define called with name='yt-learning-journey-zero-state' (argc=3)
+[I/customElements] define called with name='ytvl-live-leaderboard-item-view-model' (argc=3)
+[I/customElements] define called with name='ytvl-live-viewer-leaderboard-item-view-model' (argc=3)
+[I/customElements] define called with name='yt-qr-code-renderer' (argc=3)
+[I/customElements] define called with name='yt-video-overview-view-model' (argc=3)
+[I/customElements] define called with name='yt-official-card-view-model' (argc=3)
+[I/customElements] define called with name='ytw-search-friction-view-model' (argc=3)
+[I/customElements] define called with name='yt-sponsorships-destination-hub-header-view-model' (argc=3)
+[I/customElements] define called with name='macro-markers-panel-item-view-model' (argc=3)
+[I/customElements] define called with name='yt-video-attributes-section-view-model' (argc=3)
+[I/customElements] define called with name='fantasy-league-summary-view-model' (argc=3)
+[I/customElements] define called with name='ytw-fantasy-matchup-view-model' (argc=3)
+[I/customElements] define called with name='ytw-fantasy-weekly-matchup-summary-view-model' (argc=3)
+[I/customElements] define called with name='fantasy-win-probability-view-model' (argc=3)
+[I/customElements] define called with name='ytd-backstage-locked-post-view-model' (argc=3)
+[I/customElements] define called with name='ytd-item-section-renderer' (argc=3)
+[I/customElements] define called with name='ytd-search-filter-renderer' (argc=3)
+[I/customElements] define called with name='ytd-search-filter-group-renderer' (argc=3)
+[I/customElements] define called with name='ytd-search-sub-menu-renderer' (argc=3)
+[I/customElements] define called with name='ytd-text-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-minor-moment-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-minor-moment-setting-alert-renderer' (argc=3)
+[I/customElements] define called with name='ytd-settings-switch-renderer' (argc=3)
+[I/customElements] define called with name='ytd-minor-moment-setting-section-renderer' (argc=3)
+[I/customElements] define called with name='ytd-empty-product-details-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sponsorships-loyalty-badges-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sponsorships-perk-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sponsorships-perks-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sponsorships-expandable-perks-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sponsorships-actionable-message-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sponsorships-expandable-message-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sponsorships-heading-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sponsorships-links-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sponsorships-list-tile-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sponsorships-promotion-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sponsorships-purchase-option-renderer' (argc=3)
+[I/customElements] define called with name='ytd-ypc-offer-promo-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sponsorships-tier-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sponsorships-management-renderer' (argc=3)
+[I/customElements] define called with name='ytd-open-in-native-app-view-model' (argc=3)
+[I/customElements] define called with name='ytd-empty-product-shelf-renderer' (argc=3)
+[I/customElements] define called with name='ytd-merch-shelf-renderer' (argc=3)
+[I/customElements] define called with name='ytd-backstage-items' (argc=3)
+[I/customElements] define called with name='ytd-comments' (argc=3)
+[I/customElements] define called with name='yt-themed-image-renderer' (argc=3)
+[I/customElements] define called with name='yt-header-with-back-renderer' (argc=3)
+[I/customElements] define called with name='yt-iframe-renderer' (argc=3)
+[I/customElements] define called with name='mini-app-container-view-model' (argc=3)
+[I/customElements] define called with name='yt-sponsorships-hub' (argc=3)
+[I/customElements] define called with name='yt-sponsorships-perks-list' (argc=3)
+[I/customElements] define called with name='ytw-fantasy-empty-state-view-model' (argc=3)
+[I/customElements] define called with name='timed-animation-button-renderer' (argc=3)
+[I/customElements] define called with name='ytd-video-owner-renderer' (argc=3)
+[I/customElements] define called with name='mini-app-play-page-renderer' (argc=3)
+[I/customElements] define called with name='ytd-section-list-renderer' (argc=3)
+[I/customElements] define called with name='ytd-slim-metadata-toggle-button-renderer' (argc=3)
+[I/customElements] define called with name='ytd-playlist-panel-video-renderer' (argc=3)
+[I/customElements] define called with name='ytd-playlist-panel-supported-items' (argc=3)
+[I/customElements] define called with name='ytd-playlist-panel-renderer' (argc=3)
+[I/customElements] define called with name='ytd-calendar-date-picker' (argc=3)
+[I/customElements] define called with name='ytd-date-time-picker-renderer' (argc=3)
+[I/customElements] define called with name='ytd-backstage-dismissable-attachment' (argc=3)
+[I/customElements] define called with name='ytd-backstage-video-link-attachment' (argc=3)
+[I/customElements] define called with name='ytd-poll-attachment' (argc=3)
+[I/customElements] define called with name='yt-interstitial-view-model' (argc=3)
+[I/customElements] define called with name='yt-player-error-message-renderer' (argc=3)
+[I/customElements] define called with name='yt-player-kav-renderer' (argc=3)
+[I/customElements] define called with name='yt-player-captcha-view-model' (argc=3)
+[I/customElements] define called with name='yt-player-interstitial-renderer' (argc=3)
+[I/customElements] define called with name='yt-playability-error-supported-renderers' (argc=3)
+[I/customElements] define called with name='iron-media-query' (argc=3)
+[I/customElements] define called with name='tp-yt-app-drawer' (argc=3)
+[I/customElements] define called with name='tp-yt-app-header' (argc=3)
+[I/customElements] define called with name='tp-yt-app-header-layout' (argc=3)
+[I/dom_api] js_element_set_inner_html called, argc=1
+[I/dom_api] js_element_set_inner_html: html=<iron-iconset-svg name="icons" size="24">
+<svg><de
+[I/html_dom] Parsed HTML document: found no <head>, no <body>
+[I/customElements] define called with name='tp-yt-iron-image' (argc=3)
+[I/customElements] define called with name='tp-yt-iron-pages' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-card' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-checkbox' (argc=3)
+[I/dom_api] js_element_set_inner_html called, argc=1
+[I/dom_api] js_element_set_inner_html: html=<iron-iconset-svg name="paper-dropdown-menu" size=
+[I/html_dom] Parsed HTML document: found no <head>, no <body>
+[I/customElements] define called with name='tp-yt-paper-dropdown-menu' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-dropdown-menu-light' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-material' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-progress' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-radio-button' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-radio-group' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-slider' (argc=3)
+[I/customElements] define called with name='tp-yt-paper-toast' (argc=3)
+[I/customElements] define called with name='yt-creator-goal-set-up-flow-view-model' (argc=3)
+[I/customElements] define called with name='yt-disableable-button-view-model' (argc=3)
+[I/customElements] define called with name='yt-emoji-fountain-view-model' (argc=3)
+[I/customElements] define called with name='yt-live-chat-banner-poll-choice' (argc=3)
+[I/customElements] define called with name='yt-live-chat-button' (argc=3)
+[I/customElements] define called with name='yt-live-chat-call-for-questions-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-dialog-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-error-message-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-icon-toggle-button-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-message-input-prompt-header-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-message-subtext-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-message-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-poll-editor-input' (argc=3)
+[I/customElements] define called with name='yt-live-chat-poll-editor-panel-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-product-picker-panel-item-view-model' (argc=3)
+[I/customElements] define called with name='yt-live-chat-product-picker-panel-view-model' (argc=3)
+[I/customElements] define called with name='yt-live-chat-product-button-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-product-picker-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-interactivity-component-background' (argc=3)
+[I/customElements] define called with name='yt-live-chat-qna-start-panel-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-text-actions-error-message-renderer' (argc=3)
+[I/customElements] define called with name='yt-reaction-control-panel-button-view-model' (argc=3)
+[I/customElements] define called with name='yt-reaction-control-panel-view-model' (argc=3)
+[I/customElements] define called with name='yt-reaction-control-panel-overlay-view-model' (argc=3)
+[I/customElements] define called with name='yt-live-chat-message-input-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-restricted-participation-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-engagement-panel-input-renderer' (argc=3)
+[I/customElements] define called with name='yt-live-chat-toggle-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sentiment-bar-renderer' (argc=3)
+[I/customElements] define called with name='ytd-video-view-count-renderer' (argc=3)
+[I/customElements] define called with name='ytd-video-primary-info-renderer' (argc=3)
+[I/customElements] define called with name='ytd-autotagging-metadata-renderer' (argc=3)
+[I/customElements] define called with name='ytd-autotagging-metadata-row-renderer' (argc=3)
+[I/customElements] define called with name='ytd-metadata-row-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-metadata-row-renderer' (argc=3)
+[I/customElements] define called with name='ytd-metadata-with-image-row-renderer' (argc=3)
+[I/customElements] define called with name='ytd-rich-metadata-renderer' (argc=3)
+[I/customElements] define called with name='ytd-rich-metadata-row-renderer' (argc=3)
+[I/customElements] define called with name='ytd-metadata-row-container-renderer' (argc=3)
+[I/customElements] define called with name='ytd-error-corrections-section-item-renderer' (argc=3)
+[I/customElements] define called with name='ytd-error-corrections-section-renderer' (argc=3)
+[I/customElements] define called with name='ytd-topic-link-renderer' (argc=3)
+[I/customElements] define called with name='ytd-video-description-course-section-renderer' (argc=3)
+[I/customElements] define called with name='ytd-video-description-files-section-renderer' (argc=3)
+[I/customElements] define called with name='ytd-video-description-gaming-section-renderer' (argc=3)
+[I/customElements] define called with name='ytd-info-row-renderer' (argc=3)
+[I/customElements] define called with name='ytd-video-description-music-section-renderer' (argc=3)
+[I/customElements] define called with name='ytd-video-description-transcript-section-renderer' (argc=3)
+[I/customElements] define called with name='ytd-ticket-shelf-renderer' (argc=3)
+[I/customElements] define called with name='yt-shopping-description-shelf-view-model' (argc=3)
+[I/customElements] define called with name='ytw-video-description-fantasy-section-view-model' (argc=3)
+[I/customElements] define called with name='how-this-was-made-section-view-model' (argc=3)
+[I/customElements] define called with name='yt-floating-button-view-model' (argc=3)
+[I/customElements] define called with name='yt-video-title-header-view-model' (argc=3)
+[I/customElements] define called with name='yt-video-description-youchat-section-view-model' (argc=3)
+[I/customElements] define called with name='ytd-structured-description-content-renderer' (argc=3)
+[I/customElements] define called with name='ytd-video-secondary-info-renderer' (argc=3)
+[I/customElements] define called with name='ytd-comment-history-entry-renderer' (argc=3)
+[I/customElements] define called with name='ytd-donation-shelf-renderer' (argc=3)
+[I/customElements] define called with name='ytd-donation-unavailable-renderer' (argc=3)
+[I/customElements] define called with name='ytd-survey-trigger-renderer' (argc=3)
+[I/customElements] define called with name='ytd-toggle-theme-compact-link-renderer' (argc=3)
+[I/customElements] define called with name='ytd-notification-renderer' (argc=3)
+[I/customElements] define called with name='ytd-playlist-show-metadata-renderer' (argc=3)
+[I/customElements] define called with name='ytd-purchase-item-renderer' (argc=3)
+[I/customElements] define called with name='ytd-simple-text-section-renderer' (argc=3)
+[I/customElements] define called with name='ytd-unlimited-page-feature-info-renderer' (argc=3)
+[I/customElements] define called with name='ytd-post-redemption-section-renderer' (argc=3)
+[I/customElements] define called with name='ytd-ypc-post-redemption-renderer' (argc=3)
+[I/customElements] define called with name='ytd-redeem-code-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-about-metadata-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-featured-content-renderer' (argc=3)
+[I/customElements] define called with name='ytd-clarification-renderer' (argc=3)
+[I/customElements] define called with name='ytd-compact-link-renderer' (argc=3)
+[I/customElements] define called with name='ytd-exploratory-results-renderer' (argc=3)
+[I/customElements] define called with name='ytd-feedback-elicitation-single-question-renderer' (argc=3)
+[I/customElements] define called with name='ytd-limited-state-message-renderer' (argc=3)
+[I/customElements] define called with name='ytd-newspaper-hero-video-renderer' (argc=3)
+[I/customElements] define called with name='ytd-newspaper-mini-video-renderer' (argc=3)
+[I/customElements] define called with name='ytd-newspaper-renderer' (argc=3)
+[I/customElements] define called with name='ytd-playlist-video-list-renderer' (argc=3)
+[I/customElements] define called with name='ytd-movie-renderer' (argc=3)
+[I/customElements] define called with name='ytd-action-basic-immersive-content-renderer' (argc=3)
+[I/customElements] define called with name='ytd-image-tile-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sitelink-renderer' (argc=3)
+[I/customElements] define called with name='ytd-action-engagement-panel-content-renderer' (argc=3)
+[I/customElements] define called with name='panel-text-icon-image-tiles-button-layout-content-view-model' (argc=3)
+[I/customElements] define called with name='panel-text-icon-text-grid-cards-sub-layout-content-view-model' (argc=3)
+[I/customElements] define called with name='ytd-ads-engagement-panel-content-renderer' (argc=3)
+[I/customElements] define called with name='ytd-clip-attribution-renderer' (argc=3)
+[I/customElements] define called with name='ytd-clip-section-footer-renderer' (argc=3)
+[I/customElements] define called with name='ytd-clip-ad-state-renderer' (argc=3)
+[I/customElements] define called with name='ytd-clip-creation-text-input-renderer' (argc=3)
+[I/customElements] define called with name='yt-clip-creation-scrubber-canvas' (argc=3)
+[I/customElements] define called with name='yt-clip-creation-scrubber-view' (argc=3)
+[I/customElements] define called with name='yt-clip-creation-scrubber-renderer' (argc=3)
+[I/customElements] define called with name='yt-clip-creation-renderer' (argc=3)
+[I/customElements] define called with name='ytd-clip-section-renderer' (argc=3)
+[I/customElements] define called with name='ytd-hashtag-grid-tile-renderer' (argc=3)
+[I/customElements] define called with name='ytd-hashtag-grid-shelf-renderer' (argc=3)
+[I/customElements] define called with name='ytd-toggle-option-renderer' (argc=3)
+[I/customElements] define called with name='ytd-checkbox-survey-option-renderer' (argc=3)
+[I/customElements] define called with name='ytd-radio-button-survey-option-renderer' (argc=3)
+[I/customElements] define called with name='ytd-inline-survey-renderer' (argc=3)
+[I/customElements] define called with name='ytd-brand-video-shelf-renderer' (argc=3)
+[I/customElements] define called with name='ytd-brand-video-singleton-renderer' (argc=3)
+[I/customElements] define called with name='yt-profile-page-header-information-view-model' (argc=3)
+[I/customElements] define called with name='ytd-effect-pivot-header-view-model' (argc=3)
+[I/customElements] define called with name='ytd-source-pivot-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-default-promo-panel-renderer-inline-playback-renderer' (argc=3)
+[I/customElements] define called with name='yt-video-as-thumbnail-details' (argc=3)
+[I/customElements] define called with name='ytd-default-promo-panel-renderer' (argc=3)
+[I/customElements] define called with name='ytd-carousel-item-renderer' (argc=3)
+[I/customElements] define called with name='yt-generic-faq-question-renderer' (argc=3)
+[I/customElements] define called with name='yt-faq-section-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-history-renderer' (argc=3)
+[I/customElements] define called with name='ytd-feature-enablement-info-renderer' (argc=3)
+[I/customElements] define called with name='ytd-ypc-coupon-renderer' (argc=3)
+[I/customElements] define called with name='ytd-flow-bottom-bar-renderer' (argc=3)
+[I/customElements] define called with name='ytd-flow-top-bar-renderer' (argc=3)
+[I/customElements] define called with name='yt-free-text-input-flow-step-renderer' (argc=3)
+[I/customElements] define called with name='ytd-free-text-input-flow-step-renderer' (argc=3)
+[I/customElements] define called with name='yt-survey-answer-card-renderer' (argc=3)
+[I/customElements] define called with name='yt-survey-flow-step-renderer' (argc=3)
+[I/customElements] define called with name='ytd-survey-flow-step-renderer' (argc=3)
+[I/customElements] define called with name='ytd-metadata-line-renderer' (argc=3)
+[I/customElements] define called with name='ytd-media-product-renderer' (argc=3)
+[I/customElements] define called with name='ytd-billboard-masthead-renderer' (argc=3)
+[I/customElements] define called with name='ytd-bullet-formatted-string' (argc=3)
+[I/customElements] define called with name='ytd-offer-detail-renderer' (argc=3)
+[I/customElements] define called with name='ytd-offer-detail-step-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-masthead-renderer' (argc=3)
+[I/customElements] define called with name='ytd-offer-card-renderer' (argc=3)
+[I/customElements] define called with name='ytd-offer-content-renderer' (argc=3)
+[I/customElements] define called with name='ytd-offer-section-renderer' (argc=3)
+[I/customElements] define called with name='yt-card-item-actions-renderer' (argc=3)
+[I/customElements] define called with name='yt-card-item-badge-renderer' (argc=3)
+[I/customElements] define called with name='yt-card-item-text-renderer' (argc=3)
+[I/customElements] define called with name='yt-card-item-text-collection-renderer' (argc=3)
+[I/customElements] define called with name='yt-card-item-text-with-image-renderer' (argc=3)
+[I/customElements] define called with name='yt-card-item-error-renderer' (argc=3)
+[I/customElements] define called with name='yt-card-item-text-with-button-renderer' (argc=3)
+[I/customElements] define called with name='yt-card-item-renderer' (argc=3)
+[I/customElements] define called with name='ytd-offer-selection-step-renderer' (argc=3)
+[I/customElements] define called with name='ytd-confirmation-masthead-renderer' (argc=3)
+[I/customElements] define called with name='ytd-purchase-complete-detail-renderer' (argc=3)
+[I/customElements] define called with name='ytd-purchase-complete-step-renderer' (argc=3)
+[I/customElements] define called with name='ytd-ypc-transaction-error-message-renderer' (argc=3)
+[I/customElements] define called with name='yt-feature-enablement-soft-entry-renderer' (argc=3)
+[I/customElements] define called with name='yt-benefits-item-renderer' (argc=3)
+[I/customElements] define called with name='yt-benefits-section-renderer' (argc=3)
+[I/customElements] define called with name='yt-benefits-flow-step-renderer' (argc=3)
+[I/customElements] define called with name='yt-confirmation-flow-step-renderer' (argc=3)
+[I/customElements] define called with name='yt-info-flow-step-renderer' (argc=3)
+[I/customElements] define called with name='yt-info-list-flow-step-renderer' (argc=3)
+[I/customElements] define called with name='pdp-view-model' (argc=3)
+[I/customElements] define called with name='yt-flow-bottom-bar-renderer' (argc=3)
+[I/customElements] define called with name='yt-offer-summary-flow-step-renderer' (argc=3)
+[I/customElements] define called with name='yt-option-selection-flow-step-renderer' (argc=3)
+[I/customElements] define called with name='yt-form-footer-view-model' (argc=3)
+[I/customElements] define called with name='yt-contributor-zero-state-view-model' (argc=3)
+[I/customElements] define called with name='yt-lp-section-group-view-model' (argc=3)
+[I/customElements] define called with name='yt-note-user-rating-view-model' (argc=3)
+[I/customElements] define called with name='yt-note-view-model' (argc=3)
+[I/customElements] define called with name='yt-notes-wrapper-view-model' (argc=3)
+[I/customElements] define called with name='yt-structured-context-note-view-model' (argc=3)
+[I/customElements] define called with name='yt-feedback-form-view-model' (argc=3)
+[I/customElements] define called with name='yt-report-form-bottom-bar-view-model' (argc=3)
+[I/customElements] define called with name='yt-report-form-confirmation-page-view-model' (argc=3)
+[I/customElements] define called with name='yt-report-form-details-page-view-model' (argc=3)
+[I/customElements] define called with name='yt-report-form-reason-select-page-view-model' (argc=3)
+[I/customElements] define called with name='yt-report-form-sign-in-page-view-model' (argc=3)
+[I/customElements] define called with name='yt-talk-to-recs-view-model' (argc=3)
+[I/customElements] define called with name='ytfz-schedule-fanzone-view-model' (argc=3)
+[I/customElements] define called with name='yt-flow-bottom-bar-view-model' (argc=3)
+[I/customElements] define called with name='ytd-flow-step-renderer' (argc=3)
+[I/customElements] define called with name='yt-flow-root-progress-indicator-view-model' (argc=3)
+[I/customElements] define called with name='ytd-flow-root-renderer' (argc=3)
+[I/customElements] define called with name='ytd-talk-to-recs-flow-renderer' (argc=3)
+[I/customElements] define called with name='ytd-chips-shelf-with-video-shelf-ghost-card-view-model' (argc=3)
+[I/customElements] define called with name='ytd-chips-shelf-with-video-shelf-renderer' (argc=3)
+[I/customElements] define called with name='ytd-rich-section-renderer' (argc=3)
+[I/customElements] define called with name='ytd-banner-promo-renderer' (argc=3)
+[I/customElements] define called with name='yt-profile-identity-info-view-model' (argc=3)
+[I/customElements] define called with name='yt-page-header-view-model' (argc=3)
+[I/customElements] define called with name='ytd-ghost-grid-view-model' (argc=3)
+[I/customElements] define called with name='ytd-rich-grid-renderer' (argc=3)
+[I/customElements] define called with name='ytd-search-in-video-renderer' (argc=3)
+[I/customElements] define called with name='ytd-product-list-item-renderer' (argc=3)
+[I/customElements] define called with name='ytd-product-list-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sponsorships-gifting-opt-in-renderer' (argc=3)
+[I/customElements] define called with name='ytd-transcript-body-renderer' (argc=3)
+[I/customElements] define called with name='ytd-transcript-footer-renderer' (argc=3)
+[I/customElements] define called with name='ytd-transcript-search-box-renderer' (argc=3)
+[I/customElements] define called with name='ytd-transcript-section-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-transcript-segment-renderer' (argc=3)
+[I/customElements] define called with name='ytd-transcript-segment-list-renderer' (argc=3)
+[I/customElements] define called with name='ytd-transcript-search-panel-renderer' (argc=3)
+[I/customElements] define called with name='ytd-transcript-renderer' (argc=3)
+[I/customElements] define called with name='ytd-ad-engagement-panel-banner-renderer' (argc=3)
+[I/customElements] define called with name='ytd-ad-hover-text-button-renderer' (argc=3)
+[I/customElements] define called with name='ytd-engagement-panel-ad-subtitle-renderer' (argc=3)
+[I/customElements] define called with name='ytd-engagement-panel-title-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-macro-markers-info-item-renderer' (argc=3)
+[I/customElements] define called with name='ytd-macro-markers-list-renderer' (argc=3)
+[I/customElements] define called with name='ytd-commerce-cart-summary-line-item-renderer' (argc=3)
+[I/customElements] define called with name='ytd-commerce-cart-checkout-button-renderer' (argc=3)
+[I/customElements] define called with name='yt-content-loading-renderer' (argc=3)
+[I/customElements] define called with name='playlist-collaboration-view-model' (argc=3)
+[I/customElements] define called with name='yt-playlist-metadata-editor-form-view-model' (argc=3)
+[I/customElements] define called with name='yt-form-header-view-model' (argc=3)
+[I/customElements] define called with name='yt-text-subform-view-model' (argc=3)
+[I/customElements] define called with name='panel-ad-header-image-lockup-view-model' (argc=3)
+[I/customElements] define called with name='yt-section-list-renderer' (argc=3)
+[I/customElements] define called with name='yt-chat-input-view-model' (argc=3)
+[I/customElements] define called with name='ytd-engagement-panel-section-list-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-video-player-renderer' (argc=3)
+[I/customElements] define called with name='ytd-companion-legal-text-renderer' (argc=3)
+[I/customElements] define called with name='ytd-action-companion-ad-renderer' (argc=3)
+[I/customElements] define called with name='ytd-image-companion-renderer' (argc=3)
+[I/customElements] define called with name='ytd-shopping-companion-renderer' (argc=3)
+[I/customElements] define called with name='banner-image-layout-view-model' (argc=3)
+[I/customElements] define called with name='top-banner-image-text-icon-buttoned-layout-view-model' (argc=3)
+[I/customElements] define called with name='ytd-companion-slot-renderer' (argc=3)
+[I/customElements] define called with name='ytd-player-legacy-desktop-watch-ads-renderer' (argc=3)
+[I/customElements] define called with name='yt-search-query-correction' (argc=3)
+[I/customElements] define called with name='yt-did-you-mean-renderer' (argc=3)
+[I/customElements] define called with name='yt-including-results-for-renderer' (argc=3)
+[I/customElements] define called with name='yt-music-pass-feature-info-renderer' (argc=3)
+[I/customElements] define called with name='yt-no-results-found-showing-results-for-renderer' (argc=3)
+[I/customElements] define called with name='yt-results-without-quotes-renderer' (argc=3)
+[I/customElements] define called with name='yt-search-no-results-renderer' (argc=3)
+[I/customElements] define called with name='yt-showing-results-for-renderer' (argc=3)
+[I/customElements] define called with name='yt-activity-item-renderer' (argc=3)
+[I/customElements] define called with name='yt-offer-item-upsell-renderer' (argc=3)
+[I/customElements] define called with name='yt-card-item-container-renderer' (argc=3)
+[I/customElements] define called with name='yt-offer-item-expanded-renderer' (argc=3)
+[I/customElements] define called with name='yt-offer-item-renderer' (argc=3)
+[I/customElements] define called with name='yt-subscription-product-header-renderer' (argc=3)
+[I/customElements] define called with name='yt-subscription-product-renderer' (argc=3)
+[I/customElements] define called with name='yt-subscription-product-upsell-offer-renderer' (argc=3)
+[I/customElements] define called with name='yt-single-ypc-offer-renderer' (argc=3)
+[I/customElements] define called with name='yt-single-ypc-offer-list-renderer' (argc=3)
+[I/customElements] define called with name='yt-ypc-offers-list-renderer' (argc=3)
+[I/customElements] define called with name='yt-unlimited-manage-subscription-page-renderer' (argc=3)
+[I/customElements] define called with name='yt-collapsible-ypc-offer-renderer' (argc=3)
+[I/customElements] define called with name='yt-unlimited-page-header-renderer' (argc=3)
+[I/customElements] define called with name='yt-unlimited-user-notification-renderer' (argc=3)
+[I/customElements] define called with name='yt-alert-renderer' (argc=3)
+[I/customElements] define called with name='player-microformat-renderer' (argc=3)
+[I/customElements] define called with name='yt-shopping-timely-shelf-content-view-model' (argc=3)
+[I/customElements] define called with name='yt-side-rail-view-model' (argc=3)
+[I/customElements] define called with name='yt-guide-manager' (argc=3)
+[I/customElements] define called with name='yt-hotkey-manager' (argc=3)
+[I/customElements] define called with name='yt-playlist-manager' (argc=3)
+[I/customElements] define called with name='ytd-third-party-manager' (argc=3)
+[I/customElements] define called with name='ytd-refresh' (argc=3)
+[I/customElements] define called with name='ytd-interactive-tabbed-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-page-footer-renderer' (argc=3)
+[I/customElements] define called with name='ytd-inline-form-renderer' (argc=3)
+[I/customElements] define called with name='ytd-dropdown-item-renderer' (argc=3)
+[I/customElements] define called with name='ytd-navigation-dropdown-item-renderer' (argc=3)
+[I/customElements] define called with name='ytd-dropdown-renderer' (argc=3)
+[I/customElements] define called with name='ytd-dropdown-form-field-renderer' (argc=3)
+[I/customElements] define called with name='ytd-playlist-byline-renderer' (argc=3)
+[I/customElements] define called with name='ytd-playlist-sidebar-primary-info-renderer' (argc=3)
+[I/customElements] define called with name='ytd-playlist-sidebar-secondary-info-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-legal-info-renderer' (argc=3)
+[I/customElements] define called with name='ytd-download-playlist-button-renderer' (argc=3)
+[I/customElements] define called with name='thumbnail-overlay-button-view-model' (argc=3)
+[I/customElements] define called with name='ytd-hero-playlist-thumbnail-renderer' (argc=3)
+[I/customElements] define called with name='ytd-playlist-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-playlist-sidebar-tertiary-info-renderer' (argc=3)
+[I/customElements] define called with name='ytd-playlist-sidebar-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-banner-editor-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-tagline-renderer' (argc=3)
+[I/customElements] define called with name='ytd-expandable-tab-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-avatar-editor' (argc=3)
+[I/customElements] define called with name='yt-page-header-renderer' (argc=3)
+[I/customElements] define called with name='yt-image-banner-view-model' (argc=3)
+[I/customElements] define called with name='yt-tab-group-shape' (argc=3)
+[I/customElements] define called with name='ytd-tabbed-page-header' (argc=3)
+[I/customElements] define called with name='ytd-labs-edit-renderer' (argc=3)
+[I/customElements] define called with name='ytd-labs-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-labs-item-renderer' (argc=3)
+[I/customElements] define called with name='ytd-live-chat-history-new-sponsor-chip-renderer' (argc=3)
+[I/customElements] define called with name='ytd-live-chat-history-super-chat-chip-renderer' (argc=3)
+[I/customElements] define called with name='ytd-live-chat-history-entry-renderer' (argc=3)
+[I/customElements] define called with name='ytd-member-hub-profile-renderer' (argc=3)
+[I/customElements] define called with name='ytd-connected-app-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-options-renderer' (argc=3)
+[I/customElements] define called with name='ytd-settings-checkbox-renderer' (argc=3)
+[I/customElements] define called with name='ytd-settings-email-item-renderer' (argc=3)
+[I/customElements] define called with name='ytd-settings-email-list-renderer' (argc=3)
+[I/customElements] define called with name='yt-options-renderer' (argc=3)
+[I/customElements] define called with name='yt-enrolled-contact-renderer' (argc=3)
+[I/customElements] define called with name='yt-suggested-contact-renderer' (argc=3)
+[I/customElements] define called with name='yt-contact-section-renderer' (argc=3)
+[I/customElements] define called with name='yt-form-renderer' (argc=3)
+[I/customElements] define called with name='ytd-settings-gaia-link-renderer' (argc=3)
+[I/customElements] define called with name='ytd-settings-radio-option-renderer' (argc=3)
+[I/customElements] define called with name='basic-content-view-model' (argc=3)
+[I/customElements] define called with name='ytd-settings-options-renderer' (argc=3)
+[I/customElements] define called with name='ytd-settings-sidebar-renderer' (argc=3)
+[I/customElements] define called with name='ytd-product-details-description-renderer' (argc=3)
+[I/customElements] define called with name='ytd-product-details-hero-offer-renderer' (argc=3)
+[I/customElements] define called with name='ytd-product-details-thumbnail-renderer' (argc=3)
+[I/customElements] define called with name='ytd-product-details-image-carousel-renderer' (argc=3)
+[I/customElements] define called with name='ytd-product-details-offer-renderer' (argc=3)
+[I/customElements] define called with name='ytd-product-details-offers-container-renderer' (argc=3)
+[I/customElements] define called with name='ytd-product-details-variant-option-renderer' (argc=3)
+[I/customElements] define called with name='ytd-product-details-variant-renderer' (argc=3)
+[I/customElements] define called with name='ytd-product-details-renderer' (argc=3)
+[I/customElements] define called with name='ytd-commerce-cart-header-renderer' (argc=3)
+[I/customElements] define called with name='yt-vc-balance-renderer' (argc=3)
+[I/customElements] define called with name='ytd-vc-balance-renderer' (argc=3)
+[I/customElements] define called with name='ytd-topic-channel-details-renderer' (argc=3)
+[I/customElements] define called with name='ytd-carousel-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-metadata-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sub-feed-option-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sub-feed-selector-renderer' (argc=3)
+[I/customElements] define called with name='ytd-browse-feed-actions-renderer' (argc=3)
+[I/customElements] define called with name='ytd-mini-channel-renderer' (argc=3)
+[I/customElements] define called with name='ytd-vertical-channel-section-renderer' (argc=3)
+[I/customElements] define called with name='ytd-browse-secondary-contents-renderer' (argc=3)
+[I/customElements] define called with name='ytd-two-column-browse-results-renderer' (argc=3)
+[I/customElements] define called with name='yt-alert-with-actions-renderer' (argc=3)
+[I/customElements] define called with name='yt-personal-greeting-view-model' (argc=3)
+[I/customElements] define called with name='ytd-browse' (argc=3)
+[I/customElements] define called with name='ytd-page-manager' (argc=3)
+[I/customElements] define called with name='ytd-search-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-web-answer-renderer' (argc=3)
+[I/customElements] define called with name='ytd-page-continuation' (argc=3)
+[I/customElements] define called with name='ytd-watch-card-one-vs-one-event' (argc=3)
+[I/customElements] define called with name='ytd-watch-card-hero-one-vs-one-event-renderer' (argc=3)
+[I/customElements] define called with name='ytd-banner-and-box-hero-image-renderer' (argc=3)
+[I/customElements] define called with name='ytd-call-to-action-button-renderer' (argc=3)
+[I/customElements] define called with name='ytd-collage-hero-image-renderer' (argc=3)
+[I/customElements] define called with name='ytd-single-hero-image-renderer' (argc=3)
+[I/customElements] define called with name='ytd-watch-card-hero-video-renderer' (argc=3)
+[I/customElements] define called with name='ytd-watch-card-rich-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-watch-card-compact-video-renderer' (argc=3)
+[I/customElements] define called with name='ytd-watch-card-one-vs-one-event-compact-video-renderer' (argc=3)
+[I/customElements] define called with name='ytd-vertical-watch-card-list-renderer' (argc=3)
+[I/customElements] define called with name='ytd-watch-card-section-dropdown-renderer' (argc=3)
+[I/customElements] define called with name='ytd-watch-card-section-sequence-renderer' (argc=3)
+[I/customElements] define called with name='ytd-button-banner-view-model' (argc=3)
+[I/customElements] define called with name='ytd-universal-watch-card-renderer' (argc=3)
+[I/customElements] define called with name='overview-message-view-model' (argc=3)
+[I/customElements] define called with name='ytd-overview-answer-view-model' (argc=3)
+[I/customElements] define called with name='ytd-secondary-search-container-renderer' (argc=3)
+[I/customElements] define called with name='ytd-two-column-search-results-renderer' (argc=3)
+[I/customElements] define called with name='yt-ai-search-input-view-model' (argc=3)
+[I/customElements] define called with name='yt-floating-footer-message' (argc=3)
+[I/customElements] define called with name='ytd-search' (argc=3)
+[I/customElements] define called with name='reel-watch-break-view-model' (argc=3)
+[I/customElements] define called with name='ytd-reel-non-video-content-renderer' (argc=3)
+[I/customElements] define called with name='pivot-button-view-model' (argc=3)
+[I/customElements] define called with name='reel-action-bar-view-model' (argc=3)
+[I/customElements] define called with name='yt-reel-metapanel-view-model' (argc=3)
+[I/customElements] define called with name='yt-reel-player-overlay-view-model' (argc=3)
+[I/customElements] define called with name='yt-player-overlay-interaction' (argc=3)
+[I/customElements] define called with name='yt-stickers-layer' (argc=3)
+[I/customElements] define called with name='ytd-reel-player-overlay-renderer' (argc=3)
+[I/customElements] define called with name='ytm-closed-captioning-button' (argc=3)
+[I/customElements] define called with name='volume-controls' (argc=3)
+[I/customElements] define called with name='ytd-shorts-player-controls' (argc=3)
+[I/customElements] define called with name='desktop-shorts-player-controls' (argc=3)
+[I/customElements] define called with name='ytd-shorts-player-controls-cow' (argc=3)
+[I/customElements] define called with name='ytd-reel-video-renderer' (argc=3)
+[I/customElements] define called with name='ytd-shorts' (argc=3)
+[I/customElements] define called with name='ytd-compact-tvfilm-entry-point-renderer' (argc=3)
+[I/customElements] define called with name='ytd-ratings' (argc=3)
+[I/customElements] define called with name='ytd-offer-review-renderer' (argc=3)
+[I/customElements] define called with name='ytd-movie-offer-module-renderer' (argc=3)
+[I/customElements] define called with name='ytd-media-masthead-renderer' (argc=3)
+[I/customElements] define called with name='course-metadata-view-model' (argc=3)
+[I/customElements] define called with name='ytd-tvfilm-offer-module-renderer' (argc=3)
+[I/customElements] define called with name='ytd-unlimited-offer-module-renderer' (argc=3)
+[I/customElements] define called with name='ytd-watch-next-secondary-results-renderer' (argc=3)
+[I/customElements] define called with name='ytd-live-chat-frame' (argc=3)
+[I/customElements] define called with name='ytd-comments-entry-point-message-renderer' (argc=3)
+[I/customElements] define called with name='ytd-comments-entry-point-teaser-renderer' (argc=3)
+[I/customElements] define called with name='ytd-comments-simplebox-renderer' (argc=3)
+[I/customElements] define called with name='ytd-comments-entry-point-header-renderer' (argc=3)
+[I/customElements] define called with name='yt-animated-rolling-number' (argc=3)
+[I/customElements] define called with name='ytd-watch-info-text' (argc=3)
+[I/customElements] define called with name='yt-video-metadata-carousel-view-model' (argc=3)
+[I/customElements] define called with name='ytd-watch-metadata' (argc=3)
+[I/customElements] define called with name='ytd-watch-fixie' (argc=3)
+[I/customElements] define called with name='ytd-watch-flexy' (argc=3)
+[I/customElements] define called with name='ytd-ghost-comments-renderer' (argc=3)
+[I/customElements] define called with name='ytd-ghost-watch-metadata-renderer' (argc=3)
+[I/customElements] define called with name='ytd-watch-grid' (argc=3)
+[I/customElements] define called with name='ytd-watch-learning-journey' (argc=3)
+[I/customElements] define called with name='ytd-menu-navigation-item-renderer' (argc=3)
+[I/customElements] define called with name='ytd-menu-service-item-download-renderer' (argc=3)
+[I/customElements] define called with name='ytd-menu-service-item-renderer' (argc=3)
+[I/customElements] define called with name='ytd-backstage-post-dialog-popup-renderer' (argc=3)
+[I/customElements] define called with name='ytd-modal-with-title-and-button-renderer' (argc=3)
+[I/customElements] define called with name='ytd-account-item-section-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-account-item-section-renderer' (argc=3)
+[I/customElements] define called with name='ytd-accounts-dialog-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-google-account-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-account-section-list-renderer' (argc=3)
+[I/customElements] define called with name='ytd-active-account-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-simple-menu-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-comment-video-thumbnail-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-abuse-type-selector-renderer' (argc=3)
+[I/customElements] define called with name='ytd-report-channel-modal-additional-context-renderer' (argc=3)
+[I/customElements] define called with name='ytd-report-channel-modal-footer-renderer' (argc=3)
+[I/customElements] define called with name='ytd-report-channel-modal-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-report-channel-modal-impersonation-renderer' (argc=3)
+[I/customElements] define called with name='ytd-selectable-video-renderer' (argc=3)
+[I/customElements] define called with name='ytd-selectable-video-list-renderer' (argc=3)
+[I/customElements] define called with name='ytd-toggle-item-renderer' (argc=3)
+[I/customElements] define called with name='yt-flow-footer-renderer' (argc=3)
+[I/customElements] define called with name='ytd-flow-footer-renderer' (argc=3)
+[I/customElements] define called with name='yt-multi-page-menu-section-renderer' (argc=3)
+[I/customElements] define called with name='yt-flow-header-renderer' (argc=3)
+[I/customElements] define called with name='yt-post-confirmation-flow-step-renderer' (argc=3)
+[I/customElements] define called with name='yt-refund-confirmation-flow-step-renderer' (argc=3)
+[I/customElements] define called with name='yt-profile-card-view-model' (argc=3)
+[I/customElements] define called with name='ytd-multi-page-menu-renderer' (argc=3)
+[I/customElements] define called with name='ytd-topbar-menu-button-renderer' (argc=3)
+[I/customElements] define called with name='ytd-ad-feedback-content' (argc=3)
+[I/customElements] define called with name='ytd-ad-feedback-renderer' (argc=3)
+[I/customElements] define called with name='ytd-ad-info-dialog-content' (argc=3)
+[I/customElements] define called with name='ytd-ad-info-dialog-renderer' (argc=3)
+[I/customElements] define called with name='ytd-enforcement-message-view-model' (argc=3)
+[I/customElements] define called with name='ytd-channel-handle-input-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-creation-dialog-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-handle-edit-dialog-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-switcher-footer-renderer' (argc=3)
+[I/customElements] define called with name='ytd-identity-prompt-footer-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-switcher-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-transfer-stepper-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-warm-welcome-cont-renderer' (argc=3)
+[I/customElements] define called with name='ytd-channel-warm-welcome-renderer' (argc=3)
+[I/customElements] define called with name='ytd-comment-preview-renderer' (argc=3)
+[I/customElements] define called with name='ytd-notice-renderer' (argc=3)
+[I/customElements] define called with name='ytd-preview-comment-dialog-content' (argc=3)
+[I/customElements] define called with name='ytd-preview-comment-dialog-renderer' (argc=3)
+[I/customElements] define called with name='ytd-donation-amount-picker-renderer' (argc=3)
+[I/customElements] define called with name='ytd-donation-post-transaction-content' (argc=3)
+[I/customElements] define called with name='ytd-donation-post-transaction-renderer' (argc=3)
+[I/customElements] define called with name='ytd-checkbox-survey-renderer' (argc=3)
+[I/customElements] define called with name='ytd-dismissal-reason-text-renderer' (argc=3)
+[I/customElements] define called with name='ytd-dismissal-reason-video-renderer' (argc=3)
+[I/customElements] define called with name='ytd-dismissal-follow-up-renderer' (argc=3)
+[I/customElements] define called with name='ytd-feedback-option-renderer' (argc=3)
+[I/customElements] define called with name='ytd-feedback-question-renderer' (argc=3)
+[I/customElements] define called with name='ytd-feedback-survey-renderer' (argc=3)
+[I/customElements] define called with name='ytd-single-select-answer-option-renderer' (argc=3)
+[I/customElements] define called with name='ytd-single-select-question-renderer' (argc=3)
+[I/customElements] define called with name='ytd-multi-stage-survey-renderer' (argc=3)
+[I/customElements] define called with name='ytd-single-option-survey-option-renderer' (argc=3)
+[I/customElements] define called with name='ytd-single-option-survey-renderer' (argc=3)
+[I/customElements] define called with name='ytd-survey-follow-up-renderer' (argc=3)
+[I/customElements] define called with name='yt-timestamp-input' (argc=3)
+[I/customElements] define called with name='ytd-legal-report-details-form-renderer' (argc=3)
+[I/customElements] define called with name='ytd-form-popup-content' (argc=3)
+[I/customElements] define called with name='ytd-form-popup-renderer' (argc=3)
+[I/customElements] define called with name='ytd-gaming-account-link-confirm-dialog-renderer' (argc=3)
+[I/customElements] define called with name='ytd-gaming-account-link-setting-renderer' (argc=3)
+[I/customElements] define called with name='ytd-guide-entry-renderer' (argc=3)
+[I/customElements] define called with name='ytd-guide-collapsible-entry-renderer' (argc=3)
+[I/customElements] define called with name='ytd-guide-downloads-entry-renderer' (argc=3)
+[I/customElements] define called with name='ytd-guide-collapsible-section-entry-renderer' (argc=3)
+[I/customElements] define called with name='yt-guide-avatar-row-view-model' (argc=3)
+[I/customElements] define called with name='ytd-guide-section-renderer' (argc=3)
+[I/customElements] define called with name='ytd-guide-signin-promo-renderer' (argc=3)
+[I/customElements] define called with name='ytd-guide-renderer' (argc=3)
+[I/customElements] define called with name='ytd-mini-guide-entry-renderer' (argc=3)
+[I/customElements] define called with name='ytd-mini-guide-renderer' (argc=3)
+[I/customElements] define called with name='ytd-handles-claiming-confirm-dialog-content' (argc=3)
+[I/customElements] define called with name='ytd-handles-claiming-confirm-dialog-renderer' (argc=3)
+[I/customElements] define called with name='ytd-handles-claiming-edit-dialog-content' (argc=3)
+[I/customElements] define called with name='ytd-handles-claiming-edit-dialog-renderer' (argc=3)
+[I/customElements] define called with name='ytd-handles-claiming-radio-option-renderer' (argc=3)
+[I/customElements] define called with name='ytd-handles-claiming-select-dialog-content' (argc=3)
+[I/customElements] define called with name='ytd-handles-claiming-select-dialog-renderer' (argc=3)
+[I/customElements] define called with name='yt-lockup-metadata-view-model' (argc=3)
+[I/customElements] define called with name='yt-inline-player-controls' (argc=3)
+[I/customElements] define called with name='ytd-video-preview' (argc=3)
+[I/customElements] define called with name='ytd-hotkey-dialog-section-option-renderer' (argc=3)
+[I/customElements] define called with name='ytd-hotkey-dialog-section-renderer' (argc=3)
+[I/customElements] define called with name='ytd-hotkey-dialog-content' (argc=3)
+[I/customElements] define called with name='ytd-hotkey-dialog-renderer' (argc=3)
+[I/customElements] define called with name='ytd-block-button' (argc=3)
+[I/customElements] define called with name='ytd-kids-blocklist-picker-item-renderer' (argc=3)
+[I/customElements] define called with name='ytd-kids-blocklist-picker-content' (argc=3)
+[I/customElements] define called with name='ytd-kids-blocklist-picker-renderer' (argc=3)
+[I/customElements] define called with name='ytd-menu-popup-tip-renderer' (argc=3)
+[I/customElements] define called with name='ytd-toggle-menu-service-item-renderer' (argc=3)
+[I/customElements] define called with name='ytd-menu-custom-icon-item-renderer' (argc=3)
+[I/customElements] define called with name='switch-list-item-view-model' (argc=3)
+[I/customElements] define called with name='yt-list-item-view-model' (argc=3)
+[I/customElements] define called with name='ytd-menu-popup-renderer' (argc=3)
+[I/customElements] define called with name='yt-icon-badge-shape' (argc=3)
+[I/customElements] define called with name='ytd-notification-topbar-button-renderer' (argc=3)
+[I/customElements] define called with name='yt-pdg-buy-flow-header-renderer' (argc=3)
+[I/customElements] define called with name='ytd-pdg-color-slider-renderer' (argc=3)
+[I/customElements] define called with name='ytd-comment-input' (argc=3)
+[I/customElements] define called with name='ytd-pdg-comment-preview-renderer' (argc=3)
+[I/customElements] define called with name='ytd-pdg-super-vod-selectable-item-button-renderer' (argc=3)
+[I/customElements] define called with name='yt-super-vod-buy-flow-content-renderer' (argc=3)
+[I/customElements] define called with name='ytd-desktop-image-overlay-renderer' (argc=3)
+[I/customElements] define called with name='ytd-pdg-buy-flow-renderer' (argc=3)
+[I/customElements] define called with name='ytd-add-to-playlist-create-renderer' (argc=3)
+[I/customElements] define called with name='ytd-playlist-add-to-option-renderer' (argc=3)
+[I/customElements] define called with name='ytd-menu-title-renderer' (argc=3)
+[I/customElements] define called with name='ytd-add-to-playlist-renderer' (argc=3)
+[I/customElements] define called with name='ytd-playlist-settings-editor-renderer' (argc=3)
+[I/customElements] define called with name='ytd-red-cancel-survey-renderer' (argc=3)
+[I/customElements] define called with name='ytd-search-filter-options-dialog-renderer' (argc=3)
+[I/customElements] define called with name='ytd-download-quality-selector-content' (argc=3)
+[I/customElements] define called with name='ytd-download-quality-selector-renderer' (argc=3)
+[I/customElements] define called with name='ytd-cross-account-transfer-channel-confirm-dialog-renderer' (argc=3)
+[I/customElements] define called with name='ytd-cross-account-transfer-channel-overview-renderer' (argc=3)
+[I/customElements] define called with name='ytd-cross-account-transfer-channel-tnc-dialog-renderer' (argc=3)
+[I/customElements] define called with name='ytd-transfer-channel-confirm-dialog-renderer' (argc=3)
+[I/customElements] define called with name='ytd-compact-product-list-item-renderer' (argc=3)
+[I/customElements] define called with name='ytd-compact-product-list-renderer' (argc=3)
+[I/customElements] define called with name='ytd-membership-post-cancel-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sponsorship-confirm-cancel-content' (argc=3)
+[I/customElements] define called with name='ytd-sponsorship-confirm-cancel-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sponsorships-celebration-content' (argc=3)
+[I/customElements] define called with name='ytd-sponsorships-celebration-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sponsorships-offer-renderer' (argc=3)
+[I/customElements] define called with name='ytd-sponsorships-promotion-celebration-renderer' (argc=3)
+[I/customElements] define called with name='ytd-subscription-toggle-option-renderer' (argc=3)
+[I/customElements] define called with name='ytd-subscription-notification-options-renderer' (argc=3)
+[I/customElements] define called with name='ytd-tvfilm-offer-groups-renderer' (argc=3)
+[I/customElements] define called with name='ytd-ypc-offers-overlay-renderer' (argc=3)
+[I/customElements] define called with name='ytd-voice-search-dialog-renderer' (argc=3)
+[I/customElements] define called with name='ytd-icon-badge-topbar-button-renderer' (argc=3)
+[I/customElements] define called with name='ytd-offline-promo-content' (argc=3)
+[I/customElements] define called with name='ytd-offline-promo-renderer' (argc=3)
+[I/customElements] define called with name='ytd-consent-bump-v2-lightbox' (argc=3)
+[I/customElements] define called with name='ytd-consent-bump-v2-renderer' (argc=3)
+[I/customElements] define called with name='yt-notification-action-renderer' (argc=3)
+[I/customElements] define called with name='ytd-video-download-toast-renderer' (argc=3)
+[I/customElements] define called with name='ytd-logo' (argc=3)
+[I/customElements] define called with name='ytd-yoodle-renderer' (argc=3)
+[I/customElements] define called with name='ytd-topbar-logo-renderer' (argc=3)
+[I/customElements] define called with name='yt-searchbox' (argc=3)
+[I/customElements] define called with name='ytd-masthead' (argc=3)
+[I/customElements] define called with name='ytd-network-status-banner' (argc=3)
+[I/customElements] define called with name='ytd-permission-role-bottom-bar-renderer' (argc=3)
+[I/customElements] define called with name='ytd-search-suggestion-report-dialog' (argc=3)
+[I/customElements] define called with name='yt-about-this-ad-renderer' (argc=3)
+[I/customElements] define called with name='yt-image-editor-renderer' (argc=3)
+[I/customElements] define called with name='yt-report-details-form-content' (argc=3)
+[I/customElements] define called with name='yt-report-details-form-renderer' (argc=3)
+[I/customElements] define called with name='yt-boolean-form-field-v2-renderer' (argc=3)
+[I/customElements] define called with name='yt-report-form-modal-content' (argc=3)
+[I/customElements] define called with name='yt-report-form-modal-renderer' (argc=3)
+[I/customElements] define called with name='yt-mealbar-promo-renderer' (argc=3)
+[I/customElements] define called with name='yt-tooltip-renderer' (argc=3)
+[I/customElements] define called with name='yt-start-at-renderer' (argc=3)
+[I/customElements] define called with name='yt-sharing-embed-renderer' (argc=3)
+[I/customElements] define called with name='yt-sender-id-section-renderer' (argc=3)
+[I/customElements] define called with name='yt-community-post-section-renderer' (argc=3)
+[I/customElements] define called with name='yt-share-start-time-with-context-renderer' (argc=3)
+[I/customElements] define called with name='yt-share-panel-title-v15-renderer' (argc=3)
+[I/customElements] define called with name='yt-share-panel-header-renderer' (argc=3)
+[I/dom_api] js_element_set_inner_html called, argc=1
+[I/dom_api] js_element_set_inner_html: html=<!--css-build:shady--><svg style="position: absolu
+[I/html_dom] Parsed HTML document: found no <head>, no <body>
+[I/customElements] define called with name='yt-share-target-renderer' (argc=3)
+[I/customElements] define called with name='yt-third-party-share-target-section-renderer' (argc=3)
+[I/customElements] define called with name='yt-third-party-network-section-renderer' (argc=3)
+[I/customElements] define called with name='first-party-network-section-view-model' (argc=3)
+[I/customElements] define called with name='yt-unified-share-panel-renderer' (argc=3)
+[I/customElements] define called with name='yt-unlimited-family-message-interstitial-renderer' (argc=3)
+[I/customElements] define called with name='yt-unlimited-family-profile-interstitial-renderer' (argc=3)
+[I/customElements] define called with name='yt-unplugged-pause-membership-dialog-renderer' (argc=3)
+[I/customElements] define called with name='yt-vc-offer-layout-header-renderer' (argc=3)
+[I/customElements] define called with name='yt-vc-offer-renderer' (argc=3)
+[I/customElements] define called with name='yt-vc-offer-layout-renderer' (argc=3)
+[I/customElements] define called with name='yt-ypc-offers-modal-top-bar-renderer' (argc=3)
+[I/customElements] define called with name='yt-ypc-offers-modal-renderer' (argc=3)
+[I/customElements] define called with name='yt-ypc-upgrade-dialog-renderer' (argc=3)
+[I/customElements] define called with name='yt-bubble-hint-renderer' (argc=3)
+[I/customElements] define called with name='yt-confirm-dialog-renderer' (argc=3)
+[I/customElements] define called with name='yt-fancy-dismissible-dialog-renderer' (argc=3)
+[I/customElements] define called with name='yt-loading-renderer' (argc=3)
+[I/customElements] define called with name='yt-upsell-dialog-renderer' (argc=3)
+[I/customElements] define called with name='yt-mini-app-game-info-dialog-view-model' (argc=3)
+[I/customElements] define called with name='yt-gulp-triggering-dialog-view-model' (argc=3)
+[I/customElements] define called with name='yt-dialog-view-model' (argc=3)
+[I/customElements] define called with name='yt-sheet-view-model' (argc=3)
+[I/customElements] define called with name='yt-stories-viewer-view-model' (argc=3)
+[I/customElements] define called with name='yt-info-panel-details-view-model' (argc=3)
+[I/customElements] define called with name='yt-gen-ai-feedback-form-view-model' (argc=3)
+[I/customElements] define called with name='ytd-popup-container' (argc=3)
+[I/customElements] define called with name='yt-mdx-manager' (argc=3)
+[I/customElements] define called with name='yt-create-family-dialog' (argc=3)
+[I/customElements] define called with name='yt-page-navigation-progress' (argc=3)
+[I/customElements] define called with name='yt-rive-component' (argc=3)
+[I/customElements] define called with name='snackbar-container' (argc=3)
+[I/customElements] define called with name='yt-tooltip' (argc=3)
+[I/customElements] define called with name='yt-ephemeral-actions' (argc=3)
+[I/customElements] define called with name='ytd-miniplayer' (argc=3)
+[I/customElements] define called with name='ytd-video-preview-loader' (argc=3)
+[I/customElements] define called with name='ytd-video-preview-portal' (argc=3)
+[I/customElements] define called with name='ytd-app' (argc=3)
+[I/js_quickjs] [EXEC] Script 26 executed successfully
+[js_quickjs] <<< EVAL script 26/40 result=ok
+[CAPTURE_DEBUG] [request_ctor] data URL: data:application/json;base64,eyJhZFBsYWNlbWVudHMiOnRydWUsInBsYXllckFkcyI6dHJ1ZSwicGxheWVyUmVzcG9uc2U
+[I/js_quickjs] [URL_CAPTURED] [PLAIN] https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false
+[I/js_quickjs] [URL_CAPTURED] [PLAIN] https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false
+[I/js_quickjs] Executing script 27: 60 bytes
+[I/js_quickjs] [EXEC] Executing script 27: 60 bytes
+[js_quickjs] >>> EVAL script 27/40 size=60
+[I/js_quickjs] [EXEC] Script 27 executed successfully
+[js_quickjs] <<< EVAL script 27/40 result=ok
+[I/js_quickjs] Executing script 28: 60 bytes
+[I/js_quickjs] [EXEC] Executing script 28: 60 bytes
+[js_quickjs] >>> EVAL script 28/40 size=60
+[I/js_quickjs] [EXEC] Script 28 executed successfully
+[js_quickjs] <<< EVAL script 28/40 result=ok
+[I/js_quickjs] Executing script 29: 56 bytes
+[I/js_quickjs] [EXEC] Executing script 29: 56 bytes
+[js_quickjs] >>> EVAL script 29/40 size=56
+[I/js_quickjs] [EXEC] Script 29 executed successfully
+[js_quickjs] <<< EVAL script 29/40 result=ok
+[I/js_quickjs] Executing script 30: 54 bytes
+[I/js_quickjs] [EXEC] Executing script 30: 54 bytes
+[js_quickjs] >>> EVAL script 30/40 size=54
+[I/js_quickjs] [EXEC] Script 30 executed successfully
+[js_quickjs] <<< EVAL script 30/40 result=ok
+[I/js_quickjs] Executing script 31: 284 bytes
+[I/js_quickjs] [EXEC] Executing script 31: 284 bytes
+[js_quickjs] >>> EVAL script 31/40 size=284
+[I/js_quickjs] [EXEC] Script 31 executed successfully
+[js_quickjs] <<< EVAL script 31/40 result=ok
+[I/js_quickjs] Executing script 32: 38554 bytes
+[I/js_quickjs] [EXEC] Executing script 32: 38554 bytes
+[js_quickjs] >>> EVAL script 32/40 size=38554
+[E/quickjs] JS_EnqueueJob: job_handle=6908692 queue_handle=6908693
+[I/js_quickjs] [EXEC] Script 32 executed successfully
+[js_quickjs] <<< EVAL script 32/40 result=ok
+[I/js_quickjs] Executing script 33: 55 bytes
+[I/js_quickjs] [EXEC] Executing script 33: 55 bytes
+[js_quickjs] >>> EVAL script 33/40 size=55
+[I/js_quickjs] [EXEC] Script 33 executed successfully
+[js_quickjs] <<< EVAL script 33/40 result=ok
+[I/js_quickjs] Executing script 34: 74769 bytes
+[I/js_quickjs] [EXEC] Executing script 34: 74769 bytes
+[js_quickjs] >>> EVAL script 34/40 size=74769
+[I/js_quickjs] [EXEC] Script 34 executed successfully
+[js_quickjs] <<< EVAL script 34/40 result=ok
+[I/js_quickjs] Executing script 35: 55 bytes
+[I/js_quickjs] [EXEC] Executing script 35: 55 bytes
+[js_quickjs] >>> EVAL script 35/40 size=55
+[I/js_quickjs] [EXEC] Script 35 executed successfully
+[js_quickjs] <<< EVAL script 35/40 result=ok
+[I/js_quickjs] Executing script 36: 974 bytes
+[I/js_quickjs] [EXEC] Executing script 36: 974 bytes
+[js_quickjs] >>> EVAL script 36/40 size=974
+[I/js_quickjs] [EXEC] Script 36 executed successfully
+[js_quickjs] <<< EVAL script 36/40 result=ok
+[I/js_quickjs] Executing script 37: 55 bytes
+[I/js_quickjs] [EXEC] Executing script 37: 55 bytes
+[js_quickjs] >>> EVAL script 37/40 size=55
+[I/js_quickjs] [EXEC] Script 37 executed successfully
+[js_quickjs] <<< EVAL script 37/40 result=ok
+[I/js_quickjs] Executing script 38: 97 bytes
+[I/js_quickjs] [EXEC] Executing script 38: 97 bytes
+[js_quickjs] >>> EVAL script 38/40 size=97
+[I/js_quickjs] [EXEC] Script 38 executed successfully
+[js_quickjs] <<< EVAL script 38/40 result=ok
+[I/js_quickjs] Executing script 39: 63 bytes
+[I/js_quickjs] [EXEC] Executing script 39: 63 bytes
+[js_quickjs] >>> EVAL script 39/40 size=63
+[I/js_quickjs] [EXEC] Script 39 executed successfully
+[js_quickjs] <<< EVAL script 39/40 result=ok
+[I/js_quickjs] Drained remaining timers/jobs after all scripts
+[I/js_quickjs] All 40 scripts executed, running discovery...
+[I/console] [JS_DISCOVERY] Player/yt related globals: yt, ytcfg, yterr, ytcsi, __ytRIL, ytplayer, ytAtN, YT_I18N_FORMATTING_GOOG_LOCALE, YT_I18N_FORMATTING_DATE_TIME_PATTERNS, YT_I18N_FORMATTING_DATE_TIME_SYMBOLS, YT_I18N_FORMATTING_RELATIVE_DATE_TIME_SYMBOLS, YT_I18N_FORMATTING_PLURAL_RULES_SELECT, YT_I18N_FORMATTING_DURATION_TIME_SYMBOLS, ytglobal, ytPubsub2Pubsub2Instance, ytPubsub2Pubsub2SubscribedKeys, ytPubsub2Pubsub2TopicToKeys, ytPubsub2Pubsub2IsAsync, ytPubsub2Pubsub2SkipSubKey, ytNetworklessLoggingInitializationOptions, ytDomDomGetNextId, ytEventsEventsListeners, ytEventsEventsCounter, ytPubsubPubsubInstance, ytPubsubPubsubTopicToKeys, ytPubsubPubsubIsSynchronous, ytPubsubPubsubSubscribedKeys, ytLoggingTransportTokensToCttTargetIds_, ytLoggingTransportTokensToJspbCttTargetIds_, ytLoggingGelSequenceIdObj_, ytLoggingDocDocumentNonce_, yt_logging_screen, ytLoggingLatencyUsageStats_, ytsignals, ytAtRC, ytDebugData, ytInitialData, ytPageType, ytCommand, ytUrl, playerKeys, decryptedCount, playerGlobals, potentialDecryptors
+[I/console] [JS_DISCOVERY] window.player exists: undefined
+[I/console] [JS_DISCOVERY] window.ytPlayer exists: undefined
+[I/console] [JS_DISCOVERY] window.yt exists: object
+[I/console] [JS_DISCOVERY] window.ytcfg exists: object
+[I/console] [JS_DISCOVERY] window.ytsignals exists: object
+[I/console] [JS_DISCOVERY] Dispatched DOMContentLoaded
+[I/console] [JS_DISCOVERY] ytInitialPlayerResponse NOT DEFINED
+[I/console] [JS_DISCOVERY] === DISCOVERING PLAYER APIS ===
+[I/console] [JS_DISCOVERY] yt object found
+[I/console] [JS_DISCOVERY]   yt.logging = object
+[I/console] [JS_DISCOVERY]   yt.config_ = object
+[I/console] [JS_DISCOVERY]   yt.scheduler = object
+[I/console] [JS_DISCOVERY]   yt.ads_ = object
+[I/console] [JS_DISCOVERY]   yt.msgs_ = object
+[I/console] [JS_DISCOVERY]   yt.clientLocationService = object
+[I/console] [JS_DISCOVERY]   yt.networkStatusManager = object
+[I/console] [JS_DISCOVERY]   yt.gcf = object
+[I/console] [JS_DISCOVERY]   yt.aba = object
+[I/console] [JS_DISCOVERY]   yt.ypc = object
+[I/console] [JS_DISCOVERY] window.ytplayer = object
+[I/console] [JS_DISCOVERY] === CHECKING FOR DECRYPT FUNCTIONS ===
+[I/console] [JS_DISCOVERY] Found 0 potential decryptor functions
+[I/console] [JS_DISCOVERY] === END DISCOVERY ===
+[CE-DIAG] starting diagnostic eval
+[I/console] [CE-DIAG] HTMLElement typeof=function name=y native=false
+[I/console] [CE-DIAG] new HTMLElement() OK nodeType=1
+[I/console] [CE-DIAG] new __origHTMLElement() OK nodeType=1
+[I/console] [CE-DIAG] minimal subclass OK nodeType=1 protoName=y
+[I/console] [CE-DIAG] Reflect.construct OK nodeType=1
+[I/console] [CE-DIAG] ytd-app ctor typeof=function name=L
+[I/console] [CE-DIAG] HTMLElement source head: function y() {
+    [native code]
+}
+[I/console] [CE-DIAG] ytd-app proto chain: L -> d -> d -> z -> d -> L -> d -> z -> d -> z -> y -> Element -> Node -> EventTarget -> Object
+[I/console] [CE-DIAG] ytd-app source head: function L() {
+    [native code]
+}
+[I/console] [CE-DIAG] new ytd-app() threw: not a function stack=    at z (<lazy>:7675:789)
+    at z (<lazy>:7675:578)
+    at apply (native)
+    at d (<lazy>:7714:28)
+    at d (<lazy>:7714:13)
+    at apply (native)
+    at z (<lazy>:7726:179)
+    at z (<lazy>:7726:164)
+    at call (native)
+    at d (<lazy>:7744:26)
+    at d (<lazy>:7744:20)
+    at apply (native)
+    at L (<lazy>:7704:41)
+    at L (<lazy>:7704:26)
+    at call (native)
+    at d (<lazy>:7816:45)
+    at d (<lazy>:7816:39)
+    at apply (native)
+    at z (<lazy>:7941:116)
+    at z (<lazy>:7941:101)
+    at call (native)
+    at d (<lazy>:8077:838)
+    at d (<lazy>:8077:832)
+    at call (native)
+    at d (<lazy>:8133:306)
+    at d (<lazy>:8133:300)
+    at apply (native)
+    at L (<lazy>:2014:57)
+    at L (<lazy>:2014:42)
+    at <anonymous> (<lazy>:1:1907)
+    at <anonymous> (<lazy>:1:12)
+    at <eval> (<ce_diag>:1:2993)
+
+[I/console] [CE-DIAG] chain-new L() threw: not a function
+[I/console] [CE-DIAG] chain-new d() threw: not a function
+[I/console] [CE-DIAG] chain-new d() threw: not a function
+[I/console] [CE-DIAG] chain-new z() threw: not a function
+[I/console] [CE-DIAG] chain-new d() threw: not a function
+[I/console] [CE-DIAG] chain-new L() threw: not a function
+[I/console] [CE-DIAG] chain-new d() threw: not a function
+[I/console] [CE-DIAG] chain-new z() threw: not a function
+[I/console] [CE-DIAG] chain-new d() threw: not a function
+[I/console] [CE-DIAG] chain-new z() threw: not a function
+[CE-DIAG] diagnostic eval completed
+[I/js_quickjs] [URL_CAPTURE_SUMMARY] Total URLs captured: 1
+[I/js_quickjs] [URL_CAPTURED_0] https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false
+[js_quickjs] END exec success_count=40 captured=1 status=0
+[I/js_quickjs] Finished, captured 1 URLs, status=0
+[I/js_quickjs] Execution complete, returning
+[html_extract] RETURN js_quickjs_exec_scripts success=1
+[I/html_media] js_quickjs_exec_scripts returned, success=1
+[I/html_extract] js_quickjs_exec_scripts returned, success=1
+Scripts executed: 1 captured URLs
+[GC] Phase 2 - cleaning shape hash table
+[GC] Phase 2 done
+[GC] Phase 3 - sweeping
+[GC] Phase 3 done
+[GC] Phase 4 - removing weak objects
+[GC] remove_weak: weakmaps=50
+[GC] remove_weak: weakmap 0 handle=1781901
+[GC] remove_weak: weakmap 1 handle=1782305
+[GC] remove_weak: weakmap 2 handle=1784173
+[GC] remove_weak: weakmap 3 handle=1813653
+[GC] remove_weak: weakmap 4 handle=1813821
+[GC] remove_weak: weakmap 5 handle=1813865
+[GC] remove_weak: weakmap 6 handle=1816925
+[GC] remove_weak: weakmap 7 handle=1816958
+[GC] remove_weak: weakmap 8 handle=1816969
+[GC] remove_weak: weakmap 9 handle=1819961
+[GC] remove_weak: weakmap 10 handle=1819968
+[GC] remove_weak: weakmap 11 handle=1825734
+[GC] remove_weak: weakmap 12 handle=1825741
+[GC] remove_weak: weakmap 13 handle=1827119
+[GC] remove_weak: weakmap 14 handle=1827142
+[GC] remove_weak: weakmap 15 handle=1827285
+[GC] remove_weak: weakmap 16 handle=1827377
+[GC] remove_weak: weakmap 17 handle=1827493
+[GC] remove_weak: weakmap 18 handle=1827515
+[GC] remove_weak: weakmap 19 handle=1831216
+[GC] remove_weak: weakmap 20 handle=1833025
+[GC] remove_weak: weakmap 21 handle=1833044
+[GC] remove_weak: weakmap 22 handle=1833063
+[GC] remove_weak: weakmap 23 handle=1836754
+[GC] remove_weak: weakmap 24 handle=1836779
+[GC] remove_weak: weakmap 25 handle=1837384
+[GC] remove_weak: weakmap 26 handle=1840010
+[GC] remove_weak: weakmap 27 handle=1915891
+[GC] remove_weak: weakmap 28 handle=1915916
+[GC] remove_weak: weakmap 29 handle=1916426
+[GC] remove_weak: weakmap 30 handle=1916696
+[GC] remove_weak: weakmap 31 handle=1917056
+[GC] remove_weak: weakmap 32 handle=1920088
+[GC] remove_weak: weakmap 33 handle=1945656
+[GC] remove_weak: weakmap 34 handle=1981812
+[GC] remove_weak: weakmap 35 handle=1981818
+[GC] remove_weak: weakmap 36 handle=1981826
+[GC] remove_weak: weakmap 37 handle=2002812
+[GC] remove_weak: weakmap 38 handle=2008288
+[GC] remove_weak: weakmap 39 handle=2011748
+[GC] remove_weak: weakmap 40 handle=2011761
+[GC] remove_weak: weakmap 41 handle=2011780
+[GC] remove_weak: weakmap 42 handle=2018541
+[GC] remove_weak: weakmap 43 handle=2024217
+[GC] remove_weak: weakmap 44 handle=2024870
+[GC] remove_weak: weakmap 45 handle=2025000
+[GC] remove_weak: weakmap 46 handle=2025017
+[GC] remove_weak: weakmap 47 handle=2031960
+[GC] remove_weak: weakmap 48 handle=2031966
+[GC] remove_weak: weakmap 49 handle=2299807
+[GC] remove_weak: weakrefs=0
+[GC] remove_weak: finrecs=0
+[GC] Phase 4 done
+[GC] Phase 5 - sweeping atoms
+[E/quickjs] gc_sweep_atoms: ENTER, atom_handles.count=68857, permanent_atom_count=238
+[E/quickjs] gc_sweep_atoms: freed 0 dynamic atoms, DONE
+[GC] Phase 5 done
+[GC] Phase 6 - reclaiming dead objects
+[GC] Phase 6 done
+[GC] Phase 7 - compacting into buffer 1
+[GC] Phase 7 done
+Dispatching DOMContentLoaded and load events ...
+Captured googlevideo.com URLs: 0
+Saved fetched HTML to youtube_loaded.html (59351 bytes)
+[I/html_dom] Parsed HTML document: found <head>, <body>
+Title: YouTube
+DOM nodes: 458
+Body snippet: ""
+Running CSS layout (1024x2400) ...
+[I/css_layout] Fetching stylesheet: https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&family=YouT
+[I/tls_client] Loaded CA certs from C:/msys64/mingw64/etc/ssl/certs/ca-bundle.crt (0 certs)
+[I/tls_client] Connecting to fonts.googleapis.com:443...
+[I/tls_client] TCP connected to fonts.googleapis.com:443
+[I/tls_client] Configured perfect Android TCP stack simulation
+[I/tls_client] Using default TLS configuration for macOS/Linux
+[I/tls_client] Starting TLS handshake with fonts.googleapis.com:443...
+[I/tls_client] TLS handshake completed successfully
+[I/tls_client] TLS version: TLSv1.3, Cipher: TLS1-3-AES-256-GCM-SHA384
+[I/http_download] HTTP request sent: 431 bytes
+[I/http_download] Request headers:
+GET /css2?family=Roboto:wght@300;400;500;700&family=YouTube+Sans:wght@300..900&display=swap HTTP/1.1
+Host: fonts.googleapis.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8
+Accept-Language: en-US,en;q=0.9
+Accept-Encoding: identity
+Connection: close
+
+
+[I/http_download] Set socket timeout (read=60s, write=10s)
+[I/http_download] Starting to read HTTP response...
+[I/tls_client] TLS connection EOF
+[I/http_download] Finished reading response: 86977 bytes total
+[I/http_download] Received 86977 bytes response
+[I/http_download] Response start: [HTTP/1.1 200 OK..Content-Type: text/css; charset=utf-8..Access-Control-Allow-Origin: *..Timing-Allow]
+[I/http_download] HTTP status: 200
+[I/http_download] Detected chunked transfer encoding
+[I/http_download] Decoded chunked response: 86172 bytes -> 86143 bytes
+[I/css_layout] Fetched stylesheet (86143 bytes)
+[I/css_layout] Fetching stylesheet: https://www.youtube.com/s/desktop/395dc19a/cssbin/www-main-desktop-home-page-ske
+[I/tls_client] Loaded CA certs from C:/msys64/mingw64/etc/ssl/certs/ca-bundle.crt (0 certs)
+[I/tls_client] Connecting to www.youtube.com:443...
+[I/tls_client] TCP connected to www.youtube.com:443
+[I/tls_client] Configured perfect Android TCP stack simulation
+[I/tls_client] Using default TLS configuration for macOS/Linux
+[I/tls_client] Starting TLS handshake with www.youtube.com:443...
+[I/tls_client] TLS handshake completed successfully
+[I/tls_client] TLS version: TLSv1.3, Cipher: TLS1-3-CHACHA20-POLY1305-SHA256
+[I/http_download] HTTP request sent: 405 bytes
+[I/http_download] Request headers:
+GET /s/desktop/395dc19a/cssbin/www-main-desktop-home-page-skeleton.css HTTP/1.1
+Host: www.youtube.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8
+Accept-Language: en-US,en;q=0.9
+Accept-Encoding: identity
+Connection: close
+
+
+[I/http_download] Set socket timeout (read=60s, write=10s)
+[I/http_download] Starting to read HTTP response...
+[I/http_download] Content-Length: 4348 bytes, body timeout: 300 seconds
+[I/http_download] Finished reading response: 5024 bytes total
+[I/http_download] Received 5024 bytes response
+[I/http_download] Response start: [HTTP/1.1 200 OK..Accept-Ranges: bytes..Cross-Origin-Resource-Policy: cross-origin..Cross-Origin-Open]
+[I/http_download] HTTP status: 200
+[I/css_layout] Fetched stylesheet (4348 bytes)
+[I/css_layout] Fetching stylesheet: https://www.youtube.com/s/desktop/395dc19a/cssbin/www-onepick.css
+[I/tls_client] Loaded CA certs from C:/msys64/mingw64/etc/ssl/certs/ca-bundle.crt (0 certs)
+[I/tls_client] Connecting to www.youtube.com:443...
+[I/tls_client] TCP connected to www.youtube.com:443
+[I/tls_client] Configured perfect Android TCP stack simulation
+[I/tls_client] Using default TLS configuration for macOS/Linux
+[I/tls_client] Starting TLS handshake with www.youtube.com:443...
+[I/tls_client] TLS handshake completed successfully
+[I/tls_client] TLS version: TLSv1.3, Cipher: TLS1-3-CHACHA20-POLY1305-SHA256
+[I/http_download] HTTP request sent: 381 bytes
+[I/http_download] Request headers:
+GET /s/desktop/395dc19a/cssbin/www-onepick.css HTTP/1.1
+Host: www.youtube.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8
+Accept-Language: en-US,en;q=0.9
+Accept-Encoding: identity
+Connection: close
+
+
+[I/http_download] Set socket timeout (read=60s, write=10s)
+[I/http_download] Starting to read HTTP response...
+[I/http_download] Content-Length: 822 bytes, body timeout: 300 seconds
+[I/http_download] Finished reading response: 1497 bytes total
+[I/http_download] Received 1497 bytes response
+[I/http_download] Response start: [HTTP/1.1 200 OK..Accept-Ranges: bytes..Cross-Origin-Resource-Policy: cross-origin..Cross-Origin-Open]
+[I/http_download] HTTP status: 200
+[I/css_layout] Fetched stylesheet (822 bytes)
+[I/css_layout] Fetching stylesheet: https://www.youtube.com/s/_/ytmainappweb/_/ss/k=ytmainappweb.kevlar_base.KTHbHKS
+[I/tls_client] Loaded CA certs from C:/msys64/mingw64/etc/ssl/certs/ca-bundle.crt (0 certs)
+[I/tls_client] Connecting to www.youtube.com:443...
+[I/tls_client] TCP connected to www.youtube.com:443
+[I/tls_client] Configured perfect Android TCP stack simulation
+[I/tls_client] Using default TLS configuration for macOS/Linux
+[I/tls_client] Starting TLS handshake with www.youtube.com:443...
+[I/tls_client] TLS handshake completed successfully
+[I/tls_client] TLS version: TLSv1.3, Cipher: TLS1-3-CHACHA20-POLY1305-SHA256
+[I/http_download] HTTP request sent: 467 bytes
+[I/http_download] Request headers:
+GET /s/_/ytmainappweb/_/ss/k=ytmainappweb.kevlar_base.KTHbHKS4zWs.L.B1.O/am=AAAAAAQAQgBgDg/d=0/rs=AGKMywHZsKIX9TD5OrPm2QlVjqTPM-PYSA HTTP/1.1
+Host: www.youtube.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8
+Accept-Language: en-US,en;q=0.9
+Accept-Encoding: identity
+Connection: close
+
+
+[I/http_download] Set socket timeout (read=60s, write=10s)
+[I/http_download] Starting to read HTTP response...
+[I/http_download] Content-Length: 2822394 bytes, body timeout: 300 seconds
+[E/http_download] [DL] Received 1049059 bytes so far
+[E/http_download] [DL] Received 2101035 bytes so far
+[I/http_download] Finished reading response: 2823299 bytes total
+[I/http_download] Received 2823299 bytes response
+[I/http_download] Response start: [HTTP/1.1 200 OK..Accept-Ranges: bytes..Content-Security-Policy: require-trusted-types-for 'script'; ]
+[I/http_download] HTTP status: 200
+[I/css_layout] Fetched stylesheet (2822394 bytes)
+[I/css_layout] Parsed inline <style> stylesheet with 7 rules
+[I/css_layout] Parsed inline <style> stylesheet with 27 rules
+[I/css_layout] Parsed inline <style> stylesheet with 3 rules
+[I/css_layout] Parsed inline <style> stylesheet with 5 rules
+[I/css_layout] Parsed inline <style> stylesheet with 3 rules
+[I/css_layout] Fetching stylesheet: https://www.youtube.com/s/desktop/395dc19a/cssbin/www-main-desktop-watch-page-sk
+[I/tls_client] Loaded CA certs from C:/msys64/mingw64/etc/ssl/certs/ca-bundle.crt (0 certs)
+[I/tls_client] Connecting to www.youtube.com:443...
+[I/tls_client] TCP connected to www.youtube.com:443
+[I/tls_client] Configured perfect Android TCP stack simulation
+[I/tls_client] Using default TLS configuration for macOS/Linux
+[I/tls_client] Starting TLS handshake with www.youtube.com:443...
+[I/tls_client] TLS handshake completed successfully
+[I/tls_client] TLS version: TLSv1.3, Cipher: TLS1-3-CHACHA20-POLY1305-SHA256
+[I/http_download] HTTP request sent: 406 bytes
+[I/http_download] Request headers:
+GET /s/desktop/395dc19a/cssbin/www-main-desktop-watch-page-skeleton.css HTTP/1.1
+Host: www.youtube.com
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8
+Accept-Language: en-US,en;q=0.9
+Accept-Encoding: identity
+Connection: close
+
+
+[I/http_download] Set socket timeout (read=60s, write=10s)
+[I/http_download] Starting to read HTTP response...
+[I/http_download] Content-Length: 8539 bytes, body timeout: 300 seconds
+[I/http_download] Finished reading response: 9215 bytes total
+[I/http_download] Received 9215 bytes response
+[I/http_download] Response start: [HTTP/1.1 200 OK..Accept-Ranges: bytes..Cross-Origin-Resource-Policy: cross-origin..Cross-Origin-Open]
+[I/http_download] HTTP status: 200
+[I/css_layout] Fetched stylesheet (8539 bytes)
+[I/css_layout] Applying 9 stylesheet(s) to 458 layout nodes in parallel
+Layout boxes: 458
+Display list commands: 426
+Rendering screenshot to youtube_screenshot.jpg ...
+Saved screenshot: youtube_screenshot.jpg (1024x2400)
+
+YouTube homepage loaded successfully.
+[GC] Phase 2 - cleaning shape hash table
+[GC] Phase 2 done
+[GC] Phase 3 - sweeping
+[GC] Phase 3 done
+[GC] Phase 4 - removing weak objects
+[GC] remove_weak: weakmaps=18
+[GC] remove_weak: weakmap 0 handle=1813865
+[GC] remove_weak: weakmap 1 handle=1819961
+[GC] remove_weak: weakmap 2 handle=1819968
+[GC] remove_weak: weakmap 3 handle=1827119
+[GC] remove_weak: weakmap 4 handle=1827142
+[GC] remove_weak: weakmap 5 handle=1827285
+[GC] remove_weak: weakmap 6 handle=1827377
+[GC] remove_weak: weakmap 7 handle=1827493
+[GC] remove_weak: weakmap 8 handle=1827515
+[GC] remove_weak: weakmap 9 handle=1831216
+[GC] remove_weak: weakmap 10 handle=1833025
+[GC] remove_weak: weakmap 11 handle=1833063
+[GC] remove_weak: weakmap 12 handle=1836754
+[GC] remove_weak: weakmap 13 handle=1837384
+[GC] remove_weak: weakmap 14 handle=1915891
+[GC] remove_weak: weakmap 15 handle=2011761
+[GC] remove_weak: weakmap 16 handle=2011780
+[GC] remove_weak: weakmap 17 handle=2025017
+[GC] remove_weak: weakrefs=0
+[GC] remove_weak: finrecs=0
+[GC] Phase 4 done
+[GC] Phase 5 - sweeping atoms
+[E/quickjs] gc_sweep_atoms: ENTER, atom_handles.count=68903, permanent_atom_count=238
+[E/quickjs] gc_sweep_atoms: freed 0 dynamic atoms, DONE
+[GC] Phase 5 done
+[GC] Phase 6 - reclaiming dead objects
+[GC] Phase 6 done
+[GC] Phase 7 - compacting into buffer 0
+[GC] Phase 7 done

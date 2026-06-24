@@ -429,6 +429,7 @@ GCValue js_reflect_construct(JSContextHandle ctx, GCValue this_val, int argc, GC
     
     GCValue target = argv[0];
     GCValue args_array = argv[1];
+    GCValue new_target = (argc >= 3) ? argv[2] : target;
     
     // Get length of args array
     GCValue len_val = JS_GetPropertyStr(ctx, args_array, "length");
@@ -441,8 +442,10 @@ GCValue js_reflect_construct(JSContextHandle ctx, GCValue this_val, int argc, GC
         args[i] = JS_GetPropertyUint32(ctx, args_array, i);
     }
     
-    // Call constructor
-    GCValue result = JS_CallConstructor(ctx, target, (int)args_len, args);
+    // Call constructor with the explicit new.target so that subclasses of
+    // native constructors (e.g. Babel's _wrapNativeSuper) get the right
+    // prototype chain.
+    GCValue result = JS_CallConstructor2(ctx, target, new_target, (int)args_len, args);
     
     for (uint32_t i = 0; i < args_len; i++) {
 

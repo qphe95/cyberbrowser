@@ -640,6 +640,17 @@ int main(int argc, char *argv[]) {
         pump_timers_and_jobs(g_ctx);
 
         print_captured_googlevideo_urls(g_ctx);
+
+        // Upgrade any custom elements that were defined during script execution.
+        // This lets Polymer run connectedCallback and stamp shadow-DOM content
+        // on the existing server-rendered skeleton.
+        {
+            const char *upgrade_doc_js =
+                "if (window.customElements && typeof window.customElements.upgrade === 'function' && document && document.documentElement) {"
+                "  try { window.customElements.upgrade(document.documentElement); } catch(e) {}"
+                "}";
+            JS_Eval(g_ctx, upgrade_doc_js, strlen(upgrade_doc_js), "<upgrade_doc>", JS_EVAL_TYPE_GLOBAL);
+        }
     }
 
     /* The JS DOM populated by html_execute_page_scripts is now the source of
