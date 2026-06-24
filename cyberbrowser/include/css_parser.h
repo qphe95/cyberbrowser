@@ -86,6 +86,11 @@ typedef struct CssAppliedDecl {
 void css_apply_document_styles(JSContextHandle ctx, GCValue js_doc,
                                HtmlDocument *doc, const char *base_url);
 
+/* Parse an inline style attribute string and apply its declarations to the
+ * element's JS style object, creating the style object if necessary. */
+void css_apply_inline_style_string(JSContextHandle ctx, GCValue element,
+                                   const char *style_attr);
+
 #ifdef __cplusplus
 }
 #endif

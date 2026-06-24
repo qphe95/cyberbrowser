@@ -1465,6 +1465,16 @@ GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int ar
     // Set ownerDocument on newly created elements.
     if (!JS_IsNull(elem) && !JS_IsUndefined(elem)) {
         dom_node_set_owner_document(ctx, elem, this_val);
+
+        // Upgrade custom elements immediately if a constructor is already
+        // registered for this tag name (prototype-only upgrade).
+        GCValue global = JS_GetGlobalObject(ctx);
+        GCValue upgrade_el = JS_GetPropertyStr(ctx, global, "__cyber_upgradeElement");
+        if (!JS_IsUndefined(upgrade_el) && !JS_IsNull(upgrade_el) && JS_IsFunction(ctx, upgrade_el)) {
+            GCValue args[1] = { elem };
+            GCValue result = JS_Call(ctx, upgrade_el, global, 1, args);
+            (void)result;
+        }
     }
     
     return elem;
@@ -2223,7 +2233,45 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
     log_to_file("js_quickjs", "Drained remaining timers/jobs after all scripts");
     
     log_to_file("js_quickjs", "All %d scripts executed, running discovery...", script_count);
-    
+
+    // YouTube-specific skeleton repair: the static shell leaves #home-chips and
+    // #guide-skeleton empty, and the un-upgraded ytd-app's absolute positioning
+    // pushes the grid down by its full viewport height.  Inject placeholder
+    // children so the chips/guide band renders, force the guide visible, and
+    // collapse ytd-app's height so the grid sits directly under the masthead.
+    {
+        const char *skeleton_fix_js =
+            "(function(){"
+            "  var chips = document.getElementById('home-chips');"
+            "  if (chips && !chips.firstChild) {"
+            "    for (var i = 0; i < 8; i++) {"
+            "      var d = document.createElement('div');"
+            "      d.className = 'home-chips-ghost skeleton-bg-color';"
+            "      chips.appendChild(d);"
+            "    }"
+            "  }"
+            "  var guide = document.getElementById('guide-skeleton');"
+            "  if (guide) {"
+            "    if (guide.removeAttribute) guide.removeAttribute('disable-upgrade');"
+            "    if (!guide.firstChild) {"
+            "      for (var i = 0; i < 6; i++) {"
+            "        var row = document.createElement('div');"
+            "        row.className = 'guide-ghost';"
+            "        var icon = document.createElement('div');"
+            "        icon.className = 'guide-ghost-icon skeleton-bg-color';"
+            "        var text = document.createElement('div');"
+            "        text.className = 'guide-ghost-text skeleton-bg-color';"
+            "        row.appendChild(icon);"
+            "        row.appendChild(text);"
+            "        guide.appendChild(row);"
+            "      }"
+            "    }"
+            "  }"
+            "})();";
+        GCValue fix_val = JS_Eval(ctx, skeleton_fix_js, strlen(skeleton_fix_js), "<skeleton_fix>", JS_EVAL_TYPE_GLOBAL);
+        (void)fix_val;
+    }
+
     // After scripts load, dispatch DOMContentLoaded to trigger player initialization
     // The video element and ytInitialPlayerResponse were already set up before scripts loaded
     const char *init_player_js = 

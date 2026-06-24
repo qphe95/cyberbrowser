@@ -179,12 +179,28 @@ static bool node_class_contains_any(HtmlNode *node, const char **needles)
     return false;
 }
 
-static bool node_has_hidden_class(LayoutContext *ctx, int node_idx)
+static bool node_or_ancestor_has_class(LayoutContext *ctx, int node_idx,
+                                        const char *needle)
 {
     if (node_idx < 0 || node_idx >= ctx->tree.count) return false;
-    HtmlNode *node = (HtmlNode*)po_array_payload(&ctx->doc->array,
-                                                  ctx->tree.nodes[node_idx].dom_node_idx);
-    return node_has_class(node, "hidden");
+    int idx = node_idx;
+    while (idx >= 0) {
+        HtmlNode *node = (HtmlNode*)po_array_payload(&ctx->doc->array,
+                                                      ctx->tree.nodes[idx].dom_node_idx);
+        if (node_has_class(node, needle)) return true;
+        idx = ctx->tree.nodes[idx].parent_idx;
+    }
+    return false;
+}
+
+static bool node_has_hidden_class(LayoutContext *ctx, int node_idx)
+{
+    /* Treat any node inside a hidden subtree as hidden.  YouTube's static
+     * watch-page skeleton carries class "hidden" on its root, but its
+     * descendants do not, so we must walk up the layout tree. */
+    if (node_or_ancestor_has_class(ctx, node_idx, "hidden")) return true;
+    if (node_or_ancestor_has_class(ctx, node_idx, "watch-skeleton")) return true;
+    return false;
 }
 
 static const char* node_attribute_value(HtmlNode *node, const char *name)
@@ -423,6 +439,13 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                 "skeleton-bg-color", "video-skeleton",
                 "skeleton-light-border-bottom", NULL
             };
+            static const char *chip_needles[] = {
+                "home-chips", "home-chips-ghost", NULL
+            };
+            static const char *guide_needles[] = {
+                "guide-skeleton", "guide-ghost", "guide-ghost-icon",
+                "guide-ghost-text", NULL
+            };
             float pr = 0.0f, pg = 0.0f, pb = 0.0f, pa = 0.0f;
             if (node_class_contains_any(node, thumbnail_needles)) {
                 pr = 0.25f; pg = 0.25f; pb = 0.32f; pa = 1.0f; /* slate thumbnail */
@@ -436,6 +459,10 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                 pr = 0.22f; pg = 0.22f; pb = 0.22f; pa = 1.0f; /* #383838 */
             } else if (node_class_contains_any(node, skeleton_needles)) {
                 pr = 0.40f; pg = 0.40f; pb = 0.40f; pa = 1.0f; /* #666666 */
+            } else if (node_class_contains_any(node, chip_needles)) {
+                pr = 0.45f; pg = 0.45f; pb = 0.45f; pa = 1.0f; /* chip pill */
+            } else if (node_class_contains_any(node, guide_needles)) {
+                pr = 0.18f; pg = 0.18f; pb = 0.18f; pa = 1.0f; /* guide sidebar */
             }
             if (pa > 0.0f) {
                 if (!display_list_add_rect(dl,

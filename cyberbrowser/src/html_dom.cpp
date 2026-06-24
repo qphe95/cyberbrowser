@@ -19,6 +19,7 @@
 #include "browser_api_impl.h"
 #include "browser_api_impl_handles.h"
 #include "browser_api_impl_internal.h"
+#include "css_parser.h"
 
 #define LOG_TAG "html_dom"
 #define LOG_INFO(...) platform_log(LOG_LEVEL_INFO, LOG_TAG, __VA_ARGS__)
@@ -739,18 +740,27 @@ GCValue html_create_element_js_with_document(JSContextHandle ctx, GCValue js_doc
             GCValue args[1] = { JS_NewString(ctx, tag_name) };
             element = JS_Call(ctx, createElement, js_doc, 1, args);
             if (!JS_IsException(element) && !JS_IsUndefined(element) && !JS_IsNull(element)) {
-                /* Set attributes from parsed HTML */
+                /* Set attributes from parsed HTML.  The inline 'style' attribute is
+                 * special-cased: document.createElement already created a style
+                 * object, and copying the raw string would clobber it.  We parse
+                 * the attribute and apply declarations to the existing object. */
+                const char *inline_style = NULL;
                 HtmlAttribute *attr = attrs;
                 while (attr) {
                     if (strcasecmp(attr->name, "id") == 0) {
                         JS_SetPropertyStr(ctx, element, "id", JS_NewString(ctx, attr->value));
                     } else if (strcasecmp(attr->name, "class") == 0) {
                         JS_SetPropertyStr(ctx, element, "className", JS_NewString(ctx, attr->value));
+                    } else if (strcasecmp(attr->name, "style") == 0) {
+                        inline_style = attr->value;
                     } else {
                         /* Set other attributes directly */
                         JS_SetPropertyStr(ctx, element, attr->name, JS_NewString(ctx, attr->value));
                     }
                     attr = attr->next;
+                }
+                if (inline_style && inline_style[0]) {
+                    css_apply_inline_style_string(ctx, element, inline_style);
                 }
                 DOMNodeHandle node = DOMNodeHandle::from_object(element);
                 if (node.valid()) {
@@ -1614,6 +1624,19 @@ static void html_serialize_js_element(JSContextHandle ctx, DOMNodeHandle node, G
             DOMNodeHandle child_node = get_dom_node(ctx, child);
             if (!child_node.valid()) break;
             child = child_node.next_sibling();
+        }
+
+        /* Serialize open shadow roots so Polymer-stamped content survives the
+         * JS DOM -> native DOM round-trip. */
+        GCValue shadow = JS_GetPropertyStr(ctx, node_val, "shadowRoot");
+        if (!JS_IsUndefined(shadow) && !JS_IsNull(shadow) && JS_IsObject(shadow)) {
+            GCValue shadow_child = JS_GetPropertyStr(ctx, shadow, "firstChild");
+            while (!JS_IsUndefined(shadow_child) && !JS_IsNull(shadow_child)) {
+                html_serialize_js_node_internal(ctx, shadow_child, buf);
+                DOMNodeHandle shadow_child_node = get_dom_node(ctx, shadow_child);
+                if (!shadow_child_node.valid()) break;
+                shadow_child = shadow_child_node.next_sibling();
+            }
         }
     }
     

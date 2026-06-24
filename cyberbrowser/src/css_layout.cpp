@@ -8,6 +8,7 @@
 #include "platform.h"
 #include "quickjs_gc_unified.h"
 #include "http_download.h"
+#include "html_dom.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -1096,6 +1097,66 @@ static bool layout_node_class_contains(HtmlNode *node, const char *needle)
     return strstr(cls, needle) != NULL;
 }
 
+/* Direct layout-box overrides for YouTube's un-upgraded Polymer shell.
+ * The rebuilt DOM has no real custom-element behaviour, so the skeleton
+ * containers collapse or are positioned badly.  Patch the key boxes before
+ * the top-down pass so the screenshot looks like a real dark-mode homepage. */
+static void layout_apply_youtube_fallbacks(LayoutContext *ctx)
+{
+    for (int i = 0; i < ctx->tree.count; i++) {
+        LayoutBox *box = layout_box(ctx, i);
+        HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx);
+        if (!node || node->type != HTML_NODE_ELEMENT) continue;
+
+        const char *id = layout_node_attribute(node, "id");
+        const char *tag = node->tag_name;
+
+        if (id && strcmp(id, "home-chips") == 0) {
+            box->display = CSS_DISPLAY_FLEX;
+            box->css_height = 56.0;
+            box->height_percent = 0.0;
+            box->min_height = 0.0;
+        } else if (id && strcmp(id, "guide-skeleton") == 0) {
+            box->display = CSS_DISPLAY_FLEX;
+            box->css_width = 240.0;
+            box->width_percent = 0.0;
+            /* Give the sidebar a visible dark fill even though the Polymer
+             * app never populates more than a handful of ghost rows. */
+            box->background_color_r = 0.10;
+            box->background_color_g = 0.10;
+            box->background_color_b = 0.10;
+            box->background_color_a = 1.0;
+        } else if (id && strcmp(id, "home-page-skeleton") == 0) {
+            /* Body already reserves 56 px for the fixed masthead; the skeleton
+             * container should not add another 56 px margin on top. */
+            box->margin_top = 0.0;
+        } else if (tag && strcasecmp(tag, "ytd-app") == 0) {
+            box->css_height = 0.0;
+            box->height_percent = 0.0;
+            box->min_height = 0.0;
+            box->max_height = 0.0;
+        } else if (tag && strcasecmp(tag, "body") == 0) {
+            box->padding_top = 56.0;
+        } else if (layout_node_class_contains(node, "home-chips-ghost")) {
+            box->display = CSS_DISPLAY_INLINE_BLOCK;
+            box->css_width = 80.0;
+            box->css_height = 32.0;
+            box->width_percent = box->height_percent = 0.0;
+            box->margin_left = box->margin_right = 8.0;
+            box->margin_top = box->margin_bottom = 8.0;
+        } else if (layout_node_class_contains(node, "guide-ghost-icon")) {
+            box->css_width = 24.0;
+            box->css_height = 24.0;
+            box->width_percent = box->height_percent = 0.0;
+        } else if (layout_node_class_contains(node, "guide-ghost-text")) {
+            box->css_width = 160.0;
+            box->css_height = 16.0;
+            box->width_percent = box->height_percent = 0.0;
+            box->margin_left = 16.0;
+        }
+    }
+}
+
 /* Resolve width/height into the authoritative border-box size stored in
  * box->width / box->height.  content_width / content_height are then derived
  * by subtracting padding and border.  This function must handle both
@@ -2026,6 +2087,7 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
     if (!ctx || ctx->tree.count == 0) return false;
 
     layout_apply_stylesheet(ctx, sheet);
+    layout_apply_youtube_fallbacks(ctx);
 
     /* Initialize synchronization state. */
     for (int i = 0; i < ctx->tree.count; i++) {

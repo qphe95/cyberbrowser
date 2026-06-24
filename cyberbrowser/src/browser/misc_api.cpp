@@ -949,7 +949,18 @@ GCValue js_custom_elements_define(JSContextHandle ctx, GCValue this_val, int arg
     
     // Store in registry (the this_val should be the customElements object)
     JS_SetPropertyStr(ctx, this_val, name, argv[1]);
-    
+
+    // Upgrade any existing elements of this tag name now that a constructor
+    // has been registered.  The upgrade is prototype-only to avoid invoking
+    // ES5-shimmed constructors on existing DOMNode-backed objects.
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue upgrade_all = JS_GetPropertyStr(ctx, global, "__cyber_upgradeAll");
+    if (!JS_IsUndefined(upgrade_all) && !JS_IsNull(upgrade_all) && JS_IsFunction(ctx, upgrade_all)) {
+        GCValue args[1] = { JS_NewString(ctx, name) };
+        GCValue result = JS_Call(ctx, upgrade_all, global, 1, args);
+        (void)result;
+    }
+
     return JS_UNDEFINED;
 }
 

@@ -672,11 +672,29 @@ static void css_set_style_property(JSContextHandle ctx, GCValue style, const cha
     }
 }
 
+static void css_seed_vendor_style_properties(JSContextHandle ctx, GCValue style) {
+    /* Web Animations polyfill and other libraries do vendor-prefix detection
+     * with `'webkitTransform' in element.style`.  Seed the common transform
+     * properties so those `in` checks complete without throwing. */
+    static const char *props[] = {
+        "webkitTransform", "msTransform",
+        "webkitTransformOrigin",
+        "webkitPerspective", "webkitPerspectiveOrigin",
+        "transform", "transformOrigin",
+        "perspective", "perspectiveOrigin",
+        NULL
+    };
+    for (int i = 0; props[i]; i++) {
+        JS_SetPropertyStr(ctx, style, props[i], JS_NewString(ctx, ""));
+    }
+}
+
 static GCValue css_ensure_style_object(JSContextHandle ctx, GCValue element) {
     GCValue style = JS_GetPropertyStr(ctx, element, "style");
-    if (JS_IsUndefined(style) || JS_IsNull(style)) {
+    if (JS_IsUndefined(style) || JS_IsNull(style) || !JS_IsObject(style)) {
         style = JS_NewObject(ctx);
         JS_SetPropertyStr(ctx, style, "animationTimingFunction", JS_NewString(ctx, ""));
+        css_seed_vendor_style_properties(ctx, style);
         JS_SetPropertyStr(ctx, style, "removeProperty",
             JS_NewCFunction(ctx, js_style_remove_property, "removeProperty", 1));
         JS_SetPropertyStr(ctx, style, "setProperty",
@@ -688,8 +706,8 @@ static GCValue css_ensure_style_object(JSContextHandle ctx, GCValue element) {
     return style;
 }
 
-static void css_apply_inline_style(JSContextHandle ctx, GCValue element, HtmlNode *node) {
-    const char *style_attr = html_node_attr_value(node, "style");
+void css_apply_inline_style_string(JSContextHandle ctx, GCValue element,
+                                   const char *style_attr) {
     if (!style_attr || !style_attr[0]) return;
     int count = 0;
     CssDeclaration *decls = css_parse_inline_style(style_attr, &count);
@@ -700,6 +718,11 @@ static void css_apply_inline_style(JSContextHandle ctx, GCValue element, HtmlNod
         css_set_style_property(ctx, style, decls[i].property, decls[i].value);
     }
     css_declarations_free(decls, count);
+}
+
+static void css_apply_inline_style(JSContextHandle ctx, GCValue element, HtmlNode *node) {
+    const char *style_attr = html_node_attr_value(node, "style");
+    css_apply_inline_style_string(ctx, element, style_attr);
 }
 
 static void css_apply_declarations(JSContextHandle ctx, GCValue element,

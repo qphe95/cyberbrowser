@@ -1,34 +1,34 @@
 idx	tag	id	class	display	x	y	width	height	margin_t	margin_r	margin_b	margin_l	padding_t	padding_r	padding_b	padding_l	border_t	border_r	border_b	border_l	flex_grow	flex_shrink	position	box_sizing
-0	html			other	0.00	0.00	1024.00	3453.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+0	html			other	0.00	0.00	1024.00	3722.50	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 1	head			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 2	script			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 3	meta			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-4	meta			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+4	script			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 5	script			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 6	script			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-7	script			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+7	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 8	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 9	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 10	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 11	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-12	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-13	title			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+12	title			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+13	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 14	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 15	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-16	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+16	meta			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 17	meta			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 18	meta			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-19	meta			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+19	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 20	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-21	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+21	meta			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 22	meta			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-23	meta			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+23	script			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 24	script			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-25	script			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+25	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 26	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 27	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 28	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-29	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+29	script			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 30	script			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 31	script			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 32	script			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
@@ -42,392 +42,417 @@ idx	tag	id	class	display	x	y	width	height	margin_t	margin_r	margin_b	margin_l	pa
 40	script			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 41	script			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 42	script			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-43	script			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-44	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-45	script			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+43	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+44	script			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+45	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 46	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 47	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-48	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-49	style		global_styles	other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-50	style		masthead_shell	other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-51	style	ext-styles	masthead_custom_styles	other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-52	style		searchbox	other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-53	style		kevlar_global_styles	other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-54	meta			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+48	style		global_styles	other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+49	style		masthead_shell	other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+50	style	ext-styles	masthead_custom_styles	other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+51	style		searchbox	other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+52	style		kevlar_global_styles	other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+53	meta			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+54	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 55	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-56	link			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+56	script			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 57	script			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 58	script			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-59	script			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-60	body			other	0.00	0.00	1024.00	3453.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-61	script			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-62	script			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-63	script			other	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-64	iframe			none	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-65	ytd-app			other	0.00	0.00	1024.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	absolute	content-box
-66	ytd-masthead	masthead	shell 	flex	0.00	0.00	1024.00	56.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	fixed	content-box
-67	div	search-container	ytd-searchbox-spt	other	0.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	absolute	content-box
-68	div	search-input	ytd-searchbox-spt	other	0.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-69	input	search		other	4.00	20.00	0.00	0.00	0.00	0.00	0.00	4.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-70	svg	menu-icon	external-icon	other	16.00	0.00	40.00	40.00	0.00	0.00	0.00	16.00	8.00	8.00	8.00	8.00	0.00	0.00	0.00	0.00	0.00	1.00	static	border-box
-71	g	menu	yt-icons-ext	other	24.00	8.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-72	path			other	24.00	8.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-73	div	masthead-logo		flex	56.00	10.00	484.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-74	a			none	224.00	40.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-75	svg	yt-ringo2-svg		other	224.00	40.00	40.00	40.00	0.00	0.00	0.00	0.00	8.00	8.00	8.00	8.00	0.00	0.00	0.00	0.00	0.00	1.00	static	border-box
-76	g			other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+59	body			other	0.00	0.00	1024.00	3722.50	0.00	0.00	0.00	0.00	56.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+60	script			other	0.00	56.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+61	script			other	0.00	56.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+62	script			other	0.00	56.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+63	iframe			none	0.00	0.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+64	ytd-app			other	0.00	56.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	absolute	content-box
+65	ytd-masthead	masthead	shell 	flex	0.00	0.00	1024.00	56.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	fixed	content-box
+66	div	search-container	ytd-searchbox-spt	other	0.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	absolute	content-box
+67	div	search-input	ytd-searchbox-spt	other	0.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+68	input	search		other	4.00	20.00	0.00	0.00	0.00	0.00	0.00	4.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+69	svg	menu-icon	external-icon	other	16.00	0.00	40.00	40.00	0.00	0.00	0.00	16.00	8.00	8.00	8.00	8.00	0.00	0.00	0.00	0.00	0.00	1.00	static	border-box
+70	g	menu	yt-icons-ext	other	24.00	8.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+71	path			other	24.00	8.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+72	div	masthead-logo		flex	56.00	10.00	484.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+73	a			none	224.00	40.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+74	svg	yt-ringo2-svg		other	224.00	40.00	40.00	40.00	0.00	0.00	0.00	0.00	8.00	8.00	8.00	8.00	0.00	0.00	0.00	0.00	0.00	1.00	static	border-box
+75	g			other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+76	path			other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 77	path			other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-78	path			other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-79	g	youtube-paths		other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+78	g	youtube-paths		other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+79	path			other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 80	path			other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 81	path			other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 82	path			other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 83	path			other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 84	path			other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 85	path			other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-86	path			other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-87	a			none	224.00	40.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-88	svg	yt-ringo2-red-svg	external-icon	other	224.00	40.00	40.00	40.00	0.00	0.00	0.00	0.00	8.00	8.00	8.00	8.00	0.00	0.00	0.00	0.00	0.00	1.00	static	border-box
-89	g			other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+86	a			none	224.00	40.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+87	svg	yt-ringo2-red-svg	external-icon	other	224.00	40.00	40.00	40.00	0.00	0.00	0.00	0.00	8.00	8.00	8.00	8.00	0.00	0.00	0.00	0.00	0.00	1.00	static	border-box
+88	g			other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+89	path			other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 90	path			other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-91	path			other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-92	g	youtube-paths		other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+91	g	youtube-paths		other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+92	path			other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 93	path			other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 94	path			other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 95	path			other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 96	path			other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 97	path			other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
 98	path			other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-99	path			other	232.00	48.00	24.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-100	span	country-code		other	56.00	10.00	480.00	0.00	0.00	2.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-101	div	masthead-skeleton-icons		flex	540.00	4.00	484.00	32.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-102	div		masthead-skeleton-icon	other	888.00	4.00	32.00	32.00	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-103	div		masthead-skeleton-icon	other	936.00	4.00	32.00	32.00	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-104	div		masthead-skeleton-icon	other	984.00	4.00	32.00	32.00	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-105	a			none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-106	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-107	a			none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-108	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-109	a			none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-110	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-111	a			none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-112	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-113	a			none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-114	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-115	a			none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-116	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-117	a			none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-118	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-119	a			none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-120	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-121	a			none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-122	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-123	a			none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-124	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-125	a			none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-126	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-127	a			none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-128	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-129	a			none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-130	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-131	div	copyright		none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-132	div			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-133	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-134	div	home-page-skeleton		flex	0.00	1080.00	1024.00	2373.00	56.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
-135	div	guide-skeleton		none	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	static	content-box
-136	div	home-container-skeleton		other	0.00	1080.00	1024.00	2385.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-137	div	home-chips		flex	0.00	1080.00	1024.00	12.00	0.00	0.00	0.00	0.00	12.00	0.00	0.00	24.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-138	div	home-container-media		flex	0.00	1110.00	1024.00	2355.00	18.00	0.00	0.00	0.00	0.00	16.00	0.00	16.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-139	div		rich-grid-media-skeleton	other	31.00	1110.00	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-140	div		video-details	flex	31.00	1110.00	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-141	div		rich-thumbnail skeleton-bg-color	other	31.00	1110.00	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
-142	div		details	flex	31.00	1284.38	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-143	div		channel-avatar skeleton-bg-color	other	31.00	1296.38	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-144	div		details-text-shell	other	79.00	1284.38	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-145	div		rich-video-title text-shell skeleton-bg-color	other	79.00	1294.38	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-146	div		rich-video-meta text-shell skeleton-bg-color	other	79.00	1334.38	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-147	div		rich-grid-media-skeleton	other	357.00	1110.00	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-148	div		video-details	flex	357.00	1110.00	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-149	div		rich-thumbnail skeleton-bg-color	other	357.00	1110.00	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
-150	div		details	flex	357.00	1284.38	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-151	div		channel-avatar skeleton-bg-color	other	357.00	1296.38	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-152	div		details-text-shell	other	405.00	1284.38	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-153	div		rich-video-title text-shell skeleton-bg-color	other	405.00	1294.38	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-154	div		rich-video-meta text-shell skeleton-bg-color	other	405.00	1334.38	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-155	div		rich-grid-media-skeleton	other	683.00	1110.00	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-156	div		video-details	flex	683.00	1110.00	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-157	div		rich-thumbnail skeleton-bg-color	other	683.00	1110.00	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
-158	div		details	flex	683.00	1284.38	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-159	div		channel-avatar skeleton-bg-color	other	683.00	1296.38	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-160	div		details-text-shell	other	731.00	1284.38	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-161	div		rich-video-title text-shell skeleton-bg-color	other	731.00	1294.38	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-162	div		rich-video-meta text-shell skeleton-bg-color	other	731.00	1334.38	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-163	div		rich-grid-media-skeleton	other	31.00	1404.38	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-164	div		video-details	flex	31.00	1404.38	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-165	div		rich-thumbnail skeleton-bg-color	other	31.00	1404.38	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
-166	div		details	flex	31.00	1578.75	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-167	div		channel-avatar skeleton-bg-color	other	31.00	1590.75	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-168	div		details-text-shell	other	79.00	1578.75	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-169	div		rich-video-title text-shell skeleton-bg-color	other	79.00	1588.75	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-170	div		rich-video-meta text-shell skeleton-bg-color	other	79.00	1628.75	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-171	div		rich-grid-media-skeleton	other	357.00	1404.38	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-172	div		video-details	flex	357.00	1404.38	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-173	div		rich-thumbnail skeleton-bg-color	other	357.00	1404.38	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
-174	div		details	flex	357.00	1578.75	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-175	div		channel-avatar skeleton-bg-color	other	357.00	1590.75	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-176	div		details-text-shell	other	405.00	1578.75	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-177	div		rich-video-title text-shell skeleton-bg-color	other	405.00	1588.75	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-178	div		rich-video-meta text-shell skeleton-bg-color	other	405.00	1628.75	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-179	div		rich-grid-media-skeleton	other	683.00	1404.38	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-180	div		video-details	flex	683.00	1404.38	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-181	div		rich-thumbnail skeleton-bg-color	other	683.00	1404.38	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
-182	div		details	flex	683.00	1578.75	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-183	div		channel-avatar skeleton-bg-color	other	683.00	1590.75	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-184	div		details-text-shell	other	731.00	1578.75	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-185	div		rich-video-title text-shell skeleton-bg-color	other	731.00	1588.75	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-186	div		rich-video-meta text-shell skeleton-bg-color	other	731.00	1628.75	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-187	div		rich-grid-media-skeleton	other	31.00	1698.75	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-188	div		video-details	flex	31.00	1698.75	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-189	div		rich-thumbnail skeleton-bg-color	other	31.00	1698.75	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
-190	div		details	flex	31.00	1873.12	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-191	div		channel-avatar skeleton-bg-color	other	31.00	1885.12	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-192	div		details-text-shell	other	79.00	1873.12	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-193	div		rich-video-title text-shell skeleton-bg-color	other	79.00	1883.12	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-194	div		rich-video-meta text-shell skeleton-bg-color	other	79.00	1923.12	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-195	div		rich-grid-media-skeleton	other	357.00	1698.75	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-196	div		video-details	flex	357.00	1698.75	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-197	div		rich-thumbnail skeleton-bg-color	other	357.00	1698.75	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
-198	div		details	flex	357.00	1873.12	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-199	div		channel-avatar skeleton-bg-color	other	357.00	1885.12	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-200	div		details-text-shell	other	405.00	1873.12	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-201	div		rich-video-title text-shell skeleton-bg-color	other	405.00	1883.12	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-202	div		rich-video-meta text-shell skeleton-bg-color	other	405.00	1923.12	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-203	div		rich-grid-media-skeleton	other	683.00	1698.75	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-204	div		video-details	flex	683.00	1698.75	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-205	div		rich-thumbnail skeleton-bg-color	other	683.00	1698.75	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
-206	div		details	flex	683.00	1873.12	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-207	div		channel-avatar skeleton-bg-color	other	683.00	1885.12	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-208	div		details-text-shell	other	731.00	1873.12	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-209	div		rich-video-title text-shell skeleton-bg-color	other	731.00	1883.12	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-210	div		rich-video-meta text-shell skeleton-bg-color	other	731.00	1923.12	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-211	div		rich-grid-media-skeleton	other	31.00	1993.12	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-212	div		video-details	flex	31.00	1993.12	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-213	div		rich-thumbnail skeleton-bg-color	other	31.00	1993.12	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
-214	div		details	flex	31.00	2167.50	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-215	div		channel-avatar skeleton-bg-color	other	31.00	2179.50	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-216	div		details-text-shell	other	79.00	2167.50	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-217	div		rich-video-title text-shell skeleton-bg-color	other	79.00	2177.50	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-218	div		rich-video-meta text-shell skeleton-bg-color	other	79.00	2217.50	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-219	div		rich-grid-media-skeleton	other	357.00	1993.12	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-220	div		video-details	flex	357.00	1993.12	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-221	div		rich-thumbnail skeleton-bg-color	other	357.00	1993.12	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
-222	div		details	flex	357.00	2167.50	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-223	div		channel-avatar skeleton-bg-color	other	357.00	2179.50	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-224	div		details-text-shell	other	405.00	2167.50	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-225	div		rich-video-title text-shell skeleton-bg-color	other	405.00	2177.50	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-226	div		rich-video-meta text-shell skeleton-bg-color	other	405.00	2217.50	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-227	div		rich-grid-media-skeleton	other	683.00	1993.12	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-228	div		video-details	flex	683.00	1993.12	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-229	div		rich-thumbnail skeleton-bg-color	other	683.00	1993.12	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
-230	div		details	flex	683.00	2167.50	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-231	div		channel-avatar skeleton-bg-color	other	683.00	2179.50	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-232	div		details-text-shell	other	731.00	2167.50	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-233	div		rich-video-title text-shell skeleton-bg-color	other	731.00	2177.50	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-234	div		rich-video-meta text-shell skeleton-bg-color	other	731.00	2217.50	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-235	div		rich-grid-media-skeleton	other	31.00	2287.50	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-236	div		video-details	flex	31.00	2287.50	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-237	div		rich-thumbnail skeleton-bg-color	other	31.00	2287.50	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
-238	div		details	flex	31.00	2461.88	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-239	div		channel-avatar skeleton-bg-color	other	31.00	2473.88	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-240	div		details-text-shell	other	79.00	2461.88	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-241	div		rich-video-title text-shell skeleton-bg-color	other	79.00	2471.88	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-242	div		rich-video-meta text-shell skeleton-bg-color	other	79.00	2511.88	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-243	div		rich-grid-media-skeleton	other	357.00	2287.50	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-244	div		video-details	flex	357.00	2287.50	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-245	div		rich-thumbnail skeleton-bg-color	other	357.00	2287.50	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
-246	div		details	flex	357.00	2461.88	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-247	div		channel-avatar skeleton-bg-color	other	357.00	2473.88	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-248	div		details-text-shell	other	405.00	2461.88	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-249	div		rich-video-title text-shell skeleton-bg-color	other	405.00	2471.88	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-250	div		rich-video-meta text-shell skeleton-bg-color	other	405.00	2511.88	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-251	div		rich-grid-media-skeleton	other	683.00	2287.50	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-252	div		video-details	flex	683.00	2287.50	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-253	div		rich-thumbnail skeleton-bg-color	other	683.00	2287.50	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
-254	div		details	flex	683.00	2461.88	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-255	div		channel-avatar skeleton-bg-color	other	683.00	2473.88	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-256	div		details-text-shell	other	731.00	2461.88	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-257	div		rich-video-title text-shell skeleton-bg-color	other	731.00	2471.88	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-258	div		rich-video-meta text-shell skeleton-bg-color	other	731.00	2511.88	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-259	div		rich-grid-media-skeleton	other	31.00	2581.88	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-260	div		video-details	flex	31.00	2581.88	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-261	div		rich-thumbnail skeleton-bg-color	other	31.00	2581.88	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
-262	div		details	flex	31.00	2756.25	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-263	div		channel-avatar skeleton-bg-color	other	31.00	2768.25	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-264	div		details-text-shell	other	79.00	2756.25	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-265	div		rich-video-title text-shell skeleton-bg-color	other	79.00	2766.25	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-266	div		rich-video-meta text-shell skeleton-bg-color	other	79.00	2806.25	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-267	div		rich-grid-media-skeleton	other	357.00	2581.88	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-268	div		video-details	flex	357.00	2581.88	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-269	div		rich-thumbnail skeleton-bg-color	other	357.00	2581.88	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
-270	div		details	flex	357.00	2756.25	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-271	div		channel-avatar skeleton-bg-color	other	357.00	2768.25	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-272	div		details-text-shell	other	405.00	2756.25	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-273	div		rich-video-title text-shell skeleton-bg-color	other	405.00	2766.25	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-274	div		rich-video-meta text-shell skeleton-bg-color	other	405.00	2806.25	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-275	div		rich-grid-media-skeleton	other	683.00	2581.88	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-276	div		video-details	flex	683.00	2581.88	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-277	div		rich-thumbnail skeleton-bg-color	other	683.00	2581.88	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
-278	div		details	flex	683.00	2756.25	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-279	div		channel-avatar skeleton-bg-color	other	683.00	2768.25	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-280	div		details-text-shell	other	731.00	2756.25	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-281	div		rich-video-title text-shell skeleton-bg-color	other	731.00	2766.25	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-282	div		rich-video-meta text-shell skeleton-bg-color	other	731.00	2806.25	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-283	div		rich-grid-media-skeleton	other	31.00	2876.25	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-284	div		video-details	flex	31.00	2876.25	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-285	div		rich-thumbnail skeleton-bg-color	other	31.00	2876.25	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
-286	div		details	flex	31.00	3050.62	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-287	div		channel-avatar skeleton-bg-color	other	31.00	3062.62	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-288	div		details-text-shell	other	79.00	3050.62	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-289	div		rich-video-title text-shell skeleton-bg-color	other	79.00	3060.62	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-290	div		rich-video-meta text-shell skeleton-bg-color	other	79.00	3100.62	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-291	div		rich-grid-media-skeleton	other	357.00	2876.25	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-292	div		video-details	flex	357.00	2876.25	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-293	div		rich-thumbnail skeleton-bg-color	other	357.00	2876.25	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
-294	div		details	flex	357.00	3050.62	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-295	div		channel-avatar skeleton-bg-color	other	357.00	3062.62	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-296	div		details-text-shell	other	405.00	3050.62	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-297	div		rich-video-title text-shell skeleton-bg-color	other	405.00	3060.62	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-298	div		rich-video-meta text-shell skeleton-bg-color	other	405.00	3100.62	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-299	div		rich-grid-media-skeleton	other	683.00	2876.25	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-300	div		video-details	flex	683.00	2876.25	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-301	div		rich-thumbnail skeleton-bg-color	other	683.00	2876.25	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
-302	div		details	flex	683.00	3050.62	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-303	div		channel-avatar skeleton-bg-color	other	683.00	3062.62	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-304	div		details-text-shell	other	731.00	3050.62	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-305	div		rich-video-title text-shell skeleton-bg-color	other	731.00	3060.62	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-306	div		rich-video-meta text-shell skeleton-bg-color	other	731.00	3100.62	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-307	div		rich-grid-media-skeleton	other	31.00	3170.62	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-308	div		video-details	flex	31.00	3170.62	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-309	div		rich-thumbnail skeleton-bg-color	other	31.00	3170.62	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
-310	div		details	flex	31.00	3345.00	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-311	div		channel-avatar skeleton-bg-color	other	31.00	3357.00	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-312	div		details-text-shell	other	79.00	3345.00	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-313	div		rich-video-title text-shell skeleton-bg-color	other	79.00	3355.00	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-314	div		rich-video-meta text-shell skeleton-bg-color	other	79.00	3395.00	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-315	div		rich-grid-media-skeleton	other	357.00	3170.62	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-316	div		video-details	flex	357.00	3170.62	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-317	div		rich-thumbnail skeleton-bg-color	other	357.00	3170.62	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
-318	div		details	flex	357.00	3345.00	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-319	div		channel-avatar skeleton-bg-color	other	357.00	3357.00	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-320	div		details-text-shell	other	405.00	3345.00	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-321	div		rich-video-title text-shell skeleton-bg-color	other	405.00	3355.00	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-322	div		rich-video-meta text-shell skeleton-bg-color	other	405.00	3395.00	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-323	div		rich-grid-media-skeleton	other	683.00	3170.62	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-324	div		video-details	flex	683.00	3170.62	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-325	div		rich-thumbnail skeleton-bg-color	other	683.00	3170.62	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
-326	div		details	flex	683.00	3345.00	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-327	div		channel-avatar skeleton-bg-color	other	683.00	3357.00	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-328	div		details-text-shell	other	731.00	3345.00	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-329	div		rich-video-title text-shell skeleton-bg-color	other	731.00	3355.00	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-330	div		rich-video-meta text-shell skeleton-bg-color	other	731.00	3395.00	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-331	script			other	0.00	1080.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-332	script			other	0.00	1080.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-333	script			other	0.00	1080.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-334	script			other	0.00	1080.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-335	script	base-js		other	0.00	1080.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-336	script			other	0.00	1080.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-337	script			other	0.00	1080.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-338	script			other	0.00	1080.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-339	script			other	0.00	1080.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-340	script			other	0.00	1080.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-341	script			other	0.00	1080.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-342	script			other	0.00	1080.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-343	link			other	0.00	1080.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-344	div	watch-page-skeleton	watch-skeleton  hidden	none	0.00	0.00	1024.00	299.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	border-box
-345	div	container		flex	0.00	0.00	1024.00	299.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-346	div	related		none	0.00	0.00	0.00	102.00	-720.00	0.00	0.00	0.00	0.00	0.00	0.00	24.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	border-box
-347	div		autoplay skeleton-light-border-bottom	other	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-348	div	upnext	skeleton-bg-color	none	0.00	0.00	120.00	20.00	0.00	0.00	14.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-349	div		video-skeleton	other	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-350	div		video-details	flex	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-351	div		thumbnail skeleton-bg-color	other	24.00	0.00	168.00	94.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-352	div		details flex-1	other	200.00	0.00	0.00	52.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-353	div		video-title text-shell skeleton-bg-color	other	200.00	0.00	200.00	20.00	0.00	0.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-354	div		video-meta text-shell skeleton-bg-color	other	200.00	32.00	120.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-355	div		video-skeleton	other	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-356	div		video-details	flex	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-357	div		thumbnail skeleton-bg-color	other	24.00	0.00	168.00	94.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-358	div		details flex-1	other	200.00	0.00	0.00	52.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-359	div		video-title text-shell skeleton-bg-color	other	200.00	0.00	200.00	20.00	0.00	0.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-360	div		video-meta text-shell skeleton-bg-color	other	200.00	32.00	120.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-361	div		video-skeleton	other	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-362	div		video-details	flex	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-363	div		thumbnail skeleton-bg-color	other	24.00	0.00	168.00	94.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-364	div		details flex-1	other	200.00	0.00	0.00	52.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-365	div		video-title text-shell skeleton-bg-color	other	200.00	0.00	200.00	20.00	0.00	0.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-366	div		video-meta text-shell skeleton-bg-color	other	200.00	32.00	120.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-367	div		video-skeleton	other	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-368	div		video-details	flex	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-369	div		thumbnail skeleton-bg-color	other	24.00	0.00	168.00	94.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-370	div		details flex-1	other	200.00	0.00	0.00	52.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-371	div		video-title text-shell skeleton-bg-color	other	200.00	0.00	200.00	20.00	0.00	0.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-372	div		video-meta text-shell skeleton-bg-color	other	200.00	32.00	120.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-373	div		video-skeleton	other	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-374	div		video-details	flex	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-375	div		thumbnail skeleton-bg-color	other	24.00	0.00	168.00	94.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-376	div		details flex-1	other	200.00	0.00	0.00	52.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-377	div		video-title text-shell skeleton-bg-color	other	200.00	0.00	200.00	20.00	0.00	0.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-378	div		video-meta text-shell skeleton-bg-color	other	200.00	32.00	120.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-379	div		video-skeleton	other	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-380	div		video-details	flex	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-381	div		thumbnail skeleton-bg-color	other	24.00	0.00	168.00	94.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-382	div		details flex-1	other	200.00	0.00	0.00	52.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-383	div		video-title text-shell skeleton-bg-color	other	200.00	0.00	200.00	20.00	0.00	0.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-384	div		video-meta text-shell skeleton-bg-color	other	200.00	32.00	120.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-385	div		video-skeleton	other	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-386	div		video-details	flex	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-387	div		thumbnail skeleton-bg-color	other	24.00	0.00	168.00	94.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-388	div		details flex-1	other	200.00	0.00	0.00	52.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-389	div		video-title text-shell skeleton-bg-color	other	200.00	0.00	200.00	20.00	0.00	0.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-390	div		video-meta text-shell skeleton-bg-color	other	200.00	32.00	120.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-391	div		video-skeleton	other	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-392	div		video-details	flex	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-393	div		thumbnail skeleton-bg-color	other	24.00	0.00	168.00	94.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-394	div		details flex-1	other	200.00	0.00	0.00	52.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-395	div		video-title text-shell skeleton-bg-color	other	200.00	0.00	200.00	20.00	0.00	0.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-396	div		video-meta text-shell skeleton-bg-color	other	200.00	32.00	120.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-397	div		video-skeleton	other	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-398	div		video-details	flex	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-399	div		thumbnail skeleton-bg-color	other	24.00	0.00	168.00	94.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-400	div		details flex-1	other	200.00	0.00	0.00	52.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-401	div		video-title text-shell skeleton-bg-color	other	200.00	0.00	200.00	20.00	0.00	0.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-402	div		video-meta text-shell skeleton-bg-color	other	200.00	32.00	120.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-403	div		video-skeleton	other	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-404	div		video-details	flex	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-405	div		thumbnail skeleton-bg-color	other	24.00	0.00	168.00	94.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-406	div		details flex-1	other	200.00	0.00	0.00	52.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-407	div		video-title text-shell skeleton-bg-color	other	200.00	0.00	200.00	20.00	0.00	0.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-408	div		video-meta text-shell skeleton-bg-color	other	200.00	32.00	120.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-409	div	info-container		other	0.00	0.00	1280.00	299.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	border-box
-410	div	primary-info	skeleton-light-border-bottom	other	0.00	0.00	1280.00	92.00	0.00	0.00	0.00	0.00	20.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-411	div	title	text-shell skeleton-bg-color	other	0.00	20.00	400.00	20.00	0.00	0.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-412	div	info		flex	0.00	52.00	1280.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-413	div	count	text-shell skeleton-bg-color	other	0.00	52.00	200.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-414	div		flex-1	other	200.00	62.00	1080.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-415	div	menu		flex	1280.00	52.00	0.00	20.00	0.00	0.00	0.00	0.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-416	div		menu-button skeleton-bg-color	other	1300.00	52.00	20.00	20.00	0.00	0.00	0.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-417	div		menu-button skeleton-bg-color	other	1340.00	52.00	20.00	20.00	0.00	0.00	0.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-418	div		menu-button skeleton-bg-color	other	1380.00	52.00	20.00	20.00	0.00	0.00	0.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-419	div		menu-button skeleton-bg-color	other	1420.00	52.00	20.00	20.00	0.00	0.00	0.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-420	div		menu-button skeleton-bg-color	other	1460.00	52.00	20.00	20.00	0.00	0.00	0.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-421	div	secondary-info	skeleton-light-border-bottom	other	0.00	92.00	1280.00	183.00	0.00	0.00	24.00	0.00	16.00	0.00	16.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-422	div	top-row		flex	0.00	108.00	1280.00	50.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-423	div	video-owner	flex-1	flex	0.00	108.00	1139.00	50.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-424	div	channel-icon	skeleton-bg-color	other	0.00	108.00	48.00	48.00	0.00	16.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-425	div	upload-info	flex-1	flex	64.00	108.00	1075.00	50.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
-426	div	owner-name	text-shell skeleton-bg-color	other	64.00	108.00	200.00	20.00	0.00	0.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-427	div	published-date	text-shell skeleton-bg-color	other	64.00	139.00	200.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-428	div	subscribe-button	skeleton-bg-color	other	1139.00	115.00	137.00	36.00	7.00	4.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-429	script			other	0.00	1080.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-430	script			other	0.00	1080.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
-431	script			other	0.00	1080.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+99	span	country-code		other	56.00	10.00	480.00	0.00	0.00	2.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+100	div	masthead-skeleton-icons		flex	540.00	4.00	484.00	32.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+101	div		masthead-skeleton-icon	other	888.00	4.00	32.00	32.00	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+102	div		masthead-skeleton-icon	other	936.00	4.00	32.00	32.00	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+103	div		masthead-skeleton-icon	other	984.00	4.00	32.00	32.00	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+104	a			none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+105	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+106	a			none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+107	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+108	a			none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+109	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+110	a			none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+111	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+112	a			none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+113	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+114	a			none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+115	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+116	a			none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+117	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+118	a			none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+119	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+120	a			none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+121	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+122	a			none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+123	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+124	a			none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+125	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+126	a			none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+127	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+128	a			none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+129	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+130	div	copyright		none	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+131	div			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+132	#text			inline	0.00	0.00	1024.00	800.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+133	div	home-page-skeleton		flex	0.00	112.00	1024.00	3610.50	56.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
+134	div	guide-skeleton		flex	0.00	112.00	240.00	3610.50	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	static	content-box
+135	div		guide-ghost	flex	0.00	112.00	240.00	20.94	0.00	0.00	0.00	0.00	10.00	30.00	10.00	30.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+136	div		guide-ghost-icon skeleton-bg-color	other	30.00	122.00	40.00	24.00	0.00	15.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+137	div		guide-ghost-text skeleton-bg-color	other	101.00	122.00	160.00	16.00	0.00	0.00	0.00	16.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+138	div		guide-ghost	flex	0.00	132.94	240.00	20.94	0.00	0.00	0.00	0.00	10.00	30.00	10.00	30.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+139	div		guide-ghost-icon skeleton-bg-color	other	30.00	142.94	40.00	24.00	0.00	15.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+140	div		guide-ghost-text skeleton-bg-color	other	101.00	142.94	160.00	16.00	0.00	0.00	0.00	16.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+141	div		guide-ghost	flex	0.00	153.89	240.00	20.94	0.00	0.00	0.00	0.00	10.00	30.00	10.00	30.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+142	div		guide-ghost-icon skeleton-bg-color	other	30.00	163.89	40.00	24.00	0.00	15.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+143	div		guide-ghost-text skeleton-bg-color	other	101.00	163.89	160.00	16.00	0.00	0.00	0.00	16.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+144	div		guide-ghost	flex	0.00	174.83	240.00	20.94	0.00	0.00	0.00	0.00	10.00	30.00	10.00	30.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+145	div		guide-ghost-icon skeleton-bg-color	other	30.00	184.83	40.00	24.00	0.00	15.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+146	div		guide-ghost-text skeleton-bg-color	other	101.00	184.83	160.00	16.00	0.00	0.00	0.00	16.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+147	div		guide-ghost	flex	0.00	195.78	240.00	20.94	0.00	0.00	0.00	0.00	10.00	30.00	10.00	30.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+148	div		guide-ghost-icon skeleton-bg-color	other	30.00	205.78	40.00	24.00	0.00	15.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+149	div		guide-ghost-text skeleton-bg-color	other	101.00	205.78	160.00	16.00	0.00	0.00	0.00	16.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+150	div		guide-ghost	flex	0.00	216.72	240.00	20.94	0.00	0.00	0.00	0.00	10.00	30.00	10.00	30.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+151	div		guide-ghost-icon skeleton-bg-color	other	30.00	226.72	40.00	24.00	0.00	15.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+152	div		guide-ghost-text skeleton-bg-color	other	101.00	226.72	160.00	16.00	0.00	0.00	0.00	16.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+153	div	home-container-skeleton		other	240.00	112.00	784.00	3610.50	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+154	div	home-chips		flex	240.00	112.00	784.00	60.00	0.00	0.00	0.00	0.00	12.00	0.00	0.00	24.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+155	div		home-chips-ghost skeleton-bg-color	inline-block	272.00	132.00	80.00	32.00	8.00	8.00	8.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+156	div		home-chips-ghost skeleton-bg-color	inline-block	367.00	132.00	80.00	32.00	8.00	8.00	8.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+157	div		home-chips-ghost skeleton-bg-color	inline-block	462.00	132.00	80.00	32.00	8.00	8.00	8.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+158	div		home-chips-ghost skeleton-bg-color	inline-block	557.00	132.00	80.00	32.00	8.00	8.00	8.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+159	div		home-chips-ghost skeleton-bg-color	inline-block	652.00	132.00	80.00	32.00	8.00	8.00	8.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+160	div		home-chips-ghost skeleton-bg-color	inline-block	747.00	132.00	80.00	32.00	8.00	8.00	8.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+161	div		home-chips-ghost skeleton-bg-color	inline-block	842.00	132.00	80.00	32.00	8.00	8.00	8.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+162	div		home-chips-ghost skeleton-bg-color	inline-block	937.00	132.00	80.00	32.00	8.00	8.00	8.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+163	div	home-container-media		flex	240.00	190.00	784.00	3532.50	18.00	0.00	0.00	0.00	0.00	16.00	0.00	16.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+164	div		rich-grid-media-skeleton	other	314.00	190.00	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+165	div		video-details	flex	314.00	190.00	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+166	div		rich-thumbnail skeleton-bg-color	other	314.00	190.00	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
+167	div		details	flex	314.00	364.38	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+168	div		channel-avatar skeleton-bg-color	other	314.00	376.38	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+169	div		details-text-shell	other	362.00	364.38	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+170	div		rich-video-title text-shell skeleton-bg-color	other	362.00	374.38	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+171	div		rich-video-meta text-shell skeleton-bg-color	other	362.00	414.38	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+172	div		rich-grid-media-skeleton	other	640.00	190.00	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+173	div		video-details	flex	640.00	190.00	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+174	div		rich-thumbnail skeleton-bg-color	other	640.00	190.00	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
+175	div		details	flex	640.00	364.38	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+176	div		channel-avatar skeleton-bg-color	other	640.00	376.38	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+177	div		details-text-shell	other	688.00	364.38	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+178	div		rich-video-title text-shell skeleton-bg-color	other	688.00	374.38	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+179	div		rich-video-meta text-shell skeleton-bg-color	other	688.00	414.38	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+180	div		rich-grid-media-skeleton	other	314.00	484.38	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+181	div		video-details	flex	314.00	484.38	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+182	div		rich-thumbnail skeleton-bg-color	other	314.00	484.38	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
+183	div		details	flex	314.00	658.75	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+184	div		channel-avatar skeleton-bg-color	other	314.00	670.75	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+185	div		details-text-shell	other	362.00	658.75	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+186	div		rich-video-title text-shell skeleton-bg-color	other	362.00	668.75	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+187	div		rich-video-meta text-shell skeleton-bg-color	other	362.00	708.75	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+188	div		rich-grid-media-skeleton	other	640.00	484.38	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+189	div		video-details	flex	640.00	484.38	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+190	div		rich-thumbnail skeleton-bg-color	other	640.00	484.38	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
+191	div		details	flex	640.00	658.75	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+192	div		channel-avatar skeleton-bg-color	other	640.00	670.75	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+193	div		details-text-shell	other	688.00	658.75	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+194	div		rich-video-title text-shell skeleton-bg-color	other	688.00	668.75	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+195	div		rich-video-meta text-shell skeleton-bg-color	other	688.00	708.75	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+196	div		rich-grid-media-skeleton	other	314.00	778.75	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+197	div		video-details	flex	314.00	778.75	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+198	div		rich-thumbnail skeleton-bg-color	other	314.00	778.75	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
+199	div		details	flex	314.00	953.12	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+200	div		channel-avatar skeleton-bg-color	other	314.00	965.12	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+201	div		details-text-shell	other	362.00	953.12	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+202	div		rich-video-title text-shell skeleton-bg-color	other	362.00	963.12	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+203	div		rich-video-meta text-shell skeleton-bg-color	other	362.00	1003.12	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+204	div		rich-grid-media-skeleton	other	640.00	778.75	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+205	div		video-details	flex	640.00	778.75	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+206	div		rich-thumbnail skeleton-bg-color	other	640.00	778.75	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
+207	div		details	flex	640.00	953.12	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+208	div		channel-avatar skeleton-bg-color	other	640.00	965.12	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+209	div		details-text-shell	other	688.00	953.12	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+210	div		rich-video-title text-shell skeleton-bg-color	other	688.00	963.12	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+211	div		rich-video-meta text-shell skeleton-bg-color	other	688.00	1003.12	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+212	div		rich-grid-media-skeleton	other	314.00	1073.12	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+213	div		video-details	flex	314.00	1073.12	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+214	div		rich-thumbnail skeleton-bg-color	other	314.00	1073.12	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
+215	div		details	flex	314.00	1247.50	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+216	div		channel-avatar skeleton-bg-color	other	314.00	1259.50	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+217	div		details-text-shell	other	362.00	1247.50	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+218	div		rich-video-title text-shell skeleton-bg-color	other	362.00	1257.50	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+219	div		rich-video-meta text-shell skeleton-bg-color	other	362.00	1297.50	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+220	div		rich-grid-media-skeleton	other	640.00	1073.12	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+221	div		video-details	flex	640.00	1073.12	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+222	div		rich-thumbnail skeleton-bg-color	other	640.00	1073.12	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
+223	div		details	flex	640.00	1247.50	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+224	div		channel-avatar skeleton-bg-color	other	640.00	1259.50	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+225	div		details-text-shell	other	688.00	1247.50	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+226	div		rich-video-title text-shell skeleton-bg-color	other	688.00	1257.50	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+227	div		rich-video-meta text-shell skeleton-bg-color	other	688.00	1297.50	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+228	div		rich-grid-media-skeleton	other	314.00	1367.50	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+229	div		video-details	flex	314.00	1367.50	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+230	div		rich-thumbnail skeleton-bg-color	other	314.00	1367.50	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
+231	div		details	flex	314.00	1541.88	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+232	div		channel-avatar skeleton-bg-color	other	314.00	1553.88	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+233	div		details-text-shell	other	362.00	1541.88	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+234	div		rich-video-title text-shell skeleton-bg-color	other	362.00	1551.88	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+235	div		rich-video-meta text-shell skeleton-bg-color	other	362.00	1591.88	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+236	div		rich-grid-media-skeleton	other	640.00	1367.50	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+237	div		video-details	flex	640.00	1367.50	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+238	div		rich-thumbnail skeleton-bg-color	other	640.00	1367.50	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
+239	div		details	flex	640.00	1541.88	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+240	div		channel-avatar skeleton-bg-color	other	640.00	1553.88	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+241	div		details-text-shell	other	688.00	1541.88	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+242	div		rich-video-title text-shell skeleton-bg-color	other	688.00	1551.88	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+243	div		rich-video-meta text-shell skeleton-bg-color	other	688.00	1591.88	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+244	div		rich-grid-media-skeleton	other	314.00	1661.88	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+245	div		video-details	flex	314.00	1661.88	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+246	div		rich-thumbnail skeleton-bg-color	other	314.00	1661.88	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
+247	div		details	flex	314.00	1836.25	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+248	div		channel-avatar skeleton-bg-color	other	314.00	1848.25	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+249	div		details-text-shell	other	362.00	1836.25	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+250	div		rich-video-title text-shell skeleton-bg-color	other	362.00	1846.25	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+251	div		rich-video-meta text-shell skeleton-bg-color	other	362.00	1886.25	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+252	div		rich-grid-media-skeleton	other	640.00	1661.88	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+253	div		video-details	flex	640.00	1661.88	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+254	div		rich-thumbnail skeleton-bg-color	other	640.00	1661.88	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
+255	div		details	flex	640.00	1836.25	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+256	div		channel-avatar skeleton-bg-color	other	640.00	1848.25	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+257	div		details-text-shell	other	688.00	1836.25	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+258	div		rich-video-title text-shell skeleton-bg-color	other	688.00	1846.25	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+259	div		rich-video-meta text-shell skeleton-bg-color	other	688.00	1886.25	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+260	div		rich-grid-media-skeleton	other	314.00	1956.25	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+261	div		video-details	flex	314.00	1956.25	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+262	div		rich-thumbnail skeleton-bg-color	other	314.00	1956.25	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
+263	div		details	flex	314.00	2130.62	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+264	div		channel-avatar skeleton-bg-color	other	314.00	2142.62	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+265	div		details-text-shell	other	362.00	2130.62	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+266	div		rich-video-title text-shell skeleton-bg-color	other	362.00	2140.62	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+267	div		rich-video-meta text-shell skeleton-bg-color	other	362.00	2180.62	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+268	div		rich-grid-media-skeleton	other	640.00	1956.25	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+269	div		video-details	flex	640.00	1956.25	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+270	div		rich-thumbnail skeleton-bg-color	other	640.00	1956.25	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
+271	div		details	flex	640.00	2130.62	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+272	div		channel-avatar skeleton-bg-color	other	640.00	2142.62	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+273	div		details-text-shell	other	688.00	2130.62	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+274	div		rich-video-title text-shell skeleton-bg-color	other	688.00	2140.62	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+275	div		rich-video-meta text-shell skeleton-bg-color	other	688.00	2180.62	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+276	div		rich-grid-media-skeleton	other	314.00	2250.62	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+277	div		video-details	flex	314.00	2250.62	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+278	div		rich-thumbnail skeleton-bg-color	other	314.00	2250.62	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
+279	div		details	flex	314.00	2425.00	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+280	div		channel-avatar skeleton-bg-color	other	314.00	2437.00	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+281	div		details-text-shell	other	362.00	2425.00	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+282	div		rich-video-title text-shell skeleton-bg-color	other	362.00	2435.00	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+283	div		rich-video-meta text-shell skeleton-bg-color	other	362.00	2475.00	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+284	div		rich-grid-media-skeleton	other	640.00	2250.62	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+285	div		video-details	flex	640.00	2250.62	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+286	div		rich-thumbnail skeleton-bg-color	other	640.00	2250.62	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
+287	div		details	flex	640.00	2425.00	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+288	div		channel-avatar skeleton-bg-color	other	640.00	2437.00	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+289	div		details-text-shell	other	688.00	2425.00	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+290	div		rich-video-title text-shell skeleton-bg-color	other	688.00	2435.00	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+291	div		rich-video-meta text-shell skeleton-bg-color	other	688.00	2475.00	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+292	div		rich-grid-media-skeleton	other	314.00	2545.00	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+293	div		video-details	flex	314.00	2545.00	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+294	div		rich-thumbnail skeleton-bg-color	other	314.00	2545.00	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
+295	div		details	flex	314.00	2719.38	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+296	div		channel-avatar skeleton-bg-color	other	314.00	2731.38	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+297	div		details-text-shell	other	362.00	2719.38	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+298	div		rich-video-title text-shell skeleton-bg-color	other	362.00	2729.38	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+299	div		rich-video-meta text-shell skeleton-bg-color	other	362.00	2769.38	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+300	div		rich-grid-media-skeleton	other	640.00	2545.00	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+301	div		video-details	flex	640.00	2545.00	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+302	div		rich-thumbnail skeleton-bg-color	other	640.00	2545.00	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
+303	div		details	flex	640.00	2719.38	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+304	div		channel-avatar skeleton-bg-color	other	640.00	2731.38	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+305	div		details-text-shell	other	688.00	2719.38	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+306	div		rich-video-title text-shell skeleton-bg-color	other	688.00	2729.38	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+307	div		rich-video-meta text-shell skeleton-bg-color	other	688.00	2769.38	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+308	div		rich-grid-media-skeleton	other	314.00	2839.38	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+309	div		video-details	flex	314.00	2839.38	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+310	div		rich-thumbnail skeleton-bg-color	other	314.00	2839.38	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
+311	div		details	flex	314.00	3013.75	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+312	div		channel-avatar skeleton-bg-color	other	314.00	3025.75	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+313	div		details-text-shell	other	362.00	3013.75	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+314	div		rich-video-title text-shell skeleton-bg-color	other	362.00	3023.75	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+315	div		rich-video-meta text-shell skeleton-bg-color	other	362.00	3063.75	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+316	div		rich-grid-media-skeleton	other	640.00	2839.38	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+317	div		video-details	flex	640.00	2839.38	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+318	div		rich-thumbnail skeleton-bg-color	other	640.00	2839.38	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
+319	div		details	flex	640.00	3013.75	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+320	div		channel-avatar skeleton-bg-color	other	640.00	3025.75	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+321	div		details-text-shell	other	688.00	3013.75	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+322	div		rich-video-title text-shell skeleton-bg-color	other	688.00	3023.75	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+323	div		rich-video-meta text-shell skeleton-bg-color	other	688.00	3063.75	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+324	div		rich-grid-media-skeleton	other	314.00	3133.75	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+325	div		video-details	flex	314.00	3133.75	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+326	div		rich-thumbnail skeleton-bg-color	other	314.00	3133.75	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
+327	div		details	flex	314.00	3308.12	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+328	div		channel-avatar skeleton-bg-color	other	314.00	3320.12	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+329	div		details-text-shell	other	362.00	3308.12	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+330	div		rich-video-title text-shell skeleton-bg-color	other	362.00	3318.12	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+331	div		rich-video-meta text-shell skeleton-bg-color	other	362.00	3358.12	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+332	div		rich-grid-media-skeleton	other	640.00	3133.75	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+333	div		video-details	flex	640.00	3133.75	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+334	div		rich-thumbnail skeleton-bg-color	other	640.00	3133.75	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
+335	div		details	flex	640.00	3308.12	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+336	div		channel-avatar skeleton-bg-color	other	640.00	3320.12	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+337	div		details-text-shell	other	688.00	3308.12	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+338	div		rich-video-title text-shell skeleton-bg-color	other	688.00	3318.12	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+339	div		rich-video-meta text-shell skeleton-bg-color	other	688.00	3358.12	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+340	div		rich-grid-media-skeleton	other	314.00	3428.12	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+341	div		video-details	flex	314.00	3428.12	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+342	div		rich-thumbnail skeleton-bg-color	other	314.00	3428.12	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
+343	div		details	flex	314.00	3602.50	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+344	div		channel-avatar skeleton-bg-color	other	314.00	3614.50	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+345	div		details-text-shell	other	362.00	3602.50	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+346	div		rich-video-title text-shell skeleton-bg-color	other	362.00	3612.50	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+347	div		rich-video-meta text-shell skeleton-bg-color	other	362.00	3652.50	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+348	div		rich-grid-media-skeleton	other	640.00	3428.12	310.00	294.38	0.00	8.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+349	div		video-details	flex	640.00	3428.12	310.00	294.38	0.00	0.00	0.00	0.00	0.00	0.00	40.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+350	div		rich-thumbnail skeleton-bg-color	other	640.00	3428.12	310.00	174.38	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	content-box
+351	div		details	flex	640.00	3602.50	310.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+352	div		channel-avatar skeleton-bg-color	other	640.00	3614.50	36.00	36.00	12.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+353	div		details-text-shell	other	688.00	3602.50	262.00	80.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+354	div		rich-video-title text-shell skeleton-bg-color	other	688.00	3612.50	235.80	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+355	div		rich-video-meta text-shell skeleton-bg-color	other	688.00	3652.50	157.20	20.00	10.00	0.00	10.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+356	script			other	0.00	112.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+357	script			other	0.00	112.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+358	script			other	0.00	112.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+359	script			other	0.00	112.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+360	script	base-js		other	0.00	112.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+361	script			other	0.00	112.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+362	script			other	0.00	112.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+363	script			other	0.00	112.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+364	script			other	0.00	112.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+365	script			other	0.00	112.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+366	script			other	0.00	112.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+367	script			other	0.00	112.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+368	link			other	0.00	112.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+369	div	watch-page-skeleton	watch-skeleton  hidden	none	0.00	0.00	1024.00	299.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	border-box
+370	div	container		flex	0.00	0.00	1024.00	299.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+371	div	related		none	0.00	0.00	0.00	102.00	-720.00	0.00	0.00	0.00	0.00	0.00	0.00	24.00	0.00	0.00	0.00	0.00	0.00	1.00	relative	border-box
+372	div		autoplay skeleton-light-border-bottom	other	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+373	div	upnext	skeleton-bg-color	none	0.00	0.00	120.00	20.00	0.00	0.00	14.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+374	div		video-skeleton	other	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+375	div		video-details	flex	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+376	div		thumbnail skeleton-bg-color	other	24.00	0.00	168.00	94.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+377	div		details flex-1	other	200.00	0.00	0.00	52.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+378	div		video-title text-shell skeleton-bg-color	other	200.00	0.00	200.00	20.00	0.00	0.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+379	div		video-meta text-shell skeleton-bg-color	other	200.00	32.00	120.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+380	div		video-skeleton	other	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+381	div		video-details	flex	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+382	div		thumbnail skeleton-bg-color	other	24.00	0.00	168.00	94.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+383	div		details flex-1	other	200.00	0.00	0.00	52.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+384	div		video-title text-shell skeleton-bg-color	other	200.00	0.00	200.00	20.00	0.00	0.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+385	div		video-meta text-shell skeleton-bg-color	other	200.00	32.00	120.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+386	div		video-skeleton	other	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+387	div		video-details	flex	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+388	div		thumbnail skeleton-bg-color	other	24.00	0.00	168.00	94.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+389	div		details flex-1	other	200.00	0.00	0.00	52.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+390	div		video-title text-shell skeleton-bg-color	other	200.00	0.00	200.00	20.00	0.00	0.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+391	div		video-meta text-shell skeleton-bg-color	other	200.00	32.00	120.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+392	div		video-skeleton	other	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+393	div		video-details	flex	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+394	div		thumbnail skeleton-bg-color	other	24.00	0.00	168.00	94.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+395	div		details flex-1	other	200.00	0.00	0.00	52.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+396	div		video-title text-shell skeleton-bg-color	other	200.00	0.00	200.00	20.00	0.00	0.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+397	div		video-meta text-shell skeleton-bg-color	other	200.00	32.00	120.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+398	div		video-skeleton	other	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+399	div		video-details	flex	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+400	div		thumbnail skeleton-bg-color	other	24.00	0.00	168.00	94.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+401	div		details flex-1	other	200.00	0.00	0.00	52.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+402	div		video-title text-shell skeleton-bg-color	other	200.00	0.00	200.00	20.00	0.00	0.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+403	div		video-meta text-shell skeleton-bg-color	other	200.00	32.00	120.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+404	div		video-skeleton	other	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+405	div		video-details	flex	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+406	div		thumbnail skeleton-bg-color	other	24.00	0.00	168.00	94.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+407	div		details flex-1	other	200.00	0.00	0.00	52.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+408	div		video-title text-shell skeleton-bg-color	other	200.00	0.00	200.00	20.00	0.00	0.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+409	div		video-meta text-shell skeleton-bg-color	other	200.00	32.00	120.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+410	div		video-skeleton	other	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+411	div		video-details	flex	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+412	div		thumbnail skeleton-bg-color	other	24.00	0.00	168.00	94.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+413	div		details flex-1	other	200.00	0.00	0.00	52.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+414	div		video-title text-shell skeleton-bg-color	other	200.00	0.00	200.00	20.00	0.00	0.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+415	div		video-meta text-shell skeleton-bg-color	other	200.00	32.00	120.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+416	div		video-skeleton	other	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+417	div		video-details	flex	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+418	div		thumbnail skeleton-bg-color	other	24.00	0.00	168.00	94.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+419	div		details flex-1	other	200.00	0.00	0.00	52.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+420	div		video-title text-shell skeleton-bg-color	other	200.00	0.00	200.00	20.00	0.00	0.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+421	div		video-meta text-shell skeleton-bg-color	other	200.00	32.00	120.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+422	div		video-skeleton	other	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+423	div		video-details	flex	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+424	div		thumbnail skeleton-bg-color	other	24.00	0.00	168.00	94.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+425	div		details flex-1	other	200.00	0.00	0.00	52.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+426	div		video-title text-shell skeleton-bg-color	other	200.00	0.00	200.00	20.00	0.00	0.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+427	div		video-meta text-shell skeleton-bg-color	other	200.00	32.00	120.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+428	div		video-skeleton	other	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+429	div		video-details	flex	24.00	0.00	0.00	102.00	0.00	0.00	0.00	0.00	0.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+430	div		thumbnail skeleton-bg-color	other	24.00	0.00	168.00	94.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+431	div		details flex-1	other	200.00	0.00	0.00	52.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+432	div		video-title text-shell skeleton-bg-color	other	200.00	0.00	200.00	20.00	0.00	0.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+433	div		video-meta text-shell skeleton-bg-color	other	200.00	32.00	120.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+434	div	info-container		other	0.00	0.00	1280.00	299.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	border-box
+435	div	primary-info	skeleton-light-border-bottom	other	0.00	0.00	1280.00	92.00	0.00	0.00	0.00	0.00	20.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+436	div	title	text-shell skeleton-bg-color	other	0.00	20.00	400.00	20.00	0.00	0.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+437	div	info		flex	0.00	52.00	1280.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+438	div	count	text-shell skeleton-bg-color	other	0.00	52.00	200.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+439	div		flex-1	other	200.00	62.00	1080.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+440	div	menu		flex	1280.00	52.00	0.00	20.00	0.00	0.00	0.00	0.00	0.00	8.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+441	div		menu-button skeleton-bg-color	other	1300.00	52.00	20.00	20.00	0.00	0.00	0.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+442	div		menu-button skeleton-bg-color	other	1340.00	52.00	20.00	20.00	0.00	0.00	0.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+443	div		menu-button skeleton-bg-color	other	1380.00	52.00	20.00	20.00	0.00	0.00	0.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+444	div		menu-button skeleton-bg-color	other	1420.00	52.00	20.00	20.00	0.00	0.00	0.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+445	div		menu-button skeleton-bg-color	other	1460.00	52.00	20.00	20.00	0.00	0.00	0.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+446	div	secondary-info	skeleton-light-border-bottom	other	0.00	92.00	1280.00	183.00	0.00	0.00	24.00	0.00	16.00	0.00	16.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+447	div	top-row		flex	0.00	108.00	1280.00	50.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+448	div	video-owner	flex-1	flex	0.00	108.00	1139.00	50.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+449	div	channel-icon	skeleton-bg-color	other	0.00	108.00	48.00	48.00	0.00	16.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+450	div	upload-info	flex-1	flex	64.00	108.00	1075.00	50.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	1.00	static	content-box
+451	div	owner-name	text-shell skeleton-bg-color	other	64.00	108.00	200.00	20.00	0.00	0.00	12.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+452	div	published-date	text-shell skeleton-bg-color	other	64.00	139.00	200.00	20.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+453	div	subscribe-button	skeleton-bg-color	other	1139.00	115.00	137.00	36.00	7.00	4.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+454	script			other	0.00	112.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+455	script			other	0.00	112.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box
+456	script			other	0.00	112.00	1024.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	0.00	1.00	static	content-box

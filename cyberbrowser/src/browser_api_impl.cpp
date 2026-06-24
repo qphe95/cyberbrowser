@@ -2969,6 +2969,36 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_Eval(ctx, patch_odp, strlen(patch_odp), "<patch_odp>", JS_EVAL_TYPE_GLOBAL);
     }
 
+    // Minimal custom-element upgrade: set the element's prototype to the
+    // registered constructor's prototype so Polymer methods are visible.
+    // We deliberately do not call the constructor here; the kevlar bundle's
+    // ES5-shimmed constructors are unsafe to invoke on existing DOMNode-backed
+    // objects and caused crashes during the large application script.
+    {
+        const char *upgrade_js =
+            "(function(){"
+            "  window.__cyber_upgradeElement = function(el) {"
+            "    if (!el || el.__CE_upgraded || el.nodeType !== 1) return;"
+            "    var name = el.tagName.toLowerCase();"
+            "    var ctor = window.customElements && window.customElements.get(name);"
+            "    if (!ctor || !ctor.prototype) return;"
+            "    el.removeAttribute && el.removeAttribute('disable-upgrade');"
+            "    el.__proto__ = ctor.prototype;"
+            "    el.__CE_upgraded = true;"
+            "  };"
+            "  window.__cyber_upgradeAll = function(name) {"
+            "    if (!window.customElements) return;"
+            "    var ctor = window.customElements.get(name);"
+            "    if (!ctor || !ctor.prototype) return;"
+            "    var list = document.getElementsByTagName(name);"
+            "    for (var i = 0; i < list.length; i++) {"
+            "      window.__cyber_upgradeElement(list[i]);"
+            "    }"
+            "  };"
+            "})();";
+        JS_Eval(ctx, upgrade_js, strlen(upgrade_js), "<ce_upgrade>", JS_EVAL_TYPE_GLOBAL);
+    }
+
     // CustomElementRegistry constructor (for completeness)
     GCValue ce_registry_ctor = JS_NewCFunction2(ctx, js_dummy_function, "CustomElementRegistry",
         0, JS_CFUNC_constructor, 0);
