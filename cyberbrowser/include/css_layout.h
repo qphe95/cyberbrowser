@@ -152,7 +152,12 @@ typedef struct LayoutBox {
     double line_height;
 
     uint32_t flags;
-    uint32_t _pad;
+    /* Bitmask of which top/left/right/bottom values were explicitly set. */
+#define LAYOUT_SIDE_LEFT   0x01
+#define LAYOUT_SIDE_RIGHT  0x02
+#define LAYOUT_SIDE_TOP    0x04
+#define LAYOUT_SIDE_BOTTOM 0x08
+    uint32_t positioned_sides;
 } LayoutBox;
 
 /* Flat node reference used by both passes. */

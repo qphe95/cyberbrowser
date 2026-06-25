@@ -200,7 +200,6 @@ static bool node_has_hidden_class(LayoutContext *ctx, int node_idx)
      * watch-page skeleton carries class "hidden" on its root, but its
      * descendants do not, so we must walk up the layout tree. */
     if (node_or_ancestor_has_class(ctx, node_idx, "hidden")) return true;
-    if (node_or_ancestor_has_class(ctx, node_idx, "watch-skeleton")) return true;
     return false;
 }
 

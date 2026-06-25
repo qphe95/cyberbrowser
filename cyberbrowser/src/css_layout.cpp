@@ -186,6 +186,7 @@ static bool layout_build_nodes(LayoutContext *ctx, const int *map)
         box->left = 0.0;
         box->right = 0.0;
         box->bottom = 0.0;
+        box->positioned_sides = 0;
         box->width_percent = 0.0;
         box->height_percent = 0.0;
         box->gap_row = 0.0;
@@ -610,12 +611,16 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         box->max_height = css_parse_length(value, parent_width, viewport_width);
     } else if (strcasecmp(prop, "top") == 0) {
         box->top = css_parse_length(value, parent_width, viewport_width);
+        box->positioned_sides |= LAYOUT_SIDE_TOP;
     } else if (strcasecmp(prop, "left") == 0) {
         box->left = css_parse_length(value, parent_width, viewport_width);
+        box->positioned_sides |= LAYOUT_SIDE_LEFT;
     } else if (strcasecmp(prop, "right") == 0) {
         box->right = css_parse_length(value, parent_width, viewport_width);
+        box->positioned_sides |= LAYOUT_SIDE_RIGHT;
     } else if (strcasecmp(prop, "bottom") == 0) {
         box->bottom = css_parse_length(value, parent_width, viewport_width);
+        box->positioned_sides |= LAYOUT_SIDE_BOTTOM;
     } else if (strcasecmp(prop, "margin") == 0) {
         layout_apply_shorthand_sides(box, value, parent_width, viewport_width,
                                      &box->margin_top, &box->margin_right,
@@ -1101,9 +1106,22 @@ static bool layout_node_class_contains(HtmlNode *node, const char *needle)
 /* Direct layout-box overrides for YouTube's un-upgraded Polymer shell.
  * The rebuilt DOM has no real custom-element behaviour, so the skeleton
  * containers collapse or are positioned badly.  Patch the key boxes before
- * the top-down pass so the screenshot looks like a real dark-mode homepage. */
+ * the top-down pass so the screenshot looks reasonable. */
 static void layout_apply_youtube_fallbacks(LayoutContext *ctx)
 {
+    /* Detect which YouTube page shape we are rendering. */
+    bool is_watch_page = false;
+    for (int i = 0; i < ctx->tree.count; i++) {
+        HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx);
+        if (node && node->type == HTML_NODE_ELEMENT) {
+            const char *id = layout_node_attribute(node, "id");
+            if (id && strcmp(id, "watch-page-skeleton") == 0) {
+                is_watch_page = true;
+                break;
+            }
+        }
+    }
+
     for (int i = 0; i < ctx->tree.count; i++) {
         LayoutBox *box = layout_box(ctx, i);
         HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx);
@@ -1111,6 +1129,98 @@ static void layout_apply_youtube_fallbacks(LayoutContext *ctx)
 
         const char *id = layout_node_attribute(node, "id");
         const char *tag = node->tag_name;
+
+        if (is_watch_page) {
+            /* Watch page overrides */
+            if (tag && strcasecmp(tag, "ytd-app") == 0) {
+                /* Let the app root fill the viewport so children have room. */
+                box->display = CSS_DISPLAY_BLOCK;
+                box->css_height = ctx->viewport_height;
+                box->height_percent = 0.0;
+                box->min_height = ctx->viewport_height;
+                box->max_height = 0.0;
+                /* max_height = 0 would clamp to zero; clear it. */
+                box->max_height = 0.0;
+                continue;
+            }
+            if (tag && strcasecmp(tag, "ytd-masthead") == 0) {
+                box->display = CSS_DISPLAY_BLOCK;
+                box->css_height = 56.0;
+                box->height_percent = 0.0;
+                box->min_height = 56.0;
+                continue;
+            }
+            if (id && strcmp(id, "player") == 0) {
+                /* Primary column wrapper for the player placeholder. */
+                box->css_width = ctx->viewport_width - 402.0;
+                if (box->css_width < 400.0) box->css_width = 400.0;
+                box->width_percent = 0.0;
+                continue;
+            }
+            if (id && strcmp(id, "player-api") == 0) {
+                /* 16:9 player placeholder fills the primary column width. */
+                box->display = CSS_DISPLAY_BLOCK;
+                box->width_percent = 1.0;
+                box->aspect_ratio = 9.0 / 16.0;
+                continue;
+            }
+            if (id && strcmp(id, "movie_player") == 0) {
+                box->display = CSS_DISPLAY_BLOCK;
+                box->width_percent = 1.0;
+                box->aspect_ratio = 9.0 / 16.0;
+                continue;
+            }
+            if (id && strcmp(id, "watch-page-skeleton") == 0) {
+                box->display = CSS_DISPLAY_BLOCK;
+                box->margin_top = 0.0;
+                box->top = 0.0;
+                continue;
+            }
+            if (id && strcmp(id, "container") == 0) {
+                /* The skeleton container is a positioned wrapper so the related
+                 * column can be absolutely placed beside the player. */
+                box->display = CSS_DISPLAY_BLOCK;
+                box->position = CSS_POSITION_RELATIVE;
+                continue;
+            }
+            if (id && strcmp(id, "info-container") == 0) {
+                box->display = CSS_DISPLAY_BLOCK;
+                box->css_height = 120.0;
+                box->height_percent = 0.0;
+                /* Primary column sits below the 16:9 player placeholder. */
+                double primary_width = ctx->viewport_width - 402.0;
+                if (primary_width < 400.0) primary_width = 400.0;
+                double player_height = (primary_width - 48.0) * 9.0 / 16.0 + 48.0;
+                if (player_height < 300.0) player_height = 300.0;
+                box->margin_top = player_height;
+                box->css_width = primary_width - 48.0;
+                if (box->css_width < 350.0) box->css_width = 350.0;
+                box->width_percent = 0.0;
+                continue;
+            }
+            if (id && strcmp(id, "related") == 0) {
+                /* Place the related column at the top-right of the skeleton so
+                 * it renders beside the player placeholder. */
+                box->display = CSS_DISPLAY_FLEX;
+                box->flex_direction = CSS_FLEX_DIRECTION_COLUMN;
+                box->position = CSS_POSITION_ABSOLUTE;
+                box->top = 0.0;
+                box->right = 0.0;
+                box->positioned_sides |= LAYOUT_SIDE_TOP | LAYOUT_SIDE_RIGHT;
+                box->css_width = 402.0;
+                box->width_percent = 0.0;
+                box->margin_top = 0.0;
+                continue;
+            }
+            if ((id && strcmp(id, "title") == 0) ||
+                (id && strcmp(id, "count") == 0) ||
+                (id && strcmp(id, "subscribe-button") == 0)) {
+                box->display = CSS_DISPLAY_BLOCK;
+                box->css_height = 20.0;
+                box->height_percent = 0.0;
+                continue;
+            }
+        }
 
         if (id && strcmp(id, "home-chips") == 0) {
             box->display = CSS_DISPLAY_FLEX;
@@ -1363,6 +1473,8 @@ static void layout_resolve_subtree(LayoutContext *ctx, int idx,
             if (child->display == CSS_DISPLAY_NONE) continue;
             if (child->display == CSS_DISPLAY_INLINE) continue;
             if (child->visibility == CSS_VISIBILITY_HIDDEN) continue;
+            if (child->position == CSS_POSITION_ABSOLUTE ||
+                child->position == CSS_POSITION_FIXED) continue;
             layout_resolve_subtree(ctx, c, box->content_width, box->content_height);
             double nx = content_left + child->margin_left;
             double ny = content_top + y_offset + child->margin_top;
@@ -1386,6 +1498,10 @@ static void layout_offset_children(LayoutContext *ctx, int idx, double dx, doubl
     LayoutNodeRef *node = layout_node_ref(ctx, idx);
     for (int c = node->first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
         LayoutBox *child = layout_box(ctx, c);
+        /* Fixed positioned boxes are positioned against the viewport and must
+         * not be shifted by the normal-flow or absolute positioning of their
+         * ancestors. */
+        if (child->position == CSS_POSITION_FIXED) continue;
         child->x += dx;
         child->y += dy;
         layout_offset_children(ctx, c, dx, dy);
@@ -1424,6 +1540,9 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
         LayoutBox *child = layout_box(ctx, c);
         if (child->display == CSS_DISPLAY_NONE) continue;
         if (child->visibility == CSS_VISIBILITY_HIDDEN) continue;
+        /* Absolutely/fixed positioned children are not flex items. */
+        if (child->position == CSS_POSITION_ABSOLUTE ||
+            child->position == CSS_POSITION_FIXED) continue;
         children[n++] = c;
     }
     if (n == 0) { free(children); return; }
@@ -1770,7 +1889,9 @@ static void layout_top_down_node(LayoutContext *ctx, int idx)
             layout_update_content_sizes(box);
         } else {
             /* Normal flow: resolve width/height, then stack or flow.
-             * Fixed boxes use the viewport as their containing block. */
+             * Fixed boxes use the viewport as their containing block.
+             * Absolute boxes are resolved here but their final position is
+             * computed in a post-pass once all containing blocks are sized. */
             if (box->position == CSS_POSITION_FIXED) {
                 layout_resolve_used_sizes(box, layout_node_dom(ctx, node->dom_node_idx),
                                           ctx->viewport_width, ctx->viewport_height);
@@ -1787,16 +1908,34 @@ static void layout_top_down_node(LayoutContext *ctx, int idx)
                     layout_update_content_sizes(box);
                 }
 
-                if (box->right > 0.0 && box->left == 0.0) {
-                    box->x = ctx->viewport_width - box->right - box->width;
-                } else {
+                bool fix_left = (box->positioned_sides & LAYOUT_SIDE_LEFT) != 0;
+                bool fix_right = (box->positioned_sides & LAYOUT_SIDE_RIGHT) != 0;
+                bool fix_top = (box->positioned_sides & LAYOUT_SIDE_TOP) != 0;
+                bool fix_bottom = (box->positioned_sides & LAYOUT_SIDE_BOTTOM) != 0;
+
+                if (fix_right && !fix_left) {
+                    box->x = ctx->viewport_width - box->right - box->margin_right - box->width;
+                } else if (fix_left) {
                     box->x = box->left + box->margin_left;
-                }
-                if (box->bottom > 0.0 && box->top == 0.0) {
-                    box->y = ctx->viewport_height - box->bottom - box->height;
                 } else {
-                    box->y = box->top + box->margin_top;
+                    box->x = box->margin_left;
                 }
+                if (fix_bottom && !fix_top) {
+                    box->y = ctx->viewport_height - box->bottom - box->margin_bottom - box->height;
+                } else if (fix_top) {
+                    box->y = box->top + box->margin_top;
+                } else {
+                    box->y = box->margin_top;
+                }
+            } else if (box->position == CSS_POSITION_ABSOLUTE) {
+                layout_resolve_used_sizes(box, layout_node_dom(ctx, node->dom_node_idx),
+                                          parent->content_width, parent->content_height);
+                /* Place at the parent's content origin for now; the
+                 * absolute-positioning post-pass will compute the real offset
+                 * against the nearest positioned ancestor. */
+                box->x = parent->x + parent->padding_left + parent->border_left;
+                box->y = parent->y + parent->padding_top + parent->border_top;
+                layout_update_content_sizes(box);
             } else {
                 layout_resolve_used_sizes(box, layout_node_dom(ctx, node->dom_node_idx),
                                           parent->content_width, parent->content_height);
@@ -1942,6 +2081,11 @@ static void layout_bottom_up_node(LayoutContext *ctx, int idx)
         for (int c = node->first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
             LayoutBox *child = layout_box(ctx, c);
             if (child->display == CSS_DISPLAY_NONE) continue;
+            /* Absolutely and fixed positioned children do not participate in
+             * normal flow and must not expand their static parent's content
+             * height. */
+            if (child->position == CSS_POSITION_ABSOLUTE ||
+                child->position == CSS_POSITION_FIXED) continue;
             double child_bottom = child->y + child->height + child->margin_bottom;
             if (child_bottom > max_bottom) max_bottom = child_bottom;
         }
@@ -2080,6 +2224,107 @@ static void layout_dump_boxes(LayoutContext *ctx, const char *path)
 }
 
 /* ============================================================================
+ * Absolute positioning post-pass
+ * ============================================================================ */
+
+/* Find the nearest ancestor that establishes a containing block for an
+ * absolutely positioned box.  In our subset that is the nearest ancestor with
+ * a non-static position (fixed uses the viewport, so it is handled separately
+ * in the top-down pass). */
+static int layout_positioned_ancestor(LayoutContext *ctx, int idx)
+{
+    int p = ctx->tree.nodes[idx].parent_idx;
+    while (p >= 0) {
+        CssPosition pos = layout_box(ctx, p)->position;
+        if (pos == CSS_POSITION_RELATIVE ||
+            pos == CSS_POSITION_ABSOLUTE ||
+            pos == CSS_POSITION_STICKY) {
+            return p;
+        }
+        p = ctx->tree.nodes[p].parent_idx;
+    }
+    return -1;
+}
+
+/* Position an absolutely positioned box against its containing block.
+ * This runs after the normal flow passes so containing-block sizes are final. */
+static void layout_position_absolute_box(LayoutContext *ctx, int idx)
+{
+    LayoutBox *box = layout_box(ctx, idx);
+
+    double cb_x, cb_y, cb_w, cb_h;
+    int anc = layout_positioned_ancestor(ctx, idx);
+    if (anc >= 0) {
+        LayoutBox *a = layout_box(ctx, anc);
+        cb_x = a->x + a->padding_left + a->border_left;
+        cb_y = a->y + a->padding_top + a->border_top;
+        cb_w = a->content_width;
+        cb_h = a->content_height;
+    } else {
+        cb_x = 0.0;
+        cb_y = 0.0;
+        cb_w = ctx->viewport_width;
+        cb_h = ctx->viewport_height;
+    }
+
+    bool has_left = (box->positioned_sides & LAYOUT_SIDE_LEFT) != 0;
+    bool has_right = (box->positioned_sides & LAYOUT_SIDE_RIGHT) != 0;
+    bool has_top = (box->positioned_sides & LAYOUT_SIDE_TOP) != 0;
+    bool has_bottom = (box->positioned_sides & LAYOUT_SIDE_BOTTOM) != 0;
+    double old_x = box->x;
+    double old_y = box->y;
+
+    /* Resolve auto width from left+right constraints. */
+    if (box->width == 0.0 && has_left && has_right) {
+        double w = cb_w - box->left - box->right
+                   - box->margin_left - box->margin_right;
+        if (w < 0.0) w = 0.0;
+        box->width = w;
+        layout_update_content_sizes(box);
+    }
+    if (box->height == 0.0 && has_top && has_bottom) {
+        double h = cb_h - box->top - box->bottom
+                   - box->margin_top - box->margin_bottom;
+        if (h < 0.0) h = 0.0;
+        box->height = h;
+        layout_update_content_sizes(box);
+    }
+
+    /* Compute x offset. */
+    if (has_left) {
+        box->x = cb_x + box->left + box->margin_left;
+    } else if (has_right) {
+        box->x = cb_x + cb_w - box->right - box->margin_right - box->width;
+    } else {
+        box->x = cb_x + box->margin_left;
+    }
+
+    /* Compute y offset. */
+    if (has_top) {
+        box->y = cb_y + box->top + box->margin_top;
+    } else if (has_bottom) {
+        box->y = cb_y + cb_h - box->bottom - box->margin_bottom - box->height;
+    } else {
+        box->y = cb_y + box->margin_top;
+    }
+
+    /* Offset descendants so the absolute box acts as a containing block. */
+    layout_offset_children(ctx, idx, box->x - old_x, box->y - old_y);
+}
+
+static void layout_position_absolute_subtree(LayoutContext *ctx, int idx)
+{
+    LayoutBox *box = layout_box(ctx, idx);
+    if (box->position == CSS_POSITION_ABSOLUTE) {
+        layout_position_absolute_box(ctx, idx);
+    }
+    for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0;
+         c = ctx->tree.nodes[c].next_sibling_idx) {
+        layout_position_absolute_subtree(ctx, c);
+    }
+}
+
+/* ============================================================================
  * Public API
  * ============================================================================ */
 
@@ -2105,6 +2350,12 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
     /* Bottom-up pass. */
     if (!layout_dispatch_chunks(ctx, ctx->tree.postorder, ctx->tree.count, layout_bottom_up_job)) {
         return false;
+    }
+
+    /* Position absolutely positioned boxes now that all containing blocks have
+     * their final sizes. */
+    if (ctx->tree.count > 0) {
+        layout_position_absolute_subtree(ctx, ctx->tree.root_idx);
     }
 
     for (int i = 0; i < ctx->tree.count; i++) {
