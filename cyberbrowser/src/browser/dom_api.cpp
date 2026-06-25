@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <math.h>
+#include <ctype.h>
 #include <quickjs.h>
 #include <quickjs_gc_unified.h>
 #include "browser_api_impl.h"
@@ -442,7 +443,16 @@ void css_index_insert_node(JSContextHandle ctx, DOMNodeHandle node)
 
     const char *tag = node.node_name();
     if (tag && tag[0]) {
-        JSAtom tag_atom = JS_NewAtom(ctx, tag);
+        /* getElementsByTagName is case-insensitive in HTML documents, so index
+         * every element by a canonical lower-case tag name. */
+        char lower_tag[256];
+        size_t tag_len = strlen(tag);
+        if (tag_len >= sizeof(lower_tag)) tag_len = sizeof(lower_tag) - 1;
+        for (size_t i = 0; i < tag_len; i++) {
+            lower_tag[i] = (char)tolower((unsigned char)tag[i]);
+        }
+        lower_tag[tag_len] = '\0';
+        JSAtom tag_atom = JS_NewAtom(ctx, lower_tag);
         if (tag_atom != JS_ATOM_NULL) {
             GCHandle prev_head = lf_hash_lookup(state->tag_table,
                                                 (uint32_t)tag_atom,
@@ -1030,6 +1040,14 @@ GCValue js_node_cloneNode_real(JSContextHandle ctx, GCValue this_val, int argc, 
                     JS_SetPrototype(ctx, clone, proto);
                 }
             }
+        } else if (original.node_type() == DOM_NODE_TYPE_DOCUMENT_FRAGMENT) {
+            GCValue ctor = JS_GetPropertyStr(ctx, global_obj, "DocumentFragment");
+            if (!JS_IsUndefined(ctor) && !JS_IsException(ctor)) {
+                GCValue proto = JS_GetPropertyStr(ctx, ctor, "prototype");
+                if (!JS_IsUndefined(proto) && !JS_IsException(proto)) {
+                    JS_SetPrototype(ctx, clone, proto);
+                }
+            }
         } else {
             GCValue node_ctor = JS_GetPropertyStr(ctx, global_obj, "Node");
             if (!JS_IsUndefined(node_ctor) && !JS_IsException(node_ctor)) {
@@ -1423,45 +1441,55 @@ GCValue js_element_get_elements_by_tag_name(JSContextHandle ctx, GCValue this_va
 // Document.prototype.getElementsByTagName
 GCValue js_document_get_elements_by_tag_name(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1) return JS_NewArray(ctx);
-    
+
     const char *tag_name = JS_ToCString(ctx, argv[0]);
     if (!tag_name) return JS_NewArray(ctx);
-    
+
     GCValue arr = JS_NewArray(ctx);
     int idx = 0;
-    
+
     // Special case: if looking for 'head', check document.head directly
     if (strcasecmp(tag_name, "head") == 0) {
         GCValue head = JS_GetPropertyStr(ctx, this_val, "head");
         if (!JS_IsUndefined(head) && !JS_IsNull(head)) {
             JS_SetPropertyUint32(ctx, arr, idx++, head);
         }
+        return arr;
     }
     // Special case: if looking for 'body', check document.body directly
-    else if (strcasecmp(tag_name, "body") == 0) {
+    if (strcasecmp(tag_name, "body") == 0) {
         GCValue body = JS_GetPropertyStr(ctx, this_val, "body");
         if (!JS_IsUndefined(body) && !JS_IsNull(body)) {
             JS_SetPropertyUint32(ctx, arr, idx++, body);
         }
+        return arr;
     }
-    // For other tags, try to traverse the DOM tree
-    else {
-        // Get document element (documentElement) - usually <html>
-        GCValue doc_elem = JS_GetPropertyStr(ctx, this_val, "documentElement");
-        if (!JS_IsNull(doc_elem) && !JS_IsUndefined(doc_elem)) {
-            DOMNodeHandle node = get_dom_node(ctx, doc_elem);
-            if (node.valid()) {
-                // Check document element itself
-                const char *node_tag = node.node_name();
-                if (node_tag && strcasecmp(node_tag, tag_name) == 0) {
-                    JS_SetPropertyUint32(ctx, arr, idx++, doc_elem);
-                }
-                // Recurse into children
-                collect_elements_by_tag(ctx, node, tag_name, arr, &idx);
+
+    /* The tag index stores a canonical lower-case key, so normalize the
+     * query before looking it up. */
+    char lower_tag[256];
+    size_t tag_len = strlen(tag_name);
+    if (tag_len >= sizeof(lower_tag)) tag_len = sizeof(lower_tag) - 1;
+    for (size_t i = 0; i < tag_len; i++) {
+        lower_tag[i] = (char)tolower((unsigned char)tag_name[i]);
+    }
+    lower_tag[tag_len] = '\0';
+
+    JSAtom tag_atom = JS_NewAtom(ctx, lower_tag);
+    if (tag_atom != JS_ATOM_NULL) {
+        GCValue indexed = css_get_elements_by_tag_name(ctx, tag_atom);
+        JS_FreeAtom(ctx, tag_atom);
+        if (!JS_IsUndefined(indexed) && !JS_IsException(indexed)) {
+            GCValue len_val = JS_GetPropertyStr(ctx, indexed, "length");
+            uint32_t n = 0;
+            JS_ToUint32(ctx, &n, len_val);
+            for (uint32_t i = 0; i < n; i++) {
+                GCValue el = JS_GetPropertyUint32(ctx, indexed, i);
+                JS_SetPropertyUint32(ctx, arr, idx++, el);
             }
         }
     }
-    
+
     return arr;
 }
 
@@ -1519,19 +1547,27 @@ GCValue js_element_set_attribute(JSContextHandle ctx, GCValue this_val, int argc
 // Element.prototype.getAttribute
 GCValue js_element_get_attribute(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1) return JS_NULL;
-    
+
     const char *name = JS_ToCString(ctx, argv[0]);
     if (!name) return JS_NULL;
-    
-    GCValue val = JS_GetPropertyStr(ctx, this_val, name);
-    if (JS_IsUndefined(val) || JS_IsNull(val)) {
-        return JS_NULL;
+
+    // Read from the authoritative content-attribute store first. This fixes
+    // getAttribute('style') returning the live CSSStyleDeclaration object.
+    DOMNodeHandle node = get_dom_node(ctx, this_val);
+    if (node.valid()) {
+        const char *val = node.get_attribute(name);
+        if (val) {
+            return JS_NewString(ctx, val);
+        }
     }
-    
-    // Convert to string
-    const char *str = JS_ToCString(ctx, val);
-    if (str) {
-        return JS_NewString(ctx, str);
+
+    // Fall back to a string-valued own property (e.g. el.id set directly).
+    GCValue val = JS_GetPropertyStr(ctx, this_val, name);
+    if (JS_IsString(val)) {
+        const char *str = JS_ToCString(ctx, val);
+        if (str) {
+            return JS_NewString(ctx, str);
+        }
     }
     return JS_NULL;
 }
@@ -2261,13 +2297,65 @@ GCValue js_document_create_event(JSContextHandle ctx, GCValue this_val, int argc
     return event;
 }
 
+// Helper: create a real DocumentFragment backed by the DOM node tree.
+GCValue js_create_document_fragment(JSContextHandle ctx) {
+    GCValue frag = JS_NewObjectClass(ctx, js_dom_node_class_id);
+    if (JS_IsException(frag)) return frag;
+
+    DOMNodeHandle frag_node = DOMNodeHandle::create(ctx, DOM_NODE_TYPE_DOCUMENT_FRAGMENT, "#document-fragment");
+    if (!frag_node.valid()) {
+        return JS_ThrowInternalError(ctx, "failed to create DocumentFragment");
+    }
+    frag_node.attach_to_object(frag);
+
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue df_ctor = JS_GetPropertyStr(ctx, global, "DocumentFragment");
+    if (!JS_IsUndefined(df_ctor) && !JS_IsException(df_ctor)) {
+        GCValue df_proto = JS_GetPropertyStr(ctx, df_ctor, "prototype");
+        if (!JS_IsUndefined(df_proto) && !JS_IsException(df_proto)) {
+            JS_SetPrototype(ctx, frag, df_proto);
+        } else {
+            GCValue node_ctor = JS_GetPropertyStr(ctx, global, "Node");
+            if (!JS_IsUndefined(node_ctor) && !JS_IsException(node_ctor)) {
+                GCValue node_proto = JS_GetPropertyStr(ctx, node_ctor, "prototype");
+                if (!JS_IsUndefined(node_proto) && !JS_IsException(node_proto)) {
+                    JS_SetPrototype(ctx, frag, node_proto);
+                }
+            }
+        }
+    }
+    return frag;
+}
+
+// document.createDocumentFragment()
+GCValue js_document_create_document_fragment(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    GCValue frag = js_create_document_fragment(ctx);
+    if (!JS_IsException(frag) && !JS_IsUndefined(frag) && !JS_IsNull(frag)) {
+        dom_node_set_owner_document(ctx, frag, this_val);
+    }
+    return frag;
+}
+
 // document.importNode()
 GCValue js_document_import_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    if (argc < 1) return JS_NULL;
-    // Return a shallow copy of the node
-    GCValue clone = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, clone, "nodeType", JS_NewInt32(ctx, 1)); // ELEMENT_NODE
-    JS_SetPropertyStr(ctx, clone, "nodeName", JS_NewString(ctx, "DIV"));
+    if (argc < 1 || JS_IsNull(argv[0]) || JS_IsUndefined(argv[0])) {
+        return JS_ThrowTypeError(ctx, "importNode requires a node");
+    }
+
+    bool deep = false;
+    if (argc > 1) {
+        deep = JS_ToBool(ctx, argv[1]);
+    }
+
+    GCValue deep_val = JS_NewBool(ctx, deep);
+    GCValue clone_args[1] = { deep_val };
+    GCValue clone = js_node_cloneNode_real(ctx, argv[0], 1, clone_args);
+    if (JS_IsException(clone)) {
+        return clone;
+    }
+
+    dom_node_set_owner_document(ctx, clone, this_val);
     return clone;
 }
 
@@ -2277,3 +2365,222 @@ GCValue js_document_element_from_point(JSContextHandle ctx, GCValue this_val, in
     return JS_GetPropertyStr(ctx, this_val, "documentElement");
 }
 
+
+// ============================================================================
+// Element.attributes / NamedNodeMap helpers
+// ============================================================================
+
+static GCValue create_attr_obj(JSContextHandle ctx, GCValue owner_element,
+                               const char *name, const char *value) {
+    GCValue attr = JS_NewObject(ctx);
+    if (JS_IsException(attr)) return attr;
+    JS_SetPropertyStr(ctx, attr, "name", JS_NewString(ctx, name ? name : ""));
+    JS_SetPropertyStr(ctx, attr, "value", JS_NewString(ctx, value ? value : ""));
+    JS_SetPropertyStr(ctx, attr, "nodeName", JS_NewString(ctx, name ? name : ""));
+    JS_SetPropertyStr(ctx, attr, "nodeValue", JS_NewString(ctx, value ? value : ""));
+    JS_SetPropertyStr(ctx, attr, "namespaceURI", JS_NULL);
+    JS_SetPropertyStr(ctx, attr, "specified", JS_TRUE);
+    JS_SetPropertyStr(ctx, attr, "ownerElement", owner_element);
+    return attr;
+}
+
+static GCValue named_node_map_get_attr(JSContextHandle ctx, GCValue map,
+                                       const char *name) {
+    if (!name) return JS_NULL;
+    GCValue elem = JS_GetPropertyStr(ctx, map, "ownerElement");
+    if (!JS_IsObject(elem)) return JS_NULL;
+    DOMNodeHandle node = get_dom_node(ctx, elem);
+    if (!node.valid()) return JS_NULL;
+    const char *value = node.get_attribute(name);
+    if (!value) return JS_NULL;
+    return create_attr_obj(ctx, elem, name, value);
+}
+
+static GCValue named_node_map_get_item(JSContextHandle ctx, GCValue map, int index) {
+    GCValue elem = JS_GetPropertyStr(ctx, map, "ownerElement");
+    if (!JS_IsObject(elem)) return JS_NULL;
+    DOMNodeHandle node = get_dom_node(ctx, elem);
+    if (!node.valid()) return JS_NULL;
+    int count = node.attribute_count();
+    const DOMAttribute *attrs = node.attributes();
+    if (index < 0 || index >= count || !attrs) return JS_NULL;
+    return create_attr_obj(ctx, elem, attrs[index].name, attrs[index].value);
+}
+
+GCValue js_named_node_map_get_named_item(JSContextHandle ctx, GCValue this_val,
+                                         int argc, GCValue *argv) {
+    if (argc < 1) return JS_NULL;
+    const char *name = JS_ToCString(ctx, argv[0]);
+    return named_node_map_get_attr(ctx, this_val, name);
+}
+
+GCValue js_named_node_map_get_named_item_ns(JSContextHandle ctx, GCValue this_val,
+                                            int argc, GCValue *argv) {
+    (void)argc;
+    if (argc < 2) return JS_NULL;
+    const char *name = JS_ToCString(ctx, argv[1]);
+    return named_node_map_get_attr(ctx, this_val, name);
+}
+
+GCValue js_named_node_map_item(JSContextHandle ctx, GCValue this_val,
+                               int argc, GCValue *argv) {
+    if (argc < 1) return JS_NULL;
+    int32_t index = 0;
+    JS_ToInt32(ctx, &index, argv[0]);
+    return named_node_map_get_item(ctx, this_val, index);
+}
+
+GCValue js_named_node_map_set_named_item(JSContextHandle ctx, GCValue this_val,
+                                         int argc, GCValue *argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "setNamedItem requires an attr node");
+    GCValue elem = JS_GetPropertyStr(ctx, this_val, "ownerElement");
+    if (!JS_IsObject(elem)) return JS_NULL;
+
+    GCValue name_val = JS_GetPropertyStr(ctx, argv[0], "name");
+    GCValue value_val = JS_GetPropertyStr(ctx, argv[0], "value");
+    const char *name = JS_ToCString(ctx, name_val);
+    const char *value = JS_ToCString(ctx, value_val);
+    if (name) {
+        GCValue set_args[2];
+        set_args[0] = JS_NewString(ctx, name);
+        set_args[1] = JS_NewString(ctx, value ? value : "");
+        js_element_set_attribute(ctx, elem, 2, set_args);
+    }
+    return argv[0];
+}
+
+GCValue js_named_node_map_remove_named_item(JSContextHandle ctx, GCValue this_val,
+                                            int argc, GCValue *argv) {
+    if (argc < 1) return throw_dom_exception(ctx, "NotFoundError", "Attribute not found");
+    GCValue elem = JS_GetPropertyStr(ctx, this_val, "ownerElement");
+    if (!JS_IsObject(elem)) return throw_dom_exception(ctx, "NotFoundError", "Attribute not found");
+
+    DOMNodeHandle node = get_dom_node(ctx, elem);
+    if (!node.valid()) return throw_dom_exception(ctx, "NotFoundError", "Attribute not found");
+
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name) return throw_dom_exception(ctx, "NotFoundError", "Attribute not found");
+
+    const char *old_value = node.get_attribute(name);
+    if (!old_value) return throw_dom_exception(ctx, "NotFoundError", "Attribute not found");
+
+    GCValue old_attr = create_attr_obj(ctx, elem, name, old_value);
+    GCValue rem_args[1] = { JS_NewString(ctx, name) };
+    js_element_remove_attribute(ctx, elem, 1, rem_args);
+    return old_attr;
+}
+
+// Element.prototype.attributes getter
+GCValue js_element_get_attributes(JSContextHandle ctx, GCValue this_val,
+                                  int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    GCValue map = JS_NewObject(ctx);
+    DOMNodeHandle node = get_dom_node(ctx, this_val);
+    int count = node.valid() ? node.attribute_count() : 0;
+    const DOMAttribute *attrs = node.valid() ? node.attributes() : nullptr;
+
+    for (int i = 0; i < count && attrs; i++) {
+        GCValue attr = create_attr_obj(ctx, this_val, attrs[i].name, attrs[i].value);
+        JS_SetPropertyUint32(ctx, map, (uint32_t)i, attr);
+    }
+
+    JS_SetPropertyStr(ctx, map, "length", JS_NewInt32(ctx, count));
+    JS_SetPropertyStr(ctx, map, "ownerElement", this_val);
+    JS_SetPropertyStr(ctx, map, "getNamedItem",
+        JS_NewCFunction(ctx, js_named_node_map_get_named_item, "getNamedItem", 1));
+    JS_SetPropertyStr(ctx, map, "getNamedItemNS",
+        JS_NewCFunction(ctx, js_named_node_map_get_named_item_ns, "getNamedItemNS", 2));
+    JS_SetPropertyStr(ctx, map, "item",
+        JS_NewCFunction(ctx, js_named_node_map_item, "item", 1));
+    JS_SetPropertyStr(ctx, map, "setNamedItem",
+        JS_NewCFunction(ctx, js_named_node_map_set_named_item, "setNamedItem", 1));
+    JS_SetPropertyStr(ctx, map, "removeNamedItem",
+        JS_NewCFunction(ctx, js_named_node_map_remove_named_item, "removeNamedItem", 1));
+    return map;
+}
+
+// Element.prototype.hasAttributes()
+GCValue js_element_has_attributes(JSContextHandle ctx, GCValue this_val,
+                                  int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    DOMNodeHandle node = get_dom_node(ctx, this_val);
+    bool has = node.valid() && node.attribute_count() > 0;
+    return JS_NewBool(ctx, has);
+}
+
+// Element.prototype.getAttributeNames()
+GCValue js_element_get_attribute_names(JSContextHandle ctx, GCValue this_val,
+                                       int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    GCValue arr = JS_NewArray(ctx);
+    DOMNodeHandle node = get_dom_node(ctx, this_val);
+    if (!node.valid()) return arr;
+    int count = node.attribute_count();
+    const DOMAttribute *attrs = node.attributes();
+    for (int i = 0; i < count && attrs; i++) {
+        JS_SetPropertyUint32(ctx, arr, (uint32_t)i, JS_NewString(ctx, attrs[i].name));
+    }
+    return arr;
+}
+
+// ============================================================================
+// Element.prototype.matches / closest
+// ============================================================================
+
+GCValue js_element_matches(JSContextHandle ctx, GCValue this_val,
+                           int argc, GCValue *argv) {
+    if (argc < 1) return JS_FALSE;
+    const char *selector = JS_ToCString(ctx, argv[0]);
+    if (!selector) return JS_FALSE;
+    return JS_NewBool(ctx, matches_selector(ctx, this_val, selector));
+}
+
+GCValue js_element_closest(JSContextHandle ctx, GCValue this_val,
+                           int argc, GCValue *argv) {
+    if (argc < 1) return JS_NULL;
+    const char *selector = JS_ToCString(ctx, argv[0]);
+    if (!selector) return JS_NULL;
+
+    GCValue cur = this_val;
+    while (!JS_IsNull(cur) && JS_IsObject(cur)) {
+        if (matches_selector(ctx, cur, selector)) {
+            return cur;
+        }
+        DOMNodeHandle node = get_dom_node(ctx, cur);
+        if (!node.valid()) break;
+        cur = node.parent_node();
+    }
+    return JS_NULL;
+}
+
+// ============================================================================
+// Custom element upgrade helper (upgrade an element when it is attached)
+// ============================================================================
+
+static bool try_upgrade_element_on_attach(JSContextHandle ctx, GCValue elem) {
+    if (JS_IsNull(elem) || JS_IsUndefined(elem) || !JS_IsObject(elem)) {
+        return false;
+    }
+    // Already upgraded?
+    GCValue upgraded_val = JS_GetPropertyStr(ctx, elem, "__CE_upgraded");
+    if (JS_ToBool(ctx, upgraded_val)) {
+        return false;
+    }
+    // Must be an element with a hyphenated tag name.
+    GCValue tag_val = JS_GetPropertyStr(ctx, elem, "tagName");
+    const char *tag = JS_ToCString(ctx, tag_val);
+    if (!tag || strchr(tag, '-') == NULL) {
+        return false;
+    }
+
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue upgrade_fn = JS_GetPropertyStr(ctx, global, "__cyber_upgradeElement");
+    if (JS_IsUndefined(upgrade_fn) || JS_IsNull(upgrade_fn) || !JS_IsFunction(ctx, upgrade_fn)) {
+        return false;
+    }
+
+    GCValue args[1] = { elem };
+    GCValue result = JS_Call(ctx, upgrade_fn, global, 1, args);
+    (void)result;
+    return true;
+}

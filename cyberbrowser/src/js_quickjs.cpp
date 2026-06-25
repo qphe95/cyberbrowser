@@ -18,8 +18,9 @@
 #include "browser_api_impl_handles.h"
 #include "session_state.h"
 
-// Forward declaration from dom_api.cpp (used to set ownerDocument on created nodes)
+// Forward declarations from dom_api.cpp
 extern "C" void dom_node_set_owner_document(JSContextHandle ctx, GCValue node, GCValue doc);
+extern "C" GCValue js_create_document_fragment(JSContextHandle ctx);
 
 /* Timer API functions from browser_api_impl.cpp */
 extern "C" int timer_process_due(JSContextHandle ctx);
@@ -1399,32 +1400,6 @@ static GCValue js_canvas_get_context(JSContextHandle ctx, GCValue this_val, int 
         JS_NewCFunction(ctx, js_canvas_get_image_data, "getImageData", 4));
     
     return ctx2d;
-}
-
-// Helper: create a real DocumentFragment backed by the DOM node tree.
-static GCValue js_create_document_fragment(JSContextHandle ctx) {
-    GCValue frag = JS_NewObjectClass(ctx, js_dom_node_class_id);
-    if (JS_IsException(frag)) return frag;
-
-    DOMNodeHandle frag_node = DOMNodeHandle::create(ctx, DOM_NODE_TYPE_DOCUMENT_FRAGMENT, "#document-fragment");
-    if (!frag_node.valid()) {
-        return JS_ThrowInternalError(ctx, "failed to create DocumentFragment");
-    }
-    frag_node.attach_to_object(frag);
-
-    // Wire prototype to Node.prototype so firstChild/childNodes/etc work.
-    GCValue global = JS_GetGlobalObject(ctx);
-    GCValue node_ctor = JS_GetPropertyStr(ctx, global, "Node");
-    if (!JS_IsUndefined(node_ctor) && !JS_IsException(node_ctor)) {
-        GCValue node_proto = JS_GetPropertyStr(ctx, node_ctor, "prototype");
-        if (!JS_IsUndefined(node_proto) && !JS_IsException(node_proto)) {
-            JS_SetPrototype(ctx, frag, node_proto);
-        }
-    }
-    // nodeType is defined as a getter on Node.prototype, but the getter uses
-    // the DOMNode data; set nodeName explicitly as well.
-    JS_SetPropertyStr(ctx, frag, "nodeName", JS_NewString(ctx, "#document-fragment"));
-    return frag;
 }
 
 // Document and Element stubs with createElement support

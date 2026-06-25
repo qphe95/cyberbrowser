@@ -192,8 +192,15 @@ GCValue js_node_set_node_value(JSContextHandle ctx, GCValue this_val, int argc, 
 GCValue js_document_create_range(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_document_create_tree_walker(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_document_create_event(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_create_document_fragment(JSContextHandle ctx);
 GCValue js_document_import_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_document_element_from_point(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_element_get_attributes(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_element_has_attributes(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_element_get_attribute_names(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_element_matches(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_element_closest(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_cyber_upgrade_element(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 extern JSClassDef js_event_class_def;
 GCValue js_event_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
 GCValue js_event_preventDefault(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);

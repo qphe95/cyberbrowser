@@ -1688,11 +1688,23 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_NewCFunction(ctx, js_element_remove_attribute, "removeAttribute", 1));
     JS_SetPropertyStr(ctx, html_element_proto, "hasAttribute",
         JS_NewCFunction(ctx, js_element_has_attribute, "hasAttribute", 1));
+    JS_SetPropertyStr(ctx, html_element_proto, "hasAttributes",
+        JS_NewCFunction(ctx, js_element_has_attributes, "hasAttributes", 0));
+    JS_SetPropertyStr(ctx, html_element_proto, "getAttributeNames",
+        JS_NewCFunction(ctx, js_element_get_attribute_names, "getAttributeNames", 0));
+    JS_SetPropertyStr(ctx, html_element_proto, "matches",
+        JS_NewCFunction(ctx, js_element_matches, "matches", 1));
+    JS_SetPropertyStr(ctx, html_element_proto, "closest",
+        JS_NewCFunction(ctx, js_element_closest, "closest", 1));
+    GCValue attr_getter_he = JS_NewCFunction(ctx, js_element_get_attributes, "get attributes", 0);
+    JSAtom attr_atom_he = JS_NewAtom(ctx, "attributes");
+    JS_DefinePropertyGetSet(ctx, html_element_proto, attr_atom_he, attr_getter_he, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_FreeAtom(ctx, attr_atom_he);
     JS_SetPropertyStr(ctx, html_element_proto, "querySelector",
         JS_NewCFunction(ctx, js_element_querySelector_real, "querySelector", 1));
     JS_SetPropertyStr(ctx, html_element_proto, "querySelectorAll",
         JS_NewCFunction(ctx, js_element_querySelectorAll_real, "querySelectorAll", 1));
-    
+
     // ===== Element prototype methods =====
     // attachShadow method
     JS_SetPropertyStr(ctx, element_proto, "attachShadow",
@@ -1726,6 +1738,18 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_NewCFunction(ctx, js_element_remove_attribute, "removeAttribute", 1));
     JS_SetPropertyStr(ctx, element_proto, "hasAttribute",
         JS_NewCFunction(ctx, js_element_has_attribute, "hasAttribute", 1));
+    JS_SetPropertyStr(ctx, element_proto, "hasAttributes",
+        JS_NewCFunction(ctx, js_element_has_attributes, "hasAttributes", 0));
+    JS_SetPropertyStr(ctx, element_proto, "getAttributeNames",
+        JS_NewCFunction(ctx, js_element_get_attribute_names, "getAttributeNames", 0));
+    JS_SetPropertyStr(ctx, element_proto, "matches",
+        JS_NewCFunction(ctx, js_element_matches, "matches", 1));
+    JS_SetPropertyStr(ctx, element_proto, "closest",
+        JS_NewCFunction(ctx, js_element_closest, "closest", 1));
+    GCValue attr_getter = JS_NewCFunction(ctx, js_element_get_attributes, "get attributes", 0);
+    JSAtom attr_atom = JS_NewAtom(ctx, "attributes");
+    JS_DefinePropertyGetSet(ctx, element_proto, attr_atom, attr_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_FreeAtom(ctx, attr_atom);
     JS_SetPropertyStr(ctx, element_proto, "toggleAttribute",
         JS_NewCFunction(ctx, js_element_toggle_attribute, "toggleAttribute", 1));
     // NS attribute methods
@@ -3031,34 +3055,16 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_Eval(ctx, patch_odp, strlen(patch_odp), "<patch_odp>", JS_EVAL_TYPE_GLOBAL);
     }
 
-    // Custom-element upgrade: set the element's prototype to the registered
-    // constructor's prototype, then run the constructor and connectedCallback
-    // lifecycle methods.  We use `new ctor()` so ES6 class constructors run
-    // correctly; the native HTMLElement constructor checks
-    // __cyber_upgrade_target and returns the existing element as the instance.
+    // Register the C custom-element upgrade helper. It pushes the element onto
+    // an upgrade stack before `new ctor()`; the native HTMLElement constructor
+    // pops the stack and returns the existing element as `this`.
+    JS_SetPropertyStr(ctx, global, "__cyber_upgradeElement",
+        JS_NewCFunction(ctx, js_cyber_upgrade_element, "__cyber_upgradeElement", 1));
+
+    // JS wrappers that batch-upgrade elements and implement customElements.upgrade.
     {
         const char *upgrade_js =
             "(function(){"
-            "  window.__cyber_upgradeElement = function(el) {"
-            "    if (!el || el.__CE_upgraded || el.nodeType !== 1) return;"
-            "    var name = el.tagName ? el.tagName.toLowerCase() : '(none)';"
-            "    var ctor = window.customElements && window.customElements.get(name);"
-            "    if (!ctor || !ctor.prototype) return;"
-            "    el.removeAttribute && el.removeAttribute('disable-upgrade');"
-            "    el.__proto__ = ctor.prototype;"
-            "    el.__CE_upgraded = true;"
-            "    window.__cyber_upgrade_target = el;"
-            "    try { new ctor(); } catch(e) {"
-            "      var log = (typeof __bgmdwnldr_log !== 'undefined') ? __bgmdwnldr_log : (typeof console !== 'undefined' ? console.log : null);"
-            "      if (log) try { log('[CE-UPGRADE] ctor ' + name + ' threw: ' + e.message + ' stack=' + (e.stack||'(none)')); } catch(x) {}"
-            "    } finally { window.__cyber_upgrade_target = void 0; }"
-            "    if (ctor.prototype.connectedCallback && el.isConnected) {"
-            "      try { ctor.prototype.connectedCallback.call(el); } catch(e) {"
-            "        var log2 = (typeof __bgmdwnldr_log !== 'undefined') ? __bgmdwnldr_log : (typeof console !== 'undefined' ? console.log : null);"
-            "        if (log2) try { log2('[CE-UPGRADE] connectedCallback ' + name + ' threw: ' + e.message); } catch(x) {}"
-            "      }"
-            "    }"
-            "  };"
             "  window.__cyber_upgradeAll = function(name) {"
             "    if (!window.customElements) return;"
             "    var ctor = window.customElements.get(name);"

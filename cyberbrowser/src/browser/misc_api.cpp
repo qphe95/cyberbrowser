@@ -73,6 +73,35 @@ GCValue js_element_constructor(JSContextHandle ctx, GCValue new_target, int argc
     return obj;
 }
 
+// Stack of elements currently being upgraded. Pushed before `new ctor()` and
+// popped by the native HTMLElement constructor so super() returns the existing
+// element as `this` instead of allocating a new object.
+static void cyber_upgrade_stack_push(JSContextHandle ctx, GCValue el) {
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue stack = JS_GetPropertyStr(ctx, global, "__cyber_upgrade_stack");
+    if (!JS_IsArray(ctx, stack)) {
+        stack = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, global, "__cyber_upgrade_stack", stack);
+    }
+    GCValue len_val = JS_GetPropertyStr(ctx, stack, "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, len_val);
+    JS_SetPropertyUint32(ctx, stack, len, el);
+}
+
+static GCValue cyber_upgrade_stack_pop(JSContextHandle ctx) {
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue stack = JS_GetPropertyStr(ctx, global, "__cyber_upgrade_stack");
+    if (!JS_IsArray(ctx, stack)) return JS_UNDEFINED;
+    GCValue len_val = JS_GetPropertyStr(ctx, stack, "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, len_val);
+    if (len == 0) return JS_UNDEFINED;
+    GCValue el = JS_GetPropertyUint32(ctx, stack, len - 1);
+    JS_SetPropertyStr(ctx, stack, "length", JS_NewInt32(ctx, (int32_t)(len - 1)));
+    return el;
+}
+
 // Constructor for HTMLElement - creates object with HTMLElement.prototype in chain
 // Uses js_dom_node_class_id so DOM node data can be retrieved via JS_GetOpaqueHandle
 GCValue js_html_element_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
@@ -80,8 +109,7 @@ GCValue js_html_element_constructor(JSContextHandle ctx, GCValue new_target, int
     // If we are upgrading an existing DOMNode-backed element, reuse that object
     // as the constructed instance instead of creating a new one. This lets
     // Polymer/Closure constructors initialize __data on the actual element.
-    GCValue global = JS_GetGlobalObject(ctx);
-    GCValue upgrade_target = JS_GetPropertyStr(ctx, global, "__cyber_upgrade_target");
+    GCValue upgrade_target = cyber_upgrade_stack_pop(ctx);
     if (!JS_IsUndefined(upgrade_target) && !JS_IsNull(upgrade_target) && JS_IsObject(upgrade_target)) {
         GCValue proto = JS_GetPropertyStr(ctx, new_target, "prototype");
         if (!JS_IsException(proto) && JS_IsObject(proto)) {
@@ -1002,6 +1030,87 @@ GCValue js_custom_elements_get(JSContextHandle ctx, GCValue this_val, int argc, 
 GCValue js_custom_elements_when_defined(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     // Return a resolved promise
     return js_create_empty_resolved_promise(ctx);
+}
+
+// Spec-style upgrade for a single element: set its prototype to the registered
+// constructor's prototype, invoke the constructor via `new ctor()` (which
+// super()-returns the existing element), and fire connectedCallback when the
+// element is already in the document.
+GCValue js_cyber_upgrade_element(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_UNDEFINED;
+    GCValue el = argv[0];
+    if (JS_IsNull(el) || JS_IsUndefined(el) || !JS_IsObject(el)) return JS_UNDEFINED;
+
+    GCValue upgraded = JS_GetPropertyStr(ctx, el, "__CE_upgraded");
+    if (JS_ToBool(ctx, upgraded)) return JS_UNDEFINED;
+
+    GCValue node_type_val = JS_GetPropertyStr(ctx, el, "nodeType");
+    int32_t node_type = 0;
+    JS_ToInt32(ctx, &node_type, node_type_val);
+    if (node_type != 1) return JS_UNDEFINED;
+
+    GCValue tag_val = JS_GetPropertyStr(ctx, el, "tagName");
+    const char *tag = JS_ToCString(ctx, tag_val);
+    if (!tag) return JS_UNDEFINED;
+
+    char name_lc[128];
+    size_t len = strlen(tag);
+    if (len >= sizeof(name_lc)) len = sizeof(name_lc) - 1;
+    for (size_t i = 0; i < len; i++) name_lc[i] = (char)tolower((unsigned char)tag[i]);
+    name_lc[len] = '\0';
+
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue custom_elements = JS_GetPropertyStr(ctx, global, "customElements");
+    GCValue ctor = JS_GetPropertyStr(ctx, custom_elements, name_lc);
+    if (JS_IsUndefined(ctor) || JS_IsNull(ctor) || !JS_IsFunction(ctx, ctor)) {
+        return JS_UNDEFINED;
+    }
+
+    // Remove Polymer's disable-upgrade guard before running the constructor.
+    GCValue disable_args[1] = { JS_NewString(ctx, "disable-upgrade") };
+    js_element_remove_attribute(ctx, el, 1, disable_args);
+
+    // Set the element's prototype to the custom class prototype.
+    GCValue proto = JS_GetPropertyStr(ctx, ctor, "prototype");
+    if (!JS_IsException(proto) && JS_IsObject(proto)) {
+        JS_SetPrototype(ctx, el, proto);
+    }
+
+    // Mark as upgraded and push onto the upgrade stack so HTMLElement's
+    // constructor returns this element as the instance.
+    JS_SetPropertyStr(ctx, el, "__CE_upgraded", JS_TRUE);
+    cyber_upgrade_stack_push(ctx, el);
+
+    GCValue result = JS_CallConstructor2(ctx, ctor, ctor, 0, NULL);
+    if (JS_IsException(result)) {
+        GCValue exc = JS_GetException(ctx);
+        const char *msg = "(none)";
+        GCValue exc_msg = JS_GetPropertyStr(ctx, exc, "message");
+        if (!JS_IsUndefined(exc_msg) && !JS_IsNull(exc_msg)) {
+            const char *m = JS_ToCString(ctx, exc_msg);
+            if (m) msg = m;
+        }
+        fprintf(stderr, "[CE-UPGRADE] ctor %s threw: %s\n", name_lc, msg);
+        (void)cyber_upgrade_stack_pop(ctx); // clean stack
+    } else {
+        // If the constructor created a new object (shouldn't happen with our
+        // stack), at least try to preserve any own properties it set.
+        if (JS_IsObject(result) && !JS_IsUndefined(result) && !JS_IsNull(result)) {
+            // result and el may be the same object; if not we ignore.
+        }
+    }
+
+    // Fire connectedCallback if the element is already connected.
+    GCValue is_connected = JS_GetPropertyStr(ctx, el, "isConnected");
+    if (JS_ToBool(ctx, is_connected)) {
+        GCValue cb = JS_GetPropertyStr(ctx, el, "connectedCallback");
+        if (!JS_IsUndefined(cb) && !JS_IsNull(cb) && JS_IsFunction(ctx, cb)) {
+            JS_Call(ctx, cb, el, 0, NULL);
+        }
+    }
+
+    return el;
 }
 
 // ============================================================================
