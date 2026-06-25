@@ -631,38 +631,6 @@ static void apply_youtube_player_thumbnail_fallback(JSContextHandle ctx) {
     }
 }
 
-/* YouTube's masthead is not fully stamped in our emulated environment.  Inject
- * a minimal fixed title bar so the top of the watch page is not blank. */
-static void apply_youtube_masthead_fallback(JSContextHandle ctx) {
-    const char *js =
-        "(function(){"
-        "  try {"
-        "    var existing = document.getElementsByClassName('yt-masthead-fb');"
-        "    if (existing && existing.length) return;"
-        "    var body = document.body;"
-        "    if (!body || !window.__cyber_appendChild) return;"
-        "    var bar = document.createElement('div');"
-        "    bar.className = 'yt-masthead-fb';"
-        "    bar.setAttribute('style','position:fixed;top:0;left:0;right:0;height:56px;background:#0f0f0f;z-index:9999;overflow:hidden;');"
-        "    function make(tag,style,parent){var e=document.createElement(tag);e.setAttribute('style',style);if(parent)window.__cyber_appendChild(parent,e);return e;}"
-        "    function text(e,t){e.textContent=t;}"
-        "    var logo=make('div','position:absolute;top:16px;left:50px;height:24px;line-height:24px;color:#fff;font-size:20px;font-weight:bold;',bar);"
-        "    text(logo,'YouTube');"
-        "    text(make('div','position:absolute;top:19px;left:16px;width:18px;height:4px;line-height:4px;overflow:hidden;color:#fff;font-size:14px;',bar),'\u2014');"
-        "    text(make('div','position:absolute;top:25px;left:16px;width:18px;height:4px;line-height:4px;overflow:hidden;color:#fff;font-size:14px;',bar),'\u2014');"
-        "    text(make('div','position:absolute;top:31px;left:16px;width:18px;height:4px;line-height:4px;overflow:hidden;color:#fff;font-size:14px;',bar),'\u2014');"
-        "    window.__cyber_appendChild(body, bar);"
-        "    var cn=body.childNodes;"
-        "    for(var i=cn.length-1;i>=0;i--){"
-        "      var n=cn[i];"
-        "      if(n.nodeType===3 && n.data && n.data.indexOf('</body>')>=0) body.removeChild(n);"
-        "    }"
-        "  } catch(e) {}"
-        "})();";
-
-    JS_Eval(ctx, js, strlen(js), "<masthead_fallback>", JS_EVAL_TYPE_GLOBAL);
-}
-
 int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
@@ -846,7 +814,6 @@ int main(int argc, char *argv[]) {
         // Apply thumbnail fallback each iteration so it runs after the player
         // scripts have created the movie_player element.
         apply_youtube_player_thumbnail_fallback(g_ctx);
-        apply_youtube_masthead_fallback(g_ctx);
 
         if (g_dom_needs_layout) {
             g_dom_needs_layout = 0;

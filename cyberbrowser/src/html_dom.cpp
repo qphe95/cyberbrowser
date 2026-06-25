@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <vector>
 #include "html_dom.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
@@ -1663,6 +1664,107 @@ static bool dom_node_has_attribute(DOMNodeHandle node, const char *name) {
 
 static void html_serialize_js_node_internal(JSContextHandle ctx, GCValue node, SerializeBuffer *buf);
 
+struct LightChildEntry {
+    GCValue node;
+    const char *slot;
+    bool used;
+};
+
+/* Serialize the rendered children of a shadow host.  If the host has an open
+ * shadow root, light-DOM children are not emitted directly; they are composed
+ * into the shadow tree by matching <slot> elements.  This makes Polymer-stamped
+ * custom elements such as ytd-masthead render with their real structure. */
+static void html_serialize_shadow_host_children(JSContextHandle ctx, DOMNodeHandle host, GCValue host_val, SerializeBuffer *buf) {
+    /* Collect light-DOM children and their slot names. */
+    std::vector<LightChildEntry> light;
+    GCValue child = host.first_child();
+    while (!JS_IsNull(child) && JS_IsObject(child)) {
+        DOMNodeHandle child_node = get_dom_node(ctx, child);
+        const char *slot_name = "";
+        if (child_node.valid() && child_node.node_type() == DOM_NODE_TYPE_ELEMENT) {
+            const char *s = child_node.get_attribute("slot");
+            if (s) slot_name = s;
+        }
+        light.push_back({child, slot_name, false});
+        if (!child_node.valid()) break;
+        child = child_node.next_sibling();
+    }
+
+    /* Only consider open shadow roots for flattening.  Closed roots are not
+     * accessible to script, and the emulator does not support closed-root
+     * composition in the serialization path.  A shadow root that only contains
+     * comments or whitespace is treated as empty so the light-DOM skeleton is
+     * still rendered. */
+    GCValue shadow = JS_GetPropertyStr(ctx, host_val, "shadowRoot");
+    bool has_shadow_children = false;
+    if (!JS_IsUndefined(shadow) && !JS_IsNull(shadow) && JS_IsObject(shadow)) {
+        GCValue probe = JS_GetPropertyStr(ctx, shadow, "firstChild");
+        while (!JS_IsUndefined(probe) && !JS_IsNull(probe) && JS_IsObject(probe)) {
+            DOMNodeHandle probe_node = get_dom_node(ctx, probe);
+            if (!probe_node.valid()) break;
+            int nt = probe_node.node_type();
+            if (nt == DOM_NODE_TYPE_ELEMENT) {
+                has_shadow_children = true;
+                break;
+            }
+            if (nt == DOM_NODE_TYPE_TEXT) {
+                const char *val = probe_node.node_value();
+                bool nonws = false;
+                if (val) {
+                    for (const char *p = val; *p; p++) {
+                        if (!isspace((unsigned char)*p)) { nonws = true; break; }
+                    }
+                }
+                if (nonws) { has_shadow_children = true; break; }
+            }
+            probe = probe_node.next_sibling();
+        }
+    }
+    if (!has_shadow_children) {
+        /* No usable shadow content: emit light children in document order. */
+        for (size_t i = 0; i < light.size(); i++) {
+            html_serialize_js_node_internal(ctx, light[i].node, buf);
+        }
+        return;
+    }
+
+    GCValue schild = JS_GetPropertyStr(ctx, shadow, "firstChild");
+    while (!JS_IsUndefined(schild) && !JS_IsNull(schild) && JS_IsObject(schild)) {
+        DOMNodeHandle schild_node = get_dom_node(ctx, schild);
+        if (schild_node.valid() && schild_node.node_type() == DOM_NODE_TYPE_ELEMENT) {
+            const char *tag = schild_node.node_name();
+            if (tag && strcasecmp(tag, "slot") == 0) {
+                const char *slot_name = schild_node.get_attribute("name");
+                if (!slot_name) slot_name = "";
+                bool any = false;
+                for (size_t i = 0; i < light.size(); i++) {
+                    if (!light[i].used && strcmp(light[i].slot, slot_name) == 0) {
+                        html_serialize_js_node_internal(ctx, light[i].node, buf);
+                        light[i].used = true;
+                        any = true;
+                    }
+                }
+                if (!any) {
+                    /* No assigned nodes: emit the slot's fallback content. */
+                    GCValue fb = schild_node.first_child();
+                    while (!JS_IsNull(fb) && JS_IsObject(fb)) {
+                        html_serialize_js_node_internal(ctx, fb, buf);
+                        DOMNodeHandle fb_node = get_dom_node(ctx, fb);
+                        if (!fb_node.valid()) break;
+                        fb = fb_node.next_sibling();
+                    }
+                }
+            } else {
+                html_serialize_js_node_internal(ctx, schild, buf);
+            }
+        } else {
+            html_serialize_js_node_internal(ctx, schild, buf);
+        }
+        if (!schild_node.valid()) break;
+        schild = schild_node.next_sibling();
+    }
+}
+
 static void html_serialize_js_element(JSContextHandle ctx, DOMNodeHandle node, GCValue node_val, SerializeBuffer *buf) {
     const char *tag = node.node_name();
     if (!tag || !tag[0]) tag = "div";
@@ -1731,27 +1833,7 @@ static void html_serialize_js_element(JSContextHandle ctx, DOMNodeHandle node, G
             serialize_buf_append(buf, text);
         }
     } else {
-        /* Recurse into children. */
-        GCValue child = node.first_child();
-        while (!JS_IsNull(child)) {
-            html_serialize_js_node_internal(ctx, child, buf);
-            DOMNodeHandle child_node = get_dom_node(ctx, child);
-            if (!child_node.valid()) break;
-            child = child_node.next_sibling();
-        }
-
-        /* Serialize open shadow roots so Polymer-stamped content survives the
-         * JS DOM -> native DOM round-trip. */
-        GCValue shadow = JS_GetPropertyStr(ctx, node_val, "shadowRoot");
-        if (!JS_IsUndefined(shadow) && !JS_IsNull(shadow) && JS_IsObject(shadow)) {
-            GCValue shadow_child = JS_GetPropertyStr(ctx, shadow, "firstChild");
-            while (!JS_IsUndefined(shadow_child) && !JS_IsNull(shadow_child)) {
-                html_serialize_js_node_internal(ctx, shadow_child, buf);
-                DOMNodeHandle shadow_child_node = get_dom_node(ctx, shadow_child);
-                if (!shadow_child_node.valid()) break;
-                shadow_child = shadow_child_node.next_sibling();
-            }
-        }
+        html_serialize_shadow_host_children(ctx, node, node_val, buf);
     }
     
     serialize_buf_append(buf, "</");
@@ -1782,7 +1864,15 @@ static void html_serialize_js_node_internal(JSContextHandle ctx, GCValue node, S
     int node_type = dom_node.node_type();
     if (node_type == DOM_NODE_TYPE_TEXT) {
         const char *val = dom_node.node_value();
-        serialize_buf_append_escaped(buf, val ? val : "");
+        if (val) {
+            /* Skip text nodes that are stray closing tags emitted after the
+             * document end; the parser should not have rendered them. */
+            const char *p = val;
+            while (*p && isspace((unsigned char)*p)) p++;
+            if (strncmp(p, "</body>", 7) != 0 && strncmp(p, "</html>", 7) != 0) {
+                serialize_buf_append_escaped(buf, val);
+            }
+        }
         return;
     }
     if (node_type == DOM_NODE_TYPE_COMMENT) {
