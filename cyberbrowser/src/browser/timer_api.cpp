@@ -273,6 +273,12 @@ int find_due_timer(unsigned long long current_time) {
     return due_id;
 }
 
+// Mock IdleDeadline.timeRemaining() - returns a generous millisecond budget.
+static GCValue js_idle_deadline_time_remaining(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    return JS_NewFloat64(ctx, 50.0);
+}
+
 // Execute a timer callback by ID
 void execute_timer(JSContextHandle ctx, int id) {
     pthread_mutex_lock(&g_timer_state.mutex);
@@ -324,9 +330,9 @@ void execute_timer(JSContextHandle ctx, int id) {
         if (timer->type == TIMER_TYPE_IDLE_CALLBACK && arg_count == 0) {
             GCValue idle_deadline = JS_NewObject(ctx);
             JS_SetPropertyStr(ctx, idle_deadline, "didTimeout", JS_FALSE);
-            // timeRemaining returns always some positive number
-            JS_SetPropertyStr(ctx, idle_deadline, "timeRemaining", 
-                JS_NewCFunction(ctx, js_true, "timeRemaining", 0));
+            // timeRemaining returns a generous budget in milliseconds
+            JS_SetPropertyStr(ctx, idle_deadline, "timeRemaining",
+                JS_NewCFunction(ctx, js_idle_deadline_time_remaining, "timeRemaining", 0));
             args[0] = idle_deadline;
             arg_count = 1;
         }

@@ -16,6 +16,9 @@
 #include "gc_value_helpers.h"
 #include "platform.h"
 
+// createElement lives in js_quickjs.cpp and is used by the outerHTML setter.
+extern GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+
 /* Global layout-invalidation flag. DOM mutation functions set this to 1 so the
  * main loop knows the native HtmlDocument is stale and must be rebuilt from the
  * current JS DOM before the next layout/render pass. */
@@ -1509,6 +1512,13 @@ GCValue js_document_get_elements_by_tag_name(JSContextHandle ctx, GCValue this_v
     return arr;
 }
 
+// Document.prototype.styleSheets - return a live-ish collection of stylesheets.
+GCValue js_document_get_style_sheets(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    // TODO: collect sheets from <style> and <link rel="stylesheet"> elements.
+    return JS_NewArray(ctx);
+}
+
 // Document.prototype.getElementsByClassName - use the lock-free class index table.
 GCValue js_document_getElementsByClassName(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
@@ -2100,15 +2110,49 @@ GCValue js_element_set_inner_html(JSContextHandle ctx, GCValue this_val, int arg
 // Element.prototype.outerHTML getter
 GCValue js_element_get_outer_html(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    // Return empty string for stub
-    return JS_NewString(ctx, "");
+    DOMNodeHandle node = get_dom_node(ctx, this_val);
+    if (!node.valid() || node.node_type() != DOM_NODE_TYPE_ELEMENT) {
+        return JS_NewString(ctx, "");
+    }
+    char buf[4096];
+    buf[0] = '\0';
+    size_t pos = 0;
+    serialize_element_html(ctx, node, buf, sizeof(buf), &pos);
+    return JS_NewString(ctx, buf);
 }
 
 // Element.prototype.outerHTML setter
 GCValue js_element_set_outer_html(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1) return JS_UNDEFINED;
-    // No-op for stub - in real implementation would replace element
-    (void)argv;
+    const char *html = JS_ToCString(ctx, argv[0]);
+    if (!html) html = "";
+
+    DOMNodeHandle node = get_dom_node(ctx, this_val);
+    if (!node.valid()) return JS_UNDEFINED;
+    GCValue parent = node.parent_node();
+    if (JS_IsNull(parent) || JS_IsUndefined(parent)) return JS_UNDEFINED;
+
+    // Parse the replacement HTML into a temporary container.
+    GCValue div_tag = JS_NewString(ctx, "div");
+    GCValue temp = js_document_create_element(ctx, parent, 1, &div_tag);
+    html_element_set_inner_html(ctx, temp, html);
+
+    // Insert parsed children before this element.
+    DOMNodeHandle temp_node = get_dom_node(ctx, temp);
+    GCValue child = temp_node.first_child();
+    while (!JS_IsNull(child) && JS_IsObject(child)) {
+        DOMNodeHandle child_node = get_dom_node(ctx, child);
+        GCValue next = child_node.valid() ? child_node.next_sibling() : JS_NULL;
+        GCValue insert_args[2] = { child, this_val };
+        js_node_insertBefore_real(ctx, parent, 2, insert_args);
+        if (!JS_IsObject(next)) break;
+        child = next;
+    }
+
+    // Remove the original element.
+    GCValue remove_args[1] = { this_val };
+    js_node_removeChild_real(ctx, parent, 1, remove_args);
+
     dom_request_layout();
     return JS_UNDEFINED;
 }

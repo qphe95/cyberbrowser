@@ -465,6 +465,42 @@ static GCValue js_computed_style_get_property_value(JSContextHandle ctx, GCValue
     return JS_NewString(ctx, "");
 }
 
+static GCValue js_computed_style_get_property_priority(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NewString(ctx, "");
+    const char *prop = JS_ToCString(ctx, argv[0]);
+    if (!prop || !prop[0]) return JS_NewString(ctx, "");
+    return JS_NewString(ctx, "");
+}
+
+static GCValue js_computed_style_item(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NewString(ctx, "");
+    int32_t index = 0;
+    JS_ToInt32(ctx, &index, argv[0]);
+    JSPropertyEnum *props = NULL;
+    uint32_t prop_count = 0;
+    if (JS_GetOwnPropertyNames(ctx, &props, &prop_count, this_val, JS_GPN_STRING_MASK) == 0 && props) {
+        if (index >= 0 && (uint32_t)index < prop_count) {
+            const char *name = JS_AtomToCString(ctx, props[index].atom);
+            JS_FreePropertyEnum(ctx, props, prop_count);
+            return JS_NewString(ctx, name ? name : "");
+        }
+        JS_FreePropertyEnum(ctx, props, prop_count);
+    }
+    return JS_NewString(ctx, "");
+}
+
+static GCValue js_computed_style_set_property(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 2) return JS_UNDEFINED;
+    const char *prop = JS_ToCString(ctx, argv[0]);
+    const char *value = JS_ToCString(ctx, argv[1]);
+    if (prop && value) {
+        JS_SetPropertyStr(ctx, this_val, prop, JS_NewString(ctx, value));
+    }
+    return JS_UNDEFINED;
+}
+
 // getComputedStyle - reads from the per-element computed-style table and
 // falls back to sensible defaults so scripts can safely call .replace() etc.
 GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
@@ -530,11 +566,45 @@ GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, G
 
     JS_SetPropertyStr(ctx, style, "getPropertyValue",
         JS_NewCFunction(ctx, js_computed_style_get_property_value, "getPropertyValue", 1));
+    JS_SetPropertyStr(ctx, style, "getPropertyPriority",
+        JS_NewCFunction(ctx, js_computed_style_get_property_priority, "getPropertyPriority", 1));
+    JS_SetPropertyStr(ctx, style, "item",
+        JS_NewCFunction(ctx, js_computed_style_item, "item", 1));
+    JS_SetPropertyStr(ctx, style, "setProperty",
+        JS_NewCFunction(ctx, js_computed_style_set_property, "setProperty", 3));
 
     DOMNodeHandle node = DOMNodeHandle::from_object_check(ctx, element);
     if (node.valid()) {
-        /* Override defaults with the actual computed properties stored for
-         * this node (the table contains both kebab-case and camelCase keys). */
+        /* Merge the element's inline style object so getComputedStyle reflects
+         * properties set via element.style.foo even before layout runs. */
+        GCValue inline_style = JS_GetPropertyStr(ctx, element, "style");
+        if (JS_IsObject(inline_style)) {
+            JSPropertyEnum *props = NULL;
+            uint32_t prop_count = 0;
+            if (JS_GetOwnPropertyNames(ctx, &props, &prop_count, inline_style, JS_GPN_STRING_MASK) == 0 && props) {
+                for (uint32_t i = 0; i < prop_count; i++) {
+                    const char *key_str = JS_AtomToCString(ctx, props[i].atom);
+                    if (!key_str) continue;
+                    // Skip methods and vendor-seed properties.
+                    if (strcmp(key_str, "getPropertyValue") == 0 ||
+                        strcmp(key_str, "getPropertyPriority") == 0 ||
+                        strcmp(key_str, "setProperty") == 0 ||
+                        strcmp(key_str, "removeProperty") == 0 ||
+                        strcmp(key_str, "animationTimingFunction") == 0) {
+                        continue;
+                    }
+                    GCValue val = JS_GetPropertyStr(ctx, inline_style, key_str);
+                    if (JS_IsString(val)) {
+                        JS_SetPropertyStr(ctx, style, key_str, val);
+                    }
+                }
+                JS_FreePropertyEnum(ctx, props, prop_count);
+            }
+        }
+
+        /* Override defaults and inline styles with the actual computed
+         * properties stored for this node (the table contains both kebab-case
+         * and camelCase keys). */
         GCHandle cs_handle = node.computed_style_handle();
         if (cs_handle != GC_HANDLE_NULL) {
             CssComputedStyle *cs = (CssComputedStyle *)gc_deref(cs_handle);

@@ -143,30 +143,92 @@ GCValue js_css_style_sheet_remove_rule(JSContextHandle ctx, GCValue this_val, in
     return js_css_style_sheet_delete_rule(ctx, this_val, argc, argv);
 }
 
+static GCValue css_style_sheet_rules(JSContextHandle ctx, GCValue sheet) {
+    GCValue rules = JS_GetPropertyStr(ctx, sheet, "__rules");
+    if (!JS_IsArray(ctx, rules)) {
+        rules = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, sheet, "__rules", rules);
+    }
+    return rules;
+}
+
+GCValue js_css_style_sheet_get_css_rules(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    return css_style_sheet_rules(ctx, this_val);
+}
+
+GCValue js_css_style_sheet_get_rules(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    return css_style_sheet_rules(ctx, this_val);
+}
+
 // CSSStyleSheet.replace(text)
 GCValue js_css_style_sheet_replace(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)this_val; (void)argc; (void)argv;
-    // Returns a Promise - simplified to resolve immediately
-    return JS_UNDEFINED;
+    // Synchronously parse the text and return a resolved promise.
+    js_css_style_sheet_replace_sync(ctx, this_val, argc, argv);
+    return js_create_empty_resolved_promise(ctx);
 }
 
 // CSSStyleSheet.replaceSync(text)
 GCValue js_css_style_sheet_replace_sync(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
     if (argc < 1) return JS_UNDEFINED;
-    
-    // Replace all rules
+
     GCValue rules = JS_NewArray(ctx);
     JS_SetPropertyStr(ctx, this_val, "__rules", rules);
-    
-    // Parse and add rules (simplified)
+
     const char *text = JS_ToCString(ctx, argv[0]);
-    if (text) {
-        // Just store as one rule for simplicity
-        JS_SetPropertyUint32(ctx, rules, 0, JS_NewString(ctx, text));
+    if (!text) return JS_UNDEFINED;
+
+    // Split top-level rules by matching braces as a basic parser.
+    size_t len = strlen(text);
+    size_t start = 0;
+    int depth = 0;
+    uint32_t ridx = 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = text[i];
+        if (c == '{') {
+            depth++;
+        } else if (c == '}') {
+            depth--;
+            if (depth == 0) {
+                size_t end = i + 1;
+                while (start < len && (text[start] == ' ' || text[start] == '\t' || text[start] == '\n' || text[start] == '\r')) start++;
+                while (end > start && (text[end-1] == ' ' || text[end-1] == '\t' || text[end-1] == '\n' || text[end-1] == '\r')) end--;
+                if (end > start) {
+                    char *rule = (char*)malloc(end - start + 1);
+                    if (rule) {
+                        memcpy(rule, text + start, end - start);
+                        rule[end - start] = '\0';
+                        JS_SetPropertyUint32(ctx, rules, ridx++, JS_NewString(ctx, rule));
+                        free(rule);
+                    }
+                }
+                start = i + 1;
+            }
+        }
     }
-    
+
     return JS_UNDEFINED;
+}
+
+// CSSStyleSheet constructor
+GCValue js_css_style_sheet_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    GCValue obj = JS_NewObject(ctx);
+    if (JS_IsException(obj)) return obj;
+    GCValue proto = JS_GetPropertyStr(ctx, new_target, "prototype");
+    if (!JS_IsException(proto) && JS_IsObject(proto)) {
+        JS_SetPrototype(ctx, obj, proto);
+    }
+    JS_SetPropertyStr(ctx, obj, "__rules", JS_NewArray(ctx));
+    JS_SetPropertyStr(ctx, obj, "type", JS_NewString(ctx, "text/css"));
+    JS_SetPropertyStr(ctx, obj, "href", JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "ownerNode", JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "ownerRule", JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "title", JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, obj, "disabled", JS_FALSE);
+    return obj;
 }
 
 // CSSStyleDeclaration.setProperty(property, value, priority)
