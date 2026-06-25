@@ -46,6 +46,20 @@ typedef struct LayoutChunk {
     int end;
 } LayoutChunk;
 
+/* Storage for CSS custom properties (variables) on a single layout node. */
+typedef struct CssCustomProp {
+    char *name;
+    char *value;
+} CssCustomProp;
+
+typedef struct CssCustomProps {
+    CssCustomProp *props;
+    int count;
+    int capacity;
+} CssCustomProps;
+
+static void css_custom_props_clear(CssCustomProps *props);
+
 static inline HtmlNode* layout_node_dom(LayoutContext *ctx, int dom_idx)
 {
     return (HtmlNode*)po_array_payload(&ctx->doc->array, dom_idx);
@@ -248,6 +262,11 @@ bool css_layout_tree_build(LayoutContext *ctx, HtmlDocument *doc)
     bool ok = layout_build_nodes(ctx, map);
     if (ok) ok = layout_build_orders(ctx);
 
+    if (ok) {
+        ctx->custom_props = (CssCustomProps*)calloc(ctx->tree.count, sizeof(CssCustomProps));
+        if (!ctx->custom_props) ok = false;
+    }
+
     free(map);
     return ok;
 }
@@ -255,6 +274,12 @@ bool css_layout_tree_build(LayoutContext *ctx, HtmlDocument *doc)
 void css_layout_tree_free(LayoutContext *ctx)
 {
     if (!ctx) return;
+    if (ctx->custom_props) {
+        for (int i = 0; i < ctx->tree.count; i++) {
+            css_custom_props_clear(&ctx->custom_props[i]);
+        }
+        free(ctx->custom_props);
+    }
     free(ctx->tree.nodes);
     free(ctx->tree.preorder);
     free(ctx->tree.postorder);
@@ -280,9 +305,122 @@ static bool css_is_inherited(const char *prop)
     return false;
 }
 
+static double css_parse_length(const char *value, double parent_value, double viewport_value);
+
+/* Minimal calc() expression evaluator. Supports +, -, *, /, parentheses and
+ * length/percentage operands.  Returns 0 for unsupported expressions. */
+typedef struct {
+    const char *s;
+    size_t len;
+    size_t pos;
+    double parent_value;
+    double viewport_value;
+} CalcParser;
+
+static void calc_skip_space(CalcParser *p)
+{
+    while (p->pos < p->len && isspace((unsigned char)p->s[p->pos])) p->pos++;
+}
+
+static double calc_parse_expr(CalcParser *p);
+
+static double calc_parse_primary(CalcParser *p)
+{
+    calc_skip_space(p);
+    if (p->pos >= p->len) return 0.0;
+
+    if (p->s[p->pos] == '(') {
+        p->pos++;
+        double v = calc_parse_expr(p);
+        calc_skip_space(p);
+        if (p->pos < p->len && p->s[p->pos] == ')') p->pos++;
+        return v;
+    }
+
+    const char *start = p->s + p->pos;
+    char *end = NULL;
+    double num = strtod(start, &end);
+    if (end == start) return 0.0;
+    p->pos = (size_t)(end - p->s);
+    calc_skip_space(p);
+
+    if (p->pos < p->len && isalpha((unsigned char)p->s[p->pos])) {
+        const char *unit_start = p->s + p->pos;
+        while (p->pos < p->len && isalpha((unsigned char)p->s[p->pos])) p->pos++;
+        size_t unit_len = (size_t)(p->s + p->pos - unit_start);
+        char unit[8] = {0};
+        if (unit_len < sizeof(unit)) {
+            memcpy(unit, unit_start, unit_len);
+            for (size_t i = 0; i < unit_len; i++) unit[i] = (char)tolower((unsigned char)unit[i]);
+        }
+        if (strcmp(unit, "%") == 0) return num * p->parent_value / 100.0;
+        if (strcmp(unit, "vw") == 0) return num * p->viewport_value / 100.0;
+        if (strcmp(unit, "vh") == 0) return num * p->viewport_value / 100.0;
+        if (strcmp(unit, "em") == 0) return num * p->parent_value;
+        if (strcmp(unit, "rem") == 0) return num * 16.0;
+        /* px or unknown unit: treat number as px */
+        return num;
+    }
+    return num; /* unitless */
+}
+
+static double calc_parse_term(CalcParser *p)
+{
+    double lhs = calc_parse_primary(p);
+    for (;;) {
+        calc_skip_space(p);
+        if (p->pos >= p->len) break;
+        char op = p->s[p->pos];
+        if (op != '*' && op != '/') break;
+        p->pos++;
+        double rhs = calc_parse_primary(p);
+        if (op == '*') lhs *= rhs;
+        else if (rhs != 0.0) lhs /= rhs;
+    }
+    return lhs;
+}
+
+static double calc_parse_expr(CalcParser *p)
+{
+    calc_skip_space(p);
+    double lhs = calc_parse_term(p);
+    for (;;) {
+        calc_skip_space(p);
+        if (p->pos >= p->len) break;
+        char op = p->s[p->pos];
+        if (op != '+' && op != '-') break;
+        p->pos++;
+        double rhs = calc_parse_term(p);
+        if (op == '+') lhs += rhs;
+        else lhs -= rhs;
+    }
+    return lhs;
+}
+
+static double css_parse_calc(const char *value, double parent_value, double viewport_value)
+{
+    if (!value) return 0.0;
+    while (*value && isspace((unsigned char)*value)) value++;
+    if (strncasecmp(value, "calc(", 5) != 0) return 0.0;
+    value += 5;
+    CalcParser p = {0};
+    p.s = value;
+    p.len = strlen(value);
+    p.parent_value = parent_value;
+    p.viewport_value = viewport_value;
+    double result = calc_parse_expr(&p);
+    calc_skip_space(&p);
+    if (p.pos < p.len && p.s[p.pos] == ')') p.pos++;
+    return result;
+}
+
 static double css_parse_length(const char *value, double parent_value, double viewport_value)
 {
     if (!value || !*value) return 0.0;
+    while (*value && isspace((unsigned char)*value)) value++;
+    if (strncasecmp(value, "calc(", 5) == 0) {
+        return css_parse_calc(value, parent_value, viewport_value);
+    }
     char *end = NULL;
     double num = strtod(value, &end);
     if (end == value) return 0.0;
@@ -728,6 +866,174 @@ static void layout_apply_inline_style(LayoutBox *box, HtmlNode *node,
 }
 
 /* ============================================================================
+ * CSS custom properties (variables)
+ * ============================================================================ */
+
+static bool css_custom_props_inherit(CssCustomProps *dst, const CssCustomProps *src)
+{
+    if (!src || src->count == 0) return true;
+    if (dst->capacity < src->count) {
+        CssCustomProp *new_props = (CssCustomProp*)realloc(dst->props,
+                                                            src->count * sizeof(CssCustomProp));
+        if (!new_props) return false;
+        dst->props = new_props;
+        dst->capacity = src->count;
+    }
+    for (int i = 0; i < src->count; i++) {
+        dst->props[i].name = strdup(src->props[i].name);
+        dst->props[i].value = strdup(src->props[i].value);
+        if (!dst->props[i].name || !dst->props[i].value) {
+            for (int j = 0; j <= i; j++) {
+                free(dst->props[j].name);
+                free(dst->props[j].value);
+            }
+            return false;
+        }
+    }
+    dst->count = src->count;
+    return true;
+}
+
+static void css_custom_props_clear(CssCustomProps *props)
+{
+    if (!props) return;
+    for (int i = 0; i < props->count; i++) {
+        free(props->props[i].name);
+        free(props->props[i].value);
+    }
+    free(props->props);
+    props->props = NULL;
+    props->count = 0;
+    props->capacity = 0;
+}
+
+static const char* css_custom_props_get(const CssCustomProps *props, const char *name)
+{
+    if (!props || !name) return NULL;
+    for (int i = 0; i < props->count; i++) {
+        if (strcmp(props->props[i].name, name) == 0) return props->props[i].value;
+    }
+    return NULL;
+}
+
+static bool css_custom_props_set(CssCustomProps *props, const char *name, const char *value)
+{
+    if (!props || !name || !value) return false;
+    for (int i = 0; i < props->count; i++) {
+        if (strcmp(props->props[i].name, name) == 0) {
+            char *v = strdup(value);
+            if (!v) return false;
+            free(props->props[i].value);
+            props->props[i].value = v;
+            return true;
+        }
+    }
+    if (props->count >= props->capacity) {
+        int new_cap = props->capacity ? props->capacity * 2 : 4;
+        CssCustomProp *new_props = (CssCustomProp*)realloc(props->props,
+                                                            new_cap * sizeof(CssCustomProp));
+        if (!new_props) return false;
+        props->props = new_props;
+        props->capacity = new_cap;
+    }
+    props->props[props->count].name = strdup(name);
+    props->props[props->count].value = strdup(value);
+    if (!props->props[props->count].name || !props->props[props->count].value) {
+        free(props->props[props->count].name);
+        free(props->props[props->count].value);
+        return false;
+    }
+    props->count++;
+    return true;
+}
+
+/* Resolve var(--name, fallback) references in a CSS value.  Looks up custom
+ * properties in the supplied map and falls back to the comma-separated fallback
+ * if the variable is not defined.  Returns a newly allocated string or NULL if
+ * no var() references were found. */
+static char* css_var_resolve(const char *value, const CssCustomProps *props)
+{
+    if (!value || !strchr(value, '(')) return NULL;
+    const char *p = value;
+    const char *var = strstr(p, "var(");
+    if (!var) return NULL;
+
+    char *out = (char*)malloc(strlen(value) + 1);
+    if (!out) return NULL;
+    size_t out_len = 0;
+
+    while (*p) {
+        var = strstr(p, "var(");
+        if (!var) {
+            size_t rest = strlen(p);
+            memcpy(out + out_len, p, rest);
+            out_len += rest;
+            break;
+        }
+
+        /* Copy literal prefix. */
+        size_t prefix = (size_t)(var - p);
+        if (out_len + prefix >= strlen(value) + 1) break;
+        memcpy(out + out_len, p, prefix);
+        out_len += prefix;
+
+        /* Parse var(...) contents. */
+        p = var + 4;
+        while (*p && isspace((unsigned char)*p)) p++;
+        const char *name_start = p;
+        while (*p && *p != ',' && *p != ')') p++;
+        const char *name_end = p;
+        while (name_end > name_start && isspace((unsigned char)name_end[-1])) name_end--;
+
+        const char *fallback = NULL;
+        const char *fallback_end = NULL;
+        if (*p == ',') {
+            p++;
+            while (*p && isspace((unsigned char)*p)) p++;
+            fallback = p;
+            int depth = 1;
+            while (*p && depth > 0) {
+                if (*p == '(') depth++;
+                else if (*p == ')') depth--;
+                if (depth > 0) p++;
+            }
+            fallback_end = p;
+            while (fallback_end > fallback && isspace((unsigned char)fallback_end[-1])) fallback_end--;
+        } else if (*p == ')') {
+            p++;
+        }
+
+        size_t name_len = (size_t)(name_end - name_start);
+        char *name = (char*)malloc(name_len + 1);
+        if (!name) break;
+        memcpy(name, name_start, name_len);
+        name[name_len] = '\0';
+
+        const char *resolved = css_custom_props_get(props, name);
+        free(name);
+
+        if (resolved && resolved[0]) {
+            size_t rlen = strlen(resolved);
+            char *grown = (char*)realloc(out, out_len + rlen + strlen(p) + 1);
+            if (!grown) break;
+            out = grown;
+            memcpy(out + out_len, resolved, rlen);
+            out_len += rlen;
+        } else if (fallback && fallback_end > fallback) {
+            size_t flen = (size_t)(fallback_end - fallback);
+            char *grown = (char*)realloc(out, out_len + flen + strlen(p) + 1);
+            if (!grown) break;
+            out = grown;
+            memcpy(out + out_len, fallback, flen);
+            out_len += flen;
+        }
+    }
+
+    out[out_len] = '\0';
+    return out;
+}
+
+/* ============================================================================
  * Stylesheet collection and parallel application
  * ============================================================================ */
 
@@ -854,18 +1160,22 @@ static bool layout_collect_document_stylesheets(LayoutContext *ctx, LayoutStyleS
     return true;
 }
 
-/* Collect matching declarations for one node, sort by cascade, and apply. */
-static void layout_apply_stylesheet_node(LayoutContext *ctx, int idx,
-                                          LayoutStyleSheetList *list)
+/* Collect matching declarations for one node and return them sorted by cascade.
+ * Caller must free *out_applied. */
+static bool layout_collect_matched_declarations(LayoutContext *ctx, int idx,
+                                                 LayoutStyleSheetList *list,
+                                                 CssAppliedDecl **out_applied,
+                                                 int *out_count)
 {
-    LayoutBox *box = layout_box(ctx, idx);
+    *out_applied = NULL;
+    *out_count = 0;
     HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
-    if (!node || node->type != HTML_NODE_ELEMENT) return;
+    if (!node || node->type != HTML_NODE_ELEMENT) return false;
 
     int cap = 64;
     int count = 0;
     CssAppliedDecl *applied = (CssAppliedDecl*)malloc(cap * sizeof(CssAppliedDecl));
-    if (!applied) return;
+    if (!applied) return false;
 
     for (int s = 0; s < list->count; s++) {
         CssStylesheet *sheet = list->sheets[s];
@@ -876,36 +1186,6 @@ static void layout_apply_stylesheet_node(LayoutContext *ctx, int idx,
             if (!css_rule_media_matches(rule, ctx->viewport_width)) continue;
             int spec = rule->specificity;
             if (spec == 0) spec = css_specificity_from_selector_text(rule->selector_text);
-
-            /* Pseudo-element aspect ratios (e.g. .thumbnail:before{padding-top:56.25%})
-             * are applied to the real element since we don't render pseudo nodes. */
-            const char *sel = rule->selector_text;
-            const char *pseudo = strstr(sel, ":before");
-            if (!pseudo) pseudo = strstr(sel, ":after");
-            if (pseudo) {
-                size_t base_len = (size_t)(pseudo - sel);
-                while (base_len > 0 && isspace((unsigned char)sel[base_len - 1])) base_len--;
-                size_t start = 0;
-                while (start < base_len && isspace((unsigned char)sel[start])) start++;
-                if (base_len > start) {
-                    char *base = (char*)malloc(base_len - start + 1);
-                    if (base) {
-                        memcpy(base, sel + start, base_len - start);
-                        base[base_len - start] = '\0';
-                        if (css_selector_matches(base, ctx->doc, node)) {
-                            for (int d = 0; d < rule->declaration_count; d++) {
-                                const char *prop = rule->declarations[d].property;
-                                const char *val = rule->declarations[d].value;
-                                if (prop && strcasecmp(prop, "padding-top") == 0) {
-                                    double ratio = css_parse_percent_ratio(val);
-                                    if (ratio > box->aspect_ratio) box->aspect_ratio = ratio;
-                                }
-                            }
-                        }
-                        free(base);
-                    }
-                }
-            }
 
             for (int d = 0; d < rule->declaration_count; d++) {
                 if (count >= cap) {
@@ -926,17 +1206,156 @@ static void layout_apply_stylesheet_node(LayoutContext *ctx, int idx,
 
     if (count > 0) {
         qsort(applied, (size_t)count, sizeof(CssAppliedDecl), css_applied_decl_compare);
+    }
+    *out_applied = applied;
+    *out_count = count;
+    return true;
+}
+
+/* Apply only custom property declarations to a node.  Inheritance from the
+ * parent must already have been copied into ctx->custom_props[idx]. */
+static void layout_apply_stylesheet_node_custom_props(LayoutContext *ctx, int idx,
+                                                       LayoutStyleSheetList *list)
+{
+    HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+    if (!node || node->type != HTML_NODE_ELEMENT) return;
+    CssCustomProps *props = &ctx->custom_props[idx];
+
+    CssAppliedDecl *applied = NULL;
+    int count = 0;
+    if (list && list->count > 0) {
+        layout_collect_matched_declarations(ctx, idx, list, &applied, &count);
+    }
+
+    if (applied) {
         for (int d = 0; d < count; d++) {
-            layout_apply_declaration(box, applied[d].decl,
-                                     ctx->viewport_width, ctx->viewport_width,
-                                     ctx->base_url);
+            const char *prop = applied[d].decl->property;
+            const char *val = applied[d].decl->value;
+            if (prop && prop[0] == '-' && prop[1] == '-') {
+                /* Custom property values may reference other variables; resolve
+                 * them against the parent's inherited map for this node. */
+                char *resolved = css_var_resolve(val, props);
+                css_custom_props_set(props, prop, resolved ? resolved : val);
+                free(resolved);
+            }
+        }
+        free(applied);
+    }
+
+    /* Inline custom properties override stylesheet rules. */
+    for (HtmlAttribute *attr = node->attributes; attr; attr = attr->next) {
+        if (strcasecmp(attr->name, "style") != 0) continue;
+        int ic = 0;
+        CssDeclaration *idecls = css_parse_inline_style(attr->value, &ic);
+        for (int i = 0; i < ic; i++) {
+            const char *prop = idecls[i].property;
+            if (prop && prop[0] == '-' && prop[1] == '-') {
+                char *resolved = css_var_resolve(idecls[i].value, props);
+                css_custom_props_set(props, prop, resolved ? resolved : idecls[i].value);
+                free(resolved);
+            }
+        }
+        css_declarations_free(idecls, ic);
+    }
+}
+
+/* Collect matching declarations for one node, sort by cascade, and apply. */
+static void layout_apply_stylesheet_node(LayoutContext *ctx, int idx,
+                                          LayoutStyleSheetList *list)
+{
+    LayoutBox *box = layout_box(ctx, idx);
+    HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+    if (!node || node->type != HTML_NODE_ELEMENT) return;
+
+    CssAppliedDecl *applied = NULL;
+    int count = 0;
+    if (!list || list->count == 0 ||
+        !layout_collect_matched_declarations(ctx, idx, list, &applied, &count)) {
+        applied = NULL;
+        count = 0;
+    }
+
+    /* Pseudo-element aspect ratios (e.g. .thumbnail:before{padding-top:56.25%})
+     * are applied to the real element since we don't render pseudo nodes. */
+    if (applied) {
+        for (int d = 0; d < count; d++) {
+            CssRule *rule = NULL;
+            /* Reconstruct rule pointer from declaration to find selector. */
+            for (int s = 0; s < list->count && !rule; s++) {
+                CssStylesheet *sheet = list->sheets[s];
+                for (int r = 0; r < sheet->rule_count; r++) {
+                    if (applied[d].decl >= &sheet->rules[r].declarations[0] &&
+                        applied[d].decl < &sheet->rules[r].declarations[sheet->rules[r].declaration_count]) {
+                        rule = &sheet->rules[r];
+                        break;
+                    }
+                }
+            }
+            if (rule && rule->selector_text) {
+                const char *sel = rule->selector_text;
+                const char *pseudo = strstr(sel, ":before");
+                if (!pseudo) pseudo = strstr(sel, ":after");
+                if (pseudo) {
+                    size_t base_len = (size_t)(pseudo - sel);
+                    while (base_len > 0 && isspace((unsigned char)sel[base_len - 1])) base_len--;
+                    size_t start = 0;
+                    while (start < base_len && isspace((unsigned char)sel[start])) start++;
+                    if (base_len > start) {
+                        char *base = (char*)malloc(base_len - start + 1);
+                        if (base) {
+                            memcpy(base, sel + start, base_len - start);
+                            base[base_len - start] = '\0';
+                            if (css_selector_matches(base, ctx->doc, node)) {
+                                const char *prop = applied[d].decl->property;
+                                const char *val = applied[d].decl->value;
+                                if (prop && strcasecmp(prop, "padding-top") == 0) {
+                                    double ratio = css_parse_percent_ratio(val);
+                                    if (ratio > box->aspect_ratio) box->aspect_ratio = ratio;
+                                }
+                            }
+                            free(base);
+                        }
+                    }
+                }
+            }
         }
     }
-    free(applied);
+
+    const CssCustomProps *props = &ctx->custom_props[idx];
+
+    if (applied) {
+        for (int d = 0; d < count; d++) {
+            const char *prop = applied[d].decl->property;
+            if (prop && prop[0] == '-' && prop[1] == '-') continue; /* custom props handled separately */
+            char *resolved = css_var_resolve(applied[d].decl->value, props);
+            CssDeclaration decl = *applied[d].decl;
+            decl.value = resolved ? resolved : applied[d].decl->value;
+            layout_apply_declaration(box, &decl,
+                                     ctx->viewport_width, ctx->viewport_width,
+                                     ctx->base_url);
+            free(resolved);
+        }
+        free(applied);
+    }
 
     /* Inline styles override stylesheet rules. */
-    layout_apply_inline_style(box, node, ctx->viewport_width, ctx->viewport_width,
-                              ctx->base_url);
+    for (HtmlAttribute *attr = node->attributes; attr; attr = attr->next) {
+        if (strcasecmp(attr->name, "style") != 0) continue;
+        int ic = 0;
+        CssDeclaration *idecls = css_parse_inline_style(attr->value, &ic);
+        for (int i = 0; i < ic; i++) {
+            const char *prop = idecls[i].property;
+            if (prop && prop[0] == '-' && prop[1] == '-') continue;
+            char *resolved = css_var_resolve(idecls[i].value, props);
+            CssDeclaration decl = idecls[i];
+            decl.value = resolved ? resolved : idecls[i].value;
+            layout_apply_declaration(box, &decl,
+                                     ctx->viewport_width, ctx->viewport_width,
+                                     ctx->base_url);
+            free(resolved);
+        }
+        css_declarations_free(idecls, ic);
+    }
 }
 
 typedef struct StyleApplyChunk {
@@ -958,7 +1377,7 @@ static void layout_apply_stylesheet_job(void *arg)
 static bool layout_apply_stylesheets_parallel(LayoutContext *ctx, LayoutStyleSheetList *list)
 {
     int n = ctx->tree.count;
-    if (n == 0 || list->count == 0) return true;
+    if (n == 0) return true;
 
     uint32_t thread_count = gc_thread_pool_get_thread_count();
     if (thread_count < 1) thread_count = 1;
@@ -988,26 +1407,39 @@ static bool layout_apply_stylesheets_parallel(LayoutContext *ctx, LayoutStyleShe
     return true;
 }
 
+static void layout_apply_custom_props_inherit(LayoutContext *ctx, int idx)
+{
+    int parent = ctx->tree.nodes[idx].parent_idx;
+    if (parent >= 0) {
+        css_custom_props_inherit(&ctx->custom_props[idx], &ctx->custom_props[parent]);
+    }
+}
+
 static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
 {
     LayoutStyleSheetList list = {0};
     layout_collect_document_stylesheets(ctx, &list, ctx->base_url);
     if (sheet) layout_sheet_list_add(&list, sheet);
 
-    if (list.count == 0) {
-        /* No stylesheets to apply, but inline styles still need to be resolved. */
+    /* Pass 1: collect custom properties in preorder so inheritance works. */
+    if (ctx->tree.count > 0) {
+        LOG_INFO("Applying custom properties from %d stylesheet(s) to %d nodes",
+                 list.count, ctx->tree.count);
         for (int i = 0; i < ctx->tree.count; i++) {
-            LayoutBox *box = layout_box(ctx, i);
-            HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx);
-            if (node && node->type == HTML_NODE_ELEMENT) {
-                layout_apply_inline_style(box, node, ctx->viewport_width, ctx->viewport_width,
-                                          ctx->base_url);
-            }
+            int idx = ctx->tree.preorder[i];
+            layout_apply_custom_props_inherit(ctx, idx);
+            layout_apply_stylesheet_node_custom_props(ctx, idx, &list);
         }
-    } else {
-        LOG_INFO("Applying %d stylesheet(s) to %d layout nodes in parallel", list.count, ctx->tree.count);
-        layout_apply_stylesheets_parallel(ctx, &list);
+        int total_vars = 0;
+        for (int i = 0; i < ctx->tree.count; i++) {
+            total_vars += ctx->custom_props[i].count;
+        }
+        LOG_INFO("Collected %d custom property entries across %d nodes", total_vars, ctx->tree.count);
     }
+
+    /* Pass 2: apply normal declarations in parallel, resolving var() references. */
+    LOG_INFO("Applying %d stylesheet(s) to %d layout nodes in parallel", list.count, ctx->tree.count);
+    layout_apply_stylesheets_parallel(ctx, &list);
     layout_sheet_list_free(&list);
 }
 

@@ -186,6 +186,9 @@ typedef struct LayoutNodeState {
     volatile uint32_t bottom_up_done;    /* 0 = pending, 1 = done */
 } LayoutNodeState;
 
+/* Forward declaration for custom properties storage. */
+typedef struct CssCustomProps CssCustomProps;
+
 typedef struct LayoutContext {
     HtmlDocument *doc;
     LayoutTree tree;
@@ -198,6 +201,9 @@ typedef struct LayoutContext {
 
     /* Base URL used to resolve relative image / stylesheet URLs. */
     char base_url[512];
+
+    /* Per-node custom property (CSS variable) map. */
+    CssCustomProps *custom_props;
 } LayoutContext;
 
 /* Build a flat layout tree from a parsed HTML document. */
