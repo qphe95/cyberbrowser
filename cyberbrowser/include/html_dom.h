@@ -108,6 +108,10 @@ GCValue html_create_element_js_with_document(JSContextHandle ctx, GCValue js_doc
  * the element's children with the parsed nodes. */
 bool html_element_set_inner_html(JSContextHandle ctx, GCValue elem, const char *html);
 
+/* Set the innerHTML of a ShadowRoot by parsing the HTML string and replacing
+ * the shadow root's children with the parsed nodes. */
+bool html_shadow_root_set_inner_html(JSContextHandle ctx, GCValue shadow_root, const char *html);
+
 /* Access well-known document nodes (transient pointers; valid until tree mutates). */
 HtmlNode* html_document_root(HtmlDocument *doc);
 HtmlNode* html_document_head(HtmlDocument *doc);

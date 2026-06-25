@@ -53,7 +53,14 @@ GCValue js_shadow_root_set_innerHTML(JSContextHandle ctx, GCValue this_val, GCVa
     ShadowRootDataHandle sr = ShadowRootDataHandle::from_object_check(ctx, this_val);
     if (!sr.valid()) return JS_ThrowTypeError(ctx, "Invalid ShadowRoot");
 
+    // Keep the raw string property available for code that reads it, and also
+    // parse the markup into real shadow DOM nodes so layout/rendering can see
+    // content stamped by Polymer connectedCallbacks.
     sr.set_innerHTML(val);
+    const char *html = JS_ToCString(ctx, val);
+    if (html) {
+        html_shadow_root_set_inner_html(ctx, this_val, html);
+    }
     return JS_UNDEFINED;
 }
 

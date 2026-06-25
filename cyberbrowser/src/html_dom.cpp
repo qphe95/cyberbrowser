@@ -972,6 +972,23 @@ bool html_create_dom_in_js(JSContextHandle ctx, HtmlDocument *doc) {
     return true;
 }
 
+/* For <template> elements, parsed children belong in the .content fragment
+ * rather than in the template's own light-DOM child list. */
+static GCValue html_effective_parent_for_append(JSContextHandle ctx, GCValue parent) {
+    if (JS_IsUndefined(parent) || JS_IsNull(parent) || !JS_IsObject(parent))
+        return parent;
+    DOMNodeHandle node = get_dom_node(ctx, parent);
+    if (!node.valid() || node.node_type() != DOM_NODE_TYPE_ELEMENT)
+        return parent;
+    const char *name = node.node_name();
+    if (!name || strcasecmp(name, "template") != 0)
+        return parent;
+    GCValue content = JS_GetPropertyStr(ctx, parent, "content");
+    if (JS_IsUndefined(content) || JS_IsNull(content) || !JS_IsObject(content))
+        return parent;
+    return content;
+}
+
 /* Recursively populate JS DOM from parsed HTML using document.createElement().
  * This ensures elements get proper DOM prototypes. */
 static bool html_node_populate_js_recursive(JSContextHandle ctx, GCValue js_doc, HtmlDocument *doc, int node_idx, GCValue parent) {
@@ -981,6 +998,7 @@ static bool html_node_populate_js_recursive(JSContextHandle ctx, GCValue js_doc,
     if (!node) return false;
     
     GCValue js_node = JS_UNDEFINED;
+    GCValue append_parent = html_effective_parent_for_append(ctx, parent);
     
     switch (node->type) {
         case HTML_NODE_ELEMENT: {
@@ -1005,13 +1023,13 @@ static bool html_node_populate_js_recursive(JSContextHandle ctx, GCValue js_doc,
                 node->has_js_object = 1;
 
                 /* If we have a parent, append this element */
-                if (!JS_IsUndefined(parent) && !JS_IsNull(parent)) {
-                    GCValue appendChild = JS_GetPropertyStr(ctx, parent, "appendChild");
+                if (!JS_IsUndefined(append_parent) && !JS_IsNull(append_parent)) {
+                    GCValue appendChild = JS_GetPropertyStr(ctx, append_parent, "appendChild");
                     GCValue args[1] = { js_node };
                     if (JS_IsFunction(ctx, appendChild)) {
-                        JS_Call(ctx, appendChild, parent, 1, args);
+                        JS_Call(ctx, appendChild, append_parent, 1, args);
                     } else {
-                        js_node_appendChild_real(ctx, parent, 1, args);
+                        js_node_appendChild_real(ctx, append_parent, 1, args);
                     }
                 }
             }
@@ -1029,13 +1047,13 @@ static bool html_node_populate_js_recursive(JSContextHandle ctx, GCValue js_doc,
                     js_node = JS_NewString(ctx, node->text_content);
                 }
                 
-                if (!JS_IsUndefined(parent) && !JS_IsNull(parent)) {
-                    GCValue appendChild = JS_GetPropertyStr(ctx, parent, "appendChild");
+                if (!JS_IsUndefined(append_parent) && !JS_IsNull(append_parent)) {
+                    GCValue appendChild = JS_GetPropertyStr(ctx, append_parent, "appendChild");
                     GCValue args[1] = { js_node };
                     if (JS_IsFunction(ctx, appendChild)) {
-                        JS_Call(ctx, appendChild, parent, 1, args);
+                        JS_Call(ctx, appendChild, append_parent, 1, args);
                     } else {
-                        js_node_appendChild_real(ctx, parent, 1, args);
+                        js_node_appendChild_real(ctx, append_parent, 1, args);
                     }
                 }
             }
@@ -1207,6 +1225,78 @@ bool html_populate_js_document(JSContextHandle ctx, GCValue js_doc, HtmlDocument
     JS_SetPropertyStr(ctx, new_doc_element, "body", new_body_element);
     
     LOG_INFO("JS document populated: new docElem/head/body from parsed HTML");
+    return true;
+}
+
+/* Set the innerHTML of a ShadowRoot by parsing the HTML string and replacing
+ * the shadow root's children with the parsed nodes. The host element's
+ * ownerDocument is used so created elements get proper DOM prototypes. */
+bool html_shadow_root_set_inner_html(JSContextHandle ctx, GCValue shadow_root, const char *html) {
+    if (!ctx || JS_IsUndefined(shadow_root) || JS_IsNull(shadow_root) || !html) return false;
+
+    // Note: we intentionally do NOT set the .innerHTML property here.
+    // The caller (js_shadow_root_set_innerHTML) already stores the string on
+    // the ShadowRootData object, and assigning the property would re-enter
+    // this setter and recurse infinitely.
+
+    // Find an ownerDocument to use for createElement.
+    GCValue doc = JS_NULL;
+    GCValue host = JS_GetPropertyStr(ctx, shadow_root, "host");
+    if (!JS_IsUndefined(host) && !JS_IsNull(host) && JS_IsObject(host)) {
+        doc = JS_GetPropertyStr(ctx, host, "ownerDocument");
+    }
+    if (JS_IsUndefined(doc) || JS_IsNull(doc) || !JS_IsObject(doc)) {
+        GCValue global = JS_GetGlobalObject(ctx);
+        doc = JS_GetPropertyStr(ctx, global, "document");
+    }
+
+    // Remove existing shadow children.
+    GCValue removeChild_fn = JS_GetPropertyStr(ctx, shadow_root, "removeChild");
+    if (JS_IsFunction(ctx, removeChild_fn)) {
+        GCValue child = JS_GetPropertyStr(ctx, shadow_root, "firstChild");
+        int safety = 0;
+        while (!JS_IsUndefined(child) && !JS_IsNull(child) && JS_IsObject(child) && safety++ < 10000) {
+            GCValue next = JS_GetPropertyStr(ctx, child, "nextSibling");
+            GCValue args[1] = { child };
+            JS_Call(ctx, removeChild_fn, shadow_root, 1, args);
+            child = next;
+        }
+    }
+
+    HtmlDocument *frag_doc = html_parse(html, strlen(html));
+    if (!frag_doc) return true;
+
+    int start_idx = -1;
+    if (frag_doc->body_idx >= 0) {
+        start_idx = po_array_first_child(&frag_doc->array, frag_doc->body_idx);
+    }
+    if (start_idx < 0 && frag_doc->root_idx >= 0) {
+        start_idx = frag_doc->root_idx;
+    }
+
+    int child_idx = start_idx;
+    while (child_idx >= 0) {
+        html_node_populate_js_recursive(ctx, doc, frag_doc, child_idx, shadow_root);
+        child_idx = po_array_next_sibling(&frag_doc->array, child_idx);
+    }
+
+    // If the parser produced no nodes (e.g. plain text), append a text node.
+    if (start_idx < 0 && html[0]) {
+        GCValue createTextNode = JS_GetPropertyStr(ctx, doc, "createTextNode");
+        if (!JS_IsUndefined(createTextNode) && !JS_IsNull(createTextNode)) {
+            GCValue args[1] = { JS_NewString(ctx, html) };
+            GCValue text_node = JS_Call(ctx, createTextNode, doc, 1, args);
+            if (!JS_IsException(text_node) && !JS_IsUndefined(text_node) && !JS_IsNull(text_node)) {
+                GCValue appendChild = JS_GetPropertyStr(ctx, shadow_root, "appendChild");
+                if (JS_IsFunction(ctx, appendChild)) {
+                    GCValue aargs[1] = { text_node };
+                    JS_Call(ctx, appendChild, shadow_root, 1, aargs);
+                }
+            }
+        }
+    }
+
+    html_document_free(frag_doc);
     return true;
 }
 

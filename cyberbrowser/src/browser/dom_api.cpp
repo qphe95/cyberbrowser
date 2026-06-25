@@ -50,14 +50,33 @@ void query_selector_all_recursive(JSContextHandle ctx, GCValue elem, const char*
 // Custom element lifecycle helpers
 static bool dom_node_is_connected(JSContextHandle ctx, GCValue node) {
     GCValue cur = node;
-    while (!JS_IsUndefined(cur) && !JS_IsNull(cur) && JS_IsObject(cur)) {
+    int safety = 0;
+    while (!JS_IsUndefined(cur) && !JS_IsNull(cur) && JS_IsObject(cur) && safety++ < 10000) {
         DOMNodeHandle n = get_dom_node(ctx, cur);
-        if (!n.valid()) break;
-        if (n.node_type() == DOM_NODE_TYPE_DOCUMENT) return true;
-        // Nodes inside a template content or any disconnected fragment are not
-        // connected; don't fire connectedCallback for them.
-        if (n.node_type() == DOM_NODE_TYPE_DOCUMENT_FRAGMENT) return false;
-        cur = n.parent_node();
+        if (n.valid()) {
+            if (n.node_type() == DOM_NODE_TYPE_DOCUMENT) return true;
+            // Nodes inside a template content are not connected.  A ShadowRoot
+            // is also implemented as a fragment-like container, but it is
+            // connected when its host element is connected.
+            if (n.node_type() == DOM_NODE_TYPE_DOCUMENT_FRAGMENT) {
+                GCValue host = JS_GetPropertyStr(ctx, cur, "host");
+                if (!JS_IsUndefined(host) && !JS_IsNull(host) && JS_IsObject(host)) {
+                    cur = host;
+                    continue;
+                }
+                return false;
+            }
+            cur = n.parent_node();
+        } else {
+            // The parent may be a ShadowRoot object (not a DOMNode-backed node).
+            // Continue connectivity checks from the shadow host.
+            GCValue host = JS_GetPropertyStr(ctx, cur, "host");
+            if (!JS_IsUndefined(host) && !JS_IsNull(host) && JS_IsObject(host)) {
+                cur = host;
+                continue;
+            }
+            break;
+        }
     }
     return false;
 }

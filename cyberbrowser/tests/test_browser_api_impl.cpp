@@ -2965,6 +2965,82 @@ TEST(test_move_node_to_shadow_root) {
     return true;
 }
 
+/* Test <template>.innerHTML stores children in .content, not light DOM */
+TEST(test_template_inner_html_content) {
+    JSContextHandle ctx = get_test_context();
+    if (!ctx) return false;
+
+    const char *js_code = R"(
+        var tpl = document.createElement('template');
+        tpl.innerHTML = '<div class="t">hello</div>';
+        var light = tpl.firstChild;
+        var contentChild = tpl.content.firstChild;
+        JSON.stringify({
+            lightIsNull: light === null,
+            contentTag: contentChild && contentChild.tagName,
+            contentClass: contentChild && contentChild.className,
+            contentText: contentChild && contentChild.textContent
+        });
+    )";
+
+    GCValue result = JS_Eval(ctx, js_code, strlen(js_code), "<test>", 0);
+    const char *str = JS_ToCString(ctx, result);
+    printf("    template innerHTML debug: %s\n", str ? str : "(null)");
+
+    const char *assert_js = R"(
+        var tpl = document.createElement('template');
+        tpl.innerHTML = '<div class="t">hello</div>';
+        tpl.firstChild === null &&
+        tpl.content.firstChild &&
+        tpl.content.firstChild.tagName === 'DIV' &&
+        tpl.content.firstChild.className === 't' &&
+        tpl.content.firstChild.textContent === 'hello';
+    )";
+    GCValue assert_result = JS_Eval(ctx, assert_js, strlen(assert_js), "<test>", 0);
+    bool success = JS_ToBool(ctx, assert_result);
+
+    ASSERT_TRUE(success);
+    return true;
+}
+
+/* Test ShadowRoot.innerHTML setter parses into real shadow DOM nodes */
+TEST(test_shadow_root_inner_html_parses) {
+    JSContextHandle ctx = get_test_context();
+    if (!ctx) return false;
+
+    const char *js_code = R"(
+        var host = document.createElement('div');
+        var shadow = host.attachShadow({mode: 'open'});
+        shadow.innerHTML = '<span class="s">world</span>';
+        JSON.stringify({
+            childCount: shadow.childNodes.length,
+            firstTag: shadow.firstChild && shadow.firstChild.tagName,
+            firstClass: shadow.firstChild && shadow.firstChild.className,
+            firstText: shadow.firstChild && shadow.firstChild.textContent
+        });
+    )";
+
+    GCValue result = JS_Eval(ctx, js_code, strlen(js_code), "<test>", 0);
+    const char *str = JS_ToCString(ctx, result);
+    printf("    shadowRoot innerHTML debug: %s\n", str ? str : "(null)");
+
+    const char *assert_js = R"(
+        var host = document.createElement('div');
+        var shadow = host.attachShadow({mode: 'open'});
+        shadow.innerHTML = '<span class="s">world</span>';
+        shadow.childNodes.length === 1 &&
+        shadow.firstChild &&
+        shadow.firstChild.tagName === 'SPAN' &&
+        shadow.firstChild.className === 's' &&
+        shadow.firstChild.textContent === 'world';
+    )";
+    GCValue assert_result = JS_Eval(ctx, assert_js, strlen(assert_js), "<test>", 0);
+    bool success = JS_ToBool(ctx, assert_result);
+
+    ASSERT_TRUE(success);
+    return true;
+}
+
 /* ============================================================================
  * Event System Tests
  * ============================================================================ */
@@ -4833,6 +4909,8 @@ extern "C" void run_browser_api_impl_tests(void) {
     RUN_TEST(test_shadow_root_node_type);
     RUN_TEST(test_shadow_root_node_name);
     RUN_TEST(test_move_node_to_shadow_root);
+    RUN_TEST(test_template_inner_html_content);
+    RUN_TEST(test_shadow_root_inner_html_parses);
     // RUN_TEST(test_js_extraction);
     // RUN_TEST(test_js_extraction_save_data);
     cleanup_test_context();

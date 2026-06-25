@@ -3014,8 +3014,9 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
 
     // Custom-element upgrade: set the element's prototype to the registered
     // constructor's prototype, then run the constructor and connectedCallback
-    // lifecycle methods. The constructors are now safe to invoke because
-    // Reflect.construct preserves the explicit new.target.
+    // lifecycle methods.  We use `new ctor()` so ES6 class constructors run
+    // correctly; the native HTMLElement constructor checks
+    // __cyber_upgrade_target and returns the existing element as the instance.
     {
         const char *upgrade_js =
             "(function(){"
@@ -3028,7 +3029,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
             "    el.__proto__ = ctor.prototype;"
             "    el.__CE_upgraded = true;"
             "    window.__cyber_upgrade_target = el;"
-            "    try { ctor.call(el); } catch(e) {"
+            "    try { new ctor(); } catch(e) {"
             "      var log = (typeof __bgmdwnldr_log !== 'undefined') ? __bgmdwnldr_log : (typeof console !== 'undefined' ? console.log : null);"
             "      if (log) try { log('[CE-UPGRADE] ctor ' + name + ' threw: ' + e.message + ' stack=' + (e.stack||'(none)')); } catch(x) {}"
             "    } finally { window.__cyber_upgrade_target = void 0; }"
