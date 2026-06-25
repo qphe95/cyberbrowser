@@ -548,6 +548,81 @@ GCValue js_shadow_root_contains(JSContextHandle ctx, GCValue this_val, int argc,
     return JS_FALSE;
 }
 
+static void shadow_root_collect_by_tag(JSContextHandle ctx, GCValue node, const char *tag_name,
+                                        GCValue arr, uint32_t *idx) {
+    if (*idx >= 10000) return;
+    DOMNodeHandle n = get_dom_node(ctx, node);
+    if (!n.valid() || n.node_type() != DOM_NODE_TYPE_ELEMENT) return;
+    const char *name = n.node_name();
+    if (name && strcasecmp(name, tag_name) == 0) {
+        JS_SetPropertyUint32(ctx, arr, (*idx)++, node);
+    }
+    GCValue child = n.first_child();
+    while (!JS_IsNull(child) && JS_IsObject(child)) {
+        DOMNodeHandle child_node = get_dom_node(ctx, child);
+        if (!child_node.valid()) break;
+        shadow_root_collect_by_tag(ctx, child, tag_name, arr, idx);
+        child = child_node.next_sibling();
+    }
+}
+
+GCValue js_shadow_root_get_owner_document_wrapper(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    ShadowRootDataHandle sr = ShadowRootDataHandle::from_object_check(ctx, this_val);
+    if (!sr.valid()) return JS_NULL;
+    GCValue host = sr.host();
+    if (JS_IsNull(host) || JS_IsUndefined(host) || !JS_IsObject(host)) return JS_NULL;
+    return JS_GetPropertyStr(ctx, host, "ownerDocument");
+}
+
+GCValue js_shadow_root_get_parent_node_wrapper(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    (void)this_val;
+    return JS_NULL;
+}
+
+GCValue js_shadow_root_get_elements_by_tag_name(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1) return JS_NewArray(ctx);
+    const char *tag_name = JS_ToCString(ctx, argv[0]);
+    if (!tag_name) return JS_NewArray(ctx);
+
+    GCValue arr = JS_NewArray(ctx);
+    uint32_t idx = 0;
+
+    ShadowRootDataHandle sr = ShadowRootDataHandle::from_object_check(ctx, this_val);
+    if (!sr.valid()) return arr;
+    GCValue child = sr.first_child();
+    while (!JS_IsNull(child) && JS_IsObject(child)) {
+        shadow_root_collect_by_tag(ctx, child, tag_name, arr, &idx);
+        DOMNodeHandle child_node = get_dom_node(ctx, child);
+        if (!child_node.valid()) break;
+        child = child_node.next_sibling();
+    }
+    return arr;
+}
+
+GCValue js_shadow_root_get_adopted_style_sheets(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    GCValue sheets = JS_GetPropertyStr(ctx, this_val, "__adoptedStyleSheets");
+    if (JS_IsUndefined(sheets) || JS_IsNull(sheets) || !JS_IsArray(ctx, sheets)) {
+        sheets = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, this_val, "__adoptedStyleSheets", sheets);
+    }
+    return sheets;
+}
+
+GCValue js_shadow_root_set_adopted_style_sheets(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "adoptedStyleSheets setter requires an array");
+    JS_SetPropertyStr(ctx, this_val, "__adoptedStyleSheets", argv[0]);
+    return JS_UNDEFINED;
+}
+
+GCValue js_shadow_root_get_style_sheets(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    (void)this_val;
+    return JS_NewArray(ctx);
+}
+
 const JSCFunctionListEntry js_shadow_root_proto_funcs[] = {
     JS_CGETSET_DEF("host", js_shadow_root_get_host, NULL),
     JS_CGETSET_DEF("mode", js_shadow_root_get_mode, NULL),
@@ -559,9 +634,15 @@ const JSCFunctionListEntry js_shadow_root_proto_funcs[] = {
     JS_CFUNC_DEF("removeChild", 1, js_shadow_root_remove_child),
     JS_CFUNC_DEF("insertBefore", 2, js_shadow_root_insert_before),
     JS_CFUNC_DEF("contains", 1, js_shadow_root_contains),
+    JS_CFUNC_DEF("getElementsByTagName", 1, js_shadow_root_get_elements_by_tag_name),
     JS_CFUNC_DEF("addEventListener", 2, js_dummy_function),
     JS_CFUNC_DEF("removeEventListener", 2, js_dummy_function),
     JS_CFUNC_DEF("dispatchEvent", 1, js_dummy_function_true),
+    JS_CGETSET_DEF("ownerDocument", js_shadow_root_get_owner_document_wrapper, NULL),
+    JS_CGETSET_DEF("parentNode", js_shadow_root_get_parent_node_wrapper, NULL),
+    JS_CGETSET_DEF("parentElement", js_shadow_root_get_parent_node_wrapper, NULL),
+    JS_CGETSET_DEF("adoptedStyleSheets", js_shadow_root_get_adopted_style_sheets, js_shadow_root_set_adopted_style_sheets),
+    JS_CGETSET_DEF("styleSheets", js_shadow_root_get_style_sheets, NULL),
     JS_PROP_INT32_DEF("nodeType", 11, JS_PROP_ENUMERABLE),  // DOCUMENT_FRAGMENT_NODE
     JS_PROP_STRING_DEF("nodeName", "#document-fragment", JS_PROP_ENUMERABLE),
 };
@@ -589,7 +670,28 @@ GCValue js_element_attach_shadow(JSContextHandle ctx, GCValue this_val, int argc
     
     // Store shadowRoot reference on the element (internal property __shadowRoot)
     JS_SetPropertyStr(ctx, this_val, "__shadowRoot", shadow_root);
-    
+
+    // Polymer's _attachDom passes a pre-built fragment as `shadyUpgradeFragment`.
+    // Move its children into the new shadow root so the composed tree is ready.
+    GCValue upgrade_fragment = JS_GetPropertyStr(ctx, argv[0], "shadyUpgradeFragment");
+    if (!JS_IsNull(upgrade_fragment) && !JS_IsUndefined(upgrade_fragment) && JS_IsObject(upgrade_fragment)) {
+        GCValue fragment_children = JS_GetPropertyStr(ctx, upgrade_fragment, "childNodes");
+        if (JS_IsArray(ctx, fragment_children)) {
+            GCValue len_val = JS_GetPropertyStr(ctx, fragment_children, "length");
+            uint32_t len = 0;
+            JS_ToUint32(ctx, &len, len_val);
+            // Snapshot the children first so appending them doesn't shift indices.
+            GCValue *children = (GCValue*)malloc(sizeof(GCValue) * (len ? len : 1));
+            for (uint32_t i = 0; i < len; i++) {
+                children[i] = JS_GetPropertyUint32(ctx, fragment_children, i);
+            }
+            for (uint32_t i = 0; i < len; i++) {
+                GCValue append_args[1] = { children[i] };
+                js_shadow_root_append_child(ctx, shadow_root, 1, append_args);
+            }
+            free(children);
+        }
+    }
 
     return shadow_root;
 }

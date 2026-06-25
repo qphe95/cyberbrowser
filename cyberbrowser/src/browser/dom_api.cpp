@@ -1117,20 +1117,36 @@ GCValue js_node_contains_real(JSContextHandle ctx, GCValue this_val, int argc, G
 
 // Real getRootNode implementation
 GCValue js_node_getRootNode_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)argc; (void)argv;
-    
+    bool composed = false;
+    if (argc >= 1 && JS_IsObject(argv[0])) {
+        GCValue v = JS_GetPropertyStr(ctx, argv[0], "composed");
+        composed = JS_ToBool(ctx, v);
+    }
+
     GCValue current = this_val;
     DOMNodeHandle current_node = get_dom_node(ctx, current);
-    
-    while (current_node.valid()) {
-        GCValue parent = current_node.parent_node();
+
+    while (current_node.valid() || JS_IsObject(current)) {
+        GCValue parent = JS_NULL;
+        if (current_node.valid()) {
+            parent = current_node.parent_node();
+        }
         if (JS_IsNull(parent)) {
+            if (composed) {
+                // If current is a ShadowRoot, cross to its host and continue.
+                GCValue host = JS_GetPropertyStr(ctx, current, "host");
+                if (!JS_IsNull(host) && !JS_IsUndefined(host) && JS_IsObject(host)) {
+                    current = host;
+                    current_node = get_dom_node(ctx, current);
+                    continue;
+                }
+            }
             break;
         }
         current = parent;
         current_node = get_dom_node(ctx, current);
     }
-    
+
     return current;
 }
 
@@ -2221,21 +2237,226 @@ GCValue js_document_create_range(JSContextHandle ctx, GCValue this_val, int argc
     return range;
 }
 
+// ============================================================================
+// TreeWalker Implementation
+// ============================================================================
+
+static GCValue tree_walker_get_current(JSContextHandle ctx, GCValue tw) {
+    return JS_GetPropertyStr(ctx, tw, "currentNode");
+}
+
+static void tree_walker_set_current(JSContextHandle ctx, GCValue tw, GCValue node) {
+    JS_SetPropertyStr(ctx, tw, "currentNode", node);
+}
+
+static GCValue tree_walker_get_root(JSContextHandle ctx, GCValue tw) {
+    return JS_GetPropertyStr(ctx, tw, "root");
+}
+
+static int tree_walker_accept_node(JSContextHandle ctx, GCValue tw, GCValue node) {
+    if (JS_IsNull(node) || JS_IsUndefined(node) || !JS_IsObject(node)) return 0;
+    GCValue filter = JS_GetPropertyStr(ctx, tw, "filter");
+    if (JS_IsFunction(ctx, filter)) {
+        GCValue args[1] = { node };
+        GCValue result = JS_Call(ctx, filter, tw, 1, args);
+        if (JS_IsException(result)) return 0;
+        int32_t code = 0;
+        JS_ToInt32(ctx, &code, result);
+        return code == 1; // NodeFilter.FILTER_ACCEPT
+    }
+    return 1;
+}
+
+GCValue js_tree_walker_parent_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    GCValue current = tree_walker_get_current(ctx, this_val);
+    GCValue root = tree_walker_get_root(ctx, this_val);
+    if (JS_IsNull(current) || JS_IsUndefined(current) || JS_StrictEq(ctx, current, root)) return JS_NULL;
+    DOMNodeHandle node = get_dom_node(ctx, current);
+    if (!node.valid()) return JS_NULL;
+    GCValue parent = node.parent_node();
+    if (JS_IsNull(parent) || JS_StrictEq(ctx, parent, root)) return JS_NULL;
+    if (tree_walker_accept_node(ctx, this_val, parent)) {
+        tree_walker_set_current(ctx, this_val, parent);
+        return parent;
+    }
+    return JS_NULL;
+}
+
+GCValue js_tree_walker_first_child(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    GCValue current = tree_walker_get_current(ctx, this_val);
+    if (JS_IsNull(current) || JS_IsUndefined(current)) return JS_NULL;
+    DOMNodeHandle node = get_dom_node(ctx, current);
+    if (!node.valid()) return JS_NULL;
+    GCValue child = node.first_child();
+    while (!JS_IsNull(child)) {
+        if (tree_walker_accept_node(ctx, this_val, child)) {
+            tree_walker_set_current(ctx, this_val, child);
+            return child;
+        }
+        DOMNodeHandle child_node = get_dom_node(ctx, child);
+        if (!child_node.valid()) break;
+        child = child_node.next_sibling();
+    }
+    return JS_NULL;
+}
+
+GCValue js_tree_walker_last_child(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    GCValue current = tree_walker_get_current(ctx, this_val);
+    if (JS_IsNull(current) || JS_IsUndefined(current)) return JS_NULL;
+    DOMNodeHandle node = get_dom_node(ctx, current);
+    if (!node.valid()) return JS_NULL;
+    GCValue child = node.last_child();
+    while (!JS_IsNull(child)) {
+        if (tree_walker_accept_node(ctx, this_val, child)) {
+            tree_walker_set_current(ctx, this_val, child);
+            return child;
+        }
+        DOMNodeHandle child_node = get_dom_node(ctx, child);
+        if (!child_node.valid()) break;
+        child = child_node.previous_sibling();
+    }
+    return JS_NULL;
+}
+
+GCValue js_tree_walker_next_sibling(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    GCValue current = tree_walker_get_current(ctx, this_val);
+    if (JS_IsNull(current) || JS_IsUndefined(current)) return JS_NULL;
+    GCValue root = tree_walker_get_root(ctx, this_val);
+    DOMNodeHandle node = get_dom_node(ctx, current);
+    while (node.valid()) {
+        GCValue sib = node.next_sibling();
+        if (JS_IsNull(sib)) break;
+        if (!JS_StrictEq(ctx, sib, root) && tree_walker_accept_node(ctx, this_val, sib)) {
+            tree_walker_set_current(ctx, this_val, sib);
+            return sib;
+        }
+        node = get_dom_node(ctx, sib);
+    }
+    return JS_NULL;
+}
+
+GCValue js_tree_walker_previous_sibling(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    GCValue current = tree_walker_get_current(ctx, this_val);
+    if (JS_IsNull(current) || JS_IsUndefined(current)) return JS_NULL;
+    GCValue root = tree_walker_get_root(ctx, this_val);
+    DOMNodeHandle node = get_dom_node(ctx, current);
+    while (node.valid()) {
+        GCValue sib = node.previous_sibling();
+        if (JS_IsNull(sib)) break;
+        if (!JS_StrictEq(ctx, sib, root) && tree_walker_accept_node(ctx, this_val, sib)) {
+            tree_walker_set_current(ctx, this_val, sib);
+            return sib;
+        }
+        node = get_dom_node(ctx, sib);
+    }
+    return JS_NULL;
+}
+
+GCValue js_tree_walker_next_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    GCValue current = tree_walker_get_current(ctx, this_val);
+    GCValue root = tree_walker_get_root(ctx, this_val);
+    if (JS_IsNull(current) || JS_IsUndefined(current)) return JS_NULL;
+
+    GCValue node = current;
+    while (!JS_IsNull(node) && JS_IsObject(node)) {
+        DOMNodeHandle n = get_dom_node(ctx, node);
+        if (!n.valid()) break;
+        GCValue child = n.first_child();
+        while (!JS_IsNull(child)) {
+            if (tree_walker_accept_node(ctx, this_val, child)) {
+                tree_walker_set_current(ctx, this_val, child);
+                return child;
+            }
+            DOMNodeHandle child_node = get_dom_node(ctx, child);
+            if (!child_node.valid()) break;
+            child = child_node.next_sibling();
+        }
+        // No accepted children; try next sibling, then ancestors' next siblings.
+        while (!JS_IsNull(node) && JS_IsObject(node)) {
+            if (JS_StrictEq(ctx, node, root)) return JS_NULL;
+            DOMNodeHandle n2 = get_dom_node(ctx, node);
+            if (!n2.valid()) return JS_NULL;
+            GCValue sib = n2.next_sibling();
+            while (!JS_IsNull(sib)) {
+                if (tree_walker_accept_node(ctx, this_val, sib)) {
+                    tree_walker_set_current(ctx, this_val, sib);
+                    return sib;
+                }
+                DOMNodeHandle sib_node = get_dom_node(ctx, sib);
+                if (!sib_node.valid()) break;
+                sib = sib_node.next_sibling();
+            }
+            node = n2.parent_node();
+        }
+    }
+    return JS_NULL;
+}
+
+GCValue js_tree_walker_previous_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    GCValue current = tree_walker_get_current(ctx, this_val);
+    GCValue root = tree_walker_get_root(ctx, this_val);
+    if (JS_IsNull(current) || JS_IsUndefined(current)) return JS_NULL;
+
+    GCValue node = current;
+    while (!JS_IsNull(node) && JS_IsObject(node)) {
+        if (JS_StrictEq(ctx, node, root)) return JS_NULL;
+        DOMNodeHandle n = get_dom_node(ctx, node);
+        if (!n.valid()) break;
+        GCValue sib = n.previous_sibling();
+        if (!JS_IsNull(sib)) {
+            // Descend to deepest last-child of previous sibling.
+            node = sib;
+            while (!JS_IsNull(node)) {
+                DOMNodeHandle n2 = get_dom_node(ctx, node);
+                if (!n2.valid()) break;
+                GCValue last = n2.last_child();
+                if (JS_IsNull(last)) break;
+                node = last;
+            }
+            if (tree_walker_accept_node(ctx, this_val, node)) {
+                tree_walker_set_current(ctx, this_val, node);
+                return node;
+            }
+            continue;
+        }
+        GCValue parent = n.parent_node();
+        if (JS_IsNull(parent) || JS_StrictEq(ctx, parent, root)) return JS_NULL;
+        if (tree_walker_accept_node(ctx, this_val, parent)) {
+            tree_walker_set_current(ctx, this_val, parent);
+            return parent;
+        }
+        node = parent;
+    }
+    return JS_NULL;
+}
+
 // document.createTreeWalker()
 GCValue js_document_create_tree_walker(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
     GCValue tree_walker = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, tree_walker, "currentNode", JS_NULL);
-    JS_SetPropertyStr(ctx, tree_walker, "root", JS_NULL);
-    JS_SetPropertyStr(ctx, tree_walker, "whatToShow", JS_NewInt32(ctx, 0xFFFFFFFF)); // SHOW_ALL
-    JS_SetPropertyStr(ctx, tree_walker, "filter", JS_NULL);
-    // Methods
-    JS_SetPropertyStr(ctx, tree_walker, "firstChild", JS_NewCFunction(ctx, js_dummy_function, "firstChild", 0));
-    JS_SetPropertyStr(ctx, tree_walker, "lastChild", JS_NewCFunction(ctx, js_dummy_function, "lastChild", 0));
-    JS_SetPropertyStr(ctx, tree_walker, "nextNode", JS_NewCFunction(ctx, js_dummy_function, "nextNode", 0));
-    JS_SetPropertyStr(ctx, tree_walker, "nextSibling", JS_NewCFunction(ctx, js_dummy_function, "nextSibling", 0));
-    JS_SetPropertyStr(ctx, tree_walker, "parentNode", JS_NewCFunction(ctx, js_dummy_function, "parentNode", 0));
-    JS_SetPropertyStr(ctx, tree_walker, "previousNode", JS_NewCFunction(ctx, js_dummy_function, "previousNode", 0));
-    JS_SetPropertyStr(ctx, tree_walker, "previousSibling", JS_NewCFunction(ctx, js_dummy_function, "previousSibling", 0));
+    GCValue root = (argc >= 1) ? argv[0] : JS_NULL;
+    int32_t whatToShow = 0xFFFFFFFF; // SHOW_ALL
+    if (argc >= 2) JS_ToInt32(ctx, &whatToShow, argv[1]);
+    GCValue filter = (argc >= 3 && !JS_IsNull(argv[2]) && !JS_IsUndefined(argv[2])) ? argv[2] : JS_NULL;
+
+    JS_SetPropertyStr(ctx, tree_walker, "root", root);
+    JS_SetPropertyStr(ctx, tree_walker, "currentNode", root);
+    JS_SetPropertyStr(ctx, tree_walker, "whatToShow", JS_NewInt32(ctx, whatToShow));
+    JS_SetPropertyStr(ctx, tree_walker, "filter", filter);
+    JS_SetPropertyStr(ctx, tree_walker, "firstChild", JS_NewCFunction(ctx, js_tree_walker_first_child, "firstChild", 0));
+    JS_SetPropertyStr(ctx, tree_walker, "lastChild", JS_NewCFunction(ctx, js_tree_walker_last_child, "lastChild", 0));
+    JS_SetPropertyStr(ctx, tree_walker, "nextNode", JS_NewCFunction(ctx, js_tree_walker_next_node, "nextNode", 0));
+    JS_SetPropertyStr(ctx, tree_walker, "nextSibling", JS_NewCFunction(ctx, js_tree_walker_next_sibling, "nextSibling", 0));
+    JS_SetPropertyStr(ctx, tree_walker, "parentNode", JS_NewCFunction(ctx, js_tree_walker_parent_node, "parentNode", 0));
+    JS_SetPropertyStr(ctx, tree_walker, "previousNode", JS_NewCFunction(ctx, js_tree_walker_previous_node, "previousNode", 0));
+    JS_SetPropertyStr(ctx, tree_walker, "previousSibling", JS_NewCFunction(ctx, js_tree_walker_previous_sibling, "previousSibling", 0));
     return tree_walker;
 }
 
@@ -2583,4 +2804,184 @@ static bool try_upgrade_element_on_attach(JSContextHandle ctx, GCValue elem) {
     GCValue result = JS_Call(ctx, upgrade_fn, global, 1, args);
     (void)result;
     return true;
+}
+
+// ============================================================================
+// HTMLSlotElement helpers
+// ============================================================================
+
+static GCValue slot_find_host(JSContextHandle ctx, GCValue slot) {
+    GCValue parent = JS_GetPropertyStr(ctx, slot, "parentNode");
+    if (!JS_IsNull(parent) && !JS_IsUndefined(parent) && JS_IsObject(parent)) {
+        GCValue host = JS_GetPropertyStr(ctx, parent, "host");
+        if (!JS_IsNull(host) && !JS_IsUndefined(host) && JS_IsObject(host)) {
+            return host;
+        }
+    }
+    return JS_NULL;
+}
+
+static const char *slot_get_name(JSContextHandle ctx, GCValue slot) {
+    GCValue name_val = JS_GetPropertyStr(ctx, slot, "name");
+    if (JS_IsUndefined(name_val) || JS_IsNull(name_val)) {
+        DOMNodeHandle node = get_dom_node(ctx, slot);
+        if (node.valid()) {
+            const char *n = node.get_attribute("name");
+            if (n) return n;
+        }
+        return "";
+    }
+    const char *name = JS_ToCString(ctx, name_val);
+    return name ? name : "";
+}
+
+static void slot_collect_assigned(JSContextHandle ctx, GCValue host,
+                                  const char *slot_name, bool elements_only,
+                                  bool flatten, GCValue out);
+
+static GCValue slot_assigned_nodes_impl(JSContextHandle ctx, GCValue slot, bool flatten);
+
+static void slot_collect_assigned(JSContextHandle ctx, GCValue host,
+                                  const char *slot_name, bool elements_only,
+                                  bool flatten, GCValue out) {
+    GCValue child_nodes = JS_GetPropertyStr(ctx, host, "childNodes");
+    if (!JS_IsArray(ctx, child_nodes)) return;
+    GCValue len_val = JS_GetPropertyStr(ctx, child_nodes, "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, len_val);
+
+    uint32_t idx = 0;
+    GCValue olen = JS_GetPropertyStr(ctx, out, "length");
+    JS_ToUint32(ctx, &idx, olen);
+
+    for (uint32_t i = 0; i < len; i++) {
+        GCValue child = JS_GetPropertyUint32(ctx, child_nodes, i);
+        if (JS_IsNull(child) || JS_IsUndefined(child)) continue;
+
+        const char *child_slot = "";
+        DOMNodeHandle child_node = get_dom_node(ctx, child);
+        if (child_node.valid()) {
+            const char *s = child_node.get_attribute("slot");
+            if (s) child_slot = s;
+        }
+        bool matches = (slot_name[0] == '\0' && child_slot[0] == '\0') ||
+                       (slot_name[0] != '\0' && strcmp(child_slot, slot_name) == 0);
+        if (!matches) continue;
+
+        if (elements_only) {
+            GCValue nt = JS_GetPropertyStr(ctx, child, "nodeType");
+            int32_t type = 0;
+            JS_ToInt32(ctx, &type, nt);
+            if (type != 1) continue;
+        }
+
+        if (flatten) {
+            GCValue tag = JS_GetPropertyStr(ctx, child, "tagName");
+            const char *tagc = JS_ToCString(ctx, tag);
+            if (tagc && strcasecmp(tagc, "slot") == 0) {
+                GCValue nested = slot_assigned_nodes_impl(ctx, child, true);
+                if (JS_IsArray(ctx, nested)) {
+                    GCValue nlen = JS_GetPropertyStr(ctx, nested, "length");
+                    uint32_t nl = 0;
+                    JS_ToUint32(ctx, &nl, nlen);
+                    for (uint32_t j = 0; j < nl; j++) {
+                        GCValue nchild = JS_GetPropertyUint32(ctx, nested, j);
+                        JS_SetPropertyUint32(ctx, out, idx++, nchild);
+                    }
+                }
+                continue;
+            }
+        }
+
+        JS_SetPropertyUint32(ctx, out, idx++, child);
+    }
+}
+
+static GCValue slot_assigned_nodes_impl(JSContextHandle ctx, GCValue slot, bool flatten) {
+    GCValue result = JS_NewArray(ctx);
+    const char *slot_name = slot_get_name(ctx, slot);
+    GCValue host = slot_find_host(ctx, slot);
+
+    if (!JS_IsNull(host)) {
+        slot_collect_assigned(ctx, host, slot_name, false, flatten, result);
+    }
+
+    GCValue len_val = JS_GetPropertyStr(ctx, result, "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, len_val);
+    if (len == 0) {
+        GCValue own = JS_GetPropertyStr(ctx, slot, "childNodes");
+        if (JS_IsArray(ctx, own)) {
+            GCValue olen = JS_GetPropertyStr(ctx, own, "length");
+            uint32_t ol = 0;
+            JS_ToUint32(ctx, &ol, olen);
+            for (uint32_t i = 0; i < ol; i++) {
+                GCValue child = JS_GetPropertyUint32(ctx, own, i);
+                JS_SetPropertyUint32(ctx, result, i, child);
+            }
+        }
+    }
+    return result;
+}
+
+GCValue js_slot_assigned_nodes(JSContextHandle ctx, GCValue this_val,
+                               int argc, GCValue *argv) {
+    bool flatten = false;
+    if (argc >= 1 && JS_IsObject(argv[0])) {
+        GCValue v = JS_GetPropertyStr(ctx, argv[0], "flatten");
+        flatten = JS_ToBool(ctx, v);
+    }
+    return slot_assigned_nodes_impl(ctx, this_val, flatten);
+}
+
+GCValue js_slot_assigned_elements(JSContextHandle ctx, GCValue this_val,
+                                  int argc, GCValue *argv) {
+    bool flatten = false;
+    if (argc >= 1 && JS_IsObject(argv[0])) {
+        GCValue v = JS_GetPropertyStr(ctx, argv[0], "flatten");
+        flatten = JS_ToBool(ctx, v);
+    }
+
+    GCValue result = JS_NewArray(ctx);
+    const char *slot_name = slot_get_name(ctx, this_val);
+    GCValue host = slot_find_host(ctx, this_val);
+
+    if (!JS_IsNull(host)) {
+        slot_collect_assigned(ctx, host, slot_name, true, flatten, result);
+    }
+
+    GCValue len_val = JS_GetPropertyStr(ctx, result, "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, len_val);
+    if (len == 0) {
+        GCValue own = JS_GetPropertyStr(ctx, this_val, "childNodes");
+        if (JS_IsArray(ctx, own)) {
+            GCValue olen = JS_GetPropertyStr(ctx, own, "length");
+            uint32_t ol = 0;
+            JS_ToUint32(ctx, &ol, olen);
+            uint32_t idx = 0;
+            for (uint32_t i = 0; i < ol; i++) {
+                GCValue child = JS_GetPropertyUint32(ctx, own, i);
+                GCValue nt = JS_GetPropertyStr(ctx, child, "nodeType");
+                int32_t type = 0;
+                JS_ToInt32(ctx, &type, nt);
+                if (type == 1) {
+                    JS_SetPropertyUint32(ctx, result, idx++, child);
+                }
+            }
+        }
+    }
+    return result;
+}
+
+GCValue js_slot_get_name(JSContextHandle ctx, GCValue this_val,
+                         int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    const char *name = "";
+    DOMNodeHandle node = get_dom_node(ctx, this_val);
+    if (node.valid()) {
+        const char *n = node.get_attribute("name");
+        if (n) name = n;
+    }
+    return JS_NewString(ctx, name);
 }

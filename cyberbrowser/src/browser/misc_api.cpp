@@ -1605,19 +1605,207 @@ GCValue js_mutation_observer_constructor(JSContextHandle ctx, GCValue new_target
     return obj;
 }
 
+// ============================================================================
+// MutationObserver snapshot helpers
+// ============================================================================
+
+static void mo_push_child_nodes(JSContextHandle ctx, GCValue node, GCValue arr) {
+    GCValue child_nodes = JS_GetPropertyStr(ctx, node, "childNodes");
+    if (!JS_IsArray(ctx, child_nodes)) return;
+    GCValue len_val = JS_GetPropertyStr(ctx, child_nodes, "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, len_val);
+    for (uint32_t i = 0; i < len; i++) {
+        GCValue child = JS_GetPropertyUint32(ctx, child_nodes, i);
+        JS_SetPropertyUint32(ctx, arr, i, child);
+    }
+}
+
+static void mo_build_snapshot(JSContextHandle ctx, GCValue node, bool subtree,
+                              GCValue nodes, GCValue children) {
+    GCValue node_arr = JS_NewArray(ctx);
+    mo_push_child_nodes(ctx, node, node_arr);
+
+    uint32_t idx = 0;
+    GCValue len_val = JS_GetPropertyStr(ctx, nodes, "length");
+    JS_ToUint32(ctx, &idx, len_val);
+    JS_SetPropertyUint32(ctx, nodes, idx, node);
+    JS_SetPropertyUint32(ctx, children, idx, node_arr);
+
+    if (!subtree) return;
+
+    GCValue child_nodes = JS_GetPropertyStr(ctx, node, "childNodes");
+    if (!JS_IsArray(ctx, child_nodes)) return;
+    GCValue len_v = JS_GetPropertyStr(ctx, child_nodes, "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, len_v);
+    for (uint32_t i = 0; i < len; i++) {
+        GCValue child = JS_GetPropertyUint32(ctx, child_nodes, i);
+        mo_build_snapshot(ctx, child, subtree, nodes, children);
+    }
+}
+
+static GCValue mo_create_record(JSContextHandle ctx, GCValue target,
+                                GCValue added, GCValue removed) {
+    GCValue record = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, record, "type", JS_NewString(ctx, "childList"));
+    JS_SetPropertyStr(ctx, record, "target", target);
+    JS_SetPropertyStr(ctx, record, "addedNodes", added);
+    JS_SetPropertyStr(ctx, record, "removedNodes", removed);
+    JS_SetPropertyStr(ctx, record, "previousSibling", JS_NULL);
+    JS_SetPropertyStr(ctx, record, "nextSibling", JS_NULL);
+    JS_SetPropertyStr(ctx, record, "attributeName", JS_NULL);
+    JS_SetPropertyStr(ctx, record, "attributeNamespace", JS_NULL);
+    JS_SetPropertyStr(ctx, record, "oldValue", JS_NULL);
+    return record;
+}
+
+static bool mo_node_in_array(JSContextHandle ctx, GCValue node, GCValue arr) {
+    GCValue len_val = JS_GetPropertyStr(ctx, arr, "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, len_val);
+    for (uint32_t i = 0; i < len; i++) {
+        GCValue item = JS_GetPropertyUint32(ctx, arr, i);
+        if (JS_StrictEq(ctx, item, node)) return true;
+    }
+    return false;
+}
+
+static void mo_diff_children(JSContextHandle ctx, GCValue target,
+                             GCValue old_children, GCValue new_children,
+                             GCValue added, GCValue removed) {
+    uint32_t old_len = 0, new_len = 0;
+    GCValue olen = JS_GetPropertyStr(ctx, old_children, "length");
+    GCValue nlen = JS_GetPropertyStr(ctx, new_children, "length");
+    JS_ToUint32(ctx, &old_len, olen);
+    JS_ToUint32(ctx, &new_len, nlen);
+
+    // removed = old children not present in new
+    uint32_t ridx = 0;
+    for (uint32_t i = 0; i < old_len; i++) {
+        GCValue node = JS_GetPropertyUint32(ctx, old_children, i);
+        if (!mo_node_in_array(ctx, node, new_children)) {
+            JS_SetPropertyUint32(ctx, removed, ridx++, node);
+        }
+    }
+    // added = new children not present in old
+    uint32_t aidx = 0;
+    for (uint32_t i = 0; i < new_len; i++) {
+        GCValue node = JS_GetPropertyUint32(ctx, new_children, i);
+        if (!mo_node_in_array(ctx, node, old_children)) {
+            JS_SetPropertyUint32(ctx, added, aidx++, node);
+        }
+    }
+}
+
+static GCValue mo_take_records_for_snapshot(JSContextHandle ctx, GCValue this_val,
+                                            GCValue nodes, GCValue children,
+                                            bool subtree) {
+    GCValue records = JS_NewArray(ctx);
+    uint32_t rcount = 0;
+
+    GCValue len_val = JS_GetPropertyStr(ctx, nodes, "length");
+    uint32_t count = 0;
+    JS_ToUint32(ctx, &count, len_val);
+
+    for (uint32_t i = 0; i < count; i++) {
+        GCValue node = JS_GetPropertyUint32(ctx, nodes, i);
+        GCValue old_children = JS_GetPropertyUint32(ctx, children, i);
+
+        GCValue new_children = JS_NewArray(ctx);
+        mo_push_child_nodes(ctx, node, new_children);
+
+        // Compare sets (order-insensitive is enough for ShadyDOM childList scans).
+        GCValue added = JS_NewArray(ctx);
+        GCValue removed = JS_NewArray(ctx);
+        mo_diff_children(ctx, node, old_children, new_children, added, removed);
+
+        GCValue alen = JS_GetPropertyStr(ctx, added, "length");
+        GCValue rlen = JS_GetPropertyStr(ctx, removed, "length");
+        uint32_t al = 0, rl = 0;
+        JS_ToUint32(ctx, &al, alen);
+        JS_ToUint32(ctx, &rl, rlen);
+        if (al > 0 || rl > 0) {
+            GCValue record = mo_create_record(ctx, node, added, removed);
+            JS_SetPropertyUint32(ctx, records, rcount++, record);
+        }
+        // Update snapshot entry for next takeRecords call.
+        JS_SetPropertyUint32(ctx, children, i, new_children);
+    }
+
+    if (subtree) {
+        // Newly added nodes that were not in the snapshot need their own
+        // subtree captured for future scans.
+        for (uint32_t i = 0; i < rcount; i++) {
+            GCValue record = JS_GetPropertyUint32(ctx, records, i);
+            GCValue added = JS_GetPropertyStr(ctx, record, "addedNodes");
+            GCValue alen = JS_GetPropertyStr(ctx, added, "length");
+            uint32_t al = 0;
+            JS_ToUint32(ctx, &al, alen);
+            for (uint32_t j = 0; j < al; j++) {
+                GCValue new_node = JS_GetPropertyUint32(ctx, added, j);
+                mo_build_snapshot(ctx, new_node, true, nodes, children);
+            }
+        }
+    }
+
+    return records;
+}
+
 // MutationObserver.prototype.observe(target, options)
 GCValue js_mutation_observer_observe(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "observe requires a target node");
+    GCValue target = argv[0];
+    if (JS_IsNull(target) || JS_IsUndefined(target) || !JS_IsObject(target)) {
+        return JS_ThrowTypeError(ctx, "observe target must be a Node");
+    }
+
+    bool child_list = false;
+    bool subtree = false;
+    if (argc >= 2 && JS_IsObject(argv[1])) {
+        GCValue v = JS_GetPropertyStr(ctx, argv[1], "childList");
+        child_list = JS_ToBool(ctx, v);
+        v = JS_GetPropertyStr(ctx, argv[1], "subtree");
+        subtree = JS_ToBool(ctx, v);
+    }
+
+    JS_SetPropertyStr(ctx, this_val, "__mo_target", target);
+    JS_SetPropertyStr(ctx, this_val, "__mo_childList", JS_NewBool(ctx, child_list));
+    JS_SetPropertyStr(ctx, this_val, "__mo_subtree", JS_NewBool(ctx, subtree));
+
+    GCValue nodes = JS_NewArray(ctx);
+    GCValue children = JS_NewArray(ctx);
+    if (child_list) {
+        mo_build_snapshot(ctx, target, subtree, nodes, children);
+    }
+    JS_SetPropertyStr(ctx, this_val, "__mo_nodes", nodes);
+    JS_SetPropertyStr(ctx, this_val, "__mo_children", children);
+
     return JS_UNDEFINED;
 }
 
 // MutationObserver.prototype.disconnect()
 GCValue js_mutation_observer_disconnect(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    JS_SetPropertyStr(ctx, this_val, "__mo_target", JS_UNDEFINED);
+    JS_SetPropertyStr(ctx, this_val, "__mo_childList", JS_FALSE);
+    JS_SetPropertyStr(ctx, this_val, "__mo_subtree", JS_FALSE);
+    JS_SetPropertyStr(ctx, this_val, "__mo_nodes", JS_UNDEFINED);
+    JS_SetPropertyStr(ctx, this_val, "__mo_children", JS_UNDEFINED);
     return JS_UNDEFINED;
 }
 
 // MutationObserver.prototype.takeRecords()
 GCValue js_mutation_observer_takeRecords(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    return JS_NewArray(ctx);
+    (void)argc; (void)argv;
+    GCValue nodes = JS_GetPropertyStr(ctx, this_val, "__mo_nodes");
+    GCValue children = JS_GetPropertyStr(ctx, this_val, "__mo_children");
+    GCValue subtree_val = JS_GetPropertyStr(ctx, this_val, "__mo_subtree");
+    if (!JS_IsArray(ctx, nodes) || !JS_IsArray(ctx, children)) {
+        return JS_NewArray(ctx);
+    }
+    bool subtree = JS_ToBool(ctx, subtree_val);
+    return mo_take_records_for_snapshot(ctx, this_val, nodes, children, subtree);
 }
 
 const JSCFunctionListEntry js_mutation_observer_proto_funcs[] = {
@@ -1626,6 +1814,44 @@ const JSCFunctionListEntry js_mutation_observer_proto_funcs[] = {
     JS_CFUNC_DEF("takeRecords", 0, js_mutation_observer_takeRecords),
 };
 const size_t js_mutation_observer_proto_funcs_count = sizeof(js_mutation_observer_proto_funcs) / sizeof(js_mutation_observer_proto_funcs[0]);
+
+// ============================================================================
+// queueMicrotask Implementation
+// ============================================================================
+
+GCValue js_queue_microtask(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    if (argc < 1 || !JS_IsFunction(ctx, argv[0])) {
+        return JS_ThrowTypeError(ctx, "queueMicrotask requires a function");
+    }
+
+    GCValue global = JS_GetGlobalObject(ctx);
+
+    // Prefer Promise.resolve().then(callback) for real microtask timing.
+    GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
+    if (JS_IsFunction(ctx, promise_ctor)) {
+        GCValue resolve = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
+        if (JS_IsFunction(ctx, resolve)) {
+            GCValue p = JS_Call(ctx, resolve, promise_ctor, 0, NULL);
+            if (!JS_IsException(p)) {
+                GCValue then_fn = JS_GetPropertyStr(ctx, p, "then");
+                if (JS_IsFunction(ctx, then_fn)) {
+                    GCValue args[1] = { argv[0] };
+                    JS_Call(ctx, then_fn, p, 1, args);
+                    return JS_UNDEFINED;
+                }
+            }
+        }
+    }
+
+    // Fallback to a zero-delay timer.
+    GCValue set_timeout = JS_GetPropertyStr(ctx, global, "setTimeout");
+    if (JS_IsFunction(ctx, set_timeout)) {
+        GCValue args[2] = { argv[0], JS_NewInt32(ctx, 0) };
+        JS_Call(ctx, set_timeout, global, 2, args);
+    }
+    return JS_UNDEFINED;
+}
 
 // ============================================================================
 // ResizeObserver Implementation

@@ -1519,8 +1519,17 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     GCValue slot_proto = JS_NewObject(ctx);
     JS_SetPrototype(ctx, slot_proto, html_element_proto);
     JS_SetPropertyStr(ctx, slot_proto, "constructor", slot_ctor);
+    JS_SetPropertyStr(ctx, slot_proto, "assignedNodes",
+        JS_NewCFunction(ctx, js_slot_assigned_nodes, "assignedNodes", 1));
+    JS_SetPropertyStr(ctx, slot_proto, "assignedElements",
+        JS_NewCFunction(ctx, js_slot_assigned_elements, "assignedElements", 1));
+    GCValue slot_name_getter = JS_NewCFunction(ctx, js_slot_get_name, "get name", 0);
+    JSAtom slot_name_atom = JS_NewAtom(ctx, "name");
+    JS_DefinePropertyGetSet(ctx, slot_proto, slot_name_atom, slot_name_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_FreeAtom(ctx, slot_name_atom);
     JS_SetPropertyStr(ctx, slot_ctor, "prototype", slot_proto);
     JS_SetPropertyStr(ctx, global, "HTMLSlotElement", slot_ctor);
+    JS_SetPropertyStr(ctx, window, "HTMLSlotElement", slot_ctor);
     
     // DocumentFragment constructor (needs node_proto)
     GCValue doc_fragment_ctor = JS_NewCFunction2(ctx, js_dummy_function, "DocumentFragment", 0, JS_CFUNC_constructor, 0);
@@ -2688,6 +2697,13 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_NewCFunction(ctx, js_request_idle_callback, "requestIdleCallback", 1));
     JS_SetPropertyStr(ctx, window, "cancelIdleCallback",
         JS_NewCFunction(ctx, js_cancel_idle_callback, "cancelIdleCallback", 1));
+
+    // queueMicrotask
+    JS_SetPropertyStr(ctx, global, "queueMicrotask",
+        JS_NewCFunction(ctx, js_queue_microtask, "queueMicrotask", 1));
+    JS_SetPropertyStr(ctx, window, "queueMicrotask",
+        JS_NewCFunction(ctx, js_queue_microtask, "queueMicrotask", 1));
+
     LOG_INFO("Timer API set");
     
     // ===== Crypto API =====
