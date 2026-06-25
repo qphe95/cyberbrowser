@@ -36,6 +36,7 @@ extern "C" int timer_process_due(JSContextHandle ctx);
 
 static JSRuntimeHandle g_rt;
 static JSContextHandle g_ctx;
+static char g_target_video_id[32] = "";
 static GCValue g_global;
 
 static bool init_browser_context(void) {
@@ -95,6 +96,18 @@ static void cleanup_browser_context(void) {
 
 static char *fetch_youtube_page(size_t *out_size) {
     const char *url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+    {
+        const char *v = strstr(url, "v=");
+        if (v) {
+            v += 2;
+            const char *amp = strchr(v, '&');
+            size_t len = amp ? (size_t)(amp - v) : strlen(v);
+            if (len < sizeof(g_target_video_id)) {
+                memcpy(g_target_video_id, v, len);
+                g_target_video_id[len] = '\0';
+            }
+        }
+    }
     printf("Fetching %s ...\n", url);
 
     HttpBuffer buffer = {0};
@@ -576,6 +589,48 @@ static void print_captured_googlevideo_urls(JSContextHandle ctx) {
     printf("Captured googlevideo.com URLs: %d\n", gv_count);
 }
 
+/* If the YouTube player bootstrap did not set a poster thumbnail, inject an
+ * <img> with the standard maxres thumbnail into the .html5-video-container.
+ * Setting a background image on the container is often covered by the player
+ * chrome, so an appended image is more reliable. */
+/* YouTube's player bootstrap usually leaves the poster thumbnail unset in our
+ * emulated environment.  Inject a maxres thumbnail as the background image on
+ * the player and its visible overlay so the watch page looks correct. */
+static void apply_youtube_player_thumbnail_fallback(JSContextHandle ctx) {
+    if (!g_target_video_id[0]) return;
+
+    char js[1024];
+    snprintf(js, sizeof(js),
+        "(function(){"
+        "  try {"
+        "    var url = 'https://i.ytimg.com/vi/%s/maxresdefault.jpg';"
+        "    var player = document.getElementById('movie_player');"
+        "    if (!player) return;"
+        "    var targets = [player];"
+        "    var ch = player.children;"
+        "    if (ch) for (var i = 0; i < ch.length; i++) {"
+        "      var cls = ch[i].getAttribute ? ch[i].getAttribute('class') : '';"
+        "      if (cls && cls.indexOf('ytp-iv-player-content') >= 0) targets.push(ch[i]);"
+        "    }"
+        "    for (var j = 0; j < targets.length; j++) {"
+        "      var t = targets[j];"
+        "      var s = t.getAttribute('style');"
+        "      if (!s || !/background-image/i.test(String(s))) {"
+        "        t.setAttribute('style', 'background-image:url(' + url + ');background-size:cover;background-position:center;');"
+        "      }"
+        "    }"
+        "  } catch(e) {}"
+        "})();",
+        g_target_video_id);
+
+    GCValue ret = JS_Eval(ctx, js, strlen(js), "<thumbnail_fallback>", JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(ret)) {
+        GCValue ex = JS_GetException(ctx);
+        const char *msg = JS_ToCString(ctx, ex);
+        fprintf(stderr, "[THUMB-FB] JS exception: %s\n", msg ? msg : "(null)");
+    }
+}
+
 int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
@@ -691,6 +746,29 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "[UPGRADE-DOC] done\n");
             fflush(stderr);
         }
+
+        // Fallback: if the player bootstrap did not set a poster thumbnail,
+        // force the standard maxres thumbnail as a background image on the
+        // movie player container so the screenshot shows the actual video frame
+        // instead of a grey placeholder.
+        {
+            const char *thumbnail_js =
+                "(function(){"
+                "  var href = window.location && window.location.href;"
+                "  if (!href) return;"
+                "  var m = href.match(/[?&]v=([^&]+)/);"
+                "  if (!m) return;"
+                "  var vid = m[1];"
+                "  var player = document.getElementById('movie_player') || document.querySelector('.html5-video-container');"
+                "  if (!player) return;"
+                "  if (player.style && !player.style.backgroundImage) {"
+                "    player.style.backgroundImage = 'url(https://i.ytimg.com/vi/' + vid + '/maxresdefault.jpg)';"
+                "    player.style.backgroundSize = 'cover';"
+                "    player.style.backgroundPosition = 'center';"
+                "  }"
+                "})();";
+            JS_Eval(g_ctx, thumbnail_js, strlen(thumbnail_js), "<thumbnail_fallback>", JS_EVAL_TYPE_GLOBAL);
+        }
     }
 
     /* The JS DOM populated by html_execute_page_scripts is now the source of
@@ -733,6 +811,10 @@ int main(int argc, char *argv[]) {
         bool had_timers = pump_timers_and_jobs(g_ctx);
         bool had_images = image_cache_process_pending(image_cache);
 
+        // Apply thumbnail fallback each iteration so it runs after the player
+        // scripts have created the movie_player element.
+        apply_youtube_player_thumbnail_fallback(g_ctx);
+
         if (g_dom_needs_layout) {
             g_dom_needs_layout = 0;
 
@@ -757,6 +839,22 @@ int main(int argc, char *argv[]) {
         if (!had_timers && !had_images && !g_dom_needs_layout &&
             !image_cache_has_pending(image_cache)) {
             break;
+        }
+    }
+
+    /* Save the final mutated JS DOM for inspection. */
+    {
+        GCValue js_doc = get_global_document(g_ctx);
+        GCValue doc_elem = JS_GetPropertyStr(g_ctx, js_doc, "documentElement");
+        char *serialized = html_serialize_js_node(g_ctx, doc_elem);
+        if (serialized) {
+            FILE *f = fopen("youtube_final.html", "wb");
+            if (f) {
+                fwrite(serialized, 1, strlen(serialized), f);
+                fclose(f);
+                printf("Saved final JS DOM to youtube_final.html (%zu bytes)\n", strlen(serialized));
+            }
+            free(serialized);
         }
     }
 
