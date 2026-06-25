@@ -64,6 +64,10 @@ extern GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val,
 extern "C" GCValue js_element_querySelector_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 extern "C" GCValue js_element_querySelectorAll_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 
+// Native DOM mutation helpers from dom_api.cpp (used by fallbacks to bypass
+// page-script monkey patches).
+extern "C" GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+
 // Forward declarations for internal functions
 static GCValue js_dummy_function(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 static GCValue js_dummy_function_true(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
@@ -101,6 +105,17 @@ static GCValue js_empty_array(JSContextHandle ctx, GCValue this_val, int argc, G
 static GCValue js_empty_string(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc; (void)argv;
     return JS_NewString(ctx, "");
+}
+
+// Native appendChild exposed to JS fallbacks so they can add nodes even when
+// page scripts have wrapped Element.prototype.appendChild.
+static GCValue js_cyber_append_child(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    if (argc < 2 || JS_IsUndefined(argv[0]) || JS_IsNull(argv[0]) ||
+        JS_IsUndefined(argv[1]) || JS_IsNull(argv[1])) {
+        return JS_ThrowTypeError(ctx, "__cyber_appendChild requires parent and child");
+    }
+    return js_node_appendChild_real(ctx, argv[0], 1, &argv[1]);
 }
 
 // document.createTextNode() - returns a proper Text node object
@@ -1213,6 +1228,10 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, global, "globalThis", window);
     JS_SetPropertyStr(ctx, global, "top", window);
     JS_SetPropertyStr(ctx, global, "parent", window);
+
+    // Native DOM mutation helpers for fallback scripts.
+    JS_SetPropertyStr(ctx, global, "__cyber_appendChild",
+        JS_NewCFunction(ctx, js_cyber_append_child, "__cyber_appendChild", 2));
 
     // Window constructor (needed by ShadyDOM polyfill)
     GCValue window_ctor = JS_NewCFunction2(ctx, js_dummy_function, "Window", 0, JS_CFUNC_constructor, 0);
