@@ -718,13 +718,6 @@ GCValue css_ensure_style_object(JSContextHandle ctx, GCValue element) {
             JS_SetPrototype(ctx, style, proto);
         }
         JS_SetPropertyStr(ctx, element, "__style", style);
-        /* Also expose an own `style` data property on the element so scripts
-         * (and our own layout serialization) can read it without depending on
-         * the prototype chain. */
-        JSAtom style_atom = JS_NewAtom(ctx, "style");
-        JS_DefinePropertyValue(ctx, element, style_atom, style,
-                               JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
-        JS_FreeAtom(ctx, style_atom);
     }
     return style;
 }
