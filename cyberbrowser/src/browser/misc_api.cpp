@@ -1929,7 +1929,7 @@ static GCValue mo_create_record(JSContextHandle ctx, GCValue target, GCValue add
     return record;
 }
 
-static GCValue js_mutation_observer_job(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+static GCValue js_mutation_observer_job(JSContextHandle ctx, int argc, GCValue *argv);
 
 static void mo_schedule_callback(JSContextHandle ctx, GCValue observer) {
     GCValue scheduled = JS_GetPropertyStr(ctx, observer, "__mo_scheduled");
@@ -1939,8 +1939,7 @@ static void mo_schedule_callback(JSContextHandle ctx, GCValue observer) {
     JS_EnqueueJob(ctx, js_mutation_observer_job, 1, args);
 }
 
-static GCValue js_mutation_observer_job(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)this_val;
+static GCValue js_mutation_observer_job(JSContextHandle ctx, int argc, GCValue *argv) {
     if (argc < 1) return JS_UNDEFINED;
     GCValue observer = argv[0];
     JS_SetPropertyStr(ctx, observer, "__mo_scheduled", JS_FALSE);

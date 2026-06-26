@@ -930,6 +930,114 @@ TEST(test_mutation_observer_exists) {
     return true;
 }
 
+/* Test 11a: DocumentFragment children are expanded by appendChild/insertBefore */
+TEST(test_document_fragment_appendChild_expands) {
+    JSContextHandle ctx = get_test_context();
+    if (!ctx) return false;
+
+    const char *js =
+        "var p = document.createElement('div');"
+        "var f = document.createDocumentFragment();"
+        "var c1 = document.createElement('span');"
+        "var c2 = document.createElement('span');"
+        "f.appendChild(c1); f.appendChild(c2);"
+        "p.appendChild(f);"
+        "var directAppend = p.childNodes.length === 2;"
+        "var p2 = document.createElement('div');"
+        "var f2 = document.createDocumentFragment();"
+        "var r = document.createElement('b');"
+        "f2.appendChild(document.createElement('i'));"
+        "f2.appendChild(document.createElement('u'));"
+        "p2.appendChild(r);"
+        "p2.insertBefore(f2, r);"
+        "var insertBefore = p2.childNodes.length === 3 && p2.childNodes[2] === r;"
+        "directAppend && insertBefore;";
+    GCValue result = JS_Eval(ctx, js, strlen(js), "<test>", 0);
+    return JS_ToBool(ctx, result);
+}
+
+/* Test 11b: MutationObserver delivers async callbacks via microtasks */
+TEST(test_mutation_observer_async_callback) {
+    JSContextHandle ctx = get_test_context();
+    if (!ctx) return false;
+
+    const char *setup_js =
+        "var target = document.createElement('div');"
+        "window.__mo_test_called = false;"
+        "window.__mo_test_records = null;"
+        "var mo = new MutationObserver(function(records, observer){"
+        "  window.__mo_test_called = true;"
+        "  window.__mo_test_records = records;"
+        "});"
+        "mo.observe(target, {childList: true});"
+        "target.appendChild(document.createElement('span'));";
+    JS_Eval(ctx, setup_js, strlen(setup_js), "<test_setup>", 0);
+
+    JSRuntimeHandle rt = JS_GetRuntime(ctx);
+    JSContextHandle pending_ctx = ctx;
+    int executed = 0;
+    while (JS_ExecutePendingJob(rt, &pending_ctx) > 0) executed++;
+
+    const char *check_js =
+        "window.__mo_test_called && window.__mo_test_records && window.__mo_test_records.length > 0;";
+    GCValue result = JS_Eval(ctx, check_js, strlen(check_js), "<test_check>", 0);
+    return JS_ToBool(ctx, result);
+}
+
+/* Test 11c: window.matchMedia evaluates common YouTube media queries */
+TEST(test_match_media_evaluates_queries) {
+    JSContextHandle ctx = get_test_context();
+    if (!ctx) return false;
+
+    const char *js =
+        "({"
+        "  a: window.matchMedia('(min-width: 1024px)').matches,"
+        "  b: window.matchMedia('(max-width: 527.9px)').matches,"
+        "  c: window.matchMedia('(prefers-color-scheme: dark)').matches,"
+        "  d: window.matchMedia('screen and (max-height: 720px) and (min-resolution: 200dpi)').matches,"
+        "  e: window.matchMedia('(any-pointer: coarse)').matches,"
+        "  f: window.matchMedia('(orientation: landscape)').matches,"
+        "  g: window.matchMedia('(width: 1920px) and (height: 1080px)').matches,"
+        "  h: window.matchMedia('not print').matches,"
+        "  i: window.matchMedia('screen, print').matches"
+        "});";
+    GCValue result = JS_Eval(ctx, js, strlen(js), "<test>", 0);
+    if (JS_IsException(result)) return false;
+
+    bool a = JS_ToBool(ctx, JS_GetPropertyStr(ctx, result, "a")); // true
+    bool b = JS_ToBool(ctx, JS_GetPropertyStr(ctx, result, "b")); // false
+    bool c = JS_ToBool(ctx, JS_GetPropertyStr(ctx, result, "c")); // true
+    bool d = JS_ToBool(ctx, JS_GetPropertyStr(ctx, result, "d")); // false
+    bool e = JS_ToBool(ctx, JS_GetPropertyStr(ctx, result, "e")); // false
+    bool f = JS_ToBool(ctx, JS_GetPropertyStr(ctx, result, "f")); // true
+    bool g = JS_ToBool(ctx, JS_GetPropertyStr(ctx, result, "g")); // true
+    bool h = JS_ToBool(ctx, JS_GetPropertyStr(ctx, result, "h")); // true
+    bool i = JS_ToBool(ctx, JS_GetPropertyStr(ctx, result, "i")); // true
+
+    return a && !b && c && !d && !e && f && g && h && i;
+}
+
+/* Test 11d: MediaQueryList addListener/addEventListener registration */
+TEST(test_match_media_listeners) {
+    JSContextHandle ctx = get_test_context();
+    if (!ctx) return false;
+
+    const char *js =
+        "var mql = window.matchMedia('(min-width: 1px)');"
+        "var fn = function(){};"
+        "mql.addListener(fn);"
+        "var ok1 = mql.__mql_listeners && mql.__mql_listeners.length === 1 && mql.__mql_listeners[0] === fn;"
+        "mql.removeListener(fn);"
+        "var ok2 = mql.__mql_listeners.length === 0;"
+        "mql.addEventListener('change', fn);"
+        "var ok3 = mql.__mql_listeners.length === 1;"
+        "mql.removeEventListener('change', fn);"
+        "var ok4 = mql.__mql_listeners.length === 0;"
+        "ok1 && ok2 && ok3 && ok4;";
+    GCValue result = JS_Eval(ctx, js, strlen(js), "<test>", 0);
+    return JS_ToBool(ctx, result);
+}
+
 /* Test 12: Verify IntersectionObserver exists */
 TEST(test_intersection_observer_exists) {
     JSContextHandle ctx = get_test_context();
@@ -4722,6 +4830,10 @@ extern "C" void run_browser_api_impl_tests(void) {
     RUN_TEST(test_clearTimeout_functional);
     RUN_TEST(test_requestAnimationFrame_functional);
     RUN_TEST(test_mutation_observer_exists);
+    RUN_TEST(test_document_fragment_appendChild_expands);
+    RUN_TEST(test_mutation_observer_async_callback);
+    RUN_TEST(test_match_media_evaluates_queries);
+    RUN_TEST(test_match_media_listeners);
     RUN_TEST(test_intersection_observer_exists);
     RUN_TEST(test_resize_observer_exists);
     RUN_TEST(test_performance_observer_exists);

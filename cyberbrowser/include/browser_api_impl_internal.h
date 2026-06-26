@@ -377,7 +377,7 @@ extern const size_t js_source_buffer_proto_funcs_count;
 GCValue js_url_create_object_url(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_url_revoke_object_url(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_url_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
-GCValue js_url_get_search_params(JSContextHandle ctx, GCValue this_val);
+GCValue js_url_get_search_params(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_url_search_params_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
 GCValue js_url_search_params_append(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_url_search_params_delete(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);

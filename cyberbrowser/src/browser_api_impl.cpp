@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <math.h>
+#include <ctype.h>
 #include <quickjs.h>
 #include <quickjs_gc_unified.h>
 #include "browser_api_impl.h"
@@ -276,7 +277,7 @@ static GCValue js_promise_reject(JSContextHandle ctx, GCValue this_val, int argc
     return JS_ThrowTypeError(ctx, "not supported");
 }
 
-// Minimal media-query evaluator for window.matchMedia.
+// Media-query evaluator for window.matchMedia.
 static int js_match_media_get_viewport_width(JSContextHandle ctx) {
     GCValue global = JS_GetGlobalObject(ctx);
     GCValue win = JS_GetPropertyStr(ctx, global, "window");
@@ -294,69 +295,376 @@ static int js_match_media_get_viewport_height(JSContextHandle ctx) {
     return h;
 }
 
-static bool js_match_media_condition(const char *cond, int width, int height) {
-    while (*cond == ' ' || *cond == '\t') cond++;
-    if (!cond[0]) return true;
-    if (strcasecmp(cond, "screen") == 0 || strcasecmp(cond, "all") == 0 || strcasecmp(cond, "print") == 0)
-        return true;
-    if (strcasecmp(cond, "only screen") == 0 || strcasecmp(cond, "only all") == 0)
-        return true;
-    if (strncasecmp(cond, "not ", 4) == 0)
-        return !js_match_media_condition(cond + 4, width, height);
+static const char *js_mm_skip_ws(const char *p) {
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    return p;
+}
+static const char *js_mm_skip_ws_rev(const char *start, const char *p) {
+    while (p > start && (*(p - 1) == ' ' || *(p - 1) == '\t' || *(p - 1) == '\n' || *(p - 1) == '\r')) p--;
+    return p;
+}
 
-    // Handle (min-width: 123px) etc.
-    int val = 0;
-    if (sscanf(cond, "(min-width: %dpx)", &val) == 1) return width >= val;
-    if (sscanf(cond, "(max-width: %dpx)", &val) == 1) return width <= val;
-    if (sscanf(cond, "(min-height: %dpx)", &val) == 1) return height >= val;
-    if (sscanf(cond, "(max-height: %dpx)", &val) == 1) return height <= val;
-    if (sscanf(cond, "(width: %dpx)", &val) == 1) return width == val;
-    if (sscanf(cond, "(height: %dpx)", &val) == 1) return height == val;
-    if (strcasecmp(cond, "(prefers-color-scheme: dark)") == 0) return true;
-    if (strcasecmp(cond, "(prefers-color-scheme: light)") == 0) return false;
-    if (strcasecmp(cond, "(pointer: fine)") == 0) return true;
-    if (strcasecmp(cond, "(pointer: coarse)") == 0) return false;
-    if (strcasecmp(cond, "(hover: hover)") == 0) return true;
-    if (strcasecmp(cond, "(hover: none)") == 0) return false;
-    if (strcasecmp(cond, "(orientation: landscape)") == 0) return true;
-    if (strcasecmp(cond, "(orientation: portrait)") == 0) return false;
-    // Unknown conditions default to true so layouts don't collapse.
+static bool js_mm_streq_ci(const char *s, const char *e, const char *lit) {
+    const char *p = js_mm_skip_ws(s);
+    e = js_mm_skip_ws_rev(s, e);
+    while (p < e && *lit) {
+        if (tolower((unsigned char)*p) != tolower((unsigned char)*lit)) return false;
+        p++;
+        lit++;
+    }
+    return p == e && *lit == '\0';
+}
+
+static bool js_mm_parse_double(const char *s, const char *e, double *out) {
+    s = js_mm_skip_ws(s);
+    e = js_mm_skip_ws_rev(s, e);
+    char buf[64];
+    size_t n = (size_t)(e - s);
+    if (n == 0 || n >= sizeof(buf)) return false;
+    memcpy(buf, s, n);
+    buf[n] = '\0';
+    char *end = NULL;
+    double v = strtod(buf, &end);
+    if (end == buf) return false;
+    *out = v;
     return true;
 }
 
-static char *js_match_media_strstr_ci(const char *haystack, const char *needle) {
-    size_t nlen = strlen(needle);
-    if (nlen == 0) return (char*)haystack;
-    for (const char *p = haystack; *p; p++) {
-        if (strncasecmp(p, needle, nlen) == 0) return (char*)p;
-    }
-    return NULL;
+static bool js_mm_parse_double_unit(const char *s, const char *e, double *out) {
+    s = js_mm_skip_ws(s);
+    e = js_mm_skip_ws_rev(s, e);
+    char buf[128];
+    size_t n = (size_t)(e - s);
+    if (n == 0 || n >= sizeof(buf)) return false;
+    memcpy(buf, s, n);
+    buf[n] = '\0';
+    char *end = NULL;
+    double v = strtod(buf, &end);
+    if (end == buf) return false;
+    while (*end == ' ' || *end == '\t') end++;
+    if (strncasecmp(end, "dppx", 4) == 0) v *= 96.0;
+    else if (strncasecmp(end, "dpcm", 4) == 0) v *= 2.54;
+    *out = v;
+    return true;
 }
 
-static bool js_match_media_query(const char *query, int width, int height) {
-    // Comma-separated list: true if any list item matches.
+static bool js_mm_parse_ratio(const char *s, const char *e, double *out) {
+    s = js_mm_skip_ws(s);
+    e = js_mm_skip_ws_rev(s, e);
+    const char *slash = NULL;
+    for (const char *p = s; p < e; p++) if (*p == '/') { slash = p; break; }
+    if (!slash) return js_mm_parse_double(s, e, out);
+    double num = 0, den = 0;
+    if (!js_mm_parse_double(s, slash, &num)) return false;
+    if (!js_mm_parse_double(slash + 1, e, &den)) return false;
+    if (den == 0.0) return false;
+    *out = num / den;
+    return true;
+}
+
+static bool js_mm_known_boolean_feature(const char *name, const char *name_end) {
+    // These are known media features; a bare feature name (without a value) is treated as supported.
+    static const char *features[] = {
+        "width", "height", "aspect-ratio", "orientation",
+        "prefers-color-scheme", "prefers-reduced-motion", "prefers-contrast",
+        "forced-colors", "-ms-high-contrast",
+        "pointer", "any-pointer", "hover", "any-hover",
+        "display-mode", "color-gamut", "dynamic-range", "video-dynamic-range",
+        "resolution", "min-resolution", "max-resolution",
+        "update", "overflow-block", "overflow-inline", "scripting",
+        NULL
+    };
+    for (int i = 0; features[i]; i++) {
+        if (js_mm_streq_ci(name, name_end, features[i])) return true;
+    }
+    return false;
+}
+
+static bool js_mm_eval_feature(const char *inner, const char *inner_end, int width, int height) {
+    // inner is the content of a pair of parentheses, e.g. "min-width: 123px".
+    const char *colon = NULL;
+    for (const char *p = inner; p < inner_end; p++) {
+        if (*p == ':') { colon = p; break; }
+    }
+    if (!colon) {
+        return js_mm_known_boolean_feature(inner, inner_end);
+    }
+
+    const char *name = inner;
+    const char *name_end = colon;
+    const char *val = colon + 1;
+    const char *val_end = inner_end;
+
+    double v = 0;
+    bool has_double = js_mm_parse_double(val, val_end, &v);
+
+    if (js_mm_streq_ci(name, name_end, "min-width")) {
+        if (!has_double) return false;
+        return width >= v - 0.001;
+    }
+    if (js_mm_streq_ci(name, name_end, "max-width")) {
+        if (!has_double) return false;
+        return width <= v + 0.001;
+    }
+    if (js_mm_streq_ci(name, name_end, "width")) {
+        if (!has_double) return false;
+        return fabs(width - v) <= 0.5;
+    }
+    if (js_mm_streq_ci(name, name_end, "min-height")) {
+        if (!has_double) return false;
+        return height >= v - 0.001;
+    }
+    if (js_mm_streq_ci(name, name_end, "max-height")) {
+        if (!has_double) return false;
+        return height <= v + 0.001;
+    }
+    if (js_mm_streq_ci(name, name_end, "height")) {
+        if (!has_double) return false;
+        return fabs(height - v) <= 0.5;
+    }
+    if (js_mm_streq_ci(name, name_end, "min-aspect-ratio")) {
+        double r = (double)width / (double)(height ? height : 1);
+        double q = 0;
+        if (!js_mm_parse_ratio(val, val_end, &q)) return false;
+        return r >= q - 0.0001;
+    }
+    if (js_mm_streq_ci(name, name_end, "max-aspect-ratio")) {
+        double r = (double)width / (double)(height ? height : 1);
+        double q = 0;
+        if (!js_mm_parse_ratio(val, val_end, &q)) return false;
+        return r <= q + 0.0001;
+    }
+    if (js_mm_streq_ci(name, name_end, "aspect-ratio")) {
+        double r = (double)width / (double)(height ? height : 1);
+        double q = 0;
+        if (!js_mm_parse_ratio(val, val_end, &q)) return false;
+        return fabs(r - q) <= 0.001;
+    }
+    if (js_mm_streq_ci(name, name_end, "min-resolution") ||
+        js_mm_streq_ci(name, name_end, "max-resolution") ||
+        js_mm_streq_ci(name, name_end, "resolution")) {
+        double dpi = 0;
+        if (!js_mm_parse_double_unit(val, val_end, &dpi)) return false;
+        const double device_dpi = 96.0;
+        if (js_mm_streq_ci(name, name_end, "min-resolution")) return device_dpi >= dpi - 0.001;
+        if (js_mm_streq_ci(name, name_end, "max-resolution")) return device_dpi <= dpi + 0.001;
+        return fabs(device_dpi - dpi) <= 0.5;
+    }
+    if (js_mm_streq_ci(name, name_end, "orientation")) {
+        bool landscape = width >= height;
+        if (js_mm_streq_ci(val, val_end, "landscape")) return landscape;
+        if (js_mm_streq_ci(val, val_end, "portrait")) return !landscape;
+        return false;
+    }
+    if (js_mm_streq_ci(name, name_end, "prefers-color-scheme")) {
+        if (js_mm_streq_ci(val, val_end, "dark")) return true;
+        if (js_mm_streq_ci(val, val_end, "light")) return false;
+        return false;
+    }
+    if (js_mm_streq_ci(name, name_end, "prefers-reduced-motion")) {
+        if (js_mm_streq_ci(val, val_end, "reduce")) return false;
+        if (js_mm_streq_ci(val, val_end, "no-preference")) return true;
+        return false;
+    }
+    if (js_mm_streq_ci(name, name_end, "prefers-contrast")) {
+        if (js_mm_streq_ci(val, val_end, "more")) return false;
+        if (js_mm_streq_ci(val, val_end, "less")) return false;
+        if (js_mm_streq_ci(val, val_end, "no-preference")) return true;
+        return false;
+    }
+    if (js_mm_streq_ci(name, name_end, "forced-colors")) {
+        if (js_mm_streq_ci(val, val_end, "active")) return false;
+        if (js_mm_streq_ci(val, val_end, "none")) return true;
+        return false;
+    }
+    if (js_mm_streq_ci(name, name_end, "-ms-high-contrast")) {
+        if (js_mm_streq_ci(val, val_end, "active")) return false;
+        if (js_mm_streq_ci(val, val_end, "none")) return true;
+        return false;
+    }
+    if (js_mm_streq_ci(name, name_end, "pointer") || js_mm_streq_ci(name, name_end, "any-pointer")) {
+        if (js_mm_streq_ci(val, val_end, "fine")) return true;
+        if (js_mm_streq_ci(val, val_end, "coarse")) return false;
+        if (js_mm_streq_ci(val, val_end, "none")) return false;
+        return false;
+    }
+    if (js_mm_streq_ci(name, name_end, "hover") || js_mm_streq_ci(name, name_end, "any-hover")) {
+        if (js_mm_streq_ci(val, val_end, "hover")) return true;
+        if (js_mm_streq_ci(val, val_end, "none")) return false;
+        return false;
+    }
+    if (js_mm_streq_ci(name, name_end, "display-mode")) {
+        if (js_mm_streq_ci(val, val_end, "browser")) return true;
+        return false;
+    }
+    if (js_mm_streq_ci(name, name_end, "color-gamut")) {
+        if (js_mm_streq_ci(val, val_end, "srgb")) return true;
+        if (js_mm_streq_ci(val, val_end, "p3")) return false;
+        if (js_mm_streq_ci(val, val_end, "rec2020")) return false;
+        return false;
+    }
+    if (js_mm_streq_ci(name, name_end, "dynamic-range") || js_mm_streq_ci(name, name_end, "video-dynamic-range")) {
+        if (js_mm_streq_ci(val, val_end, "standard")) return true;
+        if (js_mm_streq_ci(val, val_end, "high")) return false;
+        return false;
+    }
+    if (js_mm_streq_ci(name, name_end, "update")) {
+        if (js_mm_streq_ci(val, val_end, "fast")) return true;
+        return false;
+    }
+    if (js_mm_streq_ci(name, name_end, "overflow-block") || js_mm_streq_ci(name, name_end, "overflow-inline")) {
+        if (js_mm_streq_ci(val, val_end, "scroll")) return true;
+        return false;
+    }
+    if (js_mm_streq_ci(name, name_end, "scripting")) {
+        if (js_mm_streq_ci(val, val_end, "enabled")) return true;
+        return false;
+    }
+    // Unknown feature/value combinations evaluate to false to avoid selecting mobile/specialised branches.
+    return false;
+}
+
+static bool js_mm_eval_term(const char *s, const char *e, int width, int height) {
+    s = js_mm_skip_ws(s);
+    e = js_mm_skip_ws_rev(s, e);
+    if (s >= e) return true;
+
+    // Media type without parentheses.
+    if (js_mm_streq_ci(s, e, "screen") || js_mm_streq_ci(s, e, "all")) return true;
+    if (js_mm_streq_ci(s, e, "print") || js_mm_streq_ci(s, e, "tv")) return false;
+
+    // Parenthesised feature.
+    if (*s == '(' && *(e - 1) == ')') {
+        return js_mm_eval_feature(s + 1, e - 1, width, height);
+    }
+
+    // Unknown bare term: false.
+    return false;
+}
+
+static bool js_mm_eval_condition(const char *s, const char *e, int width, int height) {
+    s = js_mm_skip_ws(s);
+    e = js_mm_skip_ws_rev(s, e);
+    if (s >= e) return true;
+
+    bool negate = false;
+    if (e - s >= 4 && strncasecmp(s, "not ", 4) == 0) {
+        negate = true;
+        s = js_mm_skip_ws(s + 4);
+    } else if (e - s >= 5 && strncasecmp(s, "only ", 5) == 0) {
+        s = js_mm_skip_ws(s + 5);
+    }
+
+    // Split remaining condition by " and " at depth 0.
+    const char *p = s;
+    int depth = 0;
+    bool ok = true;
+    const char *term_start = s;
+    while (p <= e) {
+        if (p < e && *p == '(') depth++;
+        else if (p < e && *p == ')') depth--;
+        bool at_end = (p == e);
+        bool is_and = false;
+        if (!at_end && depth == 0 && p + 5 <= e && strncasecmp(p, " and ", 5) == 0) {
+            is_and = true;
+        }
+        if (at_end || is_and) {
+            const char *term_end = is_and ? p : e;
+            if (!js_mm_eval_term(term_start, term_end, width, height)) { ok = false; break; }
+            if (is_and) {
+                p += 5;
+                term_start = p;
+                continue;
+            }
+        }
+        p++;
+    }
+    return negate ? !ok : ok;
+}
+
+static bool js_mm_eval_query(const char *query, int width, int height) {
     char buf[1024];
     strncpy(buf, query, sizeof(buf) - 1);
     buf[sizeof(buf) - 1] = '\0';
-    char *p = buf;
-    while (*p) {
-        char *comma = strchr(p, ',');
-        if (comma) *comma = '\0';
-        // Split by " and "
-        bool ok = true;
-        char *part = p;
-        while (*part) {
-            char *and_pos = js_match_media_strstr_ci(part, " and ");
-            if (and_pos) *and_pos = '\0';
-            if (!js_match_media_condition(part, width, height)) { ok = false; break; }
-            if (!and_pos) break;
-            part = and_pos + 5;
+
+    const char *p = buf;
+    const char *end = buf + strlen(buf);
+    int depth = 0;
+    const char *cond_start = p;
+    while (p <= end) {
+        if (p < end && *p == '(') depth++;
+        else if (p < end && *p == ')') depth--;
+        bool at_end = (p == end);
+        bool is_or = false;
+        if (!at_end && depth == 0) {
+            if (*p == ',') is_or = true;
+            else if (p + 4 <= end && strncasecmp(p, " or ", 4) == 0) is_or = true;
         }
-        if (ok) return true;
-        if (!comma) break;
-        p = comma + 1;
+        if (at_end || is_or) {
+            const char *cond_end = is_or ? p : end;
+            if (js_mm_eval_condition(cond_start, cond_end, width, height)) return true;
+            if (is_or) {
+                if (*p == ',') { p++; cond_start = p; }
+                else { p += 4; cond_start = p; }
+                continue;
+            }
+        }
+        p++;
     }
     return false;
+}
+
+// MediaQueryList listener helpers (viewport is static, so listeners are just stored).
+static GCValue js_match_media_add_listener(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    if (argc < 1 || !JS_IsFunction(ctx, argv[0])) return JS_UNDEFINED;
+    GCValue listeners = JS_GetPropertyStr(ctx, this_val, "__mql_listeners");
+    if (!JS_IsArray(ctx, listeners)) {
+        listeners = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, this_val, "__mql_listeners", listeners);
+    }
+    GCValue len_val = JS_GetPropertyStr(ctx, listeners, "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, len_val);
+    JS_SetPropertyUint32(ctx, listeners, len, argv[0]);
+    return JS_UNDEFINED;
+}
+static GCValue js_match_media_remove_listener(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_UNDEFINED;
+    GCValue listeners = JS_GetPropertyStr(ctx, this_val, "__mql_listeners");
+    if (!JS_IsArray(ctx, listeners)) return JS_UNDEFINED;
+    GCValue len_val = JS_GetPropertyStr(ctx, listeners, "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, len_val);
+    for (int i = (int)len - 1; i >= 0; i--) {
+        GCValue item = JS_GetPropertyUint32(ctx, listeners, (uint32_t)i);
+        if (JS_StrictEq(ctx, item, argv[0])) {
+            for (uint32_t j = (uint32_t)i; j + 1 < len; j++) {
+                GCValue next = JS_GetPropertyUint32(ctx, listeners, j + 1);
+                JS_SetPropertyUint32(ctx, listeners, j, next);
+            }
+            JS_SetPropertyStr(ctx, listeners, "length", JS_NewInt32(ctx, (int32_t)(len - 1)));
+            break;
+        }
+    }
+    return JS_UNDEFINED;
+}
+static GCValue js_match_media_add_event_listener(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 2) return JS_UNDEFINED;
+    const char *type = JS_ToCString(ctx, argv[0]);
+    bool is_change = (type && strcasecmp(type, "change") == 0);
+    if (!is_change) return JS_UNDEFINED;
+    GCValue args[1] = { argv[1] };
+    return js_match_media_add_listener(ctx, this_val, 1, args);
+}
+static GCValue js_match_media_remove_event_listener(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 2) return JS_UNDEFINED;
+    const char *type = JS_ToCString(ctx, argv[0]);
+    bool is_change = (type && strcasecmp(type, "change") == 0);
+    if (!is_change) return JS_UNDEFINED;
+    GCValue args[1] = { argv[1] };
+    return js_match_media_remove_listener(ctx, this_val, 1, args);
 }
 
 static GCValue js_match_media(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
@@ -368,15 +676,15 @@ static GCValue js_match_media(JSContextHandle ctx, GCValue this_val, int argc, G
     }
     int width = js_match_media_get_viewport_width(ctx);
     int height = js_match_media_get_viewport_height(ctx);
-    bool matches = js_match_media_query(q, width, height);
+    bool matches = js_mm_eval_query(q, width, height);
 
     GCValue result = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, result, "matches", JS_NewBool(ctx, matches));
     JS_SetPropertyStr(ctx, result, "media", JS_NewString(ctx, q));
-    JS_SetPropertyStr(ctx, result, "addListener", JS_NewCFunction(ctx, js_undefined, "addListener", 1));
-    JS_SetPropertyStr(ctx, result, "removeListener", JS_NewCFunction(ctx, js_undefined, "removeListener", 1));
-    JS_SetPropertyStr(ctx, result, "addEventListener", JS_NewCFunction(ctx, js_undefined, "addEventListener", 2));
-    JS_SetPropertyStr(ctx, result, "removeEventListener", JS_NewCFunction(ctx, js_undefined, "removeEventListener", 2));
+    JS_SetPropertyStr(ctx, result, "addListener", JS_NewCFunction(ctx, js_match_media_add_listener, "addListener", 1));
+    JS_SetPropertyStr(ctx, result, "removeListener", JS_NewCFunction(ctx, js_match_media_remove_listener, "removeListener", 1));
+    JS_SetPropertyStr(ctx, result, "addEventListener", JS_NewCFunction(ctx, js_match_media_add_event_listener, "addEventListener", 2));
+    JS_SetPropertyStr(ctx, result, "removeEventListener", JS_NewCFunction(ctx, js_match_media_remove_event_listener, "removeEventListener", 2));
     JS_SetPropertyStr(ctx, result, "dispatchEvent", JS_NewCFunction(ctx, js_undefined, "dispatchEvent", 1));
     return result;
 }

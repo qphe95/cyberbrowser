@@ -630,7 +630,8 @@ GCValue js_url_search_params_values(JSContextHandle ctx, GCValue this_val, int a
 }
 
 // URL.prototype.searchParams getter
-GCValue js_url_get_search_params(JSContextHandle ctx, GCValue this_val) {
+GCValue js_url_get_search_params(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
     GCValue existing = JS_GetPropertyStr(ctx, this_val, "__searchParams");
     if (!JS_IsUndefined(existing) && !JS_IsNull(existing)) return existing;
     GCValue search_val = JS_GetPropertyStr(ctx, this_val, "search");
