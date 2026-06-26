@@ -2289,6 +2289,12 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, element_proto, "getElementsByTagName",
         JS_NewCFunction(ctx, js_element_get_elements_by_tag_name, "getElementsByTagName", 1));
     
+    // style getter
+    GCValue style_getter = JS_NewCFunction(ctx, js_element_get_style, "get style", 0);
+    JSAtom style_atom = JS_NewAtom(ctx, "style");
+    JS_DefinePropertyGetSet(ctx, element_proto, style_atom, style_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_FreeAtom(ctx, style_atom);
+    
     // ===== Element Tree Navigation Properties (REAL) =====
     // children getter
     GCValue children_getter = JS_NewCFunction(ctx, js_element_get_children, "get children", 0);
@@ -3145,6 +3151,9 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     GCValue rules_getter = JS_NewCFunction(ctx, js_css_style_sheet_get_rules, "get rules", 0);
     JS_DefinePropertyGetSet(ctx, css_style_sheet_proto, JS_NewAtom(ctx, "rules"),
         rules_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    GCValue css_text_getter = JS_NewCFunction(ctx, js_css_style_sheet_get_css_text, "get cssText", 0);
+    JS_DefinePropertyGetSet(ctx, css_style_sheet_proto, JS_NewAtom(ctx, "cssText"),
+        css_text_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
     // Set prototype on constructor
     JS_SetPropertyStr(ctx, css_style_sheet_ctor, "prototype", css_style_sheet_proto);
     
@@ -3154,7 +3163,15 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     DEF_FUNC(ctx, css_style_decl_proto, "removeProperty", js_css_style_decl_remove_property, 1);
     DEF_FUNC(ctx, css_style_decl_proto, "getPropertyValue", js_css_style_decl_get_property_value, 1);
     DEF_FUNC(ctx, css_style_decl_proto, "getPropertyPriority", js_css_style_decl_get_property_priority, 1);
-    
+    DEF_FUNC(ctx, css_style_decl_proto, "item", js_css_style_decl_item, 1);
+    GCValue style_css_text_getter = JS_NewCFunction(ctx, js_css_style_decl_get_css_text, "get cssText", 0);
+    GCValue style_css_text_setter = JS_NewCFunction(ctx, js_css_style_decl_set_css_text, "set cssText", 1);
+    JS_DefinePropertyGetSet(ctx, css_style_decl_proto, JS_NewAtom(ctx, "cssText"),
+        style_css_text_getter, style_css_text_setter, JS_PROP_ENUMERABLE);
+    GCValue style_length_getter = JS_NewCFunction(ctx, js_css_style_decl_get_length, "get length", 0);
+    JS_DefinePropertyGetSet(ctx, css_style_decl_proto, JS_NewAtom(ctx, "length"),
+        style_length_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+
     // Store for use with elements
     JS_SetPropertyStr(ctx, global, "__CSSStyleDeclarationProto", css_style_decl_proto);
     

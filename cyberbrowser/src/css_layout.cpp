@@ -5,6 +5,7 @@
  */
 
 #include "css_layout.h"
+#include "browser_api_impl.h"
 #include "platform.h"
 #include "url_utils.h"
 #include "quickjs_gc_unified.h"
@@ -1213,9 +1214,18 @@ static void layout_collect_constructed_stylesheets(LayoutContext *ctx,
     }
 }
 
+static const char *g_ua_stylesheet_css =
+    "head, meta, title, link, style, script, base, template, noscript { display: none; }\n";
+
 static bool layout_collect_document_stylesheets(LayoutContext *ctx, LayoutStyleSheetList *list,
                                                  const char *base_url) {
     if (!ctx || !list || ctx->tree.count == 0) return false;
+
+    /* Inject the UA stylesheet first so metadata/head/template elements are
+     * hidden even when the hardcoded fast-path is bypassed. */
+    CssStylesheet *ua = css_stylesheet_parse(g_ua_stylesheet_css, strlen(g_ua_stylesheet_css));
+    if (ua) layout_sheet_list_add(list, ua);
+
     int root_dom_idx = ctx->tree.nodes[ctx->tree.root_idx].dom_node_idx;
     layout_collect_stylesheets_recursive(ctx, root_dom_idx, list, base_url);
     layout_collect_constructed_stylesheets(ctx, list);
@@ -2828,6 +2838,102 @@ static void layout_position_absolute_subtree(LayoutContext *ctx, int idx)
  * Public API
  * ============================================================================ */
 
+/* After layout, write resolved geometry and used values back into the JS
+ * computed-style table so getComputedStyle can return real values. */
+static void layout_export_computed_geometry(LayoutContext *ctx)
+{
+    if (!ctx->js_ctx.valid()) return;
+    JSContextHandle js = ctx->js_ctx;
+    char buf[128];
+
+    for (int i = 0; i < ctx->tree.count; i++) {
+        HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx);
+        if (!node || node->type != HTML_NODE_ELEMENT || !node->has_js_object) continue;
+
+        GCValue element = node->js_object;
+        DOMNodeHandle dom_node = DOMNodeHandle::from_object(element);
+        if (!dom_node.valid()) continue;
+
+        LayoutBox *box = &ctx->boxes[i];
+#define SET_VAL(prop, val_str) do { \
+    JSAtom atom = JS_NewAtom(js, (prop)); \
+    if (atom != JS_ATOM_NULL) { \
+        css_computed_set_property(js, dom_node, atom, (val_str)); \
+        JS_FreeAtom(js, atom); \
+    } \
+} while(0)
+#define SET_PX(prop, val) do { \
+    snprintf(buf, sizeof(buf), "%.2fpx", (val)); \
+    SET_VAL(prop, buf); \
+} while(0)
+
+        SET_PX("width", box->width);
+        SET_PX("height", box->height);
+        SET_PX("margin-top", box->margin_top);
+        SET_PX("margin-right", box->margin_right);
+        SET_PX("margin-bottom", box->margin_bottom);
+        SET_PX("margin-left", box->margin_left);
+        SET_PX("padding-top", box->padding_top);
+        SET_PX("padding-right", box->padding_right);
+        SET_PX("padding-bottom", box->padding_bottom);
+        SET_PX("padding-left", box->padding_left);
+        SET_PX("top", box->y);
+        SET_PX("left", box->x);
+        SET_PX("font-size", box->font_size);
+
+        const char *display_str = "block";
+        switch (box->display) {
+            case CSS_DISPLAY_NONE: display_str = "none"; break;
+            case CSS_DISPLAY_INLINE: display_str = "inline"; break;
+            case CSS_DISPLAY_INLINE_BLOCK: display_str = "inline-block"; break;
+            case CSS_DISPLAY_FLEX: display_str = "flex"; break;
+            case CSS_DISPLAY_GRID: display_str = "grid"; break;
+            default: break;
+        }
+        SET_VAL("display", display_str);
+
+        const char *visibility_str = "visible";
+        if (box->visibility == CSS_VISIBILITY_HIDDEN) visibility_str = "hidden";
+        else if (box->visibility == CSS_VISIBILITY_COLLAPSE) visibility_str = "collapse";
+        SET_VAL("visibility", visibility_str);
+
+        const char *position_str = "static";
+        switch (box->position) {
+            case CSS_POSITION_RELATIVE: position_str = "relative"; break;
+            case CSS_POSITION_ABSOLUTE: position_str = "absolute"; break;
+            case CSS_POSITION_FIXED: position_str = "fixed"; break;
+            case CSS_POSITION_STICKY: position_str = "sticky"; break;
+            default: break;
+        }
+        SET_VAL("position", position_str);
+
+        snprintf(buf, sizeof(buf), "rgba(%d, %d, %d, %.3f)",
+                 (int)(box->color_r * 255.0 + 0.5),
+                 (int)(box->color_g * 255.0 + 0.5),
+                 (int)(box->color_b * 255.0 + 0.5),
+                 box->color_a);
+        SET_VAL("color", buf);
+
+        snprintf(buf, sizeof(buf), "rgba(%d, %d, %d, %.3f)",
+                 (int)(box->background_color_r * 255.0 + 0.5),
+                 (int)(box->background_color_g * 255.0 + 0.5),
+                 (int)(box->background_color_b * 255.0 + 0.5),
+                 box->background_color_a);
+        SET_VAL("background-color", buf);
+
+        /* CSS custom properties are stored separately; mirror them too. */
+        if (ctx->custom_props) {
+            CssCustomProps *cp = &ctx->custom_props[i];
+            for (int j = 0; j < cp->count; j++) {
+                SET_VAL(cp->props[j].name, cp->props[j].value);
+            }
+        }
+
+#undef SET_PX
+#undef SET_VAL
+    }
+}
+
 bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
 {
     if (!ctx || ctx->tree.count == 0) return false;
@@ -2861,6 +2967,8 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
     for (int i = 0; i < ctx->tree.count; i++) {
         ctx->boxes[i].flags |= LAYOUT_HAS_LAYOUT;
     }
+
+    layout_export_computed_geometry(ctx);
 
     layout_dump_boxes(ctx, "layout_dump.txt");
     return true;

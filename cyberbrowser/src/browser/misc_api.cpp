@@ -2104,17 +2104,27 @@ static GCValue js_resize_observer_make_size(JSContextHandle ctx, double w, doubl
     return size;
 }
 
-// ResizeObserver.prototype.observe(target)
-GCValue js_resize_observer_observe(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    if (argc < 1) return JS_UNDEFINED;
-    GCValue target = argv[0];
-    ResizeObserverDataHandle ro = ResizeObserverDataHandle::from_object_check(ctx, this_val);
-    if (!ro.valid()) return JS_UNDEFINED;
-    GCValue cb = ro.callback();
-    if (!JS_IsFunction(ctx, cb)) return JS_UNDEFINED;
+static GCValue js_resize_observer_targets(JSContextHandle ctx, GCValue observer) {
+    GCValue targets = JS_GetPropertyStr(ctx, observer, "__ro_targets");
+    if (!JS_IsArray(ctx, targets)) {
+        targets = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, observer, "__ro_targets", targets);
+    }
+    return targets;
+}
 
-    /* Fire callback immediately so code that awaits a resize observation
-     * before rendering proceeds. */
+static bool js_observer_targets_contains(JSContextHandle ctx, GCValue targets, GCValue target) {
+    GCValue len_val = JS_GetPropertyStr(ctx, targets, "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, len_val);
+    for (uint32_t i = 0; i < len; i++) {
+        GCValue item = JS_GetPropertyUint32(ctx, targets, i);
+        if (JS_StrictEq(ctx, item, target)) return true;
+    }
+    return false;
+}
+
+static GCValue js_resize_observer_make_entry(JSContextHandle ctx, GCValue target) {
     GCValue rect = js_element_getBoundingClientRect(ctx, target, 0, NULL);
     double w = 0.0, h = 0.0;
     GCValue wv = JS_GetPropertyStr(ctx, rect, "width");
@@ -2131,21 +2141,91 @@ GCValue js_resize_observer_observe(JSContextHandle ctx, GCValue this_val, int ar
     JS_SetPropertyStr(ctx, entry, "borderBoxSize", sizes);
     JS_SetPropertyStr(ctx, entry, "contentBoxSize", sizes);
     JS_SetPropertyStr(ctx, entry, "devicePixelContentBoxSize", sizes);
+    return entry;
+}
+
+static GCValue js_resize_observer_job(JSContextHandle ctx, int argc, GCValue *argv) {
+    if (argc < 1) return JS_UNDEFINED;
+    GCValue observer = argv[0];
+    JS_SetPropertyStr(ctx, observer, "__ro_scheduled", JS_FALSE);
+    ResizeObserverDataHandle ro = ResizeObserverDataHandle::from_object_check(ctx, observer);
+    if (!ro.valid()) return JS_UNDEFINED;
+    GCValue cb = ro.callback();
+    if (!JS_IsFunction(ctx, cb)) return JS_UNDEFINED;
+
+    GCValue targets = js_resize_observer_targets(ctx, observer);
+    if (!JS_IsArray(ctx, targets)) return JS_UNDEFINED;
+
+    GCValue len_val = JS_GetPropertyStr(ctx, targets, "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, len_val);
 
     GCValue entries = JS_NewArray(ctx);
-    JS_SetPropertyUint32(ctx, entries, 0, entry);
-    GCValue args[2] = { entries, this_val };
+    for (uint32_t i = 0; i < len; i++) {
+        GCValue target = JS_GetPropertyUint32(ctx, targets, i);
+        JS_SetPropertyUint32(ctx, entries, i, js_resize_observer_make_entry(ctx, target));
+    }
+    GCValue args[2] = { entries, observer };
     JS_Call(ctx, cb, JS_UNDEFINED, 2, args);
+    return JS_UNDEFINED;
+}
+
+static void js_resize_observer_schedule(JSContextHandle ctx, GCValue observer) {
+    GCValue scheduled = JS_GetPropertyStr(ctx, observer, "__ro_scheduled");
+    if (JS_ToBool(ctx, scheduled)) return;
+    JS_SetPropertyStr(ctx, observer, "__ro_scheduled", JS_TRUE);
+    GCValue args[1] = { observer };
+    JS_EnqueueJob(ctx, js_resize_observer_job, 1, args);
+}
+
+// ResizeObserver.prototype.observe(target)
+GCValue js_resize_observer_observe(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1) return JS_UNDEFINED;
+    GCValue target = argv[0];
+    ResizeObserverDataHandle ro = ResizeObserverDataHandle::from_object_check(ctx, this_val);
+    if (!ro.valid()) return JS_UNDEFINED;
+    GCValue cb = ro.callback();
+    if (!JS_IsFunction(ctx, cb)) return JS_UNDEFINED;
+
+    GCValue targets = js_resize_observer_targets(ctx, this_val);
+    if (!js_observer_targets_contains(ctx, targets, target)) {
+        GCValue len_val = JS_GetPropertyStr(ctx, targets, "length");
+        uint32_t len = 0;
+        JS_ToUint32(ctx, &len, len_val);
+        JS_SetPropertyUint32(ctx, targets, len, target);
+    }
+    js_resize_observer_schedule(ctx, this_val);
     return JS_UNDEFINED;
 }
 
 // ResizeObserver.prototype.unobserve(target)
 GCValue js_resize_observer_unobserve(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1) return JS_UNDEFINED;
+    GCValue target = argv[0];
+    GCValue targets = JS_GetPropertyStr(ctx, this_val, "__ro_targets");
+    if (!JS_IsArray(ctx, targets)) return JS_UNDEFINED;
+    GCValue len_val = JS_GetPropertyStr(ctx, targets, "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, len_val);
+    for (int i = (int)len - 1; i >= 0; i--) {
+        GCValue item = JS_GetPropertyUint32(ctx, targets, (uint32_t)i);
+        if (JS_StrictEq(ctx, item, target)) {
+            for (uint32_t j = (uint32_t)i; j + 1 < len; j++) {
+                GCValue next = JS_GetPropertyUint32(ctx, targets, j + 1);
+                JS_SetPropertyUint32(ctx, targets, j, next);
+            }
+            JS_SetPropertyStr(ctx, targets, "length", JS_NewInt32(ctx, (int32_t)(len - 1)));
+            break;
+        }
+    }
     return JS_UNDEFINED;
 }
 
 // ResizeObserver.prototype.disconnect()
 GCValue js_resize_observer_disconnect(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    JS_SetPropertyStr(ctx, this_val, "__ro_targets", JS_NewArray(ctx));
+    JS_SetPropertyStr(ctx, this_val, "__ro_scheduled", JS_FALSE);
     return JS_UNDEFINED;
 }
 
@@ -2225,6 +2305,62 @@ GCValue js_intersection_observer_constructor(JSContextHandle ctx, GCValue new_ta
     return obj;
 }
 
+static GCValue js_intersection_observer_targets(JSContextHandle ctx, GCValue observer) {
+    GCValue targets = JS_GetPropertyStr(ctx, observer, "__io_targets");
+    if (!JS_IsArray(ctx, targets)) {
+        targets = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, observer, "__io_targets", targets);
+    }
+    return targets;
+}
+
+static GCValue js_intersection_observer_make_entry(JSContextHandle ctx, GCValue target) {
+    GCValue rect = js_element_getBoundingClientRect(ctx, target, 0, NULL);
+    GCValue entry = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, entry, "target", target);
+    JS_SetPropertyStr(ctx, entry, "isIntersecting", JS_TRUE);
+    JS_SetPropertyStr(ctx, entry, "intersectionRatio", JS_NewFloat64(ctx, 1.0));
+    JS_SetPropertyStr(ctx, entry, "boundingClientRect", rect);
+    JS_SetPropertyStr(ctx, entry, "intersectionRect", rect);
+    JS_SetPropertyStr(ctx, entry, "rootBounds", JS_NULL);
+    JS_SetPropertyStr(ctx, entry, "time", JS_NewFloat64(ctx, 0.0));
+    return entry;
+}
+
+static GCValue js_intersection_observer_job(JSContextHandle ctx, int argc, GCValue *argv) {
+    if (argc < 1) return JS_UNDEFINED;
+    GCValue observer = argv[0];
+    JS_SetPropertyStr(ctx, observer, "__io_scheduled", JS_FALSE);
+
+    IntersectionObserverDataHandle io = IntersectionObserverDataHandle::from_object_check(ctx, observer);
+    if (!io.valid()) return JS_UNDEFINED;
+    GCValue cb = io.callback();
+    if (!JS_IsFunction(ctx, cb)) return JS_UNDEFINED;
+
+    GCValue targets = js_intersection_observer_targets(ctx, observer);
+    if (!JS_IsArray(ctx, targets)) return JS_UNDEFINED;
+    GCValue len_val = JS_GetPropertyStr(ctx, targets, "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, len_val);
+
+    GCValue entries = JS_NewArray(ctx);
+    for (uint32_t i = 0; i < len; i++) {
+        GCValue target = JS_GetPropertyUint32(ctx, targets, i);
+        JS_SetPropertyUint32(ctx, entries, i, js_intersection_observer_make_entry(ctx, target));
+    }
+    GCValue args[2] = { entries, observer };
+    JS_Call(ctx, cb, JS_UNDEFINED, 2, args);
+    return JS_UNDEFINED;
+}
+
+static void js_intersection_observer_schedule(JSContextHandle ctx, GCValue observer) {
+    GCValue scheduled = JS_GetPropertyStr(ctx, observer, "__io_scheduled");
+    if (JS_ToBool(ctx, scheduled)) return;
+    JS_SetPropertyStr(ctx, observer, "__io_scheduled", JS_TRUE);
+    GCValue args[1] = { observer };
+    JS_EnqueueJob(ctx, js_intersection_observer_job, 1, args);
+}
+
 // IntersectionObserver.prototype.observe(target)
 GCValue js_intersection_observer_observe(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1) return JS_UNDEFINED;
@@ -2234,34 +2370,45 @@ GCValue js_intersection_observer_observe(JSContextHandle ctx, GCValue this_val, 
     GCValue cb = io.callback();
     if (!JS_IsFunction(ctx, cb)) return JS_UNDEFINED;
 
-    /* Fire the callback immediately as if the target is intersecting.
-     * This is enough to un-stick lazy-loading code paths that gate rendering
-     * on the first observer callback. */
-    GCValue entry = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, entry, "target", target);
-    JS_SetPropertyStr(ctx, entry, "isIntersecting", JS_TRUE);
-    JS_SetPropertyStr(ctx, entry, "intersectionRatio", JS_NewFloat64(ctx, 1.0));
-    JS_SetPropertyStr(ctx, entry, "boundingClientRect",
-                      js_element_getBoundingClientRect(ctx, target, 0, NULL));
-    JS_SetPropertyStr(ctx, entry, "intersectionRect",
-                      js_element_getBoundingClientRect(ctx, target, 0, NULL));
-    JS_SetPropertyStr(ctx, entry, "rootBounds", JS_NULL);
-    JS_SetPropertyStr(ctx, entry, "time", JS_NewFloat64(ctx, 0.0));
-
-    GCValue entries = JS_NewArray(ctx);
-    JS_SetPropertyUint32(ctx, entries, 0, entry);
-    GCValue args[2] = { entries, this_val };
-    JS_Call(ctx, cb, JS_UNDEFINED, 2, args);
+    GCValue targets = js_intersection_observer_targets(ctx, this_val);
+    if (!js_observer_targets_contains(ctx, targets, target)) {
+        GCValue len_val = JS_GetPropertyStr(ctx, targets, "length");
+        uint32_t len = 0;
+        JS_ToUint32(ctx, &len, len_val);
+        JS_SetPropertyUint32(ctx, targets, len, target);
+    }
+    js_intersection_observer_schedule(ctx, this_val);
     return JS_UNDEFINED;
 }
 
 // IntersectionObserver.prototype.unobserve(target)
 GCValue js_intersection_observer_unobserve(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1) return JS_UNDEFINED;
+    GCValue target = argv[0];
+    GCValue targets = JS_GetPropertyStr(ctx, this_val, "__io_targets");
+    if (!JS_IsArray(ctx, targets)) return JS_UNDEFINED;
+    GCValue len_val = JS_GetPropertyStr(ctx, targets, "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, len_val);
+    for (int i = (int)len - 1; i >= 0; i--) {
+        GCValue item = JS_GetPropertyUint32(ctx, targets, (uint32_t)i);
+        if (JS_StrictEq(ctx, item, target)) {
+            for (uint32_t j = (uint32_t)i; j + 1 < len; j++) {
+                GCValue next = JS_GetPropertyUint32(ctx, targets, j + 1);
+                JS_SetPropertyUint32(ctx, targets, j, next);
+            }
+            JS_SetPropertyStr(ctx, targets, "length", JS_NewInt32(ctx, (int32_t)(len - 1)));
+            break;
+        }
+    }
     return JS_UNDEFINED;
 }
 
 // IntersectionObserver.prototype.disconnect()
 GCValue js_intersection_observer_disconnect(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    JS_SetPropertyStr(ctx, this_val, "__io_targets", JS_NewArray(ctx));
+    JS_SetPropertyStr(ctx, this_val, "__io_scheduled", JS_FALSE);
     return JS_UNDEFINED;
 }
 

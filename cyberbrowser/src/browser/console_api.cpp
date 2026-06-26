@@ -501,6 +501,50 @@ static GCValue js_computed_style_set_property(JSContextHandle ctx, GCValue this_
     return JS_UNDEFINED;
 }
 
+static void js_computed_style_set_both(JSContextHandle ctx, GCValue style,
+                                       const char *prop, GCValue val)
+{
+    JS_SetPropertyStr(ctx, style, prop, val);
+    char *camel = css_to_camel_case(prop);
+    if (camel && strcmp(camel, prop) != 0) {
+        JS_SetPropertyStr(ctx, style, camel, val);
+    }
+    free(camel);
+}
+
+static void js_computed_style_inherit(JSContextHandle ctx, GCValue style, DOMNodeHandle node)
+{
+    static const char *inherited_props[] = {
+        "color", "font-size", "font-family", "line-height", "letter-spacing",
+        "word-spacing", "text-align", "white-space", "visibility", "cursor",
+        "text-transform", NULL
+    };
+
+    for (int i = 0; inherited_props[i]; i++) {
+        const char *prop = inherited_props[i];
+        JSAtom atom = JS_NewAtom(ctx, prop);
+        if (atom == JS_ATOM_NULL) continue;
+
+        GCValue own = css_computed_get_property(ctx, node, atom);
+        if (JS_IsUndefined(own)) {
+            DOMNodeHandle cur = node;
+            while (true) {
+                GCValue parent_val = cur.parent_node();
+                if (JS_IsNull(parent_val) || JS_IsUndefined(parent_val)) break;
+                DOMNodeHandle parent = DOMNodeHandle::from_object(parent_val);
+                if (!parent.valid()) break;
+                GCValue pval = css_computed_get_property(ctx, parent, atom);
+                if (!JS_IsUndefined(pval)) {
+                    js_computed_style_set_both(ctx, style, prop, pval);
+                    break;
+                }
+                cur = parent;
+            }
+        }
+        JS_FreeAtom(ctx, atom);
+    }
+}
+
 // getComputedStyle - reads from the per-element computed-style table and
 // falls back to sensible defaults so scripts can safely call .replace() etc.
 GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
@@ -626,6 +670,9 @@ GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, G
                 }
             }
         }
+
+        /* Inherit from ancestors for properties that should cascade. */
+        js_computed_style_inherit(ctx, style, node);
     }
     return style;
 }

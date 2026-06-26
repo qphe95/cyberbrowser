@@ -195,9 +195,12 @@ int main(int argc, char *argv[]) {
 
     /* Cleanup */
     printf("\nFreeing shared QuickJS runtime...\n");
+    fflush(stdout);
     if (g_test_rt.valid()) {
         JS_FreeRuntime(g_test_rt);
     }
+    printf("Runtime freed.\n");
+    fflush(stdout);
     g_test_rt_ptr = NULL;
     platform_http_cleanup();
     platform_cleanup();

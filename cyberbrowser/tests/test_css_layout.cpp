@@ -417,6 +417,7 @@ TEST(test_text_shaper_basic) {
 }
 
 TEST(test_dom_mutation_sync_to_native) {
+    printf("    [mutation] start\n");
     JSContextHandle ctx = get_shared_test_context();
     GCValue g_global = get_shared_test_global();
 
@@ -431,12 +432,16 @@ TEST(test_dom_mutation_sync_to_native) {
                              "<test_mutation>", JS_EVAL_TYPE_GLOBAL);
     (void)result;
 
+    printf("    [mutation] eval done\n");
     GCValue document = JS_GetPropertyStr(ctx, g_global, "document");
+    printf("    [mutation] got document\n");
     HtmlDocument *doc = html_document_from_js_dom(ctx, document);
+    printf("    [mutation] html doc built\n");
     ASSERT_TRUE(doc != NULL);
 
     LayoutContext ctx_layout;
     ASSERT_TRUE(css_layout_run(&ctx_layout, doc, NULL, 800.0, 600.0));
+    printf("    [mutation] layout done\n");
 
     HtmlNode *div = html_document_get_element_by_id(doc, "mutation-test-div");
     ASSERT_TRUE(div != NULL);
@@ -447,7 +452,9 @@ TEST(test_dom_mutation_sync_to_native) {
     ASSERT_TRUE(near_equal(box->height, 50.0));
 
     css_layout_tree_free(&ctx_layout);
+    printf("    [mutation] layout freed\n");
     html_document_free(doc);
+    printf("    [mutation] doc freed\n");
     return true;
 }
 

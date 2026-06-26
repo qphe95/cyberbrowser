@@ -1476,6 +1476,16 @@ GCValue js_element_get_children(JSContextHandle ctx, GCValue this_val, int argc,
     return arr;
 }
 
+// Element.prototype.style getter
+GCValue js_element_get_style(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    DOMNodeHandle node = get_dom_node(ctx, this_val);
+    if (!node.valid() || node.node_type() != DOM_NODE_TYPE_ELEMENT) {
+        return JS_UNDEFINED;
+    }
+    return css_ensure_style_object(ctx, this_val);
+}
+
 // Element.prototype.querySelector
 GCValue js_element_querySelector(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     return JS_NULL;
@@ -1594,16 +1604,52 @@ GCValue js_document_get_adopted_style_sheets(JSContextHandle ctx, GCValue this_v
 GCValue js_document_set_adopted_style_sheets(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1) return JS_ThrowTypeError(ctx, "adoptedStyleSheets setter requires an array");
     JS_SetPropertyStr(ctx, this_val, "__adoptedStyleSheets", argv[0]);
+    dom_request_layout();
     return JS_UNDEFINED;
 }
 
 // Document.prototype.styleSheets - return a live-ish collection of stylesheets.
 GCValue js_document_get_style_sheets(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    // For now the constructed stylesheet list is the adoptedStyleSheets array.
-    // Inline <style> and <link rel="stylesheet"> sheets are collected separately
-    // by the native layout engine from the HTML tree.
-    return js_document_get_adopted_style_sheets(ctx, this_val, 0, NULL);
+    GCValue adopted = js_document_get_adopted_style_sheets(ctx, this_val, 0, NULL);
+    if (!JS_IsArray(ctx, adopted)) {
+        adopted = JS_NewArray(ctx);
+    }
+
+    /* Ensure a UA stylesheet is available for scripts that inspect
+     * document.styleSheets (e.g. Polymer's style gathering). */
+    GCValue ua = JS_GetPropertyStr(ctx, this_val, "__uaStyleSheet");
+    if (JS_IsUndefined(ua) || JS_IsNull(ua) || !JS_IsObject(ua)) {
+        GCValue global = JS_GetGlobalObject(ctx);
+        GCValue ctor = JS_GetPropertyStr(ctx, global, "CSSStyleSheet");
+        if (JS_IsFunction(ctx, ctor)) {
+            ua = JS_Call(ctx, ctor, JS_UNDEFINED, 0, NULL);
+            if (JS_IsObject(ua)) {
+                GCValue css_arg = JS_NewString(ctx,
+                    "head, script, style, link, meta, title, base, template, noscript { display: none !important; }"
+                    " body { margin: 8px; }");
+                GCValue repl_args[1] = { css_arg };
+                js_css_style_sheet_replace_sync(ctx, ua, 1, repl_args);
+                JS_SetPropertyStr(ctx, this_val, "__uaStyleSheet", ua);
+            }
+        }
+    }
+
+    GCValue result = JS_NewArray(ctx);
+    uint32_t idx = 0;
+    if (JS_IsObject(ua)) {
+        JS_SetPropertyUint32(ctx, result, idx++, ua);
+    }
+    if (JS_IsArray(ctx, adopted)) {
+        int32_t alen = 0;
+        GCValue lenv = JS_GetPropertyStr(ctx, adopted, "length");
+        JS_ToInt32(ctx, &alen, lenv);
+        for (int32_t i = 0; i < alen; i++) {
+            GCValue item = JS_GetPropertyUint32(ctx, adopted, (uint32_t)i);
+            JS_SetPropertyUint32(ctx, result, idx++, item);
+        }
+    }
+    return result;
 }
 
 // Document.prototype.getElementsByClassName - use the lock-free class index table.

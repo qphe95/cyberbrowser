@@ -673,7 +673,7 @@ int css_applied_decl_compare(const void *a, const void *b) {
     return da->order - db->order;
 }
 
-static void css_set_style_property(JSContextHandle ctx, GCValue style, const char *prop, const char *value) {
+void css_set_style_property(JSContextHandle ctx, GCValue style, const char *prop, const char *value) {
     if (!prop || !value) return;
     JS_SetPropertyStr(ctx, style, prop, JS_NewString(ctx, value));
     char *camel = css_to_camel_case(prop);
@@ -702,19 +702,29 @@ static void css_seed_vendor_style_properties(JSContextHandle ctx, GCValue style)
     }
 }
 
-static GCValue css_ensure_style_object(JSContextHandle ctx, GCValue element) {
-    GCValue style = JS_GetPropertyStr(ctx, element, "style");
+GCValue css_ensure_style_object(JSContextHandle ctx, GCValue element) {
+    /* Use a private internal slot so we don't recurse through the public
+     * `style` accessor getter when it calls this helper. */
+    GCValue style = JS_GetPropertyStr(ctx, element, "__style");
     if (JS_IsUndefined(style) || JS_IsNull(style) || !JS_IsObject(style)) {
         style = JS_NewObject(ctx);
         JS_SetPropertyStr(ctx, style, "animationTimingFunction", JS_NewString(ctx, ""));
         css_seed_vendor_style_properties(ctx, style);
-        JS_SetPropertyStr(ctx, style, "removeProperty",
-            JS_NewCFunction(ctx, js_style_remove_property, "removeProperty", 1));
-        JS_SetPropertyStr(ctx, style, "setProperty",
-            JS_NewCFunction(ctx, js_style_set_property, "setProperty", 3));
-        JS_SetPropertyStr(ctx, style, "getPropertyValue",
-            JS_NewCFunction(ctx, js_style_get_property_value, "getPropertyValue", 1));
-        JS_SetPropertyStr(ctx, element, "style", style);
+        JS_SetPropertyStr(ctx, style, "__element", element);
+
+        GCValue global = JS_GetGlobalObject(ctx);
+        GCValue proto = JS_GetPropertyStr(ctx, global, "__CSSStyleDeclarationProto");
+        if (JS_IsObject(proto)) {
+            JS_SetPrototype(ctx, style, proto);
+        }
+        JS_SetPropertyStr(ctx, element, "__style", style);
+        /* Also expose an own `style` data property on the element so scripts
+         * (and our own layout serialization) can read it without depending on
+         * the prototype chain. */
+        JSAtom style_atom = JS_NewAtom(ctx, "style");
+        JS_DefinePropertyValue(ctx, element, style_atom, style,
+                               JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+        JS_FreeAtom(ctx, style_atom);
     }
     return style;
 }
