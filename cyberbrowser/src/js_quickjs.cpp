@@ -21,6 +21,7 @@
 // Forward declarations from dom_api.cpp
 extern "C" void dom_node_set_owner_document(JSContextHandle ctx, GCValue node, GCValue doc);
 extern "C" GCValue js_create_document_fragment(JSContextHandle ctx);
+extern "C" GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 
 /* Timer API functions from browser_api_impl.cpp */
 extern "C" int timer_process_due(JSContextHandle ctx);

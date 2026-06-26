@@ -1858,6 +1858,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, html_element_ctor, "prototype", html_element_proto);
     JS_SetPropertyStr(ctx, global, "HTMLElement", html_element_ctor);
     JS_SetPropertyStr(ctx, window, "HTMLElement", html_element_ctor);
+    JS_SetPropertyStr(ctx, global, "__cyberHTMLElementProto", html_element_proto);
     // Keep a strong reference to the original native constructor so that
     // ES5 custom-element shims (e.g. Polymer's fast-shim) can capture and
     // extend it without the GC collecting the C constructor.

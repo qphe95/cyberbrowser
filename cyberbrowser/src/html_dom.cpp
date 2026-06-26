@@ -800,8 +800,10 @@ GCValue html_create_element_js_with_document(JSContextHandle ctx, GCValue js_doc
     return element;
 }
 
-/* Recursively create DOM nodes in JS with automatic GC memory management */
-static bool html_node_create_js_recursive(JSContextHandle ctx, HtmlDocument *doc, int node_idx, GCValue parent) {
+/* Recursively create DOM nodes in JS with automatic GC memory management.
+ * Uses the document's createElement/createTextNode methods so nodes receive
+ * proper DOM prototypes (HTMLElement, Element, Node). */
+static bool html_node_create_js_recursive(JSContextHandle ctx, GCValue js_doc, HtmlDocument *doc, int node_idx, GCValue parent) {
     if (!ctx || !doc || node_idx < 0) return false;
     
     HtmlNode *node = html_node_at(doc, node_idx);
@@ -811,13 +813,13 @@ static bool html_node_create_js_recursive(JSContextHandle ctx, HtmlDocument *doc
     
     switch (node->type) {
         case HTML_NODE_ELEMENT: {
-            js_node = html_create_element_js(ctx, node->tag_name, node->attributes);
+            js_node = html_create_element_js_with_document(ctx, js_doc, node->tag_name, node->attributes);
             
             /* Process children */
-            if (!JS_IsNull(js_node)) {
+            if (!JS_IsNull(js_node) && !JS_IsUndefined(js_node)) {
                 int child_idx = po_array_first_child(&doc->array, node_idx);
                 while (child_idx >= 0) {
-                    html_node_create_js_recursive(ctx, doc, child_idx, js_node);
+                    html_node_create_js_recursive(ctx, js_doc, doc, child_idx, js_node);
                     child_idx = po_array_next_sibling(&doc->array, child_idx);
                 }
                 
@@ -844,10 +846,15 @@ static bool html_node_create_js_recursive(JSContextHandle ctx, HtmlDocument *doc
         
         case HTML_NODE_TEXT: {
             if (node->text_content && strlen(node->text_content) > 0) {
-                /* Create text node (as a simple string for now) */
-                js_node = JS_NewString(ctx, node->text_content);
+                if (!JS_IsUndefined(js_doc) && !JS_IsNull(js_doc)) {
+                    GCValue text_arg = JS_NewString(ctx, node->text_content);
+                    GCValue args[1] = { text_arg };
+                    js_node = js_document_create_text_node(ctx, js_doc, 1, args);
+                } else {
+                    js_node = JS_NewString(ctx, node->text_content);
+                }
                 
-                /* Add to parent's innerHTML or childNodes if needed */
+                /* Add to parent's childNodes if needed */
                 if (!JS_IsUndefined(parent) && !JS_IsNull(parent)) {
                     GCValue childNodes = JS_GetPropertyStr(ctx, parent, "childNodes");
                     
@@ -886,21 +893,30 @@ GCValue html_create_js_document(JSContextHandle ctx, HtmlDocument *doc) {
     JS_SetPropertyStr(ctx, js_doc, "characterSet", JS_NewString(ctx, "UTF-8"));
     JS_SetPropertyStr(ctx, js_doc, "contentType", JS_NewString(ctx, "text/html"));
     
+    /* Add document methods before creating elements so the whole tree can be
+     * built with proper DOM prototypes (HTMLElement, Element, Node). */
+    JS_SetPropertyStr(ctx, js_doc, "createElement",
+        JS_NewCFunction(ctx, js_document_create_element, "createElement", 1));
+    JS_SetPropertyStr(ctx, js_doc, "createTextNode",
+        JS_NewCFunction(ctx, js_document_create_text_node, "createTextNode", 1));
+    JS_SetPropertyStr(ctx, js_doc, "createDocumentFragment",
+        JS_NewCFunction(ctx, js_document_create_document_fragment, "createDocumentFragment", 0));
+    
     /* Create documentElement (html or first root element) */
     GCValue doc_element = JS_NULL;
     HtmlNode *root = html_document_root(doc);
     if (root) {
-        doc_element = html_create_element_js(ctx, root->tag_name, root->attributes);
+        doc_element = html_create_element_js_with_document(ctx, js_doc, root->tag_name, root->attributes);
         
         /* Process children of root */
         int child_idx = po_array_first_child(&doc->array, doc->root_idx);
         while (child_idx >= 0) {
-            html_node_create_js_recursive(ctx, doc, child_idx, doc_element);
+            html_node_create_js_recursive(ctx, js_doc, doc, child_idx, doc_element);
             child_idx = po_array_next_sibling(&doc->array, child_idx);
         }
     } else {
         /* Create a minimal html element */
-        doc_element = html_create_element_js(ctx, "html", NULL);
+        doc_element = html_create_element_js_with_document(ctx, js_doc, "html", NULL);
     }
     
     JS_SetPropertyStr(ctx, js_doc, "documentElement", doc_element);
@@ -909,16 +925,16 @@ GCValue html_create_js_document(JSContextHandle ctx, HtmlDocument *doc) {
     GCValue body_element = JS_NULL;
     HtmlNode *body = html_document_body(doc);
     if (body) {
-        body_element = html_create_element_js(ctx, body->tag_name, body->attributes);
+        body_element = html_create_element_js_with_document(ctx, js_doc, body->tag_name, body->attributes);
         
         /* Process body children */
         int child_idx = po_array_first_child(&doc->array, doc->body_idx);
         while (child_idx >= 0) {
-            html_node_create_js_recursive(ctx, doc, child_idx, body_element);
+            html_node_create_js_recursive(ctx, js_doc, doc, child_idx, body_element);
             child_idx = po_array_next_sibling(&doc->array, child_idx);
         }
     } else {
-        body_element = html_create_element_js(ctx, "body", NULL);
+        body_element = html_create_element_js_with_document(ctx, js_doc, "body", NULL);
     }
     
     JS_SetPropertyStr(ctx, js_doc, "body", body_element);
@@ -928,23 +944,20 @@ GCValue html_create_js_document(JSContextHandle ctx, HtmlDocument *doc) {
     GCValue head_element = JS_NULL;
     HtmlNode *head = html_document_head(doc);
     if (head) {
-        head_element = html_create_element_js(ctx, head->tag_name, head->attributes);
+        head_element = html_create_element_js_with_document(ctx, js_doc, head->tag_name, head->attributes);
         
         /* Process head children */
         int child_idx = po_array_first_child(&doc->array, doc->head_idx);
         while (child_idx >= 0) {
-            html_node_create_js_recursive(ctx, doc, child_idx, head_element);
+            html_node_create_js_recursive(ctx, js_doc, doc, child_idx, head_element);
             child_idx = po_array_next_sibling(&doc->array, child_idx);
         }
     } else {
-        head_element = html_create_element_js(ctx, "head", NULL);
+        head_element = html_create_element_js_with_document(ctx, js_doc, "head", NULL);
     }
     
     JS_SetPropertyStr(ctx, js_doc, "head", head_element);
     JS_SetPropertyStr(ctx, doc_element, "head", head_element);
-    
-    /* Add document methods */
-    /* Note: createElement is provided by js_quickjs.c */
     
     return js_doc;
 }
