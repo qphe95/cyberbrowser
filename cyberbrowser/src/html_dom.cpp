@@ -391,7 +391,15 @@ static int parser_parse_element(HtmlParser *p, int parent_idx) {
     HtmlNode *node = html_node_at(p->document, node_idx);
     strncpy(node->tag_name, tag_name, HTML_MAX_TAG_NAME_LEN - 1);
     node->tag_name[HTML_MAX_TAG_NAME_LEN - 1] = '\0';
-    
+    if (strcasecmp(tag_name, "ytd-masthead") == 0 || strcasecmp(tag_name, "ytd-app") == 0) {
+        const char *parent_tag = "(none)";
+        if (parent_idx >= 0) {
+            HtmlNode *pnode = html_node_at(p->document, parent_idx);
+            if (pnode) parent_tag = pnode->tag_name;
+        }
+        fprintf(stderr, "[HTML-PARSE] <%s> parent_idx=%d parent=<%s> pos=%zu\n", tag_name, parent_idx, parent_tag, p->pos);
+    }
+
     /* Parse attributes */
     HtmlAttribute **attr_tail = &node->attributes;
     while (1) {

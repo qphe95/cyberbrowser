@@ -115,10 +115,19 @@ static char *fetch_youtube_page(size_t *out_size) {
     const char *headers[] = {
         "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
         "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language: en-US,en;q=0.9"
+        "Accept-Language: en-US,en;q=0.9",
+        "Cookie: CONSENT=YES+US.en+; PREF=tz=America.Los_Angeles&f4=4000000",
+        "sec-ch-ua: \"Google Chrome\";v=\"125\", \"Chromium\";v=\"125\", \"Not.A/Brand\";v=\"24\"",
+        "sec-ch-ua-mobile: ?0",
+        "sec-ch-ua-platform: \"Windows\"",
+        "sec-fetch-dest: document",
+        "sec-fetch-mode: navigate",
+        "sec-fetch-site: none",
+        "sec-fetch-user: ?1",
+        "upgrade-insecure-requests: 1"
     };
 
-    bool ok = http_get_to_memory_with_headers(url, headers, 3, &buffer, error, sizeof(error));
+    bool ok = http_get_to_memory_with_headers(url, headers, sizeof(headers)/sizeof(headers[0]), &buffer, error, sizeof(error));
     if (!ok || !buffer.data || buffer.size == 0) {
         printf("FATAL: Failed to fetch YouTube homepage: %s\n", error);
         return NULL;

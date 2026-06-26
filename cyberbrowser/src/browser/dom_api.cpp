@@ -902,7 +902,19 @@ GCValue js_node_removeChild_real(JSContextHandle ctx, GCValue this_val, int argc
     if (!JS_StrictEq(ctx, child_parent, this_val)) {
         return throw_dom_exception(ctx, "NotFoundError", "Node is not a child of this node");
     }
-    
+    {
+        GCValue tagv = JS_GetPropertyStr(ctx, child, "tagName");
+        const char *tag = JS_ToCString(ctx, tagv);
+        GCValue parentv = JS_GetPropertyStr(ctx, this_val, "tagName");
+        const char *ptag = JS_ToCString(ctx, parentv);
+        GCValue idv = JS_GetPropertyStr(ctx, child, "__cyber_id");
+        int cid = -1;
+        JS_ToInt32(ctx, &cid, idv);
+        if (tag && (strcasecmp(tag, "ytd-masthead") == 0 || strcasecmp(tag, "ytd-app") == 0)) {
+            platform_log(LOG_LEVEL_WARN, "dom_api", "REMOVE id=%d %s from %s", cid, tag, ptag ? ptag : "?");
+        }
+    }
+
     // Get sibling references
     GCValue prev_sibling = child_node.previous_sibling();
     GCValue next_sibling = child_node.next_sibling();

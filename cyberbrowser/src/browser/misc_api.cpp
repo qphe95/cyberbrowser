@@ -2098,8 +2098,45 @@ GCValue js_resize_observer_constructor(JSContextHandle ctx, GCValue new_target, 
     return obj;
 }
 
+static GCValue js_resize_observer_make_size(JSContextHandle ctx, double w, double h) {
+    GCValue size = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, size, "inlineSize", JS_NewFloat64(ctx, w));
+    JS_SetPropertyStr(ctx, size, "blockSize", JS_NewFloat64(ctx, h));
+    return size;
+}
+
 // ResizeObserver.prototype.observe(target)
 GCValue js_resize_observer_observe(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1) return JS_UNDEFINED;
+    GCValue target = argv[0];
+    ResizeObserverDataHandle ro = ResizeObserverDataHandle::from_object_check(ctx, this_val);
+    if (!ro.valid()) return JS_UNDEFINED;
+    GCValue cb = ro.callback();
+    if (!JS_IsFunction(ctx, cb)) return JS_UNDEFINED;
+
+    /* Fire callback immediately so code that awaits a resize observation
+     * before rendering proceeds. */
+    GCValue rect = js_element_getBoundingClientRect(ctx, target, 0, NULL);
+    double w = 0.0, h = 0.0;
+    GCValue wv = JS_GetPropertyStr(ctx, rect, "width");
+    GCValue hv = JS_GetPropertyStr(ctx, rect, "height");
+    JS_ToFloat64(ctx, &w, wv);
+    JS_ToFloat64(ctx, &h, hv);
+
+    GCValue entry = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, entry, "target", target);
+    JS_SetPropertyStr(ctx, entry, "contentRect", rect);
+
+    GCValue sizes = JS_NewArray(ctx);
+    JS_SetPropertyUint32(ctx, sizes, 0, js_resize_observer_make_size(ctx, w, h));
+    JS_SetPropertyStr(ctx, entry, "borderBoxSize", sizes);
+    JS_SetPropertyStr(ctx, entry, "contentBoxSize", sizes);
+    JS_SetPropertyStr(ctx, entry, "devicePixelContentBoxSize", sizes);
+
+    GCValue entries = JS_NewArray(ctx);
+    JS_SetPropertyUint32(ctx, entries, 0, entry);
+    GCValue args[2] = { entries, this_val };
+    JS_Call(ctx, cb, JS_UNDEFINED, 2, args);
     return JS_UNDEFINED;
 }
 
@@ -2191,6 +2228,31 @@ GCValue js_intersection_observer_constructor(JSContextHandle ctx, GCValue new_ta
 
 // IntersectionObserver.prototype.observe(target)
 GCValue js_intersection_observer_observe(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1) return JS_UNDEFINED;
+    GCValue target = argv[0];
+    IntersectionObserverDataHandle io = IntersectionObserverDataHandle::from_object_check(ctx, this_val);
+    if (!io.valid()) return JS_UNDEFINED;
+    GCValue cb = io.callback();
+    if (!JS_IsFunction(ctx, cb)) return JS_UNDEFINED;
+
+    /* Fire the callback immediately as if the target is intersecting.
+     * This is enough to un-stick lazy-loading code paths that gate rendering
+     * on the first observer callback. */
+    GCValue entry = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, entry, "target", target);
+    JS_SetPropertyStr(ctx, entry, "isIntersecting", JS_TRUE);
+    JS_SetPropertyStr(ctx, entry, "intersectionRatio", JS_NewFloat64(ctx, 1.0));
+    JS_SetPropertyStr(ctx, entry, "boundingClientRect",
+                      js_element_getBoundingClientRect(ctx, target, 0, NULL));
+    JS_SetPropertyStr(ctx, entry, "intersectionRect",
+                      js_element_getBoundingClientRect(ctx, target, 0, NULL));
+    JS_SetPropertyStr(ctx, entry, "rootBounds", JS_NULL);
+    JS_SetPropertyStr(ctx, entry, "time", JS_NewFloat64(ctx, 0.0));
+
+    GCValue entries = JS_NewArray(ctx);
+    JS_SetPropertyUint32(ctx, entries, 0, entry);
+    GCValue args[2] = { entries, this_val };
+    JS_Call(ctx, cb, JS_UNDEFINED, 2, args);
     return JS_UNDEFINED;
 }
 

@@ -1415,6 +1415,7 @@ GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int ar
     
     GCValue elem = JS_NULL;
     
+    static int create_counter = 0;
     if (tag) {
         // Create proper video element
         if (strcasecmp(tag, "video") == 0) {
@@ -1452,7 +1453,12 @@ GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int ar
                 // Set tagName property (uppercase for HTML elements)
                 JS_SetPropertyStr(ctx, elem, "tagName", JS_NewString(ctx, upper_tag));
             }
-            
+            int cid = ++create_counter;
+            JS_SetPropertyStr(ctx, elem, "__cyber_id", JS_NewInt32(ctx, cid));
+            if (strcasecmp(tag, "ytd-masthead") == 0 || strcasecmp(tag, "ytd-app") == 0) {
+                fprintf(stderr, "[CREATE-ELEM] id=%d tag=%s\n", cid, tag);
+            }
+
             // Add animate method directly to created elements so feature detection works
             JS_SetPropertyStr(ctx, elem, "animate",
                 JS_NewCFunction(ctx, js_element_animate, "animate", 2));
