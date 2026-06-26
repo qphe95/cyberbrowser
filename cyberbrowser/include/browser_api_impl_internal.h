@@ -153,6 +153,17 @@ DOMNodeHandle get_or_create_dom_node(JSContextHandle ctx, GCValue obj, int node_
 extern JSClassDef js_dom_node_class_def;
 void capture_url(const char *url);
 void capture_url_debug(const char *url, const char *source);
+
+#ifdef __cplusplus
+}
+#endif
+
+// C++-only helper exposed by js_quickjs.cpp
+void record_captured_url(const char *url);
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 GCValue throw_dom_exception(JSContextHandle ctx, const char* name, const char* message);
 GCValue js_create_resolved_promise(JSContextHandle ctx, GCValue value);
 GCValue js_create_empty_resolved_promise(JSContextHandle ctx);

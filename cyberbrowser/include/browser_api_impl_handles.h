@@ -274,6 +274,10 @@ public:
             memset(vid, 0, sizeof(HTMLVideoElement));
             vid->ctx = ctx;
             vid->paused = 1;
+            vid->volume = 1.0;
+            vid->playback_rate = 1.0;
+            vid->default_playback_rate = 1.0;
+            strncpy(vid->preload, "metadata", sizeof(vid->preload) - 1);
         }
         return HTMLVideoElementHandle(h);
     }
@@ -375,6 +379,82 @@ public:
         if (p) p->autoplay = val;
     }
 
+    bool loop() const {
+        HTMLVideoElement* p = get_ptr();
+        return p ? p->loop : false;
+    }
+
+    void set_loop(bool val) {
+        HTMLVideoElement* p = get_ptr();
+        if (p) p->loop = val;
+    }
+
+    bool muted() const {
+        HTMLVideoElement* p = get_ptr();
+        return p ? p->muted : false;
+    }
+
+    void set_muted(bool val) {
+        HTMLVideoElement* p = get_ptr();
+        if (p) p->muted = val;
+    }
+
+    double volume() const {
+        HTMLVideoElement* p = get_ptr();
+        return p ? p->volume : 1.0;
+    }
+
+    void set_volume(double val) {
+        HTMLVideoElement* p = get_ptr();
+        if (p) p->volume = val;
+    }
+
+    double playback_rate() const {
+        HTMLVideoElement* p = get_ptr();
+        return p ? p->playback_rate : 1.0;
+    }
+
+    void set_playback_rate(double val) {
+        HTMLVideoElement* p = get_ptr();
+        if (p) p->playback_rate = val;
+    }
+
+    double default_playback_rate() const {
+        HTMLVideoElement* p = get_ptr();
+        return p ? p->default_playback_rate : 1.0;
+    }
+
+    void set_default_playback_rate(double val) {
+        HTMLVideoElement* p = get_ptr();
+        if (p) p->default_playback_rate = val;
+    }
+
+    const char* preload() const {
+        HTMLVideoElement* p = get_ptr();
+        return p ? p->preload : "";
+    }
+
+    void set_preload(const char* val) {
+        HTMLVideoElement* p = get_ptr();
+        if (p) {
+            strncpy(p->preload, val, sizeof(p->preload) - 1);
+            p->preload[sizeof(p->preload) - 1] = '\0';
+        }
+    }
+
+    const char* cross_origin() const {
+        HTMLVideoElement* p = get_ptr();
+        return p ? p->cross_origin : "";
+    }
+
+    void set_cross_origin(const char* val) {
+        HTMLVideoElement* p = get_ptr();
+        if (p) {
+            strncpy(p->cross_origin, val, sizeof(p->cross_origin) - 1);
+            p->cross_origin[sizeof(p->cross_origin) - 1] = '\0';
+        }
+    }
+
     GCValue onloadstart() const {
         HTMLVideoElement* p = get_ptr();
         return p ? p->onloadstart : JS_NULL;
@@ -433,6 +513,16 @@ public:
     void set_onerror(GCValue val) {
         HTMLVideoElement* p = get_ptr();
         if (p) p->onerror = val;
+    }
+
+    GCValue onvolumechange() const {
+        HTMLVideoElement* p = get_ptr();
+        return p ? p->onvolumechange : JS_NULL;
+    }
+
+    void set_onvolumechange(GCValue val) {
+        HTMLVideoElement* p = get_ptr();
+        if (p) p->onvolumechange = val;
     }
 
     JSContextHandle context() const {
@@ -1513,6 +1603,8 @@ public:
             memset(sb, 0, sizeof(SourceBufferData));
             sb->ctx = ctx;
             sb->updating = 0;
+            sb->track_count = 0;
+            sb->parsed_duration = 0.0;
             strcpy(sb->mode, "segments");
         }
         return SourceBufferDataHandle(h);
@@ -1567,6 +1659,50 @@ public:
     JSContextHandle context() const {
         SourceBufferData* p = get_ptr();
         return p ? p->ctx : JSContextHandle();
+    }
+
+    uint8_t* append_data() const {
+        SourceBufferData* p = get_ptr();
+        return p ? p->append_data : nullptr;
+    }
+
+    size_t append_size() const {
+        SourceBufferData* p = get_ptr();
+        return p ? p->append_size : 0;
+    }
+
+    size_t append_capacity() const {
+        SourceBufferData* p = get_ptr();
+        return p ? p->append_capacity : 0;
+    }
+
+    void set_append_data(uint8_t* data, size_t size, size_t capacity) {
+        SourceBufferData* p = get_ptr();
+        if (p) {
+            p->append_data = data;
+            p->append_size = size;
+            p->append_capacity = capacity;
+        }
+    }
+
+    int track_count() const {
+        SourceBufferData* p = get_ptr();
+        return p ? p->track_count : 0;
+    }
+
+    void set_track_count(int val) {
+        SourceBufferData* p = get_ptr();
+        if (p) p->track_count = val;
+    }
+
+    double parsed_duration() const {
+        SourceBufferData* p = get_ptr();
+        return p ? p->parsed_duration : 0.0;
+    }
+
+    void set_parsed_duration(double val) {
+        SourceBufferData* p = get_ptr();
+        if (p) p->parsed_duration = val;
     }
 };
 

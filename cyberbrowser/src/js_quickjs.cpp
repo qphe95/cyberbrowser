@@ -81,6 +81,7 @@ void js_quickjs_set_asset_manager(AAssetManager *mgr) {
 
 // Forward declarations
 static GCValue js_dummy_function(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+static bool is_http_url(const char *url);
 static bool is_youtube_url(const char *url);
 static int collect_user_headers(JSContextHandle ctx, GCValue headers_obj,
                                 char header_bufs[][512], const char **headers_out,
@@ -411,7 +412,76 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
         }
     }
     
-    // Fallback for non-YouTube / non-network URLs
+    // Generic HTTP(S) handling for non-YouTube endpoints (e.g. share URLs).
+    if (url && is_http_url(url)) {
+        bool is_post = (strcasecmp(xhr.method(), "POST") == 0);
+        char header_bufs[16][512];
+        const char *headers[16];
+        int header_count = 0;
+
+        header_count = collect_user_headers(ctx, xhr.headers(), header_bufs, headers, 16);
+        bool has_content_type = false;
+        for (int i = 0; i < header_count; i++) {
+            if (strncasecmp(headers[i], "Content-Type:", 13) == 0) {
+                has_content_type = true;
+                break;
+            }
+        }
+        if (is_post && !has_content_type) {
+            headers[header_count++] = "Content-Type: application/json";
+        }
+        headers[header_count++] = "Accept: */*";
+
+        const char *cookies = platform_http_get_cookies();
+        if (cookies && cookies[0]) {
+            char cookie_header[1024];
+            snprintf(cookie_header, sizeof(cookie_header), "Cookie: %s", cookies);
+            headers[header_count++] = cookie_header;
+        }
+
+        PlatformHttpBuffer response_buffer = {0};
+        char error_buf[256] = {0};
+        bool success = false;
+        int status_code = 0;
+        const char *req_body = xhr.request_body();
+        size_t req_body_len = strlen(req_body);
+
+        if (is_post && req_body_len > 0) {
+            success = platform_http_post(url, req_body, req_body_len,
+                                         headers, header_count, &response_buffer,
+                                         &status_code, error_buf, sizeof(error_buf));
+        } else {
+            success = platform_http_get_with_headers(url, headers, header_count,
+                                                     &response_buffer, error_buf,
+                                                     sizeof(error_buf));
+            status_code = success ? 200 : 0;
+        }
+
+        if (success && response_buffer.data && response_buffer.size > 0 && status_code >= 200 && status_code < 300) {
+            xhr.set_status(status_code);
+            xhr.set_response_text(response_buffer.data);
+            char rh[2048];
+            snprintf(rh, sizeof(rh), "HTTP/1.1 %d OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n", status_code, response_buffer.size);
+            xhr.set_response_headers(rh);
+            platform_http_free_buffer(&response_buffer);
+            js_xhr_fire_state(ctx, xhr, this_val, 2);
+            js_xhr_fire_state(ctx, xhr, this_val, 3);
+            js_xhr_fire_state(ctx, xhr, this_val, 4);
+            GCValue onload = JS_GetPropertyStr(ctx, this_val, "onload");
+            if (JS_IsFunction(ctx, onload)) JS_Call(ctx, onload, this_val, 0, NULL);
+            return JS_UNDEFINED;
+        } else {
+            platform_http_free_buffer(&response_buffer);
+            xhr.set_status(0);
+            xhr.set_response_text("");
+            js_xhr_fire_state(ctx, xhr, this_val, 4);
+            GCValue onerror = JS_GetPropertyStr(ctx, this_val, "onerror");
+            if (JS_IsFunction(ctx, onerror)) JS_Call(ctx, onerror, this_val, 0, NULL);
+            return JS_UNDEFINED;
+        }
+    }
+
+    // Fallback for non-network URLs
     xhr.set_ready_state(4); // DONE
     xhr.set_status(200);
     xhr.set_response_text("{}");
@@ -535,6 +605,7 @@ static void js_video_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_fun
     JS_MarkValue(rt, vid->onplay, mark_func);
     JS_MarkValue(rt, vid->onplaying, mark_func);
     JS_MarkValue(rt, vid->onerror, mark_func);
+    JS_MarkValue(rt, vid->onvolumechange, mark_func);
 }
 
 GCValue js_video_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
@@ -547,6 +618,7 @@ GCValue js_video_constructor(JSContextHandle ctx, GCValue new_target, int argc, 
     vid.set_onplay(JS_NULL);
     vid.set_onplaying(JS_NULL);
     vid.set_onerror(JS_NULL);
+    vid.set_onvolumechange(JS_NULL);
     
     GCValue obj = JS_NewObjectClass(ctx, js_video_class_id);
     vid.attach_to_object(obj);
@@ -737,6 +809,218 @@ static GCValue js_video_can_play_type(JSContextHandle ctx, GCValue this_val, int
     return JS_NewString(ctx, "");
 }
 
+static void js_video_dispatch_simple_event(JSContextHandle ctx, GCValue this_val, const char *prop_name) {
+    GCValue handler = JS_GetPropertyStr(ctx, this_val, prop_name);
+    if (JS_IsFunction(ctx, handler)) {
+        JS_Call(ctx, handler, this_val, 0, NULL);
+    }
+}
+
+static GCValue js_video_create_time_ranges(JSContextHandle ctx, double start, double end) {
+    GCValue ranges = JS_NewObject(ctx);
+    if (end > start) {
+        JS_SetPropertyStr(ctx, ranges, "length", JS_NewInt32(ctx, 1));
+        JS_SetPropertyStr(ctx, ranges, "__start", JS_NewFloat64(ctx, start));
+        JS_SetPropertyStr(ctx, ranges, "__end", JS_NewFloat64(ctx, end));
+    } else {
+        JS_SetPropertyStr(ctx, ranges, "length", JS_NewInt32(ctx, 0));
+        JS_SetPropertyStr(ctx, ranges, "__start", JS_NewFloat64(ctx, 0));
+        JS_SetPropertyStr(ctx, ranges, "__end", JS_NewFloat64(ctx, 0));
+    }
+    JS_SetPropertyStr(ctx, ranges, "start",
+        JS_NewCFunction(ctx, [](JSContextHandle c, GCValue t, int, GCValue*)->GCValue {
+            GCValue s = JS_GetPropertyStr(c, t, "__start");
+            double v = 0; JS_ToFloat64(c, &v, s); return JS_NewFloat64(c, v);
+        }, "start", 1));
+    JS_SetPropertyStr(ctx, ranges, "end",
+        JS_NewCFunction(ctx, [](JSContextHandle c, GCValue t, int, GCValue*)->GCValue {
+            GCValue e = JS_GetPropertyStr(c, t, "__end");
+            double v = 0; JS_ToFloat64(c, &v, e); return JS_NewFloat64(c, v);
+        }, "end", 1));
+    return ranges;
+}
+
+static GCValue js_video_create_track_list(JSContextHandle ctx) {
+    GCValue list = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, list, "length", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, list, "getTrackById", JS_NewCFunction(ctx, [](JSContextHandle, GCValue, int, GCValue*)->GCValue {
+        return JS_NULL;
+    }, "getTrackById", 1));
+    return list;
+}
+
+static GCValue js_video_get_buffered(JSContextHandle ctx, GCValue this_val) {
+    HTMLVideoElementHandle vid = HTMLVideoElementHandle::from_object_check(ctx, this_val);
+    if (!vid.valid()) return JS_ThrowTypeError(ctx, "VideoElement internal error");
+    double dur = vid.duration();
+    if (dur > 0 && vid.ready_state() >= 1)
+        return js_video_create_time_ranges(ctx, 0.0, dur);
+    return js_video_create_time_ranges(ctx, 0.0, 0.0);
+}
+
+static GCValue js_video_get_played(JSContextHandle ctx, GCValue this_val) {
+    HTMLVideoElementHandle vid = HTMLVideoElementHandle::from_object_check(ctx, this_val);
+    if (!vid.valid()) return JS_ThrowTypeError(ctx, "VideoElement internal error");
+    double t = vid.current_time();
+    if (t > 0)
+        return js_video_create_time_ranges(ctx, 0.0, t);
+    return js_video_create_time_ranges(ctx, 0.0, 0.0);
+}
+
+static GCValue js_video_get_seekable(JSContextHandle ctx, GCValue this_val) {
+    HTMLVideoElementHandle vid = HTMLVideoElementHandle::from_object_check(ctx, this_val);
+    if (!vid.valid()) return JS_ThrowTypeError(ctx, "VideoElement internal error");
+    double dur = vid.duration();
+    if (dur > 0)
+        return js_video_create_time_ranges(ctx, 0.0, dur);
+    return js_video_create_time_ranges(ctx, 0.0, 0.0);
+}
+
+static GCValue js_video_get_ended(JSContextHandle ctx, GCValue this_val) {
+    HTMLVideoElementHandle vid = HTMLVideoElementHandle::from_object_check(ctx, this_val);
+    if (!vid.valid()) return JS_ThrowTypeError(ctx, "VideoElement internal error");
+    double dur = vid.duration();
+    return JS_NewBool(ctx, dur > 0 && vid.current_time() >= dur && vid.paused());
+}
+
+#define DEFINE_VIDEO_BOOL_PROP(name, getter_suffix, setter_suffix) \
+    static GCValue js_video_get_##name(JSContextHandle ctx, GCValue this_val) { \
+        HTMLVideoElementHandle vid = HTMLVideoElementHandle::from_object_check(ctx, this_val); \
+        if (!vid.valid()) return JS_ThrowTypeError(ctx, "VideoElement internal error"); \
+        return JS_NewBool(ctx, vid.getter_suffix()); \
+    } \
+    static GCValue js_video_set_##name(JSContextHandle ctx, GCValue this_val, GCValue val) { \
+        HTMLVideoElementHandle vid = HTMLVideoElementHandle::from_object_check(ctx, this_val); \
+        if (!vid.valid()) return JS_ThrowTypeError(ctx, "VideoElement internal error"); \
+        vid.setter_suffix(JS_ToBool(ctx, val)); \
+        return JS_UNDEFINED; \
+    }
+
+DEFINE_VIDEO_BOOL_PROP(autoplay, autoplay, set_autoplay)
+DEFINE_VIDEO_BOOL_PROP(loop, loop, set_loop)
+
+static GCValue js_video_get_muted(JSContextHandle ctx, GCValue this_val) {
+    HTMLVideoElementHandle vid = HTMLVideoElementHandle::from_object_check(ctx, this_val);
+    if (!vid.valid()) return JS_ThrowTypeError(ctx, "VideoElement internal error");
+    return JS_NewBool(ctx, vid.muted());
+}
+
+static GCValue js_video_set_muted(JSContextHandle ctx, GCValue this_val, GCValue val) {
+    HTMLVideoElementHandle vid = HTMLVideoElementHandle::from_object_check(ctx, this_val);
+    if (!vid.valid()) return JS_ThrowTypeError(ctx, "VideoElement internal error");
+    vid.set_muted(JS_ToBool(ctx, val));
+    js_video_dispatch_simple_event(ctx, this_val, "onvolumechange");
+    return JS_UNDEFINED;
+}
+
+static GCValue js_video_get_volume(JSContextHandle ctx, GCValue this_val) {
+    HTMLVideoElementHandle vid = HTMLVideoElementHandle::from_object_check(ctx, this_val);
+    if (!vid.valid()) return JS_ThrowTypeError(ctx, "VideoElement internal error");
+    return JS_NewFloat64(ctx, vid.volume());
+}
+
+static GCValue js_video_set_volume(JSContextHandle ctx, GCValue this_val, GCValue val) {
+    HTMLVideoElementHandle vid = HTMLVideoElementHandle::from_object_check(ctx, this_val);
+    if (!vid.valid()) return JS_ThrowTypeError(ctx, "VideoElement internal error");
+    double v = 1.0; JS_ToFloat64(ctx, &v, val);
+    if (v < 0.0) v = 0.0;
+    if (v > 1.0) v = 1.0;
+    vid.set_volume(v);
+    js_video_dispatch_simple_event(ctx, this_val, "onvolumechange");
+    return JS_UNDEFINED;
+}
+
+static GCValue js_video_get_playback_rate(JSContextHandle ctx, GCValue this_val) {
+    HTMLVideoElementHandle vid = HTMLVideoElementHandle::from_object_check(ctx, this_val);
+    if (!vid.valid()) return JS_ThrowTypeError(ctx, "VideoElement internal error");
+    return JS_NewFloat64(ctx, vid.playback_rate());
+}
+
+static GCValue js_video_set_playback_rate(JSContextHandle ctx, GCValue this_val, GCValue val) {
+    HTMLVideoElementHandle vid = HTMLVideoElementHandle::from_object_check(ctx, this_val);
+    if (!vid.valid()) return JS_ThrowTypeError(ctx, "VideoElement internal error");
+    double v = 1.0; JS_ToFloat64(ctx, &v, val);
+    vid.set_playback_rate(v);
+    return JS_UNDEFINED;
+}
+
+static GCValue js_video_get_default_playback_rate(JSContextHandle ctx, GCValue this_val) {
+    HTMLVideoElementHandle vid = HTMLVideoElementHandle::from_object_check(ctx, this_val);
+    if (!vid.valid()) return JS_ThrowTypeError(ctx, "VideoElement internal error");
+    return JS_NewFloat64(ctx, vid.default_playback_rate());
+}
+
+static GCValue js_video_set_default_playback_rate(JSContextHandle ctx, GCValue this_val, GCValue val) {
+    HTMLVideoElementHandle vid = HTMLVideoElementHandle::from_object_check(ctx, this_val);
+    if (!vid.valid()) return JS_ThrowTypeError(ctx, "VideoElement internal error");
+    double v = 1.0; JS_ToFloat64(ctx, &v, val);
+    vid.set_default_playback_rate(v);
+    return JS_UNDEFINED;
+}
+
+#define DEFINE_VIDEO_STRING_PROP(name, getter_suffix, setter_suffix) \
+    static GCValue js_video_get_##name(JSContextHandle ctx, GCValue this_val) { \
+        HTMLVideoElementHandle vid = HTMLVideoElementHandle::from_object_check(ctx, this_val); \
+        if (!vid.valid()) return JS_ThrowTypeError(ctx, "VideoElement internal error"); \
+        return JS_NewString(ctx, vid.getter_suffix()); \
+    } \
+    static GCValue js_video_set_##name(JSContextHandle ctx, GCValue this_val, GCValue val) { \
+        HTMLVideoElementHandle vid = HTMLVideoElementHandle::from_object_check(ctx, this_val); \
+        if (!vid.valid()) return JS_ThrowTypeError(ctx, "VideoElement internal error"); \
+        const char *s = JS_ToCString(ctx, val); \
+        if (s) vid.setter_suffix(s); \
+        return JS_UNDEFINED; \
+    }
+
+DEFINE_VIDEO_STRING_PROP(preload, preload, set_preload)
+DEFINE_VIDEO_STRING_PROP(crossOrigin, cross_origin, set_cross_origin)
+
+static GCValue js_video_get_text_tracks(JSContextHandle ctx, GCValue this_val) {
+    (void)this_val;
+    return js_video_create_track_list(ctx);
+}
+
+static GCValue js_video_get_audio_tracks(JSContextHandle ctx, GCValue this_val) {
+    (void)this_val;
+    return js_video_create_track_list(ctx);
+}
+
+static GCValue js_video_get_video_tracks(JSContextHandle ctx, GCValue this_val) {
+    (void)this_val;
+    return js_video_create_track_list(ctx);
+}
+
+static GCValue js_video_activate(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    HTMLVideoElementHandle vid = HTMLVideoElementHandle::from_object_check(ctx, this_val);
+    if (!vid.valid()) return JS_ThrowTypeError(ctx, "VideoElement internal error");
+
+    /* YouTube's IE2 wrapper calls activate(opts). If opts.hF is present it
+     * sets the source, otherwise it simply loads the element. */
+    if (argc >= 1 && JS_IsObject(argv[0])) {
+        GCValue hf = JS_GetPropertyStr(ctx, argv[0], "hF");
+        const char *src = JS_ToCString(ctx, hf);
+        if (src && src[0]) {
+            vid.set_src(src);
+            record_captured_url(src);
+            JS_SetPropertyStr(ctx, this_val, "src", JS_NewString(ctx, src));
+        }
+    }
+
+    js_video_load(ctx, this_val, 0, NULL);
+
+    /* Add a volumechange listener once. We store the flag on the JS object. */
+    GCValue listening = JS_GetPropertyStr(ctx, this_val, "__activate_listening");
+    if (!JS_ToBool(ctx, listening)) {
+        JS_SetPropertyStr(ctx, this_val, "__activate_listening", JS_TRUE);
+        GCValue handler = JS_GetPropertyStr(ctx, this_val, "onvolumechange");
+        if (JS_IsFunction(ctx, handler)) {
+            /* In a real implementation we'd addEventListener; for now we just
+             * remember that activation has registered the listener. */
+        }
+    }
+    return JS_UNDEFINED;
+}
+
 // Generic getter/setter for event callbacks
 // NOTE: With GCValue, we just copy the handle. The GC manages the actual object.
 #define DEFINE_VIDEO_EVENT_HANDLER(name, getter_suffix, setter_suffix) \
@@ -758,12 +1042,17 @@ DEFINE_VIDEO_EVENT_HANDLER(oncanplay, oncanplay, set_oncanplay)
 DEFINE_VIDEO_EVENT_HANDLER(onplay, onplay, set_onplay)
 DEFINE_VIDEO_EVENT_HANDLER(onplaying, onplaying, set_onplaying)
 DEFINE_VIDEO_EVENT_HANDLER(onerror, onerror, set_onerror)
+DEFINE_VIDEO_EVENT_HANDLER(onvolumechange, onvolumechange, set_onvolumechange)
 
 extern "C" const JSCFunctionListEntry js_video_proto_funcs[] = {
     JS_CFUNC_DEF("load", 0, js_video_load),
     JS_CFUNC_DEF("play", 0, js_video_play),
     JS_CFUNC_DEF("pause", 0, js_video_pause),
+    JS_CFUNC_DEF("activate", 0, js_video_activate),
     JS_CFUNC_DEF("canPlayType", 1, js_video_can_play_type),
+    JS_CGETSET_DEF("textTracks", js_video_get_text_tracks, NULL),
+    JS_CGETSET_DEF("audioTracks", js_video_get_audio_tracks, NULL),
+    JS_CGETSET_DEF("videoTracks", js_video_get_video_tracks, NULL),
     JS_CGETSET_DEF("id", js_video_get_id, js_video_set_id),
     JS_CGETSET_DEF("src", js_video_get_src, js_video_set_src),
     JS_CGETSET_DEF("currentSrc", js_video_get_src, NULL),
@@ -772,18 +1061,18 @@ extern "C" const JSCFunctionListEntry js_video_proto_funcs[] = {
     JS_CGETSET_DEF("paused", js_video_get_paused, NULL),
     JS_CGETSET_DEF("readyState", js_video_get_ready_state, NULL),
     JS_CGETSET_DEF("networkState", js_video_get_network_state, NULL),
-    JS_CGETSET_DEF("buffered", NULL, NULL),
-    JS_CGETSET_DEF("played", NULL, NULL),
-    JS_CGETSET_DEF("seekable", NULL, NULL),
-    JS_CGETSET_DEF("ended", NULL, NULL),
-    JS_CGETSET_DEF("autoplay", NULL, NULL),
-    JS_CGETSET_DEF("loop", NULL, NULL),
-    JS_CGETSET_DEF("muted", NULL, NULL),
-    JS_CGETSET_DEF("volume", NULL, NULL),
-    JS_CGETSET_DEF("playbackRate", NULL, NULL),
-    JS_CGETSET_DEF("defaultPlaybackRate", NULL, NULL),
-    JS_CGETSET_DEF("preload", NULL, NULL),
-    JS_CGETSET_DEF("crossOrigin", NULL, NULL),
+    JS_CGETSET_DEF("buffered", js_video_get_buffered, NULL),
+    JS_CGETSET_DEF("played", js_video_get_played, NULL),
+    JS_CGETSET_DEF("seekable", js_video_get_seekable, NULL),
+    JS_CGETSET_DEF("ended", js_video_get_ended, NULL),
+    JS_CGETSET_DEF("autoplay", js_video_get_autoplay, js_video_set_autoplay),
+    JS_CGETSET_DEF("loop", js_video_get_loop, js_video_set_loop),
+    JS_CGETSET_DEF("muted", js_video_get_muted, js_video_set_muted),
+    JS_CGETSET_DEF("volume", js_video_get_volume, js_video_set_volume),
+    JS_CGETSET_DEF("playbackRate", js_video_get_playback_rate, js_video_set_playback_rate),
+    JS_CGETSET_DEF("defaultPlaybackRate", js_video_get_default_playback_rate, js_video_set_default_playback_rate),
+    JS_CGETSET_DEF("preload", js_video_get_preload, js_video_set_preload),
+    JS_CGETSET_DEF("crossOrigin", js_video_get_crossOrigin, js_video_set_crossOrigin),
     JS_CGETSET_DEF("onloadstart", js_video_get_onloadstart, js_video_set_onloadstart),
     JS_CGETSET_DEF("onloadedmetadata", js_video_get_onloadedmetadata, js_video_set_onloadedmetadata),
     JS_CGETSET_DEF("oncanplay", js_video_get_oncanplay, js_video_set_oncanplay),
@@ -794,6 +1083,11 @@ extern "C" const JSCFunctionListEntry js_video_proto_funcs[] = {
 extern "C" const size_t js_video_proto_funcs_count = sizeof(js_video_proto_funcs) / sizeof(js_video_proto_funcs[0]);
 
 // Global fetch implementation
+
+static bool is_http_url(const char *url) {
+    if (!url) return false;
+    return strncmp(url, "http://", 7) == 0 || strncmp(url, "https://", 8) == 0;
+}
 
 static bool is_youtube_url(const char *url) {
     if (!url) return false;
@@ -1249,6 +1543,70 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
                     return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
                 }
             }
+        }
+    } else if (url && is_http_url(url)) {
+        // Generic HTTP(S) handling for non-YouTube endpoints (e.g. share URLs).
+        bool is_post = (strcasecmp(method, "POST") == 0);
+        char header_bufs[16][512];
+        const char *headers[16];
+        int header_count = 0;
+
+        if (argc > 1 && JS_IsObject(argv[1])) {
+            GCValue headers_obj = JS_GetPropertyStr(ctx, argv[1], "headers");
+            header_count = collect_user_headers(ctx, headers_obj, header_bufs, headers, 16);
+        }
+
+        bool has_content_type = false;
+        for (int i = 0; i < header_count; i++) {
+            if (strncasecmp(headers[i], "Content-Type:", 13) == 0) {
+                has_content_type = true;
+                break;
+            }
+        }
+        if (is_post && !has_content_type) {
+            headers[header_count++] = "Content-Type: application/json";
+        }
+        headers[header_count++] = "Accept: */*";
+
+        const char *cookies = platform_http_get_cookies();
+        if (cookies && cookies[0]) {
+            char cookie_header[1024];
+            snprintf(cookie_header, sizeof(cookie_header), "Cookie: %s", cookies);
+            headers[header_count++] = cookie_header;
+        }
+
+        PlatformHttpBuffer response_buffer = {0};
+        char error_buf[256] = {0};
+        bool success = false;
+        int status_code = 0;
+
+        if (is_post && post_body && post_body_len > 0) {
+            success = platform_http_post(url, post_body, post_body_len,
+                                         headers, header_count, &response_buffer,
+                                         &status_code, error_buf, sizeof(error_buf));
+        } else {
+            success = platform_http_get_with_headers(url, headers, header_count,
+                                                     &response_buffer, error_buf,
+                                                     sizeof(error_buf));
+            status_code = success ? 200 : 0;
+        }
+
+        if (post_body) free(post_body);
+        post_body = NULL;
+
+        if (success && response_buffer.data && response_buffer.size > 0 && status_code >= 200 && status_code < 300) {
+            GCValue response_obj = create_response_from_data(ctx, url, response_buffer.data,
+                                                             response_buffer.size, status_code, "OK");
+            platform_http_free_buffer(&response_buffer);
+            GCValue global = JS_GetGlobalObject(ctx);
+            GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
+            GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
+            GCValue args[1] = { response_obj };
+            return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
+        } else {
+            platform_http_free_buffer(&response_buffer);
+            platform_log(LOG_LEVEL_WARN, "js_fetch", "Generic request failed: %s", error_buf[0] ? error_buf : "unknown");
+            // Fall through to default mock response.
         }
     }
     

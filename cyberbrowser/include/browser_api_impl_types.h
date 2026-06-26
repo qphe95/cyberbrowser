@@ -47,12 +47,20 @@ typedef struct {
     int paused;
     int ended;
     int autoplay;
+    int loop;
+    int muted;
+    double volume;
+    double playback_rate;
+    double default_playback_rate;
+    char preload[64];
+    char cross_origin[64];
     GCValue onloadstart;
     GCValue onloadedmetadata;
     GCValue oncanplay;
     GCValue onplay;
     GCValue onplaying;
     GCValue onerror;
+    GCValue onvolumechange;
     JSContextHandle ctx;
 } HTMLVideoElement;
 
@@ -261,6 +269,15 @@ typedef struct {
     GCValue onerror;
     GCValue onabort;
     JSContextHandle ctx;
+
+    // Accumulated appendBuffer bytes for this SourceBuffer.
+    uint8_t *append_data;
+    size_t append_size;
+    size_t append_capacity;
+
+    // Demuxed track/sample summary populated by minimp4 when possible.
+    int track_count;
+    double parsed_duration;  // seconds
 } SourceBufferData;
 
 /* ============================================================================

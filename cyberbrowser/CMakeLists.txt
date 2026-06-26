@@ -46,6 +46,7 @@ set(BE_SOURCES
     src/browser/shadow_dom_api.cpp
     src/browser/misc_api.cpp
     src/browser/media_source_api.cpp
+    src/browser/minimp4_impl.cpp
     src/browser/url_api.cpp
     src/browser/fetch_api.cpp
     src/browser/timer_api.cpp
@@ -137,6 +138,7 @@ target_include_directories(browser-emulator
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/quickjs
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/minimp4
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/include
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls

@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <math.h>
+#include <minimp4.h>
 #include <quickjs.h>
 #include <quickjs_gc_unified.h>
 #include "browser_api_impl.h"
@@ -37,7 +38,16 @@ void js_media_source_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_fun
 
 void js_source_buffer_finalizer(JSRuntimeHandle rt, GCValue val) {
     (void)rt;
-    (void)val;
+    GCHandle sb_handle = JS_GetOpaqueHandle(val, js_source_buffer_class_id);
+    if (sb_handle != GC_HANDLE_NULL) {
+        SourceBufferData *sb = (SourceBufferData *)gc_deref(sb_handle);
+        if (sb && sb->append_data) {
+            free(sb->append_data);
+            sb->append_data = NULL;
+            sb->append_size = 0;
+            sb->append_capacity = 0;
+        }
+    }
 }
 
 void js_source_buffer_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func) {
@@ -239,18 +249,125 @@ const JSCFunctionListEntry js_media_source_proto_funcs[] = {
 };
 const size_t js_media_source_proto_funcs_count = sizeof(js_media_source_proto_funcs) / sizeof(js_media_source_proto_funcs[0]);
 
+// Helper: accumulate appendBuffer bytes into the SourceBuffer's own buffer.
+static void source_buffer_append_data(JSContextHandle ctx, SourceBufferDataHandle &sb, const uint8_t *data, size_t len) {
+    (void)ctx;
+    if (!data || len == 0) return;
+    size_t old_size = sb.append_size();
+    size_t new_size = old_size + len;
+    uint8_t *buf = (uint8_t *)realloc(sb.append_data(), new_size);
+    if (!buf) return;
+    memcpy(buf + old_size, data, len);
+    sb.set_append_data(buf, new_size, new_size);
+}
+
+// Helper: read callback for minimp4 operating on an in-memory buffer.
+typedef struct {
+    const uint8_t *data;
+    size_t size;
+} mp4_mem_token_t;
+
+static int mp4_mem_read(int64_t offset, void *buffer, size_t size, void *token) {
+    mp4_mem_token_t *tok = (mp4_mem_token_t *)token;
+    if (!tok || !buffer) return 0;
+    if (offset < 0 || (size_t)offset > tok->size) return 0;
+    size_t avail = tok->size - (size_t)offset;
+    size_t to_read = size < avail ? size : avail;
+    if (to_read > 0) memcpy(buffer, tok->data + offset, to_read);
+    return to_read == size ? 1 : 0;
+}
+
+// Helper: turn a 32-bit big-endian fourcc into a null-terminated string.
+static void fourcc_to_str(uint32_t fcc, char *out, size_t out_len) {
+    if (out_len < 5) {
+        if (out_len > 0) out[0] = '\0';
+        return;
+    }
+    out[0] = (char)((fcc >> 24) & 0xFF);
+    out[1] = (char)((fcc >> 16) & 0xFF);
+    out[2] = (char)((fcc >> 8) & 0xFF);
+    out[3] = (char)(fcc & 0xFF);
+    out[4] = '\0';
+}
+
+// Helper: run minimp4 over the accumulated buffer and expose track/sample metadata.
+static void source_buffer_demux(JSContextHandle ctx, GCValue sb_obj, SourceBufferDataHandle &sb) {
+    if (!sb.append_data() || sb.append_size() < 8) return;
+
+    mp4_mem_token_t tok = { sb.append_data(), sb.append_size() };
+    MP4D_demux_t mp4;
+    memset(&mp4, 0, sizeof(mp4));
+    if (!MP4D_open(&mp4, mp4_mem_read, &tok, (int64_t)tok.size)) {
+        // Fragmented MP4 segments (moof/mdat) are not handled by minimp4's demuxer.
+        // The bytes are still retained for future processing.
+        return;
+    }
+
+    sb.set_track_count((int)mp4.track_count);
+    double duration_sec = 0.0;
+    if (mp4.timescale > 0) {
+        uint64_t dur = ((uint64_t)mp4.duration_hi << 32) | mp4.duration_lo;
+        duration_sec = (double)dur / (double)mp4.timescale;
+    }
+    sb.set_parsed_duration(duration_sec);
+
+    GCValue info = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, info, "trackCount", JS_NewInt32(ctx, (int)mp4.track_count));
+    JS_SetPropertyStr(ctx, info, "duration", JS_NewFloat64(ctx, duration_sec));
+    JS_SetPropertyStr(ctx, info, "timescale", JS_NewInt32(ctx, (int)mp4.timescale));
+
+    GCValue tracks = JS_NewArray(ctx);
+    for (unsigned i = 0; i < mp4.track_count; i++) {
+        MP4D_track_t *tr = &mp4.track[i];
+        GCValue track = JS_NewObject(ctx);
+        char handler[8];
+        fourcc_to_str(tr->handler_type, handler, sizeof(handler));
+        JS_SetPropertyStr(ctx, track, "handlerType", JS_NewString(ctx, handler));
+        JS_SetPropertyStr(ctx, track, "sampleCount", JS_NewInt32(ctx, (int)tr->sample_count));
+        JS_SetPropertyStr(ctx, track, "timescale", JS_NewInt32(ctx, (int)tr->timescale));
+        JS_SetPropertyStr(ctx, track, "objectType", JS_NewInt32(ctx, (int)tr->object_type_indication));
+
+        if (tr->handler_type == MP4D_HANDLER_TYPE_VIDE) {
+            JS_SetPropertyStr(ctx, track, "width", JS_NewInt32(ctx, (int)tr->SampleDescription.video.width));
+            JS_SetPropertyStr(ctx, track, "height", JS_NewInt32(ctx, (int)tr->SampleDescription.video.height));
+        } else if (tr->handler_type == MP4D_HANDLER_TYPE_SOUN) {
+            JS_SetPropertyStr(ctx, track, "channels", JS_NewInt32(ctx, (int)tr->SampleDescription.audio.channelcount));
+            JS_SetPropertyStr(ctx, track, "sampleRate", JS_NewInt32(ctx, (int)tr->SampleDescription.audio.samplerate_hz));
+        }
+
+        GCValue samples = JS_NewArray(ctx);
+        unsigned sample_limit = tr->sample_count < 4096 ? tr->sample_count : 4096;
+        for (unsigned s = 0; s < sample_limit; s++) {
+            unsigned frame_bytes = 0, ts = 0, dur = 0;
+            MP4D_file_offset_t offset = MP4D_frame_offset(&mp4, i, s, &frame_bytes, &ts, &dur);
+            GCValue sample = JS_NewObject(ctx);
+            JS_SetPropertyStr(ctx, sample, "offset", JS_NewInt64(ctx, (int64_t)offset));
+            JS_SetPropertyStr(ctx, sample, "size", JS_NewInt32(ctx, (int)frame_bytes));
+            JS_SetPropertyStr(ctx, sample, "timestamp", JS_NewInt32(ctx, (int)ts));
+            JS_SetPropertyStr(ctx, sample, "duration", JS_NewInt32(ctx, (int)dur));
+            JS_SetPropertyUint32(ctx, samples, s, sample);
+        }
+        JS_SetPropertyStr(ctx, track, "samples", samples);
+        JS_SetPropertyUint32(ctx, tracks, i, track);
+    }
+    JS_SetPropertyStr(ctx, info, "tracks", tracks);
+    JS_SetPropertyStr(ctx, sb_obj, "__mp4Info", info);
+
+    MP4D_close(&mp4);
+}
+
 // SourceBuffer.prototype.appendBuffer
 GCValue js_source_buffer_append_buffer(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     SourceBufferDataHandle sb = SourceBufferDataHandle::from_object_check(ctx, this_val);
     if (!sb.valid()) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
-    
+
     if (argc < 1) return JS_ThrowTypeError(ctx, "requires at least 1 argument(s)");
-    
+
     // Accept ArrayBuffer, TypedArray, ArrayBufferView, Blob, or plain buffer object
     size_t data_len = 0;
     const uint8_t *data = NULL;
     GCValue buffer_val = argv[0];
-    
+
     if (JS_IsObject(buffer_val)) {
         GCValue byte_length = JS_GetPropertyStr(ctx, buffer_val, "byteLength");
         if (!JS_IsUndefined(byte_length)) {
@@ -268,22 +385,41 @@ GCValue js_source_buffer_append_buffer(JSContextHandle ctx, GCValue this_val, in
         }
         data = ptr;
     }
-    
-    (void)data;
-    (void)data_len;
-    
+
     JS_SetPropertyStr(ctx, this_val, "updating", JS_TRUE);
     sb.set_updating(1);
-    
-    // Simulate async update completion synchronously
+
+    GCValue onupdatestart = JS_GetPropertyStr(ctx, this_val, "onupdatestart");
+    if (!JS_IsNull(onupdatestart) && !JS_IsUndefined(onupdatestart)) {
+        JS_Call(ctx, onupdatestart, this_val, 0, NULL);
+    }
+
+    if (data && data_len > 0) {
+        source_buffer_append_data(ctx, sb, data, data_len);
+        source_buffer_demux(ctx, this_val, sb);
+
+        char captured[256];
+        snprintf(captured, sizeof(captured),
+                 "media-source://segment?size=%zu&tracks=%d&duration=%.3f",
+                 sb.append_size(), sb.track_count(), sb.parsed_duration());
+        record_captured_url(captured);
+    }
+
+    JS_SetPropertyStr(ctx, this_val, "__appendSize", JS_NewInt64(ctx, (int64_t)sb.append_size()));
+
+    GCValue onupdate = JS_GetPropertyStr(ctx, this_val, "onupdate");
+    if (!JS_IsNull(onupdate) && !JS_IsUndefined(onupdate)) {
+        JS_Call(ctx, onupdate, this_val, 0, NULL);
+    }
+
     JS_SetPropertyStr(ctx, this_val, "updating", JS_FALSE);
     sb.set_updating(0);
-    
+
     GCValue updateend = JS_GetPropertyStr(ctx, this_val, "onupdateend");
     if (!JS_IsNull(updateend) && !JS_IsUndefined(updateend)) {
         JS_Call(ctx, updateend, this_val, 0, NULL);
     }
-    
+
     return JS_UNDEFINED;
 }
 
