@@ -202,6 +202,18 @@ typedef struct
     // case 0x6C: return "Visual ISO/IEC 10918-1";
     unsigned object_type_indication;
 
+    // Track ID from tkhd; required for fragmented MP4 (moof/traf) support.
+    unsigned track_id;
+
+    // Track Extends defaults (from trex), used for movie fragments.
+    unsigned default_sample_duration;
+    unsigned default_sample_size;
+    unsigned default_sample_flags;
+    unsigned default_sample_description_index;
+
+    // Next fragment decode time for this track.
+    uint64_t next_fragment_decode_time;
+
 #if MP4D_INFO_SUPPORTED
     /************************************************************************/
     /*                 informational public data                            */
@@ -311,6 +323,10 @@ typedef struct MP4D_demux_tag
         unsigned char *genre;
     } tag;
 #endif
+
+    // Offset of the current movie fragment (moof) box; used for
+    // default-base-is-moof fragmented MP4 support.
+    MP4D_file_offset_t moof_offset;
 
 } MP4D_demux_t;
 
@@ -2547,6 +2563,18 @@ static void my_fseek(MP4D_demux_t *mp4, boxsize_t pos, int *eof_flag)
 
 typedef enum { BOX_ATOM, BOX_OD } boxtype_t;
 
+// Helper: find a track by its track_ID. Used for fragmented MP4 support.
+static MP4D_track_t *mp4d_find_track(MP4D_demux_t *mp4, unsigned track_id)
+{
+    unsigned i;
+    for (i = 0; i < mp4->track_count; i++)
+    {
+        if (mp4->track[i].track_id == track_id)
+            return &mp4->track[i];
+    }
+    return NULL;
+}
+
 int MP4D_open(MP4D_demux_t *mp4, int (*read_callback)(int64_t offset, void *buffer, size_t size, void *token), void *token, int64_t file_size)
 {
     // box stack size
@@ -2570,6 +2598,17 @@ int MP4D_open(MP4D_demux_t *mp4, int (*read_callback)(int64_t offset, void *buff
     int eof_flag = 0;
     unsigned i;
     MP4D_track_t *tr = NULL;
+
+    // Fragment parsing state (for moof/traf/tfhd/tfdt/trun)
+    MP4D_file_offset_t frag_base_offset = 0;
+    uint64_t frag_base_decode_time = 0;
+    int frag_has_base_offset = 0;
+    int frag_has_tfdt = 0;
+    unsigned frag_default_duration = 0;
+    unsigned frag_default_size = 0;
+    unsigned frag_default_flags = 0;
+    unsigned frag_sample_description_index = 0;
+    MP4D_file_offset_t box_start_offset = 0;
 
     if (!mp4 || !read_callback)
     {
@@ -2613,7 +2652,13 @@ int MP4D_open(MP4D_demux_t *mp4, int (*read_callback)(int64_t offset, void *buff
             {BOX_stco, 0, 1},
             {BOX_co64, 0, 1},
             {BOX_stsd, 0, 0},
-            {BOX_esds, 0, 1}    // esds does not use track, but switches to OD mode. Check here, to avoid OD check
+            {BOX_esds, 0, 1},   // esds does not use track, but switches to OD mode. Check here, to avoid OD check
+            {BOX_tkhd, 1, 1},
+            {BOX_trex, 0, 0},
+            {BOX_mfhd, 0, 0},
+            {BOX_tfhd, 0, 0},
+            {BOX_tfdt, 1, 1},
+            {BOX_trun, 0, 1}
         };
 
         // List of boxes, which contains other boxes ('envelopes')
@@ -2632,7 +2677,8 @@ int MP4D_open(MP4D_demux_t *mp4, int (*read_callback)(int64_t offset, void *buff
             {OD_DSI,   BOX_OD},
             {BOX_trak, BOX_ATOM},
             {BOX_moov, BOX_ATOM},
-            //{BOX_moof, BOX_ATOM},
+            {BOX_moof, BOX_ATOM},
+            {BOX_traf, BOX_ATOM},
             {BOX_mdia, BOX_ATOM},
             {BOX_tref, BOX_ATOM},
             {BOX_minf, BOX_ATOM},
@@ -2778,6 +2824,9 @@ broken_android_meta_hack:
             box_bytes += payload_bytes;
         }
 
+        // Offset of the start of this box in the input stream.
+        box_start_offset = mp4->read_pos - read_bytes;
+
 #if MP4D_TRACE_SUPPORTED
         box_path[depth] = (box_name >> 24) | (box_name << 24) | ((box_name >> 8) & 0x0000FF00) | ((box_name << 8) & 0x00FF0000);
         TRACE(("%2d  %8d %.*s  (%d bytes remains for sibilings) \n", depth, (int)box_bytes, depth*4, (char*)box_path, (int)stack[depth].bytes));
@@ -2913,6 +2962,202 @@ broken_android_meta_hack:
                     tr->chunk_offset[i] <<= 32;
                     tr->chunk_offset[i] |= READ(4);
                 }
+            }
+            break;
+
+        // Fragmented MP4 (movie fragments) support
+        case BOX_mfhd:
+            SKIP(4); // sequence_number
+            break;
+
+        case BOX_tkhd:
+            {
+                unsigned version = FullAtomVersionAndFlags >> 24;
+                if (version == 1)
+                {
+                    SKIP(8 + 8); // creation_time, modification_time
+                    tr->track_id = READ(4);
+                    SKIP(4); // reserved
+                } else
+                {
+                    SKIP(4 + 4); // creation_time, modification_time
+                    tr->track_id = READ(4);
+                    SKIP(4); // reserved
+                }
+            }
+            break;
+
+        case BOX_trex:
+            {
+                unsigned track_id = READ(4);
+                MP4D_track_t *t = mp4d_find_track(mp4, track_id);
+                if (t)
+                {
+                    t->default_sample_description_index = READ(4);
+                    t->default_sample_duration = READ(4);
+                    t->default_sample_size = READ(4);
+                    t->default_sample_flags = READ(4);
+                } else
+                {
+                    SKIP(4 + 4 + 4 + 4);
+                }
+            }
+            break;
+
+        case BOX_traf:
+            // Reset per-fragment state; the actual track will be selected by tfhd.
+            frag_base_offset = 0;
+            frag_has_base_offset = 0;
+            frag_base_decode_time = 0;
+            frag_has_tfdt = 0;
+            frag_default_duration = 0;
+            frag_default_size = 0;
+            frag_default_flags = 0;
+            frag_sample_description_index = 0;
+            break;
+
+        case BOX_moof:
+            mp4->moof_offset = box_start_offset;
+            break;
+
+        case BOX_tfhd:
+            {
+                unsigned flags = FullAtomVersionAndFlags & 0x00FFFFFF;
+                unsigned track_id = READ(4);
+                MP4D_track_t *t = mp4d_find_track(mp4, track_id);
+                if (t)
+                {
+                    tr = t;
+                    frag_default_duration = t->default_sample_duration;
+                    frag_default_size = t->default_sample_size;
+                    frag_default_flags = t->default_sample_flags;
+                    frag_sample_description_index = t->default_sample_description_index;
+                } else
+                {
+                    frag_default_duration = 0;
+                    frag_default_size = 0;
+                    frag_default_flags = 0;
+                    frag_sample_description_index = 0;
+                }
+                frag_base_offset = 0;
+                frag_has_base_offset = 0;
+                if (flags & 0x000001)
+                {
+                    frag_base_offset = ((MP4D_file_offset_t)READ(4) << 32) | READ(4);
+                    frag_has_base_offset = 1;
+                }
+                if (flags & 0x000002)
+                    frag_sample_description_index = READ(4);
+                if (flags & 0x000008)
+                    frag_default_duration = READ(4);
+                if (flags & 0x000010)
+                    frag_default_size = READ(4);
+                if (flags & 0x000020)
+                    frag_default_flags = READ(4);
+                if ((flags & 0x020000) && !frag_has_base_offset)
+                {
+                    frag_base_offset = mp4->moof_offset;
+                    frag_has_base_offset = 1;
+                }
+            }
+            break;
+
+        case BOX_tfdt:
+            {
+                unsigned version = FullAtomVersionAndFlags >> 24;
+                if (version == 1)
+                {
+                    frag_base_decode_time = ((uint64_t)READ(4) << 32) | READ(4);
+                } else
+                {
+                    frag_base_decode_time = READ(4);
+                }
+                frag_has_tfdt = 1;
+            }
+            break;
+
+        case BOX_trun:
+            {
+                if (!tr)
+                {
+                    ERROR("trun without track");
+                    break;
+                }
+                unsigned flags = FullAtomVersionAndFlags & 0x00FFFFFF;
+                unsigned sample_count = READ(4);
+                if (sample_count == 0)
+                    break;
+                int32_t data_offset = 0;
+                int has_data_offset = 0;
+                if (flags & 0x000001)
+                {
+                    data_offset = (int32_t)READ(4);
+                    has_data_offset = 1;
+                }
+                if (flags & 0x000004)
+                {
+                    (void)READ(4); // first_sample_flags
+                }
+                uint64_t base_time = frag_has_tfdt ? frag_base_decode_time : tr->next_fragment_decode_time;
+
+                // Add a chunk for this run.
+                unsigned old_sample_count = tr->sample_count;
+                unsigned chunk_idx = tr->chunk_count;
+                MP4D_file_offset_t chunk_offset = frag_base_offset;
+                if (has_data_offset)
+                    chunk_offset = (MP4D_file_offset_t)((int64_t)chunk_offset + data_offset);
+
+                MP4D_file_offset_t *co = (MP4D_file_offset_t *)realloc(tr->chunk_offset, (chunk_idx + 1) * sizeof(MP4D_file_offset_t));
+                if (!co)
+                    ERROR("out of memory");
+                tr->chunk_offset = co;
+                tr->chunk_offset[chunk_idx] = chunk_offset;
+                tr->chunk_count++;
+
+                MP4D_sample_to_chunk_t *stc = (MP4D_sample_to_chunk_t *)realloc(tr->sample_to_chunk, (chunk_idx + 1) * sizeof(MP4D_sample_to_chunk_t));
+                if (!stc)
+                    ERROR("out of memory");
+                tr->sample_to_chunk = stc;
+                tr->sample_to_chunk[chunk_idx].first_chunk = chunk_idx + 1;
+                tr->sample_to_chunk[chunk_idx].samples_per_chunk = sample_count;
+                tr->sample_to_chunk_count = chunk_idx + 1;
+
+                unsigned new_count = old_sample_count + sample_count;
+                unsigned *es = (unsigned *)realloc(tr->entry_size, new_count * sizeof(unsigned));
+                if (!es)
+                    ERROR("out of memory");
+                tr->entry_size = es;
+#if MP4D_TIMESTAMPS_SUPPORTED
+                unsigned *ts = (unsigned *)realloc(tr->timestamp, new_count * sizeof(unsigned));
+                unsigned *dur = (unsigned *)realloc(tr->duration, new_count * sizeof(unsigned));
+                if (!ts || !dur)
+                    ERROR("out of memory");
+                tr->timestamp = ts;
+                tr->duration = dur;
+#endif
+                uint64_t sample_time = base_time;
+                for (i = 0; i < sample_count; i++)
+                {
+                    unsigned sample_duration = frag_default_duration;
+                    unsigned sample_size = frag_default_size;
+                    if (flags & 0x000100)
+                        sample_duration = READ(4);
+                    if (flags & 0x000200)
+                        sample_size = READ(4);
+                    if (flags & 0x000400)
+                        (void)READ(4); // sample_flags
+                    if (flags & 0x000800)
+                        (void)READ(4); // sample_composition_time_offset
+                    unsigned idx = old_sample_count + i;
+                    tr->entry_size[idx] = sample_size;
+#if MP4D_TIMESTAMPS_SUPPORTED
+                    tr->timestamp[idx] = (unsigned)sample_time;
+                    tr->duration[idx] = sample_duration;
+#endif
+                    sample_time += sample_duration;
+                }
+                tr->sample_count = new_count;
+                tr->next_fragment_decode_time = sample_time;
             }
             break;
 

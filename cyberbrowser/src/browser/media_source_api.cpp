@@ -269,12 +269,12 @@ typedef struct {
 
 static int mp4_mem_read(int64_t offset, void *buffer, size_t size, void *token) {
     mp4_mem_token_t *tok = (mp4_mem_token_t *)token;
-    if (!tok || !buffer) return 0;
-    if (offset < 0 || (size_t)offset > tok->size) return 0;
+    if (!tok || !buffer) return -1;
+    if (offset < 0 || (size_t)offset > tok->size) return -1;
     size_t avail = tok->size - (size_t)offset;
     size_t to_read = size < avail ? size : avail;
     if (to_read > 0) memcpy(buffer, tok->data + offset, to_read);
-    return to_read == size ? 1 : 0;
+    return to_read == size ? 0 : -1;
 }
 
 // Helper: turn a 32-bit big-endian fourcc into a null-terminated string.
