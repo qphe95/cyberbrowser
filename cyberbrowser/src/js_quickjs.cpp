@@ -2750,6 +2750,30 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
                 if (patched_script) free(patched_script);
                 patched_script = dc_patched;
             }
+
+            // Patch YouTube's DI injector so that resolving PAGE_TOKEN before
+            // ytd-page-manager has registered its provider returns a lazy proxy
+            // instead of throwing. The proxy forwards to the real page manager
+            // once it is added, letting ytd-app's connectedCallback finish.
+            if (patched_script) { current_src = patched_script; current_len = patched_len; }
+            char *di_add_patched = replace_all(current_src, current_len,
+                "SZP.prototype.addProvider=function(c){this.providers.set(c.provide,c);var k=this.JSC$10589_deferred.get(c.provide);",
+                "SZP.prototype.addProvider=function(c){if(c&&c.provide){var pt=c.provide;if((pt instanceof BwB&&pt.key&&pt.key.name===\"PAGE_TOKEN\")||pt.name===\"PAGE_TOKEN\")this.__cyber_page_manager=c.useValue||c.useClass||(c.useFactory?c.useFactory():null);}this.providers.set(c.provide,c);var k=this.JSC$10589_deferred.get(c.provide);",
+                &patched_len);
+            if (di_add_patched) {
+                if (patched_script) free(patched_script);
+                patched_script = di_add_patched;
+                current_src = patched_script;
+                current_len = patched_len;
+            }
+            char *di_resolve_patched = replace_all(current_src, current_len,
+                "if(!c.providers.has(k)){if(M)return;throw Error(\"Zc`\"+k);}",
+                "if(!c.providers.has(k)){if(M)return;if(k&&k.name===\"PAGE_TOKEN\"){var __pm=c.__cyber_page_manager;if(__pm)return __pm;return c.__cyber_pm_proxy||(c.__cyber_pm_proxy=new Proxy({},{get:function(t,p){var r=c.__cyber_page_manager;return r&&p in r?r[p]:function(){return null;}}}));}throw Error(\"Zc`\"+k);}",
+                &patched_len);
+            if (di_resolve_patched) {
+                if (patched_script) free(patched_script);
+                patched_script = di_resolve_patched;
+            }
         }
 
         // Reset diagnostic for property-on-undefined errors

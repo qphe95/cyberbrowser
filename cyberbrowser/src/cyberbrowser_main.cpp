@@ -65,6 +65,7 @@ static bool init_browser_context(void) {
     JS_AddIntrinsicPromise(g_ctx);
     JS_AddIntrinsicMapSet(g_ctx);
     JS_AddIntrinsicTypedArrays(g_ctx);
+    JS_AddIntrinsicProxy(g_ctx);
     JS_AddIntrinsicWeakRef(g_ctx);
 
     g_global = JS_GetGlobalObject(g_ctx);
