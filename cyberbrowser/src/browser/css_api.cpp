@@ -174,11 +174,12 @@ GCValue js_css_style_sheet_replace_sync(JSContextHandle ctx, GCValue this_val, i
     (void)this_val;
     if (argc < 1) return JS_UNDEFINED;
 
+    const char *text = JS_ToCString(ctx, argv[0]);
+    if (!text) text = "";
+    JS_SetPropertyStr(ctx, this_val, "__cssText", JS_NewString(ctx, text));
+
     GCValue rules = JS_NewArray(ctx);
     JS_SetPropertyStr(ctx, this_val, "__rules", rules);
-
-    const char *text = JS_ToCString(ctx, argv[0]);
-    if (!text) return JS_UNDEFINED;
 
     // Split top-level rules by matching braces as a basic parser.
     size_t len = strlen(text);
@@ -210,6 +211,52 @@ GCValue js_css_style_sheet_replace_sync(JSContextHandle ctx, GCValue this_val, i
     }
 
     return JS_UNDEFINED;
+}
+
+// Return the full CSS text for a CSSStyleSheet object.
+GCValue js_css_style_sheet_get_css_text(JSContextHandle ctx, GCValue sheet) {
+    GCValue css_text = JS_GetPropertyStr(ctx, sheet, "__cssText");
+    if (JS_IsString(css_text)) {
+        return css_text;
+    }
+    GCValue rules = JS_GetPropertyStr(ctx, sheet, "__rules");
+    if (!JS_IsArray(ctx, rules)) {
+        return JS_NewString(ctx, "");
+    }
+    GCValue len_val = JS_GetPropertyStr(ctx, rules, "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, len_val);
+    if (len == 0) return JS_NewString(ctx, "");
+    // Approximate size.
+    size_t cap = 256;
+    for (uint32_t i = 0; i < len; i++) {
+        GCValue r = JS_GetPropertyUint32(ctx, rules, i);
+        const char *s = JS_ToCString(ctx, r);
+        if (s) cap += strlen(s) + 2;
+    }
+    char *buf = (char*)malloc(cap);
+    if (!buf) return JS_NewString(ctx, "");
+    buf[0] = '\0';
+    size_t pos = 0;
+    for (uint32_t i = 0; i < len; i++) {
+        GCValue r = JS_GetPropertyUint32(ctx, rules, i);
+        const char *s = JS_ToCString(ctx, r);
+        if (s && s[0]) {
+            size_t l = strlen(s);
+            if (pos + l + 3 > cap) {
+                cap = pos + l + 256;
+                buf = (char*)realloc(buf, cap);
+                if (!buf) return JS_NewString(ctx, "");
+            }
+            memcpy(buf + pos, s, l);
+            pos += l;
+            buf[pos++] = '\n';
+            buf[pos] = '\0';
+        }
+    }
+    GCValue result = JS_NewString(ctx, buf);
+    free(buf);
+    return result;
 }
 
 // CSSStyleSheet constructor

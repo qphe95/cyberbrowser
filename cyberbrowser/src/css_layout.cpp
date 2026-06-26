@@ -1152,11 +1152,73 @@ next:
     }
 }
 
+static void layout_collect_js_sheet_array(JSContextHandle ctx, GCValue arr,
+                                            LayoutStyleSheetList *list)
+{
+    if (!JS_IsArray(ctx, arr)) return;
+    GCValue len_val = JS_GetPropertyStr(ctx, arr, "length");
+    uint32_t n = 0;
+    JS_ToUint32(ctx, &n, len_val);
+    for (uint32_t i = 0; i < n; i++) {
+        GCValue sheet = JS_GetPropertyUint32(ctx, arr, i);
+        GCValue text = JS_GetPropertyStr(ctx, sheet, "cssText");
+        const char *s = JS_ToCString(ctx, text);
+        if (s && s[0]) {
+            CssStylesheet *parsed = css_stylesheet_parse(s, strlen(s));
+            if (parsed) {
+                LOG_INFO("Parsed constructed CSSStyleSheet with %d rules", parsed->rule_count);
+                layout_sheet_list_add(list, parsed);
+            }
+        }
+    }
+}
+
+static void layout_collect_constructed_stylesheets(LayoutContext *ctx,
+                                                    LayoutStyleSheetList *list)
+{
+    if (!ctx->js_ctx.valid()) return;
+    JSContextHandle js = ctx->js_ctx;
+    GCValue global = JS_GetGlobalObject(js);
+    GCValue doc = JS_GetPropertyStr(js, global, "document");
+    if (!JS_IsObject(doc)) return;
+
+    /* Document-level adopted stylesheets. */
+    GCValue adopted = JS_GetPropertyStr(js, doc, "__adoptedStyleSheets");
+    layout_collect_js_sheet_array(js, adopted, list);
+
+    /* Shadow-root adopted stylesheets. */
+    const char *script =
+        "(function(){"
+        "  var out=[];"
+        "  var all=document.querySelectorAll('*');"
+        "  for(var i=0;i<all.length;i++){"
+        "    var sr=all[i].shadowRoot;"
+        "    if(sr){"
+        "      var sheets=sr.__adoptedStyleSheets;"
+        "      if(sheets && sheets.length) out.push(sheets);"
+        "    }"
+        "  }"
+        "  return out;"
+        "})()";
+    GCValue sr_arrays = JS_Eval(js, script, strlen(script),
+                                "<constructed-css>", JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsArray(js, sr_arrays)) {
+        GCValue len_val = JS_GetPropertyStr(js, sr_arrays, "length");
+        uint32_t m = 0;
+        JS_ToUint32(js, &m, len_val);
+        for (uint32_t j = 0; j < m; j++) {
+            GCValue ss = JS_GetPropertyUint32(js, sr_arrays, j);
+            layout_collect_js_sheet_array(js, ss, list);
+        }
+    }
+}
+
 static bool layout_collect_document_stylesheets(LayoutContext *ctx, LayoutStyleSheetList *list,
                                                  const char *base_url) {
     if (!ctx || !list || ctx->tree.count == 0) return false;
     int root_dom_idx = ctx->tree.nodes[ctx->tree.root_idx].dom_node_idx;
     layout_collect_stylesheets_recursive(ctx, root_dom_idx, list, base_url);
+    layout_collect_constructed_stylesheets(ctx, list);
     return true;
 }
 
@@ -1355,6 +1417,12 @@ static void layout_apply_stylesheet_node(LayoutContext *ctx, int idx,
             free(resolved);
         }
         css_declarations_free(idecls, ic);
+    }
+
+    /* UA rule: metadata/head/style/script/link/meta/title/base/template/noscript
+     * are always display:none, regardless of any page CSS. */
+    if (layout_default_display(node->tag_name) == CSS_DISPLAY_NONE) {
+        box->display = CSS_DISPLAY_NONE;
     }
 }
 
@@ -2801,7 +2869,9 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
 bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
                     double viewport_width, double viewport_height)
 {
+    JSContextHandle saved_js_ctx = ctx->js_ctx;
     if (!css_layout_tree_build(ctx, doc)) return false;
+    ctx->js_ctx = saved_js_ctx;
     ctx->viewport_width = viewport_width;
     ctx->viewport_height = viewport_height;
     const char *default_base = "https://www.youtube.com/";

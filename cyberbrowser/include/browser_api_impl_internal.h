@@ -83,10 +83,13 @@ GCValue js_css_style_sheet_add_rule(JSContextHandle ctx, GCValue this_val, int a
 GCValue js_css_style_sheet_remove_rule(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_css_style_sheet_replace(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_css_style_sheet_replace_sync(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_css_style_sheet_get_css_text(JSContextHandle ctx, GCValue sheet);
 GCValue js_css_style_sheet_get_css_rules(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_css_style_sheet_get_rules(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_css_style_sheet_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
 GCValue js_document_get_style_sheets(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_document_get_adopted_style_sheets(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_document_set_adopted_style_sheets(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_css_style_decl_set_property(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_css_style_decl_remove_property(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_css_style_decl_get_property_value(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
@@ -193,6 +196,8 @@ GCValue js_node_get_text_content(JSContextHandle ctx, GCValue this_val, int argc
 GCValue js_node_set_text_content(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_node_get_node_value(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_node_set_node_value(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_node_get_data(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_node_set_data(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_document_create_range(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_document_create_tree_walker(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_tree_walker_next_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
@@ -210,6 +215,9 @@ GCValue js_node_getRootNode_real(JSContextHandle ctx, GCValue this_val, int argc
 GCValue js_mutation_observer_observe(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_mutation_observer_takeRecords(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_mutation_observer_disconnect(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+void mo_notify_child_list(JSContextHandle ctx, GCValue target, GCValue added, GCValue removed);
+void mo_notify_character_data(JSContextHandle ctx, GCValue target, const char *old_value);
+void mo_notify_attribute(JSContextHandle ctx, GCValue target, const char *name, const char *old_value);
 GCValue js_queue_microtask(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_create_document_fragment(JSContextHandle ctx);
 GCValue js_document_import_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);

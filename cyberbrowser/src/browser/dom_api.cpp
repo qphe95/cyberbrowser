@@ -5,6 +5,7 @@
 #include <time.h>
 #include <math.h>
 #include <ctype.h>
+#include <vector>
 #include <quickjs.h>
 #include <quickjs_gc_unified.h>
 #include "browser_api_impl.h"
@@ -38,11 +39,31 @@ GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc
 GCValue js_node_removeChild_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_node_cloneNode_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+
+// Helpers for DocumentFragment expansion in appendChild/insertBefore.
+static bool is_document_fragment_node(JSContextHandle ctx, GCValue node) {
+    DOMNodeHandle n = get_dom_node(ctx, node);
+    return n.valid() && n.node_type() == DOM_NODE_TYPE_DOCUMENT_FRAGMENT;
+}
+static std::vector<GCValue> collect_fragment_children(JSContextHandle ctx, GCValue fragment) {
+    std::vector<GCValue> children;
+    DOMNodeHandle frag = get_dom_node(ctx, fragment);
+    if (!frag.valid()) return children;
+    GCValue cur = frag.first_child();
+    while (!JS_IsNull(cur) && !JS_IsUndefined(cur)) {
+        children.push_back(cur);
+        DOMNodeHandle cur_node = get_dom_node(ctx, cur);
+        cur = cur_node.valid() ? cur_node.next_sibling() : JS_NULL;
+    }
+    return children;
+}
 GCValue js_node_contains_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_node_getRootNode_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_node_get_ownerDocument(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_querySelector_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_querySelectorAll_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_document_get_adopted_style_sheets(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_document_set_adopted_style_sheets(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 
 // Forward declarations for DOM helper functions (used by ShadowRoot)
 bool matches_selector(JSContextHandle ctx, GCValue elem, const char* selector);
@@ -789,6 +810,16 @@ GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc
     
     GCValue child = argv[0];
     
+    // DocumentFragment: append its children, not the fragment itself.
+    if (is_document_fragment_node(ctx, child)) {
+        std::vector<GCValue> children = collect_fragment_children(ctx, child);
+        for (GCValue c : children) {
+            GCValue args[1] = { c };
+            js_node_appendChild_real(ctx, this_val, 1, args);
+        }
+        return child;
+    }
+    
     // Get or create DOM data for parent
     DOMNodeHandle parent = get_or_create_dom_node(ctx, this_val, DOM_NODE_TYPE_ELEMENT, "");
     if (!parent.valid()) {
@@ -840,6 +871,11 @@ GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc
     if (dom_node_is_connected(ctx, child)) {
         invoke_custom_element_callback(ctx, child, "connectedCallback");
     }
+
+    GCValue added_arr = JS_NewArray(ctx);
+    JS_SetPropertyUint32(ctx, added_arr, 0, child);
+    GCValue removed_arr = JS_NewArray(ctx);
+    mo_notify_child_list(ctx, this_val, added_arr, removed_arr);
 
     return child;
 }
@@ -918,6 +954,11 @@ GCValue js_node_removeChild_real(JSContextHandle ctx, GCValue this_val, int argc
         }
     }
 
+    GCValue added_arr2 = JS_NewArray(ctx);
+    JS_SetPropertyUint32(ctx, added_arr2, 0, child);
+    GCValue removed_arr2 = JS_NewArray(ctx);
+    mo_notify_child_list(ctx, this_val, added_arr2, removed_arr2);
+
     return child;
 }
 
@@ -929,6 +970,16 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
     
     GCValue new_child = argv[0];
     GCValue ref_child = argv[1];  // Can be null (append at end)
+    
+    // DocumentFragment: insert its children before ref_child, not the fragment itself.
+    if (is_document_fragment_node(ctx, new_child)) {
+        std::vector<GCValue> children = collect_fragment_children(ctx, new_child);
+        for (GCValue c : children) {
+            GCValue args[2] = { c, ref_child };
+            js_node_insertBefore_real(ctx, this_val, 2, args);
+        }
+        return new_child;
+    }
     
     // Get or create DOM data
     DOMNodeHandle parent = get_or_create_dom_node(ctx, this_val, DOM_NODE_TYPE_ELEMENT, "");
@@ -994,6 +1045,11 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
     if (dom_node_is_connected(ctx, new_child)) {
         invoke_custom_element_callback(ctx, new_child, "connectedCallback");
     }
+
+    GCValue added_arr3 = JS_NewArray(ctx);
+    JS_SetPropertyUint32(ctx, added_arr3, 0, new_child);
+    GCValue removed_arr3 = JS_NewArray(ctx);
+    mo_notify_child_list(ctx, this_val, added_arr3, removed_arr3);
 
     return new_child;
 }
@@ -1512,11 +1568,30 @@ GCValue js_document_get_elements_by_tag_name(JSContextHandle ctx, GCValue this_v
     return arr;
 }
 
+// Document.prototype.adoptedStyleSheets getter/setter.
+GCValue js_document_get_adopted_style_sheets(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    GCValue sheets = JS_GetPropertyStr(ctx, this_val, "__adoptedStyleSheets");
+    if (JS_IsUndefined(sheets) || JS_IsNull(sheets) || !JS_IsArray(ctx, sheets)) {
+        sheets = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, this_val, "__adoptedStyleSheets", sheets);
+    }
+    return sheets;
+}
+
+GCValue js_document_set_adopted_style_sheets(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "adoptedStyleSheets setter requires an array");
+    JS_SetPropertyStr(ctx, this_val, "__adoptedStyleSheets", argv[0]);
+    return JS_UNDEFINED;
+}
+
 // Document.prototype.styleSheets - return a live-ish collection of stylesheets.
 GCValue js_document_get_style_sheets(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)this_val; (void)argc; (void)argv;
-    // TODO: collect sheets from <style> and <link rel="stylesheet"> elements.
-    return JS_NewArray(ctx);
+    (void)argc; (void)argv;
+    // For now the constructed stylesheet list is the adoptedStyleSheets array.
+    // Inline <style> and <link rel="stylesheet"> sheets are collected separately
+    // by the native layout engine from the HTML tree.
+    return js_document_get_adopted_style_sheets(ctx, this_val, 0, NULL);
 }
 
 // Document.prototype.getElementsByClassName - use the lock-free class index table.
@@ -1565,6 +1640,15 @@ GCValue js_element_set_attribute(JSContextHandle ctx, GCValue this_val, int argc
 
         // Notify custom elements.
         invoke_attribute_changed(ctx, this_val, name, old_value, value);
+
+        // Notify MutationObserver observers.
+        char old_buf[512];
+        old_buf[0] = '\0';
+        if (old_value) {
+            strncpy(old_buf, old_value, sizeof(old_buf) - 1);
+            old_buf[sizeof(old_buf) - 1] = '\0';
+        }
+        mo_notify_attribute(ctx, this_val, name, old_buf);
     }
     dom_request_layout();
     return JS_UNDEFINED;
@@ -1616,6 +1700,14 @@ GCValue js_element_remove_attribute(JSContextHandle ctx, GCValue this_val, int a
         }
 
         invoke_attribute_changed(ctx, this_val, name, old_value, NULL);
+
+        char old_buf[512];
+        old_buf[0] = '\0';
+        if (old_value) {
+            strncpy(old_buf, old_value, sizeof(old_buf) - 1);
+            old_buf[sizeof(old_buf) - 1] = '\0';
+        }
+        mo_notify_attribute(ctx, this_val, name, old_buf);
     }
     dom_request_layout();
     return JS_UNDEFINED;
@@ -2253,15 +2345,49 @@ GCValue js_node_set_text_content(JSContextHandle ctx, GCValue this_val, int argc
 // Node.prototype.nodeValue getter
 GCValue js_node_get_node_value(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    // For Element nodes, nodeValue is null
+    DOMNodeHandle node = get_dom_node(ctx, this_val);
+    if (!node.valid()) return JS_NULL;
+    int t = node.node_type();
+    if (t == DOM_NODE_TYPE_TEXT || t == DOM_NODE_TYPE_COMMENT) {
+        const char *val = node.node_value();
+        return JS_NewString(ctx, val ? val : "");
+    }
     return JS_NULL;
 }
 
 // Node.prototype.nodeValue setter
 GCValue js_node_set_node_value(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    // No-op - nodeValue is read-only for most node types
-    (void)argc; (void)argv;
+    if (argc < 1) return JS_UNDEFINED;
+    DOMNodeHandle node = get_dom_node(ctx, this_val);
+    if (!node.valid()) return JS_UNDEFINED;
+    int t = node.node_type();
+    if (t == DOM_NODE_TYPE_TEXT || t == DOM_NODE_TYPE_COMMENT) {
+        const char *text = JS_ToCString(ctx, argv[0]);
+        if (!text) text = "";
+        const char *old = node.node_value();
+        char old_buf[256];
+        old_buf[0] = '\0';
+        if (old) {
+            strncpy(old_buf, old, sizeof(old_buf) - 1);
+            old_buf[sizeof(old_buf) - 1] = '\0';
+        }
+        node.set_node_value(text);
+        // Keep the .data / .textContent mirrors in sync.
+        JS_SetPropertyStr(ctx, this_val, "data", JS_NewString(ctx, text));
+        JS_SetPropertyStr(ctx, this_val, "textContent", JS_NewString(ctx, text));
+        mo_notify_character_data(ctx, this_val, old_buf);
+    }
     return JS_UNDEFINED;
+}
+
+// CharacterData.prototype.data getter/setter (used by Text/Comment nodes).
+GCValue js_node_get_data(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    return js_node_get_node_value(ctx, this_val, argc, argv);
+}
+
+GCValue js_node_set_data(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    return js_node_set_node_value(ctx, this_val, argc, argv);
 }
 
 // ============================================================================

@@ -59,6 +59,7 @@ static GCValue js_subtle_decrypt(JSContextHandle ctx, GCValue this_val, int argc
 
 // External symbols from js_quickjs.c
 extern GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+extern GCValue js_document_create_document_fragment(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 
 // DOM querySelector helpers from dom_api.cpp
 extern "C" GCValue js_element_querySelector_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
@@ -275,13 +276,103 @@ static GCValue js_promise_reject(JSContextHandle ctx, GCValue this_val, int argc
     return JS_ThrowTypeError(ctx, "not supported");
 }
 
-// matchMedia stub
+// Minimal media-query evaluator for window.matchMedia.
+static int js_match_media_get_viewport_width(JSContextHandle ctx) {
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue win = JS_GetPropertyStr(ctx, global, "window");
+    GCValue v = JS_GetPropertyStr(ctx, win, "innerWidth");
+    int32_t w = 1920;
+    JS_ToInt32(ctx, &w, v);
+    return w;
+}
+static int js_match_media_get_viewport_height(JSContextHandle ctx) {
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue win = JS_GetPropertyStr(ctx, global, "window");
+    GCValue v = JS_GetPropertyStr(ctx, win, "innerHeight");
+    int32_t h = 1080;
+    JS_ToInt32(ctx, &h, v);
+    return h;
+}
+
+static bool js_match_media_condition(const char *cond, int width, int height) {
+    while (*cond == ' ' || *cond == '\t') cond++;
+    if (!cond[0]) return true;
+    if (strcasecmp(cond, "screen") == 0 || strcasecmp(cond, "all") == 0 || strcasecmp(cond, "print") == 0)
+        return true;
+    if (strcasecmp(cond, "only screen") == 0 || strcasecmp(cond, "only all") == 0)
+        return true;
+    if (strncasecmp(cond, "not ", 4) == 0)
+        return !js_match_media_condition(cond + 4, width, height);
+
+    // Handle (min-width: 123px) etc.
+    int val = 0;
+    if (sscanf(cond, "(min-width: %dpx)", &val) == 1) return width >= val;
+    if (sscanf(cond, "(max-width: %dpx)", &val) == 1) return width <= val;
+    if (sscanf(cond, "(min-height: %dpx)", &val) == 1) return height >= val;
+    if (sscanf(cond, "(max-height: %dpx)", &val) == 1) return height <= val;
+    if (sscanf(cond, "(width: %dpx)", &val) == 1) return width == val;
+    if (sscanf(cond, "(height: %dpx)", &val) == 1) return height == val;
+    if (strcasecmp(cond, "(prefers-color-scheme: dark)") == 0) return true;
+    if (strcasecmp(cond, "(prefers-color-scheme: light)") == 0) return false;
+    if (strcasecmp(cond, "(pointer: fine)") == 0) return true;
+    if (strcasecmp(cond, "(pointer: coarse)") == 0) return false;
+    if (strcasecmp(cond, "(hover: hover)") == 0) return true;
+    if (strcasecmp(cond, "(hover: none)") == 0) return false;
+    if (strcasecmp(cond, "(orientation: landscape)") == 0) return true;
+    if (strcasecmp(cond, "(orientation: portrait)") == 0) return false;
+    // Unknown conditions default to true so layouts don't collapse.
+    return true;
+}
+
+static char *js_match_media_strstr_ci(const char *haystack, const char *needle) {
+    size_t nlen = strlen(needle);
+    if (nlen == 0) return (char*)haystack;
+    for (const char *p = haystack; *p; p++) {
+        if (strncasecmp(p, needle, nlen) == 0) return (char*)p;
+    }
+    return NULL;
+}
+
+static bool js_match_media_query(const char *query, int width, int height) {
+    // Comma-separated list: true if any list item matches.
+    char buf[1024];
+    strncpy(buf, query, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    char *p = buf;
+    while (*p) {
+        char *comma = strchr(p, ',');
+        if (comma) *comma = '\0';
+        // Split by " and "
+        bool ok = true;
+        char *part = p;
+        while (*part) {
+            char *and_pos = js_match_media_strstr_ci(part, " and ");
+            if (and_pos) *and_pos = '\0';
+            if (!js_match_media_condition(part, width, height)) { ok = false; break; }
+            if (!and_pos) break;
+            part = and_pos + 5;
+        }
+        if (ok) return true;
+        if (!comma) break;
+        p = comma + 1;
+    }
+    return false;
+}
+
 static GCValue js_match_media(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc;
-    GCValue media_query = argc > 0 && JS_IsString(argv[0]) ? argv[0] : JS_NewString(ctx, "");
+    const char *q = "";
+    if (argc > 0 && JS_IsString(argv[0])) {
+        q = JS_ToCString(ctx, argv[0]);
+        if (!q) q = "";
+    }
+    int width = js_match_media_get_viewport_width(ctx);
+    int height = js_match_media_get_viewport_height(ctx);
+    bool matches = js_match_media_query(q, width, height);
+
     GCValue result = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, result, "matches", JS_FALSE);
-    JS_SetPropertyStr(ctx, result, "media", media_query);
+    JS_SetPropertyStr(ctx, result, "matches", JS_NewBool(ctx, matches));
+    JS_SetPropertyStr(ctx, result, "media", JS_NewString(ctx, q));
     JS_SetPropertyStr(ctx, result, "addListener", JS_NewCFunction(ctx, js_undefined, "addListener", 1));
     JS_SetPropertyStr(ctx, result, "removeListener", JS_NewCFunction(ctx, js_undefined, "removeListener", 1));
     JS_SetPropertyStr(ctx, result, "addEventListener", JS_NewCFunction(ctx, js_undefined, "addEventListener", 2));
@@ -1969,6 +2060,13 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_DefinePropertyGetSet(ctx, node_proto, node_value_atom, node_value_getter, node_value_setter, JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, node_value_atom);
     
+    // data getter/setter (CharacterData interface, used by Text/Comment nodes)
+    GCValue data_getter = JS_NewCFunction(ctx, js_node_get_data, "get data", 0);
+    GCValue data_setter = JS_NewCFunction(ctx, js_node_set_data, "set data", 1);
+    JSAtom data_atom = JS_NewAtom(ctx, "data");
+    JS_DefinePropertyGetSet(ctx, node_proto, data_atom, data_getter, data_setter, JS_PROP_ENUMERABLE);
+    JS_FreeAtom(ctx, data_atom);
+    
     // Do NOT free the prototypes here!
     // They are still referenced by:
     // 1. The constructor's 'prototype' property (set via JS_SetPropertyStr)
@@ -2095,7 +2193,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     DEF_FUNC(ctx, document, "createElementNS", js_document_create_element, 2);
     DEF_FUNC(ctx, document, "createTextNode", js_document_create_text_node, 1);
     DEF_FUNC(ctx, document, "createComment", js_document_create_comment, 1);
-    DEF_FUNC(ctx, document, "createDocumentFragment", js_null, 0);
+    DEF_FUNC(ctx, document, "createDocumentFragment", js_document_create_document_fragment, 0);
     DEF_FUNC(ctx, document, "createRange", js_document_create_range, 0);
     DEF_FUNC(ctx, document, "createTreeWalker", js_document_create_tree_walker, 3);
     DEF_FUNC(ctx, document, "createEvent", js_document_create_event, 1);
@@ -2109,6 +2207,10 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     GCValue doc_style_sheets_getter = JS_NewCFunction(ctx, js_document_get_style_sheets, "get styleSheets", 0);
     JS_DefinePropertyGetSet(ctx, document, JS_NewAtom(ctx, "styleSheets"),
         doc_style_sheets_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    GCValue doc_adopted_sheets_getter = JS_NewCFunction(ctx, js_document_get_adopted_style_sheets, "get adoptedStyleSheets", 0);
+    GCValue doc_adopted_sheets_setter = JS_NewCFunction(ctx, js_document_set_adopted_style_sheets, "set adoptedStyleSheets", 1);
+    JS_DefinePropertyGetSet(ctx, document, JS_NewAtom(ctx, "adoptedStyleSheets"),
+        doc_adopted_sheets_getter, doc_adopted_sheets_setter, JS_PROP_ENUMERABLE);
     DEF_FUNC(ctx, document, "elementFromPoint", js_document_element_from_point, 2);
     DEF_FUNC(ctx, document, "addEventListener", js_event_target_addEventListener, 2);
     DEF_FUNC(ctx, document, "removeEventListener", js_event_target_removeEventListener, 2);

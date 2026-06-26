@@ -545,6 +545,7 @@ static bool render_document_to_jpg(HtmlDocument *doc, ImageCache *image_cache,
     printf("Running CSS layout (%dx%d) ...\n", WIREFRAME_WIDTH, WIREFRAME_HEIGHT);
     LayoutContext layout;
     memset(&layout, 0, sizeof(layout));
+    layout.js_ctx = g_ctx;
     bool layout_ok = css_layout_run(&layout, doc, NULL,
                                     (double)WIREFRAME_WIDTH,
                                     (double)WIREFRAME_HEIGHT);

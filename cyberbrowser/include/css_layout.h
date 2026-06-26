@@ -21,6 +21,7 @@
 #include <stddef.h>
 #include "html_dom.h"
 #include "css_parser.h"
+#include "quickjs_gc_unified.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -204,6 +205,9 @@ typedef struct LayoutContext {
 
     /* Per-node custom property (CSS variable) map. */
     CssCustomProps *custom_props;
+
+    /* Optional JS context for collecting constructed/adopted stylesheets. */
+    JSContextHandle js_ctx;
 } LayoutContext;
 
 /* Build a flat layout tree from a parsed HTML document. */
