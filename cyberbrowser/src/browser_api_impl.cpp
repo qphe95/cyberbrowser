@@ -804,14 +804,6 @@ static GCValue js_audio_context_constructor(JSContextHandle ctx, GCValue this_va
     return obj;
 }
 
-// DOMParser constructor stub
-static GCValue js_dom_parser_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)argc; (void)argv;
-    GCValue obj = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, obj, "parseFromString", JS_NewCFunction(ctx, js_empty_string, "parseFromString", 2));
-    return obj;
-}
-
 // Worker constructor stub
 static GCValue js_worker_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
@@ -1016,44 +1008,6 @@ static GCValue js_storage_estimate(JSContextHandle ctx, GCValue this_val, int ar
 static GCValue js_false_promise(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc; (void)argv;
     return JS_FALSE;
-}
-
-static GCValue js_get_selection(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)this_val; (void)argc; (void)argv;
-    // Create a simple Selection stub object
-    GCValue selection = JS_NewObject(ctx);
-    if (JS_IsException(selection)) return JS_EXCEPTION;
-    
-    // Add common Selection properties
-    JS_SetPropertyStr(ctx, selection, "anchorNode", JS_NULL);
-    JS_SetPropertyStr(ctx, selection, "focusNode", JS_NULL);
-    JS_SetPropertyStr(ctx, selection, "anchorOffset", JS_NewInt32(ctx, 0));
-    JS_SetPropertyStr(ctx, selection, "focusOffset", JS_NewInt32(ctx, 0));
-    JS_SetPropertyStr(ctx, selection, "isCollapsed", JS_TRUE);
-    JS_SetPropertyStr(ctx, selection, "rangeCount", JS_NewInt32(ctx, 0));
-    JS_SetPropertyStr(ctx, selection, "type", JS_NewString(ctx, "None"));
-    
-    // Add common Selection methods (stubs)
-    JS_SetPropertyStr(ctx, selection, "toString",
-        JS_NewCFunction(ctx, js_empty_string, "toString", 0));
-    JS_SetPropertyStr(ctx, selection, "removeAllRanges",
-        JS_NewCFunction(ctx, js_undefined, "removeAllRanges", 0));
-    JS_SetPropertyStr(ctx, selection, "addRange",
-        JS_NewCFunction(ctx, js_undefined, "addRange", 1));
-    JS_SetPropertyStr(ctx, selection, "removeRange",
-        JS_NewCFunction(ctx, js_undefined, "removeRange", 1));
-    JS_SetPropertyStr(ctx, selection, "deleteFromDocument",
-        JS_NewCFunction(ctx, js_undefined, "deleteFromDocument", 0));
-    JS_SetPropertyStr(ctx, selection, "getRangeAt",
-        JS_NewCFunction(ctx, js_null, "getRangeAt", 1));
-    JS_SetPropertyStr(ctx, selection, "collapse",
-        JS_NewCFunction(ctx, js_undefined, "collapse", 2));
-    JS_SetPropertyStr(ctx, selection, "extend",
-        JS_NewCFunction(ctx, js_undefined, "extend", 2));
-    JS_SetPropertyStr(ctx, selection, "selectAllChildren",
-        JS_NewCFunction(ctx, js_undefined, "selectAllChildren", 1));
-    
-    return selection;
 }
 
 /* ============================================================================
@@ -2119,6 +2073,12 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_NewCFunction(ctx, js_node_insertBefore_real, "insertBefore", 2));
     JS_SetPropertyStr(ctx, node_proto, "removeChild",
         JS_NewCFunction(ctx, js_node_removeChild_real, "removeChild", 1));
+    JS_SetPropertyStr(ctx, node_proto, "replaceChild",
+        JS_NewCFunction(ctx, js_node_replaceChild_real, "replaceChild", 2));
+    JS_SetPropertyStr(ctx, node_proto, "normalize",
+        JS_NewCFunction(ctx, js_node_normalize_real, "normalize", 0));
+    JS_SetPropertyStr(ctx, node_proto, "compareDocumentPosition",
+        JS_NewCFunction(ctx, js_node_compareDocumentPosition_real, "compareDocumentPosition", 1));
     JS_SetPropertyStr(ctx, node_proto, "cloneNode",
         JS_NewCFunction(ctx, js_node_cloneNode_real, "cloneNode", 1));
     JS_SetPropertyStr(ctx, node_proto, "contains",
@@ -3496,9 +3456,10 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, global, "ProgressEvent", progress_event_ctor);
     JS_SetPropertyStr(ctx, window, "ProgressEvent", progress_event_ctor);
     
-    // Range constructor (needed by TypeScript decorator metadata)
+    // Range constructor and prototype
     GCValue range_proto = JS_NewObject(ctx);
-    GCValue range_ctor = JS_NewCFunction2(ctx, js_dummy_function, "Range", 0, JS_CFUNC_constructor, 0);
+    JS_SetPropertyFunctionList(ctx, range_proto, js_range_proto_funcs, js_range_proto_funcs_count);
+    GCValue range_ctor = JS_NewCFunction2(ctx, js_range_constructor, "Range", 0, JS_CFUNC_constructor, 0);
     JS_SetPropertyStr(ctx, range_ctor, "prototype", range_proto);
     JS_SetPropertyStr(ctx, global, "Range", range_ctor);
     JS_SetPropertyStr(ctx, window, "Range", range_ctor);
@@ -4263,6 +4224,12 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         0, JS_CFUNC_constructor, 0);
     JS_SetPropertyStr(ctx, global, "DOMParser", dom_parser_ctor);
     JS_SetPropertyStr(ctx, window, "DOMParser", dom_parser_ctor);
+
+    // XMLSerializer
+    GCValue xml_serializer_ctor = JS_NewCFunction2(ctx, js_xml_serializer_constructor, "XMLSerializer",
+        0, JS_CFUNC_constructor, 0);
+    JS_SetPropertyStr(ctx, global, "XMLSerializer", xml_serializer_ctor);
+    JS_SetPropertyStr(ctx, window, "XMLSerializer", xml_serializer_ctor);
     
     // Worker
     GCValue worker_ctor = JS_NewCFunction2(ctx, js_worker_constructor, "Worker",

@@ -139,6 +139,9 @@ GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, G
 GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_node_removeChild_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_node_replaceChild_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_node_normalize_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_node_compareDocumentPosition_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_node_cloneNode_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_node_contains_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_node_getRootNode_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
@@ -215,6 +218,9 @@ GCValue js_node_set_node_value(JSContextHandle ctx, GCValue this_val, int argc, 
 GCValue js_node_get_data(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_node_set_data(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_document_create_range(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_range_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
+extern const JSCFunctionListEntry js_range_proto_funcs[];
+extern const size_t js_range_proto_funcs_count;
 GCValue js_document_create_tree_walker(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_tree_walker_next_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_tree_walker_previous_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
@@ -456,6 +462,8 @@ GCValue js_dom_parser_constructor(JSContextHandle ctx, GCValue this_val, int arg
 GCValue js_promise_resolve_undefined(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_promise_resolve_empty_string(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_get_selection(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_dom_parser_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
+GCValue js_xml_serializer_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
 extern double g_performance_time_origin;
 extern JSClassID js_service_worker_container_class_id;
 extern JSClassID js_service_worker_registration_class_id;

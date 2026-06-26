@@ -14,6 +14,7 @@
 #include "browser_api_impl_internal.h"
 #include "html_dom.h"
 #include "css_parser.h"
+#include "css_layout.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
 
@@ -1066,6 +1067,207 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
     return new_child;
 }
 
+// Real replaceChild implementation
+GCValue js_node_replaceChild_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 2 || JS_IsNull(argv[0]) || JS_IsUndefined(argv[0]) ||
+        JS_IsNull(argv[1]) || JS_IsUndefined(argv[1])) {
+        return JS_ThrowTypeError(ctx, "replaceChild: invalid arguments");
+    }
+
+    GCValue new_child = argv[0];
+    GCValue old_child = argv[1];
+
+    // Replacing a node with itself is a no-op.
+    if (JS_StrictEq(ctx, new_child, old_child)) {
+        return old_child;
+    }
+
+    DOMNodeHandle parent = get_dom_node(ctx, this_val);
+    DOMNodeHandle old_node = get_dom_node(ctx, old_child);
+    if (!parent.valid() || !old_node.valid()) {
+        return throw_dom_exception(ctx, "NotFoundError", "Node not found");
+    }
+
+    // Verify oldChild is a child of this node.
+    GCValue old_parent = old_node.parent_node();
+    if (!JS_StrictEq(ctx, old_parent, this_val)) {
+        return throw_dom_exception(ctx, "NotFoundError", "Node is not a child of this node");
+    }
+
+    // Insert newChild before oldChild, then remove oldChild. insertBefore handles
+    // DocumentFragment expansion and reparenting.
+    GCValue insert_args[2] = { new_child, old_child };
+    js_node_insertBefore_real(ctx, this_val, 2, insert_args);
+
+    GCValue remove_args[1] = { old_child };
+    js_node_removeChild_real(ctx, this_val, 1, remove_args);
+
+    return old_child;
+}
+
+// Helper: true if node is a text node.
+static bool is_text_node(JSContextHandle ctx, GCValue node) {
+    DOMNodeHandle n = get_dom_node(ctx, node);
+    return n.valid() && n.node_type() == DOM_NODE_TYPE_TEXT;
+}
+
+// Real normalize implementation: merge adjacent text nodes and remove empty ones.
+GCValue js_node_normalize_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    DOMNodeHandle parent = get_dom_node(ctx, this_val);
+    if (!parent.valid()) {
+        return JS_UNDEFINED;
+    }
+
+    GCValue child = parent.first_child();
+    while (!JS_IsNull(child)) {
+        DOMNodeHandle child_node = get_dom_node(ctx, child);
+        if (!child_node.valid()) {
+            child = child_node.next_sibling();
+            continue;
+        }
+
+        if (child_node.node_type() != DOM_NODE_TYPE_TEXT) {
+            // Recursively normalize descendants first, then advance.
+            GCValue next = child_node.next_sibling();
+            js_node_normalize_real(ctx, child, 0, NULL);
+            child = next;
+            continue;
+        }
+
+        // Merge adjacent text nodes.
+        GCValue next = child_node.next_sibling();
+        if (!JS_IsNull(next) && is_text_node(ctx, next)) {
+            DOMNodeHandle next_node = get_dom_node(ctx, next);
+            const char *t1 = child_node.node_value();
+            const char *t2 = next_node.node_value();
+            size_t len1 = t1 ? strlen(t1) : 0;
+            size_t len2 = t2 ? strlen(t2) : 0;
+            char *merged = (char *)malloc(len1 + len2 + 1);
+            if (merged) {
+                if (len1) memcpy(merged, t1, len1);
+                if (len2) memcpy(merged + len1, t2, len2);
+                merged[len1 + len2] = '\0';
+                child_node.set_node_value(merged);
+                free(merged);
+            }
+            GCValue rem_args[1] = { next };
+            js_node_removeChild_real(ctx, this_val, 1, rem_args);
+            continue;
+        }
+
+        // Remove empty text nodes.
+        const char *val = child_node.node_value();
+        if (!val || !*val) {
+            GCValue rem_args[1] = { child };
+            js_node_removeChild_real(ctx, this_val, 1, rem_args);
+            child = next;
+            continue;
+        }
+
+        child = next;
+    }
+
+    return JS_UNDEFINED;
+}
+
+// Helpers for compareDocumentPosition
+static GCValue common_ancestor_node(JSContextHandle ctx, GCValue a, GCValue b) {
+    // Collect ancestors of a (including a itself)
+    GCValue cur = a;
+    GCValue ancestors[256];
+    int anc_count = 0;
+    while (!JS_IsNull(cur) && JS_IsObject(cur) && anc_count < 256) {
+        ancestors[anc_count++] = cur;
+        DOMNodeHandle n = get_dom_node(ctx, cur);
+        if (!n.valid()) break;
+        cur = n.parent_node();
+    }
+
+    cur = b;
+    while (!JS_IsNull(cur) && JS_IsObject(cur)) {
+        for (int i = 0; i < anc_count; i++) {
+            if (JS_StrictEq(ctx, ancestors[i], cur)) {
+                return cur;
+            }
+        }
+        DOMNodeHandle n = get_dom_node(ctx, cur);
+        if (!n.valid()) break;
+        cur = n.parent_node();
+    }
+    return JS_NULL;
+}
+
+static GCValue child_containing_node(JSContextHandle ctx, GCValue ancestor, GCValue node) {
+    GCValue cur = node;
+    while (!JS_IsNull(cur) && JS_IsObject(cur)) {
+        DOMNodeHandle n = get_dom_node(ctx, cur);
+        if (!n.valid()) break;
+        GCValue p = n.parent_node();
+        if (JS_StrictEq(ctx, p, ancestor)) {
+            return cur;
+            }
+        cur = p;
+    }
+    return JS_NULL;
+}
+
+// Real compareDocumentPosition implementation
+GCValue js_node_compareDocumentPosition_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1 || JS_IsNull(argv[0]) || JS_IsUndefined(argv[0])) {
+        return JS_ThrowTypeError(ctx, "compareDocumentPosition: invalid argument");
+    }
+
+    GCValue other = argv[0];
+    if (JS_StrictEq(ctx, this_val, other)) {
+        return JS_NewInt32(ctx, 0);
+    }
+
+    // If the nodes are in disconnected trees, report disconnected.
+    GCValue root1 = js_node_getRootNode_real(ctx, this_val, 0, NULL);
+    GCValue root2 = js_node_getRootNode_real(ctx, other, 0, NULL);
+    if (!JS_StrictEq(ctx, root1, root2)) {
+        return JS_NewInt32(ctx, 1 /* DOCUMENT_POSITION_DISCONNECTED */ | 32 /* DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC */);
+    }
+
+    // Ancestor/descendant relationships.
+    GCValue args[1] = { other };
+    GCValue contains1 = js_node_contains_real(ctx, this_val, 1, args);
+    if (JS_ToBool(ctx, contains1)) {
+        // other is contained by this -> other follows this in document order.
+        return JS_NewInt32(ctx, 4 /* DOCUMENT_POSITION_FOLLOWING */ | 16 /* DOCUMENT_POSITION_CONTAINED_BY */);
+    }
+    args[0] = this_val;
+    GCValue contains2 = js_node_contains_real(ctx, other, 1, args);
+    if (JS_ToBool(ctx, contains2)) {
+        // other contains this -> other precedes this.
+        return JS_NewInt32(ctx, 2 /* DOCUMENT_POSITION_PRECEDING */ | 8 /* DOCUMENT_POSITION_CONTAINS */);
+    }
+
+    GCValue common = common_ancestor_node(ctx, this_val, other);
+    if (JS_IsNull(common)) {
+        return JS_NewInt32(ctx, 1 | 32);
+    }
+
+    GCValue c1 = child_containing_node(ctx, common, this_val);
+    GCValue c2 = child_containing_node(ctx, common, other);
+    if (JS_StrictEq(ctx, c1, c2) || JS_IsNull(c1) || JS_IsNull(c2)) {
+        return JS_NewInt32(ctx, 0);
+    }
+
+    // Walk c1's next siblings; if we hit c2, c2 follows c1.
+    GCValue cur = c1;
+    while (!JS_IsNull(cur) && JS_IsObject(cur)) {
+        if (JS_StrictEq(ctx, cur, c2)) {
+            return JS_NewInt32(ctx, 4 /* FOLLOWING */);
+        }
+        DOMNodeHandle n = get_dom_node(ctx, cur);
+        if (!n.valid()) break;
+        cur = n.next_sibling();
+    }
+    return JS_NewInt32(ctx, 2 /* PRECEDING */);
+}
+
 // Real cloneNode implementation
 GCValue js_node_cloneNode_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     bool deep = false;
@@ -1968,56 +2170,167 @@ GCValue js_element_get_animations(JSContextHandle ctx, GCValue this_val, int arg
 // Real querySelector/querySelectorAll Implementation
 // ============================================================================
 
-// Simple selector matcher - supports tag name, #id, .class selectors
+// Helper: check if a whitespace-separated token list contains a token (case-insensitive).
+static bool token_list_contains(const char *list, const char *token, size_t token_len) {
+    if (!list || !token || token_len == 0) return false;
+    const char *p = list;
+    while (*p) {
+        while (*p && isspace((unsigned char)*p)) p++;
+        const char *start = p;
+        while (*p && !isspace((unsigned char)*p)) p++;
+        size_t len = (size_t)(p - start);
+        if (len == token_len && strncasecmp(start, token, len) == 0) return true;
+    }
+    return false;
+}
+
+// Helper: match an attribute value according to a CSS attribute selector operator.
+static bool attr_match(const char *attr_val, int op, const char *val, size_t val_len) {
+    if (!attr_val) return false;
+    size_t attr_len = strlen(attr_val);
+    switch (op) {
+        case 0: // [attr] (presence)
+            return true;
+        case 1: // [attr=value]
+            return attr_len == val_len && (val_len == 0 || memcmp(attr_val, val, val_len) == 0);
+        case 2: // [attr~=value]
+            return token_list_contains(attr_val, val, val_len);
+        case 3: // [attr|=value]
+            return (attr_len == val_len && strncasecmp(attr_val, val, val_len) == 0) ||
+                   (attr_len > val_len && strncasecmp(attr_val, val, val_len) == 0 && attr_val[val_len] == '-');
+        case 4: // [attr^=value]
+            return attr_len >= val_len && strncasecmp(attr_val, val, val_len) == 0;
+        case 5: // [attr$=value]
+            return attr_len >= val_len && strncasecmp(attr_val + attr_len - val_len, val, val_len) == 0;
+        case 6: // [attr*=value]
+            if (val_len == 0) return true;
+            for (size_t i = 0; i + val_len <= attr_len; i++) {
+                if (strncasecmp(attr_val + i, val, val_len) == 0) return true;
+            }
+            return false;
+    }
+    return false;
+}
+
+// Compound selector matcher.
+// Supports: tag, #id, .class (token-aware), [attr], [attr=value/~=/|=/^=/$=/*=], and simple pseudo-classes.
 bool matches_selector(JSContextHandle ctx, GCValue elem, const char* selector) {
     if (!selector || !*selector) return false;
-    
+
     DOMNodeHandle node = get_dom_node(ctx, elem);
-    
-    // ID selector: #id
-    if (selector[0] == '#') {
-        const char* target_id = selector + 1;
-        // First check DOMNode data
-        if (node.valid() && strcmp(node.id(), target_id) == 0) {
-            return true;
+    if (!node.valid() || node.node_type() != DOM_NODE_TYPE_ELEMENT) return false;
+
+    const char *p = selector;
+
+    // Optional type (tag) selector at the start.
+    if (isalpha((unsigned char)*p) || *p == '*' || *p == '|') {
+        const char *start = p;
+        while (*p && *p != '#' && *p != '.' && *p != '[' && *p != ':') p++;
+        size_t tag_len = (size_t)(p - start);
+        if (tag_len > 0 && !(tag_len == 1 && start[0] == '*')) {
+            const char *tag_name = node.node_name();
+            size_t node_tag_len = tag_name ? strlen(tag_name) : 0;
+            if (tag_len != node_tag_len || strncasecmp(start, tag_name, tag_len) != 0) {
+                return false;
+            }
         }
-        // Also check JS object property
-        GCValue id_val = JS_GetPropertyStr(ctx, elem, "id");
-        const char* id_str = JS_ToCString(ctx, id_val);
-        if (id_str && strcmp(id_str, target_id) == 0) {
-            return true;
-        }
-        return false;
     }
-    
-    // Class selector: .class
-    if (selector[0] == '.') {
-        const char* target_class = selector + 1;
-        // First check DOMNode data
-        if (node.valid() && strstr(node.class_name(), target_class) != NULL) {
-            return true;
+
+    while (*p) {
+        if (*p == '#') {
+            p++;
+            const char *start = p;
+            while (*p && *p != '#' && *p != '.' && *p != '[' && *p != ':') p++;
+            size_t len = (size_t)(p - start);
+            const char *id = node.id();
+            size_t id_len = id ? strlen(id) : 0;
+            bool id_ok = (len == id_len && strncasecmp(start, id, len) == 0);
+            if (!id_ok) {
+                GCValue id_val = JS_GetPropertyStr(ctx, elem, "id");
+                const char *id_prop = JS_ToCString(ctx, id_val);
+                size_t id_prop_len = id_prop ? strlen(id_prop) : 0;
+                id_ok = (len == id_prop_len && strncasecmp(start, id_prop, len) == 0);
+            }
+            if (!id_ok) return false;
+        } else if (*p == '.') {
+            p++;
+            const char *start = p;
+            while (*p && *p != '#' && *p != '.' && *p != '[' && *p != ':') p++;
+            size_t len = (size_t)(p - start);
+            if (!token_list_contains(node.class_name(), start, len)) {
+                GCValue class_val = JS_GetPropertyStr(ctx, elem, "className");
+                const char *class_prop = JS_ToCString(ctx, class_val);
+                if (!token_list_contains(class_prop, start, len)) return false;
+            }
+        } else if (*p == '[') {
+            p++;
+            while (*p == ' ' || *p == '\t') p++;
+            const char *name_start = p;
+            while (*p && *p != ']' && *p != '=' && *p != ' ' && *p != '\t' &&
+                   *p != '~' && *p != '|' && *p != '^' && *p != '$' && *p != '*') p++;
+            size_t name_len = (size_t)(p - name_start);
+
+            int op = 0;
+            if (*p == '~' || *p == '|' || *p == '^' || *p == '$' || *p == '*') {
+                char op_char = *p;
+                p++;
+                if (*p == '=') {
+                    p++;
+                    switch (op_char) {
+                        case '~': op = 2; break;
+                        case '|': op = 3; break;
+                        case '^': op = 4; break;
+                        case '$': op = 5; break;
+                        case '*': op = 6; break;
+                    }
+                }
+            } else if (*p == '=') {
+                op = 1;
+                p++;
+            }
+
+            while (*p == ' ' || *p == '\t') p++;
+            char quote = 0;
+            if (*p == '"' || *p == '\'') { quote = *p; p++; }
+            const char *val_start = p;
+            if (quote) {
+                while (*p && *p != quote) p++;
+            } else {
+                while (*p && *p != ']' && *p != ' ' && *p != '\t') p++;
+            }
+            size_t val_len = (size_t)(p - val_start);
+            if (quote && *p == quote) p++;
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p != ']') return false; // malformed attribute selector
+            p++; // skip ']'
+
+            char *attr_name = (char *)malloc(name_len + 1);
+            if (!attr_name) return false;
+            memcpy(attr_name, name_start, name_len);
+            attr_name[name_len] = '\0';
+            const char *attr_val = node.get_attribute(attr_name);
+            free(attr_name);
+            if (!attr_match(attr_val, op, val_start, val_len)) return false;
+        } else if (*p == ':') {
+            // Skip pseudo-classes (including functional pseudo-classes like :not(...)).
+            p++;
+            while (*p && *p != '(' && *p != '#' && *p != '.' && *p != '[' && *p != ':') p++;
+            if (*p == '(') {
+                int depth = 1;
+                p++;
+                while (*p && depth > 0) {
+                    if (*p == '(') depth++;
+                    else if (*p == ')') depth--;
+                    p++;
+                }
+            }
+        } else {
+            // Skip unexpected characters to avoid infinite loops.
+            p++;
         }
-        // Also check JS object property
-        GCValue class_val = JS_GetPropertyStr(ctx, elem, "className");
-        const char* class_str = JS_ToCString(ctx, class_val);
-        if (class_str && strstr(class_str, target_class) != NULL) {
-            return true;
-        }
-        return false;
     }
-    
-    // Tag selector
-    const char* tag_name = node.valid() ? node.node_name() : "";
-    // Check tagName property on object
-    if (tag_name[0] == '\0') {
-        GCValue tag_val = JS_GetPropertyStr(ctx, elem, "tagName");
-        const char* tag_str = JS_ToCString(ctx, tag_val);
-        if (tag_str) {
-            return strcasecmp(tag_str, selector) == 0;
-        }
-        return false;
-    }
-    return strcasecmp(tag_name, selector) == 0;
+
+    return true;
 }
 
 // Recursive querySelector helper
@@ -2452,17 +2765,545 @@ GCValue js_node_set_data(JSContextHandle ctx, GCValue this_val, int argc, GCValu
 // Document Methods Implementation
 // ============================================================================
 
-// document.createRange()
-GCValue js_document_create_range(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    GCValue range = JS_NewObject(ctx);
-    // Range properties
-    JS_SetPropertyStr(ctx, range, "collapsed", JS_TRUE);
-    JS_SetPropertyStr(ctx, range, "commonAncestorContainer", JS_NULL);
-    JS_SetPropertyStr(ctx, range, "endContainer", JS_NULL);
-    JS_SetPropertyStr(ctx, range, "endOffset", JS_NewInt32(ctx, 0));
+// ============================================================================
+// Range / Selection Implementation
+// ============================================================================
+
+static GCValue range_get_proto(JSContextHandle ctx, GCValue range) {
+    return JS_GetPrototype(ctx, range);
+}
+
+static GCValue range_new_instance(JSContextHandle ctx, GCValue range_ctor_or_proto) {
+    GCValue proto = JS_NULL;
+    if (JS_IsFunction(ctx, range_ctor_or_proto)) {
+        proto = JS_GetPropertyStr(ctx, range_ctor_or_proto, "prototype");
+    } else if (JS_IsObject(range_ctor_or_proto)) {
+        proto = range_ctor_or_proto;
+    }
+    if (JS_IsUndefined(proto) || JS_IsNull(proto)) {
+        proto = JS_NewObject(ctx);
+    }
+    GCValue range = JS_NewObjectProto(ctx, proto);
     JS_SetPropertyStr(ctx, range, "startContainer", JS_NULL);
     JS_SetPropertyStr(ctx, range, "startOffset", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, range, "endContainer", JS_NULL);
+    JS_SetPropertyStr(ctx, range, "endOffset", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, range, "collapsed", JS_TRUE);
+    JS_SetPropertyStr(ctx, range, "commonAncestorContainer", JS_NULL);
     return range;
+}
+
+static void range_update_collapsed(JSContextHandle ctx, GCValue range) {
+    GCValue sc = JS_GetPropertyStr(ctx, range, "startContainer");
+    GCValue ec = JS_GetPropertyStr(ctx, range, "endContainer");
+    int32_t so = 0, eo = 0;
+    JS_ToInt32(ctx, &so, JS_GetPropertyStr(ctx, range, "startOffset"));
+    JS_ToInt32(ctx, &eo, JS_GetPropertyStr(ctx, range, "endOffset"));
+    JS_SetPropertyStr(ctx, range, "collapsed",
+        JS_NewBool(ctx, JS_StrictEq(ctx, sc, ec) && so == eo));
+}
+
+static void range_update_common_ancestor(JSContextHandle ctx, GCValue range) {
+    GCValue sc = JS_GetPropertyStr(ctx, range, "startContainer");
+    GCValue ec = JS_GetPropertyStr(ctx, range, "endContainer");
+    if (JS_IsNull(sc) || JS_IsNull(ec) || JS_IsUndefined(sc) || JS_IsUndefined(ec)) {
+        JS_SetPropertyStr(ctx, range, "commonAncestorContainer", JS_NULL);
+        return;
+    }
+    GCValue anc = common_ancestor_node(ctx, sc, ec);
+    JS_SetPropertyStr(ctx, range, "commonAncestorContainer", anc);
+}
+
+static int node_child_index(JSContextHandle ctx, GCValue parent, GCValue child) {
+    if (JS_IsNull(parent) || JS_IsNull(child)) return -1;
+    DOMNodeHandle p = get_dom_node(ctx, parent);
+    if (!p.valid()) return -1;
+    int idx = 0;
+    GCValue c = p.first_child();
+    while (!JS_IsNull(c)) {
+        if (JS_StrictEq(ctx, c, child)) return idx;
+        DOMNodeHandle cn = get_dom_node(ctx, c);
+        if (!cn.valid()) break;
+        c = cn.next_sibling();
+        idx++;
+    }
+    return -1;
+}
+
+static int node_child_count(JSContextHandle ctx, GCValue parent) {
+    if (JS_IsNull(parent)) return 0;
+    DOMNodeHandle p = get_dom_node(ctx, parent);
+    if (!p.valid()) return 0;
+    int count = 0;
+    GCValue c = p.first_child();
+    while (!JS_IsNull(c)) {
+        count++;
+        DOMNodeHandle cn = get_dom_node(ctx, c);
+        if (!cn.valid()) break;
+        c = cn.next_sibling();
+    }
+    return count;
+}
+
+// Range constructor (also used by document.createRange)
+GCValue js_range_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    return range_new_instance(ctx, new_target);
+}
+
+GCValue js_range_set_start(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 2) return JS_ThrowTypeError(ctx, "setStart requires 2 arguments");
+    int32_t offset = 0;
+    JS_ToInt32(ctx, &offset, argv[1]);
+    JS_SetPropertyStr(ctx, this_val, "startContainer", argv[0]);
+    JS_SetPropertyStr(ctx, this_val, "startOffset", JS_NewInt32(ctx, offset));
+    range_update_collapsed(ctx, this_val);
+    range_update_common_ancestor(ctx, this_val);
+    return JS_UNDEFINED;
+}
+
+GCValue js_range_set_end(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 2) return JS_ThrowTypeError(ctx, "setEnd requires 2 arguments");
+    int32_t offset = 0;
+    JS_ToInt32(ctx, &offset, argv[1]);
+    JS_SetPropertyStr(ctx, this_val, "endContainer", argv[0]);
+    JS_SetPropertyStr(ctx, this_val, "endOffset", JS_NewInt32(ctx, offset));
+    range_update_collapsed(ctx, this_val);
+    range_update_common_ancestor(ctx, this_val);
+    return JS_UNDEFINED;
+}
+
+GCValue js_range_set_start_before(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "setStartBefore requires 1 argument");
+    GCValue parent = js_node_get_parentNode(ctx, argv[0], 0, NULL);
+    int idx = node_child_index(ctx, parent, argv[0]);
+    JS_SetPropertyStr(ctx, this_val, "startContainer", parent);
+    JS_SetPropertyStr(ctx, this_val, "startOffset", JS_NewInt32(ctx, idx));
+    range_update_collapsed(ctx, this_val);
+    range_update_common_ancestor(ctx, this_val);
+    return JS_UNDEFINED;
+}
+
+GCValue js_range_set_start_after(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "setStartAfter requires 1 argument");
+    GCValue parent = js_node_get_parentNode(ctx, argv[0], 0, NULL);
+    int idx = node_child_index(ctx, parent, argv[0]);
+    JS_SetPropertyStr(ctx, this_val, "startContainer", parent);
+    JS_SetPropertyStr(ctx, this_val, "startOffset", JS_NewInt32(ctx, idx + 1));
+    range_update_collapsed(ctx, this_val);
+    range_update_common_ancestor(ctx, this_val);
+    return JS_UNDEFINED;
+}
+
+GCValue js_range_set_end_before(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "setEndBefore requires 1 argument");
+    GCValue parent = js_node_get_parentNode(ctx, argv[0], 0, NULL);
+    int idx = node_child_index(ctx, parent, argv[0]);
+    JS_SetPropertyStr(ctx, this_val, "endContainer", parent);
+    JS_SetPropertyStr(ctx, this_val, "endOffset", JS_NewInt32(ctx, idx));
+    range_update_collapsed(ctx, this_val);
+    range_update_common_ancestor(ctx, this_val);
+    return JS_UNDEFINED;
+}
+
+GCValue js_range_set_end_after(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "setEndAfter requires 1 argument");
+    GCValue parent = js_node_get_parentNode(ctx, argv[0], 0, NULL);
+    int idx = node_child_index(ctx, parent, argv[0]);
+    JS_SetPropertyStr(ctx, this_val, "endContainer", parent);
+    JS_SetPropertyStr(ctx, this_val, "endOffset", JS_NewInt32(ctx, idx + 1));
+    range_update_collapsed(ctx, this_val);
+    range_update_common_ancestor(ctx, this_val);
+    return JS_UNDEFINED;
+}
+
+GCValue js_range_select_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "selectNode requires 1 argument");
+    GCValue parent = js_node_get_parentNode(ctx, argv[0], 0, NULL);
+    int idx = node_child_index(ctx, parent, argv[0]);
+    JS_SetPropertyStr(ctx, this_val, "startContainer", parent);
+    JS_SetPropertyStr(ctx, this_val, "startOffset", JS_NewInt32(ctx, idx));
+    JS_SetPropertyStr(ctx, this_val, "endContainer", parent);
+    JS_SetPropertyStr(ctx, this_val, "endOffset", JS_NewInt32(ctx, idx + 1));
+    JS_SetPropertyStr(ctx, this_val, "collapsed", JS_FALSE);
+    range_update_common_ancestor(ctx, this_val);
+    return JS_UNDEFINED;
+}
+
+GCValue js_range_select_node_contents(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "selectNodeContents requires 1 argument");
+    int count = node_child_count(ctx, argv[0]);
+    JS_SetPropertyStr(ctx, this_val, "startContainer", argv[0]);
+    JS_SetPropertyStr(ctx, this_val, "startOffset", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, this_val, "endContainer", argv[0]);
+    JS_SetPropertyStr(ctx, this_val, "endOffset", JS_NewInt32(ctx, count));
+    JS_SetPropertyStr(ctx, this_val, "collapsed", JS_NewBool(ctx, count == 0));
+    range_update_common_ancestor(ctx, this_val);
+    return JS_UNDEFINED;
+}
+
+GCValue js_range_collapse(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    bool to_start = true;
+    if (argc > 0) to_start = JS_ToBool(ctx, argv[0]);
+    if (to_start) {
+        GCValue sc = JS_GetPropertyStr(ctx, this_val, "startContainer");
+        int32_t so = 0;
+        JS_ToInt32(ctx, &so, JS_GetPropertyStr(ctx, this_val, "startOffset"));
+        JS_SetPropertyStr(ctx, this_val, "endContainer", sc);
+        JS_SetPropertyStr(ctx, this_val, "endOffset", JS_NewInt32(ctx, so));
+    } else {
+        GCValue ec = JS_GetPropertyStr(ctx, this_val, "endContainer");
+        int32_t eo = 0;
+        JS_ToInt32(ctx, &eo, JS_GetPropertyStr(ctx, this_val, "endOffset"));
+        JS_SetPropertyStr(ctx, this_val, "startContainer", ec);
+        JS_SetPropertyStr(ctx, this_val, "startOffset", JS_NewInt32(ctx, eo));
+    }
+    JS_SetPropertyStr(ctx, this_val, "collapsed", JS_TRUE);
+    range_update_common_ancestor(ctx, this_val);
+    return JS_UNDEFINED;
+}
+
+GCValue js_range_clone_range(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    GCValue proto = JS_GetPrototype(ctx, this_val);
+    GCValue clone = range_new_instance(ctx, proto);
+    GCValue sc = JS_GetPropertyStr(ctx, this_val, "startContainer");
+    GCValue so = JS_GetPropertyStr(ctx, this_val, "startOffset");
+    GCValue ec = JS_GetPropertyStr(ctx, this_val, "endContainer");
+    GCValue eo = JS_GetPropertyStr(ctx, this_val, "endOffset");
+    JS_SetPropertyStr(ctx, clone, "startContainer", sc);
+    JS_SetPropertyStr(ctx, clone, "startOffset", so);
+    JS_SetPropertyStr(ctx, clone, "endContainer", ec);
+    JS_SetPropertyStr(ctx, clone, "endOffset", eo);
+    range_update_collapsed(ctx, clone);
+    range_update_common_ancestor(ctx, clone);
+    return clone;
+}
+
+GCValue js_range_to_string(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    // Full text extraction is complex; return the textContent of the common
+    // ancestor as a best-effort approximation.
+    GCValue anc = JS_GetPropertyStr(ctx, this_val, "commonAncestorContainer");
+    if (JS_IsNull(anc) || JS_IsUndefined(anc)) return JS_NewString(ctx, "");
+    GCValue tc = JS_GetPropertyStr(ctx, anc, "textContent");
+    if (JS_IsUndefined(tc) || JS_IsNull(tc)) return JS_NewString(ctx, "");
+    return tc;
+}
+
+GCValue js_range_get_bounding_client_rect(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    GCValue rect = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, rect, "x", JS_NewFloat64(ctx, 0));
+    JS_SetPropertyStr(ctx, rect, "y", JS_NewFloat64(ctx, 0));
+    JS_SetPropertyStr(ctx, rect, "width", JS_NewFloat64(ctx, 0));
+    JS_SetPropertyStr(ctx, rect, "height", JS_NewFloat64(ctx, 0));
+    JS_SetPropertyStr(ctx, rect, "top", JS_NewFloat64(ctx, 0));
+    JS_SetPropertyStr(ctx, rect, "left", JS_NewFloat64(ctx, 0));
+    JS_SetPropertyStr(ctx, rect, "right", JS_NewFloat64(ctx, 0));
+    JS_SetPropertyStr(ctx, rect, "bottom", JS_NewFloat64(ctx, 0));
+    return rect;
+}
+
+GCValue js_range_get_client_rects(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    return JS_NewArray(ctx);
+}
+
+GCValue js_range_detach(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    return JS_UNDEFINED;
+}
+
+GCValue js_range_delete_contents(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    // Best-effort: if the range is collapsed, nothing to do.
+    GCValue collapsed = JS_GetPropertyStr(ctx, this_val, "collapsed");
+    if (JS_ToBool(ctx, collapsed)) return JS_UNDEFINED;
+    // Otherwise clear the endpoints to avoid repeated deletions.
+    JS_SetPropertyStr(ctx, this_val, "endContainer", JS_GetPropertyStr(ctx, this_val, "startContainer"));
+    JS_SetPropertyStr(ctx, this_val, "endOffset", JS_GetPropertyStr(ctx, this_val, "startOffset"));
+    JS_SetPropertyStr(ctx, this_val, "collapsed", JS_TRUE);
+    return JS_UNDEFINED;
+}
+
+GCValue js_range_extract_contents(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    GCValue frag = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, frag, "nodeType", JS_NewInt32(ctx, DOM_NODE_TYPE_DOCUMENT_FRAGMENT));
+    // Deletion is a no-op for now; return an empty fragment.
+    js_range_delete_contents(ctx, this_val, 0, NULL);
+    return frag;
+}
+
+GCValue js_range_insert_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1) return JS_ThrowTypeError(ctx, "insertNode requires 1 argument");
+    GCValue sc = JS_GetPropertyStr(ctx, this_val, "startContainer");
+    int32_t so = 0;
+    JS_ToInt32(ctx, &so, JS_GetPropertyStr(ctx, this_val, "startOffset"));
+    DOMNodeHandle n = get_dom_node(ctx, sc);
+    if (n.valid() && n.node_type() == DOM_NODE_TYPE_ELEMENT) {
+        GCValue child = n.first_child();
+        int idx = 0;
+        while (!JS_IsNull(child) && idx < so) {
+            DOMNodeHandle cn = get_dom_node(ctx, child);
+            if (!cn.valid()) break;
+            child = cn.next_sibling();
+            idx++;
+        }
+        GCValue args[2] = { argv[0], child };
+        js_node_insertBefore_real(ctx, sc, 2, args);
+    }
+    return JS_UNDEFINED;
+}
+
+GCValue js_range_surround_contents(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    return JS_UNDEFINED;
+}
+
+const JSCFunctionListEntry js_range_proto_funcs[] = {
+    JS_CFUNC_DEF("setStart", 2, js_range_set_start),
+    JS_CFUNC_DEF("setEnd", 2, js_range_set_end),
+    JS_CFUNC_DEF("setStartBefore", 1, js_range_set_start_before),
+    JS_CFUNC_DEF("setStartAfter", 1, js_range_set_start_after),
+    JS_CFUNC_DEF("setEndBefore", 1, js_range_set_end_before),
+    JS_CFUNC_DEF("setEndAfter", 1, js_range_set_end_after),
+    JS_CFUNC_DEF("selectNode", 1, js_range_select_node),
+    JS_CFUNC_DEF("selectNodeContents", 1, js_range_select_node_contents),
+    JS_CFUNC_DEF("collapse", 1, js_range_collapse),
+    JS_CFUNC_DEF("cloneRange", 0, js_range_clone_range),
+    JS_CFUNC_DEF("toString", 0, js_range_to_string),
+    JS_CFUNC_DEF("getBoundingClientRect", 0, js_range_get_bounding_client_rect),
+    JS_CFUNC_DEF("getClientRects", 0, js_range_get_client_rects),
+    JS_CFUNC_DEF("detach", 0, js_range_detach),
+    JS_CFUNC_DEF("deleteContents", 0, js_range_delete_contents),
+    JS_CFUNC_DEF("extractContents", 0, js_range_extract_contents),
+    JS_CFUNC_DEF("insertNode", 1, js_range_insert_node),
+    JS_CFUNC_DEF("surroundContents", 1, js_range_surround_contents),
+};
+const size_t js_range_proto_funcs_count = sizeof(js_range_proto_funcs) / sizeof(js_range_proto_funcs[0]);
+
+// document.createRange() returns a Range instance.
+GCValue js_document_create_range(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue range_ctor = JS_GetPropertyStr(ctx, global, "Range");
+    GCValue range_proto = JS_GetPropertyStr(ctx, range_ctor, "prototype");
+    GCValue range = JS_NewObjectProto(ctx, range_proto);
+    JS_SetPropertyStr(ctx, range, "startContainer", JS_NULL);
+    JS_SetPropertyStr(ctx, range, "startOffset", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, range, "endContainer", JS_NULL);
+    JS_SetPropertyStr(ctx, range, "endOffset", JS_NewInt32(ctx, 0));
+    JS_SetPropertyStr(ctx, range, "collapsed", JS_TRUE);
+    JS_SetPropertyStr(ctx, range, "commonAncestorContainer", JS_NULL);
+    return range;
+}
+
+// Selection helper: update Selection properties from its stored Range.
+static void selection_update_from_range(JSContextHandle ctx, GCValue selection) {
+    GCValue range = JS_GetPropertyStr(ctx, selection, "__range");
+    if (JS_IsNull(range) || JS_IsUndefined(range)) {
+        JS_SetPropertyStr(ctx, selection, "anchorNode", JS_NULL);
+        JS_SetPropertyStr(ctx, selection, "anchorOffset", JS_NewInt32(ctx, 0));
+        JS_SetPropertyStr(ctx, selection, "focusNode", JS_NULL);
+        JS_SetPropertyStr(ctx, selection, "focusOffset", JS_NewInt32(ctx, 0));
+        JS_SetPropertyStr(ctx, selection, "isCollapsed", JS_TRUE);
+        JS_SetPropertyStr(ctx, selection, "rangeCount", JS_NewInt32(ctx, 0));
+        JS_SetPropertyStr(ctx, selection, "type", JS_NewString(ctx, "None"));
+        return;
+    }
+    GCValue sc = JS_GetPropertyStr(ctx, range, "startContainer");
+    GCValue so = JS_GetPropertyStr(ctx, range, "startOffset");
+    GCValue ec = JS_GetPropertyStr(ctx, range, "endContainer");
+    GCValue eo = JS_GetPropertyStr(ctx, range, "endOffset");
+    GCValue collapsed = JS_GetPropertyStr(ctx, range, "collapsed");
+    JS_SetPropertyStr(ctx, selection, "anchorNode", sc);
+    JS_SetPropertyStr(ctx, selection, "anchorOffset", so);
+    JS_SetPropertyStr(ctx, selection, "focusNode", ec);
+    JS_SetPropertyStr(ctx, selection, "focusOffset", eo);
+    JS_SetPropertyStr(ctx, selection, "isCollapsed", collapsed);
+    JS_SetPropertyStr(ctx, selection, "rangeCount", JS_NewInt32(ctx, 1));
+    JS_SetPropertyStr(ctx, selection, "type", JS_ToBool(ctx, collapsed) ? JS_NewString(ctx, "Caret") : JS_NewString(ctx, "Range"));
+}
+
+GCValue js_selection_get_range_at(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    GCValue range = JS_GetPropertyStr(ctx, this_val, "__range");
+    if (JS_IsNull(range) || JS_IsUndefined(range)) return JS_NULL;
+    return range;
+}
+
+GCValue js_selection_remove_all_ranges(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    JS_SetPropertyStr(ctx, this_val, "__range", JS_NULL);
+    selection_update_from_range(ctx, this_val);
+    return JS_UNDEFINED;
+}
+
+GCValue js_selection_add_range(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1) return JS_UNDEFINED;
+    JS_SetPropertyStr(ctx, this_val, "__range", argv[0]);
+    selection_update_from_range(ctx, this_val);
+    return JS_UNDEFINED;
+}
+
+GCValue js_selection_remove_range(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    GCValue current = JS_GetPropertyStr(ctx, this_val, "__range");
+    if (argc > 0 && JS_StrictEq(ctx, current, argv[0])) {
+        JS_SetPropertyStr(ctx, this_val, "__range", JS_NULL);
+    }
+    selection_update_from_range(ctx, this_val);
+    return JS_UNDEFINED;
+}
+
+GCValue js_selection_collapse(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1) return JS_UNDEFINED;
+    GCValue range = js_document_create_range(ctx, JS_NULL, 0, NULL);
+    int32_t offset = 0;
+    if (argc > 1) JS_ToInt32(ctx, &offset, argv[1]);
+    JS_SetPropertyStr(ctx, range, "startContainer", argv[0]);
+    JS_SetPropertyStr(ctx, range, "startOffset", JS_NewInt32(ctx, offset));
+    JS_SetPropertyStr(ctx, range, "endContainer", argv[0]);
+    JS_SetPropertyStr(ctx, range, "endOffset", JS_NewInt32(ctx, offset));
+    JS_SetPropertyStr(ctx, range, "collapsed", JS_TRUE);
+    range_update_common_ancestor(ctx, range);
+    JS_SetPropertyStr(ctx, this_val, "__range", range);
+    selection_update_from_range(ctx, this_val);
+    return JS_UNDEFINED;
+}
+
+GCValue js_selection_extend(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 2) return JS_UNDEFINED;
+    GCValue range = JS_GetPropertyStr(ctx, this_val, "__range");
+    if (JS_IsNull(range) || JS_IsUndefined(range)) return JS_UNDEFINED;
+    int32_t offset = 0;
+    JS_ToInt32(ctx, &offset, argv[1]);
+    JS_SetPropertyStr(ctx, range, "endContainer", argv[0]);
+    JS_SetPropertyStr(ctx, range, "endOffset", JS_NewInt32(ctx, offset));
+    range_update_collapsed(ctx, range);
+    range_update_common_ancestor(ctx, range);
+    selection_update_from_range(ctx, this_val);
+    return JS_UNDEFINED;
+}
+
+GCValue js_selection_select_all_children(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1) return JS_UNDEFINED;
+    GCValue range = js_document_create_range(ctx, JS_NULL, 0, NULL);
+    js_range_select_node_contents(ctx, range, 1, argv);
+    JS_SetPropertyStr(ctx, this_val, "__range", range);
+    selection_update_from_range(ctx, this_val);
+    return JS_UNDEFINED;
+}
+
+GCValue js_selection_delete_from_document(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    GCValue range = JS_GetPropertyStr(ctx, this_val, "__range");
+    if (!JS_IsNull(range) && !JS_IsUndefined(range)) {
+        js_range_delete_contents(ctx, range, 0, NULL);
+        selection_update_from_range(ctx, this_val);
+    }
+    return JS_UNDEFINED;
+}
+
+GCValue js_selection_to_string(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    GCValue range = JS_GetPropertyStr(ctx, this_val, "__range");
+    if (JS_IsNull(range) || JS_IsUndefined(range)) return JS_NewString(ctx, "");
+    return js_range_to_string(ctx, range, 0, NULL);
+}
+
+static GCValue js_selection_contains_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    return JS_FALSE;
+}
+
+static void js_selection_attach_methods(JSContextHandle ctx, GCValue selection) {
+    JS_SetPropertyStr(ctx, selection, "getRangeAt",
+        JS_NewCFunction(ctx, js_selection_get_range_at, "getRangeAt", 1));
+    JS_SetPropertyStr(ctx, selection, "removeAllRanges",
+        JS_NewCFunction(ctx, js_selection_remove_all_ranges, "removeAllRanges", 0));
+    JS_SetPropertyStr(ctx, selection, "addRange",
+        JS_NewCFunction(ctx, js_selection_add_range, "addRange", 1));
+    JS_SetPropertyStr(ctx, selection, "removeRange",
+        JS_NewCFunction(ctx, js_selection_remove_range, "removeRange", 1));
+    JS_SetPropertyStr(ctx, selection, "collapse",
+        JS_NewCFunction(ctx, js_selection_collapse, "collapse", 2));
+    JS_SetPropertyStr(ctx, selection, "extend",
+        JS_NewCFunction(ctx, js_selection_extend, "extend", 2));
+    JS_SetPropertyStr(ctx, selection, "selectAllChildren",
+        JS_NewCFunction(ctx, js_selection_select_all_children, "selectAllChildren", 1));
+    JS_SetPropertyStr(ctx, selection, "deleteFromDocument",
+        JS_NewCFunction(ctx, js_selection_delete_from_document, "deleteFromDocument", 0));
+    JS_SetPropertyStr(ctx, selection, "toString",
+        JS_NewCFunction(ctx, js_selection_to_string, "toString", 0));
+    JS_SetPropertyStr(ctx, selection, "containsNode",
+        JS_NewCFunction(ctx, js_selection_contains_node, "containsNode", 1));
+}
+
+GCValue js_get_selection(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue selection = JS_GetPropertyStr(ctx, global, "__cyberSelection");
+    if (JS_IsUndefined(selection) || JS_IsNull(selection)) {
+        selection = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, selection, "__range", JS_NULL);
+        js_selection_attach_methods(ctx, selection);
+        selection_update_from_range(ctx, selection);
+        JS_SetPropertyStr(ctx, global, "__cyberSelection", selection);
+    }
+    return selection;
+}
+
+// ============================================================================
+// DOMParser / XMLSerializer Implementation
+// ============================================================================
+
+GCValue js_dom_parser_parse_from_string(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_ThrowTypeError(ctx, "parseFromString requires 2 arguments");
+    const char *str = JS_ToCString(ctx, argv[0]);
+    const char *mime = JS_ToCString(ctx, argv[1]);
+    if (!str) str = "";
+    if (!mime) mime = "text/html";
+
+    bool as_xml = (strstr(mime, "xml") != NULL);
+    HtmlDocument *doc = html_parse(str, strlen(str));
+    if (!doc) return JS_NULL;
+
+    GCValue js_doc = html_create_js_document(ctx, doc);
+    html_document_free(doc);
+
+    if (!JS_IsUndefined(js_doc) && !JS_IsNull(js_doc)) {
+        JS_SetPropertyStr(ctx, js_doc, "contentType", JS_NewString(ctx, as_xml ? "application/xml" : "text/html"));
+    }
+    return js_doc;
+}
+
+GCValue js_dom_parser_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
+    (void)new_target; (void)argc; (void)argv;
+    GCValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "parseFromString",
+        JS_NewCFunction(ctx, js_dom_parser_parse_from_string, "parseFromString", 2));
+    return obj;
+}
+
+GCValue js_xml_serializer_serialize_to_string(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    if (argc < 1 || JS_IsNull(argv[0]) || JS_IsUndefined(argv[0])) return JS_NewString(ctx, "");
+    char *html = html_serialize_js_node(ctx, argv[0]);
+    GCValue result = JS_NewString(ctx, html ? html : "");
+    free(html);
+    return result;
+}
+
+GCValue js_xml_serializer_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
+    (void)new_target; (void)argc; (void)argv;
+    GCValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "serializeToString",
+        JS_NewCFunction(ctx, js_xml_serializer_serialize_to_string, "serializeToString", 1));
+    return obj;
 }
 
 // ============================================================================
@@ -2808,10 +3649,64 @@ GCValue js_document_import_node(JSContextHandle ctx, GCValue this_val, int argc,
     return clone;
 }
 
+// Recursive hit-test helper for elementFromPoint.
+static GCValue hit_test_layout_node(JSContextHandle ctx, LayoutContext *layout, int idx, double x, double y) {
+    if (!layout || idx < 0 || idx >= layout->tree.count) return JS_NULL;
+    LayoutBox *box = &layout->boxes[idx];
+    LayoutNodeRef *ref = &layout->tree.nodes[idx];
+
+    bool inside = (x >= box->x && x <= box->x + box->width &&
+                   y >= box->y && y <= box->y + box->height);
+    if (!inside) return JS_NULL;
+
+    // Try children in reverse DOM order (last sibling paints on top).
+    int last_child = -1;
+    int child = ref->first_child_idx;
+    while (child >= 0) {
+        last_child = child;
+        child = layout->tree.nodes[child].next_sibling_idx;
+    }
+    while (last_child >= 0) {
+        GCValue child_hit = hit_test_layout_node(ctx, layout, last_child, x, y);
+        if (!JS_IsNull(child_hit)) return child_hit;
+        last_child = layout->tree.nodes[last_child].prev_sibling_idx;
+    }
+
+    // Deepest hit: map back to the JS object if this is an element.
+    if (ref->dom_node_idx >= 0 && layout->doc) {
+        HtmlNode *hnode = (HtmlNode *)po_array_payload(&layout->doc->array, ref->dom_node_idx);
+        if (hnode && hnode->has_js_object && hnode->type == HTML_NODE_ELEMENT &&
+            !JS_IsUndefined(hnode->js_object) && !JS_IsNull(hnode->js_object)) {
+            return hnode->js_object;
+        }
+    }
+    return JS_NULL;
+}
+
 // document.elementFromPoint()
 GCValue js_document_element_from_point(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    // Return documentElement for any point
-    return JS_GetPropertyStr(ctx, this_val, "documentElement");
+    double x = 0, y = 0;
+    if (argc > 0) JS_ToFloat64(ctx, &x, argv[0]);
+    if (argc > 1) JS_ToFloat64(ctx, &y, argv[1]);
+
+    GCValue doc_elem = JS_GetPropertyStr(ctx, this_val, "documentElement");
+    if (JS_IsUndefined(doc_elem) || JS_IsNull(doc_elem)) return JS_NULL;
+
+    // Build a native HtmlDocument from the current JS DOM and run layout.
+    HtmlDocument *doc = html_document_from_js_dom(ctx, this_val);
+    if (!doc) return doc_elem;
+
+    LayoutContext layout;
+    memset(&layout, 0, sizeof(layout));
+    bool ok = css_layout_run(&layout, doc, NULL, 1920.0, 1080.0);
+    GCValue result = doc_elem;
+    if (ok && layout.tree.root_idx >= 0) {
+        GCValue hit = hit_test_layout_node(ctx, &layout, layout.tree.root_idx, x, y);
+        if (!JS_IsNull(hit)) result = hit;
+    }
+    if (ok) css_layout_tree_free(&layout);
+    html_document_free(doc);
+    return result;
 }
 
 
