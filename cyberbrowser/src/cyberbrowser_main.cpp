@@ -739,6 +739,24 @@ int main(int argc, char *argv[]) {
 
         print_captured_googlevideo_urls(g_ctx);
 
+        // Diagnostic: log the state of ytd-app and the masthead before final
+        // layout so we can see why the masthead content is missing.
+        {
+            const char *diag_js =
+                "(function(){"
+                "  var app = document.querySelector('ytd-app');"
+                "  var mast = document.querySelector('#masthead');"
+                "  function log(msg){ if(typeof console!=='undefined'&&console.error) try{console.error(msg);}catch(x){} }"
+                "  log('DIAG app='+(app?app.tagName:'null')+' app.hostElement='+(app&&app.hostElement?app.hostElement.tagName:'null'));"
+                "  log('DIAG mast='+(mast?mast.tagName:'null')+' mast.id='+(mast?mast.id:'null'));"
+                "  log('DIAG mast.data type='+(mast?typeof mast.data:'null')+' keys='+(mast&&mast.data?Object.keys(mast.data).length:'null'));"
+                "  log('DIAG app.data type='+(app?typeof app.data:'null')+' keys='+(app&&app.data?Object.keys(app.data).length:'null'));"
+                "  log('DIAG loadInitialData='+(typeof window.loadInitialData)+' getInitialData='+(typeof window.getInitialData));"
+                "  log('DIAG mast.shadowRoot='+(mast&&mast.shadowRoot?'yes':'no')+' mast.innerHTML.len='+(mast&&typeof mast.innerHTML==='string'?mast.innerHTML.length:'null'));"
+                "})();";
+            JS_Eval(g_ctx, diag_js, strlen(diag_js), "<diag>", JS_EVAL_TYPE_GLOBAL);
+        }
+
         // Upgrade any custom elements that were defined during script execution.
         // This lets Polymer run connectedCallback and stamp shadow-DOM content
         // on the existing server-rendered skeleton.

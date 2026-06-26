@@ -746,8 +746,10 @@ GCValue html_create_element_js_with_document(JSContextHandle ctx, GCValue js_doc
     if (!JS_IsUndefined(js_doc) && !JS_IsNull(js_doc)) {
         GCValue createElement = JS_GetPropertyStr(ctx, js_doc, "createElement");
         if (!JS_IsUndefined(createElement) && !JS_IsNull(createElement)) {
+            fprintf(stderr, "[CREATE-POPULATE] tag=%s before createElement\n", tag_name); fflush(stderr);
             GCValue args[1] = { JS_NewString(ctx, tag_name) };
             element = JS_Call(ctx, createElement, js_doc, 1, args);
+            fprintf(stderr, "[CREATE-POPULATE] tag=%s after createElement\n", tag_name); fflush(stderr);
             if (!JS_IsException(element) && !JS_IsUndefined(element) && !JS_IsNull(element)) {
                 /* Set attributes from parsed HTML.  The inline 'style' attribute is
                  * special-cased: document.createElement already created a style
@@ -1151,6 +1153,7 @@ bool html_populate_js_document(JSContextHandle ctx, GCValue js_doc, HtmlDocument
     css_document_state_clear(JS_GetRuntime(ctx));
     
     LOG_INFO("Populating JS document from parsed HTML");
+    fprintf(stderr, "[POPULATE] start\n"); fflush(stderr);
     
     /* Get existing documentElement, body, head (the hardcoded skeleton) */
     GCValue old_doc_element = JS_GetPropertyStr(ctx, js_doc, "documentElement");
@@ -1162,20 +1165,24 @@ bool html_populate_js_document(JSContextHandle ctx, GCValue js_doc, HtmlDocument
     HtmlNode *body = html_document_body(doc);
     
     /* Create NEW elements from the parsed HTML tags */
+    fprintf(stderr, "[POPULATE] create doc element\n"); fflush(stderr);
     GCValue new_doc_element = html_create_element_js_with_document(
         ctx, js_doc,
         root ? root->tag_name : "html",
         root ? root->attributes : NULL);
+    fprintf(stderr, "[POPULATE] create head element\n"); fflush(stderr);
     
     GCValue new_head_element = html_create_element_js_with_document(
         ctx, js_doc,
         head ? head->tag_name : "head",
         head ? head->attributes : NULL);
+    fprintf(stderr, "[POPULATE] create body element\n"); fflush(stderr);
     
     GCValue new_body_element = html_create_element_js_with_document(
         ctx, js_doc,
         body ? body->tag_name : "body",
         body ? body->attributes : NULL);
+    fprintf(stderr, "[POPULATE] elements created\n"); fflush(stderr);
     
     /* Ensure the root elements point back to the document. */
     dom_node_set_owner_document(ctx, new_doc_element, js_doc);

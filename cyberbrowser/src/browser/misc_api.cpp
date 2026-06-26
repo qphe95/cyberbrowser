@@ -1094,19 +1094,28 @@ GCValue js_cyber_upgrade_element(JSContextHandle ctx, GCValue this_val, int argc
         fprintf(stderr, "[CE-UPGRADE] ctor %s threw: %s\n", name_lc, msg);
         (void)cyber_upgrade_stack_pop(ctx); // clean stack
     } else {
-        // If the constructor created a new object (shouldn't happen with our
-        // stack), at least try to preserve any own properties it set.
-        if (JS_IsObject(result) && !JS_IsUndefined(result) && !JS_IsNull(result)) {
-            // result and el may be the same object; if not we ignore.
-        }
+        fprintf(stderr, "[CE-UPGRADE] ctor %s ok (result obj=%d)\n", name_lc, JS_IsObject(result));
     }
 
     // Fire connectedCallback if the element is already connected.
     GCValue is_connected = JS_GetPropertyStr(ctx, el, "isConnected");
-    if (JS_ToBool(ctx, is_connected)) {
+    bool connected = JS_ToBool(ctx, is_connected);
+    fprintf(stderr, "[CE-UPGRADE] %s connected=%d\n", name_lc, connected);
+    if (connected) {
         GCValue cb = JS_GetPropertyStr(ctx, el, "connectedCallback");
         if (!JS_IsUndefined(cb) && !JS_IsNull(cb) && JS_IsFunction(ctx, cb)) {
-            JS_Call(ctx, cb, el, 0, NULL);
+            fprintf(stderr, "[CE-UPGRADE] %s firing connectedCallback\n", name_lc);
+            GCValue ret = JS_Call(ctx, cb, el, 0, NULL);
+            if (JS_IsException(ret)) {
+                GCValue exc = JS_GetException(ctx);
+                GCValue exc_msg = JS_GetPropertyStr(ctx, exc, "message");
+                const char *msg = "(none)";
+                if (!JS_IsUndefined(exc_msg) && !JS_IsNull(exc_msg)) {
+                    const char *m = JS_ToCString(ctx, exc_msg);
+                    if (m) msg = m;
+                }
+                fprintf(stderr, "[CE-UPGRADE] %s connectedCallback threw: %s\n", name_lc, msg);
+            }
         }
     }
 

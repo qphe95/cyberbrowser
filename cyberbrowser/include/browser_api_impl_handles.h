@@ -659,10 +659,32 @@ public:
             strncpy(sr->mode, mode, sizeof(sr->mode) - 1);
             sr->mode[sizeof(sr->mode) - 1] = '\0';
             sr->innerHTML = JS_NewString(ctx, "");
-            sr->first_child = JS_NULL;
-            sr->last_child = JS_NULL;
-            sr->child_count = 0;
             sr->ctx = ctx;
+
+            // Back the shadow root with a regular DOMNode fragment so it can
+            // reuse the normal DOM tree mutation/traversal code.
+            GCHandle dn = gc_alloc_grey(sizeof(DOMNode), JS_GC_OBJ_TYPE_DATA);
+            if (dn != GC_HANDLE_NULL) {
+                DOMNode* node = (DOMNode*)gc_deref(dn);
+                memset(node, 0, sizeof(DOMNode));
+                node->node_type = DOM_NODE_TYPE_DOCUMENT_FRAGMENT;
+                strncpy(node->node_name, "#document-fragment", sizeof(node->node_name) - 1);
+                node->node_name[sizeof(node->node_name) - 1] = '\0';
+                node->ctx = ctx;
+                node->parent_node = JS_NULL;
+                node->first_child = JS_NULL;
+                node->last_child = JS_NULL;
+                node->previous_sibling = JS_NULL;
+                node->next_sibling = JS_NULL;
+                node->owner_document = JS_NULL;
+                node->shadow_root = JS_NULL;
+                node->computed_style_handle = GC_HANDLE_NULL;
+                node->next_class_sibling = GC_HANDLE_NULL;
+                node->next_tag_sibling = GC_HANDLE_NULL;
+                node->js_object = JS_NULL;
+                gc_publish(dn);
+                sr->dom_node = dn;
+            }
         }
         return ShadowRootDataHandle(h);
     }
@@ -705,44 +727,14 @@ public:
         if (p) p->innerHTML = val;
     }
 
-    GCValue first_child() const {
+    GCHandle dom_node() const {
         ShadowRootData* p = get_ptr();
-        return p ? p->first_child : JS_NULL;
+        return p ? p->dom_node : GC_HANDLE_NULL;
     }
 
-    void set_first_child(GCValue val) {
+    void set_dom_node(GCHandle val) {
         ShadowRootData* p = get_ptr();
-        if (p) p->first_child = val;
-    }
-
-    GCValue last_child() const {
-        ShadowRootData* p = get_ptr();
-        return p ? p->last_child : JS_NULL;
-    }
-
-    void set_last_child(GCValue val) {
-        ShadowRootData* p = get_ptr();
-        if (p) p->last_child = val;
-    }
-
-    int child_count() const {
-        ShadowRootData* p = get_ptr();
-        return p ? p->child_count : 0;
-    }
-
-    void set_child_count(int count) {
-        ShadowRootData* p = get_ptr();
-        if (p) p->child_count = count;
-    }
-
-    void increment_child_count() {
-        ShadowRootData* p = get_ptr();
-        if (p) p->child_count++;
-    }
-
-    void decrement_child_count() {
-        ShadowRootData* p = get_ptr();
-        if (p) p->child_count--;
+        if (p) p->dom_node = val;
     }
 
     JSContextHandle context() const {

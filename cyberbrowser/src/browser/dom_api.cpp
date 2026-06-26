@@ -750,8 +750,11 @@ void js_shadow_root_mark(JSRuntimeHandle rt, GCValue val,
     /* Mark JSValue fields stored in C memory so the GC sees them. */
     JS_MarkValue(rt, sr->host, mark_func);
     JS_MarkValue(rt, sr->innerHTML, mark_func);
-    JS_MarkValue(rt, sr->first_child, mark_func);
-    JS_MarkValue(rt, sr->last_child, mark_func);
+
+    /* Keep the backing DOMNode alive; it stores the actual tree pointers. */
+    if (sr->dom_node != GC_HANDLE_NULL) {
+        mark_func(rt, sr->dom_node);
+    }
 }
 
 JSClassDef js_shadow_root_class_def = {
@@ -784,23 +787,35 @@ bool is_dom_node(JSContextHandle ctx, GCValue obj) {
     return h != GC_HANDLE_NULL;
 }
 
+// Helper: Get DOM node data if it exists.  ShadowRoot objects are backed by a
+// regular DOMNode stored inside their ShadowRootData, so this lets the rest of
+// the DOM implementation treat a ShadowRoot as just another node parent.
+DOMNodeHandle get_dom_node(JSContextHandle ctx, GCValue obj) {
+    (void)ctx;
+    DOMNodeHandle node = DOMNodeHandle::from_object(obj);
+    if (node.valid()) return node;
+
+    ShadowRootDataHandle sr = ShadowRootDataHandle::from_object(obj);
+    if (sr.valid()) {
+        GCHandle h = sr.dom_node();
+        if (h != GC_HANDLE_NULL) return DOMNodeHandle(h);
+    }
+    return DOMNodeHandle();
+}
+
 // Helper: Get or create DOM node data for a JS object
 DOMNodeHandle get_or_create_dom_node(JSContextHandle ctx, GCValue obj, int node_type, const char* node_name) {
-    if (is_dom_node(ctx, obj)) {
-        return DOMNodeHandle::from_object_check(ctx, obj);
+    DOMNodeHandle node = get_dom_node(ctx, obj);
+    if (node.valid()) {
+        return node;
     }
-    
+
     // Create new DOM node data
-    DOMNodeHandle node = DOMNodeHandle::create(ctx, node_type, node_name);
+    node = DOMNodeHandle::create(ctx, node_type, node_name);
     if (node.valid()) {
         node.attach_to_object(obj);
     }
     return node;
-}
-
-// Helper: Get DOM node data if it exists
-DOMNodeHandle get_dom_node(JSContextHandle ctx, GCValue obj) {
-    return DOMNodeHandle::from_object(obj);
 }
 
 // Real appendChild implementation

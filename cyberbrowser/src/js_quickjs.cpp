@@ -22,6 +22,8 @@
 extern "C" void dom_node_set_owner_document(JSContextHandle ctx, GCValue node, GCValue doc);
 extern "C" GCValue js_create_document_fragment(JSContextHandle ctx);
 extern "C" GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+extern "C" GCValue js_element_querySelector_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+extern "C" GCValue js_element_querySelectorAll_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 
 /* Timer API functions from browser_api_impl.cpp */
 extern "C" int timer_process_due(JSContextHandle ctx);
@@ -1876,6 +1878,9 @@ GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int ar
 
         // Upgrade custom elements immediately if a constructor is already
         // registered for this tag name (prototype-only upgrade).
+        if (tag) {
+            fprintf(stderr, "[CREATE-UPGRADE] tag=%s before upgrade\n", tag); fflush(stderr);
+        }
         GCValue global = JS_GetGlobalObject(ctx);
         GCValue upgrade_el = JS_GetPropertyStr(ctx, global, "__cyber_upgradeElement");
         if (!JS_IsUndefined(upgrade_el) && !JS_IsNull(upgrade_el) && JS_IsFunction(ctx, upgrade_el)) {
@@ -1883,22 +1888,39 @@ GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int ar
             GCValue result = JS_Call(ctx, upgrade_el, global, 1, args);
             (void)result;
         }
+        if (tag) {
+            fprintf(stderr, "[CREATE-UPGRADE] tag=%s after upgrade\n", tag); fflush(stderr);
+        }
     }
     
     return elem;
 }
 
 static GCValue js_document_get_element_by_id(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    // Return null - YouTube will create its own elements
-    return JS_NULL;
+    if (argc < 1) return JS_NULL;
+    const char *id = JS_ToCString(ctx, argv[0]);
+    if (!id || !*id) return JS_NULL;
+
+    GCValue doc_elem = JS_GetPropertyStr(ctx, this_val, "documentElement");
+    if (JS_IsUndefined(doc_elem) || JS_IsNull(doc_elem)) return JS_NULL;
+
+    // Build a simple #id selector. YouTube ids are alphanumeric with hyphens/underscores.
+    char selector[256];
+    snprintf(selector, sizeof(selector), "#%s", id);
+    GCValue args[1] = { JS_NewString(ctx, selector) };
+    return js_element_querySelector_real(ctx, doc_elem, 1, args);
 }
 
 static GCValue js_document_query_selector(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    return JS_NULL;
+    GCValue doc_elem = JS_GetPropertyStr(ctx, this_val, "documentElement");
+    if (JS_IsUndefined(doc_elem) || JS_IsNull(doc_elem)) return JS_NULL;
+    return js_element_querySelector_real(ctx, doc_elem, argc, argv);
 }
 
 static GCValue js_document_query_selector_all(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    return JS_NewArray(ctx);
+    GCValue doc_elem = JS_GetPropertyStr(ctx, this_val, "documentElement");
+    if (JS_IsUndefined(doc_elem) || JS_IsNull(doc_elem)) return JS_NewArray(ctx);
+    return js_element_querySelectorAll_real(ctx, doc_elem, argc, argv);
 }
 
 static GCValue js_document_get_head(JSContextHandle ctx, GCValue this_val) {

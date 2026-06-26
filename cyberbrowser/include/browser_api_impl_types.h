@@ -88,13 +88,7 @@ typedef struct {
     GCValue host;           // The element that hosts this shadow root
     char mode[16];          // "open" or "closed"
     GCValue innerHTML;      // Shadow root content (as string for stub)
-    
-    // Real DOM tree structure for shadow root children
-    GCValue first_child;    // First child node or null
-    GCValue last_child;     // Last child node or null
-    int child_count;        // Number of child nodes
-    
-    // Reference back to shadow root JS object for tree operations
+    GCHandle dom_node;      // DOMNode backing the shadow root tree
     JSContextHandle ctx;
 } ShadowRootData;
 
