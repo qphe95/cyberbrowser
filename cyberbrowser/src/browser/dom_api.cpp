@@ -3913,38 +3913,6 @@ GCValue js_element_closest(JSContextHandle ctx, GCValue this_val,
 }
 
 // ============================================================================
-// Custom element upgrade helper (upgrade an element when it is attached)
-// ============================================================================
-
-static bool try_upgrade_element_on_attach(JSContextHandle ctx, GCValue elem) {
-    if (JS_IsNull(elem) || JS_IsUndefined(elem) || !JS_IsObject(elem)) {
-        return false;
-    }
-    // Already upgraded?
-    GCValue upgraded_val = JS_GetPropertyStr(ctx, elem, "__CE_upgraded");
-    if (JS_ToBool(ctx, upgraded_val)) {
-        return false;
-    }
-    // Must be an element with a hyphenated tag name.
-    GCValue tag_val = JS_GetPropertyStr(ctx, elem, "tagName");
-    const char *tag = JS_ToCString(ctx, tag_val);
-    if (!tag || strchr(tag, '-') == NULL) {
-        return false;
-    }
-
-    GCValue global = JS_GetGlobalObject(ctx);
-    GCValue upgrade_fn = JS_GetPropertyStr(ctx, global, "__cyber_upgradeElement");
-    if (JS_IsUndefined(upgrade_fn) || JS_IsNull(upgrade_fn) || !JS_IsFunction(ctx, upgrade_fn)) {
-        return false;
-    }
-
-    GCValue args[1] = { elem };
-    GCValue result = JS_Call(ctx, upgrade_fn, global, 1, args);
-    (void)result;
-    return true;
-}
-
-// ============================================================================
 // HTMLSlotElement helpers
 // ============================================================================
 

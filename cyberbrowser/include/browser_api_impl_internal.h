@@ -250,6 +250,8 @@ GCValue js_element_get_attribute_names(JSContextHandle ctx, GCValue this_val, in
 GCValue js_element_matches(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_closest(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_cyber_upgrade_element(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_cyber_ce_enqueue_upgrade(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_cyber_ce_flush_reactions(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 extern JSClassDef js_event_class_def;
 GCValue js_event_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
 GCValue js_event_preventDefault(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);

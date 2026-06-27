@@ -3578,34 +3578,45 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, global, "__cyber_upgradeElement",
         JS_NewCFunction(ctx, js_cyber_upgrade_element, "__cyber_upgradeElement", 1));
 
+    // Reaction-queue helpers used by define() and customElements.upgrade() to
+    // avoid running constructors synchronously while DOM operations are in
+    // progress.
+    JS_SetPropertyStr(ctx, global, "__cyber_enqueueUpgradeReaction",
+        JS_NewCFunction(ctx, js_cyber_ce_enqueue_upgrade, "__cyber_enqueueUpgradeReaction", 1));
+    JS_SetPropertyStr(ctx, global, "__cyber_flushCustomElementReactions",
+        JS_NewCFunction(ctx, js_cyber_ce_flush_reactions, "__cyber_flushCustomElementReactions", 0));
+
     // JS wrappers that batch-upgrade elements and implement customElements.upgrade.
     {
         const char *upgrade_js =
             "(function(){"
-            "  window.__cyber_upgradeAll = function(name) {"
-            "    if (!window.customElements) return;"
+            "  window.__cyber_enqueueUpgradeAll = function(name) {"
+            "    if (!window.customElements || !document) return;"
             "    var ctor = window.customElements.get(name);"
             "    if (!ctor || !ctor.prototype) return;"
             "    var list = document.getElementsByTagName(name);"
-            "    if (typeof console !== 'undefined' && console.error) try { console.error('[CE-UPGRADE] upgradeAll ' + name + ' found=' + list.length); } catch(x) {}"
             "    for (var i = 0; i < list.length; i++) {"
-            "      var el = list[i];"
-            "      if ((name === 'ytd-masthead' || name === 'ytd-app') && typeof console !== 'undefined' && console.error) {"
-            "        try { console.error('[CE-UPGRADE] ' + name + ' id=' + (el.__cyber_id||'?') + ' parent=' + (el.parentNode && el.parentNode.tagName) + '#' + (el.parentNode && el.parentNode.id || '') + ' connected=' + el.isConnected); } catch(x) {}"
-            "      }"
-            "      window.__cyber_upgradeElement(list[i]);"
+            "      window.__cyber_enqueueUpgradeReaction(list[i]);"
             "    }"
             "  };"
             "  window.customElements.upgrade = function(root) {"
             "    if (!root) return;"
+            "    var queue = [];"
             "    var walk = function(node) {"
             "      if (node.nodeType === 1) {"
-            "        window.__cyber_upgradeElement(node);"
+            "        var tag = node.tagName;"
+            "        if (tag && tag.indexOf('-') >= 0 && !node.__CE_upgraded) {"
+            "          queue.push(node);"
+            "        }"
             "        var children = node.childNodes;"
             "        for (var i = 0; i < children.length; i++) walk(children[i]);"
             "      }"
             "    };"
             "    walk(root);"
+            "    for (var i = 0; i < queue.length; i++) {"
+            "      window.__cyber_enqueueUpgradeReaction(queue[i]);"
+            "    }"
+            "    window.__cyber_flushCustomElementReactions();"
             "  };"
             "})();";
         JS_Eval(ctx, upgrade_js, strlen(upgrade_js), "<ce_upgrade>", JS_EVAL_TYPE_GLOBAL);

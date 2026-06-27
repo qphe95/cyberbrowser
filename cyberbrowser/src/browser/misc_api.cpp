@@ -102,6 +102,110 @@ static GCValue cyber_upgrade_stack_pop(JSContextHandle ctx) {
     return el;
 }
 
+// Forward declaration for the per-element upgrade helper defined later.
+GCValue js_cyber_upgrade_element(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+
+// ============================================================================
+// Custom element reaction queue
+// ============================================================================
+// The HTML spec does not run custom-element constructors synchronously from
+// define() or from DOM insertion.  Instead it enqueues upgrade/callback
+// reactions and flushes them before returning to user script.  We approximate
+// that with a global JS queue plus QuickJS's JS_EnqueueJob microtask path.
+
+static GCValue cyber_ce_reaction_queue(JSContextHandle ctx) {
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue queue = JS_GetPropertyStr(ctx, global, "__cyber_ce_reaction_queue");
+    if (!JS_IsArray(ctx, queue)) {
+        queue = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, global, "__cyber_ce_reaction_queue", queue);
+    }
+    return queue;
+}
+
+static void cyber_ce_reaction_queue_push(JSContextHandle ctx, GCValue el) {
+    GCValue upgraded = JS_GetPropertyStr(ctx, el, "__CE_upgraded");
+    if (JS_ToBool(ctx, upgraded)) return;
+    GCValue pending = JS_GetPropertyStr(ctx, el, "__CE_upgrade_pending");
+    if (JS_ToBool(ctx, pending)) return;
+
+    GCValue queue = cyber_ce_reaction_queue(ctx);
+    GCValue len_val = JS_GetPropertyStr(ctx, queue, "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, len_val);
+    JS_SetPropertyUint32(ctx, queue, len, el);
+    JS_SetPropertyStr(ctx, el, "__CE_upgrade_pending", JS_TRUE);
+}
+
+GCValue js_cyber_ce_enqueue_upgrade(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_UNDEFINED;
+    GCValue el = argv[0];
+    if (JS_IsNull(el) || JS_IsUndefined(el) || !JS_IsObject(el)) return JS_UNDEFINED;
+
+    GCValue node_type_val = JS_GetPropertyStr(ctx, el, "nodeType");
+    int32_t node_type = 0;
+    JS_ToInt32(ctx, &node_type, node_type_val);
+    if (node_type != 1) return JS_UNDEFINED;
+
+    GCValue tag_val = JS_GetPropertyStr(ctx, el, "tagName");
+    const char *tag = JS_ToCString(ctx, tag_val);
+    if (!tag) return JS_UNDEFINED;
+    bool has_hyphen = (strchr(tag, '-') != NULL);
+    JS_FreeCString(ctx, tag);
+    if (has_hyphen) {
+        cyber_ce_reaction_queue_push(ctx, el);
+    }
+    return JS_UNDEFINED;
+}
+
+GCValue js_cyber_ce_flush_reactions(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    GCValue global = JS_GetGlobalObject(ctx);
+    JS_SetPropertyStr(ctx, global, "__cyber_ce_reaction_scheduled", JS_FALSE);
+
+    GCValue queue = cyber_ce_reaction_queue(ctx);
+    int max_waves = 100;
+    while (max_waves-- > 0) {
+        GCValue len_val = JS_GetPropertyStr(ctx, queue, "length");
+        uint32_t len = 0;
+        JS_ToUint32(ctx, &len, len_val);
+        if (len == 0) break;
+
+        for (uint32_t i = 0; i < len; i++) {
+            GCValue el = JS_GetPropertyUint32(ctx, queue, i);
+            JS_SetPropertyStr(ctx, el, "__CE_upgrade_pending", JS_FALSE);
+            js_cyber_upgrade_element(ctx, JS_UNDEFINED, 1, &el);
+        }
+
+        // Remove the slice we just processed from the front of the queue.
+        GCValue new_len_val = JS_GetPropertyStr(ctx, queue, "length");
+        uint32_t new_len = 0;
+        JS_ToUint32(ctx, &new_len, new_len_val);
+        uint32_t remaining = (new_len > len) ? (new_len - len) : 0;
+        for (uint32_t i = 0; i < remaining; i++) {
+            GCValue item = JS_GetPropertyUint32(ctx, queue, len + i);
+            JS_SetPropertyUint32(ctx, queue, i, item);
+        }
+        JS_SetPropertyStr(ctx, queue, "length", JS_NewInt32(ctx, (int32_t)remaining));
+    }
+    return JS_UNDEFINED;
+}
+
+// Thin wrapper so the same flush logic can be used as a QuickJS job.
+static GCValue js_cyber_ce_flush_reactions_job(JSContextHandle ctx, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    return js_cyber_ce_flush_reactions(ctx, JS_UNDEFINED, 0, NULL);
+}
+
+static void cyber_ce_schedule_flush(JSContextHandle ctx) {
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue scheduled = JS_GetPropertyStr(ctx, global, "__cyber_ce_reaction_scheduled");
+    if (JS_ToBool(ctx, scheduled)) return;
+    JS_SetPropertyStr(ctx, global, "__cyber_ce_reaction_scheduled", JS_TRUE);
+    JS_EnqueueJob(ctx, js_cyber_ce_flush_reactions_job, 0, NULL);
+}
+
 // Constructor for HTMLElement - creates object with HTMLElement.prototype in chain
 // Uses js_dom_node_class_id so DOM node data can be retrieved via JS_GetOpaqueHandle
 // Per-upgrade budget for HTMLElement constructor calls.  Some custom-element
@@ -1013,16 +1117,19 @@ GCValue js_custom_elements_define(JSContextHandle ctx, GCValue this_val, int arg
     // Store in registry (the this_val should be the customElements object)
     JS_SetPropertyStr(ctx, this_val, name, argv[1]);
 
-    // Upgrade any existing elements of this tag name now that a constructor
-    // has been registered.  The upgrade is prototype-only to avoid invoking
-    // ES5-shimmed constructors on existing DOMNode-backed objects.
+    // Enqueue upgrade reactions for any existing elements of this tag name.
+    // The spec does not upgrade them synchronously from inside define(); it
+    // queues reactions that are flushed before returning to user script.  This
+    // avoids reentrancy and stack-overflow crashes when Polymer constructors
+    // stamp shadow DOM while define() is still on the call stack.
     GCValue global = JS_GetGlobalObject(ctx);
-    GCValue upgrade_all = JS_GetPropertyStr(ctx, global, "__cyber_upgradeAll");
-    if (!JS_IsUndefined(upgrade_all) && !JS_IsNull(upgrade_all) && JS_IsFunction(ctx, upgrade_all)) {
+    GCValue enqueue_all = JS_GetPropertyStr(ctx, global, "__cyber_enqueueUpgradeAll");
+    if (!JS_IsUndefined(enqueue_all) && !JS_IsNull(enqueue_all) && JS_IsFunction(ctx, enqueue_all)) {
         GCValue args[1] = { JS_NewString(ctx, name) };
-        GCValue result = JS_Call(ctx, upgrade_all, global, 1, args);
+        GCValue result = JS_Call(ctx, enqueue_all, global, 1, args);
         (void)result;
     }
+    cyber_ce_schedule_flush(ctx);
 
     return JS_UNDEFINED;
 }
@@ -1119,53 +1226,26 @@ GCValue js_cyber_upgrade_element(JSContextHandle ctx, GCValue this_val, int argc
     // element as `this`, so the user constructor body runs against the real
     // DOM-backed object.  If the constructor throws, mark the element as failed
     // and skip connectedCallback, just like a real browser would.
-    //
-    // Emulator safeguard: if the element already has server-rendered children,
-    // do not run the user constructor.  Polymer/YouTube shell constructors stamp
-    // a shadow DOM tree that replaces those children, and the emulator is not yet
-    // robust enough to run them without crashing.  This is a behavior-based guard
-    // ("skip constructors for populated server-rendered skeletons"), not a
-    // hardcoded site-specific list.
     bool ctor_ok = false;
-    bool skip_ctor = false;
-    GCValue child_nodes = JS_GetPropertyStr(ctx, el, "childNodes");
-    if (JS_IsArray(ctx, child_nodes)) {
-        GCValue len_val = JS_GetPropertyStr(ctx, child_nodes, "length");
-        uint32_t child_len = 0;
-        JS_ToUint32(ctx, &child_len, len_val);
-        if (child_len > 0) skip_ctor = true;
-    }
-
-    if (skip_ctor) {
-        ctor_ok = true;
-    } else {
-        // Always invoke the registered constructor as a constructor (`new`).
-        // The webcomponents-es5-adapter wraps every user constructor in an ES6
-        // class whose constructor calls native super() and then runs the user
-        // body against the same element.  Calling the wrapper as a plain
-        // function violates ES6 class semantics and is what produced the
-        // "must be invoked with 'new'" errors the old tag-name skip list was
-        // papering over.
-        g_upgrade_ctor_start = g_html_elem_ctor_count;
-        cyber_upgrade_stack_push(ctx, el);
-        GCValue ctor_ret = JS_CallConstructor(ctx, ctor, 0, NULL);
-        if (JS_IsException(ctor_ret)) {
-            GCValue exc = JS_GetException(ctx);
-            GCValue exc_msg = JS_GetPropertyStr(ctx, exc, "message");
-            const char *msg = "(none)";
-            if (!JS_IsUndefined(exc_msg) && !JS_IsNull(exc_msg)) {
-                const char *m = JS_ToCString(ctx, exc_msg);
-                if (m) msg = m;
-            }
-            fprintf(stderr, "[CE-UPGRADE] %s user ctor threw: %s\n", name_lc, msg);
-            if (strstr(msg, "custom element constructor exceeded memory budget") != NULL) {
-                fprintf(stderr, "[CE-UPGRADE] %s aborted: constructor exceeded generic memory budget\n", name_lc);
-            }
-            JS_SetPropertyStr(ctx, el, "__CE_failed", JS_TRUE);
-            cyber_upgrade_stack_pop(ctx);
-        } else {
-            ctor_ok = true;
+    g_upgrade_ctor_start = g_html_elem_ctor_count;
+    cyber_upgrade_stack_push(ctx, el);
+    GCValue ctor_ret = JS_CallConstructor(ctx, ctor, 0, NULL);
+    if (JS_IsException(ctor_ret)) {
+        GCValue exc = JS_GetException(ctx);
+        GCValue exc_msg = JS_GetPropertyStr(ctx, exc, "message");
+        const char *msg = "(none)";
+        if (!JS_IsUndefined(exc_msg) && !JS_IsNull(exc_msg)) {
+            const char *m = JS_ToCString(ctx, exc_msg);
+            if (m) msg = m;
         }
+        fprintf(stderr, "[CE-UPGRADE] %s user ctor threw: %s\n", name_lc, msg);
+        if (strstr(msg, "custom element constructor exceeded memory budget") != NULL) {
+            fprintf(stderr, "[CE-UPGRADE] %s aborted: constructor exceeded generic memory budget\n", name_lc);
+        }
+        JS_SetPropertyStr(ctx, el, "__CE_failed", JS_TRUE);
+        cyber_upgrade_stack_pop(ctx);
+    } else {
+        ctor_ok = true;
     }
 
     JS_SetPropertyStr(ctx, el, "__CE_upgraded", JS_TRUE);
