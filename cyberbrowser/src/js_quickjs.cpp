@@ -33,33 +33,6 @@ extern "C" void timer_api_reset(void);
 /* From QuickJS: last property read on undefined/null (diagnostic) */
 extern char g_last_undefined_prop[256];
 
-/* Simple in-place substring replacement (returns malloc'd string or NULL) */
-static char *replace_all(const char *src, size_t src_len, const char *needle, const char *repl, size_t *out_len) {
-    size_t needle_len = strlen(needle);
-    size_t repl_len = strlen(repl);
-    if (needle_len == 0) return NULL;
-    size_t count = 0;
-    const char *tmp = src;
-    while ((tmp = strstr(tmp, needle)) != NULL) { count++; tmp += needle_len; }
-    if (count == 0) return NULL;
-    size_t new_len = src_len + count * (repl_len - needle_len);
-    char *dst = (char*)malloc(new_len + 1);
-    if (!dst) return NULL;
-    const char *s = src;
-    char *d = dst;
-    while ((tmp = strstr(s, needle)) != NULL) {
-        size_t before = tmp - s;
-        memcpy(d, s, before); d += before;
-        memcpy(d, repl, repl_len); d += repl_len;
-        s = tmp + needle_len;
-    }
-    size_t remaining = src_len - (s - src);
-    memcpy(d, s, remaining); d += remaining;
-    *d = '\0';
-    if (out_len) *out_len = new_len;
-    return dst;
-}
-
 /* Logging wrapper that uses platform abstraction */
 static void log_to_file(const char *tag, const char *fmt, ...) {
     va_list args;
@@ -2183,6 +2156,11 @@ bool js_quickjs_create_runtime(void) {
     // Enable JSON support
     platform_log(LOG_LEVEL_INFO, "js_quickjs", "Enabling JSON support...");
     JS_AddIntrinsicJSON(g_js_context);
+
+    // Enable Proxy support - required by modern frameworks and by spec-correct
+    // lazy dependency-injection fallbacks without source-code patches.
+    platform_log(LOG_LEVEL_INFO, "js_quickjs", "Enabling Proxy support...");
+    JS_AddIntrinsicProxy(g_js_context);
     
     // Register custom classes
     JSClassDef xhr_def = {.class_name = "XMLHttpRequest", .finalizer = js_xhr_finalizer, .gc_mark = js_xhr_mark};
@@ -2571,102 +2549,6 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
         (void)guard_val; /* GC-managed, no explicit free */
     }
 
-    // Wrap customElements.define so we can see exactly which registration fails.
-    {
-        const char *define_guard = "(function(){"
-            "var reg = window.customElements;"
-            "if (!reg || reg.__cyber_wrapped) return;"
-            "var orig = reg.define;"
-            "reg.define = function(name, ctor, options){"
-            "  var _log = (typeof __bgmdwnldr_log !== 'undefined') ? __bgmdwnldr_log : (typeof console !== 'undefined' ? console.log : function(){});"
-            "  try {"
-            "    var stack = ''; try { throw new Error('stack'); } catch(e){ stack = e.stack || ''; }"
-            "    _log('[CE-DEFINE] start ' + name + ' caller=' + stack.split('\\n').slice(1,3).join(' | '));"
-            "    var r = orig.apply(this, arguments);"
-            "    _log('[CE-DEFINE] ok ' + name);"
-            "    return r;"
-            "  } catch(e) {"
-            "    _log('[CE-DEFINE] FAILED ' + name + ': ' + e.message + ' stack=' + (e.stack||'(none)'));"
-            "    throw e;"
-            "  }"
-            "};"
-            "reg.__cyber_wrapped = true;"
-            "})();";
-        GCValue define_guard_val = JS_Eval(ctx, define_guard, strlen(define_guard), "<ce_define_guard>", JS_EVAL_TYPE_GLOBAL);
-        (void)define_guard_val;
-    }
-
-    // Wrap _.dc (kevlar_base Polymer fn) so we can see which element definition
-    // fails *before* customElements.define is reached.
-    {
-        const char *dc_guard = "(function(){"
-            "var _log = (typeof __bgmdwnldr_log !== 'undefined') ? __bgmdwnldr_log : (typeof console !== 'undefined' ? console.log : function(){});"
-            "var base = this.default_kevlar_base || (this.default_kevlar_base = {});"
-            "_log('[DC-GUARD] base=' + base + ' wrapped=' + base.__cyber_dc_wrapped);"
-            "if (base.__cyber_dc_wrapped) return;"
-            "var origDC = null;"
-            "Object.defineProperty(base, 'dc', {"
-            "  get: function(){ return origDC; },"
-            "  set: function(v){"
-            "    _log('[DC-GUARD] setter fired, origDC=' + (origDC !== null));"
-            "    if (origDC) { origDC = v; return; }"
-            "    var wrapper = function(d){"
-            "      var is = (d && typeof d === 'object' && d.is) ? d.is : '(fn)';"
-            "      _log('[DC] call typeof=' + typeof d + ' is=' + is);"
-            "      try {"
-            "        _log('[DC] start ' + is);"
-            "        var r = v(d);"
-            "        _log('[DC] ok ' + is);"
-            "        return r;"
-            "      } catch(e) {"
-            "        _log('[DC] FAILED ' + is + ': ' + e.message + ' stack=' + (e.stack||'(none)'));"
-            "        throw e;"
-            "      }"
-            "    };"
-            "    wrapper.Class = v.Class;"
-            "    origDC = wrapper;"
-            "  },"
-            "  configurable: true"
-            "});"
-            "base.__cyber_dc_wrapped = true;"
-            "})();";
-        GCValue dc_guard_val = JS_Eval(ctx, dc_guard, strlen(dc_guard), "<dc_guard>", JS_EVAL_TYPE_GLOBAL);
-        (void)dc_guard_val;
-    }
-
-    // Wrap _.dc.Class as well, since some element definitions go through it.
-    {
-        const char *dc_class_guard = "(function(){"
-            "var _log = (typeof __bgmdwnldr_log !== 'undefined') ? __bgmdwnldr_log : (typeof console !== 'undefined' ? console.log : function(){});"
-            "var base = this.default_kevlar_base || (this.default_kevlar_base = {});"
-            "if (base.__cyber_dc_class_wrapped) return;"
-            "var checkAndWrap = function(){"
-            "  if (!base.dc || !base.dc.Class || base.dc.Class.__cyber_wrapped) return;"
-            "  var orig = base.dc.Class;"
-            "  base.dc.Class = function(d,z){"
-            "    var is = (d && typeof d === 'object' && d.is) ? d.is : '(no is)';"
-            "    try {"
-            "      _log('[DC-CLASS] start ' + is);"
-            "      var r = orig.apply(this, arguments);"
-            "      _log('[DC-CLASS] ok ' + is);"
-            "      return r;"
-            "    } catch(e) {"
-            "      _log('[DC-CLASS] FAILED ' + is + ': ' + e.message + ' stack=' + (e.stack||'(none)'));"
-            "      throw e;"
-            "    }"
-            "  };"
-            "  base.dc.Class.__cyber_wrapped = true;"
-            "  _log('[DC-CLASS] wrapper installed');"
-            "};"
-            "checkAndWrap();"
-            "var iv = setInterval(checkAndWrap, 1);"
-            "setTimeout(function(){ clearInterval(iv); }, 5000);"
-            "base.__cyber_dc_class_wrapped = true;"
-            "})();";
-        GCValue dc_class_guard_val = JS_Eval(ctx, dc_class_guard, strlen(dc_class_guard), "<dc_class_guard>", JS_EVAL_TYPE_GLOBAL);
-        (void)dc_class_guard_val;
-    }
-
     // Execute all scripts
     int success_count = 0;
     const size_t MAX_EXEC_SCRIPT_SIZE = 64 * 1024 * 1024; /* 64 MiB safety limit */
@@ -2711,127 +2593,13 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
         if (timeout_state.limit_seconds > 120.0) timeout_state.limit_seconds = 120.0;
         JS_SetInterruptHandler(JS_GetRuntime(ctx), js_exec_timeout_handler, &timeout_state);
 
-        // Wrap every _.dc({...}) call in the big kevlar base script so a failing
-        // element definition is logged and skipped instead of aborting the whole
-        // bundle. This lets later definitions (including ytd-app/ytd-masthead)
-        // continue to run and exposes which element is hitting the missing API.
-        char *patched_script = NULL;
-        size_t patched_len = script_lens[i];
-        const char *current_src = scripts[i];
-        size_t current_len = script_lens[i];
-        if (script_lens[i] > 1000000) {
-            // Only apply YouTube-specific patches to the kevlar application
-            // bundle.  Other large scripts (e.g. the 10 MB player base) may
-            // contain the same substrings inside string literals; replacing
-            // those corrupts the script and crashes the engine.
-            bool is_kevlar_bundle = (strstr(current_src, "_.ZZ=function(c){return new BwB(c)};") != NULL);
-            if (is_kevlar_bundle) {
-                // Stub out the WCM dependency-order helper that currently crashes
-                // on a missing computed-effects map; skipping it only disables
-                // computed-property batch ordering, not element registration.
-                char *wcm_patched = replace_all(current_src, current_len,
-                    "WCM=function(d,z,y,F,L){",
-                    "WCM=function(d,z,y,F,L){return;", &patched_len);
-                if (wcm_patched) {
-                    patched_script = wcm_patched;
-                    current_src = patched_script;
-                    current_len = patched_len;
-                }
-                char *dc_patched = replace_all(current_src, current_len,
-                    "_.dc({",
-                    "(function(__dc_info){ try { return _.dc(__dc_info); } catch(__e) { var __l=(typeof __bgmdwnldr_log!='undefined'?__bgmdwnldr_log:console.log); __l('[DC-SKIP] ' + (__dc_info&&__dc_info.is||'(unknown)') + ': ' + __e.message); return function(){}; } })({",
-                    &patched_len);
-                if (dc_patched) {
-                    if (patched_script) free(patched_script);
-                    patched_script = dc_patched;
-                }
-
-                // Patch YouTube's DI injector so that resolving PAGE_TOKEN before
-                // ytd-page-manager has registered its provider returns a lazy proxy
-                // instead of throwing. The proxy forwards to the real page manager
-                // once it is added, letting ytd-app's connectedCallback finish.
-                if (patched_script) { current_src = patched_script; current_len = patched_len; }
-                char *di_add_patched = replace_all(current_src, current_len,
-                    "SZP.prototype.addProvider=function(c){this.providers.set(c.provide,c);var k=this.JSC$10589_deferred.get(c.provide);",
-                    "SZP.prototype.addProvider=function(c){if(c&&c.provide){var pt=c.provide;if((pt instanceof BwB&&pt.key&&pt.key.name===\"PAGE_TOKEN\")||pt.name===\"PAGE_TOKEN\")this.__cyber_page_manager=c.useValue||c.useClass||(c.useFactory?c.useFactory():null);}this.providers.set(c.provide,c);var k=this.JSC$10589_deferred.get(c.provide);",
-                    &patched_len);
-                if (di_add_patched) {
-                    if (patched_script) free(patched_script);
-                    patched_script = di_add_patched;
-                    current_src = patched_script;
-                    current_len = patched_len;
-                }
-                char *di_resolve_patched = replace_all(current_src, current_len,
-                    "if(!c.providers.has(k)){if(M)return;throw Error(\"Zc`\"+k);}",
-                    "if(!c.providers.has(k)){if(M)return;if(k&&k.name===\"PAGE_TOKEN\"){var __pm=c.__cyber_page_manager;if(__pm)return __pm;return c.__cyber_pm_proxy||(c.__cyber_pm_proxy=new Proxy({},{get:function(t,p){var r=c.__cyber_page_manager;return r&&p in r?r[p]:function(){return null;}}}));}throw Error(\"Zc`\"+k);}",
-                    &patched_len);
-                if (di_resolve_patched) {
-                    if (patched_script) free(patched_script);
-                    patched_script = di_resolve_patched;
-                    current_src = patched_script;
-                    current_len = patched_len;
-                }
-
-                // Expose the watch-page initial-data loaders so the host code can
-                // trigger them manually if YouTube's scheduler does not fire them.
-                char *eml_patched = replace_all(current_src, current_len,
-                    "emL=function(",
-                    "emL=window.__cyber_emL=function(",
-                    &patched_len);
-                if (eml_patched) {
-                    if (patched_script) free(patched_script);
-                    patched_script = eml_patched;
-                    current_src = patched_script;
-                    current_len = patched_len;
-                }
-                char *tyl_patched = replace_all(current_src, current_len,
-                    "TYl=function(",
-                    "TYl=window.__cyber_TYl=function(",
-                    &patched_len);
-                if (tyl_patched) {
-                    if (patched_script) free(patched_script);
-                    patched_script = tyl_patched;
-                }
-                // Debug wrap: log any exception thrown from YouTube's custom Promise .then
-                if (patched_script) { current_src = patched_script; current_len = patched_len; }
-                char *hc_then_patched = replace_all(current_src, current_len,
-                    "_.hc.prototype.then=function(c,k,F){return $db(this,sB(typeof c===\"function\"?c:null),sB(typeof k===\"function\"?k:null),F)};",
-                    "_.hc.prototype.then=function(c,k,F){console.error('[HC-THEN-ENTRY] c='+typeof c+' k='+typeof k+' thisState='+(this&&this.JSC$9821_state_)+' sB='+typeof sB+' $db='+typeof $db);try{var __r=$db(this,sB(typeof c===\"function\"?c:null),sB(typeof k===\"function\"?k:null),F);console.error('[HC-THEN-OK]');return __r;}catch(__e){console.error('[HC-THEN-ERR] '+__e.message+' thisCtor='+(this&&this.constructor&&this.constructor.name)+' c='+typeof c+' k='+typeof k+' stack='+(__e.stack||''));throw __e;}};",
-                    &patched_len);
-                if (hc_then_patched) {
-                    if (patched_script) free(patched_script);
-                    patched_script = hc_then_patched;
-                    current_src = patched_script;
-                    current_len = patched_len;
-                }
-
-            }
-
-            // NOTE: Wrapping the kevlar bundle in an extra IIFE was tried to
-            // avoid helper-name collisions (e.g. sB), but it broke Polymer's
-            // component registration and left app.hostElement/loadData undefined.
-            // We instead rely on runtime string patches and the native registry.
-        }
-
         // Reset diagnostic for property-on-undefined errors
         g_last_undefined_prop[0] = '\0';
 
-        // Execute script directly
-        const char *script_to_run = patched_script ? patched_script : scripts[i];
-        size_t script_to_run_len = patched_script ? patched_len : script_lens[i];
-        if (script_to_run_len > 1000000) {
-            FILE *fp = fopen("C:/Users/qingping/Documents/cyberbrowser/youtube_data/script29_runtime.js", "wb");
-            if (fp) {
-                fwrite(script_to_run, 1, script_to_run_len, fp);
-                fclose(fp);
-            }
-        }
-        GCValue result = JS_Eval(ctx, script_to_run, script_to_run_len, filename, JS_EVAL_TYPE_GLOBAL);
-
-        if (patched_script) {
-            free(patched_script);
-            patched_script = NULL;
-        }
+        // Execute script directly.  We no longer apply YouTube/kevlar-specific
+        // string patches; custom-element upgrade and missing standard APIs are
+        // implemented in the browser layer instead.
+        GCValue result = JS_Eval(ctx, scripts[i], script_lens[i], filename, JS_EVAL_TYPE_GLOBAL);
 
         // Clear the interrupt handler so later operations (pumping timers, GC)
         // are not subject to the per-script deadline.

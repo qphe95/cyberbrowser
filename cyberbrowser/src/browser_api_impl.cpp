@@ -2352,11 +2352,30 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_FreeAtom(ctx, node_value_atom);
     
     // data getter/setter (CharacterData interface, used by Text/Comment nodes)
+    // This property must NOT live on Node.prototype, because Element nodes
+    // also inherit from Node and would be unable to define their own `data`
+    // property (e.g. Polymer's `data` on ytd-app).  Define it on a dedicated
+    // CharacterData prototype and chain Text/Comment constructors from it.
+    GCValue character_data_proto = JS_NewObject(ctx);
+    JS_SetPrototype(ctx, character_data_proto, node_proto);
     GCValue data_getter = JS_NewCFunction(ctx, js_node_get_data, "get data", 0);
     GCValue data_setter = JS_NewCFunction(ctx, js_node_set_data, "set data", 1);
     JSAtom data_atom = JS_NewAtom(ctx, "data");
-    JS_DefinePropertyGetSet(ctx, node_proto, data_atom, data_getter, data_setter, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, character_data_proto, data_atom, data_getter, data_setter, JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, data_atom);
+    // Text and Comment constructors already exist; give them the CharacterData
+    // prototype so that Text/Comment nodes have `data` while Element nodes do not.
+    GCValue existing_text_ctor = JS_GetPropertyStr(ctx, global, "Text");
+    if (!JS_IsUndefined(existing_text_ctor) && JS_IsFunction(ctx, existing_text_ctor)) {
+        JS_SetPropertyStr(ctx, existing_text_ctor, "prototype", character_data_proto);
+    }
+    GCValue existing_comment_ctor = JS_GetPropertyStr(ctx, global, "Comment");
+    if (!JS_IsUndefined(existing_comment_ctor) && JS_IsFunction(ctx, existing_comment_ctor)) {
+        JS_SetPropertyStr(ctx, existing_comment_ctor, "prototype", character_data_proto);
+    }
+    // Ensure document.createTextNode/createComment instances inherit from the
+    // CharacterData prototype as well.
+    JS_SetPropertyStr(ctx, global, "__cyber_character_data_proto", character_data_proto);
     
     // Do NOT free the prototypes here!
     // They are still referenced by:
@@ -3553,31 +3572,6 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
             "})();";
         JS_Eval(ctx, wrap_ce, strlen(wrap_ce), "<wrap_ce>", JS_EVAL_TYPE_GLOBAL);
     }
-    // Intercept Object.defineProperty on customElements.define so the Polymer
-    // ES5 shim's adapter wrapper is always guarded against undefined / arrow
-    // constructors, even when scripts hold a reference to the function directly.
-    {
-        const char *patch_odp =
-            "(function(){"
-            "  window.__origObjectDefineProperty = Object.defineProperty;"
-            "  Object.defineProperty = function(obj, prop, desc) {"
-            "    if (obj === window.customElements && prop === 'define' && desc && typeof desc.value === 'function') {"
-            "      var inner = desc.value;"
-            "      desc.value = function(name, ctor, options) {"
-            "        if (typeof ctor !== 'function' || !ctor.prototype) return;"
-            "        try {"
-            "          return inner.call(this, name, ctor, options);"
-            "        } catch(e) {"
-            "          return;"
-            "        }"
-            "      };"
-            "    }"
-            "    return window.__origObjectDefineProperty.call(this, obj, prop, desc);"
-            "  };"
-            "})();";
-        JS_Eval(ctx, patch_odp, strlen(patch_odp), "<patch_odp>", JS_EVAL_TYPE_GLOBAL);
-    }
-
     // Register the C custom-element upgrade helper. It pushes the element onto
     // an upgrade stack before `new ctor()`; the native HTMLElement constructor
     // pops the stack and returns the existing element as `this`.
