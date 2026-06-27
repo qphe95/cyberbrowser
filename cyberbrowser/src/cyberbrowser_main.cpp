@@ -1,10 +1,9 @@
 /*
- * CyberBrowser - minimal hardcoded YouTube loader
+ * CyberBrowser - minimal browser engine smoke-test
  *
- * Fetches https://www.youtube.com/, parses the HTML, runs the CSS layout
- * engine, builds a display list, renders a wireframe to a JPEG, and prints a
- * summary.  This is intended as a quick smoke-test executable for the
- * cyberbrowser core.
+ * Fetches a start page, parses the HTML, runs the CSS layout engine, builds a
+ * display list, renders a wireframe to a JPEG, and prints a summary.  This is
+ * intended as a quick smoke-test executable for the cyberbrowser core.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,9 +33,12 @@ extern "C" int timer_process_due(JSContextHandle ctx);
 
 #define LOG_TAG "cyberbrowser"
 
+/* Default page loaded by the smoke-test executable. */
+static const char DEFAULT_START_URL[] = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+
+
 static JSRuntimeHandle g_rt;
 static JSContextHandle g_ctx;
-static char g_target_video_id[32] = "";
 static GCValue g_global;
 
 static bool init_browser_context(void) {
@@ -95,20 +97,8 @@ static void cleanup_browser_context(void) {
     }
 }
 
-static char *fetch_youtube_page(size_t *out_size) {
-    const char *url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
-    {
-        const char *v = strstr(url, "v=");
-        if (v) {
-            v += 2;
-            const char *amp = strchr(v, '&');
-            size_t len = amp ? (size_t)(amp - v) : strlen(v);
-            if (len < sizeof(g_target_video_id)) {
-                memcpy(g_target_video_id, v, len);
-                g_target_video_id[len] = '\0';
-            }
-        }
-    }
+static char *fetch_start_page(size_t *out_size) {
+    const char *url = DEFAULT_START_URL;
     printf("Fetching %s ...\n", url);
 
     HttpBuffer buffer = {0};
@@ -130,7 +120,7 @@ static char *fetch_youtube_page(size_t *out_size) {
 
     bool ok = http_get_to_memory_with_headers(url, headers, sizeof(headers)/sizeof(headers[0]), &buffer, error, sizeof(error));
     if (!ok || !buffer.data || buffer.size == 0) {
-        printf("FATAL: Failed to fetch YouTube homepage: %s\n", error);
+        printf("FATAL: Failed to fetch start page: %s\n", error);
         return NULL;
     }
 
@@ -147,11 +137,11 @@ static char *fetch_youtube_page(size_t *out_size) {
 }
 
 static void save_html(const char *html, size_t html_size) {
-    FILE *f = fopen("youtube_loaded.html", "wb");
+    FILE *f = fopen("page_loaded.html", "wb");
     if (!f) return;
     fwrite(html, 1, html_size, f);
     fclose(f);
-    printf("Saved fetched HTML to youtube_loaded.html (%zu bytes)\n", html_size);
+    printf("Saved fetched HTML to page_loaded.html (%zu bytes)\n", html_size);
 }
 
 static const char *get_title_text(HtmlDocument *doc) {
@@ -236,55 +226,6 @@ static void print_body_snippet(HtmlDocument *doc) {
         child = html_node_next_sibling(doc, child);
     }
     printf("\"\n");
-}
-
-/* ------------------------------------------------------------------------- */
-/* Session continuity: visitor tokens from homepage into JS context          */
-/* ------------------------------------------------------------------------- */
-
-static void js_escape_string(const char *in, char *out, size_t out_len) {
-    size_t i = 0, j = 0;
-    while (in[i] && j + 3 < out_len) {
-        if (in[i] == '\\' || in[i] == '\'') {
-            out[j++] = '\\';
-        }
-        out[j++] = in[i++];
-    }
-    out[j] = '\0';
-}
-
-static void inject_session_tokens(JSContextHandle ctx, GCValue global, const char *html) {
-    char visitor[256] = {0};
-    const char *cookies = platform_http_get_cookies();
-    if (cookies && cookies[0]) {
-        session_extract_cookie_value(cookies, "VISITOR_INFO1_LIVE", visitor, sizeof(visitor));
-    }
-    if (!visitor[0] && html && html[0]) {
-        session_extract_json_field(html, "visitorData", visitor, sizeof(visitor));
-    }
-    if (!visitor[0]) {
-        return;
-    }
-
-    session_set_visitor_data(visitor);
-
-    char escaped[512] = {0};
-    js_escape_string(visitor, escaped, sizeof(escaped));
-
-    char script[2048];
-    snprintf(script, sizeof(script),
-        "window.ytcfg = window.ytcfg || {};"
-        "window.ytcfg.set = function(k,v){ this[k]=v; return v; };"
-        "window.ytcfg.get = function(k){ return this[k]; };"
-        "window.ytcfg.set('VISITOR_DATA', '%s');"
-        "window.ytcfg.set('CLIENT_VERSION', '2.20250122.04.00');"
-        "document.cookie = 'VISITOR_INFO1_LIVE=%s; path=/; domain=.youtube.com';"
-        "window.yt = window.yt || {};"
-        "window.yt.config_ = window.yt.config_ || {};"
-        "window.yt.config_.INNERTUBE_CLIENT_VERSION = '2.20250122.04.00';",
-        escaped, escaped);
-
-    JS_Eval(ctx, script, strlen(script), "<session>", JS_EVAL_TYPE_GLOBAL);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -587,61 +528,6 @@ static bool render_document_to_jpg(HtmlDocument *doc, ImageCache *image_cache,
     return true;
 }
 
-static void print_captured_googlevideo_urls(JSContextHandle ctx) {
-    char urls[JS_MAX_CAPTURED_URLS][JS_MAX_URL_LEN];
-    int count = js_quickjs_get_captured_urls(urls, JS_MAX_CAPTURED_URLS);
-    int gv_count = 0;
-    for (int i = 0; i < count; i++) {
-        if (strstr(urls[i], "googlevideo.com")) {
-            printf("Captured googlevideo URL: %s\n", urls[i]);
-            gv_count++;
-        }
-    }
-    printf("Captured googlevideo.com URLs: %d\n", gv_count);
-}
-
-/* If the YouTube player bootstrap did not set a poster thumbnail, inject an
- * <img> with the standard maxres thumbnail into the .html5-video-container.
- * Setting a background image on the container is often covered by the player
- * chrome, so an appended image is more reliable. */
-/* YouTube's player bootstrap usually leaves the poster thumbnail unset in our
- * emulated environment.  Inject a maxres thumbnail as the background image on
- * the player and its visible overlay so the watch page looks correct. */
-static void apply_youtube_player_thumbnail_fallback(JSContextHandle ctx) {
-    if (!g_target_video_id[0]) return;
-
-    char js[1024];
-    snprintf(js, sizeof(js),
-        "(function(){"
-        "  try {"
-        "    var url = 'https://i.ytimg.com/vi/%s/maxresdefault.jpg';"
-        "    var player = document.getElementById('movie_player');"
-        "    if (!player) return;"
-        "    var targets = [player];"
-        "    var ch = player.children;"
-        "    if (ch) for (var i = 0; i < ch.length; i++) {"
-        "      var cls = ch[i].getAttribute ? ch[i].getAttribute('class') : '';"
-        "      if (cls && cls.indexOf('ytp-iv-player-content') >= 0) targets.push(ch[i]);"
-        "    }"
-        "    for (var j = 0; j < targets.length; j++) {"
-        "      var t = targets[j];"
-        "      var s = t.getAttribute('style');"
-        "      if (!s || !/background-image/i.test(String(s))) {"
-        "        t.setAttribute('style', 'background-image:url(' + url + ');background-size:cover;background-position:center;');"
-        "      }"
-        "    }"
-        "  } catch(e) {}"
-        "})();",
-        g_target_video_id);
-
-    GCValue ret = JS_Eval(ctx, js, strlen(js), "<thumbnail_fallback>", JS_EVAL_TYPE_GLOBAL);
-    if (JS_IsException(ret)) {
-        GCValue ex = JS_GetException(ctx);
-        const char *msg = JS_ToCString(ctx, ex);
-        fprintf(stderr, "[THUMB-FB] JS exception: %s\n", msg ? msg : "(null)");
-    }
-}
-
 int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
@@ -649,7 +535,7 @@ int main(int argc, char *argv[]) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
     printf("========================================\n");
-    printf("CyberBrowser - YouTube Loader\n");
+    printf("CyberBrowser\n");
     printf("========================================\n");
 
     if (!platform_init()) {
@@ -670,8 +556,21 @@ int main(int argc, char *argv[]) {
     }
     printf("init_browser_context ok\n");
 
+    /* Reflect the start URL in window.location so the engine reports the
+     * correct origin, host, and pathname instead of a hardcoded default.
+     * Also sync document.domain and document.baseURI to the resolved URL. */
+    {
+        char loc_script[512];
+        snprintf(loc_script, sizeof(loc_script),
+                 "if (window.location) { window.location.href = %s%s%s; "
+                 "if (document) { document.domain = window.location.hostname; "
+                 "document.baseURI = window.location.href; } }",
+                 "\"", DEFAULT_START_URL, "\"");
+        JS_Eval(g_ctx, loc_script, strlen(loc_script), "<set_location>", JS_EVAL_TYPE_GLOBAL);
+    }
+
     size_t html_size = 0;
-    char *html = fetch_youtube_page(&html_size);
+    char *html = fetch_start_page(&html_size);
     if (!html) {
         cleanup_browser_context();
         platform_http_cleanup();
@@ -679,45 +578,8 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* Extract VISITOR_INFO1_LIVE / visitorData and inject into JS so that
-     * fetch() and XHR can send a consistent session with youtubei calls. */
-    inject_session_tokens(g_ctx, g_global, html);
-
-    /* Inject ytInitialData from a captured reference page if available.
-     * YouTube's app shell renders only a skeleton when this object is absent. */
-    {
-        const char *ytidata_path = "C:/Users/qingping/Documents/cyberbrowser/youtube_data/ytInitialData.json";
-        FILE *f = fopen(ytidata_path, "rb");
-        if (f) {
-            fseek(f, 0, SEEK_END);
-            long sz = ftell(f);
-            fseek(f, 0, SEEK_SET);
-            char *buf = (char *)malloc(sz + 64);
-            if (buf) {
-                strcpy(buf, "var ytInitialData = ");
-                size_t prefix = strlen(buf);
-                size_t n = fread(buf + prefix, 1, sz, f);
-                fclose(f);
-                buf[prefix + n] = ';';
-                buf[prefix + n + 1] = '\0';
-                GCValue ret = JS_Eval(g_ctx, buf, strlen(buf), "<yt_initial_data>", JS_EVAL_TYPE_GLOBAL);
-                if (JS_IsException(ret)) {
-                    fprintf(stderr, "[MAIN] ytInitialData eval threw exception\n");
-                    JS_GetException(g_ctx);
-                } else {
-                    fprintf(stderr, "[MAIN] injected ytInitialData (%ld bytes)\n", sz);
-                }
-                free(buf);
-            } else {
-                fclose(f);
-            }
-        } else {
-            fprintf(stderr, "[MAIN] ytInitialData.json not found at %s\n", ytidata_path);
-        }
-    }
-
     /* Phase 3: execute page scripts, drain timers, dispatch lifecycle events,
-     * and print any googlevideo.com URLs captured by the hooks. */
+     * and upgrade any custom elements defined during script execution. */
     {
         printf("Executing page scripts ...\n");
         js_quickjs_clear_captured_urls();
@@ -738,27 +600,6 @@ int main(int argc, char *argv[]) {
         dispatch_page_lifecycle_events(g_ctx);
         pump_timers_and_jobs(g_ctx);
 
-        print_captured_googlevideo_urls(g_ctx);
-
-        // Diagnostic: log the state of ytd-app and the masthead before final
-        // layout so we can see why the masthead content is missing.
-        {
-            const char *diag_js =
-                "(function(){"
-                "  var app = document.querySelector('ytd-app');"
-                "  var mast = document.querySelector('#masthead');"
-                "  function log(msg){ if(typeof console!=='undefined'&&console.error) try{console.error(msg);}catch(x){} }"
-                "  log('DIAG app='+(app?app.tagName:'null')+' app.hostElement='+(app&&app.hostElement?app.hostElement.tagName:'null'));"
-                "  log('DIAG mast='+(mast?mast.tagName:'null')+' mast.id='+(mast?mast.id:'null'));"
-                "  log('DIAG mast.data type='+(mast?typeof mast.data:'null')+' keys='+(mast&&mast.data?Object.keys(mast.data).length:'null'));"
-                "  log('DIAG app.data type='+(app?typeof app.data:'null')+' keys='+(app&&app.data?Object.keys(app.data).length:'null'));"
-                "  log('DIAG loadInitialData='+(typeof window.loadInitialData)+' getInitialData='+(typeof window.getInitialData));"
-                "  try { var gd=Object.getOwnPropertyDescriptor(window,'getInitialData'); log('DIAG getInitialData desc='+(gd?JSON.stringify({enumerable:gd.enumerable,configurable:gd.configurable,get:typeof gd.get,set:typeof gd.set,value:typeof gd.value}):'null')); var src='none'; try{ src=(window.getInitialData&&window.getInitialData.toString)?window.getInitialData.toString().replace(/\\s+/g,' ').slice(0,300):'none'; }catch(x){src='toStringErr:'+x.message;} log('DIAG getInitialData source='+src); var idata = window.getInitialData ? window.getInitialData() : null; log('DIAG initialData keys='+(idata?Object.keys(idata).join(','):'null')); } catch(e) { log('DIAG getInitialData threw: '+e.message); }"
-                "  log('DIAG mast.shadowRoot='+(mast&&mast.shadowRoot?'yes':'no')+' mast.innerHTML.len='+(mast&&typeof mast.innerHTML==='string'?mast.innerHTML.length:'null'));"
-                "})();";
-            JS_Eval(g_ctx, diag_js, strlen(diag_js), "<diag>", JS_EVAL_TYPE_GLOBAL);
-        }
-
         // Upgrade any custom elements that were defined during script execution.
         // This lets Polymer run connectedCallback and stamp shadow-DOM content
         // on the existing server-rendered skeleton.
@@ -777,85 +618,8 @@ int main(int argc, char *argv[]) {
             fflush(stderr);
         }
 
-        // If YouTube's scheduler never populated ytd-app.data, push the
-        // ytInitialData response into the app directly so data-bound UI
-        // (including the masthead) can render.
-        {
-            const char *load_initial_data_js =
-                "(function(){"
-                "  try {"
-                "    var app = document.querySelector('ytd-app');"
-                "    var mast = document.querySelector('#masthead');"
-                "    if (!app) { console.error('[MAIN] no ytd-app'); return; }"
-                "    var ytid = window.ytInitialData;"
-                "    if (!ytid) { console.error('[MAIN] no ytInitialData'); return; }"
-                "    app.data = ytid;"
-                "    if (typeof app.set === 'function') { try { app.set('data', ytid); } catch(_){} }"
-                "    if (typeof app.notifyPath === 'function') { try { app.notifyPath('data', ytid); } catch(_){} }"
-                "    console.error('[MAIN] injected app.data topKeys='+(app.data&&typeof app.data==='object'?Object.keys(app.data).length:'null')+' hasResponseContext='+(!!(app.data&&app.data.responseContext)));"
-                "    if (mast) {"
-                "      mast.data = ytid;"
-                "      if (typeof mast.set === 'function') { try { mast.set('data', ytid); } catch(_){} }"
-                "      if (typeof mast.notifyPath === 'function') { try { mast.notifyPath('data', ytid); } catch(_){} }"
-                "      console.error('[MAIN] injected mast.data topKeys='+(mast.data&&typeof mast.data==='object'?Object.keys(mast.data).length:'null')+' hasResponseContext='+(!!(mast.data&&mast.data.responseContext)));"
-                "    }"
-                "    try {"
-                "      var ev = new CustomEvent('yt-page-data-fetched', { detail: ytid, bubbles: true });"
-                "      app.dispatchEvent(ev);"
-                "      if (mast) mast.dispatchEvent(ev);"
-                "    } catch(x) {}"
-                "    console.error('[MAIN] initial data injection complete');"
-                "  } catch(e) { console.error('[MAIN] manual initial data set failed', e&&e.message, e&&e.stack); }"
-                "})();";
-            fprintf(stderr, "[MAIN] before load_initial_data_js eval\n"); fflush(stderr);
-            GCValue lid_result = JS_Eval(g_ctx, load_initial_data_js, strlen(load_initial_data_js), "<load_initial_data>", JS_EVAL_TYPE_GLOBAL);
-            fprintf(stderr, "[MAIN] load_initial_data_js result=%s\n", JS_IsException(lid_result) ? "exception" : "ok"); fflush(stderr);
-            if (JS_IsException(lid_result)) {
-                GCValue exc = JS_GetException(g_ctx);
-                GCValue exc_msg = JS_GetPropertyStr(g_ctx, exc, "message");
-                GCValue exc_stack = JS_GetPropertyStr(g_ctx, exc, "stack");
-                const char *m = JS_ToCString(g_ctx, exc_msg);
-                const char *s = JS_ToCString(g_ctx, exc_stack);
-                fprintf(stderr, "[MAIN] load_initial_data_js exception: %s\n%s\n", m ? m : "(none)", s ? s : "(no stack)");
-                fflush(stderr);
-            }
-            pump_timers_and_jobs(g_ctx);
-            {
-                const char *post_load_diag =
-                    "(function(){"
-                    "  try {"
-                    "    var app = document.querySelector('ytd-app');"
-                    "    var mast = document.querySelector('#masthead');"
-                    "    console.error('[MAIN] post-pump app.data='+(typeof app.data)+' topKeys='+(app.data?Object.keys(app.data).length:'null')+' hasResponseContext='+(!!(app.data&&app.data.responseContext))+' mast.data='+(typeof mast.data)+' mast.topKeys='+(mast&&mast.data?Object.keys(mast.data).length:'null'));"
-                    "  } catch(e) { console.error('[MAIN] post-pump diag error', e&&e.message); }"
-                    "})();";
-                JS_Eval(g_ctx, post_load_diag, strlen(post_load_diag), "<post_load_diag>", JS_EVAL_TYPE_GLOBAL);
-                pump_timers_and_jobs(g_ctx);
-            }
-        }
-
-        // Fallback: if the player bootstrap did not set a poster thumbnail,
-        // force the standard maxres thumbnail as a background image on the
-        // movie player container so the screenshot shows the actual video frame
-        // instead of a grey placeholder.
-        {
-            const char *thumbnail_js =
-                "(function(){"
-                "  var href = window.location && window.location.href;"
-                "  if (!href) return;"
-                "  var m = href.match(/[?&]v=([^&]+)/);"
-                "  if (!m) return;"
-                "  var vid = m[1];"
-                "  var player = document.getElementById('movie_player') || document.querySelector('.html5-video-container');"
-                "  if (!player) return;"
-                "  if (player.style && !player.style.backgroundImage) {"
-                "    player.style.backgroundImage = 'url(https://i.ytimg.com/vi/' + vid + '/maxresdefault.jpg)';"
-                "    player.style.backgroundSize = 'cover';"
-                "    player.style.backgroundPosition = 'center';"
-                "  }"
-                "})();";
-            JS_Eval(g_ctx, thumbnail_js, strlen(thumbnail_js), "<thumbnail_fallback>", JS_EVAL_TYPE_GLOBAL);
-        }
+        // ytInitialData injection removed: the page is expected to fetch its
+        // own initial data through standard fetch/XHR now.
     }
 
     /* The JS DOM populated by html_execute_page_scripts is now the source of
@@ -898,10 +662,6 @@ int main(int argc, char *argv[]) {
         bool had_timers = pump_timers_and_jobs(g_ctx);
         bool had_images = image_cache_process_pending(image_cache);
 
-        // Apply thumbnail fallback each iteration so it runs after the player
-        // scripts have created the movie_player element.
-        apply_youtube_player_thumbnail_fallback(g_ctx);
-
         if (g_dom_needs_layout) {
             g_dom_needs_layout = 0;
 
@@ -917,7 +677,7 @@ int main(int argc, char *argv[]) {
                 printf("DOM nodes: %d\n", doc->array.count);
                 print_body_snippet(doc);
 
-                render_document_to_jpg(doc, image_cache, "youtube_screenshot.jpg");
+                render_document_to_jpg(doc, image_cache, "page_screenshot.jpg");
             } else {
                 printf("WARNING: failed to rebuild native document from JS DOM\n");
             }
@@ -935,11 +695,11 @@ int main(int argc, char *argv[]) {
         GCValue doc_elem = JS_GetPropertyStr(g_ctx, js_doc, "documentElement");
         char *serialized = html_serialize_js_node(g_ctx, doc_elem);
         if (serialized) {
-            FILE *f = fopen("youtube_final.html", "wb");
+            FILE *f = fopen("page_final.html", "wb");
             if (f) {
                 fwrite(serialized, 1, strlen(serialized), f);
                 fclose(f);
-                printf("Saved final JS DOM to youtube_final.html (%zu bytes)\n", strlen(serialized));
+                printf("Saved final JS DOM to page_final.html (%zu bytes)\n", strlen(serialized));
             }
             free(serialized);
         }
@@ -950,7 +710,7 @@ int main(int argc, char *argv[]) {
     image_cache_destroy(image_cache);
     free(html);
 
-    printf("\nYouTube page loaded successfully.\n");
+    printf("\nStart page loaded successfully.\n");
 
     cleanup_browser_context();
     platform_http_cleanup();

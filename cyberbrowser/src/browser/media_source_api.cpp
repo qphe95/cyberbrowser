@@ -127,7 +127,7 @@ GCValue js_media_source_is_type_supported(JSContextHandle ctx, GCValue this_val,
     const char *mime_type = JS_ToCString(ctx, argv[0]);
     if (!mime_type) return JS_FALSE;
     
-    // Support common media types that YouTube uses
+    // Support common media types
     bool supported = (
         strstr(mime_type, "video/mp4") != NULL ||
         strstr(mime_type, "video/webm") != NULL ||

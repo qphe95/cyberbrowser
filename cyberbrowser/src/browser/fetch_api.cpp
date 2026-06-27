@@ -29,18 +29,11 @@ GCValue js_request_constructor(JSContextHandle ctx, GCValue new_target, int argc
         JS_SetPropertyStr(ctx, request_obj, "url", url_val);
         GCValue method_val = JS_GetPropertyStr(ctx, argv[0], "method");
         JS_SetPropertyStr(ctx, request_obj, "method", method_val);
-        // Copy __original_url so fetch() can decode base64 body through Request chains
-        GCValue orig_url_val = JS_GetPropertyStr(ctx, argv[0], "__original_url");
-        if (!JS_IsUndefined(orig_url_val)) {
-            JS_SetPropertyStr(ctx, request_obj, "__original_url", orig_url_val);
-        }
     } else {
         // URL string
         const char *url_str = JS_ToCString(ctx, argv[0]);
         if (url_str) {
             JS_SetPropertyStr(ctx, request_obj, "url", JS_NewString(ctx, url_str));
-            // Store original URL so fetch can access it even if url getter is overridden
-            JS_SetPropertyStr(ctx, request_obj, "__original_url", JS_NewString(ctx, url_str));
             // Capture the URL
             capture_url_debug(url_str, "request_ctor");
         }

@@ -282,7 +282,7 @@ void js_cyber_ce_schedule_flush(JSContextHandle ctx) {
 // Constructor for HTMLElement - creates object with HTMLElement.prototype in chain
 // Uses js_dom_node_class_id so DOM node data can be retrieved via JS_GetOpaqueHandle
 // Per-upgrade budget for HTMLElement constructor calls.  Some custom-element
-// constructors (e.g. YouTube's masthead/app shell) stamp large templates that
+// constructors (e.g. heavy app shells) stamp large templates that
 // allocate thousands of DOM nodes.  The emulator's JS heap cannot handle that
 // without running out of memory, so we abort a single upgrade before it
 // exhausts memory and mark the element as failed.  This is a generic emulator

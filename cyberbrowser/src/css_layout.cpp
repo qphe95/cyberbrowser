@@ -1075,7 +1075,7 @@ static char* layout_resolve_url(const char *base_url, const char *href) {
         return strdup(buf);
     }
     if (href[0] == '/') {
-        const char *base = base_url && base_url[0] ? base_url : "https://www.youtube.com";
+        const char *base = base_url && base_url[0] ? base_url : "https://localhost";
         char buf[2048];
         if (base[strlen(base) - 1] == '/') {
             snprintf(buf, sizeof(buf), "%s%s", base, href + 1);
@@ -1084,7 +1084,7 @@ static char* layout_resolve_url(const char *base_url, const char *href) {
         }
         return strdup(buf);
     }
-    const char *base = base_url && base_url[0] ? base_url : "https://www.youtube.com/";
+    const char *base = base_url && base_url[0] ? base_url : "https://localhost/";
     char buf[2048];
     if (base[strlen(base) - 1] == '/') {
         snprintf(buf, sizeof(buf), "%s%s", base, href);
@@ -3011,7 +3011,7 @@ bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
     ctx->js_ctx = saved_js_ctx;
     ctx->viewport_width = viewport_width;
     ctx->viewport_height = viewport_height;
-    const char *default_base = "https://www.youtube.com/";
+    const char *default_base = "https://localhost/";
     strncpy(ctx->base_url, default_base, sizeof(ctx->base_url) - 1);
     ctx->base_url[sizeof(ctx->base_url) - 1] = '\0';
     bool ok = css_layout_document(ctx, sheet);

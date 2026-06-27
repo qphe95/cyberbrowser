@@ -773,7 +773,7 @@ static GCValue js_abort_controller_constructor(JSContextHandle ctx, GCValue this
     return obj;
 }
 
-// AbortSignal constructor stub - YouTube player scripts check for this
+// AbortSignal constructor stub
 static GCValue js_abort_signal_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     GCValue signal = JS_NewObject(ctx);
@@ -1019,10 +1019,10 @@ static void parse_url(const char *url, LocationData *loc) {
     // Start with empty components
     memset(loc, 0, sizeof(LocationData));
     
-    // Default values
+    // Default values (neutral fallback when no URL is provided)
     strncpy(loc->protocol, "https:", sizeof(loc->protocol) - 1);
-    strncpy(loc->host, "www.youtube.com", sizeof(loc->host) - 1);
-    strncpy(loc->hostname, "www.youtube.com", sizeof(loc->hostname) - 1);
+    strncpy(loc->host, "localhost", sizeof(loc->host) - 1);
+    strncpy(loc->hostname, "localhost", sizeof(loc->hostname) - 1);
     strncpy(loc->port, "", sizeof(loc->port) - 1);
     strncpy(loc->pathname, "/", sizeof(loc->pathname) - 1);
     strncpy(loc->search, "", sizeof(loc->search) - 1);
@@ -1480,7 +1480,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     }
     
     // Object.defineProperty: use native QuickJS implementation. The custom
-    // polyfill caused crashes with large scripts (e.g., YouTube's kevlar_base
+    // polyfill caused crashes with large scripts (e.g., some heavy SPA bundles
     // app shell) due to descriptor/value lifetime issues.
     // (Native Object.defineProperty is available once base objects are enabled.)
     
@@ -1587,7 +1587,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     };
     
     if (!setup_dom_exception()) {
-        LOG_ERROR("DOMException setup FAILED - continuing without DOMException (YouTube player may have reduced functionality)");
+        LOG_ERROR("DOMException setup FAILED - continuing without DOMException");
     }
     LOG_INFO("Continuing with rest of browser stubs initialization");
     
@@ -1689,7 +1689,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, global, "parent", window);
 
     // Stub AsyncContext for browsers that load it from a separate bundle that
-    // we skip.  YouTube's Closure Promise .then wrapper uses AsyncContext.Snapshot.wrap.
+    // we skip. Some bundlers' Promise .then wrappers use AsyncContext.Snapshot.wrap.
     {
         const char *async_ctx_stub =
             "if (typeof AsyncContext === 'undefined') {"
@@ -2490,11 +2490,14 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     DEF_PROP_STR(ctx, document, "characterSet", "UTF-8");
     DEF_PROP_STR(ctx, document, "charset", "UTF-8");
     DEF_PROP_STR(ctx, document, "contentType", "text/html");
-    DEF_PROP_STR(ctx, document, "referrer", "https://www.youtube.com/");
-    DEF_PROP_STR(ctx, document, "cookie", "");
-    DEF_PROP_STR(ctx, document, "domain", "www.youtube.com");
-    DEF_PROP_STR(ctx, document, "title", "YouTube");
-    DEF_PROP_STR(ctx, document, "baseURI", "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    DEF_PROP_STR(ctx, document, "referrer", "");
+    GCValue doc_cookie_getter = JS_NewCFunction(ctx, js_document_cookie_getter, "get cookie", 0);
+    GCValue doc_cookie_setter = JS_NewCFunction(ctx, js_document_cookie_setter, "set cookie", 1);
+    JS_DefinePropertyGetSet(ctx, document, JS_NewAtom(ctx, "cookie"),
+        doc_cookie_getter, doc_cookie_setter, JS_PROP_ENUMERABLE);
+    DEF_PROP_STR(ctx, document, "domain", "");
+    DEF_PROP_STR(ctx, document, "title", "");
+    DEF_PROP_STR(ctx, document, "baseURI", "");
     DEF_PROP_BOOL(ctx, document, "hidden", 0);
     DEF_PROP_STR(ctx, document, "visibilityState", "visible");
     DEF_PROP_BOOL(ctx, document, "pictureInPictureEnabled", 0);
@@ -2629,7 +2632,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     DEF_PROP_INT(ctx, body_element, "offsetWidth", 1920);
     DEF_PROP_INT(ctx, body_element, "offsetHeight", 937);
     
-    // Add style object for body (needed by YouTube player scripts)
+    // Add style object for body (commonly accessed by page scripts)
     GCValue body_style = JS_NewObject(ctx);
     if (!JS_IsException(body_style)) {
         JS_SetPropertyStr(ctx, body_element, "style", body_style);
@@ -2651,7 +2654,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, head_element, "removeChild",
         JS_NewCFunction(ctx, js_node_removeChild_real, "removeChild", 1));
     
-    // Add style object for head (needed by feature detection in YouTube scripts)
+    // Add style object for head (commonly accessed by page scripts)
     GCValue head_style = JS_NewObject(ctx);
     if (!JS_IsException(head_style)) {
         JS_SetPropertyStr(ctx, head_element, "style", head_style);
@@ -2660,7 +2663,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, document, "head", head_element);
     LOG_INFO("Document head set");
     
-    // Build minimal DOM tree for YouTube player initialization
+    // Build minimal DOM tree
     // documentElement -> [head, body]
     {
         GCValue append_args[1] = { head_element };
@@ -2671,57 +2674,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         js_node_appendChild_real(ctx, doc_element, 1, append_args);
     }
     
-    // Create key YouTube elements
-    auto create_elem = [&](const char* tag) -> GCValue {
-        GCValue tag_arg = JS_NewString(ctx, tag);
-        return js_document_create_element(ctx, document, 1, &tag_arg);
-    };
-    
-    // ytd-app (root app element)
-    GCValue ytd_app = create_elem("ytd-app");
-    if (!JS_IsNull(ytd_app)) {
-        JS_SetPropertyStr(ctx, ytd_app, "getAttribute", 
-            JS_NewCFunction(ctx, js_element_get_attribute, "getAttribute", 1));
-        JS_SetPropertyStr(ctx, ytd_app, "setAttribute",
-            JS_NewCFunction(ctx, js_element_set_attribute, "setAttribute", 2));
-        JS_SetPropertyStr(ctx, ytd_app, "removeAttribute",
-            JS_NewCFunction(ctx, js_element_remove_attribute, "removeAttribute", 1));
-        GCValue append_args[1] = { ytd_app };
-        js_node_appendChild_real(ctx, body_element, 1, append_args);
-        
-        // ytd-masthead inside ytd-app
-        GCValue ytd_masthead = create_elem("ytd-masthead");
-        if (!JS_IsNull(ytd_masthead)) {
-            GCValue masthead_args[1] = { ytd_masthead };
-            js_node_appendChild_real(ctx, ytd_app, 1, masthead_args);
-        }
-    }
-    
-    // player-api container
-    GCValue player_api = create_elem("div");
-    if (!JS_IsNull(player_api)) {
-        JS_SetPropertyStr(ctx, player_api, "id", JS_NewString(ctx, "player-api"));
-        GCValue append_args[1] = { player_api };
-        js_node_appendChild_real(ctx, body_element, 1, append_args);
-    }
-    
-    // movie_player container
-    GCValue movie_player = create_elem("div");
-    if (!JS_IsNull(movie_player)) {
-        JS_SetPropertyStr(ctx, movie_player, "id", JS_NewString(ctx, "movie_player"));
-        GCValue append_args[1] = { movie_player };
-        js_node_appendChild_real(ctx, body_element, 1, append_args);
-    }
-    
-    // player-placeholder
-    GCValue player_placeholder = create_elem("div");
-    if (!JS_IsNull(player_placeholder)) {
-        JS_SetPropertyStr(ctx, player_placeholder, "id", JS_NewString(ctx, "player-placeholder"));
-        GCValue append_args[1] = { player_placeholder };
-        js_node_appendChild_real(ctx, body_element, 1, append_args);
-    }
-    
-    LOG_INFO("YouTube DOM skeleton created");
+    LOG_INFO("Minimal DOM skeleton created");
     
     // Set activeElement (body by default)
     JS_SetPropertyStr(ctx, document, "activeElement", body_element);
@@ -2770,7 +2723,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     GCHandle loc_handle = gc_allocz(sizeof(LocationData), JS_GC_OBJ_TYPE_DATA);
     if (loc_handle != GC_HANDLE_NULL) {
         LocationData *loc = (LocationData*)gc_deref(loc_handle);
-        parse_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ", loc);
+        parse_url("https://localhost/", loc);
         JS_SetOpaqueHandle(location, loc_handle);
     }
     
@@ -3667,11 +3620,11 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, global, "CustomElementRegistry", ce_registry_ctor);
 
     // ===== ShadyDOM API =====
-    // YouTube's inline config (script 03) assigns a minimal stub to
-    // window.ShadyDOM and expects the browser's webcomponents-sd polyfill to
-    // replace it with the full API. The emulator skips the external bundle, so
-    // we provide a native ShadyDOM implementation here. A getter/setter keeps
-    // the API intact when the page config is applied.
+    // ShadyDOM API stub. Pages that inline a minimal window.ShadyDOM config
+    // expect the browser's webcomponents-sd polyfill to replace it with the
+    // full API. We provide a native stub here so the page can apply its config
+    // without failing. A getter/setter keeps the API intact when the page sets
+    // the property.
     {
         const char *shady_dom_js =
             "(function(){"
@@ -3743,35 +3696,6 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
             "  if (typeof globalThis !== 'undefined') defineShadyDOM(globalThis);"
             "})();";
         JS_Eval(ctx, shady_dom_js, strlen(shady_dom_js), "<shady_dom_api>", JS_EVAL_TYPE_GLOBAL);
-    }
-
-    // ===== YouTube logging stub =====
-    // YouTube's error logger (_.$p) expects yt.logging.errors.log to be a
-    // callable. Wrap any value assigned here so non-object errors and logging
-    // failures do not produce secondary "not a function" timer warnings.
-    {
-        const char *yt_log_js =
-            "(function(){"
-            "  if (typeof window === 'undefined') return;"
-            "  if (!window.yt) window.yt = {};"
-            "  if (!window.yt.logging) window.yt.logging = {};"
-            "  if (!window.yt.logging.errors) window.yt.logging.errors = {};"
-            "  var actual = null;"
-            "  function safeLog(err, severity, a, b, c, d, e) {"
-            "    if (err == null || (typeof err !== 'object' && typeof err !== 'function')) {"
-            "      err = new Error(String(err));"
-            "    }"
-            "    if (actual && typeof actual === 'function') {"
-            "      try { return actual.call(this, err, severity, a, b, c, d, e); } catch(x) {}"
-            "    }"
-            "  }"
-            "  Object.defineProperty(window.yt.logging.errors, 'log', {"
-            "    get: function() { return actual || safeLog; },"
-            "    set: function(v) { actual = (typeof v === 'function') ? v : null; },"
-            "    configurable: true"
-            "  });"
-            "})();";
-        JS_Eval(ctx, yt_log_js, strlen(yt_log_js), "<yt_log_stub>", JS_EVAL_TYPE_GLOBAL);
     }
 
     // ===== ParentNode / ChildNode convenience methods =====
@@ -4238,7 +4162,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, window, "navigator", nav);
     LOG_INFO("Navigator sendBeacon set");
     
-    // ===== Missing APIs for YouTube script 024 =====
+    // ===== Additional standard APIs =====
     // matchMedia
     JS_SetPropertyStr(ctx, window, "matchMedia",
         JS_NewCFunction(ctx, js_match_media, "matchMedia", 1));
@@ -4255,7 +4179,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, global, "AbortController", abort_controller_ctor);
     JS_SetPropertyStr(ctx, window, "AbortController", abort_controller_ctor);
     
-    // AbortSignal - needed by YouTube player scripts
+    // AbortSignal
     GCValue abort_signal_ctor = JS_NewCFunction2(ctx, js_abort_signal_constructor, "AbortSignal",
         0, JS_CFUNC_constructor, 0);
     /* C function constructors don't get a prototype automatically */
@@ -4404,7 +4328,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     LOG_INFO("Missing APIs for script 024 set");
     
     // ===== Intl API Stub =====
-    // Minimal implementation required by YouTube scripts
+    // Minimal implementation
     const char *intl_stub = 
         "var Intl = {"
         "  DateTimeFormat: function() {"
@@ -4421,6 +4345,170 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         (void)exc;
     }
     LOG_INFO("Intl stub set");
+
+    // Standards-compliant fetch/scheduler polyfills that layer Headers, Request,
+    // Response, Origin/Referer/Cookie handling, and scheduler.postTask on top of
+    // the native HTTP backend.
+    const char *fetch_polyfill = R"__FETCH_POLYFILL__(
+(function(){
+  function normalizeHeaders(init) {
+    var h = {};
+    if (init instanceof Headers) {
+      init.forEach(function(v,k){ h[k] = v; });
+    } else if (Array.isArray(init)) {
+      for (var i=0;i<init.length;i++) h[init[i][0]] = init[i][1];
+    } else if (init) {
+      for (var k in init) h[k] = init[k];
+    }
+    return h;
+  }
+
+  function Headers(init) { this._h = normalizeHeaders(init); }
+  Headers.prototype.append = function(name, value) {
+    name = String(name); value = String(value);
+    if (this.has(name)) this._h[name] += ', ' + value;
+    else this._h[name] = value;
+  };
+  Headers.prototype.delete = function(name) { delete this._h[String(name)]; };
+  Headers.prototype.get = function(name) { var v = this._h[String(name)]; return v === undefined ? null : v; };
+  Headers.prototype.has = function(name) { return Object.prototype.hasOwnProperty.call(this._h, String(name)); };
+  Headers.prototype.set = function(name, value) { this._h[String(name)] = String(value); };
+  Headers.prototype.forEach = function(cb, thisArg) { for (var k in this._h) cb.call(thisArg, this._h[k], k, this); };
+  Headers.prototype.keys = function() { return Object.keys(this._h)[Symbol.iterator](); };
+  Headers.prototype.values = function() { var self=this; return Object.keys(this._h).map(function(k){return self._h[k];})[Symbol.iterator](); };
+  Headers.prototype.entries = function() { var self=this; return Object.keys(this._h).map(function(k){return [k, self._h[k]];})[Symbol.iterator](); };
+  Headers.prototype[Symbol.iterator] = Headers.prototype.entries;
+
+  function Request(input, init) {
+    init = init || {};
+    if (input instanceof Request) {
+      this.url = init.url !== undefined ? String(init.url) : input.url;
+      this.method = init.method !== undefined ? String(init.method) : input.method;
+      this.headers = new Headers(init.headers !== undefined ? init.headers : input.headers);
+      this.body = init.body !== undefined ? init.body : input.body;
+      this.mode = init.mode !== undefined ? init.mode : input.mode;
+      this.credentials = init.credentials !== undefined ? init.credentials : input.credentials;
+      this.cache = init.cache !== undefined ? init.cache : input.cache;
+      this.redirect = init.redirect !== undefined ? init.redirect : input.redirect;
+      this.referrer = init.referrer !== undefined ? init.referrer : input.referrer;
+      this.referrerPolicy = init.referrerPolicy !== undefined ? init.referrerPolicy : input.referrerPolicy;
+      this.integrity = init.integrity !== undefined ? init.integrity : input.integrity;
+      this.keepalive = init.keepalive !== undefined ? init.keepalive : input.keepalive;
+      this.signal = init.signal !== undefined ? init.signal : input.signal;
+    } else {
+      this.url = String(input);
+      this.method = init.method ? String(init.method) : 'GET';
+      this.headers = new Headers(init.headers);
+      this.body = init.body !== undefined ? init.body : null;
+      this.mode = init.mode || 'cors';
+      this.credentials = init.credentials || 'same-origin';
+      this.cache = init.cache || 'default';
+      this.redirect = init.redirect || 'follow';
+      this.referrer = init.referrer !== undefined ? init.referrer : 'about:client';
+      this.referrerPolicy = init.referrerPolicy || '';
+      this.integrity = init.integrity || '';
+      this.keepalive = init.keepalive !== undefined ? init.keepalive : false;
+      this.signal = init.signal || null;
+    }
+    if (this.body && (this.method === 'GET' || this.method === 'HEAD')) {
+      throw new TypeError('Body not allowed for GET/HEAD request');
+    }
+  }
+  Request.prototype.clone = function() { return new Request(this); };
+
+  function Response(body, init) {
+    init = init || {};
+    this.type = 'default';
+    this.url = '';
+    this.redirected = false;
+    this.status = init.status !== undefined ? Number(init.status) : 200;
+    this.ok = this.status >= 200 && this.status < 300;
+    this.statusText = init.statusText !== undefined ? String(init.statusText) : 'OK';
+    this.headers = new Headers(init.headers);
+    this.bodyUsed = false;
+    this._body = body;
+    this._json = undefined;
+    this._text = undefined;
+  }
+  Response.prototype.clone = function() {
+    if (this.bodyUsed) throw new TypeError('Already read');
+    return new Response(this._body, {status:this.status, statusText:this.statusText, headers:this.headers});
+  };
+  Response.prototype._consume = function() { if (this.bodyUsed) throw new TypeError('Already read'); this.bodyUsed = true; };
+  Response.prototype.text = function() {
+    this._consume();
+    var self = this;
+    return Promise.resolve().then(function(){
+      if (self._text !== undefined) return self._text;
+      if (self._body === null || self._body === undefined) return '';
+      if (typeof self._body === 'string') return self._body;
+      return String(self._body);
+    });
+  };
+  Response.prototype.json = function() { this._consume(); return this.text().then(function(t){ return JSON.parse(t); }); };
+  Response.prototype.arrayBuffer = function() { this._consume(); return Promise.resolve(new ArrayBuffer(0)); };
+  Response.prototype.blob = function() { this._consume(); return Promise.resolve({size:0, type:''}); };
+  Response.error = function() { return new Response(null, {status:0}); };
+  Response.redirect = function(url, status) { return new Response(null, {status: status||302, headers:{Location: url}}); };
+  Response.json = function(data, init) { return new Response(JSON.stringify(data), init); };
+
+  function sameOrigin(a, b) { try { return new URL(a).origin === new URL(b).origin; } catch(e){ return false; } }
+
+  var nativeFetch = window.fetch;
+  window.fetch = function(input, init) {
+    var req = new Request(input, init);
+    var headers = {};
+    req.headers.forEach(function(v,k){ headers[k] = v; });
+
+    var docUrl = (typeof document !== 'undefined' && document.URL) ||
+                 (typeof location !== 'undefined' && location.href) || 'about:blank';
+    var origin = '';
+    try { origin = new URL(docUrl).origin; } catch(e){}
+
+    if (req.mode !== 'no-cors' && !headers['Origin']) headers['Origin'] = origin;
+    if (req.referrer && req.referrer !== 'no-referrer' && !headers['Referer']) {
+      headers['Referer'] = (req.referrer === 'about:client') ? docUrl : req.referrer;
+    }
+    if (req.credentials === 'include' || (req.credentials === 'same-origin' && sameOrigin(req.url, origin))) {
+      try { var cookies = document.cookie; if (cookies) headers['Cookie'] = cookies; } catch(e){}
+    }
+
+    return nativeFetch(req.url, {method:req.method, headers:headers, body:req.body}).then(function(nativeResp){
+      var resp = new Response(null, {status:nativeResp.status, statusText:nativeResp.statusText, headers:nativeResp.headers});
+      resp.url = nativeResp.url || req.url;
+      resp.redirected = !!nativeResp.redirected;
+      resp._text = nativeResp.__body_text;
+      if (nativeResp.__body_json !== undefined) resp._json = nativeResp.__body_json;
+      resp.text = function(){ var self=this; self._consume(); return nativeResp.text(); };
+      resp.json = function(){ var self=this; self._consume(); return nativeResp.json(); };
+      resp.arrayBuffer = function(){ var self=this; self._consume(); return nativeResp.arrayBuffer(); };
+      resp.blob = function(){ var self=this; self._consume(); return nativeResp.blob(); };
+      return resp;
+    });
+  };
+
+  window.Headers = Headers;
+  window.Request = Request;
+  window.Response = Response;
+
+  window.scheduler = window.scheduler || {};
+  window.scheduler.postTask = function(callback, options) {
+    options = options || {};
+    return new Promise(function(resolve, reject){
+      setTimeout(function(){
+        try { resolve(callback()); } catch(e){ reject(e); }
+      }, options.delay ? Number(options.delay) : 0);
+    });
+  };
+  window.scheduler.yield = function() { return Promise.resolve(); };
+})();
+)__FETCH_POLYFILL__";
+    JS_Eval(ctx, fetch_polyfill, strlen(fetch_polyfill), "<fetch-polyfill>", JS_EVAL_TYPE_GLOBAL);
+    if (JS_HasException(ctx)) {
+        GCValue exc = JS_GetException(ctx);
+        (void)exc;
+    }
+    LOG_INFO("Fetch/scheduler polyfill set");
 }
 
 /*

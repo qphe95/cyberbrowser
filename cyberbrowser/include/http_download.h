@@ -50,10 +50,10 @@ bool http_download_to_file(const char *url, const char *filePath,
                            DownloadState *state,
                            char *err, size_t errLen);
 
-/* Cookie management for YouTube media downloads */
-void http_set_youtube_cookies(const char *cookies);
-const char* http_get_youtube_cookies(void);
-void http_clear_youtube_cookies(void);
+/* Cookie management for media downloads */
+void http_set_cookies(const char *cookies);
+const char* http_get_cookies(void);
+void http_clear_cookies(void);
 
 /* Android-specific functions - only available on Android */
 #ifdef BE_PLATFORM_ANDROID
@@ -62,8 +62,8 @@ void http_download_via_webview(const char *url, void *app);
 
 // WebView session management
 void http_download_set_jni_refs(JavaVM *vm, jobject activity);
-void http_download_load_youtube_page(const char *url);
-void http_download_set_youtube_cookies(const char *cookies);
+void http_download_load_page(const char *url);
+void http_download_set_cookies(const char *cookies);
 void http_download_set_js_session_data(const char *session);
 #endif
 

@@ -58,11 +58,9 @@ void js_quickjs_set_asset_manager(AAssetManager *mgr) {
 // Forward declarations
 static GCValue js_dummy_function(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 static bool is_http_url(const char *url);
-static bool is_youtube_url(const char *url);
 static int collect_user_headers(JSContextHandle ctx, GCValue headers_obj,
                                 char header_bufs[][512], const char **headers_out,
                                 int max_count);
-static const char* resolve_visitor_id(JSContextHandle ctx, char *out_buf, size_t out_len);
 
 // CSSStyleDeclaration.removeProperty stub
 GCValue js_style_remove_property(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
@@ -311,84 +309,7 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
     }
     
     const char *url = xhr.url();
-    if (url && is_youtube_url(url)) {
-        bool is_post = (strcasecmp(xhr.method(), "POST") == 0);
-        char header_bufs[16][512];
-        const char *headers[16];
-        int header_count = 0;
-        
-        // User headers stored on the XHR object
-        header_count = collect_user_headers(ctx, xhr.headers(), header_bufs, headers, 16);
-        
-        if (is_post) {
-            headers[header_count++] = "Content-Type: application/json";
-        }
-        headers[header_count++] = "X-YouTube-Client-Name: 1";
-        
-        char client_version_header[128] = {0};
-        snprintf(client_version_header, sizeof(client_version_header),
-                 "X-YouTube-Client-Version: 2.20250122.04.00");
-        headers[header_count++] = client_version_header;
-        
-        char visitor_id_header[256] = {0};
-        char visitor_buf[256] = {0};
-        const char *visitor_id = resolve_visitor_id(ctx, visitor_buf, sizeof(visitor_buf));
-        if (visitor_id && visitor_id[0]) {
-            snprintf(visitor_id_header, sizeof(visitor_id_header),
-                     "X-Goog-Visitor-Id: %s", visitor_id);
-            headers[header_count++] = visitor_id_header;
-        }
-        
-        char cookie_header[1024] = {0};
-        const char *cookies = platform_http_get_cookies();
-        if (cookies && cookies[0]) {
-            snprintf(cookie_header, sizeof(cookie_header), "Cookie: %s", cookies);
-            headers[header_count++] = cookie_header;
-        }
-        
-        PlatformHttpBuffer response_buffer = {0};
-        char error_buf[256] = {0};
-        bool success = false;
-        int status_code = 0;
-        const char *req_body = xhr.request_body();
-        size_t req_body_len = strlen(req_body);
-        
-        if (is_post && req_body_len > 0) {
-            success = platform_http_post(url, req_body, req_body_len,
-                                         headers, header_count, &response_buffer,
-                                         &status_code, error_buf, sizeof(error_buf));
-        } else {
-            success = platform_http_get_with_headers(url, headers, header_count,
-                                                     &response_buffer, error_buf,
-                                                     sizeof(error_buf));
-            status_code = success ? 200 : 0;
-        }
-        
-        if (success && response_buffer.data && response_buffer.size > 0 && status_code >= 200 && status_code < 300) {
-            xhr.set_status(status_code);
-            xhr.set_response_text(response_buffer.data);
-            char rh[2048];
-            snprintf(rh, sizeof(rh), "HTTP/1.1 %d OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n", status_code, response_buffer.size);
-            xhr.set_response_headers(rh);
-            platform_http_free_buffer(&response_buffer);
-            js_xhr_fire_state(ctx, xhr, this_val, 2); // HEADERS_RECEIVED
-            js_xhr_fire_state(ctx, xhr, this_val, 3); // LOADING
-            js_xhr_fire_state(ctx, xhr, this_val, 4); // DONE
-            GCValue onload = JS_GetPropertyStr(ctx, this_val, "onload");
-            if (JS_IsFunction(ctx, onload)) JS_Call(ctx, onload, this_val, 0, NULL);
-            return JS_UNDEFINED;
-        } else {
-            platform_http_free_buffer(&response_buffer);
-            xhr.set_status(0);
-            xhr.set_response_text("");
-            js_xhr_fire_state(ctx, xhr, this_val, 4); // DONE
-            GCValue onerror = JS_GetPropertyStr(ctx, this_val, "onerror");
-            if (JS_IsFunction(ctx, onerror)) JS_Call(ctx, onerror, this_val, 0, NULL);
-            return JS_UNDEFINED;
-        }
-    }
-    
-    // Generic HTTP(S) handling for non-YouTube endpoints (e.g. share URLs).
+    // Standard HTTP(S) handling for all endpoints.
     if (url && is_http_url(url)) {
         bool is_post = (strcasecmp(xhr.method(), "POST") == 0);
         char header_bufs[16][512];
@@ -633,7 +554,7 @@ static GCValue js_video_load(JSContextHandle ctx, GCValue this_val, int argc, GC
     vid.set_network_state(2); // NETWORK_LOADING
     vid.set_ready_state(1);   // HAVE_METADATA
     
-    // Trigger events that YouTube player expects
+    // Trigger standard media load events
     GCValue onloadstart = vid.onloadstart();
     if (!JS_IsNull(onloadstart)) {
         JS_Call(ctx, onloadstart, this_val, 0, NULL);
@@ -970,18 +891,7 @@ static GCValue js_video_activate(JSContextHandle ctx, GCValue this_val, int argc
     HTMLVideoElementHandle vid = HTMLVideoElementHandle::from_object_check(ctx, this_val);
     if (!vid.valid()) return JS_ThrowTypeError(ctx, "VideoElement internal error");
 
-    /* YouTube's IE2 wrapper calls activate(opts). If opts.hF is present it
-     * sets the source, otherwise it simply loads the element. */
-    if (argc >= 1 && JS_IsObject(argv[0])) {
-        GCValue hf = JS_GetPropertyStr(ctx, argv[0], "hF");
-        const char *src = JS_ToCString(ctx, hf);
-        if (src && src[0]) {
-            vid.set_src(src);
-            record_captured_url(src);
-            JS_SetPropertyStr(ctx, this_val, "src", JS_NewString(ctx, src));
-        }
-    }
-
+    /* activate() is a non-standard player helper; treat it as a load request. */
     js_video_load(ctx, this_val, 0, NULL);
 
     /* Add a volumechange listener once. We store the flag on the JS object. */
@@ -1065,19 +975,6 @@ static bool is_http_url(const char *url) {
     return strncmp(url, "http://", 7) == 0 || strncmp(url, "https://", 8) == 0;
 }
 
-static bool is_youtube_url(const char *url) {
-    if (!url) return false;
-    const char *p = url;
-    if (strncmp(p, "http://", 7) == 0) p += 7;
-    else if (strncmp(p, "https://", 8) == 0) p += 8;
-    else return false;
-    const char *end = p;
-    while (*end && *end != '/' && *end != '?' && *end != '#') end++;
-    size_t len = end - p;
-    return (len >= 11 && strncasecmp(p + len - 11, ".youtube.com", 11) == 0) ||
-           (len == 11 && strncasecmp(p, "youtube.com", 11) == 0);
-}
-
 static int collect_user_headers(JSContextHandle ctx, GCValue headers_obj,
                                 char header_bufs[][512], const char **headers_out,
                                 int max_count) {
@@ -1102,26 +999,6 @@ static int collect_user_headers(JSContextHandle ctx, GCValue headers_obj,
     }
     JS_FreePropertyEnum(ctx, props, prop_count);
     return count;
-}
-
-static const char* resolve_visitor_id(JSContextHandle ctx, char *out_buf, size_t out_len) {
-    if (!ctx || !out_buf || out_len == 0) return g_visitor_data;
-    out_buf[0] = '\0';
-    GCValue global_obj = JS_GetGlobalObject(ctx);
-    GCValue ytcfg = JS_GetPropertyStr(ctx, global_obj, "ytcfg");
-    if (!JS_IsUndefined(ytcfg) && !JS_IsNull(ytcfg)) {
-        GCValue vd = JS_Eval(ctx,
-            "(typeof ytcfg !== 'undefined' && ytcfg.get) ? ytcfg.get('VISITOR_DATA') : null",
-            69, "<ytcfg_vd>", JS_EVAL_TYPE_GLOBAL);
-        if (!JS_IsUndefined(vd) && !JS_IsNull(vd)) {
-            const char *s = JS_ToCString(ctx, vd);
-            if (s && s[0]) {
-                snprintf(out_buf, out_len, "%s", s);
-                return out_buf;
-            }
-        }
-    }
-    return g_visitor_data;
 }
 
 static GCValue resolve_blob_url_response(JSContextHandle ctx, const char *url) {
@@ -1320,48 +1197,14 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
         return NULL;
     };
     
-    // Priority 1: base64 data URL body (YouTube's hidden payload in Request.__original_url)
-    if (argc > 0 && JS_IsObject(argv[0])) {
-        GCValue orig_url_val = JS_GetPropertyStr(ctx, argv[0], "__original_url");
-        if (!JS_IsUndefined(orig_url_val)) {
-            const char *orig_url = JS_ToCString(ctx, orig_url_val);
-            if (orig_url && strncmp(orig_url, "data:application/json;base64,", 29) == 0) {
-                const char *b64 = orig_url + 29;
-                size_t b64_len = strlen(b64);
-                static const char b64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-                size_t out_len = (b64_len / 4) * 3;
-                if (b64_len > 0 && b64[b64_len - 1] == '=') out_len--;
-                if (b64_len > 1 && b64[b64_len - 2] == '=') out_len--;
-                post_body = (char*)malloc(out_len + 1);
-                if (post_body) {
-                    int val = 0, valb = -8;
-                    size_t j = 0;
-                    for (size_t i = 0; i < b64_len && b64[i] != '='; i++) {
-                        const char *p = strchr(b64_table, b64[i]);
-                        if (p) {
-                            val = (val << 6) + (p - b64_table);
-                            valb += 6;
-                            if (valb >= 0) {
-                                post_body[j++] = (char)((val >> valb) & 0xFF);
-                                valb -= 8;
-                            }
-                        }
-                    }
-                    post_body[j] = '\0';
-                    post_body_len = j;
-                }
-            }
-        }
-    }
-    
-    // Priority 2: init.body
+    // Priority 1: init.body
     if (!post_body && argc > 1 && JS_IsObject(argv[1])) {
         GCValue body_prop = JS_GetPropertyStr(ctx, argv[1], "body");
         post_body = extract_body(body_prop);
         if (post_body) post_body_len = strlen(post_body);
     }
     
-    // Priority 3: Request.body
+    // Priority 2: Request.body
     if (!post_body && argc > 0 && JS_IsObject(argv[0])) {
         GCValue body_prop = JS_GetPropertyStr(ctx, argv[0], "body");
         post_body = extract_body(body_prop);
@@ -1376,152 +1219,8 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
         // Fall through to default empty response
     }
     
-    // Real HTTP(S) handling for YouTube endpoints
-    if (url && is_youtube_url(url)) {
-        bool is_post = (strcasecmp(method, "POST") == 0);
-        
-        char header_bufs[16][512];
-        const char *headers[16];
-        int header_count = 0;
-        
-        // Collect user-provided headers
-        if (argc > 1 && JS_IsObject(argv[1])) {
-            GCValue headers_obj = JS_GetPropertyStr(ctx, argv[1], "headers");
-            header_count = collect_user_headers(ctx, headers_obj, header_bufs, headers, 16);
-        }
-        
-        // Default YouTube headers
-        if (is_post) {
-            headers[header_count++] = "Content-Type: application/json";
-        }
-        headers[header_count++] = "X-YouTube-Client-Name: 1";
-        
-        char client_version_header[128] = {0};
-        snprintf(client_version_header, sizeof(client_version_header),
-                 "X-YouTube-Client-Version: 2.20250122.04.00");
-        GCValue global_obj = JS_GetGlobalObject(ctx);
-        GCValue ytcfg = JS_GetPropertyStr(ctx, global_obj, "ytcfg");
-        if (!JS_IsUndefined(ytcfg) && !JS_IsNull(ytcfg)) {
-            GCValue cv = JS_Eval(ctx,
-                "(function() { var v = (typeof ytcfg !== 'undefined' && ytcfg.get) ? ytcfg.get('CLIENT_VERSION') : null; if (!v && typeof yt !== 'undefined' && yt.config_ && yt.config_.INNERTUBE_CLIENT_VERSION) v = yt.config_.INNERTUBE_CLIENT_VERSION; return v; })()",
-                230, "<ytcfg_cv>", JS_EVAL_TYPE_GLOBAL);
-            if (!JS_IsUndefined(cv) && !JS_IsNull(cv)) {
-                const char *cv_str = JS_ToCString(ctx, cv);
-                if (cv_str && cv_str[0]) {
-                    snprintf(client_version_header, sizeof(client_version_header),
-                             "X-YouTube-Client-Version: %s", cv_str);
-                }
-            }
-        }
-        headers[header_count++] = client_version_header;
-        
-        char visitor_id_header[256] = {0};
-        char visitor_buf[256] = {0};
-        const char *visitor_id = resolve_visitor_id(ctx, visitor_buf, sizeof(visitor_buf));
-        if (visitor_id && visitor_id[0]) {
-            snprintf(visitor_id_header, sizeof(visitor_id_header),
-                     "X-Goog-Visitor-Id: %s", visitor_id);
-            headers[header_count++] = visitor_id_header;
-        }
-        
-        char cookie_header[1024] = {0};
-        const char *cookies = platform_http_get_cookies();
-        if (cookies && cookies[0]) {
-            snprintf(cookie_header, sizeof(cookie_header), "Cookie: %s", cookies);
-            headers[header_count++] = cookie_header;
-        }
-        
-        PlatformHttpBuffer response_buffer = {0};
-        char error_buf[256] = {0};
-        bool success = false;
-        int status_code = 0;
-        
-        if (is_post && post_body && post_body_len > 0) {
-            success = platform_http_post(url, post_body, post_body_len,
-                                         headers, header_count, &response_buffer,
-                                         &status_code, error_buf, sizeof(error_buf));
-        } else {
-            success = platform_http_get_with_headers(url, headers, header_count,
-                                                     &response_buffer, error_buf,
-                                                     sizeof(error_buf));
-            status_code = success ? 200 : 0;
-        }
-        
-        if (success && response_buffer.data && response_buffer.size > 0 && status_code >= 200 && status_code < 300) {
-            // Capture googlevideo URLs from response
-            char *gv_url = strstr(response_buffer.data, "googlevideo.com");
-            if (gv_url) {
-                char *url_start = gv_url;
-                while (url_start > response_buffer.data && url_start[-1] != '"' && url_start[-1] != '\'' && url_start[-1] != ' ') {
-                    url_start--;
-                }
-                char *url_end = gv_url + strlen("googlevideo.com");
-                while (*url_end && *url_end != '"' && *url_end != '\'' && *url_end != ' ' && *url_end != '\\') {
-                    url_end++;
-                }
-                size_t len = url_end - url_start;
-                if (len > 0 && len < URL_MAX_LEN) {
-                    char captured[URL_MAX_LEN];
-                    strncpy(captured, url_start, len);
-                    captured[len] = '\0';
-                    record_captured_url(captured);
-                }
-            }
-            
-            GCValue response_obj = create_response_from_data(ctx, url, response_buffer.data,
-                                                             response_buffer.size, status_code, "OK");
-            platform_http_free_buffer(&response_buffer);
-            if (post_body) free(post_body);
-            GCValue global = JS_GetGlobalObject(ctx);
-            GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
-            GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
-            GCValue args[1] = { response_obj };
-            return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
-        } else {
-            platform_http_free_buffer(&response_buffer);
-            platform_log(LOG_LEVEL_WARN, "js_fetch", "Real request failed: %s", error_buf[0] ? error_buf : "unknown");
-            // Fall through to fallback for youtubei player, otherwise default mock
-        }
-        
-        // youtubei/v1/player fallback: use ytInitialPlayerResponse
-        if (strstr(url, "youtubei/v1/player") != NULL) {
-            GCValue global2 = JS_GetGlobalObject(ctx);
-            GCValue ytip = JS_GetPropertyStr(ctx, global2, "ytInitialPlayerResponse");
-            if (!JS_IsUndefined(ytip) && !JS_IsNull(ytip)) {
-                GCValue json_str = JS_JSONStringify(ctx, ytip, JS_UNDEFINED, JS_UNDEFINED);
-                const char *json_cstr = JS_ToCString(ctx, json_str);
-                if (json_cstr) {
-                    const char *scan = json_cstr;
-                    while ((scan = strstr(scan, "googlevideo.com")) != NULL) {
-                        const char *url_start = scan;
-                        while (url_start > json_cstr && url_start[-1] != '"' && url_start[-1] != '\'' && url_start[-1] != ' ') {
-                            url_start--;
-                        }
-                        const char *url_end = scan + strlen("googlevideo.com");
-                        while (*url_end && *url_end != '"' && *url_end != '\'' && *url_end != ' ' && *url_end != '\\') {
-                            url_end++;
-                        }
-                        size_t len = url_end - url_start;
-                        if (len > 0 && len < URL_MAX_LEN) {
-                            char captured[URL_MAX_LEN];
-                            strncpy(captured, url_start, len);
-                            captured[len] = '\0';
-                            record_captured_url(captured);
-                        }
-                        scan = url_end;
-                    }
-                    GCValue response_obj = create_response_from_data(ctx, url, json_cstr, strlen(json_cstr), 200, "OK");
-                    if (post_body) free(post_body);
-                    GCValue global = JS_GetGlobalObject(ctx);
-                    GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
-                    GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
-                    GCValue args[1] = { response_obj };
-                    return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
-                }
-            }
-        }
-    } else if (url && is_http_url(url)) {
-        // Generic HTTP(S) handling for non-YouTube endpoints (e.g. share URLs).
+    // Standard HTTP(S) handling for all endpoints.
+    if (url && is_http_url(url)) {
         bool is_post = (strcasecmp(method, "POST") == 0);
         char header_bufs[16][512];
         const char *headers[16];
@@ -1582,7 +1281,15 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
         } else {
             platform_http_free_buffer(&response_buffer);
             platform_log(LOG_LEVEL_WARN, "js_fetch", "Generic request failed: %s", error_buf[0] ? error_buf : "unknown");
-            // Fall through to default mock response.
+            // For HTTP(S) URLs, a failed network request rejects per Fetch semantics.
+            GCValue global = JS_GetGlobalObject(ctx);
+            GCValue typeerror_ctor = JS_GetPropertyStr(ctx, global, "TypeError");
+            GCValue err_msg = JS_NewString(ctx, error_buf[0] ? error_buf : "Network request failed");
+            GCValue err = JS_Call(ctx, typeerror_ctor, JS_UNDEFINED, 1, &err_msg);
+            GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
+            GCValue reject_fn = JS_GetPropertyStr(ctx, promise_ctor, "reject");
+            GCValue args[1] = { err };
+            return JS_Call(ctx, reject_fn, JS_UNDEFINED, 1, args);
         }
     }
     
@@ -1886,7 +1593,7 @@ static GCValue js_document_get_element_by_id(JSContextHandle ctx, GCValue this_v
     GCValue doc_elem = JS_GetPropertyStr(ctx, this_val, "documentElement");
     if (JS_IsUndefined(doc_elem) || JS_IsNull(doc_elem)) return JS_NULL;
 
-    // Build a simple #id selector. YouTube ids are alphanumeric with hyphens/underscores.
+    // Build a simple #id selector.
     char selector[256];
     snprintf(selector, sizeof(selector), "#%s", id);
     GCValue args[1] = { JS_NewString(ctx, selector) };
@@ -2152,16 +1859,15 @@ bool js_quickjs_create_runtime(void) {
     }
     platform_log(LOG_LEVEL_INFO, "js_quickjs", "Global context created: %u", g_js_context.handle());
     
-    // Enable eval() support - REQUIRED for YouTube player scripts to work
-    // YouTube's signature decryption relies heavily on eval() for code execution
+    // Enable eval() support - required by many player scripts
     platform_log(LOG_LEVEL_INFO, "js_quickjs", "Enabling eval() support...");
     JS_AddIntrinsicEval(g_js_context);
     
-    // Enable RegExp support - REQUIRED for YouTube player scripts
+    // Enable RegExp support - required by most page scripts
     platform_log(LOG_LEVEL_INFO, "js_quickjs", "Enabling RegExp support...");
     JS_AddIntrinsicRegExp(g_js_context);
     
-    // Enable Promise support - REQUIRED for modern YouTube scripts
+    // Enable Promise support - required by modern page scripts
     platform_log(LOG_LEVEL_INFO, "js_quickjs", "Enabling Promise support...");
     JS_AddIntrinsicPromise(g_js_context);
     
@@ -2549,13 +2255,13 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
         }
     }
 
-    // Note: Data payload scripts (ytInitialPlayerResponse, ytInitialData, etc.)
-    // will execute naturally as part of the scripts array, defining global
-    // variables just like in a real browser. No manual injection needed.
+    // Data payload scripts will execute naturally as part of the scripts array,
+    // defining global variables just like in a real browser. No manual injection
+    // needed.
 
     /* Defensive DOM normalization: ensure the root elements have style objects.
-     * YouTube's web-animations polyfill does 'prop in document.documentElement.style'
-     * and crashes if style is undefined. */
+     * Some web-animations polyfills do 'prop in document.documentElement.style'
+     * and crash if style is undefined. */
     {
         const char *guard = "(function(){"
             "var de=document.documentElement;"
@@ -2616,8 +2322,8 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
         // Reset diagnostic for property-on-undefined errors
         g_last_undefined_prop[0] = '\0';
 
-        // Execute script directly.  We no longer apply YouTube/kevlar-specific
-        // string patches; custom-element upgrade and missing standard APIs are
+        // Execute script directly. Domain-specific string patches are not
+        // applied; custom-element upgrade and missing standard APIs are
         // implemented in the browser layer instead.
         GCValue result = JS_Eval(ctx, scripts[i], script_lens[i], filename, JS_EVAL_TYPE_GLOBAL);
 
@@ -2654,218 +2360,7 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
     js_quickjs_pump_timers_and_jobs();
     log_to_file("js_quickjs", "Drained remaining timers/jobs after all scripts");
     
-    log_to_file("js_quickjs", "All %d scripts executed, running discovery...", script_count);
-
-    // YouTube-specific skeleton repair: the static shell leaves #home-chips and
-    // #guide-skeleton empty, and the un-upgraded ytd-app's absolute positioning
-    // pushes the grid down by its full viewport height.  Inject placeholder
-    // children so the chips/guide band renders, force the guide visible, and
-    // collapse ytd-app's height so the grid sits directly under the masthead.
-    {
-        const char *skeleton_fix_js =
-            "(function(){"
-            "  var chips = document.getElementById('home-chips');"
-            "  if (chips && !chips.firstChild) {"
-            "    for (var i = 0; i < 8; i++) {"
-            "      var d = document.createElement('div');"
-            "      d.className = 'home-chips-ghost skeleton-bg-color';"
-            "      chips.appendChild(d);"
-            "    }"
-            "  }"
-            "  var guide = document.getElementById('guide-skeleton');"
-            "  if (guide) {"
-            "    if (guide.removeAttribute) guide.removeAttribute('disable-upgrade');"
-            "    if (!guide.firstChild) {"
-            "      for (var i = 0; i < 6; i++) {"
-            "        var row = document.createElement('div');"
-            "        row.className = 'guide-ghost';"
-            "        var icon = document.createElement('div');"
-            "        icon.className = 'guide-ghost-icon skeleton-bg-color';"
-            "        var text = document.createElement('div');"
-            "        text.className = 'guide-ghost-text skeleton-bg-color';"
-            "        row.appendChild(icon);"
-            "        row.appendChild(text);"
-            "        guide.appendChild(row);"
-            "      }"
-            "    }"
-            "  }"
-            "})();";
-        GCValue fix_val = JS_Eval(ctx, skeleton_fix_js, strlen(skeleton_fix_js), "<skeleton_fix>", JS_EVAL_TYPE_GLOBAL);
-        (void)fix_val;
-    }
-
-    // After scripts load, dispatch DOMContentLoaded to trigger player initialization
-    // The video element and ytInitialPlayerResponse were already set up before scripts loaded
-    const char *init_player_js = 
-        "// Use native logging function if available\n"
-        "var _log = (typeof __bgmdwnldr_log !== 'undefined') ? __bgmdwnldr_log : console.log;\n"
-        "\n"
-        "// Debug: Log all window properties that might be player-related\n"
-        "var playerKeys = Object.keys(window).filter(function(k) {\n"
-        "  return k.toLowerCase().indexOf('player') >= 0 || k.toLowerCase().indexOf('yt') >= 0 || k.toLowerCase().indexOf('decrypt') >= 0;\n"
-        "});\n"
-        "_log('[JS_DISCOVERY] Player/yt related globals: ' + playerKeys.join(', '));\n"
-        "\n"
-        "// Check for specific player objects\n"
-        "_log('[JS_DISCOVERY] window.player exists: ' + (typeof window.player));\n"
-        "_log('[JS_DISCOVERY] window.ytPlayer exists: ' + (typeof window.ytPlayer));\n"
-        "_log('[JS_DISCOVERY] window.yt exists: ' + (typeof window.yt));\n"
-        "_log('[JS_DISCOVERY] window.ytcfg exists: ' + (typeof window.ytcfg));\n"
-        "_log('[JS_DISCOVERY] window.ytsignals exists: ' + (typeof window.ytsignals));\n"
-        "\n"
-        "// Dispatch DOMContentLoaded to trigger any player initialization\n"
-        "if (typeof window !== 'undefined' && window.dispatchEvent) {\n"
-        "  var readyEvent = { type: 'DOMContentLoaded', bubbles: true };\n"
-        "  window.dispatchEvent(readyEvent);\n"
-        "  _log('[JS_DISCOVERY] Dispatched DOMContentLoaded');\n"
-        "}\n"
-        "\n"
-        "// Log what we have available\n"
-        "if (typeof ytInitialPlayerResponse !== 'undefined') {\n"
-        "  _log('[JS_DISCOVERY] ytInitialPlayerResponse is available');\n"
-        "  // Try to extract streamingData to see if URLs are there\n"
-        "  if (ytInitialPlayerResponse.streamingData) {\n"
-        "    var formats = ytInitialPlayerResponse.streamingData.formats || [];\n"
-        "    var adaptiveFormats = ytInitialPlayerResponse.streamingData.adaptiveFormats || [];\n"
-        "    _log('[JS_DISCOVERY] Found ' + formats.length + ' formats and ' + adaptiveFormats.length + ' adaptive formats');\n"
-        "    // Count encrypted vs decrypted\n"
-        "    var encryptedCount = 0;\n"
-        "    var decryptedCount = 0;\n"
-        "    for (var i = 0; i < formats.length; i++) {\n"
-        "      if (formats[i].signatureCipher) encryptedCount++;\n"
-        "      else if (formats[i].url) decryptedCount++;\n"
-        "    }\n"
-        "    for (var i = 0; i < adaptiveFormats.length; i++) {\n"
-        "      if (adaptiveFormats[i].signatureCipher) encryptedCount++;\n"
-        "      else if (adaptiveFormats[i].url) decryptedCount++;\n"
-        "    }\n"
-        "    _log('[JS_DISCOVERY] Encrypted: ' + encryptedCount + ', Decrypted: ' + decryptedCount);\n"
-        "    // Log first few URLs if available\n"
-        "    for (var i = 0; i < Math.min(3, formats.length); i++) {\n"
-        "      if (formats[i].url) _log('[JS_DISCOVERY] Format ' + i + ' URL: ' + formats[i].url.substring(0, 80) + '...');\n"
-        "      if (formats[i].signatureCipher) _log('[JS_DISCOVERY] Format ' + i + ' signatureCipher: ' + formats[i].signatureCipher.substring(0, 80) + '...');\n"
-        "    }\n"
-        "  } else {\n"
-        "    _log('[JS_DISCOVERY] NO streamingData in ytInitialPlayerResponse');\n"
-        "  }\n"
-        "} else {\n"
-        "  _log('[JS_DISCOVERY] ytInitialPlayerResponse NOT DEFINED');\n"
-        "}\n"
-        "if (document.getElementById('movie_player')) {\n"
-        "  _log('[JS_DISCOVERY] movie_player element exists');\n"
-        "}\n"
-        "\n"
-        "// === DISCOVER PLAYER APIS ===\n"
-        "_log('[JS_DISCOVERY] === DISCOVERING PLAYER APIS ===');\n"
-        "\n"
-        "// Check for yt object\n"
-        "if (typeof yt !== 'undefined') {\n"
-        "  _log('[JS_DISCOVERY] yt object found');\n"
-        "  for (var key in yt) {\n"
-        "    _log('[JS_DISCOVERY]   yt.' + key + ' = ' + typeof yt[key]);\n"
-        "  }\n"
-        "  if (yt.player) {\n"
-        "    _log('[JS_DISCOVERY] yt.player found');\n"
-        "    for (var key in yt.player) {\n"
-        "      _log('[JS_DISCOVERY]   yt.player.' + key + ' = ' + typeof yt.player[key]);\n"
-        "    }\n"
-        "  }\n"
-        "} else {\n"
-        "  _log('[JS_DISCOVERY] yt object NOT found');\n"
-        "}\n"
-        "\n"
-        "// Check for player-related globals\n"
-        "var playerGlobals = ['player', 'ytPlayer', 'ytplayer', 'Player'];\n"
-        "for (var i = 0; i < playerGlobals.length; i++) {\n"
-        "  var name = playerGlobals[i];\n"
-        "  if (typeof window[name] !== 'undefined') {\n"
-        "    _log('[JS_DISCOVERY] window.' + name + ' = ' + typeof window[name]);\n"
-        "  }\n"
-        "}\n"
-        "\n"
-        "// === CHECK FOR DECRYPT FUNCTIONS ===\n"
-        "_log('[JS_DISCOVERY] === CHECKING FOR DECRYPT FUNCTIONS ===');\n"
-        "var potentialDecryptors = [];\n"
-        "for (var key in window) {\n"
-        "  if (typeof window[key] === 'function' && key.length > 0 && key.length < 15) {\n"
-        "    try {\n"
-        "      var fnStr = window[key].toString();\n"
-        "      // Look for signature manipulation patterns\n"
-        "      if ((fnStr.indexOf('split') > -1 || fnStr.indexOf('reverse') > -1 || fnStr.indexOf('slice') > -1) && \n"
-        "          fnStr.length < 800 && fnStr.length > 100) {\n"
-        "        potentialDecryptors.push(key);\n"
-        "        if (potentialDecryptors.length <= 3) {\n"
-        "          _log('[JS_DISCOVERY] Potential decryptor ' + key + ': ' + fnStr.substring(0, 60) + '...');\n"
-        "        }\n"
-        "      }\n"
-        "    } catch(e) {}\n"
-        "  }\n"
-        "}\n"
-        "_log('[JS_DISCOVERY] Found ' + potentialDecryptors.length + ' potential decryptor functions');\n"
-        "_log('[JS_DISCOVERY] === END DISCOVERY ===');\n"
-    ;
-    
-    GCValue init_result = JS_Eval(ctx, init_player_js, strlen(init_player_js), "<init_player>", JS_EVAL_TYPE_GLOBAL);
-    if (JS_IsException(init_result)) {
-        js_quickjs_log_exception(ctx, "js_quickjs",
-            "Init player script threw exception: %s", false);
-    }
-
-    /* Extract video title and thumbnail from ytInitialPlayerResponse */
-    {
-        GCValue global = JS_GetGlobalObject(ctx);
-        GCValue ytip = JS_GetPropertyStr(ctx, global, "ytInitialPlayerResponse");
-        if (!JS_IsUndefined(ytip) && !JS_IsNull(ytip)) {
-            GCValue vd = JS_GetPropertyStr(ctx, ytip, "videoDetails");
-            if (!JS_IsUndefined(vd) && !JS_IsNull(vd)) {
-                GCValue titleVal = JS_GetPropertyStr(ctx, vd, "title");
-                const char *titleStr = JS_ToCString(ctx, titleVal);
-                if (titleStr) {
-                    strncpy(out_result->title, titleStr, sizeof(out_result->title) - 1);
-                    out_result->title[sizeof(out_result->title) - 1] = '\0';
-                }
-                GCValue thumb = JS_GetPropertyStr(ctx, vd, "thumbnail");
-                if (!JS_IsUndefined(thumb) && !JS_IsNull(thumb)) {
-                    GCValue thumbs = JS_GetPropertyStr(ctx, thumb, "thumbnails");
-                    if (!JS_IsUndefined(thumbs) && !JS_IsNull(thumbs)) {
-                        /* Pick the last (usually highest-res) thumbnail */
-                        GCValue lenVal = JS_GetPropertyStr(ctx, thumbs, "length");
-                        int thumbCount = 0;
-                        if (!JS_IsUndefined(lenVal)) {
-                            int64_t len64;
-                            if (JS_ToBigInt64(ctx, &len64, lenVal) == 0) {
-                                thumbCount = (int)len64;
-                            } else {
-                                int32_t len32;
-                                if (JS_ToInt32(ctx, &len32, lenVal) == 0) {
-                                    thumbCount = len32;
-                                }
-                            }
-                        }
-                        if (thumbCount > 0) {
-                            GCValue lastThumb = JS_GetPropertyUint32(ctx, thumbs, (uint32_t)(thumbCount - 1));
-                            if (!JS_IsUndefined(lastThumb) && !JS_IsNull(lastThumb)) {
-                                GCValue urlVal = JS_GetPropertyStr(ctx, lastThumb, "url");
-                                const char *urlStr = JS_ToCString(ctx, urlVal);
-                                if (urlStr) {
-                                    strncpy(out_result->thumbnailUrl, urlStr, sizeof(out_result->thumbnailUrl) - 1);
-                                    out_result->thumbnailUrl[sizeof(out_result->thumbnailUrl) - 1] = '\0';
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if (out_result->title[0]) {
-            platform_log(LOG_LEVEL_INFO, "js_quickjs",
-                "[METADATA] Title: %.80s", out_result->title);
-        }
-        if (out_result->thumbnailUrl[0]) {
-            platform_log(LOG_LEVEL_INFO, "js_quickjs",
-                "[METADATA] Thumbnail: %.80s", out_result->thumbnailUrl);
-        }
-    }
+    log_to_file("js_quickjs", "All %d scripts executed", script_count);
 
     // Get captured URLs
     pthread_mutex_lock(&g_url_mutex);

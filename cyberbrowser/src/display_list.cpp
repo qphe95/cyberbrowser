@@ -196,9 +196,9 @@ static bool node_or_ancestor_has_class(LayoutContext *ctx, int node_idx,
 
 static bool node_has_hidden_class(LayoutContext *ctx, int node_idx)
 {
-    /* Treat any node inside a hidden subtree as hidden.  YouTube's static
-     * watch-page skeleton carries class "hidden" on its root, but its
-     * descendants do not, so we must walk up the layout tree. */
+    /* Treat any node inside a hidden subtree as hidden. Some page skeletons
+     * carry class "hidden" on their root while descendants do not, so we must
+     * walk up the layout tree. */
     if (node_or_ancestor_has_class(ctx, node_idx, "hidden")) return true;
     return false;
 }
@@ -294,7 +294,7 @@ static void emit_image_async(DisplayList *dl, float x, float y, float w, float h
     }
 }
 
-/* Return true if the document is in a dark theme (e.g. YouTube dark mode).
+/* Return true if the document is in a dark theme.
  * This is used to make default-black text visible on dark backgrounds. */
 static bool document_is_dark_mode(LayoutContext *ctx)
 {
@@ -405,12 +405,11 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                        (float)box->width, (float)box->height, handle);
         }
 
-        /* Placeholder fills for content shells that YouTube injects without
-         * visible CSS in our engine.  This makes skeleton thumbnails, avatars,
-         * and text shells visible instead of transparent.  Colors are chosen
-         * to contrast with YouTube's dark (#0f0f0f) background.
-         * These intentionally override any near-black CSS background so the
-         * skeleton shapes remain visible. */
+        /* Placeholder fills for content shells injected without visible CSS in
+         * our engine.  This makes skeleton thumbnails, avatars, and text shells
+         * visible instead of transparent.  Colors are chosen to contrast with
+         * dark backgrounds. These intentionally override any near-black CSS
+         * background so the skeleton shapes remain visible. */
         if (!box->background_image_url[0]) {
             static const char *thumbnail_needles[] = {
                 "rich-thumbnail", "video-thumbnail", "thumbnail", NULL

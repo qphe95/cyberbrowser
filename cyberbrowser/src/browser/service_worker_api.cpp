@@ -208,7 +208,7 @@ void post_message_to_service_worker(JSContextHandle ctx, GCValue data) {
     GCValue event = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, event, "data", data);
     JS_SetPropertyStr(ctx, event, "source", JS_NULL);
-    JS_SetPropertyStr(ctx, event, "origin", JS_NewString(ctx, "https://www.youtube.com"));
+    JS_SetPropertyStr(ctx, event, "origin", JS_NewString(ctx, ""));
     
     // Call each handler
     GCValue length_val = JS_GetPropertyStr(ctx, swc->message_handlers, "length");

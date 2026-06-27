@@ -84,13 +84,13 @@ void platform_http_free_buffer(PlatformHttpBuffer *buffer) {
 }
 
 void platform_http_set_cookies(const char *cookies) {
-    http_set_youtube_cookies(cookies);
+    http_set_cookies(cookies);
 }
 
 const char* platform_http_get_cookies(void) {
-    return http_get_youtube_cookies();
+    return http_get_cookies();
 }
 
 void platform_http_clear_cookies(void) {
-    http_clear_youtube_cookies();
+    http_clear_cookies();
 }

@@ -347,19 +347,7 @@ void execute_timer(JSContextHandle ctx, int id) {
             if (!JS_IsUndefined(stack_val) && !JS_IsNull(stack_val)) {
                 stack = JS_ToCString(ctx, stack_val);
             }
-            // YouTube's internal analytics / error-reporting paths (compiled into
-            // dynamic functions and tagged <lazy>) throw benign errors such as
-            // "Error: Ec" and "TypeError: not a function" in this headless
-            // context. They do not affect page functionality, so suppress the
-            // noisy warning while preserving logging for unexpected exceptions.
-            bool is_benign_yt_analytics = false;
-            if (exc_str && stack && strstr(stack, "<lazy>")) {
-                if (strstr(exc_str, "Error: Ec") == exc_str ||
-                    strcmp(exc_str, "TypeError: not a function") == 0) {
-                    is_benign_yt_analytics = true;
-                }
-            }
-            if (!is_benign_yt_analytics) {
+            {
                 if (exc_str) {
                     platform_log(LOG_LEVEL_WARN, "timer", "Timer callback exception: %s", exc_str);
                 }

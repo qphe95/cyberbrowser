@@ -159,22 +159,22 @@ static bool parse_url(const char *url, char *host, size_t host_len,
 }
 
 /* Global context to pass cookies between requests */
-static char g_youtube_cookies[4096] = {0};
+static char g_cookie_jar[4096] = {0};
 
-void http_set_youtube_cookies(const char *cookies) {
+void http_set_cookies(const char *cookies) {
     if (cookies) {
-        strncpy(g_youtube_cookies, cookies, sizeof(g_youtube_cookies) - 1);
-        g_youtube_cookies[sizeof(g_youtube_cookies) - 1] = '\0';
-        LOGI("Set YouTube cookies: %.100s...", g_youtube_cookies);
+        strncpy(g_cookie_jar, cookies, sizeof(g_cookie_jar) - 1);
+        g_cookie_jar[sizeof(g_cookie_jar) - 1] = '\0';
+        LOGI("Set cookies: %.100s...", g_cookie_jar);
     }
 }
 
-const char* http_get_youtube_cookies(void) {
-    return g_youtube_cookies[0] ? g_youtube_cookies : NULL;
+const char* http_get_cookies(void) {
+    return g_cookie_jar[0] ? g_cookie_jar : NULL;
 }
 
-void http_clear_youtube_cookies(void) {
-    g_youtube_cookies[0] = '\0';
+void http_clear_cookies(void) {
+    g_cookie_jar[0] = '\0';
 }
 
 static size_t parse_content_length_from_headers(const char *data, size_t data_len) {
@@ -226,15 +226,6 @@ static size_t parse_content_range_total_size(const char *data, size_t data_len) 
     return 0;
 }
 
-static bool has_range_header(const char **headers, size_t header_count) {
-    for (size_t i = 0; i < header_count; i++) {
-        if (headers[i] && strncasecmp(headers[i], "range:", 6) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
 static bool http_request_with_method_internal(const char *url, const char *method,
                                                const char *postData, size_t postDataLen,
                                                const char **custom_headers, size_t custom_header_count,
@@ -280,17 +271,6 @@ static bool http_request_with_method_internal(const char *url, const char *metho
     if (postData && postDataLen > 0) {
         req_len += snprintf(request + req_len, sizeof(request) - req_len,
                            "Content-Length: %zu\r\n", postDataLen);
-    }
-    
-    /* Add Referer for googlevideo.com */
-    if (strstr(host, "googlevideo.com")) {
-        req_len += snprintf(request + req_len, sizeof(request) - req_len,
-                           "Referer: https://www.youtube.com/\r\n");
-        /* Only add default Range if caller didn't provide one */
-        if (!has_range_header(custom_headers, custom_header_count)) {
-            req_len += snprintf(request + req_len, sizeof(request) - req_len,
-                               "Range: bytes=0-\r\n");
-        }
     }
     
     /* Add cookies if provided */
@@ -573,9 +553,9 @@ static bool http_request_with_method_internal(const char *url, const char *metho
                         strcmp(cookie_name, "SameSite") != 0) {
                         
                         bool duplicate = false;
-                        char *search = g_youtube_cookies;
+                        char *search = g_cookie_jar;
                         while ((search = strstr(search, cookie_name)) != NULL) {
-                            if (search == g_youtube_cookies || search[-1] == ' ' && search[-2] == ';') {
+                            if (search == g_cookie_jar || search[-1] == ' ' && search[-2] == ';') {
                                 if (search[strlen(cookie_name)] == '=') {
                                     duplicate = true;
                                     break;
@@ -585,23 +565,23 @@ static bool http_request_with_method_internal(const char *url, const char *metho
                         }
                         
                         if (!duplicate) {
-                            size_t current_len = strlen(g_youtube_cookies);
-                            size_t remaining = sizeof(g_youtube_cookies) - current_len - 1;
+                            size_t current_len = strlen(g_cookie_jar);
+                            size_t remaining = sizeof(g_cookie_jar) - current_len - 1;
                             size_t needed = strlen(cookie_name) + strlen(cookie_value) + 3;
-                            if (g_youtube_cookies[0]) {
+                            if (g_cookie_jar[0]) {
                                 needed += 2;
                             }
                             
                             if (remaining >= needed) {
-                                if (g_youtube_cookies[0]) {
-                                    strncat(g_youtube_cookies, "; ", remaining);
+                                if (g_cookie_jar[0]) {
+                                    strncat(g_cookie_jar, "; ", remaining);
                                     remaining -= 2;
                                 }
-                                strncat(g_youtube_cookies, cookie_name, remaining);
+                                strncat(g_cookie_jar, cookie_name, remaining);
                                 remaining -= strlen(cookie_name);
-                                strncat(g_youtube_cookies, "=", remaining);
+                                strncat(g_cookie_jar, "=", remaining);
                                 remaining -= 1;
-                                strncat(g_youtube_cookies, cookie_value, remaining);
+                                strncat(g_cookie_jar, cookie_value, remaining);
                                 LOGI("Captured cookie: %s=...", cookie_name);
                             } else {
                                 LOGE("Cookie buffer full, skipping: %s", cookie_name);
@@ -638,25 +618,6 @@ static bool http_request_with_method_internal(const char *url, const char *metho
                 free(outBuffer->data);
                 outBuffer->data = NULL;
                 return false;
-            }
-            
-            if (strstr(host, "youtube.com")) {
-                char redirect_host[256] = {0};
-                char temp_path[2048], temp_port[8];
-                if (parse_url(redirect_url, redirect_host, sizeof(redirect_host), 
-                              temp_path, sizeof(temp_path), temp_port, sizeof(temp_port))) {
-                    if (!strstr(redirect_host, "youtube.com") && 
-                        !strstr(redirect_host, "googlevideo.com") &&
-                        !strstr(redirect_host, "ytimg.com") &&
-                        !strstr(redirect_host, "googleapis.com") &&
-                        !strstr(redirect_host, "gstatic.com")) {
-                        LOGE("Blocking cross-domain redirect from youtube.com to %s", redirect_host);
-                        snprintf(err, errLen, "Cross-domain redirect blocked");
-                        free(outBuffer->data);
-                        outBuffer->data = NULL;
-                        return false;
-                    }
-                }
             }
             
             free(outBuffer->data);
@@ -785,29 +746,18 @@ static bool http_request(const char *url, HttpBuffer *outBuffer,
                          char *err, size_t errLen,
                          DownloadState *state,
                          FILE *bodyStream) {
-    /* For googlevideo.com URLs, use the saved cookies */
-    if (strstr(url, "googlevideo.com")) {
-        return http_request_with_cookies(url, outBuffer, err, errLen, g_youtube_cookies, state, bodyStream);
-    }
-    return http_request_with_cookies(url, outBuffer, err, errLen, NULL, state, bodyStream);
+    return http_request_with_cookies(url, outBuffer, err, errLen, g_cookie_jar, state, bodyStream);
 }
 
 bool http_get_to_memory(const char *url, HttpBuffer *outBuffer,
                         char *err, size_t errLen) {
-    if (strstr(url, "googlevideo.com")) {
-        return http_get_to_memory_resumable(url, outBuffer, err, errLen);
-    }
     return http_request(url, outBuffer, err, errLen, NULL, NULL);
 }
 
 bool http_get_to_memory_with_headers(const char *url, const char **headers, size_t headerCount,
                                      HttpBuffer *outBuffer, char *err, size_t errLen) {
-    if (strstr(url, "googlevideo.com")) {
-        return http_request_with_method(url, "GET", NULL, 0, headers, headerCount,
-                                        outBuffer, NULL, err, errLen, g_youtube_cookies, NULL, NULL);
-    }
     return http_request_with_method(url, "GET", NULL, 0, headers, headerCount,
-                                    outBuffer, NULL, err, errLen, NULL, NULL, NULL);
+                                    outBuffer, NULL, err, errLen, g_cookie_jar, NULL, NULL);
 }
 
 bool http_post_to_memory(const char *url, const char *postData, size_t postDataLen,
@@ -849,7 +799,7 @@ static bool http_get_to_memory_resumable(const char *url, HttpBuffer *outBuffer,
         LOGE("[RESUME] Chunk %d: Range bytes=%zu-", chunks, downloaded);
         bool req_success = http_request_with_method_internal(url, "GET", NULL, 0,
                                                               headers, 1, &chunk_buffer, &status,
-                                                              err, errLen, g_youtube_cookies,
+                                                              err, errLen, g_cookie_jar,
                                                               NULL, NULL, &chunk_total_size);
         LOGE("[RESUME] Chunk %d: req_success=%d status=%d chunk_size=%zu total=%zu", chunks, req_success, status, chunk_buffer.size, chunk_total_size);
 
@@ -945,11 +895,6 @@ bool http_download_to_file(const char *url, const char *filePath,
     if (!filePath || !filePath[0]) {
         LOGI("Download to file: no file path specified");
         return true;
-    }
-
-    /* For googlevideo.com, use parallel range download to bypass CDN throttling */
-    if (strstr(url, "googlevideo.com")) {
-        return http_download_parallel_state(url, filePath, 32, state, err, errLen);
     }
 
     FILE *file = fopen_utf8(filePath, "wb");
@@ -1077,7 +1022,7 @@ static bool http_download_parallel_state(const char *url, const char *filePath,
         const char *headers[] = { "Range: bytes=0-0" };
         if (!http_request_with_method_internal(url, "GET", NULL, 0,
                                                 headers, 1, &buffer, &status,
-                                                err, errLen, g_youtube_cookies,
+                                                err, errLen, g_cookie_jar,
                                                 NULL, NULL, &total_size)) {
             http_free_buffer(&buffer);
             snprintf(err, errLen, "Failed to get file size");
@@ -1136,7 +1081,7 @@ static bool http_download_parallel_state(const char *url, const char *filePath,
     ThreadArgs thread_args[MAX_PARALLEL_CONNECTIONS];
     for (int i = 0; i < num_chunks; i++) {
         thread_args[i].url = url;
-        thread_args[i].cookies = g_youtube_cookies;
+        thread_args[i].cookies = g_cookie_jar;
         thread_args[i].chunk = &chunks[i];
         thread_args[i].shared = &shared;
         if (pthread_create(&threads[i], NULL, parallel_download_thread, &thread_args[i]) != 0) {
@@ -1164,7 +1109,7 @@ static bool http_download_parallel_state(const char *url, const char *filePath,
             for (int i = 0; i < num_chunks; i++) {
                 if (!chunks[i].success) {
                     LOGI("Retrying chunk %d (attempt %d)", i, retry + 1);
-                    ThreadArgs args = { .url = url, .cookies = g_youtube_cookies,
+                    ThreadArgs args = { .url = url, .cookies = g_cookie_jar,
                                         .chunk = &chunks[i], .shared = &shared };
                     parallel_download_thread(&args);
                     if (!chunks[i].success) any_failed = true;
@@ -1239,11 +1184,11 @@ void http_download_set_jni_refs(JavaVM *vm, jobject activity) {
 }
 #endif
 
-void http_download_load_youtube_page(const char *url) {
+void http_download_load_page(const char *url) {
     (void)url;
 }
 
-void http_download_set_youtube_cookies(const char *cookies) {
+void http_download_set_cookies(const char *cookies) {
     (void)cookies;
 }
 

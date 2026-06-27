@@ -766,13 +766,13 @@ static char* css_resolve_url(const char *base_url, const char *href) {
         return strdup(buf);
     }
     if (href[0] == '/') {
-        const char *base = base_url && base_url[0] ? base_url : "https://www.youtube.com";
+        const char *base = base_url && base_url[0] ? base_url : "https://localhost";
         char buf[2048];
         snprintf(buf, sizeof(buf), "%s%s", base, href);
         return strdup(buf);
     }
     /* Relative path. */
-    const char *base = base_url && base_url[0] ? base_url : "https://www.youtube.com/";
+    const char *base = base_url && base_url[0] ? base_url : "https://localhost/";
     char buf[2048];
     if (base[strlen(base) - 1] == '/') {
         snprintf(buf, sizeof(buf), "%s%s", base, href);
