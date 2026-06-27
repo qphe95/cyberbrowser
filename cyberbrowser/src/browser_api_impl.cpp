@@ -1688,6 +1688,22 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, global, "top", window);
     JS_SetPropertyStr(ctx, global, "parent", window);
 
+    // Stub AsyncContext for browsers that load it from a separate bundle that
+    // we skip.  YouTube's Closure Promise .then wrapper uses AsyncContext.Snapshot.wrap.
+    {
+        const char *async_ctx_stub =
+            "if (typeof AsyncContext === 'undefined') {"
+            "  window.AsyncContext = {"
+            "    Snapshot: { wrap: function(fn) { return fn; } },"
+            "    wrap: function(fn) { return fn; }"
+            "  };"
+            "}"
+            "if (typeof globalThis !== 'undefined' && typeof globalThis.AsyncContext === 'undefined') {"
+            "  globalThis.AsyncContext = window.AsyncContext;"
+            "}";
+        JS_Eval(ctx, async_ctx_stub, strlen(async_ctx_stub), "<async_ctx_stub>", JS_EVAL_TYPE_GLOBAL);
+    }
+
     // Native DOM mutation helpers for fallback scripts.
     JS_SetPropertyStr(ctx, global, "__cyber_appendChild",
         JS_NewCFunction(ctx, js_cyber_append_child, "__cyber_appendChild", 2));

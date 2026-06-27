@@ -1062,9 +1062,28 @@ GCValue js_cyber_upgrade_element(JSContextHandle ctx, GCValue this_val, int argc
 
     GCValue global = JS_GetGlobalObject(ctx);
     GCValue custom_elements = JS_GetPropertyStr(ctx, global, "customElements");
-    GCValue ctor = JS_GetPropertyStr(ctx, custom_elements, name_lc);
-    if (JS_IsUndefined(ctor) || JS_IsNull(ctor) || !JS_IsFunction(ctx, ctor)) {
+    if (JS_IsUndefined(custom_elements) || JS_IsNull(custom_elements) || !JS_IsObject(custom_elements)) {
         return JS_UNDEFINED;
+    }
+
+    // Use the registry's public getter.  When the ES5 adapter is loaded this
+    // returns the user constructor (b), whose prototype has the real element
+    // methods.  The adapter's internal wrapper (g) is stored as a property on
+    // the registry, but constructing it directly crashes in this emulator, so
+    // we emulate the polyfill: set the element's prototype and run the user
+    // constructor as a function on the existing element.
+    GCValue get_fn = JS_GetPropertyStr(ctx, custom_elements, "get");
+    GCValue ctor = JS_UNDEFINED;
+    if (!JS_IsUndefined(get_fn) && !JS_IsNull(get_fn) && JS_IsFunction(ctx, get_fn)) {
+        GCValue args[1] = { JS_NewString(ctx, name_lc) };
+        ctor = JS_Call(ctx, get_fn, custom_elements, 1, args);
+    }
+    if (JS_IsUndefined(ctor) || JS_IsNull(ctor) || !JS_IsFunction(ctx, ctor)) {
+        // Fallback to the raw registry property (non-adapter path).
+        ctor = JS_GetPropertyStr(ctx, custom_elements, name_lc);
+        if (JS_IsUndefined(ctor) || JS_IsNull(ctor) || !JS_IsFunction(ctx, ctor)) {
+            return JS_UNDEFINED;
+        }
     }
 
     // Remove Polymer's disable-upgrade guard before running the constructor.
@@ -1077,24 +1096,32 @@ GCValue js_cyber_upgrade_element(JSContextHandle ctx, GCValue this_val, int argc
         JS_SetPrototype(ctx, el, proto);
     }
 
-    // Mark as upgraded and push onto the upgrade stack so HTMLElement's
-    // constructor returns this element as the instance.
     JS_SetPropertyStr(ctx, el, "__CE_upgraded", JS_TRUE);
-    cyber_upgrade_stack_push(ctx, el);
 
-    GCValue result = JS_CallConstructor2(ctx, ctor, ctor, 0, NULL);
-    if (JS_IsException(result)) {
-        GCValue exc = JS_GetException(ctx);
-        const char *msg = "(none)";
-        GCValue exc_msg = JS_GetPropertyStr(ctx, exc, "message");
-        if (!JS_IsUndefined(exc_msg) && !JS_IsNull(exc_msg)) {
-            const char *m = JS_ToCString(ctx, exc_msg);
-            if (m) msg = m;
-        }
-        fprintf(stderr, "[CE-UPGRADE] ctor %s threw: %s\n", name_lc, msg);
-        (void)cyber_upgrade_stack_pop(ctx); // clean stack
+    // Run the user constructor on the existing element.  In a native CE
+    // implementation the browser would call the registered wrapper with `new`,
+    // but that wrapper recursively hits the adapter shim and crashes QuickJS.
+    // Calling the user constructor directly with the already-created element
+    // matches what the webcomponents-es5-adapter polyfill does internally.
+    // Some classes throw (e.g. because of missing APIs); we catch the exception
+    // and continue so that the prototype swap and connectedCallback still run.
+    if (!strcmp(name_lc, "custom-style") || !strcmp(name_lc, "iron-iconset-svg") ||
+        !strcmp(name_lc, "ytd-masthead") || !strcmp(name_lc, "ytd-app")) {
+        fprintf(stderr, "[CE-UPGRADE] %s skipping user ctor (known unsafe)\n", name_lc);
     } else {
-        fprintf(stderr, "[CE-UPGRADE] ctor %s ok (result obj=%d)\n", name_lc, JS_IsObject(result));
+        GCValue ctor_ret = JS_Call(ctx, ctor, el, 0, NULL);
+        if (JS_IsException(ctor_ret)) {
+            GCValue exc = JS_GetException(ctx);
+            GCValue exc_msg = JS_GetPropertyStr(ctx, exc, "message");
+            const char *msg = "(none)";
+            if (!JS_IsUndefined(exc_msg) && !JS_IsNull(exc_msg)) {
+                const char *m = JS_ToCString(ctx, exc_msg);
+                if (m) msg = m;
+            }
+            fprintf(stderr, "[CE-UPGRADE] %s user ctor threw: %s\n", name_lc, msg);
+        } else {
+            fprintf(stderr, "[CE-UPGRADE] %s user ctor ok\n", name_lc);
+        }
     }
 
     // Fire connectedCallback if the element is already connected.

@@ -1876,21 +1876,10 @@ GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int ar
     if (!JS_IsNull(elem) && !JS_IsUndefined(elem)) {
         dom_node_set_owner_document(ctx, elem, this_val);
 
-        // Upgrade custom elements immediately if a constructor is already
-        // registered for this tag name (prototype-only upgrade).
-        if (tag) {
-            fprintf(stderr, "[CREATE-UPGRADE] tag=%s before upgrade\n", tag); fflush(stderr);
-        }
-        GCValue global = JS_GetGlobalObject(ctx);
-        GCValue upgrade_el = JS_GetPropertyStr(ctx, global, "__cyber_upgradeElement");
-        if (!JS_IsUndefined(upgrade_el) && !JS_IsNull(upgrade_el) && JS_IsFunction(ctx, upgrade_el)) {
-            GCValue args[1] = { elem };
-            GCValue result = JS_Call(ctx, upgrade_el, global, 1, args);
-            (void)result;
-        }
-        if (tag) {
-            fprintf(stderr, "[CREATE-UPGRADE] tag=%s after upgrade\n", tag); fflush(stderr);
-        }
+        // Defer custom-element upgrades to the explicit customElements.upgrade()
+        // call after all scripts have run.  Upgrading while the parser is still
+        // creating nodes (or while a constructor is running) causes reentrancy
+        // and stack-overflow crashes with the ES5 adapter wrapper.
     }
     
     return elem;
@@ -2731,49 +2720,97 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
         const char *current_src = scripts[i];
         size_t current_len = script_lens[i];
         if (script_lens[i] > 1000000) {
-            // Stub out the WCM dependency-order helper that currently crashes
-            // on a missing computed-effects map; skipping it only disables
-            // computed-property batch ordering, not element registration.
-            char *wcm_patched = replace_all(current_src, current_len,
-                "WCM=function(d,z,y,F,L){",
-                "WCM=function(d,z,y,F,L){return;", &patched_len);
-            if (wcm_patched) {
-                patched_script = wcm_patched;
-                current_src = patched_script;
-                current_len = patched_len;
-            }
-            char *dc_patched = replace_all(current_src, current_len,
-                "_.dc({",
-                "(function(__dc_info){ try { return _.dc(__dc_info); } catch(__e) { var __l=(typeof __bgmdwnldr_log!='undefined'?__bgmdwnldr_log:console.log); __l('[DC-SKIP] ' + (__dc_info&&__dc_info.is||'(unknown)') + ': ' + __e.message); return function(){}; } })({",
-                &patched_len);
-            if (dc_patched) {
-                if (patched_script) free(patched_script);
-                patched_script = dc_patched;
+            // Only apply YouTube-specific patches to the kevlar application
+            // bundle.  Other large scripts (e.g. the 10 MB player base) may
+            // contain the same substrings inside string literals; replacing
+            // those corrupts the script and crashes the engine.
+            bool is_kevlar_bundle = (strstr(current_src, "_.ZZ=function(c){return new BwB(c)};") != NULL);
+            if (is_kevlar_bundle) {
+                // Stub out the WCM dependency-order helper that currently crashes
+                // on a missing computed-effects map; skipping it only disables
+                // computed-property batch ordering, not element registration.
+                char *wcm_patched = replace_all(current_src, current_len,
+                    "WCM=function(d,z,y,F,L){",
+                    "WCM=function(d,z,y,F,L){return;", &patched_len);
+                if (wcm_patched) {
+                    patched_script = wcm_patched;
+                    current_src = patched_script;
+                    current_len = patched_len;
+                }
+                char *dc_patched = replace_all(current_src, current_len,
+                    "_.dc({",
+                    "(function(__dc_info){ try { return _.dc(__dc_info); } catch(__e) { var __l=(typeof __bgmdwnldr_log!='undefined'?__bgmdwnldr_log:console.log); __l('[DC-SKIP] ' + (__dc_info&&__dc_info.is||'(unknown)') + ': ' + __e.message); return function(){}; } })({",
+                    &patched_len);
+                if (dc_patched) {
+                    if (patched_script) free(patched_script);
+                    patched_script = dc_patched;
+                }
+
+                // Patch YouTube's DI injector so that resolving PAGE_TOKEN before
+                // ytd-page-manager has registered its provider returns a lazy proxy
+                // instead of throwing. The proxy forwards to the real page manager
+                // once it is added, letting ytd-app's connectedCallback finish.
+                if (patched_script) { current_src = patched_script; current_len = patched_len; }
+                char *di_add_patched = replace_all(current_src, current_len,
+                    "SZP.prototype.addProvider=function(c){this.providers.set(c.provide,c);var k=this.JSC$10589_deferred.get(c.provide);",
+                    "SZP.prototype.addProvider=function(c){if(c&&c.provide){var pt=c.provide;if((pt instanceof BwB&&pt.key&&pt.key.name===\"PAGE_TOKEN\")||pt.name===\"PAGE_TOKEN\")this.__cyber_page_manager=c.useValue||c.useClass||(c.useFactory?c.useFactory():null);}this.providers.set(c.provide,c);var k=this.JSC$10589_deferred.get(c.provide);",
+                    &patched_len);
+                if (di_add_patched) {
+                    if (patched_script) free(patched_script);
+                    patched_script = di_add_patched;
+                    current_src = patched_script;
+                    current_len = patched_len;
+                }
+                char *di_resolve_patched = replace_all(current_src, current_len,
+                    "if(!c.providers.has(k)){if(M)return;throw Error(\"Zc`\"+k);}",
+                    "if(!c.providers.has(k)){if(M)return;if(k&&k.name===\"PAGE_TOKEN\"){var __pm=c.__cyber_page_manager;if(__pm)return __pm;return c.__cyber_pm_proxy||(c.__cyber_pm_proxy=new Proxy({},{get:function(t,p){var r=c.__cyber_page_manager;return r&&p in r?r[p]:function(){return null;}}}));}throw Error(\"Zc`\"+k);}",
+                    &patched_len);
+                if (di_resolve_patched) {
+                    if (patched_script) free(patched_script);
+                    patched_script = di_resolve_patched;
+                    current_src = patched_script;
+                    current_len = patched_len;
+                }
+
+                // Expose the watch-page initial-data loaders so the host code can
+                // trigger them manually if YouTube's scheduler does not fire them.
+                char *eml_patched = replace_all(current_src, current_len,
+                    "emL=function(",
+                    "emL=window.__cyber_emL=function(",
+                    &patched_len);
+                if (eml_patched) {
+                    if (patched_script) free(patched_script);
+                    patched_script = eml_patched;
+                    current_src = patched_script;
+                    current_len = patched_len;
+                }
+                char *tyl_patched = replace_all(current_src, current_len,
+                    "TYl=function(",
+                    "TYl=window.__cyber_TYl=function(",
+                    &patched_len);
+                if (tyl_patched) {
+                    if (patched_script) free(patched_script);
+                    patched_script = tyl_patched;
+                }
+                // Debug wrap: log any exception thrown from YouTube's custom Promise .then
+                if (patched_script) { current_src = patched_script; current_len = patched_len; }
+                char *hc_then_patched = replace_all(current_src, current_len,
+                    "_.hc.prototype.then=function(c,k,F){return $db(this,sB(typeof c===\"function\"?c:null),sB(typeof k===\"function\"?k:null),F)};",
+                    "_.hc.prototype.then=function(c,k,F){console.error('[HC-THEN-ENTRY] c='+typeof c+' k='+typeof k+' thisState='+(this&&this.JSC$9821_state_)+' sB='+typeof sB+' $db='+typeof $db);try{var __r=$db(this,sB(typeof c===\"function\"?c:null),sB(typeof k===\"function\"?k:null),F);console.error('[HC-THEN-OK]');return __r;}catch(__e){console.error('[HC-THEN-ERR] '+__e.message+' thisCtor='+(this&&this.constructor&&this.constructor.name)+' c='+typeof c+' k='+typeof k+' stack='+(__e.stack||''));throw __e;}};",
+                    &patched_len);
+                if (hc_then_patched) {
+                    if (patched_script) free(patched_script);
+                    patched_script = hc_then_patched;
+                    current_src = patched_script;
+                    current_len = patched_len;
+                }
+
             }
 
-            // Patch YouTube's DI injector so that resolving PAGE_TOKEN before
-            // ytd-page-manager has registered its provider returns a lazy proxy
-            // instead of throwing. The proxy forwards to the real page manager
-            // once it is added, letting ytd-app's connectedCallback finish.
-            if (patched_script) { current_src = patched_script; current_len = patched_len; }
-            char *di_add_patched = replace_all(current_src, current_len,
-                "SZP.prototype.addProvider=function(c){this.providers.set(c.provide,c);var k=this.JSC$10589_deferred.get(c.provide);",
-                "SZP.prototype.addProvider=function(c){if(c&&c.provide){var pt=c.provide;if((pt instanceof BwB&&pt.key&&pt.key.name===\"PAGE_TOKEN\")||pt.name===\"PAGE_TOKEN\")this.__cyber_page_manager=c.useValue||c.useClass||(c.useFactory?c.useFactory():null);}this.providers.set(c.provide,c);var k=this.JSC$10589_deferred.get(c.provide);",
-                &patched_len);
-            if (di_add_patched) {
-                if (patched_script) free(patched_script);
-                patched_script = di_add_patched;
-                current_src = patched_script;
-                current_len = patched_len;
-            }
-            char *di_resolve_patched = replace_all(current_src, current_len,
-                "if(!c.providers.has(k)){if(M)return;throw Error(\"Zc`\"+k);}",
-                "if(!c.providers.has(k)){if(M)return;if(k&&k.name===\"PAGE_TOKEN\"){var __pm=c.__cyber_page_manager;if(__pm)return __pm;return c.__cyber_pm_proxy||(c.__cyber_pm_proxy=new Proxy({},{get:function(t,p){var r=c.__cyber_page_manager;return r&&p in r?r[p]:function(){return null;}}}));}throw Error(\"Zc`\"+k);}",
-                &patched_len);
-            if (di_resolve_patched) {
-                if (patched_script) free(patched_script);
-                patched_script = di_resolve_patched;
-            }
+            // NOTE: Wrapping the kevlar bundle in an extra IIFE was tried to
+            // avoid helper-name collisions (e.g. sB), but it broke Polymer's
+            // component registration and left app.hostElement/loadData undefined.
+            // We instead rely on runtime string patches and the native registry.
         }
 
         // Reset diagnostic for property-on-undefined errors

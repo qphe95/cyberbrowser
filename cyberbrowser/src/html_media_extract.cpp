@@ -1020,9 +1020,6 @@ static bool is_unsafe_external_script(const char *url) {
         "webcomponents-sd",
         "webcomponents-sd-shadycss",
         "webcomponents-all-noPatch",
-        // The ES5 adapter's HTMLElement wrapper is incompatible with this
-        // QuickJS build; rely on the native HTMLElement instead.
-        "custom-elements-es5-adapter",
         NULL
     };
     for (const char **p = skip_patterns; *p; p++) {

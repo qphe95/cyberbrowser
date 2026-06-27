@@ -753,6 +753,7 @@ int main(int argc, char *argv[]) {
                 "  log('DIAG mast.data type='+(mast?typeof mast.data:'null')+' keys='+(mast&&mast.data?Object.keys(mast.data).length:'null'));"
                 "  log('DIAG app.data type='+(app?typeof app.data:'null')+' keys='+(app&&app.data?Object.keys(app.data).length:'null'));"
                 "  log('DIAG loadInitialData='+(typeof window.loadInitialData)+' getInitialData='+(typeof window.getInitialData));"
+                "  try { var gd=Object.getOwnPropertyDescriptor(window,'getInitialData'); log('DIAG getInitialData desc='+(gd?JSON.stringify({enumerable:gd.enumerable,configurable:gd.configurable,get:typeof gd.get,set:typeof gd.set,value:typeof gd.value}):'null')); var src='none'; try{ src=(window.getInitialData&&window.getInitialData.toString)?window.getInitialData.toString().replace(/\\s+/g,' ').slice(0,300):'none'; }catch(x){src='toStringErr:'+x.message;} log('DIAG getInitialData source='+src); var idata = window.getInitialData ? window.getInitialData() : null; log('DIAG initialData keys='+(idata?Object.keys(idata).join(','):'null')); } catch(e) { log('DIAG getInitialData threw: '+e.message); }"
                 "  log('DIAG mast.shadowRoot='+(mast&&mast.shadowRoot?'yes':'no')+' mast.innerHTML.len='+(mast&&typeof mast.innerHTML==='string'?mast.innerHTML.length:'null'));"
                 "})();";
             JS_Eval(g_ctx, diag_js, strlen(diag_js), "<diag>", JS_EVAL_TYPE_GLOBAL);
@@ -774,6 +775,99 @@ int main(int argc, char *argv[]) {
             JS_Eval(g_ctx, upgrade_doc_js, strlen(upgrade_doc_js), "<upgrade_doc>", JS_EVAL_TYPE_GLOBAL);
             fprintf(stderr, "[UPGRADE-DOC] done\n");
             fflush(stderr);
+        }
+
+        // If YouTube's scheduler never populated ytd-app.data, push the
+        // ytInitialData response into the app directly so data-bound UI
+        // (including the masthead) can render.
+        {
+            const char *load_initial_data_js =
+                "(function(){"
+                "  try {"
+                "    var app = document.querySelector('ytd-app');"
+                "    var mast = document.querySelector('#masthead');"
+                "    if (!app) { console.error('[MAIN] no ytd-app'); return; }"
+                "    var ytid = window.ytInitialData;"
+                "    if (!ytid) { console.error('[MAIN] no ytInitialData'); return; }"
+                "    console.error('[MAIN] emL='+(typeof window.__cyber_emL)+"
+                "' loadData='+(typeof app.loadData)+"
+                "' data='+(typeof app.data)+"
+                "' loadDepsThen='+(app.loadDepsPromise?typeof app.loadDepsPromise.then:'none')+"
+                "' loadDepsPromise='+(app.loadDepsPromise?app.loadDepsPromise.constructor.name:typeof app.loadDepsPromise));"
+                "    window.getInitialData = function() { return ytid; };"
+                "    window.loadInitialData = function(data) { if (window.__cyber_emL) window.__cyber_emL({root: app}, data); };"
+                "    var fakeThenable = { then: function(cb, eb) { if (typeof cb === 'function') { try { cb(); } catch(ex) { console.error('[MAIN] loadDepsPromise.then cb threw', ex&&ex.message, ex&&ex.stack); if (typeof eb === 'function') eb(ex); } } } };"
+                "    try { Object.defineProperty(app, 'loadDepsPromise', { value: fakeThenable, writable: true, configurable: true, enumerable: true }); } catch(x) {}"
+                "    try { Object.defineProperty(app, 'dataUpdatePromise', { value: fakeThenable, writable: true, configurable: true, enumerable: true }); } catch(x) {}"
+                "    try { if (!app.ytdAppBehavior) app.ytdAppBehavior = {}; app.ytdAppBehavior.loadDepsPromise = fakeThenable; app.ytdAppBehavior.dataUpdatePromise = fakeThenable; } catch(x) {}"
+                "    var dataInjected = false;"
+                "    if (typeof window.__cyber_emL === 'function') {"
+                "      try {"
+                "        window.getDataPromise = function() { return Promise.resolve(ytid); };"
+                "        window.__cyber_emL({root: app});"
+                "        console.error('[MAIN] invoked __cyber_emL ok');"
+                "        dataInjected = true;"
+                "      } catch(emlErr) {"
+                "        console.error('[MAIN] __cyber_emL threw', emlErr&&emlErr.message);"
+                "      }"
+                "    }"
+                "    if (!dataInjected && typeof app.loadData === 'function') {"
+                "      try {"
+                "        app.loadData(ytid);"
+                "        console.error('[MAIN] invoked app.loadData ok');"
+                "        dataInjected = true;"
+                "      } catch(loadErr) {"
+                "        console.error('[MAIN] app.loadData threw', loadErr&&loadErr.message);"
+                "      }"
+                "    }"
+                "    try {"
+                "      Object.defineProperty(app, 'data', { value: ytid, writable: true, configurable: true, enumerable: true });"
+                "      if (typeof app.set === 'function') { try { app.set('data', ytid); } catch(_){} }"
+                "      if (typeof app.notifyPath === 'function') { try { app.notifyPath('data', ytid); } catch(_){} }"
+                "      var topKeys = (app.data && typeof app.data === 'object') ? Object.keys(app.data).length : 'none';"
+                "      console.error('[MAIN] injected app.data topKeys=' + topKeys + ' hasResponseContext='+(!!(app.data&&app.data.responseContext)));"
+                "    } catch(x) { console.error('[MAIN] app.data inject failed', x&&x.message); }"
+                "    try {"
+                "      if (mast) {"
+                "        Object.defineProperty(mast, 'data', { value: ytid, writable: true, configurable: true, enumerable: true });"
+                "        if (typeof mast.set === 'function') { try { mast.set('data', ytid); } catch(_){} }"
+                "        if (typeof mast.notifyPath === 'function') { try { mast.notifyPath('data', ytid); } catch(_){} }"
+                "        console.error('[MAIN] injected mast.data topKeys='+(mast.data&&typeof mast.data==='object'?Object.keys(mast.data).length:'null')+' hasResponseContext='+(!!(mast.data&&mast.data.responseContext)));"
+                "      }"
+                "    } catch(x) { console.error('[MAIN] mast.data inject failed', x&&x.message); }"
+                "    try {"
+                "      var ev = new CustomEvent('yt-page-data-fetched', { detail: ytid, bubbles: true });"
+                "      app.dispatchEvent(ev);"
+                "      if (mast) mast.dispatchEvent(ev);"
+                "    } catch(x) {}"
+                "    console.error('[MAIN] initial data injection complete');"
+                "  } catch(e) { console.error('[MAIN] manual initial data set failed', e&&e.message, e&&e.stack); }"
+                "})();";
+            fprintf(stderr, "[MAIN] before load_initial_data_js eval\n"); fflush(stderr);
+            GCValue lid_result = JS_Eval(g_ctx, load_initial_data_js, strlen(load_initial_data_js), "<load_initial_data>", JS_EVAL_TYPE_GLOBAL);
+            fprintf(stderr, "[MAIN] load_initial_data_js result=%s\n", JS_IsException(lid_result) ? "exception" : "ok"); fflush(stderr);
+            if (JS_IsException(lid_result)) {
+                GCValue exc = JS_GetException(g_ctx);
+                GCValue exc_msg = JS_GetPropertyStr(g_ctx, exc, "message");
+                GCValue exc_stack = JS_GetPropertyStr(g_ctx, exc, "stack");
+                const char *m = JS_ToCString(g_ctx, exc_msg);
+                const char *s = JS_ToCString(g_ctx, exc_stack);
+                fprintf(stderr, "[MAIN] load_initial_data_js exception: %s\n%s\n", m ? m : "(none)", s ? s : "(no stack)");
+                fflush(stderr);
+            }
+            pump_timers_and_jobs(g_ctx);
+            {
+                const char *post_load_diag =
+                    "(function(){"
+                    "  try {"
+                    "    var app = document.querySelector('ytd-app');"
+                    "    var mast = document.querySelector('#masthead');"
+                    "    console.error('[MAIN] post-pump app.data='+(typeof app.data)+' topKeys='+(app.data?Object.keys(app.data).length:'null')+' hasResponseContext='+(!!(app.data&&app.data.responseContext))+' mast.data='+(typeof mast.data)+' mast.topKeys='+(mast&&mast.data?Object.keys(mast.data).length:'null'));"
+                    "  } catch(e) { console.error('[MAIN] post-pump diag error', e&&e.message); }"
+                    "})();";
+                JS_Eval(g_ctx, post_load_diag, strlen(post_load_diag), "<post_load_diag>", JS_EVAL_TYPE_GLOBAL);
+                pump_timers_and_jobs(g_ctx);
+            }
         }
 
         // Fallback: if the player bootstrap did not set a poster thumbnail,
