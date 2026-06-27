@@ -294,8 +294,8 @@ generously up front and accept the memory cost.
 ### Implementation note
 
 A reusable one-to-one lock-free hash table is implemented in
-`browser-emulator/include/lockfree_hash_table.h` and
-`browser-emulator/src/lockfree_hash_table.cpp`.  It uses the same three-state
+`cyberbrowser/include/lockfree_hash_table.h` and
+`cyberbrowser/src/lockfree_hash_table.cpp`.  It uses the same three-state
 bucket (`EMPTY` → `WRITING` → `OCCUPIED`) plus tombstones, and exposes
 `lf_hash_create`, `lf_hash_insert`, `lf_hash_lookup`, `lf_hash_remove`, and
 `lf_hash_resize`.  The atomic primitives used by the table were moved from
@@ -458,7 +458,7 @@ GCHandle css_computed_get(GCHandle computed, JSAtom prop);
 To allow parallel CSS **object mutation** (not just selector matching) we must
 audit and thread-safe every piece of shared runtime state that is touched while
 objects are being created or modified.  The audit below covers the QuickJS
-runtime in `browser-emulator/third_party/quickjs`.
+runtime in `cyberbrowser/third_party/quickjs`.
 
 ### 7.1 Audit summary
 
@@ -504,7 +504,7 @@ lock-free.  Nearly all higher-level shared state is unprotected:
 | 5 | **Shape hash table** — lock-free open-addressing handle table | **Done** (`LFHashTable` integrated into QuickJS; immutable hashed shapes; CAS resize; retired-table reclamation; sharing + resize + GC cleanup tests passing) |
 | 6 | **Atom cache / atom hash** — lock-free atom hash table + atomic class ID | **Done** (`LFHashTable` replaced the chained `rt_atom_hash[]`; `LFHashTable` content-equality lookup by string hash/content; CAS resize with retired-table reclamation; `JS_NewClassID` uses atomic fetch-add; class registration uses a runtime spinlock; interning/resize/GC cleanup/class-ID tests passing) |
 | 7 | **Class array / prototypes** — freeze after init; atomic handle loads | **Done** (`JSRuntime.class_array_handle` is an RCU-style immutable snapshot with odd/even versioning; `JSContext.class_proto_handle` entries are read/written with 128-bit atomic load/store + per-context versioning; `JSShape.proto_handle` uses odd/even version + atomic load/store, and all prototype-chain readers/writers use the atomic accessors) |
-| 8 | **Job queue** — lock-free ring buffer | **Done** (`LFJobQueue` handle with lazy allocation; atomic head/tail enqueue/dequeue; acquire/release slot publication; GC roots mark both the queue object and each queued `JSJobEntry`; full `browser-emulator-tests.exe` suite passes 330/330 including `test_job_queue_threaded`) |
+| 8 | **Job queue** — lock-free ring buffer | **Done** (`LFJobQueue` handle with lazy allocation; atomic head/tail enqueue/dequeue; acquire/release slot publication; GC roots mark both the queue object and each queued `JSJobEntry`; full `cyberbrowser-tests.exe` suite passes 330/330 including `test_job_queue_threaded`) |
 | 9 | **GC free list / type buckets** — **Done** (`Treiber stack` free list + lock-free append-only type buckets; atomic pointer CAS added) |
 | 10 | **Move CSS inline-style parsing, stylesheet matching, computed-style table writes, and JS `element.style` writes into workers** | **Done** (`css_parser.cpp`: `css_apply_node_styles_parallel()` dispatches `CssMatchJob`s to the GC thread pool; each worker matches selectors, sorts declarations, applies them to `element.style`, and mirrors them in the lock-free computed-style table) |
 

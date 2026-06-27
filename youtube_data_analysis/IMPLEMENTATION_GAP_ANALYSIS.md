@@ -1,9 +1,9 @@
 # Implementation Gap Analysis
 
-## What's ALREADY Implemented in browser-emulator
+## What's ALREADY Implemented in cyberbrowser
 
 ### ✅ Video Element with URL Capture
-**File:** `browser-emulator/src/js_quickjs.cpp` (lines 345-357)
+**File:** `cyberbrowser/src/js_quickjs.cpp` (lines 345-357)
 
 ```cpp
 static GCValue js_video_set_src(JSContextHandle ctx, GCValue this_val, GCValue val) {
@@ -19,21 +19,21 @@ static GCValue js_video_set_src(JSContextHandle ctx, GCValue this_val, GCValue v
 When YouTube does `videoElement.src = "https://googlevideo.com/..."`, it's captured!
 
 ### ✅ fetch() API
-**File:** `browser-emulator/src/browser_api_impl.cpp` (line 3085)
+**File:** `cyberbrowser/src/browser_api_impl.cpp` (line 3085)
 
 ```cpp
 JS_SetPropertyStr(ctx, global, "fetch", JS_NewCFunction(ctx, js_fetch, "fetch", 2));
 ```
 
 ### ✅ XMLHttpRequest
-**File:** `browser-emulator/src/browser_api_impl.cpp` (lines 3048-3061)
+**File:** `cyberbrowser/src/browser_api_impl.cpp` (lines 3048-3061)
 
 ```cpp
 GCValue xhr_ctor = JS_NewCFunction2(ctx, js_xhr_constructor, "XMLHttpRequest", ...);
 ```
 
 ### ✅ Console APIs
-**File:** `browser-emulator/src/browser_api_impl.cpp` (lines 3037-3045)
+**File:** `cyberbrowser/src/browser_api_impl.cpp` (lines 3037-3045)
 
 ```cpp
 GCValue console = JS_NewObject(ctx);
@@ -44,7 +44,7 @@ DEF_FUNC(ctx, console, "warn", js_console_log, 1);
 ```
 
 ### ✅ Timing APIs
-**File:** `browser-emulator/src/browser_api_impl.cpp` (lines 2804-2807)
+**File:** `cyberbrowser/src/browser_api_impl.cpp` (lines 2804-2807)
 
 ```cpp
 DEF_FUNC(ctx, window, "setTimeout", js_zero, 2);
@@ -54,7 +54,7 @@ DEF_FUNC(ctx, window, "clearInterval", js_undefined, 1);
 ```
 
 ### ✅ Location
-**File:** `browser-emulator/src/browser_api_impl.cpp` (lines 2969-2980)
+**File:** `cyberbrowser/src/browser_api_impl.cpp` (lines 2969-2980)
 
 ```cpp
 GCValue location = JS_NewObject(ctx);
@@ -65,7 +65,7 @@ DEF_PROP_STR(ctx, location, "host", "www.youtube.com");
 ```
 
 ### ✅ Navigator
-**File:** `browser-emulator/src/browser_api_impl.cpp` (lines 2985-3002)
+**File:** `cyberbrowser/src/browser_api_impl.cpp` (lines 2985-3002)
 
 ```cpp
 GCValue navigator = JS_NewObject(ctx);
@@ -76,7 +76,7 @@ DEF_PROP_BOOL(ctx, navigator, "cookieEnabled", 1);
 ```
 
 ### ✅ Custom Elements
-**File:** `browser-emulator/src/browser_api_impl.cpp` (lines 3098-3112)
+**File:** `cyberbrowser/src/browser_api_impl.cpp` (lines 3098-3112)
 
 ```cpp
 GCValue custom_elements = JS_NewObjectClass(ctx, js_custom_element_registry_class_id);
@@ -345,9 +345,9 @@ static JSValue js_match_media(JSContext *ctx, ...) {
 Once Phase 1 is complete, test with:
 
 ```bash
-cd browser-emulator
+cd cyberbrowser
 ./build.sh
-./build/tests/browser-emulator-tests
+./build/tests/cyberbrowser-tests
 ```
 
 Expected behavior:

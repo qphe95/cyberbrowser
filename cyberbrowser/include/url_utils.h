@@ -1,5 +1,5 @@
 /*
- * URL utility helpers used across the browser-emulator module.
+ * URL utility helpers used across the cyberbrowser module.
  */
 
 #ifndef URL_UTILS_H

@@ -2,7 +2,7 @@
  * Platform Abstraction Layer - Android Implementation
  * 
  * This file provides Android-specific implementations of the platform abstraction.
- * It bridges the browser-emulator module to Android's native APIs.
+ * It bridges the cyberbrowser module to Android's native APIs.
  */
 
 #include "platform.h"

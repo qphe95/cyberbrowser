@@ -1,7 +1,7 @@
 /*
  * Platform Abstraction Layer
  * 
- * This header defines the platform-independent interface that the browser-emulator
+ * This header defines the platform-independent interface that the cyberbrowser
  * module uses. Platform-specific implementations provide the actual functionality.
  */
 

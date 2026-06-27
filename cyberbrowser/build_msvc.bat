@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 
 :: ============================================================================
-:: Build browser-emulator on Windows with MSVC using CMake.
+:: Build cyberbrowser on Windows with MSVC using CMake.
 :: This script finds Visual Studio, sets up the MSVC environment, then lets
 :: CMake generate and build the project (the single source of truth).
 :: ============================================================================
@@ -40,8 +40,8 @@ cd /d "%BUILD%"
 cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
 if errorlevel 1 exit /b 1
 
-cmake --build . --config Release --target browser-emulator-tests -j4
+cmake --build . --config Release --target cyberbrowser-tests -j4
 if errorlevel 1 exit /b 1
 
 echo.
-echo Build complete. Test binary: %BUILD%\tests\Release\browser-emulator-tests.exe
+echo Build complete. Test binary: %BUILD%\tests\Release\cyberbrowser-tests.exe

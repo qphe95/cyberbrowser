@@ -2,7 +2,7 @@
 use strict;
 use warnings;
 
-my $file = "browser-emulator/third_party/quickjs/quickjs_handle_classes.h";
+my $file = "cyberbrowser/third_party/quickjs/quickjs_handle_classes.h";
 open my $fh, '<', $file or die $!;
 my @lines = <$fh>;
 close $fh;

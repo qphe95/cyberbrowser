@@ -1,7 +1,7 @@
 /*
  * Standalone Test: Load and Execute YouTube Data Scripts
  * 
- * This is a standalone executable (not part of browser-emulator-tests)
+ * This is a standalone executable (not part of cyberbrowser-tests)
  * because it's a complex test that requires its own runtime and context.
  * 
  * This test loads the base HTML from youtube_data/youtube_page.html
@@ -71,7 +71,7 @@ static const char* get_youtube_data_dir(void) {
         "youtube_data",                               /* Run from project root */
         "../youtube_data",                            /* Run from build/tests */
         "../../youtube_data",                         /* Run from build/tests deeper */
-        "../../../youtube_data",                      /* Run from browser-emulator/build/tests */
+        "../../../youtube_data",                      /* Run from cyberbrowser/build/tests */
     };
     static char found_path[512] = "";
     

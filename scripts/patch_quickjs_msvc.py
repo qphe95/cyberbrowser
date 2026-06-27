@@ -13,7 +13,7 @@ All changes are wrapped in #ifdef _MSC_VER so they don't affect GCC/Clang builds
 import os
 import sys
 
-QUICKJS_DIR = os.path.join(os.path.dirname(__file__), "..", "browser-emulator", "third_party", "quickjs")
+QUICKJS_DIR = os.path.join(os.path.dirname(__file__), "..", "cyberbrowser", "third_party", "quickjs")
 
 def patch_quickjs_h():
     path = os.path.join(QUICKJS_DIR, "quickjs.h")

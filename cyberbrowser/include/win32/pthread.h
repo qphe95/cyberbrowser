@@ -3,7 +3,7 @@
 
 /*
  * Minimal pthread compatibility layer for Windows.
- * Provides just enough for the browser-emulator codebase:
+ * Provides just enough for the cyberbrowser codebase:
  *  - mutex (SRWLOCK-based)
  *  - thread creation/join (for jobs.c)
  *

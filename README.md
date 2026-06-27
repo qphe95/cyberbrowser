@@ -129,8 +129,8 @@ FFmpeg is a massive dependency. Our minimal MP4 parser finds the existing `moov/
 cd cyberbrowser
 mkdir -p build && cd build
 cmake .. -DBE_BUILD_TESTS=ON
-cmake --build . --target browser-emulator-tests -j4
-./tests/browser-emulator-tests
+cmake --build . --target cyberbrowser-tests -j4
+./tests/cyberbrowser-tests
 ```
 
 ---

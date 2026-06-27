@@ -1,7 +1,7 @@
-# Tests for browser-emulator
+# Tests for cyberbrowser
 
 # Main test executable (shared context model)
-add_executable(browser-emulator-tests
+add_executable(cyberbrowser-tests
     test_main.cpp
     test_browser_api_impl.cpp
     test_gc_unified.cpp
@@ -33,7 +33,7 @@ target_include_directories(test-interrupt
         ${CMAKE_SOURCE_DIR}/src
         ${CMAKE_SOURCE_DIR}/third_party/quickjs
 )
-target_link_libraries(test-interrupt PRIVATE browser-emulator)
+target_link_libraries(test-interrupt PRIVATE cyberbrowser_lib)
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_include_directories(test-interrupt BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
 endif()
@@ -44,12 +44,12 @@ add_executable(youtube-live-fetch-test
 )
 
 # Enable C++11 for tests
-target_compile_features(browser-emulator-tests PRIVATE cxx_std_11)
+target_compile_features(cyberbrowser-tests PRIVATE cxx_std_11)
 target_compile_features(youtube-data-test PRIVATE cxx_std_11)
 target_compile_features(youtube-live-fetch-test PRIVATE cxx_std_11)
 
 # Include directories
-target_include_directories(browser-emulator-tests
+target_include_directories(cyberbrowser-tests
     PRIVATE
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src
@@ -71,14 +71,14 @@ target_include_directories(youtube-live-fetch-test
 )
 
 # Link with the library
-target_link_libraries(browser-emulator-tests
+target_link_libraries(cyberbrowser-tests
     PRIVATE
-        browser-emulator
+        cyberbrowser_lib
 )
 
 target_link_libraries(youtube-data-test
     PRIVATE
-        browser-emulator
+        cyberbrowser_lib
 )
 if(MINGW)
     target_link_options(youtube-data-test PRIVATE "-Wl,--stack,67108864")
@@ -86,14 +86,14 @@ endif()
 
 target_link_libraries(youtube-live-fetch-test
     PRIVATE
-        browser-emulator
+        cyberbrowser_lib
 )
 if(MINGW)
     target_link_options(youtube-live-fetch-test PRIVATE "-Wl,--stack,67108864")
 endif()
 
 # Add tests
-add_test(NAME browser-emulator-tests COMMAND browser-emulator-tests)
+add_test(NAME cyberbrowser-tests COMMAND cyberbrowser-tests)
 add_test(NAME youtube-data-test COMMAND youtube-data-test)
 add_test(NAME youtube-live-fetch-test COMMAND youtube-live-fetch-test)
 
@@ -110,12 +110,12 @@ target_include_directories(atom-cache-bench
 )
 target_link_libraries(atom-cache-bench
     PRIVATE
-        browser-emulator
+        cyberbrowser_lib
 )
 
 # Windows compatibility headers
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    target_include_directories(browser-emulator-tests BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
+    target_include_directories(cyberbrowser-tests BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
     target_include_directories(youtube-data-test BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
     target_include_directories(youtube-live-fetch-test BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
     target_include_directories(atom-cache-bench BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
@@ -139,7 +139,7 @@ target_include_directories(analyze-long-video-test
 )
 target_link_libraries(analyze-long-video-test
     PRIVATE
-        browser-emulator
+        cyberbrowser_lib
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_include_directories(analyze-long-video-test BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
@@ -173,7 +173,7 @@ target_include_directories(test-youtubei-get
 )
 target_link_libraries(test-youtubei-get
     PRIVATE
-        browser-emulator
+        cyberbrowser_lib
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_include_directories(test-youtubei-get BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
@@ -192,7 +192,7 @@ target_include_directories(test-youtubei-post
 )
 target_link_libraries(test-youtubei-post
     PRIVATE
-        browser-emulator
+        cyberbrowser_lib
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_include_directories(test-youtubei-post BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
@@ -211,7 +211,7 @@ target_include_directories(test-watch-then-youtubei
 )
 target_link_libraries(test-watch-then-youtubei
     PRIVATE
-        browser-emulator
+        cyberbrowser_lib
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_include_directories(test-watch-then-youtubei BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
@@ -230,7 +230,7 @@ target_include_directories(test-two-gets
 )
 target_link_libraries(test-two-gets
     PRIVATE
-        browser-emulator
+        cyberbrowser_lib
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_include_directories(test-two-gets BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
@@ -249,7 +249,7 @@ target_include_directories(test-two-tls
 )
 target_link_libraries(test-two-tls
     PRIVATE
-        browser-emulator
+        cyberbrowser_lib
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_include_directories(test-two-tls BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
@@ -268,7 +268,7 @@ target_include_directories(test-googlevideo-http
 )
 target_link_libraries(test-googlevideo-http
     PRIVATE
-        browser-emulator
+        cyberbrowser_lib
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_include_directories(test-googlevideo-http BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
@@ -287,7 +287,7 @@ target_include_directories(test-googlevideo-file
 )
 target_link_libraries(test-googlevideo-file
     PRIVATE
-        browser-emulator
+        cyberbrowser_lib
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_include_directories(test-googlevideo-file BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
@@ -301,7 +301,7 @@ target_include_directories(long-video-test
 )
 target_link_libraries(long-video-test
     PRIVATE
-        browser-emulator
+        cyberbrowser_lib
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_include_directories(long-video-test BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
@@ -316,7 +316,7 @@ target_include_directories(analyze-long-video-test
 )
 target_link_libraries(analyze-long-video-test
     PRIVATE
-        browser-emulator
+        cyberbrowser_lib
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_include_directories(analyze-long-video-test BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
@@ -331,7 +331,7 @@ target_include_directories(youtubei-probe
 )
 target_link_libraries(youtubei-probe
     PRIVATE
-        browser-emulator
+        cyberbrowser_lib
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_include_directories(youtubei-probe BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
@@ -346,7 +346,7 @@ target_include_directories(browser-emulation-test
 )
 target_link_libraries(browser-emulation-test
     PRIVATE
-        browser-emulator
+        cyberbrowser_lib
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_include_directories(browser-emulation-test BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
@@ -361,7 +361,7 @@ target_include_directories(fetch-visitor-data-test
 )
 target_link_libraries(fetch-visitor-data-test
     PRIVATE
-        browser-emulator
+        cyberbrowser_lib
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_include_directories(fetch-visitor-data-test BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
@@ -381,7 +381,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR 
     )
     target_link_libraries(bgmdwnldr
         PRIVATE
-            browser-emulator
+            cyberbrowser_lib
     )
     # On Windows, rename output to match project branding
     if(CMAKE_SYSTEM_NAME STREQUAL "Windows")

@@ -150,7 +150,7 @@ Finalizers run during the reclamation pass, after accessors have had a chance to
 
 ## Implementation status
 
-Implemented in `browser-emulator/third_party/quickjs/quickjs_gc_unified.cpp`,
+Implemented in `cyberbrowser/third_party/quickjs/quickjs_gc_unified.cpp`,
 `quickjs_gc_unified.h`, and `quickjs.cpp`.
 
 - `GC_COLOR_DEAD` added to the color enum.

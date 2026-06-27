@@ -22,7 +22,7 @@ GC unless the worker holds a local root.
 
 ### Implementation
 
-1. Add a `gc_mark` function in `browser-emulator/src/browser_api_impl.cpp`:
+1. Add a `gc_mark` function in `cyberbrowser/src/browser_api_impl.cpp`:
 
    ```c
    static void js_dom_node_mark(JSRuntimeHandle rt, GCValue val,

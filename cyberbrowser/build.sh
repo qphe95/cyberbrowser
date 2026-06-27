@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build script for browser-emulator on macOS
+# Build script for cyberbrowser on macOS
 
 set -e
 
@@ -12,7 +12,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-echo -e "${GREEN}Building browser-emulator for macOS...${NC}"
+echo -e "${GREEN}Building cyberbrowser for macOS...${NC}"
 
 # Check dependencies
 echo -e "${YELLOW}Checking dependencies...${NC}"
@@ -40,7 +40,7 @@ make -j$(sysctl -n hw.ncpu)
 echo -e "${GREEN}Build complete!${NC}"
 echo ""
 echo "To run tests:"
-echo "  ${BUILD_DIR}/tests/browser-emulator-tests"
+echo "  ${BUILD_DIR}/tests/cyberbrowser-tests"
 echo ""
 echo "To install (optional):"
 echo "  cd ${BUILD_DIR} && sudo make install"

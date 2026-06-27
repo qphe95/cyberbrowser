@@ -125,7 +125,7 @@ This creates a detached var_ref, but doesn't properly link it to the actual stac
 
 ### Phase 1: Enhanced `get_var_ref()` with Lazy Initialization
 
-**File**: `browser-emulator/third_party/quickjs/quickjs.cpp`  
+**File**: `cyberbrowser/third_party/quickjs/quickjs.cpp`  
 **Location**: Lines 17903-17940
 
 **Changes**:
@@ -195,7 +195,7 @@ static JSVarRefHandle get_var_ref_enhanced(JSContextHandle ctx, JSStackFrame *sf
 
 ### Phase 2: Stack Frame Chain Traversal
 
-**File**: `browser-emulator/third_party/quickjs/quickjs.cpp`  
+**File**: `cyberbrowser/third_party/quickjs/quickjs.cpp`  
 **Location**: After `get_var_ref()` (~line 17950)
 
 **New Function**: `js_closure_resolve_from_stack()`
@@ -254,7 +254,7 @@ static JSVarRefHandle js_closure_resolve_from_stack(JSContextHandle ctx,
 
 ### Phase 3: Enhanced `js_closure2()`
 
-**File**: `browser-emulator/third_party/quickjs/quickjs.cpp`  
+**File**: `cyberbrowser/third_party/quickjs/quickjs.cpp`  
 **Location**: Lines 18190-18335
 
 **Modified Switch Cases**:
@@ -472,7 +472,7 @@ static GCValue js_closure2(JSContextHandle ctx, GCValue func_obj,
 
 ### Phase 4: Proactive var_refs Initialization
 
-**File**: `browser-emulator/third_party/quickjs/quickjs.cpp`  
+**File**: `cyberbrowser/third_party/quickjs/quickjs.cpp`  
 **Location**: `JS_CallInternal()` around line 18860
 
 **Enhanced Frame Setup**:
@@ -518,7 +518,7 @@ static GCValue js_closure2(JSContextHandle ctx, GCValue func_obj,
 
 ### Phase 5: Debug Logging (Optional)
 
-**File**: `browser-emulator/third_party/quickjs/quickjs.cpp`  
+**File**: `cyberbrowser/third_party/quickjs/quickjs.cpp`  
 **Location**: Beginning of file, after includes
 
 ```cpp
@@ -592,7 +592,7 @@ static GCValue js_closure2(JSContextHandle ctx, GCValue func_obj,
 
 ### Unit Tests
 
-**New Test File**: `browser-emulator/tests/test_nested_iife.cpp`
+**New Test File**: `cyberbrowser/tests/test_nested_iife.cpp`
 
 ```cpp
 /*
@@ -674,11 +674,11 @@ TEST(test_closure_with_multiple_captures) {
 
 ```bash
 # Build and run tests
-cd browser-emulator && ./build.sh
-./build/tests/browser-emulator-tests
+cd cyberbrowser && ./build.sh
+./build/tests/cyberbrowser-tests
 
 # Check specific script execution
-./build/tests/browser-emulator-tests 2>&1 | grep -E "Script (6|8)"
+./build/tests/cyberbrowser-tests 2>&1 | grep -E "Script (6|8)"
 ```
 
 ---

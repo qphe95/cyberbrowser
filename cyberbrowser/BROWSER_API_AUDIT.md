@@ -1,6 +1,6 @@
 # Browser API Audit for YouTube Data
 
-This document audits all browser API usages found in the `youtube_data` folder and documents the completeness requirements for each implementation in the browser-emulator.
+This document audits all browser API usages found in the `youtube_data` folder and documents the completeness requirements for each implementation in the cyberbrowser.
 
 ## Summary
 
@@ -1142,4 +1142,4 @@ This document audits all browser API usages found in the `youtube_data` folder a
 - **Stub Only**: ~8% of APIs
 - **Not Implemented**: ~2% of APIs
 
-The browser-emulator currently provides sufficient coverage for YouTube's media extraction pipeline, with the most critical gaps being in advanced CSS features and some newer web platform APIs that are not essential for basic media URL extraction.
+The cyberbrowser currently provides sufficient coverage for YouTube's media extraction pipeline, with the most critical gaps being in advanced CSS features and some newer web platform APIs that are not essential for basic media URL extraction.

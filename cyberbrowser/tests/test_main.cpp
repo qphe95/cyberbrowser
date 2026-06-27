@@ -128,7 +128,7 @@ int main(int argc, char *argv[]) {
     setvbuf(stdout, NULL, _IONBF, 0);
 
     printf("========================================\n");
-    printf("Browser Emulator Test Suite\n");
+    printf("CyberBrowser Test Suite\n");
     printf("(Single Context Model)\n");
     printf("========================================\n");
     printf("Starting tests...\n\n");
@@ -145,7 +145,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    PLATFORM_LOGI("test_runner", "Starting browser-emulator test suite (single context)");
+    PLATFORM_LOGI("test_runner", "Starting cyberbrowser test suite (single context)");
 
     /* Initialize unified GC first (required before any QuickJS operations) */
     printf("Initializing unified GC...\n");

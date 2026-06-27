@@ -1,8 +1,8 @@
-# Browser Emulator Module
-# A platform-agnostic library for browser emulation (HTML parsing + QuickJS execution)
+# CyberBrowser
+# A browser built from HTML parsing, CSS layout, QuickJS, and a software rasterizer.
 
 cmake_minimum_required(VERSION 3.16)
-project(browser-emulator VERSION 1.0.0 LANGUAGES C CXX)
+project(cyberbrowser VERSION 1.0.0 LANGUAGES C CXX)
 
 # =============================================================================
 # Options
@@ -123,15 +123,15 @@ if(BE_PLATFORM_MACOS OR BE_PLATFORM_LINUX OR BE_PLATFORM_WINDOWS)
 endif()
 
 if(BE_BUILD_SHARED)
-    add_library(browser-emulator SHARED ${BE_ALL_SOURCES})
+    add_library(cyberbrowser_lib SHARED ${BE_ALL_SOURCES})
 else()
-    add_library(browser-emulator STATIC ${BE_ALL_SOURCES})
+    add_library(cyberbrowser_lib STATIC ${BE_ALL_SOURCES})
 endif()
 
 # =============================================================================
 # Include directories
 # =============================================================================
-target_include_directories(browser-emulator
+target_include_directories(cyberbrowser_lib
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
@@ -150,40 +150,40 @@ target_include_directories(browser-emulator
 )
 
 if(BE_PLATFORM_WINDOWS)
-    target_include_directories(browser-emulator BEFORE PRIVATE
+    target_include_directories(cyberbrowser_lib BEFORE PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include/win32
     )
 endif()
 
 if(BE_BUILD_VULKAN)
     find_package(Vulkan REQUIRED)
-    target_include_directories(browser-emulator PRIVATE ${Vulkan_INCLUDE_DIRS})
-    target_link_libraries(browser-emulator PRIVATE ${Vulkan_LIBRARIES})
+    target_include_directories(cyberbrowser_lib PRIVATE ${Vulkan_INCLUDE_DIRS})
+    target_link_libraries(cyberbrowser_lib PRIVATE ${Vulkan_LIBRARIES})
 endif()
 
 # =============================================================================
 # Compile definitions
 # =============================================================================
-target_compile_definitions(browser-emulator PRIVATE
+target_compile_definitions(cyberbrowser_lib PRIVATE
     CONFIG_VERSION=\"2024-02-14\"
     _GNU_SOURCE
 )
 
 if(BE_PLATFORM_MACOS)
-    target_compile_definitions(browser-emulator PRIVATE BE_PLATFORM_MACOS)
+    target_compile_definitions(cyberbrowser_lib PRIVATE BE_PLATFORM_MACOS)
 elseif(BE_PLATFORM_ANDROID)
-    target_compile_definitions(browser-emulator PRIVATE BE_PLATFORM_ANDROID)
+    target_compile_definitions(cyberbrowser_lib PRIVATE BE_PLATFORM_ANDROID)
 elseif(BE_PLATFORM_WINDOWS)
-    target_compile_definitions(browser-emulator PRIVATE BE_PLATFORM_WINDOWS)
+    target_compile_definitions(cyberbrowser_lib PRIVATE BE_PLATFORM_WINDOWS)
 else()
-    target_compile_definitions(browser-emulator PRIVATE BE_PLATFORM_LINUX)
+    target_compile_definitions(cyberbrowser_lib PRIVATE BE_PLATFORM_LINUX)
 endif()
 
 # =============================================================================
 # Compile options
 # =============================================================================
 if(NOT MSVC)
-    target_compile_options(browser-emulator PRIVATE
+    target_compile_options(cyberbrowser_lib PRIVATE
         -Wall
         -Wextra
         -O2
@@ -193,11 +193,11 @@ if(NOT MSVC)
         # GCC 14+ is strict about mixing designated and non-designated
         # initializers in C++. QuickJS and our C++ stubs use this pattern.
         # C++20 officially supports designated initializers.
-        target_compile_options(browser-emulator PRIVATE -fpermissive)
-        target_compile_options(browser-emulator PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++20>)
+        target_compile_options(cyberbrowser_lib PRIVATE -fpermissive)
+        target_compile_options(cyberbrowser_lib PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++20>)
     endif()
 else()
-    target_compile_options(browser-emulator PRIVATE
+    target_compile_options(cyberbrowser_lib PRIVATE
         /W4
         /O2
         /Zi
@@ -205,7 +205,7 @@ else()
 endif()
 
 # Enable C++11 for QuickJS
-target_compile_features(browser-emulator PRIVATE cxx_std_11)
+target_compile_features(cyberbrowser_lib PRIVATE cxx_std_11)
 
 # Disable some warnings for QuickJS
 if(NOT MSVC)
@@ -221,21 +221,21 @@ endif()
 # =============================================================================
 # Link libraries
 # =============================================================================
-target_link_libraries(browser-emulator
+target_link_libraries(cyberbrowser_lib
     PUBLIC
         Threads::Threads
 )
 
 if(NOT BE_PLATFORM_WINDOWS)
-    target_link_libraries(browser-emulator PUBLIC m)
+    target_link_libraries(cyberbrowser_lib PUBLIC m)
 endif()
 
 if(BE_PLATFORM_MACOS)
     # CoreFoundation for macOS-specific features
     find_library(COREFOUNDATION_LIBRARY CoreFoundation)
-    target_link_libraries(browser-emulator PRIVATE ${COREFOUNDATION_LIBRARY})
+    target_link_libraries(cyberbrowser_lib PRIVATE ${COREFOUNDATION_LIBRARY})
 elseif(BE_PLATFORM_WINDOWS)
-    target_link_libraries(browser-emulator PRIVATE ws2_32 crypt32 shell32 bcrypt)
+    target_link_libraries(cyberbrowser_lib PRIVATE ws2_32 crypt32 shell32 bcrypt)
     if(MSVC)
         # Static-link MSVC runtime for a portable executable
         set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -261,7 +261,7 @@ target_include_directories(cyberbrowser
 
 target_link_libraries(cyberbrowser
     PRIVATE
-        browser-emulator
+        cyberbrowser_lib
 )
 
 if(BE_PLATFORM_WINDOWS)
@@ -290,8 +290,8 @@ endif()
 # =============================================================================
 include(GNUInstallDirs)
 
-install(TARGETS browser-emulator
-    EXPORT browser-emulator-targets
+install(TARGETS cyberbrowser_lib
+    EXPORT cyberbrowser-targets
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
@@ -300,8 +300,8 @@ install(DIRECTORY include/
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
-install(EXPORT browser-emulator-targets
-    FILE browser-emulator-targets.cmake
-    NAMESPACE browser-emulator::
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/browser-emulator
+install(EXPORT cyberbrowser-targets
+    FILE cyberbrowser-targets.cmake
+    NAMESPACE cyberbrowser::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/cyberbrowser
 )

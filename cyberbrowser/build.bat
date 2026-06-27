@@ -1,12 +1,12 @@
 @echo off
 setlocal enabledelayedexpansion
 
-REM Build script for browser-emulator on Windows with MSVC
+REM Build script for cyberbrowser on Windows with MSVC
 
 set "SCRIPT_DIR=%~dp0"
 set "BUILD_DIR=%SCRIPT_DIR%build"
 
-echo Building browser-emulator for Windows with MSVC...
+echo Building cyberbrowser for Windows with MSVC...
 
 REM Check for cmake
 where cmake >nul 2>nul
@@ -52,4 +52,4 @@ echo.
 echo Build complete!
 echo.
 echo To run tests:
-echo   %BUILD_DIR%\tests\Release\browser-emulator-tests.exe
+echo   %BUILD_DIR%\tests\Release\cyberbrowser-tests.exe

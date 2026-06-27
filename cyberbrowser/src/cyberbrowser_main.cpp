@@ -4,7 +4,7 @@
  * Fetches https://www.youtube.com/, parses the HTML, runs the CSS layout
  * engine, builds a display list, renders a wireframe to a JPEG, and prints a
  * summary.  This is intended as a quick smoke-test executable for the
- * browser-emulator core.
+ * cyberbrowser core.
  */
 #include <stdio.h>
 #include <stdlib.h>

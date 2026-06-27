@@ -4,7 +4,7 @@
 import re
 from pathlib import Path
 
-FILE = Path("browser-emulator/third_party/quickjs/quickjs_handle_classes.h")
+FILE = Path("cyberbrowser/third_party/quickjs/quickjs_handle_classes.h")
 text = FILE.read_text(encoding="utf-8")
 
 # We transform setters of the form:

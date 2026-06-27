@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented in `browser-emulator/third_party/quickjs/quickjs.cpp` and `quickjs_types.h`. All job-queue regression tests pass (330/330).
+Implemented in `cyberbrowser/third_party/quickjs/quickjs.cpp` and `quickjs_types.h`. All job-queue regression tests pass (330/330).
 
 ## Goals
 
