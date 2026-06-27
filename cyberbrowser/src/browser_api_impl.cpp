@@ -3176,6 +3176,15 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, window, "cancelIdleCallback",
         JS_NewCFunction(ctx, js_cancel_idle_callback, "cancelIdleCallback", 1));
 
+    // Scheduler API (window.scheduler.postTask / window.scheduler.yield)
+    GCValue scheduler_obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, scheduler_obj, "postTask",
+        JS_NewCFunction(ctx, js_scheduler_post_task, "postTask", 2));
+    JS_SetPropertyStr(ctx, scheduler_obj, "yield",
+        JS_NewCFunction(ctx, js_scheduler_yield, "yield", 1));
+    JS_SetPropertyStr(ctx, global, "scheduler", scheduler_obj);
+    JS_SetPropertyStr(ctx, window, "scheduler", scheduler_obj);
+
     // queueMicrotask
     JS_SetPropertyStr(ctx, global, "queueMicrotask",
         JS_NewCFunction(ctx, js_queue_microtask, "queueMicrotask", 1));
@@ -4491,16 +4500,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
   window.Request = Request;
   window.Response = Response;
 
-  window.scheduler = window.scheduler || {};
-  window.scheduler.postTask = function(callback, options) {
-    options = options || {};
-    return new Promise(function(resolve, reject){
-      setTimeout(function(){
-        try { resolve(callback()); } catch(e){ reject(e); }
-      }, options.delay ? Number(options.delay) : 0);
-    });
-  };
-  window.scheduler.yield = function() { return Promise.resolve(); };
+  // Native scheduler implementation is installed by init_browser_api_impl.
 })();
 )__FETCH_POLYFILL__";
     JS_Eval(ctx, fetch_polyfill, strlen(fetch_polyfill), "<fetch-polyfill>", JS_EVAL_TYPE_GLOBAL);
@@ -4522,7 +4522,8 @@ extern "C" void browser_api_impl_reset(void) {
     /* Reset DOMException class ID - it will be reallocated on next init */
     js_dom_exception_class_id = 0;
     
-    /* Reset all timers and callbacks */
+    /* Reset all timers, scheduler tasks, and callbacks */
+    scheduler_reset();
     timer_api_reset();
     
     /* Note: g_performance_time is a minor timing counter that accumulates 

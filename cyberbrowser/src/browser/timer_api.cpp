@@ -273,10 +273,27 @@ int find_due_timer(unsigned long long current_time) {
     return due_id;
 }
 
-// Mock IdleDeadline.timeRemaining() - returns a generous millisecond budget.
+// Real IdleDeadline.timeRemaining() based on the deadline stored in the IdleDeadline object.
 static GCValue js_idle_deadline_time_remaining(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)ctx; (void)this_val; (void)argc; (void)argv;
-    return JS_NewFloat64(ctx, 50.0);
+    (void)argc; (void)argv;
+    GCValue deadline_val = JS_GetPropertyStr(ctx, this_val, "__deadline");
+    int64_t deadline = 0;
+    if (JS_IsNumber(deadline_val)) {
+        JS_ToInt64(ctx, &deadline, deadline_val);
+    }
+    int64_t now = (int64_t)platform_get_time_ms();
+    double remaining = (double)(deadline - now);
+    if (remaining < 0) remaining = 0;
+    return JS_NewFloat64(ctx, remaining);
+}
+
+// Current idle deadline used by requestIdleCallback.  The event loop sets this
+// before draining timers so that IdleDeadline.timeRemaining() reflects the real
+// remaining idle budget instead of a fixed value.
+static unsigned long long g_idle_deadline_ms = 0;
+
+extern "C" void timer_set_idle_deadline(unsigned long long deadline_ms) {
+    g_idle_deadline_ms = deadline_ms;
 }
 
 // Execute a timer callback by ID
@@ -326,11 +343,13 @@ void execute_timer(JSContextHandle ctx, int id) {
             arg_count = 1;
         }
         
-        // For idle callback, pass a mock IdleDeadline object
+        // For idle callback, pass an IdleDeadline object with a real deadline.
         if (timer->type == TIMER_TYPE_IDLE_CALLBACK && arg_count == 0) {
+            unsigned long long idle_deadline_ms = g_idle_deadline_ms ? g_idle_deadline_ms : (platform_get_time_ms() + 16);
             GCValue idle_deadline = JS_NewObject(ctx);
             JS_SetPropertyStr(ctx, idle_deadline, "didTimeout", JS_FALSE);
-            // timeRemaining returns a generous budget in milliseconds
+            JS_SetPropertyStr(ctx, idle_deadline, "__deadline",
+                JS_NewInt64(ctx, (int64_t)idle_deadline_ms));
             JS_SetPropertyStr(ctx, idle_deadline, "timeRemaining",
                 JS_NewCFunction(ctx, js_idle_deadline_time_remaining, "timeRemaining", 0));
             args[0] = idle_deadline;
@@ -566,3 +585,294 @@ GCValue js_cancel_idle_callback(JSContextHandle ctx, GCValue this_val, int argc,
     return JS_UNDEFINED;
 }
 
+
+// ============================================================================
+// Scheduler API Implementation (scheduler.postTask / scheduler.yield)
+// ============================================================================
+
+#define MAX_SCHEDULER_TASKS 256
+#define SCHEDULER_TIME_SLICE_MS 8
+
+typedef enum {
+    SCHED_PRIO_USER_BLOCKING = 0,
+    SCHED_PRIO_USER_VISIBLE = 1,
+    SCHED_PRIO_BACKGROUND = 2,
+    SCHED_PRIO_COUNT = 3
+} SchedulerPriority;
+
+typedef struct SchedulerTask {
+    int id;
+    int active;
+    SchedulerPriority priority;
+    unsigned long long scheduled_time;  /* earliest time the task may run */
+    int callback_handle;
+    int resolve_handle;
+    int reject_handle;
+    int arg_count;
+    int arg_handles[MAX_TIMER_ARGS];
+    struct SchedulerTask *next;
+} SchedulerTask;
+
+static SchedulerTask g_scheduler_tasks[MAX_SCHEDULER_TASKS];
+static SchedulerTask *g_scheduler_queues[SCHED_PRIO_COUNT];
+static int g_scheduler_initialized = 0;
+static int g_scheduler_next_id = 1;
+
+static void scheduler_state_ensure_initialized(void) {
+    if (!g_scheduler_initialized) {
+        memset(g_scheduler_tasks, 0, sizeof(g_scheduler_tasks));
+        memset(g_scheduler_queues, 0, sizeof(g_scheduler_queues));
+        g_scheduler_next_id = 1;
+        g_scheduler_initialized = 1;
+    }
+}
+
+static SchedulerTask* scheduler_task_alloc(void) {
+    scheduler_state_ensure_initialized();
+    for (int i = 0; i < MAX_SCHEDULER_TASKS; i++) {
+        if (!g_scheduler_tasks[i].active) {
+            memset(&g_scheduler_tasks[i], 0, sizeof(SchedulerTask));
+            g_scheduler_tasks[i].active = 1;
+            g_scheduler_tasks[i].callback_handle = -1;
+            g_scheduler_tasks[i].resolve_handle = -1;
+            g_scheduler_tasks[i].reject_handle = -1;
+            return &g_scheduler_tasks[i];
+        }
+    }
+    return NULL;
+}
+
+static void unroot_callback_handle(int handle) {
+    if (handle < 0 || handle >= g_timer_state.callback_count) return;
+    GCValue val = g_timer_state.callbacks[handle];
+    if (gcvalue_is_reference(val)) {
+        GCHandle h = GC_VALUE_GET_HANDLE(val);
+        if (h != GC_HANDLE_NULL) {
+            gc_remove_root(h);
+        }
+    }
+}
+
+static void scheduler_task_free(SchedulerTask *task) {
+    if (!task || !task->active) return;
+    unroot_callback_handle(task->callback_handle);
+    unroot_callback_handle(task->resolve_handle);
+    unroot_callback_handle(task->reject_handle);
+    for (int i = 0; i < task->arg_count; i++) {
+        unroot_callback_handle(task->arg_handles[i]);
+    }
+    task->active = 0;
+}
+
+static SchedulerPriority scheduler_parse_priority(const char *s) {
+    if (!s) return SCHED_PRIO_USER_VISIBLE;
+    if (strcasecmp(s, "user-blocking") == 0) return SCHED_PRIO_USER_BLOCKING;
+    if (strcasecmp(s, "background") == 0) return SCHED_PRIO_BACKGROUND;
+    return SCHED_PRIO_USER_VISIBLE;
+}
+
+static void scheduler_insert_task(SchedulerTask *task) {
+    if (!task) return;
+    SchedulerTask **queue = &g_scheduler_queues[task->priority];
+    SchedulerTask *prev = NULL;
+    SchedulerTask *cur = *queue;
+    while (cur && cur->scheduled_time <= task->scheduled_time) {
+        prev = cur;
+        cur = cur->next;
+    }
+    task->next = cur;
+    if (prev) prev->next = task;
+    else *queue = task;
+}
+
+static void scheduler_remove_task(SchedulerTask *task) {
+    if (!task) return;
+    SchedulerTask **queue = &g_scheduler_queues[task->priority];
+    SchedulerTask *prev = NULL;
+    SchedulerTask *cur = *queue;
+    while (cur) {
+        if (cur == task) {
+            if (prev) prev->next = cur->next;
+            else *queue = cur->next;
+            cur->next = NULL;
+            return;
+        }
+        prev = cur;
+        cur = cur->next;
+    }
+}
+
+static GCValue scheduler_create_promise(JSContextHandle ctx, int *out_resolve_handle, int *out_reject_handle) {
+    GCValue resolving_funcs[2];
+    GCValue promise = JS_NewPromiseCapability(ctx, resolving_funcs);
+    *out_resolve_handle = store_callback(ctx, resolving_funcs[0]);
+    *out_reject_handle = store_callback(ctx, resolving_funcs[1]);
+    return promise;
+}
+
+static GCValue scheduler_post_task(JSContextHandle ctx, GCValue callback, const char *priority_str,
+                                   unsigned long long delay, GCValue *args, int arg_count) {
+    scheduler_state_ensure_initialized();
+    if (!JS_IsFunction(ctx, callback)) {
+        return JS_ThrowTypeError(ctx, "scheduler.postTask: callback must be a function");
+    }
+    SchedulerTask *task = scheduler_task_alloc();
+    if (!task) {
+        return JS_ThrowInternalError(ctx, "scheduler task queue full");
+    }
+    task->id = g_scheduler_next_id++;
+    task->priority = scheduler_parse_priority(priority_str);
+    task->scheduled_time = platform_get_time_ms() + delay;
+    task->callback_handle = store_callback(ctx, callback);
+    GCValue promise = scheduler_create_promise(ctx, &task->resolve_handle, &task->reject_handle);
+    task->arg_count = 0;
+    for (int i = 0; i < arg_count && i < MAX_TIMER_ARGS; i++) {
+        task->arg_handles[i] = store_callback(ctx, args[i]);
+        task->arg_count++;
+    }
+    scheduler_insert_task(task);
+    return promise;
+}
+
+static GCValue scheduler_yield(JSContextHandle ctx, const char *priority_str) {
+    scheduler_state_ensure_initialized();
+    SchedulerTask *task = scheduler_task_alloc();
+    if (!task) {
+        return JS_ThrowInternalError(ctx, "scheduler task queue full");
+    }
+    task->id = g_scheduler_next_id++;
+    task->priority = scheduler_parse_priority(priority_str);
+    task->scheduled_time = platform_get_time_ms();
+    GCValue promise = scheduler_create_promise(ctx, &task->resolve_handle, &task->reject_handle);
+    /* No callback: yield resolves with undefined once the task is processed. */
+    scheduler_insert_task(task);
+    return promise;
+}
+
+extern "C" int scheduler_process_tasks(JSContextHandle ctx) {
+    scheduler_state_ensure_initialized();
+    unsigned long long start = platform_get_time_ms();
+    unsigned long long now = start;
+    int processed = 0;
+    bool keep_going = true;
+    while (keep_going) {
+        keep_going = false;
+        for (int p = 0; p < SCHED_PRIO_COUNT; p++) {
+            SchedulerTask *task = g_scheduler_queues[p];
+            while (task && task->scheduled_time <= now) {
+                /* Respect the time slice so scheduler tasks don't starve the rendering loop. */
+                if (platform_get_time_ms() - start >= SCHEDULER_TIME_SLICE_MS) {
+                    return processed;
+                }
+                scheduler_remove_task(task);
+
+                GCValue callback = get_callback(task->callback_handle);
+                GCValue sargs[MAX_TIMER_ARGS];
+                int sarg_count = task->arg_count;
+                for (int i = 0; i < sarg_count; i++) {
+                    sargs[i] = get_callback(task->arg_handles[i]);
+                }
+
+                GCValue resolve = get_callback(task->resolve_handle);
+                GCValue reject = get_callback(task->reject_handle);
+
+                if (JS_IsFunction(ctx, callback)) {
+                    GCValue result = JS_Call(ctx, callback, JS_UNDEFINED, sarg_count, sargs);
+                    if (JS_IsException(result)) {
+                        GCValue exc = JS_GetException(ctx);
+                        if (JS_IsFunction(ctx, reject)) {
+                            JS_Call(ctx, reject, JS_UNDEFINED, 1, &exc);
+                        }
+                    } else {
+                        if (JS_IsFunction(ctx, resolve)) {
+                            JS_Call(ctx, resolve, JS_UNDEFINED, 1, &result);
+                        }
+                    }
+                } else if (JS_IsFunction(ctx, resolve)) {
+                    /* scheduler.yield: resolve with undefined. */
+                    GCValue undef = JS_UNDEFINED;
+                    JS_Call(ctx, resolve, JS_UNDEFINED, 1, &undef);
+                }
+
+                scheduler_task_free(task);
+                processed++;
+                now = platform_get_time_ms();
+
+                task = g_scheduler_queues[p]; /* head may have changed */
+            }
+            if (g_scheduler_queues[p] && g_scheduler_queues[p]->scheduled_time <= now) {
+                keep_going = true; /* higher-priority queue may have new eligible tasks */
+            }
+        }
+    }
+    return processed;
+}
+
+extern "C" void scheduler_reset(void) {
+    scheduler_state_ensure_initialized();
+    for (int i = 0; i < MAX_SCHEDULER_TASKS; i++) {
+        if (g_scheduler_tasks[i].active) {
+            scheduler_task_free(&g_scheduler_tasks[i]);
+        }
+    }
+    memset(g_scheduler_tasks, 0, sizeof(g_scheduler_tasks));
+    memset(g_scheduler_queues, 0, sizeof(g_scheduler_queues));
+    g_scheduler_next_id = 1;
+}
+
+// scheduler.postTask(callback, options)
+GCValue js_scheduler_post_task(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    if (argc < 1 || !JS_IsFunction(ctx, argv[0])) {
+        return JS_ThrowTypeError(ctx, "scheduler.postTask requires a callback function");
+    }
+    GCValue callback = argv[0];
+    const char *priority = "user-visible";
+    const char *prio_str = NULL;
+    unsigned long long delay = 0;
+    GCValue args[MAX_TIMER_ARGS];
+    int arg_count = 0;
+
+    if (argc >= 2 && JS_IsObject(argv[1])) {
+        GCValue prio_val = JS_GetPropertyStr(ctx, argv[1], "priority");
+        prio_str = JS_IsString(prio_val) ? JS_ToCString(ctx, prio_val) : NULL;
+        if (prio_str) {
+            priority = prio_str;
+        }
+        GCValue delay_val = JS_GetPropertyStr(ctx, argv[1], "delay");
+        double delay_ms = 0;
+        if (JS_IsNumber(delay_val) && JS_ToFloat64(ctx, &delay_ms, delay_val) == 0) {
+            if (delay_ms > 0) delay = (unsigned long long)delay_ms;
+        }
+        GCValue args_val = JS_GetPropertyStr(ctx, argv[1], "args");
+        if (JS_IsArray(ctx, args_val)) {
+            int32_t len = 0;
+            JS_ToInt32(ctx, &len, JS_GetPropertyStr(ctx, args_val, "length"));
+            if (len > MAX_TIMER_ARGS) len = MAX_TIMER_ARGS;
+            for (int32_t i = 0; i < len; i++) {
+                args[arg_count++] = JS_GetPropertyUint32(ctx, args_val, (uint32_t)i);
+            }
+        }
+    }
+
+    GCValue result = scheduler_post_task(ctx, callback, priority, delay, args, arg_count);
+    if (prio_str) JS_FreeCString(ctx, prio_str);
+    return result;
+}
+
+// scheduler.yield(options)
+GCValue js_scheduler_yield(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    const char *priority = "user-visible";
+    const char *prio_str = NULL;
+    if (argc >= 1 && JS_IsObject(argv[0])) {
+        GCValue prio_val = JS_GetPropertyStr(ctx, argv[0], "priority");
+        prio_str = JS_IsString(prio_val) ? JS_ToCString(ctx, prio_val) : NULL;
+        if (prio_str) {
+            priority = prio_str;
+        }
+    }
+    GCValue result = scheduler_yield(ctx, priority);
+    if (prio_str) JS_FreeCString(ctx, prio_str);
+    return result;
+}

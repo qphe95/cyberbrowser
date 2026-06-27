@@ -30,6 +30,8 @@
 #include "html_media_extract.h"
 
 extern "C" int timer_process_due(JSContextHandle ctx);
+extern "C" int scheduler_process_tasks(JSContextHandle ctx);
+extern "C" void timer_set_idle_deadline(unsigned long long deadline_ms);
 
 #define LOG_TAG "cyberbrowser"
 
@@ -238,7 +240,12 @@ static bool pump_timers_and_jobs(JSContextHandle ctx) {
     bool did_work = false;
     int iterations = 0;
     while (iterations < 100) {
+        // Give idle callbacks a real, per-iteration idle budget.
+        unsigned long long idle_deadline = platform_get_time_ms() + 8;
+        timer_set_idle_deadline(idle_deadline);
+
         int processed = timer_process_due(ctx);
+        int sched = scheduler_process_tasks(ctx);
         int jobs = 0;
         JSContextHandle pctx;
         int ret;
@@ -246,10 +253,11 @@ static bool pump_timers_and_jobs(JSContextHandle ctx) {
             jobs++;
         }
         (void)ret;
-        if (processed == 0 && jobs == 0) break;
+        if (processed == 0 && sched == 0 && jobs == 0) break;
         did_work = true;
         iterations++;
     }
+    timer_set_idle_deadline(0);
     return did_work;
 }
 
