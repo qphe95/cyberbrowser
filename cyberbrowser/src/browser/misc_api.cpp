@@ -1139,57 +1139,33 @@ GCValue js_cyber_upgrade_element(JSContextHandle ctx, GCValue this_val, int argc
     if (skip_ctor) {
         ctor_ok = true;
     } else {
-        // Run the user constructor on the existing element.  YouTube's
-        // custom-elements-es5-adapter registers wrapper functions that expect
-        // `HTMLElement.call(this)` to return the upgraded DOM node, so a plain
-        // function call is the right path for those.  Real ES6 classes reject a
-        // non-`new` call; fall back to `new ctor()` only in that case.
+        // Always invoke the registered constructor as a constructor (`new`).
+        // The webcomponents-es5-adapter wraps every user constructor in an ES6
+        // class whose constructor calls native super() and then runs the user
+        // body against the same element.  Calling the wrapper as a plain
+        // function violates ES6 class semantics and is what produced the
+        // "must be invoked with 'new'" errors the old tag-name skip list was
+        // papering over.
         g_upgrade_ctor_start = g_html_elem_ctor_count;
         cyber_upgrade_stack_push(ctx, el);
-        GCValue ctor_ret = JS_Call(ctx, ctor, el, 0, NULL);
-    if (JS_IsException(ctor_ret)) {
-        GCValue exc = JS_GetException(ctx);
-        GCValue exc_msg = JS_GetPropertyStr(ctx, exc, "message");
-        const char *msg = "(none)";
-        bool is_new_required = false;
-        if (!JS_IsUndefined(exc_msg) && !JS_IsNull(exc_msg)) {
-            const char *m = JS_ToCString(ctx, exc_msg);
-            if (m) {
-                msg = m;
-                is_new_required = (strstr(m, "must be invoked with 'new'") != NULL);
+        GCValue ctor_ret = JS_CallConstructor(ctx, ctor, 0, NULL);
+        if (JS_IsException(ctor_ret)) {
+            GCValue exc = JS_GetException(ctx);
+            GCValue exc_msg = JS_GetPropertyStr(ctx, exc, "message");
+            const char *msg = "(none)";
+            if (!JS_IsUndefined(exc_msg) && !JS_IsNull(exc_msg)) {
+                const char *m = JS_ToCString(ctx, exc_msg);
+                if (m) msg = m;
             }
-        }
-        if (is_new_required) {
-            cyber_upgrade_stack_push(ctx, el); // re-push for the new() attempt
-            ctor_ret = JS_CallConstructor(ctx, ctor, 0, NULL);
-            if (JS_IsException(ctor_ret)) {
-                exc = JS_GetException(ctx);
-                exc_msg = JS_GetPropertyStr(ctx, exc, "message");
-                msg = "(none)";
-                if (!JS_IsUndefined(exc_msg) && !JS_IsNull(exc_msg)) {
-                    const char *m = JS_ToCString(ctx, exc_msg);
-                    if (m) msg = m;
-                }
-                fprintf(stderr, "[CE-UPGRADE] %s user ctor (new) threw: %s\n", name_lc, msg);
-                if (strstr(msg, "custom element constructor exceeded memory budget") != NULL) {
-                    fprintf(stderr, "[CE-UPGRADE] %s aborted: constructor exceeded generic memory budget\n", name_lc);
-                }
-                JS_SetPropertyStr(ctx, el, "__CE_failed", JS_TRUE);
-                cyber_upgrade_stack_pop(ctx);
-            } else {
-                ctor_ok = true;
-            }
-        } else {
             fprintf(stderr, "[CE-UPGRADE] %s user ctor threw: %s\n", name_lc, msg);
             if (strstr(msg, "custom element constructor exceeded memory budget") != NULL) {
                 fprintf(stderr, "[CE-UPGRADE] %s aborted: constructor exceeded generic memory budget\n", name_lc);
             }
             JS_SetPropertyStr(ctx, el, "__CE_failed", JS_TRUE);
             cyber_upgrade_stack_pop(ctx);
+        } else {
+            ctor_ok = true;
         }
-    } else {
-        ctor_ok = true;
-    }
     }
 
     JS_SetPropertyStr(ctx, el, "__CE_upgraded", JS_TRUE);
