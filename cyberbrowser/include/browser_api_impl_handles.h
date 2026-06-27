@@ -717,6 +717,26 @@ public:
         return p && strcmp(p->mode, "closed") == 0;
     }
 
+    bool delegates_focus() const {
+        ShadowRootData* p = get_ptr();
+        return p ? p->delegates_focus : false;
+    }
+
+    void set_delegates_focus(bool val) {
+        ShadowRootData* p = get_ptr();
+        if (p) p->delegates_focus = val;
+    }
+
+    bool manual_slot_assignment() const {
+        ShadowRootData* p = get_ptr();
+        return p ? p->manual_slot_assignment : false;
+    }
+
+    void set_manual_slot_assignment(bool val) {
+        ShadowRootData* p = get_ptr();
+        if (p) p->manual_slot_assignment = val;
+    }
+
     GCValue innerHTML() const {
         ShadowRootData* p = get_ptr();
         return p ? p->innerHTML : JS_NULL;

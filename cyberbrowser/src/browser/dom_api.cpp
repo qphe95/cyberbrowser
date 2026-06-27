@@ -888,6 +888,12 @@ GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc
         invoke_custom_element_callback(ctx, child, "connectedCallback");
     }
 
+    // Enqueue upgrade reactions for any custom elements in the inserted subtree.
+    // The HTML spec upgrades elements when they are inserted into a document
+    // (or when a definition is registered), not just on explicit upgrade() calls.
+    js_cyber_ce_enqueue_upgrade_subtree(ctx, child);
+    js_cyber_ce_schedule_flush(ctx);
+
     GCValue added_arr = JS_NewArray(ctx);
     JS_SetPropertyUint32(ctx, added_arr, 0, child);
     GCValue removed_arr = JS_NewArray(ctx);
@@ -1073,6 +1079,10 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
     if (dom_node_is_connected(ctx, new_child)) {
         invoke_custom_element_callback(ctx, new_child, "connectedCallback");
     }
+
+    // Enqueue upgrade reactions for any custom elements in the inserted subtree.
+    js_cyber_ce_enqueue_upgrade_subtree(ctx, new_child);
+    js_cyber_ce_schedule_flush(ctx);
 
     GCValue added_arr3 = JS_NewArray(ctx);
     JS_SetPropertyUint32(ctx, added_arr3, 0, new_child);

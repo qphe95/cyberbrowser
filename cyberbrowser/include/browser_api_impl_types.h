@@ -85,11 +85,13 @@ typedef struct {
  * ShadowRoot (from browser_api_impl.cpp)
  * ============================================================================ */
 typedef struct {
-    GCValue host;           // The element that hosts this shadow root
-    char mode[16];          // "open" or "closed"
-    GCValue innerHTML;      // Shadow root content (as string for stub)
-    GCHandle dom_node;      // DOMNode backing the shadow root tree
+    GCValue host;                    // The element that hosts this shadow root
+    char mode[16];                   // "open" or "closed"
+    GCValue innerHTML;               // Shadow root content (as string for stub)
+    GCHandle dom_node;               // DOMNode backing the shadow root tree
     JSContextHandle ctx;
+    bool delegates_focus;            // init.delegatesFocus
+    bool manual_slot_assignment;     // init.slotAssignment == "manual"
 } ShadowRootData;
 
 /* ============================================================================

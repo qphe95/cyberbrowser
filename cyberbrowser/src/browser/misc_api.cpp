@@ -159,6 +159,25 @@ GCValue js_cyber_ce_enqueue_upgrade(JSContextHandle ctx, GCValue this_val, int a
     return JS_UNDEFINED;
 }
 
+void js_cyber_ce_enqueue_upgrade_subtree(JSContextHandle ctx, GCValue root) {
+    if (JS_IsNull(root) || JS_IsUndefined(root) || !JS_IsObject(root)) return;
+    GCValue node_type_val = JS_GetPropertyStr(ctx, root, "nodeType");
+    int32_t node_type = 0;
+    JS_ToInt32(ctx, &node_type, node_type_val);
+    if (node_type != 1) return;
+    cyber_ce_reaction_queue_push(ctx, root);
+    GCValue child_nodes = JS_GetPropertyStr(ctx, root, "childNodes");
+    if (JS_IsArray(ctx, child_nodes)) {
+        GCValue len_val = JS_GetPropertyStr(ctx, child_nodes, "length");
+        uint32_t len = 0;
+        JS_ToUint32(ctx, &len, len_val);
+        for (uint32_t i = 0; i < len; i++) {
+            GCValue child = JS_GetPropertyUint32(ctx, child_nodes, i);
+            js_cyber_ce_enqueue_upgrade_subtree(ctx, child);
+        }
+    }
+}
+
 GCValue js_cyber_ce_flush_reactions(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc; (void)argv;
     GCValue global = JS_GetGlobalObject(ctx);
@@ -198,7 +217,7 @@ static GCValue js_cyber_ce_flush_reactions_job(JSContextHandle ctx, int argc, GC
     return js_cyber_ce_flush_reactions(ctx, JS_UNDEFINED, 0, NULL);
 }
 
-static void cyber_ce_schedule_flush(JSContextHandle ctx) {
+void js_cyber_ce_schedule_flush(JSContextHandle ctx) {
     GCValue global = JS_GetGlobalObject(ctx);
     GCValue scheduled = JS_GetPropertyStr(ctx, global, "__cyber_ce_reaction_scheduled");
     if (JS_ToBool(ctx, scheduled)) return;
@@ -1129,7 +1148,7 @@ GCValue js_custom_elements_define(JSContextHandle ctx, GCValue this_val, int arg
         GCValue result = JS_Call(ctx, enqueue_all, global, 1, args);
         (void)result;
     }
-    cyber_ce_schedule_flush(ctx);
+    js_cyber_ce_schedule_flush(ctx);
 
     return JS_UNDEFINED;
 }

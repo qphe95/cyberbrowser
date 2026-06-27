@@ -312,9 +312,25 @@ GCValue js_shadow_root_get_style_sheets(JSContextHandle ctx, GCValue this_val, i
     return js_shadow_root_get_adopted_style_sheets(ctx, this_val, 0, NULL);
 }
 
+GCValue js_shadow_root_get_delegates_focus(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    ShadowRootDataHandle sr = ShadowRootDataHandle::from_object_check(ctx, this_val);
+    if (!sr.valid()) return JS_ThrowTypeError(ctx, "Invalid ShadowRoot");
+    return JS_NewBool(ctx, sr.delegates_focus());
+}
+
+GCValue js_shadow_root_get_slot_assignment(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    ShadowRootDataHandle sr = ShadowRootDataHandle::from_object_check(ctx, this_val);
+    if (!sr.valid()) return JS_ThrowTypeError(ctx, "Invalid ShadowRoot");
+    return JS_NewString(ctx, sr.manual_slot_assignment() ? "manual" : "named");
+}
+
 const JSCFunctionListEntry js_shadow_root_proto_funcs[] = {
     JS_CGETSET_DEF("host", js_shadow_root_get_host, NULL),
     JS_CGETSET_DEF("mode", js_shadow_root_get_mode, NULL),
+    JS_CGETSET_DEF("delegatesFocus", js_shadow_root_get_delegates_focus, NULL),
+    JS_CGETSET_DEF("slotAssignment", js_shadow_root_get_slot_assignment, NULL),
     JS_CGETSET_DEF("innerHTML", js_shadow_root_get_innerHTML, js_shadow_root_set_innerHTML),
     JS_CFUNC_DEF("querySelector", 1, js_shadow_root_querySelector),
     JS_CFUNC_DEF("querySelectorAll", 1, js_shadow_root_querySelectorAll),
@@ -342,24 +358,75 @@ const JSCFunctionListEntry js_shadow_root_proto_funcs[] = {
 };
 const size_t js_shadow_root_proto_funcs_count = sizeof(js_shadow_root_proto_funcs) / sizeof(js_shadow_root_proto_funcs[0]);
 
+// Spec-valid host local names for Element.prototype.attachShadow().
+// Custom element names (containing a hyphen) are always valid.
+static bool is_valid_shadow_host_local_name(const char *name) {
+    if (!name) return false;
+    if (strchr(name, '-') != NULL) return true;
+    static const char *allowed[] = {
+        "article", "aside", "blockquote", "body", "div", "footer",
+        "h1", "h2", "h3", "h4", "h5", "h6", "header", "main",
+        "nav", "p", "section", "span", NULL
+    };
+    for (const char **p = allowed; *p; p++) {
+        if (strcasecmp(name, *p) == 0) return true;
+    }
+    return false;
+}
+
 // Element.prototype.attachShadow()
 GCValue js_element_attach_shadow(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1 || !JS_IsObject(argv[0])) {
         return JS_ThrowTypeError(ctx, "attachShadow requires an init object");
     }
 
-    // Get mode from init object
+    // 1. Validate host restrictions.
+    DOMNodeHandle host_node = get_dom_node(ctx, this_val);
+    if (!host_node.valid() || host_node.node_type() != DOM_NODE_TYPE_ELEMENT) {
+        return JS_ThrowTypeError(ctx, "attachShadow called on non-element");
+    }
+
+    GCValue existing_shadow = JS_GetPropertyStr(ctx, this_val, "__shadowRoot");
+    if (!JS_IsUndefined(existing_shadow) && !JS_IsNull(existing_shadow) && JS_IsObject(existing_shadow)) {
+        return JS_ThrowTypeError(ctx, "NotSupportedError: element already has a shadow root");
+    }
+
+    const char *tag_name = host_node.node_name();
+    if (!is_valid_shadow_host_local_name(tag_name)) {
+        return JS_ThrowTypeError(ctx, "NotSupportedError: element does not support shadow root");
+    }
+
+    // 2. Validate init options.
     GCValue mode_val = JS_GetPropertyStr(ctx, argv[0], "mode");
     const char *mode = JS_ToCString(ctx, mode_val);
-    if (!mode) mode = "closed";
+    if (!mode || (strcmp(mode, "open") != 0 && strcmp(mode, "closed") != 0)) {
+        return JS_ThrowTypeError(ctx, "attachShadow init.mode must be 'open' or 'closed'");
+    }
 
-    // Create ShadowRoot instance.  This also allocates a regular DOMNode that
-    // will store the shadow tree's children, so ShadowRoot behaves like any
-    // other fragment parent for appendChild/querySelector/traversal.
+    GCValue delegates_focus_val = JS_GetPropertyStr(ctx, argv[0], "delegatesFocus");
+    bool delegates_focus = JS_ToBool(ctx, delegates_focus_val);
+
+    bool manual_slot_assignment = false;
+    GCValue slot_assignment_val = JS_GetPropertyStr(ctx, argv[0], "slotAssignment");
+    if (!JS_IsUndefined(slot_assignment_val) && !JS_IsNull(slot_assignment_val)) {
+        const char *sa = JS_ToCString(ctx, slot_assignment_val);
+        if (sa && (strcmp(sa, "named") == 0 || strcmp(sa, "manual") == 0)) {
+            manual_slot_assignment = (strcmp(sa, "manual") == 0);
+            JS_FreeCString(ctx, sa);
+        } else {
+            JS_FreeCString(ctx, sa);
+            return JS_ThrowTypeError(ctx, "attachShadow init.slotAssignment must be 'named' or 'manual'");
+        }
+    }
+
+    // 3. Create ShadowRoot instance.
     ShadowRootDataHandle sr = ShadowRootDataHandle::create(ctx, this_val, mode);
+    JS_FreeCString(ctx, mode);
     if (!sr.valid()) {
         return JS_ThrowInternalError(ctx, "attachShadow: failed to create ShadowRoot");
     }
+    sr.set_delegates_focus(delegates_focus);
+    sr.set_manual_slot_assignment(manual_slot_assignment);
 
     GCValue shadow_root = JS_NewObjectClass(ctx, js_shadow_root_class_id);
     sr.attach_to_object(shadow_root);
@@ -380,10 +447,8 @@ GCValue js_element_attach_shadow(JSContextHandle ctx, GCValue this_val, int argc
     // Keep the host accessible to DOM connectivity checks (e.g. isConnected).
     JS_SetPropertyStr(ctx, shadow_root, "host", this_val);
 
-    // Store shadowRoot reference on the element (internal property __shadowRoot
-    // and the native DOMNode shadow_root field).
+    // Store shadowRoot reference on the element.
     JS_SetPropertyStr(ctx, this_val, "__shadowRoot", shadow_root);
-    DOMNodeHandle host_node = get_dom_node(ctx, this_val);
     if (host_node.valid()) {
         host_node.set_shadow_root(shadow_root);
     }
@@ -397,7 +462,6 @@ GCValue js_element_attach_shadow(JSContextHandle ctx, GCValue this_val, int argc
             GCValue len_val = JS_GetPropertyStr(ctx, fragment_children, "length");
             uint32_t len = 0;
             JS_ToUint32(ctx, &len, len_val);
-            // Snapshot the children first so appending them doesn't shift indices.
             GCValue *children = (GCValue*)malloc(sizeof(GCValue) * (len ? len : 1));
             for (uint32_t i = 0; i < len; i++) {
                 children[i] = JS_GetPropertyUint32(ctx, fragment_children, i);
