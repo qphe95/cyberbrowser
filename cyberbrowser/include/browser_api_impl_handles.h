@@ -251,6 +251,16 @@ public:
         }
     }
 
+    int with_credentials() const {
+        XMLHttpRequest* p = get_ptr();
+        return p ? p->with_credentials : 0;
+    }
+
+    void set_with_credentials(int value) {
+        XMLHttpRequest* p = get_ptr();
+        if (p) p->with_credentials = value;
+    }
+
     JSContextHandle context() const {
         XMLHttpRequest* p = get_ptr();
         return p ? p->ctx : JSContextHandle();

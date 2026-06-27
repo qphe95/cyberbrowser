@@ -355,6 +355,9 @@ static bool http_request_with_method_internal(const char *url, const char *metho
                 LOGE("HTTP read timeout after %d seconds", current_max_time);
                 snprintf(err, errLen, "Download timeout");
                 free(outBuffer->data);
+        free(outBuffer->headers);
+        outBuffer->headers = NULL;
+        outBuffer->headers_size = 0;
                 outBuffer->data = NULL;
                 tls_client_close(&client);
                 if (bodyStream) fclose(bodyStream);
@@ -374,6 +377,9 @@ static bool http_request_with_method_internal(const char *url, const char *metho
                 if (!new_data) {
                     snprintf(err, errLen, "Out of memory");
                     free(outBuffer->data);
+        free(outBuffer->headers);
+        outBuffer->headers = NULL;
+        outBuffer->headers_size = 0;
                     outBuffer->data = NULL;
                     tls_client_close(&client);
                     if (bodyStream) fclose(bodyStream);
@@ -414,6 +420,9 @@ static bool http_request_with_method_internal(const char *url, const char *metho
                         if (w != body_so_far) {
                             snprintf(err, errLen, "Failed to write to file");
                             free(outBuffer->data);
+        free(outBuffer->headers);
+        outBuffer->headers = NULL;
+        outBuffer->headers_size = 0;
                             outBuffer->data = NULL;
                             tls_client_close(&client);
                             fclose(bodyStream);
@@ -430,6 +439,9 @@ static bool http_request_with_method_internal(const char *url, const char *metho
             if (w != (size_t)n) {
                 snprintf(err, errLen, "Failed to write to file");
                 free(outBuffer->data);
+        free(outBuffer->headers);
+        outBuffer->headers = NULL;
+        outBuffer->headers_size = 0;
                 outBuffer->data = NULL;
                 tls_client_close(&client);
                 fclose(bodyStream);
@@ -443,6 +455,9 @@ static bool http_request_with_method_internal(const char *url, const char *metho
                 if (!new_data) {
                     snprintf(err, errLen, "Out of memory");
                     free(outBuffer->data);
+        free(outBuffer->headers);
+        outBuffer->headers = NULL;
+        outBuffer->headers_size = 0;
                     outBuffer->data = NULL;
                     tls_client_close(&client);
                     if (bodyStream) fclose(bodyStream);
@@ -472,6 +487,9 @@ static bool http_request_with_method_internal(const char *url, const char *metho
             LOGE("HTTP read timeout after %d seconds", current_max_time);
             snprintf(err, errLen, "Download timeout");
             free(outBuffer->data);
+        free(outBuffer->headers);
+        outBuffer->headers = NULL;
+        outBuffer->headers_size = 0;
             outBuffer->data = NULL;
             tls_client_close(&client);
             return false;
@@ -504,6 +522,9 @@ static bool http_request_with_method_internal(const char *url, const char *metho
     if (!header_end) {
         snprintf(err, errLen, "Invalid HTTP response (received %zu bytes)", outBuffer->size);
         free(outBuffer->data);
+        free(outBuffer->headers);
+        outBuffer->headers = NULL;
+        outBuffer->headers_size = 0;
         outBuffer->data = NULL;
         return false;
     }
@@ -615,11 +636,17 @@ static bool http_request_with_method_internal(const char *url, const char *metho
                 LOGE("Blocking redirect to authentication page: %s", redirect_url);
                 snprintf(err, errLen, "Redirect to login page blocked");
                 free(outBuffer->data);
+        free(outBuffer->headers);
+        outBuffer->headers = NULL;
+        outBuffer->headers_size = 0;
                 outBuffer->data = NULL;
                 return false;
             }
             
             free(outBuffer->data);
+        free(outBuffer->headers);
+        outBuffer->headers = NULL;
+        outBuffer->headers_size = 0;
             outBuffer->data = NULL;
             return http_request_with_method(redirect_url, method, postData, postDataLen,
                                             custom_headers, custom_header_count,
@@ -631,11 +658,32 @@ static bool http_request_with_method_internal(const char *url, const char *metho
     if (status < 200 || status >= 300) {
         snprintf(err, errLen, "HTTP error %d", status);
         free(outBuffer->data);
+        free(outBuffer->headers);
+        outBuffer->headers = NULL;
+        outBuffer->headers_size = 0;
         outBuffer->data = NULL;
         if (bodyStream) fclose(bodyStream);
         return false;
     }
-    
+
+    /* Capture response headers for callers that need them (CORS, etc.) */
+    {
+        size_t delimiter_len = 4;
+        if (header_end >= outBuffer->data + 1 &&
+            header_end[-1] == '\n' &&
+            (header_end == outBuffer->data || header_end[-2] != '\r')) {
+            delimiter_len = 2;
+        }
+        size_t header_len = (size_t)(header_end - outBuffer->data) + delimiter_len;
+        free(outBuffer->headers);
+        outBuffer->headers = (char*)malloc(header_len + 1);
+        if (outBuffer->headers) {
+            memcpy(outBuffer->headers, outBuffer->data, header_len);
+            outBuffer->headers[header_len] = '\0';
+            outBuffer->headers_size = header_len;
+        }
+    }
+
     if (bodyStream) {
         /* Keep headers in outBuffer so callers can inspect them (e.g., for Content-Range) */
         if (outBuffer->data && outBuffer->size > 0) {
@@ -767,11 +815,28 @@ bool http_post_to_memory(const char *url, const char *postData, size_t postDataL
                                     outBuffer, outStatus, err, errLen, NULL, NULL, NULL);
 }
 
+bool http_request_to_memory(const char *url, const char *method,
+                            const char *postData, size_t postDataLen,
+                            const char **headers, size_t headerCount,
+                            HttpBuffer *outBuffer, int *outStatus,
+                            char *err, size_t errLen) {
+    /* Generic request with no automatic cookies; caller controls credentials. */
+    return http_request_with_method(url, method, postData, postDataLen, headers, headerCount,
+                                    outBuffer, outStatus, err, errLen, NULL, NULL, NULL);
+}
+
 void http_free_buffer(HttpBuffer *buffer) {
-    if (buffer && buffer->data) {
-        free(buffer->data);
-        buffer->data = NULL;
-        buffer->size = 0;
+    if (buffer) {
+        if (buffer->data) {
+            free(buffer->data);
+            buffer->data = NULL;
+            buffer->size = 0;
+        }
+        if (buffer->headers) {
+            free(buffer->headers);
+            buffer->headers = NULL;
+            buffer->headers_size = 0;
+        }
     }
 }
 
@@ -826,13 +891,13 @@ static bool http_get_to_memory_resumable(const char *url, HttpBuffer *outBuffer,
 
         if (total_expected == 0) {
             total_expected = chunk_total_size;
-            if (total_expected == 0) {
-                total_expected = parse_content_length_from_headers(chunk_buffer.data, chunk_buffer.size);
+            if (total_expected == 0 && chunk_buffer.headers) {
+                total_expected = parse_content_length_from_headers(chunk_buffer.headers, chunk_buffer.headers_size);
             }
             LOGI("Expected total size: %zu bytes", total_expected);
         }
 
-        /* chunk_buffer contains only body data (headers were stripped) */
+        /* chunk_buffer.data contains only body data (headers are in chunk_buffer.headers) */
         if (chunk_buffer.size == 0) {
             if (downloaded > 0) {
                 LOGI("Empty chunk after %zu bytes, assuming complete", downloaded);

@@ -309,57 +309,135 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
     }
     
     const char *url = xhr.url();
-    // Standard HTTP(S) handling for all endpoints.
+    // Standard HTTP(S) handling with CORS enforcement for XHR.
     if (url && is_http_url(url)) {
-        bool is_post = (strcasecmp(xhr.method(), "POST") == 0);
-        char header_bufs[16][512];
-        const char *headers[16];
+        const char *method = xhr.method();
+        bool is_post = (strcasecmp(method, "POST") == 0);
+        char origin[512];
+        js_get_document_origin(ctx, origin, sizeof(origin));
+        char request_origin[512];
+        if (!parse_url_origin(url, request_origin, sizeof(request_origin))) {
+            strncpy(request_origin, origin, sizeof(request_origin) - 1);
+            request_origin[sizeof(request_origin) - 1] = '\0';
+        }
+        bool same_origin = is_same_origin(origin, request_origin);
+        bool credentials = xhr.with_credentials() != 0;
+        bool send_credentials = same_origin || credentials;
+
+        char header_bufs[24][512];
+        const char *headers[24];
         int header_count = 0;
 
-        header_count = collect_user_headers(ctx, xhr.headers(), header_bufs, headers, 16);
+        header_count = collect_user_headers(ctx, xhr.headers(), header_bufs, headers, 24);
         bool has_content_type = false;
+        bool has_origin = false;
+        bool has_referer = false;
+        bool has_cookie = false;
         for (int i = 0; i < header_count; i++) {
-            if (strncasecmp(headers[i], "Content-Type:", 13) == 0) {
-                has_content_type = true;
-                break;
-            }
+            if (strncasecmp(headers[i], "Content-Type:", 13) == 0) has_content_type = true;
+            if (strncasecmp(headers[i], "Origin:", 7) == 0) has_origin = true;
+            if (strncasecmp(headers[i], "Referer:", 8) == 0) has_referer = true;
+            if (strncasecmp(headers[i], "Cookie:", 7) == 0) has_cookie = true;
         }
         if (is_post && !has_content_type) {
-            headers[header_count++] = "Content-Type: application/json";
+            if (header_count < 24) headers[header_count++] = "Content-Type: application/json";
         }
-        headers[header_count++] = "Accept: */*";
+        if (header_count < 24) headers[header_count++] = "Accept: */*";
 
-        const char *cookies = platform_http_get_cookies();
-        if (cookies && cookies[0]) {
-            char cookie_header[1024];
-            snprintf(cookie_header, sizeof(cookie_header), "Cookie: %s", cookies);
-            headers[header_count++] = cookie_header;
+        char origin_header[512];
+        char referer_header[1024];
+        char cookie_header[2048];
+        if (!has_origin) {
+            snprintf(origin_header, sizeof(origin_header), "Origin: %s", origin);
+            if (header_count < 24) headers[header_count++] = origin_header;
+        }
+        if (!has_referer) {
+            char doc_url[2048];
+            doc_url[0] = '\0';
+            GCValue global = JS_GetGlobalObject(ctx);
+            GCValue location = JS_GetPropertyStr(ctx, global, "location");
+            if (JS_IsObject(location)) {
+                GCValue href = JS_GetPropertyStr(ctx, location, "href");
+                const char *s = JS_IsString(href) ? JS_ToCString(ctx, href) : NULL;
+                if (s) {
+                    strncpy(doc_url, s, sizeof(doc_url) - 1);
+                    doc_url[sizeof(doc_url) - 1] = '\0';
+                    JS_FreeCString(ctx, s);
+                }
+            }
+            if (doc_url[0]) {
+                snprintf(referer_header, sizeof(referer_header), "Referer: %s", doc_url);
+                if (header_count < 24) headers[header_count++] = referer_header;
+            }
+        }
+        if (send_credentials && !has_cookie) {
+            const char *cookies = platform_http_get_cookies();
+            if (cookies && cookies[0]) {
+                snprintf(cookie_header, sizeof(cookie_header), "Cookie: %s", cookies);
+                if (header_count < 24) headers[header_count++] = cookie_header;
+            }
+        }
+
+        if (!same_origin) {
+            if (cors_requires_preflight(method, headers, header_count)) {
+                char preflight_err[256] = {0};
+                bool preflight_ok = cors_perform_preflight(ctx, url, method, headers, header_count,
+                                                           origin, credentials,
+                                                           preflight_err, sizeof(preflight_err));
+                if (!preflight_ok) {
+                    platform_log(LOG_LEVEL_WARN, "js_xhr_send", "CORS preflight failed: %s", preflight_err);
+                    xhr.set_status(0);
+                    xhr.set_response_text("");
+                    js_xhr_fire_state(ctx, xhr, this_val, 4);
+                    GCValue onerror = JS_GetPropertyStr(ctx, this_val, "onerror");
+                    if (JS_IsFunction(ctx, onerror)) JS_Call(ctx, onerror, this_val, 0, NULL);
+                    return JS_UNDEFINED;
+                }
+            }
         }
 
         PlatformHttpBuffer response_buffer = {0};
         char error_buf[256] = {0};
-        bool success = false;
         int status_code = 0;
         const char *req_body = xhr.request_body();
         size_t req_body_len = strlen(req_body);
 
-        if (is_post && req_body_len > 0) {
-            success = platform_http_post(url, req_body, req_body_len,
-                                         headers, header_count, &response_buffer,
-                                         &status_code, error_buf, sizeof(error_buf));
-        } else {
-            success = platform_http_get_with_headers(url, headers, header_count,
-                                                     &response_buffer, error_buf,
-                                                     sizeof(error_buf));
-            status_code = success ? 200 : 0;
-        }
+        bool success = platform_http_request(url, method,
+                                              is_post && req_body_len > 0 ? req_body : NULL,
+                                              req_body_len,
+                                              headers, header_count,
+                                              &response_buffer, &status_code,
+                                              error_buf, sizeof(error_buf));
 
-        if (success && response_buffer.data && response_buffer.size > 0 && status_code >= 200 && status_code < 300) {
+        if (success && response_buffer.data && status_code >= 200 && status_code < 300) {
+            if (!same_origin) {
+                char cors_err[256] = {0};
+                if (!cors_validate_response_headers(response_buffer.headers, origin, credentials,
+                                                    cors_err, sizeof(cors_err))) {
+                    platform_http_free_buffer(&response_buffer);
+                    platform_log(LOG_LEVEL_WARN, "js_xhr_send", "%s", cors_err);
+                    xhr.set_status(0);
+                    xhr.set_response_text("");
+                    js_xhr_fire_state(ctx, xhr, this_val, 4);
+                    GCValue onerror = JS_GetPropertyStr(ctx, this_val, "onerror");
+                    if (JS_IsFunction(ctx, onerror)) JS_Call(ctx, onerror, this_val, 0, NULL);
+                    return JS_UNDEFINED;
+                }
+            }
             xhr.set_status(status_code);
             xhr.set_response_text(response_buffer.data);
-            char rh[2048];
-            snprintf(rh, sizeof(rh), "HTTP/1.1 %d OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n", status_code, response_buffer.size);
-            xhr.set_response_headers(rh);
+            if (response_buffer.headers && response_buffer.headers_size > 0) {
+                char rh[2048];
+                size_t copy_len = response_buffer.headers_size;
+                if (copy_len >= sizeof(rh)) copy_len = sizeof(rh) - 1;
+                memcpy(rh, response_buffer.headers, copy_len);
+                rh[copy_len] = '\0';
+                xhr.set_response_headers(rh);
+            } else {
+                char rh[2048];
+                snprintf(rh, sizeof(rh), "HTTP/1.1 %d OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n", status_code, response_buffer.size);
+                xhr.set_response_headers(rh);
+            }
             platform_http_free_buffer(&response_buffer);
             js_xhr_fire_state(ctx, xhr, this_val, 2);
             js_xhr_fire_state(ctx, xhr, this_val, 3);
@@ -448,6 +526,19 @@ static GCValue js_xhr_get_all_response_headers(JSContextHandle ctx, GCValue this
     return JS_NewString(ctx, xhr.response_headers());
 }
 
+static GCValue js_xhr_get_with_credentials(JSContextHandle ctx, GCValue this_val) {
+    XMLHttpRequestHandle xhr = XMLHttpRequestHandle::from_object_check(ctx, this_val);
+    if (!xhr.valid()) return JS_ThrowTypeError(ctx, "XMLHttpRequest internal error");
+    return JS_NewBool(ctx, xhr.with_credentials());
+}
+
+static GCValue js_xhr_set_with_credentials(JSContextHandle ctx, GCValue this_val, GCValue val) {
+    XMLHttpRequestHandle xhr = XMLHttpRequestHandle::from_object_check(ctx, this_val);
+    if (!xhr.valid()) return JS_ThrowTypeError(ctx, "XMLHttpRequest internal error");
+    xhr.set_with_credentials(JS_ToBool(ctx, val) ? 1 : 0);
+    return JS_UNDEFINED;
+}
+
 static GCValue js_xhr_get_ready_state(JSContextHandle ctx, GCValue this_val) {
     XMLHttpRequestHandle xhr = XMLHttpRequestHandle::from_object_check(ctx, this_val);
     if (!xhr.valid()) return JS_ThrowTypeError(ctx, "XMLHttpRequest internal error");
@@ -475,6 +566,7 @@ extern "C" const JSCFunctionListEntry js_xhr_proto_funcs[] = {
     JS_CGETSET_DEF("readyState", js_xhr_get_ready_state, NULL),
     JS_CGETSET_DEF("status", js_xhr_get_status, NULL),
     JS_CGETSET_DEF("responseText", js_xhr_get_response_text, NULL),
+    JS_CGETSET_DEF("withCredentials", js_xhr_get_with_credentials, js_xhr_set_with_credentials),
     JS_PROP_STRING_DEF("responseType", "", JS_PROP_WRITABLE),
     JS_PROP_STRING_DEF("response", "", JS_PROP_WRITABLE),
 };
@@ -1001,6 +1093,422 @@ static int collect_user_headers(JSContextHandle ctx, GCValue headers_obj,
     return count;
 }
 
+/* ============================================================================
+ * CORS helpers
+ * ============================================================================ */
+
+static GCValue reject_type_error(JSContextHandle ctx, const char *msg) {
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue typeerror_ctor = JS_GetPropertyStr(ctx, global, "TypeError");
+    GCValue err_msg = JS_NewString(ctx, msg);
+    GCValue err = JS_Call(ctx, typeerror_ctor, JS_UNDEFINED, 1, &err_msg);
+    GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
+    GCValue reject_fn = JS_GetPropertyStr(ctx, promise_ctor, "reject");
+    GCValue args[1] = { err };
+    return JS_Call(ctx, reject_fn, JS_UNDEFINED, 1, args);
+}
+
+static bool js_get_document_origin(JSContextHandle ctx, char *out, size_t out_len) {
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue location = JS_GetPropertyStr(ctx, global, "location");
+    out[0] = '\0';
+    if (JS_IsObject(location)) {
+        GCValue proto_val = JS_GetPropertyStr(ctx, location, "protocol");
+        GCValue host_val = JS_GetPropertyStr(ctx, location, "host");
+        const char *proto = JS_IsString(proto_val) ? JS_ToCString(ctx, proto_val) : NULL;
+        const char *host = JS_IsString(host_val) ? JS_ToCString(ctx, host_val) : NULL;
+        if (proto && host) {
+            snprintf(out, out_len, "%s//%s", proto, host);
+        }
+        if (proto) JS_FreeCString(ctx, proto);
+        if (host) JS_FreeCString(ctx, host);
+    }
+    if (out[0] == '\0') {
+        strncpy(out, "https://localhost", out_len - 1);
+        out[out_len - 1] = '\0';
+    }
+    return true;
+}
+
+static bool parse_url_origin(const char *url, char *out, size_t out_len) {
+    if (!url) return false;
+    const char *p = url;
+    const char *proto_end = strstr(p, "://");
+    if (!proto_end) return false;
+    char protocol[16];
+    size_t proto_len = (size_t)(proto_end - p);
+    if (proto_len >= sizeof(protocol)) return false;
+    memcpy(protocol, p, proto_len);
+    protocol[proto_len] = '\0';
+
+    p = proto_end + 3;
+    const char *end = p + strlen(p);
+    const char *slash = strchr(p, '/');
+    const char *query = strchr(p, '?');
+    const char *hash = strchr(p, '#');
+    if (slash && slash < end) end = slash;
+    if (query && query < end) end = query;
+    if (hash && hash < end) end = hash;
+
+    size_t host_len = (size_t)(end - p);
+    snprintf(out, out_len, "%s://%.*s", protocol, (int)host_len, p);
+    return true;
+}
+
+static bool is_same_origin(const char *a, const char *b) {
+    return strcasecmp(a, b) == 0;
+}
+
+static bool is_cors_safe_method(const char *m) {
+    return strcasecmp(m, "GET") == 0 ||
+           strcasecmp(m, "HEAD") == 0 ||
+           strcasecmp(m, "POST") == 0;
+}
+
+static bool is_cors_simple_header_name(const char *name) {
+    static const char *simple[] = {
+        "Accept", "Accept-Language", "Content-Language", "Content-Type",
+        "DPR", "Downlink", "Save-Data", "Viewport-Width", "Width", NULL
+    };
+    for (int i = 0; simple[i]; i++) {
+        if (strcasecmp(name, simple[i]) == 0) return true;
+    }
+    return false;
+}
+
+static bool is_cors_simple_content_type(const char *val) {
+    while (*val == ' ' || *val == '\t') val++;
+    return strcasecmp(val, "application/x-www-form-urlencoded") == 0 ||
+           strcasecmp(val, "multipart/form-data") == 0 ||
+           strcasecmp(val, "text/plain") == 0;
+}
+
+static void parse_header_name_value(const char *header, char *name, size_t name_len,
+                                    char *value, size_t value_len) {
+    name[0] = '\0';
+    value[0] = '\0';
+    const char *colon = strchr(header, ':');
+    if (!colon) {
+        strncpy(name, header, name_len - 1);
+        name[name_len - 1] = '\0';
+        return;
+    }
+    size_t kl = (size_t)(colon - header);
+    while (kl > 0 && (header[kl - 1] == ' ' || header[kl - 1] == '\t')) kl--;
+    if (kl >= name_len) kl = name_len - 1;
+    memcpy(name, header, kl);
+    name[kl] = '\0';
+
+    const char *v = colon + 1;
+    while (*v == ' ' || *v == '\t') v++;
+    strncpy(value, v, value_len - 1);
+    value[value_len - 1] = '\0';
+}
+
+static bool cors_requires_preflight(const char *method, const char **headers, int header_count) {
+    if (!is_cors_safe_method(method)) return true;
+    for (int i = 0; i < header_count; i++) {
+        char name[128], value[512];
+        parse_header_name_value(headers[i], name, sizeof(name), value, sizeof(value));
+        if (strcasecmp(name, "Origin") == 0 ||
+            strcasecmp(name, "Referer") == 0 ||
+            strcasecmp(name, "Cookie") == 0) {
+            continue;
+        }
+        if (!is_cors_simple_header_name(name)) return true;
+        if (strcasecmp(name, "Content-Type") == 0 && !is_cors_simple_content_type(value)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool cors_find_header(const char *headers, const char *name,
+                             char *out, size_t out_len) {
+    size_t nlen = strlen(name);
+    const char *p = headers ? headers : "";
+    while (*p) {
+        const char *line_end = strchr(p, '\n');
+        if (!line_end) line_end = p + strlen(p);
+        const char *colon = (const char*)memchr(p, ':', (size_t)(line_end - p));
+        if (colon) {
+            size_t key_len = (size_t)(colon - p);
+            while (key_len > 0 && (p[key_len - 1] == ' ' || p[key_len - 1] == '\t')) key_len--;
+            if (key_len == nlen && strncasecmp(p, name, nlen) == 0) {
+                const char *v = colon + 1;
+                while (v < line_end && (*v == ' ' || *v == '\t')) v++;
+                size_t vl = (size_t)(line_end - v);
+                while (vl > 0 && (v[vl - 1] == '\r' || v[vl - 1] == '\n' ||
+                                  v[vl - 1] == ' ' || v[vl - 1] == '\t')) vl--;
+                if (vl >= out_len) vl = out_len - 1;
+                memcpy(out, v, vl);
+                out[vl] = '\0';
+                return true;
+            }
+        }
+        p = line_end;
+        if (*p == '\n') p++;
+    }
+    return false;
+}
+
+static bool cors_list_contains(const char *list, const char *token) {
+    size_t tlen = strlen(token);
+    const char *p = list ? list : "";
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == ',') p++;
+        if (!*p) break;
+        const char *end = p;
+        while (*end && *end != ',') end++;
+        size_t len = (size_t)(end - p);
+        while (len > 0 && (p[len - 1] == ' ' || p[len - 1] == '\t')) len--;
+        if (len == tlen && strncasecmp(p, token, tlen) == 0) return true;
+        p = end;
+        if (*p == ',') p++;
+    }
+    return false;
+}
+
+static bool cors_validate_response_headers(const char *headers, const char *origin,
+                                           bool credentials, char *err, size_t err_len) {
+    char acao[512];
+    if (!cors_find_header(headers, "Access-Control-Allow-Origin", acao, sizeof(acao))) {
+        snprintf(err, err_len, "CORS blocked: missing Access-Control-Allow-Origin");
+        return false;
+    }
+    if (strcmp(acao, "*") == 0) {
+        if (credentials) {
+            snprintf(err, err_len, "CORS blocked: wildcard ACAO with credentials");
+            return false;
+        }
+    } else if (strcasecmp(acao, origin) != 0) {
+        snprintf(err, err_len, "CORS blocked: Access-Control-Allow-Origin mismatch");
+        return false;
+    }
+    if (credentials) {
+        char acac[64];
+        if (!cors_find_header(headers, "Access-Control-Allow-Credentials", acac, sizeof(acac)) ||
+            strcasecmp(acac, "true") != 0) {
+            snprintf(err, err_len, "CORS blocked: Access-Control-Allow-Credentials missing");
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool cors_perform_preflight(JSContextHandle ctx, const char *url, const char *method,
+                                   const char **headers, int header_count,
+                                   const char *origin, bool credentials,
+                                   char *err, size_t err_len) {
+    char hbuf[24][512];
+    const char *ph[24];
+    int phc = 0;
+
+    char origin_h[512];
+    snprintf(origin_h, sizeof(origin_h), "Origin: %s", origin);
+    hbuf[phc][0] = '\0';
+    strncpy(hbuf[phc], origin_h, sizeof(hbuf[phc]) - 1);
+    ph[phc] = hbuf[phc];
+    phc++;
+
+    char acrm[128];
+    snprintf(acrm, sizeof(acrm), "Access-Control-Request-Method: %s", method);
+    hbuf[phc][0] = '\0';
+    strncpy(hbuf[phc], acrm, sizeof(hbuf[phc]) - 1);
+    ph[phc] = hbuf[phc];
+    phc++;
+
+    char acrh_value[2048];
+    acrh_value[0] = '\0';
+    bool first_acrh = true;
+    for (int i = 0; i < header_count; i++) {
+        char name[128], value[512];
+        parse_header_name_value(headers[i], name, sizeof(name), value, sizeof(value));
+        if (strcasecmp(name, "Origin") == 0 ||
+            strcasecmp(name, "Referer") == 0 ||
+            strcasecmp(name, "Cookie") == 0 ||
+            strcasecmp(name, "Accept") == 0) {
+            continue;
+        }
+        bool needs_listing = false;
+        if (!is_cors_simple_header_name(name)) {
+            needs_listing = true;
+        } else if (strcasecmp(name, "Content-Type") == 0 && !is_cors_simple_content_type(value)) {
+            needs_listing = true;
+        }
+        if (needs_listing) {
+            if (!first_acrh) strncat(acrh_value, ", ", sizeof(acrh_value) - strlen(acrh_value) - 1);
+            strncat(acrh_value, name, sizeof(acrh_value) - strlen(acrh_value) - 1);
+            first_acrh = false;
+        }
+    }
+    char acrh_header[2080];
+    if (acrh_value[0]) {
+        snprintf(acrh_header, sizeof(acrh_header), "Access-Control-Request-Headers: %s", acrh_value);
+        hbuf[phc][0] = '\0';
+        strncpy(hbuf[phc], acrh_header, sizeof(hbuf[phc]) - 1);
+        ph[phc] = hbuf[phc];
+        phc++;
+    }
+
+    PlatformHttpBuffer resp = {0};
+    int status = 0;
+    char ebuf[256] = {0};
+    bool ok = platform_http_request(url, "OPTIONS", NULL, 0, ph, phc, &resp, &status, ebuf, sizeof(ebuf));
+    if (!ok || status < 200 || status >= 300) {
+        snprintf(err, err_len, "CORS preflight failed: %s", ebuf[0] ? ebuf : "network error");
+        platform_http_free_buffer(&resp);
+        return false;
+    }
+
+    if (!cors_validate_response_headers(resp.headers, origin, credentials, err, err_len)) {
+        platform_http_free_buffer(&resp);
+        return false;
+    }
+
+    char acam[512];
+    if (!cors_find_header(resp.headers, "Access-Control-Allow-Methods", acam, sizeof(acam)) ||
+        !cors_list_contains(acam, method)) {
+        snprintf(err, err_len, "CORS preflight blocked: method %s not allowed", method);
+        platform_http_free_buffer(&resp);
+        return false;
+    }
+
+    if (acrh_value[0]) {
+        char acah[1024];
+        if (!cors_find_header(resp.headers, "Access-Control-Allow-Headers", acah, sizeof(acah))) {
+            snprintf(err, err_len, "CORS preflight blocked: missing Access-Control-Allow-Headers");
+            platform_http_free_buffer(&resp);
+            return false;
+        }
+        const char *p = acrh_value;
+        while (*p) {
+            while (*p == ' ' || *p == '\t' || *p == ',') p++;
+            if (!*p) break;
+            const char *end = p;
+            while (*end && *end != ',') end++;
+            size_t len = (size_t)(end - p);
+            while (len > 0 && (p[len - 1] == ' ' || p[len - 1] == '\t')) len--;
+            if (len > 0) {
+                char name[128];
+                if (len >= sizeof(name)) len = sizeof(name) - 1;
+                memcpy(name, p, len);
+                name[len] = '\0';
+                if (!cors_list_contains(acah, name)) {
+                    snprintf(err, err_len, "CORS preflight blocked: header %s not allowed", name);
+                    platform_http_free_buffer(&resp);
+                    return false;
+                }
+            }
+            p = end;
+            if (*p == ',') p++;
+        }
+    }
+
+    platform_http_free_buffer(&resp);
+    return true;
+}
+
+static GCValue create_http_response(JSContextHandle ctx, const char *url,
+                                    const PlatformHttpBuffer *buf, int status,
+                                    const char *statusText) {
+    GCValue response = JS_NewObject(ctx);
+    bool ok = (status >= 200 && status < 300);
+    JS_SetPropertyStr(ctx, response, "ok", JS_NewBool(ctx, ok));
+    JS_SetPropertyStr(ctx, response, "status", JS_NewInt32(ctx, status));
+    JS_SetPropertyStr(ctx, response, "statusText", JS_NewString(ctx, statusText ? statusText : (ok ? "OK" : "Error")));
+    JS_SetPropertyStr(ctx, response, "body", JS_NULL);
+    JS_SetPropertyStr(ctx, response, "redirected", JS_FALSE);
+    JS_SetPropertyStr(ctx, response, "type", JS_NewString(ctx, "basic"));
+    JS_SetPropertyStr(ctx, response, "url", JS_NewString(ctx, url ? url : ""));
+
+    GCValue headers_obj = JS_NewObject(ctx);
+    if (buf && buf->headers && buf->headers_size > 0) {
+        const char *p = buf->headers;
+        while (*p) {
+            const char *line_end = strchr(p, '\n');
+            if (!line_end) line_end = p + strlen(p);
+            const char *colon = (const char*)memchr(p, ':', (size_t)(line_end - p));
+            if (colon) {
+                size_t kl = (size_t)(colon - p);
+                while (kl > 0 && (p[kl - 1] == ' ' || p[kl - 1] == '\t')) kl--;
+                if (kl > 0 && kl < 128) {
+                    char name[128];
+                    memcpy(name, p, kl);
+                    name[kl] = '\0';
+                    const char *v = colon + 1;
+                    while (v < line_end && (*v == ' ' || *v == '\t')) v++;
+                    size_t vl = (size_t)(line_end - v);
+                    while (vl > 0 && (v[vl - 1] == '\r' || v[vl - 1] == '\n' ||
+                                      v[vl - 1] == ' ' || v[vl - 1] == '\t')) vl--;
+                    if (vl < 2048) {
+                        char value[2048];
+                        memcpy(value, v, vl);
+                        value[vl] = '\0';
+                        JS_SetPropertyStr(ctx, headers_obj, name, JS_NewString(ctx, value));
+                    }
+                }
+            }
+            p = line_end;
+            if (*p == '\n') p++;
+        }
+    }
+    JS_SetPropertyStr(ctx, response, "headers", headers_obj);
+
+    if (buf && buf->data) {
+        JS_SetPropertyStr(ctx, response, "__body_text", JS_NewStringLen(ctx, buf->data, buf->size));
+        GCValue json_val = JS_ParseJSON(ctx, buf->data, buf->size, "<fetch-response>");
+        if (!JS_IsException(json_val)) {
+            JS_SetPropertyStr(ctx, response, "__body_json", json_val);
+        }
+    }
+
+    JS_SetPropertyStr(ctx, response, "text", JS_NewCFunction(ctx, [](JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) -> GCValue {
+        (void)argc; (void)argv;
+        GCValue global = JS_GetGlobalObject(ctx);
+        GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
+        GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
+        GCValue body_text = JS_GetPropertyStr(ctx, this_val, "__body_text");
+        GCValue args[1] = { body_text };
+        return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
+    }, "text", 0));
+
+    JS_SetPropertyStr(ctx, response, "json", JS_NewCFunction(ctx, [](JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) -> GCValue {
+        (void)argc; (void)argv;
+        GCValue global = JS_GetGlobalObject(ctx);
+        GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
+        GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
+        GCValue body_json = JS_GetPropertyStr(ctx, this_val, "__body_json");
+        if (JS_IsUndefined(body_json)) body_json = JS_NewObject(ctx);
+        GCValue args[1] = { body_json };
+        return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
+    }, "json", 0));
+
+    JS_SetPropertyStr(ctx, response, "arrayBuffer", JS_NewCFunction(ctx, [](JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) -> GCValue {
+        (void)argc; (void)argv;
+        GCValue global = JS_GetGlobalObject(ctx);
+        GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
+        GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
+        GCValue ab = JS_NewArrayBuffer(ctx, NULL, 0, NULL, NULL, false);
+        GCValue args[1] = { ab };
+        return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
+    }, "arrayBuffer", 0));
+
+    JS_SetPropertyStr(ctx, response, "blob", JS_NewCFunction(ctx, [](JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) -> GCValue {
+        (void)argc; (void)argv;
+        GCValue global = JS_GetGlobalObject(ctx);
+        GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
+        GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
+        GCValue blob = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, blob, "size", JS_NewInt32(ctx, 0));
+        JS_SetPropertyStr(ctx, blob, "type", JS_NewString(ctx, ""));
+        GCValue args[1] = { blob };
+        return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
+    }, "blob", 0));
+
+    return response;
+}
+
 static GCValue resolve_blob_url_response(JSContextHandle ctx, const char *url) {
     GCValue global_obj = JS_GetGlobalObject(ctx);
     GCValue registry = JS_GetPropertyStr(ctx, global_obj, "__blobRegistry");
@@ -1159,6 +1667,28 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
         }
     }
     
+    // CORS mode and credentials from init/Request
+    char mode_buf[32] = "cors";
+    char credentials_buf[32] = "same-origin";
+    auto copy_opt = [&](const char *prop, char *buf, size_t buf_len, const char *fallback) {
+        GCValue val = JS_UNDEFINED;
+        if (argc > 1 && JS_IsObject(argv[1])) val = JS_GetPropertyStr(ctx, argv[1], prop);
+        if ((JS_IsUndefined(val) || JS_IsNull(val)) && argc > 0 && JS_IsObject(argv[0])) {
+            val = JS_GetPropertyStr(ctx, argv[0], prop);
+        }
+        const char *s = JS_IsString(val) ? JS_ToCString(ctx, val) : NULL;
+        if (s && s[0]) {
+            strncpy(buf, s, buf_len - 1);
+            buf[buf_len - 1] = '\0';
+            JS_FreeCString(ctx, s);
+        } else {
+            strncpy(buf, fallback, buf_len - 1);
+            buf[buf_len - 1] = '\0';
+        }
+    };
+    copy_opt("mode", mode_buf, sizeof(mode_buf), "cors");
+    copy_opt("credentials", credentials_buf, sizeof(credentials_buf), "same-origin");
+
     // Extract POST body from fetch() arguments
     char *post_body = NULL;
     size_t post_body_len = 0;
@@ -1219,59 +1749,124 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
         // Fall through to default empty response
     }
     
-    // Standard HTTP(S) handling for all endpoints.
+    // Standard HTTP(S) handling with CORS enforcement.
     if (url && is_http_url(url)) {
         bool is_post = (strcasecmp(method, "POST") == 0);
-        char header_bufs[16][512];
-        const char *headers[16];
+        char origin[512];
+        js_get_document_origin(ctx, origin, sizeof(origin));
+        char request_origin[512];
+        if (!parse_url_origin(url, request_origin, sizeof(request_origin))) {
+            strncpy(request_origin, origin, sizeof(request_origin) - 1);
+            request_origin[sizeof(request_origin) - 1] = '\0';
+        }
+        bool same_origin = is_same_origin(origin, request_origin);
+        bool cors_no_cors = (strcasecmp(mode_buf, "no-cors") == 0);
+        bool cors_same_origin_mode = (strcasecmp(mode_buf, "same-origin") == 0);
+        bool credentials_include = (strcasecmp(credentials_buf, "include") == 0);
+        bool send_credentials = same_origin || credentials_include;
+
+        if (cors_same_origin_mode && !same_origin) {
+            if (post_body) free(post_body);
+            return reject_type_error(ctx, "Failed to fetch: same-origin mode requests must be same-origin");
+        }
+
+        char header_bufs[24][512];
+        const char *headers[24];
         int header_count = 0;
 
         if (argc > 1 && JS_IsObject(argv[1])) {
             GCValue headers_obj = JS_GetPropertyStr(ctx, argv[1], "headers");
-            header_count = collect_user_headers(ctx, headers_obj, header_bufs, headers, 16);
+            header_count = collect_user_headers(ctx, headers_obj, header_bufs, headers, 24);
         }
 
         bool has_content_type = false;
+        bool has_origin = false;
+        bool has_referer = false;
+        bool has_cookie = false;
         for (int i = 0; i < header_count; i++) {
-            if (strncasecmp(headers[i], "Content-Type:", 13) == 0) {
-                has_content_type = true;
-                break;
-            }
+            if (strncasecmp(headers[i], "Content-Type:", 13) == 0) has_content_type = true;
+            if (strncasecmp(headers[i], "Origin:", 7) == 0) has_origin = true;
+            if (strncasecmp(headers[i], "Referer:", 8) == 0) has_referer = true;
+            if (strncasecmp(headers[i], "Cookie:", 7) == 0) has_cookie = true;
         }
         if (is_post && !has_content_type) {
-            headers[header_count++] = "Content-Type: application/json";
+            if (header_count < 24) headers[header_count++] = "Content-Type: application/json";
         }
-        headers[header_count++] = "Accept: */*";
+        if (header_count < 24) headers[header_count++] = "Accept: */*";
 
-        const char *cookies = platform_http_get_cookies();
-        if (cookies && cookies[0]) {
-            char cookie_header[1024];
-            snprintf(cookie_header, sizeof(cookie_header), "Cookie: %s", cookies);
-            headers[header_count++] = cookie_header;
+        char origin_header[512];
+        char referer_header[1024];
+        char cookie_header[2048];
+        if (!has_origin) {
+            snprintf(origin_header, sizeof(origin_header), "Origin: %s", origin);
+            if (header_count < 24) headers[header_count++] = origin_header;
+        }
+        if (!has_referer) {
+            char doc_url[2048];
+            doc_url[0] = '\0';
+            GCValue global = JS_GetGlobalObject(ctx);
+            GCValue location = JS_GetPropertyStr(ctx, global, "location");
+            if (JS_IsObject(location)) {
+                GCValue href = JS_GetPropertyStr(ctx, location, "href");
+                const char *s = JS_IsString(href) ? JS_ToCString(ctx, href) : NULL;
+                if (s) {
+                    strncpy(doc_url, s, sizeof(doc_url) - 1);
+                    doc_url[sizeof(doc_url) - 1] = '\0';
+                    JS_FreeCString(ctx, s);
+                }
+            }
+            if (doc_url[0]) {
+                snprintf(referer_header, sizeof(referer_header), "Referer: %s", doc_url);
+                if (header_count < 24) headers[header_count++] = referer_header;
+            }
+        }
+        if (send_credentials && !has_cookie) {
+            const char *cookies = platform_http_get_cookies();
+            if (cookies && cookies[0]) {
+                snprintf(cookie_header, sizeof(cookie_header), "Cookie: %s", cookies);
+                if (header_count < 24) headers[header_count++] = cookie_header;
+            }
+        }
+
+        // CORS preflight for cross-origin non-simple requests.
+        if (!same_origin && !cors_no_cors) {
+            if (cors_requires_preflight(method, headers, header_count)) {
+                char preflight_err[256] = {0};
+                bool preflight_ok = cors_perform_preflight(ctx, url, method, headers, header_count,
+                                                           origin, credentials_include,
+                                                           preflight_err, sizeof(preflight_err));
+                if (!preflight_ok) {
+                    if (post_body) free(post_body);
+                    platform_log(LOG_LEVEL_WARN, "js_fetch", "CORS preflight failed: %s", preflight_err);
+                    return reject_type_error(ctx, preflight_err);
+                }
+            }
         }
 
         PlatformHttpBuffer response_buffer = {0};
         char error_buf[256] = {0};
-        bool success = false;
         int status_code = 0;
-
-        if (is_post && post_body && post_body_len > 0) {
-            success = platform_http_post(url, post_body, post_body_len,
-                                         headers, header_count, &response_buffer,
-                                         &status_code, error_buf, sizeof(error_buf));
-        } else {
-            success = platform_http_get_with_headers(url, headers, header_count,
-                                                     &response_buffer, error_buf,
-                                                     sizeof(error_buf));
-            status_code = success ? 200 : 0;
-        }
+        bool success = platform_http_request(url, method,
+                                              post_body && post_body_len > 0 ? post_body : NULL,
+                                              post_body_len,
+                                              headers, header_count,
+                                              &response_buffer, &status_code,
+                                              error_buf, sizeof(error_buf));
 
         if (post_body) free(post_body);
         post_body = NULL;
 
-        if (success && response_buffer.data && response_buffer.size > 0 && status_code >= 200 && status_code < 300) {
-            GCValue response_obj = create_response_from_data(ctx, url, response_buffer.data,
-                                                             response_buffer.size, status_code, "OK");
+        if (success && response_buffer.data && status_code >= 200 && status_code < 300) {
+            if (!same_origin && !cors_no_cors) {
+                char cors_err[256] = {0};
+                if (!cors_validate_response_headers(response_buffer.headers, origin, credentials_include,
+                                                    cors_err, sizeof(cors_err))) {
+                    platform_http_free_buffer(&response_buffer);
+                    platform_log(LOG_LEVEL_WARN, "js_fetch", "%s", cors_err);
+                    return reject_type_error(ctx, cors_err);
+                }
+            }
+            GCValue response_obj = create_http_response(ctx, url, &response_buffer, status_code, "OK");
             platform_http_free_buffer(&response_buffer);
             GCValue global = JS_GetGlobalObject(ctx);
             GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
@@ -1281,15 +1876,7 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
         } else {
             platform_http_free_buffer(&response_buffer);
             platform_log(LOG_LEVEL_WARN, "js_fetch", "Generic request failed: %s", error_buf[0] ? error_buf : "unknown");
-            // For HTTP(S) URLs, a failed network request rejects per Fetch semantics.
-            GCValue global = JS_GetGlobalObject(ctx);
-            GCValue typeerror_ctor = JS_GetPropertyStr(ctx, global, "TypeError");
-            GCValue err_msg = JS_NewString(ctx, error_buf[0] ? error_buf : "Network request failed");
-            GCValue err = JS_Call(ctx, typeerror_ctor, JS_UNDEFINED, 1, &err_msg);
-            GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
-            GCValue reject_fn = JS_GetPropertyStr(ctx, promise_ctor, "reject");
-            GCValue args[1] = { err };
-            return JS_Call(ctx, reject_fn, JS_UNDEFINED, 1, args);
+            return reject_type_error(ctx, error_buf[0] ? error_buf : "Network request failed");
         }
     }
     

@@ -4473,7 +4473,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
       try { var cookies = document.cookie; if (cookies) headers['Cookie'] = cookies; } catch(e){}
     }
 
-    return nativeFetch(req.url, {method:req.method, headers:headers, body:req.body}).then(function(nativeResp){
+    return nativeFetch(req.url, {method:req.method, headers:headers, body:req.body, mode:req.mode, credentials:req.credentials}).then(function(nativeResp){
       var resp = new Response(null, {status:nativeResp.status, statusText:nativeResp.statusText, headers:nativeResp.headers});
       resp.url = nativeResp.url || req.url;
       resp.redirected = !!nativeResp.redirected;

@@ -19,6 +19,15 @@ void platform_http_cleanup(void) {
     /* Nothing to cleanup */
 }
 
+static void copy_http_buffer_fields(PlatformHttpBuffer *outBuffer, const HttpBuffer *http_buffer) {
+    if (outBuffer && http_buffer) {
+        outBuffer->data = http_buffer->data;
+        outBuffer->size = http_buffer->size;
+        outBuffer->headers = http_buffer->headers;
+        outBuffer->headers_size = http_buffer->headers_size;
+    }
+}
+
 bool platform_http_get_with_headers(const char *url,
                                     const char **headers, size_t headerCount,
                                     PlatformHttpBuffer *outBuffer,
@@ -35,8 +44,7 @@ bool platform_http_get_with_headers(const char *url,
                                                   &http_buffer, error, errorLen);
 
     if (result) {
-        outBuffer->data = http_buffer.data;
-        outBuffer->size = http_buffer.size;
+        copy_http_buffer_fields(outBuffer, &http_buffer);
     }
 
     return result;
@@ -68,18 +76,51 @@ bool platform_http_post(const char *url,
                                       error, errorLen);
 
     if (result) {
-        outBuffer->data = http_buffer.data;
-        outBuffer->size = http_buffer.size;
+        copy_http_buffer_fields(outBuffer, &http_buffer);
+    }
+
+    return result;
+}
+
+bool platform_http_request(const char *url,
+                           const char *method,
+                           const char *postData, size_t postDataLen,
+                           const char **headers, size_t headerCount,
+                           PlatformHttpBuffer *outBuffer,
+                           int *outStatus,
+                           char *error, size_t errorLen) {
+    if (!outBuffer) {
+        if (error && errorLen > 0) {
+            strncpy(error, "Invalid output buffer", errorLen);
+        }
+        return false;
+    }
+
+    HttpBuffer http_buffer = {0};
+    bool result = http_request_to_memory(url, method, postData, postDataLen,
+                                         headers, headerCount,
+                                         &http_buffer, outStatus,
+                                         error, errorLen);
+
+    if (result) {
+        copy_http_buffer_fields(outBuffer, &http_buffer);
     }
 
     return result;
 }
 
 void platform_http_free_buffer(PlatformHttpBuffer *buffer) {
-    if (buffer && buffer->data) {
-        free(buffer->data);
-        buffer->data = NULL;
-        buffer->size = 0;
+    if (buffer) {
+        if (buffer->data) {
+            free(buffer->data);
+            buffer->data = NULL;
+            buffer->size = 0;
+        }
+        if (buffer->headers) {
+            free(buffer->headers);
+            buffer->headers = NULL;
+            buffer->headers_size = 0;
+        }
     }
 }
 

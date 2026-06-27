@@ -16,6 +16,8 @@ extern "C" {
 typedef struct HttpBuffer {
     char *data;
     size_t size;
+    char *headers;      /* raw response header block (HTTP/1.1 ... \r\n...\r\n) */
+    size_t headers_size;
 } HttpBuffer;
 
 /* Shared state for async downloads. UI thread polls this; download thread writes it.
@@ -35,6 +37,12 @@ bool http_get_to_memory(const char *url, HttpBuffer *outBuffer,
 
 bool http_get_to_memory_with_headers(const char *url, const char **headers, size_t headerCount,
                                      HttpBuffer *outBuffer, char *err, size_t errLen);
+
+bool http_request_to_memory(const char *url, const char *method,
+                            const char *postData, size_t postDataLen,
+                            const char **headers, size_t headerCount,
+                            HttpBuffer *outBuffer, int *outStatus,
+                            char *err, size_t errLen);
 
 bool http_post_to_memory(const char *url, const char *postData, size_t postDataLen,
                          const char **headers, size_t headerCount,

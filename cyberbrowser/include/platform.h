@@ -63,6 +63,8 @@ void platform_free(void *ptr);
 typedef struct PlatformHttpBuffer {
     char *data;
     size_t size;
+    char *headers;      /* raw response header block */
+    size_t headers_size;
 } PlatformHttpBuffer;
 
 typedef void (*PlatformHttpProgressCallback)(size_t downloaded, size_t total, void *user);
@@ -91,6 +93,15 @@ bool platform_http_post(const char *url,
                         PlatformHttpBuffer *outBuffer,
                         int *outStatus,
                         char *error, size_t errorLen);
+
+/* Generic HTTP request with arbitrary method (used for CORS preflight, etc.) */
+bool platform_http_request(const char *url,
+                           const char *method,
+                           const char *postData, size_t postDataLen,
+                           const char **headers, size_t headerCount,
+                           PlatformHttpBuffer *outBuffer,
+                           int *outStatus,
+                           char *error, size_t errorLen);
 
 /* Free HTTP buffer */
 void platform_http_free_buffer(PlatformHttpBuffer *buffer);
