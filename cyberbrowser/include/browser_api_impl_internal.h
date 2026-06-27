@@ -252,6 +252,7 @@ GCValue js_element_closest(JSContextHandle ctx, GCValue this_val, int argc, GCVa
 GCValue js_cyber_upgrade_element(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_cyber_ce_enqueue_upgrade(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 void js_cyber_ce_enqueue_upgrade_subtree(JSContextHandle ctx, GCValue root);
+void js_cyber_ce_enqueue_callback(JSContextHandle ctx, GCValue elem, const char *name);
 GCValue js_cyber_ce_flush_reactions(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 void js_cyber_ce_schedule_flush(JSContextHandle ctx);
 extern JSClassDef js_event_class_def;

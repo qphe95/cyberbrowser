@@ -10,6 +10,7 @@
 #include "quickjs.h"
 #include "quickjs_gc_unified.h"
 #include "browser_api_impl.h"
+#include "browser_api_impl_internal.h"
 #include "html_dom.h"
 #include "css_parser.h"
 #include "gc_value_helpers.h"
@@ -1849,10 +1850,29 @@ GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int ar
     if (!JS_IsNull(elem) && !JS_IsUndefined(elem)) {
         dom_node_set_owner_document(ctx, elem, this_val);
 
-        // Defer custom-element upgrades to the explicit customElements.upgrade()
-        // call after all scripts have run.  Upgrading while the parser is still
-        // creating nodes (or while a constructor is running) causes reentrancy
-        // and stack-overflow crashes with the ES5 adapter wrapper.
+        // If a custom element definition already exists, upgrade the newly
+        // created element synchronously before returning it (CEReactions).
+        // We only do this when a definition is registered, so parser-created
+        // nodes that arrive before definitions are not upgraded individually.
+        if (tag && strchr(tag, '-')) {
+            GCValue global_obj = JS_GetGlobalObject(ctx);
+            GCValue customElements = JS_GetPropertyStr(ctx, global_obj, "customElements");
+            if (JS_IsObject(customElements)) {
+                GCValue get_fn = JS_GetPropertyStr(ctx, customElements, "get");
+                if (JS_IsFunction(ctx, get_fn)) {
+                    GCValue tag_val = JS_NewString(ctx, tag);
+                    GCValue ctor = JS_Call(ctx, get_fn, customElements, 1, &tag_val);
+                    if (!JS_IsException(ctor) && !JS_IsNull(ctor) && !JS_IsUndefined(ctor) && JS_IsFunction(ctx, ctor)) {
+                        js_cyber_ce_enqueue_upgrade(ctx, JS_UNDEFINED, 1, &elem);
+                        GCValue flushing = JS_GetPropertyStr(ctx, global_obj, "__cyber_ce_flushing");
+                        if (!JS_ToBool(ctx, flushing)) {
+                            js_cyber_ce_flush_reactions(ctx, JS_UNDEFINED, 0, NULL);
+                        }
+                    }
+                    if (JS_IsException(ctor)) JS_GetException(ctx);
+                }
+            }
+        }
     }
     
     return elem;

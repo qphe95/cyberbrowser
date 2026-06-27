@@ -290,6 +290,7 @@ typedef struct {
     double timeStamp;
     GCValue target;
     GCValue currentTarget;
+    GCValue path;    // composed path array populated at dispatch time
     JSContextHandle ctx;
 } EventData;
 

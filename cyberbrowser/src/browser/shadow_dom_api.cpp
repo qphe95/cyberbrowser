@@ -236,72 +236,37 @@ GCValue js_shadow_root_set_adopted_style_sheets(JSContextHandle ctx, GCValue thi
     if (argc < 1) return JS_ThrowTypeError(ctx, "adoptedStyleSheets setter requires an array");
     JS_SetPropertyStr(ctx, this_val, "__adoptedStyleSheets", argv[0]);
 
-    // Collect CSS text from all adopted sheets and inject it as a <style>
-    // element in document.head so the layout engine can parse the rules.
-    GCValue sheets = argv[0];
-    size_t total_len = 1;
-    if (JS_IsArray(ctx, sheets)) {
-        GCValue len_val = JS_GetPropertyStr(ctx, sheets, "length");
-        uint32_t n = 0;
-        JS_ToUint32(ctx, &n, len_val);
-        for (uint32_t i = 0; i < n; i++) {
-            GCValue sheet = JS_GetPropertyUint32(ctx, sheets, i);
-            GCValue text = js_css_style_sheet_get_css_text(ctx, sheet);
-            const char *s = JS_ToCString(ctx, text);
-            if (s) total_len += strlen(s) + 2;
-        }
-    }
-    char *css = (char*)malloc(total_len);
-    if (!css) return JS_UNDEFINED;
-    css[0] = '\0';
-    if (JS_IsArray(ctx, sheets)) {
-        GCValue len_val = JS_GetPropertyStr(ctx, sheets, "length");
-        uint32_t n = 0;
-        JS_ToUint32(ctx, &n, len_val);
-        for (uint32_t i = 0; i < n; i++) {
-            GCValue sheet = JS_GetPropertyUint32(ctx, sheets, i);
-            GCValue text = js_css_style_sheet_get_css_text(ctx, sheet);
-            const char *s = JS_ToCString(ctx, text);
-            if (s && s[0]) {
-                strcat(css, s);
-                strcat(css, "\n");
-            }
-        }
-    }
-
+    // Assign a unique scope class to the host element.  The layout engine uses
+    // this class to prefix every selector from these adopted sheets so they only
+    // match nodes inside this host's flattened shadow tree.
     GCValue host = js_shadow_root_get_host(ctx, this_val);
-    GCValue doc = JS_GetPropertyStr(ctx, host, "ownerDocument");
-    if (JS_IsObject(doc)) {
-        GCValue head = JS_GetPropertyStr(ctx, doc, "head");
-        if (JS_IsObject(head)) {
-            // Remove any previously injected style element for this shadow root.
-            GCValue old_style = JS_GetPropertyStr(ctx, this_val, "__adoptedStyleElement");
-            if (JS_IsObject(old_style)) {
-                GCValue remove_fn = JS_GetPropertyStr(ctx, head, "removeChild");
-                if (JS_IsFunction(ctx, remove_fn)) {
-                    GCValue remove_args[1] = { old_style };
-                    JS_Call(ctx, remove_fn, head, 1, remove_args);
-                }
-                JS_SetPropertyStr(ctx, this_val, "__adoptedStyleElement", JS_UNDEFINED);
+    if (JS_IsObject(host)) {
+        DOMNodeHandle host_node = get_dom_node(ctx, host);
+        if (host_node.valid()) {
+            static int scope_counter = 0;
+            const char *sid_attr = host_node.get_attribute("__cyber_scope_id");
+            char sid[32] = {0};
+            if (!sid_attr || !sid_attr[0]) {
+                snprintf(sid, sizeof(sid), "cs%d", ++scope_counter);
+                host_node.set_attribute("__cyber_scope_id", sid);
+            } else {
+                strncpy(sid, sid_attr, sizeof(sid) - 1);
+                sid[sizeof(sid) - 1] = '\0';
             }
-
-            if (css[0]) {
-                GCValue create_elem = JS_GetPropertyStr(ctx, doc, "createElement");
-                GCValue style_tag = JS_NewString(ctx, "style");
-                GCValue create_args[1] = { style_tag };
-                GCValue style = JS_Call(ctx, create_elem, doc, 1, create_args);
-                if (JS_IsObject(style)) {
-                    JS_SetPropertyStr(ctx, style, "textContent", JS_NewString(ctx, css));
-                    JS_SetPropertyStr(ctx, style, "__cyber_adopted_style", JS_TRUE);
-                    GCValue append_fn = JS_GetPropertyStr(ctx, head, "appendChild");
-                    GCValue append_args[1] = { style };
-                    JS_Call(ctx, append_fn, head, 1, append_args);
-                    JS_SetPropertyStr(ctx, this_val, "__adoptedStyleElement", style);
+            char scope_class[48];
+            snprintf(scope_class, sizeof(scope_class), "cyber-scope-%s", sid);
+            const char *existing = host_node.get_attribute("class");
+            char combined[256];
+            if (existing && existing[0]) {
+                if (strstr(existing, scope_class) == NULL) {
+                    snprintf(combined, sizeof(combined), "%s %s", existing, scope_class);
+                    host_node.set_attribute("class", combined);
                 }
+            } else {
+                host_node.set_attribute("class", scope_class);
             }
         }
     }
-    free(css);
 
     dom_request_layout();
     return JS_UNDEFINED;

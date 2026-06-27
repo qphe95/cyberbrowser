@@ -1187,29 +1187,58 @@ static void layout_collect_constructed_stylesheets(LayoutContext *ctx,
     GCValue adopted = JS_GetPropertyStr(js, doc, "__adoptedStyleSheets");
     layout_collect_js_sheet_array(js, adopted, list);
 
-    /* Shadow-root adopted stylesheets. */
+    /* Shadow-root adopted stylesheets.  Each sheet is scoped to its host by
+     * prefixing every selector with a unique class assigned to the host. */
     const char *script =
         "(function(){"
         "  var out=[];"
+        "  var counter = (window.__cyber_scope_counter || 0);"
         "  var all=document.querySelectorAll('*');"
         "  for(var i=0;i<all.length;i++){"
-        "    var sr=all[i].shadowRoot;"
+        "    var host=all[i];"
+        "    var sr=host.shadowRoot;"
         "    if(sr){"
         "      var sheets=sr.__adoptedStyleSheets;"
-        "      if(sheets && sheets.length) out.push(sheets);"
+        "      if(sheets && sheets.length){"
+        "        var sid=host.getAttribute('__cyber_scope_id');"
+        "        if(!sid){ sid='cs'+(++counter); }"
+        "        var scopeClass='cyber-scope-'+sid;"
+        "        for(var j=0;j<sheets.length;j++){"
+        "          var css=sheets[j].cssText||'';"
+        "          if(!css) continue;"
+        "          var scoped=css.replace(/([^{};@][^{};]*)\\{/g, function(m, sel){"
+        "            if(sel.trim().charAt(0)==='@') return m;"
+        "            var parts=sel.split(',');"
+        "            for(var k=0;k<parts.length;k++){"
+        "              var s=parts[k].trim();"
+        "              if(!s) continue;"
+        "              if(s.indexOf(':host')===0) s='.'+scopeClass+s.substring(5);"
+        "              else s='.'+scopeClass+' '+s;"
+        "              parts[k]=s;"
+        "            }"
+        "            return parts.join(', ')+'{';"
+        "          });"
+        "          out.push(scoped);"
+        "        }"
+        "      }"
         "    }"
         "  }"
+        "  window.__cyber_scope_counter=counter;"
         "  return out;"
         "})()";
-    GCValue sr_arrays = JS_Eval(js, script, strlen(script),
-                                "<constructed-css>", JS_EVAL_TYPE_GLOBAL);
-    if (JS_IsArray(js, sr_arrays)) {
-        GCValue len_val = JS_GetPropertyStr(js, sr_arrays, "length");
+    GCValue scoped_css = JS_Eval(js, script, strlen(script),
+                                 "<constructed-css>", JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsArray(js, scoped_css)) {
+        GCValue len_val = JS_GetPropertyStr(js, scoped_css, "length");
         uint32_t m = 0;
         JS_ToUint32(js, &m, len_val);
         for (uint32_t j = 0; j < m; j++) {
-            GCValue ss = JS_GetPropertyUint32(js, sr_arrays, j);
-            layout_collect_js_sheet_array(js, ss, list);
+            GCValue text = JS_GetPropertyUint32(js, scoped_css, j);
+            const char *s = JS_ToCString(js, text);
+            if (s && s[0]) {
+                CssStylesheet *parsed = css_stylesheet_parse(s, strlen(s));
+                if (parsed) layout_sheet_list_add(list, parsed);
+            }
         }
     }
 }

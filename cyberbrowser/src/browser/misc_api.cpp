@@ -137,6 +137,31 @@ static void cyber_ce_reaction_queue_push(JSContextHandle ctx, GCValue el) {
     JS_SetPropertyStr(ctx, el, "__CE_upgrade_pending", JS_TRUE);
 }
 
+static GCValue cyber_ce_callback_queue(JSContextHandle ctx) {
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue queue = JS_GetPropertyStr(ctx, global, "__cyber_ce_callback_queue");
+    if (!JS_IsArray(ctx, queue)) {
+        queue = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, global, "__cyber_ce_callback_queue", queue);
+    }
+    return queue;
+}
+
+void js_cyber_ce_enqueue_callback(JSContextHandle ctx, GCValue elem, const char *name) {
+    if (JS_IsNull(elem) || JS_IsUndefined(elem) || !JS_IsObject(elem) || !name) return;
+    GCValue cb = JS_GetPropertyStr(ctx, elem, name);
+    if (!JS_IsFunction(ctx, cb)) return;
+
+    GCValue entry = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, entry, "elem", elem);
+    JS_SetPropertyStr(ctx, entry, "name", JS_NewString(ctx, name));
+    GCValue queue = cyber_ce_callback_queue(ctx);
+    GCValue len_val = JS_GetPropertyStr(ctx, queue, "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, len_val);
+    JS_SetPropertyUint32(ctx, queue, len, entry);
+}
+
 GCValue js_cyber_ce_enqueue_upgrade(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
     if (argc < 1) return JS_UNDEFINED;
@@ -181,7 +206,10 @@ void js_cyber_ce_enqueue_upgrade_subtree(JSContextHandle ctx, GCValue root) {
 GCValue js_cyber_ce_flush_reactions(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc; (void)argv;
     GCValue global = JS_GetGlobalObject(ctx);
+    GCValue flushing = JS_GetPropertyStr(ctx, global, "__cyber_ce_flushing");
+    if (JS_ToBool(ctx, flushing)) return JS_UNDEFINED;
     JS_SetPropertyStr(ctx, global, "__cyber_ce_reaction_scheduled", JS_FALSE);
+    JS_SetPropertyStr(ctx, global, "__cyber_ce_flushing", JS_TRUE);
 
     GCValue queue = cyber_ce_reaction_queue(ctx);
     int max_waves = 100;
@@ -208,6 +236,32 @@ GCValue js_cyber_ce_flush_reactions(JSContextHandle ctx, GCValue this_val, int a
         }
         JS_SetPropertyStr(ctx, queue, "length", JS_NewInt32(ctx, (int32_t)remaining));
     }
+
+    // Flush queued lifecycle callbacks. Upgrades above may have enqueued new
+    // connectedCallback/disconnectedCallback reactions; run them now.
+    GCValue cb_queue = cyber_ce_callback_queue(ctx);
+    for (int wave = 0; wave < 100; wave++) {
+        GCValue len_val = JS_GetPropertyStr(ctx, cb_queue, "length");
+        uint32_t len = 0;
+        JS_ToUint32(ctx, &len, len_val);
+        if (len == 0) break;
+        for (uint32_t i = 0; i < len; i++) {
+            GCValue entry = JS_GetPropertyUint32(ctx, cb_queue, i);
+            GCValue elem = JS_GetPropertyStr(ctx, entry, "elem");
+            GCValue name_val = JS_GetPropertyStr(ctx, entry, "name");
+            const char *name = JS_ToCString(ctx, name_val);
+            if (name) {
+                GCValue cb = JS_GetPropertyStr(ctx, elem, name);
+                if (JS_IsFunction(ctx, cb)) {
+                    GCValue ret = JS_Call(ctx, cb, elem, 0, NULL);
+                    if (JS_IsException(ret)) JS_GetException(ctx);
+                }
+                JS_FreeCString(ctx, name);
+            }
+        }
+        JS_SetPropertyStr(ctx, cb_queue, "length", JS_NewInt32(ctx, 0));
+    }
+    JS_SetPropertyStr(ctx, global, "__cyber_ce_flushing", JS_FALSE);
     return JS_UNDEFINED;
 }
 

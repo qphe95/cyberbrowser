@@ -31,6 +31,7 @@ void js_event_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func) {
     if (!ev) return;
     JS_MarkValue(rt, ev->target, mark_func);
     JS_MarkValue(rt, ev->currentTarget, mark_func);
+    JS_MarkValue(rt, ev->path, mark_func);
 }
 
 JSClassDef js_event_class_def = {
@@ -103,14 +104,31 @@ GCValue js_event_get_defaultPrevented(JSContextHandle ctx, GCValue this_val) {
 
 GCValue js_event_get_target(JSContextHandle ctx, GCValue this_val) {
     EventHandle ev = EventHandle::from_object_check(ctx, this_val);
-    if (!ev.valid()) return JS_ThrowTypeError(ctx, "Invalid Event object");
-    return ev.target();
+    GCValue actual = JS_NULL;
+    GCValue current = JS_NULL;
+    if (ev.valid()) {
+        actual = ev.target();
+        current = ev.currentTarget();
+    } else {
+        // Fallback for subclasses (CustomEvent, MouseEvent, FocusEvent) that do not
+        // share the Event class id but still set the target/currentTarget properties.
+        actual = JS_GetPropertyStr(ctx, this_val, "target");
+        current = JS_GetPropertyStr(ctx, this_val, "currentTarget");
+    }
+
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue helper = JS_GetPropertyStr(ctx, global, "__cyber_eventRetarget");
+    if (JS_IsFunction(ctx, helper)) {
+        GCValue args[2] = { actual, current };
+        return JS_Call(ctx, helper, global, 2, args);
+    }
+    return actual;
 }
 
 GCValue js_event_get_currentTarget(JSContextHandle ctx, GCValue this_val) {
     EventHandle ev = EventHandle::from_object_check(ctx, this_val);
-    if (!ev.valid()) return JS_ThrowTypeError(ctx, "Invalid Event object");
-    return ev.currentTarget();
+    if (ev.valid()) return ev.currentTarget();
+    return JS_GetPropertyStr(ctx, this_val, "currentTarget");
 }
 
 GCValue js_event_preventDefault(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
@@ -144,7 +162,26 @@ GCValue js_event_get_eventPhase_wrapper(JSContextHandle ctx, GCValue this_val, i
 
 GCValue js_event_composedPath(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    // Return empty array for now - would need full DOM tree traversal for real implementation
+    GCValue path = JS_NULL;
+    EventHandle ev = EventHandle::from_object_check(ctx, this_val);
+    if (ev.valid()) {
+        path = ev.path();
+    }
+    if (!JS_IsArray(ctx, path)) {
+        path = JS_GetPropertyStr(ctx, this_val, "__composedPath");
+    }
+    if (!JS_IsUndefined(path) && !JS_IsNull(path) && JS_IsArray(ctx, path)) {
+        // Return a shallow copy so script mutation does not affect the event.
+        GCValue copy = JS_NewArray(ctx);
+        GCValue len_val = JS_GetPropertyStr(ctx, path, "length");
+        uint32_t len = 0;
+        JS_ToUint32(ctx, &len, len_val);
+        for (uint32_t i = 0; i < len; i++) {
+            GCValue item = JS_GetPropertyUint32(ctx, path, i);
+            JS_SetPropertyUint32(ctx, copy, i, item);
+        }
+        return copy;
+    }
     return JS_NewArray(ctx);
 }
 
@@ -198,6 +235,7 @@ void js_custom_event_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_fun
     if (!ev) return;
     JS_MarkValue(rt, ev->base.target, mark_func);
     JS_MarkValue(rt, ev->base.currentTarget, mark_func);
+    JS_MarkValue(rt, ev->base.path, mark_func);
     JS_MarkValue(rt, ev->detail, mark_func);
 }
 
@@ -253,9 +291,21 @@ void js_mouse_event_finalizer(JSRuntimeHandle rt, GCValue val) {
     (void)val;
 }
 
+void js_mouse_event_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func) {
+    GCHandle ev_handle = JS_GetOpaqueHandle(val, js_mouse_event_class_id);
+    if (ev_handle == GC_HANDLE_NULL) return;
+    mark_func(rt, ev_handle);
+    MouseEventData *ev = (MouseEventData *)gc_deref(ev_handle);
+    if (!ev) return;
+    JS_MarkValue(rt, ev->base.target, mark_func);
+    JS_MarkValue(rt, ev->base.currentTarget, mark_func);
+    JS_MarkValue(rt, ev->base.path, mark_func);
+}
+
 JSClassDef js_mouse_event_class_def = {
     .class_name = "MouseEvent",
     .finalizer = js_mouse_event_finalizer,
+    .gc_mark   = js_mouse_event_mark,
 };
 
 GCValue js_mouse_event_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
@@ -348,6 +398,7 @@ void js_focus_event_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func
     if (!ev) return;
     JS_MarkValue(rt, ev->base.target, mark_func);
     JS_MarkValue(rt, ev->base.currentTarget, mark_func);
+    JS_MarkValue(rt, ev->base.path, mark_func);
     JS_MarkValue(rt, ev->relatedTarget, mark_func);
 }
 
@@ -486,7 +537,23 @@ GCValue js_event_target_dispatchEvent(JSContextHandle ctx, GCValue this_val, int
         JS_SetPropertyStr(ctx, argv[0], "target", this_val);
     }
     JS_SetPropertyStr(ctx, argv[0], "currentTarget", this_val);
-    
+
+    // Build the composed path: shadow-including ancestors of the target.
+    GCValue path = JS_NewArray(ctx);
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue path_helper = JS_GetPropertyStr(ctx, global, "__cyber_eventComposedPath");
+    if (JS_IsFunction(ctx, path_helper)) {
+        GCValue arg = this_val;
+        path = JS_Call(ctx, path_helper, global, 1, &arg);
+    }
+    EventHandle ev = EventHandle::from_object_check(ctx, argv[0]);
+    if (ev.valid()) {
+        ev.set_path(path);
+    }
+    // Also store on the object itself so subclasses (CustomEvent/MouseEvent/FocusEvent)
+    // can expose a composedPath even though they use a separate internal handle.
+    JS_SetPropertyStr(ctx, argv[0], "__composedPath", path);
+
     // 1. Call listeners from addEventListener: __listeners_{type}
     char prop[128];
     snprintf(prop, sizeof(prop), "__listeners_%s", type);

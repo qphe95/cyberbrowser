@@ -115,17 +115,10 @@ GCValue js_node_is_connected_getter(JSContextHandle ctx, GCValue this_val, int a
 }
 
 static void invoke_custom_element_callback(JSContextHandle ctx, GCValue elem, const char *name) {
-    GCValue cb = JS_GetPropertyStr(ctx, elem, name);
-    if (JS_IsException(cb)) {
-        JS_GetException(ctx); // clear
-        return;
-    }
-    if (!JS_IsUndefined(cb) && !JS_IsNull(cb) && JS_IsFunction(ctx, cb)) {
-        GCValue ret = JS_Call(ctx, cb, elem, 0, NULL);
-        if (JS_IsException(ret)) {
-            JS_GetException(ctx); // clear
-        }
-    }
+    // Custom element lifecycle callbacks are CEReactions and must run after
+    // any queued upgrade reactions have completed, not synchronously during the
+    // DOM mutation. Enqueue them into the custom-element reaction queue.
+    js_cyber_ce_enqueue_callback(ctx, elem, name);
 }
 
 static void invoke_attribute_changed(JSContextHandle ctx, GCValue elem,
@@ -987,6 +980,7 @@ GCValue js_node_removeChild_real(JSContextHandle ctx, GCValue this_val, int argc
             invoke_custom_element_callback(ctx, child, "disconnectedCallback");
         }
     }
+    js_cyber_ce_schedule_flush(ctx);
 
     GCValue added_arr2 = JS_NewArray(ctx);
     JS_SetPropertyUint32(ctx, added_arr2, 0, child);

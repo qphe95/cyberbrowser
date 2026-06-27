@@ -3377,7 +3377,43 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     GCValue event_ctor = JS_NewCFunction2(ctx, js_event_constructor, "Event", 2, JS_CFUNC_constructor, 0);
     JS_SetConstructor(ctx, event_ctor, event_proto);
     JS_SetPropertyStr(ctx, global, "Event", event_ctor);
-    
+
+    // Event retargeting / composed-path helpers used by the C event dispatch code.
+    const char *event_helpers_js =
+        "(function(){"
+        "  window.__cyber_eventRoot = function(node){"
+        "    while(node){"
+        "      if(node.nodeType===9 || node.nodeType===11) return node;"
+        "      var p=node.parentNode; if(!p) return node; node=p;"
+        "    }"
+        "    return node;"
+        "  };"
+        "  window.__cyber_eventRetarget = function(actual, current){"
+        "    if(!actual || !current) return actual;"
+        "    var currentRoot = window.__cyber_eventRoot(current);"
+        "    var node = actual;"
+        "    while(node){"
+        "      if(window.__cyber_eventRoot(node) === currentRoot) return node;"
+        "      var p = node.parentNode;"
+        "      if(!p && node.host){ node = node.host; continue; }"
+        "      node = p;"
+        "    }"
+        "    return actual;"
+        "  };"
+        "  window.__cyber_eventComposedPath = function(target){"
+        "    var path=[];"
+        "    var node=target;"
+        "    while(node){"
+        "      path.push(node);"
+        "      var p=node.parentNode;"
+        "      if(!p && node.host){ node=node.host; continue; }"
+        "      node=p;"
+        "    }"
+        "    return path;"
+        "  };"
+        "})();";
+    JS_Eval(ctx, event_helpers_js, strlen(event_helpers_js), "<event-helpers>", JS_EVAL_TYPE_GLOBAL);
+
     // CustomEvent class (inherits from Event)
     GCValue custom_event_proto = JS_NewObject(ctx);
     // Set CustomEvent.prototype.__proto__ = Event.prototype

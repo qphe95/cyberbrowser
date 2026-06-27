@@ -2106,6 +2106,7 @@ public:
             ev->timeStamp = 0;
             ev->target = JS_NULL;
             ev->currentTarget = JS_NULL;
+            ev->path = JS_NULL;
             ev->ctx = ctx;
         }
         return EventHandle(h);
@@ -2203,6 +2204,16 @@ public:
         EventData* p = get_ptr();
         if (p) p->currentTarget = val;
     }
+
+    GCValue path() const {
+        EventData* p = get_ptr();
+        return p ? p->path : JS_NULL;
+    }
+
+    void set_path(GCValue val) {
+        EventData* p = get_ptr();
+        if (p) p->path = val;
+    }
 };
 
 /* ============================================================================
@@ -2227,6 +2238,7 @@ public:
             ev->base.timeStamp = 0;
             ev->base.target = JS_NULL;
             ev->base.currentTarget = JS_NULL;
+            ev->base.path = JS_NULL;
             ev->base.ctx = ctx;
             ev->detail = JS_NULL;
         }
@@ -2282,6 +2294,7 @@ public:
             ev->base.timeStamp = 0;
             ev->base.target = JS_NULL;
             ev->base.currentTarget = JS_NULL;
+            ev->base.path = JS_NULL;
             ev->base.ctx = ctx;
         }
         return MouseEventHandle(h);
@@ -2341,6 +2354,7 @@ public:
             ev->base.timeStamp = 0;
             ev->base.target = JS_NULL;
             ev->base.currentTarget = JS_NULL;
+            ev->base.path = JS_NULL;
             ev->base.ctx = ctx;
             ev->relatedTarget = JS_NULL;
         }
