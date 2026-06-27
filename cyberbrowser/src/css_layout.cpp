@@ -1634,178 +1634,6 @@ static double layout_flex_cross_total(const LayoutBox *box, double value, bool i
     return value;
 }
 
-static bool layout_node_class_contains(HtmlNode *node, const char *needle)
-{
-    if (!node || node->type != HTML_NODE_ELEMENT) return false;
-    const char *cls = layout_node_attribute(node, "class");
-    if (!cls || !needle) return false;
-    return strstr(cls, needle) != NULL;
-}
-
-/* Direct layout-box overrides for YouTube's un-upgraded Polymer shell.
- * The rebuilt DOM has no real custom-element behaviour, so the skeleton
- * containers collapse or are positioned badly.  Patch the key boxes before
- * the top-down pass so the screenshot looks reasonable. */
-static void layout_apply_youtube_fallbacks(LayoutContext *ctx)
-{
-    /* Detect which YouTube page shape we are rendering. */
-    bool is_watch_page = false;
-    for (int i = 0; i < ctx->tree.count; i++) {
-        HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx);
-        if (node && node->type == HTML_NODE_ELEMENT) {
-            const char *id = layout_node_attribute(node, "id");
-            if (id && strcmp(id, "watch-page-skeleton") == 0) {
-                is_watch_page = true;
-                break;
-            }
-        }
-    }
-
-    for (int i = 0; i < ctx->tree.count; i++) {
-        LayoutBox *box = layout_box(ctx, i);
-        HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx);
-        if (!node || node->type != HTML_NODE_ELEMENT) continue;
-
-        const char *id = layout_node_attribute(node, "id");
-        const char *tag = node->tag_name;
-
-        if (is_watch_page) {
-            /* Watch page overrides */
-            if (tag && strcasecmp(tag, "ytd-app") == 0) {
-                /* Let the app root fill the viewport so children have room. */
-                box->display = CSS_DISPLAY_BLOCK;
-                box->css_height = ctx->viewport_height;
-                box->height_percent = 0.0;
-                box->min_height = ctx->viewport_height;
-                box->max_height = 0.0;
-                /* max_height = 0 would clamp to zero; clear it. */
-                box->max_height = 0.0;
-                continue;
-            }
-            if (tag && strcasecmp(tag, "ytd-masthead") == 0) {
-                box->display = CSS_DISPLAY_BLOCK;
-                box->css_height = 56.0;
-                box->height_percent = 0.0;
-                box->min_height = 56.0;
-                continue;
-            }
-            if (id && strcmp(id, "player") == 0) {
-                /* Primary column wrapper for the player placeholder. */
-                box->css_width = ctx->viewport_width - 402.0;
-                if (box->css_width < 400.0) box->css_width = 400.0;
-                box->width_percent = 0.0;
-                continue;
-            }
-            if (id && strcmp(id, "player-api") == 0) {
-                /* 16:9 player placeholder fills the primary column width. */
-                box->display = CSS_DISPLAY_BLOCK;
-                box->width_percent = 1.0;
-                box->aspect_ratio = 9.0 / 16.0;
-                continue;
-            }
-            if (id && strcmp(id, "movie_player") == 0) {
-                box->display = CSS_DISPLAY_BLOCK;
-                box->width_percent = 1.0;
-                box->aspect_ratio = 9.0 / 16.0;
-                continue;
-            }
-            if (id && strcmp(id, "watch-page-skeleton") == 0) {
-                box->display = CSS_DISPLAY_BLOCK;
-                box->margin_top = 0.0;
-                box->top = 0.0;
-                continue;
-            }
-            if (id && strcmp(id, "container") == 0) {
-                /* The skeleton container is a positioned wrapper so the related
-                 * column can be absolutely placed beside the player. */
-                box->display = CSS_DISPLAY_BLOCK;
-                box->position = CSS_POSITION_RELATIVE;
-                continue;
-            }
-            if (id && strcmp(id, "info-container") == 0) {
-                box->display = CSS_DISPLAY_BLOCK;
-                box->css_height = 120.0;
-                box->height_percent = 0.0;
-                /* Primary column sits below the 16:9 player placeholder. */
-                double primary_width = ctx->viewport_width - 402.0;
-                if (primary_width < 400.0) primary_width = 400.0;
-                double player_height = (primary_width - 48.0) * 9.0 / 16.0 + 48.0;
-                if (player_height < 300.0) player_height = 300.0;
-                box->margin_top = player_height;
-                box->css_width = primary_width - 48.0;
-                if (box->css_width < 350.0) box->css_width = 350.0;
-                box->width_percent = 0.0;
-                continue;
-            }
-            if (id && strcmp(id, "related") == 0) {
-                /* Place the related column at the top-right of the skeleton so
-                 * it renders beside the player placeholder. */
-                box->display = CSS_DISPLAY_FLEX;
-                box->flex_direction = CSS_FLEX_DIRECTION_COLUMN;
-                box->position = CSS_POSITION_ABSOLUTE;
-                box->top = 0.0;
-                box->right = 0.0;
-                box->positioned_sides |= LAYOUT_SIDE_TOP | LAYOUT_SIDE_RIGHT;
-                box->css_width = 402.0;
-                box->width_percent = 0.0;
-                box->margin_top = 0.0;
-                continue;
-            }
-            if ((id && strcmp(id, "title") == 0) ||
-                (id && strcmp(id, "count") == 0) ||
-                (id && strcmp(id, "subscribe-button") == 0)) {
-                box->display = CSS_DISPLAY_BLOCK;
-                box->css_height = 20.0;
-                box->height_percent = 0.0;
-                continue;
-            }
-        }
-
-        if (id && strcmp(id, "home-chips") == 0) {
-            box->display = CSS_DISPLAY_FLEX;
-            box->css_height = 56.0;
-            box->height_percent = 0.0;
-            box->min_height = 0.0;
-        } else if (id && strcmp(id, "guide-skeleton") == 0) {
-            box->display = CSS_DISPLAY_FLEX;
-            box->css_width = 240.0;
-            box->width_percent = 0.0;
-            /* Give the sidebar a visible dark fill even though the Polymer
-             * app never populates more than a handful of ghost rows. */
-            box->background_color_r = 0.10;
-            box->background_color_g = 0.10;
-            box->background_color_b = 0.10;
-            box->background_color_a = 1.0;
-        } else if (id && strcmp(id, "home-page-skeleton") == 0) {
-            /* Body already reserves 56 px for the fixed masthead; the skeleton
-             * container should not add another 56 px margin on top. */
-            box->margin_top = 0.0;
-        } else if (tag && strcasecmp(tag, "ytd-app") == 0) {
-            box->css_height = 0.0;
-            box->height_percent = 0.0;
-            box->min_height = 0.0;
-            box->max_height = 0.0;
-        } else if (tag && strcasecmp(tag, "body") == 0) {
-            box->padding_top = 56.0;
-        } else if (layout_node_class_contains(node, "home-chips-ghost")) {
-            box->display = CSS_DISPLAY_INLINE_BLOCK;
-            box->css_width = 80.0;
-            box->css_height = 32.0;
-            box->width_percent = box->height_percent = 0.0;
-            box->margin_left = box->margin_right = 8.0;
-            box->margin_top = box->margin_bottom = 8.0;
-        } else if (layout_node_class_contains(node, "guide-ghost-icon")) {
-            box->css_width = 24.0;
-            box->css_height = 24.0;
-            box->width_percent = box->height_percent = 0.0;
-        } else if (layout_node_class_contains(node, "guide-ghost-text")) {
-            box->css_width = 160.0;
-            box->css_height = 16.0;
-            box->width_percent = box->height_percent = 0.0;
-            box->margin_left = 16.0;
-        }
-    }
-}
 
 /* Resolve width/height into the authoritative border-box size stored in
  * box->width / box->height.  content_width / content_height are then derived
@@ -1897,21 +1725,6 @@ static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
         double content_width = layout_total_to_content_width(box, box->width);
         used_content_height = content_width * box->aspect_ratio;
         height_auto = false;
-    }
-
-    /* Fallback for YouTube thumbnail placeholders: when the JS-injected CSS
-     * that sets padding-top:56.25% is not visible to the layout engine, the
-     * thumbnail box collapses to zero height.  Recognise common class names
-     * and apply a 16:9 aspect ratio so the grid renders correctly. */
-    if (height_auto && box->width > 0.0) {
-        if (layout_node_class_contains(node, "rich-thumbnail") ||
-            layout_node_class_contains(node, "video-thumbnail") ||
-            layout_node_class_contains(node, "ytd-thumbnail")) {
-            double content_width = layout_total_to_content_width(box, box->width);
-            box->aspect_ratio = 9.0 / 16.0;
-            used_content_height = content_width * box->aspect_ratio;
-            height_auto = false;
-        }
     }
 
     if (height_auto) {
@@ -2226,9 +2039,9 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
             } else if (free_main > 1e-6 && sum_grow == 0.0) {
                 /* Fallback: when no item has flex-grow but some items collapsed
                  * to zero main size, share the remaining space among them.  This
-                 * recovers layouts (e.g. YouTube's sidebar + main content) where
-                 * the flex-grow declaration was injected by JS and is not present
-                 * in the static stylesheets the layout engine can see. */
+                 * recovers layouts where the flex-grow declaration was injected by
+                 * JS and is not present in the static stylesheets the layout engine
+                 * can see. */
                 int zero_count = 0;
                 for (int j = start; j < start + count; j++) {
                     if (items[j].main_size <= 1e-6) zero_count++;
@@ -2968,7 +2781,6 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
     if (!ctx || ctx->tree.count == 0) return false;
 
     layout_apply_stylesheet(ctx, sheet);
-    layout_apply_youtube_fallbacks(ctx);
 
     /* Initialize synchronization state. */
     for (int i = 0; i < ctx->tree.count; i++) {

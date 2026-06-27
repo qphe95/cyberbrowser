@@ -1099,9 +1099,9 @@ TEST(test_custom_elements_exists) {
 }
 
 /*
- * Integration test: YouTube BGM download flow with JS extraction
- * This test exercises the pipeline: URL -> HTML fetch -> media URL extraction
- * It runs after browser stubs tests so it can reuse the QuickJS runtime.
+ * Sanity test: fetch a page and verify the HTML parser / script execution
+ * pipeline can run. Domain-specific media extraction has been removed, so the
+ * extraction step is expected to return false.
  */
 TEST(test_js_extraction) {
     /* Skip if no network */
@@ -1112,7 +1112,7 @@ TEST(test_js_extraction) {
 
     /* Test URL - Rick Astley (common test video) */
     const char *test_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
-    printf("    Testing JS extraction for: %s\n", test_url);
+    printf("    Testing page fetch and script execution for: %s\n", test_url);
 
     /* 
      * The QuickJS runtime should already exist from previous browser stubs tests.
@@ -1128,8 +1128,8 @@ TEST(test_js_extraction) {
     
     printf("    Using existing QuickJS runtime from browser stubs\n");
 
-    /* Step 1: Fetch YouTube HTML */
-    printf("    Step 1: Fetching YouTube HTML...\n");
+    /* Step 1: Fetch page HTML */
+    printf("    Step 1: Fetching page HTML...\n");
     HttpBuffer html = {0};
     char err[512] = {0};
 
@@ -1147,56 +1147,25 @@ TEST(test_js_extraction) {
     ASSERT_TRUE(html.data != NULL);
     printf("    Got %zu bytes of HTML\n", html.size);
 
-    /* Step 2: Extract media URL using HTML parsing with JS execution */
-    printf("    Step 2: Extracting media URL (with JS execution)...\n");
+    /* Step 2: Verify domain-specific media extraction is now disabled. */
+    printf("    Step 2: Verifying media extraction returns false...\n");
 
     HtmlMediaCandidate candidate;
     memset(&candidate, 0, sizeof(candidate));
 
     bool extract_result = html_extract_media_url(html.data, &candidate, err, sizeof(err));
+    if (extract_result) {
+        printf("    FAILED: Domain-specific media extraction unexpectedly succeeded\n");
+        http_free_buffer(&html);
+        return false;
+    }
 
-    /* 
-     * Note: YouTube encrypts media URLs with signatureCipher that requires
-     * JavaScript execution to decrypt. This test verifies the pipeline works.
-     * 
-     * We verify that:
-     * 1. HTML fetch succeeded (already verified above)
-     * 2. Extraction MUST succeed and return a valid media URL
-     * 3. If extraction fails, the test FAILS
-     */
-    if (!extract_result) {
-        printf("    FAILED: Media extraction failed: %s\n", err);
-        http_free_buffer(&html);
-        return false;
-    }
-    
-    /* Extraction succeeded - verify the URL looks valid */
-    printf("    Extracted media URL: %.150s%s\n",
-           candidate.url,
-           strlen(candidate.url) > 150 ? "..." : "");
-    
-    /* URL should be non-empty and look like a media URL */
-    if (strlen(candidate.url) == 0) {
-        printf("    FAILED: Extracted URL is empty\n");
-        http_free_buffer(&html);
-        return false;
-    }
-    
-    /* Should contain https:// or http:// */
-    bool has_protocol = strstr(candidate.url, "http://") != NULL ||
-                       strstr(candidate.url, "https://") != NULL;
-    if (!has_protocol) {
-        printf("    FAILED: Extracted URL missing protocol: %s\n", candidate.url);
-        http_free_buffer(&html);
-        return false;
-    }
-    
-    printf("    URL validation passed\n");
+    printf("    Media extraction correctly disabled\n");
 
     /* Cleanup */
     http_free_buffer(&html);
 
-    printf("    SUCCESS: JS extraction test completed\n");
+    printf("    SUCCESS: Page fetch / script execution test completed\n");
     return true;
 }
 

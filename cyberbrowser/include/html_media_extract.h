@@ -27,11 +27,7 @@ bool html_extract_media_url(const char *html, HtmlMediaCandidate *outCandidate,
  */
 int html_extract_inline_scripts(const char *html, char **out_scripts, int max_scripts);
 
-/* Extract visitorData from HTML by executing inline scripts in QuickJS.
- * This performs true browser emulation: scripts run and populate ytcfg,
- * then we read ytcfg.get('VISITOR_DATA') from the live JS objects.
- * Returns true if visitorData was successfully extracted.
- */
+/* visitorData extraction is disabled. Kept as a no-op stub for compatibility. */
 bool html_extract_visitor_data(const char *html, char *out_vd, size_t out_len);
 
 /* Execute all page scripts (inline + external) in document order.
@@ -40,20 +36,9 @@ bool html_extract_visitor_data(const char *html, char *out_vd, size_t out_len);
  */
 bool html_execute_page_scripts(const char *html, struct JsExecResult *out_result);
 
-/* Select the best playable media URL from a JS execution result.
- * Filters captured URLs to googlevideo.com, decodes signatureCipher if needed,
- * deprioritizes SABR/initplayback URLs, and derives MIME from the URL.
- */
-bool html_select_best_media_url(const struct JsExecResult *result,
-                                bool prefer_video,
-                                char *out_url, size_t out_url_len,
-                                char *out_mime, size_t out_mime_len);
 
-/* Extract media URL directly from ytInitialPlayerResponse embedded in the
- * watch-page HTML. This is lightweight watch-page emulation: it evaluates the
- * single inline data script and reads streamingData, avoiding the heavy
- * external player bundle that can hang/crash the emulator.
- */
+
+/* ytInitialPlayerResponse media extraction is disabled. Kept as a no-op stub. */
 bool html_extract_yt_player_response_media(const char *html, bool prefer_video,
                                            char *out_url, size_t out_url_len,
                                            char *out_mime, size_t out_mime_len,
