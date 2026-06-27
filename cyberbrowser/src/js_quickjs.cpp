@@ -371,11 +371,16 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
             }
         }
         if (send_credentials && !has_cookie) {
-            const char *cookies = platform_http_get_cookies();
+            const char *cookies = platform_http_get_cookies_for_request(url);
             if (cookies && cookies[0]) {
                 snprintf(cookie_header, sizeof(cookie_header), "Cookie: %s", cookies);
                 if (header_count < 24) headers[header_count++] = cookie_header;
+                has_cookie = true;
             }
+        }
+        if (!send_credentials && !has_cookie) {
+            if (header_count < 24) headers[header_count++] = "Cookie:";
+            has_cookie = true;
         }
 
         if (!same_origin) {
@@ -1821,11 +1826,17 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
             }
         }
         if (send_credentials && !has_cookie) {
-            const char *cookies = platform_http_get_cookies();
+            const char *cookies = platform_http_get_cookies_for_request(url);
             if (cookies && cookies[0]) {
                 snprintf(cookie_header, sizeof(cookie_header), "Cookie: %s", cookies);
                 if (header_count < 24) headers[header_count++] = cookie_header;
+                has_cookie = true;
             }
+        }
+        if (!send_credentials && !has_cookie) {
+            /* Empty Cookie header tells the HTTP layer not to inject cookies. */
+            if (header_count < 24) headers[header_count++] = "Cookie:";
+            has_cookie = true;
         }
 
         // CORS preflight for cross-origin non-simple requests.

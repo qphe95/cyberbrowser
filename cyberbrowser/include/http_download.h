@@ -59,9 +59,11 @@ bool http_download_to_file(const char *url, const char *filePath,
                            char *err, size_t errLen);
 
 /* Cookie management for media downloads */
-void http_set_cookies(const char *cookies);
-const char* http_get_cookies(void);
-void http_clear_cookies(void);
+void http_cookie_set_for_request(const char *url, const char *set_cookie_header);
+void http_cookie_set_for_document(const char *url, const char *cookie_line);
+const char* http_cookie_get_for_request(const char *url);
+const char* http_cookie_get_for_document(const char *url);
+void http_cookie_clear(void);
 
 /* Android-specific functions - only available on Android */
 #ifdef BE_PLATFORM_ANDROID

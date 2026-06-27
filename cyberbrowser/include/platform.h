@@ -106,13 +106,16 @@ bool platform_http_request(const char *url,
 /* Free HTTP buffer */
 void platform_http_free_buffer(PlatformHttpBuffer *buffer);
 
-/* Set global cookies for HTTP requests */
-void platform_http_set_cookies(const char *cookies);
+/* Set a cookie from document.cookie (domain/path scoped to the document URL). */
+void platform_http_set_cookie_for_document(const char *document_url, const char *cookie_line);
 
-/* Get current global cookies */
-const char* platform_http_get_cookies(void);
+/* Get Cookie header value for an HTTP request to the given URL. */
+const char* platform_http_get_cookies_for_request(const char *request_url);
 
-/* Clear global cookies */
+/* Get document.cookie string (non-HttpOnly cookies visible to scripts). */
+const char* platform_http_get_cookies_for_document(const char *document_url);
+
+/* Clear all cookies. */
 void platform_http_clear_cookies(void);
 
 /* ============================================================================

@@ -1829,10 +1829,31 @@ GCValue js_document_set_adopted_style_sheets(JSContextHandle ctx, GCValue this_v
     return JS_UNDEFINED;
 }
 
-// Document.prototype.cookie getter/setter backed by the platform cookie jar.
+static void js_get_document_url(JSContextHandle ctx, char *out, size_t out_len) {
+    out[0] = '\0';
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue location = JS_GetPropertyStr(ctx, global, "location");
+    if (JS_IsObject(location)) {
+        GCValue href = JS_GetPropertyStr(ctx, location, "href");
+        const char *s = JS_IsString(href) ? JS_ToCString(ctx, href) : NULL;
+        if (s) {
+            strncpy(out, s, out_len - 1);
+            out[out_len - 1] = '\0';
+            JS_FreeCString(ctx, s);
+        }
+    }
+    if (out[0] == '\0') {
+        strncpy(out, "https://localhost/", out_len - 1);
+        out[out_len - 1] = '\0';
+    }
+}
+
+// Document.prototype.cookie getter/setter backed by the domain/path-scoped cookie jar.
 GCValue js_document_cookie_getter(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc; (void)argv;
-    const char *cookies = platform_http_get_cookies();
+    char doc_url[2048];
+    js_get_document_url(ctx, doc_url, sizeof(doc_url));
+    const char *cookies = platform_http_get_cookies_for_document(doc_url);
     return JS_NewString(ctx, cookies ? cookies : "");
 }
 
@@ -1844,61 +1865,9 @@ GCValue js_document_cookie_setter(JSContextHandle ctx, GCValue this_val, int arg
         if (cookie_line) JS_FreeCString(ctx, cookie_line);
         return JS_UNDEFINED;
     }
-
-    // Extract the cookie name (characters before '=' or ';', ignoring spaces).
-    char name[256] = {0};
-    const char *p = cookie_line;
-    while (*p && *p != '=' && *p != ';' && *p != ' ' && (size_t)(p - cookie_line) < sizeof(name) - 1) {
-        name[p - cookie_line] = *p;
-        p++;
-    }
-    name[sizeof(name) - 1] = '\0';
-    if (!name[0]) {
-        JS_FreeCString(ctx, cookie_line);
-        return JS_UNDEFINED;
-    }
-    size_t name_len = strlen(name);
-
-    const char *jar = platform_http_get_cookies();
-    char new_jar[4096] = {0};
-    size_t new_len = 0;
-
-    if (jar && jar[0]) {
-        const char *start = jar;
-        while (*start) {
-            const char *end = strstr(start, "; ");
-            size_t entry_len = end ? (size_t)(end - start) : strlen(start);
-            const char *eq = (const char *)memchr(start, '=', entry_len);
-            bool replace = false;
-            if (eq) {
-                size_t entry_name_len = eq - start;
-                if (entry_name_len == name_len && strncasecmp(start, name, entry_name_len) == 0) {
-                    replace = true;
-                }
-            }
-            if (!replace) {
-                if (new_len > 0) {
-                    strncat(new_jar, "; ", sizeof(new_jar) - new_len - 1);
-                    new_len += 2;
-                }
-                strncat(new_jar, start, entry_len);
-                new_len += entry_len;
-            }
-            if (!end) break;
-            start = end + 2;
-        }
-    }
-
-    // Append the new name=value portion (up to the first attribute semicolon).
-    const char *val_end = strchr(cookie_line, ';');
-    size_t nv_len = val_end ? (size_t)(val_end - cookie_line) : strlen(cookie_line);
-    if (new_len > 0) {
-        strncat(new_jar, "; ", sizeof(new_jar) - new_len - 1);
-        new_len += 2;
-    }
-    strncat(new_jar, cookie_line, nv_len);
-
-    platform_http_set_cookies(new_jar);
+    char doc_url[2048];
+    js_get_document_url(ctx, doc_url, sizeof(doc_url));
+    platform_http_set_cookie_for_document(doc_url, cookie_line);
     JS_FreeCString(ctx, cookie_line);
     return JS_UNDEFINED;
 }

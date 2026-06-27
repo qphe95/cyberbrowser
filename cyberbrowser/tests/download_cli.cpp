@@ -15,6 +15,7 @@
 #endif
 
 #include "platform.h"
+#include "win32_compat.h"
 #include "url_analyzer.h"
 #include "http_download.h"
 #include "js_quickjs.h"
@@ -106,10 +107,38 @@ static void print_progress(DownloadState *state) {
     }
 }
 
+static void derive_mime_from_extension(const char *url, char *mime, size_t mime_len) {
+    const char *dot = strrchr(url, '.');
+    if (!dot) {
+        strncpy(mime, "application/octet-stream", mime_len - 1);
+        mime[mime_len - 1] = '\0';
+        return;
+    }
+    if (strcasecmp(dot, ".mp4") == 0 || strcasecmp(dot, ".m4a") == 0) {
+        strncpy(mime, "audio/mp4", mime_len - 1);
+    } else if (strcasecmp(dot, ".webm") == 0) {
+        strncpy(mime, "audio/webm", mime_len - 1);
+    } else if (strcasecmp(dot, ".mp3") == 0) {
+        strncpy(mime, "audio/mpeg", mime_len - 1);
+    } else {
+        strncpy(mime, "application/octet-stream", mime_len - 1);
+    }
+    mime[mime_len - 1] = '\0';
+}
+
+static bool has_media_extension(const char *url) {
+    const char *dot = strrchr(url, '.');
+    if (!dot) return false;
+    return strcasecmp(dot, ".mp4") == 0 ||
+           strcasecmp(dot, ".m4a") == 0 ||
+           strcasecmp(dot, ".webm") == 0 ||
+           strcasecmp(dot, ".mp3") == 0;
+}
+
 static void extract_filename(const char *url, char *out, size_t out_len) {
     MediaUrl media = {0};
     char err[512] = {0};
-    if (url_analyze(url, &media, err, sizeof(err))) {
+    if (url_analyze(url, &media, err, sizeof(err)) || has_media_extension(url)) {
         if (media.title[0]) {
             size_t title_len = strlen(media.title);
             if (title_len > 0) {
@@ -171,10 +200,17 @@ int main(int argc, char *argv[]) {
     MediaUrl media = {0};
     printf("Calling url_analyze...\n");
     if (!url_analyze(youtube_url, &media, err, sizeof(err))) {
-        fprintf(stderr, "URL analysis failed: %s\n", err);
-        cleanup_engine();
-        pause_if_double_clicked();
-        return 1;
+        if (has_media_extension(youtube_url)) {
+            strncpy(media.url, youtube_url, sizeof(media.url) - 1);
+            media.url[sizeof(media.url) - 1] = '\0';
+            derive_mime_from_extension(youtube_url, media.mime, sizeof(media.mime));
+            printf("URL analysis skipped; using direct media URL: %s\n", media.url);
+        } else {
+            fprintf(stderr, "URL analysis failed: %s\n", err);
+            cleanup_engine();
+            pause_if_double_clicked();
+            return 1;
+        }
     }
     printf("Media URL: %s\n", media.url);
 

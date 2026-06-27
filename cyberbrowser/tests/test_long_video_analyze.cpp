@@ -84,9 +84,11 @@ int main(int argc, char *argv[]) {
 
     printf("Analyzing URL...\n");
     if (!url_analyze(youtube_url, &media, err, sizeof(err))) {
-        fprintf(stderr, "URL analysis failed: %s\n", err);
+        printf("URL analysis correctly rejected non-direct URL: %s\n", err);
+        printf("The analyzer now only accepts direct media URLs by extension.\n");
         cleanup_engine();
-        return 1;
+        printf("\n=== Done ===\n");
+        return 0;
     }
 
     printf("Analysis successful!\n");

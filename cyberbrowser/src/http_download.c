@@ -16,6 +16,7 @@
 #endif
 #include <time.h>
 #include <pthread.h>
+#include <stdbool.h>
 #include "platform.h"
 
 
@@ -157,24 +158,322 @@ static bool parse_url(const char *url, char *host, size_t host_len,
     return true;
 }
 
-/* Global context to pass cookies between requests */
-static char g_cookie_jar[4096] = {0};
+/* ============================================================================
+ * Domain/path-scoped cookie jar
+ * ============================================================================ */
 
-void http_set_cookies(const char *cookies) {
-    if (cookies) {
-        strncpy(g_cookie_jar, cookies, sizeof(g_cookie_jar) - 1);
-        g_cookie_jar[sizeof(g_cookie_jar) - 1] = '\0';
-        LOGI("Set cookies: %.100s...", g_cookie_jar);
+typedef struct HttpCookie {
+    char name[256];
+    char value[4096];
+    char domain[256];
+    char path[1024];
+    time_t expires;   /* 0 = session cookie */
+    bool http_only;
+    bool secure;
+    bool host_only;   /* true if no Domain attribute was given */
+    struct HttpCookie *next;
+} HttpCookie;
+
+static HttpCookie *g_cookie_jar = NULL;
+static char g_cookie_buffer[8192];
+
+static void cookie_trim(char *s) {
+    char *start = s;
+    while (*start == ' ' || *start == '\t') start++;
+    if (start != s) memmove(s, start, strlen(start) + 1);
+    size_t len = strlen(s);
+    while (len > 0 && (s[len - 1] == ' ' || s[len - 1] == '\t')) {
+        s[len - 1] = '\0';
+        len--;
     }
 }
 
-const char* http_get_cookies(void) {
-    return g_cookie_jar[0] ? g_cookie_jar : NULL;
+static bool cookie_domain_match(const char *host, const char *domain, bool host_only) {
+    if (host_only) return strcasecmp(host, domain) == 0;
+    if (strcasecmp(host, domain) == 0) return true;
+    size_t dl = strlen(domain);
+    size_t hl = strlen(host);
+    if (hl < dl) return false;
+    if (strcasecmp(host + hl - dl, domain) != 0) return false;
+    if (hl > dl && host[hl - dl - 1] != '.') return false;
+    return true;
 }
 
-void http_clear_cookies(void) {
-    g_cookie_jar[0] = '\0';
+static bool cookie_path_match(const char *request_path, const char *cookie_path) {
+    size_t pl = strlen(cookie_path);
+    if (strncmp(request_path, cookie_path, pl) != 0) return false;
+    if (cookie_path[pl - 1] == '/') return true;
+    char next = request_path[pl];
+    return next == '\0' || next == '/';
 }
+
+static void cookie_default_path(const char *request_path, char *out, size_t out_len) {
+    const char *last_slash = strrchr(request_path, '/');
+    if (!last_slash) {
+        strncpy(out, "/", out_len - 1);
+    } else {
+        size_t len = (size_t)(last_slash - request_path) + 1;
+        if (len >= out_len) len = out_len - 1;
+        memcpy(out, request_path, len);
+        out[len] = '\0';
+    }
+    out[out_len - 1] = '\0';
+}
+
+static time_t cookie_parse_max_age(const char *val) {
+    char *end = NULL;
+    long ma = strtol(val, &end, 10);
+    if (end == val) return 0;
+    if (ma <= 0) return 1; /* in the past => delete */
+    return time(NULL) + (time_t)ma;
+}
+
+static void cookie_remove_expired(void) {
+    time_t now = time(NULL);
+    HttpCookie **pp = &g_cookie_jar;
+    while (*pp) {
+        HttpCookie *c = *pp;
+        if (c->expires > 0 && c->expires <= now) {
+            *pp = c->next;
+            free(c);
+        } else {
+            pp = &c->next;
+        }
+    }
+}
+
+static void cookie_set_internal(const char *url, const char *header, bool from_document) {
+    char host[256] = {0}, path[2048] = {0}, port[8] = {0};
+    if (!parse_url(url, host, sizeof(host), path, sizeof(path), port, sizeof(port))) return;
+
+    char header_copy[4096];
+    strncpy(header_copy, header, sizeof(header_copy) - 1);
+    header_copy[sizeof(header_copy) - 1] = '\0';
+    char *p = header_copy;
+    cookie_trim(p);
+
+    char *first_semi = strchr(p, ';');
+    char nv[4096] = {0};
+    if (first_semi) {
+        size_t len = (size_t)(first_semi - p);
+        if (len >= sizeof(nv)) len = sizeof(nv) - 1;
+        memcpy(nv, p, len);
+        nv[len] = '\0';
+    } else {
+        strncpy(nv, p, sizeof(nv) - 1);
+    }
+    cookie_trim(nv);
+
+    char name[256] = {0}, value[4096] = {0};
+    char *eq = strchr(nv, '=');
+    if (eq) {
+        *eq = '\0';
+        strncpy(name, nv, sizeof(name) - 1);
+        strncpy(value, eq + 1, sizeof(value) - 1);
+    } else {
+        strncpy(name, nv, sizeof(name) - 1);
+    }
+    if (!name[0]) return;
+
+    char domain[256] = {0};
+    char path_attr[1024] = {0};
+    time_t expires = 0;
+    bool secure = false, http_only = false;
+    bool has_domain = false, has_path = false;
+
+    char *attr_start = first_semi ? first_semi + 1 : NULL;
+    while (attr_start && *attr_start) {
+        char *next_semi = strchr(attr_start, ';');
+        if (next_semi) *next_semi = '\0';
+        cookie_trim(attr_start);
+        char *aeq = strchr(attr_start, '=');
+        char attr_name[128] = {0}, attr_val[1024] = {0};
+        if (aeq) {
+            *aeq = '\0';
+            strncpy(attr_name, attr_start, sizeof(attr_name) - 1);
+            strncpy(attr_val, aeq + 1, sizeof(attr_val) - 1);
+            cookie_trim(attr_val);
+        } else {
+            strncpy(attr_name, attr_start, sizeof(attr_name) - 1);
+        }
+        cookie_trim(attr_name);
+
+        if (strcasecmp(attr_name, "Domain") == 0 && attr_val[0]) {
+            has_domain = true;
+            if (attr_val[0] == '.') memmove(attr_val, attr_val + 1, strlen(attr_val));
+            strncpy(domain, attr_val, sizeof(domain) - 1);
+        } else if (strcasecmp(attr_name, "Path") == 0 && attr_val[0]) {
+            has_path = true;
+            strncpy(path_attr, attr_val, sizeof(path_attr) - 1);
+        } else if (strcasecmp(attr_name, "Max-Age") == 0) {
+            expires = cookie_parse_max_age(attr_val);
+        } else if (strcasecmp(attr_name, "Expires") == 0) {
+            /* Expires parsing omitted; Max-Age is preferred. */
+        } else if (strcasecmp(attr_name, "Secure") == 0) {
+            secure = true;
+        } else if (strcasecmp(attr_name, "HttpOnly") == 0) {
+            if (!from_document) http_only = true;
+        }
+        if (!next_semi) break;
+        attr_start = next_semi + 1;
+    }
+
+    char cookie_domain[256] = {0};
+    bool host_only_flag;
+    if (has_domain) {
+        strncpy(cookie_domain, domain, sizeof(cookie_domain) - 1);
+        cookie_domain[sizeof(cookie_domain) - 1] = '\0';
+        host_only_flag = false;
+        if (from_document) {
+            /* document.cookie may only set a domain that is a suffix of the host. */
+            if (!cookie_domain_match(host, cookie_domain, false)) return;
+        }
+    } else {
+        strncpy(cookie_domain, host, sizeof(cookie_domain) - 1);
+        host_only_flag = true;
+    }
+
+    char cookie_path[1024] = {0};
+    if (has_path) {
+        strncpy(cookie_path, path_attr, sizeof(cookie_path) - 1);
+        cookie_path[sizeof(cookie_path) - 1] = '\0';
+    } else {
+        cookie_default_path(path, cookie_path, sizeof(cookie_path));
+    }
+
+    cookie_remove_expired();
+
+    /* If the cookie is already expired, delete it instead of storing. */
+    if (expires > 0 && expires <= time(NULL)) {
+        HttpCookie **pp = &g_cookie_jar;
+        while (*pp) {
+            HttpCookie *c = *pp;
+            if (strcasecmp(c->name, name) == 0 &&
+                strcasecmp(c->domain, cookie_domain) == 0 &&
+                strcmp(c->path, cookie_path) == 0) {
+                *pp = c->next;
+                free(c);
+                return;
+            }
+            pp = &c->next;
+        }
+        return;
+    }
+
+    /* Update existing cookie if same name/domain/path. */
+    HttpCookie *c = g_cookie_jar;
+    while (c) {
+        if (strcasecmp(c->name, name) == 0 &&
+            strcasecmp(c->domain, cookie_domain) == 0 &&
+            strcmp(c->path, cookie_path) == 0) {
+            strncpy(c->value, value, sizeof(c->value) - 1);
+            c->expires = expires;
+            c->secure = secure;
+            c->http_only = http_only;
+            c->host_only = host_only_flag;
+            return;
+        }
+        c = c->next;
+    }
+
+    HttpCookie *newc = (HttpCookie*)calloc(1, sizeof(HttpCookie));
+    if (!newc) return;
+    strncpy(newc->name, name, sizeof(newc->name) - 1);
+    strncpy(newc->value, value, sizeof(newc->value) - 1);
+    strncpy(newc->domain, cookie_domain, sizeof(newc->domain) - 1);
+    strncpy(newc->path, cookie_path, sizeof(newc->path) - 1);
+    newc->expires = expires;
+    newc->secure = secure;
+    newc->http_only = http_only;
+    newc->host_only = host_only_flag;
+    newc->next = g_cookie_jar;
+    g_cookie_jar = newc;
+}
+
+void http_cookie_set_for_request(const char *url, const char *set_cookie_header) {
+    if (!url || !set_cookie_header) return;
+    cookie_set_internal(url, set_cookie_header, false);
+}
+
+void http_cookie_set_for_document(const char *url, const char *cookie_line) {
+    if (!url || !cookie_line) return;
+    cookie_set_internal(url, cookie_line, true);
+}
+
+static const char* cookie_build_string(const char *url, bool for_http) {
+    char host[256] = {0}, path[2048] = {0}, port[8] = {0};
+    if (!parse_url(url, host, sizeof(host), path, sizeof(path), port, sizeof(port))) return NULL;
+    bool is_https = (strncasecmp(url, "https://", 8) == 0);
+    time_t now = time(NULL);
+
+    cookie_remove_expired();
+
+    HttpCookie *matches[256];
+    int count = 0;
+    for (HttpCookie *c = g_cookie_jar; c && count < 256; c = c->next) {
+        if (c->expires > 0 && c->expires <= now) continue;
+        if (c->secure && !is_https) continue;
+        if (!for_http && c->http_only) continue;
+        if (!cookie_domain_match(host, c->domain, c->host_only)) continue;
+        if (!cookie_path_match(path, c->path)) continue;
+        matches[count++] = c;
+    }
+
+    /* Sort by path length descending (longest first). */
+    for (int i = 0; i < count; i++) {
+        for (int j = i + 1; j < count; j++) {
+            if (strlen(matches[j]->path) > strlen(matches[i]->path)) {
+                HttpCookie *tmp = matches[i];
+                matches[i] = matches[j];
+                matches[j] = tmp;
+            }
+        }
+    }
+
+    g_cookie_buffer[0] = '\0';
+    size_t len = 0;
+    for (int i = 0; i < count; i++) {
+        if (len > 0) {
+            strncat(g_cookie_buffer, "; ", sizeof(g_cookie_buffer) - len - 1);
+            len += 2;
+        }
+        size_t nl = strlen(matches[i]->name);
+        size_t vl = strlen(matches[i]->value);
+        if (len + nl + 1 + vl >= sizeof(g_cookie_buffer)) break;
+        if (len > 0) {
+            /* already added separator above */
+        }
+        strncat(g_cookie_buffer, matches[i]->name, sizeof(g_cookie_buffer) - len - 1);
+        len += nl;
+        strncat(g_cookie_buffer, "=", sizeof(g_cookie_buffer) - len - 1);
+        len += 1;
+        strncat(g_cookie_buffer, matches[i]->value, sizeof(g_cookie_buffer) - len - 1);
+        len += vl;
+    }
+    return g_cookie_buffer[0] ? g_cookie_buffer : NULL;
+}
+
+const char* http_cookie_get_for_request(const char *url) {
+    if (!url) return NULL;
+    return cookie_build_string(url, true);
+}
+
+const char* http_cookie_get_for_document(const char *url) {
+    if (!url) return NULL;
+    return cookie_build_string(url, false);
+}
+
+void http_cookie_clear(void) {
+    HttpCookie *c = g_cookie_jar;
+    while (c) {
+        HttpCookie *next = c->next;
+        free(c);
+        c = next;
+    }
+    g_cookie_jar = NULL;
+    g_cookie_buffer[0] = '\0';
+}
+
 
 static size_t parse_content_length_from_headers(const char *data, size_t data_len) {
     const char *p = data;
@@ -272,12 +571,34 @@ static bool http_request_with_method_internal(const char *url, const char *metho
                            "Content-Length: %zu\r\n", postDataLen);
     }
     
-    /* Add cookies if provided */
-    if (cookies && cookies[0]) {
-        req_len += snprintf(request + req_len, sizeof(request) - req_len,
-                           "Cookie: %s\r\n", cookies);
-        LOGI("Adding cookies to request for %s", host);
+    /* Add cookies scoped to this request URL.
+       - OPTIONS preflight requests must not carry credentials.
+       - If the caller supplied a non-empty Cookie header, use it as-is.
+       - If the caller supplied an empty Cookie header, suppress cookie sending entirely. */
+    const char *custom_cookie_value = NULL;
+    bool custom_cookie_empty = false;
+    for (size_t i = 0; i < custom_header_count; i++) {
+        if (custom_headers[i] && strncasecmp(custom_headers[i], "Cookie:", 7) == 0) {
+            const char *v = custom_headers[i] + 7;
+            while (*v == ' ' || *v == '\t') v++;
+            if (*v) {
+                custom_cookie_value = v;
+            } else {
+                custom_cookie_empty = true;
+            }
+            break;
+        }
     }
+    bool is_options_preflight = (strcasecmp(method, "OPTIONS") == 0);
+    if (!custom_cookie_value && !custom_cookie_empty && !is_options_preflight) {
+        const char *request_cookies = http_cookie_get_for_request(url);
+        if (request_cookies && request_cookies[0]) {
+            req_len += snprintf(request + req_len, sizeof(request) - req_len,
+                               "Cookie: %s\r\n", request_cookies);
+            LOGI("Adding cookies to request for %s", host);
+        }
+    }
+    (void)cookies;
     
     /* Add final CRLF */
     req_len += snprintf(request + req_len, sizeof(request) - req_len, "\r\n");
@@ -540,76 +861,23 @@ static bool http_request_with_method_internal(const char *url, const char *metho
         LOGI("Sending cookies: %.200s...", cookies);
     }
     
-    /* Extract cookies from response headers */
+    /* Extract cookies from response headers and store them with domain/path scope. */
     char *set_cookie = strstr(outBuffer->data, "Set-Cookie:");
     while (set_cookie) {
         set_cookie += 11;
         while (*set_cookie == ' ') set_cookie++;
-        
+
         char *line_end = strchr(set_cookie, '\r');
         if (!line_end) line_end = strchr(set_cookie, '\n');
         if (!line_end) line_end = set_cookie + strlen(set_cookie);
-        
-        char *first_semi = strchr(set_cookie, ';');
-        if (first_semi && first_semi < line_end) {
-            size_t nv_len = (size_t)(first_semi - set_cookie);
-            if (nv_len > 0 && nv_len < 2000) {
-                char name_value[2048];
-                memcpy(name_value, set_cookie, nv_len);
-                name_value[nv_len] = '\0';
-                
-                char *eq = strchr(name_value, '=');
-                if (eq && eq > name_value) {
-                    *eq = '\0';
-                    char *cookie_name = name_value;
-                    char *cookie_value = eq + 1;
-                    
-                    if (strcmp(cookie_name, "Domain") != 0 && 
-                        strcmp(cookie_name, "Path") != 0 &&
-                        strcmp(cookie_name, "Expires") != 0 &&
-                        strcmp(cookie_name, "Max-Age") != 0 &&
-                        strcmp(cookie_name, "HttpOnly") != 0 &&
-                        strcmp(cookie_name, "Secure") != 0 &&
-                        strcmp(cookie_name, "SameSite") != 0) {
-                        
-                        bool duplicate = false;
-                        char *search = g_cookie_jar;
-                        while ((search = strstr(search, cookie_name)) != NULL) {
-                            if (search == g_cookie_jar || search[-1] == ' ' && search[-2] == ';') {
-                                if (search[strlen(cookie_name)] == '=') {
-                                    duplicate = true;
-                                    break;
-                                }
-                            }
-                            search++;
-                        }
-                        
-                        if (!duplicate) {
-                            size_t current_len = strlen(g_cookie_jar);
-                            size_t remaining = sizeof(g_cookie_jar) - current_len - 1;
-                            size_t needed = strlen(cookie_name) + strlen(cookie_value) + 3;
-                            if (g_cookie_jar[0]) {
-                                needed += 2;
-                            }
-                            
-                            if (remaining >= needed) {
-                                if (g_cookie_jar[0]) {
-                                    strncat(g_cookie_jar, "; ", remaining);
-                                    remaining -= 2;
-                                }
-                                strncat(g_cookie_jar, cookie_name, remaining);
-                                remaining -= strlen(cookie_name);
-                                strncat(g_cookie_jar, "=", remaining);
-                                remaining -= 1;
-                                strncat(g_cookie_jar, cookie_value, remaining);
-                                LOGI("Captured cookie: %s=...", cookie_name);
-                            } else {
-                                LOGE("Cookie buffer full, skipping: %s", cookie_name);
-                            }
-                        }
-                    }
-                }
-            }
+
+        size_t val_len = (size_t)(line_end - set_cookie);
+        if (val_len > 0 && val_len < sizeof(val)) {
+            char val[4096];
+            memcpy(val, set_cookie, val_len);
+            val[val_len] = '\0';
+            http_cookie_set_for_request(url, val);
+            LOGI("Captured cookie from %s", host);
         }
         set_cookie = strstr(line_end, "Set-Cookie:");
     }
@@ -793,7 +1061,7 @@ static bool http_request(const char *url, HttpBuffer *outBuffer,
                          char *err, size_t errLen,
                          DownloadState *state,
                          FILE *bodyStream) {
-    return http_request_with_cookies(url, outBuffer, err, errLen, g_cookie_jar, state, bodyStream);
+    return http_request_with_cookies(url, outBuffer, err, errLen, NULL, state, bodyStream);
 }
 
 bool http_get_to_memory(const char *url, HttpBuffer *outBuffer,
@@ -804,7 +1072,7 @@ bool http_get_to_memory(const char *url, HttpBuffer *outBuffer,
 bool http_get_to_memory_with_headers(const char *url, const char **headers, size_t headerCount,
                                      HttpBuffer *outBuffer, char *err, size_t errLen) {
     return http_request_with_method(url, "GET", NULL, 0, headers, headerCount,
-                                    outBuffer, NULL, err, errLen, g_cookie_jar, NULL, NULL);
+                                    outBuffer, NULL, err, errLen, NULL, NULL, NULL);
 }
 
 bool http_post_to_memory(const char *url, const char *postData, size_t postDataLen,
@@ -863,7 +1131,7 @@ static bool http_get_to_memory_resumable(const char *url, HttpBuffer *outBuffer,
         LOGE("[RESUME] Chunk %d: Range bytes=%zu-", chunks, downloaded);
         bool req_success = http_request_with_method_internal(url, "GET", NULL, 0,
                                                               headers, 1, &chunk_buffer, &status,
-                                                              err, errLen, g_cookie_jar,
+                                                              err, errLen, NULL,
                                                               NULL, NULL, &chunk_total_size);
         LOGE("[RESUME] Chunk %d: req_success=%d status=%d chunk_size=%zu total=%zu", chunks, req_success, status, chunk_buffer.size, chunk_total_size);
 
@@ -1086,7 +1354,7 @@ static bool http_download_parallel_state(const char *url, const char *filePath,
         const char *headers[] = { "Range: bytes=0-0" };
         if (!http_request_with_method_internal(url, "GET", NULL, 0,
                                                 headers, 1, &buffer, &status,
-                                                err, errLen, g_cookie_jar,
+                                                err, errLen, NULL,
                                                 NULL, NULL, &total_size)) {
             http_free_buffer(&buffer);
             snprintf(err, errLen, "Failed to get file size");
@@ -1145,7 +1413,7 @@ static bool http_download_parallel_state(const char *url, const char *filePath,
     ThreadArgs thread_args[MAX_PARALLEL_CONNECTIONS];
     for (int i = 0; i < num_chunks; i++) {
         thread_args[i].url = url;
-        thread_args[i].cookies = g_cookie_jar;
+        thread_args[i].cookies = NULL;
         thread_args[i].chunk = &chunks[i];
         thread_args[i].shared = &shared;
         if (pthread_create(&threads[i], NULL, parallel_download_thread, &thread_args[i]) != 0) {
@@ -1173,7 +1441,7 @@ static bool http_download_parallel_state(const char *url, const char *filePath,
             for (int i = 0; i < num_chunks; i++) {
                 if (!chunks[i].success) {
                     LOGI("Retrying chunk %d (attempt %d)", i, retry + 1);
-                    ThreadArgs args = { .url = url, .cookies = g_cookie_jar,
+                    ThreadArgs args = { .url = url, .cookies = NULL,
                                         .chunk = &chunks[i], .shared = &shared };
                     parallel_download_thread(&args);
                     if (!chunks[i].success) any_failed = true;

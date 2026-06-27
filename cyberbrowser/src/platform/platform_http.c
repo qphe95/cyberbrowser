@@ -124,14 +124,18 @@ void platform_http_free_buffer(PlatformHttpBuffer *buffer) {
     }
 }
 
-void platform_http_set_cookies(const char *cookies) {
-    http_set_cookies(cookies);
+void platform_http_set_cookie_for_document(const char *document_url, const char *cookie_line) {
+    http_cookie_set_for_document(document_url, cookie_line);
 }
 
-const char* platform_http_get_cookies(void) {
-    return http_get_cookies();
+const char* platform_http_get_cookies_for_request(const char *request_url) {
+    return http_cookie_get_for_request(request_url);
+}
+
+const char* platform_http_get_cookies_for_document(const char *document_url) {
+    return http_cookie_get_for_document(document_url);
 }
 
 void platform_http_clear_cookies(void) {
-    http_clear_cookies();
+    http_cookie_clear();
 }
