@@ -13,6 +13,12 @@
 extern "C" {
 #endif
 
+/* Compatibility shim: this QuickJS fork does not expose JS_FreeCString, but
+ * several browser API files use it after JS_ToCString.  Freeing the raw C
+ * string properly would require internal string-handle bookkeeping, so we
+ * leave it as a no-op for now; the strings are short-lived. */
+static inline void JS_FreeCString(JSContextHandle ctx, const char *s) { (void)ctx; (void)s; }
+
 /* Logging macros shared by all API files */
 #define LOG_TAG "browser_api_impl"
 #define LOG_ERROR(...) platform_log(LOG_LEVEL_ERROR, LOG_TAG, __VA_ARGS__)

@@ -61,6 +61,16 @@ static bool is_http_url(const char *url);
 static int collect_user_headers(JSContextHandle ctx, GCValue headers_obj,
                                 char header_bufs[][512], const char **headers_out,
                                 int max_count);
+static bool js_get_document_origin(JSContextHandle ctx, char *out, size_t out_len);
+static bool parse_url_origin(const char *url, char *out, size_t out_len);
+static bool is_same_origin(const char *a, const char *b);
+static bool cors_requires_preflight(const char *method, const char **headers, int header_count);
+static bool cors_perform_preflight(JSContextHandle ctx, const char *url, const char *method,
+                                   const char **headers, int header_count,
+                                   const char *origin, bool credentials,
+                                   char *err, size_t err_len);
+static bool cors_validate_response_headers(const char *headers, const char *origin,
+                                           bool credentials, char *err, size_t err_len);
 
 // CSSStyleDeclaration.removeProperty stub
 GCValue js_style_remove_property(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
@@ -1953,25 +1963,6 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
 // External reference to DOM node class ID
 extern JSClassID js_dom_node_class_id;
 
-// Stub animate function for createElement
-static GCValue js_element_animate(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)ctx; (void)this_val; (void)argc; (void)argv;
-    // Return a stub Animation object
-    // IMPORTANT: oncancel is set to null (not undefined) so that feature detection
-    // in Web Animations polyfill skips the polyfill code path that causes errors
-    GCValue anim = JS_NewObject(ctx);
-    if (JS_IsException(anim)) return anim;
-    JS_SetPropertyStr(ctx, anim, "oncancel", JS_NULL);
-    JS_SetPropertyStr(ctx, anim, "cancel", JS_NewCFunction(ctx, js_element_animate, "cancel", 0));
-    JS_SetPropertyStr(ctx, anim, "play", JS_NewCFunction(ctx, js_element_animate, "play", 0));
-    JS_SetPropertyStr(ctx, anim, "pause", JS_NewCFunction(ctx, js_element_animate, "pause", 0));
-    JS_SetPropertyStr(ctx, anim, "finish", JS_NewCFunction(ctx, js_element_animate, "finish", 0));
-    JS_SetPropertyStr(ctx, anim, "currentTime", JS_NewFloat64(ctx, 0));
-    JS_SetPropertyStr(ctx, anim, "playbackRate", JS_NewFloat64(ctx, 1));
-    JS_SetPropertyStr(ctx, anim, "playState", JS_NewString(ctx, "idle"));
-    return anim;
-}
-
 // Stub for CanvasRenderingContext2D.fillRect
 static GCValue js_canvas_fill_rect(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     // No-op for color parsing
@@ -2228,14 +2219,6 @@ static GCValue js_document_get_document_element(JSContextHandle ctx, GCValue thi
     return html;
 }
 
-static GCValue js_element_set_attribute(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    return JS_UNDEFINED;
-}
-
-static GCValue js_element_get_attribute(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    return JS_NULL;
-}
-
 static GCValue js_element_add_event_listener(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     // Store event handlers on the element for dispatch
     const char *event = JS_ToCString(ctx, argv[0]);
@@ -2251,10 +2234,6 @@ static GCValue js_element_remove_event_listener(JSContextHandle ctx, GCValue thi
     return JS_UNDEFINED;
 }
 
-static GCValue js_dummy_function(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    return JS_UNDEFINED;
-}
-
 // Native logging function for JavaScript debugging
 // Logs to Android logcat so we can see JS-side decryption results
 static GCValue js_bgmdwnldr_log(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
@@ -2266,28 +2245,6 @@ static GCValue js_bgmdwnldr_log(JSContextHandle ctx, GCValue this_val, int argc,
         if (str) {
             platform_log(LOG_LEVEL_INFO, "js_quickjs", "[JS] %s", str);
         }
-    }
-    return JS_UNDEFINED;
-}
-
-static GCValue js_console_log(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)this_val;
-    char msg[4096] = "";
-    size_t off = 0;
-    for (int i = 0; i < argc; i++) {
-        const char *str = JS_ToCString(ctx, argv[i]);
-        if (str) {
-            size_t len = strlen(str);
-            if (off + len + 2 < sizeof(msg)) {
-                if (off > 0) msg[off++] = ' ';
-                memcpy(msg + off, str, len);
-                off += len;
-                msg[off] = '\0';
-            }
-        }
-    }
-    if (off > 0) {
-        platform_log(LOG_LEVEL_INFO, "console", "%s", msg);
     }
     return JS_UNDEFINED;
 }

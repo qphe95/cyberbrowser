@@ -2823,7 +2823,7 @@ bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
     ctx->js_ctx = saved_js_ctx;
     ctx->viewport_width = viewport_width;
     ctx->viewport_height = viewport_height;
-    const char *default_base = "https://localhost/";
+    const char *default_base = "https://www.youtube.com/";
     strncpy(ctx->base_url, default_base, sizeof(ctx->base_url) - 1);
     ctx->base_url[sizeof(ctx->base_url) - 1] = '\0';
     bool ok = css_layout_document(ctx, sheet);

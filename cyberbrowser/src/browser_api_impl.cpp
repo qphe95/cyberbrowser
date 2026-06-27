@@ -4358,7 +4358,8 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // Standards-compliant fetch/scheduler polyfills that layer Headers, Request,
     // Response, Origin/Referer/Cookie handling, and scheduler.postTask on top of
     // the native HTTP backend.
-    const char *fetch_polyfill = R"__FETCH_POLYFILL__(
+    const char *fetch_polyfill = R"__FP__(
+
 (function(){
   function normalizeHeaders(init) {
     var h = {};
@@ -4502,7 +4503,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
 
   // Native scheduler implementation is installed by init_browser_api_impl.
 })();
-)__FETCH_POLYFILL__";
+)__FP__";
     JS_Eval(ctx, fetch_polyfill, strlen(fetch_polyfill), "<fetch-polyfill>", JS_EVAL_TYPE_GLOBAL);
     if (JS_HasException(ctx)) {
         GCValue exc = JS_GetException(ctx);

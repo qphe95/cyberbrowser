@@ -1641,6 +1641,12 @@ TEST(test_job_queue_basic) {
     JSContextHandle ctx = get_test_ctx();
     JSRuntimeHandle rt(ctx.rt_handle());
 
+    /* Drain any leftover jobs from previous tests before counting. */
+    for (;;) {
+        int ret = JS_ExecutePendingJob(rt, NULL);
+        if (ret == 0) break;
+    }
+
     memset(g_job_counters, 0, sizeof(g_job_counters));
 
     const int njobs = 10;

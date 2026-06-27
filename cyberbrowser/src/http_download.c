@@ -872,8 +872,8 @@ static bool http_request_with_method_internal(const char *url, const char *metho
         if (!line_end) line_end = set_cookie + strlen(set_cookie);
 
         size_t val_len = (size_t)(line_end - set_cookie);
+        char val[4096];
         if (val_len > 0 && val_len < sizeof(val)) {
-            char val[4096];
             memcpy(val, set_cookie, val_len);
             val[val_len] = '\0';
             http_cookie_set_for_request(url, val);
