@@ -951,13 +951,22 @@ static void dom_execute_external_script(JSContextHandle ctx, GCValue script, con
     /* Mark as loaded before the network fetch so recursive insertions of the
      * same node do not re-trigger execution. */
     JS_SetPropertyStr(ctx, script, "__cyber_script_loaded", JS_TRUE);
+    JS_SetPropertyStr(ctx, script, "readyState", JS_NewString(ctx, "loading"));
 
     platform_log(LOG_LEVEL_INFO, "dom_api", "Dynamic script load: %s", url);
     HttpBuffer buffer = {0};
     char err[256] = {0};
     bool ok = http_get_to_memory(url, &buffer, err, sizeof(err));
     if (ok && buffer.data && buffer.size > 0) {
+        GCValue doc = JS_GetPropertyStr(ctx, global, "document");
+        GCValue prev_current = JS_GetPropertyStr(ctx, doc, "currentScript");
+        JS_SetPropertyStr(ctx, doc, "currentScript", script);
+        JS_SetPropertyStr(ctx, script, "readyState", JS_NewString(ctx, "loaded"));
+
         GCValue result = JS_Eval(ctx, buffer.data, buffer.size, url, JS_EVAL_TYPE_GLOBAL);
+
+        JS_SetPropertyStr(ctx, script, "readyState", JS_NewString(ctx, "complete"));
+        JS_SetPropertyStr(ctx, doc, "currentScript", prev_current);
         if (JS_IsException(result)) {
             GCValue exc = JS_GetException(ctx);
             const char *estr = JS_ToCString(ctx, exc);
@@ -969,6 +978,7 @@ static void dom_execute_external_script(JSContextHandle ctx, GCValue script, con
         }
     } else {
         platform_log(LOG_LEVEL_WARN, "dom_api", "Dynamic script fetch failed: %s (%s)", url, err[0] ? err : "unknown");
+        JS_SetPropertyStr(ctx, script, "readyState", JS_NewString(ctx, "error"));
         dom_dispatch_script_event(ctx, script, "error");
     }
     free(url);

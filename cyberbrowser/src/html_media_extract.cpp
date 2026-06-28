@@ -10,6 +10,30 @@
 #include "platform.h"
 #include "url_utils.h"
 
+extern const char *g_cyber_start_url;
+
+/* Return the origin (scheme://host) of g_cyber_start_url, falling back to
+ * https://localhost when no start URL is available. */
+static const char *cyber_get_origin_base(void) {
+    static char origin[1024] = {0};
+    static int initialized = 0;
+    if (!initialized) {
+        const char *start = g_cyber_start_url && g_cyber_start_url[0] ? g_cyber_start_url : "https://localhost/";
+        const char *scheme_end = strstr(start, "://");
+        const char *path_start = scheme_end ? strchr(scheme_end + 3, '/') : NULL;
+        size_t len = path_start ? (size_t)(path_start - start) : strlen(start);
+        if (len >= sizeof(origin)) len = sizeof(origin) - 1;
+        memcpy(origin, start, len);
+        origin[len] = '\0';
+        if (len == 0) {
+            strncpy(origin, "https://localhost", sizeof(origin) - 1);
+            origin[sizeof(origin) - 1] = '\0';
+        }
+        initialized = 1;
+    }
+    return origin;
+}
+
 /* Logging wrapper that uses platform abstraction */
 static void log_to_file(const char *tag, const char *fmt, ...) {
     va_list args;
@@ -689,7 +713,7 @@ static int extract_scripts_in_order(const char *html, ScriptInfo *scripts, int m
                 strcpy(scripts[count].url, temp);
             } else if (scripts[count].url[0] == '/') {
                 char temp[SCRIPT_URL_MAX_LEN];
-                snprintf(temp, sizeof(temp), "https://localhost%s", scripts[count].url);
+                snprintf(temp, sizeof(temp), "%s%s", cyber_get_origin_base(), scripts[count].url);
                 strcpy(scripts[count].url, temp);
             } else if (strncmp(scripts[count].url, "http", 4) != 0) {
                 // Skip non-HTTP URLs

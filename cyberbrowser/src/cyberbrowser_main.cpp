@@ -647,8 +647,9 @@ int main(int argc, char *argv[]) {
             JS_Eval(g_ctx, disable_shady_js, strlen(disable_shady_js), "<disable_shady>", JS_EVAL_TYPE_GLOBAL);
 
             const char *upgrade_doc_js =
-                "if (window.customElements && typeof window.customElements.upgrade === 'function' && document && document.documentElement) {"
-                "  try { window.customElements.upgrade(document.documentElement); } catch(e) {}"
+                "if (window.customElements && typeof window.customElements.upgrade === 'function' && document) {"
+                "  var app = document.querySelector('ytd-app');"
+                "  try { window.customElements.upgrade(app || document.documentElement); } catch(e) {}"
                 "} else {"
                 "  var log = (typeof __bgmdwnldr_log !== 'undefined') ? __bgmdwnldr_log : null;"
                 "  if (log) try { log('[UPGRADE-DOC] no upgrade function'); } catch(x) {}"
@@ -656,30 +657,6 @@ int main(int argc, char *argv[]) {
             JS_Eval(g_ctx, upgrade_doc_js, strlen(upgrade_doc_js), "<upgrade_doc>", JS_EVAL_TYPE_GLOBAL);
             fprintf(stderr, "[UPGRADE-DOC] done\n");
             fflush(stderr);
-
-            const char *inspect_app_js =
-                "(function(){"
-                "  var app = document.querySelector('ytd-app');"
-                "  if (!app) return 'INSPECT: no ytd-app';"
-                "  var sr = app.shadowRoot;"
-                "  var s = 'INSPECT ytd-app shadowRoot=' + (sr ? 'yes' : 'no') + ' children=' + (sr ? sr.childNodes.length : 0);"
-                "  if (sr && sr.childNodes.length > 0) {"
-                "    var first = sr.childNodes[0];"
-                "    s += ' first=' + (first.tagName || first.nodeName);"
-                "  }"
-                "  s += ' upgraded=' + (app.__CE_upgraded ? 'yes' : 'no');"
-                "  return s;"
-                "})();";
-            GCValue inspect_ret = JS_Eval(g_ctx, inspect_app_js, strlen(inspect_app_js), "<inspect_app>", JS_EVAL_TYPE_GLOBAL);
-            if (!JS_IsException(inspect_ret) && !JS_IsUndefined(inspect_ret)) {
-                const char *s = JS_ToCString(g_ctx, inspect_ret);
-                if (s) fprintf(stderr, "%s\n", s);
-            } else if (JS_HasException(g_ctx)) {
-                GCValue exc = JS_GetException(g_ctx);
-                GCValue msg = JS_GetPropertyStr(g_ctx, exc, "message");
-                const char *m = JS_ToCString(g_ctx, msg);
-                fprintf(stderr, "[INSPECT] exception: %s\n", m ? m : "?");
-            }
         }
 
         // ytInitialData injection removed: the page is expected to fetch its

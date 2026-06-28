@@ -32,17 +32,105 @@ GCValue js_dummy_function(JSContextHandle ctx, GCValue this_val, int argc, GCVal
     return JS_UNDEFINED;
 }
 
+// Minimal MessagePort helper forward declarations
+static GCValue js_message_port_post_message(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+static GCValue js_message_port_start(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+static GCValue js_message_port_close(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+
 // MessageChannel constructor
 GCValue js_message_channel_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     GCValue obj = js_create_from_ctor_proto(ctx, new_target);
     if (JS_IsException(obj))
         return JS_EXCEPTION;
+
+    // Use the shared MessagePort.prototype so addEventListener/dispatchEvent work.
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue message_port_ctor = JS_GetPropertyStr(ctx, global, "MessagePort");
+    GCValue message_port_proto = JS_GetPropertyStr(ctx, message_port_ctor, "prototype");
+
     GCValue port1 = JS_NewObject(ctx);
     GCValue port2 = JS_NewObject(ctx);
+    if (JS_IsObject(message_port_proto)) {
+        JS_SetPrototype(ctx, port1, message_port_proto);
+        JS_SetPrototype(ctx, port2, message_port_proto);
+    }
+
+    JS_SetPropertyStr(ctx, port1, "onmessage", JS_NULL);
+    JS_SetPropertyStr(ctx, port1, "onmessageerror", JS_NULL);
+    JS_SetPropertyStr(ctx, port1, "__cyber_other", port2);
+    JS_SetPropertyStr(ctx, port1, "__cyber_started", JS_TRUE);
+    JS_SetPropertyStr(ctx, port1, "__cyber_closed", JS_FALSE);
+    JS_SetPropertyStr(ctx, port1, "postMessage", JS_NewCFunction(ctx, js_message_port_post_message, "postMessage", 1));
+    JS_SetPropertyStr(ctx, port1, "start", JS_NewCFunction(ctx, js_message_port_start, "start", 0));
+    JS_SetPropertyStr(ctx, port1, "close", JS_NewCFunction(ctx, js_message_port_close, "close", 0));
+
+    JS_SetPropertyStr(ctx, port2, "onmessage", JS_NULL);
+    JS_SetPropertyStr(ctx, port2, "onmessageerror", JS_NULL);
+    JS_SetPropertyStr(ctx, port2, "__cyber_other", port1);
+    JS_SetPropertyStr(ctx, port2, "__cyber_started", JS_TRUE);
+    JS_SetPropertyStr(ctx, port2, "__cyber_closed", JS_FALSE);
+    JS_SetPropertyStr(ctx, port2, "postMessage", JS_NewCFunction(ctx, js_message_port_post_message, "postMessage", 1));
+    JS_SetPropertyStr(ctx, port2, "start", JS_NewCFunction(ctx, js_message_port_start, "start", 0));
+    JS_SetPropertyStr(ctx, port2, "close", JS_NewCFunction(ctx, js_message_port_close, "close", 0));
+
     JS_SetPropertyStr(ctx, obj, "port1", port1);
     JS_SetPropertyStr(ctx, obj, "port2", port2);
     return obj;
+}
+
+static GCValue js_message_port_post_message(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    GCValue closed_val = JS_GetPropertyStr(ctx, this_val, "__cyber_closed");
+    if (JS_ToBool(ctx, closed_val)) return JS_UNDEFINED;
+
+    GCValue other = JS_GetPropertyStr(ctx, this_val, "__cyber_other");
+    if (JS_IsUndefined(other) || JS_IsNull(other)) return JS_UNDEFINED;
+
+    GCValue onmessage = JS_GetPropertyStr(ctx, other, "onmessage");
+    if (!JS_IsFunction(ctx, onmessage)) return JS_UNDEFINED;
+
+    GCValue event = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, event, "data", argc > 0 ? argv[0] : JS_UNDEFINED);
+    JS_SetPropertyStr(ctx, event, "origin", JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, event, "lastEventId", JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, event, "source", JS_NULL);
+    JS_SetPropertyStr(ctx, event, "ports", JS_NewArray(ctx));
+
+    // Bind the handler to the receiving port so |this| is correct, then
+    // schedule it via setTimeout(..., 0, event) to emulate async dispatch.
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue Function = JS_GetPropertyStr(ctx, global, "Function");
+    GCValue func_proto = JS_GetPropertyStr(ctx, Function, "prototype");
+    GCValue bind = JS_GetPropertyStr(ctx, func_proto, "bind");
+    GCValue bind_args[1] = { other };
+    GCValue bound = JS_Call(ctx, bind, onmessage, 1, bind_args);
+    if (!JS_IsFunction(ctx, bound)) {
+        // Fall back to the unbound handler if bind fails.
+        bound = onmessage;
+    }
+
+    GCValue set_timeout = JS_GetPropertyStr(ctx, global, "setTimeout");
+    GCValue st_args[3];
+    st_args[0] = bound;
+    st_args[1] = JS_NewInt32(ctx, 0);
+    st_args[2] = event;
+    (void)JS_Call(ctx, set_timeout, global, 3, st_args);
+
+    return JS_UNDEFINED;
+}
+
+static GCValue js_message_port_start(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    JS_SetPropertyStr(ctx, this_val, "__cyber_started", JS_TRUE);
+    return JS_UNDEFINED;
+}
+
+static GCValue js_message_port_close(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    JS_SetPropertyStr(ctx, this_val, "__cyber_closed", JS_TRUE);
+    JS_SetPropertyStr(ctx, this_val, "onmessage", JS_NULL);
+    JS_SetPropertyStr(ctx, this_val, "__cyber_other", JS_NULL);
+    return JS_UNDEFINED;
 }
 
 // Helper: create object from constructor's prototype (like js_create_from_ctor)
