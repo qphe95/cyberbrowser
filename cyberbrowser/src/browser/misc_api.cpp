@@ -75,8 +75,20 @@ GCValue js_element_constructor(JSContextHandle ctx, GCValue new_target, int argc
 
 // Stack of elements currently being upgraded. The native HTMLElement constructor
 // pops the stack so super() can return the existing element as `this` instead
-// of allocating a new object.  Pushing is currently disabled because upgrades
-// are skipped entirely.
+// of allocating a new object.
+static void cyber_upgrade_stack_push(JSContextHandle ctx, GCValue el) {
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue stack = JS_GetPropertyStr(ctx, global, "__cyber_upgrade_stack");
+    if (!JS_IsArray(ctx, stack)) {
+        stack = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, global, "__cyber_upgrade_stack", stack);
+    }
+    GCValue len_val = JS_GetPropertyStr(ctx, stack, "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, len_val);
+    JS_SetPropertyUint32(ctx, stack, len, el);
+}
+
 static GCValue cyber_upgrade_stack_pop(JSContextHandle ctx) {
     GCValue global = JS_GetGlobalObject(ctx);
     GCValue stack = JS_GetPropertyStr(ctx, global, "__cyber_upgrade_stack");
@@ -88,6 +100,11 @@ static GCValue cyber_upgrade_stack_pop(JSContextHandle ctx) {
     GCValue el = JS_GetPropertyUint32(ctx, stack, len - 1);
     JS_SetPropertyStr(ctx, stack, "length", JS_NewInt32(ctx, (int32_t)(len - 1)));
     return el;
+}
+
+static void cyber_upgrade_stack_clear(JSContextHandle ctx) {
+    GCValue global = JS_GetGlobalObject(ctx);
+    JS_SetPropertyStr(ctx, global, "__cyber_upgrade_stack", JS_NewArray(ctx));
 }
 
 // Forward declaration for the per-element upgrade helper defined later.
@@ -277,17 +294,54 @@ void js_cyber_ce_schedule_flush(JSContextHandle ctx) {
 // safeguard, not a site-specific skip list.
 static int g_html_elem_ctor_count = 0;
 static int g_upgrade_ctor_start = 0;
-static const int g_upgrade_ctor_budget = 2000;
+static const int g_upgrade_ctor_budget = 5000;
+static int g_ce_upgrade_depth = 0;
+static const int g_ce_upgrade_max_depth = 8;
+struct CEUpgradeDepthGuard {
+    CEUpgradeDepthGuard() { g_ce_upgrade_depth++; }
+    ~CEUpgradeDepthGuard() { g_ce_upgrade_depth--; }
+};
+
+static const char *CE_BUDGET_SENTINEL = "__CYBER_CE_BUDGET__";
 
 GCValue js_html_element_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     g_html_elem_ctor_count++;
-    if (g_html_elem_ctor_count - g_upgrade_ctor_start > g_upgrade_ctor_budget) {
-        // Return the exception marker without allocating a new Error object.
-        // Allocating an error here can itself run out of memory on constructors
-        // that stamp very large templates.
+    if (g_html_elem_ctor_count % 500 == 0) {
+        JS_RunGC(JS_GetRuntime(ctx));
+    }
+    // Only enforce the per-upgrade budget when we are actually inside an
+    // upgrade.  Ordinary `new HTMLElement()` calls outside the upgrade path
+    // should not be throttled by a stale budget.
+    if (g_ce_upgrade_depth > 0 && g_html_elem_ctor_count - g_upgrade_ctor_start > g_upgrade_ctor_budget) {
+        // Throw a lightweight sentinel instead of a real Error object.
+        // The custom-element upgrade helper catches this sentinel and treats
+        // the element as partially upgraded.  Using a sentinel prevents the
+        // Polymer ES5 shim from allocating ever-larger wrapped Error strings
+        // when a constructor aborts.
+        GCValue g = JS_GetGlobalObject(ctx);
+        JS_SetPropertyStr(ctx, g, "__cyber_ce_budget_hit", JS_TRUE);
+        JS_Throw(ctx, JS_NewString(ctx, CE_BUDGET_SENTINEL));
         return JS_EXCEPTION;
     }
+    // If HTMLElement is called as a normal function with an existing object as
+    // `this` (e.g., Babel's _wrapNativeSuper calling HTMLElement.call(el) from
+    // a transpiled subclass constructor), just reuse that object. Creating a new
+    // DOM node here would break the subclass's `this` binding and can corrupt
+    // the internal shape chain.
+    if (!JS_IsUndefined(new_target) && !JS_IsNull(new_target) &&
+        JS_IsObject(new_target) && !JS_IsFunction(ctx, new_target)) {
+        GCValue html_ctor = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__origHTMLElement");
+        if (!JS_IsObject(html_ctor)) {
+            html_ctor = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "HTMLElement");
+        }
+        GCValue proto = JS_GetPropertyStr(ctx, html_ctor, "prototype");
+        if (!JS_IsException(proto) && JS_IsObject(proto)) {
+            JS_SetPrototype(ctx, new_target, proto);
+        }
+        return new_target;
+    }
+
     // If we are upgrading an existing DOMNode-backed element, reuse that object
     // as the constructed instance instead of creating a new one. This lets
     // Polymer/Closure constructors initialize __data on the actual element.
@@ -1217,23 +1271,215 @@ GCValue js_custom_elements_when_defined(JSContextHandle ctx, GCValue this_val, i
     return js_create_empty_resolved_promise(ctx);
 }
 
-// Custom-element upgrade: historically this ran the registered constructor on
-// the existing DOM element, but Polymer's ES5 shim and missing DOM APIs make
-// that path recursively abort the process.  For the smoke test, treat every
-// custom element as already-upgraded so the page still builds a DOM tree and
-// can be laid out/rendered without invoking any user constructors.
+// Custom-element upgrade: run the registered constructor against the existing
+// DOM element.  The webcomponents ES5 shim wraps `customElements.get()` so it
+// returns the user constructor (b); the actual registered class (g) is stored
+// on the registry and accessible via `__origGet`.  We construct g directly so
+// super() resolves to the native HTMLElement and returns the existing element.
+// Constructors that throw are marked failed and skipped, just like a real
+// browser would skip a custom element with a throwing constructor.
 GCValue js_cyber_upgrade_element(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
     if (argc < 1) return JS_UNDEFINED;
     GCValue el = argv[0];
     if (JS_IsNull(el) || JS_IsUndefined(el) || !JS_IsObject(el)) return JS_UNDEFINED;
 
+    if (g_ce_upgrade_depth >= g_ce_upgrade_max_depth) {
+        GCValue tagv = JS_GetPropertyStr(ctx, el, "tagName");
+        const char *tag = JS_ToCString(ctx, tagv);
+        fprintf(stderr, "[CE-UPGRADE] depth-limit skip %s\n", tag ? tag : "?"); fflush(stderr);
+        JS_SetPropertyStr(ctx, el, "__CE_upgraded", JS_TRUE);
+        JS_FreeCString(ctx, tag);
+        return el;
+    }
+    CEUpgradeDepthGuard depth_guard;
+
+    GCValue upgraded = JS_GetPropertyStr(ctx, el, "__CE_upgraded");
+    if (JS_ToBool(ctx, upgraded)) return JS_UNDEFINED;
+
     GCValue node_type_val = JS_GetPropertyStr(ctx, el, "nodeType");
     int32_t node_type = 0;
     JS_ToInt32(ctx, &node_type, node_type_val);
     if (node_type != 1) return JS_UNDEFINED;
 
+    GCValue tag_val = JS_GetPropertyStr(ctx, el, "tagName");
+    const char *tag = JS_ToCString(ctx, tag_val);
+    if (!tag) return JS_UNDEFINED;
+
+    char name_lc[128];
+    size_t len = strlen(tag);
+    if (len >= sizeof(name_lc)) len = sizeof(name_lc) - 1;
+    for (size_t i = 0; i < len; i++) name_lc[i] = (char)tolower((unsigned char)tag[i]);
+    name_lc[len] = '\0';
+
+    // Skip elements whose constructors are known to hit missing APIs and
+    // abort the process before we have implemented those standards.
+    static const char *skip_tags[] = { "custom-style", "iron-iconset-svg", "yt-page-navigation-progress", "ytd-masthead" };
+    for (size_t i = 0; i < sizeof(skip_tags)/sizeof(skip_tags[0]); i++) {
+        if (strcmp(name_lc, skip_tags[i]) == 0) {
+            fprintf(stderr, "[CE-UPGRADE] skipping %s\n", name_lc);
+            JS_SetPropertyStr(ctx, el, "__CE_upgraded", JS_TRUE);
+            JS_FreeCString(ctx, tag);
+            return el;
+        }
+    }
+
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue custom_elements = JS_GetPropertyStr(ctx, global, "customElements");
+    if (JS_IsUndefined(custom_elements) || JS_IsNull(custom_elements) || !JS_IsObject(custom_elements)) {
+        JS_FreeCString(ctx, tag);
+        return JS_UNDEFINED;
+    }
+
+    // Use the original C get() to retrieve the actual registered class (g),
+    // not the ES5 shim's user-constructor wrapper (b).
+    GCValue ctor = JS_UNDEFINED;
+    GCValue get_fn = JS_GetPropertyStr(ctx, custom_elements, "__origGet");
+    if (!JS_IsUndefined(get_fn) && !JS_IsNull(get_fn) && JS_IsFunction(ctx, get_fn)) {
+        GCValue args[1] = { JS_NewString(ctx, name_lc) };
+        ctor = JS_Call(ctx, get_fn, custom_elements, 1, args);
+    }
+    if (JS_IsUndefined(ctor) || JS_IsNull(ctor) || !JS_IsFunction(ctx, ctor)) {
+        // Fallback to public get() for non-shim pages.
+        get_fn = JS_GetPropertyStr(ctx, custom_elements, "get");
+        if (!JS_IsUndefined(get_fn) && !JS_IsNull(get_fn) && JS_IsFunction(ctx, get_fn)) {
+            GCValue args[1] = { JS_NewString(ctx, name_lc) };
+            ctor = JS_Call(ctx, get_fn, custom_elements, 1, args);
+        }
+    }
+    if (JS_IsUndefined(ctor) || JS_IsNull(ctor) || !JS_IsFunction(ctx, ctor)) {
+        JS_FreeCString(ctx, tag);
+        return JS_UNDEFINED;
+    }
+
+    // Remove Polymer's disable-upgrade guard before running the constructor.
+    GCValue disable_args[1] = { JS_NewString(ctx, "disable-upgrade") };
+    js_element_remove_attribute(ctx, el, 1, disable_args);
+
+    // Set the element's prototype to the custom class prototype.
+    GCValue proto = JS_GetPropertyStr(ctx, ctor, "prototype");
+    if (!JS_IsException(proto) && JS_IsObject(proto)) {
+        JS_SetPrototype(ctx, el, proto);
+    }
+
+    // Run the registered constructor with the existing element on the upgrade
+    // stack. The native HTMLElement constructor pops the stack and returns the
+    // existing element as `this`, so the user constructor body runs against the
+    // real DOM-backed object.  Also restore the native HTMLElement globally so
+    // that any nested `new` inside the constructor body hits our upgrade-aware
+    // native constructor instead of the ES5 shim's wrapper.
+    bool ctor_ok = false;
+    bool budget_exceeded = false;
+    if (g_ce_upgrade_depth == 1) {
+        // Start the per-upgrade constructor budget at the outermost upgrade.
+        // Nested upgrades share this budget so the whole tree is throttled.
+        g_upgrade_ctor_start = g_html_elem_ctor_count;
+    }
+    GCValue saved_html = JS_UNDEFINED;
+    GCValue saved_window_html = JS_UNDEFINED;
+    GCValue native_html = JS_GetPropertyStr(ctx, global, "__origHTMLElement");
+    if (JS_IsFunction(ctx, native_html)) {
+        saved_html = JS_GetPropertyStr(ctx, global, "HTMLElement");
+        JS_SetPropertyStr(ctx, global, "HTMLElement", native_html);
+        GCValue window_obj = JS_GetPropertyStr(ctx, global, "window");
+        if (!JS_IsUndefined(window_obj) && !JS_IsNull(window_obj) && JS_IsObject(window_obj)) {
+            saved_window_html = JS_GetPropertyStr(ctx, window_obj, "HTMLElement");
+            JS_SetPropertyStr(ctx, window_obj, "HTMLElement", native_html);
+        }
+    }
+    // Clear the budget-hit flag before running the constructor and check it
+    // afterwards.  The flag lets us recognise a budget abort even though the
+    // Polymer ES5 adapter wraps the thrown value in many layers of
+    // "Constructing <tag>: ..." messages.
+    JS_SetPropertyStr(ctx, global, "__cyber_ce_budget_hit", JS_FALSE);
+    JS_SetPropertyStr(ctx, global, "__cyber_first_real_error", JS_NULL);
+    JS_SetPropertyStr(ctx, global, "__cyber_ce_in_ctor", JS_TRUE);
+    cyber_upgrade_stack_push(ctx, el);
+    GCValue ctor_ret = JS_CallConstructor(ctx, ctor, 0, NULL);
+    JS_SetPropertyStr(ctx, global, "__cyber_ce_in_ctor", JS_FALSE);
+    GCValue budget_hit_val = JS_GetPropertyStr(ctx, global, "__cyber_ce_budget_hit");
+    bool budget_hit = JS_ToBool(ctx, budget_hit_val);
+    if (!JS_IsUndefined(saved_html)) {
+        JS_SetPropertyStr(ctx, global, "HTMLElement", saved_html);
+    }
+    if (!JS_IsUndefined(saved_window_html)) {
+        GCValue window_obj = JS_GetPropertyStr(ctx, global, "window");
+        if (!JS_IsUndefined(window_obj) && !JS_IsNull(window_obj) && JS_IsObject(window_obj)) {
+            JS_SetPropertyStr(ctx, window_obj, "HTMLElement", saved_window_html);
+        }
+    }
+    if (JS_IsException(ctor_ret) || budget_hit) {
+        if (budget_hit) {
+            budget_exceeded = true;
+            fprintf(stderr, "[CE-UPGRADE] %s partial upgrade: constructor budget reached\n", name_lc);
+            if (JS_IsException(ctor_ret)) JS_GetException(ctx);
+        } else {
+            GCValue exc = JS_GetException(ctx);
+            GCValue exc_msg = JS_GetPropertyStr(ctx, exc, "message");
+            char msg_buf[512] = "(none)";
+            if (!JS_IsUndefined(exc_msg) && !JS_IsNull(exc_msg)) {
+                const char *m = JS_ToCString(ctx, exc_msg);
+                if (m) {
+                    snprintf(msg_buf, sizeof(msg_buf), "%s", m);
+                    JS_FreeCString(ctx, m);
+                }
+            }
+            GCValue exc_stack = JS_GetPropertyStr(ctx, exc, "stack");
+            char stack_buf[512] = "";
+            if (!JS_IsUndefined(exc_stack) && !JS_IsNull(exc_stack)) {
+                const char *s = JS_ToCString(ctx, exc_stack);
+                if (s) {
+                    strncpy(stack_buf, s, sizeof(stack_buf) - 1);
+                    stack_buf[sizeof(stack_buf) - 1] = '\0';
+                }
+            }
+            fprintf(stderr, "[CE-UPGRADE] %s user ctor threw: %s | stack: %s\n", name_lc, msg_buf, stack_buf);
+            JS_SetPropertyStr(ctx, el, "__CE_failed", JS_TRUE);
+        }
+        cyber_upgrade_stack_pop(ctx);
+        cyber_upgrade_stack_clear(ctx);
+    } else {
+        ctor_ok = true;
+    }
+
+    {
+        GCValue sr = JS_GetPropertyStr(ctx, el, "shadowRoot");
+        GCValue sr_children = JS_GetPropertyStr(ctx, sr, "children");
+        GCValue sr_len = JS_GetPropertyStr(ctx, sr_children, "length");
+        int32_t sr_n = 0; JS_ToInt32(ctx, &sr_n, sr_len);
+        fprintf(stderr, "[CE-UPGRADE] %s ctor_ok=%d shadowRoot=%s children=%d\n",
+                name_lc, ctor_ok ? 1 : 0,
+                JS_IsObject(sr) ? "yes" : "no", sr_n);
+    }
+
     JS_SetPropertyStr(ctx, el, "__CE_upgraded", JS_TRUE);
+
+    // Fire connectedCallback if the element is already connected and the
+    // constructor succeeded.
+    GCValue is_connected = JS_GetPropertyStr(ctx, el, "isConnected");
+    bool connected = JS_ToBool(ctx, is_connected);
+    if (ctor_ok && connected) {
+        GCValue cb = JS_GetPropertyStr(ctx, el, "connectedCallback");
+        if (!JS_IsUndefined(cb) && !JS_IsNull(cb) && JS_IsFunction(ctx, cb)) {
+            GCValue ret = JS_Call(ctx, cb, el, 0, NULL);
+            if (JS_IsException(ret)) {
+                GCValue exc = JS_GetException(ctx);
+                GCValue exc_msg = JS_GetPropertyStr(ctx, exc, "message");
+                char msg_buf[512] = "(none)";
+                if (!JS_IsUndefined(exc_msg) && !JS_IsNull(exc_msg)) {
+                    const char *m = JS_ToCString(ctx, exc_msg);
+                    if (m) {
+                        strncpy(msg_buf, m, sizeof(msg_buf) - 1);
+                        msg_buf[sizeof(msg_buf) - 1] = '\0';
+                        JS_FreeCString(ctx, m);
+                    }
+                }
+                fprintf(stderr, "[CE-UPGRADE] %s connectedCallback threw: %s\n", name_lc, msg_buf);
+            }
+        }
+    }
+
+    JS_FreeCString(ctx, tag);
     return el;
 }
 

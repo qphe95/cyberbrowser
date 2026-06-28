@@ -2088,9 +2088,6 @@ GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int ar
             }
             int cid = ++create_counter;
             JS_SetPropertyStr(ctx, elem, "__cyber_id", JS_NewInt32(ctx, cid));
-            if (strcasecmp(tag, "ytd-masthead") == 0 || strcasecmp(tag, "ytd-app") == 0) {
-                fprintf(stderr, "[CREATE-ELEM] id=%d tag=%s\n", cid, tag);
-            }
 
             // Add animate method directly to created elements so feature detection works
             JS_SetPropertyStr(ctx, elem, "animate",
@@ -2408,7 +2405,7 @@ bool js_quickjs_create_runtime(void) {
     css_document_state_ensure(g_js_runtime);
     
     // Set limits after successful runtime creation
-    JS_SetMemoryLimit(g_js_runtime, 256 * 1024 * 1024); // 256MB
+    JS_SetMemoryLimit(g_js_runtime, 1024 * 1024 * 1024); // 1GB
     JS_SetMaxStackSize(g_js_runtime, 8 * 1024 * 1024);  // 8MB
     
     // Create context - this initializes built-in objects

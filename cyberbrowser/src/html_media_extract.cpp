@@ -807,9 +807,13 @@ static void pump_timers_and_jobs_after_fetch(void) {
 static bool is_unsafe_external_script(const char *url) {
     if (!url) return false;
     static const char *skip_patterns[] = {
-        // Polyfills that monkey-patch native DOM prototypes and corrupt state.
-        // webcomponents-sd is provided natively by the emulator, so the external
-        // bundle is not fetched.
+        // Skip the Polymer ES5 adapter and ShadyDOM polyfills. The adapter's
+        // wrapper class corrupts the QuickJS bytecode when combined with our
+        // native HTMLElement upgrade path, and the ShadyDOM polyfill forces
+        // Polymer onto a shady-root code path we do not implement. Without
+        // these polyfills Polymer falls back to native Shadow DOM and our
+        // real attachShadow/template stamping paths.
+        "custom-elements-es5-adapter",
         "webcomponents-sd",
         "webcomponents-sd-shadycss",
         "webcomponents-all-noPatch",

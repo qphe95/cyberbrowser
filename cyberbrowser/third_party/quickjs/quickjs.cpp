@@ -20046,7 +20046,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
     for(;;) {
         int call_argc;
         GCValue *call_argv;
-        
+
         /* Cooperative interrupt check. Only active when an interrupt handler
          * has been installed and the counter has been primed. */
         if (rt.interrupt_handler() && rt.instruction_counter()) {

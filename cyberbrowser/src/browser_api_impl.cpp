@@ -2013,11 +2013,28 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, doc_fragment_proto, "constructor", doc_fragment_ctor);
     // Inherit Node methods (appendChild, insertBefore, removeChild, cloneNode, ...)
     JS_SetPrototype(ctx, doc_fragment_proto, node_proto);
-    // DocumentFragment needs querySelector(All) for template.content usage.
+    // DocumentFragment needs querySelector(All) and element-child traversal
+    // for template.content usage.
     JS_SetPropertyStr(ctx, doc_fragment_proto, "querySelector",
         JS_NewCFunction(ctx, js_element_querySelector_real, "querySelector", 1));
     JS_SetPropertyStr(ctx, doc_fragment_proto, "querySelectorAll",
         JS_NewCFunction(ctx, js_element_querySelectorAll_real, "querySelectorAll", 1));
+    JS_SetPropertyStr(ctx, doc_fragment_proto, "firstElementChild",
+        JS_NewCFunction(ctx, js_element_get_firstElementChild, "get firstElementChild", 0));
+    JS_SetPropertyStr(ctx, doc_fragment_proto, "lastElementChild",
+        JS_NewCFunction(ctx, js_element_get_lastElementChild, "get lastElementChild", 0));
+    JS_SetPropertyStr(ctx, doc_fragment_proto, "children",
+        JS_NewCFunction(ctx, js_element_get_children, "get children", 0));
+    JS_SetPropertyStr(ctx, doc_fragment_proto, "childElementCount",
+        JS_NewCFunction(ctx, js_element_get_childElementCount, "get childElementCount", 0));
+
+    // ParentNode mixin for DocumentFragment
+    JS_SetPropertyStr(ctx, doc_fragment_proto, "append",
+        JS_NewCFunction(ctx, js_element_append, "append", 1));
+    JS_SetPropertyStr(ctx, doc_fragment_proto, "prepend",
+        JS_NewCFunction(ctx, js_element_prepend, "prepend", 1));
+    JS_SetPropertyStr(ctx, doc_fragment_proto, "replaceChildren",
+        JS_NewCFunction(ctx, js_element_replaceChildren, "replaceChildren", 1));
 
     JS_SetPropertyStr(ctx, doc_fragment_ctor, "prototype", doc_fragment_proto);
     JS_SetPropertyStr(ctx, global, "DocumentFragment", doc_fragment_ctor);
@@ -2309,6 +2326,21 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_DefinePropertyGetSet(ctx, element_proto, child_elem_count_atom, child_elem_count_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, child_elem_count_atom);
     
+    // ParentNode mixin
+    JS_SetPropertyStr(ctx, element_proto, "append",
+        JS_NewCFunction(ctx, js_element_append, "append", 1));
+    JS_SetPropertyStr(ctx, element_proto, "prepend",
+        JS_NewCFunction(ctx, js_element_prepend, "prepend", 1));
+    JS_SetPropertyStr(ctx, element_proto, "replaceChildren",
+        JS_NewCFunction(ctx, js_element_replaceChildren, "replaceChildren", 1));
+    // ChildNode mixin
+    JS_SetPropertyStr(ctx, element_proto, "before",
+        JS_NewCFunction(ctx, js_element_before, "before", 1));
+    JS_SetPropertyStr(ctx, element_proto, "after",
+        JS_NewCFunction(ctx, js_element_after, "after", 1));
+    JS_SetPropertyStr(ctx, element_proto, "replaceWith",
+        JS_NewCFunction(ctx, js_element_replaceWith, "replaceWith", 1));
+
     // ===== Element Content Properties =====
     // innerHTML getter/setter
     GCValue inner_html_getter = JS_NewCFunction(ctx, js_element_get_inner_html, "get innerHTML", 0);
@@ -2363,6 +2395,13 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JSAtom data_atom = JS_NewAtom(ctx, "data");
     JS_DefinePropertyGetSet(ctx, character_data_proto, data_atom, data_getter, data_setter, JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, data_atom);
+    // ChildNode mixin for CharacterData (Text/Comment)
+    JS_SetPropertyStr(ctx, character_data_proto, "before",
+        JS_NewCFunction(ctx, js_element_before, "before", 1));
+    JS_SetPropertyStr(ctx, character_data_proto, "after",
+        JS_NewCFunction(ctx, js_element_after, "after", 1));
+    JS_SetPropertyStr(ctx, character_data_proto, "replaceWith",
+        JS_NewCFunction(ctx, js_element_replaceWith, "replaceWith", 1));
     // Text and Comment constructors already exist; give them the CharacterData
     // prototype so that Text/Comment nodes have `data` while Element nodes do not.
     GCValue existing_text_ctor = JS_GetPropertyStr(ctx, global, "Text");
@@ -3589,14 +3628,17 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_NewCFunction(ctx, js_cyber_ce_enqueue_upgrade, "__cyber_enqueueUpgradeReaction", 1));
     JS_SetPropertyStr(ctx, global, "__cyber_flushCustomElementReactions",
         JS_NewCFunction(ctx, js_cyber_ce_flush_reactions, "__cyber_flushCustomElementReactions", 0));
+    JS_SetPropertyStr(ctx, global, "__cyber_scheduleCustomElementReactions",
+        JS_NewCFunction(ctx, js_cyber_ce_schedule_flush, "__cyber_scheduleCustomElementReactions", 0));
 
     // JS wrappers that batch-upgrade elements and implement customElements.upgrade.
     {
         const char *upgrade_js =
             "(function(){"
+            "  var skip = { 'custom-style': true, 'iron-iconset-svg': true, 'yt-page-navigation-progress': true, 'ytd-masthead': true };"
             "  window.__cyber_enqueueUpgradeAll = function(name) {"
             "    if (!window.customElements || !document) return;"
-            "    if (name === 'custom-style') return;"
+            "    if (skip[name]) return;"
             "    var ctor = window.customElements.get(name);"
             "    if (!ctor || !ctor.prototype) return;"
             "    var list = document.getElementsByTagName(name);"
@@ -3608,12 +3650,19 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
             "    if (!root) return;"
             "    var queue = [];"
             "    var walk = function(node) {"
-            "      if (node.nodeType === 1) {"
+            "      var nt = node.nodeType;"
+            "      if (nt === 1) {"
             "        var tag = node.tagName;"
-            "        if (tag && tag.indexOf('-') >= 0 && !node.__CE_upgraded && tag !== 'CUSTOM-STYLE') {"
+            "        var lc = tag ? tag.toLowerCase() : '';"
+            "        if (tag && tag.indexOf('-') >= 0 && !node.__CE_upgraded && !skip[lc]) {"
             "          queue.push(node);"
             "        }"
-            "        if (tag === 'CUSTOM-STYLE') { node.__CE_upgraded = true; }"
+            "        if (skip[lc]) { node.__CE_upgraded = true; }"
+            "        var children = node.childNodes;"
+            "        for (var i = 0; i < children.length; i++) walk(children[i]);"
+            "        var sr = node.shadowRoot;"
+            "        if (sr) walk(sr);"
+            "      } else if (nt === 11) {"
             "        var children = node.childNodes;"
             "        for (var i = 0; i < children.length; i++) walk(children[i]);"
             "      }"
@@ -3622,10 +3671,63 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
             "    for (var i = 0; i < queue.length; i++) {"
             "      window.__cyber_enqueueUpgradeReaction(queue[i]);"
             "    }"
-            "    window.__cyber_flushCustomElementReactions();"
+            "    if (window.__cyber_ce_in_ctor) {"
+            "      window.__cyber_scheduleCustomElementReactions();"
+            "    } else {"
+            "      window.__cyber_flushCustomElementReactions();"
+            "    }"
             "  };"
             "})();";
         JS_Eval(ctx, upgrade_js, strlen(upgrade_js), "<ce_upgrade>", JS_EVAL_TYPE_GLOBAL);
+    }
+
+    // Patch the global Error constructor during custom-element upgrades so we can
+    // capture the original thrown error before the Polymer ES5 adapter recursively
+    // wraps it as "Constructing <tag>: ...".  Also cap message length to prevent
+    // the recursive wrapping from growing until QuickJS aborts, and recognise the
+    // budget-abort sentinel string.
+    {
+        const char *error_patch_js =
+            "(function(){"
+            "  var orig = window.Error;"
+            "  if (!orig) return;"
+            "  function SafeError() {"
+            "    var args = Array.prototype.slice.call(arguments);"
+            "    var msg = args[0];"
+            "    if (typeof msg === 'string') {"
+            "      if (msg.indexOf('__CYBER_CE_BUDGET__') >= 0) {"
+            "        try { window.__cyber_ce_budget_hit = true; } catch(e) {}"
+            "      }"
+            "      if (msg.length > 2048) {"
+            "        args[0] = msg.slice(0, 2048) + '...[truncated]';"
+            "      }"
+            "    }"
+            "    var inCtor = false;"
+            "    try { inCtor = !!window.__cyber_ce_in_ctor; } catch(e) {}"
+            "    if (inCtor && typeof msg === 'string' &&"
+            "        msg.indexOf('__CYBER_CE_BUDGET__') < 0 &&"
+            "        msg.indexOf('Constructing ') !== 0 &&"
+            "        (!window.__cyber_first_real_error || window.__cyber_first_real_error === null)) {"
+            "      try {"
+            "        var err = new orig(msg);"
+            "        window.__cyber_first_real_error = { msg: msg, stack: err && err.stack ? String(err.stack) : '' };"
+            "      } catch(e) {}"
+            "    }"
+            "    return orig.apply(this, args);"
+            "  }"
+            "  SafeError.prototype = orig.prototype;"
+            "  SafeError.name = orig.name;"
+            "  try {"
+            "    Object.defineProperty(SafeError, 'length', { value: orig.length, writable: false, configurable: true });"
+            "  } catch(e) {}"
+            "  try {"
+            "    Object.defineProperty(window, 'Error', { value: SafeError, configurable: true, writable: true });"
+            "  } catch(e) { window.Error = SafeError; }"
+            "  try {"
+            "    Object.defineProperty(globalThis, 'Error', { value: SafeError, configurable: true, writable: true });"
+            "  } catch(e) { try { globalThis.Error = SafeError; } catch(e2) {} }"
+            "})();";
+        JS_Eval(ctx, error_patch_js, strlen(error_patch_js), "<error_patch>", JS_EVAL_TYPE_GLOBAL);
     }
 
     // CustomElementRegistry constructor (for completeness)
@@ -3671,13 +3773,13 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
             "      return ev && ev.target ? [ev.target] : [];"
             "    }"
             "    stored = {"
-            "      inUse: true,"
+            "      inUse: false,"
             "      noPatch: true,"
             "      preferPerformance: true,"
-            "      force: true,"
+            "      force: false,"
             "      handlesDynamicScoping: true,"
             "      deferConnectionCallbacks: false,"
-            "      settings: { noPatch: true, preferPerformance: true, force: true },"
+            "      settings: { noPatch: true, preferPerformance: true, force: false },"
             "      Wrapper: Wrapper,"
             "      wrap: function(node) { return node; },"
             "      wrapIfNeeded: function(node) { return node; },"
@@ -4517,6 +4619,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         GCValue exc = JS_GetException(ctx);
         (void)exc;
     }
+
     LOG_INFO("Fetch/scheduler polyfill set");
 }
 

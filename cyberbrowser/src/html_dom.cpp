@@ -746,10 +746,8 @@ GCValue html_create_element_js_with_document(JSContextHandle ctx, GCValue js_doc
     if (!JS_IsUndefined(js_doc) && !JS_IsNull(js_doc)) {
         GCValue createElement = JS_GetPropertyStr(ctx, js_doc, "createElement");
         if (!JS_IsUndefined(createElement) && !JS_IsNull(createElement)) {
-            fprintf(stderr, "[CREATE-POPULATE] tag=%s before createElement\n", tag_name); fflush(stderr);
             GCValue args[1] = { JS_NewString(ctx, tag_name) };
             element = JS_Call(ctx, createElement, js_doc, 1, args);
-            fprintf(stderr, "[CREATE-POPULATE] tag=%s after createElement\n", tag_name); fflush(stderr);
             if (!JS_IsException(element) && !JS_IsUndefined(element) && !JS_IsNull(element)) {
                 /* Set attributes from parsed HTML.  The inline 'style' attribute is
                  * special-cased: document.createElement already created a style

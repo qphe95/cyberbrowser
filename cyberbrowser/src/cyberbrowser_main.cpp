@@ -10,6 +10,9 @@
 #include <string.h>
 #include <ctype.h>
 #include <math.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "platform.h"
 #include "quickjs.h"
@@ -38,6 +41,17 @@ extern "C" void timer_set_idle_deadline(unsigned long long deadline_ms);
 /* Default page loaded by the smoke-test executable. */
 static const char DEFAULT_START_URL[] = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
 
+#ifdef _WIN32
+static LONG WINAPI unhandled_exception_filter(EXCEPTION_POINTERS *ep) {
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    fprintf(stderr, "[FATAL] Unhandled exception 0x%08X at %p\n",
+            (unsigned int)code, ep->ExceptionRecord->ExceptionAddress);
+    if (code == EXCEPTION_ACCESS_VIOLATION) fprintf(stderr, "[FATAL] Access violation\n");
+    if (code == EXCEPTION_STACK_OVERFLOW) fprintf(stderr, "[FATAL] Stack overflow\n");
+    if (code == EXCEPTION_ILLEGAL_INSTRUCTION) fprintf(stderr, "[FATAL] Illegal instruction\n");
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+#endif
 
 static JSRuntimeHandle g_rt;
 static JSContextHandle g_ctx;
@@ -540,6 +554,10 @@ int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
 
+#ifdef _WIN32
+    SetUnhandledExceptionFilter(unhandled_exception_filter);
+#endif
+
     setvbuf(stdout, NULL, _IONBF, 0);
 
     printf("========================================\n");
@@ -614,6 +632,12 @@ int main(int argc, char *argv[]) {
         {
             fprintf(stderr, "[UPGRADE-DOC] invoking customElements.upgrade\n");
             fflush(stderr);
+            const char *disable_shady_js =
+                "if (window.ShadyDOM) { try { window.ShadyDOM.inUse = false; } catch(e) {} }"
+                "if (window.WebComponents) { try { window.WebComponents.shadydom = false; window.WebComponents.shadycss = false; } catch(e) {} }"
+                "try { Object.defineProperty(window, 'ShadyDOM', { value: { inUse: false }, configurable: true, writable: true }); } catch(e) {}";
+            JS_Eval(g_ctx, disable_shady_js, strlen(disable_shady_js), "<disable_shady>", JS_EVAL_TYPE_GLOBAL);
+
             const char *upgrade_doc_js =
                 "if (window.customElements && typeof window.customElements.upgrade === 'function' && document && document.documentElement) {"
                 "  try { window.customElements.upgrade(document.documentElement); } catch(e) {}"
@@ -624,6 +648,30 @@ int main(int argc, char *argv[]) {
             JS_Eval(g_ctx, upgrade_doc_js, strlen(upgrade_doc_js), "<upgrade_doc>", JS_EVAL_TYPE_GLOBAL);
             fprintf(stderr, "[UPGRADE-DOC] done\n");
             fflush(stderr);
+
+            const char *inspect_app_js =
+                "(function(){"
+                "  var app = document.querySelector('ytd-app');"
+                "  if (!app) return 'INSPECT: no ytd-app';"
+                "  var sr = app.shadowRoot;"
+                "  var s = 'INSPECT ytd-app shadowRoot=' + (sr ? 'yes' : 'no') + ' children=' + (sr ? sr.childNodes.length : 0);"
+                "  if (sr && sr.childNodes.length > 0) {"
+                "    var first = sr.childNodes[0];"
+                "    s += ' first=' + (first.tagName || first.nodeName);"
+                "  }"
+                "  s += ' upgraded=' + (app.__CE_upgraded ? 'yes' : 'no');"
+                "  return s;"
+                "})();";
+            GCValue inspect_ret = JS_Eval(g_ctx, inspect_app_js, strlen(inspect_app_js), "<inspect_app>", JS_EVAL_TYPE_GLOBAL);
+            if (!JS_IsException(inspect_ret) && !JS_IsUndefined(inspect_ret)) {
+                const char *s = JS_ToCString(g_ctx, inspect_ret);
+                if (s) fprintf(stderr, "%s\n", s);
+            } else if (JS_HasException(g_ctx)) {
+                GCValue exc = JS_GetException(g_ctx);
+                GCValue msg = JS_GetPropertyStr(g_ctx, exc, "message");
+                const char *m = JS_ToCString(g_ctx, msg);
+                fprintf(stderr, "[INSPECT] exception: %s\n", m ? m : "?");
+            }
         }
 
         // ytInitialData injection removed: the page is expected to fetch its

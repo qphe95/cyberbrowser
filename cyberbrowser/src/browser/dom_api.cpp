@@ -63,6 +63,16 @@ GCValue js_node_getRootNode_real(JSContextHandle ctx, GCValue this_val, int argc
 GCValue js_node_get_ownerDocument(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_querySelector_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_querySelectorAll_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_element_append(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_element_prepend(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_element_replaceChildren(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_element_before(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_element_after(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_element_replaceWith(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_element_get_firstElementChild(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_element_get_lastElementChild(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_element_get_children(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_element_get_childElementCount(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_document_get_adopted_style_sheets(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_document_set_adopted_style_sheets(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 
@@ -882,7 +892,7 @@ GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc
     }
 
     // Enqueue upgrade reactions for any custom elements in the inserted subtree.
-    // The HTML spec upgrades elements when they are inserted into a document
+    // The HTML spec upgrades elements when they are inserted into the document
     // (or when a definition is registered), not just on explicit upgrade() calls.
     js_cyber_ce_enqueue_upgrade_subtree(ctx, child);
     js_cyber_ce_schedule_flush(ctx);
@@ -988,6 +998,129 @@ GCValue js_node_removeChild_real(JSContextHandle ctx, GCValue this_val, int argc
     mo_notify_child_list(ctx, this_val, added_arr2, removed_arr2);
 
     return child;
+}
+
+// Convert a ParentNode method argument to a node.  DOM nodes are used as-is;
+// strings become text nodes in the owner's document.
+static GCValue parent_node_arg_to_node(JSContextHandle ctx, GCValue parent, GCValue arg) {
+    if (JS_IsString(arg)) {
+        GCValue owner_doc = JS_GetPropertyStr(ctx, parent, "ownerDocument");
+        GCValue doc = JS_IsObject(owner_doc) ? owner_doc : JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document");
+        GCValue create_args[1] = { arg };
+        GCValue text = JS_UNDEFINED;
+        if (JS_IsObject(doc)) {
+            GCValue create_fn = JS_GetPropertyStr(ctx, doc, "createTextNode");
+            if (JS_IsFunction(ctx, create_fn)) {
+                text = JS_Call(ctx, create_fn, doc, 1, create_args);
+            }
+        }
+        return JS_IsObject(text) ? text : JS_NULL;
+    }
+    if (JS_IsObject(arg)) return arg;
+    return JS_NULL;
+}
+
+// Element/DocumentFragment.append(...nodes) and .prepend(...nodes)
+static GCValue js_parent_node_append_or_prepend(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv, bool prepend) {
+    if (argc < 1) return JS_UNDEFINED;
+
+    // Build a list of nodes to insert, expanding DocumentFragment arguments.
+    std::vector<GCValue> to_insert;
+    for (int i = 0; i < argc; i++) {
+        GCValue node = parent_node_arg_to_node(ctx, this_val, argv[i]);
+        if (JS_IsNull(node) || JS_IsUndefined(node)) continue;
+        if (is_document_fragment_node(ctx, node)) {
+            std::vector<GCValue> frag_children = collect_fragment_children(ctx, node);
+            for (GCValue c : frag_children) to_insert.push_back(c);
+        } else {
+            to_insert.push_back(node);
+        }
+    }
+
+    if (to_insert.empty()) return JS_UNDEFINED;
+
+    if (prepend) {
+        GCValue first = js_node_get_firstChild(ctx, this_val, 0, NULL);
+        for (GCValue node : to_insert) {
+            GCValue args[2] = { node, first };
+            js_node_insertBefore_real(ctx, this_val, 2, args);
+            first = node;
+        }
+    } else {
+        for (GCValue node : to_insert) {
+            GCValue args[1] = { node };
+            js_node_appendChild_real(ctx, this_val, 1, args);
+        }
+    }
+    return JS_UNDEFINED;
+}
+
+GCValue js_element_append(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    return js_parent_node_append_or_prepend(ctx, this_val, argc, argv, false);
+}
+
+GCValue js_element_prepend(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    return js_parent_node_append_or_prepend(ctx, this_val, argc, argv, true);
+}
+
+GCValue js_element_replaceChildren(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    // Remove all existing children.
+    GCValue child = js_node_get_firstChild(ctx, this_val, 0, NULL);
+    while (!JS_IsNull(child) && !JS_IsUndefined(child)) {
+        GCValue next = js_node_get_nextSibling(ctx, this_val, 0, NULL);
+        GCValue rem_args[1] = { child };
+        js_node_removeChild_real(ctx, this_val, 1, rem_args);
+        child = next;
+    }
+    // Append new nodes.
+    return js_parent_node_append_or_prepend(ctx, this_val, argc, argv, false);
+}
+
+// ChildNode methods: before/after/replaceWith
+static GCValue js_child_node_insert(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv, int mode) {
+    if (argc < 1) return JS_UNDEFINED;
+    GCValue parent = JS_GetPropertyStr(ctx, this_val, "parentNode");
+    if (JS_IsNull(parent) || JS_IsUndefined(parent) || !JS_IsObject(parent)) return JS_UNDEFINED;
+
+    GCValue ref = this_val;
+    if (mode == 1) { // after
+        ref = js_node_get_nextSibling(ctx, this_val, 0, NULL);
+    }
+
+    std::vector<GCValue> to_insert;
+    for (int i = 0; i < argc; i++) {
+        GCValue node = parent_node_arg_to_node(ctx, parent, argv[i]);
+        if (JS_IsNull(node) || JS_IsUndefined(node)) continue;
+        if (is_document_fragment_node(ctx, node)) {
+            std::vector<GCValue> frag_children = collect_fragment_children(ctx, node);
+            for (GCValue c : frag_children) to_insert.push_back(c);
+        } else {
+            to_insert.push_back(node);
+        }
+    }
+
+    for (GCValue node : to_insert) {
+        GCValue args[2] = { node, ref };
+        js_node_insertBefore_real(ctx, parent, 2, args);
+    }
+
+    if (mode == 2) { // replaceWith
+        GCValue rem_args[1] = { this_val };
+        js_node_removeChild_real(ctx, parent, 1, rem_args);
+    }
+    return JS_UNDEFINED;
+}
+
+GCValue js_element_before(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    return js_child_node_insert(ctx, this_val, argc, argv, 0);
+}
+
+GCValue js_element_after(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    return js_child_node_insert(ctx, this_val, argc, argv, 1);
+}
+
+GCValue js_element_replaceWith(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    return js_child_node_insert(ctx, this_val, argc, argv, 2);
 }
 
 // Real insertBefore implementation
@@ -2452,7 +2585,6 @@ GCValue js_element_querySelector_real(JSContextHandle ctx, GCValue this_val, int
     
     // Start from this element
     GCValue result = query_selector_recursive(ctx, this_val, selector);
-    
     return result;
 }
 
