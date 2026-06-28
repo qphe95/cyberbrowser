@@ -2147,12 +2147,12 @@ GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int ar
     if (!JS_IsNull(elem) && !JS_IsUndefined(elem)) {
         dom_node_set_owner_document(ctx, elem, this_val);
 
-        // Disabled synchronous upgrade in createElement: it causes fatal
-        // recursion/stack exhaustion when Polymer constructors stamp templates
-        // while createElement is still on the C stack.  Upgrades are instead
-        // queued when the element is inserted into the document (or via
-        // customElements.upgrade) and flushed from a job.
-#if 0
+        // Synchronously upgrade script-created custom elements when a definition
+        // is already registered.  This matches the HTML spec and is required for
+        // Polymer templates: stamping <ytd-app> must create and upgrade child
+        // custom elements such as <ytd-page-manager> before the parent's
+        // connectedCallback runs.  A depth guard prevents runaway recursion when
+        // constructors stamp deep templates.
         if (tag && strchr(tag, '-') && strcasecmp(tag, "custom-style") != 0) {
             GCValue global_obj = JS_GetGlobalObject(ctx);
             GCValue customElements = JS_GetPropertyStr(ctx, global_obj, "customElements");
@@ -2162,17 +2162,20 @@ GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int ar
                     GCValue tag_val = JS_NewString(ctx, tag);
                     GCValue ctor = JS_Call(ctx, get_fn, customElements, 1, &tag_val);
                     if (!JS_IsException(ctor) && !JS_IsNull(ctor) && !JS_IsUndefined(ctor) && JS_IsFunction(ctx, ctor)) {
-                        js_cyber_ce_enqueue_upgrade(ctx, JS_UNDEFINED, 1, &elem);
-                        GCValue flushing = JS_GetPropertyStr(ctx, global_obj, "__cyber_ce_flushing");
-                        if (!JS_ToBool(ctx, flushing)) {
-                            js_cyber_ce_flush_reactions(ctx, JS_UNDEFINED, 0, NULL);
+                        GCValue upgraded = JS_GetPropertyStr(ctx, elem, "__CE_upgraded");
+                        if (!JS_ToBool(ctx, upgraded)) {
+                            if (js_cyber_ce_upgrade_depth() < 8) {
+                                js_cyber_upgrade_element(ctx, JS_UNDEFINED, 1, &elem);
+                            } else {
+                                js_cyber_ce_enqueue_upgrade(ctx, JS_UNDEFINED, 1, &elem);
+                                js_cyber_ce_schedule_flush(ctx);
+                            }
                         }
                     }
                     if (JS_IsException(ctor)) JS_GetException(ctx);
                 }
             }
         }
-#endif
     }
     
     return elem;

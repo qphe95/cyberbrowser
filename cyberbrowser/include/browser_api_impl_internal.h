@@ -265,6 +265,7 @@ GCValue js_element_get_attribute_names(JSContextHandle ctx, GCValue this_val, in
 GCValue js_element_matches(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_closest(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_cyber_upgrade_element(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+int js_cyber_ce_upgrade_depth(void);
 GCValue js_cyber_ce_enqueue_upgrade(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 void js_cyber_ce_enqueue_upgrade_subtree(JSContextHandle ctx, GCValue root);
 void js_cyber_ce_enqueue_callback(JSContextHandle ctx, GCValue elem, const char *name);

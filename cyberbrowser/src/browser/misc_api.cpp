@@ -385,6 +385,10 @@ static int g_upgrade_ctor_start = 0;
 static const int g_upgrade_ctor_budget = 5000;
 static int g_ce_upgrade_depth = 0;
 static const int g_ce_upgrade_max_depth = 8;
+
+extern "C" int js_cyber_ce_upgrade_depth(void) {
+    return g_ce_upgrade_depth;
+}
 struct CEUpgradeDepthGuard {
     CEUpgradeDepthGuard() { g_ce_upgrade_depth++; }
     ~CEUpgradeDepthGuard() { g_ce_upgrade_depth--; }

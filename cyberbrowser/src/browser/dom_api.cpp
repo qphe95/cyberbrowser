@@ -140,6 +140,19 @@ static void invoke_custom_element_callback(JSContextHandle ctx, GCValue elem, co
     js_cyber_ce_enqueue_callback(ctx, elem, name);
 }
 
+// Flush the custom-element reaction queue synchronously when we are at the
+// top of a DOM operation.  This matches the HTML spec CEReactions behaviour:
+// reactions queued by appendChild/insertBefore are flushed before the
+// operation returns, so a parent constructor can rely on its children being
+// upgraded and connected.
+static void dom_flush_ce_reactions(JSContextHandle ctx) {
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue flushing = JS_GetPropertyStr(ctx, global, "__cyber_ce_flushing");
+    if (!JS_ToBool(ctx, flushing)) {
+        js_cyber_ce_flush_reactions(ctx, JS_UNDEFINED, 0, NULL);
+    }
+}
+
 static void invoke_attribute_changed(JSContextHandle ctx, GCValue elem,
                                      const char *name, const char *old_val,
                                      const char *new_val) {
@@ -1081,7 +1094,7 @@ GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc
     // The HTML spec upgrades elements when they are inserted into the document
     // (or when a definition is registered), not just on explicit upgrade() calls.
     js_cyber_ce_enqueue_upgrade_subtree(ctx, child);
-    js_cyber_ce_schedule_flush(ctx);
+    dom_flush_ce_reactions(ctx);
 
     // Load external scripts that are inserted dynamically after the initial
     // page load (e.g. YouTube's module loader).
@@ -1180,7 +1193,7 @@ GCValue js_node_removeChild_real(JSContextHandle ctx, GCValue this_val, int argc
             invoke_custom_element_callback(ctx, child, "disconnectedCallback");
         }
     }
-    js_cyber_ce_schedule_flush(ctx);
+    dom_flush_ce_reactions(ctx);
 
     GCValue added_arr2 = JS_NewArray(ctx);
     JS_SetPropertyUint32(ctx, added_arr2, 0, child);
@@ -1399,7 +1412,7 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
 
     // Enqueue upgrade reactions for any custom elements in the inserted subtree.
     js_cyber_ce_enqueue_upgrade_subtree(ctx, new_child);
-    js_cyber_ce_schedule_flush(ctx);
+    dom_flush_ce_reactions(ctx);
 
     // Load external scripts that are inserted dynamically (e.g. YouTube's
     // player module loader uses head.insertBefore(script, head.firstChild)).

@@ -1784,7 +1784,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // Note: node_proto is kept alive for adding methods below
     
     // HTMLElement constructor
-    GCValue html_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLElement", 0, JS_CFUNC_constructor, 0);
+    GCValue html_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLElement", 0, JS_CFUNC_constructor_or_func, 0);
     GCValue html_element_proto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, html_element_proto, "constructor", html_element_ctor);
     // HTMLElement.prototype -> Element.prototype
@@ -1839,7 +1839,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // Keep html_element_ctor and html_element_proto for document.body
     
     // HTMLDivElement constructor (needed by Polymer/TypeScript decorator metadata)
-    GCValue div_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLDivElement", 0, JS_CFUNC_constructor, 0);
+    GCValue div_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLDivElement", 0, JS_CFUNC_constructor_or_func, 0);
     GCValue div_element_proto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, div_element_proto, "constructor", div_element_ctor);
     JS_SetPrototype(ctx, div_element_proto, html_element_proto);
@@ -1848,7 +1848,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, window, "HTMLDivElement", div_element_ctor);
     
     // HTMLImageElement constructor (needed by Polymer/TypeScript decorator metadata)
-    GCValue img_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLImageElement", 0, JS_CFUNC_constructor, 0);
+    GCValue img_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLImageElement", 0, JS_CFUNC_constructor_or_func, 0);
     GCValue img_element_proto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, img_element_proto, "constructor", img_element_ctor);
     JS_SetPrototype(ctx, img_element_proto, html_element_proto);
@@ -1857,7 +1857,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, window, "HTMLImageElement", img_element_ctor);
     
     // HTMLInputElement constructor (needed by Polymer/TypeScript decorator metadata)
-    GCValue input_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLInputElement", 0, JS_CFUNC_constructor, 0);
+    GCValue input_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLInputElement", 0, JS_CFUNC_constructor_or_func, 0);
     GCValue input_element_proto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, input_element_proto, "constructor", input_element_ctor);
     JS_SetPrototype(ctx, input_element_proto, html_element_proto);
@@ -1866,7 +1866,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, window, "HTMLInputElement", input_element_ctor);
     
     // HTMLFormElement constructor (needed by Polymer/TypeScript decorator metadata)
-    GCValue form_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLFormElement", 0, JS_CFUNC_constructor, 0);
+    GCValue form_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLFormElement", 0, JS_CFUNC_constructor_or_func, 0);
     GCValue form_element_proto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, form_element_proto, "constructor", form_element_ctor);
     JS_SetPrototype(ctx, form_element_proto, html_element_proto);
@@ -1875,7 +1875,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, window, "HTMLFormElement", form_element_ctor);
     
     // HTMLIFrameElement constructor (needed by Polymer/TypeScript decorator metadata)
-    GCValue iframe_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLIFrameElement", 0, JS_CFUNC_constructor, 0);
+    GCValue iframe_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLIFrameElement", 0, JS_CFUNC_constructor_or_func, 0);
     GCValue iframe_element_proto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, iframe_element_proto, "constructor", iframe_element_ctor);
     JS_SetPrototype(ctx, iframe_element_proto, html_element_proto);
@@ -1884,7 +1884,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, window, "HTMLIFrameElement", iframe_element_ctor);
     
     // HTMLTextAreaElement constructor (needed by Polymer/TypeScript decorator metadata)
-    GCValue textarea_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLTextAreaElement", 0, JS_CFUNC_constructor, 0);
+    GCValue textarea_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLTextAreaElement", 0, JS_CFUNC_constructor_or_func, 0);
     GCValue textarea_element_proto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, textarea_element_proto, "constructor", textarea_element_ctor);
     JS_SetPrototype(ctx, textarea_element_proto, html_element_proto);
@@ -1893,7 +1893,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, window, "HTMLTextAreaElement", textarea_element_ctor);
     
     // HTMLCanvasElement constructor (needed by Polymer/TypeScript decorator metadata)
-    GCValue canvas_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLCanvasElement", 0, JS_CFUNC_constructor, 0);
+    GCValue canvas_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLCanvasElement", 0, JS_CFUNC_constructor_or_func, 0);
     GCValue canvas_element_proto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, canvas_element_proto, "constructor", canvas_element_ctor);
     JS_SetPrototype(ctx, canvas_element_proto, html_element_proto);
@@ -1902,7 +1902,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, window, "HTMLCanvasElement", canvas_element_ctor);
     
     // HTMLAnchorElement constructor
-    GCValue anchor_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLAnchorElement", 0, JS_CFUNC_constructor, 0);
+    GCValue anchor_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLAnchorElement", 0, JS_CFUNC_constructor_or_func, 0);
     GCValue anchor_element_proto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, anchor_element_proto, "constructor", anchor_element_ctor);
     JS_SetPrototype(ctx, anchor_element_proto, html_element_proto);
@@ -1911,7 +1911,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, window, "HTMLAnchorElement", anchor_element_ctor);
     
     // HTMLButtonElement constructor
-    GCValue button_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLButtonElement", 0, JS_CFUNC_constructor, 0);
+    GCValue button_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLButtonElement", 0, JS_CFUNC_constructor_or_func, 0);
     GCValue button_element_proto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, button_element_proto, "constructor", button_element_ctor);
     JS_SetPrototype(ctx, button_element_proto, html_element_proto);
@@ -1920,7 +1920,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, window, "HTMLButtonElement", button_element_ctor);
     
     // HTMLLinkElement constructor
-    GCValue link_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLLinkElement", 0, JS_CFUNC_constructor, 0);
+    GCValue link_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLLinkElement", 0, JS_CFUNC_constructor_or_func, 0);
     GCValue link_element_proto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, link_element_proto, "constructor", link_element_ctor);
     JS_SetPrototype(ctx, link_element_proto, html_element_proto);
@@ -1929,7 +1929,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, window, "HTMLLinkElement", link_element_ctor);
     
     // HTMLSelectElement constructor
-    GCValue select_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLSelectElement", 0, JS_CFUNC_constructor, 0);
+    GCValue select_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLSelectElement", 0, JS_CFUNC_constructor_or_func, 0);
     GCValue select_element_proto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, select_element_proto, "constructor", select_element_ctor);
     JS_SetPrototype(ctx, select_element_proto, html_element_proto);
@@ -1938,7 +1938,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, window, "HTMLSelectElement", select_element_ctor);
     
     // HTMLOptionElement constructor
-    GCValue option_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLOptionElement", 0, JS_CFUNC_constructor, 0);
+    GCValue option_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLOptionElement", 0, JS_CFUNC_constructor_or_func, 0);
     GCValue option_element_proto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, option_element_proto, "constructor", option_element_ctor);
     JS_SetPrototype(ctx, option_element_proto, html_element_proto);
@@ -1947,7 +1947,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, window, "HTMLOptionElement", option_element_ctor);
     
     // HTMLStyleElement constructor
-    GCValue style_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLStyleElement", 0, JS_CFUNC_constructor, 0);
+    GCValue style_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLStyleElement", 0, JS_CFUNC_constructor_or_func, 0);
     GCValue style_element_proto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, style_element_proto, "constructor", style_element_ctor);
     JS_SetPrototype(ctx, style_element_proto, html_element_proto);
@@ -1956,7 +1956,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, window, "HTMLStyleElement", style_element_ctor);
     
     // HTMLUnknownElement constructor
-    GCValue unknown_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLUnknownElement", 0, JS_CFUNC_constructor, 0);
+    GCValue unknown_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLUnknownElement", 0, JS_CFUNC_constructor_or_func, 0);
     GCValue unknown_element_proto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, unknown_element_proto, "constructor", unknown_element_ctor);
     JS_SetPrototype(ctx, unknown_element_proto, html_element_proto);
@@ -1965,7 +1965,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, window, "HTMLUnknownElement", unknown_element_ctor);
     
     // HTMLFencedFrameElement constructor
-    GCValue fenced_frame_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLFencedFrameElement", 0, JS_CFUNC_constructor, 0);
+    GCValue fenced_frame_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLFencedFrameElement", 0, JS_CFUNC_constructor_or_func, 0);
     GCValue fenced_frame_element_proto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, fenced_frame_element_proto, "constructor", fenced_frame_element_ctor);
     JS_SetPrototype(ctx, fenced_frame_element_proto, html_element_proto);
@@ -1974,7 +1974,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, window, "HTMLFencedFrameElement", fenced_frame_element_ctor);
     
     // SVGElement constructor (needed by Polymer/TypeScript decorator metadata)
-    GCValue svg_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "SVGElement", 0, JS_CFUNC_constructor, 0);
+    GCValue svg_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "SVGElement", 0, JS_CFUNC_constructor_or_func, 0);
     GCValue svg_element_proto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, svg_element_proto, "constructor", svg_element_ctor);
     JS_SetPrototype(ctx, svg_element_proto, html_element_proto);
