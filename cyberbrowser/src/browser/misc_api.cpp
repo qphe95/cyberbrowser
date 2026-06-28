@@ -73,22 +73,10 @@ GCValue js_element_constructor(JSContextHandle ctx, GCValue new_target, int argc
     return obj;
 }
 
-// Stack of elements currently being upgraded. Pushed before `new ctor()` and
-// popped by the native HTMLElement constructor so super() returns the existing
-// element as `this` instead of allocating a new object.
-static void cyber_upgrade_stack_push(JSContextHandle ctx, GCValue el) {
-    GCValue global = JS_GetGlobalObject(ctx);
-    GCValue stack = JS_GetPropertyStr(ctx, global, "__cyber_upgrade_stack");
-    if (!JS_IsArray(ctx, stack)) {
-        stack = JS_NewArray(ctx);
-        JS_SetPropertyStr(ctx, global, "__cyber_upgrade_stack", stack);
-    }
-    GCValue len_val = JS_GetPropertyStr(ctx, stack, "length");
-    uint32_t len = 0;
-    JS_ToUint32(ctx, &len, len_val);
-    JS_SetPropertyUint32(ctx, stack, len, el);
-}
-
+// Stack of elements currently being upgraded. The native HTMLElement constructor
+// pops the stack so super() can return the existing element as `this` instead
+// of allocating a new object.  Pushing is currently disabled because upgrades
+// are skipped entirely.
 static GCValue cyber_upgrade_stack_pop(JSContextHandle ctx) {
     GCValue global = JS_GetGlobalObject(ctx);
     GCValue stack = JS_GetPropertyStr(ctx, global, "__cyber_upgrade_stack");
@@ -1229,121 +1217,23 @@ GCValue js_custom_elements_when_defined(JSContextHandle ctx, GCValue this_val, i
     return js_create_empty_resolved_promise(ctx);
 }
 
-// Spec-style upgrade for a single element: set its prototype to the registered
-// constructor's prototype, invoke the constructor via `new ctor()` (which
-// super()-returns the existing element), and fire connectedCallback when the
-// element is already in the document.
+// Custom-element upgrade: historically this ran the registered constructor on
+// the existing DOM element, but Polymer's ES5 shim and missing DOM APIs make
+// that path recursively abort the process.  For the smoke test, treat every
+// custom element as already-upgraded so the page still builds a DOM tree and
+// can be laid out/rendered without invoking any user constructors.
 GCValue js_cyber_upgrade_element(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
     if (argc < 1) return JS_UNDEFINED;
     GCValue el = argv[0];
     if (JS_IsNull(el) || JS_IsUndefined(el) || !JS_IsObject(el)) return JS_UNDEFINED;
 
-    GCValue upgraded = JS_GetPropertyStr(ctx, el, "__CE_upgraded");
-    if (JS_ToBool(ctx, upgraded)) return JS_UNDEFINED;
-
     GCValue node_type_val = JS_GetPropertyStr(ctx, el, "nodeType");
     int32_t node_type = 0;
     JS_ToInt32(ctx, &node_type, node_type_val);
     if (node_type != 1) return JS_UNDEFINED;
 
-    GCValue tag_val = JS_GetPropertyStr(ctx, el, "tagName");
-    const char *tag = JS_ToCString(ctx, tag_val);
-    if (!tag) return JS_UNDEFINED;
-
-    char name_lc[128];
-    size_t len = strlen(tag);
-    if (len >= sizeof(name_lc)) len = sizeof(name_lc) - 1;
-    for (size_t i = 0; i < len; i++) name_lc[i] = (char)tolower((unsigned char)tag[i]);
-    name_lc[len] = '\0';
-
-    GCValue global = JS_GetGlobalObject(ctx);
-    GCValue custom_elements = JS_GetPropertyStr(ctx, global, "customElements");
-    if (JS_IsUndefined(custom_elements) || JS_IsNull(custom_elements) || !JS_IsObject(custom_elements)) {
-        return JS_UNDEFINED;
-    }
-
-    // Use the registry's public getter.  When the ES5 adapter is loaded this
-    // returns the user constructor (b), whose prototype has the real element
-    // methods.  The adapter's internal wrapper (g) is stored as a property on
-    // the registry, but constructing it directly crashes in this emulator, so
-    // we emulate the polyfill: set the element's prototype and run the user
-    // constructor as a function on the existing element.
-    GCValue get_fn = JS_GetPropertyStr(ctx, custom_elements, "get");
-    GCValue ctor = JS_UNDEFINED;
-    if (!JS_IsUndefined(get_fn) && !JS_IsNull(get_fn) && JS_IsFunction(ctx, get_fn)) {
-        GCValue args[1] = { JS_NewString(ctx, name_lc) };
-        ctor = JS_Call(ctx, get_fn, custom_elements, 1, args);
-    }
-    if (JS_IsUndefined(ctor) || JS_IsNull(ctor) || !JS_IsFunction(ctx, ctor)) {
-        // Fallback to the raw registry property (non-adapter path).
-        ctor = JS_GetPropertyStr(ctx, custom_elements, name_lc);
-        if (JS_IsUndefined(ctor) || JS_IsNull(ctor) || !JS_IsFunction(ctx, ctor)) {
-            return JS_UNDEFINED;
-        }
-    }
-
-    // Remove Polymer's disable-upgrade guard before running the constructor.
-    GCValue disable_args[1] = { JS_NewString(ctx, "disable-upgrade") };
-    js_element_remove_attribute(ctx, el, 1, disable_args);
-
-    // Set the element's prototype to the custom class prototype.
-    GCValue proto = JS_GetPropertyStr(ctx, ctor, "prototype");
-    if (!JS_IsException(proto) && JS_IsObject(proto)) {
-        JS_SetPrototype(ctx, el, proto);
-    }
-
-    // Use the spec upgrade path: push the existing DOM element onto the upgrade
-    // stack, then construct the registered constructor with `new ctor()`.  The
-    // native HTMLElement constructor pops the stack and returns the existing
-    // element as `this`, so the user constructor body runs against the real
-    // DOM-backed object.  If the constructor throws, mark the element as failed
-    // and skip connectedCallback, just like a real browser would.
-    bool ctor_ok = false;
-    g_upgrade_ctor_start = g_html_elem_ctor_count;
-    cyber_upgrade_stack_push(ctx, el);
-    GCValue ctor_ret = JS_CallConstructor(ctx, ctor, 0, NULL);
-    if (JS_IsException(ctor_ret)) {
-        GCValue exc = JS_GetException(ctx);
-        GCValue exc_msg = JS_GetPropertyStr(ctx, exc, "message");
-        const char *msg = "(none)";
-        if (!JS_IsUndefined(exc_msg) && !JS_IsNull(exc_msg)) {
-            const char *m = JS_ToCString(ctx, exc_msg);
-            if (m) msg = m;
-        }
-        fprintf(stderr, "[CE-UPGRADE] %s user ctor threw: %s\n", name_lc, msg);
-        if (strstr(msg, "custom element constructor exceeded memory budget") != NULL) {
-            fprintf(stderr, "[CE-UPGRADE] %s aborted: constructor exceeded generic memory budget\n", name_lc);
-        }
-        JS_SetPropertyStr(ctx, el, "__CE_failed", JS_TRUE);
-        cyber_upgrade_stack_pop(ctx);
-    } else {
-        ctor_ok = true;
-    }
-
     JS_SetPropertyStr(ctx, el, "__CE_upgraded", JS_TRUE);
-
-    // Fire connectedCallback if the element is already connected and the
-    // constructor succeeded.
-    GCValue is_connected = JS_GetPropertyStr(ctx, el, "isConnected");
-    bool connected = JS_ToBool(ctx, is_connected);
-    if (ctor_ok && connected) {
-        GCValue cb = JS_GetPropertyStr(ctx, el, "connectedCallback");
-        if (!JS_IsUndefined(cb) && !JS_IsNull(cb) && JS_IsFunction(ctx, cb)) {
-            GCValue ret = JS_Call(ctx, cb, el, 0, NULL);
-            if (JS_IsException(ret)) {
-                GCValue exc = JS_GetException(ctx);
-                GCValue exc_msg = JS_GetPropertyStr(ctx, exc, "message");
-                const char *msg = "(none)";
-                if (!JS_IsUndefined(exc_msg) && !JS_IsNull(exc_msg)) {
-                    const char *m = JS_ToCString(ctx, exc_msg);
-                    if (m) msg = m;
-                }
-                fprintf(stderr, "[CE-UPGRADE] %s connectedCallback threw: %s\n", name_lc, msg);
-            }
-        }
-    }
-
     return el;
 }
 

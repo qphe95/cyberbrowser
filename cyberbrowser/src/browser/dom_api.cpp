@@ -1489,9 +1489,10 @@ void dom_node_set_owner_document(JSContextHandle ctx, GCValue node, GCValue doc)
     if (dom_node.valid()) {
         dom_node.set_owner_document(doc);
     }
-    // Also set as own property for code that reads it before the getter is available
-    // or for nodes without DOMNode data.
-    JS_SetPropertyStr(ctx, node, "ownerDocument", doc);
+    // Define an own writable data property so polyfills that assign to
+    // ownerDocument do not trip over the read-only getter on Node.prototype.
+    JS_DefinePropertyValueStr(ctx, node, "ownerDocument", doc,
+                              JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
 }
 
 GCValue js_node_get_ownerDocument(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {

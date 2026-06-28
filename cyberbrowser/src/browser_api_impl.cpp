@@ -2593,7 +2593,9 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_SetPropertyStr(ctx, doc_style, "transformOrigin", JS_NewString(ctx, ""));
         JS_SetPropertyStr(ctx, doc_style, "perspective", JS_NewString(ctx, ""));
         JS_SetPropertyStr(ctx, doc_style, "perspectiveOrigin", JS_NewString(ctx, ""));
-        JS_SetPropertyStr(ctx, doc_element, "style", doc_style);
+        // Element.prototype has a read-only style getter; define an own property.
+        JS_DefinePropertyValueStr(ctx, doc_element, "style", doc_style,
+                                  JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
     }
     
     JS_SetPropertyStr(ctx, document, "documentElement", doc_element);
@@ -2635,7 +2637,9 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // Add style object for body (commonly accessed by page scripts)
     GCValue body_style = JS_NewObject(ctx);
     if (!JS_IsException(body_style)) {
-        JS_SetPropertyStr(ctx, body_element, "style", body_style);
+        // Element.prototype has a read-only style getter; define an own property.
+        JS_DefinePropertyValueStr(ctx, body_element, "style", body_style,
+                                  JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
     }
     
     JS_SetPropertyStr(ctx, document, "body", body_element);
@@ -2657,7 +2661,9 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // Add style object for head (commonly accessed by page scripts)
     GCValue head_style = JS_NewObject(ctx);
     if (!JS_IsException(head_style)) {
-        JS_SetPropertyStr(ctx, head_element, "style", head_style);
+        // Element.prototype has a read-only style getter; define an own property.
+        JS_DefinePropertyValueStr(ctx, head_element, "style", head_style,
+                                  JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
     }
     
     JS_SetPropertyStr(ctx, document, "head", head_element);
@@ -3590,6 +3596,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
             "(function(){"
             "  window.__cyber_enqueueUpgradeAll = function(name) {"
             "    if (!window.customElements || !document) return;"
+            "    if (name === 'custom-style') return;"
             "    var ctor = window.customElements.get(name);"
             "    if (!ctor || !ctor.prototype) return;"
             "    var list = document.getElementsByTagName(name);"
@@ -3603,9 +3610,10 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
             "    var walk = function(node) {"
             "      if (node.nodeType === 1) {"
             "        var tag = node.tagName;"
-            "        if (tag && tag.indexOf('-') >= 0 && !node.__CE_upgraded) {"
+            "        if (tag && tag.indexOf('-') >= 0 && !node.__CE_upgraded && tag !== 'CUSTOM-STYLE') {"
             "          queue.push(node);"
             "        }"
+            "        if (tag === 'CUSTOM-STYLE') { node.__CE_upgraded = true; }"
             "        var children = node.childNodes;"
             "        for (var i = 0; i < children.length; i++) walk(children[i]);"
             "      }"

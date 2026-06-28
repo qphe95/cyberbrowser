@@ -685,7 +685,7 @@ int main(int argc, char *argv[]) {
                 printf("DOM nodes: %d\n", doc->array.count);
                 print_body_snippet(doc);
 
-                render_document_to_jpg(doc, image_cache, "page_screenshot.jpg");
+                render_document_to_jpg(doc, image_cache, "youtube_screenshot.jpg");
             } else {
                 printf("WARNING: failed to rebuild native document from JS DOM\n");
             }

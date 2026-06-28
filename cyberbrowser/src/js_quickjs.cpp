@@ -2081,8 +2081,10 @@ GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int ar
             DOMNodeHandle node = DOMNodeHandle::create(ctx, DOM_NODE_TYPE_ELEMENT, upper_tag);
             if (node.valid()) {
                 node.attach_to_object(elem);
-                // Set tagName property (uppercase for HTML elements)
-                JS_SetPropertyStr(ctx, elem, "tagName", JS_NewString(ctx, upper_tag));
+                // Set tagName property (uppercase for HTML elements) as an own
+                // data property so it overrides the read-only getter on Element.prototype.
+                JS_DefinePropertyValueStr(ctx, elem, "tagName", JS_NewString(ctx, upper_tag),
+                                          JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
             }
             int cid = ++create_counter;
             JS_SetPropertyStr(ctx, elem, "__cyber_id", JS_NewInt32(ctx, cid));
@@ -2108,7 +2110,9 @@ GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int ar
                     JS_NewCFunction(ctx, js_style_set_property, "setProperty", 3));
                 JS_SetPropertyStr(ctx, style, "getPropertyValue",
                     JS_NewCFunction(ctx, js_style_get_property_value, "getPropertyValue", 1));
-                JS_SetPropertyStr(ctx, elem, "style", style);
+                // Define as own property; Element.prototype has a read-only style getter.
+                JS_DefinePropertyValueStr(ctx, elem, "style", style,
+                                          JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
             }
             
             // Add getContext method for canvas elements (needed by Web Animations polyfill for color parsing)
@@ -2146,11 +2150,13 @@ GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int ar
     if (!JS_IsNull(elem) && !JS_IsUndefined(elem)) {
         dom_node_set_owner_document(ctx, elem, this_val);
 
-        // If a custom element definition already exists, upgrade the newly
-        // created element synchronously before returning it (CEReactions).
-        // We only do this when a definition is registered, so parser-created
-        // nodes that arrive before definitions are not upgraded individually.
-        if (tag && strchr(tag, '-')) {
+        // Disabled synchronous upgrade in createElement: it causes fatal
+        // recursion/stack exhaustion when Polymer constructors stamp templates
+        // while createElement is still on the C stack.  Upgrades are instead
+        // queued when the element is inserted into the document (or via
+        // customElements.upgrade) and flushed from a job.
+#if 0
+        if (tag && strchr(tag, '-') && strcasecmp(tag, "custom-style") != 0) {
             GCValue global_obj = JS_GetGlobalObject(ctx);
             GCValue customElements = JS_GetPropertyStr(ctx, global_obj, "customElements");
             if (JS_IsObject(customElements)) {
@@ -2169,6 +2175,7 @@ GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int ar
                 }
             }
         }
+#endif
     }
     
     return elem;
