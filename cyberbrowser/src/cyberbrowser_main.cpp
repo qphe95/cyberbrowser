@@ -41,7 +41,7 @@ extern "C" void timer_set_idle_deadline(unsigned long long deadline_ms);
 
 /* Default page loaded by the smoke-test executable. */
 static const char DEFAULT_START_URL[] = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
-const char *g_cyber_start_url = DEFAULT_START_URL;
+extern const char *g_cyber_start_url;
 
 #ifdef _WIN32
 static LONG WINAPI unhandled_exception_filter(EXCEPTION_POINTERS *ep) {
@@ -583,6 +583,9 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     printf("init_browser_context ok\n");
+
+    /* Make the start URL available to the DOM / URL resolution code. */
+    g_cyber_start_url = DEFAULT_START_URL;
 
     /* Reflect the start URL in window.location so the engine reports the
      * correct origin, host, and pathname instead of a hardcoded default.

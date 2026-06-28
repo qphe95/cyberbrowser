@@ -23,7 +23,7 @@
 
 // createElement lives in js_quickjs.cpp and is used by the outerHTML setter.
 extern GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
-extern const char *g_cyber_start_url;
+const char *g_cyber_start_url = NULL;
 
 /* Global layout-invalidation flag. DOM mutation functions set this to 1 so the
  * main loop knows the native HtmlDocument is stale and must be rebuilt from the
@@ -96,15 +96,26 @@ void query_selector_all_recursive(JSContextHandle ctx, GCValue elem, const char*
 static bool dom_node_is_connected(JSContextHandle ctx, GCValue node) {
     GCValue cur = node;
     int safety = 0;
+    int debug = 0;
+    GCValue tagv = JS_GetPropertyStr(ctx, node, "tagName");
+    const char *start_tag = JS_ToCString(ctx, tagv);
+    if (start_tag && strcasecmp(start_tag, "ytd-page-manager") == 0) debug = 1;
     while (!JS_IsUndefined(cur) && !JS_IsNull(cur) && JS_IsObject(cur) && safety++ < 10000) {
         DOMNodeHandle n = get_dom_node(ctx, cur);
         if (n.valid()) {
+            if (debug) {
+                GCValue t = JS_GetPropertyStr(ctx, cur, "tagName");
+                const char *s = JS_ToCString(ctx, t);
+                fprintf(stderr, "[ISCONN] step %s type=%d\n", s ? s : "?", n.node_type());
+                JS_FreeCString(ctx, s);
+            }
             if (n.node_type() == DOM_NODE_TYPE_DOCUMENT) return true;
             // Nodes inside a template content are not connected.  A ShadowRoot
             // is also implemented as a fragment-like container, but it is
             // connected when its host element is connected.
             if (n.node_type() == DOM_NODE_TYPE_DOCUMENT_FRAGMENT) {
                 GCValue host = JS_GetPropertyStr(ctx, cur, "host");
+                if (debug) fprintf(stderr, "[ISCONN] fragment host=%d\n", JS_IsObject(host));
                 if (!JS_IsUndefined(host) && !JS_IsNull(host) && JS_IsObject(host)) {
                     cur = host;
                     continue;
@@ -113,6 +124,7 @@ static bool dom_node_is_connected(JSContextHandle ctx, GCValue node) {
             }
             cur = n.parent_node();
         } else {
+            if (debug) fprintf(stderr, "[ISCONN] no dom node; check host\n");
             // The parent may be a ShadowRoot object (not a DOMNode-backed node).
             // Continue connectivity checks from the shadow host.
             GCValue host = JS_GetPropertyStr(ctx, cur, "host");
@@ -123,6 +135,8 @@ static bool dom_node_is_connected(JSContextHandle ctx, GCValue node) {
             break;
         }
     }
+    if (debug) fprintf(stderr, "[ISCONN] not connected\n");
+    JS_FreeCString(ctx, start_tag);
     return false;
 }
 

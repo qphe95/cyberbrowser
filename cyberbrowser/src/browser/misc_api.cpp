@@ -243,7 +243,14 @@ static GCValue cyber_ce_callback_queue(JSContextHandle ctx) {
 void js_cyber_ce_enqueue_callback(JSContextHandle ctx, GCValue elem, const char *name) {
     if (JS_IsNull(elem) || JS_IsUndefined(elem) || !JS_IsObject(elem) || !name) return;
     GCValue cb = JS_GetPropertyStr(ctx, elem, name);
-    if (!JS_IsFunction(ctx, cb)) return;
+    if (!JS_IsFunction(ctx, cb)) {
+        GCValue pc = JS_GetPropertyStr(ctx, elem, "polymerController");
+        if (!JS_IsObject(pc)) return;
+        GCValue pc_cb = JS_GetPropertyStr(ctx, pc, name);
+        if (!JS_IsFunction(ctx, pc_cb)) return;
+        elem = pc;
+        cb = pc_cb;
+    }
 
     GCValue entry = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, entry, "elem", elem);
@@ -347,7 +354,18 @@ GCValue js_cyber_ce_flush_reactions(JSContextHandle ctx, GCValue this_val, int a
                 GCValue cb = JS_GetPropertyStr(ctx, elem, name);
                 if (JS_IsFunction(ctx, cb)) {
                     GCValue ret = JS_Call(ctx, cb, elem, 0, NULL);
-                    if (JS_IsException(ret)) JS_GetException(ctx);
+                    if (JS_IsException(ret)) {
+                        GCValue exc = JS_GetException(ctx);
+                        GCValue exc_msg = JS_GetPropertyStr(ctx, exc, "message");
+                        GCValue tag_val = JS_GetPropertyStr(ctx, elem, "tagName");
+                        const char *m = NULL, *tag = NULL;
+                        if (!JS_IsUndefined(exc_msg) && !JS_IsNull(exc_msg)) m = JS_ToCString(ctx, exc_msg);
+                        if (!JS_IsUndefined(tag_val) && !JS_IsNull(tag_val)) tag = JS_ToCString(ctx, tag_val);
+                        fprintf(stderr, "[CE-CALLBACK] %s %s threw: %s\n", tag ? tag : "?", name, m ? m : "(no message)");
+                        fflush(stderr);
+                        if (m) JS_FreeCString(ctx, m);
+                        if (tag) JS_FreeCString(ctx, tag);
+                    }
                 }
                 JS_FreeCString(ctx, name);
             }
@@ -1325,10 +1343,10 @@ GCValue js_custom_elements_define(JSContextHandle ctx, GCValue this_val, int arg
     JS_SetPropertyStr(ctx, this_val, name, argv[1]);
 
     // Enqueue upgrade reactions for any existing elements of this tag name.
-    // The spec does not upgrade them synchronously from inside define(); it
-    // queues reactions that are flushed before returning to user script.  This
-    // avoids reentrancy and stack-overflow crashes when Polymer constructors
-    // stamp shadow DOM while define() is still on the call stack.
+    // The spec flushes CEReactions before define() returns, so a component
+    // registered early in a script can initialize before later definitions
+    // (e.g. ytd-page-manager must run ready() before ytd-app resolves
+    // PAGE_TOKEN in its connectedCallback).
     GCValue global = JS_GetGlobalObject(ctx);
     GCValue enqueue_all = JS_GetPropertyStr(ctx, global, "__cyber_enqueueUpgradeAll");
     if (!JS_IsUndefined(enqueue_all) && !JS_IsNull(enqueue_all) && JS_IsFunction(ctx, enqueue_all)) {
@@ -1336,7 +1354,7 @@ GCValue js_custom_elements_define(JSContextHandle ctx, GCValue this_val, int arg
         GCValue result = JS_Call(ctx, enqueue_all, global, 1, args);
         (void)result;
     }
-    js_cyber_ce_schedule_flush(ctx);
+    js_cyber_ce_flush_reactions(ctx, JS_UNDEFINED, 0, NULL);
 
     return JS_UNDEFINED;
 }
@@ -1550,25 +1568,14 @@ GCValue js_cyber_upgrade_element(JSContextHandle ctx, GCValue this_val, int argc
     // constructor succeeded.
     GCValue is_connected = JS_GetPropertyStr(ctx, el, "isConnected");
     bool connected = JS_ToBool(ctx, is_connected);
+    fprintf(stderr, "[CE-UPGRADE] %s ctor_ok=%d isConnected=%d\n", name_lc, ctor_ok ? 1 : 0, connected ? 1 : 0);
+    // Enqueue connectedCallback instead of calling it synchronously.  This
+    // lets callbacks that were enqueued during the constructor (e.g. children
+    // moved into a newly created shadow root) run before the parent callback,
+    // matching the reaction-queue ordering that Polymer apps rely on.
     if (ctor_ok && connected) {
-        GCValue cb = JS_GetPropertyStr(ctx, el, "connectedCallback");
-        if (!JS_IsUndefined(cb) && !JS_IsNull(cb) && JS_IsFunction(ctx, cb)) {
-            GCValue ret = JS_Call(ctx, cb, el, 0, NULL);
-            if (JS_IsException(ret)) {
-                GCValue exc = JS_GetException(ctx);
-                GCValue exc_msg = JS_GetPropertyStr(ctx, exc, "message");
-                char msg_buf[512] = "(none)";
-                if (!JS_IsUndefined(exc_msg) && !JS_IsNull(exc_msg)) {
-                    const char *m = JS_ToCString(ctx, exc_msg);
-                    if (m) {
-                        strncpy(msg_buf, m, sizeof(msg_buf) - 1);
-                        msg_buf[sizeof(msg_buf) - 1] = '\0';
-                        JS_FreeCString(ctx, m);
-                    }
-                }
-                fprintf(stderr, "[CE-UPGRADE] %s connectedCallback threw: %s\n", name_lc, msg_buf);
-            }
-        }
+        js_cyber_ce_enqueue_callback(ctx, el, "connectedCallback");
+        fprintf(stderr, "[CE-UPGRADE] %s enqueued connectedCallback\n", name_lc);
     }
 
     JS_FreeCString(ctx, tag);

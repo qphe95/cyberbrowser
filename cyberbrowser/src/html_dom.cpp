@@ -903,7 +903,14 @@ GCValue html_create_js_document(JSContextHandle ctx, HtmlDocument *doc) {
     JS_SetPropertyStr(ctx, js_doc, "readyState", JS_NewString(ctx, "complete"));
     JS_SetPropertyStr(ctx, js_doc, "characterSet", JS_NewString(ctx, "UTF-8"));
     JS_SetPropertyStr(ctx, js_doc, "contentType", JS_NewString(ctx, "text/html"));
-    
+
+    /* Give the document object a real DOM node backing so parentNode / isConnected
+     * traversal from the documentElement reaches a DOCUMENT_NODE. */
+    DOMNodeHandle doc_node = DOMNodeHandle::create(ctx, DOM_NODE_TYPE_DOCUMENT, "#document");
+    if (doc_node.valid()) {
+        doc_node.attach_to_object(js_doc);
+    }
+
     /* Add document methods before creating elements so the whole tree can be
      * built with proper DOM prototypes (HTMLElement, Element, Node). */
     JS_SetPropertyStr(ctx, js_doc, "createElement",
