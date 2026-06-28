@@ -729,6 +729,11 @@ GCValue html_create_element_js(JSContextHandle ctx, const char *tag_name, HtmlAt
         if (!JS_IsUndefined(src_attr) && !JS_IsNull(src_attr)) {
             JS_SetPropertyStr(ctx, element, "src", src_attr);
         }
+
+        /* Parser-inserted scripts are executed by the static HTML script runner;
+         * mark them so the dynamic <script src> loader does not fetch them again
+         * when they are appended to the DOM during initial population. */
+        JS_SetPropertyStr(ctx, element, "__cyber_parser_script", JS_TRUE);
     }
     
     return element;
@@ -781,6 +786,9 @@ GCValue html_create_element_js_with_document(JSContextHandle ctx, GCValue js_doc
                     }
                     css_index_insert_node(ctx, node);
                 }
+                if (strcasecmp(tag_name, "script") == 0) {
+                    JS_SetPropertyStr(ctx, element, "__cyber_parser_script", JS_TRUE);
+                }
                 return element;
             }
             /* Fall through to plain object if createElement failed */
@@ -796,6 +804,9 @@ GCValue html_create_element_js_with_document(JSContextHandle ctx, GCValue js_doc
     /* Ensure ownerDocument is set even for fallback-created elements. */
     if (!JS_IsUndefined(js_doc) && !JS_IsNull(js_doc)) {
         dom_node_set_owner_document(ctx, element, js_doc);
+    }
+    if (strcasecmp(tag_name, "script") == 0) {
+        JS_SetPropertyStr(ctx, element, "__cyber_parser_script", JS_TRUE);
     }
     return element;
 }

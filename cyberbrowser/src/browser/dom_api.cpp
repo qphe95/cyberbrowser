@@ -17,14 +17,23 @@
 #include "css_layout.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
+#include "http_download.h"
+#include "url_utils.h"
+#include "js_quickjs.h"
 
 // createElement lives in js_quickjs.cpp and is used by the outerHTML setter.
 extern GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+extern const char *g_cyber_start_url;
 
 /* Global layout-invalidation flag. DOM mutation functions set this to 1 so the
  * main loop knows the native HtmlDocument is stale and must be rebuilt from the
  * current JS DOM before the next layout/render pass. */
 volatile int g_dom_needs_layout = 0;
+static int g_dom_dynamic_scripts_enabled = 0;
+
+extern "C" void dom_enable_dynamic_script_loading(void) {
+    g_dom_dynamic_scripts_enabled = 1;
+}
 
 void dom_request_layout(void) {
     g_dom_needs_layout = 1;
@@ -821,6 +830,173 @@ DOMNodeHandle get_or_create_dom_node(JSContextHandle ctx, GCValue obj, int node_
     return node;
 }
 
+/* Resolve a URL against window.location.href.  Only handles the http/https
+ * cases needed for YouTube module loading. */
+static char* dom_resolve_url(const char *base, const char *href) {
+    if (!href || !href[0]) return base ? strdup(base) : NULL;
+    if (url_has_scheme(href)) return strdup(href);
+
+    const char *scheme_end = base ? strstr(base, "://") : NULL;
+    if (!scheme_end) return strdup(href);
+
+    /* Length of "scheme://" (e.g. "https://"). */
+    size_t scheme_len = (size_t)(scheme_end - base) + 3;
+
+    /* Start of the path in the base URL (first '/' after host).  May be NULL. */
+    const char *path_start = strchr(scheme_end + 3, '/');
+    size_t origin_len = path_start ? (size_t)(path_start - base) : strlen(base);
+
+    if (href[0] == '/' && href[1] == '/') {
+        /* Protocol-relative: keep the scheme (without "://"), then use href
+         * which already supplies the "//" authority prefix. */
+        size_t scheme_only_len = (size_t)(scheme_end - base);
+        char *out = (char*)malloc(scheme_only_len + 1 + strlen(href) + 1);
+        if (!out) return strdup(href);
+        memcpy(out, base, scheme_only_len);
+        out[scheme_only_len] = ':';
+        strcpy(out + scheme_only_len + 1, href);
+        return out;
+    }
+    if (href[0] == '/') {
+        /* Absolute path: keep the origin (scheme + host). */
+        char *out = (char*)malloc(origin_len + strlen(href) + 1);
+        if (!out) return strdup(href);
+        memcpy(out, base, origin_len);
+        strcpy(out + origin_len, href);
+        return out;
+    }
+
+    /* Relative path: keep the origin and the directory part of the base path. */
+    const char *base_dir = path_start ? path_start : "/";
+    const char *last_slash = strrchr(base_dir, '/');
+    size_t dir_len = last_slash ? (size_t)(last_slash - base_dir + 1) : strlen(base_dir);
+    char *out = (char*)malloc(origin_len + dir_len + strlen(href) + 1);
+    if (!out) return strdup(href);
+    memcpy(out, base, origin_len);
+    memcpy(out + origin_len, base_dir, dir_len);
+    strcpy(out + origin_len + dir_len, href);
+    return out;
+}
+
+static void dom_dispatch_script_event(JSContextHandle ctx, GCValue script, const char *type) {
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue event_ctor = JS_GetPropertyStr(ctx, global, "Event");
+    GCValue type_val = JS_NewString(ctx, type);
+    GCValue event = JS_IsFunction(ctx, event_ctor)
+        ? JS_CallConstructor(ctx, event_ctor, 1, &type_val)
+        : JS_UNDEFINED;
+    if (!JS_IsUndefined(event) && !JS_IsNull(event) && !JS_IsException(event)) {
+        js_event_target_dispatchEvent(ctx, script, 1, &event);
+    }
+}
+
+static bool dom_script_type_is_executable(JSContextHandle ctx, GCValue script) {
+    GCValue typev = JS_GetPropertyStr(ctx, script, "type");
+    if (JS_IsUndefined(typev) || JS_IsNull(typev)) return true;
+    const char *type = JS_IsString(typev) ? JS_ToCString(ctx, typev) : NULL;
+    bool ok = true;
+    if (type && type[0]) {
+        /* Skip module/importmap scripts; the emulator only supports classic
+         * ES5/global scripts today. */
+        if (strstr(type, "module") || strstr(type, "importmap")) ok = false;
+    }
+    if (type) JS_FreeCString(ctx, type);
+    return ok;
+}
+
+static void dom_execute_external_script(JSContextHandle ctx, GCValue script, const char *src) {
+    if (!g_dom_dynamic_scripts_enabled) return;
+    if (!src || !src[0]) return;
+
+    GCValue loaded = JS_GetPropertyStr(ctx, script, "__cyber_script_loaded");
+    if (JS_ToBool(ctx, loaded)) return;
+    GCValue parser = JS_GetPropertyStr(ctx, script, "__cyber_parser_script");
+    if (JS_ToBool(ctx, parser)) return;
+    if (!dom_node_is_connected(ctx, script)) return;
+    if (!dom_script_type_is_executable(ctx, script)) return;
+
+    GCValue global = JS_GetGlobalObject(ctx);
+    const char *base = NULL;
+    int base_needs_free = 0;
+    GCValue loc = JS_GetPropertyStr(ctx, global, "location");
+    GCValue href = JS_GetPropertyStr(ctx, loc, "href");
+    if (JS_IsString(href)) {
+        base = JS_ToCString(ctx, href);
+        base_needs_free = 1;
+    }
+    if (!base || !base[0]) {
+        GCValue doc = JS_GetPropertyStr(ctx, global, "document");
+        GCValue baseuri = JS_GetPropertyStr(ctx, doc, "baseURI");
+        if (JS_IsString(baseuri)) {
+            if (base_needs_free) JS_FreeCString(ctx, base);
+            base = JS_ToCString(ctx, baseuri);
+            base_needs_free = 1;
+        }
+    }
+    if ((!base || !base[0]) && g_cyber_start_url && g_cyber_start_url[0]) {
+        if (base_needs_free) JS_FreeCString(ctx, base);
+        base = g_cyber_start_url;
+        base_needs_free = 0;
+    }
+
+    char *url = dom_resolve_url(base ? base : "", src);
+    if (base_needs_free) JS_FreeCString(ctx, base);
+    if (!url) return;
+
+    if (!url_is_network_url(url)) {
+        free(url);
+        return;
+    }
+
+    /* Mark as loaded before the network fetch so recursive insertions of the
+     * same node do not re-trigger execution. */
+    JS_SetPropertyStr(ctx, script, "__cyber_script_loaded", JS_TRUE);
+
+    platform_log(LOG_LEVEL_INFO, "dom_api", "Dynamic script load: %s", url);
+    HttpBuffer buffer = {0};
+    char err[256] = {0};
+    bool ok = http_get_to_memory(url, &buffer, err, sizeof(err));
+    if (ok && buffer.data && buffer.size > 0) {
+        GCValue result = JS_Eval(ctx, buffer.data, buffer.size, url, JS_EVAL_TYPE_GLOBAL);
+        if (JS_IsException(result)) {
+            GCValue exc = JS_GetException(ctx);
+            const char *estr = JS_ToCString(ctx, exc);
+            platform_log(LOG_LEVEL_WARN, "dom_api", "Dynamic script eval error: %s", estr ? estr : "?");
+            if (estr) JS_FreeCString(ctx, estr);
+            dom_dispatch_script_event(ctx, script, "error");
+        } else {
+            dom_dispatch_script_event(ctx, script, "load");
+        }
+    } else {
+        platform_log(LOG_LEVEL_WARN, "dom_api", "Dynamic script fetch failed: %s (%s)", url, err[0] ? err : "unknown");
+        dom_dispatch_script_event(ctx, script, "error");
+    }
+    free(url);
+    if (buffer.data) free(buffer.data);
+}
+
+static void dom_maybe_load_script(JSContextHandle ctx, GCValue node) {
+    if (!g_dom_dynamic_scripts_enabled) return;
+
+    GCValue tagv = JS_GetPropertyStr(ctx, node, "tagName");
+    const char *tag = JS_IsString(tagv) ? JS_ToCString(ctx, tagv) : NULL;
+    bool is_script = tag && strcasecmp(tag, "SCRIPT") == 0;
+
+    GCValue srcv = JS_GetPropertyStr(ctx, node, "src");
+    const char *src = JS_IsString(srcv) ? JS_ToCString(ctx, srcv) : NULL;
+
+    if (tag) JS_FreeCString(ctx, tag);
+    if (!is_script) {
+        if (src) JS_FreeCString(ctx, src);
+        return;
+    }
+
+    if (src && src[0]) {
+        dom_execute_external_script(ctx, node, src);
+    }
+    if (src) JS_FreeCString(ctx, src);
+}
+
 // Real appendChild implementation
 GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1 || JS_IsNull(argv[0]) || JS_IsUndefined(argv[0])) {
@@ -896,6 +1072,10 @@ GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc
     // (or when a definition is registered), not just on explicit upgrade() calls.
     js_cyber_ce_enqueue_upgrade_subtree(ctx, child);
     js_cyber_ce_schedule_flush(ctx);
+
+    // Load external scripts that are inserted dynamically after the initial
+    // page load (e.g. YouTube's module loader).
+    dom_maybe_load_script(ctx, child);
 
     GCValue added_arr = JS_NewArray(ctx);
     JS_SetPropertyUint32(ctx, added_arr, 0, child);
@@ -1210,6 +1390,10 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
     // Enqueue upgrade reactions for any custom elements in the inserted subtree.
     js_cyber_ce_enqueue_upgrade_subtree(ctx, new_child);
     js_cyber_ce_schedule_flush(ctx);
+
+    // Load external scripts that are inserted dynamically (e.g. YouTube's
+    // player module loader uses head.insertBefore(script, head.firstChild)).
+    dom_maybe_load_script(ctx, new_child);
 
     GCValue added_arr3 = JS_NewArray(ctx);
     JS_SetPropertyUint32(ctx, added_arr3, 0, new_child);
@@ -2092,6 +2276,14 @@ GCValue js_element_set_attribute(JSContextHandle ctx, GCValue this_val, int argc
         // Capture URL if src is being set on any element
         if (name && strcmp(name, "src") == 0 && value && value[0]) {
             capture_url_debug(value, "element_setAttribute_src");
+            if (g_dom_dynamic_scripts_enabled) {
+                GCValue tagv = JS_GetPropertyStr(ctx, this_val, "tagName");
+                const char *tag = JS_IsString(tagv) ? JS_ToCString(ctx, tagv) : NULL;
+                if (tag && strcasecmp(tag, "SCRIPT") == 0) {
+                    dom_execute_external_script(ctx, this_val, value);
+                }
+                if (tag) JS_FreeCString(ctx, tag);
+            }
         }
 
         // Notify custom elements.

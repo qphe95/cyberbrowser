@@ -18,6 +18,7 @@
 #include "quickjs.h"
 #include "quickjs_gc_unified.h"
 #include "browser_api_impl.h"
+#include "browser_api_impl_internal.h"
 #include "js_quickjs.h"
 #include "http_download.h"
 #include "html_dom.h"
@@ -40,6 +41,7 @@ extern "C" void timer_set_idle_deadline(unsigned long long deadline_ms);
 
 /* Default page loaded by the smoke-test executable. */
 static const char DEFAULT_START_URL[] = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+const char *g_cyber_start_url = DEFAULT_START_URL;
 
 #ifdef _WIN32
 static LONG WINAPI unhandled_exception_filter(EXCEPTION_POINTERS *ep) {
@@ -594,6 +596,12 @@ int main(int argc, char *argv[]) {
                  "\"", DEFAULT_START_URL, "\"");
         JS_Eval(g_ctx, loc_script, strlen(loc_script), "<set_location>", JS_EVAL_TYPE_GLOBAL);
     }
+
+    /* Enable dynamic <script src> loading before the initial page scripts run.
+     * YouTube lazy-loads modules (including player modules and the masthead
+     * bootstrap) by creating script elements from JS.  Parser-inserted scripts
+     * are marked so they are not executed twice. */
+    dom_enable_dynamic_script_loading();
 
     size_t html_size = 0;
     char *html = fetch_start_page(&html_size);

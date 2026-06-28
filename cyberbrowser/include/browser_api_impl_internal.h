@@ -514,6 +514,7 @@ extern "C" int timer_has_pending(void);
 extern "C" void timer_set_idle_deadline(unsigned long long deadline_ms);
 extern "C" int scheduler_process_tasks(JSContextHandle ctx);
 extern "C" void scheduler_reset(void);
+extern "C" void dom_enable_dynamic_script_loading(void);
 GCValue js_scheduler_post_task(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_scheduler_yield(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 extern GCHandle service_worker_handle;
