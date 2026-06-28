@@ -846,6 +846,197 @@ static void css_sheet_list_free(CssSheetList *list) {
     list->count = list->capacity = 0;
 }
 
+/* ============================================================================
+ * Shadow-root style scoping helpers
+ *
+ * When a <style> element lives inside a shadow root we serialize it as a child
+ * of its host.  To keep those styles from leaking to the whole document we
+ * rewrite the selectors so they only match descendants of that host, and we
+ * turn :host / ::slotted into host/slot-aware selectors.
+ * ============================================================================ */
+
+static bool css_tag_is_custom_element(const char *tag) {
+    if (!tag) return false;
+    for (const char *p = tag; *p; p++) {
+        if (*p == '-') return true;
+    }
+    return false;
+}
+
+static const char* css_find_host_tag(HtmlDocument *doc, int node_idx) {
+    int p = po_array_parent(&doc->array, node_idx);
+    while (p >= 0) {
+        HtmlNode *node = (HtmlNode*)po_array_payload(&doc->array, p);
+        if (node && node->type == HTML_NODE_ELEMENT && css_tag_is_custom_element(node->tag_name)) {
+            return node->tag_name;
+        }
+        p = po_array_parent(&doc->array, p);
+    }
+    return NULL;
+}
+
+static char* css_strdup(const char *s) {
+    size_t n = strlen(s);
+    char *out = (char*)malloc(n + 1);
+    if (out) memcpy(out, s, n + 1);
+    return out;
+}
+
+/* Return the index of the closing ')' matching the '(' at start. */
+static size_t css_match_paren(const char *s, size_t start, size_t len) {
+    int depth = 1;
+    size_t i = start + 1;
+    while (i < len) {
+        if (s[i] == '(') depth++;
+        else if (s[i] == ')') {
+            depth--;
+            if (depth == 0) return i;
+        } else if (s[i] == '"' || s[i] == '\'') {
+            char q = s[i++];
+            while (i < len && s[i] != q) i++;
+        }
+        i++;
+    }
+    return len;
+}
+
+/* Append a formatted string to a dynamically-grown buffer. */
+static void css_buf_append(char **buf, size_t *len, size_t *cap, const char *s, size_t n) {
+    if (!*buf) {
+        *cap = n + 64;
+        *buf = (char*)malloc(*cap);
+        if (!*buf) return;
+        *len = 0;
+    }
+    if (*len + n + 1 > *cap) {
+        size_t new_cap = *cap * 2;
+        while (new_cap < *len + n + 1) new_cap *= 2;
+        char *new_buf = (char*)realloc(*buf, new_cap);
+        if (!new_buf) return;
+        *buf = new_buf;
+        *cap = new_cap;
+    }
+    memcpy(*buf + *len, s, n);
+    *len += n;
+    (*buf)[*len] = '\0';
+}
+
+static void css_buf_append_cstr(char **buf, size_t *len, size_t *cap, const char *s) {
+    css_buf_append(buf, len, cap, s, strlen(s));
+}
+
+/* Transform a single selector string for a given shadow host tag. */
+static char* css_transform_one_selector(const char *sel, size_t len, const char *host_tag) {
+    size_t i = 0;
+    while (i < len && css_is_space(sel[i])) i++;
+    size_t start = i;
+
+    char *out = NULL;
+    size_t out_len = 0, out_cap = 0;
+
+    if (i + 6 <= len && strncasecmp(sel + i, ":host(", 6) == 0) {
+        /* :host(<qualifier>) ...  ->  host_tag<qualifier> ... */
+        size_t open = i + 5;
+        size_t close = css_match_paren(sel, open, len);
+        css_buf_append_cstr(&out, &out_len, &out_cap, host_tag);
+        if (close > open + 1) {
+            css_buf_append(&out, &out_len, &out_cap, sel + open + 1, close - open - 1);
+        }
+        i = close + 1;
+        css_buf_append(&out, &out_len, &out_cap, sel + i, len - i);
+    } else if (i + 5 <= len && strncasecmp(sel + i, ":host", 5) == 0) {
+        /* :host ...  ->  host_tag ... */
+        css_buf_append_cstr(&out, &out_len, &out_cap, host_tag);
+        i += 5;
+        css_buf_append(&out, &out_len, &out_cap, sel + i, len - i);
+    } else if (i + 9 <= len && strncasecmp(sel + i, "::slotted", 9) == 0) {
+        /* ::slotted(<qualifier>) ... -> host_tag > <qualifier> ... */
+        size_t open = i + 8;
+        size_t close = css_match_paren(sel, open, len);
+        css_buf_append_cstr(&out, &out_len, &out_cap, host_tag);
+        css_buf_append_cstr(&out, &out_len, &out_cap, " > ");
+        if (close > open + 1) {
+            css_buf_append(&out, &out_len, &out_cap, sel + open + 1, close - open - 1);
+        } else {
+            css_buf_append_cstr(&out, &out_len, &out_cap, "*");
+        }
+        i = close + 1;
+        css_buf_append(&out, &out_len, &out_cap, sel + i, len - i);
+    } else if (i + 14 <= len && strncasecmp(sel + i, ":host-context(", 14) == 0) {
+        /* Drop :host-context rules; we cannot model outer ancestors. */
+        free(out);
+        return css_strdup("");
+    } else {
+        /* Default: scope to host descendants. */
+        size_t host_len = strlen(host_tag);
+        /* Don't double-scope if selector already starts with the host tag. */
+        if (len > host_len && strncasecmp(sel + i, host_tag, host_len) == 0 &&
+            (i + host_len >= len || css_is_space(sel[i + host_len]) || sel[i + host_len] == '.' ||
+             sel[i + host_len] == '#' || sel[i + host_len] == '[' || sel[i + host_len] == ':' ||
+             sel[i + host_len] == '>' || sel[i + host_len] == '+' || sel[i + host_len] == '~')) {
+            css_buf_append(&out, &out_len, &out_cap, sel, len);
+        } else {
+            css_buf_append_cstr(&out, &out_len, &out_cap, host_tag);
+            css_buf_append_cstr(&out, &out_len, &out_cap, " ");
+            css_buf_append(&out, &out_len, &out_cap, sel, len);
+        }
+    }
+    return out ? out : css_strdup("");
+}
+
+/* Split a selector list on commas and transform each part. */
+static char* css_transform_selectors_for_host(const char *selector_text, const char *host_tag) {
+    if (!selector_text || !host_tag) return css_strdup(selector_text ? selector_text : "");
+
+    char *out = NULL;
+    size_t out_len = 0, out_cap = 0;
+    size_t len = strlen(selector_text);
+    size_t i = 0;
+    bool first = true;
+
+    while (i <= len) {
+        /* Skip leading whitespace for this part. */
+        size_t part_start = i;
+        size_t j = i;
+        int depth = 0;
+        bool in_str = false;
+        char q = 0;
+        while (j < len && !(selector_text[j] == ',' && depth == 0 && !in_str)) {
+            char c = selector_text[j];
+            if (!in_str) {
+                if (c == '(') depth++;
+                else if (c == ')') depth--;
+                else if (c == '"' || c == '\'') { in_str = true; q = c; }
+            } else if (c == q && (j == 0 || selector_text[j - 1] != '\\')) {
+                in_str = false;
+            }
+            j++;
+        }
+        size_t part_len = j - part_start;
+        char *part = css_transform_one_selector(selector_text + part_start, part_len, host_tag);
+        if (part && part[0]) {
+            if (!first) css_buf_append_cstr(&out, &out_len, &out_cap, ", ");
+            css_buf_append_cstr(&out, &out_len, &out_cap, part);
+            first = false;
+        }
+        free(part);
+        i = j + 1;
+    }
+    return out ? out : css_strdup("");
+}
+
+static void css_scope_stylesheet(CssStylesheet *sheet, const char *host_tag) {
+    if (!sheet || !host_tag) return;
+    for (int r = 0; r < sheet->rule_count; r++) {
+        CssRule *rule = &sheet->rules[r];
+        if (!rule->selector_text) continue;
+        char *new_sel = css_transform_selectors_for_host(rule->selector_text, host_tag);
+        free(rule->selector_text);
+        rule->selector_text = new_sel;
+        rule->specificity = 0;
+    }
+}
+
 static void css_collect_stylesheets_recursive(HtmlDocument *doc, int node_idx,
                                               CssSheetList *list,
                                               const char *base_url) {
@@ -856,7 +1047,13 @@ static void css_collect_stylesheets_recursive(HtmlDocument *doc, int node_idx,
     if (strcasecmp(node->tag_name, "style") == 0 && node->text_content && node->text_content[0]) {
         CssStylesheet *sheet = css_stylesheet_parse(node->text_content, strlen(node->text_content));
         if (sheet) {
-            LOG_INFO("Parsed inline <style> stylesheet with %d rules", sheet->rule_count);
+            const char *host_tag = css_find_host_tag(doc, node_idx);
+            if (host_tag) {
+                LOG_INFO("Parsed inline <style> stylesheet with %d rules (host=%s)", sheet->rule_count, host_tag);
+                css_scope_stylesheet(sheet, host_tag);
+            } else {
+                LOG_INFO("Parsed inline <style> stylesheet with %d rules", sheet->rule_count);
+            }
             css_sheet_list_add(list, sheet);
         }
     } else if (strcasecmp(node->tag_name, "link") == 0) {

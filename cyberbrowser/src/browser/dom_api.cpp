@@ -2622,6 +2622,7 @@ GCValue js_element_get_classList(JSContextHandle ctx, GCValue this_val, int argc
     JS_SetPropertyStr(ctx, classList, "remove", JS_NewCFunction(ctx, js_dom_token_list_remove, "remove", 1));
     JS_SetPropertyStr(ctx, classList, "toggle", JS_NewCFunction(ctx, js_dom_token_list_toggle, "toggle", 2));
     JS_SetPropertyStr(ctx, classList, "contains", JS_NewCFunction(ctx, js_dom_token_list_contains, "contains", 1));
+    JS_SetPropertyStr(ctx, classList, "supports", JS_NewCFunction(ctx, js_dom_token_list_supports, "supports", 1));
     JS_SetPropertyStr(ctx, classList, "item", JS_NewCFunction(ctx, js_dom_token_list_item, "item", 1));
     JS_SetPropertyStr(ctx, classList, "forEach", JS_NewCFunction(ctx, js_dom_token_list_for_each, "forEach", 1));
     GCValue length_getter = JS_NewCFunction(ctx, js_dom_token_list_get_length, "get length", 0);

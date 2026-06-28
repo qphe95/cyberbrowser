@@ -187,6 +187,7 @@ int find_free_timer_slot(void) {
 // Add a new timer
 int add_timer(JSContextHandle ctx, TimerType type, GCValue callback, 
                      unsigned long long delay_ms, int arg_count, GCValue *args) {
+    (void)ctx;
     timer_state_ensure_initialized();
     pthread_mutex_lock(&g_timer_state.mutex);
     
@@ -372,6 +373,28 @@ void execute_timer(JSContextHandle ctx, int id) {
                 }
                 if (stack) {
                     platform_log(LOG_LEVEL_WARN, "timer", "Timer callback stack: %s", stack);
+                }
+                // Diagnostic: when the error is "not a function", print the
+                // callback identity so we can identify which API is missing.
+                if (exc_str && strstr(exc_str, "not a function")) {
+                    GCValue cb_name = JS_GetPropertyStr(ctx, callback, "name");
+                    GCValue cb_len = JS_GetPropertyStr(ctx, callback, "length");
+                    GCValue cb_ctor = JS_GetPropertyStr(ctx, callback, "constructor");
+                    GCValue ctor_name = JS_IsObject(cb_ctor) ? JS_GetPropertyStr(ctx, cb_ctor, "name") : JS_UNDEFINED;
+                    int32_t cb_len_i = 0; JS_ToInt32(ctx, &cb_len_i, cb_len);
+                    const char *name = JS_ToCString(ctx, cb_name);
+                    const char *ctor_name_c = JS_IsString(ctor_name) ? JS_ToCString(ctx, ctor_name) : NULL;
+                    platform_log(LOG_LEVEL_WARN, "timer", "Timer callback name=%s length=%d ctor=%s", name ? name : "?", cb_len_i, ctor_name_c ? ctor_name_c : "?");
+                    if (name) JS_FreeCString(ctx, name);
+                    if (ctor_name_c) JS_FreeCString(ctx, ctor_name_c);
+                    GCValue toString_fn = JS_GetPropertyStr(ctx, callback, "toString");
+                    if (JS_IsFunction(ctx, toString_fn)) {
+                        GCValue cb_str_val = JS_Call(ctx, toString_fn, callback, 0, NULL);
+                        const char *cb_str = JS_ToCString(ctx, cb_str_val);
+                        if (cb_str) {
+                            platform_log(LOG_LEVEL_WARN, "timer", "Timer callback toString (first 2000 chars): %.2000s", cb_str);
+                        }
+                    }
                 }
             }
         }

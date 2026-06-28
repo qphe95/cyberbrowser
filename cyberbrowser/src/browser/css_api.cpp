@@ -582,6 +582,32 @@ GCValue js_dom_token_list_item(JSContextHandle ctx, GCValue this_val, int argc, 
     return result;
 }
 
+// DOMTokenList.supports(token)
+GCValue js_dom_token_list_supports(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    if (argc < 1 || !JS_IsString(argv[0])) return JS_FALSE;
+    const char *token = JS_ToCString(ctx, argv[0]);
+    if (!token || !token[0]) {
+        if (token) JS_FreeCString(ctx, token);
+        return JS_FALSE;
+    }
+    /* Approximate: accept common sandbox/rel tokens. */
+    static const char *known[] = {
+        "allow-same-origin", "allow-scripts", "allow-popups",
+        "allow-popups-to-escape-sandbox", "allow-forms", "allow-top-navigation",
+        "allow-modals", "allow-pointer-lock", "allow-orientation-lock",
+        "noopener", "noreferrer", "opener", "help", "icon", "preload",
+        "stylesheet", "manifest", "apple-touch-icon", "shortcut icon",
+        "prefetch", "dns-prefetch", "preconnect", "prerender", NULL
+    };
+    bool ok = false;
+    for (int i = 0; known[i]; i++) {
+        if (strcasecmp(token, known[i]) == 0) { ok = true; break; }
+    }
+    JS_FreeCString(ctx, token);
+    return JS_NewBool(ctx, ok ? 1 : 0);
+}
+
 // DOMTokenList.contains(token)
 GCValue js_dom_token_list_contains(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1 || !JS_IsString(argv[0])) return JS_FALSE;

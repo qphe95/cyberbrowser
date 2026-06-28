@@ -81,6 +81,7 @@ GCValue js_storage_clear(JSContextHandle ctx, GCValue this_val, int argc, GCValu
 GCValue js_storage_key(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_storage_get_length(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_dom_token_list_contains(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_dom_token_list_supports(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_css_supports(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_css_escape(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_css_style_sheet_insert_rule(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);

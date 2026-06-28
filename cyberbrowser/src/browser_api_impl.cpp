@@ -3175,6 +3175,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     DEF_FUNC(ctx, dom_token_list_proto, "remove", js_dom_token_list_remove, 0);  // Variable args
     DEF_FUNC(ctx, dom_token_list_proto, "toggle", js_dom_token_list_toggle, 2);
     DEF_FUNC(ctx, dom_token_list_proto, "contains", js_dom_token_list_contains, 1);
+    DEF_FUNC(ctx, dom_token_list_proto, "supports", js_dom_token_list_supports, 1);
     DEF_FUNC(ctx, dom_token_list_proto, "forEach", js_dom_token_list_for_each, 1);
     
     // Store for use with elements

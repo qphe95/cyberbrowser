@@ -1896,7 +1896,14 @@ static void html_serialize_js_node_internal(JSContextHandle ctx, GCValue node, S
             const char *p = val;
             while (*p && isspace((unsigned char)*p)) p++;
             if (strncmp(p, "</body>", 7) != 0 && strncmp(p, "</html>", 7) != 0) {
-                serialize_buf_append_escaped(buf, val);
+                /* Skip text nodes that are just HTML comment markers left
+                 * behind by Polymer's css-build annotations. */
+                size_t len = strlen(p);
+                while (len > 0 && isspace((unsigned char)p[len - 1])) len--;
+                if (!(len >= 7 && strncmp(p, "<!--", 4) == 0 &&
+                      strncmp(p + len - 3, "-->", 3) == 0)) {
+                    serialize_buf_append_escaped(buf, val);
+                }
             }
         }
         return;
