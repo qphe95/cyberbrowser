@@ -26,6 +26,11 @@ extern "C" GCValue js_document_create_element(JSContextHandle ctx, GCValue this_
 extern "C" GCValue js_element_querySelector_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 extern "C" GCValue js_element_querySelectorAll_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 
+// Custom-element reaction stack helpers from misc_api.cpp
+extern "C" void js_cyber_ce_push_stack(JSContextHandle ctx);
+extern "C" void js_cyber_ce_pop_stack(JSContextHandle ctx);
+extern "C" int js_cyber_ce_upgrade_depth(void);
+
 /* Timer API functions from browser_api_impl.cpp */
 extern "C" int timer_process_due(JSContextHandle ctx);
 extern "C" int timer_has_pending(void);
@@ -2110,6 +2115,10 @@ GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int ar
                 // Define as own property; Element.prototype has a read-only style getter.
                 JS_DefinePropertyValueStr(ctx, elem, "style", style,
                                           JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+                // Also store it in the internal slot used by the CSS engine so that
+                // stylesheet-applied properties land on the same object returned by
+                // element.style.
+                JS_SetPropertyStr(ctx, elem, "__style", style);
             }
             
             // Add getContext method for canvas elements (needed by Web Animations polyfill for color parsing)
@@ -2148,11 +2157,13 @@ GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int ar
         dom_node_set_owner_document(ctx, elem, this_val);
 
         // Synchronously upgrade script-created custom elements when a definition
-        // is already registered.  This matches the HTML spec and is required for
-        // Polymer templates: stamping <ytd-app> must create and upgrade child
-        // custom elements such as <ytd-page-manager> before the parent's
-        // connectedCallback runs.  A depth guard prevents runaway recursion when
+        // is already registered.  Push a CEReactions stack frame so that nested
+        // constructors/insertions (e.g. Polymer stamping shadow DOM) queue their
+        // lifecycle callbacks instead of running them immediately; flush the
+        // reactions before popping the frame so connectedCallbacks run in the
+        // correct order.  A depth guard prevents runaway recursion when
         // constructors stamp deep templates.
+        js_cyber_ce_push_stack(ctx);
         if (tag && strchr(tag, '-') && strcasecmp(tag, "custom-style") != 0) {
             GCValue global_obj = JS_GetGlobalObject(ctx);
             GCValue customElements = JS_GetPropertyStr(ctx, global_obj, "customElements");
@@ -2176,6 +2187,8 @@ GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int ar
                 }
             }
         }
+        js_cyber_ce_flush_reactions(ctx, JS_UNDEFINED, 0, NULL);
+        js_cyber_ce_pop_stack(ctx);
     }
     
     return elem;

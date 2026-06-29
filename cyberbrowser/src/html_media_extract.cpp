@@ -1,5 +1,4 @@
 #include <string.h>
-#include <string>
 #include <stdlib.h>
 #include <stdio.h>
 #include <ctype.h>
@@ -853,49 +852,6 @@ static bool is_unsafe_external_script(const char *url) {
 // Execute all page scripts (inline + external) in document order.
 // Fetches external scripts, runs everything through js_quickjs_exec_scripts,
 // and pumps timers/microtasks after each network response.
-
-/* Patch YouTube's dependency-injector source so that resolving PAGE_TOKEN
- * before ytd-page-manager has registered its provider returns a safe proxy
- * instead of throwing.  This removes a hard failure in ytd-app's
- * connectedCallback.  The patch is intentionally conservative: it only touches
- * scripts that contain the exact minified patterns used by the current
- * kevlar runtime/base module.
- */
-static void apply_youtube_page_token_patch(std::string &src) {
-    // (1) Capture the real page-manager value when the provider is added.
-    const char *set_pat = "this.providers.set(c.provide,c);";
-    const char *throw_pat = "throw Error(\"Zc`\"+k);";
-    bool found_set = (src.find(set_pat) != std::string::npos);
-    bool found_throw = (src.find(throw_pat) != std::string::npos);
-    fprintf(stderr, "[PAGE-TOKEN-PATCH] set=%d throw=%d size=%zu\n", found_set?1:0, found_throw?1:0, src.size());
-    fflush(stderr);
-
-    const char *set_repl =
-        "if(c&&c.provide){var pt=c.provide;"
-        "if((pt.key&&pt.key.name===\"PAGE_TOKEN\")||pt.name===\"PAGE_TOKEN\")"
-        "this.__cyber_page_manager=c.useValue||c.useClass||(c.useFactory?c.useFactory():null);}"
-        "this.providers.set(c.provide,c);";
-    size_t pos = 0;
-    while ((pos = src.find(set_pat, pos)) != std::string::npos) {
-        src.replace(pos, strlen(set_pat), set_repl);
-        pos += strlen(set_repl);
-    }
-
-    // (2) Return a proxy for PAGE_TOKEN when no provider exists yet.
-    const char *throw_repl =
-        "if(k&&k.name===\"PAGE_TOKEN\"){"
-        "var __pm=c.__cyber_page_manager;"
-        "if(__pm)return __pm;"
-        "return c.__cyber_pm_proxy||(c.__cyber_pm_proxy=new Proxy({},"
-        "{get:function(t,p){var r=c.__cyber_page_manager;"
-        "return r&&p in r?r[p]:function(){return null;}}}));}"
-        "throw Error(\"Zc`\"+k);";
-    pos = src.find(throw_pat);
-    if (pos != std::string::npos) {
-        src.replace(pos, strlen(throw_pat), throw_repl);
-    }
-}
-
 extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_result) {
     if (!html || !out_result) return false;
     memset(out_result, 0, sizeof(JsExecResult));
@@ -975,26 +931,6 @@ extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_re
                 } else {
                     LOG_INFO("Loaded external script [%d]: %zu bytes URL=%.200s",
                              scripts[i].parse_order, buffer.size, scripts[i].url);
-
-                    // Apply a source-level PAGE_TOKEN fallback patch to the
-                    // YouTube runtime/base module before execution.
-                    std::string patched(buffer.data, buffer.size);
-                    apply_youtube_page_token_patch(patched);
-                    if (patched.size() != buffer.size) {
-                        char *new_data = (char *)malloc(patched.size() + 1);
-                        if (new_data) {
-                            memcpy(new_data, patched.data(), patched.size());
-                            new_data[patched.size()] = '\0';
-                            http_free_buffer(&buffer);
-                            buffer.data = new_data;
-                            buffer.size = patched.size();
-                        }
-                    } else {
-                        // The patch function may have rewritten the content in
-                        // place without changing the size; copy it back.
-                        memcpy(buffer.data, patched.data(), patched.size());
-                    }
-
                     scripts[i].content = buffer.data;
                     scripts[i].content_len = buffer.size;
                 }

@@ -106,8 +106,12 @@ static bool dom_node_is_connected(JSContextHandle ctx, GCValue node) {
             if (debug) {
                 GCValue t = JS_GetPropertyStr(ctx, cur, "tagName");
                 const char *s = JS_ToCString(ctx, t);
-                fprintf(stderr, "[ISCONN] step %s type=%d\n", s ? s : "?", n.node_type());
+                GCValue p = n.parent_node();
+                GCValue pt = JS_GetPropertyStr(ctx, p, "tagName");
+                const char *ps = JS_ToCString(ctx, pt);
+                fprintf(stderr, "[ISCONN] step %s type=%d parent=%s\n", s ? s : "?", n.node_type(), ps ? ps : "?");
                 JS_FreeCString(ctx, s);
+                JS_FreeCString(ctx, ps);
             }
             if (n.node_type() == DOM_NODE_TYPE_DOCUMENT) return true;
             // Nodes inside a template content are not connected.  A ShadowRoot
@@ -154,17 +158,11 @@ static void invoke_custom_element_callback(JSContextHandle ctx, GCValue elem, co
     js_cyber_ce_enqueue_callback(ctx, elem, name);
 }
 
-// Flush the custom-element reaction queue synchronously when we are at the
-// top of a DOM operation.  This matches the HTML spec CEReactions behaviour:
-// reactions queued by appendChild/insertBefore are flushed before the
-// operation returns, so a parent constructor can rely on its children being
-// upgraded and connected.
+// Flush the custom-element reaction queue for the current CEReactions stack
+// frame.  Callers must push a frame before enqueueing reactions and pop it
+// afterwards, matching the HTML spec's CEReactions stack.
 static void dom_flush_ce_reactions(JSContextHandle ctx) {
-    GCValue global = JS_GetGlobalObject(ctx);
-    GCValue flushing = JS_GetPropertyStr(ctx, global, "__cyber_ce_flushing");
-    if (!JS_ToBool(ctx, flushing)) {
-        js_cyber_ce_flush_reactions(ctx, JS_UNDEFINED, 0, NULL);
-    }
+    js_cyber_ce_flush_reactions(ctx, JS_UNDEFINED, 0, NULL);
 }
 
 static void invoke_attribute_changed(JSContextHandle ctx, GCValue elem,
@@ -1098,6 +1096,11 @@ GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc
     
     dom_request_layout();
 
+    // CEReactions frame for this appendChild: any connectedCallback and upgrade
+    // reactions queued below are flushed before we return, so a parent
+    // constructor can rely on its appended children being upgraded.
+    js_cyber_ce_push_stack(ctx);
+
     // Trigger custom element connectedCallback only when the node is actually
     // connected to the document (not inside a template fragment).
     if (dom_node_is_connected(ctx, child)) {
@@ -1109,6 +1112,8 @@ GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc
     // (or when a definition is registered), not just on explicit upgrade() calls.
     js_cyber_ce_enqueue_upgrade_subtree(ctx, child);
     dom_flush_ce_reactions(ctx);
+
+    js_cyber_ce_pop_stack(ctx);
 
     // Load external scripts that are inserted dynamically after the initial
     // page load (e.g. YouTube's module loader).
@@ -1418,6 +1423,8 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
     
     dom_request_layout();
 
+    js_cyber_ce_push_stack(ctx);
+
     // Trigger custom element connectedCallback only when the node is actually
     // connected to the document.
     if (dom_node_is_connected(ctx, new_child)) {
@@ -1427,6 +1434,8 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
     // Enqueue upgrade reactions for any custom elements in the inserted subtree.
     js_cyber_ce_enqueue_upgrade_subtree(ctx, new_child);
     dom_flush_ce_reactions(ctx);
+
+    js_cyber_ce_pop_stack(ctx);
 
     // Load external scripts that are inserted dynamically (e.g. YouTube's
     // player module loader uses head.insertBefore(script, head.firstChild)).

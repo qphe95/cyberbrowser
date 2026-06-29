@@ -206,14 +206,85 @@ GCValue js_cyber_upgrade_element(JSContextHandle ctx, GCValue this_val, int argc
 // reactions and flushes them before returning to user script.  We approximate
 // that with a global JS queue plus QuickJS's JS_EnqueueJob microtask path.
 
-static GCValue cyber_ce_reaction_queue(JSContextHandle ctx) {
+// Custom-element reactions are scoped by a stack of queue pairs, matching the
+// HTML spec's CEReactions stack.  Each operation that enqueues reactions
+// (customElements.define, appendChild, insertBefore, setAttribute, ...) pushes
+// a frame, enqueues into it, and pops/flushes it before returning.  This lets
+// nested operations (e.g. a parent constructor appending children) flush their
+// own reactions before the outer operation continues.
+static GCValue cyber_ce_stack(JSContextHandle ctx) {
     GCValue global = JS_GetGlobalObject(ctx);
-    GCValue queue = JS_GetPropertyStr(ctx, global, "__cyber_ce_reaction_queue");
+    GCValue stack = JS_GetPropertyStr(ctx, global, "__cyber_ce_stack");
+    if (!JS_IsArray(ctx, stack)) {
+        stack = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, global, "__cyber_ce_stack", stack);
+        // Depth 0 always has a frame so scheduled background flushes work.
+        GCValue frame = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, frame, "reactions", JS_NewArray(ctx));
+        JS_SetPropertyStr(ctx, frame, "callbacks", JS_NewArray(ctx));
+        JS_SetPropertyUint32(ctx, stack, 0, frame);
+        JS_SetPropertyStr(ctx, global, "__cyber_ce_depth", JS_NewInt32(ctx, 0));
+    }
+    return stack;
+}
+
+static int32_t cyber_ce_depth(JSContextHandle ctx) {
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue depth_val = JS_GetPropertyStr(ctx, global, "__cyber_ce_depth");
+    int32_t depth = 0;
+    JS_ToInt32(ctx, &depth, depth_val);
+    return depth;
+}
+
+static GCValue cyber_ce_current_frame(JSContextHandle ctx) {
+    GCValue stack = cyber_ce_stack(ctx);
+    int32_t depth = cyber_ce_depth(ctx);
+    GCValue frame = JS_GetPropertyUint32(ctx, stack, depth);
+    if (!JS_IsObject(frame)) {
+        frame = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, frame, "reactions", JS_NewArray(ctx));
+        JS_SetPropertyStr(ctx, frame, "callbacks", JS_NewArray(ctx));
+        JS_SetPropertyUint32(ctx, stack, depth, frame);
+    }
+    return frame;
+}
+
+static GCValue cyber_ce_reaction_queue(JSContextHandle ctx) {
+    GCValue frame = cyber_ce_current_frame(ctx);
+    GCValue queue = JS_GetPropertyStr(ctx, frame, "reactions");
     if (!JS_IsArray(ctx, queue)) {
         queue = JS_NewArray(ctx);
-        JS_SetPropertyStr(ctx, global, "__cyber_ce_reaction_queue", queue);
+        JS_SetPropertyStr(ctx, frame, "reactions", queue);
     }
     return queue;
+}
+
+static GCValue cyber_ce_callback_queue(JSContextHandle ctx) {
+    GCValue frame = cyber_ce_current_frame(ctx);
+    GCValue queue = JS_GetPropertyStr(ctx, frame, "callbacks");
+    if (!JS_IsArray(ctx, queue)) {
+        queue = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, frame, "callbacks", queue);
+    }
+    return queue;
+}
+
+void js_cyber_ce_push_stack(JSContextHandle ctx) {
+    GCValue stack = cyber_ce_stack(ctx);
+    int32_t depth = cyber_ce_depth(ctx);
+    depth++;
+    JS_SetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyber_ce_depth", JS_NewInt32(ctx, depth));
+    GCValue frame = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, frame, "reactions", JS_NewArray(ctx));
+    JS_SetPropertyStr(ctx, frame, "callbacks", JS_NewArray(ctx));
+    JS_SetPropertyUint32(ctx, stack, depth, frame);
+}
+
+void js_cyber_ce_pop_stack(JSContextHandle ctx) {
+    int32_t depth = cyber_ce_depth(ctx);
+    if (depth > 0) {
+        JS_SetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyber_ce_depth", JS_NewInt32(ctx, depth - 1));
+    }
 }
 
 static void cyber_ce_reaction_queue_push(JSContextHandle ctx, GCValue el) {
@@ -228,16 +299,6 @@ static void cyber_ce_reaction_queue_push(JSContextHandle ctx, GCValue el) {
     JS_ToUint32(ctx, &len, len_val);
     JS_SetPropertyUint32(ctx, queue, len, el);
     JS_SetPropertyStr(ctx, el, "__CE_upgrade_pending", JS_TRUE);
-}
-
-static GCValue cyber_ce_callback_queue(JSContextHandle ctx) {
-    GCValue global = JS_GetGlobalObject(ctx);
-    GCValue queue = JS_GetPropertyStr(ctx, global, "__cyber_ce_callback_queue");
-    if (!JS_IsArray(ctx, queue)) {
-        queue = JS_NewArray(ctx);
-        JS_SetPropertyStr(ctx, global, "__cyber_ce_callback_queue", queue);
-    }
-    return queue;
 }
 
 void js_cyber_ce_enqueue_callback(JSContextHandle ctx, GCValue elem, const char *name) {
@@ -306,10 +367,7 @@ void js_cyber_ce_enqueue_upgrade_subtree(JSContextHandle ctx, GCValue root) {
 GCValue js_cyber_ce_flush_reactions(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc; (void)argv;
     GCValue global = JS_GetGlobalObject(ctx);
-    GCValue flushing = JS_GetPropertyStr(ctx, global, "__cyber_ce_flushing");
-    if (JS_ToBool(ctx, flushing)) return JS_UNDEFINED;
     JS_SetPropertyStr(ctx, global, "__cyber_ce_reaction_scheduled", JS_FALSE);
-    JS_SetPropertyStr(ctx, global, "__cyber_ce_flushing", JS_TRUE);
 
     GCValue queue = cyber_ce_reaction_queue(ctx);
     int max_waves = 100;
@@ -319,26 +377,26 @@ GCValue js_cyber_ce_flush_reactions(JSContextHandle ctx, GCValue this_val, int a
         JS_ToUint32(ctx, &len, len_val);
         if (len == 0) break;
 
-        for (uint32_t i = 0; i < len; i++) {
-            GCValue el = JS_GetPropertyUint32(ctx, queue, i);
-            JS_SetPropertyStr(ctx, el, "__CE_upgrade_pending", JS_FALSE);
-            js_cyber_upgrade_element(ctx, JS_UNDEFINED, 1, &el);
-        }
+        // Shift the first element and upgrade it.  Using shift avoids
+        // index invalidation when nested appendChild/insertBefore operations
+        // add or remove items from the same queue.
+        GCValue el = JS_GetPropertyUint32(ctx, queue, 0);
+        JS_SetPropertyStr(ctx, el, "__CE_upgrade_pending", JS_FALSE);
+        js_cyber_upgrade_element(ctx, JS_UNDEFINED, 1, &el);
 
-        // Remove the slice we just processed from the front of the queue.
         GCValue new_len_val = JS_GetPropertyStr(ctx, queue, "length");
         uint32_t new_len = 0;
         JS_ToUint32(ctx, &new_len, new_len_val);
-        uint32_t remaining = (new_len > len) ? (new_len - len) : 0;
-        for (uint32_t i = 0; i < remaining; i++) {
-            GCValue item = JS_GetPropertyUint32(ctx, queue, len + i);
-            JS_SetPropertyUint32(ctx, queue, i, item);
+        if (new_len > 0) {
+            for (uint32_t i = 1; i < new_len; i++) {
+                GCValue item = JS_GetPropertyUint32(ctx, queue, i);
+                JS_SetPropertyUint32(ctx, queue, i - 1, item);
+            }
+            JS_SetPropertyStr(ctx, queue, "length", JS_NewInt32(ctx, (int32_t)(new_len - 1)));
         }
-        JS_SetPropertyStr(ctx, queue, "length", JS_NewInt32(ctx, (int32_t)remaining));
     }
 
-    // Flush queued lifecycle callbacks. Upgrades above may have enqueued new
-    // connectedCallback/disconnectedCallback reactions; run them now.
+    // Flush queued lifecycle callbacks for the current reaction-stack frame.
     GCValue cb_queue = cyber_ce_callback_queue(ctx);
     for (int wave = 0; wave < 100; wave++) {
         GCValue len_val = JS_GetPropertyStr(ctx, cb_queue, "length");
@@ -372,7 +430,6 @@ GCValue js_cyber_ce_flush_reactions(JSContextHandle ctx, GCValue this_val, int a
         }
         JS_SetPropertyStr(ctx, cb_queue, "length", JS_NewInt32(ctx, 0));
     }
-    JS_SetPropertyStr(ctx, global, "__cyber_ce_flushing", JS_FALSE);
     return JS_UNDEFINED;
 }
 
@@ -1343,10 +1400,10 @@ GCValue js_custom_elements_define(JSContextHandle ctx, GCValue this_val, int arg
     JS_SetPropertyStr(ctx, this_val, name, argv[1]);
 
     // Enqueue upgrade reactions for any existing elements of this tag name.
-    // The spec flushes CEReactions before define() returns, so a component
-    // registered early in a script can initialize before later definitions
-    // (e.g. ytd-page-manager must run ready() before ytd-app resolves
-    // PAGE_TOKEN in its connectedCallback).
+    // The spec pushes a CEReactions stack frame while define() runs and flushes
+    // it before returning, so nested DOM operations (e.g. constructors that
+    // stamp shadow DOM) get their reactions processed in the right order.
+    js_cyber_ce_push_stack(ctx);
     GCValue global = JS_GetGlobalObject(ctx);
     GCValue enqueue_all = JS_GetPropertyStr(ctx, global, "__cyber_enqueueUpgradeAll");
     if (!JS_IsUndefined(enqueue_all) && !JS_IsNull(enqueue_all) && JS_IsFunction(ctx, enqueue_all)) {
@@ -1355,6 +1412,7 @@ GCValue js_custom_elements_define(JSContextHandle ctx, GCValue this_val, int arg
         (void)result;
     }
     js_cyber_ce_flush_reactions(ctx, JS_UNDEFINED, 0, NULL);
+    js_cyber_ce_pop_stack(ctx);
 
     return JS_UNDEFINED;
 }

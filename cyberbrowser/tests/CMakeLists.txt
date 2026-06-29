@@ -246,6 +246,13 @@ target_include_directories(test-two-tls
         ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src
         ${CMAKE_SOURCE_DIR}/third_party/quickjs
+        ${CMAKE_SOURCE_DIR}/third_party/mbedtls/include
+        ${CMAKE_SOURCE_DIR}/third_party/mbedtls
+        ${CMAKE_SOURCE_DIR}/third_party/mbedtls/tf-psa-crypto/include
+        ${CMAKE_SOURCE_DIR}/third_party/mbedtls/tf-psa-crypto
+        ${CMAKE_SOURCE_DIR}/third_party/mbedtls/tf-psa-crypto/core
+        ${CMAKE_SOURCE_DIR}/third_party/mbedtls/tf-psa-crypto/drivers/builtin/include
+        ${CMAKE_SOURCE_DIR}/third_party/mbedtls/tf-psa-crypto/drivers/builtin/src
 )
 target_link_libraries(test-two-tls
     PRIVATE

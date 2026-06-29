@@ -270,6 +270,8 @@ GCValue js_cyber_ce_enqueue_upgrade(JSContextHandle ctx, GCValue this_val, int a
 void js_cyber_ce_enqueue_upgrade_subtree(JSContextHandle ctx, GCValue root);
 void js_cyber_ce_enqueue_callback(JSContextHandle ctx, GCValue elem, const char *name);
 GCValue js_cyber_ce_flush_reactions(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+void js_cyber_ce_push_stack(JSContextHandle ctx);
+void js_cyber_ce_pop_stack(JSContextHandle ctx);
 void js_cyber_ce_schedule_flush(JSContextHandle ctx);
 extern JSClassDef js_event_class_def;
 GCValue js_event_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
