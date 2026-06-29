@@ -1375,8 +1375,17 @@ bool html_element_set_inner_html(JSContextHandle ctx, GCValue elem, const char *
         doc = JS_GetPropertyStr(ctx, global, "document");
     }
 
+    GCValue tagv = JS_GetPropertyStr(ctx, target, "tagName");
+    const char *tagn = JS_IsString(tagv) ? JS_ToCString(ctx, tagv) : "?";
+    fprintf(stderr, "[INNER-HTML-SET] tag=%s html=%.60s\n", tagn, html);
+    JS_FreeCString(ctx, tagn);
+
     HtmlDocument *frag_doc = html_parse(html, strlen(html));
-    if (!frag_doc) return false;
+    if (!frag_doc) {
+        fprintf(stderr, "[INNER-HTML-SET] parse failed\n");
+        return false;
+    }
+    fprintf(stderr, "[INNER-HTML-SET] parse ok root=%d body=%d\n", frag_doc->root_idx, frag_doc->body_idx);
 
     // Remove existing children from the target (template content or element)
     DOMNodeHandle target_node = DOMNodeHandle::from_object(target);
@@ -1424,6 +1433,10 @@ bool html_element_set_inner_html(JSContextHandle ctx, GCValue elem, const char *
     }
 
     html_document_free(frag_doc);
+    GCValue child_nodes = JS_GetPropertyStr(ctx, target, "childNodes");
+    GCValue lenv = JS_GetPropertyStr(ctx, child_nodes, "length");
+    int32_t clen = 0; JS_ToInt32(ctx, &clen, lenv);
+    fprintf(stderr, "[INNER-HTML-SET] result children=%d\n", clen);
     return true;
 }
 

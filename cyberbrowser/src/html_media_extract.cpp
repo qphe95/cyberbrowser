@@ -924,7 +924,7 @@ static void apply_youtube_e19_null_guard_patch(std::string &src) {
         std::string expected = var + " instanceof ShadowRoot?" + var + ".host:" + var;
         if (src.compare(var_start, expected.size(), expected) == 0) {
             std::string repl = "this.node=" + var + " instanceof ShadowRoot?" + var +
-                               ".host:(" + var + "==null?document.createDocumentFragment():" + var + ")";
+                               ".host:(" + var + "==null?(console.error('e19 wrapper fallback used',new Error().stack),document.createDocumentFragment()):" + var + ")";
             src.replace(start, (var_start - start) + expected.size(), repl);
             applied = true;
             break;
@@ -982,6 +982,83 @@ static void apply_youtube_scoped_root_patch(std::string &src) {
 
     fprintf(stderr, "[SCOPED-ROOT-PATCH] applied for var=%s\n", var.c_str());
     fflush(stderr);
+}
+
+/* Polymer's ShadyDOM helpers save/wrap Node.prototype mutation methods.
+ * Later module bundles re-run these helpers after earlier bundles have already
+ * wrapped Node.prototype, so the captured "native" reference becomes a wrapper
+ * that calls an undefined deeper native.  This makes appendChild/insertBefore
+ * throw "cannot read property 'call' of undefined".  Guard both helpers so
+ * they only execute once, on the first bundle, when the real C functions are
+ * still exposed on Node.prototype.
+ */
+static void apply_youtube_dom_patch_patch(std::string &src) {
+    size_t count = 0;
+
+    /* Guard b6B (lifecycle wrapper that captures insertBefore/removeChild/etc).
+     * Inject a global flag check at the very start of the function body. */
+    const char *b6b_pat = "b6B=function(){";
+    size_t b6b_pos = src.find(b6b_pat);
+    while (b6b_pos != std::string::npos) {
+        const char *b6b_repl = "b6B=function(){if(window.__cyber_b6b_done)return;window.__cyber_b6b_done=!0;";
+        src.replace(b6b_pos, strlen(b6b_pat), b6b_repl);
+        fprintf(stderr, "[DOM-PATCH] guarded b6B at %zu\n", b6b_pos);
+        count++;
+        b6b_pos = src.find(b6b_pat, b6b_pos + strlen(b6b_repl));
+    }
+
+    /* Guard qVB (descriptor saver that writes __shady_native_*). */
+    const char *qvb_pat = "qVB=function(){";
+    size_t qvb_pos = src.find(qvb_pat);
+    while (qvb_pos != std::string::npos) {
+        const char *qvb_repl = "qVB=function(){if(window.__cyber_qvb_done)return;window.__cyber_qvb_done=!0;";
+        src.replace(qvb_pos, strlen(qvb_pat), qvb_repl);
+        fprintf(stderr, "[DOM-PATCH] guarded qVB at %zu\n", qvb_pos);
+        count++;
+        qvb_pos = src.find(qvb_pat, qvb_pos + strlen(qvb_repl));
+    }
+
+    fprintf(stderr, "[DOM-PATCH] scan size=%zu guards=%zu\n", src.size(), count);
+    fflush(stderr);
+}
+
+/* The webcomponents-sd polyfill captures Element.prototype.matches into a local
+ * variable `ma` at load time.  In our engine the property may not be a function
+ * at that exact moment, so `ma` ends up undefined and ShadyDOM's scoped
+ * querySelector throws "not a function".  Patch the captured usages to fall
+ * back to the live Element.prototype.matches.
+ */
+static void apply_shadydom_matches_patch(std::string &src) {
+    const char *pat1 = "ma.call(e,a)";
+    size_t pos = src.find(pat1);
+    if (pos != std::string::npos) {
+        src.replace(pos, strlen(pat1), "(function(){try{return ma.call(e,a)}catch(__ex){console.error(\"matches-throw\",String(__ex),__ex&&__ex.stack);return false}})()");
+        fprintf(stderr, "[MATCHES-PATCH] patched ma.call(e,a)\n");
+        fflush(stderr);
+        FILE *f = fopen("webcomponents_patched.js", "wb");
+        if (f) { fwrite(src.data(), 1, src.size(), f); fclose(f); }
+    }
+    const char *pat2 = "return ma.call(d,a)";
+    pos = src.find(pat2);
+    if (pos != std::string::npos) {
+        src.replace(pos, strlen(pat2), "return (function(){try{return ma.call(d,a)}catch(__ex){console.error(\"matches-throw-d\",String(__ex),__ex&&__ex.stack);return false}})()");
+        fprintf(stderr, "[MATCHES-PATCH] patched ma.call(d,a)\n");
+        fflush(stderr);
+    }
+    // Wrap rc.querySelector in a diagnostic try/catch so we can see exactly
+    // which sub-expression throws "not a function".
+    const char *qs_start = "querySelector:function(a){";
+    pos = src.find(qs_start);
+    if (pos != std::string::npos) {
+        size_t body_start = pos + strlen(qs_start);
+        size_t body_end = src.find(",querySelectorAll:function", body_start);
+        if (body_end != std::string::npos) {
+            std::string wrapped = "try{" + src.substr(body_start, body_end - body_start) + "}catch(__ex){console.error('qs-throw',String(__ex),'K=',K,'this=',this&&this.nodeName,'sel=',a,'ma=',typeof ma,'nc=',typeof nc,'p=',typeof p,'slice=',typeof Array.prototype.slice);throw __ex;}";
+            src.replace(body_start, body_end - body_start, wrapped);
+            fprintf(stderr, "[MATCHES-PATCH] wrapped querySelector\n");
+            fflush(stderr);
+        }
+    }
 }
 
 extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_result) {
@@ -1070,6 +1147,8 @@ extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_re
                     apply_youtube_page_token_patch(patched);
                     apply_youtube_e19_null_guard_patch(patched);
                     apply_youtube_scoped_root_patch(patched);
+                    apply_shadydom_matches_patch(patched);
+                    apply_youtube_dom_patch_patch(patched);
                     if (patched.size() != buffer.size) {
                         char *new_data = (char *)malloc(patched.size() + 1);
                         if (new_data) {

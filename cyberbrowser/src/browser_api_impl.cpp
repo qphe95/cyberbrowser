@@ -3694,7 +3694,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
             "      if (nt === 1) {"
             "        var tag = node.tagName;"
             "        var lc = tag ? tag.toLowerCase() : '';"
-            "        if (tag && tag.indexOf('-') >= 0 && !node.__CE_upgraded && !skip[lc]) {"
+            "        if (tag && tag.indexOf('-') >= 0 && !node.__CE_upgraded && !skip[lc] && node.getAttribute && node.getAttribute('disable-upgrade') === null) {"
             "          queue.push(node);"
             "        }"
             "        if (skip[lc]) { node.__CE_upgraded = true; }"

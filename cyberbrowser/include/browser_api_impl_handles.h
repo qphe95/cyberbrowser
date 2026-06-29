@@ -2021,6 +2021,15 @@ public:
             if (strcmp(p->attributes[i].name, name) == 0) {
                 strncpy(p->attributes[i].value, value, sizeof(p->attributes[i].value) - 1);
                 p->attributes[i].value[sizeof(p->attributes[i].value) - 1] = '\0';
+                // Keep the dedicated id/class caches in sync with the attribute
+                // list so querySelector and .id/.className see the same value.
+                if (strcmp(name, "id") == 0) {
+                    strncpy(p->id, value, sizeof(p->id) - 1);
+                    p->id[sizeof(p->id) - 1] = '\0';
+                } else if (strcmp(name, "class") == 0) {
+                    strncpy(p->class_name, value, sizeof(p->class_name) - 1);
+                    p->class_name[sizeof(p->class_name) - 1] = '\0';
+                }
                 return;
             }
         }
@@ -2053,6 +2062,13 @@ public:
         p->attributes[p->attribute_count].value[
             sizeof(p->attributes[p->attribute_count].value) - 1] = '\0';
         p->attribute_count++;
+        if (strcmp(name, "id") == 0) {
+            strncpy(p->id, value, sizeof(p->id) - 1);
+            p->id[sizeof(p->id) - 1] = '\0';
+        } else if (strcmp(name, "class") == 0) {
+            strncpy(p->class_name, value, sizeof(p->class_name) - 1);
+            p->class_name[sizeof(p->class_name) - 1] = '\0';
+        }
     }
 
     bool has_attribute(const char* name) const {

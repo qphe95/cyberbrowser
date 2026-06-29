@@ -18,6 +18,7 @@
 #include "quickjs.h"
 #include "quickjs_gc_unified.h"
 #include "browser_api_impl.h"
+#include "browser_api_impl_types.h"
 #include "browser_api_impl_internal.h"
 #include "js_quickjs.h"
 #include "http_download.h"
@@ -619,6 +620,10 @@ int main(int argc, char *argv[]) {
      * and upgrade any custom elements defined during script execution. */
     {
         printf("Executing page scripts ...\n");
+        {
+            const char *pre_diag = "console.error('[PRE-DIAG] Element.matches=' + typeof Element.prototype.matches);";
+            JS_Eval(g_ctx, pre_diag, strlen(pre_diag), "<pre_diag>", JS_EVAL_TYPE_GLOBAL);
+        }
         js_quickjs_clear_captured_urls();
         JsExecResult js_result;
         bool exec_ok = html_execute_page_scripts(html, &js_result);
@@ -660,6 +665,75 @@ int main(int argc, char *argv[]) {
             JS_Eval(g_ctx, upgrade_doc_js, strlen(upgrade_doc_js), "<upgrade_doc>", JS_EVAL_TYPE_GLOBAL);
             fprintf(stderr, "[UPGRADE-DOC] done\n");
             fflush(stderr);
+
+            /* Make sure Polymer's wrapper installation has not left the native
+             * Node mutation methods broken before we run diagnostics/layout. */
+            js_dom_restore_native_methods(g_ctx);
+
+            /* YouTube's app loader normally fires on a 'script-load-dpj' event
+             * or ytsignals callback.  In our emulator those signals are missing,
+             * so the app stays in its disable-upgrade skeleton state.  Manually
+             * run the loader to remove disable-upgrade and let ytd-app stamp. */
+            const char *app_load_js =
+                "console.error('[APP-LOAD] typeof=' + typeof appLoad + ' window=' + typeof window.appLoad + ' schedule=' + typeof scheduleAppLoad);"
+                "if (typeof appLoad === 'function') { try { appLoad(); console.error('[APP-LOAD] triggered'); } catch(e) { console.error('[APP-LOAD] err', e.message, e.stack); } }"
+                "else if (window.appLoad && typeof window.appLoad === 'function') { try { window.appLoad(); console.error('[APP-LOAD] triggered via window'); } catch(e) { console.error('[APP-LOAD] err', e.message, e.stack); } }"
+                "else { console.error('[APP-LOAD] not found'); }";
+            JS_Eval(g_ctx, app_load_js, strlen(app_load_js), "<app_load>", JS_EVAL_TYPE_GLOBAL);
+
+            /* Re-upgrade now that disable-upgrade has been removed. */
+            {
+                const char *reupgrade_js =
+                    "if (window.customElements && typeof window.customElements.upgrade === 'function') {"
+                    "  var app = document.querySelector('ytd-app');"
+                    "  try { window.customElements.upgrade(app || document.documentElement); } catch(e) {}"
+                    "}";
+                JS_Eval(g_ctx, reupgrade_js, strlen(reupgrade_js), "<reupgrade>", JS_EVAL_TYPE_GLOBAL);
+            }
+
+            const char *shady_diag_js =
+                "(function(){"
+                "  try {"
+                "    var app = document.querySelector('ytd-app');"
+                "    if (!app) { console.error('[SHADY-DIAG] no ytd-app'); return; }"
+                "    var root = app.root || app.shadowRoot;"
+                "    console.error('[SHADY-DIAG] app root=' + (root && root.nodeName) + ' isShadow=' + (root instanceof ShadowRoot));"
+                "    if (!root) return;"
+                "    console.error('[SHADY-DIAG] matches=' + typeof Element.prototype.matches + ' qsa=' + typeof Element.prototype.__shady_native_querySelectorAll + ' qi=' + (window.ShadyDOM && window.ShadyDOM.querySelectorImplementation));"
+                "    console.error('[SHADY-DIAG] root proto=' + (root && Object.prototype.toString.call(root)));"
+                "    console.error('[SHADY-DIAG] root has qs=' + (root && typeof root.querySelector) + ' has getRoot=' + (root && typeof root.__shady_getRootNode));"
+                "    try { var test = document.createElement('div'); console.error('[SHADY-DIAG] matchesTest=' + Element.prototype.matches.call(test, 'div')); } catch(ee) { console.error('[SHADY-DIAG] matchesTestExc', ee.message); }"
+                "    console.error('[SHADY-DIAG] ShadyDOM.inUse=' + (window.ShadyDOM && window.ShadyDOM.inUse) + ' Wrapper=' + (window.ShadyDOM && typeof window.ShadyDOM.Wrapper) + ' noPatch=' + (window.ShadyDOM && window.ShadyDOM.noPatch));"
+                "    var testDiv = document.createElement('div');"
+                "    var testBtn2 = document.createElement('button'); testBtn2.id='bar'; console.error('[SHADY-DIAG] createButton id=' + testBtn2.id + ' nodeName=' + testBtn2.nodeName);"
+                "    console.error('[SHADY-DIAG] appendChild type=' + typeof Node.prototype.appendChild + ' nativeAppend type=' + typeof Node.prototype.__shady_native_appendChild);"
+                "    var desc = Object.getOwnPropertyDescriptor(Node.prototype,'__shady_native_appendChild');"
+                "    console.error('[SHADY-DIAG] nativeAppend desc valueType=' + (desc && typeof desc.value) + ' getType=' + (desc && typeof desc.get) + ' setType=' + (desc && typeof desc.set));"
+                "    function ss(f){return String(f).replace(/\\n/g,' ').slice(0,500);}"
+                "    console.error('[SHADY-DIAG] nativeAppend callType=' + (Node.prototype.__shady_native_appendChild && typeof Node.prototype.__shady_native_appendChild.call) + ' applyType=' + (Node.prototype.__shady_native_appendChild && typeof Node.prototype.__shady_native_appendChild.apply));"
+                "    console.error('[SHADY-DIAG] appendChild callType=' + (Node.prototype.appendChild && typeof Node.prototype.appendChild.call));"
+                "    console.error('[SHADY-DIAG] nativeInsert toString=' + (Node.prototype.__shady_native_insertBefore && ss(Node.prototype.__shady_native_insertBefore)));"
+                "    console.error('[SHADY-DIAG] insertBefore toString=' + (Node.prototype.insertBefore && ss(Node.prototype.insertBefore)));"
+                "    try { var d3=document.createElement('div'); Node.prototype.__shady_native_appendChild(d3, document.createElement('span')); console.error('[SHADY-DIAG] nativeAppend direct ok=' + d3.childNodes.length); } catch(e3){ console.error('[SHADY-DIAG] nativeAppend direct err=' + e3.message + ' stack=' + (e3.stack||'')); }"
+                "    try { var d4=document.createElement('div'); __cyber_appendChild(d4, document.createElement('span')); console.error('[SHADY-DIAG] cyberAppend ok=' + d4.childNodes.length); } catch(e4){ console.error('[SHADY-DIAG] cyberAppend err=' + e4.message + ' stack=' + (e4.stack||'')); }"
+                "    try { var d2=document.createElement('div'); var s2=document.createElement('span'); Node.prototype.__shady_native_appendChild.call(d2,s2); console.error('[SHADY-DIAG] nativeAppend ok childLen=' + d2.childNodes.length); } catch(e2) { console.error('[SHADY-DIAG] nativeAppend err=' + e2.message); }"
+                "    try { testDiv.appendChild(testBtn2); console.error('[SHADY-DIAG] manualAppend childLen=' + testDiv.childNodes.length); } catch(e) { console.error('[SHADY-DIAG] manualAppend err=' + e.message); }"
+                "    testDiv.innerHTML = '<button id=\"button\" class=\"foo\"></button>';"
+                "    console.error('[SHADY-DIAG] testDiv html=' + testDiv.innerHTML + ' childLen=' + testDiv.childNodes.length + ' first=' + (testDiv.children[0] && testDiv.children[0].nodeName));"
+                "    var testBtn = testDiv.querySelector('button'); console.error('[SHADY-DIAG] testBtn id=' + (testBtn && testBtn.id) + ' class=' + (testBtn && testBtn.className) + ' attr=' + (testBtn && testBtn.getAttribute('id')));"
+                "    var ib = root.querySelector('yt-icon-button');"
+                "    var ibRoot = ib && (ib.root || ib.shadowRoot);"
+                "    console.error('[SHADY-DIAG] iconButton=' + (ib && ib.nodeName) + ' ibRoot=' + (ibRoot && ibRoot.nodeName) + ' ibInstRoot=' + (ib && ib.polymerController && ib.polymerController.root && ib.polymerController.root.nodeName));"
+                "    if (ibRoot) {"
+                "      var fc = ibRoot.firstElementChild; var fcn = ibRoot.childNodes && ibRoot.childNodes[0];"
+                "      console.error('[SHADY-DIAG] ib nativeFirst=' + ('__shady_native_firstChild' in ibRoot));"
+                "      console.error('[SHADY-DIAG] ib shadyFirst=' + ('__shady_firstChild' in ibRoot));"
+                "      console.error('[SHADY-DIAG] ib childLen=' + (ibRoot.childNodes && ibRoot.childNodes.length) + ' firstTag=' + (fcn && fcn.nodeName) + ' firstId=' + (fcn && fcn.id) + ' firstAttr=' + (fcn && fcn.getAttribute('id')) + ' class=' + (fcn && fcn.getAttribute('class')));"
+                "      console.error('[SHADY-DIAG] ib qsButton=' + (ibRoot.querySelector ? ibRoot.querySelector('#button') : 'no qs'));"
+                "    }"
+                "  } catch(e) { console.error('[SHADY-DIAG] exc string=' + String(e)); console.error('[SHADY-DIAG] exc stack=' + (e.stack || 'no stack')); }"
+                "})();";
+            JS_Eval(g_ctx, shady_diag_js, strlen(shady_diag_js), "<shady_diag>", JS_EVAL_TYPE_GLOBAL);
         }
 
         // ytInitialData injection removed: the page is expected to fetch its

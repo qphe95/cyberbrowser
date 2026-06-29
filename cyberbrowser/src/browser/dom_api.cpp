@@ -929,6 +929,36 @@ static bool dom_script_type_is_executable(JSContextHandle ctx, GCValue script) {
     return ok;
 }
 
+/* Restore Node.prototype mutation methods to the real C implementations and
+ * mirror them on __shady_native_*.  YouTube module bundles install wrappers
+ * around these methods; this helper returns the JS DOM to a working state. */
+void js_dom_restore_native_methods(JSContextHandle ctx) {
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue node_ctor = JS_GetPropertyStr(ctx, global, "Node");
+    if (JS_IsObject(node_ctor)) {
+        GCValue node_proto = JS_GetPropertyStr(ctx, node_ctor, "prototype");
+        if (JS_IsObject(node_proto)) {
+            JS_SetPropertyStr(ctx, node_proto, "appendChild",
+                JS_NewCFunction(ctx, js_node_appendChild_real, "appendChild", 1));
+            JS_SetPropertyStr(ctx, node_proto, "insertBefore",
+                JS_NewCFunction(ctx, js_node_insertBefore_real, "insertBefore", 2));
+            JS_SetPropertyStr(ctx, node_proto, "removeChild",
+                JS_NewCFunction(ctx, js_node_removeChild_real, "removeChild", 1));
+            JS_SetPropertyStr(ctx, node_proto, "replaceChild",
+                JS_NewCFunction(ctx, js_node_replaceChild_real, "replaceChild", 2));
+
+            JS_SetPropertyStr(ctx, node_proto, "__shady_native_appendChild",
+                JS_NewCFunction(ctx, js_node_appendChild_real, "appendChild", 1));
+            JS_SetPropertyStr(ctx, node_proto, "__shady_native_insertBefore",
+                JS_NewCFunction(ctx, js_node_insertBefore_real, "insertBefore", 2));
+            JS_SetPropertyStr(ctx, node_proto, "__shady_native_removeChild",
+                JS_NewCFunction(ctx, js_node_removeChild_real, "removeChild", 1));
+            JS_SetPropertyStr(ctx, node_proto, "__shady_native_replaceChild",
+                JS_NewCFunction(ctx, js_node_replaceChild_real, "replaceChild", 2));
+        }
+    }
+}
+
 static void dom_execute_external_script(JSContextHandle ctx, GCValue script, const char *src) {
     if (!g_dom_dynamic_scripts_enabled) return;
     if (!src || !src[0]) return;
@@ -989,6 +1019,7 @@ static void dom_execute_external_script(JSContextHandle ctx, GCValue script, con
         JS_SetPropertyStr(ctx, script, "readyState", JS_NewString(ctx, "loaded"));
 
         GCValue result = JS_Eval(ctx, buffer.data, buffer.size, url, JS_EVAL_TYPE_GLOBAL);
+        js_dom_restore_native_methods(ctx);
 
         JS_SetPropertyStr(ctx, script, "readyState", JS_NewString(ctx, "complete"));
         JS_SetPropertyStr(ctx, doc, "currentScript", prev_current);
@@ -1739,6 +1770,9 @@ GCValue js_node_cloneNode_real(JSContextHandle ctx, GCValue this_val, int argc, 
             child = child_node.next_sibling();
         }
     }
+
+    // Keep ShadyDOM's parallel __shady tree in sync (YouTube noPatch mode).
+    dom_sync_shady_tree(ctx, clone, JS_NULL);
     
     return clone;
 }
@@ -1878,6 +1912,48 @@ GCValue js_node_get_parentNode(JSContextHandle ctx, GCValue this_val, int argc, 
     }
     GCValue parent = node.parent_node();
     return JS_IsNull(parent) ? JS_NULL : parent;
+}
+
+// Synchronise ShadyDOM's parallel __shady tree with the native DOM tree.
+// YouTube runs the webcomponents-sd polyfill in noPatch mode, so public
+// cloneNode/importNode/attachShadow are not wrapped.  Our native C++ paths
+// build the real DOM but never populate node.__shady.firstChild/..., which
+// breaks ShadyDOM's scoped querySelector and causes e19 wrappers to be built
+// around null nodes.  This helper mirrors the polyfill's xc() sync.
+static GCValue shady_ensure_obj(JSContextHandle ctx, GCValue node) {
+    GCValue shady = JS_GetPropertyStr(ctx, node, "__shady");
+    if (JS_IsUndefined(shady) || JS_IsNull(shady) || !JS_IsObject(shady)) {
+        shady = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, node, "__shady", shady);
+    }
+    return shady;
+}
+
+void dom_sync_shady_tree(JSContextHandle ctx, GCValue node, GCValue parent) {
+    if (!JS_IsObject(node)) return;
+    DOMNodeHandle dom = get_dom_node(ctx, node);
+    if (!dom.valid()) return;
+
+    GCValue shady = shady_ensure_obj(ctx, node);
+    GCValue first = js_node_get_firstChild(ctx, node, 0, NULL);
+    GCValue last = js_node_get_lastChild(ctx, node, 0, NULL);
+    GCValue prev = js_node_get_previousSibling(ctx, node, 0, NULL);
+    GCValue next = js_node_get_nextSibling(ctx, node, 0, NULL);
+
+    JS_SetPropertyStr(ctx, shady, "firstChild", first);
+    JS_SetPropertyStr(ctx, shady, "lastChild", last);
+    JS_SetPropertyStr(ctx, shady, "previousSibling", prev);
+    JS_SetPropertyStr(ctx, shady, "nextSibling", next);
+    JS_SetPropertyStr(ctx, shady, "parentNode", JS_IsNull(parent) ? JS_NULL : parent);
+    // Invalidate any cached childNodes array.
+    JS_SetPropertyStr(ctx, shady, "childNodes", JS_UNDEFINED);
+
+    GCValue child = first;
+    while (!JS_IsNull(child) && !JS_IsUndefined(child) && JS_IsObject(child)) {
+        dom_sync_shady_tree(ctx, child, node);
+        GCValue ns = js_node_get_nextSibling(ctx, child, 0, NULL);
+        child = ns;
+    }
 }
 
 GCValue js_node_get_parentElement(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
@@ -2832,6 +2908,18 @@ GCValue js_element_querySelector_real(JSContextHandle ctx, GCValue this_val, int
         GCValue len_val = JS_GetPropertyStr(ctx, children, "length");
         int32_t clen = 0; JS_ToInt32(ctx, &clen, len_val);
         fprintf(stderr, "[QS-BUTTON] host=%s children=%d result=%s\n", htag?htag:"?", clen, rtag?rtag:"?");
+        for (int32_t i = 0; i < clen && i < 10; i++) {
+            GCValue c = JS_GetPropertyUint32(ctx, children, i);
+            GCValue ctag = JS_GetPropertyStr(ctx, c, "nodeName");
+            GCValue cid = JS_GetPropertyStr(ctx, c, "id");
+            GCValue ctype = JS_GetPropertyStr(ctx, c, "nodeType");
+            const char *ctag_s = JS_ToCString(ctx, ctag);
+            const char *cid_s = JS_ToCString(ctx, cid);
+            int32_t ctype_i = 0; JS_ToInt32(ctx, &ctype_i, ctype);
+            fprintf(stderr, "[QS-BUTTON]   child[%d] type=%d name=%s id=%s\n", i, ctype_i, ctag_s?ctag_s:"?", cid_s?cid_s:"?");
+            if (ctag_s) JS_FreeCString(ctx, ctag_s);
+            if (cid_s) JS_FreeCString(ctx, cid_s);
+        }
         fflush(stderr);
         if (htag) JS_FreeCString(ctx, htag);
         if (rtag && rtag != "null") JS_FreeCString(ctx, rtag);

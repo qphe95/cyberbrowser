@@ -1901,7 +1901,7 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
             return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
         } else {
             platform_http_free_buffer(&response_buffer);
-            platform_log(LOG_LEVEL_WARN, "js_fetch", "Generic request failed: %s", error_buf[0] ? error_buf : "unknown");
+            platform_log(LOG_LEVEL_WARN, "js_fetch", "Generic request failed for %s %s: HTTP %d / %s", method, url ? url : "?", status_code, error_buf[0] ? error_buf : "unknown");
             return reject_type_error(ctx, error_buf[0] ? error_buf : "Network request failed");
         }
     }
@@ -2924,6 +2924,11 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
         // fetch()/XHR .then() chains and player bootstrap callbacks run.
         js_quickjs_pump_timers_and_jobs();
 
+        // YouTube module bundles wrap Node.prototype mutation methods.  Restore
+        // the real C implementations after each script so timers and later
+        // bundles operate on working native methods instead of broken wrappers.
+        js_dom_restore_native_methods(ctx);
+
         // Run a GC cycle after every script to prevent handle exhaustion /
         // memory pressure when many large scripts execute in sequence.
         // NOTE: disabled during script execution because the compacting GC can
@@ -2934,7 +2939,10 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
     // Process all remaining timers and jobs after all scripts complete.
     js_quickjs_pump_timers_and_jobs();
     log_to_file("js_quickjs", "Drained remaining timers/jobs after all scripts");
-    
+
+    /* Final restore in case the last bundle left wrappers installed. */
+    js_dom_restore_native_methods(ctx);
+
     log_to_file("js_quickjs", "All %d scripts executed", script_count);
 
     // Get captured URLs

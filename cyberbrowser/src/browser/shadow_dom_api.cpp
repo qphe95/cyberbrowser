@@ -351,12 +351,14 @@ GCValue js_element_attach_shadow(JSContextHandle ctx, GCValue this_val, int argc
         return JS_ThrowTypeError(ctx, "attachShadow called on non-element");
     }
 
+    const char *tag_name = host_node.node_name();
+    fprintf(stderr, "[ATTACH-SHADOW-ENTER] host=%s\n", tag_name);
+    fflush(stderr);
+
     GCValue existing_shadow = JS_GetPropertyStr(ctx, this_val, "__shadowRoot");
     if (!JS_IsUndefined(existing_shadow) && !JS_IsNull(existing_shadow) && JS_IsObject(existing_shadow)) {
         return JS_ThrowTypeError(ctx, "NotSupportedError: element already has a shadow root");
     }
-
-    const char *tag_name = host_node.node_name();
     if (!is_valid_shadow_host_local_name(tag_name)) {
         return JS_ThrowTypeError(ctx, "NotSupportedError: element does not support shadow root");
     }
@@ -421,6 +423,20 @@ GCValue js_element_attach_shadow(JSContextHandle ctx, GCValue this_val, int argc
     // Polymer's _attachDom passes a pre-built fragment as `shadyUpgradeFragment`.
     // Move its children into the new shadow root so the composed tree is ready.
     GCValue upgrade_fragment = JS_GetPropertyStr(ctx, argv[0], "shadyUpgradeFragment");
+    bool has_upgrade = !JS_IsNull(upgrade_fragment) && !JS_IsUndefined(upgrade_fragment) && JS_IsObject(upgrade_fragment);
+    if (has_upgrade) {
+        GCValue frag_first = js_node_get_firstChild(ctx, upgrade_fragment, 0, NULL);
+        GCValue frag_child_nodes = JS_GetPropertyStr(ctx, upgrade_fragment, "childNodes");
+        int frag_len = 0;
+        if (JS_IsArray(ctx, frag_child_nodes)) {
+            JS_ToInt32(ctx, &frag_len, JS_GetPropertyStr(ctx, frag_child_nodes, "length"));
+        }
+        GCValue first_name_v = JS_GetPropertyStr(ctx, frag_first, "nodeName");
+        const char *first_name = JS_IsObject(frag_first) ? JS_ToCString(ctx, first_name_v) : "null";
+        fprintf(stderr, "[ATTACH-SHADOW] host=%s fragment_children=%d first=%s\n", tag_name, frag_len, first_name ? first_name : "null");
+        JS_FreeCString(ctx, first_name);
+        fflush(stderr);
+    }
     if (!JS_IsNull(upgrade_fragment) && !JS_IsUndefined(upgrade_fragment) && JS_IsObject(upgrade_fragment)) {
         GCValue fragment_children = JS_GetPropertyStr(ctx, upgrade_fragment, "childNodes");
         if (JS_IsArray(ctx, fragment_children)) {
@@ -436,6 +452,44 @@ GCValue js_element_attach_shadow(JSContextHandle ctx, GCValue this_val, int argc
                 js_node_appendChild_real(ctx, shadow_root, 1, append_args);
             }
             free(children);
+        }
+    }
+
+    // Keep ShadyDOM's parallel __shady tree in sync (YouTube noPatch mode).
+    dom_sync_shady_tree(ctx, shadow_root, JS_NULL);
+
+    // Polymer's `ready` runs before `_readyClients`, so `this.root` is still
+    // the original stamped fragment.  Make that fragment's Shady tree mirror
+    // the children we just moved into our ShadowRoot, so scoped querySelector
+    // on the fragment finds the stamped content (e.g. #button).
+    if (!JS_IsNull(upgrade_fragment) && !JS_IsUndefined(upgrade_fragment) && JS_IsObject(upgrade_fragment)) {
+        GCValue frag_shady = JS_GetPropertyStr(ctx, upgrade_fragment, "__shady");
+        if (!JS_IsObject(frag_shady)) {
+            frag_shady = JS_NewObject(ctx);
+            JS_SetPropertyStr(ctx, upgrade_fragment, "__shady", frag_shady);
+        }
+        GCValue frag_first = js_node_get_firstChild(ctx, shadow_root, 0, NULL);
+        GCValue frag_last = js_node_get_lastChild(ctx, shadow_root, 0, NULL);
+        JS_SetPropertyStr(ctx, frag_shady, "firstChild", frag_first);
+        JS_SetPropertyStr(ctx, frag_shady, "lastChild", frag_last);
+        JS_SetPropertyStr(ctx, frag_shady, "parentNode", JS_NULL);
+        JS_SetPropertyStr(ctx, frag_shady, "childNodes", JS_UNDEFINED);
+
+        GCValue child = frag_first;
+        GCValue prev = JS_NULL;
+        while (!JS_IsNull(child) && !JS_IsUndefined(child) && JS_IsObject(child)) {
+            GCValue ns = js_node_get_nextSibling(ctx, child, 0, NULL);
+            GCValue child_shady = JS_GetPropertyStr(ctx, child, "__shady");
+            if (!JS_IsObject(child_shady)) {
+                child_shady = JS_NewObject(ctx);
+                JS_SetPropertyStr(ctx, child, "__shady", child_shady);
+            }
+            JS_SetPropertyStr(ctx, child_shady, "parentNode", upgrade_fragment);
+            JS_SetPropertyStr(ctx, child_shady, "previousSibling", prev);
+            JS_SetPropertyStr(ctx, child_shady, "nextSibling", ns);
+            JS_SetPropertyStr(ctx, child_shady, "childNodes", JS_UNDEFINED);
+            prev = child;
+            child = ns;
         }
     }
 

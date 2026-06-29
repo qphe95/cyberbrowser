@@ -409,6 +409,11 @@ extern volatile int g_dom_needs_layout;
  * that holds the JS context (e.g. async image load callbacks). */
 void dom_request_layout(void);
 
+/* Restore Node.prototype mutation methods to the real C implementations and
+ * mirror them on __shady_native_*.  YouTube module bundles install wrappers
+ * around these methods; this helper returns the JS DOM to a working state. */
+void js_dom_restore_native_methods(JSContextHandle ctx);
+
 /* ============================================================================
  * Location object data
  * ============================================================================ */
