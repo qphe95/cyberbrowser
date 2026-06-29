@@ -70,6 +70,10 @@ int css_specificity_from_selector_text(const char *selector);
 /* Returns true if a rule's enclosing @media condition matches the viewport. */
 bool css_rule_media_matches(const CssRule *rule, double viewport_width);
 
+/* Transform a stylesheet's selectors for a shadow host (e.g. :host, ::slotted).
+ * Used by both the JS CSS applier and the layout-engine collector. */
+void css_scope_stylesheet(CssStylesheet *sheet, const char *host_tag);
+
 /* One matched declaration with specificity/order for cascading. */
 typedef struct CssAppliedDecl {
     const CssDeclaration *decl;

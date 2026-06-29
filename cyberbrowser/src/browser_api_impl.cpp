@@ -271,6 +271,20 @@ static GCValue js_true(JSContextHandle ctx, GCValue this_val, int argc, GCValue 
     return JS_TRUE;
 }
 
+// HTMLScriptElement.supports(type) — modern loaders use this to feature-detect
+// module/importmap script support. We only claim classic scripts are supported.
+static GCValue js_html_script_element_supports(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_FALSE;
+    const char *type = JS_ToCString(ctx, argv[0]);
+    bool supported = false;
+    if (type) {
+        supported = (strcmp(type, "classic") == 0);
+        JS_FreeCString(ctx, type);
+    }
+    return JS_NewBool(ctx, supported);
+}
+
 // Promise rejection helper
 static GCValue js_promise_reject(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc; (void)argv;
@@ -1954,7 +1968,18 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, style_element_ctor, "prototype", style_element_proto);
     JS_SetPropertyStr(ctx, global, "HTMLStyleElement", style_element_ctor);
     JS_SetPropertyStr(ctx, window, "HTMLStyleElement", style_element_ctor);
-    
+
+    // HTMLScriptElement constructor + static supports() method
+    GCValue script_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLScriptElement", 0, JS_CFUNC_constructor_or_func, 0);
+    GCValue script_element_proto = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, script_element_proto, "constructor", script_element_ctor);
+    JS_SetPrototype(ctx, script_element_proto, html_element_proto);
+    JS_SetPropertyStr(ctx, script_element_ctor, "prototype", script_element_proto);
+    JS_SetPropertyStr(ctx, script_element_ctor, "supports",
+        JS_NewCFunction(ctx, js_html_script_element_supports, "supports", 1));
+    JS_SetPropertyStr(ctx, global, "HTMLScriptElement", script_element_ctor);
+    JS_SetPropertyStr(ctx, window, "HTMLScriptElement", script_element_ctor);
+
     // HTMLUnknownElement constructor
     GCValue unknown_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLUnknownElement", 0, JS_CFUNC_constructor_or_func, 0);
     GCValue unknown_element_proto = JS_NewObject(ctx);
@@ -3636,7 +3661,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     {
         const char *upgrade_js =
             "(function(){"
-            "  var skip = { 'custom-style': true, 'iron-iconset-svg': true, 'yt-page-navigation-progress': true, 'ytd-masthead': true };"
+            "  var skip = { };"
             "  window.__cyber_enqueueUpgradeAll = function(name) {"
             "    if (!window.customElements || !document) return;"
             "    if (skip[name]) return;"

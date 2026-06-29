@@ -1482,8 +1482,11 @@ GCValue js_cyber_upgrade_element(JSContextHandle ctx, GCValue this_val, int argc
 
     // Skip elements whose constructors are known to hit missing APIs and
     // abort the process before we have implemented those standards.
-    static const char *skip_tags[] = { "custom-style", "iron-iconset-svg", "yt-page-navigation-progress", "ytd-masthead" };
+    // (Previously skipped custom-style/iron-iconset-svg/yt-page-navigation-progress/ytd-masthead;
+    // those standards are now implemented, so the list is empty.)
+    static const char *skip_tags[] = { NULL };
     for (size_t i = 0; i < sizeof(skip_tags)/sizeof(skip_tags[0]); i++) {
+        if (!skip_tags[i]) continue;
         if (strcmp(name_lc, skip_tags[i]) == 0) {
             fprintf(stderr, "[CE-UPGRADE] skipping %s\n", name_lc);
             JS_SetPropertyStr(ctx, el, "__CE_upgraded", JS_TRUE);
@@ -3485,8 +3488,16 @@ GCValue js_performance_observer_takeRecords(JSContextHandle ctx, GCValue this_va
 
 // PerformanceObserver.supportedEntryTypes getter
 GCValue js_performance_observer_get_supported_entry_types(JSContextHandle ctx, GCValue this_val) {
-    // Return an array of supported entry types
+    (void)this_val;
     GCValue array = JS_NewArray(ctx);
+    const char *types[] = {
+        "element", "event", "first-input", "largest-contentful-paint",
+        "layout-shift", "longtask", "mark", "measure", "navigation",
+        "paint", "resource", NULL
+    };
+    for (int i = 0; types[i]; i++) {
+        JS_SetPropertyUint32(ctx, array, (uint32_t)i, JS_NewString(ctx, types[i]));
+    }
     return array;
 }
 

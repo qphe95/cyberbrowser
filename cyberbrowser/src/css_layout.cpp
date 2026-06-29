@@ -5,6 +5,7 @@
  */
 
 #include "css_layout.h"
+#include "css_parser.h"
 #include "browser_api_impl.h"
 #include "platform.h"
 #include "url_utils.h"
@@ -1120,16 +1121,35 @@ static CssStylesheet* layout_fetch_stylesheet(const char *base_url, const char *
     return sheet;
 }
 
+/* Walk up the native parent chain to find the nearest custom-element host.
+ * This lets us scope shadow-root <style> sheets correctly. */
+static const char* layout_find_host_tag(LayoutContext *ctx, int dom_idx) {
+    int p = po_array_parent(&ctx->doc->array, dom_idx);
+    while (p >= 0) {
+        HtmlNode *node = (HtmlNode*)po_array_payload(&ctx->doc->array, p);
+        if (node && node->type == HTML_NODE_ELEMENT && node->tag_name && strchr(node->tag_name, '-')) {
+            return node->tag_name;
+        }
+        p = po_array_parent(&ctx->doc->array, p);
+    }
+    return NULL;
+}
+
 static void layout_collect_stylesheets_recursive(LayoutContext *ctx, int layout_idx,
                                                   LayoutStyleSheetList *list,
                                                   const char *base_url) {
     if (layout_idx < 0 || layout_idx >= ctx->tree.count) return;
-    HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[layout_idx].dom_node_idx);
+    int dom_idx = ctx->tree.nodes[layout_idx].dom_node_idx;
+    HtmlNode *node = layout_node_dom(ctx, dom_idx);
     if (!node || node->type != HTML_NODE_ELEMENT) goto next;
 
     if (strcasecmp(node->tag_name, "style") == 0 && node->text_content && node->text_content[0]) {
         CssStylesheet *sheet = css_stylesheet_parse(node->text_content, strlen(node->text_content));
         if (sheet) {
+            /* If this <style> lives inside a stamped shadow root, scope :host,
+             * ::slotted, etc. to the host custom element. */
+            const char *host_tag = layout_find_host_tag(ctx, dom_idx);
+            if (host_tag) css_scope_stylesheet(sheet, host_tag);
             LOG_INFO("Parsed inline <style> stylesheet with %d rules", sheet->rule_count);
             layout_sheet_list_add(list, sheet);
         }

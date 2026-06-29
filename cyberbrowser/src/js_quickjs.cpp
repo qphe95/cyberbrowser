@@ -2164,7 +2164,7 @@ GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int ar
         // correct order.  A depth guard prevents runaway recursion when
         // constructors stamp deep templates.
         js_cyber_ce_push_stack(ctx);
-        if (tag && strchr(tag, '-') && strcasecmp(tag, "custom-style") != 0) {
+        if (tag && strchr(tag, '-')) {
             GCValue global_obj = JS_GetGlobalObject(ctx);
             GCValue customElements = JS_GetPropertyStr(ctx, global_obj, "customElements");
             if (JS_IsObject(customElements)) {
