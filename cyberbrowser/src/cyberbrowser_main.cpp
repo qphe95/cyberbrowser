@@ -643,11 +643,11 @@ int main(int argc, char *argv[]) {
         {
             fprintf(stderr, "[UPGRADE-DOC] invoking customElements.upgrade\n");
             fflush(stderr);
-            const char *disable_shady_js =
-                "if (window.ShadyDOM) { try { window.ShadyDOM.inUse = false; } catch(e) {} }"
-                "if (window.WebComponents) { try { window.WebComponents.shadydom = false; window.WebComponents.shadycss = false; } catch(e) {} }"
-                "try { Object.defineProperty(window, 'ShadyDOM', { value: { inUse: false }, configurable: true, writable: true }); } catch(e) {}";
-            JS_Eval(g_ctx, disable_shady_js, strlen(disable_shady_js), "<disable_shady>", JS_EVAL_TYPE_GLOBAL);
+            // With the webcomponents-sd polyfill allowed to run, leave ShadyDOM
+            // in the state the page configured.  Forcing it off after scripts
+            // run confuses Polymer's wrapper methods.
+            // const char *disable_shady_js = ...
+            // JS_Eval(g_ctx, disable_shady_js, ...);
 
             const char *upgrade_doc_js =
                 "if (window.customElements && typeof window.customElements.upgrade === 'function' && document) {"

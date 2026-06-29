@@ -1778,6 +1778,20 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, global, "Node", node_ctor);
     JS_SetPropertyStr(ctx, window, "Node", node_ctor);
 
+    // Standard Node type constants used by DOM polyfills such as webcomponents-sd.
+    JS_SetPropertyStr(ctx, node_ctor, "ELEMENT_NODE", JS_NewInt32(ctx, 1));
+    JS_SetPropertyStr(ctx, node_ctor, "ATTRIBUTE_NODE", JS_NewInt32(ctx, 2));
+    JS_SetPropertyStr(ctx, node_ctor, "TEXT_NODE", JS_NewInt32(ctx, 3));
+    JS_SetPropertyStr(ctx, node_ctor, "CDATA_SECTION_NODE", JS_NewInt32(ctx, 4));
+    JS_SetPropertyStr(ctx, node_ctor, "ENTITY_REFERENCE_NODE", JS_NewInt32(ctx, 5));
+    JS_SetPropertyStr(ctx, node_ctor, "ENTITY_NODE", JS_NewInt32(ctx, 6));
+    JS_SetPropertyStr(ctx, node_ctor, "PROCESSING_INSTRUCTION_NODE", JS_NewInt32(ctx, 7));
+    JS_SetPropertyStr(ctx, node_ctor, "COMMENT_NODE", JS_NewInt32(ctx, 8));
+    JS_SetPropertyStr(ctx, node_ctor, "DOCUMENT_NODE", JS_NewInt32(ctx, 9));
+    JS_SetPropertyStr(ctx, node_ctor, "DOCUMENT_TYPE_NODE", JS_NewInt32(ctx, 10));
+    JS_SetPropertyStr(ctx, node_ctor, "DOCUMENT_FRAGMENT_NODE", JS_NewInt32(ctx, 11));
+    JS_SetPropertyStr(ctx, node_ctor, "NOTATION_NODE", JS_NewInt32(ctx, 12));
+
     // Note: event_target_proto is kept alive for adding methods below
     // It will be freed after we add methods to it
     // Keep node_proto for Element and DocumentFragment

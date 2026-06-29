@@ -19,6 +19,8 @@
 
 // Define macro to access private GCM functions
 #define MBEDTLS_DECLARE_PRIVATE_IDENTIFIERS 1
+
+extern char g_last_undefined_prop[256];
 #include "mbedtls/private/gcm.h"
 
 GCValue js_dummy_function_true(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
@@ -283,7 +285,38 @@ void js_cyber_ce_push_stack(JSContextHandle ctx) {
 void js_cyber_ce_pop_stack(JSContextHandle ctx) {
     int32_t depth = cyber_ce_depth(ctx);
     if (depth > 0) {
+        GCValue stack = cyber_ce_stack(ctx);
+        GCValue old_frame = JS_GetPropertyUint32(ctx, stack, depth);
         JS_SetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyber_ce_depth", JS_NewInt32(ctx, depth - 1));
+
+        // If the frame we are leaving still has pending reactions or callbacks,
+        // merge them into the new current frame so they are not orphaned when
+        // the depth changes.  This can happen when a flush is capped by the
+        // max-waves safety limit before the queue is empty.
+        if (JS_IsObject(old_frame)) {
+            struct { const char *name; GCValue (*queue_fn)(JSContextHandle); } pairs[2] = {
+                { "reactions", cyber_ce_reaction_queue },
+                { "callbacks", cyber_ce_callback_queue },
+            };
+            for (int p = 0; p < 2; p++) {
+                GCValue old_q = JS_GetPropertyStr(ctx, old_frame, pairs[p].name);
+                if (JS_IsArray(ctx, old_q)) {
+                    GCValue old_len_val = JS_GetPropertyStr(ctx, old_q, "length");
+                    uint32_t old_len = 0;
+                    JS_ToUint32(ctx, &old_len, old_len_val);
+                    if (old_len > 0) {
+                        GCValue new_q = pairs[p].queue_fn(ctx);
+                        GCValue new_len_val = JS_GetPropertyStr(ctx, new_q, "length");
+                        uint32_t new_len = 0;
+                        JS_ToUint32(ctx, &new_len, new_len_val);
+                        for (uint32_t i = 0; i < old_len; i++) {
+                            GCValue item = JS_GetPropertyUint32(ctx, old_q, i);
+                            JS_SetPropertyUint32(ctx, new_q, new_len + i, item);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -370,7 +403,7 @@ GCValue js_cyber_ce_flush_reactions(JSContextHandle ctx, GCValue this_val, int a
     JS_SetPropertyStr(ctx, global, "__cyber_ce_reaction_scheduled", JS_FALSE);
 
     GCValue queue = cyber_ce_reaction_queue(ctx);
-    int max_waves = 100;
+    int max_waves = 100000;
     while (max_waves-- > 0) {
         GCValue len_val = JS_GetPropertyStr(ctx, queue, "length");
         uint32_t len = 0;
@@ -411,17 +444,46 @@ GCValue js_cyber_ce_flush_reactions(JSContextHandle ctx, GCValue this_val, int a
             if (name) {
                 GCValue cb = JS_GetPropertyStr(ctx, elem, name);
                 if (JS_IsFunction(ctx, cb)) {
+                    GCValue tag_val = JS_GetPropertyStr(ctx, elem, "tagName");
+                    const char *tag = NULL;
+                    if (!JS_IsUndefined(tag_val) && !JS_IsNull(tag_val)) tag = JS_ToCString(ctx, tag_val);
+                    if (tag && strcmp(tag, "YTD-APP") == 0) {
+                        GCValue root = JS_GetPropertyStr(ctx, elem, "root");
+                        GCValue sr = JS_GetPropertyStr(ctx, elem, "shadowRoot");
+                        GCValue children = JS_GetPropertyStr(ctx, elem, "children");
+                        GCValue len_val = JS_GetPropertyStr(ctx, children, "length");
+                        int32_t len = 0; JS_ToInt32(ctx, &len, len_val);
+                        fprintf(stderr, "[CE-CALLBACK-DIAG] ytd-app root=%s shadowRoot=%s children=%d isConnected=%d\n",
+                                JS_IsNull(root) ? "null" : (JS_IsUndefined(root) ? "undef" : "obj"),
+                                JS_IsNull(sr) ? "null" : (JS_IsUndefined(sr) ? "undef" : "obj"),
+                                len,
+                                JS_ToBool(ctx, JS_GetPropertyStr(ctx, elem, "isConnected")));
+                        fflush(stderr);
+                    }
+                    if (tag) JS_FreeCString(ctx, tag);
                     GCValue ret = JS_Call(ctx, cb, elem, 0, NULL);
                     if (JS_IsException(ret)) {
                         GCValue exc = JS_GetException(ctx);
                         GCValue exc_msg = JS_GetPropertyStr(ctx, exc, "message");
+                        GCValue exc_stack = JS_GetPropertyStr(ctx, exc, "stack");
+                        GCValue exc_name = JS_GetPropertyStr(ctx, exc, "name");
                         GCValue tag_val = JS_GetPropertyStr(ctx, elem, "tagName");
-                        const char *m = NULL, *tag = NULL;
+                        const char *m = NULL, *s = NULL, *n = NULL, *tag = NULL;
                         if (!JS_IsUndefined(exc_msg) && !JS_IsNull(exc_msg)) m = JS_ToCString(ctx, exc_msg);
+                        if (!JS_IsUndefined(exc_stack) && !JS_IsNull(exc_stack)) s = JS_ToCString(ctx, exc_stack);
+                        if (!JS_IsUndefined(exc_name) && !JS_IsNull(exc_name)) n = JS_ToCString(ctx, exc_name);
                         if (!JS_IsUndefined(tag_val) && !JS_IsNull(tag_val)) tag = JS_ToCString(ctx, tag_val);
-                        fprintf(stderr, "[CE-CALLBACK] %s %s threw: %s\n", tag ? tag : "?", name, m ? m : "(no message)");
+                        fprintf(stderr, "[CE-CALLBACK] %s %s threw: %s (%s)\n", tag ? tag : "?", name, m ? m : "(no message)", n ? n : "?");
+                        if (m && strstr(m, "cannot read property")) {
+                            fprintf(stderr, "[CE-CALLBACK] last undefined property: '%s'\n", g_last_undefined_prop);
+                        }
+                        if (s) {
+                            fprintf(stderr, "[CE-CALLBACK] stack:\n%s\n", s);
+                        }
                         fflush(stderr);
                         if (m) JS_FreeCString(ctx, m);
+                        if (s) JS_FreeCString(ctx, s);
+                        if (n) JS_FreeCString(ctx, n);
                         if (tag) JS_FreeCString(ctx, tag);
                     }
                 }

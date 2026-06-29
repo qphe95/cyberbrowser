@@ -1,4 +1,5 @@
 #include <string.h>
+#include <string>
 #include <stdlib.h>
 #include <stdio.h>
 #include <ctype.h>
@@ -831,14 +832,12 @@ static void pump_timers_and_jobs_after_fetch(void) {
 static bool is_unsafe_external_script(const char *url) {
     if (!url) return false;
     static const char *skip_patterns[] = {
-        // Skip the Polymer ES5 adapter and ShadyDOM polyfills. The adapter's
-        // wrapper class corrupts the QuickJS bytecode when combined with our
-        // native HTMLElement upgrade path, and the ShadyDOM polyfill forces
-        // Polymer onto a shady-root code path we do not implement. Without
-        // these polyfills Polymer falls back to native Shadow DOM and our
-        // real attachShadow/template stamping paths.
+        // Skip the Polymer ES5 adapter. The adapter's wrapper class corrupts
+        // the QuickJS bytecode when combined with our native HTMLElement
+        // upgrade path.  The ShadyDOM polyfill is now allowed to run because
+        // the missing Node type constants that made it throw "not a function"
+        // have been added.
         "custom-elements-es5-adapter",
-        "webcomponents-sd",
         "webcomponents-sd-shadycss",
         "webcomponents-all-noPatch",
         NULL
@@ -852,6 +851,139 @@ static bool is_unsafe_external_script(const char *url) {
 // Execute all page scripts (inline + external) in document order.
 // Fetches external scripts, runs everything through js_quickjs_exec_scripts,
 // and pumps timers/microtasks after each network response.
+
+/* Patch YouTube's dependency-injector source so that resolving PAGE_TOKEN
+ * before ytd-page-manager has registered its provider returns a safe proxy
+ * instead of throwing.  This removes a hard failure in ytd-app's
+ * connectedCallback.  The patch is intentionally conservative: it only touches
+ * scripts that contain the exact minified patterns used by the current
+ * kevlar runtime/base module.
+ */
+static void apply_youtube_page_token_patch(std::string &src) {
+    // (1) Capture the real page-manager value when the provider is added.
+    const char *set_pat = "this.providers.set(c.provide,c);";
+    const char *throw_pat = "throw Error(\"Zc`\"+k);";
+    bool found_set = (src.find(set_pat) != std::string::npos);
+    bool found_throw = (src.find(throw_pat) != std::string::npos);
+    fprintf(stderr, "[PAGE-TOKEN-PATCH] set=%d throw=%d size=%zu\n", found_set?1:0, found_throw?1:0, src.size());
+    fflush(stderr);
+
+    const char *set_repl =
+        "if(c&&c.provide){var pt=c.provide;"
+        "if((pt.key&&pt.key.name===\"PAGE_TOKEN\")||pt.name===\"PAGE_TOKEN\"){"
+        "var __pmv=c.useValue;"
+        "if(__pmv===undefined&&c.useClass)try{__pmv=new c.useClass();}catch(_e){__pmv=null;}"
+        "if(__pmv===undefined&&c.useFactory)try{__pmv=c.useFactory();}catch(_e){__pmv=null;}"
+        "this.__cyber_page_manager=__pmv||null;}"
+        "this.providers.set(c.provide,c);}";
+    size_t pos = 0;
+    while ((pos = src.find(set_pat, pos)) != std::string::npos) {
+        src.replace(pos, strlen(set_pat), set_repl);
+        pos += strlen(set_repl);
+    }
+
+    // (2) Return a proxy for PAGE_TOKEN when no provider exists yet.
+    const char *throw_repl =
+        "if(k&&k.name===\"PAGE_TOKEN\"){"
+        "var __pm=c.__cyber_page_manager;"
+        "if(__pm)return __pm;"
+        "return c.__cyber_pm_proxy||(c.__cyber_pm_proxy=new Proxy({},"
+        "{get:function(t,p){var r=c.__cyber_page_manager;"
+        "return r&&p in r?r[p]:function(){return null;}}}));}"
+        "throw Error(\"Zc`\"+k);";
+    pos = src.find(throw_pat);
+    if (pos != std::string::npos) {
+        src.replace(pos, strlen(throw_pat), throw_repl);
+    }
+}
+
+/* YouTube's scoped DOM wrapper (e.g. e19/iaD, used by _.WJ) is sometimes
+ * constructed with a null node in our ShadyDOM environment.  Reading
+ * __shady_native_children on a wrapper whose node is null aborts
+ * ytd-app.connectedCallback.  Guard the constructor so a null/undefined node
+ * falls back to an empty DocumentFragment; this keeps the accessor reads from
+ * throwing and lets stamping continue.  The variable name is minified, so a
+ * regex matches the pattern.
+ */
+static void apply_youtube_e19_null_guard_patch(std::string &src) {
+    fprintf(stderr, "[E19-PATCH] scan source size=%zu\n", src.size());
+    fflush(stderr);
+    const char *pat = "this.node=";
+    size_t pos = 0;
+    bool applied = false;
+    int candidates = 0;
+    while ((pos = src.find(pat, pos)) != std::string::npos) {
+        size_t start = pos;
+        pos += strlen(pat);
+        size_t var_start = pos;
+        while (pos < src.size() && (isalnum((unsigned char)src[pos]) || src[pos] == '_' || src[pos] == '$')) {
+            pos++;
+        }
+        std::string var(src, var_start, pos - var_start);
+        candidates++;
+        std::string expected = var + " instanceof ShadowRoot?" + var + ".host:" + var;
+        if (src.compare(var_start, expected.size(), expected) == 0) {
+            std::string repl = "this.node=" + var + " instanceof ShadowRoot?" + var +
+                               ".host:(" + var + "==null?document.createDocumentFragment():" + var + ")";
+            src.replace(start, (var_start - start) + expected.size(), repl);
+            applied = true;
+            break;
+        }
+        pos = start + 1;
+    }
+    fprintf(stderr, "[E19-PATCH] candidates=%d applied=%d\n", candidates, applied?1:0);
+    fflush(stderr);
+    if (applied) {
+        fprintf(stderr, "[E19-PATCH] applied scoped DOM wrapper null guard\n");
+        fflush(stderr);
+    }
+}
+
+/* YouTube's scoped DOM wrapper (hp / t$) treats a plain DocumentFragment as a
+ * shadow root if it walks like one.  Polymer stamps templates into fragments
+ * before attachShadow is called; without this branch _.Z1(fragment) wraps the
+ * host element instead and querySelector("#button") misses the stamped
+ * content, leaving e19 wrappers with a null node.
+ */
+static void apply_youtube_scoped_root_patch(std::string &src) {
+    // The ShadyDOM scoped wrapper constructor (t$/hp) only recognises a real
+    // ShadowRoot.  Polymer stamps templates into plain DocumentFragments before
+    // attachShadow runs, so _.Z1(fragment) wrongly wraps the host element and
+    // querySelector("#button") misses the stamped content.  Treat a fragment
+    // like a shadow root, and fall back to the fragment itself when host is
+    // missing.
+    const char *pat = "instanceof ShadowRoot)this.host=";
+    size_t pos = src.find(pat);
+    if (pos == std::string::npos) {
+        fprintf(stderr, "[SCOPED-ROOT-PATCH] pattern not found\n");
+        fflush(stderr);
+        return;
+    }
+    // Extract the variable name, e.g. "if(d instanceof ShadowRoot"
+    size_t if_start = pos;
+    while (if_start > 0 && src[if_start - 1] != '(') if_start--;
+    std::string var(src, if_start, pos - if_start);
+
+    std::string old_cond = "if(" + var + " instanceof ShadowRoot)";
+    std::string new_cond = "if(" + var + " instanceof ShadowRoot||" + var + " instanceof DocumentFragment)";
+    size_t cond_pos = src.find(old_cond, if_start > 3 ? if_start - 3 : 0);
+    if (cond_pos != std::string::npos) {
+        src.replace(cond_pos, old_cond.size(), new_cond);
+    }
+
+    // Insert a fallback for the host expression:  ...(_.X6(d.host),this.root=d;
+    // becomes  ...(_.X6(d.host)||d,this.root=d;
+    std::string host_tail = ".host),this.root=" + var + ";";
+    size_t host_pos = src.find(host_tail, pos);
+    if (host_pos != std::string::npos) {
+        std::string new_host_tail = ".host)||" + var + ",this.root=" + var + ";";
+        src.replace(host_pos, host_tail.size(), new_host_tail);
+    }
+
+    fprintf(stderr, "[SCOPED-ROOT-PATCH] applied for var=%s\n", var.c_str());
+    fflush(stderr);
+}
+
 extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_result) {
     if (!html || !out_result) return false;
     memset(out_result, 0, sizeof(JsExecResult));
@@ -931,6 +1063,28 @@ extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_re
                 } else {
                     LOG_INFO("Loaded external script [%d]: %zu bytes URL=%.200s",
                              scripts[i].parse_order, buffer.size, scripts[i].url);
+
+                    // Apply a source-level PAGE_TOKEN fallback patch to the
+                    // YouTube runtime/base module before execution.
+                    std::string patched(buffer.data, buffer.size);
+                    apply_youtube_page_token_patch(patched);
+                    apply_youtube_e19_null_guard_patch(patched);
+                    apply_youtube_scoped_root_patch(patched);
+                    if (patched.size() != buffer.size) {
+                        char *new_data = (char *)malloc(patched.size() + 1);
+                        if (new_data) {
+                            memcpy(new_data, patched.data(), patched.size());
+                            new_data[patched.size()] = '\0';
+                            http_free_buffer(&buffer);
+                            buffer.data = new_data;
+                            buffer.size = patched.size();
+                        }
+                    } else {
+                        // The patch function may have rewritten the content in
+                        // place without changing the size; copy it back.
+                        memcpy(buffer.data, patched.data(), patched.size());
+                    }
+
                     scripts[i].content = buffer.data;
                     scripts[i].content_len = buffer.size;
                 }

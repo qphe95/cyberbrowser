@@ -1049,7 +1049,6 @@ GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc
         }
         return child;
     }
-    
     // Get or create DOM data for parent
     DOMNodeHandle parent = get_or_create_dom_node(ctx, this_val, DOM_NODE_TYPE_ELEMENT, "");
     if (!parent.valid()) {
@@ -2823,6 +2822,21 @@ GCValue js_element_querySelector_real(JSContextHandle ctx, GCValue this_val, int
     
     // Start from this element
     GCValue result = query_selector_recursive(ctx, this_val, selector);
+    if (selector && strcmp(selector, "#button") == 0) {
+        GCValue host = JS_GetPropertyStr(ctx, this_val, "host");
+        GCValue host_tag = JS_GetPropertyStr(ctx, host, "tagName");
+        const char *htag = JS_ToCString(ctx, host_tag);
+        GCValue res_tag = JS_GetPropertyStr(ctx, result, "tagName");
+        const char *rtag = JS_IsNull(result) ? "null" : JS_ToCString(ctx, res_tag);
+        GCValue children = JS_GetPropertyStr(ctx, this_val, "childNodes");
+        GCValue len_val = JS_GetPropertyStr(ctx, children, "length");
+        int32_t clen = 0; JS_ToInt32(ctx, &clen, len_val);
+        fprintf(stderr, "[QS-BUTTON] host=%s children=%d result=%s\n", htag?htag:"?", clen, rtag?rtag:"?");
+        fflush(stderr);
+        if (htag) JS_FreeCString(ctx, htag);
+        if (rtag && rtag != "null") JS_FreeCString(ctx, rtag);
+    }
+    JS_FreeCString(ctx, selector);
     return result;
 }
 

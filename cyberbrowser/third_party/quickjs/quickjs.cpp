@@ -10473,8 +10473,16 @@ static GCValue JS_GetPropertyValue(JSContextHandle ctx, GCValue this_obj,
             const char *prop_str = JS_IsException(prop_str_val) ? NULL : JS_ToCString(ctx, prop_str_val);
             snprintf(g_last_undefined_prop, sizeof(g_last_undefined_prop), "%s", prop_str ? prop_str : "?");
             fprintf(stderr, "[QJS DEBUG] prop='%s' of %s\n", prop_str ? prop_str : "?", JS_IsNull(this_obj) ? "null" : "undefined");
-            /* deliberately not freed - diagnostic only */
-            return JS_ThrowTypeError(ctx, "cannot read property of %s", JS_IsNull(this_obj) ? "null" : "undefined");
+            JS_ThrowTypeError(ctx, "cannot read property of %s", JS_IsNull(this_obj) ? "null" : "undefined");
+            GCValue exc = JS_GetException(ctx);
+            GCValue stack_val = JS_GetPropertyStr(ctx, exc, "stack");
+            if (!JS_IsUndefined(stack_val) && !JS_IsNull(stack_val)) {
+                const char *stack = JS_ToCString(ctx, stack_val);
+                if (stack) {
+                    fprintf(stderr, "[QJS DEBUG] stack:\n%s\n", stack);
+                }
+            }
+            return JS_EXCEPTION;
         }
         atom = JS_ValueToAtom(ctx, prop);
         
