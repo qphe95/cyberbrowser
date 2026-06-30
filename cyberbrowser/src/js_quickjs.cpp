@@ -39,6 +39,9 @@ extern "C" void timer_api_reset(void);
 /* From QuickJS: last property read on undefined/null (diagnostic) */
 extern char g_last_undefined_prop[256];
 
+/* Start URL used for resolving relative stylesheet / fetch URLs. */
+extern const char *g_cyber_start_url;
+
 /* Logging wrapper that uses platform abstraction */
 static void log_to_file(const char *tag, const char *fmt, ...) {
     va_list args;
@@ -2819,7 +2822,8 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
                     /* Parse and apply inline/external CSS before scripts run. */
                     fprintf(stderr, "[js_quickjs] Applying document styles...\n");
                     fflush(stderr);
-                    css_apply_document_styles(ctx, js_doc, doc, NULL);
+                    const char *css_base = (g_cyber_start_url && g_cyber_start_url[0]) ? g_cyber_start_url : "https://www.youtube.com/";
+                    css_apply_document_styles(ctx, js_doc, doc, css_base);
                     fprintf(stderr, "[js_quickjs] Document styles applied.\n");
                     fflush(stderr);
                 } else {
@@ -2929,6 +2933,25 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
         // bundles operate on working native methods instead of broken wrappers.
         js_dom_restore_native_methods(ctx);
 
+        // Keep ShadyDOM in its native-only state.  The page's inline config sets
+        // force:true, which would make webcomponents-sd patch querySelector and
+        // friends with wrappers that break on our native ShadowRoots.  Forcing
+        // inUse=false lets Polymer fall back to native DOM APIs.
+        {
+            const char *shady_neutral =
+                "try {"
+                "  var s = window.ShadyDOM;"
+                "  if (!s || typeof s !== 'object') {"
+                "    var __cyber_sd = {force:false, noPatch:false, preferPerformance:false, inUse:false, nativeCss:true, settings:{}, patch:function(n){return n;}, wrap:function(n){return n;}, patchElementProto:function(n){return n;}, flush:function(){}, flushInitial:function(){}, observeChildren:function(){return {disconnect:function(){}};}, unobserveChildren:function(){}, composedPath:function(e){return e&&e.composedPath?e.composedPath():[];}, isShadyRoot:function(){return false;}, enqueue:function(){}, filterMutations:function(a){return a;}};"
+                "    try { delete window.ShadyDOM; } catch(e1) {}"
+                "    try { Object.defineProperty(window, 'ShadyDOM', {value: __cyber_sd, writable:false, configurable:false, enumerable:true}); } catch(e2) { window.ShadyDOM = __cyber_sd; }"
+                "  } else {"
+                "    s.force = false; s.noPatch = false; s.preferPerformance = false; s.inUse = false;"
+                "  }"
+                "} catch(e) {}";
+            JS_Eval(ctx, shady_neutral, strlen(shady_neutral), "<shady_neutral>", JS_EVAL_TYPE_GLOBAL);
+        }
+
         // Run a GC cycle after every script to prevent handle exhaustion /
         // memory pressure when many large scripts execute in sequence.
         // NOTE: disabled during script execution because the compacting GC can
@@ -2942,6 +2965,20 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
 
     /* Final restore in case the last bundle left wrappers installed. */
     js_dom_restore_native_methods(ctx);
+
+    // Final ShadyDOM neutralization before returning to the caller.
+    {
+        const char *shady_neutral =
+            "try {"
+            "  var s = window.ShadyDOM;"
+            "  if (!s || typeof s !== 'object') {"
+            "    window.ShadyDOM = {force:false, noPatch:false, preferPerformance:false, inUse:false, nativeCss:true, settings:{}, patch:function(n){return n;}, wrap:function(n){return n;}, patchElementProto:function(n){return n;}, flush:function(){}, flushInitial:function(){}, observeChildren:function(){return {disconnect:function(){}};}, unobserveChildren:function(){}, composedPath:function(e){return e&&e.composedPath?e.composedPath():[];}, isShadyRoot:function(){return false;}, enqueue:function(){}, filterMutations:function(a){return a;}};"
+            "  } else {"
+            "    s.force = false; s.noPatch = false; s.preferPerformance = false; s.inUse = false;"
+            "  }"
+            "} catch(e) {}";
+        JS_Eval(ctx, shady_neutral, strlen(shady_neutral), "<shady_neutral>", JS_EVAL_TYPE_GLOBAL);
+    }
 
     log_to_file("js_quickjs", "All %d scripts executed", script_count);
 

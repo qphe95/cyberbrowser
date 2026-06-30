@@ -621,6 +621,18 @@ int main(int argc, char *argv[]) {
     {
         printf("Executing page scripts ...\n");
         {
+            const char *bind_polyfill =
+                "(function(){"
+                "  var orig = Function.prototype.bind;"
+                "  Function.prototype.bind = function(){"
+                "    var b = orig.apply(this, arguments);"
+                "    try { b.__cyber_bound_target = this; } catch(e) {}"
+                "    return b;"
+                "  };"
+                "})();";
+            JS_Eval(g_ctx, bind_polyfill, strlen(bind_polyfill), "<bind_polyfill>", JS_EVAL_TYPE_GLOBAL);
+        }
+        {
             const char *pre_diag = "console.error('[PRE-DIAG] Element.matches=' + typeof Element.prototype.matches);";
             JS_Eval(g_ctx, pre_diag, strlen(pre_diag), "<pre_diag>", JS_EVAL_TYPE_GLOBAL);
         }
@@ -633,6 +645,25 @@ int main(int argc, char *argv[]) {
             printf("WARNING: page script execution did not complete successfully\n");
         }
         pump_timers_and_jobs(g_ctx);
+
+        /* Neutralise YouTube's error-logging paths before lifecycle timers fire.
+         * The helper g.En("yt.logging.errors.log") creates empty objects along
+         * the path if it is missing and then calls the result, which throws
+         * "not a function" and aborts the app loader. */
+        {
+            const char *neutralise_log_js2 =
+                "(function(){"
+                "  try {"
+                "    var yt = window.yt || (window.yt = {});"
+                "    var logging = yt.logging || (yt.logging = {});"
+                "    var errors = logging.errors || (logging.errors = {});"
+                "    if (typeof errors.log !== 'function') { errors.log = function(){}; console.error('[NEUTRAL-EARLY] yt.logging.errors.log'); }"
+                "    if (typeof errors.warn !== 'function') { errors.warn = function(){}; }"
+                "  } catch(e) {}"
+                "  if (window.ytcsi && typeof window.ytcsi.tick === 'function') { window.ytcsi.tick = function(){}; console.error('[NEUTRAL-EARLY] ytcsi.tick'); }"
+                "})();";
+            JS_Eval(g_ctx, neutralise_log_js2, strlen(neutralise_log_js2), "<neutralise_log_early>", JS_EVAL_TYPE_GLOBAL);
+        }
 
         // Reclaim handles allocated by script execution before dispatching
         // lifecycle events.
@@ -670,15 +701,60 @@ int main(int argc, char *argv[]) {
              * Node mutation methods broken before we run diagnostics/layout. */
             js_dom_restore_native_methods(g_ctx);
 
+            /* YouTube's error-logging wrappers (_.JC) catch exceptions and forward
+             * them to yt.logging.errors.log.  In the emulator the logging path
+             * itself throws ("not a function"), so real errors get lost and
+             * timers/appLoad abort.  Neutralise the global loggers so wrapped
+             * callbacks fail gracefully. */
+            {
+                const char *neutralise_log_js =
+                    "(function(){"
+                    "  var ytle = window.yt && window.yt.logging && window.yt.logging.errors;"
+                    "  if (ytle) {"
+                    "    if (typeof ytle.log === 'function') { ytle.log = function(){}; console.error('[NEUTRAL] yt.logging.errors.log'); }"
+                    "    if (typeof ytle.warn === 'function') { ytle.warn = function(){}; }"
+                    "  }"
+                    "  if (window.ytcsi && typeof window.ytcsi.tick === 'function') {"
+                    "    window.ytcsi.tick = function(){}; console.error('[NEUTRAL] ytcsi.tick');"
+                    "  }"
+                    "})();";
+                JS_Eval(g_ctx, neutralise_log_js, strlen(neutralise_log_js), "<neutralise_log>", JS_EVAL_TYPE_GLOBAL);
+            }
+
+            {
+                const char *shady_neutral_js =
+                    "try {"
+                    "  var sd = {force:false, noPatch:false, preferPerformance:false, inUse:false, nativeCss:true, settings:{}, patch:function(n){return n;}, wrap:function(n){return n;}, patchElementProto:function(n){return n;}, flush:function(){}, flushInitial:function(){}, observeChildren:function(){return {disconnect:function(){}};}, unobserveChildren:function(){}, composedPath:function(e){return e&&e.composedPath?e.composedPath():[];}, isShadyRoot:function(){return false;}, enqueue:function(){}, filterMutations:function(a){return a;}};"
+                    "  try { delete window.ShadyDOM; } catch(e1) {}"
+                    "  try { Object.defineProperty(window, 'ShadyDOM', {value: sd, writable:false, configurable:false, enumerable:true}); } catch(e2) { window.ShadyDOM = sd; }"
+                    "  console.error('[SHADY-NEUTRAL] ShadyDOM replaced, inUse=' + window.ShadyDOM.inUse);"
+                    "} catch(e) { console.error('[SHADY-NEUTRAL] failed', e.message, e.stack); }";
+                JS_Eval(g_ctx, shady_neutral_js, strlen(shady_neutral_js), "<shady_neutral>", JS_EVAL_TYPE_GLOBAL);
+            }
+
+            {
+                const char *pre_load_diag =
+                    "try {"
+                    "  console.error('[PRE-LOAD-DIAG] ShadyDOM typeof=' + typeof window.ShadyDOM);"
+                    "  console.error('[PRE-LOAD-DIAG] ShadyDOM inUse=' + (window.ShadyDOM && window.ShadyDOM.inUse));"
+                    "  console.error('[PRE-LOAD-DIAG] ShadyDOM keys=' + (window.ShadyDOM ? Object.keys(window.ShadyDOM).join(',') : 'none'));"
+                    "} catch(e) { console.error('[PRE-LOAD-DIAG] exc', e.message, e.stack); }";
+                JS_Eval(g_ctx, pre_load_diag, strlen(pre_load_diag), "<pre_load_diag>", JS_EVAL_TYPE_GLOBAL);
+            }
+
             /* YouTube's app loader normally fires on a 'script-load-dpj' event
              * or ytsignals callback.  In our emulator those signals are missing,
              * so the app stays in its disable-upgrade skeleton state.  Manually
              * run the loader to remove disable-upgrade and let ytd-app stamp. */
             const char *app_load_js =
                 "console.error('[APP-LOAD] typeof=' + typeof appLoad + ' window=' + typeof window.appLoad + ' schedule=' + typeof scheduleAppLoad);"
+                "var cp = window.yt && window.yt.player && window.yt.player.Application && (window.yt.player.Application.createAlternate || window.yt.player.Application.create);"
+                "console.error('[APP-LOAD] createPlayer typeof=' + typeof cp);"
+                "var __cyber_old_yterr = window.yterr; window.yterr = false;"
                 "if (typeof appLoad === 'function') { try { appLoad(); console.error('[APP-LOAD] triggered'); } catch(e) { console.error('[APP-LOAD] err', e.message, e.stack); } }"
                 "else if (window.appLoad && typeof window.appLoad === 'function') { try { window.appLoad(); console.error('[APP-LOAD] triggered via window'); } catch(e) { console.error('[APP-LOAD] err', e.message, e.stack); } }"
-                "else { console.error('[APP-LOAD] not found'); }";
+                "else { console.error('[APP-LOAD] not found'); }"
+                "window.yterr = __cyber_old_yterr;";
             JS_Eval(g_ctx, app_load_js, strlen(app_load_js), "<app_load>", JS_EVAL_TYPE_GLOBAL);
 
             /* Re-upgrade now that disable-upgrade has been removed. */
@@ -699,11 +775,19 @@ int main(int argc, char *argv[]) {
                 "    var root = app.root || app.shadowRoot;"
                 "    console.error('[SHADY-DIAG] app root=' + (root && root.nodeName) + ' isShadow=' + (root instanceof ShadowRoot));"
                 "    if (!root) return;"
-                "    console.error('[SHADY-DIAG] matches=' + typeof Element.prototype.matches + ' qsa=' + typeof Element.prototype.__shady_native_querySelectorAll + ' qi=' + (window.ShadyDOM && window.ShadyDOM.querySelectorImplementation));"
-                "    console.error('[SHADY-DIAG] root proto=' + (root && Object.prototype.toString.call(root)));"
-                "    console.error('[SHADY-DIAG] root has qs=' + (root && typeof root.querySelector) + ' has getRoot=' + (root && typeof root.__shady_getRootNode));"
-                "    try { var test = document.createElement('div'); console.error('[SHADY-DIAG] matchesTest=' + Element.prototype.matches.call(test, 'div')); } catch(ee) { console.error('[SHADY-DIAG] matchesTestExc', ee.message); }"
-                "    console.error('[SHADY-DIAG] ShadyDOM.inUse=' + (window.ShadyDOM && window.ShadyDOM.inUse) + ' Wrapper=' + (window.ShadyDOM && typeof window.ShadyDOM.Wrapper) + ' noPatch=' + (window.ShadyDOM && window.ShadyDOM.noPatch));"
+                "    function _pd(n,f){try{console.error('[SHADY-DIAG] ' + n + '=' + f());}catch(ee){console.error('[SHADY-DIAG] ' + n + ' EXC', ee.message, ee.stack);}}"
+                "    _pd('matches', function(){return typeof Element.prototype.matches;});"
+                "    _pd('qsa', function(){return typeof Element.prototype.__shady_native_querySelectorAll;});"
+                "    _pd('ShadyDOM type', function(){return typeof window.ShadyDOM + ' ' + Object.prototype.toString.call(window.ShadyDOM);});"
+                "    _pd('ShadyDOM inUse desc', function(){return JSON.stringify(Object.getOwnPropertyDescriptor(window.ShadyDOM,'inUse'));});"
+                "    _pd('qi', function(){return (window.ShadyDOM && window.ShadyDOM.querySelectorImplementation);});"
+                "    _pd('root proto', function(){return Object.prototype.toString.call(root);});"
+                "    _pd('root qs', function(){return typeof root.querySelector;});"
+                "    _pd('root getRoot', function(){return typeof root.__shady_getRootNode;});"
+                "    _pd('matchesTest', function(){var test=document.createElement('div');return Element.prototype.matches.call(test,'div');});"
+                "    _pd('ShadyDOM.inUse', function(){return window.ShadyDOM && window.ShadyDOM.inUse;});"
+                "    _pd('ShadyDOM.Wrapper', function(){return window.ShadyDOM && typeof window.ShadyDOM.Wrapper;});"
+                "    _pd('ShadyDOM.noPatch', function(){return window.ShadyDOM && window.ShadyDOM.noPatch;});"
                 "    var testDiv = document.createElement('div');"
                 "    var testBtn2 = document.createElement('button'); testBtn2.id='bar'; console.error('[SHADY-DIAG] createButton id=' + testBtn2.id + ' nodeName=' + testBtn2.nodeName);"
                 "    console.error('[SHADY-DIAG] appendChild type=' + typeof Node.prototype.appendChild + ' nativeAppend type=' + typeof Node.prototype.__shady_native_appendChild);"

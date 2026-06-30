@@ -16,6 +16,9 @@
 #include "platform.h"
 #include <pthread.h>
 
+/* Diagnostic: last property read on undefined/null before a TypeError. */
+extern char g_last_undefined_prop[256];
+
 GCValue js_navigator_send_beacon(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1) return JS_FALSE;
     
@@ -385,8 +388,21 @@ void execute_timer(JSContextHandle ctx, int id) {
                     const char *name = JS_ToCString(ctx, cb_name);
                     const char *ctor_name_c = JS_IsString(ctor_name) ? JS_ToCString(ctx, ctor_name) : NULL;
                     platform_log(LOG_LEVEL_WARN, "timer", "Timer callback name=%s length=%d ctor=%s", name ? name : "?", cb_len_i, ctor_name_c ? ctor_name_c : "?");
+                    platform_log(LOG_LEVEL_WARN, "timer", "Timer callback last_undefined_prop='%s'", g_last_undefined_prop ? g_last_undefined_prop : "");
                     if (name) JS_FreeCString(ctx, name);
                     if (ctor_name_c) JS_FreeCString(ctx, ctor_name_c);
+                    GCValue bound_target = JS_GetPropertyStr(ctx, callback, "__cyber_bound_target");
+                    if (JS_IsFunction(ctx, bound_target)) {
+                        GCValue bt_toString = JS_GetPropertyStr(ctx, bound_target, "toString");
+                        if (JS_IsFunction(ctx, bt_toString)) {
+                            GCValue bt_str_val = JS_Call(ctx, bt_toString, bound_target, 0, NULL);
+                            const char *bt_str = JS_ToCString(ctx, bt_str_val);
+                            if (bt_str) {
+                                platform_log(LOG_LEVEL_WARN, "timer", "Timer bound target (first 1000 chars): %.1000s", bt_str);
+                                JS_FreeCString(ctx, bt_str);
+                            }
+                        }
+                    }
                     GCValue toString_fn = JS_GetPropertyStr(ctx, callback, "toString");
                     if (JS_IsFunction(ctx, toString_fn)) {
                         GCValue cb_str_val = JS_Call(ctx, toString_fn, callback, 0, NULL);

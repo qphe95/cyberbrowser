@@ -55,7 +55,7 @@ GCValue js_user_agent_data_get_high_entropy_values(JSContextHandle ctx, GCValue 
     return result;
 }
 
-// Battery API - getBattery() returns a mock battery object
+// Battery API - getBattery() returns a Promise resolving to a mock battery object
 GCValue js_navigator_get_battery(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc; (void)argv;
     // Create a mock battery object
@@ -71,7 +71,13 @@ GCValue js_navigator_get_battery(JSContextHandle ctx, GCValue this_val, int argc
     JS_SetPropertyStr(ctx, battery, "removeEventListener",
         JS_NewCFunction(ctx, js_undefined, "removeEventListener", 2));
     
-    return battery;
+    // Wrap in a Promise (thenable) so code like navigator.getBattery?.().then(...)
+    // works without throwing "undefined is not a function".
+    GCValue resolving_funcs[2];
+    GCValue promise = JS_NewPromiseCapability(ctx, resolving_funcs);
+    if (JS_IsException(promise)) return battery; // fallback
+    JS_Call(ctx, resolving_funcs[0], JS_UNDEFINED, 1, &battery);
+    return promise;
 }
 
 // History pushState - stores the state object on history.state

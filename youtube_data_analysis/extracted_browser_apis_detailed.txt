@@ -1,0 +1,8859 @@
+Browser API extraction from youtube_data
+Files scanned: 92
+Files with APIs: 65
+Total unique APIs: 979
+
+================================================================================
+COMBINED API LIST
+================================================================================
+
+abort
+AbortController
+AbortSignal
+addEventListener
+addSourceBuffer
+adoptNode
+after
+alert
+append
+appendBuffer
+appendChild
+Array.from
+Array.isArray
+Array.prototype
+arrayBuffer
+ArrayBuffer.isView
+assign
+at
+atob
+attachShadow
+Audio
+AudioContext
+BigInt.asIntN
+BigInt.asUintN
+blob
+Blob
+blur
+BroadcastChannel
+btoa
+cancel
+cancelAnimationFrame
+cancelIdleCallback
+catch
+charAt
+charCodeAt
+clearInterval
+clearTimeout
+click
+clone
+cloneNode
+close
+closest
+codePointAt
+composedPath
+concat
+console.debug
+console.error
+console.group
+console.groupCollapsed
+console.groupEnd
+console.groupEnd.call
+console.info
+console.log
+console.time
+console.timeEnd
+console.warn
+contains
+copyWithin
+create
+createDocumentFragment
+createElement
+createElementNS
+createObjectURL
+createTextNode
+crypto.getRandomValues
+crypto.subtle
+customElements.define
+customElements.get
+customElements.polyfillWrapFlushCallback
+CustomEvent
+Date.now
+Date.parse
+Date.prototype
+Date.UTC
+decodeURI
+decodeURIComponent
+defineProperties
+defineProperty
+delete
+dispatchEvent
+document.__shady_native_activeElement
+document.activeElement
+document.activeElement.blur
+document.activeElement.tagName
+document.addEventListener
+document.adoptedStyleSheets
+document.adoptedStyleSheets.length
+document.all
+document.attachEvent
+document.baseURI
+document.body
+document.body.addEventListener
+document.body.animate
+document.body.appendChild
+document.body.classList.add
+document.body.classList.contains
+document.body.classList.remove
+document.body.className.indexOf
+document.body.clientHeight
+document.body.clientWidth
+document.body.contains
+document.body.getAttribute
+document.body.hasAttribute
+document.body.prepend
+document.body.removeAttribute
+document.body.removeChild
+document.body.scrollLeft
+document.body.scrollTop
+document.body.setAttribute
+document.body.style.backgroundColor
+document.body.style.colorScheme
+document.body.style.cursor
+document.body.style.overflow
+document.body.style.overflowY
+document.body.style.overscrollBehavior
+document.body.style.top
+document.contains
+document.cookie
+document.createComment
+document.createDocumentFragment
+document.createElement
+document.createElementNS
+document.createEvent
+document.createRange
+document.createTextNode
+document.createTreeWalker
+document.currentScript
+document.currentScript.src.indexOf
+document.defaultView
+document.detachEvent
+document.dispatchEvent
+document.documentElement
+document.documentElement.__shady_native_contains
+document.documentElement.animate
+document.documentElement.clientHeight
+document.documentElement.clientWidth
+document.documentElement.getAttribute
+document.documentElement.getBoundingClientRect
+document.documentElement.hasAttribute
+document.documentElement.lang
+document.documentElement.scrollHeight
+document.documentElement.scrollLeft
+document.documentElement.scrollTop
+document.documentElement.setCapture
+document.documentElement.style
+document.documentElement.style.overscrollBehavior
+document.documentElement.tagName.toLowerCase
+document.documentMode
+document.domain
+document.elementFromPoint
+document.execCommand
+document.exitFullscreen
+document.exitPictureInPicture
+document.featurePolicy
+document.fonts
+document.fonts.load
+document.getElementById
+document.getElementsByClassName
+document.getElementsByTagName
+document.getSelection
+document.hasFocus
+document.hasStorageAccess
+document.head
+document.head.append
+document.head.appendChild
+document.head.querySelector
+document.head.removeChild
+document.head.style.touchAction
+document.hidden
+document.implementation.createHTMLDocument
+document.importNode
+document.JSC$8385_onVisibilityChange.pipe
+document.JSC$9433_onVisibilityChange.pipe
+document.JSC$9434_onVisibilityChange.pipe
+document.location
+document.location.hostname
+document.location.hostname.endsWith
+document.location.href
+document.location.origin
+document.location.port
+document.location.protocol
+document.location.toString
+document.pictureInPictureElement
+document.postMessage
+document.prerendering
+document.queryCommandSupported
+document.querySelector
+document.querySelectorAll
+document.readyState
+document.referrer
+document.referrer.substring
+document.releaseCapture
+document.removeEventListener
+document.requestStorageAccessFor
+document.scrollingElement
+document.scrollingElement.scrollLeft
+document.scrollingElement.scrollTop
+document.startViewTransition
+document.styleSheets
+document.timeline
+document.timeline.getAnimations
+document.timeline.play
+document.title
+document.visibilityState
+document.wasDiscarded
+DocumentFragment
+DOMParser
+DOMTokenList
+encodeURI
+encodeURIComponent
+endOfStream
+endsWith
+entries
+Error.apply
+Error.call
+Error.captureStackTrace
+Error.stackTraceLimit
+escape
+Event
+every
+exec
+exitFullscreen
+fetch
+File
+FileReader
+fill
+filter
+finally
+find
+findIndex
+flat
+flatMap
+focus
+FocusEvent
+forEach
+formData
+FormData
+freeze
+from
+fromEntries
+get
+getAll
+getAllResponseHeaders
+getAttribute
+getBoundingClientRect
+getClientRects
+getComputedStyle
+getElementById
+getElementsByClassName
+getElementsByTagName
+getFullYear
+getOwnPropertyDescriptor
+getOwnPropertyDescriptors
+getOwnPropertyNames
+getOwnPropertySymbols
+getPrototypeOf
+getReader
+getResponseHeader
+getRootNode
+getSelection
+getTime
+globalThis.Array
+globalThis.cancelIdleCallback
+globalThis.HTMLElement
+globalThis.performance
+globalThis.performance.getEntriesByType
+globalThis.requestIdleCallback
+globalThis.ResizeObserver
+globalThis.sessionStorage
+globalThis.sessionStorage.getItem
+globalThis.sessionStorage.removeItem
+globalThis.sessionStorage.setItem
+globalThis.TextEncoder
+globalThis.trustedTypes
+globalThis.XRegExp
+globalThis.Zone
+has
+hasAttribute
+hasOwn
+hasOwnProperty
+Headers
+history.length
+history.pushState
+history.replaceState
+history.state
+HTMLAnchorElement
+HTMLButtonElement
+HTMLCanvasElement
+HTMLDivElement
+HTMLElement
+HTMLFencedFrameElement
+HTMLFormElement
+HTMLIFrameElement
+HTMLImageElement
+HTMLInputElement
+HTMLLinkElement
+HTMLMediaElement
+HTMLOptionElement
+HTMLSelectElement
+HTMLSlotElement
+HTMLStyleElement
+HTMLTemplateElement
+HTMLTextAreaElement
+HTMLUnknownElement
+HTMLVideoElement
+Image
+importNode
+includes
+indexOf
+insertBefore
+IntersectionObserver
+Intl.DateTimeFormat
+Intl.NumberFormat
+isExtensible
+isFinite
+isFrozen
+isNaN
+join
+json
+JSON.parse
+JSON.parseWrapper
+JSON.stringify
+keys
+lastIndexOf
+load
+localStorage.get
+localStorage.remove
+localStorage.set
+location.ancestorOrigins
+location.ancestorOrigins.length
+location.clone
+location.hash
+location.host
+location.hostname
+location.hostname.indexOf
+location.hostname.match
+location.href
+location.href.substring
+location.origin
+location.OY
+location.pathname
+location.port
+location.protocol
+location.reload
+location.search
+location.set
+location.TM
+location.ZE
+ManagedMediaSource
+map
+Map.prototype
+match
+matches
+matchMedia
+Math.abs
+Math.acos
+Math.asin
+Math.atan
+Math.atan2
+Math.ceil
+Math.cos
+Math.exp
+Math.floor
+Math.hypot
+Math.imul
+Math.LN2
+Math.log
+Math.log2
+Math.max
+Math.min
+Math.PI
+Math.pow
+Math.random
+Math.round
+Math.sign
+Math.sin
+Math.sqrt
+Math.SQRT2
+Math.tan
+Math.trunc
+Math.uuid
+MediaSource
+MouseEvent
+moveTo
+MutationObserver
+navigator.clipboard
+navigator.clipboard.write
+navigator.clipboard.writeText
+navigator.connection
+navigator.cookieEnabled
+navigator.deviceMemory
+navigator.geolocation
+navigator.geolocation.getCurrentPosition
+navigator.getBattery
+navigator.hardwareConcurrency
+navigator.keyboard
+navigator.locks
+navigator.mediaCapabilities
+navigator.mediaCapabilities.decodingInfo
+navigator.mediaDevices
+navigator.mediaDevices.getUserMedia
+navigator.mediaSession
+navigator.mediaSession.metadata
+navigator.mediaSession.playbackState
+navigator.mediaSession.setActionHandler
+navigator.mediaSession.setPositionState
+navigator.onLine
+navigator.permissions
+navigator.permissions.query
+navigator.requestMediaKeySystemAccess
+navigator.sendBeacon
+navigator.serviceWorker
+navigator.serviceWorker.addEventListener
+navigator.serviceWorker.getRegistration
+navigator.serviceWorker.getRegistrations
+navigator.serviceWorker.ready.then
+navigator.serviceWorker.register
+navigator.share
+navigator.standalone
+navigator.storage
+navigator.storage.estimate
+navigator.userActivation
+navigator.userAgent
+navigator.userAgent.includes
+navigator.userAgent.indexOf
+navigator.userAgent.match
+navigator.userAgentData
+navigator.userAgentData.brands
+navigator.userAgentData.brands.length
+navigator.userAgentData.getHighEntropyValues
+navigator.vendor
+normalize
+Number.isFinite
+Number.isInteger
+Number.isNaN
+Number.isSafeInteger
+Number.MAX_SAFE_INTEGER
+Number.MAX_VALUE
+Number.MIN_SAFE_INTEGER
+Number.NEGATIVE_INFINITY
+Number.parseFloat
+Number.parseInt
+Number.POSITIVE_INFINITY
+Object.assign
+Object.create
+Object.defineProperties
+Object.defineProperty
+Object.entries
+Object.freeze
+Object.fromEntries
+Object.getOwnPropertyDescriptor
+Object.getOwnPropertyDescriptors
+Object.getOwnPropertyNames
+Object.getOwnPropertySymbols
+Object.getPrototypeOf
+Object.hasOwn
+Object.hasOwnProperty
+Object.is
+Object.isExtensible
+Object.isFrozen
+Object.keys
+Object.my_load
+Object.prototype
+Object.seal
+Object.setPrototypeOf
+Object.values
+OffscreenCanvas
+open
+overrideMimeType
+padStart
+parent.header
+parent.parent
+parent.start
+parent.type
+parseFloat
+parseInt
+pause
+performance.clearResourceTimings
+performance.getEntriesByName
+performance.getEntriesByType
+performance.js
+performance.mark
+performance.measure
+performance.memory
+performance.memory.jsHeapSizeLimit
+performance.memory.totalJSHeapSize
+performance.memory.usedJSHeapSize
+performance.now
+performance.onresourcetimingbufferfull
+performance.timeOrigin
+performance.timing
+performance.timing.navigationStart
+performance.timing.responseStart
+performance.vflset
+PerformanceObserver
+pipeThrough
+play
+pop
+postMessage
+prepend
+preventDefault
+Promise.all
+Promise.allSettled
+Promise.prototype
+Promise.race
+Promise.reject
+Promise.resolve
+Promise.toString
+Promise.withResolvers
+prompt
+push
+querySelector
+querySelectorAll
+queueMicrotask
+read
+reduce
+Reflect.closure
+Reflect.construct
+Reflect.decorate
+Reflect.defineMetadata
+Reflect.getMetadata
+Reflect.metadata
+Reflect.ownKeys
+Reflect.setPrototypeOf
+RegExp.prototype
+releaseLock
+remove
+removeAttribute
+removeChild
+removeEventListener
+repeat
+replace
+replaceAll
+replaceChild
+Request
+requestAnimationFrame
+requestFullscreen
+requestIdleCallback
+reset
+ResizeObserver
+Response
+reverse
+revokeObjectURL
+screen.availTop
+screen.availWidth
+screen.height
+screen.orientation.addEventListener
+screen.orientation.removeEventListener
+screen.width
+scroll
+scrollBy
+scrollIntoView
+scrollTo
+seal
+search
+select
+self.addEventListener
+self.crossOriginIsolated
+self.document
+self.indexedDB.deleteDatabase
+self.indexedDB.open
+self.localStorage
+self.localStorage.removeItem
+self.location
+self.location.origin
+self.location.protocol.slice
+self.ManagedMediaSource
+self.ManagedMediaSource.isTypeSupported
+self.MediaSource
+self.MediaSource.isTypeSupported
+self.sessionStorage
+self.sessionStorage.removeItem
+self.top
+send
+ServiceWorker
+sessionStorage.remove
+sessionStorage.set
+set
+Set.prototype
+setAttribute
+setFullYear
+setInterval
+setPrototypeOf
+setRequestHeader
+setTime
+setTimeout
+ShadowRoot
+shift
+slice
+some
+sort
+splice
+split
+startsWith
+stop
+stopImmediatePropagation
+stopPropagation
+String.fromCharCode
+String.fromCodePoint
+String.prototype
+String.raw
+structuredClone
+submit
+substr
+substring
+SVGElement
+SVGGraphicsElement
+Symbol.asyncIterator
+Symbol.dispose
+Symbol.for
+Symbol.iterator
+Symbol.observable
+terminate
+test
+text
+TextDecoder
+TextEncoder
+then
+toExponential
+toFixed
+toLocaleString
+toLowerCase
+top.bar.renderer.css.js
+top.document
+top.location.hash
+top.location.href
+top.mraid
+toPrecision
+toString
+toUpperCase
+trim
+unescape
+unshift
+URL
+URL.createObjectURL
+URL.revokeObjectURL
+URLSearchParams
+valueOf
+values
+WebAssembly
+WebAssembly.compile
+WebAssembly.instantiate
+WebKitMediaSource
+window.___jsl.hefn
+window.__cyber_emL
+window.__cyber_TYl
+window.__onGCastApiAvailable
+window.__shady_native_addEventListener
+window._attn_data
+window._DumpException
+window._F_combinedSignature
+window._F_cssRowKey
+window._F_installCss
+window._spf_state
+window.AbortController
+window.addEventListener
+window.alert
+window.android
+window.android.webview
+window.android.webview.getExperimentalMediaIntegrityTokenProvider
+window.Animation
+window.attachEvent
+window.attmp
+window.AudioContext
+window.Av6
+window.bgens
+window.botguard
+window.btoa
+window.caches
+window.cancelAnimationFrame
+window.cancelIdleCallback
+window.cast.receiver.platform.canDisplayType
+window.chrome
+window.clearInterval
+window.clearTimeout
+window.close
+window.COMPILED
+window.console.error
+window.console.log
+window.crypto
+window.crypto.getRandomValues
+window.crypto.subtle
+window.CSS
+window.CSS.supports
+window.CustomElementRegistry.prototype
+window.customElements
+window.customElements.define
+window.customElements.get
+window.customElements.polyfillWrapFlushCallback
+window.CustomEvent
+window.dataLayer
+window.dataLayer.push
+window.detachEvent
+window.devicePixelRatio
+window.dispatchEvent
+window.document
+window.document.baseURI
+window.document.body
+window.document.documentElement
+window.document.elementFromPoint
+window.document.head.appendChild
+window.document.location.href
+window.document.pictureInPictureEnabled
+window.document.timeline
+window.document.visibilityState
+window.documentPictureInPicture
+window.EGn
+window.Element.prototype.animate
+window.Element.prototype.getAnimations
+window.emergencyTimeoutImg
+window.enableHotReplacement
+window.Event
+window.event
+window.EventTarget
+window.EventTarget.prototype
+window.familyDialogHistory
+window.fetch
+window.Float32Array
+window.focus
+window.FormData
+window.frames
+window.ga
+window.ga.q
+window.getComputedStyle
+window.getSelection
+window.google
+window.google.gr
+window.google_image_requests
+window.grecaptcha
+window.GroupEffect
+window.GroupEffect.prototype
+window.h5vcc
+window.h5vcc.cVal.getValue
+window.H5vccPlatformService
+window.H5vccScreen
+window.H5vccScreen.GetDiagonal
+window.Hammer
+window.history
+window.history.back
+window.history.forward
+window.history.pushState
+window.history.replaceState
+window.history.scrollRestoration
+window.history.state
+window.HTMLElement
+window.HTMLElement.es5Shimmed
+window.HTMLElement.prototype
+window.HTMLImports
+window.HTMLImports.whenReady
+window.HTMLMediaElement
+window.HTMLSlotElement
+window.HTMLTemplateElement
+window.HTMLTemplateElement.prototype
+window.HTMLVideoElement
+window.innerHeight
+window.innerWidth
+window.Int32Array
+window.IntersectionObserver
+window.JSCompiler_renameProperty
+window.JSON
+window.KeyframeEffect
+window.loadGuideDataHook
+window.localStorage
+window.localStorage.removeItem
+window.localStorage.setItem
+window.location
+window.location.ancestorOrigins
+window.location.hash
+window.location.host
+window.location.hostname
+window.location.hostname.includes
+window.location.hostname.split
+window.location.href
+window.location.href.includes
+window.location.href.split
+window.location.origin
+window.location.pathname
+window.location.pathname.indexOf
+window.location.protocol
+window.location.reload
+window.location.search
+window.lottie
+window.ManagedMediaSource
+window.ManagedMediaSource.isTypeSupported
+window.matchMedia
+window.MediaMetadata
+window.MediaSource
+window.MediaSource.isTypeSupported
+window.MouseEvent
+window.MutationObserver
+window.nativeMessageListener
+window.nativeMessageListener.onmessage
+window.navigator
+window.navigator.maxTouchPoints
+window.navigator.msMaxTouchPoints
+window.navigator.msPointerEnabled
+window.navigator.onLine
+window.navigator.presentation
+window.navigator.sendBeacon
+window.navigator.userAgent.indexOf
+window.navigator.userAgent.match
+window.Notification
+window.OfflineAudioContext
+window.onerror
+window.onLegacyPolymerFunctionDefinedCallback
+window.open
+window.origin
+window.outerHeight
+window.outerWidth
+window.pageXOffset
+window.pageYOffset
+window.parent
+window.parent.document
+window.parent.postMessage
+window.payments
+window.performance
+window.performance.clearResourceTimings
+window.performance.getEntriesByName
+window.performance.getEntriesByType
+window.performance.mozClearResourceTimings
+window.performance.msClearResourceTimings
+window.performance.now
+window.performance.now.bind
+window.performance.oClearResourceTimings
+window.performance.timeOrigin
+window.performance.timing
+window.performance.timing.navigationStart
+window.performance.webkitClearResourceTimings
+window.pis
+window.PointerEvent
+window.Polymer
+window.Polymer._polymerFn
+window.Polymer.allowTemplateFromDomModule
+window.Polymer.Element
+window.Polymer.fastDomIf
+window.Polymer.legacyNoObservedAttributes
+window.Polymer.legacyOptimizations
+window.Polymer.legacyUndefined
+window.Polymer.legacyWarnings
+window.Polymer.orderedComputed
+window.Polymer.removeNestedTemplates
+window.Polymer.rootPath
+window.Polymer.sanitizeDOMValue
+window.Polymer.setPassiveTouchGestures
+window.Polymer.strictTemplatePolicy
+window.Polymer.suppressTemplateNotifications
+window.Polymer.syncInitialRender
+window.Polymer.useAdoptedStyleSheetsWithBuiltCSS
+window.PolymerFakeBaseClass
+window.PolymerFakeBaseClassWithoutHtml
+window.polymerSkipLoadingFontRoboto
+window.postMessage
+window.PressureObserver
+window.Profiler
+window.Promise
+window.PROPERTY_ACCESS_MAP
+window.Proxy
+window.queueMicrotask
+window.queueMicrotask.bind
+window.ReadableStream
+window.Reflect
+window.Reflect.getMetadata
+window.removeEventListener
+window.Request
+window.requestAnimationFrame
+window.requestAnimationFrame.bind
+window.requestIdleCallback
+window.ResizeObserver
+window.screen
+window.screen.availHeight
+window.screen.availWidth
+window.screen.height
+window.screen.pixelDepth
+window.screen.width
+window.scroll
+window.scroll.apply
+window.scrollTo
+window.scrollX
+window.scrollY
+window.self
+window.self.location.href
+window.SequenceEffect
+window.SequenceEffect.prototype
+window.sessionStorage
+window.sessionStorage.getItem
+window.sessionStorage.removeItem
+window.sessionStorage.setItem
+window.setInterval
+window.setTimeout
+window.ShadowRoot
+window.ShadyCSS
+window.ShadyCSS.ApplyShim
+window.ShadyCSS.cssBuild
+window.ShadyCSS.CustomStyleInterface
+window.ShadyCSS.disableRuntime
+window.ShadyCSS.flushCustomStyles
+window.ShadyCSS.nativeCss
+window.ShadyCSS.prepareTemplate
+window.ShadyCSS.ScopingShim
+window.ShadyCSS.ScopingShim.flush
+window.ShadyCSS.styleDocument
+window.ShadyCSS.styleElement
+window.ShadyCSS.styleSubtree
+window.shadyCSSStyleTransformHooks
+window.ShadyDOM
+window.ShadyDOM.composedPath
+window.ShadyDOM.flush
+window.ShadyDOM.flushInitial
+window.ShadyDOM.handlesDynamicScoping
+window.ShadyDOM.inUse
+window.ShadyDOM.nativeMethods.querySelectorAll.call
+window.ShadyDOM.nativeMethods.setAttribute.call
+window.ShadyDOM.noPatch
+window.ShadyDOM.observeChildren
+window.ShadyDOM.patch
+window.ShadyDOM.unobserveChildren
+window.ShadyDOM.wrap
+window.ShadyDOM.Wrapper
+window.SourceBuffer
+window.spf
+window.Symbol
+window.TextDecoder
+window.TextDecoderStream
+window.TextEncoder
+window.top
+window.top.document
+window.trayride
+window.trustedTypes
+window.trustedTypes.createPolicy
+window.trustedTypes.emptyScript
+window.trustedTypes.isHTML
+window.trustedTypes.isScript
+window.trustedTypes.isScriptURL
+window.unhandledErrorCount
+window.unhandledErrorMessages
+window.URL
+window.URL.createObjectURL
+window.URLSearchParams
+window.V6V
+window.WebAssembly
+window.WebComponents
+window.WebComponents.flags
+window.webkit
+window.webkitAudioContext
+window.WebKitMediaSource
+window.WebKitPlaybackTargetAvailabilityEvent
+window.WIZ_global_data
+window.youtubewebview
+window.youtubewebview.onmessage
+window.yt
+window.YT
+window.yt.config_
+window.yt.config_.WEB_PLAYER_CONTEXT_CONFIGS
+window.yt.msgs_
+window.yt.player
+window.yt.player.Application
+window.yt.player.Application.create
+window.yt.player.Application.createAlternate
+window.yt.ready
+window.YT.ready
+window.ytAtN
+window.ytAtP
+window.ytcfg
+window.ytcfg.msgs
+window.ytcfg.obfuscatedData_
+window.ytcfg.set
+window.ytcsi
+window.ytcsi.tick
+window.yterr
+window.ytInitialGuideData
+window.ytInitialGuideDataPresent
+window.ytplayer
+window.ytplayer.bootstrapPlayerContainer
+window.ytplayer.bootstrapPlayerResponse
+window.ytplayer.bootstrapWebPlayerContextConfig
+window.ytplayer.config
+Worker
+XMLHttpRequest
+XMLSerializer
+
+================================================================================
+PER-FILE API COUNTS
+================================================================================
+
+fetched_external_006.js: 82 APIs
+  addEventListener
+  Array.from
+  Array.isArray
+  Array.prototype
+  cancel
+  clone
+  concat
+  console.warn
+  create
+  createElement
+  createElementNS
+  Date.now
+  defineProperty
+  document.createElement
+  document.createElementNS
+  document.documentElement
+  document.documentElement.animate
+  document.documentElement.style
+  document.timeline.getAnimations
+  exec
+  filter
+  forEach
+  from
+  getComputedStyle
+  getOwnPropertyNames
+  indexOf
+  isFinite
+  isNaN
+  join
+  lastIndexOf
+  map
+  Math.abs
+  Math.floor
+  Math.max
+  Math.min
+  Math.round
+  Math.sign
+  Number.MAX_VALUE
+  Object.create
+  Object.defineProperty
+  Object.getOwnPropertyNames
+  pause
+  performance.now
+  play
+  pop
+  push
+  remove
+  removeEventListener
+  replace
+  requestAnimationFrame
+  reverse
+  search
+  setTimeout
+  shift
+  slice
+  sort
+  splice
+  split
+  substr
+  Symbol.iterator
+  test
+  toFixed
+  toLowerCase
+  toUpperCase
+  trim
+  unshift
+  window.Animation
+  window.cancelAnimationFrame
+  window.document
+  window.document.timeline
+  window.Element.prototype.animate
+  window.Element.prototype.getAnimations
+  window.getComputedStyle
+  window.GroupEffect
+  window.GroupEffect.prototype
+  window.KeyframeEffect
+  window.performance
+  window.Promise
+  window.requestAnimationFrame
+  window.SequenceEffect
+  window.SequenceEffect.prototype
+  window.Symbol
+
+fetched_external_009.js: 29 APIs
+  addEventListener
+  Array.isArray
+  clearInterval
+  defineProperty
+  exec
+  filter
+  forEach
+  getBoundingClientRect
+  getComputedStyle
+  indexOf
+  IntersectionObserver
+  isNaN
+  join
+  map
+  Math.max
+  Math.min
+  MutationObserver
+  Object.defineProperty
+  parseFloat
+  performance.now
+  push
+  removeEventListener
+  setInterval
+  setTimeout
+  slice
+  some
+  sort
+  splice
+  split
+
+fetched_external_014.js: 37 APIs
+  addEventListener
+  Array.prototype
+  cancelAnimationFrame
+  cancelIdleCallback
+  clearTimeout
+  Date.now
+  defineProperty
+  document.addEventListener
+  document.hidden
+  document.removeEventListener
+  getOwnPropertyDescriptor
+  hasOwnProperty
+  Math.max
+  Math.random
+  Object.create
+  Object.defineProperties
+  Object.defineProperty
+  Object.getOwnPropertyDescriptor
+  Object.prototype
+  Object.setPrototypeOf
+  Object.values
+  push
+  removeEventListener
+  requestAnimationFrame
+  requestIdleCallback
+  setTimeout
+  shift
+  split
+  Symbol.dispose
+  Symbol.iterator
+  values
+  window.cancelAnimationFrame
+  window.cancelIdleCallback
+  window.clearTimeout
+  window.requestAnimationFrame
+  window.requestIdleCallback
+  window.setTimeout
+
+fetched_external_015.js: 6 APIs
+  indexOf
+  Math.min
+  Math.pow
+  Object.prototype
+  shift
+  split
+
+fetched_external_016.js: 122 APIs
+  abort
+  addEventListener
+  appendChild
+  Array.prototype
+  charCodeAt
+  clearTimeout
+  concat
+  console.warn
+  contains
+  createElement
+  createTextNode
+  CustomEvent
+  dispatchEvent
+  document.addEventListener
+  document.attachEvent
+  document.body
+  document.createElement
+  document.createEvent
+  document.createTextNode
+  document.detachEvent
+  document.dispatchEvent
+  document.getElementById
+  document.getElementsByTagName
+  document.readyState
+  document.referrer
+  document.removeEventListener
+  document.title
+  encodeURIComponent
+  every
+  exec
+  filter
+  forEach
+  FormData
+  getAttribute
+  getElementById
+  getElementsByTagName
+  getResponseHeader
+  getTime
+  globalThis.trustedTypes
+  history.pushState
+  history.replaceState
+  Image
+  indexOf
+  insertBefore
+  isNaN
+  join
+  JSON.parse
+  keys
+  lastIndexOf
+  map
+  match
+  Math.random
+  Math.round
+  navigator.userAgent.indexOf
+  Object.defineProperties
+  Object.defineProperty
+  Object.keys
+  Object.prototype
+  open
+  parseInt
+  pop
+  postMessage
+  preventDefault
+  push
+  querySelectorAll
+  remove
+  removeChild
+  removeEventListener
+  replace
+  Request
+  Response
+  scroll
+  scrollIntoView
+  send
+  setAttribute
+  setRequestHeader
+  setTimeout
+  shift
+  slice
+  some
+  sort
+  split
+  String.prototype
+  substring
+  Symbol.iterator
+  test
+  toLowerCase
+  toUpperCase
+  trim
+  URL
+  window._spf_state
+  window.addEventListener
+  window.attachEvent
+  window.chrome
+  window.detachEvent
+  window.history
+  window.history.back
+  window.history.pushState
+  window.history.state
+  window.location.hash
+  window.location.href
+  window.location.reload
+  window.navigator.maxTouchPoints
+  window.navigator.msMaxTouchPoints
+  window.pageXOffset
+  window.pageYOffset
+  window.performance
+  window.performance.clearResourceTimings
+  window.performance.getEntriesByName
+  window.performance.mozClearResourceTimings
+  window.performance.msClearResourceTimings
+  window.performance.now
+  window.performance.oClearResourceTimings
+  window.performance.timing
+  window.performance.timing.navigationStart
+  window.performance.webkitClearResourceTimings
+  window.postMessage
+  window.removeEventListener
+  window.scroll
+  window.scroll.apply
+  window.setTimeout
+  XMLHttpRequest
+
+fetched_external_018.js: 64 APIs
+  abort
+  addEventListener
+  Array.prototype
+  clearTimeout
+  concat
+  console.warn
+  createElement
+  document.createElement
+  exec
+  forEach
+  FormData
+  getResponseHeader
+  getTime
+  indexOf
+  isNaN
+  join
+  JSON.parse
+  keys
+  lastIndexOf
+  match
+  Math.random
+  Math.round
+  Object.defineProperties
+  Object.defineProperty
+  Object.keys
+  Object.prototype
+  open
+  parseInt
+  pop
+  postMessage
+  push
+  removeEventListener
+  replace
+  Request
+  Response
+  send
+  setRequestHeader
+  setTimeout
+  slice
+  some
+  split
+  String.prototype
+  substring
+  Symbol.iterator
+  test
+  toLowerCase
+  toUpperCase
+  trim
+  URL
+  window._spf_state
+  window.addEventListener
+  window.attachEvent
+  window.chrome
+  window.detachEvent
+  window.location.href
+  window.performance
+  window.performance.getEntriesByName
+  window.performance.now
+  window.performance.timing
+  window.performance.timing.navigationStart
+  window.postMessage
+  window.removeEventListener
+  window.setTimeout
+  XMLHttpRequest
+
+fetched_external_023.js: 492 APIs
+  abort
+  AbortController
+  addEventListener
+  addSourceBuffer
+  append
+  appendBuffer
+  appendChild
+  Array.from
+  Array.isArray
+  Array.prototype
+  arrayBuffer
+  ArrayBuffer.isView
+  assign
+  at
+  atob
+  AudioContext
+  BigInt.asIntN
+  BigInt.asUintN
+  Blob
+  blur
+  BroadcastChannel
+  btoa
+  cancel
+  cancelAnimationFrame
+  catch
+  charAt
+  charCodeAt
+  clearInterval
+  clearTimeout
+  click
+  clone
+  cloneNode
+  close
+  closest
+  composedPath
+  concat
+  console.error
+  console.groupCollapsed
+  console.groupEnd
+  console.log
+  console.warn
+  contains
+  copyWithin
+  create
+  createElement
+  createElementNS
+  createObjectURL
+  createTextNode
+  crypto.getRandomValues
+  crypto.subtle
+  CustomEvent
+  Date.now
+  Date.parse
+  decodeURI
+  decodeURIComponent
+  defineProperty
+  delete
+  dispatchEvent
+  document.activeElement
+  document.activeElement.blur
+  document.addEventListener
+  document.body
+  document.body.scrollLeft
+  document.body.scrollTop
+  document.createElement
+  document.createElementNS
+  document.createEvent
+  document.createRange
+  document.createTextNode
+  document.documentElement
+  document.documentElement.getAttribute
+  document.documentElement.scrollLeft
+  document.documentElement.scrollTop
+  document.documentElement.style
+  document.documentMode
+  document.domain
+  document.execCommand
+  document.exitFullscreen
+  document.exitPictureInPicture
+  document.featurePolicy
+  document.getElementById
+  document.getElementsByClassName
+  document.getElementsByTagName
+  document.hasFocus
+  document.head.appendChild
+  document.head.removeChild
+  document.implementation.createHTMLDocument
+  document.location
+  document.location.hostname
+  document.location.hostname.endsWith
+  document.location.href
+  document.location.origin
+  document.location.port
+  document.location.protocol
+  document.location.toString
+  document.pictureInPictureElement
+  document.queryCommandSupported
+  document.querySelector
+  document.querySelectorAll
+  document.readyState
+  document.referrer
+  document.referrer.substring
+  document.removeEventListener
+  document.visibilityState
+  DOMParser
+  encodeURI
+  encodeURIComponent
+  endOfStream
+  endsWith
+  entries
+  Error.captureStackTrace
+  Error.stackTraceLimit
+  escape
+  Event
+  every
+  exec
+  exitFullscreen
+  fetch
+  File
+  fill
+  filter
+  finally
+  find
+  findIndex
+  focus
+  forEach
+  FormData
+  freeze
+  from
+  fromEntries
+  get
+  getAll
+  getAllResponseHeaders
+  getAttribute
+  getBoundingClientRect
+  getComputedStyle
+  getElementById
+  getElementsByClassName
+  getElementsByTagName
+  getOwnPropertyDescriptor
+  getPrototypeOf
+  getReader
+  getResponseHeader
+  getRootNode
+  getSelection
+  getTime
+  globalThis.performance
+  globalThis.sessionStorage
+  globalThis.sessionStorage.getItem
+  globalThis.sessionStorage.removeItem
+  globalThis.sessionStorage.setItem
+  globalThis.TextEncoder
+  globalThis.trustedTypes
+  has
+  hasAttribute
+  hasOwnProperty
+  Headers
+  history.length
+  HTMLElement
+  HTMLMediaElement
+  HTMLStyleElement
+  HTMLVideoElement
+  Image
+  includes
+  indexOf
+  insertBefore
+  IntersectionObserver
+  Intl.DateTimeFormat
+  Intl.NumberFormat
+  isExtensible
+  isFinite
+  isFrozen
+  isNaN
+  join
+  json
+  JSON.parse
+  JSON.stringify
+  keys
+  lastIndexOf
+  load
+  localStorage.get
+  localStorage.remove
+  localStorage.set
+  location.ancestorOrigins
+  location.ancestorOrigins.length
+  location.clone
+  location.hash
+  location.hostname
+  location.href
+  location.href.substring
+  location.origin
+  location.protocol
+  location.set
+  location.TM
+  ManagedMediaSource
+  map
+  match
+  matchMedia
+  Math.abs
+  Math.ceil
+  Math.exp
+  Math.floor
+  Math.imul
+  Math.log
+  Math.log2
+  Math.max
+  Math.min
+  Math.PI
+  Math.pow
+  Math.random
+  Math.round
+  Math.sign
+  Math.sqrt
+  Math.trunc
+  MediaSource
+  moveTo
+  MutationObserver
+  navigator.clipboard.writeText
+  navigator.connection
+  navigator.cookieEnabled
+  navigator.geolocation
+  navigator.geolocation.getCurrentPosition
+  navigator.getBattery
+  navigator.hardwareConcurrency
+  navigator.mediaCapabilities
+  navigator.mediaCapabilities.decodingInfo
+  navigator.mediaSession
+  navigator.mediaSession.metadata
+  navigator.mediaSession.playbackState
+  navigator.mediaSession.setActionHandler
+  navigator.mediaSession.setPositionState
+  navigator.requestMediaKeySystemAccess
+  navigator.sendBeacon
+  navigator.share
+  navigator.standalone
+  navigator.userAgent
+  navigator.vendor
+  Number.isFinite
+  Number.isInteger
+  Number.isNaN
+  Number.isSafeInteger
+  Number.MAX_SAFE_INTEGER
+  Number.MAX_VALUE
+  Number.MIN_SAFE_INTEGER
+  Number.POSITIVE_INFINITY
+  Object.assign
+  Object.create
+  Object.defineProperties
+  Object.defineProperty
+  Object.entries
+  Object.freeze
+  Object.fromEntries
+  Object.getOwnPropertyDescriptor
+  Object.getPrototypeOf
+  Object.is
+  Object.isExtensible
+  Object.isFrozen
+  Object.keys
+  Object.prototype
+  Object.setPrototypeOf
+  Object.values
+  open
+  padStart
+  parseFloat
+  parseInt
+  pause
+  performance.clearResourceTimings
+  performance.getEntriesByName
+  performance.mark
+  performance.measure
+  performance.memory
+  performance.memory.jsHeapSizeLimit
+  performance.memory.totalJSHeapSize
+  performance.memory.usedJSHeapSize
+  performance.now
+  performance.onresourcetimingbufferfull
+  performance.timeOrigin
+  performance.timing
+  performance.timing.navigationStart
+  pipeThrough
+  play
+  pop
+  postMessage
+  preventDefault
+  Promise.all
+  Promise.race
+  Promise.reject
+  Promise.resolve
+  Promise.withResolvers
+  push
+  querySelector
+  querySelectorAll
+  read
+  reduce
+  Reflect.construct
+  remove
+  removeAttribute
+  removeChild
+  removeEventListener
+  replace
+  replaceAll
+  Request
+  requestAnimationFrame
+  requestFullscreen
+  requestIdleCallback
+  reset
+  ResizeObserver
+  Response
+  reverse
+  revokeObjectURL
+  screen.availTop
+  screen.availWidth
+  screen.height
+  screen.width
+  scrollTo
+  search
+  select
+  self.addEventListener
+  self.crossOriginIsolated
+  self.document
+  self.indexedDB.deleteDatabase
+  self.indexedDB.open
+  self.localStorage
+  self.location
+  self.location.protocol.slice
+  self.ManagedMediaSource
+  self.ManagedMediaSource.isTypeSupported
+  self.MediaSource
+  self.MediaSource.isTypeSupported
+  self.top
+  send
+  set
+  setAttribute
+  setInterval
+  setPrototypeOf
+  setRequestHeader
+  setTime
+  setTimeout
+  shift
+  slice
+  some
+  sort
+  splice
+  split
+  startsWith
+  stop
+  stopImmediatePropagation
+  stopPropagation
+  String.fromCharCode
+  String.prototype
+  substr
+  substring
+  SVGElement
+  Symbol.dispose
+  Symbol.for
+  Symbol.iterator
+  Symbol.observable
+  terminate
+  test
+  text
+  TextDecoder
+  TextEncoder
+  then
+  toFixed
+  toLocaleString
+  toLowerCase
+  top.document
+  top.location.hash
+  top.location.href
+  top.mraid
+  toString
+  toUpperCase
+  trim
+  unescape
+  unshift
+  URL
+  URL.createObjectURL
+  URL.revokeObjectURL
+  URLSearchParams
+  valueOf
+  values
+  WebAssembly
+  WebAssembly.compile
+  WebAssembly.instantiate
+  WebKitMediaSource
+  window.AbortController
+  window.addEventListener
+  window.android
+  window.android.webview
+  window.android.webview.getExperimentalMediaIntegrityTokenProvider
+  window.attmp
+  window.AudioContext
+  window.Av6
+  window.bgens
+  window.botguard
+  window.cast.receiver.platform.canDisplayType
+  window.clearInterval
+  window.clearTimeout
+  window.close
+  window.console.log
+  window.crypto
+  window.crypto.getRandomValues
+  window.devicePixelRatio
+  window.dispatchEvent
+  window.document
+  window.document.documentElement
+  window.document.elementFromPoint
+  window.document.pictureInPictureEnabled
+  window.event
+  window.fetch
+  window.Float32Array
+  window.FormData
+  window.getComputedStyle
+  window.getSelection
+  window.google_image_requests
+  window.h5vcc
+  window.h5vcc.cVal.getValue
+  window.H5vccPlatformService
+  window.H5vccScreen
+  window.H5vccScreen.GetDiagonal
+  window.HTMLMediaElement
+  window.HTMLVideoElement
+  window.innerHeight
+  window.innerWidth
+  window.Int32Array
+  window.IntersectionObserver
+  window.JSON
+  window.localStorage
+  window.localStorage.removeItem
+  window.location.ancestorOrigins
+  window.location.hostname
+  window.location.hostname.includes
+  window.location.hostname.split
+  window.location.href
+  window.location.origin
+  window.location.protocol
+  window.location.reload
+  window.location.search
+  window.ManagedMediaSource
+  window.ManagedMediaSource.isTypeSupported
+  window.matchMedia
+  window.MediaMetadata
+  window.MediaSource
+  window.MediaSource.isTypeSupported
+  window.navigator
+  window.navigator.msPointerEnabled
+  window.navigator.onLine
+  window.navigator.sendBeacon
+  window.onerror
+  window.open
+  window.origin
+  window.outerHeight
+  window.outerWidth
+  window.performance
+  window.performance.getEntriesByName
+  window.performance.timing.navigationStart
+  window.PressureObserver
+  window.Profiler
+  window.queueMicrotask
+  window.queueMicrotask.bind
+  window.ReadableStream
+  window.removeEventListener
+  window.Request
+  window.requestAnimationFrame
+  window.requestIdleCallback
+  window.screen
+  window.screen.height
+  window.screen.pixelDepth
+  window.screen.width
+  window.sessionStorage
+  window.sessionStorage.getItem
+  window.sessionStorage.removeItem
+  window.sessionStorage.setItem
+  window.setInterval
+  window.setTimeout
+  window.SourceBuffer
+  window.top
+  window.top.document
+  window.trayride
+  window.URL
+  window.URL.createObjectURL
+  window.WebAssembly
+  window.webkitAudioContext
+  window.WebKitMediaSource
+  window.WebKitPlaybackTargetAvailabilityEvent
+  window.yt
+  window.yt.msgs_
+  window.ytcfg
+  window.ytcfg.msgs
+  window.yterr
+  Worker
+  XMLHttpRequest
+
+fetched_external_027.js: 122 APIs
+  abort
+  addEventListener
+  appendChild
+  Array.prototype
+  charCodeAt
+  clearTimeout
+  concat
+  console.warn
+  contains
+  createElement
+  createTextNode
+  CustomEvent
+  dispatchEvent
+  document.addEventListener
+  document.attachEvent
+  document.body
+  document.createElement
+  document.createEvent
+  document.createTextNode
+  document.detachEvent
+  document.dispatchEvent
+  document.getElementById
+  document.getElementsByTagName
+  document.readyState
+  document.referrer
+  document.removeEventListener
+  document.title
+  encodeURIComponent
+  every
+  exec
+  filter
+  forEach
+  FormData
+  getAttribute
+  getElementById
+  getElementsByTagName
+  getResponseHeader
+  getTime
+  globalThis.trustedTypes
+  history.pushState
+  history.replaceState
+  Image
+  indexOf
+  insertBefore
+  isNaN
+  join
+  JSON.parse
+  keys
+  lastIndexOf
+  map
+  match
+  Math.random
+  Math.round
+  navigator.userAgent.indexOf
+  Object.defineProperties
+  Object.defineProperty
+  Object.keys
+  Object.prototype
+  open
+  parseInt
+  pop
+  postMessage
+  preventDefault
+  push
+  querySelectorAll
+  remove
+  removeChild
+  removeEventListener
+  replace
+  Request
+  Response
+  scroll
+  scrollIntoView
+  send
+  setAttribute
+  setRequestHeader
+  setTimeout
+  shift
+  slice
+  some
+  sort
+  split
+  String.prototype
+  substring
+  Symbol.iterator
+  test
+  toLowerCase
+  toUpperCase
+  trim
+  URL
+  window._spf_state
+  window.addEventListener
+  window.attachEvent
+  window.chrome
+  window.detachEvent
+  window.history
+  window.history.back
+  window.history.pushState
+  window.history.state
+  window.location.hash
+  window.location.href
+  window.location.reload
+  window.navigator.maxTouchPoints
+  window.navigator.msMaxTouchPoints
+  window.pageXOffset
+  window.pageYOffset
+  window.performance
+  window.performance.clearResourceTimings
+  window.performance.getEntriesByName
+  window.performance.mozClearResourceTimings
+  window.performance.msClearResourceTimings
+  window.performance.now
+  window.performance.oClearResourceTimings
+  window.performance.timing
+  window.performance.timing.navigationStart
+  window.performance.webkitClearResourceTimings
+  window.postMessage
+  window.removeEventListener
+  window.scroll
+  window.scroll.apply
+  window.setTimeout
+  XMLHttpRequest
+
+fetched_external_029.js: 64 APIs
+  abort
+  addEventListener
+  Array.prototype
+  clearTimeout
+  concat
+  console.warn
+  createElement
+  document.createElement
+  exec
+  forEach
+  FormData
+  getResponseHeader
+  getTime
+  indexOf
+  isNaN
+  join
+  JSON.parse
+  keys
+  lastIndexOf
+  match
+  Math.random
+  Math.round
+  Object.defineProperties
+  Object.defineProperty
+  Object.keys
+  Object.prototype
+  open
+  parseInt
+  pop
+  postMessage
+  push
+  removeEventListener
+  replace
+  Request
+  Response
+  send
+  setRequestHeader
+  setTimeout
+  slice
+  some
+  split
+  String.prototype
+  substring
+  Symbol.iterator
+  test
+  toLowerCase
+  toUpperCase
+  trim
+  URL
+  window._spf_state
+  window.addEventListener
+  window.attachEvent
+  window.chrome
+  window.detachEvent
+  window.location.href
+  window.performance
+  window.performance.getEntriesByName
+  window.performance.now
+  window.performance.timing
+  window.performance.timing.navigationStart
+  window.postMessage
+  window.removeEventListener
+  window.setTimeout
+  XMLHttpRequest
+
+fetched_external_031.js: 790 APIs
+  abort
+  AbortController
+  AbortSignal
+  addEventListener
+  after
+  alert
+  append
+  appendChild
+  Array.from
+  Array.isArray
+  Array.prototype
+  arrayBuffer
+  ArrayBuffer.isView
+  assign
+  at
+  atob
+  attachShadow
+  Audio
+  AudioContext
+  BigInt.asIntN
+  BigInt.asUintN
+  blob
+  Blob
+  blur
+  BroadcastChannel
+  btoa
+  cancel
+  cancelAnimationFrame
+  cancelIdleCallback
+  catch
+  charAt
+  charCodeAt
+  clearInterval
+  clearTimeout
+  click
+  clone
+  cloneNode
+  close
+  closest
+  codePointAt
+  composedPath
+  concat
+  console.debug
+  console.error
+  console.group
+  console.groupCollapsed
+  console.groupEnd
+  console.groupEnd.call
+  console.info
+  console.log
+  console.time
+  console.timeEnd
+  console.warn
+  contains
+  create
+  createDocumentFragment
+  createElement
+  createElementNS
+  createObjectURL
+  createTextNode
+  crypto.getRandomValues
+  crypto.subtle
+  customElements.define
+  customElements.get
+  customElements.polyfillWrapFlushCallback
+  CustomEvent
+  Date.now
+  Date.parse
+  Date.prototype
+  Date.UTC
+  decodeURI
+  decodeURIComponent
+  defineProperties
+  defineProperty
+  delete
+  dispatchEvent
+  document.activeElement
+  document.activeElement.blur
+  document.activeElement.tagName
+  document.addEventListener
+  document.adoptedStyleSheets
+  document.adoptedStyleSheets.length
+  document.all
+  document.baseURI
+  document.body
+  document.body.addEventListener
+  document.body.animate
+  document.body.appendChild
+  document.body.classList.add
+  document.body.classList.contains
+  document.body.classList.remove
+  document.body.className.indexOf
+  document.body.clientHeight
+  document.body.clientWidth
+  document.body.contains
+  document.body.getAttribute
+  document.body.hasAttribute
+  document.body.prepend
+  document.body.removeAttribute
+  document.body.removeChild
+  document.body.scrollLeft
+  document.body.scrollTop
+  document.body.setAttribute
+  document.body.style.backgroundColor
+  document.body.style.colorScheme
+  document.body.style.cursor
+  document.body.style.overflow
+  document.body.style.overflowY
+  document.body.style.overscrollBehavior
+  document.body.style.top
+  document.cookie
+  document.createComment
+  document.createDocumentFragment
+  document.createElement
+  document.createElementNS
+  document.createEvent
+  document.createRange
+  document.createTextNode
+  document.createTreeWalker
+  document.currentScript
+  document.currentScript.src.indexOf
+  document.defaultView
+  document.dispatchEvent
+  document.documentElement
+  document.documentElement.clientHeight
+  document.documentElement.clientWidth
+  document.documentElement.getAttribute
+  document.documentElement.getBoundingClientRect
+  document.documentElement.hasAttribute
+  document.documentElement.lang
+  document.documentElement.scrollHeight
+  document.documentElement.scrollLeft
+  document.documentElement.scrollTop
+  document.documentElement.setCapture
+  document.documentElement.style
+  document.documentElement.style.overscrollBehavior
+  document.documentElement.tagName.toLowerCase
+  document.domain
+  document.elementFromPoint
+  document.execCommand
+  document.featurePolicy
+  document.getElementById
+  document.getElementsByTagName
+  document.getSelection
+  document.hasStorageAccess
+  document.head
+  document.head.append
+  document.head.appendChild
+  document.head.querySelector
+  document.head.removeChild
+  document.head.style.touchAction
+  document.implementation.createHTMLDocument
+  document.importNode
+  document.JSC$9434_onVisibilityChange.pipe
+  document.location.hostname
+  document.location.hostname.endsWith
+  document.location.href
+  document.location.port
+  document.location.protocol
+  document.location.toString
+  document.pictureInPictureElement
+  document.postMessage
+  document.prerendering
+  document.querySelector
+  document.querySelectorAll
+  document.readyState
+  document.referrer
+  document.releaseCapture
+  document.removeEventListener
+  document.requestStorageAccessFor
+  document.scrollingElement
+  document.scrollingElement.scrollLeft
+  document.scrollingElement.scrollTop
+  document.startViewTransition
+  document.styleSheets
+  document.timeline
+  document.timeline.play
+  document.title
+  document.visibilityState
+  document.wasDiscarded
+  DocumentFragment
+  DOMTokenList
+  encodeURI
+  encodeURIComponent
+  endsWith
+  entries
+  Error.apply
+  Error.call
+  Error.captureStackTrace
+  escape
+  Event
+  every
+  exec
+  fetch
+  File
+  FileReader
+  fill
+  filter
+  finally
+  find
+  findIndex
+  flat
+  flatMap
+  focus
+  FocusEvent
+  forEach
+  FormData
+  formData
+  freeze
+  from
+  fromEntries
+  get
+  getAll
+  getAllResponseHeaders
+  getAttribute
+  getBoundingClientRect
+  getClientRects
+  getComputedStyle
+  getElementById
+  getElementsByClassName
+  getElementsByTagName
+  getFullYear
+  getOwnPropertyDescriptor
+  getOwnPropertyDescriptors
+  getOwnPropertyNames
+  getOwnPropertySymbols
+  getPrototypeOf
+  getReader
+  getResponseHeader
+  getRootNode
+  getSelection
+  getTime
+  globalThis.Array
+  globalThis.cancelIdleCallback
+  globalThis.HTMLElement
+  globalThis.performance
+  globalThis.performance.getEntriesByType
+  globalThis.requestIdleCallback
+  globalThis.ResizeObserver
+  globalThis.sessionStorage
+  globalThis.sessionStorage.getItem
+  globalThis.sessionStorage.removeItem
+  globalThis.sessionStorage.setItem
+  globalThis.TextEncoder
+  globalThis.trustedTypes
+  globalThis.XRegExp
+  globalThis.Zone
+  has
+  hasAttribute
+  hasOwn
+  hasOwnProperty
+  Headers
+  history.length
+  history.pushState
+  history.replaceState
+  history.state
+  HTMLAnchorElement
+  HTMLButtonElement
+  HTMLCanvasElement
+  HTMLDivElement
+  HTMLElement
+  HTMLFencedFrameElement
+  HTMLFormElement
+  HTMLIFrameElement
+  HTMLImageElement
+  HTMLInputElement
+  HTMLLinkElement
+  HTMLOptionElement
+  HTMLSelectElement
+  HTMLStyleElement
+  HTMLTemplateElement
+  HTMLTextAreaElement
+  HTMLUnknownElement
+  HTMLVideoElement
+  Image
+  importNode
+  includes
+  indexOf
+  insertBefore
+  IntersectionObserver
+  Intl.DateTimeFormat
+  Intl.NumberFormat
+  isExtensible
+  isFinite
+  isFrozen
+  isNaN
+  join
+  json
+  JSON.parse
+  JSON.parseWrapper
+  JSON.stringify
+  keys
+  lastIndexOf
+  load
+  localStorage.get
+  localStorage.remove
+  localStorage.set
+  location.host
+  location.hostname
+  location.hostname.indexOf
+  location.hostname.match
+  location.href
+  location.origin
+  location.pathname
+  location.port
+  location.protocol
+  location.reload
+  location.search
+  ManagedMediaSource
+  map
+  Map.prototype
+  match
+  matches
+  matchMedia
+  Math.abs
+  Math.acos
+  Math.asin
+  Math.atan
+  Math.atan2
+  Math.ceil
+  Math.cos
+  Math.exp
+  Math.floor
+  Math.hypot
+  Math.imul
+  Math.LN2
+  Math.log
+  Math.log2
+  Math.max
+  Math.min
+  Math.PI
+  Math.pow
+  Math.random
+  Math.round
+  Math.sign
+  Math.sin
+  Math.sqrt
+  Math.SQRT2
+  Math.tan
+  Math.trunc
+  Math.uuid
+  MediaSource
+  MouseEvent
+  moveTo
+  MutationObserver
+  navigator.clipboard
+  navigator.clipboard.write
+  navigator.clipboard.writeText
+  navigator.cookieEnabled
+  navigator.deviceMemory
+  navigator.geolocation
+  navigator.geolocation.getCurrentPosition
+  navigator.hardwareConcurrency
+  navigator.keyboard
+  navigator.locks
+  navigator.mediaDevices
+  navigator.mediaDevices.getUserMedia
+  navigator.onLine
+  navigator.permissions
+  navigator.permissions.query
+  navigator.sendBeacon
+  navigator.serviceWorker
+  navigator.serviceWorker.addEventListener
+  navigator.serviceWorker.getRegistration
+  navigator.serviceWorker.getRegistrations
+  navigator.serviceWorker.ready.then
+  navigator.serviceWorker.register
+  navigator.share
+  navigator.standalone
+  navigator.storage
+  navigator.storage.estimate
+  navigator.userActivation
+  navigator.userAgent
+  navigator.userAgent.includes
+  navigator.userAgent.indexOf
+  navigator.userAgent.match
+  navigator.userAgentData.getHighEntropyValues
+  navigator.vendor
+  normalize
+  Number.isFinite
+  Number.isInteger
+  Number.isNaN
+  Number.isSafeInteger
+  Number.MAX_SAFE_INTEGER
+  Number.MAX_VALUE
+  Number.MIN_SAFE_INTEGER
+  Number.NEGATIVE_INFINITY
+  Number.parseFloat
+  Number.parseInt
+  Number.POSITIVE_INFINITY
+  Object.assign
+  Object.create
+  Object.defineProperties
+  Object.defineProperty
+  Object.entries
+  Object.freeze
+  Object.fromEntries
+  Object.getOwnPropertyDescriptor
+  Object.getOwnPropertyDescriptors
+  Object.getOwnPropertyNames
+  Object.getOwnPropertySymbols
+  Object.getPrototypeOf
+  Object.hasOwn
+  Object.hasOwnProperty
+  Object.is
+  Object.isExtensible
+  Object.isFrozen
+  Object.keys
+  Object.my_load
+  Object.prototype
+  Object.seal
+  Object.setPrototypeOf
+  Object.values
+  OffscreenCanvas
+  open
+  overrideMimeType
+  padStart
+  parent.header
+  parent.parent
+  parent.start
+  parseFloat
+  parseInt
+  pause
+  performance.getEntriesByName
+  performance.getEntriesByType
+  performance.mark
+  performance.measure
+  performance.now
+  performance.timing
+  performance.timing.navigationStart
+  PerformanceObserver
+  pipeThrough
+  play
+  pop
+  postMessage
+  prepend
+  preventDefault
+  Promise.all
+  Promise.allSettled
+  Promise.prototype
+  Promise.race
+  Promise.reject
+  Promise.resolve
+  Promise.toString
+  Promise.withResolvers
+  prompt
+  push
+  querySelector
+  querySelectorAll
+  queueMicrotask
+  read
+  reduce
+  Reflect.closure
+  Reflect.construct
+  Reflect.decorate
+  Reflect.defineMetadata
+  Reflect.getMetadata
+  Reflect.metadata
+  Reflect.ownKeys
+  Reflect.setPrototypeOf
+  RegExp.prototype
+  remove
+  removeAttribute
+  removeChild
+  removeEventListener
+  repeat
+  replace
+  replaceAll
+  replaceChild
+  Request
+  requestAnimationFrame
+  requestFullscreen
+  requestIdleCallback
+  reset
+  ResizeObserver
+  Response
+  reverse
+  revokeObjectURL
+  screen.availTop
+  screen.availWidth
+  screen.height
+  screen.width
+  scroll
+  scrollBy
+  scrollIntoView
+  scrollTo
+  seal
+  search
+  select
+  self.addEventListener
+  self.crossOriginIsolated
+  self.document
+  self.indexedDB.deleteDatabase
+  self.indexedDB.open
+  self.localStorage
+  self.localStorage.removeItem
+  self.location
+  self.location.origin
+  self.location.protocol.slice
+  self.sessionStorage
+  self.sessionStorage.removeItem
+  self.top
+  send
+  ServiceWorker
+  sessionStorage.remove
+  sessionStorage.set
+  set
+  Set.prototype
+  setAttribute
+  setFullYear
+  setInterval
+  setPrototypeOf
+  setRequestHeader
+  setTime
+  setTimeout
+  ShadowRoot
+  shift
+  slice
+  some
+  sort
+  splice
+  split
+  startsWith
+  stop
+  stopImmediatePropagation
+  stopPropagation
+  String.fromCharCode
+  String.fromCodePoint
+  String.prototype
+  String.raw
+  structuredClone
+  submit
+  substr
+  substring
+  SVGElement
+  SVGGraphicsElement
+  Symbol.asyncIterator
+  Symbol.dispose
+  Symbol.for
+  Symbol.iterator
+  Symbol.observable
+  test
+  text
+  TextDecoder
+  TextEncoder
+  then
+  toExponential
+  toFixed
+  toLowerCase
+  top.bar.renderer.css.js
+  top.location.href
+  toPrecision
+  toString
+  toUpperCase
+  trim
+  unescape
+  unshift
+  URL
+  URL.createObjectURL
+  URL.revokeObjectURL
+  URLSearchParams
+  valueOf
+  values
+  window.___jsl.hefn
+  window.__onGCastApiAvailable
+  window._DumpException
+  window._F_combinedSignature
+  window._F_cssRowKey
+  window._F_installCss
+  window.AbortController
+  window.addEventListener
+  window.alert
+  window.attmp
+  window.AudioContext
+  window.bgens
+  window.btoa
+  window.caches
+  window.cancelAnimationFrame
+  window.cancelIdleCallback
+  window.chrome
+  window.clearInterval
+  window.clearTimeout
+  window.close
+  window.COMPILED
+  window.console.log
+  window.crypto
+  window.crypto.getRandomValues
+  window.crypto.subtle
+  window.CSS
+  window.CSS.supports
+  window.customElements
+  window.customElements.define
+  window.customElements.polyfillWrapFlushCallback
+  window.dataLayer
+  window.dataLayer.push
+  window.devicePixelRatio
+  window.dispatchEvent
+  window.document
+  window.document.baseURI
+  window.document.body
+  window.document.documentElement
+  window.document.head.appendChild
+  window.document.location.href
+  window.document.visibilityState
+  window.documentPictureInPicture
+  window.event
+  window.familyDialogHistory
+  window.fetch
+  window.focus
+  window.FormData
+  window.frames
+  window.ga
+  window.ga.q
+  window.getComputedStyle
+  window.getSelection
+  window.google
+  window.google.gr
+  window.grecaptcha
+  window.Hammer
+  window.history
+  window.history.back
+  window.history.forward
+  window.history.pushState
+  window.history.replaceState
+  window.history.scrollRestoration
+  window.history.state
+  window.HTMLImports
+  window.HTMLImports.whenReady
+  window.HTMLTemplateElement
+  window.innerHeight
+  window.innerWidth
+  window.Int32Array
+  window.IntersectionObserver
+  window.JSCompiler_renameProperty
+  window.JSON
+  window.loadGuideDataHook
+  window.localStorage
+  window.localStorage.setItem
+  window.location
+  window.location.hash
+  window.location.host
+  window.location.hostname
+  window.location.hostname.includes
+  window.location.hostname.split
+  window.location.href
+  window.location.href.includes
+  window.location.href.split
+  window.location.origin
+  window.location.pathname
+  window.location.pathname.indexOf
+  window.location.protocol
+  window.location.reload
+  window.location.search
+  window.lottie
+  window.ManagedMediaSource
+  window.ManagedMediaSource.isTypeSupported
+  window.matchMedia
+  window.MediaSource
+  window.MediaSource.isTypeSupported
+  window.MouseEvent
+  window.MutationObserver
+  window.nativeMessageListener
+  window.nativeMessageListener.onmessage
+  window.navigator
+  window.navigator.onLine
+  window.navigator.presentation
+  window.navigator.sendBeacon
+  window.navigator.userAgent.indexOf
+  window.navigator.userAgent.match
+  window.Notification
+  window.OfflineAudioContext
+  window.onerror
+  window.onLegacyPolymerFunctionDefinedCallback
+  window.origin
+  window.outerHeight
+  window.pageXOffset
+  window.pageYOffset
+  window.parent
+  window.parent.document
+  window.parent.postMessage
+  window.payments
+  window.performance
+  window.performance.getEntriesByName
+  window.performance.getEntriesByType
+  window.performance.now
+  window.performance.now.bind
+  window.performance.timeOrigin
+  window.PointerEvent
+  window.Polymer
+  window.Polymer._polymerFn
+  window.Polymer.allowTemplateFromDomModule
+  window.Polymer.Element
+  window.Polymer.fastDomIf
+  window.Polymer.legacyNoObservedAttributes
+  window.Polymer.legacyOptimizations
+  window.Polymer.legacyUndefined
+  window.Polymer.legacyWarnings
+  window.Polymer.orderedComputed
+  window.Polymer.removeNestedTemplates
+  window.Polymer.rootPath
+  window.Polymer.sanitizeDOMValue
+  window.Polymer.setPassiveTouchGestures
+  window.Polymer.strictTemplatePolicy
+  window.Polymer.suppressTemplateNotifications
+  window.Polymer.syncInitialRender
+  window.Polymer.useAdoptedStyleSheetsWithBuiltCSS
+  window.PolymerFakeBaseClass
+  window.PolymerFakeBaseClassWithoutHtml
+  window.polymerSkipLoadingFontRoboto
+  window.postMessage
+  window.PROPERTY_ACCESS_MAP
+  window.Proxy
+  window.queueMicrotask
+  window.ReadableStream
+  window.Reflect
+  window.Reflect.getMetadata
+  window.removeEventListener
+  window.Request
+  window.requestAnimationFrame
+  window.requestAnimationFrame.bind
+  window.requestIdleCallback
+  window.ResizeObserver
+  window.screen
+  window.screen.availHeight
+  window.screen.availWidth
+  window.scrollTo
+  window.scrollX
+  window.scrollY
+  window.self
+  window.self.location.href
+  window.sessionStorage
+  window.sessionStorage.getItem
+  window.sessionStorage.removeItem
+  window.sessionStorage.setItem
+  window.setInterval
+  window.setTimeout
+  window.ShadyCSS
+  window.ShadyCSS.ApplyShim
+  window.ShadyCSS.cssBuild
+  window.ShadyCSS.CustomStyleInterface
+  window.ShadyCSS.disableRuntime
+  window.ShadyCSS.flushCustomStyles
+  window.ShadyCSS.nativeCss
+  window.ShadyCSS.prepareTemplate
+  window.ShadyCSS.ScopingShim
+  window.ShadyCSS.ScopingShim.flush
+  window.ShadyCSS.styleDocument
+  window.ShadyCSS.styleElement
+  window.ShadyCSS.styleSubtree
+  window.ShadyDOM
+  window.ShadyDOM.composedPath
+  window.ShadyDOM.flush
+  window.ShadyDOM.flushInitial
+  window.ShadyDOM.inUse
+  window.ShadyDOM.noPatch
+  window.ShadyDOM.observeChildren
+  window.ShadyDOM.patch
+  window.ShadyDOM.unobserveChildren
+  window.ShadyDOM.wrap
+  window.ShadyDOM.Wrapper
+  window.spf
+  window.TextDecoderStream
+  window.top
+  window.trustedTypes
+  window.trustedTypes.createPolicy
+  window.trustedTypes.emptyScript
+  window.trustedTypes.isHTML
+  window.trustedTypes.isScript
+  window.trustedTypes.isScriptURL
+  window.URLSearchParams
+  window.WebComponents
+  window.WebComponents.flags
+  window.webkit
+  window.webkitAudioContext
+  window.youtubewebview
+  window.youtubewebview.onmessage
+  window.yt
+  window.YT
+  window.yt.msgs_
+  window.yt.ready
+  window.YT.ready
+  window.ytcfg
+  window.ytcfg.msgs
+  window.ytcsi
+  window.yterr
+  window.ytInitialGuideData
+  window.ytInitialGuideDataPresent
+  Worker
+  XMLHttpRequest
+  XMLSerializer
+
+fetched_external_031_patched.js: 790 APIs
+  abort
+  AbortController
+  AbortSignal
+  addEventListener
+  after
+  alert
+  append
+  appendChild
+  Array.from
+  Array.isArray
+  Array.prototype
+  arrayBuffer
+  ArrayBuffer.isView
+  assign
+  at
+  atob
+  attachShadow
+  Audio
+  AudioContext
+  BigInt.asIntN
+  BigInt.asUintN
+  blob
+  Blob
+  blur
+  BroadcastChannel
+  btoa
+  cancel
+  cancelAnimationFrame
+  cancelIdleCallback
+  catch
+  charAt
+  charCodeAt
+  clearInterval
+  clearTimeout
+  click
+  clone
+  cloneNode
+  close
+  closest
+  codePointAt
+  composedPath
+  concat
+  console.debug
+  console.error
+  console.group
+  console.groupCollapsed
+  console.groupEnd
+  console.groupEnd.call
+  console.info
+  console.log
+  console.time
+  console.timeEnd
+  console.warn
+  contains
+  create
+  createDocumentFragment
+  createElement
+  createElementNS
+  createObjectURL
+  createTextNode
+  crypto.getRandomValues
+  crypto.subtle
+  customElements.define
+  customElements.get
+  customElements.polyfillWrapFlushCallback
+  CustomEvent
+  Date.now
+  Date.parse
+  Date.prototype
+  Date.UTC
+  decodeURI
+  decodeURIComponent
+  defineProperties
+  defineProperty
+  delete
+  dispatchEvent
+  document.activeElement
+  document.activeElement.blur
+  document.activeElement.tagName
+  document.addEventListener
+  document.adoptedStyleSheets
+  document.adoptedStyleSheets.length
+  document.all
+  document.baseURI
+  document.body
+  document.body.addEventListener
+  document.body.animate
+  document.body.appendChild
+  document.body.classList.add
+  document.body.classList.contains
+  document.body.classList.remove
+  document.body.className.indexOf
+  document.body.clientHeight
+  document.body.clientWidth
+  document.body.contains
+  document.body.getAttribute
+  document.body.hasAttribute
+  document.body.prepend
+  document.body.removeAttribute
+  document.body.removeChild
+  document.body.scrollLeft
+  document.body.scrollTop
+  document.body.setAttribute
+  document.body.style.backgroundColor
+  document.body.style.colorScheme
+  document.body.style.cursor
+  document.body.style.overflow
+  document.body.style.overflowY
+  document.body.style.overscrollBehavior
+  document.body.style.top
+  document.cookie
+  document.createComment
+  document.createDocumentFragment
+  document.createElement
+  document.createElementNS
+  document.createEvent
+  document.createRange
+  document.createTextNode
+  document.createTreeWalker
+  document.currentScript
+  document.currentScript.src.indexOf
+  document.defaultView
+  document.dispatchEvent
+  document.documentElement
+  document.documentElement.clientHeight
+  document.documentElement.clientWidth
+  document.documentElement.getAttribute
+  document.documentElement.getBoundingClientRect
+  document.documentElement.hasAttribute
+  document.documentElement.lang
+  document.documentElement.scrollHeight
+  document.documentElement.scrollLeft
+  document.documentElement.scrollTop
+  document.documentElement.setCapture
+  document.documentElement.style
+  document.documentElement.style.overscrollBehavior
+  document.documentElement.tagName.toLowerCase
+  document.domain
+  document.elementFromPoint
+  document.execCommand
+  document.featurePolicy
+  document.getElementById
+  document.getElementsByTagName
+  document.getSelection
+  document.hasStorageAccess
+  document.head
+  document.head.append
+  document.head.appendChild
+  document.head.querySelector
+  document.head.removeChild
+  document.head.style.touchAction
+  document.implementation.createHTMLDocument
+  document.importNode
+  document.JSC$9434_onVisibilityChange.pipe
+  document.location.hostname
+  document.location.hostname.endsWith
+  document.location.href
+  document.location.port
+  document.location.protocol
+  document.location.toString
+  document.pictureInPictureElement
+  document.postMessage
+  document.prerendering
+  document.querySelector
+  document.querySelectorAll
+  document.readyState
+  document.referrer
+  document.releaseCapture
+  document.removeEventListener
+  document.requestStorageAccessFor
+  document.scrollingElement
+  document.scrollingElement.scrollLeft
+  document.scrollingElement.scrollTop
+  document.startViewTransition
+  document.styleSheets
+  document.timeline
+  document.timeline.play
+  document.title
+  document.visibilityState
+  document.wasDiscarded
+  DocumentFragment
+  DOMTokenList
+  encodeURI
+  encodeURIComponent
+  endsWith
+  entries
+  Error.apply
+  Error.call
+  Error.captureStackTrace
+  escape
+  Event
+  every
+  exec
+  fetch
+  File
+  FileReader
+  fill
+  filter
+  finally
+  find
+  findIndex
+  flat
+  flatMap
+  focus
+  FocusEvent
+  forEach
+  FormData
+  formData
+  freeze
+  from
+  fromEntries
+  get
+  getAll
+  getAllResponseHeaders
+  getAttribute
+  getBoundingClientRect
+  getClientRects
+  getComputedStyle
+  getElementById
+  getElementsByClassName
+  getElementsByTagName
+  getFullYear
+  getOwnPropertyDescriptor
+  getOwnPropertyDescriptors
+  getOwnPropertyNames
+  getOwnPropertySymbols
+  getPrototypeOf
+  getReader
+  getResponseHeader
+  getRootNode
+  getSelection
+  getTime
+  globalThis.Array
+  globalThis.cancelIdleCallback
+  globalThis.HTMLElement
+  globalThis.performance
+  globalThis.performance.getEntriesByType
+  globalThis.requestIdleCallback
+  globalThis.ResizeObserver
+  globalThis.sessionStorage
+  globalThis.sessionStorage.getItem
+  globalThis.sessionStorage.removeItem
+  globalThis.sessionStorage.setItem
+  globalThis.TextEncoder
+  globalThis.trustedTypes
+  globalThis.XRegExp
+  globalThis.Zone
+  has
+  hasAttribute
+  hasOwn
+  hasOwnProperty
+  Headers
+  history.length
+  history.pushState
+  history.replaceState
+  history.state
+  HTMLAnchorElement
+  HTMLButtonElement
+  HTMLCanvasElement
+  HTMLDivElement
+  HTMLElement
+  HTMLFencedFrameElement
+  HTMLFormElement
+  HTMLIFrameElement
+  HTMLImageElement
+  HTMLInputElement
+  HTMLLinkElement
+  HTMLOptionElement
+  HTMLSelectElement
+  HTMLStyleElement
+  HTMLTemplateElement
+  HTMLTextAreaElement
+  HTMLUnknownElement
+  HTMLVideoElement
+  Image
+  importNode
+  includes
+  indexOf
+  insertBefore
+  IntersectionObserver
+  Intl.DateTimeFormat
+  Intl.NumberFormat
+  isExtensible
+  isFinite
+  isFrozen
+  isNaN
+  join
+  json
+  JSON.parse
+  JSON.parseWrapper
+  JSON.stringify
+  keys
+  lastIndexOf
+  load
+  localStorage.get
+  localStorage.remove
+  localStorage.set
+  location.host
+  location.hostname
+  location.hostname.indexOf
+  location.hostname.match
+  location.href
+  location.origin
+  location.pathname
+  location.port
+  location.protocol
+  location.reload
+  location.search
+  ManagedMediaSource
+  map
+  Map.prototype
+  match
+  matches
+  matchMedia
+  Math.abs
+  Math.acos
+  Math.asin
+  Math.atan
+  Math.atan2
+  Math.ceil
+  Math.cos
+  Math.exp
+  Math.floor
+  Math.hypot
+  Math.imul
+  Math.LN2
+  Math.log
+  Math.log2
+  Math.max
+  Math.min
+  Math.PI
+  Math.pow
+  Math.random
+  Math.round
+  Math.sign
+  Math.sin
+  Math.sqrt
+  Math.SQRT2
+  Math.tan
+  Math.trunc
+  Math.uuid
+  MediaSource
+  MouseEvent
+  moveTo
+  MutationObserver
+  navigator.clipboard
+  navigator.clipboard.write
+  navigator.clipboard.writeText
+  navigator.cookieEnabled
+  navigator.deviceMemory
+  navigator.geolocation
+  navigator.geolocation.getCurrentPosition
+  navigator.hardwareConcurrency
+  navigator.keyboard
+  navigator.locks
+  navigator.mediaDevices
+  navigator.mediaDevices.getUserMedia
+  navigator.onLine
+  navigator.permissions
+  navigator.permissions.query
+  navigator.sendBeacon
+  navigator.serviceWorker
+  navigator.serviceWorker.addEventListener
+  navigator.serviceWorker.getRegistration
+  navigator.serviceWorker.getRegistrations
+  navigator.serviceWorker.ready.then
+  navigator.serviceWorker.register
+  navigator.share
+  navigator.standalone
+  navigator.storage
+  navigator.storage.estimate
+  navigator.userActivation
+  navigator.userAgent
+  navigator.userAgent.includes
+  navigator.userAgent.indexOf
+  navigator.userAgent.match
+  navigator.userAgentData.getHighEntropyValues
+  navigator.vendor
+  normalize
+  Number.isFinite
+  Number.isInteger
+  Number.isNaN
+  Number.isSafeInteger
+  Number.MAX_SAFE_INTEGER
+  Number.MAX_VALUE
+  Number.MIN_SAFE_INTEGER
+  Number.NEGATIVE_INFINITY
+  Number.parseFloat
+  Number.parseInt
+  Number.POSITIVE_INFINITY
+  Object.assign
+  Object.create
+  Object.defineProperties
+  Object.defineProperty
+  Object.entries
+  Object.freeze
+  Object.fromEntries
+  Object.getOwnPropertyDescriptor
+  Object.getOwnPropertyDescriptors
+  Object.getOwnPropertyNames
+  Object.getOwnPropertySymbols
+  Object.getPrototypeOf
+  Object.hasOwn
+  Object.hasOwnProperty
+  Object.is
+  Object.isExtensible
+  Object.isFrozen
+  Object.keys
+  Object.my_load
+  Object.prototype
+  Object.seal
+  Object.setPrototypeOf
+  Object.values
+  OffscreenCanvas
+  open
+  overrideMimeType
+  padStart
+  parent.header
+  parent.parent
+  parent.start
+  parseFloat
+  parseInt
+  pause
+  performance.getEntriesByName
+  performance.getEntriesByType
+  performance.mark
+  performance.measure
+  performance.now
+  performance.timing
+  performance.timing.navigationStart
+  PerformanceObserver
+  pipeThrough
+  play
+  pop
+  postMessage
+  prepend
+  preventDefault
+  Promise.all
+  Promise.allSettled
+  Promise.prototype
+  Promise.race
+  Promise.reject
+  Promise.resolve
+  Promise.toString
+  Promise.withResolvers
+  prompt
+  push
+  querySelector
+  querySelectorAll
+  queueMicrotask
+  read
+  reduce
+  Reflect.closure
+  Reflect.construct
+  Reflect.decorate
+  Reflect.defineMetadata
+  Reflect.getMetadata
+  Reflect.metadata
+  Reflect.ownKeys
+  Reflect.setPrototypeOf
+  RegExp.prototype
+  remove
+  removeAttribute
+  removeChild
+  removeEventListener
+  repeat
+  replace
+  replaceAll
+  replaceChild
+  Request
+  requestAnimationFrame
+  requestFullscreen
+  requestIdleCallback
+  reset
+  ResizeObserver
+  Response
+  reverse
+  revokeObjectURL
+  screen.availTop
+  screen.availWidth
+  screen.height
+  screen.width
+  scroll
+  scrollBy
+  scrollIntoView
+  scrollTo
+  seal
+  search
+  select
+  self.addEventListener
+  self.crossOriginIsolated
+  self.document
+  self.indexedDB.deleteDatabase
+  self.indexedDB.open
+  self.localStorage
+  self.localStorage.removeItem
+  self.location
+  self.location.origin
+  self.location.protocol.slice
+  self.sessionStorage
+  self.sessionStorage.removeItem
+  self.top
+  send
+  ServiceWorker
+  sessionStorage.remove
+  sessionStorage.set
+  set
+  Set.prototype
+  setAttribute
+  setFullYear
+  setInterval
+  setPrototypeOf
+  setRequestHeader
+  setTime
+  setTimeout
+  ShadowRoot
+  shift
+  slice
+  some
+  sort
+  splice
+  split
+  startsWith
+  stop
+  stopImmediatePropagation
+  stopPropagation
+  String.fromCharCode
+  String.fromCodePoint
+  String.prototype
+  String.raw
+  structuredClone
+  submit
+  substr
+  substring
+  SVGElement
+  SVGGraphicsElement
+  Symbol.asyncIterator
+  Symbol.dispose
+  Symbol.for
+  Symbol.iterator
+  Symbol.observable
+  test
+  text
+  TextDecoder
+  TextEncoder
+  then
+  toExponential
+  toFixed
+  toLowerCase
+  top.bar.renderer.css.js
+  top.location.href
+  toPrecision
+  toString
+  toUpperCase
+  trim
+  unescape
+  unshift
+  URL
+  URL.createObjectURL
+  URL.revokeObjectURL
+  URLSearchParams
+  valueOf
+  values
+  window.___jsl.hefn
+  window.__onGCastApiAvailable
+  window._DumpException
+  window._F_combinedSignature
+  window._F_cssRowKey
+  window._F_installCss
+  window.AbortController
+  window.addEventListener
+  window.alert
+  window.attmp
+  window.AudioContext
+  window.bgens
+  window.btoa
+  window.caches
+  window.cancelAnimationFrame
+  window.cancelIdleCallback
+  window.chrome
+  window.clearInterval
+  window.clearTimeout
+  window.close
+  window.COMPILED
+  window.console.log
+  window.crypto
+  window.crypto.getRandomValues
+  window.crypto.subtle
+  window.CSS
+  window.CSS.supports
+  window.customElements
+  window.customElements.define
+  window.customElements.polyfillWrapFlushCallback
+  window.dataLayer
+  window.dataLayer.push
+  window.devicePixelRatio
+  window.dispatchEvent
+  window.document
+  window.document.baseURI
+  window.document.body
+  window.document.documentElement
+  window.document.head.appendChild
+  window.document.location.href
+  window.document.visibilityState
+  window.documentPictureInPicture
+  window.event
+  window.familyDialogHistory
+  window.fetch
+  window.focus
+  window.FormData
+  window.frames
+  window.ga
+  window.ga.q
+  window.getComputedStyle
+  window.getSelection
+  window.google
+  window.google.gr
+  window.grecaptcha
+  window.Hammer
+  window.history
+  window.history.back
+  window.history.forward
+  window.history.pushState
+  window.history.replaceState
+  window.history.scrollRestoration
+  window.history.state
+  window.HTMLImports
+  window.HTMLImports.whenReady
+  window.HTMLTemplateElement
+  window.innerHeight
+  window.innerWidth
+  window.Int32Array
+  window.IntersectionObserver
+  window.JSCompiler_renameProperty
+  window.JSON
+  window.loadGuideDataHook
+  window.localStorage
+  window.localStorage.setItem
+  window.location
+  window.location.hash
+  window.location.host
+  window.location.hostname
+  window.location.hostname.includes
+  window.location.hostname.split
+  window.location.href
+  window.location.href.includes
+  window.location.href.split
+  window.location.origin
+  window.location.pathname
+  window.location.pathname.indexOf
+  window.location.protocol
+  window.location.reload
+  window.location.search
+  window.lottie
+  window.ManagedMediaSource
+  window.ManagedMediaSource.isTypeSupported
+  window.matchMedia
+  window.MediaSource
+  window.MediaSource.isTypeSupported
+  window.MouseEvent
+  window.MutationObserver
+  window.nativeMessageListener
+  window.nativeMessageListener.onmessage
+  window.navigator
+  window.navigator.onLine
+  window.navigator.presentation
+  window.navigator.sendBeacon
+  window.navigator.userAgent.indexOf
+  window.navigator.userAgent.match
+  window.Notification
+  window.OfflineAudioContext
+  window.onerror
+  window.onLegacyPolymerFunctionDefinedCallback
+  window.origin
+  window.outerHeight
+  window.pageXOffset
+  window.pageYOffset
+  window.parent
+  window.parent.document
+  window.parent.postMessage
+  window.payments
+  window.performance
+  window.performance.getEntriesByName
+  window.performance.getEntriesByType
+  window.performance.now
+  window.performance.now.bind
+  window.performance.timeOrigin
+  window.PointerEvent
+  window.Polymer
+  window.Polymer._polymerFn
+  window.Polymer.allowTemplateFromDomModule
+  window.Polymer.Element
+  window.Polymer.fastDomIf
+  window.Polymer.legacyNoObservedAttributes
+  window.Polymer.legacyOptimizations
+  window.Polymer.legacyUndefined
+  window.Polymer.legacyWarnings
+  window.Polymer.orderedComputed
+  window.Polymer.removeNestedTemplates
+  window.Polymer.rootPath
+  window.Polymer.sanitizeDOMValue
+  window.Polymer.setPassiveTouchGestures
+  window.Polymer.strictTemplatePolicy
+  window.Polymer.suppressTemplateNotifications
+  window.Polymer.syncInitialRender
+  window.Polymer.useAdoptedStyleSheetsWithBuiltCSS
+  window.PolymerFakeBaseClass
+  window.PolymerFakeBaseClassWithoutHtml
+  window.polymerSkipLoadingFontRoboto
+  window.postMessage
+  window.PROPERTY_ACCESS_MAP
+  window.Proxy
+  window.queueMicrotask
+  window.ReadableStream
+  window.Reflect
+  window.Reflect.getMetadata
+  window.removeEventListener
+  window.Request
+  window.requestAnimationFrame
+  window.requestAnimationFrame.bind
+  window.requestIdleCallback
+  window.ResizeObserver
+  window.screen
+  window.screen.availHeight
+  window.screen.availWidth
+  window.scrollTo
+  window.scrollX
+  window.scrollY
+  window.self
+  window.self.location.href
+  window.sessionStorage
+  window.sessionStorage.getItem
+  window.sessionStorage.removeItem
+  window.sessionStorage.setItem
+  window.setInterval
+  window.setTimeout
+  window.ShadyCSS
+  window.ShadyCSS.ApplyShim
+  window.ShadyCSS.cssBuild
+  window.ShadyCSS.CustomStyleInterface
+  window.ShadyCSS.disableRuntime
+  window.ShadyCSS.flushCustomStyles
+  window.ShadyCSS.nativeCss
+  window.ShadyCSS.prepareTemplate
+  window.ShadyCSS.ScopingShim
+  window.ShadyCSS.ScopingShim.flush
+  window.ShadyCSS.styleDocument
+  window.ShadyCSS.styleElement
+  window.ShadyCSS.styleSubtree
+  window.ShadyDOM
+  window.ShadyDOM.composedPath
+  window.ShadyDOM.flush
+  window.ShadyDOM.flushInitial
+  window.ShadyDOM.inUse
+  window.ShadyDOM.noPatch
+  window.ShadyDOM.observeChildren
+  window.ShadyDOM.patch
+  window.ShadyDOM.unobserveChildren
+  window.ShadyDOM.wrap
+  window.ShadyDOM.Wrapper
+  window.spf
+  window.TextDecoderStream
+  window.top
+  window.trustedTypes
+  window.trustedTypes.createPolicy
+  window.trustedTypes.emptyScript
+  window.trustedTypes.isHTML
+  window.trustedTypes.isScript
+  window.trustedTypes.isScriptURL
+  window.URLSearchParams
+  window.WebComponents
+  window.WebComponents.flags
+  window.webkit
+  window.webkitAudioContext
+  window.youtubewebview
+  window.youtubewebview.onmessage
+  window.yt
+  window.YT
+  window.yt.msgs_
+  window.yt.ready
+  window.YT.ready
+  window.ytcfg
+  window.ytcfg.msgs
+  window.ytcsi
+  window.yterr
+  window.ytInitialGuideData
+  window.ytInitialGuideDataPresent
+  Worker
+  XMLHttpRequest
+  XMLSerializer
+
+fetched_external_036.js: 790 APIs
+  abort
+  AbortController
+  AbortSignal
+  addEventListener
+  after
+  alert
+  append
+  appendChild
+  Array.from
+  Array.isArray
+  Array.prototype
+  arrayBuffer
+  ArrayBuffer.isView
+  assign
+  at
+  atob
+  attachShadow
+  Audio
+  AudioContext
+  BigInt.asIntN
+  BigInt.asUintN
+  blob
+  Blob
+  blur
+  BroadcastChannel
+  btoa
+  cancel
+  cancelAnimationFrame
+  cancelIdleCallback
+  catch
+  charAt
+  charCodeAt
+  clearInterval
+  clearTimeout
+  click
+  clone
+  cloneNode
+  close
+  closest
+  codePointAt
+  composedPath
+  concat
+  console.debug
+  console.error
+  console.group
+  console.groupCollapsed
+  console.groupEnd
+  console.groupEnd.call
+  console.info
+  console.log
+  console.time
+  console.timeEnd
+  console.warn
+  contains
+  create
+  createDocumentFragment
+  createElement
+  createElementNS
+  createObjectURL
+  createTextNode
+  crypto.getRandomValues
+  crypto.subtle
+  customElements.define
+  customElements.get
+  customElements.polyfillWrapFlushCallback
+  CustomEvent
+  Date.now
+  Date.parse
+  Date.prototype
+  Date.UTC
+  decodeURI
+  decodeURIComponent
+  defineProperties
+  defineProperty
+  delete
+  dispatchEvent
+  document.activeElement
+  document.activeElement.blur
+  document.activeElement.tagName
+  document.addEventListener
+  document.adoptedStyleSheets
+  document.adoptedStyleSheets.length
+  document.all
+  document.baseURI
+  document.body
+  document.body.addEventListener
+  document.body.animate
+  document.body.appendChild
+  document.body.classList.add
+  document.body.classList.contains
+  document.body.classList.remove
+  document.body.className.indexOf
+  document.body.clientHeight
+  document.body.clientWidth
+  document.body.contains
+  document.body.getAttribute
+  document.body.hasAttribute
+  document.body.prepend
+  document.body.removeAttribute
+  document.body.removeChild
+  document.body.scrollLeft
+  document.body.scrollTop
+  document.body.setAttribute
+  document.body.style.backgroundColor
+  document.body.style.colorScheme
+  document.body.style.cursor
+  document.body.style.overflow
+  document.body.style.overflowY
+  document.body.style.overscrollBehavior
+  document.body.style.top
+  document.cookie
+  document.createComment
+  document.createDocumentFragment
+  document.createElement
+  document.createElementNS
+  document.createEvent
+  document.createRange
+  document.createTextNode
+  document.createTreeWalker
+  document.currentScript
+  document.currentScript.src.indexOf
+  document.defaultView
+  document.dispatchEvent
+  document.documentElement
+  document.documentElement.clientHeight
+  document.documentElement.clientWidth
+  document.documentElement.getAttribute
+  document.documentElement.getBoundingClientRect
+  document.documentElement.hasAttribute
+  document.documentElement.lang
+  document.documentElement.scrollHeight
+  document.documentElement.scrollLeft
+  document.documentElement.scrollTop
+  document.documentElement.setCapture
+  document.documentElement.style
+  document.documentElement.style.overscrollBehavior
+  document.documentElement.tagName.toLowerCase
+  document.domain
+  document.elementFromPoint
+  document.execCommand
+  document.featurePolicy
+  document.getElementById
+  document.getElementsByTagName
+  document.getSelection
+  document.hasStorageAccess
+  document.head
+  document.head.append
+  document.head.appendChild
+  document.head.querySelector
+  document.head.removeChild
+  document.head.style.touchAction
+  document.implementation.createHTMLDocument
+  document.importNode
+  document.JSC$9434_onVisibilityChange.pipe
+  document.location.hostname
+  document.location.hostname.endsWith
+  document.location.href
+  document.location.port
+  document.location.protocol
+  document.location.toString
+  document.pictureInPictureElement
+  document.postMessage
+  document.prerendering
+  document.querySelector
+  document.querySelectorAll
+  document.readyState
+  document.referrer
+  document.releaseCapture
+  document.removeEventListener
+  document.requestStorageAccessFor
+  document.scrollingElement
+  document.scrollingElement.scrollLeft
+  document.scrollingElement.scrollTop
+  document.startViewTransition
+  document.styleSheets
+  document.timeline
+  document.timeline.play
+  document.title
+  document.visibilityState
+  document.wasDiscarded
+  DocumentFragment
+  DOMTokenList
+  encodeURI
+  encodeURIComponent
+  endsWith
+  entries
+  Error.apply
+  Error.call
+  Error.captureStackTrace
+  escape
+  Event
+  every
+  exec
+  fetch
+  File
+  FileReader
+  fill
+  filter
+  finally
+  find
+  findIndex
+  flat
+  flatMap
+  focus
+  FocusEvent
+  forEach
+  FormData
+  formData
+  freeze
+  from
+  fromEntries
+  get
+  getAll
+  getAllResponseHeaders
+  getAttribute
+  getBoundingClientRect
+  getClientRects
+  getComputedStyle
+  getElementById
+  getElementsByClassName
+  getElementsByTagName
+  getFullYear
+  getOwnPropertyDescriptor
+  getOwnPropertyDescriptors
+  getOwnPropertyNames
+  getOwnPropertySymbols
+  getPrototypeOf
+  getReader
+  getResponseHeader
+  getRootNode
+  getSelection
+  getTime
+  globalThis.Array
+  globalThis.cancelIdleCallback
+  globalThis.HTMLElement
+  globalThis.performance
+  globalThis.performance.getEntriesByType
+  globalThis.requestIdleCallback
+  globalThis.ResizeObserver
+  globalThis.sessionStorage
+  globalThis.sessionStorage.getItem
+  globalThis.sessionStorage.removeItem
+  globalThis.sessionStorage.setItem
+  globalThis.TextEncoder
+  globalThis.trustedTypes
+  globalThis.XRegExp
+  globalThis.Zone
+  has
+  hasAttribute
+  hasOwn
+  hasOwnProperty
+  Headers
+  history.length
+  history.pushState
+  history.replaceState
+  history.state
+  HTMLAnchorElement
+  HTMLButtonElement
+  HTMLCanvasElement
+  HTMLDivElement
+  HTMLElement
+  HTMLFencedFrameElement
+  HTMLFormElement
+  HTMLIFrameElement
+  HTMLImageElement
+  HTMLInputElement
+  HTMLLinkElement
+  HTMLOptionElement
+  HTMLSelectElement
+  HTMLStyleElement
+  HTMLTemplateElement
+  HTMLTextAreaElement
+  HTMLUnknownElement
+  HTMLVideoElement
+  Image
+  importNode
+  includes
+  indexOf
+  insertBefore
+  IntersectionObserver
+  Intl.DateTimeFormat
+  Intl.NumberFormat
+  isExtensible
+  isFinite
+  isFrozen
+  isNaN
+  join
+  json
+  JSON.parse
+  JSON.parseWrapper
+  JSON.stringify
+  keys
+  lastIndexOf
+  load
+  localStorage.get
+  localStorage.remove
+  localStorage.set
+  location.host
+  location.hostname
+  location.hostname.indexOf
+  location.hostname.match
+  location.href
+  location.origin
+  location.pathname
+  location.port
+  location.protocol
+  location.reload
+  location.search
+  ManagedMediaSource
+  map
+  Map.prototype
+  match
+  matches
+  matchMedia
+  Math.abs
+  Math.acos
+  Math.asin
+  Math.atan
+  Math.atan2
+  Math.ceil
+  Math.cos
+  Math.exp
+  Math.floor
+  Math.hypot
+  Math.imul
+  Math.LN2
+  Math.log
+  Math.log2
+  Math.max
+  Math.min
+  Math.PI
+  Math.pow
+  Math.random
+  Math.round
+  Math.sign
+  Math.sin
+  Math.sqrt
+  Math.SQRT2
+  Math.tan
+  Math.trunc
+  Math.uuid
+  MediaSource
+  MouseEvent
+  moveTo
+  MutationObserver
+  navigator.clipboard
+  navigator.clipboard.write
+  navigator.clipboard.writeText
+  navigator.cookieEnabled
+  navigator.deviceMemory
+  navigator.geolocation
+  navigator.geolocation.getCurrentPosition
+  navigator.hardwareConcurrency
+  navigator.keyboard
+  navigator.locks
+  navigator.mediaDevices
+  navigator.mediaDevices.getUserMedia
+  navigator.onLine
+  navigator.permissions
+  navigator.permissions.query
+  navigator.sendBeacon
+  navigator.serviceWorker
+  navigator.serviceWorker.addEventListener
+  navigator.serviceWorker.getRegistration
+  navigator.serviceWorker.getRegistrations
+  navigator.serviceWorker.ready.then
+  navigator.serviceWorker.register
+  navigator.share
+  navigator.standalone
+  navigator.storage
+  navigator.storage.estimate
+  navigator.userActivation
+  navigator.userAgent
+  navigator.userAgent.includes
+  navigator.userAgent.indexOf
+  navigator.userAgent.match
+  navigator.userAgentData.getHighEntropyValues
+  navigator.vendor
+  normalize
+  Number.isFinite
+  Number.isInteger
+  Number.isNaN
+  Number.isSafeInteger
+  Number.MAX_SAFE_INTEGER
+  Number.MAX_VALUE
+  Number.MIN_SAFE_INTEGER
+  Number.NEGATIVE_INFINITY
+  Number.parseFloat
+  Number.parseInt
+  Number.POSITIVE_INFINITY
+  Object.assign
+  Object.create
+  Object.defineProperties
+  Object.defineProperty
+  Object.entries
+  Object.freeze
+  Object.fromEntries
+  Object.getOwnPropertyDescriptor
+  Object.getOwnPropertyDescriptors
+  Object.getOwnPropertyNames
+  Object.getOwnPropertySymbols
+  Object.getPrototypeOf
+  Object.hasOwn
+  Object.hasOwnProperty
+  Object.is
+  Object.isExtensible
+  Object.isFrozen
+  Object.keys
+  Object.my_load
+  Object.prototype
+  Object.seal
+  Object.setPrototypeOf
+  Object.values
+  OffscreenCanvas
+  open
+  overrideMimeType
+  padStart
+  parent.header
+  parent.parent
+  parent.start
+  parseFloat
+  parseInt
+  pause
+  performance.getEntriesByName
+  performance.getEntriesByType
+  performance.mark
+  performance.measure
+  performance.now
+  performance.timing
+  performance.timing.navigationStart
+  PerformanceObserver
+  pipeThrough
+  play
+  pop
+  postMessage
+  prepend
+  preventDefault
+  Promise.all
+  Promise.allSettled
+  Promise.prototype
+  Promise.race
+  Promise.reject
+  Promise.resolve
+  Promise.toString
+  Promise.withResolvers
+  prompt
+  push
+  querySelector
+  querySelectorAll
+  queueMicrotask
+  read
+  reduce
+  Reflect.closure
+  Reflect.construct
+  Reflect.decorate
+  Reflect.defineMetadata
+  Reflect.getMetadata
+  Reflect.metadata
+  Reflect.ownKeys
+  Reflect.setPrototypeOf
+  RegExp.prototype
+  remove
+  removeAttribute
+  removeChild
+  removeEventListener
+  repeat
+  replace
+  replaceAll
+  replaceChild
+  Request
+  requestAnimationFrame
+  requestFullscreen
+  requestIdleCallback
+  reset
+  ResizeObserver
+  Response
+  reverse
+  revokeObjectURL
+  screen.availTop
+  screen.availWidth
+  screen.height
+  screen.width
+  scroll
+  scrollBy
+  scrollIntoView
+  scrollTo
+  seal
+  search
+  select
+  self.addEventListener
+  self.crossOriginIsolated
+  self.document
+  self.indexedDB.deleteDatabase
+  self.indexedDB.open
+  self.localStorage
+  self.localStorage.removeItem
+  self.location
+  self.location.origin
+  self.location.protocol.slice
+  self.sessionStorage
+  self.sessionStorage.removeItem
+  self.top
+  send
+  ServiceWorker
+  sessionStorage.remove
+  sessionStorage.set
+  set
+  Set.prototype
+  setAttribute
+  setFullYear
+  setInterval
+  setPrototypeOf
+  setRequestHeader
+  setTime
+  setTimeout
+  ShadowRoot
+  shift
+  slice
+  some
+  sort
+  splice
+  split
+  startsWith
+  stop
+  stopImmediatePropagation
+  stopPropagation
+  String.fromCharCode
+  String.fromCodePoint
+  String.prototype
+  String.raw
+  structuredClone
+  submit
+  substr
+  substring
+  SVGElement
+  SVGGraphicsElement
+  Symbol.asyncIterator
+  Symbol.dispose
+  Symbol.for
+  Symbol.iterator
+  Symbol.observable
+  test
+  text
+  TextDecoder
+  TextEncoder
+  then
+  toExponential
+  toFixed
+  toLowerCase
+  top.bar.renderer.css.js
+  top.location.href
+  toPrecision
+  toString
+  toUpperCase
+  trim
+  unescape
+  unshift
+  URL
+  URL.createObjectURL
+  URL.revokeObjectURL
+  URLSearchParams
+  valueOf
+  values
+  window.___jsl.hefn
+  window.__onGCastApiAvailable
+  window._DumpException
+  window._F_combinedSignature
+  window._F_cssRowKey
+  window._F_installCss
+  window.AbortController
+  window.addEventListener
+  window.alert
+  window.attmp
+  window.AudioContext
+  window.bgens
+  window.btoa
+  window.caches
+  window.cancelAnimationFrame
+  window.cancelIdleCallback
+  window.chrome
+  window.clearInterval
+  window.clearTimeout
+  window.close
+  window.COMPILED
+  window.console.log
+  window.crypto
+  window.crypto.getRandomValues
+  window.crypto.subtle
+  window.CSS
+  window.CSS.supports
+  window.customElements
+  window.customElements.define
+  window.customElements.polyfillWrapFlushCallback
+  window.dataLayer
+  window.dataLayer.push
+  window.devicePixelRatio
+  window.dispatchEvent
+  window.document
+  window.document.baseURI
+  window.document.body
+  window.document.documentElement
+  window.document.head.appendChild
+  window.document.location.href
+  window.document.visibilityState
+  window.documentPictureInPicture
+  window.event
+  window.familyDialogHistory
+  window.fetch
+  window.focus
+  window.FormData
+  window.frames
+  window.ga
+  window.ga.q
+  window.getComputedStyle
+  window.getSelection
+  window.google
+  window.google.gr
+  window.grecaptcha
+  window.Hammer
+  window.history
+  window.history.back
+  window.history.forward
+  window.history.pushState
+  window.history.replaceState
+  window.history.scrollRestoration
+  window.history.state
+  window.HTMLImports
+  window.HTMLImports.whenReady
+  window.HTMLTemplateElement
+  window.innerHeight
+  window.innerWidth
+  window.Int32Array
+  window.IntersectionObserver
+  window.JSCompiler_renameProperty
+  window.JSON
+  window.loadGuideDataHook
+  window.localStorage
+  window.localStorage.setItem
+  window.location
+  window.location.hash
+  window.location.host
+  window.location.hostname
+  window.location.hostname.includes
+  window.location.hostname.split
+  window.location.href
+  window.location.href.includes
+  window.location.href.split
+  window.location.origin
+  window.location.pathname
+  window.location.pathname.indexOf
+  window.location.protocol
+  window.location.reload
+  window.location.search
+  window.lottie
+  window.ManagedMediaSource
+  window.ManagedMediaSource.isTypeSupported
+  window.matchMedia
+  window.MediaSource
+  window.MediaSource.isTypeSupported
+  window.MouseEvent
+  window.MutationObserver
+  window.nativeMessageListener
+  window.nativeMessageListener.onmessage
+  window.navigator
+  window.navigator.onLine
+  window.navigator.presentation
+  window.navigator.sendBeacon
+  window.navigator.userAgent.indexOf
+  window.navigator.userAgent.match
+  window.Notification
+  window.OfflineAudioContext
+  window.onerror
+  window.onLegacyPolymerFunctionDefinedCallback
+  window.origin
+  window.outerHeight
+  window.pageXOffset
+  window.pageYOffset
+  window.parent
+  window.parent.document
+  window.parent.postMessage
+  window.payments
+  window.performance
+  window.performance.getEntriesByName
+  window.performance.getEntriesByType
+  window.performance.now
+  window.performance.now.bind
+  window.performance.timeOrigin
+  window.PointerEvent
+  window.Polymer
+  window.Polymer._polymerFn
+  window.Polymer.allowTemplateFromDomModule
+  window.Polymer.Element
+  window.Polymer.fastDomIf
+  window.Polymer.legacyNoObservedAttributes
+  window.Polymer.legacyOptimizations
+  window.Polymer.legacyUndefined
+  window.Polymer.legacyWarnings
+  window.Polymer.orderedComputed
+  window.Polymer.removeNestedTemplates
+  window.Polymer.rootPath
+  window.Polymer.sanitizeDOMValue
+  window.Polymer.setPassiveTouchGestures
+  window.Polymer.strictTemplatePolicy
+  window.Polymer.suppressTemplateNotifications
+  window.Polymer.syncInitialRender
+  window.Polymer.useAdoptedStyleSheetsWithBuiltCSS
+  window.PolymerFakeBaseClass
+  window.PolymerFakeBaseClassWithoutHtml
+  window.polymerSkipLoadingFontRoboto
+  window.postMessage
+  window.PROPERTY_ACCESS_MAP
+  window.Proxy
+  window.queueMicrotask
+  window.ReadableStream
+  window.Reflect
+  window.Reflect.getMetadata
+  window.removeEventListener
+  window.Request
+  window.requestAnimationFrame
+  window.requestAnimationFrame.bind
+  window.requestIdleCallback
+  window.ResizeObserver
+  window.screen
+  window.screen.availHeight
+  window.screen.availWidth
+  window.scrollTo
+  window.scrollX
+  window.scrollY
+  window.self
+  window.self.location.href
+  window.sessionStorage
+  window.sessionStorage.getItem
+  window.sessionStorage.removeItem
+  window.sessionStorage.setItem
+  window.setInterval
+  window.setTimeout
+  window.ShadyCSS
+  window.ShadyCSS.ApplyShim
+  window.ShadyCSS.cssBuild
+  window.ShadyCSS.CustomStyleInterface
+  window.ShadyCSS.disableRuntime
+  window.ShadyCSS.flushCustomStyles
+  window.ShadyCSS.nativeCss
+  window.ShadyCSS.prepareTemplate
+  window.ShadyCSS.ScopingShim
+  window.ShadyCSS.ScopingShim.flush
+  window.ShadyCSS.styleDocument
+  window.ShadyCSS.styleElement
+  window.ShadyCSS.styleSubtree
+  window.ShadyDOM
+  window.ShadyDOM.composedPath
+  window.ShadyDOM.flush
+  window.ShadyDOM.flushInitial
+  window.ShadyDOM.inUse
+  window.ShadyDOM.noPatch
+  window.ShadyDOM.observeChildren
+  window.ShadyDOM.patch
+  window.ShadyDOM.unobserveChildren
+  window.ShadyDOM.wrap
+  window.ShadyDOM.Wrapper
+  window.spf
+  window.TextDecoderStream
+  window.top
+  window.trustedTypes
+  window.trustedTypes.createPolicy
+  window.trustedTypes.emptyScript
+  window.trustedTypes.isHTML
+  window.trustedTypes.isScript
+  window.trustedTypes.isScriptURL
+  window.URLSearchParams
+  window.WebComponents
+  window.WebComponents.flags
+  window.webkit
+  window.webkitAudioContext
+  window.youtubewebview
+  window.youtubewebview.onmessage
+  window.yt
+  window.YT
+  window.yt.msgs_
+  window.yt.ready
+  window.YT.ready
+  window.ytcfg
+  window.ytcfg.msgs
+  window.ytcsi
+  window.yterr
+  window.ytInitialGuideData
+  window.ytInitialGuideDataPresent
+  Worker
+  XMLHttpRequest
+  XMLSerializer
+
+known_good.html: 118 APIs
+  addEventListener
+  appendChild
+  Array.prototype
+  concat
+  create
+  createElement
+  defineProperties
+  defineProperty
+  delete
+  document.body.appendChild
+  document.body.clientWidth
+  document.createElement
+  document.fonts
+  document.fonts.load
+  document.getElementById
+  document.getElementsByTagName
+  document.querySelector
+  encodeURIComponent
+  get
+  getAttribute
+  getElementById
+  getElementsByTagName
+  getOwnPropertyDescriptor
+  getOwnPropertyNames
+  getTime
+  has
+  Image
+  indexOf
+  isExtensible
+  isNaN
+  join
+  keys
+  load
+  match
+  Math.ceil
+  Math.floor
+  Math.max
+  Math.min
+  Math.random
+  Math.round
+  navigator.userAgent
+  navigator.userAgentData
+  navigator.userAgentData.brands
+  navigator.userAgentData.brands.length
+  Object.create
+  Object.defineProperties
+  Object.defineProperty
+  Object.getOwnPropertyDescriptor
+  Object.getOwnPropertyNames
+  Object.isExtensible
+  Object.keys
+  Object.prototype
+  Object.seal
+  Object.values
+  performance.js
+  performance.timing.responseStart
+  performance.vflset
+  push
+  querySelector
+  remove
+  removeAttribute
+  removeChild
+  removeEventListener
+  replace
+  requestAnimationFrame
+  seal
+  set
+  setTimeout
+  shift
+  split
+  substr
+  Symbol.iterator
+  toLowerCase
+  toString
+  values
+  window.addEventListener
+  window.customElements
+  window.document
+  window.emergencyTimeoutImg
+  window.innerHeight
+  window.innerWidth
+  window.location.href
+  window.onerror
+  window.performance
+  window.performance.now
+  window.performance.timing
+  window.performance.timing.navigationStart
+  window.pis
+  window.Polymer
+  window.Polymer.legacyOptimizations
+  window.Polymer.setPassiveTouchGestures
+  window.polymerSkipLoadingFontRoboto
+  window.removeEventListener
+  window.ShadyCSS
+  window.ShadyDOM
+  window.unhandledErrorCount
+  window.unhandledErrorMessages
+  window.WIZ_global_data
+  window.yt
+  window.yt.config_
+  window.yt.config_.WEB_PLAYER_CONTEXT_CONFIGS
+  window.yt.player
+  window.yt.player.Application
+  window.yt.player.Application.create
+  window.yt.player.Application.createAlternate
+  window.ytAtN
+  window.ytAtP
+  window.ytcfg
+  window.ytcfg.obfuscatedData_
+  window.ytcfg.set
+  window.ytcsi
+  window.ytcsi.tick
+  window.yterr
+  window.ytplayer
+  window.ytplayer.bootstrapPlayerContainer
+  window.ytplayer.bootstrapPlayerResponse
+  window.ytplayer.bootstrapWebPlayerContextConfig
+  window.ytplayer.config
+
+script29_runtime.js: 792 APIs
+  abort
+  AbortController
+  AbortSignal
+  addEventListener
+  after
+  alert
+  append
+  appendChild
+  Array.from
+  Array.isArray
+  Array.prototype
+  arrayBuffer
+  ArrayBuffer.isView
+  assign
+  at
+  atob
+  attachShadow
+  Audio
+  AudioContext
+  BigInt.asIntN
+  BigInt.asUintN
+  blob
+  Blob
+  blur
+  BroadcastChannel
+  btoa
+  cancel
+  cancelAnimationFrame
+  cancelIdleCallback
+  catch
+  charAt
+  charCodeAt
+  clearInterval
+  clearTimeout
+  click
+  clone
+  cloneNode
+  close
+  closest
+  codePointAt
+  composedPath
+  concat
+  console.debug
+  console.error
+  console.group
+  console.groupCollapsed
+  console.groupEnd
+  console.groupEnd.call
+  console.info
+  console.log
+  console.time
+  console.timeEnd
+  console.warn
+  contains
+  create
+  createDocumentFragment
+  createElement
+  createElementNS
+  createObjectURL
+  createTextNode
+  crypto.getRandomValues
+  crypto.subtle
+  customElements.define
+  customElements.get
+  customElements.polyfillWrapFlushCallback
+  CustomEvent
+  Date.now
+  Date.parse
+  Date.prototype
+  Date.UTC
+  decodeURI
+  decodeURIComponent
+  defineProperties
+  defineProperty
+  delete
+  dispatchEvent
+  document.activeElement
+  document.activeElement.blur
+  document.activeElement.tagName
+  document.addEventListener
+  document.adoptedStyleSheets
+  document.adoptedStyleSheets.length
+  document.all
+  document.baseURI
+  document.body
+  document.body.addEventListener
+  document.body.animate
+  document.body.appendChild
+  document.body.classList.add
+  document.body.classList.contains
+  document.body.classList.remove
+  document.body.className.indexOf
+  document.body.clientHeight
+  document.body.clientWidth
+  document.body.contains
+  document.body.getAttribute
+  document.body.hasAttribute
+  document.body.prepend
+  document.body.removeAttribute
+  document.body.removeChild
+  document.body.scrollLeft
+  document.body.scrollTop
+  document.body.setAttribute
+  document.body.style.backgroundColor
+  document.body.style.colorScheme
+  document.body.style.cursor
+  document.body.style.overflow
+  document.body.style.overflowY
+  document.body.style.overscrollBehavior
+  document.body.style.top
+  document.cookie
+  document.createComment
+  document.createDocumentFragment
+  document.createElement
+  document.createElementNS
+  document.createEvent
+  document.createRange
+  document.createTextNode
+  document.createTreeWalker
+  document.currentScript
+  document.currentScript.src.indexOf
+  document.defaultView
+  document.dispatchEvent
+  document.documentElement
+  document.documentElement.clientHeight
+  document.documentElement.clientWidth
+  document.documentElement.getAttribute
+  document.documentElement.getBoundingClientRect
+  document.documentElement.hasAttribute
+  document.documentElement.lang
+  document.documentElement.scrollHeight
+  document.documentElement.scrollLeft
+  document.documentElement.scrollTop
+  document.documentElement.setCapture
+  document.documentElement.style
+  document.documentElement.style.overscrollBehavior
+  document.documentElement.tagName.toLowerCase
+  document.domain
+  document.elementFromPoint
+  document.execCommand
+  document.featurePolicy
+  document.getElementById
+  document.getElementsByTagName
+  document.getSelection
+  document.hasStorageAccess
+  document.head
+  document.head.append
+  document.head.appendChild
+  document.head.querySelector
+  document.head.removeChild
+  document.head.style.touchAction
+  document.implementation.createHTMLDocument
+  document.importNode
+  document.JSC$9433_onVisibilityChange.pipe
+  document.location.hostname
+  document.location.hostname.endsWith
+  document.location.href
+  document.location.port
+  document.location.protocol
+  document.location.toString
+  document.pictureInPictureElement
+  document.postMessage
+  document.prerendering
+  document.querySelector
+  document.querySelectorAll
+  document.readyState
+  document.referrer
+  document.releaseCapture
+  document.removeEventListener
+  document.scrollingElement
+  document.scrollingElement.scrollLeft
+  document.scrollingElement.scrollTop
+  document.startViewTransition
+  document.styleSheets
+  document.timeline
+  document.timeline.play
+  document.title
+  document.visibilityState
+  document.wasDiscarded
+  DocumentFragment
+  DOMTokenList
+  encodeURI
+  encodeURIComponent
+  endsWith
+  entries
+  Error.apply
+  Error.call
+  Error.captureStackTrace
+  escape
+  Event
+  every
+  exec
+  fetch
+  File
+  FileReader
+  fill
+  filter
+  finally
+  find
+  findIndex
+  flat
+  flatMap
+  focus
+  FocusEvent
+  forEach
+  FormData
+  formData
+  freeze
+  from
+  fromEntries
+  get
+  getAll
+  getAllResponseHeaders
+  getAttribute
+  getBoundingClientRect
+  getClientRects
+  getComputedStyle
+  getElementById
+  getElementsByClassName
+  getElementsByTagName
+  getFullYear
+  getOwnPropertyDescriptor
+  getOwnPropertyDescriptors
+  getOwnPropertyNames
+  getOwnPropertySymbols
+  getPrototypeOf
+  getReader
+  getResponseHeader
+  getRootNode
+  getSelection
+  getTime
+  globalThis.Array
+  globalThis.cancelIdleCallback
+  globalThis.HTMLElement
+  globalThis.performance
+  globalThis.performance.getEntriesByType
+  globalThis.requestIdleCallback
+  globalThis.ResizeObserver
+  globalThis.sessionStorage
+  globalThis.sessionStorage.getItem
+  globalThis.sessionStorage.removeItem
+  globalThis.sessionStorage.setItem
+  globalThis.TextEncoder
+  globalThis.trustedTypes
+  globalThis.XRegExp
+  globalThis.Zone
+  has
+  hasAttribute
+  hasOwn
+  hasOwnProperty
+  Headers
+  history.length
+  history.pushState
+  history.replaceState
+  history.state
+  HTMLAnchorElement
+  HTMLButtonElement
+  HTMLCanvasElement
+  HTMLDivElement
+  HTMLElement
+  HTMLFencedFrameElement
+  HTMLFormElement
+  HTMLIFrameElement
+  HTMLImageElement
+  HTMLInputElement
+  HTMLLinkElement
+  HTMLOptionElement
+  HTMLSelectElement
+  HTMLStyleElement
+  HTMLTemplateElement
+  HTMLTextAreaElement
+  HTMLUnknownElement
+  HTMLVideoElement
+  Image
+  importNode
+  includes
+  indexOf
+  insertBefore
+  IntersectionObserver
+  Intl.DateTimeFormat
+  Intl.NumberFormat
+  isExtensible
+  isFinite
+  isFrozen
+  isNaN
+  join
+  json
+  JSON.parse
+  JSON.parseWrapper
+  JSON.stringify
+  keys
+  lastIndexOf
+  load
+  localStorage.get
+  localStorage.remove
+  localStorage.set
+  location.host
+  location.hostname
+  location.hostname.indexOf
+  location.href
+  location.origin
+  location.pathname
+  location.port
+  location.protocol
+  location.reload
+  location.search
+  ManagedMediaSource
+  map
+  Map.prototype
+  match
+  matches
+  matchMedia
+  Math.abs
+  Math.acos
+  Math.asin
+  Math.atan
+  Math.atan2
+  Math.ceil
+  Math.cos
+  Math.exp
+  Math.floor
+  Math.hypot
+  Math.imul
+  Math.LN2
+  Math.log
+  Math.log2
+  Math.max
+  Math.min
+  Math.PI
+  Math.pow
+  Math.random
+  Math.round
+  Math.sign
+  Math.sin
+  Math.sqrt
+  Math.SQRT2
+  Math.tan
+  Math.trunc
+  Math.uuid
+  MediaSource
+  MouseEvent
+  moveTo
+  MutationObserver
+  navigator.clipboard
+  navigator.clipboard.write
+  navigator.clipboard.writeText
+  navigator.cookieEnabled
+  navigator.deviceMemory
+  navigator.geolocation
+  navigator.geolocation.getCurrentPosition
+  navigator.hardwareConcurrency
+  navigator.keyboard
+  navigator.locks
+  navigator.mediaDevices
+  navigator.mediaDevices.getUserMedia
+  navigator.onLine
+  navigator.permissions
+  navigator.permissions.query
+  navigator.sendBeacon
+  navigator.serviceWorker
+  navigator.serviceWorker.addEventListener
+  navigator.serviceWorker.getRegistration
+  navigator.serviceWorker.getRegistrations
+  navigator.serviceWorker.ready.then
+  navigator.serviceWorker.register
+  navigator.share
+  navigator.standalone
+  navigator.storage
+  navigator.storage.estimate
+  navigator.userActivation
+  navigator.userAgent
+  navigator.userAgent.includes
+  navigator.userAgent.indexOf
+  navigator.userAgent.match
+  navigator.userAgentData.getHighEntropyValues
+  navigator.vendor
+  normalize
+  Number.isFinite
+  Number.isInteger
+  Number.isNaN
+  Number.isSafeInteger
+  Number.MAX_SAFE_INTEGER
+  Number.MAX_VALUE
+  Number.MIN_SAFE_INTEGER
+  Number.NEGATIVE_INFINITY
+  Number.parseFloat
+  Number.parseInt
+  Number.POSITIVE_INFINITY
+  Object.assign
+  Object.create
+  Object.defineProperties
+  Object.defineProperty
+  Object.entries
+  Object.freeze
+  Object.fromEntries
+  Object.getOwnPropertyDescriptor
+  Object.getOwnPropertyDescriptors
+  Object.getOwnPropertyNames
+  Object.getOwnPropertySymbols
+  Object.getPrototypeOf
+  Object.hasOwn
+  Object.hasOwnProperty
+  Object.is
+  Object.isExtensible
+  Object.isFrozen
+  Object.keys
+  Object.my_load
+  Object.prototype
+  Object.seal
+  Object.setPrototypeOf
+  Object.values
+  OffscreenCanvas
+  open
+  overrideMimeType
+  padStart
+  parent.header
+  parent.parent
+  parent.start
+  parseFloat
+  parseInt
+  pause
+  performance.getEntriesByName
+  performance.getEntriesByType
+  performance.mark
+  performance.measure
+  performance.now
+  performance.timing
+  performance.timing.navigationStart
+  PerformanceObserver
+  pipeThrough
+  play
+  pop
+  postMessage
+  prepend
+  preventDefault
+  Promise.all
+  Promise.allSettled
+  Promise.prototype
+  Promise.race
+  Promise.reject
+  Promise.resolve
+  Promise.toString
+  Promise.withResolvers
+  prompt
+  push
+  querySelector
+  querySelectorAll
+  queueMicrotask
+  read
+  reduce
+  Reflect.closure
+  Reflect.construct
+  Reflect.decorate
+  Reflect.defineMetadata
+  Reflect.getMetadata
+  Reflect.metadata
+  Reflect.ownKeys
+  Reflect.setPrototypeOf
+  RegExp.prototype
+  remove
+  removeAttribute
+  removeChild
+  removeEventListener
+  repeat
+  replace
+  replaceAll
+  replaceChild
+  Request
+  requestAnimationFrame
+  requestFullscreen
+  requestIdleCallback
+  reset
+  ResizeObserver
+  Response
+  reverse
+  revokeObjectURL
+  screen.availTop
+  screen.availWidth
+  screen.height
+  screen.orientation.addEventListener
+  screen.orientation.removeEventListener
+  screen.width
+  scroll
+  scrollBy
+  scrollIntoView
+  scrollTo
+  seal
+  search
+  select
+  self.addEventListener
+  self.crossOriginIsolated
+  self.document
+  self.indexedDB.deleteDatabase
+  self.indexedDB.open
+  self.localStorage
+  self.localStorage.removeItem
+  self.location
+  self.location.origin
+  self.location.protocol.slice
+  self.sessionStorage
+  self.sessionStorage.removeItem
+  self.top
+  send
+  ServiceWorker
+  sessionStorage.remove
+  sessionStorage.set
+  set
+  Set.prototype
+  setAttribute
+  setFullYear
+  setInterval
+  setPrototypeOf
+  setRequestHeader
+  setTime
+  setTimeout
+  ShadowRoot
+  shift
+  slice
+  some
+  sort
+  splice
+  split
+  startsWith
+  stop
+  stopImmediatePropagation
+  stopPropagation
+  String.fromCharCode
+  String.fromCodePoint
+  String.prototype
+  String.raw
+  structuredClone
+  submit
+  substr
+  substring
+  SVGElement
+  SVGGraphicsElement
+  Symbol.asyncIterator
+  Symbol.dispose
+  Symbol.for
+  Symbol.iterator
+  Symbol.observable
+  test
+  text
+  TextDecoder
+  TextEncoder
+  then
+  toExponential
+  toFixed
+  toLowerCase
+  top.bar.renderer.css.js
+  top.location.href
+  toPrecision
+  toString
+  toUpperCase
+  trim
+  unescape
+  unshift
+  URL
+  URL.createObjectURL
+  URL.revokeObjectURL
+  URLSearchParams
+  valueOf
+  values
+  window.___jsl.hefn
+  window.__cyber_emL
+  window.__cyber_TYl
+  window.__onGCastApiAvailable
+  window._DumpException
+  window._F_combinedSignature
+  window._F_cssRowKey
+  window._F_installCss
+  window.AbortController
+  window.addEventListener
+  window.alert
+  window.attmp
+  window.AudioContext
+  window.bgens
+  window.btoa
+  window.caches
+  window.cancelAnimationFrame
+  window.cancelIdleCallback
+  window.chrome
+  window.clearInterval
+  window.clearTimeout
+  window.close
+  window.COMPILED
+  window.console.log
+  window.crypto
+  window.crypto.getRandomValues
+  window.crypto.subtle
+  window.CSS
+  window.CSS.supports
+  window.customElements
+  window.customElements.define
+  window.customElements.polyfillWrapFlushCallback
+  window.dataLayer
+  window.dataLayer.push
+  window.devicePixelRatio
+  window.dispatchEvent
+  window.document
+  window.document.baseURI
+  window.document.body
+  window.document.documentElement
+  window.document.head.appendChild
+  window.document.location.href
+  window.document.visibilityState
+  window.documentPictureInPicture
+  window.event
+  window.familyDialogHistory
+  window.fetch
+  window.focus
+  window.FormData
+  window.frames
+  window.ga
+  window.ga.q
+  window.getComputedStyle
+  window.getSelection
+  window.google
+  window.google.gr
+  window.grecaptcha
+  window.Hammer
+  window.history
+  window.history.back
+  window.history.forward
+  window.history.pushState
+  window.history.replaceState
+  window.history.scrollRestoration
+  window.history.state
+  window.HTMLImports
+  window.HTMLImports.whenReady
+  window.HTMLTemplateElement
+  window.innerHeight
+  window.innerWidth
+  window.Int32Array
+  window.IntersectionObserver
+  window.JSCompiler_renameProperty
+  window.JSON
+  window.loadGuideDataHook
+  window.localStorage
+  window.localStorage.setItem
+  window.location
+  window.location.hash
+  window.location.host
+  window.location.hostname
+  window.location.hostname.includes
+  window.location.hostname.split
+  window.location.href
+  window.location.href.includes
+  window.location.href.split
+  window.location.origin
+  window.location.pathname
+  window.location.pathname.indexOf
+  window.location.protocol
+  window.location.reload
+  window.location.search
+  window.lottie
+  window.ManagedMediaSource
+  window.ManagedMediaSource.isTypeSupported
+  window.matchMedia
+  window.MediaSource
+  window.MediaSource.isTypeSupported
+  window.MouseEvent
+  window.MutationObserver
+  window.nativeMessageListener
+  window.nativeMessageListener.onmessage
+  window.navigator
+  window.navigator.onLine
+  window.navigator.presentation
+  window.navigator.sendBeacon
+  window.navigator.userAgent.indexOf
+  window.navigator.userAgent.match
+  window.Notification
+  window.OfflineAudioContext
+  window.onerror
+  window.onLegacyPolymerFunctionDefinedCallback
+  window.origin
+  window.outerHeight
+  window.pageXOffset
+  window.pageYOffset
+  window.parent
+  window.parent.document
+  window.parent.postMessage
+  window.payments
+  window.performance
+  window.performance.getEntriesByName
+  window.performance.getEntriesByType
+  window.performance.now
+  window.performance.now.bind
+  window.performance.timeOrigin
+  window.PointerEvent
+  window.Polymer
+  window.Polymer._polymerFn
+  window.Polymer.allowTemplateFromDomModule
+  window.Polymer.Element
+  window.Polymer.fastDomIf
+  window.Polymer.legacyNoObservedAttributes
+  window.Polymer.legacyOptimizations
+  window.Polymer.legacyUndefined
+  window.Polymer.legacyWarnings
+  window.Polymer.orderedComputed
+  window.Polymer.removeNestedTemplates
+  window.Polymer.rootPath
+  window.Polymer.sanitizeDOMValue
+  window.Polymer.setPassiveTouchGestures
+  window.Polymer.strictTemplatePolicy
+  window.Polymer.suppressTemplateNotifications
+  window.Polymer.syncInitialRender
+  window.Polymer.useAdoptedStyleSheetsWithBuiltCSS
+  window.PolymerFakeBaseClass
+  window.PolymerFakeBaseClassWithoutHtml
+  window.polymerSkipLoadingFontRoboto
+  window.postMessage
+  window.PROPERTY_ACCESS_MAP
+  window.Proxy
+  window.queueMicrotask
+  window.ReadableStream
+  window.Reflect
+  window.Reflect.getMetadata
+  window.removeEventListener
+  window.Request
+  window.requestAnimationFrame
+  window.requestAnimationFrame.bind
+  window.requestIdleCallback
+  window.ResizeObserver
+  window.screen
+  window.screen.availHeight
+  window.screen.availWidth
+  window.scrollTo
+  window.scrollX
+  window.scrollY
+  window.self
+  window.self.location.href
+  window.sessionStorage
+  window.sessionStorage.getItem
+  window.sessionStorage.removeItem
+  window.sessionStorage.setItem
+  window.setInterval
+  window.setTimeout
+  window.ShadyCSS
+  window.ShadyCSS.ApplyShim
+  window.ShadyCSS.cssBuild
+  window.ShadyCSS.CustomStyleInterface
+  window.ShadyCSS.disableRuntime
+  window.ShadyCSS.flushCustomStyles
+  window.ShadyCSS.nativeCss
+  window.ShadyCSS.prepareTemplate
+  window.ShadyCSS.ScopingShim
+  window.ShadyCSS.ScopingShim.flush
+  window.ShadyCSS.styleDocument
+  window.ShadyCSS.styleElement
+  window.ShadyCSS.styleSubtree
+  window.ShadyDOM
+  window.ShadyDOM.composedPath
+  window.ShadyDOM.flush
+  window.ShadyDOM.flushInitial
+  window.ShadyDOM.inUse
+  window.ShadyDOM.noPatch
+  window.ShadyDOM.observeChildren
+  window.ShadyDOM.patch
+  window.ShadyDOM.unobserveChildren
+  window.ShadyDOM.wrap
+  window.ShadyDOM.Wrapper
+  window.spf
+  window.TextDecoderStream
+  window.top
+  window.trustedTypes
+  window.trustedTypes.createPolicy
+  window.trustedTypes.emptyScript
+  window.trustedTypes.isHTML
+  window.trustedTypes.isScript
+  window.trustedTypes.isScriptURL
+  window.URLSearchParams
+  window.WebComponents
+  window.WebComponents.flags
+  window.webkit
+  window.webkitAudioContext
+  window.youtubewebview
+  window.youtubewebview.onmessage
+  window.yt
+  window.YT
+  window.yt.msgs_
+  window.yt.ready
+  window.YT.ready
+  window.ytcfg
+  window.ytcfg.msgs
+  window.ytcsi
+  window.yterr
+  window.ytInitialGuideData
+  window.ytInitialGuideDataPresent
+  Worker
+  XMLHttpRequest
+  XMLSerializer
+
+script_22_runtime.js: 492 APIs
+  abort
+  AbortController
+  addEventListener
+  addSourceBuffer
+  append
+  appendBuffer
+  appendChild
+  Array.from
+  Array.isArray
+  Array.prototype
+  arrayBuffer
+  ArrayBuffer.isView
+  assign
+  at
+  atob
+  AudioContext
+  BigInt.asIntN
+  BigInt.asUintN
+  Blob
+  blur
+  BroadcastChannel
+  btoa
+  cancel
+  cancelAnimationFrame
+  catch
+  charAt
+  charCodeAt
+  clearInterval
+  clearTimeout
+  click
+  clone
+  cloneNode
+  close
+  closest
+  composedPath
+  concat
+  console.error
+  console.groupCollapsed
+  console.groupEnd
+  console.log
+  console.warn
+  contains
+  copyWithin
+  create
+  createElement
+  createElementNS
+  createObjectURL
+  createTextNode
+  crypto.getRandomValues
+  crypto.subtle
+  CustomEvent
+  Date.now
+  Date.parse
+  decodeURI
+  decodeURIComponent
+  defineProperty
+  delete
+  dispatchEvent
+  document.activeElement
+  document.activeElement.blur
+  document.addEventListener
+  document.body
+  document.body.scrollLeft
+  document.body.scrollTop
+  document.createElement
+  document.createElementNS
+  document.createEvent
+  document.createRange
+  document.createTextNode
+  document.documentElement
+  document.documentElement.getAttribute
+  document.documentElement.scrollLeft
+  document.documentElement.scrollTop
+  document.documentElement.style
+  document.documentMode
+  document.domain
+  document.execCommand
+  document.exitFullscreen
+  document.exitPictureInPicture
+  document.featurePolicy
+  document.getElementById
+  document.getElementsByClassName
+  document.getElementsByTagName
+  document.hasFocus
+  document.head.appendChild
+  document.head.removeChild
+  document.implementation.createHTMLDocument
+  document.location
+  document.location.hostname
+  document.location.hostname.endsWith
+  document.location.href
+  document.location.origin
+  document.location.port
+  document.location.protocol
+  document.location.toString
+  document.pictureInPictureElement
+  document.queryCommandSupported
+  document.querySelector
+  document.querySelectorAll
+  document.readyState
+  document.referrer
+  document.referrer.substring
+  document.removeEventListener
+  document.visibilityState
+  DOMParser
+  encodeURI
+  encodeURIComponent
+  endOfStream
+  endsWith
+  entries
+  Error.captureStackTrace
+  Error.stackTraceLimit
+  escape
+  Event
+  every
+  exec
+  exitFullscreen
+  fetch
+  File
+  fill
+  filter
+  finally
+  find
+  findIndex
+  focus
+  forEach
+  FormData
+  freeze
+  from
+  fromEntries
+  get
+  getAll
+  getAllResponseHeaders
+  getAttribute
+  getBoundingClientRect
+  getComputedStyle
+  getElementById
+  getElementsByClassName
+  getElementsByTagName
+  getOwnPropertyDescriptor
+  getPrototypeOf
+  getReader
+  getResponseHeader
+  getRootNode
+  getSelection
+  getTime
+  globalThis.performance
+  globalThis.sessionStorage
+  globalThis.sessionStorage.getItem
+  globalThis.sessionStorage.removeItem
+  globalThis.sessionStorage.setItem
+  globalThis.TextEncoder
+  globalThis.trustedTypes
+  has
+  hasAttribute
+  hasOwnProperty
+  Headers
+  history.length
+  HTMLElement
+  HTMLMediaElement
+  HTMLStyleElement
+  HTMLVideoElement
+  Image
+  includes
+  indexOf
+  insertBefore
+  IntersectionObserver
+  Intl.DateTimeFormat
+  Intl.NumberFormat
+  isExtensible
+  isFinite
+  isFrozen
+  isNaN
+  join
+  json
+  JSON.parse
+  JSON.stringify
+  keys
+  lastIndexOf
+  load
+  localStorage.get
+  localStorage.remove
+  localStorage.set
+  location.ancestorOrigins
+  location.ancestorOrigins.length
+  location.clone
+  location.hash
+  location.hostname
+  location.href
+  location.href.substring
+  location.origin
+  location.OY
+  location.protocol
+  location.set
+  ManagedMediaSource
+  map
+  match
+  matchMedia
+  Math.abs
+  Math.ceil
+  Math.exp
+  Math.floor
+  Math.imul
+  Math.log
+  Math.log2
+  Math.max
+  Math.min
+  Math.PI
+  Math.pow
+  Math.random
+  Math.round
+  Math.sign
+  Math.sqrt
+  Math.trunc
+  MediaSource
+  moveTo
+  MutationObserver
+  navigator.clipboard.writeText
+  navigator.connection
+  navigator.cookieEnabled
+  navigator.geolocation
+  navigator.geolocation.getCurrentPosition
+  navigator.getBattery
+  navigator.hardwareConcurrency
+  navigator.mediaCapabilities
+  navigator.mediaCapabilities.decodingInfo
+  navigator.mediaSession
+  navigator.mediaSession.metadata
+  navigator.mediaSession.playbackState
+  navigator.mediaSession.setActionHandler
+  navigator.mediaSession.setPositionState
+  navigator.requestMediaKeySystemAccess
+  navigator.sendBeacon
+  navigator.share
+  navigator.standalone
+  navigator.userAgent
+  navigator.vendor
+  Number.isFinite
+  Number.isInteger
+  Number.isNaN
+  Number.isSafeInteger
+  Number.MAX_SAFE_INTEGER
+  Number.MAX_VALUE
+  Number.MIN_SAFE_INTEGER
+  Number.POSITIVE_INFINITY
+  Object.assign
+  Object.create
+  Object.defineProperties
+  Object.defineProperty
+  Object.entries
+  Object.freeze
+  Object.fromEntries
+  Object.getOwnPropertyDescriptor
+  Object.getPrototypeOf
+  Object.is
+  Object.isExtensible
+  Object.isFrozen
+  Object.keys
+  Object.prototype
+  Object.setPrototypeOf
+  Object.values
+  open
+  padStart
+  parseFloat
+  parseInt
+  pause
+  performance.clearResourceTimings
+  performance.getEntriesByName
+  performance.mark
+  performance.measure
+  performance.memory
+  performance.memory.jsHeapSizeLimit
+  performance.memory.totalJSHeapSize
+  performance.memory.usedJSHeapSize
+  performance.now
+  performance.onresourcetimingbufferfull
+  performance.timeOrigin
+  performance.timing
+  performance.timing.navigationStart
+  pipeThrough
+  play
+  pop
+  postMessage
+  preventDefault
+  Promise.all
+  Promise.race
+  Promise.reject
+  Promise.resolve
+  Promise.withResolvers
+  push
+  querySelector
+  querySelectorAll
+  read
+  reduce
+  Reflect.construct
+  remove
+  removeAttribute
+  removeChild
+  removeEventListener
+  replace
+  replaceAll
+  Request
+  requestAnimationFrame
+  requestFullscreen
+  requestIdleCallback
+  reset
+  ResizeObserver
+  Response
+  reverse
+  revokeObjectURL
+  screen.availTop
+  screen.availWidth
+  screen.height
+  screen.width
+  scrollTo
+  search
+  select
+  self.addEventListener
+  self.crossOriginIsolated
+  self.document
+  self.indexedDB.deleteDatabase
+  self.indexedDB.open
+  self.localStorage
+  self.location
+  self.location.protocol.slice
+  self.ManagedMediaSource
+  self.ManagedMediaSource.isTypeSupported
+  self.MediaSource
+  self.MediaSource.isTypeSupported
+  self.top
+  send
+  set
+  setAttribute
+  setInterval
+  setPrototypeOf
+  setRequestHeader
+  setTime
+  setTimeout
+  shift
+  slice
+  some
+  sort
+  splice
+  split
+  startsWith
+  stop
+  stopImmediatePropagation
+  stopPropagation
+  String.fromCharCode
+  String.prototype
+  substr
+  substring
+  SVGElement
+  Symbol.dispose
+  Symbol.for
+  Symbol.iterator
+  Symbol.observable
+  terminate
+  test
+  text
+  TextDecoder
+  TextEncoder
+  then
+  toFixed
+  toLocaleString
+  toLowerCase
+  top.document
+  top.location.hash
+  top.location.href
+  top.mraid
+  toString
+  toUpperCase
+  trim
+  unescape
+  unshift
+  URL
+  URL.createObjectURL
+  URL.revokeObjectURL
+  URLSearchParams
+  valueOf
+  values
+  WebAssembly
+  WebAssembly.compile
+  WebAssembly.instantiate
+  WebKitMediaSource
+  window.AbortController
+  window.addEventListener
+  window.android
+  window.android.webview
+  window.android.webview.getExperimentalMediaIntegrityTokenProvider
+  window.attmp
+  window.AudioContext
+  window.bgens
+  window.botguard
+  window.cast.receiver.platform.canDisplayType
+  window.clearInterval
+  window.clearTimeout
+  window.close
+  window.console.log
+  window.crypto
+  window.crypto.getRandomValues
+  window.devicePixelRatio
+  window.dispatchEvent
+  window.document
+  window.document.documentElement
+  window.document.elementFromPoint
+  window.document.pictureInPictureEnabled
+  window.event
+  window.fetch
+  window.Float32Array
+  window.FormData
+  window.getComputedStyle
+  window.getSelection
+  window.google_image_requests
+  window.h5vcc
+  window.h5vcc.cVal.getValue
+  window.H5vccPlatformService
+  window.H5vccScreen
+  window.H5vccScreen.GetDiagonal
+  window.HTMLMediaElement
+  window.HTMLVideoElement
+  window.innerHeight
+  window.innerWidth
+  window.Int32Array
+  window.IntersectionObserver
+  window.JSON
+  window.localStorage
+  window.localStorage.removeItem
+  window.location.ancestorOrigins
+  window.location.hostname
+  window.location.hostname.includes
+  window.location.hostname.split
+  window.location.href
+  window.location.origin
+  window.location.protocol
+  window.location.reload
+  window.location.search
+  window.ManagedMediaSource
+  window.ManagedMediaSource.isTypeSupported
+  window.matchMedia
+  window.MediaMetadata
+  window.MediaSource
+  window.MediaSource.isTypeSupported
+  window.navigator
+  window.navigator.msPointerEnabled
+  window.navigator.onLine
+  window.navigator.sendBeacon
+  window.onerror
+  window.open
+  window.origin
+  window.outerHeight
+  window.outerWidth
+  window.performance
+  window.performance.getEntriesByName
+  window.performance.timing.navigationStart
+  window.PressureObserver
+  window.Profiler
+  window.queueMicrotask
+  window.queueMicrotask.bind
+  window.ReadableStream
+  window.removeEventListener
+  window.Request
+  window.requestAnimationFrame
+  window.requestIdleCallback
+  window.screen
+  window.screen.height
+  window.screen.pixelDepth
+  window.screen.width
+  window.sessionStorage
+  window.sessionStorage.getItem
+  window.sessionStorage.removeItem
+  window.sessionStorage.setItem
+  window.setInterval
+  window.setTimeout
+  window.SourceBuffer
+  window.top
+  window.top.document
+  window.trayride
+  window.URL
+  window.URL.createObjectURL
+  window.V6V
+  window.WebAssembly
+  window.webkitAudioContext
+  window.WebKitMediaSource
+  window.WebKitPlaybackTargetAvailabilityEvent
+  window.yt
+  window.yt.msgs_
+  window.ytcfg
+  window.ytcfg.msgs
+  window.yterr
+  Worker
+  XMLHttpRequest
+
+script_35_runtime.js: 792 APIs
+  abort
+  AbortController
+  AbortSignal
+  addEventListener
+  after
+  alert
+  append
+  appendChild
+  Array.from
+  Array.isArray
+  Array.prototype
+  arrayBuffer
+  ArrayBuffer.isView
+  assign
+  at
+  atob
+  attachShadow
+  Audio
+  AudioContext
+  BigInt.asIntN
+  BigInt.asUintN
+  blob
+  Blob
+  blur
+  BroadcastChannel
+  btoa
+  cancel
+  cancelAnimationFrame
+  cancelIdleCallback
+  catch
+  charAt
+  charCodeAt
+  clearInterval
+  clearTimeout
+  click
+  clone
+  cloneNode
+  close
+  closest
+  codePointAt
+  composedPath
+  concat
+  console.debug
+  console.error
+  console.group
+  console.groupCollapsed
+  console.groupEnd
+  console.groupEnd.call
+  console.info
+  console.log
+  console.time
+  console.timeEnd
+  console.warn
+  contains
+  create
+  createDocumentFragment
+  createElement
+  createElementNS
+  createObjectURL
+  createTextNode
+  crypto.getRandomValues
+  crypto.subtle
+  customElements.define
+  customElements.get
+  customElements.polyfillWrapFlushCallback
+  CustomEvent
+  Date.now
+  Date.parse
+  Date.prototype
+  Date.UTC
+  decodeURI
+  decodeURIComponent
+  defineProperties
+  defineProperty
+  delete
+  dispatchEvent
+  document.activeElement
+  document.activeElement.blur
+  document.activeElement.tagName
+  document.addEventListener
+  document.adoptedStyleSheets
+  document.adoptedStyleSheets.length
+  document.all
+  document.baseURI
+  document.body
+  document.body.addEventListener
+  document.body.animate
+  document.body.appendChild
+  document.body.classList.add
+  document.body.classList.contains
+  document.body.classList.remove
+  document.body.className.indexOf
+  document.body.clientHeight
+  document.body.clientWidth
+  document.body.contains
+  document.body.getAttribute
+  document.body.hasAttribute
+  document.body.prepend
+  document.body.removeAttribute
+  document.body.removeChild
+  document.body.scrollLeft
+  document.body.scrollTop
+  document.body.setAttribute
+  document.body.style.backgroundColor
+  document.body.style.colorScheme
+  document.body.style.cursor
+  document.body.style.overflow
+  document.body.style.overflowY
+  document.body.style.overscrollBehavior
+  document.body.style.top
+  document.cookie
+  document.createComment
+  document.createDocumentFragment
+  document.createElement
+  document.createElementNS
+  document.createEvent
+  document.createRange
+  document.createTextNode
+  document.createTreeWalker
+  document.currentScript
+  document.currentScript.src.indexOf
+  document.defaultView
+  document.dispatchEvent
+  document.documentElement
+  document.documentElement.clientHeight
+  document.documentElement.clientWidth
+  document.documentElement.getAttribute
+  document.documentElement.getBoundingClientRect
+  document.documentElement.hasAttribute
+  document.documentElement.lang
+  document.documentElement.scrollHeight
+  document.documentElement.scrollLeft
+  document.documentElement.scrollTop
+  document.documentElement.setCapture
+  document.documentElement.style
+  document.documentElement.style.overscrollBehavior
+  document.documentElement.tagName.toLowerCase
+  document.domain
+  document.elementFromPoint
+  document.execCommand
+  document.featurePolicy
+  document.getElementById
+  document.getElementsByTagName
+  document.getSelection
+  document.hasStorageAccess
+  document.head
+  document.head.append
+  document.head.appendChild
+  document.head.querySelector
+  document.head.removeChild
+  document.head.style.touchAction
+  document.implementation.createHTMLDocument
+  document.importNode
+  document.JSC$9433_onVisibilityChange.pipe
+  document.location.hostname
+  document.location.hostname.endsWith
+  document.location.href
+  document.location.port
+  document.location.protocol
+  document.location.toString
+  document.pictureInPictureElement
+  document.postMessage
+  document.prerendering
+  document.querySelector
+  document.querySelectorAll
+  document.readyState
+  document.referrer
+  document.releaseCapture
+  document.removeEventListener
+  document.scrollingElement
+  document.scrollingElement.scrollLeft
+  document.scrollingElement.scrollTop
+  document.startViewTransition
+  document.styleSheets
+  document.timeline
+  document.timeline.play
+  document.title
+  document.visibilityState
+  document.wasDiscarded
+  DocumentFragment
+  DOMTokenList
+  encodeURI
+  encodeURIComponent
+  endsWith
+  entries
+  Error.apply
+  Error.call
+  Error.captureStackTrace
+  escape
+  Event
+  every
+  exec
+  fetch
+  File
+  FileReader
+  fill
+  filter
+  finally
+  find
+  findIndex
+  flat
+  flatMap
+  focus
+  FocusEvent
+  forEach
+  FormData
+  formData
+  freeze
+  from
+  fromEntries
+  get
+  getAll
+  getAllResponseHeaders
+  getAttribute
+  getBoundingClientRect
+  getClientRects
+  getComputedStyle
+  getElementById
+  getElementsByClassName
+  getElementsByTagName
+  getFullYear
+  getOwnPropertyDescriptor
+  getOwnPropertyDescriptors
+  getOwnPropertyNames
+  getOwnPropertySymbols
+  getPrototypeOf
+  getReader
+  getResponseHeader
+  getRootNode
+  getSelection
+  getTime
+  globalThis.Array
+  globalThis.cancelIdleCallback
+  globalThis.HTMLElement
+  globalThis.performance
+  globalThis.performance.getEntriesByType
+  globalThis.requestIdleCallback
+  globalThis.ResizeObserver
+  globalThis.sessionStorage
+  globalThis.sessionStorage.getItem
+  globalThis.sessionStorage.removeItem
+  globalThis.sessionStorage.setItem
+  globalThis.TextEncoder
+  globalThis.trustedTypes
+  globalThis.XRegExp
+  globalThis.Zone
+  has
+  hasAttribute
+  hasOwn
+  hasOwnProperty
+  Headers
+  history.length
+  history.pushState
+  history.replaceState
+  history.state
+  HTMLAnchorElement
+  HTMLButtonElement
+  HTMLCanvasElement
+  HTMLDivElement
+  HTMLElement
+  HTMLFencedFrameElement
+  HTMLFormElement
+  HTMLIFrameElement
+  HTMLImageElement
+  HTMLInputElement
+  HTMLLinkElement
+  HTMLOptionElement
+  HTMLSelectElement
+  HTMLStyleElement
+  HTMLTemplateElement
+  HTMLTextAreaElement
+  HTMLUnknownElement
+  HTMLVideoElement
+  Image
+  importNode
+  includes
+  indexOf
+  insertBefore
+  IntersectionObserver
+  Intl.DateTimeFormat
+  Intl.NumberFormat
+  isExtensible
+  isFinite
+  isFrozen
+  isNaN
+  join
+  json
+  JSON.parse
+  JSON.parseWrapper
+  JSON.stringify
+  keys
+  lastIndexOf
+  load
+  localStorage.get
+  localStorage.remove
+  localStorage.set
+  location.host
+  location.hostname
+  location.hostname.indexOf
+  location.href
+  location.origin
+  location.pathname
+  location.port
+  location.protocol
+  location.reload
+  location.search
+  ManagedMediaSource
+  map
+  Map.prototype
+  match
+  matches
+  matchMedia
+  Math.abs
+  Math.acos
+  Math.asin
+  Math.atan
+  Math.atan2
+  Math.ceil
+  Math.cos
+  Math.exp
+  Math.floor
+  Math.hypot
+  Math.imul
+  Math.LN2
+  Math.log
+  Math.log2
+  Math.max
+  Math.min
+  Math.PI
+  Math.pow
+  Math.random
+  Math.round
+  Math.sign
+  Math.sin
+  Math.sqrt
+  Math.SQRT2
+  Math.tan
+  Math.trunc
+  Math.uuid
+  MediaSource
+  MouseEvent
+  moveTo
+  MutationObserver
+  navigator.clipboard
+  navigator.clipboard.write
+  navigator.clipboard.writeText
+  navigator.cookieEnabled
+  navigator.deviceMemory
+  navigator.geolocation
+  navigator.geolocation.getCurrentPosition
+  navigator.hardwareConcurrency
+  navigator.keyboard
+  navigator.locks
+  navigator.mediaDevices
+  navigator.mediaDevices.getUserMedia
+  navigator.onLine
+  navigator.permissions
+  navigator.permissions.query
+  navigator.sendBeacon
+  navigator.serviceWorker
+  navigator.serviceWorker.addEventListener
+  navigator.serviceWorker.getRegistration
+  navigator.serviceWorker.getRegistrations
+  navigator.serviceWorker.ready.then
+  navigator.serviceWorker.register
+  navigator.share
+  navigator.standalone
+  navigator.storage
+  navigator.storage.estimate
+  navigator.userActivation
+  navigator.userAgent
+  navigator.userAgent.includes
+  navigator.userAgent.indexOf
+  navigator.userAgent.match
+  navigator.userAgentData.getHighEntropyValues
+  navigator.vendor
+  normalize
+  Number.isFinite
+  Number.isInteger
+  Number.isNaN
+  Number.isSafeInteger
+  Number.MAX_SAFE_INTEGER
+  Number.MAX_VALUE
+  Number.MIN_SAFE_INTEGER
+  Number.NEGATIVE_INFINITY
+  Number.parseFloat
+  Number.parseInt
+  Number.POSITIVE_INFINITY
+  Object.assign
+  Object.create
+  Object.defineProperties
+  Object.defineProperty
+  Object.entries
+  Object.freeze
+  Object.fromEntries
+  Object.getOwnPropertyDescriptor
+  Object.getOwnPropertyDescriptors
+  Object.getOwnPropertyNames
+  Object.getOwnPropertySymbols
+  Object.getPrototypeOf
+  Object.hasOwn
+  Object.hasOwnProperty
+  Object.is
+  Object.isExtensible
+  Object.isFrozen
+  Object.keys
+  Object.my_load
+  Object.prototype
+  Object.seal
+  Object.setPrototypeOf
+  Object.values
+  OffscreenCanvas
+  open
+  overrideMimeType
+  padStart
+  parent.header
+  parent.parent
+  parent.start
+  parseFloat
+  parseInt
+  pause
+  performance.getEntriesByName
+  performance.getEntriesByType
+  performance.mark
+  performance.measure
+  performance.now
+  performance.timing
+  performance.timing.navigationStart
+  PerformanceObserver
+  pipeThrough
+  play
+  pop
+  postMessage
+  prepend
+  preventDefault
+  Promise.all
+  Promise.allSettled
+  Promise.prototype
+  Promise.race
+  Promise.reject
+  Promise.resolve
+  Promise.toString
+  Promise.withResolvers
+  prompt
+  push
+  querySelector
+  querySelectorAll
+  queueMicrotask
+  read
+  reduce
+  Reflect.closure
+  Reflect.construct
+  Reflect.decorate
+  Reflect.defineMetadata
+  Reflect.getMetadata
+  Reflect.metadata
+  Reflect.ownKeys
+  Reflect.setPrototypeOf
+  RegExp.prototype
+  remove
+  removeAttribute
+  removeChild
+  removeEventListener
+  repeat
+  replace
+  replaceAll
+  replaceChild
+  Request
+  requestAnimationFrame
+  requestFullscreen
+  requestIdleCallback
+  reset
+  ResizeObserver
+  Response
+  reverse
+  revokeObjectURL
+  screen.availTop
+  screen.availWidth
+  screen.height
+  screen.orientation.addEventListener
+  screen.orientation.removeEventListener
+  screen.width
+  scroll
+  scrollBy
+  scrollIntoView
+  scrollTo
+  seal
+  search
+  select
+  self.addEventListener
+  self.crossOriginIsolated
+  self.document
+  self.indexedDB.deleteDatabase
+  self.indexedDB.open
+  self.localStorage
+  self.localStorage.removeItem
+  self.location
+  self.location.origin
+  self.location.protocol.slice
+  self.sessionStorage
+  self.sessionStorage.removeItem
+  self.top
+  send
+  ServiceWorker
+  sessionStorage.remove
+  sessionStorage.set
+  set
+  Set.prototype
+  setAttribute
+  setFullYear
+  setInterval
+  setPrototypeOf
+  setRequestHeader
+  setTime
+  setTimeout
+  ShadowRoot
+  shift
+  slice
+  some
+  sort
+  splice
+  split
+  startsWith
+  stop
+  stopImmediatePropagation
+  stopPropagation
+  String.fromCharCode
+  String.fromCodePoint
+  String.prototype
+  String.raw
+  structuredClone
+  submit
+  substr
+  substring
+  SVGElement
+  SVGGraphicsElement
+  Symbol.asyncIterator
+  Symbol.dispose
+  Symbol.for
+  Symbol.iterator
+  Symbol.observable
+  test
+  text
+  TextDecoder
+  TextEncoder
+  then
+  toExponential
+  toFixed
+  toLowerCase
+  top.bar.renderer.css.js
+  top.location.href
+  toPrecision
+  toString
+  toUpperCase
+  trim
+  unescape
+  unshift
+  URL
+  URL.createObjectURL
+  URL.revokeObjectURL
+  URLSearchParams
+  valueOf
+  values
+  window.___jsl.hefn
+  window.__cyber_emL
+  window.__cyber_TYl
+  window.__onGCastApiAvailable
+  window._DumpException
+  window._F_combinedSignature
+  window._F_cssRowKey
+  window._F_installCss
+  window.AbortController
+  window.addEventListener
+  window.alert
+  window.attmp
+  window.AudioContext
+  window.bgens
+  window.btoa
+  window.caches
+  window.cancelAnimationFrame
+  window.cancelIdleCallback
+  window.chrome
+  window.clearInterval
+  window.clearTimeout
+  window.close
+  window.COMPILED
+  window.console.log
+  window.crypto
+  window.crypto.getRandomValues
+  window.crypto.subtle
+  window.CSS
+  window.CSS.supports
+  window.customElements
+  window.customElements.define
+  window.customElements.polyfillWrapFlushCallback
+  window.dataLayer
+  window.dataLayer.push
+  window.devicePixelRatio
+  window.dispatchEvent
+  window.document
+  window.document.baseURI
+  window.document.body
+  window.document.documentElement
+  window.document.head.appendChild
+  window.document.location.href
+  window.document.visibilityState
+  window.documentPictureInPicture
+  window.event
+  window.familyDialogHistory
+  window.fetch
+  window.focus
+  window.FormData
+  window.frames
+  window.ga
+  window.ga.q
+  window.getComputedStyle
+  window.getSelection
+  window.google
+  window.google.gr
+  window.grecaptcha
+  window.Hammer
+  window.history
+  window.history.back
+  window.history.forward
+  window.history.pushState
+  window.history.replaceState
+  window.history.scrollRestoration
+  window.history.state
+  window.HTMLImports
+  window.HTMLImports.whenReady
+  window.HTMLTemplateElement
+  window.innerHeight
+  window.innerWidth
+  window.Int32Array
+  window.IntersectionObserver
+  window.JSCompiler_renameProperty
+  window.JSON
+  window.loadGuideDataHook
+  window.localStorage
+  window.localStorage.setItem
+  window.location
+  window.location.hash
+  window.location.host
+  window.location.hostname
+  window.location.hostname.includes
+  window.location.hostname.split
+  window.location.href
+  window.location.href.includes
+  window.location.href.split
+  window.location.origin
+  window.location.pathname
+  window.location.pathname.indexOf
+  window.location.protocol
+  window.location.reload
+  window.location.search
+  window.lottie
+  window.ManagedMediaSource
+  window.ManagedMediaSource.isTypeSupported
+  window.matchMedia
+  window.MediaSource
+  window.MediaSource.isTypeSupported
+  window.MouseEvent
+  window.MutationObserver
+  window.nativeMessageListener
+  window.nativeMessageListener.onmessage
+  window.navigator
+  window.navigator.onLine
+  window.navigator.presentation
+  window.navigator.sendBeacon
+  window.navigator.userAgent.indexOf
+  window.navigator.userAgent.match
+  window.Notification
+  window.OfflineAudioContext
+  window.onerror
+  window.onLegacyPolymerFunctionDefinedCallback
+  window.origin
+  window.outerHeight
+  window.pageXOffset
+  window.pageYOffset
+  window.parent
+  window.parent.document
+  window.parent.postMessage
+  window.payments
+  window.performance
+  window.performance.getEntriesByName
+  window.performance.getEntriesByType
+  window.performance.now
+  window.performance.now.bind
+  window.performance.timeOrigin
+  window.PointerEvent
+  window.Polymer
+  window.Polymer._polymerFn
+  window.Polymer.allowTemplateFromDomModule
+  window.Polymer.Element
+  window.Polymer.fastDomIf
+  window.Polymer.legacyNoObservedAttributes
+  window.Polymer.legacyOptimizations
+  window.Polymer.legacyUndefined
+  window.Polymer.legacyWarnings
+  window.Polymer.orderedComputed
+  window.Polymer.removeNestedTemplates
+  window.Polymer.rootPath
+  window.Polymer.sanitizeDOMValue
+  window.Polymer.setPassiveTouchGestures
+  window.Polymer.strictTemplatePolicy
+  window.Polymer.suppressTemplateNotifications
+  window.Polymer.syncInitialRender
+  window.Polymer.useAdoptedStyleSheetsWithBuiltCSS
+  window.PolymerFakeBaseClass
+  window.PolymerFakeBaseClassWithoutHtml
+  window.polymerSkipLoadingFontRoboto
+  window.postMessage
+  window.PROPERTY_ACCESS_MAP
+  window.Proxy
+  window.queueMicrotask
+  window.ReadableStream
+  window.Reflect
+  window.Reflect.getMetadata
+  window.removeEventListener
+  window.Request
+  window.requestAnimationFrame
+  window.requestAnimationFrame.bind
+  window.requestIdleCallback
+  window.ResizeObserver
+  window.screen
+  window.screen.availHeight
+  window.screen.availWidth
+  window.scrollTo
+  window.scrollX
+  window.scrollY
+  window.self
+  window.self.location.href
+  window.sessionStorage
+  window.sessionStorage.getItem
+  window.sessionStorage.removeItem
+  window.sessionStorage.setItem
+  window.setInterval
+  window.setTimeout
+  window.ShadyCSS
+  window.ShadyCSS.ApplyShim
+  window.ShadyCSS.cssBuild
+  window.ShadyCSS.CustomStyleInterface
+  window.ShadyCSS.disableRuntime
+  window.ShadyCSS.flushCustomStyles
+  window.ShadyCSS.nativeCss
+  window.ShadyCSS.prepareTemplate
+  window.ShadyCSS.ScopingShim
+  window.ShadyCSS.ScopingShim.flush
+  window.ShadyCSS.styleDocument
+  window.ShadyCSS.styleElement
+  window.ShadyCSS.styleSubtree
+  window.ShadyDOM
+  window.ShadyDOM.composedPath
+  window.ShadyDOM.flush
+  window.ShadyDOM.flushInitial
+  window.ShadyDOM.inUse
+  window.ShadyDOM.noPatch
+  window.ShadyDOM.observeChildren
+  window.ShadyDOM.patch
+  window.ShadyDOM.unobserveChildren
+  window.ShadyDOM.wrap
+  window.ShadyDOM.Wrapper
+  window.spf
+  window.TextDecoderStream
+  window.top
+  window.trustedTypes
+  window.trustedTypes.createPolicy
+  window.trustedTypes.emptyScript
+  window.trustedTypes.isHTML
+  window.trustedTypes.isScript
+  window.trustedTypes.isScriptURL
+  window.URLSearchParams
+  window.WebComponents
+  window.WebComponents.flags
+  window.webkit
+  window.webkitAudioContext
+  window.youtubewebview
+  window.youtubewebview.onmessage
+  window.yt
+  window.YT
+  window.yt.msgs_
+  window.yt.ready
+  window.YT.ready
+  window.ytcfg
+  window.ytcfg.msgs
+  window.ytcsi
+  window.yterr
+  window.ytInitialGuideData
+  window.ytInitialGuideDataPresent
+  Worker
+  XMLHttpRequest
+  XMLSerializer
+
+watch_page.html: 60 APIs
+  addEventListener
+  Array.prototype
+  create
+  defineProperties
+  defineProperty
+  encodeURIComponent
+  get
+  getAttribute
+  getOwnPropertyDescriptor
+  getOwnPropertyNames
+  getTime
+  Image
+  indexOf
+  isNaN
+  join
+  keys
+  match
+  navigator.userAgent
+  navigator.userAgentData
+  navigator.userAgentData.brands
+  navigator.userAgentData.brands.length
+  Object.create
+  Object.defineProperties
+  Object.defineProperty
+  Object.getOwnPropertyDescriptor
+  Object.getOwnPropertyNames
+  Object.keys
+  performance.timing.responseStart
+  push
+  removeEventListener
+  replace
+  requestAnimationFrame
+  set
+  setTimeout
+  substr
+  Symbol.iterator
+  toLowerCase
+  window.customElements
+  window.emergencyTimeoutImg
+  window.location.href
+  window.onerror
+  window.performance
+  window.performance.now
+  window.performance.timing
+  window.performance.timing.navigationStart
+  window.Polymer
+  window.Polymer.legacyOptimizations
+  window.Polymer.setPassiveTouchGestures
+  window.polymerSkipLoadingFontRoboto
+  window.ShadyCSS
+  window.ShadyDOM
+  window.unhandledErrorCount
+  window.unhandledErrorMessages
+  window.WIZ_global_data
+  window.yt
+  window.ytcfg.set
+  window.ytcsi
+  window.ytcsi.tick
+  window.yterr
+  window.ytplayer
+
+youtube_page.html: 118 APIs
+  addEventListener
+  appendChild
+  Array.prototype
+  concat
+  create
+  createElement
+  defineProperties
+  defineProperty
+  delete
+  document.body.appendChild
+  document.body.clientWidth
+  document.createElement
+  document.fonts
+  document.fonts.load
+  document.getElementById
+  document.getElementsByTagName
+  document.querySelector
+  encodeURIComponent
+  get
+  getAttribute
+  getElementById
+  getElementsByTagName
+  getOwnPropertyDescriptor
+  getOwnPropertyNames
+  getTime
+  has
+  Image
+  indexOf
+  isExtensible
+  isNaN
+  join
+  keys
+  load
+  match
+  Math.ceil
+  Math.floor
+  Math.max
+  Math.min
+  Math.random
+  Math.round
+  navigator.userAgent
+  navigator.userAgentData
+  navigator.userAgentData.brands
+  navigator.userAgentData.brands.length
+  Object.create
+  Object.defineProperties
+  Object.defineProperty
+  Object.getOwnPropertyDescriptor
+  Object.getOwnPropertyNames
+  Object.isExtensible
+  Object.keys
+  Object.prototype
+  Object.seal
+  Object.values
+  performance.js
+  performance.timing.responseStart
+  performance.vflset
+  push
+  querySelector
+  remove
+  removeAttribute
+  removeChild
+  removeEventListener
+  replace
+  requestAnimationFrame
+  seal
+  set
+  setTimeout
+  shift
+  split
+  substr
+  Symbol.iterator
+  toLowerCase
+  toString
+  values
+  window.addEventListener
+  window.customElements
+  window.document
+  window.emergencyTimeoutImg
+  window.innerHeight
+  window.innerWidth
+  window.location.href
+  window.onerror
+  window.performance
+  window.performance.now
+  window.performance.timing
+  window.performance.timing.navigationStart
+  window.pis
+  window.Polymer
+  window.Polymer.legacyOptimizations
+  window.Polymer.setPassiveTouchGestures
+  window.polymerSkipLoadingFontRoboto
+  window.removeEventListener
+  window.ShadyCSS
+  window.ShadyDOM
+  window.unhandledErrorCount
+  window.unhandledErrorMessages
+  window.WIZ_global_data
+  window.yt
+  window.yt.config_
+  window.yt.config_.WEB_PLAYER_CONTEXT_CONFIGS
+  window.yt.player
+  window.yt.player.Application
+  window.yt.player.Application.create
+  window.yt.player.Application.createAlternate
+  window.ytAtN
+  window.ytAtP
+  window.ytcfg
+  window.ytcfg.obfuscatedData_
+  window.ytcfg.set
+  window.ytcsi
+  window.ytcsi.tick
+  window.yterr
+  window.ytplayer
+  window.ytplayer.bootstrapPlayerContainer
+  window.ytplayer.bootstrapPlayerResponse
+  window.ytplayer.bootstrapWebPlayerContextConfig
+  window.ytplayer.config
+
+youtube_script_000_inline.js: 1 APIs
+  window.WIZ_global_data
+
+youtube_script_001_inline.js: 3 APIs
+  set
+  window.yt
+  window.ytcfg.set
+
+youtube_script_002_inline.js: 31 APIs
+  Array.prototype
+  create
+  defineProperties
+  defineProperty
+  encodeURIComponent
+  get
+  getOwnPropertyDescriptor
+  getOwnPropertyNames
+  Image
+  indexOf
+  isNaN
+  join
+  keys
+  match
+  Object.create
+  Object.defineProperties
+  Object.defineProperty
+  Object.getOwnPropertyDescriptor
+  Object.getOwnPropertyNames
+  Object.keys
+  push
+  replace
+  set
+  substr
+  window.customElements
+  window.emergencyTimeoutImg
+  window.location.href
+  window.onerror
+  window.unhandledErrorCount
+  window.unhandledErrorMessages
+  window.yterr
+
+youtube_script_003_inline.js: 6 APIs
+  window.Polymer
+  window.Polymer.legacyOptimizations
+  window.Polymer.setPassiveTouchGestures
+  window.polymerSkipLoadingFontRoboto
+  window.ShadyCSS
+  window.ShadyDOM
+
+youtube_script_004_inline.js: 2 APIs
+  Array.prototype
+  Symbol.iterator
+
+youtube_script_005_inline.js: 18 APIs
+  addEventListener
+  getAttribute
+  getTime
+  indexOf
+  navigator.userAgent
+  navigator.userAgentData
+  navigator.userAgentData.brands
+  navigator.userAgentData.brands.length
+  performance.timing.responseStart
+  push
+  removeEventListener
+  requestAnimationFrame
+  setTimeout
+  toLowerCase
+  window.performance
+  window.performance.now
+  window.performance.timing
+  window.performance.timing.navigationStart
+
+youtube_script_006_external.js: 82 APIs
+  addEventListener
+  Array.from
+  Array.isArray
+  Array.prototype
+  cancel
+  clone
+  concat
+  console.warn
+  create
+  createElement
+  createElementNS
+  Date.now
+  defineProperty
+  document.createElement
+  document.createElementNS
+  document.documentElement
+  document.documentElement.animate
+  document.documentElement.style
+  document.timeline.getAnimations
+  exec
+  filter
+  forEach
+  from
+  getComputedStyle
+  getOwnPropertyNames
+  indexOf
+  isFinite
+  isNaN
+  join
+  lastIndexOf
+  map
+  Math.abs
+  Math.floor
+  Math.max
+  Math.min
+  Math.round
+  Math.sign
+  Number.MAX_VALUE
+  Object.create
+  Object.defineProperty
+  Object.getOwnPropertyNames
+  pause
+  performance.now
+  play
+  pop
+  push
+  remove
+  removeEventListener
+  replace
+  requestAnimationFrame
+  reverse
+  search
+  setTimeout
+  shift
+  slice
+  sort
+  splice
+  split
+  substr
+  Symbol.iterator
+  test
+  toFixed
+  toLowerCase
+  toUpperCase
+  trim
+  unshift
+  window.Animation
+  window.cancelAnimationFrame
+  window.document
+  window.document.timeline
+  window.Element.prototype.animate
+  window.Element.prototype.getAnimations
+  window.getComputedStyle
+  window.GroupEffect
+  window.GroupEffect.prototype
+  window.KeyframeEffect
+  window.performance
+  window.Promise
+  window.requestAnimationFrame
+  window.SequenceEffect
+  window.SequenceEffect.prototype
+  window.Symbol
+
+youtube_script_007_external.js: 16 APIs
+  concat
+  defineProperty
+  get
+  HTMLElement
+  match
+  navigator.userAgent.match
+  Object.defineProperty
+  Object.setPrototypeOf
+  set
+  setPrototypeOf
+  window.customElements
+  window.customElements.define
+  window.customElements.get
+  window.HTMLElement
+  window.HTMLElement.es5Shimmed
+  window.HTMLElement.prototype
+
+youtube_script_008_external.js: 150 APIs
+  addEventListener
+  adoptNode
+  appendChild
+  Array.from
+  Array.isArray
+  Array.prototype
+  assign
+  composedPath
+  create
+  createDocumentFragment
+  createElement
+  createElementNS
+  createTextNode
+  CustomEvent
+  Date.now
+  defineProperties
+  defineProperty
+  delete
+  document.__shady_native_activeElement
+  document.activeElement
+  document.addEventListener
+  document.body
+  document.contains
+  document.createComment
+  document.createDocumentFragment
+  document.createElement
+  document.createTextNode
+  document.createTreeWalker
+  document.documentElement
+  document.documentElement.__shady_native_contains
+  document.head
+  document.head.appendChild
+  document.head.querySelector
+  document.implementation.createHTMLDocument
+  document.readyState
+  document.removeEventListener
+  DocumentFragment
+  Event
+  exec
+  fetch
+  filter
+  forEach
+  from
+  get
+  getAttribute
+  getComputedStyle
+  getOwnPropertyDescriptor
+  getOwnPropertyNames
+  getPrototypeOf
+  getRootNode
+  has
+  hasAttribute
+  hasOwnProperty
+  HTMLElement
+  HTMLSlotElement
+  HTMLTemplateElement
+  indexOf
+  insertBefore
+  isNaN
+  join
+  lastIndexOf
+  map
+  match
+  matchMedia
+  Math.min
+  MouseEvent
+  MutationObserver
+  navigator.userAgent.match
+  Object.assign
+  Object.create
+  Object.defineProperties
+  Object.defineProperty
+  Object.getOwnPropertyDescriptor
+  Object.getOwnPropertyNames
+  Object.getPrototypeOf
+  Object.setPrototypeOf
+  parent.start
+  parent.type
+  parseInt
+  pop
+  Promise.resolve
+  push
+  querySelector
+  querySelectorAll
+  reduce
+  remove
+  removeChild
+  removeEventListener
+  replace
+  replaceChild
+  requestAnimationFrame
+  reverse
+  set
+  setAttribute
+  setPrototypeOf
+  ShadowRoot
+  shift
+  slice
+  some
+  sort
+  splice
+  split
+  stopImmediatePropagation
+  substring
+  Symbol.iterator
+  test
+  then
+  trim
+  unshift
+  window.__shady_native_addEventListener
+  window.addEventListener
+  window.console.error
+  window.CSS
+  window.CustomElementRegistry.prototype
+  window.customElements
+  window.customElements.define
+  window.customElements.polyfillWrapFlushCallback
+  window.CustomEvent
+  window.document
+  window.enableHotReplacement
+  window.Event
+  window.EventTarget
+  window.EventTarget.prototype
+  window.getComputedStyle
+  window.HTMLImports
+  window.HTMLImports.whenReady
+  window.HTMLSlotElement
+  window.HTMLTemplateElement
+  window.HTMLTemplateElement.prototype
+  window.matchMedia
+  window.MouseEvent
+  window.removeEventListener
+  window.ShadowRoot
+  window.ShadyCSS
+  window.ShadyCSS.ApplyShim
+  window.ShadyCSS.cssBuild
+  window.ShadyCSS.CustomStyleInterface
+  window.ShadyCSS.disableRuntime
+  window.ShadyCSS.nativeCss
+  window.ShadyCSS.ScopingShim
+  window.shadyCSSStyleTransformHooks
+  window.ShadyDOM
+  window.ShadyDOM.handlesDynamicScoping
+  window.ShadyDOM.inUse
+  window.ShadyDOM.nativeMethods.querySelectorAll.call
+  window.ShadyDOM.nativeMethods.setAttribute.call
+  window.ShadyDOM.wrap
+  window.WebComponents
+  window.WebComponents.flags
+  XMLHttpRequest
+
+youtube_script_009_external.js: 29 APIs
+  addEventListener
+  Array.isArray
+  clearInterval
+  defineProperty
+  exec
+  filter
+  forEach
+  getBoundingClientRect
+  getComputedStyle
+  indexOf
+  IntersectionObserver
+  isNaN
+  join
+  map
+  Math.max
+  Math.min
+  MutationObserver
+  Object.defineProperty
+  parseFloat
+  performance.now
+  push
+  removeEventListener
+  setInterval
+  setTimeout
+  slice
+  some
+  sort
+  splice
+  split
+
+youtube_script_010_inline.js: 2 APIs
+  window.ytcsi
+  window.ytcsi.tick
+
+youtube_script_011_inline.js: 9 APIs
+  performance.js
+  performance.vflset
+  set
+  window.innerHeight
+  window.innerWidth
+  window.yt
+  window.ytcfg
+  window.ytcfg.obfuscatedData_
+  window.ytplayer
+
+youtube_script_012_inline.js: 2 APIs
+  window.ytcsi
+  window.ytcsi.tick
+
+youtube_script_013_inline.js: 4 APIs
+  addEventListener
+  window.addEventListener
+  window.ytAtN
+  window.ytAtP
+
+youtube_script_014_external.js: 37 APIs
+  addEventListener
+  Array.prototype
+  cancelAnimationFrame
+  cancelIdleCallback
+  clearTimeout
+  Date.now
+  defineProperty
+  document.addEventListener
+  document.hidden
+  document.removeEventListener
+  getOwnPropertyDescriptor
+  hasOwnProperty
+  Math.max
+  Math.random
+  Object.create
+  Object.defineProperties
+  Object.defineProperty
+  Object.getOwnPropertyDescriptor
+  Object.prototype
+  Object.setPrototypeOf
+  Object.values
+  push
+  removeEventListener
+  requestAnimationFrame
+  requestIdleCallback
+  setTimeout
+  shift
+  split
+  Symbol.dispose
+  Symbol.iterator
+  values
+  window.cancelAnimationFrame
+  window.cancelIdleCallback
+  window.clearTimeout
+  window.requestAnimationFrame
+  window.requestIdleCallback
+  window.setTimeout
+
+youtube_script_015_external.js: 6 APIs
+  indexOf
+  Math.min
+  Math.pow
+  Object.prototype
+  shift
+  split
+
+youtube_script_016_inline.js: 2 APIs
+  window.ytcsi
+  window.ytcsi.tick
+
+youtube_script_017_inline.js: 3 APIs
+  document.fonts
+  document.fonts.load
+  load
+
+youtube_script_019_inline.js: 2 APIs
+  window.ytcsi
+  window.ytcsi.tick
+
+youtube_script_020_inline.js: 5 APIs
+  appendChild
+  createElement
+  document.createElement
+  document.getElementsByTagName
+  getElementsByTagName
+
+youtube_script_021_inline.js: 35 APIs
+  appendChild
+  Array.prototype
+  concat
+  createElement
+  delete
+  document.body.appendChild
+  document.querySelector
+  get
+  has
+  isExtensible
+  join
+  Math.ceil
+  Math.floor
+  Math.max
+  Math.min
+  Math.random
+  Math.round
+  Object.defineProperties
+  Object.defineProperty
+  Object.isExtensible
+  Object.prototype
+  Object.seal
+  Object.values
+  push
+  querySelector
+  removeChild
+  seal
+  set
+  shift
+  split
+  Symbol.iterator
+  toLowerCase
+  toString
+  values
+  window.document
+
+youtube_script_022_inline.js: 2 APIs
+  document.querySelector
+  querySelector
+
+youtube_script_023_inline.js: 2 APIs
+  window.ytcsi
+  window.ytcsi.tick
+
+youtube_script_024_external.js: 490 APIs
+  abort
+  AbortController
+  addEventListener
+  addSourceBuffer
+  append
+  appendBuffer
+  appendChild
+  Array.from
+  Array.isArray
+  Array.prototype
+  arrayBuffer
+  ArrayBuffer.isView
+  assign
+  at
+  atob
+  AudioContext
+  BigInt.asIntN
+  BigInt.asUintN
+  Blob
+  blur
+  BroadcastChannel
+  btoa
+  cancel
+  cancelAnimationFrame
+  catch
+  charAt
+  charCodeAt
+  clearInterval
+  clearTimeout
+  click
+  clone
+  cloneNode
+  close
+  closest
+  composedPath
+  concat
+  console.error
+  console.groupCollapsed
+  console.groupEnd
+  console.log
+  console.warn
+  contains
+  copyWithin
+  create
+  createElement
+  createElementNS
+  createObjectURL
+  createTextNode
+  crypto.getRandomValues
+  crypto.subtle
+  CustomEvent
+  Date.now
+  Date.parse
+  decodeURI
+  decodeURIComponent
+  defineProperty
+  delete
+  dispatchEvent
+  document.activeElement
+  document.activeElement.blur
+  document.addEventListener
+  document.body
+  document.body.scrollLeft
+  document.body.scrollTop
+  document.createElement
+  document.createElementNS
+  document.createEvent
+  document.createRange
+  document.createTextNode
+  document.documentElement
+  document.documentElement.getAttribute
+  document.documentElement.scrollLeft
+  document.documentElement.scrollTop
+  document.documentElement.style
+  document.documentMode
+  document.domain
+  document.execCommand
+  document.exitFullscreen
+  document.exitPictureInPicture
+  document.featurePolicy
+  document.getElementById
+  document.getElementsByClassName
+  document.getElementsByTagName
+  document.hasFocus
+  document.head.appendChild
+  document.head.removeChild
+  document.implementation.createHTMLDocument
+  document.location
+  document.location.hostname
+  document.location.hostname.endsWith
+  document.location.href
+  document.location.origin
+  document.location.port
+  document.location.protocol
+  document.location.toString
+  document.pictureInPictureElement
+  document.queryCommandSupported
+  document.querySelector
+  document.querySelectorAll
+  document.readyState
+  document.referrer
+  document.referrer.substring
+  document.removeEventListener
+  document.visibilityState
+  DOMParser
+  encodeURI
+  encodeURIComponent
+  endOfStream
+  endsWith
+  entries
+  Error.captureStackTrace
+  Error.stackTraceLimit
+  escape
+  Event
+  every
+  exec
+  exitFullscreen
+  fetch
+  File
+  fill
+  filter
+  finally
+  find
+  findIndex
+  focus
+  forEach
+  FormData
+  freeze
+  from
+  fromEntries
+  get
+  getAll
+  getAllResponseHeaders
+  getAttribute
+  getBoundingClientRect
+  getComputedStyle
+  getElementById
+  getElementsByClassName
+  getElementsByTagName
+  getOwnPropertyDescriptor
+  getPrototypeOf
+  getReader
+  getResponseHeader
+  getRootNode
+  getSelection
+  getTime
+  globalThis.performance
+  globalThis.sessionStorage
+  globalThis.sessionStorage.getItem
+  globalThis.sessionStorage.removeItem
+  globalThis.sessionStorage.setItem
+  globalThis.TextEncoder
+  globalThis.trustedTypes
+  has
+  hasAttribute
+  hasOwnProperty
+  Headers
+  history.length
+  HTMLElement
+  HTMLMediaElement
+  HTMLStyleElement
+  HTMLVideoElement
+  Image
+  includes
+  indexOf
+  insertBefore
+  IntersectionObserver
+  Intl.DateTimeFormat
+  Intl.NumberFormat
+  isExtensible
+  isFinite
+  isFrozen
+  isNaN
+  join
+  json
+  JSON.parse
+  JSON.stringify
+  keys
+  lastIndexOf
+  load
+  localStorage.get
+  localStorage.remove
+  localStorage.set
+  location.ancestorOrigins
+  location.ancestorOrigins.length
+  location.clone
+  location.hash
+  location.hostname
+  location.href
+  location.href.substring
+  location.origin
+  location.protocol
+  location.set
+  location.ZE
+  ManagedMediaSource
+  map
+  match
+  matchMedia
+  Math.abs
+  Math.ceil
+  Math.exp
+  Math.floor
+  Math.imul
+  Math.log
+  Math.log2
+  Math.max
+  Math.min
+  Math.PI
+  Math.pow
+  Math.random
+  Math.round
+  Math.sign
+  Math.sqrt
+  Math.trunc
+  MediaSource
+  moveTo
+  MutationObserver
+  navigator.clipboard.writeText
+  navigator.connection
+  navigator.cookieEnabled
+  navigator.geolocation
+  navigator.geolocation.getCurrentPosition
+  navigator.getBattery
+  navigator.hardwareConcurrency
+  navigator.mediaCapabilities
+  navigator.mediaCapabilities.decodingInfo
+  navigator.mediaSession
+  navigator.mediaSession.metadata
+  navigator.mediaSession.playbackState
+  navigator.mediaSession.setActionHandler
+  navigator.mediaSession.setPositionState
+  navigator.requestMediaKeySystemAccess
+  navigator.sendBeacon
+  navigator.share
+  navigator.standalone
+  navigator.userAgent
+  navigator.vendor
+  Number.isFinite
+  Number.isInteger
+  Number.isNaN
+  Number.isSafeInteger
+  Number.MAX_SAFE_INTEGER
+  Number.MAX_VALUE
+  Number.MIN_SAFE_INTEGER
+  Number.POSITIVE_INFINITY
+  Object.assign
+  Object.create
+  Object.defineProperties
+  Object.defineProperty
+  Object.entries
+  Object.freeze
+  Object.fromEntries
+  Object.getOwnPropertyDescriptor
+  Object.getPrototypeOf
+  Object.is
+  Object.isExtensible
+  Object.isFrozen
+  Object.keys
+  Object.prototype
+  Object.setPrototypeOf
+  Object.values
+  open
+  padStart
+  parseFloat
+  parseInt
+  pause
+  performance.clearResourceTimings
+  performance.getEntriesByName
+  performance.mark
+  performance.measure
+  performance.memory
+  performance.memory.jsHeapSizeLimit
+  performance.memory.totalJSHeapSize
+  performance.memory.usedJSHeapSize
+  performance.now
+  performance.onresourcetimingbufferfull
+  performance.timeOrigin
+  performance.timing
+  performance.timing.navigationStart
+  pipeThrough
+  play
+  pop
+  postMessage
+  preventDefault
+  Promise.all
+  Promise.race
+  Promise.reject
+  Promise.resolve
+  Promise.withResolvers
+  push
+  querySelector
+  querySelectorAll
+  read
+  reduce
+  Reflect.construct
+  remove
+  removeAttribute
+  removeChild
+  removeEventListener
+  replace
+  replaceAll
+  Request
+  requestAnimationFrame
+  requestFullscreen
+  requestIdleCallback
+  reset
+  ResizeObserver
+  Response
+  reverse
+  revokeObjectURL
+  screen.availTop
+  screen.availWidth
+  screen.height
+  screen.width
+  scrollTo
+  search
+  select
+  self.addEventListener
+  self.crossOriginIsolated
+  self.document
+  self.indexedDB.deleteDatabase
+  self.indexedDB.open
+  self.localStorage
+  self.location
+  self.location.protocol.slice
+  self.top
+  send
+  set
+  setAttribute
+  setInterval
+  setPrototypeOf
+  setRequestHeader
+  setTime
+  setTimeout
+  shift
+  slice
+  some
+  sort
+  splice
+  split
+  startsWith
+  stop
+  stopImmediatePropagation
+  stopPropagation
+  String.fromCharCode
+  String.prototype
+  substr
+  substring
+  SVGElement
+  Symbol.dispose
+  Symbol.for
+  Symbol.iterator
+  Symbol.observable
+  terminate
+  test
+  text
+  TextDecoder
+  TextEncoder
+  then
+  toFixed
+  toLocaleString
+  toLowerCase
+  top.document
+  top.location.hash
+  top.location.href
+  top.mraid
+  toString
+  toUpperCase
+  trim
+  unescape
+  unshift
+  URL
+  URL.createObjectURL
+  URL.revokeObjectURL
+  URLSearchParams
+  valueOf
+  values
+  WebAssembly
+  WebAssembly.compile
+  WebAssembly.instantiate
+  WebKitMediaSource
+  window.AbortController
+  window.addEventListener
+  window.android
+  window.android.webview
+  window.android.webview.getExperimentalMediaIntegrityTokenProvider
+  window.attmp
+  window.AudioContext
+  window.bgens
+  window.botguard
+  window.cast.receiver.platform.canDisplayType
+  window.clearInterval
+  window.clearTimeout
+  window.close
+  window.console.log
+  window.crypto
+  window.crypto.getRandomValues
+  window.devicePixelRatio
+  window.dispatchEvent
+  window.document
+  window.document.documentElement
+  window.document.elementFromPoint
+  window.document.pictureInPictureEnabled
+  window.EGn
+  window.event
+  window.fetch
+  window.Float32Array
+  window.FormData
+  window.getComputedStyle
+  window.getSelection
+  window.google_image_requests
+  window.h5vcc
+  window.h5vcc.cVal.getValue
+  window.H5vccPlatformService
+  window.H5vccScreen
+  window.H5vccScreen.GetDiagonal
+  window.HTMLMediaElement
+  window.HTMLVideoElement
+  window.innerHeight
+  window.innerWidth
+  window.Int32Array
+  window.IntersectionObserver
+  window.JSON
+  window.localStorage
+  window.localStorage.removeItem
+  window.location.ancestorOrigins
+  window.location.hostname
+  window.location.hostname.includes
+  window.location.hostname.split
+  window.location.href
+  window.location.origin
+  window.location.protocol
+  window.location.reload
+  window.location.search
+  window.ManagedMediaSource
+  window.ManagedMediaSource.isTypeSupported
+  window.matchMedia
+  window.MediaMetadata
+  window.MediaSource
+  window.MediaSource.isTypeSupported
+  window.navigator
+  window.navigator.msPointerEnabled
+  window.navigator.onLine
+  window.navigator.sendBeacon
+  window.onerror
+  window.open
+  window.origin
+  window.outerHeight
+  window.outerWidth
+  window.performance
+  window.performance.getEntriesByName
+  window.performance.timing.navigationStart
+  window.PressureObserver
+  window.Profiler
+  window.queueMicrotask
+  window.queueMicrotask.bind
+  window.ReadableStream
+  window.removeEventListener
+  window.Request
+  window.requestAnimationFrame
+  window.requestIdleCallback
+  window.screen
+  window.screen.height
+  window.screen.pixelDepth
+  window.screen.width
+  window.sessionStorage
+  window.sessionStorage.getItem
+  window.sessionStorage.removeItem
+  window.sessionStorage.setItem
+  window.setInterval
+  window.setTimeout
+  window.SourceBuffer
+  window.TextDecoder
+  window.TextEncoder
+  window.top
+  window.top.document
+  window.trayride
+  window.URL
+  window.URL.createObjectURL
+  window.WebAssembly
+  window.webkitAudioContext
+  window.WebKitMediaSource
+  window.WebKitPlaybackTargetAvailabilityEvent
+  window.yt
+  window.yt.msgs_
+  window.ytcfg
+  window.ytcfg.msgs
+  window.yterr
+  Worker
+  XMLHttpRequest
+
+youtube_script_025_inline.js: 3 APIs
+  document.querySelector
+  querySelector
+  remove
+
+youtube_script_026_inline.js: 17 APIs
+  document.getElementById
+  getElementById
+  window.pis
+  window.yt
+  window.yt.config_
+  window.yt.config_.WEB_PLAYER_CONTEXT_CONFIGS
+  window.yt.player
+  window.yt.player.Application
+  window.yt.player.Application.create
+  window.yt.player.Application.createAlternate
+  window.ytcsi
+  window.ytcsi.tick
+  window.ytplayer
+  window.ytplayer.bootstrapPlayerContainer
+  window.ytplayer.bootstrapPlayerResponse
+  window.ytplayer.bootstrapWebPlayerContextConfig
+  window.ytplayer.config
+
+youtube_script_027_inline.js: 2 APIs
+  document.querySelector
+  querySelector
+
+youtube_script_028_external.js: 122 APIs
+  abort
+  addEventListener
+  appendChild
+  Array.prototype
+  charCodeAt
+  clearTimeout
+  concat
+  console.warn
+  contains
+  createElement
+  createTextNode
+  CustomEvent
+  dispatchEvent
+  document.addEventListener
+  document.attachEvent
+  document.body
+  document.createElement
+  document.createEvent
+  document.createTextNode
+  document.detachEvent
+  document.dispatchEvent
+  document.getElementById
+  document.getElementsByTagName
+  document.readyState
+  document.referrer
+  document.removeEventListener
+  document.title
+  encodeURIComponent
+  every
+  exec
+  filter
+  forEach
+  FormData
+  getAttribute
+  getElementById
+  getElementsByTagName
+  getResponseHeader
+  getTime
+  globalThis.trustedTypes
+  history.pushState
+  history.replaceState
+  Image
+  indexOf
+  insertBefore
+  isNaN
+  join
+  JSON.parse
+  keys
+  lastIndexOf
+  map
+  match
+  Math.random
+  Math.round
+  navigator.userAgent.indexOf
+  Object.defineProperties
+  Object.defineProperty
+  Object.keys
+  Object.prototype
+  open
+  parseInt
+  pop
+  postMessage
+  preventDefault
+  push
+  querySelectorAll
+  remove
+  removeChild
+  removeEventListener
+  replace
+  Request
+  Response
+  scroll
+  scrollIntoView
+  send
+  setAttribute
+  setRequestHeader
+  setTimeout
+  shift
+  slice
+  some
+  sort
+  split
+  String.prototype
+  substring
+  Symbol.iterator
+  test
+  toLowerCase
+  toUpperCase
+  trim
+  URL
+  window._spf_state
+  window.addEventListener
+  window.attachEvent
+  window.chrome
+  window.detachEvent
+  window.history
+  window.history.back
+  window.history.pushState
+  window.history.state
+  window.location.hash
+  window.location.href
+  window.location.reload
+  window.navigator.maxTouchPoints
+  window.navigator.msMaxTouchPoints
+  window.pageXOffset
+  window.pageYOffset
+  window.performance
+  window.performance.clearResourceTimings
+  window.performance.getEntriesByName
+  window.performance.mozClearResourceTimings
+  window.performance.msClearResourceTimings
+  window.performance.now
+  window.performance.oClearResourceTimings
+  window.performance.timing
+  window.performance.timing.navigationStart
+  window.performance.webkitClearResourceTimings
+  window.postMessage
+  window.removeEventListener
+  window.scroll
+  window.scroll.apply
+  window.setTimeout
+  XMLHttpRequest
+
+youtube_script_030_external.js: 64 APIs
+  abort
+  addEventListener
+  Array.prototype
+  clearTimeout
+  concat
+  console.warn
+  createElement
+  document.createElement
+  exec
+  forEach
+  FormData
+  getResponseHeader
+  getTime
+  indexOf
+  isNaN
+  join
+  JSON.parse
+  keys
+  lastIndexOf
+  match
+  Math.random
+  Math.round
+  Object.defineProperties
+  Object.defineProperty
+  Object.keys
+  Object.prototype
+  open
+  parseInt
+  pop
+  postMessage
+  push
+  removeEventListener
+  replace
+  Request
+  Response
+  send
+  setRequestHeader
+  setTimeout
+  slice
+  some
+  split
+  String.prototype
+  substring
+  Symbol.iterator
+  test
+  toLowerCase
+  toUpperCase
+  trim
+  URL
+  window._spf_state
+  window.addEventListener
+  window.attachEvent
+  window.chrome
+  window.detachEvent
+  window.location.href
+  window.performance
+  window.performance.getEntriesByName
+  window.performance.now
+  window.performance.timing
+  window.performance.timing.navigationStart
+  window.postMessage
+  window.removeEventListener
+  window.setTimeout
+  XMLHttpRequest
+
+youtube_script_031_inline.js: 2 APIs
+  window.ytcsi
+  window.ytcsi.tick
+
+youtube_script_032_inline.js: 2 APIs
+  document.body.clientWidth
+  set
+
+youtube_script_033_inline.js: 2 APIs
+  window.ytcsi
+  window.ytcsi.tick
+
+youtube_script_034_inline.js: 2 APIs
+  window.ytcsi
+  window.ytcsi.tick
+
+youtube_script_035_inline.js: 2 APIs
+  window.ytcsi
+  window.ytcsi.tick
+
+youtube_script_036_inline.js: 2 APIs
+  window.ytcsi
+  window.ytcsi.tick
+
+youtube_script_037_external.js: 785 APIs
+  abort
+  AbortController
+  AbortSignal
+  addEventListener
+  after
+  alert
+  append
+  appendChild
+  Array.from
+  Array.isArray
+  Array.prototype
+  arrayBuffer
+  ArrayBuffer.isView
+  assign
+  atob
+  attachShadow
+  Audio
+  AudioContext
+  BigInt.asIntN
+  BigInt.asUintN
+  blob
+  Blob
+  blur
+  BroadcastChannel
+  btoa
+  cancel
+  cancelAnimationFrame
+  cancelIdleCallback
+  catch
+  charAt
+  charCodeAt
+  clearInterval
+  clearTimeout
+  click
+  clone
+  cloneNode
+  close
+  closest
+  codePointAt
+  composedPath
+  concat
+  console.debug
+  console.error
+  console.groupCollapsed
+  console.groupEnd
+  console.info
+  console.log
+  console.time
+  console.timeEnd
+  console.warn
+  contains
+  create
+  createDocumentFragment
+  createElement
+  createElementNS
+  createObjectURL
+  createTextNode
+  crypto.getRandomValues
+  crypto.subtle
+  customElements.define
+  customElements.get
+  customElements.polyfillWrapFlushCallback
+  CustomEvent
+  Date.now
+  Date.parse
+  Date.prototype
+  Date.UTC
+  decodeURI
+  decodeURIComponent
+  defineProperties
+  defineProperty
+  delete
+  dispatchEvent
+  document.activeElement
+  document.activeElement.blur
+  document.activeElement.tagName
+  document.addEventListener
+  document.adoptedStyleSheets
+  document.adoptedStyleSheets.length
+  document.all
+  document.baseURI
+  document.body
+  document.body.addEventListener
+  document.body.animate
+  document.body.appendChild
+  document.body.classList.add
+  document.body.classList.contains
+  document.body.classList.remove
+  document.body.className.indexOf
+  document.body.clientHeight
+  document.body.clientWidth
+  document.body.contains
+  document.body.getAttribute
+  document.body.hasAttribute
+  document.body.prepend
+  document.body.removeAttribute
+  document.body.removeChild
+  document.body.scrollLeft
+  document.body.scrollTop
+  document.body.setAttribute
+  document.body.style.backgroundColor
+  document.body.style.colorScheme
+  document.body.style.cursor
+  document.body.style.overflow
+  document.body.style.overflowY
+  document.body.style.overscrollBehavior
+  document.body.style.top
+  document.cookie
+  document.createComment
+  document.createDocumentFragment
+  document.createElement
+  document.createElementNS
+  document.createEvent
+  document.createRange
+  document.createTextNode
+  document.createTreeWalker
+  document.currentScript
+  document.currentScript.src.indexOf
+  document.defaultView
+  document.dispatchEvent
+  document.documentElement
+  document.documentElement.clientHeight
+  document.documentElement.clientWidth
+  document.documentElement.getAttribute
+  document.documentElement.hasAttribute
+  document.documentElement.lang
+  document.documentElement.scrollLeft
+  document.documentElement.scrollTop
+  document.documentElement.setCapture
+  document.documentElement.style
+  document.documentElement.style.overscrollBehavior
+  document.documentElement.tagName.toLowerCase
+  document.domain
+  document.elementFromPoint
+  document.execCommand
+  document.featurePolicy
+  document.getElementById
+  document.getElementsByTagName
+  document.getSelection
+  document.hasStorageAccess
+  document.head
+  document.head.append
+  document.head.appendChild
+  document.head.removeChild
+  document.head.style.touchAction
+  document.implementation.createHTMLDocument
+  document.importNode
+  document.JSC$8385_onVisibilityChange.pipe
+  document.location.hostname
+  document.location.hostname.endsWith
+  document.location.href
+  document.location.port
+  document.location.protocol
+  document.location.toString
+  document.pictureInPictureElement
+  document.postMessage
+  document.prerendering
+  document.querySelector
+  document.querySelectorAll
+  document.readyState
+  document.referrer
+  document.releaseCapture
+  document.removeEventListener
+  document.requestStorageAccessFor
+  document.scrollingElement
+  document.scrollingElement.scrollLeft
+  document.scrollingElement.scrollTop
+  document.startViewTransition
+  document.styleSheets
+  document.timeline
+  document.timeline.play
+  document.title
+  document.visibilityState
+  document.wasDiscarded
+  DocumentFragment
+  DOMTokenList
+  encodeURI
+  encodeURIComponent
+  endsWith
+  entries
+  Error.apply
+  Error.call
+  Error.captureStackTrace
+  escape
+  Event
+  every
+  exec
+  fetch
+  File
+  FileReader
+  fill
+  filter
+  finally
+  find
+  findIndex
+  flat
+  flatMap
+  focus
+  FocusEvent
+  forEach
+  FormData
+  formData
+  freeze
+  from
+  fromEntries
+  get
+  getAll
+  getAllResponseHeaders
+  getAttribute
+  getBoundingClientRect
+  getClientRects
+  getComputedStyle
+  getElementById
+  getElementsByClassName
+  getElementsByTagName
+  getFullYear
+  getOwnPropertyDescriptor
+  getOwnPropertyDescriptors
+  getOwnPropertyNames
+  getOwnPropertySymbols
+  getPrototypeOf
+  getReader
+  getResponseHeader
+  getRootNode
+  getSelection
+  getTime
+  globalThis.HTMLElement
+  globalThis.performance
+  globalThis.performance.getEntriesByType
+  globalThis.requestIdleCallback
+  globalThis.ResizeObserver
+  globalThis.sessionStorage
+  globalThis.sessionStorage.getItem
+  globalThis.sessionStorage.removeItem
+  globalThis.sessionStorage.setItem
+  globalThis.TextEncoder
+  globalThis.trustedTypes
+  globalThis.XRegExp
+  globalThis.Zone
+  has
+  hasAttribute
+  hasOwn
+  hasOwnProperty
+  Headers
+  history.length
+  history.pushState
+  history.replaceState
+  history.state
+  HTMLAnchorElement
+  HTMLButtonElement
+  HTMLCanvasElement
+  HTMLDivElement
+  HTMLElement
+  HTMLFencedFrameElement
+  HTMLFormElement
+  HTMLIFrameElement
+  HTMLImageElement
+  HTMLInputElement
+  HTMLLinkElement
+  HTMLOptionElement
+  HTMLSelectElement
+  HTMLStyleElement
+  HTMLTemplateElement
+  HTMLTextAreaElement
+  HTMLUnknownElement
+  HTMLVideoElement
+  Image
+  importNode
+  includes
+  indexOf
+  insertBefore
+  IntersectionObserver
+  Intl.DateTimeFormat
+  Intl.NumberFormat
+  isExtensible
+  isFinite
+  isFrozen
+  isNaN
+  join
+  json
+  JSON.parse
+  JSON.parseWrapper
+  JSON.stringify
+  keys
+  lastIndexOf
+  load
+  localStorage.get
+  localStorage.remove
+  localStorage.set
+  location.host
+  location.hostname
+  location.hostname.indexOf
+  location.hostname.match
+  location.href
+  location.origin
+  location.pathname
+  location.port
+  location.protocol
+  location.reload
+  location.search
+  ManagedMediaSource
+  map
+  Map.prototype
+  match
+  matches
+  matchMedia
+  Math.abs
+  Math.acos
+  Math.asin
+  Math.atan
+  Math.atan2
+  Math.ceil
+  Math.cos
+  Math.exp
+  Math.floor
+  Math.hypot
+  Math.imul
+  Math.LN2
+  Math.log
+  Math.log2
+  Math.max
+  Math.min
+  Math.PI
+  Math.pow
+  Math.random
+  Math.round
+  Math.sign
+  Math.sin
+  Math.sqrt
+  Math.SQRT2
+  Math.tan
+  Math.trunc
+  Math.uuid
+  MediaSource
+  MouseEvent
+  moveTo
+  MutationObserver
+  navigator.clipboard
+  navigator.clipboard.write
+  navigator.clipboard.writeText
+  navigator.cookieEnabled
+  navigator.deviceMemory
+  navigator.geolocation
+  navigator.geolocation.getCurrentPosition
+  navigator.hardwareConcurrency
+  navigator.keyboard
+  navigator.locks
+  navigator.mediaDevices
+  navigator.mediaDevices.getUserMedia
+  navigator.onLine
+  navigator.permissions
+  navigator.permissions.query
+  navigator.sendBeacon
+  navigator.serviceWorker
+  navigator.serviceWorker.addEventListener
+  navigator.serviceWorker.getRegistration
+  navigator.serviceWorker.getRegistrations
+  navigator.serviceWorker.ready.then
+  navigator.serviceWorker.register
+  navigator.share
+  navigator.standalone
+  navigator.storage
+  navigator.storage.estimate
+  navigator.userActivation
+  navigator.userAgent
+  navigator.userAgent.includes
+  navigator.userAgent.indexOf
+  navigator.userAgent.match
+  navigator.userAgentData.getHighEntropyValues
+  navigator.vendor
+  normalize
+  Number.isFinite
+  Number.isInteger
+  Number.isNaN
+  Number.isSafeInteger
+  Number.MAX_SAFE_INTEGER
+  Number.MAX_VALUE
+  Number.MIN_SAFE_INTEGER
+  Number.NEGATIVE_INFINITY
+  Number.parseFloat
+  Number.parseInt
+  Number.POSITIVE_INFINITY
+  Object.assign
+  Object.create
+  Object.defineProperties
+  Object.defineProperty
+  Object.entries
+  Object.freeze
+  Object.fromEntries
+  Object.getOwnPropertyDescriptor
+  Object.getOwnPropertyDescriptors
+  Object.getOwnPropertyNames
+  Object.getOwnPropertySymbols
+  Object.getPrototypeOf
+  Object.hasOwn
+  Object.hasOwnProperty
+  Object.is
+  Object.isExtensible
+  Object.isFrozen
+  Object.keys
+  Object.my_load
+  Object.prototype
+  Object.seal
+  Object.setPrototypeOf
+  Object.values
+  OffscreenCanvas
+  open
+  overrideMimeType
+  padStart
+  parent.header
+  parent.parent
+  parent.start
+  parseFloat
+  parseInt
+  pause
+  performance.getEntriesByName
+  performance.getEntriesByType
+  performance.mark
+  performance.measure
+  performance.now
+  performance.timing
+  performance.timing.navigationStart
+  PerformanceObserver
+  pipeThrough
+  play
+  pop
+  postMessage
+  prepend
+  preventDefault
+  Promise.all
+  Promise.allSettled
+  Promise.prototype
+  Promise.race
+  Promise.reject
+  Promise.resolve
+  Promise.toString
+  prompt
+  push
+  querySelector
+  querySelectorAll
+  queueMicrotask
+  read
+  reduce
+  Reflect.closure
+  Reflect.construct
+  Reflect.decorate
+  Reflect.defineMetadata
+  Reflect.getMetadata
+  Reflect.metadata
+  Reflect.ownKeys
+  Reflect.setPrototypeOf
+  RegExp.prototype
+  releaseLock
+  remove
+  removeAttribute
+  removeChild
+  removeEventListener
+  repeat
+  replace
+  replaceAll
+  replaceChild
+  Request
+  requestAnimationFrame
+  requestFullscreen
+  requestIdleCallback
+  reset
+  ResizeObserver
+  Response
+  reverse
+  revokeObjectURL
+  screen.availTop
+  screen.availWidth
+  screen.height
+  screen.width
+  scroll
+  scrollBy
+  scrollIntoView
+  scrollTo
+  seal
+  search
+  select
+  self.addEventListener
+  self.crossOriginIsolated
+  self.document
+  self.indexedDB.deleteDatabase
+  self.indexedDB.open
+  self.localStorage
+  self.localStorage.removeItem
+  self.location
+  self.location.origin
+  self.location.protocol.slice
+  self.sessionStorage
+  self.sessionStorage.removeItem
+  self.top
+  send
+  ServiceWorker
+  sessionStorage.remove
+  sessionStorage.set
+  set
+  Set.prototype
+  setAttribute
+  setFullYear
+  setInterval
+  setPrototypeOf
+  setRequestHeader
+  setTime
+  setTimeout
+  ShadowRoot
+  shift
+  slice
+  some
+  sort
+  splice
+  split
+  startsWith
+  stop
+  stopImmediatePropagation
+  stopPropagation
+  String.fromCharCode
+  String.fromCodePoint
+  String.prototype
+  String.raw
+  structuredClone
+  submit
+  substr
+  substring
+  SVGElement
+  SVGGraphicsElement
+  Symbol.asyncIterator
+  Symbol.dispose
+  Symbol.for
+  Symbol.iterator
+  Symbol.observable
+  test
+  text
+  TextDecoder
+  TextEncoder
+  then
+  toExponential
+  toFixed
+  toLowerCase
+  top.bar.renderer.css.js
+  top.location.href
+  toPrecision
+  toString
+  toUpperCase
+  trim
+  unescape
+  unshift
+  URL
+  URL.createObjectURL
+  URL.revokeObjectURL
+  URLSearchParams
+  valueOf
+  values
+  window.___jsl.hefn
+  window.__onGCastApiAvailable
+  window._attn_data
+  window._DumpException
+  window._F_combinedSignature
+  window._F_cssRowKey
+  window._F_installCss
+  window.AbortController
+  window.addEventListener
+  window.alert
+  window.attmp
+  window.AudioContext
+  window.bgens
+  window.btoa
+  window.caches
+  window.cancelAnimationFrame
+  window.cancelIdleCallback
+  window.chrome
+  window.clearInterval
+  window.clearTimeout
+  window.close
+  window.COMPILED
+  window.console.log
+  window.crypto
+  window.crypto.getRandomValues
+  window.crypto.subtle
+  window.CSS
+  window.CSS.supports
+  window.customElements
+  window.customElements.define
+  window.customElements.polyfillWrapFlushCallback
+  window.dataLayer
+  window.dataLayer.push
+  window.devicePixelRatio
+  window.dispatchEvent
+  window.document
+  window.document.baseURI
+  window.document.body
+  window.document.documentElement
+  window.document.head.appendChild
+  window.document.location.href
+  window.document.visibilityState
+  window.documentPictureInPicture
+  window.event
+  window.familyDialogHistory
+  window.fetch
+  window.focus
+  window.FormData
+  window.frames
+  window.ga
+  window.ga.q
+  window.getComputedStyle
+  window.getSelection
+  window.google
+  window.google.gr
+  window.grecaptcha
+  window.Hammer
+  window.history
+  window.history.back
+  window.history.forward
+  window.history.pushState
+  window.history.replaceState
+  window.history.scrollRestoration
+  window.history.state
+  window.HTMLImports
+  window.HTMLImports.whenReady
+  window.HTMLTemplateElement
+  window.innerHeight
+  window.innerWidth
+  window.Int32Array
+  window.IntersectionObserver
+  window.JSCompiler_renameProperty
+  window.JSON
+  window.loadGuideDataHook
+  window.localStorage
+  window.localStorage.setItem
+  window.location
+  window.location.hash
+  window.location.host
+  window.location.hostname
+  window.location.hostname.includes
+  window.location.hostname.split
+  window.location.href
+  window.location.href.includes
+  window.location.href.split
+  window.location.origin
+  window.location.pathname
+  window.location.pathname.indexOf
+  window.location.protocol
+  window.location.reload
+  window.location.search
+  window.lottie
+  window.ManagedMediaSource
+  window.ManagedMediaSource.isTypeSupported
+  window.matchMedia
+  window.MediaSource
+  window.MediaSource.isTypeSupported
+  window.MouseEvent
+  window.MutationObserver
+  window.nativeMessageListener
+  window.nativeMessageListener.onmessage
+  window.navigator
+  window.navigator.onLine
+  window.navigator.presentation
+  window.navigator.sendBeacon
+  window.navigator.userAgent.indexOf
+  window.navigator.userAgent.match
+  window.Notification
+  window.OfflineAudioContext
+  window.onerror
+  window.onLegacyPolymerFunctionDefinedCallback
+  window.origin
+  window.outerHeight
+  window.pageXOffset
+  window.pageYOffset
+  window.parent
+  window.parent.document
+  window.parent.postMessage
+  window.payments
+  window.performance
+  window.performance.getEntriesByName
+  window.performance.getEntriesByType
+  window.performance.now
+  window.performance.now.bind
+  window.performance.timeOrigin
+  window.PointerEvent
+  window.Polymer
+  window.Polymer._polymerFn
+  window.Polymer.allowTemplateFromDomModule
+  window.Polymer.Element
+  window.Polymer.fastDomIf
+  window.Polymer.legacyNoObservedAttributes
+  window.Polymer.legacyOptimizations
+  window.Polymer.legacyUndefined
+  window.Polymer.legacyWarnings
+  window.Polymer.orderedComputed
+  window.Polymer.removeNestedTemplates
+  window.Polymer.rootPath
+  window.Polymer.sanitizeDOMValue
+  window.Polymer.setPassiveTouchGestures
+  window.Polymer.strictTemplatePolicy
+  window.Polymer.suppressTemplateNotifications
+  window.Polymer.syncInitialRender
+  window.Polymer.useAdoptedStyleSheetsWithBuiltCSS
+  window.PolymerFakeBaseClass
+  window.PolymerFakeBaseClassWithoutHtml
+  window.polymerSkipLoadingFontRoboto
+  window.postMessage
+  window.PROPERTY_ACCESS_MAP
+  window.Proxy
+  window.queueMicrotask
+  window.ReadableStream
+  window.Reflect
+  window.Reflect.getMetadata
+  window.removeEventListener
+  window.Request
+  window.requestAnimationFrame
+  window.requestAnimationFrame.bind
+  window.requestIdleCallback
+  window.ResizeObserver
+  window.screen
+  window.screen.availHeight
+  window.screen.availWidth
+  window.scrollTo
+  window.scrollX
+  window.scrollY
+  window.self
+  window.self.location.href
+  window.sessionStorage
+  window.sessionStorage.getItem
+  window.sessionStorage.removeItem
+  window.sessionStorage.setItem
+  window.setInterval
+  window.setTimeout
+  window.ShadyCSS
+  window.ShadyCSS.ApplyShim
+  window.ShadyCSS.cssBuild
+  window.ShadyCSS.CustomStyleInterface
+  window.ShadyCSS.disableRuntime
+  window.ShadyCSS.flushCustomStyles
+  window.ShadyCSS.nativeCss
+  window.ShadyCSS.prepareTemplate
+  window.ShadyCSS.ScopingShim
+  window.ShadyCSS.ScopingShim.flush
+  window.ShadyCSS.styleDocument
+  window.ShadyCSS.styleElement
+  window.ShadyCSS.styleSubtree
+  window.ShadyDOM
+  window.ShadyDOM.composedPath
+  window.ShadyDOM.flush
+  window.ShadyDOM.flushInitial
+  window.ShadyDOM.inUse
+  window.ShadyDOM.noPatch
+  window.ShadyDOM.observeChildren
+  window.ShadyDOM.patch
+  window.ShadyDOM.unobserveChildren
+  window.ShadyDOM.wrap
+  window.ShadyDOM.Wrapper
+  window.spf
+  window.TextDecoder
+  window.TextDecoderStream
+  window.TextEncoder
+  window.top
+  window.trustedTypes
+  window.trustedTypes.createPolicy
+  window.trustedTypes.emptyScript
+  window.trustedTypes.isHTML
+  window.trustedTypes.isScript
+  window.trustedTypes.isScriptURL
+  window.URLSearchParams
+  window.WebComponents
+  window.WebComponents.flags
+  window.webkit
+  window.webkitAudioContext
+  window.youtubewebview
+  window.youtubewebview.onmessage
+  window.yt
+  window.YT
+  window.yt.msgs_
+  window.yt.ready
+  window.YT.ready
+  window.ytcfg
+  window.ytcfg.msgs
+  window.ytcsi
+  window.yterr
+  window.ytInitialGuideData
+  window.ytInitialGuideDataPresent
+  Worker
+  XMLHttpRequest
+  XMLSerializer
+
+youtube_script_038_inline.js: 2 APIs
+  window.ytcsi
+  window.ytcsi.tick
+
+youtube_script_039_inline.js: 2 APIs
+  window.ytcsi
+  window.ytcsi.tick
+
+youtube_script_040_inline.js: 2 APIs
+  window.ytcsi
+  window.ytcsi.tick
+
+youtube_script_041_inline.js: 10 APIs
+  addEventListener
+  document.querySelector
+  indexOf
+  querySelector
+  removeAttribute
+  removeEventListener
+  window.addEventListener
+  window.onerror
+  window.removeEventListener
+  window.ytcsi
+
+youtube_script_042_inline.js: 2 APIs
+  window.ytcsi
+  window.ytcsi.tick
+
+youtube_script_043_inline.js: 7 APIs
+  addEventListener
+  removeEventListener
+  window.addEventListener
+  window.Polymer
+  window.removeEventListener
+  window.ytcsi
+  window.ytcsi.tick
+
+youtube_script_044_inline.js: 1 APIs
+  window.ytAtN
+
+youtube_script_045_inline.js: 2 APIs
+  window.ytcsi
+  window.ytcsi.tick
+
+youtube_script_047_inline.js: 2 APIs
+  window.ytcsi
+  window.ytcsi.tick
+
+youtube_script_049_inline.js: 1 APIs
+  set
+
+youtube_script_050_inline.js: 1 APIs
+  window.ytcsi
+

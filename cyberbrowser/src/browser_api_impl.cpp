@@ -4487,17 +4487,27 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     LOG_INFO("Missing APIs for script 024 set");
     
     // ===== Intl API Stub =====
-    // Minimal implementation
+    // Minimal implementation that satisfies YouTube's date/number formatting
+    // wrappers.  A real Intl implementation would be large; this stub provides
+    // the callable methods the page expects.
     const char *intl_stub = 
-        "var Intl = {"
-        "  DateTimeFormat: function() {"
-        "    this.resolvedOptions = function() { return {timeZone: 'UTC'}; };"
-        "  },"
-        "  NumberFormat: function(locale, options) {"
-        "    this.format = function(n) { return String(n); };"
-        "  }"
+        "if (typeof Intl === 'undefined') { var Intl = {}; }"
+        "Intl.DateTimeFormat = function(locales, options) { this._locales = locales; this._options = options; };"
+        "Intl.DateTimeFormat.prototype.format = function(date) {"
+        "  if (!date) date = new Date();"
+        "  return date.toLocaleString ? date.toLocaleString() : date.toString();"
         "};"
-        "Intl.NumberFormat.supportedLocalesOf = function(locales) { return locales; };";
+        "Intl.DateTimeFormat.prototype.resolvedOptions = function() {"
+        "  return {locale: 'en-US', calendar: 'gregory', numberingSystem: 'latn', timeZone: 'UTC',"
+        "          year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric'};"
+        "};"
+        "Intl.DateTimeFormat.supportedLocalesOf = function(locales) { return Array.isArray(locales) ? locales : ['en-US']; };"
+        "Intl.NumberFormat = function(locales, options) { this._locales = locales; this._options = options; };"
+        "Intl.NumberFormat.prototype.format = function(n) { return String(n); };"
+        "Intl.NumberFormat.prototype.resolvedOptions = function() {"
+        "  return {locale: 'en-US', numberingSystem: 'latn', style: 'decimal', minimumFractionDigits: 0, maximumFractionDigits: 3};"
+        "};"
+        "Intl.NumberFormat.supportedLocalesOf = function(locales) { return Array.isArray(locales) ? locales : ['en-US']; };";
     JS_Eval(ctx, intl_stub, strlen(intl_stub), "<intl_stub>", JS_EVAL_TYPE_GLOBAL);
     if (JS_HasException(ctx)) {
         GCValue exc = JS_GetException(ctx);

@@ -1022,6 +1022,39 @@ static void apply_youtube_dom_patch_patch(std::string &src) {
     fflush(stderr);
 }
 
+/* The inline player bootstrap sets window.ytplayer.config without width/height,
+ * so base.js's player creation helper throws "missing height argument".
+ * Inject sensible defaults so the player bootstrap completes.
+ */
+static void apply_youtube_player_bootstrap_patch(std::string &src) {
+    const char *pat = "window.ytplayer.config={args:{raw_player_response:window.ytplayer.bootstrapPlayerResponse}};";
+    size_t pos = src.find(pat);
+    if (pos != std::string::npos) {
+        const char *repl = "window.ytplayer.config={args:{raw_player_response:window.ytplayer.bootstrapPlayerResponse},width:640,height:360};";
+        src.replace(pos, strlen(pat), repl);
+        fprintf(stderr, "[PLAYER-BOOTSTRAP-PATCH] added width/height to ytplayer.config\n");
+        fflush(stderr);
+    }
+}
+
+/* YouTube's kevlar bundle computes a ShadyDOM helper `_.ht` as:
+ *   window.ShadyDOM&&window.ShadyDOM.noPatch&&window.ShadyDOM.wrap?window.ShadyDOM.wrap:
+ *   window.ShadyDOM?function(c){return ShadyDOM.patch(c)}:function(c){return c}
+ * Because we force ShadyDOM.inUse=false, the first branch is skipped and the
+ * fallback calls ShadyDOM.patch.  When our neutral stub is overwritten or
+ * captured without patch, that throws "not a function" inside ytd-app's
+ * connectedCallback.  Replace the fallback with a plain identity function.
+ */
+static void apply_youtube_shadydom_use_patch(std::string &src) {
+    const char *pat = "window.ShadyDOM?function(c){return ShadyDOM.patch(c)}:function(c){return c}";
+    size_t pos = src.find(pat);
+    if (pos != std::string::npos) {
+        src.replace(pos, strlen(pat), "function(c){return c}");
+        fprintf(stderr, "[SHADYDOM-USE-PATCH] replaced ShadyDOM.patch fallback\n");
+        fflush(stderr);
+    }
+}
+
 /* The webcomponents-sd polyfill captures Element.prototype.matches into a local
  * variable `ma` at load time.  In our engine the property may not be a function
  * at that exact moment, so `ma` ends up undefined and ShadyDOM's scoped
@@ -1046,17 +1079,24 @@ static void apply_shadydom_matches_patch(std::string &src) {
         fflush(stderr);
     }
     // Wrap rc.querySelector in a diagnostic try/catch so we can see exactly
-    // which sub-expression throws "not a function".
+    // which sub-expression throws "not a function".  The function body ends
+    // with a '}' just before ",querySelectorAll:function"; we must keep that
+    // closing brace outside the wrapper or the source becomes unbalanced.
     const char *qs_start = "querySelector:function(a){";
     pos = src.find(qs_start);
     if (pos != std::string::npos) {
         size_t body_start = pos + strlen(qs_start);
-        size_t body_end = src.find(",querySelectorAll:function", body_start);
-        if (body_end != std::string::npos) {
-            std::string wrapped = "try{" + src.substr(body_start, body_end - body_start) + "}catch(__ex){console.error('qs-throw',String(__ex),'K=',K,'this=',this&&this.nodeName,'sel=',a,'ma=',typeof ma,'nc=',typeof nc,'p=',typeof p,'slice=',typeof Array.prototype.slice);throw __ex;}";
-            src.replace(body_start, body_end - body_start, wrapped);
-            fprintf(stderr, "[MATCHES-PATCH] wrapped querySelector\n");
-            fflush(stderr);
+        size_t comma_pos = src.find(",querySelectorAll:function", body_start);
+        if (comma_pos != std::string::npos) {
+            size_t body_end = comma_pos;
+            while (body_end > body_start && src[body_end - 1] != '}') body_end--;
+            if (body_end > body_start) {
+                body_end--;  // exclude the function body's closing brace from the wrapped body
+                std::string wrapped = "try{" + src.substr(body_start, body_end - body_start) + "}catch(__ex){console.error('qs-throw',String(__ex),'K=',K,'this=',this&&this.nodeName,'sel=',a,'ma=',typeof ma,'nc=',typeof nc,'p=',typeof p,'slice=',typeof Array.prototype.slice);throw __ex;}";
+                src.replace(body_start, body_end - body_start, wrapped);
+                fprintf(stderr, "[MATCHES-PATCH] wrapped querySelector\n");
+                fflush(stderr);
+            }
         }
     }
 }
@@ -1149,6 +1189,18 @@ extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_re
                     apply_youtube_scoped_root_patch(patched);
                     apply_shadydom_matches_patch(patched);
                     apply_youtube_dom_patch_patch(patched);
+                    apply_youtube_shadydom_use_patch(patched);
+                    {
+                        char dbgname[64];
+                        snprintf(dbgname, sizeof(dbgname), "debug_script_%02d_patched.js", scripts[i].parse_order);
+                        FILE *df = fopen(dbgname, "wb");
+                        if (df) {
+                            fwrite(patched.data(), 1, patched.size(), df);
+                            fclose(df);
+                            fprintf(stderr, "[DEBUG-SAVE] %s (%zu bytes)\n", dbgname, patched.size());
+                            fflush(stderr);
+                        }
+                    }
                     if (patched.size() != buffer.size) {
                         char *new_data = (char *)malloc(patched.size() + 1);
                         if (new_data) {
@@ -1175,6 +1227,26 @@ extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_re
 
             // Pump timers and microtasks after each network response
             pump_timers_and_jobs_after_fetch();
+        }
+    }
+
+    // Patch inline scripts as well (e.g. the player bootstrap that sets
+    // window.ytplayer.config without width/height).
+    for (int i = 0; i < script_count; i++) {
+        if (scripts[i].type == SCRIPT_TYPE_INLINE && scripts[i].content && scripts[i].content_len > 0) {
+            std::string patched(scripts[i].content, scripts[i].content_len);
+            apply_youtube_player_bootstrap_patch(patched);
+            if (patched.size() != scripts[i].content_len ||
+                memcmp(patched.data(), scripts[i].content, scripts[i].content_len) != 0) {
+                char *new_data = (char *)malloc(patched.size() + 1);
+                if (new_data) {
+                    memcpy(new_data, patched.data(), patched.size());
+                    new_data[patched.size()] = '\0';
+                    free((void *)scripts[i].content);
+                    scripts[i].content = new_data;
+                    scripts[i].content_len = patched.size();
+                }
+            }
         }
     }
     

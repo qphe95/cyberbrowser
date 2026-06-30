@@ -1,0 +1,10 @@
+[
+  {
+    "adPlacements": true,
+    "playerAds": true,
+    "playerResponse": {
+      "adPlacements": true,
+      "playerAds": true
+    }
+  }
+]

@@ -1,0 +1,95 @@
+{
+  "wireMagic": "pb3",
+  "pens": [
+    {}
+  ],
+  "wsWinStyles": [
+    {}
+  ],
+  "wpWinPositions": [
+    {}
+  ],
+  "events": [
+    {
+      "tStartMs": 266,
+      "dDurationMs": 1569,
+      "segs": [
+        {
+          "utf8": "It's odd. If something's free,"
+        }
+      ]
+    },
+    {
+      "tStartMs": 1835,
+      "dDurationMs": 1535,
+      "segs": [
+        {
+          "utf8": "people just can't resist it."
+        }
+      ]
+    },
+    {
+      "tStartMs": 3370,
+      "dDurationMs": 1401,
+      "segs": [
+        {
+          "utf8": "More baffling is that people"
+        }
+      ]
+    },
+    {
+      "tStartMs": 4771,
+      "dDurationMs": 867,
+      "segs": [
+        {
+          "utf8": "turn down free money"
+        }
+      ]
+    },
+    {
+      "tStartMs": 5638,
+      "dDurationMs": 1702,
+      "segs": [
+        {
+          "utf8": "by not switching to GEICO."
+        }
+      ]
+    },
+    {
+      "tStartMs": 7340,
+      "dDurationMs": 2002,
+      "segs": [
+        {
+          "utf8": "Customers can save $900,\nyou know."
+        }
+      ]
+    },
+    {
+      "tStartMs": 10910,
+      "dDurationMs": 1602,
+      "segs": [
+        {
+          "utf8": "Say, do you have this\nin a small?"
+        }
+      ]
+    },
+    {
+      "tStartMs": 12512,
+      "dDurationMs": 1368,
+      "segs": [
+        {
+          "utf8": " It feels good to find\n the right fit."
+        }
+      ]
+    },
+    {
+      "tStartMs": 13880,
+      "dDurationMs": 1034,
+      "segs": [
+        {
+          "utf8": " It feels good to GEICO."
+        }
+      ]
+    }
+  ]
+}

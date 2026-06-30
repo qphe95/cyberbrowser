@@ -1,0 +1,4220 @@
+{
+  "responseContext": {
+    "serviceTrackingParams": [
+      {
+        "service": "GFEEDBACK",
+        "params": [
+          {
+            "key": "kc",
+            "value": "66"
+          },
+          {
+            "key": "cw",
+            "value": "st"
+          },
+          {
+            "key": "zb",
+            "value": "xz"
+          },
+          {
+            "key": "zl",
+            "value": "16"
+          },
+          {
+            "key": "pf",
+            "value": "sy"
+          }
+        ]
+      },
+      {
+        "service": "bh",
+        "params": [
+          {
+            "key": "ip",
+            "value": "54"
+          },
+          {
+            "key": "tb",
+            "value": "dv"
+          },
+          {
+            "key": "pi",
+            "value": "pn"
+          },
+          {
+            "key": "fg",
+            "value": "35"
+          },
+          {
+            "key": "wm",
+            "value": "vo"
+          }
+        ]
+      },
+      {
+        "service": "fp",
+        "params": [
+          {
+            "key": "hw",
+            "value": "91"
+          }
+        ]
+      },
+      {
+        "service": "rk",
+        "params": [
+          {
+            "key": "pe",
+            "value": "sf"
+          },
+          {
+            "key": "rv",
+            "value": "jn"
+          },
+          {
+            "key": "aw",
+            "value": "pw"
+          }
+        ]
+      }
+    ],
+    "maxAgeSeconds": 87,
+    "mainAppWebResponseContext": {
+      "loggedOut": 43,
+      "trackingParam": "dd",
+      "datasyncId": "xp"
+    },
+    "webResponseContextExtensionData": {
+      "hasDecorated": 75
+    }
+  },
+  "playabilityStatus": {
+    "status": "by",
+    "playableInEmbed": 2,
+    "miniplayer": {
+      "miniplayerRenderer": {
+        "playbackMode": "tj"
+      }
+    },
+    "offlineability": {
+      "buttonRenderer": {
+        "serviceEndpoint": {
+          "clickTrackingParams": "pz",
+          "ypcGetOfflineUpsellEndpoint": {
+            "params": "xm"
+          }
+        },
+        "trackingParams": "pq"
+      }
+    },
+    "contextParams": "lu"
+  },
+  "streamingData": {
+    "expiresInSeconds": "53",
+    "formats": [
+      {
+        "itag": 80,
+        "url": "https://rr3---sn-n4v7sns7.googlevideo.com/videoplayback?expire=1697267654&source=youtube&requiressl=yes",
+        "mimeType": "video/webm; codecs=\"vp9\"",
+        "bitrate": 88,
+        "width": 96,
+        "height": 65,
+        "lastModified": "1665263132187531",
+        "contentLength": "17",
+        "quality": "rc",
+        "fps": 8,
+        "qualityLabel": "ab",
+        "projectionType": "by",
+        "averageBitrate": 50,
+        "audioQuality": "th",
+        "approxDurationMs": "86",
+        "audioSampleRate": "88",
+        "audioChannels": 34
+      },
+      {
+        "itag": 95,
+        "url": "hs",
+        "mimeType": "nm",
+        "bitrate": 56,
+        "width": 13,
+        "height": 14,
+        "lastModified": "10",
+        "quality": "fu",
+        "fps": 54,
+        "qualityLabel": "yj",
+        "projectionType": "wu",
+        "audioQuality": "tu",
+        "approxDurationMs": "51",
+        "audioSampleRate": "87",
+        "audioChannels": 44
+      }
+    ],
+    "adaptiveFormats": [
+      {
+        "itag": 50,
+        "url": "fu",
+        "mimeType": "uz",
+        "bitrate": 80,
+        "width": 80,
+        "height": 85,
+        "initRange": {
+          "start": "16",
+          "end": "71"
+        },
+        "indexRange": {
+          "start": "1",
+          "end": "26"
+        },
+        "lastModified": "70",
+        "contentLength": "66",
+        "quality": "cx",
+        "fps": 61,
+        "qualityLabel": "xt",
+        "projectionType": "pe",
+        "averageBitrate": 68,
+        "approxDurationMs": "1"
+      },
+      {
+        "itag": 77,
+        "url": "rj",
+        "mimeType": "lh",
+        "bitrate": 16,
+        "width": 17,
+        "height": 47,
+        "initRange": {
+          "start": "51",
+          "end": "44"
+        },
+        "indexRange": {
+          "start": "87",
+          "end": "61"
+        },
+        "lastModified": "13",
+        "contentLength": "21",
+        "quality": "ie",
+        "fps": 23,
+        "qualityLabel": "ig",
+        "projectionType": "bl",
+        "averageBitrate": 16,
+        "colorInfo": {
+          "primaries": "et",
+          "transferCharacteristics": "zu",
+          "matrixCoefficients": "od"
+        },
+        "approxDurationMs": "59"
+      },
+      {
+        "itag": 7,
+        "url": "fc",
+        "mimeType": "gr",
+        "bitrate": 71,
+        "width": 11,
+        "height": 3,
+        "initRange": {
+          "start": "100",
+          "end": "7"
+        },
+        "indexRange": {
+          "start": "36",
+          "end": "98"
+        },
+        "lastModified": "88",
+        "contentLength": "77",
+        "quality": "rb",
+        "fps": 46,
+        "qualityLabel": "gq",
+        "projectionType": "ld",
+        "averageBitrate": 99,
+        "colorInfo": {
+          "primaries": "xd",
+          "transferCharacteristics": "uu",
+          "matrixCoefficients": "zc"
+        },
+        "approxDurationMs": "44"
+      },
+      {
+        "itag": 10,
+        "url": "kl",
+        "mimeType": "wb",
+        "bitrate": 51,
+        "width": 69,
+        "height": 3,
+        "initRange": {
+          "start": "92",
+          "end": "79"
+        },
+        "indexRange": {
+          "start": "42",
+          "end": "72"
+        },
+        "lastModified": "99",
+        "contentLength": "6",
+        "quality": "ee",
+        "fps": 40,
+        "qualityLabel": "em",
+        "projectionType": "wz",
+        "averageBitrate": 48,
+        "approxDurationMs": "86"
+      },
+      {
+        "itag": 44,
+        "url": "hp",
+        "mimeType": "kq",
+        "bitrate": 84,
+        "width": 53,
+        "height": 22,
+        "initRange": {
+          "start": "48",
+          "end": "51"
+        },
+        "indexRange": {
+          "start": "54",
+          "end": "44"
+        },
+        "lastModified": "25",
+        "contentLength": "47",
+        "quality": "xy",
+        "fps": 11,
+        "qualityLabel": "zl",
+        "projectionType": "za",
+        "averageBitrate": 95,
+        "colorInfo": {
+          "primaries": "ot",
+          "transferCharacteristics": "av",
+          "matrixCoefficients": "ow"
+        },
+        "approxDurationMs": "85"
+      },
+      {
+        "itag": 20,
+        "url": "di",
+        "mimeType": "nc",
+        "bitrate": 15,
+        "width": 19,
+        "height": 92,
+        "initRange": {
+          "start": "82",
+          "end": "58"
+        },
+        "indexRange": {
+          "start": "80",
+          "end": "37"
+        },
+        "lastModified": "46",
+        "contentLength": "40",
+        "quality": "wo",
+        "fps": 44,
+        "qualityLabel": "pt",
+        "projectionType": "bg",
+        "averageBitrate": 3,
+        "colorInfo": {
+          "primaries": "wq",
+          "transferCharacteristics": "is",
+          "matrixCoefficients": "ou"
+        },
+        "approxDurationMs": "47"
+      },
+      {
+        "itag": 44,
+        "url": "oe",
+        "mimeType": "mh",
+        "bitrate": 37,
+        "width": 43,
+        "height": 24,
+        "initRange": {
+          "start": "29",
+          "end": "91"
+        },
+        "indexRange": {
+          "start": "97",
+          "end": "97"
+        },
+        "lastModified": "52",
+        "contentLength": "43",
+        "quality": "cr",
+        "fps": 44,
+        "qualityLabel": "hc",
+        "projectionType": "cr",
+        "averageBitrate": 12,
+        "approxDurationMs": "97"
+      },
+      {
+        "itag": 32,
+        "url": "gq",
+        "mimeType": "sh",
+        "bitrate": 42,
+        "width": 32,
+        "height": 13,
+        "initRange": {
+          "start": "71",
+          "end": "87"
+        },
+        "indexRange": {
+          "start": "70",
+          "end": "4"
+        },
+        "lastModified": "67",
+        "contentLength": "16",
+        "quality": "sb",
+        "fps": 66,
+        "qualityLabel": "mv",
+        "projectionType": "kk",
+        "averageBitrate": 51,
+        "colorInfo": {
+          "primaries": "pk",
+          "transferCharacteristics": "ea",
+          "matrixCoefficients": "cq"
+        },
+        "approxDurationMs": "70"
+      },
+      {
+        "itag": 71,
+        "url": "zt",
+        "mimeType": "bl",
+        "bitrate": 12,
+        "width": 68,
+        "height": 12,
+        "initRange": {
+          "start": "63",
+          "end": "2"
+        },
+        "indexRange": {
+          "start": "28",
+          "end": "68"
+        },
+        "lastModified": "33",
+        "contentLength": "0",
+        "quality": "dh",
+        "fps": 6,
+        "qualityLabel": "jv",
+        "projectionType": "sy",
+        "averageBitrate": 75,
+        "colorInfo": {
+          "primaries": "us",
+          "transferCharacteristics": "ka",
+          "matrixCoefficients": "xw"
+        },
+        "approxDurationMs": "16"
+      },
+      {
+        "itag": 98,
+        "url": "vl",
+        "mimeType": "lg",
+        "bitrate": 88,
+        "width": 23,
+        "height": 83,
+        "initRange": {
+          "start": "49",
+          "end": "34"
+        },
+        "indexRange": {
+          "start": "43",
+          "end": "90"
+        },
+        "lastModified": "84",
+        "contentLength": "77",
+        "quality": "xu",
+        "fps": 50,
+        "qualityLabel": "jz",
+        "projectionType": "om",
+        "averageBitrate": 16,
+        "highReplication": 95,
+        "approxDurationMs": "46"
+      },
+      {
+        "itag": 85,
+        "url": "ri",
+        "mimeType": "dh",
+        "bitrate": 77,
+        "width": 86,
+        "height": 54,
+        "initRange": {
+          "start": "40",
+          "end": "98"
+        },
+        "indexRange": {
+          "start": "15",
+          "end": "85"
+        },
+        "lastModified": "25",
+        "contentLength": "53",
+        "quality": "rq",
+        "fps": 62,
+        "qualityLabel": "nx",
+        "projectionType": "wg",
+        "averageBitrate": 35,
+        "colorInfo": {
+          "primaries": "oa",
+          "transferCharacteristics": "kb",
+          "matrixCoefficients": "kk"
+        },
+        "approxDurationMs": "26"
+      },
+      {
+        "itag": 10,
+        "url": "zz",
+        "mimeType": "lq",
+        "bitrate": 55,
+        "width": 89,
+        "height": 43,
+        "initRange": {
+          "start": "94",
+          "end": "98"
+        },
+        "indexRange": {
+          "start": "73",
+          "end": "51"
+        },
+        "lastModified": "3",
+        "contentLength": "36",
+        "quality": "yo",
+        "fps": 5,
+        "qualityLabel": "we",
+        "projectionType": "ve",
+        "averageBitrate": 83,
+        "colorInfo": {
+          "primaries": "yu",
+          "transferCharacteristics": "fu",
+          "matrixCoefficients": "ox"
+        },
+        "approxDurationMs": "11"
+      },
+      {
+        "itag": 62,
+        "url": "hv",
+        "mimeType": "th",
+        "bitrate": 76,
+        "width": 28,
+        "height": 79,
+        "initRange": {
+          "start": "97",
+          "end": "100"
+        },
+        "indexRange": {
+          "start": "58",
+          "end": "63"
+        },
+        "lastModified": "53",
+        "contentLength": "22",
+        "quality": "ou",
+        "fps": 7,
+        "qualityLabel": "cm",
+        "projectionType": "xv",
+        "averageBitrate": 35,
+        "approxDurationMs": "98"
+      },
+      {
+        "itag": 91,
+        "url": "vr",
+        "mimeType": "wo",
+        "bitrate": 41,
+        "width": 4,
+        "height": 79,
+        "initRange": {
+          "start": "80",
+          "end": "83"
+        },
+        "indexRange": {
+          "start": "14",
+          "end": "58"
+        },
+        "lastModified": "50",
+        "contentLength": "38",
+        "quality": "ic",
+        "fps": 64,
+        "qualityLabel": "sq",
+        "projectionType": "du",
+        "averageBitrate": 61,
+        "colorInfo": {
+          "primaries": "ok",
+          "transferCharacteristics": "ud",
+          "matrixCoefficients": "ob"
+        },
+        "approxDurationMs": "73"
+      },
+      {
+        "itag": 48,
+        "url": "lq",
+        "mimeType": "zl",
+        "bitrate": 4,
+        "width": 16,
+        "height": 65,
+        "initRange": {
+          "start": "93",
+          "end": "50"
+        },
+        "indexRange": {
+          "start": "52",
+          "end": "44"
+        },
+        "lastModified": "74",
+        "contentLength": "86",
+        "quality": "mi",
+        "fps": 43,
+        "qualityLabel": "rz",
+        "projectionType": "ji",
+        "averageBitrate": 61,
+        "colorInfo": {
+          "primaries": "qo",
+          "transferCharacteristics": "fk",
+          "matrixCoefficients": "jy"
+        },
+        "approxDurationMs": "70"
+      },
+      {
+        "itag": 34,
+        "url": "cr",
+        "mimeType": "la",
+        "bitrate": 53,
+        "width": 29,
+        "height": 97,
+        "initRange": {
+          "start": "89",
+          "end": "45"
+        },
+        "indexRange": {
+          "start": "93",
+          "end": "45"
+        },
+        "lastModified": "52",
+        "contentLength": "74",
+        "quality": "xn",
+        "fps": 60,
+        "qualityLabel": "xs",
+        "projectionType": "lf",
+        "averageBitrate": 1,
+        "approxDurationMs": "18"
+      },
+      {
+        "itag": 67,
+        "url": "mr",
+        "mimeType": "cs",
+        "bitrate": 79,
+        "width": 9,
+        "height": 85,
+        "initRange": {
+          "start": "56",
+          "end": "96"
+        },
+        "indexRange": {
+          "start": "71",
+          "end": "84"
+        },
+        "lastModified": "78",
+        "contentLength": "80",
+        "quality": "ld",
+        "fps": 2,
+        "qualityLabel": "no",
+        "projectionType": "uq",
+        "averageBitrate": 35,
+        "colorInfo": {
+          "primaries": "mj",
+          "transferCharacteristics": "ry",
+          "matrixCoefficients": "cc"
+        },
+        "approxDurationMs": "43"
+      },
+      {
+        "itag": 57,
+        "url": "fi",
+        "mimeType": "to",
+        "bitrate": 80,
+        "width": 81,
+        "height": 29,
+        "initRange": {
+          "start": "6",
+          "end": "96"
+        },
+        "indexRange": {
+          "start": "73",
+          "end": "48"
+        },
+        "lastModified": "32",
+        "contentLength": "11",
+        "quality": "ck",
+        "fps": 82,
+        "qualityLabel": "fo",
+        "projectionType": "px",
+        "averageBitrate": 95,
+        "colorInfo": {
+          "primaries": "az",
+          "transferCharacteristics": "mq",
+          "matrixCoefficients": "oc"
+        },
+        "approxDurationMs": "44"
+      },
+      {
+        "itag": 52,
+        "url": "ea",
+        "mimeType": "xm",
+        "bitrate": 18,
+        "initRange": {
+          "start": "15",
+          "end": "16"
+        },
+        "indexRange": {
+          "start": "4",
+          "end": "33"
+        },
+        "lastModified": "65",
+        "contentLength": "67",
+        "quality": "es",
+        "projectionType": "mp",
+        "averageBitrate": 52,
+        "highReplication": 82,
+        "audioQuality": "za",
+        "approxDurationMs": "24",
+        "audioSampleRate": "1",
+        "audioChannels": 92,
+        "loudnessDb": 0.9787435365879406
+      },
+      {
+        "itag": 37,
+        "url": "kk",
+        "mimeType": "xg",
+        "bitrate": 78,
+        "initRange": {
+          "start": "38",
+          "end": "94"
+        },
+        "indexRange": {
+          "start": "27",
+          "end": "17"
+        },
+        "lastModified": "61",
+        "contentLength": "2",
+        "quality": "nh",
+        "projectionType": "ar",
+        "averageBitrate": 69,
+        "audioQuality": "la",
+        "approxDurationMs": "95",
+        "audioSampleRate": "66",
+        "audioChannels": 50,
+        "loudnessDb": 0.6461265012758731
+      },
+      {
+        "itag": 45,
+        "url": "oc",
+        "mimeType": "nm",
+        "bitrate": 12,
+        "initRange": {
+          "start": "21",
+          "end": "45"
+        },
+        "indexRange": {
+          "start": "21",
+          "end": "13"
+        },
+        "lastModified": "45",
+        "contentLength": "85",
+        "quality": "vs",
+        "projectionType": "xp",
+        "averageBitrate": 32,
+        "audioQuality": "tv",
+        "approxDurationMs": "1",
+        "audioSampleRate": "99",
+        "audioChannels": 42,
+        "loudnessDb": 0.39295968942278037
+      },
+      {
+        "itag": 37,
+        "url": "zf",
+        "mimeType": "be",
+        "bitrate": 29,
+        "initRange": {
+          "start": "27",
+          "end": "87"
+        },
+        "indexRange": {
+          "start": "81",
+          "end": "20"
+        },
+        "lastModified": "6",
+        "contentLength": "33",
+        "quality": "pe",
+        "projectionType": "pb",
+        "averageBitrate": 100,
+        "audioQuality": "zi",
+        "approxDurationMs": "70",
+        "audioSampleRate": "32",
+        "audioChannels": 68,
+        "loudnessDb": 0.2781731101164002
+      }
+    ]
+  },
+  "playerAds": [
+    {
+      "playerLegacyDesktopWatchAdsRenderer": {
+        "playerAdParams": {
+          "showContentThumbnail": true,
+          "enabledEngageTypes": "3,6,4,5"
+        },
+        "gutParams": {
+          "tag": "\\4061\\ytpwmpu"
+        },
+        "showCompanion": true,
+        "showInstream": true,
+        "useGut": true
+      }
+    }
+  ],
+  "playbackTracking": {
+    "videostatsPlaybackUrl": {
+      "baseUrl": "bj"
+    },
+    "videostatsDelayplayUrl": {
+      "baseUrl": "vx"
+    },
+    "videostatsWatchtimeUrl": {
+      "baseUrl": "px"
+    },
+    "ptrackingUrl": {
+      "baseUrl": "tg"
+    },
+    "qoeUrl": {
+      "baseUrl": "wx"
+    },
+    "atrUrl": {
+      "baseUrl": "xz",
+      "elapsedMediaTimeSeconds": 45
+    },
+    "videostatsScheduledFlushWalltimeSeconds": [
+      99,
+      32,
+      39
+    ],
+    "videostatsDefaultFlushIntervalSeconds": 3,
+    "youtubeRemarketingUrl": {
+      "baseUrl": "mb",
+      "elapsedMediaTimeSeconds": 63
+    },
+    "googleRemarketingUrl": {
+      "baseUrl": "yn",
+      "elapsedMediaTimeSeconds": 83
+    }
+  },
+  "captions": {
+    "playerCaptionsTracklistRenderer": {
+      "captionTracks": [
+        {
+          "baseUrl": "ew",
+          "name": {
+            "simpleText": "ez"
+          },
+          "vssId": "fj",
+          "languageCode": "wd",
+          "kind": "ez",
+          "isTranslatable": 21
+        }
+      ],
+      "audioTracks": [
+        {
+          "captionTrackIndices": [
+            87
+          ]
+        }
+      ],
+      "translationLanguages": [
+        {
+          "languageCode": "xu",
+          "languageName": {
+            "simpleText": "fw"
+          }
+        },
+        {
+          "languageCode": "zl",
+          "languageName": {
+            "simpleText": "xc"
+          }
+        },
+        {
+          "languageCode": "jr",
+          "languageName": {
+            "simpleText": "md"
+          }
+        },
+        {
+          "languageCode": "sc",
+          "languageName": {
+            "simpleText": "wf"
+          }
+        },
+        {
+          "languageCode": "nj",
+          "languageName": {
+            "simpleText": "xn"
+          }
+        },
+        {
+          "languageCode": "of",
+          "languageName": {
+            "simpleText": "av"
+          }
+        },
+        {
+          "languageCode": "tv",
+          "languageName": {
+            "simpleText": "ok"
+          }
+        },
+        {
+          "languageCode": "nu",
+          "languageName": {
+            "simpleText": "ry"
+          }
+        },
+        {
+          "languageCode": "zy",
+          "languageName": {
+            "simpleText": "nb"
+          }
+        },
+        {
+          "languageCode": "pt",
+          "languageName": {
+            "simpleText": "eq"
+          }
+        },
+        {
+          "languageCode": "vr",
+          "languageName": {
+            "simpleText": "cc"
+          }
+        },
+        {
+          "languageCode": "wh",
+          "languageName": {
+            "simpleText": "hd"
+          }
+        },
+        {
+          "languageCode": "hp",
+          "languageName": {
+            "simpleText": "ds"
+          }
+        },
+        {
+          "languageCode": "ka",
+          "languageName": {
+            "simpleText": "up"
+          }
+        },
+        {
+          "languageCode": "sw",
+          "languageName": {
+            "simpleText": "zp"
+          }
+        },
+        {
+          "languageCode": "rh",
+          "languageName": {
+            "simpleText": "eq"
+          }
+        },
+        {
+          "languageCode": "bq",
+          "languageName": {
+            "simpleText": "at"
+          }
+        },
+        {
+          "languageCode": "hu",
+          "languageName": {
+            "simpleText": "fg"
+          }
+        },
+        {
+          "languageCode": "ai",
+          "languageName": {
+            "simpleText": "iy"
+          }
+        },
+        {
+          "languageCode": "rj",
+          "languageName": {
+            "simpleText": "oz"
+          }
+        },
+        {
+          "languageCode": "sq",
+          "languageName": {
+            "simpleText": "fe"
+          }
+        },
+        {
+          "languageCode": "tn",
+          "languageName": {
+            "simpleText": "vk"
+          }
+        },
+        {
+          "languageCode": "jr",
+          "languageName": {
+            "simpleText": "jg"
+          }
+        },
+        {
+          "languageCode": "vc",
+          "languageName": {
+            "simpleText": "hv"
+          }
+        },
+        {
+          "languageCode": "yn",
+          "languageName": {
+            "simpleText": "ky"
+          }
+        },
+        {
+          "languageCode": "pa",
+          "languageName": {
+            "simpleText": "rw"
+          }
+        },
+        {
+          "languageCode": "lr",
+          "languageName": {
+            "simpleText": "kv"
+          }
+        },
+        {
+          "languageCode": "ud",
+          "languageName": {
+            "simpleText": "fn"
+          }
+        },
+        {
+          "languageCode": "hq",
+          "languageName": {
+            "simpleText": "io"
+          }
+        },
+        {
+          "languageCode": "rp",
+          "languageName": {
+            "simpleText": "qx"
+          }
+        },
+        {
+          "languageCode": "xf",
+          "languageName": {
+            "simpleText": "sm"
+          }
+        },
+        {
+          "languageCode": "fs",
+          "languageName": {
+            "simpleText": "ty"
+          }
+        },
+        {
+          "languageCode": "so",
+          "languageName": {
+            "simpleText": "xl"
+          }
+        },
+        {
+          "languageCode": "fk",
+          "languageName": {
+            "simpleText": "ff"
+          }
+        },
+        {
+          "languageCode": "fw",
+          "languageName": {
+            "simpleText": "wz"
+          }
+        },
+        {
+          "languageCode": "rn",
+          "languageName": {
+            "simpleText": "zw"
+          }
+        },
+        {
+          "languageCode": "wq",
+          "languageName": {
+            "simpleText": "yt"
+          }
+        },
+        {
+          "languageCode": "oh",
+          "languageName": {
+            "simpleText": "oo"
+          }
+        },
+        {
+          "languageCode": "ts",
+          "languageName": {
+            "simpleText": "jt"
+          }
+        },
+        {
+          "languageCode": "xy",
+          "languageName": {
+            "simpleText": "ga"
+          }
+        },
+        {
+          "languageCode": "jy",
+          "languageName": {
+            "simpleText": "sx"
+          }
+        },
+        {
+          "languageCode": "lw",
+          "languageName": {
+            "simpleText": "cf"
+          }
+        },
+        {
+          "languageCode": "fc",
+          "languageName": {
+            "simpleText": "qr"
+          }
+        },
+        {
+          "languageCode": "ji",
+          "languageName": {
+            "simpleText": "cc"
+          }
+        },
+        {
+          "languageCode": "qs",
+          "languageName": {
+            "simpleText": "pi"
+          }
+        },
+        {
+          "languageCode": "vx",
+          "languageName": {
+            "simpleText": "hk"
+          }
+        },
+        {
+          "languageCode": "jt",
+          "languageName": {
+            "simpleText": "eh"
+          }
+        },
+        {
+          "languageCode": "fb",
+          "languageName": {
+            "simpleText": "iu"
+          }
+        },
+        {
+          "languageCode": "mf",
+          "languageName": {
+            "simpleText": "st"
+          }
+        },
+        {
+          "languageCode": "en",
+          "languageName": {
+            "simpleText": "vr"
+          }
+        },
+        {
+          "languageCode": "go",
+          "languageName": {
+            "simpleText": "kp"
+          }
+        },
+        {
+          "languageCode": "sc",
+          "languageName": {
+            "simpleText": "rk"
+          }
+        },
+        {
+          "languageCode": "bx",
+          "languageName": {
+            "simpleText": "ci"
+          }
+        },
+        {
+          "languageCode": "pu",
+          "languageName": {
+            "simpleText": "qj"
+          }
+        },
+        {
+          "languageCode": "fa",
+          "languageName": {
+            "simpleText": "ht"
+          }
+        },
+        {
+          "languageCode": "bw",
+          "languageName": {
+            "simpleText": "af"
+          }
+        },
+        {
+          "languageCode": "rr",
+          "languageName": {
+            "simpleText": "jt"
+          }
+        },
+        {
+          "languageCode": "ef",
+          "languageName": {
+            "simpleText": "yy"
+          }
+        },
+        {
+          "languageCode": "bn",
+          "languageName": {
+            "simpleText": "wu"
+          }
+        },
+        {
+          "languageCode": "ov",
+          "languageName": {
+            "simpleText": "ae"
+          }
+        },
+        {
+          "languageCode": "sm",
+          "languageName": {
+            "simpleText": "hi"
+          }
+        },
+        {
+          "languageCode": "tq",
+          "languageName": {
+            "simpleText": "ie"
+          }
+        },
+        {
+          "languageCode": "fn",
+          "languageName": {
+            "simpleText": "et"
+          }
+        },
+        {
+          "languageCode": "jw",
+          "languageName": {
+            "simpleText": "bu"
+          }
+        },
+        {
+          "languageCode": "iz",
+          "languageName": {
+            "simpleText": "gc"
+          }
+        },
+        {
+          "languageCode": "bk",
+          "languageName": {
+            "simpleText": "jh"
+          }
+        },
+        {
+          "languageCode": "vw",
+          "languageName": {
+            "simpleText": "fq"
+          }
+        },
+        {
+          "languageCode": "xt",
+          "languageName": {
+            "simpleText": "or"
+          }
+        },
+        {
+          "languageCode": "kq",
+          "languageName": {
+            "simpleText": "ch"
+          }
+        },
+        {
+          "languageCode": "pa",
+          "languageName": {
+            "simpleText": "cs"
+          }
+        },
+        {
+          "languageCode": "ef",
+          "languageName": {
+            "simpleText": "eq"
+          }
+        },
+        {
+          "languageCode": "mk",
+          "languageName": {
+            "simpleText": "ig"
+          }
+        },
+        {
+          "languageCode": "me",
+          "languageName": {
+            "simpleText": "pv"
+          }
+        },
+        {
+          "languageCode": "ll",
+          "languageName": {
+            "simpleText": "nz"
+          }
+        },
+        {
+          "languageCode": "yd",
+          "languageName": {
+            "simpleText": "pu"
+          }
+        },
+        {
+          "languageCode": "dj",
+          "languageName": {
+            "simpleText": "vx"
+          }
+        },
+        {
+          "languageCode": "xc",
+          "languageName": {
+            "simpleText": "ca"
+          }
+        },
+        {
+          "languageCode": "wb",
+          "languageName": {
+            "simpleText": "il"
+          }
+        },
+        {
+          "languageCode": "ww",
+          "languageName": {
+            "simpleText": "jf"
+          }
+        },
+        {
+          "languageCode": "xi",
+          "languageName": {
+            "simpleText": "ba"
+          }
+        },
+        {
+          "languageCode": "ae",
+          "languageName": {
+            "simpleText": "hx"
+          }
+        },
+        {
+          "languageCode": "uj",
+          "languageName": {
+            "simpleText": "xu"
+          }
+        },
+        {
+          "languageCode": "hq",
+          "languageName": {
+            "simpleText": "gp"
+          }
+        },
+        {
+          "languageCode": "we",
+          "languageName": {
+            "simpleText": "pk"
+          }
+        },
+        {
+          "languageCode": "kt",
+          "languageName": {
+            "simpleText": "ek"
+          }
+        },
+        {
+          "languageCode": "hy",
+          "languageName": {
+            "simpleText": "ab"
+          }
+        },
+        {
+          "languageCode": "hm",
+          "languageName": {
+            "simpleText": "nu"
+          }
+        },
+        {
+          "languageCode": "uw",
+          "languageName": {
+            "simpleText": "rx"
+          }
+        },
+        {
+          "languageCode": "or",
+          "languageName": {
+            "simpleText": "nf"
+          }
+        },
+        {
+          "languageCode": "dh",
+          "languageName": {
+            "simpleText": "zn"
+          }
+        },
+        {
+          "languageCode": "kb",
+          "languageName": {
+            "simpleText": "js"
+          }
+        },
+        {
+          "languageCode": "vg",
+          "languageName": {
+            "simpleText": "xe"
+          }
+        },
+        {
+          "languageCode": "dl",
+          "languageName": {
+            "simpleText": "so"
+          }
+        },
+        {
+          "languageCode": "lz",
+          "languageName": {
+            "simpleText": "hb"
+          }
+        },
+        {
+          "languageCode": "ny",
+          "languageName": {
+            "simpleText": "xr"
+          }
+        },
+        {
+          "languageCode": "ag",
+          "languageName": {
+            "simpleText": "us"
+          }
+        },
+        {
+          "languageCode": "zr",
+          "languageName": {
+            "simpleText": "ae"
+          }
+        },
+        {
+          "languageCode": "yq",
+          "languageName": {
+            "simpleText": "yc"
+          }
+        },
+        {
+          "languageCode": "up",
+          "languageName": {
+            "simpleText": "dc"
+          }
+        },
+        {
+          "languageCode": "zn",
+          "languageName": {
+            "simpleText": "jw"
+          }
+        },
+        {
+          "languageCode": "uh",
+          "languageName": {
+            "simpleText": "ms"
+          }
+        },
+        {
+          "languageCode": "mt",
+          "languageName": {
+            "simpleText": "vf"
+          }
+        },
+        {
+          "languageCode": "lt",
+          "languageName": {
+            "simpleText": "ln"
+          }
+        },
+        {
+          "languageCode": "vf",
+          "languageName": {
+            "simpleText": "rd"
+          }
+        },
+        {
+          "languageCode": "my",
+          "languageName": {
+            "simpleText": "rk"
+          }
+        },
+        {
+          "languageCode": "ei",
+          "languageName": {
+            "simpleText": "ul"
+          }
+        },
+        {
+          "languageCode": "dj",
+          "languageName": {
+            "simpleText": "cz"
+          }
+        },
+        {
+          "languageCode": "kb",
+          "languageName": {
+            "simpleText": "hp"
+          }
+        },
+        {
+          "languageCode": "jj",
+          "languageName": {
+            "simpleText": "zf"
+          }
+        },
+        {
+          "languageCode": "ew",
+          "languageName": {
+            "simpleText": "ff"
+          }
+        },
+        {
+          "languageCode": "jo",
+          "languageName": {
+            "simpleText": "iz"
+          }
+        },
+        {
+          "languageCode": "ja",
+          "languageName": {
+            "simpleText": "uz"
+          }
+        },
+        {
+          "languageCode": "yd",
+          "languageName": {
+            "simpleText": "or"
+          }
+        },
+        {
+          "languageCode": "tl",
+          "languageName": {
+            "simpleText": "tw"
+          }
+        },
+        {
+          "languageCode": "mw",
+          "languageName": {
+            "simpleText": "th"
+          }
+        },
+        {
+          "languageCode": "pq",
+          "languageName": {
+            "simpleText": "zp"
+          }
+        },
+        {
+          "languageCode": "pq",
+          "languageName": {
+            "simpleText": "pk"
+          }
+        },
+        {
+          "languageCode": "ef",
+          "languageName": {
+            "simpleText": "fj"
+          }
+        },
+        {
+          "languageCode": "qq",
+          "languageName": {
+            "simpleText": "vu"
+          }
+        },
+        {
+          "languageCode": "pj",
+          "languageName": {
+            "simpleText": "kp"
+          }
+        },
+        {
+          "languageCode": "ab",
+          "languageName": {
+            "simpleText": "xw"
+          }
+        },
+        {
+          "languageCode": "re",
+          "languageName": {
+            "simpleText": "ln"
+          }
+        },
+        {
+          "languageCode": "ht",
+          "languageName": {
+            "simpleText": "wo"
+          }
+        },
+        {
+          "languageCode": "ju",
+          "languageName": {
+            "simpleText": "wb"
+          }
+        },
+        {
+          "languageCode": "yq",
+          "languageName": {
+            "simpleText": "xv"
+          }
+        }
+      ],
+      "defaultAudioTrackIndex": 70
+    }
+  },
+  "videoDetails": {
+    "videoId": "ux",
+    "title": "jb",
+    "lengthSeconds": "90",
+    "keywords": [
+      "th",
+      "ts",
+      "yg",
+      "gy",
+      "ih",
+      "iq",
+      "zj"
+    ],
+    "channelId": "pg",
+    "isOwnerViewing": 6,
+    "shortDescription": "ts",
+    "isCrawlable": 62,
+    "thumbnail": {
+      "thumbnails": [
+        {
+          "url": "vx",
+          "width": 8,
+          "height": 58
+        },
+        {
+          "url": "bp",
+          "width": 44,
+          "height": 79
+        },
+        {
+          "url": "oh",
+          "width": 47,
+          "height": 66
+        },
+        {
+          "url": "hm",
+          "width": 34,
+          "height": 55
+        },
+        {
+          "url": "vr",
+          "width": 0,
+          "height": 20
+        }
+      ]
+    },
+    "allowRatings": 24,
+    "viewCount": "49",
+    "author": "xr",
+    "isPrivate": 70,
+    "isUnpluggedCorpus": 66,
+    "isLiveContent": 99
+  },
+  "annotations": [
+    {
+      "playerAnnotationsExpandedRenderer": {
+        "featuredChannel": {
+          "startTimeMs": "96",
+          "endTimeMs": "46",
+          "watermark": {
+            "thumbnails": [
+              {
+                "url": "li",
+                "width": 91,
+                "height": 28
+              }
+            ]
+          },
+          "trackingParams": "an",
+          "navigationEndpoint": {
+            "clickTrackingParams": "mg",
+            "commandMetadata": {
+              "webCommandMetadata": {
+                "url": "rd",
+                "webPageType": "nc",
+                "rootVe": 69,
+                "apiUrl": "/youtubei/v1/browse"
+              }
+            },
+            "browseEndpoint": {
+              "browseId": "qg"
+            }
+          },
+          "channelName": "ei",
+          "subscribeButton": {
+            "subscribeButtonRenderer": {
+              "buttonText": {
+                "runs": [
+                  {
+                    "text": "pz"
+                  }
+                ]
+              },
+              "subscribed": 44,
+              "enabled": 33,
+              "type": "ue",
+              "channelId": "ki",
+              "showPreferences": 71,
+              "subscribedButtonText": {
+                "runs": [
+                  {
+                    "text": "lk"
+                  }
+                ]
+              },
+              "unsubscribedButtonText": {
+                "runs": [
+                  {
+                    "text": "jn"
+                  }
+                ]
+              },
+              "trackingParams": "oj",
+              "unsubscribeButtonText": {
+                "runs": [
+                  {
+                    "text": "ad"
+                  }
+                ]
+              },
+              "serviceEndpoints": [
+                {
+                  "clickTrackingParams": "wm",
+                  "commandMetadata": {
+                    "webCommandMetadata": {
+                      "sendPost": 4,
+                      "apiUrl": "ky"
+                    }
+                  },
+                  "subscribeEndpoint": {
+                    "channelIds": [
+                      "zt"
+                    ],
+                    "params": "at"
+                  }
+                },
+                {
+                  "clickTrackingParams": "jg",
+                  "commandMetadata": {
+                    "webCommandMetadata": {
+                      "sendPost": 28
+                    }
+                  },
+                  "signalServiceEndpoint": {
+                    "signal": "ok",
+                    "actions": [
+                      {
+                        "clickTrackingParams": "lt",
+                        "openPopupAction": {
+                          "popup": {
+                            "confirmDialogRenderer": {
+                              "trackingParams": "po",
+                              "dialogMessages": [
+                                {
+                                  "runs": [
+                                    {
+                                      "text": "ou"
+                                    },
+                                    {
+                                      "text": "jt"
+                                    },
+                                    {
+                                      "text": "zz"
+                                    }
+                                  ]
+                                }
+                              ],
+                              "confirmButton": {
+                                "buttonRenderer": {
+                                  "style": "mm",
+                                  "size": "oi",
+                                  "isDisabled": 43,
+                                  "text": {
+                                    "runs": [
+                                      {
+                                        "text": "kc"
+                                      }
+                                    ]
+                                  },
+                                  "serviceEndpoint": {
+                                    "clickTrackingParams": "gk",
+                                    "commandMetadata": {
+                                      "webCommandMetadata": {
+                                        "sendPost": 18,
+                                        "apiUrl": "kc"
+                                      }
+                                    },
+                                    "unsubscribeEndpoint": {
+                                      "channelIds": [
+                                        "cm"
+                                      ],
+                                      "params": "ar"
+                                    }
+                                  },
+                                  "accessibility": {
+                                    "label": "iy"
+                                  },
+                                  "trackingParams": "gs"
+                                }
+                              },
+                              "cancelButton": {
+                                "buttonRenderer": {
+                                  "style": "jb",
+                                  "size": "pe",
+                                  "isDisabled": 69,
+                                  "text": {
+                                    "runs": [
+                                      {
+                                        "text": "uv"
+                                      }
+                                    ]
+                                  },
+                                  "accessibility": {
+                                    "label": "qu"
+                                  },
+                                  "trackingParams": "pe"
+                                }
+                              },
+                              "primaryIsCancel": 48
+                            }
+                          },
+                          "popupType": "ma"
+                        }
+                      }
+                    ]
+                  }
+                }
+              ],
+              "subscribeAccessibility": {
+                "accessibilityData": {
+                  "label": "vh"
+                }
+              },
+              "unsubscribeAccessibility": {
+                "accessibilityData": {
+                  "label": "lg"
+                }
+              },
+              "signInEndpoint": {
+                "clickTrackingParams": "eu",
+                "commandMetadata": {
+                  "webCommandMetadata": {
+                    "url": "na"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "allowSwipeDismiss": 55,
+        "annotationId": "jd"
+      }
+    }
+  ],
+  "playerConfig": {
+    "audioConfig": {
+      "loudnessDb": 0.9620880668073215,
+      "perceptualLoudnessDb": 0.541474004793957,
+      "enablePerFormatLoudness": 31
+    },
+    "streamSelectionConfig": {
+      "maxBitrate": "61"
+    },
+    "mediaCommonConfig": {
+      "dynamicReadaheadConfig": {
+        "maxReadAheadMediaTimeMs": 100,
+        "minReadAheadMediaTimeMs": 21,
+        "readAheadGrowthRateMs": 29
+      }
+    },
+    "webPlayerConfig": {
+      "useCobaltTvosDash": 55,
+      "webPlayerActionsPorting": {
+        "getSharePanelCommand": {
+          "clickTrackingParams": "of",
+          "commandMetadata": {
+            "webCommandMetadata": {
+              "sendPost": 31,
+              "apiUrl": "xl"
+            }
+          },
+          "webPlayerShareEntityServiceEndpoint": {
+            "serializedShareEntity": "tr"
+          }
+        },
+        "subscribeCommand": {
+          "clickTrackingParams": "fs",
+          "commandMetadata": {
+            "webCommandMetadata": {
+              "sendPost": 13,
+              "apiUrl": "xp"
+            }
+          },
+          "subscribeEndpoint": {
+            "channelIds": [
+              "qs"
+            ],
+            "params": "oa"
+          }
+        },
+        "unsubscribeCommand": {
+          "clickTrackingParams": "ls",
+          "commandMetadata": {
+            "webCommandMetadata": {
+              "sendPost": 91,
+              "apiUrl": "wc"
+            }
+          },
+          "unsubscribeEndpoint": {
+            "channelIds": [
+              "fo"
+            ],
+            "params": "vt"
+          }
+        },
+        "addToWatchLaterCommand": {
+          "clickTrackingParams": "ua",
+          "commandMetadata": {
+            "webCommandMetadata": {
+              "sendPost": 18,
+              "apiUrl": "iu"
+            }
+          },
+          "playlistEditEndpoint": {
+            "playlistId": "rv",
+            "actions": [
+              {
+                "addedVideoId": "iw",
+                "action": "rd"
+              }
+            ]
+          }
+        },
+        "removeFromWatchLaterCommand": {
+          "clickTrackingParams": "un",
+          "commandMetadata": {
+            "webCommandMetadata": {
+              "sendPost": 20,
+              "apiUrl": "bl"
+            }
+          },
+          "playlistEditEndpoint": {
+            "playlistId": "zg",
+            "actions": [
+              {
+                "action": "ya",
+                "removedVideoId": "dk"
+              }
+            ]
+          }
+        }
+      },
+      "gatewayExperimentGroup": "vb"
+    }
+  },
+  "storyboards": {
+    "playerStoryboardSpecRenderer": {
+      "spec": "aj",
+      "recommendedLevel": 87
+    }
+  },
+  "microformat": {
+    "playerMicroformatRenderer": {
+      "thumbnail": {
+        "thumbnails": [
+          {
+            "url": "mm",
+            "width": 57,
+            "height": 94
+          }
+        ]
+      },
+      "embed": {
+        "iframeUrl": "bd",
+        "width": 51,
+        "height": 73
+      },
+      "title": {
+        "simpleText": "sg"
+      },
+      "description": {
+        "simpleText": "yv"
+      },
+      "lengthSeconds": "18",
+      "ownerProfileUrl": "bg",
+      "externalChannelId": "eg",
+      "isFamilySafe": 88,
+      "availableCountries": [
+        "hn",
+        "sd",
+        "lt",
+        "tx",
+        "nw",
+        "mq",
+        "iz",
+        "aj",
+        "vi",
+        "xa",
+        "ec",
+        "iv",
+        "rj",
+        "vb",
+        "ro",
+        "po",
+        "mv",
+        "mx",
+        "cn",
+        "ld",
+        "tn",
+        "ay",
+        "gv",
+        "bs",
+        "vf",
+        "da",
+        "ss",
+        "km",
+        "uo",
+        "mg",
+        "wv",
+        "md",
+        "lo",
+        "nc",
+        "vh",
+        "li",
+        "jh",
+        "lj",
+        "qq",
+        "ci",
+        "ob",
+        "zy",
+        "pu",
+        "bl",
+        "jm",
+        "ge",
+        "tt",
+        "ov",
+        "ue",
+        "vp",
+        "ka",
+        "nh",
+        "uc",
+        "gb",
+        "rs",
+        "gu",
+        "hm",
+        "uv",
+        "nq",
+        "ga",
+        "qu",
+        "hr",
+        "pj",
+        "zq",
+        "rh",
+        "nn",
+        "yv",
+        "or",
+        "zg",
+        "ai",
+        "qj",
+        "cv",
+        "vg",
+        "hr",
+        "zm",
+        "al",
+        "mj",
+        "fz",
+        "yx",
+        "st",
+        "tt",
+        "ih",
+        "vm",
+        "wq",
+        "gx",
+        "wi",
+        "ys",
+        "ug",
+        "vb",
+        "uh",
+        "rf",
+        "ry",
+        "ba",
+        "xu",
+        "ce",
+        "eq",
+        "bx",
+        "he",
+        "jm",
+        "ie",
+        "nb",
+        "cd",
+        "qz",
+        "no",
+        "yq",
+        "qe",
+        "jy",
+        "wd",
+        "pm",
+        "nb",
+        "hk",
+        "em",
+        "im",
+        "iv",
+        "ld",
+        "gz",
+        "fe",
+        "ut",
+        "md",
+        "gw",
+        "sf",
+        "yz",
+        "yp",
+        "xr",
+        "gm",
+        "uo",
+        "kg",
+        "yo",
+        "wv",
+        "da",
+        "wt",
+        "ry",
+        "it",
+        "gz",
+        "mm",
+        "ho",
+        "mf",
+        "lq",
+        "tu",
+        "im",
+        "lu",
+        "gm",
+        "pa",
+        "ny",
+        "gu",
+        "ds",
+        "yx",
+        "yh",
+        "jk",
+        "qb",
+        "jv",
+        "mp",
+        "bi",
+        "nr",
+        "mc",
+        "bg",
+        "ym",
+        "zt",
+        "sh",
+        "kd",
+        "gj",
+        "dp",
+        "qw",
+        "eh",
+        "no",
+        "pj",
+        "nq",
+        "dy",
+        "gt",
+        "cm",
+        "pg",
+        "ce",
+        "jt",
+        "xv",
+        "tf",
+        "ue",
+        "ke",
+        "hs",
+        "xh",
+        "tc",
+        "ad",
+        "yg",
+        "uh",
+        "cd",
+        "zc",
+        "rj",
+        "kq",
+        "sp",
+        "vv",
+        "xt",
+        "bo",
+        "am",
+        "kg",
+        "kx",
+        "xb",
+        "fr",
+        "il",
+        "qi",
+        "ap",
+        "pe",
+        "tg",
+        "im",
+        "cs",
+        "vy",
+        "zu",
+        "cq",
+        "bu",
+        "og",
+        "tf",
+        "ze",
+        "zj",
+        "um",
+        "vd",
+        "ot",
+        "al",
+        "zl",
+        "um",
+        "jv",
+        "ss",
+        "md",
+        "xm",
+        "nv",
+        "id",
+        "es",
+        "jf",
+        "as",
+        "zb",
+        "ms",
+        "uv",
+        "jh",
+        "xz",
+        "em",
+        "uv",
+        "bk",
+        "zx",
+        "wp",
+        "ay",
+        "ub",
+        "pa",
+        "rf",
+        "yi",
+        "zm",
+        "em",
+        "pu",
+        "xs"
+      ],
+      "isUnlisted": 24,
+      "hasYpcMetadata": 38,
+      "viewCount": "6",
+      "category": "qh",
+      "publishDate": "eb",
+      "ownerChannelName": "mf",
+      "uploadDate": "ax"
+    }
+  },
+  "cards": {
+    "cardCollectionRenderer": {
+      "cards": [
+        {
+          "cardRenderer": {
+            "teaser": {
+              "simpleCardTeaserRenderer": {
+                "message": {
+                  "simpleText": "ha"
+                },
+                "trackingParams": "ra",
+                "prominent": 9,
+                "logVisibilityUpdates": 88,
+                "onTapCommand": {
+                  "clickTrackingParams": "dy",
+                  "changeEngagementPanelVisibilityAction": {
+                    "targetId": "qc",
+                    "visibility": "mh"
+                  }
+                }
+              }
+            },
+            "cueRanges": [
+              {
+                "startCardActiveMs": "41",
+                "endCardActiveMs": "81",
+                "teaserDurationMs": "31",
+                "iconAfterTeaserMs": "65"
+              }
+            ],
+            "trackingParams": "sn"
+          }
+        }
+      ],
+      "headerText": {
+        "simpleText": "mi"
+      },
+      "icon": {
+        "infoCardIconRenderer": {
+          "trackingParams": "tq"
+        }
+      },
+      "closeButton": {
+        "infoCardIconRenderer": {
+          "trackingParams": "nz"
+        }
+      },
+      "trackingParams": "ss",
+      "allowTeaserDismiss": 55,
+      "logIconVisibilityUpdates": 49
+    }
+  },
+  "trackingParams": "lt",
+  "attestation": {
+    "playerAttestationRenderer": {
+      "challenge": "rg",
+      "botguardData": {
+        "program": "vk",
+        "interpreterSafeUrl": {
+          "privateDoNotAccessOrElseTrustedResourceUrlWrappedValue": "ap"
+        },
+        "serverEnvironment": 83
+      }
+    }
+  },
+  "videoQualityPromoSupportedRenderers": {
+    "videoQualityPromoRenderer": {
+      "triggerCriteria": {
+        "connectionWhitelist": [
+          "vs"
+        ],
+        "joinLatencySeconds": 85,
+        "rebufferTimeSeconds": 89,
+        "watchTimeWindowSeconds": 21,
+        "refractorySeconds": 41
+      },
+      "text": {
+        "runs": [
+          {
+            "text": "it"
+          },
+          {
+            "text": "qt",
+            "bold": 60
+          }
+        ]
+      },
+      "endpoint": {
+        "clickTrackingParams": "lw",
+        "commandMetadata": {
+          "webCommandMetadata": {
+            "url": "ih",
+            "webPageType": "xa",
+            "rootVe": 73
+          }
+        },
+        "urlEndpoint": {
+          "url": "ms",
+          "target": "tj"
+        }
+      },
+      "trackingParams": "vd",
+      "snackbar": {
+        "notificationActionRenderer": {
+          "responseText": {
+            "runs": [
+              {
+                "text": "pp"
+              }
+            ]
+          },
+          "actionButton": {
+            "buttonRenderer": {
+              "text": {
+                "runs": [
+                  {
+                    "text": "yw"
+                  }
+                ]
+              },
+              "navigationEndpoint": {
+                "clickTrackingParams": "sq",
+                "commandMetadata": {
+                  "webCommandMetadata": {
+                    "url": "wp",
+                    "webPageType": "zn",
+                    "rootVe": 21
+                  }
+                },
+                "urlEndpoint": {
+                  "url": "ju",
+                  "target": "dy"
+                }
+              },
+              "trackingParams": "zj"
+            }
+          },
+          "trackingParams": "nh"
+        }
+      }
+    }
+  },
+  "messages": [
+    {
+      "mealbarPromoRenderer": {
+        "icon": {
+          "thumbnails": [
+            {
+              "url": "ek",
+              "width": 71,
+              "height": 69
+            }
+          ]
+        },
+        "messageTexts": [
+          {
+            "runs": [
+              {
+                "text": "ew"
+              }
+            ]
+          }
+        ],
+        "actionButton": {
+          "buttonRenderer": {
+            "style": "gz",
+            "size": "tz",
+            "text": {
+              "runs": [
+                {
+                  "text": "ga"
+                }
+              ]
+            },
+            "trackingParams": "qr",
+            "command": {
+              "clickTrackingParams": "wk",
+              "commandExecutorCommand": {
+                "commands": [
+                  {
+                    "clickTrackingParams": "dw",
+                    "commandMetadata": {
+                      "webCommandMetadata": {
+                        "url": "po",
+                        "webPageType": "fl",
+                        "rootVe": 70,
+                        "apiUrl": "ot"
+                      }
+                    },
+                    "browseEndpoint": {
+                      "browseId": "pl",
+                      "params": "zo"
+                    }
+                  },
+                  {
+                    "commandMetadata": {
+                      "webCommandMetadata": {
+                        "sendPost": 10,
+                        "apiUrl": "rv"
+                      }
+                    },
+                    "feedbackEndpoint": {
+                      "feedbackToken": "xi",
+                      "uiActions": {
+                        "hideEnclosingContainer": 25
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "dismissButton": {
+          "buttonRenderer": {
+            "style": "ol",
+            "size": "og",
+            "text": {
+              "runs": [
+                {
+                  "text": "yv"
+                }
+              ]
+            },
+            "trackingParams": "ch",
+            "command": {
+              "clickTrackingParams": "uu",
+              "commandExecutorCommand": {
+                "commands": [
+                  {
+                    "clickTrackingParams": "ig",
+                    "commandMetadata": {
+                      "webCommandMetadata": {
+                        "sendPost": 71,
+                        "apiUrl": "en"
+                      }
+                    },
+                    "feedbackEndpoint": {
+                      "feedbackToken": "wh",
+                      "uiActions": {
+                        "hideEnclosingContainer": 45
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "triggerCondition": "pb",
+        "style": "uq",
+        "trackingParams": "rp",
+        "impressionEndpoints": [
+          {
+            "clickTrackingParams": "xb",
+            "commandMetadata": {
+              "webCommandMetadata": {
+                "sendPost": 73,
+                "apiUrl": "wl"
+              }
+            },
+            "feedbackEndpoint": {
+              "feedbackToken": "wf",
+              "uiActions": {
+                "hideEnclosingContainer": 95
+              }
+            }
+          }
+        ],
+        "isVisible": 17,
+        "messageTitle": {
+          "runs": [
+            {
+              "text": "ir"
+            }
+          ]
+        },
+        "enableSharedFeatureForImpressionHandling": 21
+      }
+    }
+  ],
+  "adPlacements": [
+    {
+      "adPlacementRenderer": {
+        "config": {
+          "adPlacementConfig": {
+            "kind": "AD_PLACEMENT_KIND_MILLISECONDS",
+            "adTimeOffset": {
+              "offsetStartMilliseconds": "7",
+              "offsetEndMilliseconds": "39"
+            },
+            "hideCueRangeMarker": true
+          }
+        },
+        "renderer": {
+          "linearAdSequenceRenderer": {
+            "linearAds": [
+              {
+                "instreamVideoAdRenderer": {
+                  "playerOverlay": {
+                    "instreamAdPlayerOverlayRenderer": {
+                      "skipOrPreviewRenderer": {
+                        "skipAdRenderer": {
+                          "preskipRenderer": {
+                            "adPreviewRenderer": {
+                              "thumbnail": {
+                                "thumbnail": {
+                                  "thumbnails": [
+                                    {
+                                      "url": "https://i.ytimg.com/vi/AERLXaPKn_U/mqdefault.jpg",
+                                      "width": 46,
+                                      "height": 25
+                                    }
+                                  ]
+                                },
+                                "trackingParams": "ye"
+                              },
+                              "trackingParams": "dq",
+                              "templatedCountdown": {
+                                "templatedAdText": {
+                                  "text": "ps",
+                                  "isTemplated": 82,
+                                  "trackingParams": "cc"
+                                }
+                              },
+                              "durationMilliseconds": 44
+                            }
+                          },
+                          "skippableRenderer": {
+                            "skipButtonRenderer": {
+                              "message": {
+                                "text": "xz",
+                                "isTemplated": 30,
+                                "trackingParams": "um"
+                              },
+                              "trackingParams": "ge"
+                            }
+                          },
+                          "trackingParams": "zg",
+                          "skipOffsetMilliseconds": 88
+                        }
+                      },
+                      "trackingParams": "qd",
+                      "visitAdvertiserRenderer": {
+                        "buttonRenderer": {
+                          "style": "fv",
+                          "text": {
+                            "simpleText": "on"
+                          },
+                          "icon": {
+                            "iconType": "vw"
+                          },
+                          "navigationEndpoint": {
+                            "clickTrackingParams": "mk",
+                            "commandMetadata": {
+                              "webCommandMetadata": {
+                                "url": "https://www.googleadservices.com/pagead/aclk?sa=L&ai=C3OQpfbUyZYWKL_Ken8RMFbClwAyRha6dc6fw7oP7EbaQHxABIABgyfb4hsijoBmCARdjYS1wdWItNjIxOTgxMTc0NzA0OTM3MYgBAaAB59zF2gOoAwSqBLMDT9ATfUTpaHDVXptzXB0Bqtu5dBV_jsP-c6MPkZYSL8_SrzCV3_f4sBsAHAi3Utb4zaJFaF_HvQdtBwss4wAA_skHdbFnpl5-EMNyyzlRw-Cndshj8CGQYwd1ZXhxlU46cvUuzxBe4SvQuo5EZgRv_zIYfKVpOj81ol3soC-FTzrjxhngpg6E1SEy8MZ8S5ykzm_m-YEKix3QCVLlSpEedBunRo295OkIwlFwaIQk8cLxsmnYhxdD_0zLFeTvwe5Q5tNO9mqkUZ7rAyzCTey_m5MZVo67-fDtV0elSQR79C9ErFiOQ5SaPsQgzk7zE3jxPNZYzV0zKOQ245eF3ZWxcGIrFA5NPIvvBwOl60ABjpEgQjQ4y2LpZnygmW_9ikThHx_iC4RujeV7iSAG5Fvv28wptAmCq7jMu5tWztpr-nl-Y0Iz7dA2FeeEOcd4ddn596NriGGT8AjZAXhtD7yJ8tRBEO3P48giFZj81WrpYHUvNhfx24PguTj-IBSpw2uQbemku11WDOxo7SI20n_fPtLcaEXB3YUajshnd5LoR4NlONEqC0f_uYwLaHt5X4Fw1hd8oAZUgAeBo7oliAcBkAcCqAf5sbECqAfnnbECqAfonbECqAfqt7ECqAentbMVqAfvtbECqAfwtbECqAeCqrECqAePOgHqNIbqAe2B6gHpJqxAqgHkZ-xAqgHsJuxAqgH36GxAqgHrrGxAqgHpqqxAqgH_bKxAqgHgcYbqAf8r7ECqAerxRuoB5zcG6gH5p2xAqgHyJ-xAqgHt6GxAqgH66WxAqgHyqmxApIIC242UFJubjBtcFpjqAgB0ggcCIAREAIYWjIDgoAEOgeP0ICAgIAESNmg0jVQFPIIH2NhLXl0LWhvc3QtcHViLTE4MDAxMjAxBZAyMzA2NTWaCRtodHRwczovL2xhdW5pdGVjLm5ldC9lY29tYTKxCS-fhg771OyRyAkYyAmPAcgJkAGYCwGhC8vk5LIcunUAugtXCAEQARgFIAEoATABQAFIAWAAaABwAogBAJgBAaIBLwoYIAPauAQSMhA6DgoMKDBIs5vbluYKmBkBEAEYACAAWABgAHAA0AEBqAIFwAIC2AEBgAIBiAIG0AsS2gw8CgoQ8Pj1wrn_sa1tEgIBAxoqCAESGf6BmeYY2b35qxjevPmrGJO89uoDvoSxpgPO7YnF2kwgmtyo08MEmg0BEqoNAlVTuBP___________8BsBQBwBXJgIBA0BUB2BUBkBYBmBYB4hYCCAGAFwGKFxoIAxgBIAEoATABOAFAAUgBUAFYAWACaAFwAaAXAakXG4oLaa1eRvW6FwQoADAA&ase=2&num=1&cid=CAASD-D4c9DOhTCuXm4CeUayPw&ad_cpn=%5BAD_CPN%5D&sig=AOD64_1U5dvH2jbnEq_3j0LlY381EiWpog&ms=[CLICK_MS]&adurl=https://garlo.com/enapa2%3Fgc_id%3D20599670093&label=video_click_to_advertiser_site&ctype=110",
+                                "webPageType": "ry",
+                                "rootVe": 62
+                              }
+                            },
+                            "urlEndpoint": {
+                              "url": "lq",
+                              "target": "wt"
+                            }
+                          },
+                          "trackingParams": "mh"
+                        }
+                      },
+                      "adBadgeRenderer": {
+                        "simpleAdBadgeRenderer": {
+                          "text": {
+                            "text": "kw",
+                            "isTemplated": 93,
+                            "trackingParams": "jg"
+                          },
+                          "trackingParams": "at"
+                        }
+                      },
+                      "adDurationRemaining": {
+                        "adDurationRemainingRenderer": {
+                          "templatedCountdown": {
+                            "templatedAdText": {
+                              "text": "rl",
+                              "isTemplated": 73,
+                              "trackingParams": "le"
+                            }
+                          },
+                          "trackingParams": "tr"
+                        }
+                      },
+                      "adInfoRenderer": {
+                        "adHoverTextButtonRenderer": {
+                          "button": {
+                            "buttonRenderer": {
+                              "style": "le",
+                              "size": "nb",
+                              "isDisabled": 41,
+                              "serviceEndpoint": {
+                                "clickTrackingParams": "jt",
+                                "openPopupAction": {
+                                  "popup": {
+                                    "aboutThisAdRenderer": {
+                                      "url": {
+                                        "privateDoNotAccessOrElseTrustedResourceUrlWrappedValue": "as"
+                                      },
+                                      "trackingParams": "vy"
+                                    }
+                                  },
+                                  "popupType": "xn"
+                                }
+                              },
+                              "icon": {
+                                "iconType": "vl"
+                              },
+                              "trackingParams": "lm",
+                              "accessibilityData": {
+                                "accessibilityData": {
+                                  "label": "qi"
+                                }
+                              }
+                            }
+                          },
+                          "hoverText": {
+                            "simpleText": "zk"
+                          },
+                          "trackingParams": "qa"
+                        }
+                      },
+                      "flyoutCtaRenderer": {
+                        "flyoutCtaRenderer": {
+                          "image": {
+                            "thumbnail": {
+                              "thumbnails": [
+                                {
+                                  "url": "pv"
+                                }
+                              ]
+                            },
+                            "trackingParams": "jo"
+                          },
+                          "headline": {
+                            "text": "qx",
+                            "isTemplated": 10,
+                            "trackingParams": "um"
+                          },
+                          "description": {
+                            "text": "mf",
+                            "trackingParams": "fe"
+                          },
+                          "actionButton": {
+                            "buttonRenderer": {
+                              "text": {
+                                "simpleText": "kq"
+                              },
+                              "navigationEndpoint": {
+                                "clickTrackingParams": "cm",
+                                "commandMetadata": {
+                                  "webCommandMetadata": {
+                                    "url": "wa",
+                                    "webPageType": "nq",
+                                    "rootVe": 69
+                                  }
+                                },
+                                "urlEndpoint": {
+                                  "url": "ln",
+                                  "target": "nd"
+                                }
+                              },
+                              "trackingParams": "no"
+                            }
+                          },
+                          "startMs": 45,
+                          "trackingParams": "ge"
+                        }
+                      },
+                      "adLayoutLoggingData": {
+                        "serializedAdServingDataEntry": "xd"
+                      },
+                      "elementId": "tc",
+                      "inPlayerSlotId": "gg",
+                      "inPlayerLayoutId": "cm"
+                    }
+                  },
+                  "trackingParams": "uy",
+                  "layoutId": "ff",
+                  "associatedPlayerBytesLayoutId": "dy"
+                }
+              },
+              {
+                "adActionInterstitialRenderer": {
+                  "image": {
+                    "thumbnail": {
+                      "thumbnails": [
+                        {
+                          "url": "gv"
+                        }
+                      ]
+                    },
+                    "trackingParams": "at"
+                  },
+                  "headline": {
+                    "text": "ow",
+                    "isTemplated": 66,
+                    "trackingParams": "za"
+                  },
+                  "description": {
+                    "text": "ds",
+                    "isTemplated": 95,
+                    "trackingParams": "fc"
+                  },
+                  "actionButton": {
+                    "buttonRenderer": {
+                      "style": "ys",
+                      "text": {
+                        "simpleText": "aq"
+                      },
+                      "navigationEndpoint": {
+                        "clickTrackingParams": "vu",
+                        "commandMetadata": {
+                          "webCommandMetadata": {
+                            "url": "zn",
+                            "webPageType": "jv",
+                            "rootVe": 38
+                          }
+                        },
+                        "urlEndpoint": {
+                          "url": "df",
+                          "target": "xe"
+                        }
+                      },
+                      "trackingParams": "za"
+                    }
+                  },
+                  "durationMilliseconds": 44,
+                  "countdownRenderer": {
+                    "timedPieCountdownRenderer": {
+                      "trackingParams": "xg"
+                    }
+                  },
+                  "navigationEndpoint": {
+                    "clickTrackingParams": "vg",
+                    "loggingUrls": [
+                      {
+                        "baseUrl": "bc"
+                      }
+                    ],
+                    "commandMetadata": {
+                      "webCommandMetadata": {
+                        "url": "sn",
+                        "webPageType": "vb",
+                        "rootVe": 34
+                      }
+                    },
+                    "urlEndpoint": {
+                      "url": "ex",
+                      "target": "nb"
+                    }
+                  },
+                  "trackingParams": "iw",
+                  "backgroundImage": {
+                    "thumbnail": {
+                      "thumbnails": [
+                        {
+                          "url": "cm"
+                        }
+                      ]
+                    },
+                    "trackingParams": "br"
+                  },
+                  "adRendererCommands": {
+                    "impressionCommand": {
+                      "clickTrackingParams": "dj",
+                      "commandExecutorCommand": {
+                        "commands": [
+                          {
+                            "clickTrackingParams": "li",
+                            "loggingUrls": [
+                              {
+                                "baseUrl": "wa"
+                              }
+                            ],
+                            "pingingEndpoint": {
+                              "hack": 0
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "skipButton": {
+                    "skipButtonRenderer": {
+                      "message": {
+                        "text": "jg",
+                        "isTemplated": 95,
+                        "trackingParams": "by"
+                      },
+                      "trackingParams": "kl"
+                    }
+                  },
+                  "adLayoutLoggingData": {
+                    "serializedAdServingDataEntry": "kt"
+                  },
+                  "layoutId": "cv",
+                  "inPlayerSlotId": "qt",
+                  "inPlayerLayoutId": "yy",
+                  "associatedPlayerBytesLayoutId": "dx"
+                }
+              },
+              {
+                "instreamVideoAdRenderer": {
+                  "playerOverlay": {
+                    "instreamAdPlayerOverlayRenderer": {
+                      "skipOrPreviewRenderer": {
+                        "skipAdRenderer": {
+                          "preskipRenderer": {
+                            "adPreviewRenderer": {
+                              "thumbnail": {
+                                "thumbnail": {
+                                  "thumbnails": [
+                                    {
+                                      "url": "pz",
+                                      "width": 32,
+                                      "height": 43
+                                    }
+                                  ]
+                                },
+                                "trackingParams": "iz"
+                              },
+                              "trackingParams": "yo",
+                              "templatedCountdown": {
+                                "templatedAdText": {
+                                  "text": "we",
+                                  "isTemplated": 91,
+                                  "trackingParams": "si"
+                                }
+                              },
+                              "durationMilliseconds": 10
+                            }
+                          },
+                          "skippableRenderer": {
+                            "skipButtonRenderer": {
+                              "message": {
+                                "text": "bp",
+                                "isTemplated": 93,
+                                "trackingParams": "mo"
+                              },
+                              "trackingParams": "cp"
+                            }
+                          },
+                          "trackingParams": "qr",
+                          "skipOffsetMilliseconds": 60
+                        }
+                      },
+                      "trackingParams": "zf",
+                      "visitAdvertiserRenderer": {
+                        "buttonRenderer": {
+                          "style": "ya",
+                          "text": {
+                            "simpleText": "fv"
+                          },
+                          "icon": {
+                            "iconType": "bx"
+                          },
+                          "navigationEndpoint": {
+                            "clickTrackingParams": "bw",
+                            "commandMetadata": {
+                              "webCommandMetadata": {
+                                "url": "ht",
+                                "webPageType": "gv",
+                                "rootVe": 14
+                              }
+                            },
+                            "urlEndpoint": {
+                              "url": "wi",
+                              "target": "te"
+                            }
+                          },
+                          "trackingParams": "gr"
+                        }
+                      },
+                      "adBadgeRenderer": {
+                        "simpleAdBadgeRenderer": {
+                          "text": {
+                            "text": "ox",
+                            "isTemplated": 66,
+                            "trackingParams": "td"
+                          },
+                          "trackingParams": "ng"
+                        }
+                      },
+                      "adDurationRemaining": {
+                        "adDurationRemainingRenderer": {
+                          "templatedCountdown": {
+                            "templatedAdText": {
+                              "text": "zu",
+                              "isTemplated": 15,
+                              "trackingParams": "py"
+                            }
+                          },
+                          "trackingParams": "hb"
+                        }
+                      },
+                      "adInfoRenderer": {
+                        "adHoverTextButtonRenderer": {
+                          "button": {
+                            "buttonRenderer": {
+                              "style": "vn",
+                              "size": "cw",
+                              "isDisabled": 56,
+                              "serviceEndpoint": {
+                                "clickTrackingParams": "jh",
+                                "openPopupAction": {
+                                  "popup": {
+                                    "aboutThisAdRenderer": {
+                                      "url": {
+                                        "privateDoNotAccessOrElseTrustedResourceUrlWrappedValue": "zx"
+                                      },
+                                      "trackingParams": "yl"
+                                    }
+                                  },
+                                  "popupType": "tw"
+                                }
+                              },
+                              "icon": {
+                                "iconType": "ar"
+                              },
+                              "trackingParams": "vi",
+                              "accessibilityData": {
+                                "accessibilityData": {
+                                  "label": "hy"
+                                }
+                              }
+                            }
+                          },
+                          "hoverText": {
+                            "simpleText": "ap"
+                          },
+                          "trackingParams": "pp"
+                        }
+                      },
+                      "flyoutCtaRenderer": {
+                        "flyoutCtaRenderer": {
+                          "image": {
+                            "thumbnail": {
+                              "thumbnails": [
+                                {
+                                  "url": "ol"
+                                }
+                              ]
+                            },
+                            "trackingParams": "kz"
+                          },
+                          "headline": {
+                            "text": "wa",
+                            "isTemplated": 43,
+                            "trackingParams": "yb"
+                          },
+                          "description": {
+                            "text": "cl",
+                            "trackingParams": "aq"
+                          },
+                          "actionButton": {
+                            "buttonRenderer": {
+                              "text": {
+                                "simpleText": "xg"
+                              },
+                              "navigationEndpoint": {
+                                "clickTrackingParams": "wp",
+                                "commandMetadata": {
+                                  "webCommandMetadata": {
+                                    "url": "uh",
+                                    "webPageType": "bs",
+                                    "rootVe": 44
+                                  }
+                                },
+                                "urlEndpoint": {
+                                  "url": "xq",
+                                  "target": "fi"
+                                }
+                              },
+                              "trackingParams": "fo"
+                            }
+                          },
+                          "startMs": 5,
+                          "trackingParams": "kh"
+                        }
+                      },
+                      "adLayoutLoggingData": {
+                        "serializedAdServingDataEntry": "ir"
+                      },
+                      "elementId": "mp",
+                      "inPlayerSlotId": "fh",
+                      "inPlayerLayoutId": "bh"
+                    }
+                  },
+                  "trackingParams": "ao",
+                  "layoutId": "gc",
+                  "associatedPlayerBytesLayoutId": "up"
+                }
+              },
+              {
+                "adActionInterstitialRenderer": {
+                  "image": {
+                    "thumbnail": {
+                      "thumbnails": [
+                        {
+                          "url": "wj"
+                        }
+                      ]
+                    },
+                    "trackingParams": "zr"
+                  },
+                  "headline": {
+                    "text": "rq",
+                    "isTemplated": 82,
+                    "trackingParams": "gr"
+                  },
+                  "description": {
+                    "text": "fj",
+                    "isTemplated": 57,
+                    "trackingParams": "li"
+                  },
+                  "actionButton": {
+                    "buttonRenderer": {
+                      "style": "mu",
+                      "text": {
+                        "simpleText": "cg"
+                      },
+                      "navigationEndpoint": {
+                        "clickTrackingParams": "eb",
+                        "commandMetadata": {
+                          "webCommandMetadata": {
+                            "url": "vn",
+                            "webPageType": "nw",
+                            "rootVe": 96
+                          }
+                        },
+                        "urlEndpoint": {
+                          "url": "bs",
+                          "target": "dr"
+                        }
+                      },
+                      "trackingParams": "iq"
+                    }
+                  },
+                  "durationMilliseconds": 39,
+                  "countdownRenderer": {
+                    "timedPieCountdownRenderer": {
+                      "trackingParams": "mt"
+                    }
+                  },
+                  "navigationEndpoint": {
+                    "clickTrackingParams": "uz",
+                    "loggingUrls": [
+                      {
+                        "baseUrl": "rn"
+                      }
+                    ],
+                    "commandMetadata": {
+                      "webCommandMetadata": {
+                        "url": "cu",
+                        "webPageType": "qs",
+                        "rootVe": 26
+                      }
+                    },
+                    "urlEndpoint": {
+                      "url": "ty",
+                      "target": "he"
+                    }
+                  },
+                  "trackingParams": "bw",
+                  "backgroundImage": {
+                    "thumbnail": {
+                      "thumbnails": [
+                        {
+                          "url": "pd"
+                        }
+                      ]
+                    },
+                    "trackingParams": "wm"
+                  },
+                  "adRendererCommands": {
+                    "impressionCommand": {
+                      "clickTrackingParams": "io",
+                      "commandExecutorCommand": {
+                        "commands": [
+                          {
+                            "clickTrackingParams": "hd",
+                            "loggingUrls": [
+                              {
+                                "baseUrl": "hz"
+                              }
+                            ],
+                            "pingingEndpoint": {
+                              "hack": 81
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "skipButton": {
+                    "skipButtonRenderer": {
+                      "message": {
+                        "text": "db",
+                        "isTemplated": 42,
+                        "trackingParams": "ga"
+                      },
+                      "trackingParams": "pa"
+                    }
+                  },
+                  "adLayoutLoggingData": {
+                    "serializedAdServingDataEntry": "bt"
+                  },
+                  "layoutId": "ec",
+                  "inPlayerSlotId": "nl",
+                  "inPlayerLayoutId": "qh",
+                  "associatedPlayerBytesLayoutId": "qe"
+                }
+              }
+            ]
+          }
+        },
+        "adSlotLoggingData": {
+          "serializedSlotAdServingDataEntry": "rj"
+        }
+      }
+    },
+    {
+      "adPlacementRenderer": {
+        "config": {
+          "adPlacementConfig": {
+            "kind": "zf",
+            "adTimeOffset": {
+              "offsetStartMilliseconds": "63",
+              "offsetEndMilliseconds": "83"
+            },
+            "hideCueRangeMarker": true
+          }
+        },
+        "renderer": {
+          "adBreakServiceRenderer": {
+            "prefetchMilliseconds": "59",
+            "getAdBreakUrl": "https://www.youtube.com/get_midroll_info?ei=l3FgBarVGsIphxLPxuRduBc&m_pos=330&token=RLJjkrMhTDF1XyVxobLOmsF6L503baqxgf8zHtyL78tfro_JRoNlfUoKtHWX2jso_GFC-H_ls4xj56iIKpT0KTxmL6pBydJcB_KTnotW1Kxo4HXObZOq6QB1pko2sTXpiLrkJms8CUEhtmyJi4JLbzgqpKLHDEPl661jo3yXCRv0JEFo_M8Kbs-NJqqhNk-CRJ_s8hTmbiMZPaPBDZtVQ-NB0zXsJDIwj2XvPAaTetL-zmXE540lFCFBTmjXZ_xJyO2NATx6lkN7RoJZL2oRwXCH1rZDjXoOvFwjXFWV9JSPwCRzajtfJUVyGROxkM6BX896KoL4rFXfYzJZBZ1QOvbMxJD4laKN5xMb5KPz5Jq54KXXO76NpvMuOlkHb5qf-k2-Z&index=2&cpn=[CPN]&lact=[LACT]&vis=[VIS]&ad_block=[AD_BLOCK]&tsla=[TSLA]&bid=[BISCOTTI_ID]&dt=[DT]&flash=[FLASH]&frm=[FRM]&ca_type=[CA_TYPE]&u_tz=[U_TZ]&u_his=[U_HIS]&u_java=[U_JAVA]&u_h=[U_H]&u_w=[U_W]&u_ah=[U_AH]&u_aw=[U_AW]&u_cd=[U_CD]&u_nplug=[U_NPLUG]&u_nmime=[U_NMIME]&p_w=[P_W]&p_h=[P_H]&c=WEB&cver=2.20231003.02.02&m_pos_ms=330200"
+          }
+        },
+        "adSlotLoggingData": {
+          "serializedSlotAdServingDataEntry": "LigQMVuP3nAx3LwQfSGhgYmqsEWANi"
+        }
+      }
+    },
+    {
+      "adPlacementRenderer": {
+        "config": {
+          "adPlacementConfig": {
+            "kind": "AD_PLACEMENT_KIND_START",
+            "adTimeOffset": {
+              "offsetStartMilliseconds": "330100",
+              "offsetEndMilliseconds": "594666"
+            },
+            "hideCueRangeMarker": true
+          }
+        },
+        "renderer": {
+          "adBreakServiceRenderer": {
+            "prefetchMilliseconds": "0",
+            "getAdBreakUrl": "https://www.youtube.com/get_midroll_info?ei=l3FgBarVGsIphxLPxuRduBc&m_pos=330&token=RLJjkrMhTDF1XyVxobLOmsF6L503baqxgf8zHtyL78tfro_JRoNlfUoKtHWX2jso_GFC-H_ls4xj56iIKpT0KTxmL6pBydJcB_KTnotW1Kxo4HXObZOq6QB1pko2sTXpiLrkJms8CUEhtmyJi4JLbzgqpKLHDEPl661jo3yXCRv0JEFo_M8Kbs-NJqqhNk-CRJ_s8hTmbiMZPaPBDZtVQ-NB0zXsJDIwj2XvPAaTetL-zmXE540lFCFBTmjXZ_xJyO2NATx6lkN7RoJZL2oRwXCH1rZDjXoOvFwjXFWV9JSPwCRzajtfJUVyGROxkM6BX896KoL4rFXfYzJZBZ1QOvbMxJD4laKN5xMb5KPz5Jq54KXXO76NpvMuOlkHb5qf-k2-Z&index=2&cpn=[CPN]&lact=[LACT]&vis=[VIS]&ad_block=[AD_BLOCK]&tsla=[TSLA]&bid=[BISCOTTI_ID]&dt=[DT]&flash=[FLASH]&frm=[FRM]&ca_type=[CA_TYPE]&u_tz=[U_TZ]&u_his=[U_HIS]&u_java=[U_JAVA]&u_h=[U_H]&u_w=[U_W]&u_ah=[U_AH]&u_aw=[U_AW]&u_cd=[U_CD]&u_nplug=[U_NPLUG]&u_nmime=[U_NMIME]&p_w=[P_W]&p_h=[P_H]&c=WEB&cver=2.20231003.02.02&m_pos_ms=330200"
+          }
+        },
+        "adSlotLoggingData": {
+          "serializedSlotAdServingDataEntry": "LigQMVuP3nAx3LwQfSGhgYmqsEWANi"
+        }
+      }
+    },
+    {
+      "adPlacementRenderer": {
+        "config": {
+          "adPlacementConfig": {
+            "kind": "AD_PLACEMENT_KIND_MILLISECONDS",
+            "adTimeOffset": {
+              "offsetStartMilliseconds": "65",
+              "offsetEndMilliseconds": "30"
+            },
+            "hideCueRangeMarker": true
+          }
+        },
+        "renderer": {
+          "adBreakServiceRenderer": {
+            "prefetchMilliseconds": "51",
+            "getAdBreakUrl": "https://www.youtube.com/get_midroll_info?ei=l3FgBarVGsIphxLPxuRduBc&m_pos=330&token=RLJjkrMhTDF1XyVxobLOmsF6L503baqxgf8zHtyL78tfro_JRoNlfUoKtHWX2jso_GFC-H_ls4xj56iIKpT0KTxmL6pBydJcB_KTnotW1Kxo4HXObZOq6QB1pko2sTXpiLrkJms8CUEhtmyJi4JLbzgqpKLHDEPl661jo3yXCRv0JEFo_M8Kbs-NJqqhNk-CRJ_s8hTmbiMZPaPBDZtVQ-NB0zXsJDIwj2XvPAaTetL-zmXE540lFCFBTmjXZ_xJyO2NATx6lkN7RoJZL2oRwXCH1rZDjXoOvFwjXFWV9JSPwCRzajtfJUVyGROxkM6BX896KoL4rFXfYzJZBZ1QOvbMxJD4laKN5xMb5KPz5Jq54KXXO76NpvMuOlkHb5qf-k2-Z&index=2&cpn=[CPN]&lact=[LACT]&vis=[VIS]&ad_block=[AD_BLOCK]&tsla=[TSLA]&bid=[BISCOTTI_ID]&dt=[DT]&flash=[FLASH]&frm=[FRM]&ca_type=[CA_TYPE]&u_tz=[U_TZ]&u_his=[U_HIS]&u_java=[U_JAVA]&u_h=[U_H]&u_w=[U_W]&u_ah=[U_AH]&u_aw=[U_AW]&u_cd=[U_CD]&u_nplug=[U_NPLUG]&u_nmime=[U_NMIME]&p_w=[P_W]&p_h=[P_H]&c=WEB&cver=2.20231003.02.02&m_pos_ms=330200"
+          }
+        },
+        "adSlotLoggingData": {
+          "serializedSlotAdServingDataEntry": "wg"
+        }
+      }
+    },
+    {
+      "adPlacementRenderer": {
+        "config": {
+          "adPlacementConfig": {
+            "kind": "AD_PLACEMENT_KIND_MILLISECONDS",
+            "adTimeOffset": {
+              "offsetStartMilliseconds": "56",
+              "offsetEndMilliseconds": "86"
+            },
+            "hideCueRangeMarker": true
+          }
+        },
+        "renderer": {
+          "adBreakServiceRenderer": {
+            "prefetchMilliseconds": "25",
+            "getAdBreakUrl": "https://www.youtube.com/get_midroll_info?ei=l3FgBarVGsIphxLPxuRduBc&m_pos=330&token=RLJjkrMhTDF1XyVxobLOmsF6L503baqxgf8zHtyL78tfro_JRoNlfUoKtHWX2jso_GFC-H_ls4xj56iIKpT0KTxmL6pBydJcB_KTnotW1Kxo4HXObZOq6QB1pko2sTXpiLrkJms8CUEhtmyJi4JLbzgqpKLHDEPl661jo3yXCRv0JEFo_M8Kbs-NJqqhNk-CRJ_s8hTmbiMZPaPBDZtVQ-NB0zXsJDIwj2XvPAaTetL-zmXE540lFCFBTmjXZ_xJyO2NATx6lkN7RoJZL2oRwXCH1rZDjXoOvFwjXFWV9JSPwCRzajtfJUVyGROxkM6BX896KoL4rFXfYzJZBZ1QOvbMxJD4laKN5xMb5KPz5Jq54KXXO76NpvMuOlkHb5qf-k2-Z&index=2&cpn=[CPN]&lact=[LACT]&vis=[VIS]&ad_block=[AD_BLOCK]&tsla=[TSLA]&bid=[BISCOTTI_ID]&dt=[DT]&flash=[FLASH]&frm=[FRM]&ca_type=[CA_TYPE]&u_tz=[U_TZ]&u_his=[U_HIS]&u_java=[U_JAVA]&u_h=[U_H]&u_w=[U_W]&u_ah=[U_AH]&u_aw=[U_AW]&u_cd=[U_CD]&u_nplug=[U_NPLUG]&u_nmime=[U_NMIME]&p_w=[P_W]&p_h=[P_H]&c=WEB&cver=2.20231003.02.02&m_pos_ms=330200"
+          }
+        },
+        "adSlotLoggingData": {
+          "serializedSlotAdServingDataEntry": "nh"
+        }
+      }
+    },
+    {
+      "adPlacementRenderer": {
+        "config": {
+          "adPlacementConfig": {
+            "kind": "AD_PLACEMENT_KIND_END",
+            "adTimeOffset": {
+              "offsetStartMilliseconds": "25",
+              "offsetEndMilliseconds": "13"
+            },
+            "hideCueRangeMarker": true
+          }
+        },
+        "renderer": {
+          "adBreakServiceRenderer": {
+            "prefetchMilliseconds": "32",
+            "getAdBreakUrl": "https://www.youtube.com/get_midroll_info?ei=l3FgBarVGsIphxLPxuRduBc&m_pos=330&token=RLJjkrMhTDF1XyVxobLOmsF6L503baqxgf8zHtyL78tfro_JRoNlfUoKtHWX2jso_GFC-H_ls4xj56iIKpT0KTxmL6pBydJcB_KTnotW1Kxo4HXObZOq6QB1pko2sTXpiLrkJms8CUEhtmyJi4JLbzgqpKLHDEPl661jo3yXCRv0JEFo_M8Kbs-NJqqhNk-CRJ_s8hTmbiMZPaPBDZtVQ-NB0zXsJDIwj2XvPAaTetL-zmXE540lFCFBTmjXZ_xJyO2NATx6lkN7RoJZL2oRwXCH1rZDjXoOvFwjXFWV9JSPwCRzajtfJUVyGROxkM6BX896KoL4rFXfYzJZBZ1QOvbMxJD4laKN5xMb5KPz5Jq54KXXO76NpvMuOlkHb5qf-k2-Z&index=2&cpn=[CPN]&lact=[LACT]&vis=[VIS]&ad_block=[AD_BLOCK]&tsla=[TSLA]&bid=[BISCOTTI_ID]&dt=[DT]&flash=[FLASH]&frm=[FRM]&ca_type=[CA_TYPE]&u_tz=[U_TZ]&u_his=[U_HIS]&u_java=[U_JAVA]&u_h=[U_H]&u_w=[U_W]&u_ah=[U_AH]&u_aw=[U_AW]&u_cd=[U_CD]&u_nplug=[U_NPLUG]&u_nmime=[U_NMIME]&p_w=[P_W]&p_h=[P_H]&c=WEB&cver=2.20231003.02.02&m_pos_ms=330200"
+          }
+        },
+        "adSlotLoggingData": {
+          "serializedSlotAdServingDataEntry": "ti"
+        }
+      }
+    },
+    {
+      "adPlacementRenderer": {
+        "config": {
+          "adPlacementConfig": {
+            "kind": "AD_PLACEMENT_KIND_MILLISECONDS",
+            "adTimeOffset": {
+              "offsetStartMilliseconds": "47",
+              "offsetEndMilliseconds": "84"
+            },
+            "hideCueRangeMarker": true
+          }
+        },
+        "renderer": {
+          "adBreakServiceRenderer": {
+            "prefetchMilliseconds": "10",
+            "getAdBreakUrl": "https://www.youtube.com/get_midroll_info?ei=l3FgBarVGsIphxLPxuRduBc&m_pos=330&token=RLJjkrMhTDF1XyVxobLOmsF6L503baqxgf8zHtyL78tfro_JRoNlfUoKtHWX2jso_GFC-H_ls4xj56iIKpT0KTxmL6pBydJcB_KTnotW1Kxo4HXObZOq6QB1pko2sTXpiLrkJms8CUEhtmyJi4JLbzgqpKLHDEPl661jo3yXCRv0JEFo_M8Kbs-NJqqhNk-CRJ_s8hTmbiMZPaPBDZtVQ-NB0zXsJDIwj2XvPAaTetL-zmXE540lFCFBTmjXZ_xJyO2NATx6lkN7RoJZL2oRwXCH1rZDjXoOvFwjXFWV9JSPwCRzajtfJUVyGROxkM6BX896KoL4rFXfYzJZBZ1QOvbMxJD4laKN5xMb5KPz5Jq54KXXO76NpvMuOlkHb5qf-k2-Z&index=2&cpn=[CPN]&lact=[LACT]&vis=[VIS]&ad_block=[AD_BLOCK]&tsla=[TSLA]&bid=[BISCOTTI_ID]&dt=[DT]&flash=[FLASH]&frm=[FRM]&ca_type=[CA_TYPE]&u_tz=[U_TZ]&u_his=[U_HIS]&u_java=[U_JAVA]&u_h=[U_H]&u_w=[U_W]&u_ah=[U_AH]&u_aw=[U_AW]&u_cd=[U_CD]&u_nplug=[U_NPLUG]&u_nmime=[U_NMIME]&p_w=[P_W]&p_h=[P_H]&c=WEB&cver=2.20231003.02.02&m_pos_ms=330200"
+          }
+        },
+        "adSlotLoggingData": {
+          "serializedSlotAdServingDataEntry": "go"
+        }
+      }
+    },
+    {
+      "adPlacementRenderer": {
+        "config": {
+          "adPlacementConfig": {
+            "kind": "AD_PLACEMENT_KIND_MILLISECONDS",
+            "adTimeOffset": {
+              "offsetStartMilliseconds": "14",
+              "offsetEndMilliseconds": "87"
+            },
+            "hideCueRangeMarker": true
+          }
+        },
+        "renderer": {
+          "adBreakServiceRenderer": {
+            "prefetchMilliseconds": "79",
+            "getAdBreakUrl": "https://www.youtube.com/get_midroll_info?ei=l3FgBarVGsIphxLPxuRduBc&m_pos=330&token=RLJjkrMhTDF1XyVxobLOmsF6L503baqxgf8zHtyL78tfro_JRoNlfUoKtHWX2jso_GFC-H_ls4xj56iIKpT0KTxmL6pBydJcB_KTnotW1Kxo4HXObZOq6QB1pko2sTXpiLrkJms8CUEhtmyJi4JLbzgqpKLHDEPl661jo3yXCRv0JEFo_M8Kbs-NJqqhNk-CRJ_s8hTmbiMZPaPBDZtVQ-NB0zXsJDIwj2XvPAaTetL-zmXE540lFCFBTmjXZ_xJyO2NATx6lkN7RoJZL2oRwXCH1rZDjXoOvFwjXFWV9JSPwCRzajtfJUVyGROxkM6BX896KoL4rFXfYzJZBZ1QOvbMxJD4laKN5xMb5KPz5Jq54KXXO76NpvMuOlkHb5qf-k2-Z&index=2&cpn=[CPN]&lact=[LACT]&vis=[VIS]&ad_block=[AD_BLOCK]&tsla=[TSLA]&bid=[BISCOTTI_ID]&dt=[DT]&flash=[FLASH]&frm=[FRM]&ca_type=[CA_TYPE]&u_tz=[U_TZ]&u_his=[U_HIS]&u_java=[U_JAVA]&u_h=[U_H]&u_w=[U_W]&u_ah=[U_AH]&u_aw=[U_AW]&u_cd=[U_CD]&u_nplug=[U_NPLUG]&u_nmime=[U_NMIME]&p_w=[P_W]&p_h=[P_H]&c=WEB&cver=2.20231003.02.02&m_pos_ms=330200"
+          }
+        },
+        "adSlotLoggingData": {
+          "serializedSlotAdServingDataEntry": "wi"
+        }
+      }
+    },
+    {
+      "adPlacementRenderer": {
+        "config": {
+          "adPlacementConfig": {
+            "kind": "AD_PLACEMENT_KIND_MILLISECONDS",
+            "adTimeOffset": {
+              "offsetStartMilliseconds": "34",
+              "offsetEndMilliseconds": "12"
+            },
+            "hideCueRangeMarker": true
+          }
+        },
+        "renderer": {
+          "adBreakServiceRenderer": {
+            "prefetchMilliseconds": "27",
+            "getAdBreakUrl": "https://www.youtube.com/get_midroll_info?ei=l3FgBarVGsIphxLPxuRduBc&m_pos=330&token=RLJjkrMhTDF1XyVxobLOmsF6L503baqxgf8zHtyL78tfro_JRoNlfUoKtHWX2jso_GFC-H_ls4xj56iIKpT0KTxmL6pBydJcB_KTnotW1Kxo4HXObZOq6QB1pko2sTXpiLrkJms8CUEhtmyJi4JLbzgqpKLHDEPl661jo3yXCRv0JEFo_M8Kbs-NJqqhNk-CRJ_s8hTmbiMZPaPBDZtVQ-NB0zXsJDIwj2XvPAaTetL-zmXE540lFCFBTmjXZ_xJyO2NATx6lkN7RoJZL2oRwXCH1rZDjXoOvFwjXFWV9JSPwCRzajtfJUVyGROxkM6BX896KoL4rFXfYzJZBZ1QOvbMxJD4laKN5xMb5KPz5Jq54KXXO76NpvMuOlkHb5qf-k2-Z&index=2&cpn=[CPN]&lact=[LACT]&vis=[VIS]&ad_block=[AD_BLOCK]&tsla=[TSLA]&bid=[BISCOTTI_ID]&dt=[DT]&flash=[FLASH]&frm=[FRM]&ca_type=[CA_TYPE]&u_tz=[U_TZ]&u_his=[U_HIS]&u_java=[U_JAVA]&u_h=[U_H]&u_w=[U_W]&u_ah=[U_AH]&u_aw=[U_AW]&u_cd=[U_CD]&u_nplug=[U_NPLUG]&u_nmime=[U_NMIME]&p_w=[P_W]&p_h=[P_H]&c=WEB&cver=2.20231003.02.02&m_pos_ms=330200"
+          }
+        },
+        "adSlotLoggingData": {
+          "serializedSlotAdServingDataEntry": "fp"
+        }
+      }
+    },
+    {
+      "adPlacementRenderer": {
+        "config": {
+          "adPlacementConfig": {
+            "kind": "AD_PLACEMENT_KIND_MILLISECONDS",
+            "adTimeOffset": {
+              "offsetStartMilliseconds": "66",
+              "offsetEndMilliseconds": "35"
+            },
+            "hideCueRangeMarker": true
+          }
+        },
+        "renderer": {
+          "adBreakServiceRenderer": {
+            "prefetchMilliseconds": "98",
+            "getAdBreakUrl": "https://www.youtube.com/get_midroll_info?ei=l3FgBarVGsIphxLPxuRduBc&m_pos=330&token=RLJjkrMhTDF1XyVxobLOmsF6L503baqxgf8zHtyL78tfro_JRoNlfUoKtHWX2jso_GFC-H_ls4xj56iIKpT0KTxmL6pBydJcB_KTnotW1Kxo4HXObZOq6QB1pko2sTXpiLrkJms8CUEhtmyJi4JLbzgqpKLHDEPl661jo3yXCRv0JEFo_M8Kbs-NJqqhNk-CRJ_s8hTmbiMZPaPBDZtVQ-NB0zXsJDIwj2XvPAaTetL-zmXE540lFCFBTmjXZ_xJyO2NATx6lkN7RoJZL2oRwXCH1rZDjXoOvFwjXFWV9JSPwCRzajtfJUVyGROxkM6BX896KoL4rFXfYzJZBZ1QOvbMxJD4laKN5xMb5KPz5Jq54KXXO76NpvMuOlkHb5qf-k2-Z&index=2&cpn=[CPN]&lact=[LACT]&vis=[VIS]&ad_block=[AD_BLOCK]&tsla=[TSLA]&bid=[BISCOTTI_ID]&dt=[DT]&flash=[FLASH]&frm=[FRM]&ca_type=[CA_TYPE]&u_tz=[U_TZ]&u_his=[U_HIS]&u_java=[U_JAVA]&u_h=[U_H]&u_w=[U_W]&u_ah=[U_AH]&u_aw=[U_AW]&u_cd=[U_CD]&u_nplug=[U_NPLUG]&u_nmime=[U_NMIME]&p_w=[P_W]&p_h=[P_H]&c=WEB&cver=2.20231003.02.02&m_pos_ms=330200"
+          }
+        },
+        "adSlotLoggingData": {
+          "serializedSlotAdServingDataEntry": "cn"
+        }
+      }
+    },
+    {
+      "adPlacementRenderer": {
+        "config": {
+          "adPlacementConfig": {
+            "kind": "AD_PLACEMENT_KIND_MILLISECONDS",
+            "adTimeOffset": {
+              "offsetStartMilliseconds": "59",
+              "offsetEndMilliseconds": "8"
+            },
+            "hideCueRangeMarker": true
+          }
+        },
+        "renderer": {
+          "adBreakServiceRenderer": {
+            "prefetchMilliseconds": "26",
+            "getAdBreakUrl": "https://www.youtube.com/get_midroll_info?ei=l3FgBarVGsIphxLPxuRduBc&m_pos=330&token=RLJjkrMhTDF1XyVxobLOmsF6L503baqxgf8zHtyL78tfro_JRoNlfUoKtHWX2jso_GFC-H_ls4xj56iIKpT0KTxmL6pBydJcB_KTnotW1Kxo4HXObZOq6QB1pko2sTXpiLrkJms8CUEhtmyJi4JLbzgqpKLHDEPl661jo3yXCRv0JEFo_M8Kbs-NJqqhNk-CRJ_s8hTmbiMZPaPBDZtVQ-NB0zXsJDIwj2XvPAaTetL-zmXE540lFCFBTmjXZ_xJyO2NATx6lkN7RoJZL2oRwXCH1rZDjXoOvFwjXFWV9JSPwCRzajtfJUVyGROxkM6BX896KoL4rFXfYzJZBZ1QOvbMxJD4laKN5xMb5KPz5Jq54KXXO76NpvMuOlkHb5qf-k2-Z&index=2&cpn=[CPN]&lact=[LACT]&vis=[VIS]&ad_block=[AD_BLOCK]&tsla=[TSLA]&bid=[BISCOTTI_ID]&dt=[DT]&flash=[FLASH]&frm=[FRM]&ca_type=[CA_TYPE]&u_tz=[U_TZ]&u_his=[U_HIS]&u_java=[U_JAVA]&u_h=[U_H]&u_w=[U_W]&u_ah=[U_AH]&u_aw=[U_AW]&u_cd=[U_CD]&u_nplug=[U_NPLUG]&u_nmime=[U_NMIME]&p_w=[P_W]&p_h=[P_H]&c=WEB&cver=2.20231003.02.02&m_pos_ms=330200"
+          }
+        },
+        "adSlotLoggingData": {
+          "serializedSlotAdServingDataEntry": "wz"
+        }
+      }
+    },
+    {
+      "adPlacementRenderer": {
+        "config": {
+          "adPlacementConfig": {
+            "kind": "AD_PLACEMENT_KIND_MILLISECONDS",
+            "adTimeOffset": {
+              "offsetStartMilliseconds": "84",
+              "offsetEndMilliseconds": "90"
+            },
+            "hideCueRangeMarker": true
+          }
+        },
+        "renderer": {
+          "adBreakServiceRenderer": {
+            "prefetchMilliseconds": "92",
+            "getAdBreakUrl": "https://www.youtube.com/get_midroll_info?ei=l3FgBarVGsIphxLPxuRduBc&m_pos=330&token=RLJjkrMhTDF1XyVxobLOmsF6L503baqxgf8zHtyL78tfro_JRoNlfUoKtHWX2jso_GFC-H_ls4xj56iIKpT0KTxmL6pBydJcB_KTnotW1Kxo4HXObZOq6QB1pko2sTXpiLrkJms8CUEhtmyJi4JLbzgqpKLHDEPl661jo3yXCRv0JEFo_M8Kbs-NJqqhNk-CRJ_s8hTmbiMZPaPBDZtVQ-NB0zXsJDIwj2XvPAaTetL-zmXE540lFCFBTmjXZ_xJyO2NATx6lkN7RoJZL2oRwXCH1rZDjXoOvFwjXFWV9JSPwCRzajtfJUVyGROxkM6BX896KoL4rFXfYzJZBZ1QOvbMxJD4laKN5xMb5KPz5Jq54KXXO76NpvMuOlkHb5qf-k2-Z&index=2&cpn=[CPN]&lact=[LACT]&vis=[VIS]&ad_block=[AD_BLOCK]&tsla=[TSLA]&bid=[BISCOTTI_ID]&dt=[DT]&flash=[FLASH]&frm=[FRM]&ca_type=[CA_TYPE]&u_tz=[U_TZ]&u_his=[U_HIS]&u_java=[U_JAVA]&u_h=[U_H]&u_w=[U_W]&u_ah=[U_AH]&u_aw=[U_AW]&u_cd=[U_CD]&u_nplug=[U_NPLUG]&u_nmime=[U_NMIME]&p_w=[P_W]&p_h=[P_H]&c=WEB&cver=2.20231003.02.02&m_pos_ms=330200"
+          }
+        },
+        "adSlotLoggingData": {
+          "serializedSlotAdServingDataEntry": "nl"
+        }
+      }
+    },
+    {
+      "adPlacementRenderer": {
+        "config": {
+          "adPlacementConfig": {
+            "kind": "AD_PLACEMENT_KIND_MILLISECONDS",
+            "adTimeOffset": {
+              "offsetStartMilliseconds": "50",
+              "offsetEndMilliseconds": "67"
+            },
+            "hideCueRangeMarker": true
+          }
+        },
+        "renderer": {
+          "adBreakServiceRenderer": {
+            "prefetchMilliseconds": "96",
+            "getAdBreakUrl": "https://www.youtube.com/get_midroll_info?ei=l3FgBarVGsIphxLPxuRduBc&m_pos=330&token=RLJjkrMhTDF1XyVxobLOmsF6L503baqxgf8zHtyL78tfro_JRoNlfUoKtHWX2jso_GFC-H_ls4xj56iIKpT0KTxmL6pBydJcB_KTnotW1Kxo4HXObZOq6QB1pko2sTXpiLrkJms8CUEhtmyJi4JLbzgqpKLHDEPl661jo3yXCRv0JEFo_M8Kbs-NJqqhNk-CRJ_s8hTmbiMZPaPBDZtVQ-NB0zXsJDIwj2XvPAaTetL-zmXE540lFCFBTmjXZ_xJyO2NATx6lkN7RoJZL2oRwXCH1rZDjXoOvFwjXFWV9JSPwCRzajtfJUVyGROxkM6BX896KoL4rFXfYzJZBZ1QOvbMxJD4laKN5xMb5KPz5Jq54KXXO76NpvMuOlkHb5qf-k2-Z&index=2&cpn=[CPN]&lact=[LACT]&vis=[VIS]&ad_block=[AD_BLOCK]&tsla=[TSLA]&bid=[BISCOTTI_ID]&dt=[DT]&flash=[FLASH]&frm=[FRM]&ca_type=[CA_TYPE]&u_tz=[U_TZ]&u_his=[U_HIS]&u_java=[U_JAVA]&u_h=[U_H]&u_w=[U_W]&u_ah=[U_AH]&u_aw=[U_AW]&u_cd=[U_CD]&u_nplug=[U_NPLUG]&u_nmime=[U_NMIME]&p_w=[P_W]&p_h=[P_H]&c=WEB&cver=2.20231003.02.02&m_pos_ms=330200"
+          }
+        },
+        "adSlotLoggingData": {
+          "serializedSlotAdServingDataEntry": "ov"
+        }
+      }
+    },
+    {
+      "adPlacementRenderer": {
+        "config": {
+          "adPlacementConfig": {
+            "kind": "AD_PLACEMENT_KIND_MILLISECONDS",
+            "adTimeOffset": {
+              "offsetStartMilliseconds": "13",
+              "offsetEndMilliseconds": "2"
+            },
+            "hideCueRangeMarker": true
+          }
+        },
+        "renderer": {
+          "adBreakServiceRenderer": {
+            "prefetchMilliseconds": "52",
+            "getAdBreakUrl": "https://www.youtube.com/get_midroll_info?ei=l3FgBarVGsIphxLPxuRduBc&m_pos=330&token=RLJjkrMhTDF1XyVxobLOmsF6L503baqxgf8zHtyL78tfro_JRoNlfUoKtHWX2jso_GFC-H_ls4xj56iIKpT0KTxmL6pBydJcB_KTnotW1Kxo4HXObZOq6QB1pko2sTXpiLrkJms8CUEhtmyJi4JLbzgqpKLHDEPl661jo3yXCRv0JEFo_M8Kbs-NJqqhNk-CRJ_s8hTmbiMZPaPBDZtVQ-NB0zXsJDIwj2XvPAaTetL-zmXE540lFCFBTmjXZ_xJyO2NATx6lkN7RoJZL2oRwXCH1rZDjXoOvFwjXFWV9JSPwCRzajtfJUVyGROxkM6BX896KoL4rFXfYzJZBZ1QOvbMxJD4laKN5xMb5KPz5Jq54KXXO76NpvMuOlkHb5qf-k2-Z&index=2&cpn=[CPN]&lact=[LACT]&vis=[VIS]&ad_block=[AD_BLOCK]&tsla=[TSLA]&bid=[BISCOTTI_ID]&dt=[DT]&flash=[FLASH]&frm=[FRM]&ca_type=[CA_TYPE]&u_tz=[U_TZ]&u_his=[U_HIS]&u_java=[U_JAVA]&u_h=[U_H]&u_w=[U_W]&u_ah=[U_AH]&u_aw=[U_AW]&u_cd=[U_CD]&u_nplug=[U_NPLUG]&u_nmime=[U_NMIME]&p_w=[P_W]&p_h=[P_H]&c=WEB&cver=2.20231003.02.02&m_pos_ms=330200"
+          }
+        },
+        "adSlotLoggingData": {
+          "serializedSlotAdServingDataEntry": "by"
+        }
+      }
+    },
+    {
+      "adPlacementRenderer": {
+        "config": {
+          "adPlacementConfig": {
+            "kind": "AD_PLACEMENT_KIND_MILLISECONDS",
+            "adTimeOffset": {
+              "offsetStartMilliseconds": "73",
+              "offsetEndMilliseconds": "64"
+            },
+            "hideCueRangeMarker": true
+          }
+        },
+        "renderer": {
+          "adBreakServiceRenderer": {
+            "prefetchMilliseconds": "67",
+            "getAdBreakUrl": "https://www.youtube.com/get_midroll_info?ei=l3FgBarVGsIphxLPxuRduBc&m_pos=330&token=RLJjkrMhTDF1XyVxobLOmsF6L503baqxgf8zHtyL78tfro_JRoNlfUoKtHWX2jso_GFC-H_ls4xj56iIKpT0KTxmL6pBydJcB_KTnotW1Kxo4HXObZOq6QB1pko2sTXpiLrkJms8CUEhtmyJi4JLbzgqpKLHDEPl661jo3yXCRv0JEFo_M8Kbs-NJqqhNk-CRJ_s8hTmbiMZPaPBDZtVQ-NB0zXsJDIwj2XvPAaTetL-zmXE540lFCFBTmjXZ_xJyO2NATx6lkN7RoJZL2oRwXCH1rZDjXoOvFwjXFWV9JSPwCRzajtfJUVyGROxkM6BX896KoL4rFXfYzJZBZ1QOvbMxJD4laKN5xMb5KPz5Jq54KXXO76NpvMuOlkHb5qf-k2-Z&index=2&cpn=[CPN]&lact=[LACT]&vis=[VIS]&ad_block=[AD_BLOCK]&tsla=[TSLA]&bid=[BISCOTTI_ID]&dt=[DT]&flash=[FLASH]&frm=[FRM]&ca_type=[CA_TYPE]&u_tz=[U_TZ]&u_his=[U_HIS]&u_java=[U_JAVA]&u_h=[U_H]&u_w=[U_W]&u_ah=[U_AH]&u_aw=[U_AW]&u_cd=[U_CD]&u_nplug=[U_NPLUG]&u_nmime=[U_NMIME]&p_w=[P_W]&p_h=[P_H]&c=WEB&cver=2.20231003.02.02&m_pos_ms=330200"
+          }
+        },
+        "adSlotLoggingData": {
+          "serializedSlotAdServingDataEntry": "uc"
+        }
+      }
+    },
+    {
+      "adPlacementRenderer": {
+        "config": {
+          "adPlacementConfig": {
+            "kind": "AD_PLACEMENT_KIND_MILLISECONDS",
+            "adTimeOffset": {
+              "offsetStartMilliseconds": "10",
+              "offsetEndMilliseconds": "zo"
+            },
+            "hideCueRangeMarker": true
+          }
+        },
+        "renderer": {
+          "adBreakServiceRenderer": {
+            "prefetchMilliseconds": "22",
+            "getAdBreakUrl": "https://www.youtube.com/get_midroll_info?ei=l3FgBarVGsIphxLPxuRduBc&m_pos=330&token=RLJjkrMhTDF1XyVxobLOmsF6L503baqxgf8zHtyL78tfro_JRoNlfUoKtHWX2jso_GFC-H_ls4xj56iIKpT0KTxmL6pBydJcB_KTnotW1Kxo4HXObZOq6QB1pko2sTXpiLrkJms8CUEhtmyJi4JLbzgqpKLHDEPl661jo3yXCRv0JEFo_M8Kbs-NJqqhNk-CRJ_s8hTmbiMZPaPBDZtVQ-NB0zXsJDIwj2XvPAaTetL-zmXE540lFCFBTmjXZ_xJyO2NATx6lkN7RoJZL2oRwXCH1rZDjXoOvFwjXFWV9JSPwCRzajtfJUVyGROxkM6BX896KoL4rFXfYzJZBZ1QOvbMxJD4laKN5xMb5KPz5Jq54KXXO76NpvMuOlkHb5qf-k2-Z&index=2&cpn=[CPN]&lact=[LACT]&vis=[VIS]&ad_block=[AD_BLOCK]&tsla=[TSLA]&bid=[BISCOTTI_ID]&dt=[DT]&flash=[FLASH]&frm=[FRM]&ca_type=[CA_TYPE]&u_tz=[U_TZ]&u_his=[U_HIS]&u_java=[U_JAVA]&u_h=[U_H]&u_w=[U_W]&u_ah=[U_AH]&u_aw=[U_AW]&u_cd=[U_CD]&u_nplug=[U_NPLUG]&u_nmime=[U_NMIME]&p_w=[P_W]&p_h=[P_H]&c=WEB&cver=2.20231003.02.02&m_pos_ms=330200"
+          }
+        },
+        "adSlotLoggingData": {
+          "serializedSlotAdServingDataEntry": "en"
+        }
+      }
+    },
+    {
+      "adPlacementRenderer": {
+        "config": {
+          "adPlacementConfig": {
+            "kind": "AD_PLACEMENT_KIND_SELF_START"
+          }
+        },
+        "renderer": {
+          "actionCompanionAdRenderer": {
+            "headline": {
+              "text": "eg",
+              "isTemplated": 93,
+              "trackingParams": "it"
+            },
+            "description": {
+              "text": "ux",
+              "isTemplated": 43,
+              "trackingParams": "sj"
+            },
+            "actionButton": {
+              "buttonRenderer": {
+                "text": {
+                  "simpleText": "de"
+                },
+                "navigationEndpoint": {
+                  "clickTrackingParams": "ex",
+                  "commandMetadata": {
+                    "webCommandMetadata": {
+                      "url": "ue",
+                      "webPageType": "ow",
+                      "rootVe": 77
+                    }
+                  },
+                  "urlEndpoint": {
+                    "url": "yh",
+                    "target": "pg"
+                  }
+                },
+                "trackingParams": "xf"
+              }
+            },
+            "iconImage": {
+              "thumbnail": {
+                "thumbnails": [
+                  {
+                    "url": "te",
+                    "width": 19,
+                    "height": 23
+                  }
+                ]
+              },
+              "trackingParams": "lv"
+            },
+            "bannerImage": {
+              "thumbnail": {
+                "thumbnails": [
+                  {
+                    "url": "gj",
+                    "width": 38,
+                    "height": 67
+                  }
+                ]
+              },
+              "trackingParams": "ow"
+            },
+            "navigationEndpoint": {
+              "clickTrackingParams": "um",
+              "commandMetadata": {
+                "webCommandMetadata": {
+                  "url": "fq",
+                  "webPageType": "fd",
+                  "rootVe": 61
+                }
+              },
+              "urlEndpoint": {
+                "url": "gi",
+                "target": "tq"
+              }
+            },
+            "trackingParams": "ie",
+            "adInfoRenderer": {
+              "adHoverTextButtonRenderer": {
+                "button": {
+                  "buttonRenderer": {
+                    "style": "ng",
+                    "size": "xv",
+                    "isDisabled": 53,
+                    "icon": {
+                      "iconType": "bq"
+                    },
+                    "navigationEndpoint": {
+                      "clickTrackingParams": "yl",
+                      "openPopupAction": {
+                        "popup": {
+                          "aboutThisAdRenderer": {
+                            "url": {
+                              "privateDoNotAccessOrElseTrustedResourceUrlWrappedValue": "po"
+                            },
+                            "trackingParams": "hi"
+                          }
+                        },
+                        "popupType": "sb"
+                      }
+                    },
+                    "trackingParams": "ho",
+                    "accessibilityData": {
+                      "accessibilityData": {
+                        "label": "kl"
+                      }
+                    }
+                  }
+                },
+                "hoverText": {
+                  "simpleText": "xd"
+                },
+                "trackingParams": "dv"
+              }
+            },
+            "adVideoId": "je",
+            "impressionPings": [
+              {
+                "baseUrl": "xj"
+              }
+            ],
+            "adLayoutLoggingData": {
+              "serializedAdServingDataEntry": "dt"
+            },
+            "associatedCompositePlayerBytesLayoutId": "te"
+          }
+        },
+        "adSlotLoggingData": {
+          "serializedSlotAdServingDataEntry": "vs"
+        }
+      }
+    }
+  ],
+  "adSlots": [
+    {
+      "adSlotRenderer": {
+        "adSlotMetadata": {
+          "slotId": "1234",
+          "slotType": "SLOT_TYPE_PLAYER_BYTES",
+          "adSlotLoggingData": {
+            "serializedSlotAdServingDataEntry": "ob"
+          },
+          "triggerEvent": "SLOT_TRIGGER_EVENT_BEFORE_CONTENT"
+        },
+        "fulfillmentContent": {
+          "fulfilledLayout": {
+            "playerBytesAdLayoutRenderer": {
+              "adLayoutMetadata": {
+                "layoutId": "ot",
+                "layoutType": "xg",
+                "adLayoutLoggingData": {
+                  "serializedAdServingDataEntry": "yk"
+                }
+              },
+              "renderingContent": {
+                "playerBytesSequentialLayoutRenderer": {
+                  "sequentialLayouts": [
+                    {
+                      "playerBytesAdLayoutRenderer": {
+                        "adLayoutMetadata": {
+                          "layoutId": "je",
+                          "layoutType": "ww",
+                          "adLayoutLoggingData": {
+                            "serializedAdServingDataEntry": "ve"
+                          }
+                        },
+                        "renderingContent": {
+                          "instreamVideoAdRenderer": {
+                            "skipOffsetMilliseconds": 94,
+                            "pings": {
+                              "impressionPings": [
+                                {
+                                  "baseUrl": "pl"
+                                },
+                                {
+                                  "baseUrl": "zs"
+                                }
+                              ],
+                              "errorPings": [
+                                {
+                                  "baseUrl": "hh"
+                                }
+                              ],
+                              "mutePings": [
+                                {
+                                  "baseUrl": "qh"
+                                }
+                              ],
+                              "unmutePings": [
+                                {
+                                  "baseUrl": "ey"
+                                }
+                              ],
+                              "pausePings": [
+                                {
+                                  "baseUrl": "pz"
+                                }
+                              ],
+                              "rewindPings": [
+                                {
+                                  "baseUrl": "bh"
+                                }
+                              ],
+                              "resumePings": [
+                                {
+                                  "baseUrl": "mw"
+                                }
+                              ],
+                              "skipPings": [
+                                {
+                                  "baseUrl": "si"
+                                }
+                              ],
+                              "closePings": [
+                                {
+                                  "baseUrl": "oh"
+                                }
+                              ],
+                              "progressPings": [
+                                {
+                                  "baseUrl": "ly",
+                                  "offsetMilliseconds": 1
+                                },
+                                {
+                                  "baseUrl": "ac",
+                                  "offsetMilliseconds": 80
+                                },
+                                {
+                                  "baseUrl": "sy",
+                                  "offsetMilliseconds": 72
+                                }
+                              ],
+                              "fullscreenPings": [
+                                {
+                                  "baseUrl": "kw"
+                                }
+                              ],
+                              "activeViewViewablePings": [
+                                {
+                                  "baseUrl": "oz"
+                                }
+                              ],
+                              "endFullscreenPings": [
+                                {
+                                  "baseUrl": "uc"
+                                }
+                              ],
+                              "activeViewMeasurablePings": [
+                                {
+                                  "baseUrl": "vu"
+                                }
+                              ],
+                              "abandonPings": [
+                                {
+                                  "baseUrl": "sf"
+                                }
+                              ],
+                              "activeViewFullyViewableAudibleHalfDurationPings": [
+                                {
+                                  "baseUrl": "qg"
+                                }
+                              ],
+                              "completePings": [
+                                {
+                                  "baseUrl": "jv"
+                                }
+                              ],
+                              "activeViewTracking": {
+                                "trafficType": "sq"
+                              }
+                            },
+                            "clickthroughEndpoint": {
+                              "clickTrackingParams": "fn",
+                              "commandMetadata": {
+                                "webCommandMetadata": {
+                                  "url": "tf",
+                                  "webPageType": "ox",
+                                  "rootVe": 73
+                                }
+                              },
+                              "urlEndpoint": {
+                                "url": "ny",
+                                "target": "uc"
+                              }
+                            },
+                            "csiParameters": [
+                              {
+                                "key": "qe",
+                                "value": "em"
+                              }
+                            ],
+                            "playerVars": "suppress_creator_endscreen=1&is_trueview_action",
+                            "elementId": "bq",
+                            "trackingParams": "dr",
+                            "legacyInfoCardVastExtension": "pa",
+                            "sodarExtensionData": {
+                              "siub": "mi",
+                              "bgub": "hc",
+                              "scs": "cw",
+                              "bgp": "co"
+                            },
+                            "externalVideoId": "ya",
+                            "adLayoutLoggingData": {
+                              "serializedAdServingDataEntry": "jj"
+                            },
+                            "layoutId": "sc"
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "playerBytesAdLayoutRenderer": {
+                        "adLayoutMetadata": {
+                          "layoutId": "nr",
+                          "layoutType": "kn",
+                          "adLayoutLoggingData": {
+                            "serializedAdServingDataEntry": "cf"
+                          }
+                        },
+                        "renderingContent": {
+                          "adActionInterstitialRenderer": {
+                            "durationMilliseconds": 52,
+                            "trackingParams": "yq",
+                            "abandonCommands": {
+                              "commands": [
+                                {
+                                  "clickTrackingParams": "wi",
+                                  "loggingUrls": [
+                                    {
+                                      "baseUrl": "jb"
+                                    }
+                                  ],
+                                  "pingingEndpoint": {
+                                    "hack": 90
+                                  }
+                                }
+                              ]
+                            },
+                            "skipPings": [
+                              {
+                                "baseUrl": "av"
+                              }
+                            ],
+                            "layoutId": "nj"
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "playerBytesAdLayoutRenderer": {
+                        "adLayoutMetadata": {
+                          "layoutId": "nl",
+                          "layoutType": "wm",
+                          "adLayoutLoggingData": {
+                            "serializedAdServingDataEntry": "zw"
+                          }
+                        },
+                        "renderingContent": {
+                          "instreamVideoAdRenderer": {
+                            "skipOffsetMilliseconds": 80,
+                            "pings": {
+                              "impressionPings": [
+                                {
+                                  "baseUrl": "ji"
+                                },
+                                {
+                                  "baseUrl": "ao"
+                                },
+                                {
+                                  "baseUrl": "cc"
+                                }
+                              ],
+                              "errorPings": [
+                                {
+                                  "baseUrl": "jt"
+                                }
+                              ],
+                              "mutePings": [
+                                {
+                                  "baseUrl": "mn"
+                                },
+                                {
+                                  "baseUrl": "ce"
+                                }
+                              ],
+                              "unmutePings": [
+                                {
+                                  "baseUrl": "rd"
+                                },
+                                {
+                                  "baseUrl": "lb"
+                                }
+                              ],
+                              "pausePings": [
+                                {
+                                  "baseUrl": "et"
+                                },
+                                {
+                                  "baseUrl": "fv"
+                                }
+                              ],
+                              "rewindPings": [
+                                {
+                                  "baseUrl": "ft"
+                                }
+                              ],
+                              "resumePings": [
+                                {
+                                  "baseUrl": "qj"
+                                },
+                                {
+                                  "baseUrl": "ot"
+                                }
+                              ],
+                              "skipPings": [
+                                {
+                                  "baseUrl": "ky"
+                                },
+                                {
+                                  "baseUrl": "jb"
+                                }
+                              ],
+                              "closePings": [
+                                {
+                                  "baseUrl": "hw"
+                                }
+                              ],
+                              "progressPings": [
+                                {
+                                  "baseUrl": "vh",
+                                  "offsetMilliseconds": 36
+                                },
+                                {
+                                  "baseUrl": "um",
+                                  "offsetMilliseconds": 77
+                                },
+                                {
+                                  "baseUrl": "sq",
+                                  "offsetMilliseconds": 19
+                                },
+                                {
+                                  "baseUrl": "ui",
+                                  "offsetMilliseconds": 15
+                                },
+                                {
+                                  "baseUrl": "nl",
+                                  "offsetMilliseconds": 86
+                                }
+                              ],
+                              "fullscreenPings": [
+                                {
+                                  "baseUrl": "rp"
+                                },
+                                {
+                                  "baseUrl": "cn"
+                                }
+                              ],
+                              "activeViewViewablePings": [
+                                {
+                                  "baseUrl": "ml"
+                                },
+                                {
+                                  "baseUrl": "kq"
+                                }
+                              ],
+                              "endFullscreenPings": [
+                                {
+                                  "baseUrl": "ym"
+                                }
+                              ],
+                              "activeViewMeasurablePings": [
+                                {
+                                  "baseUrl": "di"
+                                },
+                                {
+                                  "baseUrl": "ol"
+                                }
+                              ],
+                              "abandonPings": [
+                                {
+                                  "baseUrl": "aj"
+                                },
+                                {
+                                  "baseUrl": "wo"
+                                }
+                              ],
+                              "activeViewFullyViewableAudibleHalfDurationPings": [
+                                {
+                                  "baseUrl": "ms"
+                                },
+                                {
+                                  "baseUrl": "uj"
+                                }
+                              ],
+                              "startPings": [
+                                {
+                                  "baseUrl": "gy"
+                                }
+                              ],
+                              "firstQuartilePings": [
+                                {
+                                  "baseUrl": "ly"
+                                }
+                              ],
+                              "secondQuartilePings": [
+                                {
+                                  "baseUrl": "sw"
+                                }
+                              ],
+                              "thirdQuartilePings": [
+                                {
+                                  "baseUrl": "gt"
+                                }
+                              ],
+                              "completePings": [
+                                {
+                                  "baseUrl": "hu"
+                                },
+                                {
+                                  "baseUrl": "gs"
+                                }
+                              ],
+                              "activeViewTracking": {
+                                "trafficType": "mr"
+                              }
+                            },
+                            "clickthroughEndpoint": {
+                              "clickTrackingParams": "yq",
+                              "commandMetadata": {
+                                "webCommandMetadata": {
+                                  "url": "dn",
+                                  "webPageType": "ms",
+                                  "rootVe": 54
+                                }
+                              },
+                              "urlEndpoint": {
+                                "url": "hs",
+                                "target": "jt"
+                              }
+                            },
+                            "csiParameters": [
+                              {
+                                "key": "zn",
+                                "value": "eq"
+                              }
+                            ],
+                            "playerVars": "bi",
+                            "elementId": "gr",
+                            "trackingParams": "qc",
+                            "legacyInfoCardVastExtension": "xv",
+                            "sodarExtensionData": {
+                              "siub": "ul",
+                              "bgub": "yr",
+                              "scs": "ui",
+                              "bgp": "vy"
+                            },
+                            "externalVideoId": "fp",
+                            "adLayoutLoggingData": {
+                              "serializedAdServingDataEntry": "gt"
+                            },
+                            "layoutId": "bh"
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "playerBytesAdLayoutRenderer": {
+                        "adLayoutMetadata": {
+                          "layoutId": "xy",
+                          "layoutType": "bf",
+                          "adLayoutLoggingData": {
+                            "serializedAdServingDataEntry": "rj"
+                          }
+                        },
+                        "renderingContent": {
+                          "adActionInterstitialRenderer": {
+                            "durationMilliseconds": 95,
+                            "trackingParams": "ee",
+                            "abandonCommands": {
+                              "commands": [
+                                {
+                                  "clickTrackingParams": "mi",
+                                  "loggingUrls": [
+                                    {
+                                      "baseUrl": "yi"
+                                    },
+                                    {
+                                      "baseUrl": "tm"
+                                    }
+                                  ],
+                                  "pingingEndpoint": {
+                                    "hack": 47
+                                  }
+                                }
+                              ]
+                            },
+                            "skipPings": [
+                              {
+                                "baseUrl": "uk"
+                              },
+                              {
+                                "baseUrl": "yj"
+                              }
+                            ],
+                            "layoutId": "ft"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              "layoutExitNormalTriggers": [
+                {
+                  "id": "hq",
+                  "onLayoutSelfExitRequestedTrigger": {
+                    "triggeringLayoutId": "hv"
+                  }
+                }
+              ],
+              "layoutExitSkipTriggers": [
+                {
+                  "id": "up",
+                  "skipRequestedTrigger": {
+                    "triggeringLayoutId": "nm"
+                  }
+                },
+                {
+                  "id": "yl",
+                  "skipRequestedTrigger": {
+                    "triggeringLayoutId": "gh"
+                  }
+                },
+                {
+                  "id": "zd",
+                  "skipRequestedTrigger": {
+                    "triggeringLayoutId": "mo"
+                  }
+                },
+                {
+                  "id": "bc",
+                  "skipRequestedTrigger": {
+                    "triggeringLayoutId": "jj"
+                  }
+                }
+              ],
+              "layoutExitMuteTriggers": [
+                {
+                  "id": "ql",
+                  "skipRequestedTrigger": {
+                    "triggeringLayoutId": "hr"
+                  }
+                },
+                {
+                  "id": "rc",
+                  "skipRequestedTrigger": {
+                    "triggeringLayoutId": "ln"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "slotEntryTrigger": {
+          "id": "lc",
+          "beforeContentVideoIdStartedTrigger": {}
+        },
+        "slotFulfillmentTriggers": [
+          {
+            "id": "xq",
+            "slotIdEnteredTrigger": {
+              "triggeringSlotId": "da"
+            }
+          }
+        ],
+        "slotExpirationTriggers": [
+          {
+            "id": "vv",
+            "slotIdExitedTrigger": {
+              "triggeringSlotId": "re"
+            }
+          },
+          {
+            "id": "jg",
+            "onNewPlaybackAfterContentVideoIdTrigger": {}
+          }
+        ]
+      }
+    }
+  ],
+  "adBreakHeartbeatParams": "mw",
+  "frameworkUpdates": {
+    "entityBatchUpdate": {
+      "mutations": [
+        {
+          "entityKey": "pz",
+          "type": "az",
+          "payload": {
+            "offlineabilityEntity": {
+              "key": "ql",
+              "command": {
+                "innertubeCommand": {
+                  "clickTrackingParams": "nz",
+                  "ypcGetOfflineUpsellEndpoint": {
+                    "params": "pw"
+                  }
+                }
+              },
+              "addToOfflineButtonState": "os",
+              "contentCheckOk": false,
+              "racyCheckOk": false,
+              "loggingDirectives": {
+                "trackingParams": "xp",
+                "visibility": {
+                  "types": "1"
+                },
+                "enableDisplayloggerExperiment": true
+              }
+            }
+          }
+        }
+      ],
+      "timestamp": {
+        "seconds": "19",
+        "nanos": 12
+      }
+    }
+  }
+}
