@@ -697,10 +697,6 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "[UPGRADE-DOC] done\n");
             fflush(stderr);
 
-            /* Make sure Polymer's wrapper installation has not left the native
-             * Node mutation methods broken before we run diagnostics/layout. */
-            js_dom_restore_native_methods(g_ctx);
-
             /* YouTube's error-logging wrappers (_.JC) catch exceptions and forward
              * them to yt.logging.errors.log.  In the emulator the logging path
              * itself throws ("not a function"), so real errors get lost and

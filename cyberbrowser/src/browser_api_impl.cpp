@@ -2220,9 +2220,8 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_FreeAtom(ctx, owner_document_atom);
     
     // ===== HTMLElement prototype methods =====
-    // attachShadow (same as Element)
-    JS_SetPropertyStr(ctx, html_element_proto, "attachShadow",
-        JS_NewCFunction(ctx, js_element_attach_shadow, "attachShadow", 1));
+    // attachShadow is intentionally NOT installed here.  The ShadyDOM polyfill
+    // (webcomponents-sd.js) installs its own Element.prototype.attachShadow.
     // click method (same as Element)
     JS_SetPropertyStr(ctx, html_element_proto, "click",
         JS_NewCFunction(ctx, js_element_click, "click", 0));
@@ -2253,9 +2252,8 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_NewCFunction(ctx, js_element_querySelectorAll_real, "querySelectorAll", 1));
 
     // ===== Element prototype methods =====
-    // attachShadow method
-    JS_SetPropertyStr(ctx, element_proto, "attachShadow",
-        JS_NewCFunction(ctx, js_element_attach_shadow, "attachShadow", 1));
+    // attachShadow is intentionally NOT installed.  The ShadyDOM polyfill
+    // (webcomponents-sd.js) provides its own Element.prototype.attachShadow.
     // tagName getter - returns DOM node name or "DIV" fallback
     GCValue tagName_getter = JS_NewCFunction(ctx, js_element_get_tagName, "get tagName", 0);
     JSAtom tagName_atom = JS_NewAtom(ctx, "tagName");
@@ -3581,21 +3579,23 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, range_ctor, "prototype", range_proto);
     JS_SetPropertyStr(ctx, global, "Range", range_ctor);
     JS_SetPropertyStr(ctx, window, "Range", range_ctor);
-    
-    // ===== Shadow DOM APIs =====
-    // ShadowRoot class.  All prototype properties (host, mode, firstChild,
-    // lastChild, childNodes, children, childElementCount, adoptedStyleSheets,
-    // querySelector, etc.) are installed declaratively via the function list
-    // below using JS_CGETSET_DEF / JS_CFUNC_DEF entries.
-    GCValue shadow_root_proto = JS_NewObject(ctx);
-    JS_SetPropertyFunctionList(ctx, shadow_root_proto, js_shadow_root_proto_funcs,
-        js_shadow_root_proto_funcs_count);
 
-    JS_SetClassProto(ctx, js_shadow_root_class_id, shadow_root_proto);
-    GCValue shadow_root_ctor = JS_NewCFunction2(ctx, js_shadow_root_constructor, "ShadowRoot",
-        0, JS_CFUNC_constructor, 0);
-    JS_SetConstructor(ctx, shadow_root_ctor, shadow_root_proto);
-    JS_SetPropertyStr(ctx, global, "ShadowRoot", shadow_root_ctor);
+    // ===== Shadow DOM APIs =====
+    // We deliberately do NOT implement native shadow DOM.  The page's
+    // webcomponents-sd.js (ShadyDOM) polyfill owns shadow DOM: it installs its
+    // own Element.prototype.attachShadow, ShadowRoot implementation, and
+    // __shady_* tree bookkeeping.  We only expose a bare `ShadowRoot`
+    // constructor + prototype as a global so the polyfill's
+    // `instanceof ShadowRoot` checks and `b.__proto__ = ShadowRoot.prototype`
+    // assignments resolve against a real constructor object.
+    {
+        GCValue shadow_root_ctor = JS_NewCFunction2(ctx, js_dummy_function, "ShadowRoot",
+            0, JS_CFUNC_constructor, 0);
+        GCValue shadow_root_proto = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, shadow_root_ctor, "prototype", shadow_root_proto);
+        JS_SetPropertyStr(ctx, shadow_root_proto, "constructor", shadow_root_ctor);
+        JS_SetPropertyStr(ctx, global, "ShadowRoot", shadow_root_ctor);
+    }
 
     // ===== Custom Elements API =====
     GCValue custom_elements = JS_NewObjectClass(ctx, js_custom_element_registry_class_id);
@@ -3748,85 +3748,6 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, ce_registry_proto, "constructor", ce_registry_ctor);
     JS_SetPropertyStr(ctx, ce_registry_ctor, "prototype", ce_registry_proto);
     JS_SetPropertyStr(ctx, global, "CustomElementRegistry", ce_registry_ctor);
-
-    // ===== ShadyDOM API =====
-    // ShadyDOM API stub. Pages that inline a minimal window.ShadyDOM config
-    // expect the browser's webcomponents-sd polyfill to replace it with the
-    // full API. We provide a native stub here so the page can apply its config
-    // without failing. A getter/setter keeps the API intact when the page sets
-    // the property.
-    {
-        const char *shady_dom_js =
-            "(function(){"
-            "  var stored = null;"
-            "  function ensure() {"
-            "    if (stored) return stored;"
-            "    function Wrapper(node) {"
-            "      if (!(this instanceof Wrapper)) return new Wrapper(node);"
-            "      this.node = node;"
-            "    }"
-            "    function observeChildren(target, callback) {"
-            "      if (!target || typeof MutationObserver === 'undefined') {"
-            "        return { takeRecords: function(){ return []; }, disconnect: function(){} };"
-            "      }"
-            "      var mo = new MutationObserver(callback);"
-            "      mo.observe(target, { childList: true, subtree: true });"
-            "      return {"
-            "        takeRecords: function() { return mo.takeRecords(); },"
-            "        disconnect: function() { mo.disconnect(); }"
-            "      };"
-            "    }"
-            "    function unobserveChildren(observer) {"
-            "      if (observer && typeof observer.disconnect === 'function') observer.disconnect();"
-            "    }"
-            "    function composedPath(ev) {"
-            "      if (ev && typeof ev.composedPath === 'function') return ev.composedPath();"
-            "      return ev && ev.target ? [ev.target] : [];"
-            "    }"
-            "    stored = {"
-            "      inUse: false,"
-            "      noPatch: true,"
-            "      preferPerformance: true,"
-            "      force: false,"
-            "      handlesDynamicScoping: true,"
-            "      deferConnectionCallbacks: false,"
-            "      settings: { noPatch: true, preferPerformance: true, force: false },"
-            "      Wrapper: Wrapper,"
-            "      wrap: function(node) { return node; },"
-            "      wrapIfNeeded: function(node) { return node; },"
-            "      patch: function(node) { return node; },"
-            "      isShadyRoot: function(node) { return false; },"
-            "      observeChildren: observeChildren,"
-            "      unobserveChildren: unobserveChildren,"
-            "      flush: function() { return false; },"
-            "      flushInitial: function(root) {},"
-            "      composedPath: composedPath,"
-            "      enqueue: function(fn) { if (typeof fn === 'function') fn(); },"
-            "      filterMutations: function(mutations, target) { return mutations; }"
-            "    };"
-            "    return stored;"
-            "  }"
-            "  function defineShadyDOM(obj) {"
-            "    Object.defineProperty(obj, 'ShadyDOM', {"
-            "      get: function() { return ensure(); },"
-            "      set: function(v) {"
-            "        var s = ensure();"
-            "        if (v && typeof v === 'object') {"
-            "          for (var k in v) {"
-            "            if (k === 'Wrapper' && typeof v[k] !== 'function') continue;"
-            "            s[k] = v[k];"
-            "          }"
-            "          s.settings = Object.assign({}, s.settings, v);"
-            "        }"
-            "      },"
-            "      configurable: true"
-            "    });"
-            "  }"
-            "  defineShadyDOM(window);"
-            "  if (typeof globalThis !== 'undefined') defineShadyDOM(globalThis);"
-            "})();";
-        JS_Eval(ctx, shady_dom_js, strlen(shady_dom_js), "<shady_dom_api>", JS_EVAL_TYPE_GLOBAL);
-    }
 
     // ===== ParentNode / ChildNode convenience methods =====
     // Polymer's ShadyDOM patch loop (V6k) wraps before/after/replaceWith and

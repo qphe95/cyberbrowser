@@ -2928,29 +2928,11 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
         // fetch()/XHR .then() chains and player bootstrap callbacks run.
         js_quickjs_pump_timers_and_jobs();
 
-        // YouTube module bundles wrap Node.prototype mutation methods.  Restore
-        // the real C implementations after each script so timers and later
-        // bundles operate on working native methods instead of broken wrappers.
-        js_dom_restore_native_methods(ctx);
-
-        // Keep ShadyDOM in its native-only state.  The page's inline config sets
-        // force:true, which would make webcomponents-sd patch querySelector and
-        // friends with wrappers that break on our native ShadowRoots.  Forcing
-        // inUse=false lets Polymer fall back to native DOM APIs.
-        {
-            const char *shady_neutral =
-                "try {"
-                "  var s = window.ShadyDOM;"
-                "  if (!s || typeof s !== 'object') {"
-                "    var __cyber_sd = {force:false, noPatch:false, preferPerformance:false, inUse:false, nativeCss:true, settings:{}, patch:function(n){return n;}, wrap:function(n){return n;}, patchElementProto:function(n){return n;}, flush:function(){}, flushInitial:function(){}, observeChildren:function(){return {disconnect:function(){}};}, unobserveChildren:function(){}, composedPath:function(e){return e&&e.composedPath?e.composedPath():[];}, isShadyRoot:function(){return false;}, enqueue:function(){}, filterMutations:function(a){return a;}};"
-                "    try { delete window.ShadyDOM; } catch(e1) {}"
-                "    try { Object.defineProperty(window, 'ShadyDOM', {value: __cyber_sd, writable:false, configurable:false, enumerable:true}); } catch(e2) { window.ShadyDOM = __cyber_sd; }"
-                "  } else {"
-                "    s.force = false; s.noPatch = false; s.preferPerformance = false; s.inUse = false;"
-                "  }"
-                "} catch(e) {}";
-            JS_Eval(ctx, shady_neutral, strlen(shady_neutral), "<shady_neutral>", JS_EVAL_TYPE_GLOBAL);
-        }
+        // NOTE: we intentionally do NOT restore/clobber Node.prototype mutation
+        // methods here.  The ShadyDOM (webcomponents-sd.js) polyfill wraps them
+        // and maintains the shadow tree; re-binding the raw C functions would
+        // destroy its wrappers.  The polyfill reaches the native implementations
+        // through the __shady_native_* aliases it captures itself.
 
         // Run a GC cycle after every script to prevent handle exhaustion /
         // memory pressure when many large scripts execute in sequence.
@@ -2962,23 +2944,6 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
     // Process all remaining timers and jobs after all scripts complete.
     js_quickjs_pump_timers_and_jobs();
     log_to_file("js_quickjs", "Drained remaining timers/jobs after all scripts");
-
-    /* Final restore in case the last bundle left wrappers installed. */
-    js_dom_restore_native_methods(ctx);
-
-    // Final ShadyDOM neutralization before returning to the caller.
-    {
-        const char *shady_neutral =
-            "try {"
-            "  var s = window.ShadyDOM;"
-            "  if (!s || typeof s !== 'object') {"
-            "    window.ShadyDOM = {force:false, noPatch:false, preferPerformance:false, inUse:false, nativeCss:true, settings:{}, patch:function(n){return n;}, wrap:function(n){return n;}, patchElementProto:function(n){return n;}, flush:function(){}, flushInitial:function(){}, observeChildren:function(){return {disconnect:function(){}};}, unobserveChildren:function(){}, composedPath:function(e){return e&&e.composedPath?e.composedPath():[];}, isShadyRoot:function(){return false;}, enqueue:function(){}, filterMutations:function(a){return a;}};"
-            "  } else {"
-            "    s.force = false; s.noPatch = false; s.preferPerformance = false; s.inUse = false;"
-            "  }"
-            "} catch(e) {}";
-        JS_Eval(ctx, shady_neutral, strlen(shady_neutral), "<shady_neutral>", JS_EVAL_TYPE_GLOBAL);
-    }
 
     log_to_file("js_quickjs", "All %d scripts executed", script_count);
 

@@ -446,9 +446,6 @@ GCValue js_element_attach_shadow(JSContextHandle ctx, GCValue this_val, int argc
         }
     }
 
-    // Keep ShadyDOM's parallel __shady tree in sync (YouTube noPatch mode).
-    dom_sync_shady_tree(ctx, shadow_root, JS_NULL);
-
     // Polymer's `ready` runs before `_readyClients`, so `this.root` is still
     // the original stamped fragment.  Make that fragment's Shady tree mirror
     // the children we just moved into our ShadowRoot, so scoped querySelector
