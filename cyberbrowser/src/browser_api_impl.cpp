@@ -128,30 +128,38 @@ GCValue js_document_create_text_node(JSContextHandle ctx, GCValue this_val, int 
         text = JS_ToCString(ctx, argv[0]);
         if (!text) text = "";
     }
-    
+
     // Create a DOM node object with js_dom_node_class_id
     GCValue node = JS_NewObjectClass(ctx, js_dom_node_class_id);
     if (JS_IsException(node)) {
         return JS_NULL;
     }
-    
+
+    // Set prototype to Node.prototype so the text node inherits the standard
+    // nodeValue/textContent/parentNode/etc. getter/setters.  Without this,
+    // setting textContent on the node is a plain own-property write that
+    // bypasses the characterData MutationObserver that polyfills rely on.
+    {
+        GCValue global_obj = JS_GetGlobalObject(ctx);
+        GCValue node_ctor = JS_GetPropertyStr(ctx, global_obj, "Node");
+        if (JS_IsObject(node_ctor)) {
+            GCValue node_proto = JS_GetPropertyStr(ctx, node_ctor, "prototype");
+            if (JS_IsObject(node_proto)) {
+                JS_SetPrototype(ctx, node, node_proto);
+            }
+        }
+    }
+
     // Create and attach DOMNode data for Text node
     DOMNodeHandle dom_node = DOMNodeHandle::create(ctx, DOM_NODE_TYPE_TEXT, "#text");
     if (dom_node.valid()) {
         dom_node.set_node_value(text);
         dom_node.attach_to_object(node);
     }
-    
-    // Set standard Text node properties
-    JS_SetPropertyStr(ctx, node, "nodeType", JS_NewInt32(ctx, DOM_NODE_TYPE_TEXT));
-    JS_SetPropertyStr(ctx, node, "nodeName", JS_NewString(ctx, "#text"));
-    JS_SetPropertyStr(ctx, node, "data", JS_NewString(ctx, text));
-    JS_SetPropertyStr(ctx, node, "textContent", JS_NewString(ctx, text));
-    JS_SetPropertyStr(ctx, node, "length", JS_NewInt32(ctx, (int)strlen(text)));
-    
+
     // Set ownerDocument on the text node.
     dom_node_set_owner_document(ctx, node, this_val);
-    
+
     return node;
 }
 
