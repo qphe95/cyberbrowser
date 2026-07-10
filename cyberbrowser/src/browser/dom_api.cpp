@@ -99,18 +99,26 @@ static bool dom_node_is_connected(JSContextHandle ctx, GCValue node) {
     while (!JS_IsUndefined(cur) && !JS_IsNull(cur) && JS_IsObject(cur) && safety++ < 10000) {
         DOMNodeHandle n = get_dom_node(ctx, cur);
         if (n.valid()) {
-            if (n.node_type() == DOM_NODE_TYPE_DOCUMENT) return true;
-            // Nodes inside a template content are not connected.  A ShadowRoot
-            // is also implemented as a fragment-like container, but it is
-            // connected when its host element is connected.
-            if (n.node_type() == DOM_NODE_TYPE_DOCUMENT_FRAGMENT) {
+            int nt = n.node_type();
+            if (nt == DOM_NODE_TYPE_DOCUMENT) return true;
+            // A ShadowRoot is connected when its host element is connected.
+            // The ShadyDOM polyfill creates shadow roots as plain JS objects.
+            // Our get_or_create_dom_node may assign them type ELEMENT, but they
+            // carry a `host` property and report nodeType 11 at the JS level.
+            // Use the JS-level nodeType to reliably identify shadow roots.
+            if (nt == DOM_NODE_TYPE_DOCUMENT_FRAGMENT || nt == DOM_NODE_TYPE_ELEMENT) {
                 GCValue host = JS_GetPropertyStr(ctx, cur, "host");
                 if (!JS_IsUndefined(host) && !JS_IsNull(host) && JS_IsObject(host)) {
-                    cur = host;
-                    continue;
+                    GCValue js_nt_val = JS_GetPropertyStr(ctx, cur, "nodeType");
+                    int32_t js_nt = 0;
+                    JS_ToInt32(ctx, &js_nt, js_nt_val);
+                    if (js_nt == DOM_NODE_TYPE_DOCUMENT_FRAGMENT) {
+                        cur = host;
+                        continue;
+                    }
                 }
-                return false;
             }
+            if (nt == DOM_NODE_TYPE_DOCUMENT_FRAGMENT) return false;
             cur = n.parent_node();
         } else {
             // The parent may be a ShadowRoot object (not a DOMNode-backed node).
@@ -1014,6 +1022,35 @@ static void dom_maybe_load_script(JSContextHandle ctx, GCValue node) {
     if (src) JS_FreeCString(ctx, src);
 }
 
+// Enqueue connectedCallback for every custom element in the subtree rooted at
+// `node`.  Called when a subtree is inserted into a connected document.  We
+// enqueue rather than call directly so that pending upgrade reactions (enqueued
+// by js_cyber_ce_enqueue_upgrade_subtree) run first — the HTML spec requires
+// upgrades before connectedCallbacks within the same CEReactions batch.
+static void fire_connected_in_subtree(JSContextHandle ctx, GCValue node) {
+    if (JS_IsNull(node) || JS_IsUndefined(node) || !JS_IsObject(node)) return;
+    DOMNodeHandle n = get_dom_node(ctx, node);
+    if (!n.valid()) return;
+    if (n.node_type() == DOM_NODE_TYPE_ELEMENT) {
+        // Only fire for elements with a registered custom element definition
+        // (tag contains a hyphen).  The reaction queue ensures the upgrade
+        // runs before the connectedCallback.
+        GCValue tagv = JS_GetPropertyStr(ctx, node, "tagName");
+        const char *tag = JS_ToCString(ctx, tagv);
+        if (tag && strchr(tag, '-') != NULL && dom_node_is_connected(ctx, node)) {
+            invoke_custom_element_callback(ctx, node, "connectedCallback");
+        }
+        JS_FreeCString(ctx, tag);
+    }
+    GCValue child = n.first_child();
+    while (!JS_IsNull(child) && !JS_IsUndefined(child) && JS_IsObject(child)) {
+        fire_connected_in_subtree(ctx, child);
+        DOMNodeHandle cn = get_dom_node(ctx, child);
+        if (!cn.valid()) break;
+        child = cn.next_sibling();
+    }
+}
+
 // Real appendChild implementation
 GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1 || JS_IsNull(argv[0]) || JS_IsUndefined(argv[0])) {
@@ -1021,7 +1058,7 @@ GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc
     }
     
     GCValue child = argv[0];
-    
+
     // DocumentFragment: append its children, not the fragment itself.
     if (is_document_fragment_node(ctx, child)) {
         std::vector<GCValue> children = collect_fragment_children(ctx, child);
@@ -1082,18 +1119,21 @@ GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc
     // constructor can rely on its appended children being upgraded.
     js_cyber_ce_push_stack(ctx);
 
+    // Enqueue upgrade reactions for any custom elements in the inserted subtree.
+    // The HTML spec upgrades elements when they are inserted into the document
+    // (or when a definition is registered), not just on explicit upgrade() calls.
+    js_cyber_ce_enqueue_upgrade_subtree(ctx, child);
+
     // Per the DOM Standard, inserting a node into a connected document must
     // enqueue a connectedCallback reaction for every custom element in the
-    // inserted subtree (not just the directly inserted node).  The ShadyDOM
-    // polyfill wraps connectedCallback and dispatches it during its own
-    // rendering, so we only need to handle the directly-inserted node here;
-    // the polyfill handles deeper elements in shadow trees.
+    // inserted subtree (not just the directly inserted node).  This is critical
+    // for Polymer/ShadyDOM elements that stamp nested custom elements (e.g.
+    // ytd-page-manager inside ytd-app's shadow template) — the inner element's
+    // connectedCallback must fire before the outer element's lifecycle continues.
     if (dom_node_is_connected(ctx, child)) {
-        invoke_custom_element_callback(ctx, child, "connectedCallback");
+        fire_connected_in_subtree(ctx, child);
     }
 
-    // Enqueue upgrade reactions for any custom elements in the inserted subtree.
-    js_cyber_ce_enqueue_upgrade_subtree(ctx, child);
     dom_flush_ce_reactions(ctx);
 
     js_cyber_ce_pop_stack(ctx);
@@ -1336,7 +1376,7 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
     
     GCValue new_child = argv[0];
     GCValue ref_child = argv[1];  // Can be null (append at end)
-    
+
     // DocumentFragment: insert its children before ref_child, not the fragment itself.
     if (is_document_fragment_node(ctx, new_child)) {
         std::vector<GCValue> children = collect_fragment_children(ctx, new_child);
@@ -1408,13 +1448,15 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
 
     js_cyber_ce_push_stack(ctx);
 
-    // Trigger custom element connectedCallback for the inserted node.
-    if (dom_node_is_connected(ctx, new_child)) {
-        invoke_custom_element_callback(ctx, new_child, "connectedCallback");
-    }
-
     // Enqueue upgrade reactions for any custom elements in the inserted subtree.
     js_cyber_ce_enqueue_upgrade_subtree(ctx, new_child);
+
+    // Per the DOM Standard, inserting a subtree into a connected document must
+    // enqueue connectedCallback for every custom element in that subtree.
+    if (dom_node_is_connected(ctx, new_child)) {
+        fire_connected_in_subtree(ctx, new_child);
+    }
+
     dom_flush_ce_reactions(ctx);
 
     js_cyber_ce_pop_stack(ctx);

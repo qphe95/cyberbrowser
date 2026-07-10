@@ -680,6 +680,15 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "[UPGRADE-DOC] invoking customElements.upgrade\n");
             fflush(stderr);
 
+            /* Flush the ShadyDOM polyfill's render queue before upgrading so
+             * that shadow-tree elements are connected and their connectedCallback
+             * (which registers DI providers like PAGE_TOKEN) fires before parent
+             * connectedCallbacks that depend on them. */
+            const char *flush_js =
+                "try{if(window.ShadyDOM&&typeof window.ShadyDOM.flush==='function')window.ShadyDOM.flush();}catch(e){}";
+            JS_Eval(g_ctx, flush_js, strlen(flush_js), "<shady_flush>", JS_EVAL_TYPE_GLOBAL);
+            pump_timers_and_jobs(g_ctx);
+
             const char *upgrade_doc_js =
                 "if (window.customElements && typeof window.customElements.upgrade === 'function' && document) {"
                 "  var app = document.querySelector('ytd-app');"

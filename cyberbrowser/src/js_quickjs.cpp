@@ -2901,6 +2901,20 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
         // Reset diagnostic for property-on-undefined errors
         g_last_undefined_prop[0] = '\0';
 
+        // The ShadyDOM polyfill reads window.ShadyDOM.preferPerformance at load
+        // time to decide whether to render shadow trees itself.  Pages that
+        // also ship a native shadow DOM implementation set preferPerformance:true
+        // so the polyfill defers rendering to the browser.  Since this engine
+        // has no native shadow DOM and relies entirely on the polyfill, we must
+        // ensure preferPerformance is false before the polyfill loads so it
+        // takes ownership of rendering (including connectedCallback dispatch
+        // for shadow-tree elements).
+        {
+            const char *fix_pp =
+                "try{if(window.ShadyDOM&&window.ShadyDOM.preferPerformance===true)window.ShadyDOM.preferPerformance=false;}catch(e){}";
+            JS_Eval(ctx, fix_pp, strlen(fix_pp), "<fix_pp>", JS_EVAL_TYPE_GLOBAL);
+        }
+
         // Execute script directly. Domain-specific string patches are not
         // applied; custom-element upgrade and missing standard APIs are
         // implemented in the browser layer instead.
