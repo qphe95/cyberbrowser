@@ -2162,61 +2162,61 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // firstChild getter
     GCValue first_child_getter = JS_NewCFunction(ctx, js_node_get_firstChild, "get firstChild", 0);
     JSAtom first_child_atom = JS_NewAtom(ctx, "firstChild");
-    JS_DefinePropertyGetSet(ctx, node_proto, first_child_atom, first_child_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, node_proto, first_child_atom, first_child_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, first_child_atom);
     
     // lastChild getter
     GCValue last_child_getter = JS_NewCFunction(ctx, js_node_get_lastChild, "get lastChild", 0);
     JSAtom last_child_atom = JS_NewAtom(ctx, "lastChild");
-    JS_DefinePropertyGetSet(ctx, node_proto, last_child_atom, last_child_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, node_proto, last_child_atom, last_child_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, last_child_atom);
     
     // nextSibling getter
     GCValue next_sibling_getter = JS_NewCFunction(ctx, js_node_get_nextSibling, "get nextSibling", 0);
     JSAtom next_sibling_atom = JS_NewAtom(ctx, "nextSibling");
-    JS_DefinePropertyGetSet(ctx, node_proto, next_sibling_atom, next_sibling_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, node_proto, next_sibling_atom, next_sibling_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, next_sibling_atom);
     
     // previousSibling getter
     GCValue prev_sibling_getter = JS_NewCFunction(ctx, js_node_get_previousSibling, "get previousSibling", 0);
     JSAtom prev_sibling_atom = JS_NewAtom(ctx, "previousSibling");
-    JS_DefinePropertyGetSet(ctx, node_proto, prev_sibling_atom, prev_sibling_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, node_proto, prev_sibling_atom, prev_sibling_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, prev_sibling_atom);
     
     // parentNode getter
     GCValue parent_node_getter = JS_NewCFunction(ctx, js_node_get_parentNode, "get parentNode", 0);
     JSAtom parent_node_atom = JS_NewAtom(ctx, "parentNode");
-    JS_DefinePropertyGetSet(ctx, node_proto, parent_node_atom, parent_node_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, node_proto, parent_node_atom, parent_node_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, parent_node_atom);
     
     // parentElement getter
     GCValue parent_element_getter = JS_NewCFunction(ctx, js_node_get_parentElement, "get parentElement", 0);
     JSAtom parent_element_atom = JS_NewAtom(ctx, "parentElement");
-    JS_DefinePropertyGetSet(ctx, node_proto, parent_element_atom, parent_element_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, node_proto, parent_element_atom, parent_element_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, parent_element_atom);
     
     // childNodes getter
     GCValue child_nodes_getter = JS_NewCFunction(ctx, js_node_get_childNodes, "get childNodes", 0);
     JSAtom child_nodes_atom = JS_NewAtom(ctx, "childNodes");
-    JS_DefinePropertyGetSet(ctx, node_proto, child_nodes_atom, child_nodes_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, node_proto, child_nodes_atom, child_nodes_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, child_nodes_atom);
     
     // nodeType getter
     GCValue node_type_getter = JS_NewCFunction(ctx, js_node_get_nodeType, "get nodeType", 0);
     JSAtom node_type_atom = JS_NewAtom(ctx, "nodeType");
-    JS_DefinePropertyGetSet(ctx, node_proto, node_type_atom, node_type_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, node_proto, node_type_atom, node_type_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, node_type_atom);
     
     // nodeName getter
     GCValue node_name_getter = JS_NewCFunction(ctx, js_node_get_nodeName, "get nodeName", 0);
     JSAtom node_name_atom = JS_NewAtom(ctx, "nodeName");
-    JS_DefinePropertyGetSet(ctx, node_proto, node_name_atom, node_name_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, node_proto, node_name_atom, node_name_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, node_name_atom);
     
     // ownerDocument getter
     GCValue owner_document_getter = JS_NewCFunction(ctx, js_node_get_ownerDocument, "get ownerDocument", 0);
     JSAtom owner_document_atom = JS_NewAtom(ctx, "ownerDocument");
-    JS_DefinePropertyGetSet(ctx, node_proto, owner_document_atom, owner_document_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, node_proto, owner_document_atom, owner_document_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, owner_document_atom);
     
     // ===== HTMLElement prototype methods =====
@@ -2410,14 +2410,14 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     GCValue text_content_getter = JS_NewCFunction(ctx, js_node_get_text_content, "get textContent", 0);
     GCValue text_content_setter = JS_NewCFunction(ctx, js_node_set_text_content, "set textContent", 1);
     JSAtom text_content_atom = JS_NewAtom(ctx, "textContent");
-    JS_DefinePropertyGetSet(ctx, node_proto, text_content_atom, text_content_getter, text_content_setter, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, node_proto, text_content_atom, text_content_getter, text_content_setter, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, text_content_atom);
     
     // nodeValue getter/setter
     GCValue node_value_getter = JS_NewCFunction(ctx, js_node_get_node_value, "get nodeValue", 0);
     GCValue node_value_setter = JS_NewCFunction(ctx, js_node_set_node_value, "set nodeValue", 1);
     JSAtom node_value_atom = JS_NewAtom(ctx, "nodeValue");
-    JS_DefinePropertyGetSet(ctx, node_proto, node_value_atom, node_value_getter, node_value_setter, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, node_proto, node_value_atom, node_value_getter, node_value_setter, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, node_value_atom);
     
     // data getter/setter (CharacterData interface, used by Text/Comment nodes)
