@@ -49,10 +49,10 @@
 #include "mbedtls/private/gcm.h"
 
 // Forward declarations for Crypto API
-static GCValue js_crypto_get_random_values(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
-static GCValue js_subtle_digest(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
-static GCValue js_subtle_encrypt(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
-static GCValue js_subtle_decrypt(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_crypto_get_random_values(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_subtle_digest(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_subtle_encrypt(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_subtle_decrypt(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 
 #define LOG_TAG "browser_api_impl"
 #define LOG_ERROR(...) platform_log(LOG_LEVEL_ERROR, LOG_TAG, __VA_ARGS__)
@@ -71,16 +71,16 @@ extern "C" GCValue js_element_querySelectorAll_real(JSContextHandle ctx, GCValue
 extern "C" GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 
 // Forward declarations for internal functions
-static GCValue js_dummy_function(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
-static GCValue js_dummy_function_true(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
-static GCValue js_create_from_ctor_proto(JSContextHandle ctx, GCValue ctor);
-static GCValue js_message_channel_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
-static GCValue js_event_target_addEventListener(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
-static GCValue js_event_target_removeEventListener(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
-static GCValue js_event_target_dispatchEvent(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
-static GCValue js_promise_resolve_undefined(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
-static GCValue js_promise_resolve_empty_string(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
-static GCValue js_create_resolved_promise(JSContextHandle ctx, GCValue value);
+GCValue js_dummy_function(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_dummy_function_true(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_create_from_ctor_proto(JSContextHandle ctx, GCValue ctor);
+GCValue js_message_channel_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
+GCValue js_event_target_addEventListener(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_event_target_removeEventListener(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_event_target_dispatchEvent(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_promise_resolve_undefined(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_promise_resolve_empty_string(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_create_resolved_promise(JSContextHandle ctx, GCValue value);
 
 // ServiceWorker API forward declarations
 extern JSClassID js_service_worker_container_class_id;
@@ -89,22 +89,22 @@ extern JSClassID js_service_worker_class_id;
 GCHandle service_worker_handle = GC_HANDLE_NULL;
 
 // Basic stub function definitions (must be before use in function lists)
-static GCValue js_undefined(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_undefined(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)ctx; (void)this_val; (void)argc; (void)argv;
     return JS_UNDEFINED;
 }
 
-static GCValue js_null(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_null(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)ctx; (void)this_val; (void)argc; (void)argv;
     return JS_NULL;
 }
 
-static GCValue js_empty_array(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_empty_array(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc; (void)argv;
     return JS_NewArray(ctx);
 }
 
-static GCValue js_empty_string(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_empty_string(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc; (void)argv;
     return JS_NewString(ctx, "");
 }
@@ -121,7 +121,7 @@ static GCValue js_cyber_append_child(JSContextHandle ctx, GCValue this_val, int 
 }
 
 // document.createTextNode() - returns a proper Text node object
-static GCValue js_document_create_text_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_document_create_text_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
     const char *text = "";
     if (argc >= 1) {
@@ -261,12 +261,12 @@ static GCValue js_document_implementation_create_html_document(JSContextHandle c
     return doc;
 }
 
-static GCValue js_false(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_false(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)ctx; (void)this_val; (void)argc; (void)argv;
     return JS_FALSE;
 }
 
-static GCValue js_true(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_true(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)ctx; (void)this_val; (void)argc; (void)argv;
     return JS_TRUE;
 }
@@ -286,7 +286,7 @@ static GCValue js_html_script_element_supports(JSContextHandle ctx, GCValue this
 }
 
 // Promise rejection helper
-static GCValue js_promise_reject(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_promise_reject(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc; (void)argv;
     return JS_ThrowTypeError(ctx, "not supported");
 }
@@ -681,7 +681,7 @@ static GCValue js_match_media_remove_event_listener(JSContextHandle ctx, GCValue
     return js_match_media_remove_listener(ctx, this_val, 1, args);
 }
 
-static GCValue js_match_media(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_match_media(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc;
     const char *q = "";
     if (argc > 0 && JS_IsString(argv[0])) {
@@ -704,7 +704,7 @@ static GCValue js_match_media(JSContextHandle ctx, GCValue this_val, int argc, G
 }
 
 // Real base64 encode
-static GCValue js_btoa(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_btoa(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
     if (argc < 1 || !JS_IsString(argv[0]))
         return JS_ThrowTypeError(ctx, "btoa requires a string");
@@ -736,7 +736,7 @@ static GCValue js_btoa(JSContextHandle ctx, GCValue this_val, int argc, GCValue 
 }
 
 // Real base64 decode
-static GCValue js_atob(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_atob(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
     if (argc < 1 || !JS_IsString(argv[0]))
         return JS_ThrowTypeError(ctx, "atob requires a string");
@@ -775,7 +775,7 @@ static GCValue js_atob(JSContextHandle ctx, GCValue this_val, int argc, GCValue 
 }
 
 // AbortController constructor stub
-static GCValue js_abort_controller_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_abort_controller_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     GCValue obj = JS_NewObject(ctx);
     GCValue signal = JS_NewObject(ctx);
@@ -788,7 +788,7 @@ static GCValue js_abort_controller_constructor(JSContextHandle ctx, GCValue this
 }
 
 // AbortSignal constructor stub
-static GCValue js_abort_signal_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_abort_signal_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     GCValue signal = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, signal, "aborted", JS_FALSE);
@@ -800,7 +800,7 @@ static GCValue js_abort_signal_constructor(JSContextHandle ctx, GCValue this_val
 }
 
 // AudioContext constructor stub
-static GCValue js_audio_context_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_audio_context_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     GCValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "createBuffer", JS_NewCFunction(ctx, js_null, "createBuffer", 3));
@@ -819,7 +819,7 @@ static GCValue js_audio_context_constructor(JSContextHandle ctx, GCValue this_va
 }
 
 // Worker constructor stub
-static GCValue js_worker_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_worker_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     GCValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "postMessage", JS_NewCFunction(ctx, js_undefined, "postMessage", 1));
@@ -830,7 +830,7 @@ static GCValue js_worker_constructor(JSContextHandle ctx, GCValue this_val, int 
 }
 
 // Blob constructor stub
-static GCValue js_blob_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_blob_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     GCValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "size", JS_NewInt64(ctx, 0));
@@ -843,7 +843,7 @@ static GCValue js_blob_constructor(JSContextHandle ctx, GCValue this_val, int ar
 }
 
 // File constructor stub
-static GCValue js_file_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_file_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     GCValue obj = js_blob_constructor(ctx, this_val, argc, argv);
     JS_SetPropertyStr(ctx, obj, "name", JS_NewString(ctx, ""));
@@ -852,7 +852,7 @@ static GCValue js_file_constructor(JSContextHandle ctx, GCValue this_val, int ar
 }
 
 // FormData constructor stub
-static GCValue js_form_data_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_form_data_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     GCValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "append", JS_NewCFunction(ctx, js_undefined, "append", 2));
@@ -868,7 +868,7 @@ static GCValue js_form_data_constructor(JSContextHandle ctx, GCValue this_val, i
 }
 
 // TextEncoder constructor stub
-static GCValue js_text_encoder_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_text_encoder_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     GCValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "encoding", JS_NewString(ctx, "utf-8"));
@@ -878,7 +878,7 @@ static GCValue js_text_encoder_constructor(JSContextHandle ctx, GCValue this_val
 }
 
 // TextDecoder constructor stub
-static GCValue js_text_decoder_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_text_decoder_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     GCValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "encoding", JS_NewString(ctx, "utf-8"));
@@ -889,7 +889,7 @@ static GCValue js_text_decoder_constructor(JSContextHandle ctx, GCValue this_val
 }
 
 // ReadableStream constructor stub
-static GCValue js_readable_stream_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_readable_stream_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     GCValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "locked", JS_FALSE);
@@ -902,7 +902,7 @@ static GCValue js_readable_stream_constructor(JSContextHandle ctx, GCValue this_
 }
 
 // PressureObserver constructor stub
-static GCValue js_pressure_observer_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_pressure_observer_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     GCValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "observe", JS_NewCFunction(ctx, js_promise_resolve_undefined, "observe", 1));
@@ -912,7 +912,7 @@ static GCValue js_pressure_observer_constructor(JSContextHandle ctx, GCValue thi
 }
 
 // Profiler constructor stub
-static GCValue js_profiler_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_profiler_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     GCValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "start", JS_NewCFunction(ctx, js_undefined, "start", 0));
@@ -922,7 +922,7 @@ static GCValue js_profiler_constructor(JSContextHandle ctx, GCValue this_val, in
 }
 
 // Promise-returning helpers for Clipboard API
-static GCValue js_promise_resolve_undefined(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_promise_resolve_undefined(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc; (void)argv;
     // Return a resolved promise with undefined
     GCValue promise = JS_NewPromiseCapability(ctx, NULL);
@@ -931,18 +931,18 @@ static GCValue js_promise_resolve_undefined(JSContextHandle ctx, GCValue this_va
     return JS_UNDEFINED;
 }
 
-static GCValue js_promise_resolve_empty_string(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_promise_resolve_empty_string(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc; (void)argv;
     return JS_NewString(ctx, "");
 }
 
-static GCValue js_promise_resolve_empty_array(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_promise_resolve_empty_array(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc; (void)argv;
     return JS_NewArray(ctx);
 }
 
 // MediaCapabilities decodingInfo - returns Promise<{supported, smooth, powerEfficient}>
-static GCValue js_media_capabilities_decoding_info(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_media_capabilities_decoding_info(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc; (void)argv;
     // Create result object with all capabilities supported
     GCValue result = JS_NewObject(ctx);
@@ -957,7 +957,7 @@ static GCValue js_media_capabilities_decoding_info(JSContextHandle ctx, GCValue 
 }
 
 // MediaCapabilities encodingInfo - returns Promise<{supported, smooth, powerEfficient}>
-static GCValue js_media_capabilities_encoding_info(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_media_capabilities_encoding_info(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc; (void)argv;
     // Create result object - encoding not supported
     GCValue result = JS_NewObject(ctx);
@@ -972,7 +972,7 @@ static GCValue js_media_capabilities_encoding_info(JSContextHandle ctx, GCValue 
 }
 
 // PermissionStatus constructor
-static GCValue js_permission_status_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
+GCValue js_permission_status_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
     (void)new_target;
     GCValue obj = JS_NewObject(ctx);
     if (JS_IsException(obj)) return JS_EXCEPTION;
@@ -993,7 +993,7 @@ static GCValue js_permission_status_constructor(JSContextHandle ctx, GCValue new
 }
 
 // Permissions query/request/revoke - returns Promise<PermissionStatus>
-static GCValue js_permissions_query(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_permissions_query(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc;
     // Create PermissionStatus with state "prompt" (default permission state)
     GCValue permission_status = JS_NewObject(ctx);
@@ -1006,7 +1006,7 @@ static GCValue js_permissions_query(JSContextHandle ctx, GCValue this_val, int a
 }
 
 // Storage API - returns { usage, quota, usageDetails }
-static GCValue js_storage_estimate(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_storage_estimate(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc; (void)argv;
     GCValue result = JS_NewObject(ctx);
     if (JS_IsException(result)) return JS_EXCEPTION;
@@ -1019,7 +1019,7 @@ static GCValue js_storage_estimate(JSContextHandle ctx, GCValue this_val, int ar
 }
 
 // Storage persist/persisted - returns Promise<false>
-static GCValue js_false_promise(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_false_promise(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc; (void)argv;
     return JS_FALSE;
 }
@@ -1330,7 +1330,7 @@ static GCValue js_location_reload(JSContextHandle ctx, GCValue this_val, int arg
 
 // Validation that actually tests if object can be used
 // Returns 1 if usable, 0 if not. Logs when corruption is detected.
-static int is_obj_usable(JSContextHandle ctx, GCValue obj) {
+int is_obj_usable(JSContextHandle ctx, GCValue obj) {
     (void)ctx;
     if (JS_IsException(obj)) {
         LOG_ERROR("is_obj_usable: object is exception");
@@ -1344,7 +1344,7 @@ static int is_obj_usable(JSContextHandle ctx, GCValue obj) {
 }
 
 // Safe version of JS_SetPropertyStr that checks for errors
-static int safe_set_property_str(JSContextHandle ctx, GCValue obj, const char *key, GCValue val) {
+int safe_set_property_str(JSContextHandle ctx, GCValue obj, const char *key, GCValue val) {
     if (!is_obj_usable(ctx, obj)) {
         LOG_ERROR("safe_set_property_str: obj not usable for key '%s'", key);
         return -1;
@@ -1365,7 +1365,7 @@ GCValue js_get_prototype(JSContextHandle ctx, GCValue ctor) {
     return JS_GetPropertyStr(ctx, ctor, "prototype");
 }
 
-static GCValue js_zero(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+GCValue js_zero(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc; (void)argv;
     return JS_NewInt32(ctx, 0);
 }

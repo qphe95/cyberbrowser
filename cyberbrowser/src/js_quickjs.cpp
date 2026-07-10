@@ -64,7 +64,7 @@ void js_quickjs_set_asset_manager(AAssetManager *mgr) {
 #endif
 
 // Forward declarations
-static GCValue js_dummy_function(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_dummy_function(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 static bool is_http_url(const char *url);
 static int collect_user_headers(JSContextHandle ctx, GCValue headers_obj,
                                 char header_bufs[][512], const char **headers_out,

@@ -130,11 +130,32 @@ static inline uint64_t atomic_compare_exchange_u64(volatile uint64_t *p, uint64_
 }
 #endif
 
+/* Simple spinlock used for coarse-grained thread safety (e.g. type buckets).
+ * Defined here so the portable 128-bit fallback below can use it. */
+typedef struct GCSpinLock {
+    volatile uint32_t lock;
+} GCSpinLock;
+
+static inline void gc_spinlock_init(GCSpinLock *sl) {
+    sl->lock = 0;
+}
+
+static inline void gc_spinlock_acquire(GCSpinLock *sl) {
+    while (atomic_compare_exchange_u32(&sl->lock, 0, 1) != 0) {
+        /* spin */
+    }
+}
+
+static inline void gc_spinlock_release(GCSpinLock *sl) {
+    atomic_store_u32(&sl->lock, 0);
+}
+
 /* 128-bit atomic helpers for GCValue-sized slots (used by lock-free property arrays).
- * addr must be 16-byte aligned at runtime.  We use explicit inline assembly for
- * cmpxchg16b to avoid stack-alignment / libgcc issues with compiler-generated
- * 128-bit atomics on MinGW. */
+ * addr must be 16-byte aligned at runtime. */
 #if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+/* x86_64: use explicit inline assembly for cmpxchg16b to avoid
+ * stack-alignment / libgcc issues with compiler-generated 128-bit
+ * atomics on MinGW. */
 static inline void atomic_load_128(volatile uint64_t *addr, uint64_t *low, uint64_t *high) {
     uint64_t rax = 0, rdx = 0;
     __asm__ __volatile__ (
@@ -172,29 +193,73 @@ static inline void atomic_store_128(volatile uint64_t *addr, uint64_t low, uint6
         /* retry with current value already in expected_* */
     }
 }
+#elif defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+/* arm64 (Apple Silicon, Linux aarch64): use compiler __atomic builtins.
+ * On arm64 these lower to single LDP/STP + CASAL instructions (with LSE)
+ * or an LL/SC loop, both of which are genuinely atomic and 16-byte aligned. */
+static inline void atomic_load_128(volatile uint64_t *addr, uint64_t *low, uint64_t *high) {
+    __int128 val = __atomic_load_n((volatile __int128 *)addr, __ATOMIC_SEQ_CST);
+    *low = (uint64_t)val;
+    *high = (uint64_t)(val >> 64);
+}
+static inline bool atomic_compare_exchange_128(volatile uint64_t *addr,
+                                               uint64_t *expected_low, uint64_t *expected_high,
+                                               uint64_t desired_low, uint64_t desired_high) {
+    union { __int128 v; struct { uint64_t lo, hi; } s; } exp, des;
+    exp.s.lo = *expected_low;
+    exp.s.hi = *expected_high;
+    des.s.lo = desired_low;
+    des.s.hi = desired_high;
+    bool ok = __atomic_compare_exchange_n((volatile __int128 *)addr, &exp.v, des.v,
+                                          false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    if (!ok) {
+        *expected_low = exp.s.lo;
+        *expected_high = exp.s.hi;
+    }
+    return ok;
+}
+static inline void atomic_store_128(volatile uint64_t *addr, uint64_t low, uint64_t high) {
+    union { __int128 v; struct { uint64_t lo, hi; } s; } des;
+    des.s.lo = low;
+    des.s.hi = high;
+    __atomic_store_n((volatile __int128 *)addr, des.v, __ATOMIC_SEQ_CST);
+}
 #else
-#error "128-bit atomic operations not implemented for this target"
+/* Portable fallback using a global spinlock. Correct on any target that
+ * has the 32-bit atomics defined above, though less scalable than a
+ * native 128-bit CAS. */
+static inline void atomic_load_128(volatile uint64_t *addr, uint64_t *low, uint64_t *high) {
+    static GCSpinLock lock128;
+    gc_spinlock_acquire(&lock128);
+    *low = addr[0];
+    *high = addr[1];
+    gc_spinlock_release(&lock128);
+}
+static inline bool atomic_compare_exchange_128(volatile uint64_t *addr,
+                                               uint64_t *expected_low, uint64_t *expected_high,
+                                               uint64_t desired_low, uint64_t desired_high) {
+    static GCSpinLock lock128;
+    gc_spinlock_acquire(&lock128);
+    if (addr[0] == *expected_low && addr[1] == *expected_high) {
+        addr[0] = desired_low;
+        addr[1] = desired_high;
+        gc_spinlock_release(&lock128);
+        return true;
+    }
+    *expected_low = addr[0];
+    *expected_high = addr[1];
+    gc_spinlock_release(&lock128);
+    return false;
+}
+static inline void atomic_store_128(volatile uint64_t *addr, uint64_t low, uint64_t high) {
+    static GCSpinLock lock128;
+    gc_spinlock_acquire(&lock128);
+    addr[0] = low;
+    addr[1] = high;
+    gc_spinlock_release(&lock128);
+}
 #endif
 
-
-/* Simple spinlock used for coarse-grained thread safety (e.g. type buckets) */
-typedef struct GCSpinLock {
-    volatile uint32_t lock;
-} GCSpinLock;
-
-static inline void gc_spinlock_init(GCSpinLock *sl) {
-    sl->lock = 0;
-}
-
-static inline void gc_spinlock_acquire(GCSpinLock *sl) {
-    while (atomic_compare_exchange_u32(&sl->lock, 0, 1) != 0) {
-        /* spin */
-    }
-}
-
-static inline void gc_spinlock_release(GCSpinLock *sl) {
-    atomic_store_u32(&sl->lock, 0);
-}
 
 #define GC_HEAP_SIZE (4ULL * 1024 * 1024 * 1024)
 #define GC_INITIAL_HANDLES 32000000

@@ -334,7 +334,11 @@ static bool gc_thread_pool_init(void) {
     }
     
     g_gc_pool.thread_count = thread_count;
+#ifdef _WIN32
     g_gc_pool.threads = (HANDLE *)malloc(thread_count * sizeof(HANDLE));
+#else
+    g_gc_pool.threads = (pthread_t *)malloc(thread_count * sizeof(pthread_t));
+#endif
     if (!g_gc_pool.threads) return false;
     
 #ifdef _WIN32
@@ -1630,7 +1634,7 @@ static bool free_queue_init(void)
 
 static void free_queue_cleanup(void)
 {
-    JobBuffer *b = atomic_load_ptr((void *volatile *)&g_gc.free_queue.head_block);
+    JobBuffer *b = (JobBuffer *)atomic_load_ptr((void *volatile *)&g_gc.free_queue.head_block);
     while (b) {
         JobBuffer *next = (JobBuffer *)atomic_load_ptr((void *volatile *)&b->next);
         free(b);
@@ -1647,7 +1651,7 @@ static inline void push_free_handle(GCHandle handle) {
     if (handle == GC_HANDLE_NULL) return;
     
     for (;;) {
-        JobBuffer *tb = atomic_load_ptr((void *volatile *)&g_gc.free_queue.tail_block);
+        JobBuffer *tb = (JobBuffer *)atomic_load_ptr((void *volatile *)&g_gc.free_queue.tail_block);
         free_queue_acquire_buffer(tb);
         
         uint64_t head = atomic_load_u64(&tb->head);
@@ -1708,7 +1712,7 @@ static inline void push_free_handle(GCHandle handle) {
  */
 static GCHandle pop_free_handle(void) {
     for (;;) {
-        JobBuffer *hb = atomic_load_ptr((void *volatile *)&g_gc.free_queue.head_block);
+        JobBuffer *hb = (JobBuffer *)atomic_load_ptr((void *volatile *)&g_gc.free_queue.head_block);
         if (!hb) return GC_HANDLE_NULL;
         free_queue_acquire_buffer(hb);
         
@@ -2422,12 +2426,10 @@ static void gc_mark_phase(JSRuntimeHandle rt) {
 }
 
 /* Background mark job submitted to the GC thread pool. It drains the grey
- * queue until gc_grey_queue_drain() signals completion (the handshake). */
-#ifdef _WIN32
-static DWORD WINAPI gc_mark_job_func(LPVOID arg) {
-#else
-static void *gc_mark_job_func(void *arg) {
-#endif
+ * queue until gc_grey_queue_drain() signals completion (the handshake).
+ * This is a thread-pool *job* (GCThreadPoolJobFunc), not a raw thread
+ * entry point, so it returns void regardless of platform. */
+static void gc_mark_job_func(void *arg) {
     (void)arg;
     JSRuntimeHandle rt(g_gc.rt);
 

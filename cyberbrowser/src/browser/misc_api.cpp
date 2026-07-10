@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <math.h>
+#include <ctype.h>
 #include <quickjs.h>
 #include <quickjs_gc_unified.h>
 #include "browser_api_impl.h"

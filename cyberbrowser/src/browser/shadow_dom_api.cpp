@@ -81,20 +81,19 @@ GCValue js_shadow_root_insert_before(JSContextHandle ctx, GCValue this_val, int 
     return js_node_insertBefore_real(ctx, this_val, argc, argv);
 }
 
-GCValue js_shadow_root_get_first_child(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    return js_node_get_firstChild(ctx, this_val, argc, argv);
+GCValue js_shadow_root_get_first_child(JSContextHandle ctx, GCValue this_val) {
+    return js_node_get_firstChild(ctx, this_val, 0, NULL);
 }
 
-GCValue js_shadow_root_get_last_child(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    return js_node_get_lastChild(ctx, this_val, argc, argv);
+GCValue js_shadow_root_get_last_child(JSContextHandle ctx, GCValue this_val) {
+    return js_node_get_lastChild(ctx, this_val, 0, NULL);
 }
 
-GCValue js_shadow_root_get_child_nodes(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    return js_node_get_childNodes(ctx, this_val, argc, argv);
+GCValue js_shadow_root_get_child_nodes(JSContextHandle ctx, GCValue this_val) {
+    return js_node_get_childNodes(ctx, this_val, 0, NULL);
 }
 
-GCValue js_shadow_root_get_children(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)argc; (void)argv;
+GCValue js_shadow_root_get_children(JSContextHandle ctx, GCValue this_val) {
     GCValue arr = JS_NewArray(ctx);
     DOMNodeHandle node = get_dom_node(ctx, this_val);
     if (!node.valid()) return arr;
@@ -111,8 +110,7 @@ GCValue js_shadow_root_get_children(JSContextHandle ctx, GCValue this_val, int a
     return arr;
 }
 
-GCValue js_shadow_root_get_child_element_count(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)argc; (void)argv;
+GCValue js_shadow_root_get_child_element_count(JSContextHandle ctx, GCValue this_val) {
     int count = 0;
     DOMNodeHandle node = get_dom_node(ctx, this_val);
     if (!node.valid()) return JS_NewInt32(ctx, 0);
@@ -207,8 +205,7 @@ GCValue js_shadow_root_get_elements_by_tag_name(JSContextHandle ctx, GCValue thi
     return arr;
 }
 
-GCValue js_shadow_root_get_owner_document_wrapper(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)argc; (void)argv;
+GCValue js_shadow_root_get_owner_document_wrapper(JSContextHandle ctx, GCValue this_val) {
     ShadowRootDataHandle sr = ShadowRootDataHandle::from_object_check(ctx, this_val);
     if (!sr.valid()) return JS_NULL;
     GCValue host = sr.host();
@@ -216,14 +213,12 @@ GCValue js_shadow_root_get_owner_document_wrapper(JSContextHandle ctx, GCValue t
     return JS_GetPropertyStr(ctx, host, "ownerDocument");
 }
 
-GCValue js_shadow_root_get_parent_node_wrapper(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)argc; (void)argv;
-    (void)this_val;
+GCValue js_shadow_root_get_parent_node_wrapper(JSContextHandle ctx, GCValue this_val) {
+    (void)ctx; (void)this_val;
     return JS_NULL;
 }
 
-GCValue js_shadow_root_get_adopted_style_sheets(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)argc; (void)argv;
+GCValue js_shadow_root_get_adopted_style_sheets(JSContextHandle ctx, GCValue this_val) {
     GCValue sheets = JS_GetPropertyStr(ctx, this_val, "__adoptedStyleSheets");
     if (JS_IsUndefined(sheets) || JS_IsNull(sheets) || !JS_IsArray(ctx, sheets)) {
         sheets = JS_NewArray(ctx);
@@ -232,9 +227,8 @@ GCValue js_shadow_root_get_adopted_style_sheets(JSContextHandle ctx, GCValue thi
     return sheets;
 }
 
-GCValue js_shadow_root_set_adopted_style_sheets(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    if (argc < 1) return JS_ThrowTypeError(ctx, "adoptedStyleSheets setter requires an array");
-    JS_SetPropertyStr(ctx, this_val, "__adoptedStyleSheets", argv[0]);
+GCValue js_shadow_root_set_adopted_style_sheets(JSContextHandle ctx, GCValue this_val, GCValue val) {
+    JS_SetPropertyStr(ctx, this_val, "__adoptedStyleSheets", val);
 
     // Assign a unique scope class to the host element.  The layout engine uses
     // this class to prefix every selector from these adopted sheets so they only
@@ -272,20 +266,17 @@ GCValue js_shadow_root_set_adopted_style_sheets(JSContextHandle ctx, GCValue thi
     return JS_UNDEFINED;
 }
 
-GCValue js_shadow_root_get_style_sheets(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)argc; (void)argv;
-    return js_shadow_root_get_adopted_style_sheets(ctx, this_val, 0, NULL);
+GCValue js_shadow_root_get_style_sheets(JSContextHandle ctx, GCValue this_val) {
+    return js_shadow_root_get_adopted_style_sheets(ctx, this_val);
 }
 
-GCValue js_shadow_root_get_delegates_focus(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)argc; (void)argv;
+GCValue js_shadow_root_get_delegates_focus(JSContextHandle ctx, GCValue this_val) {
     ShadowRootDataHandle sr = ShadowRootDataHandle::from_object_check(ctx, this_val);
     if (!sr.valid()) return JS_ThrowTypeError(ctx, "Invalid ShadowRoot");
     return JS_NewBool(ctx, sr.delegates_focus());
 }
 
-GCValue js_shadow_root_get_slot_assignment(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)argc; (void)argv;
+GCValue js_shadow_root_get_slot_assignment(JSContextHandle ctx, GCValue this_val) {
     ShadowRootDataHandle sr = ShadowRootDataHandle::from_object_check(ctx, this_val);
     if (!sr.valid()) return JS_ThrowTypeError(ctx, "Invalid ShadowRoot");
     return JS_NewString(ctx, sr.manual_slot_assignment() ? "manual" : "named");
