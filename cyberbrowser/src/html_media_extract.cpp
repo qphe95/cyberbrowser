@@ -825,21 +825,17 @@ static void pump_timers_and_jobs_after_fetch(void) {
     }
 }
 
-// Some third-party polyfills are not safe to execute inside this emulator:
-// they monkey-patch native DOM prototypes and corrupt state.  Skip only those
-// known-bad polyfills; large application bundles must be allowed to run
-// because they carry bootstrap logic that the page expects.
+// Some third-party polyfills are not safe to execute inside this emulator.
+// We let the ShadyDOM (webcomponents-sd) and ShadyCSS polyfills run unmodified
+// so they can own shadow DOM.  Only skip polyfills that are genuinely
+// incompatible with the engine itself.
 static bool is_unsafe_external_script(const char *url) {
     if (!url) return false;
     static const char *skip_patterns[] = {
-        // Skip the Polymer ES5 adapter. The adapter's wrapper class corrupts
-        // the QuickJS bytecode when combined with our native HTMLElement
-        // upgrade path.  The ShadyDOM polyfill is now allowed to run because
-        // the missing Node type constants that made it throw "not a function"
-        // have been added.
+        // The Polymer ES5 adapter transpiles class syntax in a way that
+        // corrupts QuickJS's custom-element upgrade path.  Not a shadow-DOM
+        // concern; skipped for engine compatibility.
         "custom-elements-es5-adapter",
-        "webcomponents-sd-shadycss",
-        "webcomponents-all-noPatch",
         NULL
     };
     for (const char **p = skip_patterns; *p; p++) {
@@ -930,9 +926,6 @@ extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_re
     // nesting-state buffer has been moved from the C stack to the GC heap,
     // and cyberbrowser.exe is linked with a 64 MiB C stack, so large
     // ~10 MiB application bundles no longer overflow during JS_Eval.
-    // Polyfills that are known to leave the JS heap in a corrupted state in our
-    // emulator (e.g. the ShadyDOM webcomponents-sd polyfill) are still skipped
-    // by URL.
     const size_t MAX_EXTERNAL_SCRIPT_SIZE = 64 * 1024 * 1024;
     
     // Fetch external scripts (skipped when MAX_EXTERNAL_SCRIPT_SIZE == 0)
@@ -996,11 +989,6 @@ extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_re
                     // YouTube runtime/base module before execution.
                     std::string patched(buffer.data, buffer.size);
                     apply_youtube_page_token_patch(patched);
-                    apply_youtube_e19_null_guard_patch(patched);
-                    apply_youtube_scoped_root_patch(patched);
-                    apply_shadydom_matches_patch(patched);
-                    apply_youtube_dom_patch_patch(patched);
-                    apply_youtube_shadydom_use_patch(patched);
                     {
                         char dbgname[64];
                         snprintf(dbgname, sizeof(dbgname), "debug_script_%02d_patched.js", scripts[i].parse_order);

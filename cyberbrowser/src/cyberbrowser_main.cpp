@@ -679,11 +679,6 @@ int main(int argc, char *argv[]) {
         {
             fprintf(stderr, "[UPGRADE-DOC] invoking customElements.upgrade\n");
             fflush(stderr);
-            // With the webcomponents-sd polyfill allowed to run, leave ShadyDOM
-            // in the state the page configured.  Forcing it off after scripts
-            // run confuses Polymer's wrapper methods.
-            // const char *disable_shady_js = ...
-            // JS_Eval(g_ctx, disable_shady_js, ...);
 
             const char *upgrade_doc_js =
                 "if (window.customElements && typeof window.customElements.upgrade === 'function' && document) {"
@@ -717,27 +712,6 @@ int main(int argc, char *argv[]) {
                 JS_Eval(g_ctx, neutralise_log_js, strlen(neutralise_log_js), "<neutralise_log>", JS_EVAL_TYPE_GLOBAL);
             }
 
-            {
-                const char *shady_neutral_js =
-                    "try {"
-                    "  var sd = {force:false, noPatch:false, preferPerformance:false, inUse:false, nativeCss:true, settings:{}, patch:function(n){return n;}, wrap:function(n){return n;}, patchElementProto:function(n){return n;}, flush:function(){}, flushInitial:function(){}, observeChildren:function(){return {disconnect:function(){}};}, unobserveChildren:function(){}, composedPath:function(e){return e&&e.composedPath?e.composedPath():[];}, isShadyRoot:function(){return false;}, enqueue:function(){}, filterMutations:function(a){return a;}};"
-                    "  try { delete window.ShadyDOM; } catch(e1) {}"
-                    "  try { Object.defineProperty(window, 'ShadyDOM', {value: sd, writable:false, configurable:false, enumerable:true}); } catch(e2) { window.ShadyDOM = sd; }"
-                    "  console.error('[SHADY-NEUTRAL] ShadyDOM replaced, inUse=' + window.ShadyDOM.inUse);"
-                    "} catch(e) { console.error('[SHADY-NEUTRAL] failed', e.message, e.stack); }";
-                JS_Eval(g_ctx, shady_neutral_js, strlen(shady_neutral_js), "<shady_neutral>", JS_EVAL_TYPE_GLOBAL);
-            }
-
-            {
-                const char *pre_load_diag =
-                    "try {"
-                    "  console.error('[PRE-LOAD-DIAG] ShadyDOM typeof=' + typeof window.ShadyDOM);"
-                    "  console.error('[PRE-LOAD-DIAG] ShadyDOM inUse=' + (window.ShadyDOM && window.ShadyDOM.inUse));"
-                    "  console.error('[PRE-LOAD-DIAG] ShadyDOM keys=' + (window.ShadyDOM ? Object.keys(window.ShadyDOM).join(',') : 'none'));"
-                    "} catch(e) { console.error('[PRE-LOAD-DIAG] exc', e.message, e.stack); }";
-                JS_Eval(g_ctx, pre_load_diag, strlen(pre_load_diag), "<pre_load_diag>", JS_EVAL_TYPE_GLOBAL);
-            }
-
             /* YouTube's app loader normally fires on a 'script-load-dpj' event
              * or ytsignals callback.  In our emulator those signals are missing,
              * so the app stays in its disable-upgrade skeleton state.  Manually
@@ -762,59 +736,7 @@ int main(int argc, char *argv[]) {
                     "}";
                 JS_Eval(g_ctx, reupgrade_js, strlen(reupgrade_js), "<reupgrade>", JS_EVAL_TYPE_GLOBAL);
             }
-
-            const char *shady_diag_js =
-                "(function(){"
-                "  try {"
-                "    var app = document.querySelector('ytd-app');"
-                "    if (!app) { console.error('[SHADY-DIAG] no ytd-app'); return; }"
-                "    var root = app.root || app.shadowRoot;"
-                "    console.error('[SHADY-DIAG] app root=' + (root && root.nodeName) + ' isShadow=' + (root instanceof ShadowRoot));"
-                "    if (!root) return;"
-                "    function _pd(n,f){try{console.error('[SHADY-DIAG] ' + n + '=' + f());}catch(ee){console.error('[SHADY-DIAG] ' + n + ' EXC', ee.message, ee.stack);}}"
-                "    _pd('matches', function(){return typeof Element.prototype.matches;});"
-                "    _pd('qsa', function(){return typeof Element.prototype.__shady_native_querySelectorAll;});"
-                "    _pd('ShadyDOM type', function(){return typeof window.ShadyDOM + ' ' + Object.prototype.toString.call(window.ShadyDOM);});"
-                "    _pd('ShadyDOM inUse desc', function(){return JSON.stringify(Object.getOwnPropertyDescriptor(window.ShadyDOM,'inUse'));});"
-                "    _pd('qi', function(){return (window.ShadyDOM && window.ShadyDOM.querySelectorImplementation);});"
-                "    _pd('root proto', function(){return Object.prototype.toString.call(root);});"
-                "    _pd('root qs', function(){return typeof root.querySelector;});"
-                "    _pd('root getRoot', function(){return typeof root.__shady_getRootNode;});"
-                "    _pd('matchesTest', function(){var test=document.createElement('div');return Element.prototype.matches.call(test,'div');});"
-                "    _pd('ShadyDOM.inUse', function(){return window.ShadyDOM && window.ShadyDOM.inUse;});"
-                "    _pd('ShadyDOM.Wrapper', function(){return window.ShadyDOM && typeof window.ShadyDOM.Wrapper;});"
-                "    _pd('ShadyDOM.noPatch', function(){return window.ShadyDOM && window.ShadyDOM.noPatch;});"
-                "    var testDiv = document.createElement('div');"
-                "    var testBtn2 = document.createElement('button'); testBtn2.id='bar'; console.error('[SHADY-DIAG] createButton id=' + testBtn2.id + ' nodeName=' + testBtn2.nodeName);"
-                "    console.error('[SHADY-DIAG] appendChild type=' + typeof Node.prototype.appendChild + ' nativeAppend type=' + typeof Node.prototype.__shady_native_appendChild);"
-                "    var desc = Object.getOwnPropertyDescriptor(Node.prototype,'__shady_native_appendChild');"
-                "    console.error('[SHADY-DIAG] nativeAppend desc valueType=' + (desc && typeof desc.value) + ' getType=' + (desc && typeof desc.get) + ' setType=' + (desc && typeof desc.set));"
-                "    function ss(f){return String(f).replace(/\\n/g,' ').slice(0,500);}"
-                "    console.error('[SHADY-DIAG] nativeAppend callType=' + (Node.prototype.__shady_native_appendChild && typeof Node.prototype.__shady_native_appendChild.call) + ' applyType=' + (Node.prototype.__shady_native_appendChild && typeof Node.prototype.__shady_native_appendChild.apply));"
-                "    console.error('[SHADY-DIAG] appendChild callType=' + (Node.prototype.appendChild && typeof Node.prototype.appendChild.call));"
-                "    console.error('[SHADY-DIAG] nativeInsert toString=' + (Node.prototype.__shady_native_insertBefore && ss(Node.prototype.__shady_native_insertBefore)));"
-                "    console.error('[SHADY-DIAG] insertBefore toString=' + (Node.prototype.insertBefore && ss(Node.prototype.insertBefore)));"
-                "    try { var d3=document.createElement('div'); Node.prototype.__shady_native_appendChild(d3, document.createElement('span')); console.error('[SHADY-DIAG] nativeAppend direct ok=' + d3.childNodes.length); } catch(e3){ console.error('[SHADY-DIAG] nativeAppend direct err=' + e3.message + ' stack=' + (e3.stack||'')); }"
-                "    try { var d4=document.createElement('div'); __cyber_appendChild(d4, document.createElement('span')); console.error('[SHADY-DIAG] cyberAppend ok=' + d4.childNodes.length); } catch(e4){ console.error('[SHADY-DIAG] cyberAppend err=' + e4.message + ' stack=' + (e4.stack||'')); }"
-                "    try { var d2=document.createElement('div'); var s2=document.createElement('span'); Node.prototype.__shady_native_appendChild.call(d2,s2); console.error('[SHADY-DIAG] nativeAppend ok childLen=' + d2.childNodes.length); } catch(e2) { console.error('[SHADY-DIAG] nativeAppend err=' + e2.message); }"
-                "    try { testDiv.appendChild(testBtn2); console.error('[SHADY-DIAG] manualAppend childLen=' + testDiv.childNodes.length); } catch(e) { console.error('[SHADY-DIAG] manualAppend err=' + e.message); }"
-                "    testDiv.innerHTML = '<button id=\"button\" class=\"foo\"></button>';"
-                "    console.error('[SHADY-DIAG] testDiv html=' + testDiv.innerHTML + ' childLen=' + testDiv.childNodes.length + ' first=' + (testDiv.children[0] && testDiv.children[0].nodeName));"
-                "    var testBtn = testDiv.querySelector('button'); console.error('[SHADY-DIAG] testBtn id=' + (testBtn && testBtn.id) + ' class=' + (testBtn && testBtn.className) + ' attr=' + (testBtn && testBtn.getAttribute('id')));"
-                "    var ib = root.querySelector('yt-icon-button');"
-                "    var ibRoot = ib && (ib.root || ib.shadowRoot);"
-                "    console.error('[SHADY-DIAG] iconButton=' + (ib && ib.nodeName) + ' ibRoot=' + (ibRoot && ibRoot.nodeName) + ' ibInstRoot=' + (ib && ib.polymerController && ib.polymerController.root && ib.polymerController.root.nodeName));"
-                "    if (ibRoot) {"
-                "      var fc = ibRoot.firstElementChild; var fcn = ibRoot.childNodes && ibRoot.childNodes[0];"
-                "      console.error('[SHADY-DIAG] ib nativeFirst=' + ('__shady_native_firstChild' in ibRoot));"
-                "      console.error('[SHADY-DIAG] ib shadyFirst=' + ('__shady_firstChild' in ibRoot));"
-                "      console.error('[SHADY-DIAG] ib childLen=' + (ibRoot.childNodes && ibRoot.childNodes.length) + ' firstTag=' + (fcn && fcn.nodeName) + ' firstId=' + (fcn && fcn.id) + ' firstAttr=' + (fcn && fcn.getAttribute('id')) + ' class=' + (fcn && fcn.getAttribute('class')));"
-                "      console.error('[SHADY-DIAG] ib qsButton=' + (ibRoot.querySelector ? ibRoot.querySelector('#button') : 'no qs'));"
-                "    }"
-                "  } catch(e) { console.error('[SHADY-DIAG] exc string=' + String(e)); console.error('[SHADY-DIAG] exc stack=' + (e.stack || 'no stack')); }"
-                "})();";
-            JS_Eval(g_ctx, shady_diag_js, strlen(shady_diag_js), "<shady_diag>", JS_EVAL_TYPE_GLOBAL);
-        }
+            }
 
         // ytInitialData injection removed: the page is expected to fetch its
         // own initial data through standard fetch/XHR now.
