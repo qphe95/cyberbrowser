@@ -96,30 +96,15 @@ void query_selector_all_recursive(JSContextHandle ctx, GCValue elem, const char*
 static bool dom_node_is_connected(JSContextHandle ctx, GCValue node) {
     GCValue cur = node;
     int safety = 0;
-    int debug = 0;
-    GCValue tagv = JS_GetPropertyStr(ctx, node, "tagName");
-    const char *start_tag = JS_ToCString(ctx, tagv);
-    if (start_tag && strcasecmp(start_tag, "ytd-page-manager") == 0) debug = 1;
     while (!JS_IsUndefined(cur) && !JS_IsNull(cur) && JS_IsObject(cur) && safety++ < 10000) {
         DOMNodeHandle n = get_dom_node(ctx, cur);
         if (n.valid()) {
-            if (debug) {
-                GCValue t = JS_GetPropertyStr(ctx, cur, "tagName");
-                const char *s = JS_ToCString(ctx, t);
-                GCValue p = n.parent_node();
-                GCValue pt = JS_GetPropertyStr(ctx, p, "tagName");
-                const char *ps = JS_ToCString(ctx, pt);
-                fprintf(stderr, "[ISCONN] step %s type=%d parent=%s\n", s ? s : "?", n.node_type(), ps ? ps : "?");
-                JS_FreeCString(ctx, s);
-                JS_FreeCString(ctx, ps);
-            }
             if (n.node_type() == DOM_NODE_TYPE_DOCUMENT) return true;
             // Nodes inside a template content are not connected.  A ShadowRoot
             // is also implemented as a fragment-like container, but it is
             // connected when its host element is connected.
             if (n.node_type() == DOM_NODE_TYPE_DOCUMENT_FRAGMENT) {
                 GCValue host = JS_GetPropertyStr(ctx, cur, "host");
-                if (debug) fprintf(stderr, "[ISCONN] fragment host=%d\n", JS_IsObject(host));
                 if (!JS_IsUndefined(host) && !JS_IsNull(host) && JS_IsObject(host)) {
                     cur = host;
                     continue;
@@ -128,7 +113,6 @@ static bool dom_node_is_connected(JSContextHandle ctx, GCValue node) {
             }
             cur = n.parent_node();
         } else {
-            if (debug) fprintf(stderr, "[ISCONN] no dom node; check host\n");
             // The parent may be a ShadowRoot object (not a DOMNode-backed node).
             // Continue connectivity checks from the shadow host.
             GCValue host = JS_GetPropertyStr(ctx, cur, "host");
@@ -139,8 +123,6 @@ static bool dom_node_is_connected(JSContextHandle ctx, GCValue node) {
             break;
         }
     }
-    if (debug) fprintf(stderr, "[ISCONN] not connected\n");
-    JS_FreeCString(ctx, start_tag);
     return false;
 }
 
@@ -1100,15 +1082,17 @@ GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc
     // constructor can rely on its appended children being upgraded.
     js_cyber_ce_push_stack(ctx);
 
-    // Trigger custom element connectedCallback only when the node is actually
-    // connected to the document (not inside a template fragment).
+    // Per the DOM Standard, inserting a node into a connected document must
+    // enqueue a connectedCallback reaction for every custom element in the
+    // inserted subtree (not just the directly inserted node).  The ShadyDOM
+    // polyfill wraps connectedCallback and dispatches it during its own
+    // rendering, so we only need to handle the directly-inserted node here;
+    // the polyfill handles deeper elements in shadow trees.
     if (dom_node_is_connected(ctx, child)) {
         invoke_custom_element_callback(ctx, child, "connectedCallback");
     }
 
     // Enqueue upgrade reactions for any custom elements in the inserted subtree.
-    // The HTML spec upgrades elements when they are inserted into the document
-    // (or when a definition is registered), not just on explicit upgrade() calls.
     js_cyber_ce_enqueue_upgrade_subtree(ctx, child);
     dom_flush_ce_reactions(ctx);
 
@@ -1424,8 +1408,7 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
 
     js_cyber_ce_push_stack(ctx);
 
-    // Trigger custom element connectedCallback only when the node is actually
-    // connected to the document.
+    // Trigger custom element connectedCallback for the inserted node.
     if (dom_node_is_connected(ctx, new_child)) {
         invoke_custom_element_callback(ctx, new_child, "connectedCallback");
     }
@@ -3137,6 +3120,25 @@ GCValue js_node_set_text_content(JSContextHandle ctx, GCValue this_val, int argc
 
     DOMNodeHandle node = get_dom_node(ctx, this_val);
     if (!node.valid()) return JS_UNDEFINED;
+
+    // For text/comment/PI nodes, textContent behaves like nodeValue/data:
+    // update the text and fire a characterData mutation.  This is critical
+    // for polyfills that use a text node's textContent as a microtask trigger
+    // (e.g. ShadyDOM's scheduler sets textNode.textContent to increment a
+    // counter observed via MutationObserver {characterData:true}).
+    int nt = node.node_type();
+    if (nt == DOM_NODE_TYPE_TEXT || nt == DOM_NODE_TYPE_COMMENT || nt == DOM_NODE_TYPE_PROCESSING_INSTRUCTION) {
+        GCValue node_value = JS_GetPropertyStr(ctx, this_val, "nodeValue");
+        const char *old_buf = NULL;
+        if (JS_IsString(node_value)) {
+            old_buf = JS_ToCString(ctx, node_value);
+        }
+        node.set_node_value(text);
+        mo_notify_character_data(ctx, this_val, old_buf);
+        if (old_buf) JS_FreeCString(ctx, old_buf);
+        JS_FreeCString(ctx, text);
+        return JS_UNDEFINED;
+    }
 
     // Remove all children
     GCValue child = node.first_child();
