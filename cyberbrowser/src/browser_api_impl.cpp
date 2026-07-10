@@ -218,7 +218,7 @@ static GCValue js_document_implementation_create_html_document(JSContextHandle c
     DEF_FUNC(ctx, doc, "createElementNS", js_document_create_element, 2);
     DEF_FUNC(ctx, doc, "createTextNode", js_document_create_text_node, 1);
     DEF_FUNC(ctx, doc, "createComment", js_document_create_comment, 1);
-    DEF_FUNC(ctx, doc, "createDocumentFragment", js_create_document_fragment, 0);
+    DEF_FUNC(ctx, doc, "createDocumentFragment", js_document_create_document_fragment, 0);
     DEF_FUNC(ctx, doc, "createRange", js_document_create_range, 0);
     DEF_FUNC(ctx, doc, "createTreeWalker", js_document_create_tree_walker, 3);
     DEF_FUNC(ctx, doc, "importNode", js_document_import_node, 2);
@@ -3583,43 +3583,14 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, window, "Range", range_ctor);
     
     // ===== Shadow DOM APIs =====
-    // ShadowRoot class
+    // ShadowRoot class.  All prototype properties (host, mode, firstChild,
+    // lastChild, childNodes, children, childElementCount, adoptedStyleSheets,
+    // querySelector, etc.) are installed declaratively via the function list
+    // below using JS_CGETSET_DEF / JS_CFUNC_DEF entries.
     GCValue shadow_root_proto = JS_NewObject(ctx);
-    JS_SetPropertyFunctionList(ctx, shadow_root_proto, js_shadow_root_proto_funcs, 
+    JS_SetPropertyFunctionList(ctx, shadow_root_proto, js_shadow_root_proto_funcs,
         js_shadow_root_proto_funcs_count);
-    
-    // ShadowRoot.prototype.host getter
-    GCValue host_getter = JS_NewCFunction(ctx, js_shadow_root_get_host_wrapper, "get host", 0);
-    JSAtom host_atom = JS_NewAtom(ctx, "host");
-    JS_DefinePropertyGetSet(ctx, shadow_root_proto, host_atom, host_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
-    JS_FreeAtom(ctx, host_atom);
-    
-    // ShadowRoot tree navigation properties
-    GCValue sr_first_child_getter = JS_NewCFunction(ctx, js_shadow_root_get_first_child, "get firstChild", 0);
-    JSAtom sr_first_child_atom = JS_NewAtom(ctx, "firstChild");
-    JS_DefinePropertyGetSet(ctx, shadow_root_proto, sr_first_child_atom, sr_first_child_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
-    JS_FreeAtom(ctx, sr_first_child_atom);
-    
-    GCValue sr_last_child_getter = JS_NewCFunction(ctx, js_shadow_root_get_last_child, "get lastChild", 0);
-    JSAtom sr_last_child_atom = JS_NewAtom(ctx, "lastChild");
-    JS_DefinePropertyGetSet(ctx, shadow_root_proto, sr_last_child_atom, sr_last_child_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
-    JS_FreeAtom(ctx, sr_last_child_atom);
-    
-    GCValue sr_child_nodes_getter = JS_NewCFunction(ctx, js_shadow_root_get_child_nodes, "get childNodes", 0);
-    JSAtom sr_child_nodes_atom = JS_NewAtom(ctx, "childNodes");
-    JS_DefinePropertyGetSet(ctx, shadow_root_proto, sr_child_nodes_atom, sr_child_nodes_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
-    JS_FreeAtom(ctx, sr_child_nodes_atom);
-    
-    GCValue sr_children_getter = JS_NewCFunction(ctx, js_shadow_root_get_children, "get children", 0);
-    JSAtom sr_children_atom = JS_NewAtom(ctx, "children");
-    JS_DefinePropertyGetSet(ctx, shadow_root_proto, sr_children_atom, sr_children_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
-    JS_FreeAtom(ctx, sr_children_atom);
-    
-    GCValue sr_child_elem_count_getter = JS_NewCFunction(ctx, js_shadow_root_get_child_element_count, "get childElementCount", 0);
-    JSAtom sr_child_elem_count_atom = JS_NewAtom(ctx, "childElementCount");
-    JS_DefinePropertyGetSet(ctx, shadow_root_proto, sr_child_elem_count_atom, sr_child_elem_count_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
-    JS_FreeAtom(ctx, sr_child_elem_count_atom);
-    
+
     JS_SetClassProto(ctx, js_shadow_root_class_id, shadow_root_proto);
     GCValue shadow_root_ctor = JS_NewCFunction2(ctx, js_shadow_root_constructor, "ShadowRoot",
         0, JS_CFUNC_constructor, 0);
@@ -3669,7 +3640,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, global, "__cyber_flushCustomElementReactions",
         JS_NewCFunction(ctx, js_cyber_ce_flush_reactions, "__cyber_flushCustomElementReactions", 0));
     JS_SetPropertyStr(ctx, global, "__cyber_scheduleCustomElementReactions",
-        JS_NewCFunction(ctx, js_cyber_ce_schedule_flush, "__cyber_scheduleCustomElementReactions", 0));
+        JS_NewCFunction(ctx, js_cyber_ce_schedule_flush_wrapper, "__cyber_scheduleCustomElementReactions", 0));
 
     // JS wrappers that batch-upgrade elements and implement customElements.upgrade.
     {

@@ -1025,7 +1025,7 @@ static char* css_transform_selectors_for_host(const char *selector_text, const c
     return out ? out : css_strdup("");
 }
 
-static void css_scope_stylesheet(CssStylesheet *sheet, const char *host_tag) {
+void css_scope_stylesheet(CssStylesheet *sheet, const char *host_tag) {
     if (!sheet || !host_tag) return;
     for (int r = 0; r < sheet->rule_count; r++) {
         CssRule *rule = &sheet->rules[r];
@@ -1073,7 +1073,7 @@ next:
     }
 }
 
-static int css_specificity_from_selector_text(const char *selector);
+int css_specificity_from_selector_text(const char *selector);
 
 /* Per-element result produced by the parallel matching phase. */
 typedef struct CssElementResult {

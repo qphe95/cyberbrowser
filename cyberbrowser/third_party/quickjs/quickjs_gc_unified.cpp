@@ -2461,12 +2461,6 @@ static void gc_mark_job_func(void *arg) {
 
     GC_LOGI("mark job: finished");
     gc_mark_signal_done();
-
-#ifdef _WIN32
-    return 0;
-#else
-    return NULL;
-#endif
 }
 
 /* Legacy gc_mark() - now redirects to the synchronous tri-color mark phase */

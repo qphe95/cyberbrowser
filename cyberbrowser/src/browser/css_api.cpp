@@ -215,7 +215,9 @@ GCValue js_css_style_sheet_replace_sync(JSContextHandle ctx, GCValue this_val, i
 }
 
 // Return the full CSS text for a CSSStyleSheet object.
-GCValue js_css_style_sheet_get_css_text(JSContextHandle ctx, GCValue sheet) {
+GCValue js_css_style_sheet_get_css_text(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    GCValue sheet = this_val;
     GCValue css_text = JS_GetPropertyStr(ctx, sheet, "__cssText");
     if (JS_IsString(css_text)) {
         return css_text;

@@ -510,6 +510,14 @@ void js_cyber_ce_schedule_flush(JSContextHandle ctx) {
     JS_EnqueueJob(ctx, js_cyber_ce_flush_reactions_job, 0, NULL);
 }
 
+// JSCFunction-compatible wrapper so the schedule helper can be exposed to JS
+// as window.__cyber_scheduleCustomElementReactions.
+GCValue js_cyber_ce_schedule_flush_wrapper(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    js_cyber_ce_schedule_flush(ctx);
+    return JS_UNDEFINED;
+}
+
 // Constructor for HTMLElement - creates object with HTMLElement.prototype in chain
 // Uses js_dom_node_class_id so DOM node data can be retrieved via JS_GetOpaqueHandle
 // Per-upgrade budget for HTMLElement constructor calls.  Some custom-element

@@ -1741,7 +1741,7 @@ static void js_job_queue_clear(JSRuntimeHandle rt)
 {
     JobQueue *q = js_job_queue_ptr(rt);
     if (!q) return;
-    JobBuffer *b = atomic_load_ptr((void *volatile *)&q->head_block);
+    JobBuffer *b = (JobBuffer *)atomic_load_ptr((void *volatile *)&q->head_block);
     while (b) {
         JobBuffer *next = (JobBuffer *)atomic_load_ptr((void *volatile *)&b->next);
         qjs_free(b);
@@ -1756,7 +1756,7 @@ static uint64_t js_job_queue_count(JSRuntimeHandle rt)
     JobQueue *q = js_job_queue_ptr(rt);
     if (!q) return 0;
     uint64_t count = 0;
-    JobBuffer *b = atomic_load_ptr((void *volatile *)&q->head_block);
+    JobBuffer *b = (JobBuffer *)atomic_load_ptr((void *volatile *)&q->head_block);
     if (!b) return 0;
     acquire_buffer(b);
     while (b) {
@@ -1824,7 +1824,7 @@ static BOOL js_job_queue_enqueue(JSRuntimeHandle rt, GCHandle job_handle)
         return FALSE;
 
     for (;;) {
-        JobBuffer *tb = atomic_load_ptr((void *volatile *)&q->tail_block);
+        JobBuffer *tb = (JobBuffer *)atomic_load_ptr((void *volatile *)&q->tail_block);
         acquire_buffer(tb);
 
         uint64_t head = atomic_load_u64(&tb->head);
@@ -1887,7 +1887,7 @@ static GCHandle js_job_queue_dequeue(JSRuntimeHandle rt)
     if (!q) return GC_HANDLE_NULL;
 
     for (;;) {
-        JobBuffer *hb = atomic_load_ptr((void *volatile *)&q->head_block);
+        JobBuffer *hb = (JobBuffer *)atomic_load_ptr((void *volatile *)&q->head_block);
         if (!hb) return GC_HANDLE_NULL;
         acquire_buffer(hb);
 
@@ -7761,7 +7761,7 @@ static void gc_mark_roots(JSRuntimeHandle rt)
        stop-the-world GC phase, so concurrent enqueue/dequeue are paused. */
     JobQueue *job_queue = js_job_queue_ptr(rt);
     if (job_queue) {
-        JobBuffer *buf = atomic_load_ptr((void *volatile *)&job_queue->head_block);
+        JobBuffer *buf = (JobBuffer *)atomic_load_ptr((void *volatile *)&job_queue->head_block);
         while (buf) {
             uint64_t head = atomic_load_u64(&buf->head);
             uint64_t tail = atomic_load_u64(&buf->tail);
@@ -65380,7 +65380,7 @@ extern "C" uint32_t JSRuntime_job_queue_count(JSRuntimeHandle rt) {
     JobQueue *job_queue = js_job_queue_ptr(rt);
     if (!job_queue) return 0;
     uint64_t count = 0;
-    JobBuffer *b = atomic_load_ptr((void *volatile *)&job_queue->head_block);
+    JobBuffer *b = (JobBuffer *)atomic_load_ptr((void *volatile *)&job_queue->head_block);
     while (b) {
         uint64_t head = atomic_load_u64(&b->head);
         uint64_t tail = atomic_load_u64(&b->tail);
@@ -65398,7 +65398,7 @@ extern "C" uint32_t JSRuntime_job_queue_get_handle(JSRuntimeHandle rt, int index
     JobQueue *job_queue = js_job_queue_ptr(rt);
     if (!job_queue || index < 0) return GC_HANDLE_NULL;
 
-    JobBuffer *b = atomic_load_ptr((void *volatile *)&job_queue->head_block);
+    JobBuffer *b = (JobBuffer *)atomic_load_ptr((void *volatile *)&job_queue->head_block);
     while (b) {
         uint64_t head = atomic_load_u64(&b->head);
         uint64_t tail = atomic_load_u64(&b->tail);
