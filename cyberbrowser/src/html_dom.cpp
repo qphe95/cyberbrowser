@@ -1732,10 +1732,15 @@ struct LightChildEntry {
  * into the shadow tree by matching <slot> elements.  This makes Polymer-stamped
  * custom elements such as ytd-masthead render with their real structure. */
 static void html_serialize_shadow_host_children(JSContextHandle ctx, DOMNodeHandle host, GCValue host_val, SerializeBuffer *buf) {
-    /* Collect light-DOM children and their slot names. */
+    /* Collect light-DOM children and their slot names.  Read from the C-level
+     * DOMNode tree (first_child/next_sibling) rather than the JS-level
+     * firstChild/nextSibling properties, because the ShadyDOM polyfill patches
+     * the JS-level getters to return only the *composed* tree (distributed
+     * content), which excludes non-distributed elements like <style> that are
+     * still native children of the host. */
     std::vector<LightChildEntry> light;
     GCValue child = host.first_child();
-    while (!JS_IsNull(child) && JS_IsObject(child)) {
+    while (!JS_IsNull(child) && !JS_IsUndefined(child) && JS_IsObject(child)) {
         DOMNodeHandle child_node = get_dom_node(ctx, child);
         const char *slot_name = "";
         if (child_node.valid() && child_node.node_type() == DOM_NODE_TYPE_ELEMENT) {
@@ -1753,36 +1758,49 @@ static void html_serialize_shadow_host_children(JSContextHandle ctx, DOMNodeHand
      * comments or whitespace is treated as empty so the light-DOM skeleton is
      * still rendered. */
     GCValue shadow = JS_GetPropertyStr(ctx, host_val, "shadowRoot");
-    /* The ShadyDOM polyfill's shadowRoot getter can return null even when a
-     * shadow root exists (its internal Wb field may not be set).  Fall back to
-     * __CE_shadowRoot, which the polyfill sets directly on the host in
-     * attachShadow().  This is needed to collect <style> elements that the
-     * polyfill keeps inside the shadow root rather than in the light DOM. */
     if (JS_IsNull(shadow) || JS_IsUndefined(shadow)) {
         shadow = JS_GetPropertyStr(ctx, host_val, "__CE_shadowRoot");
     }
     bool has_shadow_children = false;
     if (!JS_IsUndefined(shadow) && !JS_IsNull(shadow) && JS_IsObject(shadow)) {
+        /* Probe using JS-level firstChild (the polyfill patches this to return
+         * the composed tree's first child).  We check both the C-level DOMNode
+         * type and the JS-level nodeType property, because the ShadyDOM
+         * polyfill manages some shadow-tree nodes via __shady properties that
+         * may not have C-level DOMNode data. */
         GCValue probe = JS_GetPropertyStr(ctx, shadow, "firstChild");
         while (!JS_IsUndefined(probe) && !JS_IsNull(probe) && JS_IsObject(probe)) {
             DOMNodeHandle probe_node = get_dom_node(ctx, probe);
-            if (!probe_node.valid()) break;
-            int nt = probe_node.node_type();
+            int nt = -1;
+            if (probe_node.valid()) {
+                nt = probe_node.node_type();
+            } else {
+                /* Fall back to JS-level nodeType. */
+                GCValue jnt = JS_GetPropertyStr(ctx, probe, "nodeType");
+                int32_t t = 0;
+                JS_ToInt32(ctx, &t, jnt);
+                nt = t;
+            }
             if (nt == DOM_NODE_TYPE_ELEMENT) {
                 has_shadow_children = true;
                 break;
             }
             if (nt == DOM_NODE_TYPE_TEXT) {
-                const char *val = probe_node.node_value();
+                /* Check for non-whitespace text. */
+                GCValue tc = JS_GetPropertyStr(ctx, probe, "textContent");
+                const char *val = JS_ToCString(ctx, tc);
                 bool nonws = false;
                 if (val) {
                     for (const char *p = val; *p; p++) {
                         if (!isspace((unsigned char)*p)) { nonws = true; break; }
                     }
+                    JS_FreeCString(ctx, val);
                 }
                 if (nonws) { has_shadow_children = true; break; }
             }
-            probe = probe_node.next_sibling();
+            /* Advance via JS-level nextSibling. */
+            GCValue ns = JS_GetPropertyStr(ctx, probe, "nextSibling");
+            probe = ns;
         }
     }
     if (!has_shadow_children) {
@@ -1796,37 +1814,58 @@ static void html_serialize_shadow_host_children(JSContextHandle ctx, DOMNodeHand
     GCValue schild = JS_GetPropertyStr(ctx, shadow, "firstChild");
     while (!JS_IsUndefined(schild) && !JS_IsNull(schild) && JS_IsObject(schild)) {
         DOMNodeHandle schild_node = get_dom_node(ctx, schild);
-        if (schild_node.valid() && schild_node.node_type() == DOM_NODE_TYPE_ELEMENT) {
-            const char *tag = schild_node.node_name();
-            if (tag && strcasecmp(tag, "slot") == 0) {
-                const char *slot_name = schild_node.get_attribute("name");
-                if (!slot_name) slot_name = "";
-                bool any = false;
-                for (size_t i = 0; i < light.size(); i++) {
-                    if (!light[i].used && strcmp(light[i].slot, slot_name) == 0) {
-                        html_serialize_js_node_internal(ctx, light[i].node, buf);
-                        light[i].used = true;
-                        any = true;
-                    }
-                }
-                if (!any) {
-                    /* No assigned nodes: emit the slot's fallback content. */
-                    GCValue fb = schild_node.first_child();
-                    while (!JS_IsNull(fb) && JS_IsObject(fb)) {
-                        html_serialize_js_node_internal(ctx, fb, buf);
-                        DOMNodeHandle fb_node = get_dom_node(ctx, fb);
-                        if (!fb_node.valid()) break;
-                        fb = fb_node.next_sibling();
-                    }
-                }
+        int snt = -1;
+        const char *stag = NULL;
+        GCValue stag_val = JS_GetPropertyStr(ctx, schild, "nodeName");
+        const char *stag_tmp = JS_ToCString(ctx, stag_val);
+        if (stag_tmp) stag = stag_tmp;
+        if (schild_node.valid()) {
+            snt = schild_node.node_type();
+        } else {
+            GCValue jnt = JS_GetPropertyStr(ctx, schild, "nodeType");
+            int32_t t = 0; JS_ToInt32(ctx, &t, jnt);
+            snt = t;
+        }
+        if (snt == DOM_NODE_TYPE_ELEMENT && stag && strcasecmp(stag, "slot") == 0) {
+            /* Slot element: distribute light-DOM children with matching slot
+             * name, or emit fallback content. */
+            const char *slot_name = "";
+            if (schild_node.valid()) {
+                const char *sn = schild_node.get_attribute("name");
+                if (sn) slot_name = sn;
             } else {
-                html_serialize_js_node_internal(ctx, schild, buf);
+                GCValue sav = JS_GetPropertyStr(ctx, schild, "getAttribute");
+                if (JS_IsFunction(ctx, sav)) {
+                    GCValue name_arg = JS_NewString(ctx, "name");
+                    GCValue args[1] = { name_arg };
+                    GCValue sv = JS_Call(ctx, sav, schild, 1, args);
+                    const char *s = JS_ToCString(ctx, sv);
+                    if (s && s[0]) slot_name = s;
+                    JS_FreeCString(ctx, s);
+                }
+            }
+            bool any = false;
+            for (size_t i = 0; i < light.size(); i++) {
+                if (!light[i].used && strcmp(light[i].slot, slot_name) == 0) {
+                    html_serialize_js_node_internal(ctx, light[i].node, buf);
+                    light[i].used = true;
+                    any = true;
+                }
+            }
+            if (!any) {
+                /* No assigned nodes: emit the slot's fallback content. */
+                GCValue fb = JS_GetPropertyStr(ctx, schild, "firstChild");
+                while (!JS_IsNull(fb) && !JS_IsUndefined(fb) && JS_IsObject(fb)) {
+                    html_serialize_js_node_internal(ctx, fb, buf);
+                    fb = JS_GetPropertyStr(ctx, fb, "nextSibling");
+                }
             }
         } else {
             html_serialize_js_node_internal(ctx, schild, buf);
         }
-        if (!schild_node.valid()) break;
-        schild = schild_node.next_sibling();
+        if (stag_tmp) JS_FreeCString(ctx, stag_tmp);
+        /* Advance via JS-level nextSibling. */
+        schild = JS_GetPropertyStr(ctx, schild, "nextSibling");
     }
 }
 
@@ -1918,12 +1957,53 @@ static void html_serialize_js_node_internal(JSContextHandle ctx, GCValue node, S
     
     DOMNodeHandle dom_node = get_dom_node(ctx, node);
     if (!dom_node.valid()) {
-        /* Unknown object child: try to serialize children recursively. */
-        GCValue first = JS_GetPropertyStr(ctx, node, "firstChild");
-        if (!JS_IsUndefined(first) && !JS_IsNull(first)) {
-            html_serialize_js_node_internal(ctx, first, buf);
+        /* No C-level DOMNode data: this node may be managed by the ShadyDOM
+         * polyfill's __shady tree.  Create DOMNode data on-the-fly so the
+         * standard serialization path works.  Use JS-level properties for
+         * nodeType/nodeName since the polyfill may set them on the prototype. */
+        GCValue jnt = JS_GetPropertyStr(ctx, node, "nodeType");
+        int32_t nt = 0;
+        JS_ToInt32(ctx, &nt, jnt);
+        GCValue jnn = JS_GetPropertyStr(ctx, node, "nodeName");
+        const char *nn = JS_ToCString(ctx, jnn);
+        dom_node = DOMNodeHandle::create(ctx, nt, nn ? nn : "#unknown");
+        if (dom_node.valid()) {
+            dom_node.attach_to_object(node);
+            /* Populate attributes from JS-level getAttributeNames/getAttribute. */
+            GCValue gan = JS_GetPropertyStr(ctx, node, "getAttributeNames");
+            if (JS_IsFunction(ctx, gan)) {
+                GCValue names_arr = JS_Call(ctx, gan, node, 0, NULL);
+                if (JS_IsArray(ctx, names_arr)) {
+                    GCValue len_val = JS_GetPropertyStr(ctx, names_arr, "length");
+                    uint32_t len = 0;
+                    JS_ToUint32(ctx, &len, len_val);
+                    for (uint32_t i = 0; i < len; i++) {
+                        GCValue name_val = JS_GetPropertyUint32(ctx, names_arr, i);
+                        const char *name = JS_ToCString(ctx, name_val);
+                        if (name && name[0]) {
+                            GCValue gav = JS_GetPropertyStr(ctx, node, "getAttribute");
+                            if (JS_IsFunction(ctx, gav)) {
+                                GCValue args[1] = { name_val };
+                                GCValue v = JS_Call(ctx, gav, node, 1, args);
+                                const char *vs = JS_ToCString(ctx, v);
+                                if (vs) dom_node.set_attribute(name, vs);
+                                JS_FreeCString(ctx, vs);
+                            }
+                        }
+                        JS_FreeCString(ctx, name);
+                    }
+                }
+            }
+            /* Also read textContent for text/comment nodes. */
+            if (nt == DOM_NODE_TYPE_TEXT || nt == DOM_NODE_TYPE_COMMENT) {
+                GCValue tc = JS_GetPropertyStr(ctx, node, "textContent");
+                const char *tcs = JS_ToCString(ctx, tc);
+                if (tcs) dom_node.set_node_value(tcs);
+                JS_FreeCString(ctx, tcs);
+            }
         }
-        return;
+        if (nn) JS_FreeCString(ctx, nn);
+        if (!dom_node.valid()) return;
     }
     
     int node_type = dom_node.node_type();
