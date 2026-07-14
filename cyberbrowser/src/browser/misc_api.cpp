@@ -431,67 +431,58 @@ GCValue js_cyber_ce_flush_reactions(JSContextHandle ctx, GCValue this_val, int a
     }
 
     // Flush queued lifecycle callbacks for the current reaction-stack frame.
+    // Process by shifting from the front so callbacks enqueued during
+    // processing (e.g. a parent connectedCallback stamping shadow content that
+    // triggers child connectedCallbacks) are not lost.
     GCValue cb_queue = cyber_ce_callback_queue(ctx);
-    for (int wave = 0; wave < 100; wave++) {
+    for (int wave = 0; wave < 10000; wave++) {
         GCValue len_val = JS_GetPropertyStr(ctx, cb_queue, "length");
         uint32_t len = 0;
         JS_ToUint32(ctx, &len, len_val);
         if (len == 0) break;
-        for (uint32_t i = 0; i < len; i++) {
-            GCValue entry = JS_GetPropertyUint32(ctx, cb_queue, i);
-            GCValue elem = JS_GetPropertyStr(ctx, entry, "elem");
-            GCValue name_val = JS_GetPropertyStr(ctx, entry, "name");
-            const char *name = JS_ToCString(ctx, name_val);
-            if (name) {
-                GCValue cb = JS_GetPropertyStr(ctx, elem, name);
-                if (JS_IsFunction(ctx, cb)) {
-                    GCValue tag_val = JS_GetPropertyStr(ctx, elem, "tagName");
-                    const char *tag = NULL;
-                    if (!JS_IsUndefined(tag_val) && !JS_IsNull(tag_val)) tag = JS_ToCString(ctx, tag_val);
-                    if (tag && strcmp(tag, "YTD-APP") == 0) {
-                        GCValue root = JS_GetPropertyStr(ctx, elem, "root");
-                        GCValue sr = JS_GetPropertyStr(ctx, elem, "shadowRoot");
-                        GCValue children = JS_GetPropertyStr(ctx, elem, "children");
-                        GCValue len_val = JS_GetPropertyStr(ctx, children, "length");
-                        int32_t len = 0; JS_ToInt32(ctx, &len, len_val);
-                        fprintf(stderr, "[CE-CALLBACK-DIAG] ytd-app root=%s shadowRoot=%s children=%d isConnected=%d\n",
-                                JS_IsNull(root) ? "null" : (JS_IsUndefined(root) ? "undef" : "obj"),
-                                JS_IsNull(sr) ? "null" : (JS_IsUndefined(sr) ? "undef" : "obj"),
-                                len,
-                                JS_ToBool(ctx, JS_GetPropertyStr(ctx, elem, "isConnected")));
-                        fflush(stderr);
-                    }
-                    if (tag) JS_FreeCString(ctx, tag);
-                    GCValue ret = JS_Call(ctx, cb, elem, 0, NULL);
-                    if (JS_IsException(ret)) {
-                        GCValue exc = JS_GetException(ctx);
-                        GCValue exc_msg = JS_GetPropertyStr(ctx, exc, "message");
-                        GCValue exc_stack = JS_GetPropertyStr(ctx, exc, "stack");
-                        GCValue exc_name = JS_GetPropertyStr(ctx, exc, "name");
-                        GCValue tag_val = JS_GetPropertyStr(ctx, elem, "tagName");
-                        const char *m = NULL, *s = NULL, *n = NULL, *tag = NULL;
-                        if (!JS_IsUndefined(exc_msg) && !JS_IsNull(exc_msg)) m = JS_ToCString(ctx, exc_msg);
-                        if (!JS_IsUndefined(exc_stack) && !JS_IsNull(exc_stack)) s = JS_ToCString(ctx, exc_stack);
-                        if (!JS_IsUndefined(exc_name) && !JS_IsNull(exc_name)) n = JS_ToCString(ctx, exc_name);
-                        if (!JS_IsUndefined(tag_val) && !JS_IsNull(tag_val)) tag = JS_ToCString(ctx, tag_val);
-                        fprintf(stderr, "[CE-CALLBACK] %s %s threw: %s (%s)\n", tag ? tag : "?", name, m ? m : "(no message)", n ? n : "?");
-                        if (m && strstr(m, "cannot read property")) {
-                            fprintf(stderr, "[CE-CALLBACK] last undefined property: '%s'\n", g_last_undefined_prop);
-                        }
-                        if (s) {
-                            fprintf(stderr, "[CE-CALLBACK] stack:\n%s\n", s);
-                        }
-                        fflush(stderr);
-                        if (m) JS_FreeCString(ctx, m);
-                        if (s) JS_FreeCString(ctx, s);
-                        if (n) JS_FreeCString(ctx, n);
-                        if (tag) JS_FreeCString(ctx, tag);
-                    }
-                }
-                JS_FreeCString(ctx, name);
-            }
+
+        // Shift the first entry off the queue.
+        GCValue entry = JS_GetPropertyUint32(ctx, cb_queue, 0);
+        for (uint32_t j = 1; j < len; j++) {
+            GCValue item = JS_GetPropertyUint32(ctx, cb_queue, j);
+            JS_SetPropertyUint32(ctx, cb_queue, j - 1, item);
         }
-        JS_SetPropertyStr(ctx, cb_queue, "length", JS_NewInt32(ctx, 0));
+        JS_SetPropertyStr(ctx, cb_queue, "length", JS_NewInt32(ctx, (int32_t)(len - 1)));
+
+        GCValue elem = JS_GetPropertyStr(ctx, entry, "elem");
+        GCValue name_val = JS_GetPropertyStr(ctx, entry, "name");
+        const char *name = JS_ToCString(ctx, name_val);
+        if (name) {
+            GCValue cb = JS_GetPropertyStr(ctx, elem, name);
+            if (JS_IsFunction(ctx, cb)) {
+                GCValue ret = JS_Call(ctx, cb, elem, 0, NULL);
+                if (JS_IsException(ret)) {
+                    GCValue exc = JS_GetException(ctx);
+                    GCValue exc_msg = JS_GetPropertyStr(ctx, exc, "message");
+                    GCValue exc_stack = JS_GetPropertyStr(ctx, exc, "stack");
+                    GCValue exc_name = JS_GetPropertyStr(ctx, exc, "name");
+                    GCValue tag_val = JS_GetPropertyStr(ctx, elem, "tagName");
+                    const char *m = NULL, *s = NULL, *n = NULL, *tag = NULL;
+                    if (!JS_IsUndefined(exc_msg) && !JS_IsNull(exc_msg)) m = JS_ToCString(ctx, exc_msg);
+                    if (!JS_IsUndefined(exc_stack) && !JS_IsNull(exc_stack)) s = JS_ToCString(ctx, exc_stack);
+                    if (!JS_IsUndefined(exc_name) && !JS_IsNull(exc_name)) n = JS_ToCString(ctx, exc_name);
+                    if (!JS_IsUndefined(tag_val) && !JS_IsNull(tag_val)) tag = JS_ToCString(ctx, tag_val);
+                    fprintf(stderr, "[CE-CALLBACK] %s %s threw: %s (%s)\n", tag ? tag : "?", name, m ? m : "(no message)", n ? n : "?");
+                    if (m && strstr(m, "cannot read property")) {
+                        fprintf(stderr, "[CE-CALLBACK] last undefined property: '%s'\n", g_last_undefined_prop);
+                    }
+                    if (s) {
+                        fprintf(stderr, "[CE-CALLBACK] stack:\n%s\n", s);
+                    }
+                    fflush(stderr);
+                    if (m) JS_FreeCString(ctx, m);
+                    if (s) JS_FreeCString(ctx, s);
+                    if (n) JS_FreeCString(ctx, n);
+                    if (tag) JS_FreeCString(ctx, tag);
+                }
+            }
+            JS_FreeCString(ctx, name);
+        }
     }
     return JS_UNDEFINED;
 }
