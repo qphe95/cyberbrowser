@@ -2568,6 +2568,7 @@ static void layout_dump_boxes(LayoutContext *ctx, const char *path)
         }
         const char *dname = "block";
         switch (b->display) {
+            case CSS_DISPLAY_BLOCK: dname = "block"; break;
             case CSS_DISPLAY_INLINE: dname = "inline"; break;
             case CSS_DISPLAY_INLINE_BLOCK: dname = "inline-block"; break;
             case CSS_DISPLAY_FLEX: dname = "flex"; break;
