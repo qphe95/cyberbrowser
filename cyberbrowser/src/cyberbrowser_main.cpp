@@ -797,6 +797,14 @@ int main(int argc, char *argv[]) {
                 printf("DOM nodes: %d\n", doc->array.count);
                 print_body_snippet(doc);
 
+                /* Apply CSS styles to the rebuilt document.  The initial
+                 * css_apply_document_styles call ran on the pre-script DOM;
+                 * the rebuilt DOM has Polymer-stamped shadow content that
+                 * needs styles collected and applied before layout. */
+                const char *css_base = (g_cyber_start_url && g_cyber_start_url[0])
+                                       ? g_cyber_start_url : "https://www.youtube.com/";
+                css_apply_document_styles(g_ctx, js_doc, doc, css_base);
+
                 render_document_to_jpg(doc, image_cache, "youtube_screenshot.jpg");
             } else {
                 printf("WARNING: failed to rebuild native document from JS DOM\n");

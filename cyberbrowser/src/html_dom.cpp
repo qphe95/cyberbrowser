@@ -1753,6 +1753,14 @@ static void html_serialize_shadow_host_children(JSContextHandle ctx, DOMNodeHand
      * comments or whitespace is treated as empty so the light-DOM skeleton is
      * still rendered. */
     GCValue shadow = JS_GetPropertyStr(ctx, host_val, "shadowRoot");
+    /* The ShadyDOM polyfill's shadowRoot getter can return null even when a
+     * shadow root exists (its internal Wb field may not be set).  Fall back to
+     * __CE_shadowRoot, which the polyfill sets directly on the host in
+     * attachShadow().  This is needed to collect <style> elements that the
+     * polyfill keeps inside the shadow root rather than in the light DOM. */
+    if (JS_IsNull(shadow) || JS_IsUndefined(shadow)) {
+        shadow = JS_GetPropertyStr(ctx, host_val, "__CE_shadowRoot");
+    }
     bool has_shadow_children = false;
     if (!JS_IsUndefined(shadow) && !JS_IsNull(shadow) && JS_IsObject(shadow)) {
         GCValue probe = JS_GetPropertyStr(ctx, shadow, "firstChild");
