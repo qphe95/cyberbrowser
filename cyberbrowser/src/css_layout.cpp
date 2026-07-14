@@ -1320,6 +1320,7 @@ static bool layout_collect_matched_declarations(LayoutContext *ctx, int idx,
                 applied[count].decl = &rule->declarations[d];
                 applied[count].specificity = spec;
                 applied[count].order = s * 1000000 + r * 1000 + d;
+                applied[count].important = rule->declarations[d].important;
                 count++;
             }
         }

@@ -118,6 +118,20 @@ static bool css_declaration_add(CssRule *rule, const char *prop, size_t prop_len
     }
     css_str_tolower(p);
 
+    /* Detect and strip trailing !important (case-insensitive) from the value.
+     * The important flag is stored on the declaration so the cascade can
+     * prioritize it above normal declarations. */
+    bool is_important = false;
+    {
+        size_t vlen = strlen(v);
+        if (vlen >= 10 && strncasecmp(v + vlen - 10, "!important", 10) == 0) {
+            is_important = true;
+            v[vlen - 10] = '\0';
+            size_t trimmed = vlen - 10;
+            while (trimmed > 0 && css_is_space(v[trimmed - 1])) v[--trimmed] = '\0';
+        }
+    }
+
     if (rule->declaration_count >= rule->declaration_capacity) {
         int new_cap = rule->declaration_capacity ? rule->declaration_capacity * 2 : 4;
         CssDeclaration *new_decls = (CssDeclaration*)realloc(rule->declarations,
@@ -131,6 +145,7 @@ static bool css_declaration_add(CssRule *rule, const char *prop, size_t prop_len
     }
     rule->declarations[rule->declaration_count].property = p;
     rule->declarations[rule->declaration_count].value = v;
+    rule->declarations[rule->declaration_count].important = is_important;
     rule->declaration_count++;
     return true;
 }
@@ -230,6 +245,15 @@ CssDeclaration* css_parse_inline_style(const char *style_attr, int *out_count) {
             char *v = css_strndup_trim(style_attr + val_start, val_end - val_start);
             if (p && v && p[0] && v[0]) {
                 css_str_tolower(p);
+                /* Strip !important from inline style values. */
+                bool is_imp = false;
+                size_t vlen = strlen(v);
+                if (vlen >= 10 && strncasecmp(v + vlen - 10, "!important", 10) == 0) {
+                    is_imp = true;
+                    v[vlen - 10] = '\0';
+                    size_t trimmed = vlen - 10;
+                    while (trimmed > 0 && css_is_space(v[trimmed - 1])) v[--trimmed] = '\0';
+                }
                 if (count >= cap) {
                     cap = cap ? cap * 2 : 4;
                     CssDeclaration *new_decls = (CssDeclaration*)realloc(decls, cap * sizeof(CssDeclaration));
@@ -238,6 +262,7 @@ CssDeclaration* css_parse_inline_style(const char *style_attr, int *out_count) {
                 }
                 decls[count].property = p;
                 decls[count].value = v;
+                decls[count].important = is_imp;
                 count++;
             } else {
                 free(p); free(v);
@@ -419,12 +444,15 @@ void css_stylesheet_free(CssStylesheet *sheet) {
 
 #define CSS_MAX_SIMPLE_PARTS 16
 #define CSS_MAX_CLASSES 16
+#define CSS_MAX_ATTRS 8
 
 typedef struct CssSimpleSelector {
     char tag[64];
     char id[128];
     char classes[CSS_MAX_CLASSES][64];
     int class_count;
+    char attrs[CSS_MAX_ATTRS][64];  /* attribute names that must be present */
+    int attr_count;
     bool has_tag;
     bool has_id;
     bool universal;
@@ -477,8 +505,22 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
             css_strncpy_lower(out->id, s + start, i - start, sizeof(out->id));
             out->has_id = out->id[0] != '\0';
         } else if (s[i] == '[') {
-            /* Skip attribute selector for matching purposes. */
+            /* Parse attribute selector: [name], [name=value], [name~=value], etc.
+             * We only track the attribute NAME for presence checking. */
             i++;
+            size_t attr_start = i;
+            while (i < n && s[i] != '=' && s[i] != '~' && s[i] != '|' &&
+                   s[i] != '^' && s[i] != '$' && s[i] != '*' && s[i] != ']') i++;
+            if (out->attr_count < CSS_MAX_ATTRS) {
+                css_strncpy_lower(out->attrs[out->attr_count], s + attr_start,
+                                  i - attr_start, sizeof(out->attrs[0]));
+                /* Trim trailing whitespace from attr name */
+                size_t al = strlen(out->attrs[out->attr_count]);
+                while (al > 0 && css_is_space(out->attrs[out->attr_count][al-1]))
+                    out->attrs[out->attr_count][--al] = '\0';
+                if (al > 0) out->attr_count++;
+            }
+            /* Skip rest of attribute selector */
             int depth = 1;
             while (i < n && depth > 0) {
                 if (s[i] == '[') depth++;
@@ -595,10 +637,14 @@ static bool css_simple_matches(const CssSimpleSelector *simple, HtmlNode *node) 
     for (int i = 0; i < simple->class_count; i++) {
         if (!html_node_class_contains(node, simple->classes[i])) return false;
     }
+    for (int i = 0; i < simple->attr_count; i++) {
+        /* [attr] — element must have the named attribute. */
+        if (!html_node_attr_value(node, simple->attrs[i])) return false;
+    }
     if (simple->has_tag) {
         if (strcasecmp(node->tag_name, simple->tag) != 0) return false;
     }
-    /* Universal with no id/class always true. */
+    /* Universal with no id/class/attr always true. */
     return true;
 }
 
@@ -669,6 +715,10 @@ bool css_selector_matches(const char *selector, HtmlDocument *doc, HtmlNode *nod
 int css_applied_decl_compare(const void *a, const void *b) {
     const CssAppliedDecl *da = (const CssAppliedDecl*)a;
     const CssAppliedDecl *db = (const CssAppliedDecl*)b;
+    /* Per CSS Cascade spec: !important declarations win over normal,
+     * regardless of specificity.  Within the same importance level,
+     * higher specificity wins; ties broken by source order. */
+    if (da->important != db->important) return da->important ? 1 : -1;
     if (da->specificity != db->specificity) return da->specificity - db->specificity;
     return da->order - db->order;
 }

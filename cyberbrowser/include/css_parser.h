@@ -23,6 +23,7 @@ extern "C" {
 typedef struct CssDeclaration {
     char *property;
     char *value;
+    bool important;
 } CssDeclaration;
 
 /* One rule: a selector string plus its declarations. */
@@ -79,6 +80,7 @@ typedef struct CssAppliedDecl {
     const CssDeclaration *decl;
     int specificity;
     int order;
+    bool important;
 } CssAppliedDecl;
 
 /* Parse an inline style attribute string and apply its declarations to the
