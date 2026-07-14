@@ -2819,13 +2819,9 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
                         html_document_head(doc) ? "yes" : "no",
                         html_document_body(doc) ? "yes" : "no");
 
-                    /* Parse and apply inline/external CSS before scripts run. */
-                    fprintf(stderr, "[js_quickjs] Applying document styles...\n");
-                    fflush(stderr);
-                    const char *css_base = (g_cyber_start_url && g_cyber_start_url[0]) ? g_cyber_start_url : "https://www.youtube.com/";
-                    css_apply_document_styles(ctx, js_doc, doc, css_base);
-                    fprintf(stderr, "[js_quickjs] Document styles applied.\n");
-                    fflush(stderr);
+                    /* CSS application is handled by the layout engine
+                     * (css_layout_run) which has its own complete stylesheet
+                     * collection and selector matching pipeline. */
                 } else {
                     platform_log(LOG_LEVEL_WARN, "js_quickjs",
                         "Failed to populate DOM from parsed HTML");

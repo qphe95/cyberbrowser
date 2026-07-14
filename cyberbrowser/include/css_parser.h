@@ -81,15 +81,6 @@ typedef struct CssAppliedDecl {
     int order;
 } CssAppliedDecl;
 
-/*
- * Walk the parsed HTML document, collect inline <style> sheets and external
- * stylesheets, fetch the external ones, then apply matching rules to every
- * element's JS style object.  base_url may be NULL; relative URLs fall back to
- * https://www.youtube.com/ .
- */
-void css_apply_document_styles(JSContextHandle ctx, GCValue js_doc,
-                               HtmlDocument *doc, const char *base_url);
-
 /* Parse an inline style attribute string and apply its declarations to the
  * element's JS style object, creating the style object if necessary. */
 void css_apply_inline_style_string(JSContextHandle ctx, GCValue element,

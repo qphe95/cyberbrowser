@@ -754,125 +754,69 @@ static void css_apply_declarations(JSContextHandle ctx, GCValue element,
 /* ============================================================================
  * Stylesheet loading
  * ============================================================================ */
+/* Recompute specificity from raw selector text (used when not precomputed). */
+int css_specificity_from_selector_text(const char *selector) {
+    CssSelectorPart parts[CSS_MAX_SIMPLE_PARTS];
+    int count = css_parse_selector_chain(selector, parts, CSS_MAX_SIMPLE_PARTS);
+    return css_specificity_from_chain(parts, count);
+}
 
-static char* css_resolve_url(const char *base_url, const char *href) {
-    if (!href || !href[0]) return NULL;
-    if (url_has_scheme(href)) {
-        return strdup(href);
-    }
-    if (strncmp(href, "//", 2) == 0) {
-        char buf[2048];
-        snprintf(buf, sizeof(buf), "https:%s", href);
-        return strdup(buf);
-    }
-    if (href[0] == '/') {
-        const char *base = base_url && base_url[0] ? base_url : "https://localhost";
-        char buf[2048];
-        snprintf(buf, sizeof(buf), "%s%s", base, href);
-        return strdup(buf);
-    }
-    /* Relative path. */
-    const char *base = base_url && base_url[0] ? base_url : "https://localhost/";
-    char buf[2048];
-    if (base[strlen(base) - 1] == '/') {
-        snprintf(buf, sizeof(buf), "%s%s", base, href);
-    } else {
-        /* Strip to last slash. */
-        const char *last_slash = strrchr(base, '/');
-        if (last_slash) {
-            size_t base_len = (size_t)(last_slash - base) + 1;
-            snprintf(buf, sizeof(buf), "%.*s%s", (int)base_len, base, href);
+bool css_rule_media_matches(const CssRule *rule, double viewport_width) {
+    if (!rule || !rule->media_query || !rule->media_query[0]) return true;
+    const char *s = rule->media_query;
+    bool result = true;
+    bool expect_and = false;
+
+    while (*s) {
+        while (*s && css_is_space(*s)) s++;
+        if (!*s) break;
+
+        if (strncasecmp(s, "only", 4) == 0) {
+            s += 4;
+            while (*s && css_is_space(*s)) s++;
+        }
+        if (strncasecmp(s, "screen", 6) == 0 ||
+            strncasecmp(s, "all", 3) == 0 ||
+            strncasecmp(s, "print", 5) == 0) {
+            while (*s && !css_is_space(*s) && *s != '(') s++;
+            while (*s && css_is_space(*s)) s++;
+        }
+
+        if (*s == '(') {
+            s++;
+            while (*s && css_is_space(*s)) s++;
+            bool is_min = false, is_max = false;
+            const char *prop = s;
+            while (*s && *s != ':' && *s != ')') s++;
+            size_t prop_len = (size_t)(s - prop);
+            if (*s == ':') {
+                s++;
+                while (*s && css_is_space(*s)) s++;
+                char *end = NULL;
+                double val = strtod(s, &end);
+                if (prop_len >= 8 && strncasecmp(prop, "min-width", 9) == 0) is_min = true;
+                else if (prop_len >= 8 && strncasecmp(prop, "max-width", 9) == 0) is_max = true;
+                bool matches = true;
+                if (is_min) matches = viewport_width >= val - 0.5;
+                else if (is_max) matches = viewport_width <= val + 0.5;
+                if (expect_and) result = result && matches;
+                else result = matches;
+                expect_and = true;
+                s = end;
+            }
+            while (*s && *s != ')') s++;
+            if (*s == ')') s++;
+        } else if (strncasecmp(s, "and", 3) == 0) {
+            s += 3;
+            expect_and = true;
+            continue;
         } else {
-            snprintf(buf, sizeof(buf), "%s/%s", base, href);
+            while (*s && !css_is_space(*s) && *s != '(') s++;
         }
+        while (*s && css_is_space(*s)) s++;
+        if (*s == ',' || strncasecmp(s, "or", 2) == 0) return true;
     }
-    return strdup(buf);
-}
-
-static CssStylesheet* css_fetch_stylesheet(const char *base_url, const char *href) {
-    char *url = css_resolve_url(base_url, href);
-    if (!url) return NULL;
-    LOG_INFO("Fetching stylesheet: %.80s", url);
-
-    HttpBuffer buffer = {0};
-    char err[256] = {0};
-    bool ok = http_get_to_memory(url, &buffer, err, sizeof(err));
-    CssStylesheet *sheet = NULL;
-    if (ok && buffer.data && buffer.size > 0) {
-        LOG_INFO("Fetched stylesheet (%zu bytes)", buffer.size);
-        sheet = css_stylesheet_parse(buffer.data, buffer.size);
-    } else {
-        LOG_WARN("Failed to fetch stylesheet %.80s: %s", url, err[0] ? err : "unknown");
-    }
-    free(url);
-    if (buffer.data) free(buffer.data);
-    return sheet;
-}
-
-/* ============================================================================
- * Document traversal and application
- * ============================================================================ */
-
-typedef struct CssSheetList {
-    CssStylesheet **sheets;
-    int count;
-    int capacity;
-} CssSheetList;
-
-static bool css_sheet_list_add(CssSheetList *list, CssStylesheet *sheet) {
-    if (!sheet) return false;
-    if (list->count >= list->capacity) {
-        int new_cap = list->capacity ? list->capacity * 2 : 4;
-        CssStylesheet **new_sheets = (CssStylesheet**)realloc(list->sheets,
-                                                               new_cap * sizeof(CssStylesheet*));
-        if (!new_sheets) {
-            css_stylesheet_free(sheet);
-            return false;
-        }
-        list->sheets = new_sheets;
-        list->capacity = new_cap;
-    }
-    list->sheets[list->count++] = sheet;
-    return true;
-}
-
-static void css_sheet_list_free(CssSheetList *list) {
-    if (!list) return;
-    for (int i = 0; i < list->count; i++) {
-        css_stylesheet_free(list->sheets[i]);
-    }
-    free(list->sheets);
-    list->sheets = NULL;
-    list->count = list->capacity = 0;
-}
-
-/* ============================================================================
- * Shadow-root style scoping helpers
- *
- * When a <style> element lives inside a shadow root we serialize it as a child
- * of its host.  To keep those styles from leaking to the whole document we
- * rewrite the selectors so they only match descendants of that host, and we
- * turn :host / ::slotted into host/slot-aware selectors.
- * ============================================================================ */
-
-static bool css_tag_is_custom_element(const char *tag) {
-    if (!tag) return false;
-    for (const char *p = tag; *p; p++) {
-        if (*p == '-') return true;
-    }
-    return false;
-}
-
-static const char* css_find_host_tag(HtmlDocument *doc, int node_idx) {
-    int p = po_array_parent(&doc->array, node_idx);
-    while (p >= 0) {
-        HtmlNode *node = (HtmlNode*)po_array_payload(&doc->array, p);
-        if (node && node->type == HTML_NODE_ELEMENT && css_tag_is_custom_element(node->tag_name)) {
-            return node->tag_name;
-        }
-        p = po_array_parent(&doc->array, p);
-    }
-    return NULL;
+    return result;
 }
 
 static char* css_strdup(const char *s) {
@@ -1037,340 +981,5 @@ void css_scope_stylesheet(CssStylesheet *sheet, const char *host_tag) {
     }
 }
 
-static void css_collect_stylesheets_recursive(HtmlDocument *doc, int node_idx,
-                                              CssSheetList *list,
-                                              const char *base_url) {
-    if (node_idx < 0) return;
-    HtmlNode *node = (HtmlNode*)po_array_payload(&doc->array, node_idx);
-    if (!node || node->type != HTML_NODE_ELEMENT) goto next;
 
-    if (strcasecmp(node->tag_name, "style") == 0 && node->text_content && node->text_content[0]) {
-        CssStylesheet *sheet = css_stylesheet_parse(node->text_content, strlen(node->text_content));
-        if (sheet) {
-            const char *host_tag = css_find_host_tag(doc, node_idx);
-            if (host_tag) {
-                LOG_INFO("Parsed inline <style> stylesheet with %d rules (host=%s)", sheet->rule_count, host_tag);
-                css_scope_stylesheet(sheet, host_tag);
-            } else {
-                LOG_INFO("Parsed inline <style> stylesheet with %d rules", sheet->rule_count);
-            }
-            css_sheet_list_add(list, sheet);
-        }
-    } else if (strcasecmp(node->tag_name, "link") == 0) {
-        const char *rel = html_node_attr_value(node, "rel");
-        const char *href = html_node_attr_value(node, "href");
-        if (rel && href && strcasecmp(rel, "stylesheet") == 0) {
-            CssStylesheet *sheet = css_fetch_stylesheet(base_url, href);
-            if (sheet) css_sheet_list_add(list, sheet);
-        }
-    }
 
-next:
-    int child = po_array_first_child(&doc->array, node_idx);
-    while (child >= 0) {
-        css_collect_stylesheets_recursive(doc, child, list, base_url);
-        child = po_array_next_sibling(&doc->array, child);
-    }
-}
-
-int css_specificity_from_selector_text(const char *selector);
-
-/* Per-element result produced by the parallel matching phase. */
-typedef struct CssElementResult {
-    int node_idx;
-    CssAppliedDecl *applied;
-    int applied_count;
-} CssElementResult;
-
-/* Match selectors for a single element and store the resulting declarations.
- * This runs on worker threads and only reads shared DOM/CSS data; it does not
- * touch the JS heap. */
-static void css_match_one_node(HtmlDocument *doc, int node_idx, CssSheetList *list,
-                               CssElementResult *result) {
-    result->node_idx = node_idx;
-    result->applied = NULL;
-    result->applied_count = 0;
-
-    HtmlNode *node = (HtmlNode*)po_array_payload(&doc->array, node_idx);
-    if (!node || node->type != HTML_NODE_ELEMENT || !node->has_js_object) return;
-
-    int applied_cap = 64;
-    int applied_count = 0;
-    CssAppliedDecl *applied = (CssAppliedDecl*)malloc(applied_cap * sizeof(CssAppliedDecl));
-    if (!applied) return;
-
-    for (int s = 0; s < list->count; s++) {
-        CssStylesheet *sheet = list->sheets[s];
-        for (int r = 0; r < sheet->rule_count; r++) {
-            CssRule *rule = &sheet->rules[r];
-            if (!rule->selector_text || !rule->selector_text[0]) continue;
-            if (!css_selector_matches(rule->selector_text, doc, node)) continue;
-            if (!css_rule_media_matches(rule, 1024.0)) continue; /* viewport unknown here; use a default */
-            int spec = rule->specificity;
-            if (spec == 0) spec = css_specificity_from_selector_text(rule->selector_text);
-            for (int d = 0; d < rule->declaration_count; d++) {
-                if (applied_count >= applied_cap) {
-                    int new_cap = applied_cap * 2;
-                    CssAppliedDecl *new_app = (CssAppliedDecl*)realloc(applied,
-                                                                        new_cap * sizeof(CssAppliedDecl));
-                    if (!new_app) break;
-                    applied = new_app;
-                    applied_cap = new_cap;
-                }
-                applied[applied_count].decl = &rule->declarations[d];
-                applied[applied_count].specificity = spec;
-                applied[applied_count].order = s * 1000000 + r * 1000 + d;
-                applied_count++;
-            }
-        }
-    }
-
-    if (applied_count == 0) {
-        free(applied);
-    } else {
-        result->applied = applied;
-        result->applied_count = applied_count;
-    }
-}
-
-typedef struct CssMatchJob {
-    JSContextHandle ctx;
-    HtmlDocument *doc;
-    CssSheetList *list;
-    CssElementResult *results;
-    int start;
-    int end;
-} CssMatchJob;
-
-/* Worker implementation: match selectors, sort declarations by specificity,
- * and apply them to both the JS element.style object and the lock-free
- * computed-style table.  Each element is owned by exactly one worker, so JS
- * object mutation is safe even though the context is shared. */
-static void css_match_node_styles_job_impl(CssMatchJob *job)
-{
-    for (int i = job->start; i < job->end; i++) {
-        CssElementResult *res = &job->results[i];
-        css_match_one_node(job->doc, res->node_idx, job->list, res);
-
-        /* Sort the matched declarations so they can be applied in cascade order. */
-        if (res->applied_count > 0) {
-            qsort(res->applied, (size_t)res->applied_count,
-                  sizeof(CssAppliedDecl), css_applied_decl_compare);
-        }
-
-        HtmlNode *node = (HtmlNode*)po_array_payload(&job->doc->array, res->node_idx);
-        if (!node || node->type != HTML_NODE_ELEMENT || !node->has_js_object) {
-            free(res->applied);
-            res->applied = NULL;
-            res->applied_count = 0;
-            continue;
-        }
-
-        GCValue element = node->js_object;
-        if (JS_IsUndefined(element) || JS_IsNull(element)) {
-            free(res->applied);
-            res->applied = NULL;
-            res->applied_count = 0;
-            continue;
-        }
-
-        DOMNodeHandle dom_node = DOMNodeHandle::from_object(element);
-        if (!dom_node.valid()) {
-            free(res->applied);
-            res->applied = NULL;
-            res->applied_count = 0;
-            continue;
-        }
-
-        /* Apply stylesheet declarations and inline styles to the JS element.style
-         * object.  Each element is owned by exactly one worker, so this is safe. */
-        css_apply_declarations(job->ctx, element, res->applied, res->applied_count);
-        css_apply_inline_style(job->ctx, element, node);
-
-        /* Mirror the same values in getComputedStyle's lock-free table. */
-        if (res->applied_count > 0) {
-            css_computed_apply_declarations(job->ctx, dom_node,
-                                            res->applied, res->applied_count);
-        }
-        const char *style_attr = html_node_attr_value(node, "style");
-        if (style_attr && style_attr[0]) {
-            css_computed_apply_inline_style(job->ctx, dom_node, style_attr);
-        }
-
-        free(res->applied);
-        res->applied = NULL;
-        res->applied_count = 0;
-    }
-}
-
-/* Collect every element node that has a backing JS object into a results array. */
-static CssElementResult* css_collect_element_results(HtmlDocument *doc, int *out_count) {
-    int cap = 64;
-    int count = 0;
-    CssElementResult *results = (CssElementResult*)malloc(cap * sizeof(CssElementResult));
-    if (!results) {
-        *out_count = 0;
-        return NULL;
-    }
-
-    size_t n = po_array_count(&doc->array);
-    for (size_t i = 0; i < n; i++) {
-        HtmlNode *node = (HtmlNode*)po_array_payload(&doc->array, (int)i);
-        if (!node || node->type != HTML_NODE_ELEMENT || !node->has_js_object) continue;
-
-        if (count >= cap) {
-            int new_cap = cap * 2;
-            CssElementResult *new_results = (CssElementResult*)realloc(results,
-                                                                        new_cap * sizeof(CssElementResult));
-            if (!new_results) break;
-            results = new_results;
-            cap = new_cap;
-        }
-        results[count].node_idx = (int)i;
-        results[count].applied = NULL;
-        results[count].applied_count = 0;
-        count++;
-    }
-
-    *out_count = count;
-    return results;
-}
-
-/* Use the GC thread pool to match selectors for every element, sort
- * declarations, and apply them to both the JS element.style object and the
- * lock-free computed-style table.  Each worker owns a disjoint chunk of
- * elements, so all style application is parallel. */
-static void css_apply_node_styles_parallel(JSContextHandle ctx, HtmlDocument *doc,
-                                           CssSheetList *list) {
-    int element_count = 0;
-    CssElementResult *results = css_collect_element_results(doc, &element_count);
-    if (!results || element_count == 0) {
-        free(results);
-        return;
-    }
-
-    /* Pre-allocate computed-style objects on the main thread so the serial
-     * pass below can write lock-free without racing on lazy allocation. */
-    for (int i = 0; i < element_count; i++) {
-        HtmlNode *node = (HtmlNode*)po_array_payload(&doc->array, results[i].node_idx);
-        if (!node || !node->has_js_object) continue;
-        GCValue element = node->js_object;
-        if (JS_IsUndefined(element) || JS_IsNull(element)) continue;
-        DOMNodeHandle dom_node = DOMNodeHandle::from_object(element);
-        if (dom_node.valid()) {
-            css_ensure_computed_style(dom_node);
-        }
-    }
-
-    /* Run style matching and application serially on the main thread.
-     * The previous worker-thread implementation shared the JS context across
-     * threads, which is not safe for QuickJS and caused intermittent segfaults. */
-    CssMatchJob job;
-    job.ctx = ctx;
-    job.doc = doc;
-    job.list = list;
-    job.results = results;
-    job.start = 0;
-    job.end = element_count;
-    css_match_node_styles_job_impl(&job);
-
-    for (int i = 0; i < element_count; i++) {
-        free(results[i].applied);
-    }
-    free(results);
-}
-
-bool css_rule_media_matches(const CssRule *rule, double viewport_width) {
-    if (!rule || !rule->media_query || !rule->media_query[0]) return true;
-    const char *s = rule->media_query;
-    bool result = true;
-    bool expect_and = false;  /* we only support 'and'-joined media features */
-
-    while (*s) {
-        while (*s && css_is_space(*s)) s++;
-        if (!*s) break;
-
-        if (strncasecmp(s, "only", 4) == 0) {
-            s += 4;
-            while (*s && css_is_space(*s)) s++;
-        }
-        if (strncasecmp(s, "screen", 6) == 0 ||
-            strncasecmp(s, "all", 3) == 0 ||
-            strncasecmp(s, "print", 5) == 0) {
-            while (*s && !css_is_space(*s) && *s != '(') s++;
-            while (*s && css_is_space(*s)) s++;
-        }
-
-        if (*s == '(') {
-            s++;
-            while (*s && css_is_space(*s)) s++;
-            bool is_min = false, is_max = false;
-            const char *prop = s;
-            while (*s && *s != ':' && *s != ')') s++;
-            size_t prop_len = (size_t)(s - prop);
-            if (*s == ':') {
-                s++;
-                while (*s && css_is_space(*s)) s++;
-                char *end = NULL;
-                double val = strtod(s, &end);
-                if (prop_len >= 8 && strncasecmp(prop, "min-width", 9) == 0) is_min = true;
-                else if (prop_len >= 8 && strncasecmp(prop, "max-width", 9) == 0) is_max = true;
-                bool matches = true;
-                if (is_min) matches = viewport_width >= val - 0.5;
-                else if (is_max) matches = viewport_width <= val + 0.5;
-                if (expect_and) result = result && matches;
-                else result = matches;
-                expect_and = true;
-                s = end;
-            }
-            while (*s && *s != ')') s++;
-            if (*s == ')') s++;
-        } else if (strncasecmp(s, "and", 3) == 0) {
-            s += 3;
-            expect_and = true;
-            continue;
-        } else {
-            /* Unknown token; skip until next space/paren. */
-            while (*s && !css_is_space(*s) && *s != '(') s++;
-        }
-        while (*s && css_is_space(*s)) s++;
-        if (*s == ',' || strncasecmp(s, "or", 2) == 0) return true; /* be permissive for comma/or */
-    }
-    return result;
-}
-
-/* Recompute specificity from raw selector text (used when not precomputed). */
-int css_specificity_from_selector_text(const char *selector) {
-    CssSelectorPart parts[CSS_MAX_SIMPLE_PARTS];
-    int count = css_parse_selector_chain(selector, parts, CSS_MAX_SIMPLE_PARTS);
-    return css_specificity_from_chain(parts, count);
-}
-
-void css_apply_document_styles(JSContextHandle ctx, GCValue js_doc,
-                               HtmlDocument *doc, const char *base_url) {
-    (void)js_doc;
-    if (!ctx || !doc) return;
-
-    CssSheetList list = {0};
-    int root_idx = doc->root_idx;
-    if (root_idx < 0) {
-        /* Try any root. */
-        size_t n = po_array_count(&doc->array);
-        for (size_t i = 0; i < n; i++) {
-            HtmlNode *node = (HtmlNode*)po_array_payload(&doc->array, (int)i);
-            if (node && node->type == HTML_NODE_ELEMENT && po_array_parent(&doc->array, (int)i) < 0) {
-                root_idx = (int)i;
-                break;
-            }
-        }
-    }
-    if (root_idx < 0) return;
-
-    LOG_INFO("Collecting stylesheets from DOM...");
-    css_collect_stylesheets_recursive(doc, root_idx, &list, base_url);
-    LOG_INFO("Collected %d stylesheet(s), applying to DOM", list.count);
-
-    css_apply_node_styles_parallel(ctx, doc, &list);
-
-    css_sheet_list_free(&list);
-}

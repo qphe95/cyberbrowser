@@ -787,22 +787,6 @@ int main(int argc, char *argv[]) {
 
             GCValue js_doc = get_global_document(g_ctx);
 
-            /* Extract CSS from constructable stylesheets (CSSStyleSheet +
-             * replaceSync) and inject as a <style> element BEFORE rebuilding
-             * the native document, so the layout pipeline picks it up. */
-            {
-                const char *inject =
-                    "try{"
-                    "  var cssText='';"
-                    "  var collectSheet=function(s){if(s&&s.__cssText)cssText+=s.__cssText+'\\n';};"
-                    "  var collectFrom=function(obj){if(obj&&obj.adoptedStyleSheets){try{obj.adoptedStyleSheets.forEach(collectSheet);}catch(e){}}};"
-                    "  collectFrom(document);"
-                    "  try{var all=document.querySelectorAll('*');for(var i=0;i<all.length;i++){var sr=all[i].shadowRoot||all[i].__CE_shadowRoot;if(sr)collectFrom(sr);}}catch(e){}"
-                    "  if(cssText.length>0){var s=document.createElement('style');s.setAttribute('data-cyber-adopted','1');s.textContent=cssText;var h=document.head||document.documentElement;if(h)h.appendChild(s);}"
-                    "}catch(e){}";
-                JS_Eval(g_ctx, inject, strlen(inject), "<inject_adopted>", JS_EVAL_TYPE_GLOBAL);
-            }
-
             HtmlDocument *new_doc = html_document_from_js_dom(g_ctx, js_doc);
             if (new_doc) {
                 if (doc) html_document_free(doc);
@@ -814,10 +798,9 @@ int main(int argc, char *argv[]) {
                 printf("DOM nodes: %d\n", doc->array.count);
                 print_body_snippet(doc);
 
-                /* Apply CSS styles to the rebuilt document. */
-                const char *css_base = (g_cyber_start_url && g_cyber_start_url[0])
-                                       ? g_cyber_start_url : "https://www.youtube.com/";
-                css_apply_document_styles(g_ctx, js_doc, doc, css_base);
+                /* CSS is applied by the layout engine (css_layout_run) which
+                 * has its own complete stylesheet collection + selector matching
+                 * pipeline.  No separate CSS application step is needed here. */
 
                 render_document_to_jpg(doc, image_cache, "youtube_screenshot.jpg");
             } else {
