@@ -1060,19 +1060,13 @@ GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc
     GCValue child = argv[0];
 
     // DocumentFragment: append its children, not the fragment itself.
-    // Exception: a shadow root (DocumentFragment with a `host` property) must
-    // be appended as-is — it becomes the host's shadow root, not unwrapped.
     if (is_document_fragment_node(ctx, child)) {
-        GCValue child_host = JS_GetPropertyStr(ctx, child, "host");
-        bool is_shadow_root = JS_IsObject(child_host);
-        if (!is_shadow_root) {
-            std::vector<GCValue> children = collect_fragment_children(ctx, child);
-            for (GCValue c : children) {
-                GCValue args[1] = { c };
-                js_node_appendChild_real(ctx, this_val, 1, args);
-            }
-            return child;
+        std::vector<GCValue> children = collect_fragment_children(ctx, child);
+        for (GCValue c : children) {
+            GCValue args[1] = { c };
+            js_node_appendChild_real(ctx, this_val, 1, args);
         }
+        return child;
     }
     // Get or create DOM data for parent
     DOMNodeHandle parent = get_or_create_dom_node(ctx, this_val, DOM_NODE_TYPE_ELEMENT, "");
@@ -1089,29 +1083,29 @@ GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc
     // Remove child from its current parent if any
     GCValue old_parent_val = child_node.parent_node();
     if (!JS_IsNull(old_parent_val) && !JS_StrictEq(ctx, old_parent_val, this_val)) {
-        // Detach from old parent without throwing if the linkage is stale
-        // (e.g. shadow root fragments that were reparented by the polyfill).
+        // Call removeChild on the old parent.  Use the native implementation
+        // directly; if the child's linkage is stale (parent mismatch), just
+        // clear the old parent reference rather than throwing.
         DOMNodeHandle old_parent_node = get_dom_node(ctx, old_parent_val);
         if (old_parent_node.valid()) {
+            GCValue fc = old_parent_node.first_child();
+            bool found = false;
+            GCValue scan = fc;
+            while (!JS_IsNull(scan) && JS_IsObject(scan)) {
+                if (JS_StrictEq(ctx, scan, child)) { found = true; break; }
+                DOMNodeHandle sn = get_dom_node(ctx, scan);
+                if (!sn.valid()) break;
+                scan = sn.next_sibling();
+            }
+            if (found) {
+                GCValue remove_args[1] = { child };
+                js_node_removeChild_real(ctx, old_parent_val, 1, remove_args);
+            } else {
+                // Stale parent reference — just clear it.
+                child_node.set_parent_node(JS_NULL);
+            }
+        } else {
             child_node.set_parent_node(JS_NULL);
-            GCValue prev_sib = child_node.previous_sibling();
-            GCValue next_sib = child_node.next_sibling();
-            if (!JS_IsNull(prev_sib)) {
-                DOMNodeHandle pn = get_dom_node(ctx, prev_sib);
-                if (pn.valid()) pn.set_next_sibling(next_sib);
-            }
-            if (!JS_IsNull(next_sib)) {
-                DOMNodeHandle nn = get_dom_node(ctx, next_sib);
-                if (nn.valid()) nn.set_previous_sibling(prev_sib);
-            }
-            if (!JS_IsNull(old_parent_node.first_child()) &&
-                JS_StrictEq(ctx, old_parent_node.first_child(), child)) {
-                old_parent_node.set_first_child(next_sib);
-            }
-            if (!JS_IsNull(old_parent_node.last_child()) &&
-                JS_StrictEq(ctx, old_parent_node.last_child(), child)) {
-                old_parent_node.set_last_child(prev_sib);
-            }
         }
     }
     
@@ -1405,19 +1399,13 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
     GCValue ref_child = argv[1];  // Can be null (append at end)
 
     // DocumentFragment: insert its children before ref_child, not the fragment itself.
-    // Exception: a shadow root (DocumentFragment with a `host` property) must be
-    // inserted as-is.
     if (is_document_fragment_node(ctx, new_child)) {
-        GCValue child_host = JS_GetPropertyStr(ctx, new_child, "host");
-        bool is_shadow_root = JS_IsObject(child_host);
-        if (!is_shadow_root) {
-            std::vector<GCValue> children = collect_fragment_children(ctx, new_child);
-            for (GCValue c : children) {
-                GCValue args[2] = { c, ref_child };
-                js_node_insertBefore_real(ctx, this_val, 2, args);
-            }
-            return new_child;
+        std::vector<GCValue> children = collect_fragment_children(ctx, new_child);
+        for (GCValue c : children) {
+            GCValue args[2] = { c, ref_child };
+            js_node_insertBefore_real(ctx, this_val, 2, args);
         }
+        return new_child;
     }
     
     // Get or create DOM data
