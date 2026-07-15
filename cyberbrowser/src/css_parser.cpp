@@ -433,6 +433,7 @@ void css_stylesheet_free(CssStylesheet *sheet) {
         free(rule->selector_text);
         free(rule->media_query);
         css_declarations_free(rule->declarations, rule->declaration_count);
+        css_rule_compiled_free(rule);
     }
     free(sheet->rules);
     free(sheet);
@@ -470,6 +471,20 @@ typedef struct CssSelectorPart {
 #define CSS_COMB_DESCENDANT 1
 #define CSS_COMB_CHILD      2
 
+/* A fully-parsed selector chain (the text between commas). */
+typedef struct CssSelectorChain {
+    CssSelectorPart parts[CSS_MAX_SIMPLE_PARTS];
+    int part_count;
+} CssSelectorChain;
+
+/* A compiled selector: an array of chains (one per comma group). This is
+ * cached on a CssRule so matching does not re-parse the selector text for
+ * every node it is tested against. */
+struct CssCompiledSelector {
+    CssSelectorChain *chains;
+    int chain_count;
+};
+
 static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector *out) {
     memset(out, 0, sizeof(*out));
     size_t i = 0;
@@ -480,10 +495,22 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
         out->universal = true;
         i++;
     } else if (s[i] == ':') {
-        /* Pseudo-class: handle :root specially; skip others. */
+        /* Leading pseudo-class/element: handle :root specially; skip others
+         * (:hover, :not(...), ::before, etc.). */
         size_t start = i;
+        i++;  /* consume the leading ':' (or first of '::') */
+        if (i < n && s[i] == ':') i++;
         while (i < n && s[i] != '.' && s[i] != '#' && s[i] != '[' &&
                s[i] != ':' && !css_is_space(s[i])) i++;
+        if (i < n && s[i] == '(') {
+            int depth = 1;
+            i++;
+            while (i < n && depth > 0) {
+                if (s[i] == '(') depth++;
+                else if (s[i] == ')') depth--;
+                i++;
+            }
+        }
         if (i - start >= 5 && strncasecmp(s + start, ":root", 5) == 0) {
             out->is_root = true;
         }
@@ -516,10 +543,24 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
             css_strncpy_lower(out->id, s + start, i - start, sizeof(out->id));
             out->has_id = out->id[0] != '\0';
         } else if (s[i] == ':') {
-            /* Pseudo-class: handle :root, skip others (:hover, :focus, etc.). */
+            /* Pseudo-class/element: handle :root specially; skip others
+             * (:hover, :focus, ::before, :not(...), etc.). */
             size_t start = i;
+            i++;  /* consume the leading ':' (or first of '::') */
+            /* Consume a second ':' for pseudo-elements (::before). */
+            if (i < n && s[i] == ':') i++;
+            /* Consume the pseudo name and any balanced (...) argument list. */
             while (i < n && s[i] != '.' && s[i] != '#' && s[i] != '[' &&
                    s[i] != ':' && !css_is_space(s[i])) i++;
+            if (i < n && s[i] == '(') {
+                int depth = 1;
+                i++;
+                while (i < n && depth > 0) {
+                    if (s[i] == '(') depth++;
+                    else if (s[i] == ')') depth--;
+                    i++;
+                }
+            }
             if (i - start >= 5 && strncasecmp(s + start, ":root", 5) == 0) {
                 out->is_root = true;
             }
@@ -675,6 +716,10 @@ static bool css_chain_matches(const CssSelectorPart *parts, int count,
                               HtmlDocument *doc, HtmlNode *node) {
     if (count <= 0) return false;
     HtmlNode *current = node;
+    /* Guard against cycles in the DOM parent chain. The tree should be
+     * acyclic; this cap makes matching robust if a malformed/adopted tree
+     * introduces a parent loop. */
+    const int MAX_PARENT_WALK = 4096;
     for (int i = count - 1; i >= 0; i--) {
         if (!current) return false;
         if (!css_simple_matches(&parts[i].simple, current)) return false;
@@ -685,8 +730,10 @@ static bool css_chain_matches(const CssSelectorPart *parts, int count,
             current = html_node_parent_node(doc, current);
         } else { /* descendant */
             current = html_node_parent_node(doc, current);
+            int steps = 0;
             while (current && !css_simple_matches(&parts[i - 1].simple, current)) {
                 current = html_node_parent_node(doc, current);
+                if (++steps > MAX_PARENT_WALK) return false;
             }
             if (!current) return false;
         }
@@ -705,14 +752,16 @@ bool css_selector_matches(const char *selector, HtmlDocument *doc, HtmlNode *nod
     size_t i = 0;
     while (i < len) {
         size_t start = i;
-        bool in_paren = false;
+        int paren_depth = 0;
         bool in_quote = false;
         char quote_char = 0;
         while (i < len) {
             char c = selector[i];
             if (!in_quote) {
                 if (c == '"' || c == '\'') { in_quote = true; quote_char = c; }
-                else if (c == ',' && !in_paren) break;
+                else if (c == '(') paren_depth++;
+                else if (c == ')') { if (paren_depth > 0) paren_depth--; }
+                else if (c == ',' && paren_depth == 0) break;
             } else {
                 if (c == quote_char) in_quote = false;
             }
@@ -727,6 +776,92 @@ bool css_selector_matches(const char *selector, HtmlDocument *doc, HtmlNode *nod
             free(part);
         }
         if (i < len && selector[i] == ',') i++;
+    }
+    return false;
+}
+
+/* Compile a selector string into a cached CssCompiledSelector. Splits on
+ * top-level commas (respecting quotes/parens) and parses each group into a
+ * chain. Returns NULL if no usable chain was produced. */
+static CssCompiledSelector* css_compile_selector(const char *selector) {
+    if (!selector || !selector[0]) return NULL;
+    CssCompiledSelector *cs = (CssCompiledSelector*)calloc(1, sizeof(*cs));
+    if (!cs) return NULL;
+
+    int cap = 4;
+    cs->chains = (CssSelectorChain*)malloc((size_t)cap * sizeof(CssSelectorChain));
+    if (!cs->chains) { free(cs); return NULL; }
+
+    size_t len = strlen(selector);
+    size_t i = 0;
+    while (i < len) {
+        size_t start = i;
+        int paren_depth = 0;
+        bool in_quote = false;
+        char quote_char = 0;
+        while (i < len) {
+            char c = selector[i];
+            if (!in_quote) {
+                if (c == '"' || c == '\'') { in_quote = true; quote_char = c; }
+                else if (c == '(') paren_depth++;
+                else if (c == ')') { if (paren_depth > 0) paren_depth--; }
+                else if (c == ',' && paren_depth == 0) break;
+            } else {
+                if (c == quote_char) in_quote = false;
+            }
+            i++;
+        }
+        char *part = css_strndup_trim(selector + start, i - start);
+        if (part && part[0]) {
+            if (cs->chain_count >= cap) {
+                int new_cap = cap * 2;
+                CssSelectorChain *new_chains = (CssSelectorChain*)realloc(
+                    cs->chains, (size_t)new_cap * sizeof(CssSelectorChain));
+                if (!new_chains) { free(part); break; }
+                cs->chains = new_chains;
+                cap = new_cap;
+            }
+            CssSelectorChain *chain = &cs->chains[cs->chain_count];
+            chain->part_count = css_parse_selector_chain(part, chain->parts,
+                                                        CSS_MAX_SIMPLE_PARTS);
+            if (chain->part_count > 0) cs->chain_count++;
+        }
+        free(part);
+        if (i < len && selector[i] == ',') i++;
+    }
+
+    if (cs->chain_count == 0) {
+        free(cs->chains);
+        free(cs);
+        return NULL;
+    }
+    return cs;
+}
+
+void css_rule_compiled_free(CssRule *rule) {
+    if (!rule || !rule->compiled) return;
+    free(rule->compiled->chains);
+    free(rule->compiled);
+    rule->compiled = NULL;
+}
+
+bool css_rule_matches(const CssRule *rule, HtmlDocument *doc, HtmlNode *node) {
+    if (!rule || !rule->selector_text || !node) return false;
+
+    /* Lazily compile and cache the selector. The rule is logically const from
+     * the caller's perspective; the cache is an internal mutable detail. */
+    CssCompiledSelector *cs = rule->compiled;
+    if (!cs) {
+        cs = css_compile_selector(rule->selector_text);
+        ((CssRule*)rule)->compiled = cs;  /* may be NULL if uncompileable */
+    }
+    if (!cs) return false;
+
+    for (int c = 0; c < cs->chain_count; c++) {
+        const CssSelectorChain *chain = &cs->chains[c];
+        if (css_chain_matches(chain->parts, chain->part_count, doc, node)) {
+            return true;
+        }
     }
     return false;
 }
@@ -1051,6 +1186,8 @@ void css_scope_stylesheet(CssStylesheet *sheet, const char *host_tag) {
         free(rule->selector_text);
         rule->selector_text = new_sel;
         rule->specificity = 0;
+        /* The selector text changed, so any cached parse is now stale. */
+        css_rule_compiled_free(rule);
     }
 }
 

@@ -26,6 +26,9 @@ typedef struct CssDeclaration {
     bool important;
 } CssDeclaration;
 
+/* Forward declaration of the lazily-compiled selector representation. */
+typedef struct CssCompiledSelector CssCompiledSelector;
+
 /* One rule: a selector string plus its declarations. */
 typedef struct CssRule {
     char *selector_text;
@@ -34,6 +37,10 @@ typedef struct CssRule {
     CssDeclaration *declarations;
     int declaration_count;
     int declaration_capacity;
+    /* Lazily-parsed selector, cached so the matcher does not re-parse the
+     * selector text for every DOM node it is tested against. NULL until first
+     * used (or if compilation yielded no usable selector). */
+    CssCompiledSelector *compiled;
 } CssRule;
 
 /* A parsed stylesheet. */
@@ -61,6 +68,14 @@ char* css_to_camel_case(const char *prop);
 
 /* Selector matching: returns true if the selector matches the given DOM node. */
 bool css_selector_matches(const char *selector, HtmlDocument *doc, HtmlNode *node);
+
+/* Match a rule's selector against a node. The selector is parsed once and
+ * cached on the rule (rule->compiled), so repeated calls over many nodes do
+ * not re-parse the selector text each time. */
+bool css_rule_matches(const CssRule *rule, HtmlDocument *doc, HtmlNode *node);
+
+/* Free a rule's cached compiled selector (set rule->compiled to NULL). */
+void css_rule_compiled_free(CssRule *rule);
 
 /* qsort comparator for CssAppliedDecl (specificity ascending, then order). */
 int css_applied_decl_compare(const void *a, const void *b);

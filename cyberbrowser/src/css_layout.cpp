@@ -1189,7 +1189,6 @@ static CssStylesheet* layout_fetch_stylesheet(const char *base_url, const char *
     if (buffer.data) free(buffer.data);
     return sheet;
 }
-}
 
 /* Walk up the native parent chain to find the nearest custom-element host.
  * This lets us scope shadow-root <style> sheets correctly. */
@@ -1373,8 +1372,10 @@ static bool layout_collect_matched_declarations(LayoutContext *ctx, int idx,
         for (int r = 0; r < sheet->rule_count; r++) {
             CssRule *rule = &sheet->rules[r];
             if (!rule->selector_text || !rule->selector_text[0]) continue;
-            if (!css_selector_matches(rule->selector_text, ctx->doc, node)) continue;
+            /* Check the (cheap) media query before the selector match so that
+             * responsive rules outside the current viewport are skipped early. */
             if (!css_rule_media_matches(rule, ctx->viewport_width)) continue;
+            if (!css_rule_matches(rule, ctx->doc, node)) continue;
             int spec = rule->specificity;
             if (spec == 0) spec = css_specificity_from_selector_text(rule->selector_text);
 
