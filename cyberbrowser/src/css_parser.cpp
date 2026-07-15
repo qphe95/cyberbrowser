@@ -455,6 +455,7 @@ typedef struct CssSimpleSelector {
     int attr_count;
     bool has_tag;
     bool has_id;
+    bool is_root;    /* :root pseudo-class */
     bool universal;
 } CssSimpleSelector;
 
@@ -478,10 +479,20 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
     if (s[i] == '*') {
         out->universal = true;
         i++;
+    } else if (s[i] == ':') {
+        /* Pseudo-class: handle :root specially; skip others. */
+        size_t start = i;
+        while (i < n && s[i] != '.' && s[i] != '#' && s[i] != '[' &&
+               s[i] != ':' && !css_is_space(s[i])) i++;
+        if (i - start >= 5 && strncasecmp(s + start, ":root", 5) == 0) {
+            out->is_root = true;
+        }
+        /* Other pseudo-classes (:hover, :focus, etc.) are ignored. */
     } else if (s[i] != '.' && s[i] != '#' && s[i] != '[') {
         /* tag */
         size_t start = i;
-        while (i < n && s[i] != '.' && s[i] != '#' && s[i] != '[') i++;
+        while (i < n && s[i] != '.' && s[i] != '#' && s[i] != '[' &&
+               s[i] != ':') i++;
         css_strncpy_lower(out->tag, s + start, i - start, sizeof(out->tag));
         out->has_tag = out->tag[0] != '\0';
     }
@@ -492,7 +503,7 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
         if (s[i] == '.') {
             i++;
             size_t start = i;
-            while (i < n && s[i] != '.' && s[i] != '#' && s[i] != '[') i++;
+            while (i < n && s[i] != '.' && s[i] != '#' && s[i] != '[' && s[i] != ':') i++;
             if (out->class_count < CSS_MAX_CLASSES) {
                 css_strncpy_lower(out->classes[out->class_count], s + start, i - start,
                                   sizeof(out->classes[0]));
@@ -501,9 +512,17 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
         } else if (s[i] == '#') {
             i++;
             size_t start = i;
-            while (i < n && s[i] != '.' && s[i] != '#' && s[i] != '[') i++;
+            while (i < n && s[i] != '.' && s[i] != '#' && s[i] != '[' && s[i] != ':') i++;
             css_strncpy_lower(out->id, s + start, i - start, sizeof(out->id));
             out->has_id = out->id[0] != '\0';
+        } else if (s[i] == ':') {
+            /* Pseudo-class: handle :root, skip others (:hover, :focus, etc.). */
+            size_t start = i;
+            while (i < n && s[i] != '.' && s[i] != '#' && s[i] != '[' &&
+                   s[i] != ':' && !css_is_space(s[i])) i++;
+            if (i - start >= 5 && strncasecmp(s + start, ":root", 5) == 0) {
+                out->is_root = true;
+            }
         } else if (s[i] == '[') {
             /* Parse attribute selector: [name], [name=value], [name~=value], etc.
              * We only track the attribute NAME for presence checking. */
@@ -630,6 +649,10 @@ static HtmlNode* html_node_parent_node(HtmlDocument *doc, HtmlNode *node) {
 
 static bool css_simple_matches(const CssSimpleSelector *simple, HtmlNode *node) {
     if (!node || node->type != HTML_NODE_ELEMENT) return false;
+    if (simple->is_root) {
+        /* :root matches the document root element (html). */
+        if (strcasecmp(node->tag_name, "html") != 0) return false;
+    }
     if (simple->has_id) {
         const char *id = html_node_attr_value(node, "id");
         if (!id || strcasecmp(id, simple->id) != 0) return false;

@@ -442,15 +442,85 @@ static bool css_parse_color(const char *value, double *r, double *g, double *b, 
     *r = *g = *b = 0.0; *a = 1.0;
     if (!value || !*value) return false;
 
+    /* Skip leading whitespace. */
+    while (*value && isspace((unsigned char)*value)) value++;
+    if (!*value) return false;
+
     if (value[0] == '#') {
         int rr = 0, gg = 0, bb = 0;
         if (sscanf(value + 1, "%02x%02x%02x", &rr, &gg, &bb) == 3) {
             *r = rr / 255.0; *g = gg / 255.0; *b = bb / 255.0;
             return true;
         }
+        /* 3-digit hex: #fff */
+        if (sscanf(value + 1, "%1x%1x%1x", &rr, &gg, &bb) == 3) {
+            *r = (rr * 17) / 255.0; *g = (gg * 17) / 255.0; *b = (bb * 17) / 255.0;
+            return true;
+        }
+        return false;
     }
 
-    /* Named colors - tiny subset. */
+    /* rgb() / rgba() */
+    if (strncasecmp(value, "rgb", 3) == 0) {
+        int rr = 0, gg = 0, bb = 0;
+        double aa = 1.0;
+        const char *p = value + 3;
+        if (*p == 'a') p++;
+        if (*p == '(') {
+            p++;
+            /* Parse r,g,b and optional a */
+            rr = (int)strtol(p, (char**)&p, 10);
+            while (*p && (*p == ',' || *p == ' ' || *p == '/')) p++;
+            gg = (int)strtol(p, (char**)&p, 10);
+            while (*p && (*p == ',' || *p == ' ' || *p == '/')) p++;
+            bb = (int)strtol(p, (char**)&p, 10);
+            while (*p && (*p == ',' || *p == ' ' || *p == '/')) p++;
+            if (*p && *p != ')') {
+                aa = strtod(p, (char**)&p);
+            }
+            *r = rr / 255.0; *g = gg / 255.0; *b = bb / 255.0; *a = aa;
+            return true;
+        }
+        return false;
+    }
+
+    /* hsl() / hsla() */
+    if (strncasecmp(value, "hsl", 3) == 0) {
+        double h, s, l;
+        double aa = 1.0;
+        const char *p = value + 3;
+        if (*p == 'a') p++;
+        if (*p == '(') {
+            p++;
+            h = strtod(p, (char**)&p);
+            while (*p && (*p == ',' || *p == ' ' || *p == '/')) p++;
+            s = strtod(p, (char**)&p);
+            while (*p && (*p == ',' || *p == ' ' || *p == '/')) p++;
+            l = strtod(p, (char**)&p);
+            while (*p && (*p == ',' || *p == ' ' || *p == '/')) p++;
+            if (*p && *p != ')') {
+                aa = strtod(p, (char**)&p);
+            }
+            /* Convert HSL to RGB */
+            s /= 100.0; l /= 100.0;
+            double c = (1.0 - fabs(2.0 * l - 1.0)) * s;
+            double hp = h / 60.0;
+            double x = c * (1.0 - fabs(fmod(hp, 2.0) - 1.0));
+            double r1 = 0, g1 = 0, b1 = 0;
+            if (hp < 1) { r1 = c; g1 = x; b1 = 0; }
+            else if (hp < 2) { r1 = x; g1 = c; b1 = 0; }
+            else if (hp < 3) { r1 = 0; g1 = c; b1 = x; }
+            else if (hp < 4) { r1 = 0; g1 = x; b1 = c; }
+            else if (hp < 5) { r1 = x; g1 = 0; b1 = c; }
+            else { r1 = c; g1 = 0; b1 = x; }
+            double m = l - c / 2.0;
+            *r = r1 + m; *g = g1 + m; *b = b1 + m; *a = aa;
+            return true;
+        }
+        return false;
+    }
+
+    /* Named colors - common subset. */
     struct { const char *name; double r, g, b; } names[] = {
         {"black", 0,0,0}, {"white", 1,1,1}, {"red", 1,0,0},
         {"green", 0,0.5,0}, {"blue", 0,0,1}, {"yellow", 1,1,0},
@@ -1104,7 +1174,6 @@ static char* layout_resolve_url(const char *base_url, const char *href) {
 static CssStylesheet* layout_fetch_stylesheet(const char *base_url, const char *href) {
     char *url = layout_resolve_url(base_url, href);
     if (!url) return NULL;
-    LOG_INFO("Fetching stylesheet: %.80s", url);
 
     HttpBuffer buffer = {0};
     char err[256] = {0};
@@ -1119,6 +1188,7 @@ static CssStylesheet* layout_fetch_stylesheet(const char *base_url, const char *
     free(url);
     if (buffer.data) free(buffer.data);
     return sheet;
+}
 }
 
 /* Walk up the native parent chain to find the nearest custom-element host.
