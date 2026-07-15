@@ -458,6 +458,8 @@ typedef struct CssSimpleSelector {
     bool has_id;
     bool is_root;    /* :root pseudo-class */
     bool universal;
+    bool has_substantive;    /* a tag/id/class/attr/universal was matched */
+    bool is_pseudo_element;  /* a ::pseudo-element (::before, ::-webkit-...) is present */
 } CssSimpleSelector;
 
 /* combinator that precedes this simple selector in document order */
@@ -493,13 +495,14 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
 
     if (s[i] == '*') {
         out->universal = true;
+        out->has_substantive = true;
         i++;
     } else if (s[i] == ':') {
         /* Leading pseudo-class/element: handle :root specially; skip others
          * (:hover, :not(...), ::before, etc.). */
         size_t start = i;
         i++;  /* consume the leading ':' (or first of '::') */
-        if (i < n && s[i] == ':') i++;
+        if (i < n && s[i] == ':') { i++; out->is_pseudo_element = true; }
         while (i < n && s[i] != '.' && s[i] != '#' && s[i] != '[' &&
                s[i] != ':' && !css_is_space(s[i])) i++;
         if (i < n && s[i] == '(') {
@@ -513,6 +516,7 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
         }
         if (i - start >= 5 && strncasecmp(s + start, ":root", 5) == 0) {
             out->is_root = true;
+            out->has_substantive = true;
         }
         /* Other pseudo-classes (:hover, :focus, etc.) are ignored. */
     } else if (s[i] != '.' && s[i] != '#' && s[i] != '[') {
@@ -522,6 +526,7 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
                s[i] != ':') i++;
         css_strncpy_lower(out->tag, s + start, i - start, sizeof(out->tag));
         out->has_tag = out->tag[0] != '\0';
+        out->has_substantive = out->has_substantive || out->has_tag;
     }
 
     while (i < n) {
@@ -535,6 +540,7 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
                 css_strncpy_lower(out->classes[out->class_count], s + start, i - start,
                                   sizeof(out->classes[0]));
                 out->class_count++;
+                out->has_substantive = true;
             }
         } else if (s[i] == '#') {
             i++;
@@ -542,13 +548,14 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
             while (i < n && s[i] != '.' && s[i] != '#' && s[i] != '[' && s[i] != ':') i++;
             css_strncpy_lower(out->id, s + start, i - start, sizeof(out->id));
             out->has_id = out->id[0] != '\0';
+            out->has_substantive = out->has_substantive || out->has_id;
         } else if (s[i] == ':') {
             /* Pseudo-class/element: handle :root specially; skip others
              * (:hover, :focus, ::before, :not(...), etc.). */
             size_t start = i;
             i++;  /* consume the leading ':' (or first of '::') */
             /* Consume a second ':' for pseudo-elements (::before). */
-            if (i < n && s[i] == ':') i++;
+            if (i < n && s[i] == ':') { i++; out->is_pseudo_element = true; }
             /* Consume the pseudo name and any balanced (...) argument list. */
             while (i < n && s[i] != '.' && s[i] != '#' && s[i] != '[' &&
                    s[i] != ':' && !css_is_space(s[i])) i++;
@@ -563,6 +570,7 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
             }
             if (i - start >= 5 && strncasecmp(s + start, ":root", 5) == 0) {
                 out->is_root = true;
+                out->has_substantive = true;
             }
         } else if (s[i] == '[') {
             /* Parse attribute selector: [name], [name=value], [name~=value], etc.
@@ -578,7 +586,10 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
                 size_t al = strlen(out->attrs[out->attr_count]);
                 while (al > 0 && css_is_space(out->attrs[out->attr_count][al-1]))
                     out->attrs[out->attr_count][--al] = '\0';
-                if (al > 0) out->attr_count++;
+                if (al > 0) {
+                    out->attr_count++;
+                    out->has_substantive = true;
+                }
             }
             /* Skip rest of attribute selector */
             int depth = 1;
@@ -690,6 +701,13 @@ static HtmlNode* html_node_parent_node(HtmlDocument *doc, HtmlNode *node) {
 
 static bool css_simple_matches(const CssSimpleSelector *simple, HtmlNode *node) {
     if (!node || node->type != HTML_NODE_ELEMENT) return false;
+    /* A selector with no concrete key (tag/id/class/attr/universal/root) —
+     * e.g. a bare pseudo-element like ::before or ::view-transition-old(...)
+     * — does not match any real element.  Without this, such selectors would
+     * fall through to the "universal" return-true below and erroneously match
+     * every node, applying pseudo-element-only declarations (often
+     * display:none) to real elements. */
+    if (!simple->has_substantive) return false;
     if (simple->is_root) {
         /* :root matches the document root element (html). */
         if (strcasecmp(node->tag_name, "html") != 0) return false;
@@ -715,6 +733,10 @@ static bool css_simple_matches(const CssSimpleSelector *simple, HtmlNode *node) 
 static bool css_chain_matches(const CssSelectorPart *parts, int count,
                               HtmlDocument *doc, HtmlNode *node) {
     if (count <= 0) return false;
+    /* The key (rightmost) simple selector determines what the rule targets.
+     * If it is a pseudo-element (::before, ::-webkit-scrollbar, ...) the rule
+     * styles an abstract box that has no real DOM node, so it never matches. */
+    if (parts[count - 1].simple.is_pseudo_element) return false;
     HtmlNode *current = node;
     /* Guard against cycles in the DOM parent chain. The tree should be
      * acyclic; this cap makes matching robust if a malformed/adopted tree

@@ -19957,21 +19957,6 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                     if (caller_b.has_debug()) {
                         caller_name = JS_AtomToCString(caller_ctx, caller_b.debug_filename());
                         caller_line = find_line_num(caller_ctx, caller_b, caller_sf->pc_offset - 1, &caller_col);
-                        /* Dump the caller's source so we can map <lazy> line numbers. */
-                        if (caller_b.debug_source() && caller_b.debug_source_len() > 0) {
-                            static int dump_count = 0;
-                            if (dump_count < 30) {
-                                char fname[128];
-                                snprintf(fname, sizeof(fname), "lazy_fail_%02d_%d_%d.js", dump_count, caller_line, caller_col);
-                                FILE *df = fopen(fname, "wb");
-                                if (df) {
-                                    fwrite(caller_b.debug_source(), 1, caller_b.debug_source_len(), df);
-                                    fclose(df);
-                                    fprintf(stderr, "[QJS-NOT-A-FUNC] dumped source to %s\n", fname);
-                                    dump_count++;
-                                }
-                            }
-                        }
                         fprintf(stderr, "[QJS-NOT-A-FUNC] caller handle=%u\n", (unsigned)caller_b.handle());
                     }
                 }
@@ -40017,20 +40002,6 @@ static GCValue js_trigger_lazy_function(JSContextHandle ctx, GCValue lazy_func,
         func_source = (char *)dbuf.buf;
         func_source_len = dbuf.size - 1;  /* Exclude null terminator */
         /* Note: dbuf.buf will be freed with dbuf_free at the end */
-        {
-            static int lazy_dump_count = 0;
-            if (lazy_dump_count < 100) {
-                char fname[64];
-                snprintf(fname, sizeof(fname), "lazy_all_%03d.js", lazy_dump_count++);
-                FILE *df = fopen(fname, "wb");
-                if (df) {
-                    size_t dump_len = func_source_len;
-                    if (dump_len > 256 * 1024) dump_len = 256 * 1024;
-                    fwrite(func_source, 1, dump_len, df);
-                    fclose(df);
-                }
-            }
-        }
         
         /* Function source reconstructed: %s */
 
@@ -41289,30 +41260,7 @@ static GCValue js_resume_lazy_parse(JSContextHandle ctx,
         return JS_ThrowInternalError(ctx, "lazy parse: invalid source handle");
     }
     const uint8_t *root_source = (const uint8_t *)source_str.data();
-    
-    /* Diagnostic dump of large lazy function bodies so we can map <lazy> line numbers. */
-    {
-        static int resume_dump_count = 0;
-        if (resume_dump_count < 2000 && source_str.length() > 50000) {
-            char fname[128];
-            snprintf(fname, sizeof(fname), "lazy_resume_%03d_h%u_line%04d.js", resume_dump_count, (unsigned)lazy_b.handle(), state->line_num);
-            FILE *df = fopen(fname, "wb");
-            if (df) {
-                size_t dump_len = source_str.length();
-                if (state->source_offset < dump_len)
-                    dump_len -= state->source_offset;
-                else
-                    dump_len = 0;
-                if (dump_len > 4 * 1024 * 1024) dump_len = 4 * 1024 * 1024;
-                fwrite(root_source + state->source_offset, 1, dump_len, df);
-                fclose(df);
-                fprintf(stderr, "[LAZY-RESUME] idx=%d handle=%u line=%d file=%s len=%zu\n",
-                        resume_dump_count, (unsigned)lazy_b.handle(), state->line_num, fname, dump_len);
-                resume_dump_count++;
-            }
-        }
-    }
-    
+
     /* Step 3: Create and initialize parser state */
     memset(&s, 0, sizeof(s));
     s.ctx = ctx;
