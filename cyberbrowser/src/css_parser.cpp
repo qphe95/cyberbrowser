@@ -460,6 +460,7 @@ typedef struct CssSimpleSelector {
     bool universal;
     bool has_substantive;    /* a tag/id/class/attr/universal was matched */
     bool is_pseudo_element;  /* a ::pseudo-element (::before, ::-webkit-...) is present */
+    bool requires_empty;     /* :empty — element must have no element/text children */
 } CssSimpleSelector;
 
 /* combinator that precedes this simple selector in document order */
@@ -518,6 +519,9 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
             out->is_root = true;
             out->has_substantive = true;
         }
+        if (i - start >= 6 && strncasecmp(s + start, ":empty", 6) == 0) {
+            out->requires_empty = true;
+        }
         /* Other pseudo-classes (:hover, :focus, etc.) are ignored. */
     } else if (s[i] != '.' && s[i] != '#' && s[i] != '[') {
         /* tag */
@@ -571,6 +575,9 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
             if (i - start >= 5 && strncasecmp(s + start, ":root", 5) == 0) {
                 out->is_root = true;
                 out->has_substantive = true;
+            }
+            if (i - start >= 6 && strncasecmp(s + start, ":empty", 6) == 0) {
+                out->requires_empty = true;
             }
         } else if (s[i] == '[') {
             /* Parse attribute selector: [name], [name=value], [name~=value], etc.
@@ -722,6 +729,11 @@ static bool css_simple_matches(const CssSimpleSelector *simple, HtmlNode *node) 
     for (int i = 0; i < simple->attr_count; i++) {
         /* [attr] — element must have the named attribute. */
         if (!html_node_attr_value(node, simple->attrs[i])) return false;
+    }
+    if (simple->requires_empty) {
+        /* :empty matches an element with no child nodes (elements or text).
+         * The compaction-array first_child index is < 0 when there are none. */
+        if (node->array_node.first_child >= 0) return false;
     }
     if (simple->has_tag) {
         if (strcasecmp(node->tag_name, simple->tag) != 0) return false;
