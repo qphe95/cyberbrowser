@@ -45,14 +45,23 @@ GCValue js_user_agent_data_get_high_entropy_values(JSContextHandle ctx, GCValue 
     (void)this_val; (void)argc; (void)argv;
     GCValue result = JS_NewObject(ctx);
     if (JS_IsException(result)) return JS_EXCEPTION;
-    
+
     JS_SetPropertyStr(ctx, result, "platform", JS_NewString(ctx, "Linux x86_64"));
     JS_SetPropertyStr(ctx, result, "platformVersion", JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, result, "architecture", JS_NewString(ctx, "x86"));
     JS_SetPropertyStr(ctx, result, "model", JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, result, "uaFullVersion", JS_NewString(ctx, "120.0.0.0"));
-    
-    return result;
+
+    /* navigator.userAgentData.getHighEntropyValues() is async and returns a
+     * Promise.  YouTube's bundle (ov4) does `.getHighEntropyValues(z).then(...)`,
+     * so returning a bare object here throws "not a function" and aborts the
+     * bundle's top-level eval.  Resolve a Promise to the hints object. */
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
+    GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
+    GCValue args[1] = { result };
+    GCValue promise = JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
+    return promise;
 }
 
 // Battery API - getBattery() returns a Promise resolving to a mock battery object

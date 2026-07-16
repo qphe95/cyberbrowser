@@ -3060,7 +3060,20 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     
     // ===== User-Agent Client Hints =====
     GCValue user_agent_data = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, user_agent_data, "brands", JS_NewArray(ctx));
+    /* Populate brands like real Chrome so YouTube's UA-detection code (which
+     * reads navigator.userAgentData.brands during bundle init) sees a valid,
+     * non-empty array rather than failing on an empty one. */
+    GCValue brands_arr = JS_NewArray(ctx);
+    {
+        const char *brand_names[] = {"Google Chrome", "Chromium", "Not?A_Brand"};
+        for (int bi = 0; bi < 3; bi++) {
+            GCValue bobj = JS_NewObject(ctx);
+            JS_SetPropertyStr(ctx, bobj, "brand", JS_NewString(ctx, brand_names[bi]));
+            JS_SetPropertyStr(ctx, bobj, "version", JS_NewString(ctx, "120.0.0.0"));
+            JS_SetPropertyUint32(ctx, brands_arr, bi, bobj);
+        }
+    }
+    JS_SetPropertyStr(ctx, user_agent_data, "brands", brands_arr);
     JS_SetPropertyStr(ctx, user_agent_data, "mobile", JS_FALSE);
     JS_SetPropertyStr(ctx, user_agent_data, "platform", JS_NewString(ctx, "Linux x86_64"));
     JS_SetPropertyStr(ctx, user_agent_data, "getHighEntropyValues",
