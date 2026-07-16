@@ -2333,6 +2333,12 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JSAtom style_atom = JS_NewAtom(ctx, "style");
     JS_DefinePropertyGetSet(ctx, element_proto, style_atom, style_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, style_atom);
+
+    // Fullscreen API no-op stubs (document.fullscreenEnabled reports support)
+    JS_SetPropertyStr(ctx, element_proto, "requestFullscreen",
+        JS_NewCFunction(ctx, js_dummy_function, "requestFullscreen", 0));
+    JS_SetPropertyStr(ctx, element_proto, "webkitRequestFullscreen",
+        JS_NewCFunction(ctx, js_dummy_function, "webkitRequestFullscreen", 0));
     
     // ===== Element Tree Navigation Properties (REAL) =====
     // children getter
@@ -2481,10 +2487,10 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     LOG_INFO("DOM prototype methods set");
     
     // ===== Window Properties =====
-    DEF_PROP_INT(ctx, window, "innerWidth", 1920);
-    DEF_PROP_INT(ctx, window, "innerHeight", 1080);
-    DEF_PROP_INT(ctx, window, "outerWidth", 1920);
-    DEF_PROP_INT(ctx, window, "outerHeight", 1080);
+    DEF_PROP_INT(ctx, window, "innerWidth", 1024);
+    DEF_PROP_INT(ctx, window, "innerHeight", 2400);
+    DEF_PROP_INT(ctx, window, "outerWidth", 1024);
+    DEF_PROP_INT(ctx, window, "outerHeight", 2400);
     DEF_PROP_INT(ctx, window, "screenX", 0);
     DEF_PROP_INT(ctx, window, "screenY", 0);
     DEF_PROP_INT(ctx, window, "screenLeft", 0);
@@ -2586,6 +2592,16 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     DEF_PROP_STR(ctx, document, "visibilityState", "visible");
     DEF_PROP_BOOL(ctx, document, "pictureInPictureEnabled", 0);
     DEF_PROP_STR(ctx, document, "readyState", "complete");
+    /* Fullscreen API stubs: the player feature-detects document.fullscreenEnabled
+     * (and vendor variants) and shows a "browser doesn't support full screen"
+     * warning when missing.  Report support; the calls are no-ops. */
+    DEF_PROP_BOOL(ctx, document, "fullscreenEnabled", 1);
+    DEF_PROP_BOOL(ctx, document, "webkitFullscreenEnabled", 1);
+    JS_SetPropertyStr(ctx, document, "fullscreenElement", JS_NULL);
+    JS_SetPropertyStr(ctx, document, "exitFullscreen",
+        JS_NewCFunction(ctx, js_dummy_function, "exitFullscreen", 0));
+    JS_SetPropertyStr(ctx, document, "webkitExitFullscreen",
+        JS_NewCFunction(ctx, js_dummy_function, "webkitExitFullscreen", 0));
     DEF_FUNC(ctx, document, "createElement", js_document_create_element, 1);
     DEF_FUNC(ctx, document, "createElementNS", js_document_create_element, 2);
     DEF_FUNC(ctx, document, "createTextNode", js_document_create_text_node, 1);
@@ -2657,12 +2673,12 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_NewCFunction(ctx, js_node_appendChild_real, "appendChild", 1));
     
     // Add clientWidth/clientHeight properties (viewport dimensions)
-    DEF_PROP_INT(ctx, doc_element, "clientWidth", 1920);
-    DEF_PROP_INT(ctx, doc_element, "clientHeight", 1080);
-    DEF_PROP_INT(ctx, doc_element, "scrollWidth", 1920);
-    DEF_PROP_INT(ctx, doc_element, "scrollHeight", 1080);
-    DEF_PROP_INT(ctx, doc_element, "offsetWidth", 1920);
-    DEF_PROP_INT(ctx, doc_element, "offsetHeight", 1080);
+    DEF_PROP_INT(ctx, doc_element, "clientWidth", 1024);
+    DEF_PROP_INT(ctx, doc_element, "clientHeight", 2400);
+    DEF_PROP_INT(ctx, doc_element, "scrollWidth", 1024);
+    DEF_PROP_INT(ctx, doc_element, "scrollHeight", 2400);
+    DEF_PROP_INT(ctx, doc_element, "offsetWidth", 1024);
+    DEF_PROP_INT(ctx, doc_element, "offsetHeight", 2400);
     
     // Add style object for CSS property detection (needed by Web Animations polyfill)
     GCValue doc_style = JS_NewObject(ctx);
@@ -2711,12 +2727,12 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_NewCFunction(ctx, js_element_querySelectorAll_real, "querySelectorAll", 1));
     
     // Add clientWidth/clientHeight properties to body (viewport dimensions)
-    DEF_PROP_INT(ctx, body_element, "clientWidth", 1920);
-    DEF_PROP_INT(ctx, body_element, "clientHeight", 937);  // 1080 - some UI chrome
-    DEF_PROP_INT(ctx, body_element, "scrollWidth", 1920);
-    DEF_PROP_INT(ctx, body_element, "scrollHeight", 937);
-    DEF_PROP_INT(ctx, body_element, "offsetWidth", 1920);
-    DEF_PROP_INT(ctx, body_element, "offsetHeight", 937);
+    DEF_PROP_INT(ctx, body_element, "clientWidth", 1024);
+    DEF_PROP_INT(ctx, body_element, "clientHeight", 2400);
+    DEF_PROP_INT(ctx, body_element, "scrollWidth", 1024);
+    DEF_PROP_INT(ctx, body_element, "scrollHeight", 2400);
+    DEF_PROP_INT(ctx, body_element, "offsetWidth", 1024);
+    DEF_PROP_INT(ctx, body_element, "offsetHeight", 2400);
     
     // Add style object for body (commonly accessed by page scripts)
     GCValue body_style = JS_NewObject(ctx);

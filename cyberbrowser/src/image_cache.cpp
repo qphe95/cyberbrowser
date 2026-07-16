@@ -203,6 +203,36 @@ static bool decode_entry(ImageCacheEntry *e)
         pixels = stbi_load(e->source, &width, &height, &channels, 4);
     }
 
+    if (!pixels && e->source && is_network_url(e->source)) {
+        /* Retry once with the query string stripped: CDNs like i.ytimg.com
+         * select the image format from query parameters (sqp=...), serving
+         * AVIF/WebP variants that stb cannot decode.  The plain URL serves a
+         * baseline JPEG instead. */
+        const char *q = strchr(e->source, '?');
+        if (q && q != e->source) {
+            size_t base_len = (size_t)(q - e->source);
+            char *plain = (char *)malloc(base_len + 1);
+            if (plain) {
+                memcpy(plain, e->source, base_len);
+                plain[base_len] = '\0';
+                HttpBuffer buffer = {0};
+                char err[256] = {0};
+                if (http_get_to_memory(plain, &buffer, err, sizeof(err)) &&
+                    buffer.data && buffer.size > 0) {
+                    width = height = channels = 0;
+                    pixels = stbi_load_from_memory((const stbi_uc *)buffer.data,
+                                                   (int)buffer.size,
+                                                   &width, &height, &channels, 4);
+                    if (pixels) {
+                        LOG_INFO("Decoded image after stripping query: %.80s", plain);
+                    }
+                }
+                if (buffer.data) free(buffer.data);
+                free(plain);
+            }
+        }
+    }
+
     if (!pixels) {
         LOG_ERROR("Failed to decode image %s", e->source ? e->source : "(null)");
         return false;

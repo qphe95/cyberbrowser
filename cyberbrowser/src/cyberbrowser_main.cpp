@@ -201,6 +201,18 @@ static JSRuntimeHandle g_rt;
 static JSContextHandle g_ctx;
 static GCValue g_global;
 
+/* Interrupt handler for the bounded customElements.upgrade pass. */
+struct upgrade_timeout_state { struct timespec start; double limit; };
+int upgrade_timeout_handler(JSRuntimeHandle rt, void *opaque) {
+    (void)rt;
+    struct upgrade_timeout_state *uts = (struct upgrade_timeout_state *)opaque;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    double elapsed = (now.tv_sec - uts->start.tv_sec) +
+                     (now.tv_nsec - uts->start.tv_nsec) / 1e9;
+    return elapsed > uts->limit ? 1 : 0;
+}
+
 static bool init_browser_context(void) {
     if (!gc_init()) {
         printf("FATAL: gc_init() failed\n");
@@ -738,6 +750,13 @@ int main(int argc, char *argv[]) {
             } else {
                 printf("PROBE OK\n");
             }
+            /* Pump timers/jobs so async continuations and setTimeout callbacks
+             * run before exit (set CYBER_PROBE_NO_PUMP=1 to skip). */
+            if (!getenv("CYBER_PROBE_NO_PUMP")) {
+                for (int pi = 0; pi < 50; pi++) {
+                    if (!pump_timers_and_jobs(g_ctx)) break;
+                }
+            }
             free(pbuf);
             cleanup_browser_context();
             platform_http_cleanup();
@@ -790,6 +809,35 @@ int main(int argc, char *argv[]) {
      * are marked so they are not executed twice. */
     dom_enable_dynamic_script_loading();
 
+    /* Layout probe: render a local HTML file through the production layout
+     * pipeline and exit (CYBER_LAYOUT_HTML=/path/to.html). */
+    {
+        const char *lhtml_path = getenv("CYBER_LAYOUT_HTML");
+        if (lhtml_path && lhtml_path[0]) {
+            FILE *lf = fopen(lhtml_path, "rb");
+            if (!lf) { printf("FATAL: cannot open %s\n", lhtml_path); return 1; }
+            fseek(lf, 0, SEEK_END);
+            long lsz = ftell(lf);
+            fseek(lf, 0, SEEK_SET);
+            char *lbuf = (char *)malloc((size_t)lsz + 1);
+            fread(lbuf, 1, (size_t)lsz, lf);
+            fclose(lf);
+            lbuf[lsz] = '\0';
+            HtmlDocument *ldoc = html_parse(lbuf, (size_t)lsz);
+            free(lbuf);
+            if (!ldoc) { printf("FATAL: html_parse failed\n"); return 1; }
+            ImageCache *lcache = image_cache_create();
+            display_list_set_image_cache(lcache);
+            render_document_to_jpg(ldoc, lcache, "layout_probe.jpg");
+            html_document_free(ldoc);
+            image_cache_destroy(lcache);
+            cleanup_browser_context();
+            platform_http_cleanup();
+            platform_cleanup();
+            return 0;
+        }
+    }
+
     size_t html_size = 0;
     char *html = fetch_start_page(&html_size);
     if (!html) {
@@ -826,6 +874,64 @@ int main(int argc, char *argv[]) {
             printf("Scripts executed: %d captured URLs\n", js_result.captured_url_count);
         } else {
             printf("WARNING: page script execution did not complete successfully\n");
+        }
+
+        if (getenv("CYBER_HOOK_BOOT")) {
+            /* Instrument the kevlar boot chain: log ytsignals, the consumption
+             * of window.getInitialData, and ytd-app's connectedCallback. */
+            const char *hook_js =
+                "(function(){"
+                "  try {"
+                "    var L = window.default_kevlar_base;"
+                "    var app0 = document.querySelector('ytd-app');"
+                "    console.error('[SIG] hook-time: dkb=' + typeof L + ' LU=' + (L ? typeof L.LU : '-')"
+                "      + ' app=' + (app0 ? 'found' : 'NULL')"
+                "      + ' gid=' + typeof window.getInitialData);"
+                "    if (L) {"
+                "      ['jJ','JC'].forEach(function(nm){"
+                "        if (typeof L[nm] === 'function') {"
+                "          var orig = L[nm];"
+                "          L[nm] = function(e) {"
+                "            try { console.error('[YTERR:' + nm + '] ' + (e && e.message ? e.message : e) + ' | ' + (e && e.stack ? String(e.stack).split('\\n').slice(0,4).join(' | ') : '')); } catch(x) {}"
+                "            try { return orig.apply(this, arguments); } catch(x2) { console.error('[YTERR:' + nm + '] orig threw: ' + (x2 && x2.message)); }"
+                "          };"
+                "        }"
+                "      });"
+                "    }"
+                "    if (L && L.LU) {"
+                "      var inst = L.LU();"
+                "      var ps = inst.processSignal;"
+                "      inst.processSignal = function(s) {"
+                "        console.error('[SIG] processSignal ' + s);"
+                "        try { return ps.apply(this, arguments); } catch(e) { console.error('[SIG] ' + s + ' threw: ' + (e && e.message)); throw e; }"
+                "      };"
+                "    }"
+                "    var gid = window.getInitialData;"
+                "    Object.defineProperty(window, 'getInitialData', {"
+                "      configurable: true,"
+                "      get: function() { return gid; },"
+                "      set: function(v) { console.error('[SIG] getInitialData set to ' + typeof v); gid = v; }"
+                "    });"
+                "    var app = document.querySelector('ytd-app');"
+                "    if (app) {"
+                "      var ccb = app.connectedCallback;"
+                "      if (typeof ccb === 'function') {"
+                "        app.connectedCallback = function() {"
+                "          console.error('[SIG] ytd-app connectedCallback');"
+                "          try { return ccb.apply(this, arguments); } catch(e) { console.error('[SIG] ytd-app ccb threw: ' + (e && e.message)); throw e; }"
+                "        };"
+                "      } else console.error('[SIG] ytd-app has no connectedCallback fn at hook time');"
+                "    }"
+                "  } catch(e) { console.error('[SIG] hook install failed: ' + (e && e.message)); }"
+                "})();";
+            GCValue hook_res = JS_Eval(g_ctx, hook_js, strlen(hook_js), "<boot_hook>", JS_EVAL_TYPE_GLOBAL);
+            if (JS_IsException(hook_res)) {
+                GCValue exc = JS_GetException(g_ctx);
+                const char *es = JS_ToCString(g_ctx, exc);
+                fprintf(stderr, "[SIG] hook eval EXCEPTION: %s\n", es ? es : "?");
+            } else {
+                fprintf(stderr, "[SIG] hook eval ok\n");
+            }
         }
         pump_timers_and_jobs(g_ctx);
 
@@ -871,7 +977,25 @@ int main(int argc, char *argv[]) {
                 "  var log = (typeof __bgmdwnldr_log !== 'undefined') ? __bgmdwnldr_log : null;"
                 "  if (log) try { log('[UPGRADE-DOC] no upgrade function'); } catch(x) {}"
                 "}";
-            JS_Eval(g_ctx, upgrade_doc_js, strlen(upgrade_doc_js), "<upgrade_doc>", JS_EVAL_TYPE_GLOBAL);
+            {
+                /* Bound the upgrade pass: it can hard-loop on pathological DOMs;
+                 * on timeout, log the stack to find the loop. */
+                struct upgrade_timeout_state uts;
+                clock_gettime(CLOCK_MONOTONIC, &uts.start);
+                uts.limit = 60.0;
+                JS_SetInterruptHandler(JS_GetRuntime(g_ctx), upgrade_timeout_handler, &uts);
+                GCValue ures = JS_Eval(g_ctx, upgrade_doc_js, strlen(upgrade_doc_js), "<upgrade_doc>", JS_EVAL_TYPE_GLOBAL);
+                JS_SetInterruptHandler(JS_GetRuntime(g_ctx), NULL, NULL);
+                if (JS_IsException(ures)) {
+                    GCValue exc = JS_GetException(g_ctx);
+                    const char *es = JS_ToCString(g_ctx, exc);
+                    fprintf(stderr, "[UPGRADE-DOC] eval EXCEPTION: %s\n", es ? es : "?");
+                    GCValue stk = JS_GetPropertyStr(g_ctx, exc, "stack");
+                    const char *ss = JS_ToCString(g_ctx, stk);
+                    if (ss) fprintf(stderr, "[UPGRADE-DOC] stack:\n%s\n", ss);
+                    fflush(stderr);
+                }
+            }
             fprintf(stderr, "[UPGRADE-DOC] done\n");
             fflush(stderr);
 
@@ -1010,6 +1134,51 @@ int main(int argc, char *argv[]) {
                 printf("Saved final JS DOM to page_final.html (%zu bytes)\n", strlen(serialized));
             }
             free(serialized);
+        }
+    }
+
+    if (getenv("CYBER_DIAG_BOOT")) {
+        const char *diag_js =
+            "(function(){"
+            "  var app = document.querySelector('ytd-app');"
+            "  var mh = app && app.querySelector('ytd-masthead');"
+            "  var L = window.default_kevlar_base;"
+            "  var inst = null;"
+            "  try { inst = L && L.LU && L.LU(); } catch(e) { console.error('[BOOT-DIAG] LU() threw: ' + (e && e.message)); }"
+            "  var sigs = '?';"
+            "  try { sigs = (inst && inst.signals) ? inst.signals.join(',') : 'none'; } catch(e) { sigs = 'err:' + e.message; }"
+            "  (function(){"
+            "    try { console.error('[D] div.__shady_attachShadow=' + typeof document.createElement('div').__shady_attachShadow); } catch(e) { console.error('[D] shady_attachShadow err: ' + e.message); }"
+            "    try {"
+            "      var sd = window.ShadyDOM;"
+            "      console.error('[D] WeakMap.prototype.get=' + (window.WeakMap ? typeof WeakMap.prototype.get : 'N/A')"
+            "        + ' set=' + (window.WeakMap ? typeof WeakMap.prototype.set : 'N/A'));"
+            "      var fresh = new WeakMap(); var k={}; fresh.set(k, 9); console.error('[D] fresh wm.get=' + fresh.get(k));"
+            "      console.error('[D] SD.wrap=' + (sd ? typeof sd.wrap : 'N/A'));"
+            "      if (sd && sd.wrap) {"
+            "        var w = sd.wrap(document.createElement('div'));"
+            "        console.error('[D] wrap res=' + typeof w + ' wrap.attachShadow=' + (w ? typeof w.attachShadow : 'nul'));"
+            "      }"
+            "    } catch(e) { console.error('[D] wrap err: ' + e.message + ' | ' + (e.stack ? String(e.stack).split('\\n').slice(0,3).join('|') : '')); }"
+            "  })();"
+            "  console.error('[BOOT-DIAG] getInitialData=' + typeof window.getInitialData"
+            "    + ' getInitialCommand=' + typeof window.getInitialCommand"
+            "    + ' appChildren=' + (app ? app.childElementCount : -1)"
+            "    + ' appShadow=' + (app && app.shadowRoot ? 'yes' : 'no')"
+            "    + ' app__CE_sr=' + (app && app.__CE_shadowRoot ? 'yes' : 'no')"
+            "    + ' app_sr_children=' + (app && app.__CE_shadowRoot && app.__CE_shadowRoot.childNodes ? app.__CE_shadowRoot.childNodes.length : -1)"
+            "    + ' masthead=' + (mh ? 'found' : 'MISSING') + ' mhChildren=' + (mh ? mh.childElementCount : -1)"
+            "    + ' mhShadow=' + (mh && mh.shadowRoot ? 'yes' : 'no')"
+            "    + ' mh__CE_sr=' + (mh && mh.__CE_shadowRoot ? 'yes' : 'no')"
+            "    + ' du-app=' + (app && app.hasAttribute('disable-upgrade'))"
+            "    + ' du-mh=' + (mh && mh.hasAttribute('disable-upgrade'))"
+            "    + ' signals=[' + sigs + ']');"
+            "})();";
+        GCValue diag_res = JS_Eval(g_ctx, diag_js, strlen(diag_js), "<boot_diag>", JS_EVAL_TYPE_GLOBAL);
+        if (JS_IsException(diag_res)) {
+            GCValue exc = JS_GetException(g_ctx);
+            const char *es = JS_ToCString(g_ctx, exc);
+            fprintf(stderr, "[BOOT-DIAG] eval EXCEPTION: %s\n", es ? es : "?");
         }
     }
 

@@ -1883,12 +1883,93 @@ static void html_serialize_js_element(JSContextHandle ctx, DOMNodeHandle node, G
     serialize_buf_append(buf, "<");
     serialize_buf_append(buf, tag_lower);
     
-    /* Emit attributes from the internal DOMNode attribute table. */
+    /* Emit attributes from the internal DOMNode attribute table.  The style
+     * attribute is handled separately below so that JS-mutated style
+     * properties (element.style.x = y, style.setProperty) merge with it. */
+    const char *attr_style = NULL;
     for (int i = 0; i < node.attribute_count(); i++) {
         const char *name = node.attributes()[i].name;
         const char *value = node.attributes()[i].value;
         if (!name || !name[0]) continue;
+        if (strcasecmp(name, "style") == 0) {
+            attr_style = value;
+            continue;
+        }
         serialize_buf_append_attr(buf, name, value ? value : "");
+    }
+
+    /* Reflect the JS style object (__style) into the style attribute so the
+     * re-parsed native document carries dynamic styles into layout.  Kebab
+     * properties win over their camelCase duplicates; empty values, internal
+     * slots, and method properties are skipped. */
+    {
+        SerializeBuffer style_buf;
+        serialize_buf_init(&style_buf);
+        if (attr_style && attr_style[0]) {
+            serialize_buf_append(&style_buf, attr_style);
+            size_t n = strlen(attr_style);
+            if (n > 0 && attr_style[n - 1] != ';')
+                serialize_buf_append(&style_buf, ";");
+        }
+        GCValue style_obj = JS_GetPropertyStr(ctx, node_val, "__style");
+        if (JS_IsObject(style_obj)) {
+            JSPropertyEnum *tab = NULL;
+            uint32_t plen = 0;
+            if (JS_GetOwnPropertyNames(ctx, &tab, &plen, style_obj, JS_GPN_STRING_MASK) == 0 && tab) {
+                for (uint32_t i = 0; i < plen; i++) {
+                    /* Copy key/value out of GC-managed string memory before any
+                     * further JS calls: ToCString results point into GC strings
+                     * and can dangle if a later call in this loop triggers GC. */
+                    char key_buf[128];
+                    const char *key0 = JS_AtomToCString(ctx, tab[i].atom);
+                    if (!key0 || !key0[0]) continue;
+                    snprintf(key_buf, sizeof(key_buf), "%s", key0);
+                    const char *key = key_buf;
+                    if (key[0] == '_') continue;
+                    if (strcmp(key, "removeProperty") == 0 ||
+                        strcmp(key, "setProperty") == 0 ||
+                        strcmp(key, "getPropertyValue") == 0 ||
+                        strcmp(key, "getPropertyPriority") == 0 ||
+                        strcmp(key, "item") == 0 ||
+                        strcmp(key, "length") == 0 ||
+                        strcmp(key, "cssText") == 0) continue;
+                    GCValue val = JS_GetPropertyStr(ctx, style_obj, key);
+                    if (!JS_IsString(val)) continue;
+                    char val_buf[1024];
+                    const char *s0 = JS_ToCString(ctx, val);
+                    if (!s0 || !s0[0]) continue;
+                    snprintf(val_buf, sizeof(val_buf), "%s", s0);
+                    /* Convert camelCase to kebab-case; skip if the kebab form
+                     * exists as an own property (it holds the same value). */
+                    char kebab[128];
+                    size_t kn = 0;
+                    bool had_upper = false;
+                    for (const char *p = key; *p && kn < sizeof(kebab) - 2; p++) {
+                        if (*p >= 'A' && *p <= 'Z') {
+                            kebab[kn++] = '-';
+                            kebab[kn++] = (char)tolower((unsigned char)*p);
+                            had_upper = true;
+                        } else {
+                            kebab[kn++] = *p;
+                        }
+                    }
+                    kebab[kn] = '\0';
+                    if (had_upper) {
+                        GCValue kv = JS_GetPropertyStr(ctx, style_obj, kebab);
+                        if (JS_IsString(kv)) continue; /* kebab twin exists */
+                    }
+                    serialize_buf_append(&style_buf, kebab);
+                    serialize_buf_append(&style_buf, ":");
+                    serialize_buf_append(&style_buf, val_buf);
+                    serialize_buf_append(&style_buf, ";");
+                }
+                JS_FreePropertyEnum(ctx, tab, plen);
+            }
+        }
+        if (style_buf.data && style_buf.len > 0) {
+            serialize_buf_append_attr(buf, "style", style_buf.data);
+        }
+        serialize_buf_free(&style_buf);
     }
     
     /* Catch attributes that were set as JS properties but not reflected into

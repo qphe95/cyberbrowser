@@ -7679,6 +7679,19 @@ extern "C" void mark_children(JSRuntimeHandle rt, GCHandle handle,
                 if (sf->bytecode_handle != GC_HANDLE_NULL) {
                     mark_func(rt, sf->bytecode_handle);
                 }
+                /* Mark the frame's variable storage up to its current operand
+                 * depth (sp_offset), mirroring the async-frame marker.  Frames
+                 * outlive their activation when closures capture their locals,
+                 * so the captured values must be marked or they are reclaimed
+                 * while var_refs still point at them (closures then read
+                 * garbage, e.g. a WeakMap/constructor resolving to a
+                 * non-function).  For a running frame sp_offset == 0, so nothing
+                 * is marked (its operand slots may be uninitialized). */
+                if (sf->sp_offset > 0) {
+                    GCValue *var_buf = JS_SF_VAR_BUF(sf);
+                    for (int i = 0; i < sf->sp_offset; i++)
+                        JS_MarkValue(rt, var_buf[i], mark_func);
+                }
                 /* Mark all var_refs in this frame */
                 GCHandle *var_refs = JS_SF_VAR_REFS(sf);
                 if (var_refs && sf->var_ref_count > 0) {
@@ -19573,8 +19586,14 @@ static void close_var_ref(JSRuntimeHandle rt, JSStackFrame *sf, JSVarRefHandle v
 static void close_var_refs(JSRuntimeHandle rt, JSFunctionBytecodeHandle b, JSStackFrame *sf)
 {
     int i;
+    /* Lazily-resumed functions replace the bytecode after the frame was
+     * allocated, so the bytecode's var_ref_count can exceed the frame's
+     * allocated var_refs array.  Clamp to the frame's count to avoid an
+     * out-of-bounds read (segfault). */
+    int count = b.var_ref_count();
+    if (sf->var_ref_count < count) count = sf->var_ref_count;
 
-    for(i = 0; i < b.var_ref_count(); i++) {
+    for(i = 0; i < count; i++) {
         /* JS_SF_VAR_REFS(sf) is now a GCHandle array */
         GCHandle var_ref_h = JS_SF_VAR_REFS(sf)[i];
         if (var_ref_h != GC_HANDLE_NULL) {

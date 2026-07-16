@@ -831,13 +831,19 @@ static void pump_timers_and_jobs_after_fetch(void) {
 // incompatible with the engine itself.
 static bool is_unsafe_external_script(const char *url) {
     if (!url) return false;
+    /* custom-elements-es5-adapter is required by Polymer ES5 elements to
+     * construct/stamp correctly.  It was previously skipped because the
+     * engine's closure resolution for class constructors inside functions
+     * was broken (js_op_define_class var-refs type confusion); that bug is
+     * fixed, so allow the adapter to load.  CYBER_SKIP_ES5_ADAPTER=1
+     * restores the old behavior. */
     static const char *skip_patterns[] = {
-        // The Polymer ES5 adapter transpiles class syntax in a way that
-        // corrupts QuickJS's custom-element upgrade path.  Not a shadow-DOM
-        // concern; skipped for engine compatibility.
-        "custom-elements-es5-adapter",
         NULL
     };
+    if (getenv("CYBER_SKIP_ES5_ADAPTER")) {
+        static const char *es5[] = { "custom-elements-es5-adapter", NULL };
+        skip_patterns[0] = es5[0];
+    }
     for (const char **p = skip_patterns; *p; p++) {
         if (strstr(url, *p)) return true;
     }

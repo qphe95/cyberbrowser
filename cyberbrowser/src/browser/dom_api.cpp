@@ -3214,13 +3214,17 @@ GCValue js_node_set_text_content(JSContextHandle ctx, GCValue this_val, int argc
     // counter observed via MutationObserver {characterData:true}).
     int nt = node.node_type();
     if (nt == DOM_NODE_TYPE_TEXT || nt == DOM_NODE_TYPE_COMMENT || nt == DOM_NODE_TYPE_PROCESSING_INSTRUCTION) {
+        if (getenv("CYBER_DEBUG_TC")) fprintf(stderr, "[TC] enter nt=%d\n", nt), fflush(stderr);
         GCValue node_value = JS_GetPropertyStr(ctx, this_val, "nodeValue");
         const char *old_buf = NULL;
         if (JS_IsString(node_value)) {
             old_buf = JS_ToCString(ctx, node_value);
         }
+        if (getenv("CYBER_DEBUG_TC")) fprintf(stderr, "[TC] got nodeValue\n"), fflush(stderr);
         node.set_node_value(text);
+        if (getenv("CYBER_DEBUG_TC")) fprintf(stderr, "[TC] set_node_value done\n"), fflush(stderr);
         mo_notify_character_data(ctx, this_val, old_buf);
+        if (getenv("CYBER_DEBUG_TC")) fprintf(stderr, "[TC] mo_notify done\n"), fflush(stderr);
         if (old_buf) JS_FreeCString(ctx, old_buf);
         JS_FreeCString(ctx, text);
         return JS_UNDEFINED;
@@ -3291,9 +3295,11 @@ GCValue js_node_set_node_value(JSContextHandle ctx, GCValue this_val, int argc, 
             old_buf[sizeof(old_buf) - 1] = '\0';
         }
         node.set_node_value(text);
-        // Keep the .data / .textContent mirrors in sync.
-        JS_SetPropertyStr(ctx, this_val, "data", JS_NewString(ctx, text));
-        JS_SetPropertyStr(ctx, this_val, "textContent", JS_NewString(ctx, text));
+        /* NOTE: do NOT mirror into the "data"/"textContent" JS properties via
+         * JS_SetPropertyStr here.  The getters for all three read node_value(),
+         * so the DOM value is already in sync — and a [[Set]] on "textContent"
+         * re-invokes the ShadyDOM/polyfill textContent setter, which sets
+         * nodeValue again: infinite recursion (stack overflow). */
         mo_notify_character_data(ctx, this_val, old_buf);
     }
     return JS_UNDEFINED;

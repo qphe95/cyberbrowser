@@ -159,6 +159,13 @@ typedef struct LayoutBox {
 #define LAYOUT_SIDE_TOP    0x04
 #define LAYOUT_SIDE_BOTTOM 0x08
     uint32_t positioned_sides;
+
+    /* >0 when font-size was specified relative to the parent's font-size
+     * (percentage or em).  The ratio is applied against the parent's final
+     * font-size in a serial preorder pass after the parallel style apply,
+     * because the parallel pass cannot safely read the parent's computed
+     * font-size. */
+    double font_size_ratio;
 } LayoutBox;
 
 /* Flat node reference used by both passes. */

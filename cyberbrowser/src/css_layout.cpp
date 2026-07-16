@@ -169,6 +169,7 @@ static bool layout_build_nodes(LayoutContext *ctx, const int *map)
         box->justify_content = CSS_JUSTIFY_FLEX_START;
         box->align_items = CSS_ALIGN_STRETCH;
         box->font_size = 16.0;
+        box->font_size_ratio = 0.0;
         box->font_family[0] = '\0';
         box->background_image_url[0] = '\0';
         box->color_r = 0.0;
@@ -891,7 +892,25 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
             box->background_image_url[0] = '\0';
         }
     } else if (strcasecmp(prop, "font-size") == 0) {
-        box->font_size = css_parse_length(value, parent_width, viewport_width);
+        /* Percentage and em font-sizes are relative to the PARENT's computed
+         * font-size, not to the containing-block width.  Record the ratio and
+         * resolve it in a serial preorder pass after the (parallel) apply. */
+        if (css_value_is_percent(value)) {
+            box->font_size_ratio = css_parse_percent_ratio(value);
+            box->font_size = 16.0 * box->font_size_ratio; /* provisional */
+        } else {
+            const char *p = value;
+            while (*p && isspace((unsigned char)*p)) p++;
+            char *end = NULL;
+            double num = strtod(p, &end);
+            if (end != p && strcasecmp(end, "em") == 0) {
+                box->font_size_ratio = num;
+                box->font_size = 16.0 * num; /* provisional */
+            } else {
+                box->font_size_ratio = 0.0;
+                box->font_size = css_parse_length(value, parent_width, viewport_width);
+            }
+        }
         if (box->font_size <= 0.0) box->font_size = 16.0;
     } else if (strcasecmp(prop, "font-family") == 0) {
         /* Keep only the first comma-separated family name, stripped of quotes and whitespace. */
@@ -1623,6 +1642,19 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
     /* Pass 2: apply normal declarations in parallel, resolving var() references. */
     LOG_INFO("Applying %d stylesheet(s) to %d layout nodes in parallel", list.count, ctx->tree.count);
     layout_apply_stylesheets_parallel(ctx, &list);
+
+    /* Pass 3 (serial, preorder): resolve parent-relative font-size ratios now
+     * that every box's own font-size is final. */
+    for (int i = 0; i < ctx->tree.count; i++) {
+        int idx = ctx->tree.preorder[i];
+        LayoutBox *box = layout_box(ctx, idx);
+        if (box->font_size_ratio > 0.0) {
+            int p = ctx->tree.nodes[idx].parent_idx;
+            double base = (p >= 0) ? layout_box(ctx, p)->font_size : 16.0;
+            if (base <= 0.0) base = 16.0;
+            box->font_size = base * box->font_size_ratio;
+        }
+    }
     layout_sheet_list_free(&list);
 }
 
@@ -2341,7 +2373,7 @@ static void layout_dump_boxes(LayoutContext *ctx, const char *path)
 {
     FILE *fp = fopen(path, "w");
     if (!fp) return;
-    fprintf(fp, "idx\ttag\tid\tclass\tdisplay\tx\ty\twidth\theight\tmargin_t\tmargin_r\tmargin_b\tmargin_l\tpadding_t\tpadding_r\tpadding_b\tpadding_l\tborder_t\tborder_r\tborder_b\tborder_l\tflex_grow\tflex_shrink\tposition\tbox_sizing\n");
+    fprintf(fp, "idx\ttag\tid\tclass\tdisplay\tx\ty\twidth\theight\tmargin_t\tmargin_r\tmargin_b\tmargin_l\tpadding_t\tpadding_r\tpadding_b\tpadding_l\tborder_t\tborder_r\tborder_b\tborder_l\tflex_grow\tflex_shrink\tposition\tbox_sizing\tbg\tvisibility\n");
     for (int i = 0; i < ctx->tree.count; i++) {
         LayoutBox *b = &ctx->boxes[i];
         HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx);
@@ -2378,13 +2410,22 @@ static void layout_dump_boxes(LayoutContext *ctx, const char *path)
         }
         const char *bsname = "content-box";
         if (b->box_sizing == CSS_BOX_SIZING_BORDER_BOX) bsname = "border-box";
-        fprintf(fp, "%d\t%s\t%s\t%s\t%s\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%s\t%s\n",
+        char bg_buf[32] = "-";
+        if (b->background_color_a > 0.0) {
+            snprintf(bg_buf, sizeof(bg_buf), "#%02x%02x%02x/a%.2f",
+                     (int)(b->background_color_r * 255.0),
+                     (int)(b->background_color_g * 255.0),
+                     (int)(b->background_color_b * 255.0),
+                     b->background_color_a);
+        }
+        const char *vname = (b->visibility == CSS_VISIBILITY_HIDDEN) ? "hidden" : "visible";
+        fprintf(fp, "%d\t%s\t%s\t%s\t%s\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%s\t%s\t%s\t%s\n",
                 i, tag, id_buf, cls_buf, dname,
                 b->x, b->y, b->width, b->height,
                 b->margin_top, b->margin_right, b->margin_bottom, b->margin_left,
                 b->padding_top, b->padding_right, b->padding_bottom, b->padding_left,
                 b->border_top, b->border_right, b->border_bottom, b->border_left,
-                b->flex_grow, b->flex_shrink, pname, bsname);
+                b->flex_grow, b->flex_shrink, pname, bsname, bg_buf, vname);
     }
     fclose(fp);
 }

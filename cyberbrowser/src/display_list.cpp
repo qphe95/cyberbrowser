@@ -304,9 +304,11 @@ static bool document_is_dark_mode(LayoutContext *ctx)
         if (!node || node->type != HTML_NODE_ELEMENT) continue;
         if (strcasecmp(node->tag_name, "html") == 0 ||
             strcasecmp(node->tag_name, "body") == 0) {
-            if (node_attribute_value(node, "darker-dark-theme") != NULL) return true;
+            /* Only the exact `dark` attribute marks YouTube's dark theme.  The
+             * legacy `darker-dark-theme` attribute is present on the light
+             * theme as well (deprecated), so it must not be used here. */
             if (node_attribute_value(node, "dark") != NULL) return true;
-            static const char *dark_needles[] = {"dark", "darker-dark-theme", NULL};
+            static const char *dark_needles[] = {"dark-mode", "theme-dark", NULL};
             if (node_class_contains_any(node, dark_needles)) return true;
         }
     }
@@ -408,9 +410,10 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
         /* Placeholder fills for content shells injected without visible CSS in
          * our engine.  This makes skeleton thumbnails, avatars, and text shells
          * visible instead of transparent.  Colors are chosen to contrast with
-         * dark backgrounds. These intentionally override any near-black CSS
-         * background so the skeleton shapes remain visible. */
-        if (!box->background_image_url[0]) {
+         * dark backgrounds.  Only applies when the cascade did not provide a
+         * background color — otherwise it would paint over the real (light)
+         * skeleton color from the page's CSS. */
+        if (!box->background_image_url[0] && box->background_color_a <= 0.0f) {
             static const char *thumbnail_needles[] = {
                 "rich-thumbnail", "video-thumbnail", "thumbnail", NULL
             };
