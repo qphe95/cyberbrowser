@@ -22,6 +22,7 @@
 #include "browser_api_impl_internal.h"
 #include "js_quickjs.h"
 #include "http_download.h"
+#include "url_utils.h"
 #include "html_dom.h"
 #include "css_parser.h"
 #include "css_layout.h"
@@ -43,6 +44,134 @@ extern "C" void timer_set_idle_deadline(unsigned long long deadline_ms);
 /* Default page loaded by the smoke-test executable. */
 static const char DEFAULT_START_URL[] = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
 extern const char *g_cyber_start_url;
+
+/* ============================================================================
+ * ES module loader
+ *
+ * YouTube's modern app lazy-loads page-specific component modules via dynamic
+ * import() of chunk URLs.  QuickJS calls the host module normalize/loader
+ * hooks registered here to resolve and fetch those chunks.  Without them
+ * every import() fails with "could not load module", so watch-page components
+ * (ytd-watch-flexy, yt-formatted-string, ...) are never registered.
+ * ============================================================================ */
+
+/* Resolve a module specifier against the page origin into an absolute URL.
+ * Handles absolute URLs, scheme-relative (//host), root-absolute (/path), and
+ * relative (path) specifiers.  Returns a malloc'd string (caller frees). */
+static char *cyber_module_resolve(const char *base, const char *specifier)
+{
+    if (!specifier || !specifier[0]) return NULL;
+
+    /* Absolute URL (http://, https://, or any scheme:) — use as-is. */
+    if (url_has_scheme(specifier)) return strdup(specifier);
+
+    /* Determine the origin from the base URL. */
+    char origin[512] = "";
+    const char *src = (base && base[0]) ? base : g_cyber_start_url;
+    if (src) {
+        const char *scheme = strstr(src, "://");
+        if (scheme) {
+            const char *host = scheme + 3;
+            const char *slash = strchr(host, '/');
+            size_t origin_len = slash ? (size_t)(slash - src) : strlen(src);
+            if (origin_len >= sizeof(origin)) origin_len = sizeof(origin) - 1;
+            memcpy(origin, src, origin_len);
+            origin[origin_len] = '\0';
+        }
+    }
+    if (!origin[0]) {
+        /* No origin discoverable; fall back to the specifier verbatim. */
+        return strdup(specifier);
+    }
+
+    /* Scheme-relative (//host/...) → prepend "https:". */
+    if (specifier[0] == '/' && specifier[1] == '/') {
+        size_t n = strlen(specifier) + 8;
+        char *out = (char *)malloc(n);
+        if (out) snprintf(out, n, "https:%s", specifier);
+        return out;
+    }
+    /* Root-absolute (/path) → origin + path. */
+    if (specifier[0] == '/') {
+        size_t n = strlen(origin) + strlen(specifier) + 1;
+        char *out = (char *)malloc(n);
+        if (out) snprintf(out, n, "%s%s", origin, specifier);
+        return out;
+    }
+    /* Relative (path) → origin + "/" + path.  (Coarse but adequate for
+     * chunk specifiers that are already effectively absolute.) */
+    size_t n = strlen(origin) + strlen(specifier) + 2;
+    char *out = (char *)malloc(n);
+    if (out) snprintf(out, n, "%s/%s", origin, specifier);
+    return out;
+}
+
+/* JSModuleNormalizeFunc: return the canonical (absolute URL) module name as a
+ * GCValue string. */
+static GCValue cyber_module_normalize(JSContextHandle ctx, const char *module_base_name,
+                                      const char *module_name, void *opaque)
+{
+    (void)opaque;
+    char *resolved = cyber_module_resolve(module_base_name, module_name);
+    if (!resolved) {
+        JS_ThrowTypeError(ctx, "could not normalize module '%s'", module_name);
+        return JS_EXCEPTION;
+    }
+    GCValue ret = JS_NewString(ctx, resolved);
+    free(resolved);
+    return ret;
+}
+
+/* JSModuleLoaderFunc: fetch the module source over HTTP and compile it as an
+ * ES module.  Returns the module definition handle (or null on failure). */
+static JSModuleDefHandle cyber_module_loader(JSContextHandle ctx, const char *module_name,
+                                             void *opaque)
+{
+    (void)opaque;
+    const char *url = module_name;
+
+    /* Only http(s) URLs can be fetched; bare names can't be loaded. */
+    if (!url_is_network_url(url)) {
+        JS_ThrowReferenceError(ctx, "module '%s' is not a network URL", url);
+        return JSModuleDefHandle(GC_HANDLE_NULL);
+    }
+
+    HttpBuffer buffer = {0};
+    char err[256] = {0};
+    bool ok = http_get_to_memory(url, &buffer, err, sizeof(err));
+    if (!ok || !buffer.data || buffer.size == 0) {
+        platform_log(LOG_LEVEL_WARN, "module_loader", "Failed to fetch module %s: %s",
+                     url, err[0] ? err : "unknown");
+        if (buffer.data) free(buffer.data);
+        JS_ThrowReferenceError(ctx, "could not fetch module '%s'", url);
+        return JSModuleDefHandle(GC_HANDLE_NULL);
+    }
+
+    platform_log(LOG_LEVEL_INFO, "module_loader", "Loaded module %s (%zu bytes)", url, buffer.size);
+
+    /* Compile the source as a module.  JS_Eval with JS_EVAL_TYPE_MODULE parses
+     * and registers the module, returning a JS_TAG_MODULE value whose handle
+     * we extract and return. */
+    GCValue mv = JS_Eval(ctx, buffer.data, buffer.size, url, JS_EVAL_TYPE_MODULE);
+    free(buffer.data);
+    if (JS_IsException(mv)) {
+        GCValue exc = JS_GetException(ctx);
+        const char *es = JS_ToCString(ctx, exc);
+        platform_log(LOG_LEVEL_WARN, "module_loader", "Module eval error for %s: %s",
+                     url, es ? es : "?");
+        if (es) JS_FreeCString(ctx, es);
+        JS_ThrowReferenceError(ctx, "could not compile module '%s'", url);
+        return JSModuleDefHandle(GC_HANDLE_NULL);
+    }
+
+    JSModuleDefHandle m = JS_VALUE_GET_MODULE_HANDLE(mv);
+    if (!m.valid()) {
+        platform_log(LOG_LEVEL_WARN, "module_loader", "Module %s did not produce a def", url);
+        JS_ThrowReferenceError(ctx, "module '%s' produced no definition", url);
+        return JSModuleDefHandle(GC_HANDLE_NULL);
+    }
+    return m;
+}
 
 #ifdef _WIN32
 static LONG WINAPI unhandled_exception_filter(EXCEPTION_POINTERS *ep) {
@@ -71,6 +200,10 @@ static bool init_browser_context(void) {
         printf("FATAL: JS_NewRuntime() failed\n");
         return false;
     }
+
+    /* Register the ES module loader so dynamic import() can fetch YouTube's
+     * lazily-loaded component chunks over HTTP. */
+    JS_SetModuleLoaderFunc(g_rt, cyber_module_normalize, cyber_module_loader, NULL);
 
     g_ctx = JS_NewContext(g_rt);
     if (!g_ctx.valid()) {
