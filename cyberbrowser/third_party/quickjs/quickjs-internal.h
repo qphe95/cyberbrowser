@@ -290,6 +290,11 @@ public:
     GCHandle frame_handle() const {
         JSVarRef* p = get_ptr();
         if (!p || p->is_detached) return GC_HANDLE_NULL;
+        /* Only async refs carry a GC handle to the frame.  A sync ref instead
+         * stores a raw JSStackFrame* in the same union; returning it here as a
+         * GCHandle would make the GC mark a garbage index (and never mark the
+         * real frame), so report NULL instead. */
+        if (!p->is_async_frame) return GC_HANDLE_NULL;
         return p->frame_ref.frame_handle;
     }
     

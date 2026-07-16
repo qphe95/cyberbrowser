@@ -1043,6 +1043,28 @@ int main(int argc, char *argv[]) {
                     "}";
                 JS_Eval(g_ctx, reupgrade_js, strlen(reupgrade_js), "<reupgrade>", JS_EVAL_TYPE_GLOBAL);
             }
+
+            /* The app's rendering phase is gated on the ytsignals "ci" signal,
+             * normally fired by the app element's Polymer attached() callback.
+             * When that callback is not delivered, the rendering phase (which
+             * routes ytInitialData into the app) never runs.  Fire the signal
+             * directly once the app has stamped. */
+            {
+                const char *fire_ci_js =
+                    "(function(){"
+                    "  try {"
+                    "    var L = window.default_kevlar_base;"
+                    "    if (L && L.LU) { L.LU().processSignal('ci'); console.error('[CI] fired via dkb'); }"
+                    "    else if (window.ytsignals && typeof window.ytsignals.getInstance === 'function') {"
+                    "      var inst = window.ytsignals.getInstance();"
+                    "      if (inst && typeof inst.processSignal === 'function') { inst.processSignal('ci'); console.error('[CI] fired via ytsignals'); }"
+                    "      else console.error('[CI] no processSignal');"
+                    "    } else console.error('[CI] no signals API');"
+                    "  } catch(e) { console.error('[CI] fire failed: ' + (e && e.message)); }"
+                    "})();";
+                JS_Eval(g_ctx, fire_ci_js, strlen(fire_ci_js), "<fire_ci>", JS_EVAL_TYPE_GLOBAL);
+                pump_timers_and_jobs(g_ctx);
+            }
             }
 
         // ytInitialData injection removed: the page is expected to fetch its

@@ -7679,17 +7679,16 @@ extern "C" void mark_children(JSRuntimeHandle rt, GCHandle handle,
                 if (sf->bytecode_handle != GC_HANDLE_NULL) {
                     mark_func(rt, sf->bytecode_handle);
                 }
-                /* Mark the frame's variable storage up to its current operand
-                 * depth (sp_offset), mirroring the async-frame marker.  Frames
-                 * outlive their activation when closures capture their locals,
-                 * so the captured values must be marked or they are reclaimed
-                 * while var_refs still point at them (closures then read
-                 * garbage, e.g. a WeakMap/constructor resolving to a
-                 * non-function).  For a running frame sp_offset == 0, so nothing
-                 * is marked (its operand slots may be uninitialized). */
-                if (sf->sp_offset > 0) {
-                    GCValue *var_buf = JS_SF_VAR_BUF(sf);
-                    for (int i = 0; i < sf->sp_offset; i++)
+                /* Mark the frame's local variable storage.  Frames outlive their
+                 * activation when closures capture their locals, so the captured
+                 * values must be marked or they are reclaimed while var_refs
+                 * still point at them (closures then read garbage).  Only the
+                 * local slots are marked (always initialized at function entry);
+                 * the operand stack beyond them is not touched (may be
+                 * uninitialized on running frames). */
+                if (sf->var_count > 0) {
+                    GCValue *var_buf = (GCValue *)((uint8_t *)sf + sf->var_buf_offset);
+                    for (int i = 0; i < sf->var_count; i++)
                         JS_MarkValue(rt, var_buf[i], mark_func);
                 }
                 /* Mark all var_refs in this frame */
@@ -20111,12 +20110,15 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                     var_ref.set_is_detached(FALSE);
                     var_ref.set_var_idx(i);
                     var_ref.set_is_arg(TRUE);
-                    var_ref.set_frame_ref(sf, FALSE, sf->self_handle);
+                    /* Handle-based frame ref: a raw frame_ptr (async=FALSE) is
+                     * misread as a GCHandle by the marker, so the frame is never
+                     * kept alive and captured values dangle. */
+                    var_ref.set_frame_ref(sf, TRUE, sf->self_handle);
                     gc_set_heap_handle(sf_var_refs[vd->var_ref_idx], var_ref.handle());
                 }
             }
         }
-        
+
         /* Then, initialize captured local variables */
         for (i = 0; i < b.var_count(); i++) {
             JSBytecodeVarDef *vd = &vardefs[b.arg_count() + i];
@@ -20128,7 +20130,8 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                     var_ref.set_is_detached(FALSE);
                     var_ref.set_var_idx(i);
                     var_ref.set_is_arg(FALSE);
-                    var_ref.set_frame_ref(sf, FALSE, sf->self_handle);
+                    /* Handle-based frame ref (see above). */
+                    var_ref.set_frame_ref(sf, TRUE, sf->self_handle);
                     gc_set_heap_handle(sf_var_refs[vd->var_ref_idx], var_ref.handle());
                 }
             }
