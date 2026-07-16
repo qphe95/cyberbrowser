@@ -1,0 +1,1 @@
+(function(){var de=document.documentElement;if(de&&(!de.style||typeof de.style!='object')) de.style={};var b=document.body;if(b&&(!b.style||typeof b.style!='object')) b.style={};var h=document.head;if(h&&(!h.style||typeof h.style!='object')) h.style={};})();

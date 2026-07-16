@@ -149,6 +149,18 @@ static JSModuleDefHandle cyber_module_loader(JSContextHandle ctx, const char *mo
 
     platform_log(LOG_LEVEL_INFO, "module_loader", "Loaded module %s (%zu bytes)", url, buffer.size);
 
+    if (getenv("CYBER_DUMP_SCRIPTS")) {
+        static int module_dump_idx = 0;
+        char dump_name[64];
+        snprintf(dump_name, sizeof(dump_name), "exec_module_%d.js", module_dump_idx++);
+        FILE *df = fopen(dump_name, "wb");
+        if (df) {
+            fwrite(buffer.data, 1, buffer.size, df);
+            fclose(df);
+        }
+        platform_log(LOG_LEVEL_INFO, "module_loader", "Dumped module to %s url=%s", dump_name, url);
+    }
+
     /* Compile the source as a module.  JS_Eval with JS_EVAL_TYPE_MODULE parses
      * and registers the module, returning a JS_TAG_MODULE value whose handle
      * we extract and return. */
@@ -695,6 +707,44 @@ int main(int argc, char *argv[]) {
 #endif
 
     setvbuf(stdout, NULL, _IONBF, 0);
+
+    /* Fast JS-engine probe: eval a file and exit (CYBER_PROBE_JS=/path/to.js).
+     * Optional CYBER_PROBE_NO_LAZY=1 forces full (non-lazy) parsing. */
+    {
+        const char *probe = getenv("CYBER_PROBE_JS");
+        if (probe && probe[0]) {
+            if (!platform_init()) { printf("FATAL: platform_init() failed\n"); return 1; }
+            if (!platform_http_init()) { printf("FATAL: platform_http_init() failed\n"); return 1; }
+            if (!init_browser_context()) { printf("FATAL: init_browser_context() failed\n"); return 1; }
+            FILE *pf = fopen(probe, "rb");
+            if (!pf) { printf("FATAL: cannot open probe %s\n", probe); return 1; }
+            fseek(pf, 0, SEEK_END);
+            long psz = ftell(pf);
+            fseek(pf, 0, SEEK_SET);
+            char *pbuf = (char *)malloc((size_t)psz + 1);
+            fread(pbuf, 1, (size_t)psz, pf);
+            fclose(pf);
+            pbuf[psz] = '\0';
+            int pflags = JS_EVAL_TYPE_GLOBAL;
+            if (getenv("CYBER_PROBE_NO_LAZY")) pflags |= JS_EVAL_FLAG_NO_LAZY;
+            GCValue pres = JS_Eval(g_ctx, pbuf, (size_t)psz, "<probe>", pflags);
+            if (JS_IsException(pres)) {
+                GCValue exc = JS_GetException(g_ctx);
+                const char *es = JS_ToCString(g_ctx, exc);
+                printf("PROBE EXCEPTION: %s\n", es ? es : "?");
+                GCValue stack = JS_GetPropertyStr(g_ctx, exc, "stack");
+                const char *ss = JS_ToCString(g_ctx, stack);
+                if (ss) printf("PROBE STACK:\n%s\n", ss);
+            } else {
+                printf("PROBE OK\n");
+            }
+            free(pbuf);
+            cleanup_browser_context();
+            platform_http_cleanup();
+            platform_cleanup();
+            return JS_IsException(pres) ? 1 : 0;
+        }
+    }
 
     printf("========================================\n");
     printf("CyberBrowser\n");

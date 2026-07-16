@@ -618,6 +618,9 @@ static void js_video_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_fun
     JS_MarkValue(rt, vid->onplaying, mark_func);
     JS_MarkValue(rt, vid->onerror, mark_func);
     JS_MarkValue(rt, vid->onvolumechange, mark_func);
+    if (vid->dom_node != GC_HANDLE_NULL) {
+        mark_func(rt, vid->dom_node);
+    }
 }
 
 GCValue js_video_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
@@ -634,23 +637,18 @@ GCValue js_video_constructor(JSContextHandle ctx, GCValue new_target, int argc, 
     
     GCValue obj = JS_NewObjectClass(ctx, js_video_class_id);
     vid.attach_to_object(obj);
-    
-    /* Set tagName for accurate HTML emulation */
-    JS_SetPropertyStr(ctx, obj, "tagName", JS_NewString(ctx, "VIDEO"));
-    
-    /* Add style object for CSS property access */
-    GCValue style = JS_NewObject(ctx);
-    if (!JS_IsException(style)) {
-        JS_SetPropertyStr(ctx, style, "animationTimingFunction", JS_NewString(ctx, ""));
-        JS_SetPropertyStr(ctx, style, "removeProperty",
-            JS_NewCFunction(ctx, js_style_remove_property, "removeProperty", 1));
-        JS_SetPropertyStr(ctx, style, "setProperty",
-            JS_NewCFunction(ctx, js_style_set_property, "setProperty", 3));
-        JS_SetPropertyStr(ctx, style, "getPropertyValue",
-            JS_NewCFunction(ctx, js_style_get_property_value, "getPropertyValue", 1));
-        JS_SetPropertyStr(ctx, obj, "style", style);
+
+    /* Give the element a real DOM node backing so Element.prototype getters
+     * (tagName, style, attributes, ...) work.  Previously tagName/style were
+     * set with JS_SetPropertyStr, which silently fails because Element.prototype
+     * defines those as getter-only accessors, leaving the video element with no
+     * usable tagName or style (YouTube's player then crashes in g.lz sizing the
+     * video container). */
+    DOMNodeHandle video_node = DOMNodeHandle::create(ctx, DOM_NODE_TYPE_ELEMENT, "VIDEO");
+    if (video_node.valid()) {
+        vid.set_dom_node(video_node.handle());
     }
-    
+
     /* Add dimension properties expected by player code */
     JS_SetPropertyStr(ctx, obj, "clientWidth", JS_NewInt32(ctx, 640));
     JS_SetPropertyStr(ctx, obj, "clientHeight", JS_NewInt32(ctx, 360));
@@ -658,7 +656,7 @@ GCValue js_video_constructor(JSContextHandle ctx, GCValue new_target, int argc, 
     JS_SetPropertyStr(ctx, obj, "offsetHeight", JS_NewInt32(ctx, 360));
     JS_SetPropertyStr(ctx, obj, "scrollWidth", JS_NewInt32(ctx, 640));
     JS_SetPropertyStr(ctx, obj, "scrollHeight", JS_NewInt32(ctx, 360));
-    
+
     return obj;
 }
 
@@ -2056,6 +2054,8 @@ GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int ar
     
     static int create_counter = 0;
     if (tag) {
+        if (getenv("CYBER_DUMP_BC"))
+            fprintf(stderr, "[CE] createElement tag='%s'\n", tag);
         // Create proper video element
         if (strcasecmp(tag, "video") == 0) {
             elem = js_video_constructor(ctx, JS_NULL, 0, NULL);
@@ -2897,10 +2897,24 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
         // Reset diagnostic for property-on-undefined errors
         g_last_undefined_prop[0] = '\0';
 
+        // Debug: dump executed scripts to disk so exception stack frames
+        // (which carry original line numbers) can be mapped to real source.
+        if (getenv("CYBER_DUMP_SCRIPTS")) {
+            char dump_name[64];
+            snprintf(dump_name, sizeof(dump_name), "exec_script_%d.js", i);
+            FILE *df = fopen(dump_name, "wb");
+            if (df) {
+                fwrite(scripts[i], 1, script_lens[i], df);
+                fclose(df);
+            }
+        }
+
         // Execute script directly. Domain-specific string patches are not
         // applied; custom-element upgrade and missing standard APIs are
         // implemented in the browser layer instead.
-        GCValue result = JS_Eval(ctx, scripts[i], script_lens[i], filename, JS_EVAL_TYPE_GLOBAL);
+        int eval_flags = JS_EVAL_TYPE_GLOBAL;
+        if (getenv("CYBER_NO_LAZY")) eval_flags |= JS_EVAL_FLAG_NO_LAZY;
+        GCValue result = JS_Eval(ctx, scripts[i], script_lens[i], filename, eval_flags);
 
         // Clear the interrupt handler so later operations (pumping timers, GC)
         // are not subject to the per-script deadline.

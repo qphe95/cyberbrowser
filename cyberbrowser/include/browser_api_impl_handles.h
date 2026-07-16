@@ -475,6 +475,16 @@ public:
         if (p) p->onloadstart = val;
     }
 
+    GCHandle dom_node() const {
+        HTMLVideoElement* p = get_ptr();
+        return p ? p->dom_node : GC_HANDLE_NULL;
+    }
+
+    void set_dom_node(GCHandle val) {
+        HTMLVideoElement* p = get_ptr();
+        if (p) p->dom_node = val;
+    }
+
     GCValue onloadedmetadata() const {
         HTMLVideoElement* p = get_ptr();
         return p ? p->onloadedmetadata : JS_NULL;

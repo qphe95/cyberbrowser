@@ -19288,10 +19288,44 @@ static GCValue js_closure2(JSContextHandle ctx, GCValue func_obj,
                     var_ref = get_var_ref_from_array_safe(
                         cur_var_refs_handle, b.closure_var_var_idx(i));
                     if (var_ref.valid()) {
-                        resolved = TRUE;
+                        /* Verify the parent bytecode has a matching closure var
+                         * at this index. The index is compile-time state and can
+                         * go stale (e.g. class constructors parsed inline in a
+                         * function body add global refs to the parent after the
+                         * parent's var_refs layout was fixed). A wrong index
+                         * would silently bind an unrelated var_ref (observed as
+                         * globals like Math resolving to undefined). Fall back
+                         * to a by-name global lookup on mismatch, mirroring the
+                         * JS_CLOSURE_REF case below. */
+                        if (sf) {
+                            JSObjectHandle parent_p = JS_VALUE_GET_OBJ_HANDLE(sf->cur_func);
+                            JSFunctionBytecodeHandle parent_b(parent_p.func_bytecode_handle());
+                            int cv_idx = b.closure_var_var_idx(i);
+                            if (cv_idx >= 0 && cv_idx < parent_b.closure_var_count() &&
+                                parent_b.closure_var_var_name(cv_idx) == b.closure_var_var_name(i)) {
+                                resolved = TRUE;
+                            }
+                            if (getenv("CYBER_DUMP_BC")) {
+                                char ab[128];
+                                fprintf(stderr, "[CL] GLOBAL_REF name='%s' cv_idx=%d parent_cv_count=%d match=%d resolved=%d val_tag=%d\n",
+                                        JS_AtomGetStr(ctx, ab, sizeof(ab), b.closure_var_var_name(i)),
+                                        cv_idx, parent_b.closure_var_count(),
+                                        (cv_idx >= 0 && cv_idx < parent_b.closure_var_count() &&
+                                         parent_b.closure_var_var_name(cv_idx) == b.closure_var_var_name(i)),
+                                        resolved, JS_VALUE_GET_TAG(var_ref.get_value()));
+                            }
+                        } else {
+                            resolved = TRUE;
+                            if (getenv("CYBER_DUMP_BC")) {
+                                char ab[128];
+                                fprintf(stderr, "[CL] GLOBAL_REF name='%s' no-sf inherited val_tag=%d\n",
+                                        JS_AtomGetStr(ctx, ab, sizeof(ab), b.closure_var_var_name(i)),
+                                        JS_VALUE_GET_TAG(var_ref.get_value()));
+                            }
+                        }
                     }
                 }
-                
+
                 if (!resolved) {
                     /* Look up in global object */
                     JSClosureVar cv;
@@ -19432,7 +19466,7 @@ static GCValue js_closure(JSContextHandle ctx, GCValue bfunc,
 
 static int js_op_define_class(JSContextHandle ctx, GCValue *sp,
                               JSAtom class_name, int class_flags,
-                              JSVarRefHandle*cur_var_refs,
+                              GCHandle cur_var_refs_handle,
                               JSStackFrame *sf, BOOL is_computed_name)
 {
     GCValue bfunc, parent_class, proto = JS_UNDEFINED;
@@ -19475,7 +19509,7 @@ static int js_op_define_class(JSContextHandle ctx, GCValue *sp,
                                   JS_CLASS_BYTECODE_FUNCTION);
     if (JS_IsException(ctor))
         goto fail;
-    ctor = js_closure2(ctx, ctor, b, cur_var_refs ? cur_var_refs[0].handle() : GC_HANDLE_NULL, sf, FALSE, JSModuleDefHandle());
+    ctor = js_closure2(ctx, ctor, b, cur_var_refs_handle, sf, FALSE, JSModuleDefHandle());
     bfunc = JS_UNDEFINED;
     if (JS_IsException(ctor))
         goto fail;
@@ -21721,7 +21755,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                 class_flags = pc[4];
                 pc += 5;
                 if (js_op_define_class(ctx, sp, atom, class_flags,
-                                       var_refs, sf,
+                                       var_refs_handle, sf,
                                        (opcode == OP_define_class_computed)) < 0)
                     goto exception;
             }
@@ -22805,6 +22839,44 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
         }
     }
  exception:
+    if (getenv("CYBER_LOG_THROW")) {
+        GCValue exc0 = rt.current_exception();
+        int tag0 = JS_VALUE_GET_TAG(exc0);
+        BOOL fresh_error = is_backtrace_needed(ctx, exc0);
+        if (fresh_error || tag0 == JS_TAG_STRING) {
+            const char *msg = "?";
+            char mbuf[300];
+            mbuf[0] = 0;
+            if (fresh_error) {
+                GCValue mv = JS_GetPropertyStr(ctx, exc0, "message");
+                const char *m = JS_ToCString(ctx, mv);
+                if (m) snprintf(mbuf, sizeof(mbuf), "%s", m);
+                msg = mbuf;
+            } else {
+                const char *m = JS_ToCString(ctx, exc0);
+                if (m) snprintf(mbuf, sizeof(mbuf), "%.200s", m);
+                msg = mbuf;
+            }
+            char fname[128]; fname[0] = 0;
+            const char *fn = "?";
+            int fl = -1, fc = -1;
+            if (sf && JS_VALUE_GET_TAG(sf->cur_func) == JS_TAG_OBJECT) {
+                JSObjectHandle fp = JS_VALUE_GET_OBJ_HANDLE(sf->cur_func);
+                if (js_class_has_bytecode(fp.class_id())) {
+                    JSFunctionBytecodeHandle fb(fp.func_bytecode_handle());
+                    if (fb.has_debug()) {
+                        const char *a = JS_AtomToCString(ctx, fb.debug_filename());
+                        if (a) snprintf(fname, sizeof(fname), "%s", a);
+                        fn = fname;
+                        int pc_off = (int)(pc - fb.byte_code_buf());
+                        fl = find_line_num(ctx, fb, pc_off > 0 ? pc_off - 1 : 0, &fc);
+                    }
+                }
+            }
+            fprintf(stderr, "[THROW] %s msg='%s' at %s:%d:%d\n",
+                    fresh_error ? "ERR " : "STR ", msg, fn, fl, fc);
+        }
+    }
     if (is_backtrace_needed(ctx, rt.current_exception())) {
         /* add the backtrace information now (it is not done
            before if the exception happens in a bytecode
@@ -39860,6 +39932,21 @@ static GCValue js_create_function(JSContextHandle ctx, JSFunctionDef *fd)
     }
 #endif
 
+    if (getenv("CYBER_DUMP_BC")) {
+        /* Minimal dump: function identity + closure vars (opcode dump helpers
+         * in this tree are bit-rotted, so don't use them). */
+        char atom_buf[128];
+        fprintf(stderr, "[BC] func='%s' closure_var_count=%d arg_count=%d var_count=%d\n",
+                JS_AtomGetStr(ctx, atom_buf, sizeof(atom_buf), b.func_name()),
+                b.closure_var_count(), b.arg_count(), b.var_count());
+        for (int i = 0; i < b.closure_var_count(); i++) {
+            fprintf(stderr, "[BC]   cv[%d] type=%d name='%s' var_idx=%d is_lexical=%d\n",
+                    i, (int)b.closure_var_closure_type(i),
+                    JS_AtomGetStr(ctx, atom_buf, sizeof(atom_buf), b.closure_var_var_name(i)),
+                    b.closure_var_var_idx(i), (int)b.closure_var_is_lexical(i));
+        }
+    }
+
     /* Lazy function bytecode created if applicable */
 
     /* parent_handle and link_idx are handles - GC frees automatically */
@@ -41260,6 +41347,30 @@ static GCValue js_resume_lazy_parse(JSContextHandle ctx,
         return JS_ThrowInternalError(ctx, "lazy parse: invalid source handle");
     }
     const uint8_t *root_source = (const uint8_t *)source_str.data();
+
+    /* DEBUG (CYBER_DUMP_SCRIPTS): dump each unique lazy root source so stack
+     * frames showing <lazy>:LINE can be mapped to real source text. */
+    if (getenv("CYBER_DUMP_SCRIPTS")) {
+        static GCHandle seen_sources[512];
+        static int seen_count = 0;
+        int found = 0;
+        for (int i = 0; i < seen_count; i++) {
+            if (seen_sources[i] == state->source_handle) { found = 1; break; }
+        }
+        if (!found) {
+            if (seen_count < 512) seen_sources[seen_count++] = state->source_handle;
+            char dump_name[96];
+            snprintf(dump_name, sizeof(dump_name), "lazy_root_%u.js",
+                     (unsigned)state->source_handle);
+            FILE *df = fopen(dump_name, "wb");
+            if (df) {
+                fwrite(root_source, 1, source_str.length(), df);
+                fclose(df);
+            }
+            fprintf(stderr, "[lazy] dump root source handle=%u len=%zu file=%s\n",
+                    (unsigned)state->source_handle, (size_t)source_str.length(), dump_name);
+        }
+    }
 
     /* Step 3: Create and initialize parser state */
     memset(&s, 0, sizeof(s));

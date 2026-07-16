@@ -822,6 +822,18 @@ DOMNodeHandle get_dom_node(JSContextHandle ctx, GCValue obj) {
     DOMNodeHandle node = DOMNodeHandle::from_object(obj);
     if (node.valid()) return node;
 
+    /* Video elements use js_video_class_id (opaque = HTMLVideoElement), so the
+     * DOMNodeHandle opaque lookup above misses.  The video element stores its
+     * backing DOM node in the HTMLVideoElement struct instead. */
+    if (js_video_class_id != 0) {
+        GCHandle vh = JS_GetOpaqueHandle(obj, js_video_class_id);
+        if (vh != GC_HANDLE_NULL) {
+            HTMLVideoElementHandle vid(vh);
+            GCHandle dn = vid.dom_node();
+            if (dn != GC_HANDLE_NULL) return DOMNodeHandle(dn);
+        }
+    }
+
     ShadowRootDataHandle sr = ShadowRootDataHandle::from_object(obj);
     if (sr.valid()) {
         GCHandle h = sr.dom_node();
@@ -973,6 +985,17 @@ static void dom_execute_external_script(JSContextHandle ctx, GCValue script, con
     char err[256] = {0};
     bool ok = http_get_to_memory(url, &buffer, err, sizeof(err));
     if (ok && buffer.data && buffer.size > 0) {
+        if (getenv("CYBER_DUMP_SCRIPTS")) {
+            static int dyn_dump_idx = 0;
+            char dump_name[64];
+            snprintf(dump_name, sizeof(dump_name), "exec_dyn_%d.js", dyn_dump_idx++);
+            FILE *df = fopen(dump_name, "wb");
+            if (df) {
+                fwrite(buffer.data, 1, buffer.size, df);
+                fclose(df);
+            }
+            platform_log(LOG_LEVEL_INFO, "dom_api", "Dumped dynamic script to %s url=%s", dump_name, url);
+        }
         GCValue doc = JS_GetPropertyStr(ctx, global, "document");
         GCValue prev_current = JS_GetPropertyStr(ctx, doc, "currentScript");
         JS_SetPropertyStr(ctx, doc, "currentScript", script);

@@ -63,6 +63,7 @@ typedef struct {
     GCValue onerror;
     GCValue onvolumechange;
     JSContextHandle ctx;
+    GCHandle dom_node;   // backing DOMNode (ELEMENT "VIDEO") for Element.prototype getters
 } HTMLVideoElement;
 
 /* ============================================================================
