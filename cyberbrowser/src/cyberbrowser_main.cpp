@@ -1105,6 +1105,57 @@ int main(int argc, char *argv[]) {
             }
             }
 
+        if (getenv("CYBER_DIAG_SIGNALS")) {
+            const char *diag_js =
+                "(function(){"
+                "  var pm = document.querySelector('ytd-page-manager');"
+                "  console.error('[DIAG] pm children=' + (pm ? pm.childElementCount : -1));"
+                "  var ytdapp = document.querySelector('ytd-app');"
+                "  console.error('[DIAG] ytd-app inst=' + (ytdapp && ytdapp.inst ? 'yes' : 'no'));"
+                "  if (ytdapp) { try { console.error('[DIAG] ytd-app ownProps=' + Object.getOwnPropertyNames(ytdapp).filter(function(n){return n[0]!='_';}).slice(0,40).join(',')); } catch(e){console.error('[DIAG] ownProps err');} }"
+                "  if (ytdapp) { console.error('[DIAG] polymerController=' + (ytdapp.polymerController ? 'yes' : 'no') + ' controllerProxy=' + (ytdapp.controllerProxy ? 'yes' : 'no')); }"
+                "  var sig = (window.ytsignals && window.ytsignals.getInstance) ? window.ytsignals.getInstance() : null;"
+                "  console.error('[DIAG] ytsignals inst=' + (sig ? 'yes' : 'no'));"
+                "  if (sig && sig.processSignal) { sig.processSignal('ci'); console.error('[DIAG] fired ci via ytsignals'); }"
+                "})();";
+            JS_Eval(g_ctx, diag_js, strlen(diag_js), "<diag_signals>", JS_EVAL_TYPE_GLOBAL);
+            pump_timers_and_jobs(g_ctx);
+            const char *diag2_js =
+                "(function(){"
+                "  var pm = document.querySelector('ytd-page-manager');"
+                "  console.error('[DIAG] after ci: pm children=' + (pm ? pm.childElementCount : -1));"
+                "  var w = document.querySelectorAll('ytd-watch-flexy');"
+                "  console.error('[DIAG] ytd-watch-flexy count=' + w.length);"
+                "})();";
+            JS_Eval(g_ctx, diag2_js, strlen(diag2_js), "<diag_signals2>", JS_EVAL_TYPE_GLOBAL);
+            pump_timers_and_jobs(g_ctx);
+            const char *diag3_js =
+                "(function(){"
+                "  var sig = (window.ytsignals && window.ytsignals.getInstance) ? window.ytsignals.getInstance() : null;"
+                "  if (sig && sig.processSignal) { sig.processSignal('eocs'); sig.processSignal('eor'); console.error('[DIAG] fired eocs+eor via ytsignals'); }"
+                "})();";
+            JS_Eval(g_ctx, diag3_js, strlen(diag3_js), "<diag_signals3>", JS_EVAL_TYPE_GLOBAL);
+            pump_timers_and_jobs(g_ctx);
+            const char *diag4_js =
+                "(function(){"
+                "  console.error('[DIAG4] href=' + window.location.href + ' pathname=' + window.location.pathname + ' search=' + window.location.search);"
+                "  var sig = (window.ytsignals && window.ytsignals.getInstance) ? window.ytsignals.getInstance() : null;"
+                "  var s = sig && sig.signals ? sig.signals.slice(0,8).join(',') : 'none';"
+                "  console.error('[DIAG4] signals[0..8]=' + s + ' total=' + (sig && sig.signals ? sig.signals.length : -1));"
+                "  var app = document.querySelector('ytd-app');"
+                "  var pc = app && app.polymerController;"
+                "  console.error('[DIAG4] pc.pageType=' + (pc && pc.pageType) + ' pc.data=' + (pc && pc.data ? 'yes' : 'no'));"
+                "})();";
+            GCValue d4 = JS_Eval(g_ctx, diag4_js, strlen(diag4_js), "<diag_signals4>", JS_EVAL_TYPE_GLOBAL);
+            if (JS_IsException(d4)) {
+                GCValue exc = JS_GetException(g_ctx);
+                const char *es = JS_ToCString(g_ctx, exc);
+                fprintf(stderr, "[DIAG4] eval exception: %s\n", es ? es : "?");
+                fflush(stderr);
+            }
+            pump_timers_and_jobs(g_ctx);
+        }
+
         // ytInitialData injection removed: the page is expected to fetch its
         // own initial data through standard fetch/XHR now.
     }

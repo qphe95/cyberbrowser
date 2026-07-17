@@ -2057,6 +2057,21 @@ GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int ar
     if (tag) {
         if (getenv("CYBER_DUMP_BC"))
             fprintf(stderr, "[CE] createElement tag='%s'\n", tag);
+        if (getenv("CYBER_TRACE_PAGEFLOW") &&
+            (strstr(tag, "watch") || strstr(tag, "page-manager"))) {
+            static int pf_guard = 0;
+            fprintf(stderr, "[PAGEFLOW] createElement tag='%s'\n", tag);
+            fflush(stderr);
+            if (!pf_guard) {
+                pf_guard = 1;
+                const char *tj = "(function(){try{throw new Error('pf')}catch(e){return e.stack}})()";
+                GCValue st = JS_Eval(ctx, tj, strlen(tj), "<pf>", JS_EVAL_TYPE_GLOBAL);
+                const char *ss = JS_ToCString(ctx, st);
+                fprintf(stderr, "%s\n", ss ? ss : "?");
+                fflush(stderr);
+                pf_guard = 0;
+            }
+        }
         // Create proper video element
         if (strcasecmp(tag, "video") == 0) {
             elem = js_video_constructor(ctx, JS_NULL, 0, NULL);

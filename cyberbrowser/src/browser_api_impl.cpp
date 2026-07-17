@@ -1036,6 +1036,16 @@ GCValue js_false_promise(JSContextHandle ctx, GCValue this_val, int argc, GCValu
  * Location Object Implementation
  * ============================================================================ */
 
+// The location object is a plain JS object carrying a LocationData opaque.
+// It must have its own class id so JS_GetOpaqueHandle can resolve the opaque:
+// the class check inside JS_GetOpaqueHandle compares the object's class_id
+// against the requested id, and a plain JS_CLASS_OBJECT would never match.
+JSClassID js_location_class_id = 0;
+
+JSClassDef js_location_class_def = {
+    .class_name = "Location",
+};
+
 // Parse URL into components - simple parser for standard URLs
 static void parse_url(const char *url, LocationData *loc) {
     // Start with empty components
@@ -1157,8 +1167,9 @@ static void rebuild_href(LocationData *loc) {
 
 // Get LocationData from JS object
 static LocationData* get_location_data(JSContextHandle ctx, GCValue obj) {
+    (void)ctx;
     // Use gc_deref to get pointer from handle stored in opaque
-    GCHandle handle = JS_GetOpaqueHandle(obj, JS_GC_OBJ_TYPE_DATA);
+    GCHandle handle = JS_GetOpaqueHandle(obj, js_location_class_id);
     if (handle == GC_HANDLE_NULL) return NULL;
     return (LocationData*)gc_deref(handle);
 }
@@ -1453,6 +1464,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_NewClassID(&js_service_worker_container_class_id);
     JS_NewClassID(&js_service_worker_registration_class_id);
     JS_NewClassID(&js_service_worker_class_id);
+    JS_NewClassID(&js_location_class_id);
     
     // Register classes with the runtime
     JSRuntimeHandle rt = JS_GetRuntime(ctx);
@@ -1484,6 +1496,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_NewClass(rt, js_service_worker_container_class_id, &js_service_worker_container_class_def);
     JS_NewClass(rt, js_service_worker_registration_class_id, &js_service_worker_registration_class_def);
     JS_NewClass(rt, js_service_worker_class_id, &js_service_worker_class_def);
+    JS_NewClass(rt, js_location_class_id, &js_location_class_def);
     
     // ===== ES6+ Polyfills Registration =====
     // Get Object constructor
@@ -2831,7 +2844,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     
     // ===== Location =====
     // Create Location object with getters/setters and shared data
-    GCValue location = JS_NewObject(ctx);
+    GCValue location = JS_NewObjectClass(ctx, js_location_class_id);
     
     // Allocate LocationData from GC heap
     GCHandle loc_handle = gc_allocz(sizeof(LocationData), JS_GC_OBJ_TYPE_DATA);
