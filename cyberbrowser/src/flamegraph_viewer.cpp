@@ -2,8 +2,8 @@
  * flamegraph_viewer.cpp - Vulkan window that displays the flame graph PNG
  * produced by CYBER_PROFILE=1 runs of cyberbrowser.
  *
- * The window/instance/surface scaffolding is lifted from the old
- * ft_vulkan_ui vulkan_main.cpp; rendering goes through the shared
+ * The window/instance/surface scaffolding derives from the old (removed)
+ * ft_vulkan_ui main; rendering goes through the shared
  * VulkanRenderer (vulkan_renderer.cpp) with the flamegraph shaders
  * (shaders/flamegraph.vert / .frag, embedded via embedded_shaders.h).
  *

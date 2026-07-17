@@ -1,1 +1,0 @@
-(function(){  var orig = Function.prototype.bind;  Function.prototype.bind = function(){    var b = orig.apply(this, arguments);    try { b.__cyber_bound_target = this; } catch(e) {}    return b;  };})();

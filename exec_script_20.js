@@ -1,1 +1,0 @@
-(function() {var element = document.querySelector('#player-placeholder'); if (yt && yt.flexy && yt.flexy.setPlayerlikeElementSize && typeof yt.flexy.setPlayerlikeElementSize === 'function') {yt.flexy.setPlayerlikeElementSize(element);}})();

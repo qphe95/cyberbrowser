@@ -45,5 +45,17 @@ vc140.pdb
 *.mp3
 *.mp4
 
+# Debug dumps from browser runs (CYBER_DUMP_SCRIPTS, layout/DOM snapshots)
+exec_script_*.js
+exec_dyn_*.js
+lazy_root_*.js
+page_final.html
+page_loaded.html
+layout_dump.txt
+youtube_final.html
+youtube_initial.html
+youtube_loaded.html
+diag_out.txt
+
 # OS metadata (ensure nested directories are covered)
 **/.DS_Store

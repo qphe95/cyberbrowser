@@ -1,1 +1,0 @@
-(function(){  var reg = window.customElements;  reg.define = function(name, ctor, options) {    return reg.__origDefine.call(this, name, ctor, options);  };  reg.get = function(name) {    return reg.__origGet.call(this, name);  };})();
