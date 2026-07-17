@@ -18,6 +18,7 @@
 #include "browser_api_impl_types.h"
 #include "browser_api_impl_handles.h"
 #include "session_state.h"
+#include "cyber_profile.h"
 
 // Forward declarations from dom_api.cpp
 extern "C" void dom_node_set_owner_document(JSContextHandle ctx, GCValue node, GCValue doc);
@@ -2914,7 +2915,12 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
         // implemented in the browser layer instead.
         int eval_flags = JS_EVAL_TYPE_GLOBAL;
         if (getenv("CYBER_NO_LAZY")) eval_flags |= JS_EVAL_FLAG_NO_LAZY;
+        char evname[64];
+        snprintf(evname, sizeof(evname), "eval-script-%d (%zu KB)",
+                 i, script_lens[i] / 1024);
+        CP_BEGIN_CAT(evname, "js");
         GCValue result = JS_Eval(ctx, scripts[i], script_lens[i], filename, eval_flags);
+        CP_END(evname);
 
         // Clear the interrupt handler so later operations (pumping timers, GC)
         // are not subject to the per-script deadline.
@@ -2936,7 +2942,10 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
 
         // Drain both timers and pending Promise jobs after each script so that
         // fetch()/XHR .then() chains and player bootstrap callbacks run.
-        js_quickjs_pump_timers_and_jobs();
+        {
+            CP_SCOPE("pump-after-script");
+            js_quickjs_pump_timers_and_jobs();
+        }
 
         // NOTE: we intentionally do NOT restore/clobber Node.prototype mutation
         // methods here.  The ShadyDOM (webcomponents-sd.js) polyfill wraps them

@@ -60,6 +60,7 @@ set(BE_SOURCES
     src/image_cache.cpp
     src/lockfree_hash_table.cpp
     src/url_analyzer.cpp
+    src/cyber_profile.cpp
     src/session_state.c
     src/tls_client.c
     src/http_download.c
@@ -275,6 +276,45 @@ if(BE_PLATFORM_WINDOWS)
     if(MINGW)
         target_link_options(cyberbrowser PRIVATE "-Wl,--stack,67108864")
     endif()
+endif()
+
+# =============================================================================
+# Flame graph viewer (Vulkan window showing flamegraph.png)
+# =============================================================================
+# Self-contained: compiles vulkan_renderer.cpp directly (independent of
+# BE_BUILD_VULKAN) and links the system Vulkan loader + cyberbrowser_lib
+# (for stb_image and the text-shaper symbols the renderer references).
+if(BE_PLATFORM_WINDOWS)
+    add_executable(flamegraph_viewer
+        src/flamegraph_viewer.cpp
+        src/vulkan_renderer.cpp
+        src/vulkan_font_stub.cpp
+        shaders/embedded_shaders.c
+    )
+
+    target_include_directories(flamegraph_viewer
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/quickjs
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb
+            ${CMAKE_CURRENT_SOURCE_DIR}/shaders
+    )
+
+    # MinGW ships the Vulkan headers + import library; fall back to the
+    # Vulkan SDK package layout when not on MinGW.
+    find_package(Vulkan)
+    if(Vulkan_FOUND)
+        target_include_directories(flamegraph_viewer PRIVATE ${Vulkan_INCLUDE_DIRS})
+        target_link_libraries(flamegraph_viewer PRIVATE ${Vulkan_LIBRARIES})
+    else()
+        target_link_libraries(flamegraph_viewer PRIVATE vulkan-1)
+    endif()
+
+    target_link_libraries(flamegraph_viewer
+        PRIVATE
+            cyberbrowser_lib
+    )
 endif()
 
 # =============================================================================

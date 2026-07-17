@@ -10,6 +10,7 @@
 #include "js_quickjs.h"
 #include "platform.h"
 #include "url_utils.h"
+#include "cyber_profile.h"
 
 extern const char *g_cyber_start_url;
 
@@ -875,7 +876,11 @@ extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_re
     
     ScriptInfo scripts[MAX_SCRIPTS];
     memset(scripts, 0, sizeof(scripts));
-    int script_count = extract_scripts_in_order(html, scripts, MAX_SCRIPTS);
+    int script_count = 0;
+    {
+        CP_SCOPE("extract-scripts");
+        script_count = extract_scripts_in_order(html, scripts, MAX_SCRIPTS);
+    }
     if (script_count == 0) {
         LOG_ERROR("No scripts found in HTML");
         return false;
@@ -916,7 +921,11 @@ extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_re
                     scripts[i].parse_order, scripts[i].url);
             fflush(stderr);
 
-            bool result = http_get_to_memory(scripts[i].url, &buffer, error, sizeof(error));
+            bool result = false;
+            {
+                CP_SCOPE_CAT("fetch-external-script", "net");
+                result = http_get_to_memory(scripts[i].url, &buffer, error, sizeof(error));
+            }
             fprintf(stderr, "[html_extract] FETCH external script [%d] result=%s size=%zu\n",
                     scripts[i].parse_order, result ? "ok" : "fail", result ? buffer.size : 0);
             fflush(stderr);

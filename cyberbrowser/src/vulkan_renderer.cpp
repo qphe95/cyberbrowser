@@ -730,6 +730,63 @@ static bool create_font_resources(VulkanRenderer *r) {
     return true;
 }
 
+/* Upload an arbitrary RGBA8 image as the sampled texture, replacing the font
+ * atlas.  Used by the flame-graph viewer to display the rendered PNG. */
+bool vk_renderer_upload_texture_rgba(VulkanRenderer *r, const uint8_t *rgba,
+                                     int width, int height)
+{
+    if (!r || !rgba || width <= 0 || height <= 0) return false;
+
+    if (r->fontImageView != VK_NULL_HANDLE) {
+        vkDestroyImageView(r->device, r->fontImageView, NULL);
+        r->fontImageView = VK_NULL_HANDLE;
+    }
+    if (r->fontImage != VK_NULL_HANDLE) {
+        vkDestroyImage(r->device, r->fontImage, NULL);
+        r->fontImage = VK_NULL_HANDLE;
+    }
+    if (r->fontImageMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(r->device, r->fontImageMemory, NULL);
+        r->fontImageMemory = VK_NULL_HANDLE;
+    }
+
+    size_t bytes = (size_t)width * (size_t)height * 4;
+    VkBuffer stagingBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+    if (!create_buffer(r, bytes,
+                       VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                       &stagingBuffer, &stagingMemory)) {
+        return false;
+    }
+
+    void *data = NULL;
+    vkMapMemory(r->device, stagingMemory, 0, bytes, 0, &data);
+    memcpy(data, rgba, bytes);
+    vkUnmapMemory(r->device, stagingMemory);
+
+    if (!create_image(r, (uint32_t)width, (uint32_t)height, VK_FORMAT_R8G8B8A8_UNORM,
+                      VK_IMAGE_TILING_OPTIMAL,
+                      VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                      &r->fontImage, &r->fontImageMemory, 1)) {
+        vkDestroyBuffer(r->device, stagingBuffer, NULL);
+        vkFreeMemory(r->device, stagingMemory, NULL);
+        return false;
+    }
+    transition_image_layout(r, r->fontImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    copy_buffer_to_image(r, stagingBuffer, r->fontImage, (uint32_t)width, (uint32_t)height);
+    transition_image_layout(r, r->fontImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    vkDestroyBuffer(r->device, stagingBuffer, NULL);
+    vkFreeMemory(r->device, stagingMemory, NULL);
+
+    r->fontImageView = create_image_view(r, r->fontImage, VK_FORMAT_R8G8B8A8_UNORM, 1);
+    if (r->fontImageView == VK_NULL_HANDLE) return false;
+
+    return update_font_descriptor_set(r);
+}
+
 bool vk_renderer_load_font(VulkanRenderer *r, const char *ttf_path, float size_pixels)
 {
     if (!r || !ttf_path) return false;

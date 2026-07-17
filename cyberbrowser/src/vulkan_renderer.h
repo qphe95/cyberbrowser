@@ -92,6 +92,8 @@ bool vk_renderer_display_list(VulkanRenderer *r, const DisplayList *dl);
 bool vk_renderer_capture_framebuffer(VulkanRenderer *r, const char *bmpPath);
 bool vk_renderer_load_font(VulkanRenderer *r, const char *ttf_path, float size_pixels);
 struct TextShaper *vk_renderer_get_font_shaper(VulkanRenderer *r);
+bool vk_renderer_upload_texture_rgba(VulkanRenderer *r, const uint8_t *rgba,
+                                     int width, int height);
 
 #ifdef __cplusplus
 }

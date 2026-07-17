@@ -9,6 +9,7 @@
 #include "quickjs.h"
 #include "quickjs_gc_unified.h"
 #include "quickjs-internal.h"
+#include "cyber_profile.h"
 
 /* Platform threading support */
 #ifdef _WIN32
@@ -301,7 +302,9 @@ static void *gc_thread_pool_worker(void *arg) {
         gc_thread_pool_unlock(pool);
         
         if (job) {
+            CP_BEGIN_CAT("gc-job", "gc");
             job->func(job->arg);
+            CP_END("gc-job");
             free(job);
             
             gc_thread_pool_lock(pool);

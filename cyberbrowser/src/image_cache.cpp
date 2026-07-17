@@ -19,6 +19,7 @@
 
 #include "http_download.h"
 #include "platform.h"
+#include "cyber_profile.h"
 
 #define LOG_TAG "image_cache"
 #define LOG_ERROR(...) platform_log(LOG_LEVEL_ERROR, LOG_TAG, __VA_ARGS__)
@@ -272,7 +273,12 @@ int image_cache_load(ImageCache *cache, const char *url_or_path)
     } else if (is_network_url(url_or_path)) {
         HttpBuffer buffer = {0};
         char err[256] = {0};
-        if (!http_get_to_memory(url_or_path, &buffer, err, sizeof(err))) {
+        bool got = false;
+        {
+            CP_SCOPE_CAT("image-download", "img");
+            got = http_get_to_memory(url_or_path, &buffer, err, sizeof(err));
+        }
+        if (!got) {
             LOG_ERROR("Failed to download image %s: %s", url_or_path, err);
             cache->count--;
             free(e);
@@ -282,7 +288,12 @@ int image_cache_load(ImageCache *cache, const char *url_or_path)
         e->download_size = buffer.size;
     }
 
-    if (!decode_entry(e)) {
+    int decoded = 0;
+    {
+        CP_SCOPE_CAT("image-decode", "img");
+        decoded = decode_entry(e);
+    }
+    if (!decoded) {
         free(e->download_data);
         e->download_data = NULL;
         e->download_size = 0;
@@ -327,7 +338,12 @@ static void *async_local_thread(void *param)
 #endif
 {
     ImageCacheEntry *e = (ImageCacheEntry *)param;
-    if (decode_entry(e)) {
+    int decoded = 0;
+    {
+        CP_SCOPE_CAT("image-decode-async", "img");
+        decoded = decode_entry(e);
+    }
+    if (decoded) {
         atomic_set(&e->state, ENTRY_STATE_DONE);
     } else {
         atomic_set(&e->state, ENTRY_STATE_ERROR);

@@ -29,8 +29,9 @@
 #include "display_list.h"
 #include "text_shaper.h"
 #include "image_cache.h"
+#include "cyber_profile.h"
 
-#define STB_IMAGE_WRITE_IMPLEMENTATION
+/* stb_image_write implementation lives in cyber_profile.cpp (library side). */
 #include "stb_image_write.h"
 #include "session_state.h"
 #include "html_media_extract.h"
@@ -679,9 +680,13 @@ static bool render_document_to_jpg(HtmlDocument *doc, ImageCache *image_cache,
     LayoutContext layout;
     memset(&layout, 0, sizeof(layout));
     layout.js_ctx = g_ctx;
-    bool layout_ok = css_layout_run(&layout, doc, NULL,
-                                    (double)WIREFRAME_WIDTH,
-                                    (double)WIREFRAME_HEIGHT);
+    bool layout_ok = false;
+    {
+        CP_SCOPE("css-layout");
+        layout_ok = css_layout_run(&layout, doc, NULL,
+                                   (double)WIREFRAME_WIDTH,
+                                   (double)WIREFRAME_HEIGHT);
+    }
     if (!layout_ok) {
         printf("WARNING: css_layout_run() failed\n");
         return false;
@@ -691,11 +696,21 @@ static bool render_document_to_jpg(HtmlDocument *doc, ImageCache *image_cache,
     DisplayList dl;
     display_list_init(&dl);
 
-    if (css_layout_build_display_list(&layout, &dl)) {
+    bool dl_ok = false;
+    {
+        CP_SCOPE("build-display-list");
+        dl_ok = css_layout_build_display_list(&layout, &dl);
+    }
+    if (dl_ok) {
         printf("Display list commands: %d\n", dl.count);
         printf("Rendering screenshot to %s ...\n", out_path);
-        if (render_display_list_to_jpg(&dl, out_path,
-                                       WIREFRAME_WIDTH, WIREFRAME_HEIGHT)) {
+        bool raster_ok = false;
+        {
+            CP_SCOPE("raster-jpg");
+            raster_ok = render_display_list_to_jpg(&dl, out_path,
+                                                   WIREFRAME_WIDTH, WIREFRAME_HEIGHT);
+        }
+        if (raster_ok) {
             printf("Saved screenshot: %s (%dx%d)\n", out_path,
                    WIREFRAME_WIDTH, WIREFRAME_HEIGHT);
         } else {
@@ -769,6 +784,8 @@ int main(int argc, char *argv[]) {
     printf("CyberBrowser\n");
     printf("========================================\n");
 
+    CP_BEGIN("load-youtube");
+
     if (!platform_init()) {
         printf("FATAL: platform_init() failed\n");
         return 1;
@@ -780,10 +797,13 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    if (!init_browser_context()) {
-        platform_http_cleanup();
-        platform_cleanup();
-        return 1;
+    {
+        CP_SCOPE("init-browser-context");
+        if (!init_browser_context()) {
+            platform_http_cleanup();
+            platform_cleanup();
+            return 1;
+        }
     }
     printf("init_browser_context ok\n");
 
@@ -839,7 +859,11 @@ int main(int argc, char *argv[]) {
     }
 
     size_t html_size = 0;
-    char *html = fetch_start_page(&html_size);
+    char *html = NULL;
+    {
+        CP_SCOPE("fetch-start-page");
+        html = fetch_start_page(&html_size);
+    }
     if (!html) {
         cleanup_browser_context();
         platform_http_cleanup();
@@ -869,7 +893,11 @@ int main(int argc, char *argv[]) {
         }
         js_quickjs_clear_captured_urls();
         JsExecResult js_result;
-        bool exec_ok = html_execute_page_scripts(html, &js_result);
+        bool exec_ok = false;
+        {
+            CP_SCOPE("execute-page-scripts");
+            exec_ok = html_execute_page_scripts(html, &js_result);
+        }
         if (exec_ok) {
             printf("Scripts executed: %d captured URLs\n", js_result.captured_url_count);
         } else {
@@ -956,16 +984,26 @@ int main(int argc, char *argv[]) {
 
         // Reclaim handles allocated by script execution before dispatching
         // lifecycle events.
-        JS_RunGC(JS_GetRuntime(g_ctx));
+        {
+            CP_SCOPE("run-gc");
+            JS_RunGC(JS_GetRuntime(g_ctx));
+        }
 
         printf("Dispatching DOMContentLoaded and load events ...\n");
-        dispatch_page_lifecycle_events(g_ctx);
-        pump_timers_and_jobs(g_ctx);
+        {
+            CP_SCOPE("lifecycle-events");
+            dispatch_page_lifecycle_events(g_ctx);
+        }
+        {
+            CP_SCOPE("pump-after-lifecycle");
+            pump_timers_and_jobs(g_ctx);
+        }
 
         // Upgrade any custom elements that were defined during script execution.
         // This lets Polymer run connectedCallback and stamp shadow-DOM content
         // on the existing server-rendered skeleton.
         {
+            CP_SCOPE("upgrade-custom-elements");
             fprintf(stderr, "[UPGRADE-DOC] invoking customElements.upgrade\n");
             fflush(stderr);
 
@@ -1105,18 +1143,31 @@ int main(int argc, char *argv[]) {
     }
 
     int loop_iterations = 0;
+    CP_BEGIN("quiescence-loop");
     while (loop_iterations < 100) {
         loop_iterations++;
 
-        bool had_timers = pump_timers_and_jobs(g_ctx);
-        bool had_images = image_cache_process_pending(image_cache);
+        bool had_timers = false;
+        bool had_images = false;
+        {
+            CP_SCOPE("pump-timers");
+            had_timers = pump_timers_and_jobs(g_ctx);
+        }
+        {
+            CP_SCOPE("process-images");
+            had_images = image_cache_process_pending(image_cache);
+        }
 
         if (g_dom_needs_layout) {
             g_dom_needs_layout = 0;
 
             GCValue js_doc = get_global_document(g_ctx);
 
-            HtmlDocument *new_doc = html_document_from_js_dom(g_ctx, js_doc);
+            HtmlDocument *new_doc = NULL;
+            {
+                CP_SCOPE("rebuild-doc");
+                new_doc = html_document_from_js_dom(g_ctx, js_doc);
+            }
             if (new_doc) {
                 if (doc) html_document_free(doc);
                 doc = new_doc;
@@ -1142,6 +1193,7 @@ int main(int argc, char *argv[]) {
             break;
         }
     }
+    CP_END("quiescence-loop");
 
     /* Save the final mutated JS DOM for inspection. */
     {
@@ -1169,6 +1221,50 @@ int main(int argc, char *argv[]) {
             "  try { inst = L && L.LU && L.LU(); } catch(e) { console.error('[BOOT-DIAG] LU() threw: ' + (e && e.message)); }"
             "  var sigs = '?';"
             "  try { sigs = (inst && inst.signals) ? inst.signals.join(',') : 'none'; } catch(e) { sigs = 'err:' + e.message; }"
+            "  (function(){"
+            "    try {"
+            "      var L2 = window.default_kevlar_base;"
+            "      console.error('[CFG] _.C=' + (L2 ? typeof L2.C : 'n/a')"
+            "        + ' _.YG=' + (L2 ? typeof L2.YG : 'n/a')"
+            "        + ' _.mQ=' + (L2 ? typeof L2.mQ : 'n/a')"
+            "        + ' _.D9=' + (L2 ? typeof L2.D9 : 'n/a'));"
+            "      if (L2 && typeof L2.YG === 'function') {"
+            "        try { console.error('[CFG] YG(EXPERIMENT_FLAGS) type=' + typeof L2.YG('EXPERIMENT_FLAGS', {})); }"
+            "        catch(e) { console.error('[CFG] YG threw: ' + e.message); }"
+            "      }"
+            "      if (L2 && typeof L2.C === 'function') {"
+            "        try { console.error('[CFG] C(web_monomer_web_component_wrapper_handle_errors)=' + L2.C('web_monomer_web_component_wrapper_handle_errors')); }"
+            "        catch(e) { console.error('[CFG] C threw: ' + e.message); }"
+            "      }"
+            "    } catch(e) { console.error('[CFG] err: ' + e.message); }"
+            "  })();"
+            "  (function(){"
+            "    try {"
+            "      var arr = window.__cyber_all_errors || [];"
+            "      for (var i = 0; i < arr.length; i++) {"
+            "        console.error('[ERR' + i + '] ' + arr[i].msg + ' || ' + arr[i].stack);"
+            "      }"
+            "      if (!arr.length) console.error('[ERR] none');"
+            "    } catch(e) { console.error('[ERR] read err: ' + e.message); }"
+            "  })();"
+            "  (function(){"
+            "    try {"
+            "      var fe = window.__cyber_first_real_error;"
+            "      if (fe) console.error('[REAL-ERR] msg=' + fe.msg + ' | stack=' + String(fe.stack).split('\\n').slice(0,6).join(' | '));"
+            "      else console.error('[REAL-ERR] none captured');"
+            "    } catch(e) { console.error('[REAL-ERR] read err: ' + e.message); }"
+            "  })();"
+            "  (function(){"
+            "    try {"
+            "      if (inst) {"
+            "        var before = inst.signals ? inst.signals.length : -1;"
+            "        inst.processSignal('ci');"
+            "        var after = inst.signals ? inst.signals.length : -1;"
+            "        var idx = inst.signals ? inst.signals.indexOf('ci') : -2;"
+            "        console.error('[D-CI] before=' + before + ' after=' + after + ' ciIdx=' + idx);"
+            "      }"
+            "    } catch(e) { console.error('[D-CI] err: ' + (e && e.message)); }"
+            "  })();"
             "  (function(){"
             "    try { console.error('[D] div.__shady_attachShadow=' + typeof document.createElement('div').__shady_attachShadow); } catch(e) { console.error('[D] shady_attachShadow err: ' + e.message); }"
             "    try {"
@@ -1210,6 +1306,13 @@ int main(int argc, char *argv[]) {
     free(html);
 
     printf("\nStart page loaded successfully.\n");
+
+    CP_END("load-youtube");
+    if (cp_profile_enabled()) {
+        cp_profile_flush("profile.json");
+        cp_profile_write_flamegraph("flamegraph.png");
+        printf("Profile written to profile.json + flamegraph.png\n");
+    }
 
     cleanup_browser_context();
     platform_http_cleanup();

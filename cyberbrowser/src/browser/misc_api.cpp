@@ -1675,6 +1675,22 @@ GCValue js_cyber_upgrade_element(JSContextHandle ctx, GCValue this_val, int argc
         ctor_ok = true;
     }
 
+    /* Trace the prototype chain for the CE-construction blocker
+     * (b.createElement undefined at KvR-generated constructors). */
+    if (getenv("CYBER_TRACE_UPGRADE") &&
+        (strstr(name_lc, "masthead") || strstr(name_lc, "ytd-app") ||
+         strstr(name_lc, "ytd-watch") || strstr(name_lc, "yt-img"))) {
+        GCValue ce = JS_GetPropertyStr(ctx, el, "createElement");
+        GCValue proto2 = JS_GetPropertyStr(ctx, el, "__proto__");
+        if (JS_IsUndefined(proto2) || JS_IsNull(proto2)) proto2 = JS_GetPropertyStr(ctx, el, "prototype");
+        GCValue ce2 = JS_GetPropertyStr(ctx, proto2, "createElement");
+        fprintf(stderr, "[TRACE-UP] %s ctor_ok=%d el.createElement=%s proto.createElement=%s\n",
+                name_lc, ctor_ok ? 1 : 0,
+                JS_IsFunction(ctx, ce) ? "function" : "MISSING",
+                JS_IsFunction(ctx, ce2) ? "function" : "MISSING");
+        fflush(stderr);
+    }
+
     {
         GCValue sr = JS_GetPropertyStr(ctx, el, "shadowRoot");
         GCValue sr_children = JS_GetPropertyStr(ctx, sr, "children");
