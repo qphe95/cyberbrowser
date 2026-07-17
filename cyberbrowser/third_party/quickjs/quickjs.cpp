@@ -343,7 +343,20 @@ enum {
 
 /* number of typed array types */
 #define JS_TYPED_ARRAY_COUNT  (JS_CLASS_FLOAT64_ARRAY - JS_CLASS_UINT8C_ARRAY + 1)
-static uint8_t typed_array_size_log2[JS_TYPED_ARRAY_COUNT];
+static uint8_t typed_array_size_log2[JS_TYPED_ARRAY_COUNT] = {
+    0, /* JS_CLASS_UINT8C_ARRAY */
+    0, /* JS_CLASS_INT8_ARRAY */
+    0, /* JS_CLASS_UINT8_ARRAY */
+    1, /* JS_CLASS_INT16_ARRAY */
+    1, /* JS_CLASS_UINT16_ARRAY */
+    2, /* JS_CLASS_INT32_ARRAY */
+    2, /* JS_CLASS_UINT32_ARRAY */
+    3, /* JS_CLASS_BIG_INT64_ARRAY */
+    3, /* JS_CLASS_BIG_UINT64_ARRAY */
+    1, /* JS_CLASS_FLOAT16_ARRAY */
+    2, /* JS_CLASS_FLOAT32_ARRAY */
+    3, /* JS_CLASS_FLOAT64_ARRAY */
+};
 #define typed_array_size_log2(classid)  (typed_array_size_log2[(classid)- JS_CLASS_UINT8C_ARRAY])
 
 
@@ -62415,18 +62428,6 @@ static GCValue js_typed_array_set_internal(JSContextHandle ctx,
         /* copying between typed objects */
         if (src_p.class_id() == p.class_id()) {
             /* same type, use memmove */
-            if (getenv("CYBER_TRACE_TA")) {
-                fprintf(stderr, "[TA-SET] dest.data=%p dest.off=%d src.data=%p src.off=%d offset=%lld shift=%d src_len=%lld n=%lld dest_bytelen=%d src_bytelen=%d\n",
-                        dest_abuf.data(), dest_ta.offset(),
-                        src_abuf.data(), src_ta.offset(),
-                        (long long)offset, shift, (long long)src_len,
-                        (long long)(src_len << shift),
-                        dest_abuf.byte_length(), src_abuf.byte_length());
-                fprintf(stderr, "[TA-SET] dest.dh=%u deref(dest.dh)=%p src.dh=%u deref(src.dh)=%p\n",
-                        (unsigned)dest_abuf.data_handle(), gc_deref(dest_abuf.data_handle()),
-                        (unsigned)src_abuf.data_handle(), gc_deref(src_abuf.data_handle()));
-                fflush(stderr);
-            }
             memmove(dest_abuf.data() + dest_ta.offset() + (offset << shift),
                     src_abuf.data() + src_ta.offset(), src_len << shift);
             goto done;
