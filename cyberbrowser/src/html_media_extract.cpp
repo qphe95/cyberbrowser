@@ -957,6 +957,35 @@ extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_re
 
                     scripts[i].content = buffer.data;
                     scripts[i].content_len = buffer.size;
+
+                    /* Diagnostic: trace the monomer lifecycle state-machine
+                     * transitions in the desktop_polymer bundle.  CYBER_TRACE_LIFECYCLE=1. */
+                    if (getenv("CYBER_TRACE_LIFECYCLE") && scripts[i].content_len > 1000000 &&
+                        strstr(scripts[i].content, "prototype.transition=function(")) {
+                        std::string patched(scripts[i].content, scripts[i].content_len);
+                        size_t fpos = patched.find("prototype.transition=function(");
+                        size_t bpos = patched.find('{', fpos);
+                        if (fpos != std::string::npos && bpos != std::string::npos) {
+                            const char *inj = "try{console.error('[TR] '+this.state+'->'+arguments[0])}catch(e){}";
+                            patched.insert(bpos + 1, inj);
+                        }
+                        size_t fpos2 = patched.find("prototype.parkOrScheduleJob=function(");
+                        size_t bpos2 = fpos2 == std::string::npos ? fpos2 : patched.find('{', fpos2);
+                        if (fpos2 != std::string::npos && bpos2 != std::string::npos) {
+                            const char *inj2 = "try{console.error('[PARK] sig='+arguments[2]+' prio='+arguments[1])}catch(e){}";
+                            patched.insert(bpos2 + 1, inj2);
+                        }
+                        if (patched.size() != scripts[i].content_len) {
+                            char *nd = (char *)malloc(patched.size() + 1);
+                            if (nd) {
+                                memcpy(nd, patched.data(), patched.size());
+                                nd[patched.size()] = '\0';
+                                scripts[i].content = nd;
+                                scripts[i].content_len = patched.size();
+                                fprintf(stderr, "[LC-PATCH] transition trace injected\n");
+                            }
+                        }
+                    }
                 }
             } else {
                 LOG_WARN("Failed to fetch script [%d]: %s", scripts[i].parse_order, error);

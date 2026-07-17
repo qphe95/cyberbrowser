@@ -277,6 +277,23 @@ int find_due_timer(unsigned long long current_time) {
     return due_id;
 }
 
+/* Return the trigger_time of the earliest pending timer, or (unsigned long long)-1
+ * if none is pending.  The event loop uses this to wait for delayed timers
+ * instead of dropping them when nothing is immediately due. */
+unsigned long long timer_next_due_ms(void) {
+    timer_state_ensure_initialized();
+    pthread_mutex_lock(&g_timer_state.mutex);
+    unsigned long long earliest = (unsigned long long)(-1);
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        Timer *t = &g_timer_state.timers[i];
+        if (t->active && t->trigger_time < earliest) {
+            earliest = t->trigger_time;
+        }
+    }
+    pthread_mutex_unlock(&g_timer_state.mutex);
+    return earliest;
+}
+
 // Real IdleDeadline.timeRemaining() based on the deadline stored in the IdleDeadline object.
 static GCValue js_idle_deadline_time_remaining(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;

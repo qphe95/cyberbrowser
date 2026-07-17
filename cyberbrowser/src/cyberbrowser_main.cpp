@@ -39,6 +39,8 @@
 extern "C" int timer_process_due(JSContextHandle ctx);
 extern "C" int scheduler_process_tasks(JSContextHandle ctx);
 extern "C" void timer_set_idle_deadline(unsigned long long deadline_ms);
+unsigned long long timer_next_due_ms(void);
+void platform_sleep_ms(unsigned int ms);
 
 #define LOG_TAG "cyberbrowser"
 
@@ -421,6 +423,7 @@ static bool pump_timers_and_jobs(JSContextHandle ctx) {
     JSRuntimeHandle rt = JS_GetRuntime(ctx);
     bool did_work = false;
     int iterations = 0;
+    unsigned long long pump_start = platform_get_time_ms();
     while (iterations < 100) {
         // Give idle callbacks a real, per-iteration idle budget.
         unsigned long long idle_deadline = platform_get_time_ms() + 8;
@@ -435,7 +438,24 @@ static bool pump_timers_and_jobs(JSContextHandle ctx) {
             jobs++;
         }
         (void)ret;
-        if (processed == 0 && sched == 0 && jobs == 0) break;
+        if (processed == 0 && sched == 0 && jobs == 0) {
+            /* Nothing immediately due.  Lifecycle callbacks (e.g. the monomer
+             * "initialized" job set) are scheduled via setTimeout with a small
+             * delay, and YouTube's app never reaches its "rendering" phase if
+             * those never fire.  Wait for the earliest pending timer within a
+             * bounded window instead of dropping it, so delayed callbacks run. */
+            unsigned long long next = timer_next_due_ms();
+            if (next != (unsigned long long)-1) {
+                unsigned long long now = platform_get_time_ms();
+                unsigned long long wait = next > now ? next - now : 0;
+                unsigned long long elapsed = now - pump_start;
+                if (wait <= 200 && elapsed + wait <= 3000) {
+                    platform_sleep_ms((unsigned int)(wait ? wait : 1));
+                    continue;
+                }
+            }
+            break;
+        }
         did_work = true;
         iterations++;
     }
@@ -1145,13 +1165,16 @@ int main(int argc, char *argv[]) {
             pump_timers_and_jobs(g_ctx);
             const char *diag4_js =
                 "(function(){"
-                "  console.error('[DIAG4] href=' + window.location.href + ' pathname=' + window.location.pathname + ' search=' + window.location.search);"
-                "  var sig = (window.ytsignals && window.ytsignals.getInstance) ? window.ytsignals.getInstance() : null;"
-                "  var s = sig && sig.signals ? sig.signals.slice(0,8).join(',') : 'none';"
-                "  console.error('[DIAG4] signals[0..8]=' + s + ' total=' + (sig && sig.signals ? sig.signals.length : -1));"
+                "  console.error('[DIAG4] loadInitialData=' + typeof window.loadInitialData + ' getInitialData=' + typeof window.getInitialData + ' getDataPromise=' + typeof window.getDataPromise);"
                 "  var app = document.querySelector('ytd-app');"
                 "  var pc = app && app.polymerController;"
-                "  console.error('[DIAG4] pc.pageType=' + (pc && pc.pageType) + ' pc.data=' + (pc && pc.data ? 'yes' : 'no'));"
+                "  console.error('[DIAG4] pc.data=' + (pc && pc.data ? 'yes' : 'no') + ' pc.root=' + (pc && pc.root ? 'yes' : 'no') + ' pc.loadData=' + (pc ? typeof pc.loadData : 'n/a'));"
+                "  var pm = document.querySelector('ytd-page-manager');"
+                "  if (pm && pm.pagePool) {"
+                "    try { var r = pm.preparePage('watch'); console.error('[DIAG4] preparePage ran'); } catch(e){ console.error('[DIAG4] preparePage threw: ' + (e && e.message)); }"
+                "    var w = pm.pagePool.pageNameToElement.get('watch');"
+                "    console.error('[DIAG4] after preparePage: watch el=' + (w ? 'yes' : 'no') + ' isAttached=' + (w && w.isAttached));"
+                "  }"
                 "})();";
             GCValue d4 = JS_Eval(g_ctx, diag4_js, strlen(diag4_js), "<diag_signals4>", JS_EVAL_TYPE_GLOBAL);
             if (JS_IsException(d4)) {

@@ -875,13 +875,63 @@ GCValue js_form_data_constructor(JSContextHandle ctx, GCValue this_val, int argc
     return obj;
 }
 
+// TextEncoder.encode(str) -> Uint8Array of UTF-8 bytes
+GCValue js_text_encoder_encode(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    size_t len = 0;
+    const char *str = "";
+    if (argc > 0) {
+        str = JS_ToCStringLen(ctx, &len, argv[0]);
+        if (!str) { str = ""; len = 0; }
+    }
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue u8 = JS_GetPropertyStr(ctx, global, "Uint8Array");
+    GCValue lenv = JS_NewInt32(ctx, (int)len);
+    GCValue arr = JS_CallConstructor(ctx, u8, 1, &lenv);
+    if (JS_IsException(arr)) return arr;
+    for (size_t i = 0; i < len; i++)
+        JS_SetPropertyUint32(ctx, arr, (uint32_t)i, JS_NewInt32(ctx, (uint8_t)str[i]));
+    return arr;
+}
+
+// TextEncoder.encodeInto(str, uint8array) -> { read, written }
+GCValue js_text_encoder_encode_into(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+    size_t slen = 0;
+    const char *str = JS_ToCStringLen(ctx, &slen, argv[0]);
+    if (!str) { str = ""; slen = 0; }
+    GCValue lenv = JS_GetPropertyStr(ctx, argv[1], "length");
+    int32_t tlen = 0;
+    JS_ToInt32(ctx, &tlen, lenv);
+    size_t cap = tlen > 0 ? (size_t)tlen : 0;
+    size_t n = slen < cap ? slen : cap;
+    /* Back off to a UTF-8 character boundary so we don't split a sequence. */
+    while (n > 0 && n < slen && (str[n] & 0xC0) == 0x80) n--;
+    for (size_t i = 0; i < n; i++)
+        JS_SetPropertyUint32(ctx, argv[1], (uint32_t)i, JS_NewInt32(ctx, (uint8_t)str[i]));
+    /* Count UTF-16 code units consumed for `read`. */
+    size_t read = 0;
+    for (size_t i = 0; i < n; ) {
+        uint8_t c = (uint8_t)str[i];
+        if (c < 0x80) { i += 1; read += 1; }
+        else if ((c & 0xE0) == 0xC0) { i += 2; read += 1; }
+        else if ((c & 0xF0) == 0xE0) { i += 3; read += 1; }
+        else { i += 4; read += 2; /* surrogate pair */ }
+    }
+    GCValue res = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, res, "read", JS_NewInt32(ctx, (int)read));
+    JS_SetPropertyStr(ctx, res, "written", JS_NewInt32(ctx, (int)n));
+    return res;
+}
+
 // TextEncoder constructor stub
 GCValue js_text_encoder_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     GCValue obj = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, obj, "encoding", JS_NewString(ctx, "utf-8"));
-    JS_SetPropertyStr(ctx, obj, "encode", JS_NewCFunction(ctx, js_empty_array, "encode", 1));
-    JS_SetPropertyStr(ctx, obj, "encodeInto", JS_NewCFunction(ctx, js_undefined, "encodeInto", 2));
+    JS_SetPropertyStr(ctx, obj, "encode", JS_NewCFunction(ctx, js_text_encoder_encode, "encode", 1));
+    JS_SetPropertyStr(ctx, obj, "encodeInto", JS_NewCFunction(ctx, js_text_encoder_encode_into, "encodeInto", 2));
     return obj;
 }
 
