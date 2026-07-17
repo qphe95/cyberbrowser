@@ -565,10 +565,15 @@ static bool http_request_with_method_internal(const char *url, const char *metho
         }
     }
     
-    /* Add Content-Length for POST */
+    /* Add Content-Length for POST.  HTTP/1.1 servers (e.g. YouTube's analytics
+     * endpoints) reject POST requests that carry no Content-Length header with
+     * 411 Length Required, so send it even for an empty body. */
     if (postData && postDataLen > 0) {
         req_len += snprintf(request + req_len, sizeof(request) - req_len,
                            "Content-Length: %zu\r\n", postDataLen);
+    } else if (strcasecmp(method, "POST") == 0) {
+        req_len += snprintf(request + req_len, sizeof(request) - req_len,
+                           "Content-Length: 0\r\n");
     }
     
     /* Add cookies scoped to this request URL.
