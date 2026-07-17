@@ -198,6 +198,52 @@ static void cyber_upgrade_stack_clear(JSContextHandle ctx) {
     JS_SetPropertyStr(ctx, global, "__cyber_upgrade_stack", JS_NewArray(ctx));
 }
 
+/* Under-construction stack: elements whose custom-element constructor is
+ * currently running.  The KvR/ES5-adapter path calls super() in the wrapper
+ * class (popping the upgrade stack) and then HTMLElement.call(this) inside
+ * the user constructor body; that second native call must resolve to the
+ * element under construction rather than allocating a fresh object. */
+static void cyber_under_construction_push(JSContextHandle ctx, GCValue el) {
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue stack = JS_GetPropertyStr(ctx, global, "__cyber_under_construction");
+    if (!JS_IsArray(ctx, stack)) {
+        stack = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, global, "__cyber_under_construction", stack);
+    }
+    GCValue len_val = JS_GetPropertyStr(ctx, stack, "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, len_val);
+    JS_SetPropertyUint32(ctx, stack, len, el);
+}
+
+static GCValue cyber_under_construction_peek(JSContextHandle ctx) {
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue stack = JS_GetPropertyStr(ctx, global, "__cyber_under_construction");
+    if (!JS_IsArray(ctx, stack)) return JS_UNDEFINED;
+    GCValue len_val = JS_GetPropertyStr(ctx, stack, "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, len_val);
+    if (len == 0) return JS_UNDEFINED;
+    return JS_GetPropertyUint32(ctx, stack, len - 1);
+}
+
+static int cyber_under_construction_length(JSContextHandle ctx) {
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue stack = JS_GetPropertyStr(ctx, global, "__cyber_under_construction");
+    if (!JS_IsArray(ctx, stack)) return 0;
+    GCValue len_val = JS_GetPropertyStr(ctx, stack, "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, len_val);
+    return (int)len;
+}
+
+static void cyber_under_construction_truncate(JSContextHandle ctx, int len) {
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue stack = JS_GetPropertyStr(ctx, global, "__cyber_under_construction");
+    if (!JS_IsArray(ctx, stack)) return;
+    JS_SetPropertyStr(ctx, stack, "length", JS_NewInt32(ctx, len));
+}
+
 // Forward declaration for the per-element upgrade helper defined later.
 GCValue js_cyber_upgrade_element(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 
@@ -580,7 +626,23 @@ GCValue js_html_element_constructor(JSContextHandle ctx, GCValue new_target, int
         if (!JS_IsException(proto) && JS_IsObject(proto)) {
             JS_SetPrototype(ctx, upgrade_target, proto);
         }
+        cyber_under_construction_push(ctx, upgrade_target);
         return upgrade_target;
+    }
+
+    /* Double-super() case: the KvR/ES5-adapter wrapper class calls super()
+     * (popping the upgrade stack above), then the user constructor body runs
+     * HTMLElement.call(this).  That second native call arrives as a plain
+     * function call (new_target === undefined) with the upgrade stack already
+     * empty; resolve it to the element under construction instead of
+     * allocating a fresh, prototype-less object.  Nested `new` of an inner
+     * class still takes the fresh-object path below because new_target is a
+     * function there. */
+    if (JS_IsUndefined(new_target) || JS_IsNull(new_target)) {
+        GCValue uc = cyber_under_construction_peek(ctx);
+        if (!JS_IsUndefined(uc) && !JS_IsNull(uc) && JS_IsObject(uc)) {
+            return uc;
+        }
     }
 
     GCValue obj = JS_NewObjectClass(ctx, js_dom_node_class_id);
@@ -1598,27 +1660,26 @@ GCValue js_cyber_upgrade_element(JSContextHandle ctx, GCValue this_val, int argc
     // Run the registered constructor with the existing element on the upgrade
     // stack. The native HTMLElement constructor pops the stack and returns the
     // existing element as `this`, so the user constructor body runs against the
-    // real DOM-backed object.  Also restore the native HTMLElement globally so
-    // that any nested `new` inside the constructor body hits our upgrade-aware
-    // native constructor instead of the ES5 shim's wrapper.
+    // real DOM-backed object.
+    //
+    // NOTE: window.HTMLElement must NOT be swapped to the native constructor
+    // for the duration of the constructor run.  YouTube's custom-elements
+    // fast-shim replaces window.HTMLElement with a JS function that implements
+    // the e/f construction protocol (consume `e` on upgrade, `new a` on user
+    // construction), and page ES5 classes capture that function in
+    // module-scoped variables (var M = HTMLElement).  Swapping the global to
+    // the native ctor makes some HTMLElement.call sites bypass the shim while
+    // captured sites still run it, desynchronising the shared e/f flags; the
+    // shim then takes its `new a` path mid-upgrade and constructs the wrapper
+    // class recursively until stack overflow.  Leaving the shim in place
+    // matches Chrome: super() reaches our native ctor (upgrade stack pop) and
+    // every HTMLElement.call is handled by the shim's JS protocol.
     bool ctor_ok = false;
     bool budget_exceeded = false;
     if (g_ce_upgrade_depth == 1) {
         // Start the per-upgrade constructor budget at the outermost upgrade.
         // Nested upgrades share this budget so the whole tree is throttled.
         g_upgrade_ctor_start = g_html_elem_ctor_count;
-    }
-    GCValue saved_html = JS_UNDEFINED;
-    GCValue saved_window_html = JS_UNDEFINED;
-    GCValue native_html = JS_GetPropertyStr(ctx, global, "__origHTMLElement");
-    if (JS_IsFunction(ctx, native_html)) {
-        saved_html = JS_GetPropertyStr(ctx, global, "HTMLElement");
-        JS_SetPropertyStr(ctx, global, "HTMLElement", native_html);
-        GCValue window_obj = JS_GetPropertyStr(ctx, global, "window");
-        if (!JS_IsUndefined(window_obj) && !JS_IsNull(window_obj) && JS_IsObject(window_obj)) {
-            saved_window_html = JS_GetPropertyStr(ctx, window_obj, "HTMLElement");
-            JS_SetPropertyStr(ctx, window_obj, "HTMLElement", native_html);
-        }
     }
     // Clear the budget-hit flag before running the constructor and check it
     // afterwards.  The flag lets us recognise a budget abort even though the
@@ -1627,20 +1688,24 @@ GCValue js_cyber_upgrade_element(JSContextHandle ctx, GCValue this_val, int argc
     JS_SetPropertyStr(ctx, global, "__cyber_ce_budget_hit", JS_FALSE);
     JS_SetPropertyStr(ctx, global, "__cyber_first_real_error", JS_NULL);
     JS_SetPropertyStr(ctx, global, "__cyber_ce_in_ctor", JS_TRUE);
+    /* Mark the element as upgraded BEFORE running the constructor, matching the
+     * HTML spec: an element's custom element state becomes "custom" before its
+     * constructor is invoked, and a throwing constructor leaves it "failed"
+     * (never retried).  Without this, a re-entrant upgrade triggered while the
+     * constructor is still running (template stamping synchronously upgrades
+     * children and flushes the reaction queue, or a nested define) would run
+     * the constructor a second time on the same element; the second run's
+     * _initializeProperties then trips over the non-configurable monomer
+     * forwarding accessors the first run already defined on the element,
+     * throwing "could not delete property". */
+    JS_SetPropertyStr(ctx, el, "__CE_upgraded", JS_TRUE);
     cyber_upgrade_stack_push(ctx, el);
+    int uc_len_before = cyber_under_construction_length(ctx);
     GCValue ctor_ret = JS_CallConstructor(ctx, ctor, 0, NULL);
+    cyber_under_construction_truncate(ctx, uc_len_before);
     JS_SetPropertyStr(ctx, global, "__cyber_ce_in_ctor", JS_FALSE);
     GCValue budget_hit_val = JS_GetPropertyStr(ctx, global, "__cyber_ce_budget_hit");
     bool budget_hit = JS_ToBool(ctx, budget_hit_val);
-    if (!JS_IsUndefined(saved_html)) {
-        JS_SetPropertyStr(ctx, global, "HTMLElement", saved_html);
-    }
-    if (!JS_IsUndefined(saved_window_html)) {
-        GCValue window_obj = JS_GetPropertyStr(ctx, global, "window");
-        if (!JS_IsUndefined(window_obj) && !JS_IsNull(window_obj) && JS_IsObject(window_obj)) {
-            JS_SetPropertyStr(ctx, window_obj, "HTMLElement", saved_window_html);
-        }
-    }
     if (JS_IsException(ctor_ret) || budget_hit) {
         if (budget_hit) {
             budget_exceeded = true;
@@ -1701,7 +1766,7 @@ GCValue js_cyber_upgrade_element(JSContextHandle ctx, GCValue this_val, int argc
                 JS_IsObject(sr) ? "yes" : "no", sr_n);
     }
 
-    JS_SetPropertyStr(ctx, el, "__CE_upgraded", JS_TRUE);
+    /* __CE_upgraded was already set before the constructor ran (see above). */
 
     // Fire connectedCallback if the element is already connected and the
     // constructor succeeded.

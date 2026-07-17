@@ -9547,6 +9547,17 @@ GCValue JS_GetPropertyInternal(JSContextHandle ctx, GCValue obj,
     if (unlikely(tag != JS_TAG_OBJECT)) {
         switch(tag) {
         case JS_TAG_NULL:
+            if (getenv("CYBER_TRACE_NULLPROP")) {
+                const char *pname = JS_AtomToCString(ctx, prop);
+                if (pname && strcmp(pname, "createElement") == 0) {
+                    GCValue err = JS_NewError(ctx);
+                    build_backtrace(ctx, err, NULL, 0, 0, 0);
+                    GCValue st = JS_GetPropertyStr(ctx, err, "stack");
+                    const char *ss = JS_ToCString(ctx, st);
+                    fprintf(stderr, "[NULLPROP createElement]\n%s\n", ss ? ss : "?");
+                    fflush(stderr);
+                }
+            }
             return JS_ThrowTypeErrorAtom(ctx, "cannot read property '%s' of null", prop);
         case JS_TAG_UNDEFINED:
             return JS_ThrowTypeErrorAtom(ctx, "cannot read property '%s' of undefined", prop);
@@ -11859,6 +11870,17 @@ int JS_DefineProperty(JSContextHandle ctx, GCValue this_obj,
         QJS_LOGD("JS_DefineProperty: p is NULL!");
         return -1;
     }
+    if (getenv("CYBER_TRACE_DEFINE")) {
+        const char *pname = JS_AtomToCString(ctx, prop);
+        if (pname && strcmp(pname, "renderGuide") == 0) {
+            GCValue err = JS_NewError(ctx);
+            build_backtrace(ctx, err, NULL, 0, 0, 0);
+            GCValue st = JS_GetPropertyStr(ctx, err, "stack");
+            const char *ss = JS_ToCString(ctx, st);
+            fprintf(stderr, "[DEFINE renderGuide] flags=0x%x\n%s\n", flags, ss ? ss : "?");
+            fflush(stderr);
+        }
+    }
 
  redo_prop_update:
     QJS_LOGD("JS_DefineProperty: calling find_own_property p=%u prop=%d", p.handle(), prop);
@@ -12370,6 +12392,15 @@ int JS_DeleteProperty(JSContextHandle ctx, GCValue obj, JSAtom prop, int flags)
         return res;
     if ((flags & JS_PROP_THROW) ||
         ((flags & JS_PROP_THROW_STRICT) && is_strict_mode(ctx))) {
+        if (getenv("CYBER_TRACE_DELETEPROP")) {
+            const char *pname = JS_AtomToCString(ctx, prop);
+            GCValue err = JS_NewError(ctx);
+            build_backtrace(ctx, err, NULL, 0, 0, 0);
+            GCValue st = JS_GetPropertyStr(ctx, err, "stack");
+            const char *ss = JS_ToCString(ctx, st);
+            fprintf(stderr, "[DELETEPROP] prop=%s\n%s\n", pname ? pname : "?", ss ? ss : "?");
+            fflush(stderr);
+        }
         JS_ThrowTypeError(ctx, "could not delete property");
         return -1;
     }

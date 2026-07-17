@@ -191,6 +191,7 @@ GCValue js_node_get_childNodes(JSContextHandle ctx, GCValue this_val, int argc, 
 GCValue js_node_get_nodeType(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_node_get_nodeName(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_get_tagName(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_element_get_localName(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_get_firstElementChild(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_get_lastElementChild(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_get_nextElementSibling(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);

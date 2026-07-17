@@ -1082,6 +1082,34 @@ GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc
     
     GCValue child = argv[0];
 
+    /* Trace insertions into ShadyDOM-managed roots (CYBER_TRACE_ROOTINS=1):
+     * log the child tag and the JS stack so we can see which API path stamps
+     * shadow content (innerHTML vs appendChild vs importNode). */
+    if (getenv("CYBER_TRACE_ROOTINS")) {
+        GCValue nt = JS_GetPropertyStr(ctx, this_val, "nodeType");
+        int32_t ntv = 0;
+        JS_ToInt32(ctx, &ntv, nt);
+        GCValue shady = JS_GetPropertyStr(ctx, this_val, "__shady");
+        bool host_is_app = false;
+        if (ntv == 1) {
+            GCValue htagv = JS_GetPropertyStr(ctx, this_val, "tagName");
+            const char *htag = JS_ToCString(ctx, htagv);
+            host_is_app = htag && strcasecmp(htag, "ytd-app") == 0;
+            JS_FreeCString(ctx, htag);
+        }
+        if (JS_IsObject(shady) && (ntv == 11 || host_is_app)) {
+            GCValue tagv = JS_GetPropertyStr(ctx, child, "tagName");
+            const char *tag = JS_ToCString(ctx, tagv);
+            const char *trace_js = "(new Error('ri')).stack";
+            GCValue tv = JS_Eval(ctx, trace_js, strlen(trace_js), "<ritrace>", JS_EVAL_TYPE_GLOBAL);
+            const char *ts = JS_ToCString(ctx, tv);
+            fprintf(stderr, "[ROOT-INS] into=%s child=%s:\n%s\n",
+                    host_is_app ? "YTD-APP" : "FRAG", tag ? tag : "?", ts ? ts : "?");
+            fflush(stderr);
+            JS_FreeCString(ctx, tag);
+        }
+    }
+
     // DocumentFragment: append its children, not the fragment itself.
     if (is_document_fragment_node(ctx, child)) {
         std::vector<GCValue> children = collect_fragment_children(ctx, child);
@@ -1226,6 +1254,14 @@ GCValue js_node_removeChild_real(JSContextHandle ctx, GCValue this_val, int argc
         JS_ToInt32(ctx, &cid, idv);
         if (tag && (strcasecmp(tag, "ytd-masthead") == 0 || strcasecmp(tag, "ytd-app") == 0)) {
             platform_log(LOG_LEVEL_WARN, "dom_api", "REMOVE id=%d %s from %s", cid, tag, ptag ? ptag : "?");
+            if (getenv("CYBER_TRACE_REMOVE")) {
+                /* Capture the JS stack at the removal call site. */
+                const char *trace_js = "(new Error('rm')).stack";
+                GCValue tv = JS_Eval(ctx, trace_js, strlen(trace_js), "<rmtrace>", JS_EVAL_TYPE_GLOBAL);
+                const char *ts = JS_ToCString(ctx, tv);
+                fprintf(stderr, "[RM-TRACE] %s from %s:\n%s\n", tag, ptag ? ptag : "?", ts ? ts : "?");
+                fflush(stderr);
+            }
         }
     }
 
@@ -1420,6 +1456,32 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
     
     GCValue new_child = argv[0];
     GCValue ref_child = argv[1];  // Can be null (append at end)
+
+    /* Trace insertions into ShadyDOM-managed roots (CYBER_TRACE_ROOTINS=1). */
+    if (getenv("CYBER_TRACE_ROOTINS")) {
+        GCValue nt = JS_GetPropertyStr(ctx, this_val, "nodeType");
+        int32_t ntv = 0;
+        JS_ToInt32(ctx, &ntv, nt);
+        GCValue shady = JS_GetPropertyStr(ctx, this_val, "__shady");
+        bool host_is_app = false;
+        if (ntv == 1) {
+            GCValue htagv = JS_GetPropertyStr(ctx, this_val, "tagName");
+            const char *htag = JS_ToCString(ctx, htagv);
+            host_is_app = htag && strcasecmp(htag, "ytd-app") == 0;
+            JS_FreeCString(ctx, htag);
+        }
+        if (JS_IsObject(shady) && (ntv == 11 || host_is_app)) {
+            GCValue tagv = JS_GetPropertyStr(ctx, new_child, "tagName");
+            const char *tag = JS_ToCString(ctx, tagv);
+            const char *trace_js = "(new Error('ri')).stack";
+            GCValue tv = JS_Eval(ctx, trace_js, strlen(trace_js), "<ritrace>", JS_EVAL_TYPE_GLOBAL);
+            const char *ts = JS_ToCString(ctx, tv);
+            fprintf(stderr, "[ROOT-INS-BEFORE] into=%s child=%s:\n%s\n",
+                    host_is_app ? "YTD-APP" : "FRAG", tag ? tag : "?", ts ? ts : "?");
+            fflush(stderr);
+            JS_FreeCString(ctx, tag);
+        }
+    }
 
     // DocumentFragment: insert its children before ref_child, not the fragment itself.
     if (is_document_fragment_node(ctx, new_child)) {
@@ -1742,6 +1804,12 @@ GCValue js_node_cloneNode_real(JSContextHandle ctx, GCValue this_val, int argc, 
     clone_node.set_node_value(original.node_value());
     clone_node.set_id(original.id());
     clone_node.set_class_name(original.class_name());
+
+    /* The clone belongs to the same document as the original (DOM spec:
+     * cloneNode keeps the node document; importNode re-documents the top
+     * node separately).  Polymer's template parser relies on ownerDocument
+     * being set on every node inside stamped template fragments. */
+    clone_node.set_owner_document(original.owner_document());
     
     // Copy attributes
     int attr_count = original.attribute_count();
@@ -2014,6 +2082,21 @@ GCValue js_element_get_tagName(JSContextHandle ctx, GCValue this_val, int argc, 
         return JS_NewString(ctx, "DIV");
     }
     return JS_NewString(ctx, node.node_name());
+}
+
+/* Element.localName: the tag name in lowercase.  Polymer's template parser
+ * and the ShadyDOM polyfill detect <slot> elements via `localName === "slot"`;
+ * without it shadow-DOM slot registration silently never happens. */
+GCValue js_element_get_localName(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    DOMNodeHandle node = get_dom_node(ctx, this_val);
+    const char *name = (node.valid() && node.node_name()[0]) ? node.node_name() : "div";
+    char lower[128];
+    size_t n = strlen(name);
+    if (n >= sizeof(lower)) n = sizeof(lower) - 1;
+    for (size_t i = 0; i < n; i++) lower[i] = (char)tolower((unsigned char)name[i]);
+    lower[n] = '\0';
+    return JS_NewString(ctx, lower);
 }
 
 // Element tree navigation getters

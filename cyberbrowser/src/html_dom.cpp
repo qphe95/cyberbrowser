@@ -690,6 +690,17 @@ GCValue html_create_element_js(JSContextHandle ctx, const char *tag_name, HtmlAt
     
     /* Set tagName property */
     JS_SetPropertyStr(ctx, element, "tagName", JS_NewString(ctx, tag_name));
+
+    /* Set localName property (lowercase tag name; Polymer/ShadyDOM slot
+     * detection compares `localName === "slot"`). */
+    {
+        char lower_tag[128];
+        size_t tn = strlen(tag_name);
+        if (tn >= sizeof(lower_tag)) tn = sizeof(lower_tag) - 1;
+        for (size_t i = 0; i < tn; i++) lower_tag[i] = (char)tolower((unsigned char)tag_name[i]);
+        lower_tag[tn] = '\0';
+        JS_SetPropertyStr(ctx, element, "localName", JS_NewString(ctx, lower_tag));
+    }
     
     /* Create attributes map */
     GCValue attr_map = JS_NewObject(ctx);
@@ -1378,6 +1389,20 @@ bool html_element_set_inner_html(JSContextHandle ctx, GCValue elem, const char *
     GCValue tagv = JS_GetPropertyStr(ctx, target, "tagName");
     const char *tagn = JS_IsString(tagv) ? JS_ToCString(ctx, tagv) : "?";
     fprintf(stderr, "[INNER-HTML-SET] tag=%s html=%.60s\n", tagn, html);
+    if (getenv("CYBER_TRACE_INNERHTML")) {
+        GCValue nt = JS_GetPropertyStr(ctx, target, "nodeType");
+        int32_t ntv = 0;
+        JS_ToInt32(ctx, &ntv, nt);
+        /* Dump a JS stack whenever innerHTML is set on a non-element target
+         * (shadow root / fragment) so we can see who stamps template content. */
+        if (ntv != 1) {
+            const char *trace_js = "(new Error('ih')).stack";
+            GCValue tv = JS_Eval(ctx, trace_js, strlen(trace_js), "<ihtrace>", JS_EVAL_TYPE_GLOBAL);
+            const char *ts = JS_ToCString(ctx, tv);
+            fprintf(stderr, "[IH-TRACE] nodeType=%d tag=%s:\n%s\n", ntv, tagn, ts ? ts : "?");
+            fflush(stderr);
+        }
+    }
     JS_FreeCString(ctx, tagn);
 
     HtmlDocument *frag_doc = html_parse(html, strlen(html));

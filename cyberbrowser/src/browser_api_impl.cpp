@@ -2268,6 +2268,14 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_DefinePropertyGetSet(ctx, element_proto, tagName_atom,
         tagName_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, tagName_atom);
+
+    // localName getter - the lowercase tag name (needed by Polymer's
+    // template parser and ShadyDOM slot detection: `localName === "slot"`).
+    GCValue localName_getter = JS_NewCFunction(ctx, js_element_get_localName, "get localName", 0);
+    JSAtom localName_atom = JS_NewAtom(ctx, "localName");
+    JS_DefinePropertyGetSet(ctx, element_proto, localName_atom,
+        localName_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_FreeAtom(ctx, localName_atom);
     
     // shadowRoot getter
     GCValue getter = JS_NewCFunction(ctx, js_element_get_shadow_root, "get shadowRoot", 0);

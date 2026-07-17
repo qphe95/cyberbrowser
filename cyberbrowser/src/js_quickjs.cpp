@@ -2094,6 +2094,15 @@ GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int ar
                 // data property so it overrides the read-only getter on Element.prototype.
                 JS_DefinePropertyValueStr(ctx, elem, "tagName", JS_NewString(ctx, upper_tag),
                                           JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+                // localName is the lowercase tag name (slot detection in
+                // Polymer/ShadyDOM template parsing depends on it).
+                char lower_tag[64];
+                for (size_t i = 0; i < copy_len; i++) {
+                    lower_tag[i] = (char)tolower((unsigned char)tag[i]);
+                }
+                lower_tag[copy_len] = '\0';
+                JS_DefinePropertyValueStr(ctx, elem, "localName", JS_NewString(ctx, lower_tag),
+                                          JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
             }
             int cid = ++create_counter;
             JS_SetPropertyStr(ctx, elem, "__cyber_id", JS_NewInt32(ctx, cid));
@@ -2820,6 +2829,18 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
                         html_document_head(doc) ? "yes" : "no",
                         html_document_body(doc) ? "yes" : "no");
 
+                    /* Diagnostic: does the server-rendered masthead survive
+                     * the parse+populate step? (CYBER_DIAG_POPULATE=1) */
+                    if (getenv("CYBER_DIAG_POPULATE")) {
+                        const char *q =
+                            "var a=document.querySelector('ytd-app');"
+                            "console.error('[POPULATED] masthead=' + document.querySelectorAll('ytd-masthead').length"
+                            " + ' app=' + document.querySelectorAll('ytd-app').length"
+                            " + ' appKids=' + (a ? a.childElementCount : -1)"
+                            " + ' appFirst=' + (a && a.firstElementChild ? a.firstElementChild.tagName : 'n/a'));";
+                        JS_Eval(ctx, q, strlen(q), "<diag_populated>", JS_EVAL_TYPE_GLOBAL);
+                    }
+
                     /* CSS application is handled by the layout engine
                      * (css_layout_run) which has its own complete stylesheet
                      * collection and selector matching pipeline. */
@@ -2913,8 +2934,20 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
         // Execute script directly. Domain-specific string patches are not
         // applied; custom-element upgrade and missing standard APIs are
         // implemented in the browser layer instead.
+        //
+        // Lazy parsing is disabled: a lazily-stubbed function body is skipped
+        // at parse time, so the parser never registers which outer variables
+        // the nested function captures, and the enclosing function's closure
+        // var table is built WITHOUT those through-captures.  When the nested
+        // function is later resumed on its own, its JS_CLOSURE_REF indices are
+        // computed against a stale parent closure table and bind to
+        // detached/fresh var_refs instead of the shared enclosing bindings
+        // (observed with YouTube's custom-elements fast-shim: the wrapper class
+        // constructor saw the IIFE's e/f construction flags as undefined,
+        // re-running the user constructor until stack overflow).  CYBER_LAZY=1
+        // re-enables lazy parsing for debugging.
         int eval_flags = JS_EVAL_TYPE_GLOBAL;
-        if (getenv("CYBER_NO_LAZY")) eval_flags |= JS_EVAL_FLAG_NO_LAZY;
+        if (!getenv("CYBER_LAZY")) eval_flags |= JS_EVAL_FLAG_NO_LAZY;
         char evname[64];
         snprintf(evname, sizeof(evname), "eval-script-%d (%zu KB)",
                  i, script_lens[i] / 1024);
