@@ -3931,7 +3931,13 @@ public:
     
     uint8_t* data() const {
         JSArrayBuffer* p = get_ptr();
-        return p ? p->data : nullptr;
+        if (!p) return nullptr;
+        /* The raw data field goes stale when the compacting GC moves the
+         * backing store; data_handle is stable, so dereference it for GC-managed
+         * buffers and fall back to the field only for externally-owned ones. */
+        if (p->data_handle != GC_HANDLE_NULL)
+            return (uint8_t *)gc_deref(p->data_handle);
+        return p->data;
     }
     
     void set_data(uint8_t* d) {

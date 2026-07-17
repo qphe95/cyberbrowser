@@ -1042,8 +1042,18 @@ GCValue js_false_promise(JSContextHandle ctx, GCValue this_val, int argc, GCValu
 // against the requested id, and a plain JS_CLASS_OBJECT would never match.
 JSClassID js_location_class_id = 0;
 
+void js_location_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func) {
+    (void)rt;
+    /* Keep the LocationData opaque alive; opaque data is not scanned by the
+     * generic object marker, so without this the GC frees it while the
+     * location object is still reachable and later reads hit freed memory. */
+    GCHandle handle = JS_GetOpaqueHandle(val, js_location_class_id);
+    if (handle != GC_HANDLE_NULL) mark_func(rt, handle);
+}
+
 JSClassDef js_location_class_def = {
     .class_name = "Location",
+    .gc_mark   = js_location_mark,
 };
 
 // Parse URL into components - simple parser for standard URLs

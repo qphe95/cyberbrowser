@@ -194,6 +194,13 @@ static LONG WINAPI unhandled_exception_filter(EXCEPTION_POINTERS *ep) {
     if (code == EXCEPTION_ACCESS_VIOLATION) fprintf(stderr, "[FATAL] Access violation\n");
     if (code == EXCEPTION_STACK_OVERFLOW) fprintf(stderr, "[FATAL] Stack overflow\n");
     if (code == EXCEPTION_ILLEGAL_INSTRUCTION) fprintf(stderr, "[FATAL] Illegal instruction\n");
+    {
+        void *frames[32];
+        USHORT n = RtlCaptureStackBackTrace(0, 32, frames, NULL);
+        fprintf(stderr, "[FATAL] backtrace (%d frames):\n", (int)n);
+        for (USHORT i = 0; i < n; i++) fprintf(stderr, "  #%2d %p\n", (int)i, frames[i]);
+        fflush(stderr);
+    }
     return EXCEPTION_EXECUTE_HANDLER;
 }
 #endif

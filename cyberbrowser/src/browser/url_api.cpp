@@ -434,6 +434,8 @@ static const char* usp_get_item_value(JSContextHandle ctx, GCValue item) {
 }
 
 GCValue js_url_search_params_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
+    // Link instances to URLSearchParams.prototype so the accessor methods work.
+    GCValue proto = JS_GetPropertyStr(ctx, new_target, "prototype");
     const char *search = "";
     if (argc > 0) {
         if (JS_IsString(argv[0])) {
@@ -457,11 +459,18 @@ GCValue js_url_search_params_constructor(JSContextHandle ctx, GCValue new_target
                 JS_FreePropertyEnum(ctx, props, prop_count);
             }
             GCValue obj = JS_NewObject(ctx);
+            if (!JS_IsException(proto) && JS_IsObject(proto)) {
+                JS_SetPrototype(ctx, obj, proto);
+            }
             JS_SetPropertyStr(ctx, obj, "__params", arr);
             return obj;
         }
     }
-    return usp_create(ctx, search ? search : "");
+    GCValue obj = usp_create(ctx, search ? search : "");
+    if (!JS_IsException(obj) && !JS_IsException(proto) && JS_IsObject(proto)) {
+        JS_SetPrototype(ctx, obj, proto);
+    }
+    return obj;
 }
 
 GCValue js_url_search_params_append(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {

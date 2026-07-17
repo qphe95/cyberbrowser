@@ -61728,6 +61728,13 @@ static void js_array_buffer_mark(JSRuntimeHandle rt, GCValue val,
     JSArrayBufferHandle abuf = p.array_buffer_handle();
     if (abuf.valid()) {
         mark_func(rt, abuf.handle());
+        /* Also keep the backing store alive: the data buffer is a separate GC
+         * allocation referenced by data_handle.  Without marking it, the GC
+         * sweeps the buffer while the ArrayBuffer struct survives, and any
+         * later access (e.g. TypedArray#set's memmove) reads freed memory. */
+        GCHandle dh = abuf.data_handle();
+        if (dh != GC_HANDLE_NULL)
+            mark_func(rt, dh);
     }
 }
 
@@ -62387,9 +62394,15 @@ static GCValue js_typed_array_set_internal(JSContextHandle ctx,
     if (src_p.class_id() >= JS_CLASS_UINT8C_ARRAY &&
         src_p.class_id() <= JS_CLASS_FLOAT64_ARRAY) {
         JSTypedArrayHandle dest_ta = p.typed_array_handle();
-        JSArrayBufferHandle dest_abuf = JSArrayBufferHandle(dest_ta.buffer_handle());
+        /* buffer_handle is the ArrayBuffer JSObject handle, not the JSArrayBuffer
+         * struct handle; resolve the struct through the object's opaque handle
+         * (as typed_array_is_oob does).  Using the object handle directly reads
+         * the JSObject's fields as if they were JSArrayBuffer's. */
+        JSObjectHandle dest_abuf_obj(dest_ta.buffer_handle());
+        JSArrayBufferHandle dest_abuf = JSArrayBufferHandle(dest_abuf_obj.array_buffer_handle());
         JSTypedArrayHandle src_ta = src_p.typed_array_handle();
-        JSArrayBufferHandle src_abuf = JSArrayBufferHandle(src_ta.buffer_handle());
+        JSObjectHandle src_abuf_obj(src_ta.buffer_handle());
+        JSArrayBufferHandle src_abuf = JSArrayBufferHandle(src_abuf_obj.array_buffer_handle());
         int shift = typed_array_size_log2(p.class_id());
 
         if (typed_array_is_oob(src_p))
@@ -62402,6 +62415,18 @@ static GCValue js_typed_array_set_internal(JSContextHandle ctx,
         /* copying between typed objects */
         if (src_p.class_id() == p.class_id()) {
             /* same type, use memmove */
+            if (getenv("CYBER_TRACE_TA")) {
+                fprintf(stderr, "[TA-SET] dest.data=%p dest.off=%d src.data=%p src.off=%d offset=%lld shift=%d src_len=%lld n=%lld dest_bytelen=%d src_bytelen=%d\n",
+                        dest_abuf.data(), dest_ta.offset(),
+                        src_abuf.data(), src_ta.offset(),
+                        (long long)offset, shift, (long long)src_len,
+                        (long long)(src_len << shift),
+                        dest_abuf.byte_length(), src_abuf.byte_length());
+                fprintf(stderr, "[TA-SET] dest.dh=%u deref(dest.dh)=%p src.dh=%u deref(src.dh)=%p\n",
+                        (unsigned)dest_abuf.data_handle(), gc_deref(dest_abuf.data_handle()),
+                        (unsigned)src_abuf.data_handle(), gc_deref(src_abuf.data_handle()));
+                fflush(stderr);
+            }
             memmove(dest_abuf.data() + dest_ta.offset() + (offset << shift),
                     src_abuf.data() + src_ta.offset(), src_len << shift);
             goto done;

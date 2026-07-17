@@ -274,7 +274,7 @@ if(BE_PLATFORM_WINDOWS)
     # through nested IIFEs during both parsing and execution; a 64 MiB
     # stack prevents C stack overflow in JS_Eval.
     if(MINGW)
-        target_link_options(cyberbrowser PRIVATE "-Wl,--stack,67108864")
+        target_link_options(cyberbrowser PRIVATE "-Wl,--stack,67108864" "-Wl,--disable-dynamicbase")
     endif()
 endif()
 
