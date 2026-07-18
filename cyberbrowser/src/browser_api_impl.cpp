@@ -2368,6 +2368,19 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_NewCFunction(ctx, js_element_get_attribute, "getAttribute", 1));
     JS_SetPropertyStr(ctx, element_proto, "setAttribute",
         JS_NewCFunction(ctx, js_element_set_attribute, "setAttribute", 2));
+    // Reflected id/className properties (backed by the content attributes)
+    {
+        JSAtom id_atom = JS_NewAtom(ctx, "id");
+        JS_DefinePropertyGetSet(ctx, element_proto, id_atom,
+            JS_NewCFunction(ctx, js_element_get_id, "get id", 0),
+            JS_NewCFunction(ctx, js_element_set_id, "set id", 1), JS_PROP_ENUMERABLE);
+        JS_FreeAtom(ctx, id_atom);
+        JSAtom cn_atom = JS_NewAtom(ctx, "className");
+        JS_DefinePropertyGetSet(ctx, element_proto, cn_atom,
+            JS_NewCFunction(ctx, js_element_get_class_name, "get className", 0),
+            JS_NewCFunction(ctx, js_element_set_class_name, "set className", 1), JS_PROP_ENUMERABLE);
+        JS_FreeAtom(ctx, cn_atom);
+    }
     JS_SetPropertyStr(ctx, element_proto, "removeAttribute",
         JS_NewCFunction(ctx, js_element_remove_attribute, "removeAttribute", 1));
     JS_SetPropertyStr(ctx, element_proto, "hasAttribute",
@@ -3593,7 +3606,34 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     GCValue custom_event_ctor = JS_NewCFunction2(ctx, js_custom_event_constructor, "CustomEvent", 2, JS_CFUNC_constructor, 0);
     JS_SetConstructor(ctx, custom_event_ctor, custom_event_proto);
     JS_SetPropertyStr(ctx, global, "CustomEvent", custom_event_ctor);
-    
+
+    /* PromiseRejectionEvent: present in every real browser.  YouTube's Promise
+     * polyfill gate keeps the NATIVE Promise only when this class exists;
+     * without it the page installs a polyfill whose async scheduler deadlocks
+     * in our engine (its drain job is armed through the polyfilled Promise
+     * itself), stalling the entire .then-driven app bootstrap. */
+    {
+        const char *pre_js =
+            "(function(){"
+            "  function PRE(type, init) {"
+            "    var e = new Event(type, init || {});"
+            "    Object.setPrototypeOf(e, PRE.prototype);"
+            "    e.promise = init && init.promise !== void 0 ? init.promise : null;"
+            "    e.reason = init && 'reason' in init ? init.reason : void 0;"
+            "    return e;"
+            "  }"
+            "  PRE.prototype = Object.create(Event.prototype);"
+            "  PRE.prototype.constructor = PRE;"
+            "  Object.defineProperty(PRE, 'name', { value: 'PromiseRejectionEvent' });"
+            "  window.PromiseRejectionEvent = PRE;"
+            "  return PRE;"
+            "})();";
+        GCValue pre = JS_Eval(ctx, pre_js, strlen(pre_js), "<promise-rejection-event>", JS_EVAL_TYPE_GLOBAL);
+        if (!JS_IsException(pre) && !JS_IsUndefined(pre)) {
+            JS_SetPropertyStr(ctx, global, "PromiseRejectionEvent", pre);
+        }
+    }
+
     // MouseEvent class (inherits from Event)
     GCValue mouse_event_proto = JS_NewObject(ctx);
     // Set MouseEvent.prototype.__proto__ = Event.prototype

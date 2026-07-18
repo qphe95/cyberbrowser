@@ -198,6 +198,8 @@ static LONG WINAPI unhandled_exception_filter(EXCEPTION_POINTERS *ep) {
     if (code == EXCEPTION_ILLEGAL_INSTRUCTION) fprintf(stderr, "[FATAL] Illegal instruction\n");
     {
         void *frames[32];
+        HMODULE self = GetModuleHandleA(NULL);
+        fprintf(stderr, "[FATAL] module base=%p\n", (void *)self);
         USHORT n = RtlCaptureStackBackTrace(0, 32, frames, NULL);
         fprintf(stderr, "[FATAL] backtrace (%d frames):\n", (int)n);
         for (USHORT i = 0; i < n; i++) fprintf(stderr, "  #%2d %p\n", (int)i, frames[i]);
@@ -1143,6 +1145,8 @@ int main(int argc, char *argv[]) {
                 "  if (ytdapp) { console.error('[DIAG] polymerController=' + (ytdapp.polymerController ? 'yes' : 'no') + ' controllerProxy=' + (ytdapp.controllerProxy ? 'yes' : 'no')); }"
                 "  var sig = (window.ytsignals && window.ytsignals.getInstance) ? window.ytsignals.getInstance() : null;"
                 "  console.error('[DIAG] ytsignals inst=' + (sig ? 'yes' : 'no'));"
+                "  try { console.error('[DIAG] Promise native=' + (function(){ var s = ''+Promise.resolve; return s.indexOf('native') >= 0; })() + ' Promise.name=' + Promise.name + ' mm?=' + (window.default_kevlar_base && window.default_kevlar_base.mm ? 'y' : '?')); } catch(e) { console.error('[DIAG] promise check err'); }"
+                "  try { console.error('[DIAG] Promise str=' + (''+Promise).slice(0,120)); console.error('[DIAG] Promise===mm:' + (window.default_kevlar_base && window.default_kevlar_base.mm ? (Promise === window.default_kevlar_base.mm) : 'n/a')); } catch(e) {}"
                 "  if (sig && sig.processSignal) { sig.processSignal('ci'); console.error('[DIAG] fired ci via ytsignals'); }"
                 "})();";
             JS_Eval(g_ctx, diag_js, strlen(diag_js), "<diag_signals>", JS_EVAL_TYPE_GLOBAL);
@@ -1169,6 +1173,15 @@ int main(int argc, char *argv[]) {
                 "  var app = document.querySelector('ytd-app');"
                 "  var pc = app && app.polymerController;"
                 "  console.error('[DIAG4] pc.data=' + (pc && pc.data ? 'yes' : 'no') + ' pc.root=' + (pc && pc.root ? 'yes' : 'no') + ' pc.loadData=' + (pc ? typeof pc.loadData : 'n/a'));"
+                "  console.error('[DIAG4] pm pc=' + (pm && pm.polymerController ? 'yes' : 'no') + ' pm.isConnected=' + (pm && pm.isConnected) + ' pm.shadowRoot=' + (pm && pm.shadowRoot ? 'yes' : 'no') + ' pm.__shady=' + (pm && pm.__shady ? 'yes' : 'no'));"
+                "  var allpm = document.querySelectorAll('ytd-page-manager');"
+                "  console.error('[DIAG4] pm count=' + allpm.length);"
+                "  var realpm = allpm[0];"
+                "  if (realpm) { var pp = window.__cyber_eventComposedPath ? window.__cyber_eventComposedPath(realpm) : []; console.error('[DIAG4] pm path len=' + pp.length + ' tags=' + pp.map(function(n){return n.tagName||('#'+n.nodeType);}).slice(0,12).join('>')); }"
+                "  var app2 = document.querySelector('ytd-app');"
+                "  if (app2) { var la = app2['__listeners_attached']; console.error('[DIAG4] app listeners_attached=' + (la ? la.length : 'none')); }"
+                "  for (var pmi = 0; pmi < allpm.length && pmi < 6; pmi++) { var pX = allpm[pmi]; console.error('[DIAG4] pm['+pmi+'] parent=' + (pX.parentNode ? pX.parentNode.tagName : 'null') + ' conn=' + pX.isConnected + ' pc=' + (pX.polymerController?'yes':'no') + ' kids=' + pX.childElementCount); }"
+                "  console.error('[DIAG4] pm parent=' + (pm && pm.parentNode && pm.parentNode.tagName) + ' rootNode=' + (pm && pm.getRootNode && pm.getRootNode().nodeType));"
                 "  var pm = document.querySelector('ytd-page-manager');"
                 "  if (pm && pm.pagePool) {"
                 "    try { var r = pm.preparePage('watch'); console.error('[DIAG4] preparePage ran'); } catch(e){ console.error('[DIAG4] preparePage threw: ' + (e && e.message)); }"

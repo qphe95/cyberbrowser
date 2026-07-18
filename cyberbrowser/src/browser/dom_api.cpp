@@ -1455,7 +1455,8 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
     }
     
     GCValue new_child = argv[0];
-    GCValue ref_child = argv[1];  // Can be null (append at end)
+    /* WebIDL: refChild is `Node?` — undefined converts to null (append at end). */
+    GCValue ref_child = JS_IsUndefined(argv[1]) ? JS_NULL : argv[1];
 
     /* Trace insertions into ShadyDOM-managed roots (CYBER_TRACE_ROOTINS=1). */
     if (getenv("CYBER_TRACE_ROOTINS")) {
@@ -1519,6 +1520,21 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
     // Get ref child's DOM data
     DOMNodeHandle ref_node = get_dom_node(ctx, ref_child);
     if (!ref_node.valid()) {
+        if (getenv("CYBER_TRACE_INS")) {
+            const char *trace_js = "(new Error('ib')).stack";
+            GCValue tv = JS_Eval(ctx, trace_js, strlen(trace_js), "<ibtrace>", JS_EVAL_TYPE_GLOBAL);
+            const char *ts = JS_ToCString(ctx, tv);
+            GCValue ptv = JS_GetPropertyStr(ctx, this_val, "tagName");
+            const char *pt = JS_ToCString(ctx, ptv);
+            GCValue rtv = JS_GetPropertyStr(ctx, ref_child, "tagName");
+            const char *rt = JS_ToCString(ctx, rtv);
+            fprintf(stderr, "[INS-NOTFOUND] parent=%s ref=%s:\n%s\n",
+                    pt ? pt : "?", rt ? rt : "?", ts ? ts : "?");
+            fflush(stderr);
+            JS_FreeCString(ctx, pt);
+            JS_FreeCString(ctx, rt);
+            JS_FreeCString(ctx, ts);
+        }
         return throw_dom_exception(ctx, "NotFoundError", "Reference node not found");
     }
     
@@ -2461,8 +2477,12 @@ GCValue js_element_set_attribute(JSContextHandle ctx, GCValue this_val, int argc
             old_value = node.get_attribute(name);
         }
 
-        // Store attribute on the object itself
-        JS_SetPropertyStr(ctx, this_val, name, JS_NewString(ctx, value));
+        // Store attribute on the object itself (skip names that have a
+        // reflected prototype accessor — the accessor already wrote through
+        // to the internal table, and [[Set]] would invoke it a second time).
+        if (strcmp(name, "id") != 0 && strcmp(name, "class") != 0) {
+            JS_SetPropertyStr(ctx, this_val, name, JS_NewString(ctx, value));
+        }
         
         // Keep the internal DOMNode attribute table in sync so serialization
         // back to HTML produces the mutated attributes.
@@ -2496,6 +2516,71 @@ GCValue js_element_set_attribute(JSContextHandle ctx, GCValue this_val, int argc
         mo_notify_attribute(ctx, this_val, name, old_buf);
     }
     dom_request_layout();
+    return JS_UNDEFINED;
+}
+
+// Element.prototype.id / className — reflected content attributes.
+// Elements created by the HTML parser store attributes only in the internal
+// attribute table, so reading .id / .className as plain JS properties fails
+// (e.g. ytd-page-manager's id="page-manager" read as undefined, which broke
+// the monomer's page-manager-attached detection).
+// NOTE: these must read/write the internal table directly — going through
+// js_element_get/set_attribute recurses back into these accessors.
+GCValue js_element_get_id(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    DOMNodeHandle node = get_dom_node(ctx, this_val);
+    if (node.valid()) {
+        const char *val = node.get_attribute("id");
+        if (val) return JS_NewString(ctx, val);
+    }
+    return JS_NewString(ctx, "");
+}
+
+GCValue js_element_set_id(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc >= 1) {
+        const char *v = JS_ToCString(ctx, argv[0]);
+        if (v) {
+            DOMNodeHandle node = get_dom_node(ctx, this_val);
+            if (node.valid()) {
+                const char *old = node.get_attribute("id");
+                char old_buf[512]; old_buf[0] = '\0';
+                if (old) strncpy(old_buf, old, sizeof(old_buf) - 1);
+                node.set_attribute("id", v);
+                invoke_attribute_changed(ctx, this_val, "id", old, v);
+                mo_notify_attribute(ctx, this_val, "id", old_buf);
+                dom_request_layout();
+            }
+        }
+    }
+    return JS_UNDEFINED;
+}
+
+GCValue js_element_get_class_name(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    DOMNodeHandle node = get_dom_node(ctx, this_val);
+    if (node.valid()) {
+        const char *val = node.get_attribute("class");
+        if (val) return JS_NewString(ctx, val);
+    }
+    return JS_NewString(ctx, "");
+}
+
+GCValue js_element_set_class_name(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc >= 1) {
+        const char *v = JS_ToCString(ctx, argv[0]);
+        if (v) {
+            DOMNodeHandle node = get_dom_node(ctx, this_val);
+            if (node.valid()) {
+                const char *old = node.get_attribute("class");
+                char old_buf[512]; old_buf[0] = '\0';
+                if (old) strncpy(old_buf, old, sizeof(old_buf) - 1);
+                node.set_attribute("class", v);
+                invoke_attribute_changed(ctx, this_val, "class", old, v);
+                mo_notify_attribute(ctx, this_val, "class", old_buf);
+                dom_request_layout();
+            }
+        }
+    }
     return JS_UNDEFINED;
 }
 

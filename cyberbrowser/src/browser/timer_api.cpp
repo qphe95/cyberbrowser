@@ -233,6 +233,10 @@ int add_timer(JSContextHandle ctx, TimerType type, GCValue callback,
     g_timer_state.timer_count++;
     pthread_mutex_unlock(&g_timer_state.mutex);
     
+    if (getenv("CYBER_TRACE_RAF") && type == TIMER_TYPE_RAF) {
+        fprintf(stderr, "[RAF-ADD] id=%d\n", timer->id);
+        fflush(stderr);
+    }
     return timer->id;
 }
 
@@ -247,6 +251,10 @@ int clear_timer_by_id(int id) {
             // Unregister GC roots for this timer's callback and args
             unregister_timer_roots(&g_timer_state.timers[i]);
             
+            if (getenv("CYBER_TRACE_RAF") && g_timer_state.timers[i].type == TIMER_TYPE_RAF) {
+                fprintf(stderr, "[RAF-CLEAR] id=%d\n", id);
+                fflush(stderr);
+            }
             g_timer_state.timers[i].active = 0;
             g_timer_state.timer_count--;
             pthread_mutex_unlock(&g_timer_state.mutex);
@@ -338,6 +346,10 @@ void execute_timer(JSContextHandle ctx, int id) {
     
     // Get callback and args while holding lock
     GCValue callback = get_callback(timer->callback_handle);
+    if (getenv("CYBER_TRACE_RAF") && timer->type == TIMER_TYPE_RAF) {
+        fprintf(stderr, "[RAF-EXEC] id=%d cbIsFunc=%d\n", id, JS_IsFunction(ctx, callback));
+        fflush(stderr);
+    }
     GCValue args[MAX_TIMER_ARGS];
     int arg_count = timer->arg_count;
     for (int i = 0; i < arg_count; i++) {
@@ -613,7 +625,11 @@ GCValue js_request_idle_callback(JSContextHandle ctx, GCValue this_val, int argc
         return JS_NewInt32(ctx, 0);
     }
     
-    // Parse timeout from options (default 0)
+    // Parse timeout from options (default 0).  Note: the timeout is only a
+    // maximum-wait guarantee — an idle callback must fire as soon as the
+    // browser is idle, NOT after `timeout` ms.  Firing it as a plain timer of
+    // `timeout` ms starves scheduler queues that depend on prompt idle
+    // dispatch (YouTube's priority-0 jobs never ran, hanging page lifecycle).
     unsigned long long timeout = 0;
     if (argc >= 2 && JS_IsObject(argv[1])) {
         GCValue timeout_val = JS_GetPropertyStr(ctx, argv[1], "timeout");
@@ -622,8 +638,9 @@ GCValue js_request_idle_callback(JSContextHandle ctx, GCValue this_val, int argc
             timeout = (unsigned long long)(timeout_ms > 0 ? timeout_ms : 0);
         }
     }
-    
-    int id = add_timer(ctx, TIMER_TYPE_IDLE_CALLBACK, argv[0], timeout, 0, NULL);
+    (void)timeout;
+
+    int id = add_timer(ctx, TIMER_TYPE_IDLE_CALLBACK, argv[0], 0, 0, NULL);
     return JS_NewInt32(ctx, id);
 }
 

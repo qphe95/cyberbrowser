@@ -972,8 +972,203 @@ extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_re
                         size_t fpos2 = patched.find("prototype.parkOrScheduleJob=function(");
                         size_t bpos2 = fpos2 == std::string::npos ? fpos2 : patched.find('{', fpos2);
                         if (fpos2 != std::string::npos && bpos2 != std::string::npos) {
-                            const char *inj2 = "try{console.error('[PARK] sig='+arguments[2]+' prio='+arguments[1])}catch(e){}";
+                            const char *inj2 = "try{var s$=arguments[2];if(s$&&(''+s$).indexOf('eoir')>=0){window.__eoirC=(window.__eoirC||0)+1;if(window.__eoirC<4||window.__eoirC===1000)console.error('[PARK-EOIR #'+window.__eoirC+'] V.name='+(arguments[0]&&arguments[0].name)+' V.body='+(''+arguments[0]).slice(0,60)+' al=='+(typeof appLoad)+' al===sal:'+(typeof appLoad!=='undefined'&&typeof scheduleAppLoad!=='undefined'?appLoad===scheduleAppLoad:'?')+' '+(((new Error('x')).stack||'').split(String.fromCharCode(10)).slice(1,6).join(' <- ')))}else console.error('[PARK] sig='+s$+' prio='+arguments[1])}catch(e){}";
                             patched.insert(bpos2 + 1, inj2);
+                        }
+                        /* Log when the lifecycle jobSet resolves (init completes).
+                         * The call sits in expression position (after &&), so wrap
+                         * it in a comma expression rather than inserting a stmt. */
+                        const char *res_anchor = ".completedResolver.resolve()";
+                        size_t fpos3 = patched.find(res_anchor);
+                        if (fpos3 != std::string::npos) {
+                            /* Back up over the receiver identifier (minified name
+                             * shifts between fetches) and wrap the whole call in a
+                             * comma expression — valid in the && chain it sits in. */
+                            size_t id_start = fpos3;
+                            while (id_start > 0 && (isalnum((unsigned char)patched[id_start-1]) ||
+                                   patched[id_start-1]=='_' || patched[id_start-1]=='$'))
+                                id_start--;
+                            std::string call = patched.substr(id_start, fpos3 - id_start) + res_anchor;
+                            patched.replace(id_start, call.size(),
+                                "(console.error('[JOBSET] resolved')," + call + ")");
+                        }
+                        /* Log a jobSet payload job that throws (which would leave the
+                         * jobSet's completedResolver permanently unresolved). */
+                        size_t fpos4 = patched.find("function(){J.payload$jscomp$20.job();");
+                        if (fpos4 != std::string::npos) {
+                            /* Find the jobSet `this` capture by locating the receiver
+                             * of .scheduledPayloads[ after the wrapper start. */
+                            std::string js_this = "y";
+                            size_t sp = patched.find(".scheduledPayloads[", fpos4);
+                            if (sp != std::string::npos) {
+                                size_t id_start = sp;
+                                while (id_start > 0 && (isalnum((unsigned char)patched[id_start-1]) ||
+                                       patched[id_start-1]=='_' || patched[id_start-1]=='$'))
+                                    id_start--;
+                                js_this = patched.substr(id_start, sp - id_start);
+                            }
+                            std::string to4 = std::string("function(){console.error('[JOBSET-JOB-RUN] i='+J.i$jscomp$549+' n='+") +
+                                js_this + ".scheduledPayloads.length);try{J.payload$jscomp$20.job()}catch(e$jscomp$1){console.error('[JOBSET-ERR] '+(e$jscomp$1&&e$jscomp$1.message)+' | '+((e$jscomp$1&&e$jscomp$1.stack)||'').split(String.fromCharCode(10))[0]);throw e$jscomp$1};";
+                            const char *from4 = "function(){J.payload$jscomp$20.job();";
+                            patched.replace(fpos4, strlen(from4), to4);
+                        }
+                        /* Trace gkY cancel/flushJobs — a cancel would explain jobSet
+                         * payload jobs never running. */
+                        size_t fpos6 = patched.find("prototype.cancel=function(){for(var ");
+                        if (fpos6 != std::string::npos) {
+                            size_t b6 = patched.find('{', fpos6 + 10);
+                            if (b6 != std::string::npos)
+                                patched.insert(b6 + 1, "try{console.error('[JOBSET-CANCEL]')}catch(e){}");
+                        }
+                        size_t fpos7 = patched.find("prototype.flushJobs=function(){");
+                        if (fpos7 != std::string::npos) {
+                            size_t b7 = patched.find('{', fpos7);
+                            if (b7 != std::string::npos)
+                                patched.insert(b7 + 1, "try{console.error('[JOBSET-FLUSH]')}catch(e){}");
+                        }
+                        /* Log each jobSet payload's scheduled priority. */
+                        size_t fpos8 = patched.find("this.scheduler.addJob(Q,i1A(this,V.payload$jscomp$20))");
+                        if (fpos8 != std::string::npos) {
+                            const char *a8 = "this.scheduler.addJob(Q,i1A(this,V.payload$jscomp$20))";
+                            std::string r8 = std::string("(console.error('[JOBSET-ADD] i='+V.i$jscomp$549+' prio='+i1A(this,V.payload$jscomp$20)),") + a8 + ")";
+                            patched.replace(fpos8, strlen(a8), r8);
+                        }
+                        /* Trace jK.addJob: does the jobSet scheduler delegate to a
+                         * registered service or run synchronously? */
+                        size_t fpos5 = patched.find("jK.prototype.addJob=function(V,y,Q){");
+                        if (fpos5 != std::string::npos) {
+                            const char *from5 = "jK.prototype.addJob=function(V,y,Q){";
+                            const char *to5 = "jK.prototype.addJob=function(V,y,Q){try{console.error('[JK-ADDJOB] prio='+y)}catch(e){}try{";
+                            patched.replace(fpos5, strlen(from5), to5);
+                            const char *tail5 = "Q===void 0?(V(),NaN):_.Mk(V,Q||0)}";
+                            size_t tpos5 = patched.find(tail5, fpos5);
+                            if (tpos5 != std::string::npos) {
+                                patched.replace(tpos5, strlen(tail5),
+                                    "Q===void 0?(V(),NaN):_.Mk(V,Q||0)}catch(e$2){console.error('[JK-ADDJOB-ERR] '+(e$2&&e$2.message)+' | '+((e$2&&e$2.stack)||'').split(String.fromCharCode(10))[0]);throw e$2}}");
+                            }
+                        }
+                        /* Trace the initial-data consumption (SDs) and ytd-app's
+                         * updatePageData (which fires the 'cr' signal). */
+                        size_t fpos9 = patched.find("SDs=function(V,y){");
+                        if (fpos9 != std::string::npos) {
+                            size_t b9 = patched.find('{', fpos9);
+                            if (b9 != std::string::npos)
+                                patched.insert(b9 + 1, "try{console.error('[SDS] initial data consumed')}catch(e){}");
+                        }
+                        size_t fposRM = patched.find("RM=function(V,y){");
+                        if (fposRM != std::string::npos) {
+                            size_t brm = patched.find('{', fposRM);
+                            if (brm != std::string::npos)
+                                patched.insert(brm + 1, "try{console.error('[RM] run root.loadData='+(V&&V.root&&typeof V.root.loadData))}catch(e){}");
+                        }
+                        size_t fpos10 = patched.find(".updatePageData=function(V){");
+                        if (fpos10 != std::string::npos) {
+                            size_t b10 = patched.find('{', fpos10);
+                            if (b10 != std::string::npos)
+                                patched.insert(b10 + 1, "try{console.error('[UPD] updatePageData called page='+(V&&V.page)+' keys='+(V?Object.keys(V).slice(0,10).join(','):'null')+' pdu='+typeof this.performDataUpdate)}catch(e){}");
+                        }
+                        size_t fposJ = patched.find(".updatePageDataJobId=_.MQ(_.Jv,J)");
+                        if (fposJ != std::string::npos) {
+                            const char *aJ = ".updatePageDataJobId=_.MQ(_.Jv,J)";
+                            patched.replace(fposJ, strlen(aJ),
+                                ".updatePageDataJobId=(console.error('[UPDJ] scheduling J'),_.MQ(_.Jv,J))");
+                        }
+                        /* Trace the deferred J body (performDataUpdate + cr fire). */
+                        size_t fposJB = patched.find("var J=function(){V.filler?y.performDataUpdate(V,Q):zUD(");
+                        if (fposJB != std::string::npos) {
+                            size_t bJB = patched.find('{', fposJB);
+                            if (bJB != std::string::npos)
+                                patched.insert(bJB + 1, "try{console.error('[J] running page='+(V&&V.page))}catch(e){}");
+                        }
+                        /* Trace fireEvent detail integrity. */
+                        size_t fposFE = patched.find("V=new CustomEvent(V,{bubbles:!0,cancelable:!1,composed:!0,detail:y});this.dispatchEvent(V)");
+                        if (fposFE != std::string::npos) {
+                            const char *aFE = "V=new CustomEvent(V,{bubbles:!0,cancelable:!1,composed:!0,detail:y});this.dispatchEvent(V)";
+                            const char *rFE = "V=new CustomEvent(V,{bubbles:!0,cancelable:!1,composed:!0,detail:y});console.error('[FE] fireEvent type='+V.type+' yType='+typeof y+' yStr='+(function(){try{return JSON.stringify(y).slice(0,80)}catch(e){return 'err:'+e.message}})());this.dispatchEvent(V)";
+                            patched.replace(fposFE, strlen(aFE), rFE);
+                        }
+                        size_t fposPDU = patched.find("performDataUpdate=function(V,y){");
+                        if (fposPDU != std::string::npos) {
+                            size_t bpdu = patched.find('{', fposPDU);
+                            if (bpdu != std::string::npos)
+                                patched.insert(bpdu + 1, "try{console.error('[PDU] performDataUpdate')}catch(e){}");
+                        }
+                        /* Trace zUD invoking the deferred performDataUpdate fn. */
+                        size_t fposZ = patched.find("try{_.Kp(\"fr_s\"),V()}catch(y){_.NR(y)}");
+                        if (fposZ != std::string::npos) {
+                            const char *aZ = "try{_.Kp(\"fr_s\"),V()}catch(y){_.NR(y)}";
+                            const char *rZ = "try{_.Kp(\"fr_s\");console.error('[ZUD] invoking fn');V()}catch(y){console.error('[ZUD] fn threw: '+(y&&y.message));_.NR(y)}";
+                            patched.replace(fposZ, strlen(aZ), rZ);
+                        }
+                        size_t fpos11 = patched.find("processSignal(\"cr\")");
+                        if (fpos11 != std::string::npos) {
+                            patched.insert(fpos11, "console.error('[CR] firing cr'),");
+                        }
+                        /* Trace the page-manager-attached handler. */
+                        size_t fpos12 = patched.find("onYtPageManagerAttached=function(V){");
+                        if (fpos12 != std::string::npos) {
+                            size_t b12 = patched.find('{', fpos12);
+                            if (b12 != std::string::npos)
+                                patched.insert(b12 + 1, "try{var g$=_.gU(V);console.error('[PMA] onYtPageManagerAttached gU='+(g$&&g$.tagName)+' id='+(g$&&g$.id)+' target='+(V&&V.target&&V.target.tagName))}catch(e){console.error('[PMA] err '+e.message)}");
+                        }
+                        size_t fpos12b = patched.find("this.pageManagerAttachedPromise.resolve()");
+                        if (fpos12b != std::string::npos) {
+                            patched.replace(fpos12b, strlen("this.pageManagerAttachedPromise.resolve()"),
+                                "(console.error('[PMA-RESOLVE] typeof='+typeof this.pageManagerAttachedPromise),this.pageManagerAttachedPromise.resolve())");
+                        }
+                        /* Trace the page-data-fetched handler (leads to updatePageData). */
+                        size_t fpos14 = patched.find("onYtPageDataFetched=function(V,y){");
+                        if (fpos14 != std::string::npos) {
+                            size_t b14 = patched.find('{', fpos14);
+                            if (b14 != std::string::npos)
+                                patched.insert(b14 + 1, "try{console.error('[PDF] onYtPageDataFetched y='+(y?Object.keys(y).slice(0,6).join(','):'null')+' pd='+(y&&y.pageData?'y':'n'))}catch(e){}");
+                        }
+                        size_t fposPPD = patched.find("publishPageData=function(V){");
+                        if (fposPPD != std::string::npos) {
+                            size_t bppd = patched.find('{', fposPPD);
+                            if (bppd != std::string::npos)
+                                patched.insert(bppd + 1, "try{var lit$={pageData:V};var d$=Object.getOwnPropertyDescriptor(lit$,'pageData');console.error('[PPD] page='+(V&&V.page)+' keys='+Object.keys(lit$).length+' desc='+JSON.stringify(d$&&{e:d$.enumerable,w:d$.writable,c:d$.configurable})+' vKeys='+(V?Object.keys(V).length:'-'))}catch(e){}");
+                        }
+                        /* Trace loadData's deferred navigation callback. */
+                        size_t fpos15 = patched.find("this.loadDepsPromise.then(function(){");
+                        if (fpos15 != std::string::npos) {
+                            size_t b15 = patched.find('{', fpos15);
+                            if (b15 != std::string::npos)
+                                patched.insert(b15 + 1, "try{console.error('[LDD] loadDeps then runs')}catch(e){}");
+                        }
+                        size_t fpos16 = patched.find(".loadData=function(V){var y=this;");
+                        if (fpos16 != std::string::npos) {
+                            const char *a16 = ".loadData=function(V){var y=this;";
+                            std::string r16 = std::string(a16) + "try{console.error('[LD] loadData entry deps='+(this.loadDepsPromise?'y':'n'))}catch(e){}";
+                            patched.replace(fpos16, strlen(a16), r16);
+                        }
+                        /* Trace the _.mm custom-promise async pump: EQY schedules,
+                         * UR$ drains via a native Promise job. */
+                        size_t fpos17 = patched.find("EQY=function(V){V.executing_||(V.executing_=!0,_.WV(");
+                        if (fpos17 != std::string::npos) {
+                            size_t b17 = patched.find('{', fpos17);
+                            if (b17 != std::string::npos)
+                                patched.insert(b17 + 1, "try{window.__eqy=(window.__eqy||0)+1;if(window.__eqy<6)console.error('[EQY] schedule')}catch(e){}");
+                        }
+                        size_t fpos18 = patched.find("UR$=function(){for(var V;V=AvU.remove();)");
+                        if (fpos18 != std::string::npos) {
+                            size_t b18 = patched.find('{', fpos18);
+                            if (b18 != std::string::npos)
+                                patched.insert(b18 + 1, "try{window.__ur=(window.__ur||0)+1;if(window.__ur<6)console.error('[UR] drain')}catch(e){}");
+                        }
+                        /* Trace _.mm callback invocation. */
+                        size_t fpos19 = patched.find("nQN=function(V,y,Q){y==2?V.JSC$9850_onFulfilled.call(V.context,Q)");
+                        if (fpos19 != std::string::npos) {
+                            size_t b19 = patched.find('{', fpos19);
+                            if (b19 != std::string::npos)
+                                patched.insert(b19 + 1, "try{window.__nqn=(window.__nqn||0)+1;if(window.__nqn<15)console.error('[NQN] state='+y)}catch(e){}");
+                        }
+                        /* Trace _.bQ event dispatches named 'attached'. */
+                        size_t fpos13 = patched.find("bQ=function(V,y,Q,v){");
+                        if (fpos13 != std::string::npos) {
+                            size_t b13 = patched.find('{', fpos13);
+                            if (b13 != std::string::npos)
+                                patched.insert(b13 + 1, "try{if(y==='attached'){window.__bqa=(window.__bqa||0)+1;if(window.__bqa<8)console.error('[BQ] attached fired on '+(V&&V.tagName))}}catch(e){}");
                         }
                         if (patched.size() != scripts[i].content_len) {
                             char *nd = (char *)malloc(patched.size() + 1);
@@ -983,6 +1178,103 @@ extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_re
                                 scripts[i].content = nd;
                                 scripts[i].content_len = patched.size();
                                 fprintf(stderr, "[LC-PATCH] transition trace injected\n");
+                            }
+                        }
+                    }
+                    /* Log jobs that error inside the scheduler's O() executor so we can
+                     * see which scheduled job hangs the lifecycle jobSet. */
+                    if (getenv("CYBER_TRACE_LIFECYCLE") && scripts[i].content_len > 1000 &&
+                        strstr(scripts[i].content, "function O(a){try{a()}catch(b){T(b)}}")) {
+                        std::string patched(scripts[i].content, scripts[i].content_len);
+                        const char *from = "function O(a){try{a()}catch(b){T(b)}}";
+                        const char *to = "function O(a){try{if(!window.__schedRun)window.__schedRun=1;window.__schedRunCount=(window.__schedRunCount||0)+1;if(window.__schedRunCount<20||window.__schedRunCount%500===0)console.error('[SCHED-RUN #'+window.__schedRunCount+']');a()}catch(b){console.error('[SCHED-JOB-ERR] '+(b&&b.message)+' | '+((b&&b.stack)||'').split(String.fromCharCode(10))[0]);T(b)}}";
+                        size_t pos = patched.find(from);
+                        if (pos != std::string::npos) {
+                            patched.replace(pos, strlen(from), to);
+                        }
+                        /* Trace who keeps re-queueing scheduleAppLoad (the eoir park
+                         * flood that starves priority-0 lifecycle jobs). */
+                        const char *fromP = "function P(a,b,c,d){++a.F;";
+                        const char *toP = "function P(a,b,c,d){try{if(b&&b.name==='scheduleAppLoad'){window.__salC=(window.__salC||0)+1;if(window.__salC<4)console.error('[ADD-SAL] prio='+c+' body='+(''+b).slice(0,90)+' STACK '+((new Error()).stack||'').split(String.fromCharCode(10)).slice(1,7).join(' <- '))}}catch(e){}++a.F;";
+                        size_t posP = patched.find(fromP);
+                        if (posP != std::string::npos) {
+                            patched.replace(posP, strlen(fromP), toP);
+                        }
+                        /* Trace prio-2 job adds (updatePageData's deferred J). */
+                        const char *fromP2 = "var e=a.F;a.h[e]=b;a.l&&!d?a.v.push({id:e,priority:c}):(a.i[c].push(e),";
+                        const char *toP2 = "var e=a.F;a.h[e]=b;try{if(c===2)console.error('[SCHED-P2] add id='+e)}catch(e$7){}a.l&&!d?a.v.push({id:e,priority:c}):(a.i[c].push(e),";
+                        size_t posP2 = patched.find(fromP2);
+                        if (posP2 != std::string::npos) {
+                            patched.replace(posP2, strlen(fromP2), toP2);
+                        }
+                        /* Trace V drains when queue 2 is non-empty. */
+                        const char *fromV = "function V(a,b,c){a.C&&a.m===4&&a.g||R(a);";
+                        const char *toV = "function V(a,b,c){try{if(a.i[2].length>0)console.error('[SCHED-V] q2='+a.i[2].length+' q3='+a.i[3].length+' m='+a.m)}catch(e$8){}a.C&&a.m===4&&a.g||R(a);";
+                        size_t posV = patched.find(fromV);
+                        if (posV != std::string::npos) {
+                            patched.replace(posV, strlen(fromV), toV);
+                        }
+                        /* Trace the RAF/timeout callbacks that reset the pump handle. */
+                        const char *fromT = "g.T=function(a){this.C=!0;";
+                        const char *toT = "g.T=function(a){window.__tCnt=(window.__tCnt||0)+1;if(window.__tCnt<10)console.error('[SCHED-CB] T(RAF) g='+this.g);this.C=!0;";
+                        size_t posT = patched.find(fromT);
+                        if (posT != std::string::npos) {
+                            patched.replace(posT, strlen(fromT), toT);
+                        }
+                        const char *fromUU = "g.U=function(){V(this)}";
+                        const char *toUU = "g.U=function(){window.__u2Cnt=(window.__u2Cnt||0)+1;if(window.__u2Cnt<10)console.error('[SCHED-CB] U(timeout) g='+this.g);V(this)}";
+                        size_t posUU = patched.find(fromUU);
+                        if (posUU != std::string::npos) {
+                            patched.replace(posUU, strlen(fromUU), toUU);
+                        }
+                        const char *fromU = "function U(a){for(var b=r(J),c=b.next();!c.done;c=b.next())if(a.i[c.value].length)return!0;return!1}";
+                        const char *toU = "function U(a){var rr=(function(){for(var b=r(J),c=b.next();!c.done;c=b.next())if(a.i[c.value].length)return!0;return!1})();window.__uCnt=(window.__uCnt||0)+1;if(window.__uCnt<25||window.__uCnt%200===0)console.error('[SCHED-U] ret='+rr+' g='+a.g+' m='+a.m);return rr}";
+                        size_t posU = patched.find(fromU);
+                        if (posU != std::string::npos) {
+                            patched.replace(posU, strlen(fromU), toU);
+                        }
+                        const char *fromSt = "g.start=function(){this.D=!1;if(this.g===0)switch(this.m=Q(this),this.m){";
+                        const char *toSt = "g.start=function(){window.__stCnt=(window.__stCnt||0)+1;if(window.__stCnt<25||window.__stCnt%200===0)console.error('[SCHED-START] g='+this.g+' m0='+this.m);this.D=!1;if(this.g===0)switch(this.m=Q(this),this.m){";
+                        size_t posSt = patched.find(fromSt);
+                        if (posSt != std::string::npos) {
+                            patched.replace(posSt, strlen(fromSt), toSt);
+                        }
+                        /* Trace queue-0 state: pushes and drain opportunities. */
+                        const char *fromQ = "function Q(a){if(a.i[8].length){if(a.C)return 4;if(!document.hidden&&a.B)return 3}for(var b=5;b>=a.j;b--)if(a.i[b].length>0)return b>0?!document.hidden&&a.B?3:2:1;return 0}";
+                        const char *toQ = "function Q(a){var r=(function(){if(a.i[8].length){if(a.C)return 4;if(!document.hidden&&a.B)return 3}for(var b=5;b>=a.j;b--)if(a.i[b].length>0)return b>0?!document.hidden&&a.B?3:2:1;return 0})();if(a.i[0].length>0){window.__q0c=(window.__q0c||0)+1;if(window.__q0c<30)console.error('[SCHED-Q] ret='+r+' q0='+a.i[0].length+' q8='+(a.i[8]&&a.i[8].length)+' C='+a.C+' G='+a.G+' m='+a.m)}return r}";
+                        size_t posQ = patched.find(fromQ);
+                        if (posQ != std::string::npos) {
+                            patched.replace(posQ, strlen(fromQ), toQ);
+                        }
+                        if (patched.size() != scripts[i].content_len) {
+                            char *nd = (char *)malloc(patched.size() + 1);
+                            if (nd) {
+                                memcpy(nd, patched.data(), patched.size());
+                                nd[patched.size()] = '\0';
+                                scripts[i].content = nd;
+                                scripts[i].content_len = patched.size();
+                                fprintf(stderr, "[LC-PATCH] sched-job-err trace injected\n");
+                            }
+                        }
+                    }
+                    /* DIAGNOSTIC: force the lifecycle init to skip the jobSet wait, to
+                     * test whether the "rendering" phase (and metadata) runs once the
+                     * jobSet hang is bypassed.  CYBER_FORCE_RENDER=1. */
+                    if (getenv("CYBER_FORCE_RENDER") && scripts[i].content_len > 1000000 &&
+                        strstr(scripts[i].content, ".jobSet?v.yield(y.jobSet.completedResolver.promise,4):v.jumpTo(4)")) {
+                        std::string patched(scripts[i].content, scripts[i].content_len);
+                        const char *from = ".jobSet?v.yield(y.jobSet.completedResolver.promise,4):v.jumpTo(4)";
+                        const char *to = ".jobSet?v.jumpTo(4):v.jumpTo(4)";
+                        size_t pos = patched.find(from);
+                        if (pos != std::string::npos) {
+                            patched.replace(pos, strlen(from), to);
+                            char *nd = (char *)malloc(patched.size() + 1);
+                            if (nd) {
+                                memcpy(nd, patched.data(), patched.size());
+                                nd[patched.size()] = '\0';
+                                scripts[i].content = nd;
+                                scripts[i].content_len = patched.size();
+                                fprintf(stderr, "[LC-PATCH] force-render (skip jobSet wait) injected\n");
                             }
                         }
                     }

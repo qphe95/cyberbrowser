@@ -1405,6 +1405,32 @@ bool html_element_set_inner_html(JSContextHandle ctx, GCValue elem, const char *
     }
     JS_FreeCString(ctx, tagn);
 
+    /* Empty innerHTML is a clear-children operation, not a parse error. */
+    if (html[0] == '\0') {
+        if (getenv("CYBER_TRACE_INNERHTML")) {
+            static int empty_ih_count = 0;
+            if (empty_ih_count++ < 3) {
+                const char *trace_js = "(new Error('eih')).stack";
+                GCValue tv = JS_Eval(ctx, trace_js, strlen(trace_js), "<eihtrace>", JS_EVAL_TYPE_GLOBAL);
+                const char *ts = JS_ToCString(ctx, tv);
+                fprintf(stderr, "[EIH-TRACE] empty innerHTML set:\n%s\n", ts ? ts : "?");
+                fflush(stderr);
+            }
+        }
+        DOMNodeHandle target_node0 = DOMNodeHandle::from_object(target);
+        if (target_node0.valid()) {
+            GCValue child = target_node0.first_child();
+            while (!JS_IsNull(child)) {
+                DOMNodeHandle child_node = DOMNodeHandle::from_object(child);
+                GCValue next = child_node.valid() ? child_node.next_sibling() : JS_NULL;
+                GCValue remove_args[1] = { child };
+                js_node_removeChild_real(ctx, target, 1, remove_args);
+                child = next;
+            }
+        }
+        return true;
+    }
+
     HtmlDocument *frag_doc = html_parse(html, strlen(html));
     if (!frag_doc) {
         fprintf(stderr, "[INNER-HTML-SET] parse failed\n");

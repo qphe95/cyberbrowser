@@ -815,6 +815,7 @@ static void js_for_in_iterator_finalizer(JSRuntimeHandle rt, GCValue val);
 static void js_for_in_iterator_mark(JSRuntimeHandle rt, GCValue val,
                                 JS_MarkFunc *mark_func);
 static void js_regexp_finalizer(JSRuntimeHandle rt, GCValue val);
+static void js_regexp_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func);
 static void js_array_buffer_finalizer(JSRuntimeHandle rt, GCValue val);
 static void js_array_buffer_mark(JSRuntimeHandle rt, GCValue val,
                                 JS_MarkFunc *mark_func);
@@ -1438,7 +1439,7 @@ static JSClassShortDef const js_std_class_def[] = {
     { JS_ATOM_Function, js_c_function_data_finalizer, js_c_function_data_mark }, /* JS_CLASS_C_FUNCTION_DATA */
     { JS_ATOM_GeneratorFunction, js_bytecode_function_finalizer, js_bytecode_function_mark },  /* JS_CLASS_GENERATOR_FUNCTION */
     { JS_ATOM_ForInIterator, js_for_in_iterator_finalizer, js_for_in_iterator_mark },      /* JS_CLASS_FOR_IN_ITERATOR */
-    { JS_ATOM_RegExp, js_regexp_finalizer, NULL },                              /* JS_CLASS_REGEXP */
+    { JS_ATOM_RegExp, js_regexp_finalizer, js_regexp_mark },                              /* JS_CLASS_REGEXP */
     { JS_ATOM_ArrayBuffer, js_array_buffer_finalizer, js_array_buffer_mark },   /* JS_CLASS_ARRAY_BUFFER */
     { JS_ATOM_SharedArrayBuffer, js_array_buffer_finalizer, js_array_buffer_mark }, /* JS_CLASS_SHARED_ARRAY_BUFFER */
     { JS_ATOM_Uint8ClampedArray, js_typed_array_finalizer, js_typed_array_mark }, /* JS_CLASS_UINT8C_ARRAY */
@@ -5871,17 +5872,17 @@ static no_inline int resize_properties(JSContextHandle ctx, GCHandle *psh_handle
     while (new_hash_size < new_size)
         new_hash_size = 2 * new_hash_size;
     
-    /* CRITICAL: Use gc_realloc which preserves the handle.
-     * The handle stays the same, only the memory location changes. */
+    /* CRITICAL: gc_realloc MOVES the shape to new memory and frees the old
+     * block — the `sh` pointer captured above is now stale.  Re-deref before
+     * any further use, otherwise prop_size/hash-table rebuilds are written
+     * into freed memory and the live shape keeps a zeroed hash table (every
+     * subsequent property lookup on it fails). */
     uint32_t old_hash_size = sh.prop_hash_mask() + 1;
     if (gc_realloc(sh_handle, get_shape_size(new_hash_size, new_size)) == GC_HANDLE_NULL) {
         js_object_end_resize(p);
         return -1;
     }
-    
-    /* After gc_realloc, the same handle points to new memory */
-    /* The JSShapeHandle is still valid - no need to recreate it */
-    /* Handle table was already updated by gc_realloc */
+    sh = GC_SHAPE_DEREF(sh_handle);
     
     /* CRITICAL FIX: Update prop_size BEFORE rebuilding hash table.
      * prop_hash_start(sh) uses sh.prop_size() to compute the hash table location.
@@ -6093,8 +6094,25 @@ static int add_shape_property(JSContextHandle ctx, GCHandle *psh_handle,
     prop = get_shape_prop(sh);
     pr = &prop[prop_idx];
     sh.set_prop_count(prop_idx + 1);
+    if (getenv("CYBER_TRACE_DF")) {
+        const char *pn = JS_AtomToCString(ctx, atom);
+        if (pn && strcmp(pn, "pageData") == 0) {
+            fprintf(stderr, "[ADD-PD] prop_idx=%d flags=0x%x sh=%u\n", prop_idx, prop_flags, (unsigned)*psh_handle);
+            fflush(stderr);
+        }
+    }
     pr->atom = JS_DupAtom(ctx, atom);
     pr->flags = prop_flags;
+    if (getenv("CYBER_TRACE_DF") && !(prop_flags & JS_PROP_ENUMERABLE)) {
+        const char *pn = JS_AtomToCString(ctx, atom);
+        if (pn && strcmp(pn, "pageData") == 0) {
+            const char *trace_js = "(new Error('pd')).stack";
+            GCValue tv = JS_Eval(ctx, trace_js, strlen(trace_js), "<pdtrace>", JS_EVAL_TYPE_GLOBAL);
+            const char *ss = JS_ToCString(ctx, tv);
+            fprintf(stderr, "[ADD-PD-FLAGS0] flags=0x%x idx=%d\n%.600s\n", prop_flags, prop_idx, ss ? ss : "?");
+            fflush(stderr);
+        }
+    }
     /* add in hash table (now uses positive indices) */
     hash_mask = sh.prop_hash_mask();
     h = atom & hash_mask;
@@ -6854,6 +6872,13 @@ static force_inline JSShapeProperty *find_own_property(JSProperty **ppr,
     JSShapeHandle sh;
     JSShapeProperty *pr, *prop;
     intptr_t h;
+    bool df_trace = getenv("CYBER_TRACE_DF") && atom > 1000;
+    if (df_trace) {
+        fprintf(stderr, "[FOP-ENTER] atom=%u p.valid=%d shapeH=%u derefNull=%d\n",
+                (unsigned)atom, (int)(!!p), (unsigned)(p ? p.shape_handle() : 0),
+                p ? (GC_SHAPE_DEREF(p.shape_handle()) ? 0 : 1) : -1);
+        fflush(stderr);
+    }
     QJS_LOGD("find_own_property: ENTRY p=%u atom=%d", p.handle(), atom);
     if (unlikely(!p || !GC_SHAPE_DEREF(p.shape_handle()))) {
         QJS_LOGD("find_own_property: NULL p or shape - p=%p shape_handle=%u sh=%p", 
@@ -6891,6 +6916,11 @@ static force_inline JSShapeProperty *find_own_property(JSProperty **ppr,
             gc_print_corruption_info(p.shape_handle(), shape_canary);
             gc_diagnose_corruption_context(p.shape_handle());
             gc_dump_heap_for_analysis("/tmp/qjs_heap_dump.txt");
+            if (getenv("CYBER_TRACE_DF")) {
+                fprintf(stderr, "[CANARY-BAIL] shape handle=%u status=%d propcount=%d\n",
+                        p.shape_handle(), (int)shape_canary, sh.prop_count());
+                fflush(stderr);
+            }
             *ppr = NULL;
             return NULL;
         }
@@ -6910,6 +6940,38 @@ static force_inline JSShapeProperty *find_own_property(JSProperty **ppr,
             return pr;
         }
         h = pr->hash_next;
+    }
+    /* Diagnostic: hash-miss — linear scan to distinguish a broken hash chain
+     * from a genuinely absent property.  CYBER_TRACE_DF=1. */
+    if (getenv("CYBER_TRACE_DF") && atom > 1000) {
+        int found = -1;
+        for (int li = 0; li < sh.prop_count(); li++) {
+            if (prop[li].atom == atom) { found = li; break; }
+        }
+        static int fop_miss_log = 0;
+        if (fop_miss_log++ < 100000) {
+            fprintf(stderr, "[FOP-MISS] atom=%u found=%d shapeH=%u mask=%u bucket=%u bval=%d propcount=%d p0atom=%u\n",
+                    (unsigned)atom, found, (unsigned)p.shape_handle(), sh.prop_hash_mask(),
+                    (unsigned)((uintptr_t)atom & sh.prop_hash_mask()),
+                    (int)prop_hash_start(sh)[(uintptr_t)atom & sh.prop_hash_mask()],
+                    sh.prop_count(), sh.prop_count() > 0 ? (unsigned)prop[0].atom : 0u);
+            fflush(stderr);
+        }
+    }
+    /* The shape's hash chain is only an accelerator.  When it is corrupted
+     * (observed on this engine under heavy shape churn: a property present in
+     * the prop array becomes unreachable via the hash chain), a lookup would
+     * wrongly report the property as missing, silently breaking page code.
+     * Fall back to a bounded linear scan so the lookup stays correct.  The
+     * bound keeps this off hot paths on large shapes. */
+    {
+        int li, limit = sh.prop_count() < 32 ? sh.prop_count() : 32;
+        for (li = 0; li < limit; li++) {
+            if (prop[li].atom == atom) {
+                *ppr = &p_prop[li];
+                return &prop[li];
+            }
+        }
     }
     *ppr = NULL;
     return NULL;
@@ -7703,6 +7765,21 @@ extern "C" void mark_children(JSRuntimeHandle rt, GCHandle handle,
                     GCValue *var_buf = (GCValue *)((uint8_t *)sf + sf->var_buf_offset);
                     for (int i = 0; i < sf->var_count; i++)
                         JS_MarkValue(rt, var_buf[i], mark_func);
+                }
+                /* Mark the frame's argument storage too: closures can capture
+                 * arguments (e.g. IIFE args captured by an inner function), and
+                 * those values must be kept alive exactly like locals.  Only
+                 * mark when arg_buf lies inside the frame allocation (C frames
+                 * may reference the caller's external argv instead). */
+                if (sf->arg_count > 0) {
+                    size_t fsize = gc_handle_get_size(sf->self_handle);
+                    uint64_t aoff = sf->arg_buf_offset;
+                    if (aoff >= sizeof(JSStackFrame) &&
+                        aoff + (uint64_t)sf->arg_count * sizeof(GCValue) <= fsize) {
+                        GCValue *arg_buf = (GCValue *)((uint8_t *)sf + aoff);
+                        for (int i = 0; i < sf->arg_count; i++)
+                            JS_MarkValue(rt, arg_buf[i], mark_func);
+                    }
                 }
                 /* Mark all var_refs in this frame */
                 GCHandle *var_refs = JS_SF_VAR_REFS(sf);
@@ -10657,6 +10734,16 @@ static JSProperty *add_property(JSContextHandle ctx,
        current shape is shared or private.  This maximizes shape sharing and
        avoids creating duplicate hashed shapes when growing private shapes. */
     new_sh = find_hashed_shape_prop(ctx_rt, sh, prop, prop_flags);
+    bool df_pd = getenv("CYBER_TRACE_DF") && prop > 1000;
+    if (df_pd) {
+        const char *pn = JS_AtomToCString(ctx, prop);
+        if (pn && strcmp(pn, "pageData") == 0) {
+            fprintf(stderr, "[ADDPROP-PD] parent_propcount=%d new_sh_found=%d new_propcount=%d\n",
+                    sh.prop_count(), new_sh.valid() ? 1 : 0,
+                    new_sh.valid() ? new_sh.prop_count() : -1);
+            fflush(stderr);
+        }
+    }
     if (new_sh.valid()) {
         /* matching shape found: use it */
         /*  the property array may need to be resized */
@@ -11895,9 +11982,16 @@ int JS_DefineProperty(JSContextHandle ctx, GCValue this_obj,
         }
     }
 
- redo_prop_update:
+    redo_prop_update:
     QJS_LOGD("JS_DefineProperty: calling find_own_property p=%u prop=%d", p.handle(), prop);
     prs = find_own_property(&pr, p, prop);
+    if (getenv("CYBER_TRACE_DF")) {
+        const char *pn = JS_AtomToCString(ctx, prop);
+        if (pn && strcmp(pn, "pageData") == 0) {
+            fprintf(stderr, "[DEF-PD] find result=%s flags=0x%x\n", prs ? "FOUND" : "MISS", prs ? prs->flags : 0);
+            fflush(stderr);
+        }
+    }
     if (prs) {
         /* the range of the Array length property is always tested before */
         if ((prs->flags & JS_PROP_LENGTH) && (flags & JS_PROP_HAS_VALUE)) {
@@ -19004,6 +19098,15 @@ static JSVarRefHandle js_closure_global_var(JSContextHandle ctx, JSClosureVar *c
     p = JS_VALUE_GET_OBJ(ctx.global_obj());
  redo:
     prs = find_own_property(&pr, p, cv->var_name);
+    if (getenv("CYBER_TRACE_GV")) {
+        const char *nm = JS_AtomToCString(ctx, cv->var_name);
+        if (nm && (strstr(nm, "appLoad") || strstr(nm, "scheduleAppLoad"))) {
+            fprintf(stderr, "[GV] lookup '%s' atom=%u found=%d found_atom=%u flags=%x\n",
+                    nm, (unsigned)cv->var_name, prs ? 1 : 0,
+                    prs ? (unsigned)prs->atom : 0, prs ? prs->flags : 0);
+            fflush(stderr);
+        }
+    }
     if (prs) {
         if (unlikely((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT)) {
             /* AUTOINIT disabled - should never happen with eager initialization */
@@ -19030,9 +19133,21 @@ static JSVarRefHandle js_closure_global_var(JSContextHandle ctx, JSClosureVar *c
                         if (var_ref1 && !JS_IsUninitialized(var_ref1.get_value()) && !JS_IsUndefined(var_ref1.get_value())) {
                             /* Found a valid value in uninitialized vars - use it */
                             var_ref.set_value(var_ref1.get_value());
+                            if (getenv("CYBER_TRACE_GV")) {
+                                const char *nm = JS_AtomToCString(ctx, cv->var_name);
+                                if (nm && (strstr(nm, "appLoad") || strstr(nm, "scheduleAppLoad")))
+                                    fprintf(stderr, "[GV] '%s' uninit-fallback copied into vr=%llu\n",
+                                            nm, (unsigned long long)var_ref.handle());
+                            }
                         }
                     }
                 }
+            }
+            if (getenv("CYBER_TRACE_GV")) {
+                const char *nm = JS_AtomToCString(ctx, cv->var_name);
+                if (nm && (strstr(nm, "appLoad") || strstr(nm, "scheduleAppLoad")))
+                    fprintf(stderr, "[GV] '%s' -> global vr=%llu\n",
+                            nm, (unsigned long long)var_ref.handle());
             }
             return var_ref;
         }
@@ -19050,7 +19165,16 @@ static JSVarRefHandle js_closure_global_var(JSContextHandle ctx, JSClosureVar *c
         gc_set_heap_handle(pr->u.var_ref_handle, var_ref.handle());
         return var_ref;
     }
-    return js_global_object_get_uninitialized_var(ctx, p, cv->var_name);
+    {
+        JSVarRefHandle uvr = js_global_object_get_uninitialized_var(ctx, p, cv->var_name);
+        if (getenv("CYBER_TRACE_GV")) {
+            const char *nm = JS_AtomToCString(ctx, cv->var_name);
+            if (nm && (strstr(nm, "appLoad") || strstr(nm, "scheduleAppLoad")))
+                fprintf(stderr, "[GV] '%s' -> uninit vr=%llu\n",
+                        nm, (unsigned long long)uvr.handle());
+        }
+        return uvr;
+    }
 }
 
 /* Safely fetch a var_ref from a GC handle array with bounds checking.
@@ -19938,6 +20062,37 @@ extern BOOL exec_trace_active;
 extern const char *exec_trace_func_filter;
 #endif
 
+static JSAtom g_last_field_atom = JS_ATOM_NULL;
+
+/* CYBER_TRACE_GV: trace writes of specific named functions into var_refs. */
+static void gv_trace_put(JSContextHandle ctx, GCHandle vrh, GCValue v, int idx) {
+    if (!getenv("CYBER_TRACE_GV")) return;
+    if (!JS_IsFunction(ctx, v)) return;
+    GCValue nm = JS_GetPropertyStr(ctx, v, "name");
+    const char *s = JS_ToCString(ctx, nm);
+    if (s && (strstr(s, "appLoad") || strstr(s, "scheduleAppLoad"))) {
+        fprintf(stderr, "[GV-PUT] vr=%llu idx=%d <- fn '%s'\n",
+                (unsigned long long)vrh, idx, s);
+        fflush(stderr);
+    }
+}
+
+/* CYBER_TRACE_GV: trace var_ref reads inside script_40 functions. */
+static void gv_trace_get(JSContextHandle ctx, JSFunctionBytecodeHandle b,
+                         JSVarRefHandle *var_refs, int idx, GCValue val) {
+    if (!getenv("CYBER_TRACE_GV")) return;
+    if (!var_refs) return;
+    if (!JS_IsFunction(ctx, val)) return;  /* cheap exit before touching b */
+    GCValue nm = JS_GetPropertyStr(ctx, val, "name");
+    const char *s = JS_ToCString(ctx, nm);
+    if (!s || (!strstr(s, "appLoad") && !strstr(s, "scheduleAppLoad"))) return;
+    const char *vn = (b.valid() && idx >= 0 && idx < b.closure_var_count())
+        ? JS_AtomToCString(ctx, b.closure_var_var_name(idx)) : NULL;
+    fprintf(stderr, "[GV-GET] idx=%d declared='%s' vr=%llu value_fn='%s'\n",
+            idx, vn ? vn : "?", (unsigned long long)var_refs[idx].handle(), s);
+    fflush(stderr);
+}
+
 static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                                GCValue this_obj, GCValue new_target,
                                int argc, GCValue *argv, int flags)
@@ -20097,6 +20252,22 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                         JS_FreePropertyEnum(caller_ctx, keys_tab, keys_len);
                     }
                     (void)caller_ctx;
+                }
+                if (getenv("CYBER_TRACE_NAF") && g_last_field_atom != JS_ATOM_NULL) {
+                    char ab[128];
+                    fprintf(stderr, "[NAF-METHOD] missing: %s\n",
+                            JS_AtomGetStr(caller_ctx, ab, sizeof(ab), g_last_field_atom));
+                    g_last_field_atom = JS_ATOM_NULL;
+                    static int naf_m_bt = 0, naf_m_guard = 0;
+                    if (naf_m_bt < 4 && !naf_m_guard) {
+                        naf_m_guard = 1;
+                        naf_m_bt++;
+                        const char *tj = "(function(){try{throw new Error('nm')}catch(e){return e.stack}})()";
+                        GCValue st = JS_Eval(caller_ctx, tj, strlen(tj), "<nm>", JS_EVAL_TYPE_GLOBAL);
+                        const char *ss = JS_ToCString(caller_ctx, st);
+                        fprintf(stderr, "[NAF-M-BT]\n%s\n", ss ? ss : "?");
+                        naf_m_guard = 0;
+                    }
                 }
                 fflush(stderr);
             }
@@ -20317,6 +20488,20 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
             *sp++ = JS_NewObject(ctx);
             if (unlikely(JS_IsException(sp[-1])))
                 goto exception;
+            if (getenv("CYBER_TRACE_DF")) {
+                static int bad_base = 0;
+                JSObjectHandle no = JS_VALUE_GET_OBJ(sp[-1]);
+                JSShapeHandle nsh = GC_SHAPE_DEREF(no.shape_handle());
+                if (nsh.valid() && nsh.prop_count() != 0 && bad_base++ < 8) {
+                    fprintf(stderr, "[OBJ-BASE] new object starts with propcount=%d\n", nsh.prop_count());
+                    for (int bi = 0; bi < nsh.prop_count() && bi < 6; bi++) {
+                        JSShapeProperty *bp = get_shape_prop(nsh) + bi;
+                        const char *bn = JS_AtomToCString(ctx, bp->atom);
+                        fprintf(stderr, "[OBJ-BASE]   slot[%d] atom='%s' flags=0x%x\n", bi, bn ? bn : "?", bp->flags);
+                    }
+                    fflush(stderr);
+                }
+            }
             BREAK;
         CASE(OP_special_object):
             {
@@ -20939,6 +21124,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                     }
                 } else {
                 put_var_ok:
+                   gv_trace_put(ctx, var_ref.handle(), sp[-1], idx);
                    var_ref.set_value(sp[-1]);
                    sp--;
                 }
@@ -21026,18 +21212,18 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
         CASE(OP_set_arg1): set_value(ctx, &arg_buf[1], sp[-1]); BREAK;
         CASE(OP_set_arg2): set_value(ctx, &arg_buf[2], sp[-1]); BREAK;
         CASE(OP_set_arg3): set_value(ctx, &arg_buf[3], sp[-1]); BREAK;
-        CASE(OP_get_var_ref0): *sp++ = var_refs[0].get_value(); BREAK;
-        CASE(OP_get_var_ref1): *sp++ = var_refs[1].get_value(); BREAK;
-        CASE(OP_get_var_ref2): *sp++ = var_refs[2].get_value(); BREAK;
-        CASE(OP_get_var_ref3): *sp++ = var_refs[3].get_value(); BREAK;
-        CASE(OP_put_var_ref0): var_refs[0].set_value(*--sp); BREAK;
-        CASE(OP_put_var_ref1): var_refs[1].set_value(*--sp); BREAK;
-        CASE(OP_put_var_ref2): var_refs[2].set_value(*--sp); BREAK;
-        CASE(OP_put_var_ref3): var_refs[3].set_value(*--sp); BREAK;
-        CASE(OP_set_var_ref0): var_refs[0].set_value(sp[-1]); BREAK;
-        CASE(OP_set_var_ref1): var_refs[1].set_value(sp[-1]); BREAK;
-        CASE(OP_set_var_ref2): var_refs[2].set_value(sp[-1]); BREAK;
-        CASE(OP_set_var_ref3): var_refs[3].set_value(sp[-1]); BREAK;
+        CASE(OP_get_var_ref0): gv_trace_get(ctx, b, var_refs, 0, var_refs[0].get_value()); *sp++ = var_refs[0].get_value(); BREAK;
+        CASE(OP_get_var_ref1): gv_trace_get(ctx, b, var_refs, 1, var_refs[1].get_value()); *sp++ = var_refs[1].get_value(); BREAK;
+        CASE(OP_get_var_ref2): gv_trace_get(ctx, b, var_refs, 2, var_refs[2].get_value()); *sp++ = var_refs[2].get_value(); BREAK;
+        CASE(OP_get_var_ref3): gv_trace_get(ctx, b, var_refs, 3, var_refs[3].get_value()); *sp++ = var_refs[3].get_value(); BREAK;
+        CASE(OP_put_var_ref0): gv_trace_put(ctx, var_refs[0].handle(), sp[-1], 0); var_refs[0].set_value(*--sp); BREAK;
+        CASE(OP_put_var_ref1): gv_trace_put(ctx, var_refs[1].handle(), sp[-1], 1); var_refs[1].set_value(*--sp); BREAK;
+        CASE(OP_put_var_ref2): gv_trace_put(ctx, var_refs[2].handle(), sp[-1], 2); var_refs[2].set_value(*--sp); BREAK;
+        CASE(OP_put_var_ref3): gv_trace_put(ctx, var_refs[3].handle(), sp[-1], 3); var_refs[3].set_value(*--sp); BREAK;
+        CASE(OP_set_var_ref0): gv_trace_put(ctx, var_refs[0].handle(), sp[-1], 0); var_refs[0].set_value(sp[-1]); BREAK;
+        CASE(OP_set_var_ref1): gv_trace_put(ctx, var_refs[1].handle(), sp[-1], 1); var_refs[1].set_value(sp[-1]); BREAK;
+        CASE(OP_set_var_ref2): gv_trace_put(ctx, var_refs[2].handle(), sp[-1], 2); var_refs[2].set_value(sp[-1]); BREAK;
+        CASE(OP_set_var_ref3): gv_trace_put(ctx, var_refs[3].handle(), sp[-1], 3); var_refs[3].set_value(sp[-1]); BREAK;
 #endif
 
         CASE(OP_get_var_ref):
@@ -21047,6 +21233,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                 idx = get_u16(pc);
                 pc += 2;
                 val = var_refs[idx].get_value();
+                gv_trace_get(ctx, b, var_refs, idx, val);
                 if (unlikely(JS_IsUninitialized(val))) {
                     /* bgmdwnldr: In browsers, if a variable is not found,
                      * fall back to global object lookup instead of returning
@@ -21071,6 +21258,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                 int idx;
                 idx = get_u16(pc);
                 pc += 2;
+                gv_trace_put(ctx, var_refs[idx].handle(), sp[-1], idx);
                 var_refs[idx].set_value(sp[-1]);
                 sp--;
             }
@@ -21080,6 +21268,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                 int idx;
                 idx = get_u16(pc);
                 pc += 2;
+                gv_trace_put(ctx, var_refs[idx].handle(), sp[-1], idx);
                 var_refs[idx].set_value(sp[-1]);
             }
             BREAK;
@@ -21118,6 +21307,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                     JS_ThrowReferenceErrorUninitialized2(ctx, b, idx, TRUE);
                     goto exception;
                 }
+                gv_trace_put(ctx, var_refs[idx].handle(), sp[-1], idx);
                 var_refs[idx].set_value(sp[-1]);
                 sp--;
             }
@@ -21131,6 +21321,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                     JS_ThrowReferenceErrorUninitialized2(ctx, b, idx, TRUE);
                     goto exception;
                 }
+                gv_trace_put(ctx, var_refs[idx].handle(), sp[-1], idx);
                 var_refs[idx].set_value(sp[-1]);
                 sp--;
             }
@@ -21546,6 +21737,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                     atom = get_u32(pc);                                 \
                     pc += 4;                                            \
                 }                                                       \
+                if (getenv("CYBER_TRACE_NAF")) g_last_field_atom = atom; \
                                                                         \
                 obj = sp[-1];                                           \
                 if (likely(JS_VALUE_GET_TAG(obj) == JS_TAG_OBJECT)) {   \
@@ -21712,6 +21904,31 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                 sp--;
                 if (unlikely(ret < 0))
                     goto exception;
+                if (getenv("CYBER_TRACE_DF")) {
+                    static int df_bad = 0;
+                    const char *an = JS_AtomToCString(ctx, atom);
+                    bool numeric_name = an && an[0] >= '0' && an[0] <= '9';
+                    if (!numeric_name) {
+                        JSShapeProperty *prs; JSProperty *pr;
+                        JSObjectHandle op = JS_VALUE_GET_OBJ(sp[-1]);
+                        prs = find_own_property(&pr, op, atom);
+                        if (!prs && df_bad++ < 4) {
+                            JSShapeHandle sh = GC_SHAPE_DEREF(op.shape_handle());
+                            fprintf(stderr, "[DF-BAD] define lost atom='%s' ID=%u ret=%d propcount=%d\n",
+                                    an ? an : "?", (unsigned)atom, ret, sh.prop_count());
+                            for (int bi = 0; bi <= (int)sh.prop_hash_mask() && bi < 16; bi++) {
+                                uint32_t bv = prop_hash_start(sh)[bi];
+                                if (bv) {
+                                    JSShapeProperty *bp = get_shape_prop(sh) + (bv - 1);
+                                    const char *bn = JS_AtomToCString(ctx, bp->atom);
+                                    fprintf(stderr, "[DF-BAD]   bucket[%d]=%u atom='%s' ID=%u hash_next=%u\n",
+                                            bi, bv, bn ? bn : "?", (unsigned)bp->atom, bp->hash_next);
+                                }
+                            }
+                            fflush(stderr);
+                        }
+                    }
+                }
             }
             BREAK;
 
@@ -36182,6 +36399,14 @@ static int add_closure_var(JSContextHandle ctx, JSFunctionDef *s,
         cv->var_kind = var_kind;
         cv->var_idx = var_idx;
         cv->var_name = JS_DupAtom(ctx, var_name);
+        if (getenv("CYBER_TRACE_GV")) {
+            const char *nm = JS_AtomToCString(ctx, var_name);
+            if (nm && (strstr(nm, "appLoad") || strstr(nm, "scheduleAppLoad") || strcmp(nm, "window") == 0)) {
+                fprintf(stderr, "[GV-ADDCV] name='%s' idx=%d closure_type=%d var_idx=%d fd=%p\n",
+                        nm, idx, (int)closure_type, var_idx, (void *)s);
+                fflush(stderr);
+            }
+        }
         return idx;
     }
 }
@@ -36220,8 +36445,20 @@ static int get_closure_var(JSContextHandle ctx, JSFunctionDef *s,
     }
     for(i = 0; i < s->closure_var_handle.count(); i++) {
         JSClosureVar *cv = &s_closure_var[i];
-        if (cv->var_idx == var_idx && cv->closure_type == closure_type)
+        if (cv->var_idx == var_idx && cv->closure_type == closure_type) {
+            /* For global closure vars var_idx is always 0, so it cannot
+             * distinguish different globals — the name must match too.
+             * Otherwise referencing a second global (e.g. 'appLoad' after
+             * 'scheduleAppLoad') falsely dedups onto the first entry and
+             * the emitted bytecode reads the wrong variable. */
+            if (closure_type == JS_CLOSURE_GLOBAL ||
+                closure_type == JS_CLOSURE_GLOBAL_DECL ||
+                closure_type == JS_CLOSURE_GLOBAL_REF) {
+                if (cv->var_name != var_name)
+                    continue;
+            }
             return i;
+        }
     }
     return add_closure_var(ctx, s, closure_type, var_idx, var_name,
                            is_const, is_lexical, var_kind);
@@ -52342,6 +52579,17 @@ static void js_regexp_finalizer(JSRuntimeHandle rt, GCValue val)
 {
     JSObjectHandle p = JS_VALUE_GET_OBJ(val);
     /* GC frees automatically */
+}
+
+/* Mark the regexp bytecode string so it is not reclaimed while the RegExp
+ * object is alive (previously NULL gc_mark: bytecode was freed mid-page and
+ * any later .flags/.test access dereferenced garbage and crashed). */
+static void js_regexp_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func)
+{
+    JSObjectHandle p = JS_VALUE_GET_OBJ(val);
+    GCHandle bc = p.regexp_bytecode_handle();
+    if (bc != GC_HANDLE_NULL)
+        mark_func(rt, bc);
 }
 
 /* create a string containing the RegExp bytecode */

@@ -2130,6 +2130,20 @@ public:
     EventHandle() : Base() {}
     explicit EventHandle(GCHandle handle) : Base(handle) {}
 
+    /* Accept Event and all its subclasses (CustomEvent/MouseEvent/FocusEvent):
+     * their data structs embed EventData at offset 0, so the opaque handle is
+     * interchangeable.  The base getter rejects subclass instances otherwise
+     * (e.g. reading .type on a CustomEvent threw "Invalid Event object", which
+     * silently broke dispatchEvent for every subclass event). */
+    static EventHandle from_object_check(JSContextHandle ctx, GCValue obj) {
+        (void)ctx;
+        GCHandle h = JS_GetOpaqueHandle(obj, js_event_class_id);
+        if (h == GC_HANDLE_NULL) h = JS_GetOpaqueHandle(obj, js_custom_event_class_id);
+        if (h == GC_HANDLE_NULL) h = JS_GetOpaqueHandle(obj, js_mouse_event_class_id);
+        if (h == GC_HANDLE_NULL) h = JS_GetOpaqueHandle(obj, js_focus_event_class_id);
+        return EventHandle(h);
+    }
+
     static EventHandle create(JSContextHandle ctx, const char* type) {
         GCHandle h = gc_alloc(sizeof(EventData), JS_GC_OBJ_TYPE_DATA);
         if (h != GC_HANDLE_NULL) {

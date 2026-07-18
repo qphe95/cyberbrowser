@@ -141,11 +141,16 @@ GCValue js_event_preventDefault(JSContextHandle ctx, GCValue this_val, int argc,
 
 GCValue js_event_stopPropagation(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
+    JS_SetPropertyStr(ctx, this_val, "cancelBubble", JS_TRUE);
+    JS_SetPropertyStr(ctx, this_val, "__cyber_stopped", JS_TRUE);
     return JS_UNDEFINED;
 }
 
 GCValue js_event_stopImmediatePropagation(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
+    JS_SetPropertyStr(ctx, this_val, "cancelBubble", JS_TRUE);
+    JS_SetPropertyStr(ctx, this_val, "__cyber_stopped", JS_TRUE);
+    JS_SetPropertyStr(ctx, this_val, "__cyber_stopped_immediate", JS_TRUE);
     return JS_UNDEFINED;
 }
 
@@ -531,12 +536,16 @@ GCValue js_event_target_dispatchEvent(JSContextHandle ctx, GCValue this_val, int
     const char *type = JS_ToCString(ctx, type_val);
     if (!type) return JS_FALSE;
     
-    // Set target if not already set
+    // Set target if not already set — write both the JS property and the
+    // internal EventData (the getters read from EventData).
+    EventHandle ev0 = EventHandle::from_object_check(ctx, argv[0]);
     GCValue target = JS_GetPropertyStr(ctx, argv[0], "target");
     if (JS_IsNull(target) || JS_IsUndefined(target)) {
         JS_SetPropertyStr(ctx, argv[0], "target", this_val);
+        if (ev0.valid()) ev0.set_target(this_val);
     }
     JS_SetPropertyStr(ctx, argv[0], "currentTarget", this_val);
+    if (ev0.valid()) ev0.set_currentTarget(this_val);
 
     // Build the composed path: shadow-including ancestors of the target.
     GCValue path = JS_NewArray(ctx);
@@ -603,7 +612,88 @@ GCValue js_event_target_dispatchEvent(JSContextHandle ctx, GCValue this_val, int
             }
         }
     }
-    
+
+    /* 4. Bubble phase: if the event bubbles, walk the composed path (which
+     * already crosses shadow boundaries via host links) and invoke listeners
+     * on each ancestor, updating currentTarget as we go.  Ancestor listeners
+     * are how YouTube's delegated "attached"/"detached" lifecycle events and
+     * general event-delegation reach handlers registered on hosts/document. */
+    GCValue bubbles_val = JS_GetPropertyStr(ctx, argv[0], "bubbles");
+    bool bubbles = JS_ToBool(ctx, bubbles_val);
+    if (bubbles && JS_IsArray(ctx, path)) {
+        GCValue plen_val = JS_GetPropertyStr(ctx, path, "length");
+        uint32_t plen = 0;
+        JS_ToUint32(ctx, &plen, plen_val);
+        for (uint32_t pi = 1; pi < plen; pi++) {
+            /* Honor stopPropagation()/cancelBubble between nodes. */
+            GCValue cancel = JS_GetPropertyStr(ctx, argv[0], "cancelBubble");
+            if (JS_ToBool(ctx, cancel)) break;
+            GCValue stop = JS_GetPropertyStr(ctx, argv[0], "__cyber_stopped");
+            if (JS_ToBool(ctx, stop)) break;
+
+            GCValue node = JS_GetPropertyUint32(ctx, path, pi);
+            if (JS_IsUndefined(node) || JS_IsNull(node) || !JS_IsObject(node)) continue;
+
+            JS_SetPropertyStr(ctx, argv[0], "currentTarget", node);
+            if (ev0.valid()) ev0.set_currentTarget(node);
+
+            char lprop[128];
+            snprintf(lprop, sizeof(lprop), "__listeners_%s", type);
+            GCValue nlisteners = JS_GetPropertyStr(ctx, node, lprop);
+            if (!JS_IsUndefined(nlisteners) && !JS_IsNull(nlisteners) && JS_IsArray(ctx, nlisteners)) {
+                int nlen = 0;
+                GCValue nlen_val = JS_GetPropertyStr(ctx, nlisteners, "length");
+                JS_ToInt32(ctx, &nlen, nlen_val);
+                for (int li = 0; li < nlen; li++) {
+                    GCValue handler = JS_GetPropertyUint32(ctx, nlisteners, li);
+                    if (JS_IsUndefined(handler) || JS_IsNull(handler) || !JS_IsFunction(ctx, handler)) continue;
+                    GCValue event_args[1] = { argv[0] };
+                    GCValue result = JS_Call(ctx, handler, node, 1, event_args);
+                    if (JS_IsException(result)) {
+                        GCValue exc = JS_GetException(ctx);
+                        (void)exc;
+                    }
+                    /* stopImmediatePropagation aborts the remaining handlers. */
+                    GCValue imm = JS_GetPropertyStr(ctx, argv[0], "__cyber_stopped_immediate");
+                    if (JS_ToBool(ctx, imm)) break;
+                }
+            }
+
+            /* inline __on{type} legacy storage on the ancestor */
+            snprintf(lprop, sizeof(lprop), "__on%s", type);
+            GCValue nhandler = JS_GetPropertyStr(ctx, node, lprop);
+            if (!JS_IsUndefined(nhandler) && !JS_IsNull(nhandler) && JS_IsFunction(ctx, nhandler)) {
+                GCValue event_args[1] = { argv[0] };
+                GCValue result = JS_Call(ctx, nhandler, node, 1, event_args);
+                if (JS_IsException(result)) {
+                    GCValue exc = JS_GetException(ctx);
+                    (void)exc;
+                }
+            }
+
+            /* on{type} property on the ancestor (e.g., document.onload) */
+            if (type[0]) {
+                char on_prop[128];
+                snprintf(on_prop, sizeof(on_prop), "on%s", type);
+                GCValue on_h = JS_GetPropertyStr(ctx, node, on_prop);
+                if (!JS_IsUndefined(on_h) && !JS_IsNull(on_h) && JS_IsFunction(ctx, on_h)) {
+                    GCValue event_args[1] = { argv[0] };
+                    GCValue result = JS_Call(ctx, on_h, node, 1, event_args);
+                    if (JS_IsException(result)) {
+                        GCValue exc = JS_GetException(ctx);
+                        (void)exc;
+                    }
+                }
+            }
+
+            GCValue imm2 = JS_GetPropertyStr(ctx, argv[0], "__cyber_stopped_immediate");
+            if (JS_ToBool(ctx, imm2)) break;
+        }
+        /* Restore currentTarget semantics: outside dispatch it reads as null. */
+        JS_SetPropertyStr(ctx, argv[0], "currentTarget", JS_NULL);
+        if (ev0.valid()) ev0.set_currentTarget(JS_NULL);
+    }
+
     return JS_TRUE;
 }
 
