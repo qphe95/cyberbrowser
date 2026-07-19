@@ -113,6 +113,9 @@ typedef struct LayoutBox {
     /* Resolved colors (RGBA, 0..1). */
     double color_r, color_g, color_b, color_a;
     double background_color_r, background_color_g, background_color_b, background_color_a;
+    /* Set when a rule/inline style explicitly assigned `color`; used to
+     * decide inheritance from the parent box. */
+    unsigned char color_set;
 
     /* Resolved typography. */
     double font_size;
@@ -131,6 +134,7 @@ typedef struct LayoutBox {
     CssAlignItems align_items;
 
     double flex_basis;
+    double flex_basis_percent; /* >0 when flex-basis was a percentage */
     double flex_grow;
     double flex_shrink;
 

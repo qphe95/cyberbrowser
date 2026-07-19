@@ -891,6 +891,19 @@ int main(int argc, char *argv[]) {
             if (!ldoc) { printf("FATAL: html_parse failed\n"); return 1; }
             ImageCache *lcache = image_cache_create();
             display_list_set_image_cache(lcache);
+            /* Set a default font so text renders, matching the main path. */
+            {
+                const char *font_paths[] = {
+                    "cyberbrowser/third_party/fonts/Roboto-Regular.ttf",
+                    "third_party/fonts/Roboto-Regular.ttf",
+                    "../third_party/fonts/Roboto-Regular.ttf",
+                    "../../third_party/fonts/Roboto-Regular.ttf",
+                    NULL
+                };
+                for (int i = 0; font_paths[i]; i++) {
+                    if (display_list_set_default_font(font_paths[i], 16.0f)) break;
+                }
+            }
             render_document_to_jpg(ldoc, lcache, "layout_probe.jpg");
             html_document_free(ldoc);
             image_cache_destroy(lcache);
