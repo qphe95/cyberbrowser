@@ -6962,11 +6962,12 @@ static force_inline JSShapeProperty *find_own_property(JSProperty **ppr,
      * (observed on this engine under heavy shape churn: a property present in
      * the prop array becomes unreachable via the hash chain), a lookup would
      * wrongly report the property as missing, silently breaking page code.
-     * Fall back to a bounded linear scan so the lookup stays correct.  The
-     * bound keeps this off hot paths on large shapes. */
-    {
-        int li, limit = sh.prop_count() < 32 ? sh.prop_count() : 32;
-        for (li = 0; li < limit; li++) {
+     * Fall back to a linear scan so the lookup stays correct — but only on
+     * small shapes, to keep this off hot paths (an unbounded scan here slowed
+     * the 10MB bundle eval past its timeout). */
+    if (sh.prop_count() <= 8) {
+        int li;
+        for (li = 0; li < sh.prop_count(); li++) {
             if (prop[li].atom == atom) {
                 *ppr = &p_prop[li];
                 return &prop[li];
@@ -10738,9 +10739,10 @@ static JSProperty *add_property(JSContextHandle ctx,
     if (df_pd) {
         const char *pn = JS_AtomToCString(ctx, prop);
         if (pn && strcmp(pn, "pageData") == 0) {
-            fprintf(stderr, "[ADDPROP-PD] parent_propcount=%d new_sh_found=%d new_propcount=%d\n",
+            fprintf(stderr, "[ADDPROP-PD] parent_propcount=%d new_sh_found=%d new_propcount=%d new_flags=0x%x\n",
                     sh.prop_count(), new_sh.valid() ? 1 : 0,
-                    new_sh.valid() ? new_sh.prop_count() : -1);
+                    new_sh.valid() ? new_sh.prop_count() : -1,
+                    new_sh.valid() && new_sh.prop_count() > 0 ? get_shape_prop(new_sh)[new_sh.prop_count()-1].flags : 0);
             fflush(stderr);
         }
     }
@@ -21905,28 +21907,17 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                 if (unlikely(ret < 0))
                     goto exception;
                 if (getenv("CYBER_TRACE_DF")) {
-                    static int df_bad = 0;
                     const char *an = JS_AtomToCString(ctx, atom);
-                    bool numeric_name = an && an[0] >= '0' && an[0] <= '9';
-                    if (!numeric_name) {
-                        JSShapeProperty *prs; JSProperty *pr;
+                    if (an && strcmp(an, "pageData") == 0) {
                         JSObjectHandle op = JS_VALUE_GET_OBJ(sp[-1]);
-                        prs = find_own_property(&pr, op, atom);
-                        if (!prs && df_bad++ < 4) {
-                            JSShapeHandle sh = GC_SHAPE_DEREF(op.shape_handle());
-                            fprintf(stderr, "[DF-BAD] define lost atom='%s' ID=%u ret=%d propcount=%d\n",
-                                    an ? an : "?", (unsigned)atom, ret, sh.prop_count());
-                            for (int bi = 0; bi <= (int)sh.prop_hash_mask() && bi < 16; bi++) {
-                                uint32_t bv = prop_hash_start(sh)[bi];
-                                if (bv) {
-                                    JSShapeProperty *bp = get_shape_prop(sh) + (bv - 1);
-                                    const char *bn = JS_AtomToCString(ctx, bp->atom);
-                                    fprintf(stderr, "[DF-BAD]   bucket[%d]=%u atom='%s' ID=%u hash_next=%u\n",
-                                            bi, bv, bn ? bn : "?", (unsigned)bp->atom, bp->hash_next);
-                                }
-                            }
-                            fflush(stderr);
+                        JSShapeHandle sh = GC_SHAPE_DEREF(op.shape_handle());
+                        fprintf(stderr, "[DF-PD] after define ret=%d propcount=%d\n", ret, sh.valid() ? sh.prop_count() : -1);
+                        for (int bi = 0; sh.valid() && bi < sh.prop_count() && bi < 4; bi++) {
+                            JSShapeProperty *bp = get_shape_prop(sh) + bi;
+                            const char *bn = JS_AtomToCString(ctx, bp->atom);
+                            fprintf(stderr, "[DF-PD]   slot[%d] atom='%s' flags=0x%x\n", bi, bn ? bn : "?", bp->flags);
                         }
+                        fflush(stderr);
                     }
                 }
             }

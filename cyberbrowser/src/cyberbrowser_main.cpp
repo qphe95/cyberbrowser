@@ -1146,6 +1146,7 @@ int main(int argc, char *argv[]) {
                 "  var sig = (window.ytsignals && window.ytsignals.getInstance) ? window.ytsignals.getInstance() : null;"
                 "  console.error('[DIAG] ytsignals inst=' + (sig ? 'yes' : 'no'));"
                 "  try { console.error('[DIAG] Promise native=' + (function(){ var s = ''+Promise.resolve; return s.indexOf('native') >= 0; })() + ' Promise.name=' + Promise.name + ' mm?=' + (window.default_kevlar_base && window.default_kevlar_base.mm ? 'y' : '?')); } catch(e) { console.error('[DIAG] promise check err'); }"
+                "  try { var rid = window.requestAnimationFrame(function(){}); console.error('[DIAG] RAF src=' + (''+window.requestAnimationFrame).slice(0,90) + ' returnedId=' + rid); } catch(e) { console.error('[DIAG] RAF check err ' + e.message); }"
                 "  try { console.error('[DIAG] Promise str=' + (''+Promise).slice(0,120)); console.error('[DIAG] Promise===mm:' + (window.default_kevlar_base && window.default_kevlar_base.mm ? (Promise === window.default_kevlar_base.mm) : 'n/a')); } catch(e) {}"
                 "  if (sig && sig.processSignal) { sig.processSignal('ci'); console.error('[DIAG] fired ci via ytsignals'); }"
                 "})();";

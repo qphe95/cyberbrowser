@@ -1097,14 +1097,74 @@ extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_re
                         size_t fposZ = patched.find("try{_.Kp(\"fr_s\"),V()}catch(y){_.NR(y)}");
                         if (fposZ != std::string::npos) {
                             const char *aZ = "try{_.Kp(\"fr_s\"),V()}catch(y){_.NR(y)}";
-                            const char *rZ = "try{_.Kp(\"fr_s\");console.error('[ZUD] invoking fn');V()}catch(y){console.error('[ZUD] fn threw: '+(y&&y.message));_.NR(y)}";
+                            const char *rZ = "try{_.Kp(\"fr_s\");console.error('[ZUD] invoking fn');V()}catch(y){console.error('[ZUD] fn caught: '+(y&&y.message)+' (skipping NR)')}";
                             patched.replace(fposZ, strlen(aZ), rZ);
                         }
                         size_t fpos11 = patched.find("processSignal(\"cr\")");
                         if (fpos11 != std::string::npos) {
-                            patched.insert(fpos11, "console.error('[CR] firing cr'),");
+                            /* Back up over the receiver identifier (e.g. `t.`) and wrap
+                             * the WHOLE call in a comma expression — inserting before
+                             * `processSignal` alone would produce `t.console.error(...)`,
+                             * which throws (t.console is undefined) and aborts the
+                             * updatePageData continuation before "cr" fires. */
+                            size_t id_start = fpos11;
+                            while (id_start > 0 && (isalnum((unsigned char)patched[id_start-1]) ||
+                                   patched[id_start-1]=='_' || patched[id_start-1]=='$' ||
+                                   patched[id_start-1]=='.'))
+                                id_start--;
+                            std::string call = patched.substr(id_start, fpos11 - id_start) + "processSignal(\"cr\")";
+                            patched.replace(id_start, call.size(),
+                                "(console.error('[CR] firing cr')," + call + ")");
                         }
-                        /* Trace the page-manager-attached handler. */
+                        /* Guard the MiniplayerService PIP check: our DI does not inject
+                         * pipController, so `this.pipController.pictureInPictureSupported()`
+                         * throws mid-performDataUpdate and aborts the "cr" signal (which
+                         * gates the whole "rendered" transition and the metadata commit).
+                         * Returning false (no PIP support) is correct here. */
+                        size_t fposB3 = patched.find("_.L.updateComputedBadges=function(V,y,Q){var v=this,J;");
+                        if (fposB3 != std::string::npos) {
+                            const char *aB3 = "_.L.updateComputedBadges=function(V,y,Q){var v=this,J;";
+                            const char *rB3 = "_.L.updateComputedBadges=function(V,y,Q){console.error('[UCB] V='+typeof V+' isArr='+Array.isArray(V)+' filter='+typeof (V&&V.filter)+' this='+(this&&this.hostElement&&this.hostElement.tagName));var v=this,J;";
+                            patched.replace(fposB3, strlen(aB3), rB3);
+                        }
+                        size_t fposPip = patched.find("im.prototype.pictureInPictureSupported=function(){return this.pipController.pictureInPictureSupported()}");
+                        if (fposPip != std::string::npos) {
+                            const char *aP = "im.prototype.pictureInPictureSupported=function(){return this.pipController.pictureInPictureSupported()}";
+                            const char *rP = "im.prototype.pictureInPictureSupported=function(){return this.pipController?this.pipController.pictureInPictureSupported():false}";
+                            patched.replace(fposPip, strlen(aP), rP);
+                            fprintf(stderr, "[LC-PATCH] pipController guard injected\n");
+                        }
+                        /* Trace the J continuation: does it reach the cr fire? */
+                        size_t fposCR2 = patched.find("var t=_.n_();_.Sy(t,\"cr\")||t.processSignal(\"cr\");v()");
+                        if (fposCR2 != std::string::npos) {
+                            const char *aC = "var t=_.n_();_.Sy(t,\"cr\")||t.processSignal(\"cr\");v()";
+                            const char *rC = "console.error('[CR2] J-continuation filler='+V.filler);var t=_.n_();console.error('[CR2] Sy(cr)='+_.Sy(t,\"cr\"));_.Sy(t,\"cr\")||t.processSignal(\"cr\");console.error('[CR2] cr fired');v()";
+                            patched.replace(fposCR2, strlen(aC), rC);
+                        }
+                        /* Guard badge-observer calls that run with a wrong `this` (the
+                         * monomer fires some Polymer property observers on the host
+                         * element instead of the controller, so `this.updateComputedBadges`
+                         * is undefined and throws mid-performDataUpdate, aborting "cr"). */
+                        size_t fposB1 = patched.find("this.updateComputedBadges(this.badges,this.topStandaloneBadge)");
+                        if (fposB1 != std::string::npos) {
+                            const char *aB = "this.updateComputedBadges(this.badges,this.topStandaloneBadge)";
+                            const char *rB = "this.updateComputedBadges&&this.updateComputedBadges(this.badges,this.topStandaloneBadge)";
+                            size_t p = fposB1;
+                            while (p != std::string::npos) {
+                                patched.replace(p, strlen(aB), rB);
+                                p = patched.find(aB, p + strlen(rB));
+                            }
+                        }
+                        size_t fposB2 = patched.find("this.updateComputedBadges(this.badges,this.topStandaloneBadge,this.bottomStandaloneBadge)");
+                        if (fposB2 != std::string::npos) {
+                            const char *aB2 = "this.updateComputedBadges(this.badges,this.topStandaloneBadge,this.bottomStandaloneBadge)";
+                            const char *rB2 = "this.updateComputedBadges&&this.updateComputedBadges(this.badges,this.topStandaloneBadge,this.bottomStandaloneBadge)";
+                            size_t p2 = fposB2;
+                            while (p2 != std::string::npos) {
+                                patched.replace(p2, strlen(aB2), rB2);
+                                p2 = patched.find(aB2, p2 + strlen(rB2));
+                            }
+                        }
                         size_t fpos12 = patched.find("onYtPageManagerAttached=function(V){");
                         if (fpos12 != std::string::npos) {
                             size_t b12 = patched.find('{', fpos12);
@@ -1181,6 +1241,34 @@ extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_re
                             }
                         }
                     }
+                    /* Log when the scheduler's O() executor runs jobs and when the
+                     * web-animations polyfill's RAF queue schedules/runs its driver. */
+                    if (getenv("CYBER_TRACE_LIFECYCLE") && scripts[i].content_len > 1000 &&
+                        strstr(scripts[i].content, "m.length==0&&e(d);m.push([C,q]);return C")) {
+                        std::string patched(scripts[i].content, scripts[i].content_len);
+                        const char *from = "m.length==0&&e(d);m.push([C,q]);return C";
+                        const char *to = "if(m.length==0){console.error('[WADRV] schedule driver');e(d)}m.push([C,q]);return C";
+                        size_t pos = patched.find(from);
+                        if (pos != std::string::npos) {
+                            patched.replace(pos, strlen(from), to);
+                        }
+                        const char *fromD = "function d(q){var C=m;m=[];";
+                        const char *toD = "function d(q){console.error('[WADRV] driver runs qlen='+m.length);var C=m;m=[];";
+                        size_t posD = patched.find(fromD);
+                        if (posD != std::string::npos) {
+                            patched.replace(posD, strlen(fromD), toD);
+                        }
+                        if (patched.size() != scripts[i].content_len) {
+                            char *nd = (char *)malloc(patched.size() + 1);
+                            if (nd) {
+                                memcpy(nd, patched.data(), patched.size());
+                                nd[patched.size()] = '\0';
+                                scripts[i].content = nd;
+                                scripts[i].content_len = patched.size();
+                                fprintf(stderr, "[LC-PATCH] wa-driver trace injected\n");
+                            }
+                        }
+                    }
                     /* Log jobs that error inside the scheduler's O() executor so we can
                      * see which scheduled job hangs the lifecycle jobSet. */
                     if (getenv("CYBER_TRACE_LIFECYCLE") && scripts[i].content_len > 1000 &&
@@ -1238,6 +1326,12 @@ extern "C" bool html_execute_page_scripts(const char *html, JsExecResult *out_re
                         size_t posSt = patched.find(fromSt);
                         if (posSt != std::string::npos) {
                             patched.replace(posSt, strlen(fromSt), toSt);
+                        }
+                        const char *fromRaf = "case 3:this.g=window.requestAnimationFrame(this.M);break;";
+                        const char *toRaf = "case 3:this.g=(console.error('[SCHED-ARM] raf m='+this.m),window.requestAnimationFrame(this.M));console.error('[SCHED-ARMED] id='+this.g);break;";
+                        size_t posRaf = patched.find(fromRaf);
+                        if (posRaf != std::string::npos) {
+                            patched.replace(posRaf, strlen(fromRaf), toRaf);
                         }
                         /* Trace queue-0 state: pushes and drain opportunities. */
                         const char *fromQ = "function Q(a){if(a.i[8].length){if(a.C)return 4;if(!document.hidden&&a.B)return 3}for(var b=5;b>=a.j;b--)if(a.i[b].length>0)return b>0?!document.hidden&&a.B?3:2:1;return 0}";

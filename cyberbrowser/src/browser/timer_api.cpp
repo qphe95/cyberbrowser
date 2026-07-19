@@ -151,6 +151,13 @@ void unregister_timer_roots(Timer *timer) {
             }
         }
     }
+
+    /* Free the slot: find_free_timer_slot requires active==0 && id==0.
+     * Without this the slot leaked permanently after each one-shot timer,
+     * exhausting the table after MAX_TIMERS timers and stalling YouTube's
+     * RAF-driven scheduler (its deferred jobs then never ran). */
+    timer->id = 0;
+    timer->callback_handle = 0;
 }
 
 // Clear all timers and callback storage
@@ -197,6 +204,10 @@ int add_timer(JSContextHandle ctx, TimerType type, GCValue callback,
     int slot = find_free_timer_slot();
     if (slot < 0) {
         pthread_mutex_unlock(&g_timer_state.mutex);
+        if (getenv("CYBER_TRACE_RAF")) {
+            fprintf(stderr, "[TIMER-FULL] type=%d count=%d\n", (int)type, g_timer_state.timer_count);
+            fflush(stderr);
+        }
         return 0; // No slots available
     }
     
@@ -233,8 +244,8 @@ int add_timer(JSContextHandle ctx, TimerType type, GCValue callback,
     g_timer_state.timer_count++;
     pthread_mutex_unlock(&g_timer_state.mutex);
     
-    if (getenv("CYBER_TRACE_RAF") && type == TIMER_TYPE_RAF) {
-        fprintf(stderr, "[RAF-ADD] id=%d\n", timer->id);
+    if (getenv("CYBER_TRACE_RAF")) {
+        fprintf(stderr, "[TIMER-ADD] id=%d type=%d\n", timer->id, (int)type);
         fflush(stderr);
     }
     return timer->id;
@@ -598,7 +609,7 @@ GCValue js_request_animation_frame(JSContextHandle ctx, GCValue this_val, int ar
         return JS_NewInt32(ctx, 0);
     }
     
-    // RAF typically fires at 60fps (~16.67ms), but we'll use 0 for immediate execution
+    // RAF typically fires at 60fps (~16.67ms), but we use 0 for immediate execution
     int id = add_timer(ctx, TIMER_TYPE_RAF, argv[0], 0, 0, NULL);
     return JS_NewInt32(ctx, id);
 }
