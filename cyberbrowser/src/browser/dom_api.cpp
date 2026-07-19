@@ -3321,25 +3321,35 @@ GCValue js_element_set_outer_html(JSContextHandle ctx, GCValue this_val, int arg
 // Node Content Getters/Setters
 // ============================================================================
 
+// Helper: dynamically-growing buffer for text collection.
+typedef struct { char *data; size_t len; size_t cap; } TextCollectBuf;
+
+static void text_collect_append(TextCollectBuf *b, const char *s, size_t n) {
+    if (b->len + n + 1 > b->cap) {
+        size_t new_cap = b->cap ? b->cap : 4096;
+        while (new_cap < b->len + n + 1) new_cap *= 2;
+        char *nd = (char *)realloc(b->data, new_cap);
+        if (!nd) return;
+        b->data = nd;
+        b->cap = new_cap;
+    }
+    memcpy(b->data + b->len, s, n);
+    b->len += n;
+    b->data[b->len] = '\0';
+}
+
 // Helper: recursively collect text content from an element's descendants.
-static void collect_text_content(JSContextHandle ctx, DOMNodeHandle node, char *buf, size_t buf_size, size_t *pos) {
+static void collect_text_content(JSContextHandle ctx, DOMNodeHandle node, TextCollectBuf *b) {
     if (!node.valid()) return;
     if (node.node_type() == DOM_NODE_TYPE_TEXT) {
         const char *val = node.node_value();
-        if (val && val[0]) {
-            size_t len = strlen(val);
-            if (*pos + len < buf_size) {
-                memcpy(buf + *pos, val, len);
-                *pos += len;
-                buf[*pos] = '\0';
-            }
-        }
+        if (val && val[0]) text_collect_append(b, val, strlen(val));
         return;
     }
     GCValue child = node.first_child();
     while (!JS_IsNull(child)) {
         DOMNodeHandle child_node = get_dom_node(ctx, child);
-        collect_text_content(ctx, child_node, buf, buf_size, pos);
+        collect_text_content(ctx, child_node, b);
         if (child_node.valid()) {
             child = child_node.next_sibling();
         } else {
@@ -3359,11 +3369,11 @@ GCValue js_node_get_text_content(JSContextHandle ctx, GCValue this_val, int argc
         const char *val = node.node_value();
         return JS_NewString(ctx, val ? val : "");
     }
-    char buf[4096];
-    buf[0] = '\0';
-    size_t pos = 0;
-    collect_text_content(ctx, node, buf, sizeof(buf), &pos);
-    return JS_NewString(ctx, buf);
+    TextCollectBuf b = {0};
+    collect_text_content(ctx, node, &b);
+    GCValue out = JS_NewString(ctx, b.data ? b.data : "");
+    free(b.data);
+    return out;
 }
 
 // Node.prototype.textContent setter

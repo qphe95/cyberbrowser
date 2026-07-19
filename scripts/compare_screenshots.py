@@ -3,12 +3,12 @@
 
 Uses ImageMagick's `magick compare -metric MAE`.  The reference image is
 assumed to be the ground truth (e.g. a Chrome capture); the second image is
-the candidate (e.g. CyberBrowser's `youtube_screenshot.jpg`).
+the candidate (e.g. CyberBrowser's `wikipedia_screenshot.jpg`).
 
 Example:
     python3 scripts/compare_screenshots.py \
         cyberbrowser/build-mingw/chrome_ref.jpg \
-        cyberbrowser/build-mingw/youtube_screenshot.jpg \
+        cyberbrowser/build-mingw/wikipedia_screenshot.jpg \
         --diff cyberbrowser/build-mingw/screenshot_diff.png \
         --report cyberbrowser/build-mingw/screenshot_diff_report.txt
 """

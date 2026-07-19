@@ -1377,7 +1377,7 @@ static bool layout_collect_matched_declarations(LayoutContext *ctx, int idx,
             if (!rule->selector_text || !rule->selector_text[0]) continue;
             /* Check the (cheap) media query before the selector match so that
              * responsive rules outside the current viewport are skipped early. */
-            if (!css_rule_media_matches(rule, ctx->viewport_width)) continue;
+            if (!css_rule_media_matches(rule, ctx->viewport_width, ctx->viewport_height)) continue;
             if (!css_rule_matches(rule, ctx->doc, node)) continue;
             int spec = rule->specificity;
             if (spec == 0) spec = css_specificity_from_selector_text(rule->selector_text);
@@ -2684,9 +2684,30 @@ bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
     ctx->js_ctx = saved_js_ctx;
     ctx->viewport_width = viewport_width;
     ctx->viewport_height = viewport_height;
-    const char *default_base = "https://www.youtube.com/";
-    strncpy(ctx->base_url, default_base, sizeof(ctx->base_url) - 1);
-    ctx->base_url[sizeof(ctx->base_url) - 1] = '\0';
+    /* Base URL for resolving relative stylesheet/image URLs: derive the origin
+     * (scheme + host + "/") from the page's start URL.  Fall back to the
+     * historical default when no start URL has been set. */
+    {
+        extern const char *g_cyber_start_url;
+        const char *src = (g_cyber_start_url && g_cyber_start_url[0])
+                          ? g_cyber_start_url : "https://www.youtube.com/";
+        const char *scheme = strstr(src, "://");
+        if (scheme) {
+            const char *host = scheme + 3;
+            const char *slash = strchr(host, '/');
+            size_t origin_len = slash ? (size_t)(slash - src) + 1 : strlen(src);
+            if (origin_len >= sizeof(ctx->base_url)) origin_len = sizeof(ctx->base_url) - 1;
+            memcpy(ctx->base_url, src, origin_len);
+            ctx->base_url[origin_len] = '\0';
+            if (!slash && origin_len + 1 < sizeof(ctx->base_url)) {
+                ctx->base_url[origin_len] = '/';
+                ctx->base_url[origin_len + 1] = '\0';
+            }
+        } else {
+            strncpy(ctx->base_url, src, sizeof(ctx->base_url) - 1);
+            ctx->base_url[sizeof(ctx->base_url) - 1] = '\0';
+        }
+    }
     bool ok = css_layout_document(ctx, sheet);
     if (!ok) css_layout_tree_free(ctx);
     return ok;

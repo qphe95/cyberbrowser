@@ -326,60 +326,132 @@ static char* css_read_selector(const char *s, size_t len, size_t *pos) {
     return css_strndup_trim(s + start, *pos - start);
 }
 
-/* Parse an at-rule. Block-form at-rules (e.g. @media, @supports) contain
- * regular style rules; we extract those rules so layout can use them.
- * Statement at-rules (e.g. @import) are skipped. */
-static void css_parse_at_rule(const char *s, size_t len, size_t *pos, CssStylesheet *sheet) {
+/* Read an at-rule precondition: everything up to (not including) the next
+ * '{' or ';' at paren depth 0, or a block-closing '}'.  Returns a malloc'd
+ * trimmed string (possibly empty). */
+static char* css_read_at_condition(const char *s, size_t len, size_t *pos) {
+    css_skip_space_and_comments(s, len, pos);
+    size_t start = *pos;
+    int depth = 0;
+    char quote = 0;
+    while (*pos < len) {
+        char c = s[*pos];
+        if (quote) {
+            if (c == quote) quote = 0;
+            else if (c == '\\' && *pos + 1 < len) (*pos)++;
+        } else if (c == '"' || c == '\'') {
+            quote = c;
+        } else if (c == '(') {
+            depth++;
+        } else if (c == ')') {
+            if (depth > 0) depth--;
+        } else if (depth == 0 && (c == '{' || c == ';' || c == '}')) {
+            break;
+        }
+        (*pos)++;
+    }
+    return css_strndup_trim(s + start, *pos - start);
+}
+
+/* Parse an at-rule.  @media blocks are entered and their condition is
+ * attached to every nested rule (ANDed with any enclosing @media condition).
+ * Other block at-rules whose contents are style rules (@supports, @layer)
+ * are entered unconditionally; at-rules whose contents are not style rules
+ * (@font-face, @keyframes, @page) are skipped wholesale.  Statement at-rules
+ * (@import, @charset) are skipped. */
+static void css_parse_at_rule(const char *s, size_t len, size_t *pos,
+                              CssStylesheet *sheet, const char *parent_cond) {
     /* Skip '@' and identifier. */
     (*pos)++;
+    size_t kw_start = *pos;
     while (*pos < len && (isalnum((unsigned char)s[*pos]) || s[*pos] == '-')) (*pos)++;
-    css_skip_space_and_comments(s, len, pos);
-    if (*pos < len && s[*pos] == '{') {
-        /* Capture the media/supports condition before consuming the block. */
-        size_t cond_start = *pos;
-        /* condition starts after any leading space and ends at the '{' */
-        size_t cond_end = *pos;
-        while (cond_start > 0 && css_is_space(s[cond_start - 1])) cond_start--;
-        char *media_cond = css_strndup_trim(s + cond_start, cond_end - cond_start);
+    size_t kw_len = *pos - kw_start;
+    bool is_media = (kw_len == 5 && strncasecmp(s + kw_start, "media", 5) == 0);
+    bool skip_block =
+        (kw_len == 9  && strncasecmp(s + kw_start, "font-face", 9) == 0) ||
+        (kw_len == 8  && strncasecmp(s + kw_start, "keyframes", 8) == 0) ||
+        (kw_len == 17 && strncasecmp(s + kw_start, "-webkit-keyframes", 17) == 0) ||
+        (kw_len == 4  && strncasecmp(s + kw_start, "page", 4) == 0);
 
-        /* Block-form at-rule: parse nested rules. */
-        (*pos)++;
-        while (*pos < len) {
-            css_skip_space_and_comments(s, len, pos);
-            if (*pos >= len) break;
-            if (s[*pos] == '}') { (*pos)++; break; }
-            if (s[*pos] == '@') {
-                css_parse_at_rule(s, len, pos, sheet);
-                continue;
-            }
-            char *selector = css_read_selector(s, len, pos);
-            if (!selector) {
-                /* Could be malformed; try to recover. */
-                (*pos)++;
-                continue;
-            }
-            if (*pos >= len || s[*pos] != '{') {
-                free(selector);
-                free(media_cond);
-                continue;
-            }
-            (*pos)++; /* skip '{' */
-            CssRule *rule = css_stylesheet_add_rule(sheet);
-            if (!rule) {
-                free(selector);
-                free(media_cond);
-                break;
-            }
-            rule->selector_text = selector;
-            rule->media_query = media_cond ? strdup(media_cond) : NULL;
-            css_parse_declaration_block(s, len, pos, rule);
-        }
-        free(media_cond);
-    } else {
-        /* Statement form; skip until ';' or block end. */
+    char *cond = css_read_at_condition(s, len, pos);
+
+    if (*pos >= len || s[*pos] != '{') {
+        /* Statement form (@import, @charset, ...): skip until ';' or '}'. */
+        free(cond);
         while (*pos < len && s[*pos] != ';' && s[*pos] != '}') (*pos)++;
         if (*pos < len && s[*pos] == ';') (*pos)++;
+        return;
     }
+    (*pos)++; /* skip '{' */
+
+    if (skip_block) {
+        free(cond);
+        int depth = 1;
+        char quote = 0;
+        while (*pos < len && depth > 0) {
+            char c = s[*pos];
+            if (quote) {
+                if (c == quote) quote = 0;
+                else if (c == '\\' && *pos + 1 < len) (*pos)++;
+            } else if (c == '"' || c == '\'') {
+                quote = c;
+            } else if (c == '{') {
+                depth++;
+            } else if (c == '}') {
+                depth--;
+            }
+            (*pos)++;
+        }
+        return;
+    }
+
+    /* Effective condition for rules in this block: ANDed with any enclosing
+     * @media condition.  Non-@media blocks attach no condition (their rules
+     * apply unconditionally). */
+    char *eff = NULL;
+    if (is_media) {
+        if (parent_cond && parent_cond[0] && cond && cond[0]) {
+            size_t n = strlen(parent_cond) + strlen(cond) + 6;
+            eff = (char *)malloc(n);
+            if (eff) snprintf(eff, n, "%s and %s", parent_cond, cond);
+        } else if (parent_cond && parent_cond[0]) {
+            eff = strdup(parent_cond);
+        } else if (cond && cond[0]) {
+            eff = strdup(cond);
+        }
+    }
+    free(cond);
+
+    /* Block-form at-rule: parse nested rules. */
+    while (*pos < len) {
+        css_skip_space_and_comments(s, len, pos);
+        if (*pos >= len) break;
+        if (s[*pos] == '}') { (*pos)++; break; }
+        if (s[*pos] == '@') {
+            css_parse_at_rule(s, len, pos, sheet, eff ? eff : "");
+            continue;
+        }
+        char *selector = css_read_selector(s, len, pos);
+        if (!selector) {
+            /* Could be malformed; try to recover. */
+            (*pos)++;
+            continue;
+        }
+        if (*pos >= len || s[*pos] != '{') {
+            free(selector);
+            continue;
+        }
+        (*pos)++; /* skip '{' */
+        CssRule *rule = css_stylesheet_add_rule(sheet);
+        if (!rule) {
+            free(selector);
+            break;
+        }
+        rule->selector_text = selector;
+        rule->media_query = (eff && eff[0]) ? strdup(eff) : NULL;
+        css_parse_declaration_block(s, len, pos, rule);
+    }
+    free(eff);
 }
 
 CssStylesheet* css_stylesheet_parse(const char *css, size_t len) {
@@ -393,7 +465,7 @@ CssStylesheet* css_stylesheet_parse(const char *css, size_t len) {
         if (pos >= len) break;
 
         if (css[pos] == '@') {
-            css_parse_at_rule(css, len, &pos, sheet);
+            css_parse_at_rule(css, len, &pos, sheet, "");
             continue;
         }
         if (css[pos] == '}') { pos++; continue; }
@@ -1003,62 +1075,204 @@ int css_specificity_from_selector_text(const char *selector) {
     return css_specificity_from_chain(parts, count);
 }
 
-bool css_rule_media_matches(const CssRule *rule, double viewport_width) {
-    if (!rule || !rule->media_query || !rule->media_query[0]) return true;
-    const char *s = rule->media_query;
-    bool result = true;
-    bool expect_and = false;
+/* ============================================================================
+ * Media query evaluation
+ *
+ * Media types: screen/all match, everything else (print, speech, ...) does
+ * not.  Features: width/height (incl. min-/max-) with px/em/rem/calc()
+ * values, and orientation.  Any other feature (prefers-*, hover, pointer,
+ * ...) never matches — it is safer to drop a rule than to apply one meant
+ * for a different medium.
+ * ============================================================================ */
 
-    while (*s) {
-        while (*s && css_is_space(*s)) s++;
-        if (!*s) break;
+static void css_media_skip_ws(const char **sp) {
+    while (**sp == ' ' || **sp == '\t' || **sp == '\n' || **sp == '\r' || **sp == '\f') (*sp)++;
+}
 
-        if (strncasecmp(s, "only", 4) == 0) {
-            s += 4;
-            while (*s && css_is_space(*s)) s++;
-        }
-        if (strncasecmp(s, "screen", 6) == 0 ||
-            strncasecmp(s, "all", 3) == 0 ||
-            strncasecmp(s, "print", 5) == 0) {
-            while (*s && !css_is_space(*s) && *s != '(') s++;
-            while (*s && css_is_space(*s)) s++;
-        }
+static double css_media_expr(const char **sp);
 
-        if (*s == '(') {
-            s++;
-            while (*s && css_is_space(*s)) s++;
-            bool is_min = false, is_max = false;
-            const char *prop = s;
-            while (*s && *s != ':' && *s != ')') s++;
-            size_t prop_len = (size_t)(s - prop);
-            if (*s == ':') {
-                s++;
-                while (*s && css_is_space(*s)) s++;
-                char *end = NULL;
-                double val = strtod(s, &end);
-                if (prop_len >= 8 && strncasecmp(prop, "min-width", 9) == 0) is_min = true;
-                else if (prop_len >= 8 && strncasecmp(prop, "max-width", 9) == 0) is_max = true;
-                bool matches = true;
-                if (is_min) matches = viewport_width >= val - 0.5;
-                else if (is_max) matches = viewport_width <= val + 0.5;
-                if (expect_and) result = result && matches;
-                else result = matches;
-                expect_and = true;
-                s = end;
-            }
-            while (*s && *s != ')') s++;
-            if (*s == ')') s++;
-        } else if (strncasecmp(s, "and", 3) == 0) {
-            s += 3;
-            expect_and = true;
-            continue;
-        } else {
-            while (*s && !css_is_space(*s) && *s != '(') s++;
-        }
-        while (*s && css_is_space(*s)) s++;
-        if (*s == ',' || strncasecmp(s, "or", 2) == 0) return true;
+static double css_media_number(const char **sp) {
+    css_media_skip_ws(sp);
+    char *end = NULL;
+    double v = strtod(*sp, &end);
+    if (end == *sp) return 0.0;
+    *sp = end;
+    if (strncasecmp(*sp, "rem", 3) == 0) { v *= 16.0; *sp += 3; }
+    else if (strncasecmp(*sp, "em", 2) == 0) { v *= 16.0; *sp += 2; }
+    else if (strncasecmp(*sp, "px", 2) == 0) { *sp += 2; }
+    return v;
+}
+
+static double css_media_factor(const char **sp) {
+    css_media_skip_ws(sp);
+    if (**sp == '(') {
+        (*sp)++;
+        double v = css_media_expr(sp);
+        css_media_skip_ws(sp);
+        if (**sp == ')') (*sp)++;
+        return v;
     }
-    return result;
+    if (**sp == '-') { (*sp)++; return -css_media_factor(sp); }
+    if (**sp == '+') { (*sp)++; return css_media_factor(sp); }
+    return css_media_number(sp);
+}
+
+static double css_media_term(const char **sp) {
+    double v = css_media_factor(sp);
+    for (;;) {
+        css_media_skip_ws(sp);
+        if (**sp == '*') { (*sp)++; v *= css_media_factor(sp); }
+        else if (**sp == '/') {
+            (*sp)++;
+            double d = css_media_factor(sp);
+            if (d != 0.0) v /= d;
+        }
+        else return v;
+    }
+}
+
+static double css_media_expr(const char **sp) {
+    double v = css_media_term(sp);
+    for (;;) {
+        css_media_skip_ws(sp);
+        if (**sp == '+') { (*sp)++; v += css_media_term(sp); }
+        else if (**sp == '-') { (*sp)++; v -= css_media_term(sp); }
+        else return v;
+    }
+}
+
+/* Parse a media length: a plain number with optional unit, or calc(...). */
+static double css_media_length(const char **sp) {
+    css_media_skip_ws(sp);
+    if (strncasecmp(*sp, "calc", 4) == 0) {
+        *sp += 4;
+        css_media_skip_ws(sp);
+        if (**sp == '(') {
+            (*sp)++;
+            double v = css_media_expr(sp);
+            css_media_skip_ws(sp);
+            if (**sp == ')') (*sp)++;
+            return v;
+        }
+    }
+    return css_media_number(sp);
+}
+
+/* Evaluate one parenthesized media feature, e.g. "min-width: calc(640px - 1px)".
+ * Unknown features never match. */
+static bool css_media_feature_matches(const char *feature, double vw, double vh) {
+    const char *colon = strchr(feature, ':');
+    char name[64];
+    size_t nlen = colon ? (size_t)(colon - feature) : strlen(feature);
+    size_t lead = 0;
+    while (nlen > 0 && css_is_space(feature[lead + nlen - 1])) nlen--;
+    while (lead < nlen && css_is_space(feature[lead])) lead++;
+    nlen -= lead;
+    if (nlen == 0 || nlen >= sizeof(name)) return false;
+    for (size_t i = 0; i < nlen; i++) name[i] = (char)tolower((unsigned char)feature[lead + i]);
+    name[nlen] = '\0';
+
+    if (strcmp(name, "orientation") == 0) {
+        if (!colon) return true;
+        const char *v = colon + 1;
+        while (*v && css_is_space(*v)) v++;
+        bool portrait = vh >= vw;
+        if (strncasecmp(v, "portrait", 8) == 0) return portrait;
+        if (strncasecmp(v, "landscape", 9) == 0) return !portrait;
+        return false;
+    }
+    if (strcmp(name, "width") == 0 || strcmp(name, "min-width") == 0 ||
+        strcmp(name, "max-width") == 0 || strcmp(name, "height") == 0 ||
+        strcmp(name, "min-height") == 0 || strcmp(name, "max-height") == 0) {
+        if (!colon) return false;
+        const char *p = colon + 1;
+        double val = css_media_length(&p);
+        double vp = strstr(name, "width") ? vw : vh;
+        if (strncmp(name, "min-", 4) == 0) return vp >= val - 0.5;
+        if (strncmp(name, "max-", 4) == 0) return vp <= val + 0.5;
+        return vp >= val - 0.5 && vp <= val + 0.5;
+    }
+    return false;
+}
+
+/* Evaluate a single media query (no comma): [only|not] [type] [and (feature)]* */
+static bool css_media_single_query_matches(const char *q, double vw, double vh) {
+    const char *s = q;
+    bool negate = false;
+    bool result = true;
+    css_media_skip_ws(&s);
+    if (strncasecmp(s, "only", 4) == 0 && css_is_space(s[4])) {
+        s += 4;
+        css_media_skip_ws(&s);
+    } else if (strncasecmp(s, "not", 3) == 0 && css_is_space(s[3])) {
+        negate = true;
+        s += 3;
+        css_media_skip_ws(&s);
+    }
+    /* Optional media type identifier. */
+    if (*s && *s != '(') {
+        const char *t = s;
+        while (*t && (isalnum((unsigned char)*t) || *t == '-')) t++;
+        size_t tl = (size_t)(t - s);
+        if (tl > 0) {
+            if (!(tl == 6 && strncasecmp(s, "screen", 6) == 0) &&
+                !(tl == 3 && strncasecmp(s, "all", 3) == 0)) {
+                result = false;  /* print, speech, tv, ... never match */
+            }
+            s = t;
+            css_media_skip_ws(&s);
+        }
+    }
+    /* Parenthesized features joined by "and". */
+    for (;;) {
+        if (strncasecmp(s, "and", 3) == 0 && (css_is_space(s[3]) || s[3] == '(')) {
+            s += 3;
+            css_media_skip_ws(&s);
+        }
+        if (*s != '(') break;
+        const char *close = s + 1;
+        int depth = 1;
+        while (*close && depth > 0) {
+            if (*close == '(') depth++;
+            else if (*close == ')') depth--;
+            if (depth > 0) close++;
+        }
+        if (depth != 0) return false;  /* unbalanced parens */
+        char feat[256];
+        size_t fl = (size_t)(close - (s + 1));
+        if (fl >= sizeof(feat)) fl = sizeof(feat) - 1;
+        memcpy(feat, s + 1, fl);
+        feat[fl] = '\0';
+        if (!css_media_feature_matches(feat, vw, vh)) result = false;
+        s = close + 1;
+        css_media_skip_ws(&s);
+    }
+    return negate ? !result : result;
+}
+
+bool css_rule_media_matches(const CssRule *rule, double viewport_width, double viewport_height) {
+    if (!rule || !rule->media_query || !rule->media_query[0]) return true;
+    /* A media query list matches if ANY comma-separated query matches. */
+    const char *s = rule->media_query;
+    for (;;) {
+        const char *comma = s;
+        int depth = 0;
+        while (*comma) {
+            if (*comma == '(') depth++;
+            else if (*comma == ')') { if (depth > 0) depth--; }
+            else if (*comma == ',' && depth == 0) break;
+            comma++;
+        }
+        char qbuf[512];
+        size_t qlen = (size_t)(comma - s);
+        if (qlen >= sizeof(qbuf)) qlen = sizeof(qbuf) - 1;
+        memcpy(qbuf, s, qlen);
+        qbuf[qlen] = '\0';
+        if (css_media_single_query_matches(qbuf, viewport_width, viewport_height)) return true;
+        if (!*comma) break;
+        s = comma + 1;
+    }
+    return false;
 }
 
 static char* css_strdup(const char *s) {

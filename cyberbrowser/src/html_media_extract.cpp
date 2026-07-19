@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stdarg.h>
 #include "html_media_extract.h"
+#include "html_dom.h"
 #include "http_download.h"
 #include "js_quickjs.h"
 #include "platform.h"
@@ -707,6 +708,9 @@ static int extract_scripts_in_order(const char *html, ScriptInfo *scripts, int m
             // External script
             strncpy(scripts[count].url, src_start, src_len);
             scripts[count].url[src_len] = '\0';
+            // HTML attribute values are entity-encoded (e.g. &amp; in query
+            // strings); decode before resolving, like the DOM parser does.
+            html_decode_entities(scripts[count].url, src_len);
             
             // Convert relative to absolute URL
             if (strncmp(scripts[count].url, "//", 2) == 0) {

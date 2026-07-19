@@ -2,11 +2,14 @@
 """Capture a reference screenshot of a URL using Google Chrome headless.
 
 Usage:
-    python scripts/capture_chrome_screenshot.py [URL] [OUT_PATH]
+    python scripts/capture_chrome_screenshot.py [URL] [OUT_PATH] [--dark]
 
 Defaults:
-    URL: https://www.youtube.com/watch?v=dQw4w9WgXcQ
+    URL: https://en.wikipedia.org/wiki/Main_Page
     OUT_PATH: cyberbrowser/build-mingw/chrome_ref.jpg
+
+--dark forces Chrome's dark mode (used for dark-themed pages such as YouTube).
+CHROME_PATH can point at a specific chrome.exe.
 """
 import os
 import platform
@@ -14,7 +17,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-DEFAULT_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+DEFAULT_URL = "https://en.wikipedia.org/wiki/Main_Page"
 DEFAULT_OUT = str(Path(__file__).parent.parent / "cyberbrowser" / "build-mingw" / "chrome_ref.jpg")
 
 VIEWPORT_W = 1024
@@ -24,6 +27,9 @@ VIEWPORT_H = 2400
 def find_chrome():
     system = platform.system()
     candidates = []
+    env_chrome = os.environ.get("CHROME_PATH", "")
+    if env_chrome:
+        candidates.append(env_chrome)
     if system == "Windows":
         pf = os.environ.get("PROGRAMFILES", r"C:\Program Files")
         pf_x86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
@@ -64,8 +70,10 @@ def run(cmd):
 
 
 def main():
-    url = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_URL
-    out_path = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_OUT
+    dark_mode = "--dark" in sys.argv
+    argv = [a for a in sys.argv[1:] if a != "--dark"]
+    url = argv[0] if len(argv) > 0 else DEFAULT_URL
+    out_path = argv[1] if len(argv) > 1 else DEFAULT_OUT
     out_path = os.path.abspath(out_path)
 
     chrome = find_chrome()
@@ -79,9 +87,10 @@ def main():
 
     # Chrome's --screenshot writes a PNG by default.
     png_path = os.path.splitext(out_path)[0] + ".png"
-    # Use a desktop user-agent, dark mode to match the emulator's rendered theme,
-    # and a virtual-time budget so lazy/timer-driven Polymer content gets a chance
-    # to stamp before the screenshot is taken.
+    # Use a desktop user-agent and a virtual-time budget so lazy/timer-driven
+    # content gets a chance to stamp before the screenshot is taken.  Dark mode
+    # is opt-in (--dark): the emulator renders on a white background, which
+    # matches light-themed pages such as Wikipedia.
     user_agent = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
@@ -91,7 +100,10 @@ def main():
         "--headless",
         "--disable-gpu",
         "--hide-scrollbars",
-        "--force-dark-mode",
+    ]
+    if dark_mode:
+        cmd.append("--force-dark-mode")
+    cmd += [
         "--run-all-compositor-stages-before-draw",
         "--virtual-time-budget=20000",
         f"--user-agent={user_agent}",

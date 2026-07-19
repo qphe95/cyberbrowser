@@ -363,8 +363,10 @@ int image_cache_load_async(ImageCache *cache, const char *url_or_path,
     ImageCacheEntry *e = find_entry(cache, url_or_path);
     if (e) {
         if (e->pixels) {
-            /* Already loaded synchronously: invoke callback immediately. */
-            if (callback) callback(url_or_path, user_data);
+            /* Already loaded: do NOT invoke the callback.  The pixels were
+             * available before this call, so nothing changed — re-notifying
+             * would mark the layout dirty on every render pass and the
+             * quiescence loop would never settle. */
         } else if (e->state == ENTRY_STATE_LOADING) {
             /* Already pending: update callback/user_data so the new caller is
              * notified when it completes. */

@@ -84,7 +84,7 @@ int css_applied_decl_compare(const void *a, const void *b);
 int css_specificity_from_selector_text(const char *selector);
 
 /* Returns true if a rule's enclosing @media condition matches the viewport. */
-bool css_rule_media_matches(const CssRule *rule, double viewport_width);
+bool css_rule_media_matches(const CssRule *rule, double viewport_width, double viewport_height);
 
 /* Transform a stylesheet's selectors for a shadow host (e.g. :host, ::slotted).
  * Used by both the JS CSS applier and the layout-engine collector. */

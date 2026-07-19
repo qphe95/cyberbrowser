@@ -244,7 +244,8 @@ elseif(BE_PLATFORM_WINDOWS)
 endif()
 
 # =============================================================================
-# CyberBrowser executable (hardcoded YouTube loader)
+# CyberBrowser executable (start-page loader; defaults to Wikipedia, URL via
+# argv[1] or CYBER_START_URL)
 # =============================================================================
 add_executable(cyberbrowser
     src/cyberbrowser_main.cpp

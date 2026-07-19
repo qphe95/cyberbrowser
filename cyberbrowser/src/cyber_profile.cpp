@@ -368,10 +368,10 @@ void cp_profile_write_flamegraph(const char *path) {
     }
     if (t1 <= t0) t1 = t0 + 1.0;
 
-    /* Main thread = the one that owns the "load-youtube" root span. */
+    /* Main thread = the one that owns the "load-page" root span. */
     unsigned long long main_tid = ev[0].tid;
     for (int i = 0; i < n; i++) {
-        if (strcmp(ev[i].name, "load-youtube") == 0) { main_tid = ev[i].tid; break; }
+        if (strcmp(ev[i].name, "load-page") == 0) { main_tid = ev[i].tid; break; }
     }
 
     /* Lane order: main first, then other threads by busy time (descending). */

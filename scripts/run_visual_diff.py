@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Reproducible visual-diff pipeline for CyberBrowser vs. Chrome.
 
-1. Capture a headless Chrome reference screenshot (forced dark mode).
-2. Run CyberBrowser to produce `youtube_screenshot.jpg`.
+1. Capture a headless Chrome reference screenshot (via capture_chrome_screenshot.py).
+2. Run CyberBrowser to produce `wikipedia_screenshot.jpg`.
 3. Compare the two images with ImageMagick and write a per-band report.
 
 Example:
@@ -15,7 +15,6 @@ import argparse
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 
 def find_chrome() -> str:
@@ -31,32 +30,18 @@ def find_chrome() -> str:
     raise FileNotFoundError("Could not find chrome.exe. Set CHROME_PATH.")
 
 
-def capture_chrome_reference(url: str, out_path: str, chrome_path: str,
-                              width: int = 1024, height: int = 2400) -> None:
-    """Capture a headless Chrome screenshot to *out_path*."""
-    abs_out = os.path.abspath(out_path)
-    os.makedirs(os.path.dirname(abs_out) or ".", exist_ok=True)
-    cmd = [
-        chrome_path,
-        "--headless",
-        "--disable-gpu",
-        "--hide-scrollbars",
-        "--enable-features=WebContentsForceDark",
-        "--run-all-compositor-stages-before-draw",
-        "--virtual-time-budget=20000",
-        f"--window-size={width},{height}",
-        f"--screenshot={abs_out}",
-        url,
-    ]
+def capture_chrome_reference(url: str, out_path: str, chrome_path: str) -> None:
+    """Capture a headless Chrome screenshot to *out_path*.
+
+    Delegates to capture_chrome_screenshot.py so the user-agent, viewport,
+    and Chrome flags have a single source of truth.
+    """
+    script = os.path.join(os.path.dirname(__file__), "capture_chrome_screenshot.py")
+    env = dict(os.environ)
+    if chrome_path:
+        env["CHROME_PATH"] = chrome_path
     print("Capturing Chrome reference ...")
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        # Chrome often prints benign errors to stderr; keep going if the file
-        # was written.
-        if not os.path.exists(abs_out):
-            print(proc.stderr, file=sys.stderr)
-            raise RuntimeError("Chrome screenshot capture failed")
-    print(f"Reference saved: {abs_out}")
+    subprocess.run([sys.executable, script, url, out_path], env=env, check=True)
 
 
 def run_cyberbrowser(build_dir: str, url: str) -> None:
@@ -66,7 +51,7 @@ def run_cyberbrowser(build_dir: str, url: str) -> None:
         raise FileNotFoundError(f"CyberBrowser executable not found: {exe}")
     print("Running CyberBrowser ...")
     subprocess.run([exe, url], cwd=build_dir, check=True)
-    screenshot = os.path.join(build_dir, "youtube_screenshot.jpg")
+    screenshot = os.path.join(build_dir, "wikipedia_screenshot.jpg")
     if not os.path.exists(screenshot):
         raise RuntimeError(f"CyberBrowser did not produce {screenshot}")
     print(f"Screenshot saved: {screenshot}")
@@ -75,7 +60,7 @@ def run_cyberbrowser(build_dir: str, url: str) -> None:
 def run_compare(build_dir: str, band_height: int) -> None:
     """Invoke scripts/compare_screenshots.py on the two outputs."""
     ref = os.path.join(build_dir, "chrome_ref.jpg")
-    cand = os.path.join(build_dir, "youtube_screenshot.jpg")
+    cand = os.path.join(build_dir, "wikipedia_screenshot.jpg")
     diff = os.path.join(build_dir, "screenshot_diff.png")
     report = os.path.join(build_dir, "screenshot_diff_report.txt")
 
@@ -97,7 +82,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Capture Chrome reference, run CyberBrowser, and diff screenshots."
     )
-    parser.add_argument("--url", default="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    parser.add_argument("--url", default="https://en.wikipedia.org/wiki/Main_Page",
                         help="URL to load")
     parser.add_argument("--build-dir",
                         default="cyberbrowser/build-mingw",
@@ -107,7 +92,7 @@ def main() -> int:
     parser.add_argument("--skip-capture", action="store_true",
                         help="Reuse existing chrome_ref.jpg")
     parser.add_argument("--skip-cyberbrowser", action="store_true",
-                        help="Reuse existing youtube_screenshot.jpg")
+                        help="Reuse existing wikipedia_screenshot.jpg")
     parser.add_argument("--band-height", type=int, default=200,
                         help="Vertical band height for per-band report")
     args = parser.parse_args()

@@ -44,8 +44,9 @@ void platform_sleep_ms(unsigned int ms);
 
 #define LOG_TAG "cyberbrowser"
 
-/* Default page loaded by the smoke-test executable. */
-static const char DEFAULT_START_URL[] = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+/* Default page loaded by the smoke-test executable.  Can be overridden by
+ * argv[1] or the CYBER_START_URL environment variable. */
+static const char DEFAULT_START_URL[] = "https://en.wikipedia.org/wiki/Main_Page";
 extern const char *g_cyber_start_url;
 
 /* ============================================================================
@@ -285,28 +286,31 @@ static void cleanup_browser_context(void) {
     }
 }
 
-static char *fetch_start_page(size_t *out_size) {
-    const char *url = DEFAULT_START_URL;
+static char *fetch_start_page(const char *url, size_t *out_size) {
     printf("Fetching %s ...\n", url);
 
     HttpBuffer buffer = {0};
     char error[512] = {0};
-    const char *headers[] = {
-        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-        "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language: en-US,en;q=0.9",
-        "Cookie: CONSENT=YES+US.en+; PREF=tz=America.Los_Angeles&f4=4000000",
-        "sec-ch-ua: \"Google Chrome\";v=\"125\", \"Chromium\";v=\"125\", \"Not.A/Brand\";v=\"24\"",
-        "sec-ch-ua-mobile: ?0",
-        "sec-ch-ua-platform: \"Windows\"",
-        "sec-fetch-dest: document",
-        "sec-fetch-mode: navigate",
-        "sec-fetch-site: none",
-        "sec-fetch-user: ?1",
-        "upgrade-insecure-requests: 1"
-    };
+    /* Google's consent cookie only makes sense for Google properties; sending
+     * it to other sites is pointless, so include it just for YouTube. */
+    const bool send_google_consent = strstr(url, "youtube.") != NULL;
+    const char *headers[16];
+    int nheaders = 0;
+    headers[nheaders++] = "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
+    headers[nheaders++] = "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8";
+    headers[nheaders++] = "Accept-Language: en-US,en;q=0.9";
+    if (send_google_consent)
+        headers[nheaders++] = "Cookie: CONSENT=YES+US.en+; PREF=tz=America.Los_Angeles&f4=4000000";
+    headers[nheaders++] = "sec-ch-ua: \"Google Chrome\";v=\"125\", \"Chromium\";v=\"125\", \"Not.A/Brand\";v=\"24\"";
+    headers[nheaders++] = "sec-ch-ua-mobile: ?0";
+    headers[nheaders++] = "sec-ch-ua-platform: \"Windows\"";
+    headers[nheaders++] = "sec-fetch-dest: document";
+    headers[nheaders++] = "sec-fetch-mode: navigate";
+    headers[nheaders++] = "sec-fetch-site: none";
+    headers[nheaders++] = "sec-fetch-user: ?1";
+    headers[nheaders++] = "upgrade-insecure-requests: 1";
 
-    bool ok = http_get_to_memory_with_headers(url, headers, sizeof(headers)/sizeof(headers[0]), &buffer, error, sizeof(error));
+    bool ok = http_get_to_memory_with_headers(url, headers, nheaders, &buffer, error, sizeof(error));
     if (!ok || !buffer.data || buffer.size == 0) {
         printf("FATAL: Failed to fetch start page: %s\n", error);
         return NULL;
@@ -755,8 +759,17 @@ static bool render_document_to_jpg(HtmlDocument *doc, ImageCache *image_cache,
 }
 
 int main(int argc, char *argv[]) {
-    (void)argc;
-    (void)argv;
+    /* Start URL: argv[1] wins, then CYBER_START_URL, then the compiled-in
+     * default (Wikipedia).  The YouTube-specific shims below only run when the
+     * resolved URL is a YouTube page. */
+    const char *start_url = DEFAULT_START_URL;
+    if (argc > 1 && argv[1] && argv[1][0]) {
+        start_url = argv[1];
+    } else {
+        const char *env_url = getenv("CYBER_START_URL");
+        if (env_url && env_url[0]) start_url = env_url;
+    }
+    const bool page_is_youtube = strstr(start_url, "youtube.") != NULL;
 
 #ifdef _WIN32
     SetUnhandledExceptionFilter(unhandled_exception_filter);
@@ -811,9 +824,10 @@ int main(int argc, char *argv[]) {
 
     printf("========================================\n");
     printf("CyberBrowser\n");
+    printf("Start URL: %s\n", start_url);
     printf("========================================\n");
 
-    CP_BEGIN("load-youtube");
+    CP_BEGIN("load-page");
 
     if (!platform_init()) {
         printf("FATAL: platform_init() failed\n");
@@ -837,18 +851,18 @@ int main(int argc, char *argv[]) {
     printf("init_browser_context ok\n");
 
     /* Make the start URL available to the DOM / URL resolution code. */
-    g_cyber_start_url = DEFAULT_START_URL;
+    g_cyber_start_url = start_url;
 
     /* Reflect the start URL in window.location so the engine reports the
      * correct origin, host, and pathname instead of a hardcoded default.
      * Also sync document.domain and document.baseURI to the resolved URL. */
     {
-        char loc_script[512];
+        char loc_script[1024];
         snprintf(loc_script, sizeof(loc_script),
                  "if (window.location) { window.location.href = %s%s%s; "
                  "if (document) { document.domain = window.location.hostname; "
                  "document.baseURI = window.location.href; } }",
-                 "\"", DEFAULT_START_URL, "\"");
+                 "\"", start_url, "\"");
         JS_Eval(g_ctx, loc_script, strlen(loc_script), "<set_location>", JS_EVAL_TYPE_GLOBAL);
     }
 
@@ -891,7 +905,7 @@ int main(int argc, char *argv[]) {
     char *html = NULL;
     {
         CP_SCOPE("fetch-start-page");
-        html = fetch_start_page(&html_size);
+        html = fetch_start_page(start_url, &html_size);
     }
     if (!html) {
         cleanup_browser_context();
@@ -995,8 +1009,8 @@ int main(int argc, char *argv[]) {
         /* Neutralise YouTube's error-logging paths before lifecycle timers fire.
          * The helper g.En("yt.logging.errors.log") creates empty objects along
          * the path if it is missing and then calls the result, which throws
-         * "not a function" and aborts the app loader. */
-        {
+         * "not a function" and aborts the app loader.  YouTube-only. */
+        if (page_is_youtube) {
             const char *neutralise_log_js2 =
                 "(function(){"
                 "  try {"
@@ -1066,6 +1080,12 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "[UPGRADE-DOC] done\n");
             fflush(stderr);
 
+            /* Everything from here to the end of this scope is YouTube-app
+             * bootstrapping: neutralising yt.logging.errors, triggering the
+             * 'script-load-dpj' app loader, re-upgrading ytd-app, and firing
+             * the ytsignals "ci" signal.  Skip it entirely for non-YouTube
+             * pages. */
+            if (page_is_youtube) {
             /* YouTube's error-logging wrappers (_.JC) catch exceptions and forward
              * them to yt.logging.errors.log.  In the emulator the logging path
              * itself throws ("not a function"), so real errors get lost and
@@ -1131,6 +1151,7 @@ int main(int argc, char *argv[]) {
                     "})();";
                 JS_Eval(g_ctx, fire_ci_js, strlen(fire_ci_js), "<fire_ci>", JS_EVAL_TYPE_GLOBAL);
                 pump_timers_and_jobs(g_ctx);
+            }
             }
             }
 
@@ -1277,7 +1298,7 @@ int main(int argc, char *argv[]) {
                  * has its own complete stylesheet collection + selector matching
                  * pipeline.  No separate CSS application step is needed here. */
 
-                render_document_to_jpg(doc, image_cache, "youtube_screenshot.jpg");
+                render_document_to_jpg(doc, image_cache, "wikipedia_screenshot.jpg");
             } else {
                 printf("WARNING: failed to rebuild native document from JS DOM\n");
             }
@@ -1488,7 +1509,7 @@ int main(int argc, char *argv[]) {
 
     printf("\nStart page loaded successfully.\n");
 
-    CP_END("load-youtube");
+    CP_END("load-page");
     if (cp_profile_enabled()) {
         cp_profile_flush("profile.json");
         cp_profile_write_flamegraph("flamegraph.png");
