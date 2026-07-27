@@ -17,6 +17,11 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
+#define NANOSVG_IMPLEMENTATION
+#include "nanosvg.h"
+#define NANOSVGRAST_IMPLEMENTATION
+#include "nanosvgrast.h"
+
 #include "http_download.h"
 #include "platform.h"
 #include "cyber_profile.h"
@@ -92,8 +97,7 @@ static uint8_t *base64_decode(const char *in, size_t in_len, size_t *out_len)
     return out;
 }
 
-/* Supported image MIME types for data: URLs.  SVG is intentionally omitted
- * because stb_image does not support vector graphics. */
+/* Supported image MIME types for data: URLs. */
 static bool is_supported_image_mime(const char *header, size_t header_len)
 {
     if (header_len >= 9 && strncasecmp(header, "image/png", 9) == 0) return true;
@@ -101,7 +105,70 @@ static bool is_supported_image_mime(const char *header, size_t header_len)
     if (header_len >= 9 && strncasecmp(header, "image/gif", 9) == 0) return true;
     if (header_len >= 9 && strncasecmp(header, "image/bmp", 9) == 0) return true;
     if (header_len >= 10 && strncasecmp(header, "image/webp", 10) == 0) return true;
+    if (header_len >= 13 && strncasecmp(header, "image/svg+xml", 13) == 0) return true;
     return false;
+}
+
+/* Detect an SVG document by content: '<' start (after BOM/whitespace) with
+ * "<svg" appearing early, since raster formats start with magic bytes. */
+static bool is_svg_document(const char *data, size_t size)
+{
+    if (!data || size < 5) return false;
+    size_t i = 0;
+    if (size >= 3 && (unsigned char)data[0] == 0xEF &&
+        (unsigned char)data[1] == 0xBB && (unsigned char)data[2] == 0xBF) i = 3;
+    while (i < size && isspace((unsigned char)data[i])) i++;
+    if (i >= size || data[i] != '<') return false;
+    size_t scan = size - i < 512 ? size - i : 512;
+    for (size_t j = i; j + 4 <= i + scan; j++) {
+        if (memcmp(data + j, "<svg", 4) == 0) return true;
+    }
+    return false;
+}
+
+/* Rasterize an SVG document to RGBA pixels with nanosvg.  Returns malloc'd
+ * pixels (compatible with stbi_image_free) and sets *out_w/*out_h. */
+static uint8_t *svg_rasterize(const char *data, size_t size, int *out_w, int *out_h)
+{
+    char *copy = (char *)malloc(size + 1);
+    if (!copy) return NULL;
+    memcpy(copy, data, size);
+    copy[size] = '\0';
+
+    NSVGimage *img = nsvgParse(copy, "px", 96.0f);
+    free(copy);
+    if (!img) return NULL;
+
+    /* nsvgParse always resolves width/height (viewBox/content fallback). */
+    float w = img->width, h = img->height;
+    if (w <= 0.0f || h <= 0.0f) { w = 256.0f; h = 256.0f; }
+
+    /* Cap the raster size so huge documents do not allocate giant buffers. */
+    float scale = 1.0f;
+    const float max_dim = 2048.0f;
+    if (w > max_dim || h > max_dim) {
+        scale = max_dim / (w > h ? w : h);
+        w *= scale;
+        h *= scale;
+    }
+
+    int iw = (int)(w + 0.5f), ih = (int)(h + 0.5f);
+    NSVGrasterizer *rast = nsvgCreateRasterizer();
+    if (iw <= 0 || ih <= 0 || !rast) {
+        if (rast) nsvgDeleteRasterizer(rast);
+        nsvgDelete(img);
+        return NULL;
+    }
+    uint8_t *pixels = (uint8_t *)calloc((size_t)iw * (size_t)ih, 4);
+    if (pixels) {
+        nsvgRasterize(rast, img, 0.0f, 0.0f, scale, pixels, iw, ih, iw * 4);
+    }
+    nsvgDeleteRasterizer(rast);
+    nsvgDelete(img);
+    if (!pixels) return NULL;
+    *out_w = iw;
+    *out_h = ih;
+    return pixels;
 }
 
 /* Parse a data: URL and return the decoded payload if it is a supported image
@@ -196,9 +263,14 @@ static bool decode_entry(ImageCacheEntry *e)
     uint8_t *pixels = NULL;
 
     if (e->download_data && e->download_size > 0) {
-        pixels = stbi_load_from_memory((const stbi_uc *)e->download_data,
-                                       (int)e->download_size,
-                                       &width, &height, &channels, 4);
+        if (is_svg_document(e->download_data, e->download_size)) {
+            pixels = svg_rasterize(e->download_data, e->download_size, &width, &height);
+            channels = 4;
+        } else {
+            pixels = stbi_load_from_memory((const stbi_uc *)e->download_data,
+                                           (int)e->download_size,
+                                           &width, &height, &channels, 4);
+        }
     } else {
         /* Local file path. */
         pixels = stbi_load(e->source, &width, &height, &channels, 4);

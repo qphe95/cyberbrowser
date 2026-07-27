@@ -97,6 +97,13 @@ typedef enum {
     CSS_BOX_SIZING_BORDER_BOX
 } CssBoxSizing;
 
+/* CSS text-align value (justify is treated as left). */
+typedef enum {
+    CSS_TEXT_ALIGN_LEFT,
+    CSS_TEXT_ALIGN_CENTER,
+    CSS_TEXT_ALIGN_RIGHT
+} CssTextAlign;
+
 /* Layout values for a single DOM node. */
 typedef struct LayoutBox {
     double x, y;
@@ -104,6 +111,11 @@ typedef struct LayoutBox {
     /* Parsed CSS width/height values before box-sizing conversion.  width/height
      * above always store the final border-box totals. */
     double css_width, css_height;
+    /* Set when width/height were explicitly assigned (even to 0): an explicit
+     * zero is a real size, not "auto". */
+    unsigned char width_set, height_set;
+    /* Set when visibility was explicitly assigned (for inheritance). */
+    unsigned char visibility_set;
     double margin_top, margin_right, margin_bottom, margin_left;
     double padding_top, padding_right, padding_bottom, padding_left;
     double border_top, border_right, border_bottom, border_left;
@@ -116,6 +128,17 @@ typedef struct LayoutBox {
     /* Set when a rule/inline style explicitly assigned `color`; used to
      * decide inheritance from the parent box. */
     unsigned char color_set;
+    /* Set when font-size was explicitly assigned (for inheritance). */
+    unsigned char font_size_set;
+
+    /* Text alignment for inline content (inherited like color). */
+    CssTextAlign text_align;
+    unsigned char text_align_set;
+
+    /* CSS float/clear.  float_side: 0=none, 1=left, 2=right.
+     * clear: 0=none, 1=left, 2=right, 3=both. */
+    unsigned char float_side;
+    unsigned char clear;
 
     /* Resolved typography. */
     double font_size;
@@ -137,6 +160,14 @@ typedef struct LayoutBox {
     double flex_basis_percent; /* >0 when flex-basis was a percentage */
     double flex_grow;
     double flex_shrink;
+
+    /* Word-wrap state for text boxes whose run wraps across lines.
+     * wrap_cont_w > 0 marks the box as wrapped: display emission wraps the
+     * text with first line width wrap_first_w, continuation lines starting at
+     * wrap_cont_x with width wrap_cont_w. */
+    double wrap_first_w;
+    double wrap_cont_w;
+    double wrap_cont_x;
 
     double min_width, max_width;
     double min_height, max_height;
@@ -201,6 +232,13 @@ typedef struct LayoutNodeState {
 /* Forward declaration for custom properties storage. */
 typedef struct CssCustomProps CssCustomProps;
 
+/* A placed float, used to compute line insets while flowing inline content.
+ * side: 1=left, 2=right. */
+typedef struct {
+    double left, right, bottom;
+    unsigned char side;
+} FloatRec;
+
 typedef struct LayoutContext {
     HtmlDocument *doc;
     LayoutTree tree;
@@ -216,6 +254,13 @@ typedef struct LayoutContext {
 
     /* Per-node custom property (CSS variable) map. */
     CssCustomProps *custom_props;
+
+    /* Floats placed so far during the flow, in page coordinates.  Inline
+     * lines shrink around them while they are vertically active; they also
+     * serve clear: left/right/both. */
+    FloatRec *float_stack;
+    int float_count;
+    int float_cap;
 
     /* Optional JS context for collecting constructed/adopted stylesheets. */
     JSContextHandle js_ctx;

@@ -203,6 +203,21 @@ static bool node_has_hidden_class(LayoutContext *ctx, int node_idx)
     return false;
 }
 
+/* True when the node or any ancestor is display:none or visibility:hidden.
+ * Emissions that bypass the size filters (text glyphs, <img>, background
+ * images) must check this so hidden subtrees (scripts, off-screen menus,
+ * head content) do not leak onto the page at the origin. */
+static bool box_or_ancestor_hidden(LayoutContext *ctx, int node_idx)
+{
+    int idx = node_idx;
+    while (idx >= 0) {
+        LayoutBox *b = &ctx->boxes[idx];
+        if (b->display == CSS_DISPLAY_NONE || b->visibility == CSS_VISIBILITY_HIDDEN) return true;
+        idx = ctx->tree.nodes[idx].parent_idx;
+    }
+    return false;
+}
+
 static const char* node_attribute_value(HtmlNode *node, const char *name)
 {
     if (!node || node->type != HTML_NODE_ELEMENT) return NULL;
@@ -210,6 +225,69 @@ static const char* node_attribute_value(HtmlNode *node, const char *name)
         if (strcasecmp(a->name, name) == 0) return a->value;
     }
     return NULL;
+}
+
+/* Pick the best candidate from an <img srcset> for the box's CSS width.
+ * Width descriptors (300w): smallest candidate >= css width, else the
+ * largest.  Density descriptors (1.5x): smallest >= 1x, else the largest.
+ * Returns a malloc'd URL string (caller frees) or NULL. */
+static char *srcset_pick(const char *srcset, float css_width)
+{
+    if (!srcset || !srcset[0]) return NULL;
+    char *copy = strdup(srcset);
+    if (!copy) return NULL;
+
+    char *best_w_ge = NULL;  double best_w_ge_v = 0.0;  /* smallest w >= target */
+    char *best_any = NULL;   double best_any_v = 0.0;   /* largest overall */
+    char *best_x_ge = NULL;  double best_x_ge_v = 0.0;  /* smallest x >= 1 */
+    char *best_x = NULL;     double best_x_v = 0.0;     /* largest x */
+
+    char *save = NULL;
+    for (char *cand = strtok_r(copy, ",", &save); cand; cand = strtok_r(NULL, ",", &save)) {
+        while (isspace((unsigned char)*cand)) cand++;
+        if (!cand[0]) continue;
+        /* Split URL from descriptor at the first space. */
+        char *desc = NULL;
+        for (char *q = cand; *q; q++) {
+            if (isspace((unsigned char)*q)) { *q = '\0'; desc = q + 1; break; }
+        }
+        double w = -1.0, x = 1.0;
+        if (desc) {
+            while (isspace((unsigned char)*desc)) desc++;
+            char *end = NULL;
+            double v = strtod(desc, &end);
+            if (end && end != desc) {
+                if (*end == 'w') { w = v; x = -1.0; }
+                else if (*end == 'x') x = v;
+            }
+        }
+        if (w > 0.0) {
+            if (css_width > 0.0f && w >= css_width &&
+                (best_w_ge == NULL || w < best_w_ge_v)) {
+                free(best_w_ge); best_w_ge = strdup(cand); best_w_ge_v = w;
+            }
+            if (best_any == NULL || w > best_any_v) {
+                free(best_any); best_any = strdup(cand); best_any_v = w;
+            }
+        } else {
+            if (x >= 1.0 && (best_x_ge == NULL || x < best_x_ge_v)) {
+                free(best_x_ge); best_x_ge = strdup(cand); best_x_ge_v = x;
+            }
+            if (best_x == NULL || x > best_x_v) {
+                free(best_x); best_x = strdup(cand); best_x_v = x;
+            }
+        }
+    }
+
+    char *out = NULL;
+    if (best_w_ge || best_any) out = best_w_ge ? best_w_ge : best_any;
+    else out = best_x_ge ? best_x_ge : best_x;
+    if (best_w_ge && out != best_w_ge) free(best_w_ge);
+    if (best_any && out != best_any) free(best_any);
+    if (best_x_ge && out != best_x_ge) free(best_x_ge);
+    if (best_x && out != best_x) free(best_x);
+    free(copy);
+    return out;
 }
 
 static char* dl_resolve_url(const char *base_url, const char *href)
@@ -327,6 +405,7 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
         if (box->display == CSS_DISPLAY_NONE) continue;
         if (box->visibility == CSS_VISIBILITY_HIDDEN) continue;
         if (node_has_hidden_class(ctx, i)) continue;
+        if (box_or_ancestor_hidden(ctx, i)) continue;
 
         HtmlNode *node = NULL;
         if (ctx->doc) {
@@ -338,6 +417,11 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
         if (node && node->type == HTML_NODE_ELEMENT &&
             strcasecmp(node->tag_name, "img") == 0 && g_image_cache) {
             const char *src = node_attribute_value(node, "src");
+            /* srcset, when present, overrides src with the candidate that
+             * best matches the laid-out box width. */
+            const char *srcset = node_attribute_value(node, "srcset");
+            char *picked = srcset ? srcset_pick(srcset, (float)box->width) : NULL;
+            if (picked) src = picked;
             if (src && src[0]) {
                 char *url = dl_resolve_url(ctx->base_url, src);
                 if (url) {
@@ -347,6 +431,7 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                     free(url);
                 }
             }
+            free(picked);
             continue;
         }
 
@@ -373,9 +458,29 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                     if (dark_mode && tr < 0.1f && tg < 0.1f && tb < 0.1f) {
                         tr = 1.0f; tg = 1.0f; tb = 1.0f;
                     }
-                    if (!text_shaper_shape_to_display_list(g_default_font,
+                    /* Scale glyph metrics for the box's font size; the shaper
+                     * itself was loaded at 16px. */
+                    double fs = box->font_size > 0.0 ? box->font_size : 16.0;
+                    float scale = (float)(fs / 16.0);
+                    if (box->wrap_cont_w > 0.0) {
+                        /* Wrapped run: shape across lines using the wrap
+                         * geometry recorded by the layout. */
+                        float line_adv = (float)(fs * 1.5);
+                        if (!text_shaper_wrap_shape(g_default_font,
+                                                    node->text_content,
+                                                    (float)box->x, (float)box->y,
+                                                    (float)box->wrap_cont_x,
+                                                    (float)box->wrap_first_w,
+                                                    (float)box->wrap_cont_w,
+                                                    scale, line_adv,
+                                                    tr, tg, tb, ta,
+                                                    dl, NULL)) {
+                            return false;
+                        }
+                    } else if (!text_shaper_shape_to_display_list_scaled(g_default_font,
                                                            node->text_content,
                                                            (float)box->x, (float)box->y,
+                                                           scale,
                                                            tr, tg, tb, ta,
                                                            dl)) {
                         return false;
@@ -412,8 +517,12 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
          * visible instead of transparent.  Colors are chosen to contrast with
          * dark backgrounds.  Only applies when the cascade did not provide a
          * background color — otherwise it would paint over the real (light)
-         * skeleton color from the page's CSS. */
-        if (!box->background_image_url[0] && box->background_color_a <= 0.0f) {
+         * skeleton color from the page's CSS.
+         * YouTube-only: the class needles are YouTube skeleton classes, and
+         * substring matching would otherwise misfire on classes like
+         * MediaWiki's "vector-search-box-show-thumbnail". */
+        bool placeholders_enabled = ctx->base_url && strstr(ctx->base_url, "youtube.") != NULL;
+        if (placeholders_enabled && !box->background_image_url[0] && box->background_color_a <= 0.0f) {
             static const char *thumbnail_needles[] = {
                 "rich-thumbnail", "video-thumbnail", "thumbnail", NULL
             };

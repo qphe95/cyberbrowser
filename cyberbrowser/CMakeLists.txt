@@ -141,6 +141,7 @@ target_include_directories(cyberbrowser_lib
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/quickjs
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/minimp4
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nanosvg
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/include
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/tf-psa-crypto/include

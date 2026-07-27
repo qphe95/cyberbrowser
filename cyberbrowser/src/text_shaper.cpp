@@ -266,34 +266,207 @@ bool text_shaper_shape_to_display_list(const TextShaper *s,
                                        float r, float g, float b, float a,
                                        DisplayList *dl)
 {
+    return text_shaper_shape_to_display_list_scaled(s, utf8, x, y, 1.0f, r, g, b, a, dl);
+}
+
+bool text_shaper_shape_to_display_list_scaled(const TextShaper *s,
+                                       const char *utf8,
+                                       float x, float y, float scale,
+                                       float r, float g, float b, float a,
+                                       DisplayList *dl)
+{
     if (!s || !utf8 || !dl) return false;
+    if (scale <= 0.0f) scale = 1.0f;
     float pen_x = x;
-    float pen_y = y + s->baseline;
+    float pen_y = y + s->baseline * scale;
     int prev_glyph = -1;
     const char *p = utf8;
     uint32_t cp;
     while ((cp = utf8_decode(&p)) != 0) {
         if (cp == '\n') {
             pen_x = x;
-            pen_y += s->baseline - s->descent + s->line_gap;
+            pen_y += (s->baseline - s->descent + s->line_gap) * scale;
             prev_glyph = -1;
             continue;
         }
         GlyphEntry *ge = ensure_glyph((TextShaper *)s, cp);
         if (!ge) continue;
         if (prev_glyph >= 0) {
-            pen_x += (float)stbtt_GetGlyphKernAdvance(&s->font, prev_glyph, ge->glyph_index) * s->scale;
+            pen_x += (float)stbtt_GetGlyphKernAdvance(&s->font, prev_glyph, ge->glyph_index) * s->scale * scale;
         }
-        float gx = pen_x + ge->xoff;
-        float gy = pen_y + ge->yoff;
-        if (!display_list_add_glyph(dl, gx, gy, (float)ge->bw, (float)ge->bh,
+        float gx = pen_x + ge->xoff * scale;
+        float gy = pen_y + ge->yoff * scale;
+        if (!display_list_add_glyph(dl, gx, gy, (float)ge->bw * scale, (float)ge->bh * scale,
                                     ge->u0, ge->v0, ge->u1, ge->v1,
                                     (uint32_t)ge->glyph_index,
                                     r, g, b, a)) {
             return false;
         }
-        pen_x += ge->xadvance;
+        pen_x += ge->xadvance * scale;
         prev_glyph = ge->glyph_index;
     }
     return true;
+}
+
+/* Measure the advance of the span [start, end) at the loaded size (unscaled). */
+static float ts_measure_span(const TextShaper *s, const char *start, const char *end)
+{
+    float x = 0.0f;
+    int prev_glyph = -1;
+    const char *p = start;
+    while (p < end) {
+        const char *save = p;
+        uint32_t cp = utf8_decode(&p);
+        if (cp == 0 || p > end) { p = save; break; }
+        GlyphEntry *g = ensure_glyph((TextShaper *)s, cp);
+        if (!g) continue;
+        if (prev_glyph >= 0) {
+            x += (float)stbtt_GetGlyphKernAdvance(&s->font, prev_glyph, g->glyph_index) * s->scale;
+        }
+        x += g->xadvance;
+        prev_glyph = g->glyph_index;
+    }
+    return x;
+}
+
+/* Shared word-wrap walker.  When emit is false this only measures.  Words are
+ * maximal runs of non-space codepoints plus their trailing spaces; a line is
+ * never broken before its first word. */
+static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
+                         float x, float y, float cont_x,
+                         float first_width, float cont_width,
+                         float scale, float line_advance,
+                         bool emit, float r, float g, float b, float a,
+                         DisplayList *dl, TsWrapResult *out)
+{
+    if (!s || !utf8 || scale <= 0.0f) return false;
+    if (line_advance <= 0.0f)
+        line_advance = (s->baseline - s->descent + s->line_gap) * scale;
+    if (out) {
+        memset(out, 0, sizeof(*out));
+        out->line_advance = line_advance;
+        out->last_end_x = x;
+    }
+
+    float pen_x = x;
+    float pen_y = y;
+    float line_start_x = x;
+    float limit = first_width;
+    int lines = 1;
+    float max_width = 0.0f;
+    int prev_glyph = -1;
+
+    const char *word_start = utf8;
+    const char *p = utf8;
+    for (;;) {
+        /* A word ends after the next space (or at the string end). */
+        uint32_t cp;
+        const char *save = p;
+        cp = utf8_decode(&p);
+        bool at_end = (cp == 0);
+        bool is_space = (cp == ' ' || cp == '\t' || cp == '\n');
+        if (!at_end && !is_space) continue;
+
+        /* Emit/measure the completed word [word_start, p) — for a space the
+         * space itself is included as the word's trailing advance. */
+        const char *word_end = at_end ? p : p;
+        float word_w = ts_measure_span(s, word_start, word_end) * scale;
+        if (pen_x > line_start_x + 0.001f && pen_x - line_start_x + word_w > limit) {
+            /* Wrap to the next line before this word.  Skip a leading space
+             * on the new line: it belongs to the end of the old line. */
+            float used = pen_x - line_start_x;
+            if (used > max_width) max_width = used;
+            lines++;
+            pen_x = cont_x;
+            pen_y += line_advance;
+            line_start_x = cont_x;
+            limit = cont_width;
+            prev_glyph = -1;
+            /* Drop leading whitespace from the word on the new line. */
+            while (word_start < word_end) {
+                const char *ws = word_start;
+                uint32_t wc = utf8_decode(&ws);
+                if (wc == ' ' || wc == '\t' || wc == '\n') word_start = ws;
+                else break;
+            }
+            word_w = ts_measure_span(s, word_start, word_end) * scale;
+        }
+
+        /* Emit glyphs for [word_start, word_end). */
+        if (emit) {
+            const char *gp = word_start;
+            float gy = pen_y + s->baseline * scale;
+            while (gp < word_end) {
+                uint32_t gc = utf8_decode(&gp);
+                if (gc == 0) break;
+                if (gc < 0x20 && gc != ' ') continue; /* control chars: no glyph */
+                GlyphEntry *ge = ensure_glyph((TextShaper *)s, gc);
+                if (!ge) continue;
+                if (prev_glyph >= 0) {
+                    pen_x += (float)stbtt_GetGlyphKernAdvance(&s->font, prev_glyph, ge->glyph_index) * s->scale * scale;
+                }
+                float gx = pen_x + ge->xoff * scale;
+                float gyy = gy + ge->yoff * scale;
+                if (!display_list_add_glyph(dl, gx, gyy, (float)ge->bw * scale, (float)ge->bh * scale,
+                                            ge->u0, ge->v0, ge->u1, ge->v1,
+                                            (uint32_t)ge->glyph_index, r, g, b, a)) {
+                    return false;
+                }
+                pen_x += ge->xadvance * scale;
+                prev_glyph = ge->glyph_index;
+            }
+        } else {
+            pen_x += word_w;
+        }
+
+        word_start = word_end;
+        if (at_end) break;
+        if (cp == '\n') {
+            /* Hard newline: flush line and reset. */
+            float used = pen_x - line_start_x;
+            if (used > max_width) max_width = used;
+            lines++;
+            pen_x = cont_x;
+            pen_y += line_advance;
+            line_start_x = cont_x;
+            limit = cont_width;
+            prev_glyph = -1;
+        }
+    }
+
+    float used = pen_x - line_start_x;
+    if (used > max_width) max_width = used;
+
+    if (out) {
+        out->lines = lines;
+        out->height = (float)lines * line_advance;
+        out->last_end_x = pen_x;
+        out->max_width = max_width;
+        out->line_advance = line_advance;
+    }
+    return true;
+}
+
+bool text_shaper_wrap_measure(const TextShaper *s, const char *utf8,
+                              float x, float cont_x,
+                              float first_width, float cont_width,
+                              float scale, float line_advance,
+                              TsWrapResult *out)
+{
+    return ts_wrap_walk(s, utf8, x, 0.0f, cont_x,
+                        first_width, cont_width, scale, line_advance,
+                        false, 0, 0, 0, 0, NULL, out)
+           ? (out && out->lines > 0) : false;
+}
+
+bool text_shaper_wrap_shape(const TextShaper *s, const char *utf8,
+                            float x, float y, float cont_x,
+                            float first_width, float cont_width,
+                            float scale, float line_advance,
+                            float r, float g, float b, float a,
+                            DisplayList *dl, TsWrapResult *out)
+{
+    if (!dl) return false;
+    return ts_wrap_walk(s, utf8, x, y, cont_x, first_width, cont_width,
+                        scale, line_advance, true, r, g, b, a, dl, out);
 }

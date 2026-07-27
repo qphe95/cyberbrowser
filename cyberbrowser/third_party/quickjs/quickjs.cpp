@@ -21092,12 +21092,18 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                     if (var_ref.is_lexical()) {
                         if (opcode == OP_put_var_init)
                             goto put_var_ok;
-                        if (var_ref.is_value_uninitialized())
-                            JS_ThrowReferenceErrorUninitialized(ctx, b.closure_var_var_name(idx));
-                        else
+                        /* bgmdwnldr: an uninitialized "lexical" global hit on a
+                         * plain write is an undeclared variable being assigned
+                         * for the first time (implicit global, e.g.
+                         * RLQ=window.RLQ||[]).  Browsers create a property on
+                         * the global object instead of throwing a TDZ error;
+                         * only a true const assignment still throws. */
+                        if (var_ref.is_const()) {
                             JS_ThrowTypeErrorReadOnly(ctx, JS_PROP_THROW, b.closure_var_var_name(idx));
-                        goto exception;
-                    } else {
+                            goto exception;
+                        }
+                    }
+                    {
                         JS_SF_SET_PC(sf, pc);
                         ret = JS_HasProperty(ctx, ctx.global_obj(), b.closure_var_var_name(idx));
                         if (ret < 0)

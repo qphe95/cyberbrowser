@@ -462,9 +462,18 @@ static int parser_parse_element(HtmlParser *p, int parent_idx) {
         p->nesting_depth++;
         
         while (p->pos < p->html_len && p->nesting_depth < HTML_MAX_NESTING_DEPTH) {
-            parser_skip_whitespace(p);
-            
+            /* Do NOT skip whitespace here: whitespace between children is
+             * meaningful between inline-level siblings (it produces the space
+             * in "text <a>link</a> text").  parser_parse_text collapses it to
+             * a single space, and the layout collapses it to nothing at block
+             * boundaries. */
             if (p->pos >= p->html_len) break;
+
+            /* Skip comments */
+            if (parser_match(p, "<!--")) {
+                parser_skip_comment(p);
+                continue;
+            }
             
             /* Check for closing tag */
             if (p->html[p->pos] == '<' && p->pos + 1 < p->html_len && p->html[p->pos + 1] == '/') {
@@ -480,6 +489,12 @@ static int parser_parse_element(HtmlParser *p, int parent_idx) {
                     if (p->pos < p->html_len) p->pos++;
                     break;
                 }
+                /* Stray closing tag for a different element: drop it rather
+                 * than letting its text leak into the document. */
+                p->pos += 2;
+                while (p->pos < p->html_len && p->html[p->pos] != '>') p->pos++;
+                if (p->pos < p->html_len) p->pos++;
+                continue;
             }
             
             /* Parse child element or text */
@@ -513,29 +528,41 @@ static int parser_parse_text(HtmlParser *p, int parent_idx) {
     size_t len = p->pos - start;
     if (len == 0) return -1;
     
-    /* Trim trailing whitespace but preserve leading for preformatted text */
-    while (len > 0 && isspace((unsigned char)p->html[start + len - 1])) {
-        len--;
+    /* Collapse whitespace runs to a single space, like CSS white-space:normal.
+     * Leading and trailing single spaces are preserved: they are the gaps
+     * between inline-level siblings (e.g. "text <a>link</a> text").  A node
+     * that is entirely whitespace collapses to a lone space and has no size
+     * in layout. */
+    char *collapsed = (char*)malloc(len + 1);
+    if (!collapsed) return -1;
+    size_t cl = 0;
+    bool pending_space = false;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char ch = (unsigned char)p->html[start + i];
+        if (isspace(ch)) {
+            pending_space = true;
+            continue;
+        }
+        if (pending_space) collapsed[cl++] = ' ';
+        pending_space = false;
+        collapsed[cl++] = (char)ch;
     }
-    
-    if (len == 0) return -1;
+    if (pending_space && cl > 0) collapsed[cl++] = ' ';
+    if (cl == 0) collapsed[cl++] = ' ';  /* pure-whitespace node: one space */
+    collapsed[cl] = '\0';
     
     int node_idx = html_node_create(p->document, HTML_NODE_TEXT, parent_idx);
-    if (node_idx < 0) return -1;
-    
-    HtmlNode *node = html_node_at(p->document, node_idx);
-    node->text_content = (char*)malloc(len + 1);
-    if (!node->text_content) {
-        /* Cannot safely remove from tree here; leave as empty text node */
-        return node_idx;
+    if (node_idx < 0) {
+        free(collapsed);
+        return -1;
     }
     
-    memcpy(node->text_content, p->html + start, len);
-    node->text_content[len] = '\0';
-    node->text_len = len;
+    HtmlNode *node = html_node_at(p->document, node_idx);
+    node->text_content = collapsed;
+    node->text_len = cl;
     
     /* Decode entities */
-    html_decode_entities(node->text_content, len);
+    node->text_len = html_decode_entities(node->text_content, cl);
     
     return node_idx;
 }
