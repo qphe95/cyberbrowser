@@ -39,6 +39,7 @@ typedef enum {
     CSS_DISPLAY_FLEX,
     CSS_DISPLAY_GRID,
     CSS_DISPLAY_NONE,
+    CSS_DISPLAY_LIST_ITEM,
     CSS_DISPLAY_OTHER
 } CssDisplay;
 
@@ -119,6 +120,10 @@ typedef struct LayoutBox {
     double margin_top, margin_right, margin_bottom, margin_left;
     double padding_top, padding_right, padding_bottom, padding_left;
     double border_top, border_right, border_bottom, border_left;
+    /* Border color (single slot; most real-world borders are uniform).
+     * Defaults to the text color (currentColor) when unset. */
+    double border_color_r, border_color_g, border_color_b, border_color_a;
+    unsigned char border_color_set;
     double content_width, content_height;
     double baseline;
 
@@ -143,6 +148,21 @@ typedef struct LayoutBox {
     /* Resolved typography. */
     double font_size;
     char   font_family[64];
+    /* Font weight 100..900 (400 = normal, 700 = bold) and italic flag. */
+    int    font_weight;
+    unsigned char font_italic;
+    unsigned char font_weight_set;
+    unsigned char font_italic_set;
+    /* text-decoration bitmask: 1 = underline, 2 = line-through, 4 = overline. */
+    unsigned char text_decoration;
+    unsigned char text_decoration_set;
+    /* Resolved line-height in px; <= 0 means "normal" (1.5 x font-size). */
+    double line_height;
+    unsigned char line_height_set;
+
+    /* list-style for display:list-item markers. */
+    unsigned char list_style_type;   /* 0=none, 1=disc, 2=circle, 3=square, 4=decimal */
+    unsigned char list_style_type_set;
 
     /* Background image URL, if any. */
     char   background_image_url[256];
@@ -185,7 +205,6 @@ typedef struct LayoutBox {
      * through the previous-sibling dependency chain. */
     double line_x;
     double line_y_offset;
-    double line_height;
 
     uint32_t flags;
     /* Bitmask of which top/left/right/bottom values were explicitly set. */

@@ -114,6 +114,9 @@ bool display_list_add_image(DisplayList *dl, float x, float y, float w, float h,
 static TextShaper *g_default_font = NULL;
 static ImageCache *g_image_cache = NULL;
 
+/* Font table: 3 families x 4 variants.  Slot 0 aliases g_default_font. */
+static TextShaper *g_font_slots[DL_FONT_SLOTS] = {0};
+
 void display_list_set_image_cache(ImageCache *cache)
 {
     g_image_cache = cache;
@@ -130,14 +133,71 @@ bool display_list_set_default_font(const char *ttf_path, float size_pixels)
         text_shaper_destroy(g_default_font);
         g_default_font = NULL;
     }
+    g_font_slots[0] = NULL;
     if (!ttf_path) return true;
     g_default_font = text_shaper_create(ttf_path, size_pixels);
+    g_font_slots[0] = g_default_font;
     return g_default_font != NULL;
 }
 
 struct TextShaper *display_list_get_default_font(void)
 {
     return g_default_font;
+}
+
+bool display_list_set_font(int slot, const char *ttf_path, float size_pixels)
+{
+    if (slot < 0 || slot >= DL_FONT_SLOTS) return false;
+    if (slot == 0) return display_list_set_default_font(ttf_path, size_pixels);
+    if (g_font_slots[slot]) {
+        text_shaper_destroy(g_font_slots[slot]);
+        g_font_slots[slot] = NULL;
+    }
+    if (!ttf_path) return true;
+    g_font_slots[slot] = text_shaper_create(ttf_path, size_pixels);
+    return g_font_slots[slot] != NULL;
+}
+
+struct TextShaper *display_list_get_font(int slot)
+{
+    if (slot < 0 || slot >= DL_FONT_SLOTS) return g_default_font;
+    TextShaper *s = g_font_slots[slot];
+    return s ? s : g_default_font;
+}
+
+int display_list_resolve_font_slot(const char *font_family, int font_weight,
+                                   int font_italic)
+{
+    int base = DL_FONT_SANS;
+    if (font_family && font_family[0]) {
+        char buf[96];
+        size_t n = strlen(font_family);
+        if (n >= sizeof(buf)) n = sizeof(buf) - 1;
+        for (size_t i = 0; i < n; i++)
+            buf[i] = (char)tolower((unsigned char)font_family[i]);
+        buf[n] = '\0';
+        if (strstr(buf, "mono") || strstr(buf, "courier") ||
+            strstr(buf, "consolas") || strstr(buf, "menlo")) {
+            base = DL_FONT_MONO;
+        } else if ((strstr(buf, "serif") && !strstr(buf, "sans")) ||
+                   strstr(buf, "times") || strstr(buf, "georgia")) {
+            base = DL_FONT_SERIF;
+        }
+    }
+    int slot = base + (font_weight >= 600 ? 1 : 0) + (font_italic ? 2 : 0);
+    /* Fall back to whatever variant of the family is actually loaded. */
+    if (!g_font_slots[slot]) slot = base;
+    if (!g_font_slots[slot]) slot = 0;
+    return slot;
+}
+
+void display_list_stamp_font_slot(DisplayList *dl, int from_cmd, int slot)
+{
+    if (!dl || slot <= 0) return;
+    for (int i = from_cmd; i < dl->count; i++) {
+        if (dl->cmds[i].type == DL_GLYPH)
+            dl->cmds[i].u.glyph.font_slot = (uint8_t)slot;
+    }
 }
 
 static bool text_is_whitespace(const char *s)

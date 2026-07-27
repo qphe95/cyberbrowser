@@ -173,6 +173,21 @@ static bool layout_build_nodes(LayoutContext *ctx, const int *map)
         box->font_size = 16.0;
         box->font_size_ratio = 0.0;
         box->font_family[0] = '\0';
+        box->font_weight = 400;
+        box->font_italic = 0;
+        box->font_weight_set = 0;
+        box->font_italic_set = 0;
+        box->text_decoration = 0;
+        box->text_decoration_set = 0;
+        box->line_height = 0.0;
+        box->line_height_set = 0;
+        box->list_style_type = 0;
+        box->list_style_type_set = 0;
+        box->border_color_r = 0.0;
+        box->border_color_g = 0.0;
+        box->border_color_b = 0.0;
+        box->border_color_a = 1.0;
+        box->border_color_set = 0;
         box->background_image_url[0] = '\0';
         box->color_r = 0.0;
         box->color_g = 0.0;
@@ -1046,6 +1061,127 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         if (len >= sizeof(box->font_family)) len = sizeof(box->font_family) - 1;
         memcpy(box->font_family, p, len);
         box->font_family[len] = '\0';
+    } else if (strcasecmp(prop, "font-weight") == 0) {
+        int w = 400;
+        if (strncasecmp(value, "bold", 4) == 0) w = 700;
+        else if (strncasecmp(value, "normal", 6) == 0) w = 400;
+        else if (strncasecmp(value, "bolder", 6) == 0) w = 700;
+        else if (strncasecmp(value, "lighter", 7) == 0) w = 400;
+        else {
+            int n = atoi(value);
+            if (n >= 100 && n <= 900) w = n;
+        }
+        box->font_weight = w;
+        box->font_weight_set = 1;
+    } else if (strcasecmp(prop, "font-style") == 0) {
+        box->font_italic = (strncasecmp(value, "italic", 6) == 0 ||
+                            strncasecmp(value, "oblique", 7) == 0) ? 1 : 0;
+        box->font_italic_set = 1;
+    } else if (strcasecmp(prop, "text-decoration") == 0 ||
+               strcasecmp(prop, "text-decoration-line") == 0) {
+        /* Token scan: underline / line-through / overline; "none" clears. */
+        unsigned char deco = 0;
+        if (strstr(value, "underline")) deco |= 1;
+        if (strstr(value, "line-through")) deco |= 2;
+        if (strstr(value, "overline")) deco |= 4;
+        box->text_decoration = deco;
+        box->text_decoration_set = 1;
+    } else if (strcasecmp(prop, "line-height") == 0) {
+        if (strncasecmp(value, "normal", 6) == 0) {
+            box->line_height = 0.0; /* <=0 => normal (fs x 1.5 at layout) */
+        } else {
+            char *end = NULL;
+            double num = strtod(value, &end);
+            if (end != value) {
+                while (*end && isspace((unsigned char)*end)) end++;
+                if (*end == '\0') {
+                    /* Unitless multiplier of the element's own font-size. */
+                    box->line_height = num * box->font_size;
+                } else if (css_value_is_percent(value)) {
+                    box->line_height = css_parse_percent_ratio(value) * box->font_size;
+                } else {
+                    box->line_height = css_parse_length(value, parent_width, viewport_width,
+                                                        box->font_size);
+                }
+            }
+        }
+        box->line_height_set = 1;
+    } else if (strcasecmp(prop, "list-style-type") == 0 ||
+               strcasecmp(prop, "list-style") == 0) {
+        unsigned char t = 0;
+        if (strstr(value, "disc")) t = 1;
+        else if (strstr(value, "circle")) t = 2;
+        else if (strstr(value, "square")) t = 3;
+        else if (strstr(value, "decimal")) t = 4;
+        else if (strstr(value, "none")) t = 0;
+        box->list_style_type = t;
+        box->list_style_type_set = 1;
+    } else if (strcasecmp(prop, "border") == 0 ||
+               strcasecmp(prop, "border-left") == 0 ||
+               strcasecmp(prop, "border-right") == 0 ||
+               strcasecmp(prop, "border-top") == 0 ||
+               strcasecmp(prop, "border-bottom") == 0) {
+        /* Shorthand: scan tokens for a width (number+unit) and a color.
+         * Style keywords (solid/dashed/...) are accepted and ignored. */
+        int sides = 0x0F;
+        if (strstr(prop, "left")) sides = 0x01;
+        else if (strstr(prop, "right")) sides = 0x02;
+        else if (strstr(prop, "top")) sides = 0x04;
+        else if (strstr(prop, "bottom")) sides = 0x08;
+        const char *p = value;
+        char token[256];
+        while (*p) {
+            while (*p && isspace((unsigned char)*p)) p++;
+            if (!*p) break;
+            size_t tl = 0;
+            while (p[tl] && !isspace((unsigned char)p[tl])) tl++;
+            if (tl >= sizeof(token)) tl = sizeof(token) - 1;
+            memcpy(token, p, tl);
+            token[tl] = '\0';
+            p += tl;
+            double w = css_parse_length(token, parent_width, viewport_width, box->font_size);
+            if (w > 0.0 && (isdigit((unsigned char)token[0]) || token[0] == '.')) {
+                if (sides & 0x01) box->border_left = w;
+                if (sides & 0x02) box->border_right = w;
+                if (sides & 0x04) box->border_top = w;
+                if (sides & 0x08) box->border_bottom = w;
+                continue;
+            }
+            /* Border-width keywords. */
+            double kw = 0.0;
+            if (strcasecmp(token, "thin") == 0) kw = 1.0;
+            else if (strcasecmp(token, "medium") == 0) kw = 3.0;
+            else if (strcasecmp(token, "thick") == 0) kw = 5.0;
+            if (kw > 0.0) {
+                if (sides & 0x01) box->border_left = kw;
+                if (sides & 0x02) box->border_right = kw;
+                if (sides & 0x04) box->border_top = kw;
+                if (sides & 0x08) box->border_bottom = kw;
+                continue;
+            }
+            double cr, cg, cb, ca;
+            if (css_parse_color(token, &cr, &cg, &cb, &ca)) {
+                box->border_color_r = cr; box->border_color_g = cg;
+                box->border_color_b = cb; box->border_color_a = ca;
+                box->border_color_set = 1;
+            }
+        }
+    } else if (strcasecmp(prop, "border-width") == 0) {
+        layout_apply_shorthand_sides(box, value, parent_width, viewport_width,
+                                     &box->border_top, &box->border_right,
+                                     &box->border_bottom, &box->border_left);
+    } else if (strcasecmp(prop, "border-color") == 0 ||
+               strcasecmp(prop, "border-left-color") == 0 ||
+               strcasecmp(prop, "border-right-color") == 0 ||
+               strcasecmp(prop, "border-top-color") == 0 ||
+               strcasecmp(prop, "border-bottom-color") == 0) {
+        /* Single border color slot: first color token wins per declaration. */
+        double cr, cg, cb, ca;
+        if (css_parse_color(value, &cr, &cg, &cb, &ca)) {
+            box->border_color_r = cr; box->border_color_g = cg;
+            box->border_color_b = cb; box->border_color_a = ca;
+            box->border_color_set = 1;
+        }
     }
 }
 
@@ -3029,6 +3165,24 @@ static void layout_node_serial(LayoutContext *ctx, int idx)
                     child->width = iw;
                     child->height = ih;
                     sized = true;
+                }
+            }
+            if (!sized && dom && dom->type == HTML_NODE_ELEMENT) {
+                /* Inline element with descendant text (<a>, <b>, <span>, ...):
+                 * measure its real text width, mirroring the block-flow
+                 * inline branch, instead of falling back to a fake size that
+                 * pushes following siblings out of the box (overlap). */
+                char concat[8192];
+                size_t cl = 0;
+                concat[0] = '\0';
+                layout_concat_dom_text(ctx->doc, dom, concat, sizeof(concat), &cl);
+                if (cl > 0 && !layout_text_is_whitespace(concat)) {
+                    double tw = 0.0;
+                    if (layout_measure_text(concat, fs, &tw, NULL)) {
+                        child->width = tw;
+                        child->height = line_adv;
+                        sized = true;
+                    }
                 }
             }
             if (!sized) {
