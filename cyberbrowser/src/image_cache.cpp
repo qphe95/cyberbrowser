@@ -346,9 +346,18 @@ int image_cache_load(ImageCache *cache, const char *url_or_path)
         HttpBuffer buffer = {0};
         char err[256] = {0};
         bool got = false;
-        {
+        /* CDNs (notably upload.wikimedia.org) answer bursts with HTTP 429.
+         * Retry with backoff so screenshots don't lose images to rate limits. */
+        for (int attempt = 0; attempt < 4 && !got; attempt++) {
+            if (attempt > 0) {
+                platform_sleep_ms((unsigned int)(400 * attempt * attempt));
+                if (buffer.data) { free(buffer.data); buffer.data = NULL; }
+                buffer.size = 0;
+                err[0] = '\0';
+            }
             CP_SCOPE_CAT("image-download", "img");
             got = http_get_to_memory(url_or_path, &buffer, err, sizeof(err));
+            if (!got && strstr(err, "429") == NULL) break; /* not retryable */
         }
         if (!got) {
             LOG_ERROR("Failed to download image %s: %s", url_or_path, err);

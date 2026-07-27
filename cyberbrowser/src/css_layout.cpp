@@ -1966,8 +1966,13 @@ static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
             used_total_width = layout_clamp_size(used_total_width,
                                                   box->min_width, box->max_width);
         } else {
-            double cw = layout_clamp_size(used_content_width,
-                                          box->min_width, box->max_width);
+            /* For auto width the content width derives from the total just
+             * computed above; clamping the (never assigned) used_content_width
+             * would collapse the box to zero. */
+            double cw = width_auto
+                ? used_total_width - layout_horizontal_border_padding(box)
+                : used_content_width;
+            cw = layout_clamp_size(cw, box->min_width, box->max_width);
             used_total_width = layout_content_to_total_width(box, cw);
         }
     }
@@ -2404,6 +2409,11 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
             layout_flow_line_geometry(ctx->float_stack, ctx->float_count, cur.y,
                                       content_left, avail_width,
                                       &line_left, &line_avail);
+            /* The pen must never start left of the float-inset line edge:
+             * without this clamp the first line of a container (and any run
+             * right after a block boundary) is emitted at content_left and
+             * overlaps a left float. */
+            if (cur.x < line_left) cur.x = line_left;
             HtmlNode *dom = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
             double fs = child->font_size > 0.0 ? child->font_size : 16.0;
             float scale = (float)(fs / 16.0);

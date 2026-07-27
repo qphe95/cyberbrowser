@@ -59,3 +59,5 @@ diag_out.txt
 
 # OS metadata (ensure nested directories are covered)
 **/.DS_Store
+
+probes/

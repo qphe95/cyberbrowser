@@ -533,6 +533,22 @@ typedef struct CssSimpleSelector {
     bool has_substantive;    /* a tag/id/class/attr/universal was matched */
     bool is_pseudo_element;  /* a ::pseudo-element (::before, ::-webkit-...) is present */
     bool requires_empty;     /* :empty — element must have no element/text children */
+    bool never_match;        /* dynamic pseudo-class (:visited, :hover, ...) — never true in a static render */
+    bool requires_link;      /* :link — must be <a>/<area> with an href attribute */
+    int  child_pos;          /* 0=none, 1=:first-child, 2=:last-child, 3=:only-child */
+    int  type_pos;           /* 0=none, 1=:first-of-type, 2=:last-of-type, 3=:only-of-type */
+    int  nth_kind;           /* 0=none, 1=nth-child, 2=nth-last-child, 3=nth-of-type, 4=nth-last-of-type */
+    int  nth_a, nth_b;       /* an+b coefficients */
+    /* Flattened :not(<simple-selector>) argument (first compound only). */
+    bool not_active;
+    bool not_has_tag;
+    bool not_has_id;
+    char not_tag[64];
+    char not_id[128];
+    char not_classes[CSS_MAX_CLASSES][64];
+    int  not_class_count;
+    char not_attrs[CSS_MAX_ATTRS][64];
+    int  not_attr_count;
 } CssSimpleSelector;
 
 /* combinator that precedes this simple selector in document order */
@@ -560,6 +576,163 @@ struct CssCompiledSelector {
     int chain_count;
 };
 
+static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector *out);
+
+/* Consume one pseudo token starting at s[*pi] == ':'.  Handles an optional
+ * second ':' (pseudo-element), the name, and an optional balanced (...)
+ * argument (quotes respected).  Returns the name span and argument span. */
+static void css_consume_pseudo(const char *s, size_t n, size_t *pi,
+                               const char **name, size_t *name_len,
+                               const char **arg, size_t *arg_len,
+                               bool *is_element)
+{
+    size_t i = *pi;
+    *name = NULL; *name_len = 0; *arg = NULL; *arg_len = 0;
+    *is_element = false;
+    i++; /* first ':' */
+    if (i < n && s[i] == ':') { i++; *is_element = true; }
+    size_t ns = i;
+    while (i < n && (isalnum((unsigned char)s[i]) || s[i] == '-')) i++;
+    *name = s + ns; *name_len = i - ns;
+    if (i < n && s[i] == '(') {
+        int depth = 1;
+        i++;
+        size_t as = i;
+        while (i < n && depth > 0) {
+            if (s[i] == '(') depth++;
+            else if (s[i] == ')') { depth--; if (depth == 0) break; }
+            else if (s[i] == '"' || s[i] == '\'') {
+                char q = s[i++];
+                while (i < n && s[i] != q) i++;
+            }
+            i++;
+        }
+        *arg = s + as;
+        *arg_len = (i > as) ? (i - as) : 0;
+        if (i < n && s[i] == ')') i++;
+    }
+    *pi = i;
+}
+
+static bool css_pseudo_name_is(const char *name, size_t nl, const char *kw)
+{
+    size_t kl = strlen(kw);
+    return nl == kl && strncasecmp(name, kw, nl) == 0;
+}
+
+/* Parse an An+B expression ("odd", "even", "n", "2n+1", "-n+3", "3"). */
+static void css_parse_nth(const char *arg, size_t al, int *out_a, int *out_b)
+{
+    char buf[64];
+    size_t k = al < sizeof(buf) - 1 ? al : sizeof(buf) - 1;
+    size_t w = 0;
+    for (size_t j = 0; j < k; j++) {
+        if (!css_is_space(arg[j])) buf[w++] = (char)tolower((unsigned char)arg[j]);
+    }
+    buf[w] = '\0';
+    *out_a = 0; *out_b = 0;
+    if (strcmp(buf, "odd") == 0) { *out_a = 2; *out_b = 1; return; }
+    if (strcmp(buf, "even") == 0) { *out_a = 2; *out_b = 0; return; }
+    char *np = strchr(buf, 'n');
+    if (!np) { *out_a = 0; *out_b = atoi(buf); return; }
+    if (np == buf) *out_a = 1;
+    else if (np == buf + 1 && buf[0] == '-') *out_a = -1;
+    else if (np == buf + 1 && buf[0] == '+') *out_a = 1;
+    else *out_a = atoi(buf);
+    *out_b = atoi(np + 1);
+}
+
+/* Record a parsed pseudo-class/element on the simple selector. */
+static void css_apply_pseudo(CssSimpleSelector *out,
+                             const char *name, size_t nl,
+                             const char *arg, size_t al,
+                             bool is_element)
+{
+    if (is_element) { out->is_pseudo_element = true; return; }
+    /* Legacy single-colon pseudo-elements. */
+    if (css_pseudo_name_is(name, nl, "before") ||
+        css_pseudo_name_is(name, nl, "after") ||
+        css_pseudo_name_is(name, nl, "first-letter") ||
+        css_pseudo_name_is(name, nl, "first-line") ||
+        css_pseudo_name_is(name, nl, "marker") ||
+        css_pseudo_name_is(name, nl, "placeholder") ||
+        css_pseudo_name_is(name, nl, "selection") ||
+        css_pseudo_name_is(name, nl, "backdrop") ||
+        css_pseudo_name_is(name, nl, "file-selector-button")) {
+        out->is_pseudo_element = true;
+        return;
+    }
+    if (css_pseudo_name_is(name, nl, "root")) {
+        out->is_root = true;
+        out->has_substantive = true;
+        return;
+    }
+    if (css_pseudo_name_is(name, nl, "empty")) { out->requires_empty = true; return; }
+    if (css_pseudo_name_is(name, nl, "link")) { out->requires_link = true; return; }
+    /* Dynamic states: never true for a freshly-rendered static page. */
+    if (css_pseudo_name_is(name, nl, "visited") ||
+        css_pseudo_name_is(name, nl, "hover") ||
+        css_pseudo_name_is(name, nl, "active") ||
+        css_pseudo_name_is(name, nl, "focus") ||
+        css_pseudo_name_is(name, nl, "focus-visible") ||
+        css_pseudo_name_is(name, nl, "focus-within") ||
+        css_pseudo_name_is(name, nl, "target") ||
+        css_pseudo_name_is(name, nl, "target-within") ||
+        css_pseudo_name_is(name, nl, "checked") ||
+        css_pseudo_name_is(name, nl, "disabled") ||
+        css_pseudo_name_is(name, nl, "indeterminate") ||
+        css_pseudo_name_is(name, nl, "read-write") ||
+        css_pseudo_name_is(name, nl, "autofill") ||
+        css_pseudo_name_is(name, nl, "playing") ||
+        css_pseudo_name_is(name, nl, "paused") ||
+        css_pseudo_name_is(name, nl, "current") ||
+        css_pseudo_name_is(name, nl, "past") ||
+        css_pseudo_name_is(name, nl, "future")) {
+        out->never_match = true;
+        return;
+    }
+    if (css_pseudo_name_is(name, nl, "first-child")) { out->child_pos = 1; return; }
+    if (css_pseudo_name_is(name, nl, "last-child")) { out->child_pos = 2; return; }
+    if (css_pseudo_name_is(name, nl, "only-child")) { out->child_pos = 3; return; }
+    if (css_pseudo_name_is(name, nl, "first-of-type")) { out->type_pos = 1; return; }
+    if (css_pseudo_name_is(name, nl, "last-of-type")) { out->type_pos = 2; return; }
+    if (css_pseudo_name_is(name, nl, "only-of-type")) { out->type_pos = 3; return; }
+    if (css_pseudo_name_is(name, nl, "nth-child")) {
+        out->nth_kind = 1; css_parse_nth(arg, al, &out->nth_a, &out->nth_b); return;
+    }
+    if (css_pseudo_name_is(name, nl, "nth-last-child")) {
+        out->nth_kind = 2; css_parse_nth(arg, al, &out->nth_a, &out->nth_b); return;
+    }
+    if (css_pseudo_name_is(name, nl, "nth-of-type")) {
+        out->nth_kind = 3; css_parse_nth(arg, al, &out->nth_a, &out->nth_b); return;
+    }
+    if (css_pseudo_name_is(name, nl, "nth-last-of-type")) {
+        out->nth_kind = 4; css_parse_nth(arg, al, &out->nth_a, &out->nth_b); return;
+    }
+    if (css_pseudo_name_is(name, nl, "not")) {
+        /* Parse the first compound of the argument as a simple selector and
+         * store it flattened; complex/list arguments degrade to "always match"
+         * (the pseudo is effectively dropped), matching legacy behavior. */
+        CssSimpleSelector tmp;
+        css_parse_simple_selector(arg, al, &tmp);
+        if (tmp.has_tag || tmp.has_id || tmp.class_count > 0 || tmp.attr_count > 0 ||
+            tmp.universal) {
+            out->not_active = true;
+            out->not_has_tag = tmp.has_tag;
+            out->not_has_id = tmp.has_id;
+            memcpy(out->not_tag, tmp.tag, sizeof(out->not_tag));
+            memcpy(out->not_id, tmp.id, sizeof(out->not_id));
+            memcpy(out->not_classes, tmp.classes, sizeof(out->not_classes));
+            out->not_class_count = tmp.class_count;
+            memcpy(out->not_attrs, tmp.attrs, sizeof(out->not_attrs));
+            out->not_attr_count = tmp.attr_count;
+        }
+        return;
+    }
+    /* :where(), :is(), :matches(), :has() and unknown pseudo-classes are
+     * ignored, i.e. they neither add nor remove constraints. */
+}
+
 static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector *out) {
     memset(out, 0, sizeof(*out));
     size_t i = 0;
@@ -571,30 +744,12 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
         out->has_substantive = true;
         i++;
     } else if (s[i] == ':') {
-        /* Leading pseudo-class/element: handle :root specially; skip others
-         * (:hover, :not(...), ::before, etc.). */
-        size_t start = i;
-        i++;  /* consume the leading ':' (or first of '::') */
-        if (i < n && s[i] == ':') { i++; out->is_pseudo_element = true; }
-        while (i < n && s[i] != '.' && s[i] != '#' && s[i] != '[' &&
-               s[i] != ':' && !css_is_space(s[i])) i++;
-        if (i < n && s[i] == '(') {
-            int depth = 1;
-            i++;
-            while (i < n && depth > 0) {
-                if (s[i] == '(') depth++;
-                else if (s[i] == ')') depth--;
-                i++;
-            }
-        }
-        if (i - start >= 5 && strncasecmp(s + start, ":root", 5) == 0) {
-            out->is_root = true;
-            out->has_substantive = true;
-        }
-        if (i - start >= 6 && strncasecmp(s + start, ":empty", 6) == 0) {
-            out->requires_empty = true;
-        }
-        /* Other pseudo-classes (:hover, :focus, etc.) are ignored. */
+        /* Leading pseudo-class/element. */
+        const char *name, *arg;
+        size_t name_len, arg_len;
+        bool is_element;
+        css_consume_pseudo(s, n, &i, &name, &name_len, &arg, &arg_len, &is_element);
+        css_apply_pseudo(out, name, name_len, arg, arg_len, is_element);
     } else if (s[i] != '.' && s[i] != '#' && s[i] != '[') {
         /* tag */
         size_t start = i;
@@ -626,31 +781,12 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
             out->has_id = out->id[0] != '\0';
             out->has_substantive = out->has_substantive || out->has_id;
         } else if (s[i] == ':') {
-            /* Pseudo-class/element: handle :root specially; skip others
-             * (:hover, :focus, ::before, :not(...), etc.). */
-            size_t start = i;
-            i++;  /* consume the leading ':' (or first of '::') */
-            /* Consume a second ':' for pseudo-elements (::before). */
-            if (i < n && s[i] == ':') { i++; out->is_pseudo_element = true; }
-            /* Consume the pseudo name and any balanced (...) argument list. */
-            while (i < n && s[i] != '.' && s[i] != '#' && s[i] != '[' &&
-                   s[i] != ':' && !css_is_space(s[i])) i++;
-            if (i < n && s[i] == '(') {
-                int depth = 1;
-                i++;
-                while (i < n && depth > 0) {
-                    if (s[i] == '(') depth++;
-                    else if (s[i] == ')') depth--;
-                    i++;
-                }
-            }
-            if (i - start >= 5 && strncasecmp(s + start, ":root", 5) == 0) {
-                out->is_root = true;
-                out->has_substantive = true;
-            }
-            if (i - start >= 6 && strncasecmp(s + start, ":empty", 6) == 0) {
-                out->requires_empty = true;
-            }
+            /* Pseudo-class/element. */
+            const char *name, *arg;
+            size_t name_len, arg_len;
+            bool is_element;
+            css_consume_pseudo(s, n, &i, &name, &name_len, &arg, &arg_len, &is_element);
+            css_apply_pseudo(out, name, name_len, arg, arg_len, is_element);
         } else if (s[i] == '[') {
             /* Parse attribute selector: [name], [name=value], [name~=value], etc.
              * We only track the attribute NAME for presence checking. */
@@ -778,7 +914,41 @@ static HtmlNode* html_node_parent_node(HtmlDocument *doc, HtmlNode *node) {
     return (HtmlNode*)po_array_payload(&doc->array, p);
 }
 
-static bool css_simple_matches(const CssSimpleSelector *simple, HtmlNode *node) {
+/* 1-based position of `node` among its element siblings; when matching type,
+ * only siblings with the same tag are counted.  from_end counts from the
+ * last sibling backwards. */
+static int css_element_index(HtmlDocument *doc, HtmlNode *node,
+                             bool same_type, bool from_end)
+{
+    if (!doc) return 0; /* cannot verify position: positional pseudo fails */
+    HtmlNode *parent = html_node_parent_node(doc, node);
+    if (!parent) return 1;
+    int pos = 0, total = 0;
+    int pidx = po_array_index_from_payload(&doc->array, parent);
+    if (pidx < 0) return 1;
+    for (int c = po_array_first_child(&doc->array, pidx); c >= 0;
+         c = po_array_next_sibling(&doc->array, c)) {
+        HtmlNode *sib = (HtmlNode*)po_array_payload(&doc->array, c);
+        if (!sib || sib->type != HTML_NODE_ELEMENT) continue;
+        if (same_type && strcasecmp(sib->tag_name, node->tag_name) != 0) continue;
+        total++;
+        if (sib == node) pos = total;
+    }
+    if (pos == 0) return 0;
+    return from_end ? (total - pos + 1) : pos;
+}
+
+static bool css_nth_matches(int a, int b, int pos)
+{
+    if (pos <= 0) return false;
+    if (a == 0) return pos == b;
+    int d = pos - b;
+    if (d % a != 0) return false;
+    return d / a >= 0;
+}
+
+static bool css_simple_matches_ex(const CssSimpleSelector *simple, HtmlDocument *doc,
+                                  HtmlNode *node) {
     if (!node || node->type != HTML_NODE_ELEMENT) return false;
     /* A selector with no concrete key (tag/id/class/attr/universal/root) —
      * e.g. a bare pseudo-element like ::before or ::view-transition-old(...)
@@ -787,9 +957,17 @@ static bool css_simple_matches(const CssSimpleSelector *simple, HtmlNode *node) 
      * every node, applying pseudo-element-only declarations (often
      * display:none) to real elements. */
     if (!simple->has_substantive) return false;
+    if (simple->never_match) return false;
     if (simple->is_root) {
         /* :root matches the document root element (html). */
         if (strcasecmp(node->tag_name, "html") != 0) return false;
+    }
+    if (simple->requires_link) {
+        /* :link matches unvisited <a>/<area> with an href; this engine keeps
+         * no browsing history, so every href link is unvisited. */
+        bool link_tag = strcasecmp(node->tag_name, "a") == 0 ||
+                        strcasecmp(node->tag_name, "area") == 0;
+        if (!link_tag || !html_node_attr_value(node, "href")) return false;
     }
     if (simple->has_id) {
         const char *id = html_node_attr_value(node, "id");
@@ -807,11 +985,56 @@ static bool css_simple_matches(const CssSimpleSelector *simple, HtmlNode *node) 
          * The compaction-array first_child index is < 0 when there are none. */
         if (node->array_node.first_child >= 0) return false;
     }
+    if (simple->child_pos) {
+        int pos = css_element_index(doc, node, false, simple->child_pos == 2);
+        if (simple->child_pos == 3) {
+            if (css_element_index(doc, node, false, false) != 1 ||
+                css_element_index(doc, node, false, true) != 1) return false;
+        } else if (pos != 1) return false;
+    }
+    if (simple->type_pos) {
+        int pos = css_element_index(doc, node, true, simple->type_pos == 2);
+        if (simple->type_pos == 3) {
+            if (css_element_index(doc, node, true, false) != 1 ||
+                css_element_index(doc, node, true, true) != 1) return false;
+        } else if (pos != 1) return false;
+    }
+    if (simple->nth_kind) {
+        bool same_type = simple->nth_kind >= 3;
+        bool from_end = (simple->nth_kind % 2) == 0;
+        int pos = css_element_index(doc, node, same_type, from_end);
+        if (!css_nth_matches(simple->nth_a, simple->nth_b, pos)) return false;
+    }
+    if (simple->not_active) {
+        /* Negated simple argument: the node must NOT match all of it. */
+        bool hit = true;
+        if (simple->not_has_tag &&
+            strcasecmp(node->tag_name, simple->not_tag) != 0) hit = false;
+        if (hit && simple->not_has_id) {
+            const char *id = html_node_attr_value(node, "id");
+            if (!id || strcasecmp(id, simple->not_id) != 0) hit = false;
+        }
+        if (hit) {
+            for (int i = 0; i < simple->not_class_count && hit; i++) {
+                if (!html_node_class_contains(node, simple->not_classes[i])) hit = false;
+            }
+        }
+        if (hit) {
+            for (int i = 0; i < simple->not_attr_count && hit; i++) {
+                if (!html_node_attr_value(node, simple->not_attrs[i])) hit = false;
+            }
+        }
+        if (hit) return false;
+    }
     if (simple->has_tag) {
         if (strcasecmp(node->tag_name, simple->tag) != 0) return false;
     }
     /* Universal with no id/class/attr always true. */
     return true;
+}
+
+static bool css_simple_matches(const CssSimpleSelector *simple, HtmlNode *node) {
+    return css_simple_matches_ex(simple, NULL, node);
 }
 
 static bool css_chain_matches(const CssSelectorPart *parts, int count,
@@ -828,7 +1051,7 @@ static bool css_chain_matches(const CssSelectorPart *parts, int count,
     const int MAX_PARENT_WALK = 4096;
     for (int i = count - 1; i >= 0; i--) {
         if (!current) return false;
-        if (!css_simple_matches(&parts[i].simple, current)) return false;
+        if (!css_simple_matches_ex(&parts[i].simple, doc, current)) return false;
         if (i == 0) return true;
 
         int comb = parts[i].combinator; /* relates part i to part i-1 */
@@ -837,7 +1060,7 @@ static bool css_chain_matches(const CssSelectorPart *parts, int count,
         } else { /* descendant */
             current = html_node_parent_node(doc, current);
             int steps = 0;
-            while (current && !css_simple_matches(&parts[i - 1].simple, current)) {
+            while (current && !css_simple_matches_ex(&parts[i - 1].simple, doc, current)) {
                 current = html_node_parent_node(doc, current);
                 if (++steps > MAX_PARENT_WALK) return false;
             }
