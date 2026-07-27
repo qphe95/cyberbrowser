@@ -611,6 +611,7 @@ static CssDisplay layout_default_display(const char *tag_name) {
     for (int i = 0; inline_tags[i]; i++) {
         if (strcasecmp(tag_name, inline_tags[i]) == 0) return CSS_DISPLAY_INLINE;
     }
+    if (strcasecmp(tag_name, "li") == 0) return CSS_DISPLAY_LIST_ITEM;
     return CSS_DISPLAY_BLOCK;
 }
 
@@ -636,6 +637,7 @@ static CssDisplay css_parse_display(const char *value) {
     if (strcasecmp(value, "block") == 0) return CSS_DISPLAY_BLOCK;
     if (strcasecmp(value, "inline") == 0) return CSS_DISPLAY_INLINE;
     if (strcasecmp(value, "inline-block") == 0) return CSS_DISPLAY_INLINE_BLOCK;
+    if (strcasecmp(value, "list-item") == 0) return CSS_DISPLAY_LIST_ITEM;
     if (strcasecmp(value, "flex") == 0 ||
         strcasecmp(value, "inline-flex") == 0 ||
         strcasecmp(value, "-webkit-flex") == 0 ||
@@ -782,6 +784,7 @@ static bool layout_is_block_flow(CssDisplay display) {
     return display == CSS_DISPLAY_BLOCK ||
            display == CSS_DISPLAY_FLEX ||
            display == CSS_DISPLAY_GRID ||
+           display == CSS_DISPLAY_LIST_ITEM ||
            display == CSS_DISPLAY_OTHER;
 }
 
@@ -1595,8 +1598,56 @@ static void layout_collect_constructed_stylesheets(LayoutContext *ctx,
     }
 }
 
+/* User-agent stylesheet approximating the HTML5 rendering defaults.
+ * All selectors are kept at single-element specificity (0,0,1) so that any
+ * author rule — even a bare element selector — wins by specificity or source
+ * order (the UA sheet is always first in the sheet list). */
 static const char *g_ua_stylesheet_css =
-    "head, meta, title, link, style, script, base, template, noscript { display: none; }\n";
+    "head, meta, title, link, style, script, base, template, noscript { display: none; }\n"
+    "html { font-family: serif; }\n"
+    "body { margin: 8px; }\n"
+    "p { margin: 1em 0; }\n"
+    "h1 { display: block; font-size: 2em; font-weight: bold; margin: 0.67em 0; }\n"
+    "h2 { display: block; font-size: 1.5em; font-weight: bold; margin: 0.83em 0; }\n"
+    "h3 { display: block; font-size: 1.17em; font-weight: bold; margin: 1em 0; }\n"
+    "h4 { display: block; font-size: 1em; font-weight: bold; margin: 1.33em 0; }\n"
+    "h5 { display: block; font-size: 0.83em; font-weight: bold; margin: 1.67em 0; }\n"
+    "h6 { display: block; font-size: 0.67em; font-weight: bold; margin: 2.33em 0; }\n"
+    "b { font-weight: bold; }\n"
+    "strong { font-weight: bold; }\n"
+    "th { font-weight: bold; }\n"
+    "i { font-style: italic; }\n"
+    "em { font-style: italic; }\n"
+    "cite { font-style: italic; }\n"
+    "dfn { font-style: italic; }\n"
+    "var { font-style: italic; }\n"
+    "address { font-style: italic; }\n"
+    "u { text-decoration: underline; }\n"
+    "ins { text-decoration: underline; }\n"
+    "s { text-decoration: line-through; }\n"
+    "del { text-decoration: line-through; }\n"
+    "strike { text-decoration: line-through; }\n"
+    "a { color: #0000EE; text-decoration: underline; }\n"
+    "code { font-family: monospace; }\n"
+    "kbd { font-family: monospace; }\n"
+    "samp { font-family: monospace; }\n"
+    "tt { font-family: monospace; }\n"
+    "pre { display: block; font-family: monospace; margin: 1em 0; }\n"
+    "small { font-size: 0.833em; }\n"
+    "sub { font-size: 0.833em; }\n"
+    "sup { font-size: 0.833em; }\n"
+    "big { font-size: 1.17em; }\n"
+    "ul { display: block; margin: 1em 0; padding-left: 40px; list-style-type: disc; }\n"
+    "ol { display: block; margin: 1em 0; padding-left: 40px; list-style-type: decimal; }\n"
+    "li { display: list-item; }\n"
+    "dl { display: block; margin: 1em 0; }\n"
+    "dd { display: block; margin-left: 40px; }\n"
+    "blockquote { display: block; margin: 1em 40px; }\n"
+    "figure { display: block; margin: 1em 40px; }\n"
+    "hr { display: block; margin: 0.5em 0; border-top: 1px solid #808080; }\n"
+    "center { text-align: center; }\n"
+    "caption { text-align: center; }\n"
+    "mark { background-color: #ffff00; color: #000000; }\n";
 
 static bool layout_collect_document_stylesheets(LayoutContext *ctx, LayoutStyleSheetList *list,
                                                  const char *base_url) {
@@ -1954,6 +2005,20 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
         if (!box->visibility_set && parent) {
             box->visibility = parent->visibility;
         }
+        /* Typography inheritance: font-family, weight, style, line-height and
+         * list-style-type are inherited CSS properties.  text-decoration is
+         * technically not inherited, but it visually propagates to inline
+         * descendants; inheriting-when-unset approximates that well. */
+        if (parent) {
+            if (!box->font_family[0]) {
+                snprintf(box->font_family, sizeof(box->font_family), "%s", parent->font_family);
+            }
+            if (!box->font_weight_set) box->font_weight = parent->font_weight;
+            if (!box->font_italic_set) box->font_italic = parent->font_italic;
+            if (!box->text_decoration_set) box->text_decoration = parent->text_decoration;
+            if (!box->line_height_set) box->line_height = parent->line_height;
+            if (!box->list_style_type_set) box->list_style_type = parent->list_style_type;
+        }
     }
     layout_sheet_list_free(&list);
 }
@@ -2212,6 +2277,21 @@ static double layout_line_advance(double font_size)
     return font_size * 1.5;
 }
 
+/* Line advance honoring an explicit CSS line-height (<=0 means normal). */
+static double layout_line_advance_box(const LayoutBox *box)
+{
+    if (box && box->line_height > 0.0) return box->line_height;
+    return layout_line_advance(box ? box->font_size : 16.0);
+}
+
+/* Resolve the font slot for a box's typography (sans/serif/mono x bold x italic). */
+static int layout_font_slot(const LayoutBox *box)
+{
+    if (!box) return 0;
+    return display_list_resolve_font_slot(box->font_family, box->font_weight,
+                                          box->font_italic ? 1 : 0);
+}
+
 static bool layout_text_is_whitespace(const char *s)
 {
     if (!s) return true;
@@ -2221,11 +2301,13 @@ static bool layout_text_is_whitespace(const char *s)
     return true;
 }
 
-/* Measure text at a given font size with the default font. */
-static bool layout_measure_text(const char *text, double font_size,
-                                double *out_w, double *out_h)
+/* Measure text at a given font size with the box's resolved font. */
+static bool layout_measure_text_styled(const LayoutBox *box, const char *text,
+                                       double font_size,
+                                       double *out_w, double *out_h)
 {
-    TextShaper *font = display_list_get_default_font();
+    TextShaper *font = display_list_get_font(layout_font_slot(box));
+    if (!font) font = display_list_get_default_font();
     if (!font || !text || !text[0]) return false;
     float mw = 0.0f, mh = 0.0f;
     if (!text_shaper_measure(font, text, &mw, &mh)) return false;
@@ -2553,12 +2635,13 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
             HtmlNode *dom = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
             double fs = child->font_size > 0.0 ? child->font_size : 16.0;
             float scale = (float)(fs / 16.0);
-            double line_adv = layout_line_advance(fs);
+            double line_adv = layout_line_advance_box(child);
             const char *text = NULL;
             char concat[8192];
             bool is_text_run = false;
             bool is_whitespace_run = false;
             bool is_img = false;
+            bool is_br = false;
             if (dom && dom->type == HTML_NODE_TEXT) {
                 if (!layout_text_is_whitespace(dom->text_content)) {
                     text = dom->text_content;
@@ -2569,6 +2652,8 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
             } else if (dom && dom->type == HTML_NODE_ELEMENT) {
                 if (strcasecmp(dom->tag_name, "img") == 0) {
                     is_img = true;
+                } else if (strcasecmp(dom->tag_name, "br") == 0) {
+                    is_br = true;
                 } else {
                     size_t cl = 0;
                     concat[0] = '\0';
@@ -2585,7 +2670,7 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
                  * fallbacks cannot resurrect it as an 80x24 box. */
                 if (cur.x > line_left + 0.001) {
                     double sw = 0.0;
-                    if (!layout_measure_text(" ", fs, &sw, NULL)) sw = fs * 0.3;
+                    if (!layout_measure_text_styled(child, " ", fs, &sw, NULL)) sw = fs * 0.3;
                     child->width = sw;
                     child->height = line_adv;
                 } else {
@@ -2601,7 +2686,7 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
                 if (ha && ha[0]) child->height = atof(ha);
                 if (child->width <= 0.0) child->width = 32.0;
                 if (child->height <= 0.0) child->height = child->width;
-            } else if (text && layout_measure_text(text, fs, &tw, NULL)) {
+            } else if (text && layout_measure_text_styled(child, text, fs, &tw, NULL)) {
                 child->width = tw;
                 child->height = line_adv;
             } else if (!is_text_run || text == NULL) {
@@ -2621,6 +2706,27 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
                 }
             }
             layout_update_content_sizes(child);
+
+            if (is_br) {
+                /* <br>: forced line break — finish the current line (its box
+                 * height defaults to one line when empty) and start a new one. */
+                if (line_member_count > 0) {
+                    layout_align_line(ctx, line_members, line_member_count,
+                                      line_left, line_avail, box->text_align);
+                    line_member_count = 0;
+                }
+                double adv = cur.line_box > 0.0 ? cur.line_box : line_adv;
+                child->x = cur.x;
+                child->y = cur.y;
+                child->width = 0.0;
+                child->height = line_adv;
+                layout_update_content_sizes(child);
+                cur.y += adv;
+                cur.line_box = 0.0;
+                cur.x = line_left;
+                layout_node_serial(ctx, c);
+                continue;
+            }
 
             double span = child->margin_left + child->width + child->margin_right;
             double line_right = line_left + line_avail;
@@ -2658,7 +2764,8 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
                     double h = child->margin_top + child->height + child->margin_bottom;
                     if (h > cur.line_box) cur.line_box = h;
                 } else {
-                    TextShaper *font = display_list_get_default_font();
+                    TextShaper *font = display_list_get_font(layout_font_slot(child));
+                    if (!font) font = display_list_get_default_font();
                     TsWrapResult wr;
                     if (font && text_shaper_wrap_measure(font, text,
                             (float)(cur.x + child->margin_left), (float)line_left,
@@ -2854,7 +2961,7 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
                 if (fl > 0) {
                     double fs2 = child->font_size > 0.0 ? child->font_size : 16.0;
                     double tw = 0.0;
-                    if (layout_measure_text(fbuf, fs2, &tw, NULL)) basis = tw;
+                    if (layout_measure_text_styled(child, fbuf, fs2, &tw, NULL)) basis = tw;
                 }
             }
         }
@@ -3122,7 +3229,7 @@ static void layout_node_serial(LayoutContext *ctx, int idx)
             HtmlNode *dom = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
             layout_resolve_used_sizes(child, dom, box->content_width, box->content_height);
             double fs = child->font_size > 0.0 ? child->font_size : 16.0;
-            double line_adv = layout_line_advance(fs);
+            double line_adv = layout_line_advance_box(child);
             bool sized = false;
             if (dom && dom->type == HTML_NODE_TEXT) {
                 if (layout_text_is_whitespace(dom->text_content)) {
@@ -3131,7 +3238,7 @@ static void layout_node_serial(LayoutContext *ctx, int idx)
                     double content_left_i = box->x + box->padding_left + box->border_left;
                     if (cx > content_left_i + 0.001) {
                         double sw = 0.0;
-                        if (!layout_measure_text(" ", fs, &sw, NULL)) sw = fs * 0.3;
+                        if (!layout_measure_text_styled(child, " ", fs, &sw, NULL)) sw = fs * 0.3;
                         child->width = sw;
                     } else {
                         child->width = 0.0;
@@ -3140,7 +3247,7 @@ static void layout_node_serial(LayoutContext *ctx, int idx)
                     sized = true;
                 } else {
                     double tw = 0.0;
-                    if (layout_measure_text(dom->text_content, fs, &tw, NULL)) {
+                    if (layout_measure_text_styled(child, dom->text_content, fs, &tw, NULL)) {
                         child->width = tw;
                         child->height = line_adv;
                         sized = true;
@@ -3178,7 +3285,7 @@ static void layout_node_serial(LayoutContext *ctx, int idx)
                 layout_concat_dom_text(ctx->doc, dom, concat, sizeof(concat), &cl);
                 if (cl > 0 && !layout_text_is_whitespace(concat)) {
                     double tw = 0.0;
-                    if (layout_measure_text(concat, fs, &tw, NULL)) {
+                    if (layout_measure_text_styled(child, concat, fs, &tw, NULL)) {
                         child->width = tw;
                         child->height = line_adv;
                         sized = true;
