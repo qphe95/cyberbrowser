@@ -578,26 +578,34 @@ static void draw_glyph(RGB *pixels, int img_width, int img_height,
                        const uint8_t *atlas, int atlas_w, int atlas_h,
                        const DisplayListCmd *cmd)
 {
-    int ax0 = (int)floorf(cmd->u.glyph.u0 * (float)atlas_w);
-    int ay0 = (int)floorf(cmd->u.glyph.v0 * (float)atlas_h);
-    int ax1 = (int)floorf(cmd->u.glyph.u1 * (float)atlas_w);
-    int ay1 = (int)floorf(cmd->u.glyph.v1 * (float)atlas_h);
-    int gw = ax1 - ax0;
-    int gh = ay1 - ay0;
-    if (gw <= 0 || gh <= 0) return;
-
+    /* Resample the atlas region into the destination rect (cmd->x/y/w/h) so
+     * glyphs render at the scaled font size, not the 16px atlas size.
+     * Sampling at pixel centers keeps the nearest-neighbor lookup stable. */
+    if (cmd->w <= 0.0f || cmd->h <= 0.0f) return;
     int dx0 = (int)floorf(cmd->x);
     int dy0 = (int)floorf(cmd->y);
-    for (int gy = 0; gy < gh; gy++) {
-        for (int gx = 0; gx < gw; gx++) {
-            int sx = ax0 + gx;
-            int sy = ay0 + gy;
-            if (sx < 0 || sx >= atlas_w || sy < 0 || sy >= atlas_h) continue;
+    int dx1 = (int)ceilf(cmd->x + cmd->w);
+    int dy1 = (int)ceilf(cmd->y + cmd->h);
+    if (dx0 < 0) dx0 = 0;
+    if (dy0 < 0) dy0 = 0;
+    if (dx1 > img_width) dx1 = img_width;
+    if (dy1 > img_height) dy1 = img_height;
+    if (dx0 >= dx1 || dy0 >= dy1) return;
+
+    for (int dy = dy0; dy < dy1; dy++) {
+        float v = (dy + 0.5f - cmd->y) / cmd->h;
+        float av = cmd->u.glyph.v0 + v * (cmd->u.glyph.v1 - cmd->u.glyph.v0);
+        int sy = (int)floorf(av * (float)atlas_h);
+        if (sy < 0) sy = 0;
+        if (sy >= atlas_h) sy = atlas_h - 1;
+        for (int dx = dx0; dx < dx1; dx++) {
+            float u = (dx + 0.5f - cmd->x) / cmd->w;
+            float au = cmd->u.glyph.u0 + u * (cmd->u.glyph.u1 - cmd->u.glyph.u0);
+            int sx = (int)floorf(au * (float)atlas_w);
+            if (sx < 0) sx = 0;
+            if (sx >= atlas_w) sx = atlas_w - 1;
             uint8_t a8 = atlas[sy * atlas_w + sx];
             if (a8 == 0) continue;
-            int dx = dx0 + gx;
-            int dy = dy0 + gy;
-            if (dx < 0 || dx >= img_width || dy < 0 || dy >= img_height) continue;
             float alpha = (a8 / 255.0f) * cmd->a;
             pixels[dy * img_width + dx] = blend_over(pixels[dy * img_width + dx],
                                                       cmd->r, cmd->g, cmd->b, alpha);
@@ -668,6 +676,12 @@ static bool render_display_list_to_jpg(const DisplayList *dl, const char *path,
     const uint8_t *atlas = font ? text_shaper_atlas_pixels(font) : NULL;
     int atlas_w = font ? text_shaper_atlas_width(font) : 0;
     int atlas_h = font ? text_shaper_atlas_height(font) : 0;
+    /* Per-slot atlases, resolved lazily when a glyph references a non-default
+     * font (bold/italic/serif/mono variants). */
+    TextShaper *slot_fonts[DL_FONT_SLOTS] = {0};
+    const uint8_t *slot_atlas[DL_FONT_SLOTS] = {0};
+    int slot_atlas_w[DL_FONT_SLOTS] = {0};
+    int slot_atlas_h[DL_FONT_SLOTS] = {0};
 
     for (int i = 0; i < dl->count; i++) {
         const DisplayListCmd *cmd = &dl->cmds[i];
@@ -691,6 +705,27 @@ static bool render_display_list_to_jpg(const DisplayList *dl, const char *path,
                                   cmd->r, cmd->g, cmd->b, cmd->a);
             }
         } else if (cmd->type == DL_GLYPH && atlas) {
+            int slot = cmd->u.glyph.font_slot;
+            if (slot > 0 && slot < DL_FONT_SLOTS) {
+                if (!slot_fonts[slot]) {
+                    slot_fonts[slot] = display_list_get_font(slot);
+                    slot_atlas[slot] = slot_fonts[slot]
+                        ? text_shaper_atlas_pixels(slot_fonts[slot]) : NULL;
+                    slot_atlas_w[slot] = slot_fonts[slot]
+                        ? text_shaper_atlas_width(slot_fonts[slot]) : 0;
+                    slot_atlas_h[slot] = slot_fonts[slot]
+                        ? text_shaper_atlas_height(slot_fonts[slot]) : 0;
+                }
+                if (slot_atlas[slot]) {
+                    draw_glyph(pixels, img_width, img_height,
+                               slot_atlas[slot], slot_atlas_w[slot],
+                               slot_atlas_h[slot], cmd);
+                }
+                /* A missing slot atlas means the glyph UVs belong to an
+                 * unloaded font — skip rather than draw garbage from the
+                 * default atlas. */
+                continue;
+            }
             draw_glyph(pixels, img_width, img_height, atlas, atlas_w, atlas_h, cmd);
         } else if (cmd->type == DL_IMAGE) {
             ImageCache *cache = display_list_get_image_cache();
@@ -702,6 +737,38 @@ static bool render_display_list_to_jpg(const DisplayList *dl, const char *path,
     int ok = stbi_write_jpg(path, img_width, img_height, 3, pixels, 95);
     free(pixels);
     return ok != 0;
+}
+
+/* Register the font table: sans (Arial) in slots 0-3, serif (Times) in 4-7,
+ * monospace (Courier) in 8-11, each as regular/bold/italic/bold-italic. */
+static void register_font_table(void)
+{
+    static const char *rel_dirs[] = {
+        "cyberbrowser/third_party/fonts/",
+        "third_party/fonts/",
+        "../third_party/fonts/",
+        "../../third_party/fonts/",
+        NULL
+    };
+    static const char *slot_files[DL_FONT_SLOTS] = {
+        "arial.ttf",  "arialbd.ttf", "ariali.ttf",  "arialbi.ttf",
+        "times.ttf",  "timesbd.ttf", "timesi.ttf",  "timesbi.ttf",
+        "cour.ttf",   "courbd.ttf",  "couri.ttf",   "courbi.ttf"
+    };
+    char path[512];
+    for (int s = 0; s < DL_FONT_SLOTS; s++) {
+        for (int d = 0; rel_dirs[d]; d++) {
+            snprintf(path, sizeof(path), "%s%s", rel_dirs[d], slot_files[s]);
+            if (display_list_set_font(s, path, 16.0f)) break;
+        }
+    }
+    /* Fallback: the legacy Roboto default if Arial could not be loaded. */
+    if (!display_list_get_font(0)) {
+        for (int d = 0; rel_dirs[d]; d++) {
+            snprintf(path, sizeof(path), "%sRoboto-Regular.ttf", rel_dirs[d]);
+            if (display_list_set_default_font(path, 16.0f)) break;
+        }
+    }
 }
 
 static bool render_document_to_jpg(HtmlDocument *doc, ImageCache *image_cache,
@@ -891,19 +958,8 @@ int main(int argc, char *argv[]) {
             if (!ldoc) { printf("FATAL: html_parse failed\n"); return 1; }
             ImageCache *lcache = image_cache_create();
             display_list_set_image_cache(lcache);
-            /* Set a default font so text renders, matching the main path. */
-            {
-                const char *font_paths[] = {
-                    "cyberbrowser/third_party/fonts/Roboto-Regular.ttf",
-                    "third_party/fonts/Roboto-Regular.ttf",
-                    "../third_party/fonts/Roboto-Regular.ttf",
-                    "../../third_party/fonts/Roboto-Regular.ttf",
-                    NULL
-                };
-                for (int i = 0; font_paths[i]; i++) {
-                    if (display_list_set_default_font(font_paths[i], 16.0f)) break;
-                }
-            }
+            /* Register the font table so text renders, matching the main path. */
+            register_font_table();
             render_document_to_jpg(ldoc, lcache, "layout_probe.jpg");
             html_document_free(ldoc);
             image_cache_destroy(lcache);
@@ -1260,16 +1316,7 @@ int main(int argc, char *argv[]) {
     ImageCache *image_cache = image_cache_create();
     display_list_set_image_cache(image_cache);
 
-    const char *font_paths[] = {
-        "cyberbrowser/third_party/fonts/Roboto-Regular.ttf",
-        "third_party/fonts/Roboto-Regular.ttf",
-        "../third_party/fonts/Roboto-Regular.ttf",
-        "../../third_party/fonts/Roboto-Regular.ttf",
-        NULL
-    };
-    for (int i = 0; font_paths[i]; i++) {
-        if (display_list_set_default_font(font_paths[i], 16.0f)) break;
-    }
+    register_font_table();
 
     int loop_iterations = 0;
     CP_BEGIN("quiescence-loop");

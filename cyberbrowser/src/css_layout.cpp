@@ -456,6 +456,8 @@ static double css_parse_length(const char *value, double parent_value, double vi
     if (strcasecmp(end, "vh") == 0) return num * viewport_value / 100.0;
     if (strcasecmp(end, "em") == 0) return num * font_size;
     if (strcasecmp(end, "rem") == 0) return num * 16.0; /* root em fallback */
+    if (strcasecmp(end, "pt") == 0) return num * 96.0 / 72.0;
+    if (strcasecmp(end, "pc") == 0) return num * 16.0;
     return num; /* treat unitless as px */
 }
 
@@ -1033,12 +1035,47 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
             box->background_image_url[0] = '\0';
         }
     } else if (strcasecmp(prop, "font-size") == 0) {
+        /* Absolute-size keywords (CSS2 table for 16px medium). */
+        static const struct { const char *kw; double px; } kw_sizes[] = {
+            { "xx-small", 9.0 }, { "x-small", 10.0 }, { "small", 13.33 },
+            { "medium", 16.0 }, { "large", 18.0 }, { "x-large", 24.0 },
+            { "xx-large", 32.0 }, { NULL, 0.0 }
+        };
+        bool kw_done = false;
+        for (int k = 0; kw_sizes[k].kw; k++) {
+            if (strcasecmp(value, kw_sizes[k].kw) == 0) {
+                box->font_size = kw_sizes[k].px;
+                box->font_size_ratio = 0.0;
+                box->font_size_set = 1;
+                kw_done = true;
+                break;
+            }
+        }
+        if (kw_done) {
+            /* done */
+        } else if (strcasecmp(value, "smaller") == 0) {
+            box->font_size_ratio = 0.833;
+            box->font_size = 16.0 * 0.833; /* provisional */
+            box->font_size_set = 1;
+        } else if (strcasecmp(value, "larger") == 0) {
+            box->font_size_ratio = 1.2;
+            box->font_size = 16.0 * 1.2; /* provisional */
+            box->font_size_set = 1;
+        } else if (strcasecmp(value, "inherit") == 0) {
+            /* Clear the flag so pass-3 inheritance fills the value in. */
+            box->font_size_set = 0;
+            box->font_size_ratio = 0.0;
+        } else if (strcasecmp(value, "initial") == 0) {
+            box->font_size = 16.0;
+            box->font_size_ratio = 0.0;
+            box->font_size_set = 1;
         /* Percentage and em font-sizes are relative to the PARENT's computed
          * font-size, not to the containing-block width.  Record the ratio and
          * resolve it in a serial preorder pass after the (parallel) apply. */
-        if (css_value_is_percent(value)) {
+        } else if (css_value_is_percent(value)) {
             box->font_size_ratio = css_parse_percent_ratio(value);
             box->font_size = 16.0 * box->font_size_ratio; /* provisional */
+            box->font_size_set = 1;
         } else {
             const char *p = value;
             while (*p && isspace((unsigned char)*p)) p++;
@@ -1051,9 +1088,9 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                 box->font_size_ratio = 0.0;
                 box->font_size = css_parse_length(value, parent_width, viewport_width, box->font_size);
             }
+            if (box->font_size <= 0.0) box->font_size = 16.0;
+            box->font_size_set = 1;
         }
-        if (box->font_size <= 0.0) box->font_size = 16.0;
-        box->font_size_set = 1;
     } else if (strcasecmp(prop, "font-family") == 0) {
         /* Keep only the first comma-separated family name, stripped of quotes and whitespace. */
         const char *p = value;
@@ -1337,6 +1374,9 @@ static char* css_var_resolve(const char *value, const CssCustomProps *props)
             }
             fallback_end = p;
             while (fallback_end > fallback && isspace((unsigned char)fallback_end[-1])) fallback_end--;
+            /* Consume the closing ')' so it is not emitted as literal text
+             * after the substituted value. */
+            if (*p == ')') p++;
         } else if (*p == ')') {
             p++;
         }
@@ -2153,10 +2193,16 @@ static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
     }
 
     if (width_auto) {
-        /* Auto width fills the containing block content width; that is the
-         * total border-box width before margins are applied. */
-        used_total_width = parent_content_width - box->margin_left - box->margin_right;
-        if (used_total_width < 0.0) used_total_width = 0.0;
+        if (box->display == CSS_DISPLAY_INLINE) {
+            /* Inline boxes shrink-to-fit: leave the width to the inline flow,
+             * which measures the text runs (an empty inline stays 0 wide). */
+            used_total_width = 0.0;
+        } else {
+            /* Auto width fills the containing block content width; that is the
+             * total border-box width before margins are applied. */
+            used_total_width = parent_content_width - box->margin_left - box->margin_right;
+            if (used_total_width < 0.0) used_total_width = 0.0;
+        }
     } else if (box->box_sizing == CSS_BOX_SIZING_CONTENT_BOX) {
         used_total_width = layout_content_to_total_width(box, used_content_width);
     }
@@ -2314,6 +2360,10 @@ static bool layout_measure_text_styled(const LayoutBox *box, const char *text,
     float scale = (float)(font_size / 16.0);
     if (out_w) *out_w = (double)mw * scale;
     if (out_h) *out_h = (double)mh * scale;
+    if (getenv("CYBER_DEBUG_MEASURE")) {
+        fprintf(stderr, "[MEAS] fs=%.2f slot=%d mw=%.4f out=%.4f text=%.30s\n",
+                font_size, layout_font_slot(box), mw, out_w ? *out_w : -1.0, text);
+    }
     return true;
 }
 
@@ -2461,6 +2511,21 @@ static void layout_flow_line_geometry(const FloatRec *floats, int n, double y,
     if (*line_avail < 0.0) *line_avail = 0.0;
 }
 
+/* Replaced form/embedded elements keep a default object size even when they
+ * have no text content (unlike empty phrasing elements, which shrink to 0). */
+static bool layout_is_replaced_form_element(const char *tag)
+{
+    static const char *tags[] = {
+        "input", "button", "select", "textarea", "iframe",
+        "canvas", "object", "audio", "video", "embed", NULL
+    };
+    if (!tag) return false;
+    for (int i = 0; tags[i]; i++) {
+        if (strcasecmp(tag, tags[i]) == 0) return true;
+    }
+    return false;
+}
+
 /* Find the first <img> descendant and return its width/height attributes.
  * Used to size inline elements (like <a><img></a>) that wrap an image. */
 static bool layout_first_img_size(HtmlDocument *doc, HtmlNode *node,
@@ -2485,6 +2550,60 @@ static bool layout_first_img_size(HtmlDocument *doc, HtmlNode *node,
     return false;
 }
 
+/* ---- Margin collapsing (CSS 2.1 §8.3.1) ----
+ * layout_eff_margin_top/bottom return the collapse-aware vertical margin a
+ * block-level box presents to its parent's block flow:
+ * - a box's top margin collapses with its first in-flow block child's top
+ *   margin when the box has no top border/padding;
+ * - symmetrically at the bottom when the box's height is auto (not set);
+ * - a box with no significant in-flow children is empty: its top and bottom
+ *   margins collapse together into a single max();
+ * - an inline-level first/last child forms a line box, which blocks the
+ *   collapse.  Whitespace-only text is not significant. */
+static void layout_sig_children(LayoutContext *ctx, int idx, int *out_first, int *out_last)
+{
+    *out_first = *out_last = -1;
+    for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0;
+         c = ctx->tree.nodes[c].next_sibling_idx) {
+        LayoutBox *ch = layout_box(ctx, c);
+        if (!layout_is_in_flow(ch) || ch->float_side != 0) continue;
+        HtmlNode *dn = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
+        if (dn && dn->type == HTML_NODE_TEXT &&
+            layout_text_is_whitespace(dn->text_content)) continue;
+        if (*out_first < 0) *out_first = c;
+        *out_last = c;
+    }
+}
+
+static double layout_eff_margin_top(LayoutContext *ctx, int idx, int depth)
+{
+    LayoutBox *box = layout_box(ctx, idx);
+    double mt = box->margin_top, mb = box->margin_bottom;
+    if (depth > 8) return mt;
+    int f, l;
+    layout_sig_children(ctx, idx, &f, &l);
+    if (f < 0) return mt > mb ? mt : mb;          /* empty: through-collapse */
+    if (box->padding_top > 0.0 || box->border_top > 0.0) return mt;
+    if (!layout_is_block_flow(layout_box(ctx, f)->display)) return mt;
+    double c = layout_eff_margin_top(ctx, f, depth + 1);
+    return mt > c ? mt : c;
+}
+
+static double layout_eff_margin_bottom(LayoutContext *ctx, int idx, int depth)
+{
+    LayoutBox *box = layout_box(ctx, idx);
+    double mt = box->margin_top, mb = box->margin_bottom;
+    if (depth > 8) return mb;
+    int f, l;
+    layout_sig_children(ctx, idx, &f, &l);
+    if (f < 0) return mt > mb ? mt : mb;
+    if (box->padding_bottom > 0.0 || box->border_bottom > 0.0) return mb;
+    if (box->height_set) return mb;               /* explicit height blocks */
+    if (!layout_is_block_flow(layout_box(ctx, l)->display)) return mb;
+    double c = layout_eff_margin_bottom(ctx, l, depth + 1);
+    return mb > c ? mb : c;
+}
+
 /* Position in-flow children in a block formatting context and recurse into
  * each.  The box itself is already positioned and width-resolved by the
  * caller; this resolves each child's width/height/position and, after
@@ -2504,6 +2623,14 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
     cur.y = content_top;
     cur.line_top = content_top;
     cur.line_box = 0.0;
+
+    /* Margin collapsing: cur.y is the anchor (bottom of the last non-empty
+     * in-flow content, margins excluded); pending_mb is the collapsed bottom
+     * margin waiting to be resolved against the next block child's top
+     * margin.  any_placed becomes true once any line box or non-empty block
+     * has been placed (used for the first-child top-margin collapse rule). */
+    double pending_mb = 0.0;
+    bool any_placed = false;
 
     /* text-align: indices of the inline runs on the current line; the line is
      * shifted when it finishes (wrap, block child, or end of container). */
@@ -2595,30 +2722,64 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
                                   content_left, avail_width, box->text_align);
                 line_member_count = 0;
             }
-            cur.y += cur.line_box;          /* drop any pending inline-line height */
-            cur.line_box = 0.0;
+            if (cur.line_box > 0.0) {
+                cur.y += cur.line_box;      /* drop any pending inline-line height */
+                cur.line_box = 0.0;
+                any_placed = true;
+                pending_mb = 0.0;           /* line boxes block margin collapse */
+            }
             cur.x = content_left;
 
             /* clear: advance past the matching floats before stacking. */
+            bool cleared = false;
             if (child->clear) {
                 for (int fi = 0; fi < ctx->float_count; fi++) {
                     bool match = (child->clear == 3) ||
                                  (child->clear == 1 && ctx->float_stack[fi].side == 1) ||
                                  (child->clear == 2 && ctx->float_stack[fi].side == 2);
-                    if (match && ctx->float_stack[fi].bottom > cur.y)
+                    if (match && ctx->float_stack[fi].bottom > cur.y) {
                         cur.y = ctx->float_stack[fi].bottom;
+                        cleared = true;
+                    }
                 }
             }
 
+            /* Collapsed top gap: sibling margins resolve to max(); the first
+             * in-flow child's top margin collapses out through the parent
+             * when the parent has no top border/padding. */
+            double eff_mt = layout_eff_margin_top(ctx, c, 0);
+            double gap;
+            if (cleared) {
+                gap = eff_mt;
+                pending_mb = 0.0;
+            } else if (!any_placed &&
+                       box->padding_top <= 0.0 && box->border_top <= 0.0) {
+                gap = 0.0;
+            } else {
+                gap = pending_mb > eff_mt ? pending_mb : eff_mt;
+            }
+
             child->x = content_left + child->margin_left;
-            child->y = cur.y + child->margin_top;
+            child->y = cur.y + gap;
             layout_update_content_sizes(child);
 
             /* Recurse so the child's subtree (and thus its auto height) is final
              * before we advance the cursor past it. */
             layout_node_serial(ctx, c);
 
-            cur.y = child->y + child->height + child->margin_bottom;
+            double eff_mb = layout_eff_margin_bottom(ctx, c, 0);
+            if (child->height <= 0.0 && !child->height_set &&
+                child->padding_top <= 0.0 && child->padding_bottom <= 0.0 &&
+                child->border_top <= 0.0 && child->border_bottom <= 0.0) {
+                /* Empty block: top and bottom margins collapse through into a
+                 * single margin; the anchor does not move. */
+                double m = eff_mt > eff_mb ? eff_mt : eff_mb;
+                pending_mb = pending_mb > m ? pending_mb : m;
+            } else {
+                cur.y = child->y + child->height;
+                pending_mb = eff_mb;
+                any_placed = true;
+            }
         } else {
             /* Inline-level child: measure with real glyph metrics so runs
              * share lines like a browser; long text runs wrap across lines.
@@ -2698,14 +2859,28 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
                 if (from_img) {
                     child->width = iw;
                     child->height = ih;
-                } else {
-                    if (child->width <= 0.0) child->width = child->font_size * 5.0;
-                    if (child->height <= 0.0) child->height = line_adv;
+                } else if (dom && layout_is_replaced_form_element(dom->tag_name)) {
                     if (child->width <= 0.0) child->width = 80.0;
                     if (child->height <= 0.0) child->height = 20.0;
+                } else {
+                    /* Empty inline element (anchor span, empty <a>, ...):
+                     * shrink to zero instead of a fake box. */
+                    if (!child->width_set) child->width = 0.0;
+                    if (!child->height_set) child->height = 0.0;
                 }
             }
             layout_update_content_sizes(child);
+
+            /* Vertical margins on non-replaced inline boxes have no effect
+             * (CSS 2.1 §8.4): they neither shift the box on its line nor
+             * inflate the line box.  Replaced elements (img, form controls)
+             * and inline-blocks keep their vertical margins. */
+            bool nonreplaced_inline =
+                child->display == CSS_DISPLAY_INLINE && !is_img &&
+                !(dom && dom->type == HTML_NODE_ELEMENT &&
+                  layout_is_replaced_form_element(dom->tag_name));
+            double vmt = nonreplaced_inline ? 0.0 : child->margin_top;
+            double vmb = nonreplaced_inline ? 0.0 : child->margin_bottom;
 
             if (is_br) {
                 /* <br>: forced line break — finish the current line (its box
@@ -2739,8 +2914,11 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
             }
 
             /* Text run that doesn't fit on the current line: wrap it across
-             * lines, starting on the current one when it has useful room. */
-            if (is_text_run && span > remaining && span > fs * 2.0) {
+             * lines, starting on the current one when it has useful room.
+             * Inline elements whose content is (concatenated) text — links,
+             * <b>, <span> — wrap the same way; the wrap geometry is later
+             * propagated to their text descendants for glyph emission. */
+            if (text && span > remaining && span > fs * 2.0) {
                 double first_w = remaining;
                 if (cur.x <= line_left + 0.001 || first_w < fs * 4.0) {
                     if (cur.x > line_left + 0.001) {
@@ -2759,9 +2937,9 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
                 if (span <= first_w) {
                     /* Fits on the (possibly new) current line unwrapped. */
                     child->x = cur.x + child->margin_left;
-                    child->y = cur.y + child->margin_top;
+                    child->y = cur.y + vmt;
                     cur.x += span;
-                    double h = child->margin_top + child->height + child->margin_bottom;
+                    double h = vmt + child->height + vmb;
                     if (h > cur.line_box) cur.line_box = h;
                 } else {
                     TextShaper *font = display_list_get_font(layout_font_slot(child));
@@ -2771,7 +2949,7 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
                             (float)(cur.x + child->margin_left), (float)line_left,
                             (float)first_w, (float)line_avail, scale, (float)line_adv, &wr)) {
                         child->x = cur.x + child->margin_left;
-                        child->y = cur.y + child->margin_top;
+                        child->y = cur.y + vmt;
                         child->width = wr.max_width;
                         child->height = wr.height;
                         child->wrap_first_w = first_w;
@@ -2780,12 +2958,12 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
                         layout_update_content_sizes(child);
                         /* Continue after the wrapped text: cursor sits at the
                          * end of its last line so following runs share it. */
-                        cur.y += child->margin_top + wr.height - wr.line_advance;
+                        cur.y += vmt + wr.height - wr.line_advance;
                         cur.x = wr.last_end_x + child->margin_right;
-                        cur.line_box = wr.line_advance + child->margin_bottom;
+                        cur.line_box = wr.line_advance + vmb;
                     } else {
                         child->x = cur.x + child->margin_left;
-                        child->y = cur.y + child->margin_top;
+                        child->y = cur.y + vmt;
                         cur.x += span;
                     }
                 }
@@ -2806,9 +2984,9 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
                 cur.x = line_left;
             }
             child->x = cur.x + child->margin_left;
-            child->y = cur.y + child->margin_top;
+            child->y = cur.y + vmt;
             cur.x += span;
-            double h = child->margin_top + child->height + child->margin_bottom;
+            double h = vmt + child->height + vmb;
             if (h > cur.line_box) cur.line_box = h;
 
             if (line_members) line_members[line_member_count++] = c;
@@ -2833,14 +3011,21 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
     free(kids);
 
     /* Resolve auto height from the extent of the children (not when height
-     * was explicitly assigned, even to zero). */
+     * was explicitly assigned, even to zero).  cur.y is the anchor: the
+     * bottom of the last non-empty in-flow content.  The last child's
+     * collapsed bottom margin extends the box only when it cannot collapse
+     * out through the parent (i.e. the parent has bottom border/padding). */
     if (box->height <= 0.0 && !box->height_set) {
-        double max_bottom = content_top;
+        double max_bottom = cur.y;
+        if (box->padding_bottom > 0.0 || box->border_bottom > 0.0)
+            max_bottom += pending_mb;
+        /* Children that overflowed their line (e.g. tall replaced inline
+         * content) can extend below the anchor; take them into account. */
         for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0;
              c = ctx->tree.nodes[c].next_sibling_idx) {
             LayoutBox *child = layout_box(ctx, c);
             if (!layout_is_in_flow(child)) continue;
-            double bottom = child->y + child->height + child->margin_bottom;
+            double bottom = child->y + child->height;
             if (bottom > max_bottom) max_bottom = bottom;
         }
         /* Floats are out of flow but the container still grows around them
@@ -3222,12 +3407,43 @@ static void layout_node_serial(LayoutContext *ctx, int idx)
          * so positions match the parent's measured width. */
         double cx = box->x + box->padding_left + box->border_left;
         double cy = box->y + box->padding_top + box->border_top;
+        /* If this inline box was word-wrapped by the block-flow inline branch
+         * and it has exactly one significant child (the common <a>text</a>
+         * case, possibly nested like <b><a>text</a></b>), propagate the wrap
+         * geometry down so the text leaf emits wrapped glyphs. */
+        int wrap_target = -1;
+        if (box->wrap_cont_w > 0.0) {
+            int sig_count = 0;
+            for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0;
+                 c = ctx->tree.nodes[c].next_sibling_idx) {
+                LayoutBox *child = layout_box(ctx, c);
+                if (child->display == CSS_DISPLAY_NONE) continue;
+                HtmlNode *dn = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
+                if (dn && dn->type == HTML_NODE_TEXT &&
+                    layout_text_is_whitespace(dn->text_content)) continue;
+                sig_count++;
+                wrap_target = c;
+            }
+            if (sig_count != 1) wrap_target = -1;
+        }
         for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0;
              c = ctx->tree.nodes[c].next_sibling_idx) {
             LayoutBox *child = layout_box(ctx, c);
             if (child->display == CSS_DISPLAY_NONE) continue;
             HtmlNode *dom = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
             layout_resolve_used_sizes(child, dom, box->content_width, box->content_height);
+            if (c == wrap_target) {
+                child->x = box->x;
+                child->y = box->y;
+                child->width = box->width;
+                child->height = box->height;
+                child->wrap_first_w = box->wrap_first_w;
+                child->wrap_cont_w = box->wrap_cont_w;
+                child->wrap_cont_x = box->wrap_cont_x;
+                layout_update_content_sizes(child);
+                layout_node_serial(ctx, c);
+                continue;
+            }
             double fs = child->font_size > 0.0 ? child->font_size : 16.0;
             double line_adv = layout_line_advance_box(child);
             bool sized = false;
@@ -3293,10 +3509,18 @@ static void layout_node_serial(LayoutContext *ctx, int idx)
                 }
             }
             if (!sized) {
-                if (child->width <= 0.0) child->width = child->font_size * 5.0;
-                if (child->height <= 0.0) child->height = line_adv;
-                if (child->width <= 0.0) child->width = 80.0;
-                if (child->height <= 0.0) child->height = 20.0;
+                /* Empty inline element with no text/img content and no
+                 * explicit size: shrink to zero (mirrors the block-flow
+                 * inline branch) instead of resurrecting a fake 80x20 box
+                 * that displaces following content. Replaced form elements
+                 * keep a small default size. */
+                if (dom && layout_is_replaced_form_element(dom->tag_name)) {
+                    if (child->width <= 0.0) child->width = 80.0;
+                    if (child->height <= 0.0) child->height = 20.0;
+                } else {
+                    if (child->width <= 0.0) child->width = 0.0;
+                    if (child->height <= 0.0) child->height = 0.0;
+                }
             }
             child->x = cx;
             child->y = cy;

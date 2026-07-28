@@ -13,6 +13,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdio.h>
+#include <math.h>
 
 #define LOG_TAG "display_list"
 #define LOG_ERROR(...) platform_log(LOG_LEVEL_ERROR, LOG_TAG, __VA_ARGS__)
@@ -432,6 +433,65 @@ static void emit_image_async(DisplayList *dl, float x, float y, float w, float h
     }
 }
 
+/* Emit underline / line-through rects for the glyph commands emitted since
+ * `from_cmd`.  Glyphs are grouped into lines by y proximity so wrapped runs
+ * get one decoration segment per line. */
+static void emit_text_decorations(DisplayList *dl, int from_cmd, double fs,
+                                  unsigned char deco, float r, float g, float b, float a)
+{
+    if (!deco || from_cmd >= dl->count) return;
+    float tol = (float)(fs * 0.5);
+    if (tol < 1.0f) tol = 1.0f;
+    /* Collect line extents first (add_rect may realloc dl->cmds). */
+    typedef struct { float y, x0, x1; } DecoLine;
+    int cap = 16, n = 0;
+    DecoLine *lines = (DecoLine *)malloc((size_t)cap * sizeof(DecoLine));
+    if (!lines) return;
+    for (int i = from_cmd; i < dl->count; i++) {
+        DisplayListCmd *c = &dl->cmds[i];
+        if (c->type != DL_GLYPH) continue;
+        float ly = c->y;
+        int found = -1;
+        for (int k = 0; k < n; k++) {
+            if (fabsf(lines[k].y - ly) <= tol) { found = k; break; }
+        }
+        if (found < 0) {
+            if (n >= cap) {
+                cap *= 2;
+                DecoLine *nl = (DecoLine *)realloc(lines, (size_t)cap * sizeof(DecoLine));
+                if (!nl) { free(lines); return; }
+                lines = nl;
+            }
+            found = n++;
+            lines[found].y = ly;
+            lines[found].x0 = c->x;
+            lines[found].x1 = c->x + c->w;
+        } else {
+            if (c->x < lines[found].x0) lines[found].x0 = c->x;
+            if (c->x + c->w > lines[found].x1) lines[found].x1 = c->x + c->w;
+        }
+    }
+    for (int pass = 0; pass < 2; pass++) {
+        float yoff, thick;
+        if (pass == 0) {
+            if (!(deco & 1)) continue; /* underline */
+            yoff = (float)(fs * 0.92);
+        } else {
+            if (!(deco & 2)) continue; /* line-through */
+            yoff = (float)(fs * 0.32);
+        }
+        thick = (float)(fs / 14.0);
+        if (thick < 1.0f) thick = 1.0f;
+        for (int k = 0; k < n; k++) {
+            float w = lines[k].x1 - lines[k].x0;
+            if (w <= 0.0f) continue;
+            display_list_add_rect(dl, lines[k].x0, lines[k].y + yoff, w, thick,
+                                  r, g, b, a);
+        }
+    }
+    free(lines);
+}
+
 /* Return true if the document is in a dark theme.
  * This is used to make default-black text visible on dark backgrounds. */
 static bool document_is_dark_mode(LayoutContext *ctx)
@@ -522,11 +582,19 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                      * itself was loaded at 16px. */
                     double fs = box->font_size > 0.0 ? box->font_size : 16.0;
                     float scale = (float)(fs / 16.0);
+                    /* Pick the font variant matching the box's typography
+                     * (sans/serif/mono x bold x italic). */
+                    int fslot = display_list_resolve_font_slot(
+                        box->font_family, box->font_weight, box->font_italic ? 1 : 0);
+                    TextShaper *font = display_list_get_font(fslot);
+                    if (!font) font = g_default_font;
+                    int from_cmd = dl->count;
                     if (box->wrap_cont_w > 0.0) {
                         /* Wrapped run: shape across lines using the wrap
                          * geometry recorded by the layout. */
-                        float line_adv = (float)(fs * 1.5);
-                        if (!text_shaper_wrap_shape(g_default_font,
+                        float line_adv = box->line_height > 0.0
+                            ? (float)box->line_height : (float)(fs * 1.5);
+                        if (!text_shaper_wrap_shape(font,
                                                     node->text_content,
                                                     (float)box->x, (float)box->y,
                                                     (float)box->wrap_cont_x,
@@ -537,15 +605,106 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                                                     dl, NULL)) {
                             return false;
                         }
-                    } else if (!text_shaper_shape_to_display_list_scaled(g_default_font,
+                    } else {
+                        /* CSS strut model: center the em box in the line box;
+                         * the shaper adds the em ascent on top of this y. */
+                        double lh = box->line_height > 0.0 ? box->line_height
+                                                           : fs * 1.5;
+                        double half_leading = (lh - fs) * 0.5;
+                        if (half_leading < 0.0) half_leading = 0.0;
+                        if (!text_shaper_shape_to_display_list_scaled(font,
                                                            node->text_content,
-                                                           (float)box->x, (float)box->y,
+                                                           (float)box->x,
+                                                           (float)(box->y + half_leading),
                                                            scale,
                                                            tr, tg, tb, ta,
                                                            dl)) {
-                        return false;
+                            return false;
+                        }
                     }
+                    display_list_stamp_font_slot(dl, from_cmd, fslot);
+                    emit_text_decorations(dl, from_cmd, fs, box->text_decoration,
+                                          tr, tg, tb, ta);
                 }
+            }
+        }
+
+        /* display:list-item marker (bullet / ordinal) in the gutter to the
+         * left of the item's first line. */
+        if (g_default_font && node && node->type == HTML_NODE_ELEMENT &&
+            box->display == CSS_DISPLAY_LIST_ITEM && box->list_style_type != 0) {
+            char marker[24];
+            if (box->list_style_type == 4) {
+                /* decimal: ordinal from preceding <li> element siblings. */
+                int ordinal = 1;
+                int dom_idx = ctx->tree.nodes[i].dom_node_idx;
+                for (int s = po_array_prev_sibling(&ctx->doc->array, dom_idx);
+                     s >= 0;
+                     s = po_array_prev_sibling(&ctx->doc->array, s)) {
+                    HtmlNode *sn = (HtmlNode *)po_array_payload(&ctx->doc->array, s);
+                    if (sn && sn->type == HTML_NODE_ELEMENT &&
+                        strcasecmp(sn->tag_name, "li") == 0) ordinal++;
+                }
+                snprintf(marker, sizeof(marker), "%d.", ordinal);
+            } else if (box->list_style_type == 2) {
+                snprintf(marker, sizeof(marker), "\xE2\x97\xA6"); /* U+25E6 white bullet */
+            } else if (box->list_style_type == 3) {
+                snprintf(marker, sizeof(marker), "\xE2\x96\xAA"); /* U+25AA black small square */
+            } else {
+                snprintf(marker, sizeof(marker), "\xE2\x80\xA2"); /* U+2022 bullet */
+            }
+            double mfs = box->font_size > 0.0 ? box->font_size : 16.0;
+            float mscale = (float)(mfs / 16.0);
+            int mfslot = display_list_resolve_font_slot(
+                box->font_family, box->font_weight, box->font_italic ? 1 : 0);
+            TextShaper *mfont = display_list_get_font(mfslot);
+            if (!mfont) mfont = g_default_font;
+            float mw = 0.0f, mh = 0.0f;
+            text_shaper_measure(mfont, marker, &mw, &mh);
+            double mx = box->x - (double)mw * mscale - mfs * 0.4;
+            if (mx < 0.0) mx = 0.0;
+            int from_cmd = dl->count;
+            if (text_shaper_shape_to_display_list_scaled(mfont, marker,
+                    (float)mx, (float)box->y, mscale,
+                    (float)box->color_r, (float)box->color_g,
+                    (float)box->color_b, (float)box->color_a, dl)) {
+                display_list_stamp_font_slot(dl, from_cmd, mfslot);
+            }
+        }
+
+        /* Borders, painted as four filled edge rects so per-side widths work.
+         * The color defaults to currentColor when no border-color was given.
+         * Emitted before the small-box filter: a thin box (e.g. <hr>) still
+         * needs its border painted. */
+        if (box->border_top > 0.0 || box->border_right > 0.0 ||
+            box->border_bottom > 0.0 || box->border_left > 0.0) {
+            float br_r = (float)(box->border_color_set ? box->border_color_r : box->color_r);
+            float br_g = (float)(box->border_color_set ? box->border_color_g : box->color_g);
+            float br_b = (float)(box->border_color_set ? box->border_color_b : box->color_b);
+            float br_a = (float)(box->border_color_set ? box->border_color_a : box->color_a);
+            float bx = (float)box->x, by = (float)box->y;
+            float bw = (float)box->width, bh = (float)box->height;
+            if (box->border_top > 0.0) {
+                display_list_add_rect(dl, bx, by, bw, (float)box->border_top,
+                                      br_r, br_g, br_b, br_a);
+            }
+            if (box->border_bottom > 0.0) {
+                display_list_add_rect(dl, bx, by + bh - (float)box->border_bottom,
+                                      bw, (float)box->border_bottom,
+                                      br_r, br_g, br_b, br_a);
+            }
+            double mid_h = box->height - box->border_top - box->border_bottom;
+            if (mid_h < 0.0) mid_h = 0.0;
+            if (box->border_left > 0.0) {
+                display_list_add_rect(dl, bx, by + (float)box->border_top,
+                                      (float)box->border_left, (float)mid_h,
+                                      br_r, br_g, br_b, br_a);
+            }
+            if (box->border_right > 0.0) {
+                display_list_add_rect(dl, bx + bw - (float)box->border_right,
+                                      by + (float)box->border_top,
+                                      (float)box->border_right, (float)mid_h,
+                                      br_r, br_g, br_b, br_a);
             }
         }
 

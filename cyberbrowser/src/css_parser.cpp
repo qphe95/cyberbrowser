@@ -549,6 +549,11 @@ typedef struct CssSimpleSelector {
     int  not_class_count;
     char not_attrs[CSS_MAX_ATTRS][64];
     int  not_attr_count;
+    /* :where()/:is() argument, kept as raw selector text and evaluated
+     * recursively at match time.  :where() contributes zero specificity;
+     * :is() is treated the same here (a slight specificity deviation). */
+    bool where_active;
+    char where_arg[160];
 } CssSimpleSelector;
 
 /* combinator that precedes this simple selector in document order */
@@ -729,8 +734,24 @@ static void css_apply_pseudo(CssSimpleSelector *out,
         }
         return;
     }
-    /* :where(), :is(), :matches(), :has() and unknown pseudo-classes are
-     * ignored, i.e. they neither add nor remove constraints. */
+    if (css_pseudo_name_is(name, nl, "where") ||
+        css_pseudo_name_is(name, nl, "is") ||
+        css_pseudo_name_is(name, nl, "matches")) {
+        /* Keep the argument text; it is evaluated recursively at match time.
+         * Without this, a:where(.new) would degrade to "a" and match every
+         * link on the page. */
+        if (arg && al > 0) {
+            size_t copy = al;
+            if (copy >= sizeof(out->where_arg)) copy = sizeof(out->where_arg) - 1;
+            memcpy(out->where_arg, arg, copy);
+            out->where_arg[copy] = '\0';
+            out->where_active = true;
+            out->has_substantive = true;
+        }
+        return;
+    }
+    /* :has() and unknown pseudo-classes are ignored, i.e. they neither add
+     * nor remove constraints. */
 }
 
 static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector *out) {
@@ -1025,6 +1046,10 @@ static bool css_simple_matches_ex(const CssSimpleSelector *simple, HtmlDocument 
             }
         }
         if (hit) return false;
+    }
+    if (simple->where_active) {
+        /* :where()/:is() — the element must match the inner selector. */
+        if (!css_selector_matches(simple->where_arg, doc, node)) return false;
     }
     if (simple->has_tag) {
         if (strcasecmp(node->tag_name, simple->tag) != 0) return false;

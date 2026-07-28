@@ -195,7 +195,11 @@ TextShaper *text_shaper_create(const char *ttf_path, float size_pixels)
         return NULL;
     }
 
-    s->scale = stbtt_ScaleForPixelHeight(&s->font, size_pixels);
+    /* CSS sizes fonts by the em box, not the ascender-to-descender distance:
+     * "16px Arial" means 16/2048 em units.  ScaleForPixelHeight would use
+     * the hhea ascent+descent (2288 for Arial), making every glyph ~11%
+     * narrower than Chrome's em-based metrics. */
+    s->scale = stbtt_ScaleForMappingEmToPixels(&s->font, size_pixels);
     int ascent, descent, line_gap;
     stbtt_GetFontVMetrics(&s->font, &ascent, &descent, &line_gap);
     s->ascent   = (float)ascent * s->scale;
@@ -392,10 +396,14 @@ static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
             word_w = ts_measure_span(s, word_start, word_end) * scale;
         }
 
-        /* Emit glyphs for [word_start, word_end). */
+        /* Emit glyphs for [word_start, word_end).  Baseline placement follows
+         * the CSS strut model: the em box is centered in the line box, so the
+         * baseline sits at half-leading + ascent from the line top. */
         if (emit) {
             const char *gp = word_start;
-            float gy = pen_y + s->baseline * scale;
+            float half_leading = (line_advance - s->size_pixels * scale) * 0.5f;
+            if (half_leading < 0.0f) half_leading = 0.0f;
+            float gy = pen_y + half_leading + s->baseline * scale;
             while (gp < word_end) {
                 uint32_t gc = utf8_decode(&gp);
                 if (gc == 0) break;

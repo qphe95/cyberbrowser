@@ -159,6 +159,10 @@ typedef struct LayoutBox {
     /* Resolved line-height in px; <= 0 means "normal" (1.5 x font-size). */
     double line_height;
     unsigned char line_height_set;
+    /* Unitless line-height (<number>) inherits as a RATIO, not as the
+     * computed pixel value (CSS 2.1 §10.8.1): > 0 here means line_height
+     * must be recomputed as ratio x own font-size once that is final. */
+    double line_height_ratio;
 
     /* list-style for display:list-item markers. */
     unsigned char list_style_type;   /* 0=none, 1=disc, 2=circle, 3=square, 4=decimal */
