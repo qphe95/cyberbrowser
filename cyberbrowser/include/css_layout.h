@@ -145,6 +145,18 @@ typedef struct LayoutBox {
     unsigned char float_side;
     unsigned char clear;
 
+    /* overflow/overflow-x/overflow-y: 0=visible, 1=hidden, 2=auto, 3=scroll.
+     * Any value other than visible makes the box establish a new block
+     * formatting context (CSS 2.1 §9.4.1), which blocks margin collapsing
+     * with in-flow children (§8.3.1) and stops empty-box through-collapse. */
+    unsigned char overflow;
+
+    /* vertical-align: 0=baseline, 1=middle, 2=top, 3=bottom.
+     * Table cells (td/th) default to middle per the HTML UA stylesheet;
+     * everything else defaults to baseline.  Only middle/top/bottom are
+     * honoured for table-cell content alignment at the moment. */
+    unsigned char vertical_align;
+
     /* Resolved typography. */
     double font_size;
     char   font_family[64];
@@ -163,6 +175,16 @@ typedef struct LayoutBox {
      * computed pixel value (CSS 2.1 §10.8.1): > 0 here means line_height
      * must be recomputed as ratio x own font-size once that is final. */
     double line_height_ratio;
+
+    /* em-unit margins/paddings resolve against the element's FINAL computed
+     * font-size, which is only known after the pass-3 font-size fixup.
+     * Declarations in em are therefore recorded as ratios here (in side
+     * order top/right/bottom/left) and re-resolved in pass 3; the pixel
+     * fields above always hold a provisional value in the meantime.
+     * em_deferred bits: 0-3 = margin T/R/B/L, 4-7 = padding T/R/B/L. */
+    double margin_em[4];
+    double padding_em[4];
+    unsigned char em_deferred;
 
     /* list-style for display:list-item markers. */
     unsigned char list_style_type;   /* 0=none, 1=disc, 2=circle, 3=square, 4=decimal */
@@ -188,10 +210,16 @@ typedef struct LayoutBox {
     /* Word-wrap state for text boxes whose run wraps across lines.
      * wrap_cont_w > 0 marks the box as wrapped: display emission wraps the
      * text with first line width wrap_first_w, continuation lines starting at
-     * wrap_cont_x with width wrap_cont_w. */
+     * wrap_cont_x with width wrap_cont_w.  When a float below the run start
+     * stops intruding mid-wrap, wrap_cont2_line (>1) is the 1-based line
+     * number from which continuation lines instead use wrap_cont2_x /
+     * wrap_cont2_w (e.g. full width once the text passes the float). */
     double wrap_first_w;
     double wrap_cont_w;
     double wrap_cont_x;
+    double wrap_cont2_x;
+    double wrap_cont2_w;
+    int    wrap_cont2_line;
 
     double min_width, max_width;
     double min_height, max_height;

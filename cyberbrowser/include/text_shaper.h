@@ -38,19 +38,27 @@ typedef struct {
  * `first_width`, continuation lines start at `cont_x` with `cont_width`).
  * `scale` multiplies all glyph metrics (for font sizes other than the
  * shaper's loaded size); `line_advance` is the per-line vertical advance in
- * pixels (already scaled by the caller).  All output x values are absolute. */
+ * pixels (already scaled by the caller).  All output x values are absolute.
+ * When `cont2_from_line` > 1, continuation lines whose 1-based line number
+ * reaches it start at `cont2_x` with `cont2_width` instead — used when a
+ * float stops intruding partway through the wrapped run. */
 bool text_shaper_wrap_measure(const TextShaper *shaper, const char *utf8,
                               float x, float cont_x,
                               float first_width, float cont_width,
                               float scale, float line_advance,
+                              int cont2_from_line, float cont2_x,
+                              float cont2_width,
                               TsWrapResult *out);
 
 /* Append DL_GLYPH commands for `utf8`, word-wrapped.  (x, y) is the top-left
- * origin of the first line; continuation lines start at `cont_x`. */
+ * origin of the first line; continuation lines start at `cont_x`, switching
+ * to `cont2_x`/`cont2_width` from line `cont2_from_line` on (when > 1). */
 bool text_shaper_wrap_shape(const TextShaper *shaper, const char *utf8,
                             float x, float y, float cont_x,
                             float first_width, float cont_width,
                             float scale, float line_advance,
+                            int cont2_from_line, float cont2_x,
+                            float cont2_width,
                             float r, float g, float b, float a,
                             DisplayList *dl, TsWrapResult *out);
 

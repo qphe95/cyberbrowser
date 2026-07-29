@@ -340,6 +340,7 @@ static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
                          float x, float y, float cont_x,
                          float first_width, float cont_width,
                          float scale, float line_advance,
+                         int cont2_from_line, float cont2_x, float cont2_width,
                          bool emit, float r, float g, float b, float a,
                          DisplayList *dl, TsWrapResult *out)
 {
@@ -374,17 +375,39 @@ static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
         /* Emit/measure the completed word [word_start, p) — for a space the
          * space itself is included as the word's trailing advance. */
         const char *word_end = at_end ? p : p;
+        /* CSS white-space processing discards spaces at the end of a line, so
+         * the fit test must use the width up to the last non-space codepoint;
+         * the full width (with trailing spaces) still advances the pen when
+         * the word stays on the line. */
+        const char *trim_end = word_start;
+        {
+            const char *q = word_start;
+            while (q < word_end) {
+                const char *save = q;
+                uint32_t c2 = utf8_decode(&q);
+                if (c2 == 0) break;
+                if (c2 != ' ' && c2 != '\t' && c2 != '\n') trim_end = q;
+                (void)save;
+            }
+        }
         float word_w = ts_measure_span(s, word_start, word_end) * scale;
-        if (pen_x > line_start_x + 0.001f && pen_x - line_start_x + word_w > limit) {
+        float word_fit_w = ts_measure_span(s, word_start, trim_end) * scale;
+        if (pen_x > line_start_x + 0.001f && pen_x - line_start_x + word_fit_w > limit) {
             /* Wrap to the next line before this word.  Skip a leading space
              * on the new line: it belongs to the end of the old line. */
             float used = pen_x - line_start_x;
             if (used > max_width) max_width = used;
             lines++;
-            pen_x = cont_x;
+            /* From cont2_from_line on, continuation lines use the second
+             * geometry (e.g. full width below an expired float). */
+            float cx = (cont2_from_line > 1 && lines >= cont2_from_line)
+                     ? cont2_x : cont_x;
+            float cw = (cont2_from_line > 1 && lines >= cont2_from_line)
+                     ? cont2_width : cont_width;
+            pen_x = cx;
             pen_y += line_advance;
-            line_start_x = cont_x;
-            limit = cont_width;
+            line_start_x = cx;
+            limit = cw;
             prev_glyph = -1;
             /* Drop leading whitespace from the word on the new line. */
             while (word_start < word_end) {
@@ -434,10 +457,14 @@ static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
             float used = pen_x - line_start_x;
             if (used > max_width) max_width = used;
             lines++;
-            pen_x = cont_x;
+            float cx = (cont2_from_line > 1 && lines >= cont2_from_line)
+                     ? cont2_x : cont_x;
+            float cw = (cont2_from_line > 1 && lines >= cont2_from_line)
+                     ? cont2_width : cont_width;
+            pen_x = cx;
             pen_y += line_advance;
-            line_start_x = cont_x;
-            limit = cont_width;
+            line_start_x = cx;
+            limit = cw;
             prev_glyph = -1;
         }
     }
@@ -459,10 +486,13 @@ bool text_shaper_wrap_measure(const TextShaper *s, const char *utf8,
                               float x, float cont_x,
                               float first_width, float cont_width,
                               float scale, float line_advance,
+                              int cont2_from_line, float cont2_x,
+                              float cont2_width,
                               TsWrapResult *out)
 {
     return ts_wrap_walk(s, utf8, x, 0.0f, cont_x,
                         first_width, cont_width, scale, line_advance,
+                        cont2_from_line, cont2_x, cont2_width,
                         false, 0, 0, 0, 0, NULL, out)
            ? (out && out->lines > 0) : false;
 }
@@ -471,10 +501,14 @@ bool text_shaper_wrap_shape(const TextShaper *s, const char *utf8,
                             float x, float y, float cont_x,
                             float first_width, float cont_width,
                             float scale, float line_advance,
+                            int cont2_from_line, float cont2_x,
+                            float cont2_width,
                             float r, float g, float b, float a,
                             DisplayList *dl, TsWrapResult *out)
 {
     if (!dl) return false;
     return ts_wrap_walk(s, utf8, x, y, cont_x, first_width, cont_width,
-                        scale, line_advance, true, r, g, b, a, dl, out);
+                        scale, line_advance,
+                        cont2_from_line, cont2_x, cont2_width,
+                        true, r, g, b, a, dl, out);
 }

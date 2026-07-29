@@ -1323,6 +1323,51 @@ int css_specificity_from_selector_text(const char *selector) {
     return css_specificity_from_chain(parts, count);
 }
 
+/* Specificity of a selector LIST against a concrete node: per CSS Cascade,
+ * a rule's specificity is that of the most specific complex selector (list
+ * branch) that matches the element — not the sum over all branches. */
+int css_specificity_from_selector_text_matching(const char *selector,
+                                                HtmlDocument *doc,
+                                                HtmlNode *node) {
+    int best = 0;
+    if (!selector) return 0;
+    size_t len = strlen(selector);
+    size_t i = 0;
+    while (i < len) {
+        size_t start = i;
+        int paren_depth = 0;
+        bool in_quote = false;
+        char quote_char = 0;
+        while (i < len) {
+            char c = selector[i];
+            if (!in_quote) {
+                if (c == '"' || c == '\'') { in_quote = true; quote_char = c; }
+                else if (c == '(') paren_depth++;
+                else if (c == ')') { if (paren_depth > 0) paren_depth--; }
+                else if (c == ',' && paren_depth == 0) break;
+            } else {
+                if (c == quote_char) in_quote = false;
+            }
+            i++;
+        }
+        char *part = css_strndup_trim(selector + start, i - start);
+        if (part && part[0]) {
+            if (css_selector_matches_one(part, doc, node)) {
+                CssSelectorPart parts[CSS_MAX_SIMPLE_PARTS];
+                int count = css_parse_selector_chain(part, parts,
+                                                     CSS_MAX_SIMPLE_PARTS);
+                int spec = css_specificity_from_chain(parts, count);
+                if (spec > best) best = spec;
+            }
+            free(part);
+        } else {
+            free(part);
+        }
+        if (i < len && selector[i] == ',') i++;
+    }
+    return best;
+}
+
 /* ============================================================================
  * Media query evaluation
  *

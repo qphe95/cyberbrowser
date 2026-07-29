@@ -601,6 +601,9 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                                                     (float)box->wrap_first_w,
                                                     (float)box->wrap_cont_w,
                                                     scale, line_adv,
+                                                    box->wrap_cont2_line,
+                                                    (float)box->wrap_cont2_x,
+                                                    (float)box->wrap_cont2_w,
                                                     tr, tg, tb, ta,
                                                     dl, NULL)) {
                             return false;

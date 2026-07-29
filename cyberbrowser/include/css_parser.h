@@ -83,6 +83,11 @@ int css_applied_decl_compare(const void *a, const void *b);
 /* Compute specificity from raw selector text. */
 int css_specificity_from_selector_text(const char *selector);
 
+/* Specificity of the most specific selector-list branch matching this node. */
+int css_specificity_from_selector_text_matching(const char *selector,
+                                                HtmlDocument *doc,
+                                                HtmlNode *node);
+
 /* Returns true if a rule's enclosing @media condition matches the viewport. */
 bool css_rule_media_matches(const CssRule *rule, double viewport_width, double viewport_height);
 
