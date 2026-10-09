@@ -24,7 +24,7 @@
  * GC Handle Type (shared foundation)
  * ============================================================================ */
 
-using GCHandle = uint32_t;
+typedef uint32_t GCHandle;
 
 extern "C" {
 /* External free function for malloc'd memory (defined in quickjs.cpp) */
@@ -50,42 +50,60 @@ struct JSTypedArray;
 } /* extern "C" */
 
 /* ============================================================================
- * Forward declarations for C++ handle classes
+ * GC handle types
+ * ============================================================================
+ * These used to be C++ wrapper classes that dereferenced a GCHandle on
+ * every field access.  They are now plain handle typedefs; use the
+ * SAFE_GET / SAFE_SET macros (quickjs_handles.h) to read/write fields.
  * ============================================================================ */
 
-#ifdef __cplusplus
-
-class JSContextHandle;
-class JSRuntimeHandle;
-class JSStringHandle;
-class JSStringRopeHandle;
-class JSVarRefHandle;
-class JSBigIntHandle;
-class JSModuleDefHandle;
-class JSAsyncFunctionStateHandle;
-class JSJobEntryHandle;
-class JSFunctionBytecodeHandle;
-class JSArrayBufferHandle;
-class JSTypedArrayHandle;
-class JSMapStateHandle;
-class JSPromiseDataHandle;
-class JSProxyDataHandle;
-class JSBoundFunctionHandle;
-class JSForInIteratorHandle;
-class JSMapRecordHandle;
-class JSMapIteratorDataHandle;
-class JSArrayIteratorDataHandle;
-class JSIteratorHelperDataHandle;
-class JSIteratorConcatDataHandle;
-class JSIteratorWrapDataHandle;
-class JSRegExpStringIteratorDataHandle;
-class JSPromiseFunctionDataHandle;
-class JSPromiseFunctionDataResolvedHandle;
-class JSCFunctionDataRecordHandle;
-class JSGeneratorDataHandle;
-class JSAsyncGeneratorDataHandle;
-
-#endif /* __cplusplus */
+typedef GCHandle JSContextHandle;
+typedef GCHandle JSRuntimeHandle;
+typedef GCHandle JSStringHandle;
+typedef GCHandle JSStringRopeHandle;
+typedef GCHandle JSVarRefHandle;
+typedef GCHandle JSBigIntHandle;
+typedef GCHandle JSModuleDefHandle;
+typedef GCHandle JSAsyncFunctionStateHandle;
+typedef GCHandle JSJobEntryHandle;
+typedef GCHandle JSFunctionBytecodeHandle;
+typedef GCHandle JSArrayBufferHandle;
+typedef GCHandle JSTypedArrayHandle;
+typedef GCHandle JSMapStateHandle;
+typedef GCHandle JSPromiseDataHandle;
+typedef GCHandle JSProxyDataHandle;
+typedef GCHandle JSBoundFunctionHandle;
+typedef GCHandle JSForInIteratorHandle;
+typedef GCHandle JSMapRecordHandle;
+typedef GCHandle JSMapIteratorDataHandle;
+typedef GCHandle JSArrayIteratorDataHandle;
+typedef GCHandle JSIteratorHelperDataHandle;
+typedef GCHandle JSIteratorConcatDataHandle;
+typedef GCHandle JSIteratorWrapDataHandle;
+typedef GCHandle JSRegExpStringIteratorDataHandle;
+typedef GCHandle JSPromiseFunctionDataHandle;
+typedef GCHandle JSPromiseFunctionDataResolvedHandle;
+typedef GCHandle JSCFunctionDataRecordHandle;
+typedef GCHandle JSGeneratorDataHandle;
+typedef GCHandle JSAsyncGeneratorDataHandle;
+typedef GCHandle JSAsyncFrameHandle;
+typedef GCHandle JSVarDefHandle;
+typedef GCHandle JSVarDefArrayHandle;
+typedef GCHandle JSAsyncFromSyncIteratorDataHandle;
+typedef GCHandle JSFinalizationRegistryDataHandle;
+typedef GCHandle JSWeakRefDataHandle;
+typedef GCHandle JSPropertyEnumHandle;
+typedef GCHandle GCStringHandle;
+typedef GCHandle JSPropertyArrayHandle;
+typedef GCHandle JSPropertyHandle;
+typedef GCHandle JSPromiseReactionDataHandle;
+typedef GCHandle JSFinRecEntryHandle;
+typedef GCHandle JSAsyncGeneratorRequestHandle;
+typedef GCHandle JSClassHandle;
+typedef GCHandle JSObjectListEntryArrayHandle;
+typedef GCHandle GCValueHandle;
+typedef GCHandle JSShapeHandle;
+typedef GCHandle JSObjectHandle;
 
 /* Forward declaration for GCValue struct (defined below) */
 struct GCValue;
@@ -356,75 +374,8 @@ static inline GCValue GC_UNINITIALIZED_VAL() {
 #define GC_EXCEPTION  GC_EXCEPTION_VAL()
 #define GC_UNINITIALIZED GC_UNINITIALIZED_VAL()
 
-/* ============================================================================
- * GCValueHandle - Safe handle-based access to GCValue arrays
- * 
- * This class wraps a GCHandle to provide safe access to GCValue arrays.
- * It dereferences the handle on every access to ensure the pointer is valid.
- * NOTE: Defined AFTER GCValue struct so inline methods can use it.
- * ============================================================================ */
-class GCValueHandle {
-private:
-    GCHandle handle_;
-    
-    /* Get fresh pointer - called on every access */
-    GCValue* get_ptr() const {
-        if (handle_ == GC_HANDLE_NULL) return nullptr;
-        return (GCValue*)gc_deref(handle_);
-    }
-
-public:
-    /* Default constructor - null handle */
-    GCValueHandle() : handle_(GC_HANDLE_NULL) {}
-    
-    /* Construct from GCHandle */
-    explicit GCValueHandle(GCHandle handle) : handle_(handle) {}
-    
-    /* Copy constructor */
-    GCValueHandle(const GCValueHandle& other) : handle_(other.handle_) {}
-    
-    /* Move constructor */
-    GCValueHandle(GCValueHandle&& other) noexcept : handle_(other.handle_) {
-        other.handle_ = GC_HANDLE_NULL;
-    }
-    
-    /* Assignment operators */
-    GCValueHandle& operator=(const GCValueHandle& other) {
-        handle_ = other.handle_;
-        return *this;
-    }
-    
-    GCValueHandle& operator=(GCHandle handle) {
-        handle_ = handle;
-        return *this;
-    }
-    
-    /* Get the underlying handle */
-    GCHandle handle() const { return handle_; }
-    
-    /* Check if handle is valid */
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
-    
-    /* Explicit bool conversion */
-    explicit operator bool() const { return valid(); }
-    
-    /* Array access - dereferences handle each time */
-    GCValue& operator[](size_t index) {
-        return get_ptr()[index];
-    }
-    
-    const GCValue& operator[](size_t index) const {
-        return get_ptr()[index];
-    }
-    
-    /* Pointer-like access for iteration */
-    GCValue* operator->() { return get_ptr(); }
-    const GCValue* operator->() const { return get_ptr(); }
-    
-    /* Implicit conversion to GCValue* for compatibility */
-    operator GCValue*() { return get_ptr(); }
-    operator const GCValue*() const { return get_ptr(); }
-};
+/* GCValueHandle is now a plain GCHandle typedef (see the handle types
+ * block above).  Array element access goes through SAFE_AT. */
 
 /* ============================================================================
  * Error Codes

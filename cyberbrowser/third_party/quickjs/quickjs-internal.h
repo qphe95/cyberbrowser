@@ -91,440 +91,210 @@ struct JSVarRef {
 #endif
 
 /* ============================================================================
- * C++ JSVarRefHandle Class - Safe GC Handle Wrapper
+ * JSVarRefHandle - GC-safe access to JSVarRef
  * ============================================================================
- * 
- * This class wraps a GCHandle to provide safe access to JSVarRef instances.
- * The key feature is that it NEVER stores a raw JSVarRef pointer - instead,
- * it dereferences the handle on every property access to get a fresh pointer.
- * This ensures that the pointer is always valid even after GC compaction.
- * 
- * USAGE:
- *   JSVarRefHandle var_ref = JS_VALUE_GET_VAR_REF_HANDLE(val);
- *   GCValue val = var_ref.get_value();        // Read value safely
- *   var_ref.set_value(new_value);             // Write value safely
- *   bool init = var_ref.is_value_initialized(); // Check if initialized
- * 
- * IMPORTANT: Do NOT use JSVarRef* in new code. Always use JSVarRefHandle.
- * The raw pvalue() pointer is PRIVATE and should never be stored.
+ * JSVarRefHandle is a plain GCHandle typedef (see quickjs_types.h).  The old
+ * C++ wrapper class dereferenced the handle on every access; the helpers below
+ * keep that behaviour for the non-trivial accessors.  Plain fields are handled
+ * with the SAFE_GET / SAFE_SET macros from quickjs_handles.h:
+ *
+ *   SAFE_GET(vr, JSVarRefHandle, is_detached)
+ *   SAFE_SET(vr, JSVarRefHandle, is_lexical, 1)
+ *   SAFE_SET_HANDLE(vr, JSVarRefHandle, frame_ref.frame_handle, fh)
+ *   SAFE_GET(vr, JSVarRefHandle, frame_ref.frame_ptr)
+ *
+ * The raw value pointer must never be stored across a GC point.
  */
+#define JS_VALUE_GET_VAR_REF_HANDLE(val) (GC_VALUE_GET_HANDLE(val))
 
-class JSVarRefHandle {
-private:
-    GCHandle handle_;
-    
-    /* Get fresh pointer - called on every access */
-    JSVarRef* get_ptr() const {
-        if (handle_ == GC_HANDLE_NULL) return nullptr;
-        return (JSVarRef*)gc_deref(handle_);
-    }
-    
-    /* 
-     * PRIVATE: Get pointer to the actual variable value
-     * 
-     * This dynamically computes the pointer based on the var_ref state.
-     * DO NOT STORE this pointer - it may become invalid after GC!
-     * Use get_value() and set_value() for safe access.
-     */
-    GCValue* pvalue() const {
-        JSVarRef* p = get_ptr();
-        if (!p) return nullptr;
-        
-        if (p->is_detached) {
-            return &p->frame_ref.value;
-        }
-        
-        JSStackFrame* sf;
-        if (p->is_async_frame) {
-            sf = (JSStackFrame*)gc_deref(p->frame_ref.frame_handle);
-        } else {
-            sf = p->frame_ref.frame_ptr;
-        }
-        
-        if (!sf) return nullptr;
-        
-        if (p->is_arg) {
-            GCValue* arg_buf = JS_SF_ARG_BUF(sf);
-            return &arg_buf[p->var_idx];
-        } else {
-            GCValue* var_buf = JS_SF_VAR_BUF(sf);
-            return &var_buf[p->var_idx];
-        }
-    }
+static inline JSVarRef *js_varref_ptr(GCHandle handle)
+{
+    if (handle == GC_HANDLE_NULL)
+        return NULL;
+    return (JSVarRef *)gc_deref(handle);
+}
 
-public:
-    /* Default constructor - null handle */
-    JSVarRefHandle() : handle_(GC_HANDLE_NULL) {}
-    
-    /* Construct from GCHandle */
-    explicit JSVarRefHandle(GCHandle handle) : handle_(handle) {}
-    
-    /* Copy constructor */
-    JSVarRefHandle(const JSVarRefHandle& other) : handle_(other.handle_) {}
-    
-    /* Move constructor */
-    JSVarRefHandle(JSVarRefHandle&& other) noexcept : handle_(other.handle_) {
-        other.handle_ = GC_HANDLE_NULL;
+/* Address of the variable's GCValue slot.  Valid only until the next GC. */
+static inline GCValue *js_varref_pvalue(GCHandle handle)
+{
+    JSVarRef *p = js_varref_ptr(handle);
+    JSStackFrame *sf;
+    if (!p)
+        return NULL;
+    if (p->is_detached)
+        return &p->frame_ref.value;
+    if (p->is_async_frame)
+        sf = (JSStackFrame *)gc_deref(p->frame_ref.frame_handle);
+    else
+        sf = p->frame_ref.frame_ptr;
+    if (!sf)
+        return NULL;
+    if (p->is_arg) {
+        GCValue *arg_buf = JS_SF_ARG_BUF(sf);
+        return &arg_buf[p->var_idx];
+    } else {
+        GCValue *var_buf = JS_SF_VAR_BUF(sf);
+        return &var_buf[p->var_idx];
     }
-    
-    /* Assignment operators */
-    JSVarRefHandle& operator=(const JSVarRefHandle& other) {
-        handle_ = other.handle_;
-        return *this;
+}
+
+static inline GCValue js_varref_get_value(GCHandle handle)
+{
+    GCValue *pv = js_varref_pvalue(handle);
+    return pv ? *pv : GC_UNDEFINED;
+}
+
+static inline void js_varref_set_value(GCHandle handle, GCValue val)
+{
+    GCValue *pv = js_varref_pvalue(handle);
+    if (pv) {
+        *pv = val;
+        if (gc_ptr_in_heap(pv))
+            gc_write_barrier_for_heap_slot(pv, GC_VALUE_GET_HANDLE(val));
     }
-    
-    JSVarRefHandle& operator=(JSVarRefHandle&& other) noexcept {
-        handle_ = other.handle_;
-        other.handle_ = GC_HANDLE_NULL;
-        return *this;
+}
+
+/* was get_value_ptr_for_set() */
+static inline GCValue *js_varref_value_ptr(GCHandle handle)
+{
+    return js_varref_pvalue(handle);
+}
+
+static inline bool js_varref_is_value_uninitialized(GCHandle handle)
+{
+    GCValue *pv = js_varref_pvalue(handle);
+    return pv ? JS_IsUninitialized(*pv) : false;
+}
+
+static inline bool js_varref_is_value_object(GCHandle handle)
+{
+    GCValue *pv = js_varref_pvalue(handle);
+    return pv ? JS_IsObject(*pv) : false;
+}
+
+/* was copy_value_to(GCValue&) - C callers pass the destination by pointer */
+static inline bool js_varref_copy_value_to(GCHandle handle, GCValue *dest)
+{
+    GCValue *pv = js_varref_pvalue(handle);
+    if (pv) {
+        *dest = *pv;
+        return true;
     }
-    
-    /* Assignment from nullptr */
-    JSVarRefHandle& operator=(decltype(nullptr)) {
-        handle_ = GC_HANDLE_NULL;
-        return *this;
-    }
-    
-    /* Get the underlying handle */
-    GCHandle handle() const { return handle_; }
-    
-    /* Check if handle is valid */
-    bool valid() const { 
-        return handle_ != GC_HANDLE_NULL && gc_handle_is_valid(handle_);
-    }
-    
-    /* Check if handle is null */
-    bool is_null() const {
-        return handle_ == GC_HANDLE_NULL;
-    }
-    
-    /* Explicit bool conversion */
-    explicit operator bool() const { return valid(); }
-    
-    /* =========================================================================
-     * Property accessors - each dereferences handle to get fresh pointer
-     * ========================================================================= */
-    
-    /* is_detached access */
-    uint8_t is_detached() const {
-        JSVarRef* p = get_ptr();
-        return p ? p->is_detached : 0;
-    }
-    
-    void set_is_detached(uint8_t val) {
-        JSVarRef* p = get_ptr();
-        if (p) p->is_detached = val;
-    }
-    
-    /* is_lexical access */
-    uint8_t is_lexical() const {
-        JSVarRef* p = get_ptr();
-        return p ? p->is_lexical : 0;
-    }
-    
-    void set_is_lexical(uint8_t val) {
-        JSVarRef* p = get_ptr();
-        if (p) p->is_lexical = val;
-    }
-    
-    /* is_const access */
-    uint8_t is_const() const {
-        JSVarRef* p = get_ptr();
-        return p ? p->is_const : 0;
-    }
-    
-    void set_is_const(uint8_t val) {
-        JSVarRef* p = get_ptr();
-        if (p) p->is_const = val;
-    }
-    
-    /* is_async_frame access */
-    uint8_t is_async_frame() const {
-        JSVarRef* p = get_ptr();
-        return p ? p->is_async_frame : 0;
-    }
-    
-    void set_is_async_frame(uint8_t val) {
-        JSVarRef* p = get_ptr();
-        if (p) p->is_async_frame = val;
-    }
-    
-    /* var_idx access (used when is_detached = FALSE) */
-    uint16_t var_idx() const {
-        JSVarRef* p = get_ptr();
-        return p ? p->var_idx : 0;
-    }
-    
-    void set_var_idx(uint16_t val) {
-        JSVarRef* p = get_ptr();
-        if (p) p->var_idx = val;
-    }
-    
-    /* is_arg access (used when is_detached = FALSE) */
-    uint8_t is_arg() const {
-        JSVarRef* p = get_ptr();
-        return p ? p->is_arg : 0;
-    }
-    
-    void set_is_arg(uint8_t val) {
-        JSVarRef* p = get_ptr();
-        if (p) p->is_arg = val;
-    }
-    
-    /* var_ref_idx access (used for cleanup in JSStackFrame.var_refs[]) */
-    uint16_t var_ref_idx() const {
-        JSVarRef* p = get_ptr();
-        return p ? p->var_ref_idx : 0;
-    }
-    
-    void set_var_ref_idx(uint16_t val) {
-        JSVarRef* p = get_ptr();
-        if (p) p->var_ref_idx = val;
-    }
-    
-    /* =========================================================================
-     * Frame reference accessors (used when is_detached = FALSE)
-     * ========================================================================= */
-    
-    /* Get frame handle (for GC-managed frames) */
-    GCHandle frame_handle() const {
-        JSVarRef* p = get_ptr();
-        if (!p || p->is_detached) return GC_HANDLE_NULL;
-        /* Only async refs carry a GC handle to the frame.  A sync ref instead
-         * stores a raw JSStackFrame* in the same union; returning it here as a
-         * GCHandle would make the GC mark a garbage index (and never mark the
-         * real frame), so report NULL instead. */
-        if (!p->is_async_frame) return GC_HANDLE_NULL;
-        return p->frame_ref.frame_handle;
-    }
-    
-    void set_frame_handle(GCHandle val) {
-        JSVarRef* p = get_ptr();
-        if (p && !p->is_detached) {
-            p->frame_ref.frame_handle = val;
-            gc_write_barrier_for_heap_slot(&p->frame_ref.frame_handle, val);
-        }
-    }
-    
-    /* Get frame pointer (for sync frames) */
-    JSStackFrame* frame_ptr() const {
-        JSVarRef* p = get_ptr();
-        if (!p || p->is_detached || p->is_async_frame) return nullptr;
-        return p->frame_ref.frame_ptr;
-    }
-    
-    void set_frame_ptr(JSStackFrame* val) {
-        JSVarRef* p = get_ptr();
-        if (p && !p->is_detached) p->frame_ref.frame_ptr = val;
-    }
-    
-    /* Set frame reference (for use during initialization) */
-    void set_frame_ref(JSStackFrame* ptr, uint8_t async, GCHandle frame_handle = GC_HANDLE_NULL) {
-        JSVarRef* p = get_ptr();
-        if (!p) return;
-        
-        p->is_async_frame = async;
-        if (async) {
-            p->frame_ref.frame_handle = frame_handle;
-        } else {
-            p->frame_ref.frame_ptr = ptr;
-        }
-    }
-    
-    /* =========================================================================
-     * Safe Value Accessors - Use these instead of pvalue()
-     * ========================================================================= */
-    
-    /* 
-     * get_value() - Get the current value of the variable
-     * 
-     * This safely reads the value by computing the pointer dynamically.
-     * Returns JS_UNDEFINED if the var_ref is invalid.
-     */
-    GCValue get_value() const {
-        GCValue* pv = pvalue();
-        return pv ? *pv : GC_UNDEFINED;
-    }
-    
-    /*
-     * set_value() - Set the value of the variable
-     * 
-     * This safely writes the value by computing the pointer dynamically.
-     * Also handles proper value reference counting if needed.
-     */
-    void set_value(const GCValue& val) {
-        GCValue* pv = pvalue();
-        if (pv) {
-            *pv = val;
-            if (gc_ptr_in_heap(pv))
-                gc_write_barrier_for_heap_slot(pv, GC_VALUE_GET_HANDLE(val));
-        }
-    }
-    
-    /*
-     * get_value_ptr_for_set() - Get pointer for set_value() compatibility
-     * 
-     * This is for internal use with functions that take GCValue* but don't
-     * store the pointer. The pointer must not be stored or used across GC points.
-     * Returns nullptr if var_ref is invalid.
-     */
-    GCValue* get_value_ptr_for_set() const {
-        return pvalue();
-    }
-    
-    /*
-     * is_value_uninitialized() - Check if the current value is uninitialized
-     * 
-     * This is a common check that avoids exposing the raw pointer.
-     */
-    bool is_value_uninitialized() const {
-        GCValue* pv = pvalue();
-        return pv ? JS_IsUninitialized(*pv) : false;
-    }
-    
-    /*
-     * is_value_object() - Check if the current value is an object
-     */
-    bool is_value_object() const {
-        GCValue* pv = pvalue();
-        return pv ? JS_IsObject(*pv) : false;
-    }
-    
-    /*
-     * copy_value_to() - Copy the value to an external GCValue
-     * 
-     * Useful when you need to store the value in a local variable.
-     * Returns true if successful, false if var_ref is invalid.
-     */
-    bool copy_value_to(GCValue& dest) const {
-        GCValue* pv = pvalue();
-        if (pv) {
-            dest = *pv;
-            return true;
-        }
-        return false;
-    }
-    
-    /* =========================================================================
-     * Detached value accessors (for when is_detached = TRUE)
-     * ========================================================================= */
-    
-    /* 
-     * get_detached_value() - Get the detached value
-     * Only valid when is_detached = TRUE.
-     */
-    GCValue get_detached_value() const {
-        JSVarRef* p = get_ptr();
-        return (p && p->is_detached) ? p->frame_ref.value : GC_UNDEFINED;
-    }
-    
-    /*
-     * set_detached_value() - Set the detached value
-     * Only valid when is_detached = TRUE.
-     */
-    void set_detached_value(const GCValue& val) {
-        JSVarRef* p = get_ptr();
-        if (p && p->is_detached) {
-            p->frame_ref.value = val;
-            gc_write_barrier_for_heap_slot(&p->frame_ref.value, GC_VALUE_GET_HANDLE(val));
-        }
-    }
-    
-    /* =========================================================================
-     * Detachment operations
-     * ========================================================================= */
-    
-    /* 
-     * detach() - Detach the var_ref from its frame
-     * 
-     * This copies the current value from the frame into internal storage
-     * and marks the var_ref as detached.
-     */
-    void detach() {
-        JSVarRef* p = get_ptr();
-        if (!p || p->is_detached) return;
-        
-        /* Copy value from frame to internal storage */
-        GCValue* current = pvalue();
-        if (current) {
-            p->frame_ref.value = *current;
-            gc_write_barrier_for_heap_slot(&p->frame_ref.value, GC_VALUE_GET_HANDLE(*current));
-        } else {
-            p->frame_ref.value = GC_UNDEFINED;
-        }
-        
-        p->is_detached = TRUE;
-    }
-    
-    /*
-     * detach_with_value() - Detach with a specific value
-     * 
-     * Useful when you want to detach and set a new value at the same time.
-     */
-    void detach_with_value(const GCValue& val) {
-        JSVarRef* p = get_ptr();
-        if (!p) return;
-        
+    return false;
+}
+
+static inline GCValue js_varref_get_detached_value(GCHandle handle)
+{
+    JSVarRef *p = js_varref_ptr(handle);
+    return (p && p->is_detached) ? p->frame_ref.value : GC_UNDEFINED;
+}
+
+static inline void js_varref_set_detached_value(GCHandle handle, GCValue val)
+{
+    JSVarRef *p = js_varref_ptr(handle);
+    if (p && p->is_detached) {
         p->frame_ref.value = val;
         gc_write_barrier_for_heap_slot(&p->frame_ref.value, GC_VALUE_GET_HANDLE(val));
-        p->is_detached = TRUE;
     }
-    
-    /* =========================================================================
-     * Static helpers for array access
-     * ========================================================================= */
-    
-    /* Get a JSVarRefHandle from an array of handles at given index */
-    static JSVarRefHandle from_array_handle(GCHandle array_handle, size_t index) {
-        if (array_handle == GC_HANDLE_NULL) return JSVarRefHandle();
-        GCHandle* array = (GCHandle*)gc_deref(array_handle);
-        if (!array) return JSVarRefHandle();
-        return JSVarRefHandle(array[index]);
+}
+
+static inline void js_varref_detach(GCHandle handle)
+{
+    JSVarRef *p = js_varref_ptr(handle);
+    GCValue *current;
+    if (!p || p->is_detached)
+        return;
+    current = js_varref_pvalue(handle);
+    if (current) {
+        p->frame_ref.value = *current;
+        gc_write_barrier_for_heap_slot(&p->frame_ref.value, GC_VALUE_GET_HANDLE(*current));
+    } else {
+        p->frame_ref.value = GC_UNDEFINED;
     }
-    
-    /* Set a JSVarRefHandle in an array of handles at given index */
-    static void set_in_array_handle(GCHandle array_handle, size_t index, JSVarRefHandle var_ref) {
-        if (array_handle == GC_HANDLE_NULL) return;
-        GCHandle* array = (GCHandle*)gc_deref(array_handle);
-        if (!array) return;
-        array[index] = var_ref.handle();
-        gc_write_barrier_for_heap_slot(&array[index], var_ref.handle());
+    p->is_detached = TRUE;
+}
+
+static inline void js_varref_detach_with_value(GCHandle handle, GCValue val)
+{
+    JSVarRef *p = js_varref_ptr(handle);
+    if (!p)
+        return;
+    p->frame_ref.value = val;
+    gc_write_barrier_for_heap_slot(&p->frame_ref.value, GC_VALUE_GET_HANDLE(val));
+    p->is_detached = TRUE;
+}
+
+static inline GCHandle js_varref_frame_handle(GCHandle handle)
+{
+    JSVarRef *p = js_varref_ptr(handle);
+    if (!p || p->is_detached || !p->is_async_frame)
+        return GC_HANDLE_NULL;
+    return p->frame_ref.frame_handle;
+}
+
+static inline void js_varref_set_frame_handle(GCHandle handle, GCHandle val)
+{
+    JSVarRef *p = js_varref_ptr(handle);
+    if (p && !p->is_detached) {
+        p->frame_ref.frame_handle = val;
+        gc_write_barrier_for_heap_slot(&p->frame_ref.frame_handle, val);
     }
-    
-    /* =========================================================================
-     * Conversion operators for interoperability
-     * ========================================================================= */
-    
-    /* Convert to GCHandle for handle-based APIs */
-    operator GCHandle() const {
-        return handle_;
-    }
-    
-    /* Comparison operators */
-    bool operator==(const JSVarRefHandle& other) const {
-        return handle_ == other.handle_;
-    }
-    
-    bool operator!=(const JSVarRefHandle& other) const {
-        return handle_ != other.handle_;
-    }
-    
-    bool operator==(GCHandle h) const {
-        return handle_ == h;
-    }
-    
-    bool operator!=(GCHandle h) const {
-        return handle_ != h;
-    }
-    
-    bool operator==(decltype(nullptr)) const {
-        return handle_ == GC_HANDLE_NULL;
-    }
-    
-    bool operator!=(decltype(nullptr)) const {
-        return handle_ != GC_HANDLE_NULL;
-    }
-};
+}
+
+static inline JSStackFrame *js_varref_frame_ptr(GCHandle handle)
+{
+    JSVarRef *p = js_varref_ptr(handle);
+    if (!p || p->is_detached || p->is_async_frame)
+        return NULL;
+    return p->frame_ref.frame_ptr;
+}
+
+static inline void js_varref_set_frame_ptr(GCHandle handle, JSStackFrame *val)
+{
+    JSVarRef *p = js_varref_ptr(handle);
+    if (p && !p->is_detached)
+        p->frame_ref.frame_ptr = val;
+}
+
+/* was set_frame_ref(ptr, async, frame_handle = GC_HANDLE_NULL) */
+static inline void js_varref_set_frame_ref(GCHandle handle, JSStackFrame *ptr,
+                                           uint8_t is_async, GCHandle frame_handle)
+{
+    JSVarRef *p = js_varref_ptr(handle);
+    if (!p)
+        return;
+    p->is_async_frame = is_async;
+    if (is_async)
+        p->frame_ref.frame_handle = frame_handle;
+    else
+        p->frame_ref.frame_ptr = ptr;
+}
+
+/* was static from_array_handle() */
+static inline JSVarRefHandle js_varref_from_array(GCHandle array_handle, size_t index)
+{
+    GCHandle *array;
+    if (array_handle == GC_HANDLE_NULL)
+        return GC_HANDLE_NULL;
+    array = (GCHandle *)gc_deref(array_handle);
+    if (!array)
+        return GC_HANDLE_NULL;
+    return array[index];
+}
+
+/* was static set_in_array_handle() */
+static inline void js_varref_set_in_array(GCHandle array_handle, size_t index,
+                                          JSVarRefHandle var_ref)
+{
+    GCHandle *array;
+    if (array_handle == GC_HANDLE_NULL)
+        return;
+    array = (GCHandle *)gc_deref(array_handle);
+    if (!array)
+        return;
+    array[index] = var_ref;
+    gc_write_barrier_for_heap_slot(&array[index], var_ref);
+}
 
 /*
  * JSProxyData - Proxy data structure

@@ -2202,57 +2202,90 @@ static void layout_apply_stylesheet_node(LayoutContext *ctx, int idx,
         }
     }
 
-    /* Generated content: gather ::after string content in cascade order
-     * (applied[] is sorted ascending, so the last matching declaration wins,
-     * including explicit content:none/"" suppression).  The winning string
-     * is injected into the DOM text after the full style pass below. */
+    /* Generated content: ::after rules never enter applied[] (the matcher
+     * rejects pseudo-element keys — their declarations must not style the
+     * real element), so scan the stylesheets directly for content-bearing
+     * ::after rules and run the cascade manually: highest (important,
+     * specificity, source order) wins, including explicit content:none/""
+     * suppression.  The winning string is injected into the DOM text after
+     * the full style pass below. */
     char after_content[256];
     bool after_set = false;
     after_content[0] = '\0';
-    if (applied) {
-        for (int d = 0; d < count; d++) {
-            const char *prop = applied[d].decl->property;
-            if (!prop || strcasecmp(prop, "content") != 0) continue;
-            CssRule *rule = NULL;
-            for (int s = 0; s < list->count && !rule; s++) {
-                CssStylesheet *sheet = list->sheets[s];
-                for (int r = 0; r < sheet->rule_count; r++) {
-                    if (applied[d].decl >= &sheet->rules[r].declarations[0] &&
-                        applied[d].decl < &sheet->rules[r].declarations[sheet->rules[r].declaration_count]) {
-                        rule = &sheet->rules[r];
+    bool dbg_content = getenv("CYBER_DEBUG_CONTENT") != NULL &&
+                       node->type == HTML_NODE_ELEMENT &&
+                       strcasecmp(node->tag_name, "li") == 0;
+    if (list) {
+        int best_important = -1, best_spec = -1, best_order = -1;
+        int dbg_rules_seen = 0;
+        for (int s = 0; s < list->count; s++) {
+            CssStylesheet *sheet = list->sheets[s];
+            for (int r = 0; r < sheet->rule_count; r++) {
+                CssRule *rule = &sheet->rules[r];
+                if (!rule->selector_text ||
+                    !strstr(rule->selector_text, ":after")) continue;
+                dbg_rules_seen++;
+                if (!css_rule_media_matches(rule, ctx->viewport_width,
+                                            ctx->viewport_height)) continue;
+                /* Does any comma branch ending in ::after match this node? */
+                bool branch_matched = false;
+                int branch_spec = 0;
+                const char *bp = rule->selector_text;
+                while (*bp) {
+                    const char *comma = strchr(bp, ',');
+                    size_t blen = comma ? (size_t)(comma - bp) : strlen(bp);
+                    while (blen > 0 && isspace((unsigned char)*bp)) { bp++; blen--; }
+                    while (blen > 0 && isspace((unsigned char)bp[blen - 1])) blen--;
+                    if (blen > 0 &&
+                        layout_pseudo_branch_matches(bp, blen, "after",
+                                                     ctx->doc, node)) {
+                        branch_matched = true;
+                        char specbuf[512];
+                        if (blen < sizeof(specbuf)) {
+                            memcpy(specbuf, bp, blen);
+                            specbuf[blen] = '\0';
+                            branch_spec = css_specificity_from_selector_text(specbuf);
+                        }
                         break;
                     }
+                    if (!comma) break;
+                    bp = comma + 1;
                 }
-            }
-            if (!rule || !rule->selector_text) continue;
-            /* Only branches ending in ::after contribute, and only when their
-             * base selector matches this node (the rule-level match may have
-             * come from a different comma branch). */
-            bool branch_matched = false;
-            const char *bp = rule->selector_text;
-            while (*bp && !branch_matched) {
-                const char *comma = strchr(bp, ',');
-                size_t blen = comma ? (size_t)(comma - bp) : strlen(bp);
-                while (blen > 0 && isspace((unsigned char)*bp)) { bp++; blen--; }
-                while (blen > 0 && isspace((unsigned char)bp[blen - 1])) blen--;
-                if (blen > 0 &&
-                    layout_pseudo_branch_matches(bp, blen, "after", ctx->doc, node))
-                    branch_matched = true;
-                if (!comma) break;
-                bp = comma + 1;
-            }
-            if (!branch_matched) continue;
-            char decoded[256];
-            bool is_empty = false;
-            if (!css_content_decode_string(applied[d].decl->value, decoded,
-                                           sizeof(decoded), &is_empty))
-                continue;  /* counters/url()/etc.: unsupported, leave as-is */
-            after_set = true;
-            if (is_empty) {
-                after_content[0] = '\0';
-            } else {
-                strncpy(after_content, decoded, sizeof(after_content) - 1);
-                after_content[sizeof(after_content) - 1] = '\0';
+                if (!branch_matched) {
+                    if (dbg_content && strstr(rule->selector_text, "hlist"))
+                        fprintf(stderr, "[CONTENT] li idx=%d: hlist rule NO branch match: %.80s\n",
+                                idx, rule->selector_text);
+                    continue;
+                }
+                for (int d = 0; d < rule->declaration_count; d++) {
+                    const CssDeclaration *decl = &rule->declarations[d];
+                    if (!decl->property || strcasecmp(decl->property, "content") != 0)
+                        continue;
+                    int order = s * 1000000 + r * 1000 + d;
+                    int imp = decl->important ? 1 : 0;
+                    if (imp < best_important) continue;
+                    if (imp == best_important && branch_spec < best_spec) continue;
+                    if (imp == best_important && branch_spec == best_spec &&
+                        order <= best_order) continue;
+                    char decoded[256];
+                    bool is_empty = false;
+                    if (!css_content_decode_string(decl->value, decoded,
+                                                   sizeof(decoded), &is_empty))
+                        continue;  /* counters/url()/etc.: unsupported */
+                    best_important = imp;
+                    best_spec = branch_spec;
+                    best_order = order;
+                    after_set = true;
+                    if (dbg_content)
+                        fprintf(stderr, "[CONTENT] li idx=%d: content='%s' empty=%d spec=%d order=%d\n",
+                                idx, decoded, (int)is_empty, branch_spec, order);
+                    if (is_empty) {
+                        after_content[0] = '\0';
+                    } else {
+                        strncpy(after_content, decoded, sizeof(after_content) - 1);
+                        after_content[sizeof(after_content) - 1] = '\0';
+                    }
+                }
             }
         }
     }
@@ -2315,8 +2348,13 @@ static void layout_apply_stylesheet_node(LayoutContext *ctx, int idx,
     }
 
     /* Realize the winning ::after string (e.g. .hlist li::after " · "). */
-    if (after_set && after_content[0] != '\0')
+    if (after_set && after_content[0] != '\0') {
+        if (dbg_content)
+            fprintf(stderr, "[CONTENT] li idx=%d: INJECT '%s'\n", idx, after_content);
         layout_inject_generated_after(ctx, idx, after_content);
+    } else if (dbg_content) {
+        fprintf(stderr, "[CONTENT] li idx=%d: no content (set=%d)\n", idx, (int)after_set);
+    }
 }
 
 typedef struct StyleApplyChunk {
@@ -3386,7 +3424,10 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
                     /* Split the run at a word boundary only when its first
                      * word (with any leading spaces) fits in the remaining
                      * sliver; otherwise push the whole run to the next
-                     * line.  Browsers split whenever a word fits. */
+                     * line.  Browsers split whenever a word fits.  A first
+                     * word that is itself too wide may still start the line
+                     * when a hyphen prefix of it fits (UAX #14 break-after-
+                     * hyphen), because the shaper will split it there. */
                     const char *we = text;
                     while (*we == ' ' || *we == '\t' || *we == '\n') we++;
                     while (*we && *we != ' ' && *we != '\t' && *we != '\n') we++;
@@ -3398,6 +3439,36 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
                     double fww = 0.0, fwh = 0.0;
                     bool fw_ok = layout_measure_text_styled(child, first_word,
                                                             fs, &fww, &fwh);
+                    if (fw_ok && fww > first_w + 0.001) {
+                        /* Try hyphen prefixes (longest first that fits). */
+                        char *last_hyphen = NULL;
+                        for (char *hp = first_word; *hp; hp++) {
+                            if (*hp == '-' && hp[1] &&
+                                ((hp[1] >= 'a' && hp[1] <= 'z') ||
+                                 (hp[1] >= 'A' && hp[1] <= 'Z') ||
+                                 (unsigned char)hp[1] >= 0x80))
+                                last_hyphen = hp;
+                        }
+                        while (last_hyphen) {
+                            char saved = last_hyphen[1];
+                            last_hyphen[1] = '\0';
+                            double pw = 0.0;
+                            bool ok = layout_measure_text_styled(child, first_word,
+                                                                 fs, &pw, NULL);
+                            if (ok && pw <= first_w + 0.001) { fw_ok = true; fww = pw; break; }
+                            last_hyphen[1] = saved;
+                            /* find an earlier hyphen */
+                            char *prev = NULL;
+                            for (char *hp = first_word; hp < last_hyphen; hp++) {
+                                if (*hp == '-' && hp[1] &&
+                                    ((hp[1] >= 'a' && hp[1] <= 'z') ||
+                                     (hp[1] >= 'A' && hp[1] <= 'Z') ||
+                                     (unsigned char)hp[1] >= 0x80))
+                                    prev = hp;
+                            }
+                            last_hyphen = prev;
+                        }
+                    }
                     if (!fw_ok || fww > first_w + 0.001) {
                         /* First word doesn't fit: finish the current line
                          * first (alignment applies). */

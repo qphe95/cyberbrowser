@@ -333,6 +333,81 @@ static float ts_measure_span(const TextShaper *s, const char *start, const char 
     return x;
 }
 
+/* Letter test for hyphen break opportunities: ASCII letters plus a coarse
+ * non-ASCII approximation (anything outside ASCII that is not a dash/quote
+ * or an Arabic-Indic digit).  Good enough for Latin/CJK text; digits are
+ * deliberately excluded so number ranges like "2018-19" never split. */
+static bool ts_is_letter(uint32_t cp)
+{
+    if ((cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z')) return true;
+    if (cp >= 0x80) {
+        if (cp >= 0x2010 && cp <= 0x2027) return false;  /* dashes, quotes */
+        if ((cp >= 0x0660 && cp <= 0x0669) || (cp >= 0x06F0 && cp <= 0x06F9))
+            return false;  /* Arabic-Indic digits */
+        if (cp >= 0xFF10 && cp <= 0xFF19) return false;  /* fullwidth digits */
+        return true;
+    }
+    return false;
+}
+
+/* Find the best hyphen break point inside [word_start, word_end) that fits
+ * `avail` pixels: the longest prefix ending immediately after a hyphen
+ * (U+002D/U+2010/U+2013) that is followed by a letter, per UAX #14's
+ * break-after-hyphen rule.  Returns NULL when no such prefix fits. */
+static const char *ts_find_hyphen_break(const TextShaper *s,
+                                        const char *word_start,
+                                        const char *word_end,
+                                        float avail, float scale)
+{
+    const char *best = NULL;
+    const char *q = word_start;
+    while (q < word_end) {
+        uint32_t c2 = utf8_decode(&q);
+        if (c2 == 0) break;
+        if ((c2 == '-' || c2 == 0x2010 || c2 == 0x2013) && q < word_end) {
+            const char *nq = q;
+            uint32_t nc = utf8_decode(&nq);
+            if (nc != 0 && ts_is_letter(nc)) {
+                float pw = ts_measure_span(s, word_start, q) * scale;
+                if (pw <= avail + 0.001f) best = q;
+                else break;  /* longer prefixes cannot fit either */
+            }
+        }
+    }
+    return best;
+}
+
+/* Emit glyphs for one span [gp, gend) advancing *pen_x.  Baseline gy is
+ * precomputed by the caller (CSS strut model). */
+static bool ts_emit_span_glyphs(const TextShaper *s, const char *gp,
+                                const char *gend, float *pen_x, float gy,
+                                float scale, int *prev_glyph,
+                                float r, float g, float b, float a,
+                                DisplayList *dl)
+{
+    while (gp < gend) {
+        uint32_t gc = utf8_decode(&gp);
+        if (gc == 0) break;
+        if (gc < 0x20 && gc != ' ') continue; /* control chars: no glyph */
+        GlyphEntry *ge = ensure_glyph((TextShaper *)s, gc);
+        if (!ge) continue;
+        if (*prev_glyph >= 0) {
+            *pen_x += (float)stbtt_GetGlyphKernAdvance(&s->font, *prev_glyph,
+                                                       ge->glyph_index) * s->scale * scale;
+        }
+        float gx = *pen_x + ge->xoff * scale;
+        float gyy = gy + ge->yoff * scale;
+        if (!display_list_add_glyph(dl, gx, gyy, (float)ge->bw * scale, (float)ge->bh * scale,
+                                    ge->u0, ge->v0, ge->u1, ge->v1,
+                                    (uint32_t)ge->glyph_index, r, g, b, a)) {
+            return false;
+        }
+        *pen_x += ge->xadvance * scale;
+        *prev_glyph = ge->glyph_index;
+    }
+    return true;
+}
+
 /* Shared word-wrap walker.  When emit is false this only measures.  Words are
  * maximal runs of non-space codepoints plus their trailing spaces; a line is
  * never broken before its first word. */
@@ -392,7 +467,77 @@ static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
         }
         float word_w = ts_measure_span(s, word_start, word_end) * scale;
         float word_fit_w = ts_measure_span(s, word_start, trim_end) * scale;
+        bool at_line_start = (pen_x <= line_start_x + 0.001f);
+        /* UAX #14 hyphen break, case B: at a line start (including a run
+         * that begins in a narrow sliver, e.g. a link starting mid-line that
+         * the layout pushed to wrap mode) a word too wide for the whole line
+         * still breaks at a hyphen when a prefix fits — Chrome splits
+         * "comic-book" as "comic-"/"book" rather than overflowing. */
+        if (at_line_start && word_fit_w > limit + 0.001f) {
+            const char *bp = ts_find_hyphen_break(s, word_start, word_end,
+                                                  limit, scale);
+            if (bp && bp > word_start) {
+                float half_leading = (line_advance - s->size_pixels * scale) * 0.5f;
+                if (half_leading < 0.0f) half_leading = 0.0f;
+                float gy = pen_y + half_leading + s->baseline * scale;
+                if (emit) {
+                    if (!ts_emit_span_glyphs(s, word_start, bp, &pen_x, gy,
+                                             scale, &prev_glyph, r, g, b, a, dl))
+                        return false;
+                } else {
+                    pen_x += ts_measure_span(s, word_start, bp) * scale;
+                }
+                float used = pen_x - line_start_x;
+                if (used > max_width) max_width = used;
+                lines++;
+                float cx = (cont2_from_line > 1 && lines >= cont2_from_line)
+                         ? cont2_x : cont_x;
+                float cw = (cont2_from_line > 1 && lines >= cont2_from_line)
+                         ? cont2_width : cont_width;
+                pen_x = cx;
+                pen_y += line_advance;
+                line_start_x = cx;
+                limit = cw;
+                prev_glyph = -1;
+                word_start = bp;
+                word_w = ts_measure_span(s, word_start, word_end) * scale;
+                /* fall through: emit the remainder on the fresh line */
+            }
+        }
         if (pen_x > line_start_x + 0.001f && pen_x - line_start_x + word_fit_w > limit) {
+            /* UAX #14 hyphen break, case A: the word doesn't fit the rest of
+             * the line, but a prefix ending right after a hyphen does — break
+             * there instead of wrapping the whole word. */
+            const char *bp = ts_find_hyphen_break(s, word_start, word_end,
+                                                  limit - (pen_x - line_start_x),
+                                                  scale);
+            if (bp && bp > word_start) {
+                float half_leading = (line_advance - s->size_pixels * scale) * 0.5f;
+                if (half_leading < 0.0f) half_leading = 0.0f;
+                float gy = pen_y + half_leading + s->baseline * scale;
+                if (emit) {
+                    if (!ts_emit_span_glyphs(s, word_start, bp, &pen_x, gy,
+                                             scale, &prev_glyph, r, g, b, a, dl))
+                        return false;
+                } else {
+                    pen_x += ts_measure_span(s, word_start, bp) * scale;
+                }
+                float used = pen_x - line_start_x;
+                if (used > max_width) max_width = used;
+                lines++;
+                float cx = (cont2_from_line > 1 && lines >= cont2_from_line)
+                         ? cont2_x : cont_x;
+                float cw = (cont2_from_line > 1 && lines >= cont2_from_line)
+                         ? cont2_width : cont_width;
+                pen_x = cx;
+                pen_y += line_advance;
+                line_start_x = cx;
+                limit = cw;
+                prev_glyph = -1;
+                word_start = bp;
+                word_w = ts_measure_span(s, word_start, word_end) * scale;
+                /* fall through: emit the remainder on the fresh line */
+            } else {
             /* Wrap to the next line before this word.  Skip a leading space
              * on the new line: it belongs to the end of the old line. */
             float used = pen_x - line_start_x;
@@ -417,6 +562,7 @@ static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
                 else break;
             }
             word_w = ts_measure_span(s, word_start, word_end) * scale;
+            }
         }
 
         /* Emit glyphs for [word_start, word_end).  Baseline placement follows
