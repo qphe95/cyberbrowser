@@ -29,13 +29,12 @@ add_executable(test-interrupt
 target_compile_features(test-interrupt PRIVATE cxx_std_11)
 target_include_directories(test-interrupt
     PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src
-        ${CMAKE_SOURCE_DIR}/third_party/quickjs
+        ${CMAKE_SOURCE_DIR}/src/quickjs
 )
 target_link_libraries(test-interrupt PRIVATE cyberbrowser_lib)
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    target_include_directories(test-interrupt BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
+    target_include_directories(test-interrupt BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/src/win32)
 endif()
 
 # Live YouTube fetch test (fetches fresh data from youtube.com)
@@ -51,23 +50,20 @@ target_compile_features(youtube-live-fetch-test PRIVATE cxx_std_11)
 # Include directories
 target_include_directories(cyberbrowser-tests
     PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src
-        ${CMAKE_SOURCE_DIR}/third_party/quickjs
+        ${CMAKE_SOURCE_DIR}/src/quickjs
 )
 
 target_include_directories(youtube-data-test
     PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src
-        ${CMAKE_SOURCE_DIR}/third_party/quickjs
+        ${CMAKE_SOURCE_DIR}/src/quickjs
 )
 
 target_include_directories(youtube-live-fetch-test
     PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src
-        ${CMAKE_SOURCE_DIR}/third_party/quickjs
+        ${CMAKE_SOURCE_DIR}/src/quickjs
 )
 
 # Link with the library
@@ -104,9 +100,8 @@ add_executable(atom-cache-bench
 target_compile_features(atom-cache-bench PRIVATE cxx_std_11)
 target_include_directories(atom-cache-bench
     PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src
-        ${CMAKE_SOURCE_DIR}/third_party/quickjs
+        ${CMAKE_SOURCE_DIR}/src/quickjs
 )
 target_link_libraries(atom-cache-bench
     PRIVATE
@@ -115,10 +110,10 @@ target_link_libraries(atom-cache-bench
 
 # Windows compatibility headers
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    target_include_directories(cyberbrowser-tests BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
-    target_include_directories(youtube-data-test BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
-    target_include_directories(youtube-live-fetch-test BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
-    target_include_directories(atom-cache-bench BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
+    target_include_directories(cyberbrowser-tests BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/src/win32)
+    target_include_directories(youtube-data-test BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/src/win32)
+    target_include_directories(youtube-live-fetch-test BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/src/win32)
+    target_include_directories(atom-cache-bench BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/src/win32)
 endif()
 
 # Long video analysis test
@@ -133,16 +128,15 @@ add_executable(analyze-long-video-test
 target_compile_features(analyze-long-video-test PRIVATE cxx_std_11)
 target_include_directories(analyze-long-video-test
     PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src
-        ${CMAKE_SOURCE_DIR}/third_party/quickjs
+        ${CMAKE_SOURCE_DIR}/src/quickjs
 )
 target_link_libraries(analyze-long-video-test
     PRIVATE
         cyberbrowser_lib
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    target_include_directories(analyze-long-video-test BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
+    target_include_directories(analyze-long-video-test BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/src/win32)
 endif()
 
 # YouTubei API probe (no QuickJS)
@@ -167,16 +161,15 @@ add_executable(test-youtubei-get
 target_compile_features(test-youtubei-get PRIVATE cxx_std_11)
 target_include_directories(test-youtubei-get
     PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src
-        ${CMAKE_SOURCE_DIR}/third_party/quickjs
+        ${CMAKE_SOURCE_DIR}/src/quickjs
 )
 target_link_libraries(test-youtubei-get
     PRIVATE
         cyberbrowser_lib
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    target_include_directories(test-youtubei-get BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
+    target_include_directories(test-youtubei-get BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/src/win32)
 endif()
 
 # Simple youtubei POST test
@@ -186,16 +179,15 @@ add_executable(test-youtubei-post
 target_compile_features(test-youtubei-post PRIVATE cxx_std_11)
 target_include_directories(test-youtubei-post
     PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src
-        ${CMAKE_SOURCE_DIR}/third_party/quickjs
+        ${CMAKE_SOURCE_DIR}/src/quickjs
 )
 target_link_libraries(test-youtubei-post
     PRIVATE
         cyberbrowser_lib
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    target_include_directories(test-youtubei-post BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
+    target_include_directories(test-youtubei-post BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/src/win32)
 endif()
 
 # Watch page then youtubei test
@@ -205,16 +197,15 @@ add_executable(test-watch-then-youtubei
 target_compile_features(test-watch-then-youtubei PRIVATE cxx_std_11)
 target_include_directories(test-watch-then-youtubei
     PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src
-        ${CMAKE_SOURCE_DIR}/third_party/quickjs
+        ${CMAKE_SOURCE_DIR}/src/quickjs
 )
 target_link_libraries(test-watch-then-youtubei
     PRIVATE
         cyberbrowser_lib
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    target_include_directories(test-watch-then-youtubei BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
+    target_include_directories(test-watch-then-youtubei BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/src/win32)
 endif()
 
 # Two GETs test
@@ -224,16 +215,15 @@ add_executable(test-two-gets
 target_compile_features(test-two-gets PRIVATE cxx_std_11)
 target_include_directories(test-two-gets
     PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src
-        ${CMAKE_SOURCE_DIR}/third_party/quickjs
+        ${CMAKE_SOURCE_DIR}/src/quickjs
 )
 target_link_libraries(test-two-gets
     PRIVATE
         cyberbrowser_lib
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    target_include_directories(test-two-gets BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
+    target_include_directories(test-two-gets BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/src/win32)
 endif()
 
 # Two TLS connections test
@@ -243,23 +233,22 @@ add_executable(test-two-tls
 target_compile_features(test-two-tls PRIVATE cxx_std_11)
 target_include_directories(test-two-tls
     PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src
-        ${CMAKE_SOURCE_DIR}/third_party/quickjs
-        ${CMAKE_SOURCE_DIR}/third_party/mbedtls/include
-        ${CMAKE_SOURCE_DIR}/third_party/mbedtls
-        ${CMAKE_SOURCE_DIR}/third_party/mbedtls/tf-psa-crypto/include
-        ${CMAKE_SOURCE_DIR}/third_party/mbedtls/tf-psa-crypto
-        ${CMAKE_SOURCE_DIR}/third_party/mbedtls/tf-psa-crypto/core
-        ${CMAKE_SOURCE_DIR}/third_party/mbedtls/tf-psa-crypto/drivers/builtin/include
-        ${CMAKE_SOURCE_DIR}/third_party/mbedtls/tf-psa-crypto/drivers/builtin/src
+        ${CMAKE_SOURCE_DIR}/src/quickjs
+        ${CMAKE_SOURCE_DIR}/src/mbedtls/include
+        ${CMAKE_SOURCE_DIR}/src/mbedtls
+        ${CMAKE_SOURCE_DIR}/src/mbedtls/tf-psa-crypto/include
+        ${CMAKE_SOURCE_DIR}/src/mbedtls/tf-psa-crypto
+        ${CMAKE_SOURCE_DIR}/src/mbedtls/tf-psa-crypto/core
+        ${CMAKE_SOURCE_DIR}/src/mbedtls/tf-psa-crypto/drivers/builtin/include
+        ${CMAKE_SOURCE_DIR}/src/mbedtls/tf-psa-crypto/drivers/builtin/src
 )
 target_link_libraries(test-two-tls
     PRIVATE
         cyberbrowser_lib
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    target_include_directories(test-two-tls BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
+    target_include_directories(test-two-tls BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/src/win32)
 endif()
 
 # Googlevideo connect test
@@ -269,16 +258,15 @@ add_executable(test-googlevideo-http
 target_compile_features(test-googlevideo-http PRIVATE cxx_std_11)
 target_include_directories(test-googlevideo-http
     PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src
-        ${CMAKE_SOURCE_DIR}/third_party/quickjs
+        ${CMAKE_SOURCE_DIR}/src/quickjs
 )
 target_link_libraries(test-googlevideo-http
     PRIVATE
         cyberbrowser_lib
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    target_include_directories(test-googlevideo-http BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
+    target_include_directories(test-googlevideo-http BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/src/win32)
 endif()
 
 # Googlevideo file download test
@@ -288,90 +276,84 @@ add_executable(test-googlevideo-file
 target_compile_features(test-googlevideo-file PRIVATE cxx_std_11)
 target_include_directories(test-googlevideo-file
     PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src
-        ${CMAKE_SOURCE_DIR}/third_party/quickjs
+        ${CMAKE_SOURCE_DIR}/src/quickjs
 )
 target_link_libraries(test-googlevideo-file
     PRIVATE
         cyberbrowser_lib
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    target_include_directories(test-googlevideo-file BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
+    target_include_directories(test-googlevideo-file BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/src/win32)
 endif()
 target_compile_features(long-video-test PRIVATE cxx_std_11)
 target_include_directories(long-video-test
     PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src
-        ${CMAKE_SOURCE_DIR}/third_party/quickjs
+        ${CMAKE_SOURCE_DIR}/src/quickjs
 )
 target_link_libraries(long-video-test
     PRIVATE
         cyberbrowser_lib
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    target_include_directories(long-video-test BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
+    target_include_directories(long-video-test BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/src/win32)
 endif()
 
 target_compile_features(analyze-long-video-test PRIVATE cxx_std_11)
 target_include_directories(analyze-long-video-test
     PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src
-        ${CMAKE_SOURCE_DIR}/third_party/quickjs
+        ${CMAKE_SOURCE_DIR}/src/quickjs
 )
 target_link_libraries(analyze-long-video-test
     PRIVATE
         cyberbrowser_lib
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    target_include_directories(analyze-long-video-test BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
+    target_include_directories(analyze-long-video-test BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/src/win32)
 endif()
 
 target_compile_features(youtubei-probe PRIVATE cxx_std_11)
 target_include_directories(youtubei-probe
     PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src
-        ${CMAKE_SOURCE_DIR}/third_party/quickjs
+        ${CMAKE_SOURCE_DIR}/src/quickjs
 )
 target_link_libraries(youtubei-probe
     PRIVATE
         cyberbrowser_lib
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    target_include_directories(youtubei-probe BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
+    target_include_directories(youtubei-probe BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/src/win32)
 endif()
 
 target_compile_features(browser-emulation-test PRIVATE cxx_std_11)
 target_include_directories(browser-emulation-test
     PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src
-        ${CMAKE_SOURCE_DIR}/third_party/quickjs
+        ${CMAKE_SOURCE_DIR}/src/quickjs
 )
 target_link_libraries(browser-emulation-test
     PRIVATE
         cyberbrowser_lib
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    target_include_directories(browser-emulation-test BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
+    target_include_directories(browser-emulation-test BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/src/win32)
 endif()
 
 target_compile_features(fetch-visitor-data-test PRIVATE cxx_std_11)
 target_include_directories(fetch-visitor-data-test
     PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src
-        ${CMAKE_SOURCE_DIR}/third_party/quickjs
+        ${CMAKE_SOURCE_DIR}/src/quickjs
 )
 target_link_libraries(fetch-visitor-data-test
     PRIVATE
         cyberbrowser_lib
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    target_include_directories(fetch-visitor-data-test BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/include/win32)
+    target_include_directories(fetch-visitor-data-test BEFORE PRIVATE ${CMAKE_SOURCE_DIR}/src/win32)
 endif()
 
 # CLI downloader tool (macOS/Linux/Windows)
@@ -382,9 +364,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR 
     target_compile_features(bgmdwnldr PRIVATE cxx_std_11)
     target_include_directories(bgmdwnldr
         PRIVATE
-            ${CMAKE_SOURCE_DIR}/include
             ${CMAKE_SOURCE_DIR}/src
-            ${CMAKE_SOURCE_DIR}/third_party/quickjs
+            ${CMAKE_SOURCE_DIR}/src/quickjs
     )
     target_link_libraries(bgmdwnldr
         PRIVATE

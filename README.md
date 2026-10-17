@@ -96,17 +96,19 @@ open app/build_macos/BGMDWLDR.app
 ```
 cyberbrowser/
 ├── cyberbrowser/              # Custom browser emulation library
-│   ├── src/
+│   ├── src/                   # All source code and headers
 │   │   ├── js_quickjs.cpp     # QuickJS JS engine integration
 │   │   ├── html_media_extract.cpp
 │   │   ├── browser/           # Split browser API implementations
 │   │   ├── http_download.c
-│   │   └── platform/          # macOS/Linux/Windows abstractions
-│   ├── include/               # Public headers
-│   ├── tests/
-│   └── third_party/
-│       ├── quickjs/           # QuickJS JavaScript engine (MIT)
-│       └── mbedtls/           # TLS/SSL library (Apache 2.0)
+│   │   ├── platform/          # macOS/Linux/Windows abstractions
+│   │   ├── win32/             # Windows shims for POSIX headers
+│   │   ├── quickjs/           # QuickJS JavaScript engine (MIT)
+│   │   ├── mbedtls/           # TLS/SSL library (Apache 2.0)
+│   │   └── stb/, nanosvg/, minimp4/   # Single-header libraries
+│   ├── fonts/                 # Fonts loaded at runtime
+│   ├── shaders/
+│   └── tests/
 │
 ├── build.sh                   # MSVC build wrapper
 ├── build_macos_app.sh         # macOS build script (legacy)

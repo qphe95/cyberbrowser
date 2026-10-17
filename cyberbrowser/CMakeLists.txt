@@ -95,22 +95,22 @@ endif()
 
 # QuickJS sources
 set(QUICKJS_SOURCES
-    third_party/quickjs/quickjs.cpp
-    third_party/quickjs/libregexp.c
-    third_party/quickjs/libunicode.c
-    third_party/quickjs/cutils.c
-    third_party/quickjs/dtoa.c
-    third_party/quickjs/quickjs_gc_unified.cpp
-    third_party/quickjs/js_atom_cache.c
-    third_party/quickjs/js_fast_dispatch.c
+    src/quickjs/quickjs.cpp
+    src/quickjs/libregexp.c
+    src/quickjs/libunicode.c
+    src/quickjs/cutils.c
+    src/quickjs/dtoa.c
+    src/quickjs/quickjs_gc_unified.cpp
+    src/quickjs/js_atom_cache.c
+    src/quickjs/js_fast_dispatch.c
 )
 
 # mbedtls sources (for TLS on macOS/Linux)
 if(BE_PLATFORM_MACOS OR BE_PLATFORM_LINUX OR BE_PLATFORM_WINDOWS)
     file(GLOB MBEDTLS_SOURCES 
-        third_party/mbedtls/library/*.c
-        third_party/mbedtls/tf-psa-crypto/core/*.c
-        third_party/mbedtls/tf-psa-crypto/drivers/builtin/src/*.c
+        src/mbedtls/library/*.c
+        src/mbedtls/tf-psa-crypto/core/*.c
+        src/mbedtls/tf-psa-crypto/drivers/builtin/src/*.c
     )
     list(FILTER MBEDTLS_SOURCES EXCLUDE REGEX "mbedtls_config\\.c$")
 endif()
@@ -134,26 +134,26 @@ endif()
 # =============================================================================
 target_include_directories(cyberbrowser_lib
     PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/quickjs
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/minimp4
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nanosvg
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/tf-psa-crypto/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/tf-psa-crypto
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/tf-psa-crypto/core
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/tf-psa-crypto/drivers/builtin/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/tf-psa-crypto/drivers/builtin/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/quickjs
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/minimp4
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/stb
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/nanosvg
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mbedtls/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mbedtls
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mbedtls/tf-psa-crypto/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mbedtls/tf-psa-crypto
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mbedtls/tf-psa-crypto/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mbedtls/tf-psa-crypto/drivers/builtin/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mbedtls/tf-psa-crypto/drivers/builtin/src
 )
 
 if(BE_PLATFORM_WINDOWS)
     target_include_directories(cyberbrowser_lib BEFORE PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include/win32
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/win32
     )
 endif()
 
@@ -256,10 +256,9 @@ target_compile_features(cyberbrowser PRIVATE cxx_std_11)
 
 target_include_directories(cyberbrowser
     PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/quickjs
-        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/quickjs
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/stb
 )
 
 target_link_libraries(cyberbrowser
@@ -269,7 +268,7 @@ target_link_libraries(cyberbrowser
 
 if(BE_PLATFORM_WINDOWS)
     target_include_directories(cyberbrowser BEFORE PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include/win32
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/win32
     )
     # Give the main executable the same generous C stack that the test
     # executables use.  YouTube's minified bundles can recurse deeply
@@ -296,10 +295,9 @@ if(BE_PLATFORM_WINDOWS)
 
     target_include_directories(flamegraph_viewer
         PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/include
             ${CMAKE_CURRENT_SOURCE_DIR}/src
-            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/quickjs
-            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/quickjs
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/stb
             ${CMAKE_CURRENT_SOURCE_DIR}/shaders
     )
 
@@ -338,7 +336,34 @@ install(TARGETS cyberbrowser_lib
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
-install(DIRECTORY include/
+# Public headers (formerly include/, now alongside the sources in src/)
+install(FILES
+    src/browser_api_impl.h
+    src/browser_api_impl_handles.h
+    src/browser_api_impl_internal.h
+    src/browser_api_impl_types.h
+    src/css_layout.h
+    src/css_parser.h
+    src/cyber_profile.h
+    src/display_list.h
+    src/gc_handle_access.h
+    src/gc_value_helpers.h
+    src/html_dom.h
+    src/html_media_extract.h
+    src/http_download.h
+    src/image_cache.h
+    src/js_quickjs.h
+    src/lockfree_hash_table.h
+    src/platform.h
+    src/preorder_compaction_array.h
+    src/session_state.h
+    src/text_shaper.h
+    src/tls_client.h
+    src/url_analyzer.h
+    src/url_utils.h
+    src/utf8_filename.h
+    src/vulkan_font_stub.h
+    src/win32_compat.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 

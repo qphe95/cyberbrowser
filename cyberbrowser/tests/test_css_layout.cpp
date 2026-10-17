@@ -383,10 +383,10 @@ TEST(test_layout_img_display_list) {
 
 TEST(test_text_shaper_basic) {
     const char *paths[] = {
-        "cyberbrowser/third_party/fonts/Roboto-Regular.ttf",
-        "../../third_party/fonts/Roboto-Regular.ttf",
-        "../third_party/fonts/Roboto-Regular.ttf",
-        "third_party/fonts/Roboto-Regular.ttf",
+        "cyberbrowser/fonts/Roboto-Regular.ttf",
+        "../../fonts/Roboto-Regular.ttf",
+        "../fonts/Roboto-Regular.ttf",
+        "fonts/Roboto-Regular.ttf",
         NULL
     };
     TextShaper *shaper = NULL;

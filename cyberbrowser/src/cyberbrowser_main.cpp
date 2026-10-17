@@ -744,10 +744,10 @@ static bool render_display_list_to_jpg(const DisplayList *dl, const char *path,
 static void register_font_table(void)
 {
     static const char *rel_dirs[] = {
-        "cyberbrowser/third_party/fonts/",
-        "third_party/fonts/",
-        "../third_party/fonts/",
-        "../../third_party/fonts/",
+        "cyberbrowser/fonts/",
+        "fonts/",
+        "../fonts/",
+        "../../fonts/",
         NULL
     };
     static const char *slot_files[DL_FONT_SLOTS] = {

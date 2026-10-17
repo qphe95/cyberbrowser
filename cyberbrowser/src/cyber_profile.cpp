@@ -266,10 +266,10 @@ typedef struct {
 
 static void fg_font_load(FgFont *fnt) {
     static const char *paths[] = {
-        "cyberbrowser/third_party/fonts/Roboto-Regular.ttf",
-        "third_party/fonts/Roboto-Regular.ttf",
-        "../third_party/fonts/Roboto-Regular.ttf",
-        "../../third_party/fonts/Roboto-Regular.ttf",
+        "cyberbrowser/fonts/Roboto-Regular.ttf",
+        "fonts/Roboto-Regular.ttf",
+        "../fonts/Roboto-Regular.ttf",
+        "../../fonts/Roboto-Regular.ttf",
         NULL
     };
     memset(fnt, 0, sizeof(*fnt));
