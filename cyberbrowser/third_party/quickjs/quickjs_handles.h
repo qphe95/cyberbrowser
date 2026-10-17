@@ -187,11 +187,23 @@
 /* Read a field. Not null-safe (matches the old fast path). */
 #define SAFE_GET(handle, HType, field) (GC_DEREF_H(handle, HType)->field)
 
+/* Declared type of a struct field, used so the SAFE_SET family can evaluate
+ * the value *before* dereferencing the handle. The value expression may
+ * allocate (and so move objects); dereferencing first would leave _p stale,
+ * and SAFE_SET_HANDLE/VALUE would also evaluate `value` twice. The old
+ * methods were safe here because C++ evaluates arguments before the call. */
+#ifdef __cplusplus
+#define GC_FIELD_TYPE(HType, field) decltype(((GC_STRUCT_OF(HType) *)0)->field)
+#else
+#define GC_FIELD_TYPE(HType, field) __typeof__(((GC_STRUCT_OF(HType) *)0)->field)
+#endif
+
 /* Write a plain (non-GC) field. */
 #define SAFE_SET(handle, HType, field, value) \
     do { \
+        GC_FIELD_TYPE(HType, field) _v = (value); \
         GC_STRUCT_OF(HType) *_p = GC_DEREF_H(handle, HType); \
-        if (_p) _p->field = (value); \
+        if (_p) _p->field = _v; \
     } while (0)
 
 /* Lvalue reference to a field (e.g. to take its address). */
@@ -207,20 +219,22 @@
 /* Write a GCHandle field and run the heap-slot write barrier. */
 #define SAFE_SET_HANDLE(handle, HType, field, value) \
     do { \
+        GC_FIELD_TYPE(HType, field) _v = (value); \
         GC_STRUCT_OF(HType) *_p = GC_DEREF_H(handle, HType); \
         if (_p) { \
-            _p->field = (value); \
-            GC_WRITE_BARRIER_HEAP_HANDLE(&_p->field, (value)); \
+            _p->field = _v; \
+            GC_WRITE_BARRIER_HEAP_HANDLE(&_p->field, _v); \
         } \
     } while (0)
 
 /* Write a GCValue field and run the heap-slot write barrier. */
 #define SAFE_SET_VALUE(handle, HType, field, value) \
     do { \
+        GC_FIELD_TYPE(HType, field) _v = (value); \
         GC_STRUCT_OF(HType) *_p = GC_DEREF_H(handle, HType); \
         if (_p) { \
-            _p->field = (value); \
-            GC_WRITE_BARRIER_HEAP_VALUE(&_p->field, (value)); \
+            _p->field = _v; \
+            GC_WRITE_BARRIER_HEAP_VALUE(&_p->field, _v); \
         } \
     } while (0)
 

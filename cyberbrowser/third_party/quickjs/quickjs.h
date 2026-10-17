@@ -1953,4 +1953,9 @@ struct JSStringRope {
 #define JS_VALUE_GET_BIGINT_HANDLE(val)         (GC_VALUE_GET_HANDLE(val))
 #define JS_MKBIGINT(h)                          GC_MKHANDLE(JS_TAG_BIG_INT, (h))
 
+/* C helpers replacing the non-trivial methods of the old handle classes
+ * (js_rt_atom_size(), js_obj_shape_handle(), ...). Included last because
+ * they need the complete struct definitions above. */
+#include "quickjs_handle_helpers.h"
+
 #endif /* QUICKJS_H */

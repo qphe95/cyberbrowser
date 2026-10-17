@@ -21,9 +21,9 @@ extern "C" JSContextHandle get_shared_test_context(void);
 /* Helper to get the shared test context */
 static JSContextHandle get_test_context(void) {
     JSContextHandle ctx = get_shared_test_context();
-    if (!ctx.valid()) {
+    if (!SAFE_VALID(ctx)) {
         printf("    ERROR: Shared context not available\n");
-        return JSContextHandle();
+        return GC_HANDLE_NULL;
     }
     return ctx;
 }
@@ -32,7 +32,7 @@ TEST(test_simple_iife) {
     printf("    Testing simple IIFE...\n");
     
     JSContextHandle ctx = get_test_context();
-    if (!ctx.valid()) {
+    if (!SAFE_VALID(ctx)) {
         return false;
     }
     
@@ -61,7 +61,7 @@ TEST(test_nested_function_in_iife) {
     printf("    Testing nested function in IIFE capturing argument...\n");
     
     JSContextHandle ctx = get_test_context();
-    if (!ctx.valid()) {
+    if (!SAFE_VALID(ctx)) {
         return false;
     }
     
@@ -95,7 +95,7 @@ TEST(test_deeply_nested_iife) {
     printf("    Testing deeply nested IIFE (3 levels)...\n");
     
     JSContextHandle ctx = get_test_context();
-    if (!ctx.valid()) {
+    if (!SAFE_VALID(ctx)) {
         return false;
     }
     
@@ -133,7 +133,7 @@ TEST(test_web_animations_like_pattern) {
     printf("    Testing Web Animations-like pattern...\n");
     
     JSContextHandle ctx = get_test_context();
-    if (!ctx.valid()) {
+    if (!SAFE_VALID(ctx)) {
         return false;
     }
     
@@ -179,7 +179,7 @@ TEST(test_closure_with_multiple_captures) {
     printf("    Testing closure with multiple captures...\n");
     
     JSContextHandle ctx = get_test_context();
-    if (!ctx.valid()) {
+    if (!SAFE_VALID(ctx)) {
         return false;
     }
     
@@ -216,7 +216,7 @@ TEST(test_iife_with_local_var_capture) {
     printf("    Testing IIFE with local variable capture...\n");
     
     JSContextHandle ctx = get_test_context();
-    if (!ctx.valid()) {
+    if (!SAFE_VALID(ctx)) {
         return false;
     }
     
@@ -253,7 +253,7 @@ TEST(test_many_nested_functions) {
     printf("    Testing many nested functions in IIFE...\n");
     
     JSContextHandle ctx = get_test_context();
-    if (!ctx.valid()) {
+    if (!SAFE_VALID(ctx)) {
         return false;
     }
     

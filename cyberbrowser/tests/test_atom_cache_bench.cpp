@@ -60,7 +60,7 @@ int main(int argc, char *argv[]) {
     double elapsed = (end - start) / (double)CLOCKS_PER_SEC;
     
     /* Get cache stats */
-    JSContext *p = (JSContext*)gc_deref(ctx.handle());
+    JSContext *p = (JSContext*)gc_deref(SAFE_HANDLE(ctx));
     uint32_t hits, misses;
     js_atom_cache_stats(&p->atom_cache, &hits, &misses);
     

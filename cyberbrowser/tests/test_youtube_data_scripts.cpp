@@ -109,8 +109,8 @@ typedef struct {
 } ScriptEntry;
 
 /* Global state - standalone runtime and context */
-static JSRuntimeHandle g_rt;
-static JSContextHandle g_ctx;
+static JSRuntimeHandle g_rt = GC_HANDLE_NULL;
+static JSContextHandle g_ctx = GC_HANDLE_NULL;
 static GCValue g_global;
 
 /* Comparison function for sorting scripts by index */
@@ -196,7 +196,7 @@ static bool init_test_context(void) {
     
     /* Create runtime */
     g_rt = JS_NewRuntime();
-    if (!g_rt.valid()) {
+    if (!SAFE_VALID(g_rt)) {
         printf("    ERROR: JS_NewRuntime() failed\n");
         return false;
     }
@@ -212,7 +212,7 @@ static bool init_test_context(void) {
     
     /* Create context */
     g_ctx = JS_NewContext(g_rt);
-    if (!g_ctx.valid()) {
+    if (!SAFE_VALID(g_ctx)) {
         printf("    ERROR: JS_NewContext() failed\n");
         return false;
     }
@@ -256,10 +256,10 @@ static bool init_test_context(void) {
 static void cleanup_test_context(void) {
     extern JSRuntimeHandle g_js_runtime;
     extern JSContextHandle g_js_context;
-    g_js_runtime = JSRuntimeHandle();
-    g_js_context = JSContextHandle();
+    g_js_runtime = GC_HANDLE_NULL;
+    g_js_context = GC_HANDLE_NULL;
     
-    if (g_rt.valid()) {
+    if (SAFE_VALID(g_rt)) {
         JS_FreeRuntime(g_rt);
     }
 }
@@ -490,7 +490,7 @@ static bool test_youtube_globals_exist(void) {
     printf("    Using existing context from previous test\n");
     
     /* Context should already be initialized from first test */
-    if (!g_ctx.valid()) {
+    if (!SAFE_VALID(g_ctx)) {
         printf("    ERROR: Context not initialized\n");
         return false;
     }
@@ -561,7 +561,7 @@ static void test_url_capture_callback(const char *url) {
 static bool test_youtube_url_decryption_with_hooks(void) {
     printf("    Using existing context from previous test\n");
     
-    if (!g_ctx.valid()) {
+    if (!SAFE_VALID(g_ctx)) {
         printf("    ERROR: Context not initialized\n");
         return false;
     }

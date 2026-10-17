@@ -684,7 +684,7 @@ extern GCValue js_video_constructor(JSContextHandle ctx, GCValue new_target, int
 
 /* Create a JavaScript element for a given tag */
 GCValue html_create_element_js(JSContextHandle ctx, const char *tag_name, HtmlAttribute *attrs) {
-    if (!tag_name || !ctx) return JS_NULL;
+    if (!tag_name || !SAFE_VALID(ctx)) return JS_NULL;
     
     GCValue element;
     
@@ -781,7 +781,7 @@ GCValue html_create_element_js(JSContextHandle ctx, const char *tag_name, HtmlAt
  * This ensures elements get proper DOM prototypes (Element, HTMLElement, etc.)
  * rather than plain objects. */
 GCValue html_create_element_js_with_document(JSContextHandle ctx, GCValue js_doc, const char *tag_name, HtmlAttribute *attrs) {
-    if (!tag_name || !ctx) return JS_NULL;
+    if (!tag_name || !SAFE_VALID(ctx)) return JS_NULL;
     
     GCValue element;
     
@@ -853,7 +853,7 @@ GCValue html_create_element_js_with_document(JSContextHandle ctx, GCValue js_doc
  * Uses the document's createElement/createTextNode methods so nodes receive
  * proper DOM prototypes (HTMLElement, Element, Node). */
 static bool html_node_create_js_recursive(JSContextHandle ctx, GCValue js_doc, HtmlDocument *doc, int node_idx, GCValue parent) {
-    if (!ctx || !doc || node_idx < 0) return false;
+    if (!SAFE_VALID(ctx) || !doc || node_idx < 0) return false;
     
     HtmlNode *node = html_node_at(doc, node_idx);
     if (!node) return false;
@@ -932,7 +932,7 @@ static bool html_node_create_js_recursive(JSContextHandle ctx, GCValue js_doc, H
 
 /* Create JavaScript document object with parsed HTML structure */
 GCValue html_create_js_document(JSContextHandle ctx, HtmlDocument *doc) {
-    if (!ctx || !doc) return JS_NULL;
+    if (!SAFE_VALID(ctx) || !doc) return JS_NULL;
     
     GCValue js_doc = JS_NewObject(ctx);
     
@@ -1020,7 +1020,7 @@ GCValue html_create_js_document(JSContextHandle ctx, HtmlDocument *doc) {
 
 /* Main entry point: parse HTML and create DOM in JS context */
 bool html_create_dom_in_js(JSContextHandle ctx, HtmlDocument *doc) {
-    if (!ctx || !doc) return false;
+    if (!SAFE_VALID(ctx) || !doc) return false;
     
     LOG_INFO("Creating DOM in JS context");
     
@@ -1070,7 +1070,7 @@ static GCValue html_effective_parent_for_append(JSContextHandle ctx, GCValue par
 /* Recursively populate JS DOM from parsed HTML using document.createElement().
  * This ensures elements get proper DOM prototypes. */
 static bool html_node_populate_js_recursive(JSContextHandle ctx, GCValue js_doc, HtmlDocument *doc, int node_idx, GCValue parent) {
-    if (!ctx || !doc || node_idx < 0) return false;
+    if (!SAFE_VALID(ctx) || !doc || node_idx < 0) return false;
     
     HtmlNode *node = html_node_at(doc, node_idx);
     if (!node) return false;
@@ -1199,7 +1199,7 @@ static void html_transfer_element_properties(JSContextHandle ctx, GCValue new_el
  * so document.head and document.body are the actual parsed elements.
  * Critical properties from the old skeleton are transferred to the new elements. */
 bool html_populate_js_document(JSContextHandle ctx, GCValue js_doc, HtmlDocument *doc) {
-    if (!ctx || !doc) return false;
+    if (!SAFE_VALID(ctx) || !doc) return false;
     if (JS_IsUndefined(js_doc) || JS_IsNull(js_doc)) return false;
     
     /* The CSS index tables are per-runtime state; clear them before populating
@@ -1315,7 +1315,7 @@ bool html_populate_js_document(JSContextHandle ctx, GCValue js_doc, HtmlDocument
  * the shadow root's children with the parsed nodes. The host element's
  * ownerDocument is used so created elements get proper DOM prototypes. */
 bool html_shadow_root_set_inner_html(JSContextHandle ctx, GCValue shadow_root, const char *html) {
-    if (!ctx || JS_IsUndefined(shadow_root) || JS_IsNull(shadow_root) || !html) return false;
+    if (!SAFE_VALID(ctx) || JS_IsUndefined(shadow_root) || JS_IsNull(shadow_root) || !html) return false;
 
     // Note: we intentionally do NOT set the .innerHTML property here.
     // The caller (js_shadow_root_set_innerHTML) already stores the string on
@@ -1387,7 +1387,7 @@ bool html_shadow_root_set_inner_html(JSContextHandle ctx, GCValue shadow_root, c
  * the element's children with the parsed nodes. Uses document.createElement()
  * from the element's ownerDocument so nodes get proper prototypes. */
 bool html_element_set_inner_html(JSContextHandle ctx, GCValue elem, const char *html) {
-    if (!ctx || JS_IsUndefined(elem) || JS_IsNull(elem) || !html) return false;
+    if (!SAFE_VALID(ctx) || JS_IsUndefined(elem) || JS_IsNull(elem) || !html) return false;
 
     // Templates store their children in the content DocumentFragment, not in
     // the template element itself.
@@ -2207,7 +2207,7 @@ char *html_serialize_js_node(JSContextHandle ctx, GCValue node) {
 
 /* Build a fresh native HtmlDocument from the JS document's current DOM. */
 HtmlDocument *html_document_from_js_dom(JSContextHandle ctx, GCValue js_doc) {
-    if (!ctx) return NULL;
+    if (!SAFE_VALID(ctx)) return NULL;
     
     GCValue doc_elem = JS_NULL;
     if (!JS_IsUndefined(js_doc) && !JS_IsNull(js_doc)) {

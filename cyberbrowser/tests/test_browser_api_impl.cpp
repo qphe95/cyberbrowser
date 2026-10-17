@@ -95,9 +95,9 @@ extern "C" GCValue get_shared_test_global(void);
 /* Get test context - uses shared context from test_main.cpp */
 static JSContextHandle get_test_context(void) {
     JSContextHandle ctx = get_shared_test_context();
-    if (!ctx.valid()) {
+    if (!SAFE_VALID(ctx)) {
         printf("    Shared context not available\n");
-        return JSContextHandle();
+        return GC_HANDLE_NULL;
     }
     
     /* Get global object once */
@@ -105,10 +105,10 @@ static JSContextHandle get_test_context(void) {
         g_global = get_shared_test_global();
         if (JS_IsException(g_global)) {
             printf("    JS_GetGlobalObject() failed\n");
-            return JSContextHandle();
+            return GC_HANDLE_NULL;
         }
         g_local_initialized = true;
-        printf("    Using shared context: ctx=%u\n", ctx.handle());
+        printf("    Using shared context: ctx=%u\n", SAFE_HANDLE(ctx));
     }
 
     return ctx;
@@ -123,7 +123,7 @@ static void cleanup_test_context(void) {
 /* Test 1: Verify init_browser_api_impl doesn't crash */
 TEST(test_browser_api_impl_init) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx.valid()) {
+    if (!SAFE_VALID(ctx)) {
         printf("    Failed to get test context\n");
         return false;
     }
@@ -135,7 +135,7 @@ TEST(test_browser_api_impl_init) {
 /* Test 2: Verify console object exists after init */
 TEST(test_console_object_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx.valid()) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue console = JS_GetPropertyStr(ctx, g_global, "console");
     bool has_console = !JS_IsUndefined(console);
@@ -147,7 +147,7 @@ TEST(test_console_object_exists) {
 /* Test 3: Verify console.log exists */
 TEST(test_console_log_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue console = JS_GetPropertyStr(ctx, g_global, "console");
     GCValue log = JS_GetPropertyStr(ctx, console, "log");
@@ -160,7 +160,7 @@ TEST(test_console_log_exists) {
 /* Test 4: Verify document object exists after init */
 TEST(test_document_object_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue document = JS_GetPropertyStr(ctx, g_global, "document");
     bool has_document = !JS_IsUndefined(document);
@@ -172,7 +172,7 @@ TEST(test_document_object_exists) {
 /* Test 5: Verify window object exists */
 TEST(test_window_object_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     /* Global object IS window in browser context */
     GCValue inner_height = JS_GetPropertyStr(ctx, g_global, "innerHeight");
@@ -185,7 +185,7 @@ TEST(test_window_object_exists) {
 /* Test 6: Verify getComputedStyle exists */
 TEST(test_get_computed_style_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue document = JS_GetPropertyStr(ctx, g_global, "document");
     GCValue get_computed_style = JS_GetPropertyStr(ctx, document, "getComputedStyle");
@@ -198,7 +198,7 @@ TEST(test_get_computed_style_exists) {
 /* Test 7: Verify createElement exists */
 TEST(test_create_element_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue document = JS_GetPropertyStr(ctx, g_global, "document");
     GCValue create_element = JS_GetPropertyStr(ctx, document, "createElement");
@@ -211,7 +211,7 @@ TEST(test_create_element_exists) {
 /* Test 8: Verify querySelector exists */
 TEST(test_query_selector_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue document = JS_GetPropertyStr(ctx, g_global, "document");
     GCValue query_selector = JS_GetPropertyStr(ctx, document, "querySelector");
@@ -224,7 +224,7 @@ TEST(test_query_selector_exists) {
 /* Test 9: Verify addEventListener exists on document */
 TEST(test_add_event_listener_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue document = JS_GetPropertyStr(ctx, g_global, "document");
     GCValue add_event_listener = JS_GetPropertyStr(ctx, document, "addEventListener");
@@ -237,7 +237,7 @@ TEST(test_add_event_listener_exists) {
 /* Test 10: Verify performance object exists */
 TEST(test_performance_object_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue performance = JS_GetPropertyStr(ctx, g_global, "performance");
     bool has_perf = !JS_IsUndefined(performance);
@@ -249,7 +249,7 @@ TEST(test_performance_object_exists) {
 /* Test 10a: Verify performance.now() exists and returns a number */
 TEST(test_performance_now_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue performance = JS_GetPropertyStr(ctx, g_global, "performance");
     GCValue now = JS_GetPropertyStr(ctx, performance, "now");
@@ -265,7 +265,7 @@ TEST(test_performance_now_exists) {
 /* Test 10b: Verify performance.timeOrigin exists */
 TEST(test_performance_time_origin_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue performance = JS_GetPropertyStr(ctx, g_global, "performance");
     GCValue timeOrigin = JS_GetPropertyStr(ctx, performance, "timeOrigin");
@@ -277,7 +277,7 @@ TEST(test_performance_time_origin_exists) {
 /* Test 10c: Verify performance.timing exists */
 TEST(test_performance_timing_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue performance = JS_GetPropertyStr(ctx, g_global, "performance");
     if (!JS_IsObject(performance)) return false;
@@ -296,7 +296,7 @@ TEST(test_performance_timing_exists) {
 /* Test 10d: Verify performance.mark() works */
 TEST(test_performance_mark) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue performance = JS_GetPropertyStr(ctx, g_global, "performance");
     GCValue mark = JS_GetPropertyStr(ctx, performance, "mark");
@@ -313,7 +313,7 @@ TEST(test_performance_mark) {
 /* Test 10e: Verify performance.measure() works */
 TEST(test_performance_measure) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue performance = JS_GetPropertyStr(ctx, g_global, "performance");
     GCValue measure = JS_GetPropertyStr(ctx, performance, "measure");
@@ -335,7 +335,7 @@ TEST(test_performance_measure) {
 /* Test 10f: Verify performance.getEntriesByName() works */
 TEST(test_performance_get_entries_by_name) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue performance = JS_GetPropertyStr(ctx, g_global, "performance");
     GCValue getEntriesByName = JS_GetPropertyStr(ctx, performance, "getEntriesByName");
@@ -357,7 +357,7 @@ TEST(test_performance_get_entries_by_name) {
 /* Test 10g: Verify performance.getEntriesByType() works */
 TEST(test_performance_get_entries_by_type) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue performance = JS_GetPropertyStr(ctx, g_global, "performance");
     GCValue getEntriesByType = JS_GetPropertyStr(ctx, performance, "getEntriesByType");
@@ -374,7 +374,7 @@ TEST(test_performance_get_entries_by_type) {
 /* Test 10h: Verify performance.clearMarks() works */
 TEST(test_performance_clear_marks) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue performance = JS_GetPropertyStr(ctx, g_global, "performance");
     GCValue clearMarks = JS_GetPropertyStr(ctx, performance, "clearMarks");
@@ -390,7 +390,7 @@ TEST(test_performance_clear_marks) {
 /* Test 10i: Verify performance.clearMeasures() works */
 TEST(test_performance_clear_measures) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue performance = JS_GetPropertyStr(ctx, g_global, "performance");
     GCValue clearMeasures = JS_GetPropertyStr(ctx, performance, "clearMeasures");
@@ -409,7 +409,7 @@ TEST(test_performance_clear_measures) {
 
 TEST(test_localStorage_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue localStorage = JS_GetPropertyStr(ctx, g_global, "localStorage");
     if (!JS_IsObject(localStorage)) return false;
@@ -419,7 +419,7 @@ TEST(test_localStorage_exists) {
 
 TEST(test_sessionStorage_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue sessionStorage = JS_GetPropertyStr(ctx, g_global, "sessionStorage");
     if (!JS_IsObject(sessionStorage)) return false;
@@ -429,7 +429,7 @@ TEST(test_sessionStorage_exists) {
 
 TEST(test_localStorage_methods) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue localStorage = JS_GetPropertyStr(ctx, g_global, "localStorage");
     
@@ -458,7 +458,7 @@ TEST(test_localStorage_methods) {
 
 TEST(test_localStorage_setItem_getItem) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue localStorage = JS_GetPropertyStr(ctx, g_global, "localStorage");
     GCValue setItem = JS_GetPropertyStr(ctx, localStorage, "setItem");
@@ -482,7 +482,7 @@ TEST(test_localStorage_setItem_getItem) {
 
 TEST(test_localStorage_length) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue localStorage = JS_GetPropertyStr(ctx, g_global, "localStorage");
     GCValue setItem = JS_GetPropertyStr(ctx, localStorage, "setItem");
@@ -513,7 +513,7 @@ TEST(test_localStorage_length) {
 
 TEST(test_localStorage_key) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue localStorage = JS_GetPropertyStr(ctx, g_global, "localStorage");
     GCValue setItem = JS_GetPropertyStr(ctx, localStorage, "setItem");
@@ -540,7 +540,7 @@ TEST(test_localStorage_key) {
 
 TEST(test_localStorage_removeItem) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue localStorage = JS_GetPropertyStr(ctx, g_global, "localStorage");
     GCValue setItem = JS_GetPropertyStr(ctx, localStorage, "setItem");
@@ -569,7 +569,7 @@ TEST(test_localStorage_removeItem) {
 
 TEST(test_localStorage_clear) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue localStorage = JS_GetPropertyStr(ctx, g_global, "localStorage");
     GCValue setItem = JS_GetPropertyStr(ctx, localStorage, "setItem");
@@ -595,7 +595,7 @@ TEST(test_localStorage_clear) {
 
 TEST(test_sessionStorage_separate) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue localStorage = JS_GetPropertyStr(ctx, g_global, "localStorage");
     GCValue sessionStorage = JS_GetPropertyStr(ctx, g_global, "sessionStorage");
@@ -632,7 +632,7 @@ TEST(test_sessionStorage_separate) {
 
 TEST(test_crypto_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue crypto = JS_GetPropertyStr(ctx, g_global, "crypto");
     if (!JS_IsObject(crypto)) return false;
@@ -642,7 +642,7 @@ TEST(test_crypto_exists) {
 
 TEST(test_crypto_getRandomValues) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue crypto = JS_GetPropertyStr(ctx, g_global, "crypto");
     GCValue getRandomValues = JS_GetPropertyStr(ctx, crypto, "getRandomValues");
@@ -656,7 +656,7 @@ TEST(test_crypto_getRandomValues) {
 
 TEST(test_subtle_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue crypto = JS_GetPropertyStr(ctx, g_global, "crypto");
     GCValue subtle = JS_GetPropertyStr(ctx, crypto, "subtle");
@@ -667,7 +667,7 @@ TEST(test_subtle_exists) {
 
 TEST(test_subtle_digest) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue crypto = JS_GetPropertyStr(ctx, g_global, "crypto");
     GCValue subtle = JS_GetPropertyStr(ctx, crypto, "subtle");
@@ -691,7 +691,7 @@ TEST(test_subtle_digest) {
 
 TEST(test_subtle_encrypt_decrypt) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue crypto = JS_GetPropertyStr(ctx, g_global, "crypto");
     GCValue subtle = JS_GetPropertyStr(ctx, crypto, "subtle");
@@ -710,7 +710,7 @@ TEST(test_subtle_encrypt_decrypt) {
 /* Timer API Tests */
 TEST(test_setTimeout_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue setTimeout = JS_GetPropertyStr(ctx, g_global, "setTimeout");
     if (!JS_IsFunction(ctx, setTimeout)) return false;
@@ -720,7 +720,7 @@ TEST(test_setTimeout_exists) {
 
 TEST(test_clearTimeout_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue clearTimeout = JS_GetPropertyStr(ctx, g_global, "clearTimeout");
     if (!JS_IsFunction(ctx, clearTimeout)) return false;
@@ -730,7 +730,7 @@ TEST(test_clearTimeout_exists) {
 
 TEST(test_setInterval_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue setInterval = JS_GetPropertyStr(ctx, g_global, "setInterval");
     if (!JS_IsFunction(ctx, setInterval)) return false;
@@ -740,7 +740,7 @@ TEST(test_setInterval_exists) {
 
 TEST(test_clearInterval_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue clearInterval = JS_GetPropertyStr(ctx, g_global, "clearInterval");
     if (!JS_IsFunction(ctx, clearInterval)) return false;
@@ -750,7 +750,7 @@ TEST(test_clearInterval_exists) {
 
 TEST(test_requestAnimationFrame_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue raf = JS_GetPropertyStr(ctx, g_global, "requestAnimationFrame");
     if (!JS_IsFunction(ctx, raf)) return false;
@@ -760,7 +760,7 @@ TEST(test_requestAnimationFrame_exists) {
 
 TEST(test_cancelAnimationFrame_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue caf = JS_GetPropertyStr(ctx, g_global, "cancelAnimationFrame");
     if (!JS_IsFunction(ctx, caf)) return false;
@@ -770,7 +770,7 @@ TEST(test_cancelAnimationFrame_exists) {
 
 TEST(test_requestIdleCallback_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue ric = JS_GetPropertyStr(ctx, g_global, "requestIdleCallback");
     if (!JS_IsFunction(ctx, ric)) return false;
@@ -780,7 +780,7 @@ TEST(test_requestIdleCallback_exists) {
 
 TEST(test_cancelIdleCallback_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue cic = JS_GetPropertyStr(ctx, g_global, "cancelIdleCallback");
     if (!JS_IsFunction(ctx, cic)) return false;
@@ -790,7 +790,7 @@ TEST(test_cancelIdleCallback_exists) {
 
 TEST(test_timer_functions_on_window) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue window = JS_GetPropertyStr(ctx, g_global, "window");
     if (!JS_IsObject(window)) return false;
@@ -811,7 +811,7 @@ TEST(test_timer_functions_on_window) {
 // This test runs JavaScript that uses setTimeout and verifies the callback is executed
 TEST(test_setTimeout_functional) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
     
     // Check if setTimeout is actually a function
     GCValue setTimeout = JS_GetPropertyStr(ctx, g_global, "setTimeout");
@@ -855,7 +855,7 @@ TEST(test_setTimeout_functional) {
 // Test: clearTimeout prevents callback execution
 TEST(test_clearTimeout_functional) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
     
     // Set up a flag
     const char *setup_js = "var __testClearedCalled = false;";
@@ -881,7 +881,7 @@ TEST(test_clearTimeout_functional) {
 // Test: requestAnimationFrame works
 TEST(test_requestAnimationFrame_functional) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
     
     // Set up a flag
     const char *setup_js = "var __testRAFCalled = false; var __testRAFTime = 0;";
@@ -905,7 +905,7 @@ TEST(test_requestAnimationFrame_functional) {
 /* Test 10j: Verify performance.clearResourceTimings() works */
 TEST(test_performance_clear_resource_timings) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue performance = JS_GetPropertyStr(ctx, g_global, "performance");
     GCValue clearResourceTimings = JS_GetPropertyStr(ctx, performance, "clearResourceTimings");
@@ -921,7 +921,7 @@ TEST(test_performance_clear_resource_timings) {
 /* Test 11: Verify MutationObserver exists */
 TEST(test_mutation_observer_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue mutation_observer = JS_GetPropertyStr(ctx, g_global, "MutationObserver");
     bool has_mo = !JS_IsUndefined(mutation_observer);
@@ -933,7 +933,7 @@ TEST(test_mutation_observer_exists) {
 /* Test 11a: DocumentFragment children are expanded by appendChild/insertBefore */
 TEST(test_document_fragment_appendChild_expands) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js =
         "var p = document.createElement('div');"
@@ -959,7 +959,7 @@ TEST(test_document_fragment_appendChild_expands) {
 /* Test 11b: MutationObserver delivers async callbacks via microtasks */
 TEST(test_mutation_observer_async_callback) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *setup_js =
         "var target = document.createElement('div');"
@@ -987,7 +987,7 @@ TEST(test_mutation_observer_async_callback) {
 /* Test 11c: window.matchMedia evaluates common YouTube media queries */
 TEST(test_match_media_evaluates_queries) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js =
         "({"
@@ -1020,7 +1020,7 @@ TEST(test_match_media_evaluates_queries) {
 /* Test 11d: MediaQueryList addListener/addEventListener registration */
 TEST(test_match_media_listeners) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js =
         "var mql = window.matchMedia('(min-width: 1px)');"
@@ -1041,7 +1041,7 @@ TEST(test_match_media_listeners) {
 /* Test 12: Verify IntersectionObserver exists */
 TEST(test_intersection_observer_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue io = JS_GetPropertyStr(ctx, g_global, "IntersectionObserver");
     bool has_io = !JS_IsUndefined(io);
@@ -1053,7 +1053,7 @@ TEST(test_intersection_observer_exists) {
 /* Test 13: Verify ResizeObserver exists */
 TEST(test_resize_observer_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue ro = JS_GetPropertyStr(ctx, g_global, "ResizeObserver");
     bool has_ro = !JS_IsUndefined(ro);
@@ -1065,7 +1065,7 @@ TEST(test_resize_observer_exists) {
 /* Test 13a: Verify PerformanceObserver exists */
 TEST(test_performance_observer_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue po = JS_GetPropertyStr(ctx, g_global, "PerformanceObserver");
     bool has_po = !JS_IsUndefined(po);
@@ -1077,7 +1077,7 @@ TEST(test_performance_observer_exists) {
 /* Test 14: Verify Map class exists */
 TEST(test_map_class_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue map_ctor = JS_GetPropertyStr(ctx, g_global, "Map");
     bool has_map = !JS_IsUndefined(map_ctor);
@@ -1089,7 +1089,7 @@ TEST(test_map_class_exists) {
 /* Test 15: Verify customElements exists */
 TEST(test_custom_elements_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue custom_elements = JS_GetPropertyStr(ctx, g_global, "customElements");
     bool has_ce = !JS_IsUndefined(custom_elements);
@@ -1121,7 +1121,7 @@ TEST(test_js_extraction) {
     extern JSRuntimeHandle g_js_runtime;
     extern JSContextHandle g_js_context;
     
-    if (!g_js_runtime || !g_js_context) {
+    if (!SAFE_VALID(g_js_runtime) || !SAFE_VALID(g_js_context)) {
         printf("    ERROR: QuickJS runtime not initialized\n");
         return false;
     }
@@ -1372,7 +1372,7 @@ TEST(test_js_extraction_save_data) {
 /* Test MediaSource API exists */
 TEST(test_media_source_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue media_source = JS_GetPropertyStr(ctx, g_global, "MediaSource");
     bool has_ms = !JS_IsUndefined(media_source);
@@ -1384,7 +1384,7 @@ TEST(test_media_source_exists) {
 /* Test MediaSource.isTypeSupported */
 TEST(test_media_source_is_type_supported) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue media_source = JS_GetPropertyStr(ctx, g_global, "MediaSource");
     GCValue is_type_supported = JS_GetPropertyStr(ctx, media_source, "isTypeSupported");
@@ -1397,7 +1397,7 @@ TEST(test_media_source_is_type_supported) {
 /* Test ManagedMediaSource (iOS variant) exists */
 TEST(test_managed_media_source_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue managed_media_source = JS_GetPropertyStr(ctx, g_global, "ManagedMediaSource");
     bool has_mms = !JS_IsUndefined(managed_media_source);
@@ -1409,7 +1409,7 @@ TEST(test_managed_media_source_exists) {
 /* Test WebKitMediaSource (Safari variant) exists */
 TEST(test_webkit_media_source_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue webkit_media_source = JS_GetPropertyStr(ctx, g_global, "WebKitMediaSource");
     bool has_wms = !JS_IsUndefined(webkit_media_source);
@@ -1421,7 +1421,7 @@ TEST(test_webkit_media_source_exists) {
 /* Test SourceBuffer API exists */
 TEST(test_source_buffer_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue source_buffer = JS_GetPropertyStr(ctx, g_global, "SourceBuffer");
     bool has_sb = !JS_IsUndefined(source_buffer);
@@ -1433,7 +1433,7 @@ TEST(test_source_buffer_exists) {
 /* Test HTMLMediaElement API exists */
 TEST(test_html_media_element_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue html_media_element = JS_GetPropertyStr(ctx, g_global, "HTMLMediaElement");
     bool has_hme = !JS_IsUndefined(html_media_element);
@@ -1445,7 +1445,7 @@ TEST(test_html_media_element_exists) {
 /* Test HTMLMediaElement.webkitSourceAddId exists */
 TEST(test_html_media_element_webkit_source_add_id) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue html_media_element = JS_GetPropertyStr(ctx, g_global, "HTMLMediaElement");
     GCValue prototype = JS_GetPropertyStr(ctx, html_media_element, "prototype");
@@ -1459,7 +1459,7 @@ TEST(test_html_media_element_webkit_source_add_id) {
 /* Test URL.createObjectURL exists */
 TEST(test_url_create_object_url_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue url = JS_GetPropertyStr(ctx, g_global, "URL");
     GCValue create_object_url = JS_GetPropertyStr(ctx, url, "createObjectURL");
@@ -1472,7 +1472,7 @@ TEST(test_url_create_object_url_exists) {
 /* Test URL constructor exists */
 TEST(test_url_constructor_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue url = JS_GetPropertyStr(ctx, g_global, "URL");
     // URL should be callable (a constructor)
@@ -1485,7 +1485,7 @@ TEST(test_url_constructor_exists) {
 /* Test URL.revokeObjectURL exists */
 TEST(test_url_revoke_object_url_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue url = JS_GetPropertyStr(ctx, g_global, "URL");
     GCValue revoke_object_url = JS_GetPropertyStr(ctx, url, "revokeObjectURL");
@@ -1498,7 +1498,7 @@ TEST(test_url_revoke_object_url_exists) {
 /* Test Request constructor exists */
 TEST(test_request_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue request = JS_GetPropertyStr(ctx, g_global, "Request");
     bool has_request = !JS_IsUndefined(request);
@@ -1510,7 +1510,7 @@ TEST(test_request_exists) {
 /* Test Response constructor exists */
 TEST(test_response_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue response = JS_GetPropertyStr(ctx, g_global, "Response");
     bool has_response = !JS_IsUndefined(response);
@@ -1522,7 +1522,7 @@ TEST(test_response_exists) {
 /* Test Response.json() exists */
 TEST(test_response_json_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue response = JS_GetPropertyStr(ctx, g_global, "Response");
     GCValue json_method = JS_GetPropertyStr(ctx, response, "json");
@@ -1535,7 +1535,7 @@ TEST(test_response_json_exists) {
 /* Test navigator.sendBeacon exists */
 TEST(test_navigator_send_beacon_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     GCValue send_beacon = JS_GetPropertyStr(ctx, navigator, "sendBeacon");
@@ -1548,7 +1548,7 @@ TEST(test_navigator_send_beacon_exists) {
 /* Test document.createRange exists */
 TEST(test_document_create_range_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue document = JS_GetPropertyStr(ctx, g_global, "document");
     GCValue create_range = JS_GetPropertyStr(ctx, document, "createRange");
@@ -1561,7 +1561,7 @@ TEST(test_document_create_range_exists) {
 /* Test document.createTreeWalker exists */
 TEST(test_document_create_tree_walker_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue document = JS_GetPropertyStr(ctx, g_global, "document");
     GCValue create_tree_walker = JS_GetPropertyStr(ctx, document, "createTreeWalker");
@@ -1574,7 +1574,7 @@ TEST(test_document_create_tree_walker_exists) {
 /* Test document.createEvent exists */
 TEST(test_document_create_event_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue document = JS_GetPropertyStr(ctx, g_global, "document");
     GCValue create_event = JS_GetPropertyStr(ctx, document, "createEvent");
@@ -1587,7 +1587,7 @@ TEST(test_document_create_event_exists) {
 /* Test document.importNode exists */
 TEST(test_document_import_node_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue document = JS_GetPropertyStr(ctx, g_global, "document");
     GCValue import_node = JS_GetPropertyStr(ctx, document, "importNode");
@@ -1600,7 +1600,7 @@ TEST(test_document_import_node_exists) {
 /* Test document.elementFromPoint exists */
 TEST(test_document_element_from_point_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue document = JS_GetPropertyStr(ctx, g_global, "document");
     GCValue element_from_point = JS_GetPropertyStr(ctx, document, "elementFromPoint");
@@ -1613,7 +1613,7 @@ TEST(test_document_element_from_point_exists) {
 /* Test Element.prototype.hasAttribute exists */
 TEST(test_element_has_attribute_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue element = JS_GetPropertyStr(ctx, g_global, "Element");
     GCValue prototype = JS_GetPropertyStr(ctx, element, "prototype");
@@ -1627,7 +1627,7 @@ TEST(test_element_has_attribute_exists) {
 /* Test Element.prototype.toggleAttribute exists */
 TEST(test_element_toggle_attribute_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue element = JS_GetPropertyStr(ctx, g_global, "Element");
     GCValue prototype = JS_GetPropertyStr(ctx, element, "prototype");
@@ -1641,7 +1641,7 @@ TEST(test_element_toggle_attribute_exists) {
 /* Test Element.prototype.click exists */
 TEST(test_element_click_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue element = JS_GetPropertyStr(ctx, g_global, "Element");
     GCValue prototype = JS_GetPropertyStr(ctx, element, "prototype");
@@ -1655,7 +1655,7 @@ TEST(test_element_click_exists) {
 /* Test Element.prototype.getAnimations exists */
 TEST(test_element_get_animations_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue element = JS_GetPropertyStr(ctx, g_global, "Element");
     GCValue prototype = JS_GetPropertyStr(ctx, element, "prototype");
@@ -1669,7 +1669,7 @@ TEST(test_element_get_animations_exists) {
 /* Test Element.prototype.children exists */
 TEST(test_element_children_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue element = JS_GetPropertyStr(ctx, g_global, "Element");
     GCValue prototype = JS_GetPropertyStr(ctx, element, "prototype");
@@ -1683,7 +1683,7 @@ TEST(test_element_children_exists) {
 /* Test Element.prototype.firstElementChild exists */
 TEST(test_element_first_element_child_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue element = JS_GetPropertyStr(ctx, g_global, "Element");
     GCValue prototype = JS_GetPropertyStr(ctx, element, "prototype");
@@ -1697,7 +1697,7 @@ TEST(test_element_first_element_child_exists) {
 /* Test Element.prototype.lastElementChild exists */
 TEST(test_element_last_element_child_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue element = JS_GetPropertyStr(ctx, g_global, "Element");
     GCValue prototype = JS_GetPropertyStr(ctx, element, "prototype");
@@ -1711,7 +1711,7 @@ TEST(test_element_last_element_child_exists) {
 /* Test Element.prototype.nextElementSibling exists */
 TEST(test_element_next_element_sibling_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue element = JS_GetPropertyStr(ctx, g_global, "Element");
     GCValue prototype = JS_GetPropertyStr(ctx, element, "prototype");
@@ -1725,7 +1725,7 @@ TEST(test_element_next_element_sibling_exists) {
 /* Test Element.prototype.previousElementSibling exists */
 TEST(test_element_previous_element_sibling_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue element = JS_GetPropertyStr(ctx, g_global, "Element");
     GCValue prototype = JS_GetPropertyStr(ctx, element, "prototype");
@@ -1739,7 +1739,7 @@ TEST(test_element_previous_element_sibling_exists) {
 /* Test Element.prototype.childElementCount exists */
 TEST(test_element_child_element_count_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue element = JS_GetPropertyStr(ctx, g_global, "Element");
     GCValue prototype = JS_GetPropertyStr(ctx, element, "prototype");
@@ -1753,7 +1753,7 @@ TEST(test_element_child_element_count_exists) {
 /* Test Element.prototype.innerHTML exists */
 TEST(test_element_inner_html_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue element = JS_GetPropertyStr(ctx, g_global, "Element");
     GCValue prototype = JS_GetPropertyStr(ctx, element, "prototype");
@@ -1767,7 +1767,7 @@ TEST(test_element_inner_html_exists) {
 /* Test Element.prototype.outerHTML exists */
 TEST(test_element_outer_html_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue element = JS_GetPropertyStr(ctx, g_global, "Element");
     GCValue prototype = JS_GetPropertyStr(ctx, element, "prototype");
@@ -1781,7 +1781,7 @@ TEST(test_element_outer_html_exists) {
 /* Test Node.prototype.textContent exists */
 TEST(test_node_text_content_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue node = JS_GetPropertyStr(ctx, g_global, "Node");
     GCValue prototype = JS_GetPropertyStr(ctx, node, "prototype");
@@ -1795,7 +1795,7 @@ TEST(test_node_text_content_exists) {
 /* Test Node.prototype.nodeValue exists */
 TEST(test_node_node_value_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue node = JS_GetPropertyStr(ctx, g_global, "Node");
     GCValue prototype = JS_GetPropertyStr(ctx, node, "prototype");
@@ -1809,7 +1809,7 @@ TEST(test_node_node_value_exists) {
 /* Test ShadowRoot constructor exists */
 TEST(test_shadow_root_constructor_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue shadow_root = JS_GetPropertyStr(ctx, g_global, "ShadowRoot");
     bool has_constructor = !JS_IsUndefined(shadow_root);
@@ -1821,7 +1821,7 @@ TEST(test_shadow_root_constructor_exists) {
 /* Test ShadowRoot.prototype.host exists */
 TEST(test_shadow_root_host_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue shadow_root = JS_GetPropertyStr(ctx, g_global, "ShadowRoot");
     GCValue prototype = JS_GetPropertyStr(ctx, shadow_root, "prototype");
@@ -1835,7 +1835,7 @@ TEST(test_shadow_root_host_exists) {
 /* Test Node constructor exists */
 TEST(test_node_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue node = JS_GetPropertyStr(ctx, g_global, "Node");
     bool has_node = !JS_IsUndefined(node);
@@ -1847,7 +1847,7 @@ TEST(test_node_exists) {
 /* Test Node.prototype.getRootNode exists */
 TEST(test_node_get_root_node_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue node = JS_GetPropertyStr(ctx, g_global, "Node");
     GCValue prototype = JS_GetPropertyStr(ctx, node, "prototype");
@@ -1861,7 +1861,7 @@ TEST(test_node_get_root_node_exists) {
 /* Test Node.prototype.parentNode exists */
 TEST(test_node_parent_node_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue node = JS_GetPropertyStr(ctx, g_global, "Node");
     GCValue prototype = JS_GetPropertyStr(ctx, node, "prototype");
@@ -1876,7 +1876,7 @@ TEST(test_node_parent_node_exists) {
 /* Test HTMLElement constructor exists */
 TEST(test_html_element_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue html_element = JS_GetPropertyStr(ctx, g_global, "HTMLElement");
     bool has_html_element = !JS_IsUndefined(html_element);
@@ -1888,7 +1888,7 @@ TEST(test_html_element_exists) {
 /* Test HTMLElement.prototype.attachShadow exists */
 TEST(test_html_element_attach_shadow_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue html_element = JS_GetPropertyStr(ctx, g_global, "HTMLElement");
     GCValue prototype = JS_GetPropertyStr(ctx, html_element, "prototype");
@@ -1902,7 +1902,7 @@ TEST(test_html_element_attach_shadow_exists) {
 /* Test document.head exists */
 TEST(test_document_head_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue document = JS_GetPropertyStr(ctx, g_global, "document");
     GCValue head = JS_GetPropertyStr(ctx, document, "head");
@@ -1915,7 +1915,7 @@ TEST(test_document_head_exists) {
 /* Test document.activeElement exists */
 TEST(test_document_active_element_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue document = JS_GetPropertyStr(ctx, g_global, "document");
     GCValue active_element = JS_GetPropertyStr(ctx, document, "activeElement");
@@ -1928,7 +1928,7 @@ TEST(test_document_active_element_exists) {
 /* Test document.fonts exists */
 TEST(test_document_fonts_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue document = JS_GetPropertyStr(ctx, g_global, "document");
     GCValue fonts = JS_GetPropertyStr(ctx, document, "fonts");
@@ -1941,7 +1941,7 @@ TEST(test_document_fonts_exists) {
 /* Test document.featurePolicy exists */
 TEST(test_document_feature_policy_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue document = JS_GetPropertyStr(ctx, g_global, "document");
     GCValue feature_policy = JS_GetPropertyStr(ctx, document, "featurePolicy");
@@ -1954,7 +1954,7 @@ TEST(test_document_feature_policy_exists) {
 /* Test document.title exists */
 TEST(test_document_title_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue document = JS_GetPropertyStr(ctx, g_global, "document");
     GCValue title = JS_GetPropertyStr(ctx, document, "title");
@@ -1967,7 +1967,7 @@ TEST(test_document_title_exists) {
 /* Test document.baseURI exists */
 TEST(test_document_base_uri_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue document = JS_GetPropertyStr(ctx, g_global, "document");
     GCValue base_uri = JS_GetPropertyStr(ctx, document, "baseURI");
@@ -1980,7 +1980,7 @@ TEST(test_document_base_uri_exists) {
 /* Test document.hidden exists */
 TEST(test_document_hidden_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue document = JS_GetPropertyStr(ctx, g_global, "document");
     GCValue hidden = JS_GetPropertyStr(ctx, document, "hidden");
@@ -1993,7 +1993,7 @@ TEST(test_document_hidden_exists) {
 /* Test document.visibilityState exists */
 TEST(test_document_visibility_state_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue document = JS_GetPropertyStr(ctx, g_global, "document");
     GCValue visibility_state = JS_GetPropertyStr(ctx, document, "visibilityState");
@@ -2006,7 +2006,7 @@ TEST(test_document_visibility_state_exists) {
 /* Test document.pictureInPictureEnabled exists */
 TEST(test_document_picture_in_picture_enabled_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue document = JS_GetPropertyStr(ctx, g_global, "document");
     GCValue pip_enabled = JS_GetPropertyStr(ctx, document, "pictureInPictureEnabled");
@@ -2019,7 +2019,7 @@ TEST(test_document_picture_in_picture_enabled_exists) {
 /* Test HTMLVideoElement constructor exists */
 TEST(test_html_video_element_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue html_video_element = JS_GetPropertyStr(ctx, g_global, "HTMLVideoElement");
     bool has_hve = !JS_IsUndefined(html_video_element);
@@ -2035,7 +2035,7 @@ TEST(test_html_video_element_exists) {
 /* Test Node.appendChild works correctly */
 TEST(test_node_append_child_works) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     /* Create parent and child elements */
     const char *js_code = R"(
@@ -2056,7 +2056,7 @@ TEST(test_node_append_child_works) {
 /* Test Node.removeChild works correctly */
 TEST(test_node_remove_child_works) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var parent = document.createElement('div');
@@ -2076,7 +2076,7 @@ TEST(test_node_remove_child_works) {
 /* Test Node.insertBefore works correctly */
 TEST(test_node_insert_before_works) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var parent = document.createElement('div');
@@ -2097,7 +2097,7 @@ TEST(test_node_insert_before_works) {
 /* Test firstChild and lastChild work correctly */
 TEST(test_node_first_last_child) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var parent = document.createElement('div');
@@ -2118,7 +2118,7 @@ TEST(test_node_first_last_child) {
 /* Test nextSibling and previousSibling work correctly */
 TEST(test_node_siblings) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var parent = document.createElement('div');
@@ -2139,7 +2139,7 @@ TEST(test_node_siblings) {
 /* Test parentNode works correctly */
 TEST(test_node_parent_node) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var parent = document.createElement('div');
@@ -2158,7 +2158,7 @@ TEST(test_node_parent_node) {
 /* Test childNodes returns correct array */
 TEST(test_node_child_nodes) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var parent = document.createElement('div');
@@ -2180,7 +2180,7 @@ TEST(test_node_child_nodes) {
 /* Test ownerDocument is set on created elements and text nodes */
 TEST(test_owner_document_set) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var el = document.createElement('div');
@@ -2198,7 +2198,7 @@ TEST(test_owner_document_set) {
 /* Test window.addEventListener is the real inherited method */
 TEST(test_window_add_event_listener_real) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var called = false;
@@ -2217,7 +2217,7 @@ TEST(test_window_add_event_listener_real) {
 /* Test DOMContentLoaded and load events dispatch on window and document */
 TEST(test_dom_content_loaded_and_load_events) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var dclWindow = false, dclDoc = false, loadWindow = false, loadDoc = false;
@@ -2246,7 +2246,7 @@ TEST(test_dom_content_loaded_and_load_events) {
 /* Test timer and microtask pump drains setTimeout and Promise callbacks */
 TEST(test_timer_and_promise_pump) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var timeoutRan = false;
@@ -2260,7 +2260,7 @@ TEST(test_timer_and_promise_pump) {
     if (!JS_ToBool(ctx, result)) return false;
 
     JSRuntimeHandle rt = JS_GetRuntime(ctx);
-    JSContextHandle pctx;
+    JSContextHandle pctx = GC_HANDLE_NULL;
     for (int i = 0; i < 50; i++) {
         int processed = timer_process_due(ctx);
         int jobs = 0;
@@ -2280,7 +2280,7 @@ TEST(test_timer_and_promise_pump) {
 /* Test classList reflects and modifies className */
 TEST(test_class_list_functional) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var el = document.createElement('div');
@@ -2319,7 +2319,7 @@ TEST(test_class_list_functional) {
 /* Test classList.remove updates className */
 TEST(test_class_list_remove) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var el = document.createElement('div');
@@ -2338,7 +2338,7 @@ TEST(test_class_list_remove) {
 /* Test textContent getter/setter */
 TEST(test_text_content) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var parent = document.createElement('div');
@@ -2369,7 +2369,7 @@ TEST(test_text_content) {
 /* Test innerHTML setter parses and replaces children and getter serializes them */
 TEST(test_inner_html_setter) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var parent = document.createElement('div');
@@ -2406,7 +2406,7 @@ TEST(test_inner_html_setter) {
 /* Test URL base resolution and searchParams */
 TEST(test_url_with_base) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var url = new URL('/watch?v=abc123', 'https://www.youtube.com');
@@ -2425,7 +2425,7 @@ TEST(test_url_with_base) {
 /* Test URLSearchParams basic operations */
 TEST(test_url_search_params) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var usp = new URLSearchParams('a=1&b=2&a=3');
@@ -2452,7 +2452,7 @@ TEST(test_url_search_params) {
 /* Test blob URL registry create/revoke */
 TEST(test_blob_url_registry) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var obj = { data: 'test' };
@@ -2472,7 +2472,7 @@ TEST(test_blob_url_registry) {
 /* Test MediaSource creates a blob URL and addSourceBuffer works */
 TEST(test_media_source_blob_url) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         try {
@@ -2508,7 +2508,7 @@ TEST(test_media_source_blob_url) {
 /* Test SourceBuffer.appendBuffer parses a fragmented MP4 segment */
 TEST(test_media_source_append_buffer_fmp4) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var data = new Uint8Array([0,0,0,20,102,116,121,112,105,115,111,109,0,0,0,0,105,115,111,109,0,0,1,245,109,111,111,118,0,0,0,104,109,118,104,100,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3,232,0,0,0,0,0,1,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0,0,1,93,116,114,97,107,0,0,0,92,116,107,104,100,0,0,0,3,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,64,0,0,0,240,0,0,0,0,0,249,109,100,105,97,0,0,0,32,109,100,104,100,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3,232,0,0,0,0,85,196,0,0,0,0,0,45,104,100,108,114,0,0,0,0,0,0,0,0,118,105,100,101,0,0,0,0,0,0,0,0,0,0,0,0,86,105,100,101,111,72,97,110,100,108,101,114,0,0,0,0,164,109,105,110,102,0,0,0,28,118,109,104,100,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,36,100,105,110,102,0,0,0,28,100,114,101,102,0,0,0,0,0,0,0,1,0,0,0,12,117,114,108,32,0,0,0,1,0,0,0,92,115,116,98,108,0,0,0,16,115,116,115,100,0,0,0,0,0,0,0,0,0,0,0,20,115,116,115,122,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,16,115,116,115,99,0,0,0,0,0,0,0,0,0,0,0,16,115,116,99,111,0,0,0,0,0,0,0,0,0,0,0,16,115,116,116,115,0,0,0,0,0,0,0,0,0,0,0,40,109,118,101,120,0,0,0,32,116,114,101,120,0,0,0,0,0,0,0,1,0,0,0,1,0,0,3,232,0,0,0,0,0,0,0,0,0,0,0,84,109,111,111,102,0,0,0,16,109,102,104,100,0,0,0,0,0,0,0,1,0,0,0,16,116,102,104,100,0,2,0,0,0,0,0,1,0,0,0,16,116,102,100,116,0,0,0,0,0,0,0,0,0,0,0,28,116,114,117,110,0,0,3,1,0,0,0,1,0,0,0,88,0,0,3,232,0,0,0,4,0,0,0,12,109,100,97,116,0,1,2,3]);
@@ -2557,7 +2557,7 @@ TEST(test_media_source_append_buffer_fmp4) {
 /* Test XMLHttpRequest readyState transitions for fallback path */
 TEST(test_xhr_state_transitions) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var states = [];
@@ -2589,7 +2589,7 @@ TEST(test_xhr_state_transitions) {
 /* Test Node.contains works correctly */
 TEST(test_node_contains) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var parent = document.createElement('div');
@@ -2610,7 +2610,7 @@ TEST(test_node_contains) {
 /* Test getRootNode returns correct root */
 TEST(test_node_get_root_node) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var parent = document.createElement('div');
@@ -2630,7 +2630,7 @@ TEST(test_node_get_root_node) {
 /* Test children property returns only elements */
 TEST(test_element_children) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var parent = document.createElement('div');
@@ -2652,7 +2652,7 @@ TEST(test_element_children) {
 /* Test childElementCount works correctly */
 TEST(test_element_child_element_count) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var parent = document.createElement('div');
@@ -2673,7 +2673,7 @@ TEST(test_element_child_element_count) {
 /* Test firstElementChild and lastElementChild work correctly */
 TEST(test_element_first_last_element_child) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var parent = document.createElement('div');
@@ -2694,7 +2694,7 @@ TEST(test_element_first_last_element_child) {
 /* Test nextElementSibling and previousElementSibling work correctly */
 TEST(test_element_element_siblings) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var parent = document.createElement('div');
@@ -2719,7 +2719,7 @@ TEST(test_element_element_siblings) {
 /* Test Element.attachShadow works correctly */
 TEST(test_attach_shadow_works) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var host = document.createElement('div');
@@ -2737,7 +2737,7 @@ TEST(test_attach_shadow_works) {
 /* Test ShadowRoot.host property works correctly */
 TEST(test_shadow_root_host) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var host = document.createElement('div');
@@ -2755,7 +2755,7 @@ TEST(test_shadow_root_host) {
 /* Test ShadowRoot.mode property works correctly */
 TEST(test_shadow_root_mode) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var host1 = document.createElement('div');
@@ -2775,7 +2775,7 @@ TEST(test_shadow_root_mode) {
 /* Test closed shadowRoot returns null */
 TEST(test_closed_shadow_root_returns_null) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var host = document.createElement('div');
@@ -2793,7 +2793,7 @@ TEST(test_closed_shadow_root_returns_null) {
 /* Test ShadowRoot.appendChild works correctly */
 TEST(test_shadow_root_append_child) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var host = document.createElement('div');
@@ -2813,7 +2813,7 @@ TEST(test_shadow_root_append_child) {
 /* Test ShadowRoot.removeChild works correctly */
 TEST(test_shadow_root_remove_child) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var host = document.createElement('div');
@@ -2834,7 +2834,7 @@ TEST(test_shadow_root_remove_child) {
 /* Test ShadowRoot.insertBefore works correctly */
 TEST(test_shadow_root_insert_before) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var host = document.createElement('div');
@@ -2856,7 +2856,7 @@ TEST(test_shadow_root_insert_before) {
 /* Test ShadowRoot.firstChild and lastChild work correctly */
 TEST(test_shadow_root_first_last_child) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var host = document.createElement('div');
@@ -2878,7 +2878,7 @@ TEST(test_shadow_root_first_last_child) {
 /* Test ShadowRoot.childNodes works correctly */
 TEST(test_shadow_root_child_nodes) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var host = document.createElement('div');
@@ -2901,7 +2901,7 @@ TEST(test_shadow_root_child_nodes) {
 /* Test ShadowRoot.children works correctly */
 TEST(test_shadow_root_children) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var host = document.createElement('div');
@@ -2924,7 +2924,7 @@ TEST(test_shadow_root_children) {
 /* Test ShadowRoot.childElementCount works correctly */
 TEST(test_shadow_root_child_element_count) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var host = document.createElement('div');
@@ -2946,7 +2946,7 @@ TEST(test_shadow_root_child_element_count) {
 /* Test ShadowRoot.contains works correctly */
 TEST(test_shadow_root_contains) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var host = document.createElement('div');
@@ -2968,7 +2968,7 @@ TEST(test_shadow_root_contains) {
 /* Test ShadowRoot.querySelector works correctly */
 TEST(test_shadow_root_query_selector) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var host = document.createElement('div');
@@ -2992,7 +2992,7 @@ TEST(test_shadow_root_query_selector) {
 /* Test ShadowRoot.querySelectorAll works correctly */
 TEST(test_shadow_root_query_selector_all) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var host = document.createElement('div');
@@ -3015,7 +3015,7 @@ TEST(test_shadow_root_query_selector_all) {
 /* Test ShadowRoot.getElementById works correctly */
 TEST(test_shadow_root_get_element_by_id) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var host = document.createElement('div');
@@ -3036,7 +3036,7 @@ TEST(test_shadow_root_get_element_by_id) {
 /* Test ShadowRoot.nodeType is DOCUMENT_FRAGMENT_NODE (11) */
 TEST(test_shadow_root_node_type) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var host = document.createElement('div');
@@ -3054,7 +3054,7 @@ TEST(test_shadow_root_node_type) {
 /* Test ShadowRoot.nodeName is #document-fragment */
 TEST(test_shadow_root_node_name) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var host = document.createElement('div');
@@ -3072,7 +3072,7 @@ TEST(test_shadow_root_node_name) {
 /* Test moving node from regular DOM to ShadowRoot */
 TEST(test_move_node_to_shadow_root) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var host = document.createElement('div');
@@ -3094,7 +3094,7 @@ TEST(test_move_node_to_shadow_root) {
 /* Test <template>.innerHTML stores children in .content, not light DOM */
 TEST(test_template_inner_html_content) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var tpl = document.createElement('template');
@@ -3132,7 +3132,7 @@ TEST(test_template_inner_html_content) {
 /* Test ShadowRoot.innerHTML setter parses into real shadow DOM nodes */
 TEST(test_shadow_root_inner_html_parses) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var host = document.createElement('div');
@@ -3174,7 +3174,7 @@ TEST(test_shadow_root_inner_html_parses) {
 /* Test Event constructor exists */
 TEST(test_event_constructor_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue event = JS_GetPropertyStr(ctx, g_global, "Event");
     bool has_event = !JS_IsUndefined(event) && JS_IsFunction(ctx, event);
@@ -3186,7 +3186,7 @@ TEST(test_event_constructor_exists) {
 /* Test CustomEvent constructor exists */
 TEST(test_custom_event_constructor_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue custom_event = JS_GetPropertyStr(ctx, g_global, "CustomEvent");
     bool has_custom = !JS_IsUndefined(custom_event) && JS_IsFunction(ctx, custom_event);
@@ -3198,7 +3198,7 @@ TEST(test_custom_event_constructor_exists) {
 /* Test MouseEvent constructor exists */
 TEST(test_mouse_event_constructor_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue mouse_event = JS_GetPropertyStr(ctx, g_global, "MouseEvent");
     bool has_mouse = !JS_IsUndefined(mouse_event) && JS_IsFunction(ctx, mouse_event);
@@ -3210,7 +3210,7 @@ TEST(test_mouse_event_constructor_exists) {
 /* Test FocusEvent constructor exists */
 TEST(test_focus_event_constructor_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue focus_event = JS_GetPropertyStr(ctx, g_global, "FocusEvent");
     bool has_focus = !JS_IsUndefined(focus_event) && JS_IsFunction(ctx, focus_event);
@@ -3222,7 +3222,7 @@ TEST(test_focus_event_constructor_exists) {
 /* Test Event constructor with type */
 TEST(test_event_constructor_with_type) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var ev = new Event('click');
@@ -3239,7 +3239,7 @@ TEST(test_event_constructor_with_type) {
 /* Test Event constructor with init options */
 TEST(test_event_constructor_with_init) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var ev = new Event('click', { bubbles: true });
@@ -3256,7 +3256,7 @@ TEST(test_event_constructor_with_init) {
 /* Test Event.type property */
 TEST(test_event_type_property) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var ev = new Event('test');
@@ -3273,7 +3273,7 @@ TEST(test_event_type_property) {
 /* Test Event.bubbles property */
 TEST(test_event_bubbles_property) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var ev1 = new Event('test', { bubbles: true });
@@ -3291,7 +3291,7 @@ TEST(test_event_bubbles_property) {
 /* Test Event.cancelable property */
 TEST(test_event_cancelable_property) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var ev1 = new Event('test', { cancelable: true });
@@ -3309,7 +3309,7 @@ TEST(test_event_cancelable_property) {
 /* Test Event.composed property */
 TEST(test_event_composed_property) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var ev1 = new Event('test', { composed: true });
@@ -3327,7 +3327,7 @@ TEST(test_event_composed_property) {
 /* Test Event.eventPhase property */
 TEST(test_event_eventPhase_property) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var ev = new Event('test');
@@ -3344,7 +3344,7 @@ TEST(test_event_eventPhase_property) {
 /* Test Event.defaultPrevented property */
 TEST(test_event_defaultPrevented_property) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var ev = new Event('test', { cancelable: true });
@@ -3361,7 +3361,7 @@ TEST(test_event_defaultPrevented_property) {
 /* Test Event.preventDefault() method */
 TEST(test_event_preventDefault) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var ev = new Event('test');
@@ -3379,7 +3379,7 @@ TEST(test_event_preventDefault) {
 /* Test Event.stopPropagation() method */
 TEST(test_event_stopPropagation) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var ev = new Event('test');
@@ -3397,7 +3397,7 @@ TEST(test_event_stopPropagation) {
 /* Test Event.stopImmediatePropagation() method */
 TEST(test_event_stopImmediatePropagation) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var ev = new Event('test');
@@ -3415,7 +3415,7 @@ TEST(test_event_stopImmediatePropagation) {
 /* Test Event.composedPath() method */
 TEST(test_event_composedPath) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var ev = new Event('test');
@@ -3433,7 +3433,7 @@ TEST(test_event_composedPath) {
 /* Test Event.target property */
 TEST(test_event_target_property) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var ev = new Event('test');
@@ -3450,7 +3450,7 @@ TEST(test_event_target_property) {
 /* Test Event.currentTarget property */
 TEST(test_event_currentTarget_property) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var ev = new Event('test');
@@ -3467,7 +3467,7 @@ TEST(test_event_currentTarget_property) {
 /* Test CustomEvent with detail property */
 TEST(test_custom_event_detail) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var ev = new CustomEvent('test', { detail: { foo: 'bar' } });
@@ -3484,7 +3484,7 @@ TEST(test_custom_event_detail) {
 /* Test CustomEvent inherits from Event */
 TEST(test_custom_event_inherits) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = R"(
         var ev = new CustomEvent('test', { bubbles: true });
@@ -3501,7 +3501,7 @@ TEST(test_custom_event_inherits) {
 /* Test MouseEvent can be created */
 TEST(test_mouse_event_created) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue mouse_event = JS_GetPropertyStr(ctx, g_global, "MouseEvent");
     GCValue ev = JS_CallConstructor(ctx, mouse_event, 0, NULL);
@@ -3514,7 +3514,7 @@ TEST(test_mouse_event_created) {
 /* Test MouseEvent inherits from Event */
 TEST(test_mouse_event_works) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     // Skip this test for now - MouseEvent constructor has issues
     return true;
@@ -3523,7 +3523,7 @@ TEST(test_mouse_event_works) {
 /* Test FocusEvent can be created */
 TEST(test_focus_event_works) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     // Skip this test for now - FocusEvent constructor has issues
     return true;
@@ -3535,7 +3535,7 @@ TEST(test_focus_event_works) {
 
 TEST(test_window_document_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = "typeof window.document !== 'undefined'";
     GCValue result = JS_Eval(ctx, js_code, strlen(js_code), "<test>", 0);
@@ -3546,7 +3546,7 @@ TEST(test_window_document_exists) {
 
 TEST(test_window_core_apis) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     // Test window.location
     GCValue location = JS_GetPropertyStr(ctx, g_global, "location");
@@ -3618,7 +3618,7 @@ TEST(test_window_core_apis) {
 
 TEST(test_window_globalThis_equals_window) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = "globalThis === window";
     GCValue result = JS_Eval(ctx, js_code, strlen(js_code), "<test>", 0);
@@ -3629,7 +3629,7 @@ TEST(test_window_globalThis_equals_window) {
 
 TEST(test_window_innerWidth) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = "typeof window.innerWidth === 'number' && window.innerWidth > 0";
     GCValue result = JS_Eval(ctx, js_code, strlen(js_code), "<test>", 0);
@@ -3640,7 +3640,7 @@ TEST(test_window_innerWidth) {
 
 TEST(test_window_innerHeight) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = "typeof window.innerHeight === 'number' && window.innerHeight > 0";
     GCValue result = JS_Eval(ctx, js_code, strlen(js_code), "<test>", 0);
@@ -3651,7 +3651,7 @@ TEST(test_window_innerHeight) {
 
 TEST(test_window_outerWidth) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = "typeof window.outerWidth === 'number' && window.outerWidth > 0";
     GCValue result = JS_Eval(ctx, js_code, strlen(js_code), "<test>", 0);
@@ -3662,7 +3662,7 @@ TEST(test_window_outerWidth) {
 
 TEST(test_window_outerHeight) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = "typeof window.outerHeight === 'number' && window.outerHeight > 0";
     GCValue result = JS_Eval(ctx, js_code, strlen(js_code), "<test>", 0);
@@ -3673,7 +3673,7 @@ TEST(test_window_outerHeight) {
 
 TEST(test_window_devicePixelRatio) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = "typeof window.devicePixelRatio === 'number' && window.devicePixelRatio > 0";
     GCValue result = JS_Eval(ctx, js_code, strlen(js_code), "<test>", 0);
@@ -3684,7 +3684,7 @@ TEST(test_window_devicePixelRatio) {
 
 TEST(test_window_closed) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = "typeof window.closed === 'boolean' && window.closed === false";
     GCValue result = JS_Eval(ctx, js_code, strlen(js_code), "<test>", 0);
@@ -3695,7 +3695,7 @@ TEST(test_window_closed) {
 
 TEST(test_window_properties) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     // Test window.innerWidth
     GCValue innerWidth = JS_GetPropertyStr(ctx, g_global, "innerWidth");
@@ -3747,7 +3747,7 @@ TEST(test_window_properties) {
 
 TEST(test_window_methods) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     // Test window.alert
     GCValue alert = JS_GetPropertyStr(ctx, g_global, "alert");
@@ -3802,7 +3802,7 @@ TEST(test_window_methods) {
 
 TEST(test_window_getSelection) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     // Test getSelection returns a Selection-like object
     GCValue getSelection = JS_GetPropertyStr(ctx, g_global, "getSelection");
@@ -3841,7 +3841,7 @@ TEST(test_window_getSelection) {
 
 TEST(test_location_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue location = JS_GetPropertyStr(ctx, g_global, "location");
     if (!JS_IsObject(location)) return false;
@@ -3850,7 +3850,7 @@ TEST(test_location_exists) {
 
 TEST(test_location_href) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue location = JS_GetPropertyStr(ctx, g_global, "location");
     GCValue href = JS_GetPropertyStr(ctx, location, "href");
@@ -3860,7 +3860,7 @@ TEST(test_location_href) {
 
 TEST(test_location_components) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue location = JS_GetPropertyStr(ctx, g_global, "location");
     
@@ -3888,7 +3888,7 @@ TEST(test_location_components) {
 
 TEST(test_location_setters) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue location = JS_GetPropertyStr(ctx, g_global, "location");
     
@@ -3911,7 +3911,7 @@ TEST(test_location_setters) {
 
 TEST(test_location_methods) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue location = JS_GetPropertyStr(ctx, g_global, "location");
     
@@ -3940,7 +3940,7 @@ TEST(test_location_methods) {
 
 TEST(test_navigator_clipboard_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     if (!JS_IsObject(navigator)) return false;
@@ -3953,7 +3953,7 @@ TEST(test_navigator_clipboard_exists) {
 
 TEST(test_navigator_clipboard_writeText) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     GCValue clipboard = JS_GetPropertyStr(ctx, navigator, "clipboard");
@@ -3967,7 +3967,7 @@ TEST(test_navigator_clipboard_writeText) {
 
 TEST(test_navigator_clipboard_write) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     GCValue clipboard = JS_GetPropertyStr(ctx, navigator, "clipboard");
@@ -3993,7 +3993,7 @@ TEST(test_navigator_clipboard_write) {
 
 TEST(test_navigator_mediaSession_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     if (!JS_IsObject(navigator)) return false;
@@ -4006,7 +4006,7 @@ TEST(test_navigator_mediaSession_exists) {
 
 TEST(test_MediaMetadata_class) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     // Test MediaMetadata class exists
     GCValue MediaMetadata = JS_GetPropertyStr(ctx, g_global, "MediaMetadata");
@@ -4017,7 +4017,7 @@ TEST(test_MediaMetadata_class) {
 
 TEST(test_navigator_mediaSession_playbackState) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     GCValue mediaSession = JS_GetPropertyStr(ctx, navigator, "mediaSession");
@@ -4036,7 +4036,7 @@ TEST(test_navigator_mediaSession_playbackState) {
 
 TEST(test_navigator_mediaSession_metadata) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     GCValue mediaSession = JS_GetPropertyStr(ctx, navigator, "mediaSession");
@@ -4051,7 +4051,7 @@ TEST(test_navigator_mediaSession_metadata) {
 
 TEST(test_navigator_mediaSession_methods) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     GCValue mediaSession = JS_GetPropertyStr(ctx, navigator, "mediaSession");
@@ -4073,7 +4073,7 @@ TEST(test_navigator_mediaSession_methods) {
 
 TEST(test_navigator_mediaCapabilities_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     if (!JS_IsObject(navigator)) return false;
@@ -4086,7 +4086,7 @@ TEST(test_navigator_mediaCapabilities_exists) {
 
 TEST(test_navigator_mediaCapabilities_decodingInfo) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     GCValue mediaCapabilities = JS_GetPropertyStr(ctx, navigator, "mediaCapabilities");
@@ -4100,7 +4100,7 @@ TEST(test_navigator_mediaCapabilities_decodingInfo) {
 
 TEST(test_navigator_mediaCapabilities_encodingInfo) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     GCValue mediaCapabilities = JS_GetPropertyStr(ctx, navigator, "mediaCapabilities");
@@ -4118,7 +4118,7 @@ TEST(test_navigator_mediaCapabilities_encodingInfo) {
 
 TEST(test_navigator_permissions_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     if (!JS_IsObject(navigator)) return false;
@@ -4131,7 +4131,7 @@ TEST(test_navigator_permissions_exists) {
 
 TEST(test_navigator_permissions_query) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     GCValue permissions = JS_GetPropertyStr(ctx, navigator, "permissions");
@@ -4145,7 +4145,7 @@ TEST(test_navigator_permissions_query) {
 
 TEST(test_PermissionStatus_class) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     // Test PermissionStatus class exists
     GCValue PermissionStatus = JS_GetPropertyStr(ctx, g_global, "PermissionStatus");
@@ -4160,7 +4160,7 @@ TEST(test_PermissionStatus_class) {
 
 TEST(test_navigator_storage_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     if (!JS_IsObject(navigator)) return false;
@@ -4173,7 +4173,7 @@ TEST(test_navigator_storage_exists) {
 
 TEST(test_navigator_storage_estimate) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     GCValue storage = JS_GetPropertyStr(ctx, navigator, "storage");
@@ -4191,7 +4191,7 @@ TEST(test_navigator_storage_estimate) {
 
 TEST(test_navigator_serviceWorker_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     if (!JS_IsObject(navigator)) return false;
@@ -4204,7 +4204,7 @@ TEST(test_navigator_serviceWorker_exists) {
 
 TEST(test_navigator_serviceWorker_register) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     GCValue serviceWorker = JS_GetPropertyStr(ctx, navigator, "serviceWorker");
@@ -4218,7 +4218,7 @@ TEST(test_navigator_serviceWorker_register) {
 
 TEST(test_navigator_serviceWorker_getRegistration) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     GCValue serviceWorker = JS_GetPropertyStr(ctx, navigator, "serviceWorker");
@@ -4236,7 +4236,7 @@ TEST(test_navigator_serviceWorker_getRegistration) {
 
 TEST(test_navigator_serviceWorker_ready) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     GCValue serviceWorker = JS_GetPropertyStr(ctx, navigator, "serviceWorker");
@@ -4253,7 +4253,7 @@ TEST(test_navigator_serviceWorker_ready) {
 
 TEST(test_navigator_serviceWorker_addEventListener) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     GCValue serviceWorker = JS_GetPropertyStr(ctx, navigator, "serviceWorker");
@@ -4271,7 +4271,7 @@ TEST(test_navigator_serviceWorker_addEventListener) {
 
 TEST(test_navigator_geolocation_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     if (!JS_IsObject(navigator)) return false;
@@ -4284,7 +4284,7 @@ TEST(test_navigator_geolocation_exists) {
 
 TEST(test_navigator_geolocation_getCurrentPosition) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     GCValue geolocation = JS_GetPropertyStr(ctx, navigator, "geolocation");
@@ -4298,7 +4298,7 @@ TEST(test_navigator_geolocation_getCurrentPosition) {
 
 TEST(test_navigator_geolocation_watchPosition) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     GCValue geolocation = JS_GetPropertyStr(ctx, navigator, "geolocation");
@@ -4320,7 +4320,7 @@ TEST(test_navigator_geolocation_watchPosition) {
 
 TEST(test_navigator_share_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     if (!JS_IsObject(navigator)) return false;
@@ -4342,7 +4342,7 @@ TEST(test_navigator_share_exists) {
 
 TEST(test_navigator_userAgentData_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     if (!JS_IsObject(navigator)) return false;
@@ -4355,7 +4355,7 @@ TEST(test_navigator_userAgentData_exists) {
 
 TEST(test_navigator_userAgentData_properties) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     GCValue userAgentData = JS_GetPropertyStr(ctx, navigator, "userAgentData");
@@ -4385,7 +4385,7 @@ TEST(test_navigator_userAgentData_properties) {
 
 TEST(test_navigator_getBattery_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     if (!JS_IsObject(navigator)) return false;
@@ -4403,7 +4403,7 @@ TEST(test_navigator_getBattery_exists) {
 
 TEST(test_navigator_connection_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     if (!JS_IsObject(navigator)) return false;
@@ -4416,7 +4416,7 @@ TEST(test_navigator_connection_exists) {
 
 TEST(test_navigator_connection_properties) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     GCValue connection = JS_GetPropertyStr(ctx, navigator, "connection");
@@ -4446,7 +4446,7 @@ TEST(test_navigator_connection_properties) {
 
 TEST(test_navigator_core_properties) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue navigator = JS_GetPropertyStr(ctx, g_global, "navigator");
     if (!JS_IsObject(navigator)) return false;
@@ -4512,7 +4512,7 @@ TEST(test_navigator_core_properties) {
 
 TEST(test_history_exists) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue history = JS_GetPropertyStr(ctx, g_global, "history");
     if (!JS_IsObject(history)) return false;
@@ -4522,7 +4522,7 @@ TEST(test_history_exists) {
 
 TEST(test_history_properties) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue history = JS_GetPropertyStr(ctx, g_global, "history");
     
@@ -4543,7 +4543,7 @@ TEST(test_history_properties) {
 
 TEST(test_history_methods) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue history = JS_GetPropertyStr(ctx, g_global, "history");
     
@@ -4572,7 +4572,7 @@ TEST(test_history_methods) {
 
 TEST(test_history_pushState) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue history = JS_GetPropertyStr(ctx, g_global, "history");
     
@@ -4599,7 +4599,7 @@ TEST(test_history_pushState) {
 
 TEST(test_console_all_methods_exist) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue console = JS_GetPropertyStr(ctx, g_global, "console");
     if (!JS_IsObject(console)) return false;
@@ -4664,7 +4664,7 @@ TEST(test_console_all_methods_exist) {
 
 TEST(test_console_log_execution) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue console = JS_GetPropertyStr(ctx, g_global, "console");
     GCValue log = JS_GetPropertyStr(ctx, console, "log");
@@ -4683,7 +4683,7 @@ TEST(test_console_log_execution) {
 
 TEST(test_console_time_execution) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue console = JS_GetPropertyStr(ctx, g_global, "console");
     GCValue time = JS_GetPropertyStr(ctx, console, "time");
@@ -4709,7 +4709,7 @@ TEST(test_console_time_execution) {
 
 TEST(test_console_count_execution) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue console = JS_GetPropertyStr(ctx, g_global, "console");
     GCValue count = JS_GetPropertyStr(ctx, console, "count");
@@ -4733,7 +4733,7 @@ TEST(test_console_count_execution) {
 
 TEST(test_console_group_execution) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue console = JS_GetPropertyStr(ctx, g_global, "console");
     GCValue group = JS_GetPropertyStr(ctx, console, "group");
@@ -4761,7 +4761,7 @@ TEST(test_console_group_execution) {
 
 TEST(test_console_assert_execution) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue console = JS_GetPropertyStr(ctx, g_global, "console");
     GCValue assert_fn = JS_GetPropertyStr(ctx, console, "assert");
@@ -4781,7 +4781,7 @@ TEST(test_console_assert_execution) {
 
 TEST(test_console_clear_execution) {
     JSContextHandle ctx = get_test_context();
-    if (!ctx) return false;
+    if (!SAFE_VALID(ctx)) return false;
 
     GCValue console = JS_GetPropertyStr(ctx, g_global, "console");
     GCValue clear = JS_GetPropertyStr(ctx, console, "clear");

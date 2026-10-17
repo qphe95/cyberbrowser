@@ -20,9 +20,9 @@ extern int tests_passed;
 extern int tests_failed;
 #endif
 
-/* Forward declaration for QuickJS runtime handle (C++ class) */
-/* The actual type is defined in quickjs_types.h */
-class JSRuntimeHandle;
+/* QuickJS runtime handle: a plain GCHandle typedef from quickjs_types.h
+ * (it used to be a C++ class, forward-declared here). */
+#include "quickjs_types.h"
 
 /* Global shared runtime - tests should use this instead of creating their own */
 #ifdef TEST_RUNNER_MAIN

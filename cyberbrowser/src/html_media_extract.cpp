@@ -812,13 +812,13 @@ extern "C" int timer_process_due(JSContextHandle ctx);
 
 // Pump timers and microtasks after a network response.
 static void pump_timers_and_jobs_after_fetch(void) {
-    if (!g_js_context) return;
+    if (!SAFE_VALID(g_js_context)) return;
     
     int iterations = 0;
     while (iterations < 20) {
         int processed = timer_process_due(g_js_context);
         int jobs = 0;
-        JSContextHandle pctx;
+        JSContextHandle pctx = GC_HANDLE_NULL;
         JSRuntimeHandle rt = JS_GetRuntime(g_js_context);
         int ret;
         while ((ret = JS_ExecutePendingJob(rt, &pctx)) > 0) {

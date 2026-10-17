@@ -662,7 +662,7 @@ TEST(test_grey_lifecycle) {
 
 TEST(test_js_object_published) {
     JSContextHandle ctx = get_shared_test_context();
-    if (!ctx.valid()) {
+    if (!SAFE_VALID(ctx)) {
         printf("    (skipped - no shared context)");
         return true;
     }
@@ -677,7 +677,7 @@ TEST(test_js_object_published) {
 
 TEST(test_dom_node_published) {
     JSContextHandle ctx = get_shared_test_context();
-    if (!ctx.valid()) {
+    if (!SAFE_VALID(ctx)) {
         printf("    (skipped - no shared context)");
         return true;
     }
@@ -690,7 +690,7 @@ TEST(test_dom_node_published) {
 
 TEST(test_nested_js_objects_published) {
     JSContextHandle ctx = get_shared_test_context();
-    if (!ctx.valid()) {
+    if (!SAFE_VALID(ctx)) {
         printf("    (skipped - no shared context)");
         return true;
     }
@@ -1021,7 +1021,7 @@ extern "C" JSContextHandle get_shared_test_context(void);
 
 TEST(test_qjs_gc_basic) {
     /* Skip if no runtime */
-    if (!g_test_rt) {
+    if (!SAFE_VALID(g_test_rt)) {
         printf("    (skipped - no QuickJS runtime)");
         return true; /* Skip, don't fail */
     }
@@ -1038,7 +1038,7 @@ TEST(test_qjs_gc_preserves_objects) {
     JSContextHandle test_ctx = get_shared_test_context();
     
     /* Skip if no context */
-    if (!test_ctx.valid()) {
+    if (!SAFE_VALID(test_ctx)) {
         printf("    (skipped - no QuickJS context)");
         return true;
     }
@@ -1079,7 +1079,7 @@ TEST(test_qjs_gc_preserves_objects) {
 
 TEST(test_barrier_js_set_property) {
     JSContextHandle ctx = get_test_ctx();
-    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
+    if (!SAFE_VALID(ctx)) { printf("    (skipped - no context)"); return true; }
     GCValue r = eval_test(ctx,
         "var __src = {}; var __tgt = {v:1}; __src.x = __tgt; __src.x.v;");
     ASSERT_TRUE(is_exception_free(ctx, r));
@@ -1089,7 +1089,7 @@ TEST(test_barrier_js_set_property) {
 
 TEST(test_barrier_js_array_store) {
     JSContextHandle ctx = get_test_ctx();
-    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
+    if (!SAFE_VALID(ctx)) { printf("    (skipped - no context)"); return true; }
     GCValue r = eval_test(ctx,
         "var __arr = []; var __o = {v:2}; __arr[0] = __o; __arr[0].v;");
     ASSERT_TRUE(is_exception_free(ctx, r));
@@ -1099,7 +1099,7 @@ TEST(test_barrier_js_array_store) {
 
 TEST(test_barrier_js_array_push) {
     JSContextHandle ctx = get_test_ctx();
-    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
+    if (!SAFE_VALID(ctx)) { printf("    (skipped - no context)"); return true; }
     GCValue r = eval_test(ctx,
         "var __arr = []; __arr.push({v:3}); __arr[0].v;");
     ASSERT_TRUE(is_exception_free(ctx, r));
@@ -1109,7 +1109,7 @@ TEST(test_barrier_js_array_push) {
 
 TEST(test_barrier_js_set_prototype) {
     JSContextHandle ctx = get_test_ctx();
-    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
+    if (!SAFE_VALID(ctx)) { printf("    (skipped - no context)"); return true; }
     GCValue r = eval_test(ctx,
         "var __proto = {v:4}; var __obj = {}; Object.setPrototypeOf(__obj, __proto); __obj.v;");
     ASSERT_TRUE(is_exception_free(ctx, r));
@@ -1119,7 +1119,7 @@ TEST(test_barrier_js_set_prototype) {
 
 TEST(test_barrier_js_getset) {
     JSContextHandle ctx = get_test_ctx();
-    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
+    if (!SAFE_VALID(ctx)) { printf("    (skipped - no context)"); return true; }
     GCValue r = eval_test(ctx,
         "var __obj = {}; var __store = {v:5}; Object.defineProperty(__obj, 'x', { get: function(){ return __store; } }); __obj.x.v;");
     ASSERT_TRUE(is_exception_free(ctx, r));
@@ -1129,7 +1129,7 @@ TEST(test_barrier_js_getset) {
 
 TEST(test_barrier_js_private_field) {
     JSContextHandle ctx = get_test_ctx();
-    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
+    if (!SAFE_VALID(ctx)) { printf("    (skipped - no context)"); return true; }
     GCValue r = eval_test(ctx,
         "class __C { #x; constructor(){ this.#x = {v:5}; } get(){ return this.#x.v; } } var __c = new __C(); __c.get();");
     if (!is_exception_free(ctx, r)) {
@@ -1142,7 +1142,7 @@ TEST(test_barrier_js_private_field) {
 
 TEST(test_barrier_js_closure) {
     JSContextHandle ctx = get_test_ctx();
-    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
+    if (!SAFE_VALID(ctx)) { printf("    (skipped - no context)"); return true; }
     GCValue r = eval_test(ctx,
         "function __make(){ var __o = {v:6}; return function(){ return __o.v; }; } __make()();");
     ASSERT_TRUE(is_exception_free(ctx, r));
@@ -1152,7 +1152,7 @@ TEST(test_barrier_js_closure) {
 
 TEST(test_barrier_js_bound_function) {
     JSContextHandle ctx = get_test_ctx();
-    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
+    if (!SAFE_VALID(ctx)) { printf("    (skipped - no context)"); return true; }
     GCValue r = eval_test(ctx,
         "var __o = {v:7}; function __f(){ return this.v; } var __b = __f.bind(__o); __b();");
     ASSERT_TRUE(is_exception_free(ctx, r));
@@ -1162,7 +1162,7 @@ TEST(test_barrier_js_bound_function) {
 
 TEST(test_barrier_js_generator) {
     JSContextHandle ctx = get_test_ctx();
-    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
+    if (!SAFE_VALID(ctx)) { printf("    (skipped - no context)"); return true; }
     GCValue r = eval_test(ctx,
         "function* __g(){ yield {v:8}; } var __gen = __g(); __gen.next().value.v;");
     ASSERT_TRUE(is_exception_free(ctx, r));
@@ -1172,7 +1172,7 @@ TEST(test_barrier_js_generator) {
 
 TEST(test_barrier_js_typed_array) {
     JSContextHandle ctx = get_test_ctx();
-    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
+    if (!SAFE_VALID(ctx)) { printf("    (skipped - no context)"); return true; }
     GCValue r = eval_test(ctx,
         "var __a = new Uint8Array(4); __a[0] = 9; __a[0];");
     ASSERT_TRUE(is_exception_free(ctx, r));
@@ -1182,7 +1182,7 @@ TEST(test_barrier_js_typed_array) {
 
 TEST(test_barrier_js_map) {
     JSContextHandle ctx = get_test_ctx();
-    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
+    if (!SAFE_VALID(ctx)) { printf("    (skipped - no context)"); return true; }
     GCValue r = eval_test(ctx,
         "var __m = new Map(); var __k = {v:10}; __m.set(__k, {v:11}); __m.get(__k).v;");
     ASSERT_TRUE(is_exception_free(ctx, r));
@@ -1192,7 +1192,7 @@ TEST(test_barrier_js_map) {
 
 TEST(test_barrier_js_weakref) {
     JSContextHandle ctx = get_test_ctx();
-    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
+    if (!SAFE_VALID(ctx)) { printf("    (skipped - no context)"); return true; }
     GCValue r = eval_test(ctx,
         "var __o = {v:12}; var __w = new WeakRef(__o); __w.deref().v;");
     ASSERT_TRUE(is_exception_free(ctx, r));
@@ -1202,7 +1202,7 @@ TEST(test_barrier_js_weakref) {
 
 TEST(test_barrier_js_promise) {
     JSContextHandle ctx = get_test_ctx();
-    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
+    if (!SAFE_VALID(ctx)) { printf("    (skipped - no context)"); return true; }
     GCValue r = eval_test(ctx,
         "var __p = Promise.resolve({v:13}); __p instanceof Promise;");
     ASSERT_TRUE(is_exception_free(ctx, r));
@@ -1216,8 +1216,8 @@ TEST(test_barrier_js_promise) {
 
 TEST(test_shape_hash_empty_shape_sharing) {
     JSContextHandle ctx = get_test_ctx();
-    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
-    JSRuntimeHandle rt = JSRuntimeHandle(JS_GetRuntime(ctx));
+    if (!SAFE_VALID(ctx)) { printf("    (skipped - no context)"); return true; }
+    JSRuntimeHandle rt = (JSRuntimeHandle)(JS_GetRuntime(ctx));
 
     /* Create objects directly so we do not pollute the global object and
        create unrelated shape changes. */
@@ -1237,8 +1237,8 @@ TEST(test_shape_hash_empty_shape_sharing) {
 
 TEST(test_shape_hash_property_shape_sharing) {
     JSContextHandle ctx = get_test_ctx();
-    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
-    JSRuntimeHandle rt = JSRuntimeHandle(JS_GetRuntime(ctx));
+    if (!SAFE_VALID(ctx)) { printf("    (skipped - no context)"); return true; }
+    JSRuntimeHandle rt = (JSRuntimeHandle)(JS_GetRuntime(ctx));
 
     GCValue o1 = JS_NewObject(ctx);
     ASSERT_TRUE(JS_IsObject(o1));
@@ -1260,8 +1260,8 @@ TEST(test_shape_hash_property_shape_sharing) {
 
 TEST(test_shape_hash_resize) {
     JSContextHandle ctx = get_test_ctx();
-    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
-    JSRuntimeHandle rt = JSRuntimeHandle(JS_GetRuntime(ctx));
+    if (!SAFE_VALID(ctx)) { printf("    (skipped - no context)"); return true; }
+    JSRuntimeHandle rt = (JSRuntimeHandle)(JS_GetRuntime(ctx));
     uint32_t count_before = JSRuntime_get_shape_hash_count(rt);
 
     GCValue r = eval_test(ctx,
@@ -1280,14 +1280,14 @@ TEST(test_shape_hash_resize) {
 
 TEST(test_shape_hash_gc_cleanup) {
     JSContextHandle ctx = get_test_ctx();
-    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
+    if (!SAFE_VALID(ctx)) { printf("    (skipped - no context)"); return true; }
     GCValue r = eval_test(ctx,
         "var __sh_e = {a:1, b:2, c:3}; __sh_e");
     ASSERT_TRUE(is_exception_free(ctx, r));
     JSObjectHandle o = JS_VALUE_GET_OBJ_HANDLE(r);
-    ASSERT_TRUE(o.valid());
+    ASSERT_TRUE(SAFE_VALID(o));
 
-    JSRuntimeHandle rt = JSRuntimeHandle(JS_GetRuntime(ctx));
+    JSRuntimeHandle rt = (JSRuntimeHandle)(JS_GetRuntime(ctx));
     uint32_t count_before = JSRuntime_get_shape_hash_count(rt);
     ASSERT_TRUE(count_before > 0);
 
@@ -1309,7 +1309,7 @@ TEST(test_shape_hash_gc_cleanup) {
 
 TEST(test_atom_hash_interning) {
     JSContextHandle ctx = get_test_ctx();
-    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
+    if (!SAFE_VALID(ctx)) { printf("    (skipped - no context)"); return true; }
     JSAtom a1 = JS_NewAtom(ctx, "__atom_hash_intern_test");
     JSAtom a2 = JS_NewAtom(ctx, "__atom_hash_intern_test");
     ASSERT_TRUE(a1 != JS_ATOM_NULL);
@@ -1321,8 +1321,8 @@ TEST(test_atom_hash_interning) {
 
 TEST(test_atom_hash_resize) {
     JSContextHandle ctx = get_test_ctx();
-    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
-    JSRuntimeHandle rt = JSRuntimeHandle(JS_GetRuntime(ctx));
+    if (!SAFE_VALID(ctx)) { printf("    (skipped - no context)"); return true; }
+    JSRuntimeHandle rt = (JSRuntimeHandle)(JS_GetRuntime(ctx));
     uint32_t count_before = JSRuntime_get_atom_hash_count(rt);
 
     JSAtom atoms[300];
@@ -1344,8 +1344,8 @@ TEST(test_atom_hash_resize) {
 
 TEST(test_atom_hash_gc_cleanup) {
     JSContextHandle ctx = get_test_ctx();
-    if (!ctx.valid()) { printf("    (skipped - no context)"); return true; }
-    JSRuntimeHandle rt = JSRuntimeHandle(JS_GetRuntime(ctx));
+    if (!SAFE_VALID(ctx)) { printf("    (skipped - no context)"); return true; }
+    JSRuntimeHandle rt = (JSRuntimeHandle)(JS_GetRuntime(ctx));
 
     JSAtom a = JS_NewAtom(ctx, "__atom_gc_cleanup_temp");
     ASSERT_TRUE(a != JS_ATOM_NULL);
@@ -1371,25 +1371,25 @@ TEST(test_property_array_prealloc) {
     GCValue obj_val = JS_NewObject(ctx);
     ASSERT_TRUE(JS_IsObject(obj_val));
     JSObjectHandle obj = JS_VALUE_GET_OBJ_HANDLE(obj_val);
-    ASSERT_TRUE(obj.valid());
+    ASSERT_TRUE(SAFE_VALID(obj));
 
     /* Version starts stable (even). */
-    uint32_t v0 = obj.prop_version();
+    uint32_t v0 = js_obj_prop_version(obj);
     ASSERT_TRUE((v0 & 1) == 0);
 
-    ASSERT_TRUE(js_object_prealloc_properties(ctx, obj.handle(), 16));
+    ASSERT_TRUE(js_object_prealloc_properties(ctx, SAFE_HANDLE(obj), 16));
 
     /* After pre-sizing the version is still stable. */
-    uint32_t v1 = obj.prop_version();
+    uint32_t v1 = js_obj_prop_version(obj);
     ASSERT_TRUE((v1 & 1) == 0);
 
-    JSShapeHandle sh(obj.shape_handle());
-    ASSERT_TRUE(sh.valid());
-    ASSERT_TRUE(sh.prop_size() >= 16);
+    JSShapeHandle sh = js_obj_shape_handle(obj);
+    ASSERT_TRUE(SAFE_VALID(sh));
+    ASSERT_TRUE(SAFE_GET_OR(sh, JSShapeHandle, prop_size, 0) >= 16);
 
     GCValue val = int32_value(42);
-    ASSERT_TRUE(js_object_set_property_value_atomic(ctx, obj.handle(), 0, val));
-    GCValue got = js_object_get_property_value_atomic(ctx, obj.handle(), 0);
+    ASSERT_TRUE(js_object_set_property_value_atomic(ctx, SAFE_HANDLE(obj), 0, val));
+    GCValue got = js_object_get_property_value_atomic(ctx, SAFE_HANDLE(obj), 0);
     ASSERT_TRUE(JS_IsNumber(got));
     ASSERT_EQ(JS_VALUE_GET_INT(got), 42);
     return true;
@@ -1423,13 +1423,13 @@ TEST(test_property_array_atomic_cas) {
     GCValue obj_val = JS_NewObject(ctx);
     ASSERT_TRUE(JS_IsObject(obj_val));
     JSObjectHandle obj = JS_VALUE_GET_OBJ_HANDLE(obj_val);
-    ASSERT_TRUE(obj.valid());
-    ASSERT_TRUE(js_object_prealloc_properties(ctx, obj.handle(), 16));
+    ASSERT_TRUE(SAFE_VALID(obj));
+    ASSERT_TRUE(js_object_prealloc_properties(ctx, SAFE_HANDLE(obj), 16));
 
     /* Keep the object and its property array alive and prevent GC from being
      * triggered by allocations during the threaded portion of the test. */
-    gc_add_root(obj.handle());
-    GCHandle prop_handle = obj.prop_handle();
+    gc_add_root(SAFE_HANDLE(obj));
+    GCHandle prop_handle = js_obj_prop_handle(obj);
     gc_add_root(prop_handle);
 
     size_t saved_threshold = g_gc.gc_threshold;
@@ -1442,7 +1442,7 @@ TEST(test_property_array_atomic_cas) {
 
     for (int i = 0; i < nthreads; i++) {
         args[i].ctx = ctx;
-        args[i].obj = obj.handle();
+        args[i].obj = SAFE_HANDLE(obj);
         args[i].iters = iters;
         pthread_create(&threads[i], NULL, prop_array_cas_worker, &args[i]);
     }
@@ -1452,11 +1452,11 @@ TEST(test_property_array_atomic_cas) {
 
     g_gc.gc_threshold = saved_threshold;
 
-    GCValue final_val = js_object_get_property_value_atomic(ctx, obj.handle(), 0);
+    GCValue final_val = js_object_get_property_value_atomic(ctx, SAFE_HANDLE(obj), 0);
     ASSERT_EQ(JS_VALUE_GET_INT(final_val), nthreads * iters);
 
     gc_remove_root(prop_handle);
-    gc_remove_root(obj.handle());
+    gc_remove_root(SAFE_HANDLE(obj));
     return true;
 }
 
@@ -1474,11 +1474,11 @@ TEST(test_class_id_atomic) {
 
 TEST(test_class_array_atomic) {
     JSContextHandle ctx = get_test_ctx();
-    JSRuntimeHandle rt(ctx.rt_handle());
-    ASSERT_TRUE(rt.valid());
+    JSRuntimeHandle rt = SAFE_GET_OR(ctx, JSContextHandle, rt_handle, GC_HANDLE_NULL);
+    ASSERT_TRUE(SAFE_VALID(rt));
 
     /* Version must be stable (even) after init. */
-    uint32_t ver = rt.class_array_version();
+    uint32_t ver = js_rt_class_array_version(rt);
     ASSERT_TRUE((ver & 1) == 0);
 
     /* Register a custom class and read the descriptor back through the
@@ -1500,7 +1500,7 @@ TEST(test_class_proto_atomic) {
     ASSERT_TRUE(JS_NewClassID(&class_id) != 0);
     JSClassDef class_def = {};
     class_def.class_name = "TestClassProtoAtomic";
-    ASSERT_TRUE(JS_NewClass(JSRuntimeHandle(ctx.rt_handle()), class_id, &class_def) == 0);
+    ASSERT_TRUE(JS_NewClass((JSRuntimeHandle)(SAFE_GET_OR(ctx, JSContextHandle, rt_handle, GC_HANDLE_NULL)), class_id, &class_def) == 0);
 
     GCValue proto = JS_NewObject(ctx);
     ASSERT_TRUE(JS_IsObject(proto));
@@ -1512,7 +1512,7 @@ TEST(test_class_proto_atomic) {
     ASSERT_EQ((int64_t)JS_VALUE_GET_HANDLE(got),
               (int64_t)JS_VALUE_GET_HANDLE(proto));
 
-    ASSERT_TRUE((ctx.class_proto_version() & 1) == 0);
+    ASSERT_TRUE((js_ctx_class_proto_version(ctx) & 1) == 0);
     return true;
 }
 
@@ -1639,7 +1639,7 @@ static GCValue test_job_counter_func(JSContextHandle ctx, int argc, GCValue *arg
 
 TEST(test_job_queue_basic) {
     JSContextHandle ctx = get_test_ctx();
-    JSRuntimeHandle rt(ctx.rt_handle());
+    JSRuntimeHandle rt = SAFE_GET_OR(ctx, JSContextHandle, rt_handle, GC_HANDLE_NULL);
 
     /* Drain any leftover jobs from previous tests before counting. */
     for (;;) {
@@ -1707,7 +1707,7 @@ static void *job_queue_consumer(void *arg)
 
 TEST(test_job_queue_threaded) {
     JSContextHandle ctx = get_test_ctx();
-    JSRuntimeHandle rt(ctx.rt_handle());
+    JSRuntimeHandle rt = SAFE_GET_OR(ctx, JSContextHandle, rt_handle, GC_HANDLE_NULL);
 
     memset(g_job_counters, 0, sizeof(g_job_counters));
     atomic_store_u32(&g_job_producers_done, 0);
@@ -1752,7 +1752,7 @@ TEST(test_job_queue_threaded) {
 
 TEST(test_job_queue_gc_marking) {
     JSContextHandle ctx = get_test_ctx();
-    JSRuntimeHandle rt(ctx.rt_handle());
+    JSRuntimeHandle rt = SAFE_GET_OR(ctx, JSContextHandle, rt_handle, GC_HANDLE_NULL);
 
     memset(g_job_counters, 0, sizeof(g_job_counters));
 

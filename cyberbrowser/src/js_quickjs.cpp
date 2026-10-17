@@ -200,8 +200,8 @@ static int g_captured_url_count = 0;
 static pthread_mutex_t g_url_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* Global QuickJS runtime and context - initialized once in android_main */
-JSRuntimeHandle g_js_runtime;
-JSContextHandle g_js_context;
+JSRuntimeHandle g_js_runtime = GC_HANDLE_NULL;
+JSContextHandle g_js_context = GC_HANDLE_NULL;
 
 // Record a captured URL
 // BUG FIX #1: Fixed buffer overflow using memcpy with explicit length validation
@@ -2439,11 +2439,11 @@ bool js_quickjs_create_runtime(void) {
     // Create runtime using unified GC allocator
     platform_log(LOG_LEVEL_INFO, "js_quickjs", "Creating global runtime...");
     g_js_runtime = JS_NewRuntime();
-    if (!g_js_runtime) {
+    if (!SAFE_VALID(g_js_runtime)) {
         platform_log(LOG_LEVEL_ERROR, "js_quickjs", "Runtime creation failed");
         return false;
     }
-    platform_log(LOG_LEVEL_INFO, "js_quickjs", "Global runtime created: %u", g_js_runtime.handle());
+    platform_log(LOG_LEVEL_INFO, "js_quickjs", "Global runtime created: %u", SAFE_HANDLE(g_js_runtime));
     
     // Allocate per-document CSS index tables (id/class/tag).
     css_document_state_ensure(g_js_runtime);
@@ -2456,11 +2456,11 @@ bool js_quickjs_create_runtime(void) {
     platform_log(LOG_LEVEL_INFO, "js_quickjs", "Creating global context...");
     g_js_context = JS_NewContext(g_js_runtime);
     
-    if (!g_js_context) {
+    if (!SAFE_VALID(g_js_context)) {
         platform_log(LOG_LEVEL_ERROR, "js_quickjs", "Context creation failed");
         return false;
     }
-    platform_log(LOG_LEVEL_INFO, "js_quickjs", "Global context created: %u", g_js_context.handle());
+    platform_log(LOG_LEVEL_INFO, "js_quickjs", "Global context created: %u", SAFE_HANDLE(g_js_context));
     
     // Enable eval() support - required by many player scripts
     platform_log(LOG_LEVEL_INFO, "js_quickjs", "Enabling eval() support...");
@@ -2515,7 +2515,7 @@ bool js_quickjs_create_runtime(void) {
  * html_populate_js_document() when HTML is available.
  */
 void js_quickjs_setup_initial_dom(void) {
-    if (!g_js_context) {
+    if (!SAFE_VALID(g_js_context)) {
         log_to_file("js_quickjs", "Cannot setup DOM: context not initialized");
         return;
     }
@@ -2556,7 +2556,7 @@ void js_quickjs_clear_captured_urls(void) {
 }
 
 void js_quickjs_pump_timers_and_jobs(void) {
-    if (!g_js_context.valid()) return;
+    if (!SAFE_VALID(g_js_context)) return;
     JSRuntimeHandle rt = JS_GetRuntime(g_js_context);
     int iterations = 0;
     int callbacks_remaining = 1000;  /* Guard against runaway interval loops */
@@ -2565,7 +2565,7 @@ void js_quickjs_pump_timers_and_jobs(void) {
         if (processed > callbacks_remaining) processed = callbacks_remaining;
         callbacks_remaining -= processed;
         int jobs = 0;
-        JSContextHandle pctx;
+        JSContextHandle pctx = GC_HANDLE_NULL;
         int ret;
         while (callbacks_remaining > 0 &&
                (ret = JS_ExecutePendingJob(rt, &pctx)) > 0) {
@@ -2579,7 +2579,7 @@ void js_quickjs_pump_timers_and_jobs(void) {
 }
 
 void js_quickjs_dispatch_lifecycle_events(void) {
-    if (!g_js_context.valid()) return;
+    if (!SAFE_VALID(g_js_context)) return;
     const char *lifecycle_js =
         "document.readyState = 'interactive';"
         "var dcl = new Event('DOMContentLoaded', { bubbles: true });"
@@ -2613,8 +2613,8 @@ void js_quickjs_cleanup(void) {
     // Free CSS index tables before the runtime pointer is reset.
     css_document_state_destroy(g_js_runtime);
 
-    g_js_context = JSContextHandle();
-    g_js_runtime = JSRuntimeHandle();
+    g_js_context = GC_HANDLE_NULL;
+    g_js_runtime = GC_HANDLE_NULL;
     
     // Cleanup unified GC - this frees the entire heap including all JS objects
     gc_cleanup();
@@ -2628,7 +2628,7 @@ void js_quickjs_cleanup(void) {
 bool js_quickjs_extract_value(const char **scripts, const size_t *script_lens,
                               int script_count, const char *js_expr,
                               char *out_value, size_t out_value_len) {
-    if (!g_js_context || !scripts || script_count <= 0 ||
+    if (!SAFE_VALID(g_js_context) || !scripts || script_count <= 0 ||
         !js_expr || !out_value || out_value_len == 0) {
         log_to_file("js_quickjs", "extract_value: invalid arguments");
         return false;
@@ -2717,7 +2717,7 @@ static char* extract_attr(const char *html, const char *tag_end, const char *att
 // Create DOM nodes from parsed HTML document
 // Using automatic GC memory management
 static int create_dom_nodes_from_parsed_html(JSContextHandle ctx, HtmlDocument *doc) {
-    if (!ctx || !doc) return 0;
+    if (!SAFE_VALID(ctx) || !doc) return 0;
     
     int count = 0;
     
@@ -2817,14 +2817,14 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
     out_result->status = JS_EXEC_ERROR;
     
     // Use global runtime and context (initialized once in android_main)
-    if (!g_js_runtime || !g_js_context) {
+    if (!SAFE_VALID(g_js_runtime) || !SAFE_VALID(g_js_context)) {
         log_to_file("js_quickjs", "Global runtime/context not initialized");
         return false;
     }
     
     JSContextHandle ctx = g_js_context;
     
-    log_to_file("js_quickjs", "Using global runtime=%u, context=%u", g_js_runtime.handle(), g_js_context.handle());
+    log_to_file("js_quickjs", "Using global runtime=%u, context=%u", SAFE_HANDLE(g_js_runtime), SAFE_HANDLE(g_js_context));
 
     // Parse the full HTML and populate the DOM tree in JS.
     // This replaces the hardcoded minimal skeleton with the actual page structure,

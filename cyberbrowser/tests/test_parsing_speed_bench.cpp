@@ -98,7 +98,7 @@ int main(int argc, char *argv[]) {
         free(script);
         
         /* Clear atom cache between tests for fair comparison */
-        JSContext *p = (JSContext*)gc_deref(ctx.handle());
+        JSContext *p = (JSContext*)gc_deref(SAFE_HANDLE(ctx));
         js_atom_cache_reset(&p->atom_cache);
     }
     
@@ -120,7 +120,7 @@ int main(int argc, char *argv[]) {
         
         free(script);
         
-        JSContext *p = (JSContext*)gc_deref(ctx.handle());
+        JSContext *p = (JSContext*)gc_deref(SAFE_HANDLE(ctx));
         js_atom_cache_reset(&p->atom_cache);
     }
     
@@ -157,7 +157,7 @@ int main(int argc, char *argv[]) {
         printf("  Speed: %.1f KB/sec\n", kb_per_sec);
         
         /* Show atom cache stats */
-        JSContext *p = (JSContext*)gc_deref(ctx.handle());
+        JSContext *p = (JSContext*)gc_deref(SAFE_HANDLE(ctx));
         uint32_t hits, misses;
         js_atom_cache_stats(&p->atom_cache, &hits, &misses);
         printf("  Atom cache: %u hits, %u misses (%.1f%% hit rate)\n",

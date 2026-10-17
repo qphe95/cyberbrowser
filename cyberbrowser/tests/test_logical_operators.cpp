@@ -24,11 +24,11 @@
 extern "C" JSContextHandle get_shared_test_context(void);
 extern "C" GCValue get_shared_test_global(void);
 
-static JSContextHandle g_ctx;
+static JSContextHandle g_ctx = GC_HANDLE_NULL;
 
 static bool setup_context(void) {
     g_ctx = get_shared_test_context();
-    if (!g_ctx.valid()) {
+    if (!SAFE_VALID(g_ctx)) {
         printf("    ERROR: Shared context not available\n");
         return false;
     }

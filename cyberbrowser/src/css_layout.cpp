@@ -1706,7 +1706,7 @@ static void layout_collect_js_sheet_array(JSContextHandle ctx, GCValue arr,
 static void layout_collect_constructed_stylesheets(LayoutContext *ctx,
                                                     LayoutStyleSheetList *list)
 {
-    if (!ctx->js_ctx.valid()) return;
+    if (!SAFE_VALID(ctx->js_ctx)) return;
     JSContextHandle js = ctx->js_ctx;
     GCValue global = JS_GetGlobalObject(js);
     GCValue doc = JS_GetPropertyStr(js, global, "document");
@@ -4490,7 +4490,7 @@ static void layout_position_absolute_subtree(LayoutContext *ctx, int idx)
  * computed-style table so getComputedStyle can return real values. */
 static void layout_export_computed_geometry(LayoutContext *ctx)
 {
-    if (!ctx->js_ctx.valid()) return;
+    if (!SAFE_VALID(ctx->js_ctx)) return;
     JSContextHandle js = ctx->js_ctx;
     char buf[128];
 

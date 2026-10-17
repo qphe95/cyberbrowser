@@ -1111,11 +1111,11 @@ void gc_cleanup(void) {
 }
 
 void gc_set_runtime(JSRuntimeHandle rt) {
-    g_gc.rt = rt.handle();
+    g_gc.rt = SAFE_HANDLE(rt);
 }
 
 JSRuntimeHandle gc_get_runtime(void) {
-    return JSRuntimeHandle(g_gc.rt);
+    return (JSRuntimeHandle)(g_gc.rt);
 }
 
 void gc_set_handle_finalizer(GCHandle handle, GCFinalizerFunc *finalizer) {
@@ -2118,10 +2118,10 @@ static void gc_mark_ptr(void *ptr) {
     
     /* For JSVarRef, mark its value and the referenced frame (to keep parent frames alive) */
     if (hdr->gc_obj_type == JS_GC_OBJ_TYPE_VAR_REF) {
-        JSVarRefHandle var_ref = JSVarRefHandle(hdr->handle);
-        gc_mark_value(var_ref.get_detached_value());
+        JSVarRefHandle var_ref = (JSVarRefHandle)(hdr->handle);
+        gc_mark_value(js_varref_get_detached_value(var_ref));
         /* Mark the frame handle to keep parent frames alive for closures */
-        GCHandle frame_handle = var_ref.frame_handle();
+        GCHandle frame_handle = js_varref_frame_handle(var_ref);
         if (frame_handle != GC_HANDLE_NULL) {
             /* Mark by setting the mark bit directly on the header */
             void *frame_ptr = gc_deref(frame_handle);
@@ -2162,10 +2162,10 @@ static void gc_mark_value(GCValue val) {
                             gc_mark_object((JSObject*)ptr);
                         }
                         else if (tag == JS_TAG_STRING && hdr->gc_obj_type == JS_GC_OBJ_TYPE_JS_STRING_ROPE) {
-                            JSStringRopeHandle rope(handle);
+                            JSStringRopeHandle rope = handle;
                             /* Mark left and right components of the rope */
-                            gc_mark_value(rope.left());
-                            gc_mark_value(rope.right());
+                            gc_mark_value(SAFE_GET_OR(rope, JSStringRopeHandle, left, GC_UNDEFINED));
+                            gc_mark_value(SAFE_GET_OR(rope, JSStringRopeHandle, right, GC_UNDEFINED));
                         }
                     }
                 }
@@ -2179,15 +2179,15 @@ static void gc_mark_object(JSObject *p) {
     if (!p) return;
 
     /* Mark the shape */
-    JSShapeHandle shape = JSShapeHandle(p->shape_handle);
-    if (shape.valid()) {
-        GCHeader *shape_hdr = gc_header(gc_deref(shape.handle()));
+    JSShapeHandle shape = (JSShapeHandle)(p->shape_handle);
+    if (SAFE_VALID(shape)) {
+        GCHeader *shape_hdr = gc_header(gc_deref(SAFE_HANDLE(shape)));
         if (shape_hdr->size > 0 && !(shape_hdr->flags & GC_FLAG_FREED)) shape_hdr->gc_color_state = GC_COLOR_BLACK;
         
         /* Mark the shape's prototype handle - CRITICAL: shapes reference
          * prototype objects that must be kept alive */
-        if (shape.proto_handle() != GC_HANDLE_NULL) {
-            void *proto = gc_deref(shape.proto_handle());
+        if (SAFE_GET_OR(shape, JSShapeHandle, proto_handle, GC_HANDLE_NULL) != GC_HANDLE_NULL) {
+            void *proto = gc_deref(SAFE_GET_OR(shape, JSShapeHandle, proto_handle, GC_HANDLE_NULL));
             if (proto) {
                 GCHeader *proto_hdr = gc_header(proto);
                 if (proto_hdr->size > 0 && !(proto_hdr->flags & GC_FLAG_FREED)) proto_hdr->gc_color_state = GC_COLOR_BLACK;
@@ -2202,11 +2202,11 @@ static void gc_mark_object(JSObject *p) {
 
     /* Mark properties */
     JSProperty *obj_props = (JSProperty*)gc_deref(p->prop_handle);
-    if (shape && obj_props) {
+    if (SAFE_VALID(shape) && obj_props) {
         /* Shape properties (with flags) come right after JSShape header */
-        JSShapeProperty *shape_props = (JSShapeProperty *)((uint8_t *)gc_deref(shape.handle()) + sizeof(JSShape));
+        JSShapeProperty *shape_props = (JSShapeProperty *)((uint8_t *)gc_deref(SAFE_HANDLE(shape)) + sizeof(JSShape));
         
-        for (uint32_t i = 0; i < shape.prop_count(); i++) {
+        for (uint32_t i = 0; i < SAFE_GET_OR(shape, JSShapeHandle, prop_count, 0); i++) {
             JSShapeProperty *prs = &shape_props[i];
             JSProperty *pr = &obj_props[i];
             
@@ -2356,7 +2356,7 @@ static void gc_mark_roots(JSRuntimeHandle rt) {
     }
 
     /* Job queue entries. */
-    GCHandle job_queue_h = rt.job_queue_handle();
+    GCHandle job_queue_h = js_rt_job_queue_handle(rt);
     if (job_queue_h != GC_HANDLE_NULL) {
         gc_shade(job_queue_h);
     }
@@ -2434,7 +2434,7 @@ static void gc_mark_phase(JSRuntimeHandle rt) {
  * entry point, so it returns void regardless of platform. */
 static void gc_mark_job_func(void *arg) {
     (void)arg;
-    JSRuntimeHandle rt(g_gc.rt);
+    JSRuntimeHandle rt = g_gc.rt;
 
     GC_LOGI("mark job: starting");
 
@@ -2496,7 +2496,7 @@ static void gc_mark(void) {
         return;
     }
 
-    JSRuntimeHandle rt(g_gc.rt);
+    JSRuntimeHandle rt = g_gc.rt;
     gc_mark_phase(rt);
 }
 
@@ -2615,7 +2615,7 @@ static void gc_compact_move_objects(size_t *out_user_bytes) {
     if (dst->handles && dst->handle_capacity)
         memset(dst->handles, 0, dst->handle_capacity * sizeof(void*));
     
-    JSRuntimeHandle rt(g_gc.rt);
+    JSRuntimeHandle rt = g_gc.rt;
     size_t new_bytes = 0;
     size_t user_bytes = 0;
     int corrupted_objects = 0;
@@ -2959,7 +2959,7 @@ static void gc_sweep_unified(JSRuntimeHandle rt) {
 static void gc_run_internal(void) {
     if (!g_gc.initialized) return;
     
-    JSRuntimeHandle rt(g_gc.rt);
+    JSRuntimeHandle rt = g_gc.rt;
     bool has_runtime = (g_gc.rt != GC_HANDLE_NULL);
     
     GC_LOGI("gc_run_internal: ENTER has_runtime=%d", has_runtime);

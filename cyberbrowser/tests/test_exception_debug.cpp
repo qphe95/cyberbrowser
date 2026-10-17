@@ -25,9 +25,9 @@ static JSContextHandle get_test_context(void) {
 TEST(debug_simple_throw_catch) {
     printf("\n  Test 1: Simple throw/catch\n");
     
-    JSContextHandle ctx;
+    JSContextHandle ctx = GC_HANDLE_NULL;
     ctx = get_test_context(); 
-    if (!ctx.valid()) return false;
+    if (!SAFE_VALID(ctx)) return false;
     
     const char* script = "throw new Error('test error');";
     GCValue result = JS_Eval(ctx, script, strlen(script), "test.js", JS_EVAL_TYPE_GLOBAL);
@@ -70,8 +70,8 @@ TEST(debug_simple_throw_catch) {
 TEST(debug_error_prototypes) {
     printf("\n  Test 2: Error prototype methods\n");
     
-    JSContextHandle ctx;
-    ctx = get_test_context(); if (!ctx.valid()) return false;
+    JSContextHandle ctx = GC_HANDLE_NULL;
+    ctx = get_test_context(); if (!SAFE_VALID(ctx)) return false;
     
     // Test each error type individually
     const char* error_types[] = {
@@ -116,8 +116,8 @@ TEST(debug_error_prototypes) {
 TEST(debug_reference_error) {
     printf("\n  Test 3: ReferenceError\n");
     
-    JSContextHandle ctx;
-    ctx = get_test_context(); if (!ctx.valid()) return false;
+    JSContextHandle ctx = GC_HANDLE_NULL;
+    ctx = get_test_context(); if (!SAFE_VALID(ctx)) return false;
     
     const char* script = "undefined_variable_name;";
     GCValue result = JS_Eval(ctx, script, strlen(script), "test.js", JS_EVAL_TYPE_GLOBAL);
@@ -152,8 +152,8 @@ TEST(debug_reference_error) {
 TEST(debug_type_error) {
     printf("\n  Test 4: TypeError\n");
     
-    JSContextHandle ctx;
-    ctx = get_test_context(); if (!ctx.valid()) return false;
+    JSContextHandle ctx = GC_HANDLE_NULL;
+    ctx = get_test_context(); if (!SAFE_VALID(ctx)) return false;
     
     const char* script = "null.toString();";
     GCValue result = JS_Eval(ctx, script, strlen(script), "test.js", JS_EVAL_TYPE_GLOBAL);
@@ -188,8 +188,8 @@ TEST(debug_type_error) {
 TEST(debug_internal_error) {
     printf("\n  Test 5: InternalError\n");
     
-    JSContextHandle ctx;
-    ctx = get_test_context(); if (!ctx.valid()) return false;
+    JSContextHandle ctx = GC_HANDLE_NULL;
+    ctx = get_test_context(); if (!SAFE_VALID(ctx)) return false;
     
     // Try to trigger an internal error by creating a huge string
     const char* script = "'x'.repeat(1e10);";
@@ -213,8 +213,8 @@ TEST(debug_internal_error) {
 TEST(debug_api_exception) {
     printf("\n  Test 6: Exception from API callback\n");
     
-    JSContextHandle ctx;
-    ctx = get_test_context(); if (!ctx.valid()) return false;
+    JSContextHandle ctx = GC_HANDLE_NULL;
+    ctx = get_test_context(); if (!SAFE_VALID(ctx)) return false;
     
     // This should trigger our XMLHttpRequest stubs which may have issues
     const char* script = R"(
@@ -247,8 +247,8 @@ TEST(debug_api_exception) {
 TEST(debug_youtube_like) {
     printf("\n  Test 7: YouTube-like script\n");
     
-    JSContextHandle ctx;
-    ctx = get_test_context(); if (!ctx.valid()) return false;
+    JSContextHandle ctx = GC_HANDLE_NULL;
+    ctx = get_test_context(); if (!SAFE_VALID(ctx)) return false;
     
     // Minimal script that mimics what YouTube does
     const char* script = R"(

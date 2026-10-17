@@ -45,8 +45,8 @@ extern GCValue get_shared_test_global(void);
 #endif
 
 /* Shared runtime and context - single context model */
-static JSRuntimeHandle g_shared_rt;
-static JSContextHandle g_shared_ctx;
+static JSRuntimeHandle g_shared_rt = GC_HANDLE_NULL;
+static JSContextHandle g_shared_ctx = GC_HANDLE_NULL;
 static GCValue g_shared_global;
 static bool g_context_initialized = false;
 
@@ -57,7 +57,7 @@ static bool init_shared_context(void) {
     }
     
     /* Use the shared runtime from test_runner.h */
-    if (!g_test_rt.valid()) {
+    if (!SAFE_VALID(g_test_rt)) {
         printf("FATAL: Shared test runtime not available\n");
         return false;
     }
@@ -66,7 +66,7 @@ static bool init_shared_context(void) {
     
     /* Create single shared context */
     g_shared_ctx = JS_NewContext(g_shared_rt);
-    if (!g_shared_ctx.valid()) {
+    if (!SAFE_VALID(g_shared_ctx)) {
         printf("FATAL: Failed to create shared context\n");
         return false;
     }
@@ -100,7 +100,7 @@ static bool init_shared_context(void) {
     
     g_context_initialized = true;
     printf("Shared context initialized successfully (handle=%u)\n\n", 
-           g_shared_ctx.handle());
+           SAFE_HANDLE(g_shared_ctx));
     return true;
 }
 
@@ -160,7 +160,7 @@ int main(int argc, char *argv[]) {
     printf("Creating shared QuickJS runtime...\n");
     JSRuntimeHandle shared_rt = JS_NewRuntime();
     g_test_rt_ptr = &shared_rt;
-    if (!g_test_rt.valid()) {
+    if (!SAFE_VALID(g_test_rt)) {
         printf("FATAL: Failed to create QuickJS runtime\n");
         platform_http_cleanup();
         platform_cleanup();
@@ -196,7 +196,7 @@ int main(int argc, char *argv[]) {
     /* Cleanup */
     printf("\nFreeing shared QuickJS runtime...\n");
     fflush(stdout);
-    if (g_test_rt.valid()) {
+    if (SAFE_VALID(g_test_rt)) {
         JS_FreeRuntime(g_test_rt);
     }
     printf("Runtime freed.\n");

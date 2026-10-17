@@ -110,7 +110,7 @@ extern "C" JSContextHandle get_shared_test_context(void);
 
 TEST(test_css_apply_parallel) {
     JSContextHandle ctx = get_shared_test_context();
-    if (!ctx.valid()) {
+    if (!SAFE_VALID(ctx)) {
         printf("    (skipped - no shared context)");
         return true;
     }
@@ -161,7 +161,7 @@ TEST(test_css_apply_parallel) {
 
 TEST(test_css_computed_style_and_indexes) {
     JSContextHandle ctx = get_shared_test_context();
-    if (!ctx.valid()) {
+    if (!SAFE_VALID(ctx)) {
         printf("    (skipped - no shared context)");
         return true;
     }
@@ -218,7 +218,7 @@ TEST(test_css_computed_style_and_indexes) {
 
 TEST(test_css_parallel_computed_styles) {
     JSContextHandle ctx = get_shared_test_context();
-    if (!ctx.valid()) {
+    if (!SAFE_VALID(ctx)) {
         printf("    (skipped - no shared context)");
         return true;
     }
@@ -293,7 +293,7 @@ TEST(test_css_parallel_computed_styles) {
 
 TEST(test_css_index_tables) {
     JSContextHandle ctx = get_shared_test_context();
-    if (!ctx.valid()) {
+    if (!SAFE_VALID(ctx)) {
         printf("    (skipped - no shared context)");
         return true;
     }

@@ -137,7 +137,7 @@ static JSModuleDefHandle cyber_module_loader(JSContextHandle ctx, const char *mo
     /* Only http(s) URLs can be fetched; bare names can't be loaded. */
     if (!url_is_network_url(url)) {
         JS_ThrowReferenceError(ctx, "module '%s' is not a network URL", url);
-        return JSModuleDefHandle(GC_HANDLE_NULL);
+        return (JSModuleDefHandle)(GC_HANDLE_NULL);
     }
 
     HttpBuffer buffer = {0};
@@ -148,7 +148,7 @@ static JSModuleDefHandle cyber_module_loader(JSContextHandle ctx, const char *mo
                      url, err[0] ? err : "unknown");
         if (buffer.data) free(buffer.data);
         JS_ThrowReferenceError(ctx, "could not fetch module '%s'", url);
-        return JSModuleDefHandle(GC_HANDLE_NULL);
+        return (JSModuleDefHandle)(GC_HANDLE_NULL);
     }
 
     platform_log(LOG_LEVEL_INFO, "module_loader", "Loaded module %s (%zu bytes)", url, buffer.size);
@@ -177,14 +177,14 @@ static JSModuleDefHandle cyber_module_loader(JSContextHandle ctx, const char *mo
                      url, es ? es : "?");
         if (es) JS_FreeCString(ctx, es);
         JS_ThrowReferenceError(ctx, "could not compile module '%s'", url);
-        return JSModuleDefHandle(GC_HANDLE_NULL);
+        return (JSModuleDefHandle)(GC_HANDLE_NULL);
     }
 
     JSModuleDefHandle m = JS_VALUE_GET_MODULE_HANDLE(mv);
-    if (!m.valid()) {
+    if (!SAFE_VALID(m)) {
         platform_log(LOG_LEVEL_WARN, "module_loader", "Module %s did not produce a def", url);
         JS_ThrowReferenceError(ctx, "module '%s' produced no definition", url);
-        return JSModuleDefHandle(GC_HANDLE_NULL);
+        return (JSModuleDefHandle)(GC_HANDLE_NULL);
     }
     return m;
 }
@@ -210,8 +210,8 @@ static LONG WINAPI unhandled_exception_filter(EXCEPTION_POINTERS *ep) {
 }
 #endif
 
-static JSRuntimeHandle g_rt;
-static JSContextHandle g_ctx;
+static JSRuntimeHandle g_rt = GC_HANDLE_NULL;
+static JSContextHandle g_ctx = GC_HANDLE_NULL;
 static GCValue g_global;
 
 /* Interrupt handler for the bounded customElements.upgrade pass. */
@@ -233,7 +233,7 @@ static bool init_browser_context(void) {
     }
 
     g_rt = JS_NewRuntime();
-    if (!g_rt.valid()) {
+    if (!SAFE_VALID(g_rt)) {
         printf("FATAL: JS_NewRuntime() failed\n");
         return false;
     }
@@ -243,7 +243,7 @@ static bool init_browser_context(void) {
     JS_SetModuleLoaderFunc(g_rt, cyber_module_normalize, cyber_module_loader, NULL);
 
     g_ctx = JS_NewContext(g_rt);
-    if (!g_ctx.valid()) {
+    if (!SAFE_VALID(g_ctx)) {
         printf("FATAL: JS_NewContext() failed\n");
         JS_FreeRuntime(g_rt);
         return false;
@@ -279,9 +279,9 @@ static bool init_browser_context(void) {
 static void cleanup_browser_context(void) {
     extern JSRuntimeHandle g_js_runtime;
     extern JSContextHandle g_js_context;
-    g_js_runtime = JSRuntimeHandle();
-    g_js_context = JSContextHandle();
-    if (g_rt.valid()) {
+    g_js_runtime = GC_HANDLE_NULL;
+    g_js_context = GC_HANDLE_NULL;
+    if (SAFE_VALID(g_rt)) {
         JS_FreeRuntime(g_rt);
     }
 }
@@ -425,7 +425,7 @@ static void print_body_snippet(HtmlDocument *doc) {
 /* ------------------------------------------------------------------------- */
 
 static bool pump_timers_and_jobs(JSContextHandle ctx) {
-    if (!ctx.valid()) return false;
+    if (!SAFE_VALID(ctx)) return false;
     JSRuntimeHandle rt = JS_GetRuntime(ctx);
     bool did_work = false;
     int iterations = 0;
@@ -438,7 +438,7 @@ static bool pump_timers_and_jobs(JSContextHandle ctx) {
         int processed = timer_process_due(ctx);
         int sched = scheduler_process_tasks(ctx);
         int jobs = 0;
-        JSContextHandle pctx;
+        JSContextHandle pctx = GC_HANDLE_NULL;
         int ret;
         while ((ret = JS_ExecutePendingJob(rt, &pctx)) > 0) {
             jobs++;
@@ -485,7 +485,7 @@ static void dispatch_page_lifecycle_events(JSContextHandle ctx) {
 }
 
 static GCValue get_global_document(JSContextHandle ctx) {
-    if (!ctx.valid()) return JS_NULL;
+    if (!SAFE_VALID(ctx)) return JS_NULL;
     GCValue global = JS_GetGlobalObject(ctx);
     GCValue doc = JS_GetPropertyStr(ctx, global, "document");
     return doc;

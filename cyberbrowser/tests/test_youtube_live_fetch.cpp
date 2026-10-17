@@ -37,8 +37,8 @@ extern "C" int timer_has_pending(void);
 #define MAX_HTML_SIZE (20 * 1024 * 1024)
 
 /* Global state */
-static JSRuntimeHandle g_rt;
-static JSContextHandle g_ctx;
+static JSRuntimeHandle g_rt = GC_HANDLE_NULL;
+static JSContextHandle g_ctx = GC_HANDLE_NULL;
 static GCValue g_global;
 static struct timespec g_exec_start;
 static double g_exec_timeout_seconds = 60.0;
@@ -99,13 +99,13 @@ static char* read_file(const char *path, size_t *out_size) {
 static bool init_test_context(void) {
     if (!gc_init()) { printf("    ERROR: gc_init() failed\n"); return false; }
     g_rt = JS_NewRuntime();
-    if (!g_rt.valid()) { printf("    ERROR: JS_NewRuntime() failed\n"); return false; }
+    if (!SAFE_VALID(g_rt)) { printf("    ERROR: JS_NewRuntime() failed\n"); return false; }
     JS_SetMemoryLimit(g_rt, 4ULL * 1024 * 1024 * 1024);
     JS_SetMaxStackSize(g_rt, 64 * 1024 * 1024);
     clock_gettime(CLOCK_MONOTONIC, &g_exec_start);
     JS_SetInterruptHandler(g_rt, exec_timeout_handler, &g_exec_start);
     g_ctx = JS_NewContext(g_rt);
-    if (!g_ctx.valid()) { printf("    ERROR: JS_NewContext() failed\n"); return false; }
+    if (!SAFE_VALID(g_ctx)) { printf("    ERROR: JS_NewContext() failed\n"); return false; }
     JS_AddIntrinsicEval(g_ctx);
     JS_AddIntrinsicRegExp(g_ctx);
     JS_AddIntrinsicJSON(g_ctx);
@@ -131,9 +131,9 @@ static bool init_test_context(void) {
 static void cleanup_test_context(void) {
     extern JSRuntimeHandle g_js_runtime;
     extern JSContextHandle g_js_context;
-    g_js_runtime = JSRuntimeHandle();
-    g_js_context = JSContextHandle();
-    if (g_rt.valid()) JS_FreeRuntime(g_rt);
+    g_js_runtime = GC_HANDLE_NULL;
+    g_js_context = GC_HANDLE_NULL;
+    if (SAFE_VALID(g_rt)) JS_FreeRuntime(g_rt);
 }
 
 /* Check if content is JSON-LD structured data */
@@ -860,7 +860,7 @@ static bool test_youtube_live_fetch(void) {
         if (processed > 0) total_timers += processed;
         
         // Execute promise jobs (needed for async player initialization)
-        JSContextHandle pctx;
+        JSContextHandle pctx = GC_HANDLE_NULL;
         int promise_jobs = 0;
         while (true) {
             int ret = JS_ExecutePendingJob(g_rt, &pctx);

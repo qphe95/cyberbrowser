@@ -26,9 +26,9 @@ extern "C" JSContextHandle get_shared_test_context(void);
 /* Helper to get the shared test context */
 static JSContextHandle get_test_context(void) {
     JSContextHandle ctx = get_shared_test_context();
-    if (!ctx.valid()) {
+    if (!SAFE_VALID(ctx)) {
         printf("    ERROR: Shared context not available\n");
-        return JSContextHandle();
+        return GC_HANDLE_NULL;
     }
     return ctx;
 }
@@ -79,7 +79,7 @@ static int eval_to_int(JSContextHandle ctx, const char* code, BOOL* success) {
 
 TEST(test_lazy_function_basic) {
     JSContextHandle ctx = get_test_context();
-    ASSERT_TRUE(ctx.valid());
+    ASSERT_TRUE(SAFE_VALID(ctx));
     
     /* Test 1.1: Simple function definition and call */
     {
@@ -147,7 +147,7 @@ TEST(test_lazy_function_basic) {
 
 TEST(test_lazy_function_closure) {
     JSContextHandle ctx = get_test_context();
-    ASSERT_TRUE(ctx.valid());
+    ASSERT_TRUE(SAFE_VALID(ctx));
     
     /* Test 2.1: Basic closure - capture outer variable */
     {
@@ -252,7 +252,7 @@ TEST(test_lazy_function_closure) {
 
 TEST(test_lazy_class_constructor) {
     JSContextHandle ctx = get_test_context();
-    ASSERT_TRUE(ctx.valid());
+    ASSERT_TRUE(SAFE_VALID(ctx));
     
     /* Test 3.1: Basic class constructor */
     {
@@ -342,7 +342,7 @@ TEST(test_lazy_class_constructor) {
 
 TEST(test_lazy_class_methods) {
     JSContextHandle ctx = get_test_context();
-    ASSERT_TRUE(ctx.valid());
+    ASSERT_TRUE(SAFE_VALID(ctx));
     
     /* Test 4.1: Instance method */
     {
@@ -473,7 +473,7 @@ TEST(test_lazy_class_methods) {
 
 TEST(test_lazy_arrow_functions) {
     JSContextHandle ctx = get_test_context();
-    ASSERT_TRUE(ctx.valid());
+    ASSERT_TRUE(SAFE_VALID(ctx));
     
     /* Test 5.1: Arrow function with block body */
     {
@@ -591,7 +591,7 @@ TEST(test_lazy_arrow_functions) {
 
 TEST(test_lazy_nested_functions) {
     JSContextHandle ctx = get_test_context();
-    ASSERT_TRUE(ctx.valid());
+    ASSERT_TRUE(SAFE_VALID(ctx));
     
     /* Test 6.1: IIFE (Immediately Invoked Function Expression) */
     {
@@ -688,7 +688,7 @@ TEST(test_lazy_nested_functions) {
 
 TEST(test_lazy_function_errors) {
     JSContextHandle ctx = get_test_context();
-    ASSERT_TRUE(ctx.valid());
+    ASSERT_TRUE(SAFE_VALID(ctx));
     
     /* Test 7.1: Syntax error in function body */
     {
@@ -739,7 +739,7 @@ TEST(test_lazy_function_errors) {
 
 TEST(test_lazy_function_recursion) {
     JSContextHandle ctx = get_test_context();
-    ASSERT_TRUE(ctx.valid());
+    ASSERT_TRUE(SAFE_VALID(ctx));
     
     /* Test 8.1: Simple recursion - factorial */
     {
@@ -784,7 +784,7 @@ TEST(test_lazy_function_recursion) {
 
 TEST(test_lazy_function_properties) {
     JSContextHandle ctx = get_test_context();
-    ASSERT_TRUE(ctx.valid());
+    ASSERT_TRUE(SAFE_VALID(ctx));
     
     /* Test 9.1: Function name */
     {
@@ -831,7 +831,7 @@ TEST(test_lazy_function_properties) {
 
 TEST(test_lazy_function_edge_cases) {
     JSContextHandle ctx = get_test_context();
-    ASSERT_TRUE(ctx.valid());
+    ASSERT_TRUE(SAFE_VALID(ctx));
     
     /* Test 10.1: Empty function body */
     {
@@ -917,7 +917,7 @@ static BOOL g_lazy_parse_verified = FALSE;
 
 TEST(test_lazy_parsing_not_triggered_until_call) {
     JSContextHandle ctx = get_test_context();
-    ASSERT_TRUE(ctx.valid());
+    ASSERT_TRUE(SAFE_VALID(ctx));
     
     /* Test 11.1: Function with syntax error is not parsed until called
      * 
@@ -1000,7 +1000,7 @@ TEST(test_lazy_parsing_not_triggered_until_call) {
 
 TEST(test_js_eval_flag_no_lazy) {
     JSContextHandle ctx = get_test_context();
-    ASSERT_TRUE(ctx.valid());
+    ASSERT_TRUE(SAFE_VALID(ctx));
     
     /* Test 12.1: With JS_EVAL_FLAG_NO_LAZY, syntax errors are caught immediately
      *
@@ -1053,7 +1053,7 @@ TEST(test_js_eval_flag_no_lazy) {
 
 TEST(test_lazy_parsing_state_transitions) {
     JSContextHandle ctx = get_test_context();
-    ASSERT_TRUE(ctx.valid());
+    ASSERT_TRUE(SAFE_VALID(ctx));
     
     /* Test 13.1: Function is parsed only on first call
      *
@@ -1114,7 +1114,7 @@ TEST(test_lazy_parsing_state_transitions) {
 
 TEST(test_lazy_parsing_complex_scenarios) {
     JSContextHandle ctx = get_test_context();
-    ASSERT_TRUE(ctx.valid());
+    ASSERT_TRUE(SAFE_VALID(ctx));
     
     /* Test 14.1: Many lazy functions, only one called
      *
