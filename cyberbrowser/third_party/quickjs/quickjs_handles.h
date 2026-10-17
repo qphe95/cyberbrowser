@@ -3,7 +3,7 @@
  * ============================================================================
  *
  * This header replaces the old C++ "handle wrapper classes"
- * (JSContextHandle, JSMapStateHandle, ... in quickjs_handle_classes.h and the
+ * (JSContextHandle, JSMapStateHandle, ... formerly in quickjs_handle_classes.h and the
  * scattered *Handle classes in quickjs_types.h / quickjs-internal.h /
  * quickjs.h) with a macro based system that is C compatible.
  *

@@ -48469,7 +48469,7 @@ exception:
     return ret;
 }
 
-/* JSArrayIteratorData and JSArrayIteratorDataHandle are defined in quickjs-internal.h and quickjs_handle_classes.h */
+/* JSArrayIteratorData is defined in quickjs-internal.h; JSArrayIteratorDataHandle in quickjs_types.h */
 
 static void js_array_iterator_finalizer(JSRuntimeHandle rt, GCValue val)
 {
@@ -65523,8 +65523,6 @@ int JS_AddIntrinsicWeakRef(JSContextHandle ctx)
     return 0;
 }
 
-/* Handle macros (already included via quickjs.h; kept for clarity) */
-#include "quickjs_handle_classes.h"
 
 
 /* ============================================================================

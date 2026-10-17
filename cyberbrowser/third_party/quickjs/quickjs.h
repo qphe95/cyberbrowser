@@ -35,9 +35,11 @@
 /* Include unified GC for allocation functions */
 #include "quickjs_gc_unified.h"
 
-/* Include handle class definitions after GC functions are declared */
+/* Struct definitions (JSPropertyEnum, JSPromiseStateEnum, ...) and the
+ * SAFE_GET / SAFE_SET handle macros, after GC functions are declared */
 #ifdef __cplusplus
-#include "quickjs_handle_classes.h"
+#include "quickjs-internal.h"
+#include "quickjs_handles.h"
 #endif
 
 /* Default version if not defined at compile time */
