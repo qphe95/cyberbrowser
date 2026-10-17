@@ -104,6 +104,7 @@ typedef GCHandle JSObjectListEntryArrayHandle;
 typedef GCHandle GCValueHandle;
 typedef GCHandle JSShapeHandle;
 typedef GCHandle JSObjectHandle;
+typedef GCHandle JSFunctionDefHandle;  /* struct JSFunctionDef is private to quickjs.cpp */
 
 /* Forward declaration for GCValue struct (defined below) */
 struct GCValue;

@@ -121,6 +121,7 @@
 #define GC_STRUCT_OF_JSStringHandle                     JSString
 #define GC_STRUCT_OF_JSStringRopeHandle                 JSStringRope
 #define GC_STRUCT_OF_JSObjectHandle                     JSObject
+#define GC_STRUCT_OF_JSFunctionDefHandle                JSFunctionDef   /* defined in quickjs.cpp */
 #define GC_STRUCT_OF_void                               void
 
 /* Accept bare struct names too, so SAFE_GET(h, JSContext, rt_handle) works. */
@@ -168,6 +169,7 @@
 #define GC_STRUCT_OF_JSString                           JSString
 #define GC_STRUCT_OF_JSStringRope                       JSStringRope
 #define GC_STRUCT_OF_JSObject                           JSObject
+#define GC_STRUCT_OF_JSFunctionDef                      JSFunctionDef
 
 /* ============================================================================
  * Core dereference
