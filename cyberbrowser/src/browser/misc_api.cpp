@@ -9,7 +9,7 @@
 #include <quickjs_gc_unified.h>
 #include "browser_api_impl.h"
 #include "browser_api_impl_types.h"
-#include "browser_api_impl_handles.h"
+#include "browser_api_impl_handle_helpers.h"
 #include "browser_api_impl_internal.h"
 #include "html_dom.h"
 #include "css_parser.h"
@@ -683,23 +683,23 @@ JSClassDef js_dom_exception_class_def = {
 
 GCValue js_dom_exception_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
     DOM_EX_LOGD("DOMException constructor called");
-    DOMExceptionDataHandle de = DOMExceptionDataHandle::create();
-    if (!de.valid()) return JS_ThrowTypeError(ctx, "Invalid DOM element");
+    DOMExceptionDataHandle de = dom_exception_create();
+    if (SAFE_IS_NULL(de)) return JS_ThrowTypeError(ctx, "Invalid DOM element");
     
-    de.set_name("Error");
-    de.set_code(0);
+    SAFE_SET_STR(de, DOMExceptionDataHandle, name, "Error");
+    SAFE_SET(de, DOMExceptionDataHandle, code, 0);
     
     if (argc > 0) {
         const char *msg = JS_ToCString(ctx, argv[0]);
         if (msg) {
-            de.set_message(msg);
+            SAFE_SET_STR(de, DOMExceptionDataHandle, message, msg);
         }
     }
     
     if (argc > 1) {
         const char *name = JS_ToCString(ctx, argv[1]);
         if (name) {
-            de.set_name(name);
+            SAFE_SET_STR(de, DOMExceptionDataHandle, name, name);
             int code = 0;
             if (strcmp(name, "IndexSizeError") == 0) code = DOM_EXCEPTION_INDEX_SIZE_ERR;
             else if (strcmp(name, "HierarchyRequestError") == 0) code = DOM_EXCEPTION_HIERARCHY_REQUEST_ERR;
@@ -722,7 +722,7 @@ GCValue js_dom_exception_constructor(JSContextHandle ctx, GCValue new_target, in
             else if (strcmp(name, "TimeoutError") == 0) code = DOM_EXCEPTION_TIMEOUT_ERR;
             else if (strcmp(name, "InvalidNodeTypeError") == 0) code = DOM_EXCEPTION_INVALID_NODE_TYPE_ERR;
             else if (strcmp(name, "DataCloneError") == 0) code = DOM_EXCEPTION_DATA_CLONE_ERR;
-            de.set_code(code);
+            SAFE_SET(de, DOMExceptionDataHandle, code, code);
         }
     }
     
@@ -730,26 +730,26 @@ GCValue js_dom_exception_constructor(JSContextHandle ctx, GCValue new_target, in
     if (JS_IsException(obj)) {
         return obj;
     }
-    de.attach_to_object(obj);
+    JS_SetOpaqueHandle(obj, de);
     return obj;
 }
 
 GCValue js_dom_exception_get_name(JSContextHandle ctx, GCValue this_val) {
-    DOMExceptionDataHandle de = DOMExceptionDataHandle::from_object_check(ctx, this_val);
-    if (!de.valid()) return JS_ThrowTypeError(ctx, "Invalid DOM element");
-    return JS_NewString(ctx, de.name());
+    DOMExceptionDataHandle de = JS_GetOpaqueHandle2(ctx, this_val, js_dom_exception_class_id);
+    if (SAFE_IS_NULL(de)) return JS_ThrowTypeError(ctx, "Invalid DOM element");
+    return JS_NewString(ctx, SAFE_GET_OR(de, DOMExceptionDataHandle, name, ""));
 }
 
 GCValue js_dom_exception_get_message(JSContextHandle ctx, GCValue this_val) {
-    DOMExceptionDataHandle de = DOMExceptionDataHandle::from_object_check(ctx, this_val);
-    if (!de.valid()) return JS_ThrowTypeError(ctx, "Invalid DOM element");
-    return JS_NewString(ctx, de.message());
+    DOMExceptionDataHandle de = JS_GetOpaqueHandle2(ctx, this_val, js_dom_exception_class_id);
+    if (SAFE_IS_NULL(de)) return JS_ThrowTypeError(ctx, "Invalid DOM element");
+    return JS_NewString(ctx, SAFE_GET_OR(de, DOMExceptionDataHandle, message, ""));
 }
 
 GCValue js_dom_exception_get_code(JSContextHandle ctx, GCValue this_val) {
-    DOMExceptionDataHandle de = DOMExceptionDataHandle::from_object_check(ctx, this_val);
-    if (!de.valid()) return JS_ThrowTypeError(ctx, "Invalid DOM element");
-    return JS_NewInt32(ctx, de.code());
+    DOMExceptionDataHandle de = JS_GetOpaqueHandle2(ctx, this_val, js_dom_exception_class_id);
+    if (SAFE_IS_NULL(de)) return JS_ThrowTypeError(ctx, "Invalid DOM element");
+    return JS_NewInt32(ctx, SAFE_GET_OR(de, DOMExceptionDataHandle, code, 0));
 }
 
 const JSCFunctionListEntry js_dom_exception_proto_funcs[] = {
@@ -1202,27 +1202,27 @@ JSClassDef js_map_class_def = {
 };
 
 GCValue js_map_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
-    MapDataHandle map = MapDataHandle::create(ctx);
-    if (!map.valid()) return JS_ThrowTypeError(ctx, "Invalid Map object");
+    MapDataHandle map = map_data_create(ctx);
+    if (SAFE_IS_NULL(map)) return JS_ThrowTypeError(ctx, "Invalid Map object");
     
     GCValue obj = JS_NewObjectClass(ctx, js_map_class_id);
-    map.attach_to_object(obj);
+    JS_SetOpaqueHandle(obj, map);
     return obj;
 }
 
 GCValue js_map_set(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    MapDataHandle map = MapDataHandle::from_object_check(ctx, this_val);
-    if (!map.valid() || argc < 2) return JS_ThrowTypeError(ctx, "Map requires 2 arguments");
+    MapDataHandle map = JS_GetOpaqueHandle2(ctx, this_val, js_map_class_id);
+    if (SAFE_IS_NULL(map) || argc < 2) return JS_ThrowTypeError(ctx, "Map requires 2 arguments");
     
     const char *key = JS_ToCString(ctx, argv[0]);
     if (!key) return JS_ThrowTypeError(ctx, "Invalid key");
     
     // Check if key exists
-    GCValue entries = map.entries();
+    GCValue entries = SAFE_GET_OR(map, MapDataHandle, entries, JS_NULL);
     GCValue existing = JS_GetPropertyStr(ctx, entries, key);
     int exists = !JS_IsUndefined(existing);
 
-    if (!exists) map.increment_size();
+    if (!exists) SAFE_SET(map, MapDataHandle, size, SAFE_GET_OR(map, MapDataHandle, size, 0) + 1);
     
     JS_SetPropertyStr(ctx, entries, key, argv[1]);
     
@@ -1230,26 +1230,26 @@ GCValue js_map_set(JSContextHandle ctx, GCValue this_val, int argc, GCValue *arg
 }
 
 GCValue js_map_get(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    MapDataHandle map = MapDataHandle::from_object_check(ctx, this_val);
-    if (!map.valid() || argc < 1) return JS_ThrowTypeError(ctx, "Map requires at least 1 argument");
+    MapDataHandle map = JS_GetOpaqueHandle2(ctx, this_val, js_map_class_id);
+    if (SAFE_IS_NULL(map) || argc < 1) return JS_ThrowTypeError(ctx, "Map requires at least 1 argument");
     
     const char *key = JS_ToCString(ctx, argv[0]);
     if (!key) return JS_ThrowTypeError(ctx, "Invalid key");
     
-    GCValue entries = map.entries();
+    GCValue entries = SAFE_GET_OR(map, MapDataHandle, entries, JS_NULL);
     GCValue val = JS_GetPropertyStr(ctx, entries, key);
     
     return val;
 }
 
 GCValue js_map_has(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    MapDataHandle map = MapDataHandle::from_object_check(ctx, this_val);
-    if (!map.valid() || argc < 1) return JS_ThrowTypeError(ctx, "Map requires at least 1 argument");
+    MapDataHandle map = JS_GetOpaqueHandle2(ctx, this_val, js_map_class_id);
+    if (SAFE_IS_NULL(map) || argc < 1) return JS_ThrowTypeError(ctx, "Map requires at least 1 argument");
     
     const char *key = JS_ToCString(ctx, argv[0]);
     if (!key) return JS_ThrowTypeError(ctx, "Invalid key");
     
-    GCValue entries = map.entries();
+    GCValue entries = SAFE_GET_OR(map, MapDataHandle, entries, JS_NULL);
     GCValue val = JS_GetPropertyStr(ctx, entries, key);
     
     int exists = !JS_IsUndefined(val);
@@ -1258,20 +1258,20 @@ GCValue js_map_has(JSContextHandle ctx, GCValue this_val, int argc, GCValue *arg
 }
 
 GCValue js_map_delete(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    MapDataHandle map = MapDataHandle::from_object_check(ctx, this_val);
-    if (!map.valid() || argc < 1) return JS_ThrowTypeError(ctx, "Map requires at least 1 argument");
+    MapDataHandle map = JS_GetOpaqueHandle2(ctx, this_val, js_map_class_id);
+    if (SAFE_IS_NULL(map) || argc < 1) return JS_ThrowTypeError(ctx, "Map requires at least 1 argument");
     
     const char *key = JS_ToCString(ctx, argv[0]);
     if (!key) return JS_ThrowTypeError(ctx, "Invalid key");
     
-    GCValue entries = map.entries();
+    GCValue entries = SAFE_GET_OR(map, MapDataHandle, entries, JS_NULL);
     GCValue val = JS_GetPropertyStr(ctx, entries, key);
     int exists = !JS_IsUndefined(val);
 
     if (exists) {
         GCValue undefined = JS_UNDEFINED;
         JS_SetPropertyStr(ctx, entries, key, undefined);
-        map.decrement_size();
+        SAFE_SET(map, MapDataHandle, size, SAFE_GET_OR(map, MapDataHandle, size, 0) - 1);
     }
     
     return JS_NewBool(ctx, exists);
@@ -1279,27 +1279,27 @@ GCValue js_map_delete(JSContextHandle ctx, GCValue this_val, int argc, GCValue *
 
 GCValue js_map_clear(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    MapDataHandle map = MapDataHandle::from_object_check(ctx, this_val);
-    if (!map.valid()) return JS_ThrowTypeError(ctx, "Invalid Map object");
+    MapDataHandle map = JS_GetOpaqueHandle2(ctx, this_val, js_map_class_id);
+    if (SAFE_IS_NULL(map)) return JS_ThrowTypeError(ctx, "Invalid Map object");
 
-    map.set_entries(JS_NewObject(ctx));
-    map.set_size(0);
+    SAFE_SET(map, MapDataHandle, entries, JS_NewObject(ctx));
+    SAFE_SET(map, MapDataHandle, size, 0);
     
     return JS_UNDEFINED;
 }
 
 GCValue js_map_get_size(JSContextHandle ctx, GCValue this_val) {
-    MapDataHandle map = MapDataHandle::from_object_check(ctx, this_val);
-    if (!map.valid()) return JS_ThrowTypeError(ctx, "Invalid Map object");
-    return JS_NewInt32(ctx, map.size());
+    MapDataHandle map = JS_GetOpaqueHandle2(ctx, this_val, js_map_class_id);
+    if (SAFE_IS_NULL(map)) return JS_ThrowTypeError(ctx, "Invalid Map object");
+    return JS_NewInt32(ctx, SAFE_GET_OR(map, MapDataHandle, size, 0));
 }
 
 // Helper: create an array of [key, value] pairs from a Map's entries object
 GCValue js_map_entries_array(JSContextHandle ctx, GCValue this_val) {
-    MapDataHandle map = MapDataHandle::from_object_check(ctx, this_val);
-    if (!map.valid()) return JS_ThrowTypeError(ctx, "Invalid Map object");
+    MapDataHandle map = JS_GetOpaqueHandle2(ctx, this_val, js_map_class_id);
+    if (SAFE_IS_NULL(map)) return JS_ThrowTypeError(ctx, "Invalid Map object");
     
-    GCValue entries_obj = map.entries();
+    GCValue entries_obj = SAFE_GET_OR(map, MapDataHandle, entries, JS_NULL);
     
     // Get Object.keys(entries_obj)
     GCValue global_obj = JS_GetGlobalObject(ctx);
@@ -1347,10 +1347,10 @@ GCValue js_map_entries(JSContextHandle ctx, GCValue this_val, int argc, GCValue 
 
 GCValue js_map_keys(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    MapDataHandle map = MapDataHandle::from_object_check(ctx, this_val);
-    if (!map.valid()) return JS_ThrowTypeError(ctx, "Invalid Map object");
+    MapDataHandle map = JS_GetOpaqueHandle2(ctx, this_val, js_map_class_id);
+    if (SAFE_IS_NULL(map)) return JS_ThrowTypeError(ctx, "Invalid Map object");
     
-    GCValue entries_obj = map.entries();
+    GCValue entries_obj = SAFE_GET_OR(map, MapDataHandle, entries, JS_NULL);
     GCValue global_obj = JS_GetGlobalObject(ctx);
     GCValue object_ctor = JS_GetPropertyStr(ctx, global_obj, "Object");
     GCValue keys_fn = JS_GetPropertyStr(ctx, object_ctor, "keys");
@@ -1371,10 +1371,10 @@ GCValue js_map_keys(JSContextHandle ctx, GCValue this_val, int argc, GCValue *ar
 
 GCValue js_map_values(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    MapDataHandle map = MapDataHandle::from_object_check(ctx, this_val);
-    if (!map.valid()) return JS_ThrowTypeError(ctx, "Invalid Map object");
+    MapDataHandle map = JS_GetOpaqueHandle2(ctx, this_val, js_map_class_id);
+    if (SAFE_IS_NULL(map)) return JS_ThrowTypeError(ctx, "Invalid Map object");
     
-    GCValue entries_obj = map.entries();
+    GCValue entries_obj = SAFE_GET_OR(map, MapDataHandle, entries, JS_NULL);
     GCValue global_obj = JS_GetGlobalObject(ctx);
     GCValue object_ctor = JS_GetPropertyStr(ctx, global_obj, "Object");
     GCValue keys_fn = JS_GetPropertyStr(ctx, object_ctor, "keys");
@@ -1838,52 +1838,52 @@ JSClassDef js_keyframe_effect_class_def = {
 
 // Animation constructor
 GCValue js_animation_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
-    AnimationDataHandle anim = AnimationDataHandle::create(ctx);
-    if (!anim.valid()) return JS_ThrowTypeError(ctx, "Invalid Animation");
+    AnimationDataHandle anim = animation_create(ctx);
+    if (SAFE_IS_NULL(anim)) return JS_ThrowTypeError(ctx, "Invalid Animation");
     
     if (argc > 0) {
-        anim.set_effect(argv[0]);
+        SAFE_SET(anim, AnimationDataHandle, effect, argv[0]);
         // Try to get duration from effect
         if (JS_IsObject(argv[0])) {
             GCValue duration_val = JS_GetPropertyStr(ctx, argv[0], "duration");
             double duration;
             if (!JS_IsException(duration_val) && !JS_ToFloat64(ctx, &duration, duration_val)) {
-                anim.set_duration(duration);
+                SAFE_SET(anim, AnimationDataHandle, duration, duration);
             }
 
         }
     }
     
     GCValue obj = JS_NewObjectClass(ctx, js_animation_class_id);
-    anim.attach_to_object(obj);
+    JS_SetOpaqueHandle(obj, anim);
     return obj;
 }
 
 // Animation.prototype.play()
 GCValue js_animation_play(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    AnimationDataHandle anim = AnimationDataHandle::from_object_check(ctx, this_val);
-    if (!anim.valid()) return JS_ThrowTypeError(ctx, "Invalid Animation");
-    anim.set_playing();
+    AnimationDataHandle anim = JS_GetOpaqueHandle2(ctx, this_val, js_animation_class_id);
+    if (SAFE_IS_NULL(anim)) return JS_ThrowTypeError(ctx, "Invalid Animation");
+    SAFE_SET(anim, AnimationDataHandle, play_state, 1);
     return JS_UNDEFINED;
 }
 
 // Animation.prototype.pause()
 GCValue js_animation_pause(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    AnimationDataHandle anim = AnimationDataHandle::from_object_check(ctx, this_val);
-    if (!anim.valid()) return JS_ThrowTypeError(ctx, "Invalid Animation");
-    anim.set_paused();
+    AnimationDataHandle anim = JS_GetOpaqueHandle2(ctx, this_val, js_animation_class_id);
+    if (SAFE_IS_NULL(anim)) return JS_ThrowTypeError(ctx, "Invalid Animation");
+    SAFE_SET(anim, AnimationDataHandle, play_state, 2);
     return JS_UNDEFINED;
 }
 
 // Animation.prototype.finish()
 GCValue js_animation_finish(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    AnimationDataHandle anim = AnimationDataHandle::from_object_check(ctx, this_val);
-    if (!anim.valid()) return JS_ThrowTypeError(ctx, "Invalid Animation");
-    anim.set_finished();
-    anim.set_current_time(anim.duration());
+    AnimationDataHandle anim = JS_GetOpaqueHandle2(ctx, this_val, js_animation_class_id);
+    if (SAFE_IS_NULL(anim)) return JS_ThrowTypeError(ctx, "Invalid Animation");
+    SAFE_SET(anim, AnimationDataHandle, play_state, 3);
+    SAFE_SET(anim, AnimationDataHandle, current_time, SAFE_GET_OR(anim, AnimationDataHandle, duration, 0.0));
     
     // Call onfinish callback if set
-    GCValue onfinish = anim.onfinish();
+    GCValue onfinish = SAFE_GET_OR(anim, AnimationDataHandle, onfinish, JS_NULL);
     if (!JS_IsNull(onfinish) && JS_IsFunction(ctx, onfinish)) {
         JS_Call(ctx, onfinish, this_val, 0, NULL);
     }
@@ -1892,10 +1892,10 @@ GCValue js_animation_finish(JSContextHandle ctx, GCValue this_val, int argc, GCV
 
 // Animation.prototype.cancel()
 GCValue js_animation_cancel(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    AnimationDataHandle anim = AnimationDataHandle::from_object_check(ctx, this_val);
-    if (!anim.valid()) return JS_ThrowTypeError(ctx, "Invalid Animation");
-    anim.set_idle();
-    anim.set_current_time(0);
+    AnimationDataHandle anim = JS_GetOpaqueHandle2(ctx, this_val, js_animation_class_id);
+    if (SAFE_IS_NULL(anim)) return JS_ThrowTypeError(ctx, "Invalid Animation");
+    SAFE_SET(anim, AnimationDataHandle, play_state, 0);
+    SAFE_SET(anim, AnimationDataHandle, current_time, 0);
     return JS_UNDEFINED;
 }
 
@@ -1906,39 +1906,39 @@ GCValue js_animation_reverse(JSContextHandle ctx, GCValue this_val, int argc, GC
 
 // Animation.playState getter
 GCValue js_animation_get_play_state(JSContextHandle ctx, GCValue this_val) {
-    AnimationDataHandle anim = AnimationDataHandle::from_object_check(ctx, this_val);
-    if (!anim.valid()) return JS_ThrowTypeError(ctx, "Invalid Animation");
-    return JS_NewString(ctx, anim.play_state_string());
+    AnimationDataHandle anim = JS_GetOpaqueHandle2(ctx, this_val, js_animation_class_id);
+    if (SAFE_IS_NULL(anim)) return JS_ThrowTypeError(ctx, "Invalid Animation");
+    return JS_NewString(ctx, animation_play_state_string(anim));
 }
 
 // Animation.currentTime getter
 GCValue js_animation_get_current_time(JSContextHandle ctx, GCValue this_val) {
-    AnimationDataHandle anim = AnimationDataHandle::from_object_check(ctx, this_val);
-    if (!anim.valid()) return JS_ThrowTypeError(ctx, "Invalid Animation");
-    return JS_NewFloat64(ctx, anim.current_time());
+    AnimationDataHandle anim = JS_GetOpaqueHandle2(ctx, this_val, js_animation_class_id);
+    if (SAFE_IS_NULL(anim)) return JS_ThrowTypeError(ctx, "Invalid Animation");
+    return JS_NewFloat64(ctx, SAFE_GET_OR(anim, AnimationDataHandle, current_time, 0.0));
 }
 
 // Animation.effect getter
 GCValue js_animation_get_effect(JSContextHandle ctx, GCValue this_val) {
-    AnimationDataHandle anim = AnimationDataHandle::from_object_check(ctx, this_val);
-    if (!anim.valid()) return JS_ThrowTypeError(ctx, "Invalid Animation");
-    GCValue effect = anim.effect();
+    AnimationDataHandle anim = JS_GetOpaqueHandle2(ctx, this_val, js_animation_class_id);
+    if (SAFE_IS_NULL(anim)) return JS_ThrowTypeError(ctx, "Invalid Animation");
+    GCValue effect = SAFE_GET_OR(anim, AnimationDataHandle, effect, JS_NULL);
     if (JS_IsNull(effect)) return JS_NULL;
     return effect;
 }
 
 // Animation.onfinish getter/setter
 GCValue js_animation_get_onfinish(JSContextHandle ctx, GCValue this_val) {
-    AnimationDataHandle anim = AnimationDataHandle::from_object_check(ctx, this_val);
-    if (!anim.valid()) return JS_ThrowTypeError(ctx, "Invalid Animation");
-    return anim.onfinish();
+    AnimationDataHandle anim = JS_GetOpaqueHandle2(ctx, this_val, js_animation_class_id);
+    if (SAFE_IS_NULL(anim)) return JS_ThrowTypeError(ctx, "Invalid Animation");
+    return SAFE_GET_OR(anim, AnimationDataHandle, onfinish, JS_NULL);
 }
 
 GCValue js_animation_set_onfinish(JSContextHandle ctx, GCValue this_val, GCValue val) {
-    AnimationDataHandle anim = AnimationDataHandle::from_object_check(ctx, this_val);
-    if (!anim.valid()) return JS_ThrowTypeError(ctx, "Invalid Animation");
+    AnimationDataHandle anim = JS_GetOpaqueHandle2(ctx, this_val, js_animation_class_id);
+    if (SAFE_IS_NULL(anim)) return JS_ThrowTypeError(ctx, "Invalid Animation");
 
-    anim.set_onfinish(val);
+    SAFE_SET(anim, AnimationDataHandle, onfinish, val);
     return JS_UNDEFINED;
 }
 
@@ -1957,49 +1957,49 @@ const size_t js_animation_proto_funcs_count = sizeof(js_animation_proto_funcs) /
 
 // KeyframeEffect constructor
 GCValue js_keyframe_effect_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
-    KeyFrameEffectDataHandle effect = KeyFrameEffectDataHandle::create();
-    if (!effect.valid()) return JS_ThrowTypeError(ctx, "Invalid Effect");
+    KeyFrameEffectDataHandle effect = keyframe_effect_create();
+    if (SAFE_IS_NULL(effect)) return JS_ThrowTypeError(ctx, "Invalid Effect");
     
     if (argc > 0) {
-        effect.set_target(argv[0]);
+        SAFE_SET(effect, KeyFrameEffectDataHandle, target, argv[0]);
     }
     if (argc > 1) {
-        effect.set_keyframes(argv[1]);
+        SAFE_SET(effect, KeyFrameEffectDataHandle, keyframes, argv[1]);
     }
     if (argc > 2 && JS_IsObject(argv[2])) {
         GCValue duration_val = JS_GetPropertyStr(ctx, argv[2], "duration");
         double duration;
         if (!JS_IsException(duration_val) && !JS_ToFloat64(ctx, &duration, duration_val)) {
-            effect.set_duration(duration);
+            SAFE_SET(effect, KeyFrameEffectDataHandle, duration, duration);
         }
 
         GCValue easing_val = JS_GetPropertyStr(ctx, argv[2], "easing");
         const char *easing = JS_ToCString(ctx, easing_val);
         if (easing) {
-            effect.set_easing(easing);
+            SAFE_SET_STR(effect, KeyFrameEffectDataHandle, easing, easing);
         }
 
     }
     
     GCValue obj = JS_NewObjectClass(ctx, js_keyframe_effect_class_id);
-    effect.attach_to_object(obj);
+    JS_SetOpaqueHandle(obj, effect);
     return obj;
 }
 
 // KeyframeEffect.target getter
 GCValue js_keyframe_effect_get_target(JSContextHandle ctx, GCValue this_val) {
-    KeyFrameEffectDataHandle effect = KeyFrameEffectDataHandle::from_object_check(ctx, this_val);
-    if (!effect.valid()) return JS_ThrowTypeError(ctx, "Invalid Effect");
-    GCValue target = effect.target();
+    KeyFrameEffectDataHandle effect = JS_GetOpaqueHandle2(ctx, this_val, js_keyframe_effect_class_id);
+    if (SAFE_IS_NULL(effect)) return JS_ThrowTypeError(ctx, "Invalid Effect");
+    GCValue target = SAFE_GET_OR(effect, KeyFrameEffectDataHandle, target, JS_NULL);
     if (JS_IsNull(target)) return JS_NULL;
     return target;
 }
 
 // KeyframeEffect.duration getter
 GCValue js_keyframe_effect_get_duration(JSContextHandle ctx, GCValue this_val) {
-    KeyFrameEffectDataHandle effect = KeyFrameEffectDataHandle::from_object_check(ctx, this_val);
-    if (!effect.valid()) return JS_ThrowTypeError(ctx, "Invalid Effect");
-    return JS_NewFloat64(ctx, effect.duration());
+    KeyFrameEffectDataHandle effect = JS_GetOpaqueHandle2(ctx, this_val, js_keyframe_effect_class_id);
+    if (SAFE_IS_NULL(effect)) return JS_ThrowTypeError(ctx, "Invalid Effect");
+    return JS_NewFloat64(ctx, SAFE_GET_OR(effect, KeyFrameEffectDataHandle, duration, 0.0));
 }
 
 const JSCFunctionListEntry js_keyframe_effect_proto_funcs[] = {
@@ -2034,9 +2034,9 @@ GCValue js_element_animate(JSContextHandle ctx, GCValue this_val, int argc, GCVa
     }
     
     // Auto-play the animation
-    AnimationDataHandle anim = AnimationDataHandle::from_object(animation);
-    if (anim.valid()) {
-        anim.set_playing();
+    AnimationDataHandle anim = JS_GetOpaqueHandle(animation, js_animation_class_id);
+    if (!SAFE_IS_NULL(anim)) {
+        SAFE_SET(anim, AnimationDataHandle, play_state, 1);
     }
     
     // Set oncancel to null (not undefined) so Web Animations polyfill
@@ -2086,20 +2086,20 @@ JSClassDef js_font_face_set_class_def = {
 
 // FontFace constructor
 GCValue js_font_face_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
-    FontFaceDataHandle ff = FontFaceDataHandle::create();
-    if (!ff.valid()) return JS_ThrowTypeError(ctx, "Invalid FontFace");
+    FontFaceDataHandle ff = font_face_create();
+    if (SAFE_IS_NULL(ff)) return JS_ThrowTypeError(ctx, "Invalid FontFace");
     
     if (argc > 0) {
         const char *family = JS_ToCString(ctx, argv[0]);
         if (family) {
-            ff.set_family(family);
+            SAFE_SET_STR(ff, FontFaceDataHandle, family, family);
         }
     }
     
     if (argc > 1) {
         const char *source = JS_ToCString(ctx, argv[1]);
         if (source) {
-            ff.set_source(source);
+            SAFE_SET_STR(ff, FontFaceDataHandle, source, source);
         }
     }
     
@@ -2107,13 +2107,13 @@ GCValue js_font_face_constructor(JSContextHandle ctx, GCValue new_target, int ar
         GCValue display_val = JS_GetPropertyStr(ctx, argv[2], "display");
         const char *display = JS_ToCString(ctx, display_val);
         if (display) {
-            ff.set_display(display);
+            SAFE_SET_STR(ff, FontFaceDataHandle, display, display);
         }
 
     }
     
     GCValue obj = JS_NewObjectClass(ctx, js_font_face_class_id);
-    ff.attach_to_object(obj);
+    JS_SetOpaqueHandle(obj, ff);
     return obj;
 }
 
@@ -2127,8 +2127,8 @@ GCValue js_font_face_load(JSContextHandle ctx, GCValue this_val, int argc, GCVal
 
 // FontFace.loaded getter - returns a Promise that resolves to this FontFace
 GCValue js_font_face_get_loaded(JSContextHandle ctx, GCValue this_val) {
-    FontFaceDataHandle ff = FontFaceDataHandle::from_object_check(ctx, this_val);
-    if (!ff.valid()) return JS_ThrowTypeError(ctx, "Invalid FontFace");
+    FontFaceDataHandle ff = JS_GetOpaqueHandle2(ctx, this_val, js_font_face_class_id);
+    if (SAFE_IS_NULL(ff)) return JS_ThrowTypeError(ctx, "Invalid FontFace");
     // Return a resolved promise with this FontFace
     GCValue result = js_create_resolved_promise(ctx, this_val);
 
@@ -2137,9 +2137,9 @@ GCValue js_font_face_get_loaded(JSContextHandle ctx, GCValue this_val) {
 
 // FontFace.family getter
 GCValue js_font_face_get_family(JSContextHandle ctx, GCValue this_val) {
-    FontFaceDataHandle ff = FontFaceDataHandle::from_object_check(ctx, this_val);
-    if (!ff.valid()) return JS_ThrowTypeError(ctx, "Invalid FontFace");
-    return JS_NewString(ctx, ff.family());
+    FontFaceDataHandle ff = JS_GetOpaqueHandle2(ctx, this_val, js_font_face_class_id);
+    if (SAFE_IS_NULL(ff)) return JS_ThrowTypeError(ctx, "Invalid FontFace");
+    return JS_NewString(ctx, SAFE_GET_OR(ff, FontFaceDataHandle, family, ""));
 }
 
 // FontFace.status getter
@@ -2275,11 +2275,11 @@ GCValue js_mutation_observer_constructor(JSContextHandle ctx, GCValue new_target
         return JS_ThrowTypeError(ctx, "MutationObserver constructor requires a callback function");
     }
     
-    MutationObserverDataHandle mo = MutationObserverDataHandle::create(ctx, argv[0]);
-    if (!mo.valid()) return JS_ThrowTypeError(ctx, "Invalid MutationObserver");
+    MutationObserverDataHandle mo = mutation_observer_create(ctx, argv[0]);
+    if (SAFE_IS_NULL(mo)) return JS_ThrowTypeError(ctx, "Invalid MutationObserver");
     
     GCValue obj = JS_NewObjectClass(ctx, js_mutation_observer_class_id);
-    mo.attach_to_object(obj);
+    JS_SetOpaqueHandle(obj, mo);
     
     JS_SetPropertyStr(ctx, obj, "__mo_callback", argv[0]);
     JS_SetPropertyStr(ctx, obj, "__mo_records", JS_NewArray(ctx));
@@ -2762,11 +2762,11 @@ GCValue js_resize_observer_constructor(JSContextHandle ctx, GCValue new_target, 
         return JS_ThrowTypeError(ctx, "ResizeObserver constructor requires a callback function");
     }
     
-    ResizeObserverDataHandle ro = ResizeObserverDataHandle::create(ctx, argv[0]);
-    if (!ro.valid()) return JS_ThrowTypeError(ctx, "Invalid ResizeObserver");
+    ResizeObserverDataHandle ro = resize_observer_create(ctx, argv[0]);
+    if (SAFE_IS_NULL(ro)) return JS_ThrowTypeError(ctx, "Invalid ResizeObserver");
     
     GCValue obj = JS_NewObjectClass(ctx, js_resize_observer_class_id);
-    ro.attach_to_object(obj);
+    JS_SetOpaqueHandle(obj, ro);
     return obj;
 }
 
@@ -2821,9 +2821,9 @@ static GCValue js_resize_observer_job(JSContextHandle ctx, int argc, GCValue *ar
     if (argc < 1) return JS_UNDEFINED;
     GCValue observer = argv[0];
     JS_SetPropertyStr(ctx, observer, "__ro_scheduled", JS_FALSE);
-    ResizeObserverDataHandle ro = ResizeObserverDataHandle::from_object_check(ctx, observer);
-    if (!ro.valid()) return JS_UNDEFINED;
-    GCValue cb = ro.callback();
+    ResizeObserverDataHandle ro = JS_GetOpaqueHandle2(ctx, observer, js_resize_observer_class_id);
+    if (SAFE_IS_NULL(ro)) return JS_UNDEFINED;
+    GCValue cb = SAFE_GET_OR(ro, ResizeObserverDataHandle, callback, JS_NULL);
     if (!JS_IsFunction(ctx, cb)) return JS_UNDEFINED;
 
     GCValue targets = js_resize_observer_targets(ctx, observer);
@@ -2855,9 +2855,9 @@ static void js_resize_observer_schedule(JSContextHandle ctx, GCValue observer) {
 GCValue js_resize_observer_observe(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1) return JS_UNDEFINED;
     GCValue target = argv[0];
-    ResizeObserverDataHandle ro = ResizeObserverDataHandle::from_object_check(ctx, this_val);
-    if (!ro.valid()) return JS_UNDEFINED;
-    GCValue cb = ro.callback();
+    ResizeObserverDataHandle ro = JS_GetOpaqueHandle2(ctx, this_val, js_resize_observer_class_id);
+    if (SAFE_IS_NULL(ro)) return JS_UNDEFINED;
+    GCValue cb = SAFE_GET_OR(ro, ResizeObserverDataHandle, callback, JS_NULL);
     if (!JS_IsFunction(ctx, cb)) return JS_UNDEFINED;
 
     GCValue targets = js_resize_observer_targets(ctx, this_val);
@@ -2949,32 +2949,32 @@ GCValue js_intersection_observer_constructor(JSContextHandle ctx, GCValue new_ta
         return JS_ThrowTypeError(ctx, "IntersectionObserver constructor requires a callback function");
     }
     
-    IntersectionObserverDataHandle io = IntersectionObserverDataHandle::create(ctx, argv[0]);
-    if (!io.valid()) return JS_ThrowTypeError(ctx, "Invalid IntersectionObserver");
+    IntersectionObserverDataHandle io = intersection_observer_create(ctx, argv[0]);
+    if (SAFE_IS_NULL(io)) return JS_ThrowTypeError(ctx, "Invalid IntersectionObserver");
     
     // Parse options if provided
     if (argc > 1 && JS_IsObject(argv[1])) {
         GCValue root_val = JS_GetPropertyStr(ctx, argv[1], "root");
         if (!JS_IsUndefined(root_val) && !JS_IsNull(root_val)) {
-            io.set_root(root_val);
+            SAFE_SET(io, IntersectionObserverDataHandle, root, root_val);
         }
 
         GCValue margin_val = JS_GetPropertyStr(ctx, argv[1], "rootMargin");
         const char *margin = JS_ToCString(ctx, margin_val);
         if (margin) {
-            io.set_root_margin(margin);
+            SAFE_SET_STR(io, IntersectionObserverDataHandle, rootMargin, margin);
         }
 
         GCValue threshold_val = JS_GetPropertyStr(ctx, argv[1], "threshold");
         double threshold;
         if (!JS_IsException(threshold_val) && !JS_ToFloat64(ctx, &threshold, threshold_val)) {
-            io.set_threshold(threshold);
+            SAFE_SET(io, IntersectionObserverDataHandle, threshold, threshold);
         }
 
     }
     
     GCValue obj = JS_NewObjectClass(ctx, js_intersection_observer_class_id);
-    io.attach_to_object(obj);
+    JS_SetOpaqueHandle(obj, io);
     return obj;
 }
 
@@ -3005,9 +3005,9 @@ static GCValue js_intersection_observer_job(JSContextHandle ctx, int argc, GCVal
     GCValue observer = argv[0];
     JS_SetPropertyStr(ctx, observer, "__io_scheduled", JS_FALSE);
 
-    IntersectionObserverDataHandle io = IntersectionObserverDataHandle::from_object_check(ctx, observer);
-    if (!io.valid()) return JS_UNDEFINED;
-    GCValue cb = io.callback();
+    IntersectionObserverDataHandle io = JS_GetOpaqueHandle2(ctx, observer, js_intersection_observer_class_id);
+    if (SAFE_IS_NULL(io)) return JS_UNDEFINED;
+    GCValue cb = SAFE_GET_OR(io, IntersectionObserverDataHandle, callback, JS_NULL);
     if (!JS_IsFunction(ctx, cb)) return JS_UNDEFINED;
 
     GCValue targets = js_intersection_observer_targets(ctx, observer);
@@ -3038,9 +3038,9 @@ static void js_intersection_observer_schedule(JSContextHandle ctx, GCValue obser
 GCValue js_intersection_observer_observe(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1) return JS_UNDEFINED;
     GCValue target = argv[0];
-    IntersectionObserverDataHandle io = IntersectionObserverDataHandle::from_object_check(ctx, this_val);
-    if (!io.valid()) return JS_UNDEFINED;
-    GCValue cb = io.callback();
+    IntersectionObserverDataHandle io = JS_GetOpaqueHandle2(ctx, this_val, js_intersection_observer_class_id);
+    if (SAFE_IS_NULL(io)) return JS_UNDEFINED;
+    GCValue cb = SAFE_GET_OR(io, IntersectionObserverDataHandle, callback, JS_NULL);
     if (!JS_IsFunction(ctx, cb)) return JS_UNDEFINED;
 
     GCValue targets = js_intersection_observer_targets(ctx, this_val);
@@ -3453,9 +3453,9 @@ JSClassDef js_performance_timing_class_def = {
 
 #define DEF_TIMING_GETTER(field) \
 static GCValue js_performance_timing_get_##field(JSContextHandle ctx, GCValue this_val) { \
-    PerformanceTimingDataHandle timing = PerformanceTimingDataHandle::from_object_check(ctx, this_val); \
-    if (!timing.valid()) return JS_ThrowTypeError(ctx, "Invalid PerformanceTiming"); \
-    return JS_NewFloat64(ctx, timing.field()); \
+    PerformanceTimingDataHandle timing = JS_GetOpaqueHandle2(ctx, this_val, js_performance_timing_class_id); \
+    if (SAFE_IS_NULL(timing)) return JS_ThrowTypeError(ctx, "Invalid PerformanceTiming"); \
+    return JS_NewFloat64(ctx, SAFE_GET_OR(timing, PerformanceTimingDataHandle, field, 0.0)); \
 }
 
 DEF_TIMING_GETTER(navigationStart)
@@ -3566,30 +3566,30 @@ const size_t js_performance_proto_funcs_count = sizeof(js_performance_proto_func
 
 // PerformanceEntry.name getter
 GCValue js_performance_entry_get_name(JSContextHandle ctx, GCValue this_val) {
-    PerformanceEntryDataHandle entry = PerformanceEntryDataHandle::from_object_check(ctx, this_val);
-    if (!entry.valid()) return JS_ThrowTypeError(ctx, "Invalid PerformanceEntry");
-    return JS_NewString(ctx, entry.name());
+    PerformanceEntryDataHandle entry = JS_GetOpaqueHandle2(ctx, this_val, js_performance_entry_class_id);
+    if (SAFE_IS_NULL(entry)) return JS_ThrowTypeError(ctx, "Invalid PerformanceEntry");
+    return JS_NewString(ctx, SAFE_GET_OR(entry, PerformanceEntryDataHandle, name, ""));
 }
 
 // PerformanceEntry.entryType getter
 GCValue js_performance_entry_get_entry_type(JSContextHandle ctx, GCValue this_val) {
-    PerformanceEntryDataHandle entry = PerformanceEntryDataHandle::from_object_check(ctx, this_val);
-    if (!entry.valid()) return JS_ThrowTypeError(ctx, "Invalid PerformanceEntry");
-    return JS_NewString(ctx, entry.entry_type());
+    PerformanceEntryDataHandle entry = JS_GetOpaqueHandle2(ctx, this_val, js_performance_entry_class_id);
+    if (SAFE_IS_NULL(entry)) return JS_ThrowTypeError(ctx, "Invalid PerformanceEntry");
+    return JS_NewString(ctx, SAFE_GET_OR(entry, PerformanceEntryDataHandle, entryType, ""));
 }
 
 // PerformanceEntry.startTime getter
 GCValue js_performance_entry_get_start_time(JSContextHandle ctx, GCValue this_val) {
-    PerformanceEntryDataHandle entry = PerformanceEntryDataHandle::from_object_check(ctx, this_val);
-    if (!entry.valid()) return JS_ThrowTypeError(ctx, "Invalid PerformanceEntry");
-    return JS_NewFloat64(ctx, entry.start_time());
+    PerformanceEntryDataHandle entry = JS_GetOpaqueHandle2(ctx, this_val, js_performance_entry_class_id);
+    if (SAFE_IS_NULL(entry)) return JS_ThrowTypeError(ctx, "Invalid PerformanceEntry");
+    return JS_NewFloat64(ctx, SAFE_GET_OR(entry, PerformanceEntryDataHandle, startTime, 0.0));
 }
 
 // PerformanceEntry.duration getter
 GCValue js_performance_entry_get_duration(JSContextHandle ctx, GCValue this_val) {
-    PerformanceEntryDataHandle entry = PerformanceEntryDataHandle::from_object_check(ctx, this_val);
-    if (!entry.valid()) return JS_ThrowTypeError(ctx, "Invalid PerformanceEntry");
-    return JS_NewFloat64(ctx, entry.duration());
+    PerformanceEntryDataHandle entry = JS_GetOpaqueHandle2(ctx, this_val, js_performance_entry_class_id);
+    if (SAFE_IS_NULL(entry)) return JS_ThrowTypeError(ctx, "Invalid PerformanceEntry");
+    return JS_NewFloat64(ctx, SAFE_GET_OR(entry, PerformanceEntryDataHandle, duration, 0.0));
 }
 
 const JSCFunctionListEntry js_performance_entry_proto_funcs[] = {
@@ -3606,11 +3606,11 @@ GCValue js_performance_observer_constructor(JSContextHandle ctx, GCValue new_tar
         return JS_ThrowTypeError(ctx, "PerformanceObserver constructor requires a callback function");
     }
     
-    PerformanceObserverDataHandle po = PerformanceObserverDataHandle::create(ctx, argv[0]);
-    if (!po.valid()) return JS_ThrowTypeError(ctx, "Invalid PerformanceObserver");
+    PerformanceObserverDataHandle po = performance_observer_create(ctx, argv[0]);
+    if (SAFE_IS_NULL(po)) return JS_ThrowTypeError(ctx, "Invalid PerformanceObserver");
     
     GCValue obj = JS_NewObjectClass(ctx, js_performance_observer_class_id);
-    po.attach_to_object(obj);
+    JS_SetOpaqueHandle(obj, po);
     return obj;
 }
 
@@ -3683,24 +3683,24 @@ JSClassDef js_dom_rect_read_only_class_def = {
 // Element.prototype.getBoundingClientRect - returns a DOMRect
 GCValue js_element_getBoundingClientRect(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    DOMRectDataHandle rect = DOMRectDataHandle::create();
-    if (!rect.valid()) return JS_ThrowTypeError(ctx, "Invalid DOMRect");
+    DOMRectDataHandle rect = dom_rect_create();
+    if (SAFE_IS_NULL(rect)) return JS_ThrowTypeError(ctx, "Invalid DOMRect");
     
-    rect.set_x(0);
-    rect.set_y(0);
-    rect.set_width(640);
-    rect.set_height(360);
-    rect.compute_bounds();
+    SAFE_SET(rect, DOMRectDataHandle, x, 0);
+    SAFE_SET(rect, DOMRectDataHandle, y, 0);
+    SAFE_SET(rect, DOMRectDataHandle, width, 640);
+    SAFE_SET(rect, DOMRectDataHandle, height, 360);
+    dom_rect_compute_bounds(rect);
     
     GCValue obj = JS_NewObjectClass(ctx, js_dom_rect_class_id);
-    rect.attach_to_object(obj);
+    JS_SetOpaqueHandle(obj, rect);
     return obj;
 }
 
 // DOMRect constructor
 GCValue js_dom_rect_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
-    DOMRectDataHandle rect = DOMRectDataHandle::create();
-    if (!rect.valid()) return JS_ThrowTypeError(ctx, "Invalid DOMRect");
+    DOMRectDataHandle rect = dom_rect_create();
+    if (SAFE_IS_NULL(rect)) return JS_ThrowTypeError(ctx, "Invalid DOMRect");
     
     double x = 0, y = 0, width = 0, height = 0;
     
@@ -3709,21 +3709,21 @@ GCValue js_dom_rect_constructor(JSContextHandle ctx, GCValue new_target, int arg
     if (argc > 2) JS_ToFloat64(ctx, &width, argv[2]);
     if (argc > 3) JS_ToFloat64(ctx, &height, argv[3]);
     
-    rect.set_x(x);
-    rect.set_y(y);
-    rect.set_width(width);
-    rect.set_height(height);
-    rect.compute_bounds();
+    SAFE_SET(rect, DOMRectDataHandle, x, x);
+    SAFE_SET(rect, DOMRectDataHandle, y, y);
+    SAFE_SET(rect, DOMRectDataHandle, width, width);
+    SAFE_SET(rect, DOMRectDataHandle, height, height);
+    dom_rect_compute_bounds(rect);
     
     GCValue obj = JS_NewObjectClass(ctx, js_dom_rect_class_id);
-    rect.attach_to_object(obj);
+    JS_SetOpaqueHandle(obj, rect);
     return obj;
 }
 
 // DOMRectReadOnly constructor
 GCValue js_dom_rect_read_only_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
-    DOMRectDataHandle rect = DOMRectDataHandle::create();
-    if (!rect.valid()) return JS_ThrowTypeError(ctx, "Invalid DOMRect");
+    DOMRectDataHandle rect = dom_rect_create();
+    if (SAFE_IS_NULL(rect)) return JS_ThrowTypeError(ctx, "Invalid DOMRect");
     
     double x = 0, y = 0, width = 0, height = 0;
     
@@ -3732,14 +3732,14 @@ GCValue js_dom_rect_read_only_constructor(JSContextHandle ctx, GCValue new_targe
     if (argc > 2) JS_ToFloat64(ctx, &width, argv[2]);
     if (argc > 3) JS_ToFloat64(ctx, &height, argv[3]);
     
-    rect.set_x(x);
-    rect.set_y(y);
-    rect.set_width(width);
-    rect.set_height(height);
-    rect.compute_bounds();
+    SAFE_SET(rect, DOMRectDataHandle, x, x);
+    SAFE_SET(rect, DOMRectDataHandle, y, y);
+    SAFE_SET(rect, DOMRectDataHandle, width, width);
+    SAFE_SET(rect, DOMRectDataHandle, height, height);
+    dom_rect_compute_bounds(rect);
     
     GCValue obj = JS_NewObjectClass(ctx, js_dom_rect_read_only_class_id);
-    rect.attach_to_object(obj);
+    JS_SetOpaqueHandle(obj, rect);
     return obj;
 }
 
@@ -3813,14 +3813,14 @@ GCValue js_dom_rect_read_only_from_rect(JSContextHandle ctx, GCValue this_val, i
     return result;
 }
 
-#define DEF_DOM_RECT_GETTER(name, getter_func) \
+#define DEF_DOM_RECT_GETTER(name, field) \
 static GCValue js_dom_rect_get_##name(JSContextHandle ctx, GCValue this_val) { \
-    DOMRectDataHandle rect = DOMRectDataHandle::from_dom_rect(this_val); \
-    if (!rect.valid()) { \
-        rect = DOMRectDataHandle::from_dom_rect_read_only(this_val); \
-        if (!rect.valid()) return JS_ThrowTypeError(ctx, "Invalid DOMRect"); \
+    DOMRectDataHandle rect = JS_GetOpaqueHandle(this_val, js_dom_rect_class_id); \
+    if (SAFE_IS_NULL(rect)) { \
+        rect = JS_GetOpaqueHandle(this_val, js_dom_rect_read_only_class_id); \
+        if (SAFE_IS_NULL(rect)) return JS_ThrowTypeError(ctx, "Invalid DOMRect"); \
     } \
-    return JS_NewFloat64(ctx, rect.getter_func()); \
+    return JS_NewFloat64(ctx, SAFE_GET_OR(rect, DOMRectDataHandle, field, 0.0)); \
 }
 
 DEF_DOM_RECT_GETTER(x, x)
@@ -3834,21 +3834,21 @@ DEF_DOM_RECT_GETTER(left, left)
 
 #undef DEF_DOM_RECT_GETTER
 
-#define DEF_DOM_RECT_SETTER(name, setter_func) \
+#define DEF_DOM_RECT_SETTER(name, field) \
 static GCValue js_dom_rect_set_##name(JSContextHandle ctx, GCValue this_val, GCValue val) { \
-    DOMRectDataHandle rect = DOMRectDataHandle::from_dom_rect(this_val); \
-    if (!rect.valid()) return JS_ThrowTypeError(ctx, "Invalid DOMRect"); \
+    DOMRectDataHandle rect = JS_GetOpaqueHandle(this_val, js_dom_rect_class_id); \
+    if (SAFE_IS_NULL(rect)) return JS_ThrowTypeError(ctx, "Invalid DOMRect"); \
     double value; \
     JS_ToFloat64(ctx, &value, val); \
-    rect.setter_func(value); \
-    rect.compute_bounds(); \
+    SAFE_SET(rect, DOMRectDataHandle, field, value); \
+    dom_rect_compute_bounds(rect); \
     return JS_UNDEFINED; \
 }
 
-DEF_DOM_RECT_SETTER(x, set_x)
-DEF_DOM_RECT_SETTER(y, set_y)
-DEF_DOM_RECT_SETTER(width, set_width)
-DEF_DOM_RECT_SETTER(height, set_height)
+DEF_DOM_RECT_SETTER(x, x)
+DEF_DOM_RECT_SETTER(y, y)
+DEF_DOM_RECT_SETTER(width, width)
+DEF_DOM_RECT_SETTER(height, height)
 
 #undef DEF_DOM_RECT_SETTER
 
@@ -3960,8 +3960,8 @@ void date_to_local_time(long long timestamp_ms, struct tm *out_tm, int *out_ms) 
 
 // Date constructor
 GCValue js_date_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
-    DateDataHandle date = DateDataHandle::create();
-    if (!date.valid()) return JS_ThrowTypeError(ctx, "Invalid Date");
+    DateDataHandle date = date_data_create();
+    if (SAFE_IS_NULL(date)) return JS_ThrowTypeError(ctx, "Invalid Date");
     
     long long timestamp_ms = 0;
     int is_valid = 1;
@@ -3982,10 +3982,10 @@ GCValue js_date_constructor(JSContextHandle ctx, GCValue new_target, int argc, G
             timestamp_ms = (long long)val;
         } else if (JS_IsObject(argv[0])) {
             // Check if it's another Date object
-            DateDataHandle other = DateDataHandle::from_object_check(ctx, argv[0]);
-            if (other.valid()) {
-                timestamp_ms = other.timestamp_ms();
-                is_valid = other.is_valid();
+            DateDataHandle other = JS_GetOpaqueHandle2(ctx, argv[0], js_date_class_id);
+            if (!SAFE_IS_NULL(other)) {
+                timestamp_ms = SAFE_GET_OR(other, DateDataHandle, timestamp_ms, 0);
+                is_valid = SAFE_GET_OR(other, DateDataHandle, is_valid, 0);
             } else {
                 is_valid = 0;
             }
@@ -4024,21 +4024,21 @@ GCValue js_date_constructor(JSContextHandle ctx, GCValue new_target, int argc, G
         }
     }
     
-    date.set_timestamp_ms(timestamp_ms);
-    date.set_valid(is_valid);
+    SAFE_SET(date, DateDataHandle, timestamp_ms, timestamp_ms);
+    SAFE_SET(date, DateDataHandle, is_valid, is_valid);
     
     GCValue obj = JS_NewObjectClass(ctx, js_date_class_id);
-    date.attach_to_object(obj);
+    JS_SetOpaqueHandle(obj, date);
     return obj;
 }
 
 // Date.prototype.getTime()
 GCValue js_date_getTime(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    DateDataHandle date = DateDataHandle::from_object_check(ctx, this_val);
-    if (!date.valid()) return JS_ThrowTypeError(ctx, "Invalid Date object");
-    if (!date.is_valid()) return JS_NewFloat64(ctx, NAN);
-    return JS_NewFloat64(ctx, (double)date.timestamp_ms());
+    DateDataHandle date = JS_GetOpaqueHandle2(ctx, this_val, js_date_class_id);
+    if (SAFE_IS_NULL(date)) return JS_ThrowTypeError(ctx, "Invalid Date object");
+    if (!SAFE_GET_OR(date, DateDataHandle, is_valid, 0)) return JS_NewFloat64(ctx, NAN);
+    return JS_NewFloat64(ctx, (double)SAFE_GET_OR(date, DateDataHandle, timestamp_ms, 0));
 }
 
 // Date.prototype.valueOf() - same as getTime
@@ -4049,205 +4049,205 @@ GCValue js_date_valueOf(JSContextHandle ctx, GCValue this_val, int argc, GCValue
 // Date.prototype.getFullYear()
 GCValue js_date_getFullYear(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    DateDataHandle date = DateDataHandle::from_object_check(ctx, this_val);
-    if (!date.valid() || !date.is_valid()) return JS_NewFloat64(ctx, NAN);
+    DateDataHandle date = JS_GetOpaqueHandle2(ctx, this_val, js_date_class_id);
+    if (SAFE_IS_NULL(date) || !SAFE_GET_OR(date, DateDataHandle, is_valid, 0)) return JS_NewFloat64(ctx, NAN);
     
     struct tm tm;
     int ms;
-    date_to_local_time(date.timestamp_ms(), &tm, &ms);
+    date_to_local_time(SAFE_GET_OR(date, DateDataHandle, timestamp_ms, 0), &tm, &ms);
     return JS_NewInt32(ctx, tm.tm_year + 1900);
 }
 
 // Date.prototype.getUTCFullYear()
 GCValue js_date_getUTCFullYear(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    DateDataHandle date = DateDataHandle::from_object_check(ctx, this_val);
-    if (!date.valid() || !date.is_valid()) return JS_NewFloat64(ctx, NAN);
+    DateDataHandle date = JS_GetOpaqueHandle2(ctx, this_val, js_date_class_id);
+    if (SAFE_IS_NULL(date) || !SAFE_GET_OR(date, DateDataHandle, is_valid, 0)) return JS_NewFloat64(ctx, NAN);
     
     struct tm tm;
     int ms;
-    date_to_utc_time(date.timestamp_ms(), &tm, &ms);
+    date_to_utc_time(SAFE_GET_OR(date, DateDataHandle, timestamp_ms, 0), &tm, &ms);
     return JS_NewInt32(ctx, tm.tm_year + 1900);
 }
 
 // Date.prototype.getMonth()
 GCValue js_date_getMonth(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    DateDataHandle date = DateDataHandle::from_object_check(ctx, this_val);
-    if (!date.valid() || !date.is_valid()) return JS_NewFloat64(ctx, NAN);
+    DateDataHandle date = JS_GetOpaqueHandle2(ctx, this_val, js_date_class_id);
+    if (SAFE_IS_NULL(date) || !SAFE_GET_OR(date, DateDataHandle, is_valid, 0)) return JS_NewFloat64(ctx, NAN);
     
     struct tm tm;
     int ms;
-    date_to_local_time(date.timestamp_ms(), &tm, &ms);
+    date_to_local_time(SAFE_GET_OR(date, DateDataHandle, timestamp_ms, 0), &tm, &ms);
     return JS_NewInt32(ctx, tm.tm_mon);
 }
 
 // Date.prototype.getUTCMonth()
 GCValue js_date_getUTCMonth(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    DateDataHandle date = DateDataHandle::from_object_check(ctx, this_val);
-    if (!date.valid() || !date.is_valid()) return JS_NewFloat64(ctx, NAN);
+    DateDataHandle date = JS_GetOpaqueHandle2(ctx, this_val, js_date_class_id);
+    if (SAFE_IS_NULL(date) || !SAFE_GET_OR(date, DateDataHandle, is_valid, 0)) return JS_NewFloat64(ctx, NAN);
     
     struct tm tm;
     int ms;
-    date_to_utc_time(date.timestamp_ms(), &tm, &ms);
+    date_to_utc_time(SAFE_GET_OR(date, DateDataHandle, timestamp_ms, 0), &tm, &ms);
     return JS_NewInt32(ctx, tm.tm_mon);
 }
 
 // Date.prototype.getDate()
 GCValue js_date_getDate(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    DateDataHandle date = DateDataHandle::from_object_check(ctx, this_val);
-    if (!date.valid() || !date.is_valid()) return JS_NewFloat64(ctx, NAN);
+    DateDataHandle date = JS_GetOpaqueHandle2(ctx, this_val, js_date_class_id);
+    if (SAFE_IS_NULL(date) || !SAFE_GET_OR(date, DateDataHandle, is_valid, 0)) return JS_NewFloat64(ctx, NAN);
     
     struct tm tm;
     int ms;
-    date_to_local_time(date.timestamp_ms(), &tm, &ms);
+    date_to_local_time(SAFE_GET_OR(date, DateDataHandle, timestamp_ms, 0), &tm, &ms);
     return JS_NewInt32(ctx, tm.tm_mday);
 }
 
 // Date.prototype.getUTCDate()
 GCValue js_date_getUTCDate(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    DateDataHandle date = DateDataHandle::from_object_check(ctx, this_val);
-    if (!date.valid() || !date.is_valid()) return JS_NewFloat64(ctx, NAN);
+    DateDataHandle date = JS_GetOpaqueHandle2(ctx, this_val, js_date_class_id);
+    if (SAFE_IS_NULL(date) || !SAFE_GET_OR(date, DateDataHandle, is_valid, 0)) return JS_NewFloat64(ctx, NAN);
     
     struct tm tm;
     int ms;
-    date_to_utc_time(date.timestamp_ms(), &tm, &ms);
+    date_to_utc_time(SAFE_GET_OR(date, DateDataHandle, timestamp_ms, 0), &tm, &ms);
     return JS_NewInt32(ctx, tm.tm_mday);
 }
 
 // Date.prototype.getDay()
 GCValue js_date_getDay(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    DateDataHandle date = DateDataHandle::from_object_check(ctx, this_val);
-    if (!date.valid() || !date.is_valid()) return JS_NewFloat64(ctx, NAN);
+    DateDataHandle date = JS_GetOpaqueHandle2(ctx, this_val, js_date_class_id);
+    if (SAFE_IS_NULL(date) || !SAFE_GET_OR(date, DateDataHandle, is_valid, 0)) return JS_NewFloat64(ctx, NAN);
     
     struct tm tm;
     int ms;
-    date_to_local_time(date.timestamp_ms(), &tm, &ms);
+    date_to_local_time(SAFE_GET_OR(date, DateDataHandle, timestamp_ms, 0), &tm, &ms);
     return JS_NewInt32(ctx, tm.tm_wday);
 }
 
 // Date.prototype.getUTCDay()
 GCValue js_date_getUTCDay(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    DateDataHandle date = DateDataHandle::from_object_check(ctx, this_val);
-    if (!date.valid() || !date.is_valid()) return JS_NewFloat64(ctx, NAN);
+    DateDataHandle date = JS_GetOpaqueHandle2(ctx, this_val, js_date_class_id);
+    if (SAFE_IS_NULL(date) || !SAFE_GET_OR(date, DateDataHandle, is_valid, 0)) return JS_NewFloat64(ctx, NAN);
     
     struct tm tm;
     int ms;
-    date_to_utc_time(date.timestamp_ms(), &tm, &ms);
+    date_to_utc_time(SAFE_GET_OR(date, DateDataHandle, timestamp_ms, 0), &tm, &ms);
     return JS_NewInt32(ctx, tm.tm_wday);
 }
 
 // Date.prototype.getHours()
 GCValue js_date_getHours(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    DateDataHandle date = DateDataHandle::from_object_check(ctx, this_val);
-    if (!date.valid() || !date.is_valid()) return JS_NewFloat64(ctx, NAN);
+    DateDataHandle date = JS_GetOpaqueHandle2(ctx, this_val, js_date_class_id);
+    if (SAFE_IS_NULL(date) || !SAFE_GET_OR(date, DateDataHandle, is_valid, 0)) return JS_NewFloat64(ctx, NAN);
     
     struct tm tm;
     int ms;
-    date_to_local_time(date.timestamp_ms(), &tm, &ms);
+    date_to_local_time(SAFE_GET_OR(date, DateDataHandle, timestamp_ms, 0), &tm, &ms);
     return JS_NewInt32(ctx, tm.tm_hour);
 }
 
 // Date.prototype.getUTCHours()
 GCValue js_date_getUTCHours(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    DateDataHandle date = DateDataHandle::from_object_check(ctx, this_val);
-    if (!date.valid() || !date.is_valid()) return JS_NewFloat64(ctx, NAN);
+    DateDataHandle date = JS_GetOpaqueHandle2(ctx, this_val, js_date_class_id);
+    if (SAFE_IS_NULL(date) || !SAFE_GET_OR(date, DateDataHandle, is_valid, 0)) return JS_NewFloat64(ctx, NAN);
     
     struct tm tm;
     int ms;
-    date_to_utc_time(date.timestamp_ms(), &tm, &ms);
+    date_to_utc_time(SAFE_GET_OR(date, DateDataHandle, timestamp_ms, 0), &tm, &ms);
     return JS_NewInt32(ctx, tm.tm_hour);
 }
 
 // Date.prototype.getMinutes()
 GCValue js_date_getMinutes(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    DateDataHandle date = DateDataHandle::from_object_check(ctx, this_val);
-    if (!date.valid() || !date.is_valid()) return JS_NewFloat64(ctx, NAN);
+    DateDataHandle date = JS_GetOpaqueHandle2(ctx, this_val, js_date_class_id);
+    if (SAFE_IS_NULL(date) || !SAFE_GET_OR(date, DateDataHandle, is_valid, 0)) return JS_NewFloat64(ctx, NAN);
     
     struct tm tm;
     int ms;
-    date_to_local_time(date.timestamp_ms(), &tm, &ms);
+    date_to_local_time(SAFE_GET_OR(date, DateDataHandle, timestamp_ms, 0), &tm, &ms);
     return JS_NewInt32(ctx, tm.tm_min);
 }
 
 // Date.prototype.getUTCMinutes()
 GCValue js_date_getUTCMinutes(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    DateDataHandle date = DateDataHandle::from_object_check(ctx, this_val);
-    if (!date.valid() || !date.is_valid()) return JS_NewFloat64(ctx, NAN);
+    DateDataHandle date = JS_GetOpaqueHandle2(ctx, this_val, js_date_class_id);
+    if (SAFE_IS_NULL(date) || !SAFE_GET_OR(date, DateDataHandle, is_valid, 0)) return JS_NewFloat64(ctx, NAN);
     
     struct tm tm;
     int ms;
-    date_to_utc_time(date.timestamp_ms(), &tm, &ms);
+    date_to_utc_time(SAFE_GET_OR(date, DateDataHandle, timestamp_ms, 0), &tm, &ms);
     return JS_NewInt32(ctx, tm.tm_min);
 }
 
 // Date.prototype.getSeconds()
 GCValue js_date_getSeconds(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    DateDataHandle date = DateDataHandle::from_object_check(ctx, this_val);
-    if (!date.valid() || !date.is_valid()) return JS_NewFloat64(ctx, NAN);
+    DateDataHandle date = JS_GetOpaqueHandle2(ctx, this_val, js_date_class_id);
+    if (SAFE_IS_NULL(date) || !SAFE_GET_OR(date, DateDataHandle, is_valid, 0)) return JS_NewFloat64(ctx, NAN);
     
     struct tm tm;
     int ms;
-    date_to_local_time(date.timestamp_ms(), &tm, &ms);
+    date_to_local_time(SAFE_GET_OR(date, DateDataHandle, timestamp_ms, 0), &tm, &ms);
     return JS_NewInt32(ctx, tm.tm_sec);
 }
 
 // Date.prototype.getUTCSeconds()
 GCValue js_date_getUTCSeconds(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    DateDataHandle date = DateDataHandle::from_object_check(ctx, this_val);
-    if (!date.valid() || !date.is_valid()) return JS_NewFloat64(ctx, NAN);
+    DateDataHandle date = JS_GetOpaqueHandle2(ctx, this_val, js_date_class_id);
+    if (SAFE_IS_NULL(date) || !SAFE_GET_OR(date, DateDataHandle, is_valid, 0)) return JS_NewFloat64(ctx, NAN);
     
     struct tm tm;
     int ms;
-    date_to_utc_time(date.timestamp_ms(), &tm, &ms);
+    date_to_utc_time(SAFE_GET_OR(date, DateDataHandle, timestamp_ms, 0), &tm, &ms);
     return JS_NewInt32(ctx, tm.tm_sec);
 }
 
 // Date.prototype.getMilliseconds()
 GCValue js_date_getMilliseconds(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    DateDataHandle date = DateDataHandle::from_object_check(ctx, this_val);
-    if (!date.valid() || !date.is_valid()) return JS_NewFloat64(ctx, NAN);
+    DateDataHandle date = JS_GetOpaqueHandle2(ctx, this_val, js_date_class_id);
+    if (SAFE_IS_NULL(date) || !SAFE_GET_OR(date, DateDataHandle, is_valid, 0)) return JS_NewFloat64(ctx, NAN);
     
     struct tm tm;
     int ms;
-    date_to_local_time(date.timestamp_ms(), &tm, &ms);
+    date_to_local_time(SAFE_GET_OR(date, DateDataHandle, timestamp_ms, 0), &tm, &ms);
     return JS_NewInt32(ctx, ms);
 }
 
 // Date.prototype.getUTCMilliseconds()
 GCValue js_date_getUTCMilliseconds(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    DateDataHandle date = DateDataHandle::from_object_check(ctx, this_val);
-    if (!date.valid() || !date.is_valid()) return JS_NewFloat64(ctx, NAN);
+    DateDataHandle date = JS_GetOpaqueHandle2(ctx, this_val, js_date_class_id);
+    if (SAFE_IS_NULL(date) || !SAFE_GET_OR(date, DateDataHandle, is_valid, 0)) return JS_NewFloat64(ctx, NAN);
     
     struct tm tm;
     int ms;
-    date_to_utc_time(date.timestamp_ms(), &tm, &ms);
+    date_to_utc_time(SAFE_GET_OR(date, DateDataHandle, timestamp_ms, 0), &tm, &ms);
     return JS_NewInt32(ctx, ms);
 }
 
 // Date.prototype.getTimezoneOffset()
 GCValue js_date_getTimezoneOffset(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    DateDataHandle date = DateDataHandle::from_object_check(ctx, this_val);
-    if (!date.valid() || !date.is_valid()) return JS_NewFloat64(ctx, NAN);
+    DateDataHandle date = JS_GetOpaqueHandle2(ctx, this_val, js_date_class_id);
+    if (SAFE_IS_NULL(date) || !SAFE_GET_OR(date, DateDataHandle, is_valid, 0)) return JS_NewFloat64(ctx, NAN);
     
     struct tm local_tm, utc_tm;
     int ms;
-    date_to_local_time(date.timestamp_ms(), &local_tm, &ms);
-    date_to_utc_time(date.timestamp_ms(), &utc_tm, &ms);
+    date_to_local_time(SAFE_GET_OR(date, DateDataHandle, timestamp_ms, 0), &local_tm, &ms);
+    date_to_utc_time(SAFE_GET_OR(date, DateDataHandle, timestamp_ms, 0), &utc_tm, &ms);
     
     time_t local_t = mktime(&local_tm);
     time_t utc_t = timegm(&utc_tm);
@@ -4259,12 +4259,12 @@ GCValue js_date_getTimezoneOffset(JSContextHandle ctx, GCValue this_val, int arg
 // Date.prototype.toString()
 GCValue js_date_toString(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    DateDataHandle date = DateDataHandle::from_object_check(ctx, this_val);
-    if (!date.valid() || !date.is_valid()) return JS_NewString(ctx, "Invalid Date");
+    DateDataHandle date = JS_GetOpaqueHandle2(ctx, this_val, js_date_class_id);
+    if (SAFE_IS_NULL(date) || !SAFE_GET_OR(date, DateDataHandle, is_valid, 0)) return JS_NewString(ctx, "Invalid Date");
     
     struct tm tm;
     int ms;
-    date_to_local_time(date.timestamp_ms(), &tm, &ms);
+    date_to_local_time(SAFE_GET_OR(date, DateDataHandle, timestamp_ms, 0), &tm, &ms);
     
     const char *days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
     const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -4287,12 +4287,12 @@ GCValue js_date_toString(JSContextHandle ctx, GCValue this_val, int argc, GCValu
 // Date.prototype.toDateString()
 GCValue js_date_toDateString(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    DateDataHandle date = DateDataHandle::from_object_check(ctx, this_val);
-    if (!date.valid() || !date.is_valid()) return JS_NewString(ctx, "Invalid Date");
+    DateDataHandle date = JS_GetOpaqueHandle2(ctx, this_val, js_date_class_id);
+    if (SAFE_IS_NULL(date) || !SAFE_GET_OR(date, DateDataHandle, is_valid, 0)) return JS_NewString(ctx, "Invalid Date");
     
     struct tm tm;
     int ms;
-    date_to_local_time(date.timestamp_ms(), &tm, &ms);
+    date_to_local_time(SAFE_GET_OR(date, DateDataHandle, timestamp_ms, 0), &tm, &ms);
     
     const char *days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
     const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -4311,12 +4311,12 @@ GCValue js_date_toDateString(JSContextHandle ctx, GCValue this_val, int argc, GC
 // Date.prototype.toTimeString()
 GCValue js_date_toTimeString(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    DateDataHandle date = DateDataHandle::from_object_check(ctx, this_val);
-    if (!date.valid() || !date.is_valid()) return JS_NewString(ctx, "Invalid Date");
+    DateDataHandle date = JS_GetOpaqueHandle2(ctx, this_val, js_date_class_id);
+    if (SAFE_IS_NULL(date) || !SAFE_GET_OR(date, DateDataHandle, is_valid, 0)) return JS_NewString(ctx, "Invalid Date");
     
     struct tm tm;
     int ms;
-    date_to_local_time(date.timestamp_ms(), &tm, &ms);
+    date_to_local_time(SAFE_GET_OR(date, DateDataHandle, timestamp_ms, 0), &tm, &ms);
     
     char buf[64];
     snprintf(buf, sizeof(buf), "%02d:%02d:%02d GMT%+.4d",
@@ -4331,12 +4331,12 @@ GCValue js_date_toTimeString(JSContextHandle ctx, GCValue this_val, int argc, GC
 // Date.prototype.toUTCString()
 GCValue js_date_toUTCString(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    DateDataHandle date = DateDataHandle::from_object_check(ctx, this_val);
-    if (!date.valid() || !date.is_valid()) return JS_NewString(ctx, "Invalid Date");
+    DateDataHandle date = JS_GetOpaqueHandle2(ctx, this_val, js_date_class_id);
+    if (SAFE_IS_NULL(date) || !SAFE_GET_OR(date, DateDataHandle, is_valid, 0)) return JS_NewString(ctx, "Invalid Date");
     
     struct tm tm;
     int ms;
-    date_to_utc_time(date.timestamp_ms(), &tm, &ms);
+    date_to_utc_time(SAFE_GET_OR(date, DateDataHandle, timestamp_ms, 0), &tm, &ms);
     
     const char *days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
     const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -4358,14 +4358,14 @@ GCValue js_date_toUTCString(JSContextHandle ctx, GCValue this_val, int argc, GCV
 // Date.prototype.toISOString()
 GCValue js_date_toISOString(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    DateDataHandle date = DateDataHandle::from_object_check(ctx, this_val);
-    if (!date.valid() || !date.is_valid()) {
+    DateDataHandle date = JS_GetOpaqueHandle2(ctx, this_val, js_date_class_id);
+    if (SAFE_IS_NULL(date) || !SAFE_GET_OR(date, DateDataHandle, is_valid, 0)) {
         return JS_ThrowRangeError(ctx, "Invalid Date");
     }
     
     struct tm tm;
     int ms;
-    date_to_utc_time(date.timestamp_ms(), &tm, &ms);
+    date_to_utc_time(SAFE_GET_OR(date, DateDataHandle, timestamp_ms, 0), &tm, &ms);
     
     char buf[64];
     snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",

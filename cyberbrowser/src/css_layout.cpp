@@ -4499,8 +4499,8 @@ static void layout_export_computed_geometry(LayoutContext *ctx)
         if (!node || node->type != HTML_NODE_ELEMENT || !node->has_js_object) continue;
 
         GCValue element = node->js_object;
-        DOMNodeHandle dom_node = DOMNodeHandle::from_object(element);
-        if (!dom_node.valid()) continue;
+        DOMNodeHandle dom_node = dom_node_from_object(element);
+        if (SAFE_IS_NULL(dom_node)) continue;
 
         LayoutBox *box = &ctx->boxes[i];
 #define SET_VAL(prop, val_str) do { \

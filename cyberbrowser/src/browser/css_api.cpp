@@ -9,7 +9,7 @@
 #include <quickjs_gc_unified.h>
 #include "browser_api_impl.h"
 #include "browser_api_impl_types.h"
-#include "browser_api_impl_handles.h"
+#include "browser_api_impl_handle_helpers.h"
 #include "browser_api_impl_internal.h"
 #include "html_dom.h"
 #include "css_parser.h"
@@ -519,9 +519,9 @@ static char* token_list_get_class_name(JSContextHandle ctx, GCValue elem) {
 static void token_list_set_class_name(JSContextHandle ctx, GCValue elem, const char *class_name) {
     const char *new_val = class_name ? class_name : "";
     JS_SetPropertyStr(ctx, elem, "className", JS_NewString(ctx, new_val));
-    DOMNodeHandle node = DOMNodeHandle::from_object(elem);
-    if (node.valid()) {
-        node.set_class_name(new_val);
+    DOMNodeHandle node = dom_node_from_object(elem);
+    if (!SAFE_IS_NULL(node)) {
+        SAFE_SET_STR(node, DOMNodeHandle, class_name, new_val);
         css_index_insert_node(ctx, node);
     }
 }

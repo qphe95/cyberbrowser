@@ -339,7 +339,7 @@ install(TARGETS cyberbrowser_lib
 # Public headers (formerly include/, now alongside the sources in src/)
 install(FILES
     src/browser_api_impl.h
-    src/browser_api_impl_handles.h
+    src/browser_api_impl_handle_helpers.h
     src/browser_api_impl_internal.h
     src/browser_api_impl_types.h
     src/css_layout.h

@@ -8,7 +8,7 @@
 #include <quickjs_gc_unified.h>
 #include "browser_api_impl.h"
 #include "browser_api_impl_types.h"
-#include "browser_api_impl_handles.h"
+#include "browser_api_impl_handle_helpers.h"
 #include "browser_api_impl_internal.h"
 #include "html_dom.h"
 #include "css_parser.h"
@@ -301,10 +301,10 @@ GCValue js_url_create_object_url(JSContextHandle ctx, GCValue this_val, int argc
     }
 
     bool is_media_source = false;
-    MediaSourceDataHandle ms = MediaSourceDataHandle::from_object(obj);
-    if (ms.valid()) {
+    MediaSourceDataHandle ms = JS_GetOpaqueHandle(obj, js_media_source_class_id);
+    if (!SAFE_IS_NULL(ms)) {
         is_media_source = true;
-        ms.set_ready_state(1); // open
+        SAFE_SET(ms, MediaSourceDataHandle, ready_state, 1); // open
     }
 
     if (origin && origin[0]) {

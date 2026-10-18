@@ -5,7 +5,7 @@
 #define BROWSER_API_IMPL_H
 
 #include <quickjs.h>
-#include "browser_api_impl_handles.h"
+#include "browser_api_impl_handle_helpers.h"
 
 // Class IDs for DOM/Browser APIs
 extern JSClassID js_shadow_root_class_id;

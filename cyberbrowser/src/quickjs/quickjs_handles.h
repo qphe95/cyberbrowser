@@ -36,6 +36,8 @@
  *                                      write a GCHandle field + write barrier
  *   SAFE_SET_VALUE(handle, HType, field, v)
  *                                      write a GCValue field + write barrier
+ *   SAFE_SET_STR(handle, HType, field, str)
+ *                                      copy a C string into a char[] field
  *   SAFE_REF(handle, HType, field)     lvalue reference to a field
  *   SAFE_AT(handle, HType, index)      array element (for array handles)
  *   SAFE_HANDLE(handle)                the handle itself (was .handle())
@@ -57,6 +59,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "quickjs_types.h"
 #include "quickjs_gc_unified.h"
@@ -206,6 +209,21 @@
         GC_FIELD_TYPE(HType, field) _v = (value); \
         GC_STRUCT_OF(HType) *_p = GC_DEREF_H(handle, HType); \
         if (_p) _p->field = _v; \
+    } while (0)
+
+/* Copy a NUL-terminated string into a fixed-size char array field, truncating
+ * to fit and always NUL-terminating. A NULL string leaves the field unchanged.
+ * The string may not point into the GC heap of a *different* object that a
+ * GC could move, but gc_deref itself never triggers a GC, so reading it here
+ * is safe. */
+#define SAFE_SET_STR(handle, HType, field, str) \
+    do { \
+        const char *_s = (str); \
+        GC_STRUCT_OF(HType) *_p = GC_DEREF_H(handle, HType); \
+        if (_p && _s) { \
+            strncpy(_p->field, _s, sizeof(_p->field) - 1); \
+            _p->field[sizeof(_p->field) - 1] = '\0'; \
+        } \
     } while (0)
 
 /* Lvalue reference to a field (e.g. to take its address). */

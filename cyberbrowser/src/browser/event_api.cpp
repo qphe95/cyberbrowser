@@ -8,7 +8,7 @@
 #include <quickjs_gc_unified.h>
 #include "browser_api_impl.h"
 #include "browser_api_impl_types.h"
-#include "browser_api_impl_handles.h"
+#include "browser_api_impl_handle_helpers.h"
 #include "browser_api_impl_internal.h"
 #include "html_dom.h"
 #include "css_parser.h"
@@ -52,8 +52,8 @@ GCValue js_event_constructor(JSContextHandle ctx, GCValue new_target, int argc, 
         return JS_EXCEPTION;
     }
     
-    EventHandle ev = EventHandle::create(ctx, type);
-    if (!ev.valid()) {
+    EventHandle ev = event_create(ctx, type);
+    if (SAFE_IS_NULL(ev)) {
         return JS_ThrowInternalError(ctx, "Event creation failed");
     }
     
@@ -63,52 +63,52 @@ GCValue js_event_constructor(JSContextHandle ctx, GCValue new_target, int argc, 
         GCValue cancelable_val = JS_GetPropertyStr(ctx, argv[1], "cancelable");
         GCValue composed_val = JS_GetPropertyStr(ctx, argv[1], "composed");
         
-        ev.set_bubbles(JS_ToBool(ctx, bubbles_val));
-        ev.set_cancelable(JS_ToBool(ctx, cancelable_val));
-        ev.set_composed(JS_ToBool(ctx, composed_val));
+        SAFE_SET(ev, EventHandle, bubbles, JS_ToBool(ctx, bubbles_val));
+        SAFE_SET(ev, EventHandle, cancelable, JS_ToBool(ctx, cancelable_val));
+        SAFE_SET(ev, EventHandle, composed, JS_ToBool(ctx, composed_val));
     }
     
-    ev.attach_to_object(obj);
+    JS_SetOpaqueHandle(obj, ev);
     return obj;
 }
 
 GCValue js_event_get_type(JSContextHandle ctx, GCValue this_val) {
-    EventHandle ev = EventHandle::from_object_check(ctx, this_val);
-    if (!ev.valid()) return JS_ThrowTypeError(ctx, "Invalid Event object");
-    return JS_NewString(ctx, ev.type());
+    EventHandle ev = event_from_object_check(ctx, this_val);
+    if (SAFE_IS_NULL(ev)) return JS_ThrowTypeError(ctx, "Invalid Event object");
+    return JS_NewString(ctx, SAFE_GET_OR(ev, EventHandle, type, ""));
 }
 
 GCValue js_event_get_bubbles(JSContextHandle ctx, GCValue this_val) {
-    EventHandle ev = EventHandle::from_object_check(ctx, this_val);
-    if (!ev.valid()) return JS_ThrowTypeError(ctx, "Invalid Event object");
-    return JS_NewBool(ctx, ev.bubbles());
+    EventHandle ev = event_from_object_check(ctx, this_val);
+    if (SAFE_IS_NULL(ev)) return JS_ThrowTypeError(ctx, "Invalid Event object");
+    return JS_NewBool(ctx, SAFE_GET_OR(ev, EventHandle, bubbles, 0));
 }
 
 GCValue js_event_get_cancelable(JSContextHandle ctx, GCValue this_val) {
-    EventHandle ev = EventHandle::from_object_check(ctx, this_val);
-    if (!ev.valid()) return JS_ThrowTypeError(ctx, "Invalid Event object");
-    return JS_NewBool(ctx, ev.cancelable());
+    EventHandle ev = event_from_object_check(ctx, this_val);
+    if (SAFE_IS_NULL(ev)) return JS_ThrowTypeError(ctx, "Invalid Event object");
+    return JS_NewBool(ctx, SAFE_GET_OR(ev, EventHandle, cancelable, 0));
 }
 
 GCValue js_event_get_composed(JSContextHandle ctx, GCValue this_val) {
-    EventHandle ev = EventHandle::from_object_check(ctx, this_val);
-    if (!ev.valid()) return JS_ThrowTypeError(ctx, "Invalid Event object");
-    return JS_NewBool(ctx, ev.composed());
+    EventHandle ev = event_from_object_check(ctx, this_val);
+    if (SAFE_IS_NULL(ev)) return JS_ThrowTypeError(ctx, "Invalid Event object");
+    return JS_NewBool(ctx, SAFE_GET_OR(ev, EventHandle, composed, 0));
 }
 
 GCValue js_event_get_defaultPrevented(JSContextHandle ctx, GCValue this_val) {
-    EventHandle ev = EventHandle::from_object_check(ctx, this_val);
-    if (!ev.valid()) return JS_ThrowTypeError(ctx, "Invalid Event object");
-    return JS_NewBool(ctx, ev.defaultPrevented());
+    EventHandle ev = event_from_object_check(ctx, this_val);
+    if (SAFE_IS_NULL(ev)) return JS_ThrowTypeError(ctx, "Invalid Event object");
+    return JS_NewBool(ctx, SAFE_GET_OR(ev, EventHandle, defaultPrevented, 0));
 }
 
 GCValue js_event_get_target(JSContextHandle ctx, GCValue this_val) {
-    EventHandle ev = EventHandle::from_object_check(ctx, this_val);
+    EventHandle ev = event_from_object_check(ctx, this_val);
     GCValue actual = JS_NULL;
     GCValue current = JS_NULL;
-    if (ev.valid()) {
-        actual = ev.target();
-        current = ev.currentTarget();
+    if (!SAFE_IS_NULL(ev)) {
+        actual = SAFE_GET_OR(ev, EventHandle, target, JS_NULL);
+        current = SAFE_GET_OR(ev, EventHandle, currentTarget, JS_NULL);
     } else {
         // Fallback for subclasses (CustomEvent, MouseEvent, FocusEvent) that do not
         // share the Event class id but still set the target/currentTarget properties.
@@ -126,16 +126,16 @@ GCValue js_event_get_target(JSContextHandle ctx, GCValue this_val) {
 }
 
 GCValue js_event_get_currentTarget(JSContextHandle ctx, GCValue this_val) {
-    EventHandle ev = EventHandle::from_object_check(ctx, this_val);
-    if (ev.valid()) return ev.currentTarget();
+    EventHandle ev = event_from_object_check(ctx, this_val);
+    if (!SAFE_IS_NULL(ev)) return SAFE_GET_OR(ev, EventHandle, currentTarget, JS_NULL);
     return JS_GetPropertyStr(ctx, this_val, "currentTarget");
 }
 
 GCValue js_event_preventDefault(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
-    EventHandle ev = EventHandle::from_object_check(ctx, this_val);
-    if (!ev.valid()) return JS_ThrowTypeError(ctx, "Invalid Event object");
-    ev.set_defaultPrevented(1);
+    EventHandle ev = event_from_object_check(ctx, this_val);
+    if (SAFE_IS_NULL(ev)) return JS_ThrowTypeError(ctx, "Invalid Event object");
+    SAFE_SET(ev, EventHandle, defaultPrevented, 1);
     return JS_UNDEFINED;
 }
 
@@ -155,9 +155,9 @@ GCValue js_event_stopImmediatePropagation(JSContextHandle ctx, GCValue this_val,
 }
 
 GCValue js_event_get_eventPhase(JSContextHandle ctx, GCValue this_val) {
-    EventHandle ev = EventHandle::from_object_check(ctx, this_val);
-    if (!ev.valid()) return JS_ThrowTypeError(ctx, "Invalid Event object");
-    return JS_NewInt32(ctx, ev.eventPhase());
+    EventHandle ev = event_from_object_check(ctx, this_val);
+    if (SAFE_IS_NULL(ev)) return JS_ThrowTypeError(ctx, "Invalid Event object");
+    return JS_NewInt32(ctx, SAFE_GET_OR(ev, EventHandle, eventPhase, 0));
 }
 
 GCValue js_event_get_eventPhase_wrapper(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
@@ -168,9 +168,9 @@ GCValue js_event_get_eventPhase_wrapper(JSContextHandle ctx, GCValue this_val, i
 GCValue js_event_composedPath(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     GCValue path = JS_NULL;
-    EventHandle ev = EventHandle::from_object_check(ctx, this_val);
-    if (ev.valid()) {
-        path = ev.path();
+    EventHandle ev = event_from_object_check(ctx, this_val);
+    if (!SAFE_IS_NULL(ev)) {
+        path = SAFE_GET_OR(ev, EventHandle, path, JS_NULL);
     }
     if (!JS_IsArray(ctx, path)) {
         path = JS_GetPropertyStr(ctx, this_val, "__composedPath");
@@ -262,8 +262,8 @@ GCValue js_custom_event_constructor(JSContextHandle ctx, GCValue new_target, int
         return JS_EXCEPTION;
     }
     
-    CustomEventHandle ev = CustomEventHandle::create(ctx, type);
-    if (!ev.valid()) {
+    CustomEventHandle ev = custom_event_create(ctx, type);
+    if (SAFE_IS_NULL(ev)) {
         return JS_ThrowInternalError(ctx, "CustomEvent creation failed");
     }
     
@@ -274,20 +274,20 @@ GCValue js_custom_event_constructor(JSContextHandle ctx, GCValue new_target, int
         GCValue composed_val = JS_GetPropertyStr(ctx, argv[1], "composed");
         GCValue detail_val = JS_GetPropertyStr(ctx, argv[1], "detail");
         
-        ev.set_bubbles(JS_ToBool(ctx, bubbles_val));
-        ev.set_cancelable(JS_ToBool(ctx, cancelable_val));
-        ev.set_composed(JS_ToBool(ctx, composed_val));
-        ev.set_detail(detail_val);
+        SAFE_SET(ev, CustomEventHandle, base.bubbles, JS_ToBool(ctx, bubbles_val));
+        SAFE_SET(ev, CustomEventHandle, base.cancelable, JS_ToBool(ctx, cancelable_val));
+        SAFE_SET(ev, CustomEventHandle, base.composed, JS_ToBool(ctx, composed_val));
+        SAFE_SET(ev, CustomEventHandle, detail, detail_val);
     }
     
-    ev.attach_to_object(obj);
+    JS_SetOpaqueHandle(obj, ev);
     return obj;
 }
 
 GCValue js_custom_event_get_detail(JSContextHandle ctx, GCValue this_val) {
-    CustomEventHandle ev = CustomEventHandle::from_object_check(ctx, this_val);
-    if (!ev.valid()) return JS_ThrowTypeError(ctx, "Invalid Event object");
-    return ev.detail();
+    CustomEventHandle ev = JS_GetOpaqueHandle2(ctx, this_val, js_custom_event_class_id);
+    if (SAFE_IS_NULL(ev)) return JS_ThrowTypeError(ctx, "Invalid Event object");
+    return SAFE_GET_OR(ev, CustomEventHandle, detail, JS_NULL);
 }
 
 // MouseEvent Implementation
@@ -325,8 +325,8 @@ GCValue js_mouse_event_constructor(JSContextHandle ctx, GCValue new_target, int 
         return JS_EXCEPTION;
     }
     
-    MouseEventHandle ev = MouseEventHandle::create(ctx, type);
-    if (!ev.valid()) {
+    MouseEventHandle ev = mouse_event_create(ctx, type);
+    if (SAFE_IS_NULL(ev)) {
         return JS_ThrowInternalError(ctx, "MouseEvent creation failed");
     }
     
@@ -345,32 +345,32 @@ GCValue js_mouse_event_constructor(JSContextHandle ctx, GCValue new_target, int 
         GCValue altKey_val = JS_GetPropertyStr(ctx, argv[1], "altKey");
         GCValue metaKey_val = JS_GetPropertyStr(ctx, argv[1], "metaKey");
         
-        ev.set_bubbles(JS_ToBool(ctx, bubbles_val));
-        ev.set_cancelable(JS_ToBool(ctx, cancelable_val));
+        SAFE_SET(ev, MouseEventHandle, base.bubbles, JS_ToBool(ctx, bubbles_val));
+        SAFE_SET(ev, MouseEventHandle, base.cancelable, JS_ToBool(ctx, cancelable_val));
         
         double dval;
-        if (!JS_IsException(clientX_val)) { JS_ToFloat64(ctx, &dval, clientX_val); ev.set_clientX(dval); }
-        if (!JS_IsException(clientY_val)) { JS_ToFloat64(ctx, &dval, clientY_val); ev.set_clientY(dval); }
+        if (!JS_IsException(clientX_val)) { JS_ToFloat64(ctx, &dval, clientX_val); SAFE_SET(ev, MouseEventHandle, clientX, dval); }
+        if (!JS_IsException(clientY_val)) { JS_ToFloat64(ctx, &dval, clientY_val); SAFE_SET(ev, MouseEventHandle, clientY, dval); }
         
         int ival;
         if (!JS_IsException(button_val)) { JS_ToInt32(ctx, &ival, button_val); }
         if (!JS_IsException(ctrlKey_val)) { JS_ToBool(ctx, ctrlKey_val); }
     }
     
-    ev.attach_to_object(obj);
+    JS_SetOpaqueHandle(obj, ev);
     return obj;
 }
 
 GCValue js_mouse_event_get_clientX(JSContextHandle ctx, GCValue this_val) {
-    MouseEventHandle ev = MouseEventHandle::from_object_check(ctx, this_val);
-    if (!ev.valid()) return JS_ThrowTypeError(ctx, "Invalid Event object");
-    return JS_NewFloat64(ctx, ev.clientX());
+    MouseEventHandle ev = JS_GetOpaqueHandle2(ctx, this_val, js_mouse_event_class_id);
+    if (SAFE_IS_NULL(ev)) return JS_ThrowTypeError(ctx, "Invalid Event object");
+    return JS_NewFloat64(ctx, SAFE_GET_OR(ev, MouseEventHandle, clientX, 0));
 }
 
 GCValue js_mouse_event_get_clientY(JSContextHandle ctx, GCValue this_val) {
-    MouseEventHandle ev = MouseEventHandle::from_object_check(ctx, this_val);
-    if (!ev.valid()) return JS_ThrowTypeError(ctx, "Invalid Event object");
-    return JS_NewFloat64(ctx, ev.clientY());
+    MouseEventHandle ev = JS_GetOpaqueHandle2(ctx, this_val, js_mouse_event_class_id);
+    if (SAFE_IS_NULL(ev)) return JS_ThrowTypeError(ctx, "Invalid Event object");
+    return JS_NewFloat64(ctx, SAFE_GET_OR(ev, MouseEventHandle, clientY, 0));
 }
 
 // Wrapper functions for property getters (matching JSCFunction signature)
@@ -441,8 +441,8 @@ GCValue js_focus_event_constructor(JSContextHandle ctx, GCValue new_target, int 
         return JS_EXCEPTION;
     }
     
-    FocusEventHandle ev = FocusEventHandle::create(ctx, type);
-    if (!ev.valid()) {
+    FocusEventHandle ev = focus_event_create(ctx, type);
+    if (SAFE_IS_NULL(ev)) {
         return JS_ThrowInternalError(ctx, "FocusEvent creation failed");
     }
     
@@ -452,19 +452,19 @@ GCValue js_focus_event_constructor(JSContextHandle ctx, GCValue new_target, int 
         GCValue cancelable_val = JS_GetPropertyStr(ctx, argv[1], "cancelable");
         GCValue relatedTarget_val = JS_GetPropertyStr(ctx, argv[1], "relatedTarget");
         
-        ev.set_bubbles(JS_ToBool(ctx, bubbles_val));
-        ev.set_cancelable(JS_ToBool(ctx, cancelable_val));
-        ev.set_relatedTarget(relatedTarget_val);
+        SAFE_SET(ev, FocusEventHandle, base.bubbles, JS_ToBool(ctx, bubbles_val));
+        SAFE_SET(ev, FocusEventHandle, base.cancelable, JS_ToBool(ctx, cancelable_val));
+        SAFE_SET(ev, FocusEventHandle, relatedTarget, relatedTarget_val);
     }
     
-    ev.attach_to_object(obj);
+    JS_SetOpaqueHandle(obj, ev);
     return obj;
 }
 
 GCValue js_focus_event_get_relatedTarget(JSContextHandle ctx, GCValue this_val) {
-    FocusEventHandle ev = FocusEventHandle::from_object_check(ctx, this_val);
-    if (!ev.valid()) return JS_ThrowTypeError(ctx, "Invalid Event object");
-    return ev.relatedTarget();
+    FocusEventHandle ev = JS_GetOpaqueHandle2(ctx, this_val, js_focus_event_class_id);
+    if (SAFE_IS_NULL(ev)) return JS_ThrowTypeError(ctx, "Invalid Event object");
+    return SAFE_GET_OR(ev, FocusEventHandle, relatedTarget, JS_NULL);
 }
 // ============================================================================
 // EventTarget Implementation
@@ -538,14 +538,14 @@ GCValue js_event_target_dispatchEvent(JSContextHandle ctx, GCValue this_val, int
     
     // Set target if not already set — write both the JS property and the
     // internal EventData (the getters read from EventData).
-    EventHandle ev0 = EventHandle::from_object_check(ctx, argv[0]);
+    EventHandle ev0 = event_from_object_check(ctx, argv[0]);
     GCValue target = JS_GetPropertyStr(ctx, argv[0], "target");
     if (JS_IsNull(target) || JS_IsUndefined(target)) {
         JS_SetPropertyStr(ctx, argv[0], "target", this_val);
-        if (ev0.valid()) ev0.set_target(this_val);
+        if (!SAFE_IS_NULL(ev0)) SAFE_SET(ev0, EventHandle, target, this_val);
     }
     JS_SetPropertyStr(ctx, argv[0], "currentTarget", this_val);
-    if (ev0.valid()) ev0.set_currentTarget(this_val);
+    if (!SAFE_IS_NULL(ev0)) SAFE_SET(ev0, EventHandle, currentTarget, this_val);
 
     // Build the composed path: shadow-including ancestors of the target.
     GCValue path = JS_NewArray(ctx);
@@ -555,9 +555,9 @@ GCValue js_event_target_dispatchEvent(JSContextHandle ctx, GCValue this_val, int
         GCValue arg = this_val;
         path = JS_Call(ctx, path_helper, global, 1, &arg);
     }
-    EventHandle ev = EventHandle::from_object_check(ctx, argv[0]);
-    if (ev.valid()) {
-        ev.set_path(path);
+    EventHandle ev = event_from_object_check(ctx, argv[0]);
+    if (!SAFE_IS_NULL(ev)) {
+        SAFE_SET(ev, EventHandle, path, path);
     }
     // Also store on the object itself so subclasses (CustomEvent/MouseEvent/FocusEvent)
     // can expose a composedPath even though they use a separate internal handle.
@@ -635,7 +635,7 @@ GCValue js_event_target_dispatchEvent(JSContextHandle ctx, GCValue this_val, int
             if (JS_IsUndefined(node) || JS_IsNull(node) || !JS_IsObject(node)) continue;
 
             JS_SetPropertyStr(ctx, argv[0], "currentTarget", node);
-            if (ev0.valid()) ev0.set_currentTarget(node);
+            if (!SAFE_IS_NULL(ev0)) SAFE_SET(ev0, EventHandle, currentTarget, node);
 
             char lprop[128];
             snprintf(lprop, sizeof(lprop), "__listeners_%s", type);
@@ -691,7 +691,7 @@ GCValue js_event_target_dispatchEvent(JSContextHandle ctx, GCValue this_val, int
         }
         /* Restore currentTarget semantics: outside dispatch it reads as null. */
         JS_SetPropertyStr(ctx, argv[0], "currentTarget", JS_NULL);
-        if (ev0.valid()) ev0.set_currentTarget(JS_NULL);
+        if (!SAFE_IS_NULL(ev0)) SAFE_SET(ev0, EventHandle, currentTarget, JS_NULL);
     }
 
     return JS_TRUE;

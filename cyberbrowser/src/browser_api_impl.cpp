@@ -11,7 +11,7 @@
 #include <quickjs_gc_unified.h>
 #include "browser_api_impl.h"
 #include "browser_api_impl_types.h"
-#include "browser_api_impl_handles.h"
+#include "browser_api_impl_handle_helpers.h"
 #include "browser_api_impl_internal.h"
 #include "html_dom.h"
 #include "css_parser.h"
@@ -39,7 +39,7 @@
 #include "gc_value_helpers.h"
 #include "platform.h"
 #include "browser_api_impl_types.h"
-#include "browser_api_impl_handles.h"
+#include "browser_api_impl_handle_helpers.h"
 
 // mbedtls includes for Crypto API
 #include "mbedtls/md.h"
@@ -151,10 +151,10 @@ GCValue js_document_create_text_node(JSContextHandle ctx, GCValue this_val, int 
     }
 
     // Create and attach DOMNode data for Text node
-    DOMNodeHandle dom_node = DOMNodeHandle::create(ctx, DOM_NODE_TYPE_TEXT, "#text");
-    if (dom_node.valid()) {
-        dom_node.set_node_value(text);
-        dom_node.attach_to_object(node);
+    DOMNodeHandle dom_node = dom_node_create(ctx, DOM_NODE_TYPE_TEXT, "#text");
+    if (!SAFE_IS_NULL(dom_node)) {
+        SAFE_SET_STR(dom_node, DOMNodeHandle, node_value, text);
+        dom_node_attach_to_object(dom_node, node);
     }
 
     // Set ownerDocument on the text node.
@@ -177,10 +177,10 @@ static GCValue js_document_create_comment(JSContextHandle ctx, GCValue this_val,
         return JS_NULL;
     }
 
-    DOMNodeHandle dom_node = DOMNodeHandle::create(ctx, DOM_NODE_TYPE_COMMENT, "#comment");
-    if (dom_node.valid()) {
-        dom_node.set_node_value(text);
-        dom_node.attach_to_object(node);
+    DOMNodeHandle dom_node = dom_node_create(ctx, DOM_NODE_TYPE_COMMENT, "#comment");
+    if (!SAFE_IS_NULL(dom_node)) {
+        SAFE_SET_STR(dom_node, DOMNodeHandle, node_value, text);
+        dom_node_attach_to_object(dom_node, node);
     }
 
     JS_SetPropertyStr(ctx, node, "nodeType", JS_NewInt32(ctx, DOM_NODE_TYPE_COMMENT));
@@ -204,10 +204,10 @@ static GCValue js_document_implementation_create_html_document(JSContextHandle c
     GCValue doc = JS_NewObjectClass(ctx, js_dom_node_class_id);
     if (JS_IsException(doc)) return doc;
 
-    DOMNodeHandle doc_node = DOMNodeHandle::create(ctx, DOM_NODE_TYPE_DOCUMENT, "#document");
-    if (doc_node.valid()) {
-        doc_node.attach_to_object(doc);
-        doc_node.set_owner_document(doc);
+    DOMNodeHandle doc_node = dom_node_create(ctx, DOM_NODE_TYPE_DOCUMENT, "#document");
+    if (!SAFE_IS_NULL(doc_node)) {
+        dom_node_attach_to_object(doc_node, doc);
+        SAFE_SET(doc_node, DOMNodeHandle, owner_document, doc);
     }
 
     JS_SetPropertyStr(ctx, doc, "nodeType", JS_NewInt32(ctx, DOM_NODE_TYPE_DOCUMENT));
@@ -2663,10 +2663,10 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     }
     LOG_INFO("Document object created");
     {
-        DOMNodeHandle doc_node = DOMNodeHandle::create(ctx, DOM_NODE_TYPE_DOCUMENT, "#document");
-        if (doc_node.valid()) {
-            doc_node.attach_to_object(document);
-            doc_node.set_owner_document(document);
+        DOMNodeHandle doc_node = dom_node_create(ctx, DOM_NODE_TYPE_DOCUMENT, "#document");
+        if (!SAFE_IS_NULL(doc_node)) {
+            dom_node_attach_to_object(doc_node, document);
+            SAFE_SET(doc_node, DOMNodeHandle, owner_document, document);
         }
     }
     DEF_PROP_INT(ctx, document, "nodeType", 9);

@@ -508,6 +508,95 @@ typedef struct {
     int is_valid;            // 0 if invalid date
 } DateData;
 
+/* ============================================================================
+ * Handle types
+ * ============================================================================
+ * Each struct above lives in the GC heap and is referred to by a GCHandle.
+ * The *Handle names document which struct a handle points at; access the
+ * fields with the SAFE_* macros from quickjs_handles.h, e.g.
+ *     SAFE_GET_OR(node, DOMNodeHandle, node_type, 0)
+ * GC_STRUCT_OF_<HandleType> tells those macros which struct to cast to.
+ */
+typedef GCHandle XMLHttpRequestHandle;
+typedef GCHandle HTMLVideoElementHandle;
+typedef GCHandle DOMExceptionDataHandle;
+typedef GCHandle MapDataHandle;
+typedef GCHandle ShadowRootDataHandle;
+typedef GCHandle CustomElementRegistryDataHandle;
+typedef GCHandle AnimationDataHandle;
+typedef GCHandle KeyFrameEffectDataHandle;
+typedef GCHandle FontFaceDataHandle;
+typedef GCHandle FontFaceSetDataHandle;
+typedef GCHandle MutationObserverDataHandle;
+typedef GCHandle ResizeObserverDataHandle;
+typedef GCHandle IntersectionObserverDataHandle;
+typedef GCHandle PerformanceDataHandle;
+typedef GCHandle PerformanceEntryDataHandle;
+typedef GCHandle PerformanceObserverDataHandle;
+typedef GCHandle PerformanceTimingDataHandle;
+typedef GCHandle DOMRectDataHandle;
+typedef GCHandle MediaSourceDataHandle;
+typedef GCHandle SourceBufferDataHandle;
+typedef GCHandle DOMNodeHandle;
+typedef GCHandle EventHandle;
+typedef GCHandle CustomEventHandle;
+typedef GCHandle MouseEventHandle;
+typedef GCHandle FocusEventHandle;
+typedef GCHandle DateDataHandle;
+
+#define GC_STRUCT_OF_XMLHttpRequestHandle            XMLHttpRequest
+#define GC_STRUCT_OF_HTMLVideoElementHandle          HTMLVideoElement
+#define GC_STRUCT_OF_DOMExceptionDataHandle          DOMExceptionData
+#define GC_STRUCT_OF_MapDataHandle                   MapData
+#define GC_STRUCT_OF_ShadowRootDataHandle            ShadowRootData
+#define GC_STRUCT_OF_CustomElementRegistryDataHandle CustomElementRegistryData
+#define GC_STRUCT_OF_AnimationDataHandle             AnimationData
+#define GC_STRUCT_OF_KeyFrameEffectDataHandle        KeyFrameEffectData
+#define GC_STRUCT_OF_FontFaceDataHandle              FontFaceData
+#define GC_STRUCT_OF_FontFaceSetDataHandle           FontFaceSetData
+#define GC_STRUCT_OF_MutationObserverDataHandle      MutationObserverData
+#define GC_STRUCT_OF_ResizeObserverDataHandle        ResizeObserverData
+#define GC_STRUCT_OF_IntersectionObserverDataHandle  IntersectionObserverData
+#define GC_STRUCT_OF_PerformanceDataHandle           PerformanceData
+#define GC_STRUCT_OF_PerformanceEntryDataHandle      PerformanceEntryData
+#define GC_STRUCT_OF_PerformanceObserverDataHandle   PerformanceObserverData
+#define GC_STRUCT_OF_PerformanceTimingDataHandle     PerformanceTimingData
+#define GC_STRUCT_OF_DOMRectDataHandle               DOMRectData
+#define GC_STRUCT_OF_MediaSourceDataHandle           MediaSourceData
+#define GC_STRUCT_OF_SourceBufferDataHandle          SourceBufferData
+#define GC_STRUCT_OF_DOMNodeHandle                   DOMNode
+#define GC_STRUCT_OF_EventHandle                     EventData
+#define GC_STRUCT_OF_CustomEventHandle               CustomEventData
+#define GC_STRUCT_OF_MouseEventHandle                MouseEventData
+#define GC_STRUCT_OF_FocusEventHandle                FocusEventData
+#define GC_STRUCT_OF_DateDataHandle                  DateData
+#define GC_STRUCT_OF_XMLHttpRequest                  XMLHttpRequest
+#define GC_STRUCT_OF_HTMLVideoElement                HTMLVideoElement
+#define GC_STRUCT_OF_DOMExceptionData                DOMExceptionData
+#define GC_STRUCT_OF_MapData                         MapData
+#define GC_STRUCT_OF_ShadowRootData                  ShadowRootData
+#define GC_STRUCT_OF_CustomElementRegistryData       CustomElementRegistryData
+#define GC_STRUCT_OF_AnimationData                   AnimationData
+#define GC_STRUCT_OF_KeyFrameEffectData              KeyFrameEffectData
+#define GC_STRUCT_OF_FontFaceData                    FontFaceData
+#define GC_STRUCT_OF_FontFaceSetData                 FontFaceSetData
+#define GC_STRUCT_OF_MutationObserverData            MutationObserverData
+#define GC_STRUCT_OF_ResizeObserverData              ResizeObserverData
+#define GC_STRUCT_OF_IntersectionObserverData        IntersectionObserverData
+#define GC_STRUCT_OF_PerformanceData                 PerformanceData
+#define GC_STRUCT_OF_PerformanceEntryData            PerformanceEntryData
+#define GC_STRUCT_OF_PerformanceObserverData         PerformanceObserverData
+#define GC_STRUCT_OF_PerformanceTimingData           PerformanceTimingData
+#define GC_STRUCT_OF_DOMRectData                     DOMRectData
+#define GC_STRUCT_OF_MediaSourceData                 MediaSourceData
+#define GC_STRUCT_OF_SourceBufferData                SourceBufferData
+#define GC_STRUCT_OF_DOMNode                         DOMNode
+#define GC_STRUCT_OF_EventData                       EventData
+#define GC_STRUCT_OF_CustomEventData                 CustomEventData
+#define GC_STRUCT_OF_MouseEventData                  MouseEventData
+#define GC_STRUCT_OF_FocusEventData                  FocusEventData
+#define GC_STRUCT_OF_DateData                        DateData
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

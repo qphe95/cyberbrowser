@@ -22,7 +22,7 @@
 #include "quickjs_gc_unified.h"
 #include "quickjs-internal.h"
 #include "lockfree_hash_table.h"
-#include "browser_api_impl_handles.h"
+#include "browser_api_impl_handle_helpers.h"
 
 /* External reference to g_gc for testing */
 extern GCState g_gc;
@@ -682,9 +682,9 @@ TEST(test_dom_node_published) {
         return true;
     }
 
-    DOMNodeHandle node = DOMNodeHandle::create(ctx, 1 /* ELEMENT_NODE */, "DIV");
-    ASSERT_TRUE(node.valid());
-    ASSERT_TRUE(gc_is_published(node.handle()));
+    DOMNodeHandle node = dom_node_create(ctx, 1, "DIV");
+    ASSERT_TRUE(!SAFE_IS_NULL(node));
+    ASSERT_TRUE(gc_is_published(node));
     return true;
 }
 

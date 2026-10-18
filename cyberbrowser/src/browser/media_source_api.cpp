@@ -9,7 +9,7 @@
 #include <quickjs_gc_unified.h>
 #include "browser_api_impl.h"
 #include "browser_api_impl_types.h"
-#include "browser_api_impl_handles.h"
+#include "browser_api_impl_handle_helpers.h"
 #include "browser_api_impl_internal.h"
 #include "html_dom.h"
 #include "css_parser.h"
@@ -77,13 +77,13 @@ JSClassDef js_source_buffer_class_def = {
 
 // MediaSource constructor
 GCValue js_media_source_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
-    MediaSourceDataHandle ms = MediaSourceDataHandle::create(ctx);
-    if (!ms.valid()) return JS_ThrowTypeError(ctx, "Invalid MediaSource");
+    MediaSourceDataHandle ms = media_source_create(ctx);
+    if (SAFE_IS_NULL(ms)) return JS_ThrowTypeError(ctx, "Invalid MediaSource");
     
-    ms.set_ready_state(1); // open
+    SAFE_SET(ms, MediaSourceDataHandle, ready_state, 1); // open
     
     GCValue obj = JS_NewObjectClass(ctx, js_media_source_class_id);
-    ms.attach_to_object(obj);
+    JS_SetOpaqueHandle(obj, ms);
     
     // Register a stable blob URL for this MediaSource
     GCValue url_args[1] = { obj };
@@ -103,20 +103,20 @@ GCValue js_media_source_constructor(JSContextHandle ctx, GCValue new_target, int
 
 // SourceBuffer constructor (internal use)
 GCValue js_source_buffer_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
-    SourceBufferDataHandle sb = SourceBufferDataHandle::create(ctx);
-    if (!sb.valid()) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
+    SourceBufferDataHandle sb = source_buffer_create(ctx);
+    if (SAFE_IS_NULL(sb)) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
     
     if (argc > 0) {
         const char *mime_type = JS_ToCString(ctx, argv[0]);
         if (mime_type) {
-            sb.set_mime_type(mime_type);
+            SAFE_SET_STR(sb, SourceBufferDataHandle, mime_type, mime_type);
             // Capture blob URLs for media source
             capture_url_debug(mime_type, "source_buffer_ctor");
         }
     }
     
     GCValue obj = JS_NewObjectClass(ctx, js_source_buffer_class_id);
-    sb.attach_to_object(obj);
+    JS_SetOpaqueHandle(obj, sb);
     return obj;
 }
 
@@ -141,8 +141,8 @@ GCValue js_media_source_is_type_supported(JSContextHandle ctx, GCValue this_val,
 
 // MediaSource.prototype.addSourceBuffer
 GCValue js_media_source_add_source_buffer(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    MediaSourceDataHandle ms = MediaSourceDataHandle::from_object_check(ctx, this_val);
-    if (!ms.valid()) return JS_ThrowTypeError(ctx, "Invalid MediaSource");
+    MediaSourceDataHandle ms = JS_GetOpaqueHandle2(ctx, this_val, js_media_source_class_id);
+    if (SAFE_IS_NULL(ms)) return JS_ThrowTypeError(ctx, "Invalid MediaSource");
     
     if (argc < 1) return JS_ThrowTypeError(ctx, "requires at least 1 argument(s)");
     
@@ -182,20 +182,20 @@ GCValue js_media_source_remove_source_buffer(JSContextHandle ctx, GCValue this_v
 
 // MediaSource.prototype.endOfStream
 GCValue js_media_source_end_of_stream(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    MediaSourceDataHandle ms = MediaSourceDataHandle::from_object_check(ctx, this_val);
-    if (!ms.valid()) return JS_ThrowTypeError(ctx, "Invalid MediaSource");
+    MediaSourceDataHandle ms = JS_GetOpaqueHandle2(ctx, this_val, js_media_source_class_id);
+    if (SAFE_IS_NULL(ms)) return JS_ThrowTypeError(ctx, "Invalid MediaSource");
     
-    ms.set_ready_state(2); // ended
+    SAFE_SET(ms, MediaSourceDataHandle, ready_state, 2); // ended
     return JS_UNDEFINED;
 }
 
 // MediaSource.readyState getter
 GCValue js_media_source_get_ready_state(JSContextHandle ctx, GCValue this_val) {
-    MediaSourceDataHandle ms = MediaSourceDataHandle::from_object_check(ctx, this_val);
-    if (!ms.valid()) return JS_ThrowTypeError(ctx, "Invalid MediaSource");
+    MediaSourceDataHandle ms = JS_GetOpaqueHandle2(ctx, this_val, js_media_source_class_id);
+    if (SAFE_IS_NULL(ms)) return JS_ThrowTypeError(ctx, "Invalid MediaSource");
     
     static const char* states[] = {"closed", "open", "ended"};
-    int state = ms.ready_state();
+    int state = SAFE_GET_OR(ms, MediaSourceDataHandle, ready_state, 0);
     if (state >= 0 && state < 3) {
         return JS_NewString(ctx, states[state]);
     }
@@ -204,17 +204,17 @@ GCValue js_media_source_get_ready_state(JSContextHandle ctx, GCValue this_val) {
 
 // MediaSource.duration getter/setter
 GCValue js_media_source_get_duration(JSContextHandle ctx, GCValue this_val) {
-    MediaSourceDataHandle ms = MediaSourceDataHandle::from_object_check(ctx, this_val);
-    if (!ms.valid()) return JS_ThrowTypeError(ctx, "Invalid MediaSource");
-    return JS_NewFloat64(ctx, ms.duration());
+    MediaSourceDataHandle ms = JS_GetOpaqueHandle2(ctx, this_val, js_media_source_class_id);
+    if (SAFE_IS_NULL(ms)) return JS_ThrowTypeError(ctx, "Invalid MediaSource");
+    return JS_NewFloat64(ctx, SAFE_GET_OR(ms, MediaSourceDataHandle, duration, 0.0));
 }
 
 GCValue js_media_source_set_duration(JSContextHandle ctx, GCValue this_val, GCValue val) {
-    MediaSourceDataHandle ms = MediaSourceDataHandle::from_object_check(ctx, this_val);
-    if (!ms.valid()) return JS_ThrowTypeError(ctx, "Invalid MediaSource");
+    MediaSourceDataHandle ms = JS_GetOpaqueHandle2(ctx, this_val, js_media_source_class_id);
+    if (SAFE_IS_NULL(ms)) return JS_ThrowTypeError(ctx, "Invalid MediaSource");
     double duration;
     JS_ToFloat64(ctx, &duration, val);
-    ms.set_duration(duration);
+    SAFE_SET(ms, MediaSourceDataHandle, duration, duration);
     return JS_UNDEFINED;
 }
 
@@ -250,15 +250,15 @@ const JSCFunctionListEntry js_media_source_proto_funcs[] = {
 const size_t js_media_source_proto_funcs_count = sizeof(js_media_source_proto_funcs) / sizeof(js_media_source_proto_funcs[0]);
 
 // Helper: accumulate appendBuffer bytes into the SourceBuffer's own buffer.
-static void source_buffer_append_data(JSContextHandle ctx, SourceBufferDataHandle &sb, const uint8_t *data, size_t len) {
+static void source_buffer_append_data(JSContextHandle ctx, SourceBufferDataHandle sb, const uint8_t *data, size_t len) {
     (void)ctx;
     if (!data || len == 0) return;
-    size_t old_size = sb.append_size();
+    size_t old_size = SAFE_GET_OR(sb, SourceBufferDataHandle, append_size, 0);
     size_t new_size = old_size + len;
-    uint8_t *buf = (uint8_t *)realloc(sb.append_data(), new_size);
+    uint8_t *buf = (uint8_t *)realloc(SAFE_GET_OR(sb, SourceBufferDataHandle, append_data, NULL), new_size);
     if (!buf) return;
     memcpy(buf + old_size, data, len);
-    sb.set_append_data(buf, new_size, new_size);
+    source_buffer_set_append_data(sb, buf, new_size, new_size);
 }
 
 // Helper: read callback for minimp4 operating on an in-memory buffer.
@@ -291,10 +291,10 @@ static void fourcc_to_str(uint32_t fcc, char *out, size_t out_len) {
 }
 
 // Helper: run minimp4 over the accumulated buffer and expose track/sample metadata.
-static void source_buffer_demux(JSContextHandle ctx, GCValue sb_obj, SourceBufferDataHandle &sb) {
-    if (!sb.append_data() || sb.append_size() < 8) return;
+static void source_buffer_demux(JSContextHandle ctx, GCValue sb_obj, SourceBufferDataHandle sb) {
+    if (!SAFE_GET_OR(sb, SourceBufferDataHandle, append_data, NULL) || SAFE_GET_OR(sb, SourceBufferDataHandle, append_size, 0) < 8) return;
 
-    mp4_mem_token_t tok = { sb.append_data(), sb.append_size() };
+    mp4_mem_token_t tok = { SAFE_GET_OR(sb, SourceBufferDataHandle, append_data, NULL), SAFE_GET_OR(sb, SourceBufferDataHandle, append_size, 0) };
     MP4D_demux_t mp4;
     memset(&mp4, 0, sizeof(mp4));
     if (!MP4D_open(&mp4, mp4_mem_read, &tok, (int64_t)tok.size)) {
@@ -303,13 +303,13 @@ static void source_buffer_demux(JSContextHandle ctx, GCValue sb_obj, SourceBuffe
         return;
     }
 
-    sb.set_track_count((int)mp4.track_count);
+    SAFE_SET(sb, SourceBufferDataHandle, track_count, (int)mp4.track_count);
     double duration_sec = 0.0;
     if (mp4.timescale > 0) {
         uint64_t dur = ((uint64_t)mp4.duration_hi << 32) | mp4.duration_lo;
         duration_sec = (double)dur / (double)mp4.timescale;
     }
-    sb.set_parsed_duration(duration_sec);
+    SAFE_SET(sb, SourceBufferDataHandle, parsed_duration, duration_sec);
 
     GCValue info = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, info, "trackCount", JS_NewInt32(ctx, (int)mp4.track_count));
@@ -358,8 +358,8 @@ static void source_buffer_demux(JSContextHandle ctx, GCValue sb_obj, SourceBuffe
 
 // SourceBuffer.prototype.appendBuffer
 GCValue js_source_buffer_append_buffer(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    SourceBufferDataHandle sb = SourceBufferDataHandle::from_object_check(ctx, this_val);
-    if (!sb.valid()) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
+    SourceBufferDataHandle sb = JS_GetOpaqueHandle2(ctx, this_val, js_source_buffer_class_id);
+    if (SAFE_IS_NULL(sb)) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
 
     if (argc < 1) return JS_ThrowTypeError(ctx, "requires at least 1 argument(s)");
 
@@ -387,7 +387,7 @@ GCValue js_source_buffer_append_buffer(JSContextHandle ctx, GCValue this_val, in
     }
 
     JS_SetPropertyStr(ctx, this_val, "updating", JS_TRUE);
-    sb.set_updating(1);
+    SAFE_SET(sb, SourceBufferDataHandle, updating, 1);
 
     GCValue onupdatestart = JS_GetPropertyStr(ctx, this_val, "onupdatestart");
     if (!JS_IsNull(onupdatestart) && !JS_IsUndefined(onupdatestart)) {
@@ -401,11 +401,11 @@ GCValue js_source_buffer_append_buffer(JSContextHandle ctx, GCValue this_val, in
         char captured[256];
         snprintf(captured, sizeof(captured),
                  "media-source://segment?size=%zu&tracks=%d&duration=%.3f",
-                 sb.append_size(), sb.track_count(), sb.parsed_duration());
+                 SAFE_GET_OR(sb, SourceBufferDataHandle, append_size, 0), SAFE_GET_OR(sb, SourceBufferDataHandle, track_count, 0), SAFE_GET_OR(sb, SourceBufferDataHandle, parsed_duration, 0.0));
         record_captured_url(captured);
     }
 
-    JS_SetPropertyStr(ctx, this_val, "__appendSize", JS_NewInt64(ctx, (int64_t)sb.append_size()));
+    JS_SetPropertyStr(ctx, this_val, "__appendSize", JS_NewInt64(ctx, (int64_t)SAFE_GET_OR(sb, SourceBufferDataHandle, append_size, 0)));
 
     GCValue onupdate = JS_GetPropertyStr(ctx, this_val, "onupdate");
     if (!JS_IsNull(onupdate) && !JS_IsUndefined(onupdate)) {
@@ -413,7 +413,7 @@ GCValue js_source_buffer_append_buffer(JSContextHandle ctx, GCValue this_val, in
     }
 
     JS_SetPropertyStr(ctx, this_val, "updating", JS_FALSE);
-    sb.set_updating(0);
+    SAFE_SET(sb, SourceBufferDataHandle, updating, 0);
 
     GCValue updateend = JS_GetPropertyStr(ctx, this_val, "onupdateend");
     if (!JS_IsNull(updateend) && !JS_IsUndefined(updateend)) {
@@ -425,10 +425,10 @@ GCValue js_source_buffer_append_buffer(JSContextHandle ctx, GCValue this_val, in
 
 // SourceBuffer.prototype.abort
 GCValue js_source_buffer_abort(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    SourceBufferDataHandle sb = SourceBufferDataHandle::from_object_check(ctx, this_val);
-    if (!sb.valid()) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
+    SourceBufferDataHandle sb = JS_GetOpaqueHandle2(ctx, this_val, js_source_buffer_class_id);
+    if (SAFE_IS_NULL(sb)) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
     
-    sb.set_updating(0);
+    SAFE_SET(sb, SourceBufferDataHandle, updating, 0);
     return JS_UNDEFINED;
 }
 
@@ -436,12 +436,12 @@ GCValue js_source_buffer_abort(JSContextHandle ctx, GCValue this_val, int argc, 
 GCValue js_source_buffer_change_type(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1) return JS_ThrowTypeError(ctx, "requires at least 1 argument(s)");
     
-    SourceBufferDataHandle sb = SourceBufferDataHandle::from_object_check(ctx, this_val);
-    if (!sb.valid()) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
+    SourceBufferDataHandle sb = JS_GetOpaqueHandle2(ctx, this_val, js_source_buffer_class_id);
+    if (SAFE_IS_NULL(sb)) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
     
     const char *mime_type = JS_ToCString(ctx, argv[0]);
     if (mime_type) {
-        sb.set_mime_type(mime_type);
+        SAFE_SET_STR(sb, SourceBufferDataHandle, mime_type, mime_type);
     }
     
     return JS_UNDEFINED;
@@ -454,40 +454,40 @@ GCValue js_source_buffer_remove(JSContextHandle ctx, GCValue this_val, int argc,
 
 // SourceBuffer.updating getter
 GCValue js_source_buffer_get_updating(JSContextHandle ctx, GCValue this_val) {
-    SourceBufferDataHandle sb = SourceBufferDataHandle::from_object_check(ctx, this_val);
-    if (!sb.valid()) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
-    return JS_NewBool(ctx, sb.updating());
+    SourceBufferDataHandle sb = JS_GetOpaqueHandle2(ctx, this_val, js_source_buffer_class_id);
+    if (SAFE_IS_NULL(sb)) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
+    return JS_NewBool(ctx, SAFE_GET_OR(sb, SourceBufferDataHandle, updating, 0));
 }
 
 // SourceBuffer.timestampOffset getter/setter
 GCValue js_source_buffer_get_timestamp_offset(JSContextHandle ctx, GCValue this_val) {
-    SourceBufferDataHandle sb = SourceBufferDataHandle::from_object_check(ctx, this_val);
-    if (!sb.valid()) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
-    return JS_NewFloat64(ctx, sb.timestamp_offset());
+    SourceBufferDataHandle sb = JS_GetOpaqueHandle2(ctx, this_val, js_source_buffer_class_id);
+    if (SAFE_IS_NULL(sb)) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
+    return JS_NewFloat64(ctx, SAFE_GET_OR(sb, SourceBufferDataHandle, timestamp_offset, 0.0));
 }
 
 GCValue js_source_buffer_set_timestamp_offset(JSContextHandle ctx, GCValue this_val, GCValue val) {
-    SourceBufferDataHandle sb = SourceBufferDataHandle::from_object_check(ctx, this_val);
-    if (!sb.valid()) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
+    SourceBufferDataHandle sb = JS_GetOpaqueHandle2(ctx, this_val, js_source_buffer_class_id);
+    if (SAFE_IS_NULL(sb)) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
     double offset;
     JS_ToFloat64(ctx, &offset, val);
-    sb.set_timestamp_offset(offset);
+    SAFE_SET(sb, SourceBufferDataHandle, timestamp_offset, offset);
     return JS_UNDEFINED;
 }
 
 // SourceBuffer.mode getter/setter
 GCValue js_source_buffer_get_mode(JSContextHandle ctx, GCValue this_val) {
-    SourceBufferDataHandle sb = SourceBufferDataHandle::from_object_check(ctx, this_val);
-    if (!sb.valid()) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
-    return JS_NewString(ctx, sb.mode());
+    SourceBufferDataHandle sb = JS_GetOpaqueHandle2(ctx, this_val, js_source_buffer_class_id);
+    if (SAFE_IS_NULL(sb)) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
+    return JS_NewString(ctx, SAFE_GET_OR(sb, SourceBufferDataHandle, mode, "segments"));
 }
 
 GCValue js_source_buffer_set_mode(JSContextHandle ctx, GCValue this_val, GCValue val) {
-    SourceBufferDataHandle sb = SourceBufferDataHandle::from_object_check(ctx, this_val);
-    if (!sb.valid()) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
+    SourceBufferDataHandle sb = JS_GetOpaqueHandle2(ctx, this_val, js_source_buffer_class_id);
+    if (SAFE_IS_NULL(sb)) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
     const char *mode = JS_ToCString(ctx, val);
     if (mode) {
-        sb.set_mode(mode);
+        SAFE_SET_STR(sb, SourceBufferDataHandle, mode, mode);
     }
     return JS_UNDEFINED;
 }

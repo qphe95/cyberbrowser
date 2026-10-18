@@ -10,7 +10,7 @@
 #include <quickjs_gc_unified.h>
 #include "browser_api_impl.h"
 #include "browser_api_impl_types.h"
-#include "browser_api_impl_handles.h"
+#include "browser_api_impl_handle_helpers.h"
 #include "browser_api_impl_internal.h"
 #include "html_dom.h"
 #include "css_parser.h"
@@ -53,17 +53,17 @@ GCValue js_node_cloneNode_real(JSContextHandle ctx, GCValue this_val, int argc, 
 // Helpers for DocumentFragment expansion in appendChild/insertBefore.
 static bool is_document_fragment_node(JSContextHandle ctx, GCValue node) {
     DOMNodeHandle n = get_dom_node(ctx, node);
-    return n.valid() && n.node_type() == DOM_NODE_TYPE_DOCUMENT_FRAGMENT;
+    return !SAFE_IS_NULL(n) && SAFE_GET_OR(n, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_DOCUMENT_FRAGMENT;
 }
 static std::vector<GCValue> collect_fragment_children(JSContextHandle ctx, GCValue fragment) {
     std::vector<GCValue> children;
     DOMNodeHandle frag = get_dom_node(ctx, fragment);
-    if (!frag.valid()) return children;
-    GCValue cur = frag.first_child();
+    if (SAFE_IS_NULL(frag)) return children;
+    GCValue cur = SAFE_GET_OR(frag, DOMNodeHandle, first_child, JS_NULL);
     while (!JS_IsNull(cur) && !JS_IsUndefined(cur)) {
         children.push_back(cur);
         DOMNodeHandle cur_node = get_dom_node(ctx, cur);
-        cur = cur_node.valid() ? cur_node.next_sibling() : JS_NULL;
+        cur = !SAFE_IS_NULL(cur_node) ? SAFE_GET_OR(cur_node, DOMNodeHandle, next_sibling, JS_NULL) : JS_NULL;
     }
     return children;
 }
@@ -98,8 +98,8 @@ static bool dom_node_is_connected(JSContextHandle ctx, GCValue node) {
     int safety = 0;
     while (!JS_IsUndefined(cur) && !JS_IsNull(cur) && JS_IsObject(cur) && safety++ < 10000) {
         DOMNodeHandle n = get_dom_node(ctx, cur);
-        if (n.valid()) {
-            int nt = n.node_type();
+        if (!SAFE_IS_NULL(n)) {
+            int nt = SAFE_GET_OR(n, DOMNodeHandle, node_type, 0);
             if (nt == DOM_NODE_TYPE_DOCUMENT) return true;
             // A ShadowRoot is connected when its host element is connected.
             // The ShadyDOM polyfill creates shadow roots as plain JS objects.
@@ -119,7 +119,7 @@ static bool dom_node_is_connected(JSContextHandle ctx, GCValue node) {
                 }
             }
             if (nt == DOM_NODE_TYPE_DOCUMENT_FRAGMENT) return false;
-            cur = n.parent_node();
+            cur = SAFE_GET_OR(n, DOMNodeHandle, parent_node, JS_NULL);
         } else {
             // The parent may be a ShadowRoot object (not a DOMNode-backed node).
             // Continue connectivity checks from the shadow host.
@@ -181,10 +181,10 @@ void js_dom_node_finalizer(JSRuntimeHandle rt, GCValue val) {
     // malloc'd; the GC will reclaim the CssComputedStyle object separately.
     GCHandle node_handle = JS_GetOpaqueHandle(val, js_dom_node_class_id);
     if (node_handle != GC_HANDLE_NULL) {
-        DOMNodeHandle node(node_handle);
-        if (node.valid()) {
-            node.free_attributes();
-            GCHandle cs_handle = node.computed_style_handle();
+        DOMNodeHandle node = node_handle;
+        if (!SAFE_IS_NULL(node)) {
+            dom_node_free_attributes(node);
+            GCHandle cs_handle = SAFE_GET_OR(node, DOMNodeHandle, computed_style_handle, GC_HANDLE_NULL);
             if (cs_handle != GC_HANDLE_NULL) {
                 CssComputedStyle *cs = (CssComputedStyle *)gc_deref(cs_handle);
                 if (cs && cs->properties) {
@@ -207,22 +207,22 @@ void js_dom_node_mark(JSRuntimeHandle rt, GCValue val,
      * automatically by the generic object marker. */
     mark_func(rt, node_handle);
 
-    DOMNodeHandle node(node_handle);
-    if (!node.valid()) return;
+    DOMNodeHandle node = node_handle;
+    if (SAFE_IS_NULL(node)) return;
 
     /* Tree links are stored as GCValue JS object references. */
-    JS_MarkValue(rt, node.js_object(), mark_func);
-    JS_MarkValue(rt, node.parent_node(), mark_func);
-    JS_MarkValue(rt, node.first_child(), mark_func);
-    JS_MarkValue(rt, node.last_child(), mark_func);
-    JS_MarkValue(rt, node.previous_sibling(), mark_func);
-    JS_MarkValue(rt, node.next_sibling(), mark_func);
-    JS_MarkValue(rt, node.owner_document(), mark_func);
-    JS_MarkValue(rt, node.shadow_root(), mark_func);
+    JS_MarkValue(rt, SAFE_GET_OR(node, DOMNodeHandle, js_object, JS_NULL), mark_func);
+    JS_MarkValue(rt, SAFE_GET_OR(node, DOMNodeHandle, parent_node, JS_NULL), mark_func);
+    JS_MarkValue(rt, SAFE_GET_OR(node, DOMNodeHandle, first_child, JS_NULL), mark_func);
+    JS_MarkValue(rt, SAFE_GET_OR(node, DOMNodeHandle, last_child, JS_NULL), mark_func);
+    JS_MarkValue(rt, SAFE_GET_OR(node, DOMNodeHandle, previous_sibling, JS_NULL), mark_func);
+    JS_MarkValue(rt, SAFE_GET_OR(node, DOMNodeHandle, next_sibling, JS_NULL), mark_func);
+    JS_MarkValue(rt, SAFE_GET_OR(node, DOMNodeHandle, owner_document, JS_NULL), mark_func);
+    JS_MarkValue(rt, SAFE_GET_OR(node, DOMNodeHandle, shadow_root, JS_NULL), mark_func);
 
     /* Computed-style table.  Keep the table object alive, then mark every
      * value handle stored inside it (they are JS strings). */
-    GCHandle cs_handle = node.computed_style_handle();
+    GCHandle cs_handle = SAFE_GET_OR(node, DOMNodeHandle, computed_style_handle, GC_HANDLE_NULL);
     if (cs_handle != GC_HANDLE_NULL) {
         mark_func(rt, cs_handle);
         CssComputedStyle *cs = (CssComputedStyle *)gc_deref(cs_handle);
@@ -238,9 +238,9 @@ void js_dom_node_mark(JSRuntimeHandle rt, GCValue val,
     }
 
     /* Index-table list chaining refers to other DOMNode data handles. */
-    GCHandle class_sib = node.next_class_sibling();
+    GCHandle class_sib = SAFE_GET_OR(node, DOMNodeHandle, next_class_sibling, GC_HANDLE_NULL);
     if (class_sib != GC_HANDLE_NULL) mark_func(rt, class_sib);
-    GCHandle tag_sib = node.next_tag_sibling();
+    GCHandle tag_sib = SAFE_GET_OR(node, DOMNodeHandle, next_tag_sibling, GC_HANDLE_NULL);
     if (tag_sib != GC_HANDLE_NULL) mark_func(rt, tag_sib);
 }
 
@@ -262,7 +262,7 @@ JSClassDef js_dom_node_class_def = {
 /* Allocate or return the existing computed-style object for a DOM node. */
 GCHandle css_ensure_computed_style(DOMNodeHandle node)
 {
-    GCHandle h = node.computed_style_handle();
+    GCHandle h = SAFE_GET_OR(node, DOMNodeHandle, computed_style_handle, GC_HANDLE_NULL);
     if (h != GC_HANDLE_NULL) return h;
 
     h = gc_allocz(sizeof(CssComputedStyle), JS_GC_OBJ_TYPE_DATA);
@@ -276,7 +276,7 @@ GCHandle css_ensure_computed_style(DOMNodeHandle node)
         return GC_HANDLE_NULL;
     }
 
-    node.set_computed_style_handle(h);
+    SAFE_SET(node, DOMNodeHandle, computed_style_handle, h);
     return h;
 }
 
@@ -323,7 +323,7 @@ GCValue css_computed_get_property(JSContextHandle ctx, DOMNodeHandle node,
 {
     if (prop_atom == JS_ATOM_NULL) return JS_UNDEFINED;
 
-    GCHandle cs_handle = node.computed_style_handle();
+    GCHandle cs_handle = SAFE_GET_OR(node, DOMNodeHandle, computed_style_handle, GC_HANDLE_NULL);
     if (cs_handle == GC_HANDLE_NULL) return JS_UNDEFINED;
 
     CssComputedStyle *cs = (CssComputedStyle *)gc_deref(cs_handle);
@@ -341,7 +341,7 @@ GCValue css_computed_get_property(JSContextHandle ctx, DOMNodeHandle node,
 void css_computed_apply_declarations(JSContextHandle ctx, DOMNodeHandle node,
                                      CssAppliedDecl *applied, int count)
 {
-    if (!node.valid() || count <= 0) return;
+    if (SAFE_IS_NULL(node) || count <= 0) return;
     for (int i = 0; i < count; i++) {
         JSAtom atom = JS_NewAtom(ctx, applied[i].decl->property);
         if (atom != JS_ATOM_NULL) {
@@ -356,7 +356,7 @@ void css_computed_apply_declarations(JSContextHandle ctx, DOMNodeHandle node,
 void css_computed_apply_inline_style(JSContextHandle ctx, DOMNodeHandle node,
                                      const char *style_attr)
 {
-    if (!node.valid() || !style_attr || !style_attr[0]) return;
+    if (SAFE_IS_NULL(node) || !style_attr || !style_attr[0]) return;
 
     int count = 0;
     CssDeclaration *decls = css_parse_inline_style(style_attr, &count);
@@ -427,18 +427,18 @@ void css_document_state_clear(JSRuntimeHandle rt)
  * attached to its public JS object. */
 void css_index_insert_node(JSContextHandle ctx, DOMNodeHandle node)
 {
-    if (!node.valid()) return;
+    if (SAFE_IS_NULL(node)) return;
 
     JSRuntimeHandle rt = JS_GetRuntime(ctx);
     CssDocumentState *state = css_document_state_ensure(rt);
     if (!state) return;
 
-    GCHandle node_handle = node.handle();
-    GCValue js_obj = node.js_object();
+    GCHandle node_handle = node;
+    GCValue js_obj = SAFE_GET_OR(node, DOMNodeHandle, js_object, JS_NULL);
 
     /* Read id/className from the JS object when available; the DOMNode fields
      * are not always kept in sync by the current property setters. */
-    const char *id = node.id();
+    const char *id = SAFE_GET_OR(node, DOMNodeHandle, id, "");
     char id_buf[256];
     if ((!id || !id[0]) && !JS_IsNull(js_obj) && !JS_IsUndefined(js_obj)) {
         GCValue id_val = JS_GetPropertyStr(ctx, js_obj, "id");
@@ -458,7 +458,7 @@ void css_index_insert_node(JSContextHandle ctx, DOMNodeHandle node)
         }
     }
 
-    const char *class_name = node.class_name();
+    const char *class_name = SAFE_GET_OR(node, DOMNodeHandle, class_name, "");
     char class_buf[1024];
     if ((!class_name || !class_name[0]) && !JS_IsNull(js_obj) && !JS_IsUndefined(js_obj)) {
         GCValue class_val = JS_GetPropertyStr(ctx, js_obj, "className");
@@ -484,7 +484,7 @@ void css_index_insert_node(JSContextHandle ctx, DOMNodeHandle node)
                 GCHandle prev_head = lf_hash_lookup(state->class_table,
                                                     (uint32_t)class_atom,
                                                     (GCHandle)class_atom);
-                node.set_next_class_sibling(prev_head);
+                SAFE_SET(node, DOMNodeHandle, next_class_sibling, prev_head);
                 lf_hash_insert(state->class_table, (uint32_t)class_atom,
                                (GCHandle)class_atom, node_handle);
                 JS_FreeAtom(ctx, class_atom);
@@ -493,7 +493,7 @@ void css_index_insert_node(JSContextHandle ctx, DOMNodeHandle node)
         }
     }
 
-    const char *tag = node.node_name();
+    const char *tag = SAFE_GET_OR(node, DOMNodeHandle, node_name, "");
     if (tag && tag[0]) {
         /* getElementsByTagName is case-insensitive in HTML documents, so index
          * every element by a canonical lower-case tag name. */
@@ -509,7 +509,7 @@ void css_index_insert_node(JSContextHandle ctx, DOMNodeHandle node)
             GCHandle prev_head = lf_hash_lookup(state->tag_table,
                                                 (uint32_t)tag_atom,
                                                 (GCHandle)tag_atom);
-            node.set_next_tag_sibling(prev_head);
+            SAFE_SET(node, DOMNodeHandle, next_tag_sibling, prev_head);
             lf_hash_insert(state->tag_table, (uint32_t)tag_atom,
                            (GCHandle)tag_atom, node_handle);
             JS_FreeAtom(ctx, tag_atom);
@@ -530,10 +530,10 @@ GCValue css_get_element_by_id(JSContextHandle ctx, JSAtom id)
                                           (GCHandle)id);
     if (node_handle == GC_HANDLE_NULL) return JS_NULL;
 
-    DOMNodeHandle node(node_handle);
-    if (!node.valid()) return JS_NULL;
+    DOMNodeHandle node = node_handle;
+    if (SAFE_IS_NULL(node)) return JS_NULL;
 
-    GCValue obj = node.js_object();
+    GCValue obj = SAFE_GET_OR(node, DOMNodeHandle, js_object, JS_NULL);
     if (JS_IsNull(obj) || JS_IsUndefined(obj)) return JS_NULL;
     return obj;
 }
@@ -552,13 +552,13 @@ GCValue css_get_elements_by_class_name(JSContextHandle ctx, JSAtom class_atom)
     GCHandle cur = lf_hash_lookup(state->class_table, (uint32_t)class_atom,
                                   (GCHandle)class_atom);
     while (cur != GC_HANDLE_NULL) {
-        DOMNodeHandle node(cur);
-        if (!node.valid()) break;
-        GCValue obj = node.js_object();
+        DOMNodeHandle node = cur;
+        if (SAFE_IS_NULL(node)) break;
+        GCValue obj = SAFE_GET_OR(node, DOMNodeHandle, js_object, JS_NULL);
         if (!JS_IsNull(obj) && !JS_IsUndefined(obj)) {
             JS_SetPropertyUint32(ctx, arr, idx++, obj);
         }
-        cur = node.next_class_sibling();
+        cur = SAFE_GET_OR(node, DOMNodeHandle, next_class_sibling, GC_HANDLE_NULL);
     }
     return arr;
 }
@@ -577,13 +577,13 @@ GCValue css_get_elements_by_tag_name(JSContextHandle ctx, JSAtom tag_atom)
     GCHandle cur = lf_hash_lookup(state->tag_table, (uint32_t)tag_atom,
                                   (GCHandle)tag_atom);
     while (cur != GC_HANDLE_NULL) {
-        DOMNodeHandle node(cur);
-        if (!node.valid()) break;
-        GCValue obj = node.js_object();
+        DOMNodeHandle node = cur;
+        if (SAFE_IS_NULL(node)) break;
+        GCValue obj = SAFE_GET_OR(node, DOMNodeHandle, js_object, JS_NULL);
         if (!JS_IsNull(obj) && !JS_IsUndefined(obj)) {
             JS_SetPropertyUint32(ctx, arr, idx++, obj);
         }
-        cur = node.next_tag_sibling();
+        cur = SAFE_GET_OR(node, DOMNodeHandle, next_tag_sibling, GC_HANDLE_NULL);
     }
     return arr;
 }
@@ -613,13 +613,13 @@ void capture_url_debug(const char *url, const char *source) {
 // Helper to throw a DOMException
 GCValue throw_dom_exception(JSContextHandle ctx, const char* name, const char* message) {
     // Create DOMException instance
-    DOMExceptionDataHandle de = DOMExceptionDataHandle::create();
-    if (!de.valid()) {
+    DOMExceptionDataHandle de = dom_exception_create();
+    if (SAFE_IS_NULL(de)) {
         return JS_ThrowTypeError(ctx, "%s: %s", name, message);
     }
     
-    de.set_name(name);
-    de.set_message(message);
+    SAFE_SET_STR(de, DOMExceptionDataHandle, name, name);
+    SAFE_SET_STR(de, DOMExceptionDataHandle, message, message);
     
     // Set appropriate code based on name
     int code = 0;
@@ -644,7 +644,7 @@ GCValue throw_dom_exception(JSContextHandle ctx, const char* name, const char* m
     else if (strcmp(name, "TimeoutError") == 0) code = 23;
     else if (strcmp(name, "InvalidNodeTypeError") == 0) code = 24;
     else if (strcmp(name, "DataCloneError") == 0) code = 25;
-    de.set_code(code);
+    SAFE_SET(de, DOMExceptionDataHandle, code, code);
     
     // Create the exception object
     GCValue exc = JS_NewObjectClass(ctx, js_dom_exception_class_id);
@@ -652,7 +652,7 @@ GCValue throw_dom_exception(JSContextHandle ctx, const char* name, const char* m
         return JS_ThrowTypeError(ctx, "%s: %s", name, message);
     }
     
-    de.attach_to_object(exc);
+    JS_SetOpaqueHandle(exc, de);
     
     // Set name and message properties on the exception object
     JS_SetPropertyStr(ctx, exc, "name", JS_NewString(ctx, name));
@@ -819,8 +819,8 @@ bool is_dom_node(JSContextHandle ctx, GCValue obj) {
 // the DOM implementation treat a ShadowRoot as just another node parent.
 DOMNodeHandle get_dom_node(JSContextHandle ctx, GCValue obj) {
     (void)ctx;
-    DOMNodeHandle node = DOMNodeHandle::from_object(obj);
-    if (node.valid()) return node;
+    DOMNodeHandle node = dom_node_from_object(obj);
+    if (!SAFE_IS_NULL(node)) return node;
 
     /* Video elements use js_video_class_id (opaque = HTMLVideoElement), so the
      * DOMNodeHandle opaque lookup above misses.  The video element stores its
@@ -828,31 +828,31 @@ DOMNodeHandle get_dom_node(JSContextHandle ctx, GCValue obj) {
     if (js_video_class_id != 0) {
         GCHandle vh = JS_GetOpaqueHandle(obj, js_video_class_id);
         if (vh != GC_HANDLE_NULL) {
-            HTMLVideoElementHandle vid(vh);
-            GCHandle dn = vid.dom_node();
-            if (dn != GC_HANDLE_NULL) return DOMNodeHandle(dn);
+            HTMLVideoElementHandle vid = vh;
+            GCHandle dn = SAFE_GET_OR(vid, HTMLVideoElementHandle, dom_node, GC_HANDLE_NULL);
+            if (dn != GC_HANDLE_NULL) return dn;
         }
     }
 
-    ShadowRootDataHandle sr = ShadowRootDataHandle::from_object(obj);
-    if (sr.valid()) {
-        GCHandle h = sr.dom_node();
-        if (h != GC_HANDLE_NULL) return DOMNodeHandle(h);
+    ShadowRootDataHandle sr = JS_GetOpaqueHandle(obj, js_shadow_root_class_id);
+    if (!SAFE_IS_NULL(sr)) {
+        GCHandle h = SAFE_GET_OR(sr, ShadowRootDataHandle, dom_node, GC_HANDLE_NULL);
+        if (h != GC_HANDLE_NULL) return h;
     }
-    return DOMNodeHandle();
+    return GC_HANDLE_NULL;
 }
 
 // Helper: Get or create DOM node data for a JS object
 DOMNodeHandle get_or_create_dom_node(JSContextHandle ctx, GCValue obj, int node_type, const char* node_name) {
     DOMNodeHandle node = get_dom_node(ctx, obj);
-    if (node.valid()) {
+    if (!SAFE_IS_NULL(node)) {
         return node;
     }
 
     // Create new DOM node data
-    node = DOMNodeHandle::create(ctx, node_type, node_name);
-    if (node.valid()) {
-        node.attach_to_object(obj);
+    node = dom_node_create(ctx, node_type, node_name);
+    if (!SAFE_IS_NULL(node)) {
+        dom_node_attach_to_object(node, obj);
     }
     return node;
 }
@@ -1053,8 +1053,8 @@ static void dom_maybe_load_script(JSContextHandle ctx, GCValue node) {
 static void fire_connected_in_subtree(JSContextHandle ctx, GCValue node) {
     if (JS_IsNull(node) || !JS_IsObject(node)) return;
     DOMNodeHandle n = get_dom_node(ctx, node);
-    if (!n.valid()) return;
-    if (n.node_type() == DOM_NODE_TYPE_ELEMENT) {
+    if (SAFE_IS_NULL(n)) return;
+    if (SAFE_GET_OR(n, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_ELEMENT) {
         // Only fire for elements with a registered custom element definition
         // (tag contains a hyphen).  The reaction queue ensures the upgrade
         // runs before the connectedCallback.
@@ -1065,12 +1065,12 @@ static void fire_connected_in_subtree(JSContextHandle ctx, GCValue node) {
         }
         JS_FreeCString(ctx, tag);
     }
-    GCValue child = n.first_child();
+    GCValue child = SAFE_GET_OR(n, DOMNodeHandle, first_child, JS_NULL);
     while (!JS_IsNull(child) && !JS_IsUndefined(child) && JS_IsObject(child)) {
         fire_connected_in_subtree(ctx, child);
         DOMNodeHandle cn = get_dom_node(ctx, child);
-        if (!cn.valid()) break;
-        child = cn.next_sibling();
+        if (SAFE_IS_NULL(cn)) break;
+        child = SAFE_GET_OR(cn, DOMNodeHandle, next_sibling, JS_NULL);
     }
 }
 
@@ -1121,67 +1121,67 @@ GCValue js_node_appendChild_real(JSContextHandle ctx, GCValue this_val, int argc
     }
     // Get or create DOM data for parent
     DOMNodeHandle parent = get_or_create_dom_node(ctx, this_val, DOM_NODE_TYPE_ELEMENT, "");
-    if (!parent.valid()) {
+    if (SAFE_IS_NULL(parent)) {
         return JS_ThrowTypeError(ctx, "appendChild: invalid parent node");
     }
     
     // Get or create DOM data for child
     DOMNodeHandle child_node = get_or_create_dom_node(ctx, child, DOM_NODE_TYPE_ELEMENT, "");
-    if (!child_node.valid()) {
+    if (SAFE_IS_NULL(child_node)) {
         return JS_ThrowTypeError(ctx, "appendChild: invalid child node");
     }
     
     // Remove child from its current parent if any
-    GCValue old_parent_val = child_node.parent_node();
+    GCValue old_parent_val = SAFE_GET_OR(child_node, DOMNodeHandle, parent_node, JS_NULL);
     if (!JS_IsNull(old_parent_val) && !JS_StrictEq(ctx, old_parent_val, this_val)) {
         // Call removeChild on the old parent.  Use the native implementation
         // directly; if the child's linkage is stale (parent mismatch), just
         // clear the old parent reference rather than throwing.
         DOMNodeHandle old_parent_node = get_dom_node(ctx, old_parent_val);
-        if (old_parent_node.valid()) {
-            GCValue fc = old_parent_node.first_child();
+        if (!SAFE_IS_NULL(old_parent_node)) {
+            GCValue fc = SAFE_GET_OR(old_parent_node, DOMNodeHandle, first_child, JS_NULL);
             bool found = false;
             GCValue scan = fc;
             while (!JS_IsNull(scan) && JS_IsObject(scan)) {
                 if (JS_StrictEq(ctx, scan, child)) { found = true; break; }
                 DOMNodeHandle sn = get_dom_node(ctx, scan);
-                if (!sn.valid()) break;
-                scan = sn.next_sibling();
+                if (SAFE_IS_NULL(sn)) break;
+                scan = SAFE_GET_OR(sn, DOMNodeHandle, next_sibling, JS_NULL);
             }
             if (found) {
                 GCValue remove_args[1] = { child };
                 js_node_removeChild_real(ctx, old_parent_val, 1, remove_args);
             } else {
                 // Stale parent reference — just clear it.
-                child_node.set_parent_node(JS_NULL);
+                SAFE_SET(child_node, DOMNodeHandle, parent_node, JS_NULL);
             }
         } else {
-            child_node.set_parent_node(JS_NULL);
+            SAFE_SET(child_node, DOMNodeHandle, parent_node, JS_NULL);
         }
     }
     
     // Set child's parent
-    child_node.set_parent_node(this_val);
+    SAFE_SET(child_node, DOMNodeHandle, parent_node, this_val);
     
     // Link child into parent's child list
-    GCValue first_child = parent.first_child();
-    GCValue last_child = parent.last_child();
+    GCValue first_child = SAFE_GET_OR(parent, DOMNodeHandle, first_child, JS_NULL);
+    GCValue last_child = SAFE_GET_OR(parent, DOMNodeHandle, last_child, JS_NULL);
     
     if (JS_IsNull(first_child)) {
         // First child - clear any stale sibling references
-        parent.set_first_child(child);
-        parent.set_last_child(child);
-        child_node.set_previous_sibling(JS_NULL);
-        child_node.set_next_sibling(JS_NULL);
+        SAFE_SET(parent, DOMNodeHandle, first_child, child);
+        SAFE_SET(parent, DOMNodeHandle, last_child, child);
+        SAFE_SET(child_node, DOMNodeHandle, previous_sibling, JS_NULL);
+        SAFE_SET(child_node, DOMNodeHandle, next_sibling, JS_NULL);
     } else {
         // Append to end
         DOMNodeHandle last_node = get_dom_node(ctx, last_child);
-        if (last_node.valid()) {
-            last_node.set_next_sibling(child);
+        if (!SAFE_IS_NULL(last_node)) {
+            SAFE_SET(last_node, DOMNodeHandle, next_sibling, child);
         }
-        child_node.set_previous_sibling(last_child);
-        child_node.set_next_sibling(JS_NULL);
-        parent.set_last_child(child);
+        SAFE_SET(child_node, DOMNodeHandle, previous_sibling, last_child);
+        SAFE_SET(child_node, DOMNodeHandle, next_sibling, JS_NULL);
+        SAFE_SET(parent, DOMNodeHandle, last_child, child);
     }
     
     dom_request_layout();
@@ -1234,13 +1234,13 @@ GCValue js_node_removeChild_real(JSContextHandle ctx, GCValue this_val, int argc
     DOMNodeHandle parent = get_dom_node(ctx, this_val);
     DOMNodeHandle child_node = get_dom_node(ctx, child);
     
-    if (!parent.valid() || !child_node.valid()) {
+    if (SAFE_IS_NULL(parent) || SAFE_IS_NULL(child_node)) {
         // If no DOM data, just return the child (no-op for non-DOM nodes)
         return child;
     }
     
     // Verify child is actually a child of parent
-    GCValue child_parent = child_node.parent_node();
+    GCValue child_parent = SAFE_GET_OR(child_node, DOMNodeHandle, parent_node, JS_NULL);
     if (!JS_StrictEq(ctx, child_parent, this_val)) {
         return throw_dom_exception(ctx, "NotFoundError", "Node is not a child of this node");
     }
@@ -1266,35 +1266,35 @@ GCValue js_node_removeChild_real(JSContextHandle ctx, GCValue this_val, int argc
     }
 
     // Get sibling references
-    GCValue prev_sibling = child_node.previous_sibling();
-    GCValue next_sibling = child_node.next_sibling();
+    GCValue prev_sibling = SAFE_GET_OR(child_node, DOMNodeHandle, previous_sibling, JS_NULL);
+    GCValue next_sibling = SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL);
     
     // Unlink from previous sibling
     if (!JS_IsNull(prev_sibling)) {
         DOMNodeHandle prev_node = get_dom_node(ctx, prev_sibling);
-        if (prev_node.valid()) {
-            prev_node.set_next_sibling(next_sibling);
+        if (!SAFE_IS_NULL(prev_node)) {
+            SAFE_SET(prev_node, DOMNodeHandle, next_sibling, next_sibling);
         }
     } else {
         // Child was first child, update parent's firstChild
-        parent.set_first_child(next_sibling);
+        SAFE_SET(parent, DOMNodeHandle, first_child, next_sibling);
     }
     
     // Unlink from next sibling
     if (!JS_IsNull(next_sibling)) {
         DOMNodeHandle next_node = get_dom_node(ctx, next_sibling);
-        if (next_node.valid()) {
-            next_node.set_previous_sibling(prev_sibling);
+        if (!SAFE_IS_NULL(next_node)) {
+            SAFE_SET(next_node, DOMNodeHandle, previous_sibling, prev_sibling);
         }
     } else {
         // Child was last child, update parent's lastChild
-        parent.set_last_child(prev_sibling);
+        SAFE_SET(parent, DOMNodeHandle, last_child, prev_sibling);
     }
     
     // Clear child's references
-    child_node.set_parent_node(JS_NULL);
-    child_node.set_previous_sibling(JS_NULL);
-    child_node.set_next_sibling(JS_NULL);
+    SAFE_SET(child_node, DOMNodeHandle, parent_node, JS_NULL);
+    SAFE_SET(child_node, DOMNodeHandle, previous_sibling, JS_NULL);
+    SAFE_SET(child_node, DOMNodeHandle, next_sibling, JS_NULL);
 
     dom_request_layout();
 
@@ -1306,10 +1306,10 @@ GCValue js_node_removeChild_real(JSContextHandle ctx, GCValue this_val, int argc
         GCValue cur = this_val;
         while (!JS_IsUndefined(cur) && !JS_IsNull(cur) && JS_IsObject(cur)) {
             DOMNodeHandle n = get_dom_node(ctx, cur);
-            if (!n.valid()) break;
-            if (n.node_type() == DOM_NODE_TYPE_DOCUMENT) { was_connected = true; break; }
-            if (n.node_type() == DOM_NODE_TYPE_DOCUMENT_FRAGMENT) break;
-            cur = n.parent_node();
+            if (SAFE_IS_NULL(n)) break;
+            if (SAFE_GET_OR(n, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_DOCUMENT) { was_connected = true; break; }
+            if (SAFE_GET_OR(n, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_DOCUMENT_FRAGMENT) break;
+            cur = SAFE_GET_OR(n, DOMNodeHandle, parent_node, JS_NULL);
         }
         if (was_connected) {
             invoke_custom_element_callback(ctx, child, "disconnectedCallback");
@@ -1496,17 +1496,17 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
     
     // Get or create DOM data
     DOMNodeHandle parent = get_or_create_dom_node(ctx, this_val, DOM_NODE_TYPE_ELEMENT, "");
-    if (!parent.valid()) {
+    if (SAFE_IS_NULL(parent)) {
         return JS_ThrowTypeError(ctx, "insertBefore: invalid parent node");
     }
     
     DOMNodeHandle new_node = get_or_create_dom_node(ctx, new_child, DOM_NODE_TYPE_ELEMENT, "");
-    if (!new_node.valid()) {
+    if (SAFE_IS_NULL(new_node)) {
         return JS_ThrowTypeError(ctx, "insertBefore: invalid new child node");
     }
     
     // Remove from current parent if any
-    GCValue old_parent_val = new_node.parent_node();
+    GCValue old_parent_val = SAFE_GET_OR(new_node, DOMNodeHandle, parent_node, JS_NULL);
     if (!JS_IsNull(old_parent_val)) {
         GCValue remove_args[1] = { new_child };
         js_node_removeChild_real(ctx, old_parent_val, 1, remove_args);
@@ -1519,7 +1519,7 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
     
     // Get ref child's DOM data
     DOMNodeHandle ref_node = get_dom_node(ctx, ref_child);
-    if (!ref_node.valid()) {
+    if (SAFE_IS_NULL(ref_node)) {
         if (getenv("CYBER_TRACE_INS")) {
             const char *trace_js = "(new Error('ib')).stack";
             GCValue tv = JS_Eval(ctx, trace_js, strlen(trace_js), "<ibtrace>", JS_EVAL_TYPE_GLOBAL);
@@ -1539,31 +1539,31 @@ GCValue js_node_insertBefore_real(JSContextHandle ctx, GCValue this_val, int arg
     }
     
     // Verify ref_child is a child of parent
-    GCValue ref_parent = ref_node.parent_node();
+    GCValue ref_parent = SAFE_GET_OR(ref_node, DOMNodeHandle, parent_node, JS_NULL);
     if (!JS_StrictEq(ctx, ref_parent, this_val)) {
         return throw_dom_exception(ctx, "NotFoundError", "Reference node is not a child of this node");
     }
     
     // Insert before ref_child
-    GCValue prev_sibling = ref_node.previous_sibling();
+    GCValue prev_sibling = SAFE_GET_OR(ref_node, DOMNodeHandle, previous_sibling, JS_NULL);
     
     // Update new node's links
-    new_node.set_parent_node(this_val);
-    new_node.set_previous_sibling(prev_sibling);
-    new_node.set_next_sibling(ref_child);
+    SAFE_SET(new_node, DOMNodeHandle, parent_node, this_val);
+    SAFE_SET(new_node, DOMNodeHandle, previous_sibling, prev_sibling);
+    SAFE_SET(new_node, DOMNodeHandle, next_sibling, ref_child);
     
     // Update ref child's previous sibling link
-    ref_node.set_previous_sibling(new_child);
+    SAFE_SET(ref_node, DOMNodeHandle, previous_sibling, new_child);
     
     // Update previous sibling's next link
     if (!JS_IsNull(prev_sibling)) {
         DOMNodeHandle prev_node = get_dom_node(ctx, prev_sibling);
-        if (prev_node.valid()) {
-            prev_node.set_next_sibling(new_child);
+        if (!SAFE_IS_NULL(prev_node)) {
+            SAFE_SET(prev_node, DOMNodeHandle, next_sibling, new_child);
         }
     } else {
         // new_child is now the first child
-        parent.set_first_child(new_child);
+        SAFE_SET(parent, DOMNodeHandle, first_child, new_child);
     }
     
     dom_request_layout();
@@ -1612,12 +1612,12 @@ GCValue js_node_replaceChild_real(JSContextHandle ctx, GCValue this_val, int arg
 
     DOMNodeHandle parent = get_dom_node(ctx, this_val);
     DOMNodeHandle old_node = get_dom_node(ctx, old_child);
-    if (!parent.valid() || !old_node.valid()) {
+    if (SAFE_IS_NULL(parent) || SAFE_IS_NULL(old_node)) {
         return throw_dom_exception(ctx, "NotFoundError", "Node not found");
     }
 
     // Verify oldChild is a child of this node.
-    GCValue old_parent = old_node.parent_node();
+    GCValue old_parent = SAFE_GET_OR(old_node, DOMNodeHandle, parent_node, JS_NULL);
     if (!JS_StrictEq(ctx, old_parent, this_val)) {
         return throw_dom_exception(ctx, "NotFoundError", "Node is not a child of this node");
     }
@@ -1636,39 +1636,39 @@ GCValue js_node_replaceChild_real(JSContextHandle ctx, GCValue this_val, int arg
 // Helper: true if node is a text node.
 static bool is_text_node(JSContextHandle ctx, GCValue node) {
     DOMNodeHandle n = get_dom_node(ctx, node);
-    return n.valid() && n.node_type() == DOM_NODE_TYPE_TEXT;
+    return !SAFE_IS_NULL(n) && SAFE_GET_OR(n, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_TEXT;
 }
 
 // Real normalize implementation: merge adjacent text nodes and remove empty ones.
 GCValue js_node_normalize_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     DOMNodeHandle parent = get_dom_node(ctx, this_val);
-    if (!parent.valid()) {
+    if (SAFE_IS_NULL(parent)) {
         return JS_UNDEFINED;
     }
 
-    GCValue child = parent.first_child();
+    GCValue child = SAFE_GET_OR(parent, DOMNodeHandle, first_child, JS_NULL);
     while (!JS_IsNull(child)) {
         DOMNodeHandle child_node = get_dom_node(ctx, child);
-        if (!child_node.valid()) {
-            child = child_node.next_sibling();
+        if (SAFE_IS_NULL(child_node)) {
+            child = SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL);
             continue;
         }
 
-        if (child_node.node_type() != DOM_NODE_TYPE_TEXT) {
+        if (SAFE_GET_OR(child_node, DOMNodeHandle, node_type, 0) != DOM_NODE_TYPE_TEXT) {
             // Recursively normalize descendants first, then advance.
-            GCValue next = child_node.next_sibling();
+            GCValue next = SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL);
             js_node_normalize_real(ctx, child, 0, NULL);
             child = next;
             continue;
         }
 
         // Merge adjacent text nodes.
-        GCValue next = child_node.next_sibling();
+        GCValue next = SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL);
         if (!JS_IsNull(next) && is_text_node(ctx, next)) {
             DOMNodeHandle next_node = get_dom_node(ctx, next);
-            const char *t1 = child_node.node_value();
-            const char *t2 = next_node.node_value();
+            const char *t1 = SAFE_GET_OR(child_node, DOMNodeHandle, node_value, "");
+            const char *t2 = SAFE_GET_OR(next_node, DOMNodeHandle, node_value, "");
             size_t len1 = t1 ? strlen(t1) : 0;
             size_t len2 = t2 ? strlen(t2) : 0;
             char *merged = (char *)malloc(len1 + len2 + 1);
@@ -1676,7 +1676,7 @@ GCValue js_node_normalize_real(JSContextHandle ctx, GCValue this_val, int argc, 
                 if (len1) memcpy(merged, t1, len1);
                 if (len2) memcpy(merged + len1, t2, len2);
                 merged[len1 + len2] = '\0';
-                child_node.set_node_value(merged);
+                SAFE_SET_STR(child_node, DOMNodeHandle, node_value, merged);
                 free(merged);
             }
             GCValue rem_args[1] = { next };
@@ -1685,7 +1685,7 @@ GCValue js_node_normalize_real(JSContextHandle ctx, GCValue this_val, int argc, 
         }
 
         // Remove empty text nodes.
-        const char *val = child_node.node_value();
+        const char *val = SAFE_GET_OR(child_node, DOMNodeHandle, node_value, "");
         if (!val || !*val) {
             GCValue rem_args[1] = { child };
             js_node_removeChild_real(ctx, this_val, 1, rem_args);
@@ -1708,8 +1708,8 @@ static GCValue common_ancestor_node(JSContextHandle ctx, GCValue a, GCValue b) {
     while (!JS_IsNull(cur) && JS_IsObject(cur) && anc_count < 256) {
         ancestors[anc_count++] = cur;
         DOMNodeHandle n = get_dom_node(ctx, cur);
-        if (!n.valid()) break;
-        cur = n.parent_node();
+        if (SAFE_IS_NULL(n)) break;
+        cur = SAFE_GET_OR(n, DOMNodeHandle, parent_node, JS_NULL);
     }
 
     cur = b;
@@ -1720,8 +1720,8 @@ static GCValue common_ancestor_node(JSContextHandle ctx, GCValue a, GCValue b) {
             }
         }
         DOMNodeHandle n = get_dom_node(ctx, cur);
-        if (!n.valid()) break;
-        cur = n.parent_node();
+        if (SAFE_IS_NULL(n)) break;
+        cur = SAFE_GET_OR(n, DOMNodeHandle, parent_node, JS_NULL);
     }
     return JS_NULL;
 }
@@ -1730,8 +1730,8 @@ static GCValue child_containing_node(JSContextHandle ctx, GCValue ancestor, GCVa
     GCValue cur = node;
     while (!JS_IsNull(cur) && JS_IsObject(cur)) {
         DOMNodeHandle n = get_dom_node(ctx, cur);
-        if (!n.valid()) break;
-        GCValue p = n.parent_node();
+        if (SAFE_IS_NULL(n)) break;
+        GCValue p = SAFE_GET_OR(n, DOMNodeHandle, parent_node, JS_NULL);
         if (JS_StrictEq(ctx, p, ancestor)) {
             return cur;
             }
@@ -1790,8 +1790,8 @@ GCValue js_node_compareDocumentPosition_real(JSContextHandle ctx, GCValue this_v
             return JS_NewInt32(ctx, 4 /* FOLLOWING */);
         }
         DOMNodeHandle n = get_dom_node(ctx, cur);
-        if (!n.valid()) break;
-        cur = n.next_sibling();
+        if (SAFE_IS_NULL(n)) break;
+        cur = SAFE_GET_OR(n, DOMNodeHandle, next_sibling, JS_NULL);
     }
     return JS_NewInt32(ctx, 2 /* PRECEDING */);
 }
@@ -1804,41 +1804,41 @@ GCValue js_node_cloneNode_real(JSContextHandle ctx, GCValue this_val, int argc, 
     }
     
     DOMNodeHandle original = get_dom_node(ctx, this_val);
-    if (!original.valid()) {
+    if (SAFE_IS_NULL(original)) {
         // No DOM data, return a basic object copy
         return JS_NewObject(ctx);
     }
     
     // Create new node of same type
     GCValue clone = JS_NewObjectClass(ctx, js_dom_node_class_id);
-    DOMNodeHandle clone_node = DOMNodeHandle::create(ctx, original.node_type(), original.node_name());
-    if (!clone_node.valid()) {
+    DOMNodeHandle clone_node = dom_node_create(ctx, SAFE_GET_OR(original, DOMNodeHandle, node_type, 0), SAFE_GET_OR(original, DOMNodeHandle, node_name, ""));
+    if (SAFE_IS_NULL(clone_node)) {
         return JS_ThrowInternalError(ctx, "cloneNode: failed to create clone");
     }
     
-    clone_node.attach_to_object(clone);
-    clone_node.set_node_value(original.node_value());
-    clone_node.set_id(original.id());
-    clone_node.set_class_name(original.class_name());
+    dom_node_attach_to_object(clone_node, clone);
+    SAFE_SET_STR(clone_node, DOMNodeHandle, node_value, SAFE_GET_OR(original, DOMNodeHandle, node_value, ""));
+    SAFE_SET_STR(clone_node, DOMNodeHandle, id, SAFE_GET_OR(original, DOMNodeHandle, id, ""));
+    SAFE_SET_STR(clone_node, DOMNodeHandle, class_name, SAFE_GET_OR(original, DOMNodeHandle, class_name, ""));
 
     /* The clone belongs to the same document as the original (DOM spec:
      * cloneNode keeps the node document; importNode re-documents the top
      * node separately).  Polymer's template parser relies on ownerDocument
      * being set on every node inside stamped template fragments. */
-    clone_node.set_owner_document(original.owner_document());
+    SAFE_SET(clone_node, DOMNodeHandle, owner_document, SAFE_GET_OR(original, DOMNodeHandle, owner_document, JS_NULL));
     
     // Copy attributes
-    int attr_count = original.attribute_count();
-    const DOMAttribute *attrs = original.attributes();
+    int attr_count = SAFE_GET_OR(original, DOMNodeHandle, attribute_count, 0);
+    const DOMAttribute *attrs = SAFE_GET_OR(original, DOMNodeHandle, attributes, NULL);
     for (int i = 0; i < attr_count && attrs; i++) {
-        clone_node.set_attribute(attrs[i].name, attrs[i].value);
+        dom_node_set_attribute(clone_node, attrs[i].name, attrs[i].value);
     }
 
     // Wire up a sensible prototype so the clone has DOM methods.
     {
         GCValue global_obj = JS_GetGlobalObject(ctx);
-        if (original.node_type() == DOM_NODE_TYPE_ELEMENT) {
-            bool is_template = (strcmp(original.node_name(), "TEMPLATE") == 0);
+        if (SAFE_GET_OR(original, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_ELEMENT) {
+            bool is_template = (strcmp(SAFE_GET_OR(original, DOMNodeHandle, node_name, ""), "TEMPLATE") == 0);
             GCValue ctor = JS_GetPropertyStr(ctx, global_obj,
                 is_template ? "HTMLTemplateElement" : "HTMLElement");
             if (!JS_IsUndefined(ctor) && !JS_IsException(ctor)) {
@@ -1847,7 +1847,7 @@ GCValue js_node_cloneNode_real(JSContextHandle ctx, GCValue this_val, int argc, 
                     JS_SetPrototype(ctx, clone, proto);
                 }
             }
-        } else if (original.node_type() == DOM_NODE_TYPE_DOCUMENT_FRAGMENT) {
+        } else if (SAFE_GET_OR(original, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_DOCUMENT_FRAGMENT) {
             GCValue ctor = JS_GetPropertyStr(ctx, global_obj, "DocumentFragment");
             if (!JS_IsUndefined(ctor) && !JS_IsException(ctor)) {
                 GCValue proto = JS_GetPropertyStr(ctx, ctor, "prototype");
@@ -1867,7 +1867,7 @@ GCValue js_node_cloneNode_real(JSContextHandle ctx, GCValue this_val, int argc, 
     }
 
     // Templates store their children in .content, not in the light DOM.
-    if (original.node_type() == DOM_NODE_TYPE_ELEMENT && strcmp(original.node_name(), "TEMPLATE") == 0) {
+    if (SAFE_GET_OR(original, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_ELEMENT && strcmp(SAFE_GET_OR(original, DOMNodeHandle, node_name, ""), "TEMPLATE") == 0) {
         GCValue orig_content = JS_GetPropertyStr(ctx, this_val, "content");
         if (!JS_IsUndefined(orig_content) && !JS_IsNull(orig_content) && JS_IsObject(orig_content)) {
             GCValue cloned_content = js_node_cloneNode_real(ctx, orig_content, 1, argv);
@@ -1879,17 +1879,17 @@ GCValue js_node_cloneNode_real(JSContextHandle ctx, GCValue this_val, int argc, 
 
     // If deep clone, clone all children
     if (deep) {
-        GCValue child = original.first_child();
+        GCValue child = SAFE_GET_OR(original, DOMNodeHandle, first_child, JS_NULL);
         while (!JS_IsNull(child)) {
             DOMNodeHandle child_node = get_dom_node(ctx, child);
-            if (child_node.valid()) {
+            if (!SAFE_IS_NULL(child_node)) {
                 GCValue clone_child = js_node_cloneNode_real(ctx, child, 1, argv);
                 if (!JS_IsException(clone_child)) {
                     GCValue append_args[1] = { clone_child };
                     js_node_appendChild_real(ctx, clone, 1, append_args);
                 }
             }
-            child = child_node.next_sibling();
+            child = SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL);
         }
     }
 
@@ -1911,8 +1911,8 @@ GCValue js_node_contains_real(JSContextHandle ctx, GCValue this_val, int argc, G
     
     // Walk up the tree from other node
     DOMNodeHandle other_node = get_dom_node(ctx, other);
-    while (other_node.valid()) {
-        GCValue parent = other_node.parent_node();
+    while (!SAFE_IS_NULL(other_node)) {
+        GCValue parent = SAFE_GET_OR(other_node, DOMNodeHandle, parent_node, JS_NULL);
         if (JS_StrictEq(ctx, parent, this_val)) {
             return JS_TRUE;
         }
@@ -1933,10 +1933,10 @@ GCValue js_node_getRootNode_real(JSContextHandle ctx, GCValue this_val, int argc
     GCValue current = this_val;
     DOMNodeHandle current_node = get_dom_node(ctx, current);
 
-    while (current_node.valid() || JS_IsObject(current)) {
+    while (!SAFE_IS_NULL(current_node) || JS_IsObject(current)) {
         GCValue parent = JS_NULL;
-        if (current_node.valid()) {
-            parent = current_node.parent_node();
+        if (!SAFE_IS_NULL(current_node)) {
+            parent = SAFE_GET_OR(current_node, DOMNodeHandle, parent_node, JS_NULL);
         }
         if (JS_IsNull(parent)) {
             if (composed) {
@@ -1961,48 +1961,48 @@ GCValue js_node_getRootNode_real(JSContextHandle ctx, GCValue this_val, int argc
 GCValue js_node_get_firstChild(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (!node.valid()) {
+    if (SAFE_IS_NULL(node)) {
         return JS_NULL;
     }
-    GCValue first = node.first_child();
+    GCValue first = SAFE_GET_OR(node, DOMNodeHandle, first_child, JS_NULL);
     return JS_IsNull(first) ? JS_NULL : first;
 }
 
 GCValue js_node_get_lastChild(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (!node.valid()) {
+    if (SAFE_IS_NULL(node)) {
         return JS_NULL;
     }
-    GCValue last = node.last_child();
+    GCValue last = SAFE_GET_OR(node, DOMNodeHandle, last_child, JS_NULL);
     return JS_IsNull(last) ? JS_NULL : last;
 }
 
 GCValue js_node_get_nextSibling(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (!node.valid()) {
+    if (SAFE_IS_NULL(node)) {
         return JS_NULL;
     }
-    GCValue next = node.next_sibling();
+    GCValue next = SAFE_GET_OR(node, DOMNodeHandle, next_sibling, JS_NULL);
     return JS_IsNull(next) ? JS_NULL : next;
 }
 
 GCValue js_node_get_previousSibling(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (!node.valid()) {
+    if (SAFE_IS_NULL(node)) {
         return JS_NULL;
     }
-    GCValue prev = node.previous_sibling();
+    GCValue prev = SAFE_GET_OR(node, DOMNodeHandle, previous_sibling, JS_NULL);
     return JS_IsNull(prev) ? JS_NULL : prev;
 }
 
 /* Set both the internal DOMNode ownerDocument and the JS ownerDocument property. */
 void dom_node_set_owner_document(JSContextHandle ctx, GCValue node, GCValue doc) {
     DOMNodeHandle dom_node = get_dom_node(ctx, node);
-    if (dom_node.valid()) {
-        dom_node.set_owner_document(doc);
+    if (!SAFE_IS_NULL(dom_node)) {
+        SAFE_SET(dom_node, DOMNodeHandle, owner_document, doc);
     }
     // Define an own writable data property so polyfills that assign to
     // ownerDocument do not trip over the read-only getter on Node.prototype.
@@ -2013,10 +2013,10 @@ void dom_node_set_owner_document(JSContextHandle ctx, GCValue node, GCValue doc)
 GCValue js_node_get_ownerDocument(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (!node.valid()) {
+    if (SAFE_IS_NULL(node)) {
         return JS_NULL;
     }
-    GCValue doc = node.owner_document();
+    GCValue doc = SAFE_GET_OR(node, DOMNodeHandle, owner_document, JS_NULL);
     if (JS_IsUndefined(doc) || JS_IsNull(doc)) {
         return JS_NULL;
     }
@@ -2026,10 +2026,10 @@ GCValue js_node_get_ownerDocument(JSContextHandle ctx, GCValue this_val, int arg
 GCValue js_node_get_parentNode(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (!node.valid()) {
+    if (SAFE_IS_NULL(node)) {
         return JS_NULL;
     }
-    GCValue parent = node.parent_node();
+    GCValue parent = SAFE_GET_OR(node, DOMNodeHandle, parent_node, JS_NULL);
     return JS_IsNull(parent) ? JS_NULL : parent;
 }
 
@@ -2041,7 +2041,7 @@ GCValue js_node_get_parentElement(JSContextHandle ctx, GCValue this_val, int arg
     }
     // Check if parent is an element
     DOMNodeHandle parent_node = get_dom_node(ctx, parent);
-    if (parent_node.valid() && parent_node.node_type() == DOM_NODE_TYPE_ELEMENT) {
+    if (!SAFE_IS_NULL(parent_node) && SAFE_GET_OR(parent_node, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_ELEMENT) {
         return parent;
     }
     return JS_NULL;
@@ -2051,17 +2051,17 @@ GCValue js_node_get_childNodes(JSContextHandle ctx, GCValue this_val, int argc, 
     (void)argc; (void)argv;
     GCValue arr = JS_NewArray(ctx);
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (!node.valid()) {
+    if (SAFE_IS_NULL(node)) {
         return arr;
     }
     
     int idx = 0;
-    GCValue child = node.first_child();
+    GCValue child = SAFE_GET_OR(node, DOMNodeHandle, first_child, JS_NULL);
     while (!JS_IsNull(child)) {
         JS_SetPropertyUint32(ctx, arr, idx++, child);
         DOMNodeHandle child_node = get_dom_node(ctx, child);
-        if (!child_node.valid()) break;
-        child = child_node.next_sibling();
+        if (SAFE_IS_NULL(child_node)) break;
+        child = SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL);
     }
     
     return arr;
@@ -2070,16 +2070,16 @@ GCValue js_node_get_childNodes(JSContextHandle ctx, GCValue this_val, int argc, 
 GCValue js_node_get_nodeType(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (!node.valid()) {
+    if (SAFE_IS_NULL(node)) {
         return JS_NewInt32(ctx, DOM_NODE_TYPE_ELEMENT);  // Default to element
     }
-    return JS_NewInt32(ctx, node.node_type());
+    return JS_NewInt32(ctx, SAFE_GET_OR(node, DOMNodeHandle, node_type, 0));
 }
 
 GCValue js_node_get_nodeName(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (!node.valid() || strlen(node.node_name()) == 0) {
+    if (SAFE_IS_NULL(node) || strlen(SAFE_GET_OR(node, DOMNodeHandle, node_name, "")) == 0) {
         // Try to get from object
         GCValue tagName = JS_GetPropertyStr(ctx, this_val, "tagName");
         if (!JS_IsUndefined(tagName)) {
@@ -2087,17 +2087,17 @@ GCValue js_node_get_nodeName(JSContextHandle ctx, GCValue this_val, int argc, GC
         }
         return JS_NewString(ctx, "DIV");
     }
-    return JS_NewString(ctx, node.node_name());
+    return JS_NewString(ctx, SAFE_GET_OR(node, DOMNodeHandle, node_name, ""));
 }
 
 // Element.prototype.tagName getter
 GCValue js_element_get_tagName(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (!node.valid() || strlen(node.node_name()) == 0) {
+    if (SAFE_IS_NULL(node) || strlen(SAFE_GET_OR(node, DOMNodeHandle, node_name, "")) == 0) {
         return JS_NewString(ctx, "DIV");
     }
-    return JS_NewString(ctx, node.node_name());
+    return JS_NewString(ctx, SAFE_GET_OR(node, DOMNodeHandle, node_name, ""));
 }
 
 /* Element.localName: the tag name in lowercase.  Polymer's template parser
@@ -2106,7 +2106,7 @@ GCValue js_element_get_tagName(JSContextHandle ctx, GCValue this_val, int argc, 
 GCValue js_element_get_localName(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    const char *name = (node.valid() && node.node_name()[0]) ? node.node_name() : "div";
+    const char *name = (!SAFE_IS_NULL(node) && SAFE_GET_OR(node, DOMNodeHandle, node_name, "")[0]) ? SAFE_GET_OR(node, DOMNodeHandle, node_name, "") : "div";
     char lower[128];
     size_t n = strlen(name);
     if (n >= sizeof(lower)) n = sizeof(lower) - 1;
@@ -2119,17 +2119,17 @@ GCValue js_element_get_localName(JSContextHandle ctx, GCValue this_val, int argc
 GCValue js_element_get_firstElementChild(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (!node.valid()) {
+    if (SAFE_IS_NULL(node)) {
         return JS_NULL;
     }
     
-    GCValue child = node.first_child();
+    GCValue child = SAFE_GET_OR(node, DOMNodeHandle, first_child, JS_NULL);
     while (!JS_IsNull(child)) {
         DOMNodeHandle child_node = get_dom_node(ctx, child);
-        if (child_node.valid() && child_node.node_type() == DOM_NODE_TYPE_ELEMENT) {
+        if (!SAFE_IS_NULL(child_node) && SAFE_GET_OR(child_node, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_ELEMENT) {
             return child;
         }
-        child = child_node.next_sibling();
+        child = SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL);
     }
     return JS_NULL;
 }
@@ -2137,17 +2137,17 @@ GCValue js_element_get_firstElementChild(JSContextHandle ctx, GCValue this_val, 
 GCValue js_element_get_lastElementChild(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (!node.valid()) {
+    if (SAFE_IS_NULL(node)) {
         return JS_NULL;
     }
     
-    GCValue child = node.last_child();
+    GCValue child = SAFE_GET_OR(node, DOMNodeHandle, last_child, JS_NULL);
     while (!JS_IsNull(child)) {
         DOMNodeHandle child_node = get_dom_node(ctx, child);
-        if (child_node.valid() && child_node.node_type() == DOM_NODE_TYPE_ELEMENT) {
+        if (!SAFE_IS_NULL(child_node) && SAFE_GET_OR(child_node, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_ELEMENT) {
             return child;
         }
-        child = child_node.previous_sibling();
+        child = SAFE_GET_OR(child_node, DOMNodeHandle, previous_sibling, JS_NULL);
     }
     return JS_NULL;
 }
@@ -2155,17 +2155,17 @@ GCValue js_element_get_lastElementChild(JSContextHandle ctx, GCValue this_val, i
 GCValue js_element_get_nextElementSibling(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (!node.valid()) {
+    if (SAFE_IS_NULL(node)) {
         return JS_NULL;
     }
     
-    GCValue sibling = node.next_sibling();
+    GCValue sibling = SAFE_GET_OR(node, DOMNodeHandle, next_sibling, JS_NULL);
     while (!JS_IsNull(sibling)) {
         DOMNodeHandle sib_node = get_dom_node(ctx, sibling);
-        if (sib_node.valid() && sib_node.node_type() == DOM_NODE_TYPE_ELEMENT) {
+        if (!SAFE_IS_NULL(sib_node) && SAFE_GET_OR(sib_node, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_ELEMENT) {
             return sibling;
         }
-        sibling = sib_node.next_sibling();
+        sibling = SAFE_GET_OR(sib_node, DOMNodeHandle, next_sibling, JS_NULL);
     }
     return JS_NULL;
 }
@@ -2173,17 +2173,17 @@ GCValue js_element_get_nextElementSibling(JSContextHandle ctx, GCValue this_val,
 GCValue js_element_get_previousElementSibling(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (!node.valid()) {
+    if (SAFE_IS_NULL(node)) {
         return JS_NULL;
     }
     
-    GCValue sibling = node.previous_sibling();
+    GCValue sibling = SAFE_GET_OR(node, DOMNodeHandle, previous_sibling, JS_NULL);
     while (!JS_IsNull(sibling)) {
         DOMNodeHandle sib_node = get_dom_node(ctx, sibling);
-        if (sib_node.valid() && sib_node.node_type() == DOM_NODE_TYPE_ELEMENT) {
+        if (!SAFE_IS_NULL(sib_node) && SAFE_GET_OR(sib_node, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_ELEMENT) {
             return sibling;
         }
-        sibling = sib_node.previous_sibling();
+        sibling = SAFE_GET_OR(sib_node, DOMNodeHandle, previous_sibling, JS_NULL);
     }
     return JS_NULL;
 }
@@ -2191,18 +2191,18 @@ GCValue js_element_get_previousElementSibling(JSContextHandle ctx, GCValue this_
 GCValue js_element_get_childElementCount(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (!node.valid()) {
+    if (SAFE_IS_NULL(node)) {
         return JS_NewInt32(ctx, 0);
     }
     
     int count = 0;
-    GCValue child = node.first_child();
+    GCValue child = SAFE_GET_OR(node, DOMNodeHandle, first_child, JS_NULL);
     while (!JS_IsNull(child)) {
         DOMNodeHandle child_node = get_dom_node(ctx, child);
-        if (child_node.valid() && child_node.node_type() == DOM_NODE_TYPE_ELEMENT) {
+        if (!SAFE_IS_NULL(child_node) && SAFE_GET_OR(child_node, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_ELEMENT) {
             count++;
         }
-        child = child_node.next_sibling();
+        child = SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL);
     }
     return JS_NewInt32(ctx, count);
 }
@@ -2211,18 +2211,18 @@ GCValue js_element_get_children(JSContextHandle ctx, GCValue this_val, int argc,
     (void)argc; (void)argv;
     GCValue arr = JS_NewArray(ctx);
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (!node.valid()) {
+    if (SAFE_IS_NULL(node)) {
         return arr;
     }
     
     int idx = 0;
-    GCValue child = node.first_child();
+    GCValue child = SAFE_GET_OR(node, DOMNodeHandle, first_child, JS_NULL);
     while (!JS_IsNull(child)) {
         DOMNodeHandle child_node = get_dom_node(ctx, child);
-        if (child_node.valid() && child_node.node_type() == DOM_NODE_TYPE_ELEMENT) {
+        if (!SAFE_IS_NULL(child_node) && SAFE_GET_OR(child_node, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_ELEMENT) {
             JS_SetPropertyUint32(ctx, arr, idx++, child);
         }
-        child = child_node.next_sibling();
+        child = SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL);
     }
     
     return arr;
@@ -2232,7 +2232,7 @@ GCValue js_element_get_children(JSContextHandle ctx, GCValue this_val, int argc,
 GCValue js_element_get_style(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (!node.valid() || node.node_type() != DOM_NODE_TYPE_ELEMENT) {
+    if (SAFE_IS_NULL(node) || SAFE_GET_OR(node, DOMNodeHandle, node_type, 0) != DOM_NODE_TYPE_ELEMENT) {
         return JS_UNDEFINED;
     }
     return css_ensure_style_object(ctx, this_val);
@@ -2250,21 +2250,21 @@ GCValue js_element_querySelectorAll(JSContextHandle ctx, GCValue this_val, int a
 
 // Helper to recursively collect elements by tag name
 void collect_elements_by_tag(JSContextHandle ctx, DOMNodeHandle node, const char *tag_name, GCValue arr, int *idx) {
-    if (!node.valid()) return;
+    if (SAFE_IS_NULL(node)) return;
     
-    GCValue child = node.first_child();
+    GCValue child = SAFE_GET_OR(node, DOMNodeHandle, first_child, JS_NULL);
     while (!JS_IsNull(child)) {
         DOMNodeHandle child_node = get_dom_node(ctx, child);
-        if (child_node.valid() && child_node.node_type() == DOM_NODE_TYPE_ELEMENT) {
+        if (!SAFE_IS_NULL(child_node) && SAFE_GET_OR(child_node, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_ELEMENT) {
             // Check if tag name matches
-            const char *child_tag = child_node.node_name();
+            const char *child_tag = SAFE_GET_OR(child_node, DOMNodeHandle, node_name, "");
             if (child_tag && strcasecmp(child_tag, tag_name) == 0) {
                 JS_SetPropertyUint32(ctx, arr, (*idx)++, child);
             }
             // Recurse into children
             collect_elements_by_tag(ctx, child_node, tag_name, arr, idx);
         }
-        child = child_node.next_sibling();
+        child = SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL);
     }
 }
 
@@ -2277,7 +2277,7 @@ GCValue js_element_get_elements_by_tag_name(JSContextHandle ctx, GCValue this_va
     
     GCValue arr = JS_NewArray(ctx);
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (!node.valid()) {
+    if (SAFE_IS_NULL(node)) {
         return arr;
     }
     
@@ -2473,8 +2473,8 @@ GCValue js_element_set_attribute(JSContextHandle ctx, GCValue this_val, int argc
         // Capture the old value before overwriting.
         const char *old_value = NULL;
         DOMNodeHandle node = get_dom_node(ctx, this_val);
-        if (node.valid()) {
-            old_value = node.get_attribute(name);
+        if (!SAFE_IS_NULL(node)) {
+            old_value = dom_node_get_attribute(node, name);
         }
 
         // Store attribute on the object itself (skip names that have a
@@ -2486,8 +2486,8 @@ GCValue js_element_set_attribute(JSContextHandle ctx, GCValue this_val, int argc
         
         // Keep the internal DOMNode attribute table in sync so serialization
         // back to HTML produces the mutated attributes.
-        if (node.valid()) {
-            node.set_attribute(name, value);
+        if (!SAFE_IS_NULL(node)) {
+            dom_node_set_attribute(node, name, value);
         }
         
         // Capture URL if src is being set on any element
@@ -2529,8 +2529,8 @@ GCValue js_element_set_attribute(JSContextHandle ctx, GCValue this_val, int argc
 GCValue js_element_get_id(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (node.valid()) {
-        const char *val = node.get_attribute("id");
+    if (!SAFE_IS_NULL(node)) {
+        const char *val = dom_node_get_attribute(node, "id");
         if (val) return JS_NewString(ctx, val);
     }
     return JS_NewString(ctx, "");
@@ -2541,11 +2541,11 @@ GCValue js_element_set_id(JSContextHandle ctx, GCValue this_val, int argc, GCVal
         const char *v = JS_ToCString(ctx, argv[0]);
         if (v) {
             DOMNodeHandle node = get_dom_node(ctx, this_val);
-            if (node.valid()) {
-                const char *old = node.get_attribute("id");
+            if (!SAFE_IS_NULL(node)) {
+                const char *old = dom_node_get_attribute(node, "id");
                 char old_buf[512]; old_buf[0] = '\0';
                 if (old) strncpy(old_buf, old, sizeof(old_buf) - 1);
-                node.set_attribute("id", v);
+                dom_node_set_attribute(node, "id", v);
                 invoke_attribute_changed(ctx, this_val, "id", old, v);
                 mo_notify_attribute(ctx, this_val, "id", old_buf);
                 dom_request_layout();
@@ -2558,8 +2558,8 @@ GCValue js_element_set_id(JSContextHandle ctx, GCValue this_val, int argc, GCVal
 GCValue js_element_get_class_name(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (node.valid()) {
-        const char *val = node.get_attribute("class");
+    if (!SAFE_IS_NULL(node)) {
+        const char *val = dom_node_get_attribute(node, "class");
         if (val) return JS_NewString(ctx, val);
     }
     return JS_NewString(ctx, "");
@@ -2570,11 +2570,11 @@ GCValue js_element_set_class_name(JSContextHandle ctx, GCValue this_val, int arg
         const char *v = JS_ToCString(ctx, argv[0]);
         if (v) {
             DOMNodeHandle node = get_dom_node(ctx, this_val);
-            if (node.valid()) {
-                const char *old = node.get_attribute("class");
+            if (!SAFE_IS_NULL(node)) {
+                const char *old = dom_node_get_attribute(node, "class");
                 char old_buf[512]; old_buf[0] = '\0';
                 if (old) strncpy(old_buf, old, sizeof(old_buf) - 1);
-                node.set_attribute("class", v);
+                dom_node_set_attribute(node, "class", v);
                 invoke_attribute_changed(ctx, this_val, "class", old, v);
                 mo_notify_attribute(ctx, this_val, "class", old_buf);
                 dom_request_layout();
@@ -2594,8 +2594,8 @@ GCValue js_element_get_attribute(JSContextHandle ctx, GCValue this_val, int argc
     // Read from the authoritative content-attribute store first. This fixes
     // getAttribute('style') returning the live CSSStyleDeclaration object.
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (node.valid()) {
-        const char *val = node.get_attribute(name);
+    if (!SAFE_IS_NULL(node)) {
+        const char *val = dom_node_get_attribute(node, name);
         if (val) {
             return JS_NewString(ctx, val);
         }
@@ -2619,14 +2619,14 @@ GCValue js_element_remove_attribute(JSContextHandle ctx, GCValue this_val, int a
     const char *name = JS_ToCString(ctx, argv[0]);
     if (name) {
         DOMNodeHandle node = get_dom_node(ctx, this_val);
-        const char *old_value = node.valid() ? node.get_attribute(name) : NULL;
+        const char *old_value = !SAFE_IS_NULL(node) ? dom_node_get_attribute(node, name) : NULL;
 
         JSAtom atom = JS_NewAtom(ctx, name);
         JS_DeleteProperty(ctx, this_val, atom, 0);
         JS_FreeAtom(ctx, atom);
         
-        if (node.valid()) {
-            node.remove_attribute(name);
+        if (!SAFE_IS_NULL(node)) {
+            dom_node_remove_attribute(node, name);
         }
 
         invoke_attribute_changed(ctx, this_val, name, old_value, NULL);
@@ -2888,7 +2888,7 @@ bool matches_selector(JSContextHandle ctx, GCValue elem, const char* selector) {
     if (!selector || !*selector) return false;
 
     DOMNodeHandle node = get_dom_node(ctx, elem);
-    if (!node.valid() || node.node_type() != DOM_NODE_TYPE_ELEMENT) return false;
+    if (SAFE_IS_NULL(node) || SAFE_GET_OR(node, DOMNodeHandle, node_type, 0) != DOM_NODE_TYPE_ELEMENT) return false;
 
     const char *p = selector;
 
@@ -2898,7 +2898,7 @@ bool matches_selector(JSContextHandle ctx, GCValue elem, const char* selector) {
         while (*p && *p != '#' && *p != '.' && *p != '[' && *p != ':') p++;
         size_t tag_len = (size_t)(p - start);
         if (tag_len > 0 && !(tag_len == 1 && start[0] == '*')) {
-            const char *tag_name = node.node_name();
+            const char *tag_name = SAFE_GET_OR(node, DOMNodeHandle, node_name, "");
             size_t node_tag_len = tag_name ? strlen(tag_name) : 0;
             if (tag_len != node_tag_len || strncasecmp(start, tag_name, tag_len) != 0) {
                 return false;
@@ -2912,7 +2912,7 @@ bool matches_selector(JSContextHandle ctx, GCValue elem, const char* selector) {
             const char *start = p;
             while (*p && *p != '#' && *p != '.' && *p != '[' && *p != ':') p++;
             size_t len = (size_t)(p - start);
-            const char *id = node.id();
+            const char *id = SAFE_GET_OR(node, DOMNodeHandle, id, "");
             size_t id_len = id ? strlen(id) : 0;
             bool id_ok = (len == id_len && strncasecmp(start, id, len) == 0);
             if (!id_ok) {
@@ -2927,7 +2927,7 @@ bool matches_selector(JSContextHandle ctx, GCValue elem, const char* selector) {
             const char *start = p;
             while (*p && *p != '#' && *p != '.' && *p != '[' && *p != ':') p++;
             size_t len = (size_t)(p - start);
-            if (!token_list_contains(node.class_name(), start, len)) {
+            if (!token_list_contains(SAFE_GET_OR(node, DOMNodeHandle, class_name, ""), start, len)) {
                 GCValue class_val = JS_GetPropertyStr(ctx, elem, "className");
                 const char *class_prop = JS_ToCString(ctx, class_val);
                 if (!token_list_contains(class_prop, start, len)) return false;
@@ -2978,7 +2978,7 @@ bool matches_selector(JSContextHandle ctx, GCValue elem, const char* selector) {
             if (!attr_name) return false;
             memcpy(attr_name, name_start, name_len);
             attr_name[name_len] = '\0';
-            const char *attr_val = node.get_attribute(attr_name);
+            const char *attr_val = dom_node_get_attribute(node, attr_name);
             free(attr_name);
             if (!attr_match(attr_val, op, val_start, val_len)) return false;
         } else if (*p == ':') {
@@ -3006,7 +3006,7 @@ bool matches_selector(JSContextHandle ctx, GCValue elem, const char* selector) {
 // Recursive querySelector helper
 GCValue query_selector_recursive(JSContextHandle ctx, GCValue elem, const char* selector) {
     DOMNodeHandle node = get_dom_node(ctx, elem);
-    if (!node.valid()) return JS_NULL;
+    if (SAFE_IS_NULL(node)) return JS_NULL;
     
     // Check this element
     if (matches_selector(ctx, elem, selector)) {
@@ -3014,16 +3014,16 @@ GCValue query_selector_recursive(JSContextHandle ctx, GCValue elem, const char* 
     }
     
     // Check children recursively
-    GCValue child = node.first_child();
+    GCValue child = SAFE_GET_OR(node, DOMNodeHandle, first_child, JS_NULL);
     while (!JS_IsNull(child)) {
         DOMNodeHandle child_node = get_dom_node(ctx, child);
-        if (child_node.valid() && child_node.node_type() == DOM_NODE_TYPE_ELEMENT) {
+        if (!SAFE_IS_NULL(child_node) && SAFE_GET_OR(child_node, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_ELEMENT) {
             GCValue result = query_selector_recursive(ctx, child, selector);
             if (!JS_IsNull(result)) {
                 return result;
             }
         }
-        child = child_node.next_sibling();
+        child = SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL);
     }
     
     return JS_NULL;
@@ -3032,7 +3032,7 @@ GCValue query_selector_recursive(JSContextHandle ctx, GCValue elem, const char* 
 // Recursive querySelectorAll helper
 void query_selector_all_recursive(JSContextHandle ctx, GCValue elem, const char* selector, GCValue result_arr, int* idx) {
     DOMNodeHandle node = get_dom_node(ctx, elem);
-    if (!node.valid()) return;
+    if (SAFE_IS_NULL(node)) return;
     
     // Check this element
     if (matches_selector(ctx, elem, selector)) {
@@ -3040,13 +3040,13 @@ void query_selector_all_recursive(JSContextHandle ctx, GCValue elem, const char*
     }
     
     // Check children recursively
-    GCValue child = node.first_child();
+    GCValue child = SAFE_GET_OR(node, DOMNodeHandle, first_child, JS_NULL);
     while (!JS_IsNull(child)) {
         DOMNodeHandle child_node = get_dom_node(ctx, child);
-        if (child_node.valid() && child_node.node_type() == DOM_NODE_TYPE_ELEMENT) {
+        if (!SAFE_IS_NULL(child_node) && SAFE_GET_OR(child_node, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_ELEMENT) {
             query_selector_all_recursive(ctx, child, selector, result_arr, idx);
         }
-        child = child_node.next_sibling();
+        child = SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL);
     }
 }
 
@@ -3160,7 +3160,7 @@ static const char* safe_string(JSContextHandle ctx, GCValue val) {
 }
 
 static void serialize_element_html(JSContextHandle ctx, DOMNodeHandle node, char *buf, size_t buf_size, size_t *pos) {
-    const char *tag = node.node_name();
+    const char *tag = SAFE_GET_OR(node, DOMNodeHandle, node_name, "");
     if (!tag || !tag[0]) tag = "DIV";
     size_t tag_len = strlen(tag);
     if (*pos + tag_len + 2 >= buf_size) return;
@@ -3169,7 +3169,7 @@ static void serialize_element_html(JSContextHandle ctx, DOMNodeHandle node, char
     *pos += tag_len;
 
     // Serialize class and id attributes explicitly
-    GCValue class_val = JS_GetPropertyStr(ctx, node.js_object(), "className");
+    GCValue class_val = JS_GetPropertyStr(ctx, SAFE_GET_OR(node, DOMNodeHandle, js_object, JS_NULL), "className");
     const char *class_str = safe_string(ctx, class_val);
     if (class_str) {
         size_t len = strlen(class_str);
@@ -3181,7 +3181,7 @@ static void serialize_element_html(JSContextHandle ctx, DOMNodeHandle node, char
             buf[(*pos)++] = '"';
         }
     }
-    GCValue id_val = JS_GetPropertyStr(ctx, node.js_object(), "id");
+    GCValue id_val = JS_GetPropertyStr(ctx, SAFE_GET_OR(node, DOMNodeHandle, js_object, JS_NULL), "id");
     const char *id_str = safe_string(ctx, id_val);
     if (id_str) {
         size_t len = strlen(id_str);
@@ -3199,12 +3199,12 @@ static void serialize_element_html(JSContextHandle ctx, DOMNodeHandle node, char
     buf[*pos] = '\0';
 
     // Serialize children
-    GCValue child = node.first_child();
+    GCValue child = SAFE_GET_OR(node, DOMNodeHandle, first_child, JS_NULL);
     while (!JS_IsNull(child)) {
         serialize_inner_html(ctx, child, buf, buf_size, pos);
         DOMNodeHandle child_node = get_dom_node(ctx, child);
-        if (!child_node.valid()) break;
-        child = child_node.next_sibling();
+        if (SAFE_IS_NULL(child_node)) break;
+        child = SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL);
     }
 
     if (*pos + tag_len + 3 >= buf_size) return;
@@ -3218,8 +3218,8 @@ static void serialize_element_html(JSContextHandle ctx, DOMNodeHandle node, char
 
 static void serialize_inner_html(JSContextHandle ctx, GCValue node, char *buf, size_t buf_size, size_t *pos) {
     DOMNodeHandle dom_node = get_dom_node(ctx, node);
-    if (dom_node.valid() && dom_node.node_type() == DOM_NODE_TYPE_TEXT) {
-        const char *val = dom_node.node_value();
+    if (!SAFE_IS_NULL(dom_node) && SAFE_GET_OR(dom_node, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_TEXT) {
+        const char *val = SAFE_GET_OR(dom_node, DOMNodeHandle, node_value, "");
         if (val && val[0]) {
             size_t len = strlen(val);
             if (*pos + len < buf_size) {
@@ -3230,7 +3230,7 @@ static void serialize_inner_html(JSContextHandle ctx, GCValue node, char *buf, s
         }
         return;
     }
-    if (dom_node.valid() && dom_node.node_type() == DOM_NODE_TYPE_ELEMENT) {
+    if (!SAFE_IS_NULL(dom_node) && SAFE_GET_OR(dom_node, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_ELEMENT) {
         serialize_element_html(ctx, dom_node, buf, buf_size, pos);
     }
 }
@@ -3242,13 +3242,13 @@ GCValue js_element_get_inner_html(JSContextHandle ctx, GCValue this_val, int arg
     size_t pos = 0;
     // innerHTML serializes children, not the element itself.
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (node.valid()) {
-        GCValue child = node.first_child();
+    if (!SAFE_IS_NULL(node)) {
+        GCValue child = SAFE_GET_OR(node, DOMNodeHandle, first_child, JS_NULL);
         while (!JS_IsNull(child)) {
             serialize_inner_html(ctx, child, buf, sizeof(buf), &pos);
             DOMNodeHandle child_node = get_dom_node(ctx, child);
-            if (!child_node.valid()) break;
-            child = child_node.next_sibling();
+            if (SAFE_IS_NULL(child_node)) break;
+            child = SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL);
         }
     }
     if (pos < sizeof(buf)) buf[pos] = '\0';
@@ -3271,7 +3271,7 @@ GCValue js_element_set_inner_html(JSContextHandle ctx, GCValue this_val, int arg
 GCValue js_element_get_outer_html(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (!node.valid() || node.node_type() != DOM_NODE_TYPE_ELEMENT) {
+    if (SAFE_IS_NULL(node) || SAFE_GET_OR(node, DOMNodeHandle, node_type, 0) != DOM_NODE_TYPE_ELEMENT) {
         return JS_NewString(ctx, "");
     }
     char buf[4096];
@@ -3288,8 +3288,8 @@ GCValue js_element_set_outer_html(JSContextHandle ctx, GCValue this_val, int arg
     if (!html) html = "";
 
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (!node.valid()) return JS_UNDEFINED;
-    GCValue parent = node.parent_node();
+    if (SAFE_IS_NULL(node)) return JS_UNDEFINED;
+    GCValue parent = SAFE_GET_OR(node, DOMNodeHandle, parent_node, JS_NULL);
     if (JS_IsNull(parent) || JS_IsUndefined(parent)) return JS_UNDEFINED;
 
     // Parse the replacement HTML into a temporary container.
@@ -3299,10 +3299,10 @@ GCValue js_element_set_outer_html(JSContextHandle ctx, GCValue this_val, int arg
 
     // Insert parsed children before this element.
     DOMNodeHandle temp_node = get_dom_node(ctx, temp);
-    GCValue child = temp_node.first_child();
+    GCValue child = SAFE_GET_OR(temp_node, DOMNodeHandle, first_child, JS_NULL);
     while (!JS_IsNull(child) && JS_IsObject(child)) {
         DOMNodeHandle child_node = get_dom_node(ctx, child);
-        GCValue next = child_node.valid() ? child_node.next_sibling() : JS_NULL;
+        GCValue next = !SAFE_IS_NULL(child_node) ? SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL) : JS_NULL;
         GCValue insert_args[2] = { child, this_val };
         js_node_insertBefore_real(ctx, parent, 2, insert_args);
         if (!JS_IsObject(next)) break;
@@ -3340,18 +3340,18 @@ static void text_collect_append(TextCollectBuf *b, const char *s, size_t n) {
 
 // Helper: recursively collect text content from an element's descendants.
 static void collect_text_content(JSContextHandle ctx, DOMNodeHandle node, TextCollectBuf *b) {
-    if (!node.valid()) return;
-    if (node.node_type() == DOM_NODE_TYPE_TEXT) {
-        const char *val = node.node_value();
+    if (SAFE_IS_NULL(node)) return;
+    if (SAFE_GET_OR(node, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_TEXT) {
+        const char *val = SAFE_GET_OR(node, DOMNodeHandle, node_value, "");
         if (val && val[0]) text_collect_append(b, val, strlen(val));
         return;
     }
-    GCValue child = node.first_child();
+    GCValue child = SAFE_GET_OR(node, DOMNodeHandle, first_child, JS_NULL);
     while (!JS_IsNull(child)) {
         DOMNodeHandle child_node = get_dom_node(ctx, child);
         collect_text_content(ctx, child_node, b);
-        if (child_node.valid()) {
-            child = child_node.next_sibling();
+        if (!SAFE_IS_NULL(child_node)) {
+            child = SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL);
         } else {
             break;
         }
@@ -3362,11 +3362,11 @@ static void collect_text_content(JSContextHandle ctx, DOMNodeHandle node, TextCo
 GCValue js_node_get_text_content(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (!node.valid()) {
+    if (SAFE_IS_NULL(node)) {
         return JS_NewString(ctx, "");
     }
-    if (node.node_type() == DOM_NODE_TYPE_TEXT) {
-        const char *val = node.node_value();
+    if (SAFE_GET_OR(node, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_TEXT) {
+        const char *val = SAFE_GET_OR(node, DOMNodeHandle, node_value, "");
         return JS_NewString(ctx, val ? val : "");
     }
     TextCollectBuf b = {0};
@@ -3383,14 +3383,14 @@ GCValue js_node_set_text_content(JSContextHandle ctx, GCValue this_val, int argc
     if (!text) text = "";
 
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (!node.valid()) return JS_UNDEFINED;
+    if (SAFE_IS_NULL(node)) return JS_UNDEFINED;
 
     // For text/comment/PI nodes, textContent behaves like nodeValue/data:
     // update the text and fire a characterData mutation.  This is critical
     // for polyfills that use a text node's textContent as a microtask trigger
     // (e.g. ShadyDOM's scheduler sets textNode.textContent to increment a
     // counter observed via MutationObserver {characterData:true}).
-    int nt = node.node_type();
+    int nt = SAFE_GET_OR(node, DOMNodeHandle, node_type, 0);
     if (nt == DOM_NODE_TYPE_TEXT || nt == DOM_NODE_TYPE_COMMENT || nt == DOM_NODE_TYPE_PROCESSING_INSTRUCTION) {
         if (getenv("CYBER_DEBUG_TC")) fprintf(stderr, "[TC] enter nt=%d\n", nt), fflush(stderr);
         GCValue node_value = JS_GetPropertyStr(ctx, this_val, "nodeValue");
@@ -3399,7 +3399,7 @@ GCValue js_node_set_text_content(JSContextHandle ctx, GCValue this_val, int argc
             old_buf = JS_ToCString(ctx, node_value);
         }
         if (getenv("CYBER_DEBUG_TC")) fprintf(stderr, "[TC] got nodeValue\n"), fflush(stderr);
-        node.set_node_value(text);
+        SAFE_SET_STR(node, DOMNodeHandle, node_value, text);
         if (getenv("CYBER_DEBUG_TC")) fprintf(stderr, "[TC] set_node_value done\n"), fflush(stderr);
         mo_notify_character_data(ctx, this_val, old_buf);
         if (getenv("CYBER_DEBUG_TC")) fprintf(stderr, "[TC] mo_notify done\n"), fflush(stderr);
@@ -3409,12 +3409,12 @@ GCValue js_node_set_text_content(JSContextHandle ctx, GCValue this_val, int argc
     }
 
     // Remove all children
-    GCValue child = node.first_child();
+    GCValue child = SAFE_GET_OR(node, DOMNodeHandle, first_child, JS_NULL);
     while (!JS_IsNull(child)) {
         DOMNodeHandle child_node = get_dom_node(ctx, child);
         GCValue next = JS_NULL;
-        if (child_node.valid()) {
-            next = child_node.next_sibling();
+        if (!SAFE_IS_NULL(child_node)) {
+            next = SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL);
         }
         GCValue remove_args[1] = { child };
         js_node_removeChild_real(ctx, this_val, 1, remove_args);
@@ -3423,7 +3423,7 @@ GCValue js_node_set_text_content(JSContextHandle ctx, GCValue this_val, int argc
 
     // Insert a single text node if text is non-empty
     if (text[0]) {
-        GCValue doc = node.owner_document();
+        GCValue doc = SAFE_GET_OR(node, DOMNodeHandle, owner_document, JS_NULL);
         GCValue text_node = JS_NULL;
         if (!JS_IsUndefined(doc) && !JS_IsNull(doc)) {
             GCValue createTextNode = JS_GetPropertyStr(ctx, doc, "createTextNode");
@@ -3447,10 +3447,10 @@ GCValue js_node_set_text_content(JSContextHandle ctx, GCValue this_val, int argc
 GCValue js_node_get_node_value(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (!node.valid()) return JS_NULL;
-    int t = node.node_type();
+    if (SAFE_IS_NULL(node)) return JS_NULL;
+    int t = SAFE_GET_OR(node, DOMNodeHandle, node_type, 0);
     if (t == DOM_NODE_TYPE_TEXT || t == DOM_NODE_TYPE_COMMENT) {
-        const char *val = node.node_value();
+        const char *val = SAFE_GET_OR(node, DOMNodeHandle, node_value, "");
         return JS_NewString(ctx, val ? val : "");
     }
     return JS_NULL;
@@ -3460,19 +3460,19 @@ GCValue js_node_get_node_value(JSContextHandle ctx, GCValue this_val, int argc, 
 GCValue js_node_set_node_value(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1) return JS_UNDEFINED;
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (!node.valid()) return JS_UNDEFINED;
-    int t = node.node_type();
+    if (SAFE_IS_NULL(node)) return JS_UNDEFINED;
+    int t = SAFE_GET_OR(node, DOMNodeHandle, node_type, 0);
     if (t == DOM_NODE_TYPE_TEXT || t == DOM_NODE_TYPE_COMMENT) {
         const char *text = JS_ToCString(ctx, argv[0]);
         if (!text) text = "";
-        const char *old = node.node_value();
+        const char *old = SAFE_GET_OR(node, DOMNodeHandle, node_value, "");
         char old_buf[256];
         old_buf[0] = '\0';
         if (old) {
             strncpy(old_buf, old, sizeof(old_buf) - 1);
             old_buf[sizeof(old_buf) - 1] = '\0';
         }
-        node.set_node_value(text);
+        SAFE_SET_STR(node, DOMNodeHandle, node_value, text);
         /* NOTE: do NOT mirror into the "data"/"textContent" JS properties via
          * JS_SetPropertyStr here.  The getters for all three read node_value(),
          * so the DOM value is already in sync — and a [[Set]] on "textContent"
@@ -3549,14 +3549,14 @@ static void range_update_common_ancestor(JSContextHandle ctx, GCValue range) {
 static int node_child_index(JSContextHandle ctx, GCValue parent, GCValue child) {
     if (JS_IsNull(parent) || JS_IsNull(child)) return -1;
     DOMNodeHandle p = get_dom_node(ctx, parent);
-    if (!p.valid()) return -1;
+    if (SAFE_IS_NULL(p)) return -1;
     int idx = 0;
-    GCValue c = p.first_child();
+    GCValue c = SAFE_GET_OR(p, DOMNodeHandle, first_child, JS_NULL);
     while (!JS_IsNull(c)) {
         if (JS_StrictEq(ctx, c, child)) return idx;
         DOMNodeHandle cn = get_dom_node(ctx, c);
-        if (!cn.valid()) break;
-        c = cn.next_sibling();
+        if (SAFE_IS_NULL(cn)) break;
+        c = SAFE_GET_OR(cn, DOMNodeHandle, next_sibling, JS_NULL);
         idx++;
     }
     return -1;
@@ -3565,14 +3565,14 @@ static int node_child_index(JSContextHandle ctx, GCValue parent, GCValue child) 
 static int node_child_count(JSContextHandle ctx, GCValue parent) {
     if (JS_IsNull(parent)) return 0;
     DOMNodeHandle p = get_dom_node(ctx, parent);
-    if (!p.valid()) return 0;
+    if (SAFE_IS_NULL(p)) return 0;
     int count = 0;
-    GCValue c = p.first_child();
+    GCValue c = SAFE_GET_OR(p, DOMNodeHandle, first_child, JS_NULL);
     while (!JS_IsNull(c)) {
         count++;
         DOMNodeHandle cn = get_dom_node(ctx, c);
-        if (!cn.valid()) break;
-        c = cn.next_sibling();
+        if (SAFE_IS_NULL(cn)) break;
+        c = SAFE_GET_OR(cn, DOMNodeHandle, next_sibling, JS_NULL);
     }
     return count;
 }
@@ -3774,13 +3774,13 @@ GCValue js_range_insert_node(JSContextHandle ctx, GCValue this_val, int argc, GC
     int32_t so = 0;
     JS_ToInt32(ctx, &so, JS_GetPropertyStr(ctx, this_val, "startOffset"));
     DOMNodeHandle n = get_dom_node(ctx, sc);
-    if (n.valid() && n.node_type() == DOM_NODE_TYPE_ELEMENT) {
-        GCValue child = n.first_child();
+    if (!SAFE_IS_NULL(n) && SAFE_GET_OR(n, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_ELEMENT) {
+        GCValue child = SAFE_GET_OR(n, DOMNodeHandle, first_child, JS_NULL);
         int idx = 0;
         while (!JS_IsNull(child) && idx < so) {
             DOMNodeHandle cn = get_dom_node(ctx, child);
-            if (!cn.valid()) break;
-            child = cn.next_sibling();
+            if (SAFE_IS_NULL(cn)) break;
+            child = SAFE_GET_OR(cn, DOMNodeHandle, next_sibling, JS_NULL);
             idx++;
         }
         GCValue args[2] = { argv[0], child };
@@ -4074,8 +4074,8 @@ GCValue js_tree_walker_parent_node(JSContextHandle ctx, GCValue this_val, int ar
     GCValue root = tree_walker_get_root(ctx, this_val);
     if (JS_IsNull(current) || JS_IsUndefined(current) || JS_StrictEq(ctx, current, root)) return JS_NULL;
     DOMNodeHandle node = get_dom_node(ctx, current);
-    if (!node.valid()) return JS_NULL;
-    GCValue parent = node.parent_node();
+    if (SAFE_IS_NULL(node)) return JS_NULL;
+    GCValue parent = SAFE_GET_OR(node, DOMNodeHandle, parent_node, JS_NULL);
     if (JS_IsNull(parent) || JS_StrictEq(ctx, parent, root)) return JS_NULL;
     if (tree_walker_accept_node(ctx, this_val, parent)) {
         tree_walker_set_current(ctx, this_val, parent);
@@ -4089,16 +4089,16 @@ GCValue js_tree_walker_first_child(JSContextHandle ctx, GCValue this_val, int ar
     GCValue current = tree_walker_get_current(ctx, this_val);
     if (JS_IsNull(current) || JS_IsUndefined(current)) return JS_NULL;
     DOMNodeHandle node = get_dom_node(ctx, current);
-    if (!node.valid()) return JS_NULL;
-    GCValue child = node.first_child();
+    if (SAFE_IS_NULL(node)) return JS_NULL;
+    GCValue child = SAFE_GET_OR(node, DOMNodeHandle, first_child, JS_NULL);
     while (!JS_IsNull(child)) {
         if (tree_walker_accept_node(ctx, this_val, child)) {
             tree_walker_set_current(ctx, this_val, child);
             return child;
         }
         DOMNodeHandle child_node = get_dom_node(ctx, child);
-        if (!child_node.valid()) break;
-        child = child_node.next_sibling();
+        if (SAFE_IS_NULL(child_node)) break;
+        child = SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL);
     }
     return JS_NULL;
 }
@@ -4108,16 +4108,16 @@ GCValue js_tree_walker_last_child(JSContextHandle ctx, GCValue this_val, int arg
     GCValue current = tree_walker_get_current(ctx, this_val);
     if (JS_IsNull(current) || JS_IsUndefined(current)) return JS_NULL;
     DOMNodeHandle node = get_dom_node(ctx, current);
-    if (!node.valid()) return JS_NULL;
-    GCValue child = node.last_child();
+    if (SAFE_IS_NULL(node)) return JS_NULL;
+    GCValue child = SAFE_GET_OR(node, DOMNodeHandle, last_child, JS_NULL);
     while (!JS_IsNull(child)) {
         if (tree_walker_accept_node(ctx, this_val, child)) {
             tree_walker_set_current(ctx, this_val, child);
             return child;
         }
         DOMNodeHandle child_node = get_dom_node(ctx, child);
-        if (!child_node.valid()) break;
-        child = child_node.previous_sibling();
+        if (SAFE_IS_NULL(child_node)) break;
+        child = SAFE_GET_OR(child_node, DOMNodeHandle, previous_sibling, JS_NULL);
     }
     return JS_NULL;
 }
@@ -4128,8 +4128,8 @@ GCValue js_tree_walker_next_sibling(JSContextHandle ctx, GCValue this_val, int a
     if (JS_IsNull(current) || JS_IsUndefined(current)) return JS_NULL;
     GCValue root = tree_walker_get_root(ctx, this_val);
     DOMNodeHandle node = get_dom_node(ctx, current);
-    while (node.valid()) {
-        GCValue sib = node.next_sibling();
+    while (!SAFE_IS_NULL(node)) {
+        GCValue sib = SAFE_GET_OR(node, DOMNodeHandle, next_sibling, JS_NULL);
         if (JS_IsNull(sib)) break;
         if (!JS_StrictEq(ctx, sib, root) && tree_walker_accept_node(ctx, this_val, sib)) {
             tree_walker_set_current(ctx, this_val, sib);
@@ -4146,8 +4146,8 @@ GCValue js_tree_walker_previous_sibling(JSContextHandle ctx, GCValue this_val, i
     if (JS_IsNull(current) || JS_IsUndefined(current)) return JS_NULL;
     GCValue root = tree_walker_get_root(ctx, this_val);
     DOMNodeHandle node = get_dom_node(ctx, current);
-    while (node.valid()) {
-        GCValue sib = node.previous_sibling();
+    while (!SAFE_IS_NULL(node)) {
+        GCValue sib = SAFE_GET_OR(node, DOMNodeHandle, previous_sibling, JS_NULL);
         if (JS_IsNull(sib)) break;
         if (!JS_StrictEq(ctx, sib, root) && tree_walker_accept_node(ctx, this_val, sib)) {
             tree_walker_set_current(ctx, this_val, sib);
@@ -4167,33 +4167,33 @@ GCValue js_tree_walker_next_node(JSContextHandle ctx, GCValue this_val, int argc
     GCValue node = current;
     while (!JS_IsNull(node) && JS_IsObject(node)) {
         DOMNodeHandle n = get_dom_node(ctx, node);
-        if (!n.valid()) break;
-        GCValue child = n.first_child();
+        if (SAFE_IS_NULL(n)) break;
+        GCValue child = SAFE_GET_OR(n, DOMNodeHandle, first_child, JS_NULL);
         while (!JS_IsNull(child)) {
             if (tree_walker_accept_node(ctx, this_val, child)) {
                 tree_walker_set_current(ctx, this_val, child);
                 return child;
             }
             DOMNodeHandle child_node = get_dom_node(ctx, child);
-            if (!child_node.valid()) break;
-            child = child_node.next_sibling();
+            if (SAFE_IS_NULL(child_node)) break;
+            child = SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL);
         }
         // No accepted children; try next sibling, then ancestors' next siblings.
         while (!JS_IsNull(node) && JS_IsObject(node)) {
             if (JS_StrictEq(ctx, node, root)) return JS_NULL;
             DOMNodeHandle n2 = get_dom_node(ctx, node);
-            if (!n2.valid()) return JS_NULL;
-            GCValue sib = n2.next_sibling();
+            if (SAFE_IS_NULL(n2)) return JS_NULL;
+            GCValue sib = SAFE_GET_OR(n2, DOMNodeHandle, next_sibling, JS_NULL);
             while (!JS_IsNull(sib)) {
                 if (tree_walker_accept_node(ctx, this_val, sib)) {
                     tree_walker_set_current(ctx, this_val, sib);
                     return sib;
                 }
                 DOMNodeHandle sib_node = get_dom_node(ctx, sib);
-                if (!sib_node.valid()) break;
-                sib = sib_node.next_sibling();
+                if (SAFE_IS_NULL(sib_node)) break;
+                sib = SAFE_GET_OR(sib_node, DOMNodeHandle, next_sibling, JS_NULL);
             }
-            node = n2.parent_node();
+            node = SAFE_GET_OR(n2, DOMNodeHandle, parent_node, JS_NULL);
         }
     }
     return JS_NULL;
@@ -4209,15 +4209,15 @@ GCValue js_tree_walker_previous_node(JSContextHandle ctx, GCValue this_val, int 
     while (!JS_IsNull(node) && JS_IsObject(node)) {
         if (JS_StrictEq(ctx, node, root)) return JS_NULL;
         DOMNodeHandle n = get_dom_node(ctx, node);
-        if (!n.valid()) break;
-        GCValue sib = n.previous_sibling();
+        if (SAFE_IS_NULL(n)) break;
+        GCValue sib = SAFE_GET_OR(n, DOMNodeHandle, previous_sibling, JS_NULL);
         if (!JS_IsNull(sib)) {
             // Descend to deepest last-child of previous sibling.
             node = sib;
             while (!JS_IsNull(node)) {
                 DOMNodeHandle n2 = get_dom_node(ctx, node);
-                if (!n2.valid()) break;
-                GCValue last = n2.last_child();
+                if (SAFE_IS_NULL(n2)) break;
+                GCValue last = SAFE_GET_OR(n2, DOMNodeHandle, last_child, JS_NULL);
                 if (JS_IsNull(last)) break;
                 node = last;
             }
@@ -4227,7 +4227,7 @@ GCValue js_tree_walker_previous_node(JSContextHandle ctx, GCValue this_val, int 
             }
             continue;
         }
-        GCValue parent = n.parent_node();
+        GCValue parent = SAFE_GET_OR(n, DOMNodeHandle, parent_node, JS_NULL);
         if (JS_IsNull(parent) || JS_StrictEq(ctx, parent, root)) return JS_NULL;
         if (tree_walker_accept_node(ctx, this_val, parent)) {
             tree_walker_set_current(ctx, this_val, parent);
@@ -4324,11 +4324,11 @@ GCValue js_create_document_fragment(JSContextHandle ctx) {
     GCValue frag = JS_NewObjectClass(ctx, js_dom_node_class_id);
     if (JS_IsException(frag)) return frag;
 
-    DOMNodeHandle frag_node = DOMNodeHandle::create(ctx, DOM_NODE_TYPE_DOCUMENT_FRAGMENT, "#document-fragment");
-    if (!frag_node.valid()) {
+    DOMNodeHandle frag_node = dom_node_create(ctx, DOM_NODE_TYPE_DOCUMENT_FRAGMENT, "#document-fragment");
+    if (SAFE_IS_NULL(frag_node)) {
         return JS_ThrowInternalError(ctx, "failed to create DocumentFragment");
     }
-    frag_node.attach_to_object(frag);
+    dom_node_attach_to_object(frag_node, frag);
 
     GCValue global = JS_GetGlobalObject(ctx);
     GCValue df_ctor = JS_GetPropertyStr(ctx, global, "DocumentFragment");
@@ -4466,8 +4466,8 @@ static GCValue named_node_map_get_attr(JSContextHandle ctx, GCValue map,
     GCValue elem = JS_GetPropertyStr(ctx, map, "ownerElement");
     if (!JS_IsObject(elem)) return JS_NULL;
     DOMNodeHandle node = get_dom_node(ctx, elem);
-    if (!node.valid()) return JS_NULL;
-    const char *value = node.get_attribute(name);
+    if (SAFE_IS_NULL(node)) return JS_NULL;
+    const char *value = dom_node_get_attribute(node, name);
     if (!value) return JS_NULL;
     return create_attr_obj(ctx, elem, name, value);
 }
@@ -4476,9 +4476,9 @@ static GCValue named_node_map_get_item(JSContextHandle ctx, GCValue map, int ind
     GCValue elem = JS_GetPropertyStr(ctx, map, "ownerElement");
     if (!JS_IsObject(elem)) return JS_NULL;
     DOMNodeHandle node = get_dom_node(ctx, elem);
-    if (!node.valid()) return JS_NULL;
-    int count = node.attribute_count();
-    const DOMAttribute *attrs = node.attributes();
+    if (SAFE_IS_NULL(node)) return JS_NULL;
+    int count = SAFE_GET_OR(node, DOMNodeHandle, attribute_count, 0);
+    const DOMAttribute *attrs = SAFE_GET_OR(node, DOMNodeHandle, attributes, NULL);
     if (index < 0 || index >= count || !attrs) return JS_NULL;
     return create_attr_obj(ctx, elem, attrs[index].name, attrs[index].value);
 }
@@ -4532,12 +4532,12 @@ GCValue js_named_node_map_remove_named_item(JSContextHandle ctx, GCValue this_va
     if (!JS_IsObject(elem)) return throw_dom_exception(ctx, "NotFoundError", "Attribute not found");
 
     DOMNodeHandle node = get_dom_node(ctx, elem);
-    if (!node.valid()) return throw_dom_exception(ctx, "NotFoundError", "Attribute not found");
+    if (SAFE_IS_NULL(node)) return throw_dom_exception(ctx, "NotFoundError", "Attribute not found");
 
     const char *name = JS_ToCString(ctx, argv[0]);
     if (!name) return throw_dom_exception(ctx, "NotFoundError", "Attribute not found");
 
-    const char *old_value = node.get_attribute(name);
+    const char *old_value = dom_node_get_attribute(node, name);
     if (!old_value) return throw_dom_exception(ctx, "NotFoundError", "Attribute not found");
 
     GCValue old_attr = create_attr_obj(ctx, elem, name, old_value);
@@ -4552,8 +4552,8 @@ GCValue js_element_get_attributes(JSContextHandle ctx, GCValue this_val,
     (void)argc; (void)argv;
     GCValue map = JS_NewObject(ctx);
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    int count = node.valid() ? node.attribute_count() : 0;
-    const DOMAttribute *attrs = node.valid() ? node.attributes() : nullptr;
+    int count = !SAFE_IS_NULL(node) ? SAFE_GET_OR(node, DOMNodeHandle, attribute_count, 0) : 0;
+    const DOMAttribute *attrs = !SAFE_IS_NULL(node) ? SAFE_GET_OR(node, DOMNodeHandle, attributes, NULL) : nullptr;
 
     for (int i = 0; i < count && attrs; i++) {
         GCValue attr = create_attr_obj(ctx, this_val, attrs[i].name, attrs[i].value);
@@ -4580,7 +4580,7 @@ GCValue js_element_has_attributes(JSContextHandle ctx, GCValue this_val,
                                   int argc, GCValue *argv) {
     (void)argc; (void)argv;
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    bool has = node.valid() && node.attribute_count() > 0;
+    bool has = !SAFE_IS_NULL(node) && SAFE_GET_OR(node, DOMNodeHandle, attribute_count, 0) > 0;
     return JS_NewBool(ctx, has);
 }
 
@@ -4590,9 +4590,9 @@ GCValue js_element_get_attribute_names(JSContextHandle ctx, GCValue this_val,
     (void)argc; (void)argv;
     GCValue arr = JS_NewArray(ctx);
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (!node.valid()) return arr;
-    int count = node.attribute_count();
-    const DOMAttribute *attrs = node.attributes();
+    if (SAFE_IS_NULL(node)) return arr;
+    int count = SAFE_GET_OR(node, DOMNodeHandle, attribute_count, 0);
+    const DOMAttribute *attrs = SAFE_GET_OR(node, DOMNodeHandle, attributes, NULL);
     for (int i = 0; i < count && attrs; i++) {
         JS_SetPropertyUint32(ctx, arr, (uint32_t)i, JS_NewString(ctx, attrs[i].name));
     }
@@ -4623,8 +4623,8 @@ GCValue js_element_closest(JSContextHandle ctx, GCValue this_val,
             return cur;
         }
         DOMNodeHandle node = get_dom_node(ctx, cur);
-        if (!node.valid()) break;
-        cur = node.parent_node();
+        if (SAFE_IS_NULL(node)) break;
+        cur = SAFE_GET_OR(node, DOMNodeHandle, parent_node, JS_NULL);
     }
     return JS_NULL;
 }
@@ -4648,8 +4648,8 @@ static const char *slot_get_name(JSContextHandle ctx, GCValue slot) {
     GCValue name_val = JS_GetPropertyStr(ctx, slot, "name");
     if (JS_IsUndefined(name_val) || JS_IsNull(name_val)) {
         DOMNodeHandle node = get_dom_node(ctx, slot);
-        if (node.valid()) {
-            const char *n = node.get_attribute("name");
+        if (!SAFE_IS_NULL(node)) {
+            const char *n = dom_node_get_attribute(node, "name");
             if (n) return n;
         }
         return "";
@@ -4683,8 +4683,8 @@ static void slot_collect_assigned(JSContextHandle ctx, GCValue host,
 
         const char *child_slot = "";
         DOMNodeHandle child_node = get_dom_node(ctx, child);
-        if (child_node.valid()) {
-            const char *s = child_node.get_attribute("slot");
+        if (!SAFE_IS_NULL(child_node)) {
+            const char *s = dom_node_get_attribute(child_node, "slot");
             if (s) child_slot = s;
         }
         bool matches = (slot_name[0] == '\0' && child_slot[0] == '\0') ||
@@ -4802,8 +4802,8 @@ GCValue js_slot_get_name(JSContextHandle ctx, GCValue this_val,
     (void)argc; (void)argv;
     const char *name = "";
     DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (node.valid()) {
-        const char *n = node.get_attribute("name");
+    if (!SAFE_IS_NULL(node)) {
+        const char *n = dom_node_get_attribute(node, "name");
         if (n) name = n;
     }
     return JS_NewString(ctx, name);

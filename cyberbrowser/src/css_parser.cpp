@@ -10,7 +10,7 @@
 #include "url_utils.h"
 #include "js_quickjs.h"
 #include "browser_api_impl.h"
-#include "browser_api_impl_handles.h"
+#include "browser_api_impl_handle_helpers.h"
 #include "html_dom.h"
 
 #include <string.h>

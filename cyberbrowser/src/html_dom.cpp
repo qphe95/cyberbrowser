@@ -18,7 +18,7 @@
 #include "gc_value_helpers.h"
 #include "platform.h"
 #include "browser_api_impl.h"
-#include "browser_api_impl_handles.h"
+#include "browser_api_impl_handle_helpers.h"
 #include "browser_api_impl_internal.h"
 #include "css_parser.h"
 
@@ -697,14 +697,14 @@ GCValue html_create_element_js(JSContextHandle ctx, const char *tag_name, HtmlAt
          * computed-style tables and index tables can attach to it. */
         element = JS_NewObjectClass(ctx, js_dom_node_class_id);
         if (!JS_IsException(element)) {
-            DOMNodeHandle node = DOMNodeHandle::create(ctx, DOM_NODE_TYPE_ELEMENT, tag_name);
-            if (node.valid()) {
-                node.attach_to_object(element);
+            DOMNodeHandle node = dom_node_create(ctx, DOM_NODE_TYPE_ELEMENT, tag_name);
+            if (!SAFE_IS_NULL(node)) {
+                dom_node_attach_to_object(node, element);
                 /* Copy parsed attributes into the DOMNode so the JS DOM can be
                  * serialized back to HTML without losing information. */
                 HtmlAttribute *attr = attrs;
                 while (attr) {
-                    node.set_attribute(attr->name, attr->value);
+                    dom_node_set_attribute(node, attr->name, attr->value);
                     attr = attr->next;
                 }
             }
@@ -814,12 +814,12 @@ GCValue html_create_element_js_with_document(JSContextHandle ctx, GCValue js_doc
                 if (inline_style && inline_style[0]) {
                     css_apply_inline_style_string(ctx, element, inline_style);
                 }
-                DOMNodeHandle node = DOMNodeHandle::from_object(element);
-                if (node.valid()) {
+                DOMNodeHandle node = dom_node_from_object(element);
+                if (!SAFE_IS_NULL(node)) {
                     /* Copy parsed attributes into the DOMNode for HTML serialization. */
                     attr = attrs;
                     while (attr) {
-                        node.set_attribute(attr->name, attr->value);
+                        dom_node_set_attribute(node, attr->name, attr->value);
                         attr = attr->next;
                     }
                     css_index_insert_node(ctx, node);
@@ -836,8 +836,8 @@ GCValue html_create_element_js_with_document(JSContextHandle ctx, GCValue js_doc
     /* Fallback to plain object if document.createElement not available */
     element = html_create_element_js(ctx, tag_name, attrs);
     {
-        DOMNodeHandle node = DOMNodeHandle::from_object(element);
-        if (node.valid()) css_index_insert_node(ctx, node);
+        DOMNodeHandle node = dom_node_from_object(element);
+        if (!SAFE_IS_NULL(node)) css_index_insert_node(ctx, node);
     }
     /* Ensure ownerDocument is set even for fallback-created elements. */
     if (!JS_IsUndefined(js_doc) && !JS_IsNull(js_doc)) {
@@ -944,9 +944,9 @@ GCValue html_create_js_document(JSContextHandle ctx, HtmlDocument *doc) {
 
     /* Give the document object a real DOM node backing so parentNode / isConnected
      * traversal from the documentElement reaches a DOCUMENT_NODE. */
-    DOMNodeHandle doc_node = DOMNodeHandle::create(ctx, DOM_NODE_TYPE_DOCUMENT, "#document");
-    if (doc_node.valid()) {
-        doc_node.attach_to_object(js_doc);
+    DOMNodeHandle doc_node = dom_node_create(ctx, DOM_NODE_TYPE_DOCUMENT, "#document");
+    if (!SAFE_IS_NULL(doc_node)) {
+        dom_node_attach_to_object(doc_node, js_doc);
     }
 
     /* Add document methods before creating elements so the whole tree can be
@@ -1056,9 +1056,9 @@ static GCValue html_effective_parent_for_append(JSContextHandle ctx, GCValue par
     if (JS_IsUndefined(parent) || JS_IsNull(parent) || !JS_IsObject(parent))
         return parent;
     DOMNodeHandle node = get_dom_node(ctx, parent);
-    if (!node.valid() || node.node_type() != DOM_NODE_TYPE_ELEMENT)
+    if (SAFE_IS_NULL(node) || SAFE_GET_OR(node, DOMNodeHandle, node_type, 0) != DOM_NODE_TYPE_ELEMENT)
         return parent;
-    const char *name = node.node_name();
+    const char *name = SAFE_GET_OR(node, DOMNodeHandle, node_name, "");
     if (!name || strcasecmp(name, "template") != 0)
         return parent;
     GCValue content = JS_GetPropertyStr(ctx, parent, "content");
@@ -1444,12 +1444,12 @@ bool html_element_set_inner_html(JSContextHandle ctx, GCValue elem, const char *
                 fflush(stderr);
             }
         }
-        DOMNodeHandle target_node0 = DOMNodeHandle::from_object(target);
-        if (target_node0.valid()) {
-            GCValue child = target_node0.first_child();
+        DOMNodeHandle target_node0 = dom_node_from_object(target);
+        if (!SAFE_IS_NULL(target_node0)) {
+            GCValue child = SAFE_GET_OR(target_node0, DOMNodeHandle, first_child, JS_NULL);
             while (!JS_IsNull(child)) {
-                DOMNodeHandle child_node = DOMNodeHandle::from_object(child);
-                GCValue next = child_node.valid() ? child_node.next_sibling() : JS_NULL;
+                DOMNodeHandle child_node = dom_node_from_object(child);
+                GCValue next = !SAFE_IS_NULL(child_node) ? SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL) : JS_NULL;
                 GCValue remove_args[1] = { child };
                 js_node_removeChild_real(ctx, target, 1, remove_args);
                 child = next;
@@ -1466,12 +1466,12 @@ bool html_element_set_inner_html(JSContextHandle ctx, GCValue elem, const char *
     fprintf(stderr, "[INNER-HTML-SET] parse ok root=%d body=%d\n", frag_doc->root_idx, frag_doc->body_idx);
 
     // Remove existing children from the target (template content or element)
-    DOMNodeHandle target_node = DOMNodeHandle::from_object(target);
-    if (target_node.valid()) {
-        GCValue child = target_node.first_child();
+    DOMNodeHandle target_node = dom_node_from_object(target);
+    if (!SAFE_IS_NULL(target_node)) {
+        GCValue child = SAFE_GET_OR(target_node, DOMNodeHandle, first_child, JS_NULL);
         while (!JS_IsNull(child)) {
-            DOMNodeHandle child_node = DOMNodeHandle::from_object(child);
-            GCValue next = child_node.valid() ? child_node.next_sibling() : JS_NULL;
+            DOMNodeHandle child_node = dom_node_from_object(child);
+            GCValue next = !SAFE_IS_NULL(child_node) ? SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL) : JS_NULL;
             GCValue remove_args[1] = { child };
             js_node_removeChild_real(ctx, target, 1, remove_args);
             child = next;
@@ -1790,9 +1790,9 @@ static char *js_object_get_string(JSContextHandle ctx, GCValue obj, const char *
 
 /* Return true if the attribute name is already present in the DOMNode table. */
 static bool dom_node_has_attribute(DOMNodeHandle node, const char *name) {
-    if (!node.valid() || !name) return false;
-    for (int i = 0; i < node.attribute_count(); i++) {
-        if (strcasecmp(node.attributes()[i].name, name) == 0) return true;
+    if (SAFE_IS_NULL(node) || !name) return false;
+    for (int i = 0; i < SAFE_GET_OR(node, DOMNodeHandle, attribute_count, 0); i++) {
+        if (strcasecmp(SAFE_GET_OR(node, DOMNodeHandle, attributes, NULL)[i].name, name) == 0) return true;
     }
     return false;
 }
@@ -1817,17 +1817,17 @@ static void html_serialize_shadow_host_children(JSContextHandle ctx, DOMNodeHand
      * content), which excludes non-distributed elements like <style> that are
      * still native children of the host. */
     std::vector<LightChildEntry> light;
-    GCValue child = host.first_child();
+    GCValue child = SAFE_GET_OR(host, DOMNodeHandle, first_child, JS_NULL);
     while (!JS_IsNull(child) && !JS_IsUndefined(child) && JS_IsObject(child)) {
         DOMNodeHandle child_node = get_dom_node(ctx, child);
         const char *slot_name = "";
-        if (child_node.valid() && child_node.node_type() == DOM_NODE_TYPE_ELEMENT) {
-            const char *s = child_node.get_attribute("slot");
+        if (!SAFE_IS_NULL(child_node) && SAFE_GET_OR(child_node, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_ELEMENT) {
+            const char *s = dom_node_get_attribute(child_node, "slot");
             if (s) slot_name = s;
         }
         light.push_back({child, slot_name, false});
-        if (!child_node.valid()) break;
-        child = child_node.next_sibling();
+        if (SAFE_IS_NULL(child_node)) break;
+        child = SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL);
     }
 
     /* Only consider open shadow roots for flattening.  Closed roots are not
@@ -1850,8 +1850,8 @@ static void html_serialize_shadow_host_children(JSContextHandle ctx, DOMNodeHand
         while (!JS_IsUndefined(probe) && !JS_IsNull(probe) && JS_IsObject(probe)) {
             DOMNodeHandle probe_node = get_dom_node(ctx, probe);
             int nt = -1;
-            if (probe_node.valid()) {
-                nt = probe_node.node_type();
+            if (!SAFE_IS_NULL(probe_node)) {
+                nt = SAFE_GET_OR(probe_node, DOMNodeHandle, node_type, 0);
             } else {
                 /* Fall back to JS-level nodeType. */
                 GCValue jnt = JS_GetPropertyStr(ctx, probe, "nodeType");
@@ -1897,8 +1897,8 @@ static void html_serialize_shadow_host_children(JSContextHandle ctx, DOMNodeHand
         GCValue stag_val = JS_GetPropertyStr(ctx, schild, "nodeName");
         const char *stag_tmp = JS_ToCString(ctx, stag_val);
         if (stag_tmp) stag = stag_tmp;
-        if (schild_node.valid()) {
-            snt = schild_node.node_type();
+        if (!SAFE_IS_NULL(schild_node)) {
+            snt = SAFE_GET_OR(schild_node, DOMNodeHandle, node_type, 0);
         } else {
             GCValue jnt = JS_GetPropertyStr(ctx, schild, "nodeType");
             int32_t t = 0; JS_ToInt32(ctx, &t, jnt);
@@ -1908,8 +1908,8 @@ static void html_serialize_shadow_host_children(JSContextHandle ctx, DOMNodeHand
             /* Slot element: distribute light-DOM children with matching slot
              * name, or emit fallback content. */
             const char *slot_name = "";
-            if (schild_node.valid()) {
-                const char *sn = schild_node.get_attribute("name");
+            if (!SAFE_IS_NULL(schild_node)) {
+                const char *sn = dom_node_get_attribute(schild_node, "name");
                 if (sn) slot_name = sn;
             } else {
                 GCValue sav = JS_GetPropertyStr(ctx, schild, "getAttribute");
@@ -1948,7 +1948,7 @@ static void html_serialize_shadow_host_children(JSContextHandle ctx, DOMNodeHand
 }
 
 static void html_serialize_js_element(JSContextHandle ctx, DOMNodeHandle node, GCValue node_val, SerializeBuffer *buf) {
-    const char *tag = node.node_name();
+    const char *tag = SAFE_GET_OR(node, DOMNodeHandle, node_name, "");
     if (!tag || !tag[0]) tag = "div";
     
     /* Normalize tag name to lowercase for HTML serialization. */
@@ -1965,9 +1965,9 @@ static void html_serialize_js_element(JSContextHandle ctx, DOMNodeHandle node, G
      * attribute is handled separately below so that JS-mutated style
      * properties (element.style.x = y, style.setProperty) merge with it. */
     const char *attr_style = NULL;
-    for (int i = 0; i < node.attribute_count(); i++) {
-        const char *name = node.attributes()[i].name;
-        const char *value = node.attributes()[i].value;
+    for (int i = 0; i < SAFE_GET_OR(node, DOMNodeHandle, attribute_count, 0); i++) {
+        const char *name = SAFE_GET_OR(node, DOMNodeHandle, attributes, NULL)[i].name;
+        const char *value = SAFE_GET_OR(node, DOMNodeHandle, attributes, NULL)[i].value;
         if (!name || !name[0]) continue;
         if (strcasecmp(name, "style") == 0) {
             attr_style = value;
@@ -2115,7 +2115,7 @@ static void html_serialize_js_node_internal(JSContextHandle ctx, GCValue node, S
     }
     
     DOMNodeHandle dom_node = get_dom_node(ctx, node);
-    if (!dom_node.valid()) {
+    if (SAFE_IS_NULL(dom_node)) {
         /* No C-level DOMNode data: this node may be managed by the ShadyDOM
          * polyfill's __shady tree.  Create DOMNode data on-the-fly so the
          * standard serialization path works.  Use JS-level properties for
@@ -2125,9 +2125,9 @@ static void html_serialize_js_node_internal(JSContextHandle ctx, GCValue node, S
         JS_ToInt32(ctx, &nt, jnt);
         GCValue jnn = JS_GetPropertyStr(ctx, node, "nodeName");
         const char *nn = JS_ToCString(ctx, jnn);
-        dom_node = DOMNodeHandle::create(ctx, nt, nn ? nn : "#unknown");
-        if (dom_node.valid()) {
-            dom_node.attach_to_object(node);
+        dom_node = dom_node_create(ctx, nt, nn ? nn : "#unknown");
+        if (!SAFE_IS_NULL(dom_node)) {
+            dom_node_attach_to_object(dom_node, node);
             /* Populate attributes from JS-level getAttributeNames/getAttribute. */
             GCValue gan = JS_GetPropertyStr(ctx, node, "getAttributeNames");
             if (JS_IsFunction(ctx, gan)) {
@@ -2145,7 +2145,7 @@ static void html_serialize_js_node_internal(JSContextHandle ctx, GCValue node, S
                                 GCValue args[1] = { name_val };
                                 GCValue v = JS_Call(ctx, gav, node, 1, args);
                                 const char *vs = JS_ToCString(ctx, v);
-                                if (vs) dom_node.set_attribute(name, vs);
+                                if (vs) dom_node_set_attribute(dom_node, name, vs);
                                 JS_FreeCString(ctx, vs);
                             }
                         }
@@ -2157,17 +2157,17 @@ static void html_serialize_js_node_internal(JSContextHandle ctx, GCValue node, S
             if (nt == DOM_NODE_TYPE_TEXT || nt == DOM_NODE_TYPE_COMMENT) {
                 GCValue tc = JS_GetPropertyStr(ctx, node, "textContent");
                 const char *tcs = JS_ToCString(ctx, tc);
-                if (tcs) dom_node.set_node_value(tcs);
+                if (tcs) SAFE_SET_STR(dom_node, DOMNodeHandle, node_value, tcs);
                 JS_FreeCString(ctx, tcs);
             }
         }
         if (nn) JS_FreeCString(ctx, nn);
-        if (!dom_node.valid()) return;
+        if (SAFE_IS_NULL(dom_node)) return;
     }
     
-    int node_type = dom_node.node_type();
+    int node_type = SAFE_GET_OR(dom_node, DOMNodeHandle, node_type, 0);
     if (node_type == DOM_NODE_TYPE_TEXT) {
-        const char *val = dom_node.node_value();
+        const char *val = SAFE_GET_OR(dom_node, DOMNodeHandle, node_value, "");
         if (val) {
             /* Skip text nodes that are stray closing tags emitted after the
              * document end; the parser should not have rendered them. */

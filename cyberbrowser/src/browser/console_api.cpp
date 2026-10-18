@@ -8,7 +8,7 @@
 #include <quickjs_gc_unified.h>
 #include "browser_api_impl.h"
 #include "browser_api_impl_types.h"
-#include "browser_api_impl_handles.h"
+#include "browser_api_impl_handle_helpers.h"
 #include "browser_api_impl_internal.h"
 #include "html_dom.h"
 #include "css_parser.h"
@@ -529,10 +529,10 @@ static void js_computed_style_inherit(JSContextHandle ctx, GCValue style, DOMNod
         if (JS_IsUndefined(own)) {
             DOMNodeHandle cur = node;
             while (true) {
-                GCValue parent_val = cur.parent_node();
+                GCValue parent_val = SAFE_GET_OR(cur, DOMNodeHandle, parent_node, JS_NULL);
                 if (JS_IsNull(parent_val) || JS_IsUndefined(parent_val)) break;
-                DOMNodeHandle parent = DOMNodeHandle::from_object(parent_val);
-                if (!parent.valid()) break;
+                DOMNodeHandle parent = dom_node_from_object(parent_val);
+                if (SAFE_IS_NULL(parent)) break;
                 GCValue pval = css_computed_get_property(ctx, parent, atom);
                 if (!JS_IsUndefined(pval)) {
                     js_computed_style_set_both(ctx, style, prop, pval);
@@ -617,8 +617,8 @@ GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, G
     JS_SetPropertyStr(ctx, style, "setProperty",
         JS_NewCFunction(ctx, js_computed_style_set_property, "setProperty", 3));
 
-    DOMNodeHandle node = DOMNodeHandle::from_object_check(ctx, element);
-    if (node.valid()) {
+    DOMNodeHandle node = dom_node_from_object_check(ctx, element);
+    if (!SAFE_IS_NULL(node)) {
         /* Merge the element's inline style object so getComputedStyle reflects
          * properties set via element.style.foo even before layout runs. */
         GCValue inline_style = JS_GetPropertyStr(ctx, element, "style");
@@ -649,7 +649,7 @@ GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, G
         /* Override defaults and inline styles with the actual computed
          * properties stored for this node (the table contains both kebab-case
          * and camelCase keys). */
-        GCHandle cs_handle = node.computed_style_handle();
+        GCHandle cs_handle = SAFE_GET_OR(node, DOMNodeHandle, computed_style_handle, GC_HANDLE_NULL);
         if (cs_handle != GC_HANDLE_NULL) {
             CssComputedStyle *cs = (CssComputedStyle *)gc_deref(cs_handle);
             if (cs && cs->properties) {

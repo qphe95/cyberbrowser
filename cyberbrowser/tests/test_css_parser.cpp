@@ -10,7 +10,7 @@
 #include "quickjs.h"
 #include "js_quickjs.h"
 #include "browser_api_impl.h"
-#include "browser_api_impl_handles.h"
+#include "browser_api_impl_handle_helpers.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -187,8 +187,8 @@ TEST(test_css_computed_style_and_indexes) {
     HtmlNode *div = html_document_get_element_by_tag(doc, "div");
     ASSERT_TRUE(div != NULL && div->has_js_object);
 
-    DOMNodeHandle dom_node = DOMNodeHandle::from_object(div->js_object);
-    ASSERT_TRUE(dom_node.valid());
+    DOMNodeHandle dom_node = dom_node_from_object(div->js_object);
+    ASSERT_TRUE(!SAFE_IS_NULL(dom_node));
 
     GCValue global = JS_GetGlobalObject(ctx);
     GCValue get_cs = JS_GetPropertyStr(ctx, global, "getComputedStyle");
