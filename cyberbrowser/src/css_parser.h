@@ -53,6 +53,12 @@ typedef struct CssStylesheet {
 /* Parse a full stylesheet. Returns NULL on empty/invalid input. */
 CssStylesheet* css_stylesheet_parse(const char *css, size_t len);
 
+/* Parse the top-level items of css that start in [start, stop); see the
+ * comment in css_parser.c.  Returns a sheet (possibly empty) and the stop
+ * position in *end_pos.  Used for chunked parallel parsing. */
+CssStylesheet* css_stylesheet_parse_range(const char *css, size_t len,
+                                          size_t start, size_t stop, size_t *end_pos);
+
 /* Free a stylesheet and all owned strings. */
 void css_stylesheet_free(CssStylesheet *sheet);
 
@@ -101,6 +107,7 @@ typedef struct CssAppliedDecl {
     int specificity;
     int order;
     bool important;
+    int rule;        /* global rule index in the compiled style set (-1 if none) */
 } CssAppliedDecl;
 
 /* Parse an inline style attribute string and apply its declarations to the

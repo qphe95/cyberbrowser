@@ -783,6 +783,7 @@ static bool render_document_to_jpg(HtmlDocument *doc, ImageCache *image_cache,
     LayoutContext layout;
     memset(&layout, 0, sizeof(layout));
     layout.js_ctx = g_ctx;
+    layout.dump_path = "layout_dump.txt";
     bool layout_ok = false;
     {
         CP_SCOPE("css-layout");

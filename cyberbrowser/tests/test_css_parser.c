@@ -68,13 +68,18 @@ TEST(test_parse_comments_and_whitespace) {
     return true;
 }
 
-TEST(test_parse_at_rule_skipped) {
+TEST(test_parse_media_rules_entered) {
+    /* @media blocks are entered: their rules carry the condition. */
     const char *css = "@media screen { body { color: red; } }\ndiv { display: block; }";
     CssStylesheet *sheet = css_stylesheet_parse(css, strlen(css));
     ASSERT_TRUE(sheet != NULL);
-    ASSERT_EQ(1, sheet->rule_count);
-    ASSERT_TRUE(strstr(sheet->rules[0].selector_text, "div") != NULL);
-    ASSERT_EQ(1, sheet->rules[0].declaration_count);
+    ASSERT_EQ(2, sheet->rule_count);
+    ASSERT_TRUE(strstr(sheet->rules[0].selector_text, "body") != NULL);
+    ASSERT_TRUE(sheet->rules[0].media_query != NULL);
+    ASSERT_STR_EQ("screen", sheet->rules[0].media_query);
+    ASSERT_TRUE(strstr(sheet->rules[1].selector_text, "div") != NULL);
+    ASSERT_TRUE(sheet->rules[1].media_query == NULL);
+    ASSERT_EQ(1, sheet->rules[1].declaration_count);
     css_stylesheet_free(sheet);
     return true;
 }
@@ -104,189 +109,6 @@ TEST(test_parse_inline_style_empty) {
 }
 
 JSContextHandle get_shared_test_context(void);
-
-TEST(test_css_apply_parallel) {
-    JSContextHandle ctx = get_shared_test_context();
-    if (!SAFE_VALID(ctx)) {
-        printf("    (skipped - no shared context)");
-        return true;
-    }
-
-    const char *html =
-        "<html><head>"
-        "<style>div { color: red; } .box { display: block; } p { margin: 0; }</style>"
-        "</head><body>"
-        "<div id=\"a\" class=\"box\" style=\"font-size: 12px\">hello</div>"
-        "<p>world</p>"
-        "</body></html>";
-
-    HtmlDocument *doc = html_parse(html, strlen(html));
-    ASSERT_TRUE(doc != NULL);
-
-    GCValue js_doc = html_create_js_document(ctx, doc);
-    ASSERT_TRUE(!JS_IsUndefined(js_doc) && !JS_IsNull(js_doc) && !JS_IsException(js_doc));
-
-    ASSERT_TRUE(html_populate_js_document(ctx, js_doc, doc));
-
-    css_apply_document_styles(ctx, js_doc, doc, "https://example.com/");
-
-    HtmlNode *div = html_document_get_element_by_tag(doc, "div");
-    ASSERT_TRUE(div != NULL);
-    ASSERT_TRUE(div->has_js_object);
-
-    GCValue element = div->js_object;
-    GCValue style = JS_GetPropertyStr(ctx, element, "style");
-
-    GCValue color = JS_GetPropertyStr(ctx, style, "color");
-    const char *color_str = JS_ToCString(ctx, color);
-    ASSERT_TRUE(color_str != NULL);
-    ASSERT_STR_EQ("red", color_str);
-
-    GCValue display = JS_GetPropertyStr(ctx, style, "display");
-    const char *display_str = JS_ToCString(ctx, display);
-    ASSERT_TRUE(display_str != NULL);
-    ASSERT_STR_EQ("block", display_str);
-
-    GCValue font_size = JS_GetPropertyStr(ctx, style, "fontSize");
-    const char *font_size_str = JS_ToCString(ctx, font_size);
-    ASSERT_TRUE(font_size_str != NULL);
-    ASSERT_STR_EQ("12px", font_size_str);
-
-    html_document_free(doc);
-    return true;
-}
-
-TEST(test_css_computed_style_and_indexes) {
-    JSContextHandle ctx = get_shared_test_context();
-    if (!SAFE_VALID(ctx)) {
-        printf("    (skipped - no shared context)");
-        return true;
-    }
-
-    const char *html =
-        "<html><head>"
-        "<style>div { color: red; } .box { display: block; } p { margin: 0; }</style>"
-        "</head><body>"
-        "<div id=\"a\" class=\"box\" style=\"font-size: 12px\">hello</div>"
-        "<p>world</p>"
-        "</body></html>";
-
-    HtmlDocument *doc = html_parse(html, strlen(html));
-    ASSERT_TRUE(doc != NULL);
-
-    GCValue js_doc = html_create_js_document(ctx, doc);
-    ASSERT_TRUE(!JS_IsUndefined(js_doc) && !JS_IsNull(js_doc) && !JS_IsException(js_doc));
-
-    ASSERT_TRUE(html_populate_js_document(ctx, js_doc, doc));
-    css_apply_document_styles(ctx, js_doc, doc, "https://example.com/");
-
-    /* getComputedStyle returns real values from the per-element table. */
-    HtmlNode *div = html_document_get_element_by_tag(doc, "div");
-    ASSERT_TRUE(div != NULL && div->has_js_object);
-
-    DOMNodeHandle dom_node = dom_node_from_object(div->js_object);
-    ASSERT_TRUE(!SAFE_IS_NULL(dom_node));
-
-    GCValue global = JS_GetGlobalObject(ctx);
-    GCValue get_cs = JS_GetPropertyStr(ctx, global, "getComputedStyle");
-    ASSERT_TRUE(!JS_IsUndefined(get_cs) && !JS_IsNull(get_cs) && !JS_IsException(get_cs));
-    GCValue args[1] = { div->js_object };
-    GCValue cs = JS_Call(ctx, get_cs, global, 1, args);
-    ASSERT_TRUE(!JS_IsUndefined(cs) && !JS_IsNull(cs) && !JS_IsException(cs));
-
-    GCValue color = JS_GetPropertyStr(ctx, cs, "color");
-    const char *color_str = JS_ToCString(ctx, color);
-    ASSERT_TRUE(color_str != NULL);
-    ASSERT_STR_EQ("red", color_str);
-
-    GCValue display = JS_GetPropertyStr(ctx, cs, "display");
-    const char *display_str = JS_ToCString(ctx, display);
-    ASSERT_TRUE(display_str != NULL);
-    ASSERT_STR_EQ("block", display_str);
-
-    GCValue font_size = JS_GetPropertyStr(ctx, cs, "fontSize");
-    const char *font_size_str = JS_ToCString(ctx, font_size);
-    ASSERT_TRUE(font_size_str != NULL);
-    ASSERT_STR_EQ("12px", font_size_str);
-
-    html_document_free(doc);
-    return true;
-}
-
-TEST(test_css_parallel_computed_styles) {
-    JSContextHandle ctx = get_shared_test_context();
-    if (!SAFE_VALID(ctx)) {
-        printf("    (skipped - no shared context)");
-        return true;
-    }
-
-    /* Build a document with enough elements to span multiple worker chunks. */
-    char html[8192];
-    snprintf(html, sizeof(html),
-        "<html><head><style>"
-        "div { color: red; }"
-        ".box { display: block; }"
-        "#item5 { color: blue; }"
-        "span { margin: 0; }"
-        "</style></head><body>");
-    size_t body_off = strlen(html);
-    for (int i = 0; i < 50 && body_off < sizeof(html) - 128; i++) {
-        int n = snprintf(html + body_off, sizeof(html) - body_off,
-            "<div id=\"item%d\" class=\"%s\" style=\"font-size: %dpx\">%d</div>"
-            "<span class=\"box\">s%d</span>",
-            i, (i % 3 == 0) ? "box" : "", 10 + i, i, i);
-        body_off += n;
-    }
-    snprintf(html + body_off, sizeof(html) - body_off, "</body></html>");
-
-    HtmlDocument *doc = html_parse(html, strlen(html));
-    ASSERT_TRUE(doc != NULL);
-
-    GCValue js_doc = html_create_js_document(ctx, doc);
-    ASSERT_TRUE(!JS_IsUndefined(js_doc) && !JS_IsNull(js_doc) && !JS_IsException(js_doc));
-    ASSERT_TRUE(html_populate_js_document(ctx, js_doc, doc));
-
-    css_apply_document_styles(ctx, js_doc, doc, "https://example.com/");
-
-    /* Spot-check several elements via getComputedStyle. */
-    GCValue global = JS_GetGlobalObject(ctx);
-    GCValue get_cs = JS_GetPropertyStr(ctx, global, "getComputedStyle");
-
-    for (int i = 0; i < 50; i++) {
-        char id[32];
-        snprintf(id, sizeof(id), "item%d", i);
-
-        HtmlNode *node = html_document_get_element_by_id(doc, id);
-        if (!node || !node->has_js_object) continue;
-
-        GCValue args[1] = { node->js_object };
-        GCValue cs = JS_Call(ctx, get_cs, global, 1, args);
-        ASSERT_TRUE(!JS_IsUndefined(cs) && !JS_IsNull(cs) && !JS_IsException(cs));
-
-        GCValue color = JS_GetPropertyStr(ctx, cs, "color");
-        const char *color_str = JS_ToCString(ctx, color);
-        ASSERT_TRUE(color_str != NULL);
-        const char *expected_color = (i == 5) ? "blue" : "red";
-        ASSERT_STR_EQ(expected_color, color_str);
-
-        if (i % 3 == 0) {
-            GCValue display = JS_GetPropertyStr(ctx, cs, "display");
-            const char *display_str = JS_ToCString(ctx, display);
-            ASSERT_TRUE(display_str != NULL);
-            ASSERT_STR_EQ("block", display_str);
-        }
-
-        char expected_font[32];
-        snprintf(expected_font, sizeof(expected_font), "%dpx", 10 + i);
-        GCValue font_size = JS_GetPropertyStr(ctx, cs, "fontSize");
-        const char *font_size_str = JS_ToCString(ctx, font_size);
-        ASSERT_TRUE(font_size_str != NULL);
-        ASSERT_STR_EQ(expected_font, font_size_str);
-    }
-
-    html_document_free(doc);
-    return true;
-}
 
 TEST(test_css_index_tables) {
     JSContextHandle ctx = get_shared_test_context();
@@ -345,12 +167,9 @@ void run_css_parser_tests(void) {
     RUN_TEST(test_parse_simple_rule);
     RUN_TEST(test_parse_multiple_rules);
     RUN_TEST(test_parse_comments_and_whitespace);
-    RUN_TEST(test_parse_at_rule_skipped);
+    RUN_TEST(test_parse_media_rules_entered);
     RUN_TEST(test_parse_inline_style);
     RUN_TEST(test_parse_inline_style_empty);
-    RUN_TEST(test_css_apply_parallel);
-    RUN_TEST(test_css_computed_style_and_indexes);
-    RUN_TEST(test_css_parallel_computed_styles);
     RUN_TEST(test_css_index_tables);
 }
 

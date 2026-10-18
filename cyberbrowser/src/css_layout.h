@@ -1,17 +1,17 @@
 /*
- * CSS Layout Engine
+ * CSS Layout Engine (PARALLEL_STYLE_LAYOUT.md).
  *
- * Parallel CSS layout as described in PARALLEL_CSS_LAYOUT.md.
- *
- * Two passes over a flat layout tree built from an HtmlDocument:
- *   - Top-down (pre-order): inherited / containing-block values, plus block
- *     sibling stacking and inline line-flow.  Each node spin-waits on both its
- *     parent and its previous sibling, forming a dependency chain that gives a
- *     valid topological order for parallel execution.
- *   - Bottom-up (post-order): auto heights, content sizes, scroll extents.
- *
- * Both passes are dispatched to the GC thread pool and synchronize with
- * fine-grained spin-waits on per-node atomic flags/counters.
+ * css_layout_run() builds a flat layout tree from an HtmlDocument, then:
+ *   - style: stylesheets are parsed once per distinct text (in parallel, in
+ *     chunks for large sheets) and compiled into a cached CssStyleSet;
+ *     elements are styled top-down by range jobs on the job system, with the
+ *     compiled bucketed matcher, an ancestor Bloom filter and a style-sharing
+ *     cache;
+ *   - layout: one recursive pass; flex items and table cells, which their
+ *     container places before laying out, fork into jobs when no float can
+ *     cross between them.
+ * Workers never touch the GC heap or QuickJS.  The result is identical for
+ * any thread count.  Runs on the engine thread, synchronously.
  */
 
 #ifndef CSS_LAYOUT_H
@@ -22,6 +22,7 @@
 #include "html_dom.h"
 #include "css_parser.h"
 #include "quickjs_gc_unified.h"
+#include "frame_arena.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -232,12 +233,6 @@ typedef struct LayoutBox {
      * is otherwise auto (common thumbnail placeholder technique). */
     double aspect_ratio;
 
-    /* Temporary line-flow state used during the top-down pass.  Each parent
-     * box tracks the current line position; children update it sequentially
-     * through the previous-sibling dependency chain. */
-    double line_x;
-    double line_y_offset;
-
     uint32_t flags;
     /* Bitmask of which top/left/right/bottom values were explicitly set. */
 #define LAYOUT_SIDE_LEFT   0x01
@@ -274,12 +269,6 @@ typedef struct LayoutTree {
     int *postorder;         /* indices in children-before-parent order */
 } LayoutTree;
 
-typedef struct LayoutNodeState {
-    volatile uint32_t top_down_done;     /* 0 = pending, 1 = done */
-    volatile uint32_t children_remaining;
-    volatile uint32_t bottom_up_done;    /* 0 = pending, 1 = done */
-} LayoutNodeState;
-
 /* Forward declaration for custom properties storage. */
 typedef struct CssCustomProps CssCustomProps;
 
@@ -293,7 +282,6 @@ typedef struct {
 typedef struct LayoutContext {
     HtmlDocument *doc;
     LayoutTree tree;
-    LayoutNodeState *states;
     LayoutBox *boxes;       /* boxes[i] corresponds to tree.nodes[i] */
 
     /* Viewport / initial containing block dimensions. */
@@ -303,8 +291,12 @@ typedef struct LayoutContext {
     /* Base URL used to resolve relative image / stylesheet URLs. */
     char base_url[512];
 
-    /* Per-node custom property (CSS variable) map. */
-    CssCustomProps *custom_props;
+    /* Per-node custom property (CSS variable) map; immutable, shared with
+     * the parent when the node sets none (copy-on-write). */
+    const CssCustomProps **custom_props;
+
+    /* Allocations that live as long as this layout (variable maps, ...). */
+    FrameArena arena;
 
     /* Floats placed so far during the flow, in page coordinates.  Inline
      * lines shrink around them while they are vertically active; they also
@@ -315,6 +307,10 @@ typedef struct LayoutContext {
 
     /* Optional JS context for collecting constructed/adopted stylesheets. */
     JSContextHandle js_ctx;
+
+    /* Optional path for a tab-separated box dump after layout (NULL = none;
+     * CSS_DUMP=<path> in the environment overrides). */
+    const char *dump_path;
 } LayoutContext;
 
 /* Build a flat layout tree from a parsed HTML document. */
@@ -323,12 +319,16 @@ bool css_layout_tree_build(LayoutContext *ctx, HtmlDocument *doc);
 /* Free resources held by a layout tree. */
 void css_layout_tree_free(LayoutContext *ctx);
 
-/* Run both layout passes in parallel. */
+/* Style and lay out the tree (parallel inside, synchronous to the caller). */
 bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet);
 
 /* Convenience: allocate/resolve/free in one call. */
 bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
                     double viewport_width, double viewport_height);
+
+/* Test hook: parse a stylesheet with the chunked parallel parser (chunk =
+ * bytes per chunk, 0 = default).  Equal to css_stylesheet_parse's result. */
+CssStylesheet *css_layout_parse_sheet_parallel(const char *text, size_t len, size_t chunk);
 
 /* Access the resolved LayoutBox for a DOM node index, or NULL if not found. */
 LayoutBox* css_layout_box_for_node(LayoutContext *ctx, int dom_node_idx);

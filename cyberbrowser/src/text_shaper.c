@@ -1,5 +1,6 @@
 #include "text_shaper.h"
 
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -49,7 +50,18 @@ struct TextShaper {
     GlyphEntry     *glyphs;
     int             glyph_count;
     int             glyph_capacity;
+
+    /* Thread-safe metrics (PARALLEL_STYLE_LAYOUT.md §8): measurement never
+     * touches the atlas.  Both tables are insert-only and lock-free:
+     *   metric_pages[cp >> 8][cp & 255] = (glyph_index + 1) << 32 | advance bits
+     *   kern[] = ((g1 << 16 | g2) + 1) << 32 | (uint32_t)kern  (open addressing) */
+    _Atomic(_Atomic uint64_t *) *metric_pages;
+    _Atomic uint64_t *kern;
 };
+
+#define TS_METRIC_PAGES (0x110000 >> 8)
+#define TS_KERN_SLOTS   (1u << 15)
+#define TS_KERN_PROBES  16
 
 static uint32_t utf8_decode(const char **ptr)
 {
@@ -114,6 +126,65 @@ static bool pack_bitmap(TextShaper *s, int bw, int bh, int *out_x, int *out_y)
     s->pack_x += bw + 1;
     if (bh > s->pack_row_h) s->pack_row_h = bh;
     return true;
+}
+
+/* Glyph index and advance (at the loaded size) of a codepoint, with the
+ * same missing-glyph fallback as ensure_glyph.  Safe from any thread. */
+static void ts_metric(const TextShaper *s, uint32_t cp, int *glyph_index, float *xadvance)
+{
+    if (cp > 0x10FFFF) cp = 0xFFFD;
+    _Atomic uint64_t *page = atomic_load_explicit(&s->metric_pages[cp >> 8], memory_order_acquire);
+    if (!page) {
+        _Atomic uint64_t *fresh = calloc(256, sizeof(uint64_t));
+        _Atomic uint64_t *expected = NULL;
+        if (atomic_compare_exchange_strong_explicit(&s->metric_pages[cp >> 8], &expected, fresh,
+                                                    memory_order_acq_rel, memory_order_acquire)) {
+            page = fresh;
+        } else {
+            free(fresh);
+            page = expected;
+        }
+    }
+    uint64_t v = atomic_load_explicit(&page[cp & 255], memory_order_relaxed);
+    if (!v) {
+        int gi = stbtt_FindGlyphIndex(&s->font, (int)cp);
+        if (gi == 0 && cp != ' ') gi = stbtt_FindGlyphIndex(&s->font, 0xFFFD);
+        int advance, lsb;
+        stbtt_GetGlyphHMetrics(&s->font, gi, &advance, &lsb);
+        float xa = (float)advance * s->scale;
+        uint32_t bits;
+        memcpy(&bits, &xa, sizeof(bits));
+        v = ((uint64_t)(uint32_t)(gi + 1) << 32) | bits;
+        atomic_store_explicit(&page[cp & 255], v, memory_order_relaxed);
+    }
+    *glyph_index = (int)(uint32_t)(v >> 32) - 1;
+    uint32_t bits = (uint32_t)v;
+    memcpy(xadvance, &bits, sizeof(*xadvance));
+}
+
+/* Kerning between two glyphs in font units, cached.  Safe from any thread. */
+static int ts_kern(const TextShaper *s, int g1, int g2)
+{
+    if (g1 < 0 || g2 < 0 || g1 > 0xFFFF || g2 > 0xFFFF)
+        return stbtt_GetGlyphKernAdvance(&s->font, g1, g2);
+    uint32_t key = (((uint32_t)g1 << 16) | (uint32_t)g2) + 1u;
+    uint32_t h = (key * 0x9E3779B1u) >> 17;   /* 15 bits */
+    for (uint32_t i = 0; i < TS_KERN_PROBES; i++) {
+        _Atomic uint64_t *slot = &s->kern[(h + i) & (TS_KERN_SLOTS - 1)];
+        uint64_t v = atomic_load_explicit(slot, memory_order_relaxed);
+        if (v && (uint32_t)(v >> 32) == key) return (int)(int32_t)(uint32_t)v;
+        if (!v) {
+            int k = stbtt_GetGlyphKernAdvance(&s->font, g1, g2);
+            uint64_t nv = ((uint64_t)key << 32) | (uint32_t)(int32_t)k;
+            uint64_t expected = 0;
+            if (atomic_compare_exchange_strong_explicit(slot, &expected, nv, memory_order_relaxed,
+                                                        memory_order_relaxed) ||
+                (uint32_t)(expected >> 32) == key)
+                return k;
+            /* Lost the slot to another pair: keep probing. */
+        }
+    }
+    return stbtt_GetGlyphKernAdvance(&s->font, g1, g2);   /* neighbourhood full */
 }
 
 static GlyphEntry *ensure_glyph(TextShaper *s, uint32_t codepoint)
@@ -194,6 +265,12 @@ TextShaper *text_shaper_create(const char *ttf_path, float size_pixels)
         text_shaper_destroy(s);
         return NULL;
     }
+    s->metric_pages = calloc(TS_METRIC_PAGES, sizeof(*s->metric_pages));
+    s->kern = calloc(TS_KERN_SLOTS, sizeof(*s->kern));
+    if (!s->metric_pages || !s->kern) {
+        text_shaper_destroy(s);
+        return NULL;
+    }
 
     /* CSS sizes fonts by the em box, not the ascender-to-descender distance:
      * "16px Arial" means 16/2048 em units.  ScaleForPixelHeight would use
@@ -220,6 +297,11 @@ TextShaper *text_shaper_create(const char *ttf_path, float size_pixels)
 void text_shaper_destroy(TextShaper *s)
 {
     if (!s) return;
+    if (s->metric_pages) {
+        for (int i = 0; i < TS_METRIC_PAGES; i++) free((void *)s->metric_pages[i]);
+        free((void *)s->metric_pages);
+    }
+    free((void *)s->kern);
     free(s->glyphs);
     free(s->atlas);
     free(s->ttf_data);
@@ -251,13 +333,14 @@ bool text_shaper_measure(const TextShaper *s, const char *utf8,
     uint32_t cp;
     while ((cp = utf8_decode(&p)) != 0) {
         if (cp == '\n') { x = 0; prev_glyph = -1; continue; }
-        GlyphEntry *g = ensure_glyph((TextShaper *)s, cp);
-        if (!g) continue;
+        int gi;
+        float xa;
+        ts_metric(s, cp, &gi, &xa);
         if (prev_glyph >= 0) {
-            x += (float)stbtt_GetGlyphKernAdvance(&s->font, prev_glyph, g->glyph_index) * s->scale;
+            x += (float)ts_kern(s, prev_glyph, gi) * s->scale;
         }
-        x += g->xadvance;
-        prev_glyph = g->glyph_index;
+        x += xa;
+        prev_glyph = gi;
     }
     if (out_width)  *out_width  = x;
     if (out_height) *out_height = s->baseline - s->descent + s->line_gap;
@@ -296,7 +379,7 @@ bool text_shaper_shape_to_display_list_scaled(const TextShaper *s,
         GlyphEntry *ge = ensure_glyph((TextShaper *)s, cp);
         if (!ge) continue;
         if (prev_glyph >= 0) {
-            pen_x += (float)stbtt_GetGlyphKernAdvance(&s->font, prev_glyph, ge->glyph_index) * s->scale * scale;
+            pen_x += (float)ts_kern(s, prev_glyph, ge->glyph_index) * s->scale * scale;
         }
         float gx = pen_x + ge->xoff * scale;
         float gy = pen_y + ge->yoff * scale;
@@ -322,13 +405,14 @@ static float ts_measure_span(const TextShaper *s, const char *start, const char 
         const char *save = p;
         uint32_t cp = utf8_decode(&p);
         if (cp == 0 || p > end) { p = save; break; }
-        GlyphEntry *g = ensure_glyph((TextShaper *)s, cp);
-        if (!g) continue;
+        int gi;
+        float xa;
+        ts_metric(s, cp, &gi, &xa);
         if (prev_glyph >= 0) {
-            x += (float)stbtt_GetGlyphKernAdvance(&s->font, prev_glyph, g->glyph_index) * s->scale;
+            x += (float)ts_kern(s, prev_glyph, gi) * s->scale;
         }
-        x += g->xadvance;
-        prev_glyph = g->glyph_index;
+        x += xa;
+        prev_glyph = gi;
     }
     return x;
 }
@@ -392,8 +476,7 @@ static bool ts_emit_span_glyphs(const TextShaper *s, const char *gp,
         GlyphEntry *ge = ensure_glyph((TextShaper *)s, gc);
         if (!ge) continue;
         if (*prev_glyph >= 0) {
-            *pen_x += (float)stbtt_GetGlyphKernAdvance(&s->font, *prev_glyph,
-                                                       ge->glyph_index) * s->scale * scale;
+            *pen_x += (float)ts_kern(s, *prev_glyph, ge->glyph_index) * s->scale * scale;
         }
         float gx = *pen_x + ge->xoff * scale;
         float gyy = gy + ge->yoff * scale;
@@ -580,7 +663,7 @@ static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
                 GlyphEntry *ge = ensure_glyph((TextShaper *)s, gc);
                 if (!ge) continue;
                 if (prev_glyph >= 0) {
-                    pen_x += (float)stbtt_GetGlyphKernAdvance(&s->font, prev_glyph, ge->glyph_index) * s->scale * scale;
+                    pen_x += (float)ts_kern(s, prev_glyph, ge->glyph_index) * s->scale * scale;
                 }
                 float gx = pen_x + ge->xoff * scale;
                 float gyy = gy + ge->yoff * scale;

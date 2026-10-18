@@ -12,6 +12,7 @@ add_executable(cyberbrowser-tests
     test_preorder_compaction_array.c
     test_css_parser.c
     test_css_layout.c
+    test_css_style.c
 )
 
 # Standalone YouTube data test executable (complex test with its own main)

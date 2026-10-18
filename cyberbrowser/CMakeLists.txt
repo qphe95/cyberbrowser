@@ -72,6 +72,9 @@ set(BE_SOURCES
     src/html_dom.c
     src/preorder_compaction_array.c
     src/css_parser.c
+    src/css_style.c
+    src/frame_arena.c
+    src/job_system.c
     src/css_layout.c
     src/display_list.c
     src/text_shaper.c

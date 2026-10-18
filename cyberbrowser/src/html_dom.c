@@ -507,6 +507,8 @@ static int parser_parse_element(HtmlParser *p, int parent_idx) {
                 int text_idx = parser_parse_text(p, node_idx);
                 (void)text_idx;
             }
+            /* Adding children can grow (realloc) the node array: reload. */
+            node = html_node_at(p->document, node_idx);
         }
         
         p->nesting_depth--;
