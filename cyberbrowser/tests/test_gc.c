@@ -918,6 +918,30 @@ TEST(test_gc_header_is_8_bytes) {
     return true;
 }
 
+/* Atoms live in permanent regions: no cycle includes them, so marking never
+ * visits them, and they survive every kind of collection. */
+TEST(test_gc_atoms_are_permanent) {
+    JSContextHandle ctx = get_gc_test_ctx();
+    if (!SAFE_VALID(ctx)) return true;
+    JSAtom a = JS_NewAtom(ctx, "__gc_permanent_atom_test");
+    ASSERT_TRUE(a != JS_ATOM_NULL);
+    /* An atom made from an existing (young) string is copied, not reused. */
+    GCValue str = JS_NewString(ctx, "__gc_atom_from_string");
+    JSAtom b = JS_ValueToAtom(ctx, str);
+    ASSERT_TRUE(b != JS_ATOM_NULL);
+    GCValue sa = JS_AtomToString(ctx, a), sb = JS_AtomToString(ctx, b);
+    GCHeader *ha = gc_header(gc_deref(JS_VALUE_GET_HANDLE(sa)));
+    GCHeader *hb = gc_header(gc_deref(JS_VALUE_GET_HANDLE(sb)));
+    ASSERT_TRUE(ha && hb);
+    ASSERT_TRUE(gc_core_region_of(ha)->permanent);
+    ASSERT_TRUE(gc_core_region_of(hb)->permanent);
+    gc_run();
+    ASSERT_TRUE(eval_expect_ok(ctx,
+        "(function(){ var o = {}; o['__gc_permanent_atom_test'] = 1; o.__gc_atom_from_string = 2;"
+        "  return o.__gc_permanent_atom_test + o['__gc_atom_from_string'] === 3 ? 'ok' : 'atoms lost'; })()"));
+    return true;
+}
+
 TEST(test_gc_ptr_to_handle_interior) {
     GCHandle h = gc_alloc(200, JS_GC_OBJ_TYPE_DATA);
     uint8_t *p = (uint8_t *)gc_deref(h);
@@ -1600,6 +1624,7 @@ void run_gc_tests(void) {
     printf("\n=== Heap and Handles ===\n");
     RUN_TEST(test_gc_header_is_8_bytes);
     RUN_TEST(test_gc_ptr_to_handle_interior);
+    RUN_TEST(test_gc_atoms_are_permanent);
     RUN_TEST(test_gc_humongous_object_never_moves);
     RUN_TEST(test_gc_realloc_keeps_handle_and_contents);
     RUN_TEST(test_gc_free_recycles_handle);

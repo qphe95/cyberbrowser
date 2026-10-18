@@ -59,9 +59,10 @@ it, the back table is.
 JS thread:   ─run─|B|─run─|B|─run─|B|─run─|B|─run─
                    ^       ^       ^       ^
                    |       |       |       flip: reject changed/pinned copies, swap tables
-                   |       |       remark: finish marking (budgeted), weak step
-                   |       mark start: parity, TAMS, root snapshot
-GC thread:   ═ prepare ═ mark ═ rescan ═ mark ═ sweep ═ copy ═ release ═
+                   |       |       weak apply: remove condemned weak entries, finalizers
+                   |       remark: finish marking (budgeted), open the weak window
+                   mark start: parity, TAMS, root snapshot (atoms skipped)
+GC thread:   ═ prepare ═ mark ═ rescan ═ final rescan ═ weak compute ═ sweep ═ copy ═ release ═
 ```
 
 The GC thread posts one request at a time (`request`, `req_seq`, `req_budget_ns`) and sets
@@ -169,7 +170,11 @@ address, and a thread waiting for the pool runs queued jobs itself.
 
 - **Precise roots:** every frame on the runtime's frame chain (arguments, locals and the
   whole operand stack), the runtime, contexts and their loaded modules, the current
-  exception, the job queue, `gc_add_root` handles, and atoms (permanent).
+  exception, the job queue and `gc_add_root` handles.
+- **Atoms** live in permanent regions (their own allocation context). A permanent region
+  is never in a cycle: marking does not visit atoms, the sweep and the evacuation skip
+  those regions, and atom strings are always copied into permanent storage rather than
+  reusing an existing string object.
 - **Conservative roots:** the JS thread's C stack and callee-saved registers, spilled
   with `setjmp`. A 32-bit word equal to a live handle, or a pointer into a live object (or
   one past its end), keeps that object alive. Pointers are resolved through the
@@ -268,7 +273,9 @@ during the cycle.
 **2. Concurrent mark** (GC thread):
 - trace from the worklist with the engine's `mark_children`;
 - pull the dirty cards and rescan them (§6.3), in rounds, until a round finds fewer than
-  64 dirty cards (at most 16 rounds).
+  64 dirty cards (at most 16 rounds);
+- **final pass:** rescan that last small round, drain, pull once more, rescan and drain,
+  so remark starts with almost nothing left to do.
 
 `mark_children` reads objects the JS thread is changing. Every handle is bounds-checked
 against the handle table; every loop that reads a count from one object and an array
@@ -281,14 +288,26 @@ class-prototype table is read directly instead of through its retry loop.
 - the roots again, the reference log since mark start, the last dirty cards;
 - trace until the worklist is empty, checking the budget every 256 objects and every 64
   cards; past the budget, decline (the GC thread takes the worklist and the cards);
-- when it finishes inside the budget, marking is complete: run the verifier if enabled,
-  then the **weak step** on the JS thread (WeakMap/WeakRef/FinalizationRegistry, the
-  shape-hash cleanup, finalizers, dead contexts), and recycle the deferred handles.
+- when it finishes inside the budget, marking is complete: run the verifier if enabled
+  and **open the weak window** (`weak_step_active = true`). Handle reuse stays deferred.
 
-Running the weak step in the same step as the end of marking means no weak lookup can
-hand out an object marking has condemned. During marking itself weak lookups are safe:
-whatever the JS thread takes from a weak table it holds on its stack (rescanned at
-remark) or stores (a dirty card).
+**3a. Weak compute** (GC thread, inside the weak window):
+- clean the shape hash: CAS each condemned shape's bucket entry to a tombstone;
+- scan the WeakMap, WeakRef and FinalizationRegistry registries (count read with acquire,
+  then the array) and flag the containers that hold a condemned value;
+- note whether any finalizer must run. Then post the weak-apply request.
+
+**3b. Weak apply** (boundary step, short): remove the condemned entries from the flagged
+containers only (the full cleanup if the shape table was resized meanwhile), run
+finalizers and prune dead contexts, close the weak window and recycle the deferred
+handles. Typically about 1 µs.
+
+While the window is open, `gc_object_is_dead()` answers for the condemned objects, so a
+weak lookup on the JS thread skips them and nothing marking condemned can be handed out
+before the apply. During marking itself weak lookups are safe: whatever the JS thread
+takes from a weak table it holds on its stack (rescanned at remark) or stores (a dirty
+card). When a registry or handle array grows, its old storage is retired rather than
+freed (the GC thread may be reading it) and freed at the next mark start.
 
 **4. Concurrent sweep** (GC thread): walk each region below TAMS; for a current, unmarked
 object, CAS its handle entries to NULL and push the handle to `freed_handles`. Count the
@@ -361,9 +380,9 @@ the remembered set, snapshot the roots and the reference log (then clear it).
 dirty cards in rounds as in a major cycle. Writes made after the minor start into old
 objects or fresh young objects are found the same way.
 
-**3. Remark** (boundary step, budgeted), **weak step** in the same step: WeakRefs,
-WeakMap entries and FinalizationRegistry targets in the collected set that died are
-cleared.
+**3. Remark** (boundary step, budgeted), then **weak compute and weak apply** as in a
+major cycle: WeakRefs, WeakMap entries and FinalizationRegistry targets in the collected
+set that died are cleared.
 
 **4. Sweep** (GC thread): free the handles of the collected set's unmarked objects.
 
@@ -405,8 +424,10 @@ These are the atom hash, shape hash, WeakMap, WeakRef and FinalizationRegistry.
 
 - **During marking** the JS thread may take objects from weak tables freely: it keeps
   them on its stack (rescanned at remark) or stores them (dirty cards).
-- **The weak step** runs on the JS thread in the step that completes marking. Entries
-  whose object the cycle condemned are removed; finalizers run. Atoms are permanent.
+- **Between remark and weak apply** (the weak window) condemned entries read as dead.
+- **The GC thread** cleans the shape hash and finds which containers hold condemned
+  entries; **the JS thread** removes them in the short weak-apply step and runs
+  finalizers. Atoms are permanent and never collected.
 - A conservative rescan can keep a WeakMap key alive for one extra cycle. The language
   allows this: collection timing is unspecified.
 
@@ -439,7 +460,7 @@ These are the atom hash, shape hash, WeakMap, WeakRef and FinalizationRegistry.
 | I4 | A presented copy equals the original at the moment of the flip. | Write watch reset before copying (Windows), `memcmp` (elsewhere), rejection |
 | I5 | No raw pointer on the stack points into a moved object. | Pins: stack scan and frames on the chain |
 | I6 | No thread waits on another to make progress, except in `gc_run()`. | Budgets, declines, single-writer fields, CAS |
-| I7 | A weak entry is never handed out after its object was condemned. | The weak step runs in the step that completes marking |
+| I7 | A weak entry is never handed out after its object was condemned. | `gc_object_is_dead()` answers for condemned objects from the end of remark until weak apply removes them |
 | I8 | Every reference from an old object to a young one is on a card in the remembered set, in the reference log, or in a frame on the chain. | Write helpers or write watch, frame unlink, `gc_note_ref`, copies dirty their cards |
 | I9 | When a minor cycle ends, the collected nursery holds no live object except those promoted in place. | Promotion on first survival, in-place promotion |
 
@@ -454,7 +475,7 @@ The verifier (§13) checks I1 and I8 after every remark.
 | A range check and a byte store | Every reference store (Linux, macOS); free on Windows |
 | A dirty range over the frame | Each return, yield or await |
 | Dual store when an entry changes | Allocating a handle, `gc_realloc`, `gc_free` |
-| Boundary steps | Mark start, remark and flip of each cycle (§14) |
+| Boundary steps | Mark start, remark, weak apply and flip of each cycle (§14) |
 
 ## 13. Testing
 
@@ -473,7 +494,8 @@ The verifier (§13) checks I1 and I8 after every remark.
   closures), a mixed workload under back-to-back cycles, every copy rejected,
   half the copies rejected with dense regions moved, `gc_run()` abandoning cycles,
   progress inside a script that never returns to the event loop, budget declines, weak
-  references cleared by minor cycles, and ArrayBuffer storage that never moves.
+  references cleared by minor cycles, ArrayBuffer storage that never moves, and atoms
+  placed in permanent regions that no cycle collects.
 
 Every concurrent test runs with the verifier on and checks that it reported nothing and
 that `gc_test_heap_check()` finds no inconsistent header, start bit or handle entry.
@@ -490,7 +512,7 @@ that `gc_test_heap_check()` finds no inconsistent header, start bit or handle en
 | `QJS_GC_VERIFY=1` | After every remark, re-trace from the roots and report reachable objects the cycle left unmarked (also checks the remembered set) |
 | `QJS_GC_POISON=1` | Decommit released regions so a stale pointer faults |
 | `QJS_GC_BUDGET_US`, `QJS_GC_NURSERY_KB`, `QJS_GC_MAJOR_KB` | Tuning |
-| `QJS_GC_LOG=1..3` | Cycle phase times, mark rounds, every boundary step |
+| `QJS_GC_LOG=1..4` | Cycle phase times, mark rounds, every boundary step (4: per-phase breakdown of mark start and remark) |
 | `QJS_GC_TRACE=1` | Record every handle event in a ring; the verifier prints the history of the handles it reports |
 
 **Static check:** `python3 tools/gc_store_check.py build/compile_commands.json` lists
@@ -506,17 +528,18 @@ Boundary steps on allocation-heavy scripts (three benchmarks below, default sett
 
 | Step | Average | Worst seen |
 |---|---|---|
-| Mark start | 24–87 µs | 0.25 ms |
-| Remark | 144–204 µs | 0.55 ms |
-| Flip | 177–242 µs | 1.5 ms (after declines raised the budget) |
+| Mark start | 15–69 µs | 0.26 ms |
+| Remark | 23–62 µs | 0.16 ms |
+| Weak apply | ~1 µs | — |
+| Flip | 110–174 µs | 0.48 ms |
 
 Peak memory and time against the previous code, which collected only when asked:
 
 | Script | Peak RSS before → concurrent | Time before → concurrent |
 |---|---|---|
-| 400K short-lived objects | 424 MB → 113 MB | 8.2 s → 7.2 s |
-| Binary trees | 597 MB → 241 MB | 7.6 s → 7.1 s |
-| Array churn | 795 MB → 162 MB | 5.3 s → 3.9 s |
+| 400K short-lived objects | 424 MB → 112 MB | 7.0 s → 6.6 s |
+| Binary trees | 597 MB → 238 MB | 6.2 s → 5.9 s |
+| Array churn | 795 MB → 163 MB | 4.7 s → 3.3 s |
 | fib(27) | 176 MB → 40 MB | 0.46 s → 0.15 s |
 
 (The first three spend most of their time in `getenv` calls on the engine's property
@@ -524,9 +547,8 @@ paths, which is unrelated to the collector.)
 
 ## 15. Limitations and next steps
 
-- **Remark cost** grows with the cards the JS thread dirtied during the last concurrent
-  round, mostly initializing new objects. Scanning fresh allocation precisely, or a
-  second GC thread, would cut it.
+- **Remark cost** is now mostly the root rescan (frames and the C stack) plus the cards
+  dirtied after the GC thread's final pass, about 25–65 µs on average.
 - **Flip cost on Linux and macOS** is proportional to the bytes copied (`memcmp`). The
   batch limit keeps it near 0.2 ms; moving the comparison to the GC thread and comparing
   only cards written since the copy would need write tracking of non-reference stores.

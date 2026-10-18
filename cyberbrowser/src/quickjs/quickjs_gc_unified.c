@@ -188,6 +188,7 @@ static void region_activate(GCRegion *r, uint32_t space, uint32_t head, uint32_t
     r->collecting = false;
     r->keep = false;
     r->pinned = false;
+    r->permanent = false;
     r->humongous_head = head;
     r->humongous_count = count;
     atomic_store_explicit(&r->top, (uintptr_t)base + GC_HEADER_SIZE, memory_order_release);
@@ -288,6 +289,7 @@ void gc_core_region_release(GCRegion *r) {
         x->collecting = false;
         x->keep = false;
         x->pinned = false;
+        x->permanent = false;
         x->live_bytes = 0;
         x->alloc_owner = GC_OWNER_NONE;
         if (g_core.poison) {
@@ -336,6 +338,7 @@ GCHeader *gc_core_alloc_object_memory(GCAllocCtx *a, size_t payload, JSGCObjectT
         GCRegion *r = gc_core_region_acquire(a->space);
         if (!r) return NULL;
         r->alloc_owner = a->owner;
+        r->permanent = a->permanent;
         a->region = r;
         a->top = (uint8_t *)atomic_load_explicit(&r->top, memory_order_relaxed);
         a->end = gc_core_region_start(r) + GC_REGION_SIZE;
@@ -365,10 +368,10 @@ static bool type_starts_old(JSGCObjectTypeEnum type) {
     }
 }
 
-static GCHandle gc_alloc_in(size_t size, JSGCObjectTypeEnum type, bool old) {
+static GCHandle gc_alloc_in(size_t size, JSGCObjectTypeEnum type, bool old, bool permanent) {
     if (!g_gc.initialized && !gc_init()) return GC_HANDLE_NULL;
-    bool young = !old && g_core.nursery_enabled;
-    GCAllocCtx *a = young ? &g_core.js_young : &g_core.js_old;
+    bool young = !old && !permanent && g_core.nursery_enabled;
+    GCAllocCtx *a = permanent ? &g_core.js_perm : young ? &g_core.js_young : &g_core.js_old;
     GCHeader *hdr = gc_core_alloc_object_memory(a, size, type);
     if (!hdr) {
         fprintf(stderr, "[GC] out of memory allocating %zu bytes\n", size);
@@ -385,16 +388,18 @@ static GCHandle gc_alloc_in(size_t size, JSGCObjectTypeEnum type, bool old) {
 }
 
 GCHandle gc_alloc(size_t size, JSGCObjectTypeEnum gc_obj_type) {
-    return gc_alloc_in(size, gc_obj_type, type_starts_old(gc_obj_type));
+    return gc_alloc_in(size, gc_obj_type, type_starts_old(gc_obj_type), false);
 }
 
 GCHandle gc_alloc_old(size_t size, JSGCObjectTypeEnum gc_obj_type) {
-    return gc_alloc_in(size, gc_obj_type, true);
+    return gc_alloc_in(size, gc_obj_type, true, false);
 }
 
 GCHandle gc_alloc_ex(size_t size, JSGCObjectTypeEnum gc_obj_type, GCHandleArrayType array_type) {
-    bool old = type_starts_old(gc_obj_type) || array_type == GC_HANDLE_ARRAY_ATOM;
-    GCHandle h = gc_alloc_in(size, gc_obj_type, old);
+    /* Atoms are permanent: they go to regions no cycle looks at, so the
+     * collector never has to mark them. */
+    bool atom = array_type == GC_HANDLE_ARRAY_ATOM;
+    GCHandle h = gc_alloc_in(size, gc_obj_type, atom || type_starts_old(gc_obj_type), atom);
     if (h == GC_HANDLE_NULL) return h;
     if (array_type == GC_HANDLE_ARRAY_ATOM)
         gc_handle_array_add(&g_gc.atom_handles, h);
@@ -414,7 +419,7 @@ GCHandle gc_realloc(GCHandle handle, size_t new_size) {
     size_t old_size = gc_header_payload_size(old_hdr);
     GCRegion *orr = gc_core_region_of(old_hdr);
     bool young = g_core.nursery_enabled && orr && orr->space == GC_RS_NURSERY;
-    GCAllocCtx *a = young ? &g_core.js_young : &g_core.js_old;
+    GCAllocCtx *a = orr && orr->permanent ? &g_core.js_perm : young ? &g_core.js_young : &g_core.js_old;
     GCHeader *hdr = gc_core_alloc_object_memory(a, new_size, type);
     if (!hdr) {
         fprintf(stderr, "[GC] out of memory reallocating %zu bytes\n", new_size);
@@ -519,17 +524,51 @@ void gc_dirty_range_slow(const void *p, size_t size) {
  * Registries: contexts, finalizers, roots (JS thread)
  * ============================================================================ */
 
+/* ============================================================================
+ * Retired storage
+ * ============================================================================ */
+
+static void **g_retired;
+static uint32_t g_retired_n, g_retired_cap;
+
+void gc_core_retire(void *p) {
+    if (!p) return;
+    if (g_retired_n == g_retired_cap) {
+        uint32_t cap = g_retired_cap ? g_retired_cap * 2 : 64;
+        void **n = (void **)realloc(g_retired, cap * sizeof(void *));
+        if (!n) return;   /* leak rather than free under a reader */
+        g_retired = n;
+        g_retired_cap = cap;
+    }
+    g_retired[g_retired_n++] = p;
+}
+
+void gc_core_free_retired(void) {
+    for (uint32_t i = 0; i < g_retired_n; i++) free(g_retired[i]);
+    g_retired_n = 0;
+}
+
+/* Grow storage the GC thread may read: copy, publish, retire the old. */
+static void *grow_shared(void *old, size_t old_bytes, size_t new_bytes) {
+    void *n = calloc(1, new_bytes);
+    if (!n) return NULL;
+    if (old) memcpy(n, old, old_bytes);
+    gc_core_retire(old);
+    return n;
+}
+
 void gc_core_registry_add(GCRegistry *reg, GCHandle h) {
     if (reg->count == reg->cap) {
         uint32_t cap = reg->cap ? reg->cap * 2 : 16;
-        GCRegistryEntry *n = (GCRegistryEntry *)realloc(reg->items, cap * sizeof(*n));
+        GCRegistryEntry *n = (GCRegistryEntry *)grow_shared(reg->items, reg->cap * sizeof(*n),
+                                                            cap * sizeof(*n));
         if (!n) return;
-        reg->items = n;
+        atomic_store_explicit((_Atomic(GCRegistryEntry *) *)&reg->items, n, memory_order_release);
         reg->cap = cap;
     }
     reg->items[reg->count].handle = h;
     reg->items[reg->count].fn = NULL;
-    reg->count++;
+    atomic_store_explicit((_Atomic uint32_t *)&reg->count, reg->count + 1, memory_order_release);
 }
 
 void gc_set_handle_finalizer(GCHandle handle, GCFinalizerFunc *finalizer) {
@@ -649,15 +688,17 @@ int gc_handle_array_add(JSHandleArray *arr, GCHandle handle) {
 int gc_handle_array_push_with_index(JSHandleArray *arr, GCHandle handle, uint32_t *out_index) {
     if (!arr || handle == GC_HANDLE_NULL) return -1;
     if (arr->count >= arr->capacity) {
+        /* The GC thread may be reading the array (weak processing). */
         uint32_t cap = arr->capacity ? arr->capacity * 2 : 16;
-        GCHandle *n = (GCHandle *)realloc(arr->handles, cap * sizeof(GCHandle));
+        GCHandle *n = (GCHandle *)grow_shared(arr->handles, arr->capacity * sizeof(GCHandle),
+                                              cap * sizeof(GCHandle));
         if (!n) return -1;
-        memset(n + arr->capacity, 0, (cap - arr->capacity) * sizeof(GCHandle));
-        arr->handles = n;
+        atomic_store_explicit((_Atomic(GCHandle *) *)&arr->handles, n, memory_order_release);
         arr->capacity = cap;
     }
-    uint32_t index = arr->count++;
+    uint32_t index = arr->count;
     arr->handles[index] = handle;
+    atomic_store_explicit((_Atomic uint32_t *)&arr->count, index + 1, memory_order_release);
     if (out_index) *out_index = index;
     return 0;
 }
@@ -732,6 +773,9 @@ bool gc_init(void) {
     g_core.js_young.owner = GC_OWNER_JS;
     g_core.js_old.space = GC_RS_OLD;
     g_core.js_old.owner = GC_OWNER_JS;
+    g_core.js_perm.space = GC_RS_OLD;
+    g_core.js_perm.owner = GC_OWNER_JS;
+    g_core.js_perm.permanent = true;
     g_core.gc_copy.space = GC_RS_OLD;
     g_core.gc_copy.owner = GC_OWNER_GC;
 
@@ -764,6 +808,10 @@ void gc_cleanup(void) {
     }
     free(g_core.regions);
     free(g_core.hcache);
+    gc_core_free_retired();
+    free(g_retired);
+    g_retired = NULL;
+    g_retired_cap = 0;
     free(g_core.contexts.items);
     free(g_core.finalizers.items);
     free(g_core.roots.items);

@@ -183,6 +183,7 @@ enum {
     REQ_MARK_START,
     REQ_REMARK,
     REQ_FLIP,
+    REQ_WEAK_APPLY,
 };
 
 enum {
@@ -235,6 +236,11 @@ typedef struct GCConc {
     uint32_t moved_n, moved_cap;
     uint32_t cset_first, cset_count;   /* regions being evacuated (list below) */
     U32Vec cset;
+
+    /* Weak processing results (GC thread -> weak apply step). */
+    U32Vec weak_dead[3];          /* WeakMap/WeakSet states, WeakRefs, FinalizationRegistries */
+    void *weak_shapes;            /* the shape table the GC thread cleaned */
+    bool weak_finalizers;         /* some registered finalizer's object died */
 
     /* Remembered set: one bit per card written since the last minor start
      * (acc), and the set the running minor cycle consumes (cur). */
@@ -374,6 +380,8 @@ static inline bool over_budget(uint64_t t0, uint64_t budget_ns) {
 /* Mark start: flip parity, record TAMS, snapshot the roots. */
 static void step_mark_start(int kind) {
     JSRuntimeHandle rt = g_gc.rt;
+    /* The GC thread holds no pointer into retired registry storage now. */
+    gc_core_free_retired();
     if (g_core.trace_handle) gc_core_trace(0, kind == GC_CYCLE_MINOR ? "--- minor mark start" : "--- major mark start");
     if (kind == GC_CYCLE_MINOR) {
         /* The nursery that exists now is the one this cycle collects; new
@@ -391,9 +399,13 @@ static void step_mark_start(int kind) {
     } else {
         g_conc.old_bytes = 0;
     }
+    uint64_t ta = gc_os_now_ns();
     gc_col_begin_cycle(kind, false);
     g_core.defer_frees = true;
+    uint64_t tb = gc_os_now_ns();
     gc_col_enumerate_roots(rt, false);
+    if (g_core.log_level > 3)
+        fprintf(stderr, "[GC]   mark start: setup %.1f us, roots %.1f us\n", (tb - ta) / 1e3, (gc_os_now_ns() - tb) / 1e3);
     if (kind == GC_CYCLE_MINOR) {
         gc_col_mark_ref_log(rt, 0);
         g_ref_log.n = 0;
@@ -406,9 +418,13 @@ static void step_mark_start(int kind) {
  * step.  Declines (leaving the work to the GC thread) if over budget. */
 static uint32_t step_remark(int kind, uint64_t t0, uint64_t budget_ns) {
     JSRuntimeHandle rt = g_gc.rt;
+    uint64_t ta = gc_os_now_ns();
     gc_col_enumerate_roots(rt, false);
     gc_col_mark_ref_log(rt, kind == GC_CYCLE_MINOR ? 0 : g_ref_log_major_start);
+    uint64_t tb = gc_os_now_ns();
     dirty_pull_all(&g_conc.pending_cards);
+    uint32_t ncards = g_conc.pending_cards.n;
+    uint64_t tc = gc_os_now_ns();
     for (;;) {
         if (!gc_col_drain(rt, 256)) {
             if (over_budget(t0, budget_ns)) return ACK_DECLINED;
@@ -424,9 +440,15 @@ static uint32_t step_remark(int kind, uint64_t t0, uint64_t budget_ns) {
     /* Marking is complete. */
     if (g_core.trace_handle) gc_core_trace(0, "--- remark done");
     if (g_core.config.verify) gc_col_verify_impl(rt);
-    gc_col_weak_step(rt);
-    g_core.defer_frees = false;
-    release_deferred_frees();
+    if (g_core.log_level > 3)
+        fprintf(stderr, "[GC]   remark: roots %.1f us, pull %.1f us (%u cards), rescan+trace %.1f us\n",
+                (tb - ta) / 1e3, (tc - tb) / 1e3, ncards, (gc_os_now_ns() - tc) / 1e3);
+    /* Open the weak window: from now until the weak apply step,
+     * gc_object_is_dead() answers for this cycle, so weak lookups (shape
+     * hash, WeakRef.deref) cannot hand out an object the cycle condemned
+     * while the GC thread works out what died.  Handle reuse stays
+     * deferred: the GC thread reads weak containers through handles. */
+    atomic_store_explicit((_Atomic bool *)&g_gc.weak_step_active, true, memory_order_release);
     if (kind == GC_CYCLE_MAJOR && !g_core.nursery_enabled) g_ref_log.n = 0;
     return ACK_DONE;
 }
@@ -523,6 +545,28 @@ static uint32_t step_flip(uint64_t t0, uint64_t budget_ns) {
     return ACK_DONE;
 }
 
+/* Weak apply: fix the weak containers the GC thread flagged, run the
+ * finalizers of condemned objects, close the weak window. */
+static void close_weak_window(void) {
+    atomic_store_explicit((_Atomic bool *)&g_gc.weak_step_active, false, memory_order_release);
+    g_core.defer_frees = false;
+    release_deferred_frees();
+}
+
+static uint32_t step_weak_apply(void) {
+    JSRuntimeHandle rt = g_gc.rt;
+    const GCHandle *lists[3];
+    uint32_t counts[3];
+    for (int k = 0; k < 3; k++) {
+        lists[k] = g_conc.weak_dead[k].items;
+        counts[k] = g_conc.weak_dead[k].n;
+    }
+    if (rt != GC_HANDLE_NULL) JS_GCWeakApply(rt, g_conc.weak_shapes, lists, counts);
+    gc_col_finalize_dead(rt, g_conc.weak_finalizers);
+    close_weak_window();
+    return ACK_DONE;
+}
+
 /* Run the pending boundary step, if any. */
 static void run_boundary(uintptr_t stack_lo) {
     if (g_conc.in_boundary) return;
@@ -548,6 +592,9 @@ static void run_boundary(uintptr_t stack_lo) {
         break;
     case REQ_FLIP:
         ack = step_flip(t0, budget);
+        break;
+    case REQ_WEAK_APPLY:
+        ack = step_weak_apply();
         break;
     }
     uint64_t dt = gc_os_now_ns() - t0;
@@ -687,7 +734,25 @@ static bool concurrent_mark(JSRuntimeHandle rt) {
         dirty_pull_all(&g_conc.pending_cards);
         if (g_core.log_level > 1)
             fprintf(stderr, "[GC]   round %d: %u dirty cards\n", round, g_conc.pending_cards.n);
-        if (g_conc.pending_cards.n < 64) return true;
+        if (g_conc.pending_cards.n < 64) {
+            /* Final pass: rescan these here, then pull once more just before
+             * remark is posted, so the JS thread only sees the cards written
+             * in the moments since. */
+            while (g_conc.pending_cards.n) {
+                gc_col_rescan_card(rt, g_conc.pending_cards.items[--g_conc.pending_cards.n]);
+                g_core.stats.dirty_cards_rescanned++;
+            }
+            while (!gc_col_drain(rt, 512))
+                if (aborted()) return false;
+            dirty_pull_all(&g_conc.pending_cards);
+            while (g_conc.pending_cards.n) {
+                gc_col_rescan_card(rt, g_conc.pending_cards.items[--g_conc.pending_cards.n]);
+                g_core.stats.dirty_cards_rescanned++;
+            }
+            while (!gc_col_drain(rt, 512))
+                if (aborted()) return false;
+            return true;
+        }
     }
 }
 
@@ -736,7 +801,7 @@ static void sweep_concurrent(int kind) {
     for (uint32_t i = 0; i < hwm; i++) {
         GCRegion *r = &g_core.regions[i];
         uint32_t st = atomic_load_explicit(&r->state, memory_order_acquire);
-        if (!gc_core_region_in_use(st)) continue;
+        if (!gc_core_region_in_use(st) || r->permanent) continue;
         if (kind == GC_CYCLE_MINOR) {
             if (!r->collecting) continue;
             gc_col_sweep_region(r, atomic_load(&r->top), false);
@@ -901,7 +966,7 @@ static bool evacuate_major(void) {
         for (; next < hwm && batch < EVAC_BATCH_BYTES; next++) {
             GCRegion *r = &g_core.regions[next];
             if (atomic_load_explicit(&r->state, memory_order_acquire) != GC_RS_OLD) continue;
-            if (r->alloc_owner != GC_OWNER_NONE || r->pinned) continue;
+            if (r->alloc_owner != GC_OWNER_NONE || r->pinned || r->permanent) continue;
             uintptr_t top = atomic_load_explicit(&r->top, memory_order_acquire);
             if (top != r->tams) continue;   /* allocated in during the cycle */
             size_t used = top - (uintptr_t)gc_core_region_start(r);
@@ -968,6 +1033,31 @@ static bool evacuate_minor(void) {
  * GC thread: cycles
  * ============================================================================ */
 
+/* After marking: find what died among the weak structures (GC thread).
+ * The arrays read here are JS-owned; their storage is never freed while a
+ * cycle may read it (gc_core_retire), and entries are published before the
+ * count. */
+static void weak_compute(JSRuntimeHandle rt) {
+    JSHandleArray *arrays[3] = { &g_gc.weakmap_handles, &g_gc.weakref_handles, &g_gc.finrec_handles };
+    g_conc.weak_shapes = rt != GC_HANDLE_NULL ? JS_GCWeakCleanShapes(rt) : NULL;
+    for (int k = 0; k < 3; k++) {
+        g_conc.weak_dead[k].n = 0;
+        uint32_t n = atomic_load_explicit((_Atomic uint32_t *)&arrays[k]->count, memory_order_acquire);
+        GCHandle *hs = atomic_load_explicit((_Atomic(GCHandle *) *)&arrays[k]->handles, memory_order_acquire);
+        for (uint32_t i = 0; i < n; i++) {
+            GCHandle h = atomic_load_explicit((_Atomic uint32_t *)&hs[i], memory_order_relaxed);
+            if (gc_handle_array_entry_is_valid(h) && JS_GCWeakContainerHasDead(h, k))
+                u32_push(&g_conc.weak_dead[k], h);
+        }
+    }
+    g_conc.weak_finalizers = false;
+    uint32_t n = atomic_load_explicit((_Atomic uint32_t *)&g_core.finalizers.count, memory_order_acquire);
+    GCRegistryEntry *items = atomic_load_explicit((_Atomic(GCRegistryEntry *) *)&g_core.finalizers.items,
+                                                  memory_order_acquire);
+    for (uint32_t i = 0; i < n && !g_conc.weak_finalizers; i++)
+        if (gc_object_is_dead(items[i].handle)) g_conc.weak_finalizers = true;
+}
+
 /* The remembered set a minor cycle used: cleared when the cycle completed
  * (every young object it covered was promoted), merged back otherwise. */
 static void retire_remset(bool completed) {
@@ -1006,6 +1096,8 @@ static void run_cycle(int kind) {
     if (!remark(rt)) goto abandon;
     t_remark = gc_os_now_ns();
     marked = true;
+    weak_compute(rt);
+    if (post_request(REQ_WEAK_APPLY, 0) != ACK_DONE) goto finish;
     sweep_concurrent(kind);
     t_sweep = gc_os_now_ns();
     if (aborted()) goto finish;
@@ -1107,8 +1199,7 @@ static void abort_and_wait(void) {
         gc_os_wait((volatile uint32_t *)&g_conc.idle, 0, 5);
     }
     atomic_store_explicit(&g_conc.abort, 0, memory_order_release);
-    g_core.defer_frees = false;
-    release_deferred_frees();
+    close_weak_window();
     gc_core_drain_freed_ring();
     /* The GC thread is idle: nothing can be pending. */
     atomic_store_explicit(&g_gc_poll_flag, g_conc.force_full, memory_order_release);
@@ -1157,6 +1248,7 @@ void gc_core_free_internal(void) {
     u32_free(&g_deferred_frees);
     u32_free(&g_ref_log);
     u32_free(&g_conc.pending_cards);
+    for (int k = 0; k < 3; k++) u32_free(&g_conc.weak_dead[k]);
     u32_free(&g_conc.cset);
     free(g_conc.moved);
     free(g_conc.remset_acc);

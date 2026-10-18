@@ -45,6 +45,10 @@ int JS_GCHasActiveFrames(JSRuntimeHandle rt);
 
 /* Engine hooks (quickjs.c), continued */
 void JS_GCMarkContextRoots(JSRuntimeHandle rt, JSContextHandle ctx, JS_MarkFunc *mark_func);
+int JS_GCWeakContainerHasDead(GCHandle h, int kind);
+void *JS_GCWeakCleanShapes(JSRuntimeHandle rt);
+void JS_GCWeakApply(JSRuntimeHandle rt, void *cleaned_shapes,
+                    const GCHandle *const lists[3], const uint32_t counts[3]);
 
 /* gc_collector.c */
 void gc_col_mark_cb(JSRuntimeHandle rt, GCHandle h);
@@ -54,6 +58,7 @@ void gc_col_enumerate_roots_cb(JSRuntimeHandle rt, JS_MarkFunc *cb);
 void gc_col_capture_stack(uintptr_t lo);
 void gc_col_pin_running_code(JSRuntimeHandle rt);
 void gc_col_weak_step(JSRuntimeHandle rt);
+void gc_col_finalize_dead(JSRuntimeHandle rt, bool finalizers);
 void gc_col_begin_cycle(int kind, bool clear_bits);
 void gc_col_end_cycle(void);
 bool gc_col_header_condemned(const GCHeader *hdr);

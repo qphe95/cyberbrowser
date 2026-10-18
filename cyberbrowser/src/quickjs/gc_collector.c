@@ -117,6 +117,7 @@ static void worklist_push(GCWorklist *w, GCHandle h) {
  * outside the cycle are live by definition: allocated during the cycle
  * (above TAMS) or, in a minor cycle, outside the nursery being collected. */
 static inline bool in_cycle(const GCRegion *r, const GCHeader *hdr) {
+    if (r->permanent) return false;   /* atoms */
     switch (g_col.kind) {
     case GC_CYCLE_FULL:
     case GC_CYCLE_MAJOR:
@@ -189,14 +190,6 @@ static void mark_cb(JSRuntimeHandle rt, GCHandle h) {
         GC_TRACE(h, "marked");
         worklist_push(&g_col.work, h);
     }
-}
-
-/* Mark a leaf object (no children) without queueing it. */
-static void mark_leaf(GCHandle h) {
-    GCHeader *hdr = handle_header(h);
-    if (!hdr) return;
-    GCRegion *r = header_region(hdr);
-    if (in_cycle(r, hdr)) set_mark(r, hdr);
 }
 
 typedef struct TraceEvent {
@@ -437,13 +430,14 @@ static void ignore_cb(JSRuntimeHandle rt, GCHandle h) { (void)rt; (void)h; }
  * reaches through raw pointers are pinned.  JS thread only: the roots live
  * in structures the JS thread changes without dirty flags. */
 static void enumerate_roots(JSRuntimeHandle rt, bool pin, JS_MarkFunc *cb) {
-    /* Atoms are permanent: the engine refers to them by index from places
-     * the collector cannot see (bytecode, shapes under construction). */
-    for (uint32_t i = 0; i < g_gc.atom_handles.count; i++) {
-        GCHandle h = g_gc.atom_handles.handles[i];
-        if (gc_handle_array_entry_is_valid(h)) {
-            if (cb == mark_cb) mark_leaf(h);
-            else cb(rt, h);
+    /* Atoms are permanent (the engine refers to them by index from places
+     * the collector cannot see) and live in permanent regions, which no
+     * cycle includes: marking does not need to visit them.  The verifier
+     * still does. */
+    if (cb != mark_cb) {
+        for (uint32_t i = 0; i < g_gc.atom_handles.count; i++) {
+            GCHandle h = g_gc.atom_handles.handles[i];
+            if (gc_handle_array_entry_is_valid(h)) cb(rt, h);
         }
     }
     for (uint32_t i = 0; i < g_core.contexts.count; i++) {
@@ -480,11 +474,11 @@ static void pin_running_code(JSRuntimeHandle rt) {
 /* Drop weak references to objects this cycle condemned and run their
  * finalizers.  Runs on the JS thread; the engine's weak tables belong to
  * it. */
-static void weak_step(JSRuntimeHandle rt) {
-    g_gc.weak_step_active = true;
-    if (rt != GC_HANDLE_NULL) JS_GCWeakStep(rt);
-
+/* Run the finalizers of condemned objects and drop dead contexts (JS
+ * thread, while gc_object_is_dead answers for the finished cycle). */
+void gc_col_finalize_dead(JSRuntimeHandle rt, bool finalizers) {
     uint32_t j = 0;
+    if (!finalizers) goto contexts;
     for (uint32_t i = 0; i < g_core.finalizers.count; i++) {
         GCRegistryEntry e = g_core.finalizers.items[i];
         if (gc_object_is_dead(e.handle)) {
@@ -496,6 +490,7 @@ static void weak_step(JSRuntimeHandle rt) {
     }
     g_core.finalizers.count = j;
 
+contexts:
     j = 0;
     for (uint32_t i = 0; i < g_core.contexts.count; i++) {
         GCRegistryEntry e = g_core.contexts.items[i];
@@ -503,7 +498,12 @@ static void weak_step(JSRuntimeHandle rt) {
         g_core.contexts.items[j++] = e;
     }
     g_core.contexts.count = j;
+}
 
+static void weak_step(JSRuntimeHandle rt) {
+    g_gc.weak_step_active = true;
+    if (rt != GC_HANDLE_NULL) JS_GCWeakStep(rt);
+    gc_col_finalize_dead(rt, true);
     g_gc.weak_step_active = false;
 }
 
@@ -551,6 +551,7 @@ static void sweep_all_now(void) {
         GCRegion *r = &g_core.regions[i];
         uint32_t st = atomic_load(&r->state);
         if (!gc_core_region_in_use(st)) continue;
+        if (r->permanent) continue;
         size_t live = gc_col_sweep_region(r, atomic_load(&r->top), true);
         if (live == 0 && r->alloc_owner == GC_OWNER_NONE && !r->pinned)
             gc_core_region_release(r);
@@ -589,7 +590,7 @@ static void evacuate_sparse_regions_now(void) {
         GCRegion *r = &g_core.regions[i];
         uint32_t st = atomic_load(&r->state);
         if (st != GC_RS_OLD && st != GC_RS_NURSERY) continue;
-        if (r->pinned || r->alloc_owner != GC_OWNER_NONE) continue;
+        if (r->pinned || r->permanent || r->alloc_owner != GC_OWNER_NONE) continue;
         size_t used = atomic_load(&r->top) - (uintptr_t)gc_core_region_start(r);
         if (r->live_bytes * 2 > used) continue;
         uintptr_t start = (uintptr_t)gc_core_region_start(r) + GC_HEADER_SIZE;

@@ -3268,7 +3268,10 @@ static JSAtom __JS_NewAtom(JSRuntimeHandle rt, JSStringHandle str, int atom_type
     }
 
     if (SAFE_VALID(str)) {
-        if (SAFE_GET_OR(str, JSStringHandle, atom_type, 0) == 0) {
+        /* Atoms live in permanent regions (never collected, so the collector
+         * need not mark them), so an existing string is always copied into
+         * one instead of being turned into the atom itself. */
+        if (0 && SAFE_GET_OR(str, JSStringHandle, atom_type, 0) == 0) {
             /* Reuse existing string as atom. It's already in gc_handles
              * from when it was created as a GC object.
              * 
@@ -7759,6 +7762,98 @@ void JS_GCWeakStep(JSRuntimeHandle rt)
     gc_handle_array_compact(&g_gc.weakmap_handles);
     gc_handle_array_compact(&g_gc.weakref_handles);
     gc_handle_array_compact(&g_gc.finrec_handles);
+}
+
+/* ----------------------------------------------------------------------------
+ * Weak processing for the concurrent collector.  Between the end of marking
+ * and the weak apply step, gc_object_is_dead() answers for the finished cycle
+ * on both threads.  The GC thread finds what died (read-only, except for the
+ * lock-free shape hash, whose entries it removes itself); the JS thread then
+ * fixes only the containers that were flagged.
+ * ------------------------------------------------------------------------- */
+
+static inline BOOL gc_weak_value_dead(GCValue v)
+{
+    return JS_VALUE_HAS_REF_COUNT(v) && gc_object_is_dead(GC_VALUE_GET_HANDLE(v));
+}
+
+/* GC thread: does the weak container h (kind: 0 WeakMap/WeakSet state,
+ * 1 WeakRef data, 2 FinalizationRegistry data) hold an entry that died?
+ * The JS thread may be changing it; every handle is checked on the way. */
+int JS_GCWeakContainerHasDead(GCHandle h, int kind)
+{
+    uint32_t guard = 0;
+    if (h == GC_HANDLE_NULL || !gc_handle_is_valid(h)) return 0;
+    switch (kind) {
+    case 0: {
+        JSMapState *ms = (JSMapState *)gc_deref(h);
+        if (!ms || !ms->is_weak) return 0;
+        GCHandle mr = ms->records.next;
+        while (mr != GC_HANDLE_NULL && guard++ < (1u << 24)) {
+            JSMapRecord *r = (JSMapRecord *)gc_deref(mr);
+            if (!r) break;
+            if (!r->empty && gc_weak_value_dead(r->key)) return 1;
+            mr = r->link.next;
+        }
+        return 0;
+    }
+    case 1: {
+        JSWeakRefData *w = (JSWeakRefData *)gc_deref(h);
+        return w && gc_weak_value_dead(w->target);
+    }
+    case 2: {
+        JSFinalizationRegistryData *fr = (JSFinalizationRegistryData *)gc_deref(h);
+        if (!fr) return 0;
+        GCHandle e = fr->entries.next;
+        while (e != GC_HANDLE_NULL && guard++ < (1u << 24)) {
+            JSFinRecEntry *fe = (JSFinRecEntry *)gc_deref(e);
+            if (!fe) break;
+            if (gc_weak_value_dead(fe->target) || gc_weak_value_dead(fe->token)) return 1;
+            e = fe->link.next;
+        }
+        return 0;
+    }
+    }
+    return 0;
+}
+
+/* GC thread: remove the shapes the cycle condemned from the lock-free shape
+ * hash (a CAS per entry, as concurrent with lookups and inserts as the table
+ * is designed to be).  Returns the table it cleaned. */
+void *JS_GCWeakCleanShapes(JSRuntimeHandle rt)
+{
+    LFHashTable *t = js_rt_shape_hash(rt);
+    if (!t) return NULL;
+    for (uint32_t i = 0; i < t->bucket_count; i++) {
+        LFHashBucket *b = &t->buckets[i];
+        if (atomic_load_u32(&b->state) != LF_HASH_OCCUPIED) continue;
+        GCHandle sh = atomic_load_u32((volatile uint32_t *)&b->value);
+        if (sh == GC_HANDLE_NULL || !gc_object_is_dead(sh)) continue;
+        if (atomic_compare_exchange_u32(&b->state, LF_HASH_OCCUPIED, LF_HASH_TOMBSTONE) == LF_HASH_OCCUPIED)
+            js_rt_shape_hash_count_dec(rt);
+    }
+    return t;
+}
+
+/* JS thread, weak apply step: fix the containers the GC thread flagged. */
+void JS_GCWeakApply(JSRuntimeHandle rt, void *cleaned_shapes,
+                    const GCHandle *const lists[3], const uint32_t counts[3])
+{
+    /* The table was replaced (resized) while the GC thread cleaned it: the
+     * new one may hold entries copied before they were removed. */
+    if (js_rt_shape_hash(rt) != (LFHashTable *)cleaned_shapes)
+        gc_cleanup_shape_hash_table(rt);
+    for (uint32_t i = 0; i < counts[0]; i++)
+        if (SAFE_VALID(lists[0][i])) map_delete_weakrefs(rt, lists[0][i]);
+    for (uint32_t i = 0; i < counts[1]; i++) {
+        JSWeakRefData *w = SAFE_PTR(lists[1][i], JSWeakRefDataHandle);
+        if (w) weakref_delete_weakref(rt, w);
+    }
+    for (uint32_t i = 0; i < counts[2]; i++)
+        if (SAFE_VALID(lists[2][i])) finrec_delete_weakref(rt, lists[2][i]);
+    if (counts[0]) gc_handle_array_compact(&g_gc.weakmap_handles);
+    if (counts[1]) gc_handle_array_compact(&g_gc.weakref_handles);
+    if (counts[2]) gc_handle_array_compact(&g_gc.finrec_handles);
 }
 
 static void JS_RunGCInternal(JSRuntimeHandle rt, BOOL remove_weak_objects)

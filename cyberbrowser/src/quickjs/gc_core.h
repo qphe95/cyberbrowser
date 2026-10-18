@@ -36,6 +36,7 @@ typedef struct GCRegion {
     bool in_cset;              /* being evacuated by a major cycle */
     bool collecting;           /* in the nursery set a minor cycle collects */
     bool keep;                 /* a move out of it was rejected: it stays in use */
+    bool permanent;            /* holds atoms: never in a cycle, never moved or freed */
     bool pinned;               /* holds an object pinned for this cycle */
     _Atomic uintptr_t top;     /* end of the last fully allocated object */
     uintptr_t tams;            /* top at mark start (major cycle) */
@@ -52,6 +53,7 @@ typedef struct GCAllocCtx {
     uint8_t *end;
     uint32_t space;
     uint32_t owner;
+    bool permanent;            /* fills permanent regions */
 } GCAllocCtx;
 
 typedef struct GCRegistryEntry {
@@ -90,6 +92,7 @@ typedef struct GCCore {
 
     GCAllocCtx js_young;   /* JS thread: nursery */
     GCAllocCtx js_old;     /* JS thread: pretenured objects */
+    GCAllocCtx js_perm;    /* JS thread: atoms (permanent) */
     GCAllocCtx gc_copy;    /* GC thread (or sync collector): copies */
 
     GCHandle *hcache;      /* JS thread free-handle cache */
@@ -171,6 +174,12 @@ static inline void **gc_core_back(void) {
 /* Clear a handle's entries if they still point at payload (CAS, so a
  * concurrent change by the other thread wins).  True if this call freed it. */
 bool gc_core_clear_handle(GCHandle h, void *payload);
+
+/* Storage the GC thread may be reading (registry arrays) is not freed when
+ * it is replaced: it is retired, and freed at the next mark start, when the
+ * GC thread holds no pointer into it.  JS thread only. */
+void gc_core_retire(void *p);
+void gc_core_free_retired(void);
 
 /* Collector (gc_collector.c) */
 void gc_core_drain_freed_ring(void);
