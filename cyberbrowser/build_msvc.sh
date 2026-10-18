@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 mkdir -p build-msvc
 cd build-msvc
 
-cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+cmake .. -G "Visual Studio 17 2022" -A x64 -T ClangCL -DCMAKE_BUILD_TYPE=Release
 cmake --build . --config Release --target cyberbrowser-tests -j4
 
 echo ""

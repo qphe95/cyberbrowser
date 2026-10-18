@@ -8,10 +8,6 @@
 #ifndef QUICKJS_TYPES_H
 #define QUICKJS_TYPES_H
 
-/* This header requires C++ compilation */
-#ifndef __cplusplus
-#error "quickjs_types.h requires C++ compilation"
-#endif
 
 #include <stddef.h>
 #include <stdint.h>
@@ -26,8 +22,10 @@
 
 typedef uint32_t GCHandle;
 
+#ifdef __cplusplus
 extern "C" {
-/* External free function for malloc'd memory (defined in quickjs.cpp) */
+#endif
+/* External free function for malloc'd memory (defined in quickjs.c) */
 void js_bc_free(void *ptr);
 
 #define GC_HANDLE_NULL 0
@@ -36,18 +34,20 @@ void js_bc_free(void *ptr);
  * Forward declarations for internal structs
  * ============================================================================ */
 
-struct JSRuntime;
-struct JSContext;
+typedef struct JSRuntime JSRuntime;
+typedef struct JSContext JSContext;
 struct JSString;
 struct JSObject;
 struct JSVarRef;
 struct JSShape;
 struct JSModuleDef;
-struct JSFunctionBytecode;
+typedef struct JSFunctionBytecode JSFunctionBytecode;
 struct JSJobEntry;
 struct JSTypedArray;
 
+#ifdef __cplusplus
 } /* extern "C" */
+#endif
 
 /* ============================================================================
  * GC handle types
@@ -104,7 +104,7 @@ typedef GCHandle JSObjectListEntryArrayHandle;
 typedef GCHandle GCValueHandle;
 typedef GCHandle JSShapeHandle;
 typedef GCHandle JSObjectHandle;
-typedef GCHandle JSFunctionDefHandle;  /* struct JSFunctionDef is private to quickjs.cpp */
+typedef GCHandle JSFunctionDefHandle;  /* struct JSFunctionDef is private to quickjs.c */
 
 /* Forward declaration for GCValue struct (defined below) */
 struct GCValue;
@@ -122,6 +122,16 @@ void *gc_deref(uint32_t handle);
 
 typedef uint32_t JSAtom;
 typedef uint32_t JSClassID;
+
+typedef struct JSPropertyEnum JSPropertyEnum;
+typedef struct JSClassExoticMethods JSClassExoticMethods;
+
+/* JSPromiseStateEnum - Promise state enumeration */
+typedef enum JSPromiseStateEnum {
+    JS_PROMISE_PENDING,
+    JS_PROMISE_FULFILLED,
+    JS_PROMISE_REJECTED,
+} JSPromiseStateEnum;
 
 #ifndef BOOL
 typedef int BOOL;
@@ -196,10 +206,14 @@ typedef enum JSGCObjectTypeEnum {
     JS_GC_OBJ_TYPE_MODULE,
 } JSGCObjectTypeEnum;
 
+#ifdef __cplusplus
 extern "C" {
-/* Forward declaration for gc_alloc (defined in quickjs_gc_unified.cpp) */
+#endif
+/* Forward declaration for gc_alloc (defined in quickjs_gc_unified.c) */
 GCHandle gc_alloc(size_t size, JSGCObjectTypeEnum gc_obj_type);
+#ifdef __cplusplus
 }
+#endif
 
 /* JSGCObjectTypeEnum must stay in sync with GCObjectBucketType in quickjs_gc_unified.h */
 /* Make sure the values match */
@@ -298,39 +312,11 @@ typedef struct GCValue {
     GCValueUnion u;
     int64_t tag;
     
-    /* Default constructor - explicitly initialize to undefined */
-    GCValue() : tag(JS_TAG_UNDEFINED) { u.handle = GC_HANDLE_NULL; }
-    
-    /* Constructor from GCHandle */
-    explicit GCValue(GCHandle h, int64_t t = JS_TAG_OBJECT) : tag(t) { u.handle = h; }
-    
-    /* Constructor for int32 */
-    explicit GCValue(int32_t i, bool is_tag_int = true) : tag(is_tag_int ? JS_TAG_INT : JS_TAG_BOOL) { u.int32 = i; }
-    
-    /* Constructor for double */
-    explicit GCValue(double d) : tag(JS_TAG_FLOAT64) { u.float64 = d; }
-    
-    /* Constructor for C-style initialization (GC_MKVAL macro compatibility) */
-    GCValue(GCValueUnion union_val, int64_t t) : tag(t) { u = union_val; }
-    
-    /* Check value type */
-    bool IsObject() const { return tag == JS_TAG_OBJECT; }
-    bool IsInt32() const { return tag == JS_TAG_INT; }
-    bool IsFloat64() const { return tag == JS_TAG_FLOAT64; }
-    bool IsString() const { return tag == JS_TAG_STRING; }
-    bool IsBool() const { return tag == JS_TAG_BOOL; }
-    bool IsNull() const { return tag == JS_TAG_NULL; }
-    bool IsUndefined() const { return tag == JS_TAG_UNDEFINED; }
-    bool IsException() const { return tag == JS_TAG_EXCEPTION; }
-    
-    /* Getters */
-    GCHandle GetHandle() const { return u.handle; }
-    int32_t GetInt32() const { return u.int32; }
-    double GetFloat64() const { return u.float64; }
-    
-    /* Check if handle is NULL */
-    bool IsNullHandle() const { return u.handle == GC_HANDLE_NULL; }
 } GCValue;
+
+/* Constant initialiser for an undefined GCValue (usable for static storage).
+ * Automatic variables can use GC_UNDEFINED instead. */
+#define GC_UNDEFINED_INIT { { .handle = GC_HANDLE_NULL }, JS_TAG_UNDEFINED }
 
 typedef const GCValue GCValueConst;
 
@@ -347,23 +333,23 @@ typedef GCValue JSValueHandle;
 #define JS_VALUE_GET_HANDLE(v) GC_VALUE_GET_HANDLE(v)
 #define GC_VALUE_GET_SHORT_BIG_INT(v) GC_VALUE_GET_INT(v)
 
-/* Special values - inline functions for C++ compatibility */
-static inline GCValue GC_NULL_VAL() {
+/* Special values - inline functions */
+static inline GCValue GC_NULL_VAL(void) {
     GCValue v; v.tag = JS_TAG_NULL; v.u.handle = GC_HANDLE_NULL; return v;
 }
-static inline GCValue GC_UNDEFINED_VAL() {
+static inline GCValue GC_UNDEFINED_VAL(void) {
     GCValue v; v.tag = JS_TAG_UNDEFINED; v.u.handle = GC_HANDLE_NULL; return v;
 }
-static inline GCValue GC_FALSE_VAL() {
+static inline GCValue GC_FALSE_VAL(void) {
     GCValue v; v.tag = JS_TAG_BOOL; v.u.int32 = 0; return v;
 }
-static inline GCValue GC_TRUE_VAL() {
+static inline GCValue GC_TRUE_VAL(void) {
     GCValue v; v.tag = JS_TAG_BOOL; v.u.int32 = 1; return v;
 }
-static inline GCValue GC_EXCEPTION_VAL() {
+static inline GCValue GC_EXCEPTION_VAL(void) {
     GCValue v; v.tag = JS_TAG_EXCEPTION; v.u.handle = GC_HANDLE_NULL; return v;
 }
-static inline GCValue GC_UNINITIALIZED_VAL() {
+static inline GCValue GC_UNINITIALIZED_VAL(void) {
     GCValue v; v.tag = JS_TAG_UNINITIALIZED; v.u.handle = GC_HANDLE_NULL; return v;
 }
 
@@ -654,7 +640,7 @@ static inline GCValue GC_NewHandle(GCHandle h)
     return v;
 }
 
-static inline GCValue GC_NewException()
+static inline GCValue GC_NewException(void)
 {
     GCValue v;
     v.tag = JS_TAG_EXCEPTION;
@@ -662,117 +648,83 @@ static inline GCValue GC_NewException()
     return v;
 }
 
-/* Forward declare GCHandleArray and GCDataArray templates for use in structs */
-template<typename T> class GCHandleArray;
-template<typename T> class GCDataArray;
+/* ============================================================================
+ * GCHandleList - growable malloc'd array of GCHandle values
+ * ============================================================================
+ * Used for ordered lists of GC objects (loaded modules, typed arrays, child
+ * function definitions, ...). The list does NOT free its storage on its own;
+ * call gc_handle_list_clear_and_free() when the owner is finalized.
+ * A zero-initialised GCHandleList is a valid empty list.
+ */
+typedef struct GCHandleList {
+    GCHandle *data;
+    int count;
+    int capacity;
+} GCHandleList;
 
-/* Simple array of GCHandle values (for ordered lists of GC objects) */
-class GCHandleList {
-private:
-    GCHandle *data_;
-    int count_;
-    int capacity_;
-
-public:
-    /* Default constructor - empty array */
-    GCHandleList() : data_(nullptr), count_(0), capacity_(0) {}
-    
-    /* Destructor - DOES NOT free data by design */
-    ~GCHandleList() = default;
-    
-    /* Access element at index */
-    GCHandle& operator[](size_t index) { return data_[index]; }
-    const GCHandle& operator[](size_t index) const { return data_[index]; }
-    
-    /* Get raw data pointer */
-    GCHandle* data() { return data_; }
-    const GCHandle* data() const { return data_; }
-    
-    /* Get element count */
-    int count() const { return count_; }
-    
-    /* Get capacity */
-    int capacity() const { return capacity_; }
-    
-    /* Check if array has data */
-    bool valid() const { return data_ != nullptr; }
-    explicit operator bool() const { return valid(); }
-    bool empty() const { return count_ == 0; }
-    
-    /* Resize array, allocating new memory if needed */
-    bool resize(int new_count) {
-        if (new_count <= capacity_) {
-            if (new_count > count_) {
-                memset(data_ + count_, 0, sizeof(GCHandle) * (new_count - count_));
-            }
-            count_ = new_count;
-            return true;
-        }
-        int new_cap = new_count > capacity_ * 3 / 2 ? new_count : capacity_ * 3 / 2;
-        if (new_cap < 4) new_cap = 4;
-        GCHandle *new_data = (GCHandle*)realloc(data_, sizeof(GCHandle) * new_cap);
-        if (!new_data) return false;
-        memset(new_data + count_, 0, sizeof(GCHandle) * (new_count - count_));
-        data_ = new_data;
-        capacity_ = new_cap;
-        count_ = new_count;
+/* Resize to new_count elements (new slots are zeroed). Returns false on OOM. */
+static inline bool gc_handle_list_resize(GCHandleList *l, int new_count)
+{
+    if (new_count <= l->capacity) {
+        if (new_count > l->count)
+            memset(l->data + l->count, 0, sizeof(GCHandle) * (new_count - l->count));
+        l->count = new_count;
         return true;
     }
-    
-    /* Add handle to end, growing array if needed */
-    bool push(GCHandle handle) {
-        if (!resize(count_ + 1))
-            return false;
-        data_[count_ - 1] = handle;
-        return true;
+    int new_cap = new_count > l->capacity * 3 / 2 ? new_count : l->capacity * 3 / 2;
+    if (new_cap < 4) new_cap = 4;
+    GCHandle *new_data = (GCHandle *)realloc(l->data, sizeof(GCHandle) * new_cap);
+    if (!new_data) return false;
+    memset(new_data + l->count, 0, sizeof(GCHandle) * (new_count - l->count));
+    l->data = new_data;
+    l->capacity = new_cap;
+    l->count = new_count;
+    return true;
+}
+
+/* Append a handle. Returns false on OOM. */
+static inline bool gc_handle_list_push(GCHandleList *l, GCHandle handle)
+{
+    if (!gc_handle_list_resize(l, l->count + 1))
+        return false;
+    l->data[l->count - 1] = handle;
+    return true;
+}
+
+/* Remove the element at index (keeps order). */
+static inline void gc_handle_list_remove_at(GCHandleList *l, int index)
+{
+    if (index < 0 || index >= l->count) return;
+    for (int j = index; j < l->count - 1; j++)
+        l->data[j] = l->data[j + 1];
+    l->count--;
+}
+
+/* Index of handle, or -1. */
+static inline int gc_handle_list_find(const GCHandleList *l, GCHandle handle)
+{
+    for (int i = 0; i < l->count; i++) {
+        if (l->data[i] == handle) return i;
     }
-    
-    /* Remove handle at index */
-    void remove_at(int index) {
-        if (index < 0 || index >= count_) return;
-        for (int j = index; j < count_ - 1; j++) {
-            data_[j] = data_[j + 1];
-        }
-        count_--;
+    return -1;
+}
+
+/* Remove the first occurrence of handle. */
+static inline void gc_handle_list_remove(GCHandleList *l, GCHandle handle)
+{
+    gc_handle_list_remove_at(l, gc_handle_list_find(l, handle));
+}
+
+/* Free the storage and reset to empty. */
+static inline void gc_handle_list_clear_and_free(GCHandleList *l)
+{
+    if (l->data) {
+        js_bc_free(l->data);
+        l->data = NULL;
     }
-    
-    /* Remove specific handle */
-    void remove(GCHandle handle) {
-        for (int i = 0; i < count_; i++) {
-            if (data_[i] == handle) {
-                remove_at(i);
-                return;
-            }
-        }
-    }
-    
-    /* Find handle index, returns -1 if not found */
-    int find(GCHandle handle) const {
-        for (int i = 0; i < count_; i++) {
-            if (data_[i] == handle) return i;
-        }
-        return -1;
-    }
-    
-    /* Clear count but keep allocated memory */
-    void clear_count() { count_ = 0; }
-    
-    /* Free memory and reset */
-    void clear_and_free() {
-        if (data_) {
-            js_bc_free(data_);
-            data_ = nullptr;
-        }
-        count_ = 0;
-        capacity_ = 0;
-    }
-    
-    /* Iterator support */
-    GCHandle* begin() { return data_; }
-    GCHandle* end() { return data_ + count_; }
-    const GCHandle* begin() const { return data_; }
-    const GCHandle* end() const { return data_ + count_; }
-};
+    l->count = 0;
+    l->capacity = 0;
+}
 
 /* ============================================================================
  * JobBuffer - Flat array of pending JS job handles
@@ -814,286 +766,54 @@ typedef struct JobQueue {
 } JobQueue;
 
 /* ============================================================================
- * GCHandleArray<T> - Malloc'd array wrapper for structures containing GC refs
+ * GCDataArray - growable array stored on the unified GC heap
  * ============================================================================
- * 
+ *
  * IMPORTANT DESIGN NOTE:
- * This template wraps arrays that are allocated via malloc (not GC-managed) but
- * contain structures with GCHandle or GCValue fields. This is used for module
- * entry arrays (JSReqModuleEntry, JSExportEntry, etc.) where:
- * 
- * 1. The array itself is malloc'd for simplicity and performance
- * 2. The structures inside contain GCHandles that must be marked by GC
- * 3. The array is freed in the owner's finalizer (e.g., js_free_module_def)
- * 
- * GC MARKING REQUIREMENT:
- * The owner (e.g., JSModuleDef) MUST manually mark all GC references in these
- * arrays via its mark callback (e.g., js_mark_module_def). The GC does NOT
- * automatically scan malloc'd memory - only GC-managed memory.
+ * The array storage lives on the GC heap and is referred to by a GCHandle,
+ * so it stays valid when the compacting GC moves it. Dereference the handle
+ * at the point of use (GC_DATA_ARRAY_PTR / GC_DATA_ARRAY_AT); the resulting
+ * pointer is only valid until the next GC point.
+ *
+ * The element type is not part of the struct, so the field declaration names
+ * it in a comment and the accessors take it as a parameter:
+ *
+ *     GCDataArray scopes_handle;   // of JSVarScope
+ *     JSVarScope *s = &GC_DATA_ARRAY_AT(fd->scopes_handle, JSVarScope, i);
+ *     gc_data_array_resize(&fd->scopes_handle, sizeof(JSVarScope), n);
+ *
+ * The struct holding the GCDataArray should itself be GC allocated. The GC
+ * reclaims the storage when it is no longer referenced. A zero-initialised
+ * GCDataArray is a valid empty array.
  */
-template<typename T>
-class GCHandleArray {
-private:
-    T *data_;
-    int count_;
-    int capacity_;
+typedef struct GCDataArray {
+    GCHandle handle;  /* handle to GC-managed array storage */
+    int count;
+    int capacity;
+} GCDataArray;
 
-public:
-    /* Default constructor - empty array */
-    GCHandleArray() : data_(nullptr), count_(0), capacity_(0) {}
-    
-    /* Destructor - DOES NOT free data by design */
-    /* Caller must explicitly call free() or use clear() */
-    ~GCHandleArray() = default;
-    
-    /* Access element at index */
-    T& operator[](size_t index) { return data_[index]; }
-    const T& operator[](size_t index) const { return data_[index]; }
-    
-    /* Get raw data pointer */
-    T* data() { return data_; }
-    const T* data() const { return data_; }
-    
-    /* Get element count */
-    int count() const { return count_; }
-    
-    /* Get capacity */
-    int capacity() const { return capacity_; }
-    
-    /* Check if array has data */
-    bool valid() const { return data_ != nullptr; }
-    explicit operator bool() const { return valid(); }
-    
-    /* Resize array, allocating new memory if needed */
-    bool resize(int new_count) {
-        if (new_count <= capacity_) {
-            /* Zero new elements when growing within capacity */
-            if (new_count > count_) {
-                memset(data_ + count_, 0, sizeof(T) * (new_count - count_));
-            }
-            count_ = new_count;
-            return true;
-        }
-        int new_cap = new_count > capacity_ * 3 / 2 ? new_count : capacity_ * 3 / 2;
-        if (new_cap < 4) new_cap = 4;
-        T *new_data = (T*)realloc(data_, sizeof(T) * new_cap);
-        if (!new_data) return false;
-        /* Zero the newly allocated elements (from old count to new count) */
-        memset(new_data + count_, 0, sizeof(T) * (new_count - count_));
-        data_ = new_data;
-        capacity_ = new_cap;
-        count_ = new_count;
-        return true;
-    }
-    
-    /* Add element, growing array if needed */
-    bool push(const T& elem) {
-        if (!resize(count_ + 1))
-            return false;
-        data_[count_ - 1] = elem;
-        return true;
-    }
-    
-    /* Get pointer to next slot for in-place construction */
-    T* prepare_push() {
-        if (!resize(count_ + 1))
-            return nullptr;
-        return &data_[count_ - 1];
-    }
-    
-    /* Clear count but keep allocated memory */
-    void clear_count() { count_ = 0; }
-    
-    /* Free memory and reset (named clear_and_free to avoid conflict with free() macro) */
-    void clear_and_free() {
-        if (data_) {
-            js_bc_free(data_);
-            data_ = nullptr;
-        }
-        count_ = 0;
-        capacity_ = 0;
-    }
-    
-    /* Reset with external allocation (used during deserialization) */
-    void reset(T* data, int count, int capacity) {
-        clear_and_free();
-        data_ = data;
-        count_ = count;
-        capacity_ = capacity;
-    }
-    
-    /* Iterator support */
-    T* begin() { return data_; }
-    T* end() { return data_ + count_; }
-    const T* begin() const { return data_; }
-    const T* end() const { return data_ + count_; }
-};
+/* Raw pointer to the storage (NULL if empty). Valid until the next GC point. */
+#define GC_DATA_ARRAY_PTR(arr, T) \
+    ((arr).handle != GC_HANDLE_NULL ? (T *)gc_deref((arr).handle) : (T *)NULL)
+/* Element lvalue. */
+#define GC_DATA_ARRAY_AT(arr, T, index) (GC_DATA_ARRAY_PTR(arr, T)[(index)])
 
-/* ============================================================================
- * GCDataArray<T> - Unified GC heap array wrapper
- * ============================================================================
- * 
- * IMPORTANT DESIGN NOTE:
- * This template wraps arrays that are allocated on the unified GC heap (not
- * malloc'd). The array storage is accessed through a GCHandle, which is
- * dereferenced on every access. This ensures the array works correctly with
- * the compacting garbage collector - the handle remains valid even if the
- * GC moves the array in memory.
- * 
- * Usage in structs:
- *   GCDataArray<JSVarScope> scopes_handle;
- * 
- * The array data is GC-managed and will be freed by the GC when no longer
- * referenced. The struct containing the GCDataArray should be allocated
- * via gc_alloc() to ensure proper GC integration.
- */
-template<typename T>
-class GCDataArray {
-private:
-    GCHandle handle_;  /* Handle to GC-managed array storage */
-    int count_;
-    int capacity_;
+/* Resize to new_count elements, reallocating on the GC heap when the capacity
+ * is exceeded (new elements are zeroed). Returns false on OOM.
+ * Defined in quickjs_gc_unified.c. */
+bool gc_data_array_resize(GCDataArray *arr, size_t elem_size, int new_count);
+/* Append one element slot and return a pointer to it (NULL on OOM). */
+void *gc_data_array_prepare_push(GCDataArray *arr, size_t elem_size);
+/* Append a copy of *elem. Returns false on OOM. */
+bool gc_data_array_push(GCDataArray *arr, size_t elem_size, const void *elem);
 
-public:
-    /* Default constructor - empty array */
-    GCDataArray() : handle_(GC_HANDLE_NULL), count_(0), capacity_(0) {}
-    
-    /* Destructor - DOES NOT free GC data by design */
-    /* GC will reclaim the memory when the owning object is collected */
-    ~GCDataArray() = default;
-    
-    /* Get the handle to the array storage */
-    GCHandle handle() const { return handle_; }
-    
-    /* Get element count */
-    int count() const { return count_; }
-    
-    /* Get capacity */
-    int capacity() const { return capacity_; }
-    
-    /* Check if array has data */
-    bool valid() const { return handle_ != GC_HANDLE_NULL; }
-    explicit operator bool() const { return valid(); }
-    
-    /* Comparison with GCHandle (for checking against GC_HANDLE_NULL) */
-    bool operator==(GCHandle h) const { return handle_ == h; }
-    bool operator!=(GCHandle h) const { return handle_ != h; }
-    
-    /* Assignment from GCHandle - for initialization with GC_HANDLE_NULL */
-    GCDataArray& operator=(GCHandle h) {
-        handle_ = h;
-        count_ = 0;
-        capacity_ = 0;
-        return *this;
-    }
-    
-    /* Dereference to get raw pointer - USE WITH CAUTION */
-    /* The pointer is only valid until the next GC point */
-    T* ptr() const { 
-        return handle_ != GC_HANDLE_NULL ? (T*)gc_deref(handle_) : nullptr; 
-    }
-    
-    /* Alias for ptr() - for compatibility with GCHandleArray API */
-    T* data() { return ptr(); }
-    const T* data() const { return ptr(); }
-    
-    /* Access element at index - dereferences handle each time for GC safety */
-    T& operator[](size_t index) { 
-        T* p = ptr();
-        return p[index]; 
-    }
-    const T& operator[](size_t index) const { 
-        T* p = ptr();
-        return p[index]; 
-    }
-    
-    /* Resize array, allocating new GC memory if needed */
-    bool resize(int new_count) {
-        if (new_count <= capacity_) {
-            /* Zero new elements when growing within capacity */
-            if (new_count > count_) {
-                T* p = ptr();
-                if (p) memset(p + count_, 0, sizeof(T) * (new_count - count_));
-            }
-            count_ = new_count;
-            return true;
-        }
-        /* Need to grow - allocate new GC memory */
-        int new_cap = new_count > capacity_ * 3 / 2 ? new_count : capacity_ * 3 / 2;
-        if (new_cap < 4) new_cap = 4;
-        
-        /* Allocate new array on GC heap */
-        GCHandle new_handle = gc_alloc(sizeof(T) * new_cap, JS_GC_OBJ_TYPE_DATA);
-        if (new_handle == GC_HANDLE_NULL) return false;
-        
-        T* new_data = (T*)gc_deref(new_handle);
-        if (!new_data) return false;
-        
-        /* Copy existing data */
-        T* old_data = ptr();
-        if (old_data && count_ > 0) {
-            memcpy(new_data, old_data, sizeof(T) * count_);
-        }
-        
-        /* Zero the newly allocated portion */
-        memset(new_data + count_, 0, sizeof(T) * (new_count - count_));
-        
-        handle_ = new_handle;
-        capacity_ = new_cap;
-        count_ = new_count;
-        return true;
-    }
-    
-    /* Add element, growing array if needed */
-    bool push(const T& elem) {
-        if (!resize(count_ + 1))
-            return false;
-        T* p = ptr();
-        if (p) p[count_ - 1] = elem;
-        return true;
-    }
-    
-    /* Get pointer to next slot for in-place construction */
-    T* prepare_push() {
-        if (!resize(count_ + 1))
-            return nullptr;
-        T* p = ptr();
-        return p ? &p[count_ - 1] : nullptr;
-    }
-    
-    /* Clear count but keep allocated memory */
-    void clear_count() { count_ = 0; }
-    
-    /* Free memory and reset (named clear_and_free to avoid conflict with free() macro).
-     * For GCDataArray, the memory is GC-managed so we just reset the handle.
-     * The GC will reclaim the memory when no longer referenced. */
-    void clear_and_free() {
-        handle_ = GC_HANDLE_NULL;
-        count_ = 0;
-        capacity_ = 0;
-    }
-    
-    /* Reset handle (used when the GC moves the array) */
-    void set_handle(GCHandle h) { handle_ = h; }
-    
-    /* Iterator support - dereferences handle each time */
-    class Iterator {
-        GCDataArray* array_;
-        int index_;
-    public:
-        Iterator(GCDataArray* arr, int idx) : array_(arr), index_(idx) {}
-        T& operator*() { return (*array_)[index_]; }
-        T* operator->() { 
-            T* p = array_->ptr();
-            return p ? &p[index_] : nullptr;
-        }
-        Iterator& operator++() { ++index_; return *this; }
-        bool operator!=(const Iterator& other) const { return index_ != other.index_; }
-    };
-    
-    Iterator begin() { return Iterator(this, 0); }
-    Iterator end() { return Iterator(this, count_); }
-};
+/* Reset to empty. The GC reclaims the old storage. */
+static inline void gc_data_array_clear_and_free(GCDataArray *arr)
+{
+    arr->handle = GC_HANDLE_NULL;
+    arr->count = 0;
+    arr->capacity = 0;
+}
 
 /* Include atom cache header before JSContext definition */
 #include "js_atom_cache.h"
@@ -1310,10 +1030,10 @@ struct JSModuleDef {
      * This ensures the arrays are properly relocated during GC compaction.
      * The module's mark function must still manually mark all GC references.
      */
-    GCDataArray<JSReqModuleEntry> req_module_entries;
-    GCDataArray<JSExportEntry> export_entries;
-    GCDataArray<JSStarExportEntry> star_export_entries;
-    GCDataArray<JSImportEntry> import_entries;
+    GCDataArray req_module_entries;   /* of JSReqModuleEntry */
+    GCDataArray export_entries;   /* of JSExportEntry */
+    GCDataArray star_export_entries;   /* of JSStarExportEntry */
+    GCDataArray import_entries;   /* of JSImportEntry */
 
     GCValue module_ns;
     GCValue func_obj; /* only used for JS modules */
@@ -1561,7 +1281,13 @@ struct JSFunctionBytecode {
  * ============================================================================ */
 
 /* Forward declarations of GC functions */
-extern "C" void *gc_deref(uint32_t handle);
-extern "C" bool gc_handle_is_valid(GCHandle handle);
+#ifdef __cplusplus
+extern "C" {
+#endif
+void *gc_deref(uint32_t handle);
+bool gc_handle_is_valid(GCHandle handle);
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* QUICKJS_TYPES_H */

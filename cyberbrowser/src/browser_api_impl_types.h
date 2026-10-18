@@ -17,7 +17,7 @@ extern "C" {
 #endif
 
 /* ============================================================================
- * XMLHttpRequest (from js_quickjs.cpp)
+ * XMLHttpRequest (from js_quickjs.c)
  * ============================================================================ */
 typedef struct {
     char url[2048];
@@ -36,7 +36,7 @@ typedef struct {
 } XMLHttpRequest;
 
 /* ============================================================================
- * HTMLVideoElement (from js_quickjs.cpp)
+ * HTMLVideoElement (from js_quickjs.c)
  * ============================================================================ */
 typedef struct {
     char id[256];        // Element id for tracking
@@ -67,7 +67,7 @@ typedef struct {
 } HTMLVideoElement;
 
 /* ============================================================================
- * DOMException (from browser_api_impl.cpp)
+ * DOMException (from browser_api_impl.c)
  * ============================================================================ */
 typedef struct {
     char name[64];
@@ -76,7 +76,7 @@ typedef struct {
 } DOMExceptionData;
 
 /* ============================================================================
- * Map (polyfill, from browser_api_impl.cpp)
+ * Map (polyfill, from browser_api_impl.c)
  * ============================================================================ */
 typedef struct {
     GCValue entries;  // Object storing key->value mappings
@@ -84,7 +84,7 @@ typedef struct {
 } MapData;
 
 /* ============================================================================
- * ShadowRoot (from browser_api_impl.cpp)
+ * ShadowRoot (from browser_api_impl.c)
  * ============================================================================ */
 typedef struct {
     GCValue host;                    // The element that hosts this shadow root
@@ -97,14 +97,14 @@ typedef struct {
 } ShadowRootData;
 
 /* ============================================================================
- * CustomElementRegistry (from browser_api_impl.cpp)
+ * CustomElementRegistry (from browser_api_impl.c)
  * ============================================================================ */
 typedef struct {
     GCValue registry;  // Map of tag names to constructor functions
 } CustomElementRegistryData;
 
 /* ============================================================================
- * Animation (from browser_api_impl.cpp)
+ * Animation (from browser_api_impl.c)
  * ============================================================================ */
 typedef struct {
     double current_time;
@@ -116,7 +116,7 @@ typedef struct {
 } AnimationData;
 
 /* ============================================================================
- * KeyframeEffect (from browser_api_impl.cpp)
+ * KeyframeEffect (from browser_api_impl.c)
  * ============================================================================ */
 typedef struct {
     GCValue target;
@@ -126,7 +126,7 @@ typedef struct {
 } KeyFrameEffectData;
 
 /* ============================================================================
- * FontFace (from browser_api_impl.cpp)
+ * FontFace (from browser_api_impl.c)
  * ============================================================================ */
 typedef struct {
     char family[256];
@@ -135,14 +135,14 @@ typedef struct {
 } FontFaceData;
 
 /* ============================================================================
- * FontFaceSet (from browser_api_impl.cpp)
+ * FontFaceSet (from browser_api_impl.c)
  * ============================================================================ */
 typedef struct {
     GCValue loaded_fonts;  // Array of loaded FontFace objects
 } FontFaceSetData;
 
 /* ============================================================================
- * MutationObserver (from browser_api_impl.cpp)
+ * MutationObserver (from browser_api_impl.c)
  * ============================================================================ */
 typedef struct {
     GCValue callback;
@@ -150,7 +150,7 @@ typedef struct {
 } MutationObserverData;
 
 /* ============================================================================
- * ResizeObserver (from browser_api_impl.cpp)
+ * ResizeObserver (from browser_api_impl.c)
  * ============================================================================ */
 typedef struct {
     GCValue callback;
@@ -158,7 +158,7 @@ typedef struct {
 } ResizeObserverData;
 
 /* ============================================================================
- * IntersectionObserver (from browser_api_impl.cpp)
+ * IntersectionObserver (from browser_api_impl.c)
  * ============================================================================ */
 typedef struct {
     GCValue callback;
@@ -169,7 +169,7 @@ typedef struct {
 } IntersectionObserverData;
 
 /* ============================================================================
- * Performance (from browser_api_impl.cpp)
+ * Performance (from browser_api_impl.c)
  * ============================================================================ */
 
 #define PERFORMANCE_MAX_ENTRIES 256
@@ -189,7 +189,7 @@ typedef struct {
 } PerformanceData;
 
 /* ============================================================================
- * PerformanceObserver (from browser_api_impl.cpp)
+ * PerformanceObserver (from browser_api_impl.c)
  * ============================================================================ */
 typedef struct {
     GCValue callback;
@@ -197,7 +197,7 @@ typedef struct {
 } PerformanceObserverData;
 
 /* ============================================================================
- * PerformanceTiming (from browser_api_impl.cpp)
+ * PerformanceTiming (from browser_api_impl.c)
  * ============================================================================ */
 typedef struct {
     double navigationStart;
@@ -224,7 +224,7 @@ typedef struct {
 } PerformanceTimingData;
 
 /* ============================================================================
- * DOMRect/DOMRectReadOnly (from browser_api_impl.cpp)
+ * DOMRect/DOMRectReadOnly (from browser_api_impl.c)
  * ============================================================================ */
 typedef struct {
     double x;
@@ -238,7 +238,7 @@ typedef struct {
 } DOMRectData;
 
 /* ============================================================================
- * MediaSource (from browser_api_impl.cpp)
+ * MediaSource (from browser_api_impl.c)
  * ============================================================================ */
 typedef struct {
     char source_buffers[1024];  // JSON array of source buffer types
@@ -252,7 +252,7 @@ typedef struct {
 } MediaSourceData;
 
 /* ============================================================================
- * SourceBuffer (from browser_api_impl.cpp)
+ * SourceBuffer (from browser_api_impl.c)
  * ============================================================================ */
 typedef struct {
     char mime_type[256];
@@ -279,7 +279,7 @@ typedef struct {
 } SourceBufferData;
 
 /* ============================================================================
- * Event Data Structures (from browser_api_impl.cpp)
+ * Event Data Structures (from browser_api_impl.c)
  * ============================================================================ */
 
 typedef struct {
@@ -501,7 +501,7 @@ typedef struct {
 } ConsoleData;
 
 /* ============================================================================
- * Date (from browser_api_impl.cpp)
+ * Date (from browser_api_impl.c)
  * ============================================================================ */
 typedef struct {
     long long timestamp_ms;  // Milliseconds since epoch (UTC)

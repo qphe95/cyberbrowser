@@ -30,7 +30,7 @@ cd /d "%BUILD_DIR%"
 
 REM Configure with CMake
 echo Configuring with CMake...
-cmake .. ^
+cmake .. -T ClangCL ^
     -DBE_BUILD_TESTS=ON ^
     -DCMAKE_MSVC_RUNTIME_LIBRARY="MultiThreaded$<$<CONFIG:Debug>:Debug>"
 

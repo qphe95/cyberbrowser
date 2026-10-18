@@ -374,7 +374,7 @@ void gc_free(GCHandle handle);
 GCHandle gc_realloc(GCHandle handle, size_t new_size);
 GCHandle gc_realloc2(GCHandle handle, size_t new_size, size_t *pslack);
 
-/* Forward declaration for gc_deref - defined in quickjs.cpp or gc implementation */
+/* Forward declaration for gc_deref - defined in quickjs.c or gc implementation */
 void *gc_deref(uint32_t handle);
 
 /* Handle-based GC header accessors - these are safe across GC compaction */

@@ -57,11 +57,11 @@ static inline bool js_abuf_is_resizable(GCHandle handle)
     return p ? p->max_byte_length >= 0 : false;
 }
 
-static inline GCHandleList& js_abuf_typed_arrays(GCHandle handle)
+static inline GCHandleList *js_abuf_typed_arrays(GCHandle handle)
 {
     JSArrayBuffer* p = GC_DEREF_H(handle, JSArrayBufferHandle);
     static GCHandleList empty_list;
-    return p ? p->typed_arrays : empty_list;
+    return p ? &p->typed_arrays : &empty_list;
 }
 
 /* ------------------------------------------------------------------------
@@ -256,11 +256,11 @@ static inline uint32_t js_ctx_class_proto_version(GCHandle handle)
     return p ? atomic_load_u32((volatile uint32_t *)&p->class_proto_version) : 0;
 }
 
-static inline GCHandleList& js_ctx_loaded_modules(GCHandle handle)
+static inline GCHandleList *js_ctx_loaded_modules(GCHandle handle)
 {
     JSContext* p = GC_DEREF_H(handle, JSContextHandle);
     static GCHandleList dummy;
-    return p ? p->loaded_modules : dummy;
+    return p ? &p->loaded_modules : &dummy;
 }
 
 static inline void js_ctx_zero_memory(GCHandle handle)
@@ -473,27 +473,27 @@ static inline int* js_module_async_parent_modules_size_ptr(GCHandle handle)
 static inline int js_module_export_entries_count(GCHandle handle)
 {
     JSModuleDef* p = GC_DEREF_H(handle, JSModuleDefHandle);
-    return p ? p->export_entries.count() : 0;
+    return p ? p->export_entries.count : 0;
 }
 
-static inline GCDataArray<JSExportEntry>& js_module_export_entries(GCHandle handle)
+static inline GCDataArray *js_module_export_entries(GCHandle handle)
 {
     JSModuleDef* p = GC_DEREF_H(handle, JSModuleDefHandle);
-    static GCDataArray<JSExportEntry> empty;
-    return p ? p->export_entries : empty;
+    static GCDataArray empty;   /* of JSExportEntry */
+    return p ? &p->export_entries : &empty;
 }
 
 static inline int js_module_import_entries_count(GCHandle handle)
 {
     JSModuleDef* p = GC_DEREF_H(handle, JSModuleDefHandle);
-    return p ? p->import_entries.count() : 0;
+    return p ? p->import_entries.count : 0;
 }
 
-static inline GCDataArray<JSImportEntry>& js_module_import_entries(GCHandle handle)
+static inline GCDataArray *js_module_import_entries(GCHandle handle)
 {
     JSModuleDef* p = GC_DEREF_H(handle, JSModuleDefHandle);
-    static GCDataArray<JSImportEntry> empty;
-    return p ? p->import_entries : empty;
+    static GCDataArray empty;   /* of JSImportEntry */
+    return p ? &p->import_entries : &empty;
 }
 
 static inline GCValue* js_module_private_value_ptr(GCHandle handle)
@@ -505,14 +505,14 @@ static inline GCValue* js_module_private_value_ptr(GCHandle handle)
 static inline int js_module_req_module_entries_count(GCHandle handle)
 {
     JSModuleDef* p = GC_DEREF_H(handle, JSModuleDefHandle);
-    return p ? p->req_module_entries.count() : 0;
+    return p ? p->req_module_entries.count : 0;
 }
 
-static inline GCDataArray<JSReqModuleEntry>& js_module_req_module_entries(GCHandle handle)
+static inline GCDataArray *js_module_req_module_entries(GCHandle handle)
 {
     JSModuleDef* p = GC_DEREF_H(handle, JSModuleDefHandle);
-    static GCDataArray<JSReqModuleEntry> empty;
-    return p ? p->req_module_entries : empty;
+    static GCDataArray empty;   /* of JSReqModuleEntry */
+    return p ? &p->req_module_entries : &empty;
 }
 
 static inline GCValue js_module_resolving_func(GCHandle handle, int idx)
@@ -534,14 +534,14 @@ static inline void js_module_set_resolving_func(GCHandle handle, int idx, GCValu
 static inline int js_module_star_export_entries_count(GCHandle handle)
 {
     JSModuleDef* p = GC_DEREF_H(handle, JSModuleDefHandle);
-    return p ? p->star_export_entries.count() : 0;
+    return p ? p->star_export_entries.count : 0;
 }
 
-static inline GCDataArray<JSStarExportEntry>& js_module_star_export_entries(GCHandle handle)
+static inline GCDataArray *js_module_star_export_entries(GCHandle handle)
 {
     JSModuleDef* p = GC_DEREF_H(handle, JSModuleDefHandle);
-    static GCDataArray<JSStarExportEntry> empty;
-    return p ? p->star_export_entries : empty;
+    static GCDataArray empty;   /* of JSStarExportEntry */
+    return p ? &p->star_export_entries : &empty;
 }
 
 /* ------------------------------------------------------------------------

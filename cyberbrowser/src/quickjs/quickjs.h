@@ -37,10 +37,8 @@
 
 /* Struct definitions (JSPropertyEnum, JSPromiseStateEnum, ...) and the
  * SAFE_GET / SAFE_SET handle macros, after GC functions are declared */
-#ifdef __cplusplus
 #include "quickjs-internal.h"
 #include "quickjs_handles.h"
-#endif
 
 /* Default version if not defined at compile time */
 #ifndef CONFIG_VERSION
@@ -328,17 +326,6 @@ static inline GCValue GC_NewShortBigIntNan(int32_t d)
  * Note: This is a macro for generic field access. For specific fields,
  * use the accessor functions below (gc_obj_get_shape_handle, etc.)
  */
-#ifdef _MSC_VER
-#define GC_FIELD_GET(handle, type, field) \
-    ([](GCHandle _h) -> GCHandle { \
-        GCHandle _field_handle = GC_HANDLE_NULL; \
-        void *_ptr = gc_deref(_h); \
-        if (_ptr != NULL) { \
-            _field_handle = ((type *)_ptr)->field; \
-        } \
-        return _field_handle; \
-    })(handle)
-#else
 #define GC_FIELD_GET(handle, type, field) ({ \
     GCHandle _field_handle = GC_HANDLE_NULL; \
     void *_ptr = gc_deref(handle); \
@@ -347,7 +334,6 @@ static inline GCValue GC_NewShortBigIntNan(int32_t d)
     } \
     _field_handle; \
 })
-#endif
 
 /*
  * GC_FIELD_SET - Set a GCHandle field in a GC-managed object.
@@ -752,9 +738,9 @@ static inline GCValue GC_MKHANDLE_FUNC(int64_t tag, GCHandle handle_val) {
 
 #define GC_TAG_IS_FLOAT64(tag) ((unsigned)(tag) == JS_TAG_FLOAT64)
 
-/* Special values - use inline functions for C++ compatibility */
-static inline GCValue GC_NAN_VAL() {
-    GCValue v;
+/* Special values - inline functions */
+static inline GCValue GC_NAN_VAL(void) {
+    GCValue v = GC_UNDEFINED;
     v.tag = JS_TAG_FLOAT64;
     union { uint64_t u; double d; } nan = { 0x7FF8000000000000ULL };
     v.u.float64 = nan.d;
@@ -1104,6 +1090,7 @@ typedef struct JSPropertyDescriptor {
     GCValue getter;
     GCValue setter;
 } JSPropertyDescriptor;
+#define JS_PROPERTY_DESCRIPTOR_INIT { .flags = 0, .value = GC_UNDEFINED_INIT, .getter = GC_UNDEFINED_INIT, .setter = GC_UNDEFINED_INIT }
 
 typedef struct JSClassExoticMethods {
     /* Return -1 if exception (can only happen in case of Proxy object),
@@ -1196,7 +1183,7 @@ static inline GCValue __JS_NewFloat64(JSContextHandle ctx, double d)
 
 static js_force_inline GCValue JS_NewInt64(JSContextHandle ctx, int64_t val)
 {
-    GCValue v;
+    GCValue v = GC_UNDEFINED;
     if (val == (int32_t)val) {
         v = JS_NewInt32(ctx, val);
     } else {
@@ -1207,7 +1194,7 @@ static js_force_inline GCValue JS_NewInt64(JSContextHandle ctx, int64_t val)
 
 static js_force_inline GCValue JS_NewUint32(JSContextHandle ctx, uint32_t val)
 {
-    GCValue v;
+    GCValue v = GC_UNDEFINED;
     if (val <= 0x7fffffff) {
         v = JS_NewInt32(ctx, val);
     } else {
@@ -1917,6 +1904,7 @@ struct JSString {
  * to other strings (which may also be ropes). The actual string data is
  * only flattened when needed.
  */
+typedef struct JSStringRope JSStringRope;
 struct JSStringRope {
     uint32_t len;           /* Total length of the rope */
     uint8_t is_wide_char;   /* 0 = 8 bits, 1 = 16 bits */

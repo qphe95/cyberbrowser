@@ -170,7 +170,7 @@ void capture_url_debug(const char *url, const char *source);
 }
 #endif
 
-// C++-only helper exposed by js_quickjs.cpp
+// Helper exposed by js_quickjs.c
 void record_captured_url(const char *url);
 
 #ifdef __cplusplus
@@ -497,14 +497,20 @@ extern double g_performance_time_origin;
 extern JSClassID js_service_worker_container_class_id;
 extern JSClassID js_service_worker_registration_class_id;
 extern JSClassID js_service_worker_class_id;
-extern "C" JSClassID js_xhr_class_id;
-extern "C" JSClassID js_video_class_id;
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern JSClassID js_xhr_class_id;
+extern JSClassID js_video_class_id;
+#ifdef __cplusplus
+}
+#endif
 
 #ifdef __cplusplus
 }
 #endif
 
-/* These functions are defined in js_quickjs.cpp with C++ linkage */
+/* These functions are defined in js_quickjs.c */
 extern GCValue js_xhr_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
 extern GCValue js_video_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
 extern GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
@@ -513,17 +519,23 @@ extern GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue
 extern "C" {
 #endif
 
-extern "C" const JSCFunctionListEntry js_xhr_proto_funcs[];
-extern "C" const JSCFunctionListEntry js_video_proto_funcs[];
-extern "C" const size_t js_xhr_proto_funcs_count;
-extern "C" const size_t js_video_proto_funcs_count;
-extern "C" void timer_api_reset(void);
-extern "C" int timer_process_due(JSContextHandle ctx);
-extern "C" int timer_has_pending(void);
-extern "C" void timer_set_idle_deadline(unsigned long long deadline_ms);
-extern "C" int scheduler_process_tasks(JSContextHandle ctx);
-extern "C" void scheduler_reset(void);
-extern "C" void dom_enable_dynamic_script_loading(void);
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern const JSCFunctionListEntry js_xhr_proto_funcs[];
+extern const JSCFunctionListEntry js_video_proto_funcs[];
+extern const size_t js_xhr_proto_funcs_count;
+extern const size_t js_video_proto_funcs_count;
+void timer_api_reset(void);
+int timer_process_due(JSContextHandle ctx);
+int timer_has_pending(void);
+void timer_set_idle_deadline(unsigned long long deadline_ms);
+int scheduler_process_tasks(JSContextHandle ctx);
+void scheduler_reset(void);
+void dom_enable_dynamic_script_loading(void);
+#ifdef __cplusplus
+}
+#endif
 GCValue js_scheduler_post_task(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_scheduler_yield(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 extern GCHandle service_worker_handle;

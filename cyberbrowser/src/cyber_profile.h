@@ -37,24 +37,25 @@ void cp_profile_flush(const char *path);
  * x axis is wall-clock time.  Uses stb_image_write + stb_truetype. */
 void cp_profile_write_flamegraph(const char *path);
 
+/* Scope helpers: CP_SCOPE begins an event and ends it automatically when the
+ * enclosing block exits (on any path), using the GNU cleanup attribute. */
+static inline const char *cp_scope_begin_(const char *name, const char *cat)
+{
+    if (cp_profile_enabled()) cp_profile_begin(name, cat);
+    return name;
+}
+static inline void cp_scope_end_(const char *const *name)
+{
+    if (cp_profile_enabled()) cp_profile_end(*name);
+}
+#define CP_CONCAT_(a, b) a##b
+#define CP_CONCAT(a, b) CP_CONCAT_(a, b)
+#define CP_SCOPE_CAT(n, c) \
+    const char *CP_CONCAT(_cp_scope_, __LINE__) __attribute__((cleanup(cp_scope_end_))) = cp_scope_begin_(n, c)
+#define CP_SCOPE(n) CP_SCOPE_CAT(n, "main")
+
 #ifdef __cplusplus
 }
-
-/* C++ RAII scope helper. */
-struct CyberProfileScope {
-    const char *name;
-    explicit CyberProfileScope(const char *n, const char *cat = "main") : name(n) {
-        if (cp_profile_enabled()) cp_profile_begin(n, cat);
-    }
-    ~CyberProfileScope() {
-        if (cp_profile_enabled()) cp_profile_end(name);
-    }
-};
-#define CP_SCOPE(n) CyberProfileScope _cp_scope_##__LINE__(n)
-#define CP_SCOPE_CAT(n, c) CyberProfileScope _cp_scope_##__LINE__(n, c)
-#else
-#define CP_SCOPE(n) do { if (cp_profile_enabled()) cp_profile_begin(n, "main"); } while (0)
-#define CP_SCOPE_CAT(n, c) do { if (cp_profile_enabled()) cp_profile_begin(n, c); } while (0)
 #endif
 
 #define CP_BEGIN(n) do { if (cp_profile_enabled()) cp_profile_begin(n, "main"); } while (0)

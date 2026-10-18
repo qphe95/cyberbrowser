@@ -2,7 +2,22 @@
 # A browser built from HTML parsing, CSS layout, QuickJS, and a software rasterizer.
 
 cmake_minimum_required(VERSION 3.16)
-project(cyberbrowser VERSION 1.0.0 LANGUAGES C CXX)
+project(cyberbrowser VERSION 1.0.0 LANGUAGES C)
+
+# GNU C17: the code uses GNU extensions (statement expressions, __typeof__,
+# __attribute__((cleanup)), range designators) supported by GCC and Clang.
+set(CMAKE_C_STANDARD 17)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS ON)
+
+# MSVC's own C compiler does not implement those extensions. With Visual
+# Studio, build with the bundled Clang toolset instead:
+#   cmake .. -G "Visual Studio 17 2022" -A x64 -T ClangCL
+if(MSVC AND NOT CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    message(FATAL_ERROR
+        "cyberbrowser is written in GNU C and needs GCC or Clang. "
+        "With Visual Studio use the ClangCL toolset (-T ClangCL), or build with MinGW.")
+endif()
 
 # =============================================================================
 # Options
@@ -33,34 +48,34 @@ find_package(Threads REQUIRED)
 # Source files
 # =============================================================================
 set(BE_SOURCES
-    src/html_media_extract.cpp
-    src/js_quickjs.cpp
-    src/browser/crypto_api.cpp
-    src/browser/storage_api.cpp
-    src/browser/css_api.cpp
-    src/browser/service_worker_api.cpp
-    src/browser/geolocation_api.cpp
-    src/browser/console_api.cpp
-    src/browser/dom_api.cpp
-    src/browser/event_api.cpp
-    src/browser/shadow_dom_api.cpp
-    src/browser/misc_api.cpp
-    src/browser/media_source_api.cpp
-    src/browser/minimp4_impl.cpp
-    src/browser/url_api.cpp
-    src/browser/fetch_api.cpp
-    src/browser/timer_api.cpp
-    src/browser_api_impl.cpp
-    src/html_dom.cpp
-    src/preorder_compaction_array.cpp
-    src/css_parser.cpp
-    src/css_layout.cpp
-    src/display_list.cpp
-    src/text_shaper.cpp
-    src/image_cache.cpp
-    src/lockfree_hash_table.cpp
-    src/url_analyzer.cpp
-    src/cyber_profile.cpp
+    src/html_media_extract.c
+    src/js_quickjs.c
+    src/browser/crypto_api.c
+    src/browser/storage_api.c
+    src/browser/css_api.c
+    src/browser/service_worker_api.c
+    src/browser/geolocation_api.c
+    src/browser/console_api.c
+    src/browser/dom_api.c
+    src/browser/event_api.c
+    src/browser/shadow_dom_api.c
+    src/browser/misc_api.c
+    src/browser/media_source_api.c
+    src/browser/minimp4_impl.c
+    src/browser/url_api.c
+    src/browser/fetch_api.c
+    src/browser/timer_api.c
+    src/browser_api_impl.c
+    src/html_dom.c
+    src/preorder_compaction_array.c
+    src/css_parser.c
+    src/css_layout.c
+    src/display_list.c
+    src/text_shaper.c
+    src/image_cache.c
+    src/lockfree_hash_table.c
+    src/url_analyzer.c
+    src/cyber_profile.c
     src/session_state.c
     src/tls_client.c
     src/http_download.c
@@ -88,19 +103,19 @@ endif()
 # Vulkan renderer backend (optional)
 if(BE_BUILD_VULKAN)
     list(APPEND BE_SOURCES
-        src/vulkan_renderer.cpp
-        src/vulkan_font_stub.cpp
+        src/vulkan_renderer.c
+        src/vulkan_font_stub.c
     )
 endif()
 
 # QuickJS sources
 set(QUICKJS_SOURCES
-    src/quickjs/quickjs.cpp
+    src/quickjs/quickjs.c
     src/quickjs/libregexp.c
     src/quickjs/libunicode.c
     src/quickjs/cutils.c
     src/quickjs/dtoa.c
-    src/quickjs/quickjs_gc_unified.cpp
+    src/quickjs/quickjs_gc_unified.c
     src/quickjs/js_atom_cache.c
     src/quickjs/js_fast_dispatch.c
 )
@@ -191,13 +206,6 @@ if(NOT MSVC)
         -O2
         -g
     )
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        # GCC 14+ is strict about mixing designated and non-designated
-        # initializers in C++. QuickJS and our C++ stubs use this pattern.
-        # C++20 officially supports designated initializers.
-        target_compile_options(cyberbrowser_lib PRIVATE -fpermissive)
-        target_compile_options(cyberbrowser_lib PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++20>)
-    endif()
 else()
     target_compile_options(cyberbrowser_lib PRIVATE
         /W4
@@ -205,9 +213,6 @@ else()
         /Zi
     )
 endif()
-
-# Enable C++11 for QuickJS
-target_compile_features(cyberbrowser_lib PRIVATE cxx_std_11)
 
 # Disable some warnings for QuickJS
 if(NOT MSVC)
@@ -249,10 +254,8 @@ endif()
 # argv[1] or CYBER_START_URL)
 # =============================================================================
 add_executable(cyberbrowser
-    src/cyberbrowser_main.cpp
+    src/cyberbrowser_main.c
 )
-
-target_compile_features(cyberbrowser PRIVATE cxx_std_11)
 
 target_include_directories(cyberbrowser
     PRIVATE
@@ -282,14 +285,14 @@ endif()
 # =============================================================================
 # Flame graph viewer (Vulkan window showing flamegraph.png)
 # =============================================================================
-# Self-contained: compiles vulkan_renderer.cpp directly (independent of
+# Self-contained: compiles vulkan_renderer.c directly (independent of
 # BE_BUILD_VULKAN) and links the system Vulkan loader + cyberbrowser_lib
 # (for stb_image and the text-shaper symbols the renderer references).
 if(BE_PLATFORM_WINDOWS)
     add_executable(flamegraph_viewer
-        src/flamegraph_viewer.cpp
-        src/vulkan_renderer.cpp
-        src/vulkan_font_stub.cpp
+        src/flamegraph_viewer.c
+        src/vulkan_renderer.c
+        src/vulkan_font_stub.c
         shaders/embedded_shaders.c
     )
 

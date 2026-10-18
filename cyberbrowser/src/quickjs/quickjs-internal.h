@@ -336,7 +336,7 @@ struct JSTypedArray {
 
 /*
  * ============================================================================
- * Extracted struct and enum definitions from quickjs.cpp
+ * Extracted struct and enum definitions from quickjs.c
  * ============================================================================
  */
 
@@ -379,6 +379,7 @@ typedef enum JSIteratorHelperKindEnum {
 
 /* Structs */
 
+typedef struct JSClass JSClass;
 struct JSClass {
     uint32_t class_id; /* 0 means free entry */
     JSAtom class_name;
@@ -496,12 +497,7 @@ typedef struct JSFinRecEntry {
     GCValue token;
 } JSFinRecEntry;
 
-/* JSPromiseStateEnum - Promise state enumeration */
-typedef enum JSPromiseStateEnum {
-    JS_PROMISE_PENDING,
-    JS_PROMISE_FULFILLED,
-    JS_PROMISE_REJECTED,
-} JSPromiseStateEnum;
+/* JSPromiseStateEnum is defined in quickjs_types.h */
 
 typedef struct JSPromiseData {
     JSPromiseStateEnum promise_state;

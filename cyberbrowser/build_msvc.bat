@@ -37,7 +37,7 @@ set "BUILD=%ROOT%\build-msvc"
 if not exist "%BUILD%" mkdir "%BUILD%"
 cd /d "%BUILD%"
 
-cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+cmake .. -G "Visual Studio 17 2022" -A x64 -T ClangCL -DCMAKE_BUILD_TYPE=Release
 if errorlevel 1 exit /b 1
 
 cmake --build . --config Release --target cyberbrowser-tests -j4

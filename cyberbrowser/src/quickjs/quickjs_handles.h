@@ -124,7 +124,7 @@
 #define GC_STRUCT_OF_JSStringHandle                     JSString
 #define GC_STRUCT_OF_JSStringRopeHandle                 JSStringRope
 #define GC_STRUCT_OF_JSObjectHandle                     JSObject
-#define GC_STRUCT_OF_JSFunctionDefHandle                JSFunctionDef   /* defined in quickjs.cpp */
+#define GC_STRUCT_OF_JSFunctionDefHandle                JSFunctionDef   /* defined in quickjs.c */
 #define GC_STRUCT_OF_void                               void
 
 /* Accept bare struct names too, so SAFE_GET(h, JSContext, rt_handle) works. */
@@ -198,15 +198,21 @@
  * and SAFE_SET_HANDLE/VALUE would also evaluate `value` twice. The old
  * methods were safe here because C++ evaluates arguments before the call. */
 #ifdef __cplusplus
-#define GC_FIELD_TYPE(HType, field) decltype(((GC_STRUCT_OF(HType) *)0)->field)
+#define GC_FIELD_VALUE(HType, field, var, value) \
+    decltype(((GC_STRUCT_OF(HType) *)0)->field) var = (value)
 #else
-#define GC_FIELD_TYPE(HType, field) __typeof__(((GC_STRUCT_OF(HType) *)0)->field)
+/* The temporary has the type of the value rather than of the field: typeof
+ * is not allowed on bit-fields. The conditional strips bit-field-ness from a
+ * value read from a bit-field; the assignment to the field performs the same
+ * conversion as before. */
+#define GC_FIELD_VALUE(HType, field, var, value) \
+    __typeof__(1 ? (value) : (value)) var = (value)
 #endif
 
 /* Write a plain (non-GC) field. */
 #define SAFE_SET(handle, HType, field, value) \
     do { \
-        GC_FIELD_TYPE(HType, field) _v = (value); \
+        GC_FIELD_VALUE(HType, field, _v, value); \
         GC_STRUCT_OF(HType) *_p = GC_DEREF_H(handle, HType); \
         if (_p) _p->field = _v; \
     } while (0)
@@ -239,7 +245,7 @@
 /* Write a GCHandle field and run the heap-slot write barrier. */
 #define SAFE_SET_HANDLE(handle, HType, field, value) \
     do { \
-        GC_FIELD_TYPE(HType, field) _v = (value); \
+        GC_FIELD_VALUE(HType, field, _v, value); \
         GC_STRUCT_OF(HType) *_p = GC_DEREF_H(handle, HType); \
         if (_p) { \
             _p->field = _v; \
@@ -250,7 +256,7 @@
 /* Write a GCValue field and run the heap-slot write barrier. */
 #define SAFE_SET_VALUE(handle, HType, field, value) \
     do { \
-        GC_FIELD_TYPE(HType, field) _v = (value); \
+        GC_FIELD_VALUE(HType, field, _v, value); \
         GC_STRUCT_OF(HType) *_p = GC_DEREF_H(handle, HType); \
         if (_p) { \
             _p->field = _v; \
