@@ -69,7 +69,7 @@ static void gc_value_vec_push(GCValueVec *v, GCValue val) {
         v->data = data;
         v->capacity = cap;
     }
-    v->data[v->count++] = val;
+    GC_SET(v->data[v->count++], val);
 }
 static void gc_value_vec_free(GCValueVec *v) {
     free(v->data);
@@ -322,6 +322,8 @@ void css_computed_set_property(JSContextHandle ctx, DOMNodeHandle node,
 
     lf_hash_insert(cs->properties, (uint32_t)prop_atom,
                    (GCHandle)prop_atom, str_handle);
+    /* The table is malloc'd: tell the collector about the reference. */
+    gc_note_ref(str_handle);
 
     /* Also store the camelCase alias so getComputedStyle().fontSize works. */
     const char *prop_str = JS_AtomToCString(ctx, prop_atom);

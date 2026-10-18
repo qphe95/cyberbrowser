@@ -4,6 +4,9 @@
 cmake_minimum_required(VERSION 3.16)
 project(cyberbrowser VERSION 1.0.0 LANGUAGES C)
 
+# compile_commands.json, used by tools/gc_store_check.py
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # GNU C17: the code uses GNU extensions (statement expressions, __typeof__,
 # __attribute__((cleanup)), range designators) supported by GCC and Clang.
 set(CMAKE_C_STANDARD 17)
@@ -116,6 +119,10 @@ set(QUICKJS_SOURCES
     src/quickjs/cutils.c
     src/quickjs/dtoa.c
     src/quickjs/quickjs_gc_unified.c
+    src/quickjs/gc_collector.c
+    src/quickjs/gc_concurrent.c
+    src/quickjs/gc_platform.c
+    src/quickjs/job_pool.c
     src/quickjs/js_atom_cache.c
     src/quickjs/js_fast_dispatch.c
 )
@@ -242,7 +249,7 @@ if(BE_PLATFORM_MACOS)
     find_library(COREFOUNDATION_LIBRARY CoreFoundation)
     target_link_libraries(cyberbrowser_lib PRIVATE ${COREFOUNDATION_LIBRARY})
 elseif(BE_PLATFORM_WINDOWS)
-    target_link_libraries(cyberbrowser_lib PRIVATE ws2_32 crypt32 shell32 bcrypt)
+    target_link_libraries(cyberbrowser_lib PRIVATE ws2_32 crypt32 shell32 bcrypt synchronization)
     if(MSVC)
         # Static-link MSVC runtime for a portable executable
         set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -326,6 +333,19 @@ endif()
 if(BE_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+# Static check that every store of a GC reference sets its dirty flag
+# (CONCURRENT_GC.md, section 6).  Needs Python 3 and libclang:
+#   cmake --build . --target gc_store_check
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_custom_target(gc_store_check
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/gc_store_check.py
+                ${CMAKE_BINARY_DIR}/compile_commands.json
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Checking GC reference stores for dirty flags"
+        VERBATIM)
 endif()
 
 # =============================================================================

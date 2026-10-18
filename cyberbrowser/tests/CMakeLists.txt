@@ -4,8 +4,7 @@
 add_executable(cyberbrowser-tests
     test_main.c
     test_browser_api_impl.c
-    test_gc_unified.c
-    test_gc_multithreaded.c
+    test_gc.c
     test_exception_debug.c
     test_logical_operators.c
     test_nested_iife.c

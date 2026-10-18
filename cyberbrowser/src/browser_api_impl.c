@@ -3114,8 +3114,8 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         service_worker_handle = gc_allocz(sizeof(ServiceWorkerContainerData), JS_GC_OBJ_TYPE_DATA);
         if (service_worker_handle != GC_HANDLE_NULL) {
             ServiceWorkerContainerData *swc = (ServiceWorkerContainerData*)gc_deref(service_worker_handle);
-            swc->registrations = JS_NewArray(ctx);
-            swc->message_handlers = JS_NewArray(ctx);
+            GC_SET(swc->registrations, JS_NewArray(ctx));
+            GC_SET(swc->message_handlers, JS_NewArray(ctx));
             JS_SetOpaqueHandle(service_worker, service_worker_handle);
         }
     }
@@ -4076,7 +4076,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     if (ffs_handle != GC_HANDLE_NULL) {
         /* Safe: dereference only for immediate initialization before any GC point */
         FontFaceSetData *ffs = (FontFaceSetData*)gc_deref(ffs_handle);
-        ffs->loaded_fonts = JS_NewArray(ctx);
+        GC_SET(ffs->loaded_fonts, JS_NewArray(ctx));
         /* Store handle (not pointer) for GC safety during compaction */
         JS_SetOpaqueHandle(font_face_set, ffs_handle);
     }

@@ -177,7 +177,7 @@ static inline bool js_varref_copy_value_to(GCHandle handle, GCValue *dest)
 {
     GCValue *pv = js_varref_pvalue(handle);
     if (pv) {
-        *dest = *pv;
+        GC_SET(*dest, *pv);
         return true;
     }
     return false;
@@ -265,7 +265,7 @@ static inline void js_varref_set_frame_ref(GCHandle handle, JSStackFrame *ptr,
         return;
     p->is_async_frame = is_async;
     if (is_async)
-        p->frame_ref.frame_handle = frame_handle;
+        GC_SET(p->frame_ref.frame_handle, frame_handle);
     else
         p->frame_ref.frame_ptr = ptr;
 }

@@ -1706,7 +1706,8 @@ static void layout_collect_js_sheet_array(JSContextHandle ctx, GCValue arr,
 static void layout_collect_constructed_stylesheets(LayoutContext *ctx,
                                                     LayoutStyleSheetList *list)
 {
-    if (!SAFE_VALID(ctx->js_ctx)) return;
+    if (!SAFE_VALID(ctx->js_ctx) ||
+        gc_handle_get_type(ctx->js_ctx) != JS_GC_OBJ_TYPE_JS_CONTEXT) return;
     JSContextHandle js = ctx->js_ctx;
     GCValue global = JS_GetGlobalObject(js);
     GCValue doc = JS_GetPropertyStr(js, global, "document");
@@ -4490,7 +4491,8 @@ static void layout_position_absolute_subtree(LayoutContext *ctx, int idx)
  * computed-style table so getComputedStyle can return real values. */
 static void layout_export_computed_geometry(LayoutContext *ctx)
 {
-    if (!SAFE_VALID(ctx->js_ctx)) return;
+    if (!SAFE_VALID(ctx->js_ctx) ||
+        gc_handle_get_type(ctx->js_ctx) != JS_GC_OBJ_TYPE_JS_CONTEXT) return;
     JSContextHandle js = ctx->js_ctx;
     char buf[128];
 
@@ -4620,7 +4622,7 @@ bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
 {
     JSContextHandle saved_js_ctx = ctx->js_ctx;
     if (!css_layout_tree_build(ctx, doc)) return false;
-    ctx->js_ctx = saved_js_ctx;
+    GC_SET(ctx->js_ctx, saved_js_ctx);
     ctx->viewport_width = viewport_width;
     ctx->viewport_height = viewport_height;
     /* Base URL for resolving relative stylesheet/image URLs: derive the origin
@@ -4636,7 +4638,7 @@ bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
             const char *slash = strchr(host, '/');
             size_t origin_len = slash ? (size_t)(slash - src) + 1 : strlen(src);
             if (origin_len >= sizeof(ctx->base_url)) origin_len = sizeof(ctx->base_url) - 1;
-            memcpy(ctx->base_url, src, origin_len);
+            gc_memcpy(ctx->base_url, src, origin_len);
             ctx->base_url[origin_len] = '\0';
             if (!slash && origin_len + 1 < sizeof(ctx->base_url)) {
                 ctx->base_url[origin_len] = '/';

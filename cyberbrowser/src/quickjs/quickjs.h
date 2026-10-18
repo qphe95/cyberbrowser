@@ -684,9 +684,9 @@ void gc_shape_set_hashed(GCHandle shape_handle, int val);
  * GC Dereference Function
  * ============================================================================
  * The gc_deref() function converts a GCHandle to a pointer.
- * Use the macros above instead of calling this directly.
+ * Use the macros above instead of calling this directly.  It is an inline
+ * function in quickjs_gc_unified.h.
  */
-void *gc_deref(GCHandle handle);
 
 /* gc_deref_unsafe: Intentional unsafe dereference for cases where we need raw pointers.
  * This is used for BigInt arithmetic operands where we pass pointers to C-style functions.

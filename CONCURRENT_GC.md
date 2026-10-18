@@ -2,33 +2,40 @@
 
 This design replaces `MULTITHREADED_GC.md`, `WRITE_BARRIER.md`, `GREY_DELETE.md`,
 `MULTITHREADED_JAVASCRIPT.md` and `CONCURRENT_GC_DESIGN.md`. It is built the way a game
-engine splits work between its simulation thread and its worker threads.
+engine splits work between its simulation thread and its worker threads. Sections 1–12
+describe the collector as implemented; §13 covers testing, §14 measurements and §15 what
+is left.
 
-- **Frames.** The JS thread runs in ticks, one turn of the event loop each. The GC is a
-  state machine on worker threads. The two meet only at tick boundaries.
+- **Frames.** The JS thread runs in ticks, one turn of the event loop each, and polls
+  between opcodes. The GC is a state machine on its own thread. The two meet only at
+  boundary steps: the GC thread posts a request, the JS thread runs it at its next poll
+  or tick.
 - **Double buffering.** The GC builds the "next frame" in back buffers (a back handle
   table, to-space regions, next-cycle mark bitmaps). The JS thread presents it with one
-  atomic pointer swap at a tick boundary.
-- **Dirty flags instead of code barriers.** The operating system records which heap pages
-  the JS thread wrote. No load or store in the engine changes.
-- **Command buffers.** The GC never edits structures the JS thread owns (hash tables, weak
-  maps, the job queue). It records commands in single-producer rings, and the JS thread
-  applies them at the next tick boundary.
-- **Fences.** Old memory is released a tick after the flip, the way a renderer frees a GPU
-  resource only after the fence for the frame that used it has passed.
+  atomic pointer swap at a boundary step.
+- **Dirty flags instead of code barriers.** On Windows the operating system records which
+  heap pages the JS thread wrote (`GetWriteWatch`). On Linux and macOS the engine's write
+  helpers store one byte per 4 KB card. Neither is a barrier: nothing branches, nothing
+  waits, and no load changes.
+- **Generations.** Most JS objects die young. New objects go into a nursery that is
+  collected often and cheaply: the cost depends on how many objects survive, not on the
+  size of the heap (§8). Collections of the whole heap are rare.
 - **No mutexes, no spinlocks, no waiting.** All coordination uses atomic loads, stores,
-  `fetch_add` and CAS. The JS thread never waits for the GC. If the GC isn't ready at a
-  tick boundary, nothing happens and the JS thread carries on. Idle GC workers sleep on an
-  address (`WaitOnAddress` or futex), which isn't a lock and never involves the JS thread.
+  `fetch_add` and CAS. The JS thread never waits for the GC. If a step does not fit its
+  time budget it declines, and the GC thread does more work before asking again. The GC
+  thread sleeps on an address (`WaitOnAddress` or futex) while it waits for an answer.
 
 ## 1. Words that sound blocking but aren't
 
 | Term | Blocks? | Meaning here |
 |---|---|---|
-| GC read/write barrier | No | A few inline instructions on a load or store. This design has none: page tracking replaces them. |
+| GC read/write barrier | No | Usually a few inline instructions on a load or store. This design has no read barrier; on Linux and macOS each reference store also stores one byte (§6). |
 | Memory fence (`atomic_thread_fence`, acquire/release) | No | Orders memory accesses. Used throughout. |
 | Thread barrier (`pthread_barrier_wait`) | Yes | Not used. |
-| Mutex, spinlock, condition variable | Yes | Not used in the GC. |
+| Mutex, spinlock, condition variable | Yes | Not used in the GC or in the worker pool. |
+
+The one place the JS thread waits is `gc_run()`, the explicit stop-the-world collection
+(`JS_RunGC`): it first asks the GC thread to abandon its cycle and waits for it to stop.
 
 ## 2. Why the old double buffer lost data, and what fixes it
 
@@ -38,314 +45,495 @@ keeps the double buffer.
 
 | Old failure | Fix |
 |---|---|
-| The JS thread wrote to an object after the GC copied it, so the write was lost at the swap. | Every heap write sets the page's OS dirty bit. At the flip, a copied object whose page was written after its copy is **rejected**: its back-table entry goes back to the old copy. Only clean copies are presented. (§6) |
-| Raw pointers (`pc`, `sp`, `gc_deref` results) pointed into the old buffer after the swap. | The swap happens only at a tick boundary, when no JS frames exist, or at a mid-script poll after a stack scan. Objects that a raw pointer on the stack points to are **pinned**: their move is rejected for this flip. (§5) |
-| The old buffer was reset right after the swap, while it could still be in use. | Old regions are released one tick later (the fence). (§7) |
+| The JS thread wrote to an object after the GC copied it, so the write was lost at the swap. | At the flip, a copy whose original changed after the copy was made is **rejected**: its back-table entry goes back to the original. Windows detects the change from the page's write-watch bit; Linux and macOS compare the copy with the original. (§7) |
+| Raw pointers (`pc`, `sp`, `gc_deref` results) pointed into the old buffer after the swap. | Every object that a raw pointer on the JS thread's stack, or a running frame, points into is **pinned**: its move is rejected at the flip. (§5) |
+| The old buffer was reset right after the swap, while it could still be in use. | A from-region is released only when nothing current is left in it, after the back table is brought up to date. Pinned objects never moved, so no stack pointer can point into a released region. (§7) |
 
-The core rule: **nothing the JS thread can still see is changed until it says so at a tick
-boundary.** Until the flip, the front table and the old copies are the truth. After it,
-the back table is.
+The core rule: **nothing the JS thread can still see is changed until it says so at a
+boundary step.** Until the flip, the front table and the originals are the truth. After
+it, the back table is.
 
-## 3. Threads and the tick
+## 3. Threads and boundary steps
 
 ```
-JS thread:   ──tick──|B|──tick──|B|──tick──|B|──tick──|B|──
-                      ^          ^          ^
-                      |          |          present: flip back table (O(1) + dirty check)
-                      |          finish marking (bounded remark)
-                      start marking (snapshot roots)
-GC workers:  ═══ mark ═══ mark ═══ sweep ═══ evacuate ═══ prepare back table ═══
+JS thread:   ─run─|B|─run─|B|─run─|B|─run─|B|─run─
+                   ^       ^       ^       ^
+                   |       |       |       flip: reject changed/pinned copies, swap tables
+                   |       |       remark: finish marking (budgeted), weak step
+                   |       mark start: parity, TAMS, root snapshot
+GC thread:   ═ prepare ═ mark ═ rescan ═ mark ═ sweep ═ copy ═ release ═
 ```
 
-At every tick boundary `B` the JS thread does one atomic load of the GC's state word. When
-the GC has posted a request, it runs that request's boundary step with a **time budget**
-(for example 0.5 ms). If the step doesn't fit, it **declines**: it posts "declined" and
-returns to JS with nothing changed, and the GC does more work concurrently before posting
-again. A boundary step never waits on anything, so the worst case for the JS thread is the
-budget.
+The GC thread posts one request at a time (`request`, `req_seq`, `req_budget_ns`) and sets
+a poll flag. The JS thread looks at the flag at every **poll point**:
 
-A tick boundary is where the event loop sits between tasks, when no JS frames exist. The
-host has to keep one rule there: **no raw pointers into the GC heap held across the
-boundary, only handles** (§9). `cyberbrowser_main` already follows it, because compaction
-at the top level works today.
+- **every opcode** of the interpreter (one relaxed load, in the dispatch `BREAK`);
+- **tick boundaries** (`gc_tick`): after each pending job (`JS_ExecutePendingJob`) and at
+  the top of each event-loop turn in `cyberbrowser_main`.
 
-**Long scripts.** A script that runs for seconds produces no tick boundaries. The
-interpreter therefore checks the state word at function entry and at loop back-edges,
-which is one relaxed atomic load. When memory is tight it runs a boundary step there,
-after a conservative scan of the stack (§5) that pins everything the running code points
-to. This is the same scan the stop-the-world fix added.
+When the flag is set it runs the request's step (`gc_poll_slow` → `run_boundary`) and
+answers with `ack_seq` and DONE, DECLINED or ABORTED. Each field has a single writer.
+
+**The stack at a boundary.** Every step spills callee-saved registers with `setjmp` and
+scans the JS thread's C stack conservatively (§5), so a step is as safe in the middle of a
+script as between tasks. Tick boundaries matter only because the event loop sits there
+when nothing else runs.
+
+**Budgets.** A step has a budget (`boundary_budget_us`, default 500 µs). Remark and flip
+check it as they go; past it they decline, leaving their work to the GC thread, which does
+another concurrent round and asks again with twice the budget. After eight declines the
+request carries no budget, so a cycle always finishes. Mark start does not decline (it is
+a root snapshot).
+
+**Pacing.** The JS thread counts bytes allocated young and old. A minor cycle starts when
+`nursery_size` bytes (default 4 MB) were allocated young since the last minor start; a
+major cycle when `major_trigger` bytes (default 32 MB) were allocated old or promoted
+since the last major cycle. If old allocation reaches 8 × `major_trigger` without a
+finished major cycle, the next poll runs `gc_run()` instead of letting the heap grow
+without bound. `gc_request_cycle()` asks for a cycle explicitly; the HTMLElement
+constructor and the page-load path in `cyberbrowser_main` use it instead of `JS_RunGC`.
 
 ## 4. Data structures
 
 ### 4.1 Heap: regions in reserved address space
 
-- One reserved virtual range, split into 1 MB regions and committed on demand.
-- On Windows, regions are allocated with `MEM_WRITE_WATCH`, so the hardware tracks dirty
-  pages for free (§6).
-- Region metadata (all atomics):
-  - `state`: FREE, ALLOC, FULL, FROM (being evacuated), TO, HUMONGOUS;
-  - `live_bytes`;
-  - `alloc_epoch`;
-  - an object-start bitmap with 1 bit per 16 bytes.
-- **Region allocation:** CAS a FREE region to ALLOC.
-- **Object allocation:** a bump pointer in a thread-local buffer (TLAB) carved from the
-  region. Plain stores, no atomics.
-- Objects larger than half a region get dedicated humongous regions and never move.
+- One reserved 16 GB range, split into 1 MB regions and committed on demand.
+- On Windows the range is reserved with `MEM_WRITE_WATCH`, so the hardware tracks dirty
+  pages (§6).
+- Region metadata: `state` (FREE, CLAIMED, NURSERY, OLD, HUMONGOUS, HUMONGOUS_CONT),
+  `space`, `top` (published with release after every allocation), `tams`, `live_bytes`,
+  `alloc_owner`, flags (`collecting`, `in_cset`, `keep`, `pinned`), an object-start bitmap
+  (1 bit per 16 bytes) and two mark bitmaps (by parity).
+- **Region allocation:** CAS a FREE region to CLAIMED, or bump the high-water mark.
+- **Object allocation:** a bump pointer in an allocation context (JS young, JS old, GC
+  copy). Each region has one allocating thread at a time.
+- Objects of a quarter region or more get dedicated humongous regions and never move.
+
+**Object header: 8 bytes.** `{uint32 handle; uint32 info}` with `info` = type (5 bits) |
+total size / 16. Headers sit at 8 mod 16 so payloads are 16-byte aligned. There are no
+colour words, canaries or publish states: marks live in side bitmaps.
 
 ### 4.2 Handle table: front and back buffers
 
 ```c
-typedef struct {
-    void **_Atomic front;        /* the table gc_deref reads */
-    void **tables[2];            /* both are reserved for the maximum size up front and never move */
-    _Atomic uint32_t high_water; /* next never-used handle (fetch_add) */
-} HandleTables;
+void **_Atomic front;          /* the table gc_deref reads */
+void **tables[2];              /* both reserved for 2^27 entries, committed in chunks */
+_Atomic uint32_t high_water;   /* next never-used handle */
 
-static inline void *gc_deref(GCHandle h) {          /* unchanged in cost: one load + index */
-    return atomic_load_explicit(&g_ht.front, memory_order_relaxed)[h];
+static inline void *gc_deref(GCHandle h) {     /* one load + index, as before */
+    return atomic_load_explicit(&g_gc.front, memory_order_acquire)[h];
 }
 ```
 
-- **Reads** go only through `front`. That load can be relaxed: `front` changes only at a
-  tick boundary on the JS thread itself, and GC threads synchronize through the state word.
-- **The back table** is written by the GC (object moves) and by the JS thread (dual
-  writes, below).
-- **Dual write:** whenever the JS thread changes an entry (allocating a handle,
-  `gc_realloc` moving an object), it stores the new pointer to `front[h]` first and then
-  `back[h]`. These are plain stores.
-- **GC writes to the back table** are always a CAS against the value it last read. A CAS
-  that fails means the JS thread changed the entry, and the GC drops its copy. So neither
-  side can overwrite the other's newer value, and nobody takes a lock.
-- After a flip, the new back table (the old front) is brought up to date by GC workers:
-  `CAS(back[h], back_old, front[h])` for each entry. The CAS combined with the JS thread's
-  front-then-back write order makes this safe against concurrent dual writes.
-- **Both tables are reserved at maximum size** (for example 2^27 entries × 8 bytes each,
-  committed in chunks). There is no `realloc`, so a reader can never see a table being
-  freed.
+- **Reads** go only through `front`, which changes only on the JS thread, at a flip.
+- **Dual write:** whenever the JS thread changes an entry (allocating, `gc_realloc`,
+  `gc_free`) it stores `front[h]` first and then `back[h]`.
+- **GC writes to the back table** are a CAS against the value it last read. A CAS that
+  fails means the JS thread changed the entry, and the GC drops its copy.
+- **Freeing** is a CAS of `front[h]` from the object to NULL, by either thread, so a
+  handle is freed once even if the sweep and `gc_free` race.
+- After a flip the GC thread brings the new back table (the old front) up to date:
+  `CAS(back[h], from, to)` for each accepted move.
+- **Handles freed by the JS thread while marking runs are not reused** until marking ends:
+  the marker may hold a handle it read earlier, and reuse would show it an object of
+  another type.
 
 ### 4.3 Mark bitmaps: double-buffered by cycle parity
 
-- There are two side bitmaps per region with 1 bit per 16 bytes, `mark[0]` and `mark[1]`.
-  Cycle `n` marks into `mark[n & 1]` using `atomic_fetch_or` on whole words.
-- The other bitmap holds the finished result of the previous cycle. The weak-table rule in
-  §8 reads it, and GC workers clear it, concurrently, before it's reused.
-- No colour words live in object headers any more.
-- **Allocate-live:** a region records the bump position at mark start (TAMS, top at mark
-  start). Objects above it are live this cycle without being marked.
+- Two side bitmaps per region, `mark[0]` and `mark[1]`, 1 bit per 16 bytes. A cycle marks
+  into `mark[parity]` with `atomic_fetch_or`. The GC thread clears the next parity's
+  bitmaps before posting mark start.
+- **Allocate-live (major):** a region records TAMS, its top at mark start. Objects above
+  it are live this cycle without being marked.
+- **Cycle membership (minor):** only the nursery regions present at minor start
+  (`collecting`) are in the cycle; everything else is live by definition.
 
-### 4.4 Communication between threads (all single-producer rings, lock-free)
+### 4.4 Communication between threads (all single-writer, lock-free)
 
-| Ring | Producer → consumer | Carries |
+| Channel | Writer → reader | Carries |
 |---|---|---|
-| `freed_handles` | GC → JS thread | Handles freed by sweep. The JS thread refills its local handle cache from here, or calls `fetch_add` on `high_water`. |
-| `commands` | GC → JS thread | Weak-table removals, atom-table removals, finalizer jobs, FinalizationRegistry jobs. Applied at the tick boundary. |
-| `roots_log` | JS thread → GC | Changes to off-heap root containers (job queue enqueues, `gc_add_root`) since the last boundary. |
-| per-worker deques | GC worker ↔ GC workers | Marking work, using Chase-Lev work stealing (lock-free). |
+| request / answer words | GC ↔ JS | The pending boundary step, its budget, and the answer. |
+| `freed_handles` ring | GC → JS | Handles freed by the concurrent sweep. The JS thread refills its handle cache from it. |
+| worklist and pending cards | handed over | The JS thread's remark work when it declines, and the GC thread's when it posts remark. Ownership moves with the request/answer protocol (release/acquire). |
+| reference log | JS → GC (read at boundaries) | References stored in off-heap memory hanging off GC objects (§6). |
 
-A ring is an array with a `head` written only by the consumer and a `tail` written only by
-the producer, using release stores and acquire loads. A ring that fills up grows by
-handing over a bigger array in a pointer swap, like a double-buffered command list, so a
-producer never waits.
+Each ring is a linked list of blocks: the producer publishes a block's count with a
+release store, the consumer reads it with acquire and frees drained blocks. A producer
+never waits.
 
-The state word, an atomic 64-bit value, holds `{cycle, phase, request, ack}`. The GC posts
-a request; the JS thread acknowledges with done or declined. Each field is written by only
-one side.
+The general-purpose worker pool (used by parallel CSS layout) is a lock-free
+multi-producer multi-consumer ring (sequence-numbered cells); idle workers sleep on an
+address, and a thread waiting for the pool runs queued jobs itself.
 
-The existing thread pool's job queue uses a mutex and a condition variable. The GC gets
-its own workers that sleep on an address instead.
+## 5. Roots and pins
 
-## 5. Roots and pins (implemented in the stop-the-world fix)
+- **Precise roots:** every frame on the runtime's frame chain (arguments, locals and the
+  whole operand stack), the runtime, contexts and their loaded modules, the current
+  exception, the job queue, `gc_add_root` handles, and atoms (permanent).
+- **Conservative roots:** the JS thread's C stack and callee-saved registers, spilled
+  with `setjmp`. A 32-bit word equal to a live handle, or a pointer into a live object (or
+  one past its end), keeps that object alive. Pointers are resolved through the
+  object-start bitmap.
+- **Pins:** at a flip, every object that a raw pointer on the stack points into, and every
+  frame on the chain, is pinned. The flip rejects the move of exactly those objects
+  (a sorted list of pinned headers). Stop-the-world compaction pins whole regions.
+- **Objects that never move.** ArrayBuffer storage (`JS_GC_OBJ_TYPE_BYTES`) is cached by
+  address in the buffer and in its typed arrays, so it is never copied: it is allocated
+  in old space and regions holding it stay where they are. Humongous objects never move.
 
-- **Precise roots:** every frame on the runtime's frame chain (locals, arguments, operand
-  stack), the runtime, contexts, the current exception, and the registered off-heap root
-  containers.
-- **Conservative roots:** the JS thread's C stack and registers, spilled with `setjmp`.
-  A 32-bit word equal to a live handle, or a pointer into a live object, keeps that object
-  alive. Pointers are resolved through the object-start bitmap.
-- **Pins:** at a mid-script flip, every object that a raw pointer on the stack points into
-  is pinned. Its move is rejected even if its page is clean. At a normal tick boundary
-  there are no JS frames, so almost nothing is pinned.
+## 6. Dirty tracking
 
-## 6. Dirty pages: the "dirty flag" mechanism
+### 6.1 Sources
 
-There is no barrier code. The OS reports which pages were written since the last reset.
-
-| Platform | Mechanism | Cost |
+| Platform | Mechanism | What it sees |
 |---|---|---|
-| Windows | `VirtualAlloc(MEM_WRITE_WATCH)`, then `GetWriteWatch(WRITE_WATCH_FLAG_RESET, ...)` | Hardware-tracked; no faults |
-| Linux | Soft-dirty bits: clear with `/proc/self/clear_refs`, read with `/proc/self/pagemap` | One syscall per batch of pages |
-| macOS, Android, Linux without soft-dirty | `mprotect` read-only plus a fault handler that marks the page and unprotects it (as the Boehm collector does) | One fault per page per cycle |
+| Windows | `VirtualAlloc(MEM_WRITE_WATCH)`; `GetWriteWatch(WRITE_WATCH_FLAG_RESET)` | Every write to a heap page |
+| Linux, macOS | A byte per 4 KB card, set by the write helpers | Every store of a reference into memory that may be a GC object |
 
-Only the GC state machine resets or reads the OS dirty state, plus the JS thread during
-its own boundary step, while the GC is guaranteed to be idle (§3). So there's a single
-reader at any moment and no locking. The GC merges what it reads into its own dirty
-bitmaps:
+The software flags are stored by:
 
-- `dirty_mark`: pages written since marking last scanned them;
-- `dirty_evac`: pages written since evacuation copied their objects.
+- `GC_SET(lvalue, value)`: evaluates the value, stores it, sets the card (release);
+- `SAFE_SET`, `SAFE_SET_HANDLE`, `SAFE_SET_VALUE`, `set_value`, `gc_set_heap_*`;
+- `gc_memcpy` / `gc_memmove`, `gc_dirty_slot`, `gc_dirty_range`;
+- the collector's own copies and `gc_realloc` (the new copy's range).
 
-**Ordering argument for evacuation.** Take one from-space page P.
+A card store is `card[(addr - heap_base) >> 12] = 1` after a range check, so stores into
+C stack or malloc'd memory cost a compare.
 
-1. The GC resets P's dirty state.
-2. Then it copies the objects in P.
-3. Any JS write to P after step 1 marks P dirty.
-4. Any JS write before step 1 is visible to the copy in step 2, because the reset has
-   acquire semantics (for `GetWriteWatch` and the `mprotect` fault, it's a system call
-   boundary).
-5. So if P is still clean at the flip, the copy equals the original.
+**Coverage is checked by a tool.** `tools/gc_store_check.py` parses every translation
+unit with libclang and reports each assignment, `memcpy`/`memmove` and atomic store whose
+destination has a reference type (GCValue, GCHandle or a typedef of either, or a struct
+containing one), is not a local variable, and is not followed by a dirty-marking call.
+Stores of constants that are not references (`JS_UNDEFINED`, `GC_HANDLE_NULL`, numbers)
+and `memset` are ignored: removing an edge never hides an object. Off-heap stores are
+annotated `/* gc-no-dirty: reason */`. The tree is at zero uncovered stores.
 
-## 7. One collection cycle
+**Exemptions.**
 
-Each step says who does it and whether the JS thread does any work.
+- *Frames on the chain.* The interpreter writes `sp`, `var_buf`, `arg_buf` and
+  `stack_buf` without dirty flags. Every frame on the chain is rescanned precisely when
+  marking finishes, and a frame that leaves the chain (return, yield, await) has its whole
+  value area marked dirty by `js_rt_pop_stack_frame`.
+- *Off-heap tables.* References stored in malloc'd memory hanging off a GC object (a DOM
+  node's computed-style table) are reported with `gc_note_ref(handle)`. Those handles are
+  marked at mark start (minor), at remark, and are the remembered set's off-heap part.
+  Off-heap root containers that the JS thread owns (the job queue, the loaded-module
+  lists, `gc_add_root`) are re-read at every boundary step instead.
 
-**1. Mark start** (boundary step, budgeted):
-- the JS thread snapshots the off-heap roots and the C stack;
-- the GC flips mark parity and records TAMS for every region;
-- the GC resets the OS dirty state for the whole heap.
+### 6.2 Pulling
 
-**2. Concurrent mark** (GC workers):
-- Trace from the snapshot using work stealing, setting bits in `mark[cycle & 1]`.
-- Each round, pull the OS dirty state into `dirty_mark`. Re-scan every marked object, or
-  object above TAMS, that overlaps a dirty page.
-- Repeat until a round finds few dirty pages.
+Only one thread pulls at a time: the GC thread while it runs, or the JS thread in a
+boundary step while the GC thread waits for its answer. A pull reads and resets the
+dirty state (`atomic_exchange` per card, or `GetWriteWatch` with reset) and records every
+card in the nursery's **remembered set** (`remset_acc`, a bitmap of cards written since
+the last minor start) before handing it to the consumer. No consumer can lose another's
+information.
+
+### 6.3 Rescanning a card
+
+A card written since it was last looked at may hold references the marker has not seen.
+The collector rescans it **conservatively**: for every current object overlapping the
+card that is live (marked, or outside the cycle) and may hold references (not a string,
+BigInt or byte buffer), every 32-bit word of the object that lies on the card is treated
+as a candidate handle. This needs no knowledge of object layouts, which matters because
+references live in engine structs, value arrays, property arrays and opaque browser data
+whose meaning only the owner's mark function knows. The cost: an integer that looks like
+a handle can keep an object alive until the next cycle.
+
+### 6.4 Validating a copy
+
+Copies are made while the JS thread keeps writing to the originals.
+
+- **Windows:** the GC thread resets the write watch of a region (pulling it into the
+  remembered set) just before copying its objects. At the flip the JS thread pulls the
+  write watch of the evacuated regions; a copy whose original lies on a written page is
+  rejected. The reset is a system call that flushes the dirty state on every core, so a
+  write made before it is visible to the copy, and a write after it shows at the flip.
+- **Linux and macOS:** the software flags cover reference stores only, so the flip
+  compares each copy with its original (`memcmp` of header and payload) and rejects any
+  that differ. An equal copy is correct by definition. This makes the flip proportional
+  to the bytes copied, so one flip validates at most 512 KB of copies (16 MB on Windows).
+
+## 7. Major cycle (whole heap)
+
+**0. Prepare** (GC thread): clear the next parity's mark bitmaps; pull and discard the
+dirty state (recording it in the remembered set). Writes after this pull are rescanned
+during the cycle.
+
+**1. Mark start** (boundary step):
+- flip the parity, set TAMS = top for every region, start deferring handle reuse;
+- snapshot the roots (§5) into the worklist with `mark_cb`, and note where the reference
+  log stands.
+
+**2. Concurrent mark** (GC thread):
+- trace from the worklist with the engine's `mark_children`;
+- pull the dirty cards and rescan them (§6.3), in rounds, until a round finds fewer than
+  64 dirty cards (at most 16 rounds).
+
+`mark_children` reads objects the JS thread is changing. Every handle is bounds-checked
+against the handle table; every loop that reads a count from one object and an array
+from another (shape and property array, array length and values, frame counts) is
+clamped to the array's real size, so a stale count can only skip slots, whose later
+stores set dirty flags. Mark functions never take locks or call into the engine; the
+class-prototype table is read directly instead of through its retry loop.
 
 **3. Remark** (boundary step, budgeted):
-- the JS thread pulls the final dirty pages, the `roots_log` and its stack;
-- it traces from those, up to the budget.
-- If it runs out of budget, it declines and the GC does another concurrent round.
-- **Marking is complete only when a remark finishes inside its budget.** Nothing has been
-  committed before that, so declining costs only time.
+- the roots again, the reference log since mark start, the last dirty cards;
+- trace until the worklist is empty, checking the budget every 256 objects and every 64
+  cards; past the budget, decline (the GC thread takes the worklist and the cards);
+- when it finishes inside the budget, marking is complete: run the verifier if enabled,
+  then the **weak step** on the JS thread (WeakMap/WeakRef/FinalizationRegistry, the
+  shape-hash cleanup, finalizers, dead contexts), and recycle the deferred handles.
 
-**4. Concurrent sweep** (GC workers):
-- Walk the handle table. An entry whose object is unmarked and below TAMS is dead:
-  - its handle goes to `freed_handles`, after both table entries are CAS'd to NULL;
-  - its bytes come off the region's `live_bytes`;
-  - finalizer, weak-table and atom-removal commands go to `commands`.
-- Regions with zero live bytes become FREE, through the fence in step 8.
+Running the weak step in the same step as the end of marking means no weak lookup can
+hand out an object marking has condemned. During marking itself weak lookups are safe:
+whatever the JS thread takes from a weak table it holds on its stack (rescanned at
+remark) or stores (a dirty card).
 
-**5. Pick the collection set** (GC):
-- Choose the sparsest regions and mark them FROM.
+**4. Concurrent sweep** (GC thread): walk each region below TAMS; for a current, unmarked
+object, CAS its handle entries to NULL and push the handle to `freed_handles`. Count the
+live bytes. A region with no live bytes that nothing was allocated in since mark start,
+that no thread is filling and that is not pinned is released.
 
-**6. Concurrent evacuation** (GC workers):
-- Work page by page: reset P's dirty state, then copy every live object that starts in
-  P into TO regions. Resetting just before copying avoids rejecting good copies because
-  of writes that happened before the copy. Linux soft-dirty can only reset the whole
-  process, so there the GC resets once and re-copies dirty pages in rounds.
-- `CAS(back[h], old, new)`; if it fails, the JS thread changed the entry, so drop the copy.
-- Keep pulling dirty state into `dirty_evac`. Objects on dirtied pages are re-copied (reset
-  the page, then copy again) or simply rejected, depending on a re-copy budget.
-- When done, post FLIP_READY and stop touching evacuation state.
+**5. Choose the collection set** (GC thread): old regions with live bytes at most half
+of what was allocated in them, not being filled, nothing allocated since mark start, up
+to the validation batch (§6.4).
+
+**6. Concurrent evacuation** (GC thread): copy every current object of the set (except
+byte buffers) into GC-owned old regions, `CAS(back[h], from, to)`, and record the move.
+The copy's cards are marked dirty (remembered set).
 
 **7. Flip** (boundary step, budgeted):
-- pull the last dirty pages for FROM regions;
-- reject each object on them, and each pinned object: `back[h] = front[h]`;
-- `atomic_store(&front, back)`, with release ordering;
-- post FLIP_DONE with the current tick number.
-- **The JS thread's work** is the rejects plus one pointer store. That's usually a handful
-  of objects, because the GC already rejected most dirty ones concurrently.
+- pin what running code holds raw pointers to (§5);
+- for each move whose entries are still as the GC left them: reject it if the object is
+  pinned or changed since the copy (§6.4), by storing `back[h] = from` and keeping its
+  region;
+- `atomic_store(&front, back)` with release.
 
-**8. Fence and release** (GC):
-- When the JS thread's tick counter has passed the flip tick, nothing can hold a pointer
-  into the FROM regions:
-  - at a tick boundary there are no raw pointers;
-  - at a mid-script flip, pinned objects weren't moved.
-- Objects whose move was rejected stay alive in place: their region goes back to FULL, not
-  FREE. Every other FROM region is released (decommitted in debug builds, so a stale
-  pointer faults immediately).
-- Then GC workers bring the new back table up to date (§4.2).
+**8. Release** (GC thread): `CAS(newback[h], from, to)` for every accepted move, then
+release every region of the set that has no current object left. The next batch starts
+at step 5.
 
-Before applying the step-4 commands, the JS thread checks the previous cycle's bitmap for
-each target. An object that's marked again in a newer cycle is skipped, so a command can't
-act on something that's live now.
+## 8. Young generation (nursery)
 
-## 8. Weak structures
+### 8.1 Why
+
+Most JS objects die within moments of being created: temporary arrays, closures, strings
+built in loops, iterator results. A minor cycle looks only at young objects and costs
+roughly the number of young objects that survive plus the old cards written since the
+last minor cycle. Reclaiming 20 MB of fresh garbage no longer means tracing 300 MB of
+long-lived DOM and application state.
+
+### 8.2 Layout
+
+- The nursery is the set of NURSERY regions. At minor start the JS thread retires its
+  young allocation buffer and labels every NURSERY region `collecting`; new young objects
+  go to fresh regions. The collected set is the back buffer, the fresh regions the front.
+- **Pretenuring:** the runtime, contexts, shapes, bytecode, module records, function
+  definitions, atoms and ArrayBuffer storage are allocated straight into old space.
+- **Promotion on first survival:** every object that survives a minor cycle leaves the
+  nursery. Once a cycle finishes, the collected set holds nothing, so the remembered set
+  never needs entries that outlive a cycle.
+
+### 8.3 Finding the young objects that survive
+
+A young object is live if something reaches it from:
+
+1. **The roots** (§5) and the reference log since the last minor start.
+2. **The remembered set:** every card written since the last minor start (`remset_acc`,
+   swapped into `remset_cur` at minor start). An old object can only point at a young one
+   if it was written after that young object existed, which set the card. Cards of the
+   collected nursery itself are skipped: its live objects are traced anyway.
+3. **Other live young objects.** Tracing follows references only while they stay inside
+   the collected set.
+
+**Buffers owned by old objects.** A DATA object (property array, array storage, value
+buffer) is only understood by its owner's mark function, and a minor cycle does not trace
+old owners. So a minor cycle scans a marked young DATA object's payload conservatively,
+the same way as a dirty card.
+
+### 8.4 Minor cycle
+
+**1. Minor start** (boundary step): retire the young buffer, label the collected set, swap
+the remembered set, snapshot the roots and the reference log (then clear it).
+
+**2. Concurrent mark** (GC thread): rescan the remembered set's cards, trace, then rescan
+dirty cards in rounds as in a major cycle. Writes made after the minor start into old
+objects or fresh young objects are found the same way.
+
+**3. Remark** (boundary step, budgeted), **weak step** in the same step: WeakRefs,
+WeakMap entries and FinalizationRegistry targets in the collected set that died are
+cleared.
+
+**4. Sweep** (GC thread): free the handles of the collected set's unmarked objects.
+
+**5. Promotion** (GC thread): a region whose survivors fill more than half of it, or that
+comes past the flip's validation batch, is promoted in place. The survivors of the other
+regions are copied into old space.
+
+**6. Flip** (boundary step, budgeted): as in §7. A rejected copy promotes its region in
+place.
+
+**7. Release** (GC thread): bring the back table up to date; regions kept by a rejection
+or a byte buffer become OLD, the rest are released.
+
+The remembered set a minor cycle used is cleared when the cycle completes and merged
+back into `remset_acc` if the cycle is abandoned, so an aborted cycle loses nothing.
+
+### 8.5 Interaction with major cycles
+
+Minor and major cycles run one after the other on the GC thread, never interleaved. A
+major cycle marks and sweeps the nursery too (it is below TAMS) but evacuates only old
+regions. Promoted bytes count toward the next major cycle.
+
+### 8.6 Stop-the-world collection
+
+`gc_run()` asks the GC thread to abandon its cycle (`abort`), answers any pending request
+with ABORTED, and waits until the thread is idle. Abandoning is safe at every point:
+
+- before remark: nothing was freed or moved;
+- during sweep: the condemned objects are unreachable anyway;
+- during evacuation: the back-table entries of recorded moves are restored with CAS;
+- after a flip: the back-table update and the release always finish first.
+
+Then it runs a full collection on the JS thread: mark from all roots (pinning), the weak
+step, sweep, and compaction of sparse regions (regions pinned by raw pointers stay).
+
+## 9. Weak structures
 
 These are the atom hash, shape hash, WeakMap, WeakRef and FinalizationRegistry.
 
-- **During marking**, a lookup that returns an object sets its bit in the current mark
-  bitmap (`atomic_fetch_or`). The JS thread can't take hold of something the marker
-  already passed over without also keeping it alive.
-- **After remark and before its command is applied**, an entry whose object is unmarked
-  in the finished cycle counts as missing. The lookup reads the previous-parity bitmap,
-  with no locks.
-- **Removals happen only on the JS thread**, by applying `commands` at a tick boundary. A
-  hash table is never modified by two threads at once.
+- **During marking** the JS thread may take objects from weak tables freely: it keeps
+  them on its stack (rescanned at remark) or stores them (dirty cards).
+- **The weak step** runs on the JS thread in the step that completes marking. Entries
+  whose object the cycle condemned are removed; finalizers run. Atoms are permanent.
+- A conservative rescan can keep a WeakMap key alive for one extra cycle. The language
+  allows this: collection timing is unspecified.
 
-## 9. Rules for engine and browser code
+## 10. Rules for engine and browser code
 
 1. **Raw pointers to GC memory stay in locals.** Never store one in a global, a malloc'd
-   struct or a GC object, and never hold one across a tick boundary. Store handles.
-2. **Off-heap structures that hold handles** (the job queue, browser structs) report
-   changes through `roots_log`, or are registered so they're re-snapshotted at remark.
-3. **Only the dual-write helpers change handle-table entries** (`gc_alloc`, `gc_realloc`).
-   Nothing writes `g_gc.handles.ptrs[...]` directly; the shape-clone path does today and
-   must change.
-4. **Finalizers run on the JS thread**, from `commands`.
+   struct or a GC object; store handles. (Exception: byte buffers of type BYTES, which
+   never move.)
+2. **Store references with the write helpers:** `GC_SET`, `SAFE_SET*`, `set_value`,
+   `gc_memcpy`. Run `tools/gc_store_check.py` after changing engine or browser code.
+3. **A reference stored in malloc'd memory reachable from a GC object** must be
+   reported with `gc_note_ref`.
+4. **Only the dual-write helpers change handle-table entries** (`gc_alloc`, `gc_realloc`,
+   `gc_free`).
+5. **Mark functions only mark:** no locks, no allocation, no calls into the engine, and
+   every loop bound clamped to the size of the array it reads (`gc_slots`,
+   `gc_clamp_count`).
+6. **Two objects' addresses must never be combined.** A frame's `var_refs` grown during
+   lazy parsing used to be found by the offset between two objects; it is now a handle
+   (`var_refs_handle`).
+7. **Only the JS thread allocates** engine objects. Worker-pool jobs work on native data.
 
-## 10. Correctness invariants
+## 11. Correctness invariants
 
 | ID | Invariant | Mechanism |
 |---|---|---|
-| I1 | Every object reachable at remark is marked, or was allocated above TAMS. | Root snapshot, dirty-page re-scan, remark completes inside its budget |
-| I2 | A handle is reused only after both table entries are NULL and the handle went through `freed_handles`. | Sweep, ring |
-| I3 | `front` changes only on the JS thread, at a boundary. | Flip is a boundary step |
-| I4 | A presented copy equals the original at the moment of the flip. | Dirty reset before copy, reject dirty or pinned at the flip |
-| I5 | A FROM region is released only after the tick that follows its flip. | Tick-counter fence |
-| I6 | No thread ever waits on another to make progress. | Budgets, declines, single-writer fields, CAS |
-| I7 | A weak entry is never handed out after its object was found dead. | Bitmap check on lookup |
+| I1 | Every object reachable when marking completes is marked, or was allocated above TAMS (major), or lies outside the collected set (minor). | Root snapshots, dirty-card rescans, rescan of frames on the chain, frame-unlink dirtying, the reference log, remark that completes inside one step |
+| I2 | A handle is reused only after both table entries are NULL, and not while marking runs. | CAS free, deferred reuse, the freed ring |
+| I3 | `front` changes only on the JS thread, in a flip. | The flip is a boundary step |
+| I4 | A presented copy equals the original at the moment of the flip. | Write watch reset before copying (Windows), `memcmp` (elsewhere), rejection |
+| I5 | No raw pointer on the stack points into a moved object. | Pins: stack scan and frames on the chain |
+| I6 | No thread waits on another to make progress, except in `gc_run()`. | Budgets, declines, single-writer fields, CAS |
+| I7 | A weak entry is never handed out after its object was condemned. | The weak step runs in the step that completes marking |
+| I8 | Every reference from an old object to a young one is on a card in the remembered set, in the reference log, or in a frame on the chain. | Write helpers or write watch, frame unlink, `gc_note_ref`, copies dirty their cards |
+| I9 | When a minor cycle ends, the collected nursery holds no live object except those promoted in place. | Promotion on first survival, in-place promotion |
 
-## 11. What the JS thread pays
+The verifier (§13) checks I1 and I8 after every remark.
+
+## 12. What the JS thread pays
 
 | Cost | When |
 |---|---|
-| One relaxed load per `gc_deref` (same as today) | Always |
-| One relaxed load of the state word | At each tick boundary, function entry and loop back-edge |
-| Dual store when an entry changes | Allocating a handle, `gc_realloc` |
-| OS dirty tracking | Free on Windows; one fault per page per cycle with `mprotect` |
-| Boundary steps (mark start, remark, flip) | Up to the budget, three times per cycle; declined instead of exceeded |
+| One acquire load + index per `gc_deref` (as before) | Always |
+| One relaxed load of the poll flag | Every opcode and tick |
+| A range check and a byte store | Every reference store (Linux, macOS); free on Windows |
+| A dirty range over the frame | Each return, yield or await |
+| Dual store when an entry changes | Allocating a handle, `gc_realloc`, `gc_free` |
+| Boundary steps | Mark start, remark and flip of each cycle (§14) |
 
-## 12. Testing
+## 13. Testing
 
-- **Torture:** request a boundary step at every poll. The hook already exists from the
-  stop-the-world fix. Run the C test suite and JS regression scripts under it.
-- **Verifier (debug):** after a remark is accepted, redo marking from scratch in a scratch
-  bitmap. Any object marked there but not in the cycle's bitmap is a bug in dirty
-  tracking or roots.
-- **Poisoned FROM regions (debug):** decommit released regions, so a stale raw pointer
-  faults at the culprit.
-- **Concurrency harness:** an extended `conc.c` from the audit. Allocate and write
-  constantly across thousands of cycles and check contents and canaries.
-- **Reject-path testing:** force every copy to be rejected, and then none, to exercise
-  both flip paths.
-- **ThreadSanitizer** on Linux, with the `mprotect` and soft-dirty back ends.
-- **Telemetry:** record each boundary step's duration, and whether it was declined, in the
-  `cyber_profile` traces.
+**Unit tests** (`tests/test_gc.c`, run by the C test suite):
 
-## 13. Implementation plan
+- heap and handles: 8-byte header, 16-byte payload alignment, zeroed memory, interior
+  pointers, humongous objects that never move, `gc_realloc`, `gc_free` and handle reuse;
+- stop-the-world collection: unreachable objects freed, roots, finalizers that run once,
+  compaction preserving contents, objects pinned by raw pointers;
+- collection while code runs: locals, arguments, operand stack, native temporaries,
+  deep recursion, generators, repeated collections;
+- dirty tracking: the write helpers set cards; the Windows write watch reports and
+  resets written pages;
+- concurrent cycles: a major cycle, promotion by a minor cycle, the remembered set
+  (old objects gaining references to young ones through properties, arrays, Maps and
+  closures), a mixed workload under back-to-back cycles, every copy rejected,
+  half the copies rejected with dense regions moved, `gc_run()` abandoning cycles,
+  progress inside a script that never returns to the event loop, budget declines, weak
+  references cleared by minor cycles, and ArrayBuffer storage that never moves.
 
-**1. Foundations**
-- Reserved-region heap, TLABs, start bitmaps.
-- The two fixed handle tables with dual writes.
-- The state word and rings.
-- GC workers that sleep on an address.
-- Remove the old double buffers, the lock-free free queue, the grey queue mutex, publish
-  states and the dead list.
-- Collection stays stop-the-world at tick boundaries.
-- *Done when:* the tests pass under torture and nothing commits 8 GB at startup.
+Every concurrent test runs with the verifier on and checks that it reported nothing and
+that `gc_test_heap_check()` finds no inconsistent header, start bit or handle entry.
 
-**2. Dirty tracking**
-- Windows write-watch, then Linux soft-dirty, then the `mprotect` fallback.
-- Unit tests of the reset-then-copy ordering.
+**Switches** (environment variables, also in `GCConfig`):
 
-**3. Concurrent mark and sweep**
-- Parity bitmaps, TAMS, budgeted remark, command buffers, weak lookups.
-- *Done when:* the verifier is clean under torture.
+| Variable | Effect |
+|---|---|
+| `QJS_GC_BACKGROUND=0` | No GC thread: collections only through `gc_run()` |
+| `QJS_GC_NURSERY=0` | No young generation |
+| `QJS_GC_STRESS=1` | Cycles back to back (minor, then major) |
+| `QJS_GC_STRESS=2` | Also move dense regions and copy every nursery survivor |
+| `QJS_GC_REJECT=all` / `half` | Reject every copy, or every other one, at the flip |
+| `QJS_GC_VERIFY=1` | After every remark, re-trace from the roots and report reachable objects the cycle left unmarked (also checks the remembered set) |
+| `QJS_GC_POISON=1` | Decommit released regions so a stale pointer faults |
+| `QJS_GC_BUDGET_US`, `QJS_GC_NURSERY_KB`, `QJS_GC_MAJOR_KB` | Tuning |
+| `QJS_GC_LOG=1..3` | Cycle phase times, mark rounds, every boundary step |
+| `QJS_GC_TRACE=1` | Record every handle event in a ring; the verifier prints the history of the handles it reports |
 
-**4. Concurrent evacuation and flip**
-- Back-table CAS, reject logic, fence release, back-table update.
-- *Done when:* the harness runs thousands of cycles clean with poisoning on.
+**Static check:** `python3 tools/gc_store_check.py build/compile_commands.json` lists
+reference stores without a dirty flag (exit status 1 if any).
 
-**5. Pacing**
-- Start cycles from the allocation rate. When the heap is nearly full, the allocating
-  thread does GC work itself instead of aborting.
-- Tune region size and budgets.
+The JS regression scripts and the audit's GC probes were run under combinations of the
+switches above (stress 1 and 2, verify, poison, half rejection); their output matches the
+stop-the-world collector's.
+
+## 14. Measurements (Linux, -O2, one GC thread)
+
+Boundary steps on allocation-heavy scripts (three benchmarks below, default settings):
+
+| Step | Average | Worst seen |
+|---|---|---|
+| Mark start | 24–87 µs | 0.25 ms |
+| Remark | 144–204 µs | 0.55 ms |
+| Flip | 177–242 µs | 1.5 ms (after declines raised the budget) |
+
+Peak memory and time against the previous code, which collected only when asked:
+
+| Script | Peak RSS before → concurrent | Time before → concurrent |
+|---|---|---|
+| 400K short-lived objects | 424 MB → 113 MB | 8.2 s → 7.2 s |
+| Binary trees | 597 MB → 241 MB | 7.6 s → 7.1 s |
+| Array churn | 795 MB → 162 MB | 5.3 s → 3.9 s |
+| fib(27) | 176 MB → 40 MB | 0.46 s → 0.15 s |
+
+(The first three spend most of their time in `getenv` calls on the engine's property
+paths, which is unrelated to the collector.)
+
+## 15. Limitations and next steps
+
+- **Remark cost** grows with the cards the JS thread dirtied during the last concurrent
+  round, mostly initializing new objects. Scanning fresh allocation precisely, or a
+  second GC thread, would cut it.
+- **Flip cost on Linux and macOS** is proportional to the bytes copied (`memcmp`). The
+  batch limit keeps it near 0.2 ms; moving the comparison to the GC thread and comparing
+  only cards written since the copy would need write tracking of non-reference stores.
+- **One GC thread.** Marking, sweeping and copying could use work-stealing workers.
+- **Conservative scans** (stack, dirty cards, young buffers owned by old objects) can
+  keep garbage alive for one cycle.
+- **A step can exceed its budget** after repeated declines (the budget doubles each
+  time); in practice this happens a few times per run of the stress tests.
+- **The OS dirty-page alternatives** (Linux soft-dirty, `mprotect`) are not implemented;
+  the software cards replace them.

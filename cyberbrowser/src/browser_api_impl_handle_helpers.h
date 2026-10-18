@@ -76,7 +76,7 @@ static inline XMLHttpRequestHandle xhr_create(JSContextHandle ctx) {
     if (h != GC_HANDLE_NULL) {
         XMLHttpRequest* xhr = (XMLHttpRequest*)gc_deref(h);
         memset(xhr, 0, sizeof(XMLHttpRequest));
-        xhr->ctx = ctx;
+        GC_SET(xhr->ctx, ctx);
     }
     return h;
 }
@@ -90,7 +90,7 @@ static inline HTMLVideoElementHandle video_create(JSContextHandle ctx) {
     if (h != GC_HANDLE_NULL) {
         HTMLVideoElement* vid = (HTMLVideoElement*)gc_deref(h);
         memset(vid, 0, sizeof(HTMLVideoElement));
-        vid->ctx = ctx;
+        GC_SET(vid->ctx, ctx);
         vid->paused = 1;
         vid->volume = 1.0;
         vid->playback_rate = 1.0;
@@ -123,7 +123,7 @@ static inline MapDataHandle map_data_create(JSContextHandle ctx) {
     if (h != GC_HANDLE_NULL) {
         MapData* map = (MapData*)gc_deref(h);
         memset(map, 0, sizeof(MapData));
-        map->entries = JS_NewObject(ctx);
+        GC_SET(map->entries, JS_NewObject(ctx));
         map->size = 0;
     }
     return h;
@@ -138,22 +138,22 @@ static inline ShadowRootDataHandle shadow_root_create(JSContextHandle ctx, GCVal
     if (h != GC_HANDLE_NULL) {
         ShadowRootData* sr = (ShadowRootData*)gc_deref(h);
         memset(sr, 0, sizeof(ShadowRootData));
-        sr->host = host;
+        GC_SET(sr->host, host);
         strncpy(sr->mode, mode, sizeof(sr->mode) - 1);
         sr->mode[sizeof(sr->mode) - 1] = '\0';
-        sr->innerHTML = JS_NewString(ctx, "");
-        sr->ctx = ctx;
+        GC_SET(sr->innerHTML, JS_NewString(ctx, ""));
+        GC_SET(sr->ctx, ctx);
 
         // Back the shadow root with a regular DOMNode fragment so it can
         // reuse the normal DOM tree mutation/traversal code.
-        GCHandle dn = gc_alloc_grey(sizeof(DOMNode), JS_GC_OBJ_TYPE_DATA);
+        GCHandle dn = gc_alloc(sizeof(DOMNode), JS_GC_OBJ_TYPE_DATA);
         if (dn != GC_HANDLE_NULL) {
             DOMNode* node = (DOMNode*)gc_deref(dn);
             memset(node, 0, sizeof(DOMNode));
             node->node_type = DOM_NODE_TYPE_DOCUMENT_FRAGMENT;
             strncpy(node->node_name, "#document-fragment", sizeof(node->node_name) - 1);
             node->node_name[sizeof(node->node_name) - 1] = '\0';
-            node->ctx = ctx;
+            GC_SET(node->ctx, ctx);
             node->parent_node = JS_NULL;
             node->first_child = JS_NULL;
             node->last_child = JS_NULL;
@@ -165,8 +165,7 @@ static inline ShadowRootDataHandle shadow_root_create(JSContextHandle ctx, GCVal
             node->next_class_sibling = GC_HANDLE_NULL;
             node->next_tag_sibling = GC_HANDLE_NULL;
             node->js_object = JS_NULL;
-            gc_publish(dn);
-            sr->dom_node = dn;
+            GC_SET(sr->dom_node, dn);
         }
     }
     return h;
@@ -186,7 +185,7 @@ static inline AnimationDataHandle animation_create(JSContextHandle ctx) {
     if (h != GC_HANDLE_NULL) {
         AnimationData* anim = (AnimationData*)gc_deref(h);
         memset(anim, 0, sizeof(AnimationData));
-        anim->ctx = ctx;
+        GC_SET(anim->ctx, ctx);
         anim->onfinish = JS_NULL;
         anim->effect = JS_NULL;
     }
@@ -236,8 +235,8 @@ static inline MutationObserverDataHandle mutation_observer_create(JSContextHandl
     if (h != GC_HANDLE_NULL) {
         MutationObserverData* mo = (MutationObserverData*)gc_deref(h);
         memset(mo, 0, sizeof(MutationObserverData));
-        mo->ctx = ctx;
-        mo->callback = callback;
+        GC_SET(mo->ctx, ctx);
+        GC_SET(mo->callback, callback);
     }
     return h;
 }
@@ -251,8 +250,8 @@ static inline ResizeObserverDataHandle resize_observer_create(JSContextHandle ct
     if (h != GC_HANDLE_NULL) {
         ResizeObserverData* ro = (ResizeObserverData*)gc_deref(h);
         memset(ro, 0, sizeof(ResizeObserverData));
-        ro->ctx = ctx;
-        ro->callback = callback;
+        GC_SET(ro->ctx, ctx);
+        GC_SET(ro->callback, callback);
     }
     return h;
 }
@@ -266,8 +265,8 @@ static inline IntersectionObserverDataHandle intersection_observer_create(JSCont
     if (h != GC_HANDLE_NULL) {
         IntersectionObserverData* io = (IntersectionObserverData*)gc_deref(h);
         memset(io, 0, sizeof(IntersectionObserverData));
-        io->ctx = ctx;
-        io->callback = callback;
+        GC_SET(io->ctx, ctx);
+        GC_SET(io->callback, callback);
         io->root = JS_NULL;
         strcpy(io->rootMargin, "0px");
         io->threshold = 0.0;
@@ -284,8 +283,8 @@ static inline PerformanceObserverDataHandle performance_observer_create(JSContex
     if (h != GC_HANDLE_NULL) {
         PerformanceObserverData* po = (PerformanceObserverData*)gc_deref(h);
         memset(po, 0, sizeof(PerformanceObserverData));
-        po->ctx = ctx;
-        po->callback = callback;
+        GC_SET(po->ctx, ctx);
+        GC_SET(po->callback, callback);
     }
     return h;
 }
@@ -322,7 +321,7 @@ static inline MediaSourceDataHandle media_source_create(JSContextHandle ctx) {
     if (h != GC_HANDLE_NULL) {
         MediaSourceData* ms = (MediaSourceData*)gc_deref(h);
         memset(ms, 0, sizeof(MediaSourceData));
-        ms->ctx = ctx;
+        GC_SET(ms->ctx, ctx);
         ms->ready_state = 0; // closed
         strcpy(ms->source_buffers, "[]");
         strcpy(ms->active_source_buffers, "[]");
@@ -339,7 +338,7 @@ static inline SourceBufferDataHandle source_buffer_create(JSContextHandle ctx) {
     if (h != GC_HANDLE_NULL) {
         SourceBufferData* sb = (SourceBufferData*)gc_deref(h);
         memset(sb, 0, sizeof(SourceBufferData));
-        sb->ctx = ctx;
+        GC_SET(sb->ctx, ctx);
         sb->updating = 0;
         sb->track_count = 0;
         sb->parsed_duration = 0.0;
@@ -362,15 +361,13 @@ static inline void source_buffer_set_append_data(SourceBufferDataHandle h, uint8
  * ------------------------------------------------------------------------ */
 
 static inline DOMNodeHandle dom_node_create(JSContextHandle ctx, int node_type, const char* node_name) {
-    /* Allocate grey so the node is invisible to readers/GC while its
-     * fields are being written. */
-    GCHandle h = gc_alloc_grey(sizeof(DOMNode), JS_GC_OBJ_TYPE_DATA);
+    GCHandle h = gc_alloc(sizeof(DOMNode), JS_GC_OBJ_TYPE_DATA);
     if (h == GC_HANDLE_NULL) return GC_HANDLE_NULL;
     
     DOMNode* node = (DOMNode*)gc_deref(h);
     memset(node, 0, sizeof(DOMNode));
     node->node_type = node_type;
-    node->ctx = ctx;
+    GC_SET(node->ctx, ctx);
     if (node_name) {
         strncpy(node->node_name, node_name, sizeof(node->node_name) - 1);
         node->node_name[sizeof(node->node_name) - 1] = '\0';
@@ -389,8 +386,6 @@ static inline DOMNodeHandle dom_node_create(JSContextHandle ctx, int node_type, 
     node->next_tag_sibling = GC_HANDLE_NULL;
     node->js_object = JS_NULL;
     
-    /* Fully initialized; publish so traversal and GC can see it. */
-    gc_publish(h);
     return h;
 }
 
@@ -410,7 +405,7 @@ static inline void dom_node_attach_to_object(DOMNodeHandle h, GCValue obj) {
     if (h != GC_HANDLE_NULL) {
         JS_SetOpaqueHandle(obj, h);
         DOMNode *p = (DOMNode *)gc_deref(h);
-        if (p) p->js_object = obj;
+        if (p) GC_SET(p->js_object, obj);
     }
 }
 
@@ -536,7 +531,7 @@ static inline EventHandle event_create(JSContextHandle ctx, const char* type) {
         ev->target = JS_NULL;
         ev->currentTarget = JS_NULL;
         ev->path = JS_NULL;
-        ev->ctx = ctx;
+        GC_SET(ev->ctx, ctx);
     }
     return h;
 }
@@ -558,7 +553,7 @@ static inline CustomEventHandle custom_event_create(JSContextHandle ctx, const c
         ev->base.target = JS_NULL;
         ev->base.currentTarget = JS_NULL;
         ev->base.path = JS_NULL;
-        ev->base.ctx = ctx;
+        GC_SET(ev->base.ctx, ctx);
         ev->detail = JS_NULL;
     }
     return h;
@@ -581,7 +576,7 @@ static inline MouseEventHandle mouse_event_create(JSContextHandle ctx, const cha
         ev->base.target = JS_NULL;
         ev->base.currentTarget = JS_NULL;
         ev->base.path = JS_NULL;
-        ev->base.ctx = ctx;
+        GC_SET(ev->base.ctx, ctx);
     }
     return h;
 }
@@ -603,7 +598,7 @@ static inline FocusEventHandle focus_event_create(JSContextHandle ctx, const cha
         ev->base.target = JS_NULL;
         ev->base.currentTarget = JS_NULL;
         ev->base.path = JS_NULL;
-        ev->base.ctx = ctx;
+        GC_SET(ev->base.ctx, ctx);
         ev->relatedTarget = JS_NULL;
     }
     return h;

@@ -109,12 +109,7 @@ typedef GCHandle JSFunctionDefHandle;  /* struct JSFunctionDef is private to qui
 /* Forward declaration for GCValue struct (defined below) */
 struct GCValue;
 
-#ifdef __cplusplus
-extern "C" {
-/* Forward declaration for gc_deref function */
-void *gc_deref(uint32_t handle);
-}
-#endif
+
 
 /* ============================================================================
  * Basic Types
@@ -204,6 +199,9 @@ typedef enum JSGCObjectTypeEnum {
     JS_GC_OBJ_TYPE_JS_STRING_ROPE,
     JS_GC_OBJ_TYPE_JS_BIGINT,
     JS_GC_OBJ_TYPE_MODULE,
+    JS_GC_OBJ_TYPE_JOB_ENTRY,   /* pending job: realm + arguments */
+    JS_GC_OBJ_TYPE_BYTES,       /* raw bytes whose address is cached (ArrayBuffer
+                                   storage): no references, never moved */
 } JSGCObjectTypeEnum;
 
 #ifdef __cplusplus
@@ -215,8 +213,6 @@ GCHandle gc_alloc(size_t size, JSGCObjectTypeEnum gc_obj_type);
 }
 #endif
 
-/* JSGCObjectTypeEnum must stay in sync with GCObjectBucketType in quickjs_gc_unified.h */
-/* Make sure the values match */
 #define JS_GC_OBJ_TYPE_JS_OBJECT_COMPAT JS_GC_OBJ_TYPE_JS_OBJECT
 
 /* NOTE: JSWeakRefHeader removed - weak references now use typed handle arrays
@@ -468,6 +464,10 @@ typedef struct JSStackFrame {
     
     /* Handle to this frame's GC allocation - needed for var_refs to reference */
     GCHandle self_handle;
+
+    /* var_refs grown after the frame was created (lazy parsing) live in a
+     * separate array; GC_HANDLE_NULL when they are inline at var_refs_offset. */
+    GCHandle var_refs_handle;
 } JSStackFrame;
 
 /* ============================================================================
@@ -492,7 +492,9 @@ struct JSStackFrame *js_frame_deref(GCHandle frame_handle);
 #define JS_SF_ARG_BUF(sf) ((GCValue*)((uint8_t*)(sf) + (sf)->arg_buf_offset))
 #define JS_SF_VAR_BUF(sf) ((GCValue*)((uint8_t*)(sf) + (sf)->var_buf_offset))
 /* var_refs is now an array of GCHandle (not JSVarRefHandle objects) for GC safety */
-#define JS_SF_VAR_REFS(sf) ((GCHandle*)((uint8_t*)(sf) + (sf)->var_refs_offset))
+#define JS_SF_VAR_REFS(sf) ((sf)->var_refs_handle != GC_HANDLE_NULL \
+    ? (GCHandle *)gc_deref((sf)->var_refs_handle) \
+    : (GCHandle *)((uint8_t *)(sf) + (sf)->var_refs_offset))
 #define JS_SF_STACK_BUF(sf) ((GCValue*)((uint8_t*)(sf) + (sf)->stack_buf_offset))
 
 /* Access previous frame */
@@ -697,7 +699,7 @@ static inline bool gc_handle_list_push(GCHandleList *l, GCHandle handle)
 {
     if (!gc_handle_list_resize(l, l->count + 1))
         return false;
-    l->data[l->count - 1] = handle;
+    l->data[l->count - 1] = handle;  /* gc-no-dirty: malloc'd list */
     return true;
 }
 
@@ -706,7 +708,7 @@ static inline void gc_handle_list_remove_at(GCHandleList *l, int index)
 {
     if (index < 0 || index >= l->count) return;
     for (int j = index; j < l->count - 1; j++)
-        l->data[j] = l->data[j + 1];
+        l->data[j] = l->data[j + 1];  /* gc-no-dirty: malloc'd list */
     l->count--;
 }
 
@@ -1290,14 +1292,6 @@ struct JSFunctionBytecode {
  * C++ Handle Class Wrappers
  * ============================================================================ */
 
-/* Forward declarations of GC functions */
-#ifdef __cplusplus
-extern "C" {
-#endif
-void *gc_deref(uint32_t handle);
-bool gc_handle_is_valid(GCHandle handle);
-#ifdef __cplusplus
-}
-#endif
+/* gc_deref and gc_handle_is_valid are declared in quickjs_gc_unified.h. */
 
 #endif /* QUICKJS_TYPES_H */

@@ -436,6 +436,8 @@ static bool pump_timers_and_jobs(JSContextHandle ctx) {
         unsigned long long idle_deadline = platform_get_time_ms() + 8;
         timer_set_idle_deadline(idle_deadline);
 
+        /* Top of an event-loop turn: a tick boundary. */
+        gc_tick();
         int processed = timer_process_due(ctx);
         int sched = scheduler_process_tasks(ctx);
         int jobs = 0;
@@ -1099,7 +1101,8 @@ int main(int argc, char *argv[]) {
         // lifecycle events.
         {
             CP_SCOPE("run-gc");
-            JS_RunGC(JS_GetRuntime(g_ctx));
+            if (gc_is_background()) gc_request_cycle(true);
+            else JS_RunGC(JS_GetRuntime(g_ctx));
         }
 
         printf("Dispatching DOMContentLoaded and load events ...\n");

@@ -58,8 +58,8 @@ GCValue create_service_worker_registration(JSContextHandle ctx, const char *scri
         
         reg_data->installing = JS_NULL;
         reg_data->waiting = JS_NULL;
-        reg_data->active = worker;
-        reg_data->ctx = ctx;
+        GC_SET(reg_data->active, worker);
+        GC_SET(reg_data->ctx, ctx);
         
         JS_SetOpaqueHandle(reg, reg_handle);
     }

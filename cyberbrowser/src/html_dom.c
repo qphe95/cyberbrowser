@@ -922,7 +922,7 @@ static bool html_node_create_js_recursive(JSContextHandle ctx, GCValue js_doc, H
     }
     
     if (!JS_IsUndefined(js_node)) {
-        node->js_object = js_node;
+        GC_SET(node->js_object, js_node);
         node->has_js_object = 1;
     }
     
@@ -1096,7 +1096,7 @@ static bool html_node_populate_js_recursive(JSContextHandle ctx, GCValue js_doc,
                 }
                 
                 /* Remember the JS object so the CSS applier can find it. */
-                node->js_object = js_node;
+                GC_SET(node->js_object, js_node);
                 node->has_js_object = 1;
 
                 /* If we have a parent, append this element */
@@ -1818,7 +1818,7 @@ static void light_child_list_push(LightChildList *l, GCValue node, const char *s
         l->data = data;
         l->capacity = cap;
     }
-    l->data[l->count].node = node;
+    GC_SET(l->data[l->count].node, node);
     l->data[l->count].slot = slot;
     l->data[l->count].used = false;
     l->count++;

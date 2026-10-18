@@ -114,7 +114,7 @@ static inline void js_async_func_state_stack_push(GCHandle handle, GCValue val)
     JSAsyncFunctionState* p = GC_DEREF_H(handle, JSAsyncFunctionStateHandle);
     if (p) {
         GCValue* var_buf = JS_SF_VAR_BUF(&p->frame);
-        var_buf[p->frame.sp_offset] = val;
+        GC_SET(var_buf[p->frame.sp_offset], val);
         p->frame.sp_offset++;
     }
 }
@@ -199,7 +199,7 @@ static inline int js_bound_func_copy_argv_to(GCHandle handle, GCValue* dest, int
     if (!p || !dest || max_count <= 0) return 0;
     int count = (p->argc < max_count) ? p->argc : max_count;
     for (int i = 0; i < count; i++) {
-        dest[i] = p->argv[i];
+        GC_SET(dest[i], p->argv[i]);
     }
     return count;
 }
@@ -371,7 +371,7 @@ static inline GCValue js_bc_cpool_value(GCHandle handle, int index)
 static inline void js_bc_memcpy_from(GCHandle handle, const void* src, size_t size)
 {
     JSFunctionBytecode* p = GC_DEREF_H(handle, JSFunctionBytecodeHandle);
-    if (p) memcpy(p, src, size);
+    if (p) gc_memcpy(p, src, size);
 }
 
 static inline void js_bc_memset_zero(GCHandle handle, size_t size)
@@ -390,7 +390,7 @@ static inline void js_bc_set_cpool_value(GCHandle handle, int index, GCValue val
 {
     JSFunctionBytecode* p = GC_DEREF_H(handle, JSFunctionBytecodeHandle);
     if (!p || index < 0 || index >= p->cpool_count) return;
-    ((GCValue*)((uint8_t*)p + p->cpool_offset))[index] = val;
+    GC_SET(((GCValue*)((uint8_t*)p + p->cpool_offset))[index], val);
 }
 
 static inline void* js_bc_vardefs_ptr(GCHandle handle)
@@ -838,7 +838,9 @@ static inline GCHandle js_rt_compare_exchange_job_queue_handle(GCHandle handle, 
 {
     JSRuntime* p = GC_DEREF_H(handle, JSRuntimeHandle);
     if (!p) return expected;
-    return atomic_compare_exchange_u32((volatile uint32_t *)&p->job_queue_handle, expected, desired);
+    uint32_t prev = atomic_compare_exchange_u32((volatile uint32_t *)&p->job_queue_handle, expected, desired);
+    gc_dirty_slot(&p->job_queue_handle);
+    return prev;
 }
 
 static inline JSStackFrame* js_rt_current_stack_frame(GCHandle handle)
@@ -923,7 +925,27 @@ static inline void js_rt_set_class_count(GCHandle handle, int count)
 static inline void js_rt_set_current_stack_frame(GCHandle handle, JSStackFrame* frame)
 {
     JSRuntime* p = GC_DEREF_H(handle, JSRuntimeHandle);
-    if (p) p->current_stack_frame_handle = frame ? frame->self_handle : GC_HANDLE_NULL;
+    if (p) GC_SET(p->current_stack_frame_handle, frame ? frame->self_handle : GC_HANDLE_NULL);
+}
+
+/* Unlink the current frame (return, yield, await).  While a frame is on the
+ * chain its locals and operand stack are written without dirty flags; the
+ * collector rescans every frame on the chain when marking ends.  A frame
+ * that leaves the chain can stay reachable (closures, suspended
+ * generators), so its whole value area is marked dirty here. */
+static inline void js_rt_pop_stack_frame(GCHandle handle, JSStackFrame* sf)
+{
+    JSRuntime* p = GC_DEREF_H(handle, JSRuntimeHandle);
+    if (!p || !sf) return;
+    /* The frame is its own object, or sits inside one (async functions). */
+    GCHeader *hdr = gc_header_from_handle(sf->self_handle);
+    if (hdr) {
+        uint8_t *start = (uint8_t *)gc_header_payload(hdr);
+        uint8_t *end = start + gc_header_payload_size(hdr);
+        if ((uint8_t *)sf >= start && (uint8_t *)sf < end)
+            gc_dirty_range(sf, (size_t)(end - (uint8_t *)sf));
+    }
+    GC_SET(p->current_stack_frame_handle, sf->prev_frame_handle);
 }
 
 static inline void js_rt_set_job_queue_handle(GCHandle handle, GCHandle h)

@@ -209,12 +209,17 @@
     __typeof__(1 ? (value) : (value)) var = (value)
 #endif
 
-/* Write a plain (non-GC) field. */
+/* Write a field.  The field may hold a reference, and may be a bit-field
+ * (whose address cannot be taken), so the whole struct's cards are marked
+ * dirty (see gc_dirty_range). */
 #define SAFE_SET(handle, HType, field, value) \
     do { \
         GC_FIELD_VALUE(HType, field, _v, value); \
         GC_STRUCT_OF(HType) *_p = GC_DEREF_H(handle, HType); \
-        if (_p) _p->field = _v; \
+        if (_p) { \
+            _p->field = _v; \
+            gc_dirty_range(_p, sizeof(*_p)); \
+        } \
     } while (0)
 
 /* Copy a NUL-terminated string into a fixed-size char array field, truncating

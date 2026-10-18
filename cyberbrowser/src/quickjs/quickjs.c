@@ -972,8 +972,6 @@ static BOOL js_job_queue_is_empty(JSRuntimeHandle rt);
 static BOOL js_job_queue_enqueue(JSRuntimeHandle rt, GCHandle job_handle);
 static GCHandle js_job_queue_dequeue(JSRuntimeHandle rt);
 
-static void add_gc_object(JSRuntimeHandle rt, GCHeader *h,
-                          JSGCObjectTypeEnum type);
 
 /* Handle array forward declarations */
 static int js_handle_array_init(JSRuntimeHandle rt, JSHandleArray *arr);
@@ -1073,7 +1071,7 @@ static no_inline int js_realloc_array(JSContextHandle ctx, GCHandle *phandle,
         return (JSPromiseStateEnum)-1;
     new_size += slack / elem_size;
     *psize = new_size;
-    *phandle = new_handle;
+    GC_SET(*phandle, new_handle);
     return 0;
 }
 
@@ -1176,14 +1174,14 @@ static int gc_byte_buffer_claim(GCByteBuffer *b, size_t len)
 
         if (b->handle == GC_HANDLE_NULL) {
             /* Initial allocation */
-            b->handle = gc_alloc(new_alloc, JS_GC_OBJ_TYPE_DATA);
+            GC_SET(b->handle, gc_alloc(new_alloc, JS_GC_OBJ_TYPE_DATA));
             if (b->handle == GC_HANDLE_NULL) {
                 b->error = TRUE;
                 return -1;
             }
         } else {
             /* Reallocation */
-            b->handle = gc_realloc_handle(b->handle, new_alloc);
+            GC_SET(b->handle, gc_realloc_handle(b->handle, new_alloc));
             if (b->handle == GC_HANDLE_NULL) {
                 b->error = TRUE;
                 return -1;
@@ -1239,7 +1237,7 @@ static void gc_byte_buffer_take_from_dbuf(GCByteBuffer *b, DynBuf *db)
     if (db->buf) {
         /* Extract handle from header (stored before the actual data) */
         uint8_t *header = (uint8_t *)db->buf - sizeof(GCHandle);
-        b->handle = *(GCHandle *)header;
+        GC_SET(b->handle, *(GCHandle *)header);
         b->size = db->size;
         b->allocated_size = db->allocated_size;
         b->error = db->error;
@@ -1270,14 +1268,14 @@ static void *js_realloc_bytecode_rt(void *opaque, void *ptr, size_t size)
         GCHandle h = gc_alloc(sizeof(GCHandle) + size, JS_GC_OBJ_TYPE_DATA);
         if (h == GC_HANDLE_NULL) return NULL;
         void *data = gc_deref_unsafe(h);
-        *(GCHandle*)data = h;
+        GC_SET(*(GCHandle*)data, h);
         return (uint8_t*)data + sizeof(GCHandle);
     } else {
         uint8_t *header = (uint8_t*)ptr - sizeof(GCHandle);
         GCHandle h = gc_realloc_handle(*(GCHandle*)header, sizeof(GCHandle) + size);
         if (h == GC_HANDLE_NULL) return NULL;
         void *data = gc_deref_unsafe(h);
-        *(GCHandle*)data = h;
+        GC_SET(*(GCHandle*)data, h);
         return (uint8_t*)data + sizeof(GCHandle);
     }
 }
@@ -1298,14 +1296,14 @@ static void *js_realloc_pc2line_rt(void *opaque, void *ptr, size_t size)
         GCHandle h = gc_alloc(sizeof(GCHandle) + size, JS_GC_OBJ_TYPE_DATA);
         if (h == GC_HANDLE_NULL) return NULL;
         void *data = gc_deref_unsafe(h);
-        *(GCHandle*)data = h;
+        GC_SET(*(GCHandle*)data, h);
         return (uint8_t*)data + sizeof(GCHandle);
     } else {
         uint8_t *header = (uint8_t*)ptr - sizeof(GCHandle);
         GCHandle h = gc_realloc_handle(*(GCHandle*)header, sizeof(GCHandle) + size);
         if (h == GC_HANDLE_NULL) return NULL;
         void *data = gc_deref_unsafe(h);
-        *(GCHandle*)data = h;
+        GC_SET(*(GCHandle*)data, h);
         return (uint8_t*)data + sizeof(GCHandle);
     }
 }
@@ -1754,7 +1752,7 @@ static BOOL js_job_queue_enqueue(JSRuntimeHandle rt, GCHandle job_handle)
 
         if (tail < tb->capacity && head < tb->capacity / 2) {
             if (atomic_compare_exchange_u64(&tb->tail, tail, tail + 1) == tail) {
-                atomic_store_u32((volatile uint32_t *)&tb->jobs[tail], job_handle);
+                atomic_store_u32((volatile uint32_t *)&tb->jobs[tail], job_handle);  /* gc-no-dirty: malloc'd job buffer, a root set read on the JS thread */
                 release_buffer(tb);
                 return TRUE;
             }
@@ -1826,7 +1824,7 @@ static GCHandle js_job_queue_dequeue(JSRuntimeHandle rt)
                        == GC_HANDLE_NULL) {
                     js_thread_yield();
                 }
-                atomic_store_u32((volatile uint32_t *)&hb->jobs[idx],
+                atomic_store_u32((volatile uint32_t *)&hb->jobs[idx],  /* gc-no-dirty: clears a slot */
                                  GC_HANDLE_NULL);
                 /* If the job entry itself became unreachable, skip it and
                  * try the next job.  Accessors must never return dead refs. */
@@ -1866,7 +1864,7 @@ int JS_EnqueueJob(JSContextHandle ctx, JSJobFunc *job_func,
     JSRuntimeHandle rt = ctx_rt;
     int i;
 
-    GCHandle e_handle = gc_alloc(sizeof(JSJobEntry) + argc * sizeof(GCValue), JS_GC_OBJ_TYPE_DATA);
+    GCHandle e_handle = gc_alloc(sizeof(JSJobEntry) + argc * sizeof(GCValue), JS_GC_OBJ_TYPE_JOB_ENTRY);
     if (e_handle == GC_HANDLE_NULL)
         return -1;
     JSJobEntryHandle e = e_handle;
@@ -1934,8 +1932,10 @@ int JS_ExecutePendingJob(JSRuntimeHandle rt, JSContextHandle *pctx)
      * The context will be freed by the GC when no more references exist.
      */
     if (pctx) {
-        *pctx = ctx;
+        *pctx = ctx;  /* gc-no-dirty: out parameter */
     }
+    /* Between jobs: a tick boundary for the concurrent collector. */
+    gc_tick();
     return ret;
 }
 
@@ -2046,6 +2046,8 @@ void JS_FreeRuntime(JSRuntimeHandle rt)
     int i;
 
     QJS_LOGI("JS_FreeRuntime: ENTER");
+    /* No concurrent collection while the runtime is torn down. */
+    gc_background_stop();
 
     /* Free all pending jobs from job queue */
     /* Unified GC: Don't call JS_FreeContext here - contexts are freed by GC.
@@ -2409,10 +2411,7 @@ static inline void set_value(JSContextHandle ctx, GCValue *pval, GCValue new_val
     GCValue old_val = GC_UNDEFINED;
     old_val = *pval;
     *pval = new_val;
-    /* If this store is into a GC-managed slot, emit the write barrier. */
-    if (gc_ptr_in_heap(pval)) {
-        gc_write_barrier_for_heap_slot(pval, GC_VALUE_GET_HANDLE(new_val));
-    }
+    gc_dirty_slot(pval);
 }
 
 /* Heap assignment helpers: store a GC reference and emit the write barrier
@@ -2475,16 +2474,8 @@ static void JS_MarkContext(JSRuntimeHandle rt, JSContextHandle ctx,
     QJS_LOGI("JS_MarkContext: ENTER ctx=%u", SAFE_HANDLE(ctx));
     QJS_LOGI("JS_MarkContext: iterating loaded_modules array");
     
-    GCHandleList *modules = js_ctx_loaded_modules(ctx);
-    for (i = 0; i < modules->count; i++) {
-        JSModuleDefHandle m = (JSModuleDefHandle)(modules->data[i]);
-        if (SAFE_VALID(m)) {
-            GCValue module_val = GC_UNDEFINED;
-            module_val.tag = JS_TAG_MODULE;
-            module_val.u.handle = SAFE_HANDLE(m);
-            JS_MarkValue(rt, module_val, mark_func);
-        }
-    }
+    /* The loaded-module list is malloc'd and changes without dirty flags,
+     * so it is read only on the JS thread, as roots (JS_GCMarkContextRoots). */
     QJS_LOGI("JS_MarkContext: done with loaded_modules");
 
     QJS_LOGI("JS_MarkContext: marking global_obj");
@@ -2507,8 +2498,14 @@ static void JS_MarkContext(JSRuntimeHandle rt, JSContextHandle ctx,
         mark_func(rt, SAFE_GET_OR(ctx, JSContextHandle, class_proto_handle, GC_HANDLE_NULL));
     }
     QJS_LOGI("JS_MarkContext: ctx_class_proto=%p", (void*)ctx_class_proto);
-    for(i = 0; i < js_rt_class_count(rt); i++) {
-        GCValue val = js_ctx_class_proto_get(ctx, i);
+    /* Read the table directly: the collector may run on another thread and
+     * must not wait on the table's update protocol.  A torn read can only
+     * mark something extra; the update itself sets a dirty flag. */
+    GCHandle cp_handle = SAFE_GET_OR(ctx, JSContextHandle, class_proto_handle, GC_HANDLE_NULL);
+    GCValue *cp_tab = (GCValue *)gc_deref(cp_handle);
+    int ncp = gc_clamp_count(js_rt_class_count(rt), gc_slots(cp_handle, 0, sizeof(GCValue)));
+    for(i = 0; cp_tab && i < ncp; i++) {
+        GCValue val = cp_tab[i];
         int tag = JS_VALUE_GET_TAG(val);
         QJS_LOGI("JS_MarkContext: class_proto[%d] tag=%u", i, (unsigned)tag);
         if (tag == JS_TAG_OBJECT) {
@@ -2560,6 +2557,18 @@ static void JS_MarkContext(JSRuntimeHandle rt, JSContextHandle ctx,
 
     if (SAFE_VALID(GC_SHAPE_DEREF(SAFE_GET_OR(ctx, JSContextHandle, regexp_result_shape_handle, GC_HANDLE_NULL))))
         mark_func(rt, SAFE_GET_OR(ctx, JSContextHandle, regexp_result_shape_handle, GC_HANDLE_NULL));
+}
+
+/* Roots of a context that live outside the GC heap (JS thread only). */
+void JS_GCMarkContextRoots(JSRuntimeHandle rt, JSContextHandle ctx, JS_MarkFunc *mark_func)
+{
+    if (!SAFE_VALID(ctx) || gc_handle_get_type(ctx) != JS_GC_OBJ_TYPE_JS_CONTEXT) return;
+    GCHandleList *modules = js_ctx_loaded_modules(ctx);
+    for (int i = 0; modules && i < modules->count; i++) {
+        GCHandle m = modules->data[i];
+        if (m != GC_HANDLE_NULL && gc_handle_is_valid(m))
+            mark_func(rt, m);
+    }
 }
 
 JSRuntimeHandle JS_GetRuntime(JSContextHandle ctx)
@@ -2922,7 +2931,7 @@ static void js_handle_array_remove(JSHandleArray *arr, GCHandle handle)
             /* Swap with last element and decrement count (O(1) removal) */
             /* Bug #3 fix: Clear the old entry to catch use-after-free */
             arr->handles[i] = GC_HANDLE_NULL;
-            arr->handles[i] = arr->handles[--arr->count];
+            GC_SET(arr->handles[i], arr->handles[--arr->count]);
             return;
         }
     }
@@ -3017,7 +3026,7 @@ static int JS_InitAtoms(JSRuntimeHandle rt)
     js_rt_set_atom_free_index(rt, 1);  /* Next free slot for sequential allocation */
     /* Initialize slots to 0 (empty) - handles are 1-based, 0 means invalid */
     for(i = 1; i < init_size; i++) {
-        rt_atom_array[i] = 0;
+        GC_SET(rt_atom_array[i], 0);
     }
 
     QJS_LOGI("JS_InitAtoms: Creating %d predefined atoms...", JS_ATOM_END - 1);
@@ -3254,7 +3263,7 @@ static JSAtom __JS_NewAtom(JSRuntimeHandle rt, JSStringHandle str, int atom_type
         js_rt_set_atom_free_index(rt, start);
         /* Initialize new slots to 0 (empty) */
         for(i = start; i < new_size; i++) {
-            rt_atom_array[i] = 0;
+            GC_SET(rt_atom_array[i], 0);
         }
     }
 
@@ -3304,7 +3313,7 @@ static JSAtom __JS_NewAtom(JSRuntimeHandle rt, JSStringHandle str, int atom_type
             uint32_t idx;
             if (gc_handle_array_push_with_index(&g_gc.atom_handles, SAFE_HANDLE(p), &idx) < 0)
                 goto fail;
-            rt_atom_array[i] = SAFE_HANDLE(p);
+            GC_SET(rt_atom_array[i], SAFE_HANDLE(p));
         } else {
             /* Duplicate string as new atom.
              * Use gc_alloc_ex to auto-add to atom_handles. */
@@ -3328,7 +3337,7 @@ static JSAtom __JS_NewAtom(JSRuntimeHandle rt, JSStringHandle str, int atom_type
                 js_rt_set_atom_free_index(rt, 0);
 
             /* Handle already in atom_handles from gc_alloc_ex */
-            rt_atom_array[i] = handle;
+            GC_SET(rt_atom_array[i], handle);
         }
     } else {
         /* Create empty atom.
@@ -3354,7 +3363,7 @@ static JSAtom __JS_NewAtom(JSRuntimeHandle rt, JSStringHandle str, int atom_type
             js_rt_set_atom_free_index(rt, 0);
 
         /* Handle already in atom_handles from gc_allocz_ex */
-        rt_atom_array[i] = handle;
+        GC_SET(rt_atom_array[i], handle);
     }
 
     SAFE_SET(p, JSStringHandle, hash, h);
@@ -4183,12 +4192,12 @@ typedef struct StringBuffer {
 static int string_buffer_init2(JSContextHandle ctx, StringBuffer *s, int size,
                                int is_wide)
 {
-    s->ctx = ctx;
+    GC_SET(s->ctx, ctx);
     s->size = size;
     s->len = 0;
     s->is_wide_char = is_wide;
     s->error_status = 0;
-    s->str = js_alloc_string(ctx, size, is_wide);
+    GC_SET(s->str, js_alloc_string(ctx, size, is_wide));
     if (unlikely(!SAFE_VALID(s->str))) {
         s->size = 0;
         return s->error_status = -1;
@@ -4238,7 +4247,7 @@ static no_inline int string_buffer_widen(StringBuffer *s, int size)
     }
     s->is_wide_char = 1;
     s->size = size;
-    s->str = str;
+    GC_SET(s->str, str);
     return 0;
 }
 
@@ -4265,7 +4274,7 @@ static no_inline int string_buffer_realloc(StringBuffer *s, int new_len, int c)
         return string_buffer_set_error(s);
     new_size = min_int(new_size + (slack >> s->is_wide_char), JS_STRING_LEN_MAX);
     s->size = new_size;
-    s->str = new_str;
+    GC_SET(s->str, new_str);
     return 0;
 }
 
@@ -4520,7 +4529,7 @@ static GCValue string_buffer_end(StringBuffer *s)
                             (s->len << s->is_wide_char) + 1 - s->is_wide_char));
         if (!SAFE_VALID(str))
             str = s->str;
-        s->str = str;
+        GC_SET(s->str, str);
     }
     if (!s->is_wide_char)
         SAFE_GET_OR(str, JSStringHandle, u.str8, NULL)[s->len] = 0;
@@ -4844,39 +4853,13 @@ static GCValue JS_ConcatString1(JSContextHandle ctx,
 }
 
 static BOOL JS_ConcatStringInPlace(JSContextHandle ctx, JSStringHandle p1, GCValue op2) {
-    if (JS_VALUE_GET_TAG(op2) == JS_TAG_STRING) {
-        JSStringHandle p2 = JS_VALUE_GET_STRING(op2);
-        size_t size1;
-
-        if (SAFE_GET_OR(p2, JSStringHandle, len, 0) == 0)
-            return TRUE;
-        /* ref_count check removed - using mark-and-sweep GC */
-        size1 = gc_usable_size(SAFE_HANDLE(p1));
-        if (SAFE_GET_OR(p1, JSStringHandle, is_wide_char, 0)) {
-            if (size1 >= sizeof(JSString) + ((SAFE_GET_OR(p1, JSStringHandle, len, 0) + SAFE_GET_OR(p2, JSStringHandle, len, 0)) << 1)) {
-                if (SAFE_GET_OR(p2, JSStringHandle, is_wide_char, 0)) {
-                    memcpy(SAFE_GET_OR(p1, JSStringHandle, u.str16, NULL) + SAFE_GET_OR(p1, JSStringHandle, len, 0), SAFE_GET_OR(p2, JSStringHandle, u.str16, NULL), SAFE_GET_OR(p2, JSStringHandle, len, 0) << 1);
-                    SAFE_SET(p1, JSStringHandle, len, SAFE_GET_OR(p1, JSStringHandle, len, 0) + SAFE_GET_OR(p2, JSStringHandle, len, 0));
-                    return TRUE;
-                } else {
-                    size_t i;
-                    int new_len = SAFE_GET_OR(p1, JSStringHandle, len, 0);
-                    for (i = 0; i < (size_t)SAFE_GET_OR(p2, JSStringHandle, len, 0); i++) {
-                        SAFE_GET_OR(p1, JSStringHandle, u.str16, NULL)[new_len++] = SAFE_GET_OR(p2, JSStringHandle, u.str8, NULL)[i];
-                    }
-                    SAFE_SET(p1, JSStringHandle, len, new_len);
-                    return TRUE;
-                }
-            }
-        } else if (!SAFE_GET_OR(p2, JSStringHandle, is_wide_char, 0)) {
-            if (size1 >= sizeof(JSString) + SAFE_GET_OR(p1, JSStringHandle, len, 0) + SAFE_GET_OR(p2, JSStringHandle, len, 0) + 1) {
-                memcpy(SAFE_GET_OR(p1, JSStringHandle, u.str8, NULL) + SAFE_GET_OR(p1, JSStringHandle, len, 0), SAFE_GET_OR(p2, JSStringHandle, u.str8, NULL), SAFE_GET_OR(p2, JSStringHandle, len, 0));
-                SAFE_SET(p1, JSStringHandle, len, SAFE_GET_OR(p1, JSStringHandle, len, 0) + SAFE_GET_OR(p2, JSStringHandle, len, 0));
-                SAFE_GET_OR(p1, JSStringHandle, u.str8, NULL)[SAFE_GET_OR(p1, JSStringHandle, len, 0)] = '\0';
-                return TRUE;
-            }
-        }
-    }
+    /* Strings are shared without reference counts (atoms, constants, values
+     * held in several places), so appending into p1's spare capacity would
+     * mutate every holder.  Only the empty-right-operand case is in place. */
+    (void)ctx; (void)p1;
+    if (JS_VALUE_GET_TAG(op2) == JS_TAG_STRING &&
+        SAFE_GET_OR(JS_VALUE_GET_STRING(op2), JSStringHandle, len, 0) == 0)
+        return TRUE;
     return FALSE;
 }
 
@@ -4924,7 +4907,7 @@ typedef struct {
 static void string_rope_iter_init(JSStringRopeIter *s, GCValue val)
 {
     s->stack_len = 0;
-    s->stack[s->stack_len++] = val;
+    GC_SET(s->stack[s->stack_len++], val);
 }
 
 /* iterate thru a rope and return the strings in order */
@@ -4941,7 +4924,7 @@ static JSStringHandle string_rope_iter_next(JSStringRopeIter *s)
             return JS_VALUE_GET_STRING(val);
         r = JS_VALUE_GET_STRING_ROPE_HANDLE(val);
         assert(s->stack_len < JS_STRING_ROPE_MAX_DEPTH);
-        s->stack[s->stack_len++] = SAFE_GET_OR(r, JSStringRopeHandle, right, GC_UNDEFINED);
+        GC_SET(s->stack[s->stack_len++], SAFE_GET_OR(r, JSStringRopeHandle, right, GC_UNDEFINED));
         val = SAFE_GET_OR(r, JSStringRopeHandle, left, GC_UNDEFINED);
     }
 }
@@ -5168,7 +5151,7 @@ static int js_rebalancee_string_rope_rec(JSContextHandle ctx, GCValue *buckets,
                 return -1;
             i++;
         }
-        buckets[i] = a;
+        GC_SET(buckets[i], a);
     } else {
         JSStringRopeHandle r = JS_VALUE_GET_STRING_ROPE_HANDLE(val);
         js_rebalancee_string_rope_rec(ctx, buckets, SAFE_GET_OR(r, JSStringRopeHandle, left, GC_UNDEFINED));
@@ -5678,9 +5661,6 @@ static JSShapeHandle js_dup_shape(JSContextHandle ctx, JSShapeHandle sh)
     SAFE_SET_HANDLE(new_sh, JSShapeHandle, handle, new_handle);
     SAFE_SET(new_sh, JSShapeHandle, is_hashed, FALSE);
     
-    /* Update handle table to point to the shape (not the alloc base).
-     * This is internal GC management - use direct table access. */
-    g_gc.handles.ptrs[new_handle] = gc_deref_unsafe(SAFE_HANDLE(new_sh));
     
     /* Duplicate all property atoms */
     JSShapeProperty *pr;
@@ -5931,7 +5911,7 @@ static int compact_properties(JSContextHandle ctx, JSObjectHandle p)
             if (j != i) {
                 pr->atom = old_pr->atom;
                 pr->flags = old_pr->flags;
-                prop[j] = prop[i];
+                GC_SET(prop[j], prop[i]);
             }
             j++;
             pr++;
@@ -5990,7 +5970,7 @@ static int add_shape_property(JSContextHandle ctx, GCHandle *psh_handle,
         JSShapeHandle new_sh = js_clone_shape(ctx, sh);
         if (!SAFE_VALID(new_sh))
             return -1;
-        *psh_handle = SAFE_HANDLE(new_sh);
+        GC_SET(*psh_handle, SAFE_HANDLE(new_sh));
         if (SAFE_VALID(p))
             js_obj_set_shape_handle(p, SAFE_HANDLE(new_sh));
         sh = new_sh;
@@ -6159,8 +6139,8 @@ static __maybe_unused void JS_DumpShapes(JSRuntimeHandle rt)
             }
         }
     }
-    /* dump non-hashed shapes - use unified g_gc.handles */
-    for (i = 1; i < g_gc.handles.count; i++) {
+    /* dump non-hashed shapes */
+    for (i = 1; i < gc_handle_limit(); i++) {
         GCHandle handle = (GCHandle)i;
         if (gc_handle_get_type_inline(handle) == JS_GC_OBJ_TYPE_JS_OBJECT) {
             p = (JSObjectHandle)(handle);
@@ -6203,10 +6183,7 @@ static GCValue JS_NewObjectFromShape(JSContextHandle ctx, JSShapeHandle sh, JSCl
     /* GC is automatically triggered by gc_object_alloc if needed */
     QJS_LOGD("JS_NewObjectFromShape: allocating object...");
     
-    /* Allocate grey so partially-initialized objects are invisible to
-     * concurrent readers and the GC marker.  We publish at the end of this
-     * function once all fields are written. */
-    obj_handle = gc_alloc_grey(sizeof(JSObject), JS_GC_OBJ_TYPE_JS_OBJECT);
+    obj_handle = gc_alloc(sizeof(JSObject), JS_GC_OBJ_TYPE_JS_OBJECT);
     if (obj_handle == GC_HANDLE_NULL) {
         fprintf(stderr, "JS_NewObjectFromShape: allocation failed!\n");
         return JS_ThrowOutOfMemory(ctx);
@@ -6333,12 +6310,10 @@ static GCValue JS_NewObjectFromShape(JSContextHandle ctx, JSShapeHandle sh, JSCl
     /* Object already registered with GC by gc_alloc_js_object */
     if (props) {
         for(i = 0; i < SAFE_GET_OR(sh, JSShapeHandle, prop_count, 0); i++)
-            SAFE_AT(p_prop, JSPropertyArrayHandle, i) = props[i];
+            GC_SET(SAFE_AT(p_prop, JSPropertyArrayHandle, i), props[i]);
     }
     p_ptr = (void*)(uintptr_t)(uint32_t)SAFE_HANDLE(p);  /* Just for printf, never dereferenced */
     ret = GC_MKHANDLE(JS_TAG_OBJECT, SAFE_HANDLE(p));
-    /* Object is fully initialized; make it visible to readers and the GC. */
-    gc_publish(obj_handle);
     QJS_LOGI("JS_NewObjectFromShape: returning obj=%u tag=%d", SAFE_HANDLE(p), (int)JS_VALUE_GET_TAG(ret));
     return ret;
 fail:
@@ -6685,7 +6660,7 @@ static GCValue js_c_function_data_call(JSContextHandle ctx, GCValue func_obj,
     if (unlikely(argc < SAFE_GET_OR(s, JSCFunctionDataRecordHandle, length, 0))) {
         arg_buf = (GCValue *)alloca(sizeof(arg_buf[0]) * SAFE_GET_OR(s, JSCFunctionDataRecordHandle, length, 0));
         for(i = 0; i < argc; i++)
-            arg_buf[i] = argv[i];
+            GC_SET(arg_buf[i], argv[i]);
         for(i = argc; i < SAFE_GET_OR(s, JSCFunctionDataRecordHandle, length, 0); i++)
             arg_buf[i] = JS_UNDEFINED;
     } else {
@@ -6703,7 +6678,7 @@ static GCValue js_c_function_data_call(JSContextHandle ctx, GCValue func_obj,
     } else {
         data_ptr = (GCValue *)alloca(sizeof(GCValue) * data_len);
         for (i = 0; i < data_len; i++) {
-            data_ptr[i] = js_cfunc_data_data(s, i);
+            GC_SET(data_ptr[i], js_cfunc_data_data(s, i));
         }
     }
 
@@ -6825,24 +6800,7 @@ static force_inline JSShapeProperty *find_own_property(JSProperty **ppr,
         QJS_LOGD("find_own_property: CRITICAL - shape_handle=%u derefs to NULL!", js_obj_shape_handle(p));
     }
     
-    /* Validate canaries on the shape object before accessing it */
-    if (SAFE_VALID(sh)) {
-        GCCanaryStatus shape_canary = gc_validate_shape_canaries(js_obj_shape_handle(p));
-        if (shape_canary != GC_CANARY_OK) {
-            QJS_LOGD("find_own_property: SHAPE CANARY CORRUPTION DETECTED! handle=%u status=%s", 
-                     js_obj_shape_handle(p), gc_canary_status_string(shape_canary));
-            gc_print_corruption_info(js_obj_shape_handle(p), shape_canary);
-            gc_diagnose_corruption_context(js_obj_shape_handle(p));
-            gc_dump_heap_for_analysis("/tmp/qjs_heap_dump.txt");
-            if (getenv("CYBER_TRACE_DF")) {
-                fprintf(stderr, "[CANARY-BAIL] shape handle=%u status=%d propcount=%d\n",
-                        js_obj_shape_handle(p), (int)shape_canary, SAFE_GET_OR(sh, JSShapeHandle, prop_count, 0));
-                fflush(stderr);
-            }
-            *ppr = NULL;
-            return NULL;
-        }
-    }
+
     
     QJS_LOGD("find_own_property: accessing sh.prop_hash_mask()");
     h = (uintptr_t)atom & SAFE_GET_OR(sh, JSShapeHandle, prop_hash_mask, 0);
@@ -6956,8 +6914,11 @@ static void js_array_mark(JSRuntimeHandle rt, GCValue val,
         mark_func(rt, values_handle);
     }
 
-    for(i = 0; i < SAFE_GET_OR(p, JSObjectHandle, u.array.count, 0); i++) {
-        JS_MarkValue(rt, p_array_values[i], mark_func);
+    GCValue *values = (GCValue *)gc_deref(values_handle);
+    int n = gc_clamp_count((int)SAFE_GET_OR(p, JSObjectHandle, u.array.count, 0),
+                           gc_slots(values_handle, 0, sizeof(GCValue)));
+    for(i = 0; values && i < n; i++) {
+        JS_MarkValue(rt, values[i], mark_func);
     }
 }
 
@@ -7044,7 +7005,10 @@ static void js_bytecode_function_mark(JSRuntimeHandle rt, GCValue val,
         JSVarRefHandle *var_refs_pin = (JSVarRefHandle *)gc_deref(SAFE_GET_OR(p, JSObjectHandle, u.func.var_refs_handle, GC_HANDLE_NULL));
         JSVarRefHandle* var_refs = var_refs_pin;
         if (var_refs) {
-            for(i = 0; i < SAFE_GET_OR(b, JSFunctionBytecodeHandle, closure_var_count, 0); i++) {
+            int nvr = gc_clamp_count(SAFE_GET_OR(b, JSFunctionBytecodeHandle, closure_var_count, 0),
+                                     gc_slots(SAFE_GET_OR(p, JSObjectHandle, u.func.var_refs_handle, GC_HANDLE_NULL),
+                                              0, sizeof(GCHandle)));
+            for(i = 0; i < nvr; i++) {
                 if (SAFE_HANDLE(var_refs[i]) != GC_HANDLE_NULL) {
                     mark_func(rt, SAFE_HANDLE(var_refs[i]));
                 }
@@ -7110,119 +7074,6 @@ static void js_for_in_iterator_mark(JSRuntimeHandle rt, GCValue val,
     JS_MarkValue(rt, SAFE_GET_OR(it, JSForInIteratorHandle, obj, GC_UNDEFINED), mark_func);
 }
 
-static void free_object(JSRuntimeHandle rt, JSObjectHandle p)
-{
-    JSClassFinalizer *finalizer;
-    JSObject *obj = (JSObject *)gc_deref(SAFE_HANDLE(p));
-
-    if (!obj) return;
-
-    /* If the class has no finalizer, the GC can simply reclaim the object.
-       This avoids touching children (shape/property array) that may already
-       have been swept and keeps the fragile sweep phase robust. */
-    if (obj->class_id < (uint16_t)js_rt_class_count(rt)) {
-        finalizer = ((JSClass*)rt_class_array)[obj->class_id].finalizer;
-        if (!finalizer) {
-            obj->free_mark = 1;
-            return;
-        }
-    }
-
-    obj->free_mark = 1; /* used to tell the object is invalid when
-                         freeing cycles */
-    /* With unified GC, shapes and properties are GC-managed objects.
-     * They will be freed by the GC when unreachable. We only need to
-     * clear this object's references to them. */
-    
-    /* If a child was already swept, do not run the class finalizer: it may
-       dereference freed memory.  Just clear the object's fields. */
-    BOOL child_freed = FALSE;
-    if (obj->shape_handle != GC_HANDLE_NULL && gc_deref(obj->shape_handle) == NULL)
-        child_freed = TRUE;
-    if (obj->prop_handle != GC_HANDLE_NULL && gc_deref(obj->prop_handle) == NULL)
-        child_freed = TRUE;
-
-    /* fail safe: clear shape/prop references before any finalizer runs */
-    atomic_store_u32((volatile uint32_t *)&obj->shape_handle, GC_HANDLE_NULL);
-    atomic_store_u32((volatile uint32_t *)&obj->prop_handle, GC_HANDLE_NULL);
-
-    if (!child_freed) {
-        finalizer = ((JSClass*)rt_class_array)[obj->class_id].finalizer;
-        if (finalizer)
-            (*finalizer)(rt, GC_MKHANDLE(JS_TAG_OBJECT, SAFE_HANDLE(p)));
-    }
-
-    /* fail safe */
-    obj->class_id = 0;
-    obj->u.opaque_handle = GC_HANDLE_NULL;
-    /* var_refs / home_object are in the func union; clearing opaque is enough
-       because the union shares storage and the object will be freed. */
-
-    /* keep the object structure in case there are weak references to it */
-    if (obj->weakref_count == 0) {
-        /* GC frees automatically */;
-    } else {
-        gc_handle_set_mark(SAFE_HANDLE(p), 0); /* reset the mark so that the weakref can be freed */
-    }
-}
-
-static void free_string(JSRuntimeHandle rt, JSStringHandle str)
-{
-#ifdef DUMP_LEAKS
-    list_del(&str->link);
-#endif
-    /* GC frees automatically */;
-}
-
-static void free_bigint(JSRuntimeHandle rt, JSBigIntHandle p)
-{
-    /* GC frees automatically */;
-}
-
-static void free_string_rope(JSRuntimeHandle rt, JSStringRopeHandle r)
-{
-    /* GC frees automatically */;
-}
-
-static void free_gc_object_handle(JSRuntimeHandle rt, GCHandle handle)
-{
-    JSGCObjectTypeEnum gc_obj_type = gc_handle_get_type_inline(handle);
-    switch(gc_obj_type) {
-    case JS_GC_OBJ_TYPE_JS_OBJECT:
-        free_object(rt, (JSObjectHandle)(handle));
-        break;
-    case JS_GC_OBJ_TYPE_FUNCTION_BYTECODE:
-        free_function_bytecode(rt, (JSFunctionBytecodeHandle)(handle));
-        break;
-    case JS_GC_OBJ_TYPE_ASYNC_FUNCTION:
-        __async_func_free(rt, (JSAsyncFunctionStateHandle)(handle));
-        break;
-    case JS_GC_OBJ_TYPE_MODULE:
-        js_free_module_def(rt, (JSModuleDefHandle)(handle));
-        break;
-    case JS_GC_OBJ_TYPE_JS_STRING:
-        /* Atoms are permanent roots - never freed by GC */
-        break;
-    case JS_GC_OBJ_TYPE_JS_BIGINT:
-        free_bigint(rt, (JSBigIntHandle)(handle));
-        break;
-    case JS_GC_OBJ_TYPE_JS_STRING_ROPE:
-        free_string_rope(rt, (JSStringRopeHandle)(handle));
-        break;
-    case JS_GC_OBJ_TYPE_SHAPE:
-        js_free_shape(rt, (JSShapeHandle)(handle));
-        break;
-    case JS_GC_OBJ_TYPE_VAR_REF:
-        /* Var refs are freed when their containing object is freed */
-        /* GC frees automatically */;
-        break;
-    default:
-        /* Unknown object type - just free the header */
-        /* GC frees automatically */;
-        break;
-    }
-}
-
 /* garbage collection */
 
 void gc_remove_weak_objects(JSRuntimeHandle rt)
@@ -7233,41 +7084,29 @@ void gc_remove_weak_objects(JSRuntimeHandle rt)
     SAFE_SET(rt, JSRuntimeHandle, gc_phase, JS_GC_PHASE_DECREF);
     
     /* 1. Clean WeakMaps (remove entries with dead keys) */
-    fprintf(stderr, "[GC] remove_weak: weakmaps=%u\n", g_gc.weakmap_handles.count);
-    fflush(stderr);
     for (i = 0; i < g_gc.weakmap_handles.count; i++) {
         GCHandle handle = g_gc.weakmap_handles.handles[i];
         if (!js_handle_array_entry_is_valid(handle)) continue;
         JSMapStateHandle s = handle;
         if (!SAFE_VALID(s)) continue;
-        fprintf(stderr, "[GC] remove_weak: weakmap %d handle=%u\n", i, handle);
-        fflush(stderr);
         map_delete_weakrefs(rt, s);
     }
     
     /* 2. Clear dead WeakRefs */
-    fprintf(stderr, "[GC] remove_weak: weakrefs=%u\n", g_gc.weakref_handles.count);
-    fflush(stderr);
     for (i = 0; i < g_gc.weakref_handles.count; i++) {
         GCHandle handle = g_gc.weakref_handles.handles[i];
         if (!js_handle_array_entry_is_valid(handle)) continue;
         JSWeakRefDataHandle wrd = handle;
         if (!SAFE_VALID(wrd)) continue;
-        fprintf(stderr, "[GC] remove_weak: weakref %d handle=%u\n", i, handle);
-        fflush(stderr);
         weakref_delete_weakref(rt, SAFE_PTR(wrd, JSWeakRefDataHandle));
     }
     
     /* 3. Queue FinalizationRegistry callbacks for dead targets */
-    fprintf(stderr, "[GC] remove_weak: finrecs=%u\n", g_gc.finrec_handles.count);
-    fflush(stderr);
     for (i = 0; i < g_gc.finrec_handles.count; i++) {
         GCHandle handle = g_gc.finrec_handles.handles[i];
         if (!js_handle_array_entry_is_valid(handle)) continue;
         JSFinalizationRegistryDataHandle frd = handle;
         if (!SAFE_VALID(frd)) continue;
-        fprintf(stderr, "[GC] remove_weak: finrec %d handle=%u\n", i, handle);
-        fflush(stderr);
         finrec_delete_weakref(rt, frd);
     }
 
@@ -7313,34 +7152,6 @@ static void* js_gc_stack_alloc(JSGCStack *stack, size_t size)
 static void js_gc_stack_reset(JSGCStack *stack)
 {
     stack->top = stack->base;
-}
-
-/* Handle table entry */
-typedef struct {
-    GCHeader *ptr;
-    uint32_t generation;
-} JSGCHandleEntry;
-
-static void add_gc_object(JSRuntimeHandle rt, GCHeader *h,
-                          JSGCObjectTypeEnum type)
-{
-    /* REMOVED: rt->gc_handles - objects are already in g_gc.handles from gc_alloc.
-     * This function now just sets gc_obj_type for proper typing.
-     * The handle was already registered during gc_alloc.
-     */
-    if (!SAFE_VALID(rt) || !h) {
-        QJS_LOGE("add_gc_object: NULL rt or h!");
-        abort();
-    }
-    
-    h->gc_color_state = GC_COLOR_WHITE;
-    h->gc_obj_type = type;
-    
-    /* Handle must already be registered during gc_alloc. */
-    if (h->handle == GC_HANDLE_NULL || h->handle >= g_gc.handles.count) {
-        QJS_LOGE("add_gc_object: handle not registered during gc_alloc!");
-        abort();
-    }
 }
 
 /* JS_MarkHandle - Mark an object directly by handle without exposing raw pointers.
@@ -7410,7 +7221,10 @@ void mark_children(JSRuntimeHandle rt, GCHandle handle,
             }
             /* mark all the fields */
             prs = get_shape_prop(sh);
-            for(i = 0; i < SAFE_GET_OR(sh, JSShapeHandle, prop_count, 0); i++) {
+            int nprops = gc_clamp_count(SAFE_GET_OR(sh, JSShapeHandle, prop_count, 0),
+                                        gc_slots(SAFE_HANDLE(sh), offsetof(JSShape, prop), sizeof(JSShapeProperty)));
+            nprops = gc_clamp_count(nprops, gc_slots(p_prop, 0, sizeof(JSProperty)));
+            for(i = 0; prs && i < nprops; i++) {
                 if (prs->atom != JS_ATOM_NULL) {
                     if (prs->flags & JS_PROP_TMASK) {
                         if ((prs->flags & JS_PROP_TMASK) == JS_PROP_GETSET) {
@@ -7449,9 +7263,24 @@ void mark_children(JSRuntimeHandle rt, GCHandle handle,
              * otherwise see this handle, so the data blob can be freed while
              * the JS object is still reachable.  Mark it explicitly to keep
              * opaque C data alive for every object that has it. */
-            GCHandle opaque = SAFE_GET_OR(p, JSObjectHandle, u.opaque_handle, GC_HANDLE_NULL);
-            if (opaque != GC_HANDLE_NULL) {
-                mark_func(rt, opaque);
+            switch (SAFE_GET_OR(p, JSObjectHandle, class_id, 0)) {
+            case JS_CLASS_ARRAY:          /* u.array.u1.size */
+            case JS_CLASS_ARGUMENTS:
+            case JS_CLASS_MAPPED_ARGUMENTS:
+            case JS_CLASS_NUMBER:         /* u.object_data, marked by its class */
+            case JS_CLASS_STRING:
+            case JS_CLASS_BOOLEAN:
+            case JS_CLASS_SYMBOL:
+            case JS_CLASS_DATE:
+            case JS_CLASS_BIG_INT:
+            case JS_CLASS_GLOBAL_OBJECT:  /* u.global_object */
+                /* The first word of the union is not a handle. */
+                break;
+            default: {
+                GCHandle opaque = SAFE_GET_OR(p, JSObjectHandle, u.opaque_handle, GC_HANDLE_NULL);
+                if (opaque != GC_HANDLE_NULL)
+                    mark_func(rt, opaque);
+            }
             }
         }
         break;
@@ -7533,7 +7362,7 @@ void mark_children(JSRuntimeHandle rt, GCHandle handle,
             JSStackFrame *sf = js_async_func_state_frame_ptr(s);
             GCValue *sp;
 
-            if (!SAFE_GET_OR(s, JSAsyncFunctionStateHandle, is_completed, FALSE)) {
+            if (sf && !SAFE_GET_OR(s, JSAsyncFunctionStateHandle, is_completed, FALSE)) {
                 JS_MarkValue(rt, sf->cur_func, mark_func);
                 JS_MarkValue(rt, SAFE_GET_OR(s, JSAsyncFunctionStateHandle, this_val, GC_UNDEFINED), mark_func);
                 /* sp_offset = 0 if the function is running */
@@ -7543,7 +7372,9 @@ void mark_children(JSRuntimeHandle rt, GCHandle handle,
                        because a running function cannot be part of a removable
                        cycle */
                     GCValue *var_buf = JS_SF_VAR_BUF(sf);
-                    for(i = 0; i < sf->sp_offset; i++)
+                    size_t off = (size_t)((uint8_t *)var_buf - (uint8_t *)gc_deref(handle));
+                    int n = gc_clamp_count(sf->sp_offset, gc_slots(handle, off, sizeof(GCValue)));
+                    for(i = 0; i < n; i++)
                         JS_MarkValue(rt, var_buf[i], mark_func);
                 }
             }
@@ -7566,7 +7397,9 @@ void mark_children(JSRuntimeHandle rt, GCHandle handle,
              * These atoms must stay alive as long as the shape exists.
              */
             prs = get_shape_prop(sh);
-            for(i = 0; i < SAFE_GET_OR(sh, JSShapeHandle, prop_count, 0); i++) {
+            int nprops = gc_clamp_count(SAFE_GET_OR(sh, JSShapeHandle, prop_count, 0),
+                                        gc_slots(SAFE_HANDLE(sh), offsetof(JSShape, prop), sizeof(JSShapeProperty)));
+            for(i = 0; prs && i < nprops; i++) {
                 if (prs[i].atom != JS_ATOM_NULL) {
                     JSAtom atom = prs[i].atom;
                     /* Tagged integer atoms (array indices) have the high bit set.
@@ -7668,7 +7501,8 @@ void mark_children(JSRuntimeHandle rt, GCHandle handle,
                  * uninitialized on running frames). */
                 if (sf->var_count > 0) {
                     GCValue *var_buf = (GCValue *)((uint8_t *)sf + sf->var_buf_offset);
-                    for (int i = 0; i < sf->var_count; i++)
+                    int n = gc_clamp_count(sf->var_count, gc_slots(handle, sf->var_buf_offset, sizeof(GCValue)));
+                    for (int i = 0; i < n; i++)
                         JS_MarkValue(rt, var_buf[i], mark_func);
                 }
                 /* Mark the frame's argument storage too: closures can capture
@@ -7686,10 +7520,17 @@ void mark_children(JSRuntimeHandle rt, GCHandle handle,
                             JS_MarkValue(rt, arg_buf[i], mark_func);
                     }
                 }
-                /* Mark all var_refs in this frame */
+                /* Mark all var_refs in this frame (inline, or in a separate
+                 * array that is kept alive here). */
                 GCHandle *var_refs = JS_SF_VAR_REFS(sf);
+                if (sf->var_refs_handle != GC_HANDLE_NULL)
+                    mark_func(rt, sf->var_refs_handle);
                 if (var_refs && sf->var_ref_count > 0) {
-                    for (int i = 0; i < sf->var_ref_count; i++) {
+                    int n = gc_clamp_count(sf->var_ref_count,
+                        sf->var_refs_handle != GC_HANDLE_NULL
+                            ? gc_slots(sf->var_refs_handle, 0, sizeof(GCHandle))
+                            : gc_slots(handle, sf->var_refs_offset, sizeof(GCHandle)));
+                    for (int i = 0; i < n; i++) {
                         if (var_refs[i] != GC_HANDLE_NULL) {
                             mark_func(rt, var_refs[i]);
                         }
@@ -7706,8 +7547,24 @@ void mark_children(JSRuntimeHandle rt, GCHandle handle,
             }
         }
         break;
+    case JS_GC_OBJ_TYPE_JOB_ENTRY:
+        {
+            JSJobEntry *e = (JSJobEntry *)gc_deref(handle);
+            if (e) {
+                size_t cap = (gc_handle_get_size(handle) - sizeof(JSJobEntry)) / sizeof(GCValue);
+                int n = e->argc;
+                if (n < 0) n = 0;
+                if ((size_t)n > cap) n = (int)cap;
+                if (e->realm_handle != GC_HANDLE_NULL)
+                    mark_func(rt, e->realm_handle);
+                for (int k = 0; k < n; k++)
+                    JS_MarkValue(rt, e->argv[k], mark_func);
+            }
+        }
+        break;
     case JS_GC_OBJ_TYPE_DATA:
     case JS_GC_OBJ_TYPE_AUTO:
+    case JS_GC_OBJ_TYPE_BYTES:
         /* Raw data objects - no children to mark */
         break;
     default:
@@ -7743,7 +7600,9 @@ void JS_MarkActiveStackFrames(JSRuntimeHandle rt, JS_MarkFunc *mark_func)
             for (; v < end; v++)
                 JS_MarkValue(rt, *v, mark_func);
             GCHandle *var_refs = JS_SF_VAR_REFS(sf);
-            for (int i = 0; i < sf->var_ref_count; i++) {
+            if (sf->var_refs_handle != GC_HANDLE_NULL)
+                mark_func(rt, sf->var_refs_handle);
+            for (int i = 0; var_refs && i < sf->var_ref_count; i++) {
                 if (var_refs[i] != GC_HANDLE_NULL)
                     mark_func(rt, var_refs[i]);
             }
@@ -7764,158 +7623,61 @@ void JS_MarkActiveStackFrames(JSRuntimeHandle rt, JS_MarkFunc *mark_func)
     }
 }
 
-/* Mark an object and all its children as reachable */
-/* Wrapper for mark_func callbacks that converts user_ptr to header internally.
- * mark_func callbacks receive user_ptr (after header), not GCHeader*.
- */
-static void gc_mark_recursive(JSRuntimeHandle rt, GCHandle handle);
-
-static void gc_mark_recursive(JSRuntimeHandle rt, GCHandle handle)
+/* Roots the engine keeps outside GC objects: the pending exception, the
+ * pending jobs and the atom array. */
+void JS_GCEnumerateEngineRoots(JSRuntimeHandle rt, JS_MarkFunc *mark_func)
 {
-    if (handle == GC_HANDLE_NULL) {
-        QJS_LOGE("gc_mark_recursive: handle is NULL!");
-        return;
-    }
-    
-    /* Skip objects that haven't been fully initialized yet */
-    if (gc_handle_get_type_inline(handle) == JS_GC_OBJ_TYPE_AUTO) {
-        return;
-    }
-    if (gc_handle_get_mark(handle))
-        return;  /* Already marked */
-    gc_handle_set_mark(handle, 1);
-    mark_children(rt, handle, gc_mark_recursive);
-}
-
-static void ctx_mark_callback(GCHandle handle, void *user_data)
-{
-    (void)user_data;
-    gc_mark_recursive(gc_get_runtime(), handle);
-}
-
-
-/* Mark all objects reachable from roots */
-static void gc_mark_roots(JSRuntimeHandle rt)
-{
-    int i;
-
-    /* First, clear all marks from unified GC handles */
-    for (i = 1; i < g_gc.handles.count; i++) {
-        void *user_ptr = g_gc.handles.ptrs[i];
-        if (user_ptr) {
-            GCHandle handle = (GCHandle)i;
-            gc_handle_set_mark(handle, 0);
-        }
-    }
-
-    /* Mark from contexts (roots) - use type bucket iteration */
-    gc_for_each_object_of_type(JS_GC_OBJ_TYPE_JS_CONTEXT, ctx_mark_callback, NULL);
-
-    /* Mark the runtime's current_exception */
-    JS_MarkValue(rt, SAFE_GET_OR(rt, JSRuntimeHandle, current_exception, GC_UNDEFINED), gc_mark_recursive);
-
-    /* Mark jobs in the lock-free job queue.  This runs during the
-       stop-the-world GC phase, so concurrent enqueue/dequeue are paused. */
+    GCValue exc = SAFE_GET_OR(rt, JSRuntimeHandle, current_exception, GC_UNDEFINED);
+    JS_MarkValue(rt, exc, mark_func);
+    GCHandle atoms = js_rt_atom_array_handle(rt);
+    if (atoms != GC_HANDLE_NULL)
+        mark_func(rt, atoms);
     JobQueue *job_queue = js_job_queue_ptr(rt);
     if (job_queue) {
-        JobBuffer *buf = (JobBuffer *)atomic_load_ptr((void *volatile *)&job_queue->head_block);
-        while (buf) {
-            uint64_t head = atomic_load_u64(&buf->head);
-            uint64_t tail = atomic_load_u64(&buf->tail);
-            for (uint64_t idx_q = head; idx_q < tail; idx_q++) {
-                GCHandle job_handle = atomic_load_u32((volatile uint32_t *)&buf->jobs[idx_q]);
-                if (!gc_handle_array_entry_is_valid(job_handle)) continue;
-                JSJobEntryHandle job = (JSJobEntryHandle)(job_handle);
-                if (!SAFE_VALID(job)) continue;
-                /* Mark the job's realm to prevent it from being GC'd */
-                if (SAFE_GET_OR(job, JSJobEntryHandle, realm_handle, GC_HANDLE_NULL))
-                    gc_mark_recursive(rt, SAFE_GET_OR(job, JSJobEntryHandle, realm_handle, GC_HANDLE_NULL));
-                int j;
-                for(j = 0; j < SAFE_GET_OR(job, JSJobEntryHandle, argc, 0); j++) {
-                    JS_MarkValue(rt, js_job_argv_at(job, j), gc_mark_recursive);
-                }
+        JobBuffer *b = (JobBuffer *)atomic_load_ptr((void *volatile *)&job_queue->head_block);
+        while (b) {
+            uint64_t head = atomic_load_u64(&b->head);
+            uint64_t tail = atomic_load_u64(&b->tail);
+            for (uint64_t idx = head; idx < tail && idx < b->capacity; idx++) {
+                GCHandle job = atomic_load_u32((volatile uint32_t *)&b->jobs[idx]);
+                if (gc_handle_array_entry_is_valid(job))
+                    mark_func(rt, job);
             }
-            buf = (JobBuffer *)atomic_load_ptr((void *volatile *)&buf->next);
+            b = (JobBuffer *)atomic_load_ptr((void *volatile *)&b->next);
         }
     }
-    
-    /* 3-tier atom marking:
-     * Tier 1: Permanent atoms (0 to permanent_atom_count-1) are always roots
-     * Tier 2: Dynamic atoms are marked through shape references below
-     */
-    for (i = 0; i < SAFE_GET_OR(rt, JSRuntimeHandle, permanent_atom_count, 0) && i < js_rt_atom_size(rt); i++) {
-        GCHandle atom_handle = rt_atom_array[i];
-        if (!js_handle_array_entry_is_valid(atom_handle)) {
-            continue;
+}
+
+/* Objects that running code addresses through raw pointers: every frame on
+ * the current call chain, its bytecode and bytecode buffer, and the
+ * closure-variable array of its function.  The collector pins them. */
+void JS_GCForEachActiveFrameObject(JSRuntimeHandle rt, JS_MarkFunc *fn)
+{
+    for (JSStackFrame *sf = js_rt_current_stack_frame(rt); sf != NULL; sf = JS_SF_PREV(sf)) {
+        if (sf->self_handle != GC_HANDLE_NULL)
+            fn(rt, sf->self_handle);
+        if (sf->bytecode_handle != GC_HANDLE_NULL) {
+            fn(rt, sf->bytecode_handle);
+            JSFunctionBytecodeHandle b = sf->bytecode_handle;
+            GCHandle buf = SAFE_GET_OR(b, JSFunctionBytecodeHandle, byte_code_handle, GC_HANDLE_NULL);
+            if (buf != GC_HANDLE_NULL)
+                fn(rt, buf);
         }
-        gc_mark_recursive(rt, atom_handle);
-    }
-    
-    /* Tier 2: Mark atoms referenced by shapes.
-     * Dynamic atoms must be reachable through shapes to stay alive.
-     */
-    for (i = 1; i < g_gc.handles.count; i++) {
-        GCHandle handle = (GCHandle)i;
-        void *user_ptr = g_gc.handles.ptrs[i];
-        if (!user_ptr) continue;
-        
-        if (gc_handle_get_type_inline(handle) == JS_GC_OBJ_TYPE_SHAPE) {
-            JSShapeHandle sh = (JSShapeHandle)(handle);
-            JSShapeProperty *prs = get_shape_prop(sh);
-            int j;
-            for (j = 0; j < SAFE_GET_OR(sh, JSShapeHandle, prop_count, 0); j++) {
-                if (prs[j].atom != JS_ATOM_NULL) {
-                    JSAtom atom_idx = prs[j].atom;
-                    if (atom_idx < js_rt_atom_size(rt)) {
-                        GCHandle atom_handle = rt_atom_array[atom_idx];
-                        if (js_handle_array_entry_is_valid(atom_handle)) {
-                            JSStringHandle p = (JSStringHandle)(atom_handle);
-                            if (SAFE_GET_OR(p, JSStringHandle, atom_type, 0) != JS_ATOM_TYPE_DEAD) {
-                                gc_mark_recursive(rt, atom_handle);
-                            }
-                        }
-                    }
-                }
+        if (JS_VALUE_GET_TAG(sf->cur_func) == JS_TAG_OBJECT) {
+            JSObjectHandle p = JS_VALUE_GET_OBJ(sf->cur_func);
+            fn(rt, p);
+            if (SAFE_GET_OR(p, JSObjectHandle, class_id, 0) == JS_CLASS_BYTECODE_FUNCTION) {
+                GCHandle vr = SAFE_GET_OR(p, JSObjectHandle, u.func.var_refs_handle, GC_HANDLE_NULL);
+                if (vr != GC_HANDLE_NULL)
+                    fn(rt, vr);
             }
         }
     }
-    
-    for (i = 0; i < g_gc.root_set.count; i++) {
-        GCHandle root_handle = g_gc.root_set.roots[i];
-        gc_mark_recursive(rt, root_handle);
-    }
-    
-    /* Mark the runtime and all its children (class_array, atom_array, etc.) */
-    /* This is critical: mark_children for JS_RUNTIME marks all internal arrays */
-    if (SAFE_HANDLE(rt) != GC_HANDLE_NULL) {
-        gc_mark_recursive(rt, SAFE_HANDLE(rt));
-    }
-    
-    /* Mark objects on the JS stack (active function calls) */
-    /* This is critical: functions currently executing must not be collected */
-    JSStackFrame *sf = js_rt_current_stack_frame(rt);
-    while (sf != NULL) {
-        /* Mark the function object in this stack frame */
-        JS_MarkValue(rt, sf->cur_func, gc_mark_recursive);
-        /* Also mark var_refs if present.
-         * JS_SF_VAR_REFS(sf) is now a GCHandle array. */
-        if (JS_SF_VAR_REFS(sf) && sf->var_ref_count > 0) {
-            for (int i = 0; i < sf->var_ref_count; i++) {
-                if (JS_SF_VAR_REFS(sf)[i] != GC_HANDLE_NULL) {
-                    gc_mark_recursive(rt, JS_SF_VAR_REFS(sf)[i]);
-                }
-            }
-        }
-        /* Move to previous frame */
-        sf = JS_SF_PREV(sf);
-    }
-    
-    /* Mark handles in the temporary root set */
-    /* This is critical: handles added via gc_add_root() must be marked */
-    for (i = 0; i < g_gc.root_set.count; i++) {
-        GCHandle root_handle = g_gc.root_set.roots[i];
-        gc_mark_recursive(rt, root_handle);
-    }
+}
+
+int JS_GCHasActiveFrames(JSRuntimeHandle rt)
+{
+    return js_rt_current_stack_frame(rt) != NULL;
 }
 
 /* CRITICAL FIX: Clean up freed shapes from the shape hash table.
@@ -7987,222 +7749,23 @@ void gc_cleanup_shape_hash_table(JSRuntimeHandle rt)
     QJS_LOGI("gc_cleanup_shape_hash_table: DONE");
 }
 
-/* Sweep: free all unmarked objects using unified GC handles */
-void gc_sweep(JSRuntimeHandle rt)
+/* Weak step of a collection: drop weak references to objects the cycle
+ * found unreachable.  The collector calls this on the JS thread with
+ * gc_object_is_dead() answering for the cycle. */
+void JS_GCWeakStep(JSRuntimeHandle rt)
 {
-    uint32_t i;
-    void *user_ptr;
-    GCHeader *hdr;
-
-    QJS_LOGI("gc_sweep: ENTER, g_gc.handles.count=%d", g_gc.handles.count);
-    SAFE_SET(rt, JSRuntimeHandle, gc_phase, JS_GC_PHASE_REMOVE_CYCLES);
-
-    /* Iterate over unified GC handles and free unmarked objects */
-    for (i = 1; i < g_gc.handles.count; i++) {
-        GCHandle handle = (GCHandle)i;
-        user_ptr = g_gc.handles.ptrs[i];
-        QJS_LOGI("gc_sweep: entry %d, ptr=%p", i, user_ptr);
-        
-        if (!user_ptr) {
-            QJS_LOGI("gc_sweep: entry %d has NULL pointer, skipping", i);
-            continue;
-        }
-        
-        /* Safety check: user_ptr must point to valid memory in GC heap */
-        if (unlikely(!gc_ptr_is_valid(user_ptr))) {
-            QJS_LOGE("gc_sweep: entry %d user_ptr=%p not in GC heap, clearing", i, (void*)user_ptr);
-            g_gc.handles.ptrs[i] = NULL;
-            continue;
-        }
-        
-        /* Additional safety: check minimum object alignment (8-byte for 64-bit) */
-        if (unlikely((uintptr_t)user_ptr & 0x7)) {
-            QJS_LOGE("gc_sweep: entry %d user_ptr=%p not 8-byte aligned, clearing", i, (void*)user_ptr);
-            g_gc.handles.ptrs[i] = NULL;
-            continue;
-        }
-        
-        QJS_LOGI("gc_sweep: entry %d, size=%zu", i, gc_handle_get_size(handle));
-        
-        /* Check if already freed via gc_free() (size == 0) */
-        if (gc_handle_is_freed(handle)) {
-            /* Object was already freed, just clear handle entry */
-            QJS_LOGI("gc_sweep: entry %d already freed (size=0), clearing handle", i);
-            g_gc.handles.ptrs[i] = NULL;
-            continue;
-        }
-        
-        if (!gc_handle_get_mark(handle)) {
-            /* Object is unreachable - call finalizer and clear handle */
-            QJS_LOGI("gc_sweep: FREEING entry %d, handle=%u, gc_obj_type=%d", i, handle, (int)gc_handle_get_type_inline(handle));
-            free_gc_object_handle(rt, handle);
-            /* Clear the handle entry so gc_compact can reuse it */
-            g_gc.handles.ptrs[i] = NULL;
-        }
-    }
-
-    SAFE_SET(rt, JSRuntimeHandle, gc_phase, JS_GC_PHASE_NONE);
-}
-
-/* 3-tier atom system: Sweep dynamic atoms that are no longer referenced.
- * This runs after gc_sweep to free unmarked dynamic atoms.
- */
-void gc_sweep_atoms(JSRuntimeHandle rt)
-{
-    uint32_t i;
-    int freed_count = 0;
-    
-    QJS_LOGE("gc_sweep_atoms: ENTER, atom_handles.count=%u, permanent_atom_count=%u", g_gc.atom_handles.count, SAFE_GET_OR(rt, JSRuntimeHandle, permanent_atom_count, 0));
-    
-    /* Phase 1: Mark unreferenced dynamic atoms as DEAD and remove from hash table */
-    for (i = SAFE_GET_OR(rt, JSRuntimeHandle, permanent_atom_count, 0); i < g_gc.atom_handles.count; i++) {
-        GCHandle atom_handle = g_gc.atom_handles.handles[i];
-        if (!js_handle_array_entry_is_valid(atom_handle)) {
-            continue;
-        }
-        if (!gc_ptr_is_valid_handle(atom_handle)) {
-            continue;  /* Skip malloc'd atoms */
-        }
-        
-        JSStringHandle p = (JSStringHandle)(atom_handle);
-        
-        /* Skip already dead atoms */
-        if (SAFE_GET_OR(p, JSStringHandle, atom_type, 0) == JS_ATOM_TYPE_DEAD) {
-            continue;
-        }
-        
-        /* If atom is not marked, it will be freed */
-        if (!gc_handle_get_mark(atom_handle)) {
-            /* Remove from atom_hash so it can't be looked up anymore */
-            if (SAFE_GET_OR(p, JSStringHandle, atom_type, 0) != JS_ATOM_TYPE_SYMBOL) {
-                js_atom_hash_remove(rt, SAFE_GET_OR(p, JSStringHandle, hash_next, 0));
-            }
-
-            /* Mark as dead so shapes know to skip it */
-            QJS_LOGI("gc_sweep_atoms: marking atom %u as DEAD", i);
-            SAFE_SET(p, JSStringHandle, atom_type, JS_ATOM_TYPE_DEAD);
-            freed_count++;
-        }
-    }
-    
-    /* Phase 2: Scan all shapes and null out dead atom references */
-    /* REMOVED: rt->gc_handles - use unified g_gc.handles instead */
-    /* CRITICAL FIX: Handle table is 0-indexed, handles are 1-based (0 = NULL).
-     * Valid handles are 1 to handles.count-1. Start from i=1 to skip NULL handle. */
-    for (i = 1; i < g_gc.handles.count; i++) {
-        GCHandle handle = (GCHandle)i;
-        if (!js_handle_array_entry_is_valid(handle)) continue;
-        if (gc_handle_is_freed(handle)) continue;
-        
-        if (gc_handle_get_type_inline(handle) == JS_GC_OBJ_TYPE_SHAPE) {
-            JSShapeHandle sh = (JSShapeHandle)(handle);
-            JSShapeProperty *prs = get_shape_prop(sh);
-            int j;
-            for (j = 0; j < SAFE_GET_OR(sh, JSShapeHandle, prop_count, 0); j++) {
-                if (prs[j].atom != JS_ATOM_NULL) {
-                    JSAtom atom_idx = prs[j].atom;
-                    /* Tagged integer atoms (array indices) are not real atom indices
-                     * and don't need to be swept. Skip them. */
-                    if (__JS_AtomIsTaggedInt(atom_idx)) {
-                        continue;
-                    }
-                    if ((uint32_t)atom_idx < js_rt_atom_size(rt)) {
-                        GCHandle atom_handle = rt_atom_array[atom_idx];
-                        if (js_handle_array_entry_is_valid(atom_handle)) {
-                            if (!gc_ptr_is_valid_handle(atom_handle)) continue;
-                            JSStringHandle p = (JSStringHandle)(atom_handle);
-                            if (SAFE_GET_OR(p, JSStringHandle, atom_type, 0) == JS_ATOM_TYPE_DEAD) {
-                                QJS_LOGI("gc_sweep_atoms: nulling dead atom %u in shape %u prop %d", 
-                                         atom_idx, SAFE_HANDLE(sh), j);
-                                prs[j].atom = JS_ATOM_NULL;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    /* Phase 3: Free dead atoms */
-    for (i = SAFE_GET_OR(rt, JSRuntimeHandle, permanent_atom_count, 0); i < g_gc.atom_handles.count; i++) {
-        GCHandle atom_handle = g_gc.atom_handles.handles[i];
-        if (!js_handle_array_entry_is_valid(atom_handle)) {
-            continue;
-        }
-        if (!gc_ptr_is_valid_handle(atom_handle)) {
-            continue;
-        }
-        
-        JSStringHandle p = (JSStringHandle)(atom_handle);
-        if (SAFE_GET_OR(p, JSStringHandle, atom_type, 0) == JS_ATOM_TYPE_DEAD) {
-            QJS_LOGI("gc_sweep_atoms: freeing dead atom %u (handle=%u)", i, (uint32_t)atom_handle);
-            /* Free the atom memory and update both handle arrays */
-            /* Clear the pointer in handle table to mark as freed */
-            if (atom_handle < g_gc.handles.count) {
-                g_gc.handles.ptrs[atom_handle] = NULL;
-            } else {
-                QJS_LOGE("gc_sweep_atoms: atom handle %u out of bounds (count=%u)", (uint32_t)atom_handle, g_gc.handles.count);
-            }
-            if (i < g_gc.atom_handles.capacity) {
-                g_gc.atom_handles.handles[i] = GC_HANDLE_FREED;
-            } else {
-                QJS_LOGE("gc_sweep_atoms: atom index %u out of capacity %u", i, g_gc.atom_handles.capacity);
-            }
-        }
-    }
-    
-    QJS_LOGE("gc_sweep_atoms: freed %d dynamic atoms, DONE", freed_count);
+    gc_remove_weak_objects(rt);
+    gc_cleanup_shape_hash_table(rt);
+    gc_handle_array_compact(&g_gc.weakmap_handles);
+    gc_handle_array_compact(&g_gc.weakref_handles);
+    gc_handle_array_compact(&g_gc.finrec_handles);
 }
 
 static void JS_RunGCInternal(JSRuntimeHandle rt, BOOL remove_weak_objects)
 {
-    /* Use unified GC instead of old GC code path */
+    (void)rt;
+    (void)remove_weak_objects;
     gc_run();
-    return;
-    QJS_LOGE("JS_RunGCInternal: ENTER rt=%u", SAFE_HANDLE(rt));
-    if (!SAFE_VALID(rt)) {
-        QJS_LOGE("JS_RunGCInternal: rt is NULL!");
-        return;
-    }
-    if (remove_weak_objects) {
-        /* free the weakly referenced object or symbol structures, delete
-           the associated Map/Set entries and queue the finalization
-           registry callbacks. */
-        QJS_LOGE("JS_RunGCInternal: removing weak objects...");
-        gc_remove_weak_objects(rt);
-        QJS_LOGE("JS_RunGCInternal: weak objects removed");
-    }
-
-    QJS_LOGE("JS_RunGCInternal: about to mark roots...");
-    /* Mark phase: mark all reachable objects from roots */
-    gc_mark_roots(rt);
-    QJS_LOGE("JS_RunGCInternal: roots marked");
-
-    QJS_LOGE("JS_RunGCInternal: about to sweep...");
-    /* Sweep phase: free all unmarked objects */
-    gc_sweep(rt);
-    QJS_LOGE("JS_RunGCInternal: sweep complete");
-    
-    QJS_LOGE("JS_RunGCInternal: about to cleanup shape hash table...");
-    /* Clean up freed shapes from hash table before compaction */
-    gc_cleanup_shape_hash_table(rt);
-    QJS_LOGE("JS_RunGCInternal: shape hash table cleanup complete");
-    
-    QJS_LOGE("JS_RunGCInternal: about to sweep atoms...");
-    /* 3-tier atom system: sweep dynamic atoms that are no longer referenced */
-    gc_sweep_atoms(rt);
-    QJS_LOGE("JS_RunGCInternal: atoms swept");
-
-    QJS_LOGE("JS_RunGCInternal: about to compact handle arrays...");
-    /* Compact handle arrays to remove NULL entries (like stack allocator) */
-    /* Note: context_handles and job_handles removed - use type buckets and job_queue */
-    gc_handle_array_compact(&g_gc.weakmap_handles);
-    gc_handle_array_compact(&g_gc.weakref_handles);
-    gc_handle_array_compact(&g_gc.finrec_handles);
-    gc_handle_array_compact(&g_gc.atom_handles);
-    QJS_LOGE("JS_RunGCInternal: handle arrays compacted");
-    
-    QJS_LOGE("JS_RunGCInternal: EXIT");
 }
 
 void JS_RunGC(JSRuntimeHandle rt)
@@ -8390,23 +7953,21 @@ void JS_ComputeMemoryUsage(JSRuntimeHandle rt, JSMemoryUsage *s)
     
     gc_for_each_object_of_type(JS_GC_OBJ_TYPE_JS_CONTEXT, ctx_count_callback, &ctx_mem_data);
 
-    /* REMOVED: rt->gc_handles - use unified g_gc.handles instead */
-    for (i = 0; i < g_gc.handles.count; i++) {
-        GCHandle handle = (GCHandle)(i + 1);  /* Handle 0 is NULL, 1-based index */
+    for (i = 1; i < gc_handle_limit(); i++) {
+        GCHandle handle = (GCHandle)i;
         void *pin = gc_deref(handle);
-        if (!pin || !gc_ptr_is_valid(pin))
+        if (!pin)
             continue;
-        GCHeader *gp = ((GCHeader *)pin);
-        if (!gp) continue;
+        GCHeader *gp = gc_header(pin);
         JSObjectHandle p = GC_HANDLE_NULL;
         JSShapeHandle sh = GC_HANDLE_NULL;
         JSShapeProperty *prs;
 
         /* XXX: could count the other GC object types too */
-        if (gp->gc_obj_type == JS_GC_OBJ_TYPE_FUNCTION_BYTECODE) {
+        if (gc_header_type(gp) == JS_GC_OBJ_TYPE_FUNCTION_BYTECODE) {
             compute_bytecode_size((JSFunctionBytecodeHandle)(handle), hp);
             continue;
-        } else if (gp->gc_obj_type != JS_GC_OBJ_TYPE_JS_OBJECT) {
+        } else if (gc_header_type(gp) != JS_GC_OBJ_TYPE_JS_OBJECT) {
             continue;
         }
         p = (JSObjectHandle)(handle);  // Use handle directly from loop variable
@@ -8683,11 +8244,10 @@ void JS_DumpMemoryUsage(FILE *fp, const JSMemoryUsage *s, JSRuntimeHandle rt)
         {
             int obj_classes[JS_CLASS_INIT_COUNT + 1] = { 0 };
             int class_id;
-            /* REMOVED: rt->gc_handles - use unified g_gc.handles instead */
-            for (i = 0; i < g_gc.handles.count; i++) {
-                GCHandle handle = (GCHandle)(i + 1);  /* Handle 0 is NULL, 1-based index */
+            for (i = 1; i < gc_handle_limit(); i++) {
+                GCHandle handle = (GCHandle)i;
                 void *pin = gc_deref(handle);
-                if (!pin || !gc_ptr_is_valid(pin)) continue;
+                if (!pin) continue;
                 JSObjectHandle p = GC_HANDLE_NULL;
                 if (gc_handle_get_type_inline(handle) == JS_GC_OBJ_TYPE_JS_OBJECT) {
                     p = (JSObjectHandle)(handle);
@@ -10236,7 +9796,7 @@ static int __exception JS_GetOwnPropertyNamesInternal2(JSContextHandle ctx,
     *ptab = tab_atom;
     *plen = atom_count;
     if (ptab_handle)
-        *ptab_handle = tab_atom_handle;
+        GC_SET(*ptab_handle, tab_atom_handle);
     return 0;
 }
 
@@ -10281,9 +9841,9 @@ retry:
                 if ((prs->flags & JS_PROP_TMASK) == JS_PROP_GETSET) {
                     desc->flags |= JS_PROP_GETSET;
                     if (pr->u.getset.getter_handle != GC_HANDLE_NULL)
-                        desc->getter = GC_MKHANDLE(JS_TAG_OBJECT, pr->u.getset.getter_handle);
+                        GC_SET(desc->getter, GC_MKHANDLE(JS_TAG_OBJECT, pr->u.getset.getter_handle));
                     if (pr->u.getset.setter_handle != GC_HANDLE_NULL)
-                        desc->setter = GC_MKHANDLE(JS_TAG_OBJECT, pr->u.getset.setter_handle);
+                        GC_SET(desc->setter, GC_MKHANDLE(JS_TAG_OBJECT, pr->u.getset.setter_handle));
                 } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_VARREF) {
                     JSVarRefHandle var_ref = (JSVarRefHandle)(pr->u.var_ref_handle);
                     if (unlikely(!SAFE_VALID(var_ref))) {
@@ -10295,14 +9855,14 @@ retry:
                         JS_ThrowReferenceErrorUninitialized(ctx, prs->atom);
                         return -1;
                     }
-                    desc->value = val;
+                    GC_SET(desc->value, val);
                 } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
                     /* AUTOINIT disabled - should never happen with eager initialization */
                     fprintf(stderr, "ERROR: JS_PROP_AUTOINIT encountered in JS_GetOwnPropertyInternal - this should not happen!\n");
                     return -1;
                 }
             } else {
-                desc->value = pr->u.value;
+                GC_SET(desc->value, pr->u.value);
             }
         } else {
             /* for consistency, send the exception even if desc is NULL */
@@ -10332,7 +9892,7 @@ retry:
                             JS_PROP_CONFIGURABLE;
                         desc->getter = JS_UNDEFINED;
                         desc->setter = JS_UNDEFINED;
-                        desc->value = JS_GetPropertyUint32(ctx, GC_MKHANDLE(JS_TAG_OBJECT, SAFE_HANDLE(p)), idx);
+                        GC_SET(desc->value, JS_GetPropertyUint32(ctx, GC_MKHANDLE(JS_TAG_OBJECT, SAFE_HANDLE(p)), idx));
                     }
                     return TRUE;
                 }
@@ -10608,7 +10168,7 @@ static int JS_TryGetPropertyInt64(JSContextHandle ctx, GCValue obj, int64_t idx,
             JS_FreeAtom(ctx, prop);
         }
     }
-    *pval = val;
+    GC_SET(*pval, val);
     return present;
 }
 
@@ -10802,7 +10362,7 @@ static int remove_global_object_property(JSContextHandle ctx, JSObjectHandle p,
     pr1 = add_property(ctx, p1, prs->atom, JS_PROP_C_W_E | JS_PROP_VARREF);
     if (!pr1)
         return -1;
-    pr1->u.var_ref_handle = var_ref_handle;
+    GC_SET(pr1->u.var_ref_handle, var_ref_handle);
     /* ref_count removed - using mark-and-sweep GC */
     
     if (SAFE_VALID(var_ref)) {
@@ -16006,7 +15566,7 @@ static void js_print_value(JSPrintValueState *s, GCValue val)
             if (idx >= 0) {
                 js_printf(s, "[circular %d]", idx);
             } else if (s->level < s->options.max_depth) {
-                s->print_stack[s->level++] = p;
+                GC_SET(s->print_stack[s->level++], p);
                 js_print_object(s, JS_VALUE_GET_OBJ(val));
                 s->level--;
             } else {
@@ -16064,7 +15624,7 @@ static void JS_PrintValueInternal(JSRuntimeHandle rt, JSContextHandle ctx,
     if (s->options.max_item_count == 0)
         s->options.max_item_count = UINT32_MAX;
     // s->rt_handle no longer exists - runtime is accessed via ctx
-    s->ctx = ctx;
+    s->ctx = ctx;  /* gc-no-dirty: print state on the C stack */
     s->write_func = write_func;
     s->write_opaque = write_opaque;
     s->level = 0;
@@ -16094,7 +15654,7 @@ static __maybe_unused void print_atom(JSContextHandle ctx, JSAtom atom)
     JSPrintValueState ss, *s = &ss;
     memset(s, 0, sizeof(*s));
     // s->rt_handle no longer exists - runtime is accessed via ctx
-    s->ctx = ctx;
+    s->ctx = ctx;  /* gc-no-dirty: print state on the C stack */
     s->write_func = js_dump_value_write;
     s->write_opaque = stdout;
     js_print_atom(s, atom);
@@ -17866,7 +17426,7 @@ static GCValue js_build_arguments(JSContextHandle ctx, int argc, GCValue *argv)
             goto fail;
         tab = SAFE_PTR(tab_handle, GCValueHandle);
         for(i = 0; i < argc; i++) {
-            tab[i] = argv[i];
+            GC_SET(tab[i], argv[i]);
         }
     }
     SAFE_SET_HANDLE(p, JSObjectHandle, u.array.u.values_handle, tab_handle);
@@ -17903,7 +17463,10 @@ static void js_mapped_arguments_mark(JSRuntimeHandle rt, GCValue val,
         mark_func(rt, SAFE_GET_OR(p, JSObjectHandle, u.array.u.var_refs_handle, GC_HANDLE_NULL));
     }
     
-    for(i = 0; i < SAFE_GET_OR(p, JSObjectHandle, u.array.count, 0); i++) {
+    int nrefs = gc_clamp_count((int)SAFE_GET_OR(p, JSObjectHandle, u.array.count, 0),
+                               gc_slots(SAFE_GET_OR(p, JSObjectHandle, u.array.u.var_refs_handle, GC_HANDLE_NULL),
+                                        0, sizeof(GCHandle)));
+    for(i = 0; i < nrefs; i++) {
         JSVarRefHandle var_ref = js_varref_from_array(SAFE_GET_OR(p, JSObjectHandle, u.array.u.var_refs_handle, GC_HANDLE_NULL), i);
         if (SAFE_VALID(var_ref))
             mark_func(rt, SAFE_HANDLE(var_ref));
@@ -19779,7 +19342,7 @@ JSStackFrame *js_frame_deref(GCHandle frame_handle)
     void *p = gc_deref(frame_handle);
     if (!p)
         return NULL;
-    if (gc_header(p)->gc_obj_type == JS_GC_OBJ_TYPE_ASYNC_FUNCTION)
+    if (gc_header_type(gc_header(p)) == JS_GC_OBJ_TYPE_ASYNC_FUNCTION)
         return &((JSAsyncFunctionState *)p)->frame;
     return (JSStackFrame *)p;
 }
@@ -19804,12 +19367,12 @@ static JSStackFrame *js_alloc_c_frame(JSContextHandle ctx, int argc, int arg_cou
     uint8_t *mem = (uint8_t *)gc_deref(handle);
     JSStackFrame *sf = (JSStackFrame *)mem;
     memset(sf, 0, sizeof(JSStackFrame));
-    sf->self_handle = handle;
+    GC_SET(sf->self_handle, handle);
     
     if (args_size > 0) {
         *out_arg_buf = (GCValue *)(mem + frame_size);
         for(int i = 0; i < argc; i++)
-            (*out_arg_buf)[i] = argv[i];
+            GC_SET((*out_arg_buf)[i], argv[i]);
         for(int i = argc; i < arg_count; i++)
             (*out_arg_buf)[i] = JS_UNDEFINED;
         sf->arg_count = arg_count;
@@ -19936,7 +19499,7 @@ static GCValue js_call_c_function(JSContextHandle ctx, GCValue func_obj,
         abort();
     }
 
-    SAFE_SET_HANDLE(rt, JSRuntimeHandle, current_stack_frame_handle, sf->prev_frame_handle);
+    js_rt_pop_stack_frame(rt, sf);
     return ret_val;
 }
 
@@ -19956,7 +19519,7 @@ static GCValue js_call_bound_function(JSContextHandle ctx, GCValue func_obj,
     arg_buf = (GCValue *)alloca(sizeof(GCValue) * arg_count);
     js_bound_func_copy_argv_to(bf, arg_buf, SAFE_GET_OR(bf, JSBoundFunctionHandle, argc, 0));
     for(i = 0; i < argc; i++) {
-        arg_buf[SAFE_GET_OR(bf, JSBoundFunctionHandle, argc, 0) + i] = argv[i];
+        GC_SET(arg_buf[SAFE_GET_OR(bf, JSBoundFunctionHandle, argc, 0) + i], argv[i]);
     }
     if (flags & JS_CALL_FLAG_CONSTRUCTOR) {
         new_target = this_obj;
@@ -20016,7 +19579,7 @@ static JSStackFrame *js_alloc_bytecode_frame(JSContextHandle ctx,
     uint8_t *mem = (uint8_t *)gc_deref(handle);
     JSStackFrame *sf = (JSStackFrame *)mem;
     memset(sf, 0, sizeof(JSStackFrame));
-    sf->self_handle = handle;
+    GC_SET(sf->self_handle, handle);
     gc_set_heap_handle(&sf->bytecode_handle, SAFE_HANDLE(b));
     
     /* Compute buffer pointers */
@@ -20128,7 +19691,9 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
 #define SWITCH(pc)      goto *dispatch_table[opcode = *pc++];
 #define CASE(op)        case_ ## op
 #define DEFAULT         case_default
-#define BREAK           SWITCH(pc)
+/* Every opcode boundary is a poll point for the concurrent collector (the
+ * loop head is not reached between opcodes with direct dispatch). */
+#define BREAK           do { gc_poll(); } while (0); SWITCH(pc)
 #endif
 
     if (unlikely(JS_VALUE_GET_TAG(func_obj) != JS_TAG_OBJECT)) {
@@ -20363,6 +19928,10 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
     for(;;) {
         int call_argc;
         GCValue *call_argv;
+
+        /* Boundary for the concurrent collector: one relaxed load unless
+         * the GC thread has posted a step. */
+        gc_poll();
 
         /* Cooperative interrupt check. Only active when an interrupt handler
          * has been installed and the counter has been primed. */
@@ -23186,7 +22755,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
         /* Unlink the suspended frame, as upstream does for both paths.
          * Leaving it as the current frame made the next call link back to
          * it, turning the frame chain into a cycle. */
-        SAFE_SET_HANDLE(rt, JSRuntimeHandle, current_stack_frame_handle, sf->prev_frame_handle);
+        js_rt_pop_stack_frame(rt, sf);
         return ret_val;
     } else {
     done:
@@ -23194,7 +22763,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
          * The frame stays alive as long as closures reference it.
          * Just unlink from the frame chain - GC will collect when no longer needed.
          */
-        SAFE_SET_HANDLE(rt, JSRuntimeHandle, current_stack_frame_handle, sf->prev_frame_handle);
+        js_rt_pop_stack_frame(rt, sf);
         return ret_val;
     }
 }
@@ -23650,7 +23219,7 @@ static GCValue js_generator_next(JSContextHandle ctx, GCValue this_val,
         } else {
             {
                 GCValue *var_buf = JS_SF_VAR_BUF(sf);
-                var_buf[sf->sp_offset - 1] = ret;
+                GC_SET(var_buf[sf->sp_offset - 1], ret);
                 var_buf[sf->sp_offset] = JS_NewInt32(ctx, magic);
                 sf->sp_offset++;
             }
@@ -23783,9 +23352,8 @@ static int js_async_function_resolve_create(JSContextHandle ctx,
     JSObjectHandle p = GC_HANDLE_NULL;
 
     for(i = 0; i < 2; i++) {
-        resolving_funcs[i] =
-            JS_NewObjectProtoClass(ctx, SAFE_GET_OR(ctx, JSContextHandle, function_proto, GC_UNDEFINED),
-                                   JS_CLASS_ASYNC_FUNCTION_RESOLVE + i);
+        GC_SET(resolving_funcs[i], JS_NewObjectProtoClass(ctx, SAFE_GET_OR(ctx, JSContextHandle, function_proto, GC_UNDEFINED),
+                                   JS_CLASS_ASYNC_FUNCTION_RESOLVE + i));
         if (JS_IsException(resolving_funcs[i])) {
             return -1;
         }
@@ -23977,7 +23545,7 @@ static int js_async_generator_resolve_function_create(JSContextHandle ctx,
         if (JS_IsException(func)) {
             return -1;
         }
-        resolving_funcs[i] = func;
+        GC_SET(resolving_funcs[i], func);
     }
     return 0;
 }
@@ -24339,7 +23907,7 @@ static GCValue js_async_generator_function_call(JSContextHandle ctx, GCValue fun
     func_state = async_func_init(ctx, func_obj, this_obj, argc, argv);
     if (!SAFE_VALID(func_state))
         goto fail;
-    s->func_state_handle = SAFE_HANDLE(func_state);
+    GC_SET(s->func_state_handle, SAFE_HANDLE(func_state));
     /* execute the function up to 'OP_initial_yield' (no yield nor
        await are possible) */
     func_ret = async_func_resume(ctx, func_state);
@@ -24350,7 +23918,7 @@ static GCValue js_async_generator_function_call(JSContextHandle ctx, GCValue fun
     obj = js_create_from_ctor(ctx, func_obj, JS_CLASS_ASYNC_GENERATOR);
     if (JS_IsException(obj))
         goto fail;
-    s->generator_handle = SAFE_HANDLE(JS_VALUE_GET_OBJ(obj));
+    GC_SET(s->generator_handle, SAFE_HANDLE(JS_VALUE_GET_OBJ(obj)));
     JS_SetOpaqueHandle(obj, s_handle);
     return obj;
  fail:
@@ -24837,7 +24405,7 @@ static inline void js_parse_set_cur_func(JSParseState *s, JSFunctionDefHandle ne
     }
     
     /* Update the handle */
-    s->cur_func_handle = new_handle;
+    s->cur_func_handle = new_handle;  /* gc-no-dirty: parse state on the C stack */
     
     /* Add new root if valid */
     if (!SAFE_IS_NULL(s->cur_func_handle)) {
@@ -25258,7 +24826,7 @@ static __exception int js_parse_template_part(JSParseState *s, const uint8_t *p)
         return -1;
     s->token.val = TOK_TEMPLATE;
     s->token.u.str.sep = c;
-    s->token.u.str.str = str;
+    GC_SET(s->token.u.str.str, str);
     s->buf_ptr = p;
     return 0;
 
@@ -25269,7 +24837,7 @@ static __exception int js_parse_template_part(JSParseState *s, const uint8_t *p)
         return -1;
     s->token.val = TOK_TEMPLATE;
     s->token.u.str.sep = '`';
-    s->token.u.str.str = str;
+    GC_SET(s->token.u.str.str, str);
     s->buf_ptr = p;
     return 0;
 
@@ -25280,7 +24848,7 @@ static __exception int js_parse_template_part(JSParseState *s, const uint8_t *p)
         return -1;
     s->token.val = TOK_TEMPLATE;
     s->token.u.str.sep = '`';  /* Mark as end of template */
-    s->token.u.str.str = str;
+    s->token.u.str.str = str;  /* gc-no-dirty: token in the parse state on the C stack */
     s->buf_ptr = p;
     return 0;
  fail:
@@ -25436,7 +25004,7 @@ static __exception int js_parse_string(JSParseState *s, int sep,
         return -1;
     token->val = TOK_STRING;
     token->u.str.sep = sep;  /* Use original separator */
-    token->u.str.str = str;
+    token->u.str.str = str;  /* gc-no-dirty: token on the C stack */
     *pp = p;
     return 0;
 
@@ -25456,7 +25024,7 @@ static __exception int js_parse_string(JSParseState *s, int sep,
         return -1;
     token->val = TOK_STRING;
     token->u.str.sep = sep;  /* Use original separator */
-    token->u.str.str = str;
+    token->u.str.str = str;  /* gc-no-dirty: token on the C stack */
     *pp = p;
     return 0;
  fail:
@@ -25567,8 +25135,8 @@ static __exception int js_parse_regexp(JSParseState *s)
         return -1;
     }
     s->token.val = TOK_REGEXP;
-    s->token.u.regexp.body = body_str;
-    s->token.u.regexp.flags = flags_str;
+    GC_SET(s->token.u.regexp.body, body_str);
+    GC_SET(s->token.u.regexp.flags, flags_str);
     s->buf_ptr = p;
     return 0;
  fail:
@@ -25599,7 +25167,7 @@ static __exception int ident_realloc(JSContextHandle ctx, char **pbuf, size_t *p
         if (h == GC_HANDLE_NULL)
             return -1;
         void *data = gc_deref_unsafe(h);  /* Safe: immediately store handle below */
-        *(GCHandle*)data = h;
+        *(GCHandle*)data = h;  /* gc-no-dirty: the buffer's own handle */
         new_buf = (char*)data + sizeof(GCHandle);
         memcpy(new_buf, buf, size);
     } else {
@@ -25609,7 +25177,7 @@ static __exception int ident_realloc(JSContextHandle ctx, char **pbuf, size_t *p
         if (h == GC_HANDLE_NULL)
             return -1;
         void *data = gc_deref_unsafe(h);  /* Safe: immediately store handle below */
-        *(GCHandle*)data = h;
+        *(GCHandle*)data = h;  /* gc-no-dirty: the buffer's own handle */
         new_buf = (char*)data + sizeof(GCHandle);
     }
     *pbuf = new_buf;
@@ -25938,7 +25506,7 @@ static __exception int next_token(JSParseState *s)
                 */
             }
             s->token.val = TOK_NUMBER;
-            s->token.u.num.val = ret;
+            GC_SET(s->token.u.num.val, ret);
         }
         break;
     case '*':
@@ -26276,7 +25844,7 @@ static int json_parse_string(JSParseState *s, const uint8_t **pp, int sep)
     }
     s->token.val = TOK_STRING;
     s->token.u.str.sep = sep;
-    s->token.u.str.str = string_buffer_end(b);
+    GC_SET(s->token.u.str.str, string_buffer_end(b));
     *pp = p;
     return 0;
 
@@ -27042,7 +26610,7 @@ static int cpool_add(JSParseState *s, GCValue val)
         
         return -1;
     }
-    SAFE_AT(fd_cpool, GCValueHandle, fd->cpool_count++) = val;
+    { int cpool_idx_ = fd->cpool_count++; GC_SET(SAFE_AT(fd_cpool, GCValueHandle, cpool_idx_), val); }
     return fd->cpool_count - 1;
 }
 
@@ -28566,7 +28134,7 @@ static __exception int emit_class_init_start(JSParseState *s,
     JSFunctionDef *fields_init_fd = js_parse_function_class_fields_init(s);
     if (!fields_init_fd)
         return -1;
-    cf->fields_init_fd_handle = fields_init_fd->self_handle;
+    GC_SET(cf->fields_init_fd_handle, fields_init_fd->self_handle);
         return -1;
 
     js_parse_set_cur_func(s, (JSFunctionDefHandle)(cf->fields_init_fd_handle));
@@ -29008,7 +28576,7 @@ static __exception int js_parse_class(JSParseState *s, BOOL is_class_expr,
         ctor_fd->source_len = s->buf_ptr - class_start_ptr;
         {
             GCStringHandle source_handle = gc_strndup((const char *)class_start_ptr, ctor_fd->source_len);
-            ctor_fd->source_string_handle = SAFE_HANDLE(source_handle);
+            GC_SET(ctor_fd->source_string_handle, SAFE_HANDLE(source_handle));
             if (ctor_fd->source_string_handle == GC_HANDLE_NULL)
                 goto fail;
         }
@@ -31673,15 +31241,15 @@ static int push_break_entry(JSContextHandle ctx, JSFunctionDef *fd,
     if (fd->break_stack_handle == GC_HANDLE_NULL) {
         /* Initial allocation */
         fd->break_stack_capacity = 8;
-        fd->break_stack_handle = gc_alloc(sizeof(BlockEnv) * fd->break_stack_capacity, 
-                                          JS_GC_OBJ_TYPE_DATA);
+        GC_SET(fd->break_stack_handle, gc_alloc(sizeof(BlockEnv) * fd->break_stack_capacity, 
+                                          JS_GC_OBJ_TYPE_DATA));
         if (fd->break_stack_handle == GC_HANDLE_NULL)
             return -1;
     } else if (new_depth >= fd->break_stack_capacity) {
         /* Grow the array */
         fd->break_stack_capacity *= 2;
-        fd->break_stack_handle = gc_realloc_handle(fd->break_stack_handle, 
-                                                    sizeof(BlockEnv) * fd->break_stack_capacity);
+        GC_SET(fd->break_stack_handle, gc_realloc_handle(fd->break_stack_handle, 
+                                                    sizeof(BlockEnv) * fd->break_stack_capacity));
         if (fd->break_stack_handle == GC_HANDLE_NULL)
             return -1;
     }
@@ -33073,13 +32641,17 @@ static void js_mark_module_def(JSRuntimeHandle rt, JSModuleDefHandle m,
     if (!SAFE_VALID(m)) return;
 
     /* Mark GC references in req_module_entries (GC-managed array via GCDataArray) */
-    for(i = 0; i < js_module_req_module_entries_count(m); i++) {
+    int nreq = gc_clamp_count(js_module_req_module_entries_count(m),
+                              gc_slots(js_module_req_module_entries(m)->handle, 0, sizeof(JSReqModuleEntry)));
+    for(i = 0; i < nreq; i++) {
         JSReqModuleEntry *rme = &GC_DATA_ARRAY_AT((*js_module_req_module_entries(m)), JSReqModuleEntry, i);
         JS_MarkValue(rt, rme->attributes, mark_func);
     }
     
     /* Mark GC references in export_entries (GC-managed array via GCDataArray) */
-    for(i = 0; i < js_module_export_entries_count(m); i++) {
+    int nexp = gc_clamp_count(js_module_export_entries_count(m),
+                              gc_slots(js_module_export_entries(m)->handle, 0, sizeof(JSExportEntry)));
+    for(i = 0; i < nexp; i++) {
         JSExportEntry *me = &GC_DATA_ARRAY_AT((*js_module_export_entries(m)), JSExportEntry, i);
         if (me->export_type == JS_EXPORT_TYPE_LOCAL &&
             me->u.local.var_ref_handle != GC_HANDLE_NULL) {
@@ -33500,7 +33072,7 @@ static int add_resolve_entry(JSContextHandle ctx, JSResolveState *s,
                         &s->size, s->count + 1))
         return -1;
     re = &js_resolve_state_array(s)[s->count++];
-    re->module = m;
+    GC_SET(re->module, m);
     re->name = JS_DupAtom(ctx, name);
     return 0;
 }
@@ -33533,7 +33105,7 @@ static JSResolveResultEnum js_resolve_export1(JSContextHandle ctx,
     if (me) {
         if (me->export_type == JS_EXPORT_TYPE_LOCAL) {
             /* local export */
-            *pmodule = m;
+            *pmodule = m;  /* gc-no-dirty: out parameter */
             *pme = me;
             return JS_RESOLVE_RES_FOUND;
         } else {
@@ -33542,7 +33114,7 @@ static JSResolveResultEnum js_resolve_export1(JSContextHandle ctx,
             JSModuleDefHandle m1 = (JSModuleDefHandle)(rme->module_handle);
             if (me->local_name == JS_ATOM__star_) {
                 /* export ns from */
-                *pmodule = m;
+                *pmodule = m;  /* gc-no-dirty: out parameter */
                 *pme = me;
                 return JS_RESOLVE_RES_FOUND;
             } else {
@@ -33578,7 +33150,7 @@ static JSResolveResultEnum js_resolve_export1(JSContextHandle ctx,
                             return JS_RESOLVE_RES_AMBIGUOUS;
                         }
                     } else {
-                        *pmodule = res_m;
+                        GC_SET(*pmodule, res_m);
                         *pme = res_me;
                     }
                 }
@@ -33697,7 +33269,7 @@ static __exception int get_exported_names(JSContextHandle ctx,
     if (js_resize_array(ctx, (GCHandle *)&s->modules, sizeof(s->modules[0]),
                         &s->modules_size, s->modules_count + 1))
         return -1;
-    s->modules[s->modules_count++] = m;
+    GC_SET(s->modules[s->modules_count++], m);
 
     for(i = 0; i < js_module_export_entries_count(m); i++) {
         JSExportEntry *me = &GC_DATA_ARRAY_PTR((*js_module_export_entries(m)), JSExportEntry)[i];
@@ -33845,11 +33417,11 @@ static GCValue js_build_module_ns(JSContextHandle ctx, JSModuleDefHandle m)
                 JSModuleDefHandle res_mod = res_m;
                 if (!SAFE_VALID(res_mod)) goto fail;
                 if (res_me->u.local.var_ref_handle != GC_HANDLE_NULL) {
-                    en->u.var_ref_handle = res_me->u.local.var_ref_handle;
+                    GC_SET(en->u.var_ref_handle, res_me->u.local.var_ref_handle);
                 } else {
                     JSObjectHandle p1 = JS_VALUE_GET_OBJ(SAFE_GET_OR(res_mod, JSModuleDefHandle, func_obj, GC_UNDEFINED));
                     GCHandle var_refs_handle = SAFE_GET_OR(p1, JSObjectHandle, u.func.var_refs_handle, GC_HANDLE_NULL);
-                    en->u.var_ref_handle = gc_handle_array_get(var_refs_handle, res_me->u.local.var_idx);
+                    GC_SET(en->u.var_ref_handle, gc_handle_array_get(var_refs_handle, res_me->u.local.var_idx));
                 }
                 if (en->u.var_ref_handle == GC_HANDLE_NULL)
                     en->export_type = EXPORTED_NAME_DELAYED;
@@ -33981,7 +33553,7 @@ static int js_resolve_module(JSContextHandle ctx, JSModuleDefHandle m)
                                                   rme->attributes);
         if (!SAFE_VALID(m1))
             return -1;
-        rme->module_handle = SAFE_HANDLE(m1);
+        GC_SET(rme->module_handle, SAFE_HANDLE(m1));
         /* already done in js_host_resolve_imported_module() except if
            the module was loaded with JS_EvalBinary() */
         if (js_resolve_module(ctx, m1) < 0)
@@ -34037,7 +33609,7 @@ static int js_create_module_function(JSContextHandle ctx, JSModuleDefHandle m)
                 var_ref = js_create_var_ref(ctx, FALSE);
                 if (!SAFE_VALID(var_ref))
                     return -1;
-                me->u.local.var_ref_handle = SAFE_HANDLE(var_ref);
+                GC_SET(me->u.local.var_ref_handle, SAFE_HANDLE(var_ref));
             }
         }
     } else {
@@ -34097,7 +33669,7 @@ static int js_inner_module_linking(JSContextHandle ctx, JSModuleDefHandle m,
     index++;
     /* push 'm' on stack */
     SAFE_SET_HANDLE(m, JSModuleDefHandle, stack_prev_handle, SAFE_VALID((*pstack_top)) ? SAFE_HANDLE((*pstack_top)) : GC_HANDLE_NULL);
-    *pstack_top = m;
+    GC_SET(*pstack_top, m);
 
     for(i = 0; i < js_module_req_module_entries_count(m); i++) {
         JSReqModuleEntry *rme = &GC_DATA_ARRAY_PTR((*js_module_req_module_entries(m)), JSReqModuleEntry)[i];
@@ -34233,7 +33805,7 @@ static int js_inner_module_linking(JSContextHandle ctx, JSModuleDefHandle m,
             if (me->export_type == JS_EXPORT_TYPE_LOCAL) {
                 var_ref = js_varref_from_array(SAFE_GET_OR(p, JSObjectHandle, u.func.var_refs_handle, GC_HANDLE_NULL), me->u.local.var_idx);
                 /* ref_count removed - using mark-and-sweep GC */
-                me->u.local.var_ref_handle = SAFE_VALID(var_ref) ? SAFE_HANDLE(var_ref) : GC_HANDLE_NULL;
+                GC_SET(me->u.local.var_ref_handle, SAFE_VALID(var_ref) ? SAFE_HANDLE(var_ref) : GC_HANDLE_NULL);
             }
         }
 
@@ -34250,7 +33822,7 @@ static int js_inner_module_linking(JSContextHandle ctx, JSModuleDefHandle m,
             JSModuleDefHandle m1 = *pstack_top;
             JSModuleDefHandle m1_ptr = m1;
             if (!SAFE_VALID(m1_ptr)) goto fail;
-            *pstack_top = ((JSModuleDefHandle)SAFE_GET_OR(m1_ptr, JSModuleDefHandle, stack_prev_handle, GC_HANDLE_NULL));
+            GC_SET(*pstack_top, ((JSModuleDefHandle)SAFE_GET_OR(m1_ptr, JSModuleDefHandle, stack_prev_handle, GC_HANDLE_NULL)));
             SAFE_SET(m1_ptr, JSModuleDefHandle, status, JS_MODULE_STATUS_LINKED);
             if (m1_ptr == m)
                 break;
@@ -34682,7 +34254,7 @@ static int gather_available_ancestors(JSContextHandle ctx, JSModuleDefHandle mod
                 if (js_resize_array(ctx, (GCHandle *)&exec_list->tab, sizeof(exec_list->tab[0]), &exec_list->size, exec_list->count + 1)) {
                     return -1;
                 }
-                exec_list->tab[exec_list->count++] = m;
+                GC_SET(exec_list->tab[exec_list->count++], m);
                 if (!SAFE_GET_OR(m, JSModuleDefHandle, has_tla, FALSE)) {
                     if (gather_available_ancestors(ctx, m, exec_list))
                         return -1;
@@ -34864,14 +34436,14 @@ static int js_execute_sync_module(JSContextHandle ctx, JSModuleDefHandle m,
         if (state == JS_PROMISE_FULFILLED) {
             
         } else if (state == JS_PROMISE_REJECTED) {
-            *pvalue = JS_PromiseResult(ctx, promise);
+            GC_SET(*pvalue, JS_PromiseResult(ctx, promise));
             
             return -1;
         } else {
             
             JS_ThrowTypeError(ctx, "promise is pending");
         fail:
-            *pvalue = JS_GetException(ctx);
+            GC_SET(*pvalue, JS_GetException(ctx));
             return -1;
         }
     }
@@ -34894,14 +34466,14 @@ static int js_inner_module_evaluation(JSContextHandle ctx, JSModuleDefHandle m,
 
     if (js_check_stack_overflow(ctx_rt, 0)) {
         JS_ThrowStackOverflow(ctx);
-        *pvalue = JS_GetException(ctx);
+        GC_SET(*pvalue, JS_GetException(ctx));
         return -1;
     }
 
     if (SAFE_GET_OR(m, JSModuleDefHandle, status, JS_MODULE_STATUS_UNLINKED) == JS_MODULE_STATUS_EVALUATING_ASYNC ||
         SAFE_GET_OR(m, JSModuleDefHandle, status, JS_MODULE_STATUS_UNLINKED) == JS_MODULE_STATUS_EVALUATED) {
         if (SAFE_GET_OR(m, JSModuleDefHandle, eval_has_exception, FALSE)) {
-            *pvalue = SAFE_GET_OR(m, JSModuleDefHandle, eval_exception, GC_UNDEFINED);
+            GC_SET(*pvalue, SAFE_GET_OR(m, JSModuleDefHandle, eval_exception, GC_UNDEFINED));
             return -1;
         } else {
             *pvalue = JS_UNDEFINED;
@@ -34921,7 +34493,7 @@ static int js_inner_module_evaluation(JSContextHandle ctx, JSModuleDefHandle m,
     index++;
     /* push 'm' on stack */
     SAFE_SET_HANDLE(m, JSModuleDefHandle, stack_prev_handle, SAFE_HANDLE((*pstack_top)));
-    *pstack_top = m;
+    GC_SET(*pstack_top, m);
 
     for(i = 0; i < js_module_req_module_entries_count(m); i++) {
         JSReqModuleEntry *rme = &GC_DATA_ARRAY_PTR((*js_module_req_module_entries(m)), JSReqModuleEntry)[i];
@@ -34941,7 +34513,7 @@ static int js_inner_module_evaluation(JSContextHandle ctx, JSModuleDefHandle m,
             assert(SAFE_GET_OR(cycle_root_ptr, JSModuleDefHandle, status, JS_MODULE_STATUS_UNLINKED) == JS_MODULE_STATUS_EVALUATING_ASYNC ||
                    SAFE_GET_OR(cycle_root_ptr, JSModuleDefHandle, status, JS_MODULE_STATUS_UNLINKED) == JS_MODULE_STATUS_EVALUATED);
             if (SAFE_GET_OR(cycle_root_ptr, JSModuleDefHandle, eval_has_exception, FALSE)) {
-                *pvalue = SAFE_GET_OR(cycle_root_ptr, JSModuleDefHandle, eval_exception, GC_UNDEFINED);
+                GC_SET(*pvalue, SAFE_GET_OR(cycle_root_ptr, JSModuleDefHandle, eval_exception, GC_UNDEFINED));
                 return -1;
             }
         }
@@ -34949,11 +34521,11 @@ static int js_inner_module_evaluation(JSContextHandle ctx, JSModuleDefHandle m,
         if (SAFE_GET_OR(m1_ptr, JSModuleDefHandle, async_evaluation, FALSE)) {
             SAFE_SET(m, JSModuleDefHandle, pending_async_dependencies, SAFE_GET_OR(m, JSModuleDefHandle, pending_async_dependencies, 0) + 1);
             if (js_resize_array(ctx, (GCHandle *)js_module_async_parent_modules_handle_ptr_ptr(m1_ptr), sizeof(GCHandle), js_module_async_parent_modules_size_ptr(m1_ptr), SAFE_GET_OR(m1_ptr, JSModuleDefHandle, async_parent_modules_count, 0) + 1)) {
-                *pvalue = JS_GetException(ctx);
+                GC_SET(*pvalue, JS_GetException(ctx));
                 return -1;
             }
             GCHandle* parent_modules = ((GCHandle *)gc_deref(SAFE_GET_OR(m1_ptr, JSModuleDefHandle, async_parent_modules_handle, GC_HANDLE_NULL)));
-            parent_modules[SAFE_GET_OR(m1_ptr, JSModuleDefHandle, async_parent_modules_count, 0)] = SAFE_HANDLE(m);
+            GC_SET(parent_modules[SAFE_GET_OR(m1_ptr, JSModuleDefHandle, async_parent_modules_count, 0)], SAFE_HANDLE(m));
             SAFE_SET(m1_ptr, JSModuleDefHandle, async_parent_modules_count, SAFE_GET_OR(m1_ptr, JSModuleDefHandle, async_parent_modules_count, 0) + 1);
         }
     }
@@ -34980,7 +34552,7 @@ static int js_inner_module_evaluation(JSContextHandle ctx, JSModuleDefHandle m,
             /* pop m1 from stack */
             JSModuleDefHandle m1_handle = *pstack_top;
             JSModuleDefHandle m1_ptr = m1_handle;
-            *pstack_top = ((JSModuleDefHandle)SAFE_GET_OR(m1_ptr, JSModuleDefHandle, stack_prev_handle, GC_HANDLE_NULL));
+            GC_SET(*pstack_top, ((JSModuleDefHandle)SAFE_GET_OR(m1_ptr, JSModuleDefHandle, stack_prev_handle, GC_HANDLE_NULL)));
             if (!SAFE_GET_OR(m1_ptr, JSModuleDefHandle, async_evaluation, FALSE)) {
                 SAFE_SET(m1_ptr, JSModuleDefHandle, status, JS_MODULE_STATUS_EVALUATED);
             } else {
@@ -35102,7 +34674,7 @@ static __exception int js_parse_with_clause(JSParseState *s, JSReqModuleEntry *r
                 JS_FreeAtom(ctx, key);
                 return -1;
             }
-            rme->attributes = attributes;
+            GC_SET(rme->attributes, attributes);
         }
         ret = JS_HasProperty(ctx, rme->attributes, key);
         if (ret != 0) {
@@ -35546,8 +35118,8 @@ static JSFunctionDef *js_new_function_def(JSContextHandle ctx,
     }
 
     /* Set self_handle for safe handle-based references */
-    SAFE_PTR(fd, JSFunctionDefHandle)->self_handle = SAFE_HANDLE(fd);
-    SAFE_PTR(fd, JSFunctionDefHandle)->ctx = ctx;
+    GC_SET(SAFE_PTR(fd, JSFunctionDefHandle)->self_handle, SAFE_HANDLE(fd));
+    GC_SET(SAFE_PTR(fd, JSFunctionDefHandle)->ctx, ctx);
     SAFE_PTR(fd, JSFunctionDefHandle)->link_idx = -1; /* not in parent's child list yet */
     
     /* Initialize break stack */
@@ -35556,7 +35128,7 @@ static JSFunctionDef *js_new_function_def(JSContextHandle ctx,
     SAFE_PTR(fd, JSFunctionDefHandle)->break_stack_handle = GC_HANDLE_NULL;
 
     /* insert in parent list */
-    SAFE_PTR(fd, JSFunctionDefHandle)->parent_handle = SAFE_HANDLE(parent_handle);
+    GC_SET(SAFE_PTR(fd, JSFunctionDefHandle)->parent_handle, SAFE_HANDLE(parent_handle));
     SAFE_PTR(fd, JSFunctionDefHandle)->parent_cpool_idx = -1;
     if (!SAFE_IS_NULL(parent_handle)) {
         SAFE_PTR(fd, JSFunctionDefHandle)->link_idx = SAFE_PTR(parent_handle, JSFunctionDefHandle)->child_handles.count;
@@ -36495,7 +36067,9 @@ static void create_frame_var_ref(JSContextHandle ctx, JSStackFrame *sf, int var_
         /* Allocate a small array - will be expanded if needed */
         GCHandle new_array = gc_alloc(sizeof(GCHandle) * 4, JS_GC_OBJ_TYPE_DATA);
         if (new_array == GC_HANDLE_NULL) return;
-        sf->var_refs_offset = (uint32_t)((uint8_t*)gc_deref(new_array) - (uint8_t*)sf);
+        /* The array is a separate object: keep its handle (an address
+         * difference between two objects breaks when either moves). */
+        GC_SET(sf->var_refs_handle, new_array);
         sf_var_refs = (GCHandle *)gc_deref(new_array);
         sf->var_ref_count = 4;
     }
@@ -36506,9 +36080,9 @@ static void create_frame_var_ref(JSContextHandle ctx, JSStackFrame *sf, int var_
         GCHandle new_array_handle = gc_alloc(sizeof(GCHandle) * new_count, JS_GC_OBJ_TYPE_DATA);
         if (new_array_handle == GC_HANDLE_NULL) return;
         GCHandle *new_array = (GCHandle *)gc_deref(new_array_handle);
-        memcpy(new_array, sf_var_refs, var_ref_count * sizeof(GCHandle));
+        gc_memcpy(new_array, sf_var_refs, var_ref_count * sizeof(GCHandle));
         memset(new_array + var_ref_count, 0, (new_count - var_ref_count) * sizeof(GCHandle));
-        sf->var_refs_offset = (uint32_t)((uint8_t*)new_array - (uint8_t*)sf);
+        GC_SET(sf->var_refs_handle, new_array_handle);
         sf->var_ref_count = new_count;
         sf_var_refs = new_array;
     }
@@ -37417,7 +36991,7 @@ static __exception int add_closure_variables(JSContextHandle ctx, JSFunctionDef 
     {
         GCHandle cv_handle = gc_alloc(sizeof(JSClosureVar) * count, JS_GC_OBJ_TYPE_DATA);
         gc_data_array_clear_and_free(&s->closure_var_handle);
-        s->closure_var_handle.handle = cv_handle;
+        GC_SET(s->closure_var_handle.handle, cv_handle);
     }
     if (s->closure_var_handle.handle == GC_HANDLE_NULL)
         return -1;
@@ -39834,7 +39408,7 @@ static GCValue js_create_function(JSContextHandle ctx, JSFunctionDef *fd)
                 goto fail;
             /* save it in the constant pool */
             assert(cpool_idx >= 0);
-            SAFE_AT(fd_cpool, GCValueHandle, cpool_idx) = func_obj;
+            GC_SET(SAFE_AT(fd_cpool, GCValueHandle, cpool_idx), func_obj);
         }
     }
 
@@ -40041,7 +39615,7 @@ static GCValue js_create_function(JSContextHandle ctx, JSFunctionDef *fd)
             SAFE_SET(b, JSFunctionBytecodeHandle, has_resume_parse_state, 1);
             JSLazyParseState* state = js_bc_resume_parse_state(b);
             if (state) {
-                memcpy(state, &fd->resume_parse_state, sizeof(JSLazyParseState));
+                gc_memcpy(state, &fd->resume_parse_state, sizeof(JSLazyParseState));
             }
         }
     }
@@ -40973,7 +40547,7 @@ static __exception int js_parse_function_decl2(JSParseState *s,
                     fd->lazy_source_len = lazy_len;
                     fd->lazy_source_line = line_num;
                     fd->lazy_source_col = col_num;
-                    fd->lazy_parent_scope = fd->parent_handle;
+                    GC_SET(fd->lazy_parent_scope, fd->parent_handle);
                     fd->lazy_is_async = (func_kind & JS_FUNC_ASYNC) != 0;
                     fd->lazy_is_generator = (func_kind & JS_FUNC_GENERATOR) != 0;
                     fd->lazy_func_kind = func_kind;
@@ -40987,7 +40561,7 @@ static __exception int js_parse_function_decl2(JSParseState *s,
                         memset(state, 0, sizeof(JSLazyParseState));
                         
                         /* Source position - store handle + offset */
-                        state->source_handle = root_source_handle;
+                        GC_SET(state->source_handle, root_source_handle);
                         state->source_offset = body_start - s->buf_start;
                         state->source_len = lazy_len;
                         state->token_offset = 0;  /* Token starts at body_start */
@@ -40996,13 +40570,13 @@ static __exception int js_parse_function_decl2(JSParseState *s,
                         state->col_num = col_num;
                         
                         /* Scope context */
-                        state->parent_scope_handle = fd->parent_handle;
+                        GC_SET(state->parent_scope_handle, fd->parent_handle);
                         {
                             JSFunctionDef *parent_fd = SAFE_PTR(fd->parent_handle, JSFunctionDefHandle);
                             state->parent_scope_level = parent_fd ? parent_fd->scope_level : 0;
                         }
-                        state->var_env_handle = s->var_env_handle;
-                        state->lexical_env_handle = s->lexical_env_handle;
+                        GC_SET(state->var_env_handle, s->var_env_handle);
+                        GC_SET(state->lexical_env_handle, s->lexical_env_handle);
                         
                         /* Function context */
                         state->func_name = JS_DupAtom(ctx, fd->func_name);
@@ -41022,7 +40596,7 @@ static __exception int js_parse_function_decl2(JSParseState *s,
                                     JSVarDefArrayHandle vd_arr = fd_args; int vd_idx = i;
                                     arg_names[i] = JS_DupAtom(ctx, SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name);
                                 }
-                                state->arg_names_handle = arg_names_handle;
+                                GC_SET(state->arg_names_handle, arg_names_handle);
                             } else {
                                 state->arg_names_handle = GC_HANDLE_NULL;
                             }
@@ -41032,8 +40606,8 @@ static __exception int js_parse_function_decl2(JSParseState *s,
                         
                         /* Class context if applicable */
                         if (s->cur_class_handle != GC_HANDLE_NULL) {
-                            state->class_handle = s->cur_class_handle;
-                            state->super_class_handle = s->cur_super_class_handle;
+                            GC_SET(state->class_handle, s->cur_class_handle);
+                            GC_SET(state->super_class_handle, s->cur_super_class_handle);
                             state->is_static_method = (func_type == JS_PARSE_FUNC_CLASS_STATIC_INIT);
                             state->is_derived_constructor = 
                                 (func_type == JS_PARSE_FUNC_DERIVED_CLASS_CONSTRUCTOR);
@@ -41152,7 +40726,7 @@ static __exception int js_parse_function_decl2(JSParseState *s,
                     fd->lazy_source_len = lazy_len;
                     fd->lazy_source_line = line_num;
                     fd->lazy_source_col = col_num;
-                    fd->lazy_parent_scope = fd->parent_handle;
+                    GC_SET(fd->lazy_parent_scope, fd->parent_handle);
                     fd->lazy_is_async = (func_kind & JS_FUNC_ASYNC) != 0;
                     fd->lazy_is_generator = FALSE;  /* Arrow functions cannot be generators */
                     fd->lazy_func_kind = func_kind;
@@ -41166,7 +40740,7 @@ static __exception int js_parse_function_decl2(JSParseState *s,
                         memset(state, 0, sizeof(JSLazyParseState));
                         
                         /* Source position - store handle + offset */
-                        state->source_handle = root_source_handle;
+                        GC_SET(state->source_handle, root_source_handle);
                         state->source_offset = expr_start - s->buf_start;
                         state->source_len = lazy_len;
                         state->token_offset = 0;  /* Token starts at expr_start */
@@ -41175,13 +40749,13 @@ static __exception int js_parse_function_decl2(JSParseState *s,
                         state->col_num = col_num;
                         
                         /* Scope context */
-                        state->parent_scope_handle = fd->parent_handle;
+                        GC_SET(state->parent_scope_handle, fd->parent_handle);
                         {
                             JSFunctionDef *parent_fd = SAFE_PTR(fd->parent_handle, JSFunctionDefHandle);
                             state->parent_scope_level = parent_fd ? parent_fd->scope_level : 0;
                         }
-                        state->var_env_handle = s->var_env_handle;
-                        state->lexical_env_handle = s->lexical_env_handle;
+                        GC_SET(state->var_env_handle, s->var_env_handle);
+                        GC_SET(state->lexical_env_handle, s->lexical_env_handle);
                         
                         /* Function context */
                         state->func_name = JS_DupAtom(ctx, fd->func_name);
@@ -41201,7 +40775,7 @@ static __exception int js_parse_function_decl2(JSParseState *s,
                                     JSVarDefArrayHandle vd_arr = fd_args; int vd_idx = i;
                                     arg_names[i] = JS_DupAtom(ctx, SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name);
                                 }
-                                state->arg_names_handle = arg_names_handle;
+                                GC_SET(state->arg_names_handle, arg_names_handle);
                             } else {
                                 state->arg_names_handle = GC_HANDLE_NULL;
                             }
@@ -41211,8 +40785,8 @@ static __exception int js_parse_function_decl2(JSParseState *s,
                         
                         /* Class context if applicable */
                         if (s->cur_class_handle != GC_HANDLE_NULL) {
-                            state->class_handle = s->cur_class_handle;
-                            state->super_class_handle = s->cur_super_class_handle;
+                            GC_SET(state->class_handle, s->cur_class_handle);
+                            GC_SET(state->super_class_handle, s->cur_super_class_handle);
                             state->is_static_method = FALSE;  /* Arrow functions in classes */
                             state->is_derived_constructor = FALSE;
                         }
@@ -41262,7 +40836,7 @@ static __exception int js_parse_function_decl2(JSParseState *s,
                 fd->source_len = s->last_ptr - ptr;
                 {
                     GCStringHandle source_handle = gc_strndup((const char *)ptr, fd->source_len);
-                    fd->source_string_handle = SAFE_HANDLE(source_handle);
+                    GC_SET(fd->source_string_handle, SAFE_HANDLE(source_handle));
                     if (fd->source_string_handle == GC_HANDLE_NULL)
                         goto fail;
                 }
@@ -41292,7 +40866,7 @@ static __exception int js_parse_function_decl2(JSParseState *s,
         fd->source_len = s->buf_ptr - ptr;
         {
             GCStringHandle source_handle = gc_strndup((const char *)ptr, fd->source_len);
-            fd->source_string_handle = SAFE_HANDLE(source_handle);
+            GC_SET(fd->source_string_handle, SAFE_HANDLE(source_handle));
             if (fd->source_string_handle == GC_HANDLE_NULL)
                 goto fail;
         }
@@ -41758,7 +41332,7 @@ static GCValue js_resume_lazy_parse(JSContextHandle ctx,
         JSLazyParseState *new_state = js_bc_resume_parse_state(new_b);
         if (new_state) {
             memset(new_state, 0, sizeof(JSLazyParseState));
-            new_state->parent_frame_handle = SAFE_GET_OR(p, JSObjectHandle, u.func.parent_frame_handle, GC_HANDLE_NULL);
+            GC_SET(new_state->parent_frame_handle, SAFE_GET_OR(p, JSObjectHandle, u.func.parent_frame_handle, GC_HANDLE_NULL));
         }
     }
     
@@ -41905,7 +41479,7 @@ static void js_parse_init(JSContextHandle ctx, JSParseState *s,
                           const char *filename, int eval_flags)
 {
     memset(s, 0, sizeof(*s));
-    s->ctx = ctx;
+    GC_SET(s->ctx, ctx);
     s->filename = filename;
     s->buf_start = s->buf_ptr = (const uint8_t *)input;
     s->buf_end = s->buf_ptr + input_len;
@@ -42021,7 +41595,7 @@ static GCValue __JS_EvalInternal(JSContextHandle ctx, GCValue this_obj,
     if (!fd)
         goto fail1;
     /* Store the GC-managed source handle for lazy function references */
-    fd->source_string_handle = SAFE_HANDLE(source_copy);
+    GC_SET(fd->source_string_handle, SAFE_HANDLE(source_copy));
     js_parse_set_cur_func(s, (JSFunctionDefHandle)(fd->self_handle));
     fd->eval_type = eval_type;
     fd->has_this_binding = (eval_type != JS_EVAL_TYPE_DIRECT);
@@ -42042,7 +41616,7 @@ static GCValue __JS_EvalInternal(JSContextHandle ctx, GCValue this_obj,
         if (add_closure_variables(ctx, fd, b, scope_idx))
             goto fail;
     }
-    fd->module = m;
+    GC_SET(fd->module, m);
     if (m != GC_HANDLE_NULL || (flags & JS_EVAL_FLAG_ASYNC)) {
         fd->in_function_body = TRUE;
         fd->func_kind = JS_FUNC_ASYNC;
@@ -42203,7 +41777,7 @@ static int js_object_list_resize_hash(JSContextHandle ctx, JSObjectList *s,
     uint32_t i, h;
     uint32_t *new_hash_table;
 
-    s->hash_table_handle = gc_alloc(sizeof(uint32_t) * new_hash_size, JS_GC_OBJ_TYPE_DATA);
+    GC_SET(s->hash_table_handle, gc_alloc(sizeof(uint32_t) * new_hash_size, JS_GC_OBJ_TYPE_DATA));
     if (s->hash_table_handle == GC_HANDLE_NULL)
         return -1;
     new_hash_table = jsol_hash_table_ptr(s);
@@ -42243,7 +41817,7 @@ static int js_object_list_add(JSContextHandle ctx, JSObjectList *s, GCHandle obj
     e = (&SAFE_AT(jsol_object_tab_handle, JSObjectListEntryArrayHandle, s->object_count++));
     hash_table = jsol_hash_table_ptr(s);
     h = js_object_list_get_hash(obj_handle, s->hash_size);
-    e->obj_handle = obj_handle;
+    GC_SET(e->obj_handle, obj_handle);
     e->hash_next = hash_table[h];
     hash_table[h] = s->object_count - 1;
     return 0;
@@ -43119,7 +42693,7 @@ uint8_t *JS_WriteObject2(JSContextHandle ctx, size_t *psize, GCValue obj,
     BCWriterState ss, *s = &ss;
 
     memset(s, 0, sizeof(*s));
-    s->ctx = ctx;
+    GC_SET(s->ctx, ctx);
     s->allow_bytecode = ((flags & JS_WRITE_OBJ_BYTECODE) != 0);
     s->allow_sab = ((flags & JS_WRITE_OBJ_SAB) != 0);
     s->allow_reference = ((flags & JS_WRITE_OBJ_REFERENCE) != 0);
@@ -43553,7 +43127,7 @@ static int BC_add_object_ref1(BCReaderState *s, JSObjectHandle p)
                                                       s->objects_count + 1);
         if (!s->objects)
             return -1;
-        s->objects[s->objects_count++] = p;
+        GC_SET(s->objects[s->objects_count++], p);
     }
     return 0;
 }
@@ -43814,7 +43388,7 @@ static GCValue JS_ReadModule(BCReaderState *s)
             val = JS_ReadObjectRec(s);
             if (JS_IsException(val))
                 goto fail;
-            rme->attributes = val;
+            GC_SET(rme->attributes, val);
         }
     }
 
@@ -44013,7 +43587,7 @@ static GCValue JS_ReadTypedArray(BCReaderState *s)
     if (JS_IsException(obj))
         goto fail;
     if (s->allow_reference) {
-        s->objects[idx] = JS_VALUE_GET_OBJ(obj);
+        GC_SET(s->objects[idx], JS_VALUE_GET_OBJ(obj));
     }
     
     return obj;
@@ -44322,7 +43896,7 @@ GCValue JS_ReadObject(JSContextHandle ctx, const uint8_t *buf, size_t buf_len,
     SAFE_SET(ctx, JSContextHandle, binary_object_size, SAFE_GET_OR(ctx, JSContextHandle, binary_object_size, 0) + buf_len);
 
     memset(s, 0, sizeof(*s));
-    s->ctx = ctx;
+    GC_SET(s->ctx, ctx);
     s->buf_start = buf;
     s->buf_end = buf + buf_len;
     s->ptr = buf;
@@ -45017,9 +44591,9 @@ static int js_obj_to_desc(JSContextHandle ctx, JSPropertyDescriptor *d,
         goto fail;
     }
     d->flags = flags;
-    d->value = val;
-    d->getter = getter;
-    d->setter = setter;
+    GC_SET(d->value, val);
+    GC_SET(d->getter, getter);
+    GC_SET(d->setter, setter);
     return 0;
  fail:
     
@@ -46164,11 +45738,11 @@ static GCValue *build_arg_list(JSContextHandle ctx, uint32_t *plen,
         len == SAFE_GET_OR(p, JSObjectHandle, u.array.count, 0)) {
         if (SAFE_GET_OR(p, JSObjectHandle, class_id, 0) == JS_CLASS_MAPPED_ARGUMENTS) {
             for(i = 0; i < len; i++) {
-                tab[i] = js_varref_get_value(js_varref_from_array(SAFE_GET_OR(p, JSObjectHandle, u.array.u.var_refs_handle, GC_HANDLE_NULL), i));
+                GC_SET(tab[i], js_varref_get_value(js_varref_from_array(SAFE_GET_OR(p, JSObjectHandle, u.array.u.var_refs_handle, GC_HANDLE_NULL), i)));
             }
         } else {
             for(i = 0; i < len; i++) {
-                tab[i] = p_array_values[i];
+                GC_SET(tab[i], p_array_values[i]);
             }
         }
     } else {
@@ -46178,7 +45752,7 @@ static GCValue *build_arg_list(JSContextHandle ctx, uint32_t *plen,
                 free_arg_list(ctx, tab, i);
                 return NULL;
             }
-            tab[i] = ret;
+            GC_SET(tab[i], ret);
         }
     }
     *plen = len;
@@ -47681,7 +47255,7 @@ static GCValue js_array_pop(JSContextHandle ctx, GCValue this_val,
             JSObjectHandle p = JS_VALUE_GET_OBJ(obj);
             if (shift) {
                 res = arrp[0];
-                memmove(arrp, arrp + 1, (count32 - 1) * sizeof(*arrp));
+                gc_memmove(arrp, arrp + 1, (count32 - 1) * sizeof(*arrp));
                 SAFE_SET(p, JSObjectHandle, u.array.count, SAFE_GET_OR(p, JSObjectHandle, u.array.count, 0) - 1);
             } else {
                 res = arrp[count32 - 1];
@@ -47796,8 +47370,8 @@ static GCValue js_array_reverse(JSContextHandle ctx, GCValue this_val,
         if (count32 > 1) {
             for (ll = 0, hh = count32 - 1; ll < hh; ll++, hh--) {
                 lval = arrp[ll];
-                arrp[ll] = arrp[hh];
-                arrp[hh] = lval;
+                GC_SET(arrp[ll], arrp[hh]);
+                GC_SET(arrp[hh], lval);
             }
         }
         return obj;
@@ -48057,17 +47631,17 @@ static GCValue js_array_toSpliced(JSContextHandle ctx, GCValue this_val,
 
     if (js_get_fast_array(ctx, obj, &arrp, &count32) && count32 == len) {
         for (i = 0; i < start; i++, pval++)
-            *pval = arrp[i];
+            GC_SET(*pval, arrp[i]);
         for (j = 0; j < add; j++, pval++)
-            *pval = argv[2 + j];
+            GC_SET(*pval, argv[2 + j]);
         for (i += del; i < len; i++, pval++)
-            *pval = arrp[i];
+            GC_SET(*pval, arrp[i]);
     } else {
         for (i = 0; i < start; i++, pval++)
             if (-1 == JS_TryGetPropertyInt64(ctx, obj, i, pval))
                 goto exception;
         for (j = 0; j < add; j++, pval++)
-            *pval = argv[2 + j];
+            GC_SET(*pval, argv[2 + j]);
         for (i += del; i < len; i++, pval++)
             if (-1 == JS_TryGetPropertyInt64(ctx, obj, i, pval))
                 goto exception;
@@ -48287,13 +47861,13 @@ static int js_array_cmp_generic(const void *a, const void *b, void *opaque) {
             GCValue str = JS_ToString(ctx, ap->val);
             if (JS_IsException(str))
                 goto exception;
-            ap->str = JS_VALUE_GET_STRING(str);
+            GC_SET(ap->str, JS_VALUE_GET_STRING(str));
         }
         if (!SAFE_VALID(bp->str)) {
             GCValue str = JS_ToString(ctx, bp->val);
             if (JS_IsException(str))
                 goto exception;
-            bp->str = JS_VALUE_GET_STRING(str);
+            GC_SET(bp->str, JS_VALUE_GET_STRING(str));
         }
         cmp = js_string_compare(ctx, ap->str, bp->str);
     }
@@ -48692,7 +48266,9 @@ static void js_iterator_concat_mark(JSRuntimeHandle rt, GCValue val,
         JS_MarkValue(rt, SAFE_GET_OR(it, JSIteratorConcatDataHandle, next, GC_UNDEFINED), mark_func);
         /* Access values through handle */
         GCValue *values = SAFE_GET_OR(it, JSIteratorConcatDataHandle, values, NULL);
-        for (int i = SAFE_GET_OR(it, JSIteratorConcatDataHandle, index, 0); i < SAFE_GET_OR(it, JSIteratorConcatDataHandle, count, 0); i++)
+        int n = gc_clamp_count(SAFE_GET_OR(it, JSIteratorConcatDataHandle, count, 0),
+                               gc_slots(SAFE_HANDLE(it), offsetof(JSIteratorConcatData, values), sizeof(GCValue)));
+        for (int i = SAFE_GET_OR(it, JSIteratorConcatDataHandle, index, 0); values && i >= 0 && i < n; i++)
             JS_MarkValue(rt, values[i], mark_func);
     }
 }
@@ -48836,9 +48412,9 @@ static GCValue js_iterator_concat(JSContextHandle ctx, GCValue this_val,
             
             goto fail;
         }
-        SAFE_GET_OR(it, JSIteratorConcatDataHandle, values, NULL)[SAFE_GET_OR(it, JSIteratorConcatDataHandle, count, 0)] = obj;
+        GC_SET(SAFE_GET_OR(it, JSIteratorConcatDataHandle, values, NULL)[SAFE_GET_OR(it, JSIteratorConcatDataHandle, count, 0)], obj);
         SAFE_SET(it, JSIteratorConcatDataHandle, count, SAFE_GET_OR(it, JSIteratorConcatDataHandle, count, 0) + 1);
-        SAFE_GET_OR(it, JSIteratorConcatDataHandle, values, NULL)[SAFE_GET_OR(it, JSIteratorConcatDataHandle, count, 0)] = method;
+        GC_SET(SAFE_GET_OR(it, JSIteratorConcatDataHandle, values, NULL)[SAFE_GET_OR(it, JSIteratorConcatDataHandle, count, 0)], method);
         SAFE_SET(it, JSIteratorConcatDataHandle, count, SAFE_GET_OR(it, JSIteratorConcatDataHandle, count, 0) + 1);
     }
     obj = JS_NewObjectClass(ctx, JS_CLASS_ITERATOR_CONCAT);
@@ -50030,7 +49606,7 @@ static int js_string_get_own_property(JSContextHandle ctx,
                 if (desc) {
                     ch = string_get(p1, idx);
                     desc->flags = JS_PROP_ENUMERABLE;
-                    desc->value = js_new_string_char(ctx, ch);
+                    GC_SET(desc->value, js_new_string_char(ctx, ch));
                     desc->getter = JS_UNDEFINED;
                     desc->setter = JS_UNDEFINED;
                 }
@@ -52899,7 +52475,7 @@ void *lre_realloc(void *opaque, void *ptr, size_t size)
         GCHandle h = gc_alloc(sizeof(GCHandle) + size, JS_GC_OBJ_TYPE_DATA);
         if (h == GC_HANDLE_NULL) return NULL;
         void *data = gc_deref_unsafe(h);  /* Safe: immediately store handle below */
-        *(GCHandle*)data = h;
+        *(GCHandle*)data = h;  /* gc-no-dirty: the buffer's own handle */
         return (uint8_t*)data + sizeof(GCHandle);
     } else {
         /* Realloc: read handle from header */
@@ -52907,7 +52483,7 @@ void *lre_realloc(void *opaque, void *ptr, size_t size)
         GCHandle h = gc_realloc_handle(*(GCHandle*)header, sizeof(GCHandle) + size);
         if (h == GC_HANDLE_NULL) return NULL;
         void *data = gc_deref_unsafe(h);  /* Safe: immediately store handle below */
-        *(GCHandle*)data = h;
+        *(GCHandle*)data = h;  /* gc-no-dirty: the buffer's own handle */
         return (uint8_t*)data + sizeof(GCHandle);
     }
 }
@@ -53183,7 +52759,7 @@ static GCValue js_regexp_exec(JSContextHandle ctx, GCValue this_val,
                 JS_FreeAtom(ctx, group_name);
                 group_name = JS_ATOM_NULL;
             }
-            ((GCValue *)gc_deref(SAFE_GET_OR(p_obj, JSObjectHandle, u.array.u.values_handle, GC_HANDLE_NULL)))[SAFE_GET_OR(p_obj, JSObjectHandle, u.array.count, 0)] = val;
+            GC_SET(((GCValue *)gc_deref(SAFE_GET_OR(p_obj, JSObjectHandle, u.array.u.values_handle, GC_HANDLE_NULL)))[SAFE_GET_OR(p_obj, JSObjectHandle, u.array.count, 0)], val);
             SAFE_SET(p_obj, JSObjectHandle, u.array.count, SAFE_GET_OR(p_obj, JSObjectHandle, u.array.count, 0) + 1);
         }
 
@@ -53617,7 +53193,7 @@ static inline BOOL value_buffer_is_def(ValueBuffer *b)
 
 static int value_buffer_init(JSContextHandle ctx, ValueBuffer *b)
 {
-    b->ctx = ctx;
+    GC_SET(b->ctx, ctx);
     b->len = 0;
     b->size = 4;
     b->error_status = 0;
@@ -53645,7 +53221,7 @@ static int value_buffer_append(ValueBuffer *b, GCValue val)
 
         if (value_buffer_is_def(b)) {
             /* First allocation: moving from inline array to GC heap */
-            b->arr_handle = gc_realloc2(0, sizeof(GCValue) * new_size, &slack);
+            b->arr_handle = gc_realloc2(0, sizeof(GCValue) * new_size, &slack);  /* gc-no-dirty: ValueBuffer lives on the C stack */
             if (b->arr_handle == GC_HANDLE_NULL) {
                 value_buffer_free(b);
                 b->error_status = -1;
@@ -53653,10 +53229,10 @@ static int value_buffer_append(ValueBuffer *b, GCValue val)
                 return -1;
             }
             new_arr = ((GCValue *)gc_deref(b->arr_handle));
-            memcpy(new_arr, b->def, sizeof b->def);
+            gc_memcpy(new_arr, b->def, sizeof b->def);
         } else {
             /* Reallocation: use stored handle */
-            b->arr_handle = gc_realloc2(b->arr_handle, sizeof(GCValue) * new_size, &slack);
+            b->arr_handle = gc_realloc2(b->arr_handle, sizeof(GCValue) * new_size, &slack);  /* gc-no-dirty: ValueBuffer lives on the C stack */
             if (b->arr_handle == GC_HANDLE_NULL) {
                 value_buffer_free(b);
                 b->error_status = -1;
@@ -53668,7 +53244,7 @@ static int value_buffer_append(ValueBuffer *b, GCValue val)
         new_size += slack / sizeof(GCValue);
         b->size = new_size;
     }
-    value_buffer_arr(b)[b->len++] = val;
+    GC_SET(value_buffer_arr(b)[b->len++], val);
     return 0;
 }
 
@@ -54184,10 +53760,9 @@ int JS_AddIntrinsicRegExp(JSContextHandle ctx)
         return -1;
     SAFE_SET_VALUE(ctx, JSContextHandle, regexp_ctor, obj);
     
-    ctx_class_proto[JS_CLASS_REGEXP_STRING_ITERATOR] =
-        JS_NewObjectProtoList(ctx, ctx_class_proto[JS_CLASS_ITERATOR],
+    GC_SET(ctx_class_proto[JS_CLASS_REGEXP_STRING_ITERATOR], JS_NewObjectProtoList(ctx, ctx_class_proto[JS_CLASS_ITERATOR],
                               js_regexp_string_iterator_proto_funcs,
-                              countof(js_regexp_string_iterator_proto_funcs));
+                              countof(js_regexp_string_iterator_proto_funcs)));
     if (JS_IsException(ctx_class_proto[JS_CLASS_REGEXP_STRING_ITERATOR]))
         return -1;
 
@@ -54837,23 +54412,23 @@ GCValue JS_JSONStringify(JSContextHandle ctx, GCValue obj,
     jsc->property_list = JS_UNDEFINED;
     jsc->gap = JS_UNDEFINED;
     jsc->b = &b_s;
-    jsc->empty = JS_AtomToString(ctx, JS_ATOM_empty_string);
+    GC_SET(jsc->empty, JS_AtomToString(ctx, JS_ATOM_empty_string));
     ret = JS_UNDEFINED;
     wrapper = JS_UNDEFINED;
 
     string_buffer_init(ctx, jsc->b, 0);
-    jsc->stack = JS_NewArray(ctx);
+    GC_SET(jsc->stack, JS_NewArray(ctx));
     if (JS_IsException(jsc->stack))
         goto exception;
     if (JS_IsFunction(ctx, replacer)) {
-        jsc->replacer_func = replacer;
+        GC_SET(jsc->replacer_func, replacer);
     } else {
         res = JS_IsArray(ctx, replacer);
         if (res < 0)
             goto exception;
         if (res) {
             /* XXX: enumeration is not fully correct */
-            jsc->property_list = JS_NewArray(ctx);
+            jsc->property_list = JS_NewArray(ctx);  /* gc-no-dirty: stringify context on the C stack */
             if (JS_IsException(jsc->property_list))
                 goto exception;
             if (js_get_length64(ctx, &n, replacer))
@@ -54913,12 +54488,12 @@ GCValue JS_JSONStringify(JSContextHandle ctx, GCValue obj,
         int n;
         if (JS_ToInt32Clamp(ctx, &n, space, 0, 10, 0))
             goto exception;
-        jsc->gap = js_new_string8_len(ctx, "          ", n);
+        GC_SET(jsc->gap, js_new_string8_len(ctx, "          ", n));
     } else if (JS_IsString(space)) {
         JSStringHandle p = JS_VALUE_GET_STRING(space);
-        jsc->gap = js_sub_string(ctx, p, 0, min_int(SAFE_GET_OR(p, JSStringHandle, len, 0), 10));
+        GC_SET(jsc->gap, js_sub_string(ctx, p, 0, min_int(SAFE_GET_OR(p, JSStringHandle, len, 0), 10)));
     } else {
-        jsc->gap = jsc->empty;
+        GC_SET(jsc->gap, jsc->empty);
     }
     
     if (JS_IsException(jsc->gap))
@@ -55202,7 +54777,7 @@ static JSProxyDataHandle get_proxy_method(JSContextHandle ctx, GCValue *pmethod,
         return GC_HANDLE_NULL;
     if (JS_IsNull(method))
         method = JS_UNDEFINED;
-    *pmethod = method;
+    GC_SET(*pmethod, method);
     return s;
 }
 
@@ -55628,7 +55203,7 @@ static int js_proxy_get_own_property(JSContextHandle ctx, JSPropertyDescriptor *
         }
         ret = TRUE;
         if (pdesc) {
-            *pdesc = result_desc;
+            GC_SET(*pdesc, result_desc);
         } else {
             js_free_desc(ctx, &result_desc);
         }
@@ -56006,7 +55581,7 @@ static int js_resolve_proxy(JSContextHandle ctx, GCValue *pval, BOOL throw_excep
                 JS_ThrowTypeErrorRevokedProxy(ctx);
             return -1;
         }
-        *pval = SAFE_GET_OR(s, JSProxyDataHandle, target, GC_UNDEFINED);
+        GC_SET(*pval, SAFE_GET_OR(s, JSProxyDataHandle, target, GC_UNDEFINED));
     }
     return 0;
 }
@@ -56634,7 +56209,7 @@ static JSMapRecord *map_add_record(JSContextHandle ctx, JSMapStateHandle s,
     mr = SAFE_PTR(mr_h, JSMapRecordHandle);
     if (!mr)
         return NULL;
-    mr->self_handle = mr_handle;
+    GC_SET(mr->self_handle, mr_handle);
     mr->ref_count = 1;
     mr->empty = FALSE;
     if (SAFE_GET_OR(s, JSMapStateHandle, is_weak, false)) {
@@ -56854,7 +56429,7 @@ static void map_delete_weakrefs(JSRuntimeHandle rt, JSMapStateHandle s_h)
                     }
                     /* remove from the hash table */
                     if (mr1)
-                        *pmr_handle = mr1->hash_next_handle;
+                        GC_SET(*pmr_handle, mr1->hash_next_handle);
                 }
             }
             map_delete_record_internal(rt, s_h, mr);
@@ -56945,7 +56520,7 @@ static GCValue map_delete_record(JSContextHandle ctx, JSMapStateHandle s, GCValu
     }
 
     /* remove from the hash table */
-    *pmr_handle = mr->hash_next_handle;
+    GC_SET(*pmr_handle, mr->hash_next_handle);
     
     map_delete_record_internal(ctx_rt, s, mr);
     return JS_TRUE;
@@ -56984,7 +56559,7 @@ static GCValue map_delete_record_handle(JSContextHandle ctx, JSMapStateHandle s,
     }
     
     /* remove from the hash table */
-    *pmr_handle = mr->hash_next_handle;
+    GC_SET(*pmr_handle, mr->hash_next_handle);
     
     map_delete_record_internal(ctx_rt, s, mr);
     return JS_TRUE;
@@ -57493,8 +57068,8 @@ static int get_set_record(JSContextHandle ctx, GCValue obj,
         goto exception;
     }
     *psize = size;
-    *phas = has;
-    *pkeys = keys;
+    GC_SET(*phas, has);
+    GC_SET(*pkeys, keys);
     return 0;
 
  exception:
@@ -58084,10 +57659,9 @@ int JS_AddIntrinsicMapSet(JSContextHandle ctx)
     }
 
     for(i = 0; i < 2; i++) {
-        ctx_class_proto[JS_CLASS_MAP_ITERATOR + i] =
-            JS_NewObjectProtoList(ctx, ctx_class_proto[JS_CLASS_ITERATOR], 
+        GC_SET(ctx_class_proto[JS_CLASS_MAP_ITERATOR + i], JS_NewObjectProtoList(ctx, ctx_class_proto[JS_CLASS_ITERATOR], 
                                   js_map_proto_funcs_ptr[i + 4],
-                                  js_map_proto_funcs_count[i + 4]);
+                                  js_map_proto_funcs_count[i + 4]));
         if (JS_IsException(ctx_class_proto[JS_CLASS_MAP_ITERATOR + i]))
             return -1;
     }
@@ -58334,7 +57908,7 @@ static int js_create_resolving_functions(JSContextHandle ctx,
         SAFE_SET_VALUE(s, JSPromiseFunctionDataHandle, promise, promise);
         JS_SetOpaqueHandle(obj, s_handle);
         js_function_set_properties(ctx, obj, JS_ATOM_empty_string, 1);
-        resolving_funcs[i] = obj;
+        GC_SET(resolving_funcs[i], obj);
     }
     js_promise_resolve_function_free_resolved(ctx_rt, sr);
     return ret;
@@ -58519,7 +58093,7 @@ static GCValue js_promise_executor(JSContextHandle ctx,
     for(i = 0; i < 2; i++) {
         if (!JS_IsUndefined(func_data[i]))
             return JS_ThrowTypeError(ctx, "resolving function already set");
-        func_data[i] = argv[i];
+        GC_SET(func_data[i], argv[i]);
     }
     return JS_UNDEFINED;
 }
@@ -58568,7 +58142,7 @@ static GCValue js_new_promise_capability(JSContextHandle ctx,
             goto fail;
     }
     for(i = 0; i < 2; i++)
-        resolving_funcs[i] = s->data[i];
+        GC_SET(resolving_funcs[i], s->data[i]);
     
     return result_promise;
  fail:
@@ -59493,18 +59067,16 @@ int JS_AddIntrinsicPromise(JSContextHandle ctx)
         return -1;
 
     /* AsyncFromSyncIteratorPrototype */
-    ctx_class_proto[JS_CLASS_ASYNC_FROM_SYNC_ITERATOR] =
-        JS_NewObjectProtoList(ctx, SAFE_GET_OR(ctx, JSContextHandle, async_iterator_proto, GC_UNDEFINED),
+    GC_SET(ctx_class_proto[JS_CLASS_ASYNC_FROM_SYNC_ITERATOR], JS_NewObjectProtoList(ctx, SAFE_GET_OR(ctx, JSContextHandle, async_iterator_proto, GC_UNDEFINED),
                               js_async_from_sync_iterator_proto_funcs,
-                              countof(js_async_from_sync_iterator_proto_funcs));
+                              countof(js_async_from_sync_iterator_proto_funcs)));
     if (JS_IsException(ctx_class_proto[JS_CLASS_ASYNC_FROM_SYNC_ITERATOR]))
         return -1;
     
     /* AsyncGeneratorPrototype */
-    ctx_class_proto[JS_CLASS_ASYNC_GENERATOR] =
-        JS_NewObjectProtoList(ctx, SAFE_GET_OR(ctx, JSContextHandle, async_iterator_proto, GC_UNDEFINED), 
+    GC_SET(ctx_class_proto[JS_CLASS_ASYNC_GENERATOR], JS_NewObjectProtoList(ctx, SAFE_GET_OR(ctx, JSContextHandle, async_iterator_proto, GC_UNDEFINED), 
                               js_async_generator_proto_funcs,
-                              countof(js_async_generator_proto_funcs));
+                              countof(js_async_generator_proto_funcs)));
     if (JS_IsException(ctx_class_proto[JS_CLASS_ASYNC_GENERATOR]))
         return -1;
 
@@ -61286,7 +60858,7 @@ static int JS_AddIntrinsicBasicObjects(JSContextHandle ctx)
             QJS_LOGE("JS_AddIntrinsicBasicObjects: native error %d constructor failed!", i);
             return -1;
         }
-        SAFE_GET_OR(ctx, JSContextHandle, native_error_proto, NULL)[i] = JS_GetProperty(ctx, func_obj, JS_ATOM_prototype);
+        GC_SET(SAFE_GET_OR(ctx, JSContextHandle, native_error_proto, NULL)[i], JS_GetProperty(ctx, func_obj, JS_ATOM_prototype));
         
         if (JS_IsException(SAFE_GET_OR(ctx, JSContextHandle, native_error_proto, NULL)[i])) {
             QJS_LOGE("JS_AddIntrinsicBasicObjects: native error %d prototype failed!", i);
@@ -61461,23 +61033,20 @@ int JS_AddIntrinsicBaseObjects(JSContextHandle ctx)
     
     SAFE_SET_VALUE(ctx, JSContextHandle, iterator_ctor, obj2);
     
-    ctx_class_proto[JS_CLASS_ITERATOR_CONCAT] =
-        JS_NewObjectProtoList(ctx, ctx_class_proto[JS_CLASS_ITERATOR], 
+    GC_SET(ctx_class_proto[JS_CLASS_ITERATOR_CONCAT], JS_NewObjectProtoList(ctx, ctx_class_proto[JS_CLASS_ITERATOR], 
                               js_iterator_concat_proto_funcs,
-                              countof(js_iterator_concat_proto_funcs));
+                              countof(js_iterator_concat_proto_funcs)));
     if (JS_IsException(ctx_class_proto[JS_CLASS_ITERATOR_CONCAT]))
         return -1;
-    ctx_class_proto[JS_CLASS_ITERATOR_HELPER] =
-        JS_NewObjectProtoList(ctx, ctx_class_proto[JS_CLASS_ITERATOR], 
+    GC_SET(ctx_class_proto[JS_CLASS_ITERATOR_HELPER], JS_NewObjectProtoList(ctx, ctx_class_proto[JS_CLASS_ITERATOR], 
                               js_iterator_helper_proto_funcs,
-                              countof(js_iterator_helper_proto_funcs));
+                              countof(js_iterator_helper_proto_funcs)));
     if (JS_IsException(ctx_class_proto[JS_CLASS_ITERATOR_HELPER]))
         return -1;
                        
-    ctx_class_proto[JS_CLASS_ITERATOR_WRAP] =
-        JS_NewObjectProtoList(ctx, ctx_class_proto[JS_CLASS_ITERATOR], 
+    GC_SET(ctx_class_proto[JS_CLASS_ITERATOR_WRAP], JS_NewObjectProtoList(ctx, ctx_class_proto[JS_CLASS_ITERATOR], 
                               js_iterator_wrap_proto_funcs,
-                              countof(js_iterator_wrap_proto_funcs));
+                              countof(js_iterator_wrap_proto_funcs)));
     if (JS_IsException(ctx_class_proto[JS_CLASS_ITERATOR_WRAP]))
         return -1;
 
@@ -61486,10 +61055,9 @@ int JS_AddIntrinsicBaseObjects(JSContextHandle ctx)
     if (JS_IsException(SAFE_GET_OR(ctx, JSContextHandle, array_proto_values, GC_UNDEFINED)))
         return -1;
 
-    ctx_class_proto[JS_CLASS_ARRAY_ITERATOR] =
-        JS_NewObjectProtoList(ctx, ctx_class_proto[JS_CLASS_ITERATOR], 
+    GC_SET(ctx_class_proto[JS_CLASS_ARRAY_ITERATOR], JS_NewObjectProtoList(ctx, ctx_class_proto[JS_CLASS_ITERATOR], 
                               js_array_iterator_proto_funcs,
-                              countof(js_array_iterator_proto_funcs));
+                              countof(js_array_iterator_proto_funcs)));
     if (JS_IsException(ctx_class_proto[JS_CLASS_ARRAY_ITERATOR]))
         return -1;
 
@@ -61539,10 +61107,9 @@ int JS_AddIntrinsicBaseObjects(JSContextHandle ctx)
     if (JS_SetObjectData(ctx, ctx_class_proto[JS_CLASS_STRING], JS_AtomToString(ctx, JS_ATOM_empty_string)))
         return -1;
 
-    ctx_class_proto[JS_CLASS_STRING_ITERATOR] =
-        JS_NewObjectProtoList(ctx, ctx_class_proto[JS_CLASS_ITERATOR], 
+    GC_SET(ctx_class_proto[JS_CLASS_STRING_ITERATOR], JS_NewObjectProtoList(ctx, ctx_class_proto[JS_CLASS_ITERATOR], 
                               js_string_iterator_proto_funcs,
-                              countof(js_string_iterator_proto_funcs));
+                              countof(js_string_iterator_proto_funcs)));
     if (JS_IsException(ctx_class_proto[JS_CLASS_STRING_ITERATOR]))
         return -1;
 
@@ -61567,10 +61134,9 @@ int JS_AddIntrinsicBaseObjects(JSContextHandle ctx)
     
     
     /* ES6 Generator */
-    ctx_class_proto[JS_CLASS_GENERATOR] =
-        JS_NewObjectProtoList(ctx, ctx_class_proto[JS_CLASS_ITERATOR],
+    GC_SET(ctx_class_proto[JS_CLASS_GENERATOR], JS_NewObjectProtoList(ctx, ctx_class_proto[JS_CLASS_ITERATOR],
                               js_generator_proto_funcs,
-                              countof(js_generator_proto_funcs));
+                              countof(js_generator_proto_funcs)));
     if (JS_IsException(ctx_class_proto[JS_CLASS_GENERATOR]))
         return -1;
 
@@ -61665,7 +61231,9 @@ static GCValue js_array_buffer_constructor3(JSContextHandle ctx,
             memset(js_abuf_data(abuf), 0, sab_alloc_len);
         } else {
             /* the allocation must be done after the object creation */
-            SAFE_SET_HANDLE(abuf, JSArrayBufferHandle, data_handle, gc_allocz(max_int(len, 1), JS_GC_OBJ_TYPE_DATA));
+            /* BYTES: never moved, since the buffer and its typed arrays cache
+             * the data address. */
+            SAFE_SET_HANDLE(abuf, JSArrayBufferHandle, data_handle, gc_allocz(max_int(len, 1), JS_GC_OBJ_TYPE_BYTES));
             if (SAFE_GET_OR(abuf, JSArrayBufferHandle, data_handle, GC_HANDLE_NULL) == GC_HANDLE_NULL)
                 goto fail;
             SAFE_SET(abuf, JSArrayBufferHandle, data, ((uint8_t *)gc_deref(SAFE_GET_OR(abuf, JSArrayBufferHandle, data_handle, GC_HANDLE_NULL))));
@@ -65752,6 +65320,7 @@ bool js_object_set_property_value_atomic(JSContextHandle ctx, GCHandle obj_handl
         uint64_t low, high;
         gcvalue_to_raw(val, &low, &high);
         atomic_store_128((volatile uint64_t *)&slot->u.value, low, high);
+        gc_dirty_slot(&slot->u.value);
 
         uint32_t v1 = js_obj_prop_version(p);
         if (v1 == v0) {
@@ -65789,7 +65358,7 @@ bool js_object_cas_property_value_atomic(JSContextHandle ctx, GCHandle obj_handl
                                                    &exp_low, &exp_high,
                                                    des_low, des_high);
         if (out_actual)
-            *out_actual = raw_to_gcvalue(exp_low, exp_high);
+            GC_SET(*out_actual, raw_to_gcvalue(exp_low, exp_high));
 
         uint32_t v1 = js_obj_prop_version(p);
         if (v1 == v0) {
@@ -65859,6 +65428,7 @@ void js_ctx_class_proto_set(JSContextHandle ctx, JSClassID class_id, GCValue val
         uint64_t low, high;
         gcvalue_to_raw(val, &low, &high);
         atomic_store_128((volatile uint64_t *)&tab[class_id], low, high);
+        gc_dirty_slot(&tab[class_id]);
         GCHandle target = GC_VALUE_GET_HANDLE(val);
         if (target != GC_HANDLE_NULL)
             gc_write_barrier_for_heap_slot(&tab[class_id], target);

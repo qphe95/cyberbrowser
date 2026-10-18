@@ -436,7 +436,7 @@ GCValue js_element_attach_shadow(JSContextHandle ctx, GCValue this_val, int argc
             JS_ToUint32(ctx, &len, len_val);
             GCValue *children = (GCValue*)malloc(sizeof(GCValue) * (len ? len : 1));
             for (uint32_t i = 0; i < len; i++) {
-                children[i] = JS_GetPropertyUint32(ctx, fragment_children, i);
+                GC_SET(children[i], JS_GetPropertyUint32(ctx, fragment_children, i));
             }
             for (uint32_t i = 0; i < len; i++) {
                 GCValue append_args[1] = { children[i] };

@@ -584,7 +584,10 @@ GCValue js_html_element_constructor(JSContextHandle ctx, GCValue new_target, int
     (void)argc; (void)argv;
     g_html_elem_ctor_count++;
     if (g_html_elem_ctor_count % 500 == 0) {
-        JS_RunGC(JS_GetRuntime(ctx));
+        /* Ask the background collector for a cycle; without one, collect
+         * now. */
+        if (gc_is_background()) gc_request_cycle(true);
+        else JS_RunGC(JS_GetRuntime(ctx));
     }
     // Only enforce the per-upgrade budget when we are actually inside an
     // upgrade.  Ordinary `new HTMLElement()` calls outside the upgrade path
@@ -1008,7 +1011,7 @@ GCValue js_reflect_construct(JSContextHandle ctx, GCValue this_val, int argc, GC
     // Build arguments array
     GCValue *args = (GCValue*)malloc(sizeof(GCValue) * args_len);
     for (uint32_t i = 0; i < args_len; i++) {
-        args[i] = JS_GetPropertyUint32(ctx, args_array, i);
+        GC_SET(args[i], JS_GetPropertyUint32(ctx, args_array, i));
     }
     
     // Call constructor with the explicit new.target so that subclasses of
@@ -1041,7 +1044,7 @@ GCValue js_reflect_apply(JSContextHandle ctx, GCValue this_val, int argc, GCValu
     // Build arguments array
     GCValue *args = (GCValue*)malloc(sizeof(GCValue) * args_len);
     for (uint32_t i = 0; i < args_len; i++) {
-        args[i] = JS_GetPropertyUint32(ctx, args_array, i);
+        GC_SET(args[i], JS_GetPropertyUint32(ctx, args_array, i));
     }
     
     // Call function

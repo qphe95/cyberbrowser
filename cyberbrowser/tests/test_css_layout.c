@@ -29,7 +29,7 @@ TEST(test_layout_basic_document) {
     HtmlDocument *doc = html_parse(html, strlen(html));
     ASSERT_TRUE(doc != NULL);
 
-    LayoutContext ctx;
+    LayoutContext ctx = {0};
     ASSERT_TRUE(css_layout_run(&ctx, doc, NULL, 800.0, 600.0));
 
     ASSERT_TRUE(ctx.tree.count >= 3);
@@ -56,7 +56,7 @@ TEST(test_layout_stylesheet) {
     ASSERT_TRUE(sheet != NULL);
 
     printf("    [layout stylesheet] run layout\n");
-    LayoutContext ctx;
+    LayoutContext ctx = {0};
     ASSERT_TRUE(css_layout_run(&ctx, doc, sheet, 800.0, 600.0));
     printf("    [layout stylesheet] layout ok\n");
 
@@ -90,7 +90,7 @@ TEST(test_layout_auto_height) {
     HtmlDocument *doc = html_parse(html, strlen(html));
     ASSERT_TRUE(doc != NULL);
 
-    LayoutContext ctx;
+    LayoutContext ctx = {0};
     ASSERT_TRUE(css_layout_run(&ctx, doc, NULL, 800.0, 600.0));
 
     HtmlNode *div = html_document_get_element_by_tag(doc, "div");
@@ -116,7 +116,7 @@ TEST(test_layout_box_sizing_content_box) {
     CssStylesheet *sheet = css_stylesheet_parse(css, strlen(css));
     ASSERT_TRUE(sheet != NULL);
 
-    LayoutContext ctx;
+    LayoutContext ctx = {0};
     ASSERT_TRUE(css_layout_run(&ctx, doc, sheet, 800.0, 600.0));
 
     HtmlNode *div = html_document_get_element_by_tag(doc, "div");
@@ -143,7 +143,7 @@ TEST(test_layout_box_sizing_border_box) {
     CssStylesheet *sheet = css_stylesheet_parse(css, strlen(css));
     ASSERT_TRUE(sheet != NULL);
 
-    LayoutContext ctx;
+    LayoutContext ctx = {0};
     ASSERT_TRUE(css_layout_run(&ctx, doc, sheet, 800.0, 600.0));
 
     HtmlNode *div = html_document_get_element_by_tag(doc, "div");
@@ -170,7 +170,7 @@ TEST(test_layout_box_sizing_min_max) {
     CssStylesheet *sheet = css_stylesheet_parse(css, strlen(css));
     ASSERT_TRUE(sheet != NULL);
 
-    LayoutContext ctx;
+    LayoutContext ctx = {0};
     ASSERT_TRUE(css_layout_run(&ctx, doc, sheet, 800.0, 600.0));
 
     HtmlNode *div = html_document_get_element_by_tag(doc, "div");
@@ -200,7 +200,7 @@ TEST(test_layout_flex_box_sizing) {
     CssStylesheet *sheet = css_stylesheet_parse(css, strlen(css));
     ASSERT_TRUE(sheet != NULL);
 
-    LayoutContext ctx;
+    LayoutContext ctx = {0};
     ASSERT_TRUE(css_layout_run(&ctx, doc, sheet, 800.0, 600.0));
 
     HtmlNode *flex = html_document_get_element_by_id(doc, "flex");
@@ -237,7 +237,7 @@ TEST(test_layout_flex_basis_box_sizing) {
     CssStylesheet *sheet = css_stylesheet_parse(css, strlen(css));
     ASSERT_TRUE(sheet != NULL);
 
-    LayoutContext ctx;
+    LayoutContext ctx = {0};
     ASSERT_TRUE(css_layout_run(&ctx, doc, sheet, 800.0, 600.0));
 
     HtmlNode *item = html_document_get_element_by_id(doc, "item");
@@ -257,7 +257,7 @@ TEST(test_layout_display_list) {
     HtmlDocument *doc = html_parse(html, strlen(html));
     ASSERT_TRUE(doc != NULL);
 
-    LayoutContext ctx;
+    LayoutContext ctx = {0};
     ASSERT_TRUE(css_layout_run(&ctx, doc, NULL, 800.0, 600.0));
 
     DisplayList dl;
@@ -318,7 +318,7 @@ TEST(test_layout_background_image_url) {
     HtmlDocument *doc = html_parse(html, strlen(html));
     ASSERT_TRUE(doc != NULL);
 
-    LayoutContext ctx;
+    LayoutContext ctx = {0};
     ASSERT_TRUE(css_layout_run(&ctx, doc, NULL, 800.0, 600.0));
 
     HtmlNode *div = html_document_get_element_by_tag(doc, "div");
@@ -341,7 +341,7 @@ TEST(test_layout_img_display_list) {
     HtmlDocument *doc = html_parse(html, strlen(html));
     ASSERT_TRUE(doc != NULL);
 
-    LayoutContext ctx;
+    LayoutContext ctx = {0};
     ASSERT_TRUE(css_layout_run(&ctx, doc, NULL, 800.0, 600.0));
     /* Use an empty base URL so the relative image path is passed through to the
      * local image cache as-is. */
@@ -439,7 +439,7 @@ TEST(test_dom_mutation_sync_to_native) {
     printf("    [mutation] html doc built\n");
     ASSERT_TRUE(doc != NULL);
 
-    LayoutContext ctx_layout;
+    LayoutContext ctx_layout = {0};
     ASSERT_TRUE(css_layout_run(&ctx_layout, doc, NULL, 800.0, 600.0));
     printf("    [mutation] layout done\n");
 
