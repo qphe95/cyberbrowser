@@ -474,8 +474,19 @@ typedef struct JSStackFrame {
  * JSStackFrame Helper Macros (GC-safe accessors)
  * ============================================================================ */
 
+/* Resolve a frame handle to its JSStackFrame.  A frame handle is either a
+ * standalone JS_GC_OBJ_TYPE_STACK_FRAME allocation (the frame is the object)
+ * or a generator/async function state (the frame is embedded in it). */
+#ifdef __cplusplus
+extern "C" {
+#endif
+struct JSStackFrame *js_frame_deref(GCHandle frame_handle);
+#ifdef __cplusplus
+}
+#endif
+
 /* Get pointer to frame base from handle */
-#define JS_SF_BASE(sf_handle) ((JSStackFrame*)gc_deref(sf_handle))
+#define JS_SF_BASE(sf_handle) js_frame_deref(sf_handle)
 
 /* Access buffers using offsets */
 #define JS_SF_ARG_BUF(sf) ((GCValue*)((uint8_t*)(sf) + (sf)->arg_buf_offset))
@@ -485,8 +496,7 @@ typedef struct JSStackFrame {
 #define JS_SF_STACK_BUF(sf) ((GCValue*)((uint8_t*)(sf) + (sf)->stack_buf_offset))
 
 /* Access previous frame */
-#define JS_SF_PREV(sf) ((sf)->prev_frame_handle != GC_HANDLE_NULL ? \
-    (JSStackFrame*)gc_deref((sf)->prev_frame_handle) : NULL)
+#define JS_SF_PREV(sf) js_frame_deref((sf)->prev_frame_handle)
 
 /* Forward declaration for bytecode buffer accessor (takes GCHandle) */
 #ifdef __cplusplus

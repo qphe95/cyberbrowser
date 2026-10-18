@@ -1,8 +1,12 @@
+#if !defined(_WIN32) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE  /* pthread_getattr_np */
+#endif
 #include <stdlib.h>
 #include <stddef.h>
 #include <string.h>
 #include <assert.h>
 #include <stdio.h>
+#include <setjmp.h>
 #ifdef BE_PLATFORM_ANDROID
 #include <android/log.h>
 #endif
@@ -78,6 +82,7 @@ void browser_api_impl_reset(void);
     /* Stack frame marking */
     typedef struct JSStackFrame JSStackFrame;
     JSStackFrame *JSRuntime_get_current_stack_frame(JSRuntimeHandle rt);
+    void JS_MarkActiveStackFrames(JSRuntimeHandle rt, JS_MarkFunc *mark_func);
     
     /* Atom marking helpers */
     uint32_t JSRuntime_get_permanent_atom_count(JSRuntimeHandle rt);
@@ -2388,6 +2393,125 @@ static void gc_mark_context_callback(uint32_t ctx_handle, void *user_data) {
     gc_shade(ctx_handle);
 }
 
+/* ============================================================================
+ * CONSERVATIVE SCAN OF THE MUTATOR'S C STACK
+ * ============================================================================
+ *
+ * Native code holds GC values in C locals and registers: the result array a
+ * builtin is filling, the arguments of a native function, a raw pointer it
+ * got from gc_deref().  Nothing registers those as roots, so the collector
+ * scans the stack of the thread that requested the collection (that thread is
+ * blocked in gc_run() while the cycle runs, so its stack is stable).
+ *
+ * A 32-bit word that equals the handle of a live object, or a pointer-sized
+ * word that points into a live object, keeps that object alive.  This can
+ * keep some garbage alive for a cycle; it never frees anything live.  It does
+ * not make raw pointers safe across compaction; that is why compaction is
+ * skipped while code is running (see gc_run_internal).
+ */
+
+typedef struct {
+    uintptr_t lo;     /* lowest live address (inside gc_run's frame) */
+    uintptr_t hi;     /* stack base (highest address) */
+    bool valid;
+} GCMutatorStack;
+
+static GCMutatorStack g_gc_mutator_stack;
+
+static uintptr_t gc_current_thread_stack_base(void) {
+#if defined(_WIN32)
+    NT_TIB *tib = (NT_TIB *)NtCurrentTeb();
+    return (uintptr_t)tib->StackBase;
+#elif defined(__APPLE__)
+    return (uintptr_t)pthread_get_stackaddr_np(pthread_self());
+#else
+    static _Thread_local uintptr_t cached;
+    if (!cached) {
+        pthread_attr_t attr;
+        void *addr = NULL;
+        size_t size = 0;
+        if (pthread_getattr_np(pthread_self(), &attr) == 0) {
+            if (pthread_attr_getstack(&attr, &addr, &size) == 0)
+                cached = (uintptr_t)addr + size;
+            pthread_attr_destroy(&attr);
+        }
+    }
+    return cached;
+#endif
+}
+
+static int gc_compare_uintptr(const void *a, const void *b) {
+    uintptr_t x = *(const uintptr_t *)a, y = *(const uintptr_t *)b;
+    return x < y ? -1 : x > y;
+}
+
+static void gc_scan_mutator_stack(void) {
+    if (!g_gc_mutator_stack.valid) return;
+    uintptr_t lo = g_gc_mutator_stack.lo & ~(uintptr_t)3;
+    uintptr_t hi = g_gc_mutator_stack.hi;
+    if (!lo || hi <= lo || hi - lo > (512u << 20)) return;
+
+    GCBuffer *buf = gc_active_buffer();
+    uintptr_t heap_lo = (uintptr_t)buf->storage;
+    uintptr_t heap_hi = heap_lo + buf->bump_offset;
+    uint32_t handle_count = buf->handle_count;
+
+    /* Handles: any aligned 32-bit word naming a live object. */
+    for (uintptr_t a = lo; a + sizeof(uint32_t) <= hi; a += sizeof(uint32_t)) {
+        uint32_t w = *(const uint32_t *)a;
+        if (w != GC_HANDLE_NULL && w < handle_count)
+            gc_shade((GCHandle)w);
+    }
+
+    /* Raw pointers into the heap: collect, sort, then match them against the
+     * objects in one pass over the heap. */
+    uint32_t cap = 256, n = 0;
+    uintptr_t *ptrs = (uintptr_t *)malloc(cap * sizeof(uintptr_t));
+    if (!ptrs) return;
+    for (uintptr_t a = (lo + 7) & ~(uintptr_t)7; a + sizeof(uintptr_t) <= hi; a += sizeof(uintptr_t)) {
+        uintptr_t w = *(const uintptr_t *)a;
+        if (w < heap_lo || w >= heap_hi) continue;
+        if (n == cap) {
+            uintptr_t *grown = (uintptr_t *)realloc(ptrs, 2 * cap * sizeof(uintptr_t));
+            if (!grown) break;
+            ptrs = grown;
+            cap *= 2;
+        }
+        ptrs[n++] = w;
+    }
+    if (n > 0) {
+        qsort(ptrs, n, sizeof(uintptr_t), gc_compare_uintptr);
+        uint32_t k = 0;
+        uint8_t *read = buf->storage;
+        uint8_t *end = buf->storage + buf->bump_offset;
+        while (read < end && k < n) {
+            GCHeader *hdr;
+            if (*(uint64_t *)read == GC_CANARY_PREFIX || *(uint64_t *)read == GC_CANARY_CORRUPTED) {
+                hdr = (GCHeader *)(read + 16);
+            } else {
+                read += MIN_OBJECT_SIZE;
+                continue;
+            }
+            if (hdr->size == 0) {
+                read += MIN_OBJECT_SIZE;
+                continue;
+            }
+            uint8_t *next = read + gc_alloc_total_size(hdr);
+            /* Skip candidates that fall before this object. */
+            while (k < n && ptrs[k] < (uintptr_t)read) k++;
+            bool hit = false;
+            while (k < n && ptrs[k] < (uintptr_t)next) {
+                hit = true;
+                k++;
+            }
+            if (hit && !(hdr->flags & GC_FLAG_FREED))
+                gc_shade(hdr->handle);
+            read = next;
+        }
+    }
+    free(ptrs);
+}
+
 /* Enqueue all roots for marking. Does not drain the queue. */
 static void gc_mark_roots(JSRuntimeHandle rt) {
     /* Permanent atoms are leaf roots. */
@@ -2403,9 +2527,8 @@ static void gc_mark_roots(JSRuntimeHandle rt) {
 
     /* Current exception. */
     GCValue exc = JSRuntime_get_current_exception(rt);
-    GCHandle exc_handle = GC_VALUE_GET_HANDLE(exc);
-    if (exc_handle != GC_HANDLE_NULL) {
-        gc_shade(exc_handle);
+    if (GC_VALUE_HAS_REF_COUNT(exc)) {
+        gc_shade(GC_VALUE_GET_HANDLE(exc));
     }
 
     /* Job queue entries. */
@@ -2429,9 +2552,8 @@ static void gc_mark_roots(JSRuntimeHandle rt) {
         int argc = JSJobEntry_get_argc(job_handle);
         for (int j = 0; j < argc; j++) {
             GCValue arg = JSJobEntry_get_argv(job_handle, j);
-            GCHandle arg_handle = GC_VALUE_GET_HANDLE(arg);
-            if (arg_handle != GC_HANDLE_NULL) {
-                gc_shade(arg_handle);
+            if (GC_VALUE_HAS_REF_COUNT(arg)) {
+                gc_shade(GC_VALUE_GET_HANDLE(arg));
             }
         }
     }
@@ -2447,16 +2569,13 @@ static void gc_mark_roots(JSRuntimeHandle rt) {
         gc_shade(atom_array_handle);
     }
 
-    /* JS stack frames. */
-    JSStackFrame *sf = JSRuntime_get_current_stack_frame(rt);
-    while (sf != NULL) {
-        GCValue cur_func = JSStackFrame_get_cur_func(sf);
-        GCHandle func_handle = GC_VALUE_GET_HANDLE(cur_func);
-        if (func_handle != GC_HANDLE_NULL) {
-            gc_shade(func_handle);
-        }
-        sf = JSStackFrame_get_prev(sf);
-    }
+    /* Running JS and native frames: the frame objects themselves and every
+     * value in them, including the operand stack. */
+    JS_MarkActiveStackFrames(rt, gc_unified_mark_func);
+
+    /* Values held only in C locals and registers of the thread that asked
+     * for this collection. */
+    gc_scan_mutator_stack();
 
     /* Shapes are roots for the atoms they reference. */
     for (uint32_t i = 1; i < gc_active_handle_count(); i++) {
@@ -3073,6 +3192,25 @@ static void gc_run_internal(void) {
         fflush(stderr);
     }
     
+    /* Compaction moves objects.  While JS or native code is running (a
+     * collection requested from inside a script, e.g. by a native function),
+     * that code holds raw pointers into the heap: the interpreter's pc and
+     * stack pointer, frame pointers, pointers from gc_deref() in C locals.
+     * Moving objects under them corrupts the heap, so only mark and sweep
+     * in that case.  Freed handles are reusable immediately; their memory
+     * is reclaimed by the next collection that runs with no code active. */
+    bool code_running = has_runtime && JSRuntime_get_current_stack_frame(rt) != NULL;
+    if (code_running) {
+        GC_LOGI("gc_run_internal: code is running, compaction deferred");
+        atomic_store_u32(&g_gc.gc_phase, (uint32_t)GC_PHASE_IDLE);
+        gc_handle_array_compact(&g_gc.weakmap_handles);
+        gc_handle_array_compact(&g_gc.weakref_handles);
+        gc_handle_array_compact(&g_gc.finrec_handles);
+        gc_handle_array_compact(&g_gc.atom_handles);
+        GC_LOGI("gc_run_internal: DONE (no compaction)");
+        return;
+    }
+
     /* Enter COMPACTING phase */
     atomic_store_u32(&g_gc.gc_phase, (uint32_t)GC_PHASE_COMPACTING);
     /* Set compaction target to the inactive buffer */
@@ -3112,9 +3250,26 @@ static void gc_maybe_run(void) {
     }
 }
 
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#endif
 void gc_run(void) {
+    /* Spill callee-saved registers into this frame so the conservative
+     * stack scan sees values the caller keeps only in registers. */
+    jmp_buf regs;
+    setjmp(regs);
+    volatile uintptr_t here = (uintptr_t)&regs;
+#if defined(__GNUC__) || defined(__clang__)
+    __asm__ __volatile__("" : : "r"(&regs) : "memory");
+#endif
+    g_gc_mutator_stack.lo = here < (uintptr_t)&here ? here : (uintptr_t)&here;
+    g_gc_mutator_stack.hi = gc_current_thread_stack_base();
+    g_gc_mutator_stack.valid = g_gc_mutator_stack.hi > g_gc_mutator_stack.lo;
+
     gc_request_background();
     gc_wait_for_completion();
+
+    g_gc_mutator_stack.valid = false;
 }
 
 void gc_reset(void) {

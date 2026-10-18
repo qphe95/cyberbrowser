@@ -1213,6 +1213,133 @@ TEST(test_barrier_js_promise) {
     return true;
 }
 
+
+/* ============================================================================
+ * Collection while code is running
+ *
+ * A collection requested from inside a script (by a native function, as the
+ * HTMLElement constructor does) must keep everything the running code can
+ * still reach: locals, arguments and operand-stack temporaries of running
+ * frames, values native functions hold in C locals, and suspended generator
+ * frames.  It must not move objects that running code holds raw pointers to.
+ * Each script below returns "ok" or a description of what went wrong.
+ * ============================================================================ */
+
+static GCValue js_test_run_gc(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    JS_RunGC(JS_GetRuntime(ctx));
+    return JS_UNDEFINED;
+}
+
+static JSContextHandle get_gc_test_ctx(void) {
+    JSContextHandle ctx = get_test_ctx();
+    if (!SAFE_VALID(ctx)) return ctx;
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue existing = JS_GetPropertyStr(ctx, global, "__test_gc");
+    if (!JS_IsFunction(ctx, existing))
+        JS_SetPropertyStr(ctx, global, "__test_gc",
+                          JS_NewCFunction(ctx, js_test_run_gc, "__test_gc", 0));
+    return ctx;
+}
+
+/* Evaluate a script that returns "ok" on success; print what it returned
+ * otherwise. */
+static bool eval_expect_ok(JSContextHandle ctx, const char *script) {
+    GCValue r = eval_test(ctx, script);
+    if (JS_IsException(r)) {
+        GCValue exc = JS_GetException(ctx);
+        const char *msg = JS_ToCString(ctx, exc);
+        printf("    exception: %s\n", msg ? msg : "?");
+        return false;
+    }
+    const char *str = JS_ToCString(ctx, r);
+    if (!str || strcmp(str, "ok") != 0) {
+        printf("    script returned: %s\n", str ? str : "(null)");
+        return false;
+    }
+    return true;
+}
+
+#define GC_RUNNING_TEST(name, script) \
+    TEST(name) { \
+        JSContextHandle ctx = get_gc_test_ctx(); \
+        if (!SAFE_VALID(ctx)) { printf("    (skipped - no context)"); return true; } \
+        ASSERT_TRUE(eval_expect_ok(ctx, script)); \
+        ASSERT_EQ(0, gc_validate_all_canaries(false)); \
+        return true; \
+    }
+
+GC_RUNNING_TEST(test_gc_running_keeps_locals,
+    "(function(){ var o = {a: {b: 42}}; __test_gc(); "
+    "  return o.a.b === 42 ? 'ok' : 'local lost: ' + o.a.b; })()")
+
+GC_RUNNING_TEST(test_gc_running_keeps_arguments,
+    "(function(a, b){ __test_gc(); "
+    "  return a.v + b.v === 3 ? 'ok' : 'arguments lost'; })({v: 1}, {v: 2})")
+
+GC_RUNNING_TEST(test_gc_running_keeps_operand_stack,
+    "(function(){ var r = [{x: 1}, {x: 2}, (__test_gc(), {x: 3}), {x: 4}]"
+    "  .map(function(o){ return o.x; }).join(); "
+    "  return r === '1,2,3,4' ? 'ok' : 'temporaries lost: ' + r; })()")
+
+GC_RUNNING_TEST(test_gc_running_keeps_native_temporaries,
+    "(function(){ var r = [1, 2, 3].map(function(x){ __test_gc(); return {v: x * 10}; }); "
+    "  return (r.length === 3 && r[0].v === 10 && r[2].v === 30) ? 'ok' "
+    "    : 'map result lost: ' + JSON.stringify(r); })()")
+
+GC_RUNNING_TEST(test_gc_running_keeps_json_state,
+    "(function(){ var src = JSON.parse(JSON.stringify({a: [1, 2, {b: 'c'}], d: {e: {f: 'g'}}})); "
+    "  var r = JSON.stringify(src, function(k, v){ if (k === 'b') __test_gc(); return v; }); "
+    "  return r === '{\"a\":[1,2,{\"b\":\"c\"}],\"d\":{\"e\":{\"f\":\"g\"}}}' ? 'ok' : r; })()")
+
+GC_RUNNING_TEST(test_gc_running_deep_recursion,
+    "(function(){ function rec(n){ var o = {n: n, s: 's' + n}; "
+    "    if (n === 0) { __test_gc(); return 0; } "
+    "    return rec(n - 1) + (o.s === 's' + n ? 1 : 1000); } "
+    "  var r = rec(150); return r === 150 ? 'ok' : 'frames lost: ' + r; })()")
+
+GC_RUNNING_TEST(test_gc_running_in_generator,
+    "(function(){ function* g(){ var o = {z: 5}; yield 1; __test_gc(); yield o.z; } "
+    "  var it = g(); it.next(); __test_gc(); var r = it.next().value; "
+    "  return r === 5 ? 'ok' : 'generator frame lost: ' + r; })()")
+
+GC_RUNNING_TEST(test_gc_running_repeated,
+    "(function(){ var keep = []; var sum = 0; "
+    "  for (var k = 0; k < 30; k++) { var tmp = []; "
+    "    for (var i = 0; i < 200; i++) tmp.push({k: k, i: i, s: 'x' + i}); "
+    "    if (k % 3 === 0) __test_gc(); keep.push(tmp[k]); "
+    "    sum += tmp.reduce(function(a, o){ return a + o.i; }, 0); } "
+    "  var ok = sum === 30 * 19900 && keep.every(function(o, i){ return o.k === i && o.s === 'x' + o.i; }); "
+    "  return ok ? 'ok' : 'repeated collection lost data: ' + sum; })()")
+
+/* The frame chain must be unlinked when a generator yields; otherwise the
+ * next call links back to the suspended frame and the chain becomes a cycle
+ * (the collector then never finishes walking it, and direct eval asserts). */
+GC_RUNNING_TEST(test_gc_frame_chain_after_generator,
+    "(function(){ function* g(){ yield 1; yield 2; } var it = g(); it.next(); "
+    "  [1, 2].forEach(function(){ it.next(); }); __test_gc(); "
+    "  return eval('1 + 2') === 3 ? 'ok' : 'eval after generator'; })()")
+
+TEST(test_gc_bigint_survives) {
+    JSContextHandle ctx = get_gc_test_ctx();
+    if (!SAFE_VALID(ctx)) { printf("    (skipped - no context)"); return true; }
+    ASSERT_TRUE(is_exception_free(ctx, eval_test(ctx,
+        "var __big_a = 2n ** 100n; var __big_o = {k: 3n ** 50n}; 0")));
+    JS_RunGC(JS_GetRuntime(ctx));
+    ASSERT_TRUE(is_exception_free(ctx, eval_test(ctx,
+        "(function(){ var j = []; for (var i = 0; i < 2000; i++) j.push(BigInt(i) * 7n ** 30n); return j.length; })()")));
+    JS_RunGC(JS_GetRuntime(ctx));
+    ASSERT_TRUE(eval_expect_ok(ctx,
+        "(String(__big_a) === '1267650600228229401496703205376' && "
+        " String(__big_o.k) === '717897987691852588770249') ? 'ok' "
+        " : 'BigInt corrupted: ' + String(__big_a)"));
+    ASSERT_TRUE(eval_expect_ok(ctx,
+        "(function(){ var b = 5n ** 40n; __test_gc(); "
+        "  return String(b) === '9094947017729282379150390625' ? 'ok' : 'local BigInt: ' + String(b); })()"));
+    ASSERT_EQ(0, gc_validate_all_canaries(false));
+    return true;
+}
+
 /* ============================================================================
  * Shape hash table integration tests
  * ============================================================================ */
@@ -1874,4 +2001,16 @@ void run_gc_unified_tests(void) {
     RUN_TEST(test_barrier_js_map);
     RUN_TEST(test_barrier_js_weakref);
     RUN_TEST(test_barrier_js_promise);
+
+    printf("\n=== Collection While Code Is Running ===\n");
+    RUN_TEST(test_gc_running_keeps_locals);
+    RUN_TEST(test_gc_running_keeps_arguments);
+    RUN_TEST(test_gc_running_keeps_operand_stack);
+    RUN_TEST(test_gc_running_keeps_native_temporaries);
+    RUN_TEST(test_gc_running_keeps_json_state);
+    RUN_TEST(test_gc_running_deep_recursion);
+    RUN_TEST(test_gc_running_in_generator);
+    RUN_TEST(test_gc_running_repeated);
+    RUN_TEST(test_gc_frame_chain_after_generator);
+    RUN_TEST(test_gc_bigint_survives);
 }

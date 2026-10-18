@@ -167,17 +167,41 @@ TEST(test_gc_canary_after_swap) {
     return true;
 }
 
+/* The collector scans the calling thread's stack conservatively, so a handle
+ * kept in a local keeps its object alive.  To check that an unreferenced
+ * object is freed, keep only a disguised copy of the handle and wipe the
+ * stack the allocation ran on. */
+#define DEAD_OBJ_MASK 0x5a5a5a5au
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#endif
+static uint32_t alloc_unrooted_disguised(void) {
+    GCHandle h = gc_alloc(64, JS_GC_OBJ_TYPE_DATA);
+    return h == GC_HANDLE_NULL ? 0 : (h ^ DEAD_OBJ_MASK);
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#endif
+static void wipe_stack(void) {
+    volatile uint8_t pad[16384];
+    for (size_t i = 0; i < sizeof(pad); i++) pad[i] = 0;
+}
+
 TEST(test_gc_dead_objects_freed) {
     /* Allocate object without rooting it */
-    GCHandle h = gc_alloc(64, JS_GC_OBJ_TYPE_DATA);
-    ASSERT_TRUE(h != GC_HANDLE_NULL);
-    
+    volatile uint32_t disguised = alloc_unrooted_disguised();
+    ASSERT_TRUE(disguised != 0);
+    wipe_stack();
+
     /* Verify it's alive before GC */
-    ASSERT_TRUE(gc_handle_is_valid(h));
-    
+    ASSERT_TRUE(gc_handle_is_valid(disguised ^ DEAD_OBJ_MASK));
+
     /* Run GC without rooting - object should be freed */
     gc_run();
-    
+    GCHandle h = disguised ^ DEAD_OBJ_MASK;
+
     /* After GC, unreferenced object should be freed */
     /* Note: handle may still exist but point to NULL or freed memory */
     void *ptr = gc_deref(h);

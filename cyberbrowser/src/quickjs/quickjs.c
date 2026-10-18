@@ -6911,7 +6911,7 @@ static void free_var_ref(JSRuntimeHandle rt, JSVarRefHandle var_ref)
             JSAsyncFrameHandle sf_handle = GC_HANDLE_NULL;
             if (SAFE_GET_OR(var_ref, JSVarRefHandle, is_async_frame, 0)) {
                 sf_handle = (JSAsyncFrameHandle)(js_varref_frame_handle(var_ref));
-                sf = SAFE_PTR(sf_handle, JSAsyncFrameHandle);
+                sf = js_frame_deref(sf_handle);
             } else {
                 sf = js_varref_frame_ptr(var_ref);
             }
@@ -6921,7 +6921,7 @@ static void free_var_ref(JSRuntimeHandle rt, JSVarRefHandle var_ref)
                     assert(JS_SF_VAR_REFS(sf)[SAFE_GET_OR(var_ref, JSVarRefHandle, var_ref_idx, 0)] == SAFE_HANDLE(var_ref));
                     gc_set_heap_handle(&JS_SF_VAR_REFS(sf)[SAFE_GET_OR(var_ref, JSVarRefHandle, var_ref_idx, 0)], GC_HANDLE_NULL);
                 }
-                int js_mode = SAFE_GET_OR(var_ref, JSVarRefHandle, is_async_frame, 0) ? SAFE_GET_OR(sf_handle, JSAsyncFrameHandle, js_mode, 0) : sf->js_mode;
+                int js_mode = sf->js_mode;
                 if (js_mode & JS_MODE_ASYNC) {
                     JSAsyncFunctionStateHandle async_func = async_func_from_frame(sf);
                     async_func_free(rt, async_func);
@@ -7355,27 +7355,13 @@ static inline void JS_MarkHandle(JSRuntimeHandle rt, GCHandle handle, JS_MarkFun
 
 void JS_MarkValue(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func)
 {
-    int tag = JS_VALUE_GET_TAG(val);
     GCHandle handle = GC_VALUE_GET_HANDLE(val);
-    QJS_LOGI("JS_MarkValue: ENTER handle=%u tag=%d has_ref=%d", handle, tag, JS_VALUE_HAS_REF_COUNT(val));
-    if (JS_VALUE_HAS_REF_COUNT(val)) {
-        switch(tag) {
-        case JS_TAG_OBJECT:
-        case JS_TAG_FUNCTION_BYTECODE:
-        case JS_TAG_MODULE:
-        case JS_TAG_STRING:
-        case JS_TAG_STRING_ROPE:
-            QJS_LOGI("JS_MarkValue: marking handle=%u tag=%d", handle, tag);
-            JS_MarkHandle(rt, handle, mark_func);
-            QJS_LOGI("JS_MarkValue: done marking handle=%u", handle);
-            break;
-        default:
-            QJS_LOGI("JS_MarkValue: skipping handle=%u tag=%d (not in switch)", handle, tag);
-            break;
-        }
-    } else {
-        QJS_LOGI("JS_MarkValue: skipping handle=%u tag=%d (no ref count)", handle, tag);
-    }
+    /* Every tag with a "reference count" (the negative tags: object, string,
+     * rope, symbol, BigInt, bytecode, module) carries a GC handle and must be
+     * marked.  BigInt and symbol values used to be skipped here, so a BigInt
+     * stored anywhere was freed by the next GC. */
+    if (JS_VALUE_HAS_REF_COUNT(val))
+        JS_MarkHandle(rt, handle, mark_func);
 }
 
 struct JSFunctionDef;
@@ -7532,8 +7518,8 @@ void mark_children(JSRuntimeHandle rt, GCHandle handle,
                 /* For async frames, also mark the async function state */
                 if (SAFE_GET_OR(var_ref, JSVarRefHandle, is_async_frame, 0)) {
                     JSAsyncFrameHandle sf_handle = (JSAsyncFrameHandle)(frame_handle);
-                    JSStackFrame *sf = SAFE_PTR(sf_handle, JSAsyncFrameHandle);
-                    if (sf && (SAFE_GET_OR(sf_handle, JSAsyncFrameHandle, js_mode, 0) & JS_MODE_ASYNC)) {
+                    JSStackFrame *sf = js_frame_deref(sf_handle);
+                    if (sf && (sf->js_mode & JS_MODE_ASYNC)) {
                         JSAsyncFunctionStateHandle async_func = async_func_from_frame(sf);
                         mark_func(rt, SAFE_HANDLE(async_func));
                     }
@@ -7728,6 +7714,53 @@ void mark_children(JSRuntimeHandle rt, GCHandle handle,
         /* Unknown object type - skip it */
         QJS_LOGE("mark_children: unknown gc_obj_type=%d, skipping", (int)gc_obj_type);
         break;
+    }
+}
+
+/* Mark the frames of the code that is running right now: every frame on the
+ * runtime's current call chain, including its whole value area (arguments,
+ * locals and operand stack).  mark_children() only marks the locals and
+ * arguments of a frame, which is right for a frame kept alive by a closure
+ * after it returned, but a running frame also has live temporaries on its
+ * operand stack.  Slots above the current stack pointer may hold stale
+ * values; marking them only keeps some garbage alive until the next cycle
+ * (the memory is zeroed at allocation, so it never holds non-values). */
+void JS_MarkActiveStackFrames(JSRuntimeHandle rt, JS_MarkFunc *mark_func)
+{
+    for (JSStackFrame *sf = js_rt_current_stack_frame(rt); sf != NULL; sf = JS_SF_PREV(sf)) {
+        if (sf->self_handle != GC_HANDLE_NULL)
+            mark_func(rt, sf->self_handle);
+        JS_MarkValue(rt, sf->cur_func, mark_func);
+        if (sf->bytecode_handle != GC_HANDLE_NULL)
+            mark_func(rt, sf->bytecode_handle);
+
+        uint8_t *base = (uint8_t *)sf;
+        if (sf->var_refs_offset > sf->arg_buf_offset &&
+            sf->arg_buf_offset >= sizeof(JSStackFrame)) {
+            /* Bytecode frame: [args][vars][operand stack][var_refs] */
+            GCValue *v = (GCValue *)(base + sf->arg_buf_offset);
+            GCValue *end = (GCValue *)(base + sf->var_refs_offset);
+            for (; v < end; v++)
+                JS_MarkValue(rt, *v, mark_func);
+            GCHandle *var_refs = JS_SF_VAR_REFS(sf);
+            for (int i = 0; i < sf->var_ref_count; i++) {
+                if (var_refs[i] != GC_HANDLE_NULL)
+                    mark_func(rt, var_refs[i]);
+            }
+        } else if (sf->arg_count > 0 && sf->self_handle != GC_HANDLE_NULL) {
+            /* C function frame.  Its arguments live inside the frame only
+             * when they were copied there; otherwise they belong to the
+             * caller (a frame further down this chain, or the C stack,
+             * which the collector scans conservatively). */
+            size_t fsize = gc_handle_get_size(sf->self_handle);
+            uint64_t aoff = sf->arg_buf_offset;
+            if (aoff >= sizeof(JSStackFrame) &&
+                aoff + (uint64_t)sf->arg_count * sizeof(GCValue) <= fsize) {
+                GCValue *arg_buf = (GCValue *)(base + aoff);
+                for (int i = 0; i < sf->arg_count; i++)
+                    JS_MarkValue(rt, arg_buf[i], mark_func);
+            }
+        }
     }
 }
 
@@ -19355,7 +19388,7 @@ static GCValue js_closure2(JSContextHandle ctx, GCValue func_obj,
                                 /* Continue walking up */
                                 cv_idx = vi;
                                 cur_sf = cur_sf->prev_frame_handle != GC_HANDLE_NULL ? 
-                                    (JSStackFrame *)gc_deref(cur_sf->prev_frame_handle) : NULL;
+                                    js_frame_deref(cur_sf->prev_frame_handle) : NULL;
                                 continue;
                             }
                         }
@@ -19397,7 +19430,7 @@ static GCValue js_closure2(JSContextHandle ctx, GCValue func_obj,
                         
                         /* Fallback: walk up the call stack */
                         cur_sf = cur_sf->prev_frame_handle != GC_HANDLE_NULL ? 
-                            (JSStackFrame *)gc_deref(cur_sf->prev_frame_handle) : NULL;
+                            js_frame_deref(cur_sf->prev_frame_handle) : NULL;
                         cv_idx = -1; /* Don't use invalid indices anymore */
                     }
                 }
@@ -19737,6 +19770,18 @@ static void close_lexical_var(JSContextHandle ctx, JSFunctionBytecodeHandle b,
         close_var_ref(ctx_rt, sf, var_ref);
         gc_set_heap_handle(&JS_SF_VAR_REFS(sf)[var_ref_idx], GC_HANDLE_NULL);
     }
+}
+
+JSStackFrame *js_frame_deref(GCHandle frame_handle)
+{
+    if (frame_handle == GC_HANDLE_NULL)
+        return NULL;
+    void *p = gc_deref(frame_handle);
+    if (!p)
+        return NULL;
+    if (gc_header(p)->gc_obj_type == JS_GC_OBJ_TYPE_ASYNC_FUNCTION)
+        return &((JSAsyncFunctionState *)p)->frame;
+    return (JSStackFrame *)p;
 }
 
 #define JS_CALL_FLAG_COPY_ARGV   (1 << 1)
@@ -23138,6 +23183,10 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
     done_generator:
         JS_SF_SET_PC(sf, pc);
         JS_SF_SET_SP(sf, sp);
+        /* Unlink the suspended frame, as upstream does for both paths.
+         * Leaving it as the current frame made the next call link back to
+         * it, turning the frame chain into a cycle. */
+        SAFE_SET_HANDLE(rt, JSRuntimeHandle, current_stack_frame_handle, sf->prev_frame_handle);
         return ret_val;
     } else {
     done:
@@ -23356,6 +23405,11 @@ static JSAsyncFunctionStateHandle async_func_init(JSContextHandle ctx,
     
     /* Store self handle for frame-based lookup */
     SAFE_SET_HANDLE(s, JSAsyncFunctionStateHandle, self_handle, handle);
+    /* The embedded frame is addressed by the state's handle (see
+     * js_frame_deref).  Without it the runtime's current-frame chain is cut
+     * while a generator or async function runs, and closures over its locals
+     * fall back to raw frame pointers that compaction invalidates. */
+    SAFE_SET_HANDLE(s, JSAsyncFunctionStateHandle, frame.self_handle, handle);
 
     /* Initialize all fields through setters */
     SAFE_SET(s, JSAsyncFunctionStateHandle, frame.js_mode, SAFE_GET_OR(b, JSFunctionBytecodeHandle, js_mode, 0) | JS_MODE_ASYNC);
@@ -36397,7 +36451,7 @@ static inline void capture_var_ctx(JSContextHandle ctx, JSFunctionDef *s, JSVarD
                 if (state && state->parent_scope_handle == s->self_handle) {
                     /* This frame is a child of s, keep walking */
                     sf = sf->prev_frame_handle != GC_HANDLE_NULL ? 
-                        (JSStackFrame *)gc_deref(sf->prev_frame_handle) : NULL;
+                        js_frame_deref(sf->prev_frame_handle) : NULL;
                     continue;
                 }
             }

@@ -124,7 +124,7 @@ static inline GCValue *js_varref_pvalue(GCHandle handle)
     if (p->is_detached)
         return &p->frame_ref.value;
     if (p->is_async_frame)
-        sf = (JSStackFrame *)gc_deref(p->frame_ref.frame_handle);
+        sf = js_frame_deref(p->frame_ref.frame_handle);
     else
         sf = p->frame_ref.frame_ptr;
     if (!sf)

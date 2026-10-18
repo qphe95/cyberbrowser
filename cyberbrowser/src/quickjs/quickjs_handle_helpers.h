@@ -845,7 +845,7 @@ static inline JSStackFrame* js_rt_current_stack_frame(GCHandle handle)
 {
     JSRuntime* p = GC_DEREF_H(handle, JSRuntimeHandle);
     if (!p || p->current_stack_frame_handle == GC_HANDLE_NULL) return NULL;
-    return (JSStackFrame*)gc_deref(p->current_stack_frame_handle);
+    return js_frame_deref(p->current_stack_frame_handle);
 }
 
 static inline GCHandle js_rt_job_queue_handle(GCHandle handle)
