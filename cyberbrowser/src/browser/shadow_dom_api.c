@@ -339,6 +339,12 @@ GCValue js_element_attach_shadow(JSContextHandle ctx, GCValue this_val, int argc
 
     GCValue shadow_root = JS_NewObjectClass(ctx, js_shadow_root_class_id);
     JS_SetOpaqueHandle(shadow_root, sr);
+    {
+        GCValue global = JS_GetGlobalObject(ctx);
+        GCValue sr_ctor = JS_GetPropertyStr(ctx, global, "ShadowRoot");
+        GCValue sr_proto = JS_IsObject(sr_ctor) ? JS_GetPropertyStr(ctx, sr_ctor, "prototype") : JS_UNDEFINED;
+        if (JS_IsObject(sr_proto)) JS_SetPrototype(ctx, shadow_root, sr_proto);
+    }
 
     // Bind the shadow root object to its store fragment.
     {

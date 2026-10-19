@@ -82,6 +82,7 @@ set(BE_SOURCES
     src/dom_wrap.c
     src/dom_query.c
     src/dom_fetch.c
+    src/url_whatwg.c
     src/css_layout.c
     src/display_list.c
     src/text_shaper.c

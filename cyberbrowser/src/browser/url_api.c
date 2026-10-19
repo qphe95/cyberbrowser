@@ -18,270 +18,212 @@
 
 // URL API Implementation
 // ============================================================================
+//
+// URL, URLSearchParams and the URL attributes of <a>/<area> elements follow
+// the WHATWG URL Standard.  Parsing and serialization are done in C
+// (url_whatwg.c); the interfaces themselves are a small JS layer (below)
+// over these natives.  A parsed URL is kept in JS as a "record string":
+// every component of a parsed URL is printable ASCII (the parser
+// percent-encodes everything else), so control characters can separate
+// the fields and the record round-trips exactly (no re-parsing of the
+// serialized href, which is not always idempotent).
 
-typedef struct {
-    char protocol[64];
-    char hostname[256];
-    char host[288];
-    char pathname[512];
-    char search[512];
-    char hash[256];
-    char origin[512];
-    char href[1024];
-    int port;
-} UrlComponents;
+#include "url_whatwg.h"
 
-static void url_unescape_js_string(const char *in, char *out, size_t out_len) {
-    size_t i = 0, j = 0;
-    while (in[i] && j + 2 < out_len) {
-        if (in[i] == '\\' || in[i] == '\'') {
-            out[j++] = '\\';
-        }
-        out[j++] = in[i++];
-    }
-    out[j] = '\0';
-}
-
-static void url_parse_components(const char *url, UrlComponents *out) {
-    memset(out, 0, sizeof(*out));
-    strncpy(out->pathname, "/", sizeof(out->pathname) - 1);
-
-    const char *p = url ? url : "";
-    const char *proto_end = strstr(p, "://");
-    if (proto_end) {
-        size_t proto_len = proto_end - p;
-        if (proto_len >= sizeof(out->protocol)) proto_len = sizeof(out->protocol) - 1;
-        memcpy(out->protocol, p, proto_len);
-        out->protocol[proto_len] = '\0';
-        p = proto_end + 3;
-
-        const char *path_start = strchr(p, '/');
-        const char *query_start = strchr(p, '?');
-        const char *hash_start = strchr(p, '#');
-
-        const char *host_end = path_start;
-        if (!host_end || (query_start && query_start < host_end)) host_end = query_start;
-        if (!host_end || (hash_start && hash_start < host_end)) host_end = hash_start;
-
-        if (host_end) {
-            size_t host_len = host_end - p;
-            if (host_len >= sizeof(out->host)) host_len = sizeof(out->host) - 1;
-            memcpy(out->host, p, host_len);
-            out->host[host_len] = '\0';
-        } else {
-            strncpy(out->host, p, sizeof(out->host) - 1);
-        }
-
-        // Split host into hostname + port
-        strncpy(out->hostname, out->host, sizeof(out->hostname) - 1);
-        char *port_ptr = strchr(out->hostname, ':');
-        if (port_ptr) {
-            *port_ptr = '\0';
-            out->port = atoi(port_ptr + 1);
-        }
-
-        if (path_start) {
-            const char *path_end = query_start;
-            if (!path_end) path_end = hash_start;
-            if (!path_end) path_end = path_start + strlen(path_start);
-            size_t path_len = path_end - path_start;
-            if (path_len >= sizeof(out->pathname)) path_len = sizeof(out->pathname) - 1;
-            memcpy(out->pathname, path_start, path_len);
-            out->pathname[path_len] = '\0';
-        }
-
-        if (query_start) {
-            const char *search_end = hash_start;
-            if (!search_end) search_end = query_start + strlen(query_start);
-            size_t search_len = search_end - query_start;
-            if (search_len >= sizeof(out->search)) search_len = sizeof(out->search) - 1;
-            memcpy(out->search, query_start, search_len);
-            out->search[search_len] = '\0';
-        }
-
-        if (hash_start) {
-            strncpy(out->hash, hash_start, sizeof(out->hash) - 1);
-        }
-    } else if (url) {
-        // No protocol: treat whole thing as pathname/search/hash
-        const char *query_start = strchr(url, '?');
-        const char *hash_start = strchr(url, '#');
-        const char *path_end = query_start;
-        if (!path_end) path_end = hash_start;
-        if (!path_end) path_end = url + strlen(url);
-        size_t path_len = path_end - url;
-        if (path_len >= sizeof(out->pathname)) path_len = sizeof(out->pathname) - 1;
-        memcpy(out->pathname, url, path_len);
-        out->pathname[path_len] = '\0';
-        if (query_start) {
-            const char *search_end = hash_start;
-            if (!search_end) search_end = query_start + strlen(query_start);
-            size_t search_len = search_end - query_start;
-            if (search_len >= sizeof(out->search)) search_len = sizeof(out->search) - 1;
-            memcpy(out->search, query_start, search_len);
-            out->search[search_len] = '\0';
-        }
-        if (hash_start) {
-            strncpy(out->hash, hash_start, sizeof(out->hash) - 1);
-        }
-    }
-
-    if (out->protocol[0]) {
-        snprintf(out->origin, sizeof(out->origin), "%s://%s", out->protocol, out->host);
-    }
-
-    // Reconstruct href
-    snprintf(out->href, sizeof(out->href), "%s%s%s%s%s%s",
-             out->protocol[0] ? out->protocol : "",
-             out->protocol[0] ? "://" : "",
-             out->host[0] ? out->host : "",
-             out->pathname,
-             out->search,
-             out->hash);
-}
-
-static void url_resolve(const char *url, const char *base, UrlComponents *out) {
-    UrlComponents base_comp;
-    url_parse_components(base ? base : "", &base_comp);
-
-    if (url_has_scheme(url)) {
-        url_parse_components(url, out);
-        return;
-    }
-
-    if (strncmp(url, "//", 2) == 0) {
-        char tmp[1024];
-        snprintf(tmp, sizeof(tmp), "%s:%s", base_comp.protocol, url);
-        url_parse_components(tmp, out);
-        return;
-    }
-
-    strncpy(out->protocol, base_comp.protocol, sizeof(out->protocol) - 1);
-    strncpy(out->hostname, base_comp.hostname, sizeof(out->hostname) - 1);
-    strncpy(out->host, base_comp.host, sizeof(out->host) - 1);
-    out->port = base_comp.port;
-    strncpy(out->origin, base_comp.origin, sizeof(out->origin) - 1);
-
-    if (url[0] == '/') {
-        // Absolute path
-        const char *query_start = strchr(url, '?');
-        const char *hash_start = strchr(url, '#');
-        const char *path_end = query_start;
-        if (!path_end) path_end = hash_start;
-        if (!path_end) path_end = url + strlen(url);
-        size_t path_len = path_end - url;
-        if (path_len >= sizeof(out->pathname)) path_len = sizeof(out->pathname) - 1;
-        memcpy(out->pathname, url, path_len);
-        out->pathname[path_len] = '\0';
-        if (query_start) {
-            const char *search_end = hash_start;
-            if (!search_end) search_end = query_start + strlen(query_start);
-            size_t search_len = search_end - query_start;
-            if (search_len >= sizeof(out->search)) search_len = sizeof(out->search) - 1;
-            memcpy(out->search, query_start, search_len);
-            out->search[search_len] = '\0';
-        } else {
-            out->search[0] = '\0';
-        }
-        if (hash_start) {
-            strncpy(out->hash, hash_start, sizeof(out->hash) - 1);
-        } else {
-            out->hash[0] = '\0';
-        }
-    } else if (url[0] == '?') {
-        // Replace search only
-        strncpy(out->pathname, base_comp.pathname, sizeof(out->pathname) - 1);
-        const char *hash_start = strchr(url, '#');
-        size_t search_len = hash_start ? (size_t)(hash_start - url) : strlen(url);
-        if (search_len >= sizeof(out->search)) search_len = sizeof(out->search) - 1;
-        memcpy(out->search, url, search_len);
-        out->search[search_len] = '\0';
-        if (hash_start) {
-            strncpy(out->hash, hash_start, sizeof(out->hash) - 1);
-        } else {
-            out->hash[0] = '\0';
-        }
-    } else if (url[0] == '#') {
-        strncpy(out->pathname, base_comp.pathname, sizeof(out->pathname) - 1);
-        strncpy(out->search, base_comp.search, sizeof(out->search) - 1);
-        strncpy(out->hash, url, sizeof(out->hash) - 1);
+/* record: scheme 1 username 1 password 1 host 1 port 1 path 1 query 1 fragment
+ *   host:  '-' (null) or 'h' + host
+ *   path:  'o' + opaque path, or 'p' + count, then 2 + segment per segment
+ *   query, fragment: '-' (null) or 'v' + value */
+static char *url_record_from(const WUrl *u)
+{
+    size_t cap = 256, len = 0;
+    char *r = malloc(cap);
+#define PUT(str, n) do { size_t n_ = (n); if (len + n_ + 1 > cap) { while (len + n_ + 1 > cap) cap *= 2; r = realloc(r, cap); } memcpy(r + len, (str), n_); len += n_; } while (0)
+#define PUTS(str) PUT((str), strlen(str))
+#define PUTC(ch) do { char ch_ = (ch); PUT(&ch_, 1); } while (0)
+    if (!r)
+        return NULL;
+    PUTS(u->scheme ? u->scheme : ""); PUTC(1);
+    PUTS(u->username ? u->username : ""); PUTC(1);
+    PUTS(u->password ? u->password : ""); PUTC(1);
+    if (u->host) { PUTC('h'); PUTS(u->host); } else PUTC('-');
+    PUTC(1);
+    if (u->port >= 0) { char t[16]; snprintf(t, sizeof(t), "%d", u->port); PUTS(t); }
+    PUTC(1);
+    if (u->opaque_path) {
+        PUTC('o'); PUTS(u->opaque_path);
     } else {
-        // Relative path: replace last path segment of base
-        char base_path[512];
-        strncpy(base_path, base_comp.pathname, sizeof(base_path) - 1);
-        char *last_slash = strrchr(base_path, '/');
-        if (last_slash) {
-            *(last_slash + 1) = '\0';
-        } else {
-            strcpy(base_path, "/");
-        }
-        // Append relative url (strip its own query/hash and append separately)
-        const char *query_start = strchr(url, '?');
-        const char *hash_start = strchr(url, '#');
-        const char *rel_end = query_start;
-        if (!rel_end) rel_end = hash_start;
-        if (!rel_end) rel_end = url + strlen(url);
+        char t[16];
+        snprintf(t, sizeof(t), "p%d", u->path_len);
+        PUTS(t);
+        for (int i = 0; i < u->path_len; i++) { PUTC(2); PUTS(u->path[i]); }
+    }
+    PUTC(1);
+    if (u->query) { PUTC('v'); PUTS(u->query); } else PUTC('-');
+    PUTC(1);
+    if (u->fragment) { PUTC('v'); PUTS(u->fragment); } else PUTC('-');
+    r[len] = 0;
+#undef PUT
+#undef PUTS
+#undef PUTC
+    return r;
+}
 
-        char combined[512];
-        snprintf(combined, sizeof(combined), "%s%.*s", base_path, (int)(rel_end - url), url);
-        // Very simple normalization for "/./" and "/../"
-        char *p;
-        while ((p = strstr(combined, "/./")) != NULL) {
-            memmove(p, p + 2, strlen(p + 2) + 1);
-        }
-        while ((p = strstr(combined, "/../")) != NULL) {
-            char *start = combined;
-            if (p > start) {
-                char *prev = p - 1;
-                while (prev > start && *prev != '/') prev--;
-                if (prev > start) {
-                    memmove(prev, p + 3, strlen(p + 3) + 1);
-                    continue;
-                }
-            }
-            memmove(p, p + 3, strlen(p + 3) + 1);
-        }
-        strncpy(out->pathname, combined, sizeof(out->pathname) - 1);
+static char *field_dup(const char *s, const char *e) { char *r = malloc(e - s + 1); memcpy(r, s, e - s); r[e - s] = 0; return r; }
 
-        if (query_start) {
-            const char *search_end = hash_start;
-            if (!search_end) search_end = query_start + strlen(query_start);
-            size_t search_len = search_end - query_start;
-            if (search_len >= sizeof(out->search)) search_len = sizeof(out->search) - 1;
-            memcpy(out->search, query_start, search_len);
-            out->search[search_len] = '\0';
-        } else {
-            out->search[0] = '\0';
-        }
-        if (hash_start) {
-            strncpy(out->hash, hash_start, sizeof(out->hash) - 1);
-        } else {
-            out->hash[0] = '\0';
+static int url_record_to(const char *rec, WUrl *u)
+{
+    const char *f[8], *p = rec;
+    int nf = 0;
+    memset(u, 0, sizeof(*u));
+    u->port = -1;
+    f[nf++] = p;
+    for (; *p && nf < 8; p++)
+        if (*p == 1)
+            f[nf++] = p + 1;
+    if (nf != 8)
+        return -1;
+#define END(i) (i < 7 ? f[i + 1] - 1 : f[i] + strlen(f[i]))
+    u->scheme = field_dup(f[0], END(0));
+    u->username = field_dup(f[1], END(1));
+    u->password = field_dup(f[2], END(2));
+    if (f[3][0] == 'h')
+        u->host = field_dup(f[3] + 1, END(3));
+    if (END(4) > f[4])
+        u->port = atoi(f[4]);
+    if (f[5][0] == 'o') {
+        u->opaque_path = field_dup(f[5] + 1, END(5));
+    } else {
+        int cnt = atoi(f[5] + 1);
+        const char *q = f[5], *e = END(5);
+        while (q < e && *q != 2)
+            q++;
+        u->path_cap = cnt > 0 ? cnt : 1;
+        u->path = calloc(u->path_cap, sizeof(char *));
+        for (int i = 0; i < cnt && q < e; i++) {
+            const char *st = q + 1, *en = st;
+            while (en < e && *en != 2)
+                en++;
+            u->path[u->path_len++] = field_dup(st, en);
+            q = en;
         }
     }
-
-    snprintf(out->href, sizeof(out->href), "%s%s%s%s%s%s",
-             out->protocol[0] ? out->protocol : "",
-             out->protocol[0] ? "://" : "",
-             out->host[0] ? out->host : "",
-             out->pathname,
-             out->search,
-             out->hash);
+    if (f[6][0] == 'v')
+        u->query = field_dup(f[6] + 1, END(6));
+    if (f[7][0] == 'v')
+        u->fragment = field_dup(f[7] + 1, END(7));
+#undef END
+    return 0;
 }
 
-static void url_apply_components(JSContextHandle ctx, GCValue url_obj, const UrlComponents *comp) {
-    JS_SetPropertyStr(ctx, url_obj, "href", JS_NewString(ctx, comp->href));
-    JS_SetPropertyStr(ctx, url_obj, "protocol", JS_NewString(ctx, comp->protocol));
-    JS_SetPropertyStr(ctx, url_obj, "hostname", JS_NewString(ctx, comp->hostname));
-    JS_SetPropertyStr(ctx, url_obj, "host", JS_NewString(ctx, comp->host));
-    JS_SetPropertyStr(ctx, url_obj, "pathname", JS_NewString(ctx, comp->pathname));
-    JS_SetPropertyStr(ctx, url_obj, "search", JS_NewString(ctx, comp->search));
-    JS_SetPropertyStr(ctx, url_obj, "hash", JS_NewString(ctx, comp->hash));
-    JS_SetPropertyStr(ctx, url_obj, "port", JS_NewInt32(ctx, comp->port));
-    JS_SetPropertyStr(ctx, url_obj, "origin", JS_NewString(ctx, comp->origin));
+static GCValue url_record_value(JSContextHandle ctx, const WUrl *u)
+{
+    char *r = url_record_from(u);
+    GCValue v = r ? JS_NewString(ctx, r) : JS_NULL;
+    free(r);
+    return v;
 }
 
-// URL.createObjectURL() - Creates blob URLs and captures them
+/* __url.parse(input [, baseRecord]) -> record or null */
+static GCValue js_url_native_parse(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    size_t len;
+    const char *in = argc > 0 ? JS_ToCStringLen(ctx, &len, argv[0]) : NULL;
+    WUrl base, u;
+    int has_base = 0;
+    if (!in)
+        return JS_EXCEPTION;
+    if (argc > 1 && JS_IsString(argv[1])) {
+        const char *b = JS_ToCString(ctx, argv[1]);
+        if (!b || url_record_to(b, &base))
+            return JS_NULL;
+        has_base = 1;
+    }
+    int r = wurl_parse(in, len, has_base ? &base : NULL, &u);
+    if (has_base)
+        wurl_free(&base);
+    if (r)
+        return JS_NULL;
+    GCValue v = url_record_value(ctx, &u);
+    wurl_free(&u);
+    return v;
+}
+
+/* __url.components(record) -> [href, origin, protocol, username, password,
+   host, hostname, port, pathname, search, hash] */
+static GCValue js_url_native_components(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    const char *rec = argc > 0 ? JS_ToCString(ctx, argv[0]) : NULL;
+    WUrl u;
+    if (!rec || url_record_to(rec, &u))
+        return JS_ThrowTypeError(ctx, "invalid URL record");
+    char *f[11] = {
+        wurl_href(&u), wurl_origin(&u), wurl_protocol(&u), strdup(u.username),
+        strdup(u.password), wurl_host(&u), wurl_hostname(&u), wurl_port(&u),
+        wurl_pathname(&u), wurl_search(&u), wurl_hash(&u)
+    };
+    GCValue arr = JS_NewArray(ctx);
+    for (int i = 0; i < 11; i++) {
+        JS_SetPropertyUint32(ctx, arr, i, JS_NewString(ctx, f[i] ? f[i] : ""));
+        free(f[i]);
+    }
+    wurl_free(&u);
+    return arr;
+}
+
+/* __url.set(record, which, value) -> new record, or null if an href setter
+   value does not parse */
+static GCValue js_url_native_set(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    int32_t which = 0;
+    size_t len;
+    const char *rec = argc > 0 ? JS_ToCString(ctx, argv[0]) : NULL;
+    if (argc < 3 || !rec || JS_ToInt32(ctx, &which, argv[1]))
+        return JS_ThrowTypeError(ctx, "invalid arguments");
+    const char *val = JS_ToCStringLen(ctx, &len, argv[2]);
+    WUrl u;
+    if (!val)
+        return JS_EXCEPTION;
+    if (url_record_to(rec, &u))
+        return JS_ThrowTypeError(ctx, "invalid URL record");
+    if (wurl_set(&u, (WUrlSetter)which, val, len)) {
+        wurl_free(&u);
+        return JS_NULL;
+    }
+    GCValue v = url_record_value(ctx, &u);
+    wurl_free(&u);
+    return v;
+}
+
+static GCValue js_url_native_form_encode(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    size_t len;
+    const char *s = argc > 0 ? JS_ToCStringLen(ctx, &len, argv[0]) : NULL;
+    if (!s)
+        return JS_EXCEPTION;
+    char *e = wurl_form_encode(s, len);
+    GCValue v = JS_NewString(ctx, e ? e : "");
+    free(e);
+    return v;
+}
+
+static GCValue js_url_native_form_decode(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
+{
+    (void)this_val;
+    size_t len, out_len = 0;
+    const char *s = argc > 0 ? JS_ToCStringLen(ctx, &len, argv[0]) : NULL;
+    if (!s)
+        return JS_EXCEPTION;
+    char *d = wurl_form_decode(s, len, &out_len);
+    GCValue v = d ? JS_NewStringLen(ctx, d, out_len) : JS_NewString(ctx, "");
+    free(d);
+    return v;
+}
+
 GCValue js_url_create_object_url(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1) return JS_ThrowTypeError(ctx, "requires at least 1 argument(s)");
 
@@ -343,311 +285,39 @@ GCValue js_url_revoke_object_url(JSContextHandle ctx, GCValue this_val, int argc
     return JS_UNDEFINED;
 }
 
-// URL constructor - new URL(url, base)
-GCValue js_url_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
-    if (argc < 1) {
-        return JS_ThrowTypeError(ctx, "URL constructor requires at least 1 argument");
-    }
-
-    const char *url_str = JS_ToCString(ctx, argv[0]);
-    if (!url_str) return JS_ThrowTypeError(ctx, "Invalid URL");
-
-    const char *base_str = NULL;
-    if (argc > 1) {
-        base_str = JS_ToCString(ctx, argv[1]);
-    }
-
-    UrlComponents comp;
-    if (base_str && base_str[0] && !strstr(url_str, "://")) {
-        url_resolve(url_str, base_str, &comp);
-    } else {
-        url_parse_components(url_str, &comp);
-    }
-
-    GCValue url_obj = JS_NewObject(ctx);
-    url_apply_components(ctx, url_obj, &comp);
-
-    // searchParams getter is added via prototype in browser_api_impl.c
-    return url_obj;
-}
 
 // ============================================================================
-// URLSearchParams API
+// URL / URLSearchParams / HTMLHyperlinkElementUtils (JS layer)
 // ============================================================================
 
-static GCValue usp_create(JSContextHandle ctx, const char *search) {
-    GCValue obj = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, obj, "__params", JS_NewArray(ctx));
-    if (search && search[0]) {
-        const char *p = (*search == '?') ? search + 1 : search;
-        char buf[2048];
-        strncpy(buf, p, sizeof(buf) - 1);
-        buf[sizeof(buf) - 1] = '\0';
-        char *pair = strtok(buf, "&");
-        while (pair) {
-            char *eq = strchr(pair, '=');
-            GCValue item = JS_NewArray(ctx);
-            if (eq) {
-                *eq = '\0';
-                JS_SetPropertyUint32(ctx, item, 0, JS_NewString(ctx, pair));
-                JS_SetPropertyUint32(ctx, item, 1, JS_NewString(ctx, eq + 1));
-            } else {
-                JS_SetPropertyUint32(ctx, item, 0, JS_NewString(ctx, pair));
-                JS_SetPropertyUint32(ctx, item, 1, JS_NewString(ctx, ""));
-            }
-            GCValue arr = JS_GetPropertyStr(ctx, obj, "__params");
-            int32_t len = 0;
-            GCValue len_val = JS_GetPropertyStr(ctx, arr, "length");
-            JS_ToInt32(ctx, &len, len_val);
-            JS_SetPropertyUint32(ctx, arr, len, item);
-            pair = strtok(NULL, "&");
-        }
+static const char *url_api_js =
+#include "url_api_js.inc"
+;
+
+void url_api_install(JSContextHandle ctx, GCValue global)
+{
+    GCValue natives = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, natives, "parse", JS_NewCFunction(ctx, js_url_native_parse, "parse", 2));
+    JS_SetPropertyStr(ctx, natives, "components", JS_NewCFunction(ctx, js_url_native_components, "components", 1));
+    JS_SetPropertyStr(ctx, natives, "set", JS_NewCFunction(ctx, js_url_native_set, "set", 3));
+    JS_SetPropertyStr(ctx, natives, "formEncode", JS_NewCFunction(ctx, js_url_native_form_encode, "formEncode", 1));
+    JS_SetPropertyStr(ctx, natives, "formDecode", JS_NewCFunction(ctx, js_url_native_form_decode, "formDecode", 1));
+    JS_SetPropertyStr(ctx, natives, "createObjectURL", JS_NewCFunction(ctx, js_url_create_object_url, "createObjectURL", 1));
+    JS_SetPropertyStr(ctx, natives, "revokeObjectURL", JS_NewCFunction(ctx, js_url_revoke_object_url, "revokeObjectURL", 1));
+    GCValue fn = JS_Eval(ctx, url_api_js, strlen(url_api_js), "<url_api>", JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(fn)) {
+        GCValue e = JS_GetException(ctx);
+        const char *m = JS_ToCString(ctx, e);
+        LOG_ERROR("URL API setup failed: %s", m ? m : "?");
+        return;
     }
-    return obj;
-}
-
-static GCValue usp_get_params(JSContextHandle ctx, GCValue obj) {
-    return JS_GetPropertyStr(ctx, obj, "__params");
-}
-
-static int32_t usp_length(JSContextHandle ctx, GCValue arr) {
-    GCValue len_val = JS_GetPropertyStr(ctx, arr, "length");
-    int32_t len = 0;
-    JS_ToInt32(ctx, &len, len_val);
-    return len;
-}
-
-static GCValue usp_get_item(JSContextHandle ctx, GCValue arr, int32_t idx) {
-    return JS_GetPropertyUint32(ctx, arr, idx);
-}
-
-static const char* usp_get_item_key(JSContextHandle ctx, GCValue item) {
-    GCValue v = JS_GetPropertyUint32(ctx, item, 0);
-    const char *s = JS_ToCString(ctx, v);
-    return s;
-}
-
-static const char* usp_get_item_value(JSContextHandle ctx, GCValue item) {
-    GCValue v = JS_GetPropertyUint32(ctx, item, 1);
-    const char *s = JS_ToCString(ctx, v);
-    return s;
-}
-
-GCValue js_url_search_params_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
-    // Link instances to URLSearchParams.prototype so the accessor methods work.
-    GCValue proto = JS_GetPropertyStr(ctx, new_target, "prototype");
-    const char *search = "";
-    if (argc > 0) {
-        if (JS_IsString(argv[0])) {
-            search = JS_ToCString(ctx, argv[0]);
-        } else if (JS_IsObject(argv[0])) {
-            GCValue arr = JS_NewArray(ctx);
-            JSPropertyEnum *props = NULL;
-            uint32_t prop_count = 0;
-            if (JS_GetOwnPropertyNames(ctx, &props, &prop_count, argv[0],
-                                       JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
-                for (uint32_t i = 0; i < prop_count; i++) {
-                    const char *name = JS_AtomToCString(ctx, props[i].atom);
-                    if (!name) continue;
-                    GCValue val = JS_GetProperty(ctx, argv[0], props[i].atom);
-                    const char *val_str = JS_ToCString(ctx, val);
-                    GCValue item = JS_NewArray(ctx);
-                    JS_SetPropertyUint32(ctx, item, 0, JS_NewString(ctx, name));
-                    JS_SetPropertyUint32(ctx, item, 1, JS_NewString(ctx, val_str ? val_str : ""));
-                    JS_SetPropertyUint32(ctx, arr, i, item);
-                }
-                JS_FreePropertyEnum(ctx, props, prop_count);
-            }
-            GCValue obj = JS_NewObject(ctx);
-            if (!JS_IsException(proto) && JS_IsObject(proto)) {
-                JS_SetPrototype(ctx, obj, proto);
-            }
-            JS_SetPropertyStr(ctx, obj, "__params", arr);
-            return obj;
-        }
+    GCValue args[2] = { global, natives };
+    GCValue r = JS_Call(ctx, fn, JS_UNDEFINED, 2, args);
+    if (JS_IsException(r)) {
+        GCValue e = JS_GetException(ctx);
+        const char *m = JS_ToCString(ctx, e);
+        LOG_ERROR("URL API setup failed: %s", m ? m : "?");
     }
-    GCValue obj = usp_create(ctx, search ? search : "");
-    if (!JS_IsException(obj) && !JS_IsException(proto) && JS_IsObject(proto)) {
-        JS_SetPrototype(ctx, obj, proto);
-    }
-    return obj;
-}
-
-GCValue js_url_search_params_append(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    if (argc < 2) return JS_UNDEFINED;
-    const char *key = JS_ToCString(ctx, argv[0]);
-    const char *value = JS_ToCString(ctx, argv[1]);
-    if (!key || !value) return JS_UNDEFINED;
-    GCValue arr = usp_get_params(ctx, this_val);
-    int32_t len = usp_length(ctx, arr);
-    GCValue item = JS_NewArray(ctx);
-    JS_SetPropertyUint32(ctx, item, 0, JS_NewString(ctx, key));
-    JS_SetPropertyUint32(ctx, item, 1, JS_NewString(ctx, value));
-    JS_SetPropertyUint32(ctx, arr, len, item);
-    return JS_UNDEFINED;
-}
-
-GCValue js_url_search_params_delete(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    if (argc < 1) return JS_UNDEFINED;
-    const char *key = JS_ToCString(ctx, argv[0]);
-    if (!key) return JS_UNDEFINED;
-    GCValue arr = usp_get_params(ctx, this_val);
-    int32_t len = usp_length(ctx, arr);
-    int32_t write_idx = 0;
-    for (int32_t i = 0; i < len; i++) {
-        GCValue item = usp_get_item(ctx, arr, i);
-        const char *k = usp_get_item_key(ctx, item);
-        if (!k || strcmp(k, key) != 0) {
-            if (i != write_idx) {
-                JS_SetPropertyUint32(ctx, arr, write_idx, item);
-            }
-            write_idx++;
-        }
-    }
-    // truncate
-    for (int32_t i = write_idx; i < len; i++) {
-        JSAtom idx_atom = JS_NewAtomUInt32(ctx, (uint32_t)i);
-        JS_DeleteProperty(ctx, arr, idx_atom, 0);
-        JS_FreeAtom(ctx, idx_atom);
-    }
-    return JS_UNDEFINED;
-}
-
-GCValue js_url_search_params_get(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    if (argc < 1) return JS_NULL;
-    const char *key = JS_ToCString(ctx, argv[0]);
-    if (!key) return JS_NULL;
-    GCValue arr = usp_get_params(ctx, this_val);
-    int32_t len = usp_length(ctx, arr);
-    GCValue result = JS_NULL;
-    for (int32_t i = 0; i < len; i++) {
-        GCValue item = usp_get_item(ctx, arr, i);
-        const char *k = usp_get_item_key(ctx, item);
-        if (k && strcmp(k, key) == 0) {
-            const char *v = usp_get_item_value(ctx, item);
-            result = JS_NewString(ctx, v ? v : "");
-            break;
-        }
-    }
-    return result;
-}
-
-GCValue js_url_search_params_get_all(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    if (argc < 1) return JS_NewArray(ctx);
-    const char *key = JS_ToCString(ctx, argv[0]);
-    if (!key) return JS_NewArray(ctx);
-    GCValue out = JS_NewArray(ctx);
-    GCValue arr = usp_get_params(ctx, this_val);
-    int32_t len = usp_length(ctx, arr);
-    int32_t out_idx = 0;
-    for (int32_t i = 0; i < len; i++) {
-        GCValue item = usp_get_item(ctx, arr, i);
-        const char *k = usp_get_item_key(ctx, item);
-        if (k && strcmp(k, key) == 0) {
-            const char *v = usp_get_item_value(ctx, item);
-            JS_SetPropertyUint32(ctx, out, out_idx++, JS_NewString(ctx, v ? v : ""));
-        }
-    }
-    return out;
-}
-
-GCValue js_url_search_params_has(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    if (argc < 1) return JS_FALSE;
-    const char *key = JS_ToCString(ctx, argv[0]);
-    if (!key) return JS_FALSE;
-    GCValue arr = usp_get_params(ctx, this_val);
-    int32_t len = usp_length(ctx, arr);
-    bool found = false;
-    for (int32_t i = 0; i < len; i++) {
-        GCValue item = usp_get_item(ctx, arr, i);
-        const char *k = usp_get_item_key(ctx, item);
-        if (k && strcmp(k, key) == 0) found = true;
-        if (found) break;
-    }
-    return JS_NewBool(ctx, found);
-}
-
-GCValue js_url_search_params_set(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    if (argc < 2) return JS_UNDEFINED;
-    const char *key = JS_ToCString(ctx, argv[0]);
-    const char *value = JS_ToCString(ctx, argv[1]);
-    if (!key || !value) return JS_UNDEFINED;
-    // Delete all existing entries for key
-    js_url_search_params_delete(ctx, this_val, 1, argv);
-    // Append new value
-    js_url_search_params_append(ctx, this_val, argc, argv);
-    return JS_UNDEFINED;
-}
-
-GCValue js_url_search_params_to_string(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    GCValue arr = usp_get_params(ctx, this_val);
-    int32_t len = usp_length(ctx, arr);
-    if (len == 0) {
-        return JS_NewString(ctx, "");
-    }
-    char buf[4096];
-    buf[0] = '\0';
-    size_t pos = 0;
-    for (int32_t i = 0; i < len; i++) {
-        GCValue item = usp_get_item(ctx, arr, i);
-        const char *k = usp_get_item_key(ctx, item);
-        const char *v = usp_get_item_value(ctx, item);
-        size_t k_len = k ? strlen(k) : 0;
-        size_t v_len = v ? strlen(v) : 0;
-        if (pos + k_len + v_len + 4 >= sizeof(buf)) {
-            break;
-        }
-        if (pos > 0) {
-            buf[pos++] = '&';
-        }
-        memcpy(buf + pos, k, k_len); pos += k_len;
-        buf[pos++] = '=';
-        memcpy(buf + pos, v, v_len); pos += v_len;
-        buf[pos] = '\0';
-    }
-    return JS_NewString(ctx, buf);
-}
-
-static GCValue usp_build_array(JSContextHandle ctx, GCValue this_val, int which) {
-    // which: 0=entries, 1=keys, 2=values
-    GCValue out = JS_NewArray(ctx);
-    GCValue arr = usp_get_params(ctx, this_val);
-    int32_t len = usp_length(ctx, arr);
-    int32_t out_idx = 0;
-    for (int32_t i = 0; i < len; i++) {
-        GCValue item = usp_get_item(ctx, arr, i);
-        if (which == 0) {
-            JS_SetPropertyUint32(ctx, out, out_idx++, item);
-        } else {
-            GCValue v = JS_GetPropertyUint32(ctx, item, which == 1 ? 0 : 1);
-            JS_SetPropertyUint32(ctx, out, out_idx++, v);
-        }
-    }
-    return out;
-}
-
-GCValue js_url_search_params_entries(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    return usp_build_array(ctx, this_val, 0);
-}
-
-GCValue js_url_search_params_keys(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    return usp_build_array(ctx, this_val, 1);
-}
-
-GCValue js_url_search_params_values(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    return usp_build_array(ctx, this_val, 2);
-}
-
-// URL.prototype.searchParams getter
-GCValue js_url_get_search_params(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)argc; (void)argv;
-    GCValue existing = JS_GetPropertyStr(ctx, this_val, "__searchParams");
-    if (!JS_IsUndefined(existing) && !JS_IsNull(existing)) return existing;
-    GCValue search_val = JS_GetPropertyStr(ctx, this_val, "search");
-    const char *search = JS_ToCString(ctx, search_val);
-    GCValue sp = usp_create(ctx, search ? search : "");
-    JS_SetPropertyStr(ctx, this_val, "__searchParams", sp);
-    return sp;
 }
 
 // ============================================================================

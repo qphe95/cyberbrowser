@@ -347,79 +347,56 @@ static char *url_normalize(const char *base, const char *rel, char *out, size_t 
 
 
 
-// Find the true end of a script tag, handling strings and comments
-// This prevents premature termination when </script> appears inside JS strings
+static bool script_tag_name_at(const char *p, const char *name, size_t n) {
+    /* 'name' (lower case) followed by whitespace, '/' or '>' */
+    if (strncasecmp(p, name, n) != 0) return false;
+    char c = p[n];
+    return c == '\t' || c == '\n' || c == '\f' || c == '\r' || c == ' ' || c == '/' || c == '>';
+}
+
+// Find the end of a <script> element's text, per the HTML tokenizer's
+// script data states (https://html.spec.whatwg.org/#script-data-state):
+// the text ends at the first "</script" followed by whitespace, '/' or '>',
+// except inside "<!-- ... <script> ... </script>" (the double-escaped
+// state).  JavaScript strings and comments are NOT special: a browser ends
+// the script at "</script>" even inside a JS string.  Returns a pointer to
+// the '<' of the end tag, or NULL.
 static const char* find_script_end(const char *content_start) {
     if (!content_start) return NULL;
-    
+    enum { SD_DATA, SD_ESCAPED, SD_DOUBLE_ESCAPED } st = SD_DATA;
     const char *p = content_start;
-    bool in_string = false;
-    char string_char = 0;
-    bool escape = false;
-    int comment_state = 0;  // 0=none, 1=maybe single-line, 2=single-line, 3=maybe multi, 4=multi
-    
-    while (*p) {
-        // Handle comments
-        if (!in_string) {
-            if (comment_state == 0) {
-                if (*p == '/') {
-                    comment_state = 1;  // Maybe starting comment
-                }
-            } else if (comment_state == 1) {
-                if (*p == '/') {
-                    comment_state = 2;  // Single-line comment started
-                } else if (*p == '*') {
-                    comment_state = 4;  // Multi-line comment started
-                } else {
-                    comment_state = 0;  // Not a comment
-                }
-            } else if (comment_state == 2) {
-                if (*p == '\n') {
-                    comment_state = 0;  // End single-line comment
-                }
-            } else if (comment_state == 4) {
-                if (*p == '*') {
-                    comment_state = 3;  // Maybe ending multi-line
-                }
-            } else if (comment_state == 3) {
-                if (*p == '/') {
-                    comment_state = 0;  // End multi-line comment
-                } else if (*p != '*') {
-                    comment_state = 4;  // Still in multi-line comment
-                }
-            }
-            
-            // Check for </script> when not in string and not in comment
-            if (comment_state == 0 && *p == '<') {
-                if (strncasecmp(p, "</script>", 9) == 0) {
-                    return p;  // Found actual script end
-                }
-            }
-        }
-        
-        // Handle strings
-        if (comment_state == 0) {
-            if (escape) {
-                escape = false;
-            } else if (*p == '\\') {
-                escape = true;
-            } else if (!in_string) {
-                if (*p == '"' || *p == '\'' || *p == '`') {
-                    in_string = true;
-                    string_char = *p;
-                }
+    while ((p = strpbrk(p, "<-")) != NULL) {
+        if (*p == '-') {
+            if (st != SD_DATA && p[1] == '-' && p[2] == '>') {
+                st = SD_DATA;
+                p += 3;
             } else {
-                if (*p == string_char) {
-                    in_string = false;
-                    string_char = 0;
-                }
+                p++;
             }
+            continue;
         }
-        
-        p++;
+        /* *p == '<' */
+        if (p[1] == '/' && script_tag_name_at(p + 2, "script", 6)) {
+            if (st != SD_DOUBLE_ESCAPED) return p;
+            st = SD_ESCAPED;
+            p += 8;
+        } else if (st == SD_DATA && p[1] == '!' && p[2] == '-' && p[3] == '-') {
+            st = SD_ESCAPED;
+            p += 2;    /* leave "--" so "<!-->" sees its "-->" */
+        } else if (st == SD_ESCAPED && script_tag_name_at(p + 1, "script", 6)) {
+            st = SD_DOUBLE_ESCAPED;
+            p += 7;
+        } else {
+            p++;
+        }
     }
-    
     return NULL;  // No closing tag found
+}
+
+// Position just past the '>' of the end tag found by find_script_end().
+static const char* script_close_end(const char *end_tag) {
+    const char *gt = strchr(end_tag, '>');
+    return gt ? gt + 1 : end_tag + strlen(end_tag);
 }
 
 // Extract inline scripts from HTML (scripts without src attribute)
@@ -541,7 +518,7 @@ int html_extract_inline_scripts(const char *html, char **out_scripts, int max_sc
         
         // Skip empty scripts or very short ones
         if (content_len < 50) {
-            p = script_end + 9;
+            p = script_close_end(script_end);
             continue;
         }
         
@@ -563,7 +540,7 @@ int html_extract_inline_scripts(const char *html, char **out_scripts, int max_sc
             LOG_ERROR("Failed to allocate %zu bytes for script", content_len + 1);
         }
         
-        p = script_end + 9;
+        p = script_close_end(script_end);
     }
     
     LOG_INFO("Extracted %d inline initialization scripts", count);
@@ -756,7 +733,7 @@ static int extract_scripts_in_order(const char *html, ScriptInfo *scripts, int m
             
             // Skip empty scripts or very short ones
             if (content_len < 50) {
-                p = script_end + 9;
+                p = script_close_end(script_end);
                 continue;
             }
             
@@ -774,14 +751,14 @@ static int extract_scripts_in_order(const char *html, ScriptInfo *scripts, int m
                 script_content = (char*)malloc(content_len + 1);
                 if (!script_content) {
                     LOG_ERROR("Failed to allocate %zu bytes for script content", content_len + 1);
-                    p = script_end + 9;
+                    p = script_close_end(script_end);
                     continue;
                 }
             } else {
                 script_content = (char*)malloc(content_len + 1);
                 if (!script_content) {
                     LOG_ERROR("Failed to allocate %zu bytes for script content", content_len + 1);
-                    p = script_end + 9;
+                    p = script_close_end(script_end);
                     continue;
                 }
             }
@@ -801,7 +778,7 @@ static int extract_scripts_in_order(const char *html, ScriptInfo *scripts, int m
                      scripts[count].parse_order, content_len, mime_type);
             count++;
             
-            p = script_end + 9;
+            p = script_close_end(script_end);
         }
     }
     

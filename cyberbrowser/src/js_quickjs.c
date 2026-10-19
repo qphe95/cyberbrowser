@@ -18,6 +18,27 @@
 #include "gc_value_helpers.h"
 #include "platform.h"
 #include "browser_api_impl_types.h"
+#include "dom_wrap.h"
+#ifndef _WIN32
+#include <sys/resource.h>
+#endif
+
+/* JS stack budget: 8 MB, but never more than the thread's real C stack minus
+ * a safety margin (Linux/macOS main threads default to 8 MB in total, so an
+ * 8 MB budget would let runaway recursion overrun the stack and crash instead
+ * of throwing RangeError).  Windows links the browser with a 64 MB stack. */
+size_t js_stack_budget(void) {
+    size_t want = 8u * 1024 * 1024;
+#ifndef _WIN32
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_STACK, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY) {
+        size_t margin = 1u * 1024 * 1024;
+        size_t avail = rl.rlim_cur > margin * 2 ? (size_t)rl.rlim_cur - margin : (size_t)rl.rlim_cur / 2;
+        if (avail < want) want = avail;
+    }
+#endif
+    return want;
+}
 #include "browser_api_impl_handle_helpers.h"
 #include "session_state.h"
 #include "cyber_profile.h"
@@ -621,9 +642,11 @@ static void js_video_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_fun
     JS_MarkValue(rt, vid->onplaying, mark_func);
     JS_MarkValue(rt, vid->onerror, mark_func);
     JS_MarkValue(rt, vid->onvolumechange, mark_func);
-    if (vid->dom_node != GC_HANDLE_NULL) {
-        mark_func(rt, vid->dom_node);
-    }
+    /* The DomWrap record and what it holds (tree object, style objects):
+     * marking only the record would let those be collected while the
+     * <video> wrapper is alive. */
+    if (vid->dom_node != GC_HANDLE_NULL)
+        dom_wrap_mark(rt, vid->dom_node, mark_func);
 }
 
 GCValue js_video_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
@@ -2418,7 +2441,7 @@ bool js_quickjs_create_runtime(void) {
     
     // Set limits after successful runtime creation
     JS_SetMemoryLimit(g_js_runtime, 1024 * 1024 * 1024); // 1GB
-    JS_SetMaxStackSize(g_js_runtime, 8 * 1024 * 1024);  // 8MB
+    JS_SetMaxStackSize(g_js_runtime, js_stack_budget());
     
     // Create context - this initializes built-in objects
     platform_log(LOG_LEVEL_INFO, "js_quickjs", "Creating global context...");

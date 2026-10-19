@@ -199,6 +199,13 @@ GCValue dom_element_style(JSContextHandle ctx, GCValue el, bool create) {
 }
 
 /* Per-element JS state the page expects on a fresh wrapper. */
+/* Attributes reflected by accessors on the element's prototype, which must
+ * not be mirrored into own properties (they would shadow the accessor, or
+ * re-enter it from setAttribute): href of <a>/<area> (HTMLHyperlinkElementUtils). */
+static bool dom_attr_has_accessor(NodeId id, const char *name) {
+    return strcasecmp(name, "href") == 0 && (dom_tag_is(id, "a") || dom_tag_is(id, "area"));
+}
+
 void dom_element_setup_wrapper(JSContextHandle ctx, NodeId id, GCValue obj) {
     uint32_t s = dom_slot(id);
     /* Attributes are reflected as plain properties (the legacy DOM did this
@@ -208,6 +215,7 @@ void dom_element_setup_wrapper(JSContextHandle ctx, NodeId id, GCValue obj) {
         const char *name = css_atom_str(l->a[i].name);
         if (!name || !name[0]) continue;
         if (strcmp(name, "id") == 0 || strcmp(name, "class") == 0 || strcmp(name, "style") == 0) continue;
+        if (dom_attr_has_accessor(id, name)) continue;
         DomStr v = g_dom.attrs[s].a[i].value;      /* re-read: setters may run JS */
         JS_SetPropertyStr(ctx, obj, name, JS_NewStringLen(ctx, v.s ? v.s : "", v.len));
         if (!dom_valid(id)) return;
@@ -240,6 +248,27 @@ void dom_element_setup_wrapper(JSContextHandle ctx, NodeId id, GCValue obj) {
 }
 
 /* Factory for wrappers of store nodes (dom_wrap.h). */
+/* Interface (global constructor) whose prototype a new element wrapper gets,
+ * so that `el instanceof HTMLInputElement` etc. hold and polyfills that patch
+ * a specific interface (ShadyDOM patches HTMLSlotElement.prototype) reach it.
+ * Interfaces the browser does not define fall back to HTMLElement. */
+static const char *element_interface_name(NodeId id) {
+    static const struct { const char *tag, *iface; } map[] = {
+        { "a", "HTMLAnchorElement" },       { "area", "HTMLAreaElement" },
+        { "button", "HTMLButtonElement" },  { "canvas", "HTMLCanvasElement" },
+        { "div", "HTMLDivElement" },        { "fencedframe", "HTMLFencedFrameElement" },
+        { "form", "HTMLFormElement" },      { "iframe", "HTMLIFrameElement" },
+        { "img", "HTMLImageElement" },      { "input", "HTMLInputElement" },
+        { "link", "HTMLLinkElement" },      { "option", "HTMLOptionElement" },
+        { "script", "HTMLScriptElement" },  { "select", "HTMLSelectElement" },
+        { "slot", "HTMLSlotElement" },      { "style", "HTMLStyleElement" },
+        { "template", "HTMLTemplateElement" }, { "textarea", "HTMLTextAreaElement" },
+    };
+    for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++)
+        if (dom_tag_is(id, map[i].tag)) return map[i].iface;
+    return "HTMLElement";
+}
+
 GCValue dom_create_wrapper(JSContextHandle ctx, NodeId id) {
     int kind = dom_kind(id);
     GCValue obj = JS_UNDEFINED;
@@ -252,7 +281,9 @@ GCValue dom_create_wrapper(JSContextHandle ctx, NodeId id) {
         } else {
             obj = JS_NewObjectClass(ctx, js_dom_node_class_id);
             if (JS_IsException(obj)) return JS_NULL;
-            GCValue proto = global_proto(ctx, dom_tag_is(id, "template") ? "HTMLTemplateElement" : "HTMLElement");
+            const char *proto_name = element_interface_name(id);
+            GCValue proto = global_proto(ctx, proto_name);
+            if (!JS_IsObject(proto)) proto = global_proto(ctx, "HTMLElement");
             if (JS_IsObject(proto)) JS_SetPrototype(ctx, obj, proto);
             dom_bind(ctx, id, obj);
         }
@@ -287,6 +318,9 @@ GCValue dom_create_wrapper(JSContextHandle ctx, NodeId id) {
     }
     case DOM_K_DOCUMENT: {
         obj = JS_NewObjectClass(ctx, js_dom_node_class_id);
+        GCValue proto = global_proto(ctx, "Document");
+        if (!JS_IsObject(proto)) proto = global_proto(ctx, "Node");
+        if (JS_IsObject(proto)) JS_SetPrototype(ctx, obj, proto);
         dom_bind(ctx, id, obj);
         JS_SetPropertyStr(ctx, obj, "nodeType", JS_NewInt32(ctx, DOM_NODE_TYPE_DOCUMENT));
         return obj;
@@ -1792,7 +1826,8 @@ GCValue js_element_set_attribute(JSContextHandle ctx, GCValue this_val, int argc
         char *old_value = n ? attr_dup(n, name) : NULL;
         // Store the attribute on the object itself too (the legacy DOM's
         // reflection), except for names with a reflecting accessor.
-        if (strcmp(name, "id") != 0 && strcmp(name, "class") != 0 && strcmp(name, "style") != 0) {
+        if (strcmp(name, "id") != 0 && strcmp(name, "class") != 0 && strcmp(name, "style") != 0 &&
+            !(n && dom_attr_has_accessor(n, name))) {
             JS_SetPropertyStr(ctx, this_val, name, JS_NewStringLen(ctx, value, vlen));
         }
         n = dom_node_of(this_val);
@@ -1870,10 +1905,16 @@ GCValue js_element_get_attribute(JSContextHandle ctx, GCValue this_val, int argc
             return JS_NewStringLen(ctx, val, len);
         }
     }
-    // Fall back to a string-valued own property (e.g. el.id set directly).
-    GCValue val = JS_GetPropertyStr(ctx, this_val, name);
+    // Fall back to a string-valued own data property (e.g. el.id set
+    // directly).  Never run accessors here: a reflecting getter such as
+    // HTMLAnchorElement.prototype.href calls getAttribute() itself.
+    JSAtom atom = JS_NewAtom(ctx, name);
     JS_FreeCString(ctx, name);
-    if (JS_IsString(val)) return val;
+    JSPropertyDescriptor desc = JS_PROPERTY_DESCRIPTOR_INIT;
+    int has = JS_GetOwnProperty(ctx, &desc, this_val, atom);
+    JS_FreeAtom(ctx, atom);
+    if (has > 0 && !(desc.flags & JS_PROP_GETSET) && JS_IsString(desc.value))
+        return desc.value;
     return JS_NULL;
 }
 

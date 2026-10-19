@@ -256,6 +256,7 @@ static void tls_init(TlsClient *client) {
     mbedtls_ssl_config_init(&client->conf);
     mbedtls_x509_crt_init(&client->ca);
     client->connected = false;
+    client->plain = false;
 }
 
 /* ============================================================================
@@ -592,9 +593,33 @@ bool tls_client_connect(TlsClient *client, const char *host, const char *port,
     return true;
 }
 
+bool tcp_client_connect(TlsClient *client, const char *host, const char *port,
+                        char *err, size_t errLen) {
+    if (!client || !host || !port) {
+        set_err(err, errLen, "TCP invalid params", TLS_ERR_GENERIC);
+        return false;
+    }
+    tls_init(client);
+    client->plain = true;
+    int ret = tls_net_connect(&client->net, host, port, err, errLen);
+    if (ret != 0) {
+        if (err && errLen && !err[0]) set_err(err, errLen, "TCP connect failed", ret);
+        return false;
+    }
+    snprintf(client->host, sizeof(client->host), "%s", host);
+    client->connected = true;
+    return true;
+}
+
 ssize_t tls_client_read(TlsClient *client, unsigned char *buf, size_t len) {
     if (!client || !client->connected) {
         return -1;
+    }
+    if (client->plain) {
+        int r = mbedtls_net_recv(&client->net, buf, len);
+        if (r == MBEDTLS_ERR_SSL_WANT_READ) return 0;
+        if (r <= 0) { client->connected = false; return -1; }
+        return r;
     }
     int ret = mbedtls_ssl_read(&client->ssl, buf, len);
     if (ret == MBEDTLS_ERR_SSL_WANT_READ ||
@@ -624,6 +649,11 @@ ssize_t tls_client_write(TlsClient *client, const unsigned char *buf, size_t len
     if (!client || !client->connected) {
         return -1;
     }
+    if (client->plain) {
+        int w = mbedtls_net_send(&client->net, buf, len);
+        if (w == MBEDTLS_ERR_SSL_WANT_WRITE) return 0;
+        return w;
+    }
     int ret = mbedtls_ssl_write(&client->ssl, buf, len);
     if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
         return 0;
@@ -635,7 +665,7 @@ void tls_client_close(TlsClient *client) {
     if (!client) {
         return;
     }
-    if (client->connected) {
+    if (client->connected && !client->plain) {
         mbedtls_ssl_close_notify(&client->ssl);
     }
     mbedtls_net_free(&client->net);

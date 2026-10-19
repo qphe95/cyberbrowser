@@ -50,6 +50,10 @@ JSCFunction *js_canvas_get_context_fn(void);
 /* Initialize QuickJS runtime (called once in android_main) */
 bool js_quickjs_init(void);
 
+/* C stack budget for JS recursion (pass to JS_SetMaxStackSize): 8 MB capped
+ * to the thread's real stack minus a safety margin. */
+size_t js_stack_budget(void);
+
 /* Create global QuickJS runtime and context (called once in android_main after js_quickjs_init) */
 bool js_quickjs_create_runtime(void);
 

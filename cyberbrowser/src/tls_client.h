@@ -31,6 +31,7 @@ typedef struct TlsClient {
     char host[256];
     time_t last_used;
     bool reusable;
+    bool plain;         /* plain TCP (http://): no TLS layer */
 } TlsClient;
 
 typedef struct ConnectionPool {
@@ -41,6 +42,9 @@ typedef struct ConnectionPool {
 } ConnectionPool;
 
 bool tls_client_connect(TlsClient *client, const char *host, const char *port,
+                        char *err, size_t errLen);
+/* Plain TCP connection (for http:// URLs); read/write/close work the same. */
+bool tcp_client_connect(TlsClient *client, const char *host, const char *port,
                         char *err, size_t errLen);
 ssize_t tls_client_read(TlsClient *client, unsigned char *buf, size_t len);
 ssize_t tls_client_write(TlsClient *client, const unsigned char *buf, size_t len);

@@ -2439,8 +2439,15 @@ TEST(test_url_search_params) {
         "        ok = ok && usp.get('a') === 'x' && usp.getAll('a').length === 1;\n"
         "        usp.delete('b');\n"
         "        ok = ok && !usp.has('b') && usp.toString().indexOf('a=x') >= 0;\n"
-        "        var entries = usp.entries();\n"
-        "        ok = ok && Array.isArray(entries) && entries.length >= 2;\n"
+        "        var entries = Array.from(usp.entries());\n"
+        "        ok = ok && entries.length >= 2 && entries[0][0] === 'a';\n"
+        "        ok = ok && typeof usp.entries().next === 'function';\n"
+        "        var u = new URL('https://user:pw@EXAMPLE.com:443/a/../b?x=1#h');\n"
+        "        ok = ok && u.href === 'https://user:pw@example.com/b?x=1#h';\n"
+        "        u.searchParams.append('y', 'a b');\n"
+        "        ok = ok && u.search === '?x=1&y=a+b' && u.origin === 'https://example.com';\n"
+        "        ok = ok && new URL('//h\u00e9.com/p', 'http://a/').host === 'xn--h-bga.com';\n"
+        "        ok = ok && !URL.canParse('http://[::1') && URL.parse('nope') === null;\n"
         "        ok;\n"
         "    ";
     GCValue result = JS_Eval(ctx, js_code, strlen(js_code), "<test>", 0);

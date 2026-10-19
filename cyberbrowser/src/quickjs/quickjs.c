@@ -7776,8 +7776,32 @@ void gc_cleanup_shape_hash_table(JSRuntimeHandle rt)
 /* Weak step of a collection: drop weak references to objects the cycle
  * found unreachable.  The collector calls this on the JS thread with
  * gc_object_is_dead() answering for the cycle. */
+/* Drop registry entries whose container (WeakMap state, WeakRef data,
+ * FinalizationRegistry data) the finished cycle condemned.  This must happen
+ * now, in the weak window: once the sweep frees the container its handle is
+ * recycled, and a lingering entry would make a later weak step treat an
+ * unrelated object as a weak container. */
+static void gc_weak_registry_drop_dead(JSHandleArray *arr)
+{
+    uint32_t j = 0;
+    for (uint32_t i = 0; i < arr->count; i++) {
+        GCHandle h = arr->handles[i];
+        if (!gc_handle_array_entry_is_valid(h) || !gc_deref(h) || gc_object_is_dead(h)) continue;
+        arr->handles[j++] = h;
+    }
+    arr->count = j;
+}
+
+static void gc_weak_registries_drop_dead(void)
+{
+    gc_weak_registry_drop_dead(&g_gc.weakmap_handles);
+    gc_weak_registry_drop_dead(&g_gc.weakref_handles);
+    gc_weak_registry_drop_dead(&g_gc.finrec_handles);
+}
+
 void JS_GCWeakStep(JSRuntimeHandle rt)
 {
+    gc_weak_registries_drop_dead();
     gc_remove_weak_objects(rt);
     gc_cleanup_shape_hash_table(rt);
     gc_handle_array_compact(&g_gc.weakmap_handles);
@@ -7865,16 +7889,15 @@ void JS_GCWeakApply(JSRuntimeHandle rt, void *cleaned_shapes,
     if (js_rt_shape_hash(rt) != (LFHashTable *)cleaned_shapes)
         gc_cleanup_shape_hash_table(rt);
     for (uint32_t i = 0; i < counts[0]; i++)
-        if (SAFE_VALID(lists[0][i])) map_delete_weakrefs(rt, lists[0][i]);
+        if (SAFE_VALID(lists[0][i]) && !gc_object_is_dead(lists[0][i])) map_delete_weakrefs(rt, lists[0][i]);
     for (uint32_t i = 0; i < counts[1]; i++) {
+        if (gc_object_is_dead(lists[1][i])) continue;
         JSWeakRefData *w = SAFE_PTR(lists[1][i], JSWeakRefDataHandle);
         if (w) weakref_delete_weakref(rt, w);
     }
     for (uint32_t i = 0; i < counts[2]; i++)
-        if (SAFE_VALID(lists[2][i])) finrec_delete_weakref(rt, lists[2][i]);
-    if (counts[0]) gc_handle_array_compact(&g_gc.weakmap_handles);
-    if (counts[1]) gc_handle_array_compact(&g_gc.weakref_handles);
-    if (counts[2]) gc_handle_array_compact(&g_gc.finrec_handles);
+        if (SAFE_VALID(lists[2][i]) && !gc_object_is_dead(lists[2][i])) finrec_delete_weakref(rt, lists[2][i]);
+    gc_weak_registries_drop_dead();
 }
 
 static void JS_RunGCInternal(JSRuntimeHandle rt, BOOL remove_weak_objects)
@@ -19828,6 +19851,12 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
 #define BREAK           do { gc_poll(); } while (0); SWITCH(pc)
 #endif
 
+    /* Frames live on the GC heap, but every call still recurses on the C
+     * stack (JS_CallInternal -> JS_CallInternal), so check it here as
+     * upstream does: runaway recursion must throw RangeError, not crash. */
+    if (js_check_stack_overflow(JS_GetRuntime(caller_ctx), 0))
+        return JS_ThrowStackOverflow(caller_ctx);
+
     if (unlikely(JS_VALUE_GET_TAG(func_obj) != JS_TAG_OBJECT)) {
         if (flags & JS_CALL_FLAG_GENERATOR) {
             JSAsyncFunctionStateHandle s = (JSAsyncFunctionStateHandle)(GC_VALUE_GET_HANDLE(func_obj));
@@ -21348,7 +21377,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                 ret_val = *--sp;
                 while (sp > stack_buf &&
                        JS_VALUE_GET_TAG(sp[-1]) != JS_TAG_CATCH_OFFSET) {
-                    
+                    sp--;   /* values are GC-managed: just drop */
                 }
                 if (unlikely(sp == stack_buf)) {
                     JS_ThrowInternalError(ctx, "nip_catch");
@@ -23645,6 +23674,7 @@ static void js_async_generator_mark(JSRuntimeHandle rt, GCValue val,
                                         offsetof(JSAsyncGeneratorData, queue), 
                                         offsetof(JSAsyncGeneratorRequest, link)) {
             JSAsyncGeneratorRequestHandle req_h = req_handle;
+            mark_func(rt, req_handle);   /* the queued request record itself */
             JS_MarkValue(rt, SAFE_GET_OR(req_h, JSAsyncGeneratorRequestHandle, result, GC_UNDEFINED), mark_func);
             JS_MarkValue(rt, SAFE_GET_OR(req_h, JSAsyncGeneratorRequestHandle, promise, GC_UNDEFINED), mark_func);
             JS_MarkValue(rt, js_async_gen_req_resolving_func(req_h, 0), mark_func);
@@ -28971,6 +29001,8 @@ static JSFunctionDef *js_new_function_def(JSContextHandle ctx,
                                           const uint8_t *source_ptr,
                                           GetLineColCache *get_line_col_cache);
 static void emit_return(JSParseState *s, BOOL hasval);
+static BlockEnv *top_break_entry(JSParseState *s);
+static BlockEnv *break_entry_at(JSParseState *s, int depth);
 static GCValue js_resume_lazy_parse(JSContextHandle ctx,
                                     JSFunctionBytecodeHandle lazy_b,
                                     GCValue lazy_func,
@@ -30540,7 +30572,7 @@ static int js_parse_destructuring_element(JSParseState *s, int tok, int is_arg,
            'yield' triggers a 'return' */
         push_break_entry(s->ctx, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle),
                          JS_ATOM_NULL, -1, -1, 2);
-        block_env.has_iterator = TRUE;
+        top_break_entry(s)->has_iterator = TRUE;
         emit_op(s, OP_for_of_start);
         has_spread = FALSE;
         while (s->token.val != ']') {
@@ -32246,6 +32278,22 @@ static void pop_break_entry(JSFunctionDef *fd)
     fd->top_break_depth = stack[fd->top_break_depth].prev_depth;
 }
 
+/* The break stack lives in a GC array (not in C stack frames as upstream),
+ * so fields set after push_break_entry() must be written to the array entry
+ * itself.  Re-derive the pointer each time: the array may be reallocated. */
+static BlockEnv *break_entry_at(JSParseState *s, int depth)
+{
+    JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+    BlockEnv *stack = (BlockEnv*)gc_deref(fd->break_stack_handle);
+    return &stack[depth];
+}
+
+static BlockEnv *top_break_entry(JSParseState *s)
+{
+    JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+    return break_entry_at(s, fd->top_break_depth);
+}
+
 static __exception int emit_break(JSParseState *s, JSAtom name, int is_cont)
 {
     JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
@@ -32600,9 +32648,11 @@ static __exception int js_parse_for_in_of(JSParseState *s, int label_name,
 
     /* local for_in scope starts here so individual elements
        can be closed in statement. */
-    push_break_entry(s->ctx, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle),
-                     label_name, label_break, label_cont, 1);
-    break_entry.scope_level = block_scope_level;
+    int break_depth = push_break_entry(s->ctx, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle),
+                                       label_name, label_break, label_cont, 1);
+    if (break_depth < 0)
+        return -1;
+    break_entry_at(s, break_depth)->scope_level = block_scope_level;
 
     label_expr = emit_goto(s, OP_goto, -1);
 
@@ -32691,8 +32741,9 @@ static __exception int js_parse_for_in_of(JSParseState *s, int label_name,
     JS_FreeAtom(ctx, var_name);
 
     if (token_is_pseudo_keyword(s, JS_ATOM_of)) {
-        break_entry.has_iterator = is_for_of = TRUE;
-        break_entry.drop_count += 2;
+        is_for_of = TRUE;
+        break_entry_at(s, break_depth)->has_iterator = TRUE;
+        break_entry_at(s, break_depth)->drop_count += 2;
         if (has_initializer)
             goto initializer_error;
     } else if (s->token.val == TOK_IN) {
@@ -32842,7 +32893,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
             label_break = new_label(s);
             push_break_entry(s->ctx, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle),
                              label_name, label_break, -1, 0);
-            break_entry.is_regular_stmt = TRUE;
+            top_break_entry(s)->is_regular_stmt = TRUE;
             if (!(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->js_mode & JS_MODE_STRICT) &&
                 (decl_mask & DECL_MASK_FUNC_WITH_LABEL)) {
                 mask = DECL_MASK_FUNC | DECL_MASK_FUNC_WITH_LABEL;
@@ -33315,7 +33366,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
 
             push_break_entry(s->ctx, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle),
                              JS_ATOM_NULL, -1, -1, 1);
-            block_env.label_finally = label_finally;
+            top_break_entry(s)->label_finally = label_finally;
 
             if (js_parse_block(s))
                 goto fail;
@@ -33376,7 +33427,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
                 push_scope(s);  /* catch block */
                 push_break_entry(s->ctx, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle), JS_ATOM_NULL,
                                  -1, -1, 1);
-                block_env.label_finally = label_finally;
+                top_break_entry(s)->label_finally = label_finally;
 
                 if (js_parse_block(s))
                     goto fail;
@@ -57628,7 +57679,12 @@ static void js_map_iterator_mark(JSRuntimeHandle rt, GCValue val,
     if (SAFE_VALID(it)) {
         /* The map-iterator data object is a separate GC allocation; keep it alive. */
         mark_func(rt, SAFE_HANDLE(it));
-        /* the record is already marked by the object */
+        /* The current record is normally marked through the map, but mark
+         * it here too: a record deleted while an iterator points at it must
+         * stay valid until the iterator moves on. */
+        GCHandle cur = SAFE_GET_OR(it, JSMapIteratorDataHandle, cur_record_handle, GC_HANDLE_NULL);
+        if (cur != GC_HANDLE_NULL)
+            mark_func(rt, cur);
         JS_MarkValue(rt, SAFE_GET_OR(it, JSMapIteratorDataHandle, obj, GC_UNDEFINED), mark_func);
     }
 }
@@ -58766,6 +58822,11 @@ static void js_promise_mark(JSRuntimeHandle rt, GCValue val,
         size_t reaction_list_offset = offsetof(JSPromiseData, promise_reactions) + i * sizeof(GCListHead);
         gc_list_for_each_from_container(rd_handle, SAFE_HANDLE(ph), reaction_list_offset, offsetof(JSPromiseReactionData, link)) {
             JSPromiseReactionDataHandle rd_h = rd_handle;
+            /* The reaction record is its own (DATA) allocation, linked into
+             * the list by handle: it must be marked itself, or a collection
+             * frees it while the list still links to it and the next list
+             * update writes through a recycled handle. */
+            mark_func(rt, rd_handle);
             JS_MarkValue(rt, js_promise_reaction_resolving_func(rd_h, 0), mark_func);
             JS_MarkValue(rt, js_promise_reaction_resolving_func(rd_h, 1), mark_func);
             JS_MarkValue(rt, SAFE_GET_OR(rd_h, JSPromiseReactionDataHandle, handler, GC_UNDEFINED), mark_func);
@@ -65618,6 +65679,9 @@ static void js_finrec_mark(JSRuntimeHandle rt, GCValue val,
     if (SAFE_VALID(frd)) {
         gc_list_for_each_from_container(fre_handle, SAFE_HANDLE(frd), offsetof(JSFinalizationRegistryData, entries), offsetof(JSFinRecEntry, link)) {
             JSFinRecEntryHandle fre = fre_handle;
+            /* The entry record itself (its target and token stay weak: DATA
+             * contents are not traced). */
+            mark_func(rt, fre_handle);
             JS_MarkValue(rt, SAFE_GET_OR(fre, JSFinRecEntryHandle, held_val, GC_UNDEFINED), mark_func);
         }
         JS_MarkValue(rt, SAFE_GET_OR(frd, JSFinalizationRegistryDataHandle, cb, GC_UNDEFINED), mark_func);

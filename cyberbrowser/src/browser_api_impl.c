@@ -1481,36 +1481,27 @@ static bool setup_dom_exception(JSContextHandle ctx, GCValue global)
         return false;
     }
 
-    /* HELPER: Set an integer constant on dom_exception_ctor. */
-    #define SET_ERR_CONST(name, value) do { \
-        GCValue err_val = JS_NewInt32(ctx, value); \
-        JS_SetPropertyStr(ctx, dom_exception_ctor, #name, err_val); \
-    } while(0)
-
-    // Add static error code constants with validation before each set
-    SET_ERR_CONST(INDEX_SIZE_ERR, DOM_EXCEPTION_INDEX_SIZE_ERR);
-    SET_ERR_CONST(HIERARCHY_REQUEST_ERR, DOM_EXCEPTION_HIERARCHY_REQUEST_ERR);
-    SET_ERR_CONST(WRONG_DOCUMENT_ERR, DOM_EXCEPTION_WRONG_DOCUMENT_ERR);
-    SET_ERR_CONST(INVALID_CHARACTER_ERR, DOM_EXCEPTION_INVALID_CHARACTER_ERR);
-    SET_ERR_CONST(NO_MODIFICATION_ALLOWED_ERR, DOM_EXCEPTION_NO_MODIFICATION_ALLOWED_ERR);
-    SET_ERR_CONST(NOT_FOUND_ERR, DOM_EXCEPTION_NOT_FOUND_ERR);
-    SET_ERR_CONST(NOT_SUPPORTED_ERR, DOM_EXCEPTION_NOT_SUPPORTED_ERR);
-    SET_ERR_CONST(INVALID_STATE_ERR, DOM_EXCEPTION_INVALID_STATE_ERR);
-    SET_ERR_CONST(SYNTAX_ERR, DOM_EXCEPTION_SYNTAX_ERR);
-    SET_ERR_CONST(INVALID_MODIFICATION_ERR, DOM_EXCEPTION_INVALID_MODIFICATION_ERR);
-    SET_ERR_CONST(NAMESPACE_ERR, DOM_EXCEPTION_NAMESPACE_ERR);
-    SET_ERR_CONST(INVALID_ACCESS_ERR, DOM_EXCEPTION_INVALID_ACCESS_ERR);
-    SET_ERR_CONST(TYPE_MISMATCH_ERR, DOM_EXCEPTION_TYPE_MISMATCH_ERR);
-    SET_ERR_CONST(SECURITY_ERR, DOM_EXCEPTION_SECURITY_ERR);
-    SET_ERR_CONST(NETWORK_ERR, DOM_EXCEPTION_NETWORK_ERR);
-    SET_ERR_CONST(ABORT_ERR, DOM_EXCEPTION_ABORT_ERR);
-    SET_ERR_CONST(URL_MISMATCH_ERR, DOM_EXCEPTION_URL_MISMATCH_ERR);
-    SET_ERR_CONST(QUOTA_EXCEEDED_ERR, DOM_EXCEPTION_QUOTA_EXCEEDED_ERR);
-    SET_ERR_CONST(TIMEOUT_ERR, DOM_EXCEPTION_TIMEOUT_ERR);
-    SET_ERR_CONST(INVALID_NODE_TYPE_ERR, DOM_EXCEPTION_INVALID_NODE_TYPE_ERR);
-    SET_ERR_CONST(DATA_CLONE_ERR, DOM_EXCEPTION_DATA_CLONE_ERR);
-
-    #undef SET_ERR_CONST
+    /* Legacy code constants, in WebIDL order, on the interface object and
+     * the prototype ({ writable: false, enumerable: true,
+     * configurable: false }). */
+    {
+        static const char *const codes[] = {
+            "INDEX_SIZE_ERR", "DOMSTRING_SIZE_ERR", "HIERARCHY_REQUEST_ERR",
+            "WRONG_DOCUMENT_ERR", "INVALID_CHARACTER_ERR", "NO_DATA_ALLOWED_ERR",
+            "NO_MODIFICATION_ALLOWED_ERR", "NOT_FOUND_ERR", "NOT_SUPPORTED_ERR",
+            "INUSE_ATTRIBUTE_ERR", "INVALID_STATE_ERR", "SYNTAX_ERR",
+            "INVALID_MODIFICATION_ERR", "NAMESPACE_ERR", "INVALID_ACCESS_ERR",
+            "VALIDATION_ERR", "TYPE_MISMATCH_ERR", "SECURITY_ERR", "NETWORK_ERR",
+            "ABORT_ERR", "URL_MISMATCH_ERR", "QUOTA_EXCEEDED_ERR", "TIMEOUT_ERR",
+            "INVALID_NODE_TYPE_ERR", "DATA_CLONE_ERR"
+        };
+        for (int i = 0; i < (int)(sizeof(codes) / sizeof(codes[0])); i++) {
+            JS_DefinePropertyValueStr(ctx, dom_exception_ctor, codes[i], JS_NewInt32(ctx, i + 1),
+                                      JS_PROP_ENUMERABLE);
+            JS_DefinePropertyValueStr(ctx, dom_exception_proto, codes[i], JS_NewInt32(ctx, i + 1),
+                                      JS_PROP_ENUMERABLE);
+        }
+    }
 
     // Final validation before exposing to global object
     if (JS_IsException(dom_exception_ctor)) {
@@ -2005,7 +1996,9 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     GCValue document_ctor = JS_NewCFunction2(ctx, js_dummy_function, "Document", 0, JS_CFUNC_constructor, 0);
     GCValue document_proto = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, document_proto, "constructor", document_ctor);
-    // Note: Document.prototype chain not set - if needed, add prototype methods directly to document_proto
+    // Document.prototype -> Node.prototype (documents get this proto in
+    // dom_create_wrapper; per-document methods stay own properties).
+    JS_SetPrototype(ctx, document_proto, node_proto);
 
     JS_SetPropertyStr(ctx, document_ctor, "prototype", document_proto);
     JS_SetPropertyStr(ctx, global, "Document", document_ctor);
@@ -3583,6 +3576,12 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         GCValue shadow_root_proto = JS_NewObject(ctx);
         JS_SetPropertyStr(ctx, shadow_root_ctor, "prototype", shadow_root_proto);
         JS_SetPropertyStr(ctx, shadow_root_proto, "constructor", shadow_root_ctor);
+        /* ShadowRoot.prototype -> DocumentFragment.prototype -> Node.prototype */
+        {
+            GCValue df_ctor = JS_GetPropertyStr(ctx, global, "DocumentFragment");
+            GCValue df_proto = JS_IsObject(df_ctor) ? JS_GetPropertyStr(ctx, df_ctor, "prototype") : JS_UNDEFINED;
+            if (JS_IsObject(df_proto)) JS_SetPrototype(ctx, shadow_root_proto, df_proto);
+        }
         JS_SetPropertyStr(ctx, global, "ShadowRoot", shadow_root_ctor);
     }
 
@@ -4067,59 +4066,9 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     LOG_INFO("HTMLMediaElement API set");
     
     // ===== URL API =====
-    // Create URL constructor function
-    GCValue url_ctor = JS_NewCFunction2(ctx, js_url_constructor, "URL", 2, JS_CFUNC_constructor, 0);
-    // Create URL prototype object
-    GCValue url_proto = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, url_proto, "constructor", url_ctor);
-    // Set up the constructor with its prototype (required for JS_IsFunction to return true)
-    JS_SetConstructor(ctx, url_ctor, url_proto);
-    // Explicitly set the constructor bit to ensure JS_IsFunction returns true
-    JS_SetConstructorBit(ctx, url_ctor, TRUE);
-    // Add static methods
-    JS_SetPropertyStr(ctx, url_ctor, "createObjectURL",
-        JS_NewCFunction(ctx, js_url_create_object_url, "createObjectURL", 1));
-    JS_SetPropertyStr(ctx, url_ctor, "revokeObjectURL",
-        JS_NewCFunction(ctx, js_url_revoke_object_url, "revokeObjectURL", 1));
-    JS_SetPropertyStr(ctx, global, "URL", url_ctor);
-    JS_SetPropertyStr(ctx, window, "URL", url_ctor);
-    
-    // URL.prototype.searchParams getter
-    JSAtom search_params_atom = JS_NewAtom(ctx, "searchParams");
-    JS_DefinePropertyGetSet(ctx, url_proto, search_params_atom,
-        JS_NewCFunction(ctx, js_url_get_search_params, "get searchParams", 0),
-        JS_UNDEFINED, JS_PROP_ENUMERABLE);
-    JS_FreeAtom(ctx, search_params_atom);
-    
-    // URLSearchParams constructor and prototype
-    GCValue usp_ctor = JS_NewCFunction2(ctx, js_url_search_params_constructor, "URLSearchParams", 1, JS_CFUNC_constructor, 0);
-    GCValue usp_proto = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, usp_proto, "constructor", usp_ctor);
-    JS_SetConstructor(ctx, usp_ctor, usp_proto);
-    JS_SetConstructorBit(ctx, usp_ctor, TRUE);
-    JS_SetPropertyStr(ctx, usp_proto, "append",
-        JS_NewCFunction(ctx, js_url_search_params_append, "append", 2));
-    JS_SetPropertyStr(ctx, usp_proto, "delete",
-        JS_NewCFunction(ctx, js_url_search_params_delete, "delete", 1));
-    JS_SetPropertyStr(ctx, usp_proto, "get",
-        JS_NewCFunction(ctx, js_url_search_params_get, "get", 1));
-    JS_SetPropertyStr(ctx, usp_proto, "getAll",
-        JS_NewCFunction(ctx, js_url_search_params_get_all, "getAll", 1));
-    JS_SetPropertyStr(ctx, usp_proto, "has",
-        JS_NewCFunction(ctx, js_url_search_params_has, "has", 1));
-    JS_SetPropertyStr(ctx, usp_proto, "set",
-        JS_NewCFunction(ctx, js_url_search_params_set, "set", 2));
-    JS_SetPropertyStr(ctx, usp_proto, "toString",
-        JS_NewCFunction(ctx, js_url_search_params_to_string, "toString", 0));
-    JS_SetPropertyStr(ctx, usp_proto, "entries",
-        JS_NewCFunction(ctx, js_url_search_params_entries, "entries", 0));
-    JS_SetPropertyStr(ctx, usp_proto, "keys",
-        JS_NewCFunction(ctx, js_url_search_params_keys, "keys", 0));
-    JS_SetPropertyStr(ctx, usp_proto, "values",
-        JS_NewCFunction(ctx, js_url_search_params_values, "values", 0));
-    JS_SetPropertyStr(ctx, global, "URLSearchParams", usp_ctor);
-    JS_SetPropertyStr(ctx, window, "URLSearchParams", usp_ctor);
-    
+    // URL, URLSearchParams, document.baseURI and the URL attributes of
+    // <a>/<area> (browser/url_api.c, browser/url_api.js)
+    url_api_install(ctx, global);
     LOG_INFO("URL API set");
     
     // ===== Request/Response API =====

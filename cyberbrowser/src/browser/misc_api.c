@@ -753,14 +753,14 @@ GCValue js_dom_exception_get_message(JSContextHandle ctx, GCValue this_val) {
 
 GCValue js_dom_exception_get_code(JSContextHandle ctx, GCValue this_val) {
     DOMExceptionDataHandle de = JS_GetOpaqueHandle2(ctx, this_val, js_dom_exception_class_id);
-    if (SAFE_IS_NULL(de)) return JS_ThrowTypeError(ctx, "Invalid DOM element");
+    if (SAFE_IS_NULL(de)) return JS_ThrowTypeError(ctx, "Illegal invocation");
     return JS_NewInt32(ctx, SAFE_GET_OR(de, DOMExceptionDataHandle, code, 0));
 }
 
 const JSCFunctionListEntry js_dom_exception_proto_funcs[] = {
-    JS_CGETSET_DEF("name", js_dom_exception_get_name, NULL),
-    JS_CGETSET_DEF("message", js_dom_exception_get_message, NULL),
-    JS_CGETSET_DEF("code", js_dom_exception_get_code, NULL),
+    { .name = "name", .prop_flags = JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE, .def_type = JS_DEF_CGETSET, .magic = 0, .u = { .getset = { .get = { .getter = js_dom_exception_get_name }, .set = { .setter = NULL } } } },
+    { .name = "message", .prop_flags = JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE, .def_type = JS_DEF_CGETSET, .magic = 0, .u = { .getset = { .get = { .getter = js_dom_exception_get_message }, .set = { .setter = NULL } } } },
+    { .name = "code", .prop_flags = JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE, .def_type = JS_DEF_CGETSET, .magic = 0, .u = { .getset = { .get = { .getter = js_dom_exception_get_code }, .set = { .setter = NULL } } } },
 };
 const size_t js_dom_exception_proto_funcs_count = sizeof(js_dom_exception_proto_funcs) / sizeof(js_dom_exception_proto_funcs[0]);
 

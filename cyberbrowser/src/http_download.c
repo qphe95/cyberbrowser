@@ -1,5 +1,6 @@
 #include "http_download.h"
 #include "tls_client.h"
+#include "url_whatwg.h"
 #include "utf8_filename.h"
 
 #include <stdio.h>
@@ -124,38 +125,48 @@ static bool http_request(const char *url, HttpBuffer *outBuffer,
 static bool http_get_to_memory_resumable(const char *url, HttpBuffer *outBuffer,
                                          char *err, size_t errLen);
 
+/* Split an absolute http(s) URL (WHATWG parsing) into the connect host
+ * (IPv6 without brackets), the port (explicit or the scheme default) and the
+ * request target (path + query, no fragment).  Optional outputs: *is_tls,
+ * and host_hdr = the Host header value (host[:port] for a non-default port). */
+static bool parse_url_ex(const char *url, char *host, size_t host_len,
+                         char *path, size_t path_len, char *port, size_t port_len,
+                         bool *is_tls, char *host_hdr, size_t host_hdr_len) {
+    WUrl u;
+    if (!url || wurl_parse(url, strlen(url), NULL, &u) != 0) return false;
+    bool ok = false;
+    bool tls = strcmp(u.scheme, "https") == 0 || strcmp(u.scheme, "wss") == 0;
+    bool plain = strcmp(u.scheme, "http") == 0 || strcmp(u.scheme, "ws") == 0;
+    if ((tls || plain) && u.host && u.host[0]) {
+        const char *h = u.host;
+        size_t hl = strlen(h);
+        if (h[0] == '[' && hl >= 2 && h[hl - 1] == ']') { h++; hl -= 2; }
+        if (hl < host_len) {
+            memcpy(host, h, hl);
+            host[hl] = '\0';
+            snprintf(port, port_len, "%d", u.port >= 0 ? u.port : (tls ? 443 : 80));
+            char *pn = wurl_pathname(&u), *se = wurl_search(&u);
+            if (pn && se) {
+                snprintf(path, path_len, "%s%s", pn[0] ? pn : "/", se);
+                ok = true;
+            }
+            free(pn);
+            free(se);
+            if (ok && host_hdr && host_hdr_len) {
+                char *hh = wurl_host(&u);
+                snprintf(host_hdr, host_hdr_len, "%s", hh ? hh : host);
+                free(hh);
+            }
+            if (is_tls) *is_tls = tls;
+        }
+    }
+    wurl_free(&u);
+    return ok;
+}
+
 static bool parse_url(const char *url, char *host, size_t host_len,
                       char *path, size_t path_len, char *port, size_t port_len) {
-    const char *p = url;
-    
-    /* Skip scheme */
-    if (strncmp(p, "https://", 8) == 0) {
-        p += 8;
-        strncpy(port, "443", port_len);
-    } else if (strncmp(p, "http://", 7) == 0) {
-        p += 7;
-        strncpy(port, "80", port_len);
-    } else {
-        strncpy(port, "443", port_len);
-    }
-    
-    /* Extract host and path */
-    const char *slash = strchr(p, '/');
-    if (slash) {
-        size_t host_sz = (size_t)(slash - p);
-        if (host_sz >= host_len) host_sz = host_len - 1;
-        memcpy(host, p, host_sz);
-        host[host_sz] = '\0';
-        
-        strncpy(path, slash, path_len - 1);
-        path[path_len - 1] = '\0';
-    } else {
-        strncpy(host, p, host_len - 1);
-        host[host_len - 1] = '\0';
-        strncpy(path, "/", path_len);
-    }
-    
-    return true;
+    return parse_url_ex(url, host, host_len, path, path_len, port, port_len, NULL, NULL, 0);
 }
 
 /* ============================================================================
@@ -573,14 +584,18 @@ static bool http_request_with_method_internal(const char *url, const char *metho
     char host[256] = {0};
     char path[2048] = {0};
     char port[8] = {0};
+    char host_hdr[300] = {0};
+    bool is_tls = true;
     
-    if (!parse_url(url, host, sizeof(host), path, sizeof(path), port, sizeof(port))) {
+    if (!parse_url_ex(url, host, sizeof(host), path, sizeof(path), port, sizeof(port),
+                      &is_tls, host_hdr, sizeof(host_hdr))) {
         snprintf(err, errLen, "Failed to parse URL");
         return false;
     }
     
     TlsClient client = {0};
-    if (!tls_client_connect(&client, host, port, err, errLen)) {
+    if (!(is_tls ? tls_client_connect(&client, host, port, err, errLen)
+                 : tcp_client_connect(&client, host, port, err, errLen))) {
         return false;
     }
     
@@ -594,7 +609,7 @@ static bool http_request_with_method_internal(const char *url, const char *metho
              "Accept-Language: en-US,en;q=0.9\r\n"
              "Accept-Encoding: identity\r\n"
              "Connection: close\r\n",
-             method, path, host);
+             method, path, host_hdr);
     
     /* Add custom headers */
     for (size_t i = 0; i < custom_header_count; i++) {

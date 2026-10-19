@@ -239,6 +239,9 @@ static bool init_browser_context(void) {
         printf("FATAL: JS_NewRuntime() failed\n");
         return false;
     }
+    /* QuickJS defaults to a 1 MB JS stack (about 760 nested calls here);
+     * real pages (YouTube's Polymer) recurse deeper than that. */
+    JS_SetMaxStackSize(g_rt, js_stack_budget());
 
     /* Register the ES module loader so dynamic import() can fetch YouTube's
      * lazily-loaded component chunks over HTTP. */
@@ -1008,6 +1011,33 @@ int main(int argc, char *argv[]) {
             const char *pre_diag = "console.error('[PRE-DIAG] Element.matches=' + typeof Element.prototype.matches);";
             JS_Eval(g_ctx, pre_diag, strlen(pre_diag), "<pre_diag>", JS_EVAL_TYPE_GLOBAL);
         }
+        /* Developer hook: CYBER_PRELUDE_JS=<file> is evaluated in the page
+         * realm before any page script (instrumentation, polyfill tests). */
+        {
+            const char *prelude = cyber_getenv("CYBER_PRELUDE_JS");
+            if (prelude && *prelude) {
+                FILE *pf = fopen(prelude, "rb");
+                if (pf) {
+                    fseek(pf, 0, SEEK_END);
+                    long psz = ftell(pf);
+                    fseek(pf, 0, SEEK_SET);
+                    char *pbuf = psz >= 0 ? (char *)malloc((size_t)psz + 1) : NULL;
+                    if (pbuf && fread(pbuf, 1, (size_t)psz, pf) == (size_t)psz) {
+                        pbuf[psz] = 0;
+                        GCValue pr = JS_Eval(g_ctx, pbuf, (size_t)psz, "<prelude>", JS_EVAL_TYPE_GLOBAL);
+                        if (JS_IsException(pr)) {
+                            GCValue exc = JS_GetException(g_ctx);
+                            const char *es = JS_ToCString(g_ctx, exc);
+                            fprintf(stderr, "[PRELUDE] exception: %s\n", es ? es : "?");
+                        }
+                    }
+                    free(pbuf);
+                    fclose(pf);
+                } else {
+                    fprintf(stderr, "[PRELUDE] cannot open %s\n", prelude);
+                }
+            }
+        }
         js_quickjs_clear_captured_urls();
         JsExecResult js_result;
         bool exec_ok = false;
@@ -1325,6 +1355,16 @@ int main(int argc, char *argv[]) {
     register_font_table();
 
     int loop_iterations = 0;
+    /* Pages with recurring timers (setInterval, polling) never go quiet, so
+     * bound the settle phase by wall-clock time too (CYBER_SETTLE_MS,
+     * default 15 s). */
+    unsigned long long settle_budget_ms = 15000;
+    {
+        const char *sm = cyber_getenv("CYBER_SETTLE_MS");
+        if (sm && *sm) settle_budget_ms = strtoull(sm, NULL, 10);
+    }
+    unsigned long long settle_start_ms = platform_get_time_ms();
+    bool settle_final = false;
     CP_BEGIN("quiescence-loop");
     while (loop_iterations < 100) {
         loop_iterations++;
@@ -1333,7 +1373,7 @@ int main(int argc, char *argv[]) {
         bool had_images = false;
         {
             CP_SCOPE("pump-timers");
-            had_timers = pump_timers_and_jobs(g_ctx);
+            if (!settle_final) had_timers = pump_timers_and_jobs(g_ctx);
         }
         {
             CP_SCOPE("process-images");
@@ -1372,6 +1412,15 @@ int main(int argc, char *argv[]) {
 
         if (!had_timers && !had_images && !g_dom_needs_layout &&
             !image_cache_has_pending(image_cache)) {
+            break;
+        }
+        if (settle_final || platform_get_time_ms() - settle_start_ms > settle_budget_ms) {
+            if (g_dom_needs_layout && !settle_final) {
+                settle_final = true;    /* one more turn: lay out, no timers */
+                continue;
+            }
+            printf("Settle budget (%llu ms) reached after %d iterations; pending timers left running.\n",
+                   settle_budget_ms, loop_iterations);
             break;
         }
     }
