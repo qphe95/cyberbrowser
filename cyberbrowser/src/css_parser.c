@@ -683,6 +683,9 @@ static void css_apply_pseudo(CssSimpleSelector *out,
             memcpy(out->not_classes, tmp.classes, sizeof(out->not_classes));
             out->not_class_count = tmp.class_count;
             memcpy(out->not_attrs, tmp.attrs, sizeof(out->not_attrs));
+            memcpy(out->not_attr_ops, tmp.attr_ops, sizeof(out->not_attr_ops));
+            memcpy(out->not_attr_ci, tmp.attr_ci, sizeof(out->not_attr_ci));
+            memcpy(out->not_attr_vals, tmp.attr_vals, sizeof(out->not_attr_vals));
             out->not_attr_count = tmp.attr_count;
         }
         return;
@@ -703,8 +706,28 @@ static void css_apply_pseudo(CssSimpleSelector *out,
         }
         return;
     }
-    /* :has() and unknown pseudo-classes are ignored, i.e. they neither add
-     * nor remove constraints. */
+    if (css_pseudo_name_is(name, nl, "has")) {
+        /* Relative selector: an optional leading combinator, then a selector
+         * matched against descendants / children / following siblings. */
+        if (arg && al > 0) {
+            size_t k = 0;
+            while (k < al && css_is_space(arg[k])) k++;
+            char comb = 0;
+            if (k < al && (arg[k] == '>' || arg[k] == '+' || arg[k] == '~')) {
+                comb = arg[k++];
+                while (k < al && css_is_space(arg[k])) k++;
+            }
+            size_t copy = al - k;
+            if (copy >= sizeof(out->has_arg)) copy = sizeof(out->has_arg) - 1;
+            memcpy(out->has_arg, arg + k, copy);
+            out->has_arg[copy] = '\0';
+            out->has_comb = comb;
+            out->has_active = copy > 0;
+        }
+        return;
+    }
+    /* Unknown pseudo-classes are ignored, i.e. they neither add nor remove
+     * constraints. */
 }
 
 static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector *out) {
@@ -762,25 +785,71 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
             css_consume_pseudo(s, n, &i, &name, &name_len, &arg, &arg_len, &is_element);
             css_apply_pseudo(out, name, name_len, arg, arg_len, is_element);
         } else if (s[i] == '[') {
-            /* Parse attribute selector: [name], [name=value], [name~=value], etc.
-             * We only track the attribute NAME for presence checking. */
+            /* Parse attribute selector: [name], [name=value], [name~=value],
+             * [name|=value], [name^=value], [name$=value], [name*=value],
+             * each optionally followed by an i/s case flag. */
             i++;
+            while (i < n && css_is_space(s[i])) i++;
             size_t attr_start = i;
             while (i < n && s[i] != '=' && s[i] != '~' && s[i] != '|' &&
-                   s[i] != '^' && s[i] != '$' && s[i] != '*' && s[i] != ']') i++;
-            if (out->attr_count < CSS_MAX_ATTRS) {
-                css_strncpy_lower(out->attrs[out->attr_count], s + attr_start,
-                                  i - attr_start, sizeof(out->attrs[0]));
-                /* Trim trailing whitespace from attr name */
-                size_t al = strlen(out->attrs[out->attr_count]);
-                while (al > 0 && css_is_space(out->attrs[out->attr_count][al-1]))
-                    out->attrs[out->attr_count][--al] = '\0';
-                if (al > 0) {
-                    out->attr_count++;
-                    out->has_substantive = true;
+                   s[i] != '^' && s[i] != '$' && s[i] != '*' && s[i] != ']' &&
+                   !css_is_space(s[i])) i++;
+            size_t attr_end = i;
+            while (i < n && css_is_space(s[i])) i++;
+            int op = CSS_ATTR_OP_EXISTS;
+            bool ci = false;
+            char val[96]; val[0] = '\0';
+            bool bad = false;
+            if (i < n && s[i] != ']') {
+                char c = s[i];
+                if (c == '=') { op = CSS_ATTR_OP_EQ; i++; }
+                else if (i + 1 < n && s[i + 1] == '=') {
+                    switch (c) {
+                    case '~': op = CSS_ATTR_OP_WORD; break;
+                    case '|': op = CSS_ATTR_OP_DASH; break;
+                    case '^': op = CSS_ATTR_OP_PREFIX; break;
+                    case '$': op = CSS_ATTR_OP_SUFFIX; break;
+                    case '*': op = CSS_ATTR_OP_SUBSTR; break;
+                    default: bad = true; break;
+                    }
+                    i += 2;
+                } else bad = true;
+                while (i < n && css_is_space(s[i])) i++;
+                size_t vl = 0;
+                if (!bad && i < n && (s[i] == '"' || s[i] == '\'')) {
+                    char q = s[i++];
+                    while (i < n && s[i] != q) {
+                        char ch = s[i];
+                        if (ch == '\\' && i + 1 < n) { ch = s[++i]; }
+                        if (vl + 1 < sizeof(val)) val[vl++] = ch;
+                        i++;
+                    }
+                    if (i < n) i++;
+                } else if (!bad) {
+                    while (i < n && s[i] != ']' && !css_is_space(s[i])) {
+                        char ch = s[i];
+                        if (ch == '\\' && i + 1 < n) { ch = s[++i]; }
+                        if (vl + 1 < sizeof(val)) val[vl++] = ch;
+                        i++;
+                    }
                 }
+                val[vl] = '\0';
+                while (i < n && css_is_space(s[i])) i++;
+                if (i < n && (s[i] == 'i' || s[i] == 'I')) { ci = true; i++; }
+                else if (i < n && (s[i] == 's' || s[i] == 'S')) { i++; }
             }
-            /* Skip rest of attribute selector */
+            if (attr_end > attr_start && out->attr_count < CSS_MAX_ATTRS) {
+                int k = out->attr_count;
+                css_strncpy_lower(out->attrs[k], s + attr_start,
+                                  attr_end - attr_start, sizeof(out->attrs[0]));
+                out->attr_ops[k] = (unsigned char)op;
+                out->attr_ci[k] = ci;
+                memcpy(out->attr_vals[k], val, sizeof(val));
+                if (bad) out->never_match = true;
+                out->attr_count++;
+                out->has_substantive = true;
+            }
+            /* Skip to the closing bracket. */
             int depth = 1;
             while (i < n && depth > 0) {
                 if (s[i] == '[') depth++;
@@ -807,28 +876,38 @@ static int css_parse_selector_chain(const char *s, CssSelectorPart *parts, int m
         css_skip_space(s, len, &i);
         if (i >= len) break;
 
-        CssSelectorPart *part = &parts[count++];
-        part->combinator = (count == 1) ? CSS_COMB_NONE : CSS_COMB_DESCENDANT;
-
-        if (count > 1) {
-            /* Check for explicit combinator. */
-            if (s[i] == '>') {
-                part->combinator = CSS_COMB_CHILD;
-                i++;
-                css_skip_space(s, len, &i);
-            }
+        int comb = CSS_COMB_DESCENDANT;
+        if (s[i] == '>' || s[i] == '+' || s[i] == '~') {
+            comb = s[i] == '>' ? CSS_COMB_CHILD
+                 : s[i] == '+' ? CSS_COMB_ADJACENT : CSS_COMB_SIBLING;
+            i++;
+            css_skip_space(s, len, &i);
+            if (i >= len) break;
         }
+        CssSelectorPart *part = &parts[count++];
+        part->combinator = (count == 1) ? CSS_COMB_NONE : comb;
 
+        /* One compound: stop at top-level whitespace or a combinator, but not
+         * inside [...], (...) or quotes (e.g. :nth-child(2n+1), [a="x y"]). */
         size_t start = i;
         bool in_quote = false;
         char quote_char = 0;
+        int depth = 0;
         while (i < len) {
             char c = s[i];
-            if (!in_quote) {
-                if (c == '"' || c == '\'') { in_quote = true; quote_char = c; }
-                else if (c == ' ' || c == '>' || c == '+') break;
-            } else {
-                if (c == quote_char) in_quote = false;
+            if (in_quote) {
+                if (c == '\\' && i + 1 < len) i++;
+                else if (c == quote_char) in_quote = false;
+            } else if (c == '\\' && i + 1 < len) {
+                i++;
+            } else if (c == '"' || c == '\'') {
+                in_quote = true; quote_char = c;
+            } else if (c == '[' || c == '(') {
+                depth++;
+            } else if (c == ']' || c == ')') {
+                if (depth > 0) depth--;
+            } else if (depth == 0 && (css_is_space(c) || c == '>' || c == '+' || c == '~')) {
+                break;
             }
             i++;
         }
@@ -842,7 +921,16 @@ static int css_specificity_from_simple(const CssSimpleSelector *simple) {
     int a = simple->has_id ? 1 : 0;
     int b = simple->class_count;
     if (simple->universal) b = 0;
+    b += simple->attr_count;
+    b += (simple->child_pos ? 1 : 0) + (simple->type_pos ? 1 : 0) +
+         (simple->nth_kind ? 1 : 0) + (simple->is_root ? 1 : 0) +
+         (simple->requires_link ? 1 : 0) + (simple->requires_empty ? 1 : 0);
+    if (simple->not_active) {
+        a += simple->not_has_id ? 1 : 0;
+        b += simple->not_class_count + simple->not_attr_count;
+    }
     int c = (simple->has_tag && !simple->universal) ? 1 : 0;
+    if (simple->not_active && simple->not_has_tag) c++;
     return a * 1000 + b * 10 + c;
 }
 
@@ -958,8 +1046,10 @@ static bool css_simple_matches_ex(const CssSimpleSelector *simple, HtmlDocument 
         if (!html_node_class_contains(node, simple->classes[i])) return false;
     }
     for (int i = 0; i < simple->attr_count; i++) {
-        /* [attr] — element must have the named attribute. */
-        if (!html_node_attr_value(node, simple->attrs[i])) return false;
+        if (!css_attr_value_matches(simple->attr_ops[i], simple->attr_ci[i],
+                                    simple->attr_vals[i],
+                                    html_node_attr_value(node, simple->attrs[i])))
+            return false;
     }
     if (simple->requires_empty) {
         /* :empty matches an element with no child nodes (elements or text).
@@ -1002,11 +1092,15 @@ static bool css_simple_matches_ex(const CssSimpleSelector *simple, HtmlDocument 
         }
         if (hit) {
             for (int i = 0; i < simple->not_attr_count && hit; i++) {
-                if (!html_node_attr_value(node, simple->not_attrs[i])) hit = false;
+                if (!css_attr_value_matches(simple->not_attr_ops[i], simple->not_attr_ci[i],
+                                            simple->not_attr_vals[i],
+                                            html_node_attr_value(node, simple->not_attrs[i])))
+                    hit = false;
             }
         }
         if (hit) return false;
     }
+    if (simple->has_active) return false;   /* compiled matcher only */
     if (simple->where_active) {
         /* :where()/:is() — the element must match the inner selector. */
         if (!css_selector_matches(simple->where_arg, doc, node)) return false;
@@ -1042,6 +1136,22 @@ static bool css_chain_matches(const CssSelectorPart *parts, int count,
         int comb = parts[i].combinator; /* relates part i to part i-1 */
         if (comb == CSS_COMB_CHILD) {
             current = html_node_parent_node(doc, current);
+        } else if (comb == CSS_COMB_ADJACENT || comb == CSS_COMB_SIBLING) {
+            HtmlNode *sib = NULL;
+            int idx = po_array_index_from_payload(&doc->array, current);
+            int prev = -1;
+            int par = idx >= 0 ? po_array_parent(&doc->array, idx) : -1;
+            if (par < 0) return false;
+            for (int c = po_array_first_child(&doc->array, par); c >= 0 && c != idx;
+                 c = po_array_next_sibling(&doc->array, c)) {
+                HtmlNode *cn = (HtmlNode *)po_array_payload(&doc->array, c);
+                if (!cn || cn->type != HTML_NODE_ELEMENT) continue;
+                if (comb == CSS_COMB_ADJACENT) prev = c;
+                else if (css_simple_matches_ex(&parts[i - 1].simple, doc, cn)) prev = c;
+            }
+            if (prev >= 0) sib = (HtmlNode *)po_array_payload(&doc->array, prev);
+            if (!sib) return false;
+            current = sib;
         } else { /* descendant */
             current = html_node_parent_node(doc, current);
             int steps = 0;

@@ -12,6 +12,58 @@
 #define CSS_MAX_CLASSES 16
 #define CSS_MAX_ATTRS 8
 
+/* Attribute selector operators. */
+#define CSS_ATTR_OP_EXISTS   0  /* [a]      */
+#define CSS_ATTR_OP_EQ       1  /* [a=v]    */
+#define CSS_ATTR_OP_WORD     2  /* [a~=v]   */
+#define CSS_ATTR_OP_DASH     3  /* [a|=v]   */
+#define CSS_ATTR_OP_PREFIX   4  /* [a^=v]   */
+#define CSS_ATTR_OP_SUFFIX   5  /* [a$=v]   */
+#define CSS_ATTR_OP_SUBSTR   6  /* [a*=v]   */
+
+#include <string.h>
+#include <strings.h>
+
+/* Does attribute value `have` (NULL = attribute absent) satisfy the test? */
+static inline bool css_attr_value_matches(int op, bool ci, const char *want,
+                                          const char *have) {
+    if (!have) return false;
+    if (op == CSS_ATTR_OP_EXISTS) return true;
+    size_t wl = strlen(want), hl = strlen(have);
+    int (*ncmp)(const char *, const char *, size_t) = ci ? strncasecmp : strncmp;
+    switch (op) {
+    case CSS_ATTR_OP_EQ:
+        return wl == hl && ncmp(have, want, wl) == 0;
+    case CSS_ATTR_OP_DASH:
+        return hl >= wl && ncmp(have, want, wl) == 0 &&
+               (hl == wl || have[wl] == '-');
+    case CSS_ATTR_OP_PREFIX:
+        return wl > 0 && hl >= wl && ncmp(have, want, wl) == 0;
+    case CSS_ATTR_OP_SUFFIX:
+        return wl > 0 && hl >= wl && ncmp(have + hl - wl, want, wl) == 0;
+    case CSS_ATTR_OP_SUBSTR:
+        if (wl == 0) return false;
+        for (size_t i = 0; i + wl <= hl; i++)
+            if (ncmp(have + i, want, wl) == 0) return true;
+        return false;
+    case CSS_ATTR_OP_WORD: {
+        if (wl == 0) return false;
+        for (size_t i = 0; i < wl; i++)
+            if (want[i] == ' ' || want[i] == '\t' || want[i] == '\n') return false;
+        const char *p = have;
+        while (*p) {
+            while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\f') p++;
+            const char *st = p;
+            while (*p && !(*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\f')) p++;
+            if ((size_t)(p - st) == wl && ncmp(st, want, wl) == 0) return true;
+        }
+        return false;
+    }
+    default:
+        return true;
+    }
+}
+
 typedef struct CssSimpleSelector {
     char tag[64];
     char id[128];
@@ -19,6 +71,11 @@ typedef struct CssSimpleSelector {
     int class_count;
     char attrs[CSS_MAX_ATTRS][64];  /* attribute names that must be present */
     int attr_count;
+    /* Per-attribute value test: op is a CSS_ATTR_OP_* value; the value is
+     * stored verbatim (case is folded at match time when attr_ci is set). */
+    unsigned char attr_ops[CSS_MAX_ATTRS];
+    bool attr_ci[CSS_MAX_ATTRS];
+    char attr_vals[CSS_MAX_ATTRS][96];
     bool has_tag;
     bool has_id;
     bool is_root;    /* :root pseudo-class */
@@ -42,11 +99,19 @@ typedef struct CssSimpleSelector {
     int  not_class_count;
     char not_attrs[CSS_MAX_ATTRS][64];
     int  not_attr_count;
+    unsigned char not_attr_ops[CSS_MAX_ATTRS];
+    bool not_attr_ci[CSS_MAX_ATTRS];
+    char not_attr_vals[CSS_MAX_ATTRS][96];
     /* :where()/:is() argument, kept as raw selector text and evaluated
      * recursively at match time.  :where() contributes zero specificity;
      * :is() is treated the same here (a slight specificity deviation). */
     bool where_active;
     char where_arg[160];
+    /* :has(<relative selector>): leading combinator (0 descendant, '>' '+'
+     * '~') and the remaining selector text. */
+    bool has_active;
+    char has_comb;
+    char has_arg[160];
 } CssSimpleSelector;
 
 /* combinator that precedes this simple selector in document order */
@@ -59,6 +124,8 @@ typedef struct CssSelectorPart {
 #define CSS_COMB_NONE       0
 #define CSS_COMB_DESCENDANT 1
 #define CSS_COMB_CHILD      2
+#define CSS_COMB_ADJACENT   3   /* a + b */
+#define CSS_COMB_SIBLING    4   /* a ~ b */
 
 /* A fully-parsed selector chain (the text between commas). */
 typedef struct CssSelectorChain {

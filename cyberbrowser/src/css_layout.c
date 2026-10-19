@@ -342,6 +342,11 @@ void css_layout_tree_free(LayoutContext *ctx)
     free(ctx->tree.preorder);
     free(ctx->tree.postorder);
     free(ctx->boxes);
+    free(ctx->intrinsic_cache);
+    if (ctx->text_norm) {
+        for (int i = 0; i < ctx->tree.count; i++) free(ctx->text_norm[i]);
+        free(ctx->text_norm);
+    }
     memset(ctx, 0, sizeof(*ctx));
 }
 
@@ -363,6 +368,28 @@ static bool css_is_inherited(const char *prop)
 }
 
 static double css_parse_length(const char *value, double parent_value, double viewport_value, double font_size);
+/* Per-layout unit context: viewport size for vw/vh/vmin/vmax and the root
+ * element's font size for rem (set when the root box is styled). */
+static double g_unit_vw = 1024.0, g_unit_vh = 768.0, g_unit_rem = 16.0;
+static double css_unit_factor(const char *unit, double parent_value, double font_size, bool *known)
+{
+    *known = true;
+    if (strcasecmp(unit, "%") == 0) return parent_value / 100.0;
+    if (strcasecmp(unit, "vw") == 0) return g_unit_vw / 100.0;
+    if (strcasecmp(unit, "vh") == 0) return g_unit_vh / 100.0;
+    if (strcasecmp(unit, "vmin") == 0) return (g_unit_vw < g_unit_vh ? g_unit_vw : g_unit_vh) / 100.0;
+    if (strcasecmp(unit, "vmax") == 0) return (g_unit_vw > g_unit_vh ? g_unit_vw : g_unit_vh) / 100.0;
+    if (strcasecmp(unit, "em") == 0) return font_size;
+    if (strcasecmp(unit, "rem") == 0) return g_unit_rem;
+    if (strcasecmp(unit, "pt") == 0) return 96.0 / 72.0;
+    if (strcasecmp(unit, "pc") == 0) return 16.0;
+    if (strcasecmp(unit, "in") == 0) return 96.0;
+    if (strcasecmp(unit, "cm") == 0) return 96.0 / 2.54;
+    if (strcasecmp(unit, "mm") == 0) return 96.0 / 25.4;
+    if (strcasecmp(unit, "px") == 0) return 1.0;
+    *known = false;
+    return 1.0;
+}
 
 /* Minimal calc() expression evaluator. Supports +, -, *, /, parentheses and
  * length/percentage operands.  Returns 0 for unsupported expressions. */
@@ -411,13 +438,10 @@ static double calc_parse_primary(CalcParser *p)
             memcpy(unit, unit_start, unit_len);
             for (size_t i = 0; i < unit_len; i++) unit[i] = (char)tolower((unsigned char)unit[i]);
         }
-        if (strcmp(unit, "%") == 0) return num * p->parent_value / 100.0;
-        if (strcmp(unit, "vw") == 0) return num * p->viewport_value / 100.0;
-        if (strcmp(unit, "vh") == 0) return num * p->viewport_value / 100.0;
-        if (strcmp(unit, "em") == 0) return num * p->font_size;
-        if (strcmp(unit, "rem") == 0) return num * 16.0;
+        bool known;
+        double f = css_unit_factor(unit, p->parent_value, p->font_size, &known);
         /* px or unknown unit: treat number as px */
-        return num;
+        return num * f;
     }
     return num; /* unitless */
 }
@@ -485,15 +509,11 @@ static double css_parse_length(const char *value, double parent_value, double vi
     if (end == value) return 0.0;
 
     while (*end && isspace((unsigned char)*end)) end++;
-    if (strcasecmp(end, "px") == 0 || *end == '\0') return num;
-    if (strcasecmp(end, "%") == 0) return num * parent_value / 100.0;
-    if (strcasecmp(end, "vw") == 0) return num * viewport_value / 100.0;
-    if (strcasecmp(end, "vh") == 0) return num * viewport_value / 100.0;
-    if (strcasecmp(end, "em") == 0) return num * font_size;
-    if (strcasecmp(end, "rem") == 0) return num * 16.0; /* root em fallback */
-    if (strcasecmp(end, "pt") == 0) return num * 96.0 / 72.0;
-    if (strcasecmp(end, "pc") == 0) return num * 16.0;
-    return num; /* treat unitless as px */
+    (void)viewport_value;
+    if (*end == '\0') return num;   /* unitless: px */
+    bool known;
+    double f = css_unit_factor(end, parent_value, font_size, &known);
+    return num * f;                  /* unknown units: px */
 }
 
 static bool css_parse_color(const char *value, double *r, double *g, double *b, double *a)
@@ -699,14 +719,74 @@ static CssDisplay layout_default_display(const char *tag_name) {
     /* Common replaced/phrasing elements default to inline. */
     static const char *inline_tags[] = {
         "span", "a", "em", "strong", "b", "i", "u", "s", "small",
-        "img", "br", "wbr", "code", "pre", "sub", "sup", "label",
-        "input", "button", "textarea", "select", "iframe", "canvas", NULL
+        "img", "br", "wbr", "code", "sub", "sup", "label",
+        "iframe", "canvas", NULL
     };
+    /* Form controls are inline-block in the HTML UA stylesheet. */
+    if (strcasecmp(tag_name, "input") == 0 || strcasecmp(tag_name, "button") == 0 ||
+        strcasecmp(tag_name, "textarea") == 0 || strcasecmp(tag_name, "select") == 0)
+        return CSS_DISPLAY_INLINE_BLOCK;
     for (int i = 0; inline_tags[i]; i++) {
         if (strcasecmp(tag_name, inline_tags[i]) == 0) return CSS_DISPLAY_INLINE;
     }
     if (strcasecmp(tag_name, "li") == 0) return CSS_DISPLAY_LIST_ITEM;
-    return CSS_DISPLAY_BLOCK;
+    /* Elements the HTML UA stylesheet makes block-level (tables are laid out
+     * as blocks by this engine).  Everything else, including custom and
+     * unknown elements, is inline by default. */
+    static const char *block_tags[] = {
+        "html", "body", "div", "p", "h1", "h2", "h3", "h4", "h5", "h6",
+        "ul", "ol", "dl", "dt", "dd", "menu", "dir", "section", "article",
+        "aside", "nav", "header", "footer", "main", "address", "blockquote",
+        "figure", "figcaption", "form", "fieldset", "legend", "hr", "pre",
+        "listing", "xmp", "plaintext", "center", "details", "summary",
+        "dialog", "search", "hgroup", "optgroup", "frameset", "frame",
+        "table", "caption", "colgroup", "col", "thead", "tbody", "tfoot",
+        "tr", "td", "th", NULL
+    };
+    for (int i = 0; block_tags[i]; i++) {
+        if (strcasecmp(tag_name, block_tags[i]) == 0) return CSS_DISPLAY_BLOCK;
+    }
+    return CSS_DISPLAY_INLINE;
+}
+
+static bool layout_display_is_block_level(CssDisplay d)
+{
+    return d == CSS_DISPLAY_BLOCK || d == CSS_DISPLAY_FLEX || d == CSS_DISPLAY_GRID ||
+           d == CSS_DISPLAY_LIST_ITEM || d == CSS_DISPLAY_OTHER;
+}
+
+/* Blockification (CSS Display §2.7) and block-in-inline: flex/grid items,
+ * absolutely positioned and floated boxes compute to block-level; an inline
+ * element containing in-flow block-level children is laid out as a block
+ * (the anonymous block boxes a browser creates around them span the same
+ * area).  Runs bottom-up so a promotion propagates to inline ancestors. */
+static void layout_blockify(LayoutContext *ctx)
+{
+    const int *post = ctx->tree.postorder;
+    if (!post) return;
+    for (int k = 0; k < ctx->tree.count; k++) {
+        int i = post[k];
+        LayoutBox *box = layout_box(ctx, i);
+        if (box->display != CSS_DISPLAY_INLINE) continue;
+        HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx);
+        if (!node || node->type != HTML_NODE_ELEMENT) continue;
+        bool promote = box->position == CSS_POSITION_ABSOLUTE || box->position == CSS_POSITION_FIXED ||
+                       box->float_side != 0;
+        int p = ctx->tree.nodes[i].parent_idx;
+        if (!promote && p >= 0) {
+            CssDisplay pd = layout_box(ctx, p)->display;
+            if (pd == CSS_DISPLAY_FLEX || pd == CSS_DISPLAY_GRID) promote = true;
+        }
+        for (int c = ctx->tree.nodes[i].first_child_idx; !promote && c >= 0;
+             c = ctx->tree.nodes[c].next_sibling_idx) {
+            LayoutBox *cb = layout_box(ctx, c);
+            if (layout_display_is_block_level(cb->display) && !cb->inline_level &&
+                cb->position != CSS_POSITION_ABSOLUTE && cb->position != CSS_POSITION_FIXED &&
+                cb->float_side == 0)
+                promote = true;
+        }
+        if (promote) box->display = CSS_DISPLAY_BLOCK;
+    }
 }
 
 static CssPosition css_parse_position(const char *value) {
@@ -743,6 +823,45 @@ static CssDisplay css_parse_display(const char *value) {
     if (strcasecmp(value, "grid") == 0 ||
         strcasecmp(value, "inline-grid") == 0) return CSS_DISPLAY_GRID;
     return CSS_DISPLAY_OTHER;
+}
+
+/* inline-flex / inline-grid / inline-table: atomic inline-level boxes whose
+ * inner display css_parse_display already returned. */
+static bool css_display_is_inline_level(const char *value) {
+    if (!value) return false;
+    return strcasecmp(value, "inline-flex") == 0 ||
+           strcasecmp(value, "-webkit-inline-flex") == 0 ||
+           strcasecmp(value, "-webkit-inline-box") == 0 ||
+           strcasecmp(value, "inline-flexbox") == 0 ||
+           strcasecmp(value, "inline-grid") == 0 ||
+           strcasecmp(value, "inline-table") == 0;
+}
+
+/* Which sides of a margin shorthand are `auto` (bits 1=T 2=R 4=B 8=L). */
+static unsigned char css_margin_auto_mask(const char *value) {
+    if (!value) return 0;
+    int is_auto[4] = {0, 0, 0, 0};
+    int count = 0;
+    const char *p = value;
+    while (*p && count < 4) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        const char *st = p;
+        int depth = 0;
+        while (*p && (depth > 0 || (*p != ' ' && *p != '\t'))) {
+            if (*p == '(') depth++;
+            else if (*p == ')' && depth > 0) depth--;
+            p++;
+        }
+        is_auto[count++] = (p - st == 4 && strncasecmp(st, "auto", 4) == 0);
+    }
+    if (count == 0) return 0;
+    int t, r, b, l;
+    if (count == 1) t = r = b = l = is_auto[0];
+    else if (count == 2) { t = b = is_auto[0]; r = l = is_auto[1]; }
+    else if (count == 3) { t = is_auto[0]; r = l = is_auto[1]; b = is_auto[2]; }
+    else { t = is_auto[0]; r = is_auto[1]; b = is_auto[2]; l = is_auto[3]; }
+    return (unsigned char)((t ? 1 : 0) | (r ? 2 : 0) | (b ? 4 : 0) | (l ? 8 : 0));
 }
 
 static CssFlexDirection css_parse_flex_direction(const char *value) {
@@ -795,8 +914,10 @@ static CssJustifyContent css_parse_justify_content(const char *value) {
 static CssAlignItems css_parse_align_items(const char *value) {
     if (!value) return CSS_ALIGN_STRETCH;
     if (strcasecmp(value, "stretch") == 0) return CSS_ALIGN_STRETCH;
-    if (strcasecmp(value, "flex-start") == 0 || strcasecmp(value, "start") == 0) return CSS_ALIGN_FLEX_START;
-    if (strcasecmp(value, "flex-end") == 0 || strcasecmp(value, "end") == 0) return CSS_ALIGN_FLEX_END;
+    if (strcasecmp(value, "flex-start") == 0 || strcasecmp(value, "start") == 0 ||
+        strcasecmp(value, "self-start") == 0 || strstr(value, "baseline")) return CSS_ALIGN_FLEX_START;
+    if (strcasecmp(value, "flex-end") == 0 || strcasecmp(value, "end") == 0 ||
+        strcasecmp(value, "self-end") == 0) return CSS_ALIGN_FLEX_END;
     if (strcasecmp(value, "center") == 0) return CSS_ALIGN_CENTER;
     return CSS_ALIGN_STRETCH;
 }
@@ -872,6 +993,19 @@ static void css_parse_flex_shorthand(const char *value, double *grow, double *sh
 /* Block-level formatting context: these generate a block box that stacks
  * vertically with siblings.  Inline-block is sized like a block but flows
  * on a line with other inline content. */
+static bool layout_is_block_flow(CssDisplay display);
+/* Is the used height auto (content-sized)? */
+static inline bool layout_height_auto(const LayoutBox *b) {
+    return !b->height_set || b->height_pct_unresolved;
+}
+/* Block-level box taking part in block flow (not an atomic inline). */
+static bool layout_box_is_block_level(const LayoutBox *box) {
+    return layout_is_block_flow(box->display) && !box->inline_level;
+}
+static bool layout_box_is_atomic_inline(const LayoutBox *box) {
+    return box->display == CSS_DISPLAY_INLINE_BLOCK || box->inline_level;
+}
+
 static bool layout_is_block_flow(CssDisplay display) {
     /* Treat unknown/legacy display values as block-like so that custom elements
      * and future display types do not collapse into inline 80x20 placeholders. */
@@ -908,6 +1042,112 @@ static bool css_parse_url_value(const char *value, char *out, size_t out_size)
     return true;
 }
 
+static bool css_border_style_keyword(const char *t)
+{
+    static const char *kw[] = { "none", "hidden", "solid", "dashed", "dotted", "double",
+                                "groove", "ridge", "inset", "outset", NULL };
+    for (int i = 0; kw[i]; i++) if (strcasecmp(t, kw[i]) == 0) return true;
+    return false;
+}
+
+static bool css_border_style_visible(const char *t)
+{
+    return css_border_style_keyword(t) && strcasecmp(t, "none") != 0 && strcasecmp(t, "hidden") != 0;
+}
+
+static double css_border_width_value(const char *v, double pw, double vw, double fs)
+{
+    if (strcasecmp(v, "thin") == 0) return 1.0;
+    if (strcasecmp(v, "medium") == 0) return 3.0;
+    if (strcasecmp(v, "thick") == 0) return 5.0;
+    return css_parse_length(v, pw, vw, fs);
+}
+
+/* transform: keep the translation (translate/translateX/translateY/
+ * translate3d/matrix); other functions are ignored. */
+static void css_parse_transform(LayoutBox *box, const char *v, double pw, double vw)
+{
+    box->translate_x = box->translate_y = 0.0;
+    box->translate_xpct = box->translate_ypct = 0.0;
+    box->has_translate = 0;
+    const char *p = v;
+    while (p && *p) {
+        while (*p && (isspace((unsigned char)*p) || *p == ',')) p++;
+        const char *name = p;
+        while (*p && *p != '(' && !isspace((unsigned char)*p)) p++;
+        size_t nl = (size_t)(p - name);
+        if (*p != '(') break;
+        p++;
+        const char *args = p;
+        int depth = 1;
+        while (*p && depth > 0) { if (*p == '(') depth++; else if (*p == ')') depth--; if (depth) p++; }
+        size_t al = (size_t)(p - args);
+        if (*p == ')') p++;
+        char buf[256];
+        if (al >= sizeof(buf)) continue;
+        memcpy(buf, args, al);
+        buf[al] = '\0';
+        char *parts[6]; int np = 0;
+        char *save = NULL;
+        for (char *t = strtok_r(buf, ",", &save); t && np < 6; t = strtok_r(NULL, ",", &save)) {
+            while (*t && isspace((unsigned char)*t)) t++;
+            char *e = t + strlen(t);
+            while (e > t && isspace((unsigned char)e[-1])) *--e = '\0';
+            parts[np++] = t;
+        }
+        #define TR_ADD(str, px, pct) do { \
+            if (css_value_is_percent(str)) (pct) += css_parse_percent_ratio(str); \
+            else (px) += css_parse_length(str, pw, vw, box->font_size); } while (0)
+        if ((nl == 9 && strncasecmp(name, "translate", 9) == 0) ||
+            (nl == 11 && strncasecmp(name, "translate3d", 11) == 0)) {
+            if (np >= 1) TR_ADD(parts[0], box->translate_x, box->translate_xpct);
+            if (np >= 2) TR_ADD(parts[1], box->translate_y, box->translate_ypct);
+        } else if (nl == 10 && strncasecmp(name, "translateX", 10) == 0) {
+            if (np >= 1) TR_ADD(parts[0], box->translate_x, box->translate_xpct);
+        } else if (nl == 10 && strncasecmp(name, "translateY", 10) == 0) {
+            if (np >= 1) TR_ADD(parts[0], box->translate_y, box->translate_ypct);
+        } else if (nl == 6 && strncasecmp(name, "matrix", 6) == 0 && np == 6) {
+            box->translate_x += strtod(parts[4], NULL);
+            box->translate_y += strtod(parts[5], NULL);
+        }
+        #undef TR_ADD
+    }
+    box->has_translate = (box->translate_x != 0.0 || box->translate_y != 0.0 ||
+                          box->translate_xpct != 0.0 || box->translate_ypct != 0.0);
+}
+
+/* top/right/bottom/left (side 0..3): auto clears the side; percentages
+ * resolve later against the containing block. */
+static void layout_set_inset(LayoutBox *box, int side, const char *value,
+                             double pw, double vw)
+{
+    static const uint32_t bits[4] = { LAYOUT_SIDE_TOP, LAYOUT_SIDE_RIGHT, LAYOUT_SIDE_BOTTOM, LAYOUT_SIDE_LEFT };
+    double *dst[4] = { &box->top, &box->right, &box->bottom, &box->left };
+    box->inset_pct_bits &= (unsigned char)~(1u << side);
+    if (strcasecmp(value, "auto") == 0) {
+        *dst[side] = 0.0;
+        box->positioned_sides &= ~bits[side];
+        return;
+    }
+    if (css_value_is_percent(value)) {
+        box->inset_pct[side] = css_parse_percent_ratio(value);
+        box->inset_pct_bits |= (unsigned char)(1u << side);
+        *dst[side] = 0.0;
+    } else {
+        *dst[side] = css_parse_length(value, pw, vw, box->font_size);
+    }
+    box->positioned_sides |= bits[side];
+}
+
+/* Resolve the used insets against a containing block. */
+static void layout_resolve_insets(LayoutBox *box, double cb_w, double cb_h)
+{
+    if (box->inset_pct_bits & 1) box->top = box->inset_pct[0] * cb_h;
+    if (box->inset_pct_bits & 2) box->right = box->inset_pct[1] * cb_w;
+    if (box->inset_pct_bits & 4) box->bottom = box->inset_pct[2] * cb_h;
+    if (box->inset_pct_bits & 8) box->left = box->inset_pct[3] * cb_w;
+}
+
 static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                                      double parent_width, double viewport_width,
                                      const char *base_url)
@@ -918,6 +1158,10 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
 
     if (strcasecmp(prop, "display") == 0) {
         box->display = css_parse_display(value);
+        box->inline_level = css_display_is_inline_level(value) ? 1 : 0;
+        box->webkit_box = (strcasecmp(value, "-webkit-box") == 0 || strcasecmp(value, "box") == 0) ? 1 :
+                          strcasecmp(value, "-webkit-inline-box") == 0 ? 2 : 0;
+        if (strcasecmp(value, "inline-table") == 0) box->display = CSS_DISPLAY_BLOCK;
     } else if (strcasecmp(prop, "visibility") == 0) {
         box->visibility = css_parse_visibility(value);
         box->visibility_set = 1;
@@ -945,8 +1189,14 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
             }
         }
     } else if (strcasecmp(prop, "opacity") == 0) {
+        double op = strtod(value, NULL);
+        if (strchr(value, '%')) op /= 100.0;
+        if (op < 0.0) op = 0.0;
+        if (op > 1.0) op = 1.0;
+        box->opacity = op;
+        box->opacity_set = 1;
         /* opacity:0 renders nothing — treat like hidden for the subtree. */
-        if (strtod(value, NULL) <= 0.0) {
+        if (op <= 0.0) {
             box->visibility = CSS_VISIBILITY_HIDDEN;
             box->visibility_set = 1;
         }
@@ -955,15 +1205,29 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     } else if (strcasecmp(prop, "box-sizing") == 0) {
         box->box_sizing = css_parse_box_sizing(value);
     } else if (strcasecmp(prop, "width") == 0) {
-        if (css_value_is_percent(value)) {
+        box->width_keyword = 0;
+        if (strstr(value, "min-content")) box->width_keyword = 1;
+        else if (strstr(value, "max-content")) box->width_keyword = 2;
+        else if (strstr(value, "fit-content")) box->width_keyword = 3;
+        if (box->width_keyword) {
+            box->width_set = 0;
+            box->width_percent = 0.0;
+            box->css_width = 0.0;
+        } else if (css_value_is_percent(value)) {
             box->width_percent = css_parse_percent_ratio(value);
             box->css_width = 0.0;
         } else {
             box->css_width = css_parse_length(value, parent_width, viewport_width, box->font_size);
             box->width_percent = 0.0;
         }
-        box->width_set = (strcasecmp(value, "auto") != 0);
+        if (!box->width_keyword) box->width_set = (strcasecmp(value, "auto") != 0);
     } else if (strcasecmp(prop, "height") == 0) {
+        if (strstr(value, "-content")) {
+            box->height_set = 0;
+            box->height_percent = 0.0;
+            box->css_height = 0.0;
+            return;
+        }
         if (css_value_is_percent(value)) {
             box->height_percent = css_parse_percent_ratio(value);
             box->css_height = 0.0;
@@ -974,30 +1238,48 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         box->height_set = (strcasecmp(value, "auto") != 0);
     } else if (strcasecmp(prop, "min-width") == 0) {
         box->min_width = css_parse_length(value, parent_width, viewport_width, box->font_size);
+        if (strcasecmp(value, "auto") == 0) box->min_size_set &= (unsigned char)~1;
+        else box->min_size_set |= 1;
     } else if (strcasecmp(prop, "max-width") == 0) {
         box->max_width = css_parse_length(value, parent_width, viewport_width, box->font_size);
     } else if (strcasecmp(prop, "min-height") == 0) {
         box->min_height = css_parse_length(value, parent_width, viewport_width, box->font_size);
+        if (strcasecmp(value, "auto") == 0) box->min_size_set &= (unsigned char)~2;
+        else box->min_size_set |= 2;
     } else if (strcasecmp(prop, "max-height") == 0) {
         box->max_height = css_parse_length(value, parent_width, viewport_width, box->font_size);
     } else if (strcasecmp(prop, "top") == 0) {
-        box->top = css_parse_length(value, parent_width, viewport_width, box->font_size);
-        box->positioned_sides |= LAYOUT_SIDE_TOP;
-    } else if (strcasecmp(prop, "left") == 0) {
-        box->left = css_parse_length(value, parent_width, viewport_width, box->font_size);
-        box->positioned_sides |= LAYOUT_SIDE_LEFT;
+        layout_set_inset(box, 0, value, parent_width, viewport_width);
     } else if (strcasecmp(prop, "right") == 0) {
-        box->right = css_parse_length(value, parent_width, viewport_width, box->font_size);
-        box->positioned_sides |= LAYOUT_SIDE_RIGHT;
+        layout_set_inset(box, 1, value, parent_width, viewport_width);
     } else if (strcasecmp(prop, "bottom") == 0) {
-        box->bottom = css_parse_length(value, parent_width, viewport_width, box->font_size);
-        box->positioned_sides |= LAYOUT_SIDE_BOTTOM;
+        layout_set_inset(box, 2, value, parent_width, viewport_width);
+    } else if (strcasecmp(prop, "left") == 0) {
+        layout_set_inset(box, 3, value, parent_width, viewport_width);
+    } else if (strcasecmp(prop, "inset") == 0) {
+        char vals[4][64]; int n = 0;
+        const char *p = value;
+        while (*p && n < 4) {
+            while (*p && isspace((unsigned char)*p)) p++;
+            if (!*p) break;
+            size_t tl = 0;
+            while (p[tl] && !isspace((unsigned char)p[tl])) tl++;
+            size_t cl = tl < 63 ? tl : 63;
+            memcpy(vals[n], p, cl); vals[n][cl] = '\0';
+            n++; p += tl;
+        }
+        if (n > 0) {
+            int map[4][4] = { {0,0,0,0}, {0,1,0,1}, {0,1,2,1}, {0,1,2,3} };
+            for (int side = 0; side < 4; side++)
+                layout_set_inset(box, side, vals[map[n - 1][side]], parent_width, viewport_width);
+        }
     } else if (strcasecmp(prop, "margin") == 0) {
         double em4[4];
         unsigned fl = layout_apply_shorthand_sides(box, value, parent_width, viewport_width,
                                                    &box->margin_top, &box->margin_right,
                                                    &box->margin_bottom, &box->margin_left, em4);
         box->em_deferred &= 0xF0; /* shorthand resets all four margin sides */
+        box->margin_auto = css_margin_auto_mask(value);
         for (int i = 0; i < 4; i++) {
             if (fl & (1u << i)) {
                 box->margin_em[i] = em4[i];
@@ -1009,21 +1291,29 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         if (css_token_is_em(value, &r)) { box->margin_em[3] = r; box->em_deferred |= 0x08; }
         else box->em_deferred &= (unsigned char)~0x08;
         box->margin_left = css_parse_length(value, parent_width, viewport_width, box->font_size);
+        if (strcasecmp(value, "auto") == 0) box->margin_auto |= 8;
+        else box->margin_auto &= (unsigned char)~8;
     } else if (strcasecmp(prop, "margin-right") == 0) {
         double r;
         if (css_token_is_em(value, &r)) { box->margin_em[1] = r; box->em_deferred |= 0x02; }
         else box->em_deferred &= (unsigned char)~0x02;
         box->margin_right = css_parse_length(value, parent_width, viewport_width, box->font_size);
+        if (strcasecmp(value, "auto") == 0) box->margin_auto |= 2;
+        else box->margin_auto &= (unsigned char)~2;
     } else if (strcasecmp(prop, "margin-top") == 0) {
         double r;
         if (css_token_is_em(value, &r)) { box->margin_em[0] = r; box->em_deferred |= 0x01; }
         else box->em_deferred &= (unsigned char)~0x01;
         box->margin_top = css_parse_length(value, parent_width, viewport_width, box->font_size);
+        if (strcasecmp(value, "auto") == 0) box->margin_auto |= 1;
+        else box->margin_auto &= (unsigned char)~1;
     } else if (strcasecmp(prop, "margin-bottom") == 0) {
         double r;
         if (css_token_is_em(value, &r)) { box->margin_em[2] = r; box->em_deferred |= 0x04; }
         else box->em_deferred &= (unsigned char)~0x04;
         box->margin_bottom = css_parse_length(value, parent_width, viewport_width, box->font_size);
+        if (strcasecmp(value, "auto") == 0) box->margin_auto |= 4;
+        else box->margin_auto &= (unsigned char)~4;
     } else if (strcasecmp(prop, "padding") == 0) {
         double em4[4];
         unsigned fl = layout_apply_shorthand_sides(box, value, parent_width, viewport_width,
@@ -1060,13 +1350,29 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         box->padding_bottom = css_parse_length(value, parent_width, viewport_width, box->font_size);
         box->aspect_ratio = css_parse_percent_ratio(value);
     } else if (strcasecmp(prop, "border-left-width") == 0) {
-        box->border_left = css_parse_length(value, parent_width, viewport_width, box->font_size);
+        box->border_left = css_border_width_value(value, parent_width, viewport_width, box->font_size);
+        box->border_width_set |= 1;
+    } else if (strcasecmp(prop, "border-left-style") == 0) {
+        if (css_border_style_visible(value)) box->border_styled |= 1;
+        else box->border_styled &= (unsigned char)~1;
     } else if (strcasecmp(prop, "border-right-width") == 0) {
-        box->border_right = css_parse_length(value, parent_width, viewport_width, box->font_size);
+        box->border_right = css_border_width_value(value, parent_width, viewport_width, box->font_size);
+        box->border_width_set |= 2;
+    } else if (strcasecmp(prop, "border-right-style") == 0) {
+        if (css_border_style_visible(value)) box->border_styled |= 2;
+        else box->border_styled &= (unsigned char)~2;
     } else if (strcasecmp(prop, "border-top-width") == 0) {
-        box->border_top = css_parse_length(value, parent_width, viewport_width, box->font_size);
+        box->border_top = css_border_width_value(value, parent_width, viewport_width, box->font_size);
+        box->border_width_set |= 4;
+    } else if (strcasecmp(prop, "border-top-style") == 0) {
+        if (css_border_style_visible(value)) box->border_styled |= 4;
+        else box->border_styled &= (unsigned char)~4;
     } else if (strcasecmp(prop, "border-bottom-width") == 0) {
-        box->border_bottom = css_parse_length(value, parent_width, viewport_width, box->font_size);
+        box->border_bottom = css_border_width_value(value, parent_width, viewport_width, box->font_size);
+        box->border_width_set |= 8;
+    } else if (strcasecmp(prop, "border-bottom-style") == 0) {
+        if (css_border_style_visible(value)) box->border_styled |= 8;
+        else box->border_styled &= (unsigned char)~8;
     } else if (strcasecmp(prop, "flex-direction") == 0) {
         box->flex_direction = css_parse_flex_direction(value);
     } else if (strcasecmp(prop, "flex-wrap") == 0) {
@@ -1075,6 +1381,28 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         box->justify_content = css_parse_justify_content(value);
     } else if (strcasecmp(prop, "align-items") == 0) {
         box->align_items = css_parse_align_items(value);
+    } else if (strcasecmp(prop, "transform") == 0 || strcasecmp(prop, "-webkit-transform") == 0) {
+        css_parse_transform(box, value, parent_width, viewport_width);
+    } else if (strcasecmp(prop, "white-space") == 0 || strcasecmp(prop, "white-space-collapse") == 0) {
+        unsigned char ws = 0;
+        if (strcasecmp(value, "nowrap") == 0) ws = 1;
+        else if (strcasecmp(value, "pre") == 0) ws = 2;
+        else if (strcasecmp(value, "pre-wrap") == 0 || strcasecmp(value, "break-spaces") == 0 ||
+                 strcasecmp(value, "preserve") == 0) ws = 3;
+        else if (strcasecmp(value, "pre-line") == 0 || strcasecmp(value, "preserve-breaks") == 0) ws = 4;
+        box->white_space = ws;
+        box->white_space_set = 1;
+    } else if (strcasecmp(prop, "-webkit-box-orient") == 0 || strcasecmp(prop, "box-orient") == 0) {
+        box->box_orient_vertical = (strcasecmp(value, "vertical") == 0 ||
+                                    strcasecmp(value, "block-axis") == 0) ? 1 : 0;
+    } else if (strcasecmp(prop, "-webkit-line-clamp") == 0 || strcasecmp(prop, "line-clamp") == 0) {
+        int n = atoi(value);
+        box->line_clamp = (unsigned char)(n > 0 && n < 255 ? n : 0);
+    } else if (strcasecmp(prop, "align-self") == 0) {
+        box->align_self = (strcasecmp(value, "auto") == 0 || strcasecmp(value, "normal") == 0)
+            ? 0 : (unsigned char)(css_parse_align_items(value) + 1);
+    } else if (strcasecmp(prop, "order") == 0) {
+        box->order = atoi(value);
     } else if (strcasecmp(prop, "flex-basis") == 0) {
         if (strcasecmp(value, "auto") == 0) {
             box->flex_basis = -1.0;
@@ -1150,11 +1478,20 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
          * colors into temporaries: css_parse_color clobbers on failure. */
         const char *p = value;
         char token[1024];
+        /* The shorthand resets omitted longhands: transparent, no image. */
+        box->background_color_r = box->background_color_g = box->background_color_b = 0.0;
+        box->background_color_a = 0.0;
+        box->background_image_url[0] = '\0';
         while (*p) {
             while (*p && (isspace((unsigned char)*p) || *p == '/')) p++;
             if (!*p) break;
             size_t tl = 0;
-            while (p[tl] && !isspace((unsigned char)p[tl]) && p[tl] != '/') tl++;
+            int depth = 0;
+            while (p[tl] && (depth > 0 || (!isspace((unsigned char)p[tl]) && p[tl] != '/'))) {
+                if (p[tl] == '(') depth++;
+                else if (p[tl] == ')' && depth > 0) depth--;
+                tl++;
+            }
             if (tl >= sizeof(token)) tl = sizeof(token) - 1;
             memcpy(token, p, tl);
             token[tl] = '\0';
@@ -1281,7 +1618,8 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         box->text_decoration_set = 1;
     } else if (strcasecmp(prop, "line-height") == 0) {
         if (strncasecmp(value, "normal", 6) == 0) {
-            box->line_height = 0.0; /* <=0 => normal (fs x 1.5 at layout) */
+            box->line_height = 0.0; /* <=0 => normal (font metrics at layout) */
+            box->line_height_ratio = 0.0;
         } else {
             char *end = NULL;
             double num = strtod(value, &end);
@@ -1325,6 +1663,9 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         else if (strstr(prop, "bottom")) sides = 0x08;
         const char *p = value;
         char token[256];
+        /* The shorthand resets omitted parts: style none, width medium. */
+        box->border_styled &= (unsigned char)~sides;
+        box->border_width_set &= (unsigned char)~sides;
         while (*p) {
             while (*p && isspace((unsigned char)*p)) p++;
             if (!*p) break;
@@ -1334,8 +1675,13 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
             memcpy(token, p, tl);
             token[tl] = '\0';
             p += tl;
+            if (css_border_style_keyword(token)) {
+                if (css_border_style_visible(token)) box->border_styled |= (unsigned char)sides;
+                continue;
+            }
             double w = css_parse_length(token, parent_width, viewport_width, box->font_size);
-            if (w > 0.0 && (isdigit((unsigned char)token[0]) || token[0] == '.')) {
+            if (w >= 0.0 && (isdigit((unsigned char)token[0]) || token[0] == '.')) {
+                box->border_width_set |= (unsigned char)sides;
                 if (sides & 0x01) box->border_left = w;
                 if (sides & 0x02) box->border_right = w;
                 if (sides & 0x04) box->border_top = w;
@@ -1348,6 +1694,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
             else if (strcasecmp(token, "medium") == 0) kw = 3.0;
             else if (strcasecmp(token, "thick") == 0) kw = 5.0;
             if (kw > 0.0) {
+                box->border_width_set |= (unsigned char)sides;
                 if (sides & 0x01) box->border_left = kw;
                 if (sides & 0x02) box->border_right = kw;
                 if (sides & 0x04) box->border_top = kw;
@@ -1365,6 +1712,31 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         layout_apply_shorthand_sides(box, value, parent_width, viewport_width,
                                      &box->border_top, &box->border_right,
                                      &box->border_bottom, &box->border_left, NULL);
+        box->border_width_set = 0x0F;
+    } else if (strcasecmp(prop, "border-style") == 0) {
+        /* 1-4 values: top, right, bottom, left. */
+        int vis[4] = {0, 0, 0, 0}, n = 0;
+        const char *p = value;
+        char token[64];
+        while (*p && n < 4) {
+            while (*p && isspace((unsigned char)*p)) p++;
+            if (!*p) break;
+            size_t tl = 0;
+            while (p[tl] && !isspace((unsigned char)p[tl])) tl++;
+            size_t cl = tl < sizeof(token) ? tl : sizeof(token) - 1;
+            memcpy(token, p, cl);
+            token[cl] = '\0';
+            p += tl;
+            vis[n++] = css_border_style_visible(token);
+        }
+        if (n > 0) {
+            int t, r, b, l;
+            if (n == 1) t = r = b = l = vis[0];
+            else if (n == 2) { t = b = vis[0]; r = l = vis[1]; }
+            else if (n == 3) { t = vis[0]; r = l = vis[1]; b = vis[2]; }
+            else { t = vis[0]; r = vis[1]; b = vis[2]; l = vis[3]; }
+            box->border_styled = (unsigned char)((l ? 1 : 0) | (r ? 2 : 0) | (t ? 4 : 0) | (b ? 8 : 0));
+        }
     } else if (strcasecmp(prop, "border-color") == 0 ||
                strcasecmp(prop, "border-left-color") == 0 ||
                strcasecmp(prop, "border-right-color") == 0 ||
@@ -1441,6 +1813,10 @@ static void css_custom_props_put(FrameArena *a, CssCustomProps *m, const char *n
  * properties in the supplied map and falls back to the comma-separated fallback
  * if the variable is not defined.  Returns a newly allocated string or NULL if
  * no var() references were found. */
+/* Set when a var() had neither a value nor a fallback: the declaration is
+ * invalid at computed-value time (the property behaves as `unset`). */
+static __thread bool t_var_failed;
+
 static char* css_var_resolve(const char *value, const CssCustomProps *props)
 {
     if (!value || !strchr(value, '(')) return NULL;
@@ -1513,12 +1889,24 @@ static char* css_var_resolve(const char *value, const CssCustomProps *props)
             memcpy(out + out_len, resolved, rlen);
             out_len += rlen;
         } else if (fallback && fallback_end > fallback) {
-            size_t flen = (size_t)(fallback_end - fallback);
+            /* The fallback may itself contain var() references. */
+            size_t flen0 = (size_t)(fallback_end - fallback);
+            char *fb = (char*)malloc(flen0 + 1);
+            if (!fb) break;
+            memcpy(fb, fallback, flen0);
+            fb[flen0] = '\0';
+            char *fr = css_var_resolve(fb, props);
+            const char *use = fr ? fr : fb;
+            size_t flen = strlen(use);
             char *grown = (char*)realloc(out, out_len + flen + strlen(p) + 1);
-            if (!grown) break;
+            if (!grown) { free(fr); free(fb); break; }
             out = grown;
-            memcpy(out + out_len, fallback, flen);
+            memcpy(out + out_len, use, flen);
             out_len += flen;
+            free(fr);
+            free(fb);
+        } else {
+            t_var_failed = true;
         }
     }
 
@@ -2213,7 +2601,9 @@ static const char *g_ua_stylesheet_css =
     "kbd { font-family: monospace; }\n"
     "samp { font-family: monospace; }\n"
     "tt { font-family: monospace; }\n"
-    "pre { display: block; font-family: monospace; margin: 1em 0; }\n"
+    "pre { display: block; font-family: monospace; margin: 1em 0; white-space: pre; }\n"
+    "textarea { white-space: pre-wrap; }\n"
+    "nobr { white-space: nowrap; }\n"
     "small { font-size: 0.833em; }\n"
     "sub { font-size: 0.833em; }\n"
     "sup { font-size: 0.833em; }\n"
@@ -2228,7 +2618,12 @@ static const char *g_ua_stylesheet_css =
     "hr { display: block; margin: 0.5em 0; border-top: 1px solid #808080; }\n"
     "center { text-align: center; }\n"
     "caption { text-align: center; }\n"
-    "mark { background-color: #ffff00; color: #000000; }\n";
+    "mark { background-color: #ffff00; color: #000000; }\n"
+    "button, input, select, textarea { font-size: 13.333px; line-height: normal; }\n"
+    "button { padding: 1px 6px; border: 2px outset #767676; background-color: #efefef; box-sizing: border-box; text-align: center; }\n"
+    "input { padding: 1px 2px; border: 2px inset #767676; }\n"
+    "textarea { padding: 2px; border: 1px solid #767676; }\n"
+    "select { border: 1px solid #767676; box-sizing: border-box; }\n";
 
 static bool layout_collect_document_stylesheets(LayoutContext *ctx, LayoutStyleSheetList *list,
                                                  const char *base_url) {
@@ -2484,7 +2879,8 @@ typedef struct InlineBlock { CssDeclaration *decls; int count; } InlineBlock;
 
 /* Winning ::after `content` string for an element (legacy cascade: highest
  * important, then specificity of the first matching branch, then order). */
-static bool style_after_content(StylePass *P, StyleThread *T, int dom, char out[256])
+static bool style_after_content(StylePass *P, StyleThread *T, int dom, char out[256],
+                                double *pseudo_aspect)
 {
     const CssAfterMatch *am = NULL;
     int n = css_style_match_after(P->set, P->sd, dom, T->scratch, &am);
@@ -2493,6 +2889,16 @@ static bool style_after_content(StylePass *P, StyleThread *T, int dom, char out[
     out[0] = '\0';
     for (int i = 0; i < n; i++) {
         const CssRule *rule = css_styleset_rule(P->set, am[i].rule);
+        /* Pseudo-element aspect boxes (e.g. .thumb::before{padding-top:56.25%})
+         * size the real element, since pseudo boxes are not generated. */
+        for (int d = 0; d < rule->declaration_count; d++) {
+            const CssDeclaration *decl = &rule->declarations[d];
+            if (!decl->property || !decl->value || strcasecmp(decl->property, "padding-top") != 0) continue;
+            if (!css_value_is_percent(decl->value)) continue;
+            double ratio = css_parse_percent_ratio(decl->value);
+            if (ratio > *pseudo_aspect) *pseudo_aspect = ratio;
+        }
+        if (am[i].is_before) continue;
         int branch_spec = am[i].specificity;
         for (int d = 0; d < rule->declaration_count; d++) {
             const CssDeclaration *decl = &rule->declarations[d];
@@ -2515,6 +2921,24 @@ static bool style_after_content(StylePass *P, StyleThread *T, int dom, char out[
         }
     }
     return after_set;
+}
+
+/* A declaration invalid at computed-value time acts as `unset`: inherited
+ * properties inherit (clear the "set" marker), others keep the value an
+ * earlier declaration gave (approximation of the initial value). */
+static void layout_unset_property(LayoutBox *box, const char *prop)
+{
+    if (!prop) return;
+    if (strcasecmp(prop, "font-size") == 0) { box->font_size_set = 0; box->font_size_ratio = 0.0; }
+    else if (strcasecmp(prop, "color") == 0) box->color_set = 0;
+    else if (strcasecmp(prop, "line-height") == 0) { box->line_height_set = 0; box->line_height = 0.0; box->line_height_ratio = 0.0; }
+    else if (strcasecmp(prop, "font-weight") == 0) box->font_weight_set = 0;
+    else if (strcasecmp(prop, "font-style") == 0) box->font_italic_set = 0;
+    else if (strcasecmp(prop, "font-family") == 0) box->font_family[0] = '\0';
+    else if (strcasecmp(prop, "text-align") == 0) box->text_align_set = 0;
+    else if (strcasecmp(prop, "white-space") == 0) box->white_space_set = 0;
+    else if (strcasecmp(prop, "visibility") == 0) box->visibility_set = 0;
+    else if (strcasecmp(prop, "display") == 0) { /* initial: inline */ box->display = CSS_DISPLAY_INLINE; box->inline_level = 0; }
 }
 
 static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
@@ -2645,16 +3069,19 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
         }
 
         char after_content[256];
-        bool after_set = style_after_content(P, T, dom, after_content);
+        double pseudo_aspect = 0.0;
+        bool after_set = style_after_content(P, T, dom, after_content, &pseudo_aspect);
 
         for (int d = 0; d < count; d++) {
             const char *prop = applied[d].decl->property;
             if (prop && prop[0] == '-' && prop[1] == '-') continue;
+            t_var_failed = false;
             char *resolved = css_var_resolve(applied[d].decl->value, props);
             CssDeclaration decl = *applied[d].decl;
             decl.value = resolved ? resolved : applied[d].decl->value;
-            layout_apply_declaration(box, &decl, ctx->viewport_width, ctx->viewport_width,
-                                     ctx->base_url);
+            if (t_var_failed) layout_unset_property(box, decl.property);
+            else layout_apply_declaration(box, &decl, ctx->viewport_width, ctx->viewport_width,
+                                          ctx->base_url);
             free(resolved);
         }
         /* Inline styles override stylesheet rules. */
@@ -2662,15 +3089,18 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
             for (int i = 0; i < inl[b].count; i++) {
                 const char *prop = inl[b].decls[i].property;
                 if (prop && prop[0] == '-' && prop[1] == '-') continue;
+                t_var_failed = false;
                 char *resolved = css_var_resolve(inl[b].decls[i].value, props);
                 CssDeclaration decl = inl[b].decls[i];
                 decl.value = resolved ? resolved : inl[b].decls[i].value;
-                layout_apply_declaration(box, &decl, ctx->viewport_width, ctx->viewport_width,
-                                         ctx->base_url);
+                if (t_var_failed) layout_unset_property(box, decl.property);
+                else layout_apply_declaration(box, &decl, ctx->viewport_width, ctx->viewport_width,
+                                              ctx->base_url);
                 free(resolved);
             }
             css_declarations_free(inl[b].decls, inl[b].count);
         }
+        if (pseudo_aspect > box->aspect_ratio) box->aspect_ratio = pseudo_aspect;
 
         /* UA rule: metadata elements are always display:none. */
         if (layout_default_display(node->tag_name) == CSS_DISPLAY_NONE) {
@@ -2701,6 +3131,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
         if (base <= 0.0) base = 16.0;
         box->font_size = base * box->font_size_ratio;
     }
+    if (!parent && box->font_size > 0.0) g_unit_rem = box->font_size;   /* root: rem base */
     if (!box->color_set && parent) {
         box->color_r = parent->color_r;
         box->color_g = parent->color_g;
@@ -2725,6 +3156,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
             box->line_height_ratio = parent->line_height_ratio;
         }
         if (!box->list_style_type_set) box->list_style_type = parent->list_style_type;
+        if (!box->white_space_set) box->white_space = parent->white_space;
     }
     /* Unitless line-height inherits as a ratio: recompute against the
      * element's own (now final) font-size. */
@@ -2746,15 +3178,36 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
         if (box->em_deferred & 0x80) box->padding_left   = box->padding_em[3] * fs;
     }
 
+    /* A vertical legacy -webkit-box (the line-clamp idiom) is a block. */
+    if (box->webkit_box && box->display == CSS_DISPLAY_FLEX &&
+        (box->box_orient_vertical || box->line_clamp)) {
+        box->display = box->webkit_box == 2 ? CSS_DISPLAY_INLINE_BLOCK : CSS_DISPLAY_BLOCK;
+        box->inline_level = 0;
+    }
+
+    /* Used border widths: unstyled sides have none; styled sides without
+     * an explicit width are medium. */
+    if (node && node->type == HTML_NODE_ELEMENT) {
+        double *bw[4] = { &box->border_left, &box->border_right, &box->border_top, &box->border_bottom };
+        for (int k = 0; k < 4; k++) {
+            unsigned char bit = (unsigned char)(1u << k);
+            if (!(box->border_styled & bit)) *bw[k] = 0.0;
+            else if (!(box->border_width_set & bit)) *bw[k] = 3.0;
+        }
+    }
+
     /* Blockification (CSS 2.1 §9.7, Flexbox §4): floats, absolutely
      * positioned boxes and flex/grid items have inline-level display values
      * blockified.  The parent's display is final. */
-    if (box->display == CSS_DISPLAY_INLINE || box->display == CSS_DISPLAY_INLINE_BLOCK) {
+    if (box->display == CSS_DISPLAY_INLINE || box->display == CSS_DISPLAY_INLINE_BLOCK ||
+        box->inline_level) {
         bool container_item = parent && (parent->display == CSS_DISPLAY_FLEX ||
                                          parent->display == CSS_DISPLAY_GRID);
         if (container_item || box->float_side != 0 ||
             box->position == CSS_POSITION_ABSOLUTE || box->position == CSS_POSITION_FIXED) {
-            box->display = CSS_DISPLAY_BLOCK;
+            if (box->display == CSS_DISPLAY_INLINE || box->display == CSS_DISPLAY_INLINE_BLOCK)
+                box->display = CSS_DISPLAY_BLOCK;
+            box->inline_level = 0;
         }
     }
 
@@ -2885,6 +3338,7 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
     /* Realize the winning ::after strings (e.g. .hlist li::after " · "). */
     for (int i = 0; i < gen_total; i++) layout_inject_generated_after(ctx, gen[i].idx, gen[i].text);
     free(gen);
+    layout_blockify(ctx);
     STAGE("merge");
 
     uint64_t jobs = 0, steals = 0;
@@ -3008,6 +3462,9 @@ static double layout_flex_cross_total(const LayoutBox *box, double value, bool i
  * width/height property, i.e. content-box for content-box sizing and
  * border-box for border-box sizing.
  */
+static LayoutContext *g_layout_ctx;   /* the layout in progress (keyword sizes) */
+static double layout_intrinsic_width(LayoutContext *ctx, int idx, bool want_max);
+
 static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
                                       double parent_content_width,
                                       double parent_content_height)
@@ -3039,7 +3496,24 @@ static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
         width_auto = false;
     }
 
-    if (width_auto) {
+    if (width_auto && box->width_keyword && g_layout_ctx &&
+        box >= g_layout_ctx->boxes && box < g_layout_ctx->boxes + g_layout_ctx->tree.count) {
+        int bidx = (int)(box - g_layout_ctx->boxes);
+        double mx = layout_intrinsic_width(g_layout_ctx, bidx, true);
+        if (box->width_keyword == 2) used_total_width = mx;
+        else {
+            double mn = layout_intrinsic_width(g_layout_ctx, bidx, false);
+            if (box->width_keyword == 1) used_total_width = mn;
+            else {
+                double avail = parent_content_width - box->margin_left - box->margin_right;
+                used_total_width = mx < avail ? mx : (mn > avail ? mn : avail);
+            }
+        }
+        width_auto = false;
+        /* used_total_width is already a border-box size */
+        if (box->box_sizing == CSS_BOX_SIZING_CONTENT_BOX)
+            used_content_width = used_total_width - layout_horizontal_border_padding(box);
+    } else if (width_auto) {
         if (box->display == CSS_DISPLAY_INLINE) {
             /* Inline boxes shrink-to-fit: leave the width to the inline flow,
              * which measures the text runs (an empty inline stays 0 wide). */
@@ -3080,9 +3554,10 @@ static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
     if (box->height_percent > 0.0) {
         /* Percentage height resolves against the containing block height.
          * When that height is indefinite (depends on content), the
-         * percentage computes to auto (CSS 2.1 §10.5) — clear the markers
-         * so downstream auto-height logic (e.g. flex cross sizing) treats
-         * the box as height:auto. */
+         * percentage computes to auto (CSS 2.1 §10.5); the box is flagged so
+         * auto-height logic treats it as height:auto for this layout, and a
+         * later layout against a definite height (flex stretch) resolves it. */
+        box->height_pct_unresolved = 0;
         if (parent_content_height > 0.0) {
             if (box->box_sizing == CSS_BOX_SIZING_BORDER_BOX) {
                 used_total_height = parent_content_height * box->height_percent;
@@ -3091,8 +3566,7 @@ static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
             }
             height_auto = false;
         } else {
-            box->height_percent = 0.0;
-            box->height_set = 0;
+            box->height_pct_unresolved = 1;
         }
     }
     if (height_auto && box->height_set && !(box->height_percent > 0.0)) {
@@ -3127,8 +3601,10 @@ static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
         }
     }
 
-    /* min/max-height constrains the same box that height specified. */
-    if (box->min_height > 0.0 || box->max_height > 0.0) {
+    /* min/max-height constrains the same box that height specified.  An
+     * auto height stays 0 here (resolved from content by the formatting
+     * context, which applies the clamp then). */
+    if (!height_auto && (box->min_height > 0.0 || box->max_height > 0.0)) {
         if (box->box_sizing == CSS_BOX_SIZING_BORDER_BOX) {
             box->height = layout_clamp_size(box->height,
                                             box->min_height, box->max_height);
@@ -3180,11 +3656,32 @@ static double layout_line_advance(double font_size)
     return font_size * 1.5;
 }
 
-/* Line advance honoring an explicit CSS line-height (<=0 means normal). */
+static int layout_font_slot(const LayoutBox *box);
+
+/* Height of an inline box's content area (ascent + descent of its font,
+ * rounded like browsers do); getBoundingClientRect of a non-replaced inline
+ * element covers this, centered in the line-height (half-leading). */
+static double layout_content_area_height(const LayoutBox *box)
+{
+    double fs = box && box->font_size > 0.0 ? box->font_size : 16.0;
+    TextShaper *font = display_list_get_font(layout_font_slot(box));
+    if (!font) font = display_list_get_default_font();
+    float a, d, g;
+    if (font && text_shaper_vmetrics(font, &a, &d, &g)) return roundf(a * (float)fs) + roundf(d * (float)fs);
+    return fs * 1.15;
+}
+
+/* Line advance honoring an explicit CSS line-height; `normal` uses the
+ * font's own ascent + descent + line gap, as browsers do. */
 static double layout_line_advance_box(const LayoutBox *box)
 {
     if (box && box->line_height > 0.0) return box->line_height;
-    return layout_line_advance(box ? box->font_size : 16.0);
+    double fs = box && box->font_size > 0.0 ? box->font_size : 16.0;
+    TextShaper *font = display_list_get_font(layout_font_slot(box));
+    if (!font) font = display_list_get_default_font();
+    float lh = font ? text_shaper_normal_line_height(font, (float)fs) : 0.0f;
+    if (lh > 0.5f * fs && lh < 3.0f * fs) return lh;
+    return layout_line_advance(fs);
 }
 
 /* Resolve the font slot for a box's typography (sans/serif/mono x bold x italic). */
@@ -3432,6 +3929,17 @@ static void layout_sig_children(LayoutContext *ctx, int idx, int *out_first, int
     }
 }
 
+/* A childless box's own top and bottom margins are adjoining only when
+ * nothing separates them: no height, min-height, padding or border. */
+static bool layout_box_collapses_through(const LayoutBox *box)
+{
+    if (box->height_set && box->css_height > 0.0) return false;
+    if (box->height_percent > 0.0 || box->min_height > 0.0 || box->aspect_ratio > 0.0) return false;
+    if (box->padding_top > 0.0 || box->padding_bottom > 0.0) return false;
+    if (box->border_top > 0.0 || box->border_bottom > 0.0) return false;
+    return true;
+}
+
 static double layout_eff_margin_top(LayoutContext *ctx, int idx, int depth)
 {
     LayoutBox *box = layout_box(ctx, idx);
@@ -3441,8 +3949,9 @@ static double layout_eff_margin_top(LayoutContext *ctx, int idx, int depth)
     layout_sig_children(ctx, idx, &f, &l);
     if (f < 0) {
         /* Empty box: margins collapse through only when the box does NOT
-         * establish a new block formatting context (CSS 2.1 §8.3.1). */
-        if (box->overflow != 0) return mt;
+         * establish a new block formatting context and has no height,
+         * padding or border separating them (CSS 2.1 §8.3.1). */
+        if (box->overflow != 0 || !layout_box_collapses_through(box)) return mt;
         return mt > mb ? mt : mb;
     }
     if (box->overflow != 0) return mt;    /* BFC: no collapse with children */
@@ -3450,7 +3959,7 @@ static double layout_eff_margin_top(LayoutContext *ctx, int idx, int depth)
      * margins never collapse with their items' margins. */
     if (box->display == CSS_DISPLAY_FLEX || box->display == CSS_DISPLAY_GRID) return mt;
     if (box->padding_top > 0.0 || box->border_top > 0.0) return mt;
-    if (!layout_is_block_flow(layout_box(ctx, f)->display)) return mt;
+    if (!layout_box_is_block_level(layout_box(ctx, f))) return mt;
     double c = layout_eff_margin_top(ctx, f, depth + 1);
     return mt > c ? mt : c;
 }
@@ -3463,14 +3972,14 @@ static double layout_eff_margin_bottom(LayoutContext *ctx, int idx, int depth)
     int f, l;
     layout_sig_children(ctx, idx, &f, &l);
     if (f < 0) {
-        if (box->overflow != 0) return mb;
+        if (box->overflow != 0 || !layout_box_collapses_through(box)) return mb;
         return mt > mb ? mt : mb;
     }
     if (box->overflow != 0) return mb;    /* BFC: no collapse with children */
     if (box->display == CSS_DISPLAY_FLEX || box->display == CSS_DISPLAY_GRID) return mb;
     if (box->padding_bottom > 0.0 || box->border_bottom > 0.0) return mb;
-    if (box->height_set) return mb;               /* explicit height blocks */
-    if (!layout_is_block_flow(layout_box(ctx, l)->display)) return mb;
+    if (!layout_height_auto(box)) return mb;     /* explicit height blocks */
+    if (!layout_box_is_block_level(layout_box(ctx, l))) return mb;
     double c = layout_eff_margin_bottom(ctx, l, depth + 1);
     return mb > c ? mb : c;
 }
@@ -3479,7 +3988,277 @@ static double layout_eff_margin_bottom(LayoutContext *ctx, int idx, int depth)
  * each.  The box itself is already positioned and width-resolved by the
  * caller; this resolves each child's width/height/position and, after
  * recursing, the parent's auto height. */
+/* ---- Intrinsic sizes (CSS Sizing 3 §5) ----
+ * Min-content and max-content border-box widths, excluding margins.  Used
+ * for shrink-to-fit (atomic inlines, floats, absolutely positioned boxes)
+ * and for flex items' content-based sizes.  Memoized per layout run in
+ * ctx->intrinsic_cache (two slots per box, < 0 = not computed). */
+
+static double layout_text_intrinsic(const LayoutBox *box, const char *text, bool want_max)
+{
+    double fs = box->font_size > 0.0 ? box->font_size : 16.0;
+    char buf[4096];
+    size_t n = 0;
+    double best = 0.0;
+    const char *p = text;
+    /* Collapse runs of white space; for min-content measure each word. */
+    while (*p) {
+        while (*p && isspace((unsigned char)*p)) p++;
+        if (!*p) break;
+        const char *st = p;
+        while (*p && !isspace((unsigned char)*p)) p++;
+        size_t wl = (size_t)(p - st);
+        if (want_max) {
+            if (n > 0 && n + 1 < sizeof(buf)) buf[n++] = ' ';
+            if (n + wl >= sizeof(buf)) wl = sizeof(buf) - 1 - n;
+            memcpy(buf + n, st, wl);
+            n += wl;
+        } else {
+            char word[512];
+            if (wl >= sizeof(word)) wl = sizeof(word) - 1;
+            memcpy(word, st, wl);
+            word[wl] = '\0';
+            double w = 0.0;
+            if (layout_measure_text_styled(box, word, fs, &w, NULL) && w > best) best = w;
+        }
+    }
+    if (want_max) {
+        buf[n] = '\0';
+        if (n == 0) return 0.0;
+        double w = 0.0;
+        if (layout_measure_text_styled(box, buf, fs, &w, NULL)) best = w;
+    }
+    return best;
+}
+
+static double layout_intrinsic_width(LayoutContext *ctx, int idx, bool want_max);
+
+const char *css_layout_box_text(const LayoutContext *ctx, int idx, const char *raw)
+{
+    if (ctx && ctx->text_norm && idx >= 0 && idx < ctx->tree.count && ctx->text_norm[idx])
+        return ctx->text_norm[idx];
+    return raw;
+}
+
+/* Margin-box contribution of a child (auto margins count as zero). */
+static double layout_intrinsic_contribution(LayoutContext *ctx, int c, bool want_max)
+{
+    LayoutBox *b = layout_box(ctx, c);
+    double w = layout_intrinsic_width(ctx, c, want_max);
+    if (!(b->margin_auto & 8)) w += b->margin_left;
+    if (!(b->margin_auto & 2)) w += b->margin_right;
+    return w < 0.0 ? 0.0 : w;
+}
+
+static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_max)
+{
+    LayoutBox *box = layout_box(ctx, idx);
+    if (box->display == CSS_DISPLAY_NONE) return 0.0;
+    HtmlNode *dom = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+    if (dom && dom->type == HTML_NODE_TEXT)
+        return layout_text_intrinsic(box, dom->text_content ? dom->text_content : "",
+                                     want_max || box->white_space == 1 || box->white_space == 2);
+    if (!dom || dom->type != HTML_NODE_ELEMENT) return 0.0;
+
+    double hpb = layout_horizontal_border_padding(box);
+    /* Compressible replaced elements (form controls, images, ...) with a
+     * percentage width contribute nothing to min-content (Sizing §5.2.2). */
+    if (!want_max && box->width_percent > 0.0 && dom->tag_name &&
+        (strcasecmp(dom->tag_name, "input") == 0 || strcasecmp(dom->tag_name, "textarea") == 0 ||
+         strcasecmp(dom->tag_name, "select") == 0 || strcasecmp(dom->tag_name, "img") == 0 ||
+         strcasecmp(dom->tag_name, "video") == 0 || strcasecmp(dom->tag_name, "iframe") == 0 ||
+         strcasecmp(dom->tag_name, "canvas") == 0 || strcasecmp(dom->tag_name, "svg") == 0))
+        return hpb;
+    /* A definite (non-percentage) width is both intrinsic sizes. */
+    if (box->width_set && box->width_percent <= 0.0) {
+        double t = box->box_sizing == CSS_BOX_SIZING_BORDER_BOX ? box->css_width
+                                                                : box->css_width + hpb;
+        return t < 0.0 ? 0.0 : t;
+    }
+
+    double content = 0.0;
+    const char *tag = dom->tag_name ? dom->tag_name : "";
+    if (strcasecmp(tag, "img") == 0) {
+        const char *wa = layout_node_attribute(dom, "width");
+        content = (wa && wa[0]) ? atof(wa) : 0.0;
+    } else if (strcasecmp(tag, "input") == 0) {
+        const char *ty = layout_node_attribute(dom, "type");
+        if (ty && (strcasecmp(ty, "checkbox") == 0 || strcasecmp(ty, "radio") == 0)) content = 13.0;
+        else if (ty && strcasecmp(ty, "hidden") == 0) content = 0.0;
+        else content = 177.0;
+    } else if (strcasecmp(tag, "textarea") == 0) {
+        content = 176.0;
+    } else if (strcasecmp(tag, "svg") == 0 || strcasecmp(tag, "canvas") == 0 ||
+               strcasecmp(tag, "video") == 0 || strcasecmp(tag, "iframe") == 0) {
+        const char *wa = layout_node_attribute(dom, "width");
+        content = (wa && wa[0]) ? atof(wa)
+                                : (strcasecmp(tag, "svg") == 0 ? 300.0 :
+                                   strcasecmp(tag, "canvas") == 0 ? 300.0 :
+                                   strcasecmp(tag, "iframe") == 0 ? 300.0 : 300.0);
+    } else if (box->display == CSS_DISPLAY_FLEX) {
+        bool is_row = box->flex_direction == CSS_FLEX_DIRECTION_ROW ||
+                      box->flex_direction == CSS_FLEX_DIRECTION_ROW_REVERSE;
+        bool wraps = box->flex_wrap != CSS_FLEX_WRAP_NOWRAP;
+        int n = 0;
+        for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0;
+             c = ctx->tree.nodes[c].next_sibling_idx) {
+            LayoutBox *cb = layout_box(ctx, c);
+            if (!layout_is_in_flow(cb)) continue;
+            HtmlNode *cn = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
+            if (cn && cn->type == HTML_NODE_TEXT && layout_text_is_whitespace(cn->text_content))
+                continue;
+            double w = layout_intrinsic_contribution(ctx, c, want_max);
+            if (is_row && (want_max || !wraps)) content += w;
+            else if (w > content) content = w;
+            n++;
+        }
+        if (is_row && (want_max || !wraps) && n > 1) content += (n - 1) * box->gap_col;
+    } else {
+        /* Block / inline formatting: inline-level children accumulate along
+         * a line (max-content) while block-level children stand alone. */
+        double line = 0.0, pending_space = 0.0;
+        for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0;
+             c = ctx->tree.nodes[c].next_sibling_idx) {
+            LayoutBox *cb = layout_box(ctx, c);
+            if (cb->display == CSS_DISPLAY_NONE) continue;
+            if (cb->position == CSS_POSITION_ABSOLUTE || cb->position == CSS_POSITION_FIXED) continue;
+            HtmlNode *cn = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
+            if (cn && cn->type == HTML_NODE_ELEMENT && cn->tag_name &&
+                strcasecmp(cn->tag_name, "br") == 0) {
+                if (line > content) content = line;
+                line = 0.0;
+                pending_space = 0.0;
+                continue;
+            }
+            if (cn && cn->type == HTML_NODE_TEXT && layout_text_is_whitespace(cn->text_content)) {
+                /* Collapsible space: counts only between inline content. */
+                if (want_max && line > 0.0) {
+                    double sw = 0.0;
+                    double fs = cb->font_size > 0.0 ? cb->font_size : 16.0;
+                    if (!layout_measure_text_styled(cb, " ", fs, &sw, NULL)) sw = fs * 0.25;
+                    pending_space = sw;
+                }
+                continue;
+            }
+            double w = layout_intrinsic_contribution(ctx, c, want_max);
+            if (layout_box_is_block_level(cb) && cb->float_side == 0) {
+                if (line > content) content = line;
+                line = 0.0;
+                pending_space = 0.0;
+                if (w > content) content = w;
+            } else if (want_max) {
+                line += pending_space + w;
+                pending_space = 0.0;
+            } else if (w > content) {
+                content = w;
+            }
+        }
+        if (line > content) content = line;
+    }
+
+    double total = content + hpb;
+    if (box->min_width > 0.0 || box->max_width > 0.0) {
+        if (box->box_sizing == CSS_BOX_SIZING_BORDER_BOX)
+            total = layout_clamp_size(total, box->min_width, box->max_width);
+        else
+            total = layout_clamp_size(content, box->min_width, box->max_width) + hpb;
+    }
+    return total < 0.0 ? 0.0 : total;
+}
+
+static double layout_intrinsic_width(LayoutContext *ctx, int idx, bool want_max)
+{
+    double *cache = ctx->intrinsic_cache;
+    if (cache) {
+        double v = cache[2 * (size_t)idx + (want_max ? 1 : 0)];
+        if (v >= 0.0) return v;
+    }
+    double v = layout_intrinsic_compute(ctx, idx, want_max);
+    if (cache) cache[2 * (size_t)idx + (want_max ? 1 : 0)] = v;
+    return v;
+}
+
+/* Shrink-to-fit border-box width (CSS 2.1 §10.3.5):
+ * min(max(min-content, available), max-content). */
+static double layout_shrink_to_fit(LayoutContext *ctx, int idx, double avail)
+{
+    double mx = layout_intrinsic_width(ctx, idx, true);
+    if (mx <= avail) return mx;
+    double mn = layout_intrinsic_width(ctx, idx, false);
+    return mn > avail ? mn : avail;
+}
+
+/* Size an atomic inline (inline-block / inline-flex) before placing it on a
+ * line: definite widths come from layout_resolve_used_sizes, auto widths
+ * shrink to fit the line; auto height is resolved by its own layout. */
+static void layout_size_atomic_inline(LayoutContext *ctx, int c, double avail)
+{
+    LayoutBox *child = layout_box(ctx, c);
+    if (!(child->width_set || child->width_percent > 0.0 || child->width_keyword)) {
+        double a = avail - child->margin_left - child->margin_right;
+        if (a < 0.0) a = 0.0;
+        child->width = layout_shrink_to_fit(ctx, c, a);
+    }
+    if (layout_height_auto(child)) {
+        child->height = 0.0;
+        /* Text-entry controls have no content boxes to size them: one line
+         * (two for textarea) plus their padding and border. */
+        HtmlNode *dn = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
+        if (dn && dn->type == HTML_NODE_ELEMENT && dn->tag_name &&
+            (strcasecmp(dn->tag_name, "input") == 0 || strcasecmp(dn->tag_name, "textarea") == 0 ||
+             strcasecmp(dn->tag_name, "select") == 0)) {
+            const char *ty = layout_node_attribute(dn, "type");
+            if (!(ty && strcasecmp(ty, "hidden") == 0)) {
+                double lines = strcasecmp(dn->tag_name, "textarea") == 0 ? 2.0 : 1.0;
+                double fs = child->font_size > 0.0 ? child->font_size : 16.0;
+                double lh = layout_line_advance_box(child);
+                (void)fs;
+                child->height = lines * lh + layout_vertical_border_padding(child);
+            }
+        }
+    }
+    layout_update_content_sizes(child);
+}
+
+/* First float of the block formatting context being laid out on this thread
+ * (floats only affect line boxes in their own BFC). */
+static __thread int t_float_base = 0;
+
+static bool layout_establishes_bfc(LayoutContext *ctx, int idx)
+{
+    LayoutBox *b = layout_box(ctx, idx);
+    if (idx == ctx->tree.root_idx || b->float_side != 0 || b->overflow != 0 ||
+        b->position == CSS_POSITION_ABSOLUTE || b->position == CSS_POSITION_FIXED ||
+        layout_box_is_atomic_inline(b))
+        return true;
+    int p = ctx->tree.nodes[idx].parent_idx;
+    if (p >= 0) {
+        CssDisplay pd = layout_box(ctx, p)->display;
+        if (pd == CSS_DISPLAY_FLEX || pd == CSS_DISPLAY_GRID) return true;
+    }
+    HtmlNode *dn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+    if (dn && dn->type == HTML_NODE_ELEMENT && dn->tag_name &&
+        (strcasecmp(dn->tag_name, "td") == 0 || strcasecmp(dn->tag_name, "th") == 0))
+        return true;
+    return false;
+}
+
+static void layout_block_flow_inner(LayoutContext *ctx, int idx);
+
 static void layout_block_flow(LayoutContext *ctx, int idx)
+{
+    if (!layout_establishes_bfc(ctx, idx)) {
+        layout_block_flow_inner(ctx, idx);
+        return;
+    }
+    int saved_base = t_float_base, saved_count = ctx->float_count;
+    t_float_base = ctx->float_count;
+    layout_block_flow_inner(ctx, idx);
+    ctx->float_count = saved_count;
+    t_float_base = saved_base;
+}
+
+static void layout_block_flow_inner(LayoutContext *ctx, int idx)
 {
     LayoutBox *box = layout_box(ctx, idx);
     double content_left = box->x + box->padding_left + box->border_left;
@@ -3520,7 +4299,8 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
         layout_resolve_used_sizes(child, layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx),
                                   avail_width, box->content_height);
 
-        if (layout_is_block_flow(child->display) && child->float_side != 0) {
+        if (child->float_side != 0 && (layout_is_block_flow(child->display) ||
+                                       child->display == CSS_DISPLAY_INLINE_BLOCK)) {
             /* Floated block: finish the pending inline line, then place at the
              * current cursor on its side; the vertical cursor does not
              * advance (following content flows around it). */
@@ -3586,7 +4366,7 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
             continue;
         }
 
-        if (layout_is_block_flow(child->display)) {
+        if (layout_box_is_block_level(child)) {
             /* Block child: finish the pending inline line, then stack. */
             if (line_member_count > 0) {
                 layout_align_line(ctx, line_members, line_member_count,
@@ -3604,7 +4384,7 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
             /* clear: advance past the matching floats before stacking. */
             bool cleared = false;
             if (child->clear) {
-                for (int fi = 0; fi < ctx->float_count; fi++) {
+                for (int fi = t_float_base; fi < ctx->float_count; fi++) {
                     bool match = (child->clear == 3) ||
                                  (child->clear == 1 && ctx->float_stack[fi].side == 1) ||
                                  (child->clear == 2 && ctx->float_stack[fi].side == 2);
@@ -3625,13 +4405,31 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
                 gap = eff_mt;
                 pending_mb = 0.0;
             } else if (!any_placed && box->overflow == 0 &&
-                       box->padding_top <= 0.0 && box->border_top <= 0.0) {
+                       box->padding_top <= 0.0 && box->border_top <= 0.0 &&
+                       idx != ctx->tree.root_idx &&
+                       box->display != CSS_DISPLAY_FLEX && box->display != CSS_DISPLAY_GRID &&
+                       box->position != CSS_POSITION_ABSOLUTE && box->position != CSS_POSITION_FIXED) {
+                /* Collapses out through this box (its parent applied it via
+                 * layout_eff_margin_top).  The root element, and boxes that
+                 * establish a new formatting context (absolutely positioned
+                 * boxes), keep their children's margins inside (§8.3.1). */
                 gap = 0.0;
             } else {
                 gap = pending_mb > eff_mt ? pending_mb : eff_mt;
             }
 
             child->x = content_left + child->margin_left;
+            if ((child->margin_auto & 0xA) && (child->width_set || child->width_percent > 0.0 || child->width_keyword ||
+                                               child->max_width > 0.0)) {
+                /* Auto horizontal margins absorb the free space (§10.3.3). */
+                double ml = (child->margin_auto & 8) ? 0.0 : child->margin_left;
+                double mr = (child->margin_auto & 2) ? 0.0 : child->margin_right;
+                double free_w = avail_width - child->width - ml - mr;
+                if (free_w > 0.0) {
+                    if ((child->margin_auto & 0xA) == 0xA) child->x = content_left + free_w / 2.0;
+                    else if (child->margin_auto & 8) child->x = content_left + free_w;
+                }
+            }
             child->y = cur.y + gap;
             layout_update_content_sizes(child);
 
@@ -3640,7 +4438,7 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
             layout_node_serial(ctx, c);
 
             double eff_mb = layout_eff_margin_bottom(ctx, c, 0);
-            if (child->height <= 0.0 && !child->height_set && child->overflow == 0 &&
+            if (child->height <= 0.0 && layout_height_auto(child) && child->overflow == 0 &&
                 child->padding_top <= 0.0 && child->padding_bottom <= 0.0 &&
                 child->border_top <= 0.0 && child->border_bottom <= 0.0) {
                 /* Empty block: top and bottom margins collapse through into a
@@ -3659,7 +4457,7 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
              * share lines like a browser; long text runs wrap across lines.
              * Line geometry accounts for floats intruding at this height. */
             double line_left = content_left, line_avail = avail_width;
-            layout_flow_line_geometry(ctx->float_stack, ctx->float_count, cur.y,
+            layout_flow_line_geometry(ctx->float_stack + t_float_base, ctx->float_count - t_float_base, cur.y,
                                       content_left, avail_width,
                                       &line_left, &line_avail);
             /* The pen must never start left of the float-inset line edge:
@@ -3668,6 +4466,41 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
              * overlaps a left float. */
             if (cur.x < line_left) cur.x = line_left;
             HtmlNode *dom = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
+            if (pending_mb > 0.0 &&
+                !(dom && dom->type == HTML_NODE_TEXT && layout_text_is_whitespace(dom->text_content))) {
+                /* A line box after a block: the block's bottom margin no
+                 * longer collapses with anything. */
+                cur.y += pending_mb;
+                pending_mb = 0.0;
+                any_placed = true;
+            }
+            if (layout_box_is_atomic_inline(child) && dom && dom->type == HTML_NODE_ELEMENT &&
+                strcasecmp(dom->tag_name, "img") != 0) {
+                /* Atomic inline (inline-block / inline-flex): shrink-to-fit
+                 * width, laid out as its own formatting context, then placed
+                 * on the line as one unbreakable box. */
+                layout_size_atomic_inline(ctx, c, line_avail);
+                double aspan = child->margin_left + child->width + child->margin_right;
+                if (cur.x + aspan > line_left + line_avail + 0.01 && cur.x > line_left + 0.001) {
+                    if (line_member_count > 0) {
+                        layout_align_line(ctx, line_members, line_member_count,
+                                          line_left, line_avail, box->text_align);
+                        line_member_count = 0;
+                    }
+                    cur.y += cur.line_box;
+                    cur.line_box = 0.0;
+                    cur.x = line_left;
+                }
+                child->x = cur.x + child->margin_left;
+                child->y = cur.y + child->margin_top;
+                layout_update_content_sizes(child);
+                layout_node_serial(ctx, c);
+                cur.x += aspan;
+                double ah = child->margin_top + child->height + child->margin_bottom;
+                if (ah > cur.line_box) cur.line_box = ah;
+                if (line_members) line_members[line_member_count++] = c;
+                continue;
+            }
             double fs = child->font_size > 0.0 ? child->font_size : 16.0;
             float scale = (float)(fs / 16.0);
             double line_adv = layout_line_advance_box(child);
@@ -3677,9 +4510,16 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
             bool is_whitespace_run = false;
             bool is_img = false;
             bool is_br = false;
+            child->text_lead_skip = 0;
             if (dom && dom->type == HTML_NODE_TEXT) {
                 if (!layout_text_is_whitespace(dom->text_content)) {
-                    text = dom->text_content;
+                    text = css_layout_box_text(ctx, c, dom->text_content);
+                    if (text[0] == ' ' && cur.x <= line_left + 0.001 && child->white_space != 2 &&
+                        child->white_space != 3) {
+                        /* A collapsible space at the start of a line is removed. */
+                        text++;
+                        child->text_lead_skip = 1;
+                    }
                     is_text_run = true;
                 } else {
                     is_whitespace_run = true;
@@ -3724,6 +4564,18 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
             } else if (text && layout_measure_text_styled(child, text, fs, &tw, NULL)) {
                 child->width = tw;
                 child->height = line_adv;
+                if (!is_text_run && child->display == CSS_DISPLAY_INLINE) {
+                    /* Inline element: its max-content width also counts
+                     * atomic inline descendants and its own padding. */
+                    double iw = layout_intrinsic_width(ctx, c, true);
+                    if (iw > tw + 0.5) {
+                        double cap = line_avail - child->margin_left - child->margin_right;
+                        if (iw <= cap || layout_horizontal_border_padding(child) > 0.0) {
+                            child->width = iw;
+                            text = NULL;   /* not a plain text run: no wrapping */
+                        }
+                    }
+                }
             } else if (!is_text_run || text == NULL) {
                 /* Element with no text content (e.g. <a><img></a>): size it
                  * from a replaced <img> descendant when present, so captions
@@ -3737,10 +4589,18 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
                     if (child->width <= 0.0) child->width = 80.0;
                     if (child->height <= 0.0) child->height = 20.0;
                 } else {
-                    /* Empty inline element (anchor span, empty <a>, ...):
-                     * shrink to zero instead of a fake box. */
-                    if (!child->width_set) child->width = 0.0;
-                    if (!child->height_set) child->height = 0.0;
+                    /* Inline element without text: size from atomic inline
+                     * descendants (icons in links); otherwise empty (anchor
+                     * span, empty <a>, ...) shrinks to zero. */
+                    double iw = (child->display == CSS_DISPLAY_INLINE)
+                        ? layout_intrinsic_width(ctx, c, true) : 0.0;
+                    if (iw > 0.0) {
+                        child->width = iw;
+                        child->height = line_adv;
+                    } else {
+                        if (!child->width_set) child->width = 0.0;
+                        if (layout_height_auto(child)) child->height = 0.0;
+                    }
                 }
             }
             layout_update_content_sizes(child);
@@ -3780,6 +4640,12 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
             double span = child->margin_left + child->width + child->margin_right;
             double line_right = line_left + line_avail;
             double remaining = line_right - cur.x;
+            /* A trailing collapsible space hangs past the line end. */
+            double trail = 0.0;
+            if (text && is_text_run && text[0] && text[strlen(text) - 1] == ' ') {
+                if (!layout_measure_text_styled(child, " ", fs, &trail, NULL)) trail = 0.0;
+            }
+            bool nowrap = child->white_space == 1 || child->white_space == 2;
             if (g_layout_debug & LDBG_INLINE) {
                 HtmlNode *dn = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
                 fprintf(stderr, "[INL] idx=%d span=%.1f cur.x=%.1f line=[%.1f..%.1f] y=%.1f tag=%s type=%d\n",
@@ -3792,7 +4658,7 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
              * Inline elements whose content is (concatenated) text — links,
              * <b>, <span> — wrap the same way; the wrap geometry is later
              * propagated to their text descendants for glyph emission. */
-            if (text && span > remaining && span > fs * 2.0) {
+            if (text && !nowrap && span - trail > remaining + 0.01 && span > fs * 2.0) {
                 double first_w = remaining;
                 if (cur.x <= line_left + 0.001) {
                     /* Already at the line start: use the full line. */
@@ -3881,14 +4747,14 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
                     int cont2_line = 0;
                     double cont2_x = 0.0, cont2_w = 0.0;
                     double next_fb = 1e30;
-                    for (int fi = 0; fi < ctx->float_count; fi++) {
+                    for (int fi = t_float_base; fi < ctx->float_count; fi++) {
                         double fb = ctx->float_stack[fi].bottom;
                         if (fb > cur.y + 0.001 && fb < next_fb) next_fb = fb;
                     }
                     if (next_fb < 1e29) {
                         double g2l = content_left, g2a = avail_width;
-                        layout_flow_line_geometry(ctx->float_stack,
-                                                  ctx->float_count,
+                        layout_flow_line_geometry(ctx->float_stack + t_float_base,
+                                                  ctx->float_count - t_float_base,
                                                   next_fb + 0.01,
                                                   content_left, avail_width,
                                                   &g2l, &g2a);
@@ -3933,7 +4799,15 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
                 continue;
             }
 
-            if (cur.x + span > line_right && cur.x > line_left + 0.001) {
+            if (is_whitespace_run && cur.x + span > line_right) {
+                /* Collapsible white space at the end of a line hangs: it
+                 * neither wraps nor opens a new line box. */
+                child->width = 0.0;
+                child->height = 0.0;
+                layout_update_content_sizes(child);
+                span = 0.0;
+            }
+            if (cur.x + span - trail > line_right + 0.01 && cur.x > line_left + 0.001) {
                 /* Finish the current line (alignment applies), then wrap. */
                 if (line_member_count > 0) {
                     layout_align_line(ctx, line_members, line_member_count,
@@ -3947,18 +4821,44 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
             child->x = cur.x + child->margin_left;
             child->y = cur.y + vmt;
             cur.x += span;
-            double h = vmt + child->height + vmb;
-            if (h > cur.line_box) cur.line_box = h;
-
             if (line_members) line_members[line_member_count++] = c;
             layout_node_serial(ctx, c);
+            if (child->display == CSS_DISPLAY_INLINE && dom && dom->type == HTML_NODE_ELEMENT) {
+                /* Atomic inline descendants can be taller than one line. */
+                double bottom = child->y + child->height;
+                for (int k = ctx->tree.nodes[c].first_child_idx; k >= 0;
+                     k = ctx->tree.nodes[k].next_sibling_idx) {
+                    LayoutBox *kb = layout_box(ctx, k);
+                    if (!layout_is_in_flow(kb)) continue;
+                    double kbot = kb->y + kb->height +
+                                  (layout_box_is_atomic_inline(kb) ? kb->margin_bottom : 0.0);
+                    if (kbot > bottom) bottom = kbot;
+                }
+                bottom += child->padding_bottom + child->border_bottom;
+                /* The inline box keeps its own (font) height; the line box
+                 * grows around taller atomic content. */
+                if (bottom - cur.y > cur.line_box) cur.line_box = bottom - cur.y;
+            }
+            double h = vmt + child->height + vmb;
+            if (h > cur.line_box) cur.line_box = h;
+            if (child->display == CSS_DISPLAY_INLINE && dom && dom->type == HTML_NODE_ELEMENT &&
+                !is_img && !is_br && child->wrap_cont_w <= 0.0 &&
+                fabs(child->height - line_adv) < 0.01) {
+                /* Visual box of a one-line inline element: its content area
+                 * plus padding/border, centered by the half-leading. */
+                double ca = layout_content_area_height(child);
+                double vpb = layout_vertical_border_padding(child);
+                child->y += (line_adv - ca) / 2.0 - child->padding_top - child->border_top;
+                child->height = ca + vpb;
+                layout_update_content_sizes(child);
+            }
         }
     }
 
     /* Finish the trailing inline line (alignment applies). */
     if (line_member_count > 0) {
         double line_left = content_left, line_avail = avail_width;
-        layout_flow_line_geometry(ctx->float_stack, ctx->float_count, cur.y,
+        layout_flow_line_geometry(ctx->float_stack + t_float_base, ctx->float_count - t_float_base, cur.y,
                                   content_left, avail_width,
                                   &line_left, &line_avail);
         layout_align_line(ctx, line_members, line_member_count,
@@ -3976,8 +4876,28 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
      * bottom of the last non-empty in-flow content.  The last child's
      * collapsed bottom margin extends the box only when it cannot collapse
      * out through the parent (i.e. the parent has bottom border/padding). */
-    if (box->height <= 0.0 && !box->height_set) {
+    if (box->height <= 0.0 && layout_height_auto(box)) {
         double max_bottom = cur.y;
+        if (box->aspect_ratio > 0.0) {
+            /* ::before { padding-top: N% } aspect boxes: the pseudo block
+             * occupies width x ratio at the top of the content box. */
+            double b = content_top + box->content_width * box->aspect_ratio;
+            if (b > max_bottom) max_bottom = b;
+        }
+        {
+            /* Text-entry controls: one line of text (two for textarea). */
+            HtmlNode *bn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+            if (bn && bn->type == HTML_NODE_ELEMENT && bn->tag_name &&
+                (strcasecmp(bn->tag_name, "input") == 0 || strcasecmp(bn->tag_name, "textarea") == 0 ||
+                 strcasecmp(bn->tag_name, "select") == 0)) {
+                const char *ty = layout_node_attribute(bn, "type");
+                if (!(ty && strcasecmp(ty, "hidden") == 0)) {
+                    double lines = strcasecmp(bn->tag_name, "textarea") == 0 ? 2.0 : 1.0;
+                    double b = content_top + lines * layout_line_advance_box(box);
+                    if (b > max_bottom) max_bottom = b;
+                }
+            }
+        }
         if (box->padding_bottom > 0.0 || box->border_bottom > 0.0)
             max_bottom += pending_mb;
         /* Children that overflowed their line (e.g. tall replaced inline
@@ -3994,6 +4914,10 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
         for (int fi = 0; fi < nfloats; fi++) {
             if (floats[fi].bottom > max_bottom) max_bottom = floats[fi].bottom;
         }
+        if (box->line_clamp && box->webkit_box) {
+            double cap = content_top + box->line_clamp * layout_line_advance_box(box);
+            if (max_bottom > cap) max_bottom = cap;
+        }
         double total = max_bottom - box->y + box->padding_bottom + box->border_bottom;
         if (total < 0.0) total = 0.0;
         /* min/max-height clamps (content-box aware). */
@@ -4008,6 +4932,23 @@ static void layout_block_flow(LayoutContext *ctx, int idx)
         }
         box->height = total;
         layout_update_content_sizes(box);
+    } else {
+        /* <button> centers its content vertically in a taller box. */
+        HtmlNode *bn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+        if (bn && bn->type == HTML_NODE_ELEMENT && bn->tag_name &&
+            strcasecmp(bn->tag_name, "button") == 0) {
+            double used = cur.y - content_top;
+            double room = box->content_height - used;
+            if (used > 0.0 && room > 0.5) {
+                for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0;
+                     c = ctx->tree.nodes[c].next_sibling_idx) {
+                    LayoutBox *cb = layout_box(ctx, c);
+                    if (!layout_is_in_flow(cb)) continue;
+                    cb->y += room / 2.0;
+                    layout_offset_subtree(ctx, c, 0.0, room / 2.0);
+                }
+            }
+        }
     }
 }
 
@@ -4059,42 +5000,115 @@ static void layout_units(LayoutContext *ctx, const int *idx, int n)
     job_group_wait(group);
 }
 
-/* ---- Flex layout (single-pass, serial) ---- */
+/* ---- Flex layout (CSS Flexbox §9) ----
+ * 1. flex base sizes (flex-basis, definite size, or content size: max-content
+ *    width for rows, laid-out height for columns) and automatic minimums;
+ * 2. line breaking, then the resolve-flexible-lengths loop with freezing;
+ * 3. main-axis placement (auto margins, justify-content);
+ * 4. item layout at the final main size gives hypothetical cross sizes;
+ * 5. line cross sizes, container cross size, align-self/align-items with
+ *    stretch (re-layout only when a box's contents depend on its height). */
 
 typedef struct {
     int idx;
-    double flex_grow, flex_shrink;
-    double main_size;   /* border-box basis (flex-basis or css size), pre-grow */
-    double cross_size;  /* border-box cross basis */
-    double min_main, max_main;
-    double main_margin_start, main_margin_end;
-    double cross_margin_start, cross_margin_end;
-    double final_main, final_cross;
-    double final_x, final_y;
+    bool is_text;
+    double grow, shrink;
+    double base, hypo, target;
+    double min_main, max_main;          /* border-box; max <= 0 = none */
+    double min_cross, max_cross;
+    double mm_s, mm_e, cm_s, cm_e;      /* margins (auto counts as 0) */
+    unsigned char auto_ms, auto_me, auto_cs, auto_ce;
+    bool frozen;
+    bool cross_def;                     /* explicit cross size */
+    bool measured;                      /* laid out at its current size */
+    double text_w, text_h;
+    double main_pos;                    /* border-box main start */
+    double cross;                       /* border-box cross size */
+    int align;
+    int order, seq;
 } FlexItem;
 
 typedef struct {
     int start, count;
     double cross_size;
+    double cross_pos;
 } FlexLineSeg;
+
+static int flex_item_order_cmp(const void *a, const void *b)
+{
+    const FlexItem *x = (const FlexItem *)a, *y = (const FlexItem *)b;
+    if (x->order != y->order) return x->order < y->order ? -1 : 1;
+    return x->seq - y->seq;
+}
+
+/* Does changing this box's used height after layout move its contents? */
+static bool layout_height_sensitive(LayoutContext *ctx, int idx)
+{
+    LayoutBox *b = layout_box(ctx, idx);
+    if (b->display == CSS_DISPLAY_FLEX || b->display == CSS_DISPLAY_GRID) return true;
+    HtmlNode *dn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+    if (dn && dn->type == HTML_NODE_ELEMENT && dn->tag_name &&
+        strcasecmp(dn->tag_name, "button") == 0) return true;   /* centers its content */
+    for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0;
+         c = ctx->tree.nodes[c].next_sibling_idx) {
+        LayoutBox *cb = layout_box(ctx, c);
+        if (cb->display == CSS_DISPLAY_NONE) continue;
+        if (cb->height_percent > 0.0) return true;
+    }
+    return false;
+}
+
+/* Move an already laid out box (and its subtree) to a new border-box origin. */
+static void layout_move_box(LayoutContext *ctx, int idx, double x, double y)
+{
+    LayoutBox *b = layout_box(ctx, idx);
+    double dx = x - b->x, dy = y - b->y;
+    b->x = x;
+    b->y = y;
+    layout_offset_subtree(ctx, idx, dx, dy);
+}
+
+static double flex_clamp(double v, double mn, double mx)
+{
+    if (mx > 0.0 && v > mx) v = mx;
+    if (v < mn) v = mn;
+    return v;
+}
 
 static void layout_flex_container(LayoutContext *ctx, int idx)
 {
-    LayoutBox *container = layout_box(ctx, idx);
-    LayoutNodeRef *node = layout_node_ref(ctx, idx);
-    bool is_row = (container->flex_direction == CSS_FLEX_DIRECTION_ROW ||
-                   container->flex_direction == CSS_FLEX_DIRECTION_ROW_REVERSE);
-    bool reverse = (container->flex_direction == CSS_FLEX_DIRECTION_ROW_REVERSE ||
-                    container->flex_direction == CSS_FLEX_DIRECTION_COLUMN_REVERSE);
-    bool do_wrap = (container->flex_wrap == CSS_FLEX_WRAP_WRAP ||
-                    container->flex_wrap == CSS_FLEX_WRAP_WRAP_REVERSE);
+    LayoutBox *ct = layout_box(ctx, idx);
+    bool is_row = (ct->flex_direction == CSS_FLEX_DIRECTION_ROW ||
+                   ct->flex_direction == CSS_FLEX_DIRECTION_ROW_REVERSE);
+    bool reverse = (ct->flex_direction == CSS_FLEX_DIRECTION_ROW_REVERSE ||
+                    ct->flex_direction == CSS_FLEX_DIRECTION_COLUMN_REVERSE);
+    bool do_wrap = ct->flex_wrap != CSS_FLEX_WRAP_NOWRAP;
+    bool wrap_rev = ct->flex_wrap == CSS_FLEX_WRAP_WRAP_REVERSE;
+
+    double content_x = ct->x + ct->padding_left + ct->border_left;
+    double content_y = ct->y + ct->padding_top + ct->border_top;
+    double cw = ct->content_width;
+    bool height_def = !layout_height_auto(ct) || ct->height > 0.0;
+    double chh = height_def ? ct->content_height : 0.0;
+    bool main_def = is_row ? true : height_def;
+    bool cross_def = is_row ? height_def : true;
+    double avail_main = is_row ? cw : chh;
+    double gap_main = is_row ? ct->gap_col : ct->gap_row;
+    double gap_cross = is_row ? ct->gap_row : ct->gap_col;
+    double main_start = is_row ? content_x : content_y;
+    double cross_start = is_row ? content_y : content_x;
+
+    /* Container min/max on each axis, as content-box sizes. */
+    double cmin_h = ct->min_height, cmax_h = ct->max_height;
+    if (ct->box_sizing == CSS_BOX_SIZING_BORDER_BOX) {
+        double v = layout_vertical_border_padding(ct);
+        cmin_h = cmin_h > 0.0 ? (cmin_h - v > 0.0 ? cmin_h - v : 0.0) : 0.0;
+        cmax_h = cmax_h > 0.0 ? (cmax_h - v > 0.0 ? cmax_h - v : 0.0) : 0.0;
+    }
 
     int nkids = 0;
     int *kids = layout_collect_flow_children(ctx, idx, &nkids);
-    /* Whitespace-only text between flex items creates no flex item (CSS Flexbox
-     * §4: a text run that is entirely white space is not rendered).  Without
-     * this filter those nodes would each get an auto basis and eat the free
-     * space meant for the real items. */
+    /* Whitespace-only text between items creates no flex item (§4). */
     if (nkids > 0) {
         int w = 0;
         for (int r = 0; r < nkids; r++) {
@@ -4105,338 +5119,457 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
         }
         nkids = w;
     }
-    if (nkids == 0) { free(kids); return; }
+    FlexItem *items = nkids > 0 ? (FlexItem *)calloc((size_t)nkids, sizeof(FlexItem)) : NULL;
+    if (nkids > 0 && !items) { free(kids); return; }
 
-    FlexItem *items = (FlexItem*)calloc((size_t)nkids, sizeof(FlexItem));
-    if (!items) { free(kids); return; }
-
-    double avail_main, avail_cross;
-    if (is_row) {
-        avail_main = container->content_width;        avail_cross = container->content_height;
-    } else {
-        avail_main = container->content_height;
-        avail_cross = container->content_width;
-    }
-    bool main_definite = avail_main > 0.0;
-
-    /* Phase 1: measure items, compute main/cross bases. */
+    /* ---- 1. base sizes ---- */
+    int *measure = nkids > 0 ? (int *)malloc((size_t)nkids * sizeof(int)) : NULL;
+    int nmeasure = 0;
     for (int i = 0; i < nkids; i++) {
         int c = kids[i];
         LayoutBox *child = layout_box(ctx, c);
+        HtmlNode *dom = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
         FlexItem *it = &items[i];
         it->idx = c;
-        it->flex_grow = child->flex_grow;
-        it->flex_shrink = child->flex_shrink > 0.0 ? child->flex_shrink : 1.0;
+        it->seq = i;
+        it->order = child->order;
+        it->grow = child->flex_grow;
+        it->shrink = child->flex_shrink;
+        it->align = child->align_self ? child->align_self - 1 : (int)ct->align_items;
 
-        /* Percentage cross/main sizes resolve against the container's
-         * content box; when that size is indefinite (auto, still 0 here)
-         * the percentage computes to auto (CSS 2.1 §10.5).  Clear the
-         * markers so the item sizes from its content below. */
-        if (is_row) {
-            if (child->height_percent > 0.0 && container->content_height <= 0.0) {
-                child->height_percent = 0.0;
-                child->height_set = 0;
-                child->height = 0.0;
-            }
-        } else {
-            if (child->width_percent > 0.0 && container->content_width <= 0.0) {
-                child->width_percent = 0.0;
-                child->width_set = 0;
-                child->width = 0.0;
-            }
+        if (dom && dom->type == HTML_NODE_TEXT) {
+            it->is_text = true;
+            it->text_w = layout_intrinsic_width(ctx, c, true);
+            it->text_h = layout_line_advance_box(child);
+            it->base = is_row ? it->text_w : it->text_h;
+            it->min_main = is_row ? layout_intrinsic_width(ctx, c, false) : it->text_h;
+            it->hypo = it->base;
+            it->cross_def = true;
+            it->cross = is_row ? it->text_h : it->text_w;
+            continue;
         }
-        /* Preliminary main size from flex-basis / explicit size / auto.  A
-         * percentage flex-basis resolves against the container's main size;
-         * so does a percentage width/height used as the automatic basis. */
+
+        layout_resolve_used_sizes(child, dom, cw, chh);
+        bool w_def = child->width_set || child->width_percent > 0.0 || child->width_keyword;
+        bool h_def = !layout_height_auto(child);
+        if (!w_def) child->width = 0.0;
+        if (!h_def) child->height = 0.0;
+        layout_update_content_sizes(child);
+
+        unsigned char ma = child->margin_auto;
+        if (is_row) {
+            it->auto_ms = ma & 8; it->auto_me = ma & 2; it->auto_cs = ma & 1; it->auto_ce = ma & 4;
+            it->mm_s = it->auto_ms ? 0.0 : child->margin_left;
+            it->mm_e = it->auto_me ? 0.0 : child->margin_right;
+            it->cm_s = it->auto_cs ? 0.0 : child->margin_top;
+            it->cm_e = it->auto_ce ? 0.0 : child->margin_bottom;
+        } else {
+            it->auto_ms = ma & 1; it->auto_me = ma & 4; it->auto_cs = ma & 8; it->auto_ce = ma & 2;
+            it->mm_s = it->auto_ms ? 0.0 : child->margin_top;
+            it->mm_e = it->auto_me ? 0.0 : child->margin_bottom;
+            it->cm_s = it->auto_cs ? 0.0 : child->margin_left;
+            it->cm_e = it->auto_ce ? 0.0 : child->margin_right;
+        }
+        it->cross_def = is_row ? h_def : w_def;
+        bool main_def_item = is_row ? w_def : h_def;
+
+        /* Cross-axis min/max (border-box). */
+        if (is_row) {
+            it->min_cross = child->min_height > 0.0 ? layout_flex_cross_total(child, child->min_height, true) : 0.0;
+            it->max_cross = child->max_height > 0.0 ? layout_flex_cross_total(child, child->max_height, true) : 0.0;
+        } else {
+            it->min_cross = child->min_width > 0.0 ? layout_flex_cross_total(child, child->min_width, false) : 0.0;
+            it->max_cross = child->max_width > 0.0 ? layout_flex_cross_total(child, child->max_width, false) : 0.0;
+        }
+
+        /* Column items: the cross size (width) is known before layout. */
+        if (!is_row && !w_def) {
+            double room = cw - it->cm_s - it->cm_e;
+            if (room < 0.0) room = 0.0;
+            if (it->align == CSS_ALIGN_STRETCH && !it->auto_cs && !it->auto_ce)
+                child->width = flex_clamp(room, it->min_cross, it->max_cross);
+            else
+                child->width = flex_clamp(layout_shrink_to_fit(ctx, c, room), it->min_cross, it->max_cross);
+            layout_update_content_sizes(child);
+        }
+
         double basis = -1.0;
-        if (child->flex_basis_percent > 0.0) basis = avail_main * child->flex_basis_percent;
-        else if (child->flex_basis >= 0.0) basis = child->flex_basis;
+        if (child->flex_basis_percent > 0.0) {
+            if (main_def) basis = layout_flex_main_total(child, avail_main * child->flex_basis_percent, is_row);
+        } else if (child->flex_basis >= 0.0) {
+            basis = layout_flex_main_total(child, child->flex_basis, is_row);
+        }
+        if (basis < 0.0 && main_def_item) basis = is_row ? child->width : child->height;
         if (basis < 0.0) {
             if (is_row) {
-                if (child->width_percent > 0.0) basis = avail_main * child->width_percent;
-                else if (child->css_width > 0.0) basis = child->width;
+                basis = layout_intrinsic_width(ctx, c, true);
             } else {
-                if (child->height_percent > 0.0) basis = avail_main * child->height_percent;
-                else if (child->css_height > 0.0) basis = child->height;
+                /* Content height: lay the item out at its cross size. */
+                child->x = content_x + it->cm_s;
+                child->y = content_y + it->mm_s;
+                child->height = 0.0;
+                layout_update_content_sizes(child);
+                measure[nmeasure++] = i;
+                it->measured = true;
+                basis = -2.0;   /* filled in after the measuring layout */
             }
         }
-        if (basis < 0.0) {
-            /* basis:auto — content size.  Measure the item's text with real
-             * glyph metrics so content-sized items (tabs, buttons) fit. */
-            HtmlNode *fdom = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
-            if (fdom) {
-                char fbuf[2048];
-                size_t fl = 0;
-                fbuf[0] = '\0';
-                layout_concat_dom_text(ctx->doc, fdom, fbuf, sizeof(fbuf), &fl);
-                if (fl > 0) {
-                    double fs2 = child->font_size > 0.0 ? child->font_size : 16.0;
-                    double tw = 0.0;
-                    if (layout_measure_text_styled(child, fbuf, fs2, &tw, NULL)) basis = tw;
-                }
-            }
-        }
-        /* Convert content-box basis to border-box. */
-        if (basis >= 0.0) basis = layout_flex_main_total(child, basis, is_row);
+        it->base = basis;
 
         if (is_row) {
-            it->main_margin_start = child->margin_left;
-            it->main_margin_end = child->margin_right;
-            it->cross_margin_start = child->margin_top;
-            it->cross_margin_end = child->margin_bottom;
-            /* A 0 min/max means "no constraint" and must not pick up the
-             * padding/border inset from layout_flex_main_total. */
-            it->min_main = child->min_width > 0.0 ? layout_flex_main_total(child, child->min_width, is_row) : 0.0;
-            it->max_main = child->max_width > 0.0 ? layout_flex_main_total(child, child->max_width, is_row) : 0.0;
-            it->cross_size = child->height;
+            it->min_main = child->min_width > 0.0 ? layout_flex_main_total(child, child->min_width, true) : -1.0;
+            it->max_main = child->max_width > 0.0 ? layout_flex_main_total(child, child->max_width, true) : 0.0;
         } else {
-            it->main_margin_start = child->margin_top;
-            it->main_margin_end = child->margin_bottom;
-            it->cross_margin_start = child->margin_left;
-            it->cross_margin_end = child->margin_right;
-            it->min_main = child->min_height > 0.0 ? layout_flex_main_total(child, child->min_height, is_row) : 0.0;
-            it->max_main = child->max_height > 0.0 ? layout_flex_main_total(child, child->max_height, is_row) : 0.0;
-            it->cross_size = child->width;
+            it->min_main = child->min_height > 0.0 ? layout_flex_main_total(child, child->min_height, false) : -1.0;
+            it->max_main = child->max_height > 0.0 ? layout_flex_main_total(child, child->max_height, false) : 0.0;
         }
-        it->main_size = basis < 0.0 ? 0.0 : basis;
-        /* If no explicit main size and basis auto, fall back to content sizing:
-         * give it the container main size so it can shrink, or a small default. */
-        if (basis < 0.0 && it->main_size == 0.0) {
-            it->main_size = main_definite ? avail_main * 0.25 : 40.0;
+        if (it->min_main < 0.0 && (child->min_size_set & (is_row ? 1 : 2))) it->min_main = 0.0;
+        if (it->min_main < 0.0) {
+            /* Automatic minimum size (§4.5): the content size for items that
+             * are not scroll containers, capped by a definite size. */
+            it->min_main = 0.0;
+            if (child->overflow == 0 && is_row) {
+                double mc = layout_intrinsic_width(ctx, c, false);
+                if (w_def && child->width < mc) mc = child->width;
+                if (it->max_main > 0.0 && mc > it->max_main) mc = it->max_main;
+                it->min_main = mc;
+            }
         }
-        /* Clamp initial basis to min/max. */
-        it->main_size = layout_clamp_size(it->main_size, it->min_main, it->max_main);
+    }
+    if (nmeasure > 0) {
+        int *list = (int *)malloc((size_t)nmeasure * sizeof(int));
+        for (int k = 0; k < nmeasure; k++) list[k] = items[measure[k]].idx;
+        layout_units(ctx, list, nmeasure);
+        free(list);
+        for (int k = 0; k < nmeasure; k++) {
+            FlexItem *it = &items[measure[k]];
+            LayoutBox *child = layout_box(ctx, it->idx);
+            it->base = child->height;
+            if (child->overflow == 0 && !(child->min_size_set & 2) && child->min_height <= 0.0) {
+                double mc = child->height;
+                if (it->max_main > 0.0 && mc > it->max_main) mc = it->max_main;
+                it->min_main = mc;
+            }
+        }
+    }
+    for (int i = 0; i < nkids; i++) {
+        FlexItem *it = &items[i];
+        if (!it->is_text) it->hypo = flex_clamp(it->base, it->min_main, it->max_main);
     }
 
-    /* Phase 2: line breaking. */
-    FlexLineSeg *lines = (FlexLineSeg*)calloc((size_t)(nkids + 1), sizeof(FlexLineSeg));
-    int line_count = 0;
+    /* order: stable sort (measurement indices are no longer needed). */
+    if (nkids > 1) qsort(items, (size_t)nkids, sizeof(FlexItem), flex_item_order_cmp);
+
+    /* ---- 2. lines ---- */
+    FlexLineSeg *lines = (FlexLineSeg *)calloc((size_t)nkids + 1, sizeof(FlexLineSeg));
+    int nlines = 0;
     {
         int start = 0;
         double used = 0.0;
         for (int i = 0; i < nkids; i++) {
-            double item_main = items[i].main_size + items[i].main_margin_start + items[i].main_margin_end;
-            if (do_wrap && main_definite && line_count > 0 && start < i &&
-                used + item_main > avail_main) {
-                lines[line_count].start = start;
-                lines[line_count].count = i - start;
-                lines[line_count].cross_size = 0.0;
-                line_count++;
+            double outer = items[i].hypo + items[i].mm_s + items[i].mm_e;
+            double add = (i > start ? gap_main : 0.0) + outer;
+            if (do_wrap && main_def && i > start && used + add > avail_main + 0.01) {
+                lines[nlines].start = start;
+                lines[nlines].count = i - start;
+                nlines++;
                 start = i;
-                used = 0.0;
-            }
-            used += item_main;
-        }
-        lines[line_count].start = start;
-        lines[line_count].count = nkids - start;
-        lines[line_count].cross_size = 0.0;
-        line_count++;
-    }
-
-    /* Phase 3: main-axis distribution + cross sizing per line. */
-    for (int li = 0; li < line_count; li++) {
-        FlexLineSeg *line = &lines[li];
-        double sum_basis = 0.0, sum_grow = 0.0, sum_wshrink = 0.0, sum_margin = 0.0;
-        for (int j = 0; j < line->count; j++) {
-            FlexItem *it = &items[line->start + j];
-            sum_basis += it->main_size;
-            sum_grow += it->flex_grow;
-            sum_wshrink += it->flex_shrink * (it->main_size > 0.0 ? it->main_size : 1.0);
-            sum_margin += it->main_margin_start + it->main_margin_end;
-        }
-        double gaps = (line->count > 1) ? (line->count - 1) * container->gap_col : 0.0;
-        double free = main_definite ? (avail_main - sum_basis - sum_margin - gaps) : 0.0;
-
-        for (int j = 0; j < line->count; j++) {
-            FlexItem *it = &items[line->start + j];
-            double main = it->main_size;
-            if (main_definite && free > 0.0 && sum_grow > 0.0) {
-                main += free * (it->flex_grow / sum_grow);
-            } else if (main_definite && free < 0.0 && sum_wshrink > 0.0) {
-                double weighted = it->flex_shrink * (it->main_size > 0.0 ? it->main_size : 1.0);
-                main += free * (weighted / sum_wshrink);
-            }
-            main = layout_clamp_size(main, it->min_main, it->max_main);
-            if (main < 0.0) main = 0.0;
-            it->final_main = main;
-            if (g_layout_debug & LDBG_FLEX) {
-                LayoutBox *cb = layout_box(ctx, it->idx);
-                fprintf(stderr, "[FLEX] idx=%d basis=%.1f grow=%.1f free=%.1f avail=%.1f -> final_main=%.1f (tag=%s)\n",
-                        it->idx, it->main_size, it->flex_grow, free, avail_main, main,
-                        layout_node_dom(ctx, ctx->tree.nodes[it->idx].dom_node_idx) ?
-                        layout_node_dom(ctx, ctx->tree.nodes[it->idx].dom_node_idx)->tag_name : "?");
-                (void)cb;
-            }
-
-            /* Cross size: use basis, stretch decided in positioning phase. */
-            it->final_cross = it->cross_size;
-            if (it->final_cross <= 0.0) it->final_cross = is_row ? 20.0 : 80.0;
-
-            /* The line's cross size is the largest item MARGIN box (Flexbox
-             * §9.4): cross margins count toward the line and container. */
-            double item_cross_total = it->final_cross + it->cross_margin_start + it->cross_margin_end;
-            if (item_cross_total > line->cross_size)
-                line->cross_size = item_cross_total;
-        }
-    }
-
-    /* Phase 4: container cross size (if auto) and per-line cross start. */
-    double total_cross = 0.0;
-    for (int li = 0; li < line_count; li++) total_cross += lines[li].cross_size;
-    if (line_count > 1) total_cross += (line_count - 1) * container->gap_row;
-
-    bool cross_auto;
-    if (is_row) cross_auto = (container->height <= 0.0 && !container->height_set);
-    else        cross_auto = (container->width <= 0.0 && !container->width_set);
-    double cross_avail;
-    if (cross_auto) {
-        cross_avail = total_cross;
-        if (is_row) {
-            container->height = total_cross + container->padding_top + container->padding_bottom
-                                + container->border_top + container->border_bottom;
-        } else {
-            container->width = total_cross + container->padding_left + container->padding_right
-                               + container->border_left + container->border_right;
-        }
-        layout_update_content_sizes(container);
-    } else {
-        cross_avail = is_row ? container->content_height : container->content_width;
-    }
-
-    /* Phase 5: position items. */
-    double content_main_start = is_row
-        ? (container->x + container->padding_left + container->border_left)
-        : (container->y + container->padding_top + container->border_top);
-    double content_cross_start = is_row
-        ? (container->y + container->padding_top + container->border_top)
-        : (container->x + container->padding_left + container->border_left);
-
-    int *order = (int *)malloc((size_t)nkids * sizeof(int));
-    int norder = 0;
-    double cross_cursor = content_cross_start;
-    for (int li = 0; li < line_count; li++) {
-        FlexLineSeg *line = &lines[li];
-        double line_cross_start = cross_cursor;
-        double line_cross = lines[li].cross_size;
-
-        /* justify-content: main start offset + extra gap. */
-        double line_main_used = 0.0;
-        for (int j = 0; j < line->count; j++) {
-            FlexItem *it = &items[line->start + j];
-            line_main_used += it->final_main + it->main_margin_start + it->main_margin_end;
-        }
-        double line_gaps = (line->count > 1) ? (line->count - 1) * container->gap_col : 0.0;
-        double line_free = main_definite ? (avail_main - line_main_used - line_gaps) : 0.0;
-        double extra_gap = 0.0, main_pos = content_main_start;
-        if (main_definite && line_free > 0.0) {
-            switch (container->justify_content) {
-                case CSS_JUSTIFY_CENTER:
-                    main_pos += line_free / 2.0; break;
-                case CSS_JUSTIFY_FLEX_END:
-                    main_pos += line_free; break;
-                case CSS_JUSTIFY_SPACE_BETWEEN:
-                    extra_gap = (line->count > 1) ? line_free / (line->count - 1) : 0.0; break;
-                case CSS_JUSTIFY_SPACE_AROUND:
-                    extra_gap = (line->count > 0) ? line_free / line->count : 0.0;
-                    main_pos += extra_gap / 2.0; break;
-                case CSS_JUSTIFY_SPACE_EVENLY:
-                    extra_gap = line_free / (line->count + 1);
-                    main_pos += extra_gap; break;
-                default: break; /* flex-start */
-            }
-        }
-
-        for (int jstep = 0; jstep < line->count; jstep++) {
-            int j = reverse ? (line->start + line->count - 1 - jstep) : (line->start + jstep);
-            FlexItem *it = &items[j];
-            LayoutBox *child = layout_box(ctx, it->idx);
-
-            /* Cross placement (align-items).  line_cross is the margin-box
-             * line cross size, so margins are subtracted before aligning and
-             * added back as the final offset.  Items whose cross size is not
-             * definite (content-sized placeholder) align to flex-start: their
-             * real cross extent is unknown until the subtree is laid out, and
-             * the container's auto cross post-pass grows around them. */
-            bool cross_is_definite = (it->cross_size > 0.0);
-            double item_cross = it->final_cross;
-            double cross_offset;
-            if (!cross_is_definite && container->align_items != CSS_ALIGN_STRETCH) {
-                cross_offset = 0.0;
-            } else switch (container->align_items) {
-                case CSS_ALIGN_STRETCH:
-                    item_cross = line_cross - it->cross_margin_start - it->cross_margin_end;
-                    if (item_cross < 0.0) item_cross = 0.0;
-                    cross_offset = 0.0;
-                    break;
-                case CSS_ALIGN_CENTER:
-                    cross_offset = (line_cross - item_cross
-                                    - it->cross_margin_start - it->cross_margin_end) / 2.0;
-                    if (cross_offset < 0.0) cross_offset = 0.0;
-                    break;
-                case CSS_ALIGN_FLEX_END:
-                    cross_offset = line_cross - item_cross - it->cross_margin_end;
-                    if (cross_offset < 0.0) cross_offset = 0.0;
-                    break;
-                default:
-                    cross_offset = 0.0; /* flex-start */
-                    break;
-            }
-            cross_offset += it->cross_margin_start;
-
-            /* Write final main/cross back to the box's width/height.  When the
-             * item's cross size is auto (no definite cross basis), leave it
-             * at 0 so the subtree's own flow resolves its auto height/width
-             * from its children. */
-            if (is_row) {
-                child->width = it->final_main;
-                if (cross_is_definite) child->height = item_cross;
-                child->x = main_pos + it->main_margin_start;
-                child->y = line_cross_start + cross_offset;
+                used = outer;
             } else {
-                child->height = it->final_main;
-                if (cross_is_definite) child->width = item_cross;
-                child->y = main_pos + it->main_margin_start;
-                child->x = line_cross_start + cross_offset;
+                used += add;
             }
+        }
+        if (nkids > 0) {
+            lines[nlines].start = start;
+            lines[nlines].count = nkids - start;
+            nlines++;
+        }
+    }
+
+    /* Indefinite main size (column, auto height): the content size,
+     * clamped by min/max-height so flexible items can fill a min-height. */
+    if (!main_def) {
+        double longest = 0.0;
+        for (int li = 0; li < nlines; li++) {
+            double sum = 0.0;
+            for (int j = 0; j < lines[li].count; j++) {
+                FlexItem *it = &items[lines[li].start + j];
+                sum += it->hypo + it->mm_s + it->mm_e;
+            }
+            if (lines[li].count > 1) sum += (lines[li].count - 1) * gap_main;
+            if (sum > longest) longest = sum;
+        }
+        avail_main = flex_clamp(longest, cmin_h, cmax_h);
+    }
+
+    /* ---- resolve flexible lengths (§9.7) ---- */
+    for (int li = 0; li < nlines; li++) {
+        FlexItem *L = &items[lines[li].start];
+        int n = lines[li].count;
+        double outer_hypo = 0.0, margins = 0.0;
+        for (int j = 0; j < n; j++) {
+            outer_hypo += L[j].hypo + L[j].mm_s + L[j].mm_e;
+            margins += L[j].mm_s + L[j].mm_e;
+        }
+        double gaps = n > 1 ? (n - 1) * gap_main : 0.0;
+        bool grow = avail_main - outer_hypo - gaps > 0.0;
+        for (int j = 0; j < n; j++) {
+            FlexItem *it = &L[j];
+            double f = grow ? it->grow : it->shrink;
+            it->frozen = f <= 0.0 || (grow && it->base > it->hypo) || (!grow && it->base < it->hypo);
+            it->target = it->frozen ? it->hypo : it->base;
+        }
+        double initial_free = 0.0;
+        {
+            double used = margins + gaps;
+            for (int j = 0; j < n; j++) used += L[j].frozen ? L[j].target : L[j].base;
+            initial_free = avail_main - used;
+        }
+        for (int iter = 0; iter <= n; iter++) {
+            double used = margins + gaps, sum_f = 0.0, sum_scaled = 0.0;
+            int unfrozen = 0;
+            for (int j = 0; j < n; j++) {
+                FlexItem *it = &L[j];
+                if (it->frozen) { used += it->target; continue; }
+                used += it->base;
+                unfrozen++;
+                sum_f += grow ? it->grow : it->shrink;
+                sum_scaled += it->shrink * it->base;
+            }
+            if (unfrozen == 0) break;
+            double free_space = avail_main - used;
+            if (sum_f < 1.0) {
+                double v = initial_free * sum_f;
+                if (fabs(v) < fabs(free_space)) free_space = v;
+            }
+            for (int j = 0; j < n; j++) {
+                FlexItem *it = &L[j];
+                if (it->frozen) continue;
+                if (grow) {
+                    it->target = it->base + (sum_f > 0.0 ? free_space * it->grow / sum_f : 0.0);
+                } else if (sum_scaled > 0.0) {
+                    it->target = it->base + free_space * (it->shrink * it->base) / sum_scaled;
+                } else {
+                    it->target = it->base;
+                }
+            }
+            double violation = 0.0;
+            for (int j = 0; j < n; j++) {
+                FlexItem *it = &L[j];
+                if (it->frozen) continue;
+                double cl = flex_clamp(it->target, it->min_main, it->max_main);
+                if (cl < 0.0) cl = 0.0;
+                violation += cl - it->target;
+            }
+            for (int j = 0; j < n; j++) {
+                FlexItem *it = &L[j];
+                if (it->frozen) continue;
+                double cl = flex_clamp(it->target, it->min_main, it->max_main);
+                if (cl < 0.0) cl = 0.0;
+                bool freeze = violation == 0.0 ||
+                              (violation > 0.0 && cl > it->target) ||
+                              (violation < 0.0 && cl < it->target);
+                if (freeze) { it->target = cl; it->frozen = true; }
+            }
+        }
+        for (int j = 0; j < n; j++) if (L[j].target < 0.0) L[j].target = 0.0;
+    }
+
+    /* ---- 3. main-axis placement ---- */
+    for (int li = 0; li < nlines; li++) {
+        FlexItem *L = &items[lines[li].start];
+        int n = lines[li].count;
+        double used = n > 1 ? (n - 1) * gap_main : 0.0;
+        int nauto = 0;
+        for (int j = 0; j < n; j++) {
+            used += L[j].target + L[j].mm_s + L[j].mm_e;
+            nauto += (L[j].auto_ms ? 1 : 0) + (L[j].auto_me ? 1 : 0);
+        }
+        double free_space = avail_main - used;
+        double pos = 0.0, extra = 0.0, auto_m = 0.0;
+        if (nauto > 0) {
+            if (free_space > 0.0) auto_m = free_space / nauto;
+        } else {
+            switch (ct->justify_content) {
+            case CSS_JUSTIFY_CENTER: pos = free_space / 2.0; break;
+            case CSS_JUSTIFY_FLEX_END: pos = free_space; break;
+            case CSS_JUSTIFY_SPACE_BETWEEN:
+                if (free_space > 0.0 && n > 1) extra = free_space / (n - 1);
+                break;
+            case CSS_JUSTIFY_SPACE_AROUND:
+                if (free_space > 0.0) { extra = free_space / n; pos = extra / 2.0; }
+                else pos = free_space / 2.0;
+                break;
+            case CSS_JUSTIFY_SPACE_EVENLY:
+                if (free_space > 0.0) { extra = free_space / (n + 1); pos = extra; }
+                else pos = free_space / 2.0;
+                break;
+            default: break;
+            }
+        }
+        for (int j = 0; j < n; j++) {
+            FlexItem *it = &L[j];
+            pos += it->mm_s + (it->auto_ms ? auto_m : 0.0);
+            double p = pos;
+            if (reverse) p = avail_main - pos - it->target;
+            it->main_pos = main_start + p;
+            pos += it->target + it->mm_e + (it->auto_me ? auto_m : 0.0) + gap_main + extra;
+        }
+    }
+
+    /* ---- 4. item layout at the final main size ---- */
+    int *todo = nkids > 0 ? (int *)malloc((size_t)nkids * sizeof(int)) : NULL;
+    int ntodo = 0;
+    for (int i = 0; i < nkids; i++) {
+        FlexItem *it = &items[i];
+        LayoutBox *child = layout_box(ctx, it->idx);
+        if (it->is_text) {
+            if (is_row) { child->width = it->target; child->height = it->text_h; }
+            else { child->height = it->target; child->width = it->text_w < cw ? it->text_w : cw; }
+            it->cross = is_row ? child->height : child->width;
+            continue;
+        }
+        double x = is_row ? it->main_pos : cross_start + it->cm_s;
+        double y = is_row ? cross_start + it->cm_s : it->main_pos;
+        if (is_row) {
+            child->width = it->target;
             layout_update_content_sizes(child);
-
-            /* The item's subtree is laid out after every item is placed
-             * (below): positions never depend on item contents. */
-            order[norder++] = it->idx;
-
-            main_pos += it->final_main + it->main_margin_start + it->main_margin_end + container->gap_col + extra_gap;
+            child->x = x; child->y = y;
+            if (!it->cross_def) child->height = 0.0;
+            layout_update_content_sizes(child);
+            todo[ntodo++] = it->idx;
+        } else {
+            if (it->measured && fabs(child->height - it->target) < 0.01) {
+                layout_move_box(ctx, it->idx, x, y);
+            } else {
+                child->height = it->target;
+                child->x = x; child->y = y;
+                layout_update_content_sizes(child);
+                todo[ntodo++] = it->idx;
+            }
         }
-
-        cross_cursor += line_cross + container->gap_row;
+    }
+    if (ntodo > 0) layout_units(ctx, todo, ntodo);
+    for (int i = 0; i < nkids; i++) {
+        FlexItem *it = &items[i];
+        if (it->is_text) continue;
+        LayoutBox *child = layout_box(ctx, it->idx);
+        if (is_row) {
+            /* An item's own layout may not change its definite main size. */
+            child->width = it->target;
+            if (child->height < 0.0) child->height = 0.0;
+            child->height = flex_clamp(child->height, it->min_cross, it->max_cross);
+            it->cross = child->height;
+        } else {
+            child->height = it->target;
+            it->cross = child->width;
+        }
+        layout_update_content_sizes(child);
     }
 
-    /* Lay out the item subtrees (in parallel when they are independent). */
-    layout_units(ctx, order, norder);
-    free(order);
-
-    /* Derive the container's auto cross size from the items' actual extents:
-     * their subtrees have final sizes only after the recursion above, so the
-     * pre-layout line cross sizes were just estimates. */
-    if (is_row && cross_auto) {
-        double max_bottom = content_cross_start;
-        for (int i = 0; i < nkids; i++) {
-            LayoutBox *child = layout_box(ctx, items[i].idx);
-            double bottom = child->y + child->height + child->margin_bottom;
-            if (bottom > max_bottom) max_bottom = bottom;
+    /* ---- 5. cross sizes and alignment ---- */
+    double inner_cross = is_row ? (cross_def ? chh : 0.0) : cw;
+    double total_cross = 0.0;
+    for (int li = 0; li < nlines; li++) {
+        double m = 0.0;
+        for (int j = 0; j < lines[li].count; j++) {
+            FlexItem *it = &items[lines[li].start + j];
+            double o = it->cross + it->cm_s + it->cm_e;
+            if (o > m) m = o;
         }
-        container->height = max_bottom - container->y + container->padding_bottom + container->border_bottom;
-        layout_update_content_sizes(container);
-    } else if (!is_row && cross_auto) {
-        double max_right = content_cross_start;
-        for (int i = 0; i < nkids; i++) {
-            LayoutBox *child = layout_box(ctx, items[i].idx);
-            double right = child->x + child->width + child->margin_right;
-            if (right > max_right) max_right = right;
+        lines[li].cross_size = m;
+        total_cross += m;
+    }
+    if (nlines > 1) total_cross += (nlines - 1) * gap_cross;
+    if (!cross_def) {
+        /* Auto cross size (row container, auto height). */
+        inner_cross = flex_clamp(total_cross, cmin_h, cmax_h);
+    }
+    if (!do_wrap && nlines == 1) {
+        lines[0].cross_size = inner_cross;
+    } else if (nlines > 0 && inner_cross > total_cross) {
+        /* align-content: normal/stretch distributes the extra space. */
+        double extra = (inner_cross - total_cross) / nlines;
+        for (int li = 0; li < nlines; li++) lines[li].cross_size += extra;
+    }
+    {
+        double cpos = 0.0;
+        for (int li = 0; li < nlines; li++) {
+            int l = wrap_rev ? nlines - 1 - li : li;
+            lines[l].cross_pos = cpos;
+            cpos += lines[l].cross_size + gap_cross;
         }
-        container->width = max_right - container->x + container->padding_right + container->border_right;
-        layout_update_content_sizes(container);
     }
 
+    int *relayout = todo;   /* reuse */
+    int nrelayout = 0;
+    for (int li = 0; li < nlines; li++) {
+        for (int j = 0; j < lines[li].count; j++) {
+            FlexItem *it = &items[lines[li].start + j];
+            LayoutBox *child = layout_box(ctx, it->idx);
+            double lc = lines[li].cross_size;
+            double size = it->cross;
+            double off = 0.0;
+            double room = lc - it->cm_s - it->cm_e;
+            bool stretched = false;
+            if (it->auto_cs || it->auto_ce) {
+                double fr = room - size;
+                if (fr > 0.0) off = (it->auto_cs && it->auto_ce) ? fr / 2.0 : (it->auto_cs ? fr : 0.0);
+            } else {
+                switch (it->align) {
+                case CSS_ALIGN_STRETCH:
+                    if (!it->cross_def && !it->is_text) {
+                        double ns = flex_clamp(room < 0.0 ? 0.0 : room, it->min_cross, it->max_cross);
+                        if (fabs(ns - size) > 0.01) { size = ns; stretched = true; }
+                    }
+                    break;
+                case CSS_ALIGN_CENTER: off = (room - size) / 2.0; break;
+                case CSS_ALIGN_FLEX_END: off = room - size; break;
+                default: break;
+                }
+            }
+            if (wrap_rev && it->align != CSS_ALIGN_STRETCH && !(it->auto_cs || it->auto_ce))
+                off = room - size - off;
+            double cpos = cross_start + lines[li].cross_pos + it->cm_s + off;
+            double x = is_row ? it->main_pos : cpos;
+            double y = is_row ? cpos : it->main_pos;
+            if (it->is_text) {
+                child->x = x; child->y = y;
+                continue;
+            }
+            layout_move_box(ctx, it->idx, x, y);
+            if (stretched) {
+                if (is_row) child->height = size; else child->width = size;
+                layout_update_content_sizes(child);
+                if (!is_row || layout_height_sensitive(ctx, it->idx)) relayout[nrelayout++] = it->idx;
+            }
+        }
+    }
+    if (nrelayout > 0) {
+        layout_units(ctx, relayout, nrelayout);
+        /* Re-layout must keep the stretched sizes. */
+        for (int li = 0; li < nlines; li++) {
+            for (int j = 0; j < lines[li].count; j++) {
+                FlexItem *it = &items[lines[li].start + j];
+                if (it->is_text) continue;
+                LayoutBox *child = layout_box(ctx, it->idx);
+                if (is_row) child->width = it->target; else child->height = it->target;
+                layout_update_content_sizes(child);
+            }
+        }
+    }
+
+    /* ---- container auto size ---- */
+    if (is_row && !cross_def) {
+        ct->height = inner_cross + layout_vertical_border_padding(ct);
+        layout_update_content_sizes(ct);
+    } else if (!is_row && !main_def) {
+        ct->height = avail_main + layout_vertical_border_padding(ct);
+        layout_update_content_sizes(ct);
+    }
+
+    free(todo);
+    free(measure);
     free(lines);
     free(items);
     free(kids);
@@ -4617,6 +5750,16 @@ static void layout_node_serial(LayoutContext *ctx, int idx)
                 layout_node_serial(ctx, c);
                 continue;
             }
+            if (layout_box_is_atomic_inline(child) && dom && dom->type == HTML_NODE_ELEMENT &&
+                strcasecmp(dom->tag_name, "img") != 0) {
+                layout_size_atomic_inline(ctx, c, 1e9);
+                child->x = cx + child->margin_left;
+                child->y = cy + child->margin_top;
+                layout_update_content_sizes(child);
+                layout_node_serial(ctx, c);
+                cx += child->margin_left + child->width + child->margin_right;
+                continue;
+            }
             double fs = child->font_size > 0.0 ? child->font_size : 16.0;
             double line_adv = layout_line_advance_box(child);
             bool sized = false;
@@ -4636,7 +5779,8 @@ static void layout_node_serial(LayoutContext *ctx, int idx)
                     sized = true;
                 } else {
                     double tw = 0.0;
-                    if (layout_measure_text_styled(child, dom->text_content, fs, &tw, NULL)) {
+                    if (layout_measure_text_styled(child, css_layout_box_text(ctx, c, dom->text_content),
+                                                   fs, &tw, NULL)) {
                         child->width = tw;
                         child->height = line_adv;
                         sized = true;
@@ -4660,6 +5804,17 @@ static void layout_node_serial(LayoutContext *ctx, int idx)
                 } else if (dom && layout_first_img_size(ctx->doc, dom, &iw, &ih)) {
                     child->width = iw;
                     child->height = ih;
+                    sized = true;
+                }
+            }
+            if (!sized && dom && dom->type == HTML_NODE_ELEMENT &&
+                child->display == CSS_DISPLAY_INLINE) {
+                /* Nested inline element: its max-content width (text, atomic
+                 * inline descendants and its own padding). */
+                double iw = layout_intrinsic_width(ctx, c, true);
+                if (iw > 0.0) {
+                    child->width = iw;
+                    child->height = line_adv;
                     sized = true;
                 }
             }
@@ -4821,6 +5976,7 @@ static int layout_positioned_ancestor(LayoutContext *ctx, int idx)
         CssPosition pos = layout_box(ctx, p)->position;
         if (pos == CSS_POSITION_RELATIVE ||
             pos == CSS_POSITION_ABSOLUTE ||
+            pos == CSS_POSITION_FIXED ||
             pos == CSS_POSITION_STICKY) {
             return p;
         }
@@ -4831,18 +5987,49 @@ static int layout_positioned_ancestor(LayoutContext *ctx, int idx)
 
 /* Position an absolutely positioned box against its containing block.
  * This runs after the normal flow passes so containing-block sizes are final. */
+/* Static position (§10.3.7): where the box's margin edge would have been
+ * in normal flow, derived from the final positions of its in-flow siblings. */
+static void layout_static_position(LayoutContext *ctx, int idx, double *sx, double *sy)
+{
+    int p = ctx->tree.nodes[idx].parent_idx;
+    if (p < 0) { *sx = 0.0; *sy = 0.0; return; }
+    LayoutBox *P = layout_box(ctx, p);
+    *sx = P->x + P->border_left + P->padding_left;
+    *sy = P->y + P->border_top + P->padding_top;
+    if (P->display == CSS_DISPLAY_FLEX || P->display == CSS_DISPLAY_GRID) return;
+    for (int k = ctx->tree.nodes[idx].prev_sibling_idx; k >= 0; k = ctx->tree.nodes[k].prev_sibling_idx) {
+        LayoutBox *kb = layout_box(ctx, k);
+        if (!layout_is_in_flow(kb) || kb->float_side != 0) continue;
+        HtmlNode *kn = layout_node_dom(ctx, ctx->tree.nodes[k].dom_node_idx);
+        if (kn && kn->type == HTML_NODE_TEXT && layout_text_is_whitespace(kn->text_content)) continue;
+        if (layout_box_is_block_level(kb)) {
+            *sy = kb->y + kb->height + kb->margin_bottom;
+        } else {
+            *sx = kb->x + kb->width + kb->margin_right;
+            *sy = kb->y;
+        }
+        return;
+    }
+}
+
 static void layout_position_absolute_box(LayoutContext *ctx, int idx)
 {
     LayoutBox *box = layout_box(ctx, idx);
+    double static_x, static_y;
+    layout_static_position(ctx, idx, &static_x, &static_y);
 
+    /* The containing block is the padding box of the nearest positioned
+     * ancestor; fixed boxes use the viewport (scroll position 0). */
     double cb_x, cb_y, cb_w, cb_h;
-    int anc = layout_positioned_ancestor(ctx, idx);
+    int anc = box->position == CSS_POSITION_FIXED ? -1 : layout_positioned_ancestor(ctx, idx);
     if (anc >= 0) {
         LayoutBox *a = layout_box(ctx, anc);
-        cb_x = a->x + a->padding_left + a->border_left;
-        cb_y = a->y + a->padding_top + a->border_top;
-        cb_w = a->content_width;
-        cb_h = a->content_height;
+        cb_x = a->x + a->border_left;
+        cb_y = a->y + a->border_top;
+        cb_w = a->width - a->border_left - a->border_right;
+        cb_h = a->height - a->border_top - a->border_bottom;
+        if (cb_w < 0.0) cb_w = 0.0;
+        if (cb_h < 0.0) cb_h = 0.0;
     } else {
         cb_x = 0.0;
         cb_y = 0.0;
@@ -4854,63 +6041,75 @@ static void layout_position_absolute_box(LayoutContext *ctx, int idx)
     bool has_right = (box->positioned_sides & LAYOUT_SIDE_RIGHT) != 0;
     bool has_top = (box->positioned_sides & LAYOUT_SIDE_TOP) != 0;
     bool has_bottom = (box->positioned_sides & LAYOUT_SIDE_BOTTOM) != 0;
-    double old_x = box->x;
-    double old_y = box->y;
+    layout_resolve_insets(box, cb_w, cb_h);
 
-    /* Resolve the box's own used sizes against the containing block, then fill
-     * auto width from the available CB width (or left+right constraints). */
     layout_resolve_used_sizes(box, layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx),
                               cb_w, cb_h);
-    if (box->width == 0.0 && has_left && has_right) {
-        double w = cb_w - box->left - box->right
-                   - box->margin_left - box->margin_right;
-        if (w < 0.0) w = 0.0;
-        box->width = w;
-        layout_update_content_sizes(box);
-    } else if (box->width == 0.0) {
-        /* Auto width with no opposing offsets: fill the containing block. */
-        box->width = cb_w - box->margin_left - box->margin_right;
+    bool width_auto = !(box->width_set || box->width_percent > 0.0 || box->width_keyword);
+    double ml = (box->margin_auto & 8) ? 0.0 : box->margin_left;
+    double mr = (box->margin_auto & 2) ? 0.0 : box->margin_right;
+    double mt = (box->margin_auto & 1) ? 0.0 : box->margin_top;
+    double mb = (box->margin_auto & 4) ? 0.0 : box->margin_bottom;
+
+    /* ---- horizontal (§10.3.7) ---- */
+    if (width_auto) {
+        if (has_left && has_right) {
+            box->width = cb_w - box->left - box->right - ml - mr;
+        } else {
+            double avail = cb_w - (has_left ? box->left : 0.0) - (has_right ? box->right : 0.0) - ml - mr;
+            box->width = layout_shrink_to_fit(ctx, idx, avail < 0.0 ? 0.0 : avail);
+        }
+        if (box->max_width > 0.0 || box->min_width > 0.0) {
+            if (box->box_sizing == CSS_BOX_SIZING_BORDER_BOX)
+                box->width = layout_clamp_size(box->width, box->min_width, box->max_width);
+            else
+                box->width = layout_content_to_total_width(box,
+                    layout_clamp_size(layout_total_to_content_width(box, box->width),
+                                      box->min_width, box->max_width));
+        }
         if (box->width < 0.0) box->width = 0.0;
         layout_update_content_sizes(box);
     }
-    if (box->height == 0.0 && has_top && has_bottom) {
-        double h = cb_h - box->top - box->bottom
-                   - box->margin_top - box->margin_bottom;
-        if (h < 0.0) h = 0.0;
-        box->height = h;
+    if (has_left && has_right && !width_auto && (box->margin_auto & 0xA)) {
+        double free_w = cb_w - box->left - box->right - box->width - ml - mr;
+        if ((box->margin_auto & 0xA) == 0xA) { ml += free_w / 2.0; }
+        else if (box->margin_auto & 8) ml += free_w;
+    }
+    if (has_left) box->x = cb_x + box->left + ml;
+    else if (has_right) box->x = cb_x + cb_w - box->right - mr - box->width;
+    else box->x = static_x + ml;
+
+    /* ---- vertical (§10.6.4) ---- */
+    bool height_auto = layout_height_auto(box) && !(box->aspect_ratio > 0.0 && box->height > 0.0);
+    if (height_auto && has_top && has_bottom) {
+        double h = cb_h - box->top - box->bottom - mt - mb;
+        box->height = h < 0.0 ? 0.0 : h;
         layout_update_content_sizes(box);
+        height_auto = false;
     }
+    if (has_top) box->y = cb_y + box->top + mt;
+    else box->y = static_y + mt;
 
-    /* Compute x offset. */
-    if (has_left) {
-        box->x = cb_x + box->left + box->margin_left;
-    } else if (has_right) {
-        box->x = cb_x + cb_w - box->right - box->margin_right - box->width;
-    } else {
-        box->x = cb_x + box->margin_left;
-    }
-
-    /* Compute y offset. */
-    if (has_top) {
-        box->y = cb_y + box->top + box->margin_top;
-    } else if (has_bottom) {
-        box->y = cb_y + cb_h - box->bottom - box->margin_bottom - box->height;
-    } else {
-        box->y = cb_y + box->margin_top;
-    }
-
-    /* Lay out the absolute box's subtree now that it has a final position and
-     * size; absolute/fixed boxes were skipped by the normal flow pass. */
+    /* Lay out the subtree at its final x (absolute/fixed boxes were skipped
+     * by the normal flow pass); auto heights come out of this. */
     layout_node_serial(ctx, idx);
 
-    /* Offset descendants so the absolute box acts as a containing block. */
-    layout_offset_subtree(ctx, idx, box->x - old_x, box->y - old_y);
+    if (!has_top) {
+        double y = box->y;
+        if (has_bottom) y = cb_y + cb_h - box->bottom - mb - box->height;
+        if (y != box->y) layout_move_box(ctx, idx, box->x, y);
+    } else if (has_bottom && !height_auto && (box->margin_auto & 5)) {
+        double free_h = cb_h - box->top - box->bottom - box->height - mt - mb;
+        double dy = ((box->margin_auto & 5) == 5) ? free_h / 2.0 : ((box->margin_auto & 1) ? free_h : 0.0);
+        if (dy != 0.0) layout_move_box(ctx, idx, box->x, box->y + dy);
+    }
 }
 
 static void layout_position_absolute_subtree(LayoutContext *ctx, int idx)
 {
     LayoutBox *box = layout_box(ctx, idx);
-    if (box->position == CSS_POSITION_ABSOLUTE) {
+    if (box->display == CSS_DISPLAY_NONE) return;
+    if (box->position == CSS_POSITION_ABSOLUTE || box->position == CSS_POSITION_FIXED) {
         layout_position_absolute_box(ctx, idx);
     }
     for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0;
@@ -5046,6 +6245,51 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
     /* Size and position the root box to the viewport. */
     layout_root(ctx);
 
+    g_layout_ctx = ctx;
+    /* White-space processing (CSS Text §4.1.1): collapse runs of spaces,
+     * tabs and newlines to one space unless white-space preserves them. */
+    if (!ctx->text_norm) ctx->text_norm = (char **)calloc((size_t)ctx->tree.count + 1, sizeof(char *));
+    if (ctx->text_norm) {
+        for (int i = 0; i < ctx->tree.count; i++) {
+            free(ctx->text_norm[i]);
+            ctx->text_norm[i] = NULL;
+            HtmlNode *tn = layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx);
+            if (!tn || tn->type != HTML_NODE_TEXT || !tn->text_content) continue;
+            unsigned char ws = ctx->boxes[i].white_space;
+            if (ws == 2 || ws == 3) continue;
+            const char *t = tn->text_content;
+            bool needs = false;
+            for (const char *q = t; *q; q++) {
+                if (*q == '\n' || *q == '\t' || *q == '\r' || *q == '\f' || (*q == ' ' && q[1] == ' ')) {
+                    needs = true;
+                    break;
+                }
+            }
+            if (!needs) continue;
+            size_t L = strlen(t);
+            char *o = (char *)malloc(L + 1);
+            if (!o) continue;
+            size_t k = 0;
+            bool in_space = false;
+            for (const char *q = t; *q; q++) {
+                char ch = *q;
+                if (ch == ' ' || ch == '\n' || ch == '\t' || ch == '\r' || ch == '\f') {
+                    if (!in_space) o[k++] = ' ';
+                    in_space = true;
+                } else {
+                    o[k++] = ch;
+                    in_space = false;
+                }
+            }
+            o[k] = '\0';
+            ctx->text_norm[i] = o;
+        }
+    }
+    free(ctx->intrinsic_cache);
+    ctx->intrinsic_cache = (double *)malloc(((size_t)ctx->tree.count + 1) * 2 * sizeof(double));
+    if (ctx->intrinsic_cache)
+        for (size_t i = 0; i < ((size_t)ctx->tree.count + 1) * 2; i++) ctx->intrinsic_cache[i] = -1.0;
+
     /* Parallel-layout bookkeeping: subtree sizes and float presence. */
     {
         int n = ctx->tree.count;
@@ -5076,6 +6320,40 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
      * table cells fork into jobs (layout_units).  Then absolutely/fixed
      * positioned boxes are placed against their final containing blocks. */
     job_graph_run(job_new(layout_flow_job, NULL, ctx, 0, 0));
+    /* Translations (transform) shift boxes and their subtrees after layout;
+     * preorder so nested translations accumulate. */
+    for (int k = 0; k < ctx->tree.count; k++) {
+        int i = ctx->tree.preorder[k];
+        LayoutBox *b = &ctx->boxes[i];
+        int par = ctx->tree.nodes[i].parent_idx;
+        b->opacity_eff = (par >= 0 ? ctx->boxes[par].opacity_eff : 1.0) *
+                         (b->opacity_set ? b->opacity : 1.0);
+        if (b->display == CSS_DISPLAY_NONE) continue;
+        double dx = 0.0, dy = 0.0;
+        if ((b->position == CSS_POSITION_RELATIVE || b->position == CSS_POSITION_STICKY) &&
+            b->positioned_sides) {
+            /* Relative offsets (§9.4.3) against the parent's content box;
+             * sticky boxes are treated as relative at scroll position 0. */
+            int par = ctx->tree.nodes[i].parent_idx;
+            double pw = par >= 0 ? ctx->boxes[par].content_width : ctx->viewport_width;
+            double ph = par >= 0 ? ctx->boxes[par].content_height : ctx->viewport_height;
+            layout_resolve_insets(b, pw, ph);
+            if (b->position == CSS_POSITION_RELATIVE) {
+                if (b->positioned_sides & LAYOUT_SIDE_LEFT) dx = b->left;
+                else if (b->positioned_sides & LAYOUT_SIDE_RIGHT) dx = -b->right;
+                if (b->positioned_sides & LAYOUT_SIDE_TOP) dy = b->top;
+                else if (b->positioned_sides & LAYOUT_SIDE_BOTTOM) dy = -b->bottom;
+            }
+        }
+        if (b->has_translate) {
+            dx += b->translate_x + b->translate_xpct * b->width;
+            dy += b->translate_y + b->translate_ypct * b->height;
+        }
+        if (dx == 0.0 && dy == 0.0) continue;
+        b->x += dx;
+        b->y += dy;
+        layout_offset_subtree(ctx, i, dx, dy);
+    }
     STAGE("flow + absolute layout");
     if (g_css_log > 0)
         fprintf(stderr, "[css] Layout: %u parallel regions (%u units), %u serial regions with floats\n",
@@ -5115,6 +6393,9 @@ bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
     ctx->dump_path = saved_dump_path;
     ctx->viewport_width = viewport_width;
     ctx->viewport_height = viewport_height;
+    g_unit_vw = viewport_width > 0.0 ? viewport_width : 1024.0;
+    g_unit_vh = viewport_height > 0.0 ? viewport_height : 768.0;
+    g_unit_rem = 16.0;
     /* Base URL for resolving relative stylesheet/image URLs: derive the origin
      * (scheme + host + "/") from the page's start URL.  Fall back to the
      * historical default when no start URL has been set. */

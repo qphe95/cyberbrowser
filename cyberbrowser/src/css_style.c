@@ -168,8 +168,12 @@ struct CssStyleDoc {
     uint32_t *cls_off; uint16_t *cls_n;
     uint32_t *attr_off; uint16_t *attr_n;
     CssAtom *pool;
+    const char **pool_val;   /* attribute value per pool entry (NULL for classes) */
     int32_t *parent;
     int32_t *pos_first, *pos_last, *type_first, *type_last;
+    int32_t *prev_elem;   /* previous element sibling, -1 = none */
+    int32_t *next_elem;   /* next element sibling, -1 = none */
+    int32_t *sub_end;     /* one past the last descendant (preorder) */
 };
 
 static const char *node_attr(HtmlNode *node, const char *name)
@@ -194,6 +198,10 @@ CssStyleDoc *css_styledoc_build(HtmlDocument *doc)
     d->attr_n = calloc((size_t)n + 1, sizeof(uint16_t));
     d->parent = malloc(((size_t)n + 1) * sizeof(int32_t));
     d->pos_first = calloc((size_t)n + 1, sizeof(int32_t));
+    d->prev_elem = malloc(((size_t)n + 1) * sizeof(int32_t));
+    d->next_elem = malloc(((size_t)n + 1) * sizeof(int32_t));
+    d->sub_end = malloc(((size_t)n + 1) * sizeof(int32_t));
+    for (int i = 0; i <= n; i++) { d->prev_elem[i] = -1; d->next_elem[i] = -1; d->sub_end[i] = i + 1; }
     d->pos_last = calloc((size_t)n + 1, sizeof(int32_t));
     d->type_first = calloc((size_t)n + 1, sizeof(int32_t));
     d->type_last = calloc((size_t)n + 1, sizeof(int32_t));
@@ -209,6 +217,7 @@ CssStyleDoc *css_styledoc_build(HtmlDocument *doc)
     css_atom_reserve(est);
 
     VEC(CssAtom) pool = {0};
+    VEC(const char *) pval = {0};
     for (int i = 0; i < n; i++) {
         d->parent[i] = po_array_parent(&doc->array, i);
         HtmlNode *node = po_array_payload(&doc->array, i);
@@ -232,15 +241,19 @@ CssStyleDoc *css_styledoc_build(HtmlDocument *doc)
                 const char *st = p;
                 while (*p && !css_sel_is_space(*p)) p++;
                 VEC_PUSH(pool, css_atom_intern(st, (size_t)(p - st)));
+                VEC_PUSH(pval, (const char *)NULL);
             }
         }
         d->cls_n[i] = (uint16_t)(pool.n - d->cls_off[i]);
         d->attr_off[i] = (uint32_t)pool.n;
-        for (HtmlAttribute *a = node->attributes; a; a = a->next)
+        for (HtmlAttribute *a = node->attributes; a; a = a->next) {
             VEC_PUSH(pool, atom_cstr(a->name));
+            VEC_PUSH(pval, (const char *)(a->value ? a->value : ""));
+        }
         d->attr_n[i] = (uint16_t)(pool.n - d->attr_off[i]);
     }
     d->pool = pool.v;
+    d->pool_val = pval.v;
 
     /* Sibling positions, computed the way css_element_index counts them. */
     size_t natoms = css_atom_count() + 1;
@@ -263,6 +276,10 @@ CssStyleDoc *css_styledoc_build(HtmlDocument *doc)
             if (d->parent[c] != i) continue;
             d->pos_first[c] = k + 1;
             d->pos_last[c] = total - k;
+            if (k > 0 && d->parent[kids.v[k - 1]] == i) {
+                d->prev_elem[c] = kids.v[k - 1];
+                d->next_elem[kids.v[k - 1]] = c;
+            }
         }
         for (int k = 0; k < total; k++) tcount[d->tag[kids.v[k]]]++;
         for (int k = 0; k < total; k++) {
@@ -282,6 +299,10 @@ CssStyleDoc *css_styledoc_build(HtmlDocument *doc)
         for (int k = 0; k < total; k++) tcount[d->tag[kids.v[k]]] = 0;
     }
     free(kids.v);
+    for (int i = n - 1; i >= 0; i--) {
+        int p = d->parent[i];
+        if (p >= 0 && p < i && d->sub_end[i] > d->sub_end[p]) d->sub_end[p] = d->sub_end[i];
+    }
     free(tcount);
     return d;
 }
@@ -291,8 +312,8 @@ void css_styledoc_free(CssStyleDoc *d)
     if (!d) return;
     free(d->is_elem); free(d->flags); free(d->tag); free(d->id);
     free(d->cls_off); free(d->cls_n); free(d->attr_off); free(d->attr_n);
-    free(d->pool); free(d->parent);
-    free(d->pos_first); free(d->pos_last); free(d->type_first); free(d->type_last);
+    free(d->pool); free(d->pool_val); free(d->parent);
+    free(d->prev_elem); free(d->next_elem); free(d->sub_end); free(d->pos_first); free(d->pos_last); free(d->type_first); free(d->type_last);
     free(d);
 }
 
@@ -303,7 +324,9 @@ void css_styledoc_free(CssStyleDoc *d)
 typedef struct CComp {
     CssAtom tag, id;
     uint32_t cls_off, attr_off, ncls_off, nattr_off;
+    uint32_t atest_off, natest_off;   /* into CssStyleSet.atests, parallel to attrs */
     uint8_t cls_n, attr_n, ncls_n, nattr_n;
+    uint8_t attr_vals, nattr_vals;    /* any value test present */
     uint8_t root, link, empty, child_pos, type_pos, nth_kind;
     uint8_t not_active, not_has_tag, not_has_id;
     uint8_t comb;
@@ -311,6 +334,8 @@ typedef struct CComp {
     int nth_a, nth_b;
     CssAtom not_tag, not_id;
     int32_t where;   /* list index, -1 = none */
+    int32_t has;     /* :has() list index, -1 = none */
+    uint8_t has_comb;
 } CComp;
 
 #define BLOOM_REQ 8
@@ -335,6 +360,7 @@ typedef struct CRule {
 typedef struct CAfter {
     int32_t rule;
     int32_t spec;
+    int32_t is_before;
 } CAfter;
 
 /* Bucket map: key (kind << 32 | atom) -> [off, off+n) in bucket_items. */
@@ -347,7 +373,13 @@ typedef struct BucketMap {
     uint32_t *universal; uint32_t universal_n;
 } BucketMap;
 
+typedef struct AttrTest {
+    uint8_t op, ci;
+    char *val;
+} AttrTest;
+
 struct CssStyleSet {
+    AttrTest *atests; size_t natests;
     CComp *comps; size_t ncomps;
     CChain *chains; size_t nchains;
     CList *lists; size_t nlists;
@@ -364,6 +396,7 @@ typedef struct Builder {
     VEC(CChain) chains;
     VEC(CList) lists;
     VEC(CssAtom) atoms;
+    VEC(AttrTest) atests;
     CssSelectorPart *parts;   /* scratch for the parser (large structs) */
 } Builder;
 
@@ -374,12 +407,25 @@ static uint32_t push_atoms(Builder *b, char (*names)[64], int count)
     return off;
 }
 
+static uint32_t push_atests(Builder *b, const unsigned char *ops, const bool *ci,
+                            char (*vals)[96], int count, uint8_t *any)
+{
+    uint32_t off = (uint32_t)b->atests.n;
+    for (int i = 0; i < count; i++) {
+        AttrTest t = { ops[i], ci[i], NULL };
+        if (ops[i] != CSS_ATTR_OP_EXISTS) { t.val = strdup(vals[i]); *any = 1; }
+        VEC_PUSH(b->atests, t);
+    }
+    return off;
+}
+
 static int32_t compile_list(Builder *b, const char *text);
 
 static void compile_comp(Builder *b, const CssSimpleSelector *s, int comb, CComp *c)
 {
     memset(c, 0, sizeof(*c));
     c->where = -1;
+    c->has = -1;
     c->comb = (uint8_t)comb;
     c->never = (!s->has_substantive || s->never_match) ? 1 : 0;
     c->tag = s->has_tag ? atom_cstr(s->tag) : CSS_ATOM_NONE;
@@ -388,6 +434,8 @@ static void compile_comp(Builder *b, const CssSimpleSelector *s, int comb, CComp
     c->cls_off = push_atoms(b, (char (*)[64])s->classes, s->class_count);
     c->attr_n = (uint8_t)s->attr_count;
     c->attr_off = push_atoms(b, (char (*)[64])s->attrs, s->attr_count);
+    c->atest_off = push_atests(b, s->attr_ops, s->attr_ci, (char (*)[96])s->attr_vals,
+                               s->attr_count, &c->attr_vals);
     c->root = s->is_root;
     c->link = s->requires_link;
     c->empty = s->requires_empty;
@@ -406,6 +454,9 @@ static void compile_comp(Builder *b, const CssSimpleSelector *s, int comb, CComp
         c->ncls_off = push_atoms(b, (char (*)[64])s->not_classes, s->not_class_count);
         c->nattr_n = (uint8_t)s->not_attr_count;
         c->nattr_off = push_atoms(b, (char (*)[64])s->not_attrs, s->not_attr_count);
+        c->natest_off = push_atests(b, s->not_attr_ops, s->not_attr_ci,
+                                    (char (*)[96])s->not_attr_vals, s->not_attr_count,
+                                    &c->nattr_vals);
     }
 }
 
@@ -434,9 +485,17 @@ static int32_t compile_chain(Builder *b, const char *text, int32_t owner)
     if (local[count - 1].simple.is_pseudo_element) ch.never = 1;
     for (int i = 0; i < count; i++) {
         if (local[i].simple.where_active) tmp[i].where = compile_list(b, local[i].simple.where_arg);
+        if (local[i].simple.has_active) {
+            tmp[i].has = compile_list(b, local[i].simple.has_arg);
+            tmp[i].has_comb = (uint8_t)local[i].simple.has_comb;
+            if (tmp[i].has < 0) ch.never = 1;
+        }
     }
     /* Ancestor requirements for the Bloom filter. */
     for (int i = 0; i + 1 < count && ch.bloom_n < BLOOM_REQ; i++) {
+        /* Only compounds that must be ancestors of the subject: a compound
+         * followed by a sibling combinator is a sibling, not an ancestor. */
+        if (tmp[i + 1].comb != CSS_COMB_CHILD && tmp[i + 1].comb != CSS_COMB_DESCENDANT) continue;
         CssAtom req[2 + CSS_MAX_CLASSES];
         int nr = 0;
         if (tmp[i].tag) req[nr++] = tmp[i].tag;
@@ -542,6 +601,47 @@ static inline bool nth_matches(int a, int b, int pos)
     return d / a >= 0;
 }
 
+/* Attribute test against element n: the first attribute with this name
+ * (atoms are case-folded) must satisfy the operator. */
+static bool attr_test(const CssStyleSet *S, const CssStyleDoc *D, int n, CssAtom name,
+                      const AttrTest *t)
+{
+    (void)S;
+    const CssAtom *attrs = D->pool + D->attr_off[n];
+    for (uint32_t k = 0; k < D->attr_n[n]; k++) {
+        if (attrs[k] != name) continue;
+        if (t->op == CSS_ATTR_OP_EXISTS) return true;
+        return css_attr_value_matches(t->op, t->ci, t->val, D->pool_val[D->attr_off[n] + k]);
+    }
+    return false;
+}
+
+static bool list_match(const CssStyleSet *S, const CssStyleDoc *D, int32_t li, int node);
+
+/* :has(): some element in the relative position matches the argument. */
+static bool has_match(const CssStyleSet *S, const CssStyleDoc *D, const CComp *c, int n)
+{
+    switch (c->has_comb) {
+    case '+':
+        return D->next_elem[n] >= 0 && list_match(S, D, c->has, D->next_elem[n]);
+    case '~':
+        for (int k = D->next_elem[n]; k >= 0; k = D->next_elem[k])
+            if (list_match(S, D, c->has, k)) return true;
+        return false;
+    case '>':
+        for (int k = n + 1; k < D->sub_end[n]; k = D->sub_end[k])
+            if (D->is_elem[k] && D->parent[k] == n && list_match(S, D, c->has, k)) return true;
+        return false;
+    default: {
+        int end = D->sub_end[n];
+        if (end - n > 20000) end = n + 20000;
+        for (int k = n + 1; k < end; k++)
+            if (D->is_elem[k] && list_match(S, D, c->has, k)) return true;
+        return false;
+    }
+    }
+}
+
 static bool comp_match(const CssStyleSet *S, const CssStyleDoc *D, const CComp *c, int n)
 {
     if (n < 0 || !D->is_elem[n]) return false;
@@ -553,8 +653,14 @@ static bool comp_match(const CssStyleSet *S, const CssStyleDoc *D, const CComp *
     for (uint32_t i = 0; i < c->cls_n; i++)
         if (!has_atom(cls, D->cls_n[n], S->atoms[c->cls_off + i])) return false;
     const CssAtom *attrs = D->pool + D->attr_off[n];
-    for (uint32_t i = 0; i < c->attr_n; i++)
-        if (!has_atom(attrs, D->attr_n[n], S->atoms[c->attr_off + i])) return false;
+    if (c->attr_vals) {
+        for (uint32_t i = 0; i < c->attr_n; i++)
+            if (!attr_test(S, D, n, S->atoms[c->attr_off + i], &S->atests[c->atest_off + i]))
+                return false;
+    } else {
+        for (uint32_t i = 0; i < c->attr_n; i++)
+            if (!has_atom(attrs, D->attr_n[n], S->atoms[c->attr_off + i])) return false;
+    }
     if (c->empty && (D->flags[n] & DF_HAS_CHILD)) return false;
     if (c->child_pos) {
         if (c->child_pos == 3) {
@@ -579,39 +685,53 @@ static bool comp_match(const CssStyleSet *S, const CssStyleDoc *D, const CComp *
         if (hit && c->not_has_id && D->id[n] != c->not_id) hit = false;
         for (uint32_t i = 0; hit && i < c->ncls_n; i++)
             if (!has_atom(cls, D->cls_n[n], S->atoms[c->ncls_off + i])) hit = false;
-        for (uint32_t i = 0; hit && i < c->nattr_n; i++)
-            if (!has_atom(attrs, D->attr_n[n], S->atoms[c->nattr_off + i])) hit = false;
+        for (uint32_t i = 0; hit && i < c->nattr_n; i++) {
+            if (c->nattr_vals) {
+                if (!attr_test(S, D, n, S->atoms[c->nattr_off + i], &S->atests[c->natest_off + i]))
+                    hit = false;
+            } else if (!has_atom(attrs, D->attr_n[n], S->atoms[c->nattr_off + i])) hit = false;
+        }
         if (hit) return false;
     }
-    if (c->where >= 0 && !list_match(S, D, c->where, n)) return false;
     if (c->tag && D->tag[n] != c->tag) return false;
+    if (c->where >= 0 && !list_match(S, D, c->where, n)) return false;
+    if (c->has >= 0 && !has_match(S, D, c, n)) return false;
     return true;
 }
 
-/* Right-to-left, greedy (no backtracking), exactly like css_chain_matches. */
+/* Right-to-left with backtracking over descendant / general-sibling
+ * combinators.  `budget` bounds pathological selector/DOM combinations. */
+static bool chain_match_from(const CssStyleSet *S, const CssStyleDoc *D, const CComp *parts,
+                             int i, int cur, int *budget)
+{
+    if (cur < 0 || --*budget < 0) return false;
+    if (!comp_match(S, D, &parts[i], cur)) return false;
+    if (i == 0) return true;
+    switch (parts[i].comb) {
+    case CSS_COMB_CHILD:
+        return chain_match_from(S, D, parts, i - 1, D->parent[cur], budget);
+    case CSS_COMB_ADJACENT:
+        return chain_match_from(S, D, parts, i - 1, D->prev_elem[cur], budget);
+    case CSS_COMB_SIBLING:
+        for (int sib = D->prev_elem[cur]; sib >= 0; sib = D->prev_elem[sib]) {
+            if (chain_match_from(S, D, parts, i - 1, sib, budget)) return true;
+            if (*budget < 0) return false;
+        }
+        return false;
+    default:
+        for (int anc = D->parent[cur]; anc >= 0; anc = D->parent[anc]) {
+            if (chain_match_from(S, D, parts, i - 1, anc, budget)) return true;
+            if (*budget < 0) return false;
+        }
+        return false;
+    }
+}
+
 static bool chain_match(const CssStyleSet *S, const CssStyleDoc *D, const CChain *ch, int node)
 {
     if (ch->never) return false;
-    const CComp *parts = S->comps + ch->first;
-    int count = ch->n;
-    int cur = node;
-    for (int i = count - 1; i >= 0; i--) {
-        if (cur < 0) return false;
-        if (!comp_match(S, D, &parts[i], cur)) return false;
-        if (i == 0) return true;
-        if (parts[i].comb == CSS_COMB_CHILD) {
-            cur = D->parent[cur];
-        } else {
-            cur = D->parent[cur];
-            int steps = 0;
-            while (cur >= 0 && !comp_match(S, D, &parts[i - 1], cur)) {
-                cur = D->parent[cur];
-                if (++steps > 4096) return false;
-            }
-            if (cur < 0) return false;
-        }
-    }
-    return true;
+    int budget = 20000;
+    return chain_match_from(S, D, S->comps + ch->first, ch->n - 1, node, &budget);
 }
 
 static bool list_match(const CssStyleSet *S, const CssStyleDoc *D, int32_t li, int node)
@@ -717,7 +837,8 @@ static bool chain_positional(const CssStyleSet *S, uint32_t ci, uint8_t *memo)
     if (!ch->never) {
         for (uint32_t i = 0; i < ch->n && !pos; i++) {
             const CComp *c = &S->comps[ch->first + i];
-            if (c->child_pos || c->type_pos || c->nth_kind || c->empty) pos = true;
+            if (c->child_pos || c->type_pos || c->nth_kind || c->empty ||
+                c->comb == CSS_COMB_ADJACENT || c->comb == CSS_COMB_SIBLING || c->has >= 0) pos = true;
             else if (c->where >= 0 && list_positional(S, c->where, memo)) pos = true;
         }
     }
@@ -735,16 +856,16 @@ static void rule_branch(Builder *b, const char *branch, void *ud)
 
 /* Legacy ::after branch parsing (layout_pseudo_branch_matches): the branch
  * must end with "::after" (or ":after"); the base before it is compiled. */
-static int32_t after_base_list(Builder *b, const char *branch, size_t blen)
+static int32_t after_base_list(Builder *b, const char *branch, size_t blen, bool before)
 {
     char buf[512];
     if (blen == 0 || blen >= sizeof(buf)) return -1;
     memcpy(buf, branch, blen);
     buf[blen] = '\0';
-    const char *kw = "::after";
+    const char *kw = before ? "::before" : "::after";
     char *pseudo = strstr(buf, kw);
-    size_t kwlen = 7;
-    if (!pseudo) { kw = ":after"; pseudo = strstr(buf, kw); kwlen = 6; }
+    size_t kwlen = strlen(kw);
+    if (!pseudo) { kw = before ? ":before" : ":after"; pseudo = strstr(buf, kw); kwlen = strlen(kw); }
     if (!pseudo) return -1;
     char *tail = pseudo + kwlen;
     while (*tail && isspace((unsigned char)*tail)) tail++;
@@ -826,14 +947,14 @@ CssStyleSet *css_styleset_build(CssStylesheet *const *sheets, int count,
                 const CChain *ch = &b.chains.v[rchains.v[k]];
                 if (ch->never) continue;
                 /* Key from the builder arrays (S not populated yet). */
-                CssStyleSet tmp = { .comps = b.comps.v, .atoms = b.atoms.v, .atom_html = S->atom_html };
+                CssStyleSet tmp = { .comps = b.comps.v, .atoms = b.atoms.v, .atests = b.atests.v, .atom_html = S->atom_html };
                 uint64_t key;
                 if (chain_key(&tmp, ch, &key)) { KeyItem ki = { key, (uint32_t)rchains.v[k] }; VEC_PUSH(keys, ki); }
                 else VEC_PUSH(uni, (uint32_t)rchains.v[k]);
             }
 
             /* ::after branches (naive comma split, as the legacy code did). */
-            if (strstr(sel, ":after")) {
+            if (strstr(sel, ":after") || strstr(sel, ":before")) {
                 const char *bp = sel;
                 while (*bp) {
                     const char *comma = strchr(bp, ',');
@@ -841,9 +962,11 @@ CssStyleSet *css_styleset_build(CssStylesheet *const *sheets, int count,
                     while (blen > 0 && isspace((unsigned char)*bp)) { bp++; blen--; }
                     while (blen > 0 && isspace((unsigned char)bp[blen - 1])) blen--;
                     if (blen > 0) {
-                        int32_t li = after_base_list(&b, bp, blen);
+                        int32_t is_before = 0;
+                        int32_t li = after_base_list(&b, bp, blen, false);
+                        if (li < 0) { li = after_base_list(&b, bp, blen, true); is_before = 1; }
                         if (li >= 0) {
-                            CAfter af = { g, 0 };
+                            CAfter af = { g, 0, is_before };
                             if (blen < 512) {
                                 char specbuf[512];
                                 memcpy(specbuf, bp, blen);
@@ -859,7 +982,7 @@ CssStyleSet *css_styleset_build(CssStylesheet *const *sheets, int count,
                                 CChain *ch = &b.chains.v[ci];
                                 ch->owner = aid;
                                 if (ch->never) continue;
-                                CssStyleSet tmp = { .comps = b.comps.v, .atoms = b.atoms.v, .atom_html = S->atom_html };
+                                CssStyleSet tmp = { .comps = b.comps.v, .atoms = b.atoms.v, .atests = b.atests.v, .atom_html = S->atom_html };
                                 uint64_t key;
                                 if (chain_key(&tmp, ch, &key)) { KeyItem ki = { key, (uint32_t)ci }; VEC_PUSH(akeys, ki); }
                                 else VEC_PUSH(auni, (uint32_t)ci);
@@ -878,6 +1001,7 @@ CssStyleSet *css_styleset_build(CssStylesheet *const *sheets, int count,
     S->chains = b.chains.v; S->nchains = b.chains.n;
     S->lists = b.lists.v; S->nlists = b.lists.n;
     S->atoms = b.atoms.v; S->natoms = b.atoms.n;
+    S->atests = b.atests.v; S->natests = b.atests.n;
     S->afters = afters.v; S->nafters = (int)afters.n;
     /* Revalidation chains: every chain whose result can differ between two
      * elements with equal features and equivalent parents — those testing
@@ -912,6 +1036,8 @@ CssStyleSet *css_styleset_build(CssStylesheet *const *sheets, int count,
 void css_styleset_free(CssStyleSet *S)
 {
     if (!S) return;
+    for (size_t i = 0; i < S->natests; i++) free(S->atests[i].val);
+    free(S->atests);
     free(S->comps); free(S->chains); free(S->lists); free(S->atoms);
     free(S->rules); free(S->afters); free(S->reval);
     bucket_free(&S->rule_buckets);
@@ -1166,7 +1292,7 @@ int css_style_match_after(const CssStyleSet *S, const CssStyleDoc *D, int dom,
         const CAfter *af = &S->afters[t->after_hits.v[i]];
         if (af->rule == last_rule) continue;
         last_rule = af->rule;
-        CssAfterMatch m = { af->rule, af->spec };
+        CssAfterMatch m = { af->rule, af->spec, af->is_before };
         VEC_PUSH(t->after_out, m);
     }
     *out = t->after_out.v;
@@ -1199,6 +1325,10 @@ bool css_style_features_equal(const CssStyleDoc *D, int a, int b)
     if (D->cls_n[a] != D->cls_n[b] || D->attr_n[a] != D->attr_n[b]) return false;
     if (memcmp(D->pool + D->cls_off[a], D->pool + D->cls_off[b], D->cls_n[a] * sizeof(CssAtom))) return false;
     if (memcmp(D->pool + D->attr_off[a], D->pool + D->attr_off[b], D->attr_n[a] * sizeof(CssAtom))) return false;
+    for (uint32_t k = 0; k < D->attr_n[a]; k++) {
+        const char *va = D->pool_val[D->attr_off[a] + k], *vb = D->pool_val[D->attr_off[b] + k];
+        if (va != vb && strcmp(va ? va : "", vb ? vb : "") != 0) return false;
+    }
     return true;
 }
 

@@ -247,6 +247,55 @@ typedef struct LayoutBox {
      * because the parallel pass cannot safely read the parent's computed
      * font-size. */
     double font_size_ratio;
+
+    /* Outer display is inline but the box is laid out as an atomic inline
+     * (inline-flex / inline-grid / inline-table; inline-block uses
+     * CSS_DISPLAY_INLINE_BLOCK).  Cleared by blockification. */
+    unsigned char inline_level;
+    /* Margins specified as `auto`: 1=top 2=right 4=bottom 8=left. */
+    unsigned char margin_auto;
+    /* align-self: 0 = auto (use the container's align-items), otherwise
+     * CssAlignItems + 1. */
+    unsigned char align_self;
+    /* CSS `order` for flex items. */
+    int order;
+    /* min-width / min-height given explicitly (bit 0 / bit 1), so that an
+     * explicit 0 disables the flex automatic minimum size. */
+    unsigned char min_size_set;
+    /* Set by layout_resolve_used_sizes when a percentage height could not
+     * resolve (indefinite containing block): the used height is auto. */
+    unsigned char height_pct_unresolved;
+    /* Per-side border bookkeeping (bits 1=left 2=right 4=top 8=bottom):
+     * a side with border-style none/hidden has a used width of 0, and a
+     * styled side without an explicit width is `medium` (3px). */
+    unsigned char border_styled;
+    unsigned char border_width_set;
+    /* transform: translation part only (px plus fraction of own size). */
+    double translate_x, translate_y;
+    double translate_xpct, translate_ypct;
+    unsigned char has_translate;
+    /* width: min-content (1) / max-content (2) / fit-content (3). */
+    unsigned char width_keyword;
+    /* Percentage insets (top, right, bottom, left): bit set => the
+     * corresponding inset_pct ratio applies against the containing block. */
+    double inset_pct[4];
+    unsigned char inset_pct_bits;
+    /* white-space: 0 normal, 1 nowrap, 2 pre, 3 pre-wrap, 4 pre-line. */
+    unsigned char white_space;
+    unsigned char white_space_set;
+    /* Text node whose collapsible leading space was dropped at a line start. */
+    unsigned char text_lead_skip;
+    /* opacity (when opacity_set) and the effective opacity including all
+     * ancestors, computed after layout for painting. */
+    double opacity;
+    double opacity_eff;
+    unsigned char opacity_set;
+    /* display:-webkit-box (legacy), -webkit-box-orient:vertical, and
+     * -webkit-line-clamp: a vertical legacy box lays out as a block whose
+     * height is capped at line_clamp lines. */
+    unsigned char webkit_box;
+    unsigned char box_orient_vertical;
+    unsigned char line_clamp;
 } LayoutBox;
 
 /* Flat node reference used by both passes. */
@@ -311,7 +360,17 @@ typedef struct LayoutContext {
     /* Optional path for a tab-separated box dump after layout (NULL = none;
      * CSS_DUMP=<path> in the environment overrides). */
     const char *dump_path;
+
+    /* Memoized intrinsic widths (2 per box: min, max; < 0 = unknown). */
+    double *intrinsic_cache;
+
+    /* Per text box: the text with white space collapsed (white-space
+     * normal/nowrap/pre-line), or NULL to use the DOM text as is. */
+    char **text_norm;
 } LayoutContext;
+
+/* The text a text box lays out and paints (white space processed). */
+const char *css_layout_box_text(const LayoutContext *ctx, int idx, const char *raw);
 
 /* Build a flat layout tree from a parsed HTML document. */
 bool css_layout_tree_build(LayoutContext *ctx, HtmlDocument *doc);

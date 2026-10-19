@@ -21,6 +21,14 @@ const uint8_t *text_shaper_atlas_pixels(const TextShaper *shaper);
 int            text_shaper_atlas_width(const TextShaper *shaper);
 int            text_shaper_atlas_height(const TextShaper *shaper);
 
+/* Vertical metrics as fractions of the em (descent positive). */
+bool text_shaper_vmetrics(const TextShaper *shaper, float *ascent, float *descent,
+                          float *line_gap);
+
+/* CSS `line-height: normal` in pixels at `font_size` (ascent + descent +
+ * line gap, each rounded to whole pixels as browsers do), or 0 if unknown. */
+float text_shaper_normal_line_height(const TextShaper *shaper, float font_size);
+
 /* Measure a UTF-8 string in pixels. */
 bool text_shaper_measure(const TextShaper *shaper, const char *utf8,
                          float *out_width, float *out_height);

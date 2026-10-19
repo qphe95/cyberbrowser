@@ -323,6 +323,23 @@ int text_shaper_atlas_height(const TextShaper *s)
     return s ? s->atlas_h : 0;
 }
 
+bool text_shaper_vmetrics(const TextShaper *s, float *ascent, float *descent, float *line_gap)
+{
+    if (!s || s->size_pixels <= 0.0f) return false;
+    if (ascent) *ascent = s->ascent / s->size_pixels;
+    if (descent) *descent = -s->descent / s->size_pixels;
+    if (line_gap) *line_gap = s->line_gap / s->size_pixels;
+    return true;
+}
+
+float text_shaper_normal_line_height(const TextShaper *s, float font_size)
+{
+    float a, d, g;
+    if (!text_shaper_vmetrics(s, &a, &d, &g) || font_size <= 0.0f) return 0.0f;
+    /* Browsers round ascent, descent and line gap to whole pixels. */
+    return roundf(a * font_size) + roundf(d * font_size) + roundf(g * font_size);
+}
+
 bool text_shaper_measure(const TextShaper *s, const char *utf8,
                          float *out_width, float *out_height)
 {

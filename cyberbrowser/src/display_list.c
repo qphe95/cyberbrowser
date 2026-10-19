@@ -513,17 +513,94 @@ static bool document_is_dark_mode(LayoutContext *ctx)
     return false;
 }
 
+/* Clip the commands [from, dl->count) to rect c (x0,y0,x1,y1): quads are
+ * cropped (texture coordinates follow), fully clipped ones collapse. */
+static void dl_clip_range(DisplayList *dl, int from, const float c[4])
+{
+    for (int k = from; k < dl->count; k++) {
+        DisplayListCmd *cmd = &dl->cmds[k];
+        float x0 = cmd->x, y0 = cmd->y, x1 = cmd->x + cmd->w, y1 = cmd->y + cmd->h;
+        if (x0 >= c[0] && y0 >= c[1] && x1 <= c[2] && y1 <= c[3]) continue;
+        float nx0 = x0 > c[0] ? x0 : c[0], ny0 = y0 > c[1] ? y0 : c[1];
+        float nx1 = x1 < c[2] ? x1 : c[2], ny1 = y1 < c[3] ? y1 : c[3];
+        if (nx1 <= nx0 || ny1 <= ny0) {
+            cmd->w = 0.0f; cmd->h = 0.0f; cmd->a = 0.0f;
+            if (cmd->type == DL_BORDER) { cmd->u.border.w = 0.0f; cmd->u.border.h = 0.0f; }
+            continue;
+        }
+        float *u0 = NULL, *v0 = NULL, *u1 = NULL, *v1 = NULL;
+        if (cmd->type == DL_GLYPH) { u0 = &cmd->u.glyph.u0; v0 = &cmd->u.glyph.v0; u1 = &cmd->u.glyph.u1; v1 = &cmd->u.glyph.v1; }
+        else if (cmd->type == DL_IMAGE) { u0 = &cmd->u.image.u0; v0 = &cmd->u.image.v0; u1 = &cmd->u.image.u1; v1 = &cmd->u.image.v1; }
+        else if (cmd->type == DL_BORDER) continue;   /* outlines: keep whole */
+        if (u0 && cmd->w > 0.0f && cmd->h > 0.0f) {
+            float du = *u1 - *u0, dv = *v1 - *v0;
+            float nu0 = *u0 + du * (nx0 - x0) / cmd->w, nu1 = *u0 + du * (nx1 - x0) / cmd->w;
+            float nv0 = *v0 + dv * (ny0 - y0) / cmd->h, nv1 = *v0 + dv * (ny1 - y0) / cmd->h;
+            *u0 = nu0; *u1 = nu1; *v0 = nv0; *v1 = nv1;
+        }
+        cmd->x = nx0; cmd->y = ny0; cmd->w = nx1 - nx0; cmd->h = ny1 - ny0;
+    }
+}
+
+static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (*clip)[4]);
+
 bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
 {
     if (!ctx || !dl) return false;
     display_list_init(dl);
+    /* overflow != visible clips descendants to the padding box. */
+    int n = ctx->tree.count;
+    float (*clip)[4] = (float (*)[4])malloc(((size_t)n + 1) * sizeof(*clip));
+    if (clip) {
+        for (int i = 0; i < n; i++) {
+            int p = ctx->tree.nodes[i].parent_idx;
+            LayoutBox *b = &ctx->boxes[i];
+            float c[4] = { -1e30f, -1e30f, 1e30f, 1e30f };
+            if (p >= 0 && p < i && b->position != CSS_POSITION_FIXED) {
+                memcpy(c, clip[p], sizeof(c));
+                LayoutBox *pb = &ctx->boxes[p];
+                /* overflow on <html>/<body> applies to the viewport. */
+                HtmlNode *pn = ctx->doc ? (HtmlNode *)po_array_payload(&ctx->doc->array,
+                                              ctx->tree.nodes[p].dom_node_idx) : NULL;
+                bool viewport_box = pn && pn->type == HTML_NODE_ELEMENT && pn->tag_name &&
+                    (strcasecmp(pn->tag_name, "html") == 0 || strcasecmp(pn->tag_name, "body") == 0);
+                if (pb->overflow != 0 && pb->display != CSS_DISPLAY_NONE && !viewport_box) {
+                    if (getenv("CYBER_DEBUG_CLIP") && ctx->tree.nodes[i].prev_sibling_idx < 0)
+                        fprintf(stderr, "[CLIP] box %d by parent %d: %.0f,%.0f %.0fx%.0f\n", i, p,
+                                pb->x, pb->y, pb->width, pb->height);
+                    float px0 = (float)(pb->x + pb->border_left), py0 = (float)(pb->y + pb->border_top);
+                    float px1 = (float)(pb->x + pb->width - pb->border_right);
+                    float py1 = (float)(pb->y + pb->height - pb->border_bottom);
+                    if (px0 > c[0]) c[0] = px0;
+                    if (py0 > c[1]) c[1] = py0;
+                    if (px1 < c[2]) c[2] = px1;
+                    if (py1 < c[3]) c[3] = py1;
+                }
+            }
+            memcpy(clip[i], c, sizeof(c));
+        }
+    }
+    bool ok = build_display_list_impl(ctx, dl, clip);
+    free(clip);
+    return ok;
+}
+
+static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (*clip)[4])
+{
     bool dark_mode = document_is_dark_mode(ctx);
+    int pending_box = -1, pending_from = 0;
 
     for (int i = 0; i < ctx->tree.count; i++) {
+        if (pending_box >= 0 && clip) dl_clip_range(dl, pending_from, clip[pending_box]);
+        pending_box = i;
+        pending_from = dl->count;
         LayoutBox *box = &ctx->boxes[i];
         if (!(box->flags & LAYOUT_HAS_LAYOUT)) continue;
         if (box->display == CSS_DISPLAY_NONE) continue;
         if (box->visibility == CSS_VISIBILITY_HIDDEN) continue;
+        /* Effective opacity (product over ancestors) scales every paint. */
+        float op = (float)box->opacity_eff;
+        if (op < 0.004f) continue;
         if (node_has_hidden_class(ctx, i)) continue;
         if (box_or_ancestor_hidden(ctx, i)) continue;
 
@@ -573,6 +650,7 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                     float tb = (float)box->color_b;
                     float ta = (float)box->color_a;
                     if (ta <= 0.0f) ta = 1.0f;
+                    ta *= op;
                     /* In dark mode, default-black text is invisible on dark
                      * backgrounds.  Render it white so labels are readable. */
                     if (dark_mode && tr < 0.1f && tg < 0.1f && tb < 0.1f) {
@@ -589,13 +667,18 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                     TextShaper *font = display_list_get_font(fslot);
                     if (!font) font = g_default_font;
                     int from_cmd = dl->count;
+                    /* The white-space processed text the layout measured. */
+                    const char *run_text = css_layout_box_text(ctx, i, node->text_content);
+                    if (box->text_lead_skip && run_text[0] == ' ') run_text++;
                     if (box->wrap_cont_w > 0.0) {
                         /* Wrapped run: shape across lines using the wrap
                          * geometry recorded by the layout. */
+                        float nlh = text_shaper_normal_line_height(font, (float)fs);
+                        if (!(nlh > 0.5f * fs && nlh < 3.0f * fs)) nlh = (float)(fs * 1.5);
                         float line_adv = box->line_height > 0.0
-                            ? (float)box->line_height : (float)(fs * 1.5);
+                            ? (float)box->line_height : nlh;
                         if (!text_shaper_wrap_shape(font,
-                                                    node->text_content,
+                                                    run_text,
                                                     (float)box->x, (float)box->y,
                                                     (float)box->wrap_cont_x,
                                                     (float)box->wrap_first_w,
@@ -611,12 +694,13 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                     } else {
                         /* CSS strut model: center the em box in the line box;
                          * the shaper adds the em ascent on top of this y. */
-                        double lh = box->line_height > 0.0 ? box->line_height
-                                                           : fs * 1.5;
+                        float nlh = text_shaper_normal_line_height(font, (float)fs);
+                        if (!(nlh > 0.5f * fs && nlh < 3.0f * fs)) nlh = (float)(fs * 1.5);
+                        double lh = box->line_height > 0.0 ? box->line_height : nlh;
                         double half_leading = (lh - fs) * 0.5;
                         if (half_leading < 0.0) half_leading = 0.0;
                         if (!text_shaper_shape_to_display_list_scaled(font,
-                                                           node->text_content,
+                                                           run_text,
                                                            (float)box->x,
                                                            (float)(box->y + half_leading),
                                                            scale,
@@ -670,7 +754,7 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
             if (text_shaper_shape_to_display_list_scaled(mfont, marker,
                     (float)mx, (float)box->y, mscale,
                     (float)box->color_r, (float)box->color_g,
-                    (float)box->color_b, (float)box->color_a, dl)) {
+                    (float)box->color_b, (float)box->color_a * op, dl)) {
                 display_list_stamp_font_slot(dl, from_cmd, mfslot);
             }
         }
@@ -684,7 +768,7 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
             float br_r = (float)(box->border_color_set ? box->border_color_r : box->color_r);
             float br_g = (float)(box->border_color_set ? box->border_color_g : box->color_g);
             float br_b = (float)(box->border_color_set ? box->border_color_b : box->color_b);
-            float br_a = (float)(box->border_color_set ? box->border_color_a : box->color_a);
+            float br_a = (float)(box->border_color_set ? box->border_color_a : box->color_a) * op;
             float bx = (float)box->x, by = (float)box->y;
             float bw = (float)box->width, bh = (float)box->height;
             if (box->border_top > 0.0) {
@@ -722,7 +806,7 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                                        (float)box->background_color_r,
                                        (float)box->background_color_g,
                                        (float)box->background_color_b,
-                                       (float)box->background_color_a)) {
+                                       (float)box->background_color_a * op)) {
                 return false;
             }
         }
@@ -743,7 +827,12 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
          * YouTube-only: the class needles are YouTube skeleton classes, and
          * substring matching would otherwise misfire on classes like
          * MediaWiki's "vector-search-box-show-thumbnail". */
-        bool placeholders_enabled = ctx->base_url && strstr(ctx->base_url, "youtube.") != NULL;
+        /* Retired: the layout engine now renders YouTube's real content
+         * (CYBER_YT_PLACEHOLDERS=1 re-enables the skeleton fill). */
+        static int placeholders_env = -1;
+        if (placeholders_env < 0) placeholders_env = getenv("CYBER_YT_PLACEHOLDERS") ? 1 : 0;
+        bool placeholders_enabled = placeholders_env && ctx->base_url &&
+                                    strstr(ctx->base_url, "youtube.") != NULL;
         if (placeholders_enabled && !box->background_image_url[0] && box->background_color_a <= 0.0f) {
             static const char *thumbnail_needles[] = {
                 "rich-thumbnail", "video-thumbnail", "thumbnail", NULL
@@ -812,12 +901,13 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
                                          (float)box->color_r,
                                          (float)box->color_g,
                                          (float)box->color_b,
-                                         (float)box->color_a)) {
+                                         (float)box->color_a * op)) {
                 return false;
             }
         }
 
     }
+    if (pending_box >= 0 && clip) dl_clip_range(dl, pending_from, clip[pending_box]);
 
     return true;
 }

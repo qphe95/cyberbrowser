@@ -1905,9 +1905,14 @@ GCValue js_element_get_attribute(JSContextHandle ctx, GCValue this_val, int argc
             return JS_NewStringLen(ctx, val, len);
         }
     }
-    // Fall back to a string-valued own data property (e.g. el.id set
-    // directly).  Never run accessors here: a reflecting getter such as
+    // Fall back to a string-valued own data property for `id` only (el.id
+    // set directly).  Other own properties (e.g. Polymer's `is`) are not
+    // attributes.  Never run accessors here: a reflecting getter such as
     // HTMLAnchorElement.prototype.href calls getAttribute() itself.
+    if (strcmp(name, "id") != 0) {
+        JS_FreeCString(ctx, name);
+        return JS_NULL;
+    }
     JSAtom atom = JS_NewAtom(ctx, name);
     JS_FreeCString(ctx, name);
     JSPropertyDescriptor desc = JS_PROPERTY_DESCRIPTOR_INIT;
@@ -1952,7 +1957,7 @@ GCValue js_element_has_attribute(JSContextHandle ctx, GCValue this_val, int argc
     if (!name) return JS_FALSE;
     NodeId n = dom_node_of(this_val);
     bool has = n && dom_attr(n, name) != NULL;
-    if (!has) {
+    if (!has && strcmp(name, "id") == 0) {
         GCValue val = JS_GetPropertyStr(ctx, this_val, name);
         has = !JS_IsUndefined(val) && JS_IsString(val);
     }
