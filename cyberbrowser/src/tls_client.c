@@ -258,6 +258,114 @@ static void tls_init(TlsClient *client) {
     client->connected = false;
 }
 
+/* ============================================================================
+ * HTTPS proxy (HTTP CONNECT tunnel)
+ * ============================================================================
+ * When HTTPS_PROXY / https_proxy is set (corporate networks, sandboxes), the
+ * TCP connection goes to the proxy and a CONNECT request opens a tunnel to
+ * host:port; TLS then runs end to end through it.  NO_PROXY / no_proxy lists
+ * hosts that connect directly ("host", ".suffix", "*.suffix", "*").
+ */
+
+static bool no_proxy_matches(const char *host) {
+    const char *np = getenv("NO_PROXY");
+    if (!np || !np[0]) np = getenv("no_proxy");
+    if (!np || !np[0]) return false;
+    size_t hl = strlen(host);
+    const char *p = np;
+    while (*p) {
+        while (*p == ',' || *p == ' ') p++;
+        const char *e = p;
+        while (*e && *e != ',') e++;
+        size_t n = (size_t)(e - p);
+        while (n && p[n - 1] == ' ') n--;
+        if (n == 1 && p[0] == '*') return true;
+        const char *pat = p;
+        size_t pn = n;
+        if (pn > 1 && pat[0] == '*' && pat[1] == '.') { pat++; pn--; }
+        if (pn) {
+            if (pat[0] == '.') {
+                /* suffix: matches the domain itself and its subdomains */
+                if (hl == pn - 1 && strncasecmp(host, pat + 1, pn - 1) == 0) return true;
+                if (hl >= pn && strncasecmp(host + hl - pn, pat, pn) == 0) return true;
+            } else if (hl == pn && strncasecmp(host, pat, pn) == 0) {
+                return true;
+            } else if (hl > pn && host[hl - pn - 1] == '.' && strncasecmp(host + hl - pn, pat, pn) == 0) {
+                return true;
+            }
+        }
+        p = e;
+    }
+    return false;
+}
+
+/* Proxy host/port from HTTPS_PROXY ("http://[user:pass@]host:port[/]"). */
+static bool https_proxy_for(const char *host, char *phost, size_t phl, char *pport, size_t ppl) {
+    const char *v = getenv("HTTPS_PROXY");
+    if (!v || !v[0]) v = getenv("https_proxy");
+    if (!v || !v[0]) return false;
+    if (no_proxy_matches(host)) return false;
+    const char *p = strstr(v, "://");
+    p = p ? p + 3 : v;
+    const char *at = strchr(p, '@');
+    if (at) p = at + 1;
+    const char *end = p + strcspn(p, "/");
+    const char *colon = NULL;
+    if (*p == '[') {                         /* [ipv6]:port */
+        const char *rb = memchr(p, ']', (size_t)(end - p));
+        if (!rb) return false;
+        snprintf(phost, phl, "%.*s", (int)(rb - p - 1), p + 1);
+        colon = (rb + 1 < end && rb[1] == ':') ? rb + 1 : NULL;
+    } else {
+        colon = memchr(p, ':', (size_t)(end - p));
+        snprintf(phost, phl, "%.*s", (int)((colon ? colon : end) - p), p);
+    }
+    if (colon) snprintf(pport, ppl, "%.*s", (int)(end - colon - 1), colon + 1);
+    else snprintf(pport, ppl, "%s", strncmp(v, "https://", 8) == 0 ? "443" : "80");
+    return phost[0] != 0;
+}
+
+/* Connect `net` to host:port, through the HTTPS proxy when one applies. */
+static int tls_net_connect(mbedtls_net_context *net, const char *host, const char *port,
+                           char *err, size_t errLen) {
+    char phost[256], pport[16];
+    if (!https_proxy_for(host, phost, sizeof(phost), pport, sizeof(pport)))
+        return mbedtls_net_connect(net, host, port, MBEDTLS_NET_PROTO_TCP);
+    LOGI("Connecting to %s:%s through proxy %s:%s", host, port, phost, pport);
+    int ret = mbedtls_net_connect(net, phost, pport, MBEDTLS_NET_PROTO_TCP);
+    if (ret != 0) return ret;
+    char req[600];
+    int n = snprintf(req, sizeof(req),
+                     "CONNECT %s:%s HTTP/1.1\r\nHost: %s:%s\r\nProxy-Connection: keep-alive\r\n\r\n",
+                     host, port, host, port);
+    for (int off = 0; off < n; ) {
+        int w = mbedtls_net_send(net, (const unsigned char *)req + off, (size_t)(n - off));
+        if (w <= 0) { mbedtls_net_free(net); return MBEDTLS_ERR_NET_SEND_FAILED; }
+        off += w;
+    }
+    /* Read the response head byte by byte so no tunnel data is consumed. */
+    char head[2048];
+    size_t hn = 0;
+    while (hn + 1 < sizeof(head)) {
+        unsigned char c;
+        int r = mbedtls_net_recv(net, &c, 1);
+        if (r <= 0) { mbedtls_net_free(net); return MBEDTLS_ERR_NET_RECV_FAILED; }
+        head[hn++] = (char)c;
+        if (hn >= 4 && memcmp(head + hn - 4, "\r\n\r\n", 4) == 0) break;
+    }
+    head[hn] = 0;
+    int status = 0;
+    if (sscanf(head, "HTTP/%*s %d", &status) != 1 || status != 200) {
+        char line[128];
+        snprintf(line, sizeof(line), "%.*s", (int)strcspn(head, "\r\n"), head);
+        LOGW("Proxy refused CONNECT %s:%s: %s", host, port, line);
+        if (err && errLen) snprintf(err, errLen, "Proxy refused CONNECT %s:%s (%s)", host, port, line);
+        mbedtls_net_free(net);
+        return MBEDTLS_ERR_NET_CONNECT_FAILED;
+    }
+    return 0;
+}
+
 bool tls_client_connect(TlsClient *client, const char *host, const char *port,
                         char *err, size_t errLen) {
     if (!client || !host || !port) {
@@ -309,7 +417,7 @@ bool tls_client_connect(TlsClient *client, const char *host, const char *port,
 #ifdef _WIN32
     if (!ca_loaded) {
         /* Load CA certs from Windows certificate store */
-        HCERTSTORE hStore = CertOpenSystemStoreA(NULL, "ROOT");
+        HCERTSTORE hStore = CertOpenSystemStoreA(0, "ROOT");
         if (hStore) {
             int total_certs = 0;
             PCCERT_CONTEXT pCert = NULL;
@@ -339,9 +447,10 @@ bool tls_client_connect(TlsClient *client, const char *host, const char *port,
         LOGW("Could not load CA certs from any path, continuing without verification");
     }
     LOGI("Connecting to %s:%s...", host, port);
-    ret = mbedtls_net_connect(&client->net, host, port, MBEDTLS_NET_PROTO_TCP);
+    ret = tls_net_connect(&client->net, host, port, err, errLen);
     if (ret != 0) {
-        set_err(err, errLen, "TLS connect failed", ret);
+        if (!(err && errLen && strncmp(err, "Proxy refused", 13) == 0))
+            set_err(err, errLen, "TLS connect failed", ret);
         return false;
     }
     LOGI("TCP connected to %s:%s", host, port);

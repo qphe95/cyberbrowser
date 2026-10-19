@@ -494,6 +494,26 @@ void http_cookie_clear(void) {
 }
 
 
+/* Find the value of response header `name` (e.g. "location:") at or after
+ * `from`, within the header block [data, hdr_end).  Header names are
+ * case-insensitive (RFC 9110 5.1); servers such as Wikipedia send them in
+ * lower case.  Returns a pointer to the value (leading blanks skipped) or
+ * NULL. */
+static char *find_response_header(char *data, char *from, const char *hdr_end, const char *name) {
+    size_t nlen = strlen(name);
+    for (char *p = from; p && p < hdr_end; ) {
+        if ((p == data || p[-1] == '\n') && (size_t)(hdr_end - p) >= nlen &&
+            strncasecmp(p, name, nlen) == 0) {
+            p += nlen;
+            while (p < hdr_end && (*p == ' ' || *p == '\t')) p++;
+            return p;
+        }
+        char *nl = memchr(p, '\n', (size_t)(hdr_end - p));
+        p = nl ? nl + 1 : NULL;
+    }
+    return NULL;
+}
+
 static size_t parse_content_length_from_headers(const char *data, size_t data_len) {
     const char *p = data;
     const char *end = data + data_len;
@@ -886,10 +906,8 @@ static bool http_request_with_method_internal(const char *url, const char *metho
     }
     
     /* Extract cookies from response headers and store them with domain/path scope. */
-    char *set_cookie = strstr(outBuffer->data, "Set-Cookie:");
+    char *set_cookie = find_response_header(outBuffer->data, outBuffer->data, header_end, "set-cookie:");
     while (set_cookie) {
-        set_cookie += 11;
-        while (*set_cookie == ' ') set_cookie++;
 
         char *line_end = strchr(set_cookie, '\r');
         if (!line_end) line_end = strchr(set_cookie, '\n');
@@ -903,15 +921,13 @@ static bool http_request_with_method_internal(const char *url, const char *metho
             http_cookie_set_for_request(url, val);
             LOGI("Captured cookie from %s", host);
         }
-        set_cookie = strstr(line_end, "Set-Cookie:");
+        set_cookie = find_response_header(outBuffer->data, line_end, header_end, "set-cookie:");
     }
     
     /* Handle redirects */
     if (status >= 300 && status < 400) {
-        char *location = strstr(outBuffer->data, "Location:");
+        char *location = find_response_header(outBuffer->data, outBuffer->data, header_end, "location:");
         if (location) {
-            location += 9;
-            while (*location == ' ') location++;
             char redirect_url[2048];
             size_t i = 0;
             while (*location && *location != '\r' && *location != '\n' && i < sizeof(redirect_url) - 1) {
@@ -993,11 +1009,9 @@ static bool http_request_with_method_internal(const char *url, const char *metho
     size_t header_len = (size_t)(header_end - outBuffer->data) + delimiter_len;
     size_t body_len = outBuffer->size - header_len;
     
-    char *te_header = strstr(outBuffer->data, "Transfer-Encoding:");
+    char *te_header = find_response_header(outBuffer->data, outBuffer->data, header_end, "transfer-encoding:");
     bool is_chunked = false;
-    if (te_header && te_header < header_end + delimiter_len) {
-        te_header += 18;
-        while (*te_header == ' ') te_header++;
+    if (te_header) {
         if (strncasecmp(te_header, "chunked", 7) == 0) {
             is_chunked = true;
             LOGI("Detected chunked transfer encoding");

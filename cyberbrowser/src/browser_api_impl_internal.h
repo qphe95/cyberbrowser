@@ -527,6 +527,8 @@ extern const size_t js_xhr_proto_funcs_count;
 extern const size_t js_video_proto_funcs_count;
 void timer_api_reset(void);
 int timer_process_due(JSContextHandle ctx);
+/* Run every queued promise job (HTML microtask checkpoint). */
+void timer_microtask_checkpoint(JSContextHandle ctx);
 int timer_has_pending(void);
 void timer_set_idle_deadline(unsigned long long deadline_ms);
 int scheduler_process_tasks(JSContextHandle ctx);

@@ -13,6 +13,12 @@
 #include <sys/time.h>
 #include <pthread.h>
 #include <errno.h>
+#include <limits.h>
+#include <stdint.h>
+#include <sys/stat.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 
 /* ============================================================================
  * Logging
@@ -201,6 +207,51 @@ const char* platform_get_temp_dir(void) {
         tmpdir = "/tmp";
     }
     return tmpdir;
+}
+
+const char* platform_get_exe_dir(void) {
+    static char exe_dir[PATH_MAX];
+    static bool resolved = false;
+    if (resolved) return exe_dir[0] ? exe_dir : NULL;
+    resolved = true;
+
+    char path[PATH_MAX];
+#ifdef __APPLE__
+    uint32_t size = sizeof(path);
+    if (_NSGetExecutablePath(path, &size) != 0) return NULL;
+    char resolved_path[PATH_MAX];
+    if (realpath(path, resolved_path)) strncpy(path, resolved_path, sizeof(path) - 1);
+    path[sizeof(path) - 1] = '\0';
+#else
+    ssize_t n = readlink("/proc/self/exe", path, sizeof(path) - 1);
+    if (n <= 0) return NULL;
+    path[n] = '\0';
+#endif
+    char *slash = strrchr(path, '/');
+    if (!slash) return NULL;
+    slash[1] = '\0';
+    strncpy(exe_dir, path, sizeof(exe_dir) - 1);
+    return exe_dir;
+}
+
+bool platform_make_dirs(const char *path) {
+    char path_build[PATH_MAX];
+    strncpy(path_build, path, sizeof(path_build) - 1);
+    path_build[sizeof(path_build) - 1] = '\0';
+    for (char *p = path_build + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(path_build, 0755);
+            *p = '/';
+        }
+    }
+    mkdir(path_build, 0755);
+    struct stat st;
+    return stat(path_build, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+bool platform_file_replace(const char *src, const char *dst) {
+    return rename(src, dst) == 0;
 }
 
 /* ============================================================================

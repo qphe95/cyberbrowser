@@ -20,6 +20,7 @@ cyberbrowser/build-mingw/
 cyberbrowser/build-mingw2/
 cyberbrowser/build-mingw-asan/
 cyberbrowser/build-msvc/
+cyberbrowser/build-release/
 cyberbrowser/dist/
 
 # Root build artifacts

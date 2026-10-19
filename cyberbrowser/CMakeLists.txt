@@ -200,6 +200,7 @@ endif()
 # =============================================================================
 target_compile_definitions(cyberbrowser_lib PRIVATE
     CONFIG_VERSION=\"2024-02-14\"
+    CONFIG_ALL_UNICODE
     _GNU_SOURCE
 )
 

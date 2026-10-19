@@ -1622,148 +1622,23 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_NewClass(rt, js_service_worker_class_id, &js_service_worker_class_def);
     JS_NewClass(rt, js_location_class_id, &js_location_class_def);
     
-    // ===== ES6+ Polyfills Registration =====
-    // Get Object constructor
-    GCValue object_ctor = JS_GetPropertyStr(ctx, global, "Object");
-    
-    // Object.getPrototypeOf
-    if (!JS_IsException(object_ctor)) {
-        JS_SetPropertyStr(ctx, object_ctor, "getPrototypeOf",
-            JS_NewCFunction(ctx, js_object_get_prototype_of, "getPrototypeOf", 1));
-    }
-    
-    // Object.setPrototypeOf
-    if (!JS_IsException(object_ctor)) {
-        JS_SetPropertyStr(ctx, object_ctor, "setPrototypeOf",
-            JS_NewCFunction(ctx, js_object_set_prototype_of, "setPrototypeOf", 2));
-    }
-    
-    // Object.defineProperty: use native QuickJS implementation. The custom
-    // polyfill caused crashes with large scripts (e.g., some heavy SPA bundles
-    // app shell) due to descriptor/value lifetime issues.
-    // (Native Object.defineProperty is available once base objects are enabled.)
-    
-    // Object.getOwnPropertyDescriptor
-    if (!JS_IsException(object_ctor)) {
-        JS_SetPropertyStr(ctx, object_ctor, "getOwnPropertyDescriptor",
-            JS_NewCFunction(ctx, js_object_get_own_property_descriptor, "getOwnPropertyDescriptor", 2));
-    }
-    
-    // Object.getOwnPropertySymbols
-    if (!JS_IsException(object_ctor)) {
-        JS_SetPropertyStr(ctx, object_ctor, "getOwnPropertySymbols",
-            JS_NewCFunction(ctx, js_object_get_own_property_symbols, "getOwnPropertySymbols", 1));
-    }
-    
-    // Object.assign
-    if (!JS_IsException(object_ctor)) {
-        JS_SetPropertyStr(ctx, object_ctor, "assign",
-            JS_NewCFunction(ctx, js_object_assign, "assign", 2));
+    // ===== ECMAScript built-ins =====
+    // Object, Reflect, Map, Date, Promise.prototype.finally, includes and
+    // Array.from are the engine's own.  (This file used to replace them with
+    // partial C versions: Map coerced keys to strings and was quadratic,
+    // Reflect lacked most methods, Date had no setters, Array.from ignored
+    // iterators, Promise.prototype.finally never ran its callback.)
+
+    /* JS_NewContext does not add Date (only base objects and WeakRef). */
+    {
+        GCValue date_ctor = JS_GetPropertyStr(ctx, global, "Date");
+        if (!JS_IsFunction(ctx, date_ctor)) JS_AddIntrinsicDate(ctx);
     }
 
-    // Create Reflect object
-    GCValue reflect_obj = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, reflect_obj, "construct",
-        JS_NewCFunction(ctx, js_reflect_construct, "construct", 2));
-    JS_SetPropertyStr(ctx, reflect_obj, "apply",
-        JS_NewCFunction(ctx, js_reflect_apply, "apply", 3));
-    JS_SetPropertyStr(ctx, reflect_obj, "has",
-        JS_NewCFunction(ctx, js_reflect_has, "has", 2));
-    JS_SetPropertyStr(ctx, global, "Reflect", reflect_obj);
-    
-    // DOMException setup, isolated in a lambda so failures can exit early
-    // without goto and without affecting the rest of initialization.
-    
-    
     if (!setup_dom_exception(ctx, global)) {
         LOG_ERROR("DOMException setup FAILED - continuing without DOMException");
     }
-    LOG_INFO("Continuing with rest of browser stubs initialization");
-    
-    // Map constructor
-    LOG_INFO("Setting up Map constructor...");
-    GCValue map_proto = JS_NewObject(ctx);
-    JS_SetPropertyFunctionList(ctx, map_proto, js_map_proto_funcs, 
-        js_map_proto_funcs_count);
-    GCValue map_ctor = JS_NewCFunction2(ctx, js_map_constructor, "Map", 0, JS_CFUNC_constructor, 0);
-    JS_SetConstructor(ctx, map_ctor, map_proto);
-    JS_SetClassProto(ctx, js_map_class_id, map_proto);
-    // Set Map constructor on global
-    JS_SetPropertyStr(ctx, global, "Map", map_ctor);
-    LOG_INFO("Map constructor set on global");
-    
-    // Set Map prototype[Symbol.toStringTag]
-    GCValue symbol_ctor = JS_GetPropertyStr(ctx, global, "Symbol");
-    if (!JS_IsException(symbol_ctor) && !JS_IsUndefined(symbol_ctor)) {
-        GCValue toStringTag = JS_GetPropertyStr(ctx, symbol_ctor, "toStringTag");
-        if (!JS_IsException(toStringTag) && !JS_IsUndefined(toStringTag)) {
-            JSAtom tag_atom = JS_ValueToAtom(ctx, toStringTag);
-            if (tag_atom != JS_ATOM_NULL) {
-                JS_SetProperty(ctx, map_proto, tag_atom, JS_NewString(ctx, "Map"));
-            }
-        }
-    }
-    LOG_INFO("Map Symbol.toStringTag done");
-    
-    // Set Map prototype[Symbol.iterator] = Map.prototype.entries
-    // Use JS_Eval to get Symbol.iterator since it's a well-known symbol
-    GCValue iterator_sym_eval = JS_Eval(ctx, "Symbol.iterator", 15, "<symbol>", JS_EVAL_TYPE_GLOBAL);
-    if (!JS_IsException(iterator_sym_eval) && !JS_IsUndefined(iterator_sym_eval)) {
-        JSAtom iterator_atom = JS_ValueToAtom(ctx, iterator_sym_eval);
-        if (iterator_atom != JS_ATOM_NULL) {
-            GCValue entries_fn = JS_GetPropertyStr(ctx, map_proto, "entries");
-            JS_SetProperty(ctx, map_proto, iterator_atom, entries_fn);
-            LOG_INFO("Map Symbol.iterator set via JS_Eval");
-        }
-    } else {
-        LOG_INFO("Could not get Symbol.iterator");
-    }
-    
-    // Promise.prototype.finally
-    LOG_INFO("About to get Promise constructor...");
-    GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
-    LOG_INFO("Got Promise constructor");
-    if (!JS_IsException(promise_ctor)) {
-        LOG_INFO("Promise ctor not exception, getting prototype...");
-        GCValue promise_proto = JS_GetPropertyStr(ctx, promise_ctor, "prototype");
-        LOG_INFO("Got Promise prototype");
-        if (!JS_IsException(promise_proto)) {
-            LOG_INFO("Promise proto not exception, setting finally...");
-            JS_SetPropertyStr(ctx, promise_proto, "finally",
-                JS_NewCFunction(ctx, js_promise_finally, "finally", 1));
-            LOG_INFO("Promise.prototype.finally set");
-        }
-        LOG_INFO("Promise.prototype.finally done");
-    }
-    
-    // String.prototype.includes
-    GCValue string_ctor = JS_GetPropertyStr(ctx, global, "String");
-    if (!JS_IsException(string_ctor)) {
-        GCValue string_proto = JS_GetPropertyStr(ctx, string_ctor, "prototype");
-        if (!JS_IsException(string_proto)) {
-            JS_SetPropertyStr(ctx, string_proto, "includes",
-                JS_NewCFunction(ctx, js_string_includes, "includes", 1));
 
-        }
-
-    }
-    
-    // Array.prototype.includes
-    GCValue array_ctor = JS_GetPropertyStr(ctx, global, "Array");
-    if (!JS_IsException(array_ctor)) {
-        GCValue array_proto = JS_GetPropertyStr(ctx, array_ctor, "prototype");
-        if (!JS_IsException(array_proto)) {
-            JS_SetPropertyStr(ctx, array_proto, "includes",
-                JS_NewCFunction(ctx, js_array_includes, "includes", 1));
-
-        }
-        // Array.from
-        JS_SetPropertyStr(ctx, array_ctor, "from",
-            JS_NewCFunction(ctx, js_array_from, "from", 1));
-
-    }
-    LOG_INFO("Array methods done");
-    
     // ===== Window (global object itself) =====
     LOG_INFO("Setting up Window object...");
     // window IS the global object - this ensures 'this' at global level refers to window
@@ -3226,14 +3101,6 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_NewCFunction(ctx, js_storage_get_length, "get length", 0),
         JS_NULL, JS_PROP_ENUMERABLE);
     
-    // Allocate storage data for localStorage and store handle reference
-    GCHandle local_storage_handle = gc_allocz(sizeof(StorageData), JS_GC_OBJ_TYPE_DATA);
-    if (local_storage_handle != GC_HANDLE_NULL) {
-        StorageData *local_data = (StorageData*)gc_deref(local_storage_handle);
-        local_data->count = 0;
-        // Store handle as a hidden property
-        JS_SetPropertyStr(ctx, localStorage, "__data", JS_NewInt64(ctx, (int64_t)(intptr_t)local_storage_handle));
-    }
     
     // Create sessionStorage (separate storage instance)
     GCValue sessionStorage = JS_NewObject(ctx);
@@ -3246,14 +3113,6 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_NewCFunction(ctx, js_storage_get_length, "get length", 0),
         JS_NULL, JS_PROP_ENUMERABLE);
     
-    // Allocate storage data for sessionStorage and store handle reference
-    GCHandle session_storage_handle = gc_allocz(sizeof(StorageData), JS_GC_OBJ_TYPE_DATA);
-    if (session_storage_handle != GC_HANDLE_NULL) {
-        StorageData *session_data = (StorageData*)gc_deref(session_storage_handle);
-        session_data->count = 0;
-        // Store handle as a hidden property
-        JS_SetPropertyStr(ctx, sessionStorage, "__data", JS_NewInt64(ctx, (int64_t)(intptr_t)session_storage_handle));
-    }
     
     JS_SetPropertyStr(ctx, window, "localStorage", localStorage);
     JS_SetPropertyStr(ctx, window, "sessionStorage", sessionStorage);
@@ -3822,61 +3681,11 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_Eval(ctx, upgrade_js, strlen(upgrade_js), "<ce_upgrade>", JS_EVAL_TYPE_GLOBAL);
     }
 
-    // Patch the global Error constructor during custom-element upgrades so we can
-    // capture the original thrown error before the Polymer ES5 adapter recursively
-    // wraps it as "Constructing <tag>: ...".  Also cap message length to prevent
-    // the recursive wrapping from growing until QuickJS aborts, and recognise the
-    // budget-abort sentinel string.
-    {
-        const char *error_patch_js =
-            "(function(){"
-            "  var orig = window.Error;"
-            "  if (!orig) return;"
-            "  function SafeError() {"
-            "    var args = Array.prototype.slice.call(arguments);"
-            "    var msg = args[0];"
-            "    if (typeof msg === 'string') {"
-            "      if (msg.indexOf('__CYBER_CE_BUDGET__') >= 0) {"
-            "        try { window.__cyber_ce_budget_hit = true; } catch(e) {}"
-            "      }"
-            "      if (msg.length > 2048) {"
-            "        args[0] = msg.slice(0, 2048) + '...[truncated]';"
-            "      }"
-            "    }"
-            "    var inCtor = false;"
-            "    try { inCtor = true; } catch(e) {}"
-            "    if (inCtor && typeof msg === 'string' &&"
-            "        msg.indexOf('__CYBER_CE_BUDGET__') < 0 &&"
-            "        msg.indexOf('Constructing ') !== 0 &&"
-            "        (!window.__cyber_first_real_error || window.__cyber_first_real_error === null)) {"
-            "      try {"
-            "        var err = new orig(msg);"
-            "        window.__cyber_first_real_error = { msg: msg, stack: err && err.stack ? String(err.stack) : '' };"
-            "      } catch(e) {}"
-            "    }"
-            "    if (typeof msg === 'string' && msg.indexOf('__CYBER_CE_BUDGET__') < 0) {"
-            "      try {"
-            "        var err2 = new orig(msg);"
-            "        var arr = window.__cyber_all_errors || (window.__cyber_all_errors = []);"
-            "        if (arr.length < 12) arr.push({ msg: msg.slice(0, 200), stack: err2 && err2.stack ? String(err2.stack).split('\\n').slice(0, 6).join(' | ') : '' });"
-            "      } catch(e) {}"
-            "    }"
-            "    return orig.apply(this, args);"
-            "  }"
-            "  SafeError.prototype = orig.prototype;"
-            "  SafeError.name = orig.name;"
-            "  try {"
-            "    Object.defineProperty(SafeError, 'length', { value: orig.length, writable: false, configurable: true });"
-            "  } catch(e) {}"
-            "  try {"
-            "    Object.defineProperty(window, 'Error', { value: SafeError, configurable: true, writable: true });"
-            "  } catch(e) { window.Error = SafeError; }"
-            "  try {"
-            "    Object.defineProperty(globalThis, 'Error', { value: SafeError, configurable: true, writable: true });"
-            "  } catch(e) { try { globalThis.Error = SafeError; } catch(e2) {} }"
-            "})();";
-        JS_Eval(ctx, error_patch_js, strlen(error_patch_js), "<error_patch>", JS_EVAL_TYPE_GLOBAL);
-    }
+    /* The global Error constructor is left untouched: replacing it broke
+     * subclassing (class X extends Error), Error.isError and
+     * captureStackTrace.  Upgrade aborts use the string sentinel thrown by
+     * js_html_element_constructor instead. */
+
 
     // CustomElementRegistry constructor (for completeness)
     GCValue ce_registry_ctor = JS_NewCFunction2(ctx, js_dummy_function, "CustomElementRegistry",
@@ -4193,19 +4002,6 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     GCValue from_rect = JS_NewCFunction(ctx, js_dom_rect_from_rect, "fromRect", 1);
     JS_SetPropertyStr(ctx, dom_rect_ctor, "fromRect", from_rect);
     JS_SetPropertyStr(ctx, global, "DOMRect", dom_rect_ctor);
-
-    // ===== Date API =====
-    GCValue date_proto = JS_NewObject(ctx);
-    JS_SetPropertyFunctionList(ctx, date_proto, js_date_proto_funcs,
-        js_date_proto_funcs_count);
-    JS_SetClassProto(ctx, js_date_class_id, date_proto);
-    GCValue date_ctor = JS_NewCFunction2(ctx, js_date_constructor, "Date",
-        7, JS_CFUNC_constructor, 0);
-    JS_SetConstructor(ctx, date_ctor, date_proto);
-    // Add static methods
-    JS_SetPropertyFunctionList(ctx, date_ctor, js_date_static_funcs,
-        js_date_static_funcs_count);
-    JS_SetPropertyStr(ctx, global, "Date", date_ctor);
 
     // ===== MediaSource API =====
     // SourceBuffer class (needed by MediaSource)

@@ -58,22 +58,18 @@ static StorageData* get_storage_data(JSContextHandle ctx, GCValue obj) {
 
 // Helper to find item index by key in storage
 int storage_find_item(StorageData *storage, const char *key) {
-    for (int i = 0; i < storage->count && i < STORAGE_MAX_ITEMS; i++) {
-        if (storage->items[i].used && strcmp(storage->items[i].key, key) == 0) {
+    for (int i = 0; i < storage->count; i++) {
+        if (strcmp(storage->items[i].key, key) == 0) {
             return i;
         }
     }
     return -1;
 }
 
-// Helper to find first empty slot in storage
-int storage_find_empty_slot(StorageData *storage) {
-    for (int i = 0; i < STORAGE_MAX_ITEMS; i++) {
-        if (!storage->items[i].used) {
-            return i;
-        }
-    }
-    return -1;
+static char *storage_dup(const char *s, size_t len) {
+    char *d = malloc(len + 1);
+    if (d) { memcpy(d, s, len); d[len] = '\0'; }
+    return d;
 }
 
 // Storage.getItem(key)
@@ -81,65 +77,59 @@ GCValue js_storage_get_item(JSContextHandle ctx, GCValue this_val, int argc, GCV
     if (argc < 1) return JS_NULL;
     
     const char *key = JS_ToCString(ctx, argv[0]);
-    if (!key) return JS_NULL;
+    if (!key) return JS_EXCEPTION;
     
     StorageData *storage = get_storage_data(ctx, this_val);
     if (!storage) return JS_NULL;
     
     int idx = storage_find_item(storage, key);
     if (idx >= 0) {
-        return JS_NewString(ctx, storage->items[idx].value);
+        return JS_NewStringLen(ctx, storage->items[idx].value, storage->items[idx].value_len);
     }
     return JS_NULL;
 }
 
 // Storage.setItem(key, value)
 GCValue js_storage_set_item(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    if (argc < 2) return JS_UNDEFINED;
+    if (argc < 2)
+        return JS_ThrowTypeError(ctx, "Failed to execute 'setItem' on 'Storage': 2 arguments required");
     
-    const char *key = JS_ToCString(ctx, argv[0]);
-    const char *value = JS_ToCString(ctx, argv[1]);
-    if (!key || !value) return JS_UNDEFINED;
-    
-    // Check key length
-    size_t key_len = strlen(key);
-    if (key_len >= STORAGE_MAX_KEY_LEN) {
-        platform_log(LOG_LEVEL_ERROR, "Storage", "FATAL: Storage key length %zu exceeds maximum %d. Aborting.", key_len, STORAGE_MAX_KEY_LEN - 1);
-        abort();
-    }
-    
-    // Check value length
-    size_t value_len = strlen(value);
-    if (value_len >= STORAGE_MAX_VALUE_LEN) {
-        platform_log(LOG_LEVEL_ERROR, "Storage", "FATAL: Storage value length %zu exceeds maximum %d. Aborting.", value_len, STORAGE_MAX_VALUE_LEN - 1);
-        abort();
-    }
+    size_t key_len = 0, value_len = 0;
+    const char *key = JS_ToCStringLen(ctx, &key_len, argv[0]);
+    if (!key) return JS_EXCEPTION;
+    const char *value = JS_ToCStringLen(ctx, &value_len, argv[1]);
+    if (!value) return JS_EXCEPTION;
     
     StorageData *storage = get_storage_data(ctx, this_val);
     if (!storage) return JS_UNDEFINED;
     
-    // Check if key already exists
     int idx = storage_find_item(storage, key);
-    if (idx >= 0) {
-        // Update existing
-        strncpy(storage->items[idx].value, value, STORAGE_MAX_VALUE_LEN - 1);
-        storage->items[idx].value[STORAGE_MAX_VALUE_LEN - 1] = '\0';
-    } else {
-        // Find empty slot
-        idx = storage_find_empty_slot(storage);
-        if (idx < 0) {
-            // Storage full - abort the program
-            platform_log(LOG_LEVEL_ERROR, "Storage", "FATAL: Storage limit of %d items exceeded. Aborting.", STORAGE_MAX_ITEMS);
-            abort();
-        }
-        // Add new item
-        strncpy(storage->items[idx].key, key, STORAGE_MAX_KEY_LEN - 1);
-        storage->items[idx].key[STORAGE_MAX_KEY_LEN - 1] = '\0';
-        strncpy(storage->items[idx].value, value, STORAGE_MAX_VALUE_LEN - 1);
-        storage->items[idx].value[STORAGE_MAX_VALUE_LEN - 1] = '\0';
-        storage->items[idx].used = 1;
-        storage->count++;
+    size_t old = idx >= 0 ? storage->items[idx].key_len + storage->items[idx].value_len : 0;
+    if (storage->bytes - old + key_len + value_len > STORAGE_QUOTA_BYTES) {
+        return throw_dom_exception(ctx, "QuotaExceededError",
+            "Failed to execute 'setItem' on 'Storage': Setting the value exceeded the quota.");
     }
+    char *v = storage_dup(value, value_len);
+    if (!v) return JS_ThrowOutOfMemory(ctx);
+    if (idx >= 0) {
+        free(storage->items[idx].value);
+        storage->items[idx].value = v;
+        storage->items[idx].value_len = value_len;
+    } else {
+        char *k = storage_dup(key, key_len);
+        if (!k) { free(v); return JS_ThrowOutOfMemory(ctx); }
+        if (storage->count == storage->cap) {
+            int ncap = storage->cap ? storage->cap * 2 : 16;
+            StorageItem *ni = realloc(storage->items, (size_t)ncap * sizeof(StorageItem));
+            if (!ni) { free(k); free(v); return JS_ThrowOutOfMemory(ctx); }
+            storage->items = ni;
+            storage->cap = ncap;
+        }
+        StorageItem *it = &storage->items[storage->count++];
+        it->key = k; it->key_len = key_len;
+        it->value = v; it->value_len = value_len;
+    }
+    storage->bytes = storage->bytes - old + key_len + value_len;
     
     return JS_UNDEFINED;
 }
@@ -149,14 +139,18 @@ GCValue js_storage_remove_item(JSContextHandle ctx, GCValue this_val, int argc, 
     if (argc < 1) return JS_UNDEFINED;
     
     const char *key = JS_ToCString(ctx, argv[0]);
-    if (!key) return JS_UNDEFINED;
+    if (!key) return JS_EXCEPTION;
     
     StorageData *storage = get_storage_data(ctx, this_val);
     if (!storage) return JS_UNDEFINED;
     
     int idx = storage_find_item(storage, key);
     if (idx >= 0) {
-        storage->items[idx].used = 0;
+        StorageItem *it = &storage->items[idx];
+        storage->bytes -= it->key_len + it->value_len;
+        free(it->key);
+        free(it->value);
+        memmove(it, it + 1, (size_t)(storage->count - idx - 1) * sizeof(StorageItem));
         storage->count--;
     }
     
@@ -170,10 +164,12 @@ GCValue js_storage_clear(JSContextHandle ctx, GCValue this_val, int argc, GCValu
     StorageData *storage = get_storage_data(ctx, this_val);
     if (!storage) return JS_UNDEFINED;
     
-    for (int i = 0; i < STORAGE_MAX_ITEMS; i++) {
-        storage->items[i].used = 0;
+    for (int i = 0; i < storage->count; i++) {
+        free(storage->items[i].key);
+        free(storage->items[i].value);
     }
     storage->count = 0;
+    storage->bytes = 0;
     
     return JS_UNDEFINED;
 }
@@ -182,26 +178,14 @@ GCValue js_storage_clear(JSContextHandle ctx, GCValue this_val, int argc, GCValu
 GCValue js_storage_key(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1) return JS_NULL;
     
-    int index;
-    if (JS_IsNumber(argv[0])) {
-        JS_ToInt32(ctx, &index, argv[0]);
-    } else {
-        return JS_NULL;
-    }
+    uint32_t index;
+    if (JS_ToUint32(ctx, &index, argv[0])) return JS_EXCEPTION;
     
     StorageData *storage = get_storage_data(ctx, this_val);
     if (!storage) return JS_NULL;
     
-    // Find the nth used slot
-    int current = 0;
-    for (int i = 0; i < STORAGE_MAX_ITEMS; i++) {
-        if (storage->items[i].used) {
-            if (current == index) {
-                return JS_NewString(ctx, storage->items[i].key);
-            }
-            current++;
-        }
-    }
+    if (index < (uint32_t)storage->count)
+        return JS_NewStringLen(ctx, storage->items[index].key, storage->items[index].key_len);
     return JS_NULL;
 }
 

@@ -202,6 +202,52 @@ const char* platform_get_temp_dir(void) {
     return temp_path;
 }
 
+const char* platform_get_exe_dir(void) {
+    static char exe_dir[MAX_PATH * 3];
+    static bool resolved = false;
+    if (resolved) return exe_dir[0] ? exe_dir : NULL;
+    resolved = true;
+
+    wchar_t wpath[MAX_PATH];
+    DWORD len = GetModuleFileNameW(NULL, wpath, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) return NULL;
+    /* Strip the file name, keeping the trailing separator. */
+    while (len > 0 && wpath[len - 1] != L'\\' && wpath[len - 1] != L'/') len--;
+    wpath[len] = L'\0';
+    if (WideCharToMultiByte(CP_UTF8, 0, wpath, -1, exe_dir, sizeof(exe_dir), NULL, NULL) == 0) {
+        exe_dir[0] = '\0';
+        return NULL;
+    }
+    return exe_dir;
+}
+
+bool platform_make_dirs(const char *path) {
+    wchar_t wpath[1024];
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, 1024) == 0) return false;
+    /* Skip a drive prefix ("C:\") or UNC root so we don't try to create it. */
+    wchar_t *p = wpath;
+    if (p[0] && p[1] == L':') p += 2;
+    while (*p == L'\\' || *p == L'/') p++;
+    for (; *p; p++) {
+        if (*p == L'\\' || *p == L'/') {
+            wchar_t sep = *p;
+            *p = L'\0';
+            CreateDirectoryW(wpath, NULL);
+            *p = sep;
+        }
+    }
+    CreateDirectoryW(wpath, NULL);
+    DWORD attrs = GetFileAttributesW(wpath);
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+bool platform_file_replace(const char *src, const char *dst) {
+    wchar_t wsrc[1024], wdst[1024];
+    if (MultiByteToWideChar(CP_UTF8, 0, src, -1, wsrc, 1024) == 0) return false;
+    if (MultiByteToWideChar(CP_UTF8, 0, dst, -1, wdst, 1024) == 0) return false;
+    return MoveFileExW(wsrc, wdst, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+}
+
 /* ============================================================================
  * Asset Loading
  * ============================================================================ */

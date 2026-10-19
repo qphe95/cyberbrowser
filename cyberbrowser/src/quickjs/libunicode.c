@@ -385,6 +385,18 @@ static __maybe_unused void cr_dump(CharRange *cr)
         printf("%d: 0x%04x\n", i, cr->points[i]);
 }
 
+/* libc-backed DynBufReallocFunc for short-lived raw buffers (quickjs.c may
+ * not call malloc/realloc/free directly).  size == 0 frees. */
+void *unicode_libc_realloc(void *opaque, void *ptr, size_t size)
+{
+    (void)opaque;
+    if (size == 0) {
+        free(ptr);
+        return NULL;
+    }
+    return realloc(ptr, size);
+}
+
 static void *cr_default_realloc(void *opaque, void *ptr, size_t size)
 {
     return realloc(ptr, size);

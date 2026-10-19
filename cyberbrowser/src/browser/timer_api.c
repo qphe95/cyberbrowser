@@ -457,6 +457,9 @@ void execute_timer(JSContextHandle ctx, int id) {
             }
         }
         (void)result; // Result is ignored for timer callbacks
+        /* Microtask checkpoint after each task (HTML event loop): promise
+         * reactions queued by this callback run before the next timer. */
+        timer_microtask_checkpoint(ctx);
     }
     // For one-shot timers, unregister roots after execution (they won't be accessed again)
     // For intervals, keep roots registered as they'll be called again
@@ -470,7 +473,16 @@ void execute_timer(JSContextHandle ctx, int id) {
 
 // Process all due timers - called from interrupt handler
 // Returns 1 if any timers were processed
+void timer_microtask_checkpoint(JSContextHandle ctx) {
+    JSRuntimeHandle rt = JS_GetRuntime(ctx);
+    JSContextHandle pctx = GC_HANDLE_NULL;
+    for (int guard = 0; guard < 100000 && JS_ExecutePendingJob(rt, &pctx) > 0; guard++) {}
+}
+
 int timer_process_due(JSContextHandle ctx) {
+    /* Microtasks queued before this turn (by the scripts that just ran)
+     * come before any timer. */
+    timer_microtask_checkpoint(ctx);
     unsigned long long now = platform_get_time_ms();
     int processed = 0;
     

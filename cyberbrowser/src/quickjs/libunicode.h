@@ -97,6 +97,7 @@ typedef enum {
     UNICODE_NFKD,
 } UnicodeNormalizationEnum;
 
+void *unicode_libc_realloc(void *opaque, void *ptr, size_t size);
 int unicode_normalize(uint32_t **pdst, const uint32_t *src, int src_len,
                       UnicodeNormalizationEnum n_type,
                       void *opaque, void *(*realloc_func)(void *opaque, void *ptr, size_t size));

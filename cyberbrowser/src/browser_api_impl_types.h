@@ -405,19 +405,22 @@ typedef struct {
  * Storage API data structures
  * ============================================================================ */
 
-#define STORAGE_MAX_ITEMS 1024
-#define STORAGE_MAX_KEY_LEN 256
-#define STORAGE_MAX_VALUE_LEN 8192
+/* Web Storage quota per store, counted like Chromium: 5M UTF-16 code
+ * units of keys + values (we count UTF-8 bytes, which is within 2x). */
+#define STORAGE_QUOTA_BYTES (10u * 1024u * 1024u)
 
 typedef struct {
-    char key[STORAGE_MAX_KEY_LEN];
-    char value[STORAGE_MAX_VALUE_LEN];
-    int used;  // 1 if slot is used, 0 if empty
+    char *key;          /* malloc'd, NUL-terminated */
+    char *value;        /* malloc'd, may contain NULs; length in value_len */
+    size_t key_len;
+    size_t value_len;
 } StorageItem;
 
 typedef struct {
-    StorageItem items[STORAGE_MAX_ITEMS];
-    int count;  // Number of active items
+    StorageItem *items; /* insertion order */
+    int count;
+    int cap;
+    size_t bytes;       /* sum of key_len + value_len */
 } StorageData;
 
 /* ============================================================================

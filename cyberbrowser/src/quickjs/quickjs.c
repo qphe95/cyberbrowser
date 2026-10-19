@@ -2391,6 +2391,10 @@ JSContextHandle JS_NewContext(JSRuntimeHandle rt)
         QJS_LOGE("JS_AddIntrinsicWeakRef failed!");
         return GC_HANDLE_NULL;
     }
+    if (JS_AddIntrinsicDate(ctx)) {
+        QJS_LOGE("JS_AddIntrinsicDate failed!");
+        return GC_HANDLE_NULL;
+    }
 
     return ctx;
 }
@@ -6174,6 +6178,7 @@ static GCValue JS_NewObjectFromShape(JSContextHandle ctx, JSShapeHandle sh, JSCl
     JSRuntimeHandle rt = GC_HANDLE_NULL;
     GCValue ret = GC_UNDEFINED;
     void *p_ptr;
+    BOOL array_needs_length = FALSE;
 
     QJS_LOGD("JS_NewObjectFromShape: ctx=%u sh=%u class_id=%d", SAFE_HANDLE(ctx), SAFE_HANDLE(sh), class_id);
     /* Check if sh is valid */
@@ -6255,10 +6260,16 @@ static GCValue JS_NewObjectFromShape(JSContextHandle ctx, JSShapeHandle sh, JSCl
             SAFE_SET(p, JSObjectHandle, u.array.count, 0);
             SAFE_SET(p, JSObjectHandle, u.array.u1.size, 0);
             if (!props) {
-                /* The length property is always the first one in the array shape.
-                 * Note: sh may be a duped shape (from js_dup_shape), but it still
-                 * has the same property layout with length at index 0. */
-                js_prop_array_set_value(p_prop, 0, JS_NewInt32(ctx, 0));
+                /* The length property is the first one in the array shape.
+                 * An array made from another prototype's shape (subclasses,
+                 * Reflect.construct, `new Array()` through
+                 * js_create_from_ctor) starts with no properties: give it its
+                 * length below, as upstream QuickJS does. */
+                if (SAFE_GET_OR(sh, JSShapeHandle, prop_count, 0) > 0 &&
+                    get_shape_prop(sh)[0].atom == JS_ATOM_length)
+                    js_prop_array_set_value(p_prop, 0, JS_NewInt32(ctx, 0));
+                else
+                    array_needs_length = TRUE;
             }
         }
         break;
@@ -6315,6 +6326,12 @@ static GCValue JS_NewObjectFromShape(JSContextHandle ctx, JSShapeHandle sh, JSCl
     if (props) {
         for(i = 0; i < SAFE_GET_OR(sh, JSShapeHandle, prop_count, 0); i++)
             GC_SET(SAFE_AT(p_prop, JSPropertyArrayHandle, i), props[i]);
+    }
+    if (array_needs_length) {
+        pr = add_property(ctx, p, JS_ATOM_length, JS_PROP_WRITABLE | JS_PROP_LENGTH);
+        if (!pr)
+            return JS_ThrowOutOfMemory(ctx);
+        gc_set_heap_value(&pr->u.value, JS_NewInt32(ctx, 0));
     }
     p_ptr = (void*)(uintptr_t)(uint32_t)SAFE_HANDLE(p);  /* Just for printf, never dereferenced */
     ret = GC_MKHANDLE(JS_TAG_OBJECT, SAFE_HANDLE(p));
@@ -14360,7 +14377,10 @@ static __exception int __JS_ToFloat64Free(JSContextHandle ctx, double *pres,
 
 static inline int JS_ToFloat64Free(JSContextHandle ctx, double *pres, GCValue val)
 {
-    int tag;
+    /* Unsigned, as upstream: the pointer tags are negative and must not pass
+     * the `<= JS_TAG_NULL` test below (they did, and strings and objects
+     * converted to their GC handle number: Math.abs("x") was 4364). */
+    uint32_t tag;
 
     tag = JS_VALUE_GET_TAG(val);
     if (tag <= JS_TAG_NULL) {
@@ -19268,13 +19288,19 @@ static GCValue js_closure(JSContextHandle ctx, GCValue bfunc,
         JS_DefinePropertyValue(ctx, func_obj, JS_ATOM_prototype, proto,
                                JS_PROP_WRITABLE);
     } else if (SAFE_GET_OR(b, JSFunctionBytecodeHandle, has_prototype, 0)) {
-        /* Create prototype eagerly instead of lazily to avoid AUTOINIT/GC issues */
+        /* Create prototype eagerly instead of lazily to avoid AUTOINIT/GC
+         * issues.  As js_instantiate_prototype() would: the prototype gets a
+         * `constructor` back-reference (it had none, so new F().constructor
+         * was Object), and `prototype` is writable but not configurable. */
         GCValue proto = JS_NewObject(ctx);
         if (JS_IsException(proto))
             goto fail;
         JS_SetConstructorBit(ctx, func_obj, TRUE);
-        if (JS_DefinePropertyValue(ctx, func_obj, JS_ATOM_prototype, proto,
+        if (JS_DefinePropertyValue(ctx, proto, JS_ATOM_constructor, func_obj,
                                    JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE) < 0)
+            goto fail;
+        if (JS_DefinePropertyValue(ctx, func_obj, JS_ATOM_prototype, proto,
+                                   JS_PROP_WRITABLE) < 0)
             goto fail;
     }
     return func_obj;
@@ -28231,7 +28257,6 @@ static __exception int emit_class_init_start(JSParseState *s,
     if (!fields_init_fd)
         return -1;
     GC_SET(cf->fields_init_fd_handle, fields_init_fd->self_handle);
-        return -1;
 
     js_parse_set_cur_func(s, (JSFunctionDefHandle)(cf->fields_init_fd_handle));
 
@@ -41588,7 +41613,11 @@ static void js_parse_init(JSContextHandle ctx, JSParseState *s,
     s->get_line_col_cache.col_num = 0;
     
     /* Enable lazy function parsing by default, unless JS_EVAL_FLAG_NO_LAZY is set */
-    s->enable_lazy_parsing = (eval_flags & JS_EVAL_FLAG_NO_LAZY) == 0;
+    {
+        static int no_lazy_env = -1;
+        if (no_lazy_env < 0) no_lazy_env = getenv("CYBER_NO_LAZY") != NULL;
+        s->enable_lazy_parsing = (eval_flags & JS_EVAL_FLAG_NO_LAZY) == 0 && !no_lazy_env;
+    }
 }
 
 static GCValue JS_EvalFunctionInternal(JSContextHandle ctx, GCValue fun_obj,
@@ -51055,7 +51084,9 @@ static int JS_ToUTF32String(JSContextHandle ctx, uint32_t **pbuf, GCValue val1)
     p = JS_VALUE_GET_STRING(val);
     len = SAFE_GET_OR(p, JSStringHandle, len, 0);
     /* UTF32 buffer length is len minus the number of correct surrogates pairs */
-    buf = ((uint32_t *)gc_deref(gc_alloc(sizeof(buf[0]) * max_int(len, 1), JS_GC_OBJ_TYPE_DATA)));
+    /* libc buffer: a short-lived temporary (unicode_normalize input),
+     * released by the caller. */
+    buf = (uint32_t *)unicode_libc_realloc(NULL, NULL, sizeof(buf[0]) * max_int(len, 1));
     if (!buf) {
         
         goto fail;
@@ -51096,9 +51127,12 @@ static int js_string_normalize1(JSContextHandle ctx, uint32_t **pout_buf,
     buf_len = JS_ToUTF32String(ctx, &buf, val);
     if (buf_len < 0)
         return -1;
+    /* libc allocator: unicode_normalize grows a DynBuf of raw pointers, which
+     * the handle-based gc_realloc cannot back.  The caller releases out_buf
+     * with unicode_libc_realloc(NULL, out_buf, 0). */
     out_len = unicode_normalize(&out_buf, buf, buf_len, n_type,
-                                NULL, (DynBufReallocFunc *)gc_realloc);  /* opaque not used */
-    /* GC frees automatically */;
+                                NULL, unicode_libc_realloc);
+    unicode_libc_realloc(NULL, buf, 0);
     if (out_len < 0)
         return -1;
     *pout_buf = out_buf;
@@ -51152,7 +51186,7 @@ static GCValue js_string_normalize(JSContextHandle ctx, GCValue this_val,
     if (out_len < 0)
         return JS_EXCEPTION;
     val = JS_NewUTF32String(ctx, out_buf, out_len);
-    /* GC frees automatically */;
+    unicode_libc_realloc(NULL, out_buf, 0);
     return val;
 }
 
@@ -51202,12 +51236,12 @@ static GCValue js_string_localeCompare(JSContextHandle ctx, GCValue this_val,
     b_len = js_string_normalize1(ctx, &b_buf, b, UNICODE_NFC);
     
     if (b_len < 0) {
-        /* GC frees automatically */;
+        unicode_libc_realloc(NULL, a_buf, 0);
         return JS_EXCEPTION;
     }
     cmp = js_UTF32_compare(a_buf, a_len, b_buf, b_len);
-    /* GC frees automatically */;
-    /* GC frees automatically */;
+    unicode_libc_realloc(NULL, a_buf, 0);
+    unicode_libc_realloc(NULL, b_buf, 0);
     return JS_NewInt32(ctx, cmp);
 }
 #else /* CONFIG_ALL_UNICODE */
@@ -61201,6 +61235,11 @@ int JS_AddIntrinsicBaseObjects(JSContextHandle ctx)
         return -1;
     
     if (JS_SetObjectData(ctx, ctx_class_proto[JS_CLASS_STRING], JS_AtomToString(ctx, JS_ATOM_empty_string)))
+        return -1;
+    /* normalize / localeCompare live in a separate list upstream
+     * (JS_AddIntrinsicStringNormalize); install them with String itself so
+     * every context that has String has them. */
+    if (JS_AddIntrinsicStringNormalize(ctx))
         return -1;
 
     GC_SET(ctx_class_proto[JS_CLASS_STRING_ITERATOR], JS_NewObjectProtoList(ctx, ctx_class_proto[JS_CLASS_ITERATOR], 

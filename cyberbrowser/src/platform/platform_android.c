@@ -8,6 +8,7 @@
 #include "platform.h"
 
 #include <android/log.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -199,6 +200,32 @@ bool platform_file_exists(const char *path) {
 
 const char* platform_get_temp_dir(void) {
     return "/data/local/tmp";
+}
+
+/* An Android app has no executable directory of its own (it runs inside
+ * app_process), so callers fall back to in-memory behaviour. */
+const char* platform_get_exe_dir(void) {
+    return NULL;
+}
+
+bool platform_make_dirs(const char *path) {
+    char path_build[512];
+    strncpy(path_build, path, sizeof(path_build) - 1);
+    path_build[sizeof(path_build) - 1] = '\0';
+    for (char *p = path_build + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(path_build, 0755);
+            *p = '/';
+        }
+    }
+    mkdir(path_build, 0755);
+    struct stat st;
+    return stat(path_build, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+bool platform_file_replace(const char *src, const char *dst) {
+    return rename(src, dst) == 0;
 }
 
 /* ============================================================================

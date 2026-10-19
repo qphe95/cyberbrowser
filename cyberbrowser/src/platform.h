@@ -149,6 +149,16 @@ bool platform_file_exists(const char *path);
 /* Get temporary directory path (null-terminated, includes trailing separator) */
 const char* platform_get_temp_dir(void);
 
+/* Directory containing the running executable (UTF-8, includes trailing
+ * separator), or NULL where there is no meaningful one (Android). */
+const char* platform_get_exe_dir(void);
+
+/* Create a directory and any missing parents.  Returns true if it exists afterwards. */
+bool platform_make_dirs(const char *path);
+
+/* Atomically move src over dst, replacing dst if it exists. */
+bool platform_file_replace(const char *src, const char *dst);
+
 /* ============================================================================
  * Threading/Mutex
  * ============================================================================ */

@@ -23,6 +23,7 @@
 #include "css_layout.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
+#include "cyber_profile.h"
 #include "http_download.h"
 #include "url_utils.h"
 #include "js_quickjs.h"
@@ -906,7 +907,9 @@ static void dom_execute_external_script(JSContextHandle ctx, GCValue script, con
     platform_log(LOG_LEVEL_INFO, "dom_api", "Dynamic script load: %s", url);
     HttpBuffer buffer = {0};
     char err[256] = {0};
+    cp_profile_begin("fetch-dynamic-script", "net");
     bool ok = dom_fetch_script(url, &buffer, err, sizeof(err));
+    cp_profile_end("fetch-dynamic-script");
     if (ok && buffer.data && buffer.size > 0) {
         if (CYBER_ENV(CYBER_T_DUMP_SCRIPTS)) {
             static int dyn_dump_idx = 0;
@@ -924,7 +927,9 @@ static void dom_execute_external_script(JSContextHandle ctx, GCValue script, con
         JS_SetPropertyStr(ctx, doc, "currentScript", script);
         JS_SetPropertyStr(ctx, script, "readyState", JS_NewString(ctx, "loaded"));
 
+        cp_profile_begin("eval-dynamic-script", "js");
         GCValue result = JS_Eval(ctx, buffer.data, buffer.size, url, JS_EVAL_TYPE_GLOBAL);
+        cp_profile_end("eval-dynamic-script");
 
         JS_SetPropertyStr(ctx, script, "readyState", JS_NewString(ctx, "complete"));
         JS_SetPropertyStr(ctx, doc, "currentScript", prev_current);

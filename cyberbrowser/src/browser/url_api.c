@@ -127,7 +127,7 @@ static void url_parse_components(const char *url, UrlComponents *out) {
     }
 
     if (out->protocol[0]) {
-        snprintf(out->origin, sizeof(out->origin), "%s://%s", out->protocol, out->hostname);
+        snprintf(out->origin, sizeof(out->origin), "%s://%s", out->protocol, out->host);
     }
 
     // Reconstruct href
