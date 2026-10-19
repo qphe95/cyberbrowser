@@ -721,6 +721,7 @@ static GCValue JS_CallInternal(JSContextHandle ctx, GCValue func_obj,
 static GCValue js_trigger_lazy_function(JSContextHandle ctx, GCValue lazy_func,
                                         GCValue this_obj, GCValue new_target,
                                         int argc, GCValue *argv, int flags);
+static int js_lazy_ensure_compiled(JSObjectHandle p);
 static GCValue js_resume_lazy_parse(JSContextHandle ctx,
                                     JSFunctionBytecodeHandle lazy_b,
                                     GCValue lazy_func,
@@ -7350,6 +7351,8 @@ void mark_children(JSRuntimeHandle rt, GCHandle handle,
                 /* Mark arg names handle - CRITICAL: argument names for lazy parsing */
                 if (state->arg_names_handle != GC_HANDLE_NULL)
                     mark_func(rt, state->arg_names_handle);
+                if (state->compiled_handle != GC_HANDLE_NULL)
+                    mark_func(rt, state->compiled_handle);
             }
         }
         break;
@@ -18813,6 +18816,13 @@ static JSVarRefHandle js_closure_global_var(JSContextHandle ctx, JSClosureVar *c
             }
             return var_ref;
         }
+        if ((prs->flags & JS_PROP_TMASK) != JS_PROP_NORMAL) {
+            /* accessor (or other special) property: it cannot be turned
+               into a variable slot (pr->u.value is not a value).  Use the
+               uninitialized-var slot, which makes every access go through
+               the global object (getter/setter called, deletion seen). */
+            return js_global_object_get_uninitialized_var(ctx, p, cv->var_name);
+        }
         /* 
          * Property exists but is not a VARREF (e.g., set via JS_SetPropertyStr).
          * Create a var_ref and convert the property to VARREF type.
@@ -19959,6 +19969,13 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                          (GCValue *)argv, flags);
     }
     b = (JSFunctionBytecodeHandle)(SAFE_GET_OR(p, JSObjectHandle, u.func.function_bytecode_handle, GC_HANDLE_NULL));
+    if (unlikely(SAFE_GET_OR(b, JSFunctionBytecodeHandle, func_parse_state, 0) != JS_FUNC_PARSED)) {
+        /* first call of a lazily parsed function: compile it before its
+           frame is created */
+        if (js_lazy_ensure_compiled(p))
+            return JS_EXCEPTION;
+        b = (JSFunctionBytecodeHandle)(SAFE_GET_OR(p, JSObjectHandle, u.func.function_bytecode_handle, GC_HANDLE_NULL));
+    }
 
     /* Always allocate full arg space to ensure captured vars work */
     arg_allocated_size = SAFE_GET_OR(b, JSFunctionBytecodeHandle, arg_count, 0);
@@ -20970,21 +20987,13 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                 pc += 2;
                 val = js_varref_get_value(var_refs[idx]);
                 if (unlikely(JS_IsUninitialized(val))) {
-                    /* bgmdwnldr: In browsers, if a variable is not found,
-                     * fall back to global object lookup instead of throwing an error.
-                     * This matches browser behavior where undeclared variables are
-                     * looked up on the global object (window). */
-                    JSAtom atom = js_bc_closure_var_var_name(b, idx);
+                    /* temporal dead zone (let/const/class read before its
+                       declaration ran) */
                     JS_SF_SET_PC(sf, pc);
-                    sp[0] = JS_GetPropertyInternal(ctx, SAFE_GET_OR(ctx, JSContextHandle, global_obj, GC_UNDEFINED),
-                                                   atom,
-                                                   SAFE_GET_OR(ctx, JSContextHandle, global_obj, GC_UNDEFINED),
-                                                   0);
-                    if (JS_IsException(sp[0]))
-                        goto exception;
-                } else {
-                    sp[0] = val;
+                    JS_ThrowReferenceErrorUninitialized2(ctx, b, idx, TRUE);
+                    goto exception;
                 }
+                sp[0] = val;
                 sp++;
             }
             BREAK;
@@ -24375,6 +24384,24 @@ typedef struct JSFunctionDef {
 
     GCHandle source_string_handle; /* handle to GCString containing source, GC_HANDLE_NULL if none */
     int source_len;
+    uint32_t source_offset; /* offset of this function's text in source_string_handle */
+    /* hash index for find_var() in functions with many variables:
+       atom -> 1 + index of the last scope-level-0 var with that name */
+    GCHandle var_htab_handle;
+    uint32_t var_htab_cap;
+    int var_htab_indexed; /* vars [0, var_htab_indexed) are in the table */
+    /* hash index of closure_var_handle (for functions with many closure
+       variables): two tables of 'cv_htab_cap' slots holding 1 + index of
+       the first entry with a given name / a given (type, var_idx, name) */
+    GCHandle cv_htab_handle;
+    GCHandle cv_htab_src;     /* closure_var_handle.handle that was indexed */
+    uint32_t cv_htab_cap;
+    int cv_htab_indexed;
+    BOOL cv_has_special;      /* has _var_ / _arg_var_ / _with_ entries */
+    const uint8_t *lazy_verify_end; /* CYBER_LAZY_VERIFY: scanner's body end */
+    int lazy_dummy_pos;       /* 1 + bytecode offset of the dead name references
+                                 of a lazy stub, 0 if none */
+    BOOL resolving_lazy_dummy;
 
     JSModuleDefHandle module; /* != NULL when parsing a module */
     BOOL has_await; /* TRUE if await is used (used in module eval) */
@@ -24427,6 +24454,15 @@ static void js_mark_function_def(JSRuntimeHandle rt, JSFunctionDef *p, JS_MarkFu
     mark_func(rt, p->jump_slots_handle.handle);
     mark_func(rt, p->line_number_slots_handle.handle);
     mark_func(rt, p->source_string_handle);
+    mark_func(rt, p->var_htab_handle);
+    mark_func(rt, p->cv_htab_src);
+    if (p->has_resume_parse_state) {
+        /* lazy stub state, until js_create_function copies it */
+        mark_func(rt, p->resume_parse_state.source_handle);
+        mark_func(rt, p->resume_parse_state.arg_names_handle);
+        mark_func(rt, p->resume_parse_state.compiled_handle);
+    }
+    mark_func(rt, p->cv_htab_handle);
     mark_func(rt, p->lazy_parent_scope);
     /* Mark bytecode and pc2line buffers */
     mark_func(rt, p->byte_code.handle);
@@ -26773,9 +26809,71 @@ static int find_arg(JSContextHandle ctx, JSFunctionDef *fd, JSAtom name)
     return -1;
 }
 
+#define VAR_HTAB_MIN_VARS 64
+
+static void var_htab_put(uint32_t *t, uint32_t cap, JSAtom name, uint32_t val)
+{
+    uint32_t h = (name * 2654435761u) & (cap - 1);
+    /* slots are pairs (atom, 1 + var index) */
+    while (t[2 * h] != JS_ATOM_NULL && t[2 * h] != name)
+        h = (h + 1) & (cap - 1);
+    t[2 * h] = name;
+    t[2 * h + 1] = val;
+}
+
+/* Bring fd's variable index up to date.  Returns FALSE if no index is
+   available (small function or allocation failure). */
+static BOOL var_htab_update(JSFunctionDef *fd)
+{
+    uint32_t *t;
+    int i;
+    if (fd->var_count < VAR_HTAB_MIN_VARS)
+        return FALSE;
+    if (fd->var_htab_handle == GC_HANDLE_NULL ||
+        (uint32_t)fd->var_count * 2 > fd->var_htab_cap) {
+        uint32_t cap = 128;
+        GCHandle h;
+        while (cap < (uint32_t)fd->var_count * 4)
+            cap *= 2;
+        h = gc_allocz(cap * 2 * sizeof(uint32_t), JS_GC_OBJ_TYPE_DATA);
+        if (h == GC_HANDLE_NULL)
+            return FALSE;
+        GC_SET(fd->var_htab_handle, h);
+        fd->var_htab_cap = cap;
+        fd->var_htab_indexed = 0;
+    }
+    t = (uint32_t *)gc_deref(fd->var_htab_handle);
+    for (i = fd->var_htab_indexed; i < fd->var_count; i++) {
+        JSVarDef *vd = &SAFE_AT(fd_vars, JSVarDefArrayHandle, i);
+        if (vd->scope_level == 0 && vd->var_name != JS_ATOM_NULL)
+            var_htab_put(t, fd->var_htab_cap, vd->var_name, i + 1);
+    }
+    fd->var_htab_indexed = fd->var_count;
+    return TRUE;
+}
+
 static int find_var(JSContextHandle ctx, JSFunctionDef *fd, JSAtom name)
 {
     int i;
+    if (var_htab_update(fd)) {
+        uint32_t *t = (uint32_t *)gc_deref(fd->var_htab_handle);
+        uint32_t cap = fd->var_htab_cap;
+        uint32_t h = (name * 2654435761u) & (cap - 1);
+        while (t[2 * h] != JS_ATOM_NULL) {
+            if (t[2 * h] == name) {
+                i = (int)t[2 * h + 1] - 1;
+                /* entries are only ever overwritten with larger indexes;
+                   re-check in case a var was renamed or re-scoped */
+                if (SAFE_AT(fd_vars, JSVarDefArrayHandle, i).var_name == name &&
+                    SAFE_AT(fd_vars, JSVarDefArrayHandle, i).scope_level == 0)
+                    return i;
+                goto slow;
+            }
+            h = (h + 1) & (cap - 1);
+        }
+        return find_arg(ctx, fd, name);
+    }
+ slow:
     for(i = fd->var_count; i-- > 0;) {
         if (SAFE_AT(fd_vars, JSVarDefArrayHandle, i).var_name == name && SAFE_AT(fd_vars, JSVarDefArrayHandle, i).scope_level == 0)
             return i;
@@ -27739,203 +27837,953 @@ static int js_parse_skip_parens_token(JSParseState *s, int *pbits, BOOL no_line_
     return tok;
 }
 
-/*
- * Lazy function parsing: Skip to matching closing brace without parsing.
- * This function performs a simple character-level scan to find the matching '}'
- * while properly handling strings, template literals, comments, and nested braces.
- * 
- * Returns 0 on success (found matching brace), -1 on failure (unclosed brace or EOF).
- * On success, s->buf_ptr points to the closing '}'.
- */
-static int js_lazy_skip_to_matching_brace(JSParseState *s)
+/* ============================================================================
+ * Lazy function parsing
+ *
+ * A function body is skipped at definition time and compiled the first time
+ * the function is called.  Skipping still has to get scoping right: the
+ * enclosing function decides at compile time which of its variables are
+ * captured by closures, and a for-let loop creates a fresh binding per
+ * iteration that each closure must keep.  So the skip pass tokenizes the
+ * body (no character-level guessing about regexps or templates) and records
+ * every identifier it references.  The stub bytecode of the lazy function
+ * then contains, after its OP_lazy_function / OP_return_undef, a dead
+ * OP_scope_get_var for each of those names.  Variable resolution of the stub
+ * therefore creates exactly the closure variables a full parse would have
+ * created (plus a few harmless extras: names that turn out to be locals of
+ * the body, object keys, labels), and the enclosing function captures them
+ * normally.  Dead code is removed by resolve_labels.
+ *
+ * On the first call, js_resume_lazy_parse compiles the body as the child of
+ * a synthetic direct-eval function whose closure variables mirror the stub's
+ * closure variables, and the new function's var_refs are taken from the
+ * calling closure's var_refs.  Nothing from the enclosing function's parse
+ * state is needed after it has been compiled.
+ * ============================================================================ */
+
+static JSAtom get_private_setter_name(JSContextHandle ctx, JSAtom name);
+
+/* Open-addressing set of atoms (JS_ATOM_NULL marks an empty slot). */
+typedef struct JSLazyIdentSet {
+    DynBuf tab;
+    uint32_t cap;
+    uint32_t count;
+} JSLazyIdentSet;
+
+static void lazy_ident_set_init(JSLazyIdentSet *set)
 {
-    int brace_depth = 0;
-    BOOL in_string = FALSE;
-    char string_char = 0;
-    BOOL in_template = FALSE;
-    BOOL in_line_comment = FALSE;
-    BOOL in_block_comment = FALSE;
-    
-    while (s->buf_ptr < s->buf_end) {
-        uint8_t c = *s->buf_ptr;
-        
-        /* Handle line comments // */
-        if (in_line_comment) {
-            if (c == '\n' || c == '\r') {
-                in_line_comment = FALSE;
-            }
-            s->buf_ptr++;
-            continue;
-        }
-        
-        /* Handle block comments /* */
-        if (in_block_comment) {
-            if (c == '*' && (s->buf_ptr + 1) < s->buf_end && s->buf_ptr[1] == '/') {
-                in_block_comment = FALSE;
-                s->buf_ptr += 2;
-            } else {
-                s->buf_ptr++;
-            }
-            continue;
-        }
-        
-        /* Handle strings and template literals */
-        if (in_string) {
-            if (c == '\\') {
-                /* Skip escaped character */
-                s->buf_ptr += 2;
-            } else if (c == string_char) {
-                in_string = FALSE;
-                in_template = FALSE;
-                s->buf_ptr++;
-            } else if (c == '$' && in_template && (s->buf_ptr + 1) < s->buf_end && s->buf_ptr[1] == '{') {
-                /* Template literal ${...} interpolation - skip it */
-                s->buf_ptr += 2;
-                int template_depth = 1;
-                while ((s->buf_ptr < s->buf_end) && template_depth > 0) {
-                    c = *s->buf_ptr;
-                    if (c == '{') template_depth++;
-                    else if (c == '}') template_depth--;
-                    else if (c == '`') {
-                        /* Nested template literal in interpolation */
-                        s->buf_ptr++;
-                        BOOL in_nested = TRUE;
-                        while ((s->buf_ptr < s->buf_end) && in_nested) {
-                            c = *s->buf_ptr;
-                            if (c == '\\') {
-                                s->buf_ptr += 2;
-                            } else if (c == '`') {
-                                in_nested = FALSE;
-                                s->buf_ptr++;
-                            } else {
-                                s->buf_ptr++;
-                            }
-                        }
-                        continue;
-                    }
-                    s->buf_ptr++;
-                }
-            } else {
-                s->buf_ptr++;
-            }
-            continue;
-        }
-        
-        /* Not in string/comment - check for special tokens */
-        if (!in_string && !in_template) {
-            /* Check for comments */
-            if (c == '/' && (s->buf_ptr + 1) < s->buf_end && s->buf_ptr[1] == '/') {
-                in_line_comment = TRUE;
-                s->buf_ptr += 2;
-                continue;
-            }
-            if (c == '/' && (s->buf_ptr + 1) < s->buf_end && s->buf_ptr[1] == '*') {
-                in_block_comment = TRUE;
-                s->buf_ptr += 2;
-                continue;
-            }
-            
-            /* Check for regex literal - simplified heuristic */
-            /* A '/' is likely a regex if preceded by certain tokens */
-            if (c == '/') {
-                /* Look backward for preceding non-whitespace character */
-                const uint8_t *p = s->buf_ptr - 1;
-                while (p > s->buf_start && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) {
-                    p--;
-                }
-                int is_regex = 0;
-                if (p >= s->buf_start) {
-                    uint8_t prev = *p;
-                    /* Regex likely after: = , ; ( [ { ! & | ? : newline */
-                    if (prev == '=' || prev == ',' || prev == ';' || prev == '(' ||
-                        prev == '[' || prev == '{' || prev == '!' || prev == '&' ||
-                        prev == '|' || prev == '?' || prev == ':' || prev == '\n' ||
-                        prev == '\r' || prev == '(') {
-                        is_regex = 1;
-                    } else if (prev == 'n' && p - 6 >= s->buf_start &&
-                               memcmp(p - 6, "return", 6) == 0) {
-                        is_regex = 1;
-                    } else if (prev == 'w' && p - 4 >= s->buf_start &&
-                               memcmp(p - 4, "throw", 5) == 0) {
-                        is_regex = 1;
-                    }
-                }
-                if (is_regex) {
-                    /* Skip regex literal body */
-                    s->buf_ptr++;
-                    int in_class = 0;
-                    int regex_escape = 0;
-                    while (s->buf_ptr < s->buf_end) {
-                        c = *s->buf_ptr;
-                        if (regex_escape) {
-                            regex_escape = 0;
-                        } else if (c == '\\') {
-                            regex_escape = 1;
-                        } else if (c == '[' && !in_class) {
-                            in_class = 1;
-                        } else if (c == ']' && in_class) {
-                            in_class = 0;
-                        } else if (c == '/' && !in_class) {
-                            /* End of regex, skip flags */
-                            s->buf_ptr++;
-                            while (s->buf_ptr < s->buf_end &&
-                                   (*s->buf_ptr == 'g' || *s->buf_ptr == 'i' ||
-                                    *s->buf_ptr == 'm' || *s->buf_ptr == 's' ||
-                                    *s->buf_ptr == 'u' || *s->buf_ptr == 'y')) {
-                                s->buf_ptr++;
-                            }
-                            break;
-                        }
-                        s->buf_ptr++;
-                    }
-                    continue;
-                }
-            }
-            
-            /* Check for string/template start */
-            if (c == '"' || c == '\'' || c == '`') {
-                in_string = TRUE;
-                string_char = c;
-                if (c == '`') in_template = TRUE;
-                s->buf_ptr++;
-                continue;
-            }
-            
-            /* Handle braces */
-            if (c == '{') {
-                brace_depth++;
-            } else if (c == '}') {
-                if (brace_depth == 0) {
-                    /* Found the matching brace! */
-                    return 0;
-                }
-                brace_depth--;
-            }
-        }
-        
-        s->buf_ptr++;
-    }
-    
-    return -1;  /* Unclosed brace or EOF */
+    dbuf_init2(&set->tab, NULL, unicode_libc_realloc);
+    set->cap = 0;
+    set->count = 0;
 }
 
-/*
- * Emit stub bytecode for lazy functions.
- * This generates a bytecode sequence that triggers the lazy parser when the function is called.
- */
-static void emit_lazy_function_stub(JSParseState *s, JSFunctionDef *fd)
+static void lazy_ident_set_free(JSContextHandle ctx, JSLazyIdentSet *set)
 {
-    /* Emit: OP_lazy_function <function_idx> OP_return_undef
-     * When executed, this opcode triggers js_trigger_lazy_function which:
-     * 1. Parses the stored function body
-     * 2. Replaces the bytecode
-     * 3. Executes the function
-     * OP_return_undef is a placeholder to make bytecode analysis happy.
-     */
-    /* Emit lazy function stub */
+    uint32_t i, *t = (uint32_t *)set->tab.buf;
+    for (i = 0; i < set->cap; i++) {
+        if (t[i] != JS_ATOM_NULL)
+            JS_FreeAtom(ctx, t[i]);
+    }
+    dbuf_free(&set->tab);
+    set->cap = set->count = 0;
+}
+
+static void lazy_ident_set_insert(uint32_t *t, uint32_t cap, JSAtom a)
+{
+    uint32_t h = (a * 2654435761u) & (cap - 1);
+    while (t[h] != JS_ATOM_NULL)
+        h = (h + 1) & (cap - 1);
+    t[h] = a;
+}
+
+static int lazy_ident_set_add(JSContextHandle ctx, JSLazyIdentSet *set, JSAtom a)
+{
+    uint32_t h, *t;
+    if ((set->count + 1) * 2 > set->cap) {
+        uint32_t i, ncap = set->cap ? set->cap * 2 : 64;
+        DynBuf nt;
+        dbuf_init2(&nt, NULL, unicode_libc_realloc);
+        if (dbuf_claim(&nt, ncap * sizeof(uint32_t))) {
+            dbuf_free(&nt);
+            return -1;
+        }
+        memset(nt.buf, 0, ncap * sizeof(uint32_t));
+        nt.size = ncap * sizeof(uint32_t);
+        t = (uint32_t *)set->tab.buf;
+        for (i = 0; i < set->cap; i++) {
+            if (t[i] != JS_ATOM_NULL)
+                lazy_ident_set_insert((uint32_t *)nt.buf, ncap, t[i]);
+        }
+        dbuf_free(&set->tab);
+        set->tab = nt;
+        set->cap = ncap;
+    }
+    t = (uint32_t *)set->tab.buf;
+    h = (a * 2654435761u) & (set->cap - 1);
+    while (t[h] != JS_ATOM_NULL) {
+        if (t[h] == a)
+            return 0;
+        h = (h + 1) & (set->cap - 1);
+    }
+    t[h] = JS_DupAtom(ctx, a);
+    set->count++;
+    return 0;
+}
+
+static BOOL lazy_ident_set_has(JSLazyIdentSet *set, JSAtom a)
+{
+    uint32_t h, *t = (uint32_t *)set->tab.buf;
+    if (set->cap == 0)
+        return FALSE;
+    h = (a * 2654435761u) & (set->cap - 1);
+    while (t[h] != JS_ATOM_NULL) {
+        if (t[h] == a)
+            return TRUE;
+        h = (h + 1) & (set->cap - 1);
+    }
+    return FALSE;
+}
+
+#define LAZY_USES_THIS  (1 << 0)
+#define LAZY_USES_SUPER (1 << 1)
+#define LAZY_USES_NEW   (1 << 2)
+
+#define LAZY_MAX_NESTING 1024
+
+/* Set of names (byte ranges of the source), used to atomize each distinct
+ * identifier of a skipped body only once. */
+typedef struct {
+    DynBuf tab;     /* uint32_t triples (hash, offset + 1, length) */
+    uint32_t cap, count;
+} JSLazyNameSet;
+
+static uint32_t lazy_name_hash(const uint8_t *p, size_t len)
+{
+    uint32_t h = 2166136261u;
+    while (len--)
+        h = (h ^ *p++) * 16777619u;
+    return h;
+}
+
+static int lazy_name_set_add(JSLazyNameSet *set, const uint8_t *base,
+                             const uint8_t *p, size_t len)
+{
+    uint32_t h = lazy_name_hash(p, len), i, *t;
+    if ((set->count + 1) * 2 > set->cap) {
+        uint32_t ncap = set->cap ? set->cap * 2 : 256, j;
+        DynBuf nt;
+        dbuf_init2(&nt, NULL, unicode_libc_realloc);
+        if (dbuf_claim(&nt, ncap * 3 * sizeof(uint32_t))) {
+            dbuf_free(&nt);
+            return -1;
+        }
+        memset(nt.buf, 0, ncap * 3 * sizeof(uint32_t));
+        nt.size = ncap * 3 * sizeof(uint32_t);
+        t = (uint32_t *)set->tab.buf;
+        for (j = 0; j < set->cap; j++) {
+            if (t[3 * j + 1]) {
+                uint32_t *nb = (uint32_t *)nt.buf;
+                i = t[3 * j] & (ncap - 1);
+                while (nb[3 * i + 1])
+                    i = (i + 1) & (ncap - 1);
+                memcpy(&nb[3 * i], &t[3 * j], 3 * sizeof(uint32_t));
+            }
+        }
+        dbuf_free(&set->tab);
+        set->tab = nt;
+        set->cap = ncap;
+    }
+    t = (uint32_t *)set->tab.buf;
+    i = h & (set->cap - 1);
+    while (t[3 * i + 1]) {
+        if (t[3 * i] == h && t[3 * i + 2] == len &&
+            !memcmp(base + t[3 * i + 1] - 1, p, len))
+            return 0;
+        i = (i + 1) & (set->cap - 1);
+    }
+    t[3 * i] = h;
+    t[3 * i + 1] = (uint32_t)(p - base) + 1;
+    t[3 * i + 2] = (uint32_t)len;
+    set->count++;
+    return 0;
+}
+
+static BOOL lazy_name_set_has(JSLazyNameSet *set, const uint8_t *base,
+                              const uint8_t *p, size_t len)
+{
+    uint32_t h, i, *t = (uint32_t *)set->tab.buf;
+    if (set->cap == 0)
+        return FALSE;
+    h = lazy_name_hash(p, len);
+    i = h & (set->cap - 1);
+    while (t[3 * i + 1]) {
+        if (t[3 * i] == h && t[3 * i + 2] == len &&
+            !memcmp(base + t[3 * i + 1] - 1, p, len))
+            return TRUE;
+        i = (i + 1) & (set->cap - 1);
+    }
+    return FALSE;
+}
+
+/* classes of the previous token, for the regexp and block decisions */
+enum {
+    LZ_START,       /* start of the body / after ';' '{' : statement start */
+    LZ_PUNCT,       /* operator or other punctuator: an operand follows */
+    LZ_OPERAND,     /* literal, this, super */
+    LZ_IDENT,       /* identifier or property name */
+    LZ_KW_EXPR,     /* keyword after which an expression follows */
+    LZ_KW_CTRL,     /* if while for with */
+    LZ_KW_BLOCK,    /* else do try finally */
+    LZ_CLOSE_CTRL,  /* ')' of an if/while/for/with head */
+    LZ_CLOSE_PAREN, /* other ')' */
+    LZ_CLOSE_BRACKET,
+    LZ_CLOSE_BLOCK, /* '}' of a block */
+    LZ_CLOSE_OBJECT,/* '}' of an object literal */
+    LZ_INCDEC,      /* ++ -- */
+    LZ_DOT,         /* . ?. : a property name follows */
+    LZ_ARROW,       /* => */
+    LZ_COLON,
+};
+
+static BOOL lz_is_ident_char(int c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '_' || c == '$';
+}
+
+static BOOL lz_kw(const uint8_t *p, size_t len, const char *kw)
+{
+    return strlen(kw) == len && !memcmp(p, kw, len);
+}
+
+/* Scan a function body, collecting the identifiers it references.  On
+ * entry s->buf_ptr is just past the opening '{'.  On success (0) *pend is
+ * just past the matching '}'.  Returns -1 when the body must be parsed
+ * eagerly: direct eval, non-ASCII or escaped identifiers, HTML-like
+ * comments, nesting too deep, or anything malformed (the eager parse then
+ * reports real errors).
+ *
+ * This is a tokenizer-level scan, not a character search: strings, template
+ * literals (with nested substitutions), comments and regexp literals are
+ * recognized, and a '/' is a regexp exactly where an operand is expected,
+ * judged from the previous token as in is_regexp_allowed(), refined for the
+ * ')' of a control-statement head and the '}' of a block. */
+/* Scan a function body, collecting the identifiers it references.  On
+ * entry s->buf_ptr is just past the opening '{'.  On success (0) *pend is
+ * just past the matching '}'.  Returns -1 when the body must be parsed
+ * eagerly: direct eval, non-ASCII or escaped identifiers, HTML-like
+ * comments, nesting too deep, or anything malformed (the eager parse then
+ * reports real errors).
+ *
+ * This is a tokenizer-level scan, not a character search: strings, template
+ * literals (with nested substitutions), comments and regexp literals are
+ * recognized, and a '/' is a regexp exactly where an operand is expected,
+ * judged from the previous token as in is_regexp_allowed(), refined for the
+ * ')' of a control-statement head and the '}' of a block.
+ *
+ * Names that are certainly declared at the function level of this body
+ * ('var' outside nested functions; let/const/class/function declarations
+ * directly in the body) are recorded in 'decls': they can never refer to
+ * an enclosing scope, so the caller does not capture them.  Every brace
+ * that might open a nested function or class body is treated as one, which
+ * only makes this set smaller. */
+static int js_lazy_scan_body(JSParseState *s, JSLazyNameSet *names,
+                             JSLazyNameSet *decls,
+                             int *pflags, const uint8_t **pend)
+{
+    const uint8_t *p = s->buf_ptr, *end = s->buf_end, *base = s->buf_start;
+    /* '{' block, 'f' function or class body, 'o' object literal,
+       '(' paren, 'c' control-statement head or catch, '[' bracket,
+       '`' template substitution */
+    char stack[LAZY_MAX_NESTING];
+    int level = 0, last = LZ_START, flags = 0, c;
+    int fn_depth = 0;          /* 'f' entries on the stack (body excluded) */
+    int decl_level = -1;       /* level of the current var/let/const list */
+    BOOL expect_binding = FALSE;
+    BOOL fdecl_pending = FALSE; /* 'function'/'class' declaration name next */
+    BOOL catch_pending = FALSE;
+
+    stack[level++] = '{';
+    while (p < end) {
+        c = *p;
+        switch (c) {
+        case '\n': case '\r':
+            /* ASI may end a declaration list: stop collecting unless the
+               line ends with a ',' */
+            if (decl_level == level && !expect_binding)
+                decl_level = -1;
+            p++;
+            continue;
+        case ' ': case '\t': case '\v': case '\f':
+            p++;
+            continue;
+        case '/':
+            if (p[1] == '/') {
+                while (p < end && *p != '\n' && *p != '\r')
+                    p++;
+                continue;
+            }
+            if (p[1] == '*') {
+                const uint8_t *q = p + 2;
+                while (q + 1 < end && !(q[0] == '*' && q[1] == '/'))
+                    q++;
+                if (q + 1 >= end)
+                    return -1;
+                if (decl_level == level && !expect_binding &&
+                    memchr(p, '\n', q - p))
+                    decl_level = -1;
+                p = q + 2;
+                continue;
+            }
+            if (last == LZ_START || last == LZ_PUNCT || last == LZ_KW_EXPR ||
+                last == LZ_KW_CTRL || last == LZ_KW_BLOCK || last == LZ_ARROW ||
+                last == LZ_COLON || last == LZ_CLOSE_CTRL || last == LZ_CLOSE_BLOCK) {
+                /* regexp literal */
+                BOOL in_class = FALSE;
+                p++;
+                for (;;) {
+                    if (p >= end || *p == '\n' || *p == '\r')
+                        return -1;
+                    if (*p == '\\') {
+                        p += 2;
+                        continue;
+                    }
+                    if (*p == '[')
+                        in_class = TRUE;
+                    else if (*p == ']')
+                        in_class = FALSE;
+                    else if (*p == '/' && !in_class)
+                        break;
+                    p++;
+                }
+                p++;
+                while (p < end && lz_is_ident_char(*p))
+                    p++;  /* flags */
+                last = LZ_OPERAND;
+            } else {
+                p++;
+                last = LZ_PUNCT;
+            }
+            continue;
+        case '\'':
+        case '"':
+            p++;
+            for (;;) {
+                if (p >= end || *p == '\n' || *p == '\r')
+                    return -1;
+                if (*p == '\\') {
+                    p += 2;
+                    continue;
+                }
+                if (*p == c)
+                    break;
+                p++;
+            }
+            p++;
+            last = LZ_OPERAND;
+            continue;
+        case '`':
+            p++;
+        template_chars:
+            for (;;) {
+                if (p >= end)
+                    return -1;
+                if (*p == '\\') {
+                    p += 2;
+                    continue;
+                }
+                if (*p == '`') {
+                    p++;
+                    last = LZ_OPERAND;
+                    break;
+                }
+                if (*p == '$' && p[1] == '{') {
+                    if (level >= LAZY_MAX_NESTING)
+                        return -1;
+                    stack[level++] = '`';
+                    p += 2;
+                    last = LZ_PUNCT;
+                    break;
+                }
+                p++;
+            }
+            continue;
+        case '{': {
+            char kind;
+            if (expect_binding && decl_level == level)
+                decl_level = -1;  /* destructuring: stop collecting */
+            if (last == LZ_CLOSE_PAREN || last == LZ_ARROW || last == LZ_IDENT) {
+                /* function, method, arrow or class body (or unknown) */
+                kind = 'f';
+            } else if (last == LZ_START || last == LZ_CLOSE_CTRL ||
+                       last == LZ_KW_BLOCK || last == LZ_CLOSE_BLOCK) {
+                kind = '{';
+            } else if (last == LZ_COLON) {
+                kind = stack[level - 1] == 'o' ? 'o' : '{';
+            } else {
+                kind = 'o';
+            }
+            if (level >= LAZY_MAX_NESTING)
+                return -1;
+            if (kind == 'f')
+                fn_depth++;
+            stack[level++] = kind;
+            p++;
+            last = LZ_START;
+            continue;
+        }
+        case '}': {
+            char kind = stack[--level];
+            p++;
+            if (decl_level > level)
+                decl_level = -1;
+            if (kind == '`')
+                goto template_chars;
+            if (kind == 'f')
+                fn_depth--;
+            else if (kind != '{' && kind != 'o')
+                return -1;
+            if (level == 0) {
+                *pflags = flags;
+                *pend = p;
+                return 0;
+            }
+            last = (kind == 'o') ? LZ_CLOSE_OBJECT : LZ_CLOSE_BLOCK;
+            continue;
+        }
+        case '(':
+            if (level >= LAZY_MAX_NESTING)
+                return -1;
+            stack[level++] = (last == LZ_KW_CTRL || catch_pending) ? 'c' : '(';
+            catch_pending = FALSE;
+            p++;
+            last = LZ_PUNCT;
+            continue;
+        case ')':
+            if (level <= 1 || (stack[level - 1] != '(' && stack[level - 1] != 'c'))
+                return -1;
+            last = (stack[--level] == 'c') ? LZ_CLOSE_CTRL : LZ_CLOSE_PAREN;
+            if (decl_level > level)
+                decl_level = -1;
+            p++;
+            continue;
+        case '[':
+            if (expect_binding && decl_level == level)
+                decl_level = -1;  /* destructuring: stop collecting */
+            if (level >= LAZY_MAX_NESTING)
+                return -1;
+            stack[level++] = '[';
+            p++;
+            last = LZ_PUNCT;
+            continue;
+        case ']':
+            if (level <= 1 || stack[level - 1] != '[')
+                return -1;
+            level--;
+            if (decl_level > level)
+                decl_level = -1;
+            p++;
+            last = LZ_CLOSE_BRACKET;
+            continue;
+        case ';':
+            if (decl_level == level)
+                decl_level = -1;
+            p++;
+            last = LZ_START;
+            continue;
+        case ',':
+            if (decl_level == level)
+                expect_binding = TRUE;
+            p++;
+            last = LZ_PUNCT;
+            continue;
+        case ':':
+            p++;
+            last = LZ_COLON;
+            continue;
+        case '.':
+            if (p[1] >= '0' && p[1] <= '9')
+                goto number;
+            if (p[1] == '.' && p[2] == '.') {
+                p += 3;
+                last = LZ_PUNCT;
+            } else {
+                p++;
+                last = LZ_DOT;
+            }
+            continue;
+        case '?':
+            if (p[1] == '.' && !(p[2] >= '0' && p[2] <= '9')) {
+                p += 2;
+                last = LZ_DOT;
+            } else {
+                p++;
+                last = LZ_PUNCT;
+            }
+            continue;
+        case '=':
+            if (p[1] == '>') {
+                p += 2;
+                last = LZ_ARROW;
+            } else {
+                p++;
+                last = LZ_PUNCT;
+            }
+            continue;
+        case '+':
+        case '-':
+            if (c == '-' && p[1] == '-' && p[2] == '>')
+                return -1;  /* possible HTML-like comment */
+            if (p[1] == c) {
+                p += 2;
+                last = LZ_INCDEC;
+            } else {
+                p++;
+                last = LZ_PUNCT;
+            }
+            continue;
+        case '<':
+            if (p[1] == '!' && p[2] == '-' && p[3] == '-')
+                return -1;  /* HTML-like comment */
+            p++;
+            last = LZ_PUNCT;
+            continue;
+        case '*':
+            /* function* name */
+            p++;
+            last = LZ_PUNCT;
+            continue;
+        case '#': {
+            /* private name: a lexically scoped binding '#x' */
+            const uint8_t *start = p++;
+            if (p >= end || !lz_is_ident_char(*p) || (*p >= '0' && *p <= '9'))
+                return -1;
+            while (p < end && lz_is_ident_char(*p))
+                p++;
+            if (p < end && (*p == '\\' || *p >= 0x80))
+                return -1;
+            if (lazy_name_set_add(names, base, start, p - start))
+                return -1;
+            last = LZ_IDENT;
+            continue;
+        }
+        case '0': case '1': case '2': case '3': case '4':
+        case '5': case '6': case '7': case '8': case '9':
+        number:
+            p++;
+            while (p < end && (lz_is_ident_char(*p) || *p == '.' ||
+                               ((*p == '+' || *p == '-') &&
+                                (p[-1] == 'e' || p[-1] == 'E') &&
+                                !(p[-2] == 'x' || p[-2] == 'X'))))
+                p++;
+            last = LZ_OPERAND;
+            continue;
+        default:
+            if (last == LZ_DOT && (lz_is_ident_char(c) || c >= 0x80 || c == '\\')) {
+                /* property name: may use escapes or non-ASCII letters
+                   (e.g. x.\u0275prov); it is not a binding, just skip it */
+                while (p < end) {
+                    if (lz_is_ident_char(*p) || *p >= 0x80) {
+                        p++;
+                    } else if (*p == '\\' && p + 1 < end && p[1] == 'u') {
+                        p += 2;
+                        if (p < end && *p == '{') {
+                            while (p < end && *p != '}')
+                                p++;
+                            p++;
+                        } else {
+                            p += 4;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                last = LZ_IDENT;
+                continue;
+            }
+            if (c >= 0x80 || c == '\\')
+                return -1;  /* Unicode or escaped identifier, or Unicode space */
+            if (lz_is_ident_char(c)) {
+                const uint8_t *start = p;
+                size_t len;
+                int prev = last;
+                while (p < end && lz_is_ident_char(*p))
+                    p++;
+                if (p < end && (*p == '\\' || *p >= 0x80))
+                    return -1;
+                len = p - start;
+                if (prev == LZ_DOT) {
+                    last = LZ_IDENT;  /* property name */
+                    continue;
+                }
+                switch (start[0]) {
+                case 'a':
+                    if (lz_kw(start, len, "await")) { last = LZ_KW_EXPR; goto add_name; }
+                    break;
+                case 'b':
+                    if (lz_kw(start, len, "break")) { last = LZ_IDENT; continue; }
+                    break;
+                case 'c':
+                    if (lz_kw(start, len, "case")) { last = LZ_KW_EXPR; continue; }
+                    if (lz_kw(start, len, "catch")) { catch_pending = TRUE; last = LZ_KW_EXPR; continue; }
+                    if (lz_kw(start, len, "class")) {
+                        if (fn_depth == 0 && level == 1 &&
+                            (prev == LZ_START || prev == LZ_CLOSE_BLOCK))
+                            fdecl_pending = TRUE;
+                        last = LZ_KW_EXPR;
+                        continue;
+                    }
+                    if (lz_kw(start, len, "const")) {
+                        if (fn_depth == 0 && level == 1 &&
+                            (prev == LZ_START || prev == LZ_CLOSE_BLOCK)) {
+                            decl_level = level;
+                            expect_binding = TRUE;
+                        }
+                        last = LZ_KW_EXPR;
+                        continue;
+                    }
+                    if (lz_kw(start, len, "continue")) { last = LZ_IDENT; continue; }
+                    break;
+                case 'd':
+                    if (lz_kw(start, len, "do")) { last = LZ_KW_BLOCK; continue; }
+                    if (lz_kw(start, len, "delete") || lz_kw(start, len, "default") ||
+                        lz_kw(start, len, "debugger")) { last = LZ_KW_EXPR; continue; }
+                    break;
+                case 'e':
+                    if (lz_kw(start, len, "else")) { last = LZ_KW_BLOCK; continue; }
+                    if (lz_kw(start, len, "eval"))
+                        return -1;  /* direct eval sees the whole scope */
+                    if (lz_kw(start, len, "extends") || lz_kw(start, len, "export") ||
+                        lz_kw(start, len, "enum")) { last = LZ_KW_EXPR; continue; }
+                    break;
+                case 'f':
+                    if (lz_kw(start, len, "for")) { last = LZ_KW_CTRL; continue; }
+                    if (lz_kw(start, len, "finally")) { last = LZ_KW_BLOCK; continue; }
+                    if (lz_kw(start, len, "false")) { last = LZ_OPERAND; continue; }
+                    if (lz_kw(start, len, "function")) {
+                        if (fn_depth == 0 && level == 1 &&
+                            (prev == LZ_START || prev == LZ_CLOSE_BLOCK))
+                            fdecl_pending = TRUE;
+                        last = LZ_KW_EXPR;
+                        continue;
+                    }
+                    break;
+                case 'i':
+                    if (lz_kw(start, len, "if")) { last = LZ_KW_CTRL; continue; }
+                    if (lz_kw(start, len, "in") || lz_kw(start, len, "instanceof") ||
+                        lz_kw(start, len, "import")) { last = LZ_KW_EXPR; continue; }
+                    break;
+                case 'l':
+                    if (lz_kw(start, len, "let")) {
+                        /* 'let' declaration (sloppy code may also use it as
+                           a name; then no binding follows and the list is
+                           dropped below) */
+                        if (fn_depth == 0 && level == 1 &&
+                            (prev == LZ_START || prev == LZ_CLOSE_BLOCK)) {
+                            decl_level = level;
+                            expect_binding = TRUE;
+                            last = LZ_KW_EXPR;
+                            continue;
+                        }
+                    }
+                    break;
+                case 'n':
+                    if (lz_kw(start, len, "new")) { flags |= LAZY_USES_NEW; last = LZ_KW_EXPR; continue; }
+                    if (lz_kw(start, len, "null")) { last = LZ_OPERAND; continue; }
+                    break;
+                case 'o':
+                    if (lz_kw(start, len, "of")) { last = LZ_KW_EXPR; goto add_name; }
+                    break;
+                case 'r':
+                    if (lz_kw(start, len, "return")) { last = LZ_KW_EXPR; continue; }
+                    break;
+                case 's':
+                    if (lz_kw(start, len, "super")) { flags |= LAZY_USES_SUPER; last = LZ_OPERAND; continue; }
+                    if (lz_kw(start, len, "switch")) { last = LZ_KW_CTRL; continue; }
+                    break;
+                case 't':
+                    if (lz_kw(start, len, "this")) { flags |= LAZY_USES_THIS; last = LZ_OPERAND; continue; }
+                    if (lz_kw(start, len, "true")) { last = LZ_OPERAND; continue; }
+                    if (lz_kw(start, len, "try")) { last = LZ_KW_BLOCK; continue; }
+                    if (lz_kw(start, len, "typeof") || lz_kw(start, len, "throw")) { last = LZ_KW_EXPR; continue; }
+                    break;
+                case 'v':
+                    if (lz_kw(start, len, "var")) {
+                        if (fn_depth == 0) {
+                            decl_level = level;
+                            expect_binding = TRUE;
+                        }
+                        last = LZ_KW_EXPR;
+                        continue;
+                    }
+                    if (lz_kw(start, len, "void")) { last = LZ_KW_EXPR; continue; }
+                    break;
+                case 'w':
+                    if (lz_kw(start, len, "while") || lz_kw(start, len, "with")) { last = LZ_KW_CTRL; continue; }
+                    break;
+                case 'y':
+                    if (lz_kw(start, len, "yield")) { last = LZ_KW_EXPR; goto add_name; }
+                    break;
+                }
+                last = LZ_IDENT;
+                if (fdecl_pending) {
+                    fdecl_pending = FALSE;
+                    if (lazy_name_set_add(decls, base, start, len))
+                        return -1;
+                } else if (expect_binding && decl_level == level) {
+                    expect_binding = FALSE;
+                    if (lazy_name_set_add(decls, base, start, len))
+                        return -1;
+                }
+            add_name:
+                if (lazy_name_set_add(names, base, start, len))
+                    return -1;
+                continue;
+            }
+            /* other punctuators: an operand follows */
+            p++;
+            last = LZ_PUNCT;
+            continue;
+        }
+        /* any other token ends a pending declaration name */
+    }
+    return -1;
+}
+
+/* Skip a function body (s->token is its opening '{'), collecting the atoms
+ * of the identifiers it references into 'ids'.  On success (0) the parser
+ * is positioned on the token after the closing '}'; on -1 (parse eagerly)
+ * the position is unchanged and no exception is pending. */
+static int js_lazy_preparse_body(JSParseState *s, JSLazyIdentSet *ids,
+                                 int *pflags, const uint8_t **pend)
+{
+    JSContextHandle ctx = s->ctx;
+    JSLazyNameSet names, decls;
+    uint32_t i, *t;
+    int ret = -1;
+
+    memset(&names, 0, sizeof(names));
+    memset(&decls, 0, sizeof(decls));
+    dbuf_init2(&names.tab, NULL, unicode_libc_realloc);
+    dbuf_init2(&decls.tab, NULL, unicode_libc_realloc);
+    if (js_lazy_scan_body(s, &names, &decls, pflags, pend))
+        goto done;
+    t = (uint32_t *)names.tab.buf;
+    for (i = 0; i < names.cap; i++) {
+        JSAtom a;
+        int r;
+        if (!t[3 * i + 1])
+            continue;
+        /* declared at the body's function level: never an outer name */
+        if (lazy_name_set_has(&decls, s->buf_start,
+                              s->buf_start + t[3 * i + 1] - 1, t[3 * i + 2]))
+            continue;
+        a = JS_NewAtomLen(ctx, (const char *)s->buf_start + t[3 * i + 1] - 1, t[3 * i + 2]);
+        if (a == JS_ATOM_NULL)
+            goto done;
+        r = lazy_ident_set_add(ctx, ids, a);
+        JS_FreeAtom(ctx, a);
+        if (r)
+            goto done;
+        /* a private accessor's setter is a separate binding '#x<set>' */
+        if (s->buf_start[t[3 * i + 1] - 1] == '#') {
+            JSAtom set_name = get_private_setter_name(ctx, a);
+            if (set_name == JS_ATOM_NULL)
+                goto done;
+            r = lazy_ident_set_add(ctx, ids, set_name);
+            JS_FreeAtom(ctx, set_name);
+            if (r)
+                goto done;
+        }
+    }
+    ret = 0;
+ done:
+    dbuf_free(&names.tab);
+    dbuf_free(&decls.tab);
+    if (ret && JS_HasException(ctx))
+        JS_GetException(ctx);
+    return ret;
+}
+
+/* CYBER_LAZY_VERIFY=1: never skip; check the scanner against the parser */
+static BOOL lazy_verify_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0)
+        enabled = getenv("CYBER_LAZY_VERIFY") != NULL;
+    return enabled;
+}
+
+static void lazy_emit_dummy_ref(JSParseState *s, JSAtom name, int scope_level)
+{
+    emit_op(s, OP_scope_get_var);
+    emit_atom(s, name);
+    emit_u16(s, scope_level);
+    emit_op(s, OP_drop);
+}
+
+/* Try to skip the body of 'fd' (s->token is its opening '{').  Returns 1 if
+ * the body was skipped and a stub emitted (s->token is then the token after
+ * the closing '}'), 0 if the body must be parsed now (parser position
+ * unchanged), -1 on error. */
+static int js_lazy_try_skip_body(JSParseState *s, JSFunctionDef *fd,
+                                 JSParseFunctionEnum func_type,
+                                 const uint8_t *func_start)
+{
+    JSContextHandle ctx = s->ctx;
+    GCHandle root = GC_HANDLE_NULL;
+    JSFunctionDefHandle h;
+    JSParsePos pos;
+    JSLazyIdentSet ids;
+    JSLazyParseState *st;
+    const uint8_t *body_start, *body_end;
+    int flags = 0, line_num, col_num, scope_level;
+    uint32_t i;
+    BOOL is_arrow = (func_type == JS_PARSE_FUNC_ARROW);
+
+    /* The outermost function being parsed owns a GC copy of the whole input
+       (offsets below are relative to s->buf_start). */
+    for (h = s->cur_func_handle; !SAFE_IS_NULL(h);
+         h = (JSFunctionDefHandle)(SAFE_PTR(h, JSFunctionDefHandle)->parent_handle)) {
+        if (SAFE_PTR(h, JSFunctionDefHandle)->source_string_handle != GC_HANDLE_NULL) {
+            root = SAFE_PTR(h, JSFunctionDefHandle)->source_string_handle;
+            break;
+        }
+    }
+    if (root == GC_HANDLE_NULL)
+        return 0;
+    {
+        /* the root copy must be the buffer being parsed (O(1) check: the
+           copy is NUL-terminated right after the input) */
+        size_t len = s->buf_end - s->buf_start;
+        const char *rp = (const char *)gc_deref(root);
+        if (!rp || gc_handle_get_size(root) < len + 1 || rp[len] != '\0' ||
+            (len > 0 && (rp[0] != (char)s->buf_start[0] || rp[len - 1] != (char)s->buf_end[-1])))
+            return 0;
+    }
+
+    body_start = s->token.ptr;
+    line_num = get_line_col_cached(&s->get_line_col_cache, &col_num, body_start);
+
+    lazy_ident_set_init(&ids);
+    js_parse_get_pos(s, &pos);
+    if (js_lazy_preparse_body(s, &ids, &flags, &body_end)) {
+        lazy_ident_set_free(ctx, &ids);
+        return 0;
+    }
+    if (lazy_verify_enabled()) {
+        /* debug: parse eagerly and check where the real body ends */
+        fd->lazy_verify_end = body_end;
+        lazy_ident_set_free(ctx, &ids);
+        return 0;
+    }
+
+    /* bodies with an early error the skip pass can see are parsed eagerly
+       so the SyntaxError is reported now */
+    if (is_arrow &&
+        (((flags & LAZY_USES_SUPER) && (!fd->super_allowed || !fd->super_call_allowed)) ||
+         (!fd->arguments_allowed && lazy_ident_set_has(&ids, JS_ATOM_arguments)))) {
+        lazy_ident_set_free(ctx, &ids);
+        if (js_parse_seek_token(s, &pos))
+            return -1;
+        return 0;
+    }
+
+    st = &fd->resume_parse_state;
+    memset(st, 0, sizeof(*st));
+    GC_SET(st->source_handle, root);
+    st->source_offset = body_start - s->buf_start;
+    st->source_len = body_end - body_start;
+    st->token_offset = 0;
+    st->token_val = '{';
+    st->line_num = line_num;
+    st->col_num = col_num;
+    st->func_name = JS_DupAtom(ctx, fd->func_name);
+    st->func_kind = (uint8_t)fd->func_kind;
+    st->func_type = (uint8_t)func_type;
+    st->arg_count = fd->arg_count;
+    st->in_function_body = TRUE;
+    st->in_strict_mode = (fd->js_mode & JS_MODE_STRICT) != 0;
+    st->new_target_allowed = fd->new_target_allowed;
+    st->super_call_allowed = fd->super_call_allowed;
+    st->super_allowed = fd->super_allowed;
+    st->arguments_allowed = fd->arguments_allowed;
+    st->has_prototype = fd->has_prototype;
+    st->has_home_object = fd->has_home_object;
+    st->has_arguments_binding = fd->has_arguments_binding;
+    st->has_this_binding = fd->has_this_binding;
+    st->is_func_expr = fd->is_func_expr;
+    st->source_total_len = s->buf_end - s->buf_start;
+    st->func_source_offset = func_start - s->buf_start;
+    st->func_source_len = body_end - func_start;
+    if (fd->arg_count > 0) {
+        GCHandle names_handle = gc_alloc(sizeof(JSAtom) * fd->arg_count, JS_GC_OBJ_TYPE_DATA);
+        if (names_handle == GC_HANDLE_NULL) {
+            lazy_ident_set_free(ctx, &ids);
+            return -1;
+        }
+        {
+            JSAtom *names = (JSAtom *)gc_deref(names_handle);
+            for (i = 0; i < (uint32_t)fd->arg_count; i++) {
+                JSVarDefArrayHandle vd_arr = fd_args; int vd_idx = i;
+                names[i] = JS_DupAtom(ctx, SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name);
+            }
+        }
+        /* re-fetch: gc_alloc may have moved fd's state */
+        st = &fd->resume_parse_state;
+        GC_SET(st->arg_names_handle, names_handle);
+    }
+    fd->func_parse_state = JS_FUNC_LAZY;
+    fd->has_resume_parse_state = TRUE;
+    fd->is_expr_body = FALSE;
+
+    /* stub: trigger compilation on entry */
     emit_op(s, OP_lazy_function);
-    emit_u32(s, fd->parent_cpool_idx);
-    emit_op(s, OP_return_undef);  /* Placeholder for bytecode analysis */
+    emit_u32(s, 0);
+    emit_op(s, OP_return_undef);
+
+    /* dead references to every free name of the body (see above) */
+    fd->lazy_dummy_pos = fd->byte_code.size + 1;
+    scope_level = fd->scope_level;
+    {
+        uint32_t *t = (uint32_t *)ids.tab.buf;
+        for (i = 0; i < ids.cap; i++) {
+            JSAtom a = t[i];
+            if (a == JS_ATOM_NULL)
+                continue;
+            /* a non-arrow function has its own 'arguments' */
+            if (a == JS_ATOM_arguments && !is_arrow)
+                continue;
+            lazy_emit_dummy_ref(s, a, scope_level);
+        }
+    }
+    if (is_arrow) {
+        /* this / new.target / super come from the enclosing function */
+        if (flags & (LAZY_USES_THIS | LAZY_USES_SUPER))
+            lazy_emit_dummy_ref(s, JS_ATOM_this, scope_level);
+        if (flags & (LAZY_USES_NEW | LAZY_USES_SUPER))
+            lazy_emit_dummy_ref(s, JS_ATOM_new_target, scope_level);
+        if (flags & LAZY_USES_SUPER) {
+            lazy_emit_dummy_ref(s, JS_ATOM_home_object, scope_level);
+            lazy_emit_dummy_ref(s, JS_ATOM_this_active_func, scope_level);
+            /* super() in an arrow runs the class field initializers */
+            lazy_emit_dummy_ref(s, JS_ATOM_class_fields_init, scope_level);
+        }
+    }
+    lazy_ident_set_free(ctx, &ids);
+
+    /* source text for Function.prototype.toString(), shared with the root */
+    if (!fd->strip_source) {
+        GC_SET(fd->source_string_handle, root);
+        fd->source_offset = func_start - s->buf_start;
+        fd->source_len = body_end - func_start;
+    }
+
+    /* continue after the closing '}' */
+    s->buf_ptr = body_end;
+    if (next_token(s))
+        return -1;
+    return 1;
 }
 
 static void set_object_name(JSParseState *s, JSAtom name)
@@ -35917,6 +36765,98 @@ static int add_closure_var(JSContextHandle ctx, JSFunctionDef *s,
     }
 }
 
+#define CV_HTAB_MIN 32
+
+static BOOL cv_is_global_type(int t)
+{
+    return t == JS_CLOSURE_GLOBAL || t == JS_CLOSURE_GLOBAL_DECL ||
+        t == JS_CLOSURE_GLOBAL_REF;
+}
+
+static uint32_t cv_key_hash(int closure_type, int var_idx, JSAtom name)
+{
+    uint32_t h = (uint32_t)closure_type * 31u + (uint32_t)var_idx;
+    if (cv_is_global_type(closure_type))
+        h ^= name * 0x9e3779b1u;
+    return h * 2654435761u;
+}
+
+/* Bring s's closure variable index up to date.  Returns FALSE if there is
+   no index (few closure variables or allocation failure). */
+static BOOL cv_htab_update(JSFunctionDef *s)
+{
+    int n = s->closure_var_handle.count, i;
+    uint32_t *t, cap;
+    if (n < CV_HTAB_MIN)
+        return FALSE;
+    if (s->cv_htab_handle == GC_HANDLE_NULL ||
+        s->cv_htab_src != s->closure_var_handle.handle ||
+        n < s->cv_htab_indexed || (uint32_t)n * 2 > s->cv_htab_cap) {
+        GCHandle h;
+        cap = 64;
+        while (cap < (uint32_t)n * 4)
+            cap *= 2;
+        h = gc_allocz(cap * 2 * sizeof(uint32_t), JS_GC_OBJ_TYPE_DATA);
+        if (h == GC_HANDLE_NULL)
+            return FALSE;
+        GC_SET(s->cv_htab_handle, h);
+        GC_SET(s->cv_htab_src, s->closure_var_handle.handle);
+        s->cv_htab_cap = cap;
+        s->cv_htab_indexed = 0;
+        s->cv_has_special = FALSE;
+    }
+    cap = s->cv_htab_cap;
+    t = (uint32_t *)gc_deref(s->cv_htab_handle);
+    for (i = s->cv_htab_indexed; i < n; i++) {
+        JSClosureVar *cv = &GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, i);
+        uint32_t h;
+        if (cv->var_name == JS_ATOM__var_ || cv->var_name == JS_ATOM__arg_var_ ||
+            cv->var_name == JS_ATOM__with_)
+            s->cv_has_special = TRUE;
+        /* name table: keep the first entry of a name */
+        h = (cv->var_name * 2654435761u) & (cap - 1);
+        for (;;) {
+            if (t[h] == 0) {
+                t[h] = i + 1;
+                break;
+            }
+            if (GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, t[h] - 1).var_name == cv->var_name)
+                break;
+            h = (h + 1) & (cap - 1);
+        }
+        /* key table */
+        h = cv_key_hash(cv->closure_type, cv->var_idx, cv->var_name) & (cap - 1);
+        for (;;) {
+            JSClosureVar *cv1;
+            if (t[cap + h] == 0) {
+                t[cap + h] = i + 1;
+                break;
+            }
+            cv1 = &GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, t[cap + h] - 1);
+            if (cv1->closure_type == cv->closure_type && cv1->var_idx == cv->var_idx &&
+                (!cv_is_global_type(cv->closure_type) || cv1->var_name == cv->var_name))
+                break;
+            h = (h + 1) & (cap - 1);
+        }
+    }
+    s->cv_htab_indexed = n;
+    return TRUE;
+}
+
+/* index of the first closure variable named 'name', or -1 (requires an
+   up to date index) */
+static int cv_htab_find_name(JSFunctionDef *s, JSAtom name)
+{
+    uint32_t cap = s->cv_htab_cap, *t = (uint32_t *)gc_deref(s->cv_htab_handle);
+    uint32_t h = (name * 2654435761u) & (cap - 1);
+    while (t[h]) {
+        if (GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, t[h] - 1).var_name == name)
+            return t[h] - 1;
+        h = (h + 1) & (cap - 1);
+    }
+    return -1;
+}
+
 static int find_closure_var(JSContextHandle ctx, JSFunctionDef *s,
                             JSAtom var_name)
 {
@@ -35948,6 +36888,19 @@ static int get_closure_var(JSContextHandle ctx, JSFunctionDef *s,
             return -1;
         if (closure_type != JS_CLOSURE_GLOBAL_REF)
             closure_type = JS_CLOSURE_REF;
+    }
+    if (cv_htab_update(s)) {
+        uint32_t cap = s->cv_htab_cap, *t = (uint32_t *)gc_deref(s->cv_htab_handle);
+        uint32_t h = cv_key_hash(closure_type, var_idx, var_name) & (cap - 1);
+        while (t[cap + h]) {
+            JSClosureVar *cv = &GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, t[cap + h] - 1);
+            if (cv->var_idx == var_idx && cv->closure_type == closure_type &&
+                (!cv_is_global_type(closure_type) || cv->var_name == var_name))
+                return t[cap + h] - 1;
+            h = (h + 1) & (cap - 1);
+        }
+        return add_closure_var(ctx, s, closure_type, var_idx, var_name,
+                               is_const, is_lexical, var_kind);
     }
     for(i = 0; i < s->closure_var_handle.count; i++) {
         JSClosureVar *cv = &GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, i);
@@ -36511,8 +37464,19 @@ static int resolve_scope_var(JSContextHandle ctx, JSFunctionDef *s,
     if (!fd)
         fd = s;
     if (var_idx < 0 && fd->is_eval) {
-        int idx1;
-        for (idx1 = 0; idx1 < fd->closure_var_handle.count; idx1++) {
+        int idx1, idx1_start = 0, idx1_end = fd->closure_var_handle.count;
+        /* without var-object / with entries only a name match acts, and
+           the first one returns: look it up directly */
+        if (cv_htab_update(fd) && !fd->cv_has_special) {
+            int f = cv_htab_find_name(fd, var_name);
+            if (f < 0) {
+                idx1_end = 0;
+            } else {
+                idx1_start = f;
+                idx1_end = f + 1;
+            }
+        }
+        for (idx1 = idx1_start; idx1 < idx1_end; idx1++) {
             JSClosureVar *cv = &GC_DATA_ARRAY_AT(fd_closure_var, JSClosureVar, idx1);
             if (var_name == cv->var_name) {
                 if (fd != s) {
@@ -36556,6 +37520,14 @@ static int resolve_scope_var(JSContextHandle ctx, JSFunctionDef *s,
             }
         }
 
+        if (s->resolving_lazy_dummy) {
+            /* see lazy_emit_dummy_ref: no global closure variable (it would
+               be threaded through every enclosing function and allocated
+               in each closure instance); globals are bound when the body
+               is compiled */
+            dbuf_putc(bc, OP_undefined);
+            goto done;
+        }
         /* not found: add a closure for a global variable access */
         idx1 = add_closure_var(ctx, fd, JS_CLOSURE_GLOBAL, 0, var_name,
                               FALSE, FALSE, JS_VAR_NORMAL);
@@ -37592,8 +38564,12 @@ static __exception int resolve_variables(JSContextHandle ctx, JSFunctionDef *s)
         case OP_scope_put_var_init:
             var_name = get_u32(gc_byte_buffer_ptr(&s->byte_code) + pos + 1);
             scope = get_u16(gc_byte_buffer_ptr(&s->byte_code) + pos + 5);
+            /* a lazy stub's dead name references only capture enclosing
+               variables */
+            s->resolving_lazy_dummy = (s->lazy_dummy_pos != 0 && pos >= s->lazy_dummy_pos - 1);
             pos_next = resolve_scope_var(ctx, s, var_name, scope, op, &bc_out,
                                          NULL, NULL, pos_next);
+            s->resolving_lazy_dummy = FALSE;
             JS_FreeAtom(ctx, var_name);
             break;
         case OP_scope_make_ref:
@@ -39675,6 +40651,7 @@ static GCValue js_create_function(JSContextHandle ctx, JSFunctionDef *fd)
         SAFE_SET(b, JSFunctionBytecodeHandle, debug.pc2line_len, fd->pc2line.size);
         SAFE_SET_HANDLE(b, JSFunctionBytecodeHandle, debug.source_handle, fd->source_string_handle);
         SAFE_SET(b, JSFunctionBytecodeHandle, debug.source_len, fd->source_len);
+        SAFE_SET(b, JSFunctionBytecodeHandle, debug.source_offset, fd->source_offset);
     }
     if ((fd->scopes_handle.handle != GC_HANDLE_NULL))
         /* GC frees automatically */;
@@ -40616,178 +41593,6 @@ static __exception int js_parse_function_decl2(JSParseState *s,
      * After parameters are parsed, check if we should lazy-parse the body.
      * This skips parsing the function body until the function is first invoked.
      */
-    allow_lazy_parse = s->enable_lazy_parsing &&
-                       func_type != JS_PARSE_FUNC_CLASS_STATIC_INIT &&
-                       fd->has_simple_parameter_list;
-    
-    if (allow_lazy_parse) {
-        
-        /* Check if we have a '{' to know it's a block body (not expression) */
-        if (s->token.val == '{') {
-            JSParsePos pos;
-            const uint8_t *body_start = s->token.ptr;  /* Points to '{' */
-            
-            /* Save current position for potential fallback */
-            js_parse_get_pos(s, &pos);
-            
-            /* s->buf_ptr is already positioned after '{' from the previous
-             * next_token() call that set s->token.val to '{'.
-             * Do NOT call next_token() here - it would consume the token
-             * AFTER '{', which breaks empty function bodies {}. */
-            
-            /* Skip to matching '}' */
-            if (js_lazy_skip_to_matching_brace(s) == 0) {
-                const uint8_t *body_end = s->buf_ptr;  /* Points to '}' */
-                
-                /* Get current line/col for error reporting */
-                int line_num, col_num;
-                line_num = get_line_col_cached(&s->get_line_col_cache, &col_num, body_start);
-                
-                /* Store lazy function info */
-                size_t lazy_len = body_end - body_start + 1;  /* Include braces */
-                
-                /* Find the root function's source handle by walking up the parent chain */
-                GCHandle root_source_handle = GC_HANDLE_NULL;
-                JSFunctionDefHandle parent = s->cur_func_handle;
-                while (!SAFE_IS_NULL(parent)) {
-                    if (SAFE_PTR(parent, JSFunctionDefHandle)->source_string_handle != GC_HANDLE_NULL) {
-                        root_source_handle = SAFE_PTR(parent, JSFunctionDefHandle)->source_string_handle;
-                        break;
-                    }
-                    parent = (JSFunctionDefHandle)(SAFE_PTR(parent, JSFunctionDefHandle)->parent_handle);
-                }
-                
-                /* If no root source found, we can't do lazy parsing */
-                if (root_source_handle == GC_HANDLE_NULL) {
-                    /* Fall through to normal parsing */
-                    if (js_parse_seek_token(s, &pos))
-                        goto fail;
-                } else {
-                    fd->func_parse_state = JS_FUNC_LAZY;
-                    fd->lazy_source = (const char *)body_start;  /* Temporary, for reference */
-                    fd->lazy_source_len = lazy_len;
-                    fd->lazy_source_line = line_num;
-                    fd->lazy_source_col = col_num;
-                    GC_SET(fd->lazy_parent_scope, fd->parent_handle);
-                    fd->lazy_is_async = (func_kind & JS_FUNC_ASYNC) != 0;
-                    fd->lazy_is_generator = (func_kind & JS_FUNC_GENERATOR) != 0;
-                    fd->lazy_func_kind = func_kind;
-                    fd->is_expr_body = FALSE;  /* Block body, not expression */
-                    
-                    /* === PHASE 2: Store parser state at lazy point ===
-                     * Store reference to root source handle + offset instead of copying
-                     */
-                    {
-                        JSLazyParseState *state = &fd->resume_parse_state;
-                        memset(state, 0, sizeof(JSLazyParseState));
-                        
-                        /* Source position - store handle + offset */
-                        GC_SET(state->source_handle, root_source_handle);
-                        state->source_offset = body_start - s->buf_start;
-                        state->source_len = lazy_len;
-                        state->token_offset = 0;  /* Token starts at body_start */
-                        state->token_val = '{';  /* Token is the opening brace */
-                        state->line_num = line_num;
-                        state->col_num = col_num;
-                        
-                        /* Scope context */
-                        GC_SET(state->parent_scope_handle, fd->parent_handle);
-                        {
-                            JSFunctionDef *parent_fd = SAFE_PTR(fd->parent_handle, JSFunctionDefHandle);
-                            state->parent_scope_level = parent_fd ? parent_fd->scope_level : 0;
-                        }
-                        GC_SET(state->var_env_handle, s->var_env_handle);
-                        GC_SET(state->lexical_env_handle, s->lexical_env_handle);
-                        
-                        /* Function context */
-                        state->func_name = JS_DupAtom(ctx, fd->func_name);
-                        state->func_kind = (uint8_t)func_kind;
-                        state->func_type = (uint8_t)func_type;
-                        state->arg_count = fd->arg_count;
-                        state->is_expr_body = FALSE;
-                        
-                        /* Store argument names for proper parameter resolution */
-                        if (fd->arg_count > 0 && fd->args_handle != GC_HANDLE_NULL) {
-                            /* Allocate GC array for argument names */
-                            GCHandle arg_names_handle = gc_alloc(
-                                sizeof(JSAtom) * fd->arg_count, JS_GC_OBJ_TYPE_DATA);
-                            if (arg_names_handle != GC_HANDLE_NULL) {
-                                JSAtom *arg_names = (JSAtom *)gc_deref(arg_names_handle);
-                                for (int i = 0; i < fd->arg_count; i++) {
-                                    JSVarDefArrayHandle vd_arr = fd_args; int vd_idx = i;
-                                    arg_names[i] = JS_DupAtom(ctx, SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name);
-                                }
-                                GC_SET(state->arg_names_handle, arg_names_handle);
-                            } else {
-                                state->arg_names_handle = GC_HANDLE_NULL;
-                            }
-                        } else {
-                            state->arg_names_handle = GC_HANDLE_NULL;
-                        }
-                        
-                        /* Class context if applicable */
-                        if (s->cur_class_handle != GC_HANDLE_NULL) {
-                            GC_SET(state->class_handle, s->cur_class_handle);
-                            GC_SET(state->super_class_handle, s->cur_super_class_handle);
-                            state->is_static_method = (func_type == JS_PARSE_FUNC_CLASS_STATIC_INIT);
-                            state->is_derived_constructor = 
-                                (func_type == JS_PARSE_FUNC_DERIVED_CLASS_CONSTRUCTOR);
-                        }
-                        
-                        /* Parser flags */
-                        state->in_function_body = TRUE;
-                        state->in_class = s->in_class;
-                        state->in_strict_mode = (s->js_mode & JS_MODE_STRICT) != 0;
-                        
-                        fd->has_resume_parse_state = TRUE;
-                    }
-                
-                /* Mark as being in function body for consistency */
-                fd->in_function_body = TRUE;
-                push_scope(s);  /* enter body scope */
-                fd->body_scope = fd->scope_level;
-                
-                /* For generators, we still need to emit OP_initial_yield */
-                if (func_kind == JS_FUNC_GENERATOR ||
-                    func_kind == JS_FUNC_ASYNC_GENERATOR) {
-                    emit_op(s, OP_initial_yield);
-                }
-                
-                /* 
-                 * Add function to parent's constant pool BEFORE emitting lazy stub.
-                 * The stub needs the cpool index to find the function at runtime.
-                 */
-                fd->parent_cpool_idx = cpool_add(s, JS_NULL);
-                
-                /* Generate stub bytecode that triggers lazy parsing on call */
-                emit_lazy_function_stub(s, fd);
-                
-                /* Use seek to properly restore tokenizer state and consume '}' */
-                if (js_parse_seek_token(s, &pos))
-                    goto fail;
-                
-                /* js_parse_seek_token already consumed '{' via next_token,
-                 * so buf_ptr is positioned right after '{'.
-                 * Scan to matching '}' using character-level scanner. */
-                if (js_lazy_skip_to_matching_brace(s) != 0)
-                    goto fail;
-                
-                /* js_lazy_skip_to_matching_brace leaves buf_ptr at '}'.
-                 * Skip past '}' and read the next token. */
-                s->buf_ptr++;  /* Skip '}' */
-                if (next_token(s))
-                    goto fail;
-                
-                goto done;
-                } /* Close else block for if (root_source_handle == GC_HANDLE_NULL) */
-            } else {
-                /* Failed to find matching brace - restore position and fall through to normal parsing */
-                if (js_parse_seek_token(s, &pos))
-                    goto fail;
-            }
-        }
-    }
-    
     /* generator function: yield after the parameters are evaluated */
     if (func_kind == JS_FUNC_GENERATOR ||
         func_kind == JS_FUNC_ASYNC_GENERATOR)
@@ -40804,140 +41609,9 @@ static __exception int js_parse_function_decl2(JSParseState *s,
             goto fail;
 
         if (s->token.val != '{') {
-            /* Arrow function with expression body: (x) => x * 2 */
-            if (s->enable_lazy_parsing && fd->has_simple_parameter_list) {
-                /* Try lazy parsing for expression body */
-                if (js_parse_function_check_names(s, fd, func_name))
-                    goto fail;
-                
-                /* Store expression for lazy evaluation */
-                const uint8_t *expr_start = s->token.ptr;
-                JSParsePos expr_pos;
-                js_parse_get_pos(s, &expr_pos);
-                
-                /* Skip the expression to find its end */
-                if (js_parse_assign_expr(s))
-                    goto fail;
-                const uint8_t *expr_end = s->last_ptr;
-                
-                /* Get line/col for error reporting */
-                int line_num, col_num;
-                line_num = get_line_col_cached(&s->get_line_col_cache, &col_num, expr_start);
-                
-                /* Store lazy function info */
-                size_t lazy_len = expr_end - expr_start;
-                
-                /* Find the root function's source handle by walking up the parent chain */
-                GCHandle root_source_handle = GC_HANDLE_NULL;
-                JSFunctionDefHandle parent = s->cur_func_handle;
-                while (!SAFE_IS_NULL(parent)) {
-                    if (SAFE_PTR(parent, JSFunctionDefHandle)->source_string_handle != GC_HANDLE_NULL) {
-                        root_source_handle = SAFE_PTR(parent, JSFunctionDefHandle)->source_string_handle;
-                        break;
-                    }
-                    parent = (JSFunctionDefHandle)(SAFE_PTR(parent, JSFunctionDefHandle)->parent_handle);
-                }
-                
-                /* If no root source found, fall through to normal parsing */
-                if (root_source_handle == GC_HANDLE_NULL) {
-                    /* Fall through to normal parsing below */
-                } else {
-                    fd->func_parse_state = JS_FUNC_LAZY;
-                    fd->lazy_source = (const char *)expr_start;  /* Temporary, for reference */
-                    fd->lazy_source_len = lazy_len;
-                    fd->lazy_source_line = line_num;
-                    fd->lazy_source_col = col_num;
-                    GC_SET(fd->lazy_parent_scope, fd->parent_handle);
-                    fd->lazy_is_async = (func_kind & JS_FUNC_ASYNC) != 0;
-                    fd->lazy_is_generator = FALSE;  /* Arrow functions cannot be generators */
-                    fd->lazy_func_kind = func_kind;
-                    fd->is_expr_body = TRUE;  /* Mark as expression body */
-                    
-                    /* === PHASE 2: Store parser state at lazy point ===
-                     * Store reference to root source handle + offset instead of copying
-                     */
-                    {
-                        JSLazyParseState *state = &fd->resume_parse_state;
-                        memset(state, 0, sizeof(JSLazyParseState));
-                        
-                        /* Source position - store handle + offset */
-                        GC_SET(state->source_handle, root_source_handle);
-                        state->source_offset = expr_start - s->buf_start;
-                        state->source_len = lazy_len;
-                        state->token_offset = 0;  /* Token starts at expr_start */
-                        state->token_val = s->token.val;
-                        state->line_num = line_num;
-                        state->col_num = col_num;
-                        
-                        /* Scope context */
-                        GC_SET(state->parent_scope_handle, fd->parent_handle);
-                        {
-                            JSFunctionDef *parent_fd = SAFE_PTR(fd->parent_handle, JSFunctionDefHandle);
-                            state->parent_scope_level = parent_fd ? parent_fd->scope_level : 0;
-                        }
-                        GC_SET(state->var_env_handle, s->var_env_handle);
-                        GC_SET(state->lexical_env_handle, s->lexical_env_handle);
-                        
-                        /* Function context */
-                        state->func_name = JS_DupAtom(ctx, fd->func_name);
-                        state->func_kind = (uint8_t)func_kind;
-                        state->func_type = (uint8_t)func_type;
-                        state->arg_count = fd->arg_count;
-                        state->is_expr_body = TRUE;
-                        
-                        /* Store argument names for proper parameter resolution */
-                        if (fd->arg_count > 0 && fd->args_handle != GC_HANDLE_NULL) {
-                            /* Allocate GC array for argument names */
-                            GCHandle arg_names_handle = gc_alloc(
-                                sizeof(JSAtom) * fd->arg_count, JS_GC_OBJ_TYPE_DATA);
-                            if (arg_names_handle != GC_HANDLE_NULL) {
-                                JSAtom *arg_names = (JSAtom *)gc_deref(arg_names_handle);
-                                for (int i = 0; i < fd->arg_count; i++) {
-                                    JSVarDefArrayHandle vd_arr = fd_args; int vd_idx = i;
-                                    arg_names[i] = JS_DupAtom(ctx, SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name);
-                                }
-                                GC_SET(state->arg_names_handle, arg_names_handle);
-                            } else {
-                                state->arg_names_handle = GC_HANDLE_NULL;
-                            }
-                        } else {
-                            state->arg_names_handle = GC_HANDLE_NULL;
-                        }
-                        
-                        /* Class context if applicable */
-                        if (s->cur_class_handle != GC_HANDLE_NULL) {
-                            GC_SET(state->class_handle, s->cur_class_handle);
-                            GC_SET(state->super_class_handle, s->cur_super_class_handle);
-                            state->is_static_method = FALSE;  /* Arrow functions in classes */
-                            state->is_derived_constructor = FALSE;
-                        }
-                        
-                        /* Parser flags */
-                        state->in_function_body = TRUE;
-                        state->in_class = s->in_class;
-                        state->in_strict_mode = (s->js_mode & JS_MODE_STRICT) != 0;
-                        
-                        fd->has_resume_parse_state = TRUE;
-                    }
-                    
-                    /* Add function to parent's constant pool */
-                    fd->parent_cpool_idx = cpool_add(s, JS_NULL);
-                    
-                    /* Emit stub bytecode */
-                    emit_lazy_function_stub(s, fd);
-                    
-                    goto done;
-                }
-                
-                /* Add function to parent's constant pool */
-                fd->parent_cpool_idx = cpool_add(s, JS_NULL);
-                
-                /* Emit stub bytecode */
-                emit_lazy_function_stub(s, fd);
-                
-                goto done;
-            }
-            
+            /* Arrow function with expression body: (x) => x * 2.
+             * Not lazily parsed: the expression has to be tokenized
+             * anyway, so skipping it saves little. */
             /* Non-lazy parsing */
             if (js_parse_function_check_names(s, fd, func_name))
                 goto fail;
@@ -40966,6 +41640,30 @@ static __exception int js_parse_function_decl2(JSParseState *s,
         }
     }
 
+    /* === Lazy function parsing ===
+     * Skip the body now and compile it on the first call (see
+     * js_lazy_try_skip_body and js_resume_lazy_parse). */
+    allow_lazy_parse = s->enable_lazy_parsing &&
+                       s->token.val == '{' &&
+                       fd->has_simple_parameter_list &&
+                       !fd->strip_debug &&
+                       func_type != JS_PARSE_FUNC_CLASS_STATIC_INIT &&
+                       func_type != JS_PARSE_FUNC_CLASS_CONSTRUCTOR &&
+                       func_type != JS_PARSE_FUNC_DERIVED_CLASS_CONSTRUCTOR;
+    if (allow_lazy_parse) {
+        int r;
+        /* parameter-name early errors do not need the body (a "use strict"
+           directive in the body is checked again on the first call) */
+        if (js_parse_function_check_names(s, fd, func_name))
+            goto fail;
+        r = js_lazy_try_skip_body(s, fd, func_type, ptr);
+        if (r < 0)
+            goto fail;
+        if (r > 0)
+            goto done;
+        /* r == 0: parse the body eagerly */
+    }
+
     if (func_type != JS_PARSE_FUNC_CLASS_STATIC_INIT) {
         if (js_parse_expect(s, '{'))
             goto fail;
@@ -40981,6 +41679,12 @@ static __exception int js_parse_function_decl2(JSParseState *s,
     while (s->token.val != '}') {
         if (js_parse_source_element(s))
             goto fail;
+    }
+    if (fd->lazy_verify_end && fd->lazy_verify_end != s->token.ptr + 1) {
+        int col, line = get_line_col(&col, s->buf_start, s->token.ptr - s->buf_start);
+        fprintf(stderr, "[lazy-verify] MISMATCH %s:%d:%d scanner end %+ld\n",
+                s->filename ? s->filename : "?", line + 1, col + 1,
+                (long)(fd->lazy_verify_end - (s->token.ptr + 1)));
     }
     if (!fd->strip_source) {
         /* save the function source code */
@@ -41122,415 +41826,305 @@ static __exception int js_parse_function_decl2(JSParseState *s,
 }
 
 /* ============================================================================
- * Phase 3: Resume Lazy Parse
- * ============================================================================
- * Restores parser state from JSLazyParseState and continues parsing the
- * function body that was skipped during initial lazy parsing.
- * This replaces the source-reconstruction approach.
- */
+ * Resume lazy parse (see "Lazy function parsing" above)
+ * ============================================================================ */
+
+/* Compile the body of a lazily parsed function.  The body is parsed as the
+ * only child of a synthetic direct-eval function ("proxy") whose closure
+ * variables are the stub's closure variables, in the same order, so a free
+ * name of the body resolves to closure variable i of the proxy exactly when
+ * the stub captured it as closure variable i.  Names the stub did not
+ * capture (rare: only if the preparse missed one) resolve as globals,
+ * appended after the stub's entries.  Returns the new bytecode handle, or
+ * GC_HANDLE_NULL with an exception pending. */
+static GCHandle js_lazy_compile(JSContextHandle ctx, JSFunctionBytecodeHandle stub_b)
+{
+    JSLazyParseState *state = js_bc_resume_parse_state(stub_b);
+    JSParseState s1, *s = &s1;
+    JSFunctionDef *proxy = NULL, *fd = NULL;
+    GCValue proxy_obj;
+    GCHandle result = GC_HANDLE_NULL;
+    GCStringHandle src;
+    const char *filename, *filename_c;
+    int i, nstub, cpool_idx, arg_count;
+    uint8_t func_type;
+    BOOL strict;
+
+    if (!state || state->source_handle == GC_HANDLE_NULL) {
+        JS_ThrowInternalError(ctx, "lazy function: no source");
+        return GC_HANDLE_NULL;
+    }
+    src = (GCStringHandle)state->source_handle;
+    func_type = state->func_type;
+    strict = state->in_strict_mode;
+    arg_count = state->arg_count;
+
+    filename_c = NULL;
+    if (SAFE_GET_OR(stub_b, JSFunctionBytecodeHandle, has_debug, 0) &&
+        SAFE_GET_OR(stub_b, JSFunctionBytecodeHandle, debug.filename, JS_ATOM_NULL) != JS_ATOM_NULL)
+        filename_c = JS_AtomToCString(ctx, SAFE_GET_OR(stub_b, JSFunctionBytecodeHandle, debug.filename, JS_ATOM_NULL));
+    filename = filename_c ? filename_c : "<lazy>";
+
+    memset(s, 0, sizeof(*s));
+    GC_SET(s->ctx, ctx);
+    s->filename = filename;
+    /* s->buf_start is a raw pointer into the GC string; it lives on the C
+       stack, which pins the string for the duration of the parse. */
+    s->buf_start = (const uint8_t *)gc_deref(src);
+    s->buf_end = s->buf_start + state->source_total_len;
+    s->buf_ptr = s->buf_start + state->source_offset;
+    s->token.val = ' ';
+    s->token.ptr = s->buf_ptr;
+    s->line_num = state->line_num;
+    s->col_num = state->col_num;
+    s->get_line_col_cache.ptr = s->buf_ptr;
+    s->get_line_col_cache.buf_start = s->buf_start;
+    s->get_line_col_cache.line_num = state->line_num;
+    s->get_line_col_cache.col_num = state->col_num;
+    s->allow_html_comments = TRUE;
+    s->enable_lazy_parsing = TRUE;
+    if (strict)
+        s->js_mode = JS_MODE_STRICT;
+
+    /* the proxy: a direct-eval scope over the stub's closure variables */
+    proxy = js_new_function_def(ctx, GC_HANDLE_NULL, TRUE, FALSE, filename,
+                                s->buf_ptr, &s->get_line_col_cache);
+    if (!proxy)
+        goto fail;
+    js_parse_set_cur_func(s, (JSFunctionDefHandle)(proxy->self_handle));
+    proxy->eval_type = JS_EVAL_TYPE_DIRECT;
+    proxy->has_this_binding = FALSE;
+    proxy->has_arguments_binding = FALSE;
+    proxy->new_target_allowed = TRUE;
+    proxy->super_call_allowed = TRUE;
+    proxy->super_allowed = TRUE;
+    proxy->arguments_allowed = TRUE;
+    proxy->js_mode = strict ? JS_MODE_STRICT : 0;
+    proxy->func_name = JS_DupAtom(ctx, JS_ATOM__eval_);
+    /* nested lazy functions of the body find the root source here */
+    GC_SET(proxy->source_string_handle, state->source_handle);
+    nstub = SAFE_GET_OR(stub_b, JSFunctionBytecodeHandle, closure_var_count, 0);
+    for (i = 0; i < nstub; i++) {
+        int t = js_bc_closure_var_closure_type(stub_b, i);
+        BOOL is_global = (t == JS_CLOSURE_GLOBAL || t == JS_CLOSURE_GLOBAL_DECL ||
+                          t == JS_CLOSURE_GLOBAL_REF);
+        if (add_closure_var(ctx, proxy,
+                            is_global ? JS_CLOSURE_GLOBAL_REF : JS_CLOSURE_REF, i,
+                            js_bc_closure_var_var_name(stub_b, i),
+                            js_bc_closure_var_is_const(stub_b, i),
+                            js_bc_closure_var_is_lexical(stub_b, i),
+                            (JSVarKindEnum)js_bc_closure_var_var_kind(stub_b, i)) < 0)
+            goto fail;
+    }
+    push_scope(s);
+    proxy->body_scope = proxy->scope_level;
+
+    /* the function itself */
+    cpool_idx = cpool_add(s, JS_NULL);
+    if (cpool_idx < 0)
+        goto fail;
+    fd = js_new_function_def(ctx, (JSFunctionDefHandle)(proxy->self_handle), FALSE,
+                             state->is_func_expr, filename, s->buf_ptr,
+                             &s->get_line_col_cache);
+    if (!fd)
+        goto fail;
+    fd->parent_cpool_idx = cpool_idx;
+    state = js_bc_resume_parse_state(stub_b);
+    fd->func_name = JS_DupAtom(ctx, state->func_name);
+    fd->func_kind = (JSFunctionKindEnum)state->func_kind;
+    fd->func_type = (JSParseFunctionEnum)func_type;
+    fd->has_prototype = state->has_prototype;
+    fd->has_home_object = state->has_home_object;
+    fd->has_arguments_binding = state->has_arguments_binding;
+    fd->has_this_binding = state->has_this_binding;
+    fd->new_target_allowed = state->new_target_allowed;
+    fd->super_call_allowed = state->super_call_allowed;
+    fd->super_allowed = state->super_allowed;
+    fd->arguments_allowed = state->arguments_allowed;
+    fd->is_derived_class_constructor = (func_type == JS_PARSE_FUNC_DERIVED_CLASS_CONSTRUCTOR);
+    fd->has_simple_parameter_list = TRUE;
+    fd->js_mode = strict ? JS_MODE_STRICT : 0;
+    if (arg_count > 0 && state->arg_names_handle != GC_HANDLE_NULL) {
+        for (i = 0; i < arg_count; i++) {
+            JSAtom *names = (JSAtom *)gc_deref(js_bc_resume_parse_state(stub_b)->arg_names_handle);
+            if (add_arg(ctx, fd, names[i]) < 0)
+                goto fail;
+        }
+        fd->defined_arg_count = arg_count;
+    }
+    js_parse_set_cur_func(s, (JSFunctionDefHandle)(fd->self_handle));
+    /* argument scope is 0; the body scope is entered like in
+       js_parse_function_decl2 */
+    if (fd->func_kind == JS_FUNC_GENERATOR || fd->func_kind == JS_FUNC_ASYNC_GENERATOR)
+        emit_op(s, OP_initial_yield);
+    fd->in_function_body = TRUE;
+    push_scope(s);
+    fd->body_scope = fd->scope_level;
+
+    if (next_token(s))
+        goto fail;
+    if (s->token.val != '{') {
+        js_parse_error(s, "lazy function: expected '{'");
+        goto fail;
+    }
+    if (next_token(s))
+        goto fail;
+    /* the body's own directive prologue ("use strict") */
+    if (js_parse_directives(s))
+        goto fail;
+    if ((fd->js_mode & JS_MODE_STRICT) && !strict &&
+        js_parse_function_check_names(s, fd, fd->func_name))
+        goto fail;
+    while (s->token.val != '}') {
+        if (js_parse_source_element(s))
+            goto fail;
+    }
+    state = js_bc_resume_parse_state(stub_b);
+    if (!fd->strip_source) {
+        GC_SET(fd->source_string_handle, state->source_handle);
+        fd->source_offset = state->func_source_offset;
+        fd->source_len = state->func_source_len;
+    }
+    if (js_is_live_code(s))
+        emit_return(s, FALSE);
+    js_parse_set_cur_func(s, (JSFunctionDefHandle)(proxy->self_handle));
+    fd = NULL;  /* now owned by the proxy */
+    emit_return(s, FALSE);
+
+    proxy_obj = js_create_function(ctx, proxy);
+    proxy = NULL;  /* freed by js_create_function on failure */
+    if (JS_IsException(proxy_obj))
+        goto fail;
+    {
+        JSFunctionBytecodeHandle pb = (JSFunctionBytecodeHandle)GC_VALUE_GET_HANDLE(proxy_obj);
+        GCValue child = js_bc_cpool_value(pb, cpool_idx);
+        if (JS_VALUE_GET_TAG(child) != JS_TAG_FUNCTION_BYTECODE) {
+            JS_ThrowInternalError(ctx, "lazy function: no bytecode");
+            goto fail;
+        }
+        result = GC_VALUE_GET_HANDLE(child);
+        SAFE_SET((JSFunctionBytecodeHandle)result, JSFunctionBytecodeHandle,
+                 func_parse_state, JS_FUNC_PARSED);
+    }
+    free_token(s, &s->token);
+    js_parse_cleanup_roots(s);
+    return result;
+
+ fail:
+    free_token(s, &s->token);
+    if (fd) {
+        js_parse_set_cur_func(s, (JSFunctionDefHandle)(fd->parent_handle));
+        js_free_function_def(ctx, fd);
+    }
+    if (proxy)
+        js_free_function_def(ctx, proxy);
+    js_parse_cleanup_roots(s);
+    if (!JS_HasException(ctx))
+        JS_ThrowInternalError(ctx, "lazy parse failed");
+    return GC_HANDLE_NULL;
+}
+
+/* Turn the lazy closure 'p' (made from stub_b) into a closure of new_b.
+ * new_b's closure variable i refers to the stub's closure variable var_idx,
+ * whose var_ref the closure already holds. */
+static int js_lazy_install(JSContextHandle ctx, JSObjectHandle p,
+                           JSFunctionBytecodeHandle stub_b,
+                           JSFunctionBytecodeHandle new_b)
+{
+    int i, n, nstub;
+    GCHandle old_refs, refs = GC_HANDLE_NULL;
+
+    nstub = SAFE_GET_OR(stub_b, JSFunctionBytecodeHandle, closure_var_count, 0);
+    n = SAFE_GET_OR(new_b, JSFunctionBytecodeHandle, closure_var_count, 0);
+    old_refs = SAFE_GET_OR(p, JSObjectHandle, u.func.var_refs_handle, GC_HANDLE_NULL);
+    if (n > 0) {
+        refs = gc_allocz(sizeof(GCHandle) * n, JS_GC_OBJ_TYPE_DATA);
+        if (refs == GC_HANDLE_NULL) {
+            JS_ThrowOutOfMemory(ctx);
+            return -1;
+        }
+        gc_add_root(refs);
+        for (i = 0; i < n; i++) {
+            int t = js_bc_closure_var_closure_type(new_b, i);
+            int idx = js_bc_closure_var_var_idx(new_b, i);
+            JSVarRefHandle var_ref = GC_HANDLE_NULL;
+            if ((t == JS_CLOSURE_REF || t == JS_CLOSURE_GLOBAL_REF) &&
+                idx >= 0 && idx < nstub)
+                var_ref = get_var_ref_from_array_safe(old_refs, idx);
+            if (!SAFE_VALID(var_ref)) {
+                /* a global the stub did not capture */
+                JSClosureVar cv;
+                cv.closure_type = JS_CLOSURE_GLOBAL;
+                cv.is_lexical = js_bc_closure_var_is_lexical(new_b, i);
+                cv.is_const = js_bc_closure_var_is_const(new_b, i);
+                cv.var_kind = js_bc_closure_var_var_kind(new_b, i);
+                cv.var_idx = 0;
+                cv.var_name = js_bc_closure_var_var_name(new_b, i);
+                var_ref = js_closure_global_var(ctx, &cv);
+                if (!SAFE_VALID(var_ref)) {
+                    var_ref = js_create_var_ref(ctx, cv.is_lexical);
+                    if (!SAFE_VALID(var_ref)) {
+                        gc_remove_root(refs);
+                        JS_ThrowOutOfMemory(ctx);
+                        return -1;
+                    }
+                    js_varref_set_value(var_ref, JS_UNDEFINED);
+                }
+            }
+            js_varref_set_in_array(refs, i, var_ref);
+        }
+        gc_remove_root(refs);
+    }
+    SAFE_SET_HANDLE(p, JSObjectHandle, u.func.function_bytecode_handle, SAFE_HANDLE(new_b));
+    SAFE_SET_HANDLE(p, JSObjectHandle, u.func.var_refs_handle, refs);
+    SAFE_SET_HANDLE(p, JSObjectHandle, u.func.parent_frame_handle, GC_HANDLE_NULL);
+    return 0;
+}
+
+/* If the closure 'p' still runs a lazy stub, compile the body (once per
+ * stub) and install it in 'p'.  Returns 0 or -1 with an exception. */
+static int js_lazy_ensure_compiled(JSObjectHandle p)
+{
+    JSFunctionBytecodeHandle lazy_b = (JSFunctionBytecodeHandle)
+        SAFE_GET_OR(p, JSObjectHandle, u.func.function_bytecode_handle, GC_HANDLE_NULL);
+    JSContextHandle ctx = (JSContextHandle)SAFE_GET_OR(lazy_b, JSFunctionBytecodeHandle, realm_handle, GC_HANDLE_NULL);
+    JSLazyParseState *state;
+    GCHandle compiled;
+
+    if (SAFE_GET_OR(lazy_b, JSFunctionBytecodeHandle, func_parse_state, 0) == JS_FUNC_PARSED ||
+        !SAFE_GET_OR(lazy_b, JSFunctionBytecodeHandle, has_resume_parse_state, 0))
+        return 0;
+    state = js_bc_resume_parse_state(lazy_b);
+    compiled = state->compiled_handle;
+    if (compiled == GC_HANDLE_NULL) {
+        if (SAFE_GET_OR(lazy_b, JSFunctionBytecodeHandle, func_parse_state, 0) == JS_FUNC_PARSING) {
+            JS_ThrowInternalError(ctx, "lazy function: recursive compilation");
+            return -1;
+        }
+        SAFE_SET(lazy_b, JSFunctionBytecodeHandle, func_parse_state, JS_FUNC_PARSING);
+        compiled = js_lazy_compile(ctx, lazy_b);
+        SAFE_SET(lazy_b, JSFunctionBytecodeHandle, func_parse_state, JS_FUNC_LAZY);
+        if (compiled == GC_HANDLE_NULL)
+            return -1;
+        state = js_bc_resume_parse_state(lazy_b);
+        GC_SET(state->compiled_handle, compiled);
+    }
+    return js_lazy_install(ctx, p, lazy_b, (JSFunctionBytecodeHandle)compiled);
+}
+
+/* OP_lazy_function and the generator/async entry points: compile, install
+ * and run.  (Plain calls compile at entry in JS_CallInternal, so the stub
+ * frame normally never runs.) */
 static GCValue js_resume_lazy_parse(JSContextHandle ctx,
                                     JSFunctionBytecodeHandle lazy_b,
                                     GCValue lazy_func,
                                     GCValue this_obj, GCValue new_target,
                                     int argc, GCValue *argv, int flags)
 {
-
-    JSLazyParseState *state = js_bc_resume_parse_state(lazy_b);
-    JSFunctionDef *fd = NULL;
-    JSParseState s = { .token = { .u.str.str = GC_UNDEFINED_INIT } };
-    GCValue ret = JS_UNDEFINED;
-    GCValue new_bytecode = JS_UNDEFINED;
-    JSObjectHandle p = GC_HANDLE_NULL;
-    JSFunctionBytecodeHandle new_b = GC_HANDLE_NULL;
-    
-    /* Step 1: Validate state */
-    if (!state || state->source_handle == GC_HANDLE_NULL) {
-        return JS_ThrowInternalError(ctx, "lazy parse: no source state");
-    }
-    
-    /* DEBUG: Check if arg_names_handle is valid */
-    if (state->arg_count > 0 && state->arg_names_handle != GC_HANDLE_NULL) {
-        JSAtom *arg_names = (JSAtom *)gc_deref(state->arg_names_handle);
-        if (!arg_names) {
-            return JS_ThrowInternalError(ctx, "lazy parse: invalid arg_names");
-        }
-    }
-    
-    /* Step 2: Get source pointer from handle */
-    GCStringHandle source_str = (state->source_handle);
-    if (!SAFE_VALID(source_str)) {
-        return JS_ThrowInternalError(ctx, "lazy parse: invalid source handle");
-    }
-    const uint8_t *root_source = (const uint8_t *)((char *)gc_deref(source_str));
-
-    /* DEBUG (CYBER_DUMP_SCRIPTS): dump each unique lazy root source so stack
-     * frames showing <lazy>:LINE can be mapped to real source text. */
-    if (CYBER_ENV(CYBER_T_DUMP_SCRIPTS)) {
-        static GCHandle seen_sources[512];
-        static int seen_count = 0;
-        int found = 0;
-        for (int i = 0; i < seen_count; i++) {
-            if (seen_sources[i] == state->source_handle) { found = 1; break; }
-        }
-        if (!found) {
-            if (seen_count < 512) seen_sources[seen_count++] = state->source_handle;
-            char dump_name[96];
-            snprintf(dump_name, sizeof(dump_name), "lazy_root_%u.js",
-                     (unsigned)state->source_handle);
-            FILE *df = fopen(dump_name, "wb");
-            if (df) {
-                fwrite(root_source, 1, gc_string_length(source_str), df);
-                fclose(df);
-            }
-            fprintf(stderr, "[lazy] dump root source handle=%u len=%zu file=%s\n",
-                    (unsigned)state->source_handle, (size_t)gc_string_length(source_str), dump_name);
-        }
-    }
-
-    /* Step 3: Create and initialize parser state */
-    memset(&s, 0, sizeof(s));
-    s.ctx = ctx;
-    
-    /* Step 4: Restore source buffer using handle + offset
-     * IMPORTANT: Keep buf_start pointing to root_source, not to the function body.
-     * This ensures nested lazy functions compute correct offsets relative to root.
-     */
-    s.buf_start = (uint8_t *)root_source;
-    s.buf_end = s.buf_start + gc_string_length(source_str);
-    s.buf_ptr = s.buf_start + state->source_offset + state->token_offset;  /* Position at token */
-    s.filename = "<lazy>";  /* Use placeholder filename */
-    
-    /* Step 5: Initialize token state */
-    s.token.ptr = s.buf_ptr;
-    s.token.val = TOK_EOF;  /* Will be set by next_token() */
-    s.token.u.ident.atom = JS_ATOM_NULL;
-    s.token.u.ident.is_reserved = FALSE;
-    
-    /* Step 5: Restore line/column position */
-    s.line_num = state->line_num;
-    s.col_num = state->col_num;
-    
-    /* Initialize get_line_col_cache (required for parser operation)
-     * The cache is set at the function body start position, not at buf_start,
-     * so that line number calculations are correct for positions within
-     * the function body. */
-    s.get_line_col_cache.ptr = s.buf_start + state->source_offset;
-    s.get_line_col_cache.buf_start = s.buf_start;
-    s.get_line_col_cache.line_num = s.line_num;
-    s.get_line_col_cache.col_num = s.col_num;
-    
-    /* Enable lazy parsing in resumed parser */
-    s.enable_lazy_parsing = TRUE;
-    
-    /* Step 6: Restore scope chain */
-    if (state->parent_scope_handle == GC_HANDLE_NULL) {
-        return JS_ThrowInternalError(ctx, "lazy parse: no parent scope");
-    }
-    s.cur_func_handle = (JSFunctionDefHandle)(state->parent_scope_handle);
-    {
-        JSFunctionDef *parent_fd = SAFE_PTR(s.cur_func_handle, JSFunctionDefHandle);
-        if (parent_fd) {
-            /* Restore parent's scope level to what it was when this function was defined */
-            parent_fd->scope_level = state->parent_scope_level;
-
-        }
-    }
-    s.var_env_handle = state->var_env_handle;
-    s.lexical_env_handle = state->lexical_env_handle;
-    
-    /* Step 6: Create new function def for this function */
-    /* is_expr = true for all types except STATEMENT and VAR */
-    BOOL is_func_expr = (state->func_type != JS_PARSE_FUNC_STATEMENT && 
-                         state->func_type != JS_PARSE_FUNC_VAR);
-    fd = js_new_function_def(ctx, s.cur_func_handle, 
-                             FALSE,  /* is_eval - we're not in eval context */
-                             is_func_expr,
-                             s.filename, s.token.ptr, &s.get_line_col_cache);
-    if (!fd) {
-        return JS_ThrowInternalError(ctx, "lazy parse: failed to create function def");
-    }
-    
-    /* Step 7: Copy function properties (mirror js_parse_function_decl2) */
-    fd->func_name = JS_DupAtom(ctx, state->func_name);
-    fd->func_kind = (JSFunctionKindEnum)state->func_kind;
-    fd->func_type = (JSParseFunctionEnum)state->func_type;
-    fd->has_prototype = (state->func_type != JS_PARSE_FUNC_STATEMENT &&
-                         state->func_type != JS_PARSE_FUNC_VAR &&
-                         state->func_type != JS_PARSE_FUNC_EXPR &&
-                         state->func_type != JS_PARSE_FUNC_ARROW &&
-                         state->func_type != JS_PARSE_FUNC_CLASS_STATIC_INIT &&
-                         state->func_kind == JS_FUNC_NORMAL);
-    fd->has_home_object = (state->func_type == JS_PARSE_FUNC_METHOD ||
-                           state->func_type == JS_PARSE_FUNC_GETTER ||
-                           state->func_type == JS_PARSE_FUNC_SETTER ||
-                           state->func_type == JS_PARSE_FUNC_CLASS_CONSTRUCTOR ||
-                           state->func_type == JS_PARSE_FUNC_DERIVED_CLASS_CONSTRUCTOR);
-    fd->has_arguments_binding = (state->func_type != JS_PARSE_FUNC_ARROW &&
-                                 state->func_type != JS_PARSE_FUNC_CLASS_STATIC_INIT);
-    fd->has_this_binding = fd->has_arguments_binding;
-    fd->is_derived_class_constructor = (state->func_type == JS_PARSE_FUNC_DERIVED_CLASS_CONSTRUCTOR);
-    fd->in_function_body = TRUE;
-    
-    if (state->func_type == JS_PARSE_FUNC_ARROW) {
-        JSFunctionDef *parent_fd = SAFE_PTR(s.cur_func_handle, JSFunctionDefHandle);
-        if (parent_fd) {
-            fd->new_target_allowed = parent_fd->new_target_allowed;
-            fd->super_call_allowed = parent_fd->super_call_allowed;
-            fd->super_allowed = parent_fd->super_allowed;
-            fd->arguments_allowed = parent_fd->arguments_allowed;
-        } else {
-            fd->new_target_allowed = TRUE;
-            fd->super_call_allowed = FALSE;
-            fd->super_allowed = FALSE;
-            fd->arguments_allowed = TRUE;
-        }
-    } else if (state->func_type == JS_PARSE_FUNC_CLASS_STATIC_INIT) {
-        fd->new_target_allowed = TRUE;
-        fd->super_call_allowed = FALSE;
-        fd->super_allowed = TRUE;
-        fd->arguments_allowed = FALSE;
-    } else {
-        fd->new_target_allowed = TRUE;
-        fd->super_call_allowed = fd->is_derived_class_constructor;
-        fd->super_allowed = fd->has_home_object;
-        fd->arguments_allowed = TRUE;
-    }
-    
-    /* Step 7b: Set up arguments from stored argument names */
-    if (state->arg_count > 0 && state->arg_names_handle != GC_HANDLE_NULL) {
-        JSAtom *arg_names = (JSAtom *)gc_deref(state->arg_names_handle);
-        for (int i = 0; i < state->arg_count; i++) {
-            /* Add argument to function definition using add_arg */
-            if (add_arg(ctx, fd, JS_DupAtom(ctx, arg_names[i])) < 0) {
-                goto fail;
-            }
-        }
-        fd->defined_arg_count = state->arg_count;
-    }
-    
-    /* Step 8: Set up class context if applicable */
-    if (state->class_handle != GC_HANDLE_NULL) {
-        s.cur_class_handle = state->class_handle;
-        s.cur_super_class_handle = state->super_class_handle;
-        s.in_class = state->in_class;
-    }
-    
-    /* Step 9: Set up strict mode */
-    if (state->in_strict_mode) {
-        s.js_mode = JS_MODE_STRICT;
-        fd->js_mode = JS_MODE_STRICT;
-    }
-    
-    /* Step 10: Parse the function body */
-    js_parse_set_cur_func(&s, (JSFunctionDefHandle)(fd->self_handle));
-    
-    /* Enter function body scope */
-    push_scope(&s);
-    fd->body_scope = fd->scope_level;
-    
-    /* For generators, emit OP_initial_yield before parsing body */
-    if (fd->func_kind == JS_FUNC_GENERATOR ||
-        fd->func_kind == JS_FUNC_ASYNC_GENERATOR) {
-        emit_op(&s, OP_initial_yield);
-    }
-    
-    /* Parse function body statements */
-    if (state->func_type == JS_PARSE_FUNC_ARROW && state->is_expr_body) {
-        /* Arrow function with expression body: => expr */
-        /* Read the first token of the expression */
-        if (next_token(&s)) {
-            goto fail;
-        }
-        /* Use js_parse_assign_expr (not js_parse_expr) to stop at commas
-         * that separate the arrow body from surrounding expression context */
-        if (js_parse_assign_expr(&s)) {
-            goto fail;
-        }
-        emit_return(&s, TRUE);
-    } else {
-        /* Normal function body: { statements } */
-        /* Read the first token (should be '{') */
-        if (next_token(&s)) {
-            goto fail;
-        }
-        
-        /* Consume the opening '{' */
-        if (s.token.val != '{') {
-            js_parse_error(&s, "expected '{'");
-            goto fail;
-        }
-        /* Now read the first token INSIDE the block */
-        if (next_token(&s)) {
-            goto fail;
-        }
-        
-        /* Parse statements until matching '}' */
-        while (s.token.val != '}') {
-            if (js_parse_source_element(&s)) {
-                goto fail;
-            }
-        }
-        
-        /* Ensure function returns undefined if no explicit return */
-        emit_return(&s, FALSE);
-    }
-    
-    pop_scope(&s);
-    
-    /* Step 12: Create bytecode from function def */
-    new_bytecode = js_create_function(ctx, fd);
-    
-    /* Debug: Dump the generated bytecode */
-    {
-        JSFunctionBytecodeHandle new_b_temp = GC_HANDLE_NULL;
-        if (JS_VALUE_GET_TAG(new_bytecode) == JS_TAG_FUNCTION_BYTECODE) {
-            new_b_temp = (JSFunctionBytecodeHandle)(GC_VALUE_GET_HANDLE(new_bytecode));
-        } else {
-            new_b_temp = (JSFunctionBytecodeHandle)(
-                SAFE_GET_OR(JS_VALUE_GET_OBJ_HANDLE(new_bytecode), JSObjectHandle, u.func.function_bytecode_handle, GC_HANDLE_NULL));
-        }
-        int bc_len = SAFE_GET_OR(new_b_temp, JSFunctionBytecodeHandle, byte_code_len, 0);
-        uint8_t *bc = js_bc_byte_code_buf(new_b_temp);
-    }
-    
-    if (JS_IsException(new_bytecode)) {
-        goto fail;
-    }
-    
-    /* Step 14: Replace bytecode in original function */
-    p = JS_VALUE_GET_OBJ_HANDLE(lazy_func);
-    
-    if (JS_VALUE_GET_TAG(new_bytecode) == JS_TAG_FUNCTION_BYTECODE) {
-        new_b = (JSFunctionBytecodeHandle)(GC_VALUE_GET_HANDLE(new_bytecode));
-    } else {
-        /* Should be an object with bytecode */
-        new_b = (JSFunctionBytecodeHandle)(
-            SAFE_GET_OR(JS_VALUE_GET_OBJ_HANDLE(new_bytecode), JSObjectHandle, u.func.function_bytecode_handle, GC_HANDLE_NULL));
-    }
-    
-    /* Patch closure vars that reference incorrect parent indices.
-     * When js_create_function cleared parent_fd->closure_var_handle, any new
-     * closure vars added during resume get indices starting from 0, but the
-     * parent function's var_refs array corresponds to the original closure vars.
-     * A JS_CLOSURE_GLOBAL_REF is valid only if the parent bytecode has a closure
-     * var at that index with the same name. Otherwise, fall back to global lookup. */
-    {
-        JSFunctionBytecodeHandle parent_b = GC_HANDLE_NULL;
-        BOOL has_parent_b = FALSE;
-        if (SAFE_GET_OR(p, JSObjectHandle, u.func.parent_frame_handle, GC_HANDLE_NULL) != GC_HANDLE_NULL) {
-            JSStackFrame *parent_sf = (JSStackFrame *)gc_deref(SAFE_GET_OR(p, JSObjectHandle, u.func.parent_frame_handle, GC_HANDLE_NULL));
-            if (parent_sf) {
-                JSObjectHandle parent_p = JS_VALUE_GET_OBJ_HANDLE(parent_sf->cur_func);
-                parent_b = (JSFunctionBytecodeHandle)(SAFE_GET_OR(parent_p, JSObjectHandle, u.func.function_bytecode_handle, GC_HANDLE_NULL));
-                has_parent_b = TRUE;
-            }
-        }
-        if (has_parent_b && SAFE_GET_OR(new_b, JSFunctionBytecodeHandle, closure_var_count, 0) > 0) {
-            JSClosureVar *cv = b_closure_var(new_b);
-            JSClosureVar *parent_cv = b_closure_var(parent_b);
-            for (int i = 0; i < SAFE_GET_OR(new_b, JSFunctionBytecodeHandle, closure_var_count, 0); i++) {
-                if (cv[i].closure_type == JS_CLOSURE_GLOBAL_REF) {
-                    int idx = cv[i].var_idx;
-                    if (idx < 0 || idx >= SAFE_GET_OR(parent_b, JSFunctionBytecodeHandle, closure_var_count, 0) ||
-                        parent_cv[idx].var_name != cv[i].var_name) {
-                        cv[i].closure_type = JS_CLOSURE_GLOBAL;
-                        cv[i].var_idx = 0;
-                    }
-                }
-            }
-        }
-    }
-    
-    /* Mark as parsed */
-    SAFE_SET(new_b, JSFunctionBytecodeHandle, func_parse_state, JS_FUNC_PARSED);
-    
-    /* Preserve parent_frame_handle for nested closure resolution.
-     * Even though the function is now fully parsed, child closures
-     * may need to walk the closure parent chain to find captured
-     * variables from grandparent scopes. */
-    if (SAFE_GET_OR(p, JSObjectHandle, u.func.parent_frame_handle, GC_HANDLE_NULL) != GC_HANDLE_NULL) {
-        SAFE_SET(new_b, JSFunctionBytecodeHandle, has_resume_parse_state, 1);
-        JSLazyParseState *new_state = js_bc_resume_parse_state(new_b);
-        if (new_state) {
-            memset(new_state, 0, sizeof(JSLazyParseState));
-            GC_SET(new_state->parent_frame_handle, SAFE_GET_OR(p, JSObjectHandle, u.func.parent_frame_handle, GC_HANDLE_NULL));
-        }
-    }
-    
-    /* Replace handle */
-    SAFE_SET_HANDLE(p, JSObjectHandle, u.func.function_bytecode_handle, SAFE_HANDLE(new_b));
-    
-    /* Copy var_refs from new function if it has them */
-    if (JS_VALUE_GET_TAG(new_bytecode) == JS_TAG_OBJECT) {
-        JSObjectHandle new_p = JS_VALUE_GET_OBJ_HANDLE(new_bytecode);
-        if (SAFE_GET_OR(new_p, JSObjectHandle, u.func.var_refs_handle, GC_HANDLE_NULL) != GC_HANDLE_NULL) {
-            SAFE_SET_HANDLE(p, JSObjectHandle, u.func.var_refs_handle, SAFE_GET_OR(new_p, JSObjectHandle, u.func.var_refs_handle, GC_HANDLE_NULL));
-        }
-    } else if (JS_VALUE_GET_TAG(new_bytecode) == JS_TAG_FUNCTION_BYTECODE) {
-        /* new_bytecode is raw bytecode, need to call js_closure to create proper closure */
-        /* Get parent frame's var_refs for closure resolution */
-        JSStackFrame *cur_sf = js_rt_current_stack_frame(ctx_rt);
-        GCHandle parent_var_refs = GC_HANDLE_NULL;
-        JSStackFrame *parent_sf = NULL;
-        
-        /* First, try to use the stored parent frame handle from closure object.
-         * We read from the closure object (not bytecode) because multiple closures
-         * can share the same lazy bytecode but each has its own parent scope. */
-        if (SAFE_GET_OR(p, JSObjectHandle, u.func.parent_frame_handle, GC_HANDLE_NULL) != GC_HANDLE_NULL) {
-            parent_sf = (JSStackFrame *)gc_deref(SAFE_GET_OR(p, JSObjectHandle, u.func.parent_frame_handle, GC_HANDLE_NULL));
-            if (parent_sf) {
-                JSObjectHandle parent_p = JS_VALUE_GET_OBJ_HANDLE(parent_sf->cur_func);
-                JSFunctionBytecodeHandle parent_b = SAFE_GET_OR(parent_p, JSObjectHandle, u.func.function_bytecode_handle, GC_HANDLE_NULL);
-                parent_var_refs = SAFE_GET_OR(parent_p, JSObjectHandle, u.func.var_refs_handle, GC_HANDLE_NULL);
-            }
-        }
-        
-        /* Fallback to current call chain if no stored parent frame.
-         * Use cur_sf (the caller's frame) as the definition scope.
-         * For most cases the caller is the function where the lazy function
-         * was defined, which is the correct scope for closure resolution. */
-        if (!parent_sf && cur_sf) {
-            parent_sf = cur_sf;
-            JSObjectHandle parent_p = JS_VALUE_GET_OBJ_HANDLE(parent_sf->cur_func);
-            JSFunctionBytecodeHandle parent_b = SAFE_GET_OR(parent_p, JSObjectHandle, u.func.function_bytecode_handle, GC_HANDLE_NULL);
-            parent_var_refs = SAFE_GET_OR(parent_p, JSObjectHandle, u.func.var_refs_handle, GC_HANDLE_NULL);
-        }
-        GCValue closure = js_closure(ctx, new_bytecode, parent_var_refs, parent_sf, TRUE);
-        if (JS_IsException(closure)) {
-            goto fail;
-        }
-        if (JS_VALUE_GET_TAG(closure) == JS_TAG_OBJECT) {
-            JSObjectHandle closure_p = JS_VALUE_GET_OBJ_HANDLE(closure);
-            if (SAFE_GET_OR(closure_p, JSObjectHandle, u.func.var_refs_handle, GC_HANDLE_NULL) != GC_HANDLE_NULL) {
-                SAFE_SET_HANDLE(p, JSObjectHandle, u.func.var_refs_handle, SAFE_GET_OR(closure_p, JSObjectHandle, u.func.var_refs_handle, GC_HANDLE_NULL));
-            }
-        }
-    }
-    
-    /* Clear parent_frame_handle - function is no longer lazy */
-    SAFE_SET_HANDLE(p, JSObjectHandle, u.func.parent_frame_handle, GC_HANDLE_NULL);
-    
-    /* Step 15: Execute the new bytecode */
-    ret = JS_CallInternal(ctx, lazy_func, this_obj, new_target,
-                          argc, argv, flags);
-    
-    /* Cleanup */
-    js_parse_cleanup_roots(&s);
-    
-    return ret;
-    
-fail:
-    if (fd) {
-        js_parse_set_cur_func(&s, (JSFunctionDefHandle)(fd->parent_handle));
-        js_free_function_def(ctx, fd);
-    }
-    js_parse_cleanup_roots(&s);
-    /* js_parse_* functions return -1 on failure without setting exception */
-    /* Only throw if no exception is already set */
-    if (!JS_HasException(ctx)) {
-        JS_ThrowInternalError(ctx, "lazy parse failed");
-    }
-    return JS_EXCEPTION;
+    (void)lazy_b;
+    if (js_lazy_ensure_compiled(JS_VALUE_GET_OBJ_HANDLE(lazy_func)))
+        return JS_EXCEPTION;
+    return JS_CallInternal(ctx, lazy_func, this_obj, new_target, argc, argv, flags);
 }
 
 static __exception int js_parse_function_decl(JSParseState *s,
@@ -42400,7 +42994,9 @@ static int JS_WriteFunctionTag(BCWriterState *s, GCValue obj)
         dbuf_put(&s->dbuf, ((uint8_t*)gc_deref(SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.pc2line_handle, GC_HANDLE_NULL))), SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.pc2line_len, 0));
         if (((char*)gc_deref(SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_handle, GC_HANDLE_NULL)))) {
             bc_put_leb128(s, SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_len, 0));
-            dbuf_put(&s->dbuf, (uint8_t *)((char*)gc_deref(SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_handle, GC_HANDLE_NULL))), SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_len, 0));
+            dbuf_put(&s->dbuf, (uint8_t *)((char*)gc_deref(SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_handle, GC_HANDLE_NULL))) +
+                     SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_offset, 0),
+                     SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_len, 0));
         } else {
             bc_put_leb128(s, 0);
         }
@@ -46024,7 +46620,9 @@ static GCValue js_function_toString(JSContextHandle ctx, GCValue this_val,
     if (js_class_has_bytecode(SAFE_GET_OR(p, JSObjectHandle, class_id, 0))) {
         JSFunctionBytecodeHandle b = (JSFunctionBytecodeHandle)(SAFE_GET_OR(p, JSObjectHandle, u.func.function_bytecode_handle, GC_HANDLE_NULL));
         if (SAFE_GET_OR(b, JSFunctionBytecodeHandle, has_debug, 0) && ((char*)gc_deref(SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_handle, GC_HANDLE_NULL)))) {
-            return JS_NewStringLen(ctx, ((char*)gc_deref(SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_handle, GC_HANDLE_NULL))), SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_len, 0));
+            return JS_NewStringLen(ctx, ((char*)gc_deref(SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_handle, GC_HANDLE_NULL))) +
+                                   SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_offset, 0),
+                                   SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_len, 0));
         }
         func_kind = (JSFunctionKindEnum)SAFE_GET_OR(b, JSFunctionBytecodeHandle, func_kind, 0);
     }

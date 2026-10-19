@@ -1186,6 +1186,258 @@ TEST(test_lazy_parsing_complex_scenarios) {
 }
 
 /* ============================================================================
+ * Test 15: Lazy parsing conformance suite
+ *
+ * Scoping cases that a lazily compiled function must get exactly as an
+ * eagerly compiled one: closures over loop bindings, this / arguments /
+ * new.target / super in arrows, private names, TDZ through closures,
+ * regexp / template / division in skipped bodies, Function.prototype.toString
+ * and single evaluation of arrow bodies.  The expected output was produced
+ * by Node.js from the same source.
+ * ============================================================================ */
+
+static const char *lazy_suite_js =
+    "var out=[];\n"
+    "function T(name, f){ try{ var v=f(); out.push(name+'='+(typeof v==='string'?v:JSON.stringify(v))); }catch(e){ out.push(name+'!'+e.name+':'+e.message); } }\n"
+    "T('arrow-arguments', function(){ function outer(){ var g=()=>{ return arguments[0]; }; return g(9); } return outer(5); });\n"
+    "T('arrow-this', function(){ var o={v:3,m:function(){ var g=()=>{ return this.v; }; return g(); }}; return o.m(); });\n"
+    "T('arrow-newtarget', function(){ function F(){ var g=()=>{ return typeof new.target; }; this.r=g(); } return new F().r; });\n"
+    "T('regex-brace', function(){ function f(){ return \"a}b\".replace(/}/g,'x'); } return f(); });\n"
+    "T('regex-after-paren', function(){ function f(s){ if (s) /}/.test(s); return 1; } return f('}'); });\n"
+    "T('regex-class-brace', function(){ function f(){ var r=/[{]/; return r.test('{'); } return f(); });\n"
+    "T('div-not-regex', function(){ function f(a,b){ var x=a/b; var y=a/ 2; return [x,y,'}']; } return f(4,2); });\n"
+    "T('template-nested', function(){ function f(a){ return `x${a ? `{${a}}` : '}'}y`; } return [f(1), f(0)]; });\n"
+    "T('template-string-in-interp', function(){ function f(){ return `${\"}\"}${'{'}`; } return f(); });\n"
+    "T('template-comment-in-interp', function(){ function f(){ return `${ /* } */ 1 }`; } return f(); });\n"
+    "T('regex-after-keyword', function(){ function f(x){ switch(x){ case 1: return typeof /}/; } return void /}/; } return [f(1),f(2)]; });\n"
+    "T('regex-flags-dv', function(){ function f(){ var r=/a\\}/d; return r.flags; } return f(); });\n"
+    "T('regex-after-plus', function(){ function f(){ return 'x'+/}/.source; } return f(); });\n"
+    "T('regex-after-arrow', function(){ function f(){ var g=x=>/}/.test(x); return g('}'); } return f(); });\n"
+    "T('closure-capture', function(){ function outer(){ var a=1, b=2; function inner(){ return a+b; } return inner; } return outer()(); });\n"
+    "T('closure-late', function(){ function outer(){ var fs=[]; for(let i=0;i<3;i++) fs.push(function(){ return i; }); return fs.map(f=>f()); } return outer(); });\n"
+    "T('nested-lazy', function(){ function a(){ var x=1; function b(){ var y=2; function c(){ return x+y; } return c(); } return b(); } return a(); });\n"
+    "T('default-params', function(){ function f(a=1,b=a+1){ return function(){ return a+b; }(); } return f(); });\n"
+    "T('destructure-params', function(){ function f({a},[b]){ return function(){ return a+b; }(); } return f({a:1},[2]); });\n"
+    "T('eval-in-lazy', function(){ function f(){ var q=7; return eval('q'); } return f(); });\n"
+    "T('arguments-in-lazy', function(){ function f(){ return arguments.length; } return f(1,2,3); });\n"
+    "T('async-lazy', function(){ async function f(){ return 1; } return typeof f().then; });\n"
+    "T('generator-lazy', function(){ function* g(){ yield 1; yield 2; } return [...g()]; });\n"
+    "T('class-method', function(){ class A{ m(){ return 1; } static s(){ return 2; } get g(){ return 3; } } return [new A().m(), A.s(), new A().g]; });\n"
+    "T('super-in-lazy', function(){ class A{ m(){ return 1; } } class B extends A{ m(){ return super.m()+1; } } return new B().m(); });\n"
+    "T('strict-inherit', function(){ 'use strict'; function f(){ return this; } return typeof f(); });\n"
+    "T('fn-name-binding', function(){ var f=function g(){ return typeof g; }; return f(); });\n"
+    "T('shadow-arguments', function(){ function f(){ var arguments=5; return arguments; } return f(); });\n"
+    "T('hoisted-before', function(){ return h(); function h(){ return 'h'; } });\n"
+    "T('getter-in-object', function(){ var o={ get x(){ return 4; }, y(){ return 5; } }; return [o.x,o.y()]; });\n"
+    "T('label-brace', function(){ function f(){ a: { break a; } return '}'; } return f(); });\n"
+    "T('string-escape', function(){ function f(){ return '\\\\'+\"\\\"}\"+'\\''; } return f(); });\n"
+    "T('unicode-escape-ident', function(){ function f(){ var \\u0061b=1; return ab; } return f(); });\n"
+    "T('html-comment', function(){ return 1; });\n"
+    "T('regex-in-template-interp', function(){ function f(){ return `${'a}'.replace(/}/,'')}`; } return f(); });\n"
+    "T('obj-literal-after-return', function(){ function f(){ return {a:'}'}; } return f().a; });\n"
+    "T('with-stmt', function(){ return new Function(\"var o={z:1}; with(o){ return (function(){ return z; })(); }\")(); });\n"
+    "T('new-function', function(){ return new Function('a','return function(){return a*2}()')(3); });\n"
+    "T('nested3', function(){ function a(x){ function b(y){ function c(z){ return x+y+z; } return c; } return b; } return a(1)(2)(3); });\n"
+    "T('loop-let-nested', function(){ var r=[]; function mk(){ var fs=[]; for(let i=0;i<3;i++){ for(let j=0;j<2;j++){ fs.push(function(){ return function(){ return i*10+j; }; }); } } return fs; } mk().forEach(function(f){ r.push(f()()); }); return r; });\n"
+    "T('for-of-const', function(){ function mk(){ var fs=[]; for(const v of ['a','b','c']) fs.push(()=>{ return v; }); return fs.map(f=>f()); } return mk(); });\n"
+    "T('catch-param', function(){ function mk(){ try{ throw 7; }catch(e){ return function(){ return e; }; } } return mk()(); });\n"
+    "T('same-stub-many', function(){ function mk(n){ return function(){ return n*2; }; } var fs=[mk(1),mk(2),mk(3)]; return [fs[2](),fs[0](),fs[1](),fs[0]()]; });\n"
+    "T('call-before-return', function(){ function o(){ var a=1; function g(){ return a; } var r1=g(); a=2; var r2=g(); return [r1,r2,g]; } var r=o(); return [r[0],r[1],r[2]()]; });\n"
+    "T('mutate-after', function(){ function o(){ var a=1; var g=function(){ return a; }; a=5; return g; } return o()(); });\n"
+    "T('write-outer', function(){ function o(){ var a=1; function inc(){ a++; } inc(); inc(); return a; } return o(); });\n"
+    "T('hoisted-later', function(){ function o(){ function f(){ return later; } var later=5; return f(); } return o(); });\n"
+    "T('tdz', function(){ function o(){ function f(){ return x; } try { f(); } catch(e) { return e.name; } let x=1; } return o(); });\n"
+    "T('const-assign', function(){ function o(){ const c=1; function f(){ c=2; } try { f(); } catch(e) { return e.name; } } return o(); });\n"
+    "T('typeof-undeclared', function(){ function f(){ return typeof notDeclaredAnywhere123; } return f(); });\n"
+    "T('sloppy-global-assign', function(){ function f(){ implicitGlobal987 = 4; } f(); return globalThis.implicitGlobal987; });\n"
+    "T('global-read', function(){ globalThis.gv1 = 11; function f(){ return gv1; } return f(); });\n"
+    "T('global-later-defined', function(){ function f(){ return gvLate; } globalThis.gvLate = 3; return f(); });\n"
+    "T('arrow-super-method', function(){ class A{ m(){ return 'A'; } } class B extends A{ m(){ var g=()=>{ return super.m()+'B'; }; return g(); } } return new B().m(); });\n"
+    "T('arrow-super-ctor', function(){ class A{ constructor(){ this.x=1; } } class B extends A{ constructor(){ var g=()=>{ super(); }; g(); this.y=2; } } var b=new B(); return [b.x,b.y]; });\n"
+    "T('arrow-newtarget2', function(){ function F(){ var g=()=>{ return (()=>{ return new.target===F; })(); }; this.r=g(); } return new F().r; });\n"
+    "T('arrow-arguments2', function(){ function f(){ var g=()=>{ return (()=>{ return arguments.length; })(); }; return g(); } return f(1,2,3,4); });\n"
+    "T('arrow-this-nested', function(){ var o={v:9, m(){ return [1].map(()=>{ return [2].map(()=>{ return this.v; })[0]; })[0]; }}; return o.m(); });\n"
+    "T('private-fields', function(){ class C{ #x=3; #m(){ return this.#x; } get(){ return this.#m()+1; } has(o){ return #x in o; } } var c=new C(); return [c.get(), c.has(c), c.has({})]; });\n"
+    "T('static-private', function(){ class C{ static #s=5; static get(){ return C.#s; } } return C.get(); });\n"
+    "T('generator-closure', function(){ function mk(k){ return function*(){ yield k; yield k+1; }; } return [...mk(5)()]; });\n"
+    "T('async-closure', function(){ function mk(k){ return async function(){ return k; }; } var r; mk(8)().then(v=>{ r=v; }); return typeof mk(8)().then; });\n"
+    "T('async-arrow', function(){ var o={v:2, m(){ return (async()=>{ return this.v; })(); }}; return typeof o.m().then; });\n"
+    "T('recursion-named', function(){ var f=function fact(n){ return n<=1?1:n*fact(n-1); }; return f(5); });\n"
+    "T('recursion-decl', function(){ function fib(n){ return n<2?n:fib(n-1)+fib(n-2); } return fib(15); });\n"
+    "T('block-func-annexB', function(){ function o(){ { function inner(){ return 'in'; } } return inner(); } return o(); });\n"
+    "T('use-strict-body', function(){ function f(){ 'use strict'; return this; } return typeof f(); });\n"
+    "T('use-strict-body-nested', function(){ function f(){ 'use strict'; function g(){ return this; } return g(); } return typeof f(); });\n"
+    "T('sloppy-this', function(){ function f(){ return this === globalThis; } return f(); });\n"
+    "T('eval-in-lazy2', function(){ function o(){ var q=3; function f(){ var r=4; return eval('q+r'); } return f(); } return o(); });\n"
+    "T('eval-in-parent', function(){ function o(){ var q=3; var g=function(){ return q; }; eval('q=6'); return g(); } return o(); });\n"
+    "T('with-sloppy', function(){ return new Function(\"var x='outer'; var o={y:'wy'}; function f(){ with(o){ return x+','+y; } } return f();\")(); });\n"
+    "T('label-break', function(){ function f(){ outer: for(var i=0;i<3;i++){ for(var j=0;j<3;j++){ if(j==1) continue outer; if(i==2) break outer; } } return i; } return f(); });\n"
+    "T('regex-if', function(){ function f(s){ if (s) /}/.test(s); return 'ok'; } return f('x'); });\n"
+    "T('regex-after-block', function(){ function f(s){ if(s){ s+=1 } /}/.test(s); return 'ok2'; } return f('x'); });\n"
+    "T('obj-div', function(){ function f(){ var x = {a:4}.a / 2; return x; } return f(); });\n"
+    "T('template-deep', function(){ function f(a){ return `${`${`${a}}`}`}{`; } return f(1); });\n"
+    "T('template-regex', function(){ function f(){ return `${'x}'.replace(/[}]/g,'y')}`; } return f(); });\n"
+    "T('comment-braces', function(){ function f(){ // }\n"
+    "  /* } */ return 'c'; } return f(); });\n"
+    "T('string-braces', function(){ function f(){ return \"}\" + '{' + \"\\\"}\"; } return f(); });\n"
+    "T('div-ident', function(){ function f(a,b,g){ return a / b / g; } return f(8,2,2); });\n"
+    "T('keyword-prop-div', function(){ function f(){ var o={default:8, new:4}; return o.default / o.new; } return f(); });\n"
+    "T('getter-setter', function(){ var o={ _v:1, get v(){ return this._v; }, set v(x){ this._v=x*2; } }; o.v=5; return o.v; });\n"
+    "T('class-methods', function(){ class K{ static s(){ return 's'; } m(){ return 'm'; } get g(){ return 'g'; } *gen(){ yield 'y'; } async am(){ return 1; } } var k=new K(); return [K.s(), k.m(), k.g, [...k.gen()][0], typeof k.am().then]; });\n"
+    "T('class-name-binding', function(){ class Q{ m(){ return Q.name; } } return new Q().m(); });\n"
+    "T('class-expr-name', function(){ var C = class Named { m(){ return typeof Named; } }; return new C().m(); });\n"
+    "T('fn-length-name', function(){ function abc(a,b,c){ return 1; } var g=function(x){}; return [abc.length, abc.name, g.name, (()=>{}).name]; });\n"
+    "T('tostring-variants', function(){ var o={ m(a){ return a; }, get g(){ return 1; }, async *ag(){ } }; class C{ static s(){ return 2; } } return [o.m.toString(), Object.getOwnPropertyDescriptor(o,'g').get.toString(), o.ag.toString(), C.s.toString(), (async function nm(){ }).toString()]; });\n"
+    "T('arguments-mapped', function(){ function f(a){ arguments[0]=9; return a; } return f(1); });\n"
+    "T('arguments-strict', function(){ function f(a){ 'use strict'; arguments[0]=9; return a; } return f(1); });\n"
+    "T('default-param-closure', function(){ function f(a, g=()=>a){ return g(); } return f(7); });\n"
+    "T('param-shadow', function(){ var x='outer'; function f(x){ return function(){ return x; }; } return f('param')(); });\n"
+    "T('func-expr-self', function(){ var outer=function self(n){ return n? self(n-1): typeof self; }; return outer(3); });\n"
+    "T('closure-counter-many', function(){ var cs=[]; for(var i=0;i<100;i++){ cs.push((function(k){ var c=k; return function(){ return ++c; }; })(i)); } cs[5](); return [cs[5](), cs[99](), cs[0]()]; });\n"
+    "T('new-function-closure', function(){ var F=new Function('a','return function(b){ return function(){ return a+b; }; }'); return F(1)(2)(); });\n"
+    "T('json-reviver', function(){ return JSON.parse('{\"a\":1}', function(k,v){ return typeof v==='number'? v+1 : v; }).a; });\n"
+    "T('sort-comparator', function(){ return [3,1,2].sort(function(a,b){ return a-b; }); });\n"
+    "T('settimeout-like', function(){ var q=[]; function later(cb){ q.push(cb); } var v=1; later(function(){ return v; }); v=2; return q[0](); });\n"
+    "T('expr-arrow-once', function(){ var n=0; var f = x => (n++, x*2); f(3); f(4); var g=()=>{ n+=10; }; g(); return n; });\n"
+    "T('expr-arrow-counter', function(){ function mk(){ var c=0; return () => ++c; } var h=mk(); h(); h(); return h(); });\n"
+    "T('tostring-decl', function(){ function foo(a, b) { return a + b; } return String(foo); });\n"
+    "T('tostring-arrow', function(){ return String(() => { return 1; }) + '|' + String(x => x + 1); });\n"
+    "T('tdz-closure-decl', function(){ function f(){ return x; } try { f(); } catch(e) { return e.name; } let x=1; });\n"
+    "T('tdz-closure-arrow', function(){ var g=()=>{ return z; }; try { g(); } catch(e) { return e.name; } const z=1; });\n"
+    "T('tdz-closure-class', function(){ class C { m(){ return K; } } try { new C().m(); } catch(e) { return e.name; } let K=1; });\n"
+    "out.join('\\n');\n";
+
+static const char *lazy_suite_expected =
+    "arrow-arguments=5\n"
+    "arrow-this=3\n"
+    "arrow-newtarget=function\n"
+    "regex-brace=axb\n"
+    "regex-after-paren=1\n"
+    "regex-class-brace=true\n"
+    "div-not-regex=[2,2,\"}\"]\n"
+    "template-nested=[\"x{1}y\",\"x}y\"]\n"
+    "template-string-in-interp=}{\n"
+    "template-comment-in-interp=1\n"
+    "regex-after-keyword=[\"object\",null]\n"
+    "regex-flags-dv=d\n"
+    "regex-after-plus=x}\n"
+    "regex-after-arrow=true\n"
+    "closure-capture=3\n"
+    "closure-late=[0,1,2]\n"
+    "nested-lazy=3\n"
+    "default-params=3\n"
+    "destructure-params=3\n"
+    "eval-in-lazy=7\n"
+    "arguments-in-lazy=3\n"
+    "async-lazy=function\n"
+    "generator-lazy=[1,2]\n"
+    "class-method=[1,2,3]\n"
+    "super-in-lazy=2\n"
+    "strict-inherit=undefined\n"
+    "fn-name-binding=function\n"
+    "shadow-arguments=5\n"
+    "hoisted-before=h\n"
+    "getter-in-object=[4,5]\n"
+    "label-brace=}\n"
+    "string-escape=\\\"}'\n"
+    "unicode-escape-ident=1\n"
+    "html-comment=1\n"
+    "regex-in-template-interp=a\n"
+    "obj-literal-after-return=}\n"
+    "with-stmt=1\n"
+    "new-function=6\n"
+    "nested3=6\n"
+    "loop-let-nested=[0,1,10,11,20,21]\n"
+    "for-of-const=[\"a\",\"b\",\"c\"]\n"
+    "catch-param=7\n"
+    "same-stub-many=[6,2,4,2]\n"
+    "call-before-return=[1,2,2]\n"
+    "mutate-after=5\n"
+    "write-outer=3\n"
+    "hoisted-later=5\n"
+    "tdz=ReferenceError\n"
+    "const-assign=TypeError\n"
+    "typeof-undeclared=undefined\n"
+    "sloppy-global-assign=4\n"
+    "global-read=11\n"
+    "global-later-defined=3\n"
+    "arrow-super-method=AB\n"
+    "arrow-super-ctor=[1,2]\n"
+    "arrow-newtarget2=true\n"
+    "arrow-arguments2=4\n"
+    "arrow-this-nested=9\n"
+    "private-fields=[4,true,false]\n"
+    "static-private=5\n"
+    "generator-closure=[5,6]\n"
+    "async-closure=function\n"
+    "async-arrow=function\n"
+    "recursion-named=120\n"
+    "recursion-decl=610\n"
+    "block-func-annexB=in\n"
+    "use-strict-body=undefined\n"
+    "use-strict-body-nested=undefined\n"
+    "sloppy-this=true\n"
+    "eval-in-lazy2=7\n"
+    "eval-in-parent=6\n"
+    "with-sloppy=outer,wy\n"
+    "label-break=2\n"
+    "regex-if=ok\n"
+    "regex-after-block=ok2\n"
+    "obj-div=2\n"
+    "template-deep=1}{\n"
+    "template-regex=xy\n"
+    "comment-braces=c\n"
+    "string-braces=}{\"}\n"
+    "div-ident=2\n"
+    "keyword-prop-div=2\n"
+    "getter-setter=10\n"
+    "class-methods=[\"s\",\"m\",\"g\",\"y\",\"function\"]\n"
+    "class-name-binding=Q\n"
+    "class-expr-name=function\n"
+    "fn-length-name=[3,\"abc\",\"g\",\"\"]\n"
+    "tostring-variants=[\"m(a){ return a; }\",\"get g(){ return 1; }\",\"async *ag(){ }\",\"s(){ return 2; }\",\"async function nm(){ }\"]\n"
+    "arguments-mapped=9\n"
+    "arguments-strict=1\n"
+    "default-param-closure=7\n"
+    "param-shadow=param\n"
+    "func-expr-self=function\n"
+    "closure-counter-many=[7,100,1]\n"
+    "new-function-closure=3\n"
+    "json-reviver=2\n"
+    "sort-comparator=[1,2,3]\n"
+    "settimeout-like=2\n"
+    "expr-arrow-once=12\n"
+    "expr-arrow-counter=3\n"
+    "tostring-decl=function foo(a, b) { return a + b; }\n"
+    "tostring-arrow=() => { return 1; }|x => x + 1\n"
+    "tdz-closure-decl=ReferenceError\n"
+    "tdz-closure-arrow=ReferenceError\n"
+    "tdz-closure-class=ReferenceError";
+
+static BOOL lazy_suite_check(JSContextHandle ctx, const char *label)
+{
+    char *got = eval_to_string(ctx, lazy_suite_js);
+    BOOL ok = got && strcmp(got, lazy_suite_expected) == 0;
+    if (!ok && got) {
+        /* report the first differing line */
+        const char *a = got, *b = lazy_suite_expected;
+        while (*a && *a == *b) { a++; b++; }
+        while (a > got && a[-1] != '\n') { a--; b--; }
+        printf("    [%s] first mismatch:\n      got:      %.120s\n      expected: %.120s\n",
+               label, a, b);
+    }
+    free(got);
+    return ok;
+}
+
+TEST(test_lazy_conformance_suite) {
+    JSContextHandle ctx = get_test_context();
+    ASSERT_TRUE(SAFE_VALID(ctx));
+    ASSERT_TRUE(lazy_suite_check(ctx, "lazy"));
+    return true;
+}
+
+/* ============================================================================
  * Test Registration
  * ============================================================================ */
 
@@ -1208,4 +1460,5 @@ void run_lazy_parsing_tests(void) {
     RUN_TEST(test_js_eval_flag_no_lazy);
     RUN_TEST(test_lazy_parsing_state_transitions);
     RUN_TEST(test_lazy_parsing_complex_scenarios);
+    RUN_TEST(test_lazy_conformance_suite);
 }

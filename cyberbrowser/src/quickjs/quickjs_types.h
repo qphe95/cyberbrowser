@@ -1225,7 +1225,32 @@ typedef struct JSLazyParseState {
     uint8_t in_function_body;           /* Whether we're in function body */
     uint8_t in_class;                   /* Whether we're in a class */
     uint8_t in_strict_mode;             /* Strict mode flag */
-    
+
+    /* The function definition's own flags, as computed by
+     * js_parse_function_decl2 (arrow functions inherit new.target / super /
+     * arguments permissions from their parent at that point). */
+    uint8_t new_target_allowed;
+    uint8_t super_call_allowed;
+    uint8_t super_allowed;
+    uint8_t arguments_allowed;
+    uint8_t has_prototype;
+    uint8_t has_home_object;
+    uint8_t has_arguments_binding;
+    uint8_t has_this_binding;
+    uint8_t is_func_expr;
+
+    /* Whole function text (for Function.prototype.toString), as an offset
+     * into source_handle. */
+    uint32_t func_source_offset;
+    uint32_t func_source_len;
+
+    /* Bytecode produced by the first resume; later closures created from
+     * the same stub reuse it.  Its closure variables index the stub's
+     * closure variables (see js_resume_lazy_parse). */
+    GCHandle compiled_handle;
+
+    /* length of the root source (gc_string_length() would be a strlen) */
+    size_t source_total_len;
 } JSLazyParseState;
 
 /* JSFunctionBytecode structure - must be defined before JSFunctionBytecodeHandle */
@@ -1264,6 +1289,7 @@ struct JSFunctionBytecode {
         /* debug info, move to separate structure to save memory? */
         JSAtom filename;
         int source_len; 
+        uint32_t source_offset; /* offset of the function text in source_handle */
         int pc2line_len;
         GCHandle pc2line_handle; /* Handle to pc2line buffer (GC-managed) */
         GCHandle source_handle; /* Handle to source string (GC-managed) */
