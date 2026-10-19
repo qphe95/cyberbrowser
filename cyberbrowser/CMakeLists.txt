@@ -60,6 +60,7 @@ set(BE_SOURCES
     src/browser/geolocation_api.c
     src/browser/console_api.c
     src/browser/dom_api.c
+    src/browser/image_api.c
     src/browser/event_api.c
     src/browser/shadow_dom_api.c
     src/browser/misc_api.c
@@ -251,11 +252,69 @@ if(BE_PLATFORM_MACOS OR BE_PLATFORM_LINUX OR BE_PLATFORM_WINDOWS)
 endif()
 
 # =============================================================================
+# Image codecs (vendored under src/third_party)
+#   libjpeg-turbo: SIMD JPEG decoding with DCT-domain downscaling.  Its build
+#     system does not support add_subdirectory(), so it is built as an
+#     ExternalProject; SIMD is used when NASM is installed (otherwise the
+#     portable C code paths are compiled).
+#   libwebp: decoder-only library through its own CMake project.
+# =============================================================================
+include(ExternalProject)
+set(LJT_PREFIX ${CMAKE_BINARY_DIR}/libjpeg-turbo)
+if(MSVC)
+    set(LJT_LIB ${LJT_PREFIX}/lib/turbojpeg-static.lib)
+else()
+    set(LJT_LIB ${LJT_PREFIX}/lib/libturbojpeg.a)
+endif()
+set(LJT_CMAKE_ARGS
+    -DCMAKE_INSTALL_PREFIX=${LJT_PREFIX}
+    -DCMAKE_INSTALL_LIBDIR=lib
+    -DCMAKE_BUILD_TYPE=Release
+    -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+    -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+    -DENABLE_SHARED=OFF
+    -DENABLE_STATIC=ON
+    -DWITH_TURBOJPEG=ON
+    -DWITH_JAVA=OFF
+    -DREQUIRE_SIMD=OFF
+)
+if(CMAKE_TOOLCHAIN_FILE)
+    list(APPEND LJT_CMAKE_ARGS -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE})
+endif()
+if(CMAKE_ASM_NASM_COMPILER)
+    list(APPEND LJT_CMAKE_ARGS -DCMAKE_ASM_NASM_COMPILER=${CMAKE_ASM_NASM_COMPILER})
+endif()
+ExternalProject_Add(libjpeg_turbo_ext
+    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/libjpeg-turbo
+    BINARY_DIR ${CMAKE_BINARY_DIR}/libjpeg-turbo-build
+    CMAKE_ARGS ${LJT_CMAKE_ARGS}
+    BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --config $<CONFIG>
+    INSTALL_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --config $<CONFIG> --target install
+    BUILD_BYPRODUCTS ${LJT_LIB}
+)
+add_library(turbojpeg_static STATIC IMPORTED GLOBAL)
+set_target_properties(turbojpeg_static PROPERTIES IMPORTED_LOCATION ${LJT_LIB})
+add_dependencies(cyberbrowser_lib libjpeg_turbo_ext)
+target_include_directories(cyberbrowser_lib PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/libjpeg-turbo)
+
+foreach(_opt WEBP_BUILD_ANIM_UTILS WEBP_BUILD_CWEBP WEBP_BUILD_DWEBP WEBP_BUILD_GIF2WEBP
+        WEBP_BUILD_IMG2WEBP WEBP_BUILD_VWEBP WEBP_BUILD_WEBPINFO WEBP_BUILD_LIBWEBPMUX
+        WEBP_BUILD_WEBPMUX WEBP_BUILD_EXTRAS WEBP_BUILD_WEBP_JS)
+    set(${_opt} OFF CACHE BOOL "" FORCE)
+endforeach()
+add_subdirectory(src/third_party/libwebp EXCLUDE_FROM_ALL)
+target_include_directories(cyberbrowser_lib PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/libwebp/src)
+
+# =============================================================================
 # Link libraries
 # =============================================================================
 target_link_libraries(cyberbrowser_lib
     PUBLIC
         Threads::Threads
+        turbojpeg_static
+        webpdecoder
 )
 
 if(NOT BE_PLATFORM_WINDOWS)

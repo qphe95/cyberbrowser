@@ -13,6 +13,8 @@ add_executable(cyberbrowser-tests
     test_css_parser.c
     test_css_layout.c
     test_css_style.c
+    test_image_cache.c
+    test_http_pool.c
     test_dom.c
     legacy_html_parse.c
 )
@@ -49,6 +51,10 @@ target_include_directories(cyberbrowser-tests
     PRIVATE
         ${CMAKE_SOURCE_DIR}/src
         ${CMAKE_SOURCE_DIR}/src/quickjs
+        # test_http_pool.c includes tls_client.h (Mbed TLS sockets)
+        ${CMAKE_SOURCE_DIR}/src/mbedtls/include
+        ${CMAKE_SOURCE_DIR}/src/mbedtls/tf-psa-crypto/include
+        ${CMAKE_SOURCE_DIR}/src/mbedtls/tf-psa-crypto/drivers/builtin/include
 )
 
 target_include_directories(youtube-data-test

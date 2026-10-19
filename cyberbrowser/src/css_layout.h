@@ -296,6 +296,8 @@ typedef struct LayoutBox {
     unsigned char webkit_box;
     unsigned char box_orient_vertical;
     unsigned char line_clamp;
+    /* object-fit: 0 fill, 1 contain, 2 cover, 3 none, 4 scale-down. */
+    unsigned char object_fit;
 } LayoutBox;
 
 /* Flat node reference used by both passes. */

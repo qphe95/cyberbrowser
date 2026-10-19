@@ -31,6 +31,7 @@
 #include "display_list.h"
 #include "text_shaper.h"
 #include "image_cache.h"
+#include "browser/image_api.h"
 #include "cyber_profile.h"
 
 /* stb_image_write implementation lives in cyber_profile.c (library side). */
@@ -746,6 +747,13 @@ static bool render_display_list_to_jpg(const DisplayList *dl, const char *path,
     return ok != 0;
 }
 
+static void on_image_progress(const char *url, void *user_data)
+{
+    (void)user_data;
+    image_api_notify(g_ctx, url);
+    dom_request_layout();
+}
+
 /* Register the font table: sans (Arial) in slots 0-3, serif (Times) in 4-7,
  * monospace (Courier) in 8-11, each as regular/bold/italic/bold-italic. */
 static void register_font_table(void)
@@ -928,6 +936,13 @@ int main(int argc, char *argv[]) {
     /* Make the start URL available to the DOM / URL resolution code. */
     g_cyber_start_url = start_url;
 
+    /* The image cache exists from the start so scripts reading
+     * img.naturalWidth / img.complete start fetches early. */
+    ImageCache *image_cache = image_cache_create();
+    display_list_set_image_cache(image_cache);
+    /* Image fetched/failed: fire load/error on its <img> elements and re-render. */
+    image_cache_set_notify(image_cache, on_image_progress, NULL);
+
     /* Reflect the start URL in window.location so the engine reports the
      * correct origin, host, and pathname instead of a hardcoded default.
      * Also sync document.domain and document.baseURI to the resolved URL. */
@@ -969,6 +984,12 @@ int main(int argc, char *argv[]) {
             /* Register the font table so text renders, matching the main path. */
             register_font_table();
             render_document_to_jpg(ldoc, lcache, "layout_probe.jpg");
+            /* Layout requested images (natural sizes) and paint requested
+             * pixels: once they are in, lay out and paint again. */
+            for (int pass = 0; pass < 3 && image_cache_has_pending(lcache); pass++) {
+                image_cache_wait_pending(lcache);
+                render_document_to_jpg(ldoc, lcache, "layout_probe.jpg");
+            }
             html_document_free(ldoc);
             image_cache_destroy(lcache);
             cleanup_browser_context();
@@ -1349,8 +1370,7 @@ int main(int argc, char *argv[]) {
      * image loads, and rebuild the native HtmlDocument from the JS DOM whenever
      * a mutation invalidates it.  Exit when nothing is left to do. */
     HtmlDocument *doc = NULL;
-    ImageCache *image_cache = image_cache_create();
-    display_list_set_image_cache(image_cache);
+    image_api_scan(g_ctx);
 
     register_font_table();
 
@@ -1384,6 +1404,7 @@ int main(int argc, char *argv[]) {
             g_dom_needs_layout = 0;
 
             GCValue js_doc = get_global_document(g_ctx);
+            image_api_scan(g_ctx);
 
             HtmlDocument *new_doc = NULL;
             {
@@ -1413,6 +1434,12 @@ int main(int argc, char *argv[]) {
         if (!had_timers && !had_images && !g_dom_needs_layout &&
             !image_cache_has_pending(image_cache)) {
             break;
+        }
+        if (!had_timers && !had_images && !g_dom_needs_layout) {
+            /* Only image fetches/decodes in flight: sleep until one makes
+             * progress instead of spinning the settle loop. */
+            CP_SCOPE("wait-images");
+            image_cache_wait_progress(image_cache, 100);
         }
         if (settle_final || platform_get_time_ms() - settle_start_ms > settle_budget_ms) {
             if (g_dom_needs_layout && !settle_final) {
@@ -1631,6 +1658,8 @@ int main(int argc, char *argv[]) {
         printf("Profile written to profile.json + flamegraph.png\n");
     }
 
+    if (cp_profile_enabled() || getenv("CYBER_DEBUG_NET")) http_net_log_stats();
+    http_net_close_idle();
     cleanup_browser_context();
     platform_http_cleanup();
     platform_cleanup();

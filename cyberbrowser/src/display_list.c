@@ -6,6 +6,7 @@
 #include "platform.h"
 #include "url_utils.h"
 #include "text_shaper.h"
+#include "url_whatwg.h"
 #include "image_cache.h"
 #include "browser_api_impl_types.h"
 
@@ -118,9 +119,13 @@ static ImageCache *g_image_cache = NULL;
 /* Font table: 3 families x 4 variants.  Slot 0 aliases g_default_font. */
 static TextShaper *g_font_slots[DL_FONT_SLOTS] = {0};
 
+static void on_async_image_loaded(const char *url, void *user_data);
+
 void display_list_set_image_cache(ImageCache *cache)
 {
     g_image_cache = cache;
+    /* Any image becoming sized (layout) or decoded (paint) re-renders. */
+    if (cache) image_cache_set_notify(cache, on_async_image_loaded, NULL);
 }
 
 ImageCache *display_list_get_image_cache(void)
@@ -410,27 +415,89 @@ static void on_async_image_loaded(const char *url, void *user_data)
     dom_request_layout();
 }
 
-static void emit_image_async(DisplayList *dl, float x, float y, float w, float h, const char *url)
+/* Paint an <img> (or other replaced image) into its content box once its
+ * pixels are decoded; the decode is requested at the painted size.  While
+ * loading nothing is painted (like browsers); the cache notification
+ * triggers a re-render when the pixels arrive.  object-fit maps the image
+ * into the box: fill (stretch), contain, cover (crop), none, scale-down. */
+static void emit_image_async(DisplayList *dl, const LayoutBox *box, const char *url, float op)
 {
     if (!g_image_cache || !url || !url[0]) return;
-    int handle = image_cache_load_async(g_image_cache, url, on_async_image_loaded, NULL);
+    float cx = (float)(box->x + box->border_left + box->padding_left);
+    float cy = (float)(box->y + box->border_top + box->padding_top);
+    float cw = (float)(box->width - box->border_left - box->border_right - box->padding_left - box->padding_right);
+    float ch = (float)(box->height - box->border_top - box->border_bottom - box->padding_top - box->padding_bottom);
+    if (cw <= 0.0f || ch <= 0.0f) return;
+    int handle = image_cache_request(g_image_cache, url, (int)ceilf(cw), (int)ceilf(ch));
     if (handle < 0) return;
-
-    int img_w = 0, img_h = 0, ch = 0;
+    int img_w = 0, img_h = 0, chn = 0;
     uint8_t *pix = NULL;
-    if (image_cache_get(g_image_cache, handle, &img_w, &img_h, &ch, &pix)) {
-        /* Image already available (local or cached): emit normally. */
-        if (w <= 0.0f) w = (float)img_w;
-        if (h <= 0.0f) h = (float)img_h;
-        if (w > 0.0f && h > 0.0f) {
-            display_list_add_image(dl, x, y, w, h, handle, 0.0f, 0.0f, 1.0f, 1.0f);
-        }
-    } else {
-        /* Still loading: draw a placeholder border so the layout box is visible. */
-        float pw = (w > 0.0f) ? w : 32.0f;
-        float ph = (h > 0.0f) ? h : 32.0f;
-        display_list_add_border(dl, x, y, pw, ph, 1.0f, 0.6f, 0.6f, 0.6f, 1.0f);
+    if (!image_cache_get(g_image_cache, handle, &img_w, &img_h, &chn, &pix)) return;
+    if (img_w <= 0 || img_h <= 0) return;
+    int nw = img_w, nh = img_h;
+    image_cache_get_natural(g_image_cache, handle, &nw, &nh);
+    if (nw <= 0 || nh <= 0) { nw = img_w; nh = img_h; }
+
+    float dx = cx, dy = cy, dw = cw, dh = ch;
+    float u0 = 0.0f, v0 = 0.0f, u1 = 1.0f, v1 = 1.0f;
+    int fit = box->object_fit;
+    if (fit == 4) {   /* scale-down: none or contain, whichever is smaller */
+        fit = ((float)nw <= cw && (float)nh <= ch) ? 3 : 1;
     }
+    if (fit == 1 || fit == 3) {
+        float s = fit == 1 ? fminf(cw / (float)nw, ch / (float)nh) : 1.0f;
+        dw = (float)nw * s;
+        dh = (float)nh * s;
+        dx = cx + (cw - dw) * 0.5f;     /* object-position: 50% 50% */
+        dy = cy + (ch - dh) * 0.5f;
+        if (fit == 3 && (dw > cw || dh > ch)) {
+            /* none, larger than the box: crop to the box. */
+            float vx0 = fmaxf(dx, cx), vy0 = fmaxf(dy, cy);
+            float vx1 = fminf(dx + dw, cx + cw), vy1 = fminf(dy + dh, cy + ch);
+            u0 = (vx0 - dx) / dw; u1 = (vx1 - dx) / dw;
+            v0 = (vy0 - dy) / dh; v1 = (vy1 - dy) / dh;
+            dx = vx0; dy = vy0; dw = vx1 - vx0; dh = vy1 - vy0;
+        }
+    } else if (fit == 2) {
+        /* cover: scale to fill, crop the overflow symmetrically. */
+        float s = fmaxf(cw / (float)nw, ch / (float)nh);
+        float sw = (float)nw * s, sh = (float)nh * s;
+        u0 = ((sw - cw) * 0.5f) / sw;
+        u1 = 1.0f - u0;
+        v0 = ((sh - ch) * 0.5f) / sh;
+        v1 = 1.0f - v0;
+    }
+    if (dw <= 0.0f || dh <= 0.0f) return;
+    int from = dl->count;
+    display_list_add_image(dl, dx, dy, dw, dh, handle, u0, v0, u1, v1);
+    if (op < 0.999f && dl->count > from) dl->cmds[from].a = op;
+}
+
+char *display_list_image_source(const char *base_url, HtmlNode *node, float css_width)
+{
+    if (!node || node->type != HTML_NODE_ELEMENT) return NULL;
+    const char *src = node_attribute_value(node, "src");
+    /* srcset, when present, overrides src with the candidate that best
+     * matches the laid-out width (or the 1x candidate). */
+    const char *srcset = node_attribute_value(node, "srcset");
+    char *picked = srcset ? srcset_pick(srcset, css_width) : NULL;
+    if (picked) src = picked;
+    char *url = NULL;
+    if (src && src[0]) {
+        /* Resolve against the document URL (relative paths need its
+         * directory, not just the origin layout carries). */
+        extern const char *g_cyber_start_url;
+        const char *doc_url = (g_cyber_start_url && g_cyber_start_url[0]) ? g_cyber_start_url : base_url;
+        url = (doc_url && doc_url[0]) ? wurl_resolve(doc_url, src) : NULL;
+        if (!url) url = dl_resolve_url(base_url, src);
+    }
+    free(picked);
+    return url;
+}
+
+char *display_list_pick_srcset(const char *srcset, float css_width)
+{
+    return srcset_pick(srcset, css_width);
 }
 
 /* Emit underline / line-through rects for the glyph commands emitted since
@@ -613,22 +680,11 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         /* Replaced images: <img src="..."> */
         if (node && node->type == HTML_NODE_ELEMENT &&
             strcasecmp(node->tag_name, "img") == 0 && g_image_cache) {
-            const char *src = node_attribute_value(node, "src");
-            /* srcset, when present, overrides src with the candidate that
-             * best matches the laid-out box width. */
-            const char *srcset = node_attribute_value(node, "srcset");
-            char *picked = srcset ? srcset_pick(srcset, (float)box->width) : NULL;
-            if (picked) src = picked;
-            if (src && src[0]) {
-                char *url = dl_resolve_url(ctx->base_url, src);
-                if (url) {
-                    float w = (float)box->width;
-                    float h = (float)box->height;
-                    emit_image_async(dl, (float)box->x, (float)box->y, w, h, url);
-                    free(url);
-                }
+            char *url = display_list_image_source(ctx->base_url, node, (float)box->width);
+            if (url) {
+                emit_image_async(dl, box, url, op);
+                free(url);
             }
-            free(picked);
             continue;
         }
 
@@ -812,8 +868,10 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         }
 
         /* Background image, stretched to the padding box. */
-        if (g_image_cache && box->background_image_url[0]) {
-            int handle = image_cache_load(g_image_cache, box->background_image_url);
+        if (g_image_cache && box->background_image_url[0] &&
+            box->width >= 1.0 && box->height >= 1.0) {
+            int handle = image_cache_request(g_image_cache, box->background_image_url,
+                                             (int)ceil(box->width), (int)ceil(box->height));
             emit_image(dl, (float)box->x, (float)box->y,
                        (float)box->width, (float)box->height, handle);
         }

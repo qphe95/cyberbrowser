@@ -78,6 +78,15 @@ typedef struct ImageCache ImageCache;
 void display_list_set_image_cache(ImageCache *cache);
 ImageCache *display_list_get_image_cache(void);
 
+/* Resolved URL an <img> paints (srcset candidate for css_width, else src);
+ * malloc'd, NULL when the element has none.  Shared by layout (natural
+ * size) and paint so both use the same image. */
+struct HtmlNode;
+char *display_list_image_source(const char *base_url, struct HtmlNode *node, float css_width);
+
+/* The srcset candidate (malloc'd URL text) for a layout width; NULL if none. */
+char *display_list_pick_srcset(const char *srcset, float css_width);
+
 /* Set a TTF font to use when rendering text nodes. Pass NULL to unload. */
 bool display_list_set_default_font(const char *ttf_path, float size_pixels);
 struct TextShaper;

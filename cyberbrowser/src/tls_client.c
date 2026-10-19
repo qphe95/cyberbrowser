@@ -367,18 +367,24 @@ static int tls_net_connect(mbedtls_net_context *net, const char *host, const cha
     return 0;
 }
 
-bool tls_client_connect(TlsClient *client, const char *host, const char *port,
-                        char *err, size_t errLen) {
-    if (!client || !host || !port) {
-        set_err(err, errLen, "TLS invalid params", TLS_ERR_GENERIC);
-        return false;
+/* The CA store is parsed once per process and shared (read-only) by every
+ * connection: parsing /etc/ssl/certs or the Windows ROOT store costs far
+ * more than the handshake it verifies. */
+static mbedtls_x509_crt g_ca;
+static bool g_ca_loaded = false;
+static bool g_ca_tried = false;
+static pthread_mutex_t g_ca_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static bool tls_shared_ca_load(void) {
+    pthread_mutex_lock(&g_ca_mutex);
+    if (g_ca_tried) {
+        bool r = g_ca_loaded;
+        pthread_mutex_unlock(&g_ca_mutex);
+        return r;
     }
-    tls_init(client);
-    int ret = psa_crypto_init_once();
-    if (ret != PSA_SUCCESS) {
-        set_err(err, errLen, "PSA crypto init failed", ret);
-        return false;
-    }
+    g_ca_tried = true;
+    mbedtls_x509_crt_init(&g_ca);
+    int ret;
     /* Try platform-specific CA certificate paths */
     const char *ca_paths[] = {
 #ifdef __APPLE__
@@ -402,9 +408,9 @@ bool tls_client_connect(TlsClient *client, const char *host, const char *port,
         /* Try parse_path for directories, parse_file for .pem files */
         const char *path = ca_paths[i];
         if (strstr(path, ".pem") || strstr(path, ".crt")) {
-            ret = mbedtls_x509_crt_parse_file(&client->ca, path);
+            ret = mbedtls_x509_crt_parse_file(&g_ca, path);
         } else {
-            ret = mbedtls_x509_crt_parse_path(&client->ca, path);
+            ret = mbedtls_x509_crt_parse_path(&g_ca, path);
         }
         if (ret >= 0) {
             LOGI("Loaded CA certs from %s (%d certs)", path, ret);
@@ -423,7 +429,7 @@ bool tls_client_connect(TlsClient *client, const char *host, const char *port,
             int total_certs = 0;
             PCCERT_CONTEXT pCert = NULL;
             while ((pCert = CertEnumCertificatesInStore(hStore, pCert)) != NULL) {
-                ret = mbedtls_x509_crt_parse_der(&client->ca,
+                ret = mbedtls_x509_crt_parse_der(&g_ca,
                                                   pCert->pbCertEncoded,
                                                   pCert->cbCertEncoded);
                 if (ret == 0) {
@@ -443,6 +449,24 @@ bool tls_client_connect(TlsClient *client, const char *host, const char *port,
     }
 #endif
 
+    g_ca_loaded = ca_loaded;
+    pthread_mutex_unlock(&g_ca_mutex);
+    return ca_loaded;
+}
+
+bool tls_client_connect(TlsClient *client, const char *host, const char *port,
+                        char *err, size_t errLen) {
+    if (!client || !host || !port) {
+        set_err(err, errLen, "TLS invalid params", TLS_ERR_GENERIC);
+        return false;
+    }
+    tls_init(client);
+    int ret = psa_crypto_init_once();
+    if (ret != PSA_SUCCESS) {
+        set_err(err, errLen, "PSA crypto init failed", ret);
+        return false;
+    }
+    bool ca_loaded = tls_shared_ca_load();
     if (!ca_loaded) {
         /* Last resort: disable certificate verification for testing */
         LOGW("Could not load CA certs from any path, continuing without verification");
@@ -545,7 +569,7 @@ bool tls_client_connect(TlsClient *client, const char *host, const char *port,
     } else {
         mbedtls_ssl_conf_authmode(&client->conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
     }
-    mbedtls_ssl_conf_ca_chain(&client->conf, &client->ca, NULL);
+    mbedtls_ssl_conf_ca_chain(&client->conf, &g_ca, NULL);
     (void)psa_generate_random;
     ret = mbedtls_ssl_setup(&client->ssl, &client->conf);
     if (ret != 0) {
@@ -621,7 +645,13 @@ ssize_t tls_client_read(TlsClient *client, unsigned char *buf, size_t len) {
         if (r <= 0) { client->connected = false; return -1; }
         return r;
     }
-    int ret = mbedtls_ssl_read(&client->ssl, buf, len);
+    int ret;
+    /* A TLS 1.3 NewSessionTicket is not application data: read on rather
+     * than report 0 bytes (the caller would sleep before polling again). */
+    int tickets = 0;
+    do {
+        ret = mbedtls_ssl_read(&client->ssl, buf, len);
+    } while (ret == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET && ++tickets < 16);
     if (ret == MBEDTLS_ERR_SSL_WANT_READ ||
         ret == MBEDTLS_ERR_SSL_WANT_WRITE ||
         ret == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET) {
@@ -675,173 +705,236 @@ void tls_client_close(TlsClient *client) {
     client->connected = false;
 }
 
-// Global connection pools (one per host like browsers do)
-static ConnectionPool *g_connection_pools[100];
-static int g_pool_count = 0;
-static pthread_mutex_t g_pools_mutex = PTHREAD_MUTEX_INITIALIZER;
+/* ============================================================================
+ * HTTP/1.1 keep-alive connection pool (one per process, shared by every
+ * request: documents, scripts, stylesheets, fonts, images, XHR / fetch).
+ * ============================================================================
+ * Keyed by scheme|host|port.  Idle connections sit in a small LRU array;
+ * each key has an in-use count capped at CYBER_MAX_CONN_PER_HOST (default 6,
+ * Chrome's limit), and acquirers over the cap wait on a condition variable
+ * for a release.  Connecting and closing happen outside the lock, so
+ * handshakes to different hosts (and to the same host, up to the cap) run in
+ * parallel.
+ */
 
-// Initialize global resources (the pool mutex is statically initialized, so
-// concurrent first requests from the script fetch pool are safe).
-static void initialize_global_resources() {
+#define POOL_MAX_IDLE      48    /* parked connections, all hosts */
+#define POOL_MAX_KEYS      128   /* distinct scheme|host|port in use at once */
+#define POOL_IDLE_TIMEOUT  60    /* seconds; servers typically drop at 60-120 */
+#define POOL_WAIT_LIMIT_MS 30000 /* never wait longer than this for the cap */
+
+typedef struct PoolKeyCount {
+    char key[280];
+    int active;
+} PoolKeyCount;
+
+static struct {
+    pthread_mutex_t mu;
+    pthread_cond_t released;
+    TlsClient *idle[POOL_MAX_IDLE];   /* oldest first */
+    int nidle;
+    PoolKeyCount keys[POOL_MAX_KEYS];
+    int nkeys;
+    int max_per_host;
+    ConnPoolStats stats;
+} g_pool = { .mu = PTHREAD_MUTEX_INITIALIZER, .released = PTHREAD_COND_INITIALIZER };
+
+static int pool_max_per_host(void) {
+    if (g_pool.max_per_host <= 0) {
+        const char *e = getenv("CYBER_MAX_CONN_PER_HOST");
+        int v = e ? atoi(e) : 0;
+        g_pool.max_per_host = (v > 0 && v <= 64) ? v : MAX_CONNECTIONS_PER_HOST;
+    }
+    return g_pool.max_per_host;
 }
 
-// Find or create connection pool for host
-ConnectionPool *connection_pool_create(const char *host) {
-    initialize_global_resources();
-    pthread_mutex_lock(&g_pools_mutex);
+static int pool_disabled(void) {
+    static int d = -1;
+    if (d < 0) {
+        const char *e = getenv("CYBER_NO_KEEPALIVE");
+        d = (e && e[0] && e[0] != '0') ? 1 : 0;
+    }
+    return d;
+}
 
-    // Look for existing pool
-    for (int i = 0; i < g_pool_count; i++) {
-        if (strcmp(g_connection_pools[i]->host, host) == 0) {
-            pthread_mutex_unlock(&g_pools_mutex);
-            return g_connection_pools[i];
+/* Lock held. */
+static PoolKeyCount *pool_key_slot(const char *key, bool create) {
+    for (int i = 0; i < g_pool.nkeys; i++)
+        if (strcmp(g_pool.keys[i].key, key) == 0) return &g_pool.keys[i];
+    if (!create) return NULL;
+    /* Reuse a slot whose count dropped to zero. */
+    for (int i = 0; i < g_pool.nkeys; i++)
+        if (g_pool.keys[i].active == 0) {
+            snprintf(g_pool.keys[i].key, sizeof(g_pool.keys[i].key), "%s", key);
+            return &g_pool.keys[i];
         }
-    }
+    if (g_pool.nkeys >= POOL_MAX_KEYS) return NULL;   /* uncapped beyond this */
+    PoolKeyCount *k = &g_pool.keys[g_pool.nkeys++];
+    snprintf(k->key, sizeof(k->key), "%s", key);
+    k->active = 0;
+    return k;
+}
 
-    // Create new pool
-    if (g_pool_count >= 100) {
-        // Too many pools, reuse oldest
-        g_pool_count = 0;
-    }
+/* Lock held: remove idle[i], preserving order. */
+static TlsClient *pool_take_idle(int i) {
+    TlsClient *c = g_pool.idle[i];
+    memmove(&g_pool.idle[i], &g_pool.idle[i + 1], (size_t)(g_pool.nidle - i - 1) * sizeof(TlsClient *));
+    g_pool.nidle--;
+    return c;
+}
 
-    ConnectionPool *pool = calloc(1, sizeof(ConnectionPool));
-    if (!pool) {
-        pthread_mutex_unlock(&g_pools_mutex);
+static void pool_destroy_client(TlsClient *c) {
+    if (!c) return;
+    tls_client_close(c);
+    free(c);
+}
+
+/* An idle connection is usable when the server has not closed it: the socket
+ * must not be readable (readable = EOF, a reset, or bytes nobody asked for)
+ * and TLS must hold no buffered records. */
+static bool pool_client_alive(TlsClient *c) {
+    if (!c->connected) return false;
+    if (!c->plain && mbedtls_ssl_check_pending(&c->ssl)) return false;
+    int r = mbedtls_net_poll(&c->net, MBEDTLS_NET_POLL_READ, 0);
+    if (r < 0) return false;
+    return (r & MBEDTLS_NET_POLL_READ) == 0;
+}
+
+TlsClient *conn_pool_acquire(bool tls, const char *host, const char *port, bool fresh,
+                             bool *reused, char *err, size_t errLen) {
+    if (reused) *reused = false;
+    if (!host || !port) {
+        set_err(err, errLen, "invalid host", TLS_ERR_GENERIC);
         return NULL;
     }
+    char key[280];
+    snprintf(key, sizeof(key), "%c|%s|%s", tls ? 's' : 'p', host, port);
+    bool disabled = pool_disabled() != 0;
 
-    strncpy(pool->host, host, sizeof(pool->host) - 1);
-    pthread_mutex_init(&pool->mutex, NULL);
+    TlsClient *dead[POOL_MAX_IDLE];
+    int ndead = 0;
+    TlsClient *got = NULL;
+    bool counted = false;
 
-    g_connection_pools[g_pool_count++] = pool;
-
-    pthread_mutex_unlock(&g_pools_mutex);
-    LOGI("Created connection pool for host: %s", host);
-    return pool;
-}
-
-void connection_pool_destroy(ConnectionPool *pool) {
-    if (!pool) return;
-
-    pthread_mutex_lock(&pool->mutex);
-    for (int i = 0; i < pool->count; i++) {
-        if (pool->connections[i]) {
-            tls_client_close(pool->connections[i]);
-            free(pool->connections[i]);
-        }
-    }
-    pthread_mutex_unlock(&pool->mutex);
-    pthread_mutex_destroy(&pool->mutex);
-    free(pool);
-}
-
-TlsClient *connection_pool_get(ConnectionPool *pool, const char *host, const char *port,
-                              char *err, size_t errLen) {
-    if (!pool) return NULL;
-
-    pthread_mutex_lock(&pool->mutex);
-
-    // Clean up expired connections
-    connection_pool_cleanup_expired(pool);
-
-    // Find reusable connection
-    for (int i = 0; i < pool->count; i++) {
-        TlsClient *client = pool->connections[i];
-        if (client && client->connected && client->reusable &&
-            strcmp(client->host, host) == 0) {
-            client->last_used = time(NULL);
-            client->reusable = false; // Mark as in use
-            pthread_mutex_unlock(&pool->mutex);
-            LOGI("Reusing connection from pool for %s", host);
-            return client;
-        }
-    }
-
-    // No reusable connection, create new one
-    if (pool->count >= MAX_CONNECTIONS_PER_HOST) {
-        // Pool full, remove oldest connection
-        TlsClient *oldest = NULL;
-        int oldest_idx = -1;
-        time_t oldest_time = time(NULL);
-
-        for (int i = 0; i < pool->count; i++) {
-            if (pool->connections[i] &&
-                pool->connections[i]->last_used < oldest_time) {
-                oldest = pool->connections[i];
-                oldest_time = pool->connections[i]->last_used;
-                oldest_idx = i;
-            }
-        }
-
-        if (oldest) {
-            tls_client_close(oldest);
-            free(oldest);
-            // Shift remaining connections
-            for (int j = oldest_idx; j < pool->count - 1; j++) {
-                pool->connections[j] = pool->connections[j + 1];
-            }
-            pool->count--;
-        }
-    }
-
-    // Create new connection
-    TlsClient *client = calloc(1, sizeof(TlsClient));
-    if (!client) {
-        pthread_mutex_unlock(&pool->mutex);
-        set_err(err, errLen, "Failed to allocate connection", 0);
-        return NULL;
-    }
-
-    if (!tls_client_connect(client, host, port, err, errLen)) {
-        free(client);
-        pthread_mutex_unlock(&pool->mutex);
-        return NULL;
-    }
-
-    // Configure for pooling
-    strncpy(client->host, host, sizeof(client->host) - 1);
-    client->last_used = time(NULL);
-    client->reusable = false; // Mark as in use
-
-    // Add to pool
-    pool->connections[pool->count++] = client;
-
-    pthread_mutex_unlock(&pool->mutex);
-    LOGI("Created new connection for pool: %s", host);
-    return client;
-}
-
-void connection_pool_return(ConnectionPool *pool, TlsClient *client) {
-    if (!pool || !client) return;
-
-    pthread_mutex_lock(&pool->mutex);
-    client->reusable = true; // Mark as available for reuse
-    client->last_used = time(NULL);
-    LOGI("Returned connection to pool for %s", client->host);
-    pthread_mutex_unlock(&pool->mutex);
-}
-
-void connection_pool_cleanup_expired(ConnectionPool *pool) {
-    if (!pool) return;
-
+    pthread_mutex_lock(&g_pool.mu);
+    int cap = pool_max_per_host();
     time_t now = time(NULL);
-    int write_idx = 0;
-
-    for (int i = 0; i < pool->count; i++) {
-        TlsClient *client = pool->connections[i];
-        if (client) {
-            if (!client->connected ||
-                (now - client->last_used) > CONNECTION_TIMEOUT) {
-                // Connection expired or dead
-                tls_client_close(client);
-                free(client);
-                LOGI("Cleaned up expired connection");
-            } else {
-                // Keep connection
-                pool->connections[write_idx++] = client;
+    /* Drop idle connections past their timeout (any host). */
+    for (int i = 0; i < g_pool.nidle; ) {
+        if (now - g_pool.idle[i]->last_used > POOL_IDLE_TIMEOUT) dead[ndead++] = pool_take_idle(i);
+        else i++;
+    }
+    int waited_ms = 0;
+    bool counted_wait = false;
+    for (;;) {
+        if (!fresh && !disabled) {
+            /* Most recently used first: the likeliest to still be open. */
+            for (int i = g_pool.nidle - 1; i >= 0; i--) {
+                if (strcmp(g_pool.idle[i]->pool_key, key) != 0) continue;
+                TlsClient *c = pool_take_idle(i);
+                if (pool_client_alive(c)) { got = c; break; }
+                g_pool.stats.stale++;
+                if (ndead < POOL_MAX_IDLE) dead[ndead++] = c;
+                else { pthread_mutex_unlock(&g_pool.mu); pool_destroy_client(c); pthread_mutex_lock(&g_pool.mu); }
             }
         }
+        PoolKeyCount *slot = pool_key_slot(key, true);
+        if (got) {
+            if (slot) slot->active++;
+            g_pool.stats.reuses++;
+            g_pool.stats.active++;
+            counted = true;
+            break;
+        }
+        if (!slot || slot->active < cap || waited_ms >= POOL_WAIT_LIMIT_MS) {
+            if (slot) slot->active++;
+            g_pool.stats.active++;
+            counted = true;
+            break;
+        }
+        /* At the per-host cap: wait for a release (which may also park an
+         * idle connection we can take). */
+        if (!counted_wait) { g_pool.stats.waits++; counted_wait = true; }
+        unsigned long long t0 = platform_get_time_ms();
+#ifdef _WIN32
+        SleepConditionVariableSRW(&g_pool.released, &g_pool.mu, 1000, 0);
+#else
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec += 1;
+        pthread_cond_timedwait(&g_pool.released, &g_pool.mu, &ts);
+#endif
+        unsigned long long t1 = platform_get_time_ms();
+        waited_ms += t1 > t0 ? (int)(t1 - t0) : 1;
+    }
+    pthread_mutex_unlock(&g_pool.mu);
+    (void)counted;
+
+    for (int i = 0; i < ndead; i++) pool_destroy_client(dead[i]);
+
+    if (got) {
+        got->requests++;
+        if (reused) *reused = true;
+        return got;
     }
 
-    pool->count = write_idx;
+    TlsClient *c = calloc(1, sizeof(TlsClient));
+    bool ok = c && (tls ? tls_client_connect(c, host, port, err, errLen)
+                        : tcp_client_connect(c, host, port, err, errLen));
+    if (!ok) {
+        if (c) { tls_client_close(c); free(c); }
+        if (!c) set_err(err, errLen, "Failed to allocate connection", 0);
+        pthread_mutex_lock(&g_pool.mu);
+        PoolKeyCount *slot = pool_key_slot(key, false);
+        if (slot && slot->active > 0) slot->active--;
+        g_pool.stats.active--;
+        g_pool.stats.connect_failures++;
+        pthread_cond_broadcast(&g_pool.released);
+        pthread_mutex_unlock(&g_pool.mu);
+        return NULL;
+    }
+    snprintf(c->host, sizeof(c->host), "%s", host);
+    snprintf(c->pool_key, sizeof(c->pool_key), "%s", key);
+    c->last_used = time(NULL);
+    c->requests = 1;
+    pthread_mutex_lock(&g_pool.mu);
+    g_pool.stats.connects++;
+    pthread_mutex_unlock(&g_pool.mu);
+    return c;
+}
+
+void conn_pool_release(TlsClient *c, bool keep_alive) {
+    if (!c) return;
+    TlsClient *evict = NULL;
+    pthread_mutex_lock(&g_pool.mu);
+    PoolKeyCount *slot = pool_key_slot(c->pool_key, false);
+    if (slot && slot->active > 0) slot->active--;
+    g_pool.stats.active--;
+    if (keep_alive && c->connected && !pool_disabled()) {
+        c->last_used = time(NULL);
+        if (g_pool.nidle >= POOL_MAX_IDLE) evict = pool_take_idle(0);   /* LRU */
+        g_pool.idle[g_pool.nidle++] = c;
+        c = NULL;
+    }
+    pthread_cond_broadcast(&g_pool.released);
+    pthread_mutex_unlock(&g_pool.mu);
+    pool_destroy_client(evict);
+    pool_destroy_client(c);
+}
+
+void conn_pool_get_stats(ConnPoolStats *out) {
+    if (!out) return;
+    pthread_mutex_lock(&g_pool.mu);
+    *out = g_pool.stats;
+    out->idle = g_pool.nidle;
+    pthread_mutex_unlock(&g_pool.mu);
+}
+
+void conn_pool_close_idle(void) {
+    TlsClient *list[POOL_MAX_IDLE];
+    pthread_mutex_lock(&g_pool.mu);
+    int n = g_pool.nidle;
+    memcpy(list, g_pool.idle, (size_t)n * sizeof(TlsClient *));
+    g_pool.nidle = 0;
+    pthread_mutex_unlock(&g_pool.mu);
+    for (int i = 0; i < n; i++) pool_destroy_client(list[i]);
 }

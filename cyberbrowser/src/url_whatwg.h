@@ -51,6 +51,10 @@ int wurl_set(WUrl *url, WUrlSetter which, const char *value, size_t len);
 
 /* Serializations (malloc'd, NUL-terminated). */
 char *wurl_href(const WUrl *url);
+
+/* Resolve `href` against the absolute URL `base` (NULL/"" = no base) and
+ * return the serialized result (malloc'd), or NULL when it does not parse. */
+char *wurl_resolve(const char *base, const char *href);
 char *wurl_origin(const WUrl *url);
 char *wurl_protocol(const WUrl *url);   /* "https:" */
 char *wurl_host(const WUrl *url);       /* host[:port], "" for a null host */

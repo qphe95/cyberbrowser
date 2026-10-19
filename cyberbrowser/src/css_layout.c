@@ -16,6 +16,7 @@
 #include "dom_wrap.h"
 #include "text_shaper.h"
 #include "display_list.h"
+#include "image_cache.h"
 #include "css_style.h"
 #include "frame_arena.h"
 #include "job_system.h"
@@ -1189,16 +1190,14 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
             }
         }
     } else if (strcasecmp(prop, "opacity") == 0) {
-        double op = strtod(value, NULL);
-        if (strchr(value, '%')) op /= 100.0;
-        if (op < 0.0) op = 0.0;
-        if (op > 1.0) op = 1.0;
-        box->opacity = op;
-        box->opacity_set = 1;
-        /* opacity:0 renders nothing — treat like hidden for the subtree. */
-        if (op <= 0.0) {
-            box->visibility = CSS_VISIBILITY_HIDDEN;
-            box->visibility_set = 1;
+        char *endp = NULL;
+        double op = strtod(value, &endp);
+        if (endp != value) {            /* invalid values are ignored */
+            if (*endp == '%') op /= 100.0;
+            if (op < 0.0) op = 0.0;
+            if (op > 1.0) op = 1.0;
+            box->opacity = op;
+            box->opacity_set = 1;
         }
     } else if (strcasecmp(prop, "position") == 0) {
         box->position = css_parse_position(value);
@@ -1398,6 +1397,11 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     } else if (strcasecmp(prop, "-webkit-line-clamp") == 0 || strcasecmp(prop, "line-clamp") == 0) {
         int n = atoi(value);
         box->line_clamp = (unsigned char)(n > 0 && n < 255 ? n : 0);
+    } else if (strcasecmp(prop, "object-fit") == 0) {
+        box->object_fit = strcasecmp(value, "contain") == 0 ? 1 :
+                          strcasecmp(value, "cover") == 0 ? 2 :
+                          strcasecmp(value, "none") == 0 ? 3 :
+                          strcasecmp(value, "scale-down") == 0 ? 4 : 0;
     } else if (strcasecmp(prop, "align-self") == 0) {
         box->align_self = (strcasecmp(value, "auto") == 0 || strcasecmp(value, "normal") == 0)
             ? 0 : (unsigned char)(css_parse_align_items(value) + 1);
@@ -3463,6 +3467,66 @@ static double layout_flex_cross_total(const LayoutBox *box, double value, bool i
  * border-box for border-box sizing.
  */
 static LayoutContext *g_layout_ctx;   /* the layout in progress (keyword sizes) */
+
+static bool layout_is_img(const HtmlNode *node)
+{
+    return node && node->type == HTML_NODE_ELEMENT && node->tag_name &&
+           strcasecmp(node->tag_name, "img") == 0;
+}
+
+/* Natural size of an <img>: from the decoded image header (the image cache
+ * starts the fetch on first use and notifies when the size is known); the
+ * width/height attributes stand in while it is unknown.  Thread-safe. */
+static bool layout_img_natural(const LayoutContext *ctx, HtmlNode *node, double *nw, double *nh)
+{
+    *nw = *nh = 0.0;
+    ImageCache *ic = display_list_get_image_cache();
+    if (ic) {
+        char *url = display_list_image_source(ctx ? ctx->base_url : "", node, 0.0f);
+        if (url) {
+            int w = 0, h = 0;
+            bool ok = image_cache_natural_size(ic, url, &w, &h);
+            free(url);
+            if (ok) { *nw = w; *nh = h; return true; }
+        }
+    }
+    return false;
+}
+
+static double layout_attr_px(HtmlNode *node, const char *name)
+{
+    const char *v = layout_node_attribute(node, name);
+    if (!v || !v[0] || strchr(v, '%')) return 0.0;
+    double d = atof(v);
+    return d > 0.0 ? d : 0.0;
+}
+
+/* Used content size of an <img> (CSS 2.1 §10.3.2 / §10.6.2): definite CSS
+ * sizes win (the width/height attributes act as CSS sizes when CSS says
+ * auto); a missing dimension follows the natural aspect ratio; with both
+ * auto the natural size is used.  Unknown natural size (still loading):
+ * 0x0 unless sized by CSS/attributes. */
+static void layout_img_size(const LayoutContext *ctx, HtmlNode *node, double cw_in, bool w_auto,
+                            double ch_in, bool h_auto, double *cw_out, double *ch_out)
+{
+    double nw, nh;
+    bool known = layout_img_natural(ctx, node, &nw, &nh);
+    double aw = layout_attr_px(node, "width"), ah = layout_attr_px(node, "height");
+    double cw = cw_in, ch = ch_in;
+    if (w_auto && aw > 0.0) { cw = aw; w_auto = false; }
+    if (h_auto && ah > 0.0) { ch = ah; h_auto = false; }
+    double ratio = known && nh > 0.0 ? nw / nh : (aw > 0.0 && ah > 0.0 ? aw / ah : 0.0);
+    if (w_auto && h_auto) {
+        cw = known ? nw : 0.0;
+        ch = known ? nh : 0.0;
+    } else if (w_auto) {
+        cw = ratio > 0.0 ? ch * ratio : (known ? nw : 0.0);
+    } else if (h_auto) {
+        ch = ratio > 0.0 ? cw / ratio : (known ? nh : 0.0);
+    }
+    *cw_out = cw;
+    *ch_out = ch;
+}
 static double layout_intrinsic_width(LayoutContext *ctx, int idx, bool want_max);
 
 static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
@@ -3513,6 +3577,28 @@ static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
         /* used_total_width is already a border-box size */
         if (box->box_sizing == CSS_BOX_SIZING_CONTENT_BOX)
             used_content_width = used_total_width - layout_horizontal_border_padding(box);
+    } else if (width_auto && layout_is_img(node)) {
+        /* Replaced element: natural size / aspect ratio, not the
+         * containing block width. */
+        double ch_spec = 0.0;
+        bool h_auto = true;
+        if (box->height_set && !(box->height_percent > 0.0)) {
+            ch_spec = box->box_sizing == CSS_BOX_SIZING_BORDER_BOX
+                ? box->css_height - layout_vertical_border_padding(box) : box->css_height;
+            h_auto = false;
+        } else if (box->height_percent > 0.0 && parent_content_height > 0.0) {
+            ch_spec = parent_content_height * box->height_percent;
+            if (box->box_sizing == CSS_BOX_SIZING_BORDER_BOX) ch_spec -= layout_vertical_border_padding(box);
+            h_auto = false;
+        }
+        double cw = 0.0, ch = 0.0;
+        layout_img_size(g_layout_ctx, node, 0.0, true, ch_spec, h_auto, &cw, &ch);
+        used_content_width = cw;
+        used_total_width = layout_content_to_total_width(box, cw);
+        width_auto = false;
+        if (box->box_sizing == CSS_BOX_SIZING_BORDER_BOX) {
+            /* the content-box branch below converts; keep totals consistent */
+        }
     } else if (width_auto) {
         if (box->display == CSS_DISPLAY_INLINE) {
             /* Inline boxes shrink-to-fit: leave the width to the inline flow,
@@ -3584,7 +3670,14 @@ static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
         height_auto = false;
     }
 
-    if (height_auto) {
+    if (height_auto && layout_is_img(node)) {
+        /* Replaced element: height from the used width and aspect ratio. */
+        double cw = box->width - layout_horizontal_border_padding(box);
+        if (cw < 0.0) cw = 0.0;
+        double w2 = 0.0, ch = 0.0;
+        layout_img_size(g_layout_ctx, node, cw, false, 0.0, true, &w2, &ch);
+        box->height = layout_content_to_total_height(box, ch);
+    } else if (height_auto) {
         /* Height stays 0; it will be resolved from children in the bottom-up pass. */
         box->height = 0.0;
     } else if (box->box_sizing == CSS_BOX_SIZING_CONTENT_BOX) {
@@ -3889,10 +3982,8 @@ static bool layout_first_img_size(HtmlDocument *doc, HtmlNode *node,
          c = html_node_next_sibling(doc, c)) {
         if (c->type != HTML_NODE_ELEMENT) continue;
         if (strcasecmp(c->tag_name, "img") == 0) {
-            const char *wa = layout_node_attribute(c, "width");
-            const char *ha = layout_node_attribute(c, "height");
-            double w = (wa && wa[0]) ? atof(wa) : 0.0;
-            double h = (ha && ha[0]) ? atof(ha) : 0.0;
+            double w = 0.0, h = 0.0;
+            layout_img_size(g_layout_ctx, c, 0.0, true, 0.0, true, &w, &h);
             if (w > 0.0) {
                 *out_w = w;
                 *out_h = h > 0.0 ? h : w;
@@ -4079,8 +4170,12 @@ static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_ma
     double content = 0.0;
     const char *tag = dom->tag_name ? dom->tag_name : "";
     if (strcasecmp(tag, "img") == 0) {
-        const char *wa = layout_node_attribute(dom, "width");
-        content = (wa && wa[0]) ? atof(wa) : 0.0;
+        double ch_spec = 0.0;
+        bool h_auto = !(box->height_set && !(box->height_percent > 0.0));
+        if (!h_auto) ch_spec = box->box_sizing == CSS_BOX_SIZING_BORDER_BOX
+            ? box->css_height - layout_vertical_border_padding(box) : box->css_height;
+        double ch = 0.0;
+        layout_img_size(ctx, dom, 0.0, true, ch_spec, h_auto, &content, &ch);
     } else if (strcasecmp(tag, "input") == 0) {
         const char *ty = layout_node_attribute(dom, "type");
         if (ty && (strcasecmp(ty, "checkbox") == 0 || strcasecmp(ty, "radio") == 0)) content = 13.0;
@@ -4553,14 +4648,8 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                     child->height = 0.0;
                 }
             } else if (is_img) {
-                /* Replaced element: honor width/height attributes when
-                 * present; the exact intrinsic size is filled in later. */
-                const char *wa = layout_node_attribute(dom, "width");
-                const char *ha = layout_node_attribute(dom, "height");
-                if (wa && wa[0]) child->width = atof(wa);
-                if (ha && ha[0]) child->height = atof(ha);
-                if (child->width <= 0.0) child->width = 32.0;
-                if (child->height <= 0.0) child->height = child->width;
+                /* Replaced element: layout_resolve_used_sizes already sized
+                 * it from CSS, attributes and the natural size / ratio. */
             } else if (text && layout_measure_text_styled(child, text, fs, &tw, NULL)) {
                 child->width = tw;
                 child->height = line_adv;
@@ -4878,6 +4967,14 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
      * out through the parent (i.e. the parent has bottom border/padding). */
     if (box->height <= 0.0 && layout_height_auto(box)) {
         double max_bottom = cur.y;
+        {
+            HtmlNode *imn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+            if (layout_is_img(imn)) {
+                double w2 = 0.0, ch = 0.0;
+                layout_img_size(ctx, imn, box->content_width, false, 0.0, true, &w2, &ch);
+                if (content_top + ch > max_bottom) max_bottom = content_top + ch;
+            }
+        }
         if (box->aspect_ratio > 0.0) {
             /* ::before { padding-top: N% } aspect boxes: the pseudo block
              * occupies width x ratio at the top of the content box. */
@@ -5793,14 +5890,8 @@ static void layout_node_serial(LayoutContext *ctx, int idx)
                 double iw = 0.0, ih = 0.0;
                 if (dom && dom->type == HTML_NODE_ELEMENT &&
                     strcasecmp(dom->tag_name, "img") == 0) {
-                    const char *wa = layout_node_attribute(dom, "width");
-                    const char *ha = layout_node_attribute(dom, "height");
-                    if (wa && wa[0]) child->width = atof(wa);
-                    if (ha && ha[0]) child->height = atof(ha);
-                    if (child->width > 0.0) {
-                        if (child->height <= 0.0) child->height = child->width;
-                        sized = true;
-                    }
+                    /* Sized by layout_resolve_used_sizes (replaced element). */
+                    sized = true;
                 } else if (dom && layout_first_img_size(ctx->doc, dom, &iw, &ih)) {
                     child->width = iw;
                     child->height = ih;

@@ -1867,3 +1867,18 @@ char *wurl_form_decode(const char *s, size_t len, size_t *out_len)
     *out_len = b.len;
     return sb_take(&b);
 }
+
+char *wurl_resolve(const char *base, const char *href)
+{
+    if (!href) return NULL;
+    WUrl b, u;
+    bool have_base = false;
+    if (base && base[0] && wurl_parse(base, strlen(base), NULL, &b) == 0) have_base = true;
+    char *out = NULL;
+    if (wurl_parse(href, strlen(href), have_base ? &b : NULL, &u) == 0) {
+        out = wurl_href(&u);
+        wurl_free(&u);
+    }
+    if (have_base) wurl_free(&b);
+    return out;
+}

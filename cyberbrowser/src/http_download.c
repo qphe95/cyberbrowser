@@ -574,6 +574,57 @@ static size_t parse_content_range_total_size(const char *data, size_t data_len) 
     return 0;
 }
 
+/* Incremental chunked-body end detection (RFC 9112 section 7.1).
+ * body[0..len) is what has arrived; *cursor is where the next chunk-size
+ * line starts (advanced past complete chunks so each byte is scanned once).
+ * Returns 1 when the last chunk and the trailer section are complete
+ * (*end = body length of the whole message), 0 when more bytes are needed,
+ * -1 on malformed framing. */
+static int http_chunked_scan(const char *body, size_t len, size_t *cursor, size_t *end) {
+    size_t p = *cursor;
+    for (;;) {
+        const char *line = body + p;
+        const char *nl = p < len ? memchr(line, '\n', len - p) : NULL;
+        if (!nl) return 0;
+        size_t size = 0;
+        int digits = 0;
+        for (const char *q = line; q < nl && *q != ';' && *q != '\r' && *q != ' ' && *q != '\t'; q++) {
+            int v;
+            if (*q >= '0' && *q <= '9') v = *q - '0';
+            else if (*q >= 'a' && *q <= 'f') v = *q - 'a' + 10;
+            else if (*q >= 'A' && *q <= 'F') v = *q - 'A' + 10;
+            else return -1;
+            if (size > ((size_t)-1 >> 4)) return -1;
+            size = size * 16 + (size_t)v;
+            digits++;
+        }
+        if (!digits) return -1;
+        size_t data = (size_t)(nl - body) + 1;
+        if (size == 0) {
+            /* Trailer fields, then an empty line. */
+            size_t t = data;
+            for (;;) {
+                const char *tl = t < len ? memchr(body + t, '\n', len - t) : NULL;
+                if (!tl) return 0;
+                size_t line_len = (size_t)(tl - (body + t));
+                t = (size_t)(tl - body) + 1;
+                if (line_len == 0 || (line_len == 1 && body[t - 2] == '\r')) {
+                    *end = t;
+                    *cursor = p;
+                    return 1;
+                }
+            }
+        }
+        size_t next = data + size;                 /* chunk data, then CRLF */
+        if (next + 1 > len) return 0;
+        if (body[next] == '\r') next++;
+        if (next + 1 > len) return 0;
+        if (body[next] != '\n') return -1;
+        p = next + 1;
+        *cursor = p;
+    }
+}
+
 static bool http_request_with_method_internal(const char *url, const char *method,
                                                const char *postData, size_t postDataLen,
                                                const char **custom_headers, size_t custom_header_count,
@@ -593,12 +644,6 @@ static bool http_request_with_method_internal(const char *url, const char *metho
         return false;
     }
     
-    TlsClient client = {0};
-    if (!(is_tls ? tls_client_connect(&client, host, port, err, errLen)
-                 : tcp_client_connect(&client, host, port, err, errLen))) {
-        return false;
-    }
-    
     /* Build HTTP request */
     char request[16384];
     int req_len = snprintf(request, sizeof(request),
@@ -608,7 +653,7 @@ static bool http_request_with_method_internal(const char *url, const char *metho
              "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/apng,image/*,*/*;q=0.8\r\n"
              "Accept-Language: en-US,en;q=0.9\r\n"
              "Accept-Encoding: identity\r\n"
-             "Connection: close\r\n",
+             "Connection: keep-alive\r\n",
              method, path, host_hdr);
     
     /* Add custom headers */
@@ -662,10 +707,23 @@ static bool http_request_with_method_internal(const char *url, const char *metho
     /* Add final CRLF */
     req_len += snprintf(request + req_len, sizeof(request) - req_len, "\r\n");
     
-    ssize_t sent = tls_client_write(&client, (unsigned char *)request, strlen(request));
+    /* Connection from the shared keep-alive pool.  A pooled connection the
+     * server has meanwhile closed shows up as a failed write or an EOF before
+     * any response byte: retry once on a fresh connection (as Chromium does
+     * for errors on a reused socket). */
+    bool is_head = strcasecmp(method, "HEAD") == 0;
+    int conn_attempt = 0;
+    bool conn_reused = false;
+    TlsClient *client = NULL;
+retry_connection:
+    client = conn_pool_acquire(is_tls, host, port, conn_attempt > 0, &conn_reused, err, errLen);
+    if (!client) return false;
+
+    ssize_t sent = tls_client_write(client, (unsigned char *)request, strlen(request));
     if (sent < 0) {
+        conn_pool_release(client, false);
+        if (conn_reused && conn_attempt == 0) { conn_attempt++; goto retry_connection; }
         snprintf(err, errLen, "Failed to send request");
-        tls_client_close(&client);
         return false;
     }
     LOGI("HTTP request sent: %zd bytes", sent);
@@ -673,17 +731,18 @@ static bool http_request_with_method_internal(const char *url, const char *metho
     
     /* Send POST body if present */
     if (postData && postDataLen > 0) {
-        sent = tls_client_write(&client, (unsigned char *)postData, postDataLen);
+        sent = tls_client_write(client, (unsigned char *)postData, postDataLen);
         if (sent < 0) {
+            conn_pool_release(client, false);
+            if (conn_reused && conn_attempt == 0) { conn_attempt++; goto retry_connection; }
             snprintf(err, errLen, "Failed to send POST body");
-            tls_client_close(&client);
             return false;
         }
         LOGI("POST body sent: %zd bytes", sent);
     }
     
     /* Set socket timeout */
-    int sockfd = client.net.fd;
+    int sockfd = client->net.fd;
 #ifndef _WIN32
     struct timeval tv;
     tv.tv_sec = 60;
@@ -700,17 +759,18 @@ static bool http_request_with_method_internal(const char *url, const char *metho
     LOGI("Set socket timeout (read=60s, write=10s)");
 
     /* Read response */
-    outBuffer->data = malloc(CHUNK_SIZE);
+    size_t capacity = CHUNK_SIZE;
+    outBuffer->data = malloc(capacity);
     outBuffer->size = 0;
     if (!outBuffer->data) {
         snprintf(err, errLen, "Out of memory");
-        tls_client_close(&client);
+        conn_pool_release(client, false);
         return false;
     }
-    
-    size_t capacity = CHUNK_SIZE;
+    outBuffer->data[0] = '\0';
+
     unsigned char buf[CHUNK_SIZE];
-    ssize_t n;
+    ssize_t n = 0;
     time_t start_time = time(NULL);
     const int max_header_time = 30;
     int max_body_time = 300;
@@ -722,26 +782,31 @@ static bool http_request_with_method_internal(const char *url, const char *metho
     size_t total_size_val = 0;
     bool body_streaming = false;
     size_t body_written = 0;
-    
+    /* Message framing (RFC 9112 section 6.3): where this response ends, so
+     * the connection can carry the next request.  Without a length (no
+     * Content-Length, not chunked) the body runs to EOF and the connection
+     * is not reused. */
+    bool body_len_known = false;   /* Content-Length present, or no body */
+    size_t body_expected = 0;
+    bool resp_chunked = false;
+    size_t chunk_cursor = 0;       /* body offset of the next chunk-size line */
+    bool message_complete = false;
+    bool conn_keep = true;
+    const char *fail_msg = NULL;
+
     LOGI("Starting to read HTTP response...");
     size_t last_size = 0;
-    while ((n = tls_client_read(&client, buf, sizeof(buf))) > 0 ||
-           (n == 0 && zero_reads < max_zero_reads)) {
+    while (!message_complete) {
+        n = tls_client_read(client, buf, sizeof(buf));
+        if (n < 0) break;                       /* EOF or error */
         if (n == 0) {
-            zero_reads++;
+            if (++zero_reads >= max_zero_reads) break;
             platform_sleep_ms(10);
             int current_max_time = headers_parsed ? max_body_time : max_header_time;
             if (time(NULL) - start_time > current_max_time) {
                 LOGE("HTTP read timeout after %d seconds", current_max_time);
-                snprintf(err, errLen, "Download timeout");
-                free(outBuffer->data);
-        free(outBuffer->headers);
-        outBuffer->headers = NULL;
-        outBuffer->headers_size = 0;
-                outBuffer->data = NULL;
-                tls_client_close(&client);
-                if (bodyStream) fclose(bodyStream);
-                return false;
+                fail_msg = "Download timeout";
+                break;
             }
             continue;
         }
@@ -750,26 +815,23 @@ static bool http_request_with_method_internal(const char *url, const char *metho
             LOGE("[DL] Received %zu bytes so far", outBuffer->size);
             last_size = outBuffer->size;
         }
-        if (!headers_parsed) {
-            if (outBuffer->size + (size_t)n > capacity) {
-                capacity *= 2;
+        if (body_streaming) {
+            size_t w = fwrite(buf, 1, (size_t)n, bodyStream);
+            if (w != (size_t)n) { fail_msg = "Failed to write to file"; break; }
+            body_written += w;
+        } else {
+            if (outBuffer->size + (size_t)n + 1 > capacity) {
+                while (outBuffer->size + (size_t)n + 1 > capacity) capacity *= 2;
                 char *new_data = realloc(outBuffer->data, capacity);
-                if (!new_data) {
-                    snprintf(err, errLen, "Out of memory");
-                    free(outBuffer->data);
-        free(outBuffer->headers);
-        outBuffer->headers = NULL;
-        outBuffer->headers_size = 0;
-                    outBuffer->data = NULL;
-                    tls_client_close(&client);
-                    if (bodyStream) fclose(bodyStream);
-                    return false;
-                }
+                if (!new_data) { fail_msg = "Out of memory"; break; }
                 outBuffer->data = new_data;
             }
             memcpy(outBuffer->data + outBuffer->size, buf, (size_t)n);
             outBuffer->size += (size_t)n;
+            outBuffer->data[outBuffer->size] = '\0';
+        }
 
+        if (!headers_parsed) {
             char *header_end = strstr(outBuffer->data, "\r\n\r\n");
             if (!header_end) header_end = strstr(outBuffer->data, "\n\n");
             if (header_end) {
@@ -786,6 +848,40 @@ static bool http_request_with_method_internal(const char *url, const char *metho
                     total_size_val = content_length_val;
                 }
                 headers_parsed = true;
+
+                /* Framing and connection persistence. */
+                char *hdr_end = outBuffer->data + header_len_val;
+                int st = 0;
+                sscanf(outBuffer->data, "HTTP/%*s %d", &st);
+                bool http10 = strncmp(outBuffer->data, "HTTP/1.0", 8) == 0;
+                char *conn_hdr = find_response_header(outBuffer->data, outBuffer->data, hdr_end, "connection:");
+                size_t conn_len = conn_hdr ? strcspn(conn_hdr, "\r\n") : 0;
+                bool says_close = false, says_keep = false;
+                for (size_t k = 0; k < conn_len; k++) {
+                    if (conn_len - k >= 5 && strncasecmp(conn_hdr + k, "close", 5) == 0) says_close = true;
+                    if (conn_len - k >= 10 && strncasecmp(conn_hdr + k, "keep-alive", 10) == 0) says_keep = true;
+                }
+                if (says_close || (http10 && !says_keep)) conn_keep = false;
+                char *te = find_response_header(outBuffer->data, outBuffer->data, hdr_end, "transfer-encoding:");
+                size_t te_len = te ? strcspn(te, "\r\n") : 0;
+                for (size_t k = 0; te && k + 7 <= te_len; k++)
+                    if (strncasecmp(te + k, "chunked", 7) == 0) resp_chunked = true;
+                bool has_cl = find_response_header(outBuffer->data, outBuffer->data, hdr_end, "content-length:") != NULL;
+                if (is_head || (st >= 100 && st < 200) || st == 204 || st == 304) {
+                    body_len_known = true;
+                    body_expected = 0;
+                    resp_chunked = false;
+                } else if (resp_chunked) {
+                    /* Streamed to a file the chunk framing is kept as is and
+                     * the body runs to EOF, as before. */
+                    if (bodyStream) { resp_chunked = false; conn_keep = false; }
+                } else if (has_cl) {
+                    body_len_known = true;
+                    body_expected = content_length_val;
+                } else {
+                    conn_keep = false;                  /* body ends at EOF */
+                }
+
                 if (content_length_val > 0) {
                     max_body_time = 30 + (int)((content_length_val / (1024ULL * 1024ULL)) * 120);
                     if (max_body_time < 300) max_body_time = 300;
@@ -797,87 +893,74 @@ static bool http_request_with_method_internal(const char *url, const char *metho
                     size_t body_so_far = outBuffer->size > header_len_val ? outBuffer->size - header_len_val : 0;
                     if (body_so_far > 0) {
                         size_t w = fwrite(outBuffer->data + header_len_val, 1, body_so_far, bodyStream);
-                        if (w != body_so_far) {
-                            snprintf(err, errLen, "Failed to write to file");
-                            free(outBuffer->data);
-        free(outBuffer->headers);
-        outBuffer->headers = NULL;
-        outBuffer->headers_size = 0;
-                            outBuffer->data = NULL;
-                            tls_client_close(&client);
-                            fclose(bodyStream);
-                            return false;
-                        }
+                        if (w != body_so_far) { fail_msg = "Failed to write to file"; break; }
                         body_written += w;
                     }
                     outBuffer->size = header_len_val;
+                    outBuffer->data[outBuffer->size] = '\0';
                     body_streaming = true;
                 }
             }
-        } else if (body_streaming) {
-            size_t w = fwrite(buf, 1, (size_t)n, bodyStream);
-            if (w != (size_t)n) {
-                snprintf(err, errLen, "Failed to write to file");
-                free(outBuffer->data);
-        free(outBuffer->headers);
-        outBuffer->headers = NULL;
-        outBuffer->headers_size = 0;
-                outBuffer->data = NULL;
-                tls_client_close(&client);
-                fclose(bodyStream);
-                return false;
-            }
-            body_written += w;
-        } else {
-            if (outBuffer->size + (size_t)n > capacity) {
-                capacity *= 2;
-                char *new_data = realloc(outBuffer->data, capacity);
-                if (!new_data) {
-                    snprintf(err, errLen, "Out of memory");
-                    free(outBuffer->data);
-        free(outBuffer->headers);
-        outBuffer->headers = NULL;
-        outBuffer->headers_size = 0;
-                    outBuffer->data = NULL;
-                    tls_client_close(&client);
-                    if (bodyStream) fclose(bodyStream);
-                    return false;
+        }
+
+        if (headers_parsed) {
+            size_t body_received = body_streaming ? body_written
+                                 : (outBuffer->size > header_len_val ? outBuffer->size - header_len_val : 0);
+            if (body_len_known) {
+                if (body_received >= body_expected) {
+                    message_complete = true;
+                    if (body_received > body_expected) conn_keep = false;   /* stray bytes */
                 }
-                outBuffer->data = new_data;
+            } else if (resp_chunked) {
+                size_t end = 0;
+                int r = http_chunked_scan(outBuffer->data + header_len_val, body_received, &chunk_cursor, &end);
+                if (r > 0) {
+                    message_complete = true;
+                    if (end < body_received) conn_keep = false;
+                } else if (r < 0) {
+                    resp_chunked = false;               /* malformed: read to EOF */
+                    conn_keep = false;
+                }
             }
-            memcpy(outBuffer->data + outBuffer->size, buf, (size_t)n);
-            outBuffer->size += (size_t)n;
-        }
-        if (state && headers_parsed && content_length_val > 0) {
-            size_t downloaded = body_streaming ? body_written : (outBuffer->size > header_len_val ? outBuffer->size - header_len_val : 0);
-            if (downloaded > content_length_val) downloaded = content_length_val;
-            download_state_set_progress(state, downloaded, content_length_val);
-        }
-        
-        /* If we have received all expected body bytes, stop reading */
-        if (headers_parsed && content_length_val > 0) {
-            size_t body_received = body_streaming ? body_written : (outBuffer->size > header_len_val ? outBuffer->size - header_len_val : 0);
-            if (body_received >= content_length_val) {
-                break;
+            if (state && content_length_val > 0) {
+                size_t downloaded = body_received;
+                if (downloaded > content_length_val) downloaded = content_length_val;
+                download_state_set_progress(state, downloaded, content_length_val);
             }
         }
-        
+
         int current_max_time = headers_parsed ? max_body_time : max_header_time;
-        if (time(NULL) - start_time > current_max_time) {
+        if (!message_complete && time(NULL) - start_time > current_max_time) {
             LOGE("HTTP read timeout after %d seconds", current_max_time);
-            snprintf(err, errLen, "Download timeout");
-            free(outBuffer->data);
-        free(outBuffer->headers);
-        outBuffer->headers = NULL;
-        outBuffer->headers_size = 0;
-            outBuffer->data = NULL;
-            tls_client_close(&client);
-            return false;
+            fail_msg = "Download timeout";
+            break;
         }
     }
 
+    if (fail_msg) {
+        snprintf(err, errLen, "%s", fail_msg);
+        free(outBuffer->data);
+        free(outBuffer->headers);
+        outBuffer->headers = NULL;
+        outBuffer->headers_size = 0;
+        outBuffer->data = NULL;
+        outBuffer->size = 0;
+        conn_pool_release(client, false);
+        return false;
+    }
+    if (outBuffer->size == 0 && body_written == 0 && conn_reused && conn_attempt == 0) {
+        /* The pooled connection was closed by the server: retry on a new one. */
+        LOGI("Reused connection to %s closed before a response; retrying", host);
+        free(outBuffer->data);
+        outBuffer->data = NULL;
+        conn_pool_release(client, false);
+        conn_attempt++;
+        goto retry_connection;
+    }
+
     LOGI("Finished reading response: %zu bytes total", outBuffer->size);
-    tls_client_close(&client);
+    conn_pool_release(client, conn_keep && message_complete);
+    client = NULL;
     
     LOGI("Received %zu bytes response", outBuffer->size);
     if (outBuffer->size > 0) {
@@ -985,7 +1068,6 @@ static bool http_request_with_method_internal(const char *url, const char *metho
         outBuffer->headers = NULL;
         outBuffer->headers_size = 0;
         outBuffer->data = NULL;
-        if (bodyStream) fclose(bodyStream);
         return false;
     }
 
@@ -1144,6 +1226,21 @@ bool http_request_to_memory(const char *url, const char *method,
     /* Generic request with no automatic cookies; caller controls credentials. */
     return http_request_with_method(url, method, postData, postDataLen, headers, headerCount,
                                     outBuffer, outStatus, err, errLen, NULL, NULL, NULL);
+}
+
+void http_net_log_stats(void) {
+    ConnPoolStats st;
+    conn_pool_get_stats(&st);
+    long requests = st.connects + st.reuses;
+    fprintf(stderr, "[net] %ld requests: %ld new connections, %ld reused (%.0f%%), "
+                    "%ld stale, %ld connect failures, %ld waited for the per-host cap\n",
+            requests, st.connects, st.reuses,
+            requests ? 100.0 * (double)st.reuses / (double)requests : 0.0,
+            st.stale, st.connect_failures, st.waits);
+}
+
+void http_net_close_idle(void) {
+    conn_pool_close_idle();
 }
 
 void http_free_buffer(HttpBuffer *buffer) {

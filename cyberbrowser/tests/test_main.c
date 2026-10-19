@@ -32,6 +32,8 @@ extern void run_preorder_compaction_array_tests(void);
 extern void run_css_parser_tests(void);
 extern void run_css_layout_tests(void);
 extern void run_css_style_tests(void);
+extern void run_image_cache_tests(void);
+extern void run_http_pool_tests(void);
 extern void run_dom_tests(void);
 /* Note: YouTube data tests run in separate executable (youtube-data-test) */
 
@@ -185,6 +187,8 @@ int main(int argc, char *argv[]) {
     run_css_parser_tests();
     run_css_layout_tests();
     run_css_style_tests();
+    run_image_cache_tests();
+    run_http_pool_tests();
     run_dom_tests();
 
     /* Note: YouTube data tests run in separate executable (youtube-data-test) */

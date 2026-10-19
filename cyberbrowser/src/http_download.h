@@ -51,6 +51,12 @@ bool http_post_to_memory(const char *url, const char *postData, size_t postDataL
 
 void http_free_buffer(HttpBuffer *buffer);
 
+/* Keep-alive connection pool (shared by every request; see tls_client.h).
+ * http_net_log_stats prints a one-line summary to stderr;
+ * http_net_close_idle closes the parked connections (at shutdown). */
+void http_net_log_stats(void);
+void http_net_close_idle(void);
+
 /* Main file download API. Pass a DownloadState pointer for progress tracking.
  * The download thread updates state->bytes_downloaded and state->state directly.
  * The caller polls state at its own frame rate. */

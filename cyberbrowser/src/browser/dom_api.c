@@ -203,7 +203,9 @@ GCValue dom_element_style(JSContextHandle ctx, GCValue el, bool create) {
  * not be mirrored into own properties (they would shadow the accessor, or
  * re-enter it from setAttribute): href of <a>/<area> (HTMLHyperlinkElementUtils). */
 static bool dom_attr_has_accessor(NodeId id, const char *name) {
-    return strcasecmp(name, "href") == 0 && (dom_tag_is(id, "a") || dom_tag_is(id, "area"));
+    if (strcasecmp(name, "href") == 0 && (dom_tag_is(id, "a") || dom_tag_is(id, "area"))) return true;
+    /* src / srcset of <img> (image_api.c): setting them starts a load. */
+    return (strcasecmp(name, "src") == 0 || strcasecmp(name, "srcset") == 0) && dom_tag_is(id, "img");
 }
 
 void dom_element_setup_wrapper(JSContextHandle ctx, NodeId id, GCValue obj) {

@@ -10,6 +10,7 @@
 #include <quickjs.h>
 #include <quickjs_gc_unified.h>
 #include "browser_api_impl.h"
+#include "browser/image_api.h"
 #include "browser_api_impl_types.h"
 #include "browser_api_impl_handle_helpers.h"
 #include "browser_api_impl_internal.h"
@@ -1797,6 +1798,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, img_element_ctor, "prototype", img_element_proto);
     JS_SetPropertyStr(ctx, global, "HTMLImageElement", img_element_ctor);
     JS_SetPropertyStr(ctx, window, "HTMLImageElement", img_element_ctor);
+    image_api_install(ctx, img_element_proto);
     
     // HTMLInputElement constructor (needed by Polymer/TypeScript decorator metadata)
     GCValue input_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLInputElement", 0, JS_CFUNC_constructor_or_func, 0);
