@@ -1,3 +1,4 @@
+#include "cyber_env.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -5,6 +6,7 @@
 #include <stdint.h>
 #include <stdarg.h>
 #include "html_media_extract.h"
+#include "dom_fetch.h"
 #include "html_dom.h"
 #include "http_download.h"
 #include "js_quickjs.h"
@@ -844,7 +846,7 @@ static bool is_unsafe_external_script(const char *url) {
     static const char *skip_patterns[] = {
         NULL
     };
-    if (getenv("CYBER_SKIP_ES5_ADAPTER")) {
+    if (cyber_getenv("CYBER_SKIP_ES5_ADAPTER")) {
         static const char *es5[] = { "custom-elements-es5-adapter", NULL };
         skip_patterns[0] = es5[0];
     }
@@ -983,6 +985,14 @@ bool html_execute_page_scripts(const char *html, JsExecResult *out_result) {
     if (MAX_EXTERNAL_SCRIPT_SIZE == 0) {
         LOG_INFO("Skipping external script fetches (MAX_EXTERNAL_SCRIPT_SIZE == 0)");
     }
+    /* Start every external fetch now so the downloads overlap (they are
+     * still consumed, and executed, in document order). */
+    if (MAX_EXTERNAL_SCRIPT_SIZE != 0) {
+        for (int i = 0; i < script_count; i++)
+            if (scripts[i].type == SCRIPT_TYPE_EXTERNAL && scripts[i].url[0] &&
+                !is_unsafe_external_script(scripts[i].url))
+                dom_fetch_prefetch(scripts[i].url);
+    }
     for (int i = 0; i < script_count; i++) {
         if (scripts[i].type == SCRIPT_TYPE_EXTERNAL) {
             if (MAX_EXTERNAL_SCRIPT_SIZE == 0) {
@@ -1009,7 +1019,7 @@ bool html_execute_page_scripts(const char *html, JsExecResult *out_result) {
             bool result = false;
             {
                 CP_SCOPE_CAT("fetch-external-script", "net");
-                result = http_get_to_memory(scripts[i].url, &buffer, error, sizeof(error));
+                result = dom_fetch_script(scripts[i].url, &buffer, error, sizeof(error));
             }
             fprintf(stderr, "[html_extract] FETCH external script [%d] result=%s size=%zu\n",
                     scripts[i].parse_order, result ? "ok" : "fail", result ? buffer.size : 0);
@@ -1045,7 +1055,7 @@ bool html_execute_page_scripts(const char *html, JsExecResult *out_result) {
 
                     /* Diagnostic: trace the monomer lifecycle state-machine
                      * transitions in the desktop_polymer bundle.  CYBER_TRACE_LIFECYCLE=1. */
-                    if (getenv("CYBER_TRACE_LIFECYCLE") && scripts[i].content_len > 1000000 &&
+                    if (CYBER_ENV(CYBER_T_LIFECYCLE) && scripts[i].content_len > 1000000 &&
                         strstr(scripts[i].content, "prototype.transition=function(")) {
                         StrBuf patched SB_AUTO = sb_from(scripts[i].content, scripts[i].content_len);
                         size_t fpos = sb_find(&patched, "prototype.transition=function(", 0);
@@ -1328,7 +1338,7 @@ bool html_execute_page_scripts(const char *html, JsExecResult *out_result) {
                     }
                     /* Log when the scheduler's O() executor runs jobs and when the
                      * web-animations polyfill's RAF queue schedules/runs its driver. */
-                    if (getenv("CYBER_TRACE_LIFECYCLE") && scripts[i].content_len > 1000 &&
+                    if (CYBER_ENV(CYBER_T_LIFECYCLE) && scripts[i].content_len > 1000 &&
                         strstr(scripts[i].content, "m.length==0&&e(d);m.push([C,q]);return C")) {
                         StrBuf patched SB_AUTO = sb_from(scripts[i].content, scripts[i].content_len);
                         const char *from = "m.length==0&&e(d);m.push([C,q]);return C";
@@ -1356,7 +1366,7 @@ bool html_execute_page_scripts(const char *html, JsExecResult *out_result) {
                     }
                     /* Log jobs that error inside the scheduler's O() executor so we can
                      * see which scheduled job hangs the lifecycle jobSet. */
-                    if (getenv("CYBER_TRACE_LIFECYCLE") && scripts[i].content_len > 1000 &&
+                    if (CYBER_ENV(CYBER_T_LIFECYCLE) && scripts[i].content_len > 1000 &&
                         strstr(scripts[i].content, "function O(a){try{a()}catch(b){T(b)}}")) {
                         StrBuf patched SB_AUTO = sb_from(scripts[i].content, scripts[i].content_len);
                         const char *from = "function O(a){try{a()}catch(b){T(b)}}";
@@ -1439,7 +1449,7 @@ bool html_execute_page_scripts(const char *html, JsExecResult *out_result) {
                     /* DIAGNOSTIC: force the lifecycle init to skip the jobSet wait, to
                      * test whether the "rendering" phase (and metadata) runs once the
                      * jobSet hang is bypassed.  CYBER_FORCE_RENDER=1. */
-                    if (getenv("CYBER_FORCE_RENDER") && scripts[i].content_len > 1000000 &&
+                    if (cyber_getenv("CYBER_FORCE_RENDER") && scripts[i].content_len > 1000000 &&
                         strstr(scripts[i].content, ".jobSet?v.yield(y.jobSet.completedResolver.promise,4):v.jumpTo(4)")) {
                         StrBuf patched SB_AUTO = sb_from(scripts[i].content, scripts[i].content_len);
                         const char *from = ".jobSet?v.yield(y.jobSet.completedResolver.promise,4):v.jumpTo(4)";

@@ -1,3 +1,4 @@
+#include "cyber_env.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -12,6 +13,7 @@
 #include "browser_api_impl.h"
 #include "browser_api_impl_internal.h"
 #include "html_dom.h"
+#include "dom_js.h"
 #include "css_parser.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
@@ -600,10 +602,10 @@ const size_t js_xhr_proto_funcs_count = sizeof(js_xhr_proto_funcs) / sizeof(js_x
 // Note: HTMLVideoElement struct is defined in browser_api_impl_types.h
 
 static void js_video_finalizer(JSRuntimeHandle rt, GCValue val) {
-    // HTMLVideoElement memory is managed by GC, no manual cleanup needed
-    // GCValue fields are automatically garbage collected
     (void)rt;
-    (void)val;
+    GCHandle vh = JS_GetOpaqueHandle(val, js_video_class_id);
+    HTMLVideoElement *v = vh ? (HTMLVideoElement *)gc_deref(vh) : NULL;
+    if (v) dom_wrap_finalize(v->dom_node, val);
 }
 
 static void js_video_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func) {
@@ -645,10 +647,10 @@ GCValue js_video_constructor(JSContextHandle ctx, GCValue new_target, int argc, 
      * defines those as getter-only accessors, leaving the video element with no
      * usable tagName or style (YouTube's player then crashes in g.lz sizing the
      * video container). */
-    DOMNodeHandle video_node = dom_node_create(ctx, DOM_NODE_TYPE_ELEMENT, "VIDEO");
-    if (!SAFE_IS_NULL(video_node)) {
-        SAFE_SET(vid, HTMLVideoElementHandle, dom_node, video_node);
-    }
+    SAFE_SET_HANDLE(vid, HTMLVideoElementHandle, dom_node, dom_wrap_new(DOM_NULL));
+    /* Constructed by script (new HTMLVideoElement()): a fresh store element.
+     * The wrapper factory passes a null new_target and binds its own node. */
+    if (!JS_IsNull(new_target)) dom_bind(ctx, dom_create_element_str("video", 5, g_dom_document), obj);
 
     /* Add dimension properties expected by player code */
     JS_SetPropertyStr(ctx, obj, "clientWidth", JS_NewInt32(ctx, 640));
@@ -2092,6 +2094,24 @@ static GCValue js_canvas_get_context(JSContextHandle ctx, GCValue this_val, int 
     return ctx2d;
 }
 
+JSCFunction *js_canvas_get_context_fn(void) { return js_canvas_get_context; }
+
+/* A new element style object (CSSStyleDeclaration): the plain object
+ * document.createElement() has always given elements. */
+GCValue css_new_style_object(JSContextHandle ctx, GCValue el) {
+    (void)el;
+    GCValue style = JS_NewObject(ctx);
+    if (JS_IsException(style)) return JS_UNDEFINED;
+    JS_SetPropertyStr(ctx, style, "animationTimingFunction", JS_NewString(ctx, ""));
+    JS_SetPropertyStr(ctx, style, "removeProperty",
+        JS_NewCFunction(ctx, js_style_remove_property, "removeProperty", 1));
+    JS_SetPropertyStr(ctx, style, "setProperty",
+        JS_NewCFunction(ctx, js_style_set_property, "setProperty", 3));
+    JS_SetPropertyStr(ctx, style, "getPropertyValue",
+        JS_NewCFunction(ctx, js_style_get_property_value, "getPropertyValue", 1));
+    return style;
+}
+
 // Document and Element stubs with createElement support
 GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     // Handle createElementNS which passes (namespace, tagName)
@@ -2107,9 +2127,9 @@ GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int ar
     
     static int create_counter = 0;
     if (tag) {
-        if (getenv("CYBER_DUMP_BC"))
+        if (CYBER_ENV(CYBER_T_DUMP_BC))
             fprintf(stderr, "[CE] createElement tag='%s'\n", tag);
-        if (getenv("CYBER_TRACE_PAGEFLOW") &&
+        if (CYBER_ENV(CYBER_T_PAGEFLOW) &&
             (strstr(tag, "watch") || strstr(tag, "page-manager"))) {
             static int pf_guard = 0;
             fprintf(stderr, "[PAGEFLOW] createElement tag='%s'\n", tag);
@@ -2124,112 +2144,18 @@ GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int ar
                 pf_guard = 0;
             }
         }
-        // Create proper video element
-        if (strcasecmp(tag, "video") == 0) {
-            elem = js_video_constructor(ctx, JS_NULL, 0, NULL);
-        } else {
-            // Generic element with DOMNode data attached
-            elem = JS_NewObjectClass(ctx, js_dom_node_class_id);
-            if (JS_IsException(elem)) {
-                return JS_NULL;
-            }
-            
-            // Set prototype to HTMLElement.prototype so element methods work
-            GCValue global_obj = JS_GetGlobalObject(ctx);
-            GCValue html_element_ctor = JS_GetPropertyStr(ctx, global_obj, "HTMLElement");
-            if (!JS_IsUndefined(html_element_ctor) && !JS_IsException(html_element_ctor)) {
-                GCValue html_element_proto = JS_GetPropertyStr(ctx, html_element_ctor, "prototype");
-                if (!JS_IsUndefined(html_element_proto) && !JS_IsException(html_element_proto)) {
-                    JS_SetPrototype(ctx, elem, html_element_proto);
-                }
-            }
-            
-            // Create and attach DOMNode data
-            // For HTML documents, tagName should be uppercase per spec
-            char upper_tag[64];
-            size_t tag_len = strlen(tag);
-            size_t copy_len = tag_len < sizeof(upper_tag) - 1 ? tag_len : sizeof(upper_tag) - 1;
-            for (size_t i = 0; i < copy_len; i++) {
-                upper_tag[i] = toupper((unsigned char)tag[i]);
-            }
-            upper_tag[copy_len] = '\0';
-            
-            DOMNodeHandle node = dom_node_create(ctx, DOM_NODE_TYPE_ELEMENT, upper_tag);
-            if (!SAFE_IS_NULL(node)) {
-                dom_node_attach_to_object(node, elem);
-                // Set tagName property (uppercase for HTML elements) as an own
-                // data property so it overrides the read-only getter on Element.prototype.
-                JS_DefinePropertyValueStr(ctx, elem, "tagName", JS_NewString(ctx, upper_tag),
-                                          JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
-                // localName is the lowercase tag name (slot detection in
-                // Polymer/ShadyDOM template parsing depends on it).
-                char lower_tag[64];
-                for (size_t i = 0; i < copy_len; i++) {
-                    lower_tag[i] = (char)tolower((unsigned char)tag[i]);
-                }
-                lower_tag[copy_len] = '\0';
-                JS_DefinePropertyValueStr(ctx, elem, "localName", JS_NewString(ctx, lower_tag),
-                                          JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
-            }
-            int cid = ++create_counter;
-            JS_SetPropertyStr(ctx, elem, "__cyber_id", JS_NewInt32(ctx, cid));
-
-            // Add animate method directly to created elements so feature detection works
-            JS_SetPropertyStr(ctx, elem, "animate",
-                JS_NewCFunction(ctx, js_element_animate, "animate", 2));
-            // Add oncancel property set to null (not undefined) so polyfill skips its code path
-            JS_SetPropertyStr(ctx, elem, "oncancel", JS_NULL);
-            
-            // Add style object for CSS property access (needed by Web Animations polyfill)
-            GCValue style = JS_NewObject(ctx);
-            if (!JS_IsException(style)) {
-                // Add animationTimingFunction property getter/setter
-                // The polyfill checks valid easing functions via this property
-                JS_SetPropertyStr(ctx, style, "animationTimingFunction", JS_NewString(ctx, ""));
-                JS_SetPropertyStr(ctx, style, "removeProperty",
-                    JS_NewCFunction(ctx, js_style_remove_property, "removeProperty", 1));
-                JS_SetPropertyStr(ctx, style, "setProperty",
-                    JS_NewCFunction(ctx, js_style_set_property, "setProperty", 3));
-                JS_SetPropertyStr(ctx, style, "getPropertyValue",
-                    JS_NewCFunction(ctx, js_style_get_property_value, "getPropertyValue", 1));
-                // Define as own property; Element.prototype has a read-only style getter.
-                JS_DefinePropertyValueStr(ctx, elem, "style", style,
-                                          JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
-                // Also store it in the internal slot used by the CSS engine so that
-                // stylesheet-applied properties land on the same object returned by
-                // element.style.
-                JS_SetPropertyStr(ctx, elem, "__style", style);
-            }
-            
-            // Add getContext method for canvas elements (needed by Web Animations polyfill for color parsing)
-            if (strcasecmp(tag, "canvas") == 0) {
-                JS_SetPropertyStr(ctx, elem, "getContext",
-                    JS_NewCFunction(ctx, js_canvas_get_context, "getContext", 1));
-                // Add width and height properties
-                JS_SetPropertyStr(ctx, elem, "width", JS_NewInt32(ctx, 0));
-                JS_SetPropertyStr(ctx, elem, "height", JS_NewInt32(ctx, 0));
-            }
-            
-            // Template elements need a real DocumentFragment content so Polymer
-            // can parse, query, and clone templates.
-            if (strcasecmp(tag, "template") == 0) {
-                GCValue content = js_create_document_fragment(ctx);
-                if (!JS_IsException(content) && !JS_IsUndefined(content) && !JS_IsNull(content)) {
-                    dom_node_set_owner_document(ctx, content, this_val);
-                    JS_SetPropertyStr(ctx, elem, "content", content);
-                }
-
-                // Use HTMLTemplateElement.prototype if available.
-                GCValue global_obj = JS_GetGlobalObject(ctx);
-                GCValue template_ctor = JS_GetPropertyStr(ctx, global_obj, "HTMLTemplateElement");
-                if (!JS_IsUndefined(template_ctor) && !JS_IsException(template_ctor)) {
-                    GCValue template_proto = JS_GetPropertyStr(ctx, template_ctor, "prototype");
-                    if (!JS_IsUndefined(template_proto) && !JS_IsException(template_proto)) {
-                        JS_SetPrototype(ctx, elem, template_proto);
-                    }
-                }
-            }
+        NodeId owner = dom_node_of(this_val);
+        if (dom_kind(owner) != DOM_K_DOCUMENT) owner = g_dom_document;
+        NodeId el = dom_create_element_str(tag, strlen(tag), owner);
+        if (strcasecmp(tag, "template") == 0)
+            dom_set_template_content(el, dom_create_fragment(owner));
+        elem = dom_js(ctx, el);
+        if (!JS_IsObject(elem)) return JS_NULL;
+        if (strcasecmp(tag, "template") == 0) {
+            GCValue content = dom_js(ctx, dom_template_content(el));
+            if (JS_IsObject(content)) dom_node_set_owner_document(ctx, content, this_val);
         }
+        (void)create_counter;
     }
     
     // Set ownerDocument on newly created elements.
@@ -2756,71 +2682,6 @@ static char* extract_attr(const char *html, const char *tag_end, const char *att
     return value;
 }
 
-// Create DOM nodes from parsed HTML document
-// Using automatic GC memory management
-static int create_dom_nodes_from_parsed_html(JSContextHandle ctx, HtmlDocument *doc) {
-    if (!SAFE_VALID(ctx) || !doc) return 0;
-    
-    int count = 0;
-    
-    /* Create elements from body children */
-    HtmlNode *body = html_document_body(doc);
-    HtmlNode *node = body ? html_node_first_child(doc, body) : NULL;
-    
-    while (node) {
-        if (node->type == HTML_NODE_ELEMENT) {
-            /* Create the element */
-            GCValue elem = html_create_element_js(ctx, node->tag_name, node->attributes);
-            
-            if (!JS_IsNull(elem) && !JS_IsException(elem)) {
-                /* Check for video elements specifically */
-                if (strcasecmp(node->tag_name, "video") == 0) {
-                    
-                    /* Extract src attribute if present */
-                    HtmlAttribute *attr = node->attributes;
-                    while (attr) {
-                        if (strcasecmp(attr->name, "src") == 0 && attr->value[0]) {
-                            GCValue src_val = JS_NewString(ctx, attr->value);
-                            JS_SetPropertyStr(ctx, elem, "src", src_val);
-                            
-                            record_captured_url(attr->value);
-                        }
-                        if (strcasecmp(attr->name, "id") == 0 && attr->value[0]) {
-                            GCValue id_val = JS_NewString(ctx, attr->value);
-                            JS_SetPropertyStr(ctx, elem, "id", id_val);
-                            
-                        }
-                        attr = attr->next;
-                    }
-                    
-                    count++;
-                }
-                
-                /* Add to document.body */
-                GCValue global = JS_GetGlobalObject(ctx);
-                GCValue js_doc = JS_GetPropertyStr(ctx, global, "document");
-                
-                if (!JS_IsUndefined(js_doc) && !JS_IsNull(js_doc)) {
-                    GCValue doc_body = JS_GetPropertyStr(ctx, js_doc, "body");
-                    
-                    if (!JS_IsUndefined(doc_body) && !JS_IsNull(doc_body)) {
-                        GCValue appendChild = JS_GetPropertyStr(ctx, doc_body, "appendChild");
-                        
-                        if (!JS_IsUndefined(appendChild) && !JS_IsNull(appendChild)) {
-                            GCValue args[1] = { elem };
-                            GCValue result = JS_Call(ctx, appendChild, doc_body, 1, args);
-                            (void)result;
-                        }
-                    }
-                }
-            }
-        }
-        node = html_node_next_sibling(doc, node);
-    }
-    
-    return count;
-}
-
 /* Cooperative execution timeout. The QuickJS interpreter checks the handler
  * between bytecode instructions, so pure-JS infinite loops are caught safely.
  * Hangs inside C functions still require those functions to be fixed. */
@@ -2873,22 +2734,17 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
     // allowing scripts to find real elements via getElementById/querySelector.
     HtmlDocument *doc = NULL;
     if (html && strlen(html) > 0) {
-        doc = html_parse(html, strlen(html));
-        if (doc) {
+        {
             GCValue global = JS_GetGlobalObject(ctx);
             GCValue js_doc = JS_GetPropertyStr(ctx, global, "document");
             if (!JS_IsUndefined(js_doc) && !JS_IsNull(js_doc)) {
-                if (html_populate_js_document(ctx, js_doc, doc)) {
-                    HtmlNode *doc_root = html_document_root(doc);
+                if (html_populate_js_document_from_html(ctx, js_doc, html, strlen(html))) {
                     platform_log(LOG_LEVEL_INFO, "js_quickjs",
-                        "Full DOM populated from parsed HTML (root=%s, head=%s, body=%s)",
-                        doc_root ? doc_root->tag_name : "none",
-                        html_document_head(doc) ? "yes" : "no",
-                        html_document_body(doc) ? "yes" : "no");
+                        "Full DOM populated from parsed HTML (%u nodes)", g_dom.live);
 
                     /* Diagnostic: does the server-rendered masthead survive
                      * the parse+populate step? (CYBER_DIAG_POPULATE=1) */
-                    if (getenv("CYBER_DIAG_POPULATE")) {
+                    if (cyber_getenv("CYBER_DIAG_POPULATE")) {
                         const char *q =
                             "var a=document.querySelector('ytd-app');"
                             "console.error('[POPULATED] masthead=' + document.querySelectorAll('ytd-masthead').length"
@@ -2978,7 +2834,7 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
 
         // Debug: dump executed scripts to disk so exception stack frames
         // (which carry original line numbers) can be mapped to real source.
-        if (getenv("CYBER_DUMP_SCRIPTS")) {
+        if (CYBER_ENV(CYBER_T_DUMP_SCRIPTS)) {
             char dump_name[64];
             snprintf(dump_name, sizeof(dump_name), "exec_script_%d.js", i);
             FILE *df = fopen(dump_name, "wb");
@@ -3004,7 +2860,7 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
         // re-running the user constructor until stack overflow).  CYBER_LAZY=1
         // re-enables lazy parsing for debugging.
         int eval_flags = JS_EVAL_TYPE_GLOBAL;
-        if (!getenv("CYBER_LAZY")) eval_flags |= JS_EVAL_FLAG_NO_LAZY;
+        if (!cyber_getenv("CYBER_LAZY")) eval_flags |= JS_EVAL_FLAG_NO_LAZY;
         char evname[64];
         snprintf(evname, sizeof(evname), "eval-script-%d (%zu KB)",
                  i, script_lens[i] / 1024);

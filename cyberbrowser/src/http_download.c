@@ -175,7 +175,11 @@ typedef struct HttpCookie {
 } HttpCookie;
 
 static HttpCookie *g_cookie_jar = NULL;
-static char g_cookie_buffer[8192];
+/* Requests may run on several threads (the script fetch pool): the jar is
+ * guarded by a mutex and each thread builds its Cookie header in its own
+ * buffer. */
+static pthread_mutex_t g_cookie_mutex = PTHREAD_MUTEX_INITIALIZER;
+static _Thread_local char g_cookie_buffer[8192];
 
 static void cookie_trim(char *s) {
     char *start = s;
@@ -242,7 +246,7 @@ static void cookie_remove_expired(void) {
     }
 }
 
-static void cookie_set_internal(const char *url, const char *header, bool from_document) {
+static void cookie_set_internal_unlocked(const char *url, const char *header, bool from_document) {
     char host[256] = {0}, path[2048] = {0}, port[8] = {0};
     if (!parse_url(url, host, sizeof(host), path, sizeof(path), port, sizeof(port))) return;
 
@@ -390,6 +394,12 @@ static void cookie_set_internal(const char *url, const char *header, bool from_d
     g_cookie_jar = newc;
 }
 
+static void cookie_set_internal(const char *url, const char *header, bool from_document) {
+    pthread_mutex_lock(&g_cookie_mutex);
+    cookie_set_internal_unlocked(url, header, from_document);
+    pthread_mutex_unlock(&g_cookie_mutex);
+}
+
 void http_cookie_set_for_request(const char *url, const char *set_cookie_header) {
     if (!url || !set_cookie_header) return;
     cookie_set_internal(url, set_cookie_header, false);
@@ -400,7 +410,7 @@ void http_cookie_set_for_document(const char *url, const char *cookie_line) {
     cookie_set_internal(url, cookie_line, true);
 }
 
-static const char* cookie_build_string(const char *url, bool for_http) {
+static const char* cookie_build_string_unlocked(const char *url, bool for_http) {
     char host[256] = {0}, path[2048] = {0}, port[8] = {0};
     if (!parse_url(url, host, sizeof(host), path, sizeof(path), port, sizeof(port))) return NULL;
     bool is_https = (strncasecmp(url, "https://", 8) == 0);
@@ -453,6 +463,13 @@ static const char* cookie_build_string(const char *url, bool for_http) {
     return g_cookie_buffer[0] ? g_cookie_buffer : NULL;
 }
 
+static const char* cookie_build_string(const char *url, bool for_http) {
+    pthread_mutex_lock(&g_cookie_mutex);
+    const char *r = cookie_build_string_unlocked(url, for_http);
+    pthread_mutex_unlock(&g_cookie_mutex);
+    return r;
+}
+
 const char* http_cookie_get_for_request(const char *url) {
     if (!url) return NULL;
     return cookie_build_string(url, true);
@@ -464,6 +481,7 @@ const char* http_cookie_get_for_document(const char *url) {
 }
 
 void http_cookie_clear(void) {
+    pthread_mutex_lock(&g_cookie_mutex);
     HttpCookie *c = g_cookie_jar;
     while (c) {
         HttpCookie *next = c->next;
@@ -472,6 +490,7 @@ void http_cookie_clear(void) {
     }
     g_cookie_jar = NULL;
     g_cookie_buffer[0] = '\0';
+    pthread_mutex_unlock(&g_cookie_mutex);
 }
 
 

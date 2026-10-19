@@ -14,6 +14,7 @@
 #include "browser_api_impl_handle_helpers.h"
 #include "browser_api_impl_internal.h"
 #include "html_dom.h"
+#include "dom_js.h"
 #include "css_parser.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
@@ -35,6 +36,7 @@
 #include <quickjs_gc_unified.h>
 #include "browser_api_impl.h"
 #include "html_dom.h"
+#include "dom_js.h"
 #include "css_parser.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
@@ -120,74 +122,32 @@ static GCValue js_cyber_append_child(JSContextHandle ctx, GCValue this_val, int 
     return js_node_appendChild_real(ctx, argv[0], 1, &argv[1]);
 }
 
+static NodeId owner_doc_node(GCValue doc) {
+    NodeId d = dom_node_of(doc);
+    return dom_kind(d) == DOM_K_DOCUMENT ? d : g_dom_document;
+}
+
 // document.createTextNode() - returns a proper Text node object
 GCValue js_document_create_text_node(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)this_val;
-    const char *text = "";
-    if (argc >= 1) {
-        text = JS_ToCString(ctx, argv[0]);
-        if (!text) text = "";
-    }
-
-    // Create a DOM node object with js_dom_node_class_id
-    GCValue node = JS_NewObjectClass(ctx, js_dom_node_class_id);
-    if (JS_IsException(node)) {
-        return JS_NULL;
-    }
-
-    // Set prototype to Node.prototype so the text node inherits the standard
-    // nodeValue/textContent/parentNode/etc. getter/setters.  Without this,
-    // setting textContent on the node is a plain own-property write that
-    // bypasses the characterData MutationObserver that polyfills rely on.
-    {
-        GCValue global_obj = JS_GetGlobalObject(ctx);
-        GCValue node_ctor = JS_GetPropertyStr(ctx, global_obj, "Node");
-        if (JS_IsObject(node_ctor)) {
-            GCValue node_proto = JS_GetPropertyStr(ctx, node_ctor, "prototype");
-            if (JS_IsObject(node_proto)) {
-                JS_SetPrototype(ctx, node, node_proto);
-            }
-        }
-    }
-
-    // Create and attach DOMNode data for Text node
-    DOMNodeHandle dom_node = dom_node_create(ctx, DOM_NODE_TYPE_TEXT, "#text");
-    if (!SAFE_IS_NULL(dom_node)) {
-        SAFE_SET_STR(dom_node, DOMNodeHandle, node_value, text);
-        dom_node_attach_to_object(dom_node, node);
-    }
-
+    size_t len = 0;
+    const char *text = argc >= 1 ? JS_ToCStringLen(ctx, &len, argv[0]) : NULL;
+    if (!text) { text = ""; len = 0; }
+    NodeId t = dom_create_chardata(DOM_K_TEXT, text, len, owner_doc_node(this_val));
+    GCValue node = dom_js(ctx, t);
+    if (JS_IsNull(node)) return JS_NULL;
     // Set ownerDocument on the text node.
     dom_node_set_owner_document(ctx, node, this_val);
-
     return node;
 }
 
 // document.createComment() - returns a proper Comment node object
 static GCValue js_document_create_comment(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)this_val;
-    const char *text = "";
-    if (argc >= 1) {
-        text = JS_ToCString(ctx, argv[0]);
-        if (!text) text = "";
-    }
-
-    GCValue node = JS_NewObjectClass(ctx, js_dom_node_class_id);
-    if (JS_IsException(node)) {
-        return JS_NULL;
-    }
-
-    DOMNodeHandle dom_node = dom_node_create(ctx, DOM_NODE_TYPE_COMMENT, "#comment");
-    if (!SAFE_IS_NULL(dom_node)) {
-        SAFE_SET_STR(dom_node, DOMNodeHandle, node_value, text);
-        dom_node_attach_to_object(dom_node, node);
-    }
-
-    JS_SetPropertyStr(ctx, node, "nodeType", JS_NewInt32(ctx, DOM_NODE_TYPE_COMMENT));
-    JS_SetPropertyStr(ctx, node, "nodeName", JS_NewString(ctx, "#comment"));
-    JS_SetPropertyStr(ctx, node, "data", JS_NewString(ctx, text));
-    JS_SetPropertyStr(ctx, node, "textContent", JS_NewString(ctx, text));
-    JS_SetPropertyStr(ctx, node, "length", JS_NewInt32(ctx, (int)strlen(text)));
+    size_t len = 0;
+    const char *text = argc >= 1 ? JS_ToCStringLen(ctx, &len, argv[0]) : NULL;
+    if (!text) { text = ""; len = 0; }
+    NodeId c = dom_create_chardata(DOM_K_COMMENT, text, len, owner_doc_node(this_val));
+    GCValue node = dom_js(ctx, c);
+    if (JS_IsNull(node)) return JS_NULL;
     dom_node_set_owner_document(ctx, node, this_val);
     return node;
 }
@@ -201,14 +161,8 @@ static GCValue js_document_implementation_create_html_document(JSContextHandle c
         if (!title_str) title_str = "";
     }
 
-    GCValue doc = JS_NewObjectClass(ctx, js_dom_node_class_id);
-    if (JS_IsException(doc)) return doc;
-
-    DOMNodeHandle doc_node = dom_node_create(ctx, DOM_NODE_TYPE_DOCUMENT, "#document");
-    if (!SAFE_IS_NULL(doc_node)) {
-        dom_node_attach_to_object(doc_node, doc);
-        SAFE_SET(doc_node, DOMNodeHandle, owner_document, doc);
-    }
+    GCValue doc = dom_js(ctx, dom_create_document());
+    if (!JS_IsObject(doc)) return JS_NULL;
 
     JS_SetPropertyStr(ctx, doc, "nodeType", JS_NewInt32(ctx, DOM_NODE_TYPE_DOCUMENT));
     JS_SetPropertyStr(ctx, doc, "nodeName", JS_NewString(ctx, "#document"));
@@ -1658,6 +1612,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_NewClass(rt, js_source_buffer_class_id, &js_source_buffer_class_def);
     JS_NewClass(rt, js_date_class_id, &js_date_class_def);
     JS_NewClass(rt, js_dom_node_class_id, &js_dom_node_class_def);
+    dom_wrap_init_runtime(rt);
     JS_NewClass(rt, js_event_class_id, &js_event_class_def);
     JS_NewClass(rt, js_custom_event_class_id, &js_custom_event_class_def);
     JS_NewClass(rt, js_mouse_event_class_id, &js_mouse_event_class_def);
@@ -2669,18 +2624,13 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // ===== Document =====
     LOG_INFO("Creating document object...");
     LOG_INFO("Setting up Document...");
-    GCValue document = JS_NewObjectClass(ctx, js_dom_node_class_id);
-    if (JS_IsException(document)) {
+    dom_wrap_set_factory(dom_create_wrapper);
+    g_dom_document = dom_create_document();
+    GCValue document = dom_js(ctx, g_dom_document);
+    if (!JS_IsObject(document)) {
         document = JS_NewObject(ctx);
     }
     LOG_INFO("Document object created");
-    {
-        DOMNodeHandle doc_node = dom_node_create(ctx, DOM_NODE_TYPE_DOCUMENT, "#document");
-        if (!SAFE_IS_NULL(doc_node)) {
-            dom_node_attach_to_object(doc_node, document);
-            SAFE_SET(doc_node, DOMNodeHandle, owner_document, document);
-        }
-    }
     DEF_PROP_INT(ctx, document, "nodeType", 9);
     DEF_PROP_STR(ctx, document, "readyState", "complete");
     DEF_PROP_STR(ctx, document, "characterSet", "UTF-8");
@@ -2746,7 +2696,13 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     
     // Create documentElement as an actual Element instance with proper prototype
     // This must be done AFTER Element is defined in the dom_setup_js above
-    GCValue doc_element = JS_CallConstructor(ctx, element_ctor, 0, NULL);
+    /* The skeleton elements are real store elements (html, head, body) so
+     * scripts that run before the page is populated see a connected tree. */
+    GCValue doc_element = dom_js(ctx, dom_create_element_str("html", 4, g_dom_document));
+    {
+        GCValue eproto = JS_GetPropertyStr(ctx, element_ctor, "prototype");
+        if (JS_IsObject(doc_element) && JS_IsObject(eproto)) JS_SetPrototype(ctx, doc_element, eproto);
+    }
     if (JS_IsException(doc_element)) {
         // Fallback to plain object if constructor fails
         LOG_ERROR("Element constructor failed, using fallback object");
@@ -2808,7 +2764,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     LOG_INFO("Document documentElement set");
     
     // Create document body
-    GCValue body_element = JS_CallConstructor(ctx, html_element_ctor, 0, NULL);
+    GCValue body_element = dom_js(ctx, dom_create_element_str("body", 4, g_dom_document));
     if (JS_IsException(body_element)) {
         LOG_ERROR("HTMLElement constructor failed, using fallback object");
         body_element = JS_NewObject(ctx);
@@ -2852,7 +2808,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     LOG_INFO("Document body set");
     
     // Create document head (with DOM node class so tree traversal works)
-    GCValue head_element = JS_NewObjectClass(ctx, js_dom_node_class_id);
+    GCValue head_element = dom_js(ctx, dom_create_element_str("head", 4, g_dom_document));
     if (JS_IsException(head_element)) {
         head_element = JS_NewObject(ctx);
     }
@@ -2877,6 +2833,10 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     
     // Build minimal DOM tree
     // documentElement -> [head, body]
+    {
+        GCValue append_args[1] = { doc_element };
+        js_node_appendChild_real(ctx, document, 1, append_args);
+    }
     {
         GCValue append_args[1] = { head_element };
         js_node_appendChild_real(ctx, doc_element, 1, append_args);

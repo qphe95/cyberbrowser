@@ -48,24 +48,24 @@ typedef struct CssComputedStyle CssComputedStyle;
 typedef struct CssDocumentState CssDocumentState;
 
 /* Allocate or return the existing computed-style object for a DOM node. */
-GCHandle css_ensure_computed_style(DOMNodeHandle node);
+GCHandle css_ensure_computed_style(GCHandle node);
 
 /* Store a computed CSS property for a node. */
-void css_computed_set_property(JSContextHandle ctx, DOMNodeHandle node,
+void css_computed_set_property(JSContextHandle ctx, GCHandle node,
                                JSAtom prop_atom, const char *value);
 
 /* Look up a computed CSS property and return it as a JS value. */
-GCValue css_computed_get_property(JSContextHandle ctx, DOMNodeHandle node,
+GCValue css_computed_get_property(JSContextHandle ctx, GCHandle node,
                                   JSAtom prop_atom);
 
 /* Apply a sorted/unsorted declaration list to the computed-style table. */
 typedef struct CssAppliedDecl CssAppliedDecl;
-void css_computed_apply_declarations(JSContextHandle ctx, DOMNodeHandle node,
+void css_computed_apply_declarations(JSContextHandle ctx, GCHandle node,
                                      CssAppliedDecl *applied, int count);
 
 /* Parse an inline style attribute and store its declarations in the
  * computed-style table. */
-void css_computed_apply_inline_style(JSContextHandle ctx, DOMNodeHandle node,
+void css_computed_apply_inline_style(JSContextHandle ctx, GCHandle node,
                                      const char *style_attr);
 
 /* Allocate and attach the per-document CSS index tables. */
@@ -79,7 +79,7 @@ void css_document_state_destroy(JSRuntimeHandle rt);
 void css_document_state_clear(JSRuntimeHandle rt);
 
 /* Insert a DOM node into the id/class/tag index tables. */
-void css_index_insert_node(JSContextHandle ctx, DOMNodeHandle node);
+void css_index_insert_node(JSContextHandle ctx, GCHandle node);
 
 /* Index-table readers. */
 GCValue css_get_element_by_id(JSContextHandle ctx, JSAtom id);

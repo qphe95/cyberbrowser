@@ -12,6 +12,7 @@
 #include "browser_api_impl_handle_helpers.h"
 #include "browser_api_impl_internal.h"
 #include "html_dom.h"
+#include "dom_js.h"
 #include "css_parser.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
@@ -519,10 +520,10 @@ static char* token_list_get_class_name(JSContextHandle ctx, GCValue elem) {
 static void token_list_set_class_name(JSContextHandle ctx, GCValue elem, const char *class_name) {
     const char *new_val = class_name ? class_name : "";
     JS_SetPropertyStr(ctx, elem, "className", JS_NewString(ctx, new_val));
-    DOMNodeHandle node = dom_node_from_object(elem);
-    if (!SAFE_IS_NULL(node)) {
-        SAFE_SET_STR(node, DOMNodeHandle, class_name, new_val);
-        css_index_insert_node(ctx, node);
+    NodeId node = dom_node_of(elem);
+    if (dom_kind(node) == DOM_K_ELEMENT) {
+        const char *cur = dom_attr(node, "class");
+        if (!cur || strcmp(cur, new_val) != 0) dom_set_attr_str(node, "class", new_val);
     }
 }
 

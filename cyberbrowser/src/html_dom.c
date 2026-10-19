@@ -9,6 +9,7 @@
  * layout.
  */
 
+#include "cyber_env.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -20,6 +21,11 @@
 #include "browser_api_impl_handle_helpers.h"
 #include "browser_api_impl_internal.h"
 #include "css_parser.h"
+#include "dom_parse.h"
+#include "dom_snapshot.h"
+#include "dom_store.h"
+#include "dom_wrap.h"
+#include "dom_js.h"
 
 #define LOG_TAG "html_dom"
 #define LOG_INFO(...) platform_log(LOG_LEVEL_INFO, LOG_TAG, __VA_ARGS__)
@@ -126,49 +132,18 @@ static HtmlNode* html_node_at(HtmlDocument *doc, int idx) {
     return (HtmlNode*)po_array_payload(&doc->array, idx);
 }
 
-static int html_node_create(HtmlDocument *doc, HtmlNodeType type, int parent_idx) {
-    int idx = po_array_add(&doc->array, parent_idx);
-    if (idx < 0) return -1;
-
-    HtmlNode *node = html_node_at(doc, idx);
-    node->type = type;
-    node->js_object = JS_UNDEFINED;
-    node->has_js_object = 0;
-    return idx;
-}
-
-static HtmlAttribute* html_attribute_create(const char *name, const char *value) {
-    HtmlAttribute *attr = (HtmlAttribute*)calloc(1, sizeof(HtmlAttribute));
-    if (!attr) return NULL;
-    
-    strncpy(attr->name, name, HTML_MAX_ATTR_NAME_LEN - 1);
-    attr->name[HTML_MAX_ATTR_NAME_LEN - 1] = '\0';
-    
-    if (value) {
-        strncpy(attr->value, value, HTML_MAX_ATTR_VALUE_LEN - 1);
-        attr->value[HTML_MAX_ATTR_VALUE_LEN - 1] = '\0';
-        html_decode_entities(attr->value, strlen(attr->value));
-    }
-    
-    return attr;
-}
 
 static void html_node_free_contents(HtmlNode *node) {
     if (!node) return;
-    
-    HtmlAttribute *attr = node->attributes;
-    while (attr) {
-        HtmlAttribute *next = attr->next;
-        free(attr);
-        attr = next;
-    }
-    
+    /* Attribute names and values live in the document's arena. */
     if (node->text_content) {
         free(node->text_content);
+        node->text_content = NULL;
     }
-    
     /* Note: We don't free js_object here - that's managed by QuickJS GC */
 }
+
+void html_document_arena_free(HtmlDocument *doc);
 
 void html_document_free(HtmlDocument *doc) {
     if (!doc) return;
@@ -180,988 +155,133 @@ void html_document_free(HtmlDocument *doc) {
     }
     
     po_array_free(&doc->array);
+    html_document_arena_free(doc);
     
     if (doc->title) free(doc->title);
     free(doc);
 }
 
 /* ============================================================================
- * Parser Implementation
+ * Parsing: the node store's tokenizer and tree builder (dom_parse.c), then a
+ * layout snapshot of the result (dom_snapshot.c).
  * ============================================================================ */
-
-static void parser_skip_whitespace(HtmlParser *p) {
-    while (p->pos < p->html_len && isspace((unsigned char)p->html[p->pos])) {
-        if (p->html[p->pos] == '\n') {
-            p->line++;
-            p->column = 1;
-        } else {
-            p->column++;
-        }
-        p->pos++;
-    }
-}
-
-static bool parser_match(HtmlParser *p, const char *str) {
-    size_t len = strlen(str);
-    if (p->pos + len > p->html_len) return false;
-    return (strncasecmp(p->html + p->pos, str, len) == 0);
-}
-
-static char* parser_read_tag_name(HtmlParser *p) {
-    static char tag_name[HTML_MAX_TAG_NAME_LEN];
-    size_t i = 0;
-    
-    /* Skip initial whitespace */
-    parser_skip_whitespace(p);
-    
-    /* Read tag name */
-    while (p->pos < p->html_len && i < HTML_MAX_TAG_NAME_LEN - 1) {
-        char c = p->html[p->pos];
-        if (c == '>' || c == '/' || c == ' ' || c == '\t' || 
-            c == '\n' || c == '\r' || c == '\f') {
-            break;
-        }
-        tag_name[i++] = c;
-        p->pos++;
-        p->column++;
-    }
-    
-    tag_name[i] = '\0';
-    html_tag_name_normalize(tag_name);
-    
-    return i > 0 ? tag_name : NULL;
-}
-
-static HtmlAttribute* parser_read_attribute(HtmlParser *p) {
-    parser_skip_whitespace(p);
-    
-    /* Check for end of tag */
-    if (p->pos >= p->html_len || p->html[p->pos] == '>' || 
-        (p->html[p->pos] == '/' && p->pos + 1 < p->html_len && p->html[p->pos + 1] == '>')) {
-        return NULL;
-    }
-    
-    /* Read attribute name */
-    char name[HTML_MAX_ATTR_NAME_LEN];
-    size_t name_len = 0;
-    
-    while (p->pos < p->html_len && name_len < HTML_MAX_ATTR_NAME_LEN - 1) {
-        char c = p->html[p->pos];
-        if (c == '=' || c == '>' || c == '/' || isspace((unsigned char)c)) {
-            break;
-        }
-        name[name_len++] = c;
-        p->pos++;
-        p->column++;
-    }
-    name[name_len] = '\0';
-    
-    if (name_len == 0) return NULL;
-    
-    /* Check for value */
-    char value[HTML_MAX_ATTR_VALUE_LEN] = {0};
-    
-    parser_skip_whitespace(p);
-    
-    if (p->pos < p->html_len && p->html[p->pos] == '=') {
-        p->pos++; /* skip = */
-        p->column++;
-        
-        parser_skip_whitespace(p);
-        
-        /* Read value */
-        if (p->pos < p->html_len) {
-            char quote = p->html[p->pos];
-            if (quote == '"' || quote == '\'') {
-                p->pos++; /* skip opening quote */
-                p->column++;
-                
-                size_t val_len = 0;
-                while (p->pos < p->html_len && p->html[p->pos] != quote && 
-                       val_len < HTML_MAX_ATTR_VALUE_LEN - 1) {
-                    value[val_len++] = p->html[p->pos++];
-                    p->column++;
-                }
-                value[val_len] = '\0';
-                
-                if (p->pos < p->html_len && p->html[p->pos] == quote) {
-                    p->pos++; /* skip closing quote */
-                    p->column++;
-                }
-            } else {
-                /* Unquoted value */
-                size_t val_len = 0;
-                while (p->pos < p->html_len && val_len < HTML_MAX_ATTR_VALUE_LEN - 1) {
-                    char c = p->html[p->pos];
-                    if (c == '>' || c == '/' || isspace((unsigned char)c)) {
-                        break;
-                    }
-                    value[val_len++] = c;
-                    p->pos++;
-                    p->column++;
-                }
-                value[val_len] = '\0';
-            }
-        }
-    }
-    
-    return html_attribute_create(name, value[0] ? value : NULL);
-}
-
-static int parser_parse_element(HtmlParser *p, int parent_idx);
-static int parser_parse_text(HtmlParser *p, int parent_idx);
-
-static void parser_skip_comment(HtmlParser *p) {
-    if (parser_match(p, "<!--")) {
-        p->pos += 4;
-        while (p->pos < p->html_len) {
-            if (parser_match(p, "-->")) {
-                p->pos += 3;
-                break;
-            }
-            p->pos++;
-        }
-    }
-}
-
-static void parser_skip_doctype(HtmlParser *p) {
-    if (parser_match(p, "<!doctype") || parser_match(p, "<!DOCTYPE")) {
-        p->pos += 9;
-        while (p->pos < p->html_len && p->html[p->pos] != '>') {
-            p->pos++;
-        }
-        if (p->pos < p->html_len) p->pos++; /* skip > */
-    }
-}
-
-static char* parser_read_raw_content(HtmlParser *p, const char *end_tag) {
-    size_t start = p->pos;
-    size_t end_tag_len = strlen(end_tag);
-    
-    while (p->pos < p->html_len) {
-        if (p->html[p->pos] == '<') {
-            /* Check for end tag */
-            if (p->pos + 1 < p->html_len && p->html[p->pos + 1] == '/') {
-                if (strncasecmp(p->html + p->pos + 2, end_tag, end_tag_len) == 0) {
-                    break;
-                }
-            }
-        }
-        p->pos++;
-    }
-    
-    size_t len = p->pos - start;
-    char *content = (char*)malloc(len + 1);
-    if (content) {
-        memcpy(content, p->html + start, len);
-        content[len] = '\0';
-    }
-    
-    return content;
-}
-
-static int parser_parse_element(HtmlParser *p, int parent_idx) {
-    if (p->pos >= p->html_len || p->html[p->pos] != '<') {
-        return -1;
-    }
-    
-    p->pos++; /* skip < */
-    
-    /* Check for closing tag */
-    if (p->pos < p->html_len && p->html[p->pos] == '/') {
-        /* Closing tag - let caller handle */
-        p->pos--; /* back up */
-        return -1;
-    }
-    
-    /* Read tag name */
-    char *tag_name = parser_read_tag_name(p);
-    if (!tag_name) {
-        /* Skip malformed tag */
-        while (p->pos < p->html_len && p->html[p->pos] != '>') p->pos++;
-        if (p->pos < p->html_len) p->pos++;
-        return -1;
-    }
-    
-    /* Create element node */
-    int node_idx = html_node_create(p->document, HTML_NODE_ELEMENT, parent_idx);
-    if (node_idx < 0) return -1;
-    
-    HtmlNode *node = html_node_at(p->document, node_idx);
-    strncpy(node->tag_name, tag_name, HTML_MAX_TAG_NAME_LEN - 1);
-    node->tag_name[HTML_MAX_TAG_NAME_LEN - 1] = '\0';
-    if (strcasecmp(tag_name, "ytd-masthead") == 0 || strcasecmp(tag_name, "ytd-app") == 0) {
-        const char *parent_tag = "(none)";
-        if (parent_idx >= 0) {
-            HtmlNode *pnode = html_node_at(p->document, parent_idx);
-            if (pnode) parent_tag = pnode->tag_name;
-        }
-        fprintf(stderr, "[HTML-PARSE] <%s> parent_idx=%d parent=<%s> pos=%zu\n", tag_name, parent_idx, parent_tag, p->pos);
-    }
-
-    /* Parse attributes */
-    HtmlAttribute **attr_tail = &node->attributes;
-    while (1) {
-        parser_skip_whitespace(p);
-        
-        /* Check for self-closing or end of tag */
-        if (p->pos >= p->html_len) break;
-        
-        if (p->html[p->pos] == '>') {
-            p->pos++; /* skip > */
-            break;
-        }
-        
-        if (p->html[p->pos] == '/' && p->pos + 1 < p->html_len && p->html[p->pos + 1] == '>') {
-            p->pos += 2; /* skip /> */
-            return node_idx;
-        }
-        
-        /* Parse attribute */
-        HtmlAttribute *attr = parser_read_attribute(p);
-        if (!attr) {
-            /* Skip unknown character */
-            if (p->pos < p->html_len && p->html[p->pos] != '>' && 
-                !(p->html[p->pos] == '/' && p->pos + 1 < p->html_len && p->html[p->pos + 1] == '>')) {
-                p->pos++;
-            } else {
-                break;
-            }
-            continue;
-        }
-        
-        *attr_tail = attr;
-        attr_tail = &attr->next;
-    }
-    
-    /* Handle raw content tags (script, style, etc.) */
-    if (html_is_raw_content_tag(node->tag_name)) {
-        char end_tag[HTML_MAX_TAG_NAME_LEN + 4];
-        snprintf(end_tag, sizeof(end_tag), "</%s>", node->tag_name);
-        
-        char *content = parser_read_raw_content(p, node->tag_name);
-        if (content) {
-            node->text_content = content;
-            node->text_len = strlen(content);
-        }
-        
-        /* Skip the closing tag */
-        size_t end_tag_len = strlen(end_tag);
-        if (p->pos + end_tag_len <= p->html_len) {
-            if (strncasecmp(p->html + p->pos, end_tag, end_tag_len) == 0) {
-                p->pos += end_tag_len;
-            }
-        }
-        
-        return node_idx;
-    }
-    
-    /* Parse children for non-self-closing tags */
-    if (!html_is_self_closing_tag(node->tag_name)) {
-        p->nesting_depth++;
-        
-        while (p->pos < p->html_len && p->nesting_depth < HTML_MAX_NESTING_DEPTH) {
-            /* Do NOT skip whitespace here: whitespace between children is
-             * meaningful between inline-level siblings (it produces the space
-             * in "text <a>link</a> text").  parser_parse_text collapses it to
-             * a single space, and the layout collapses it to nothing at block
-             * boundaries. */
-            if (p->pos >= p->html_len) break;
-
-            /* Skip comments */
-            if (parser_match(p, "<!--")) {
-                parser_skip_comment(p);
-                continue;
-            }
-            
-            /* Check for closing tag */
-            if (p->html[p->pos] == '<' && p->pos + 1 < p->html_len && p->html[p->pos + 1] == '/') {
-                /* Check if it's our closing tag */
-                size_t check_pos = p->pos + 2;
-                size_t tag_len = strlen(node->tag_name);
-                
-                if (p->html_len - check_pos >= tag_len &&
-                    strncasecmp(p->html + check_pos, node->tag_name, tag_len) == 0) {
-                    /* It's our closing tag - skip it */
-                    p->pos = check_pos + tag_len;
-                    while (p->pos < p->html_len && p->html[p->pos] != '>') p->pos++;
-                    if (p->pos < p->html_len) p->pos++;
-                    break;
-                }
-                /* Stray closing tag for a different element: drop it rather
-                 * than letting its text leak into the document. */
-                p->pos += 2;
-                while (p->pos < p->html_len && p->html[p->pos] != '>') p->pos++;
-                if (p->pos < p->html_len) p->pos++;
-                continue;
-            }
-            
-            /* Parse child element or text */
-            if (p->html[p->pos] == '<') {
-                int child_idx = parser_parse_element(p, node_idx);
-                if (child_idx < 0) {
-                    /* Try to recover from parsing error */
-                    p->pos++;
-                }
-            } else {
-                int text_idx = parser_parse_text(p, node_idx);
-                (void)text_idx;
-            }
-            /* Adding children can grow (realloc) the node array: reload. */
-            node = html_node_at(p->document, node_idx);
-        }
-        
-        p->nesting_depth--;
-    }
-    
-    return node_idx;
-}
-
-static int parser_parse_text(HtmlParser *p, int parent_idx) {
-    if (p->pos >= p->html_len) return -1;
-    
-    size_t start = p->pos;
-    
-    while (p->pos < p->html_len && p->html[p->pos] != '<') {
-        p->pos++;
-    }
-    
-    size_t len = p->pos - start;
-    if (len == 0) return -1;
-    
-    /* Collapse whitespace runs to a single space, like CSS white-space:normal.
-     * Leading and trailing single spaces are preserved: they are the gaps
-     * between inline-level siblings (e.g. "text <a>link</a> text").  A node
-     * that is entirely whitespace collapses to a lone space and has no size
-     * in layout. */
-    char *collapsed = (char*)malloc(len + 1);
-    if (!collapsed) return -1;
-    size_t cl = 0;
-    bool pending_space = false;
-    for (size_t i = 0; i < len; i++) {
-        unsigned char ch = (unsigned char)p->html[start + i];
-        if (isspace(ch)) {
-            pending_space = true;
-            continue;
-        }
-        if (pending_space) collapsed[cl++] = ' ';
-        pending_space = false;
-        collapsed[cl++] = (char)ch;
-    }
-    if (pending_space && cl > 0) collapsed[cl++] = ' ';
-    if (cl == 0) collapsed[cl++] = ' ';  /* pure-whitespace node: one space */
-    collapsed[cl] = '\0';
-    
-    int node_idx = html_node_create(p->document, HTML_NODE_TEXT, parent_idx);
-    if (node_idx < 0) {
-        free(collapsed);
-        return -1;
-    }
-    
-    HtmlNode *node = html_node_at(p->document, node_idx);
-    node->text_content = collapsed;
-    node->text_len = cl;
-    
-    /* Decode entities */
-    node->text_len = html_decode_entities(node->text_content, cl);
-    
-    return node_idx;
-}
 
 HtmlDocument* html_parse(const char *html, size_t html_len) {
     if (!html || html_len == 0) return NULL;
-    
-    HtmlDocument *doc = (HtmlDocument*)calloc(1, sizeof(HtmlDocument));
-    if (!doc) return NULL;
-    
-    if (!po_array_init(&doc->array, sizeof(HtmlNode), 64)) {
-        free(doc);
-        return NULL;
-    }
-    doc->root_idx = -1;
-    doc->head_idx = -1;
-    doc->body_idx = -1;
-    doc->current_parent_idx = -1;
-    
-    HtmlParser parser = {
-        .html = html,
-        .html_len = html_len,
-        .pos = 0,
-        .line = 1,
-        .column = 1,
-        .nesting_depth = 0,
-        .document = doc
-    };
-    
-    /* Skip DOCTYPE if present */
-    parser_skip_doctype(&parser);
-    
-    /* Skip any leading whitespace/comments */
-    while (parser.pos < parser.html_len) {
-        parser_skip_whitespace(&parser);
-        if (parser_match(&parser, "<!--")) {
-            parser_skip_comment(&parser);
-        } else {
-            break;
-        }
-    }
-    
-    /* Parse root elements */
-    while (parser.pos < parser.html_len) {
-        parser_skip_whitespace(&parser);
-        
-        if (parser.pos >= parser.html_len) break;
-        
-        if (parser_match(&parser, "<!--")) {
-            parser_skip_comment(&parser);
-            continue;
-        }
-        
-        if (parser.html[parser.pos] == '<') {
-            int node_idx = parser_parse_element(&parser, -1);
-            if (node_idx >= 0) {
-                HtmlNode *node = html_node_at(doc, node_idx);
-                
-                /* Track root. The parser produces a single root in normal HTML. */
-                if (doc->root_idx < 0) {
-                    doc->root_idx = node_idx;
-                }
-                
-                /* Track head and body */
-                if (node && node->type == HTML_NODE_ELEMENT) {
-                    if (strcasecmp(node->tag_name, "head") == 0) {
-                        doc->head_idx = node_idx;
-                    } else if (strcasecmp(node->tag_name, "body") == 0) {
-                        doc->body_idx = node_idx;
-                    } else if (strcasecmp(node->tag_name, "html") == 0) {
-                        /* Look for head and body in html element children */
-                        int child_idx = po_array_first_child(&doc->array, node_idx);
-                        while (child_idx >= 0) {
-                            HtmlNode *child = html_node_at(doc, child_idx);
-                            if (child && child->type == HTML_NODE_ELEMENT) {
-                                if (strcasecmp(child->tag_name, "head") == 0) {
-                                    doc->head_idx = child_idx;
-                                } else if (strcasecmp(child->tag_name, "body") == 0) {
-                                    doc->body_idx = child_idx;
-                                }
-                            }
-                            child_idx = po_array_next_sibling(&doc->array, child_idx);
-                        }
-                    }
-                }
-            } else {
-                /* Try to recover */
-                if (parser.pos < parser.html_len && parser.html[parser.pos] == '<') {
-                    parser.pos++;
-                }
-            }
-        } else {
-            /* Text node at root level - usually whitespace, skip it */
-            int text_idx = parser_parse_text(&parser, -1);
-            if (text_idx >= 0) {
-                HtmlNode *text = html_node_at(doc, text_idx);
-                html_node_free_contents(text);
-                text->text_content = NULL;
-                text->text_len = 0;
-                po_array_delete(&doc->array, text_idx);
-            }
-        }
-    }
-    
-    LOG_INFO("Parsed HTML document: found %s, %s",
-             doc->head_idx >= 0 ? "<head>" : "no <head>",
-             doc->body_idx >= 0 ? "<body>" : "no <body>");
-    
+    NodeId frag = dom_parse_html(html, html_len, DOM_NULL);
+    HtmlDocument *doc = dom_snapshot_parsed(frag);
+    dom_free_subtree(frag);
+    if (doc)
+        LOG_INFO("Parsed HTML document: found %s, %s",
+                 doc->head_idx >= 0 ? "<head>" : "no <head>",
+                 doc->body_idx >= 0 ? "<body>" : "no <body>");
     return doc;
 }
 
 /* ============================================================================
- * DOM Node Creation in QuickJS
- * ============================================================================ */
+ * The JS document over the node store
+ * ============================================================================
+ * Parsed documents and fragments go straight into the store; wrappers are
+ * created only for the nodes scripts touch (dom_wrap.h).
+ */
 
-/* Forward declaration from js_quickjs.c */
+/* Forward declarations from js_quickjs.c / dom_api.c */
 extern JSClassID js_video_class_id;
 extern GCValue js_video_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
+extern NodeId g_dom_index_root;
+
+static NodeId owner_doc_of(GCValue js_doc) {
+    NodeId d = dom_node_of(js_doc);
+    return dom_kind(d) == DOM_K_DOCUMENT ? d : g_dom_document;
+}
+
+/* A store element with the given attributes. */
+static NodeId element_from_attrs(const char *tag_name, HtmlAttribute *attrs, NodeId owner) {
+    NodeId el = dom_create_element_str(tag_name, strlen(tag_name), owner);
+    for (HtmlAttribute *a = attrs; a; a = a->next)
+        dom_set_attr_str(el, a->name, a->value);
+    if (strcasecmp(tag_name, "script") == 0) g_dom.flags[dom_slot(el)] |= DOMF_PARSER_SCRIPT;
+    return el;
+}
 
 /* Create a JavaScript element for a given tag */
 GCValue html_create_element_js(JSContextHandle ctx, const char *tag_name, HtmlAttribute *attrs) {
     if (!tag_name || !SAFE_VALID(ctx)) return JS_NULL;
-    
-    GCValue element = GC_UNDEFINED;
-    
-    /* Special handling for video elements */
-    if (strcasecmp(tag_name, "video") == 0) {
-        extern GCValue js_video_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
-        element = js_video_constructor(ctx, JS_NULL, 0, NULL);
-    } else {
-        /* Create generic element with DOMNode backing data so parallel CSS
-         * computed-style tables and index tables can attach to it. */
-        element = JS_NewObjectClass(ctx, js_dom_node_class_id);
-        if (!JS_IsException(element)) {
-            DOMNodeHandle node = dom_node_create(ctx, DOM_NODE_TYPE_ELEMENT, tag_name);
-            if (!SAFE_IS_NULL(node)) {
-                dom_node_attach_to_object(node, element);
-                /* Copy parsed attributes into the DOMNode so the JS DOM can be
-                 * serialized back to HTML without losing information. */
-                HtmlAttribute *attr = attrs;
-                while (attr) {
-                    dom_node_set_attribute(node, attr->name, attr->value);
-                    attr = attr->next;
-                }
-            }
-        }
-    }
-    
-    if (JS_IsException(element)) {
-        return JS_NULL;
-    }
-    
-    /* Set tagName property */
-    JS_SetPropertyStr(ctx, element, "tagName", JS_NewString(ctx, tag_name));
-
-    /* Set localName property (lowercase tag name; Polymer/ShadyDOM slot
-     * detection compares `localName === "slot"`). */
-    {
-        char lower_tag[128];
-        size_t tn = strlen(tag_name);
-        if (tn >= sizeof(lower_tag)) tn = sizeof(lower_tag) - 1;
-        for (size_t i = 0; i < tn; i++) lower_tag[i] = (char)tolower((unsigned char)tag_name[i]);
-        lower_tag[tn] = '\0';
-        JS_SetPropertyStr(ctx, element, "localName", JS_NewString(ctx, lower_tag));
-    }
-    
-    /* Create attributes map */
-    GCValue attr_map = JS_NewObject(ctx);
-    
-    /* Set id and className if present */
-    HtmlAttribute *attr = attrs;
-    while (attr) {
-        if (strcasecmp(attr->name, "id") == 0) {
-            JS_SetPropertyStr(ctx, element, "id", JS_NewString(ctx, attr->value));
-        } else if (strcasecmp(attr->name, "class") == 0) {
-            JS_SetPropertyStr(ctx, element, "className", JS_NewString(ctx, attr->value));
-        }
-        
-        /* Add to attributes map */
-        JS_SetPropertyStr(ctx, attr_map, attr->name, JS_NewString(ctx, attr->value));
-        
-        attr = attr->next;
-    }
-    
-    JS_SetPropertyStr(ctx, element, "attributes", attr_map);
-    
-    /* Add childNodes array */
-    JS_SetPropertyStr(ctx, element, "childNodes", JS_NewArray(ctx));
-    
-    /* Special handling for script elements */
-    if (strcasecmp(tag_name, "script") == 0) {
-        /* Set type property from type attribute (default to "text/javascript") */
-        GCValue type_attr = JS_GetPropertyStr(ctx, attr_map, "type");
-        if (JS_IsUndefined(type_attr) || JS_IsNull(type_attr)) {
-            JS_SetPropertyStr(ctx, element, "type", JS_NewString(ctx, "text/javascript"));
-        } else {
-            JS_SetPropertyStr(ctx, element, "type", type_attr);
-        }
-        
-        /* Set src property from src attribute if present */
-        GCValue src_attr = JS_GetPropertyStr(ctx, attr_map, "src");
-        if (!JS_IsUndefined(src_attr) && !JS_IsNull(src_attr)) {
-            JS_SetPropertyStr(ctx, element, "src", src_attr);
-        }
-
-        /* Parser-inserted scripts are executed by the static HTML script runner;
-         * mark them so the dynamic <script src> loader does not fetch them again
-         * when they are appended to the DOM during initial population. */
-        JS_SetPropertyStr(ctx, element, "__cyber_parser_script", JS_TRUE);
-    }
-    
-    return element;
+    return dom_js(ctx, element_from_attrs(tag_name, attrs, g_dom_document));
 }
 
-/* Create a JavaScript element using document.createElement() when available.
- * This ensures elements get proper DOM prototypes (Element, HTMLElement, etc.)
- * rather than plain objects. */
+/* Create a JavaScript element the way document.createElement() would, with
+ * the parsed attributes. */
 GCValue html_create_element_js_with_document(JSContextHandle ctx, GCValue js_doc, const char *tag_name, HtmlAttribute *attrs) {
     if (!tag_name || !SAFE_VALID(ctx)) return JS_NULL;
-    
-    GCValue element = GC_UNDEFINED;
-    
-    /* Try to use document.createElement() for proper DOM prototypes */
-    if (!JS_IsUndefined(js_doc) && !JS_IsNull(js_doc)) {
-        GCValue createElement = JS_GetPropertyStr(ctx, js_doc, "createElement");
-        if (!JS_IsUndefined(createElement) && !JS_IsNull(createElement)) {
-            GCValue args[1] = { JS_NewString(ctx, tag_name) };
-            element = JS_Call(ctx, createElement, js_doc, 1, args);
-            if (!JS_IsException(element) && !JS_IsUndefined(element) && !JS_IsNull(element)) {
-                /* Set attributes from parsed HTML.  The inline 'style' attribute is
-                 * special-cased: document.createElement already created a style
-                 * object, and copying the raw string would clobber it.  We parse
-                 * the attribute and apply declarations to the existing object. */
-                const char *inline_style = NULL;
-                HtmlAttribute *attr = attrs;
-                while (attr) {
-                    if (strcasecmp(attr->name, "id") == 0) {
-                        JS_SetPropertyStr(ctx, element, "id", JS_NewString(ctx, attr->value));
-                    } else if (strcasecmp(attr->name, "class") == 0) {
-                        JS_SetPropertyStr(ctx, element, "className", JS_NewString(ctx, attr->value));
-                    } else if (strcasecmp(attr->name, "style") == 0) {
-                        inline_style = attr->value;
-                    } else {
-                        /* Set other attributes directly */
-                        JS_SetPropertyStr(ctx, element, attr->name, JS_NewString(ctx, attr->value));
-                    }
-                    attr = attr->next;
-                }
-                if (inline_style && inline_style[0]) {
-                    css_apply_inline_style_string(ctx, element, inline_style);
-                }
-                DOMNodeHandle node = dom_node_from_object(element);
-                if (!SAFE_IS_NULL(node)) {
-                    /* Copy parsed attributes into the DOMNode for HTML serialization. */
-                    attr = attrs;
-                    while (attr) {
-                        dom_node_set_attribute(node, attr->name, attr->value);
-                        attr = attr->next;
-                    }
-                    css_index_insert_node(ctx, node);
-                }
-                if (strcasecmp(tag_name, "script") == 0) {
-                    JS_SetPropertyStr(ctx, element, "__cyber_parser_script", JS_TRUE);
-                }
-                return element;
-            }
-            /* Fall through to plain object if createElement failed */
-        }
-    }
-    
-    /* Fallback to plain object if document.createElement not available */
-    element = html_create_element_js(ctx, tag_name, attrs);
-    {
-        DOMNodeHandle node = dom_node_from_object(element);
-        if (!SAFE_IS_NULL(node)) css_index_insert_node(ctx, node);
-    }
-    /* Ensure ownerDocument is set even for fallback-created elements. */
-    if (!JS_IsUndefined(js_doc) && !JS_IsNull(js_doc)) {
-        dom_node_set_owner_document(ctx, element, js_doc);
-    }
-    if (strcasecmp(tag_name, "script") == 0) {
-        JS_SetPropertyStr(ctx, element, "__cyber_parser_script", JS_TRUE);
-    }
-    return element;
+    GCValue el = dom_js(ctx, element_from_attrs(tag_name, attrs, owner_doc_of(js_doc)));
+    if (!JS_IsUndefined(js_doc) && !JS_IsNull(js_doc)) dom_node_set_owner_document(ctx, el, js_doc);
+    return el;
 }
 
-/* Recursively create DOM nodes in JS with automatic GC memory management.
- * Uses the document's createElement/createTextNode methods so nodes receive
- * proper DOM prototypes (HTMLElement, Element, Node). */
-static bool html_node_create_js_recursive(JSContextHandle ctx, GCValue js_doc, HtmlDocument *doc, int node_idx, GCValue parent) {
-    if (!SAFE_VALID(ctx) || !doc || node_idx < 0) return false;
-    
-    HtmlNode *node = html_node_at(doc, node_idx);
-    if (!node) return false;
-    
-    GCValue js_node = JS_UNDEFINED;
-    
-    switch (node->type) {
-        case HTML_NODE_ELEMENT: {
-            js_node = html_create_element_js_with_document(ctx, js_doc, node->tag_name, node->attributes);
-            
-            /* Process children */
-            if (!JS_IsNull(js_node) && !JS_IsUndefined(js_node)) {
-                int child_idx = po_array_first_child(&doc->array, node_idx);
-                while (child_idx >= 0) {
-                    html_node_create_js_recursive(ctx, js_doc, doc, child_idx, js_node);
-                    child_idx = po_array_next_sibling(&doc->array, child_idx);
-                }
-                
-                /* For raw content tags (script, style), set textContent from node's text_content */
-                if (html_is_raw_content_tag(node->tag_name) && node->text_content) {
-                    JS_SetPropertyStr(ctx, js_node, "textContent", 
-                                      JS_NewString(ctx, node->text_content));
-                }
-                
-                /* If we have a parent, append this element */
-                if (!JS_IsUndefined(parent) && !JS_IsNull(parent)) {
-                    /* Note: GCValue uses automatic garbage collection */
-                    GCValue appendChild = JS_GetPropertyStr(ctx, parent, "appendChild");
-                    
-                    if (!JS_IsUndefined(appendChild) && !JS_IsNull(appendChild)) {
-                        GCValue args[1] = { js_node };
-                        GCValue result = JS_Call(ctx, appendChild, parent, 1, args);
-                        (void)result;
-                    }
-                }
-            }
-            break;
+/* Template elements keep their parsed children in a content fragment. */
+void dom_adopt_template_contents(NodeId root) {
+    if (!dom_valid(root)) return;
+    static CssAtom a_template;
+    if (!a_template) { css_atom_reserve(1); a_template = css_atom_intern("template", 8); }
+    uint32_t r = dom_slot(root);
+    /* Collect first: moving children changes the walk. */
+    uint32_t *list = NULL, n = 0, cap = 0;
+    for (uint32_t s = r; s; s = dom_next_in_subtree(s, r)) {
+        if (g_dom.kind[s] == DOM_K_ELEMENT && g_dom.tag[s] == a_template) {
+            if (n == cap) { cap = cap ? cap * 2 : 16; list = realloc(list, cap * sizeof(uint32_t)); }
+            list[n++] = s;
         }
-        
-        case HTML_NODE_TEXT: {
-            if (node->text_content && strlen(node->text_content) > 0) {
-                if (!JS_IsUndefined(js_doc) && !JS_IsNull(js_doc)) {
-                    GCValue text_arg = JS_NewString(ctx, node->text_content);
-                    GCValue args[1] = { text_arg };
-                    js_node = js_document_create_text_node(ctx, js_doc, 1, args);
-                } else {
-                    js_node = JS_NewString(ctx, node->text_content);
-                }
-                
-                /* Add to parent's childNodes if needed */
-                if (!JS_IsUndefined(parent) && !JS_IsNull(parent)) {
-                    GCValue childNodes = JS_GetPropertyStr(ctx, parent, "childNodes");
-                    
-                    if (JS_IsArray(ctx, childNodes)) {
-                        GCValue push = JS_GetPropertyStr(ctx, childNodes, "push");
-                        GCValue args[1] = { js_node };
-                        GCValue result = JS_Call(ctx, push, childNodes, 1, args);
-                        (void)result;
-                    }
-                }
-            }
-            break;
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        NodeId t = dom_id_of(list[i]);
+        NodeId frag = dom_template_content(t);
+        if (!frag) {
+            frag = dom_create_fragment(dom_owner(t));
+            dom_set_template_content(t, frag);
         }
-        
-        default:
-            break;
+        while (dom_first_child(t)) {
+            NodeId c = dom_first_child(t);
+            dom_detach(c, false);
+            dom_attach(frag, c, DOM_NULL);
+        }
     }
-    
-    if (!JS_IsUndefined(js_node)) {
-        GC_SET(node->js_object, js_node);
-        node->has_js_object = 1;
-    }
-    
-    return true;
+    free(list);
 }
 
-/* Create JavaScript document object with parsed HTML structure */
-GCValue html_create_js_document(JSContextHandle ctx, HtmlDocument *doc) {
-    if (!SAFE_VALID(ctx) || !doc) return JS_NULL;
-    
-    GCValue js_doc = JS_NewObject(ctx);
-    
-    /* Set document properties */
-    JS_SetPropertyStr(ctx, js_doc, "nodeType", JS_NewInt32(ctx, 9)); /* DOCUMENT_NODE */
-    JS_SetPropertyStr(ctx, js_doc, "readyState", JS_NewString(ctx, "complete"));
-    JS_SetPropertyStr(ctx, js_doc, "characterSet", JS_NewString(ctx, "UTF-8"));
-    JS_SetPropertyStr(ctx, js_doc, "contentType", JS_NewString(ctx, "text/html"));
-
-    /* Give the document object a real DOM node backing so parentNode / isConnected
-     * traversal from the documentElement reaches a DOCUMENT_NODE. */
-    DOMNodeHandle doc_node = dom_node_create(ctx, DOM_NODE_TYPE_DOCUMENT, "#document");
-    if (!SAFE_IS_NULL(doc_node)) {
-        dom_node_attach_to_object(doc_node, js_doc);
-    }
-
-    /* Add document methods before creating elements so the whole tree can be
-     * built with proper DOM prototypes (HTMLElement, Element, Node). */
-    JS_SetPropertyStr(ctx, js_doc, "createElement",
-        JS_NewCFunction(ctx, js_document_create_element, "createElement", 1));
-    JS_SetPropertyStr(ctx, js_doc, "createTextNode",
-        JS_NewCFunction(ctx, js_document_create_text_node, "createTextNode", 1));
-    JS_SetPropertyStr(ctx, js_doc, "createDocumentFragment",
-        JS_NewCFunction(ctx, js_document_create_document_fragment, "createDocumentFragment", 0));
-    
-    /* Create documentElement (html or first root element) */
-    GCValue doc_element = JS_NULL;
-    HtmlNode *root = html_document_root(doc);
-    if (root) {
-        doc_element = html_create_element_js_with_document(ctx, js_doc, root->tag_name, root->attributes);
-        
-        /* Process children of root */
-        int child_idx = po_array_first_child(&doc->array, doc->root_idx);
-        while (child_idx >= 0) {
-            html_node_create_js_recursive(ctx, js_doc, doc, child_idx, doc_element);
-            child_idx = po_array_next_sibling(&doc->array, child_idx);
+/* Build a store fragment from an HtmlDocument (the legacy entry points that
+ * take a parsed HtmlDocument). */
+static void copy_html_children(HtmlDocument *doc, int idx, NodeId parent, NodeId owner, int depth) {
+    for (int c = idx; c >= 0; c = po_array_next_sibling(&doc->array, c)) {
+        if (!po_array_is_active(&doc->array, c)) continue;
+        HtmlNode *hn = po_array_payload(&doc->array, c);
+        if (!hn) continue;
+        if (hn->type == HTML_NODE_TEXT) {
+            NodeId t = dom_create_chardata(DOM_K_TEXT, hn->text_content ? hn->text_content : "", hn->text_len, owner);
+            dom_attach(parent, t, DOM_NULL);
+            continue;
         }
-    } else {
-        /* Create a minimal html element */
-        doc_element = html_create_element_js_with_document(ctx, js_doc, "html", NULL);
-    }
-    
-    JS_SetPropertyStr(ctx, js_doc, "documentElement", doc_element);
-    
-    /* Create body element reference */
-    GCValue body_element = JS_NULL;
-    HtmlNode *body = html_document_body(doc);
-    if (body) {
-        body_element = html_create_element_js_with_document(ctx, js_doc, body->tag_name, body->attributes);
-        
-        /* Process body children */
-        int child_idx = po_array_first_child(&doc->array, doc->body_idx);
-        while (child_idx >= 0) {
-            html_node_create_js_recursive(ctx, js_doc, doc, child_idx, body_element);
-            child_idx = po_array_next_sibling(&doc->array, child_idx);
+        if (hn->type != HTML_NODE_ELEMENT) continue;
+        NodeId n = element_from_attrs(hn->tag_name, hn->attributes, owner);
+        dom_attach(parent, n, DOM_NULL);
+        if (hn->text_content && hn->text_len && html_is_raw_content_tag(hn->tag_name)) {
+            NodeId t = dom_create_chardata(DOM_K_TEXT, hn->text_content, hn->text_len, owner);
+            dom_attach(n, t, DOM_NULL);
         }
-    } else {
-        body_element = html_create_element_js_with_document(ctx, js_doc, "body", NULL);
+        if (depth < HTML_MAX_NESTING_DEPTH)
+            copy_html_children(doc, po_array_first_child(&doc->array, c), n, owner, depth + 1);
     }
-    
-    JS_SetPropertyStr(ctx, js_doc, "body", body_element);
-    JS_SetPropertyStr(ctx, doc_element, "body", body_element);
-    
-    /* Create head element reference */
-    GCValue head_element = JS_NULL;
-    HtmlNode *head = html_document_head(doc);
-    if (head) {
-        head_element = html_create_element_js_with_document(ctx, js_doc, head->tag_name, head->attributes);
-        
-        /* Process head children */
-        int child_idx = po_array_first_child(&doc->array, doc->head_idx);
-        while (child_idx >= 0) {
-            html_node_create_js_recursive(ctx, js_doc, doc, child_idx, head_element);
-            child_idx = po_array_next_sibling(&doc->array, child_idx);
-        }
-    } else {
-        head_element = html_create_element_js_with_document(ctx, js_doc, "head", NULL);
-    }
-    
-    JS_SetPropertyStr(ctx, js_doc, "head", head_element);
-    JS_SetPropertyStr(ctx, doc_element, "head", head_element);
-    
-    return js_doc;
 }
 
-/* Main entry point: parse HTML and create DOM in JS context */
-bool html_create_dom_in_js(JSContextHandle ctx, HtmlDocument *doc) {
-    if (!SAFE_VALID(ctx) || !doc) return false;
-    
-    LOG_INFO("Creating DOM in JS context");
-    
-    /* CSS index tables are per-runtime state; clear them for the new doc. */
-    css_document_state_clear(JS_GetRuntime(ctx));
-    
-    /* Create the document object in JS first (not tracked - persistent) */
-    GCValue js_doc = html_create_js_document(ctx, doc);
-    
-    if (JS_IsNull(js_doc) || JS_IsException(js_doc)) {
-        LOG_ERROR("Failed to create JS document");
-        return false;
-    }
-    
-    /* Note: GCValue uses automatic garbage collection */
-    /* Get global object and set document */
-    GCValue global = JS_GetGlobalObject(ctx);
-    JS_SetPropertyStr(ctx, global, "document", js_doc);
-    
-    /* Also set documentElement on window */
-    GCValue doc_elem = JS_GetPropertyStr(ctx, js_doc, "documentElement");
-    if (!JS_IsNull(doc_elem) && !JS_IsUndefined(doc_elem)) {
-        JS_SetPropertyStr(ctx, global, "documentElement", doc_elem);
-    }
-    
-    LOG_INFO("DOM created successfully in JS context");
-    return true;
-}
-
-/* For <template> elements, parsed children belong in the .content fragment
- * rather than in the template's own light-DOM child list. */
-static GCValue html_effective_parent_for_append(JSContextHandle ctx, GCValue parent) {
-    if (JS_IsUndefined(parent) || JS_IsNull(parent) || !JS_IsObject(parent))
-        return parent;
-    DOMNodeHandle node = get_dom_node(ctx, parent);
-    if (SAFE_IS_NULL(node) || SAFE_GET_OR(node, DOMNodeHandle, node_type, 0) != DOM_NODE_TYPE_ELEMENT)
-        return parent;
-    const char *name = SAFE_GET_OR(node, DOMNodeHandle, node_name, "");
-    if (!name || strcasecmp(name, "template") != 0)
-        return parent;
-    GCValue content = JS_GetPropertyStr(ctx, parent, "content");
-    if (JS_IsUndefined(content) || JS_IsNull(content) || !JS_IsObject(content))
-        return parent;
-    return content;
-}
-
-/* Recursively populate JS DOM from parsed HTML using document.createElement().
- * This ensures elements get proper DOM prototypes. */
-static bool html_node_populate_js_recursive(JSContextHandle ctx, GCValue js_doc, HtmlDocument *doc, int node_idx, GCValue parent) {
-    if (!SAFE_VALID(ctx) || !doc || node_idx < 0) return false;
-    
-    HtmlNode *node = html_node_at(doc, node_idx);
-    if (!node) return false;
-    
-    GCValue js_node = JS_UNDEFINED;
-    GCValue append_parent = html_effective_parent_for_append(ctx, parent);
-    
-    switch (node->type) {
-        case HTML_NODE_ELEMENT: {
-            js_node = html_create_element_js_with_document(ctx, js_doc, node->tag_name, node->attributes);
-            
-            /* Process children */
-            if (!JS_IsNull(js_node) && !JS_IsUndefined(js_node)) {
-                int child_idx = po_array_first_child(&doc->array, node_idx);
-                while (child_idx >= 0) {
-                    html_node_populate_js_recursive(ctx, js_doc, doc, child_idx, js_node);
-                    child_idx = po_array_next_sibling(&doc->array, child_idx);
-                }
-                
-                /* For raw content tags (script, style), set textContent */
-                if (html_is_raw_content_tag(node->tag_name) && node->text_content) {
-                    JS_SetPropertyStr(ctx, js_node, "textContent", 
-                                      JS_NewString(ctx, node->text_content));
-                }
-                
-                /* Remember the JS object so the CSS applier can find it. */
-                GC_SET(node->js_object, js_node);
-                node->has_js_object = 1;
-
-                /* If we have a parent, append this element */
-                if (!JS_IsUndefined(append_parent) && !JS_IsNull(append_parent)) {
-                    GCValue appendChild = JS_GetPropertyStr(ctx, append_parent, "appendChild");
-                    GCValue args[1] = { js_node };
-                    if (JS_IsFunction(ctx, appendChild)) {
-                        JS_Call(ctx, appendChild, append_parent, 1, args);
-                    } else {
-                        js_node_appendChild_real(ctx, append_parent, 1, args);
-                    }
-                }
-            }
-            break;
-        }
-        
-        case HTML_NODE_TEXT: {
-            if (node->text_content && strlen(node->text_content) > 0) {
-                /* Try to create text node via document.createTextNode */
-                GCValue createTextNode = JS_GetPropertyStr(ctx, js_doc, "createTextNode");
-                if (!JS_IsUndefined(createTextNode) && !JS_IsNull(createTextNode)) {
-                    GCValue args[1] = { JS_NewString(ctx, node->text_content) };
-                    js_node = JS_Call(ctx, createTextNode, js_doc, 1, args);
-                } else {
-                    js_node = JS_NewString(ctx, node->text_content);
-                }
-                
-                if (!JS_IsUndefined(append_parent) && !JS_IsNull(append_parent)) {
-                    GCValue appendChild = JS_GetPropertyStr(ctx, append_parent, "appendChild");
-                    GCValue args[1] = { js_node };
-                    if (JS_IsFunction(ctx, appendChild)) {
-                        JS_Call(ctx, appendChild, append_parent, 1, args);
-                    } else {
-                        js_node_appendChild_real(ctx, append_parent, 1, args);
-                    }
-                }
-            }
-            break;
-        }
-        
-        default:
-            break;
-    }
-    
-    return true;
-}
-
-/* Helper: copy attributes from parsed HTML node to JS element */
-static void html_copy_attributes_to_js(JSContextHandle ctx, GCValue elem, HtmlAttribute *attrs) {
-    HtmlAttribute *attr = attrs;
-    while (attr) {
-        if (attr->value[0]) {
-            JS_SetPropertyStr(ctx, elem, attr->name, JS_NewString(ctx, attr->value));
-        }
-        attr = attr->next;
-    }
+static NodeId fragment_from_html_document(HtmlDocument *doc, NodeId owner) {
+    NodeId frag = dom_create_fragment(owner);
+    if (doc) copy_html_children(doc, doc->array.first_root, frag, owner, 0);
+    return frag;
 }
 
 /* Helper: transfer numeric properties and style from old element to new element */
 static void html_transfer_element_properties(JSContextHandle ctx, GCValue new_elem, GCValue old_elem) {
     if (JS_IsUndefined(old_elem) || JS_IsNull(old_elem)) return;
-    
-    /* Transfer dimension properties */
     const char *numeric_props[] = {
         "clientWidth", "clientHeight", "scrollWidth", "scrollHeight",
         "offsetWidth", "offsetHeight", NULL
@@ -1172,12 +292,9 @@ static void html_transfer_element_properties(JSContextHandle ctx, GCValue new_el
             JS_SetPropertyStr(ctx, new_elem, numeric_props[i], val);
         }
     }
-    
-    /* Merge style object properties from old element into new element's style */
     GCValue old_style = JS_GetPropertyStr(ctx, old_elem, "style");
     GCValue new_style = JS_GetPropertyStr(ctx, new_elem, "style");
-    if (!JS_IsUndefined(old_style) && !JS_IsNull(old_style) &&
-        !JS_IsUndefined(new_style) && !JS_IsNull(new_style)) {
+    if (JS_IsObject(old_style) && JS_IsObject(new_style)) {
         JSPropertyEnum *tab = NULL;
         uint32_t plen = 0;
         if (JS_GetOwnPropertyNames(ctx, &tab, &plen, old_style, JS_GPN_STRING_MASK) == 0 && tab) {
@@ -1185,7 +302,7 @@ static void html_transfer_element_properties(JSContextHandle ctx, GCValue new_el
                 const char *key = JS_AtomToCString(ctx, tab[i].atom);
                 if (key && strcmp(key, "removeProperty") != 0 &&
                     strcmp(key, "setProperty") != 0 &&
-                    strcmp(key, "getPropertyValue") != 0) {
+                    strcmp(key, "getPropertyValue") != 0 && key[0] != '_') {
                     GCValue val = JS_GetPropertyStr(ctx, old_style, key);
                     JS_SetPropertyStr(ctx, new_style, key, val);
                 }
@@ -1195,329 +312,233 @@ static void html_transfer_element_properties(JSContextHandle ctx, GCValue new_el
     }
 }
 
-/* Populate an existing JS document object from parsed HTML.
- * Creates NEW documentElement, head, and body from the parsed HTML tags,
- * so document.head and document.body are the actual parsed elements.
- * Critical properties from the old skeleton are transferred to the new elements. */
-bool html_populate_js_document(JSContextHandle ctx, GCValue js_doc, HtmlDocument *doc) {
-    if (!SAFE_VALID(ctx) || !doc) return false;
-    if (JS_IsUndefined(js_doc) || JS_IsNull(js_doc)) return false;
-    
-    /* The CSS index tables are per-runtime state; clear them before populating
-     * a new document so lookups do not return stale nodes. */
-    css_document_state_clear(JS_GetRuntime(ctx));
-    
-    LOG_INFO("Populating JS document from parsed HTML");
-    fprintf(stderr, "[POPULATE] start\n"); fflush(stderr);
-    
-    /* Get existing documentElement, body, head (the hardcoded skeleton) */
+static NodeId shallow_copy(NodeId src, const char *fallback_tag, NodeId owner) {
+    if (!dom_valid(src)) return dom_create_element_str(fallback_tag, strlen(fallback_tag), owner);
+    NodeId el = dom_create_element(dom_tag(src), owner);
+    for (int i = 0; i < dom_attr_count(src); i++) {
+        const DomAttr *a = dom_attr_at(src, i);
+        dom_set_attr(el, a->name, a->value.s ? a->value.s : "", a->value.len);
+    }
+    return el;
+}
+
+/* Move every child of `from` to the end of `to` (store only). */
+static void move_children(NodeId from, NodeId to, bool skip_head_body) {
+    NodeId c = dom_first_child(from);
+    while (c) {
+        NodeId next = dom_next_sibling(c);
+        if (skip_head_body && dom_kind(c) == DOM_K_ELEMENT) {
+            const char *t = dom_tag_name(c);
+            if (strcmp(t, "head") == 0 || strcmp(t, "body") == 0) { c = next; continue; }
+        }
+        dom_detach(c, false);
+        dom_attach(to, c, DOM_NULL);
+        c = next;
+    }
+}
+
+/* Populate document `js_doc` from a parsed fragment: NEW documentElement,
+ * head and body (copies of the parsed ones, as the legacy DOM did), the
+ * parsed head and body children moved under them, and the root's other
+ * children after them.  Properties of the old skeleton are transferred. */
+static bool populate_from_fragment(JSContextHandle ctx, GCValue js_doc, NodeId frag) {
+    NodeId doc = dom_node_of(js_doc);
+    if (dom_kind(doc) != DOM_K_DOCUMENT) return false;
+    DomParseRoots roots = dom_parse_roots(frag);
     GCValue old_doc_element = JS_GetPropertyStr(ctx, js_doc, "documentElement");
     GCValue old_body_element = JS_GetPropertyStr(ctx, js_doc, "body");
     GCValue old_head_element = JS_GetPropertyStr(ctx, js_doc, "head");
-    
-    HtmlNode *root = html_document_root(doc);
-    HtmlNode *head = html_document_head(doc);
-    HtmlNode *body = html_document_body(doc);
-    
-    /* Create NEW elements from the parsed HTML tags */
-    fprintf(stderr, "[POPULATE] create doc element\n"); fflush(stderr);
-    GCValue new_doc_element = html_create_element_js_with_document(
-        ctx, js_doc,
-        root ? root->tag_name : "html",
-        root ? root->attributes : NULL);
-    fprintf(stderr, "[POPULATE] create head element\n"); fflush(stderr);
-    
-    GCValue new_head_element = html_create_element_js_with_document(
-        ctx, js_doc,
-        head ? head->tag_name : "head",
-        head ? head->attributes : NULL);
-    fprintf(stderr, "[POPULATE] create body element\n"); fflush(stderr);
-    
-    GCValue new_body_element = html_create_element_js_with_document(
-        ctx, js_doc,
-        body ? body->tag_name : "body",
-        body ? body->attributes : NULL);
-    fprintf(stderr, "[POPULATE] elements created\n"); fflush(stderr);
-    
-    /* Ensure the root elements point back to the document. */
+
+    NodeId de = shallow_copy(roots.root, "html", doc);
+    NodeId head = shallow_copy(roots.head, "head", doc);
+    NodeId body = shallow_copy(roots.body, "body", doc);
+    if (roots.head) move_children(roots.head, head, false);
+    if (roots.body) move_children(roots.body, body, false);
+    dom_attach(de, head, DOM_NULL);
+    dom_attach(de, body, DOM_NULL);
+    if (roots.root) move_children(roots.root, de, true);
+    dom_adopt_template_contents(de);
+
+    GCValue new_doc_element = dom_js(ctx, de);
+    GCValue new_head_element = dom_js(ctx, head);
+    GCValue new_body_element = dom_js(ctx, body);
     dom_node_set_owner_document(ctx, new_doc_element, js_doc);
     dom_node_set_owner_document(ctx, new_head_element, js_doc);
     dom_node_set_owner_document(ctx, new_body_element, js_doc);
-    
-    /* Attach the root <html> element to the document so parentNode / isConnected work. */
-    {
-        GCValue args[1] = { new_doc_element };
-        js_node_appendChild_real(ctx, js_doc, 1, args);
-    }
-    
-    /* Transfer critical properties (dimensions, style) from old skeleton */
+
+    /* The new root replaces the document's current root element (the
+     * skeleton, or the previous page). */
+    NodeId old_de = dom_node_of(old_doc_element);
+    if (old_de && dom_parent(old_de) == doc) dom_detach(old_de, true);
+
+    /* Attach the root <html> element to the document. */
+    js_cyber_ce_push_stack(ctx);
+    dom_attach(doc, de, DOM_NULL);
+    dom_ce_on_connect(ctx, de);
+    js_cyber_ce_flush_reactions(ctx, JS_UNDEFINED, 0, NULL);
+    js_cyber_ce_pop_stack(ctx);
+
     html_transfer_element_properties(ctx, new_doc_element, old_doc_element);
     html_transfer_element_properties(ctx, new_body_element, old_body_element);
     html_transfer_element_properties(ctx, new_head_element, old_head_element);
-    
-    /* Populate new head with parsed head children */
-    if (doc->head_idx >= 0) {
-        int child_idx = po_array_first_child(&doc->array, doc->head_idx);
-        while (child_idx >= 0) {
-            html_node_populate_js_recursive(ctx, js_doc, doc, child_idx, new_head_element);
-            child_idx = po_array_next_sibling(&doc->array, child_idx);
-        }
-    }
-    
-    /* Populate new body with parsed body children */
-    if (doc->body_idx >= 0) {
-        int child_idx = po_array_first_child(&doc->array, doc->body_idx);
-        while (child_idx >= 0) {
-            html_node_populate_js_recursive(ctx, js_doc, doc, child_idx, new_body_element);
-            child_idx = po_array_next_sibling(&doc->array, child_idx);
-        }
-    }
-    
-    /* Append head and body to documentElement */
-    {
-        GCValue appendChild = JS_GetPropertyStr(ctx, new_doc_element, "appendChild");
-        if (!JS_IsUndefined(appendChild) && !JS_IsNull(appendChild)) {
-            GCValue args1[1] = { new_head_element };
-            JS_Call(ctx, appendChild, new_doc_element, 1, args1);
-            GCValue args2[1] = { new_body_element };
-            JS_Call(ctx, appendChild, new_doc_element, 1, args2);
-        }
-    }
-    
-    /* Add other children of parsed root to documentElement (skip head/body) */
-    if (doc->root_idx >= 0) {
-        int child_idx = po_array_first_child(&doc->array, doc->root_idx);
-        while (child_idx >= 0) {
-            HtmlNode *child = html_node_at(doc, child_idx);
-            if (child && child->type == HTML_NODE_ELEMENT) {
-                if (strcasecmp(child->tag_name, "head") == 0 ||
-                    strcasecmp(child->tag_name, "body") == 0) {
-                    child_idx = po_array_next_sibling(&doc->array, child_idx);
-                    continue;
-                }
-            }
-            html_node_populate_js_recursive(ctx, js_doc, doc, child_idx, new_doc_element);
-            child_idx = po_array_next_sibling(&doc->array, child_idx);
-        }
-    }
-    
-    /* Replace old elements with new ones in the document */
+
     JS_SetPropertyStr(ctx, js_doc, "documentElement", new_doc_element);
     JS_SetPropertyStr(ctx, js_doc, "head", new_head_element);
     JS_SetPropertyStr(ctx, js_doc, "body", new_body_element);
     JS_SetPropertyStr(ctx, new_doc_element, "head", new_head_element);
     JS_SetPropertyStr(ctx, new_doc_element, "body", new_body_element);
-    
-    LOG_INFO("JS document populated: new docElem/head/body from parsed HTML");
+    g_dom_index_root = de;
+    dom_request_layout();
     return true;
 }
 
-/* Set the innerHTML of a ShadowRoot by parsing the HTML string and replacing
- * the shadow root's children with the parsed nodes. The host element's
- * ownerDocument is used so created elements get proper DOM prototypes. */
+bool html_populate_js_document_from_html(JSContextHandle ctx, GCValue js_doc, const char *html, size_t len) {
+    if (!SAFE_VALID(ctx) || !html || !len) return false;
+    NodeId doc = owner_doc_of(js_doc);
+    NodeId frag = dom_parse_html(html, len, doc);
+    bool ok = populate_from_fragment(ctx, js_doc, frag);
+    dom_free_subtree(frag);
+    LOG_INFO("JS document populated from HTML (%zu bytes, %u nodes in store)", len, g_dom.live);
+    return ok;
+}
+
+bool html_populate_js_document(JSContextHandle ctx, GCValue js_doc, HtmlDocument *doc) {
+    if (!SAFE_VALID(ctx) || !doc) return false;
+    if (JS_IsUndefined(js_doc) || JS_IsNull(js_doc)) return false;
+    NodeId frag = fragment_from_html_document(doc, owner_doc_of(js_doc));
+    bool ok = populate_from_fragment(ctx, js_doc, frag);
+    dom_free_subtree(frag);
+    return ok;
+}
+
+/* A new document object (store document + wrapper) with the methods page
+ * code uses on documents. */
+static GCValue new_js_document(JSContextHandle ctx) {
+    NodeId d = dom_create_document();
+    GCValue js_doc = dom_js(ctx, d);
+    JS_SetPropertyStr(ctx, js_doc, "nodeType", JS_NewInt32(ctx, 9));
+    JS_SetPropertyStr(ctx, js_doc, "readyState", JS_NewString(ctx, "complete"));
+    JS_SetPropertyStr(ctx, js_doc, "characterSet", JS_NewString(ctx, "UTF-8"));
+    JS_SetPropertyStr(ctx, js_doc, "contentType", JS_NewString(ctx, "text/html"));
+    JS_SetPropertyStr(ctx, js_doc, "createElement",
+        JS_NewCFunction(ctx, js_document_create_element, "createElement", 1));
+    JS_SetPropertyStr(ctx, js_doc, "createTextNode",
+        JS_NewCFunction(ctx, js_document_create_text_node, "createTextNode", 1));
+    JS_SetPropertyStr(ctx, js_doc, "createDocumentFragment",
+        JS_NewCFunction(ctx, js_document_create_document_fragment, "createDocumentFragment", 0));
+    JS_SetPropertyStr(ctx, js_doc, "getElementById",
+        JS_NewCFunction(ctx, js_document_getElementById, "getElementById", 1));
+    JS_SetPropertyStr(ctx, js_doc, "querySelector",
+        JS_NewCFunction(ctx, js_document_querySelector, "querySelector", 1));
+    JS_SetPropertyStr(ctx, js_doc, "querySelectorAll",
+        JS_NewCFunction(ctx, js_document_querySelectorAll, "querySelectorAll", 1));
+    JS_SetPropertyStr(ctx, js_doc, "getElementsByTagName",
+        JS_NewCFunction(ctx, js_document_get_elements_by_tag_name, "getElementsByTagName", 1));
+    JS_SetPropertyStr(ctx, js_doc, "getElementsByClassName",
+        JS_NewCFunction(ctx, js_document_getElementsByClassName, "getElementsByClassName", 1));
+    return js_doc;
+}
+
+GCValue dom_new_parsed_document(JSContextHandle ctx, const char *html, size_t len) {
+    GCValue js_doc = new_js_document(ctx);
+    NodeId frag = dom_parse_html(html, len, dom_node_of(js_doc));
+    populate_from_fragment(ctx, js_doc, frag);
+    dom_free_subtree(frag);
+    return js_doc;
+}
+
+/* Create JavaScript document object with parsed HTML structure */
+GCValue html_create_js_document(JSContextHandle ctx, HtmlDocument *doc) {
+    if (!SAFE_VALID(ctx) || !doc) return JS_NULL;
+    GCValue js_doc = new_js_document(ctx);
+    NodeId frag = fragment_from_html_document(doc, dom_node_of(js_doc));
+    populate_from_fragment(ctx, js_doc, frag);
+    dom_free_subtree(frag);
+    return js_doc;
+}
+
+/* Main entry point: parse HTML and create DOM in JS context */
+bool html_create_dom_in_js(JSContextHandle ctx, HtmlDocument *doc) {
+    if (!SAFE_VALID(ctx) || !doc) return false;
+    GCValue js_doc = html_create_js_document(ctx, doc);
+    if (JS_IsNull(js_doc) || JS_IsException(js_doc)) return false;
+    GCValue global = JS_GetGlobalObject(ctx);
+    JS_SetPropertyStr(ctx, global, "document", js_doc);
+    GCValue doc_elem = JS_GetPropertyStr(ctx, js_doc, "documentElement");
+    if (!JS_IsNull(doc_elem) && !JS_IsUndefined(doc_elem))
+        JS_SetPropertyStr(ctx, global, "documentElement", doc_elem);
+    return true;
+}
+
+/* innerHTML: remove the children of `target`, then insert the parsed nodes
+ * (the parsed <body>'s children when the input has a non-empty body, else
+ * the top-level nodes; a text node with the raw string when nothing parsed).
+ * Insertions go through the DOM API so custom elements and observers see
+ * them. */
+void dom_set_inner_html(JSContextHandle ctx, NodeId target, const char *html, size_t len) {
+    if (!dom_valid(target)) return;
+    while (dom_first_child(target)) {
+        if (!dom_api_remove_discard(ctx, target, dom_first_child(target))) {
+            dom_detach(dom_first_child(target), true);
+        }
+    }
+    if (!len) return;
+    NodeId owner = dom_kind(target) == DOM_K_DOCUMENT ? target : dom_owner(target);
+    NodeId frag = dom_parse_html(html, len, owner);
+    dom_adopt_template_contents(frag);
+    NodeId start = dom_parse_fragment_source(frag);
+    if (!start) {
+        NodeId t = dom_create_chardata(DOM_K_TEXT, html, len, owner);
+        dom_api_insert(ctx, target, t, DOM_NULL);
+    } else {
+        NodeId container = dom_parent(start);
+        for (NodeId c = start; c; ) {
+            NodeId next = dom_next_sibling(c);
+            dom_detach(c, false);
+            if (!dom_valid(target) || !dom_api_insert(ctx, target, c, DOM_NULL)) {
+                if (dom_valid(c) && !dom_parent(c)) dom_free_if_unwrapped(c);
+            }
+            c = next;
+            if (c && dom_parent(c) != container) break;
+        }
+    }
+    dom_free_subtree(frag);
+}
+
+/* Set the innerHTML of a ShadowRoot. */
 bool html_shadow_root_set_inner_html(JSContextHandle ctx, GCValue shadow_root, const char *html) {
-    if (!SAFE_VALID(ctx) || JS_IsUndefined(shadow_root) || JS_IsNull(shadow_root) || !html) return false;
-
-    // Note: we intentionally do NOT set the .innerHTML property here.
-    // The caller (js_shadow_root_set_innerHTML) already stores the string on
-    // the ShadowRootData object, and assigning the property would re-enter
-    // this setter and recurse infinitely.
-
-    // Find an ownerDocument to use for createElement.
-    GCValue doc = JS_NULL;
-    GCValue host = JS_GetPropertyStr(ctx, shadow_root, "host");
-    if (!JS_IsUndefined(host) && !JS_IsNull(host) && JS_IsObject(host)) {
-        doc = JS_GetPropertyStr(ctx, host, "ownerDocument");
-    }
-    if (JS_IsUndefined(doc) || JS_IsNull(doc) || !JS_IsObject(doc)) {
-        GCValue global = JS_GetGlobalObject(ctx);
-        doc = JS_GetPropertyStr(ctx, global, "document");
-    }
-
-    // Remove existing shadow children.
-    GCValue removeChild_fn = JS_GetPropertyStr(ctx, shadow_root, "removeChild");
-    if (JS_IsFunction(ctx, removeChild_fn)) {
-        GCValue child = JS_GetPropertyStr(ctx, shadow_root, "firstChild");
-        int safety = 0;
-        while (!JS_IsUndefined(child) && !JS_IsNull(child) && JS_IsObject(child) && safety++ < 10000) {
-            GCValue next = JS_GetPropertyStr(ctx, child, "nextSibling");
-            GCValue args[1] = { child };
-            JS_Call(ctx, removeChild_fn, shadow_root, 1, args);
-            child = next;
-        }
-    }
-
-    HtmlDocument *frag_doc = html_parse(html, strlen(html));
-    if (!frag_doc) return true;
-
-    int start_idx = -1;
-    if (frag_doc->body_idx >= 0) {
-        start_idx = po_array_first_child(&frag_doc->array, frag_doc->body_idx);
-    }
-    if (start_idx < 0 && frag_doc->root_idx >= 0) {
-        start_idx = frag_doc->root_idx;
-    }
-
-    int child_idx = start_idx;
-    while (child_idx >= 0) {
-        html_node_populate_js_recursive(ctx, doc, frag_doc, child_idx, shadow_root);
-        child_idx = po_array_next_sibling(&frag_doc->array, child_idx);
-    }
-
-    // If the parser produced no nodes (e.g. plain text), append a text node.
-    if (start_idx < 0 && html[0]) {
-        GCValue createTextNode = JS_GetPropertyStr(ctx, doc, "createTextNode");
-        if (!JS_IsUndefined(createTextNode) && !JS_IsNull(createTextNode)) {
-            GCValue args[1] = { JS_NewString(ctx, html) };
-            GCValue text_node = JS_Call(ctx, createTextNode, doc, 1, args);
-            if (!JS_IsException(text_node) && !JS_IsUndefined(text_node) && !JS_IsNull(text_node)) {
-                GCValue appendChild = JS_GetPropertyStr(ctx, shadow_root, "appendChild");
-                if (JS_IsFunction(ctx, appendChild)) {
-                    GCValue aargs[1] = { text_node };
-                    JS_Call(ctx, appendChild, shadow_root, 1, aargs);
-                }
-            }
-        }
-    }
-
-    html_document_free(frag_doc);
+    if (!SAFE_VALID(ctx) || !JS_IsObject(shadow_root) || !html) return false;
+    NodeId n = dom_node_of(shadow_root);
+    if (!n) return false;
+    dom_set_inner_html(ctx, n, html, strlen(html));
     return true;
 }
 
-/* Set the innerHTML of an element by parsing the HTML string and replacing
- * the element's children with the parsed nodes. Uses document.createElement()
- * from the element's ownerDocument so nodes get proper prototypes. */
+/* Set the innerHTML of an element (template elements: their content). */
+bool html_element_set_inner_html_len(JSContextHandle ctx, GCValue elem, const char *html, size_t len) {
+    if (!SAFE_VALID(ctx) || !JS_IsObject(elem) || !html) return false;
+    NodeId n = dom_node_ensure(ctx, elem, DOM_K_ELEMENT);
+    if (!n) return false;
+    if (dom_kind(n) == DOM_K_ELEMENT && strcmp(dom_tag_name(n), "template") == 0) {
+        NodeId c = dom_template_content(n);
+        if (!c) { c = dom_create_fragment(dom_owner(n)); dom_set_template_content(n, c); }
+        n = c;
+    }
+    if (CYBER_ENV(CYBER_T_INNERHTML) && dom_kind(n) != DOM_K_ELEMENT) {
+        const char *trace_js = "(new Error('ih')).stack";
+        GCValue tv = JS_Eval(ctx, trace_js, strlen(trace_js), "<ihtrace>", JS_EVAL_TYPE_GLOBAL);
+        const char *ts = JS_ToCString(ctx, tv);
+        fprintf(stderr, "[IH-TRACE] nodeType=%d:\n%s\n", dom_kind(n), ts ? ts : "?");
+        fflush(stderr);
+    }
+    dom_set_inner_html(ctx, n, html, len);
+    return true;
+}
+
 bool html_element_set_inner_html(JSContextHandle ctx, GCValue elem, const char *html) {
-    if (!SAFE_VALID(ctx) || JS_IsUndefined(elem) || JS_IsNull(elem) || !html) return false;
-
-    // Templates store their children in the content DocumentFragment, not in
-    // the template element itself.
-    bool is_template = false;
-    GCValue tag_val = JS_GetPropertyStr(ctx, elem, "tagName");
-    if (JS_IsString(tag_val)) {
-        const char *tag_str = JS_ToCString(ctx, tag_val);
-        if (tag_str && strcasecmp(tag_str, "template") == 0) {
-            is_template = true;
-        }
-    }
-    GCValue target = elem;
-    if (is_template) {
-        GCValue content = JS_GetPropertyStr(ctx, elem, "content");
-        if (!JS_IsUndefined(content) && !JS_IsNull(content) && JS_IsObject(content)) {
-            target = content;
-        }
-    }
-
-    GCValue doc = JS_GetPropertyStr(ctx, target, "ownerDocument");
-    if (JS_IsUndefined(doc) || JS_IsNull(doc)) {
-        GCValue global = JS_GetGlobalObject(ctx);
-        doc = JS_GetPropertyStr(ctx, global, "document");
-    }
-
-    GCValue tagv = JS_GetPropertyStr(ctx, target, "tagName");
-    const char *tagn = JS_IsString(tagv) ? JS_ToCString(ctx, tagv) : "?";
-    fprintf(stderr, "[INNER-HTML-SET] tag=%s html=%.60s\n", tagn, html);
-    if (getenv("CYBER_TRACE_INNERHTML")) {
-        GCValue nt = JS_GetPropertyStr(ctx, target, "nodeType");
-        int32_t ntv = 0;
-        JS_ToInt32(ctx, &ntv, nt);
-        /* Dump a JS stack whenever innerHTML is set on a non-element target
-         * (shadow root / fragment) so we can see who stamps template content. */
-        if (ntv != 1) {
-            const char *trace_js = "(new Error('ih')).stack";
-            GCValue tv = JS_Eval(ctx, trace_js, strlen(trace_js), "<ihtrace>", JS_EVAL_TYPE_GLOBAL);
-            const char *ts = JS_ToCString(ctx, tv);
-            fprintf(stderr, "[IH-TRACE] nodeType=%d tag=%s:\n%s\n", ntv, tagn, ts ? ts : "?");
-            fflush(stderr);
-        }
-    }
-    JS_FreeCString(ctx, tagn);
-
-    /* Empty innerHTML is a clear-children operation, not a parse error. */
-    if (html[0] == '\0') {
-        if (getenv("CYBER_TRACE_INNERHTML")) {
-            static int empty_ih_count = 0;
-            if (empty_ih_count++ < 3) {
-                const char *trace_js = "(new Error('eih')).stack";
-                GCValue tv = JS_Eval(ctx, trace_js, strlen(trace_js), "<eihtrace>", JS_EVAL_TYPE_GLOBAL);
-                const char *ts = JS_ToCString(ctx, tv);
-                fprintf(stderr, "[EIH-TRACE] empty innerHTML set:\n%s\n", ts ? ts : "?");
-                fflush(stderr);
-            }
-        }
-        DOMNodeHandle target_node0 = dom_node_from_object(target);
-        if (!SAFE_IS_NULL(target_node0)) {
-            GCValue child = SAFE_GET_OR(target_node0, DOMNodeHandle, first_child, JS_NULL);
-            while (!JS_IsNull(child)) {
-                DOMNodeHandle child_node = dom_node_from_object(child);
-                GCValue next = !SAFE_IS_NULL(child_node) ? SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL) : JS_NULL;
-                GCValue remove_args[1] = { child };
-                js_node_removeChild_real(ctx, target, 1, remove_args);
-                child = next;
-            }
-        }
-        return true;
-    }
-
-    HtmlDocument *frag_doc = html_parse(html, strlen(html));
-    if (!frag_doc) {
-        fprintf(stderr, "[INNER-HTML-SET] parse failed\n");
-        return false;
-    }
-    fprintf(stderr, "[INNER-HTML-SET] parse ok root=%d body=%d\n", frag_doc->root_idx, frag_doc->body_idx);
-
-    // Remove existing children from the target (template content or element)
-    DOMNodeHandle target_node = dom_node_from_object(target);
-    if (!SAFE_IS_NULL(target_node)) {
-        GCValue child = SAFE_GET_OR(target_node, DOMNodeHandle, first_child, JS_NULL);
-        while (!JS_IsNull(child)) {
-            DOMNodeHandle child_node = dom_node_from_object(child);
-            GCValue next = !SAFE_IS_NULL(child_node) ? SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL) : JS_NULL;
-            GCValue remove_args[1] = { child };
-            js_node_removeChild_real(ctx, target, 1, remove_args);
-            child = next;
-        }
-    }
-
-    // Append parsed children. For full documents use <body>; otherwise append the
-    // root-level fragment node(s) directly (e.g. innerHTML = '<div>...</div>').
-    int start_idx = -1;
-    if (frag_doc->body_idx >= 0) {
-        start_idx = po_array_first_child(&frag_doc->array, frag_doc->body_idx);
-    }
-    if (start_idx < 0 && frag_doc->root_idx >= 0) {
-        start_idx = frag_doc->root_idx;
-    }
-
-    int child_idx = start_idx;
-    while (child_idx >= 0) {
-        html_node_populate_js_recursive(ctx, doc, frag_doc, child_idx, target);
-        child_idx = po_array_next_sibling(&frag_doc->array, child_idx);
-    }
-
-    // If the parser produced no nodes (e.g. plain text), append a text node.
-    if (start_idx < 0 && html[0]) {
-        GCValue createTextNode = JS_GetPropertyStr(ctx, doc, "createTextNode");
-        if (!JS_IsUndefined(createTextNode) && !JS_IsNull(createTextNode)) {
-            GCValue args[1] = { JS_NewString(ctx, html) };
-            GCValue text_node = JS_Call(ctx, createTextNode, doc, 1, args);
-            if (!JS_IsException(text_node) && !JS_IsUndefined(text_node) && !JS_IsNull(text_node)) {
-                GCValue appendChild = JS_GetPropertyStr(ctx, target, "appendChild");
-                if (!JS_IsUndefined(appendChild) && !JS_IsNull(appendChild)) {
-                    GCValue aargs[1] = { text_node };
-                    JS_Call(ctx, appendChild, target, 1, aargs);
-                }
-            }
-        }
-    }
-
-    html_document_free(frag_doc);
-    GCValue child_nodes = JS_GetPropertyStr(ctx, target, "childNodes");
-    GCValue lenv = JS_GetPropertyStr(ctx, child_nodes, "length");
-    int32_t clen = 0; JS_ToInt32(ctx, &clen, lenv);
-    fprintf(stderr, "[INNER-HTML-SET] result children=%d\n", clen);
-    return true;
+    return html ? html_element_set_inner_html_len(ctx, elem, html, strlen(html)) : false;
 }
+
 
 /* ============================================================================
  * Document accessors and search
@@ -1686,26 +707,36 @@ int html_document_get_elements_by_tag(HtmlDocument *doc, const char *tag_name,
 }
 
 /* ============================================================================
- * JS DOM serialization - rebuild native HTML from the JS DOM tree
+ * Render snapshot: the store (plus the JS state layout depends on) as HTML,
+ * re-parsed into the native HtmlDocument the layout engine reads.
  * ============================================================================
- * The browser maintains two DOM trees: the native HtmlDocument used by the
- * layout engine and the JavaScript DOM mutated by page scripts.  These helpers
- * serialize the JS DOM back to HTML so we can re-parse it into a fresh native
- * document after mutations occur.
+ * The serialization reproduces the legacy one exactly: lowercase tags, store
+ * attributes with the style attribute merged with the element's style
+ * object, attributes scripts set only as JS properties, raw-text elements
+ * from textContent, and open shadow roots composed with their hosts' light
+ * children through slots (read through JS, where ShadyDOM patches them).
+ * Comments, stray closing-tag text and comment-marker text are dropped.
+ * Elements the reparse produces carry the store id they came from.
  */
 
 typedef struct {
     char *data;
     size_t len;
     size_t cap;
+    /* Store ids of the emitted elements in order (0 for objects without a
+     * node); only kept by the render snapshot. */
+    uint32_t *ids;
+    const char **tags;
+    size_t nids, capids;
+    bool track;
 } SerializeBuffer;
 
 static bool serialize_buf_init(SerializeBuffer *buf) {
     if (!buf) return false;
+    memset(buf, 0, sizeof(*buf));
     buf->data = (char *)malloc(4096);
     if (!buf->data) return false;
     buf->data[0] = '\0';
-    buf->len = 0;
     buf->cap = 4096;
     return true;
 }
@@ -1713,9 +744,10 @@ static bool serialize_buf_init(SerializeBuffer *buf) {
 static void serialize_buf_free(SerializeBuffer *buf) {
     if (!buf) return;
     free(buf->data);
-    buf->data = NULL;
-    buf->len = 0;
-    buf->cap = 0;
+    free(buf->ids);
+    for (size_t i = 0; i < buf->nids; i++) free((void *)buf->tags[i]);
+    free(buf->tags);
+    memset(buf, 0, sizeof(*buf));
 }
 
 static bool serialize_buf_grow(SerializeBuffer *buf, size_t extra) {
@@ -1746,27 +778,58 @@ static bool serialize_buf_append(SerializeBuffer *buf, const char *s) {
     return serialize_buf_append_raw(buf, s, strlen(s));
 }
 
-static void serialize_buf_append_escaped(SerializeBuffer *buf, const char *s) {
+/* CYBER_DOM_LEGACY_LIMITS=1 (verification against the legacy DOM): cut
+ * attribute names / values and text the way its fixed buffers did. */
+static int legacy_limits(void) {
+    static int v = -1;
+    if (v < 0) v = cyber_getenv("CYBER_DOM_LEGACY_LIMITS") ? 1 : 0;
+    return v;
+}
+static void serialize_note_element(SerializeBuffer *buf, NodeId id, const char *tag) {
+    if (!buf->track) return;
+    if (buf->nids == buf->capids) {
+        buf->capids = buf->capids ? buf->capids * 2 : 256;
+        buf->ids = realloc(buf->ids, buf->capids * sizeof(uint32_t));
+        buf->tags = realloc(buf->tags, buf->capids * sizeof(char *));
+    }
+    buf->ids[buf->nids] = id;
+    buf->tags[buf->nids] = strdup(tag);
+    buf->nids++;
+}
+
+/* Escaped text, stopping at an embedded NUL (as the C-string serializer did). */
+static void serialize_buf_append_escaped_n(SerializeBuffer *buf, const char *s, size_t n) {
     if (!s) return;
-    for (const char *p = s; *p; p++) {
+    const char *run = s;
+    const char *end = s + n;
+    const char *p;
+    for (p = s; p < end && *p; p++) {
+        const char *rep = NULL;
+        char tmp[8];
         switch (*p) {
-            case '&': serialize_buf_append(buf, "&amp;"); break;
-            case '<': serialize_buf_append(buf, "&lt;"); break;
-            case '>': serialize_buf_append(buf, "&gt;"); break;
-            case '"': serialize_buf_append(buf, "&quot;"); break;
-            case '\'': serialize_buf_append(buf, "&#39;"); break;
+            case '&': rep = "&amp;"; break;
+            case '<': rep = "&lt;"; break;
+            case '>': rep = "&gt;"; break;
+            case '"': rep = "&quot;"; break;
+            case '\'': rep = "&#39;"; break;
             default:
                 if ((unsigned char)*p < 0x20 && !isspace((unsigned char)*p)) {
-                    char tmp[8];
                     snprintf(tmp, sizeof(tmp), "&#%d;", (unsigned char)*p);
-                    serialize_buf_append(buf, tmp);
-                } else {
-                    char tmp[2] = { *p, '\0' };
-                    serialize_buf_append(buf, tmp);
+                    rep = tmp;
                 }
                 break;
         }
+        if (rep) {
+            serialize_buf_append_raw(buf, run, (size_t)(p - run));
+            serialize_buf_append(buf, rep);
+            run = p + 1;
+        }
     }
+    serialize_buf_append_raw(buf, run, (size_t)(p - run));
+}
+
+static void serialize_buf_append_escaped(SerializeBuffer *buf, const char *s) {
+    if (s) serialize_buf_append_escaped_n(buf, s, strlen(s));
 }
 
 static void serialize_buf_append_attr(SerializeBuffer *buf, const char *name, const char *value) {
@@ -1789,30 +852,80 @@ static char *js_object_get_string(JSContextHandle ctx, GCValue obj, const char *
     return strdup(s);
 }
 
-/* Return true if the attribute name is already present in the DOMNode table. */
-static bool dom_node_has_attribute(DOMNodeHandle node, const char *name) {
-    if (SAFE_IS_NULL(node) || !name) return false;
-    for (int i = 0; i < SAFE_GET_OR(node, DOMNodeHandle, attribute_count, 0); i++) {
-        if (strcasecmp(SAFE_GET_OR(node, DOMNodeHandle, attributes, NULL)[i].name, name) == 0) return true;
-    }
-    return false;
+/* A node as the serializer sees it: a store node (with its wrapper, if it
+ * has one), or a script object that is not bound to a node (ShadyDOM keeps
+ * some shadow-tree nodes that way). */
+typedef struct SerNode {
+    NodeId id;          /* DOM_NULL for an unbound object */
+    GCValue obj;        /* the wrapper / object, JS_NULL when unwrapped */
+} SerNode;
+
+static void html_serialize_node(JSContextHandle ctx, SerNode n, SerializeBuffer *buf);
+
+static SerNode ser_of_value(GCValue v) {
+    SerNode s = { DOM_NULL, JS_NULL };
+    if (!JS_IsObject(v)) return s;
+    s.obj = v;
+    s.id = dom_node_of(v);
+    return s;
 }
 
-static void html_serialize_js_node_internal(JSContextHandle ctx, GCValue node, SerializeBuffer *buf);
+static SerNode ser_of_node(NodeId id) {
+    SerNode s = { id, JS_NULL };
+    if (dom_has_wrapper(id)) s.obj = dom_js_existing(id);
+    return s;
+}
+
+static int ser_node_type(JSContextHandle ctx, SerNode n) {
+    if (n.id) {
+        switch (dom_kind(n.id)) {
+            case DOM_K_ELEMENT: return 1;
+            case DOM_K_TEXT: return 3;
+            case DOM_K_COMMENT: return 8;
+            case DOM_K_DOCUMENT: return 9;
+            case DOM_K_FRAGMENT: return 11;
+            default: return 0;
+        }
+    }
+    if (!JS_IsObject(n.obj)) return 0;
+    GCValue jnt = JS_GetPropertyStr(ctx, n.obj, "nodeType");
+    int32_t t = 0;
+    JS_ToInt32(ctx, &t, jnt);
+    return t;
+}
+
+/* Text of a text node / textContent of an element. */
+static void ser_text_content(NodeId id, SerializeBuffer *out) {
+    if (dom_kind(id) == DOM_K_TEXT) {
+        uint32_t len = 0;
+        const char *s = dom_text(id, &len);
+        serialize_buf_append_raw(out, s, strnlen(s, len));
+        return;
+    }
+    uint32_t r = dom_slot(id);
+    for (uint32_t s = r; s; s = dom_next_in_subtree(s, r)) {
+        if (g_dom.kind[s] == DOM_K_TEXT) {
+            uint32_t len = 0;
+            const char *t = dom_text(dom_id_of(s), &len);
+            size_t tl = strnlen(t, len);
+            if (legacy_limits() && tl > 4095) tl = 4095;
+            serialize_buf_append_raw(out, t, tl);
+        }
+    }
+}
 
 typedef struct LightChildEntry {
-    GCValue node;
+    SerNode node;
     const char *slot;
     bool used;
 } LightChildEntry;
 
-/* Growable list of light-DOM children; freed automatically at scope exit. */
 typedef struct LightChildList {
     LightChildEntry *data;
     size_t count;
     size_t capacity;
 } LightChildList;
-static void light_child_list_push(LightChildList *l, GCValue node, const char *slot) {
+static void light_child_list_push(LightChildList *l, SerNode node, const char *slot) {
     if (l->count == l->capacity) {
         size_t cap = l->capacity ? l->capacity * 2 : 8;
         LightChildEntry *data = (LightChildEntry *)realloc(l->data, cap * sizeof(LightChildEntry));
@@ -1820,7 +933,8 @@ static void light_child_list_push(LightChildList *l, GCValue node, const char *s
         l->data = data;
         l->capacity = cap;
     }
-    GC_SET(l->data[l->count].node, node);
+    l->data[l->count].node = node;
+    GC_SET(l->data[l->count].node.obj, node.obj);
     l->data[l->count].slot = slot;
     l->data[l->count].used = false;
     l->count++;
@@ -1831,393 +945,465 @@ static void light_child_list_free(LightChildList *l) {
     l->count = l->capacity = 0;
 }
 
-/* Serialize the rendered children of a shadow host.  If the host has an open
- * shadow root, light-DOM children are not emitted directly; they are composed
- * into the shadow tree by matching <slot> elements.  This makes Polymer-stamped
- * custom elements such as ytd-masthead render with their real structure. */
-static void html_serialize_shadow_host_children(JSContextHandle ctx, DOMNodeHandle host, GCValue host_val, SerializeBuffer *buf) {
-    /* Collect light-DOM children and their slot names.  Read from the C-level
-     * DOMNode tree (first_child/next_sibling) rather than the JS-level
-     * firstChild/nextSibling properties, because the ShadyDOM polyfill patches
-     * the JS-level getters to return only the *composed* tree (distributed
-     * content), which excludes non-distributed elements like <style> that are
-     * still native children of the host. */
+/* Is there rendered content in the (open) shadow root: an element or
+ * non-whitespace text, read through JS (the composed tree under ShadyDOM). */
+static bool shadow_has_content(JSContextHandle ctx, GCValue shadow) {
+    GCValue probe = JS_GetPropertyStr(ctx, shadow, "firstChild");
+    while (!JS_IsUndefined(probe) && !JS_IsNull(probe) && JS_IsObject(probe)) {
+        SerNode pn = ser_of_value(probe);
+        int nt = ser_node_type(ctx, pn);
+        if (nt == 1) return true;
+        if (nt == 3) {
+            GCValue tc = JS_GetPropertyStr(ctx, probe, "textContent");
+            const char *val = JS_ToCString(ctx, tc);
+            bool nonws = false;
+            if (val) {
+                for (const char *p = val; *p; p++) {
+                    if (!isspace((unsigned char)*p)) { nonws = true; break; }
+                }
+                JS_FreeCString(ctx, val);
+            }
+            if (nonws) return true;
+        }
+        probe = JS_GetPropertyStr(ctx, probe, "nextSibling");
+    }
+    return false;
+}
+
+/* Serialize the rendered children of an element.  If the host has an open
+ * shadow root with content, light-DOM children are composed into the shadow
+ * tree by matching <slot> elements.  Light children come from the store (the
+ * ShadyDOM polyfill patches the JS-level getters to return the composed
+ * tree); the shadow tree is read through JS. */
+static void html_serialize_children(JSContextHandle ctx, SerNode host, SerializeBuffer *buf) {
     LightChildList light __attribute__((cleanup(light_child_list_free))) = {0};
-    GCValue child = SAFE_GET_OR(host, DOMNodeHandle, first_child, JS_NULL);
-    while (!JS_IsNull(child) && !JS_IsUndefined(child) && JS_IsObject(child)) {
-        DOMNodeHandle child_node = get_dom_node(ctx, child);
+    for (NodeId c = dom_first_child(host.id); c; c = dom_next_sibling(c)) {
         const char *slot_name = "";
-        if (!SAFE_IS_NULL(child_node) && SAFE_GET_OR(child_node, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_ELEMENT) {
-            const char *s = dom_node_get_attribute(child_node, "slot");
+        if (dom_kind(c) == DOM_K_ELEMENT) {
+            const char *s = dom_attr(c, "slot");
             if (s) slot_name = s;
         }
-        light_child_list_push(&light, child, slot_name);
-        if (SAFE_IS_NULL(child_node)) break;
-        child = SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL);
+        light_child_list_push(&light, ser_of_node(c), slot_name);
     }
 
-    /* Only consider open shadow roots for flattening.  Closed roots are not
-     * accessible to script, and the emulator does not support closed-root
-     * composition in the serialization path.  A shadow root that only contains
-     * comments or whitespace is treated as empty so the light-DOM skeleton is
-     * still rendered. */
-    GCValue shadow = JS_GetPropertyStr(ctx, host_val, "shadowRoot");
-    if (JS_IsNull(shadow) || JS_IsUndefined(shadow)) {
-        shadow = JS_GetPropertyStr(ctx, host_val, "__CE_shadowRoot");
+    GCValue shadow = JS_NULL;
+    if (JS_IsObject(host.obj)) {
+        shadow = JS_GetPropertyStr(ctx, host.obj, "shadowRoot");
+        if (JS_IsNull(shadow) || JS_IsUndefined(shadow))
+            shadow = JS_GetPropertyStr(ctx, host.obj, "__CE_shadowRoot");
     }
-    bool has_shadow_children = false;
-    if (!JS_IsUndefined(shadow) && !JS_IsNull(shadow) && JS_IsObject(shadow)) {
-        /* Probe using JS-level firstChild (the polyfill patches this to return
-         * the composed tree's first child).  We check both the C-level DOMNode
-         * type and the JS-level nodeType property, because the ShadyDOM
-         * polyfill manages some shadow-tree nodes via __shady properties that
-         * may not have C-level DOMNode data. */
-        GCValue probe = JS_GetPropertyStr(ctx, shadow, "firstChild");
-        while (!JS_IsUndefined(probe) && !JS_IsNull(probe) && JS_IsObject(probe)) {
-            DOMNodeHandle probe_node = get_dom_node(ctx, probe);
-            int nt = -1;
-            if (!SAFE_IS_NULL(probe_node)) {
-                nt = SAFE_GET_OR(probe_node, DOMNodeHandle, node_type, 0);
-            } else {
-                /* Fall back to JS-level nodeType. */
-                GCValue jnt = JS_GetPropertyStr(ctx, probe, "nodeType");
-                int32_t t = 0;
-                JS_ToInt32(ctx, &t, jnt);
-                nt = t;
-            }
-            if (nt == DOM_NODE_TYPE_ELEMENT) {
-                has_shadow_children = true;
-                break;
-            }
-            if (nt == DOM_NODE_TYPE_TEXT) {
-                /* Check for non-whitespace text. */
-                GCValue tc = JS_GetPropertyStr(ctx, probe, "textContent");
-                const char *val = JS_ToCString(ctx, tc);
-                bool nonws = false;
-                if (val) {
-                    for (const char *p = val; *p; p++) {
-                        if (!isspace((unsigned char)*p)) { nonws = true; break; }
-                    }
-                    JS_FreeCString(ctx, val);
-                }
-                if (nonws) { has_shadow_children = true; break; }
-            }
-            /* Advance via JS-level nextSibling. */
-            GCValue ns = JS_GetPropertyStr(ctx, probe, "nextSibling");
-            probe = ns;
-        }
-    }
-    if (!has_shadow_children) {
-        /* No usable shadow content: emit light children in document order. */
-        for (size_t i = 0; i < light.count; i++) {
-            html_serialize_js_node_internal(ctx, light.data[i].node, buf);
-        }
+    if (!JS_IsObject(shadow) || !shadow_has_content(ctx, shadow)) {
+        for (size_t i = 0; i < light.count; i++)
+            html_serialize_node(ctx, light.data[i].node, buf);
         return;
     }
 
     GCValue schild = JS_GetPropertyStr(ctx, shadow, "firstChild");
     while (!JS_IsUndefined(schild) && !JS_IsNull(schild) && JS_IsObject(schild)) {
-        DOMNodeHandle schild_node = get_dom_node(ctx, schild);
-        int snt = -1;
-        const char *stag = NULL;
-        GCValue stag_val = JS_GetPropertyStr(ctx, schild, "nodeName");
-        const char *stag_tmp = JS_ToCString(ctx, stag_val);
-        if (stag_tmp) stag = stag_tmp;
-        if (!SAFE_IS_NULL(schild_node)) {
-            snt = SAFE_GET_OR(schild_node, DOMNodeHandle, node_type, 0);
-        } else {
-            GCValue jnt = JS_GetPropertyStr(ctx, schild, "nodeType");
-            int32_t t = 0; JS_ToInt32(ctx, &t, jnt);
-            snt = t;
+        SerNode sn = ser_of_value(schild);
+        int snt = ser_node_type(ctx, sn);
+        bool is_slot = false;
+        if (snt == 1) {
+            if (sn.id) {
+                is_slot = strcmp(dom_tag_name(sn.id), "slot") == 0;
+            } else {
+                GCValue stag_val = JS_GetPropertyStr(ctx, schild, "nodeName");
+                const char *stag = JS_ToCString(ctx, stag_val);
+                is_slot = stag && strcasecmp(stag, "slot") == 0;
+                if (stag) JS_FreeCString(ctx, stag);
+            }
         }
-        if (snt == DOM_NODE_TYPE_ELEMENT && stag && strcasecmp(stag, "slot") == 0) {
-            /* Slot element: distribute light-DOM children with matching slot
-             * name, or emit fallback content. */
-            const char *slot_name = "";
-            if (!SAFE_IS_NULL(schild_node)) {
-                const char *sn = dom_node_get_attribute(schild_node, "name");
-                if (sn) slot_name = sn;
+        if (is_slot) {
+            /* Distribute light-DOM children with a matching slot name, or
+             * emit the slot's fallback content. */
+            char slot_name[256] = "";
+            if (sn.id) {
+                const char *s = dom_attr(sn.id, "name");
+                if (s) snprintf(slot_name, sizeof(slot_name), "%s", s);
             } else {
                 GCValue sav = JS_GetPropertyStr(ctx, schild, "getAttribute");
                 if (JS_IsFunction(ctx, sav)) {
-                    GCValue name_arg = JS_NewString(ctx, "name");
-                    GCValue args[1] = { name_arg };
+                    GCValue args[1] = { JS_NewString(ctx, "name") };
                     GCValue sv = JS_Call(ctx, sav, schild, 1, args);
                     const char *s = JS_ToCString(ctx, sv);
-                    if (s && s[0]) slot_name = s;
-                    JS_FreeCString(ctx, s);
+                    if (s && s[0]) snprintf(slot_name, sizeof(slot_name), "%s", s);
+                    if (s) JS_FreeCString(ctx, s);
                 }
             }
             bool any = false;
             for (size_t i = 0; i < light.count; i++) {
                 if (!light.data[i].used && strcmp(light.data[i].slot, slot_name) == 0) {
-                    html_serialize_js_node_internal(ctx, light.data[i].node, buf);
+                    html_serialize_node(ctx, light.data[i].node, buf);
                     light.data[i].used = true;
                     any = true;
                 }
             }
             if (!any) {
-                /* No assigned nodes: emit the slot's fallback content. */
                 GCValue fb = JS_GetPropertyStr(ctx, schild, "firstChild");
                 while (!JS_IsNull(fb) && !JS_IsUndefined(fb) && JS_IsObject(fb)) {
-                    html_serialize_js_node_internal(ctx, fb, buf);
+                    html_serialize_node(ctx, ser_of_value(fb), buf);
                     fb = JS_GetPropertyStr(ctx, fb, "nextSibling");
                 }
             }
         } else {
-            html_serialize_js_node_internal(ctx, schild, buf);
+            html_serialize_node(ctx, sn, buf);
         }
-        if (stag_tmp) JS_FreeCString(ctx, stag_tmp);
-        /* Advance via JS-level nextSibling. */
         schild = JS_GetPropertyStr(ctx, schild, "nextSibling");
     }
 }
 
-static void html_serialize_js_element(JSContextHandle ctx, DOMNodeHandle node, GCValue node_val, SerializeBuffer *buf) {
-    const char *tag = SAFE_GET_OR(node, DOMNodeHandle, node_name, "");
-    if (!tag || !tag[0]) tag = "div";
-    
-    /* Normalize tag name to lowercase for HTML serialization. */
+/* Attributes of an unbound script object, through getAttributeNames(). */
+typedef struct LooseAttrs { char **names, **values; int n; } LooseAttrs;
+static void loose_attrs_free(LooseAttrs *a) {
+    for (int i = 0; i < a->n; i++) { free(a->names[i]); free(a->values[i]); }
+    free(a->names); free(a->values);
+}
+static void loose_attrs_read(JSContextHandle ctx, GCValue node, LooseAttrs *out) {
+    memset(out, 0, sizeof(*out));
+    GCValue gan = JS_GetPropertyStr(ctx, node, "getAttributeNames");
+    if (!JS_IsFunction(ctx, gan)) return;
+    GCValue names_arr = JS_Call(ctx, gan, node, 0, NULL);
+    if (!JS_IsArray(ctx, names_arr)) return;
+    GCValue len_val = JS_GetPropertyStr(ctx, names_arr, "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, len_val);
+    for (uint32_t i = 0; i < len; i++) {
+        GCValue name_val = JS_GetPropertyUint32(ctx, names_arr, i);
+        const char *name = JS_ToCString(ctx, name_val);
+        if (name && name[0]) {
+            GCValue gav = JS_GetPropertyStr(ctx, node, "getAttribute");
+            if (JS_IsFunction(ctx, gav)) {
+                GCValue args[1] = { name_val };
+                GCValue v = JS_Call(ctx, gav, node, 1, args);
+                const char *vs = JS_ToCString(ctx, v);
+                if (vs) {
+                    /* Set semantics: a repeated name replaces the value. */
+                    int k;
+                    for (k = 0; k < out->n; k++) if (strcasecmp(out->names[k], name) == 0) break;
+                    if (k == out->n) {
+                        out->names = realloc(out->names, (out->n + 1) * sizeof(char *));
+                        out->values = realloc(out->values, (out->n + 1) * sizeof(char *));
+                        out->names[k] = strdup(name);
+                        out->values[k] = NULL;
+                        out->n++;
+                    }
+                    free(out->values[k]);
+                    out->values[k] = strdup(vs);
+                    JS_FreeCString(ctx, vs);
+                }
+            }
+        }
+        if (name) JS_FreeCString(ctx, name);
+    }
+}
+
+static void append_style_object(JSContextHandle ctx, GCValue style_obj, SerializeBuffer *style_buf) {
+    JSPropertyEnum *tab = NULL;
+    uint32_t plen = 0;
+    if (JS_GetOwnPropertyNames(ctx, &tab, &plen, style_obj, JS_GPN_STRING_MASK) != 0 || !tab) return;
+    for (uint32_t i = 0; i < plen; i++) {
+        char key_buf[128];
+        const char *key0 = JS_AtomToCString(ctx, tab[i].atom);
+        if (!key0 || !key0[0]) continue;
+        snprintf(key_buf, sizeof(key_buf), "%s", key0);
+        const char *key = key_buf;
+        if (key[0] == '_') continue;
+        if (strcmp(key, "removeProperty") == 0 ||
+            strcmp(key, "setProperty") == 0 ||
+            strcmp(key, "getPropertyValue") == 0 ||
+            strcmp(key, "getPropertyPriority") == 0 ||
+            strcmp(key, "item") == 0 ||
+            strcmp(key, "length") == 0 ||
+            strcmp(key, "cssText") == 0) continue;
+        GCValue val = JS_GetPropertyStr(ctx, style_obj, key);
+        if (!JS_IsString(val)) continue;
+        char val_buf[1024];
+        const char *s0 = JS_ToCString(ctx, val);
+        if (!s0 || !s0[0]) continue;
+        snprintf(val_buf, sizeof(val_buf), "%s", s0);
+        char kebab[128];
+        size_t kn = 0;
+        bool had_upper = false;
+        for (const char *p = key; *p && kn < sizeof(kebab) - 2; p++) {
+            if (*p >= 'A' && *p <= 'Z') {
+                kebab[kn++] = '-';
+                kebab[kn++] = (char)tolower((unsigned char)*p);
+                had_upper = true;
+            } else {
+                kebab[kn++] = *p;
+            }
+        }
+        kebab[kn] = '\0';
+        if (had_upper) {
+            GCValue kv = JS_GetPropertyStr(ctx, style_obj, kebab);
+            if (JS_IsString(kv)) continue; /* kebab twin exists */
+        }
+        serialize_buf_append(style_buf, kebab);
+        serialize_buf_append(style_buf, ":");
+        serialize_buf_append(style_buf, val_buf);
+        serialize_buf_append(style_buf, ";");
+    }
+    JS_FreePropertyEnum(ctx, tab, plen);
+}
+
+/* The style object an element has always had, when it has not been created
+ * yet: the createElement() object with the inline style attribute applied
+ * (each declaration under its name and its camelCase name).  Emits exactly
+ * what append_style_object() would for that object. */
+typedef struct { char *k; char *v; } StyleProp;
+static int style_prop_find(StyleProp *p, int n, const char *k) {
+    for (int i = 0; i < n; i++) if (strcmp(p[i].k, k) == 0) return i;
+    return -1;
+}
+static int style_prop_set(StyleProp **p, int *n, int *cap, const char *k, const char *v) {
+    int i = style_prop_find(*p, *n, k);
+    if (i >= 0) { free((*p)[i].v); (*p)[i].v = strdup(v); return i; }
+    if (*n == *cap) { *cap = *cap ? *cap * 2 : 16; *p = realloc(*p, *cap * sizeof(StyleProp)); }
+    (*p)[*n].k = strdup(k);
+    (*p)[*n].v = strdup(v);
+    return (*n)++;
+}
+static void append_emulated_style_object(const char *attr, SerializeBuffer *style_buf) {
+    if (!attr || !attr[0]) return;
+    int count = 0;
+    CssDeclaration *decls = css_parse_inline_style(attr, &count);
+    if (!decls) return;
+    StyleProp *props = NULL;
+    int n = 0, cap = 0;
+    style_prop_set(&props, &n, &cap, "animationTimingFunction", "");
+    for (int i = 0; i < count; i++) {
+        if (!decls[i].property || !decls[i].value) continue;
+        style_prop_set(&props, &n, &cap, decls[i].property, decls[i].value);
+        char *camel = css_to_camel_case(decls[i].property);
+        if (camel && strcmp(camel, decls[i].property) != 0)
+            style_prop_set(&props, &n, &cap, camel, decls[i].value);
+        free(camel);
+    }
+    css_declarations_free(decls, count);
+    for (int i = 0; i < n; i++) {
+        char key[128];
+        snprintf(key, sizeof(key), "%s", props[i].k);
+        if (!key[0] || key[0] == '_') continue;
+        int ki = style_prop_find(props, n, key);
+        const char *v = ki >= 0 ? props[ki].v : NULL;
+        if (!v || !v[0]) continue;
+        char val_buf[1024];
+        snprintf(val_buf, sizeof(val_buf), "%s", v);
+        char kebab[128];
+        size_t kn = 0;
+        bool had_upper = false;
+        for (const char *p = key; *p && kn < sizeof(kebab) - 2; p++) {
+            if (*p >= 'A' && *p <= 'Z') {
+                kebab[kn++] = '-';
+                kebab[kn++] = (char)tolower((unsigned char)*p);
+                had_upper = true;
+            } else {
+                kebab[kn++] = *p;
+            }
+        }
+        kebab[kn] = '\0';
+        if (had_upper && style_prop_find(props, n, kebab) >= 0) continue;
+        serialize_buf_append(style_buf, kebab);
+        serialize_buf_append(style_buf, ":");
+        serialize_buf_append(style_buf, val_buf);
+        serialize_buf_append(style_buf, ";");
+    }
+    for (int i = 0; i < n; i++) { free(props[i].k); free(props[i].v); }
+    free(props);
+}
+
+static const char *legacy_cut(const char *s, size_t max, char *tmp) {
+    if (!legacy_limits() || !s || strlen(s) < max) return s;
+    memcpy(tmp, s, max - 1);
+    tmp[max - 1] = '\0';
+    return tmp;
+}
+
+/* Attribute names are stored lower case; SVG's camelCase attributes are
+ * written back in their SVG spelling (the HTML parser's "adjust SVG
+ * attributes" table). */
+const char *dom_attr_name_for_output(const char *lower) {
+    static const char *const svg_names[] = {
+        "attributeName", "attributeType", "baseFrequency", "baseProfile", "calcMode",
+        "clipPathUnits", "diffuseConstant", "edgeMode", "filterUnits", "glyphRef",
+        "gradientTransform", "gradientUnits", "kernelMatrix", "kernelUnitLength",
+        "keyPoints", "keySplines", "keyTimes", "lengthAdjust", "limitingConeAngle",
+        "markerHeight", "markerUnits", "markerWidth", "maskContentUnits", "maskUnits",
+        "numOctaves", "pathLength", "patternContentUnits", "patternTransform",
+        "patternUnits", "pointsAtX", "pointsAtY", "pointsAtZ", "preserveAlpha",
+        "preserveAspectRatio", "primitiveUnits", "refX", "refY", "repeatCount",
+        "repeatDur", "requiredExtensions", "requiredFeatures", "specularConstant",
+        "specularExponent", "spreadMethod", "startOffset", "stdDeviation",
+        "stitchTiles", "surfaceScale", "systemLanguage", "tableValues", "targetX",
+        "targetY", "textLength", "viewBox", "viewTarget", "xChannelSelector",
+        "yChannelSelector", "zoomAndPan", NULL
+    };
+    if (!lower) return lower;
+    bool has_upper_form = false;
+    for (const char *p = lower; *p; p++) if (*p >= 'a' && *p <= 'z') { has_upper_form = true; break; }
+    if (!has_upper_form) return lower;
+    for (int i = 0; svg_names[i]; i++)
+        if (strcasecmp(svg_names[i], lower) == 0) return svg_names[i];
+    return lower;
+}
+
+static void html_serialize_element(JSContextHandle ctx, SerNode n, SerializeBuffer *buf) {
     char tag_lower[64];
-    size_t tag_len = strlen(tag);
-    if (tag_len >= sizeof(tag_lower)) tag_len = sizeof(tag_lower) - 1;
-    for (size_t i = 0; i < tag_len; i++) tag_lower[i] = (char)tolower((unsigned char)tag[i]);
-    tag_lower[tag_len] = '\0';
-    
+    LooseAttrs loose = {0};
+    if (n.id) {
+        const char *tag = dom_tag_name(n.id);
+        if (!tag || !tag[0]) tag = "div";
+        snprintf(tag_lower, sizeof(tag_lower), "%s", tag);
+    } else {
+        GCValue jnn = JS_GetPropertyStr(ctx, n.obj, "nodeName");
+        const char *nn = JS_ToCString(ctx, jnn);
+        snprintf(tag_lower, sizeof(tag_lower), "%s", nn && nn[0] ? nn : "#unknown");
+        if (nn) JS_FreeCString(ctx, nn);
+        loose_attrs_read(ctx, n.obj, &loose);
+    }
+    for (char *p = tag_lower; *p; p++) *p = (char)tolower((unsigned char)*p);
+    serialize_note_element(buf, n.id, tag_lower);
+
     serialize_buf_append(buf, "<");
     serialize_buf_append(buf, tag_lower);
-    
-    /* Emit attributes from the internal DOMNode attribute table.  The style
-     * attribute is handled separately below so that JS-mutated style
-     * properties (element.style.x = y, style.setProperty) merge with it. */
+
+    /* Attributes; the style attribute merges with the style object below. */
     const char *attr_style = NULL;
-    for (int i = 0; i < SAFE_GET_OR(node, DOMNodeHandle, attribute_count, 0); i++) {
-        const char *name = SAFE_GET_OR(node, DOMNodeHandle, attributes, NULL)[i].name;
-        const char *value = SAFE_GET_OR(node, DOMNodeHandle, attributes, NULL)[i].value;
-        if (!name || !name[0]) continue;
-        if (strcasecmp(name, "style") == 0) {
-            attr_style = value;
-            continue;
+    char *attr_style_copy = NULL;
+    if (n.id) {
+        int na = dom_attr_count(n.id);
+        /* The legacy DOM listed a parsed element's id and class first. */
+        int *order = malloc((size_t)(na ? na : 1) * sizeof(int)), no = 0;
+        for (int pass = 0; pass < 2; pass++)
+            for (int i = 0; i < na; i++) {
+                const char *nm = css_atom_str(dom_attr_at(n.id, i)->name);
+                bool ic = legacy_limits() && (strcmp(nm, "id") == 0 || strcmp(nm, "class") == 0);
+                if (ic == (pass == 0)) order[no++] = i;
+            }
+        for (int oi = 0; oi < no; oi++) {
+            int i = order[oi];
+            const DomAttr *a = dom_attr_at(n.id, i);
+            static char ntmp[64], vtmp[2048];
+            const char *name = legacy_cut(dom_attr_name_for_output(css_atom_str(a->name)), 64, ntmp);
+            const char *value = legacy_cut(a->value.s ? a->value.s : "", 2048, vtmp);
+            if (!name || !name[0]) continue;
+            if (strcmp(name, "style") == 0) { free(attr_style_copy); attr_style = attr_style_copy = strdup(value); continue; }
+            serialize_buf_append_attr(buf, name, value);
         }
-        serialize_buf_append_attr(buf, name, value ? value : "");
+        free(order);
+    } else {
+        for (int i = 0; i < loose.n; i++) {
+            if (strcasecmp(loose.names[i], "style") == 0) { attr_style = loose.values[i]; continue; }
+            serialize_buf_append_attr(buf, loose.names[i], loose.values[i]);
+        }
     }
 
-    /* Reflect the JS style object (__style) into the style attribute so the
-     * re-parsed native document carries dynamic styles into layout.  Kebab
-     * properties win over their camelCase duplicates; empty values, internal
-     * slots, and method properties are skipped. */
     {
         SerializeBuffer style_buf;
         serialize_buf_init(&style_buf);
         if (attr_style && attr_style[0]) {
             serialize_buf_append(&style_buf, attr_style);
-            size_t n = strlen(attr_style);
-            if (n > 0 && attr_style[n - 1] != ';')
+            size_t sl = strlen(attr_style);
+            if (sl > 0 && attr_style[sl - 1] != ';')
                 serialize_buf_append(&style_buf, ";");
         }
-        GCValue style_obj = JS_GetPropertyStr(ctx, node_val, "__style");
-        if (JS_IsObject(style_obj)) {
-            JSPropertyEnum *tab = NULL;
-            uint32_t plen = 0;
-            if (JS_GetOwnPropertyNames(ctx, &tab, &plen, style_obj, JS_GPN_STRING_MASK) == 0 && tab) {
-                for (uint32_t i = 0; i < plen; i++) {
-                    /* Copy key/value out of GC-managed string memory before any
-                     * further JS calls: ToCString results point into GC strings
-                     * and can dangle if a later call in this loop triggers GC. */
-                    char key_buf[128];
-                    const char *key0 = JS_AtomToCString(ctx, tab[i].atom);
-                    if (!key0 || !key0[0]) continue;
-                    snprintf(key_buf, sizeof(key_buf), "%s", key0);
-                    const char *key = key_buf;
-                    if (key[0] == '_') continue;
-                    if (strcmp(key, "removeProperty") == 0 ||
-                        strcmp(key, "setProperty") == 0 ||
-                        strcmp(key, "getPropertyValue") == 0 ||
-                        strcmp(key, "getPropertyPriority") == 0 ||
-                        strcmp(key, "item") == 0 ||
-                        strcmp(key, "length") == 0 ||
-                        strcmp(key, "cssText") == 0) continue;
-                    GCValue val = JS_GetPropertyStr(ctx, style_obj, key);
-                    if (!JS_IsString(val)) continue;
-                    char val_buf[1024];
-                    const char *s0 = JS_ToCString(ctx, val);
-                    if (!s0 || !s0[0]) continue;
-                    snprintf(val_buf, sizeof(val_buf), "%s", s0);
-                    /* Convert camelCase to kebab-case; skip if the kebab form
-                     * exists as an own property (it holds the same value). */
-                    char kebab[128];
-                    size_t kn = 0;
-                    bool had_upper = false;
-                    for (const char *p = key; *p && kn < sizeof(kebab) - 2; p++) {
-                        if (*p >= 'A' && *p <= 'Z') {
-                            kebab[kn++] = '-';
-                            kebab[kn++] = (char)tolower((unsigned char)*p);
-                            had_upper = true;
-                        } else {
-                            kebab[kn++] = *p;
-                        }
-                    }
-                    kebab[kn] = '\0';
-                    if (had_upper) {
-                        GCValue kv = JS_GetPropertyStr(ctx, style_obj, kebab);
-                        if (JS_IsString(kv)) continue; /* kebab twin exists */
-                    }
-                    serialize_buf_append(&style_buf, kebab);
-                    serialize_buf_append(&style_buf, ":");
-                    serialize_buf_append(&style_buf, val_buf);
-                    serialize_buf_append(&style_buf, ";");
-                }
-                JS_FreePropertyEnum(ctx, tab, plen);
-            }
-        }
-        if (style_buf.data && style_buf.len > 0) {
+        GCValue style_obj = JS_UNDEFINED;
+        if (JS_IsObject(n.obj))
+            style_obj = n.id ? dom_element_style(ctx, n.obj, false)
+                             : JS_GetPropertyStr(ctx, n.obj, "__style");
+        if (JS_IsObject(style_obj)) append_style_object(ctx, style_obj, &style_buf);
+        else if (n.id) append_emulated_style_object(attr_style, &style_buf);
+        if (style_buf.data && style_buf.len > 0)
             serialize_buf_append_attr(buf, "style", style_buf.data);
-        }
         serialize_buf_free(&style_buf);
     }
-    
-    /* Catch attributes that were set as JS properties but not reflected into
-     * the DOMNode table (e.g. direct property assignments by scripts). */
-    struct { const char *prop; const char *attr; } extra_attrs[] = {
-        { "id", "id" },
-        { "className", "class" },
-        { "class", "class" },
-        { "src", "src" },
-        { "href", "href" },
-        { "style", "style" },
-        { "alt", "alt" },
-        { "title", "title" },
-        { "width", "width" },
-        { "height", "height" },
-        { "type", "type" },
-        { "value", "value" },
-        { "name", "name" },
-        { "placeholder", "placeholder" },
-        { NULL, NULL }
-    };
-    for (int i = 0; extra_attrs[i].prop; i++) {
-        if (dom_node_has_attribute(node, extra_attrs[i].attr)) continue;
-        char *value = js_object_get_string(ctx, node_val, extra_attrs[i].prop);
-        if (value && value[0]) {
-            serialize_buf_append_attr(buf, extra_attrs[i].attr, value);
+    free(attr_style_copy);
+
+    /* Attributes set as JS properties only (scripts assigning el.src etc.). */
+    if (JS_IsObject(n.obj)) {
+        static const struct { const char *prop; const char *attr; } extra_attrs[] = {
+            { "id", "id" }, { "className", "class" }, { "class", "class" },
+            { "src", "src" }, { "href", "href" }, { "style", "style" },
+            { "alt", "alt" }, { "title", "title" }, { "width", "width" },
+            { "height", "height" }, { "type", "type" }, { "value", "value" },
+            { "name", "name" }, { "placeholder", "placeholder" }, { NULL, NULL }
+        };
+        for (int i = 0; extra_attrs[i].prop; i++) {
+            bool has;
+            if (n.id) {
+                has = dom_attr(n.id, extra_attrs[i].attr) != NULL;
+            } else {
+                has = false;
+                for (int k = 0; k < loose.n; k++)
+                    if (strcasecmp(loose.names[k], extra_attrs[i].attr) == 0) { has = true; break; }
+            }
+            if (has) continue;
+            char *value = js_object_get_string(ctx, n.obj, extra_attrs[i].prop);
+            if (value && value[0]) serialize_buf_append_attr(buf, extra_attrs[i].attr, value);
+            free(value);
         }
-        free(value);
     }
-    
-    bool is_void = html_is_self_closing_tag(tag_lower);
-    bool is_raw = html_is_raw_content_tag(tag_lower);
-    
-    if (is_void) {
+    loose_attrs_free(&loose);
+
+    if (html_is_self_closing_tag(tag_lower)) {
         serialize_buf_append(buf, ">");
         return;
     }
-    
     serialize_buf_append(buf, ">");
-    
-    if (is_raw) {
-        /* For raw tags emit text content directly without escaping. */
-        GCValue tc = JS_GetPropertyStr(ctx, node_val, "textContent");
-        const char *text = JS_ToCString(ctx, tc);
-        if (text) {
-            serialize_buf_append(buf, text);
+
+    if (html_is_raw_content_tag(tag_lower)) {
+        /* Raw text: textContent, unescaped. */
+        if (n.id && legacy_limits()) {
+            ser_text_content(n.id, buf);
+        } else if (JS_IsObject(n.obj)) {
+            GCValue tc = JS_GetPropertyStr(ctx, n.obj, "textContent");
+            const char *text = JS_ToCString(ctx, tc);
+            if (text) { serialize_buf_append(buf, text); JS_FreeCString(ctx, text); }
+        } else if (n.id) {
+            ser_text_content(n.id, buf);
         }
-    } else {
-        html_serialize_shadow_host_children(ctx, node, node_val, buf);
+    } else if (n.id) {
+        html_serialize_children(ctx, n, buf);
     }
-    
+
     serialize_buf_append(buf, "</");
     serialize_buf_append(buf, tag_lower);
     serialize_buf_append(buf, ">");
 }
 
-static void html_serialize_js_node_internal(JSContextHandle ctx, GCValue node, SerializeBuffer *buf) {
-    if (JS_IsUndefined(node) || JS_IsNull(node)) return;
-    
-    /* Plain string children may exist from older DOM creation paths. */
-    if (JS_IsString(node)) {
-        const char *s = JS_ToCString(ctx, node);
-        if (s) serialize_buf_append_escaped(buf, s);
-        return;
-    }
-    
-    DOMNodeHandle dom_node = get_dom_node(ctx, node);
-    if (SAFE_IS_NULL(dom_node)) {
-        /* No C-level DOMNode data: this node may be managed by the ShadyDOM
-         * polyfill's __shady tree.  Create DOMNode data on-the-fly so the
-         * standard serialization path works.  Use JS-level properties for
-         * nodeType/nodeName since the polyfill may set them on the prototype. */
-        GCValue jnt = JS_GetPropertyStr(ctx, node, "nodeType");
-        int32_t nt = 0;
-        JS_ToInt32(ctx, &nt, jnt);
-        GCValue jnn = JS_GetPropertyStr(ctx, node, "nodeName");
-        const char *nn = JS_ToCString(ctx, jnn);
-        dom_node = dom_node_create(ctx, nt, nn ? nn : "#unknown");
-        if (!SAFE_IS_NULL(dom_node)) {
-            dom_node_attach_to_object(dom_node, node);
-            /* Populate attributes from JS-level getAttributeNames/getAttribute. */
-            GCValue gan = JS_GetPropertyStr(ctx, node, "getAttributeNames");
-            if (JS_IsFunction(ctx, gan)) {
-                GCValue names_arr = JS_Call(ctx, gan, node, 0, NULL);
-                if (JS_IsArray(ctx, names_arr)) {
-                    GCValue len_val = JS_GetPropertyStr(ctx, names_arr, "length");
-                    uint32_t len = 0;
-                    JS_ToUint32(ctx, &len, len_val);
-                    for (uint32_t i = 0; i < len; i++) {
-                        GCValue name_val = JS_GetPropertyUint32(ctx, names_arr, i);
-                        const char *name = JS_ToCString(ctx, name_val);
-                        if (name && name[0]) {
-                            GCValue gav = JS_GetPropertyStr(ctx, node, "getAttribute");
-                            if (JS_IsFunction(ctx, gav)) {
-                                GCValue args[1] = { name_val };
-                                GCValue v = JS_Call(ctx, gav, node, 1, args);
-                                const char *vs = JS_ToCString(ctx, v);
-                                if (vs) dom_node_set_attribute(dom_node, name, vs);
-                                JS_FreeCString(ctx, vs);
-                            }
-                        }
-                        JS_FreeCString(ctx, name);
-                    }
-                }
-            }
-            /* Also read textContent for text/comment nodes. */
-            if (nt == DOM_NODE_TYPE_TEXT || nt == DOM_NODE_TYPE_COMMENT) {
-                GCValue tc = JS_GetPropertyStr(ctx, node, "textContent");
-                const char *tcs = JS_ToCString(ctx, tc);
-                if (tcs) SAFE_SET_STR(dom_node, DOMNodeHandle, node_value, tcs);
-                JS_FreeCString(ctx, tcs);
-            }
-        }
-        if (nn) JS_FreeCString(ctx, nn);
-        if (SAFE_IS_NULL(dom_node)) return;
-    }
-    
-    int node_type = SAFE_GET_OR(dom_node, DOMNodeHandle, node_type, 0);
-    if (node_type == DOM_NODE_TYPE_TEXT) {
-        const char *val = SAFE_GET_OR(dom_node, DOMNodeHandle, node_value, "");
-        if (val) {
-            /* Skip text nodes that are stray closing tags emitted after the
-             * document end; the parser should not have rendered them. */
-            const char *p = val;
-            while (*p && isspace((unsigned char)*p)) p++;
-            if (strncmp(p, "</body>", 7) != 0 && strncmp(p, "</html>", 7) != 0) {
-                /* Skip text nodes that are just HTML comment markers left
-                 * behind by Polymer's css-build annotations. */
-                size_t len = strlen(p);
-                while (len > 0 && isspace((unsigned char)p[len - 1])) len--;
-                if (!(len >= 7 && strncmp(p, "<!--", 4) == 0 &&
-                      strncmp(p + len - 3, "-->", 3) == 0)) {
-                    serialize_buf_append_escaped(buf, val);
-                }
-            }
+static void html_serialize_text(const char *val, size_t len, SerializeBuffer *buf) {
+    len = strnlen(val, len);
+    if (legacy_limits() && len > 4095) len = 4095;
+    /* Skip stray closing tags emitted after the document end. */
+    const char *p = val, *end = val + len;
+    while (p < end && isspace((unsigned char)*p)) p++;
+    size_t rest = (size_t)(end - p);
+    if (rest >= 7 && (strncmp(p, "</body>", 7) == 0 || strncmp(p, "</html>", 7) == 0)) return;
+    /* Skip text that is just an HTML comment marker (Polymer css-build). */
+    size_t tl = rest;
+    while (tl > 0 && isspace((unsigned char)p[tl - 1])) tl--;
+    if (tl >= 7 && strncmp(p, "<!--", 4) == 0 && strncmp(p + tl - 3, "-->", 3) == 0) return;
+    serialize_buf_append_escaped_n(buf, val, len);
+}
+
+static void html_serialize_node(JSContextHandle ctx, SerNode n, SerializeBuffer *buf) {
+    if (!n.id && !JS_IsObject(n.obj)) return;
+    int nt = ser_node_type(ctx, n);
+    if (nt == 3) {
+        if (n.id) {
+            uint32_t len = 0;
+            const char *s = dom_text(n.id, &len);
+            html_serialize_text(s, len, buf);
+        } else {
+            GCValue tc = JS_GetPropertyStr(ctx, n.obj, "textContent");
+            size_t len = 0;
+            const char *tcs = JS_ToCStringLen(ctx, &len, tc);
+            if (tcs) { html_serialize_text(tcs, len, buf); JS_FreeCString(ctx, tcs); }
         }
         return;
     }
-    if (node_type == DOM_NODE_TYPE_COMMENT) {
-        return; /* Skip comments in serialization. */
-    }
-    if (node_type == DOM_NODE_TYPE_ELEMENT) {
-        html_serialize_js_element(ctx, dom_node, node, buf);
-    }
+    if (nt == 1) html_serialize_element(ctx, n, buf);
+    /* Comments, documents and fragments are not emitted. */
 }
 
 /* Serialize a JS DOM node (and its descendants) to a heap-allocated HTML
@@ -2225,42 +1411,102 @@ static void html_serialize_js_node_internal(JSContextHandle ctx, GCValue node, S
 char *html_serialize_js_node(JSContextHandle ctx, GCValue node) {
     SerializeBuffer buf;
     if (!serialize_buf_init(&buf)) return NULL;
-    html_serialize_js_node_internal(ctx, node, &buf);
-    char *result = strdup(buf.data);
+    if (JS_IsString(node)) {
+        const char *s = JS_ToCString(ctx, node);
+        if (s) { serialize_buf_append_escaped(&buf, s); JS_FreeCString(ctx, s); }
+    } else {
+        html_serialize_node(ctx, ser_of_value(node), &buf);
+    }
+    char *result = buf.data;
+    buf.data = NULL;
     serialize_buf_free(&buf);
     return result;
 }
 
-/* Build a fresh native HtmlDocument from the JS document's current DOM. */
-HtmlDocument *html_document_from_js_dom(JSContextHandle ctx, GCValue js_doc) {
-    if (!SAFE_VALID(ctx)) return NULL;
-    
-    GCValue doc_elem = JS_NULL;
-    if (!JS_IsUndefined(js_doc) && !JS_IsNull(js_doc)) {
-        doc_elem = JS_GetPropertyStr(ctx, js_doc, "documentElement");
+/* Give the reparsed elements the store ids they were serialized from.  The
+ * parse reproduces the serialized element sequence except where the parser
+ * drops or re-nests elements, so a short lookahead resynchronises. */
+static void map_store_ids(HtmlDocument *doc, SerializeBuffer *buf) {
+    size_t pos = 0;
+    size_t n = po_array_count(&doc->array);
+    for (size_t i = 0; i < n && pos < buf->nids; i++) {
+        if (!po_array_is_active(&doc->array, (int)i)) continue;
+        HtmlNode *hn = po_array_payload(&doc->array, (int)i);
+        if (!hn || hn->type != HTML_NODE_ELEMENT) continue;
+        hn->store_id = 0;
+        for (size_t k = pos; k < buf->nids && k < pos + 8; k++) {
+            if (strcmp(buf->tags[k], hn->tag_name) == 0) {
+                hn->store_id = buf->ids[k];
+                pos = k + 1;
+                break;
+            }
+        }
     }
+}
+
+static GCValue render_root_element(JSContextHandle ctx, GCValue js_doc) {
+    GCValue doc_elem = JS_NULL;
+    if (!JS_IsUndefined(js_doc) && !JS_IsNull(js_doc))
+        doc_elem = JS_GetPropertyStr(ctx, js_doc, "documentElement");
     if (JS_IsUndefined(doc_elem) || JS_IsNull(doc_elem)) {
-        /* Fallback: look for documentElement on the global object. */
         GCValue global = JS_GetGlobalObject(ctx);
         doc_elem = JS_GetPropertyStr(ctx, global, "documentElement");
     }
-    if (JS_IsUndefined(doc_elem) || JS_IsNull(doc_elem)) {
-        return NULL;
+    return doc_elem;
+}
+
+static uint64_t fnv1a64(const char *p, size_t n) {
+    uint64_t h = 1469598103934665603ULL;
+    for (size_t i = 0; i < n; i++) { h ^= (unsigned char)p[i]; h *= 1099511628211ULL; }
+    return h | 1;   /* never 0: 0 means "no snapshot yet" */
+}
+
+static uint64_t g_render_snapshots, g_render_reuses;
+
+void html_render_stats(uint64_t *snapshots, uint64_t *reuses) {
+    if (snapshots) *snapshots = g_render_snapshots;
+    if (reuses) *reuses = g_render_reuses;
+}
+
+/* Build the render snapshot.  With `key`: when the document serializes to
+ * the same text as the snapshot `*key` names, nothing is rebuilt (returns
+ * NULL with *unchanged set); otherwise *key names the new snapshot.  Taking a
+ * snapshot clears the store's dirty bits for the document (§7). */
+HtmlDocument *html_document_from_js_dom_if_changed(JSContextHandle ctx, GCValue js_doc,
+                                                   uint64_t *key, bool *unchanged) {
+    if (unchanged) *unchanged = false;
+    if (!SAFE_VALID(ctx)) return NULL;
+    GCValue doc_elem = render_root_element(ctx, js_doc);
+    if (JS_IsUndefined(doc_elem) || JS_IsNull(doc_elem)) return NULL;
+
+    SerializeBuffer buf;
+    if (!serialize_buf_init(&buf)) return NULL;
+    buf.track = true;
+    serialize_buf_append(&buf, "<!doctype html>\n");
+    html_serialize_node(ctx, ser_of_value(doc_elem), &buf);
+
+    NodeId dn = dom_node_of(js_doc);
+    if (dom_kind(dn) != DOM_K_DOCUMENT) dn = g_dom_document;
+    if (key) {
+        uint64_t k = fnv1a64(buf.data, buf.len);
+        if (*key == k) {
+            if (unchanged) *unchanged = true;
+            g_render_reuses++;
+            dom_clear_dirty(dn);
+            serialize_buf_free(&buf);
+            return NULL;
+        }
+        *key = k;
     }
-    
-    char *inner = html_serialize_js_node(ctx, doc_elem);
-    if (!inner) return NULL;
-    
-    size_t html_len = strlen(inner) + 32;
-    char *html = (char *)malloc(html_len);
-    if (!html) {
-        free(inner);
-        return NULL;
-    }
-    snprintf(html, html_len, "<!doctype html>\n%s", inner);
-    free(inner);
-    
-    HtmlDocument *doc = html_parse(html, strlen(html));
-    free(html);
+    HtmlDocument *doc = html_parse(buf.data, buf.len);
+    if (doc) map_store_ids(doc, &buf);
+    serialize_buf_free(&buf);
+    g_render_snapshots++;
+    dom_clear_dirty(dn);
     return doc;
+}
+
+/* Build a fresh native HtmlDocument from the JS document's current DOM. */
+HtmlDocument *html_document_from_js_dom(JSContextHandle ctx, GCValue js_doc) {
+    return html_document_from_js_dom_if_changed(ctx, js_doc, NULL, NULL);
 }

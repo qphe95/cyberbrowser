@@ -1,4 +1,5 @@
 /* Auto-generated split from browser_api_impl.c */
+#include "cyber_env.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -1746,7 +1747,7 @@ GCValue js_cyber_upgrade_element(JSContextHandle ctx, GCValue this_val, int argc
 
     /* Trace the prototype chain for the CE-construction blocker
      * (b.createElement undefined at KvR-generated constructors). */
-    if (getenv("CYBER_TRACE_UPGRADE") &&
+    if (CYBER_ENV(CYBER_T_UPGRADE) &&
         (strstr(name_lc, "masthead") || strstr(name_lc, "ytd-app") ||
          strstr(name_lc, "ytd-watch") || strstr(name_lc, "yt-img"))) {
         GCValue ce = JS_GetPropertyStr(ctx, el, "createElement");
@@ -2591,6 +2592,20 @@ static bool mo_observer_interested(JSContextHandle ctx, GCValue observer, GCValu
     return false;
 }
 
+/* Would a childList change of `target` be observed?  (Mutations skip
+ * building records, and wrappers for the changed nodes, when not.) */
+bool mo_child_list_observed(JSContextHandle ctx, GCValue target) {
+    GCValue reg = mo_registry(ctx);
+    GCValue len_val = JS_GetPropertyStr(ctx, reg, "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, len_val);
+    for (uint32_t i = 0; i < len; i++) {
+        GCValue observer = JS_GetPropertyUint32(ctx, reg, i);
+        if (mo_observer_interested(ctx, observer, target, "childList")) return true;
+    }
+    return false;
+}
+
 static GCValue mo_create_record_full(JSContextHandle ctx, GCValue target, GCValue added, GCValue removed,
                                 const char *type, const char *attr_name, const char *old_value) {
     GCValue record = JS_NewObject(ctx);
@@ -2640,6 +2655,7 @@ static void mo_push_record(JSContextHandle ctx, GCValue observer, GCValue record
     JS_SetPropertyUint32(ctx, records, len, record);
     JS_SetPropertyStr(ctx, observer, "__mo_records", records);
 }
+
 
 void mo_notify_child_list(JSContextHandle ctx, GCValue target, GCValue added, GCValue removed) {
     GCValue reg = mo_registry(ctx);

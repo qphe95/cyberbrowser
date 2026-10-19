@@ -539,15 +539,11 @@ void tls_client_close(TlsClient *client) {
 // Global connection pools (one per host like browsers do)
 static ConnectionPool *g_connection_pools[100];
 static int g_pool_count = 0;
-static pthread_mutex_t g_pools_mutex;
+static pthread_mutex_t g_pools_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-// Initialize global resources
+// Initialize global resources (the pool mutex is statically initialized, so
+// concurrent first requests from the script fetch pool are safe).
 static void initialize_global_resources() {
-    static int initialized = 0;
-    if (!initialized) {
-        pthread_mutex_init(&g_pools_mutex, NULL);
-        initialized = 1;
-    }
 }
 
 // Find or create connection pool for host

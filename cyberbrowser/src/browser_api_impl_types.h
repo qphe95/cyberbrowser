@@ -63,7 +63,7 @@ typedef struct {
     GCValue onerror;
     GCValue onvolumechange;
     JSContextHandle ctx;
-    GCHandle dom_node;   // backing DOMNode (ELEMENT "VIDEO") for Element.prototype getters
+    GCHandle dom_node;   // DomWrap record: the store element this video wraps
 } HTMLVideoElement;
 
 /* ============================================================================
@@ -90,7 +90,7 @@ typedef struct {
     GCValue host;                    // The element that hosts this shadow root
     char mode[16];                   // "open" or "closed"
     GCValue innerHTML;               // Shadow root content (as string for stub)
-    GCHandle dom_node;               // DOMNode backing the shadow root tree
+    GCHandle dom_node;               // DomWrap record: the store fragment of the shadow tree
     JSContextHandle ctx;
     bool delegates_focus;            // init.delegatesFocus
     bool manual_slot_assignment;     // init.slotAssignment == "manual"
@@ -340,63 +340,12 @@ typedef struct {
 #define DOM_NODE_TYPE_DOCUMENT_FRAGMENT     11
 #define DOM_NODE_TYPE_NOTATION              12
 
-// Maximum attribute count per element
-#define DOM_MAX_ATTRIBUTES 64
-
-typedef struct DOMAttribute {
-    char name[64];
-    char value[2048];
-} DOMAttribute;
-
 typedef struct CssComputedStyle {
     LFHashTable *properties;          /* atom handle -> JS string value handle */
 } CssComputedStyle;
 
-typedef struct DOMNode {
-    int node_type;                    // DOM_NODE_TYPE_*
-    char node_name[64];               // tag name for elements, "#text" for text, etc.
-    char node_value[4096];            // For text/comment nodes
-    
-    // Tree structure pointers (stored as JS object references via handles)
-    GCValue parent_node;              // Parent node or null
-    GCValue first_child;              // First child or null
-    GCValue last_child;               // Last child or null
-    GCValue previous_sibling;         // Previous sibling or null
-    GCValue next_sibling;             // Next sibling or null
-    GCValue owner_document;           // Owning document
-    
-    // Element-specific data. Attributes are allocated on demand so empty
-    // elements don't waste the large fixed attribute buffer.
-    DOMAttribute *attributes;
-    int attribute_count;
-    int attribute_capacity;
-    char id[256];
-    char class_name[1024];
-    
-    // Computed CSS properties produced by parallel CSS application.
-    GCHandle computed_style_handle;   // handle to CssComputedStyle, or GC_HANDLE_NULL
-    
-    // Index-table list chaining (class/tag tables hold lists of elements).
-    GCHandle next_class_sibling;      // next element with same class atom, or NULL
-    GCHandle next_tag_sibling;        // next element with same tag atom, or NULL
-    
-    // Shadow DOM
-    GCValue shadow_root;              // Attached shadow root or null
-    
-    // Back-reference to the JS object that owns this DOMNode data.
-    // Used by index tables to return the public element object.
-    GCValue js_object;
-    
-    // Internal reference to the JS object this data belongs to
-    // Used for callbacks and reference management
-    JSContextHandle ctx;
-} DOMNode;
-
-typedef struct CssDocumentState {
-    LFHashTable *id_table;            /* atom handle -> DOMNode handle */
-    LFHashTable *class_table;         /* atom handle -> head DOMNode handle (chained) */
-    LFHashTable *tag_table;           /* atom handle -> head DOMNode handle (chained) */
-} CssDocumentState;
+/* DOM nodes live in the node store (dom_store.h); their JS wrappers carry a
+ * DomWrap record (dom_wrap.h). */
 
 /* ============================================================================
  * DOM mutation / layout invalidation
@@ -514,7 +463,7 @@ typedef struct {
  * Each struct above lives in the GC heap and is referred to by a GCHandle.
  * The *Handle names document which struct a handle points at; access the
  * fields with the SAFE_* macros from quickjs_handles.h, e.g.
- *     SAFE_GET_OR(node, DOMNodeHandle, node_type, 0)
+ *     SAFE_GET_OR(vid, HTMLVideoElementHandle, paused, 0)
  * GC_STRUCT_OF_<HandleType> tells those macros which struct to cast to.
  */
 typedef GCHandle XMLHttpRequestHandle;
@@ -537,7 +486,6 @@ typedef GCHandle PerformanceTimingDataHandle;
 typedef GCHandle DOMRectDataHandle;
 typedef GCHandle MediaSourceDataHandle;
 typedef GCHandle SourceBufferDataHandle;
-typedef GCHandle DOMNodeHandle;
 typedef GCHandle EventHandle;
 typedef GCHandle CustomEventHandle;
 typedef GCHandle MouseEventHandle;
@@ -564,7 +512,6 @@ typedef GCHandle DateDataHandle;
 #define GC_STRUCT_OF_DOMRectDataHandle               DOMRectData
 #define GC_STRUCT_OF_MediaSourceDataHandle           MediaSourceData
 #define GC_STRUCT_OF_SourceBufferDataHandle          SourceBufferData
-#define GC_STRUCT_OF_DOMNodeHandle                   DOMNode
 #define GC_STRUCT_OF_EventHandle                     EventData
 #define GC_STRUCT_OF_CustomEventHandle               CustomEventData
 #define GC_STRUCT_OF_MouseEventHandle                MouseEventData
@@ -590,7 +537,6 @@ typedef GCHandle DateDataHandle;
 #define GC_STRUCT_OF_DOMRectData                     DOMRectData
 #define GC_STRUCT_OF_MediaSourceData                 MediaSourceData
 #define GC_STRUCT_OF_SourceBufferData                SourceBufferData
-#define GC_STRUCT_OF_DOMNode                         DOMNode
 #define GC_STRUCT_OF_EventData                       EventData
 #define GC_STRUCT_OF_CustomEventData                 CustomEventData
 #define GC_STRUCT_OF_MouseEventData                  MouseEventData

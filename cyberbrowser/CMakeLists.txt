@@ -75,6 +75,13 @@ set(BE_SOURCES
     src/css_style.c
     src/frame_arena.c
     src/job_system.c
+    src/cyber_env.c
+    src/dom_store.c
+    src/dom_parse.c
+    src/dom_snapshot.c
+    src/dom_wrap.c
+    src/dom_query.c
+    src/dom_fetch.c
     src/css_layout.c
     src/display_list.c
     src/text_shaper.c
@@ -233,6 +240,12 @@ else()
     set_source_files_properties(${QUICKJS_SOURCES} PROPERTIES
         COMPILE_FLAGS "/wd4018 /wd4100 /wd4189"
     )
+endif()
+
+# Mbed TLS / PSA crypto are used from several threads (the script fetch pool,
+# parallel range downloads), so they need their threading layer.
+if(BE_PLATFORM_MACOS OR BE_PLATFORM_LINUX OR BE_PLATFORM_WINDOWS)
+    target_compile_definitions(cyberbrowser_lib PUBLIC MBEDTLS_THREADING_C MBEDTLS_THREADING_PTHREAD)
 endif()
 
 # =============================================================================

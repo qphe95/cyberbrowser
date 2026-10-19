@@ -26,6 +26,7 @@
 #define JS_INFINITY_VAL ((double)INFINITY)
 #define JS_NEG_INFINITY_VAL (-(double)INFINITY)
 
+#include "cyber_env.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -5995,7 +5996,7 @@ static int add_shape_property(JSContextHandle ctx, GCHandle *psh_handle,
     prop = get_shape_prop(sh);
     pr = &prop[prop_idx];
     SAFE_SET(sh, JSShapeHandle, prop_count, prop_idx + 1);
-    if (getenv("CYBER_TRACE_DF")) {
+    if (CYBER_ENV(CYBER_T_DF)) {
         const char *pn = JS_AtomToCString(ctx, atom);
         if (pn && strcmp(pn, "pageData") == 0) {
             fprintf(stderr, "[ADD-PD] prop_idx=%d flags=0x%x sh=%u\n", prop_idx, prop_flags, (unsigned)*psh_handle);
@@ -6004,7 +6005,7 @@ static int add_shape_property(JSContextHandle ctx, GCHandle *psh_handle,
     }
     pr->atom = JS_DupAtom(ctx, atom);
     pr->flags = prop_flags;
-    if (getenv("CYBER_TRACE_DF") && !(prop_flags & JS_PROP_ENUMERABLE)) {
+    if (CYBER_ENV(CYBER_T_DF) && !(prop_flags & JS_PROP_ENUMERABLE)) {
         const char *pn = JS_AtomToCString(ctx, atom);
         if (pn && strcmp(pn, "pageData") == 0) {
             const char *trace_js = "(new Error('pd')).stack";
@@ -6768,7 +6769,7 @@ static force_inline JSShapeProperty *find_own_property(JSProperty **ppr,
     JSShapeHandle sh = GC_HANDLE_NULL;
     JSShapeProperty *pr, *prop;
     intptr_t h;
-    bool df_trace = getenv("CYBER_TRACE_DF") && atom > 1000;
+    bool df_trace = CYBER_ENV(CYBER_T_DF) && atom > 1000;
     if (df_trace) {
         fprintf(stderr, "[FOP-ENTER] atom=%u p.valid=%d shapeH=%u derefNull=%d\n",
                 (unsigned)atom, (int)(!!SAFE_VALID(p)), (unsigned)(SAFE_VALID(p) ? js_obj_shape_handle(p) : 0),
@@ -6822,7 +6823,7 @@ static force_inline JSShapeProperty *find_own_property(JSProperty **ppr,
     }
     /* Diagnostic: hash-miss — linear scan to distinguish a broken hash chain
      * from a genuinely absent property.  CYBER_TRACE_DF=1. */
-    if (getenv("CYBER_TRACE_DF") && atom > 1000) {
+    if (CYBER_ENV(CYBER_T_DF) && atom > 1000) {
         int found = -1;
         for (int li = 0; li < SAFE_GET_OR(sh, JSShapeHandle, prop_count, 0); li++) {
             if (prop[li].atom == atom) { found = li; break; }
@@ -9255,7 +9256,7 @@ GCValue JS_GetPropertyInternal(JSContextHandle ctx, GCValue obj,
     if (unlikely(tag != JS_TAG_OBJECT)) {
         switch(tag) {
         case JS_TAG_NULL:
-            if (getenv("CYBER_TRACE_NULLPROP")) {
+            if (CYBER_ENV(CYBER_T_NULLPROP)) {
                 const char *pname = JS_AtomToCString(ctx, prop);
                 if (pname && strcmp(pname, "createElement") == 0) {
                     GCValue err = JS_NewError(ctx);
@@ -10360,7 +10361,7 @@ static JSProperty *add_property(JSContextHandle ctx,
        current shape is shared or private.  This maximizes shape sharing and
        avoids creating duplicate hashed shapes when growing private shapes. */
     new_sh = find_hashed_shape_prop(ctx_rt, sh, prop, prop_flags);
-    bool df_pd = getenv("CYBER_TRACE_DF") && prop > 1000;
+    bool df_pd = CYBER_ENV(CYBER_T_DF) && prop > 1000;
     if (df_pd) {
         const char *pn = JS_AtomToCString(ctx, prop);
         if (pn && strcmp(pn, "pageData") == 0) {
@@ -11595,7 +11596,7 @@ int JS_DefineProperty(JSContextHandle ctx, GCValue this_obj,
         QJS_LOGD("JS_DefineProperty: p is NULL!");
         return -1;
     }
-    if (getenv("CYBER_TRACE_DEFINE")) {
+    if (CYBER_ENV(CYBER_T_DEFINE)) {
         const char *pname = JS_AtomToCString(ctx, prop);
         if (pname && strcmp(pname, "renderGuide") == 0) {
             GCValue err = JS_NewError(ctx);
@@ -11610,7 +11611,7 @@ int JS_DefineProperty(JSContextHandle ctx, GCValue this_obj,
     redo_prop_update:
     QJS_LOGD("JS_DefineProperty: calling find_own_property p=%u prop=%d", SAFE_HANDLE(p), prop);
     prs = find_own_property(&pr, p, prop);
-    if (getenv("CYBER_TRACE_DF")) {
+    if (CYBER_ENV(CYBER_T_DF)) {
         const char *pn = JS_AtomToCString(ctx, prop);
         if (pn && strcmp(pn, "pageData") == 0) {
             fprintf(stderr, "[DEF-PD] find result=%s flags=0x%x\n", prs ? "FOUND" : "MISS", prs ? prs->flags : 0);
@@ -12122,7 +12123,7 @@ int JS_DeleteProperty(JSContextHandle ctx, GCValue obj, JSAtom prop, int flags)
         return res;
     if ((flags & JS_PROP_THROW) ||
         ((flags & JS_PROP_THROW_STRICT) && is_strict_mode(ctx))) {
-        if (getenv("CYBER_TRACE_DELETEPROP")) {
+        if (CYBER_ENV(CYBER_T_DELETEPROP)) {
             const char *pname = JS_AtomToCString(ctx, prop);
             GCValue err = JS_NewError(ctx);
             build_backtrace(ctx, err, NULL, 0, 0, 0);
@@ -18739,7 +18740,7 @@ static JSVarRefHandle js_closure_global_var(JSContextHandle ctx, JSClosureVar *c
     p = JS_VALUE_GET_OBJ(SAFE_GET_OR(ctx, JSContextHandle, global_obj, GC_UNDEFINED));
  redo:
     prs = find_own_property(&pr, p, cv->var_name);
-    if (getenv("CYBER_TRACE_GV")) {
+    if (CYBER_ENV(CYBER_T_GV)) {
         const char *nm = JS_AtomToCString(ctx, cv->var_name);
         if (nm && (strstr(nm, "appLoad") || strstr(nm, "scheduleAppLoad"))) {
             fprintf(stderr, "[GV] lookup '%s' atom=%u found=%d found_atom=%u flags=%x\n",
@@ -18774,7 +18775,7 @@ static JSVarRefHandle js_closure_global_var(JSContextHandle ctx, JSClosureVar *c
                         if (SAFE_VALID(var_ref1) && !JS_IsUninitialized(js_varref_get_value(var_ref1)) && !JS_IsUndefined(js_varref_get_value(var_ref1))) {
                             /* Found a valid value in uninitialized vars - use it */
                             js_varref_set_value(var_ref, js_varref_get_value(var_ref1));
-                            if (getenv("CYBER_TRACE_GV")) {
+                            if (CYBER_ENV(CYBER_T_GV)) {
                                 const char *nm = JS_AtomToCString(ctx, cv->var_name);
                                 if (nm && (strstr(nm, "appLoad") || strstr(nm, "scheduleAppLoad")))
                                     fprintf(stderr, "[GV] '%s' uninit-fallback copied into vr=%llu\n",
@@ -18784,7 +18785,7 @@ static JSVarRefHandle js_closure_global_var(JSContextHandle ctx, JSClosureVar *c
                     }
                 }
             }
-            if (getenv("CYBER_TRACE_GV")) {
+            if (CYBER_ENV(CYBER_T_GV)) {
                 const char *nm = JS_AtomToCString(ctx, cv->var_name);
                 if (nm && (strstr(nm, "appLoad") || strstr(nm, "scheduleAppLoad")))
                     fprintf(stderr, "[GV] '%s' -> global vr=%llu\n",
@@ -18808,7 +18809,7 @@ static JSVarRefHandle js_closure_global_var(JSContextHandle ctx, JSClosureVar *c
     }
     {
         JSVarRefHandle uvr = js_global_object_get_uninitialized_var(ctx, p, cv->var_name);
-        if (getenv("CYBER_TRACE_GV")) {
+        if (CYBER_ENV(CYBER_T_GV)) {
             const char *nm = JS_AtomToCString(ctx, cv->var_name);
             if (nm && (strstr(nm, "appLoad") || strstr(nm, "scheduleAppLoad")))
                 fprintf(stderr, "[GV] '%s' -> uninit vr=%llu\n",
@@ -19126,7 +19127,7 @@ static GCValue js_closure2(JSContextHandle ctx, GCValue func_obj,
                                 js_bc_closure_var_var_name(parent_b, cv_idx) == js_bc_closure_var_var_name(b, i)) {
                                 resolved = TRUE;
                             }
-                            if (getenv("CYBER_DUMP_BC")) {
+                            if (CYBER_ENV(CYBER_T_DUMP_BC)) {
                                 char ab[128];
                                 fprintf(stderr, "[CL] GLOBAL_REF name='%s' cv_idx=%d parent_cv_count=%d match=%d resolved=%d val_tag=%d\n",
                                         JS_AtomGetStr(ctx, ab, sizeof(ab), js_bc_closure_var_var_name(b, i)),
@@ -19137,7 +19138,7 @@ static GCValue js_closure2(JSContextHandle ctx, GCValue func_obj,
                             }
                         } else {
                             resolved = TRUE;
-                            if (getenv("CYBER_DUMP_BC")) {
+                            if (CYBER_ENV(CYBER_T_DUMP_BC)) {
                                 char ab[128];
                                 fprintf(stderr, "[CL] GLOBAL_REF name='%s' no-sf inherited val_tag=%d\n",
                                         JS_AtomGetStr(ctx, ab, sizeof(ab), js_bc_closure_var_var_name(b, i)),
@@ -19719,7 +19720,7 @@ static JSAtom g_last_field_atom = JS_ATOM_NULL;
 
 /* CYBER_TRACE_GV: trace writes of specific named functions into var_refs. */
 static void gv_trace_put(JSContextHandle ctx, GCHandle vrh, GCValue v, int idx) {
-    if (!getenv("CYBER_TRACE_GV")) return;
+    if (!CYBER_ENV(CYBER_T_GV)) return;
     if (!JS_IsFunction(ctx, v)) return;
     GCValue nm = JS_GetPropertyStr(ctx, v, "name");
     const char *s = JS_ToCString(ctx, nm);
@@ -19733,7 +19734,7 @@ static void gv_trace_put(JSContextHandle ctx, GCHandle vrh, GCValue v, int idx) 
 /* CYBER_TRACE_GV: trace var_ref reads inside script_40 functions. */
 static void gv_trace_get(JSContextHandle ctx, JSFunctionBytecodeHandle b,
                          JSVarRefHandle *var_refs, int idx, GCValue val) {
-    if (!getenv("CYBER_TRACE_GV")) return;
+    if (!CYBER_ENV(CYBER_T_GV)) return;
     if (!var_refs) return;
     if (!JS_IsFunction(ctx, val)) return;  /* cheap exit before touching b */
     GCValue nm = JS_GetPropertyStr(ctx, val, "name");
@@ -19908,7 +19909,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                     }
                     (void)caller_ctx;
                 }
-                if (getenv("CYBER_TRACE_NAF") && g_last_field_atom != JS_ATOM_NULL) {
+                if (CYBER_ENV(CYBER_T_NAF) && g_last_field_atom != JS_ATOM_NULL) {
                     char ab[128];
                     fprintf(stderr, "[NAF-METHOD] missing: %s\n",
                             JS_AtomGetStr(caller_ctx, ab, sizeof(ab), g_last_field_atom));
@@ -20147,7 +20148,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
             *sp++ = JS_NewObject(ctx);
             if (unlikely(JS_IsException(sp[-1])))
                 goto exception;
-            if (getenv("CYBER_TRACE_DF")) {
+            if (CYBER_ENV(CYBER_T_DF)) {
                 static int bad_base = 0;
                 JSObjectHandle no = JS_VALUE_GET_OBJ(sp[-1]);
                 JSShapeHandle nsh = GC_SHAPE_DEREF(js_obj_shape_handle(no));
@@ -21400,7 +21401,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                     atom = get_u32(pc);                                 \
                     pc += 4;                                            \
                 }                                                       \
-                if (getenv("CYBER_TRACE_NAF")) g_last_field_atom = atom; \
+                if (CYBER_ENV(CYBER_T_NAF)) g_last_field_atom = atom; \
                                                                         \
                 obj = sp[-1];                                           \
                 if (likely(JS_VALUE_GET_TAG(obj) == JS_TAG_OBJECT)) {   \
@@ -21567,7 +21568,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                 sp--;
                 if (unlikely(ret < 0))
                     goto exception;
-                if (getenv("CYBER_TRACE_DF")) {
+                if (CYBER_ENV(CYBER_T_DF)) {
                     const char *an = JS_AtomToCString(ctx, atom);
                     if (an && strcmp(an, "pageData") == 0) {
                         JSObjectHandle op = JS_VALUE_GET_OBJ(sp[-1]);
@@ -22774,7 +22775,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
         }
     }
  exception:
-    if (getenv("CYBER_LOG_THROW")) {
+    if (CYBER_ENV(CYBER_T_LOG_THROW)) {
         GCValue exc0 = SAFE_GET_OR(rt, JSRuntimeHandle, current_exception, GC_UNDEFINED);
         int tag0 = JS_VALUE_GET_TAG(exc0);
         BOOL fresh_error = is_backtrace_needed(ctx, exc0);
@@ -35879,7 +35880,7 @@ static int add_closure_var(JSContextHandle ctx, JSFunctionDef *s,
         cv->var_kind = var_kind;
         cv->var_idx = var_idx;
         cv->var_name = JS_DupAtom(ctx, var_name);
-        if (getenv("CYBER_TRACE_GV")) {
+        if (CYBER_ENV(CYBER_T_GV)) {
             const char *nm = JS_AtomToCString(ctx, var_name);
             if (nm && (strstr(nm, "appLoad") || strstr(nm, "scheduleAppLoad") || strcmp(nm, "window") == 0)) {
                 fprintf(stderr, "[GV-ADDCV] name='%s' idx=%d closure_type=%d var_idx=%d fd=%p\n",
@@ -39721,7 +39722,7 @@ static GCValue js_create_function(JSContextHandle ctx, JSFunctionDef *fd)
     }
 #endif
 
-    if (getenv("CYBER_DUMP_BC")) {
+    if (CYBER_ENV(CYBER_T_DUMP_BC)) {
         /* Minimal dump: function identity + closure vars (opcode dump helpers
          * in this tree are bit-rotted, so don't use them). */
         char atom_buf[128];
@@ -41139,7 +41140,7 @@ static GCValue js_resume_lazy_parse(JSContextHandle ctx,
 
     /* DEBUG (CYBER_DUMP_SCRIPTS): dump each unique lazy root source so stack
      * frames showing <lazy>:LINE can be mapped to real source text. */
-    if (getenv("CYBER_DUMP_SCRIPTS")) {
+    if (CYBER_ENV(CYBER_T_DUMP_SCRIPTS)) {
         static GCHandle seen_sources[512];
         static int seen_count = 0;
         int found = 0;

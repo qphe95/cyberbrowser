@@ -44,6 +44,8 @@ typedef struct JsExecResult {
 GCValue js_style_remove_property(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_style_set_property(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_style_get_property_value(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+/* The canvas getContext() native (for element wrappers). */
+JSCFunction *js_canvas_get_context_fn(void);
 
 /* Initialize QuickJS runtime (called once in android_main) */
 bool js_quickjs_init(void);

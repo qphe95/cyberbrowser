@@ -7,6 +7,7 @@
  * array; event ids are assigned under the same lock, so begin/end from many
  * threads stay consistent.
  */
+#include "cyber_env.h"
 #include "cyber_profile.h"
 
 #include <stdio.h>
@@ -105,7 +106,7 @@ static void cp_unlock(void) {
 
 int cp_profile_enabled(void) {
     if (g_cp_enabled < 0) {
-        const char *e = getenv("CYBER_PROFILE");
+        const char *e = cyber_getenv("CYBER_PROFILE");
         g_cp_enabled = (e && e[0] && strcmp(e, "0") != 0) ? 1 : 0;
     }
     return g_cp_enabled;

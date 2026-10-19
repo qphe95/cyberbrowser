@@ -10,6 +10,7 @@
 #include <quickjs.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include "preorder_compaction_array.h"
 
 #ifdef __cplusplus
@@ -37,25 +38,30 @@ typedef struct HtmlNode HtmlNode;
 typedef struct HtmlDocument HtmlDocument;
 typedef struct HtmlAttribute HtmlAttribute;
 
-/* HTML attribute structure */
+/* HTML attribute structure.  Names and values are owned by the document
+ * (its arena); names are lower case. */
 typedef struct HtmlAttribute {
-    char name[HTML_MAX_ATTR_NAME_LEN];
-    char value[HTML_MAX_ATTR_VALUE_LEN];
+    const char *name;
+    const char *value;
     struct HtmlAttribute *next;
 } HtmlAttribute;
 
-/* HTML node payload stored in PreOrderCompactionArray (header must be first). */
+/* HTML node payload stored in PreOrderCompactionArray (header must be first).
+ * This is the layout's input: a snapshot of the node store (dom_snapshot.h). */
 struct HtmlNode {
     PreOrderCompactionArrayNode array_node;  /* Tree links and state */
     HtmlNodeType type;
-    char tag_name[HTML_MAX_TAG_NAME_LEN];    /* For element nodes */
-    char *text_content;                      /* For text/comment nodes */
+    const char *tag_name;                    /* elements: lower-case name; others: "" */
+    char *text_content;                      /* text nodes and raw-text elements (malloc'd) */
     size_t text_len;
     HtmlAttribute *attributes;
     GCValue js_object;                       /* QuickJS object reference */
     int has_js_object;                       /* Flag to track if js_object is valid */
     GCHandle layout_box_handle;              /* Optional cached LayoutBox handle */
+    uint32_t store_id;                       /* NodeId in the node store (0 = none) */
 };
+
+struct HtmlArenaBlock;
 
 /* HTML document structure */
 struct HtmlDocument {
@@ -68,17 +74,10 @@ struct HtmlDocument {
     /* Parser state */
     int nesting_depth;
     int current_parent_idx;
+
+    struct HtmlArenaBlock *arena; /* attribute names/values */
 };
 
-/* Parser state structure */
-typedef struct {
-    const char *html;
-    size_t html_len;
-    size_t pos;
-    int line, column;
-    int nesting_depth;
-    HtmlDocument *document;
-} HtmlParser;
 
 /* ============================================================================
  * HTML DOM Functions
@@ -97,6 +96,8 @@ bool html_create_dom_in_js(JSContextHandle ctx, HtmlDocument *doc);
  * Uses document.createElement() so elements get proper DOM prototypes.
  * The existing document's createElement, body, head, and appendChild are used. */
 bool html_populate_js_document(JSContextHandle ctx, GCValue js_doc, HtmlDocument *doc);
+/* The same straight from HTML text (parsed into the node store). */
+bool html_populate_js_document_from_html(JSContextHandle ctx, GCValue js_doc, const char *html, size_t len);
 
 /* Create a single HTML element in QuickJS */
 GCValue html_create_element_js(JSContextHandle ctx, const char *tag_name, HtmlAttribute *attrs);
@@ -107,6 +108,7 @@ GCValue html_create_element_js_with_document(JSContextHandle ctx, GCValue js_doc
 /* Set the innerHTML of an element by parsing the HTML string and replacing
  * the element's children with the parsed nodes. */
 bool html_element_set_inner_html(JSContextHandle ctx, GCValue elem, const char *html);
+bool html_element_set_inner_html_len(JSContextHandle ctx, GCValue elem, const char *html, size_t len);
 
 /* Set the innerHTML of a ShadowRoot by parsing the HTML string and replacing
  * the shadow root's children with the parsed nodes. */
@@ -143,6 +145,12 @@ char *html_serialize_js_node(JSContextHandle ctx, GCValue node);
 
 /* Build a fresh native HtmlDocument from the JS document's current DOM. */
 HtmlDocument *html_document_from_js_dom(JSContextHandle ctx, GCValue js_doc);
+/* The same, skipped when the document still serializes to the snapshot
+ * `*key` names (returns NULL with *unchanged set); *key is updated. */
+HtmlDocument *html_document_from_js_dom_if_changed(JSContextHandle ctx, GCValue js_doc,
+                                                   uint64_t *key, bool *unchanged);
+/* Render snapshots built / reused (tests, benchmarks). */
+void html_render_stats(uint64_t *snapshots, uint64_t *reuses);
 
 /* ============================================================================
  * HTML Utility Functions

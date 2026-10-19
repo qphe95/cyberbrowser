@@ -5,6 +5,7 @@
  */
 
 #include "css_parser.h"
+#include "dom_js.h"
 #include "http_download.h"
 #include "platform.h"
 #include "url_utils.h"
@@ -1224,6 +1225,8 @@ static void css_seed_vendor_style_properties(JSContextHandle ctx, GCValue style)
 }
 
 GCValue css_ensure_style_object(JSContextHandle ctx, GCValue element) {
+    /* Store wrappers keep their style object in the wrapper record. */
+    if (dom_wrap_of(element) != GC_HANDLE_NULL) return dom_element_style(ctx, element, true);
     /* Use a private internal slot so we don't recurse through the public
      * `style` accessor getter when it calls this helper. */
     GCValue style = JS_GetPropertyStr(ctx, element, "__style");
@@ -1254,6 +1257,16 @@ void css_apply_inline_style_string(JSContextHandle ctx, GCValue element,
     for (int i = 0; i < count; i++) {
         css_set_style_property(ctx, style, decls[i].property, decls[i].value);
     }
+    css_declarations_free(decls, count);
+}
+
+void css_apply_inline_style_to(JSContextHandle ctx, GCValue style, const char *style_attr) {
+    if (!style_attr || !style_attr[0] || !JS_IsObject(style)) return;
+    int count = 0;
+    CssDeclaration *decls = css_parse_inline_style(style_attr, &count);
+    if (!decls) return;
+    for (int i = 0; i < count; i++)
+        css_set_style_property(ctx, style, decls[i].property, decls[i].value);
     css_declarations_free(decls, count);
 }
 

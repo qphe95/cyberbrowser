@@ -5,7 +5,8 @@
  * Minimal pthread compatibility layer for Windows.
  * Provides just enough for the cyberbrowser codebase:
  *  - mutex (SRWLOCK-based)
- *  - thread creation/join (for jobs.c)
+ *  - condition variables (CONDITION_VARIABLE)
+ *  - thread creation/join/detach
  *
  * This header shadows the system <pthread.h> on Windows builds
  * by placing its directory earlier in the include path.
@@ -88,6 +89,43 @@ static inline int pthread_join(pthread_t thread, void **retval) {
     WaitForSingleObject(thread, INFINITE);
     CloseHandle(thread);
     if (retval) *retval = NULL;
+    return 0;
+}
+
+static inline int pthread_detach(pthread_t thread) {
+    CloseHandle(thread);
+    return 0;
+}
+
+/* ============================================================================
+ * Condition variables (CONDITION_VARIABLE over the SRWLOCK mutexes)
+ * ============================================================================ */
+
+typedef CONDITION_VARIABLE pthread_cond_t;
+#define PTHREAD_COND_INITIALIZER CONDITION_VARIABLE_INIT
+
+static inline int pthread_cond_init(pthread_cond_t *cond, const void *attr) {
+    (void)attr;
+    InitializeConditionVariable(cond);
+    return 0;
+}
+
+static inline int pthread_cond_destroy(pthread_cond_t *cond) {
+    (void)cond;
+    return 0;
+}
+
+static inline int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
+    return SleepConditionVariableSRW(cond, mutex, INFINITE, 0) ? 0 : -1;
+}
+
+static inline int pthread_cond_signal(pthread_cond_t *cond) {
+    WakeConditionVariable(cond);
+    return 0;
+}
+
+static inline int pthread_cond_broadcast(pthread_cond_t *cond) {
+    WakeAllConditionVariable(cond);
     return 0;
 }
 

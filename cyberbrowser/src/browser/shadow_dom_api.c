@@ -11,6 +11,8 @@
 #include "browser_api_impl_handle_helpers.h"
 #include "browser_api_impl_internal.h"
 #include "html_dom.h"
+#include "dom_js.h"
+#include "dom_query.h"
 #include "css_parser.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
@@ -65,7 +67,7 @@ GCValue js_shadow_root_set_innerHTML(JSContextHandle ctx, GCValue this_val, GCVa
 }
 
 // ShadowRoot tree operations now delegate to the regular DOM node
-// implementation.  A ShadowRoot is backed by a DOMNode of type
+// implementation.  A ShadowRoot is backed by a store fragment (node type
 // DOCUMENT_FRAGMENT_NODE, so appendChild/removeChild/insertBefore and all
 // traversal getters work exactly like a normal fragment parent.
 
@@ -95,34 +97,16 @@ GCValue js_shadow_root_get_child_nodes(JSContextHandle ctx, GCValue this_val) {
 
 GCValue js_shadow_root_get_children(JSContextHandle ctx, GCValue this_val) {
     GCValue arr = JS_NewArray(ctx);
-    DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (SAFE_IS_NULL(node)) return arr;
-    int idx = 0;
-    GCValue child = SAFE_GET_OR(node, DOMNodeHandle, first_child, JS_NULL);
-    while (!JS_IsNull(child) && !JS_IsUndefined(child) && JS_IsObject(child)) {
-        DOMNodeHandle child_node = get_dom_node(ctx, child);
-        if (!SAFE_IS_NULL(child_node) && SAFE_GET_OR(child_node, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_ELEMENT) {
-            JS_SetPropertyUint32(ctx, arr, idx++, child);
-        }
-        if (SAFE_IS_NULL(child_node)) break;
-        child = SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL);
-    }
+    uint32_t idx = 0;
+    for (NodeId c = dom_first_child(dom_node_of(this_val)); c; c = dom_next_sibling(c))
+        if (dom_kind(c) == DOM_K_ELEMENT) JS_SetPropertyUint32(ctx, arr, idx++, dom_js(ctx, c));
     return arr;
 }
 
 GCValue js_shadow_root_get_child_element_count(JSContextHandle ctx, GCValue this_val) {
     int count = 0;
-    DOMNodeHandle node = get_dom_node(ctx, this_val);
-    if (SAFE_IS_NULL(node)) return JS_NewInt32(ctx, 0);
-    GCValue child = SAFE_GET_OR(node, DOMNodeHandle, first_child, JS_NULL);
-    while (!JS_IsNull(child) && !JS_IsUndefined(child) && JS_IsObject(child)) {
-        DOMNodeHandle child_node = get_dom_node(ctx, child);
-        if (!SAFE_IS_NULL(child_node) && SAFE_GET_OR(child_node, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_ELEMENT) {
-            count++;
-        }
-        if (SAFE_IS_NULL(child_node)) break;
-        child = SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL);
-    }
+    for (NodeId c = dom_first_child(dom_node_of(this_val)); c; c = dom_next_sibling(c))
+        if (dom_kind(c) == DOM_K_ELEMENT) count++;
     return JS_NewInt32(ctx, count);
 }
 
@@ -130,32 +114,20 @@ GCValue js_shadow_root_contains(JSContextHandle ctx, GCValue this_val, int argc,
     return js_node_contains_real(ctx, this_val, argc, argv);
 }
 
+/* First element in the shadow tree (preorder) whose id is `id`. */
 GCValue js_shadow_root_getElementById(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1) return JS_NULL;
     const char *id = JS_ToCString(ctx, argv[0]);
     if (!id) return JS_NULL;
-
-    DOMNodeHandle root = get_dom_node(ctx, this_val);
-    if (SAFE_IS_NULL(root)) return JS_NULL;
-
-    GCValue child = SAFE_GET_OR(root, DOMNodeHandle, first_child, JS_NULL);
-    while (!JS_IsNull(child) && !JS_IsUndefined(child) && JS_IsObject(child)) {
-        DOMNodeHandle child_node = get_dom_node(ctx, child);
-        if (!SAFE_IS_NULL(child_node) && SAFE_GET_OR(child_node, DOMNodeHandle, node_type, 0) == DOM_NODE_TYPE_ELEMENT) {
-            GCValue id_val = JS_GetPropertyStr(ctx, child, "id");
-            const char *child_id = JS_ToCString(ctx, id_val);
-            if (child_id && strcmp(child_id, id) == 0) {
-                return child;
-            }
-            GCValue args[1] = { argv[0] };
-            GCValue found = js_shadow_root_getElementById(ctx, child, 1, args);
-            if (!JS_IsNull(found) && !JS_IsUndefined(found)) {
-                return found;
-            }
-        }
-        if (SAFE_IS_NULL(child_node)) break;
-        child = SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL);
+    NodeId root = dom_node_of(this_val);
+    if (!root) return JS_NULL;
+    uint32_t r = dom_slot(root);
+    for (uint32_t s = dom_next_in_subtree(r, r); s; s = dom_next_in_subtree(s, r)) {
+        if (g_dom.kind[s] != DOM_K_ELEMENT) continue;
+        const char *v = dom_attr(dom_id_of(s), "id");
+        if (v && strcmp(v, id) == 0) { JS_FreeCString(ctx, id); return dom_js(ctx, dom_id_of(s)); }
     }
+    JS_FreeCString(ctx, id);
     return JS_NULL;
 }
 
@@ -167,41 +139,20 @@ GCValue js_shadow_root_querySelectorAll(JSContextHandle ctx, GCValue this_val, i
     return js_element_querySelectorAll_real(ctx, this_val, argc, argv);
 }
 
-static void shadow_root_collect_by_tag(JSContextHandle ctx, GCValue node, const char *tag_name,
-                                        GCValue arr, uint32_t *idx) {
-    if (*idx >= 10000) return;
-    DOMNodeHandle n = get_dom_node(ctx, node);
-    if (SAFE_IS_NULL(n) || SAFE_GET_OR(n, DOMNodeHandle, node_type, 0) != DOM_NODE_TYPE_ELEMENT) return;
-    const char *name = SAFE_GET_OR(n, DOMNodeHandle, node_name, "");
-    if (name && (strcasecmp(name, tag_name) == 0 || strcmp(tag_name, "*") == 0)) {
-        JS_SetPropertyUint32(ctx, arr, (*idx)++, node);
-    }
-    GCValue child = SAFE_GET_OR(n, DOMNodeHandle, first_child, JS_NULL);
-    while (!JS_IsNull(child) && JS_IsObject(child)) {
-        DOMNodeHandle child_node = get_dom_node(ctx, child);
-        if (SAFE_IS_NULL(child_node)) break;
-        shadow_root_collect_by_tag(ctx, child, tag_name, arr, idx);
-        child = SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL);
-    }
-}
-
 GCValue js_shadow_root_get_elements_by_tag_name(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     GCValue arr = JS_NewArray(ctx);
     if (argc < 1) return arr;
-    const char *tag_name = JS_ToCString(ctx, argv[0]);
+    size_t len = 0;
+    const char *tag_name = JS_ToCStringLen(ctx, &len, argv[0]);
     if (!tag_name) return arr;
-
-    DOMNodeHandle root = get_dom_node(ctx, this_val);
-    if (SAFE_IS_NULL(root)) return arr;
-
-    uint32_t idx = 0;
-    GCValue child = SAFE_GET_OR(root, DOMNodeHandle, first_child, JS_NULL);
-    while (!JS_IsNull(child) && JS_IsObject(child)) {
-        shadow_root_collect_by_tag(ctx, child, tag_name, arr, &idx);
-        DOMNodeHandle child_node = get_dom_node(ctx, child);
-        if (SAFE_IS_NULL(child_node)) break;
-        child = SAFE_GET_OR(child_node, DOMNodeHandle, next_sibling, JS_NULL);
+    NodeId root = dom_node_of(this_val);
+    if (root) {
+        DomNodeList l = dom_query_by_tag_in(root, tag_name, len, false);
+        for (uint32_t i = 0; i < l.n && i < 10000; i++)
+            JS_SetPropertyUint32(ctx, arr, i, dom_js(ctx, l.ids[i]));
+        dom_node_list_free(&l);
     }
+    JS_FreeCString(ctx, tag_name);
     return arr;
 }
 
@@ -235,29 +186,29 @@ GCValue js_shadow_root_set_adopted_style_sheets(JSContextHandle ctx, GCValue thi
     // match nodes inside this host's flattened shadow tree.
     GCValue host = js_shadow_root_get_host(ctx, this_val);
     if (JS_IsObject(host)) {
-        DOMNodeHandle host_node = get_dom_node(ctx, host);
-        if (!SAFE_IS_NULL(host_node)) {
+        NodeId host_node = dom_node_of(host);
+        if (dom_kind(host_node) == DOM_K_ELEMENT) {
             static int scope_counter = 0;
-            const char *sid_attr = dom_node_get_attribute(host_node, "__cyber_scope_id");
+            const char *sid_attr = dom_attr(host_node, "__cyber_scope_id");
             char sid[32] = {0};
             if (!sid_attr || !sid_attr[0]) {
                 snprintf(sid, sizeof(sid), "cs%d", ++scope_counter);
-                dom_node_set_attribute(host_node, "__cyber_scope_id", sid);
+                dom_set_attr_str(host_node, "__cyber_scope_id", sid);
             } else {
                 strncpy(sid, sid_attr, sizeof(sid) - 1);
                 sid[sizeof(sid) - 1] = '\0';
             }
             char scope_class[48];
             snprintf(scope_class, sizeof(scope_class), "cyber-scope-%s", sid);
-            const char *existing = dom_node_get_attribute(host_node, "class");
+            const char *existing = dom_attr(host_node, "class");
             char combined[256];
             if (existing && existing[0]) {
                 if (strstr(existing, scope_class) == NULL) {
                     snprintf(combined, sizeof(combined), "%s %s", existing, scope_class);
-                    dom_node_set_attribute(host_node, "class", combined);
+                    dom_set_attr_str(host_node, "class", combined);
                 }
             } else {
-                dom_node_set_attribute(host_node, "class", scope_class);
+                dom_set_attr_str(host_node, "class", scope_class);
             }
         }
     }
@@ -337,12 +288,12 @@ GCValue js_element_attach_shadow(JSContextHandle ctx, GCValue this_val, int argc
     }
 
     // 1. Validate host restrictions.
-    DOMNodeHandle host_node = get_dom_node(ctx, this_val);
-    if (SAFE_IS_NULL(host_node) || SAFE_GET_OR(host_node, DOMNodeHandle, node_type, 0) != DOM_NODE_TYPE_ELEMENT) {
+    NodeId host_node = dom_node_of(this_val);
+    if (dom_kind(host_node) != DOM_K_ELEMENT) {
         return JS_ThrowTypeError(ctx, "attachShadow called on non-element");
     }
 
-    const char *tag_name = SAFE_GET_OR(host_node, DOMNodeHandle, node_name, "");
+    const char *tag_name = dom_node_name(host_node);
     fprintf(stderr, "[ATTACH-SHADOW-ENTER] host=%s\n", tag_name);
     fflush(stderr);
 
@@ -389,16 +340,14 @@ GCValue js_element_attach_shadow(JSContextHandle ctx, GCValue this_val, int argc
     GCValue shadow_root = JS_NewObjectClass(ctx, js_shadow_root_class_id);
     JS_SetOpaqueHandle(shadow_root, sr);
 
-    // Wire the backing DOMNode to the new ShadowRoot JS object.
-    GCHandle dn = SAFE_GET_OR(sr, ShadowRootDataHandle, dom_node, GC_HANDLE_NULL);
-    if (dn != GC_HANDLE_NULL) {
-        DOMNodeHandle dom_node = dn;
-        if (!SAFE_IS_NULL(dom_node)) {
-            SAFE_SET(dom_node, DOMNodeHandle, js_object, shadow_root);
-            GCValue owner_doc = JS_GetPropertyStr(ctx, this_val, "ownerDocument");
-            if (!JS_IsUndefined(owner_doc) && !JS_IsNull(owner_doc)) {
-                SAFE_SET(dom_node, DOMNodeHandle, owner_document, owner_doc);
-            }
+    // Bind the shadow root object to its store fragment.
+    {
+        DomWrapHandle wd = SAFE_GET_OR(sr, ShadowRootDataHandle, dom_node, GC_HANDLE_NULL);
+        DomWrap *w = wd ? (DomWrap *)gc_deref(wd) : NULL;
+        NodeId frag = w ? w->id : DOM_NULL;
+        if (dom_valid(frag)) {
+            dom_bind(ctx, frag, shadow_root);
+            g_dom.owner[dom_slot(frag)] = g_dom.owner[dom_slot(host_node)];
         }
     }
 
@@ -407,9 +356,6 @@ GCValue js_element_attach_shadow(JSContextHandle ctx, GCValue this_val, int argc
 
     // Store shadowRoot reference on the element.
     JS_SetPropertyStr(ctx, this_val, "__shadowRoot", shadow_root);
-    if (!SAFE_IS_NULL(host_node)) {
-        SAFE_SET(host_node, DOMNodeHandle, shadow_root, shadow_root);
-    }
 
     // Polymer's _attachDom passes a pre-built fragment as `shadyUpgradeFragment`.
     // Move its children into the new shadow root so the composed tree is ready.

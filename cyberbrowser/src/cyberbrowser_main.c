@@ -5,6 +5,7 @@
  * display list, renders a wireframe to a JPEG, and prints a summary.  This is
  * intended as a quick smoke-test executable for the cyberbrowser core.
  */
+#include "cyber_env.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -154,7 +155,7 @@ static JSModuleDefHandle cyber_module_loader(JSContextHandle ctx, const char *mo
 
     platform_log(LOG_LEVEL_INFO, "module_loader", "Loaded module %s (%zu bytes)", url, buffer.size);
 
-    if (getenv("CYBER_DUMP_SCRIPTS")) {
+    if (CYBER_ENV(CYBER_T_DUMP_SCRIPTS)) {
         static int module_dump_idx = 0;
         char dump_name[64];
         snprintf(dump_name, sizeof(dump_name), "exec_module_%d.js", module_dump_idx++);
@@ -837,7 +838,7 @@ int main(int argc, char *argv[]) {
     if (argc > 1 && argv[1] && argv[1][0]) {
         start_url = argv[1];
     } else {
-        const char *env_url = getenv("CYBER_START_URL");
+        const char *env_url = cyber_getenv("CYBER_START_URL");
         if (env_url && env_url[0]) start_url = env_url;
     }
     const bool page_is_youtube = strstr(start_url, "youtube.") != NULL;
@@ -851,7 +852,7 @@ int main(int argc, char *argv[]) {
     /* Fast JS-engine probe: eval a file and exit (CYBER_PROBE_JS=/path/to.js).
      * Optional CYBER_PROBE_NO_LAZY=1 forces full (non-lazy) parsing. */
     {
-        const char *probe = getenv("CYBER_PROBE_JS");
+        const char *probe = cyber_getenv("CYBER_PROBE_JS");
         if (probe && probe[0]) {
             if (!platform_init()) { printf("FATAL: platform_init() failed\n"); return 1; }
             if (!platform_http_init()) { printf("FATAL: platform_http_init() failed\n"); return 1; }
@@ -866,7 +867,7 @@ int main(int argc, char *argv[]) {
             fclose(pf);
             pbuf[psz] = '\0';
             int pflags = JS_EVAL_TYPE_GLOBAL;
-            if (getenv("CYBER_PROBE_NO_LAZY")) pflags |= JS_EVAL_FLAG_NO_LAZY;
+            if (cyber_getenv("CYBER_PROBE_NO_LAZY")) pflags |= JS_EVAL_FLAG_NO_LAZY;
             GCValue pres = JS_Eval(g_ctx, pbuf, (size_t)psz, "<probe>", pflags);
             if (JS_IsException(pres)) {
                 GCValue exc = JS_GetException(g_ctx);
@@ -880,7 +881,7 @@ int main(int argc, char *argv[]) {
             }
             /* Pump timers/jobs so async continuations and setTimeout callbacks
              * run before exit (set CYBER_PROBE_NO_PUMP=1 to skip). */
-            if (!getenv("CYBER_PROBE_NO_PUMP")) {
+            if (!cyber_getenv("CYBER_PROBE_NO_PUMP")) {
                 for (int pi = 0; pi < 50; pi++) {
                     if (!pump_timers_and_jobs(g_ctx)) break;
                 }
@@ -946,7 +947,7 @@ int main(int argc, char *argv[]) {
     /* Layout probe: render a local HTML file through the production layout
      * pipeline and exit (CYBER_LAYOUT_HTML=/path/to.html). */
     {
-        const char *lhtml_path = getenv("CYBER_LAYOUT_HTML");
+        const char *lhtml_path = cyber_getenv("CYBER_LAYOUT_HTML");
         if (lhtml_path && lhtml_path[0]) {
             FILE *lf = fopen(lhtml_path, "rb");
             if (!lf) { printf("FATAL: cannot open %s\n", lhtml_path); return 1; }
@@ -1020,7 +1021,7 @@ int main(int argc, char *argv[]) {
             printf("WARNING: page script execution did not complete successfully\n");
         }
 
-        if (getenv("CYBER_HOOK_BOOT")) {
+        if (cyber_getenv("CYBER_HOOK_BOOT")) {
             /* Instrument the kevlar boot chain: log ytsignals, the consumption
              * of window.getInitialData, and ytd-app's connectedCallback. */
             const char *hook_js =
@@ -1229,7 +1230,7 @@ int main(int argc, char *argv[]) {
             }
             }
 
-        if (getenv("CYBER_DIAG_SIGNALS")) {
+        if (cyber_getenv("CYBER_DIAG_SIGNALS")) {
             const char *diag_js =
                 "(function(){"
                 "  var pm = document.querySelector('ytd-page-manager');"
@@ -1395,7 +1396,7 @@ int main(int argc, char *argv[]) {
     /* ShadyDOM bookkeeping diagnostic (CYBER_DIAG_SHADY=1): compare the
      * logical (shady) light children of ytd-app against the physical tree and
      * inspect the masthead slot's assigned nodes. */
-    if (getenv("CYBER_DIAG_SHADY")) {
+    if (cyber_getenv("CYBER_DIAG_SHADY")) {
         const char *shady_diag_js =
             "(function(){"
             "  try {"
@@ -1478,7 +1479,7 @@ int main(int argc, char *argv[]) {
         JS_Eval(g_ctx, shady_diag_js, strlen(shady_diag_js), "<shady_diag>", JS_EVAL_TYPE_GLOBAL);
     }
 
-    if (getenv("CYBER_DIAG_BOOT")) {
+    if (cyber_getenv("CYBER_DIAG_BOOT")) {
         const char *diag_js =
             "(function(){"
             "  var app = document.querySelector('ytd-app');"

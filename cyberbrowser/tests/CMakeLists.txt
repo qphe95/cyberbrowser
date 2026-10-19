@@ -13,6 +13,8 @@ add_executable(cyberbrowser-tests
     test_css_parser.c
     test_css_layout.c
     test_css_style.c
+    test_dom.c
+    legacy_html_parse.c
 )
 
 # Standalone YouTube data test executable (complex test with its own main)

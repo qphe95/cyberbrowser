@@ -12,6 +12,7 @@
  *
  * ESC or window close quits.
  */
+#include "cyber_env.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -184,7 +185,7 @@ int main(int argc, char *argv[]) {
     /* Headless verification hook: after a few frames, request a framebuffer
      * capture and exit once it has been written.  The renderer writes the
      * BMP (cyberbrowser_capture.bmp) during the draw AFTER the request. */
-    const char *capture_path = getenv("CYBER_FG_CAPTURE");
+    const char *capture_path = cyber_getenv("CYBER_FG_CAPTURE");
     int frames = 0;
     int capture_requested = 0;
 

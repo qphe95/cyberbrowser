@@ -2,16 +2,16 @@
  * Browser API handle helpers
  * ============================================================================
  *
- * The browser API data structs (XMLHttpRequest, DOMNode, EventData, ...) live
- * in the GC heap and are referred to by GCHandle. Their handle types are plain
- * typedefs of GCHandle (see browser_api_impl_types.h) and fields are accessed
- * with the C macros from quickjs_handles.h:
+ * The browser API data structs (XMLHttpRequest, EventData, ...) live in the GC
+ * heap and are referred to by GCHandle. Their handle types are plain typedefs
+ * of GCHandle (see browser_api_impl_types.h) and fields are accessed with the
+ * C macros from quickjs_handles.h:
  *
- *     DOMNodeHandle node = dom_node_from_object(obj);
- *     if (SAFE_IS_NULL(node)) return JS_NULL;
- *     int type = SAFE_GET_OR(node, DOMNodeHandle, node_type, 0);
- *     SAFE_SET(node, DOMNodeHandle, parent_node, parent);
- *     SAFE_SET_STR(node, DOMNodeHandle, id, "main");
+ *     HTMLVideoElementHandle vid = JS_GetOpaqueHandle(obj, js_video_class_id);
+ *     if (SAFE_IS_NULL(vid)) return JS_NULL;
+ *     SAFE_SET(vid, HTMLVideoElementHandle, onplay, callback);
+ *
+ * DOM nodes are not GC structs: they live in the node store (dom_store.h).
  *
  * Plain JS-object lookups use the QuickJS API directly:
  *
@@ -28,6 +28,7 @@
 #define BROWSER_API_IMPL_HANDLE_HELPERS_H
 
 #include "browser_api_impl_types.h"
+#include "dom_wrap.h"
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -144,29 +145,16 @@ static inline ShadowRootDataHandle shadow_root_create(JSContextHandle ctx, GCVal
         GC_SET(sr->innerHTML, JS_NewString(ctx, ""));
         GC_SET(sr->ctx, ctx);
 
-        // Back the shadow root with a regular DOMNode fragment so it can
-        // reuse the normal DOM tree mutation/traversal code.
-        GCHandle dn = gc_alloc(sizeof(DOMNode), JS_GC_OBJ_TYPE_DATA);
-        if (dn != GC_HANDLE_NULL) {
-            DOMNode* node = (DOMNode*)gc_deref(dn);
-            memset(node, 0, sizeof(DOMNode));
-            node->node_type = DOM_NODE_TYPE_DOCUMENT_FRAGMENT;
-            strncpy(node->node_name, "#document-fragment", sizeof(node->node_name) - 1);
-            node->node_name[sizeof(node->node_name) - 1] = '\0';
-            GC_SET(node->ctx, ctx);
-            node->parent_node = JS_NULL;
-            node->first_child = JS_NULL;
-            node->last_child = JS_NULL;
-            node->previous_sibling = JS_NULL;
-            node->next_sibling = JS_NULL;
-            node->owner_document = JS_NULL;
-            node->shadow_root = JS_NULL;
-            node->computed_style_handle = GC_HANDLE_NULL;
-            node->next_class_sibling = GC_HANDLE_NULL;
-            node->next_tag_sibling = GC_HANDLE_NULL;
-            node->js_object = JS_NULL;
-            GC_SET(sr->dom_node, dn);
+        // Back the shadow root with a store fragment attached to the host,
+        // so the normal tree mutation/traversal code works on it.
+        NodeId frag = dom_create_fragment(DOM_NULL);
+        NodeId hn = dom_node_of(host);
+        if (hn) {
+            g_dom.owner[dom_slot(frag)] = g_dom.owner[dom_slot(hn)];
+            dom_attach_shadow(hn, frag);
         }
+        sr = (ShadowRootData*)gc_deref(h);
+        GC_SET(sr->dom_node, dom_wrap_new(frag));
     }
     return h;
 }
@@ -353,155 +341,6 @@ static inline void source_buffer_set_append_data(SourceBufferDataHandle h, uint8
         p->append_data = data;
         p->append_size = size;
         p->append_capacity = capacity;
-    }
-}
-
-/* ------------------------------------------------------------------------
- * DOMNodeHandle  (DOMNode)
- * ------------------------------------------------------------------------ */
-
-static inline DOMNodeHandle dom_node_create(JSContextHandle ctx, int node_type, const char* node_name) {
-    GCHandle h = gc_alloc(sizeof(DOMNode), JS_GC_OBJ_TYPE_DATA);
-    if (h == GC_HANDLE_NULL) return GC_HANDLE_NULL;
-    
-    DOMNode* node = (DOMNode*)gc_deref(h);
-    memset(node, 0, sizeof(DOMNode));
-    node->node_type = node_type;
-    GC_SET(node->ctx, ctx);
-    if (node_name) {
-        strncpy(node->node_name, node_name, sizeof(node->node_name) - 1);
-        node->node_name[sizeof(node->node_name) - 1] = '\0';
-    }
-    
-    // Initialize all GCHandles to null
-    node->parent_node = JS_NULL;
-    node->first_child = JS_NULL;
-    node->last_child = JS_NULL;
-    node->previous_sibling = JS_NULL;
-    node->next_sibling = JS_NULL;
-    node->owner_document = JS_NULL;
-    node->shadow_root = JS_NULL;
-    node->computed_style_handle = GC_HANDLE_NULL;
-    node->next_class_sibling = GC_HANDLE_NULL;
-    node->next_tag_sibling = GC_HANDLE_NULL;
-    node->js_object = JS_NULL;
-    
-    return h;
-}
-
-static inline DOMNodeHandle dom_node_from_object(GCValue obj) {
-    if (JS_IsNull(obj) || JS_IsUndefined(obj)) return GC_HANDLE_NULL;
-    GCHandle h = JS_GetOpaqueHandle(obj, js_dom_node_class_id);
-    return h;
-}
-
-static inline DOMNodeHandle dom_node_from_object_check(JSContextHandle ctx, GCValue obj) {
-    if (JS_IsNull(obj) || JS_IsUndefined(obj)) return GC_HANDLE_NULL;
-    GCHandle h = JS_GetOpaqueHandle2(ctx, obj, js_dom_node_class_id);
-    return h;
-}
-
-static inline void dom_node_attach_to_object(DOMNodeHandle h, GCValue obj) {
-    if (h != GC_HANDLE_NULL) {
-        JS_SetOpaqueHandle(obj, h);
-        DOMNode *p = (DOMNode *)gc_deref(h);
-        if (p) GC_SET(p->js_object, obj);
-    }
-}
-
-static inline void dom_node_free_attributes(DOMNodeHandle h) {
-    DOMNode *p = (DOMNode *)gc_deref(h);
-    if (p && p->attributes) {
-        free(p->attributes);
-        p->attributes = NULL;
-        p->attribute_count = 0;
-        p->attribute_capacity = 0;
-    }
-}
-
-static inline const char* dom_node_get_attribute(DOMNodeHandle h, const char* name) {
-    DOMNode *p = (DOMNode *)gc_deref(h);
-    if (!p || !name) return NULL;
-    for (int i = 0; i < p->attribute_count; i++) {
-        if (strcmp(p->attributes[i].name, name) == 0) {
-            return p->attributes[i].value;
-        }
-    }
-    return NULL;
-}
-
-static inline void dom_node_set_attribute(DOMNodeHandle h, const char* name, const char* value) {
-    DOMNode *p = (DOMNode *)gc_deref(h);
-    if (!p || !name || !value) return;
-    
-    // Check if attribute already exists
-    for (int i = 0; i < p->attribute_count; i++) {
-        if (strcmp(p->attributes[i].name, name) == 0) {
-            strncpy(p->attributes[i].value, value, sizeof(p->attributes[i].value) - 1);
-            p->attributes[i].value[sizeof(p->attributes[i].value) - 1] = '\0';
-            // Keep the dedicated id/class caches in sync with the attribute
-            // list so querySelector and .id/.className see the same value.
-            if (strcmp(name, "id") == 0) {
-                strncpy(p->id, value, sizeof(p->id) - 1);
-                p->id[sizeof(p->id) - 1] = '\0';
-            } else if (strcmp(name, "class") == 0) {
-                strncpy(p->class_name, value, sizeof(p->class_name) - 1);
-                p->class_name[sizeof(p->class_name) - 1] = '\0';
-            }
-            return;
-        }
-    }
-    
-    // Allocate or grow the attribute array on demand. It is owned by the
-    // DOMNode and freed in the destructor/finalizer.
-    if (p->attribute_count >= p->attribute_capacity) {
-        int new_cap = p->attribute_capacity ? p->attribute_capacity * 2 : 4;
-        if (new_cap < 4) new_cap = 4;
-        if (new_cap > DOM_MAX_ATTRIBUTES) new_cap = DOM_MAX_ATTRIBUTES;
-        if (p->attribute_count >= new_cap) return; // at hard limit
-        DOMAttribute* new_attrs = (DOMAttribute*)malloc(sizeof(DOMAttribute) * new_cap);
-        if (!new_attrs) return; // allocation failure
-        if (p->attributes) {
-            memcpy(new_attrs, p->attributes, sizeof(DOMAttribute) * p->attribute_count);
-            free(p->attributes);
-        }
-        p->attributes = new_attrs;
-        p->attribute_capacity = new_cap;
-    }
-    
-    // Add new attribute
-    memset(&p->attributes[p->attribute_count], 0, sizeof(DOMAttribute));
-    strncpy(p->attributes[p->attribute_count].name, name, 
-            sizeof(p->attributes[p->attribute_count].name) - 1);
-    p->attributes[p->attribute_count].name[
-        sizeof(p->attributes[p->attribute_count].name) - 1] = '\0';
-    strncpy(p->attributes[p->attribute_count].value, value,
-            sizeof(p->attributes[p->attribute_count].value) - 1);
-    p->attributes[p->attribute_count].value[
-        sizeof(p->attributes[p->attribute_count].value) - 1] = '\0';
-    p->attribute_count++;
-    if (strcmp(name, "id") == 0) {
-        strncpy(p->id, value, sizeof(p->id) - 1);
-        p->id[sizeof(p->id) - 1] = '\0';
-    } else if (strcmp(name, "class") == 0) {
-        strncpy(p->class_name, value, sizeof(p->class_name) - 1);
-        p->class_name[sizeof(p->class_name) - 1] = '\0';
-    }
-}
-
-static inline void dom_node_remove_attribute(DOMNodeHandle h, const char* name) {
-    DOMNode *p = (DOMNode *)gc_deref(h);
-    if (!p || !name) return;
-    
-    for (int i = 0; i < p->attribute_count; i++) {
-        if (strcmp(p->attributes[i].name, name) == 0) {
-            // Shift remaining attributes
-            for (int j = i; j < p->attribute_count - 1; j++) {
-                p->attributes[j] = p->attributes[j + 1];
-            }
-            p->attribute_count--;
-            return;
-        }
     }
 }
 

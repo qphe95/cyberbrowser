@@ -4,6 +4,7 @@
  * Style and layout pipeline described in PARALLEL_STYLE_LAYOUT.md.
  */
 
+#include "cyber_env.h"
 #include "css_layout.h"
 #include "css_parser.h"
 #include "browser_api_impl.h"
@@ -12,6 +13,7 @@
 #include "quickjs_gc_unified.h"
 #include "http_download.h"
 #include "html_dom.h"
+#include "dom_wrap.h"
 #include "text_shaper.h"
 #include "display_list.h"
 #include "css_style.h"
@@ -2820,7 +2822,7 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
     StylePass P;
     memset(&P, 0, sizeof(P));
     P.ctx = ctx;
-    P.em_defer = getenv("CYBER_DISABLE_EM_DEFER") == NULL;
+    P.em_defer = cyber_getenv("CYBER_DISABLE_EM_DEFER") == NULL;
     const char *genv = getenv("CSS_GRAIN");
     P.grain = (genv && atoi(genv) > 0) ? atoi(genv) : 128;
     bool set_owned = false;
@@ -4935,8 +4937,8 @@ static void layout_export_computed_geometry(LayoutContext *ctx)
         if (!node || node->type != HTML_NODE_ELEMENT || !node->has_js_object) continue;
 
         GCValue element = node->js_object;
-        DOMNodeHandle dom_node = dom_node_from_object(element);
-        if (SAFE_IS_NULL(dom_node)) continue;
+        DomWrapHandle dom_node = dom_wrap_of(element);
+        if (dom_node == GC_HANDLE_NULL) continue;
 
         LayoutBox *box = &ctx->boxes[i];
 #define SET_VAL(prop, val_str) do { \
@@ -5031,10 +5033,10 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
 
     if (g_css_log < 0) { const char *e = getenv("CSS_LOG"); g_css_log = e ? atoi(e) : 0; }
     STAGE_BEGIN();
-    g_layout_debug = (getenv("CYBER_DEBUG_MEASURE") ? LDBG_MEASURE : 0) |
-                     (getenv("CYBER_DEBUG_FLOAT") ? LDBG_FLOAT : 0) |
-                     (getenv("CYBER_DEBUG_INLINE") ? LDBG_INLINE : 0) |
-                     (getenv("CYBER_DEBUG_FLEX") ? LDBG_FLEX : 0);
+    g_layout_debug = (cyber_getenv("CYBER_DEBUG_MEASURE") ? LDBG_MEASURE : 0) |
+                     (cyber_getenv("CYBER_DEBUG_FLOAT") ? LDBG_FLOAT : 0) |
+                     (cyber_getenv("CYBER_DEBUG_INLINE") ? LDBG_INLINE : 0) |
+                     (cyber_getenv("CYBER_DEBUG_FLEX") ? LDBG_FLEX : 0);
 
     /* Cascade: match selectors, resolve custom properties, apply declarations. */
     STAGE("setup");

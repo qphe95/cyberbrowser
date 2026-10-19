@@ -537,6 +537,8 @@ static inline bool gc_ptr_is_valid_handle(GCHandle handle) {
 GCHandle gc_ptr_to_handle(void *ptr);
 
 void gc_set_handle_finalizer(GCHandle handle, GCFinalizerFunc *finalizer);
+/* The same for a handle that has no finalizer yet (no registry search). */
+void gc_add_handle_finalizer(GCHandle handle, GCFinalizerFunc *finalizer);
 GCFinalizerFunc *gc_get_handle_finalizer(GCHandle handle);
 
 /* Iterate the current objects of one type (slow: walks the heap, except

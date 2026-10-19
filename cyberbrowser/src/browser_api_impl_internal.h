@@ -160,8 +160,6 @@ void dom_node_set_owner_document(JSContextHandle ctx, GCValue node, GCValue doc)
 GCValue js_element_querySelector_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_querySelectorAll_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 bool matches_selector(JSContextHandle ctx, GCValue elem, const char* selector);
-DOMNodeHandle get_dom_node(JSContextHandle ctx, GCValue obj);
-DOMNodeHandle get_or_create_dom_node(JSContextHandle ctx, GCValue obj, int node_type, const char* node_name);
 extern JSClassDef js_dom_node_class_def;
 void capture_url(const char *url);
 void capture_url_debug(const char *url, const char *source);
@@ -258,6 +256,7 @@ GCValue js_mutation_observer_observe(JSContextHandle ctx, GCValue this_val, int 
 GCValue js_mutation_observer_takeRecords(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_mutation_observer_disconnect(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 void mo_notify_child_list(JSContextHandle ctx, GCValue target, GCValue added, GCValue removed);
+bool mo_child_list_observed(JSContextHandle ctx, GCValue target);
 void mo_notify_character_data(JSContextHandle ctx, GCValue target, const char *old_value);
 void mo_notify_attribute(JSContextHandle ctx, GCValue target, const char *name, const char *old_value);
 GCValue js_queue_microtask(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);

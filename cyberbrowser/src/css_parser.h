@@ -117,6 +117,10 @@ void css_apply_inline_style_string(JSContextHandle ctx, GCValue element,
 
 /* Return the element's CSSStyleDeclaration object, creating it if necessary. */
 GCValue css_ensure_style_object(JSContextHandle ctx, GCValue element);
+/* A new element style object (js_quickjs.c) and inline declarations applied
+ * to a style object. */
+GCValue css_new_style_object(JSContextHandle ctx, GCValue element);
+void css_apply_inline_style_to(JSContextHandle ctx, GCValue style, const char *style_attr);
 
 /* Set a CSS property on a CSSStyleDeclaration object (kebab-case + camelCase). */
 void css_set_style_property(JSContextHandle ctx, GCValue style, const char *prop, const char *value);

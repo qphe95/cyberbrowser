@@ -584,6 +584,15 @@ void gc_set_handle_finalizer(GCHandle handle, GCFinalizerFunc *finalizer) {
         g_core.finalizers.items[g_core.finalizers.count - 1].fn = finalizer;
 }
 
+/* gc_set_handle_finalizer() for a handle known to have none (a new object):
+ * no search of the registry. */
+void gc_add_handle_finalizer(GCHandle handle, GCFinalizerFunc *finalizer) {
+    if (handle == GC_HANDLE_NULL) return;
+    gc_core_registry_add(&g_core.finalizers, handle);
+    if (g_core.finalizers.count)
+        g_core.finalizers.items[g_core.finalizers.count - 1].fn = finalizer;
+}
+
 GCFinalizerFunc *gc_get_handle_finalizer(GCHandle handle) {
     for (uint32_t i = 0; i < g_core.finalizers.count; i++)
         if (g_core.finalizers.items[i].handle == handle)

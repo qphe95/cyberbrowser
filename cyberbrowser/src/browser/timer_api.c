@@ -1,4 +1,5 @@
 /* Auto-generated split from browser_api_impl.c */
+#include "cyber_env.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -205,7 +206,7 @@ int add_timer(JSContextHandle ctx, TimerType type, GCValue callback,
     int slot = find_free_timer_slot();
     if (slot < 0) {
         pthread_mutex_unlock(&g_timer_state.mutex);
-        if (getenv("CYBER_TRACE_RAF")) {
+        if (CYBER_ENV(CYBER_T_RAF)) {
             fprintf(stderr, "[TIMER-FULL] type=%d count=%d\n", (int)type, g_timer_state.timer_count);
             fflush(stderr);
         }
@@ -245,7 +246,7 @@ int add_timer(JSContextHandle ctx, TimerType type, GCValue callback,
     g_timer_state.timer_count++;
     pthread_mutex_unlock(&g_timer_state.mutex);
     
-    if (getenv("CYBER_TRACE_RAF")) {
+    if (CYBER_ENV(CYBER_T_RAF)) {
         fprintf(stderr, "[TIMER-ADD] id=%d type=%d\n", timer->id, (int)type);
         fflush(stderr);
     }
@@ -263,7 +264,7 @@ int clear_timer_by_id(int id) {
             // Unregister GC roots for this timer's callback and args
             unregister_timer_roots(&g_timer_state.timers[i]);
             
-            if (getenv("CYBER_TRACE_RAF") && g_timer_state.timers[i].type == TIMER_TYPE_RAF) {
+            if (CYBER_ENV(CYBER_T_RAF) && g_timer_state.timers[i].type == TIMER_TYPE_RAF) {
                 fprintf(stderr, "[RAF-CLEAR] id=%d\n", id);
                 fflush(stderr);
             }
@@ -358,7 +359,7 @@ void execute_timer(JSContextHandle ctx, int id) {
     
     // Get callback and args while holding lock
     GCValue callback = get_callback(timer->callback_handle);
-    if (getenv("CYBER_TRACE_RAF") && timer->type == TIMER_TYPE_RAF) {
+    if (CYBER_ENV(CYBER_T_RAF) && timer->type == TIMER_TYPE_RAF) {
         fprintf(stderr, "[RAF-EXEC] id=%d cbIsFunc=%d\n", id, JS_IsFunction(ctx, callback));
         fflush(stderr);
     }

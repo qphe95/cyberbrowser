@@ -11,6 +11,7 @@
 #include "browser_api_impl_handle_helpers.h"
 #include "browser_api_impl_internal.h"
 #include "html_dom.h"
+#include "dom_js.h"
 #include "css_parser.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
@@ -512,7 +513,7 @@ static void js_computed_style_set_both(JSContextHandle ctx, GCValue style,
     free(camel);
 }
 
-static void js_computed_style_inherit(JSContextHandle ctx, GCValue style, DOMNodeHandle node)
+static void js_computed_style_inherit(JSContextHandle ctx, GCValue style, DomWrapHandle node, NodeId id)
 {
     static const char *inherited_props[] = {
         "color", "font-size", "font-family", "line-height", "letter-spacing",
@@ -527,18 +528,16 @@ static void js_computed_style_inherit(JSContextHandle ctx, GCValue style, DOMNod
 
         GCValue own = css_computed_get_property(ctx, node, atom);
         if (JS_IsUndefined(own)) {
-            DOMNodeHandle cur = node;
-            while (true) {
-                GCValue parent_val = SAFE_GET_OR(cur, DOMNodeHandle, parent_node, JS_NULL);
-                if (JS_IsNull(parent_val) || JS_IsUndefined(parent_val)) break;
-                DOMNodeHandle parent = dom_node_from_object(parent_val);
-                if (SAFE_IS_NULL(parent)) break;
-                GCValue pval = css_computed_get_property(ctx, parent, atom);
+            /* Computed tables live on wrappers: unwrapped ancestors have none. */
+            for (NodeId p = dom_parent(id); p; p = dom_parent(p)) {
+                if (!dom_has_wrapper(p)) continue;
+                DomWrapHandle pw = dom_wrap_of(dom_js_existing(p));
+                if (pw == GC_HANDLE_NULL) continue;
+                GCValue pval = css_computed_get_property(ctx, pw, atom);
                 if (!JS_IsUndefined(pval)) {
                     js_computed_style_set_both(ctx, style, prop, pval);
                     break;
                 }
-                cur = parent;
             }
         }
         JS_FreeAtom(ctx, atom);
@@ -617,8 +616,9 @@ GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, G
     JS_SetPropertyStr(ctx, style, "setProperty",
         JS_NewCFunction(ctx, js_computed_style_set_property, "setProperty", 3));
 
-    DOMNodeHandle node = dom_node_from_object_check(ctx, element);
-    if (!SAFE_IS_NULL(node)) {
+    DomWrapHandle node = dom_wrap_of(element);
+    NodeId node_id = dom_node_of(element);
+    if (node != GC_HANDLE_NULL && node_id) {
         /* Merge the element's inline style object so getComputedStyle reflects
          * properties set via element.style.foo even before layout runs. */
         GCValue inline_style = JS_GetPropertyStr(ctx, element, "style");
@@ -649,7 +649,7 @@ GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, G
         /* Override defaults and inline styles with the actual computed
          * properties stored for this node (the table contains both kebab-case
          * and camelCase keys). */
-        GCHandle cs_handle = SAFE_GET_OR(node, DOMNodeHandle, computed_style_handle, GC_HANDLE_NULL);
+        GCHandle cs_handle = SAFE_GET_OR(node, DomWrapHandle, computed_style, GC_HANDLE_NULL);
         if (cs_handle != GC_HANDLE_NULL) {
             CssComputedStyle *cs = (CssComputedStyle *)gc_deref(cs_handle);
             if (cs && cs->properties) {
@@ -672,7 +672,7 @@ GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, G
         }
 
         /* Inherit from ancestors for properties that should cascade. */
-        js_computed_style_inherit(ctx, style, node);
+        js_computed_style_inherit(ctx, style, node, node_id);
     }
     return style;
 }
