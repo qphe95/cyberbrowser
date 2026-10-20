@@ -10183,6 +10183,33 @@ JSAtom JS_ValueToAtom(JSContextHandle ctx, GCValue val)
     return atom;
 }
 
+/* A string value whose handle no longer names that string (it was freed and
+ * the handle reused by another object) reads a garbage length, and hashing
+ * it for an atom runs off the heap.  That has been seen once, rarely and not
+ * reproducibly, for a key read by an async function right after it resumed.
+ * Check that the handle's object is still a block big enough for the
+ * string, and report the JS stack when it is not, so the next occurrence
+ * says where the stale value came from instead of crashing. */
+static BOOL js_string_value_is_sane(JSContextHandle ctx, GCValue v)
+{
+    GCHandle h = GC_VALUE_GET_HANDLE(v);
+    GCHeader *hdr = gc_handle_is_valid(h) ? gc_header_from_handle(h) : NULL;
+    JSStringHandle s = JS_VALUE_GET_STRING(v);
+    size_t need = hdr ? sizeof(JSString) + ((size_t)SAFE_GET_OR(s, JSStringHandle, len, 0)
+                                            << SAFE_GET_OR(s, JSStringHandle, is_wide_char, 0)) : 0;
+    if (likely(hdr && hdr->handle == h && need <= gc_header_payload_size(hdr)))
+        return TRUE;
+    fprintf(stderr, "[quickjs] stale string value: handle=%u header=%p header_handle=%u type=%d "
+            "needs %zu bytes, block has %zu\n", (unsigned)h, (void *)hdr, hdr ? hdr->handle : 0,
+            hdr ? (int)gc_header_type(hdr) : -1, need, hdr ? gc_header_payload_size(hdr) : 0);
+    GCValue err = JS_NewError(ctx);
+    build_backtrace(ctx, err, NULL, 0, 0, 0);
+    const char *stack = JS_ToCString(ctx, JS_GetPropertyStr(ctx, err, "stack"));
+    fprintf(stderr, "[quickjs] JS stack:\n%s\n", stack ? stack : "?");
+    fflush(stderr);
+    return FALSE;
+}
+
 static GCValue JS_GetPropertyValue(JSContextHandle ctx, GCValue this_obj,
                                    GCValue prop)
 {
@@ -10260,8 +10287,10 @@ static GCValue JS_GetPropertyValue(JSContextHandle ctx, GCValue this_obj,
             }
             return JS_EXCEPTION;
         }
+        if (unlikely(JS_VALUE_GET_TAG(prop) == JS_TAG_STRING && !js_string_value_is_sane(ctx, prop)))
+            return JS_ThrowInternalError(ctx, "invalid string property key");
         atom = JS_ValueToAtom(ctx, prop);
-        
+
         if (unlikely(atom == JS_ATOM_NULL))
             return JS_EXCEPTION;
         ret = JS_GetProperty(ctx, this_obj, atom);

@@ -74,6 +74,13 @@ void js_quickjs_cleanup(void);
 /* Drain timers and pending JS jobs until quiescent. */
 void js_quickjs_pump_timers_and_jobs(void);
 
+/* Asynchronous fetch(): requests in flight (started, not yet settled);
+ * settle the finished ones (main thread, returns how many); wait up to `ms`
+ * for one to finish. */
+int js_quickjs_network_pending(void);
+int js_quickjs_net_poll(JSContextHandle ctx);
+void js_quickjs_net_wait(unsigned int ms);
+
 /* Dispatch DOMContentLoaded and load events on document/window. */
 void js_quickjs_dispatch_lifecycle_events(void);
 

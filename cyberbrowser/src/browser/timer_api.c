@@ -16,6 +16,7 @@
 #include "css_parser.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
+#include "js_quickjs.h"
 #include <pthread.h>
 
 /* Diagnostic: last property read on undefined/null before a TypeError. */
@@ -487,7 +488,9 @@ int timer_process_due(JSContextHandle ctx) {
      * come before any timer. */
     timer_microtask_checkpoint(ctx);
     unsigned long long now = platform_get_time_ms();
-    int processed = 0;
+    /* Finished network requests settle their fetch() promises first. */
+    int processed = js_quickjs_net_poll(ctx);
+    if (processed) timer_microtask_checkpoint(ctx);
     
     // Process up to 10 timers per call to avoid blocking too long
     for (int i = 0; i < 10; i++) {

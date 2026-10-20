@@ -465,9 +465,18 @@ static bool pump_timers_and_jobs(JSContextHandle ctx) {
                 unsigned long long wait = next > now ? next - now : 0;
                 unsigned long long elapsed = now - pump_start;
                 if (wait <= 200 && elapsed + wait <= 3000) {
-                    platform_sleep_ms((unsigned int)(wait ? wait : 1));
+                    if (js_quickjs_network_pending() > 0)
+                        js_quickjs_net_wait((unsigned int)(wait ? wait : 1));
+                    else
+                        platform_sleep_ms((unsigned int)(wait ? wait : 1));
                     continue;
                 }
+            }
+            /* A fetch() in flight: wait for its response like for a timer. */
+            if (js_quickjs_network_pending() > 0 &&
+                platform_get_time_ms() - pump_start <= 3000) {
+                js_quickjs_net_wait(50);
+                continue;
             }
             break;
         }
@@ -1403,6 +1412,17 @@ int main(int argc, char *argv[]) {
     }
     unsigned long long settle_start_ms = platform_get_time_ms();
     bool settle_final = false;
+    /* Recurring timers keep the loop busy long after the page stops
+     * changing.  Settle once nothing that renders has changed and no image
+     * has arrived for CYBER_QUIET_MS (default 1500 ms; 0 waits for the full
+     * budget). */
+    unsigned long long quiet_ms = 1500;
+    {
+        const char *qm = cyber_getenv("CYBER_QUIET_MS");
+        if (qm && *qm) quiet_ms = strtoull(qm, NULL, 10);
+    }
+    uint64_t last_stamp = dom_change_stamp();
+    unsigned long long last_change_ms = settle_start_ms;
     CP_BEGIN("quiescence-loop");
     while (loop_iterations < 100) {
         loop_iterations++;
@@ -1450,14 +1470,27 @@ int main(int argc, char *argv[]) {
         }
 
         if (!had_timers && !had_images && !g_dom_needs_layout &&
-            !image_cache_has_pending(image_cache)) {
+            !image_cache_has_pending(image_cache) && js_quickjs_network_pending() == 0) {
             break;
+        }
+        {
+            unsigned long long now = platform_get_time_ms();
+            uint64_t stamp = dom_change_stamp();
+            if (stamp != last_stamp || had_images || js_quickjs_network_pending() > 0) {
+                last_stamp = stamp;
+                last_change_ms = now;
+            } else if (quiet_ms && !g_dom_needs_layout && now - last_change_ms >= quiet_ms) {
+                printf("Page quiet for %llu ms after %d iterations (%llu ms); pending timers left running.\n",
+                       now - last_change_ms, loop_iterations, now - settle_start_ms);
+                break;
+            }
         }
         if (!had_timers && !had_images && !g_dom_needs_layout) {
             /* Only image fetches/decodes in flight: sleep until one makes
              * progress instead of spinning the settle loop. */
             CP_SCOPE("wait-images");
-            image_cache_wait_progress(image_cache, 100);
+            if (js_quickjs_network_pending() > 0) js_quickjs_net_wait(50);
+            else image_cache_wait_progress(image_cache, 100);
         }
         if (settle_final || platform_get_time_ms() - settle_start_ms > settle_budget_ms) {
             if (g_dom_needs_layout && !settle_final) {

@@ -56,6 +56,11 @@ void dom_enable_dynamic_script_loading(void) {
 
 uint64_t g_dom_layout_requests;
 
+uint64_t dom_change_stamp(void) {
+    return g_dom.structure_version + g_dom.attr_version + g_dom.text_version +
+           JS_watched_write_epoch + g_dom_layout_requests;
+}
+
 void dom_request_layout(void) {
     g_dom_needs_layout = 1;
     g_dom_layout_requests++;

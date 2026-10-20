@@ -358,6 +358,11 @@ extern volatile int g_dom_needs_layout;
  * store versions do not see. */
 extern uint64_t g_dom_layout_requests;
 
+/* Changes whenever the rendered document may have changed: store tree,
+ * attribute and text versions, watched (style) object writes and layout
+ * requests.  Equal stamps mean nothing a script did could show. */
+uint64_t dom_change_stamp(void);
+
 /* Mark the document as needing a layout pass. May be called from any thread
  * that holds the JS context (e.g. async image load callbacks). */
 void dom_request_layout(void);

@@ -1782,6 +1782,205 @@ static GCValue js_fetch_arrayBuffer(JSContextHandle ctx, GCValue this_val, int a
     return JS_Call(ctx, resolve_fn, promise_ctor, 1, args);
 }
 
+/* ============================================================================
+ * Asynchronous fetch(): each network request runs on its own worker thread so
+ * page scripts keep running while it is in flight (fetch used to block the JS
+ * thread for the whole round trip).  The main thread settles the promise in
+ * js_quickjs_net_poll(), called at the top of every event-loop turn.
+ * CYBER_SYNC_FETCH=1 runs the request inline instead.
+ * ============================================================================ */
+
+typedef struct NetReq {
+    struct NetReq *next;
+    /* Request (owned copies; the worker reads them). */
+    char *url, *method, *body;
+    size_t body_len;
+    char **headers;
+    int nheaders;
+    /* Response (written by the worker). */
+    PlatformHttpBuffer resp;
+    int status;
+    bool ok;
+    char err[256];
+    /* Settling (main thread only). */
+    GCValue resolve, reject;
+    bool cors_check, credentials_include;
+    char origin[512];
+} NetReq;
+
+static pthread_mutex_t g_net_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_net_cond = PTHREAD_COND_INITIALIZER;
+static NetReq *g_net_done;          /* finished, waiting to be settled */
+static int g_net_inflight;          /* started and not yet settled */
+
+static void net_req_free(NetReq *r)
+{
+    if (!r) return;
+    free(r->url);
+    free(r->method);
+    free(r->body);
+    for (int i = 0; i < r->nheaders; i++) free(r->headers[i]);
+    free(r->headers);
+    platform_http_free_buffer(&r->resp);
+    free(r);
+}
+
+static NetReq *net_req_new(const char *url, const char *method, const char *body, size_t body_len,
+                           const char **headers, int nheaders)
+{
+    NetReq *r = calloc(1, sizeof(*r));
+    if (!r) return NULL;
+    r->url = strdup(url);
+    r->method = strdup(method);
+    if (body && body_len) {
+        r->body = malloc(body_len + 1);
+        if (r->body) { memcpy(r->body, body, body_len); r->body[body_len] = '\0'; r->body_len = body_len; }
+    }
+    r->headers = calloc((size_t)(nheaders ? nheaders : 1), sizeof(char *));
+    for (int i = 0; r->headers && i < nheaders; i++) r->headers[r->nheaders++] = strdup(headers[i]);
+    if (!r->url || !r->method || !r->headers || (body && body_len && !r->body)) { net_req_free(r); return NULL; }
+    r->resolve = r->reject = JS_UNDEFINED;
+    return r;
+}
+
+static void net_req_run(NetReq *r)
+{
+    r->ok = platform_http_request(r->url, r->method, r->body, r->body_len,
+                                  (const char **)r->headers, (size_t)r->nheaders,
+                                  &r->resp, &r->status, r->err, sizeof(r->err));
+}
+
+static void *net_req_thread(void *arg)
+{
+    NetReq *r = arg;
+    net_req_run(r);
+    pthread_mutex_lock(&g_net_mutex);
+    r->next = g_net_done;
+    g_net_done = r;
+    pthread_cond_broadcast(&g_net_cond);
+    pthread_mutex_unlock(&g_net_mutex);
+    return NULL;
+}
+
+static void net_root(GCValue v, bool add)
+{
+    if (GC_VALUE_GET_TAG(v) >= 0) return;
+    GCHandle h = GC_VALUE_GET_HANDLE(v);
+    if (h == GC_HANDLE_NULL) return;
+    if (add) gc_add_root(h); else gc_remove_root(h);
+}
+
+static GCValue net_type_error(JSContextHandle ctx, const char *msg)
+{
+    GCValue ctor = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "TypeError");
+    GCValue m = JS_NewString(ctx, msg);
+    return JS_Call(ctx, ctor, JS_UNDEFINED, 1, &m);
+}
+
+/* Settle one finished request's promise (main thread). */
+static void net_req_settle(JSContextHandle ctx, NetReq *r)
+{
+    GCValue value;
+    bool ok = false;
+    if (r->ok && r->resp.data && r->status >= 200 && r->status < 300) {
+        char cors_err[256] = {0};
+        if (r->cors_check &&
+            !cors_validate_response_headers(r->resp.headers, r->origin, r->credentials_include,
+                                            cors_err, sizeof(cors_err))) {
+            platform_log(LOG_LEVEL_WARN, "js_fetch", "%s", cors_err);
+            value = net_type_error(ctx, cors_err);
+        } else {
+            value = create_http_response(ctx, r->url, &r->resp, r->status, "OK");
+            ok = true;
+        }
+    } else {
+        platform_log(LOG_LEVEL_WARN, "js_fetch", "Generic request failed for %s %s: HTTP %d / %s",
+                     r->method, r->url, r->status, r->err[0] ? r->err : "unknown");
+        value = net_type_error(ctx, r->err[0] ? r->err : "Network request failed");
+    }
+    JS_Call(ctx, ok ? r->resolve : r->reject, JS_UNDEFINED, 1, &value);
+    net_root(r->resolve, false);
+    net_root(r->reject, false);
+}
+
+/* Start `r` and return the promise it will settle.  Takes ownership of r. */
+static GCValue net_req_start(JSContextHandle ctx, NetReq *r)
+{
+    GCValue funcs[2] = { GC_UNDEFINED_INIT, GC_UNDEFINED_INIT };
+    GCValue promise = JS_NewPromiseCapability(ctx, funcs);
+    if (JS_IsException(promise)) { net_req_free(r); return promise; }
+    r->resolve = funcs[0];
+    r->reject = funcs[1];
+    net_root(r->resolve, true);
+    net_root(r->reject, true);
+
+    static int sync = -1;
+    if (sync < 0) {
+        const char *e = cyber_getenv("CYBER_SYNC_FETCH");
+        sync = e && e[0] == '1';
+    }
+    pthread_t th;
+    pthread_mutex_lock(&g_net_mutex);
+    g_net_inflight++;
+    pthread_mutex_unlock(&g_net_mutex);
+    if (sync || pthread_create(&th, NULL, net_req_thread, r) != 0) {
+        net_req_thread(r);          /* inline: settled on the next poll */
+    } else {
+        pthread_detach(th);
+    }
+    return promise;
+}
+
+int js_quickjs_network_pending(void)
+{
+    pthread_mutex_lock(&g_net_mutex);
+    int n = g_net_inflight;
+    pthread_mutex_unlock(&g_net_mutex);
+    return n;
+}
+
+int js_quickjs_net_poll(JSContextHandle ctx)
+{
+    pthread_mutex_lock(&g_net_mutex);
+    NetReq *list = g_net_done;
+    g_net_done = NULL;
+    pthread_mutex_unlock(&g_net_mutex);
+    if (!list) return 0;
+    /* Settle in start order (the list is newest first). */
+    NetReq *rev = NULL;
+    while (list) { NetReq *n = list->next; list->next = rev; rev = list; list = n; }
+    int count = 0;
+    while (rev) {
+        NetReq *n = rev->next;
+        net_req_settle(ctx, rev);
+        net_req_free(rev);
+        pthread_mutex_lock(&g_net_mutex);
+        g_net_inflight--;
+        pthread_mutex_unlock(&g_net_mutex);
+        count++;
+        rev = n;
+    }
+    return count;
+}
+
+void js_quickjs_net_wait(unsigned int ms)
+{
+    pthread_mutex_lock(&g_net_mutex);
+    if (!g_net_done && g_net_inflight > 0) {
+#ifdef _WIN32
+        SleepConditionVariableSRW(&g_net_cond, &g_net_mutex, (DWORD)ms, 0);
+#else
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec += ms / 1000;
+        ts.tv_nsec += (long)(ms % 1000) * 1000000L;
+        if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+        pthread_cond_timedwait(&g_net_cond, &g_net_mutex, &ts);
+#endif
+    }
+    pthread_mutex_unlock(&g_net_mutex);
+}
+
 GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     CP_ACC("fetch()");
     const char *url = NULL;
@@ -1972,41 +2171,16 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
             }
         }
 
-        PlatformHttpBuffer response_buffer = {0};
-        char error_buf[256] = {0};
-        int status_code = 0;
-        bool success = platform_http_request(url, method,
-                                              post_body && post_body_len > 0 ? post_body : NULL,
-                                              post_body_len,
-                                              headers, header_count,
-                                              &response_buffer, &status_code,
-                                              error_buf, sizeof(error_buf));
-
+        NetReq *req = net_req_new(url, method,
+                                  post_body && post_body_len > 0 ? post_body : NULL, post_body_len,
+                                  headers, header_count);
         if (post_body) free(post_body);
         post_body = NULL;
-
-        if (success && response_buffer.data && status_code >= 200 && status_code < 300) {
-            if (!same_origin && !cors_no_cors) {
-                char cors_err[256] = {0};
-                if (!cors_validate_response_headers(response_buffer.headers, origin, credentials_include,
-                                                    cors_err, sizeof(cors_err))) {
-                    platform_http_free_buffer(&response_buffer);
-                    platform_log(LOG_LEVEL_WARN, "js_fetch", "%s", cors_err);
-                    return reject_type_error(ctx, cors_err);
-                }
-            }
-            GCValue response_obj = create_http_response(ctx, url, &response_buffer, status_code, "OK");
-            platform_http_free_buffer(&response_buffer);
-            GCValue global = JS_GetGlobalObject(ctx);
-            GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
-            GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
-            GCValue args[1] = { response_obj };
-            return JS_Call(ctx, resolve_fn, promise_ctor, 1, args);
-        } else {
-            platform_http_free_buffer(&response_buffer);
-            platform_log(LOG_LEVEL_WARN, "js_fetch", "Generic request failed for %s %s: HTTP %d / %s", method, url ? url : "?", status_code, error_buf[0] ? error_buf : "unknown");
-            return reject_type_error(ctx, error_buf[0] ? error_buf : "Network request failed");
-        }
+        if (!req) return reject_type_error(ctx, "Network request failed");
+        req->cors_check = !same_origin && !cors_no_cors;
+        req->credentials_include = credentials_include;
+        snprintf(req->origin, sizeof(req->origin), "%s", origin);
+        return net_req_start(ctx, req);
     }
     
     if (post_body) free(post_body);

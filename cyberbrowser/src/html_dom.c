@@ -855,6 +855,32 @@ static char *js_object_get_string(JSContextHandle ctx, GCValue obj, const char *
     return strdup(s);
 }
 
+/* The object's own string data property `prop` (no getters, no prototype
+ * chain), or NULL. */
+static char *js_object_get_own_string(JSContextHandle ctx, GCValue obj, const char *prop) {
+    if (!JS_IsObject(obj)) return NULL;
+    JSAtom atom = JS_NewAtom(ctx, prop);
+    JSPropertyDescriptor desc = JS_PROPERTY_DESCRIPTOR_INIT;
+    int has = JS_GetOwnProperty(ctx, &desc, obj, atom);
+    JS_FreeAtom(ctx, atom);
+    if (has <= 0 || (desc.flags & JS_PROP_GETSET) || !JS_IsString(desc.value)) return NULL;
+    const char *s = JS_ToCString(ctx, desc.value);
+    char *out = s ? strdup(s) : NULL;
+    if (s) JS_FreeCString(ctx, s);
+    return out;
+}
+
+/* Elements whose script-only properties (value, a video's src, ...) live in
+ * native accessors rather than attributes. */
+static bool ser_has_native_props(const char *tag) {
+    static const char *const tags[] = {
+        "input", "textarea", "select", "option", "button", "video", "audio",
+        "source", "img", "canvas", "iframe", "embed", "object", NULL
+    };
+    for (int i = 0; tags[i]; i++) if (strcmp(tag, tags[i]) == 0) return true;
+    return false;
+}
+
 /* A node as the serializer sees it: a store node (with its wrapper, if it
  * has one), or a script object that is not bound to a node (ShadyDOM keeps
  * some shadow-tree nodes that way). */
@@ -1337,6 +1363,11 @@ static void html_serialize_element(JSContextHandle ctx, SerNode n, SerializeBuff
             { "height", "height" }, { "type", "type" }, { "value", "value" },
             { "name", "name" }, { "placeholder", "placeholder" }, { NULL, NULL }
         };
+        /* On a store element every accessor that matters reflects an
+         * attribute (checked first), except on the elements with native
+         * state; elsewhere only own data properties can add anything, and
+         * reading those skips the getters on the prototype chain. */
+        bool own_only = n.id && !ser_has_native_props(tag_lower);
         for (int i = 0; extra_attrs[i].prop; i++) {
             bool has;
             if (n.id) {
@@ -1347,7 +1378,8 @@ static void html_serialize_element(JSContextHandle ctx, SerNode n, SerializeBuff
                     if (strcasecmp(loose.names[k], extra_attrs[i].attr) == 0) { has = true; break; }
             }
             if (has) continue;
-            char *value = js_object_get_string(ctx, n.obj, extra_attrs[i].prop);
+            char *value = own_only ? js_object_get_own_string(ctx, n.obj, extra_attrs[i].prop)
+                                   : js_object_get_string(ctx, n.obj, extra_attrs[i].prop);
             if (value && value[0]) serialize_buf_append_attr(buf, extra_attrs[i].attr, value);
             free(value);
         }
@@ -1495,7 +1527,10 @@ HtmlDocument *html_document_from_js_dom_if_changed(JSContextHandle ctx, GCValue 
     buf.track = true;
     buf.omit_script_text = true;
     serialize_buf_append(&buf, "<!doctype html>\n");
-    html_serialize_node(ctx, ser_of_value(doc_elem), &buf);
+    {
+        CP_ACC("snapshot: serialize");
+        html_serialize_node(ctx, ser_of_value(doc_elem), &buf);
+    }
 
     NodeId dn = dom_node_of(js_doc);
     if (dom_kind(dn) != DOM_K_DOCUMENT) dn = g_dom_document;
@@ -1510,7 +1545,11 @@ HtmlDocument *html_document_from_js_dom_if_changed(JSContextHandle ctx, GCValue 
         }
         *key = k;
     }
-    HtmlDocument *doc = html_parse(buf.data, buf.len);
+    HtmlDocument *doc;
+    {
+        CP_ACC("snapshot: parse");
+        doc = html_parse(buf.data, buf.len);
+    }
     if (doc) map_store_ids(doc, &buf);
     serialize_buf_free(&buf);
     g_render_snapshots++;

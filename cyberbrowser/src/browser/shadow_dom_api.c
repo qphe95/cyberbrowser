@@ -169,17 +169,38 @@ GCValue js_shadow_root_get_parent_node_wrapper(JSContextHandle ctx, GCValue this
     return JS_NULL;
 }
 
+/* Shadow roots that have (or may get) adopted stylesheets, in registration
+ * order, kept in window.__cyber_adopting_roots so layout visits just these
+ * instead of walking every element for shadow roots. */
+static void shadow_root_register_adopting(JSContextHandle ctx, GCValue root) {
+    GCValue flag = JS_GetPropertyStr(ctx, root, "__cyber_adopt_reg");
+    if (JS_ToBool(ctx, flag)) return;
+    JS_SetPropertyStr(ctx, root, "__cyber_adopt_reg", JS_TRUE);
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue roots = JS_GetPropertyStr(ctx, global, "__cyber_adopting_roots");
+    if (!JS_IsArray(ctx, roots)) {
+        roots = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, global, "__cyber_adopting_roots", roots);
+    }
+    GCValue len_val = JS_GetPropertyStr(ctx, roots, "length");
+    uint32_t n = 0;
+    JS_ToUint32(ctx, &n, len_val);
+    JS_SetPropertyUint32(ctx, roots, n, root);
+}
+
 GCValue js_shadow_root_get_adopted_style_sheets(JSContextHandle ctx, GCValue this_val) {
     GCValue sheets = JS_GetPropertyStr(ctx, this_val, "__adoptedStyleSheets");
     if (JS_IsUndefined(sheets) || JS_IsNull(sheets) || !JS_IsArray(ctx, sheets)) {
         sheets = JS_NewArray(ctx);
         JS_SetPropertyStr(ctx, this_val, "__adoptedStyleSheets", sheets);
+        shadow_root_register_adopting(ctx, this_val);   /* it may be pushed to */
     }
     return sheets;
 }
 
 GCValue js_shadow_root_set_adopted_style_sheets(JSContextHandle ctx, GCValue this_val, GCValue val) {
     JS_SetPropertyStr(ctx, this_val, "__adoptedStyleSheets", val);
+    shadow_root_register_adopting(ctx, this_val);
 
     // Assign a unique scope class to the host element.  The layout engine uses
     // this class to prefix every selector from these adopted sheets so they only
