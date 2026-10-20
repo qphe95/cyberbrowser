@@ -267,4 +267,7 @@ CMakeFiles/cyberbrowser_lib.dir/src/browser/url_api.c.obj: \
  C:/msys64/mingw64/include/mstcpip.h C:/msys64/mingw64/include/direct.h \
  C:/msys64/mingw64/include/io.h \
  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/win32/pthread.h \
- C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/url_utils.h
+ C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/url_utils.h \
+ C:/msys64/mingw64/include/strings.h \
+ C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/url_whatwg.h \
+ C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\browser\url_api_js.inc

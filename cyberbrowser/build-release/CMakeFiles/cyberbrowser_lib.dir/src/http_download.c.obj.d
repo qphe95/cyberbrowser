@@ -9,6 +9,11 @@ CMakeFiles/cyberbrowser_lib.dir/src/http_download.c.obj: \
  C:/msys64/mingw64/include/_mingw_secapi.h \
  C:/msys64/mingw64/include/vadefs.h \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\tls_client.h \
+ C:/msys64/mingw64/include/time.h C:/msys64/mingw64/include/sys/timeb.h \
+ C:/msys64/mingw64/include/sec_api/sys/timeb_s.h \
+ C:/msys64/mingw64/include/_timeval.h \
+ C:/msys64/mingw64/include/pthread_time.h \
+ C:/msys64/mingw64/include/pthread_compat.h \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\win32_compat.h \
  C:/msys64/mingw64/include/winsock2.h \
  C:/msys64/mingw64/include/_mingw_unicode.h \
@@ -209,7 +214,6 @@ CMakeFiles/cyberbrowser_lib.dir/src/http_download.c.obj: \
  C:/msys64/mingw64/include/winsvc.h C:/msys64/mingw64/include/mcx.h \
  C:/msys64/mingw64/include/imm.h \
  C:/msys64/mingw64/include/psdk_inc/_ws1_undef.h \
- C:/msys64/mingw64/include/_timeval.h \
  C:/msys64/mingw64/include/_bsd_types.h \
  C:/msys64/mingw64/include/inaddr.h \
  C:/msys64/mingw64/include/psdk_inc/_socket_types.h \
@@ -221,13 +225,8 @@ CMakeFiles/cyberbrowser_lib.dir/src/http_download.c.obj: \
  C:/msys64/mingw64/include/qos.h C:/msys64/mingw64/include/ws2tcpip.h \
  C:/msys64/mingw64/include/ws2ipdef.h C:/msys64/mingw64/include/in6addr.h \
  C:/msys64/mingw64/include/psdk_inc/_ip_mreq1.h \
- C:/msys64/mingw64/include/mstcpip.h C:/msys64/mingw64/include/time.h \
- C:/msys64/mingw64/include/sys/timeb.h \
- C:/msys64/mingw64/include/sec_api/sys/timeb_s.h \
- C:/msys64/mingw64/include/pthread_time.h \
- C:/msys64/mingw64/include/pthread_compat.h \
- C:/msys64/mingw64/include/direct.h C:/msys64/mingw64/include/io.h \
- C:/msys64/mingw64/include/_mingw_off_t.h \
+ C:/msys64/mingw64/include/mstcpip.h C:/msys64/mingw64/include/direct.h \
+ C:/msys64/mingw64/include/io.h C:/msys64/mingw64/include/_mingw_off_t.h \
  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/win32/pthread.h \
  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/include/mbedtls/net_sockets.h \
  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/drivers/builtin/include/mbedtls/private_access.h \
@@ -298,5 +297,6 @@ CMakeFiles/cyberbrowser_lib.dir/src/http_download.c.obj: \
  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/include/mbedtls/x509.h \
  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/include/mbedtls/asn1.h \
  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/include/mbedtls/x509_crl.h \
+ C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\url_whatwg.h \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\utf8_filename.h \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\platform.h

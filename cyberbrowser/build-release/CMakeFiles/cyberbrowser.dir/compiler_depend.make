@@ -324,6 +324,7 @@ CMakeFiles/cyberbrowser.dir/src/cyberbrowser_main.c.obj: C:/Users/qingping/Docum
   C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/xsaveoptintrin.h \
   C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/xsavesintrin.h \
   C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/xtestintrin.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser/image_api.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser_api_impl.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser_api_impl_handle_helpers.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser_api_impl_internal.h \
@@ -850,6 +851,8 @@ C:/msys64/mingw64/include/securityappcontainer.h:
 C:/msys64/mingw64/include/securitybaseapi.h:
 
 C:/msys64/mingw64/include/time.h:
+
+C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser/image_api.h:
 
 C:/msys64/mingw64/include/windef.h:
 

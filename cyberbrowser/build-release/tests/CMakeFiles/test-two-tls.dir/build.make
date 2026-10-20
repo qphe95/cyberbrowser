@@ -96,6 +96,8 @@ test__two__tls_EXTERNAL_OBJECTS =
 tests/test-two-tls.exe: tests/CMakeFiles/test-two-tls.dir/test_two_tls.c.obj
 tests/test-two-tls.exe: tests/CMakeFiles/test-two-tls.dir/build.make
 tests/test-two-tls.exe: libcyberbrowser_lib.a
+tests/test-two-tls.exe: libjpeg-turbo/lib/libturbojpeg.a
+tests/test-two-tls.exe: src/third_party/libwebp/libwebpdecoder.a
 tests/test-two-tls.exe: tests/CMakeFiles/test-two-tls.dir/linkLibs.rsp
 tests/test-two-tls.exe: tests/CMakeFiles/test-two-tls.dir/objects1.rsp
 tests/test-two-tls.exe: tests/CMakeFiles/test-two-tls.dir/link.txt

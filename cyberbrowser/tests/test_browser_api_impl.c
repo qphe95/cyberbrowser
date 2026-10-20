@@ -2277,6 +2277,48 @@ TEST(test_timer_and_promise_pump) {
     return true;
 }
 
+/* fetch(request) uses the request's internal state, not its public properties:
+ * redefining url/method/body on a data: Request (as YouTube's integrity probe
+ * does) must still load the data: URL. */
+TEST(test_fetch_request_internal_state_data_url) {
+    JSContextHandle ctx = get_test_context();
+    if (!SAFE_VALID(ctx)) return false;
+
+    const char *js_code = "\n"
+        "        var fetchResult = null;\n"
+        "        var req = new Request('data:application/json;base64,' + btoa('{\"a\":[1,2],\"b\":\"x\"}'));\n"
+        "        Object.defineProperty(req, 'url', {get: function(){ return 'https://example.invalid/post'; }});\n"
+        "        Object.defineProperty(req, 'method', {get: function(){ return 'POST'; }});\n"
+        "        Object.defineProperty(req, 'body', {get: function(){ return new ReadableStream; }});\n"
+        "        var copy = new Request(req);\n"
+        "        var copyOk = copy.url.indexOf('data:') === 0 && copy.method === 'GET';\n"
+        "        fetch(req).then(function(r){ return r.json(); })\n"
+        "            .then(function(j){ fetchResult = copyOk && JSON.stringify(j); },\n"
+        "                  function(e){ fetchResult = 'error: ' + e; });\n"
+        "        fetch('data:text/plain,hi%20there').then(function(r){ return r.text(); })\n"
+        "            .then(function(t){ textResult = t; }, function(e){ textResult = 'error: ' + e; });\n"
+        "        var textResult = null;\n"
+        "        true;\n"
+        "    ";
+    GCValue result = JS_Eval(ctx, js_code, strlen(js_code), "<test>", 0);
+    if (JS_IsException(result)) return false;
+
+    JSRuntimeHandle rt = JS_GetRuntime(ctx);
+    JSContextHandle pctx = GC_HANDLE_NULL;
+    while (JS_ExecutePendingJob(rt, &pctx) > 0) {}
+
+    const char *check_js = "fetchResult === '{\"a\":[1,2],\"b\":\"x\"}' && textResult === 'hi there';";
+    GCValue check_result = JS_Eval(ctx, check_js, strlen(check_js), "<test>", 0);
+    if (!JS_ToBool(ctx, check_result)) {
+        const char *dbg_js = "String(fetchResult) + ' | ' + String(textResult)";
+        GCValue dbg = JS_Eval(ctx, dbg_js, strlen(dbg_js), "<test>", 0);
+        const char *s = JS_ToCString(ctx, dbg);
+        printf("    got: %s\n", s ? s : "(null)");
+    }
+    ASSERT_TRUE(JS_ToBool(ctx, check_result));
+    return true;
+}
+
 /* Test classList reflects and modifies className */
 TEST(test_class_list_functional) {
     JSContextHandle ctx = get_test_context();
@@ -5011,6 +5053,7 @@ void run_browser_api_impl_tests(void) {
     RUN_TEST(test_window_add_event_listener_real);
     RUN_TEST(test_dom_content_loaded_and_load_events);
     RUN_TEST(test_timer_and_promise_pump);
+    RUN_TEST(test_fetch_request_internal_state_data_url);
     RUN_TEST(test_class_list_functional);
     RUN_TEST(test_class_list_remove);
     RUN_TEST(test_text_content);

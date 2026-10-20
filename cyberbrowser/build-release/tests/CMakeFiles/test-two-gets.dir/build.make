@@ -96,6 +96,8 @@ test__two__gets_EXTERNAL_OBJECTS =
 tests/test-two-gets.exe: tests/CMakeFiles/test-two-gets.dir/test_two_gets.c.obj
 tests/test-two-gets.exe: tests/CMakeFiles/test-two-gets.dir/build.make
 tests/test-two-gets.exe: libcyberbrowser_lib.a
+tests/test-two-gets.exe: libjpeg-turbo/lib/libturbojpeg.a
+tests/test-two-gets.exe: src/third_party/libwebp/libwebpdecoder.a
 tests/test-two-gets.exe: tests/CMakeFiles/test-two-gets.dir/linkLibs.rsp
 tests/test-two-gets.exe: tests/CMakeFiles/test-two-gets.dir/objects1.rsp
 tests/test-two-gets.exe: tests/CMakeFiles/test-two-gets.dir/link.txt

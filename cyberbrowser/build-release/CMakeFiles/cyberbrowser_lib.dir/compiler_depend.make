@@ -871,6 +871,7 @@ CMakeFiles/cyberbrowser_lib.dir/src/browser/dom_api.c.obj: C:/Users/qingping/Doc
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/css_parser.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/css_style.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/cyber_env.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/cyber_profile.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/dom_fetch.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/dom_js.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/dom_parse.h \
@@ -996,6 +997,7 @@ CMakeFiles/cyberbrowser_lib.dir/src/browser/dom_api.c.obj: C:/Users/qingping/Doc
   C:/msys64/mingw64/include/stralign.h \
   C:/msys64/mingw64/include/string.h \
   C:/msys64/mingw64/include/stringapiset.h \
+  C:/msys64/mingw64/include/strings.h \
   C:/msys64/mingw64/include/swprintf.inl \
   C:/msys64/mingw64/include/synchapi.h \
   C:/msys64/mingw64/include/sys/timeb.h \
@@ -1992,6 +1994,180 @@ CMakeFiles/cyberbrowser_lib.dir/src/browser/geolocation_api.c.obj: C:/Users/qing
   C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/xsaveoptintrin.h \
   C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/xsavesintrin.h \
   C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/xtestintrin.h
+
+CMakeFiles/cyberbrowser_lib.dir/src/browser/image_api.c.obj: C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser/image_api.c \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser_api_impl.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser_api_impl_handle_helpers.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser_api_impl_types.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/css_layout.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/css_parser.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/css_style.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/display_list.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/dom_store.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/dom_wrap.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/frame_arena.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/html_dom.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/image_cache.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/lockfree_hash_table.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/preorder_compaction_array.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/quickjs/cutils.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/quickjs/js_atom_cache.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/quickjs/list.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/quickjs/quickjs-internal.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/quickjs/quickjs.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/quickjs/quickjs_gc_unified.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/quickjs/quickjs_handle_helpers.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/quickjs/quickjs_handles.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/quickjs/quickjs_types.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/url_whatwg.h \
+  C:/msys64/mingw64/include/_mingw.h \
+  C:/msys64/mingw64/include/_mingw_mac.h \
+  C:/msys64/mingw64/include/_mingw_off_t.h \
+  C:/msys64/mingw64/include/_mingw_secapi.h \
+  C:/msys64/mingw64/include/corecrt.h \
+  C:/msys64/mingw64/include/corecrt_memory.h \
+  C:/msys64/mingw64/include/corecrt_stdio_config.h \
+  C:/msys64/mingw64/include/corecrt_wstdlib.h \
+  C:/msys64/mingw64/include/crtdefs.h \
+  C:/msys64/mingw64/include/errno.h \
+  C:/msys64/mingw64/include/intrin.h \
+  C:/msys64/mingw64/include/inttypes.h \
+  C:/msys64/mingw64/include/limits.h \
+  C:/msys64/mingw64/include/malloc.h \
+  C:/msys64/mingw64/include/psdk_inc/intrin-impl.h \
+  C:/msys64/mingw64/include/sec_api/stdio_s.h \
+  C:/msys64/mingw64/include/sec_api/stdlib_s.h \
+  C:/msys64/mingw64/include/sec_api/string_s.h \
+  C:/msys64/mingw64/include/setjmp.h \
+  C:/msys64/mingw64/include/stddef.h \
+  C:/msys64/mingw64/include/stdint.h \
+  C:/msys64/mingw64/include/stdio.h \
+  C:/msys64/mingw64/include/stdlib.h \
+  C:/msys64/mingw64/include/string.h \
+  C:/msys64/mingw64/include/swprintf.inl \
+  C:/msys64/mingw64/include/vadefs.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/adxintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/ammintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/amxavx512intrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/amxbf16intrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/amxcomplexintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/amxfp16intrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/amxfp8intrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/amxint8intrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/amxmovrsintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/amxtf32intrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/amxtileintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx10_2bf16intrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx10_2convertintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx10_2copyintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx10_2mediaintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx10_2minmaxintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx10_2satcvtintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx2intrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512bf16intrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512bf16vlintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512bitalgintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512bitalgvlintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512bmmintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512bmmvlintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512bwintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512cdintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512dqintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512fintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512fp16intrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512fp16vlintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512ifmaintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512ifmavlintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512vbmi2intrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512vbmi2vlintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512vbmiintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512vbmivlintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512vlbwintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512vldqintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512vlintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512vnniintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512vnnivlintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512vp2intersectintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512vp2intersectvlintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512vpopcntdqintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512vpopcntdqvlintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avxifmaintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avxintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avxneconvertintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avxvnniint16intrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avxvnniint8intrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avxvnniintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/bmi2intrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/bmiintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/cetintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/cldemoteintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/clflushoptintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/clwbintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/clzerointrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/cmpccxaddintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/cpuid.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/emmintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/enqcmdintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/f16cintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/fma4intrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/fmaintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/fxsrintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/gfniintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/hresetintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/ia32intrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/immintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/keylockerintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/limits.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/lwpintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/lzcntintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/mm3dnow.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/mm_malloc.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/mmintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/movdirintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/movrsintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/mwaitintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/mwaitxintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/pconfigintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/pkuintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/pmmintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/popcntintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/prfchiintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/prfchwintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/raointintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/rdseedintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/rtmintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/serializeintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/sgxintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/sha512intrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/shaintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/sm3intrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/sm4intrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/smmintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/stdatomic.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/stdbool.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/stddef.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/stdint.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/syslimits.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/tbmintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/tmmintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/tsxldtrkintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/uintrintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/usermsrintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/vaesintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/vpclmulqdqintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/waitpkgintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/wbnoinvdintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/wmmintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/x86gprintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/x86intrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/xmmintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/xopintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/xsavecintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/xsaveintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/xsaveoptintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/xsavesintrin.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/xtestintrin.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser/image_api.h
 
 CMakeFiles/cyberbrowser_lib.dir/src/browser/media_source_api.c.obj: C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser/media_source_api.c \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser_api_impl.h \
@@ -3753,6 +3929,7 @@ CMakeFiles/cyberbrowser_lib.dir/src/browser/url_api.c.obj: C:/Users/qingping/Doc
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/quickjs/quickjs_handles.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/quickjs/quickjs_types.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/url_utils.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/url_whatwg.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/win32/pthread.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/win32_compat.h \
   C:/msys64/mingw64/include/_bsd_types.h \
@@ -3853,6 +4030,7 @@ CMakeFiles/cyberbrowser_lib.dir/src/browser/url_api.c.obj: C:/Users/qingping/Doc
   C:/msys64/mingw64/include/stralign.h \
   C:/msys64/mingw64/include/string.h \
   C:/msys64/mingw64/include/stringapiset.h \
+  C:/msys64/mingw64/include/strings.h \
   C:/msys64/mingw64/include/swprintf.inl \
   C:/msys64/mingw64/include/synchapi.h \
   C:/msys64/mingw64/include/sys/timeb.h \
@@ -4008,7 +4186,8 @@ CMakeFiles/cyberbrowser_lib.dir/src/browser/url_api.c.obj: C:/Users/qingping/Doc
   C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/xsaveintrin.h \
   C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/xsaveoptintrin.h \
   C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/xsavesintrin.h \
-  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/xtestintrin.h
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/xtestintrin.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser/url_api_js.inc
 
 CMakeFiles/cyberbrowser_lib.dir/src/browser_api_impl.c.obj: C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser_api_impl.c \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/lockfree_hash_table.h \
@@ -4295,6 +4474,7 @@ CMakeFiles/cyberbrowser_lib.dir/src/browser_api_impl.c.obj: C:/Users/qingping/Do
   C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/xsaveoptintrin.h \
   C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/xsavesintrin.h \
   C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/xtestintrin.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser/image_api.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser_api_impl.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser_api_impl_handle_helpers.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser_api_impl_internal.h \
@@ -4422,6 +4602,7 @@ CMakeFiles/cyberbrowser_lib.dir/src/css_layout.c.obj: C:/Users/qingping/Document
   C:/msys64/mingw64/include/stralign.h \
   C:/msys64/mingw64/include/string.h \
   C:/msys64/mingw64/include/stringapiset.h \
+  C:/msys64/mingw64/include/strings.h \
   C:/msys64/mingw64/include/swprintf.inl \
   C:/msys64/mingw64/include/synchapi.h \
   C:/msys64/mingw64/include/sys/timeb.h \
@@ -4591,6 +4772,7 @@ CMakeFiles/cyberbrowser_lib.dir/src/css_layout.c.obj: C:/Users/qingping/Document
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/frame_arena.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/html_dom.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/http_download.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/image_cache.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/job_system.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/lockfree_hash_table.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/platform.h \
@@ -4708,6 +4890,7 @@ CMakeFiles/cyberbrowser_lib.dir/src/css_parser.c.obj: C:/Users/qingping/Document
   C:/msys64/mingw64/include/stralign.h \
   C:/msys64/mingw64/include/string.h \
   C:/msys64/mingw64/include/stringapiset.h \
+  C:/msys64/mingw64/include/strings.h \
   C:/msys64/mingw64/include/swprintf.inl \
   C:/msys64/mingw64/include/synchapi.h \
   C:/msys64/mingw64/include/sys/timeb.h \
@@ -5487,6 +5670,7 @@ CMakeFiles/cyberbrowser_lib.dir/src/display_list.c.obj: C:/Users/qingping/Docume
   C:/msys64/mingw64/include/stralign.h \
   C:/msys64/mingw64/include/string.h \
   C:/msys64/mingw64/include/stringapiset.h \
+  C:/msys64/mingw64/include/strings.h \
   C:/msys64/mingw64/include/swprintf.inl \
   C:/msys64/mingw64/include/synchapi.h \
   C:/msys64/mingw64/include/sys/timeb.h \
@@ -5655,6 +5839,7 @@ CMakeFiles/cyberbrowser_lib.dir/src/display_list.c.obj: C:/Users/qingping/Docume
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/preorder_compaction_array.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/text_shaper.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/url_utils.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/url_whatwg.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/win32_compat.h
 
 CMakeFiles/cyberbrowser_lib.dir/src/dom_fetch.c.obj: C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/dom_fetch.c \
@@ -7177,6 +7362,7 @@ CMakeFiles/cyberbrowser_lib.dir/src/html_media_extract.c.obj: C:/Users/qingping/
   C:/msys64/mingw64/include/stralign.h \
   C:/msys64/mingw64/include/string.h \
   C:/msys64/mingw64/include/stringapiset.h \
+  C:/msys64/mingw64/include/strings.h \
   C:/msys64/mingw64/include/swprintf.inl \
   C:/msys64/mingw64/include/synchapi.h \
   C:/msys64/mingw64/include/sys/timeb.h \
@@ -7659,6 +7845,7 @@ CMakeFiles/cyberbrowser_lib.dir/src/http_download.c.obj: C:/Users/qingping/Docum
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/http_download.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/platform.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/tls_client.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/url_whatwg.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/utf8_filename.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/win32_compat.h
 
@@ -7666,6 +7853,9 @@ CMakeFiles/cyberbrowser_lib.dir/src/image_cache.c.obj: C:/Users/qingping/Documen
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/nanosvg/nanosvg.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/nanosvg/nanosvgrast.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/stb/stb_image.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/third_party/libjpeg-turbo/turbojpeg.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/third_party/libwebp/src/webp/decode.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/third_party/libwebp/src/webp/types.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/win32/pthread.h \
   C:/msys64/mingw64/include/_bsd_types.h \
   C:/msys64/mingw64/include/_mingw.h \
@@ -7679,12 +7869,7 @@ CMakeFiles/cyberbrowser_lib.dir/src/image_cache.c.obj: C:/Users/qingping/Documen
   C:/msys64/mingw64/include/apisetcconv.h \
   C:/msys64/mingw64/include/assert.h \
   C:/msys64/mingw64/include/basetsd.h \
-  C:/msys64/mingw64/include/bcrypt.h \
   C:/msys64/mingw64/include/bemapiset.h \
-  C:/msys64/mingw64/include/cderr.h \
-  C:/msys64/mingw64/include/cguid.h \
-  C:/msys64/mingw64/include/combaseapi.h \
-  C:/msys64/mingw64/include/commdlg.h \
   C:/msys64/mingw64/include/concurrencysal.h \
   C:/msys64/mingw64/include/consoleapi.h \
   C:/msys64/mingw64/include/consoleapi2.h \
@@ -7697,12 +7882,8 @@ CMakeFiles/cyberbrowser_lib.dir/src/image_cache.c.obj: C:/Users/qingping/Documen
   C:/msys64/mingw64/include/crtdefs.h \
   C:/msys64/mingw64/include/ctype.h \
   C:/msys64/mingw64/include/datetimeapi.h \
-  C:/msys64/mingw64/include/dde.h \
-  C:/msys64/mingw64/include/ddeml.h \
   C:/msys64/mingw64/include/debugapi.h \
   C:/msys64/mingw64/include/direct.h \
-  C:/msys64/mingw64/include/dlgs.h \
-  C:/msys64/mingw64/include/dpapi.h \
   C:/msys64/mingw64/include/driverspecs.h \
   C:/msys64/mingw64/include/errhandlingapi.h \
   C:/msys64/mingw64/include/errno.h \
@@ -7717,47 +7898,27 @@ CMakeFiles/cyberbrowser_lib.dir/src/image_cache.c.obj: C:/Users/qingping/Documen
   C:/msys64/mingw64/include/in6addr.h \
   C:/msys64/mingw64/include/inaddr.h \
   C:/msys64/mingw64/include/interlockedapi.h \
+  C:/msys64/mingw64/include/inttypes.h \
   C:/msys64/mingw64/include/io.h \
   C:/msys64/mingw64/include/ioapiset.h \
   C:/msys64/mingw64/include/jobapi.h \
-  C:/msys64/mingw64/include/joystickapi.h \
   C:/msys64/mingw64/include/ktmtypes.h \
   C:/msys64/mingw64/include/libloaderapi.h \
   C:/msys64/mingw64/include/limits.h \
-  C:/msys64/mingw64/include/lzexpand.h \
   C:/msys64/mingw64/include/malloc.h \
   C:/msys64/mingw64/include/math.h \
-  C:/msys64/mingw64/include/mciapi.h \
   C:/msys64/mingw64/include/mcx.h \
   C:/msys64/mingw64/include/memoryapi.h \
   C:/msys64/mingw64/include/minwinbase.h \
   C:/msys64/mingw64/include/minwindef.h \
-  C:/msys64/mingw64/include/mmeapi.h \
-  C:/msys64/mingw64/include/mmiscapi.h \
-  C:/msys64/mingw64/include/mmiscapi2.h \
-  C:/msys64/mingw64/include/mmsyscom.h \
-  C:/msys64/mingw64/include/mmsystem.h \
   C:/msys64/mingw64/include/mstcpip.h \
-  C:/msys64/mingw64/include/msxml.h \
   C:/msys64/mingw64/include/namedpipeapi.h \
   C:/msys64/mingw64/include/namespaceapi.h \
-  C:/msys64/mingw64/include/nb30.h \
-  C:/msys64/mingw64/include/ncrypt.h \
-  C:/msys64/mingw64/include/oaidl.h \
-  C:/msys64/mingw64/include/objbase.h \
-  C:/msys64/mingw64/include/objidl.h \
-  C:/msys64/mingw64/include/objidlbase.h \
-  C:/msys64/mingw64/include/ole2.h \
-  C:/msys64/mingw64/include/oleauto.h \
-  C:/msys64/mingw64/include/oleidl.h \
-  C:/msys64/mingw64/include/playsoundapi.h \
   C:/msys64/mingw64/include/poppack.h \
   C:/msys64/mingw64/include/processenv.h \
   C:/msys64/mingw64/include/processthreadsapi.h \
   C:/msys64/mingw64/include/processtopologyapi.h \
   C:/msys64/mingw64/include/profileapi.h \
-  C:/msys64/mingw64/include/propidl.h \
-  C:/msys64/mingw64/include/prsht.h \
   C:/msys64/mingw64/include/psdk_inc/_fd_types.h \
   C:/msys64/mingw64/include/psdk_inc/_ip_mreq1.h \
   C:/msys64/mingw64/include/psdk_inc/_ip_types.h \
@@ -7765,7 +7926,6 @@ CMakeFiles/cyberbrowser_lib.dir/src/image_cache.c.obj: C:/Users/qingping/Documen
   C:/msys64/mingw64/include/psdk_inc/_ws1_undef.h \
   C:/msys64/mingw64/include/psdk_inc/_wsa_errnos.h \
   C:/msys64/mingw64/include/psdk_inc/_wsadata.h \
-  C:/msys64/mingw64/include/psdk_inc/_xmitfile.h \
   C:/msys64/mingw64/include/psdk_inc/intrin-impl.h \
   C:/msys64/mingw64/include/pshpack1.h \
   C:/msys64/mingw64/include/pshpack2.h \
@@ -7776,15 +7936,6 @@ CMakeFiles/cyberbrowser_lib.dir/src/image_cache.c.obj: C:/Users/qingping/Documen
   C:/msys64/mingw64/include/qos.h \
   C:/msys64/mingw64/include/realtimeapiset.h \
   C:/msys64/mingw64/include/reason.h \
-  C:/msys64/mingw64/include/rpc.h \
-  C:/msys64/mingw64/include/rpcasync.h \
-  C:/msys64/mingw64/include/rpcdce.h \
-  C:/msys64/mingw64/include/rpcdcep.h \
-  C:/msys64/mingw64/include/rpcndr.h \
-  C:/msys64/mingw64/include/rpcnsi.h \
-  C:/msys64/mingw64/include/rpcnsip.h \
-  C:/msys64/mingw64/include/rpcnterr.h \
-  C:/msys64/mingw64/include/rpcsal.h \
   C:/msys64/mingw64/include/sal.h \
   C:/msys64/mingw64/include/sdkddkver.h \
   C:/msys64/mingw64/include/sec_api/stdio_s.h \
@@ -7794,8 +7945,6 @@ CMakeFiles/cyberbrowser_lib.dir/src/image_cache.c.obj: C:/Users/qingping/Documen
   C:/msys64/mingw64/include/sec_api/sys/timeb_s.h \
   C:/msys64/mingw64/include/securityappcontainer.h \
   C:/msys64/mingw64/include/securitybaseapi.h \
-  C:/msys64/mingw64/include/servprov.h \
-  C:/msys64/mingw64/include/shellapi.h \
   C:/msys64/mingw64/include/specstrings.h \
   C:/msys64/mingw64/include/stdarg.h \
   C:/msys64/mingw64/include/stddef.h \
@@ -7805,6 +7954,7 @@ CMakeFiles/cyberbrowser_lib.dir/src/image_cache.c.obj: C:/Users/qingping/Documen
   C:/msys64/mingw64/include/stralign.h \
   C:/msys64/mingw64/include/string.h \
   C:/msys64/mingw64/include/stringapiset.h \
+  C:/msys64/mingw64/include/strings.h \
   C:/msys64/mingw64/include/swprintf.inl \
   C:/msys64/mingw64/include/synchapi.h \
   C:/msys64/mingw64/include/sys/timeb.h \
@@ -7813,12 +7963,8 @@ CMakeFiles/cyberbrowser_lib.dir/src/image_cache.c.obj: C:/Users/qingping/Documen
   C:/msys64/mingw64/include/threadpoolapiset.h \
   C:/msys64/mingw64/include/threadpoollegacyapiset.h \
   C:/msys64/mingw64/include/time.h \
-  C:/msys64/mingw64/include/timeapi.h \
   C:/msys64/mingw64/include/timezoneapi.h \
   C:/msys64/mingw64/include/tvout.h \
-  C:/msys64/mingw64/include/unknwn.h \
-  C:/msys64/mingw64/include/unknwnbase.h \
-  C:/msys64/mingw64/include/urlmon.h \
   C:/msys64/mingw64/include/utilapiset.h \
   C:/msys64/mingw64/include/vadefs.h \
   C:/msys64/mingw64/include/virtdisk.h \
@@ -7826,23 +7972,15 @@ CMakeFiles/cyberbrowser_lib.dir/src/image_cache.c.obj: C:/Users/qingping/Documen
   C:/msys64/mingw64/include/winbase.h \
   C:/msys64/mingw64/include/wincon.h \
   C:/msys64/mingw64/include/wincontypes.h \
-  C:/msys64/mingw64/include/wincrypt.h \
   C:/msys64/mingw64/include/windef.h \
   C:/msys64/mingw64/include/windows.h \
-  C:/msys64/mingw64/include/winefs.h \
   C:/msys64/mingw64/include/winerror.h \
   C:/msys64/mingw64/include/wingdi.h \
-  C:/msys64/mingw64/include/winioctl.h \
   C:/msys64/mingw64/include/winnetwk.h \
   C:/msys64/mingw64/include/winnls.h \
   C:/msys64/mingw64/include/winnt.h \
-  C:/msys64/mingw64/include/winperf.h \
   C:/msys64/mingw64/include/winreg.h \
-  C:/msys64/mingw64/include/winscard.h \
-  C:/msys64/mingw64/include/winsmcrd.h \
-  C:/msys64/mingw64/include/winsock.h \
   C:/msys64/mingw64/include/winsock2.h \
-  C:/msys64/mingw64/include/winspool.h \
   C:/msys64/mingw64/include/winsvc.h \
   C:/msys64/mingw64/include/winuser.h \
   C:/msys64/mingw64/include/winver.h \
@@ -7851,8 +7989,6 @@ CMakeFiles/cyberbrowser_lib.dir/src/image_cache.c.obj: C:/Users/qingping/Documen
   C:/msys64/mingw64/include/ws2def.h \
   C:/msys64/mingw64/include/ws2ipdef.h \
   C:/msys64/mingw64/include/ws2tcpip.h \
-  C:/msys64/mingw64/include/wtypes.h \
-  C:/msys64/mingw64/include/wtypesbase.h \
   C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/adxintrin.h \
   C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/ammintrin.h \
   C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/amxavx512intrin.h \
@@ -7950,6 +8086,7 @@ CMakeFiles/cyberbrowser_lib.dir/src/image_cache.c.obj: C:/Users/qingping/Documen
   C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/sm4intrin.h \
   C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/smmintrin.h \
   C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/stdarg.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/stdatomic.h \
   C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/stdbool.h \
   C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/stddef.h \
   C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/stdint.h \
@@ -7973,6 +8110,7 @@ CMakeFiles/cyberbrowser_lib.dir/src/image_cache.c.obj: C:/Users/qingping/Documen
   C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/xsaveoptintrin.h \
   C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/xsavesintrin.h \
   C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/xtestintrin.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/cyber_env.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/cyber_profile.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/http_download.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/image_cache.h \
@@ -8379,6 +8517,7 @@ CMakeFiles/cyberbrowser_lib.dir/src/js_quickjs.c.obj: C:/Users/qingping/Document
   C:/msys64/mingw64/include/stralign.h \
   C:/msys64/mingw64/include/string.h \
   C:/msys64/mingw64/include/stringapiset.h \
+  C:/msys64/mingw64/include/strings.h \
   C:/msys64/mingw64/include/swprintf.inl \
   C:/msys64/mingw64/include/synchapi.h \
   C:/msys64/mingw64/include/sys/timeb.h \
@@ -8553,6 +8692,7 @@ CMakeFiles/cyberbrowser_lib.dir/src/js_quickjs.c.obj: C:/Users/qingping/Document
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/platform.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/preorder_compaction_array.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/session_state.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/url_utils.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/win32_compat.h
 
 CMakeFiles/cyberbrowser_lib.dir/src/lockfree_hash_table.c.obj: C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/lockfree_hash_table.c \
@@ -27591,6 +27731,40 @@ CMakeFiles/cyberbrowser_lib.dir/src/url_analyzer.c.obj: C:/Users/qingping/Docume
   C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/syslimits.h \
   C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/url_analyzer.h
 
+CMakeFiles/cyberbrowser_lib.dir/src/url_whatwg.c.obj: C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/url_whatwg.c \
+  C:/msys64/mingw64/include/_mingw.h \
+  C:/msys64/mingw64/include/_mingw_mac.h \
+  C:/msys64/mingw64/include/_mingw_off_t.h \
+  C:/msys64/mingw64/include/_mingw_secapi.h \
+  C:/msys64/mingw64/include/corecrt.h \
+  C:/msys64/mingw64/include/corecrt_memory.h \
+  C:/msys64/mingw64/include/corecrt_stdio_config.h \
+  C:/msys64/mingw64/include/corecrt_wstdlib.h \
+  C:/msys64/mingw64/include/crtdefs.h \
+  C:/msys64/mingw64/include/errno.h \
+  C:/msys64/mingw64/include/inttypes.h \
+  C:/msys64/mingw64/include/limits.h \
+  C:/msys64/mingw64/include/malloc.h \
+  C:/msys64/mingw64/include/sec_api/stdio_s.h \
+  C:/msys64/mingw64/include/sec_api/stdlib_s.h \
+  C:/msys64/mingw64/include/sec_api/string_s.h \
+  C:/msys64/mingw64/include/stddef.h \
+  C:/msys64/mingw64/include/stdint.h \
+  C:/msys64/mingw64/include/stdio.h \
+  C:/msys64/mingw64/include/stdlib.h \
+  C:/msys64/mingw64/include/string.h \
+  C:/msys64/mingw64/include/swprintf.inl \
+  C:/msys64/mingw64/include/vadefs.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/limits.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/mm_malloc.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/stdbool.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/stddef.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/stdint.h \
+  C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/syslimits.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/quickjs/cutils.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/quickjs/libunicode.h \
+  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/url_whatwg.h
+
 
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/text_shaper.c:
 
@@ -27671,6 +27845,8 @@ C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/drivers/builtin/src/poly1305.c:
 
 C:/msys64/mingw64/include/intsafe.h:
+
+C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/url_whatwg.c:
 
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/drivers/builtin/src/platform_util.c:
 
@@ -27776,8 +27952,6 @@ C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/
 
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/core/tf_psa_crypto_config_check_before.h:
 
-C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/core/tf_psa_crypto_check_config.h:
-
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/core/tf_psa_crypto_config_check_user.h:
 
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/core/tf_psa_crypto_config.c:
@@ -27829,6 +28003,16 @@ C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/library/x509write_csr.c:
 
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/library/x509_oid.c:
+
+C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/library/x509_crt.c:
+
+C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/library/x509_crl.c:
+
+C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/library/x509_create.c:
+
+C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/include/mbedtls/pem.h:
+
+C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/library/x509.c:
 
 C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/sha512intrin.h:
 
@@ -28206,7 +28390,7 @@ C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/
 
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/library/ssl_ticket.c:
 
-C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/adxintrin.h:
+C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser/image_api.c:
 
 C:/msys64/mingw64/include/threadpoolapiset.h:
 
@@ -28356,8 +28540,6 @@ C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/serializeintrin.h:
 
 C:/msys64/mingw64/include/in6addr.h:
 
-C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/include/mbedtls/pem.h:
-
 C:/msys64/mingw64/include/objectarray.h:
 
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser_api_impl.h:
@@ -28415,8 +28597,6 @@ C:/msys64/mingw64/include/sec_api/string_s.h:
 C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/fmaintrin.h:
 
 C:/msys64/mingw64/include/specstrings.h:
-
-C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/library/x509_create.c:
 
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/drivers/builtin/src/bignum_core.c:
 
@@ -28511,6 +28691,8 @@ C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512bitalgintrin.h
 C:/msys64/mingw64/include/psdk_inc/_xmitfile.h:
 
 C:/msys64/mingw64/include/windef.h:
+
+C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser/image_api.h:
 
 C:/msys64/mingw64/include/_mingw_secapi.h:
 
@@ -28678,7 +28860,17 @@ C:/msys64/mingw64/include/winapifamily.h:
 
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/js_quickjs.h:
 
+C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avxvnniintrin.h:
+
+C:/msys64/mingw64/include/strings.h:
+
+C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/drivers/builtin/include/mbedtls/private/sha1.h:
+
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser/event_api.c:
+
+C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/drivers/builtin/src/chacha20_neon.h:
+
+C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/display_list.h:
 
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser/media_source_api.c:
 
@@ -28698,33 +28890,25 @@ C:/msys64/mingw64/include/pshpack1.h:
 
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser/url_api.c:
 
+C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/adxintrin.h:
+
+C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser/url_api_js.inc:
+
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser_api_impl.c:
 
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/css_layout.c:
 
 C:/msys64/mingw64/include/oaidl.h:
 
-C:/msys64/mingw64/include/bemapiset.h:
-
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/library/x509_csr.c:
 
+C:/msys64/mingw64/include/bemapiset.h:
+
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/quickjs/gc_platform.h:
-
-C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/drivers/builtin/src/chacha20_neon.h:
-
-C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/display_list.h:
 
 C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/amxmovrsintrin.h:
 
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/css_selector_internal.h:
-
-C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avxvnniintrin.h:
-
-C:/msys64/mingw64/include/strings.h:
-
-C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/drivers/builtin/include/mbedtls/private/sha1.h:
-
-C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/library/x509_crt.c:
 
 C:/msys64/mingw64/include/consoleapi3.h:
 
@@ -28815,6 +28999,8 @@ C:/msys64/mingw64/include/rpcndr.h:
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/quickjs/gc_platform.c:
 
 C:/msys64/mingw64/include/rpcnsi.h:
+
+C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/third_party/libwebp/src/webp/decode.h:
 
 C:/msys64/mingw64/include/rpcnsip.h:
 
@@ -28958,6 +29144,12 @@ C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser/geolocation_ap
 
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/nanosvg/nanosvgrast.h:
 
+C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/third_party/libjpeg-turbo/turbojpeg.h:
+
+C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/core/tf_psa_crypto_check_config.h:
+
+C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/third_party/libwebp/src/webp/types.h:
+
 C:/msys64/mingw64/include/_mingw.h:
 
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/js_quickjs.c:
@@ -28978,6 +29170,10 @@ C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/
 
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/drivers/builtin/src/psa_util_internal.h:
 
+C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/include/mbedtls/x509_csr.h:
+
+C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/include/psa/crypto_driver_random.h:
+
 C:/msys64/mingw64/include/psdk_inc/_ip_mreq1.h:
 
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/include/psa/crypto_extra.h:
@@ -28997,6 +29193,8 @@ C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/tbmintrin.h:
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/drivers/builtin/include/mbedtls/private/camellia.h:
 
 C:/msys64/mingw64/include/winsvc.h:
+
+C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/url_whatwg.h:
 
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/drivers/builtin/include/mbedtls/private/entropy.h:
 
@@ -29031,11 +29229,3 @@ C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/library/ssl_tl
 C:/msys64/mingw64/lib/gcc/x86_64-w64-mingw32/16.1.0/include/avx512fp16vlintrin.h:
 
 C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/library/version.c:
-
-C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/library/x509.c:
-
-C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/library/x509_crl.c:
-
-C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/tf-psa-crypto/include/psa/crypto_driver_random.h:
-
-C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/mbedtls/include/mbedtls/x509_csr.h:

@@ -184,6 +184,19 @@ cyberbrowser_lib/fast:
 .PHONY : cyberbrowser_lib/fast
 
 #=============================================================================
+# Target rules for targets named libjpeg_turbo_ext
+
+# Build rule for target.
+libjpeg_turbo_ext: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 libjpeg_turbo_ext
+.PHONY : libjpeg_turbo_ext
+
+# fast build rule for target.
+libjpeg_turbo_ext/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\libjpeg_turbo_ext.dir\build.make CMakeFiles/libjpeg_turbo_ext.dir/build
+.PHONY : libjpeg_turbo_ext/fast
+
+#=============================================================================
 # Target rules for targets named cyberbrowser
 
 # Build rule for target.
@@ -221,6 +234,136 @@ gc_store_check: cmake_check_build_system
 gc_store_check/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles\gc_store_check.dir\build.make CMakeFiles/gc_store_check.dir/build
 .PHONY : gc_store_check/fast
+
+#=============================================================================
+# Target rules for targets named sharpyuv
+
+# Build rule for target.
+sharpyuv: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 sharpyuv
+.PHONY : sharpyuv
+
+# fast build rule for target.
+sharpyuv/fast:
+	$(MAKE) $(MAKESILENT) -f src\third_party\libwebp\CMakeFiles\sharpyuv.dir\build.make src/third_party/libwebp/CMakeFiles/sharpyuv.dir/build
+.PHONY : sharpyuv/fast
+
+#=============================================================================
+# Target rules for targets named webpdecode
+
+# Build rule for target.
+webpdecode: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 webpdecode
+.PHONY : webpdecode
+
+# fast build rule for target.
+webpdecode/fast:
+	$(MAKE) $(MAKESILENT) -f src\third_party\libwebp\CMakeFiles\webpdecode.dir\build.make src/third_party/libwebp/CMakeFiles/webpdecode.dir/build
+.PHONY : webpdecode/fast
+
+#=============================================================================
+# Target rules for targets named webpdspdecode
+
+# Build rule for target.
+webpdspdecode: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 webpdspdecode
+.PHONY : webpdspdecode
+
+# fast build rule for target.
+webpdspdecode/fast:
+	$(MAKE) $(MAKESILENT) -f src\third_party\libwebp\CMakeFiles\webpdspdecode.dir\build.make src/third_party/libwebp/CMakeFiles/webpdspdecode.dir/build
+.PHONY : webpdspdecode/fast
+
+#=============================================================================
+# Target rules for targets named webputilsdecode
+
+# Build rule for target.
+webputilsdecode: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 webputilsdecode
+.PHONY : webputilsdecode
+
+# fast build rule for target.
+webputilsdecode/fast:
+	$(MAKE) $(MAKESILENT) -f src\third_party\libwebp\CMakeFiles\webputilsdecode.dir\build.make src/third_party/libwebp/CMakeFiles/webputilsdecode.dir/build
+.PHONY : webputilsdecode/fast
+
+#=============================================================================
+# Target rules for targets named webpdecoder
+
+# Build rule for target.
+webpdecoder: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 webpdecoder
+.PHONY : webpdecoder
+
+# fast build rule for target.
+webpdecoder/fast:
+	$(MAKE) $(MAKESILENT) -f src\third_party\libwebp\CMakeFiles\webpdecoder.dir\build.make src/third_party/libwebp/CMakeFiles/webpdecoder.dir/build
+.PHONY : webpdecoder/fast
+
+#=============================================================================
+# Target rules for targets named webpencode
+
+# Build rule for target.
+webpencode: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 webpencode
+.PHONY : webpencode
+
+# fast build rule for target.
+webpencode/fast:
+	$(MAKE) $(MAKESILENT) -f src\third_party\libwebp\CMakeFiles\webpencode.dir\build.make src/third_party/libwebp/CMakeFiles/webpencode.dir/build
+.PHONY : webpencode/fast
+
+#=============================================================================
+# Target rules for targets named webpdsp
+
+# Build rule for target.
+webpdsp: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 webpdsp
+.PHONY : webpdsp
+
+# fast build rule for target.
+webpdsp/fast:
+	$(MAKE) $(MAKESILENT) -f src\third_party\libwebp\CMakeFiles\webpdsp.dir\build.make src/third_party/libwebp/CMakeFiles/webpdsp.dir/build
+.PHONY : webpdsp/fast
+
+#=============================================================================
+# Target rules for targets named webputils
+
+# Build rule for target.
+webputils: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 webputils
+.PHONY : webputils
+
+# fast build rule for target.
+webputils/fast:
+	$(MAKE) $(MAKESILENT) -f src\third_party\libwebp\CMakeFiles\webputils.dir\build.make src/third_party/libwebp/CMakeFiles/webputils.dir/build
+.PHONY : webputils/fast
+
+#=============================================================================
+# Target rules for targets named webp
+
+# Build rule for target.
+webp: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 webp
+.PHONY : webp
+
+# fast build rule for target.
+webp/fast:
+	$(MAKE) $(MAKESILENT) -f src\third_party\libwebp\CMakeFiles\webp.dir\build.make src/third_party/libwebp/CMakeFiles/webp.dir/build
+.PHONY : webp/fast
+
+#=============================================================================
+# Target rules for targets named webpdemux
+
+# Build rule for target.
+webpdemux: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\Makefile2 webpdemux
+.PHONY : webpdemux
+
+# fast build rule for target.
+webpdemux/fast:
+	$(MAKE) $(MAKESILENT) -f src\third_party\libwebp\CMakeFiles\webpdemux.dir\build.make src/third_party/libwebp/CMakeFiles/webpdemux.dir/build
+.PHONY : webpdemux/fast
 
 #=============================================================================
 # Target rules for targets named cyberbrowser-tests
@@ -647,6 +790,30 @@ src/browser/geolocation_api.s: src/browser/geolocation_api.c.s
 src/browser/geolocation_api.c.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles\cyberbrowser_lib.dir\build.make CMakeFiles/cyberbrowser_lib.dir/src/browser/geolocation_api.c.s
 .PHONY : src/browser/geolocation_api.c.s
+
+src/browser/image_api.obj: src/browser/image_api.c.obj
+.PHONY : src/browser/image_api.obj
+
+# target to build an object file
+src/browser/image_api.c.obj:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\cyberbrowser_lib.dir\build.make CMakeFiles/cyberbrowser_lib.dir/src/browser/image_api.c.obj
+.PHONY : src/browser/image_api.c.obj
+
+src/browser/image_api.i: src/browser/image_api.c.i
+.PHONY : src/browser/image_api.i
+
+# target to preprocess a source file
+src/browser/image_api.c.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\cyberbrowser_lib.dir\build.make CMakeFiles/cyberbrowser_lib.dir/src/browser/image_api.c.i
+.PHONY : src/browser/image_api.c.i
+
+src/browser/image_api.s: src/browser/image_api.c.s
+.PHONY : src/browser/image_api.s
+
+# target to generate assembly for a file
+src/browser/image_api.c.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\cyberbrowser_lib.dir\build.make CMakeFiles/cyberbrowser_lib.dir/src/browser/image_api.c.s
+.PHONY : src/browser/image_api.c.s
 
 src/browser/media_source_api.obj: src/browser/media_source_api.c.obj
 .PHONY : src/browser/media_source_api.obj
@@ -4440,6 +4607,30 @@ src/url_analyzer.c.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles\cyberbrowser_lib.dir\build.make CMakeFiles/cyberbrowser_lib.dir/src/url_analyzer.c.s
 .PHONY : src/url_analyzer.c.s
 
+src/url_whatwg.obj: src/url_whatwg.c.obj
+.PHONY : src/url_whatwg.obj
+
+# target to build an object file
+src/url_whatwg.c.obj:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\cyberbrowser_lib.dir\build.make CMakeFiles/cyberbrowser_lib.dir/src/url_whatwg.c.obj
+.PHONY : src/url_whatwg.c.obj
+
+src/url_whatwg.i: src/url_whatwg.c.i
+.PHONY : src/url_whatwg.i
+
+# target to preprocess a source file
+src/url_whatwg.c.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\cyberbrowser_lib.dir\build.make CMakeFiles/cyberbrowser_lib.dir/src/url_whatwg.c.i
+.PHONY : src/url_whatwg.c.i
+
+src/url_whatwg.s: src/url_whatwg.c.s
+.PHONY : src/url_whatwg.s
+
+# target to generate assembly for a file
+src/url_whatwg.c.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles\cyberbrowser_lib.dir\build.make CMakeFiles/cyberbrowser_lib.dir/src/url_whatwg.c.s
+.PHONY : src/url_whatwg.c.s
+
 src/vulkan_font_stub.obj: src/vulkan_font_stub.c.obj
 .PHONY : src/vulkan_font_stub.obj
 
@@ -4502,6 +4693,7 @@ help:
 	@echo ... rebuild_cache
 	@echo ... test
 	@echo ... gc_store_check
+	@echo ... libjpeg_turbo_ext
 	@echo ... analyze-long-video-test
 	@echo ... atom-cache-bench
 	@echo ... bgmdwnldr
@@ -4512,6 +4704,7 @@ help:
 	@echo ... fetch-visitor-data-test
 	@echo ... flamegraph_viewer
 	@echo ... long-video-test
+	@echo ... sharpyuv
 	@echo ... test-googlevideo-file
 	@echo ... test-googlevideo-http
 	@echo ... test-interrupt
@@ -4520,6 +4713,15 @@ help:
 	@echo ... test-watch-then-youtubei
 	@echo ... test-youtubei-get
 	@echo ... test-youtubei-post
+	@echo ... webp
+	@echo ... webpdecode
+	@echo ... webpdecoder
+	@echo ... webpdemux
+	@echo ... webpdsp
+	@echo ... webpdspdecode
+	@echo ... webpencode
+	@echo ... webputils
+	@echo ... webputilsdecode
 	@echo ... youtube-data-test
 	@echo ... youtube-live-fetch-test
 	@echo ... youtubei-probe
@@ -4547,6 +4749,9 @@ help:
 	@echo ... src/browser/geolocation_api.obj
 	@echo ... src/browser/geolocation_api.i
 	@echo ... src/browser/geolocation_api.s
+	@echo ... src/browser/image_api.obj
+	@echo ... src/browser/image_api.i
+	@echo ... src/browser/image_api.s
 	@echo ... src/browser/media_source_api.obj
 	@echo ... src/browser/media_source_api.i
 	@echo ... src/browser/media_source_api.s
@@ -5021,6 +5226,9 @@ help:
 	@echo ... src/url_analyzer.obj
 	@echo ... src/url_analyzer.i
 	@echo ... src/url_analyzer.s
+	@echo ... src/url_whatwg.obj
+	@echo ... src/url_whatwg.i
+	@echo ... src/url_whatwg.s
 	@echo ... src/vulkan_font_stub.obj
 	@echo ... src/vulkan_font_stub.i
 	@echo ... src/vulkan_font_stub.s

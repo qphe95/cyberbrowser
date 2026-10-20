@@ -96,6 +96,8 @@ test__watch__then__youtubei_EXTERNAL_OBJECTS =
 tests/test-watch-then-youtubei.exe: tests/CMakeFiles/test-watch-then-youtubei.dir/test_watch_then_youtubei.c.obj
 tests/test-watch-then-youtubei.exe: tests/CMakeFiles/test-watch-then-youtubei.dir/build.make
 tests/test-watch-then-youtubei.exe: libcyberbrowser_lib.a
+tests/test-watch-then-youtubei.exe: libjpeg-turbo/lib/libturbojpeg.a
+tests/test-watch-then-youtubei.exe: src/third_party/libwebp/libwebpdecoder.a
 tests/test-watch-then-youtubei.exe: tests/CMakeFiles/test-watch-then-youtubei.dir/linkLibs.rsp
 tests/test-watch-then-youtubei.exe: tests/CMakeFiles/test-watch-then-youtubei.dir/objects1.rsp
 tests/test-watch-then-youtubei.exe: tests/CMakeFiles/test-watch-then-youtubei.dir/link.txt

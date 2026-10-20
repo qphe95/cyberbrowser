@@ -96,6 +96,8 @@ youtube__data__test_EXTERNAL_OBJECTS =
 tests/youtube-data-test.exe: tests/CMakeFiles/youtube-data-test.dir/test_youtube_data_scripts.c.obj
 tests/youtube-data-test.exe: tests/CMakeFiles/youtube-data-test.dir/build.make
 tests/youtube-data-test.exe: libcyberbrowser_lib.a
+tests/youtube-data-test.exe: libjpeg-turbo/lib/libturbojpeg.a
+tests/youtube-data-test.exe: src/third_party/libwebp/libwebpdecoder.a
 tests/youtube-data-test.exe: tests/CMakeFiles/youtube-data-test.dir/linkLibs.rsp
 tests/youtube-data-test.exe: tests/CMakeFiles/youtube-data-test.dir/objects1.rsp
 tests/youtube-data-test.exe: tests/CMakeFiles/youtube-data-test.dir/link.txt

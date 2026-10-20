@@ -96,6 +96,8 @@ test__interrupt_EXTERNAL_OBJECTS =
 tests/test-interrupt.exe: tests/CMakeFiles/test-interrupt.dir/test_interrupt.c.obj
 tests/test-interrupt.exe: tests/CMakeFiles/test-interrupt.dir/build.make
 tests/test-interrupt.exe: libcyberbrowser_lib.a
+tests/test-interrupt.exe: libjpeg-turbo/lib/libturbojpeg.a
+tests/test-interrupt.exe: src/third_party/libwebp/libwebpdecoder.a
 tests/test-interrupt.exe: tests/CMakeFiles/test-interrupt.dir/linkLibs.rsp
 tests/test-interrupt.exe: tests/CMakeFiles/test-interrupt.dir/objects1.rsp
 tests/test-interrupt.exe: tests/CMakeFiles/test-interrupt.dir/link.txt

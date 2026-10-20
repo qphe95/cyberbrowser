@@ -2259,10 +2259,11 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, element_proto, "getElementsByTagName",
         JS_NewCFunction(ctx, js_element_get_elements_by_tag_name, "getElementsByTagName", 1));
     
-    // style getter
+    // style getter / setter ([PutForwards=cssText]: el.style = "..." sets cssText)
     GCValue style_getter = JS_NewCFunction(ctx, js_element_get_style, "get style", 0);
+    GCValue style_setter = JS_NewCFunction(ctx, js_element_set_style, "set style", 1);
     JSAtom style_atom = JS_NewAtom(ctx, "style");
-    JS_DefinePropertyGetSet(ctx, element_proto, style_atom, style_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, element_proto, style_atom, style_getter, style_setter, JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, style_atom);
 
     // Fullscreen API no-op stubs (document.fullscreenEnabled reports support)
@@ -4325,25 +4326,37 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         "  Headers.prototype.entries = function() { var self=this; return Object.keys(this._h).map(function(k){return [k, self._h[k]];})[Symbol.iterator](); };\n"
         "  Headers.prototype[Symbol.iterator] = Headers.prototype.entries;\n"
         "\n"
+        "  // Each Request's internal state (the spec's \"request\"), kept out of reach\n"
+        "  // of page script: fetch() and new Request(req) read this, never the\n"
+        "  // public properties, which a page may redefine (YouTube's integrity probe\n"
+        "  // fakes url/method/body getters on a data: Request and expects fetch() to\n"
+        "  // load the original data: URL).\n"
+        "  var reqState = new WeakMap();\n"
+        "  function resolveUrl(u) {\n"
+        "    u = String(u);\n"
+        "    try { return new URL(u, (typeof document !== 'undefined' && document.baseURI) || (typeof location !== 'undefined' && location.href) || undefined).href; } catch(e) { return u; }\n"
+        "  }\n"
+        "  function normMethod(m) { m = String(m); var u = m.toUpperCase(); return /^(DELETE|GET|HEAD|OPTIONS|POST|PUT)$/.test(u) ? u : m; }\n"
         "  function Request(input, init) {\n"
         "    init = init || {};\n"
-        "    if (input instanceof Request) {\n"
-        "      this.url = init.url !== undefined ? String(init.url) : input.url;\n"
-        "      this.method = init.method !== undefined ? String(init.method) : input.method;\n"
-        "      this.headers = new Headers(init.headers !== undefined ? init.headers : input.headers);\n"
-        "      this.body = init.body !== undefined ? init.body : input.body;\n"
-        "      this.mode = init.mode !== undefined ? init.mode : input.mode;\n"
-        "      this.credentials = init.credentials !== undefined ? init.credentials : input.credentials;\n"
-        "      this.cache = init.cache !== undefined ? init.cache : input.cache;\n"
-        "      this.redirect = init.redirect !== undefined ? init.redirect : input.redirect;\n"
-        "      this.referrer = init.referrer !== undefined ? init.referrer : input.referrer;\n"
-        "      this.referrerPolicy = init.referrerPolicy !== undefined ? init.referrerPolicy : input.referrerPolicy;\n"
-        "      this.integrity = init.integrity !== undefined ? init.integrity : input.integrity;\n"
-        "      this.keepalive = init.keepalive !== undefined ? init.keepalive : input.keepalive;\n"
-        "      this.signal = init.signal !== undefined ? init.signal : input.signal;\n"
+        "    var src = (input instanceof Request) ? (reqState.get(input) || input) : null;\n"
+        "    if (src) {\n"
+        "      this.url = init.url !== undefined ? resolveUrl(init.url) : src.url;\n"
+        "      this.method = init.method !== undefined ? normMethod(init.method) : src.method;\n"
+        "      this.headers = new Headers(init.headers !== undefined ? init.headers : src.headers);\n"
+        "      this.body = init.body !== undefined ? init.body : src.body;\n"
+        "      this.mode = init.mode !== undefined ? init.mode : src.mode;\n"
+        "      this.credentials = init.credentials !== undefined ? init.credentials : src.credentials;\n"
+        "      this.cache = init.cache !== undefined ? init.cache : src.cache;\n"
+        "      this.redirect = init.redirect !== undefined ? init.redirect : src.redirect;\n"
+        "      this.referrer = init.referrer !== undefined ? init.referrer : src.referrer;\n"
+        "      this.referrerPolicy = init.referrerPolicy !== undefined ? init.referrerPolicy : src.referrerPolicy;\n"
+        "      this.integrity = init.integrity !== undefined ? init.integrity : src.integrity;\n"
+        "      this.keepalive = init.keepalive !== undefined ? init.keepalive : src.keepalive;\n"
+        "      this.signal = init.signal !== undefined ? init.signal : src.signal;\n"
         "    } else {\n"
-        "      this.url = String(input);\n"
-        "      this.method = init.method ? String(init.method) : 'GET';\n"
+        "      this.url = resolveUrl(input);\n"
+        "      this.method = init.method ? normMethod(init.method) : 'GET';\n"
         "      this.headers = new Headers(init.headers);\n"
         "      this.body = init.body !== undefined ? init.body : null;\n"
         "      this.mode = init.mode || 'cors';\n"
@@ -4359,6 +4372,10 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         "    if (this.body && (this.method === 'GET' || this.method === 'HEAD')) {\n"
         "      throw new TypeError('Body not allowed for GET/HEAD request');\n"
         "    }\n"
+        "    reqState.set(this, {url:this.url, method:this.method, headers:this.headers, body:this.body,\n"
+        "                        mode:this.mode, credentials:this.credentials, cache:this.cache,\n"
+        "                        redirect:this.redirect, referrer:this.referrer, referrerPolicy:this.referrerPolicy,\n"
+        "                        integrity:this.integrity, keepalive:this.keepalive, signal:this.signal});\n"
         "  }\n"
         "  Request.prototype.clone = function() { return new Request(this); };\n"
         "\n"
@@ -4402,7 +4419,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         "\n"
         "  var nativeFetch = window.fetch;\n"
         "  window.fetch = function(input, init) {\n"
-        "    var req = new Request(input, init);\n"
+        "    var req = reqState.get(new Request(input, init));\n"
         "    var headers = {};\n"
         "    req.headers.forEach(function(v,k){ headers[k] = v; });\n"
         "\n"

@@ -96,6 +96,8 @@ atom__cache__bench_EXTERNAL_OBJECTS =
 tests/atom-cache-bench.exe: tests/CMakeFiles/atom-cache-bench.dir/test_atom_cache_bench.c.obj
 tests/atom-cache-bench.exe: tests/CMakeFiles/atom-cache-bench.dir/build.make
 tests/atom-cache-bench.exe: libcyberbrowser_lib.a
+tests/atom-cache-bench.exe: libjpeg-turbo/lib/libturbojpeg.a
+tests/atom-cache-bench.exe: src/third_party/libwebp/libwebpdecoder.a
 tests/atom-cache-bench.exe: tests/CMakeFiles/atom-cache-bench.dir/linkLibs.rsp
 tests/atom-cache-bench.exe: tests/CMakeFiles/atom-cache-bench.dir/objects1.rsp
 tests/atom-cache-bench.exe: tests/CMakeFiles/atom-cache-bench.dir/link.txt

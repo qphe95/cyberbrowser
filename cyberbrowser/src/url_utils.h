@@ -7,6 +7,9 @@
 
 #include <stdbool.h>
 #include <ctype.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <strings.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -46,6 +49,13 @@ static inline bool url_is_data_url(const char *url)
 {
     return url && strncasecmp(url, "data:", 5) == 0;
 }
+
+/*
+ * Decode the payload of a data: URL (base64 or percent-encoded) into a
+ * malloc'd, NUL-terminated buffer of *out_len bytes.  NULL when |url| is not
+ * a well-formed data: URL.  Defined in image_cache.c.
+ */
+uint8_t *data_url_decode(const char *url, size_t *out_len);
 
 /*
  * Return true if |url| uses a network scheme (http or https).

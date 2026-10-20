@@ -160,6 +160,5 @@ CMakeFiles/cyberbrowser_lib.dir/src/css_style.c.obj: \
  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/quickjs/quickjs_handle_helpers.h \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\preorder_compaction_array.h \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\css_selector_internal.h \
- C:/msys64/mingw64/include/ctype.h \
- C:/msys64/mingw64/include/corecrt_wctype.h \
- C:/msys64/mingw64/include/strings.h
+ C:/msys64/mingw64/include/strings.h C:/msys64/mingw64/include/ctype.h \
+ C:/msys64/mingw64/include/corecrt_wctype.h

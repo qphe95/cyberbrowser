@@ -203,6 +203,7 @@ GCValue js_element_before(JSContextHandle ctx, GCValue this_val, int argc, GCVal
 GCValue js_element_after(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_replaceWith(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_get_style(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+GCValue js_element_set_style(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_get_elements_by_tag_name(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_document_get_elements_by_tag_name(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_document_getElementsByClassName(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);

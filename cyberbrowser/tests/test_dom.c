@@ -630,6 +630,20 @@ TEST(test_dom_render_snapshot_reuse) {
     return true;
 }
 
+/* el.style is [PutForwards=cssText]: assigning it (Polymer's style="{{..}}"
+ * bindings do, in strict mode) sets the inline style instead of throwing. */
+TEST(test_dom_style_assignment_forwards_to_css_text) {
+    JSContextHandle ctx = get_shared_test_context();
+    if (!dom_ready(ctx)) { printf("    (skipped - no document)\n"); return true; }
+    ASSERT_EQ(1, js_int(ctx,
+        "(function(){'use strict'; var d=document.createElement('div');"
+        "var s=d.style; d.style='color: red; width: 10px';"
+        "var ok = d.style===s && d.style.color==='red' && d.style.width==='10px';"
+        "d.style=''; ok = ok && d.style.color==='';"
+        "return ok ? 1 : 0;})()"));
+    return true;
+}
+
 void run_dom_tests(void) {
     printf("\n--- Node store DOM Tests ---\n");
     RUN_TEST(test_dom_parse_matches_legacy_fixtures);
@@ -648,4 +662,5 @@ void run_dom_tests(void) {
     RUN_TEST(test_dom_index_large_document);
     RUN_TEST(test_dom_fetch_pool_overlaps_in_order);
     RUN_TEST(test_dom_render_snapshot_reuse);
+    RUN_TEST(test_dom_style_assignment_forwards_to_css_text);
 }

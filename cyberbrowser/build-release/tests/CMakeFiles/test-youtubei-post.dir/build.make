@@ -96,6 +96,8 @@ test__youtubei__post_EXTERNAL_OBJECTS =
 tests/test-youtubei-post.exe: tests/CMakeFiles/test-youtubei-post.dir/test_youtubei_post.c.obj
 tests/test-youtubei-post.exe: tests/CMakeFiles/test-youtubei-post.dir/build.make
 tests/test-youtubei-post.exe: libcyberbrowser_lib.a
+tests/test-youtubei-post.exe: libjpeg-turbo/lib/libturbojpeg.a
+tests/test-youtubei-post.exe: src/third_party/libwebp/libwebpdecoder.a
 tests/test-youtubei-post.exe: tests/CMakeFiles/test-youtubei-post.dir/linkLibs.rsp
 tests/test-youtubei-post.exe: tests/CMakeFiles/test-youtubei-post.dir/objects1.rsp
 tests/test-youtubei-post.exe: tests/CMakeFiles/test-youtubei-post.dir/link.txt

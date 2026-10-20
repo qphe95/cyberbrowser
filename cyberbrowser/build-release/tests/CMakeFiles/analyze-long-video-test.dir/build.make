@@ -97,6 +97,8 @@ tests/analyze-long-video-test.exe: tests/CMakeFiles/analyze-long-video-test.dir/
 tests/analyze-long-video-test.exe: tests/CMakeFiles/analyze-long-video-test.dir/build.make
 tests/analyze-long-video-test.exe: libcyberbrowser_lib.a
 tests/analyze-long-video-test.exe: libcyberbrowser_lib.a
+tests/analyze-long-video-test.exe: libjpeg-turbo/lib/libturbojpeg.a
+tests/analyze-long-video-test.exe: src/third_party/libwebp/libwebpdecoder.a
 tests/analyze-long-video-test.exe: tests/CMakeFiles/analyze-long-video-test.dir/linkLibs.rsp
 tests/analyze-long-video-test.exe: tests/CMakeFiles/analyze-long-video-test.dir/objects1.rsp
 tests/analyze-long-video-test.exe: tests/CMakeFiles/analyze-long-video-test.dir/link.txt

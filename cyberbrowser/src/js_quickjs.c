@@ -42,6 +42,7 @@ size_t js_stack_budget(void) {
 #include "browser_api_impl_handle_helpers.h"
 #include "session_state.h"
 #include "cyber_profile.h"
+#include "url_utils.h"
 
 // Forward declarations from dom_api.c
 void dom_node_set_owner_document(JSContextHandle ctx, GCValue node, GCValue doc);
@@ -91,7 +92,7 @@ void js_quickjs_set_asset_manager(AAssetManager *mgr) {
 GCValue js_dummy_function(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 static bool is_http_url(const char *url);
 static int collect_user_headers(JSContextHandle ctx, GCValue headers_obj,
-                                char header_bufs[][512], const char **headers_out,
+                                char header_bufs[][2048], const char **headers_out,
                                 int max_count);
 static bool js_get_document_origin(JSContextHandle ctx, char *out, size_t out_len);
 static bool parse_url_origin(const char *url, char *out, size_t out_len);
@@ -366,7 +367,7 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
         bool credentials = SAFE_GET_OR(xhr, XMLHttpRequestHandle, with_credentials, 0) != 0;
         bool send_credentials = same_origin || credentials;
 
-        char header_bufs[24][512];
+        char header_bufs[24][2048];
         const char *headers[24];
         int header_count = 0;
 
@@ -1127,7 +1128,7 @@ static bool is_http_url(const char *url) {
 }
 
 static int collect_user_headers(JSContextHandle ctx, GCValue headers_obj,
-                                char header_bufs[][512], const char **headers_out,
+                                char header_bufs[][2048], const char **headers_out,
                                 int max_count) {
     if (!JS_IsObject(headers_obj)) return 0;
     JSPropertyEnum *props = NULL;
@@ -1143,7 +1144,7 @@ static int collect_user_headers(JSContextHandle ctx, GCValue headers_obj,
         GCValue val = JS_GetProperty(ctx, headers_obj, props[i].atom);
         const char *val_str = JS_ToCString(ctx, val);
         if (val_str) {
-            snprintf(header_bufs[count], 512, "%s: %s", name, val_str);
+            snprintf(header_bufs[count], 2048, "%s: %s", name, val_str);
             headers_out[count] = header_bufs[count];
             count++;
         }
@@ -1164,7 +1165,7 @@ static GCValue reject_type_error(JSContextHandle ctx, const char *msg) {
     GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
     GCValue reject_fn = JS_GetPropertyStr(ctx, promise_ctor, "reject");
     GCValue args[1] = { err };
-    return JS_Call(ctx, reject_fn, JS_UNDEFINED, 1, args);
+    return JS_Call(ctx, reject_fn, promise_ctor, 1, args);
 }
 
 static bool js_get_document_origin(JSContextHandle ctx, char *out, size_t out_len) {
@@ -1477,7 +1478,7 @@ static GCValue create_http_response_text(JSContextHandle ctx, GCValue this_val, 
     GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
     GCValue body_text = JS_GetPropertyStr(ctx, this_val, "__body_text");
     GCValue args[1] = { body_text };
-    return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
+    return JS_Call(ctx, resolve_fn, promise_ctor, 1, args);
 }
 
 
@@ -1490,7 +1491,7 @@ static GCValue create_http_response_json(JSContextHandle ctx, GCValue this_val, 
     GCValue body_json = JS_GetPropertyStr(ctx, this_val, "__body_json");
     if (JS_IsUndefined(body_json)) body_json = JS_NewObject(ctx);
     GCValue args[1] = { body_json };
-    return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
+    return JS_Call(ctx, resolve_fn, promise_ctor, 1, args);
 }
 
 
@@ -1502,7 +1503,7 @@ static GCValue create_http_response_arrayBuffer(JSContextHandle ctx, GCValue thi
     GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
     GCValue ab = JS_NewArrayBuffer(ctx, NULL, 0, NULL, NULL, false);
     GCValue args[1] = { ab };
-    return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
+    return JS_Call(ctx, resolve_fn, promise_ctor, 1, args);
 }
 
 
@@ -1516,7 +1517,7 @@ static GCValue create_http_response_blob(JSContextHandle ctx, GCValue this_val, 
     JS_SetPropertyStr(ctx, blob, "size", JS_NewInt32(ctx, 0));
     JS_SetPropertyStr(ctx, blob, "type", JS_NewString(ctx, ""));
     GCValue args[1] = { blob };
-    return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
+    return JS_Call(ctx, resolve_fn, promise_ctor, 1, args);
 }
 
 static GCValue create_http_response(JSContextHandle ctx, const char *url,
@@ -1592,7 +1593,7 @@ static GCValue resolve_blob_url_response_text(JSContextHandle ctx, GCValue this_
     GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
     GCValue body_text = JS_GetPropertyStr(ctx, this_val, "__body_text");
     GCValue args[1] = { body_text };
-    return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
+    return JS_Call(ctx, resolve_fn, promise_ctor, 1, args);
 }
 
 
@@ -1603,7 +1604,7 @@ static GCValue resolve_blob_url_response_json(JSContextHandle ctx, GCValue this_
     GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
     GCValue empty = JS_NewObject(ctx);
     GCValue args[1] = { empty };
-    return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
+    return JS_Call(ctx, resolve_fn, promise_ctor, 1, args);
 }
 
 static GCValue resolve_blob_url_response(JSContextHandle ctx, const char *url) {
@@ -1629,7 +1630,7 @@ static GCValue resolve_blob_url_response(JSContextHandle ctx, const char *url) {
             GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
             GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
             GCValue args[1] = { response };
-            result = JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
+            result = JS_Call(ctx, resolve_fn, promise_ctor, 1, args);
         }
     }
     return result;
@@ -1646,7 +1647,7 @@ static GCValue create_response_from_data_json(JSContextHandle ctx, GCValue this_
         body_json = JS_NewObject(ctx);
     }
     GCValue args[1] = { body_json };
-    return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
+    return JS_Call(ctx, resolve_fn, promise_ctor, 1, args);
 }
 
 
@@ -1660,7 +1661,7 @@ static GCValue create_response_from_data_arrayBuffer(JSContextHandle ctx, GCValu
     const char *str = JS_ToCStringLen(ctx, &len, body_text);
     GCValue ab = JS_NewArrayBufferCopy(ctx, (const uint8_t*)str, len);
     GCValue args[1] = { ab };
-    return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
+    return JS_Call(ctx, resolve_fn, promise_ctor, 1, args);
 }
 
 
@@ -1673,7 +1674,7 @@ static GCValue create_response_from_data_blob(JSContextHandle ctx, GCValue this_
     JS_SetPropertyStr(ctx, blob, "size", JS_NewInt32(ctx, 0));
     JS_SetPropertyStr(ctx, blob, "type", JS_NewString(ctx, ""));
     GCValue args[1] = { blob };
-    return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
+    return JS_Call(ctx, resolve_fn, promise_ctor, 1, args);
 }
 
 // Helper to create a Response object from HTTP response data
@@ -1779,7 +1780,7 @@ static GCValue js_fetch_text(JSContextHandle ctx, GCValue this_val, int argc, GC
     GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
     GCValue empty_str = JS_NewString(ctx, "");
     GCValue args[1] = { empty_str };
-    return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
+    return JS_Call(ctx, resolve_fn, promise_ctor, 1, args);
 }
 
 
@@ -1790,7 +1791,7 @@ static GCValue js_fetch_json(JSContextHandle ctx, GCValue this_val, int argc, GC
     GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
     GCValue empty_obj = JS_NewObject(ctx);
     GCValue args[1] = { empty_obj };
-    return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
+    return JS_Call(ctx, resolve_fn, promise_ctor, 1, args);
 }
 
 
@@ -1801,7 +1802,7 @@ static GCValue js_fetch_arrayBuffer(JSContextHandle ctx, GCValue this_val, int a
     GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
     GCValue ab = JS_NewArrayBuffer(ctx, NULL, 0, NULL, NULL, false);
     GCValue args[1] = { ab };
-    return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
+    return JS_Call(ctx, resolve_fn, promise_ctor, 1, args);
 }
 
 GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
@@ -1877,7 +1878,22 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
         if (!JS_IsUndefined(blob_resp)) return blob_resp;
         // Fall through to default empty response
     }
-    
+
+    // data: URLs are decoded locally (Fetch spec "scheme fetch").
+    if (url && url_is_data_url(url)) {
+        if (post_body) free(post_body);
+        size_t data_len = 0;
+        uint8_t *data = data_url_decode(url, &data_len);
+        if (!data) return reject_type_error(ctx, "Failed to fetch: malformed data: URL");
+        GCValue response = create_response_from_data(ctx, url, (const char *)data, data_len, 200, "OK");
+        free(data);
+        GCValue global = JS_GetGlobalObject(ctx);
+        GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
+        GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
+        GCValue args[1] = { response };
+        return JS_Call(ctx, resolve_fn, promise_ctor, 1, args);
+    }
+
     // Standard HTTP(S) handling with CORS enforcement.
     if (url && is_http_url(url)) {
         bool is_post = (strcasecmp(method, "POST") == 0);
@@ -1899,7 +1915,7 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
             return reject_type_error(ctx, "Failed to fetch: same-origin mode requests must be same-origin");
         }
 
-        char header_bufs[24][512];
+        char header_bufs[24][2048];
         const char *headers[24];
         int header_count = 0;
 
@@ -2007,7 +2023,7 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
             GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
             GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
             GCValue args[1] = { response_obj };
-            return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
+            return JS_Call(ctx, resolve_fn, promise_ctor, 1, args);
         } else {
             platform_http_free_buffer(&response_buffer);
             platform_log(LOG_LEVEL_WARN, "js_fetch", "Generic request failed for %s %s: HTTP %d / %s", method, url ? url : "?", status_code, error_buf[0] ? error_buf : "unknown");
@@ -2040,7 +2056,7 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
     GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
     GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
     GCValue args[1] = { response };
-    return JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
+    return JS_Call(ctx, resolve_fn, promise_ctor, 1, args);
 }
 
 

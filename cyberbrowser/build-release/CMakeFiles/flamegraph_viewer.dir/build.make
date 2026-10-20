@@ -148,6 +148,8 @@ flamegraph_viewer.exe: CMakeFiles/flamegraph_viewer.dir/shaders/embedded_shaders
 flamegraph_viewer.exe: CMakeFiles/flamegraph_viewer.dir/build.make
 flamegraph_viewer.exe: C:/msys64/mingw64/lib/libvulkan-1.dll.a
 flamegraph_viewer.exe: libcyberbrowser_lib.a
+flamegraph_viewer.exe: libjpeg-turbo/lib/libturbojpeg.a
+flamegraph_viewer.exe: src/third_party/libwebp/libwebpdecoder.a
 flamegraph_viewer.exe: CMakeFiles/flamegraph_viewer.dir/linkLibs.rsp
 flamegraph_viewer.exe: CMakeFiles/flamegraph_viewer.dir/objects1.rsp
 flamegraph_viewer.exe: CMakeFiles/flamegraph_viewer.dir/link.txt

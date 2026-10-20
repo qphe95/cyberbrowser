@@ -13,6 +13,8 @@ file(REMOVE_RECURSE
   "CMakeFiles/cyberbrowser_lib.dir/src/browser/fetch_api.c.obj.d"
   "CMakeFiles/cyberbrowser_lib.dir/src/browser/geolocation_api.c.obj"
   "CMakeFiles/cyberbrowser_lib.dir/src/browser/geolocation_api.c.obj.d"
+  "CMakeFiles/cyberbrowser_lib.dir/src/browser/image_api.c.obj"
+  "CMakeFiles/cyberbrowser_lib.dir/src/browser/image_api.c.obj.d"
   "CMakeFiles/cyberbrowser_lib.dir/src/browser/media_source_api.c.obj"
   "CMakeFiles/cyberbrowser_lib.dir/src/browser/media_source_api.c.obj.d"
   "CMakeFiles/cyberbrowser_lib.dir/src/browser/minimp4_impl.c.obj"
@@ -325,6 +327,8 @@ file(REMOVE_RECURSE
   "CMakeFiles/cyberbrowser_lib.dir/src/tls_client.c.obj.d"
   "CMakeFiles/cyberbrowser_lib.dir/src/url_analyzer.c.obj"
   "CMakeFiles/cyberbrowser_lib.dir/src/url_analyzer.c.obj.d"
+  "CMakeFiles/cyberbrowser_lib.dir/src/url_whatwg.c.obj"
+  "CMakeFiles/cyberbrowser_lib.dir/src/url_whatwg.c.obj.d"
   "libcyberbrowser_lib.a"
   "libcyberbrowser_lib.pdb"
 )

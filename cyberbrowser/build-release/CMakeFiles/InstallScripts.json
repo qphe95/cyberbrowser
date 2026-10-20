@@ -2,6 +2,7 @@
 	"InstallScripts" : 
 	[
 		"C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/build-release/cmake_install.cmake",
+		"C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/build-release/src/third_party/libwebp/cmake_install.cmake",
 		"C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/build-release/tests/cmake_install.cmake"
 	],
 	"Parallel" : false

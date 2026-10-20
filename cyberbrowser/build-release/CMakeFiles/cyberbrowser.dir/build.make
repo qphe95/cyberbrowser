@@ -96,6 +96,8 @@ cyberbrowser_EXTERNAL_OBJECTS =
 cyberbrowser.exe: CMakeFiles/cyberbrowser.dir/src/cyberbrowser_main.c.obj
 cyberbrowser.exe: CMakeFiles/cyberbrowser.dir/build.make
 cyberbrowser.exe: libcyberbrowser_lib.a
+cyberbrowser.exe: libjpeg-turbo/lib/libturbojpeg.a
+cyberbrowser.exe: src/third_party/libwebp/libwebpdecoder.a
 cyberbrowser.exe: CMakeFiles/cyberbrowser.dir/linkLibs.rsp
 cyberbrowser.exe: CMakeFiles/cyberbrowser.dir/objects1.rsp
 cyberbrowser.exe: CMakeFiles/cyberbrowser.dir/link.txt

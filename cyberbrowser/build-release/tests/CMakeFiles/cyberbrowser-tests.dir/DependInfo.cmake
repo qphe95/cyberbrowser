@@ -16,6 +16,8 @@ set(CMAKE_DEPENDS_DEPENDENCY_FILES
   "C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/tests/test_dom.c" "tests/CMakeFiles/cyberbrowser-tests.dir/test_dom.c.obj" "gcc" "tests/CMakeFiles/cyberbrowser-tests.dir/test_dom.c.obj.d"
   "C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/tests/test_exception_debug.c" "tests/CMakeFiles/cyberbrowser-tests.dir/test_exception_debug.c.obj" "gcc" "tests/CMakeFiles/cyberbrowser-tests.dir/test_exception_debug.c.obj.d"
   "C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/tests/test_gc.c" "tests/CMakeFiles/cyberbrowser-tests.dir/test_gc.c.obj" "gcc" "tests/CMakeFiles/cyberbrowser-tests.dir/test_gc.c.obj.d"
+  "C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/tests/test_http_pool.c" "tests/CMakeFiles/cyberbrowser-tests.dir/test_http_pool.c.obj" "gcc" "tests/CMakeFiles/cyberbrowser-tests.dir/test_http_pool.c.obj.d"
+  "C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/tests/test_image_cache.c" "tests/CMakeFiles/cyberbrowser-tests.dir/test_image_cache.c.obj" "gcc" "tests/CMakeFiles/cyberbrowser-tests.dir/test_image_cache.c.obj.d"
   "C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/tests/test_lazy_parsing.c" "tests/CMakeFiles/cyberbrowser-tests.dir/test_lazy_parsing.c.obj" "gcc" "tests/CMakeFiles/cyberbrowser-tests.dir/test_lazy_parsing.c.obj.d"
   "C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/tests/test_logical_operators.c" "tests/CMakeFiles/cyberbrowser-tests.dir/test_logical_operators.c.obj" "gcc" "tests/CMakeFiles/cyberbrowser-tests.dir/test_logical_operators.c.obj.d"
   "C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/tests/test_main.c" "tests/CMakeFiles/cyberbrowser-tests.dir/test_main.c.obj" "gcc" "tests/CMakeFiles/cyberbrowser-tests.dir/test_main.c.obj.d"

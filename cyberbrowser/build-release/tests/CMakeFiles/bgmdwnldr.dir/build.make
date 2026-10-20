@@ -96,6 +96,8 @@ bgmdwnldr_EXTERNAL_OBJECTS =
 tests/bgmdwnldr.exe: tests/CMakeFiles/bgmdwnldr.dir/download_cli.c.obj
 tests/bgmdwnldr.exe: tests/CMakeFiles/bgmdwnldr.dir/build.make
 tests/bgmdwnldr.exe: libcyberbrowser_lib.a
+tests/bgmdwnldr.exe: libjpeg-turbo/lib/libturbojpeg.a
+tests/bgmdwnldr.exe: src/third_party/libwebp/libwebpdecoder.a
 tests/bgmdwnldr.exe: tests/CMakeFiles/bgmdwnldr.dir/linkLibs.rsp
 tests/bgmdwnldr.exe: tests/CMakeFiles/bgmdwnldr.dir/objects1.rsp
 tests/bgmdwnldr.exe: tests/CMakeFiles/bgmdwnldr.dir/link.txt

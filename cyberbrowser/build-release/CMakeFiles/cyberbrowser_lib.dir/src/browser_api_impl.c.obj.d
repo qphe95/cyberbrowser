@@ -172,6 +172,7 @@ CMakeFiles/cyberbrowser_lib.dir/src/browser_api_impl.c.obj: \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\css_parser.h \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\html_dom.h \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\preorder_compaction_array.h \
+ C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\browser/image_api.h \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\browser_api_impl_internal.h \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\dom_js.h \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\gc_value_helpers.h \

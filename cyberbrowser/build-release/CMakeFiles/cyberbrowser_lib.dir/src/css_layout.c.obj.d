@@ -263,9 +263,11 @@ CMakeFiles/cyberbrowser_lib.dir/src/css_layout.c.obj: \
  C:/msys64/mingw64/include/direct.h C:/msys64/mingw64/include/io.h \
  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/win32/pthread.h \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\url_utils.h \
+ C:/msys64/mingw64/include/strings.h \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\http_download.h \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\text_shaper.h \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\display_list.h \
+ C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\image_cache.h \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\job_system.h \
  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/quickjs/gc_platform.h \
  C:/msys64/mingw64/include/math.h

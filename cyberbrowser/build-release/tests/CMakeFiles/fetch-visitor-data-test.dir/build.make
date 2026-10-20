@@ -96,6 +96,8 @@ fetch__visitor__data__test_EXTERNAL_OBJECTS =
 tests/fetch-visitor-data-test.exe: tests/CMakeFiles/fetch-visitor-data-test.dir/test_fetch_visitor_data.c.obj
 tests/fetch-visitor-data-test.exe: tests/CMakeFiles/fetch-visitor-data-test.dir/build.make
 tests/fetch-visitor-data-test.exe: libcyberbrowser_lib.a
+tests/fetch-visitor-data-test.exe: libjpeg-turbo/lib/libturbojpeg.a
+tests/fetch-visitor-data-test.exe: src/third_party/libwebp/libwebpdecoder.a
 tests/fetch-visitor-data-test.exe: tests/CMakeFiles/fetch-visitor-data-test.dir/linkLibs.rsp
 tests/fetch-visitor-data-test.exe: tests/CMakeFiles/fetch-visitor-data-test.dir/objects1.rsp
 tests/fetch-visitor-data-test.exe: tests/CMakeFiles/fetch-visitor-data-test.dir/link.txt

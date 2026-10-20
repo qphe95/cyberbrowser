@@ -782,6 +782,54 @@ test_googlevideo_http.c.s:
 	cd /d C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\build-release && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\test-googlevideo-http.dir\build.make tests/CMakeFiles/test-googlevideo-http.dir/test_googlevideo_http.c.s
 .PHONY : test_googlevideo_http.c.s
 
+test_http_pool.obj: test_http_pool.c.obj
+.PHONY : test_http_pool.obj
+
+# target to build an object file
+test_http_pool.c.obj:
+	cd /d C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\build-release && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\cyberbrowser-tests.dir\build.make tests/CMakeFiles/cyberbrowser-tests.dir/test_http_pool.c.obj
+.PHONY : test_http_pool.c.obj
+
+test_http_pool.i: test_http_pool.c.i
+.PHONY : test_http_pool.i
+
+# target to preprocess a source file
+test_http_pool.c.i:
+	cd /d C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\build-release && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\cyberbrowser-tests.dir\build.make tests/CMakeFiles/cyberbrowser-tests.dir/test_http_pool.c.i
+.PHONY : test_http_pool.c.i
+
+test_http_pool.s: test_http_pool.c.s
+.PHONY : test_http_pool.s
+
+# target to generate assembly for a file
+test_http_pool.c.s:
+	cd /d C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\build-release && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\cyberbrowser-tests.dir\build.make tests/CMakeFiles/cyberbrowser-tests.dir/test_http_pool.c.s
+.PHONY : test_http_pool.c.s
+
+test_image_cache.obj: test_image_cache.c.obj
+.PHONY : test_image_cache.obj
+
+# target to build an object file
+test_image_cache.c.obj:
+	cd /d C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\build-release && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\cyberbrowser-tests.dir\build.make tests/CMakeFiles/cyberbrowser-tests.dir/test_image_cache.c.obj
+.PHONY : test_image_cache.c.obj
+
+test_image_cache.i: test_image_cache.c.i
+.PHONY : test_image_cache.i
+
+# target to preprocess a source file
+test_image_cache.c.i:
+	cd /d C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\build-release && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\cyberbrowser-tests.dir\build.make tests/CMakeFiles/cyberbrowser-tests.dir/test_image_cache.c.i
+.PHONY : test_image_cache.c.i
+
+test_image_cache.s: test_image_cache.c.s
+.PHONY : test_image_cache.s
+
+# target to generate assembly for a file
+test_image_cache.c.s:
+	cd /d C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\build-release && $(MAKE) $(MAKESILENT) -f tests\CMakeFiles\cyberbrowser-tests.dir\build.make tests/CMakeFiles/cyberbrowser-tests.dir/test_image_cache.c.s
+.PHONY : test_image_cache.c.s
+
 test_interrupt.obj: test_interrupt.c.obj
 .PHONY : test_interrupt.obj
 
@@ -1218,6 +1266,12 @@ help:
 	@echo ... test_googlevideo_http.obj
 	@echo ... test_googlevideo_http.i
 	@echo ... test_googlevideo_http.s
+	@echo ... test_http_pool.obj
+	@echo ... test_http_pool.i
+	@echo ... test_http_pool.s
+	@echo ... test_image_cache.obj
+	@echo ... test_image_cache.i
+	@echo ... test_image_cache.s
 	@echo ... test_interrupt.obj
 	@echo ... test_interrupt.i
 	@echo ... test_interrupt.s

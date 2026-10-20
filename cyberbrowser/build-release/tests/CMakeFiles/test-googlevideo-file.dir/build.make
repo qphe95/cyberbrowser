@@ -96,6 +96,8 @@ test__googlevideo__file_EXTERNAL_OBJECTS =
 tests/test-googlevideo-file.exe: tests/CMakeFiles/test-googlevideo-file.dir/test_googlevideo_file.c.obj
 tests/test-googlevideo-file.exe: tests/CMakeFiles/test-googlevideo-file.dir/build.make
 tests/test-googlevideo-file.exe: libcyberbrowser_lib.a
+tests/test-googlevideo-file.exe: libjpeg-turbo/lib/libturbojpeg.a
+tests/test-googlevideo-file.exe: src/third_party/libwebp/libwebpdecoder.a
 tests/test-googlevideo-file.exe: tests/CMakeFiles/test-googlevideo-file.dir/linkLibs.rsp
 tests/test-googlevideo-file.exe: tests/CMakeFiles/test-googlevideo-file.dir/objects1.rsp
 tests/test-googlevideo-file.exe: tests/CMakeFiles/test-googlevideo-file.dir/link.txt

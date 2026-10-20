@@ -10608,7 +10608,7 @@ static int delete_property(JSContextHandle ctx, JSObjectHandle p, JSAtom atom)
     return TRUE;
 }
 
-static int call_setter(JSContextHandle ctx, JSObjectHandle setter,
+static int call_setter(JSContextHandle ctx, JSAtom prop, JSObjectHandle setter,
                        GCValue this_obj, GCValue val, int flags)
 {
     GCValue ret = GC_UNDEFINED, func = GC_UNDEFINED;
@@ -10626,7 +10626,7 @@ static int call_setter(JSContextHandle ctx, JSObjectHandle setter,
         
         if ((flags & JS_PROP_THROW) ||
             ((flags & JS_PROP_THROW_STRICT) && is_strict_mode(ctx))) {
-            JS_ThrowTypeError(ctx, "no setter for property");
+            JS_ThrowTypeErrorAtom(ctx, "no setter for property '%s'", prop);
             return -1;
         }
         return FALSE;
@@ -10960,7 +10960,7 @@ int JS_SetPropertyInternal(JSContextHandle ctx, GCValue obj,
             assert(prop == JS_ATOM_length);
             return set_array_length(ctx, p, val, flags);
         } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_GETSET) {
-            return call_setter(ctx, (JSObjectHandle)(pr->u.getset.setter_handle), this_obj, val, flags);
+            return call_setter(ctx, prop, (JSObjectHandle)(pr->u.getset.setter_handle), this_obj, val, flags);
         } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_VARREF) {
             /* XXX: already use var_ref.is_const(). Cannot simplify use the
                writable flag for JS_CLASS_MODULE_NS. */
@@ -11052,7 +11052,7 @@ int JS_SetPropertyInternal(JSContextHandle ctx, GCValue obj,
                                     setter = GC_HANDLE_NULL;
                                 else
                                     setter = JS_VALUE_GET_OBJ(desc.setter);
-                                ret = call_setter(ctx, setter, this_obj, val, flags);
+                                ret = call_setter(ctx, prop, setter, this_obj, val, flags);
                                 
                                 
                                 return ret;
@@ -11092,7 +11092,7 @@ int JS_SetPropertyInternal(JSContextHandle ctx, GCValue obj,
         prs = find_own_property(&pr, p1, prop);
         if (prs) {
             if ((prs->flags & JS_PROP_TMASK) == JS_PROP_GETSET) {
-                return call_setter(ctx, (JSObjectHandle)(pr->u.getset.setter_handle), this_obj, val, flags);
+                return call_setter(ctx, prop, (JSObjectHandle)(pr->u.getset.setter_handle), this_obj, val, flags);
             } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
                 /* AUTOINIT disabled - should never happen with eager initialization */
                 fprintf(stderr, "ERROR: JS_PROP_AUTOINIT encountered in JS_SetPropertyGeneric - this should not happen!\n");

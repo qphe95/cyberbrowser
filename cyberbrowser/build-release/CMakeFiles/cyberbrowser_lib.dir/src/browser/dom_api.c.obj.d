@@ -269,8 +269,10 @@ CMakeFiles/cyberbrowser_lib.dir/src/browser/dom_api.c.obj: \
  C:/msys64/mingw64/include/mstcpip.h C:/msys64/mingw64/include/direct.h \
  C:/msys64/mingw64/include/io.h \
  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/win32/pthread.h \
+ C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/cyber_profile.h \
  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/http_download.h \
  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/url_utils.h \
+ C:/msys64/mingw64/include/strings.h \
  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/js_quickjs.h \
  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/dom_store.h \
  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/dom_parse.h \

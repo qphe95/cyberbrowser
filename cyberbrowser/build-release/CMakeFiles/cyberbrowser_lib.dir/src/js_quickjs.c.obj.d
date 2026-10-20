@@ -266,4 +266,6 @@ CMakeFiles/cyberbrowser_lib.dir/src/js_quickjs.c.obj: \
  C:/msys64/mingw64/include/mstcpip.h C:/msys64/mingw64/include/direct.h \
  C:/msys64/mingw64/include/io.h \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\session_state.h \
- C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\cyber_profile.h
+ C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\cyber_profile.h \
+ C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\url_utils.h \
+ C:/msys64/mingw64/include/strings.h

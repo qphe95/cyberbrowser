@@ -96,6 +96,8 @@ youtubei__probe_EXTERNAL_OBJECTS =
 tests/youtubei-probe.exe: tests/CMakeFiles/youtubei-probe.dir/test_youtubei_probe.c.obj
 tests/youtubei-probe.exe: tests/CMakeFiles/youtubei-probe.dir/build.make
 tests/youtubei-probe.exe: libcyberbrowser_lib.a
+tests/youtubei-probe.exe: libjpeg-turbo/lib/libturbojpeg.a
+tests/youtubei-probe.exe: src/third_party/libwebp/libwebpdecoder.a
 tests/youtubei-probe.exe: tests/CMakeFiles/youtubei-probe.dir/linkLibs.rsp
 tests/youtubei-probe.exe: tests/CMakeFiles/youtubei-probe.dir/objects1.rsp
 tests/youtubei-probe.exe: tests/CMakeFiles/youtubei-probe.dir/link.txt

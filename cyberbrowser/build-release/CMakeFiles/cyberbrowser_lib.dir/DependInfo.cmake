@@ -15,6 +15,7 @@ set(CMAKE_DEPENDS_DEPENDENCY_FILES
   "C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser/event_api.c" "CMakeFiles/cyberbrowser_lib.dir/src/browser/event_api.c.obj" "gcc" "CMakeFiles/cyberbrowser_lib.dir/src/browser/event_api.c.obj.d"
   "C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser/fetch_api.c" "CMakeFiles/cyberbrowser_lib.dir/src/browser/fetch_api.c.obj" "gcc" "CMakeFiles/cyberbrowser_lib.dir/src/browser/fetch_api.c.obj.d"
   "C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser/geolocation_api.c" "CMakeFiles/cyberbrowser_lib.dir/src/browser/geolocation_api.c.obj" "gcc" "CMakeFiles/cyberbrowser_lib.dir/src/browser/geolocation_api.c.obj.d"
+  "C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser/image_api.c" "CMakeFiles/cyberbrowser_lib.dir/src/browser/image_api.c.obj" "gcc" "CMakeFiles/cyberbrowser_lib.dir/src/browser/image_api.c.obj.d"
   "C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser/media_source_api.c" "CMakeFiles/cyberbrowser_lib.dir/src/browser/media_source_api.c.obj" "gcc" "CMakeFiles/cyberbrowser_lib.dir/src/browser/media_source_api.c.obj.d"
   "C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser/minimp4_impl.c" "CMakeFiles/cyberbrowser_lib.dir/src/browser/minimp4_impl.c.obj" "gcc" "CMakeFiles/cyberbrowser_lib.dir/src/browser/minimp4_impl.c.obj.d"
   "C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/browser/misc_api.c" "CMakeFiles/cyberbrowser_lib.dir/src/browser/misc_api.c.obj" "gcc" "CMakeFiles/cyberbrowser_lib.dir/src/browser/misc_api.c.obj.d"
@@ -171,6 +172,7 @@ set(CMAKE_DEPENDS_DEPENDENCY_FILES
   "C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/text_shaper.c" "CMakeFiles/cyberbrowser_lib.dir/src/text_shaper.c.obj" "gcc" "CMakeFiles/cyberbrowser_lib.dir/src/text_shaper.c.obj.d"
   "C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/tls_client.c" "CMakeFiles/cyberbrowser_lib.dir/src/tls_client.c.obj" "gcc" "CMakeFiles/cyberbrowser_lib.dir/src/tls_client.c.obj.d"
   "C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/url_analyzer.c" "CMakeFiles/cyberbrowser_lib.dir/src/url_analyzer.c.obj" "gcc" "CMakeFiles/cyberbrowser_lib.dir/src/url_analyzer.c.obj.d"
+  "C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/url_whatwg.c" "CMakeFiles/cyberbrowser_lib.dir/src/url_whatwg.c.obj" "gcc" "CMakeFiles/cyberbrowser_lib.dir/src/url_whatwg.c.obj.d"
   )
 
 # Targets to which this target links which contain Fortran sources.

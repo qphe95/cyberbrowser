@@ -1625,15 +1625,16 @@ GCValue js_element_get_style(JSContextHandle ctx, GCValue this_val, int argc, GC
     return dom_element_style(ctx, this_val, true);
 }
 
+/* [PutForwards=cssText]: any value is converted to a string and assigned to
+ * style.cssText, as in browsers (el.style = null sets cssText "null"). */
 GCValue js_element_set_style(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    if (argc < 1) return JS_UNDEFINED;
-    if (JS_IsString(argv[0])) {
-        GCValue style = dom_element_style(ctx, this_val, true);
-        JS_SetPropertyStr(ctx, style, "cssText", argv[0]);
-        return JS_UNDEFINED;
-    }
-    DomWrapHandle wd = dom_wrap_of(this_val);
-    if (wd != GC_HANDLE_NULL && JS_IsObject(argv[0])) SAFE_SET(wd, DomWrapHandle, style, argv[0]);
+    NodeId n = dom_node_of(this_val);
+    if (n && dom_kind(n) != DOM_K_ELEMENT) return JS_UNDEFINED;
+    GCValue text = JS_ToString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED);
+    if (JS_IsException(text)) return text;
+    GCValue style = dom_element_style(ctx, this_val, true);
+    if (JS_IsObject(style) && JS_SetPropertyStr(ctx, style, "cssText", text) < 0)
+        return JS_EXCEPTION;
     return JS_UNDEFINED;
 }
 

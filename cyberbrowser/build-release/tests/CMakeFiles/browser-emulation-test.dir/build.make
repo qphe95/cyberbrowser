@@ -96,6 +96,8 @@ browser__emulation__test_EXTERNAL_OBJECTS =
 tests/browser-emulation-test.exe: tests/CMakeFiles/browser-emulation-test.dir/test_browser_emulation.c.obj
 tests/browser-emulation-test.exe: tests/CMakeFiles/browser-emulation-test.dir/build.make
 tests/browser-emulation-test.exe: libcyberbrowser_lib.a
+tests/browser-emulation-test.exe: libjpeg-turbo/lib/libturbojpeg.a
+tests/browser-emulation-test.exe: src/third_party/libwebp/libwebpdecoder.a
 tests/browser-emulation-test.exe: tests/CMakeFiles/browser-emulation-test.dir/linkLibs.rsp
 tests/browser-emulation-test.exe: tests/CMakeFiles/browser-emulation-test.dir/objects1.rsp
 tests/browser-emulation-test.exe: tests/CMakeFiles/browser-emulation-test.dir/link.txt

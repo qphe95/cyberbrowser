@@ -257,6 +257,7 @@ CMakeFiles/cyberbrowser_lib.dir/src/css_parser.c.obj: \
  C:/msys64/mingw64/include/direct.h C:/msys64/mingw64/include/io.h \
  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/win32/pthread.h \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\url_utils.h \
+ C:/msys64/mingw64/include/strings.h \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\js_quickjs.h \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\browser_api_impl.h \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\browser_api_impl_handle_helpers.h \

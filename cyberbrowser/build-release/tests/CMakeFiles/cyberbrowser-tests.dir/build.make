@@ -236,11 +236,41 @@ tests/CMakeFiles/cyberbrowser-tests.dir/test_css_style.c.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling C source to assembly CMakeFiles/cyberbrowser-tests.dir/test_css_style.c.s"
 	cd /d C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\build-release\tests && C:\msys64\mingw64\bin\cc.exe $(C_DEFINES) $(C_INCLUDES) $(C_FLAGS) -S C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\tests\test_css_style.c -o CMakeFiles\cyberbrowser-tests.dir\test_css_style.c.s
 
+tests/CMakeFiles/cyberbrowser-tests.dir/test_image_cache.c.obj: tests/CMakeFiles/cyberbrowser-tests.dir/flags.make
+tests/CMakeFiles/cyberbrowser-tests.dir/test_image_cache.c.obj: tests/CMakeFiles/cyberbrowser-tests.dir/includes_C.rsp
+tests/CMakeFiles/cyberbrowser-tests.dir/test_image_cache.c.obj: C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/tests/test_image_cache.c
+tests/CMakeFiles/cyberbrowser-tests.dir/test_image_cache.c.obj: tests/CMakeFiles/cyberbrowser-tests.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\build-release\CMakeFiles --progress-num=$(CMAKE_PROGRESS_12) "Building C object tests/CMakeFiles/cyberbrowser-tests.dir/test_image_cache.c.obj"
+	cd /d C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\build-release\tests && C:\msys64\mingw64\bin\cc.exe $(C_DEFINES) $(C_INCLUDES) $(C_FLAGS) -MD -MT tests/CMakeFiles/cyberbrowser-tests.dir/test_image_cache.c.obj -MF CMakeFiles\cyberbrowser-tests.dir\test_image_cache.c.obj.d -o CMakeFiles\cyberbrowser-tests.dir\test_image_cache.c.obj -c C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\tests\test_image_cache.c
+
+tests/CMakeFiles/cyberbrowser-tests.dir/test_image_cache.c.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing C source to CMakeFiles/cyberbrowser-tests.dir/test_image_cache.c.i"
+	cd /d C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\build-release\tests && C:\msys64\mingw64\bin\cc.exe $(C_DEFINES) $(C_INCLUDES) $(C_FLAGS) -E C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\tests\test_image_cache.c > CMakeFiles\cyberbrowser-tests.dir\test_image_cache.c.i
+
+tests/CMakeFiles/cyberbrowser-tests.dir/test_image_cache.c.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling C source to assembly CMakeFiles/cyberbrowser-tests.dir/test_image_cache.c.s"
+	cd /d C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\build-release\tests && C:\msys64\mingw64\bin\cc.exe $(C_DEFINES) $(C_INCLUDES) $(C_FLAGS) -S C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\tests\test_image_cache.c -o CMakeFiles\cyberbrowser-tests.dir\test_image_cache.c.s
+
+tests/CMakeFiles/cyberbrowser-tests.dir/test_http_pool.c.obj: tests/CMakeFiles/cyberbrowser-tests.dir/flags.make
+tests/CMakeFiles/cyberbrowser-tests.dir/test_http_pool.c.obj: tests/CMakeFiles/cyberbrowser-tests.dir/includes_C.rsp
+tests/CMakeFiles/cyberbrowser-tests.dir/test_http_pool.c.obj: C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/tests/test_http_pool.c
+tests/CMakeFiles/cyberbrowser-tests.dir/test_http_pool.c.obj: tests/CMakeFiles/cyberbrowser-tests.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\build-release\CMakeFiles --progress-num=$(CMAKE_PROGRESS_13) "Building C object tests/CMakeFiles/cyberbrowser-tests.dir/test_http_pool.c.obj"
+	cd /d C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\build-release\tests && C:\msys64\mingw64\bin\cc.exe $(C_DEFINES) $(C_INCLUDES) $(C_FLAGS) -MD -MT tests/CMakeFiles/cyberbrowser-tests.dir/test_http_pool.c.obj -MF CMakeFiles\cyberbrowser-tests.dir\test_http_pool.c.obj.d -o CMakeFiles\cyberbrowser-tests.dir\test_http_pool.c.obj -c C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\tests\test_http_pool.c
+
+tests/CMakeFiles/cyberbrowser-tests.dir/test_http_pool.c.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing C source to CMakeFiles/cyberbrowser-tests.dir/test_http_pool.c.i"
+	cd /d C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\build-release\tests && C:\msys64\mingw64\bin\cc.exe $(C_DEFINES) $(C_INCLUDES) $(C_FLAGS) -E C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\tests\test_http_pool.c > CMakeFiles\cyberbrowser-tests.dir\test_http_pool.c.i
+
+tests/CMakeFiles/cyberbrowser-tests.dir/test_http_pool.c.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling C source to assembly CMakeFiles/cyberbrowser-tests.dir/test_http_pool.c.s"
+	cd /d C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\build-release\tests && C:\msys64\mingw64\bin\cc.exe $(C_DEFINES) $(C_INCLUDES) $(C_FLAGS) -S C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\tests\test_http_pool.c -o CMakeFiles\cyberbrowser-tests.dir\test_http_pool.c.s
+
 tests/CMakeFiles/cyberbrowser-tests.dir/test_dom.c.obj: tests/CMakeFiles/cyberbrowser-tests.dir/flags.make
 tests/CMakeFiles/cyberbrowser-tests.dir/test_dom.c.obj: tests/CMakeFiles/cyberbrowser-tests.dir/includes_C.rsp
 tests/CMakeFiles/cyberbrowser-tests.dir/test_dom.c.obj: C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/tests/test_dom.c
 tests/CMakeFiles/cyberbrowser-tests.dir/test_dom.c.obj: tests/CMakeFiles/cyberbrowser-tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\build-release\CMakeFiles --progress-num=$(CMAKE_PROGRESS_12) "Building C object tests/CMakeFiles/cyberbrowser-tests.dir/test_dom.c.obj"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\build-release\CMakeFiles --progress-num=$(CMAKE_PROGRESS_14) "Building C object tests/CMakeFiles/cyberbrowser-tests.dir/test_dom.c.obj"
 	cd /d C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\build-release\tests && C:\msys64\mingw64\bin\cc.exe $(C_DEFINES) $(C_INCLUDES) $(C_FLAGS) -MD -MT tests/CMakeFiles/cyberbrowser-tests.dir/test_dom.c.obj -MF CMakeFiles\cyberbrowser-tests.dir\test_dom.c.obj.d -o CMakeFiles\cyberbrowser-tests.dir\test_dom.c.obj -c C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\tests\test_dom.c
 
 tests/CMakeFiles/cyberbrowser-tests.dir/test_dom.c.i: cmake_force
@@ -255,7 +285,7 @@ tests/CMakeFiles/cyberbrowser-tests.dir/legacy_html_parse.c.obj: tests/CMakeFile
 tests/CMakeFiles/cyberbrowser-tests.dir/legacy_html_parse.c.obj: tests/CMakeFiles/cyberbrowser-tests.dir/includes_C.rsp
 tests/CMakeFiles/cyberbrowser-tests.dir/legacy_html_parse.c.obj: C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/tests/legacy_html_parse.c
 tests/CMakeFiles/cyberbrowser-tests.dir/legacy_html_parse.c.obj: tests/CMakeFiles/cyberbrowser-tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\build-release\CMakeFiles --progress-num=$(CMAKE_PROGRESS_13) "Building C object tests/CMakeFiles/cyberbrowser-tests.dir/legacy_html_parse.c.obj"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\build-release\CMakeFiles --progress-num=$(CMAKE_PROGRESS_15) "Building C object tests/CMakeFiles/cyberbrowser-tests.dir/legacy_html_parse.c.obj"
 	cd /d C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\build-release\tests && C:\msys64\mingw64\bin\cc.exe $(C_DEFINES) $(C_INCLUDES) $(C_FLAGS) -MD -MT tests/CMakeFiles/cyberbrowser-tests.dir/legacy_html_parse.c.obj -MF CMakeFiles\cyberbrowser-tests.dir\legacy_html_parse.c.obj.d -o CMakeFiles\cyberbrowser-tests.dir\legacy_html_parse.c.obj -c C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\tests\legacy_html_parse.c
 
 tests/CMakeFiles/cyberbrowser-tests.dir/legacy_html_parse.c.i: cmake_force
@@ -279,6 +309,8 @@ cyberbrowser__tests_OBJECTS = \
 "CMakeFiles/cyberbrowser-tests.dir/test_css_parser.c.obj" \
 "CMakeFiles/cyberbrowser-tests.dir/test_css_layout.c.obj" \
 "CMakeFiles/cyberbrowser-tests.dir/test_css_style.c.obj" \
+"CMakeFiles/cyberbrowser-tests.dir/test_image_cache.c.obj" \
+"CMakeFiles/cyberbrowser-tests.dir/test_http_pool.c.obj" \
 "CMakeFiles/cyberbrowser-tests.dir/test_dom.c.obj" \
 "CMakeFiles/cyberbrowser-tests.dir/legacy_html_parse.c.obj"
 
@@ -296,14 +328,18 @@ tests/cyberbrowser-tests.exe: tests/CMakeFiles/cyberbrowser-tests.dir/test_preor
 tests/cyberbrowser-tests.exe: tests/CMakeFiles/cyberbrowser-tests.dir/test_css_parser.c.obj
 tests/cyberbrowser-tests.exe: tests/CMakeFiles/cyberbrowser-tests.dir/test_css_layout.c.obj
 tests/cyberbrowser-tests.exe: tests/CMakeFiles/cyberbrowser-tests.dir/test_css_style.c.obj
+tests/cyberbrowser-tests.exe: tests/CMakeFiles/cyberbrowser-tests.dir/test_image_cache.c.obj
+tests/cyberbrowser-tests.exe: tests/CMakeFiles/cyberbrowser-tests.dir/test_http_pool.c.obj
 tests/cyberbrowser-tests.exe: tests/CMakeFiles/cyberbrowser-tests.dir/test_dom.c.obj
 tests/cyberbrowser-tests.exe: tests/CMakeFiles/cyberbrowser-tests.dir/legacy_html_parse.c.obj
 tests/cyberbrowser-tests.exe: tests/CMakeFiles/cyberbrowser-tests.dir/build.make
 tests/cyberbrowser-tests.exe: libcyberbrowser_lib.a
+tests/cyberbrowser-tests.exe: libjpeg-turbo/lib/libturbojpeg.a
+tests/cyberbrowser-tests.exe: src/third_party/libwebp/libwebpdecoder.a
 tests/cyberbrowser-tests.exe: tests/CMakeFiles/cyberbrowser-tests.dir/linkLibs.rsp
 tests/cyberbrowser-tests.exe: tests/CMakeFiles/cyberbrowser-tests.dir/objects1.rsp
 tests/cyberbrowser-tests.exe: tests/CMakeFiles/cyberbrowser-tests.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\build-release\CMakeFiles --progress-num=$(CMAKE_PROGRESS_14) "Linking C executable cyberbrowser-tests.exe"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\build-release\CMakeFiles --progress-num=$(CMAKE_PROGRESS_16) "Linking C executable cyberbrowser-tests.exe"
 	cd /d C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\build-release\tests && $(CMAKE_COMMAND) -E cmake_link_script CMakeFiles\cyberbrowser-tests.dir\link.txt --verbose=$(VERBOSE)
 
 # Rule to build all files generated by this target.

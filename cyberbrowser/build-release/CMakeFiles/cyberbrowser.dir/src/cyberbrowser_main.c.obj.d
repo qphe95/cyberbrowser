@@ -304,6 +304,7 @@ CMakeFiles/cyberbrowser.dir/src/cyberbrowser_main.c.obj: \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\display_list.h \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\text_shaper.h \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\image_cache.h \
+ C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\browser/image_api.h \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\cyber_profile.h \
  C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/stb/stb_image_write.h \
  C:\Users\qingping\Documents\cyberbrowser\cyberbrowser\src\session_state.h \

@@ -96,6 +96,8 @@ long__video__test_EXTERNAL_OBJECTS =
 tests/long-video-test.exe: tests/CMakeFiles/long-video-test.dir/test_long_video_analyze.c.obj
 tests/long-video-test.exe: tests/CMakeFiles/long-video-test.dir/build.make
 tests/long-video-test.exe: libcyberbrowser_lib.a
+tests/long-video-test.exe: libjpeg-turbo/lib/libturbojpeg.a
+tests/long-video-test.exe: src/third_party/libwebp/libwebpdecoder.a
 tests/long-video-test.exe: tests/CMakeFiles/long-video-test.dir/linkLibs.rsp
 tests/long-video-test.exe: tests/CMakeFiles/long-video-test.dir/objects1.rsp
 tests/long-video-test.exe: tests/CMakeFiles/long-video-test.dir/link.txt

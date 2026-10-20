@@ -60,7 +60,7 @@ GCValue js_user_agent_data_get_high_entropy_values(JSContextHandle ctx, GCValue 
     GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
     GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
     GCValue args[1] = { result };
-    GCValue promise = JS_Call(ctx, resolve_fn, JS_UNDEFINED, 1, args);
+    GCValue promise = JS_Call(ctx, resolve_fn, promise_ctor, 1, args);
     return promise;
 }
 

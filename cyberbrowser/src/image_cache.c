@@ -190,8 +190,9 @@ static int hexval(int c)
     return -1;
 }
 
-/* data: URL payload (base64 or percent-encoded).  NULL when malformed. */
-static uint8_t *decode_data_url(const char *url, size_t *out_len)
+/* data: URL payload (base64 or percent-encoded).  NULL when malformed.
+ * Declared in url_utils.h; fetch() uses it for data: URLs too. */
+uint8_t *data_url_decode(const char *url, size_t *out_len)
 {
     if (!url_is_data_url(url)) return NULL;
     const char *comma = strchr(url, ',');
@@ -532,7 +533,7 @@ static bool fetch_entry(ImageEntry *e)
 {
     const char *src = e->source;
     if (url_is_data_url(src)) {
-        e->bytes = decode_data_url(src, &e->nbytes);
+        e->bytes = data_url_decode(src, &e->nbytes);
         return e->bytes != NULL;
     }
     if (url_is_network_url(src)) return http_fetch(src, &e->bytes, &e->nbytes);

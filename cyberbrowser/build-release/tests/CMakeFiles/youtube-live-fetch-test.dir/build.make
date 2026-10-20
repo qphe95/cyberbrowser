@@ -96,6 +96,8 @@ youtube__live__fetch__test_EXTERNAL_OBJECTS =
 tests/youtube-live-fetch-test.exe: tests/CMakeFiles/youtube-live-fetch-test.dir/test_youtube_live_fetch.c.obj
 tests/youtube-live-fetch-test.exe: tests/CMakeFiles/youtube-live-fetch-test.dir/build.make
 tests/youtube-live-fetch-test.exe: libcyberbrowser_lib.a
+tests/youtube-live-fetch-test.exe: libjpeg-turbo/lib/libturbojpeg.a
+tests/youtube-live-fetch-test.exe: src/third_party/libwebp/libwebpdecoder.a
 tests/youtube-live-fetch-test.exe: tests/CMakeFiles/youtube-live-fetch-test.dir/linkLibs.rsp
 tests/youtube-live-fetch-test.exe: tests/CMakeFiles/youtube-live-fetch-test.dir/objects1.rsp
 tests/youtube-live-fetch-test.exe: tests/CMakeFiles/youtube-live-fetch-test.dir/link.txt

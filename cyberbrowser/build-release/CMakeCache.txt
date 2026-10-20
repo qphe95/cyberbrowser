@@ -288,6 +288,12 @@ CMAKE_TAPI:FILEPATH=CMAKE_TAPI-NOTFOUND
 // Studio IDE projects all commands are done without /nologo.
 CMAKE_VERBOSE_MAKEFILE:BOOL=FALSE
 
+//OpenGL library for win32
+OPENGL_gl_LIBRARY:STRING=opengl32
+
+//GLU library for win32
+OPENGL_glu_LIBRARY:STRING=glu32
+
 //Path to a program.
 Vulkan_GLSLANG_VALIDATOR_EXECUTABLE:FILEPATH=C:/msys64/mingw64/bin/glslangValidator.exe
 
@@ -300,6 +306,73 @@ Vulkan_INCLUDE_DIR:PATH=C:/msys64/mingw64/include
 //Path to a library.
 Vulkan_LIBRARY:FILEPATH=C:/msys64/mingw64/lib/libvulkan-1.dll.a
 
+//Bit trace mode (0=none, 1=bit, 2=bytes)
+WEBP_BITTRACE:STRING=0
+
+//Build animation utilities.
+WEBP_BUILD_ANIM_UTILS:BOOL=OFF
+
+//Build the cwebp command line tool.
+WEBP_BUILD_CWEBP:BOOL=OFF
+
+//Build the dwebp command line tool.
+WEBP_BUILD_DWEBP:BOOL=OFF
+
+//Build extras.
+WEBP_BUILD_EXTRAS:BOOL=OFF
+
+//Build the gif2webp conversion tool.
+WEBP_BUILD_GIF2WEBP:BOOL=OFF
+
+//Build the img2webp animation tool.
+WEBP_BUILD_IMG2WEBP:BOOL=OFF
+
+//Build the libwebpmux library.
+WEBP_BUILD_LIBWEBPMUX:BOOL=OFF
+
+//Build the vwebp viewer tool.
+WEBP_BUILD_VWEBP:BOOL=OFF
+
+//Build the webpinfo command line tool.
+WEBP_BUILD_WEBPINFO:BOOL=OFF
+
+//Build the webpmux command line tool.
+WEBP_BUILD_WEBPMUX:BOOL=OFF
+
+//Emscripten build of webp.js.
+WEBP_BUILD_WEBP_JS:BOOL=OFF
+
+//Enable any SIMD optimization.
+WEBP_ENABLE_SIMD:BOOL=ON
+
+//Enable byte swap for 16 bit colorspaces.
+WEBP_ENABLE_SWAP_16BIT_CSP:BOOL=OFF
+
+//Add [[nodiscard]] to some functions.        CMake must be at
+// least 3.21 to force C23
+WEBP_ENABLE_WUNUSED_RESULT:BOOL=OFF
+
+//Link using static libraries. If OFF, use dynamic libraries.
+WEBP_LINK_STATIC:BOOL=ON
+
+//Enable near-lossless encoding
+WEBP_NEAR_LOSSLESS:BOOL=ON
+
+//Build Unicode executables.
+WEBP_UNICODE:BOOL=ON
+
+//Enable threading support
+WEBP_USE_THREAD:BOOL=ON
+
+//Value Computed by CMake
+WebP_BINARY_DIR:STATIC=C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/build-release/src/third_party/libwebp
+
+//Value Computed by CMake
+WebP_IS_TOP_LEVEL:STATIC=OFF
+
+//Value Computed by CMake
+WebP_SOURCE_DIR:STATIC=C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/src/third_party/libwebp
+
 //Value Computed by CMake
 cyberbrowser_BINARY_DIR:STATIC=C:/Users/qingping/Documents/cyberbrowser/cyberbrowser/build-release
 
@@ -308,6 +381,18 @@ cyberbrowser_IS_TOP_LEVEL:STATIC=ON
 
 //Value Computed by CMake
 cyberbrowser_SOURCE_DIR:STATIC=C:/Users/qingping/Documents/cyberbrowser/cyberbrowser
+
+//Dependencies for the target
+sharpyuv_LIB_DEPENDS:STATIC=general;m;
+
+//Dependencies for the target
+webp_LIB_DEPENDS:STATIC=general;sharpyuv;general;m;
+
+//Dependencies for the target
+webpdecoder_LIB_DEPENDS:STATIC=general;m;
+
+//Dependencies for the target
+webpdemux_LIB_DEPENDS:STATIC=general;webp;
 
 
 ########################
@@ -432,7 +517,7 @@ CMAKE_MODULE_LINKER_FLAGS_RELWITHDEBINFO-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: CMAKE_NM
 CMAKE_NM-ADVANCED:INTERNAL=1
 //number of local generators
-CMAKE_NUMBER_OF_MAKEFILES:INTERNAL=2
+CMAKE_NUMBER_OF_MAKEFILES:INTERNAL=3
 //ADVANCED property for variable: CMAKE_OBJCOPY
 CMAKE_OBJCOPY-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: CMAKE_OBJDUMP
@@ -488,10 +573,40 @@ CMAKE_STRIP-ADVANCED:INTERNAL=1
 CMAKE_TAPI-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: CMAKE_VERBOSE_MAKEFILE
 CMAKE_VERBOSE_MAKEFILE-ADVANCED:INTERNAL=1
+//Details about finding OpenGL
+FIND_PACKAGE_MESSAGE_DETAILS_OpenGL:INTERNAL=[opengl32][ ][v()]
 //Details about finding Threads
 FIND_PACKAGE_MESSAGE_DETAILS_Threads:INTERNAL=[TRUE][v()]
 //Details about finding Vulkan
 FIND_PACKAGE_MESSAGE_DETAILS_Vulkan:INTERNAL=[C:/msys64/mingw64/lib/libvulkan-1.dll.a][C:/msys64/mingw64/include][found components: glslc glslangValidator ][v1.4.350()]
+//Test HAS_COMPILE_FLAG
+HAS_COMPILE_FLAG:INTERNAL=
+//Test HAVE_BUILTIN_BSWAP16
+HAVE_BUILTIN_BSWAP16:INTERNAL=
+//Test HAVE_BUILTIN_BSWAP32
+HAVE_BUILTIN_BSWAP32:INTERNAL=
+//Test HAVE_BUILTIN_BSWAP64
+HAVE_BUILTIN_BSWAP64:INTERNAL=
+//Have includes GLUT/glut.h
+HAVE_GLUT_GLUT_H:INTERNAL=
+//Have includes GL/glut.h
+HAVE_GL_GLUT_H:INTERNAL=
+//Test HAVE_MATH_LIBRARY
+HAVE_MATH_LIBRARY:INTERNAL=
+//Have includes OpenGL/glut.h
+HAVE_OPENGL_GLUT_H:INTERNAL=
+//Have includes shlwapi.h
+HAVE_SHLWAPI_H:INTERNAL=
+//Have includes unistd.h
+HAVE_UNISTD_H:INTERNAL=
+//Have includes wincodec.h
+HAVE_WINCODEC_H:INTERNAL=
+//Have includes windows.h
+HAVE_WINDOWS_H:INTERNAL=
+//ADVANCED property for variable: OPENGL_gl_LIBRARY
+OPENGL_gl_LIBRARY-ADVANCED:INTERNAL=1
+//ADVANCED property for variable: OPENGL_glu_LIBRARY
+OPENGL_glu_LIBRARY-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: Vulkan_GLSLANG_VALIDATOR_EXECUTABLE
 Vulkan_GLSLANG_VALIDATOR_EXECUTABLE-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: Vulkan_GLSLC_EXECUTABLE
@@ -500,6 +615,20 @@ Vulkan_GLSLC_EXECUTABLE-ADVANCED:INTERNAL=1
 Vulkan_INCLUDE_DIR-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: Vulkan_LIBRARY
 Vulkan_LIBRARY-ADVANCED:INTERNAL=1
+//STRINGS property for variable: WEBP_BITTRACE
+WEBP_BITTRACE-STRINGS:INTERNAL=0;1;2
+//Test WEBP_HAVE_FLAG_MIPS32
+WEBP_HAVE_FLAG_MIPS32:INTERNAL=
+//Test WEBP_HAVE_FLAG_MIPS_DSP_R2
+WEBP_HAVE_FLAG_MIPS_DSP_R2:INTERNAL=
+//Test WEBP_HAVE_FLAG_MSA
+WEBP_HAVE_FLAG_MSA:INTERNAL=
+//Test WEBP_HAVE_FLAG_NEON
+WEBP_HAVE_FLAG_NEON:INTERNAL=
+//Test WEBP_HAVE_FLAG_SSE2
+WEBP_HAVE_FLAG_SSE2:INTERNAL=1
+//Test WEBP_HAVE_FLAG_SSE41
+WEBP_HAVE_FLAG_SSE41:INTERNAL=1
 //CMAKE_INSTALL_PREFIX during last run
 _GNUInstallDirs_LAST_CMAKE_INSTALL_PREFIX:INTERNAL=C:/Program Files (x86)/cyberbrowser
 //Compiler reason failure
