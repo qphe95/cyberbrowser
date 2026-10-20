@@ -54,6 +54,25 @@ static inline void cp_scope_end_(const char *const *name)
     const char *CP_CONCAT(_cp_scope_, __LINE__) __attribute__((cleanup(cp_scope_end_))) = cp_scope_begin_(n, c)
 #define CP_SCOPE(n) CP_SCOPE_CAT(n, "main")
 
+/* Accumulating counters for hot paths (too many calls for an event each):
+ * CP_ACC("name") adds the enclosing scope's wall time and one call to a
+ * per-site total.  cp_profile_flush() also writes the totals (sorted) to
+ * stderr.  Main-thread use only; nearly free when profiling is off. */
+typedef struct CpAcc {
+    const char *name;
+    double total_us;
+    unsigned long long calls;
+    int registered;
+    struct CpAcc *next;
+} CpAcc;
+typedef struct { CpAcc *acc; double t0; } CpAccScope;
+CpAccScope cp_acc_begin_(CpAcc *acc);
+void cp_acc_end_(CpAccScope *s);
+#define CP_ACC(n) \
+    static CpAcc CP_CONCAT(_cp_acc_, __LINE__) = { n, 0.0, 0, 0, 0 }; \
+    CpAccScope CP_CONCAT(_cp_accs_, __LINE__) __attribute__((cleanup(cp_acc_end_))) = \
+        cp_acc_begin_(&CP_CONCAT(_cp_acc_, __LINE__))
+
 #ifdef __cplusplus
 }
 #endif

@@ -185,8 +185,49 @@ void cp_profile_instant(const char *name, const char *cat) {
     cp_unlock();
 }
 
+static CpAcc *g_cp_accs;
+
+CpAccScope cp_acc_begin_(CpAcc *acc) {
+    CpAccScope s = { NULL, 0.0 };
+    if (!cp_profile_enabled()) return s;
+    s.acc = acc;
+    s.t0 = cp_now_us();
+    return s;
+}
+
+void cp_acc_end_(CpAccScope *s) {
+    if (!s->acc) return;
+    s->acc->total_us += cp_now_us() - s->t0;
+    s->acc->calls++;
+    if (!s->acc->registered) {
+        s->acc->registered = 1;
+        s->acc->next = g_cp_accs;
+        g_cp_accs = s->acc;
+    }
+}
+
+static void cp_acc_report(void) {
+    int n = 0;
+    for (CpAcc *a = g_cp_accs; a; a = a->next) n++;
+    if (!n) return;
+    CpAcc **v = (CpAcc **)malloc((size_t)n * sizeof(*v));
+    if (!v) return;
+    n = 0;
+    for (CpAcc *a = g_cp_accs; a; a = a->next) v[n++] = a;
+    for (int i = 1; i < n; i++)            /* insertion sort, by total time */
+        for (int j = i; j > 0 && v[j]->total_us > v[j - 1]->total_us; j--) {
+            CpAcc *t = v[j]; v[j] = v[j - 1]; v[j - 1] = t;
+        }
+    fprintf(stderr, "[profile] accumulated (inclusive wall time):\n");
+    for (int i = 0; i < n; i++)
+        fprintf(stderr, "[profile] %10.1f ms %9llu calls %8.3f ms/call  %s\n", v[i]->total_us / 1000.0,
+                v[i]->calls, v[i]->calls ? v[i]->total_us / 1000.0 / (double)v[i]->calls : 0.0, v[i]->name);
+    free(v);
+}
+
 void cp_profile_flush(const char *path) {
     if (!path) return;
+    cp_acc_report();
     cp_lock();
     FILE *f = fopen(path, "w");
     if (!f) { cp_unlock(); return; }

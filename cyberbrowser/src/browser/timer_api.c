@@ -1,4 +1,5 @@
 /* Auto-generated split from browser_api_impl.c */
+#include "cyber_profile.h"
 #include "cyber_env.h"
 #include <string.h>
 #include <stdlib.h>
@@ -340,6 +341,7 @@ void timer_set_idle_deadline(unsigned long long deadline_ms) {
 
 // Execute a timer callback by ID
 void execute_timer(JSContextHandle ctx, int id) {
+    CP_ACC("timer callback");
     pthread_mutex_lock(&g_timer_state.mutex);
     
     Timer *timer = NULL;
@@ -474,6 +476,7 @@ void execute_timer(JSContextHandle ctx, int id) {
 // Process all due timers - called from interrupt handler
 // Returns 1 if any timers were processed
 void timer_microtask_checkpoint(JSContextHandle ctx) {
+    CP_ACC("microtask checkpoint");
     JSRuntimeHandle rt = JS_GetRuntime(ctx);
     JSContextHandle pctx = GC_HANDLE_NULL;
     for (int guard = 0; guard < 100000 && JS_ExecutePendingJob(rt, &pctx) > 0; guard++) {}

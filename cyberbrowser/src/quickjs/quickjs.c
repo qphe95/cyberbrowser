@@ -6214,6 +6214,7 @@ static GCValue JS_NewObjectFromShape(JSContextHandle ctx, JSShapeHandle sh, JSCl
     SAFE_SET(p, JSObjectHandle, has_immutable_prototype, 0);
     SAFE_SET(p, JSObjectHandle, tmp_mark, 0);
     SAFE_SET(p, JSObjectHandle, is_HTMLDDA, 0);
+    SAFE_SET(p, JSObjectHandle, is_watched, 0);
     SAFE_SET(p, JSObjectHandle, weakref_count, 0);
     js_obj_set_prop_version(p, 2); /* start stable (even) */
     SAFE_SET_HANDLE(p, JSObjectHandle, u.opaque_handle, GC_HANDLE_NULL);
@@ -10364,6 +10365,21 @@ static void ctx_find_callback(GCHandle handle, void *user_data)
     }
 }
 
+uint64_t JS_watched_write_epoch;
+
+#define JS_NOTE_WATCHED_WRITE(p) do { \
+    if (unlikely(SAFE_GET_OR(p, JSObjectHandle, is_watched, false))) \
+        JS_watched_write_epoch++; \
+} while (0)
+
+void JS_SetWatched(JSContextHandle ctx, GCValue obj)
+{
+    (void)ctx;
+    if (JS_VALUE_GET_TAG(obj) != JS_TAG_OBJECT)
+        return;
+    JSObjectHandle p = JS_VALUE_GET_OBJ(obj);
+    SAFE_SET(p, JSObjectHandle, is_watched, TRUE);
+}
 
 /* Note: the property value is not initialized. Return NULL if memory
    error. */
@@ -10371,6 +10387,8 @@ static JSProperty *add_property(JSContextHandle ctx,
                                 JSObjectHandle p, JSAtom prop, int prop_flags)
 {
     JSShapeHandle sh = GC_HANDLE_NULL, new_sh = GC_HANDLE_NULL;
+
+    JS_NOTE_WATCHED_WRITE(p);
 
     QJS_LOGD("add_property: ENTER p=%u prop=%d", SAFE_HANDLE(p), prop);
     if (!SAFE_VALID(p)) {
@@ -10520,6 +10538,7 @@ static int delete_property(JSContextHandle ctx, JSObjectHandle p, JSAtom atom)
     uint32_t lpr_idx;
     intptr_t h, h1;
 
+    JS_NOTE_WATCHED_WRITE(p);
  redo:
     sh = GC_SHAPE_DEREF(js_obj_shape_handle(p));
     h1 = atom & SAFE_GET_OR(sh, JSShapeHandle, prop_hash_mask, 0);
@@ -10951,6 +10970,7 @@ int JS_SetPropertyInternal(JSContextHandle ctx, GCValue obj,
         if (likely(flag_check == JS_PROP_WRITABLE)) {
             /* fast case */
             QJS_LOGD("JS_SetPropertyInternal: fast path, pr=%p pr->u.value=...", (void*)pr);
+            JS_NOTE_WATCHED_WRITE(p1);
             set_value(ctx, &pr->u.value, val);
             gc_write_barrier(GC_VALUE_GET_HANDLE(this_obj), GC_VALUE_GET_HANDLE(val));
             QJS_LOGD("JS_SetPropertyInternal: fast path done");
@@ -11651,6 +11671,7 @@ int JS_DefineProperty(JSContextHandle ctx, GCValue this_obj,
         }
     }
 
+    JS_NOTE_WATCHED_WRITE(p);
     redo_prop_update:
     QJS_LOGD("JS_DefineProperty: calling find_own_property p=%u prop=%d", SAFE_HANDLE(p), prop);
     prs = find_own_property(&pr, p, prop);
@@ -21548,6 +21569,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                     if (likely((prs->flags & (JS_PROP_TMASK | JS_PROP_WRITABLE |
                                               JS_PROP_LENGTH)) == JS_PROP_WRITABLE)) {
                         /* fast path */
+                        JS_NOTE_WATCHED_WRITE(p);
                         set_value(ctx, &pr->u.value, sp[-1]);
                         gc_write_barrier(GC_VALUE_GET_HANDLE(obj), GC_VALUE_GET_HANDLE(sp[-1]));
                     } else {

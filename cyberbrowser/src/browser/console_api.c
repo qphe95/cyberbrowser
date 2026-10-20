@@ -1,4 +1,5 @@
 /* Auto-generated split from browser_api_impl.c */
+#include "cyber_profile.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -547,6 +548,7 @@ static void js_computed_style_inherit(JSContextHandle ctx, GCValue style, DomWra
 // getComputedStyle - reads from the per-element computed-style table and
 // falls back to sensible defaults so scripts can safely call .replace() etc.
 GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    CP_ACC("getComputedStyle");
     (void)this_val;
     GCValue element = argc > 0 ? argv[0] : JS_UNDEFINED;
     GCValue pseudo = argc > 1 ? argv[1] : JS_UNDEFINED;

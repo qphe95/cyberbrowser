@@ -15,6 +15,7 @@
  * has no box and reports zeros, as display:none elements do in browsers.
  * Scrolling is not modelled: scrollTop/Left read 0 and ignore writes.
  */
+#include "cyber_profile.h"
 #include "layout_api.h"
 
 #include "cyber_env.h"
@@ -48,6 +49,29 @@ static uint32_t g_lq_slot_cap;
 
 static uint64_t g_lq_queries, g_lq_layouts, g_lq_layout_ms;
 
+/* Cheap change detection.  Serializing the document to see whether it changed
+ * costs tens of milliseconds on a large page, and scripts query layout
+ * thousands of times between mutations.  The store's version counters, the
+ * write epoch of watched (style) objects and the layout-request counter
+ * (CSSOM sheet edits) cover nearly every change; what they miss (properties
+ * that live only on JS objects) is caught by a full check at least every
+ * LQ_FULL_CHECK_MS. */
+enum { LQ_CHEAP_N = 5 };
+#define LQ_FULL_CHECK_MS 1000
+static uint64_t g_lq_cheap[LQ_CHEAP_N];
+static bool g_lq_cheap_ok;
+static unsigned long long g_lq_full_at;
+static uint64_t g_lq_cheap_hits;
+
+static void lq_cheap_key(uint64_t k[LQ_CHEAP_N])
+{
+    k[0] = g_dom.structure_version;
+    k[1] = g_dom.attr_version;
+    k[2] = g_dom.text_version;
+    k[3] = JS_watched_write_epoch;
+    k[4] = g_dom_layout_requests;
+}
+
 void layout_api_stats(uint64_t *queries, uint64_t *layouts, uint64_t *layout_ms)
 {
     if (queries) *queries = g_lq_queries;
@@ -68,6 +92,7 @@ void layout_api_invalidate(void)
 {
     lq_free();
     g_lq_key = 0;
+    g_lq_cheap_ok = false;
 }
 
 static double window_number(JSContextHandle ctx, const char *name, double fallback)
@@ -104,6 +129,14 @@ static void lq_map_slots(void)
     }
 }
 
+/* The snapshot was just checked (or rebuilt) against the live document. */
+static void lq_note_full_check(unsigned long long now)
+{
+    lq_cheap_key(g_lq_cheap);
+    g_lq_cheap_ok = true;
+    g_lq_full_at = now;
+}
+
 /* Bring the cached layout up to date with the document; false when there is
  * nothing to lay out. */
 static bool lq_ensure(JSContextHandle ctx)
@@ -121,12 +154,27 @@ static bool lq_ensure(JSContextHandle ctx)
     if (!JS_IsObject(js_doc)) return false;
     double vw = window_number(ctx, "innerWidth", 1024.0);
     double vh = window_number(ctx, "innerHeight", 768.0);
-    if (vw != g_lq_vw || vh != g_lq_vh) { g_lq_key = 0; g_lq_vw = vw; g_lq_vh = vh; }
+    if (vw != g_lq_vw || vh != g_lq_vh) {
+        g_lq_key = 0; g_lq_vw = vw; g_lq_vh = vh; g_lq_cheap_ok = false;
+    }
+
+    uint64_t cheap[LQ_CHEAP_N];
+    lq_cheap_key(cheap);
+    unsigned long long now = platform_get_time_ms();
+    if (g_lq_valid && g_lq_cheap_ok && now - g_lq_full_at < LQ_FULL_CHECK_MS &&
+        memcmp(cheap, g_lq_cheap, sizeof(cheap)) == 0) {
+        g_lq_cheap_hits++;
+        return true;
+    }
 
     bool unchanged = false;
     uint64_t key = g_lq_valid ? g_lq_key : 0;
-    HtmlDocument *doc = html_document_from_js_dom_if_changed(ctx, js_doc, &key, &unchanged);
-    if (unchanged && g_lq_valid) return true;
+    HtmlDocument *doc;
+    {
+        CP_ACC("forced layout: serialize+snapshot");
+        doc = html_document_from_js_dom_if_changed(ctx, js_doc, &key, &unchanged);
+    }
+    if (unchanged && g_lq_valid) { lq_note_full_check(now); return true; }
     if (!doc) return g_lq_valid;
 
     g_lq_running = true;
@@ -134,9 +182,13 @@ static bool lq_ensure(JSContextHandle ctx)
     lq_free();
     g_lq_doc = doc;
     g_lq_layout.js_ctx = ctx;
-    g_lq_valid = css_layout_run(&g_lq_layout, doc, NULL, vw, vh);
+    {
+        CP_ACC("forced layout: layout");
+        g_lq_valid = css_layout_run(&g_lq_layout, doc, NULL, vw, vh);
+    }
     if (g_lq_valid) {
         g_lq_key = key;
+        lq_note_full_check(now);
         lq_map_slots();
     } else {
         lq_free();
@@ -356,4 +408,9 @@ void layout_api_install(JSContextHandle ctx, GCValue element_proto)
     define_accessor(ctx, element_proto, "scrollHeight", js_scroll_height, NULL);
     define_accessor(ctx, element_proto, "scrollTop", js_scroll_offset, js_scroll_offset_set);
     define_accessor(ctx, element_proto, "scrollLeft", js_scroll_offset, js_scroll_offset_set);
+}
+
+uint64_t layout_api_cheap_hits(void)
+{
+    return g_lq_cheap_hits;
 }

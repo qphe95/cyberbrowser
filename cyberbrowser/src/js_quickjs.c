@@ -334,6 +334,7 @@ static GCValue js_xhr_open(JSContextHandle ctx, GCValue this_val, int argc, GCVa
 }
 
 static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    CP_ACC("XHR send");
     XMLHttpRequestHandle xhr = JS_GetOpaqueHandle2(ctx, this_val, js_xhr_class_id);
     if (SAFE_IS_NULL(xhr)) return JS_ThrowTypeError(ctx, "XMLHttpRequest internal error");
     
@@ -1782,6 +1783,7 @@ static GCValue js_fetch_arrayBuffer(JSContextHandle ctx, GCValue this_val, int a
 }
 
 GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    CP_ACC("fetch()");
     const char *url = NULL;
     
     // Handle Request objects
@@ -2127,6 +2129,8 @@ GCValue css_new_style_object(JSContextHandle ctx, GCValue el) {
         JS_NewCFunction(ctx, js_style_set_property, "setProperty", 3));
     JS_SetPropertyStr(ctx, style, "getPropertyValue",
         JS_NewCFunction(ctx, js_style_get_property_value, "getPropertyValue", 1));
+    /* Style writes change the render snapshot (forced layout watches them). */
+    JS_SetWatched(ctx, style);
     return style;
 }
 
@@ -2560,8 +2564,10 @@ void js_quickjs_pump_timers_and_jobs(void) {
         int jobs = 0;
         JSContextHandle pctx = GC_HANDLE_NULL;
         int ret;
-        while (callbacks_remaining > 0 &&
-               (ret = JS_ExecutePendingJob(rt, &pctx)) > 0) {
+        for (;;) {
+            if (callbacks_remaining <= 0) break;
+            CP_ACC("promise job (pump)");
+            if ((ret = JS_ExecutePendingJob(rt, &pctx)) <= 0) break;
             jobs++;
             callbacks_remaining--;
         }

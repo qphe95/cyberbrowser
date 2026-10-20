@@ -27,6 +27,8 @@ void layout_api_install(JSContextHandle ctx, GCValue element_proto);
 
 /* Forced layouts run / queries answered since start (diagnostics, tests). */
 void layout_api_stats(uint64_t *queries, uint64_t *layouts, uint64_t *layout_ms);
+/* Queries answered from the cached layout without re-serializing. */
+uint64_t layout_api_cheap_hits(void);
 
 /* Drop the cached layout (the next query lays out again). */
 void layout_api_invalidate(void);

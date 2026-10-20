@@ -1351,6 +1351,7 @@ GCValue css_ensure_style_object(JSContextHandle ctx, GCValue element) {
         if (JS_IsObject(proto)) {
             JS_SetPrototype(ctx, style, proto);
         }
+        JS_SetWatched(ctx, style);
         JS_SetPropertyStr(ctx, element, "__style", style);
     }
     return style;

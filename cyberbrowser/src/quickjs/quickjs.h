@@ -1497,6 +1497,12 @@ int JS_GetStripInfo(JSRuntimeHandle rt);
 /* set the [IsHTMLDDA] internal slot */
 void JS_SetIsHTMLDDA(JSContextHandle ctx, GCValue obj);
 
+/* Watched objects: adding, writing, redefining or deleting a property of one
+   bumps JS_watched_write_epoch, so an embedder can tell cheaply whether any
+   of them changed. */
+void JS_SetWatched(JSContextHandle ctx, GCValue obj);
+extern uint64_t JS_watched_write_epoch;
+
 typedef struct JSModuleDef JSModuleDef;
 
 /* return the module specifier (allocated with gc_alloc) or NULL if
@@ -1797,7 +1803,8 @@ struct JSObject {
     uint8_t has_immutable_prototype : 1; /* cannot modify the prototype */
     uint8_t tmp_mark : 1;        /* used in JS_WriteObjectRec() */
     uint8_t is_HTMLDDA : 1;      /* specific annex B IsHtmlDDA behavior */
-    uint8_t _padding : 7;        /* unused padding to align weakref_count */
+    uint8_t is_watched : 1;      /* writes bump JS_watched_write_epoch */
+    uint8_t _padding : 6;        /* unused padding to align weakref_count */
     /* count the number of weak references to this object. The object
        structure is freed only if weakref_count = 0 */
     uint32_t weakref_count;

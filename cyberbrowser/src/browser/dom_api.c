@@ -54,8 +54,11 @@ void dom_enable_dynamic_script_loading(void) {
     g_dom_dynamic_scripts_enabled = 1;
 }
 
+uint64_t g_dom_layout_requests;
+
 void dom_request_layout(void) {
     g_dom_needs_layout = 1;
+    g_dom_layout_requests++;
 }
 
 // Real DOM Node Implementation
@@ -452,6 +455,7 @@ static void collect_ce_candidates(NodeId root, uint32_t **out, uint32_t *n) {
  * custom element candidate in it, then connectedCallbacks for the elements
  * that already have one (upgraded elements).  Upgrades run only on connect. */
 void dom_ce_on_connect(JSContextHandle ctx, NodeId subtree) {
+    CP_ACC("CE connect+upgrade");
     uint32_t *ids = NULL, n = 0;
     collect_ce_candidates(subtree, &ids, &n);
     if (!n) { free(ids); return; }
@@ -1077,6 +1081,7 @@ static void notify_child_list(JSContextHandle ctx, GCValue target, GCValue node)
 /* Insert `child` under `parent` before `ref` (DOM_NULL appends), with the
  * DOM API's side effects.  `child` must not be a fragment. */
 bool dom_api_insert(JSContextHandle ctx, NodeId parent, NodeId child, NodeId ref) {
+    CP_ACC("DOM insert");
     if (!dom_valid(parent) || !dom_valid(child)) return false;
     if (dom_contains(child, parent) || dom_kind(child) == DOM_K_DOCUMENT) {
         throw_dom_exception(ctx, "HierarchyRequestError", "The new child contains the parent");
@@ -1125,6 +1130,7 @@ bool dom_api_remove_discard(JSContextHandle ctx, NodeId parent, NodeId child) {
 }
 
 bool dom_api_remove(JSContextHandle ctx, NodeId parent, NodeId child) {
+    CP_ACC("DOM remove");
     if (!dom_valid(parent) || !dom_valid(child) || dom_parent(child) != parent) return false;
     /* Wrappers are only needed for callbacks (a wrapped node may carry
      * them) and mutation records. */
@@ -1877,9 +1883,10 @@ GCValue js_element_set_attribute(JSContextHandle ctx, GCValue this_val, int argc
             css_atom_reserve(1);
             dom_set_attr(n, css_atom_intern(name, strlen(name)), value, vlen);
             if (strcasecmp(name, "style") == 0) {
-                /* Re-apply the inline style to the live style object. */
+                /* The attribute replaces the live style object's declarations. */
                 GCValue style = dom_element_style(ctx, this_val, false);
-                if (JS_IsObject(style)) css_apply_inline_style_to(ctx, style, value);
+                if (JS_IsObject(style))
+                    JS_SetPropertyStr(ctx, style, "cssText", JS_NewStringLen(ctx, value, vlen));
             }
         }
         if (strcmp(name, "src") == 0 && value[0]) {
@@ -1981,6 +1988,10 @@ GCValue js_element_remove_attribute(JSContextHandle ctx, GCValue this_val, int a
         if (n) {
             CssAtom a = css_atom_find(name, strlen(name));
             if (a) dom_remove_attr(n, a);
+            if (strcasecmp(name, "style") == 0) {
+                GCValue style = dom_element_style(ctx, this_val, false);
+                if (JS_IsObject(style)) JS_SetPropertyStr(ctx, style, "cssText", JS_NewString(ctx, ""));
+            }
         }
         invoke_attribute_changed(ctx, this_val, name, old_value, NULL);
         mo_notify_attribute(ctx, this_val, name, old_value ? old_value : "");
@@ -2062,6 +2073,7 @@ GCValue js_document_getElementById(JSContextHandle ctx, GCValue this_val, int ar
 /* querySelector[All] over a scope (§7 "Queries"): compiled selectors, index
  * candidates, document order. */
 static GCValue query_first(JSContextHandle ctx, NodeId scope, GCValue sel, bool include_self) {
+    CP_ACC("querySelector");
     size_t n = 0;
     const char *s = JS_ToCStringLen(ctx, &n, sel);
     if (!s) return JS_NULL;
@@ -2071,6 +2083,7 @@ static GCValue query_first(JSContextHandle ctx, NodeId scope, GCValue sel, bool 
 }
 
 static GCValue query_all(JSContextHandle ctx, NodeId scope, GCValue sel, bool include_self) {
+    CP_ACC("querySelectorAll");
     size_t n = 0;
     const char *s = JS_ToCStringLen(ctx, &n, sel);
     if (!s) return JS_NewArray(ctx);
@@ -2264,6 +2277,7 @@ static void serialize_node(SBuf *b, NodeId n) {
 }
 
 char *dom_serialize(JSContextHandle ctx, NodeId n, bool outer, size_t *len_out) {
+    CP_ACC("innerHTML+outerHTML get");
     (void)ctx;
     SBuf b = { 0 };
     sb_put(&b, "", 0);

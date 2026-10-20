@@ -9,6 +9,7 @@
  * layout.
  */
 
+#include "cyber_profile.h"
 #include "cyber_env.h"
 #include <string.h>
 #include <stdlib.h>
@@ -476,6 +477,7 @@ bool html_create_dom_in_js(JSContextHandle ctx, HtmlDocument *doc) {
  * Insertions go through the DOM API so custom elements and observers see
  * them. */
 void dom_set_inner_html(JSContextHandle ctx, NodeId target, const char *html, size_t len) {
+    CP_ACC("innerHTML set");
     if (!dom_valid(target)) return;
     while (dom_first_child(target)) {
         if (!dom_api_remove_discard(ctx, target, dom_first_child(target))) {
@@ -729,6 +731,7 @@ typedef struct {
     const char **tags;
     size_t nids, capids;
     bool track;
+    bool omit_script_text;   /* render snapshot: script text never renders */
 } SerializeBuffer;
 
 static bool serialize_buf_init(SerializeBuffer *buf) {
@@ -1357,7 +1360,9 @@ static void html_serialize_element(JSContextHandle ctx, SerNode n, SerializeBuff
     }
     serialize_buf_append(buf, ">");
 
-    if (html_is_raw_content_tag(tag_lower)) {
+    if (buf->omit_script_text && strcmp(tag_lower, "script") == 0) {
+        /* Nothing to emit. */
+    } else if (html_is_raw_content_tag(tag_lower)) {
         /* Raw text: textContent, unescaped. */
         if (n.id && legacy_limits()) {
             ser_text_content(n.id, buf);
@@ -1488,6 +1493,7 @@ HtmlDocument *html_document_from_js_dom_if_changed(JSContextHandle ctx, GCValue 
     SerializeBuffer buf;
     if (!serialize_buf_init(&buf)) return NULL;
     buf.track = true;
+    buf.omit_script_text = true;
     serialize_buf_append(&buf, "<!doctype html>\n");
     html_serialize_node(ctx, ser_of_value(doc_elem), &buf);
 

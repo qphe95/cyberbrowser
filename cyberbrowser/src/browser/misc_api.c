@@ -1,4 +1,5 @@
 /* Auto-generated split from browser_api_impl.c */
+#include "cyber_profile.h"
 #include "cyber_env.h"
 #include <string.h>
 #include <stdlib.h>
@@ -2317,6 +2318,7 @@ static void mo_push_child_nodes(JSContextHandle ctx, GCValue node, GCValue arr) 
 
 static void mo_build_snapshot(JSContextHandle ctx, GCValue node, bool subtree,
                               GCValue nodes, GCValue children) {
+    CP_ACC("MutationObserver snapshot");
     GCValue node_arr = JS_NewArray(ctx);
     mo_push_child_nodes(ctx, node, node_arr);
 
@@ -3213,6 +3215,7 @@ static GCValue io_registry(JSContextHandle ctx) {
  * 100 ms), as a browser does each rendering opportunity, so targets that
  * become visible (or stop being visible) after a layout change are told. */
 void intersection_observers_tick(JSContextHandle ctx) {
+    CP_ACC("IntersectionObserver tick");
     static unsigned long long last;
     unsigned long long now = platform_get_time_ms();
     if (now - last < 100) return;

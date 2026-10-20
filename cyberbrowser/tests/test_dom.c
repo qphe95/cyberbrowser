@@ -668,6 +668,27 @@ TEST(test_dom_layout_metrics_block_boxes) {
     return true;
 }
 
+/* Back-to-back queries reuse the cached layout, but every kind of change
+ * between them is still seen: style object writes, attributes, text of a
+ * style element and constructed sheets. */
+TEST(test_dom_layout_metrics_see_each_change) {
+    JSContextHandle ctx = get_shared_test_context();
+    if (!dom_ready(ctx)) { printf("    (skipped - no document)\n"); return true; }
+    ASSERT_EQ(1, js_int(ctx,
+        "(function(){var b=document.body, s=document.createElement('style');"
+        "var c=document.createElement('div'); c.style.height='10px'; b.appendChild(c); document.head.appendChild(s);"
+        "var r=[];"
+        "c.style.width='50px'; r.push(c.offsetWidth===50);"
+        "c.style.setProperty('width','60px'); r.push(c.offsetWidth===60);"
+        "c.style.cssText='width: 70px; height: 10px'; r.push(c.offsetWidth===70);"
+        "c.removeAttribute('style'); c.className='lmx'; s.textContent='.lmx{width:80px;height:5px}';"
+        "r.push(c.offsetWidth===80);"
+        "s.textContent='.lmx{width:90px;height:5px}'; r.push(c.offsetWidth===90);"
+        "c.setAttribute('style','width: 95px'); r.push(c.offsetWidth===95);"
+        "c.remove(); s.remove(); var m=0; for(var i=0;i<r.length;i++) if(!r[i]) m|=1<<i; return m ? 100+m : 1;})()"));
+    return true;
+}
+
 /* A fetched-style Response and its clone both read the body. */
 TEST(test_dom_response_clone_keeps_body) {
     JSContextHandle ctx = get_shared_test_context();
@@ -837,6 +858,7 @@ void run_dom_tests(void) {
     RUN_TEST(test_dom_render_snapshot_reuse);
     RUN_TEST(test_dom_style_assignment_forwards_to_css_text);
     RUN_TEST(test_dom_layout_metrics_block_boxes);
+    RUN_TEST(test_dom_layout_metrics_see_each_change);
     RUN_TEST(test_dom_response_clone_keeps_body);
     RUN_TEST(test_dom_video_wrapper_survives_gc);
     RUN_TEST(test_dom_fragment_text_and_html_element_basics);

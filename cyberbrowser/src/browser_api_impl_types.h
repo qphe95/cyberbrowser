@@ -354,6 +354,9 @@ typedef struct CssComputedStyle {
 /* Set to 1 by DOM mutation APIs. The main loop reads this flag to decide when
  * to rebuild the native HtmlDocument from the JS DOM and re-run layout. */
 extern volatile int g_dom_needs_layout;
+/* Bumped by every dom_request_layout(), including CSSOM sheet mutations the
+ * store versions do not see. */
+extern uint64_t g_dom_layout_requests;
 
 /* Mark the document as needing a layout pass. May be called from any thread
  * that holds the JS context (e.g. async image load callbacks). */
