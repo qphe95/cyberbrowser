@@ -90,6 +90,8 @@ set(BE_SOURCES
     src/css_layout.c
     src/display_list.c
     src/text_shaper.c
+    src/font_loader.c
+    src/font_registry.c
     src/image_cache.c
     src/lockfree_hash_table.c
     src/url_analyzer.c
@@ -336,6 +338,18 @@ if(NOT MSVC)
     target_compile_options(plutosvg_static PRIVATE -O2 -w)
 endif()
 target_link_libraries(cyberbrowser_lib PUBLIC plutosvg_static)
+
+# Brotli decoder (MIT, C99): WOFF2 web fonts (font_loader.c).
+file(GLOB BROTLI_DEC_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/brotli/common/*.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/brotli/dec/*.c)
+add_library(brotlidec_static STATIC ${BROTLI_DEC_SOURCES})
+target_include_directories(brotlidec_static PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/brotli/include)
+if(NOT MSVC)
+    target_compile_options(brotlidec_static PRIVATE -O2 -w)
+endif()
+target_link_libraries(cyberbrowser_lib PUBLIC brotlidec_static)
 
 # ffmpeg (video demux + decode): the minimal static LGPL build made by
 # tools/build_ffmpeg.sh.  Without it <video> plays nothing (media segments

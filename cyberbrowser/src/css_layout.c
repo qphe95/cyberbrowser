@@ -16,6 +16,7 @@
 #include "dom_wrap.h"
 #include "text_shaper.h"
 #include "display_list.h"
+#include "font_registry.h"
 #include "image_cache.h"
 #include "css_style.h"
 #include "frame_arena.h"
@@ -246,6 +247,7 @@ static bool layout_build_nodes(LayoutContext *ctx, const int *map)
         box->wrap_cont2_x = 0.0;
         box->wrap_cont2_w = 0.0;
         box->wrap_cont2_line = 0;
+        box->font_slot = -1;
         box->margin_em[0] = box->margin_em[1] = box->margin_em[2] = box->margin_em[3] = 0.0;
         box->padding_em[0] = box->padding_em[1] = box->padding_em[2] = box->padding_em[3] = 0.0;
         box->em_deferred = 0;
@@ -2710,7 +2712,10 @@ static void layout_fetch_stylesheet(LayoutStyleSheetList *list, const char *base
     char *url = layout_resolve_url(base_url, href);
     if (!url) return;
     const UrlSheet *u = url_sheet_get(url);
-    if (u) layout_sheet_list_add_text(list, u->text, u->len, NULL);
+    if (u) {
+        layout_sheet_list_add_text(list, u->text, u->len, NULL);
+        font_registry_scan_css(u->text, u->len, url);
+    }
     free(url);
 }
 
@@ -2741,6 +2746,7 @@ static void layout_collect_stylesheets_recursive(LayoutContext *ctx, int layout_
          * ::slotted, etc. to the host custom element. */
         layout_sheet_list_add_text(list, node->text_content, strlen(node->text_content),
                                    layout_find_host_tag(ctx, dom_idx));
+        font_registry_scan_css(node->text_content, strlen(node->text_content), base_url);
     } else if (strcasecmp(node->tag_name, "link") == 0) {
         const char *rel = NULL;
         const char *href = NULL;
@@ -2836,7 +2842,10 @@ static void layout_collect_constructed_stylesheets(LayoutContext *ctx,
         for (uint32_t j = 0; j < m; j++) {
             GCValue text = JS_GetPropertyUint32(js, scoped_css, j);
             const char *s = JS_ToCString(js, text);
-            if (s && s[0]) layout_sheet_list_add_text(list, s, strlen(s), NULL);
+            if (s && s[0]) {
+                layout_sheet_list_add_text(list, s, strlen(s), NULL);
+                font_registry_scan_css(s, strlen(s), ctx->base_url);
+            }
         }
     }
 }
@@ -4161,9 +4170,32 @@ static double layout_line_advance_box(const LayoutBox *box)
 /* Resolve the font slot for a box's typography (sans/serif/mono x bold x italic). */
 static int layout_font_slot(const LayoutBox *box)
 {
-    if (!box) return 0;
-    return display_list_resolve_font_slot(box->font_family, box->font_weight,
-                                          box->font_italic ? 1 : 0);
+    if (!box) return font_registry_default_slot();
+    if (box->font_slot >= 0) return box->font_slot;
+    return font_registry_resolve(box->font_family, box->font_weight, box->font_italic != 0);
+}
+
+static void layout_resolve_fonts_pass(LayoutContext *ctx)
+{
+    const LayoutBox *last = NULL;
+    for (int i = 0; i < ctx->tree.count; i++) {
+        LayoutBox *b = &ctx->boxes[i];
+        if (last && b->font_weight == last->font_weight && b->font_italic == last->font_italic &&
+            strcmp(b->font_family, last->font_family) == 0) {
+            b->font_slot = last->font_slot;
+            continue;
+        }
+        b->font_slot = font_registry_resolve(b->font_family, b->font_weight, b->font_italic != 0);
+        last = b;
+    }
+}
+
+/* Resolve every box's font; web fonts first seen here are fetched (in
+ * parallel) and the pass reruns so the boxes pick them up. */
+static void layout_resolve_fonts(LayoutContext *ctx)
+{
+    layout_resolve_fonts_pass(ctx);
+    if (font_registry_load_pending() > 0) layout_resolve_fonts_pass(ctx);
 }
 
 static bool layout_text_is_whitespace(const char *s)
@@ -6917,6 +6949,10 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
     if (ctx->viewport_width > 0.0) g_calc_pct_hint = ctx->viewport_width;
     layout_apply_stylesheet(ctx, sheet);
     _st_t = layout_now_ms();
+
+    /* Fonts: each box's family / weight / style to a registry slot, after
+     * fetching the web fonts the page asks for (once; cached afterwards). */
+    layout_resolve_fonts(ctx);
 
     /* Size and position the root box to the viewport. */
     layout_root(ctx);

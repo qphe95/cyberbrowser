@@ -2,6 +2,7 @@
 #define TEXT_SHAPER_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include "display_list.h"
 
@@ -14,6 +15,21 @@ typedef struct TextShaper TextShaper;
 
 /* Create/destroy a shaper.  `size_pixels` is the em height used for rasterization. */
 TextShaper *text_shaper_create(const char *ttf_path, float size_pixels);
+/* The same from sfnt bytes in memory (font `font_index` of a collection);
+ * takes ownership of `data` (freed on failure too). */
+TextShaper *text_shaper_create_from_memory(uint8_t *data, size_t size, int font_index, float size_pixels);
+/* The same with synthetic bold: glyph bitmaps widened by `embolden` pixels
+ * (at the loaded size) and advances grown to match. */
+TextShaper *text_shaper_create_from_memory_ex(uint8_t *data, size_t size, int font_index, float size_pixels,
+                                              int embolden);
+/* Does the font carry variation axes (fvar)?  Only its default instance is
+ * drawn. */
+bool text_shaper_is_variable(const TextShaper *shaper);
+/* Font-registry slot whose atlas holds this shaper's glyphs (-1 = none). */
+void text_shaper_set_slot(TextShaper *shaper, int slot);
+int  text_shaper_slot(const TextShaper *shaper);
+/* Does the font itself (no fallback) map this codepoint? */
+bool text_shaper_has_glyph(const TextShaper *shaper, uint32_t codepoint);
 void        text_shaper_destroy(TextShaper *shaper);
 
 /* Raw atlas access for GPU upload. */

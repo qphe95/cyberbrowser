@@ -9,6 +9,7 @@
  */
 #include "cyber_env.h"
 #include "cyber_profile.h"
+#include "font_registry.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -308,31 +309,25 @@ typedef struct {
 } FgFont;
 
 static void fg_font_load(FgFont *fnt) {
-    static const char *paths[] = {
-        "cyberbrowser/fonts/Roboto-Regular.ttf",
-        "fonts/Roboto-Regular.ttf",
-        "../fonts/Roboto-Regular.ttf",
-        "../../fonts/Roboto-Regular.ttf",
-        NULL
-    };
     memset(fnt, 0, sizeof(*fnt));
-    for (int i = 0; paths[i]; i++) {
-        FILE *f = fopen(paths[i], "rb");
-        if (!f) continue;
-        fseek(f, 0, SEEK_END);
-        long sz = ftell(f);
-        fseek(f, 0, SEEK_SET);
-        unsigned char *ttf = (unsigned char *)malloc((size_t)sz);
-        if (ttf && fread(ttf, 1, (size_t)sz, f) == (size_t)sz) {
-            if (stbtt_BakeFontBitmap(ttf, 0, 11.0f, fnt->bitmap, 256, 256,
-                                     32, 96, fnt->cdata) > 0) {
-                fnt->loaded = 1;
-            }
+    char path[1024];
+    int index = 0;
+    if (!font_registry_family_file("sans-serif", path, sizeof(path), &index)) return;
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    unsigned char *ttf = sz > 0 ? (unsigned char *)malloc((size_t)sz) : NULL;
+    if (ttf && fread(ttf, 1, (size_t)sz, f) == (size_t)sz) {
+        int off = stbtt_GetFontOffsetForIndex(ttf, index);
+        if (off >= 0 && stbtt_BakeFontBitmap(ttf, off, 11.0f, fnt->bitmap, 256, 256,
+                                             32, 96, fnt->cdata) > 0) {
+            fnt->loaded = 1;
         }
-        free(ttf);
-        fclose(f);
-        if (fnt->loaded) break;
     }
+    free(ttf);
+    fclose(f);
 }
 
 /* Draw text with alpha blending; stop at clip_x1.  (x, y) is the baseline. */

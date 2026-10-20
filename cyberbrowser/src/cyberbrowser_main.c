@@ -29,6 +29,7 @@
 #include "css_parser.h"
 #include "css_layout.h"
 #include "display_list.h"
+#include "font_registry.h"
 #include "text_shaper.h"
 #include "image_cache.h"
 #include "browser/image_api.h"
@@ -691,16 +692,12 @@ static bool render_display_list_to_jpg(const DisplayList *dl, const char *path,
         pixels[i].b = 255;
     }
 
-    TextShaper *font = display_list_get_default_font();
-    const uint8_t *atlas = font ? text_shaper_atlas_pixels(font) : NULL;
-    int atlas_w = font ? text_shaper_atlas_width(font) : 0;
-    int atlas_h = font ? text_shaper_atlas_height(font) : 0;
-    /* Per-slot atlases, resolved lazily when a glyph references a non-default
-     * font (bold/italic/serif/mono variants). */
-    TextShaper *slot_fonts[DL_FONT_SLOTS] = {0};
-    const uint8_t *slot_atlas[DL_FONT_SLOTS] = {0};
-    int slot_atlas_w[DL_FONT_SLOTS] = {0};
-    int slot_atlas_h[DL_FONT_SLOTS] = {0};
+    /* Per-slot atlases (font_registry.h), resolved when a glyph first
+     * references the slot. */
+    TextShaper *slot_fonts[FONT_SLOTS_MAX] = {0};
+    const uint8_t *slot_atlas[FONT_SLOTS_MAX] = {0};
+    int slot_atlas_w[FONT_SLOTS_MAX] = {0};
+    int slot_atlas_h[FONT_SLOTS_MAX] = {0};
 
     for (int i = 0; i < dl->count; i++) {
         const DisplayListCmd *cmd = &dl->cmds[i];
@@ -723,11 +720,11 @@ static bool render_display_list_to_jpg(const DisplayList *dl, const char *path,
                                   x1 - offset, y1 - offset,
                                   cmd->r, cmd->g, cmd->b, cmd->a);
             }
-        } else if (cmd->type == DL_GLYPH && atlas) {
+        } else if (cmd->type == DL_GLYPH) {
             int slot = cmd->u.glyph.font_slot;
-            if (slot > 0 && slot < DL_FONT_SLOTS) {
+            if (slot < FONT_SLOTS_MAX) {
                 if (!slot_fonts[slot]) {
-                    slot_fonts[slot] = display_list_get_font(slot);
+                    slot_fonts[slot] = font_registry_slot(slot);
                     slot_atlas[slot] = slot_fonts[slot]
                         ? text_shaper_atlas_pixels(slot_fonts[slot]) : NULL;
                     slot_atlas_w[slot] = slot_fonts[slot]
@@ -740,12 +737,7 @@ static bool render_display_list_to_jpg(const DisplayList *dl, const char *path,
                                slot_atlas[slot], slot_atlas_w[slot],
                                slot_atlas_h[slot], cmd);
                 }
-                /* A missing slot atlas means the glyph UVs belong to an
-                 * unloaded font — skip rather than draw garbage from the
-                 * default atlas. */
-                continue;
             }
-            draw_glyph(pixels, img_width, img_height, atlas, atlas_w, atlas_h, cmd);
         } else if (cmd->type == DL_IMAGE) {
             ImageCache *cache = display_list_get_image_cache();
             if (cache) draw_image(pixels, img_width, img_height, cache, cmd);
@@ -765,52 +757,13 @@ static void on_image_progress(const char *url, void *user_data)
     dom_request_layout();
 }
 
-/* Register the font table: sans (Arial) in slots 0-3, serif (Times) in 4-7,
- * monospace (Courier) in 8-11, each as regular/bold/italic/bold-italic. */
+/* Fonts come from the OS font folders and the page's @font-face rules
+ * (font_registry.c); index the system fonts up front. */
 static void register_font_table(void)
 {
-    /* Font directories relative to the working directory, then to the
-     * executable (so a run from any directory finds them; the build
-     * directory sits next to fonts/). */
-    static const char *rel_dirs[] = {
-        "cyberbrowser/fonts/",
-        "fonts/",
-        "../fonts/",
-        "../../fonts/",
-        NULL
-    };
-    static const char *exe_rel_dirs[] = { "fonts/", "../fonts/", NULL };
-    char dirs[8][512];
-    int ndirs = 0;
-    for (int d = 0; rel_dirs[d]; d++)
-        snprintf(dirs[ndirs++], sizeof(dirs[0]), "%s", rel_dirs[d]);
-    const char *exe_dir = platform_get_exe_dir();
-    if (exe_dir && exe_dir[0]) {
-        for (int d = 0; exe_rel_dirs[d]; d++)
-            snprintf(dirs[ndirs++], sizeof(dirs[0]), "%s%s", exe_dir, exe_rel_dirs[d]);
-    }
-    static const char *slot_files[DL_FONT_SLOTS] = {
-        "arial.ttf",  "arialbd.ttf", "ariali.ttf",  "arialbi.ttf",
-        "times.ttf",  "timesbd.ttf", "timesi.ttf",  "timesbi.ttf",
-        "cour.ttf",   "courbd.ttf",  "couri.ttf",   "courbi.ttf"
-    };
-    char path[1024];
-    for (int s = 0; s < DL_FONT_SLOTS; s++) {
-        for (int d = 0; d < ndirs; d++) {
-            snprintf(path, sizeof(path), "%s%s", dirs[d], slot_files[s]);
-            if (display_list_set_font(s, path, 16.0f)) break;
-        }
-    }
-    /* Fallback: the legacy Roboto default if Arial could not be loaded. */
-    if (!display_list_get_font(0)) {
-        for (int d = 0; d < ndirs; d++) {
-            snprintf(path, sizeof(path), "%sRoboto-Regular.ttf", dirs[d]);
-            if (display_list_set_default_font(path, 16.0f)) break;
-        }
-    }
-    if (!display_list_get_font(0))
-        printf("WARNING: no font found (looked in fonts/ near the working directory and %s); text will not be measured or drawn\n",
-               exe_dir ? exe_dir : "the executable");
+    font_registry_init();
+    if (!display_list_get_default_font())
+        printf("WARNING: no system font found; text will not be measured or drawn\n");
 }
 
 static bool render_document_to_jpg(HtmlDocument *doc, ImageCache *image_cache,

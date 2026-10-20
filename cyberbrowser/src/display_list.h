@@ -92,23 +92,12 @@ bool display_list_set_default_font(const char *ttf_path, float size_pixels);
 struct TextShaper;
 struct TextShaper *display_list_get_default_font(void);
 
-/* Font table: families of 4 slots (regular, bold, italic, bold-italic). */
-#define DL_FONT_SANS   0
-#define DL_FONT_SERIF  4
-#define DL_FONT_MONO   8
-#define DL_FONT_SLOTS  12
-
-/* Load a TTF into a font-table slot (replaces any previous occupant). */
-bool display_list_set_font(int slot, const char *ttf_path, float size_pixels);
+/* Fonts live in the font registry (font_registry.h); slots index it. */
 struct TextShaper *display_list_get_font(int slot);
 
 /* Resolve a CSS font stack + weight + style to a font-table slot. */
 int display_list_resolve_font_slot(const char *font_family, int font_weight,
                                    int font_italic);
-
-/* Stamp every glyph command emitted since `from_cmd` with `slot` so the
- * rasterizer can pick the right atlas. */
-void display_list_stamp_font_slot(DisplayList *dl, int from_cmd, int slot);
 
 /* Build a display list from a resolved LayoutContext. */
 bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl);

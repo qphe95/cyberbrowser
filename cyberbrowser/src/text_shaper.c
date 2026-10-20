@@ -8,6 +8,7 @@
 
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
+#include "font_registry.h"
 
 #ifndef TS_ATLAS_WIDTH
 #define TS_ATLAS_WIDTH  1024
@@ -32,6 +33,8 @@ typedef struct GlyphEntry {
 struct TextShaper {
     uint8_t        *ttf_data;
     size_t          ttf_size;
+    int             slot;          /* font-registry slot (-1 = none) */
+    int             embolden;      /* synthetic bold: extra pixels per glyph */
     stbtt_fontinfo  font;
     float           size_pixels;
     float           scale;
@@ -128,9 +131,18 @@ static bool pack_bitmap(TextShaper *s, int bw, int bh, int *out_x, int *out_y)
     return true;
 }
 
-/* Glyph index and advance (at the loaded size) of a codepoint, with the
- * same missing-glyph fallback as ensure_glyph.  Safe from any thread. */
-static void ts_metric(const TextShaper *s, uint32_t cp, int *glyph_index, float *xadvance)
+/* The font that draws a glyph: owner 0 is the shaper itself, owner k + 1 is
+ * fallback k of the font registry. */
+static TextShaper *ts_owner_shaper(const TextShaper *s, int owner)
+{
+    return owner == 0 ? (TextShaper *)s : font_registry_fallback(owner - 1);
+}
+
+/* Glyph index and advance (at the loaded size) of a codepoint, and which
+ * font has it: the shaper, else the first registry fallback that does, else
+ * the shaper's replacement glyph.  Safe from any thread. */
+static void ts_metric_owned(const TextShaper *s, uint32_t cp, int *glyph_index, float *xadvance,
+                            int *owner_out)
 {
     if (cp > 0x10FFFF) cp = 0xFFFD;
     _Atomic uint64_t *page = atomic_load_explicit(&s->metric_pages[cp >> 8], memory_order_acquire);
@@ -147,17 +159,29 @@ static void ts_metric(const TextShaper *s, uint32_t cp, int *glyph_index, float 
     }
     uint64_t v = atomic_load_explicit(&page[cp & 255], memory_order_relaxed);
     if (!v) {
+        const TextShaper *f = s;
+        int owner = 0;
         int gi = stbtt_FindGlyphIndex(&s->font, (int)cp);
+        if (gi == 0 && cp > ' ' && cp != 0xFFFD) {
+            int n = font_registry_fallback_count();
+            for (int k = 0; k < n && n <= 254; k++) {
+                const TextShaper *fb = font_registry_fallback(k);
+                if (!fb || fb == s) continue;
+                int g2 = stbtt_FindGlyphIndex(&fb->font, (int)cp);
+                if (g2) { f = fb; owner = k + 1; gi = g2; break; }
+            }
+        }
         if (gi == 0 && cp != ' ') gi = stbtt_FindGlyphIndex(&s->font, 0xFFFD);
         int advance, lsb;
-        stbtt_GetGlyphHMetrics(&s->font, gi, &advance, &lsb);
-        float xa = (float)advance * s->scale;
+        stbtt_GetGlyphHMetrics(&f->font, gi, &advance, &lsb);
+        float xa = (float)advance * f->scale + (float)f->embolden;
         uint32_t bits;
         memcpy(&bits, &xa, sizeof(bits));
-        v = ((uint64_t)(uint32_t)(gi + 1) << 32) | bits;
+        v = ((uint64_t)owner << 56) | ((uint64_t)((uint32_t)(gi + 1) & 0xFFFFFF) << 32) | bits;
         atomic_store_explicit(&page[cp & 255], v, memory_order_relaxed);
     }
-    *glyph_index = (int)(uint32_t)(v >> 32) - 1;
+    *glyph_index = (int)((v >> 32) & 0xFFFFFF) - 1;
+    if (owner_out) *owner_out = (int)(v >> 56);
     uint32_t bits = (uint32_t)v;
     memcpy(xadvance, &bits, sizeof(*xadvance));
 }
@@ -205,15 +229,29 @@ static GlyphEntry *ensure_glyph(TextShaper *s, uint32_t codepoint)
 
     int ix0, iy0, ix1, iy1;
     stbtt_GetGlyphBitmapBox(&s->font, glyph_index, s->scale, s->scale, &ix0, &iy0, &ix1, &iy1);
-    int bw = ix1 - ix0;
+    int gw = ix1 - ix0;
     int bh = iy1 - iy0;
+    int e = gw > 0 ? s->embolden : 0;
+    int bw = gw + e;
 
     int px, py;
     if (!pack_bitmap(s, bw, bh, &px, &py)) return NULL;
 
-    if (bw > 0 && bh > 0) {
-        stbtt_MakeGlyphBitmap(&s->font, s->atlas + py * s->atlas_w + px,
-                              bw, bh, s->atlas_w, s->scale, s->scale, glyph_index);
+    if (gw > 0 && bh > 0) {
+        uint8_t *dst = s->atlas + py * s->atlas_w + px;
+        stbtt_MakeGlyphBitmap(&s->font, dst, gw, bh, s->atlas_w, s->scale, s->scale, glyph_index);
+        /* Synthetic bold: smear each row right by `e` pixels (max filter). */
+        for (int y = 0; e > 0 && y < bh; y++) {
+            uint8_t *row = dst + y * s->atlas_w;
+            for (int x = bw - 1; x >= 0; x--) {
+                uint8_t m = 0;
+                for (int k = 0; k <= e; k++) {
+                    int sx = x - k;
+                    if (sx >= 0 && sx < gw && row[sx] > m) m = row[sx];
+                }
+                row[x] = m;
+            }
+        }
     }
 
     g = add_glyph(s);
@@ -228,8 +266,32 @@ static GlyphEntry *ensure_glyph(TextShaper *s, uint32_t codepoint)
     g->bh = bh;
     g->xoff = (float)ix0;
     g->yoff = (float)iy0;
-    g->xadvance = (float)advance * s->scale;
+    g->xadvance = (float)advance * s->scale + (float)s->embolden;
     return g;
+}
+
+/* The atlas entry for a codepoint from whichever font draws it (see
+ * ts_metric_owned); *owner_out is that font. */
+static GlyphEntry *ensure_glyph_owned(const TextShaper *s, uint32_t codepoint, TextShaper **owner_out)
+{
+    int gi, owner;
+    float xa;
+    ts_metric_owned(s, codepoint, &gi, &xa, &owner);
+    TextShaper *o = ts_owner_shaper(s, owner);
+    if (!o) o = (TextShaper *)s;
+    *owner_out = o;
+    return ensure_glyph(o, codepoint);
+}
+
+/* Record a glyph command drawn from `owner`'s atlas. */
+static bool ts_add_glyph(DisplayList *dl, const TextShaper *owner, float x, float y, float w, float h,
+                         const GlyphEntry *ge, float r, float g, float b, float a)
+{
+    if (!display_list_add_glyph(dl, x, y, w, h, ge->u0, ge->v0, ge->u1, ge->v1,
+                                (uint32_t)ge->glyph_index, r, g, b, a))
+        return false;
+    dl->cmds[dl->count - 1].u.glyph.font_slot = (uint8_t)(owner->slot < 0 ? 0 : owner->slot);
+    return true;
 }
 
 TextShaper *text_shaper_create(const char *ttf_path, float size_pixels)
@@ -249,19 +311,35 @@ TextShaper *text_shaper_create(const char *ttf_path, float size_pixels)
         free(data); fclose(f); return NULL;
     }
     fclose(f);
+    return text_shaper_create_from_memory(data, (size_t)sz, 0, size_pixels);
+}
+
+TextShaper *text_shaper_create_from_memory(uint8_t *data, size_t size, int font_index, float size_pixels)
+{
+    return text_shaper_create_from_memory_ex(data, size, font_index, size_pixels, 0);
+}
+
+TextShaper *text_shaper_create_from_memory_ex(uint8_t *data, size_t size, int font_index, float size_pixels,
+                                              int embolden)
+{
+    if (!data || size == 0 || size_pixels <= 0) { free(data); return NULL; }
+    int offset = stbtt_GetFontOffsetForIndex(data, font_index < 0 ? 0 : font_index);
+    if (offset < 0) { free(data); return NULL; }
 
     TextShaper *s = (TextShaper *)calloc(1, sizeof(TextShaper));
     if (!s) { free(data); return NULL; }
 
     s->ttf_data = data;
-    s->ttf_size = (size_t)sz;
+    s->ttf_size = size;
+    s->slot = -1;
+    s->embolden = embolden > 0 ? embolden : 0;
     s->size_pixels = size_pixels;
     s->atlas_w = TS_ATLAS_WIDTH;
     s->atlas_h = TS_ATLAS_HEIGHT;
     s->atlas = (uint8_t *)calloc(1, (size_t)s->atlas_w * (size_t)s->atlas_h);
     if (!s->atlas) { free(s); free(data); return NULL; }
 
-    if (!stbtt_InitFont(&s->font, s->ttf_data, 0)) {
+    if (!stbtt_InitFont(&s->font, s->ttf_data, offset)) {
         text_shaper_destroy(s);
         return NULL;
     }
@@ -350,14 +428,14 @@ bool text_shaper_measure(const TextShaper *s, const char *utf8,
     uint32_t cp;
     while ((cp = utf8_decode(&p)) != 0) {
         if (cp == '\n') { x = 0; prev_glyph = -1; continue; }
-        int gi;
+        int gi, owner;
         float xa;
-        ts_metric(s, cp, &gi, &xa);
-        if (prev_glyph >= 0) {
+        ts_metric_owned(s, cp, &gi, &xa, &owner);
+        if (prev_glyph >= 0 && owner == 0) {
             x += (float)ts_kern(s, prev_glyph, gi) * s->scale;
         }
         x += xa;
-        prev_glyph = gi;
+        prev_glyph = owner == 0 ? gi : -1;
     }
     if (out_width)  *out_width  = x;
     if (out_height) *out_height = s->baseline - s->descent + s->line_gap;
@@ -393,21 +471,18 @@ bool text_shaper_shape_to_display_list_scaled(const TextShaper *s,
             prev_glyph = -1;
             continue;
         }
-        GlyphEntry *ge = ensure_glyph((TextShaper *)s, cp);
+        TextShaper *gs;
+        GlyphEntry *ge = ensure_glyph_owned(s, cp, &gs);
         if (!ge) continue;
-        if (prev_glyph >= 0) {
+        if (prev_glyph >= 0 && gs == s) {
             pen_x += (float)ts_kern(s, prev_glyph, ge->glyph_index) * s->scale * scale;
         }
         float gx = pen_x + ge->xoff * scale;
         float gy = pen_y + ge->yoff * scale;
-        if (!display_list_add_glyph(dl, gx, gy, (float)ge->bw * scale, (float)ge->bh * scale,
-                                    ge->u0, ge->v0, ge->u1, ge->v1,
-                                    (uint32_t)ge->glyph_index,
-                                    r, g, b, a)) {
+        if (!ts_add_glyph(dl, gs, gx, gy, (float)ge->bw * scale, (float)ge->bh * scale, ge, r, g, b, a))
             return false;
-        }
         pen_x += ge->xadvance * scale;
-        prev_glyph = ge->glyph_index;
+        prev_glyph = gs == s ? ge->glyph_index : -1;
     }
     return true;
 }
@@ -422,14 +497,14 @@ static float ts_measure_span(const TextShaper *s, const char *start, const char 
         const char *save = p;
         uint32_t cp = utf8_decode(&p);
         if (cp == 0 || p > end) { p = save; break; }
-        int gi;
+        int gi, owner;
         float xa;
-        ts_metric(s, cp, &gi, &xa);
-        if (prev_glyph >= 0) {
+        ts_metric_owned(s, cp, &gi, &xa, &owner);
+        if (prev_glyph >= 0 && owner == 0) {
             x += (float)ts_kern(s, prev_glyph, gi) * s->scale;
         }
         x += xa;
-        prev_glyph = gi;
+        prev_glyph = owner == 0 ? gi : -1;
     }
     return x;
 }
@@ -490,20 +565,18 @@ static bool ts_emit_span_glyphs(const TextShaper *s, const char *gp,
         uint32_t gc = utf8_decode(&gp);
         if (gc == 0) break;
         if (gc < 0x20 && gc != ' ') continue; /* control chars: no glyph */
-        GlyphEntry *ge = ensure_glyph((TextShaper *)s, gc);
+        TextShaper *gs;
+        GlyphEntry *ge = ensure_glyph_owned(s, gc, &gs);
         if (!ge) continue;
-        if (*prev_glyph >= 0) {
+        if (*prev_glyph >= 0 && gs == s) {
             *pen_x += (float)ts_kern(s, *prev_glyph, ge->glyph_index) * s->scale * scale;
         }
         float gx = *pen_x + ge->xoff * scale;
         float gyy = gy + ge->yoff * scale;
-        if (!display_list_add_glyph(dl, gx, gyy, (float)ge->bw * scale, (float)ge->bh * scale,
-                                    ge->u0, ge->v0, ge->u1, ge->v1,
-                                    (uint32_t)ge->glyph_index, r, g, b, a)) {
+        if (!ts_add_glyph(dl, gs, gx, gyy, (float)ge->bw * scale, (float)ge->bh * scale, ge, r, g, b, a))
             return false;
-        }
         *pen_x += ge->xadvance * scale;
-        *prev_glyph = ge->glyph_index;
+        *prev_glyph = gs == s ? ge->glyph_index : -1;
     }
     return true;
 }
@@ -677,20 +750,18 @@ static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
                 uint32_t gc = utf8_decode(&gp);
                 if (gc == 0) break;
                 if (gc < 0x20 && gc != ' ') continue; /* control chars: no glyph */
-                GlyphEntry *ge = ensure_glyph((TextShaper *)s, gc);
+                TextShaper *gs;
+                GlyphEntry *ge = ensure_glyph_owned(s, gc, &gs);
                 if (!ge) continue;
-                if (prev_glyph >= 0) {
+                if (prev_glyph >= 0 && gs == s) {
                     pen_x += (float)ts_kern(s, prev_glyph, ge->glyph_index) * s->scale * scale;
                 }
                 float gx = pen_x + ge->xoff * scale;
                 float gyy = gy + ge->yoff * scale;
-                if (!display_list_add_glyph(dl, gx, gyy, (float)ge->bw * scale, (float)ge->bh * scale,
-                                            ge->u0, ge->v0, ge->u1, ge->v1,
-                                            (uint32_t)ge->glyph_index, r, g, b, a)) {
+                if (!ts_add_glyph(dl, gs, gx, gyy, (float)ge->bw * scale, (float)ge->bh * scale, ge, r, g, b, a))
                     return false;
-                }
                 pen_x += ge->xadvance * scale;
-                prev_glyph = ge->glyph_index;
+                prev_glyph = gs == s ? ge->glyph_index : -1;
             }
         } else {
             pen_x += word_w;
@@ -757,4 +828,24 @@ bool text_shaper_wrap_shape(const TextShaper *s, const char *utf8,
                         scale, line_advance,
                         cont2_from_line, cont2_x, cont2_width,
                         true, r, g, b, a, dl, out);
+}
+
+void text_shaper_set_slot(TextShaper *s, int slot)
+{
+    if (s) s->slot = slot;
+}
+
+int text_shaper_slot(const TextShaper *s)
+{
+    return s ? s->slot : -1;
+}
+
+bool text_shaper_has_glyph(const TextShaper *s, uint32_t codepoint)
+{
+    return s && stbtt_FindGlyphIndex(&s->font, (int)codepoint) != 0;
+}
+
+bool text_shaper_is_variable(const TextShaper *s)
+{
+    return s && stbtt__find_table(s->font.data, (stbtt_uint32)s->font.fontstart, "fvar") != 0;
 }

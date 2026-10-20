@@ -1,0 +1,4 @@
+brotli 1.1.0 (https://github.com/google/brotli, tag v1.1.0, MIT;
+sha256 of the release tarball e720a6ca29428b803f4ad165371771f5398faba397edf6778837a18599ea13ff).
+c/common, c/dec, the decoder headers of c/include/brotli and LICENSE copied unmodified.
+Decoder only: used for WOFF2 web fonts (font_loader.c).

@@ -168,6 +168,9 @@ typedef struct LayoutBox {
     /* Font weight 100..900 (400 = normal, 700 = bold) and italic flag. */
     int    font_weight;
     unsigned char font_italic;
+    /* Font-registry slot for the family / weight / style (resolved after
+     * the cascade, before layout; -1 = not resolved). */
+    int    font_slot;
     unsigned char font_weight_set;
     unsigned char font_italic_set;
     /* text-decoration bitmask: 1 = underline, 2 = line-through, 4 = overline. */

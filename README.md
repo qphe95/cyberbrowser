@@ -105,8 +105,8 @@ cyberbrowser/
 │   │   ├── win32/             # Windows shims for POSIX headers
 │   │   ├── quickjs/           # QuickJS JavaScript engine (MIT)
 │   │   ├── mbedtls/           # TLS/SSL library (Apache 2.0)
-│   │   └── stb/, nanosvg/, minimp4/   # Single-header libraries
-│   ├── fonts/                 # Fonts loaded at runtime
+│   │   ├── stb/               # Single-header libraries (stb_truetype, stb_image, ...)
+│   │   └── third_party/       # plutosvg/plutovg, brotli (decoder), libwebp, libjpeg-turbo
 │   ├── shaders/
 │   └── tests/
 │

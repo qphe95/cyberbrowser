@@ -410,8 +410,7 @@ static int g_meas_lines[16][N_TEXTS];
 
 static void measure_job(Job *j)
 {
-    TextShaper *f = display_list_get_font((int)(j->a % DL_FONT_SLOTS));
-    if (!f) f = display_list_get_default_font();
+    TextShaper *f = display_list_get_default_font();
     for (int i = 0; i < N_TEXTS; i++) {
         float w = 0, h = 0;
         text_shaper_measure(f, k_texts[i], &w, &h);
@@ -429,14 +428,7 @@ static void measure_root(Job *j)
 }
 
 TEST(test_text_measure_threadsafe) {
-    TextShaper *f = display_list_get_font(0);
-    if (!f) f = display_list_get_default_font();
-    if (!f) {
-        static const char *paths[] = { "fonts/Roboto-Regular.ttf", "../fonts/Roboto-Regular.ttf",
-                                       "../../fonts/Roboto-Regular.ttf", NULL };
-        for (int i = 0; paths[i] && !f; i++)
-            if (display_list_set_default_font(paths[i], 16.0f)) f = display_list_get_default_font();
-    }
+    TextShaper *f = display_list_get_default_font();
     if (!f) { printf("    (skipped - no font found)"); return true; }
     job_graph_run(job_new(measure_root, NULL, NULL, 0, 0));
     for (int t = 1; t < 16; t++)

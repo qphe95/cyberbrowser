@@ -15,6 +15,9 @@
 #include "text_shaper.h"
 #include "html_media_extract.h"
 #include "js_quickjs.h"
+#include "font_registry.h"
+#include "font_loader.h"
+#include <stdlib.h>
 
 void run_css_layout_tests(void);
 JSContextHandle get_shared_test_context(void);
@@ -382,18 +385,7 @@ TEST(test_layout_img_display_list) {
 }
 
 TEST(test_text_shaper_basic) {
-    const char *paths[] = {
-        "cyberbrowser/fonts/Roboto-Regular.ttf",
-        "../../fonts/Roboto-Regular.ttf",
-        "../fonts/Roboto-Regular.ttf",
-        "fonts/Roboto-Regular.ttf",
-        NULL
-    };
-    TextShaper *shaper = NULL;
-    for (int i = 0; paths[i]; i++) {
-        shaper = text_shaper_create(paths[i], 16.0f);
-        if (shaper) break;
-    }
+    TextShaper *shaper = display_list_get_default_font();   /* system sans-serif */
     ASSERT_TRUE(shaper != NULL);
 
     float w = 0, h = 0;
@@ -411,8 +403,6 @@ TEST(test_text_shaper_basic) {
                                                    0.0f, 0.0f, 0.0f, 1.0f, &dl));
     ASSERT_TRUE(dl.count > 0);
     display_list_free(&dl);
-
-    text_shaper_destroy(shaper);
     return true;
 }
 
@@ -620,11 +610,7 @@ TEST(test_async_image_load_callback) {
 /* white-space:pre keeps trailing spaces inside inline-flex items, so
  * "views  " pushes the following box right (YouTube's watch info row). */
 TEST(test_layout_pre_trailing_spaces) {
-    const char *fonts[] = { "cyberbrowser/fonts/Roboto-Regular.ttf", "../../fonts/Roboto-Regular.ttf",
-                            "../fonts/Roboto-Regular.ttf", "fonts/Roboto-Regular.ttf", NULL };
-    bool have_font = false;
-    for (int i = 0; fonts[i] && !have_font; i++) have_font = display_list_set_default_font(fonts[i], 16.0f);
-    ASSERT_TRUE(have_font);
+    ASSERT_TRUE(display_list_get_default_font() != NULL);   /* a system sans-serif */
     const char *html =
         "<html><body style=\"margin:0;font-size:20px\"><div>"
         "<span id=\"a\" style=\"display:inline-flex;white-space:pre\"><span>views&#32;&#32;</span></span>"
@@ -728,11 +714,7 @@ TEST(test_layout_calc_nested_vars) {
 /* Preserved newlines force line breaks under pre, pre-wrap and pre-line;
  * white-space:normal folds them into spaces. */
 TEST(test_layout_preserved_newlines_break_lines) {
-    const char *fonts[] = { "cyberbrowser/fonts/Roboto-Regular.ttf", "../../fonts/Roboto-Regular.ttf",
-                            "../fonts/Roboto-Regular.ttf", "fonts/Roboto-Regular.ttf", NULL };
-    bool have_font = false;
-    for (int i = 0; fonts[i] && !have_font; i++) have_font = display_list_set_default_font(fonts[i], 16.0f);
-    ASSERT_TRUE(have_font);
+    ASSERT_TRUE(display_list_get_default_font() != NULL);   /* a system sans-serif */
     const char *html =
         "<html><body style=\"margin:0;font-size:16px;line-height:20px\">"
         "<div id=\"n\" style=\"width:400px\">a\nb\nc</div>"
@@ -772,6 +754,125 @@ TEST(test_layout_preserved_newlines_break_lines) {
     return ok;
 }
 
+static uint32_t be32_at(const uint8_t *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+}
+
+static void put32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v;
+}
+
+/* Wrap an sfnt as WOFF 1.0 with uncompressed tables (valid WOFF). */
+static uint8_t *make_woff1(const uint8_t *sfnt, size_t len, size_t *out_len)
+{
+    if (len < 12) return NULL;
+    int n = (sfnt[4] << 8) | sfnt[5];
+    size_t total = 44 + (size_t)n * 20;
+    for (int i = 0; i < n; i++) total += (be32_at(sfnt + 12 + i * 16 + 12) + 3) & ~3u;
+    uint8_t *w = (uint8_t *)calloc(1, total);
+    if (!w) return NULL;
+    memcpy(w, "wOFF", 4);
+    memcpy(w + 4, sfnt, 4);
+    put32(w + 8, (uint32_t)total);
+    w[12] = (uint8_t)(n >> 8); w[13] = (uint8_t)n;
+    put32(w + 16, (uint32_t)len);
+    w[20] = 1;
+    size_t off = 44 + (size_t)n * 20;
+    for (int i = 0; i < n; i++) {
+        const uint8_t *rec = sfnt + 12 + i * 16;
+        uint32_t toff = be32_at(rec + 8), tlen = be32_at(rec + 12);
+        uint8_t *d = w + 44 + i * 20;
+        memcpy(d, rec, 4);
+        put32(d + 4, (uint32_t)off);
+        put32(d + 8, tlen);
+        put32(d + 12, tlen);
+        memcpy(d + 16, rec + 4, 4);
+        if (toff + (size_t)tlen <= len) memcpy(w + off, sfnt + toff, tlen);
+        off += (tlen + 3) & ~3u;
+    }
+    *out_len = total;
+    return w;
+}
+
+static char *base64_encode(const uint8_t *p, size_t n)
+{
+    static const char t[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    char *o = (char *)malloc((n + 2) / 3 * 4 + 1);
+    if (!o) return NULL;
+    size_t k = 0;
+    for (size_t i = 0; i < n; i += 3) {
+        uint32_t v = (uint32_t)p[i] << 16 | (i + 1 < n ? (uint32_t)p[i + 1] << 8 : 0) | (i + 2 < n ? p[i + 2] : 0);
+        o[k++] = t[(v >> 18) & 63];
+        o[k++] = t[(v >> 12) & 63];
+        o[k++] = i + 1 < n ? t[(v >> 6) & 63] : '=';
+        o[k++] = i + 2 < n ? t[v & 63] : '=';
+    }
+    o[k] = '\0';
+    return o;
+}
+
+/* System fonts resolve by generic and real family names, weight and style;
+ * an @font-face web font (a system serif wrapped as WOFF in a data: URL) is
+ * queued on first use, loaded, then chosen over the fallback family. */
+TEST(test_font_registry_system_and_web_fonts) {
+    int sans = font_registry_resolve("sans-serif", 400, false);
+    int bold = font_registry_resolve("sans-serif", 700, false);
+    ASSERT_TRUE(sans >= 0 && bold >= 0);
+    ASSERT_TRUE(font_registry_resolve("\"No Such Family\", sans-serif", 400, false) == sans);
+#ifdef _WIN32
+    ASSERT_TRUE(bold != sans);
+    ASSERT_TRUE(font_registry_resolve("serif", 400, false) != sans);
+    ASSERT_TRUE(font_registry_resolve("Arial", 400, false) == sans);
+#endif
+
+    char path[1024];
+    int index = 0;
+    ASSERT_TRUE(font_registry_family_file("serif", path, sizeof(path), &index));
+    FILE *f = fopen(path, "rb");
+    ASSERT_TRUE(f != NULL);
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *ttf = (uint8_t *)malloc((size_t)sz);
+    ASSERT_TRUE(ttf && fread(ttf, 1, (size_t)sz, f) == (size_t)sz);
+    fclose(f);
+    if (index != 0 || be32_at(ttf) == 0x74746366u) { free(ttf); printf("    (skipped - serif is a collection)"); return true; }
+
+    size_t wlen = 0;
+    uint8_t *woff = make_woff1(ttf, (size_t)sz, &wlen);
+    ASSERT_TRUE(woff != NULL);
+    uint8_t *back = NULL;
+    size_t blen = 0;
+    ASSERT_TRUE(font_decode_web(woff, wlen, &back, &blen));
+    free(back);
+
+    char *b64 = base64_encode(woff, wlen);
+    ASSERT_TRUE(b64 != NULL);
+    size_t clen = strlen(b64) + 256;
+    char *css = (char *)malloc(clen);
+    snprintf(css, clen, "@font-face{font-family:'Test Web Face';font-weight:400;"
+                        "src:url(data:font/woff;base64,%s) format('woff');unicode-range:U+0000-00FF}", b64);
+    font_registry_scan_css(css, strlen(css), "https://example.test/");
+    int before = font_registry_resolve("'Test Web Face', sans-serif", 400, false);
+    ASSERT_TRUE(before == sans);                              /* queued; sans stands in */
+    ASSERT_TRUE(font_registry_load_pending() == 1);
+    int web = font_registry_resolve("'Test Web Face', sans-serif", 400, false);
+    ASSERT_TRUE(web >= 0 && web != sans);
+    float w_web = 0, w_sys = 0;
+    TextShaper *sys = text_shaper_create_from_memory(ttf, (size_t)sz, 0, 16.0f);   /* takes ttf */
+    ASSERT_TRUE(sys != NULL);
+    ASSERT_TRUE(text_shaper_measure(font_registry_slot(web), "Hamburgefonstiv", &w_web, NULL));
+    ASSERT_TRUE(text_shaper_measure(sys, "Hamburgefonstiv", &w_sys, NULL));
+    text_shaper_destroy(sys);
+    free(css);
+    free(b64);
+    free(woff);
+    ASSERT_TRUE(w_web > 0.0f && w_web == w_sys);
+    return true;
+}
+
 void run_css_layout_tests(void) {
     printf("\n--- CSS Layout Engine Tests ---\n");
     RUN_TEST(test_layout_basic_document);
@@ -795,4 +896,5 @@ void run_css_layout_tests(void) {
     RUN_TEST(test_layout_float_table_figure);
     RUN_TEST(test_layout_calc_nested_vars);
     RUN_TEST(test_layout_preserved_newlines_break_lines);
+    RUN_TEST(test_font_registry_system_and_web_fonts);
 }

@@ -6,6 +6,7 @@
 #include "platform.h"
 #include "url_utils.h"
 #include "text_shaper.h"
+#include "font_registry.h"
 #include "url_whatwg.h"
 #include "image_cache.h"
 #include "svg_render.h"
@@ -117,12 +118,7 @@ bool display_list_add_image(DisplayList *dl, float x, float y, float w, float h,
     return true;
 }
 
-/* Global default font used when the display list encounters text nodes. */
-static TextShaper *g_default_font = NULL;
 static ImageCache *g_image_cache = NULL;
-
-/* Font table: 3 families x 4 variants.  Slot 0 aliases g_default_font. */
-static TextShaper *g_font_slots[DL_FONT_SLOTS] = {0};
 
 static void on_async_image_loaded(const char *url, void *user_data);
 
@@ -140,75 +136,25 @@ ImageCache *display_list_get_image_cache(void)
 
 bool display_list_set_default_font(const char *ttf_path, float size_pixels)
 {
-    if (g_default_font) {
-        text_shaper_destroy(g_default_font);
-        g_default_font = NULL;
-    }
-    g_font_slots[0] = NULL;
-    if (!ttf_path) return true;
-    g_default_font = text_shaper_create(ttf_path, size_pixels);
-    g_font_slots[0] = g_default_font;
-    return g_default_font != NULL;
+    (void)size_pixels;
+    return ttf_path && font_registry_set_default_file(ttf_path);
 }
 
 struct TextShaper *display_list_get_default_font(void)
 {
-    return g_default_font;
-}
-
-bool display_list_set_font(int slot, const char *ttf_path, float size_pixels)
-{
-    if (slot < 0 || slot >= DL_FONT_SLOTS) return false;
-    if (slot == 0) return display_list_set_default_font(ttf_path, size_pixels);
-    if (g_font_slots[slot]) {
-        text_shaper_destroy(g_font_slots[slot]);
-        g_font_slots[slot] = NULL;
-    }
-    if (!ttf_path) return true;
-    g_font_slots[slot] = text_shaper_create(ttf_path, size_pixels);
-    return g_font_slots[slot] != NULL;
+    return font_registry_slot(font_registry_default_slot());
 }
 
 struct TextShaper *display_list_get_font(int slot)
 {
-    if (slot < 0 || slot >= DL_FONT_SLOTS) return g_default_font;
-    TextShaper *s = g_font_slots[slot];
-    return s ? s : g_default_font;
+    TextShaper *s = font_registry_slot(slot);
+    return s ? s : display_list_get_default_font();
 }
 
 int display_list_resolve_font_slot(const char *font_family, int font_weight,
                                    int font_italic)
 {
-    int base = DL_FONT_SANS;
-    if (font_family && font_family[0]) {
-        char buf[96];
-        size_t n = strlen(font_family);
-        if (n >= sizeof(buf)) n = sizeof(buf) - 1;
-        for (size_t i = 0; i < n; i++)
-            buf[i] = (char)tolower((unsigned char)font_family[i]);
-        buf[n] = '\0';
-        if (strstr(buf, "mono") || strstr(buf, "courier") ||
-            strstr(buf, "consolas") || strstr(buf, "menlo")) {
-            base = DL_FONT_MONO;
-        } else if ((strstr(buf, "serif") && !strstr(buf, "sans")) ||
-                   strstr(buf, "times") || strstr(buf, "georgia")) {
-            base = DL_FONT_SERIF;
-        }
-    }
-    int slot = base + (font_weight >= 600 ? 1 : 0) + (font_italic ? 2 : 0);
-    /* Fall back to whatever variant of the family is actually loaded. */
-    if (!g_font_slots[slot]) slot = base;
-    if (!g_font_slots[slot]) slot = 0;
-    return slot;
-}
-
-void display_list_stamp_font_slot(DisplayList *dl, int from_cmd, int slot)
-{
-    if (!dl || slot <= 0) return;
-    for (int i = from_cmd; i < dl->count; i++) {
-        if (dl->cmds[i].type == DL_GLYPH)
-            dl->cmds[i].u.glyph.font_slot = (uint8_t)slot;
-    }
+    return font_registry_resolve(font_family, font_weight, font_italic != 0);
 }
 
 static bool text_is_whitespace(const char *s)
@@ -813,6 +759,7 @@ bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
 static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (*clip)[4])
 {
     bool dark_mode = document_is_dark_mode(ctx);
+    TextShaper *default_font = display_list_get_default_font();
     int pending_box = -1, pending_from = 0;
 
     for (int i = 0; i < ctx->tree.count; i++) {
@@ -877,7 +824,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
          * so emit them before the visibility/size filters.
          * Skip nodes whose box has collapsed to the viewport root; they have
          * not been positioned and would all overlap at the origin. */
-        if (g_default_font && ctx->doc) {
+        if (default_font && ctx->doc) {
             if (node && node->type == HTML_NODE_TEXT &&
                 node->text_content && node->text_len > 0 &&
                 !text_is_whitespace(node->text_content)) {
@@ -902,10 +849,10 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                     float scale = (float)(fs / 16.0);
                     /* Pick the font variant matching the box's typography
                      * (sans/serif/mono x bold x italic). */
-                    int fslot = display_list_resolve_font_slot(
+                    int fslot = box->font_slot >= 0 ? box->font_slot : display_list_resolve_font_slot(
                         box->font_family, box->font_weight, box->font_italic ? 1 : 0);
                     TextShaper *font = display_list_get_font(fslot);
-                    if (!font) font = g_default_font;
+                    if (!font) font = default_font;
                     int from_cmd = dl->count;
                     /* The white-space processed text the layout measured. */
                     const char *run_text = css_layout_box_text(ctx, i, node->text_content);
@@ -949,7 +896,6 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                             return false;
                         }
                     }
-                    display_list_stamp_font_slot(dl, from_cmd, fslot);
                     emit_text_decorations(dl, from_cmd, fs, box->text_decoration,
                                           tr, tg, tb, ta);
                 }
@@ -958,7 +904,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
 
         /* display:list-item marker (bullet / ordinal) in the gutter to the
          * left of the item's first line. */
-        if (g_default_font && node && node->type == HTML_NODE_ELEMENT &&
+        if (default_font && node && node->type == HTML_NODE_ELEMENT &&
             box->display == CSS_DISPLAY_LIST_ITEM && box->list_style_type != 0) {
             char marker[24];
             if (box->list_style_type == 4) {
@@ -982,21 +928,18 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             }
             double mfs = box->font_size > 0.0 ? box->font_size : 16.0;
             float mscale = (float)(mfs / 16.0);
-            int mfslot = display_list_resolve_font_slot(
+            int mfslot = box->font_slot >= 0 ? box->font_slot : display_list_resolve_font_slot(
                 box->font_family, box->font_weight, box->font_italic ? 1 : 0);
             TextShaper *mfont = display_list_get_font(mfslot);
-            if (!mfont) mfont = g_default_font;
+            if (!mfont) mfont = default_font;
             float mw = 0.0f, mh = 0.0f;
             text_shaper_measure(mfont, marker, &mw, &mh);
             double mx = box->x - (double)mw * mscale - mfs * 0.4;
             if (mx < 0.0) mx = 0.0;
-            int from_cmd = dl->count;
-            if (text_shaper_shape_to_display_list_scaled(mfont, marker,
+            text_shaper_shape_to_display_list_scaled(mfont, marker,
                     (float)mx, (float)box->y, mscale,
                     (float)box->color_r, (float)box->color_g,
-                    (float)box->color_b, (float)box->color_a * op, dl)) {
-                display_list_stamp_font_slot(dl, from_cmd, mfslot);
-            }
+                    (float)box->color_b, (float)box->color_a * op, dl);
         }
 
         /* Borders, painted as four filled edge rects so per-side widths work.
