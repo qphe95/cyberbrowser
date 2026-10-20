@@ -1045,6 +1045,44 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                 }
             }
         }
+        /* box-shadow (outer): below the box, outside its rounded rectangle. */
+        if (box->shadow_set && box->width > 0.0 && box->height > 0.0) {
+            DisplayMask sm, rr;
+            memset(&sm, 0, sizeof(sm));
+            sm.kind = 5;
+            sm.image_handle = -1;
+            float sp = box->shadow_spread;
+            sm.x = (float)box->x + box->shadow_x - sp;
+            sm.y = (float)box->y + box->shadow_y - sp;
+            sm.w = (float)box->width + 2.0f * sp;
+            sm.h = (float)box->height + 2.0f * sp;
+            sm.blur = box->shadow_blur;
+            sm.ix = (float)box->x; sm.iy = (float)box->y;
+            sm.iw = (float)box->width; sm.ih = (float)box->height;
+            if (box_round_mask(box, &rr)) {
+                for (int c = 0; c < 4; c++) {
+                    sm.ex_rx[c] = rr.rx[c]; sm.ex_ry[c] = rr.ry[c];
+                    sm.rx[c] = rr.rx[c] > 0.0f ? rr.rx[c] + sp : 0.0f;
+                    sm.ry[c] = rr.ry[c] > 0.0f ? rr.ry[c] + sp : 0.0f;
+                    if (sm.rx[c] < 0.0f) sm.rx[c] = 0.0f;
+                    if (sm.ry[c] < 0.0f) sm.ry[c] = 0.0f;
+                }
+            }
+            if (sm.w > 0.0f && sm.h > 0.0f) {
+                int mi = dl_add_mask(dl, &sm);
+                if (mi >= 0 && display_list_reserve(dl, 1)) {
+                    DisplayListCmd *cmd = &dl->cmds[dl->count++];
+                    memset(cmd, 0, sizeof(*cmd));
+                    cmd->type = DL_SHADOW;
+                    float pad = sm.blur;
+                    cmd->x = sm.x - pad; cmd->y = sm.y - pad;
+                    cmd->w = sm.w + 2.0f * pad; cmd->h = sm.h + 2.0f * pad;
+                    cmd->r = box->shadow_r; cmd->g = box->shadow_g; cmd->b = box->shadow_b;
+                    cmd->a = box->shadow_a * op;
+                    cmd->u.mask_index = mi;
+                }
+            }
+        }
         /* border-radius: rounds the box's own background and border, and
          * clips the whole subtree when the box clips (overflow) or is a
          * replaced element (rounded thumbnails, avatars). */

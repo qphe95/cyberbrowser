@@ -232,6 +232,11 @@ typedef struct LayoutBox {
     float radius[4];
     unsigned char radius_pct;
 
+    /* box-shadow: the first outer (non-inset) shadow, if any. */
+    unsigned char shadow_set;
+    float shadow_x, shadow_y, shadow_blur, shadow_spread;
+    float shadow_r, shadow_g, shadow_b, shadow_a;
+
     CssDisplay display;
     CssVisibility visibility;
     CssPosition position;

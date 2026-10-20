@@ -26,6 +26,9 @@ typedef enum {
      * the mask (DisplayList.masks[u.mask_index]). */
     DL_MASK_BEGIN,
     DL_MASK_END,
+    /* box-shadow: a blurred rounded rectangle (DisplayList.masks[u.mask_index],
+     * kind 5) in the command's color, not drawn under the box itself. */
+    DL_SHADOW,
 } DisplayListCmdType;
 
 #define DL_MASK_STOPS 8
@@ -46,6 +49,8 @@ typedef struct {
     float stop_alpha[DL_MASK_STOPS];
     float rx[4], ry[4];        /* rounded rectangle: corner radii (tl, tr, br, bl) */
     float border[4];           /* ring: border widths (top, right, bottom, left) */
+    float blur;                /* shadow: blur radius (2 sigma) */
+    float ex_rx[4], ex_ry[4];  /* shadow: radii of the box it is cut out of (ix..ih) */
 } DisplayMask;
 
 typedef struct {

@@ -861,6 +861,43 @@ TEST(test_text_truncate_ellipsis) {
     return true;
 }
 
+/* box-shadow: the first outer shadow becomes a DL_SHADOW before the box's
+ * background, offset / spread applied and blur kept; inset ones are skipped. */
+TEST(test_layout_box_shadow_display_list) {
+    const char *html =
+        "<html><body style=\"margin:0\">"
+        "<div style=\"position:relative;left:20px;top:20px;width:100px;height:50px;background:#fff;"
+        "box-shadow:inset 0 0 3px #f00, 2px 4px 6px 1px rgba(0,0,0,.25)\"></div>"
+        "</body></html>";
+    HtmlDocument *doc = html_parse(html, strlen(html));
+    ASSERT_TRUE(doc != NULL);
+    LayoutContext ctx = {0};
+    ASSERT_TRUE(css_layout_run(&ctx, doc, NULL, 800.0, 600.0));
+    DisplayList dl;
+    display_list_init(&dl);
+    ASSERT_TRUE(css_layout_build_display_list(&ctx, &dl));
+    int shadow = -1, bg = -1;
+    for (int i = 0; i < dl.count; i++) {
+        if (dl.cmds[i].type == DL_SHADOW) shadow = i;
+        else if (dl.cmds[i].type == DL_RECT && dl.cmds[i].r > 0.99f && dl.cmds[i].g > 0.99f && bg < 0) bg = i;
+    }
+    bool ok = shadow >= 0 && bg > shadow;
+    if (ok) {
+        const DisplayListCmd *c = &dl.cmds[shadow];
+        const DisplayMask *m = &dl.masks[c->u.mask_index];
+        ok = m->kind == 5 && near_equal(m->blur, 6.0) && near_equal(m->w, 102.0) && near_equal(m->h, 52.0) &&
+             near_equal(m->x - m->ix, 1.0) && near_equal(m->y - m->iy, 3.0) && near_equal(c->a, 0.25) && c->r < 0.01f;
+        if (!ok) printf("    kind %d blur %.1f %.1fx%.1f dx %.1f dy %.1f a %.2f\n", m->kind, m->blur, m->w, m->h,
+                        m->x - m->ix, m->y - m->iy, c->a);
+    } else {
+        printf("    shadow %d bg %d\n", shadow, bg);
+    }
+    display_list_free(&dl);
+    css_layout_tree_free(&ctx);
+    html_document_free(doc);
+    return ok;
+}
+
 static uint32_t be32_at(const uint8_t *p)
 {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
@@ -1090,6 +1127,7 @@ void run_css_layout_tests(void) {
     RUN_TEST(test_layout_nowrap_atomic_inlines);
     RUN_TEST(test_layout_mask_gradient_display_list);
     RUN_TEST(test_text_truncate_ellipsis);
+    RUN_TEST(test_layout_box_shadow_display_list);
     RUN_TEST(test_font_registry_system_and_web_fonts);
     RUN_TEST(test_font_variable_instances);
 }

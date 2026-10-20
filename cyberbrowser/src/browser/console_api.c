@@ -554,7 +554,19 @@ GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, G
     (void)this_val;
     GCValue element = argc > 0 ? argv[0] : JS_UNDEFINED;
     GCValue pseudo = argc > 1 ? argv[1] : JS_UNDEFINED;
-    (void)pseudo;
+    bool has_pseudo = JS_IsString(pseudo);
+
+    /* Unchanged document (no DOM, style or layout change since the last
+     * call for this element): the previous answer still holds. */
+    uint64_t stamp = dom_change_stamp();
+    if (JS_IsObject(element) && !has_pseudo) {
+        GCValue cached = JS_GetPropertyStr(ctx, element, "__cyber_cs");
+        if (JS_IsObject(cached)) {
+            double s = -1.0;
+            JS_ToFloat64(ctx, &s, JS_GetPropertyStr(ctx, element, "__cyber_cs_stamp"));
+            if (s == (double)stamp) return cached;
+        }
+    }
 
     GCValue style = JS_NewObject(ctx);
     if (JS_IsException(style)) return style;
@@ -690,6 +702,12 @@ GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, G
                 JS_SetPropertyStr(ctx, style, "fontSize", JS_NewString(ctx, buf));
                 JS_SetPropertyStr(ctx, style, "font-size", JS_NewString(ctx, buf));
             }
+        }
+        /* The answer may have forced a layout: stamp it after. */
+        if (!has_pseudo) {
+            JS_DefinePropertyValueStr(ctx, element, "__cyber_cs", style, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+            JS_DefinePropertyValueStr(ctx, element, "__cyber_cs_stamp", JS_NewFloat64(ctx, (double)dom_change_stamp()),
+                                      JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
         }
     }
     return style;

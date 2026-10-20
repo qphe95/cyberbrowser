@@ -816,6 +816,40 @@ static bool render_display_list_to_jpg(const DisplayList *dl, const char *path,
         } else if (cmd->type == DL_IMAGE) {
             ImageCache *cache = display_list_get_image_cache();
             if (cache) draw_image(pixels, img_width, img_height, cache, cmd);
+        } else if (cmd->type == DL_SHADOW) {
+            /* Blurred rounded rectangle: coverage from the signed distance
+             * to its edge through a Gaussian (sigma = blur / 2), minus the
+             * part under the box that casts it. */
+            const DisplayMask *m = &dl->masks[cmd->u.mask_index];
+            int sx0 = (int)floorf(cmd->x), sy0 = (int)floorf(cmd->y);
+            int sx1 = (int)ceilf(cmd->x + cmd->w), sy1 = (int)ceilf(cmd->y + cmd->h);
+            if (sx0 < 0) sx0 = 0;
+            if (sy0 < 0) sy0 = 0;
+            if (sx1 > img_width) sx1 = img_width;
+            if (sy1 > img_height) sy1 = img_height;
+            float sigma = m->blur * 0.5f;
+            float hw = m->w * 0.5f, hh = m->h * 0.5f, cx = m->x + hw, cy = m->y + hh;
+            for (int y = sy0; y < sy1; y++) {
+                for (int x = sx0; x < sx1; x++) {
+                    float px = (float)x + 0.5f, py = (float)y + 0.5f;
+                    int c = px < cx ? (py < cy ? 0 : 3) : (py < cy ? 1 : 2);
+                    float r = m->rx[c] < m->ry[c] ? m->rx[c] : m->ry[c];
+                    if (r > hw) r = hw;
+                    if (r > hh) r = hh;
+                    float qx = fabsf(px - cx) - hw + r, qy = fabsf(py - cy) - hh + r;
+                    float ox = qx > 0.0f ? qx : 0.0f, oy = qy > 0.0f ? qy : 0.0f;
+                    float d = sqrtf(ox * ox + oy * oy) + (qx > qy ? (qx < 0.0f ? qx : 0.0f) : (qy < 0.0f ? qy : 0.0f)) - r;
+                    float cov = sigma > 0.01f ? 0.5f * erfcf(d / (sigma * 1.41421356f))
+                                              : (d <= -0.5f ? 1.0f : d >= 0.5f ? 0.0f : 0.5f - d);
+                    cov *= 1.0f - rrect_alpha(m->ix, m->iy, m->iw, m->ih, m->ex_rx, m->ex_ry, px, py);
+                    float a = cov * cmd->a;
+                    if (a <= 0.002f) continue;
+                    RGB *p = &pixels[(size_t)y * img_width + x];
+                    p->r = (uint8_t)(p->r + ((float)(cmd->r * 255.0f) - p->r) * a + 0.5f);
+                    p->g = (uint8_t)(p->g + ((float)(cmd->g * 255.0f) - p->g) * a + 0.5f);
+                    p->b = (uint8_t)(p->b + ((float)(cmd->b * 255.0f) - p->b) * a + 0.5f);
+                }
+            }
         } else if (cmd->type == DL_MASK_BEGIN) {
             /* Remember what is under the masked box; MASK_END blends the
              * box's painting back over it by the mask's alpha. */
@@ -945,6 +979,9 @@ static bool render_document_to_jpg(HtmlDocument *doc, ImageCache *image_cache,
 }
 
 int main(int argc, char *argv[]) {
+    /* Diagnostics on stderr must survive however the process ends (it is
+     * block-buffered when redirected to a file). */
+    setvbuf(stderr, NULL, _IONBF, 0);
     /* Start URL: argv[1] wins, then CYBER_START_URL, then the compiled-in
      * default (Wikipedia).  The YouTube-specific shims below only run when the
      * resolved URL is a YouTube page. */

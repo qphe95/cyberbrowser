@@ -1957,6 +1957,63 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                 box->mask_pos_pct = 3;
             }
         }
+    } else if (strcasecmp(prop, "box-shadow") == 0 || strcasecmp(prop, "-webkit-box-shadow") == 0) {
+        /* Comma-separated shadows; the first outer one is kept:
+         * [inset] <x> <y> [<blur> [<spread>]] [<color>] in any order. */
+        box->shadow_set = 0;
+        const char *p = value;
+        while (*p && !box->shadow_set) {
+            const char *st = p;
+            int depth = 0;
+            while (*p && (depth > 0 || *p != ',')) {
+                if (*p == '(') depth++;
+                else if (*p == ')') depth--;
+                p++;
+            }
+            char one[512];
+            size_t ol = (size_t)(p - st);
+            if (ol >= sizeof(one)) ol = sizeof(one) - 1;
+            memcpy(one, st, ol);
+            one[ol] = '\0';
+            if (*p == ',') p++;
+            if (strstr(one, "inset") || strncasecmp(one, "none", 4) == 0) continue;
+            double len[4] = { 0, 0, 0, 0 };
+            int nlen = 0;
+            double cr = 0, cg = 0, cb = 0, ca = 1;
+            bool color_set = false;
+            const char *q = one;
+            while (*q) {
+                while (*q && isspace((unsigned char)*q)) q++;
+                if (!*q) break;
+                char tok[256];
+                size_t k = 0;
+                depth = 0;
+                while (*q && (depth > 0 || !isspace((unsigned char)*q))) {
+                    if (*q == '(') depth++;
+                    else if (*q == ')') depth--;
+                    if (k + 1 < sizeof(tok)) tok[k++] = *q;
+                    q++;
+                }
+                tok[k] = '\0';
+                double r_, g_, b_, a_;
+                if ((isdigit((unsigned char)tok[0]) || tok[0] == '-' || tok[0] == '.' ||
+                     strncasecmp(tok, "calc(", 5) == 0) && nlen < 4) {
+                    len[nlen++] = css_parse_len(tok, box->font_size).px;
+                } else if (css_parse_color(tok, &r_, &g_, &b_, &a_)) {
+                    cr = r_; cg = g_; cb = b_; ca = a_;
+                    color_set = true;
+                }
+            }
+            if (nlen < 2) continue;
+            if (!color_set) { cr = box->color_r; cg = box->color_g; cb = box->color_b; ca = box->color_a; }
+            if (ca <= 0.0) continue;
+            box->shadow_set = 1;
+            box->shadow_x = (float)len[0];
+            box->shadow_y = (float)len[1];
+            box->shadow_blur = (float)(len[2] > 0 ? len[2] : 0);
+            box->shadow_spread = (float)len[3];
+            box->shadow_r = (float)cr; box->shadow_g = (float)cg; box->shadow_b = (float)cb; box->shadow_a = (float)ca;
+        }
     } else if (strcasecmp(prop, "border-radius") == 0 || strcasecmp(prop, "-webkit-border-radius") == 0) {
         /* 1-4 values (horizontal radii; "/ vertical" part ignored). */
         char tok[4][128];
@@ -2440,6 +2497,8 @@ typedef struct SheetItem {
     CssStylesheet *owned;       /* a sheet the caller handed in */
     SheetEntry *entry;          /* cache entry once resolved */
     CssStylesheet *parsed;      /* parse result when the cache could not keep it */
+    uint64_t hash;              /* precomputed sheet_hash(text) when has_hash */
+    bool has_hash;
 } SheetItem;
 
 typedef struct LayoutStyleSheetList {
@@ -2723,7 +2782,7 @@ static void layout_sheet_list_resolve(LayoutStyleSheetList *list)
     for (int i = 0; i < list->nitems; i++) {
         SheetItem *it = &list->items[i];
         if (it->owned) continue;
-        hashes[i] = sheet_hash(it->text, it->len);
+        hashes[i] = it->has_hash ? it->hash : sheet_hash(it->text, it->len);
         SheetEntry *e = sheet_cache_find(hashes[i], it->text, it->len, it->host);
         if (e) { e->last_use = g_layout_clock; it->entry = e; continue; }
         /* The same text twice in one document parses once. */
@@ -2894,7 +2953,8 @@ static char* layout_resolve_url(const char *base_url, const char *href) {
 
 /* Fetched stylesheet texts, by URL, for the life of the process: a layout
  * (hit test, re-render) never re-downloads a sheet. */
-typedef struct UrlSheet { char *url; char *text; size_t len; } UrlSheet;
+typedef struct UrlSheet { char *url; char *text; size_t len; uint64_t hash; } UrlSheet;
+static uint64_t sheet_hash(const char *s, size_t n);
 #define URL_SHEET_MAX 64
 static UrlSheet g_url_sheets[URL_SHEET_MAX];
 static int g_url_sheet_n, g_url_sheet_next;
@@ -2919,6 +2979,9 @@ static const UrlSheet *url_sheet_get(const char *url) {
         memcpy(u->text, buffer.data, buffer.size);
         u->text[buffer.size] = '\0';
         u->len = buffer.size;
+        u->hash = sheet_hash(u->text, u->len);
+        /* Its @font-face rules, once per fetch (relative to the sheet). */
+        font_registry_scan_css(u->text, u->len, url);
         out = u;
     } else {
         LOG_WARN("Failed to fetch stylesheet %.80s: %s", url, err[0] ? err : "unknown");
@@ -2935,9 +2998,16 @@ static void layout_fetch_stylesheet(LayoutStyleSheetList *list, const char *base
     char *url = layout_resolve_url(base_url, href);
     if (!url) return;
     const UrlSheet *u = url_sheet_get(url);
-    if (u) {
+    if (u && g_url_sheet_n < URL_SHEET_MAX) {
+        /* The cache cannot evict while it has room: borrow its text and
+         * hash instead of copying and rehashing megabytes per layout. */
+        SheetItem *it = layout_sheet_item_new(list);
+        it->text = u->text;
+        it->len = u->len;
+        it->hash = u->hash;
+        it->has_hash = true;
+    } else if (u) {
         layout_sheet_list_add_text(list, u->text, u->len, NULL);
-        font_registry_scan_css(u->text, u->len, url);
     }
     free(url);
 }

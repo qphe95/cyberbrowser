@@ -139,6 +139,8 @@ static void lq_note_full_check(unsigned long long now)
 
 /* Bring the cached layout up to date with the document; false when there is
  * nothing to lay out. */
+static NodeId g_lq_who;   /* element whose query is being answered (CYBER_LQ_LOG) */
+
 static bool lq_ensure(JSContextHandle ctx)
 {
     if (g_lq_running) return g_lq_valid;   /* a query from inside layout */
@@ -178,6 +180,17 @@ static bool lq_ensure(JSContextHandle ctx)
     if (!doc) return g_lq_valid;
 
     g_lq_running = true;
+    /* CYBER_LQ_LOG=1: which element query forces each layout. */
+    static int lq_log = -1;
+    if (lq_log < 0) lq_log = cyber_getenv("CYBER_LQ_LOG") ? 1 : 0;
+    if (lq_log) {
+        const char *tn = g_lq_who ? css_atom_str(g_dom.tag[dom_slot(g_lq_who)]) : "?";
+        const char *idv = g_lq_who ? dom_get_attr_str(g_lq_who, "id") : NULL;
+        const char *cls = g_lq_who ? dom_get_attr_str(g_lq_who, "class") : NULL;
+        fprintf(stderr, "[LQ] forced layout %llu: %s#%s.%.80s\n", (unsigned long long)g_lq_layouts + 1,
+                tn ? tn : "?", idv ? idv : "", cls ? cls : "");
+        fflush(stderr);
+    }
     unsigned long long t0 = platform_get_time_ms();
     lq_free();
     g_lq_doc = doc;
@@ -223,7 +236,10 @@ static int lq_query(JSContextHandle ctx, GCValue element)
     g_lq_queries++;
     NodeId id = dom_node_of(element);
     if (!id || dom_kind(id) != DOM_K_ELEMENT) return -1;
-    if (!lq_ensure(ctx)) return -1;
+    g_lq_who = id;
+    bool ok = lq_ensure(ctx);
+    g_lq_who = 0;
+    if (!ok) return -1;
     int idx = lq_box_index(id);
     return lq_rendered(idx) ? idx : -1;
 }

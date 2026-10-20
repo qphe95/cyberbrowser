@@ -806,6 +806,24 @@ static void add_face_rule(const char *body, const char *end, const char *base)
 void font_registry_scan_css(const char *css, size_t len, const char *base_url)
 {
     if (!css || len < 10) return;
+    /* Layouts hand the same sheets over again and again: a text seen before
+     * (same length and sampled bytes, and base) is not rescanned. */
+    {
+        uint64_t key = (uint64_t)len * 1099511628211ull;
+        for (int k = 0; k < 64; k++) {
+            key ^= (unsigned char)css[(len - 1) * (size_t)k / 63];
+            key *= 1099511628211ull;
+        }
+        for (const char *b = base_url ? base_url : ""; *b; b++) { key ^= (unsigned char)*b; key *= 1099511628211ull; }
+        static uint64_t seen[1024];
+        static int nseen;
+        pthread_mutex_lock(&g_mu);
+        for (int k = 0; k < nseen; k++) {
+            if (seen[k] == key) { pthread_mutex_unlock(&g_mu); return; }
+        }
+        seen[nseen < 1024 ? nseen++ : (int)(key % 1024)] = key;
+        pthread_mutex_unlock(&g_mu);
+    }
     const char *end = css + len;
     const char *p = css;
     for (;;) {
