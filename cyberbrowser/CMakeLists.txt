@@ -91,6 +91,7 @@ set(BE_SOURCES
     src/display_list.c
     src/text_shaper.c
     src/font_loader.c
+    src/font_instance.c
     src/font_registry.c
     src/image_cache.c
     src/lockfree_hash_table.c

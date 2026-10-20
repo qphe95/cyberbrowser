@@ -132,11 +132,7 @@ static uint16_t get_u16(const uint8_t *p) { return (uint16_t)((p[0] << 8) | p[1]
 
 /* ---- sfnt assembly ---- */
 
-typedef struct {
-    uint32_t tag;
-    const uint8_t *data;
-    size_t len;
-} SfntTable;
+typedef FontSfntTable SfntTable;
 
 static int table_cmp(const void *a, const void *b)
 {
@@ -605,4 +601,10 @@ bool font_decode_web(const uint8_t *data, size_t len, uint8_t **out, size_t *out
         return true;
     }
     return false;
+}
+
+bool font_sfnt_build(uint32_t flavor, FontSfntTable *tables, int n, int loca_format,
+                     uint8_t **out, size_t *out_len)
+{
+    return sfnt_build(flavor, tables, n, loca_format, out, out_len);
 }

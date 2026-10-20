@@ -50,8 +50,51 @@ typedef struct {
     int nranges;
     int state;
     int slot;
-    int bold_slot;                /* synthetic-bold variant of a variable font, or -1 */
+    /* Variable fonts: the decoded file and the static instances made from it
+     * (one per weight asked for). */
+    uint8_t *var_sfnt;
+    size_t var_len;
+    struct { int weight, slot; } inst[16];
+    int ninst;
 } WebFace;
+
+/* The slot drawing a variable web face at `weight` (clamped to the face's
+ * declared range and the font's wght axis): a static instance made on first
+ * use; synthetic bold over the default instance if instancing fails. */
+static int add_slot_locked(TextShaper *s);
+static int web_instance_locked(WebFace *w, int weight)
+{
+    if (weight < w->wmin) weight = w->wmin;
+    if (weight > w->wmax) weight = w->wmax;
+    float amin = 0, adef = 400, amax = 0;
+    bool has_wght = font_axis_range(w->var_sfnt, w->var_len, FONT_AXIS_TAG('w', 'g', 'h', 't'), &amin, &adef, &amax);
+    if (has_wght) {
+        if (weight < (int)amin) weight = (int)amin;
+        if (weight > (int)amax) weight = (int)amax;
+    }
+    for (int i = 0; i < w->ninst; i++) if (w->inst[i].weight == weight) return w->inst[i].slot;
+    TextShaper *s = NULL;
+    uint8_t *out = NULL;
+    size_t olen = 0;
+    FontAxisValue v = { FONT_AXIS_TAG('w', 'g', 'h', 't'), (float)weight };
+    if (has_wght && font_instance(w->var_sfnt, w->var_len, &v, 1, &out, &olen))
+        s = text_shaper_create_from_memory(out, olen, 0, FONT_PIXELS);
+    if (!s) {
+        uint8_t *copy = (uint8_t *)malloc(w->var_len);
+        if (copy) memcpy(copy, w->var_sfnt, w->var_len);
+        s = text_shaper_create_from_memory_ex(copy, w->var_len, 0, FONT_PIXELS,
+                                              weight >= 600 && adef < 600 ? 1 : 0);
+    }
+    int slot = s ? add_slot_locked(s) : -1;
+    if (slot >= 0 && w->ninst < (int)(sizeof(w->inst) / sizeof(w->inst[0]))) {
+        w->inst[w->ninst].weight = weight;
+        w->inst[w->ninst].slot = slot;
+        w->ninst++;
+    }
+    if (getenv("CYBER_FONT_LOG"))
+        fprintf(stderr, "[fonts] instance %s wght %d -> slot %d\n", w->family, weight, slot);
+    return slot >= 0 ? slot : w->slot;
+}
 
 typedef struct {
     char *key;
@@ -444,7 +487,7 @@ static int match_web_locked(const char *family, int weight, bool italic)
     }
     if (best < 0) return -1;
     WebFace *w = &g_web[best];
-    if (w->state == WEB_READY) return weight >= 600 && w->bold_slot >= 0 ? w->bold_slot : w->slot;
+    if (w->state == WEB_READY) return w->var_sfnt ? web_instance_locked(w, weight) : w->slot;
     if (w->state == WEB_IDLE) w->state = WEB_QUEUED;
     return -2;
 }
@@ -687,7 +730,7 @@ static void add_face_rule(const char *body, const char *end, const char *base)
     memset(&w, 0, sizeof(w));
     w.wmin = w.wmax = 400;
     w.slot = -1;
-    w.bold_slot = -1;
+
     char *src = NULL;
     const char *p = body;
     while (p < end) {
@@ -898,28 +941,26 @@ int font_registry_load_pending(void)
     for (int t = 0; t < n; t++) {
         WebFace *w = &g_web[which[t]];
         const FetchJob *j = src ? &jobs[src[t]] : &jobs[t];
-        TextShaper *s = NULL, *bold = NULL;
-        if (j->sfnt) {
+        w->slot = -1;
+        if (j->sfnt && font_is_variable(j->sfnt, j->len)) {
+            /* Keep the file; instances are cut per weight on demand. */
+            w->var_sfnt = (uint8_t *)malloc(j->len);
+            if (w->var_sfnt) {
+                memcpy(w->var_sfnt, j->sfnt, j->len);
+                w->var_len = j->len;
+                w->slot = web_instance_locked(w, w->wmin <= 400 && w->wmax >= 400 ? 400 : w->wmin);
+            }
+        } else if (j->sfnt) {
             uint8_t *copy = (uint8_t *)malloc(j->len);
             if (copy) memcpy(copy, j->sfnt, j->len);
-            s = text_shaper_create_from_memory(copy, j->len, 0, FONT_PIXELS);
-            /* A variable font draws only its default instance: weights of
-             * 600+ get a synthetic-bold copy. */
-            if (s && w->wmax >= 600 && text_shaper_is_variable(s)) {
-                uint8_t *copy2 = (uint8_t *)malloc(j->len);
-                if (copy2) memcpy(copy2, j->sfnt, j->len);
-                bold = text_shaper_create_from_memory_ex(copy2, j->len, 0, FONT_PIXELS, 1);
-                if (bold && w->wmin >= 600) { text_shaper_destroy(s); s = bold; bold = NULL; }
-            }
+            TextShaper *s = text_shaper_create_from_memory(copy, j->len, 0, FONT_PIXELS);
+            w->slot = s ? add_slot_locked(s) : -1;
         }
-        w->slot = s ? add_slot_locked(s) : -1;
-        w->bold_slot = bold ? add_slot_locked(bold) : -1;
         w->state = w->slot >= 0 ? WEB_READY : WEB_FAILED;
         if (w->state == WEB_READY) ready++;
         if (getenv("CYBER_FONT_LOG"))
             fprintf(stderr, "[fonts] %s %s %d-%d%s%s from %.100s\n", w->state == WEB_READY ? "loaded" : "FAILED",
-                    w->family, w->wmin, w->wmax, w->italic ? " italic" : "",
-                    w->bold_slot >= 0 || (s && text_shaper_is_variable(s) && w->wmin >= 600) ? " (synthetic bold)" : "",
+                    w->family, w->wmin, w->wmax, w->italic ? " italic" : "", w->var_sfnt ? " (variable)" : "",
                     w->url);
     }
     for (int t = 0; t < n; t++) { free(jobs[t].url); free(jobs[t].sfnt); }

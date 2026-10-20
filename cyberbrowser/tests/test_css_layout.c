@@ -873,6 +873,90 @@ TEST(test_font_registry_system_and_web_fonts) {
     return true;
 }
 
+static float measure_sfnt(const uint8_t *sfnt, size_t len, const char *text)
+{
+    uint8_t *copy = (uint8_t *)malloc(len);
+    if (!copy) return -1.0f;
+    memcpy(copy, sfnt, len);
+    TextShaper *s = text_shaper_create_from_memory(copy, len, 0, 16.0f);
+    float w = -1.0f;
+    if (s) text_shaper_measure(s, text, &w, NULL);
+    text_shaper_destroy(s);
+    return w;
+}
+
+/* A variable font instanced at its default weight measures exactly like the
+ * font itself; heavier instances are wider (gvar phantom-point advances) and
+ * stay loadable. */
+TEST(test_font_variable_instances) {
+    char path[1024];
+    int index = 0;
+    if (!font_registry_family_file("bahnschrift", path, sizeof(path), &index)) {
+        printf("    (skipped - no Bahnschrift variable font)");
+        return true;
+    }
+    FILE *f = fopen(path, "rb");
+    ASSERT_TRUE(f != NULL);
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *ttf = (uint8_t *)malloc((size_t)sz);
+    ASSERT_TRUE(ttf && fread(ttf, 1, (size_t)sz, f) == (size_t)sz);
+    fclose(f);
+    ASSERT_TRUE(font_is_variable(ttf, (size_t)sz));
+    float wmin = 0, wdef = 0, wmax = 0;
+    ASSERT_TRUE(font_axis_range(ttf, (size_t)sz, FONT_AXIS_TAG('w', 'g', 'h', 't'), &wmin, &wdef, &wmax));
+    ASSERT_TRUE(wmin < wdef && wdef < wmax);
+
+    const char *text = "Hamburgefonstiv 0123456789";
+    float base = measure_sfnt(ttf, (size_t)sz, text);
+    float widths[3];
+    float weights[3] = { wmin, wdef, wmax };
+    for (int i = 0; i < 3; i++) {
+        FontAxisValue v = { FONT_AXIS_TAG('w', 'g', 'h', 't'), weights[i] };
+        uint8_t *inst = NULL;
+        size_t ilen = 0;
+        ASSERT_TRUE(font_instance(ttf, (size_t)sz, &v, 1, &inst, &ilen));
+        ASSERT_TRUE(!font_is_variable(inst, ilen));
+        widths[i] = measure_sfnt(inst, ilen, text);
+        free(inst);
+    }
+    float dmin = 0, ddef = 0, dmax = 0, narrow = -1.0f;
+    bool has_wdth = font_axis_range(ttf, (size_t)sz, FONT_AXIS_TAG('w', 'd', 't', 'h'), &dmin, &ddef, &dmax);
+    if (has_wdth && dmin < ddef) {
+        FontAxisValue v = { FONT_AXIS_TAG('w', 'd', 't', 'h'), dmin };
+        uint8_t *inst = NULL;
+        size_t ilen = 0;
+        ASSERT_TRUE(font_instance(ttf, (size_t)sz, &v, 1, &inst, &ilen));
+        narrow = measure_sfnt(inst, ilen, text);
+        free(inst);
+    }
+    /* Through the registry: a variable @font-face with a weight range gets one
+     * instance per weight used, reused on the next lookup. */
+    char *b64 = base64_encode(ttf, (size_t)sz);
+    ASSERT_TRUE(b64 != NULL);
+    size_t clen = strlen(b64) + 256;
+    char *css = (char *)malloc(clen);
+    snprintf(css, clen, "@font-face{font-family:'Var Test';font-weight:300 700;"
+                        "src:url(data:font/ttf;base64,%s) format('truetype')}", b64);
+    font_registry_scan_css(css, strlen(css), "https://example.test/");
+    font_registry_resolve("'Var Test'", 400, false);
+    ASSERT_TRUE(font_registry_load_pending() == 1);
+    int light = font_registry_resolve("'Var Test'", 300, false);
+    int heavy = font_registry_resolve("'Var Test'", 700, false);
+    ASSERT_TRUE(light >= 0 && heavy >= 0 && light != heavy);
+    ASSERT_TRUE(font_registry_resolve("'Var Test', serif", 700, false) == heavy);
+    free(css);
+    free(b64);
+    free(ttf);
+    printf("    wght %.0f/%.0f/%.0f: %.2f %.2f %.2f, wdth %.0f: %.2f (font %.2f)\n", weights[0], weights[1],
+           weights[2], widths[0], widths[1], widths[2], dmin, narrow, base);
+    ASSERT_TRUE(base > 0.0f && widths[1] == base);
+    ASSERT_TRUE(widths[0] <= widths[1] && widths[1] <= widths[2]);
+    if (has_wdth && dmin < ddef) ASSERT_TRUE(narrow > 0.0f && narrow < base);
+    return true;
+}
+
 void run_css_layout_tests(void) {
     printf("\n--- CSS Layout Engine Tests ---\n");
     RUN_TEST(test_layout_basic_document);
@@ -897,4 +981,5 @@ void run_css_layout_tests(void) {
     RUN_TEST(test_layout_calc_nested_vars);
     RUN_TEST(test_layout_preserved_newlines_break_lines);
     RUN_TEST(test_font_registry_system_and_web_fonts);
+    RUN_TEST(test_font_variable_instances);
 }
