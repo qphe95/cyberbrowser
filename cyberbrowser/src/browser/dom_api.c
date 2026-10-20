@@ -415,9 +415,41 @@ static void dom_flush_ce_reactions(JSContextHandle ctx) {
     js_cyber_ce_flush_reactions(ctx, JS_UNDEFINED, 0, NULL);
 }
 
+/* Is `name` in the observedAttributes of elem's custom element class?  The
+ * list is read once per constructor (custom element definitions capture it
+ * at define time) and kept as an own property of the constructor, so a
+ * subclass never reuses its parent's list. */
+static bool attribute_is_observed(JSContextHandle ctx, GCValue elem, const char *name) {
+    GCValue ctor = JS_GetPropertyStr(ctx, elem, "constructor");
+    if (!JS_IsObject(ctor)) return false;
+    JSAtom key = JS_NewAtom(ctx, "__cyber_observed");
+    JSPropertyDescriptor desc = JS_PROPERTY_DESCRIPTOR_INIT;
+    GCValue set = JS_UNDEFINED;
+    if (JS_GetOwnProperty(ctx, &desc, ctor, key) > 0) set = desc.value;
+    if (!JS_IsObject(set)) {
+        set = JS_NewObjectProto(ctx, JS_NULL);
+        GCValue list = JS_GetPropertyStr(ctx, ctor, "observedAttributes");
+        if (JS_IsException(list)) { JS_GetException(ctx); list = JS_UNDEFINED; }
+        if (JS_IsObject(list)) {
+            uint32_t n = 0;
+            JS_ToUint32(ctx, &n, JS_GetPropertyStr(ctx, list, "length"));
+            for (uint32_t i = 0; i < n; i++) {
+                const char *s = JS_ToCString(ctx, JS_GetPropertyUint32(ctx, list, i));
+                if (s) JS_SetPropertyStr(ctx, set, s, JS_TRUE);
+            }
+        }
+        JS_DefinePropertyValue(ctx, ctor, key, set, JS_PROP_CONFIGURABLE);
+    }
+    JS_FreeAtom(ctx, key);
+    GCValue hit = JS_GetPropertyStr(ctx, set, name);
+    return JS_ToBool(ctx, hit);
+}
+
 static void invoke_attribute_changed(JSContextHandle ctx, GCValue elem,
                                      const char *name, const char *old_val,
                                      const char *new_val) {
+    /* Custom element reactions only for observed attributes (HTML §4.13). */
+    if (!attribute_is_observed(ctx, elem, name)) return;
     GCValue cb = JS_GetPropertyStr(ctx, elem, "attributeChangedCallback");
     if (JS_IsException(cb)) {
         JS_GetException(ctx); // clear
@@ -478,6 +510,31 @@ void dom_ce_on_connect(JSContextHandle ctx, NodeId subtree) {
         if (dom_node_is_connected(ctx, els.data[i]))
             invoke_custom_element_callback(ctx, els.data[i], "connectedCallback");
     }
+}
+
+/* Nodes created by cloning or importing into a document with a browsing
+ * context: their defined custom elements upgrade before the API returns
+ * ([CEReactions]), connected or not.  A template stamped with importNode
+ * then has its elements' accessors in place before the stamping code sets
+ * properties on them (a property set on a not-yet-upgraded element would
+ * stay an own data property shadowing the element's accessor). */
+static void dom_ce_upgrade_created(JSContextHandle ctx, NodeId subtree) {
+    uint32_t *ids = NULL, n = 0;
+    collect_ce_candidates(subtree, &ids, &n);
+    if (!n) { free(ids); return; }
+    GCValueVec els GC_VALUE_VEC_AUTO = { 0 };
+    for (uint32_t i = 0; i < n; i++) {
+        GCValue el = dom_js(ctx, ids[i]);
+        if (JS_IsObject(el)) gc_value_vec_push(&els, el);
+    }
+    free(ids);
+    js_cyber_ce_push_stack(ctx);
+    for (size_t i = 0; i < els.count; i++) {
+        GCValue el = els.data[i];
+        js_cyber_ce_enqueue_upgrade(ctx, JS_UNDEFINED, 1, &el);
+    }
+    dom_flush_ce_reactions(ctx);
+    js_cyber_ce_pop_stack(ctx);
 }
 
 /* ============================================================================
@@ -3668,6 +3725,9 @@ GCValue js_document_import_node(JSContextHandle ctx, GCValue this_val, int argc,
     GCValue clone = js_node_cloneNode_real(ctx, argv[0], 1, &deep_val);
     if (JS_IsException(clone)) return clone;
     dom_node_set_owner_document(ctx, clone, this_val);
+    /* Imported into the document: its custom elements upgrade now. */
+    NodeId cn = dom_node_of(clone);
+    if (cn && dom_owner(cn) == g_dom_document) dom_ce_upgrade_created(ctx, cn);
     return clone;
 }
 

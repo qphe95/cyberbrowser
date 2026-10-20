@@ -8,6 +8,7 @@
 #include "text_shaper.h"
 #include "url_whatwg.h"
 #include "image_cache.h"
+#include "svg_render.h"
 #include "browser_api_impl_types.h"
 
 /* The frame a <video> shows now (browser/media_source_api.c). */
@@ -477,6 +478,159 @@ static void emit_image_async(DisplayList *dl, const LayoutBox *box, const char *
     if (op < 0.999f && dl->count > from) dl->cmds[from].a = op;
 }
 
+/* ---- inline <svg> ---- */
+
+typedef struct { char *s; size_t n, cap; } SvgBuf;
+
+static void sb_put(SvgBuf *b, const char *s, size_t n)
+{
+    if (b->n + n + 1 > b->cap) {
+        size_t nc = b->cap ? b->cap * 2 : 1024;
+        while (nc < b->n + n + 1) nc *= 2;
+        char *t = (char *)realloc(b->s, nc);
+        if (!t) return;
+        b->s = t;
+        b->cap = nc;
+    }
+    memcpy(b->s + b->n, s, n);
+    b->n += n;
+    b->s[b->n] = '\0';
+}
+static void sb_puts(SvgBuf *b, const char *s) { sb_put(b, s, strlen(s)); }
+
+static void sb_escaped(SvgBuf *b, const char *s, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        switch (s[i]) {
+        case '&': sb_puts(b, "&amp;"); break;
+        case '<': sb_puts(b, "&lt;"); break;
+        case '>': sb_puts(b, "&gt;"); break;
+        case '"': sb_puts(b, "&quot;"); break;
+        default: sb_put(b, s + i, 1);
+        }
+    }
+}
+
+/* SVG names are case-sensitive; the HTML parser lower-cased them. */
+static const char *svg_case(const char *lower)
+{
+    static const char *const names[] = {
+        "viewBox", "preserveAspectRatio", "gradientUnits", "gradientTransform", "spreadMethod",
+        "patternUnits", "patternContentUnits", "patternTransform", "clipPathUnits", "maskUnits",
+        "maskContentUnits", "markerUnits", "markerWidth", "markerHeight", "refX", "refY",
+        "stdDeviation", "textLength", "lengthAdjust", "startOffset", "pathLength",
+        "linearGradient", "radialGradient", "clipPath", "foreignObject", "textPath",
+        "feGaussianBlur", "feOffset", "feBlend", "feColorMatrix", "feComposite", "feFlood",
+        "feMerge", "feMergeNode", NULL
+    };
+    for (int i = 0; names[i]; i++)
+        if (strcasecmp(lower, names[i]) == 0) return names[i];
+    return lower;
+}
+
+static void svg_serialize(PreOrderCompactionArray *arr, int idx, SvgBuf *b, bool root,
+                          int w, int h, const char *root_style)
+{
+    HtmlNode *n = (HtmlNode *)po_array_payload(arr, idx);
+    if (!n) return;
+    if (n->type == HTML_NODE_TEXT) {
+        if (n->text_content) sb_escaped(b, n->text_content, n->text_len);
+        return;
+    }
+    if (n->type != HTML_NODE_ELEMENT || !n->tag_name) return;
+    const char *tag = svg_case(n->tag_name);
+    sb_puts(b, "<");
+    sb_puts(b, tag);
+    bool has_xmlns = false;
+    for (HtmlAttribute *a = n->attributes; a; a = a->next) {
+        if (!a->name) continue;
+        if (root && (strcasecmp(a->name, "width") == 0 || strcasecmp(a->name, "height") == 0 ||
+                     strcasecmp(a->name, "style") == 0)) continue;
+        if (strcasecmp(a->name, "xmlns") == 0) has_xmlns = true;
+        sb_puts(b, " ");
+        sb_puts(b, svg_case(a->name));
+        sb_puts(b, "=\"");
+        if (a->value) sb_escaped(b, a->value, strlen(a->value));
+        sb_puts(b, "\"");
+    }
+    if (root) {
+        char t[64];
+        if (!has_xmlns) sb_puts(b, " xmlns=\"http://www.w3.org/2000/svg\"");
+        snprintf(t, sizeof(t), " width=\"%d\" height=\"%d\"", w, h);
+        sb_puts(b, t);
+        if (root_style && root_style[0]) {
+            sb_puts(b, " style=\"");
+            sb_escaped(b, root_style, strlen(root_style));
+            sb_puts(b, "\"");
+        }
+    }
+    sb_puts(b, ">");
+    for (int c = po_array_first_child(arr, idx); c >= 0; c = po_array_next_sibling(arr, c))
+        svg_serialize(arr, c, b, false, 0, 0, NULL);
+    sb_puts(b, "</");
+    sb_puts(b, tag);
+    sb_puts(b, ">");
+}
+
+static uint64_t svg_hash(const char *s, size_t n)
+{
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < n; i++) { h ^= (unsigned char)s[i]; h *= 1099511628211ull; }
+    return h;
+}
+
+static uint8_t to_byte(double v)
+{
+    v = v < 0.0 ? 0.0 : v > 1.0 ? 1.0 : v;
+    return (uint8_t)lround(v * 255.0);
+}
+
+/* Paint an outermost inline <svg> into its content box: its subtree is
+ * serialized as a standalone document (with the CSS fill it inherits, and
+ * the text color for currentColor), rasterized at the painted size, and
+ * kept in the image cache under a key naming the markup, size and colors. */
+static void emit_inline_svg(LayoutContext *ctx, DisplayList *dl, const LayoutBox *box, int dom_idx, float op)
+{
+    int cw = (int)lround(box->width - box->border_left - box->border_right - box->padding_left - box->padding_right);
+    int ch = (int)lround(box->height - box->border_top - box->border_bottom - box->padding_top - box->padding_bottom);
+    if (cw <= 0 || ch <= 0 || cw > 4096 || ch > 4096) return;
+    char style[96] = "";
+    if (box->fill_kind == 1) snprintf(style, sizeof(style), "fill:currentColor");
+    else if (box->fill_kind == 3) snprintf(style, sizeof(style), "fill:none");
+    else if (box->fill_kind == 2)
+        snprintf(style, sizeof(style), "fill:#%02x%02x%02x;fill-opacity:%.3f", to_byte(box->fill_r),
+                 to_byte(box->fill_g), to_byte(box->fill_b), box->fill_a);
+    uint32_t color = (uint32_t)to_byte(box->color_r) << 24 | (uint32_t)to_byte(box->color_g) << 16 |
+                     (uint32_t)to_byte(box->color_b) << 8 | to_byte(box->color_a);
+
+    SvgBuf b = { 0 };
+    svg_serialize(&ctx->doc->array, dom_idx, &b, true, cw, ch, style);
+    if (!b.s) return;
+    char key[96];
+    snprintf(key, sizeof(key), "cyber-svg:%016llx:%08x", (unsigned long long)svg_hash(b.s, b.n), color);
+    if (image_cache_status(g_image_cache, key) != 1) {
+        uint8_t *px = NULL;
+        int pw = 0, ph = 0;
+        if (svg_render_rgba(b.s, b.n, cw, ch, color, &px, &pw, &ph)) {
+            image_cache_put_rgba(g_image_cache, key, pw, ph, px);
+            free(px);
+        }
+    }
+    free(b.s);
+    LayoutBox fill_box = *box;
+    fill_box.object_fit = 0;
+    emit_image_async(dl, &fill_box, key, op);
+}
+
+static bool inside_svg(PreOrderCompactionArray *arr, int dom_idx)
+{
+    for (int p = po_array_parent(arr, dom_idx); p >= 0; p = po_array_parent(arr, p)) {
+        HtmlNode *n = (HtmlNode *)po_array_payload(arr, p);
+        if (n && n->type == HTML_NODE_ELEMENT && n->tag_name && strcasecmp(n->tag_name, "svg") == 0) return true;
+    }
+    return false;
+}
+
 char *display_list_image_source(const char *base_url, HtmlNode *node, float css_width)
 {
     if (!node || node->type != HTML_NODE_ELEMENT) return NULL;
@@ -689,6 +843,14 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                 emit_image_async(dl, box, url, op);
                 free(url);
             }
+            continue;
+        }
+
+        /* Inline <svg>: the outermost one paints its whole subtree. */
+        if (node && node->type == HTML_NODE_ELEMENT && node->tag_name &&
+            strcasecmp(node->tag_name, "svg") == 0 && g_image_cache && ctx->doc) {
+            int di = ctx->tree.nodes[i].dom_node_idx;
+            if (!inside_svg(&ctx->doc->array, di)) emit_inline_svg(ctx, dl, box, di, op);
             continue;
         }
 

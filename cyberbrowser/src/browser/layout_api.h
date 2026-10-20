@@ -21,6 +21,10 @@ typedef struct {
 
 bool layout_query_element_box(JSContextHandle ctx, GCValue element, LayoutQueryBox *out);
 
+/* The element's used font size in px from the cached layout (computed
+ * values for getComputedStyle when only a relative declaration is known). */
+bool layout_query_font_size(JSContextHandle ctx, GCValue element, double *px);
+
 /* offsetWidth/Height/Top/Left, offsetParent, clientWidth/Height/Top/Left,
  * scrollWidth/Height, scrollTop/Left on Element.prototype. */
 void layout_api_install(JSContextHandle ctx, GCValue element_proto);

@@ -1504,6 +1504,30 @@ int main(int argc, char *argv[]) {
     }
     CP_END("quiescence-loop");
 
+    /* CYBER_POSTLOAD_JS=/path/to.js: evaluate a script against the settled
+     * page (inspect live state; its console output goes to stderr). */
+    {
+        const char *post = cyber_getenv("CYBER_POSTLOAD_JS");
+        FILE *pf = post && post[0] ? fopen(post, "rb") : NULL;
+        if (pf) {
+            fseek(pf, 0, SEEK_END);
+            long psz = ftell(pf);
+            fseek(pf, 0, SEEK_SET);
+            char *pbuf = (char *)malloc((size_t)psz + 1);
+            if (pbuf && fread(pbuf, 1, (size_t)psz, pf) == (size_t)psz) {
+                pbuf[psz] = '\0';
+                GCValue r = JS_Eval(g_ctx, pbuf, (size_t)psz, "<postload>", JS_EVAL_TYPE_GLOBAL);
+                if (JS_IsException(r)) {
+                    const char *es = JS_ToCString(g_ctx, JS_GetException(g_ctx));
+                    fprintf(stderr, "[postload] exception: %s\n", es ? es : "?");
+                }
+                pump_timers_and_jobs(g_ctx);
+            }
+            free(pbuf);
+            fclose(pf);
+        }
+    }
+
     /* Save the final mutated JS DOM for inspection. */
     {
         GCValue js_doc = get_global_document(g_ctx);

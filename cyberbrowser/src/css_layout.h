@@ -134,6 +134,10 @@ typedef struct LayoutBox {
     /* Set when a rule/inline style explicitly assigned `color`; used to
      * decide inheritance from the parent box. */
     unsigned char color_set;
+    /* SVG fill (inherited): 0 initial (black), 1 currentColor, 2 the
+     * fill_* color, 3 none.  Passed to inline <svg> painting. */
+    unsigned char fill_kind, fill_set;
+    double fill_r, fill_g, fill_b, fill_a;
     /* Set when font-size was explicitly assigned (for inheritance). */
     unsigned char font_size_set;
 

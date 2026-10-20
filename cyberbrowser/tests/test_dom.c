@@ -732,6 +732,31 @@ TEST(test_dom_media_source_events) {
     return true;
 }
 
+/* Custom element reactions: attributeChangedCallback only for observed
+ * attributes, and document.importNode upgrades defined elements before it
+ * returns (so a property set right after lands on the class accessor). */
+TEST(test_dom_custom_element_reactions) {
+    JSContextHandle ctx = get_shared_test_context();
+    if (!dom_ready(ctx)) { printf("    (skipped - no document)\n"); return true; }
+    ASSERT_EQ(1, js_int(ctx,
+        "(function(){var log=[];"
+        "class XReact extends HTMLElement {"
+        "  static get observedAttributes(){ return ['watched']; }"
+        "  attributeChangedCallback(n){ log.push(n); }"
+        "  set label(v){ this.__label = 'via-accessor:' + v; } get label(){ return this.__label; }"
+        "}"
+        "customElements.define('x-react-test', XReact);"
+        "var e=document.createElement('x-react-test');"
+        "e.setAttribute('watched','1'); e.setAttribute('other','2'); e.hidden=true;"
+        "var ok = log.join(',')==='watched' && e.hidden===true && e.hasAttribute('hidden');"
+        "var t=document.createElement('template'); t.innerHTML='<div><x-react-test></x-react-test></div>';"
+        "var frag=document.importNode(t.content, true), x=frag.querySelector('x-react-test');"
+        "x.label='a';"
+        "ok = ok && (x instanceof XReact) && x.label==='via-accessor:a' && !Object.prototype.hasOwnProperty.call(x,'label');"
+        "return ok ? 1 : 0;})()"));
+    return true;
+}
+
 /* A fetched-style Response and its clone both read the body. */
 TEST(test_dom_response_clone_keeps_body) {
     JSContextHandle ctx = get_shared_test_context();
@@ -903,6 +928,7 @@ void run_dom_tests(void) {
     RUN_TEST(test_dom_layout_metrics_block_boxes);
     RUN_TEST(test_dom_layout_metrics_see_each_change);
     RUN_TEST(test_dom_media_source_events);
+    RUN_TEST(test_dom_custom_element_reactions);
     RUN_TEST(test_dom_response_clone_keeps_body);
     RUN_TEST(test_dom_video_wrapper_survives_gc);
     RUN_TEST(test_dom_fragment_text_and_html_element_basics);

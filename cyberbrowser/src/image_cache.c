@@ -40,10 +40,7 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
-#define NANOSVG_IMPLEMENTATION
-#include "nanosvg.h"
-#define NANOSVGRAST_IMPLEMENTATION
-#include "nanosvgrast.h"
+#include "svg_render.h"
 
 #include "turbojpeg.h"
 #include "webp/decode.h"
@@ -425,15 +422,10 @@ static ImagePixels *decode_webp(const uint8_t *d, size_t n, int ww, int wh)
 
 static ImagePixels *decode_svg(const uint8_t *d, size_t n, int nw, int nh, int ww, int wh)
 {
-    char *copy = (char *)malloc(n + 1);
-    if (!copy) return NULL;
-    memcpy(copy, d, n);
-    copy[n] = '\0';
-    NSVGimage *img = nsvgParse(copy, "px", 96.0f);
-    free(copy);
-    if (!img) return NULL;
-    float sw = img->width > 0 ? img->width : (float)nw;
-    float sh = img->height > 0 ? img->height : (float)nh;
+    float sw = 0.0f, sh = 0.0f;
+    if (!svg_intrinsic_size((const char *)d, n, &sw, &sh)) return NULL;
+    if (sw <= 0.0f) sw = (float)nw;
+    if (sh <= 0.0f) sh = (float)nh;
     if (sw <= 0.0f || sh <= 0.0f) { sw = 300.0f; sh = 150.0f; }
     /* Vectors rasterize at the paint size (crisp at any scale); the
      * "natural size" request marker means 1:1. */
@@ -442,14 +434,16 @@ static ImagePixels *decode_svg(const uint8_t *d, size_t n, int nw, int nh, int w
     if (ww > 0 && wh > 0) scale = fmaxf((float)ww / sw, (float)wh / sh);
     if (sw * scale > 4096.0f || sh * scale > 4096.0f) scale = 4096.0f / fmaxf(sw, sh);
     int iw = (int)(sw * scale + 0.5f), ih = (int)(sh * scale + 0.5f);
-    ImagePixels *px = NULL;
-    NSVGrasterizer *rast = nsvgCreateRasterizer();
-    if (rast && iw > 0 && ih > 0 && (px = pixels_new(iw, ih)) != NULL) {
-        memset(px->data, 0, (size_t)iw * (size_t)ih * 4);
-        nsvgRasterize(rast, img, 0.0f, 0.0f, scale, px->data, iw, ih, iw * 4);
-    }
-    if (rast) nsvgDeleteRasterizer(rast);
-    nsvgDelete(img);
+    uint8_t *rgba = NULL;
+    int ow = 0, oh = 0;
+    /* An <img> has no color context: currentColor is black. */
+    if (iw <= 0 || ih <= 0 || !svg_render_rgba((const char *)d, n, iw, ih, 0x000000FFu, &rgba, &ow, &oh))
+        return NULL;
+    ImagePixels *px = (ImagePixels *)malloc(sizeof(ImagePixels));
+    if (!px) { free(rgba); return NULL; }
+    px->width = ow;
+    px->height = oh;
+    px->data = rgba;
     return px;
 }
 

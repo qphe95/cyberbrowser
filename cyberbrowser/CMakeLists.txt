@@ -68,6 +68,7 @@ set(BE_SOURCES
     src/browser/misc_api.c
     src/browser/media_source_api.c
     src/media/media_buffer.c
+    src/svg_render.c
     src/browser/url_api.c
     src/browser/fetch_api.c
     src/browser/timer_api.c
@@ -176,7 +177,8 @@ target_include_directories(cyberbrowser_lib
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/src/quickjs
         ${CMAKE_CURRENT_SOURCE_DIR}/src/stb
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/nanosvg
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/plutosvg
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/plutovg/include
         ${CMAKE_CURRENT_SOURCE_DIR}/src/mbedtls/include
         ${CMAKE_CURRENT_SOURCE_DIR}/src/mbedtls
         ${CMAKE_CURRENT_SOURCE_DIR}/src/mbedtls/tf-psa-crypto/include
@@ -317,6 +319,23 @@ target_link_libraries(cyberbrowser_lib
         turbojpeg_static
         webpdecoder
 )
+
+# PlutoSVG + plutovg (MIT, C99): SVG parsing and rasterization (svg_render.c).
+file(GLOB PLUTOVG_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/plutovg/source/*.c)
+add_library(plutosvg_static STATIC
+    ${PLUTOVG_SOURCES}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/plutosvg/plutosvg.c)
+target_include_directories(plutosvg_static PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/plutosvg
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/plutovg/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/plutovg/source)
+target_compile_definitions(plutosvg_static
+    PUBLIC PLUTOVG_BUILD_STATIC PLUTOSVG_BUILD_STATIC
+    PRIVATE PLUTOVG_BUILD PLUTOSVG_BUILD)
+if(NOT MSVC)
+    target_compile_options(plutosvg_static PRIVATE -O2 -w)
+endif()
+target_link_libraries(cyberbrowser_lib PUBLIC plutosvg_static)
 
 # ffmpeg (video demux + decode): the minimal static LGPL build made by
 # tools/build_ffmpeg.sh.  Without it <video> plays nothing (media segments

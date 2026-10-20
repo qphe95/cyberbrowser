@@ -229,6 +229,8 @@ static bool layout_build_nodes(LayoutContext *ctx, const int *map)
         box->color_b = 0.0;
         box->color_a = 1.0;
         box->color_set = 0;
+        box->fill_kind = 0;
+        box->fill_set = 0;
         box->font_size_set = 0;
         box->width_set = 0;
         box->height_set = 0;
@@ -1589,6 +1591,13 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         box->gap_row = css_parse_length(value, parent_width, viewport_width, box->font_size);
     } else if (strcasecmp(prop, "column-gap") == 0) {
         box->gap_col = css_parse_length(value, parent_width, viewport_width, box->font_size);
+    } else if (strcasecmp(prop, "fill") == 0) {
+        while (isspace((unsigned char)*value)) value++;
+        if (strncasecmp(value, "currentcolor", 12) == 0) { box->fill_kind = 1; box->fill_set = 1; }
+        else if (strncasecmp(value, "none", 4) == 0) { box->fill_kind = 3; box->fill_set = 1; }
+        else if (css_parse_color(value, &box->fill_r, &box->fill_g, &box->fill_b, &box->fill_a)) {
+            box->fill_kind = 2; box->fill_set = 1;
+        }
     } else if (strcasecmp(prop, "color") == 0) {
         if (css_parse_color(value, &box->color_r, &box->color_g, &box->color_b, &box->color_a))
             box->color_set = 1;
@@ -3098,6 +3107,7 @@ static void layout_unset_property(LayoutBox *box, const char *prop)
     if (!prop) return;
     if (strcasecmp(prop, "font-size") == 0) { box->font_size_set = 0; box->font_size_ratio = 0.0; }
     else if (strcasecmp(prop, "color") == 0) box->color_set = 0;
+    else if (strcasecmp(prop, "fill") == 0) box->fill_set = 0;
     else if (strcasecmp(prop, "line-height") == 0) { box->line_height_set = 0; box->line_height = 0.0; box->line_height_ratio = 0.0; }
     else if (strcasecmp(prop, "font-weight") == 0) box->font_weight_set = 0;
     else if (strcasecmp(prop, "font-style") == 0) box->font_italic_set = 0;
@@ -3392,6 +3402,13 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
         box->font_size = base * box->font_size_ratio;
     }
     if (!parent && box->font_size > 0.0) g_unit_rem = box->font_size;   /* root: rem base */
+    if (!box->fill_set && parent) {
+        box->fill_kind = parent->fill_kind;
+        box->fill_r = parent->fill_r;
+        box->fill_g = parent->fill_g;
+        box->fill_b = parent->fill_b;
+        box->fill_a = parent->fill_a;
+    }
     if (!box->color_set && parent) {
         box->color_r = parent->color_r;
         box->color_g = parent->color_g;

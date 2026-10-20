@@ -228,6 +228,17 @@ static int lq_query(JSContextHandle ctx, GCValue element)
     return lq_rendered(idx) ? idx : -1;
 }
 
+bool layout_query_font_size(JSContextHandle ctx, GCValue element, double *px)
+{
+    *px = 0.0;
+    NodeId id = dom_node_of(element);
+    if (!id || !lq_ensure(ctx)) return false;
+    int idx = lq_box_index(id);
+    if (idx < 0 || g_lq_layout.boxes[idx].font_size <= 0.0) return false;
+    *px = g_lq_layout.boxes[idx].font_size;
+    return true;
+}
+
 bool layout_query_element_box(JSContextHandle ctx, GCValue element, LayoutQueryBox *out)
 {
     memset(out, 0, sizeof(*out));

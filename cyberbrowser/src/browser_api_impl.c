@@ -940,16 +940,13 @@ GCValue js_profiler_constructor(JSContextHandle ctx, GCValue this_val, int argc,
 // Promise-returning helpers for Clipboard API
 GCValue js_promise_resolve_undefined(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc; (void)argv;
-    // Return a resolved promise with undefined
-    GCValue promise = JS_NewPromiseCapability(ctx, NULL);
-    if (JS_IsException(promise)) return JS_EXCEPTION;
-    // For simplicity, return undefined directly (QuickJS will wrap in Promise)
-    return JS_UNDEFINED;
+    /* A promise resolved with undefined (callers chain .then/.catch). */
+    return js_create_resolved_promise(ctx, JS_UNDEFINED);
 }
 
 GCValue js_promise_resolve_empty_string(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc; (void)argv;
-    return JS_NewString(ctx, "");
+    return js_create_resolved_promise(ctx, JS_NewString(ctx, ""));
 }
 
 GCValue js_promise_resolve_empty_array(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
@@ -4486,6 +4483,18 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         "  // Native scheduler implementation is installed by init_browser_api_impl.\n"
         "})();\n";
     JS_Eval(ctx, fetch_polyfill, strlen(fetch_polyfill), "<fetch-polyfill>", JS_EVAL_TYPE_GLOBAL);
+
+    /* new Audio(src): an <audio> element (YouTube search preloads sounds). */
+    static const char audio_ctor[] =
+        "if (typeof Audio === 'undefined') {"
+        "  window.Audio = function Audio(src) {"
+        "    var a = document.createElement('audio');"
+        "    a.preload = 'auto';"
+        "    if (src !== undefined) a.src = src;"
+        "    return a;"
+        "  };"
+        "}";
+    JS_Eval(ctx, audio_ctor, sizeof(audio_ctor) - 1, "<audio-ctor>", JS_EVAL_TYPE_GLOBAL);
     if (JS_HasException(ctx)) {
         GCValue exc = JS_GetException(ctx);
         (void)exc;

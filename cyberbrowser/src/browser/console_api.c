@@ -16,6 +16,8 @@
 #include "css_parser.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
+#include "layout_api.h"
+#include <stdio.h>
 
 /* ============================================================================
  * Console API Implementation
@@ -675,6 +677,20 @@ GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, G
 
         /* Inherit from ancestors for properties that should cascade. */
         js_computed_style_inherit(ctx, style, node, node_id);
+
+        /* font-size computes to px: a relative declaration (62.5%, 1.2em,
+         * larger) that reached the object above is resolved by layout. */
+        const char *fs = JS_ToCString(ctx, JS_GetPropertyStr(ctx, style, "fontSize"));
+        size_t fl = fs ? strlen(fs) : 0;
+        if (!fs || fl < 3 || strcmp(fs + fl - 2, "px") != 0) {
+            double px = 0.0;
+            if (layout_query_font_size(ctx, element, &px)) {
+                char buf[32];
+                snprintf(buf, sizeof(buf), "%gpx", px);
+                JS_SetPropertyStr(ctx, style, "fontSize", JS_NewString(ctx, buf));
+                JS_SetPropertyStr(ctx, style, "font-size", JS_NewString(ctx, buf));
+            }
+        }
     }
     return style;
 }
