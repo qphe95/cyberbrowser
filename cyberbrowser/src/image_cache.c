@@ -1025,3 +1025,64 @@ void image_cache_stats(ImageCache *c, ImageCacheStats *s)
     }
     pthread_mutex_unlock(&c->mu);
 }
+
+/* Insert or replace an image whose pixels the caller already has (decoded
+ * video frames).  The entry is never fetched; replaced pixels retire like a
+ * re-decode's, so a pointer from image_cache_get stays valid until the next
+ * image_cache_process_pending(). */
+int image_cache_put_rgba(ImageCache *c, const char *key, int w, int h, const uint8_t *rgba)
+{
+    if (!c || !key || !key[0] || w <= 0 || h <= 0 || !rgba) return -1;
+    ImagePixels *px = (ImagePixels *)calloc(1, sizeof(*px));
+    if (!px) return -1;
+    px->data = (uint8_t *)malloc((size_t)w * (size_t)h * 4);
+    if (!px->data) { free(px); return -1; }
+    memcpy(px->data, rgba, (size_t)w * (size_t)h * 4);
+    px->width = w;
+    px->height = h;
+
+    pthread_mutex_lock(&c->mu);
+    uint64_t hs = hash_str(key);
+    ImageEntry *e = find_locked(c, key, hs);
+    int handle = -1;
+    if (e) {
+        for (int k = 0; k < c->count; k++) if (c->entries[k] == e) { handle = k; break; }
+    } else {
+        if (c->count == c->capacity) {
+            int nc = c->capacity ? c->capacity * 2 : 64;
+            ImageEntry **ne = (ImageEntry **)realloc(c->entries, (size_t)nc * sizeof(*ne));
+            if (!ne) { pthread_mutex_unlock(&c->mu); pixels_free(px); return -1; }
+            c->entries = ne;
+            c->capacity = nc;
+        }
+        e = (ImageEntry *)calloc(1, sizeof(ImageEntry));
+        if (!e) { pthread_mutex_unlock(&c->mu); pixels_free(px); return -1; }
+        e->source = strdup(key);
+        e->hash = hs;
+        handle = c->count++;
+        c->entries[handle] = e;
+        if (!c->slots || c->count * 2 > c->slot_mask + 1) {
+            int ns = c->slots ? (c->slot_mask + 1) * 2 : 256;
+            while (c->count * 2 > ns) ns *= 2;
+            rehash_locked(c, ns);
+        } else {
+            int i = (int)(hs & (uint64_t)c->slot_mask);
+            while (c->slots[i]) i = (i + 1) & c->slot_mask;
+            c->slots[i] = handle + 1;
+        }
+    }
+    e->decoded_full = 1;
+    atomic_store(&e->nat_w, w);
+    atomic_store(&e->nat_h, h);
+    ImagePixels *old = atomic_exchange(&e->pixels, px);
+    atomic_store(&e->state, ST_READY);
+    if (old) {
+        if (c->nretired == c->capretired) {
+            c->capretired = c->capretired ? c->capretired * 2 : 16;
+            c->retired = (ImagePixels **)realloc(c->retired, (size_t)c->capretired * sizeof(*c->retired));
+        }
+        c->retired[c->nretired++] = old;
+    }
+    pthread_mutex_unlock(&c->mu);
+    return handle;
+}

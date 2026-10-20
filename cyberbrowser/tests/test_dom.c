@@ -18,6 +18,7 @@
 #include "dom_wrap.h"
 #include "dom_js.h"
 #include "dom_query.h"
+#include "media/media_buffer.h"
 #include "dom_fetch.h"
 #include "css_style.h"
 #include "legacy_html_parse.h"
@@ -689,6 +690,48 @@ TEST(test_dom_layout_metrics_see_each_change) {
     return true;
 }
 
+/* MSE: a MediaSource opens when a video element attaches it (sourceopen is a
+ * task), and appendBuffer's update events come later with updating true in
+ * between.  isTypeSupported answers for the decoders actually built. */
+TEST(test_dom_media_source_events) {
+    JSContextHandle ctx = get_shared_test_context();
+    if (!dom_ready(ctx)) { printf("    (skipped - no document)\n"); return true; }
+    ASSERT_EQ(1, js_int(ctx,
+        "globalThis.__mse=[];"
+        "var ms=new MediaSource(), v=document.createElement('video');"
+        "__mse.push('ctor:'+ms.readyState);"
+        "ms.addEventListener('sourceopen', function(){"
+        "  __mse.push('open:'+ms.readyState);"
+        "  var sb=ms.addSourceBuffer('video/mp4; codecs=\"avc1.4d401f\"');"
+        "  sb.addEventListener('updatestart', function(){ __mse.push('start:'+sb.updating); });"
+        "  sb.addEventListener('updateend', function(){ __mse.push('end:'+sb.updating+':'+sb.buffered.length); });"
+        "  sb.appendBuffer(new Uint8Array([0,0,0,8,0x66,0x72,0x65,0x65]));"
+        "  __mse.push('appended:'+sb.updating);"
+        "});"
+        "v.src=URL.createObjectURL(ms);"
+        "__mse.push('attached:'+ms.readyState); 1"));
+    extern int timer_process_due(JSContextHandle ctx);
+    for (int i = 0; i < 4; i++) timer_process_due(ctx);
+    GCValue r = JS_Eval(ctx, "__mse.join(',')", 15, "<test_dom>", JS_EVAL_TYPE_GLOBAL);
+    const char *s = JS_ToCString(ctx, r);
+    const char *want = "ctor:closed,attached:open,open:open,appended:true,start:true,end:false:0";
+    if (!s || strcmp(s, want) != 0) {
+        printf("    got  '%s'\n    want '%s'\n", s ? s : "?", want);
+        return false;
+    }
+    /* Only what the decoders handle (h264 / aac in MP4, vp9 / opus in WebM). */
+    if (media_available()) {
+        ASSERT_EQ(1, js_int(ctx,
+            "(MediaSource.isTypeSupported('video/mp4; codecs=\"avc1.64001f\"') &&"
+            " MediaSource.isTypeSupported('video/webm; codecs=\"vp9\"') &&"
+            " MediaSource.isTypeSupported('audio/webm; codecs=\"opus\"') &&"
+            " !MediaSource.isTypeSupported('video/mp4; codecs=\"av01.0.05M.08\"') &&"
+            " !MediaSource.isTypeSupported('video/webm; codecs=\"avc1.64001f\"') &&"
+            " document.createElement('video').canPlayType('application/x-mpegURL')==='') ? 1 : 0"));
+    }
+    return true;
+}
+
 /* A fetched-style Response and its clone both read the body. */
 TEST(test_dom_response_clone_keeps_body) {
     JSContextHandle ctx = get_shared_test_context();
@@ -859,6 +902,7 @@ void run_dom_tests(void) {
     RUN_TEST(test_dom_style_assignment_forwards_to_css_text);
     RUN_TEST(test_dom_layout_metrics_block_boxes);
     RUN_TEST(test_dom_layout_metrics_see_each_change);
+    RUN_TEST(test_dom_media_source_events);
     RUN_TEST(test_dom_response_clone_keeps_body);
     RUN_TEST(test_dom_video_wrapper_survives_gc);
     RUN_TEST(test_dom_fragment_text_and_html_element_basics);

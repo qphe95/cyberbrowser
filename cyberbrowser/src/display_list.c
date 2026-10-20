@@ -10,6 +10,10 @@
 #include "image_cache.h"
 #include "browser_api_impl_types.h"
 
+/* The frame a <video> shows now (browser/media_source_api.c). */
+bool media_video_frame_for_node(uint32_t node, const uint8_t **rgba, int *w, int *h,
+                                uint64_t *frame_id);
+
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
@@ -684,6 +688,24 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             if (url) {
                 emit_image_async(dl, box, url, op);
                 free(url);
+            }
+            continue;
+        }
+
+        /* <video>: the frame its player shows now, letterboxed (object-fit
+         * defaults to contain for video). */
+        if (node && node->type == HTML_NODE_ELEMENT && node->store_id &&
+            strcasecmp(node->tag_name, "video") == 0 && g_image_cache) {
+            const uint8_t *px = NULL;
+            int vw = 0, vh = 0;
+            uint64_t frame_id = 0;
+            if (media_video_frame_for_node(node->store_id, &px, &vw, &vh, &frame_id)) {
+                char key[48];
+                snprintf(key, sizeof(key), "cyber-video-frame:%u", node->store_id);
+                image_cache_put_rgba(g_image_cache, key, vw, vh, px);
+                LayoutBox vbox = *box;
+                if (vbox.object_fit == 0) vbox.object_fit = 1;
+                emit_image_async(dl, &vbox, key, op);
             }
             continue;
         }

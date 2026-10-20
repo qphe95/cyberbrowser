@@ -268,14 +268,8 @@ typedef struct {
     GCValue onabort;
     JSContextHandle ctx;
 
-    // Accumulated appendBuffer bytes for this SourceBuffer.
-    uint8_t *append_data;
-    size_t append_size;
-    size_t append_capacity;
-
-    // Demuxed track/sample summary populated by minimp4 when possible.
-    int track_count;
-    double parsed_duration;  // seconds
+    // Demuxed media (src/media/media_buffer.h); freed by the finalizer.
+    struct MediaBuffer *mb;
 } SourceBufferData;
 
 /* ============================================================================

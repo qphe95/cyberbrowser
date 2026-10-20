@@ -29,6 +29,7 @@
 
 #include "browser_api_impl_types.h"
 #include "dom_wrap.h"
+#include <math.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -311,6 +312,7 @@ static inline MediaSourceDataHandle media_source_create(JSContextHandle ctx) {
         memset(ms, 0, sizeof(MediaSourceData));
         GC_SET(ms->ctx, ctx);
         ms->ready_state = 0; // closed
+        ms->duration = NAN;   // until set or an init segment says
         strcpy(ms->source_buffers, "[]");
         strcpy(ms->active_source_buffers, "[]");
     }
@@ -328,20 +330,9 @@ static inline SourceBufferDataHandle source_buffer_create(JSContextHandle ctx) {
         memset(sb, 0, sizeof(SourceBufferData));
         GC_SET(sb->ctx, ctx);
         sb->updating = 0;
-        sb->track_count = 0;
-        sb->parsed_duration = 0.0;
         strcpy(sb->mode, "segments");
     }
     return h;
-}
-
-static inline void source_buffer_set_append_data(SourceBufferDataHandle h, uint8_t* data, size_t size, size_t capacity) {
-    SourceBufferData *p = (SourceBufferData *)gc_deref(h);
-    if (p) {
-        p->append_data = data;
-        p->append_size = size;
-        p->append_capacity = capacity;
-    }
 }
 
 /* ------------------------------------------------------------------------

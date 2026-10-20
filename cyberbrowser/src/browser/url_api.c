@@ -246,7 +246,6 @@ GCValue js_url_create_object_url(JSContextHandle ctx, GCValue this_val, int argc
     MediaSourceDataHandle ms = JS_GetOpaqueHandle(obj, js_media_source_class_id);
     if (!SAFE_IS_NULL(ms)) {
         is_media_source = true;
-        SAFE_SET(ms, MediaSourceDataHandle, ready_state, 1); // open
     }
 
     if (origin && origin[0]) {

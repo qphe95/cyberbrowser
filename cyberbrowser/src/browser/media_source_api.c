@@ -1,10 +1,18 @@
-/* Auto-generated split from browser_api_impl.c */
+/* Media Source Extensions and media element playback.
+ *
+ * MediaSource / SourceBuffer keep their media in a MediaBuffer
+ * (src/media/media_buffer.h: demux, buffered ranges, decode).  A video
+ * element whose src is a MediaSource's object URL gets a player here: the
+ * playback clock, readyState and the media events (loadedmetadata, canplay,
+ * playing, timeupdate, waiting, ...).  Events are queued as tasks and fired
+ * from media_tick(), at the top of an event-loop turn, like a browser's
+ * media task source; appendBuffer()'s update events come the same way.
+ * Audio is demuxed (its buffered ranges gate playback) but not played. */
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <time.h>
 #include <math.h>
-#include <minimp4.h>
 #include <quickjs.h>
 #include <quickjs_gc_unified.h>
 #include "browser_api_impl.h"
@@ -15,9 +23,13 @@
 #include "css_parser.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
+#include "dom_wrap.h"
+#include "media/media_buffer.h"
+#include "cyber_env.h"
+#include <stdio.h>
 
 // ============================================================================
-// MediaSource API Implementation
+// Classes
 // ============================================================================
 
 void js_media_source_finalizer(JSRuntimeHandle rt, GCValue val) {
@@ -41,11 +53,9 @@ void js_source_buffer_finalizer(JSRuntimeHandle rt, GCValue val) {
     GCHandle sb_handle = JS_GetOpaqueHandle(val, js_source_buffer_class_id);
     if (sb_handle != GC_HANDLE_NULL) {
         SourceBufferData *sb = (SourceBufferData *)gc_deref(sb_handle);
-        if (sb && sb->append_data) {
-            free(sb->append_data);
-            sb->append_data = NULL;
-            sb->append_size = 0;
-            sb->append_capacity = 0;
+        if (sb && sb->mb) {
+            media_buffer_destroy(sb->mb);
+            sb->mb = NULL;
         }
     }
 }
@@ -75,16 +85,120 @@ JSClassDef js_source_buffer_class_def = {
     .gc_mark   = js_source_buffer_mark,
 };
 
-// MediaSource constructor
+/* CYBER_MEDIA_LOG=1: appends, ranges and player state on stderr. */
+static bool media_log_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = cyber_getenv("CYBER_MEDIA_LOG");
+        on = e && e[0] == '1';
+    }
+    return on;
+}
+#define MEDIA_LOG(...) do { if (media_log_on()) { fprintf(stderr, "[media] " __VA_ARGS__); fputc('\n', stderr); } } while (0)
+
+static MediaBuffer *sb_media(GCValue sb_obj) {
+    SourceBufferData *sb = (SourceBufferData *)gc_deref(JS_GetOpaqueHandle(sb_obj, js_source_buffer_class_id));
+    return sb ? sb->mb : NULL;
+}
+
+// ============================================================================
+// Media tasks: events fired at the top of the next event-loop turn
+// ============================================================================
+
+typedef struct MediaTask {
+    GCValue target;             /* rooted while queued */
+    char type[24];
+    bool clear_updating;        /* SourceBuffer: updating = false first */
+} MediaTask;
+
+static MediaTask *g_tasks;
+static int g_ntasks, g_captasks;
+
+static void root_value(GCValue v, bool add) {
+    if (GC_VALUE_GET_TAG(v) >= 0) return;
+    GCHandle h = GC_VALUE_GET_HANDLE(v);
+    if (h == GC_HANDLE_NULL) return;
+    if (add) gc_add_root(h); else gc_remove_root(h);
+}
+
+static void media_queue_event(GCValue target, const char *type, bool clear_updating) {
+    if (g_ntasks == g_captasks) {
+        int nc = g_captasks ? g_captasks * 2 : 64;
+        MediaTask *t = (MediaTask *)realloc(g_tasks, (size_t)nc * sizeof(MediaTask));
+        if (!t) return;
+        g_tasks = t;
+        g_captasks = nc;
+    }
+    MediaTask *t = &g_tasks[g_ntasks++];
+    t->target = target;
+    snprintf(t->type, sizeof(t->type), "%s", type);
+    t->clear_updating = clear_updating;
+    root_value(target, true);
+}
+
+/* target.dispatchEvent(new Event(type)) */
+static void media_fire(JSContextHandle ctx, GCValue target, const char *type) {
+    MEDIA_LOG("event %s", type);
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue ctor = JS_GetPropertyStr(ctx, global, "Event");
+    GCValue dispatch = JS_GetPropertyStr(ctx, target, "dispatchEvent");
+    if (!JS_IsFunction(ctx, ctor) || !JS_IsFunction(ctx, dispatch)) return;
+    GCValue name = JS_NewString(ctx, type);
+    GCValue ev = JS_CallConstructor(ctx, ctor, 1, &name);
+    if (JS_IsException(ev)) { JS_GetException(ctx); return; }
+    GCValue r = JS_Call(ctx, dispatch, target, 1, &ev);
+    if (JS_IsException(r)) JS_GetException(ctx);
+}
+
+/* A TimeRanges object over ranges[0..n). */
+static GCValue time_ranges_at(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv,
+                              const char *which) {
+    uint32_t i = 0;
+    if (argc > 0) JS_ToUint32(ctx, &i, argv[0]);
+    GCValue a = JS_GetPropertyStr(ctx, this_val, which);
+    uint32_t n = 0;
+    JS_ToUint32(ctx, &n, JS_GetPropertyStr(ctx, a, "length"));
+    if (i >= n) return JS_ThrowRangeError(ctx, "IndexSizeError: index out of range");
+    return JS_GetPropertyUint32(ctx, a, i);
+}
+
+static GCValue time_ranges_start(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    return time_ranges_at(ctx, this_val, argc, argv, "__starts");
+}
+
+static GCValue time_ranges_end(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    return time_ranges_at(ctx, this_val, argc, argv, "__ends");
+}
+
+static GCValue make_time_ranges(JSContextHandle ctx, const MediaRange *r, int n) {
+    GCValue tr = JS_NewObject(ctx);
+    GCValue starts = JS_NewArray(ctx), ends = JS_NewArray(ctx);
+    for (int i = 0; i < n; i++) {
+        JS_SetPropertyUint32(ctx, starts, (uint32_t)i, JS_NewFloat64(ctx, r[i].start));
+        JS_SetPropertyUint32(ctx, ends, (uint32_t)i, JS_NewFloat64(ctx, r[i].end));
+    }
+    JS_SetPropertyStr(ctx, tr, "__starts", starts);
+    JS_SetPropertyStr(ctx, tr, "__ends", ends);
+    JS_SetPropertyStr(ctx, tr, "length", JS_NewInt32(ctx, n));
+    JS_SetPropertyStr(ctx, tr, "start", JS_NewCFunction(ctx, time_ranges_start, "start", 1));
+    JS_SetPropertyStr(ctx, tr, "end", JS_NewCFunction(ctx, time_ranges_end, "end", 1));
+    return tr;
+}
+
+#define MAX_RANGES 64
+
+// ============================================================================
+// MediaSource
+// ============================================================================
+
 GCValue js_media_source_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
+    (void)new_target; (void)argc; (void)argv;
     MediaSourceDataHandle ms = media_source_create(ctx);
     if (SAFE_IS_NULL(ms)) return JS_ThrowTypeError(ctx, "Invalid MediaSource");
-    
-    SAFE_SET(ms, MediaSourceDataHandle, ready_state, 1); // open
-    
+
     GCValue obj = JS_NewObjectClass(ctx, js_media_source_class_id);
     JS_SetOpaqueHandle(obj, ms);
-    
+
     // Register a stable blob URL for this MediaSource
     GCValue url_args[1] = { obj };
     GCValue blob_url = js_url_create_object_url(ctx, JS_UNDEFINED, 1, url_args);
@@ -93,28 +207,28 @@ GCValue js_media_source_constructor(JSContextHandle ctx, GCValue new_target, int
         JS_SetPropertyStr(ctx, obj, "url", JS_NewString(ctx, url_str));
         JS_SetPropertyStr(ctx, obj, "__blobUrl", JS_NewString(ctx, url_str));
     }
-    
+
     // Initialize source buffer lists
-    JS_SetPropertyStr(ctx, obj, "__sourceBuffers", JS_NewArray(ctx));
-    JS_SetPropertyStr(ctx, obj, "__activeSourceBuffers", JS_NewArray(ctx));
-    
+    GCValue lists_[2] = { JS_NewArray(ctx), JS_NewArray(ctx) };
+    js_media_make_event_target(ctx, lists_[0]);
+    js_media_make_event_target(ctx, lists_[1]);
+    JS_SetPropertyStr(ctx, obj, "__sourceBuffers", lists_[0]);
+    JS_SetPropertyStr(ctx, obj, "__activeSourceBuffers", lists_[1]);
+
     return obj;
 }
 
 // SourceBuffer constructor (internal use)
 GCValue js_source_buffer_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
+    (void)new_target;
     SourceBufferDataHandle sb = source_buffer_create(ctx);
     if (SAFE_IS_NULL(sb)) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
-    
-    if (argc > 0) {
-        const char *mime_type = JS_ToCString(ctx, argv[0]);
-        if (mime_type) {
-            SAFE_SET_STR(sb, SourceBufferDataHandle, mime_type, mime_type);
-            // Capture blob URLs for media source
-            capture_url_debug(mime_type, "source_buffer_ctor");
-        }
-    }
-    
+
+    const char *mime_type = argc > 0 ? JS_ToCString(ctx, argv[0]) : NULL;
+    if (mime_type) SAFE_SET_STR(sb, SourceBufferDataHandle, mime_type, mime_type);
+    SourceBufferData *d = (SourceBufferData *)gc_deref(sb);
+    if (d) d->mb = media_buffer_create(mime_type ? mime_type : "");
+
     GCValue obj = JS_NewObjectClass(ctx, js_source_buffer_class_id);
     JS_SetOpaqueHandle(obj, sb);
     return obj;
@@ -122,70 +236,78 @@ GCValue js_source_buffer_constructor(JSContextHandle ctx, GCValue new_target, in
 
 // MediaSource.isTypeSupported(static)
 GCValue js_media_source_is_type_supported(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
     if (argc < 1) return JS_FALSE;
-    
     const char *mime_type = JS_ToCString(ctx, argv[0]);
-    if (!mime_type) return JS_FALSE;
-    
-    // Support common media types
-    bool supported = (
-        strstr(mime_type, "video/mp4") != NULL ||
-        strstr(mime_type, "video/webm") != NULL ||
-        strstr(mime_type, "audio/mp4") != NULL ||
-        strstr(mime_type, "audio/webm") != NULL ||
-        strstr(mime_type, "video/x-matroska") != NULL
-    );
-    
-    return JS_NewBool(ctx, supported);
+    return JS_NewBool(ctx, mime_type && media_type_supported(mime_type));
+}
+
+static void list_push(JSContextHandle ctx, GCValue arr, GCValue v) {
+    int32_t len = 0;
+    JS_ToInt32(ctx, &len, JS_GetPropertyStr(ctx, arr, "length"));
+    JS_SetPropertyUint32(ctx, arr, (uint32_t)len, v);
 }
 
 // MediaSource.prototype.addSourceBuffer
 GCValue js_media_source_add_source_buffer(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     MediaSourceDataHandle ms = JS_GetOpaqueHandle2(ctx, this_val, js_media_source_class_id);
     if (SAFE_IS_NULL(ms)) return JS_ThrowTypeError(ctx, "Invalid MediaSource");
-    
     if (argc < 1) return JS_ThrowTypeError(ctx, "requires at least 1 argument(s)");
-    
     const char *mime_type = JS_ToCString(ctx, argv[0]);
     if (!mime_type) return JS_ThrowTypeError(ctx, "Invalid MIME type");
-    
-    // Create SourceBuffer object
+    MEDIA_LOG("addSourceBuffer(%s) supported=%d", mime_type, media_type_supported(mime_type));
+    if (!media_type_supported(mime_type))
+        return JS_ThrowTypeError(ctx, "NotSupportedError: unsupported type %s", mime_type);
+
     GCValue sb_args[1] = { JS_NewString(ctx, mime_type) };
     GCValue sb = js_source_buffer_constructor(ctx, JS_UNDEFINED, 1, sb_args);
-    
+    if (JS_IsException(sb)) return sb;
     JS_SetPropertyStr(ctx, sb, "mimeType", JS_NewString(ctx, mime_type));
-    JS_SetPropertyStr(ctx, sb, "updating", JS_NewBool(ctx, false));
-    JS_SetPropertyStr(ctx, sb, "mode", JS_NewString(ctx, "segments"));
-    JS_SetPropertyStr(ctx, sb, "timestampOffset", JS_NewInt32(ctx, 0));
-    
-    // Append to sourceBuffers / activeSourceBuffers
-    const char *lists[] = { "__sourceBuffers", "__activeSourceBuffers" };
-    for (int i = 0; i < 2; i++) {
-        GCValue arr = JS_GetPropertyStr(ctx, this_val, lists[i]);
-        if (JS_IsUndefined(arr) || JS_IsNull(arr) || !JS_IsObject(arr)) {
-            arr = JS_NewArray(ctx);
-            JS_SetPropertyStr(ctx, this_val, lists[i], arr);
-        }
-        int32_t len = 0;
-        GCValue len_val = JS_GetPropertyStr(ctx, arr, "length");
-        JS_ToInt32(ctx, &len, len_val);
-        JS_SetPropertyUint32(ctx, arr, len, sb);
-    }
-    
+    JS_SetPropertyStr(ctx, sb, "__mediaSource", this_val);
+
+    list_push(ctx, JS_GetPropertyStr(ctx, this_val, "__sourceBuffers"), sb);
+    list_push(ctx, JS_GetPropertyStr(ctx, this_val, "__activeSourceBuffers"), sb);
     return sb;
 }
 
 // MediaSource.prototype.removeSourceBuffer
 GCValue js_media_source_remove_source_buffer(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 1) return JS_UNDEFINED;
+    static const char *const lists[] = { "__sourceBuffers", "__activeSourceBuffers" };
+    for (int l = 0; l < 2; l++) {
+        GCValue arr = JS_GetPropertyStr(ctx, this_val, lists[l]);
+        int32_t len = 0;
+        JS_ToInt32(ctx, &len, JS_GetPropertyStr(ctx, arr, "length"));
+        uint32_t k = 0;
+        for (int32_t i = 0; i < len; i++) {
+            GCValue v = JS_GetPropertyUint32(ctx, arr, (uint32_t)i);
+            if (JS_VALUE_GET_HANDLE(v) != JS_VALUE_GET_HANDLE(argv[0]))
+                JS_SetPropertyUint32(ctx, arr, k++, v);
+        }
+        JS_SetPropertyStr(ctx, arr, "length", JS_NewInt32(ctx, (int32_t)k));
+    }
     return JS_UNDEFINED;
 }
 
 // MediaSource.prototype.endOfStream
 GCValue js_media_source_end_of_stream(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
     MediaSourceDataHandle ms = JS_GetOpaqueHandle2(ctx, this_val, js_media_source_class_id);
     if (SAFE_IS_NULL(ms)) return JS_ThrowTypeError(ctx, "Invalid MediaSource");
-    
+    if (SAFE_GET_OR(ms, MediaSourceDataHandle, ready_state, 0) != 1) return JS_UNDEFINED;
     SAFE_SET(ms, MediaSourceDataHandle, ready_state, 2); // ended
+    /* The duration becomes the end of what is buffered. */
+    double end = 0.0;
+    GCValue arr = JS_GetPropertyStr(ctx, this_val, "__activeSourceBuffers");
+    int32_t len = 0;
+    JS_ToInt32(ctx, &len, JS_GetPropertyStr(ctx, arr, "length"));
+    for (int32_t i = 0; i < len; i++) {
+        MediaRange r[MAX_RANGES];
+        int n = media_buffer_ranges(sb_media(JS_GetPropertyUint32(ctx, arr, (uint32_t)i)), r, MAX_RANGES);
+        if (n > 0 && r[n - 1].end > end) end = r[n - 1].end;
+    }
+    if (end > 0.0) SAFE_SET(ms, MediaSourceDataHandle, duration, end);
+    media_queue_event(this_val, "sourceended", false);
     return JS_UNDEFINED;
 }
 
@@ -193,20 +315,17 @@ GCValue js_media_source_end_of_stream(JSContextHandle ctx, GCValue this_val, int
 GCValue js_media_source_get_ready_state(JSContextHandle ctx, GCValue this_val) {
     MediaSourceDataHandle ms = JS_GetOpaqueHandle2(ctx, this_val, js_media_source_class_id);
     if (SAFE_IS_NULL(ms)) return JS_ThrowTypeError(ctx, "Invalid MediaSource");
-    
-    static const char* states[] = {"closed", "open", "ended"};
+    static const char *states[] = {"closed", "open", "ended"};
     int state = SAFE_GET_OR(ms, MediaSourceDataHandle, ready_state, 0);
-    if (state >= 0 && state < 3) {
-        return JS_NewString(ctx, states[state]);
-    }
-    return JS_NewString(ctx, "closed");
+    return JS_NewString(ctx, state >= 0 && state < 3 ? states[state] : "closed");
 }
 
 // MediaSource.duration getter/setter
 GCValue js_media_source_get_duration(JSContextHandle ctx, GCValue this_val) {
     MediaSourceDataHandle ms = JS_GetOpaqueHandle2(ctx, this_val, js_media_source_class_id);
     if (SAFE_IS_NULL(ms)) return JS_ThrowTypeError(ctx, "Invalid MediaSource");
-    return JS_NewFloat64(ctx, SAFE_GET_OR(ms, MediaSourceDataHandle, duration, 0.0));
+    if (SAFE_GET_OR(ms, MediaSourceDataHandle, ready_state, 0) == 0) return JS_NewFloat64(ctx, NAN);
+    return JS_NewFloat64(ctx, SAFE_GET_OR(ms, MediaSourceDataHandle, duration, NAN));
 }
 
 GCValue js_media_source_set_duration(JSContextHandle ctx, GCValue this_val, GCValue val) {
@@ -215,6 +334,8 @@ GCValue js_media_source_set_duration(JSContextHandle ctx, GCValue this_val, GCVa
     double duration;
     JS_ToFloat64(ctx, &duration, val);
     SAFE_SET(ms, MediaSourceDataHandle, duration, duration);
+    GCValue video = JS_GetPropertyStr(ctx, this_val, "__mediaElement");
+    if (JS_IsObject(video)) media_queue_event(video, "durationchange", false);
     return JS_UNDEFINED;
 }
 
@@ -249,206 +370,113 @@ const JSCFunctionListEntry js_media_source_proto_funcs[] = {
 };
 const size_t js_media_source_proto_funcs_count = sizeof(js_media_source_proto_funcs) / sizeof(js_media_source_proto_funcs[0]);
 
-// Helper: accumulate appendBuffer bytes into the SourceBuffer's own buffer.
-static void source_buffer_append_data(JSContextHandle ctx, SourceBufferDataHandle sb, const uint8_t *data, size_t len) {
-    (void)ctx;
-    if (!data || len == 0) return;
-    size_t old_size = SAFE_GET_OR(sb, SourceBufferDataHandle, append_size, 0);
-    size_t new_size = old_size + len;
-    uint8_t *buf = (uint8_t *)realloc(SAFE_GET_OR(sb, SourceBufferDataHandle, append_data, NULL), new_size);
-    if (!buf) return;
-    memcpy(buf + old_size, data, len);
-    source_buffer_set_append_data(sb, buf, new_size, new_size);
+// ============================================================================
+// SourceBuffer
+// ============================================================================
+
+/* Start an update (appendBuffer / remove): updating until its events fire. */
+static bool sb_begin_update(JSContextHandle ctx, GCValue this_val, SourceBufferDataHandle sb) {
+    if (SAFE_GET_OR(sb, SourceBufferDataHandle, updating, 0)) {
+        JS_ThrowTypeError(ctx, "InvalidStateError: the SourceBuffer is updating");
+        return false;
+    }
+    SAFE_SET(sb, SourceBufferDataHandle, updating, 1);
+    media_queue_event(this_val, "updatestart", false);
+    return true;
 }
 
-// Helper: read callback for minimp4 operating on an in-memory buffer.
-typedef struct {
-    const uint8_t *data;
-    size_t size;
-} mp4_mem_token_t;
-
-static int mp4_mem_read(int64_t offset, void *buffer, size_t size, void *token) {
-    mp4_mem_token_t *tok = (mp4_mem_token_t *)token;
-    if (!tok || !buffer) return -1;
-    if (offset < 0 || (size_t)offset > tok->size) return -1;
-    size_t avail = tok->size - (size_t)offset;
-    size_t to_read = size < avail ? size : avail;
-    if (to_read > 0) memcpy(buffer, tok->data + offset, to_read);
-    return to_read == size ? 0 : -1;
-}
-
-// Helper: turn a 32-bit big-endian fourcc into a null-terminated string.
-static void fourcc_to_str(uint32_t fcc, char *out, size_t out_len) {
-    if (out_len < 5) {
-        if (out_len > 0) out[0] = '\0';
-        return;
-    }
-    out[0] = (char)((fcc >> 24) & 0xFF);
-    out[1] = (char)((fcc >> 16) & 0xFF);
-    out[2] = (char)((fcc >> 8) & 0xFF);
-    out[3] = (char)(fcc & 0xFF);
-    out[4] = '\0';
-}
-
-// Helper: run minimp4 over the accumulated buffer and expose track/sample metadata.
-static void source_buffer_demux(JSContextHandle ctx, GCValue sb_obj, SourceBufferDataHandle sb) {
-    if (!SAFE_GET_OR(sb, SourceBufferDataHandle, append_data, NULL) || SAFE_GET_OR(sb, SourceBufferDataHandle, append_size, 0) < 8) return;
-
-    mp4_mem_token_t tok = { SAFE_GET_OR(sb, SourceBufferDataHandle, append_data, NULL), SAFE_GET_OR(sb, SourceBufferDataHandle, append_size, 0) };
-    MP4D_demux_t mp4;
-    memset(&mp4, 0, sizeof(mp4));
-    if (!MP4D_open(&mp4, mp4_mem_read, &tok, (int64_t)tok.size)) {
-        // Fragmented MP4 segments (moof/mdat) are not handled by minimp4's demuxer.
-        // The bytes are still retained for future processing.
-        return;
-    }
-
-    SAFE_SET(sb, SourceBufferDataHandle, track_count, (int)mp4.track_count);
-    double duration_sec = 0.0;
-    if (mp4.timescale > 0) {
-        uint64_t dur = ((uint64_t)mp4.duration_hi << 32) | mp4.duration_lo;
-        duration_sec = (double)dur / (double)mp4.timescale;
-    }
-    SAFE_SET(sb, SourceBufferDataHandle, parsed_duration, duration_sec);
-
-    GCValue info = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, info, "trackCount", JS_NewInt32(ctx, (int)mp4.track_count));
-    JS_SetPropertyStr(ctx, info, "duration", JS_NewFloat64(ctx, duration_sec));
-    JS_SetPropertyStr(ctx, info, "timescale", JS_NewInt32(ctx, (int)mp4.timescale));
-
-    GCValue tracks = JS_NewArray(ctx);
-    for (unsigned i = 0; i < mp4.track_count; i++) {
-        MP4D_track_t *tr = &mp4.track[i];
-        GCValue track = JS_NewObject(ctx);
-        char handler[8];
-        fourcc_to_str(tr->handler_type, handler, sizeof(handler));
-        JS_SetPropertyStr(ctx, track, "handlerType", JS_NewString(ctx, handler));
-        JS_SetPropertyStr(ctx, track, "sampleCount", JS_NewInt32(ctx, (int)tr->sample_count));
-        JS_SetPropertyStr(ctx, track, "timescale", JS_NewInt32(ctx, (int)tr->timescale));
-        JS_SetPropertyStr(ctx, track, "objectType", JS_NewInt32(ctx, (int)tr->object_type_indication));
-
-        if (tr->handler_type == MP4D_HANDLER_TYPE_VIDE) {
-            JS_SetPropertyStr(ctx, track, "width", JS_NewInt32(ctx, (int)tr->SampleDescription.video.width));
-            JS_SetPropertyStr(ctx, track, "height", JS_NewInt32(ctx, (int)tr->SampleDescription.video.height));
-        } else if (tr->handler_type == MP4D_HANDLER_TYPE_SOUN) {
-            JS_SetPropertyStr(ctx, track, "channels", JS_NewInt32(ctx, (int)tr->SampleDescription.audio.channelcount));
-            JS_SetPropertyStr(ctx, track, "sampleRate", JS_NewInt32(ctx, (int)tr->SampleDescription.audio.samplerate_hz));
-        }
-
-        GCValue samples = JS_NewArray(ctx);
-        unsigned sample_limit = tr->sample_count < 4096 ? tr->sample_count : 4096;
-        for (unsigned s = 0; s < sample_limit; s++) {
-            unsigned frame_bytes = 0, ts = 0, dur = 0;
-            MP4D_file_offset_t offset = MP4D_frame_offset(&mp4, i, s, &frame_bytes, &ts, &dur);
-            GCValue sample = JS_NewObject(ctx);
-            JS_SetPropertyStr(ctx, sample, "offset", JS_NewInt64(ctx, (int64_t)offset));
-            JS_SetPropertyStr(ctx, sample, "size", JS_NewInt32(ctx, (int)frame_bytes));
-            JS_SetPropertyStr(ctx, sample, "timestamp", JS_NewInt32(ctx, (int)ts));
-            JS_SetPropertyStr(ctx, sample, "duration", JS_NewInt32(ctx, (int)dur));
-            JS_SetPropertyUint32(ctx, samples, s, sample);
-        }
-        JS_SetPropertyStr(ctx, track, "samples", samples);
-        JS_SetPropertyUint32(ctx, tracks, i, track);
-    }
-    JS_SetPropertyStr(ctx, info, "tracks", tracks);
-    JS_SetPropertyStr(ctx, sb_obj, "__mp4Info", info);
-
-    MP4D_close(&mp4);
+static void sb_end_update(GCValue this_val) {
+    media_queue_event(this_val, "update", true);
+    media_queue_event(this_val, "updateend", false);
 }
 
 // SourceBuffer.prototype.appendBuffer
 GCValue js_source_buffer_append_buffer(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     SourceBufferDataHandle sb = JS_GetOpaqueHandle2(ctx, this_val, js_source_buffer_class_id);
     if (SAFE_IS_NULL(sb)) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
-
     if (argc < 1) return JS_ThrowTypeError(ctx, "requires at least 1 argument(s)");
 
-    // Accept ArrayBuffer, TypedArray, ArrayBufferView, Blob, or plain buffer object
-    size_t data_len = 0;
-    const uint8_t *data = NULL;
-    GCValue buffer_val = argv[0];
-
-    if (JS_IsObject(buffer_val)) {
-        GCValue byte_length = JS_GetPropertyStr(ctx, buffer_val, "byteLength");
-        if (!JS_IsUndefined(byte_length)) {
-            JS_ToInt64(ctx, (int64_t*)&data_len, byte_length);
-        }
-        // For ArrayBuffer / TypedArray, try to get a pointer via QuickJS
-        size_t size = 0;
-        uint8_t *ptr = JS_GetArrayBuffer(ctx, &size, buffer_val);
-        if (!ptr && JS_IsObject(buffer_val)) {
-            GCValue buf_prop = JS_GetPropertyStr(ctx, buffer_val, "buffer");
-            if (JS_IsObject(buf_prop)) {
-                ptr = JS_GetArrayBuffer(ctx, &size, buf_prop);
-                if (ptr) data_len = size;
+    /* ArrayBuffer, or a view on one (TypedArray / DataView). */
+    size_t size = 0;
+    const uint8_t *data = JS_GetArrayBuffer(ctx, &size, argv[0]);
+    if (!data && JS_IsObject(argv[0])) {
+        GCValue buf = JS_GetPropertyStr(ctx, argv[0], "buffer");
+        size_t whole = 0;
+        const uint8_t *base = JS_IsObject(buf) ? JS_GetArrayBuffer(ctx, &whole, buf) : NULL;
+        if (base) {
+            int64_t off = 0, len = 0;
+            JS_ToInt64(ctx, &off, JS_GetPropertyStr(ctx, argv[0], "byteOffset"));
+            JS_ToInt64(ctx, &len, JS_GetPropertyStr(ctx, argv[0], "byteLength"));
+            if (off >= 0 && len >= 0 && (uint64_t)(off + len) <= whole) {
+                data = base + off;
+                size = (size_t)len;
             }
         }
-        data = ptr;
     }
+    if (!data) return JS_ThrowTypeError(ctx, "appendBuffer: not an ArrayBuffer or view");
+    if (!sb_begin_update(ctx, this_val, sb)) return JS_EXCEPTION;
 
-    JS_SetPropertyStr(ctx, this_val, "updating", JS_TRUE);
-    SAFE_SET(sb, SourceBufferDataHandle, updating, 1);
-
-    GCValue onupdatestart = JS_GetPropertyStr(ctx, this_val, "onupdatestart");
-    if (!JS_IsNull(onupdatestart) && !JS_IsUndefined(onupdatestart)) {
-        JS_Call(ctx, onupdatestart, this_val, 0, NULL);
+    SourceBufferData *d = (SourceBufferData *)gc_deref(sb);
+    if (d && d->mb && !media_buffer_append(d->mb, data, size, d->timestamp_offset))
+        media_queue_event(this_val, "error", false);
+    d = (SourceBufferData *)gc_deref(sb);
+    if (media_log_on() && d) {
+        MediaRange r[MAX_RANGES];
+        int n = media_buffer_ranges(d->mb, r, MAX_RANGES);
+        MEDIA_LOG("append %zu bytes to %.60s: init=%d ranges=%d [%.3f, %.3f]", size, d->mime_type,
+                  media_buffer_has_init(d->mb), n, n ? r[0].start : 0.0, n ? r[n - 1].end : 0.0);
     }
-
-    if (data && data_len > 0) {
-        source_buffer_append_data(ctx, sb, data, data_len);
-        source_buffer_demux(ctx, this_val, sb);
-
-        char captured[256];
-        snprintf(captured, sizeof(captured),
-                 "media-source://segment?size=%zu&tracks=%d&duration=%.3f",
-                 SAFE_GET_OR(sb, SourceBufferDataHandle, append_size, 0), SAFE_GET_OR(sb, SourceBufferDataHandle, track_count, 0), SAFE_GET_OR(sb, SourceBufferDataHandle, parsed_duration, 0.0));
-        record_captured_url(captured);
+    /* A newly complete initialization segment declares the duration. */
+    GCValue ms_obj = JS_GetPropertyStr(ctx, this_val, "__mediaSource");
+    MediaSourceDataHandle ms = JS_IsObject(ms_obj) ? JS_GetOpaqueHandle(ms_obj, js_media_source_class_id) : GC_HANDLE_NULL;
+    d = (SourceBufferData *)gc_deref(sb);
+    if (!SAFE_IS_NULL(ms) && d && d->mb && isnan(SAFE_GET_OR(ms, MediaSourceDataHandle, duration, NAN))) {
+        double dur = media_buffer_duration(d->mb);
+        if (dur > 0.0) SAFE_SET(ms, MediaSourceDataHandle, duration, dur);
     }
-
-    JS_SetPropertyStr(ctx, this_val, "__appendSize", JS_NewInt64(ctx, (int64_t)SAFE_GET_OR(sb, SourceBufferDataHandle, append_size, 0)));
-
-    GCValue onupdate = JS_GetPropertyStr(ctx, this_val, "onupdate");
-    if (!JS_IsNull(onupdate) && !JS_IsUndefined(onupdate)) {
-        JS_Call(ctx, onupdate, this_val, 0, NULL);
-    }
-
-    JS_SetPropertyStr(ctx, this_val, "updating", JS_FALSE);
-    SAFE_SET(sb, SourceBufferDataHandle, updating, 0);
-
-    GCValue updateend = JS_GetPropertyStr(ctx, this_val, "onupdateend");
-    if (!JS_IsNull(updateend) && !JS_IsUndefined(updateend)) {
-        JS_Call(ctx, updateend, this_val, 0, NULL);
-    }
-
+    sb_end_update(this_val);
     return JS_UNDEFINED;
 }
 
 // SourceBuffer.prototype.abort
 GCValue js_source_buffer_abort(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
     SourceBufferDataHandle sb = JS_GetOpaqueHandle2(ctx, this_val, js_source_buffer_class_id);
     if (SAFE_IS_NULL(sb)) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
-    
-    SAFE_SET(sb, SourceBufferDataHandle, updating, 0);
+    SourceBufferData *d = (SourceBufferData *)gc_deref(sb);
+    if (d && d->mb) media_buffer_reset_parser(d->mb);
     return JS_UNDEFINED;
 }
 
 // SourceBuffer.prototype.changeType
 GCValue js_source_buffer_change_type(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1) return JS_ThrowTypeError(ctx, "requires at least 1 argument(s)");
-    
     SourceBufferDataHandle sb = JS_GetOpaqueHandle2(ctx, this_val, js_source_buffer_class_id);
     if (SAFE_IS_NULL(sb)) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
-    
     const char *mime_type = JS_ToCString(ctx, argv[0]);
-    if (mime_type) {
-        SAFE_SET_STR(sb, SourceBufferDataHandle, mime_type, mime_type);
+    if (!mime_type || !media_type_supported(mime_type))
+        return JS_ThrowTypeError(ctx, "NotSupportedError: unsupported type");
+    SAFE_SET_STR(sb, SourceBufferDataHandle, mime_type, mime_type);
+    /* The next initialization segment describes the new codec. */
+    SourceBufferData *d = (SourceBufferData *)gc_deref(sb);
+    if (d) {
+        if (d->mb) media_buffer_destroy(d->mb);
+        d->mb = media_buffer_create(mime_type);
     }
-    
     return JS_UNDEFINED;
 }
 
 // SourceBuffer.prototype.remove
 GCValue js_source_buffer_remove(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    SourceBufferDataHandle sb = JS_GetOpaqueHandle2(ctx, this_val, js_source_buffer_class_id);
+    if (SAFE_IS_NULL(sb)) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
+    double start = 0.0, end = 0.0;
+    if (argc > 0) JS_ToFloat64(ctx, &start, argv[0]);
+    if (argc > 1) JS_ToFloat64(ctx, &end, argv[1]);
+    if (!sb_begin_update(ctx, this_val, sb)) return JS_EXCEPTION;
+    SourceBufferData *d = (SourceBufferData *)gc_deref(sb);
+    if (d && d->mb) media_buffer_remove(d->mb, start, end);
+    sb_end_update(this_val);
     return JS_UNDEFINED;
 }
 
@@ -457,6 +485,13 @@ GCValue js_source_buffer_get_updating(JSContextHandle ctx, GCValue this_val) {
     SourceBufferDataHandle sb = JS_GetOpaqueHandle2(ctx, this_val, js_source_buffer_class_id);
     if (SAFE_IS_NULL(sb)) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
     return JS_NewBool(ctx, SAFE_GET_OR(sb, SourceBufferDataHandle, updating, 0));
+}
+
+// SourceBuffer.buffered getter
+GCValue js_source_buffer_get_buffered(JSContextHandle ctx, GCValue this_val) {
+    MediaRange r[MAX_RANGES];
+    int n = media_buffer_ranges(sb_media(this_val), r, MAX_RANGES);
+    return make_time_ranges(ctx, r, n);
 }
 
 // SourceBuffer.timestampOffset getter/setter
@@ -486,9 +521,7 @@ GCValue js_source_buffer_set_mode(JSContextHandle ctx, GCValue this_val, GCValue
     SourceBufferDataHandle sb = JS_GetOpaqueHandle2(ctx, this_val, js_source_buffer_class_id);
     if (SAFE_IS_NULL(sb)) return JS_ThrowTypeError(ctx, "Invalid SourceBuffer");
     const char *mode = JS_ToCString(ctx, val);
-    if (mode) {
-        SAFE_SET_STR(sb, SourceBufferDataHandle, mode, mode);
-    }
+    if (mode) SAFE_SET_STR(sb, SourceBufferDataHandle, mode, mode);
     return JS_UNDEFINED;
 }
 
@@ -498,14 +531,355 @@ const JSCFunctionListEntry js_source_buffer_proto_funcs[] = {
     JS_CFUNC_DEF("changeType", 1, js_source_buffer_change_type),
     JS_CFUNC_DEF("remove", 2, js_source_buffer_remove),
     JS_CGETSET_DEF("updating", js_source_buffer_get_updating, NULL),
+    JS_CGETSET_DEF("buffered", js_source_buffer_get_buffered, NULL),
     JS_CGETSET_DEF("timestampOffset", js_source_buffer_get_timestamp_offset, js_source_buffer_set_timestamp_offset),
     JS_CGETSET_DEF("mode", js_source_buffer_get_mode, js_source_buffer_set_mode),
     JS_PROP_DOUBLE_DEF("appendWindowStart", 0, JS_PROP_WRITABLE),
-    JS_PROP_DOUBLE_DEF("appendWindowEnd", 0, JS_PROP_WRITABLE),
-    JS_PROP_STRING_DEF("videoTracks", "", JS_PROP_WRITABLE),
-    JS_PROP_STRING_DEF("audioTracks", "", JS_PROP_WRITABLE),
-    JS_PROP_STRING_DEF("textTracks", "", JS_PROP_WRITABLE),
+    JS_PROP_DOUBLE_DEF("appendWindowEnd", INFINITY, JS_PROP_WRITABLE),
 };
 const size_t js_source_buffer_proto_funcs_count = sizeof(js_source_buffer_proto_funcs) / sizeof(js_source_buffer_proto_funcs[0]);
 
+void js_media_make_event_target(JSContextHandle ctx, GCValue obj) {
+    GCValue ctor = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "EventTarget");
+    GCValue proto = JS_IsObject(ctor) ? JS_GetPropertyStr(ctx, ctor, "prototype") : JS_UNDEFINED;
+    if (!JS_IsObject(proto)) return;
+    static const char *const names[] = { "addEventListener", "removeEventListener", "dispatchEvent" };
+    for (int i = 0; i < 3; i++) {
+        GCValue fn = JS_GetPropertyStr(ctx, proto, names[i]);
+        if (JS_IsFunction(ctx, fn)) JS_SetPropertyStr(ctx, obj, names[i], fn);
+    }
+}
+
 // ============================================================================
+// Media element playback
+// ============================================================================
+
+enum { HAVE_NOTHING, HAVE_METADATA, HAVE_CURRENT_DATA, HAVE_FUTURE_DATA, HAVE_ENOUGH_DATA };
+
+typedef struct MediaPlayer {
+    GCValue video, ms;          /* rooted while attached */
+    NodeId node;
+    bool paused, waiting, seeking, ended;
+    double t;                   /* current time at base_ms */
+    unsigned long long base_ms;
+    double rate;
+    int ready;
+    bool sent_metadata, sent_loadeddata;
+    unsigned long long last_timeupdate_ms;
+    unsigned long long last_paint_ms;
+} MediaPlayer;
+
+#define MAX_PLAYERS 32
+static MediaPlayer *g_players[MAX_PLAYERS];
+static int g_nplayers;
+static JSContextHandle g_media_ctx;   /* the context players were attached in */
+
+static MediaPlayer *player_of(GCValue video) {
+    if (!JS_IsObject(video)) return NULL;
+    for (int i = 0; i < g_nplayers; i++)
+        if (JS_VALUE_GET_HANDLE(g_players[i]->video) == JS_VALUE_GET_HANDLE(video)) return g_players[i];
+    return NULL;
+}
+
+static double player_time(const MediaPlayer *p) {
+    if (p->paused || p->waiting || p->seeking || p->ready < HAVE_FUTURE_DATA) return p->t;
+    return p->t + (double)(platform_get_time_ms() - p->base_ms) / 1000.0 * p->rate;
+}
+
+static void player_settle_clock(MediaPlayer *p) {
+    p->t = player_time(p);
+    p->base_ms = platform_get_time_ms();
+}
+
+static double player_duration(MediaPlayer *p) {
+    MediaSourceDataHandle ms = JS_GetOpaqueHandle(p->ms, js_media_source_class_id);
+    if (SAFE_IS_NULL(ms) || SAFE_GET_OR(ms, MediaSourceDataHandle, ready_state, 0) == 0) return NAN;
+    return SAFE_GET_OR(ms, MediaSourceDataHandle, duration, NAN);
+}
+
+/* The active SourceBuffers' media. */
+static int player_buffers(JSContextHandle ctx, MediaPlayer *p, MediaBuffer **out, int max) {
+    GCValue arr = JS_GetPropertyStr(ctx, p->ms, "__activeSourceBuffers");
+    int32_t len = 0;
+    JS_ToInt32(ctx, &len, JS_GetPropertyStr(ctx, arr, "length"));
+    int n = 0;
+    for (int32_t i = 0; i < len && n < max; i++) {
+        MediaBuffer *mb = sb_media(JS_GetPropertyUint32(ctx, arr, (uint32_t)i));
+        if (mb) out[n++] = mb;
+    }
+    return n;
+}
+
+/* Is [t, t + ahead) buffered in mb?  Starting up to `slack` early counts
+ * (a stream whose first frame is a few ms after 0 still starts at 0). */
+static bool covers(MediaBuffer *mb, double t, double ahead, double duration) {
+    MediaRange r[MAX_RANGES];
+    int n = media_buffer_ranges(mb, r, MAX_RANGES);
+    const double slack = 0.3;
+    for (int i = 0; i < n; i++) {
+        if (t < r[i].start - slack || t >= r[i].end) continue;
+        double need = t + ahead;
+        if (!isnan(duration) && need > duration) need = duration;
+        return r[i].end >= need - 0.05;
+    }
+    return false;
+}
+
+/* The buffered ranges of the element: the intersection of its SourceBuffers'. */
+static int player_ranges(JSContextHandle ctx, MediaPlayer *p, MediaRange *out, int max) {
+    MediaBuffer *mbs[8];
+    int nb = player_buffers(ctx, p, mbs, 8);
+    if (nb == 0) return 0;
+    int n = media_buffer_ranges(mbs[0], out, max);
+    for (int b = 1; b < nb; b++) {
+        MediaRange other[MAX_RANGES], res[MAX_RANGES];
+        int m = media_buffer_ranges(mbs[b], other, MAX_RANGES), k = 0;
+        for (int i = 0; i < n; i++)
+            for (int j = 0; j < m && k < MAX_RANGES; j++) {
+                double s = fmax(out[i].start, other[j].start), e = fmin(out[i].end, other[j].end);
+                if (e > s) res[k++] = (MediaRange){ s, e };
+            }
+        n = k < max ? k : max;
+        memcpy(out, res, (size_t)n * sizeof(MediaRange));
+    }
+    return n;
+}
+
+static void player_update(JSContextHandle ctx, MediaPlayer *p) {
+    MediaBuffer *mbs[8];
+    int nb = player_buffers(ctx, p, mbs, 8);
+    bool meta = nb > 0;
+    for (int i = 0; i < nb; i++) if (!media_buffer_has_init(mbs[i])) meta = false;
+    double duration = player_duration(p);
+    double t = player_time(p);
+
+    int ready = HAVE_NOTHING;
+    if (meta) {
+        bool cur = true, future = true;
+        for (int i = 0; i < nb; i++) {
+            if (!covers(mbs[i], t, 0.0, duration)) cur = false;
+            if (!covers(mbs[i], t, 1.0, duration)) future = false;
+        }
+        ready = future ? HAVE_ENOUGH_DATA : cur ? HAVE_CURRENT_DATA : HAVE_METADATA;
+    }
+    int old = p->ready;
+    if (ready != old)
+        MEDIA_LOG("readyState %d -> %d at t=%.3f (paused=%d, duration=%.3f)", old, ready, t, p->paused, duration);
+
+    if (ready >= HAVE_METADATA && !p->sent_metadata) {
+        p->sent_metadata = true;
+        media_queue_event(p->video, "durationchange", false);
+        media_queue_event(p->video, "loadedmetadata", false);
+        media_queue_event(p->video, "resize", false);
+    }
+    if (ready < HAVE_FUTURE_DATA && old >= HAVE_FUTURE_DATA) {
+        player_settle_clock(p);         /* freeze the clock while stalled */
+        if (!p->paused) { p->waiting = true; media_queue_event(p->video, "waiting", false); }
+    }
+    p->ready = ready;
+    if (ready >= HAVE_CURRENT_DATA && !p->sent_loadeddata) {
+        p->sent_loadeddata = true;
+        media_queue_event(p->video, "loadeddata", false);
+    }
+    if (p->seeking && ready >= HAVE_CURRENT_DATA) {
+        p->seeking = false;
+        p->base_ms = platform_get_time_ms();
+        media_queue_event(p->video, "seeked", false);
+        media_queue_event(p->video, "timeupdate", false);
+    }
+    if (ready >= HAVE_FUTURE_DATA && old < HAVE_FUTURE_DATA) {
+        p->base_ms = platform_get_time_ms();
+        media_queue_event(p->video, "canplay", false);
+        if (ready == HAVE_ENOUGH_DATA) media_queue_event(p->video, "canplaythrough", false);
+        if (!p->paused) { p->waiting = false; media_queue_event(p->video, "playing", false); }
+    }
+
+    unsigned long long now = platform_get_time_ms();
+    MediaSourceDataHandle ms = JS_GetOpaqueHandle(p->ms, js_media_source_class_id);
+    bool stream_ended = !SAFE_IS_NULL(ms) && SAFE_GET_OR(ms, MediaSourceDataHandle, ready_state, 0) == 2;
+    if (!p->paused && !p->ended && stream_ended && !isnan(duration) && player_time(p) >= duration - 0.05) {
+        p->t = duration;
+        p->base_ms = now;
+        p->paused = true;
+        p->ended = true;
+        media_queue_event(p->video, "timeupdate", false);
+        media_queue_event(p->video, "pause", false);
+        media_queue_event(p->video, "ended", false);
+    }
+    bool running = !p->paused && !p->waiting && p->ready >= HAVE_FUTURE_DATA;
+    if (running && now - p->last_timeupdate_ms >= 250) {
+        p->last_timeupdate_ms = now;
+        media_queue_event(p->video, "timeupdate", false);
+    }
+    /* A new frame needs a repaint (but is not a document change: the
+     * page can still be quiet while a video plays). */
+    if ((running || p->ready != old) && now - p->last_paint_ms >= 500) {
+        p->last_paint_ms = now;
+        g_dom_needs_layout = 1;
+    }
+}
+
+int media_tick(JSContextHandle ctx) {
+    for (int i = 0; i < g_nplayers; i++) player_update(ctx, g_players[i]);
+    if (g_ntasks == 0) return 0;
+    /* Fire what is queued now; events these handlers queue wait a turn. */
+    int n = g_ntasks;
+    MediaTask *tasks = (MediaTask *)malloc((size_t)n * sizeof(MediaTask));
+    if (!tasks) return 0;
+    memcpy(tasks, g_tasks, (size_t)n * sizeof(MediaTask));
+    g_ntasks = 0;
+    for (int i = 0; i < n; i++) {
+        if (tasks[i].clear_updating) {
+            SourceBufferDataHandle sb = JS_GetOpaqueHandle(tasks[i].target, js_source_buffer_class_id);
+            if (!SAFE_IS_NULL(sb)) SAFE_SET(sb, SourceBufferDataHandle, updating, 0);
+        }
+        media_fire(ctx, tasks[i].target, tasks[i].type);
+        root_value(tasks[i].target, false);
+    }
+    free(tasks);
+    return n;
+}
+
+bool media_tick_pending(void) { return g_ntasks > 0; }
+
+bool media_element_attach(JSContextHandle ctx, GCValue video, GCValue ms_obj) {
+    MEDIA_LOG("attach");
+    MediaSourceDataHandle ms = JS_GetOpaqueHandle(ms_obj, js_media_source_class_id);
+    if (SAFE_IS_NULL(ms)) return false;
+    media_element_detach(ctx, video);
+    if (g_nplayers == MAX_PLAYERS) return false;
+    MediaPlayer *p = (MediaPlayer *)calloc(1, sizeof(MediaPlayer));
+    if (!p) return false;
+    p->video = video;
+    p->ms = ms_obj;
+    root_value(video, true);
+    root_value(ms_obj, true);
+    p->node = dom_node_of(video);
+    g_media_ctx = ctx;
+    p->paused = true;
+    p->rate = 1.0;
+    p->base_ms = platform_get_time_ms();
+    g_players[g_nplayers++] = p;
+    JS_SetPropertyStr(ctx, ms_obj, "__mediaElement", video);
+    SAFE_SET(ms, MediaSourceDataHandle, ready_state, 1);   /* open */
+    media_queue_event(video, "loadstart", false);
+    media_queue_event(ms_obj, "sourceopen", false);
+    return true;
+}
+
+void media_element_detach(JSContextHandle ctx, GCValue video) {
+    for (int i = 0; i < g_nplayers; i++) {
+        MediaPlayer *p = g_players[i];
+        if (JS_VALUE_GET_HANDLE(p->video) != JS_VALUE_GET_HANDLE(video)) continue;
+        MediaSourceDataHandle ms = JS_GetOpaqueHandle(p->ms, js_media_source_class_id);
+        if (!SAFE_IS_NULL(ms)) SAFE_SET(ms, MediaSourceDataHandle, ready_state, 0);
+        media_queue_event(p->ms, "sourceclose", false);
+        JS_SetPropertyStr(ctx, p->ms, "__mediaElement", JS_UNDEFINED);
+        root_value(p->video, false);
+        root_value(p->ms, false);
+        free(p);
+        g_players[i] = g_players[--g_nplayers];
+        return;
+    }
+}
+
+bool media_element_active(GCValue video) { return player_of(video) != NULL; }
+
+double media_element_current_time(GCValue video) {
+    MediaPlayer *p = player_of(video);
+    return p ? player_time(p) : 0.0;
+}
+
+void media_element_seek(GCValue video, double t) {
+    MediaPlayer *p = player_of(video);
+    if (!p || isnan(t)) return;
+    if (t < 0) t = 0;
+    p->t = t;
+    p->base_ms = platform_get_time_ms();
+    p->seeking = true;
+    p->ended = false;
+    media_queue_event(p->video, "seeking", false);
+}
+
+double media_element_duration(GCValue video) {
+    MediaPlayer *p = player_of(video);
+    return p ? player_duration(p) : NAN;
+}
+
+int media_element_ready_state(GCValue video) {
+    MediaPlayer *p = player_of(video);
+    return p ? p->ready : 0;
+}
+
+bool media_element_paused(GCValue video) {
+    MediaPlayer *p = player_of(video);
+    return p ? p->paused : true;
+}
+
+bool media_element_ended(GCValue video) {
+    MediaPlayer *p = player_of(video);
+    return p ? p->ended : false;
+}
+
+GCValue media_element_buffered(JSContextHandle ctx, GCValue video) {
+    MediaPlayer *p = player_of(video);
+    MediaRange r[MAX_RANGES];
+    int n = p ? player_ranges(ctx, p, r, MAX_RANGES) : 0;
+    return make_time_ranges(ctx, r, n);
+}
+
+void media_element_play(GCValue video) {
+    MEDIA_LOG("play()");
+    MediaPlayer *p = player_of(video);
+    if (!p || !p->paused) return;
+    if (p->ended) { p->t = 0.0; p->ended = false; }
+    p->paused = false;
+    p->base_ms = platform_get_time_ms();
+    media_queue_event(p->video, "play", false);
+    if (p->ready >= HAVE_FUTURE_DATA) media_queue_event(p->video, "playing", false);
+    else { p->waiting = true; media_queue_event(p->video, "waiting", false); }
+}
+
+void media_element_pause(GCValue video) {
+    MediaPlayer *p = player_of(video);
+    if (!p || p->paused) return;
+    player_settle_clock(p);
+    p->paused = true;
+    p->waiting = false;
+    media_queue_event(p->video, "timeupdate", false);
+    media_queue_event(p->video, "pause", false);
+}
+
+void media_element_set_rate(GCValue video, double rate) {
+    MediaPlayer *p = player_of(video);
+    if (!p || isnan(rate)) return;
+    player_settle_clock(p);
+    p->rate = rate;
+    media_queue_event(p->video, "ratechange", false);
+}
+
+static MediaBuffer *player_video_buffer(JSContextHandle ctx, MediaPlayer *p) {
+    MediaBuffer *mbs[8];
+    int nb = player_buffers(ctx, p, mbs, 8);
+    for (int i = 0; i < nb; i++)
+        if (media_buffer_kind(mbs[i]) == MEDIA_KIND_VIDEO) return mbs[i];
+    return NULL;
+}
+
+void media_element_video_size(JSContextHandle ctx, GCValue video, int *w, int *h) {
+    *w = *h = 0;
+    MediaPlayer *p = player_of(video);
+    MediaBuffer *mb = p ? player_video_buffer(ctx, p) : NULL;
+    if (mb) media_buffer_video_size(mb, w, h);
+}
+
+bool media_video_frame_for_node(NodeId node, const uint8_t **rgba,
+                                int *w, int *h, uint64_t *frame_id) {
+    for (int i = 0; i < g_nplayers; i++) {
+        MediaPlayer *p = g_players[i];
+        if (p->node != node) continue;
+        MediaBuffer *mb = player_video_buffer(g_media_ctx, p);
+        return mb && media_buffer_frame_at(mb, player_time(p), rgba, w, h, frame_id);
+    }
+    return false;
+}

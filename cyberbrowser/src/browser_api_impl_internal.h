@@ -8,6 +8,7 @@
 #define BROWSER_API_IMPL_INTERNAL_H
 
 #include "browser_api_impl.h"
+#include "dom_store.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -421,6 +422,33 @@ extern JSClassDef js_source_buffer_class_def;
 GCValue js_media_source_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
 GCValue js_source_buffer_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv);
 GCValue js_media_source_is_type_supported(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+/* Give `obj` the EventTarget methods (lists such as SourceBufferList and
+ * TextTrackList are plain objects here). */
+void js_media_make_event_target(JSContextHandle ctx, GCValue obj);
+
+/* Media element playback (media_source_api.c).  A video element whose src is
+ * a MediaSource's object URL is attached to it; while attached its
+ * currentTime, readyState, buffered, play()/pause() come from here. */
+bool media_element_attach(JSContextHandle ctx, GCValue video, GCValue media_source);
+void media_element_detach(JSContextHandle ctx, GCValue video);
+bool media_element_active(GCValue video);
+double media_element_current_time(GCValue video);
+void media_element_seek(GCValue video, double t);
+double media_element_duration(GCValue video);
+int media_element_ready_state(GCValue video);
+bool media_element_paused(GCValue video);
+bool media_element_ended(GCValue video);
+GCValue media_element_buffered(JSContextHandle ctx, GCValue video);
+void media_element_play(GCValue video);
+void media_element_pause(GCValue video);
+void media_element_set_rate(GCValue video, double rate);
+void media_element_video_size(JSContextHandle ctx, GCValue video, int *w, int *h);
+/* Fire queued media events and advance playback (each event-loop turn). */
+int media_tick(JSContextHandle ctx);   /* returns the events fired */
+bool media_tick_pending(void);
+/* The frame a video element shows now (for painting). */
+bool media_video_frame_for_node(NodeId node, const uint8_t **rgba,
+                                int *w, int *h, uint64_t *frame_id);
 extern const JSCFunctionListEntry js_media_source_proto_funcs[];
 extern const size_t js_media_source_proto_funcs_count;
 extern const JSCFunctionListEntry js_source_buffer_proto_funcs[];

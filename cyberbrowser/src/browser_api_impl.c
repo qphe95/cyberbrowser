@@ -4022,6 +4022,16 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     GCValue media_source_ctor = JS_NewCFunction2(ctx, js_media_source_constructor, "MediaSource",
         0, JS_CFUNC_constructor, 0);
     JS_SetConstructor(ctx, media_source_ctor, media_source_proto);
+    /* MediaSource and SourceBuffer are EventTargets (players listen for
+     * sourceopen, updateend, ...). */
+    {
+        GCValue et_ctor = JS_GetPropertyStr(ctx, global, "EventTarget");
+        GCValue et_proto = JS_IsObject(et_ctor) ? JS_GetPropertyStr(ctx, et_ctor, "prototype") : JS_UNDEFINED;
+        if (JS_IsObject(et_proto)) {
+            JS_SetPrototype(ctx, source_buffer_proto, et_proto);
+            JS_SetPrototype(ctx, media_source_proto, et_proto);
+        }
+    }
     // Add isTypeSupported static method
     GCValue is_type_supported = JS_NewCFunction(ctx, js_media_source_is_type_supported, "isTypeSupported", 1);
     JS_SetPropertyStr(ctx, media_source_ctor, "isTypeSupported", is_type_supported);
@@ -4464,6 +4474,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         "      resp._text = nativeResp.__body_text;\n"
         "      if (nativeResp.__body_json !== undefined) resp._json = nativeResp.__body_json;\n"
         "      resp._native = nativeResp;\n"
+        "      resp.body = nativeResp.body || null;\n"
         "      return resp;\n"
         "    });\n"
         "  };\n"

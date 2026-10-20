@@ -67,7 +67,7 @@ set(BE_SOURCES
     src/browser/shadow_dom_api.c
     src/browser/misc_api.c
     src/browser/media_source_api.c
-    src/browser/minimp4_impl.c
+    src/media/media_buffer.c
     src/browser/url_api.c
     src/browser/fetch_api.c
     src/browser/timer_api.c
@@ -175,7 +175,6 @@ target_include_directories(cyberbrowser_lib
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/src/quickjs
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/minimp4
         ${CMAKE_CURRENT_SOURCE_DIR}/src/stb
         ${CMAKE_CURRENT_SOURCE_DIR}/src/nanosvg
         ${CMAKE_CURRENT_SOURCE_DIR}/src/mbedtls/include
@@ -318,6 +317,29 @@ target_link_libraries(cyberbrowser_lib
         turbojpeg_static
         webpdecoder
 )
+
+# ffmpeg (video demux + decode): the minimal static LGPL build made by
+# tools/build_ffmpeg.sh.  Without it <video> plays nothing (media segments
+# are not parsed, so nothing is ever buffered).
+set(CYBER_FFMPEG_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ffmpeg/install"
+    CACHE PATH "Install prefix of the static ffmpeg build")
+if(EXISTS "${CYBER_FFMPEG_DIR}/lib/libavcodec.a")
+    message(STATUS "ffmpeg: ${CYBER_FFMPEG_DIR}")
+    target_include_directories(cyberbrowser_lib PRIVATE "${CYBER_FFMPEG_DIR}/include")
+    target_compile_definitions(cyberbrowser_lib PRIVATE CYBER_HAVE_FFMPEG)
+    target_link_libraries(cyberbrowser_lib PUBLIC
+        "${CYBER_FFMPEG_DIR}/lib/libavformat.a"
+        "${CYBER_FFMPEG_DIR}/lib/libavcodec.a"
+        "${CYBER_FFMPEG_DIR}/lib/libswscale.a"
+        "${CYBER_FFMPEG_DIR}/lib/libswresample.a"
+        "${CYBER_FFMPEG_DIR}/lib/libavutil.a")
+    if(BE_PLATFORM_WINDOWS)
+        target_link_libraries(cyberbrowser_lib PUBLIC bcrypt ole32 user32)
+    endif()
+    target_link_libraries(cyberbrowser_lib PUBLIC atomic)
+else()
+    message(STATUS "ffmpeg: not found (run tools/build_ffmpeg.sh); video decoding disabled")
+endif()
 
 if(NOT BE_PLATFORM_WINDOWS)
     target_link_libraries(cyberbrowser_lib PUBLIC m)

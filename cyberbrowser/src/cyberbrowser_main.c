@@ -921,7 +921,7 @@ int main(int argc, char *argv[]) {
              * run before exit (set CYBER_PROBE_NO_PUMP=1 to skip). */
             if (!cyber_getenv("CYBER_PROBE_NO_PUMP")) {
                 for (int pi = 0; pi < 50; pi++) {
-                    if (!pump_timers_and_jobs(g_ctx)) break;
+                    if (!pump_timers_and_jobs(g_ctx) && js_quickjs_network_pending() == 0) break;
                 }
             }
             free(pbuf);

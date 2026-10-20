@@ -490,6 +490,8 @@ int timer_process_due(JSContextHandle ctx) {
     unsigned long long now = platform_get_time_ms();
     /* Finished network requests settle their fetch() promises first. */
     int processed = js_quickjs_net_poll(ctx);
+    /* Media tasks (MSE update events, playback events) too. */
+    processed += media_tick(ctx);
     if (processed) timer_microtask_checkpoint(ctx);
     
     // Process up to 10 timers per call to avoid blocking too long

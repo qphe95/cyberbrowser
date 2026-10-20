@@ -18,6 +18,7 @@ Thumbs.db
 cyberbrowser/build/
 cyberbrowser/build-mingw/
 cyberbrowser/build-mingw2/
+cyberbrowser/third_party/ffmpeg/
 cyberbrowser/build-mingw-asan/
 cyberbrowser/build-msvc/
 cyberbrowser/build-release/

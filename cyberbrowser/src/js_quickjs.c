@@ -43,6 +43,7 @@ size_t js_stack_budget(void) {
 #include "session_state.h"
 #include "cyber_profile.h"
 #include "url_utils.h"
+#include "media/media_buffer.h"
 
 // Forward declarations from dom_api.c
 void dom_node_set_owner_document(JSContextHandle ctx, GCValue node, GCValue doc);
@@ -684,7 +685,9 @@ GCValue js_video_constructor(JSContextHandle ctx, GCValue new_target, int argc, 
 static GCValue js_video_load(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     HTMLVideoElementHandle vid = JS_GetOpaqueHandle2(ctx, this_val, js_video_class_id);
     if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
-    
+    /* A MediaSource drives its own load (sourceopen, loadedmetadata, ...). */
+    if (media_element_active(this_val)) return JS_UNDEFINED;
+
     SAFE_SET(vid, HTMLVideoElementHandle, network_state, 2); // NETWORK_LOADING
     SAFE_SET(vid, HTMLVideoElementHandle, ready_state, 1);   // HAVE_METADATA
     
@@ -704,7 +707,11 @@ static GCValue js_video_load(JSContextHandle ctx, GCValue this_val, int argc, GC
 static GCValue js_video_play(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     HTMLVideoElementHandle vid = JS_GetOpaqueHandle2(ctx, this_val, js_video_class_id);
     if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
-    
+    if (media_element_active(this_val)) {
+        media_element_play(this_val);
+        return js_create_empty_resolved_promise(ctx);
+    }
+
     SAFE_SET(vid, HTMLVideoElementHandle, paused, false);
     SAFE_SET(vid, HTMLVideoElementHandle, ready_state, 4); // HAVE_ENOUGH_DATA
     
@@ -727,6 +734,7 @@ static GCValue js_video_play(JSContextHandle ctx, GCValue this_val, int argc, GC
 static GCValue js_video_pause(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     HTMLVideoElementHandle vid = JS_GetOpaqueHandle2(ctx, this_val, js_video_class_id);
     if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
+    if (media_element_active(this_val)) media_element_pause(this_val);
     SAFE_SET(vid, HTMLVideoElementHandle, paused, true);
     return JS_UNDEFINED;
 }
@@ -748,17 +756,20 @@ static GCValue js_video_set_src(JSContextHandle ctx, GCValue this_val, GCValue v
                 GCValue obj = JS_GetPropertyStr(ctx, registry, src);
                 if (!JS_IsUndefined(obj) && !JS_IsNull(obj)) {
                     JS_SetPropertyStr(ctx, this_val, "__mediaSource", obj);
-                    // If it's a MediaSource, transition to open if needed
+                    /* A MediaSource attaches: it opens and the player runs. */
                     MediaSourceDataHandle ms = JS_GetOpaqueHandle(obj, js_media_source_class_id);
                     if (!SAFE_IS_NULL(ms)) {
-                        SAFE_SET(ms, MediaSourceDataHandle, ready_state, 1);
                         JS_SetPropertyStr(ctx, this_val, "__blobUrl", JS_NewString(ctx, src));
+                        media_element_attach(ctx, this_val, obj);
+                        return JS_UNDEFINED;
                     }
                 }
             }
         }
+        media_element_detach(ctx, this_val);
     } else {
         SAFE_SET_STR(vid, HTMLVideoElementHandle, src, "");
+        media_element_detach(ctx, this_val);
     }
     return JS_UNDEFINED;
 }
@@ -772,6 +783,7 @@ static GCValue js_video_get_src(JSContextHandle ctx, GCValue this_val) {
 static GCValue js_video_get_current_time(JSContextHandle ctx, GCValue this_val) {
     HTMLVideoElementHandle vid = JS_GetOpaqueHandle2(ctx, this_val, js_video_class_id);
     if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
+    if (media_element_active(this_val)) return JS_NewFloat64(ctx, media_element_current_time(this_val));
     return JS_NewFloat64(ctx, SAFE_GET_OR(vid, HTMLVideoElementHandle, current_time, 0.0));
 }
 
@@ -780,6 +792,7 @@ static GCValue js_video_set_current_time(JSContextHandle ctx, GCValue this_val, 
     if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
     double time;
     JS_ToFloat64(ctx, &time, val);
+    if (media_element_active(this_val)) media_element_seek(this_val, time);
     SAFE_SET(vid, HTMLVideoElementHandle, current_time, time);
     return JS_UNDEFINED;
 }
@@ -787,19 +800,34 @@ static GCValue js_video_set_current_time(JSContextHandle ctx, GCValue this_val, 
 static GCValue js_video_get_duration(JSContextHandle ctx, GCValue this_val) {
     HTMLVideoElementHandle vid = JS_GetOpaqueHandle2(ctx, this_val, js_video_class_id);
     if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
+    if (media_element_active(this_val)) return JS_NewFloat64(ctx, media_element_duration(this_val));
     return JS_NewFloat64(ctx, SAFE_GET_OR(vid, HTMLVideoElementHandle, duration, 0.0));
 }
 
 static GCValue js_video_get_paused(JSContextHandle ctx, GCValue this_val) {
     HTMLVideoElementHandle vid = JS_GetOpaqueHandle2(ctx, this_val, js_video_class_id);
     if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
+    if (media_element_active(this_val)) return JS_NewBool(ctx, media_element_paused(this_val));
     return JS_NewBool(ctx, SAFE_GET_OR(vid, HTMLVideoElementHandle, paused, true));
 }
 
 static GCValue js_video_get_ready_state(JSContextHandle ctx, GCValue this_val) {
     HTMLVideoElementHandle vid = JS_GetOpaqueHandle2(ctx, this_val, js_video_class_id);
     if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
+    if (media_element_active(this_val)) return JS_NewInt32(ctx, media_element_ready_state(this_val));
     return JS_NewInt32(ctx, SAFE_GET_OR(vid, HTMLVideoElementHandle, ready_state, 0));
+}
+
+static GCValue js_video_get_video_width(JSContextHandle ctx, GCValue this_val) {
+    int w = 0, h = 0;
+    media_element_video_size(ctx, this_val, &w, &h);
+    return JS_NewInt32(ctx, w);
+}
+
+static GCValue js_video_get_video_height(JSContextHandle ctx, GCValue this_val) {
+    int w = 0, h = 0;
+    media_element_video_size(ctx, this_val, &w, &h);
+    return JS_NewInt32(ctx, h);
 }
 
 static GCValue js_video_get_network_state(JSContextHandle ctx, GCValue this_val) {
@@ -813,15 +841,8 @@ static GCValue js_video_can_play_type(JSContextHandle ctx, GCValue this_val, int
     if (argc < 1) return JS_NewString(ctx, "");
     const char *type = JS_ToCString(ctx, argv[0]);
     if (!type) return JS_NewString(ctx, "");
-    // Support common video/audio formats
-    if (strstr(type, "video/mp4") || strstr(type, "audio/mp4") ||
-        strstr(type, "video/webm") || strstr(type, "audio/webm") ||
-        strstr(type, "video/ogg") || strstr(type, "audio/ogg") ||
-        strstr(type, "application/vnd.apple.mpegurl") || // HLS
-        strstr(type, "application/x-mpegURL")) {
-        return JS_NewString(ctx, "probably");
-    }
-    return JS_NewString(ctx, "");
+    /* What the decoders handle (src/media/media_buffer.c); no HLS. */
+    return JS_NewString(ctx, media_type_supported(type) ? "probably" : "");
 }
 
 static void js_video_dispatch_simple_event(JSContextHandle ctx, GCValue this_val, const char *prop_name) {
@@ -873,12 +894,14 @@ static GCValue js_video_create_track_list(JSContextHandle ctx) {
     GCValue list = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, list, "length", JS_NewInt32(ctx, 0));
     JS_SetPropertyStr(ctx, list, "getTrackById", JS_NewCFunction(ctx, js_video_create_track_list_getTrackById, "getTrackById", 1));
+    js_media_make_event_target(ctx, list);
     return list;
 }
 
 static GCValue js_video_get_buffered(JSContextHandle ctx, GCValue this_val) {
     HTMLVideoElementHandle vid = JS_GetOpaqueHandle2(ctx, this_val, js_video_class_id);
     if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
+    if (media_element_active(this_val)) return media_element_buffered(ctx, this_val);
     double dur = SAFE_GET_OR(vid, HTMLVideoElementHandle, duration, 0.0);
     if (dur > 0 && SAFE_GET_OR(vid, HTMLVideoElementHandle, ready_state, 0) >= 1)
         return js_video_create_time_ranges(ctx, 0.0, dur);
@@ -906,6 +929,7 @@ static GCValue js_video_get_seekable(JSContextHandle ctx, GCValue this_val) {
 static GCValue js_video_get_ended(JSContextHandle ctx, GCValue this_val) {
     HTMLVideoElementHandle vid = JS_GetOpaqueHandle2(ctx, this_val, js_video_class_id);
     if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
+    if (media_element_active(this_val)) return JS_NewBool(ctx, media_element_ended(this_val));
     double dur = SAFE_GET_OR(vid, HTMLVideoElementHandle, duration, 0.0);
     return JS_NewBool(ctx, dur > 0 && SAFE_GET_OR(vid, HTMLVideoElementHandle, current_time, 0.0) >= dur && SAFE_GET_OR(vid, HTMLVideoElementHandle, paused, true));
 }
@@ -968,6 +992,7 @@ static GCValue js_video_set_playback_rate(JSContextHandle ctx, GCValue this_val,
     if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
     double v = 1.0; JS_ToFloat64(ctx, &v, val);
     SAFE_SET(vid, HTMLVideoElementHandle, playback_rate, v);
+    if (media_element_active(this_val)) media_element_set_rate(this_val, v);
     return JS_UNDEFINED;
 }
 
@@ -1077,6 +1102,8 @@ const JSCFunctionListEntry js_video_proto_funcs[] = {
     JS_CGETSET_DEF("readyState", js_video_get_ready_state, NULL),
     JS_CGETSET_DEF("networkState", js_video_get_network_state, NULL),
     JS_CGETSET_DEF("buffered", js_video_get_buffered, NULL),
+    JS_CGETSET_DEF("videoWidth", js_video_get_video_width, NULL),
+    JS_CGETSET_DEF("videoHeight", js_video_get_video_height, NULL),
     JS_CGETSET_DEF("played", js_video_get_played, NULL),
     JS_CGETSET_DEF("seekable", js_video_get_seekable, NULL),
     JS_CGETSET_DEF("ended", js_video_get_ended, NULL),
@@ -1478,9 +1505,39 @@ static GCValue create_http_response_arrayBuffer(JSContextHandle ctx, GCValue thi
     GCValue global = JS_GetGlobalObject(ctx);
     GCValue promise_ctor = JS_GetPropertyStr(ctx, global, "Promise");
     GCValue resolve_fn = JS_GetPropertyStr(ctx, promise_ctor, "resolve");
-    GCValue ab = JS_NewArrayBuffer(ctx, NULL, 0, NULL, NULL, false);
+    /* A copy of the body bytes (binary bodies: media segments, protobuf). */
+    size_t len = 0;
+    const uint8_t *bytes = JS_GetArrayBuffer(ctx, &len, JS_GetPropertyStr(ctx, this_val, "__body_bytes"));
+    GCValue ab = bytes ? JS_NewArrayBufferCopy(ctx, bytes, len)
+                       : JS_NewArrayBuffer(ctx, NULL, 0, NULL, NULL, false);
     GCValue args[1] = { ab };
     return JS_Call(ctx, resolve_fn, promise_ctor, 1, args);
+}
+
+/* response.body: a stream whose reader yields the body as one chunk.  Built
+ * by a small script helper (the engine's ReadableStream is not used). */
+static GCValue create_http_response_body_stream(JSContextHandle ctx, GCValue bytes)
+{
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue make = JS_GetPropertyStr(ctx, global, "__cyber_bodyStream");
+    if (!JS_IsFunction(ctx, make)) {
+        static const char src[] =
+            "(function(ab){var done=false,locked=false;"
+            "var s={get locked(){return locked;},"
+            " cancel:function(){done=true;return Promise.resolve();},"
+            " getReader:function(){locked=true;var r={"
+            "  read:function(){if(done||!ab)return Promise.resolve({value:undefined,done:true});"
+            "   done=true;return Promise.resolve({value:new Uint8Array(ab.slice(0)),done:false});},"
+            "  releaseLock:function(){locked=false;},"
+            "  cancel:function(){done=true;return Promise.resolve();},"
+            "  closed:Promise.resolve()};return r;}};"
+            "return s;})";
+        make = JS_Eval(ctx, src, sizeof(src) - 1, "<body-stream>", JS_EVAL_TYPE_GLOBAL);
+        if (!JS_IsFunction(ctx, make)) return JS_NULL;
+        JS_SetPropertyStr(ctx, global, "__cyber_bodyStream", make);
+    }
+    GCValue r = JS_Call(ctx, make, JS_UNDEFINED, 1, &bytes);
+    return JS_IsException(r) ? JS_NULL : r;
 }
 
 
@@ -1544,6 +1601,9 @@ static GCValue create_http_response(JSContextHandle ctx, const char *url,
     JS_SetPropertyStr(ctx, response, "headers", headers_obj);
 
     if (buf && buf->data) {
+        GCValue bytes = JS_NewArrayBufferCopy(ctx, (const uint8_t *)buf->data, buf->size);
+        JS_SetPropertyStr(ctx, response, "__body_bytes", bytes);
+        JS_SetPropertyStr(ctx, response, "body", create_http_response_body_stream(ctx, bytes));
         JS_SetPropertyStr(ctx, response, "__body_text", JS_NewStringLen(ctx, buf->data, buf->size));
         GCValue json_val = JS_ParseJSON(ctx, buf->data, buf->size, "<fetch-response>");
         if (!JS_IsException(json_val)) {
@@ -1714,18 +1774,43 @@ static void copy_opt(JSContextHandle ctx, int argc, GCValue *argv, const char *p
 }
 
 
-static char* extract_body(JSContextHandle ctx, GCValue body_val)
+/* The bytes of a request body (NUL-terminated copy, length in *out_len):
+ * a string as UTF-8, an ArrayBuffer or a view on one as is, any other
+ * object as JSON. */
+static char* extract_body(JSContextHandle ctx, GCValue body_val, size_t *out_len)
 {
+    *out_len = 0;
     if (JS_IsUndefined(body_val) || JS_IsNull(body_val)) return NULL;
     if (JS_IsString(body_val)) {
-        const char *s = JS_ToCString(ctx, body_val);
+        size_t len = 0;
+        const char *s = JS_ToCStringLen(ctx, &len, body_val);
         if (s) {
-            size_t len = strlen(s);
             char *buf = (char*)malloc(len + 1);
-            if (buf) memcpy(buf, s, len + 1);
+            if (buf) { memcpy(buf, s, len); buf[len] = '\0'; *out_len = len; }
             return buf;
         }
         return NULL;
+    }
+    if (JS_IsObject(body_val)) {
+        size_t size = 0;
+        const uint8_t *bytes = JS_GetArrayBuffer(ctx, &size, body_val);
+        if (!bytes) {
+            GCValue ab = JS_GetPropertyStr(ctx, body_val, "buffer");
+            size_t whole = 0;
+            const uint8_t *base = JS_IsObject(ab) ? JS_GetArrayBuffer(ctx, &whole, ab) : NULL;
+            int64_t off = 0, len = 0;
+            if (base && JS_ToInt64(ctx, &off, JS_GetPropertyStr(ctx, body_val, "byteOffset")) == 0 &&
+                JS_ToInt64(ctx, &len, JS_GetPropertyStr(ctx, body_val, "byteLength")) == 0 &&
+                off >= 0 && len >= 0 && (uint64_t)(off + len) <= whole) {
+                bytes = base + off;
+                size = (size_t)len;
+            }
+        }
+        if (bytes) {
+            char *buf = (char*)malloc(size + 1);
+            if (buf) { memcpy(buf, bytes, size); buf[size] = '\0'; *out_len = size; }
+            return buf;
+        }
     }
     if (JS_IsObject(body_val)) {
         GCValue json_str = JS_JSONStringify(ctx, body_val, JS_UNDEFINED, JS_UNDEFINED);
@@ -1734,7 +1819,7 @@ static char* extract_body(JSContextHandle ctx, GCValue body_val)
             if (s) {
                 size_t len = strlen(s);
                 char *buf = (char*)malloc(len + 1);
-                if (buf) memcpy(buf, s, len + 1);
+                if (buf) { memcpy(buf, s, len + 1); *out_len = len; }
                 return buf;
             }
         }
@@ -1742,7 +1827,7 @@ static char* extract_body(JSContextHandle ctx, GCValue body_val)
         if (s) {
             size_t len = strlen(s);
             char *buf = (char*)malloc(len + 1);
-            if (buf) memcpy(buf, s, len + 1);
+            if (buf) { memcpy(buf, s, len + 1); *out_len = len; }
             return buf;
         }
     }
@@ -2037,15 +2122,13 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
     // Priority 1: init.body
     if (!post_body && argc > 1 && JS_IsObject(argv[1])) {
         GCValue body_prop = JS_GetPropertyStr(ctx, argv[1], "body");
-        post_body = extract_body(ctx, body_prop);
-        if (post_body) post_body_len = strlen(post_body);
+        post_body = extract_body(ctx, body_prop, &post_body_len);
     }
     
     // Priority 2: Request.body
     if (!post_body && argc > 0 && JS_IsObject(argv[0])) {
         GCValue body_prop = JS_GetPropertyStr(ctx, argv[0], "body");
-        post_body = extract_body(ctx, body_prop);
-        if (post_body) post_body_len = strlen(post_body);
+        post_body = extract_body(ctx, body_prop, &post_body_len);
     }
     
     // Resolve blob: URLs locally
