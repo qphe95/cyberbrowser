@@ -748,6 +748,61 @@ TEST(test_dom_fragment_text_and_html_element_basics) {
     return true;
 }
 
+/* IntersectionObserver uses the layout: in-view targets intersect, targets
+ * below the viewport or without a box do not; later layout changes are
+ * reported by the per-frame update, and unchanged targets are not repeated. */
+void intersection_observers_tick(JSContextHandle ctx);
+void platform_sleep_ms(unsigned int ms);
+TEST(test_dom_intersection_observer_geometry) {
+    JSContextHandle ctx = get_shared_test_context();
+    if (!dom_ready(ctx)) { printf("    (skipped - no document)\n"); return true; }
+    ASSERT_EQ(1, js_int(ctx,
+        "globalThis.__iolog=[]; var b=document.body;"
+        "function mk(id, css){ var d=document.createElement('div'); d.id=id; d.style.cssText=css; b.appendChild(d); return d; }"
+        "globalThis.__ioin=mk('ioin','height:50px'); globalThis.__iobelow=mk('iobelow','height:50px;margin-top:50000px');"
+        "globalThis.__iohid=mk('iohid','height:50px;display:none');"
+        "globalThis.__ioo=new IntersectionObserver(function(es){ es.forEach(function(e){ __iolog.push(e.target.id+':'+e.isIntersecting); }); });"
+        "__ioo.observe(__ioin); __ioo.observe(__iobelow); __ioo.observe(__iohid); 1"));
+    JSContextHandle pctx = ctx;
+    while (JS_ExecutePendingJob(JS_GetRuntime(ctx), &pctx) > 0) {}
+    if (js_int(ctx, "__iolog.join(' ')==='ioin:true iobelow:false iohid:false'") != 1) {
+        GCValue v = JS_Eval(ctx, "__iolog.join(' ')", 17, "<t>", JS_EVAL_TYPE_GLOBAL);
+        const char *s = JS_ToCString(ctx, v);
+        printf("    first report: %s\n", s ? s : "?");
+        return false;
+    }
+    ASSERT_EQ(1, js_int(ctx, "__iolog=[]; __iohid.style.display='block'; __iobelow.style.marginTop='0px'; 1"));
+    platform_sleep_ms(120);
+    intersection_observers_tick(ctx);
+    while (JS_ExecutePendingJob(JS_GetRuntime(ctx), &pctx) > 0) {}
+    if (js_int(ctx, "__iolog.sort().join(' ')==='iobelow:true iohid:true'") != 1) {
+        const char *src = "__iolog.join(' ')+' | reg='+(globalThis.__cyber_io_observers||[]).length"
+                          "+' belowTop='+__iobelow.getBoundingClientRect().top+' hid='+__iohid.offsetHeight";
+        GCValue v = JS_Eval(ctx, src, strlen(src), "<t>", JS_EVAL_TYPE_GLOBAL);
+        const char *s = JS_ToCString(ctx, v);
+        printf("    after change: %s\n", s ? s : "?");
+        return false;
+    }
+    /* Nothing changed: nothing reported. */
+    ASSERT_EQ(1, js_int(ctx, "__iolog=[]; 1"));
+    platform_sleep_ms(120);
+    intersection_observers_tick(ctx);
+    ASSERT_EQ(1, js_int(ctx, "__iolog.length===0"));
+    ASSERT_EQ(1, js_int(ctx, "__ioo.disconnect(); __ioin.remove(); __iobelow.remove(); __iohid.remove(); 1"));
+    return true;
+}
+
+/* querySelector without a match is null (a fake element made YouTube's
+ * "is there a continuation trigger?" checks always true). */
+TEST(test_dom_query_selector_no_match_is_null) {
+    JSContextHandle ctx = get_shared_test_context();
+    if (!dom_ready(ctx)) { printf("    (skipped - no document)\n"); return true; }
+    ASSERT_EQ(1, js_int(ctx,
+        "document.querySelector('x-never-there') === null && document.body.querySelector('x-never-there') === null"
+        " && document.querySelectorAll('x-never-there').length === 0"));
+    return true;
+}
+
 void run_dom_tests(void) {
     printf("\n--- Node store DOM Tests ---\n");
     RUN_TEST(test_dom_parse_matches_legacy_fixtures);
@@ -771,4 +826,6 @@ void run_dom_tests(void) {
     RUN_TEST(test_dom_response_clone_keeps_body);
     RUN_TEST(test_dom_video_wrapper_survives_gc);
     RUN_TEST(test_dom_fragment_text_and_html_element_basics);
+    RUN_TEST(test_dom_intersection_observer_geometry);
+    RUN_TEST(test_dom_query_selector_no_match_is_null);
 }

@@ -494,7 +494,9 @@ int timer_process_due(JSContextHandle ctx) {
         execute_timer(ctx, due_id);
         processed++;
     }
-    
+
+    /* A rendering opportunity: intersection observers see layout changes. */
+    intersection_observers_tick(ctx);
     return processed;
 }
 

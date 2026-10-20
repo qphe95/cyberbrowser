@@ -1647,17 +1647,6 @@ GCValue js_element_set_style(JSContextHandle ctx, GCValue this_val, int argc, GC
     return JS_UNDEFINED;
 }
 
-// Element.prototype.querySelector (stub kept for the generic element stub)
-GCValue js_element_querySelector(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)ctx; (void)this_val; (void)argc; (void)argv;
-    return JS_NULL;
-}
-
-GCValue js_element_querySelectorAll(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)this_val; (void)argc; (void)argv;
-    return JS_NewArray(ctx);
-}
-
 // Element.prototype.getElementsByTagName
 GCValue js_element_get_elements_by_tag_name(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1) return JS_NewArray(ctx);
@@ -2016,58 +2005,6 @@ GCValue js_element_remove_attribute_ns(JSContextHandle ctx, GCValue this_val, in
     return js_element_remove_attribute(ctx, this_val, argc - 1, argv + 1);
 }
 
-
-// Helper to create a generic element stub for querySelector fallback
-GCValue create_generic_element_stub(JSContextHandle ctx) {
-    GCValue stub = JS_NewObject(ctx);
-    if (JS_IsException(stub)) return JS_NULL;
-    GCValue style = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, stub, "style", style);
-    JS_SetPropertyStr(ctx, stub, "tagName", JS_NewString(ctx, "DIV"));
-    JS_SetPropertyStr(ctx, stub, "nodeName", JS_NewString(ctx, "DIV"));
-    JS_SetPropertyStr(ctx, stub, "localName", JS_NewString(ctx, "div"));
-    GCValue classList = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, classList, "add", JS_NewCFunction(ctx, js_dummy_function, "add", 1));
-    JS_SetPropertyStr(ctx, classList, "remove", JS_NewCFunction(ctx, js_dummy_function, "remove", 1));
-    JS_SetPropertyStr(ctx, classList, "contains", JS_NewCFunction(ctx, js_dummy_function, "contains", 1));
-    JS_SetPropertyStr(ctx, classList, "toggle", JS_NewCFunction(ctx, js_dummy_function, "toggle", 1));
-    JS_SetPropertyStr(ctx, stub, "classList", classList);
-    GCValue dataset = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, stub, "dataset", dataset);
-    JS_SetPropertyStr(ctx, stub, "children", JS_NewArray(ctx));
-    JS_SetPropertyStr(ctx, stub, "childNodes", JS_NewArray(ctx));
-    JS_SetPropertyStr(ctx, stub, "getAttribute", JS_NewCFunction(ctx, js_element_get_attribute, "getAttribute", 1));
-    JS_SetPropertyStr(ctx, stub, "setAttribute", JS_NewCFunction(ctx, js_element_set_attribute, "setAttribute", 2));
-    JS_SetPropertyStr(ctx, stub, "hasAttribute", JS_NewCFunction(ctx, js_element_has_attribute, "hasAttribute", 1));
-    JS_SetPropertyStr(ctx, stub, "removeAttribute", JS_NewCFunction(ctx, js_dummy_function, "removeAttribute", 1));
-    JS_SetPropertyStr(ctx, stub, "getBoundingClientRect", JS_NewCFunction(ctx, js_dummy_function, "getBoundingClientRect", 0));
-    JS_SetPropertyStr(ctx, stub, "querySelector", JS_NewCFunction(ctx, js_element_querySelector, "querySelector", 1));
-    JS_SetPropertyStr(ctx, stub, "querySelectorAll", JS_NewCFunction(ctx, js_element_querySelectorAll, "querySelectorAll", 1));
-    JS_SetPropertyStr(ctx, stub, "appendChild", JS_NewCFunction(ctx, js_dummy_function, "appendChild", 1));
-    JS_SetPropertyStr(ctx, stub, "removeChild", JS_NewCFunction(ctx, js_dummy_function, "removeChild", 1));
-    JS_SetPropertyStr(ctx, stub, "insertBefore", JS_NewCFunction(ctx, js_dummy_function, "insertBefore", 2));
-    JS_SetPropertyStr(ctx, stub, "addEventListener", JS_NewCFunction(ctx, js_event_target_addEventListener, "addEventListener", 2));
-    JS_SetPropertyStr(ctx, stub, "removeEventListener", JS_NewCFunction(ctx, js_event_target_removeEventListener, "removeEventListener", 2));
-    JS_SetPropertyStr(ctx, stub, "dispatchEvent", JS_NewCFunction(ctx, js_event_target_dispatchEvent, "dispatchEvent", 1));
-    JS_SetPropertyStr(ctx, stub, "focus", JS_NewCFunction(ctx, js_dummy_function, "focus", 0));
-    JS_SetPropertyStr(ctx, stub, "blur", JS_NewCFunction(ctx, js_dummy_function, "blur", 0));
-    JS_SetPropertyStr(ctx, stub, "click", JS_NewCFunction(ctx, js_dummy_function, "click", 0));
-    JS_SetPropertyStr(ctx, stub, "closest", JS_NewCFunction(ctx, js_element_querySelector, "closest", 1));
-    JS_SetPropertyStr(ctx, stub, "matches", JS_NewCFunction(ctx, js_dummy_function, "matches", 1));
-    JS_SetPropertyStr(ctx, stub, "shadowRoot", JS_NULL);
-    JS_SetPropertyStr(ctx, stub, "attachShadow", JS_NewCFunction(ctx, js_element_attach_shadow, "attachShadow", 1));
-    JS_SetPropertyStr(ctx, stub, "parentNode", JS_NULL);
-    JS_SetPropertyStr(ctx, stub, "parentElement", JS_NULL);
-    JS_SetPropertyStr(ctx, stub, "firstChild", JS_NULL);
-    JS_SetPropertyStr(ctx, stub, "lastChild", JS_NULL);
-    JS_SetPropertyStr(ctx, stub, "nextSibling", JS_NULL);
-    JS_SetPropertyStr(ctx, stub, "previousSibling", JS_NULL);
-    JS_SetPropertyStr(ctx, stub, "innerHTML", JS_NewString(ctx, ""));
-    JS_SetPropertyStr(ctx, stub, "outerHTML", JS_NewString(ctx, ""));
-    JS_SetPropertyStr(ctx, stub, "textContent", JS_NewString(ctx, ""));
-    return stub;
-}
-
 // Document.getElementById
 GCValue js_document_getElementById(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1) return JS_NULL;
@@ -2107,13 +2044,10 @@ static GCValue query_all(JSContextHandle ctx, NodeId scope, GCValue sel, bool in
 GCValue js_document_querySelector(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1) return JS_NULL;
     GCValue doc_elem = JS_GetPropertyStr(ctx, this_val, "documentElement");
-    if (JS_IsNull(doc_elem) || JS_IsUndefined(doc_elem)) return create_generic_element_stub(ctx);
-    GCValue result = query_first(ctx, dom_node_of(doc_elem), argv[0], true);
-    if (JS_IsNull(result)) {
-        // Fallback: return a stub so page code that does not null-check works.
-        return create_generic_element_stub(ctx);
-    }
-    return result;
+    if (JS_IsNull(doc_elem) || JS_IsUndefined(doc_elem)) return JS_NULL;
+    /* null when nothing matches.  (This used to return a fake <div>, which
+     * made "is there a continuation trigger?" checks always true.) */
+    return query_first(ctx, dom_node_of(doc_elem), argv[0], true);
 }
 
 // Document.querySelectorAll

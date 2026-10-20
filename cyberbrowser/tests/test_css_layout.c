@@ -543,6 +543,46 @@ TEST(test_layout_percentage_sizes_in_calc) {
     return true;
 }
 
+/* CSS-wide keywords: `height: inherit` from an auto-height parent is auto
+ * (YouTube's horizontal lockup row), not an explicit 0px height; initial
+ * and unset reset to the initial value. */
+TEST(test_layout_css_wide_keywords) {
+    const char *html =
+        "<html><body style=\"margin:0\"><div style=\"width:400px\">"
+        "<div id=\"lockup\" style=\"display:block\">"
+        "<div id=\"row\" style=\"display:flex;flex-direction:row;height:inherit\">"
+        "<div style=\"width:200px;height:113px\"></div><div style=\"flex:1;height:78px\"></div>"
+        "</div></div>"
+        "<div id=\"init\" style=\"height:20px;height:initial\"><div style=\"height:30px\"></div></div>"
+        "<div id=\"unset\" style=\"max-width:50px;max-width:unset\"></div>"
+        "<div id=\"dir\" style=\"display:flex;flex-direction:column\"><div id=\"dirc\" style=\"display:flex;flex-direction:inherit\">"
+        "<div style=\"height:10px\"></div><div style=\"height:10px\"></div></div></div>"
+        "</div></body></html>";
+    HtmlDocument *doc = html_parse(html, strlen(html));
+    ASSERT_TRUE(doc != NULL);
+    LayoutContext ctx = {0};
+    ASSERT_TRUE(css_layout_run(&ctx, doc, NULL, 800.0, 600.0));
+    static const struct { const char *id; double w, h; } want[] = {
+        { "row", 400.0, 113.0 }, { "lockup", 400.0, 113.0 },
+        { "init", 400.0, 30.0 }, { "unset", 400.0, 0.0 },
+        { "dirc", 400.0, 20.0 },   /* column direction inherited: children stack */
+    };
+    for (size_t i = 0; i < sizeof(want) / sizeof(want[0]); i++) {
+        HtmlNode *n = html_document_get_element_by_id(doc, want[i].id);
+        LayoutBox *b = n ? css_layout_box_for_node(&ctx, po_array_index_from_payload(&doc->array, n)) : NULL;
+        if (!b || !near_equal(b->width, want[i].w) || !near_equal(b->height, want[i].h)) {
+            printf("    #%s: %.2fx%.2f, want %.0fx%.0f\n", want[i].id, b ? b->width : -1.0,
+                   b ? b->height : -1.0, want[i].w, want[i].h);
+            css_layout_tree_free(&ctx);
+            html_document_free(doc);
+            return false;
+        }
+    }
+    css_layout_tree_free(&ctx);
+    html_document_free(doc);
+    return true;
+}
+
 static void async_image_cb(const char *url, void *user_data) {
     (void)url;
     (void)user_data;
@@ -594,4 +634,5 @@ void run_css_layout_tests(void) {
     RUN_TEST(test_async_image_load_callback);
     RUN_TEST(test_layout_percentages_and_aspect_ratio);
     RUN_TEST(test_layout_percentage_sizes_in_calc);
+    RUN_TEST(test_layout_css_wide_keywords);
 }

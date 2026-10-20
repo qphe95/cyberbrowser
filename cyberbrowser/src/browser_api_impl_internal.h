@@ -516,6 +516,8 @@ extern const size_t js_xhr_proto_funcs_count;
 extern const size_t js_video_proto_funcs_count;
 void timer_api_reset(void);
 int timer_process_due(JSContextHandle ctx);
+/* IntersectionObserver per-frame re-evaluation (misc_api.c). */
+void intersection_observers_tick(JSContextHandle ctx);
 /* Run every queued promise job (HTML microtask checkpoint). */
 void timer_microtask_checkpoint(JSContextHandle ctx);
 int timer_has_pending(void);

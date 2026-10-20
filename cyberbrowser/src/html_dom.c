@@ -1117,27 +1117,33 @@ static void append_style_object(JSContextHandle ctx, GCValue style_obj, Serializ
             strcmp(key, "cssText") == 0) continue;
         GCValue val = JS_GetPropertyStr(ctx, style_obj, key);
         if (!JS_IsString(val)) continue;
+        /* Engine paths (cssText, setProperty, inline style) store both the
+         * kebab-case and the camelCase name; script writes go to camelCase
+         * (el.style.marginTop = ...), leaving the kebab twin stale.  So a
+         * kebab-case name with a camelCase twin is skipped: the twin, even
+         * when "" (cleared), is the current value. */
+        if (strchr(key, '-')) {
+            char *camel = css_to_camel_case(key);
+            bool twin = camel && strcmp(camel, key) != 0 &&
+                        JS_IsString(JS_GetPropertyStr(ctx, style_obj, camel));
+            free(camel);
+            if (twin) continue;
+        }
         char val_buf[1024];
         const char *s0 = JS_ToCString(ctx, val);
         if (!s0 || !s0[0]) continue;
         snprintf(val_buf, sizeof(val_buf), "%s", s0);
         char kebab[128];
         size_t kn = 0;
-        bool had_upper = false;
         for (const char *p = key; *p && kn < sizeof(kebab) - 2; p++) {
             if (*p >= 'A' && *p <= 'Z') {
                 kebab[kn++] = '-';
                 kebab[kn++] = (char)tolower((unsigned char)*p);
-                had_upper = true;
             } else {
                 kebab[kn++] = *p;
             }
         }
         kebab[kn] = '\0';
-        if (had_upper) {
-            GCValue kv = JS_GetPropertyStr(ctx, style_obj, kebab);
-            if (JS_IsString(kv)) continue; /* kebab twin exists */
-        }
         serialize_buf_append(style_buf, kebab);
         serialize_buf_append(style_buf, ":");
         serialize_buf_append(style_buf, val_buf);

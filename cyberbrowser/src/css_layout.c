@@ -364,8 +364,8 @@ void css_layout_tree_free(LayoutContext *ctx)
 static bool css_is_inherited(const char *prop)
 {
     static const char *inherited[] = {
-        "color", "font-size", "font-family", "line-height", "text-align",
-        "visibility", "cursor", "letter-spacing", "word-spacing",
+        "color", "font-size", "font-family", "font-weight", "font-style", "line-height",
+        "text-align", "visibility", "cursor", "letter-spacing", "word-spacing",
         "white-space", "direction", NULL
     };
     for (int i = 0; inherited[i]; i++) {
@@ -3102,6 +3102,95 @@ static void layout_unset_property(LayoutBox *box, const char *prop)
     else if (strcasecmp(prop, "display") == 0) { /* initial: inline */ box->display = CSS_DISPLAY_INLINE; box->inline_level = 0; }
 }
 
+/* CSS-wide keywords (css-cascade §7.3: inherit, initial, unset, revert,
+ * revert-layer), handled before the per-property parsers, which would read
+ * "inherit" as a length (height:inherit became an explicit 0px height).
+ * Returns true when the declaration was a CSS-wide keyword. */
+static bool layout_apply_wide_keyword(LayoutBox *box, const LayoutBox *parent,
+                                      const char *prop, const char *value,
+                                      double viewport_width, const char *base_url)
+{
+    while (*value == ' ' || *value == '\t') value++;
+    bool inherit = strcasecmp(value, "inherit") == 0;
+    bool initial = strcasecmp(value, "initial") == 0;
+    bool unset = strcasecmp(value, "unset") == 0 || strcasecmp(value, "revert") == 0 ||
+                 strcasecmp(value, "revert-layer") == 0;
+    if (!inherit && !initial && !unset) return false;
+    /* font-size's parser handles its keywords (initial = medium). */
+    if (strcasecmp(prop, "font-size") == 0) return false;
+    bool inherited_prop = css_is_inherited(prop);
+
+    /* Inherited properties: inheritance fills the value in (initial is
+     * approximated the same way). */
+    if (inherited_prop) {
+        layout_unset_property(box, prop);
+        return true;
+    }
+
+    /* Non-inherited, inherit: the parent's computed value, for the box
+     * properties pages use it on. */
+    if (inherit && parent) {
+        if (strcasecmp(prop, "height") == 0) {
+            box->height_set = parent->height_set; box->css_height = parent->css_height;
+            box->height_percent = parent->height_percent; box->height_pct_px = parent->height_pct_px;
+            return true;
+        }
+        if (strcasecmp(prop, "width") == 0) {
+            box->width_set = parent->width_set; box->css_width = parent->css_width;
+            box->width_percent = parent->width_percent; box->width_pct_px = parent->width_pct_px;
+            box->width_keyword = parent->width_keyword;
+            return true;
+        }
+        static const struct { const char *name; int which; } mm[] = {
+            { "min-width", 0 }, { "max-width", 1 }, { "min-height", 2 }, { "max-height", 3 }
+        };
+        for (size_t i = 0; i < sizeof(mm) / sizeof(mm[0]); i++) {
+            if (strcasecmp(prop, mm[i].name) != 0) continue;
+            double *dst[4] = { &box->min_width, &box->max_width, &box->min_height, &box->max_height };
+            const double *src[4] = { &parent->min_width, &parent->max_width, &parent->min_height, &parent->max_height };
+            *dst[mm[i].which] = *src[mm[i].which];
+            unsigned char bit = (unsigned char)(1u << mm[i].which);
+            box->minmax_pct_bits = (unsigned char)((box->minmax_pct_bits & ~bit) | (parent->minmax_pct_bits & bit));
+            box->minmax_pct[mm[i].which] = parent->minmax_pct[mm[i].which];
+            box->minmax_base[mm[i].which] = parent->minmax_base[mm[i].which];
+            return true;
+        }
+        if (strcasecmp(prop, "flex-direction") == 0) { box->flex_direction = parent->flex_direction; return true; }
+        if (strcasecmp(prop, "box-sizing") == 0) { box->box_sizing = parent->box_sizing; return true; }
+        if (strcasecmp(prop, "overflow") == 0) { box->overflow = parent->overflow; return true; }
+    }
+
+    /* initial / unset (and inherit we cannot model): the initial value. */
+    static const struct { const char *prop, *value; } initial_values[] = {
+        { "width", "auto" }, { "height", "auto" },
+        { "min-width", "auto" }, { "min-height", "auto" }, { "max-width", "none" }, { "max-height", "none" },
+        { "margin", "0" }, { "margin-top", "0" }, { "margin-right", "0" }, { "margin-bottom", "0" }, { "margin-left", "0" },
+        { "padding", "0" }, { "padding-top", "0" }, { "padding-right", "0" }, { "padding-bottom", "0" }, { "padding-left", "0" },
+        { "top", "auto" }, { "right", "auto" }, { "bottom", "auto" }, { "left", "auto" },
+        { "position", "static" }, { "float", "none" }, { "clear", "none" },
+        { "flex-direction", "row" }, { "flex-wrap", "nowrap" }, { "flex-grow", "0" }, { "flex-shrink", "1" },
+        { "flex-basis", "auto" }, { "flex", "0 1 auto" }, { "box-sizing", "content-box" },
+        { "overflow", "visible" }, { "overflow-x", "visible" }, { "overflow-y", "visible" },
+        { "aspect-ratio", "auto" }, { "opacity", "1" }, { "background-color", "transparent" },
+        { "z-index", "auto" }, { "order", "0" }, { "gap", "0" }, { "row-gap", "0" }, { "column-gap", "0" },
+    };
+    if (strcasecmp(prop, "display") == 0) {
+        box->display = CSS_DISPLAY_INLINE;
+        box->inline_level = 1;
+        return true;
+    }
+    for (size_t i = 0; i < sizeof(initial_values) / sizeof(initial_values[0]); i++) {
+        if (strcasecmp(prop, initial_values[i].prop) != 0) continue;
+        CssDeclaration d = { 0 };
+        d.property = (char *)initial_values[i].prop;
+        d.value = (char *)initial_values[i].value;
+        layout_apply_declaration(box, &d, viewport_width, viewport_width, base_url);
+        return true;
+    }
+    /* Not modelled: ignore the declaration rather than parse the keyword. */
+    return true;
+}
+
 static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
 {
     LayoutContext *ctx = P->ctx;
@@ -3241,7 +3330,9 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
             CssDeclaration decl = *applied[d].decl;
             decl.value = resolved ? resolved : applied[d].decl->value;
             if (t_var_failed) layout_unset_property(box, decl.property);
-            else layout_apply_declaration(box, &decl, ctx->viewport_width, ctx->viewport_width,
+            else if (!layout_apply_wide_keyword(box, parent, decl.property, decl.value,
+                                                ctx->viewport_width, ctx->base_url))
+                layout_apply_declaration(box, &decl, ctx->viewport_width, ctx->viewport_width,
                                           ctx->base_url);
             free(resolved);
         }
@@ -3255,7 +3346,9 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
                 CssDeclaration decl = inl[b].decls[i];
                 decl.value = resolved ? resolved : inl[b].decls[i].value;
                 if (t_var_failed) layout_unset_property(box, decl.property);
-                else layout_apply_declaration(box, &decl, ctx->viewport_width, ctx->viewport_width,
+                else if (!layout_apply_wide_keyword(box, parent, decl.property, decl.value,
+                                                    ctx->viewport_width, ctx->base_url))
+                    layout_apply_declaration(box, &decl, ctx->viewport_width, ctx->viewport_width,
                                               ctx->base_url);
                 free(resolved);
             }

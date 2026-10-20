@@ -3017,16 +3017,30 @@ GCValue js_intersection_observer_constructor(JSContextHandle ctx, GCValue new_ta
             SAFE_SET_STR(io, IntersectionObserverDataHandle, rootMargin, margin);
         }
 
-        GCValue threshold_val = JS_GetPropertyStr(ctx, argv[1], "threshold");
-        double threshold;
-        if (!JS_IsException(threshold_val) && !JS_ToFloat64(ctx, &threshold, threshold_val)) {
-            SAFE_SET(io, IntersectionObserverDataHandle, threshold, threshold);
-        }
-
     }
-    
+
     GCValue obj = JS_NewObjectClass(ctx, js_intersection_observer_class_id);
     JS_SetOpaqueHandle(obj, io);
+
+    /* thresholds: a number or a list, sorted (default [0]). */
+    static const char *k_thresholds =
+        "(function(o, t){ var l = t === undefined ? [0] : (Array.isArray(t) ? t.slice() : [t]);"
+        "  l = l.map(Number).filter(function(x){ return x >= 0 && x <= 1; }).sort(function(a, b){ return a - b; });"
+        "  if (!l.length) l = [0];"
+        "  Object.defineProperty(o, '__io_thresholds', {value: l, writable: true});"
+        "  Object.defineProperty(o, 'thresholds', {value: Object.freeze(l.slice()), enumerable: true}); })";
+    GCValue fn = JS_Eval(ctx, k_thresholds, strlen(k_thresholds), "<io>", JS_EVAL_TYPE_GLOBAL);
+    GCValue targs[2] = { obj, argc > 1 && JS_IsObject(argv[1]) ? JS_GetPropertyStr(ctx, argv[1], "threshold") : JS_UNDEFINED };
+    if (JS_IsFunction(ctx, fn)) {
+        GCValue r = JS_Call(ctx, fn, JS_UNDEFINED, 2, targs);
+        if (JS_IsException(r)) return r;
+    }
+    GCValue root = SAFE_GET_OR(io, IntersectionObserverDataHandle, root, JS_NULL);
+    JS_SetPropertyStr(ctx, obj, "root", JS_IsObject(root) ? root : JS_NULL);
+    char margin[32] = "";
+    IntersectionObserverData *iod = (IntersectionObserverData *)gc_deref(io);
+    if (iod) snprintf(margin, sizeof(margin), "%s", iod->rootMargin);
+    JS_SetPropertyStr(ctx, obj, "rootMargin", JS_NewString(ctx, margin[0] ? margin : "0px 0px 0px 0px"));
     return obj;
 }
 
@@ -3039,43 +3053,176 @@ static GCValue js_intersection_observer_targets(JSContextHandle ctx, GCValue obs
     return targets;
 }
 
-static GCValue js_intersection_observer_make_entry(JSContextHandle ctx, GCValue target) {
-    GCValue rect = js_element_getBoundingClientRect(ctx, target, 0, NULL);
+/* A DOMRect object for (x, y, w, h). */
+static GCValue io_rect(JSContextHandle ctx, double x, double y, double w, double h) {
+    DOMRectDataHandle rect = dom_rect_create();
+    if (SAFE_IS_NULL(rect)) return JS_NULL;
+    SAFE_SET(rect, DOMRectDataHandle, x, x);
+    SAFE_SET(rect, DOMRectDataHandle, y, y);
+    SAFE_SET(rect, DOMRectDataHandle, width, w);
+    SAFE_SET(rect, DOMRectDataHandle, height, h);
+    dom_rect_compute_bounds(rect);
+    GCValue obj = JS_NewObjectClass(ctx, js_dom_rect_class_id);
+    JS_SetOpaqueHandle(obj, rect);
+    return obj;
+}
+
+/* rootMargin ("10px 20% ..." 1-4 values, px or % of the root size) applied
+ * to the root rect: out[0..3] = top, right, bottom, left growth. */
+static void io_root_margin(const char *m, double rw, double rh, double out[4]) {
+    double v[4] = {0, 0, 0, 0};
+    int n = 0;
+    const char *p = m;
+    while (p && *p && n < 4) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        char *end = NULL;
+        double d = strtod(p, &end);
+        if (end == p) break;
+        bool pct = *end == '%';
+        while (*end && *end != ' ' && *end != '\t') end++;
+        /* top/bottom % of height, left/right % of width (sides 0..3). */
+        v[n] = pct ? d / 100.0 * ((n % 2 == 0) ? rh : rw) : d;
+        n++;
+        p = end;
+    }
+    if (n == 1) { v[1] = v[2] = v[3] = v[0]; }
+    else if (n == 2) { v[2] = v[0]; v[3] = v[1]; }
+    else if (n == 3) { v[3] = v[1]; }
+    for (int i = 0; i < 4; i++) out[i] = v[i];
+}
+
+/* Entry for `target` against `observer`'s root, and the threshold state it
+ * is in (-1: not intersecting; else 1 + the number of thresholds at or below
+ * the ratio).  Targets without a layout box never intersect. */
+static GCValue io_compute(JSContextHandle ctx, GCValue observer, GCValue target, int *state) {
+    IntersectionObserverDataHandle io = JS_GetOpaqueHandle2(ctx, observer, js_intersection_observer_class_id);
+    LayoutQueryBox tb;
+    bool has_box = layout_query_element_box(ctx, target, &tb);
+
+    double rx = 0, ry = 0, rw = 0, rh = 0;
+    GCValue root = SAFE_IS_NULL(io) ? JS_NULL : SAFE_GET_OR(io, IntersectionObserverDataHandle, root, JS_NULL);
+    bool root_ok = true;
+    if (JS_IsObject(root) && dom_node_of(root) && dom_kind(dom_node_of(root)) == DOM_K_ELEMENT) {
+        LayoutQueryBox rb;
+        root_ok = layout_query_element_box(ctx, root, &rb);
+        rx = rb.x; ry = rb.y; rw = rb.width; rh = rb.height;
+    } else {
+        GCValue global = JS_GetGlobalObject(ctx);
+        JS_ToFloat64(ctx, &rw, JS_GetPropertyStr(ctx, global, "innerWidth"));
+        JS_ToFloat64(ctx, &rh, JS_GetPropertyStr(ctx, global, "innerHeight"));
+    }
+    char margin[32] = "";
+    IntersectionObserverData *iod = SAFE_IS_NULL(io) ? NULL : (IntersectionObserverData *)gc_deref(io);
+    if (iod) snprintf(margin, sizeof(margin), "%s", iod->rootMargin);
+    double m[4];
+    io_root_margin(margin, rw, rh, m);
+    double l = rx - m[3], t = ry - m[0], r = rx + rw + m[1], b = ry + rh + m[2];
+
+    double ix0 = tb.x > l ? tb.x : l, iy0 = tb.y > t ? tb.y : t;
+    double ix1 = tb.x + tb.width < r ? tb.x + tb.width : r;
+    double iy1 = tb.y + tb.height < b ? tb.y + tb.height : b;
+    /* Edge-adjacent intersections count (zero-area targets inside the root). */
+    bool hit = has_box && root_ok && ix1 >= ix0 && iy1 >= iy0;
+    double area = tb.width * tb.height;
+    double iw = hit ? ix1 - ix0 : 0.0, ih = hit ? iy1 - iy0 : 0.0;
+    double ratio = !hit ? 0.0 : (area > 0.0 ? (iw * ih) / area : 1.0);
+
+    int st = -1;
+    if (hit) {
+        st = 1;
+        GCValue th = JS_GetPropertyStr(ctx, observer, "__io_thresholds");
+        uint32_t n = 0;
+        JS_ToUint32(ctx, &n, JS_GetPropertyStr(ctx, th, "length"));
+        for (uint32_t i = 0; i < n; i++) {
+            double tv = 0.0;
+            JS_ToFloat64(ctx, &tv, JS_GetPropertyUint32(ctx, th, i));
+            if (ratio >= tv && !(tv > 0.0 && ratio == 0.0)) st++;
+        }
+    }
+    *state = st;
+
     GCValue entry = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, entry, "target", target);
-    JS_SetPropertyStr(ctx, entry, "isIntersecting", JS_TRUE);
-    JS_SetPropertyStr(ctx, entry, "intersectionRatio", JS_NewFloat64(ctx, 1.0));
-    JS_SetPropertyStr(ctx, entry, "boundingClientRect", rect);
-    JS_SetPropertyStr(ctx, entry, "intersectionRect", rect);
-    JS_SetPropertyStr(ctx, entry, "rootBounds", JS_NULL);
-    JS_SetPropertyStr(ctx, entry, "time", JS_NewFloat64(ctx, 0.0));
+    JS_SetPropertyStr(ctx, entry, "isIntersecting", JS_NewBool(ctx, hit));
+    JS_SetPropertyStr(ctx, entry, "intersectionRatio", JS_NewFloat64(ctx, ratio));
+    JS_SetPropertyStr(ctx, entry, "boundingClientRect", io_rect(ctx, tb.x, tb.y, tb.width, tb.height));
+    JS_SetPropertyStr(ctx, entry, "intersectionRect", io_rect(ctx, hit ? ix0 : 0, hit ? iy0 : 0, iw, ih));
+    JS_SetPropertyStr(ctx, entry, "rootBounds", io_rect(ctx, l, t, r - l, b - t));
+    JS_SetPropertyStr(ctx, entry, "time", JS_NewFloat64(ctx, (double)platform_get_time_ms()));
     return entry;
+}
+
+/* Deliver entries for the targets whose threshold state changed since the
+ * last delivery (every target once after observe()). */
+static void io_update(JSContextHandle ctx, GCValue observer) {
+    IntersectionObserverDataHandle io = JS_GetOpaqueHandle2(ctx, observer, js_intersection_observer_class_id);
+    if (SAFE_IS_NULL(io)) return;
+    GCValue cb = SAFE_GET_OR(io, IntersectionObserverDataHandle, callback, JS_NULL);
+    if (!JS_IsFunction(ctx, cb)) return;
+    GCValue targets = js_intersection_observer_targets(ctx, observer);
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, JS_GetPropertyStr(ctx, targets, "length"));
+    if (!len) return;
+    GCValue states = JS_GetPropertyStr(ctx, observer, "__io_state");
+    if (!JS_IsArray(ctx, states)) {
+        states = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, observer, "__io_state", states);
+    }
+    GCValue entries = JS_NewArray(ctx);
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < len; i++) {
+        GCValue target = JS_GetPropertyUint32(ctx, targets, i);
+        int st = -1;
+        GCValue entry = io_compute(ctx, observer, target, &st);
+        GCValue prev = JS_GetPropertyUint32(ctx, states, i);
+        int32_t pst = -2;   /* never reported */
+        if (JS_IsNumber(prev)) JS_ToInt32(ctx, &pst, prev);
+        if (pst == st) continue;
+        JS_SetPropertyUint32(ctx, states, i, JS_NewInt32(ctx, st));
+        JS_SetPropertyUint32(ctx, entries, n++, entry);
+    }
+    if (!n) return;
+    GCValue args[2] = { entries, observer };
+    GCValue r = JS_Call(ctx, cb, JS_UNDEFINED, 2, args);
+    if (JS_IsException(r)) JS_GetException(ctx);
 }
 
 static GCValue js_intersection_observer_job(JSContextHandle ctx, int argc, GCValue *argv) {
     if (argc < 1) return JS_UNDEFINED;
     GCValue observer = argv[0];
     JS_SetPropertyStr(ctx, observer, "__io_scheduled", JS_FALSE);
-
-    IntersectionObserverDataHandle io = JS_GetOpaqueHandle2(ctx, observer, js_intersection_observer_class_id);
-    if (SAFE_IS_NULL(io)) return JS_UNDEFINED;
-    GCValue cb = SAFE_GET_OR(io, IntersectionObserverDataHandle, callback, JS_NULL);
-    if (!JS_IsFunction(ctx, cb)) return JS_UNDEFINED;
-
-    GCValue targets = js_intersection_observer_targets(ctx, observer);
-    if (!JS_IsArray(ctx, targets)) return JS_UNDEFINED;
-    GCValue len_val = JS_GetPropertyStr(ctx, targets, "length");
-    uint32_t len = 0;
-    JS_ToUint32(ctx, &len, len_val);
-
-    GCValue entries = JS_NewArray(ctx);
-    for (uint32_t i = 0; i < len; i++) {
-        GCValue target = JS_GetPropertyUint32(ctx, targets, i);
-        JS_SetPropertyUint32(ctx, entries, i, js_intersection_observer_make_entry(ctx, target));
-    }
-    GCValue args[2] = { entries, observer };
-    JS_Call(ctx, cb, JS_UNDEFINED, 2, args);
+    io_update(ctx, observer);
     return JS_UNDEFINED;
+}
+
+/* Observers with targets, for the per-frame update. */
+static GCValue io_registry(JSContextHandle ctx) {
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue reg = JS_GetPropertyStr(ctx, global, "__cyber_io_observers");
+    if (!JS_IsArray(ctx, reg)) {
+        reg = JS_NewArray(ctx);
+        JSAtom a = JS_NewAtom(ctx, "__cyber_io_observers");
+        JS_DefinePropertyValue(ctx, global, a, reg, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+        JS_FreeAtom(ctx, a);
+    }
+    return reg;
+}
+
+/* Called from the event loop: re-evaluate every observer (at most every
+ * 100 ms), as a browser does each rendering opportunity, so targets that
+ * become visible (or stop being visible) after a layout change are told. */
+void intersection_observers_tick(JSContextHandle ctx) {
+    static unsigned long long last;
+    unsigned long long now = platform_get_time_ms();
+    if (now - last < 100) return;
+    last = now;
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue reg = JS_GetPropertyStr(ctx, global, "__cyber_io_observers");
+    if (!JS_IsArray(ctx, reg)) return;
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, JS_GetPropertyStr(ctx, reg, "length"));
+    for (uint32_t i = 0; i < len; i++) io_update(ctx, JS_GetPropertyUint32(ctx, reg, i));
 }
 
 static void js_intersection_observer_schedule(JSContextHandle ctx, GCValue observer) {
@@ -3102,8 +3249,25 @@ GCValue js_intersection_observer_observe(JSContextHandle ctx, GCValue this_val, 
         JS_ToUint32(ctx, &len, len_val);
         JS_SetPropertyUint32(ctx, targets, len, target);
     }
+    GCValue reg = io_registry(ctx);
+    if (!js_observer_targets_contains(ctx, reg, this_val)) {
+        uint32_t rl = 0;
+        JS_ToUint32(ctx, &rl, JS_GetPropertyStr(ctx, reg, "length"));
+        JS_SetPropertyUint32(ctx, reg, rl, this_val);
+    }
     js_intersection_observer_schedule(ctx, this_val);
     return JS_UNDEFINED;
+}
+
+/* Remove item `i` of a JS array (shift down). */
+static void io_array_remove(JSContextHandle ctx, GCValue arr, uint32_t i) {
+    if (!JS_IsArray(ctx, arr)) return;
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, JS_GetPropertyStr(ctx, arr, "length"));
+    if (i >= len) return;
+    for (uint32_t j = i; j + 1 < len; j++)
+        JS_SetPropertyUint32(ctx, arr, j, JS_GetPropertyUint32(ctx, arr, j + 1));
+    JS_SetPropertyStr(ctx, arr, "length", JS_NewInt32(ctx, (int32_t)(len - 1)));
 }
 
 // IntersectionObserver.prototype.unobserve(target)
@@ -3118,11 +3282,8 @@ GCValue js_intersection_observer_unobserve(JSContextHandle ctx, GCValue this_val
     for (int i = (int)len - 1; i >= 0; i--) {
         GCValue item = JS_GetPropertyUint32(ctx, targets, (uint32_t)i);
         if (JS_StrictEq(ctx, item, target)) {
-            for (uint32_t j = (uint32_t)i; j + 1 < len; j++) {
-                GCValue next = JS_GetPropertyUint32(ctx, targets, j + 1);
-                JS_SetPropertyUint32(ctx, targets, j, next);
-            }
-            JS_SetPropertyStr(ctx, targets, "length", JS_NewInt32(ctx, (int32_t)(len - 1)));
+            io_array_remove(ctx, targets, (uint32_t)i);
+            io_array_remove(ctx, JS_GetPropertyStr(ctx, this_val, "__io_state"), (uint32_t)i);
             break;
         }
     }
@@ -3133,7 +3294,14 @@ GCValue js_intersection_observer_unobserve(JSContextHandle ctx, GCValue this_val
 GCValue js_intersection_observer_disconnect(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     JS_SetPropertyStr(ctx, this_val, "__io_targets", JS_NewArray(ctx));
+    JS_SetPropertyStr(ctx, this_val, "__io_state", JS_NewArray(ctx));
     JS_SetPropertyStr(ctx, this_val, "__io_scheduled", JS_FALSE);
+    GCValue reg = io_registry(ctx);
+    uint32_t rl = 0;
+    JS_ToUint32(ctx, &rl, JS_GetPropertyStr(ctx, reg, "length"));
+    for (uint32_t i = 0; i < rl; i++) {
+        if (JS_StrictEq(ctx, JS_GetPropertyUint32(ctx, reg, i), this_val)) { io_array_remove(ctx, reg, i); break; }
+    }
     return JS_UNDEFINED;
 }
 
