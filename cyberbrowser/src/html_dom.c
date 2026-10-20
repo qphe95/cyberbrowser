@@ -484,7 +484,7 @@ void dom_set_inner_html(JSContextHandle ctx, NodeId target, const char *html, si
     }
     if (!len) return;
     NodeId owner = dom_kind(target) == DOM_K_DOCUMENT ? target : dom_owner(target);
-    NodeId frag = dom_parse_html(html, len, owner);
+    NodeId frag = dom_parse_html_fragment(html, len, owner);
     dom_adopt_template_contents(frag);
     NodeId start = dom_parse_fragment_source(frag);
     if (!start) {

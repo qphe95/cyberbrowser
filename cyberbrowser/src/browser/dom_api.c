@@ -203,6 +203,13 @@ GCValue dom_element_style(JSContextHandle ctx, GCValue el, bool create) {
  * not be mirrored into own properties (they would shadow the accessor, or
  * re-enter it from setAttribute): href of <a>/<area> (HTMLHyperlinkElementUtils). */
 static bool dom_attr_has_accessor(NodeId id, const char *name) {
+    /* Reflected on Element.prototype by html_element_api.c (assigning the
+     * attribute string would run the setter: hidden="" would remove it). */
+    static const char *const reflected[] = {
+        "hidden", "title", "lang", "dir", "draggable", "translate", "inert", NULL
+    };
+    for (int i = 0; reflected[i]; i++)
+        if (strcasecmp(name, reflected[i]) == 0) return true;
     if (strcasecmp(name, "href") == 0 && (dom_tag_is(id, "a") || dom_tag_is(id, "area"))) return true;
     /* src / srcset of <img> (image_api.c): setting them starts a load. */
     return (strcasecmp(name, "src") == 0 || strcasecmp(name, "srcset") == 0) && dom_tag_is(id, "img");
@@ -292,22 +299,24 @@ GCValue dom_create_wrapper(JSContextHandle ctx, NodeId id) {
         dom_element_setup_wrapper(ctx, id, obj);
         return obj;
     case DOM_K_TEXT: {
+        /* Text.prototype is the CharacterData prototype (data, length, ...). */
         obj = JS_NewObjectClass(ctx, js_dom_node_class_id);
-        GCValue proto = global_proto(ctx, "Node");
+        GCValue proto = global_proto(ctx, "Text");
+        if (!JS_IsObject(proto)) proto = global_proto(ctx, "Node");
         if (JS_IsObject(proto)) JS_SetPrototype(ctx, obj, proto);
         dom_bind(ctx, id, obj);
         return obj;
     }
     case DOM_K_COMMENT: {
+        /* data/length/textContent come from the CharacterData prototype, so
+         * they follow the store (own snapshots went stale on change). */
         obj = JS_NewObjectClass(ctx, js_dom_node_class_id);
+        GCValue proto = global_proto(ctx, "Comment");
+        if (!JS_IsObject(proto)) proto = global_proto(ctx, "Node");
+        if (JS_IsObject(proto)) JS_SetPrototype(ctx, obj, proto);
         dom_bind(ctx, id, obj);
-        uint32_t len = 0;
-        const char *t = dom_text(id, &len);
         JS_SetPropertyStr(ctx, obj, "nodeType", JS_NewInt32(ctx, DOM_NODE_TYPE_COMMENT));
         JS_SetPropertyStr(ctx, obj, "nodeName", JS_NewString(ctx, "#comment"));
-        JS_SetPropertyStr(ctx, obj, "data", JS_NewStringLen(ctx, t, len));
-        JS_SetPropertyStr(ctx, obj, "textContent", JS_NewStringLen(ctx, t, len));
-        JS_SetPropertyStr(ctx, obj, "length", JS_NewInt32(ctx, (int)len));
         return obj;
     }
     case DOM_K_FRAGMENT: {

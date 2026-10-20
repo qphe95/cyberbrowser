@@ -543,6 +543,7 @@ typedef struct Builder {
     uint32_t *stack;            /* open elements (slots) */
     uint32_t sp;
     CssAtom id_name;
+    bool keep_top_text;         /* fragment parsing: text outside any element is kept */
 } Builder;
 
 static uint32_t build_element(Builder *b, DomTok *t, uint32_t parent) {
@@ -622,6 +623,7 @@ static bool build_tokens(Builder *b, TokChunk *c, size_t *pi, size_t *detour) {
             break;
         case TK_TEXT:
             if (top) build_text(b, t, top);
+            else if (b->keep_top_text) build_text(b, t, b->frag);
             break;
         default:
             break;
@@ -631,14 +633,15 @@ static bool build_tokens(Builder *b, TokChunk *c, size_t *pi, size_t *detour) {
     return true;
 }
 
-static void parse_into(const char *html, size_t len, uint32_t frag, uint32_t owner) {
+static void parse_into(const char *html, size_t len, uint32_t frag, uint32_t owner, bool fragment_mode) {
     memset(&g_stats, 0, sizeof g_stats);
     double t_all = now_ms();
     TokChunk *chunks = NULL;
     size_t nchunks = 0;
     tokenize_all(html, len, &chunks, &nchunks);
     double t0 = now_ms();
-    Builder b = { html, len, frag, owner, malloc(MAX_NESTING * sizeof(uint32_t)), 0, 0 };
+    Builder b = { html, len, frag, owner, malloc(MAX_NESTING * sizeof(uint32_t)), 0, 0, false };
+    b.keep_top_text = fragment_mode;
     css_atom_reserve(1);
     b.id_name = css_atom_intern("id", 2);
     uint32_t before = g_dom.live;
@@ -676,13 +679,19 @@ static void parse_into(const char *html, size_t len, uint32_t frag, uint32_t own
 
 NodeId dom_parse_html(const char *html, size_t len, NodeId owner_doc) {
     NodeId frag = dom_create_fragment(owner_doc);
-    if (html && len) parse_into(html, len, dom_slot(frag), dom_valid(owner_doc) ? dom_slot(owner_doc) : 0);
+    if (html && len) parse_into(html, len, dom_slot(frag), dom_valid(owner_doc) ? dom_slot(owner_doc) : 0, false);
+    return frag;
+}
+
+NodeId dom_parse_html_fragment(const char *html, size_t len, NodeId owner_doc) {
+    NodeId frag = dom_create_fragment(owner_doc);
+    if (html && len) parse_into(html, len, dom_slot(frag), dom_valid(owner_doc) ? dom_slot(owner_doc) : 0, true);
     return frag;
 }
 
 void dom_parse_html_into(const char *html, size_t len, NodeId parent, NodeId owner_doc) {
     if (!html || !len || !dom_valid(parent)) return;
-    parse_into(html, len, dom_slot(parent), dom_valid(owner_doc) ? dom_slot(owner_doc) : 0);
+    parse_into(html, len, dom_slot(parent), dom_valid(owner_doc) ? dom_slot(owner_doc) : 0, false);
 }
 
 DomParseRoots dom_parse_roots(NodeId fragment) {

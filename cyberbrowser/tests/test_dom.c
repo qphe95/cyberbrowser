@@ -711,6 +711,43 @@ TEST(test_dom_video_wrapper_survives_gc) {
     return true;
 }
 
+/* innerHTML keeps text outside elements and valueless attributes; Text
+ * nodes have data/length; innerText, focus/blur, reflected attributes; a
+ * ResizeObserver reports a target once, then only on size changes. */
+TEST(test_dom_fragment_text_and_html_element_basics) {
+    JSContextHandle ctx = get_shared_test_context();
+    if (!dom_ready(ctx)) { printf("    (skipped - no document)\n"); return true; }
+    ASSERT_EQ(1, js_int(ctx,
+        "(function(){var d=document.createElement('div'); document.body.appendChild(d);"
+        "d.innerHTML='a<b>x</b>b<span hidden>h</span>';"
+        "var k=d.childNodes, ok = k.length===4 && k[0].nodeType===3 && k[0].data==='a' && k[2].data==='b'"
+        "  && k[3].hasAttribute('hidden') && k[3].hidden===true && d.innerHTML==='a<b>x</b>b<span hidden=\"\">h</span>';"
+        "var t=k[0]; t.data='A'; ok = ok && t.length===1 && d.firstChild.textContent==='A';"
+        "var tail=t.splitText(0); ok = ok && tail.data==='A' && t.data==='';"
+        "d.innerHTML='<b>hi</b> there<br>next<div>block</div><span hidden>no</span>';"
+        "ok = ok && d.innerText==='hi there\\nnext\\nblock';"
+        "var i=document.createElement('input'); d.appendChild(i); var ev=[];"
+        "i.addEventListener('focus', function(){ ev.push('f'); }); i.addEventListener('blur', function(){ ev.push('b'); });"
+        "i.focus(); ok = ok && document.activeElement===i; i.blur();"
+        "ok = ok && ev.join('')==='fb' && document.activeElement===document.body;"
+        "d.title='t'; ok = ok && d.getAttribute('title')==='t' && d.tabIndex===-1 && i.tabIndex===0;"
+        "d.remove(); return ok ? 1 : 0;})()"));
+    ASSERT_EQ(1, js_int(ctx,
+        "globalThis.__ro=0; var e=document.createElement('div'); e.style.width='10px'; e.style.height='10px';"
+        "document.body.appendChild(e); globalThis.__roel=e;"
+        "globalThis.__roo=new ResizeObserver(function(entries){ __ro += entries.length; });"
+        "__roo.observe(e); 1"));
+    JSContextHandle pctx = ctx;
+    while (JS_ExecutePendingJob(JS_GetRuntime(ctx), &pctx) > 0) {}
+    ASSERT_EQ(1, js_int(ctx, "__ro"));
+    /* Observing again with the size unchanged reports nothing new. */
+    ASSERT_EQ(1, js_int(ctx, "var o2=document.createElement('div'); document.body.appendChild(o2); __roo.observe(o2); 1"));
+    while (JS_ExecutePendingJob(JS_GetRuntime(ctx), &pctx) > 0) {}
+    ASSERT_EQ(2, js_int(ctx, "__ro"));
+    ASSERT_EQ(1, js_int(ctx, "__roo.disconnect(); __roel.remove(); 1"));
+    return true;
+}
+
 void run_dom_tests(void) {
     printf("\n--- Node store DOM Tests ---\n");
     RUN_TEST(test_dom_parse_matches_legacy_fixtures);
@@ -733,4 +770,5 @@ void run_dom_tests(void) {
     RUN_TEST(test_dom_layout_metrics_block_boxes);
     RUN_TEST(test_dom_response_clone_keeps_body);
     RUN_TEST(test_dom_video_wrapper_survives_gc);
+    RUN_TEST(test_dom_fragment_text_and_html_element_basics);
 }

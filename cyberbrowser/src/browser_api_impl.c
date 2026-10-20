@@ -12,6 +12,7 @@
 #include "browser_api_impl.h"
 #include "browser/image_api.h"
 #include "browser/layout_api.h"
+#include "browser/html_element_api.h"
 #include "browser_api_impl_types.h"
 #include "browser_api_impl_handle_helpers.h"
 #include "browser_api_impl_internal.h"
@@ -2271,6 +2272,8 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
 
     // Layout metrics (offsetWidth, clientWidth, scrollHeight, ...) from a forced layout
     layout_api_install(ctx, element_proto);
+    // innerText, focus/blur, reflected global attributes, insertAdjacent*, ...
+    html_element_api_install(ctx, element_proto);
 
     // Fullscreen API no-op stubs (document.fullscreenEnabled reports support)
     JS_SetPropertyStr(ctx, element_proto, "requestFullscreen",
@@ -2404,6 +2407,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // Ensure document.createTextNode/createComment instances inherit from the
     // CharacterData prototype as well.
     JS_SetPropertyStr(ctx, global, "__cyber_character_data_proto", character_data_proto);
+    html_character_data_api_install(ctx, character_data_proto);
     
     // Do NOT free the prototypes here!
     // They are still referenced by:

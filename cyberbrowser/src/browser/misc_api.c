@@ -2854,11 +2854,36 @@ static GCValue js_resize_observer_job(JSContextHandle ctx, int argc, GCValue *ar
     uint32_t len = 0;
     JS_ToUint32(ctx, &len, len_val);
 
+    /* Only targets whose size differs from the last one reported to this
+     * observer (every target once after observe()), as the spec's "active
+     * observations"; every observe() used to report all targets again. */
+    GCValue last = JS_GetPropertyStr(ctx, observer, "__ro_last");
+    if (!JS_IsArray(ctx, last)) {
+        last = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, observer, "__ro_last", last);
+    }
     GCValue entries = JS_NewArray(ctx);
+    uint32_t n = 0;
     for (uint32_t i = 0; i < len; i++) {
         GCValue target = JS_GetPropertyUint32(ctx, targets, i);
-        JS_SetPropertyUint32(ctx, entries, i, js_resize_observer_make_entry(ctx, target));
+        GCValue entry = js_resize_observer_make_entry(ctx, target);
+        double w = 0.0, h = 0.0, pw = -1.0, ph = -1.0;
+        GCValue rect = JS_GetPropertyStr(ctx, entry, "contentRect");
+        JS_ToFloat64(ctx, &w, JS_GetPropertyStr(ctx, rect, "width"));
+        JS_ToFloat64(ctx, &h, JS_GetPropertyStr(ctx, rect, "height"));
+        GCValue prev = JS_GetPropertyUint32(ctx, last, i);
+        if (JS_IsArray(ctx, prev)) {
+            JS_ToFloat64(ctx, &pw, JS_GetPropertyUint32(ctx, prev, 0));
+            JS_ToFloat64(ctx, &ph, JS_GetPropertyUint32(ctx, prev, 1));
+        }
+        if (pw == w && ph == h) continue;
+        GCValue sz = JS_NewArray(ctx);
+        JS_SetPropertyUint32(ctx, sz, 0, JS_NewFloat64(ctx, w));
+        JS_SetPropertyUint32(ctx, sz, 1, JS_NewFloat64(ctx, h));
+        JS_SetPropertyUint32(ctx, last, i, sz);
+        JS_SetPropertyUint32(ctx, entries, n++, entry);
     }
+    if (n == 0) return JS_UNDEFINED;
     GCValue args[2] = { entries, observer };
     JS_Call(ctx, cb, JS_UNDEFINED, 2, args);
     return JS_UNDEFINED;
@@ -2901,14 +2926,19 @@ GCValue js_resize_observer_unobserve(JSContextHandle ctx, GCValue this_val, int 
     GCValue len_val = JS_GetPropertyStr(ctx, targets, "length");
     uint32_t len = 0;
     JS_ToUint32(ctx, &len, len_val);
+    /* Last reported sizes, kept parallel to the targets. */
+    GCValue last = JS_GetPropertyStr(ctx, this_val, "__ro_last");
+    bool has_last = JS_IsArray(ctx, last);
     for (int i = (int)len - 1; i >= 0; i--) {
         GCValue item = JS_GetPropertyUint32(ctx, targets, (uint32_t)i);
         if (JS_StrictEq(ctx, item, target)) {
             for (uint32_t j = (uint32_t)i; j + 1 < len; j++) {
                 GCValue next = JS_GetPropertyUint32(ctx, targets, j + 1);
                 JS_SetPropertyUint32(ctx, targets, j, next);
+                if (has_last) JS_SetPropertyUint32(ctx, last, j, JS_GetPropertyUint32(ctx, last, j + 1));
             }
             JS_SetPropertyStr(ctx, targets, "length", JS_NewInt32(ctx, (int32_t)(len - 1)));
+            if (has_last) JS_SetPropertyStr(ctx, last, "length", JS_NewInt32(ctx, (int32_t)(len - 1)));
             break;
         }
     }
@@ -2919,6 +2949,7 @@ GCValue js_resize_observer_unobserve(JSContextHandle ctx, GCValue this_val, int 
 GCValue js_resize_observer_disconnect(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     JS_SetPropertyStr(ctx, this_val, "__ro_targets", JS_NewArray(ctx));
+    JS_SetPropertyStr(ctx, this_val, "__ro_last", JS_NewArray(ctx));
     JS_SetPropertyStr(ctx, this_val, "__ro_scheduled", JS_FALSE);
     return JS_UNDEFINED;
 }

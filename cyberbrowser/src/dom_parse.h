@@ -31,6 +31,11 @@ extern "C" {
  * whose children are the top-level nodes.  Returns the fragment. */
 NodeId dom_parse_html(const char *html, size_t len, NodeId owner_doc);
 
+/* The same for a fragment (innerHTML, outerHTML, insertAdjacentHTML): text
+ * outside any element is kept ("a<b>x</b>b" has three top-level nodes),
+ * where document parsing drops it like the legacy parser. */
+NodeId dom_parse_html_fragment(const char *html, size_t len, NodeId owner_doc);
+
 /* Parse into an existing node: the top-level nodes become `parent`'s last
  * children.  For innerHTML-style fragments the whole input is treated like a
  * document (the legacy behaviour): see dom_parse_fragment_children(). */
