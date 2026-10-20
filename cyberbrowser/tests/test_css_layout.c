@@ -835,6 +835,32 @@ TEST(test_layout_mask_gradient_display_list) {
     return ok;
 }
 
+/* Line-clamp / text-overflow truncation: the cut text wraps to exactly the
+ * allowed lines (or fits the width) and ends with an ellipsis; text that
+ * already fits is left alone. */
+TEST(test_text_truncate_ellipsis) {
+    TextShaper *f = display_list_get_default_font();
+    ASSERT_TRUE(f != NULL);
+    const char *text = "one two three four five six seven eight nine ten eleven twelve";
+    char *t = text_shaper_truncate_lines(f, text, 0, 0, 80, 80, 1.0f, 2);
+    ASSERT_TRUE(t != NULL);
+    size_t n = strlen(t);
+    ASSERT_TRUE(n >= 3 && strcmp(t + n - 3, "\xE2\x80\xA6") == 0);
+    TsWrapResult wr;
+    ASSERT_TRUE(text_shaper_wrap_measure(f, t, 0, 0, 80, 80, 1.0f, 20.0f, 0, 0, 0, &wr));
+    ASSERT_TRUE(wr.lines == 2);
+    free(t);
+    ASSERT_TRUE(text_shaper_truncate_lines(f, "short", 0, 0, 80, 80, 1.0f, 2) == NULL);
+    char *w = text_shaper_truncate_width(f, "Hello wonderful world", 1.0f, 60.0f);
+    ASSERT_TRUE(w != NULL);
+    float ww = 0;
+    text_shaper_measure(f, w, &ww, NULL);
+    ASSERT_TRUE(ww <= 60.01f && strcmp(w + strlen(w) - 3, "\xE2\x80\xA6") == 0);
+    free(w);
+    ASSERT_TRUE(text_shaper_truncate_width(f, "Hi", 1.0f, 60.0f) == NULL);
+    return true;
+}
+
 static uint32_t be32_at(const uint8_t *p)
 {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
@@ -1063,6 +1089,7 @@ void run_css_layout_tests(void) {
     RUN_TEST(test_layout_preserved_newlines_break_lines);
     RUN_TEST(test_layout_nowrap_atomic_inlines);
     RUN_TEST(test_layout_mask_gradient_display_list);
+    RUN_TEST(test_text_truncate_ellipsis);
     RUN_TEST(test_font_registry_system_and_web_fonts);
     RUN_TEST(test_font_variable_instances);
 }

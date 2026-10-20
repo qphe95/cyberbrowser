@@ -676,6 +676,27 @@ static void draw_image(RGB *pixels, int img_width, int img_height,
     }
 }
 
+/* Coverage of a rounded rectangle at (px, py): inside unless in a corner's
+ * quadrant and outside its ellipse (about one pixel of anti-aliasing). */
+static float rrect_alpha(float x, float y, float w, float h, const float *rx, const float *ry,
+                         float px, float py)
+{
+    float lx = px - x, ly = py - y;
+    if (w <= 0.0f || h <= 0.0f || lx < 0.0f || ly < 0.0f || lx > w || ly > h) return 0.0f;
+    int c = -1;
+    float cx = 0, cy = 0;
+    if (lx < rx[0] && ly < ry[0]) { c = 0; cx = rx[0]; cy = ry[0]; }
+    else if (lx > w - rx[1] && ly < ry[1]) { c = 1; cx = w - rx[1]; cy = ry[1]; }
+    else if (lx > w - rx[2] && ly > h - ry[2]) { c = 2; cx = w - rx[2]; cy = h - ry[2]; }
+    else if (lx < rx[3] && ly > h - ry[3]) { c = 3; cx = rx[3]; cy = h - ry[3]; }
+    if (c < 0 || rx[c] <= 0.0f || ry[c] <= 0.0f) return 1.0f;
+    float nx = (lx - cx) / rx[c], ny = (ly - cy) / ry[c];
+    float d = sqrtf(nx * nx + ny * ny);
+    float r = rx[c] < ry[c] ? rx[c] : ry[c];
+    float a = 0.5f - (d - 1.0f) * r;
+    return a < 0.0f ? 0.0f : a > 1.0f ? 1.0f : a;
+}
+
 /* Mask alpha at pixel centre (px, py): a linear gradient along the CSS
  * angle through the box, or an image's alpha (src: w x h x ch, NULL while
  * not decoded = transparent). */
@@ -697,6 +718,19 @@ static float mask_alpha_at(const DisplayMask *m, float px, float py,
             }
         }
         return m->stop_alpha[m->nstops - 1];
+    }
+    if (m->kind == 3)
+        return rrect_alpha(m->x, m->y, m->w, m->h, m->rx, m->ry, px, py);
+    if (m->kind == 4) {
+        /* Border ring: the rounded box minus its inset by the border
+         * widths (inner radii shrink by the adjacent widths). */
+        const float *b = m->border;   /* top, right, bottom, left */
+        float irx[4] = { m->rx[0] - b[3], m->rx[1] - b[1], m->rx[2] - b[1], m->rx[3] - b[3] };
+        float iry[4] = { m->ry[0] - b[0], m->ry[1] - b[0], m->ry[2] - b[2], m->ry[3] - b[2] };
+        for (int k = 0; k < 4; k++) { if (irx[k] < 0.0f) irx[k] = 0.0f; if (iry[k] < 0.0f) iry[k] = 0.0f; }
+        float outer = rrect_alpha(m->x, m->y, m->w, m->h, m->rx, m->ry, px, py);
+        float inner = rrect_alpha(m->x + b[3], m->y + b[0], m->w - b[1] - b[3], m->h - b[0] - b[2], irx, iry, px, py);
+        return outer * (1.0f - inner);
     }
     if (!src || sw <= 0 || sh <= 0 || m->iw <= 0.0f || m->ih <= 0.0f) return 0.0f;
     float u = (px - m->ix) / m->iw, v = (py - m->iy) / m->ih;

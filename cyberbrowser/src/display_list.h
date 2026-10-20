@@ -35,7 +35,8 @@ typedef enum {
  * optionally repeated. */
 typedef struct {
     float x, y, w, h;          /* the masked box (its border box) */
-    int kind;                  /* 1 image, 2 linear gradient */
+    int kind;                  /* 1 image, 2 linear gradient, 3 rounded rectangle,
+                                  4 rounded border ring (3 minus its inset by border[]) */
     int image_handle;
     float ix, iy, iw, ih;
     int repeat;
@@ -43,6 +44,8 @@ typedef struct {
     int nstops;
     float stop_pos[DL_MASK_STOPS];     /* along the gradient line, 0..1 */
     float stop_alpha[DL_MASK_STOPS];
+    float rx[4], ry[4];        /* rounded rectangle: corner radii (tl, tr, br, bl) */
+    float border[4];           /* ring: border widths (top, right, bottom, left) */
 } DisplayMask;
 
 typedef struct {

@@ -1813,6 +1813,8 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     } else if (strcasecmp(prop, "-webkit-line-clamp") == 0 || strcasecmp(prop, "line-clamp") == 0) {
         int n = atoi(value);
         box->line_clamp = (unsigned char)(n > 0 && n < 255 ? n : 0);
+    } else if (strcasecmp(prop, "text-overflow") == 0) {
+        box->text_overflow_ellipsis = strstr(value, "ellipsis") != NULL;
     } else if (strcasecmp(prop, "object-fit") == 0) {
         box->object_fit = strcasecmp(value, "contain") == 0 ? 1 :
                           strcasecmp(value, "cover") == 0 ? 2 :
@@ -1955,6 +1957,60 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                 box->mask_pos_pct = 3;
             }
         }
+    } else if (strcasecmp(prop, "border-radius") == 0 || strcasecmp(prop, "-webkit-border-radius") == 0) {
+        /* 1-4 values (horizontal radii; "/ vertical" part ignored). */
+        char tok[4][128];
+        int n = 0;
+        const char *p = value;
+        while (*p && n < 4) {
+            while (*p && isspace((unsigned char)*p)) p++;
+            if (!*p || *p == '/') break;
+            size_t k = 0;
+            int depth = 0;
+            while (*p && (depth > 0 || (!isspace((unsigned char)*p) && *p != '/'))) {
+                if (*p == '(') depth++;
+                else if (*p == ')') depth--;
+                if (k + 1 < sizeof(tok[0])) tok[n][k++] = *p;
+                p++;
+            }
+            tok[n][k] = '\0';
+            n++;
+        }
+        static const int map[5][4] = { { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 1, 0, 1 },
+                                       { 0, 1, 2, 1 }, { 0, 1, 2, 3 } };
+        box->radius_pct = 0;
+        for (int c = 0; c < 4; c++) {
+            box->radius[c] = 0.0f;
+            if (n == 0) continue;
+            double v;
+            bool pct;
+            layout_mask_len(tok[map[n][c]], box->font_size, &v, &pct);
+            box->radius[c] = (float)(v > 0.0 ? v : 0.0);
+            if (pct) box->radius_pct |= (unsigned char)(1 << c);
+        }
+    } else if (strcasecmp(prop, "border-top-left-radius") == 0 || strcasecmp(prop, "border-top-right-radius") == 0 ||
+               strcasecmp(prop, "border-bottom-right-radius") == 0 ||
+               strcasecmp(prop, "border-bottom-left-radius") == 0) {
+        int c = strcasecmp(prop, "border-top-left-radius") == 0 ? 0 :
+                strcasecmp(prop, "border-top-right-radius") == 0 ? 1 :
+                strcasecmp(prop, "border-bottom-right-radius") == 0 ? 2 : 3;
+        char first[128];
+        size_t k = 0;
+        const char *p = value;
+        while (*p && isspace((unsigned char)*p)) p++;
+        int depth = 0;
+        while (*p && (depth > 0 || !isspace((unsigned char)*p)) && k + 1 < sizeof(first)) {
+            if (*p == '(') depth++;
+            else if (*p == ')') depth--;
+            first[k++] = *p++;
+        }
+        first[k] = '\0';
+        double v;
+        bool pct;
+        layout_mask_len(first, box->font_size, &v, &pct);
+        box->radius[c] = (float)(v > 0.0 ? v : 0.0);
+        if (pct) box->radius_pct |= (unsigned char)(1 << c);
+        else box->radius_pct &= (unsigned char)~(1 << c);
     } else if (strcasecmp(prop, "mask-size") == 0 || strcasecmp(prop, "-webkit-mask-size") == 0) {
         layout_parse_mask_size(box, value);
     } else if (strcasecmp(prop, "mask-position") == 0 || strcasecmp(prop, "-webkit-mask-position") == 0) {

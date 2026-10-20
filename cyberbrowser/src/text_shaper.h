@@ -77,6 +77,16 @@ bool text_shaper_wrap_measure(const TextShaper *shaper, const char *utf8,
 /* Append DL_GLYPH commands for `utf8`, word-wrapped.  (x, y) is the top-left
  * origin of the first line; continuation lines start at `cont_x`, switching
  * to `cont2_x`/`cont2_width` from line `cont2_from_line` on (when > 1). */
+/* Text cut to at most max_lines wrapped lines (same geometry as
+ * text_shaper_wrap_measure), the last ending in an ellipsis, as a malloc'd
+ * string; NULL when it already fits. */
+char *text_shaper_truncate_lines(const TextShaper *shaper, const char *utf8, float x, float cont_x,
+                                 float first_width, float cont_width, float scale, int max_lines);
+
+/* One line of text cut to `width` with an ellipsis (malloc'd); NULL when it
+ * fits. */
+char *text_shaper_truncate_width(const TextShaper *shaper, const char *utf8, float scale, float width);
+
 bool text_shaper_wrap_shape(const TextShaper *shaper, const char *utf8,
                             float x, float y, float cont_x,
                             float first_width, float cont_width,

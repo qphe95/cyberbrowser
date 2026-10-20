@@ -581,6 +581,75 @@ static bool ts_emit_span_glyphs(const TextShaper *s, const char *gp,
     return true;
 }
 
+/* Where each wrapped line starts, recorded by ts_wrap_walk while a
+ * truncation asks for it (line n starts at t_line_starts[n - 1]). */
+static __thread const char **t_line_starts;
+static __thread int t_line_starts_cap;
+
+static void ts_note_line(int line, const char *start)
+{
+    if (t_line_starts && line >= 1 && line <= t_line_starts_cap) t_line_starts[line - 1] = start;
+}
+
+static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
+                         float x, float y, float cont_x,
+                         float first_width, float cont_width,
+                         float scale, float line_advance,
+                         int cont2_from_line, float cont2_x, float cont2_width,
+                         bool emit, float r, float g, float b, float a,
+                         DisplayList *dl, TsWrapResult *out);
+
+#define TS_ELLIPSIS "\xE2\x80\xA6"
+
+/* `head` (n bytes) shortened until head + "..." is at most `limit` wide, as a
+ * malloc'd string with the ellipsis. */
+static char *ts_fit_with_ellipsis(const TextShaper *s, const char *head, size_t n, float scale, float limit,
+                                  const char *prefix, size_t prefix_len)
+{
+    float ew = ts_measure_span(s, TS_ELLIPSIS, TS_ELLIPSIS + 3) * scale;
+    for (;;) {
+        while (n && (head[n - 1] == ' ' || head[n - 1] == '\t' || head[n - 1] == '\n')) n--;
+        if (n == 0 || ts_measure_span(s, head, head + n) * scale + ew <= limit + 0.01f) break;
+        n--;
+        while (n && ((unsigned char)head[n] & 0xC0) == 0x80) n--;     /* whole UTF-8 sequences */
+    }
+    char *out = (char *)malloc(prefix_len + n + 4);
+    if (!out) return NULL;
+    memcpy(out, prefix, prefix_len);
+    memcpy(out + prefix_len, head, n);
+    memcpy(out + prefix_len + n, TS_ELLIPSIS, 4);
+    return out;
+}
+
+char *text_shaper_truncate_lines(const TextShaper *s, const char *utf8, float x, float cont_x,
+                                 float first_width, float cont_width, float scale, int max_lines)
+{
+    if (!s || !utf8 || max_lines < 1 || max_lines > 64) return NULL;
+    const char *starts[65] = { 0 };
+    starts[0] = utf8;
+    t_line_starts = starts;
+    t_line_starts_cap = max_lines + 1;
+    TsWrapResult wr;
+    ts_wrap_walk(s, utf8, x, 0.0f, cont_x, first_width, cont_width, scale, 1.0f, 0, 0.0f, 0.0f,
+                 false, 0, 0, 0, 0, NULL, &wr);
+    t_line_starts = NULL;
+    t_line_starts_cap = 0;
+    if (!starts[max_lines]) return NULL;                 /* fits in max_lines */
+    const char *last = starts[max_lines - 1] ? starts[max_lines - 1] : utf8;
+    const char *cut = starts[max_lines];
+    if (cut < last) return NULL;
+    float limit = max_lines == 1 ? first_width : cont_width;
+    return ts_fit_with_ellipsis(s, last, (size_t)(cut - last), scale, limit, utf8, (size_t)(last - utf8));
+}
+
+char *text_shaper_truncate_width(const TextShaper *s, const char *utf8, float scale, float width)
+{
+    if (!s || !utf8) return NULL;
+    size_t n = strlen(utf8);
+    if (ts_measure_span(s, utf8, utf8 + n) * scale <= width + 0.01f) return NULL;
+    return ts_fit_with_ellipsis(s, utf8, n, scale, width, "", 0);
+}
+
 /* Shared word-wrap walker.  When emit is false this only measures.  Words are
  * maximal runs of non-space codepoints plus their trailing spaces; a line is
  * never broken before its first word. */
@@ -663,6 +732,7 @@ static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
                 float used = pen_x - line_start_x;
                 if (used > max_width) max_width = used;
                 lines++;
+                ts_note_line(lines, bp);
                 float cx = (cont2_from_line > 1 && lines >= cont2_from_line)
                          ? cont2_x : cont_x;
                 float cw = (cont2_from_line > 1 && lines >= cont2_from_line)
@@ -698,6 +768,7 @@ static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
                 float used = pen_x - line_start_x;
                 if (used > max_width) max_width = used;
                 lines++;
+                ts_note_line(lines, bp);
                 float cx = (cont2_from_line > 1 && lines >= cont2_from_line)
                          ? cont2_x : cont_x;
                 float cw = (cont2_from_line > 1 && lines >= cont2_from_line)
@@ -716,6 +787,7 @@ static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
             float used = pen_x - line_start_x;
             if (used > max_width) max_width = used;
             lines++;
+            ts_note_line(lines, word_start);
             /* From cont2_from_line on, continuation lines use the second
              * geometry (e.g. full width below an expired float). */
             float cx = (cont2_from_line > 1 && lines >= cont2_from_line)
@@ -774,6 +846,7 @@ static bool ts_wrap_walk(const TextShaper *s, const char *utf8,
             float used = pen_x - line_start_x;
             if (used > max_width) max_width = used;
             lines++;
+            ts_note_line(lines, p);
             float cx = (cont2_from_line > 1 && lines >= cont2_from_line)
                      ? cont2_x : cont_x;
             float cw = (cont2_from_line > 1 && lines >= cont2_from_line)

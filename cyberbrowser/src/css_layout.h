@@ -226,6 +226,12 @@ typedef struct LayoutBox {
     double mask_size_w, mask_size_h;
     double mask_pos_x, mask_pos_y;
 
+    /* border-radius per corner (top-left, top-right, bottom-right,
+     * bottom-left): px, or a fraction of the box when the corner's bit in
+     * radius_pct is set (elliptical radii use their horizontal value). */
+    float radius[4];
+    unsigned char radius_pct;
+
     CssDisplay display;
     CssVisibility visibility;
     CssPosition position;
@@ -342,6 +348,8 @@ typedef struct LayoutBox {
     unsigned char webkit_box;
     unsigned char box_orient_vertical;
     unsigned char line_clamp;
+    /* text-overflow: ellipsis (for clipped single-line text). */
+    unsigned char text_overflow_ellipsis;
     /* object-fit: 0 fill, 1 contain, 2 cover, 3 none, 4 scale-down. */
     unsigned char object_fit;
 } LayoutBox;

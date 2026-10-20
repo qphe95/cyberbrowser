@@ -910,6 +910,40 @@ static bool box_mask(const LayoutBox *box, DisplayMask *m)
     return m->image_handle >= 0;
 }
 
+/* border-radius as a rounded-rectangle mask over the border box; false for
+ * square corners.  Overlapping radii scale down together (CSS Backgrounds
+ * §5.5). */
+static bool box_round_mask(const LayoutBox *box, DisplayMask *m)
+{
+    if (box->radius[0] <= 0.0f && box->radius[1] <= 0.0f && box->radius[2] <= 0.0f && box->radius[3] <= 0.0f)
+        return false;
+    memset(m, 0, sizeof(*m));
+    m->kind = 3;
+    m->image_handle = -1;
+    m->x = (float)box->x; m->y = (float)box->y;
+    m->w = (float)box->width; m->h = (float)box->height;
+    if (m->w <= 0.0f || m->h <= 0.0f) return false;
+    for (int c = 0; c < 4; c++) {
+        bool pct = (box->radius_pct >> c) & 1;
+        m->rx[c] = pct ? box->radius[c] * m->w : box->radius[c];
+        m->ry[c] = pct ? box->radius[c] * m->h : box->radius[c];
+    }
+    float f = 1.0f;
+    float sums[4] = { m->rx[0] + m->rx[1], m->ry[1] + m->ry[2], m->rx[2] + m->rx[3], m->ry[3] + m->ry[0] };
+    float sides[4] = { m->w, m->h, m->w, m->h };
+    for (int k = 0; k < 4; k++) if (sums[k] > sides[k] && sums[k] > 0.0f && sides[k] / sums[k] < f) f = sides[k] / sums[k];
+    for (int c = 0; c < 4; c++) { m->rx[c] *= f; m->ry[c] *= f; }
+    return true;
+}
+
+static bool is_replaced_tag(const HtmlNode *n)
+{
+    if (!n || n->type != HTML_NODE_ELEMENT || !n->tag_name) return false;
+    return strcasecmp(n->tag_name, "img") == 0 || strcasecmp(n->tag_name, "video") == 0 ||
+           strcasecmp(n->tag_name, "svg") == 0 || strcasecmp(n->tag_name, "canvas") == 0 ||
+           strcasecmp(n->tag_name, "iframe") == 0;
+}
+
 /* One past the last layout index in box i's subtree (preorder numbering). */
 static int subtree_end(const LayoutContext *ctx, int i)
 {
@@ -1011,6 +1045,20 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                 }
             }
         }
+        /* border-radius: rounds the box's own background and border, and
+         * clips the whole subtree when the box clips (overflow) or is a
+         * replaced element (rounded thumbnails, avatars). */
+        if (nmask < 64) {
+            DisplayMask rm;
+            if (box_round_mask(box, &rm)) {
+                int mi = dl_add_mask(dl, &rm);
+                if (mi >= 0 && dl_add_mask_cmd(dl, DL_MASK_BEGIN, mi, &rm)) {
+                    mask_end[nmask] = (box->overflow != 0 || is_replaced_tag(node)) ? subtree_end(ctx, i) : i + 1;
+                    mask_idx[nmask] = mi;
+                    nmask++;
+                }
+            }
+        }
 
         /* Backgrounds paint first: under the borders, list marker and the
          * box's content. */
@@ -1105,6 +1153,34 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                     /* The white-space processed text the layout measured. */
                     const char *run_text = css_layout_box_text(ctx, i, node->text_content);
                     if (box->text_lead_skip && run_text[0] == ' ') run_text++;
+                    /* -webkit-line-clamp / text-overflow: ellipsis on a near
+                     * ancestor cut the run and end it with an ellipsis. */
+                    char *clamped = NULL;
+                    for (int a = ctx->tree.nodes[i].parent_idx, depth = 0; a >= 0 && depth < 6;
+                         a = ctx->tree.nodes[a].parent_idx, depth++) {
+                        const LayoutBox *ab = &ctx->boxes[a];
+                        if (ab->line_clamp && ab->webkit_box) {
+                            double top = ab->y + ab->border_top + ab->padding_top;
+                            float nlh0 = text_shaper_normal_line_height(font, (float)fs);
+                            double adv = box->line_height > 0.0 ? box->line_height
+                                       : (nlh0 > 0.5f * fs && nlh0 < 3.0f * fs ? nlh0 : fs * 1.5);
+                            int before = adv > 0.0 ? (int)floor((box->y - top) / adv + 0.01) : 0;
+                            int left = (int)ab->line_clamp - (before > 0 ? before : 0);
+                            if (left >= 1 && box->wrap_cont_w > 0.0)
+                                clamped = text_shaper_truncate_lines(font, run_text, (float)box->x,
+                                                                     (float)box->wrap_cont_x, (float)box->wrap_first_w,
+                                                                     (float)box->wrap_cont_w, scale, left);
+                            break;
+                        }
+                        if (ab->text_overflow_ellipsis && ab->overflow != 0 &&
+                            (ab->white_space == 1 || ab->white_space == 2)) {
+                            double right = ab->x + ab->width - ab->border_right - ab->padding_right;
+                            if (box->wrap_cont_w <= 0.0 && right > box->x)
+                                clamped = text_shaper_truncate_width(font, run_text, scale, (float)(right - box->x));
+                            break;
+                        }
+                    }
+                    if (clamped) run_text = clamped;
                     if (box->wrap_cont_w > 0.0) {
                         /* Wrapped run: shape across lines using the wrap
                          * geometry recorded by the layout. */
@@ -1146,6 +1222,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                     }
                     emit_text_decorations(dl, from_cmd, fs, box->text_decoration,
                                           tr, tg, tb, ta);
+                    free(clamped);
                 }
             }
         }
@@ -1202,6 +1279,21 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             float br_a = (float)(box->border_color_set ? box->border_color_a : box->color_a) * op;
             float bx = (float)box->x, by = (float)box->y;
             float bw = (float)box->width, bh = (float)box->height;
+            DisplayMask ring;
+            if (box_round_mask(box, &ring)) {
+                /* Rounded: the border is the ring between the outer and the
+                 * inset rounded rectangles. */
+                ring.kind = 4;
+                ring.border[0] = (float)box->border_top;
+                ring.border[1] = (float)box->border_right;
+                ring.border[2] = (float)box->border_bottom;
+                ring.border[3] = (float)box->border_left;
+                int mi = dl_add_mask(dl, &ring);
+                if (mi >= 0 && dl_add_mask_cmd(dl, DL_MASK_BEGIN, mi, &ring)) {
+                    display_list_add_rect(dl, bx, by, bw, bh, br_r, br_g, br_b, br_a);
+                    dl_add_mask_cmd(dl, DL_MASK_END, mi, &ring);
+                }
+            } else {
             if (box->border_top > 0.0) {
                 display_list_add_rect(dl, bx, by, bw, (float)box->border_top,
                                       br_r, br_g, br_b, br_a);
@@ -1223,6 +1315,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                                       by + (float)box->border_top,
                                       (float)box->border_right, (float)mid_h,
                                       br_r, br_g, br_b, br_a);
+            }
             }
         }
 
