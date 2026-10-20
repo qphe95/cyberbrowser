@@ -754,6 +754,43 @@ TEST(test_layout_preserved_newlines_break_lines) {
     return ok;
 }
 
+/* white-space:pre / nowrap: inline-blocks stay on one line (YouTube's
+ * collapsed info row), a pre flex item keeps its one-line width, and a
+ * nowrap span inside normal text still moves to the next line whole. */
+TEST(test_layout_nowrap_atomic_inlines) {
+    const char *html =
+        "<html><body style=\"margin:0;font-size:16px;line-height:20px\">"
+        "<div id=\"p\" style=\"width:200px;white-space:pre\">"
+        "<a id=\"a1\" style=\"display:inline-block;width:100px\">x</a>"
+        "<a id=\"a2\" style=\"display:inline-block;width:100px\">y</a>"
+        "<a id=\"a3\" style=\"display:inline-block;width:100px\">z</a></div>"
+        "<div style=\"display:flex;width:150px\"><div id=\"f\" style=\"white-space:pre\">"
+        "<a style=\"display:inline-block;width:100px\">x</a><a style=\"display:inline-block;width:100px\">y</a>"
+        "</div></div>"
+        "<div id=\"n\" style=\"width:100px\">aaaa aaaa <span id=\"ns\" style=\"white-space:nowrap\">bb bb</span></div>"
+        "</body></html>";
+    HtmlDocument *doc = html_parse(html, strlen(html));
+    ASSERT_TRUE(doc != NULL);
+    LayoutContext ctx = {0};
+    ASSERT_TRUE(css_layout_run(&ctx, doc, NULL, 800.0, 600.0));
+    const char *ids[6] = { "p", "a1", "a2", "a3", "f", "ns" };
+    LayoutBox *bx[6];
+    for (int k = 0; k < 6; k++) {
+        HtmlNode *n = html_document_get_element_by_id(doc, ids[k]);
+        ASSERT_TRUE(n != NULL);
+        bx[k] = css_layout_box_for_node(&ctx, po_array_index_from_payload(&doc->array, n));
+        ASSERT_TRUE(bx[k] != NULL);
+    }
+    bool ok = near_equal(bx[1]->y, bx[3]->y) && near_equal(bx[3]->x, bx[1]->x + 200.0) &&
+              near_equal(bx[0]->height, 20.0) && bx[4]->width >= 199.5 && bx[5]->y >= 59.0;
+    if (!ok)
+        printf("    a1 %.1f,%.1f a3 %.1f,%.1f p.h %.1f f.w %.1f ns.y %.1f\n", bx[1]->x, bx[1]->y, bx[3]->x, bx[3]->y,
+               bx[0]->height, bx[4]->width, bx[5]->y);
+    css_layout_tree_free(&ctx);
+    html_document_free(doc);
+    return ok;
+}
+
 static uint32_t be32_at(const uint8_t *p)
 {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
@@ -980,6 +1017,7 @@ void run_css_layout_tests(void) {
     RUN_TEST(test_layout_float_table_figure);
     RUN_TEST(test_layout_calc_nested_vars);
     RUN_TEST(test_layout_preserved_newlines_break_lines);
+    RUN_TEST(test_layout_nowrap_atomic_inlines);
     RUN_TEST(test_font_registry_system_and_web_fonts);
     RUN_TEST(test_font_variable_instances);
 }

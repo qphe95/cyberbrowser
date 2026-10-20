@@ -773,6 +773,38 @@ TEST(test_dom_custom_element_reactions) {
     return true;
 }
 
+/* A MutationObserver reused after disconnect() keeps delivering (YouTube's
+ * description expander re-observes the same observer from its callback),
+ * disconnect() drops queued records, and one observer can watch two nodes. */
+TEST(test_dom_mutation_observer_reobserve) {
+    JSContextHandle ctx = get_shared_test_context();
+    if (!dom_ready(ctx)) { printf("    (skipped - no document)\n"); return true; }
+    ASSERT_EQ(1, js_int(ctx,
+        "globalThis.__mo=[];"
+        "var a=document.createElement('div'), b=document.createElement('div'), c=document.createElement('div');"
+        "var mo=new MutationObserver(function(recs, obs){"
+        "  __mo.push(recs.length + ':' + recs[0].target.id);"
+        "  if (__mo.length === 1) { obs.disconnect(); obs.observe(a, {childList:true, subtree:true});"
+        "                           a.appendChild(document.createElement('i')); }"
+        "});"
+        "a.id='a'; b.id='b'; c.id='c';"
+        "mo.observe(a, {childList:true}); a.appendChild(document.createElement('p'));"
+        "var dead=new MutationObserver(function(){ __mo.push('dead'); });"
+        "dead.observe(c, {childList:true}); c.appendChild(document.createElement('p')); dead.disconnect();"
+        "var two=new MutationObserver(function(recs){ recs.forEach(function(r){ __mo.push('two:' + r.target.id); }); });"
+        "two.observe(b, {childList:true}); two.observe(c, {childList:true});"
+        "b.appendChild(document.createElement('p')); c.appendChild(document.createElement('p')); 1"));
+    JSContextHandle pctx = ctx;
+    while (JS_ExecutePendingJob(JS_GetRuntime(ctx), &pctx) > 0) {}
+    if (js_int(ctx, "__mo.join(',') === '1:a,two:b,two:c,1:a' ? 1 : 0") != 1) {
+        GCValue rc = JS_Eval(ctx, "__mo.join(',')", 14, "<test_dom>", JS_EVAL_TYPE_GLOBAL);
+        const char *s = JS_ToCString(ctx, rc);
+        printf("    records = '%s'\n", s ? s : "?");
+        return false;
+    }
+    return true;
+}
+
 /* Styles set through element.style survive cloneNode / importNode (the clone
  * has them in its style attribute). */
 TEST(test_dom_clone_keeps_script_styles) {
@@ -960,6 +992,7 @@ void run_dom_tests(void) {
     RUN_TEST(test_dom_layout_metrics_see_each_change);
     RUN_TEST(test_dom_media_source_events);
     RUN_TEST(test_dom_custom_element_reactions);
+    RUN_TEST(test_dom_mutation_observer_reobserve);
     RUN_TEST(test_dom_clone_keeps_script_styles);
     RUN_TEST(test_dom_response_clone_keeps_body);
     RUN_TEST(test_dom_video_wrapper_survives_gc);

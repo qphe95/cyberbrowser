@@ -2296,7 +2296,8 @@ GCValue js_mutation_observer_constructor(JSContextHandle ctx, GCValue new_target
     JS_SetPropertyStr(ctx, obj, "__mo_nodes", JS_NewArray(ctx));
     JS_SetPropertyStr(ctx, obj, "__mo_children", JS_NewArray(ctx));
     JS_SetPropertyStr(ctx, obj, "__mo_subtree", JS_FALSE);
-    mo_registry_add(ctx, obj);
+    JS_SetPropertyStr(ctx, obj, "__mo_regs", JS_NewArray(ctx));
+    JS_SetPropertyStr(ctx, obj, "__mo_registered", JS_FALSE);
     return obj;
 }
 
@@ -2477,6 +2478,32 @@ GCValue js_mutation_observer_observe(JSContextHandle ctx, GCValue this_val, int 
     JS_SetPropertyStr(ctx, options, "characterData", JS_NewBool(ctx, character_data));
     JS_SetPropertyStr(ctx, options, "attributes", JS_NewBool(ctx, attributes));
 
+    /* One registration per target (observing the same node again replaces
+     * its options); the observer joins the delivery registry on its first
+     * observe after construction or disconnect. */
+    GCValue regs = JS_GetPropertyStr(ctx, this_val, "__mo_regs");
+    if (!JS_IsArray(ctx, regs)) {
+        regs = JS_NewArray(ctx);
+        JS_SetPropertyStr(ctx, this_val, "__mo_regs", regs);
+    }
+    {
+        GCValue rlen_val = JS_GetPropertyStr(ctx, regs, "length");
+        uint32_t rlen = 0, ri;
+        JS_ToUint32(ctx, &rlen, rlen_val);
+        for (ri = 0; ri < rlen; ri++) {
+            GCValue r = JS_GetPropertyUint32(ctx, regs, ri);
+            if (JS_StrictEq(ctx, JS_GetPropertyStr(ctx, r, "target"), target)) break;
+        }
+        GCValue reg = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, reg, "target", target);
+        JS_SetPropertyStr(ctx, reg, "options", options);
+        JS_SetPropertyUint32(ctx, regs, ri, reg);
+    }
+    if (!JS_ToBool(ctx, JS_GetPropertyStr(ctx, this_val, "__mo_registered"))) {
+        mo_registry_add(ctx, this_val);
+        JS_SetPropertyStr(ctx, this_val, "__mo_registered", JS_TRUE);
+    }
+
     JS_SetPropertyStr(ctx, this_val, "__mo_target", target);
     JS_SetPropertyStr(ctx, this_val, "__mo_options", options);
     JS_SetPropertyStr(ctx, this_val, "__mo_childList", JS_NewBool(ctx, child_list));
@@ -2497,6 +2524,9 @@ GCValue js_mutation_observer_observe(JSContextHandle ctx, GCValue this_val, int 
 GCValue js_mutation_observer_disconnect(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     mo_registry_remove(ctx, this_val);
+    JS_SetPropertyStr(ctx, this_val, "__mo_registered", JS_FALSE);
+    JS_SetPropertyStr(ctx, this_val, "__mo_regs", JS_NewArray(ctx));
+    JS_SetPropertyStr(ctx, this_val, "__mo_records", JS_NewArray(ctx));   /* queue emptied */
     JS_SetPropertyStr(ctx, this_val, "__mo_target", JS_UNDEFINED);
     JS_SetPropertyStr(ctx, this_val, "__mo_options", JS_UNDEFINED);
     JS_SetPropertyStr(ctx, this_val, "__mo_childList", JS_FALSE);
@@ -2568,10 +2598,27 @@ static bool mo_node_contains(JSContextHandle ctx, GCValue ancestor, GCValue desc
     return false;
 }
 
+static bool mo_registration_interested(JSContextHandle ctx, GCValue ot, GCValue opts, GCValue target,
+                                       const char *type);
+
 static bool mo_observer_interested(JSContextHandle ctx, GCValue observer, GCValue target, const char *type) {
-    GCValue ot = JS_GetPropertyStr(ctx, observer, "__mo_target");
+    GCValue regs = JS_GetPropertyStr(ctx, observer, "__mo_regs");
+    if (!JS_IsArray(ctx, regs)) return false;
+    GCValue len_val = JS_GetPropertyStr(ctx, regs, "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, len_val);
+    for (uint32_t i = 0; i < len; i++) {
+        GCValue r = JS_GetPropertyUint32(ctx, regs, i);
+        if (mo_registration_interested(ctx, JS_GetPropertyStr(ctx, r, "target"),
+                                       JS_GetPropertyStr(ctx, r, "options"), target, type))
+            return true;
+    }
+    return false;
+}
+
+static bool mo_registration_interested(JSContextHandle ctx, GCValue ot, GCValue opts, GCValue target,
+                                       const char *type) {
     if (JS_IsUndefined(ot) || JS_IsNull(ot)) return false;
-    GCValue opts = JS_GetPropertyStr(ctx, observer, "__mo_options");
     if (!JS_IsObject(opts)) return false;
 
     bool wants = false;
@@ -2640,6 +2687,9 @@ static GCValue js_mutation_observer_job(JSContextHandle ctx, int argc, GCValue *
     JS_SetPropertyStr(ctx, observer, "__mo_scheduled", JS_FALSE);
     GCValue records = JS_GetPropertyStr(ctx, observer, "__mo_records");
     if (!JS_IsArray(ctx, records)) return JS_UNDEFINED;
+    uint32_t nrec = 0;
+    JS_ToUint32(ctx, &nrec, JS_GetPropertyStr(ctx, records, "length"));
+    if (nrec == 0) return JS_UNDEFINED;          /* emptied by disconnect / takeRecords */
     JS_SetPropertyStr(ctx, observer, "__mo_records", JS_NewArray(ctx));
     GCValue callback = JS_GetPropertyStr(ctx, observer, "__mo_callback");
     if (JS_IsFunction(ctx, callback)) {

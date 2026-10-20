@@ -4679,6 +4679,9 @@ static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_ma
         /* Block / inline formatting: inline-level children accumulate along
          * a line (max-content) while block-level children stand alone. */
         double line = 0.0, pending_space = 0.0;
+        /* nowrap / pre: the inline content is one unbreakable line, so
+         * min-content equals max-content. */
+        bool one_line = want_max || box->white_space == 1 || box->white_space == 2;
         for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0;
              c = ctx->tree.nodes[c].next_sibling_idx) {
             LayoutBox *cb = layout_box(ctx, c);
@@ -4694,7 +4697,7 @@ static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_ma
             }
             if (cn && cn->type == HTML_NODE_TEXT && layout_text_is_whitespace(cn->text_content)) {
                 /* Collapsible space: counts only between inline content. */
-                if (want_max && line > 0.0) {
+                if (one_line && line > 0.0) {
                     double sw = 0.0;
                     double fs = cb->font_size > 0.0 ? cb->font_size : 16.0;
                     if (!layout_measure_text_styled(cb, " ", fs, &sw, NULL)) sw = fs * 0.25;
@@ -4709,7 +4712,7 @@ static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_ma
                 line = 0.0;
                 pending_space = 0.0;
                 if (w > content) content = w;
-            } else if (want_max) {
+            } else if (one_line) {
                 line += pending_space + w;
                 pending_space = 0.0;
             } else if (w > content) {
@@ -5052,7 +5055,9 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                  * on the line as one unbreakable box. */
                 layout_size_atomic_inline(ctx, c, line_avail);
                 double aspan = child->margin_left + child->width + child->margin_right;
-                if (cur.x + aspan > line_left + line_avail + 0.01 && cur.x > line_left + 0.001) {
+                /* No soft wrap opportunity between atomics under nowrap / pre. */
+                bool line_nowrap = box->white_space == 1 || box->white_space == 2;
+                if (!line_nowrap && cur.x + aspan > line_left + line_avail + 0.01 && cur.x > line_left + 0.001) {
                     if (line_member_count > 0) {
                         layout_align_line(ctx, line_members, line_member_count,
                                           line_left, line_avail, box->text_align);
@@ -5394,7 +5399,8 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                 layout_update_content_sizes(child);
                 span = 0.0;
             }
-            if (cur.x + span - trail > line_right + 0.01 && cur.x > line_left + 0.001) {
+            if (!(box->white_space == 1 || box->white_space == 2) &&
+                cur.x + span - trail > line_right + 0.01 && cur.x > line_left + 0.001) {
                 /* Finish the current line (alignment applies), then wrap. */
                 if (line_member_count > 0) {
                     layout_align_line(ctx, line_members, line_member_count,
