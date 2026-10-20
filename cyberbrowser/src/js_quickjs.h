@@ -57,6 +57,10 @@ size_t js_stack_budget(void);
 /* Create global QuickJS runtime and context (called once in android_main after js_quickjs_init) */
 bool js_quickjs_create_runtime(void);
 
+/* Register the XMLHttpRequest / HTMLVideoElement classes with `rt` (idempotent;
+ * init_browser_api_impl calls it for every runtime). */
+void js_quickjs_register_classes(JSRuntimeHandle rt);
+
 /* Set up initial DOM state (called once in android_main after js_quickjs_create_runtime) */
 void js_quickjs_setup_initial_dom(void);
 

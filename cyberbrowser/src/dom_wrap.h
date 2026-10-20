@@ -104,6 +104,9 @@ bool dom_subtree_has_ce(NodeId id);
 
 /* Statistics (tests): wrappers alive, tree objects alive. */
 uint32_t dom_wrap_count(void);
+/* Slots whose recorded wrapper is not a live object bound to that node (a
+ * dead or reused handle).  Prints the first `report` of them.  Tests. */
+uint32_t dom_wrap_check(int report);
 uint32_t dom_tree_object_count(void);
 
 #ifdef __cplusplus

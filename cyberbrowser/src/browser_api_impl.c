@@ -20,6 +20,7 @@
 #include "css_parser.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
+#include "js_quickjs.h"
 
 // mbedtls includes (used by throw_dom_exception helper in this file)
 #include "mbedtls/md.h"
@@ -1614,7 +1615,8 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_NewClass(rt, js_service_worker_registration_class_id, &js_service_worker_registration_class_def);
     JS_NewClass(rt, js_service_worker_class_id, &js_service_worker_class_def);
     JS_NewClass(rt, js_location_class_id, &js_location_class_def);
-    
+    js_quickjs_register_classes(rt);   /* XMLHttpRequest, HTMLVideoElement */
+
     // ===== ECMAScript built-ins =====
     // Object, Reflect, Map, Date, Promise.prototype.finally, includes and
     // Array.from are the engine's own.  (This file used to replace them with

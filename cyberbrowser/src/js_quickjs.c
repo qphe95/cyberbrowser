@@ -768,22 +768,6 @@ static GCValue js_video_get_src(JSContextHandle ctx, GCValue this_val) {
     return JS_NewString(ctx, SAFE_GET_OR(vid, HTMLVideoElementHandle, src, ""));
 }
 
-static GCValue js_video_get_id(JSContextHandle ctx, GCValue this_val) {
-    HTMLVideoElementHandle vid = JS_GetOpaqueHandle2(ctx, this_val, js_video_class_id);
-    if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
-    return JS_NewString(ctx, SAFE_GET_OR(vid, HTMLVideoElementHandle, id, ""));
-}
-
-static GCValue js_video_set_id(JSContextHandle ctx, GCValue this_val, GCValue val) {
-    HTMLVideoElementHandle vid = JS_GetOpaqueHandle2(ctx, this_val, js_video_class_id);
-    if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
-    const char *id = JS_ToCString(ctx, val);
-    if (id) {
-        SAFE_SET_STR(vid, HTMLVideoElementHandle, id, id);
-    }
-    return JS_UNDEFINED;
-}
-
 static GCValue js_video_get_current_time(JSContextHandle ctx, GCValue this_val) {
     HTMLVideoElementHandle vid = JS_GetOpaqueHandle2(ctx, this_val, js_video_class_id);
     if (SAFE_IS_NULL(vid)) return JS_ThrowTypeError(ctx, "VideoElement internal error");
@@ -1084,7 +1068,6 @@ const JSCFunctionListEntry js_video_proto_funcs[] = {
     JS_CGETSET_DEF("textTracks", js_video_get_text_tracks, NULL),
     JS_CGETSET_DEF("audioTracks", js_video_get_audio_tracks, NULL),
     JS_CGETSET_DEF("videoTracks", js_video_get_video_tracks, NULL),
-    JS_CGETSET_DEF("id", js_video_get_id, js_video_set_id),
     JS_CGETSET_DEF("src", js_video_get_src, js_video_set_src),
     JS_CGETSET_DEF("currentSrc", js_video_get_src, NULL),
     JS_CGETSET_DEF("currentTime", js_video_get_current_time, js_video_set_current_time),
@@ -2422,6 +2405,21 @@ void js_quickjs_reset_class_ids(void) {
     js_quickjs_init_class_ids();
 }
 
+/* Register XMLHttpRequest and HTMLVideoElement with a runtime (once).  Every
+ * runtime that creates these objects needs it: without the class's gc_mark,
+ * a concurrent major cycle never marks what their data holds (a <video>'s
+ * DomWrap record with its style and tree objects, an XHR's callbacks), and
+ * frees it while the object is alive. */
+void js_quickjs_register_classes(JSRuntimeHandle rt) {
+    static const JSClassDef xhr_def = {.class_name = "XMLHttpRequest", .finalizer = js_xhr_finalizer, .gc_mark = js_xhr_mark};
+    static const JSClassDef video_def = {.class_name = "HTMLVideoElement", .finalizer = js_video_finalizer, .gc_mark = js_video_mark};
+    js_quickjs_init_class_ids();
+    if (!JS_IsRegisteredClass(rt, js_xhr_class_id) && JS_NewClass(rt, js_xhr_class_id, &xhr_def) < 0)
+        platform_log(LOG_LEVEL_WARN, "js_quickjs", "Failed to register XMLHttpRequest class");
+    if (!JS_IsRegisteredClass(rt, js_video_class_id) && JS_NewClass(rt, js_video_class_id, &video_def) < 0)
+        platform_log(LOG_LEVEL_WARN, "js_quickjs", "Failed to register HTMLVideoElement class");
+}
+
 bool js_quickjs_init(void) {
     // Initialize unified GC first - all memory comes from here
     if (!gc_is_initialized()) {
@@ -2494,16 +2492,8 @@ bool js_quickjs_create_runtime(void) {
     platform_log(LOG_LEVEL_INFO, "js_quickjs", "Enabling Proxy support...");
     JS_AddIntrinsicProxy(g_js_context);
     
-    // Register custom classes
-    JSClassDef xhr_def = {.class_name = "XMLHttpRequest", .finalizer = js_xhr_finalizer, .gc_mark = js_xhr_mark};
-    JSClassDef video_def = {.class_name = "HTMLVideoElement", .finalizer = js_video_finalizer, .gc_mark = js_video_mark};
-    if (JS_NewClass(g_js_runtime, js_xhr_class_id, &xhr_def) < 0) {
-        platform_log(LOG_LEVEL_WARN, "js_quickjs", "Failed to register XMLHttpRequest class");
-    }
-    if (JS_NewClass(g_js_runtime, js_video_class_id, &video_def) < 0) {
-        platform_log(LOG_LEVEL_WARN, "js_quickjs", "Failed to register HTMLVideoElement class");
-    }
-    
+    js_quickjs_register_classes(g_js_runtime);
+
     // Initialize full browser environment with all necessary APIs
     platform_log(LOG_LEVEL_INFO, "js_quickjs", "Initializing browser environment...");
     init_browser_environment(g_js_context);

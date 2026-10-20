@@ -17,6 +17,28 @@ static JSContextHandle g_ctx;          /* the engine's context (one per process)
 static uint32_t g_wrappers, g_tree_objects;
 
 uint32_t dom_wrap_count(void) { return g_wrappers; }
+
+uint32_t dom_wrap_check(int report) {
+    uint32_t bad = 0;
+    for (uint32_t s = 1; s < g_dom.cap; s++) {
+        uint32_t h = g_dom.wrapper[s];
+        if (!h || g_dom.kind[s] == DOM_K_FREE) continue;
+        NodeId id = dom_id_of(s);
+        bool ok = gc_handle_is_valid(h) &&
+                  dom_node_of(GC_MKHANDLE(JS_TAG_OBJECT, h)) == id;
+        if (ok) continue;
+        if ((int)bad < report) {
+            bool live = gc_handle_is_valid(h);
+            DomWrapHandle wd = live ? dom_wrap_of(GC_MKHANDLE(JS_TAG_OBJECT, h)) : GC_HANDLE_NULL;
+            fprintf(stderr, "[dom_wrap_check] slot %u <%s> wrapper %u %s, record %u %s\n",
+                    s, dom_tag_name(id), h, live ? "live" : "freed",
+                    (unsigned)wd, wd && gc_handle_is_valid(wd) ? "live" : "missing or freed");
+        }
+        bad++;
+    }
+    return bad;
+}
+
 uint32_t dom_tree_object_count(void) { return g_tree_objects; }
 
 void dom_wrap_set_factory(DomWrapFactory f) { g_factory = f; }
