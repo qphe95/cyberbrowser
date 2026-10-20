@@ -1561,3 +1561,17 @@ HtmlDocument *html_document_from_js_dom_if_changed(JSContextHandle ctx, GCValue 
 HtmlDocument *html_document_from_js_dom(JSContextHandle ctx, GCValue js_doc) {
     return html_document_from_js_dom_if_changed(ctx, js_doc, NULL, NULL);
 }
+
+/* An element's style object as CSS text ("width: 1px; ..."), malloc'ed, or
+ * NULL when it declares nothing.  Uses the render serializer's conversion
+ * (camelCase properties, vendor seeds, ...). */
+char *html_style_object_css_text(JSContextHandle ctx, GCValue style_obj) {
+    if (!JS_IsObject(style_obj)) return NULL;
+    SerializeBuffer b;
+    if (!serialize_buf_init(&b)) return NULL;
+    append_style_object(ctx, style_obj, &b);
+    if (!b.data || b.len == 0) { serialize_buf_free(&b); return NULL; }
+    char *out = strdup(b.data);
+    serialize_buf_free(&b);
+    return out;
+}

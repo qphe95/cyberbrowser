@@ -57,7 +57,7 @@ void dom_enable_dynamic_script_loading(void) {
 uint64_t g_dom_layout_requests;
 
 uint64_t dom_change_stamp(void) {
-    return g_dom.structure_version + g_dom.attr_version + g_dom.text_version +
+    return g_dom.connected_version +
            JS_watched_write_epoch + g_dom_layout_requests;
 }
 
@@ -296,7 +296,9 @@ GCValue dom_create_wrapper(JSContextHandle ctx, NodeId id) {
     GCValue obj = JS_UNDEFINED;
     switch (kind) {
     case DOM_K_ELEMENT:
-        if (dom_tag_is(id, "video")) {
+        /* Media elements (video, audio) share the native media class: load(),
+         * play(), pause(), currentTime, canPlayType, ... */
+        if (dom_tag_is(id, "video") || dom_tag_is(id, "audio")) {
             obj = js_video_constructor(ctx, JS_NULL, 0, NULL);
             if (!JS_IsObject(obj)) return JS_NULL;
             dom_bind(ctx, id, obj);
@@ -1213,7 +1215,21 @@ bool dom_api_remove(JSContextHandle ctx, NodeId parent, NodeId child) {
     bool was_connected = dom_api_is_connected(ctx, parent);
     dom_detach(child, false);
     dom_request_layout();
-    if (was_connected && need_js) invoke_custom_element_callback(ctx, child_js, "disconnectedCallback");
+    /* Every custom element of the removed subtree is disconnected, not just
+     * its root (HTML "remove" steps), in tree order.  Components that clear
+     * their rendering on disconnect then render once when reinserted. */
+    if (was_connected) {
+        uint32_t *ids = NULL, n = 0;
+        collect_ce_candidates(child, &ids, &n);
+        bool root_listed = false;
+        for (uint32_t i = 0; i < n; i++) {
+            if (ids[i] == child) root_listed = true;
+            if (!dom_has_wrapper(ids[i])) continue;      /* never upgraded */
+            invoke_custom_element_callback(ctx, dom_js(ctx, ids[i]), "disconnectedCallback");
+        }
+        free(ids);
+        if (need_js && !root_listed) invoke_custom_element_callback(ctx, child_js, "disconnectedCallback");
+    }
     dom_flush_ce_reactions(ctx);
     /* (The legacy DOM reported the removed node as added; kept for the
      * polyfills that were tuned against it.) */
@@ -1554,6 +1570,24 @@ static NodeId clone_node(NodeId src, bool deep, NodeId owner) {
     return root;
 }
 
+/* Inline styles set through element.style live in the wrapper's style
+ * object, not in the store's style attribute; a clone copies attributes, so
+ * carry them over too (CSSOM reflects the declarations into the attribute,
+ * and a clone has them).  `dst` mirrors `src`'s structure. */
+static void clone_copy_styles(JSContextHandle ctx, NodeId src, NodeId dst) {
+    if (dom_kind(src) == DOM_K_ELEMENT && dom_has_wrapper(src)) {
+        GCValue style = dom_element_style(ctx, dom_js_existing(src), false);
+        char *css = html_style_object_css_text(ctx, style);
+        if (css) {
+            dom_set_attr_str(dst, "style", css);
+            free(css);
+        }
+    }
+    NodeId a = dom_first_child(src), b = dom_first_child(dst);
+    for (; a && b; a = dom_next_sibling(a), b = dom_next_sibling(b))
+        clone_copy_styles(ctx, a, b);
+}
+
 // Real cloneNode implementation
 GCValue js_node_cloneNode_real(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     bool deep = argc > 0 && JS_ToBool(ctx, argv[0]);
@@ -1562,6 +1596,11 @@ GCValue js_node_cloneNode_real(JSContextHandle ctx, GCValue this_val, int argc, 
     /* The clone belongs to the same document as the original (DOM spec:
      * cloneNode keeps the node document; importNode re-documents it). */
     NodeId copy = clone_node(original, deep, dom_owner(original));
+    if (deep) clone_copy_styles(ctx, original, copy);
+    else if (dom_kind(original) == DOM_K_ELEMENT && dom_has_wrapper(original)) {
+        char *css = html_style_object_css_text(ctx, dom_element_style(ctx, dom_js_existing(original), false));
+        if (css) { dom_set_attr_str(copy, "style", css); free(css); }
+    }
     return dom_js(ctx, copy);
 }
 

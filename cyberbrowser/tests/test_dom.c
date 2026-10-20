@@ -757,6 +757,20 @@ TEST(test_dom_custom_element_reactions) {
     return true;
 }
 
+/* Styles set through element.style survive cloneNode / importNode (the clone
+ * has them in its style attribute). */
+TEST(test_dom_clone_keeps_script_styles) {
+    JSContextHandle ctx = get_shared_test_context();
+    if (!dom_ready(ctx)) { printf("    (skipped - no document)\n"); return true; }
+    ASSERT_EQ(1, js_int(ctx,
+        "(function(){var d=document.createElement('div'); d.innerHTML='<span><svg viewBox=\"0 0 24 24\"></svg></span>';"
+        "var s=d.querySelector('svg'); s.style.pointerEvents='none'; s.style.width='100%';"
+        "var c=d.cloneNode(true).querySelector('svg'), i=document.importNode(d,true).querySelector('svg');"
+        "var ok=function(e){ var a=e.getAttribute('style')||''; return a.indexOf('pointer-events:none')>=0 && a.indexOf('width:100%')>=0; };"
+        "return ok(c) && ok(i) && c.style.width==='100%' ? 1 : 0;})()"));
+    return true;
+}
+
 /* A fetched-style Response and its clone both read the body. */
 TEST(test_dom_response_clone_keeps_body) {
     JSContextHandle ctx = get_shared_test_context();
@@ -929,6 +943,7 @@ void run_dom_tests(void) {
     RUN_TEST(test_dom_layout_metrics_see_each_change);
     RUN_TEST(test_dom_media_source_events);
     RUN_TEST(test_dom_custom_element_reactions);
+    RUN_TEST(test_dom_clone_keeps_script_styles);
     RUN_TEST(test_dom_response_clone_keeps_body);
     RUN_TEST(test_dom_video_wrapper_survives_gc);
     RUN_TEST(test_dom_fragment_text_and_html_element_basics);

@@ -616,6 +616,40 @@ TEST(test_async_image_load_callback) {
 
 
 
+
+/* white-space:pre keeps trailing spaces inside inline-flex items, so
+ * "views  " pushes the following box right (YouTube's watch info row). */
+TEST(test_layout_pre_trailing_spaces) {
+    const char *fonts[] = { "cyberbrowser/fonts/Roboto-Regular.ttf", "../../fonts/Roboto-Regular.ttf",
+                            "../fonts/Roboto-Regular.ttf", "fonts/Roboto-Regular.ttf", NULL };
+    bool have_font = false;
+    for (int i = 0; fonts[i] && !have_font; i++) have_font = display_list_set_default_font(fonts[i], 16.0f);
+    ASSERT_TRUE(have_font);
+    const char *html =
+        "<html><body style=\"margin:0;font-size:20px\"><div>"
+        "<span id=\"a\" style=\"display:inline-flex;white-space:pre\"><span>views&#32;&#32;</span></span>"
+        "<span id=\"b\" style=\"display:inline-flex;white-space:pre\"><span>views</span></span>"
+        "<span id=\"c\" style=\"white-space:pre\">x&#32;&#32;</span><span id=\"d\">y</span>"
+        "</div></body></html>";
+    HtmlDocument *doc = html_parse(html, strlen(html));
+    ASSERT_TRUE(doc != NULL);
+    LayoutContext ctx = {0};
+    ASSERT_TRUE(css_layout_run(&ctx, doc, NULL, 800.0, 600.0));
+    LayoutBox *bx[4];
+    const char *ids[4] = { "a", "b", "c", "d" };
+    for (int i = 0; i < 4; i++) {
+        HtmlNode *n = html_document_get_element_by_id(doc, ids[i]);
+        ASSERT_TRUE(n != NULL);
+        bx[i] = css_layout_box_for_node(&ctx, po_array_index_from_payload(&doc->array, n));
+        ASSERT_TRUE(bx[i] != NULL);
+    }
+    bool ok = bx[0]->width > bx[1]->width + 8.0 && bx[1]->x >= bx[0]->x + bx[0]->width - 0.5 &&
+              bx[3]->x > bx[2]->x + bx[2]->width - 0.5 && bx[2]->width > 17.0;
+    css_layout_tree_free(&ctx);
+    html_document_free(doc);
+    return ok;
+}
+
 void run_css_layout_tests(void) {
     printf("\n--- CSS Layout Engine Tests ---\n");
     RUN_TEST(test_layout_basic_document);
@@ -635,4 +669,5 @@ void run_css_layout_tests(void) {
     RUN_TEST(test_layout_percentages_and_aspect_ratio);
     RUN_TEST(test_layout_percentage_sizes_in_calc);
     RUN_TEST(test_layout_css_wide_keywords);
+    RUN_TEST(test_layout_pre_trailing_spaces);
 }

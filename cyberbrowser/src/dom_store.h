@@ -123,6 +123,8 @@ typedef struct DomStore {
     uint64_t attr_version;        /* bumped by every attribute mutation */
     uint64_t text_version;        /* bumped by every text mutation */
     uint64_t class_version;       /* bumped when an id or class attribute changes */
+    uint64_t connected_version;   /* bumped by tree, attribute and text mutations
+                                     in the document's tree (not detached ones) */
     uint32_t seq;
 } DomStore;
 
@@ -259,6 +261,9 @@ void dom_id_index_note(uint32_t s);
 const uint32_t *dom_id_index_lookup(CssAtom a, uint32_t *n);
 
 /* ---- dirty bits (§7) ---- */
+/* A mutation at slot s: count it in connected_version when s is in the
+ * document's tree. */
+void dom_note_connected_change(uint32_t s);
 void dom_mark_dirty(NodeId id, uint16_t bits);
 void dom_clear_dirty(NodeId root);
 

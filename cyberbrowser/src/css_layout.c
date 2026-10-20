@@ -4256,6 +4256,39 @@ static bool layout_is_replaced_form_element(const char *tag)
     return false;
 }
 
+/* Used size of an inline <svg>, a replaced element: CSS width/height (px, or
+ * a percentage of the parent's content box when that is definite), else its
+ * width/height attributes, else what the viewBox ratio gives from the other
+ * dimension, else 300x150 (CSS replaced-element defaults). */
+static void layout_svg_size(LayoutContext *ctx, int c, HtmlNode *dom, double *out_w, double *out_h)
+{
+    LayoutBox *b = layout_box(ctx, c);
+    int p = ctx->tree.nodes[c].parent_idx;
+    const LayoutBox *pb = p >= 0 ? layout_box(ctx, p) : NULL;
+    double pcw = pb ? pb->width - layout_horizontal_border_padding(pb) : 0.0;
+    double pch = pb && !layout_height_auto(pb) ? pb->height - layout_vertical_border_padding(pb) : 0.0;
+    double w = -1.0, h = -1.0;
+    if (b->width_percent > 0.0) { if (pcw > 0.0) w = pcw * b->width_percent / 100.0 + b->width_pct_px; }
+    else if (b->width_set) w = b->css_width;
+    if (b->height_percent > 0.0) { if (pch > 0.0) h = pch * b->height_percent / 100.0 + b->height_pct_px; }
+    else if (b->height_set) h = b->css_height;
+    const char *wa = layout_node_attribute(dom, "width");
+    const char *ha = layout_node_attribute(dom, "height");
+    if (w < 0.0 && wa && wa[0] && !strchr(wa, '%')) w = atof(wa);
+    if (h < 0.0 && ha && ha[0] && !strchr(ha, '%')) h = atof(ha);
+    double ratio = 0.0;   /* width / height */
+    const char *vb = layout_node_attribute(dom, "viewbox");
+    if (vb) {
+        double v[4];
+        if (sscanf(vb, "%lf%*[ ,]%lf%*[ ,]%lf%*[ ,]%lf", &v[0], &v[1], &v[2], &v[3]) == 4 && v[3] > 0.0)
+            ratio = v[2] / v[3];
+    }
+    if (w < 0.0) w = (h >= 0.0 && ratio > 0.0) ? h * ratio : 300.0;
+    if (h < 0.0) h = ratio > 0.0 ? w / ratio : 150.0;
+    *out_w = w;
+    *out_h = h;
+}
+
 /* Find the first <img> descendant and return its width/height attributes.
  * Used to size inline elements (like <a><img></a>) that wrap an image. */
 static bool layout_first_img_size(HtmlDocument *doc, HtmlNode *node,
@@ -4375,6 +4408,22 @@ static double layout_text_intrinsic(const LayoutBox *box, const char *text, bool
     size_t n = 0;
     double best = 0.0;
     const char *p = text;
+    /* Preserved white space (pre, and pre-wrap's max-content): each line
+     * is measured as written, spaces included. */
+    if (box->white_space == 2 || (box->white_space == 3 && want_max)) {
+        while (*p) {
+            const char *st = p;
+            while (*p && *p != '\n') p++;
+            size_t ll = (size_t)(p - st);
+            if (ll >= sizeof(buf)) ll = sizeof(buf) - 1;
+            memcpy(buf, st, ll);
+            buf[ll] = '\0';
+            double w = 0.0;
+            if (ll > 0 && layout_measure_text_styled(box, buf, fs, &w, NULL) && w > best) best = w;
+            if (*p) p++;
+        }
+        return best;
+    }
     /* Collapse runs of white space; for min-content measure each word. */
     while (*p) {
         while (*p && isspace((unsigned char)*p)) p++;
@@ -4911,7 +4960,16 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                     size_t cl = 0;
                     concat[0] = '\0';
                     layout_concat_dom_text(ctx->doc, dom, concat, sizeof(concat), &cl);
-                    if (cl > 0 && !layout_text_is_whitespace(concat)) text = concat;
+                    if (cl > 0 && !layout_text_is_whitespace(concat)) {
+                        text = concat;
+                    } else if (cl > 0 && child->display == CSS_DISPLAY_INLINE &&
+                               layout_horizontal_border_padding(child) <= 0.0) {
+                        /* <span> </span> between inline content (YouTube's
+                         * hashtag separators) is a collapsible space. */
+                        HtmlNode *fc = html_node_first_child(ctx->doc, dom);
+                        if (fc && fc->type == HTML_NODE_TEXT && !html_node_next_sibling(ctx->doc, fc))
+                            is_whitespace_run = true;
+                    }
                 }
             }
 
@@ -4957,6 +5015,9 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                 if (from_img) {
                     child->width = iw;
                     child->height = ih;
+                } else if (dom && dom->type == HTML_NODE_ELEMENT && dom->tag_name &&
+                           strcasecmp(dom->tag_name, "svg") == 0) {
+                    layout_svg_size(ctx, c, dom, &child->width, &child->height);
                 } else if (dom && layout_is_replaced_form_element(dom->tag_name)) {
                     if (child->width <= 0.0) child->width = 80.0;
                     if (child->height <= 0.0) child->height = 20.0;

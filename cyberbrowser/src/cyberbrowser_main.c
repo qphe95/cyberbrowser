@@ -34,6 +34,7 @@
 #include "browser/image_api.h"
 #include "browser/layout_api.h"
 #include "cyber_profile.h"
+#include "dom_store.h"
 
 /* stb_image_write implementation lives in cyber_profile.c (library side). */
 #include "stb_image_write.h"
@@ -1476,6 +1477,17 @@ int main(int argc, char *argv[]) {
         {
             unsigned long long now = platform_get_time_ms();
             uint64_t stamp = dom_change_stamp();
+            if (cyber_getenv("CYBER_SETTLE_LOG")) {
+                static uint64_t ps, pa, pw, pl;
+                fprintf(stderr, "[settle] t=%llu changes=%llu (connected %llu structure %llu style %llu layoutreq %llu) net=%d images=%d timers=%d\n",
+                        now - settle_start_ms, (unsigned long long)(stamp - last_stamp),
+                        (unsigned long long)(g_dom.connected_version - pa), (unsigned long long)(g_dom.structure_version - ps),
+                        (unsigned long long)(JS_watched_write_epoch - pw),
+                        (unsigned long long)(g_dom_layout_requests - pl),
+                        js_quickjs_network_pending(), had_images, had_timers);
+                ps = g_dom.structure_version; pa = g_dom.connected_version;
+                pw = JS_watched_write_epoch; pl = g_dom_layout_requests;
+            }
             if (stamp != last_stamp || had_images || js_quickjs_network_pending() > 0) {
                 last_stamp = stamp;
                 last_change_ms = now;

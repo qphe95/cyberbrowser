@@ -511,6 +511,7 @@ void dom_attach_shadow(NodeId host, NodeId shadow) {
     g_dom.flags[sh] |= DOMF_SHADOW_ROOT;
     if (pr != sh) merge_trees(pr, sh);
     if (g_dom.flags[sh] & (DOMF_CE_CANDIDATE | DOMF_CE_DESC)) mark_ce_desc(sh);
+    dom_note_connected_change(h);
     g_dom.structure_version++;
 }
 

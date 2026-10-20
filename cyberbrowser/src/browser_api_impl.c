@@ -2551,6 +2551,28 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     DEF_FUNC(ctx, document, "querySelectorAll", js_document_querySelectorAll, 1);
     DEF_FUNC(ctx, document, "getElementsByTagName", js_document_get_elements_by_tag_name, 1);
     DEF_FUNC(ctx, document, "getElementsByClassName", js_document_getElementsByClassName, 1);
+    /* document.all: the legacy HTMLAllCollection, an [[IsHTMLDDA]] object
+     * (typeof "undefined", falsy, == null) as in browsers.  Scripts tell it
+     * apart from undefined with `v !== document.all` (YouTube's DOM-value
+     * sanitizer does, and otherwise turns undefined bindings into
+     * "zClosurez").  Defined on the document and its prototype, so the
+     * page's document wrapper has it too. */
+    {
+        GCValue all = JS_NewObject(ctx);
+        JS_SetIsHTMLDDA(ctx, all);
+        static const char all_js[] =
+            "(function(all){"
+            "  all.item = function(i){ return document.getElementsByTagName('*')[i] || null; };"
+            "  all.namedItem = function(n){ return document.getElementById(String(n)) || null; };"
+            "  Object.defineProperty(all, 'length', { get: function(){ return document.getElementsByTagName('*').length; } });"
+            "})";
+        GCValue init = JS_Eval(ctx, all_js, sizeof(all_js) - 1, "<document-all>", JS_EVAL_TYPE_GLOBAL);
+        if (JS_IsFunction(ctx, init)) JS_Call(ctx, init, JS_UNDEFINED, 1, &all);
+        JS_SetPropertyStr(ctx, document, "all", all);
+        GCValue document_proto = JS_GetPrototype(ctx, document);
+        if (JS_IsObject(document_proto)) JS_SetPropertyStr(ctx, document_proto, "all", all);
+        JS_SetPropertyStr(ctx, global, "__cyber_document_all", all);
+    }
     DEF_FUNC(ctx, document, "getElementsByName", js_empty_array, 1);
     GCValue doc_style_sheets_getter = JS_NewCFunction(ctx, js_document_get_style_sheets, "get styleSheets", 0);
     JS_DefinePropertyGetSet(ctx, document, JS_NewAtom(ctx, "styleSheets"),

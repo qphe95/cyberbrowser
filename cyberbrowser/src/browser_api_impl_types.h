@@ -352,8 +352,9 @@ extern volatile int g_dom_needs_layout;
  * store versions do not see. */
 extern uint64_t g_dom_layout_requests;
 
-/* Changes whenever the rendered document may have changed: store tree,
- * attribute and text versions, watched (style) object writes and layout
+/* Changes whenever the rendered document may have changed: tree,
+ * attribute and text changes in the document (not detached nodes),
+ * watched (style) object writes and layout
  * requests.  Equal stamps mean nothing a script did could show. */
 uint64_t dom_change_stamp(void);
 

@@ -429,6 +429,7 @@ void dom_set_attr(NodeId id, CssAtom name, const char *value, size_t n) {
         else g_dom.id_atom[s] = CSS_ATOM_NONE;
     }
     if (name == id_name || name == class_name) g_dom.class_version++;
+    dom_note_connected_change(s);
     g_dom.attr_version++;
 }
 
@@ -450,6 +451,7 @@ bool dom_remove_attr(NodeId id, CssAtom name) {
         const char *nm = css_atom_str(name);
         if (nm && strcmp(nm, "id") == 0) g_dom.id_atom[s] = CSS_ATOM_NONE;
         if (nm && (strcmp(nm, "id") == 0 || strcmp(nm, "class") == 0)) g_dom.class_version++;
+        dom_note_connected_change(s);
         g_dom.attr_version++;
         return true;
     }
@@ -474,6 +476,7 @@ void dom_set_text(NodeId id, const char *s, size_t n) {
     uint32_t slot = dom_slot(id);
     dom_str_release(&g_dom.text[slot]);
     g_dom.text[slot] = dom_str_dup(s, n);
+    dom_note_connected_change(slot);
     g_dom.text_version++;
 }
 
@@ -501,6 +504,7 @@ void dom_link_before(NodeId parent, NodeId child, NodeId ref) {
         g_dom.prev[r] = c;
     }
     g_dom.structure_version++;
+    dom_note_connected_change(p);
 }
 
 void dom_link_append(NodeId parent, NodeId child) {
@@ -511,6 +515,7 @@ void dom_unlink(NodeId child) {
     if (!dom_valid(child)) return;
     uint32_t c = dom_slot(child), p = g_dom.parent[c];
     if (!p) return;
+    dom_note_connected_change(p);
     if (g_dom.prev[c]) g_dom.next[g_dom.prev[c]] = g_dom.next[c];
     else g_dom.first[p] = g_dom.next[c];
     if (g_dom.next[c]) g_dom.prev[g_dom.next[c]] = g_dom.prev[c];
@@ -692,4 +697,11 @@ const uint32_t *dom_id_index_lookup(CssAtom a, uint32_t *n) {
     IdBucket *b = a ? id_bucket(a, false) : NULL;
     *n = b ? b->n : 0;
     return b ? b->slots : NULL;
+}
+
+extern NodeId g_dom_document;
+
+void dom_note_connected_change(uint32_t s) {
+    if (!s || !g_dom_document || !dom_valid(g_dom_document)) return;
+    if (dom_tree_root_slot(s) == dom_slot(g_dom_document)) g_dom.connected_version++;
 }

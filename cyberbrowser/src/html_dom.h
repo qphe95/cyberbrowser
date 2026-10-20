@@ -142,6 +142,8 @@ GCValue html_create_js_document(JSContextHandle ctx, HtmlDocument *doc);
 /* Serialize a JS DOM node (and its descendants) to a heap-allocated HTML
  * string. The caller must free the returned pointer. */
 char *html_serialize_js_node(JSContextHandle ctx, GCValue node);
+/* An element style object as CSS text (malloc'ed), NULL when empty. */
+char *html_style_object_css_text(JSContextHandle ctx, GCValue style_obj);
 
 /* Build a fresh native HtmlDocument from the JS document's current DOM. */
 HtmlDocument *html_document_from_js_dom(JSContextHandle ctx, GCValue js_doc);
