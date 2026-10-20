@@ -429,7 +429,8 @@ GCValue js_css_style_decl_set_css_text(JSContextHandle ctx, GCValue this_val, in
             if (!name || name[0] == '_') continue;
             GCValue val = JS_GetPropertyStr(ctx, this_val, name);
             if (JS_IsString(val)) {
-                JS_SetPropertyStr(ctx, this_val, name, JS_UNDEFINED);
+                /* Unset properties read as "" (CSSOM), not undefined. */
+                JS_SetPropertyStr(ctx, this_val, name, JS_NewString(ctx, ""));
             }
         }
         JS_FreePropertyEnum(ctx, props, prop_count);

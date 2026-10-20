@@ -61,6 +61,7 @@ set(BE_SOURCES
     src/browser/console_api.c
     src/browser/dom_api.c
     src/browser/image_api.c
+    src/browser/layout_api.c
     src/browser/event_api.c
     src/browser/shadow_dom_api.c
     src/browser/misc_api.c

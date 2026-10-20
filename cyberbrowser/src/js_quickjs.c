@@ -676,14 +676,7 @@ GCValue js_video_constructor(JSContextHandle ctx, GCValue new_target, int argc, 
      * The wrapper factory passes a null new_target and binds its own node. */
     if (!JS_IsNull(new_target)) dom_bind(ctx, dom_create_element_str("video", 5, g_dom_document), obj);
 
-    /* Add dimension properties expected by player code */
-    JS_SetPropertyStr(ctx, obj, "clientWidth", JS_NewInt32(ctx, 640));
-    JS_SetPropertyStr(ctx, obj, "clientHeight", JS_NewInt32(ctx, 360));
-    JS_SetPropertyStr(ctx, obj, "offsetWidth", JS_NewInt32(ctx, 640));
-    JS_SetPropertyStr(ctx, obj, "offsetHeight", JS_NewInt32(ctx, 360));
-    JS_SetPropertyStr(ctx, obj, "scrollWidth", JS_NewInt32(ctx, 640));
-    JS_SetPropertyStr(ctx, obj, "scrollHeight", JS_NewInt32(ctx, 360));
-
+    /* clientWidth/offsetWidth/... are Element.prototype layout getters. */
     return obj;
 }
 
@@ -2135,12 +2128,15 @@ static GCValue js_canvas_get_context(JSContextHandle ctx, GCValue this_val, int 
 
 JSCFunction *js_canvas_get_context_fn(void) { return js_canvas_get_context; }
 
-/* A new element style object (CSSStyleDeclaration): the plain object
- * document.createElement() has always given elements. */
+/* A new element style object (CSSStyleDeclaration).  Its prototype carries
+ * the cssText / length accessors; without it `style.cssText = ...` would
+ * only store a plain property and declare nothing. */
 GCValue css_new_style_object(JSContextHandle ctx, GCValue el) {
     (void)el;
     GCValue style = JS_NewObject(ctx);
     if (JS_IsException(style)) return JS_UNDEFINED;
+    GCValue proto = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__CSSStyleDeclarationProto");
+    if (JS_IsObject(proto)) JS_SetPrototype(ctx, style, proto);
     JS_SetPropertyStr(ctx, style, "animationTimingFunction", JS_NewString(ctx, ""));
     JS_SetPropertyStr(ctx, style, "removeProperty",
         JS_NewCFunction(ctx, js_style_remove_property, "removeProperty", 1));

@@ -16,6 +16,7 @@
 #include "css_parser.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
+#include "layout_api.h"
 // mbedtls includes for Crypto API (used by DOMException polyfill)
 #include "mbedtls/md.h"
 
@@ -3700,16 +3701,19 @@ JSClassDef js_dom_rect_read_only_class_def = {
     .finalizer = js_dom_rect_read_only_finalizer,
 };
 
-// Element.prototype.getBoundingClientRect - returns a DOMRect
+// Element.prototype.getBoundingClientRect - the border box from the cached
+// layout (all zeros without a box); the page is never scrolled.
 GCValue js_element_getBoundingClientRect(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     DOMRectDataHandle rect = dom_rect_create();
     if (SAFE_IS_NULL(rect)) return JS_ThrowTypeError(ctx, "Invalid DOMRect");
-    
-    SAFE_SET(rect, DOMRectDataHandle, x, 0);
-    SAFE_SET(rect, DOMRectDataHandle, y, 0);
-    SAFE_SET(rect, DOMRectDataHandle, width, 640);
-    SAFE_SET(rect, DOMRectDataHandle, height, 360);
+
+    LayoutQueryBox box;
+    layout_query_element_box(ctx, this_val, &box);
+    SAFE_SET(rect, DOMRectDataHandle, x, box.x);
+    SAFE_SET(rect, DOMRectDataHandle, y, box.y);
+    SAFE_SET(rect, DOMRectDataHandle, width, box.width);
+    SAFE_SET(rect, DOMRectDataHandle, height, box.height);
     dom_rect_compute_bounds(rect);
     
     GCValue obj = JS_NewObjectClass(ctx, js_dom_rect_class_id);

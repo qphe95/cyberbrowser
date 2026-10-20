@@ -1,0 +1,38 @@
+/* Layout metrics for scripts: offsetWidth, clientWidth, getBoundingClientRect, ... */
+#ifndef LAYOUT_API_H
+#define LAYOUT_API_H
+
+#include <stdbool.h>
+#include <stdint.h>
+#include "quickjs.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Border box of an element in page coordinates, from the cached layout.
+ * Returns false (all zeros) when the element has no box: not connected,
+ * display:none itself or through an ancestor, or not an element. */
+typedef struct {
+    double x, y, width, height;
+    double border_top, border_right, border_bottom, border_left;
+    bool inline_level;
+} LayoutQueryBox;
+
+bool layout_query_element_box(JSContextHandle ctx, GCValue element, LayoutQueryBox *out);
+
+/* offsetWidth/Height/Top/Left, offsetParent, clientWidth/Height/Top/Left,
+ * scrollWidth/Height, scrollTop/Left on Element.prototype. */
+void layout_api_install(JSContextHandle ctx, GCValue element_proto);
+
+/* Forced layouts run / queries answered since start (diagnostics, tests). */
+void layout_api_stats(uint64_t *queries, uint64_t *layouts, uint64_t *layout_ms);
+
+/* Drop the cached layout (the next query lays out again). */
+void layout_api_invalidate(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

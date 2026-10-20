@@ -32,6 +32,7 @@
 #include "text_shaper.h"
 #include "image_cache.h"
 #include "browser/image_api.h"
+#include "browser/layout_api.h"
 #include "cyber_profile.h"
 
 /* stb_image_write implementation lives in cyber_profile.c (library side). */
@@ -758,6 +759,9 @@ static void on_image_progress(const char *url, void *user_data)
  * monospace (Courier) in 8-11, each as regular/bold/italic/bold-italic. */
 static void register_font_table(void)
 {
+    /* Font directories relative to the working directory, then to the
+     * executable (so a run from any directory finds them; the build
+     * directory sits next to fonts/). */
     static const char *rel_dirs[] = {
         "cyberbrowser/fonts/",
         "fonts/",
@@ -765,25 +769,38 @@ static void register_font_table(void)
         "../../fonts/",
         NULL
     };
+    static const char *exe_rel_dirs[] = { "fonts/", "../fonts/", NULL };
+    char dirs[8][512];
+    int ndirs = 0;
+    for (int d = 0; rel_dirs[d]; d++)
+        snprintf(dirs[ndirs++], sizeof(dirs[0]), "%s", rel_dirs[d]);
+    const char *exe_dir = platform_get_exe_dir();
+    if (exe_dir && exe_dir[0]) {
+        for (int d = 0; exe_rel_dirs[d]; d++)
+            snprintf(dirs[ndirs++], sizeof(dirs[0]), "%s%s", exe_dir, exe_rel_dirs[d]);
+    }
     static const char *slot_files[DL_FONT_SLOTS] = {
         "arial.ttf",  "arialbd.ttf", "ariali.ttf",  "arialbi.ttf",
         "times.ttf",  "timesbd.ttf", "timesi.ttf",  "timesbi.ttf",
         "cour.ttf",   "courbd.ttf",  "couri.ttf",   "courbi.ttf"
     };
-    char path[512];
+    char path[1024];
     for (int s = 0; s < DL_FONT_SLOTS; s++) {
-        for (int d = 0; rel_dirs[d]; d++) {
-            snprintf(path, sizeof(path), "%s%s", rel_dirs[d], slot_files[s]);
+        for (int d = 0; d < ndirs; d++) {
+            snprintf(path, sizeof(path), "%s%s", dirs[d], slot_files[s]);
             if (display_list_set_font(s, path, 16.0f)) break;
         }
     }
     /* Fallback: the legacy Roboto default if Arial could not be loaded. */
     if (!display_list_get_font(0)) {
-        for (int d = 0; rel_dirs[d]; d++) {
-            snprintf(path, sizeof(path), "%sRoboto-Regular.ttf", rel_dirs[d]);
+        for (int d = 0; d < ndirs; d++) {
+            snprintf(path, sizeof(path), "%sRoboto-Regular.ttf", dirs[d]);
             if (display_list_set_default_font(path, 16.0f)) break;
         }
     }
+    if (!display_list_get_font(0))
+        printf("WARNING: no font found (looked in fonts/ near the working directory and %s); text will not be measured or drawn\n",
+               exe_dir ? exe_dir : "the executable");
 }
 
 static bool render_document_to_jpg(HtmlDocument *doc, ImageCache *image_cache,
@@ -868,6 +885,7 @@ int main(int argc, char *argv[]) {
             if (!platform_init()) { printf("FATAL: platform_init() failed\n"); return 1; }
             if (!platform_http_init()) { printf("FATAL: platform_http_init() failed\n"); return 1; }
             if (!init_browser_context()) { printf("FATAL: init_browser_context() failed\n"); return 1; }
+            register_font_table();   /* layout queries measure text */
             FILE *pf = fopen(probe, "rb");
             if (!pf) { printf("FATAL: cannot open probe %s\n", probe); return 1; }
             fseek(pf, 0, SEEK_END);
@@ -933,6 +951,10 @@ int main(int argc, char *argv[]) {
     }
     printf("init_browser_context ok\n");
 
+    /* Fonts before any script runs: layout queries from scripts
+     * (offsetHeight, getBoundingClientRect) measure text with them. */
+    register_font_table();
+
     /* Make the start URL available to the DOM / URL resolution code. */
     g_cyber_start_url = start_url;
 
@@ -981,8 +1003,6 @@ int main(int argc, char *argv[]) {
             if (!ldoc) { printf("FATAL: html_parse failed\n"); return 1; }
             ImageCache *lcache = image_cache_create();
             display_list_set_image_cache(lcache);
-            /* Register the font table so text renders, matching the main path. */
-            register_font_table();
             render_document_to_jpg(ldoc, lcache, "layout_probe.jpg");
             /* Layout requested images (natural sizes) and paint requested
              * pixels: once they are in, lay out and paint again. */
@@ -1372,8 +1392,6 @@ int main(int argc, char *argv[]) {
     HtmlDocument *doc = NULL;
     image_api_scan(g_ctx);
 
-    register_font_table();
-
     int loop_iterations = 0;
     /* Pages with recurring timers (setInterval, polling) never go quiet, so
      * bound the settle phase by wall-clock time too (CYBER_SETTLE_MS,
@@ -1649,6 +1667,13 @@ int main(int argc, char *argv[]) {
     image_cache_destroy(image_cache);
     free(html);
 
+    {
+        uint64_t lq_queries = 0, lq_layouts = 0, lq_ms = 0;
+        layout_api_stats(&lq_queries, &lq_layouts, &lq_ms);
+        printf("Script layout queries: %llu (forced layouts: %llu, %llu ms)\n",
+               (unsigned long long)lq_queries, (unsigned long long)lq_layouts,
+               (unsigned long long)lq_ms);
+    }
     printf("\nStart page loaded successfully.\n");
 
     CP_END("load-page");

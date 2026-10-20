@@ -11,6 +11,7 @@
 #include <quickjs_gc_unified.h>
 #include "browser_api_impl.h"
 #include "browser/image_api.h"
+#include "browser/layout_api.h"
 #include "browser_api_impl_types.h"
 #include "browser_api_impl_handle_helpers.h"
 #include "browser_api_impl_internal.h"
@@ -2266,6 +2267,9 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_DefinePropertyGetSet(ctx, element_proto, style_atom, style_getter, style_setter, JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, style_atom);
 
+    // Layout metrics (offsetWidth, clientWidth, scrollHeight, ...) from a forced layout
+    layout_api_install(ctx, element_proto);
+
     // Fullscreen API no-op stubs (document.fullscreenEnabled reports support)
     JS_SetPropertyStr(ctx, element_proto, "requestFullscreen",
         JS_NewCFunction(ctx, js_dummy_function, "requestFullscreen", 0));
@@ -2605,14 +2609,9 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, doc_element, "appendChild",
         JS_NewCFunction(ctx, js_node_appendChild_real, "appendChild", 1));
     
-    // Add clientWidth/clientHeight properties (viewport dimensions)
-    DEF_PROP_INT(ctx, doc_element, "clientWidth", 1024);
-    DEF_PROP_INT(ctx, doc_element, "clientHeight", 2400);
-    DEF_PROP_INT(ctx, doc_element, "scrollWidth", 1024);
-    DEF_PROP_INT(ctx, doc_element, "scrollHeight", 2400);
-    DEF_PROP_INT(ctx, doc_element, "offsetWidth", 1024);
-    DEF_PROP_INT(ctx, doc_element, "offsetHeight", 2400);
-    
+    // clientWidth/scrollHeight/... come from Element.prototype (layout_api.c);
+    // the root element's client box is the viewport.
+
     // Add style object for CSS property detection (needed by Web Animations polyfill)
     GCValue doc_style = JS_NewObject(ctx);
     if (!JS_IsException(doc_style)) {
@@ -2658,14 +2657,6 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_NewCFunction(ctx, js_element_querySelector_real, "querySelector", 1));
     JS_SetPropertyStr(ctx, body_element, "querySelectorAll",
         JS_NewCFunction(ctx, js_element_querySelectorAll_real, "querySelectorAll", 1));
-    
-    // Add clientWidth/clientHeight properties to body (viewport dimensions)
-    DEF_PROP_INT(ctx, body_element, "clientWidth", 1024);
-    DEF_PROP_INT(ctx, body_element, "clientHeight", 2400);
-    DEF_PROP_INT(ctx, body_element, "scrollWidth", 1024);
-    DEF_PROP_INT(ctx, body_element, "scrollHeight", 2400);
-    DEF_PROP_INT(ctx, body_element, "offsetWidth", 1024);
-    DEF_PROP_INT(ctx, body_element, "offsetHeight", 2400);
     
     // Add style object for body (commonly accessed by page scripts)
     GCValue body_style = JS_NewObject(ctx);
@@ -4393,14 +4384,24 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         "    this._json = undefined;\n"
         "    this._text = undefined;\n"
         "  }\n"
+        /* A fetched response reads its body from the native response
+         * (_native, whose readers can be called repeatedly), so clones share
+         * it: response.clone() into CacheStorage keeps the body. */
         "  Response.prototype.clone = function() {\n"
         "    if (this.bodyUsed) throw new TypeError('Already read');\n"
-        "    return new Response(this._body, {status:this.status, statusText:this.statusText, headers:this.headers});\n"
+        "    var c = new Response(this._body, {status:this.status, statusText:this.statusText, headers:this.headers});\n"
+        "    c.type = this.type; c.url = this.url; c.redirected = this.redirected;\n"
+        "    c._text = this._text; c._json = this._json; c._native = this._native;\n"
+        "    return c;\n"
         "  };\n"
-        "  Response.prototype._consume = function() { if (this.bodyUsed) throw new TypeError('Already read'); this.bodyUsed = true; };\n"
-        "  Response.prototype.text = function() {\n"
-        "    this._consume();\n"
+        "  Response.prototype._consume = function() {\n"
+        "    if (this.bodyUsed) return Promise.reject(new TypeError('Already read'));\n"
+        "    this.bodyUsed = true;\n"
+        "    return null;\n"
+        "  };\n"
+        "  Response.prototype._readText = function() {\n"
         "    var self = this;\n"
+        "    if (self._native) return self._native.text();\n"
         "    return Promise.resolve().then(function(){\n"
         "      if (self._text !== undefined) return self._text;\n"
         "      if (self._body === null || self._body === undefined) return '';\n"
@@ -4408,9 +4409,22 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         "      return String(self._body);\n"
         "    });\n"
         "  };\n"
-        "  Response.prototype.json = function() { this._consume(); return this.text().then(function(t){ return JSON.parse(t); }); };\n"
-        "  Response.prototype.arrayBuffer = function() { this._consume(); return Promise.resolve(new ArrayBuffer(0)); };\n"
-        "  Response.prototype.blob = function() { this._consume(); return Promise.resolve({size:0, type:''}); };\n"
+        "  Response.prototype.text = function() { return this._consume() || this._readText(); };\n"
+        "  Response.prototype.json = function() {\n"
+        "    var used = this._consume(); if (used) return used;\n"
+        "    if (this._native) return this._native.json();\n"
+        "    return this._readText().then(function(t){ return JSON.parse(t); });\n"
+        "  };\n"
+        "  Response.prototype.arrayBuffer = function() {\n"
+        "    var used = this._consume(); if (used) return used;\n"
+        "    if (this._native) return this._native.arrayBuffer();\n"
+        "    return this._readText().then(function(t){ return new TextEncoder().encode(t).buffer; });\n"
+        "  };\n"
+        "  Response.prototype.blob = function() {\n"
+        "    var used = this._consume(); if (used) return used;\n"
+        "    if (this._native) return this._native.blob();\n"
+        "    return Promise.resolve({size:0, type:''});\n"
+        "  };\n"
         "  Response.error = function() { return new Response(null, {status:0}); };\n"
         "  Response.redirect = function(url, status) { return new Response(null, {status: status||302, headers:{Location: url}}); };\n"
         "  Response.json = function(data, init) { return new Response(JSON.stringify(data), init); };\n"
@@ -4442,10 +4456,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         "      resp.redirected = !!nativeResp.redirected;\n"
         "      resp._text = nativeResp.__body_text;\n"
         "      if (nativeResp.__body_json !== undefined) resp._json = nativeResp.__body_json;\n"
-        "      resp.text = function(){ var self=this; self._consume(); return nativeResp.text(); };\n"
-        "      resp.json = function(){ var self=this; self._consume(); return nativeResp.json(); };\n"
-        "      resp.arrayBuffer = function(){ var self=this; self._consume(); return nativeResp.arrayBuffer(); };\n"
-        "      resp.blob = function(){ var self=this; self._consume(); return nativeResp.blob(); };\n"
+        "      resp._native = nativeResp;\n"
         "      return resp;\n"
         "    });\n"
         "  };\n"
