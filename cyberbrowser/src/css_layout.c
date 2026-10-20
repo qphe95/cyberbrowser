@@ -247,6 +247,11 @@ static bool layout_build_nodes(LayoutContext *ctx, const int *map)
         box->margin_em[0] = box->margin_em[1] = box->margin_em[2] = box->margin_em[3] = 0.0;
         box->padding_em[0] = box->padding_em[1] = box->padding_em[2] = box->padding_em[3] = 0.0;
         box->em_deferred = 0;
+        box->pct_sides = 0;
+        box->minmax_pct_bits = 0;
+        box->width_pct_px = 0.0;
+        box->height_pct_px = 0.0;
+        box->flex_basis_pct_px = 0.0;
         box->flex_shrink = 1.0;
         box->min_width = 0.0;
         box->max_width = 0.0;
@@ -262,6 +267,7 @@ static bool layout_build_nodes(LayoutContext *ctx, const int *map)
         box->gap_row = 0.0;
         box->gap_col = 0.0;
         box->aspect_ratio = 0.0;
+        box->aspect_ratio_prop = 0;
     }
 
     return true;
@@ -392,14 +398,18 @@ static double css_unit_factor(const char *unit, double parent_value, double font
     return 1.0;
 }
 
+/* A length as px + pct x basis: percentages stay symbolic until the basis
+ * (usually the containing block width) is known.  pct is a fraction
+ * (50% -> 0.5). */
+typedef struct { double px, pct; } CssLen;
+
 /* Minimal calc() expression evaluator. Supports +, -, *, /, parentheses and
- * length/percentage operands.  Returns 0 for unsupported expressions. */
+ * length/percentage operands; a product or quotient needs one side to be a
+ * plain number.  Returns 0 for unsupported expressions. */
 typedef struct {
     const char *s;
     size_t len;
     size_t pos;
-    double parent_value;
-    double viewport_value;
     double font_size;
 } CalcParser;
 
@@ -408,16 +418,19 @@ static void calc_skip_space(CalcParser *p)
     while (p->pos < p->len && isspace((unsigned char)p->s[p->pos])) p->pos++;
 }
 
-static double calc_parse_expr(CalcParser *p);
+static CssLen calc_parse_expr(CalcParser *p);
 
-static double calc_parse_primary(CalcParser *p)
+static CssLen calc_parse_primary(CalcParser *p)
 {
+    CssLen zero = { 0.0, 0.0 };
     calc_skip_space(p);
-    if (p->pos >= p->len) return 0.0;
+    if (p->pos >= p->len) return zero;
 
+    /* Nested calc( and bare parentheses. */
+    if (p->len - p->pos > 5 && strncasecmp(p->s + p->pos, "calc(", 5) == 0) p->pos += 4;
     if (p->s[p->pos] == '(') {
         p->pos++;
-        double v = calc_parse_expr(p);
+        CssLen v = calc_parse_expr(p);
         calc_skip_space(p);
         if (p->pos < p->len && p->s[p->pos] == ')') p->pos++;
         return v;
@@ -426,10 +439,14 @@ static double calc_parse_primary(CalcParser *p)
     const char *start = p->s + p->pos;
     char *end = NULL;
     double num = strtod(start, &end);
-    if (end == start) return 0.0;
+    if (end == start) return zero;
     p->pos = (size_t)(end - p->s);
-    calc_skip_space(p);
 
+    if (p->pos < p->len && p->s[p->pos] == '%') {
+        p->pos++;
+        CssLen v = { 0.0, num / 100.0 };
+        return v;
+    }
     if (p->pos < p->len && isalpha((unsigned char)p->s[p->pos])) {
         const char *unit_start = p->s + p->pos;
         while (p->pos < p->len && isalpha((unsigned char)p->s[p->pos])) p->pos++;
@@ -440,81 +457,88 @@ static double calc_parse_primary(CalcParser *p)
             for (size_t i = 0; i < unit_len; i++) unit[i] = (char)tolower((unsigned char)unit[i]);
         }
         bool known;
-        double f = css_unit_factor(unit, p->parent_value, p->font_size, &known);
+        double f = css_unit_factor(unit, 0.0, p->font_size, &known);
         /* px or unknown unit: treat number as px */
-        return num * f;
+        CssLen v = { num * f, 0.0 };
+        return v;
     }
-    return num; /* unitless */
+    CssLen v = { num, 0.0 }; /* unitless number */
+    return v;
 }
 
-static double calc_parse_term(CalcParser *p)
+static CssLen calc_parse_term(CalcParser *p)
 {
-    double lhs = calc_parse_primary(p);
+    CssLen lhs = calc_parse_primary(p);
     for (;;) {
         calc_skip_space(p);
         if (p->pos >= p->len) break;
         char op = p->s[p->pos];
         if (op != '*' && op != '/') break;
         p->pos++;
-        double rhs = calc_parse_primary(p);
-        if (op == '*') lhs *= rhs;
-        else if (rhs != 0.0) lhs /= rhs;
+        CssLen rhs = calc_parse_primary(p);
+        if (op == '*') {
+            /* number * length or length * number */
+            double k = rhs.pct == 0.0 ? rhs.px : lhs.px;
+            CssLen l = rhs.pct == 0.0 ? lhs : rhs;
+            lhs.px = l.px * k;
+            lhs.pct = l.pct * k;
+        } else if (rhs.px != 0.0) {
+            lhs.px /= rhs.px;
+            lhs.pct /= rhs.px;
+        }
     }
     return lhs;
 }
 
-static double calc_parse_expr(CalcParser *p)
+static CssLen calc_parse_expr(CalcParser *p)
 {
     calc_skip_space(p);
-    double lhs = calc_parse_term(p);
+    CssLen lhs = calc_parse_term(p);
     for (;;) {
         calc_skip_space(p);
         if (p->pos >= p->len) break;
         char op = p->s[p->pos];
         if (op != '+' && op != '-') break;
         p->pos++;
-        double rhs = calc_parse_term(p);
-        if (op == '+') lhs += rhs;
-        else lhs -= rhs;
+        CssLen rhs = calc_parse_term(p);
+        double sign = op == '+' ? 1.0 : -1.0;
+        lhs.px += sign * rhs.px;
+        lhs.pct += sign * rhs.pct;
     }
     return lhs;
 }
 
-static double css_parse_calc(const char *value, double parent_value, double viewport_value, double font_size)
+/* A length value (number+unit, percentage or calc()) as px + pct.  Unitless
+ * numbers and unknown units are px. */
+static CssLen css_parse_len(const char *value, double font_size)
 {
-    if (!value) return 0.0;
-    while (*value && isspace((unsigned char)*value)) value++;
-    if (strncasecmp(value, "calc(", 5) != 0) return 0.0;
-    value += 5;
-    CalcParser p = {0};
-    p.s = value;
-    p.len = strlen(value);
-    p.parent_value = parent_value;
-    p.viewport_value = viewport_value;
-    p.font_size = font_size;
-    double result = calc_parse_expr(&p);
-    calc_skip_space(&p);
-    if (p.pos < p.len && p.s[p.pos] == ')') p.pos++;
-    return result;
-}
-
-static double css_parse_length(const char *value, double parent_value, double viewport_value, double font_size)
-{
-    if (!value || !*value) return 0.0;
+    CssLen out = { 0.0, 0.0 };
+    if (!value || !*value) return out;
     while (*value && isspace((unsigned char)*value)) value++;
     if (strncasecmp(value, "calc(", 5) == 0) {
-        return css_parse_calc(value, parent_value, viewport_value, font_size);
+        CalcParser p = {0};
+        p.s = value + 5;
+        p.len = strlen(p.s);
+        p.font_size = font_size;
+        return calc_parse_expr(&p);
     }
     char *end = NULL;
     double num = strtod(value, &end);
-    if (end == value) return 0.0;
-
+    if (end == value) return out;
     while (*end && isspace((unsigned char)*end)) end++;
-    (void)viewport_value;
-    if (*end == '\0') return num;   /* unitless: px */
+    if (*end == '%') { out.pct = num / 100.0; return out; }
+    if (*end == '\0') { out.px = num; return out; }
     bool known;
-    double f = css_unit_factor(end, parent_value, font_size, &known);
-    return num * f;                  /* unknown units: px */
+    out.px = num * css_unit_factor(end, 0.0, font_size, &known);
+    return out;
+}
+
+/* A length resolved now, percentages against parent_value. */
+static double css_parse_length(const char *value, double parent_value, double viewport_value, double font_size)
+{
+    (void)viewport_value;
+    CssLen l = css_parse_len(value, font_size);
+    return l.px + l.pct * parent_value;
 }
 
 static bool css_parse_color(const char *value, double *r, double *g, double *b, double *a)
@@ -644,6 +668,127 @@ static int css_token_is_em(const char *tok, double *ratio)
  * em-dimensioned; when em_out is non-NULL it receives those sides' ratios
  * (side order top/right/bottom/left).  Pixel outputs always receive a
  * provisional value resolved against the current font-size. */
+/* Split a space-separated value list into at most `max` tokens, keeping
+ * parenthesized groups (calc(9 / 16 * 100%)) whole.  Returns the count. */
+static int css_split_values(const char *value, char out[][128], int max)
+{
+    int n = 0;
+    const char *p = value ? value : "";
+    while (*p && n < max) {
+        while (*p == ' ' || *p == '\t' || *p == '\n') p++;
+        if (!*p) break;
+        size_t len = 0;
+        int depth = 0;
+        while (*p && (depth > 0 || (*p != ' ' && *p != '\t' && *p != '\n'))) {
+            if (*p == '(') depth++;
+            else if (*p == ')' && depth > 0) depth--;
+            if (len < 127) out[n][len++] = *p;
+            p++;
+        }
+        out[n][len] = '\0';
+        n++;
+    }
+    return n;
+}
+
+/* Expand a 1-4 value side list to top/right/bottom/left token indexes. */
+static void css_side_indexes(int count, int idx[4])
+{
+    static const int map[5][4] = { {0,0,0,0}, {0,0,0,0}, {0,1,0,1}, {0,1,2,1}, {0,1,2,3} };
+    for (int i = 0; i < 4; i++) idx[i] = map[count > 4 ? 4 : count][i];
+}
+
+/* Record which margin (padding=false) or padding sides have a percentage
+ * part, for resolution against the containing block width at layout time.
+ * `side` is 0..3 for a longhand, -1 for the shorthand.  The side fields get
+ * the px part meanwhile. */
+static void layout_note_side_pcts(LayoutBox *box, const char *value, bool padding, int side)
+{
+    double *fields[4] = {
+        padding ? &box->padding_top : &box->margin_top,
+        padding ? &box->padding_right : &box->margin_right,
+        padding ? &box->padding_bottom : &box->margin_bottom,
+        padding ? &box->padding_left : &box->margin_left,
+    };
+    double *pct = padding ? box->padding_pct : box->margin_pct;
+    double *base = padding ? box->padding_base : box->margin_base;
+    unsigned shift = padding ? 4u : 0u;
+    CssLen len4[4];
+    int first = side, last = side;
+    if (side < 0) {
+        char toks[4][128];
+        int count = css_split_values(value, toks, 4);
+        if (count == 0) return;
+        int idx[4];
+        css_side_indexes(count, idx);
+        for (int i = 0; i < 4; i++) len4[i] = css_parse_len(toks[idx[i]], box->font_size);
+        first = 0; last = 3;
+    } else {
+        len4[side] = css_parse_len(value, box->font_size);
+    }
+    for (int i = first; i <= last; i++) {
+        unsigned bit = 1u << (shift + (unsigned)i);
+        if (len4[i].pct != 0.0) {
+            pct[i] = len4[i].pct;
+            base[i] = len4[i].px;
+            *fields[i] = len4[i].px;
+            box->pct_sides |= (unsigned char)bit;
+        } else {
+            box->pct_sides &= (unsigned char)~bit;
+        }
+    }
+}
+
+/* Margins and paddings against the containing block width (CSS 2.1 §8.3,
+ * §8.4: percentages refer to the width, also for top and bottom). */
+static void layout_resolve_side_pcts(LayoutBox *box, double cb_width)
+{
+    if (!box->pct_sides) return;
+    double *fields[8] = {
+        &box->margin_top, &box->margin_right, &box->margin_bottom, &box->margin_left,
+        &box->padding_top, &box->padding_right, &box->padding_bottom, &box->padding_left,
+    };
+    if (cb_width < 0.0) cb_width = 0.0;
+    for (int i = 0; i < 8; i++) {
+        if (!(box->pct_sides & (1u << i))) continue;
+        double v = i < 4 ? box->margin_base[i] + box->margin_pct[i] * cb_width
+                         : box->padding_base[i - 4] + box->padding_pct[i - 4] * cb_width;
+        /* Negative padding is invalid. */
+        if (i >= 4 && v < 0.0) v = 0.0;
+        *fields[i] = v;
+    }
+}
+
+/* min-width/max-width/min-height/max-height (which 0..3): returns the px
+ * part, recording a percentage part for layout_resolve_minmax_pcts(). */
+static double layout_note_minmax(LayoutBox *box, int which, const char *value)
+{
+    CssLen l = css_parse_len(value, box->font_size);
+    unsigned char bit = (unsigned char)(1u << which);
+    if (l.pct != 0.0) {
+        box->minmax_pct[which] = l.pct;
+        box->minmax_base[which] = l.px;
+        box->minmax_pct_bits |= bit;
+    } else {
+        box->minmax_pct_bits &= (unsigned char)~bit;
+    }
+    return l.px;
+}
+
+/* Percentage min/max sizes: widths against the containing block width,
+ * heights against its height; with an indefinite height they mean none. */
+static void layout_resolve_minmax_pcts(LayoutBox *box, double cb_width, double cb_height)
+{
+    if (!box->minmax_pct_bits) return;
+    double *fields[4] = { &box->min_width, &box->max_width, &box->min_height, &box->max_height };
+    for (int i = 0; i < 4; i++) {
+        if (!(box->minmax_pct_bits & (1u << i))) continue;
+        double basis = i < 2 ? cb_width : cb_height;
+        double v = basis > 0.0 ? box->minmax_base[i] + box->minmax_pct[i] * basis : 0.0;
+        *fields[i] = v > 0.0 ? v : 0.0;
+    }
+}
+
 static unsigned layout_apply_shorthand_sides(LayoutBox *box, const char *value,
                                              double parent_width, double viewport_width,
                                              double *top, double *right, double *bottom, double *left,
@@ -652,21 +797,16 @@ static unsigned layout_apply_shorthand_sides(LayoutBox *box, const char *value,
     double values[4];
     double ems[4] = {0.0, 0.0, 0.0, 0.0};
     unsigned em_flags = 0;
-    char *copy = strdup(value);
-    char *save = NULL;
-    char *tok = strtok_r(copy, " \t", &save);
-    int count = 0;
-    while (tok && count < 4) {
-        values[count] = css_parse_length(tok, parent_width, viewport_width, box->font_size);
+    char toks[4][128];
+    int count = css_split_values(value, toks, 4);
+    for (int i = 0; i < count; i++) {
+        values[i] = css_parse_length(toks[i], parent_width, viewport_width, box->font_size);
         double r;
-        if (css_token_is_em(tok, &r)) {
-            ems[count] = r;
-            em_flags |= (1u << count);
+        if (css_token_is_em(toks[i], &r)) {
+            ems[i] = r;
+            em_flags |= (1u << i);
         }
-        count++;
-        tok = strtok_r(NULL, " \t", &save);
     }
-    free(copy);
     if (count == 0) return 0;
 
     double v4[4];
@@ -952,43 +1092,45 @@ static void css_parse_shorthand_1_or_2(const char *value, double parent_value, d
 }
 
 /* Parse the flex shorthand: none | [ <'flex-grow'> <'flex-shrink'>? || <'flex-basis'> ] */
-static void css_parse_flex_shorthand(const char *value, double *grow, double *shrink, double *basis,
-                                     double *basis_percent, double font_size)
+/* A flex-basis value: auto, a length, a percentage or a calc() mix.  The
+ * percentage part resolves against the flex container at layout time. */
+static void css_parse_flex_basis(const char *tok, double *basis, double *basis_percent,
+                                 double *basis_pct_px, double font_size)
 {
-    *grow = 1.0; *shrink = 1.0; *basis = 0.0; *basis_percent = 0.0;
+    *basis_percent = 0.0;
+    *basis_pct_px = 0.0;
+    if (strcasecmp(tok, "auto") == 0 || strcasecmp(tok, "content") == 0) { *basis = -1.0; return; }
+    CssLen l = css_parse_len(tok, font_size);
+    if (l.pct > 0.0) {
+        *basis_percent = l.pct;
+        *basis_pct_px = l.px;
+        *basis = -1.0;
+    } else {
+        *basis = l.px;
+    }
+}
+
+static void css_parse_flex_shorthand(const char *value, double *grow, double *shrink, double *basis,
+                                     double *basis_percent, double *basis_pct_px, double font_size)
+{
+    *grow = 1.0; *shrink = 1.0; *basis = 0.0; *basis_percent = 0.0; *basis_pct_px = 0.0;
     if (!value || !*value) return;
     if (strcasecmp(value, "none") == 0) { *grow = 0.0; *shrink = 0.0; *basis = -1.0; return; }
-    char *copy = strdup(value);
-    char *save = NULL;
-    char *tok = strtok_r(copy, " \t", &save);
-    int idx = 0;
-    while (tok) {
-        bool is_basis_token = false;
-        if (idx == 0) {
-            char *end = NULL;
-            double num = strtod(tok, &end);
-            if (end != tok) { *grow = num; }
-            else is_basis_token = true;
-        } else if (idx == 1) {
-            char *end = NULL;
-            double num = strtod(tok, &end);
-            if (end != tok) { *shrink = num; }
-            else is_basis_token = true;
+    char toks[3][128];
+    int n = css_split_values(value, toks, 3);
+    int numbers = 0;   /* grow, then shrink: plain numbers only */
+    for (int i = 0; i < n; i++) {
+        char *end = NULL;
+        double num = strtod(toks[i], &end);
+        bool plain_number = end != toks[i] && *end == '\0';
+        if (plain_number && numbers < 2) {
+            if (numbers == 0) *grow = num;
+            else *shrink = num;
+            numbers++;
         } else {
-            is_basis_token = true;
+            css_parse_flex_basis(toks[i], basis, basis_percent, basis_pct_px, font_size);
         }
-        if (is_basis_token) {
-            if (css_value_is_percent(tok)) {
-                *basis_percent = css_parse_percent_ratio(tok);
-                *basis = -1.0;
-            } else {
-                *basis = css_parse_length(tok, 0, 0, font_size);
-            }
-        }
-        idx++;
-        tok = strtok_r(NULL, " \t", &save);
     }
-    free(copy);
 }
 
 /* Block-level formatting context: these generate a block box that stacks
@@ -1212,12 +1354,13 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
             box->width_set = 0;
             box->width_percent = 0.0;
             box->css_width = 0.0;
-        } else if (css_value_is_percent(value)) {
-            box->width_percent = css_parse_percent_ratio(value);
-            box->css_width = 0.0;
         } else {
-            box->css_width = css_parse_length(value, parent_width, viewport_width, box->font_size);
-            box->width_percent = 0.0;
+            /* A percentage part (50%, calc(100% - 20px)) resolves against
+             * the containing block at layout time. */
+            CssLen l = css_parse_len(value, box->font_size);
+            box->width_percent = l.pct > 0.0 ? l.pct : 0.0;
+            box->width_pct_px = l.pct > 0.0 ? l.px : 0.0;
+            box->css_width = l.pct > 0.0 ? 0.0 : l.px;
         }
         if (!box->width_keyword) box->width_set = (strcasecmp(value, "auto") != 0);
     } else if (strcasecmp(prop, "height") == 0) {
@@ -1227,26 +1370,25 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
             box->css_height = 0.0;
             return;
         }
-        if (css_value_is_percent(value)) {
-            box->height_percent = css_parse_percent_ratio(value);
-            box->css_height = 0.0;
-        } else {
-            box->css_height = css_parse_length(value, parent_width, viewport_width, box->font_size);
-            box->height_percent = 0.0;
+        {
+            CssLen l = css_parse_len(value, box->font_size);
+            box->height_percent = l.pct > 0.0 ? l.pct : 0.0;
+            box->height_pct_px = l.pct > 0.0 ? l.px : 0.0;
+            box->css_height = l.pct > 0.0 ? 0.0 : l.px;
         }
         box->height_set = (strcasecmp(value, "auto") != 0);
     } else if (strcasecmp(prop, "min-width") == 0) {
-        box->min_width = css_parse_length(value, parent_width, viewport_width, box->font_size);
+        box->min_width = layout_note_minmax(box, 0, value);
         if (strcasecmp(value, "auto") == 0) box->min_size_set &= (unsigned char)~1;
         else box->min_size_set |= 1;
     } else if (strcasecmp(prop, "max-width") == 0) {
-        box->max_width = css_parse_length(value, parent_width, viewport_width, box->font_size);
+        box->max_width = layout_note_minmax(box, 1, value);
     } else if (strcasecmp(prop, "min-height") == 0) {
-        box->min_height = css_parse_length(value, parent_width, viewport_width, box->font_size);
+        box->min_height = layout_note_minmax(box, 2, value);
         if (strcasecmp(value, "auto") == 0) box->min_size_set &= (unsigned char)~2;
         else box->min_size_set |= 2;
     } else if (strcasecmp(prop, "max-height") == 0) {
-        box->max_height = css_parse_length(value, parent_width, viewport_width, box->font_size);
+        box->max_height = layout_note_minmax(box, 3, value);
     } else if (strcasecmp(prop, "top") == 0) {
         layout_set_inset(box, 0, value, parent_width, viewport_width);
     } else if (strcasecmp(prop, "right") == 0) {
@@ -1277,6 +1419,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         unsigned fl = layout_apply_shorthand_sides(box, value, parent_width, viewport_width,
                                                    &box->margin_top, &box->margin_right,
                                                    &box->margin_bottom, &box->margin_left, em4);
+        layout_note_side_pcts(box, value, false, -1);
         box->em_deferred &= 0xF0; /* shorthand resets all four margin sides */
         box->margin_auto = css_margin_auto_mask(value);
         for (int i = 0; i < 4; i++) {
@@ -1290,6 +1433,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         if (css_token_is_em(value, &r)) { box->margin_em[3] = r; box->em_deferred |= 0x08; }
         else box->em_deferred &= (unsigned char)~0x08;
         box->margin_left = css_parse_length(value, parent_width, viewport_width, box->font_size);
+        layout_note_side_pcts(box, value, false, 3);
         if (strcasecmp(value, "auto") == 0) box->margin_auto |= 8;
         else box->margin_auto &= (unsigned char)~8;
     } else if (strcasecmp(prop, "margin-right") == 0) {
@@ -1297,6 +1441,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         if (css_token_is_em(value, &r)) { box->margin_em[1] = r; box->em_deferred |= 0x02; }
         else box->em_deferred &= (unsigned char)~0x02;
         box->margin_right = css_parse_length(value, parent_width, viewport_width, box->font_size);
+        layout_note_side_pcts(box, value, false, 1);
         if (strcasecmp(value, "auto") == 0) box->margin_auto |= 2;
         else box->margin_auto &= (unsigned char)~2;
     } else if (strcasecmp(prop, "margin-top") == 0) {
@@ -1304,6 +1449,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         if (css_token_is_em(value, &r)) { box->margin_em[0] = r; box->em_deferred |= 0x01; }
         else box->em_deferred &= (unsigned char)~0x01;
         box->margin_top = css_parse_length(value, parent_width, viewport_width, box->font_size);
+        layout_note_side_pcts(box, value, false, 0);
         if (strcasecmp(value, "auto") == 0) box->margin_auto |= 1;
         else box->margin_auto &= (unsigned char)~1;
     } else if (strcasecmp(prop, "margin-bottom") == 0) {
@@ -1311,13 +1457,31 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         if (css_token_is_em(value, &r)) { box->margin_em[2] = r; box->em_deferred |= 0x04; }
         else box->em_deferred &= (unsigned char)~0x04;
         box->margin_bottom = css_parse_length(value, parent_width, viewport_width, box->font_size);
+        layout_note_side_pcts(box, value, false, 2);
         if (strcasecmp(value, "auto") == 0) box->margin_auto |= 4;
         else box->margin_auto &= (unsigned char)~4;
+    } else if (strcasecmp(prop, "aspect-ratio") == 0) {
+        /* auto | <ratio> | auto && <ratio>; <ratio> = <number> [ / <number> ].
+         * The "auto" fallback for replaced content is not modelled. */
+        double w = 0.0, h = 1.0;
+        const char *p = value;
+        while (*p && !(isdigit((unsigned char)*p) || *p == '.')) p++;
+        if (*p) {
+            char *end = NULL;
+            w = strtod(p, &end);
+            while (end && (*end == ' ' || *end == '\t')) end++;
+            if (end && *end == '/') {
+                h = strtod(end + 1, NULL);
+            }
+        }
+        box->aspect_ratio = (w > 0.0 && h > 0.0) ? h / w : 0.0;
+        box->aspect_ratio_prop = box->aspect_ratio > 0.0;
     } else if (strcasecmp(prop, "padding") == 0) {
         double em4[4];
         unsigned fl = layout_apply_shorthand_sides(box, value, parent_width, viewport_width,
                                                    &box->padding_top, &box->padding_right,
                                                    &box->padding_bottom, &box->padding_left, em4);
+        layout_note_side_pcts(box, value, true, -1);
         box->em_deferred &= 0x0F; /* shorthand resets all four padding sides */
         for (int i = 0; i < 4; i++) {
             if (fl & (1u << i)) {
@@ -1325,29 +1489,30 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                 box->em_deferred |= (unsigned char)(0x10u << i);
             }
         }
-        box->aspect_ratio = css_parse_percent_ratio(value);
     } else if (strcasecmp(prop, "padding-left") == 0) {
         double r;
         if (css_token_is_em(value, &r)) { box->padding_em[3] = r; box->em_deferred |= 0x80; }
         else box->em_deferred &= (unsigned char)~0x80;
         box->padding_left = css_parse_length(value, parent_width, viewport_width, box->font_size);
+        layout_note_side_pcts(box, value, true, 3);
     } else if (strcasecmp(prop, "padding-right") == 0) {
         double r;
         if (css_token_is_em(value, &r)) { box->padding_em[1] = r; box->em_deferred |= 0x20; }
         else box->em_deferred &= (unsigned char)~0x20;
         box->padding_right = css_parse_length(value, parent_width, viewport_width, box->font_size);
+        layout_note_side_pcts(box, value, true, 1);
     } else if (strcasecmp(prop, "padding-top") == 0) {
         double r;
         if (css_token_is_em(value, &r)) { box->padding_em[0] = r; box->em_deferred |= 0x10; }
         else box->em_deferred &= (unsigned char)~0x10;
         box->padding_top = css_parse_length(value, parent_width, viewport_width, box->font_size);
-        box->aspect_ratio = css_parse_percent_ratio(value);
+        layout_note_side_pcts(box, value, true, 0);
     } else if (strcasecmp(prop, "padding-bottom") == 0) {
         double r;
         if (css_token_is_em(value, &r)) { box->padding_em[2] = r; box->em_deferred |= 0x40; }
         else box->em_deferred &= (unsigned char)~0x40;
         box->padding_bottom = css_parse_length(value, parent_width, viewport_width, box->font_size);
-        box->aspect_ratio = css_parse_percent_ratio(value);
+        layout_note_side_pcts(box, value, true, 2);
     } else if (strcasecmp(prop, "border-left-width") == 0) {
         box->border_left = css_border_width_value(value, parent_width, viewport_width, box->font_size);
         box->border_width_set |= 1;
@@ -1408,23 +1573,15 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     } else if (strcasecmp(prop, "order") == 0) {
         box->order = atoi(value);
     } else if (strcasecmp(prop, "flex-basis") == 0) {
-        if (strcasecmp(value, "auto") == 0) {
-            box->flex_basis = -1.0;
-            box->flex_basis_percent = 0.0;
-        } else if (css_value_is_percent(value)) {
-            box->flex_basis_percent = css_parse_percent_ratio(value);
-            box->flex_basis = -1.0;
-        } else {
-            box->flex_basis = css_parse_length(value, parent_width, viewport_width, box->font_size);
-            box->flex_basis_percent = 0.0;
-        }
+        css_parse_flex_basis(value, &box->flex_basis, &box->flex_basis_percent,
+                             &box->flex_basis_pct_px, box->font_size);
     } else if (strcasecmp(prop, "flex-grow") == 0) {
         box->flex_grow = strtod(value, NULL);
     } else if (strcasecmp(prop, "flex-shrink") == 0) {
         box->flex_shrink = strtod(value, NULL);
     } else if (strcasecmp(prop, "flex") == 0) {
         css_parse_flex_shorthand(value, &box->flex_grow, &box->flex_shrink, &box->flex_basis,
-                                 &box->flex_basis_percent, box->font_size);
+                                 &box->flex_basis_percent, &box->flex_basis_pct_px, box->font_size);
     } else if (strcasecmp(prop, "gap") == 0) {
         css_parse_shorthand_1_or_2(value, parent_width, viewport_width,
                                    box->font_size, &box->gap_row, &box->gap_col);
@@ -3538,6 +3695,10 @@ static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
      * function converts CSS-used values (which may be content-box or border-box
      * depending on box-sizing) into those totals. */
 
+    /* Percentage margins/paddings first: the width below depends on them. */
+    layout_resolve_side_pcts(box, parent_content_width);
+    layout_resolve_minmax_pcts(box, parent_content_width, parent_content_height);
+
     /* ---------- width ---------- */
     bool width_auto = true;
     double used_content_width = 0.0; /* valid when !width_auto */
@@ -3545,9 +3706,9 @@ static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
 
     if (box->width_percent > 0.0) {
         if (box->box_sizing == CSS_BOX_SIZING_BORDER_BOX) {
-            used_total_width = parent_content_width * box->width_percent;
+            used_total_width = parent_content_width * box->width_percent + box->width_pct_px;
         } else {
-            used_content_width = parent_content_width * box->width_percent;
+            used_content_width = parent_content_width * box->width_percent + box->width_pct_px;
         }
         width_auto = false;
     } else if (box->width_set) {
@@ -3587,7 +3748,7 @@ static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
                 ? box->css_height - layout_vertical_border_padding(box) : box->css_height;
             h_auto = false;
         } else if (box->height_percent > 0.0 && parent_content_height > 0.0) {
-            ch_spec = parent_content_height * box->height_percent;
+            ch_spec = parent_content_height * box->height_percent + box->height_pct_px;
             if (box->box_sizing == CSS_BOX_SIZING_BORDER_BOX) ch_spec -= layout_vertical_border_padding(box);
             h_auto = false;
         }
@@ -3646,9 +3807,9 @@ static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
         box->height_pct_unresolved = 0;
         if (parent_content_height > 0.0) {
             if (box->box_sizing == CSS_BOX_SIZING_BORDER_BOX) {
-                used_total_height = parent_content_height * box->height_percent;
+                used_total_height = parent_content_height * box->height_percent + box->height_pct_px;
             } else {
-                used_content_height = parent_content_height * box->height_percent;
+                used_content_height = parent_content_height * box->height_percent + box->height_pct_px;
             }
             height_auto = false;
         } else {
@@ -3664,9 +3825,15 @@ static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
         }
         height_auto = false;
     } else if (height_auto && box->aspect_ratio > 0.0) {
-        /* Aspect ratio relates the content box dimensions. */
-        double content_width = layout_total_to_content_width(box, box->width);
-        used_content_height = content_width * box->aspect_ratio;
+        /* The aspect-ratio property relates the box box-sizing names (the
+         * border box for border-box); a ::before placeholder ratio relates
+         * the content box. */
+        if (box->aspect_ratio_prop && box->box_sizing == CSS_BOX_SIZING_BORDER_BOX) {
+            used_total_height = box->width * box->aspect_ratio;
+        } else {
+            double content_width = layout_total_to_content_width(box, box->width);
+            used_content_height = content_width * box->aspect_ratio;
+        }
         height_auto = false;
     }
 
@@ -3686,7 +3853,7 @@ static void layout_resolve_used_sizes(LayoutBox *box, HtmlNode *node,
         /* border-box: used_total_height already holds the total for explicit
          * and percentage sizes; aspect-ratio produced a content height that
          * must still be converted to a total. */
-        if (box->aspect_ratio > 0.0 &&
+        if (box->aspect_ratio > 0.0 && !box->aspect_ratio_prop &&
             !(box->height_percent > 0.0) && box->css_height == 0.0) {
             box->height = layout_content_to_total_height(box, used_content_height);
         } else {
@@ -4977,8 +5144,12 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
         }
         if (box->aspect_ratio > 0.0) {
             /* ::before { padding-top: N% } aspect boxes: the pseudo block
-             * occupies width x ratio at the top of the content box. */
-            double b = content_top + box->content_width * box->aspect_ratio;
+             * occupies width x ratio at the top of the content box.  The
+             * aspect-ratio property with border-box sizes the border box. */
+            double ch = box->content_width * box->aspect_ratio;
+            if (box->aspect_ratio_prop && box->box_sizing == CSS_BOX_SIZING_BORDER_BOX)
+                ch = box->width * box->aspect_ratio - layout_vertical_border_padding(box);
+            double b = content_top + ch;
             if (b > max_bottom) max_bottom = b;
         }
         {
@@ -5292,7 +5463,7 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
 
         double basis = -1.0;
         if (child->flex_basis_percent > 0.0) {
-            if (main_def) basis = layout_flex_main_total(child, avail_main * child->flex_basis_percent, is_row);
+            if (main_def) basis = layout_flex_main_total(child, avail_main * child->flex_basis_percent + child->flex_basis_pct_px, is_row);
         } else if (child->flex_basis >= 0.0) {
             basis = layout_flex_main_total(child, child->flex_basis, is_row);
         }
@@ -5729,7 +5900,7 @@ static void layout_table_row(LayoutContext *ctx, int idx)
                   + cell->border_left + cell->border_right;
         double w = 0.0;
         if (cell->width_percent > 0.0) {
-            w = inner_w * cell->width_percent;
+            w = inner_w * cell->width_percent + cell->width_pct_px;
         } else if (cell->width_set && cell->css_width > 0.0) {
             w = cell->css_width;
             if (cell->box_sizing == CSS_BOX_SIZING_CONTENT_BOX) w += hp;

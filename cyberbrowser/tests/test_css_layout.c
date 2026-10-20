@@ -459,6 +459,90 @@ TEST(test_dom_mutation_sync_to_native) {
 }
 
 static int g_async_cb_count = 0;
+/* Percentages in margins/paddings (also top/bottom) resolve against the
+ * containing block width at layout time, also inside calc(); aspect-ratio
+ * sizes the box box-sizing names. */
+TEST(test_layout_percentages_and_aspect_ratio) {
+    const char *html =
+        "<html><body style=\"margin:0\"><div style=\"width:400px\">"
+        "<div id=\"pt\" style=\"padding-top:56.25%\"></div>"
+        "<div id=\"calc\" style=\"padding-top:calc(9 / 16 * 100%)\"></div>"
+        "<div id=\"mix\" style=\"padding:calc(10px + 10%) 0 0\"></div>"
+        "<div id=\"sh\" style=\"padding:5% 10px\"></div>"
+        "<div id=\"ml\" style=\"margin-left:25%;height:10px\"></div>"
+        "<div id=\"ar\" style=\"aspect-ratio:16 / 9\"></div>"
+        "<div id=\"arbb\" style=\"aspect-ratio:2;box-sizing:border-box;padding:10px\"></div>"
+        "<div id=\"arcb\" style=\"aspect-ratio:2;padding:10px\"></div>"
+        "</div></body></html>";
+    HtmlDocument *doc = html_parse(html, strlen(html));
+    ASSERT_TRUE(doc != NULL);
+    LayoutContext ctx = {0};
+    ASSERT_TRUE(css_layout_run(&ctx, doc, NULL, 800.0, 600.0));
+    static const struct { const char *id; double w, h, pt; } want[] = {
+        { "pt",   400.0, 225.0, 225.0 },
+        { "calc", 400.0, 225.0, 225.0 },
+        { "mix",  400.0,  50.0,  50.0 },
+        { "sh",   400.0,  40.0,  20.0 },
+        { "ml",   300.0,  10.0,   0.0 },
+        { "ar",   400.0, 225.0,   0.0 },
+        { "arbb", 400.0, 200.0,  10.0 },
+        { "arcb", 400.0, 210.0,  10.0 },
+    };
+    for (size_t i = 0; i < sizeof(want) / sizeof(want[0]); i++) {
+        HtmlNode *n = html_document_get_element_by_id(doc, want[i].id);
+        ASSERT_TRUE(n != NULL);
+        LayoutBox *b = css_layout_box_for_node(&ctx, po_array_index_from_payload(&doc->array, n));
+        ASSERT_TRUE(b != NULL);
+        if (!near_equal(b->width, want[i].w) || !near_equal(b->height, want[i].h) ||
+            !near_equal(b->padding_top, want[i].pt)) {
+            printf("    #%s: %.2fx%.2f padding-top %.2f, want %.0fx%.0f padding-top %.0f\n",
+                   want[i].id, b->width, b->height, b->padding_top, want[i].w, want[i].h, want[i].pt);
+            css_layout_tree_free(&ctx);
+            html_document_free(doc);
+            return false;
+        }
+    }
+    HtmlNode *ml = html_document_get_element_by_id(doc, "ml");
+    LayoutBox *mlb = css_layout_box_for_node(&ctx, po_array_index_from_payload(&doc->array, ml));
+    ASSERT_TRUE(near_equal(mlb->margin_left, 100.0));
+    css_layout_tree_free(&ctx);
+    html_document_free(doc);
+    return true;
+}
+
+/* width/height/min/max/flex-basis percentages, plain and inside calc(),
+ * resolve against the containing block, not the viewport. */
+TEST(test_layout_percentage_sizes_in_calc) {
+    static const struct { const char *css; double w, h; } cases[] = {
+        { "width:calc(100% - 20px);height:10px", 380.0, 10.0 },
+        { "width:1000px;max-width:50%;height:10px", 200.0, 10.0 },
+        { "width:1000px;max-width:calc(50% + 10px);height:10px", 210.0, 10.0 },
+        { "width:10px;min-width:calc(25% + 0px);height:10px", 100.0, 10.0 },
+        { "height:calc(50% - 10px);width:10px", 10.0, 140.0 },
+        { "flex:0 0 calc(50% - 20px);height:10px", 180.0, 10.0 },
+        { "flex:1 0%;height:10px", 400.0, 10.0 },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char html[512];
+        snprintf(html, sizeof(html),
+                 "<html><body style=\"margin:0\"><div style=\"width:400px;height:300px;display:flex\">"
+                 "<div id=\"t\" style=\"%s\"></div></div></body></html>", cases[i].css);
+        HtmlDocument *doc = html_parse(html, strlen(html));
+        ASSERT_TRUE(doc != NULL);
+        LayoutContext ctx = {0};
+        ASSERT_TRUE(css_layout_run(&ctx, doc, NULL, 1024.0, 768.0));
+        HtmlNode *n = html_document_get_element_by_id(doc, "t");
+        LayoutBox *b = n ? css_layout_box_for_node(&ctx, po_array_index_from_payload(&doc->array, n)) : NULL;
+        bool ok = b && near_equal(b->width, cases[i].w) && near_equal(b->height, cases[i].h);
+        if (!ok) printf("    %s: %.2fx%.2f, want %.0fx%.0f\n", cases[i].css,
+                        b ? b->width : -1.0, b ? b->height : -1.0, cases[i].w, cases[i].h);
+        css_layout_tree_free(&ctx);
+        html_document_free(doc);
+        if (!ok) return false;
+    }
+    return true;
+}
+
 static void async_image_cb(const char *url, void *user_data) {
     (void)url;
     (void)user_data;
@@ -508,4 +592,6 @@ void run_css_layout_tests(void) {
     RUN_TEST(test_text_shaper_basic);
     RUN_TEST(test_dom_mutation_sync_to_native);
     RUN_TEST(test_async_image_load_callback);
+    RUN_TEST(test_layout_percentages_and_aspect_ratio);
+    RUN_TEST(test_layout_percentage_sizes_in_calc);
 }

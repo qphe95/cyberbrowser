@@ -187,6 +187,15 @@ typedef struct LayoutBox {
     double padding_em[4];
     unsigned char em_deferred;
 
+    /* Margins and paddings with a percentage part (50%, calc(10px + 5%))
+     * resolve against the containing block WIDTH at layout time (CSS 2.1
+     * §8.3/§8.4, also for top/bottom): side value = base px + pct x width.
+     * Side order top/right/bottom/left.  pct_sides bits: 0-3 margin
+     * T/R/B/L, 4-7 padding T/R/B/L. */
+    double margin_pct[4], margin_base[4];
+    double padding_pct[4], padding_base[4];
+    unsigned char pct_sides;
+
     /* list-style for display:list-item markers. */
     unsigned char list_style_type;   /* 0=none, 1=disc, 2=circle, 3=square, 4=decimal */
     unsigned char list_style_type_set;
@@ -205,6 +214,7 @@ typedef struct LayoutBox {
 
     double flex_basis;
     double flex_basis_percent; /* >0 when flex-basis was a percentage */
+    double flex_basis_pct_px;  /* px addend of a calc() basis with a % part */
     double flex_grow;
     double flex_shrink;
 
@@ -224,14 +234,25 @@ typedef struct LayoutBox {
 
     double min_width, max_width;
     double min_height, max_height;
+    /* min/max sizes with a percentage part, resolved at layout time against
+     * the containing block (widths: its width; heights: its height, or none
+     * when that is indefinite).  Order min-w, max-w, min-h, max-h; bit i of
+     * minmax_pct_bits set when entry i has a percentage part. */
+    double minmax_pct[4], minmax_base[4];
+    unsigned char minmax_pct_bits;
     double top, left, right, bottom;
-    double width_percent;   /* >0 if width was specified as a percentage. */
-    double height_percent;
+    /* >0 if width/height had a percentage part; *_pct_px is the px addend
+     * of a calc() mix (calc(100% - 20px) = 100% and -20px). */
+    double width_percent, width_pct_px;
+    double height_percent, height_pct_px;
     double gap_row, gap_col;
 
-    /* Aspect ratio derived from percentage padding-top/bottom when height
-     * is otherwise auto (common thumbnail placeholder technique). */
+    /* Preferred aspect ratio as height / width: from the aspect-ratio
+     * property (aspect_ratio_prop set; it sizes the box box-sizing names),
+     * or from a ::before{padding-top:N%} placeholder, which sizes the content
+     * box since pseudo boxes are not built. */
     double aspect_ratio;
+    unsigned char aspect_ratio_prop;
 
     uint32_t flags;
     /* Bitmask of which top/left/right/bottom values were explicitly set. */
