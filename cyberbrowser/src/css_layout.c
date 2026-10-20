@@ -422,6 +422,95 @@ static void calc_skip_space(CalcParser *p)
 
 static CssLen calc_parse_expr(CalcParser *p);
 
+/* Comparing px + pct operands needs a percentage basis the value parser
+ * does not have; the viewport width stands in for the containing block. */
+static double g_calc_pct_hint = 1024.0;   /* viewport width of the running layout */
+static double calc_pct_hint(void) { return g_calc_pct_hint; }
+static double calc_cmp_value(CssLen v) { return v.px + v.pct * calc_pct_hint(); }
+
+/* min() / max() / clamp() / round() / mod() / rem() / abs() (CSS Values 4).
+ * Unknown functions evaluate to 0, like other unsupported expressions. */
+static CssLen calc_parse_function(CalcParser *p)
+{
+    CssLen zero = { 0.0, 0.0 };
+    size_t ns = p->pos;
+    while (p->pos < p->len && (isalpha((unsigned char)p->s[p->pos]) || p->s[p->pos] == '-')) p->pos++;
+    size_t nl = p->pos - ns;
+    char name[8] = {0};
+    if (nl >= sizeof(name) || p->pos >= p->len || p->s[p->pos] != '(') return zero;
+    for (size_t i = 0; i < nl; i++) name[i] = (char)tolower((unsigned char)p->s[ns + i]);
+    p->pos++;
+
+    /* round()'s optional rounding strategy comes first. */
+    int strategy = 0;   /* 0 nearest, 1 up, 2 down, 3 to-zero */
+    if (strcmp(name, "round") == 0) {
+        calc_skip_space(p);
+        static const char *const strat[] = { "nearest", "up", "down", "to-zero" };
+        for (int k = 0; k < 4; k++) {
+            size_t sl = strlen(strat[k]);
+            if (p->len - p->pos > sl && strncasecmp(p->s + p->pos, strat[k], sl) == 0 &&
+                !isalpha((unsigned char)p->s[p->pos + sl]) && p->s[p->pos + sl] != '-') {
+                strategy = k;
+                p->pos += sl;
+                calc_skip_space(p);
+                if (p->pos < p->len && p->s[p->pos] == ',') p->pos++;
+                break;
+            }
+        }
+    }
+
+    CssLen args[8];
+    int n = 0;
+    for (;;) {
+        CssLen v = calc_parse_expr(p);
+        if (n < 8) args[n++] = v;
+        calc_skip_space(p);
+        if (p->pos < p->len && p->s[p->pos] == ',') { p->pos++; continue; }
+        break;
+    }
+    if (p->pos < p->len && p->s[p->pos] == ')') p->pos++;
+    if (n == 0) return zero;
+
+    if (strcmp(name, "min") == 0 || strcmp(name, "max") == 0) {
+        bool want_min = name[1] == 'i';
+        CssLen best = args[0];
+        for (int i = 1; i < n; i++) {
+            double a = calc_cmp_value(args[i]), b = calc_cmp_value(best);
+            if (want_min ? a < b : a > b) best = args[i];
+        }
+        return best;
+    }
+    if (strcmp(name, "clamp") == 0) {
+        if (n < 3) return args[0];
+        CssLen v = args[1];
+        if (calc_cmp_value(v) > calc_cmp_value(args[2])) v = args[2];
+        if (calc_cmp_value(v) < calc_cmp_value(args[0])) v = args[0];
+        return v;
+    }
+    if (strcmp(name, "abs") == 0) {
+        if (calc_cmp_value(args[0]) < 0.0) { args[0].px = -args[0].px; args[0].pct = -args[0].pct; }
+        return args[0];
+    }
+    if (strcmp(name, "round") == 0 || strcmp(name, "mod") == 0 || strcmp(name, "rem") == 0) {
+        double a = calc_cmp_value(args[0]);
+        double b = n > 1 ? calc_cmp_value(args[1]) : 1.0;
+        CssLen out = { 0.0, 0.0 };
+        if (b == 0.0) return out;
+        double q = a / b, r;
+        if (name[0] == 'r' && name[1] == 'o') {
+            r = strategy == 1 ? ceil(q) : strategy == 2 ? floor(q) :
+                strategy == 3 ? trunc(q) : floor(q + 0.5);
+            out.px = r * b;
+        } else if (name[0] == 'm') {
+            out.px = a - b * floor(q);     /* mod: sign of the divisor */
+        } else {
+            out.px = a - b * trunc(q);     /* rem: sign of the dividend */
+        }
+        return out;
+    }
+    return zero;
+}
+
 static CssLen calc_parse_primary(CalcParser *p)
 {
     CssLen zero = { 0.0, 0.0 };
@@ -430,6 +519,7 @@ static CssLen calc_parse_primary(CalcParser *p)
 
     /* Nested calc( and bare parentheses. */
     if (p->len - p->pos > 5 && strncasecmp(p->s + p->pos, "calc(", 5) == 0) p->pos += 4;
+    if (isalpha((unsigned char)p->s[p->pos])) return calc_parse_function(p);
     if (p->s[p->pos] == '(') {
         p->pos++;
         CssLen v = calc_parse_expr(p);
@@ -523,6 +613,13 @@ static CssLen css_parse_len(const char *value, double font_size)
         p.len = strlen(p.s);
         p.font_size = font_size;
         return calc_parse_expr(&p);
+    }
+    if (isalpha((unsigned char)*value) && strchr(value, '(')) {
+        CalcParser p = {0};
+        p.s = value;
+        p.len = strlen(p.s);
+        p.font_size = font_size;
+        return calc_parse_function(&p);
     }
     char *end = NULL;
     double num = strtod(value, &end);
@@ -1304,6 +1401,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     if (strcasecmp(prop, "display") == 0) {
         box->display = css_parse_display(value);
         box->inline_level = css_display_is_inline_level(value) ? 1 : 0;
+        box->table_caption = strcasecmp(value, "table-caption") == 0 ? 1 : 0;
         box->webkit_box = (strcasecmp(value, "-webkit-box") == 0 || strcasecmp(value, "box") == 0) ? 1 :
                           strcasecmp(value, "-webkit-inline-box") == 0 ? 2 : 0;
         if (strcasecmp(value, "inline-table") == 0) box->display = CSS_DISPLAY_BLOCK;
@@ -3115,7 +3213,7 @@ static void layout_unset_property(LayoutBox *box, const char *prop)
     else if (strcasecmp(prop, "text-align") == 0) box->text_align_set = 0;
     else if (strcasecmp(prop, "white-space") == 0) box->white_space_set = 0;
     else if (strcasecmp(prop, "visibility") == 0) box->visibility_set = 0;
-    else if (strcasecmp(prop, "display") == 0) { /* initial: inline */ box->display = CSS_DISPLAY_INLINE; box->inline_level = 0; }
+    else if (strcasecmp(prop, "display") == 0) { /* initial: inline */ box->display = CSS_DISPLAY_INLINE; box->inline_level = 0; box->table_caption = 0; }
 }
 
 /* CSS-wide keywords (css-cascade §7.3: inherit, initial, unset, revert,
@@ -4128,6 +4226,11 @@ static void layout_offset_subtree(LayoutContext *ctx, int idx, double dx, double
         if (child->position == CSS_POSITION_FIXED) continue;
         child->x += dx;
         child->y += dy;
+        /* Wrapped text runs keep absolute continuation-line origins. */
+        if (child->wrap_cont_w > 0.0) {
+            child->wrap_cont_x += dx;
+            if (child->wrap_cont2_line > 1) child->wrap_cont2_x += dx;
+        }
         layout_offset_subtree(ctx, c, dx, dy);
     }
 }
@@ -4567,7 +4670,8 @@ static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_ma
                 }
                 continue;
             }
-            double w = layout_intrinsic_contribution(ctx, c, want_max);
+            /* A table caption never widens its table past min-content. */
+            double w = layout_intrinsic_contribution(ctx, c, want_max && !cb->table_caption);
             if (layout_box_is_block_level(cb) && cb->float_side == 0) {
                 if (line > content) content = line;
                 line = 0.0;
@@ -4745,6 +4849,14 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
              * extent (e.g. a fixed-width thumb frame inside). */
             child->x = content_left + child->margin_left;
             child->y = cur.y + child->margin_top;
+            if (child->display == CSS_DISPLAY_OTHER &&
+                !(child->width_set || child->width_percent > 0.0 || child->width_keyword)) {
+                /* Floated table (Wikipedia's figure thumbs): shrink-to-fit
+                 * before layout so a caption wraps instead of widening it. */
+                double a = avail_width - child->margin_left - child->margin_right;
+                if (a < 0.0) a = 0.0;
+                child->width = layout_shrink_to_fit(ctx, c, a);
+            }
             layout_update_content_sizes(child);
             layout_node_serial(ctx, c);
 
@@ -4938,8 +5050,13 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
             bool is_img = false;
             bool is_br = false;
             child->text_lead_skip = 0;
+            /* Preserved segment breaks (pre, pre-wrap, pre-line) force line
+             * breaks: the run goes through the wrap path, whose shaper
+             * honours '\n'. */
+            bool keeps_nl = child->white_space >= 2 && child->white_space <= 4;
             if (dom && dom->type == HTML_NODE_TEXT) {
-                if (!layout_text_is_whitespace(dom->text_content)) {
+                if (!layout_text_is_whitespace(dom->text_content) ||
+                    (keeps_nl && dom->text_content && strchr(dom->text_content, '\n'))) {
                     text = css_layout_box_text(ctx, c, dom->text_content);
                     if (text[0] == ' ' && cur.x <= line_left + 0.001 && child->white_space != 2 &&
                         child->white_space != 3) {
@@ -5079,6 +5196,8 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                 if (!layout_measure_text_styled(child, " ", fs, &trail, NULL)) trail = 0.0;
             }
             bool nowrap = child->white_space == 1 || child->white_space == 2;
+            bool hard_nl = keeps_nl && text && strchr(text, '\n') &&
+                           (is_text_run || child->display == CSS_DISPLAY_INLINE);
             if (g_layout_debug & LDBG_INLINE) {
                 HtmlNode *dn = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
                 fprintf(stderr, "[INL] idx=%d span=%.1f cur.x=%.1f line=[%.1f..%.1f] y=%.1f tag=%s type=%d\n",
@@ -5091,13 +5210,16 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
              * Inline elements whose content is (concatenated) text — links,
              * <b>, <span> — wrap the same way; the wrap geometry is later
              * propagated to their text descendants for glyph emission. */
-            if (text && !nowrap && span - trail > remaining + 0.01 && span > fs * 2.0) {
+            if (hard_nl || (text && !nowrap && span - trail > remaining + 0.01 && span > fs * 2.0)) {
                 double first_w = remaining;
+                /* pre: lines end only at newlines. */
+                double wrap_avail = hard_nl && nowrap ? 1e6 : line_avail;
+                if (hard_nl && nowrap) first_w = 1e6;
                 if (cur.x <= line_left + 0.001) {
                     /* Already at the line start: use the full line. */
                     cur.line_box = 0.0;
                     cur.x = line_left;
-                    first_w = line_avail;
+                    first_w = wrap_avail;
                 } else {
                     /* Split the run at a word boundary only when its first
                      * word (with any leading spaces) fits in the remaining
@@ -5158,10 +5280,10 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                         cur.y += cur.line_box;
                         cur.line_box = 0.0;
                         cur.x = line_left;
-                        first_w = line_avail;
+                        first_w = wrap_avail;
                     }
                 }
-                if (span <= first_w) {
+                if (!hard_nl && span <= first_w) {
                     /* Fits on the (possibly new) current line unwrapped. */
                     child->x = cur.x + child->margin_left;
                     child->y = cur.y + vmt;
@@ -5203,14 +5325,14 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                     TsWrapResult wr;
                     if (font && text_shaper_wrap_measure(font, text,
                             (float)(cur.x + child->margin_left), (float)line_left,
-                            (float)first_w, (float)line_avail, scale, (float)line_adv,
+                            (float)first_w, (float)wrap_avail, scale, (float)line_adv,
                             cont2_line, (float)cont2_x, (float)cont2_w, &wr)) {
                         child->x = cur.x + child->margin_left;
                         child->y = cur.y + vmt;
                         child->width = wr.max_width;
                         child->height = wr.height;
                         child->wrap_first_w = first_w;
-                        child->wrap_cont_w = line_avail;
+                        child->wrap_cont_w = wrap_avail;
                         child->wrap_cont_x = line_left;
                         child->wrap_cont2_x = cont2_x;
                         child->wrap_cont2_w = cont2_w;
@@ -6143,6 +6265,116 @@ static void layout_table_row(LayoutContext *ctx, int idx)
     free(kids);
 }
 
+/* Children of an inline box that the parent flow wrapped across lines (or
+ * broke at preserved newlines) and that has several significant children
+ * (YouTube's attributed strings: text spans and link spans in one pre-wrap
+ * host).  Each run continues where the previous one ended: its first line
+ * is the rest of the current line, continuation lines use the box's wrap
+ * geometry. */
+static void layout_inline_wrapped_children(LayoutContext *ctx, int idx)
+{
+    LayoutBox *box = layout_box(ctx, idx);
+    double cont_x = box->wrap_cont_x, cont_w = box->wrap_cont_w;
+    double cx = box->x + box->padding_left + box->border_left;
+    double cy = box->y + box->padding_top + box->border_top;
+    double line_start = cx;
+    double line_right = box->x + box->wrap_first_w;
+    for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0;
+         c = ctx->tree.nodes[c].next_sibling_idx) {
+        LayoutBox *child = layout_box(ctx, c);
+        if (child->display == CSS_DISPLAY_NONE) continue;
+        HtmlNode *dom = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
+        layout_resolve_used_sizes(child, dom, box->content_width, box->content_height);
+        double fs = child->font_size > 0.0 ? child->font_size : 16.0;
+        double line_adv = layout_line_advance_box(child);
+        bool keeps_nl = child->white_space >= 2 && child->white_space <= 4;
+        child->wrap_cont_w = 0.0;
+        child->wrap_cont2_line = 0;
+
+        const char *text = NULL;
+        char concat[8192];
+        if (dom && dom->type == HTML_NODE_TEXT) {
+            text = css_layout_box_text(ctx, c, dom->text_content ? dom->text_content : "");
+        } else if (dom && dom->type == HTML_NODE_ELEMENT && child->display == CSS_DISPLAY_INLINE &&
+                   strcasecmp(dom->tag_name, "img") != 0) {
+            size_t cl = 0;
+            concat[0] = '\0';
+            layout_concat_dom_text(ctx->doc, dom, concat, sizeof(concat), &cl);
+            if (cl > 0) text = concat;
+        }
+        bool has_nl = text && keeps_nl && strchr(text, '\n');
+        if (text && layout_text_is_whitespace(text) && !has_nl) {
+            /* Collapsible space: one space between content, none at a line start. */
+            double sw = 0.0;
+            if (cx > line_start + 0.001 && !keeps_nl) {
+                if (!layout_measure_text_styled(child, " ", fs, &sw, NULL)) sw = fs * 0.3;
+            } else if (keeps_nl && !layout_measure_text_styled(child, text, fs, &sw, NULL)) {
+                sw = 0.0;
+            }
+            child->x = cx;
+            child->y = cy;
+            child->width = sw;
+            child->height = sw > 0.0 ? line_adv : 0.0;
+            layout_update_content_sizes(child);
+            cx += sw;
+            layout_node_serial(ctx, c);
+            continue;
+        }
+        if (text) {
+            double tw = 0.0;
+            layout_measure_text_styled(child, text, fs, &tw, NULL);
+            TextShaper *font = display_list_get_font(layout_font_slot(child));
+            if (!font) font = display_list_get_default_font();
+            TsWrapResult wr;
+            if (font && (has_nl || cx + tw > line_right + 0.01) &&
+                text_shaper_wrap_measure(font, text, (float)cx, (float)cont_x,
+                                         (float)(line_right - cx), (float)cont_w,
+                                         (float)(fs / 16.0), (float)line_adv, 0, 0.0f, 0.0f, &wr)) {
+                child->x = cx;
+                child->y = cy;
+                child->width = wr.max_width;
+                child->height = wr.height;
+                child->wrap_first_w = line_right - cx;
+                child->wrap_cont_w = cont_w;
+                child->wrap_cont_x = cont_x;
+                layout_update_content_sizes(child);
+                layout_node_serial(ctx, c);
+                if (wr.height > wr.line_advance + 0.01) {
+                    cy += wr.height - wr.line_advance;
+                    line_start = cont_x;
+                    line_right = cont_x + cont_w;
+                }
+                cx = wr.last_end_x;
+                continue;
+            }
+            child->x = cx;
+            child->y = cy;
+            child->width = tw;
+            child->height = line_adv;
+            layout_update_content_sizes(child);
+            cx += tw;
+            layout_node_serial(ctx, c);
+            continue;
+        }
+        /* Atomic inline, image, or empty element: place it, breaking first
+         * when it overflows a line that already has content. */
+        if (layout_box_is_atomic_inline(child) && dom && dom->type == HTML_NODE_ELEMENT &&
+            strcasecmp(dom->tag_name, "img") != 0)
+            layout_size_atomic_inline(ctx, c, cont_w);
+        double w = child->margin_left + child->width + child->margin_right;
+        if (cx + w > line_right + 0.01 && cx > line_start + 0.001) {
+            cy += line_adv;
+            cx = line_start = cont_x;
+            line_right = cont_x + cont_w;
+        }
+        child->x = cx + child->margin_left;
+        child->y = cy + child->margin_top;
+        layout_update_content_sizes(child);
+        layout_node_serial(ctx, c);
+        cx += w;
+    }
+}
+
 static void layout_node_serial(LayoutContext *ctx, int idx)
 {
     LayoutBox *box = layout_box(ctx, idx);
@@ -6173,6 +6405,10 @@ static void layout_node_serial(LayoutContext *ctx, int idx)
                 wrap_target = c;
             }
             if (sig_count != 1) wrap_target = -1;
+            if (sig_count > 1) {
+                layout_inline_wrapped_children(ctx, idx);
+                return;
+            }
         }
         for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0;
              c = ctx->tree.nodes[c].next_sibling_idx) {
@@ -6678,6 +6914,7 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
 
     /* Cascade: match selectors, resolve custom properties, apply declarations. */
     STAGE("setup");
+    if (ctx->viewport_width > 0.0) g_calc_pct_hint = ctx->viewport_width;
     layout_apply_stylesheet(ctx, sheet);
     _st_t = layout_now_ms();
 
@@ -6712,7 +6949,12 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
             bool in_space = false;
             for (const char *q = t; *q; q++) {
                 char ch = *q;
-                if (ch == ' ' || ch == '\n' || ch == '\t' || ch == '\r' || ch == '\f') {
+                if (ch == '\n' && ws == 4) {
+                    /* pre-line keeps segment breaks; spaces around them go. */
+                    if (k > 0 && o[k - 1] == ' ') k--;
+                    o[k++] = '\n';
+                    in_space = true;
+                } else if (ch == ' ' || ch == '\n' || ch == '\t' || ch == '\r' || ch == '\f') {
                     if (!in_space) o[k++] = ' ';
                     in_space = true;
                 } else {

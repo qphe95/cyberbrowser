@@ -277,6 +277,8 @@ typedef struct LayoutBox {
      * (inline-flex / inline-grid / inline-table; inline-block uses
      * CSS_DISPLAY_INLINE_BLOCK).  Cleared by blockification. */
     unsigned char inline_level;
+    /* display: table-caption (sized at min-content in a shrink-to-fit table). */
+    unsigned char table_caption;
     /* Margins specified as `auto`: 1=top 2=right 4=bottom 8=left. */
     unsigned char margin_auto;
     /* align-self: 0 = auto (use the container's align-items), otherwise

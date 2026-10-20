@@ -224,6 +224,22 @@ TEST(test_dom_parse_matches_legacy_fixtures) {
     return true;
 }
 
+/* Text keeps its white space (CSS collapses it, not the parser), CR LF
+ * becomes LF, the newline after <pre> is dropped, and character references
+ * decode to UTF-8. */
+TEST(test_dom_parse_text_white_space_and_entities) {
+    const char *html =
+        "<body><p>a  \tb\r\nc</p><pre>\nx  y\n</pre>"
+        "<i>&nbsp;&#233;&#x1F600;&mdash;&#150;&amp;&bogus;</i></body>";
+    char *d = dump_html_parse(html, strlen(html));
+    ASSERT_TRUE(d != NULL);
+    bool ok = strstr(d, "T:a  \\x09b\\x0ac\n") && strstr(d, "T:x  y\\x0a\n") &&
+              strstr(d, "T:\\xc2\\xa0\\xc3\\xa9\\xf0\\x9f\\x98\\x80\\xe2\\x80\\x94\\xe2\\x80\\x93&&bogus;\n");
+    if (!ok) printf("    tree:\n%s", d);
+    free(d);
+    return ok;
+}
+
 TEST(test_dom_parse_matches_legacy_fuzz) {
     for (uint32_t seed = 1; seed <= 400; seed++) {
         size_t len = 0;
@@ -924,6 +940,7 @@ void run_dom_tests(void) {
     printf("\n--- Node store DOM Tests ---\n");
     RUN_TEST(test_dom_parse_matches_legacy_fixtures);
     RUN_TEST(test_dom_parse_matches_legacy_fuzz);
+    RUN_TEST(test_dom_parse_text_white_space_and_entities);
     RUN_TEST(test_dom_parse_chunked_same_tree);
     RUN_TEST(test_dom_parse_no_length_limits);
     RUN_TEST(test_dom_wrapper_identity);

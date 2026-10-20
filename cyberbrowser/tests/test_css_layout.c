@@ -650,6 +650,128 @@ TEST(test_layout_pre_trailing_spaces) {
     return ok;
 }
 
+
+/* A floated display:table figure shrinks to its image; the caption wraps
+ * at that width instead of widening it (Wikipedia thumbnails). */
+TEST(test_layout_float_table_figure) {
+    const char *html =
+        "<html><body style=\"margin:0\"><div style=\"width:800px\">"
+        "<figure id=\"f\" style=\"display:table;float:right;margin:0;border:1px solid\">"
+        "<a id=\"a\" style=\"display:block\"><img id=\"i\" src=\"missing.png\" width=\"250\" height=\"163\" style=\"max-width:calc(100% - 8px);height:auto;margin:3px;border:1px solid\"></a>"
+        "<figcaption id=\"c\" style=\"display:table-caption;caption-side:bottom\">A web browser (Safari) on a MacBook "
+        "displaying the Wikipedia web page, with a caption long enough to wrap several times</figcaption>"
+        "</figure><p>text</p></div></body></html>";
+    HtmlDocument *doc = html_parse(html, strlen(html));
+    ASSERT_TRUE(doc != NULL);
+    LayoutContext ctx = {0};
+    ASSERT_TRUE(css_layout_run(&ctx, doc, NULL, 800.0, 600.0));
+    const char *ids[3] = { "f", "i", "c" };
+    LayoutBox *bx[3];
+    for (int k = 0; k < 3; k++) {
+        HtmlNode *n = html_document_get_element_by_id(doc, ids[k]);
+        ASSERT_TRUE(n != NULL);
+        bx[k] = css_layout_box_for_node(&ctx, po_array_index_from_payload(&doc->array, n));
+        ASSERT_TRUE(bx[k] != NULL);
+    }
+    bool ok = near_equal(bx[0]->width, 260.0) && near_equal(bx[1]->width, 252.0) &&
+              near_equal(bx[0]->x, 540.0) && bx[2]->width <= 258.5;
+    css_layout_tree_free(&ctx);
+    html_document_free(doc);
+    return ok;
+}
+
+
+/* Nested custom properties and math functions (min/max/clamp/round)
+ * resolve; Wikipedia sizes thumbnails with
+ * round(var(--image-size-user) * var(--mw-file-upright,1), 10px). */
+TEST(test_layout_calc_nested_vars) {
+    const char *css =
+        ":root{--std:250px;--user:var(--std)}"
+        "#a{width:calc(var(--user) * var(--up,1))}"
+        "#b{width:calc(var(--user) * 0.5)}"
+        "#c{width:round(var(--user) * var(--up,1),10px)}"
+        "#d{width:round(up,243px,10px)}"
+        "#e{width:min(500px,50%)}"
+        "#f{width:clamp(100px,10px,300px)}"
+        "#g{width:calc(max(20px,1em) + 5px)}";
+    const char *html =
+        "<html><body style=\"margin:0\"><div id=\"a\">x</div><div id=\"b\">y</div>"
+        "<div id=\"c\"></div><div id=\"d\"></div><div id=\"e\"></div><div id=\"f\"></div><div id=\"g\"></div></body></html>";
+    HtmlDocument *doc = html_parse(html, strlen(html));
+    ASSERT_TRUE(doc != NULL);
+    CssStylesheet *sheet = css_stylesheet_parse(css, strlen(css));
+    ASSERT_TRUE(sheet != NULL);
+    LayoutContext ctx = {0};
+    ASSERT_TRUE(css_layout_run(&ctx, doc, sheet, 800.0, 600.0));
+    HtmlNode *a = html_document_get_element_by_id(doc, "a");
+    HtmlNode *b = html_document_get_element_by_id(doc, "b");
+    LayoutBox *ba = css_layout_box_for_node(&ctx, po_array_index_from_payload(&doc->array, a));
+    LayoutBox *bb = css_layout_box_for_node(&ctx, po_array_index_from_payload(&doc->array, b));
+    bool ok = near_equal(ba->width, 250.0) && near_equal(bb->width, 125.0);
+    static const struct { const char *id; double w; } more[] = {
+        { "c", 250.0 }, { "d", 250.0 }, { "e", 400.0 }, { "f", 100.0 }, { "g", 25.0 },
+    };
+    for (size_t k = 0; k < sizeof(more) / sizeof(more[0]); k++) {
+        HtmlNode *n = html_document_get_element_by_id(doc, more[k].id);
+        LayoutBox *bm = n ? css_layout_box_for_node(&ctx, po_array_index_from_payload(&doc->array, n)) : NULL;
+        if (!bm || !near_equal(bm->width, more[k].w)) {
+            printf("    #%s: width %.2f, want %.0f\n", more[k].id, bm ? bm->width : -1.0, more[k].w);
+            ok = false;
+        }
+    }
+    css_layout_tree_free(&ctx);
+    html_document_free(doc);
+    return ok;
+}
+
+
+/* Preserved newlines force line breaks under pre, pre-wrap and pre-line;
+ * white-space:normal folds them into spaces. */
+TEST(test_layout_preserved_newlines_break_lines) {
+    const char *fonts[] = { "cyberbrowser/fonts/Roboto-Regular.ttf", "../../fonts/Roboto-Regular.ttf",
+                            "../fonts/Roboto-Regular.ttf", "fonts/Roboto-Regular.ttf", NULL };
+    bool have_font = false;
+    for (int i = 0; fonts[i] && !have_font; i++) have_font = display_list_set_default_font(fonts[i], 16.0f);
+    ASSERT_TRUE(have_font);
+    const char *html =
+        "<html><body style=\"margin:0;font-size:16px;line-height:20px\">"
+        "<div id=\"n\" style=\"width:400px\">a\nb\nc</div>"
+        "<div id=\"p\" style=\"width:400px;white-space:pre\">a\nb\nc</div>"
+        "<div id=\"w\" style=\"width:400px;white-space:pre-wrap\">a\nb\nc</div>"
+        "<div id=\"l\" style=\"width:400px;white-space:pre-line\">a  \n  b\nc</div>"
+        "<div id=\"y\" style=\"width:400px\"><span style=\"white-space:pre-wrap\"><span>one\n\ntwo </span>"
+        "<span><a id=\"ya\">link</a></span></span></div>"
+        "</body></html>";
+    HtmlDocument *doc = html_parse(html, strlen(html));
+    ASSERT_TRUE(doc != NULL);
+    LayoutContext ctx = {0};
+    ASSERT_TRUE(css_layout_run(&ctx, doc, NULL, 800.0, 600.0));
+    static const struct { const char *id; double h; } want[] = {
+        { "n", 20.0 }, { "p", 60.0 }, { "w", 60.0 }, { "l", 60.0 }, { "y", 60.0 },
+    };
+    bool ok = true;
+    for (size_t k = 0; k < sizeof(want) / sizeof(want[0]); k++) {
+        HtmlNode *n = html_document_get_element_by_id(doc, want[k].id);
+        LayoutBox *b = n ? css_layout_box_for_node(&ctx, po_array_index_from_payload(&doc->array, n)) : NULL;
+        if (!b || !near_equal(b->height, want[k].h)) {
+            printf("    #%s: height %.2f, want %.0f\n", want[k].id, b ? b->height : -1.0, want[k].h);
+            ok = false;
+        }
+    }
+    /* The link follows "two " on the third line. */
+    HtmlNode *ya = html_document_get_element_by_id(doc, "ya");
+    LayoutBox *yb = ya ? css_layout_box_for_node(&ctx, po_array_index_from_payload(&doc->array, ya)) : NULL;
+    HtmlNode *yd = html_document_get_element_by_id(doc, "y");
+    LayoutBox *ydb = yd ? css_layout_box_for_node(&ctx, po_array_index_from_payload(&doc->array, yd)) : NULL;
+    if (!yb || !ydb || !near_equal(yb->y - ydb->y, 40.0) || yb->x < 20.0) {
+        printf("    #ya at %.1f,%.1f, want y 40 after \"two \"\n", yb ? yb->x : -1.0, yb ? yb->y : -1.0);
+        ok = false;
+    }
+    css_layout_tree_free(&ctx);
+    html_document_free(doc);
+    return ok;
+}
+
 void run_css_layout_tests(void) {
     printf("\n--- CSS Layout Engine Tests ---\n");
     RUN_TEST(test_layout_basic_document);
@@ -670,4 +792,7 @@ void run_css_layout_tests(void) {
     RUN_TEST(test_layout_percentage_sizes_in_calc);
     RUN_TEST(test_layout_css_wide_keywords);
     RUN_TEST(test_layout_pre_trailing_spaces);
+    RUN_TEST(test_layout_float_table_figure);
+    RUN_TEST(test_layout_calc_nested_vars);
+    RUN_TEST(test_layout_preserved_newlines_break_lines);
 }

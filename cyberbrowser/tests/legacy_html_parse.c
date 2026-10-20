@@ -11,6 +11,7 @@
 #include <strings.h>
 #include "preorder_compaction_array.h"
 #include "legacy_html_parse.h"
+#include "dom_parse.h"
 
 /* List of self-closing HTML tags (void elements) */
 static const char *LG_SELF_CLOSING[] = {
@@ -54,53 +55,11 @@ static void lg_tag_name_normalize(char *tag_name) {
     }
 }
 
-/* Decode common HTML entities */
+/* Character references: the store parser's decoder, so the trees compare
+ * on structure rather than on entity coverage. */
 static int lg_decode_entities(char *str, size_t len) {
     if (!str || len == 0) return 0;
-    
-    char *dest = str;
-    const char *src = str;
-    const char *end = str + len;
-    
-    while (*src && src < end) {
-        if (*src == '&') {
-            if (strncmp(src, "&lt;", 4) == 0) {
-                *dest++ = '<';
-                src += 4;
-            } else if (strncmp(src, "&gt;", 4) == 0) {
-                *dest++ = '>';
-                src += 4;
-            } else if (strncmp(src, "&amp;", 5) == 0) {
-                *dest++ = '&';
-                src += 5;
-            } else if (strncmp(src, "&quot;", 6) == 0) {
-                *dest++ = '"';
-                src += 6;
-            } else if (strncmp(src, "&apos;", 6) == 0) {
-                *dest++ = '\'';
-                src += 6;
-            } else if (strncmp(src, "&nbsp;", 6) == 0) {
-                *dest++ = ' ';
-                src += 6;
-            } else if (src[1] == '#' && isdigit((unsigned char)src[2])) {
-                /* Numeric entity: &#123; */
-                src += 2;
-                int val = 0;
-                while (isdigit((unsigned char)*src)) {
-                    val = val * 10 + (*src - '0');
-                    src++;
-                }
-                if (*src == ';') src++;
-                *dest++ = (char)(val > 0 && val < 256 ? val : '?');
-            } else {
-                *dest++ = *src++;
-            }
-        } else {
-            *dest++ = *src++;
-        }
-    }
-    *dest = '\0';
-    return (int)(dest - str);
+    return (int)dom_parse_decode_entities(str, len);
 }
 
 /* ============================================================================
@@ -506,29 +465,32 @@ static int lgp_parse_text(LgParser *p, int parent_idx) {
     size_t len = p->pos - start;
     if (len == 0) return -1;
     
-    /* Collapse whitespace runs to a single space, like CSS white-space:normal.
-     * Leading and trailing single spaces are preserved: they are the gaps
-     * between inline-level siblings (e.g. "text <a>link</a> text").  A node
-     * that is entirely whitespace collapses to a lone space and has no size
-     * in layout. */
+    /* Text is kept as written (CSS does white-space processing), with CR LF
+     * and lone CR normalized to LF; a newline right after <pre> / <listing>
+     * is dropped. */
     char *collapsed = (char*)malloc(len + 1);
     if (!collapsed) return -1;
     size_t cl = 0;
-    bool pending_space = false;
     for (size_t i = 0; i < len; i++) {
-        unsigned char ch = (unsigned char)p->html[start + i];
-        if (isspace(ch)) {
-            pending_space = true;
-            continue;
+        char ch = p->html[start + i];
+        if (ch == '\r') {
+            if (i + 1 < len && p->html[start + i + 1] == '\n') continue;
+            ch = '\n';
         }
-        if (pending_space) collapsed[cl++] = ' ';
-        pending_space = false;
-        collapsed[cl++] = (char)ch;
+        collapsed[cl++] = ch;
     }
-    if (pending_space && cl > 0) collapsed[cl++] = ' ';
-    if (cl == 0) collapsed[cl++] = ' ';  /* pure-whitespace node: one space */
     collapsed[cl] = '\0';
-    
+    if (cl && collapsed[0] == '\n' && parent_idx >= 0 &&
+        po_array_first_child(&p->document->array, parent_idx) < 0) {
+        LgNode *pn = lg_node_at(p->document, parent_idx);
+        if (pn && pn->tag_name && (strcasecmp(pn->tag_name, "pre") == 0 ||
+                                   strcasecmp(pn->tag_name, "listing") == 0)) {
+            memmove(collapsed, collapsed + 1, cl);
+            cl--;
+            if (!cl) { free(collapsed); return -1; }
+        }
+    }
+
     int node_idx = lg_node_create(p->document, LG_NODE_TEXT, parent_idx);
     if (node_idx < 0) {
         free(collapsed);

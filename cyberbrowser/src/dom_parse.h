@@ -27,6 +27,10 @@
 extern "C" {
 #endif
 
+/* Decode character references in place on a NUL-terminated buffer of `len`
+ * bytes (numeric and common named ones, to UTF-8).  Returns the new length. */
+uint32_t dom_parse_decode_entities(char *str, size_t len);
+
 /* Parse `len` bytes of HTML into a new detached fragment (owner `owner_doc`)
  * whose children are the top-level nodes.  Returns the fragment. */
 NodeId dom_parse_html(const char *html, size_t len, NodeId owner_doc);

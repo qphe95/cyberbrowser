@@ -83,61 +83,119 @@ static CssAtom tok_atom(TokChunk *c, const char *s, size_t n, bool serial) {
     return a;
 }
 
-/* html_decode_entities() of the legacy parser, in place on a NUL-terminated
- * buffer.  Returns the new length. */
-static uint32_t decode_entities(char *str, size_t len) {
+/* Append code point cp as UTF-8; returns the byte count. */
+static int utf8_put(char *d, uint32_t cp) {
+    if (cp == 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) cp = 0xFFFD;
+    if (cp < 0x80) { d[0] = (char)cp; return 1; }
+    if (cp < 0x800) { d[0] = (char)(0xC0 | (cp >> 6)); d[1] = (char)(0x80 | (cp & 0x3F)); return 2; }
+    if (cp < 0x10000) {
+        d[0] = (char)(0xE0 | (cp >> 12)); d[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        d[2] = (char)(0x80 | (cp & 0x3F));
+        return 3;
+    }
+    d[0] = (char)(0xF0 | (cp >> 18)); d[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+    d[2] = (char)(0x80 | ((cp >> 6) & 0x3F)); d[3] = (char)(0x80 | (cp & 0x3F));
+    return 4;
+}
+
+/* Named references in common use.  Every entry's UTF-8 is no longer than
+ * "&name;", so decoding can run in place. */
+static const struct { const char *name; uint32_t cp; } k_entities[] = {
+    { "lt", '<' }, { "gt", '>' }, { "amp", '&' }, { "quot", '"' }, { "apos", '\'' },
+    { "nbsp", 0xA0 }, { "copy", 0xA9 }, { "reg", 0xAE }, { "trade", 0x2122 },
+    { "mdash", 0x2014 }, { "ndash", 0x2013 }, { "hellip", 0x2026 }, { "middot", 0xB7 },
+    { "bull", 0x2022 }, { "lsquo", 0x2018 }, { "rsquo", 0x2019 }, { "ldquo", 0x201C },
+    { "rdquo", 0x201D }, { "laquo", 0xAB }, { "raquo", 0xBB }, { "times", 0xD7 },
+    { "divide", 0xF7 }, { "deg", 0xB0 }, { "plusmn", 0xB1 }, { "minus", 0x2212 },
+    { "sect", 0xA7 }, { "para", 0xB6 }, { "euro", 0x20AC }, { "pound", 0xA3 },
+    { "yen", 0xA5 }, { "cent", 0xA2 }, { "larr", 0x2190 }, { "rarr", 0x2192 },
+    { "uarr", 0x2191 }, { "darr", 0x2193 }, { "harr", 0x2194 }, { "thinsp", 0x2009 },
+    { "ensp", 0x2002 }, { "emsp", 0x2003 }, { "zwj", 0x200D }, { "zwnj", 0x200C },
+    { "shy", 0xAD }, { "iexcl", 0xA1 }, { "iquest", 0xBF }, { "eacute", 0xE9 },
+    { "egrave", 0xE8 }, { "aacute", 0xE1 }, { "agrave", 0xE0 }, { "ouml", 0xF6 },
+    { "uuml", 0xFC }, { "auml", 0xE4 }, { "szlig", 0xDF }, { "ccedil", 0xE7 },
+    { "ntilde", 0xF1 }, { "oacute", 0xF3 }, { "iacute", 0xED }, { "uacute", 0xFA },
+    { "frac12", 0xBD }, { "frac14", 0xBC }, { "frac34", 0xBE }, { "prime", 0x2032 },
+    { "Prime", 0x2033 }, { "dagger", 0x2020 }, { "hearts", 0x2665 }, { "check", 0x2713 },
+};
+
+/* Character references, in place on a NUL-terminated buffer.  Numeric
+ * references (decimal and hex) and the named ones above become UTF-8;
+ * anything else is left as written.  Returns the new length. */
+uint32_t dom_parse_decode_entities(char *str, size_t len) {
     char *dest = str;
     const char *src = str, *end = str + len;
     while (*src && src < end) {
-        if (*src == '&') {
-            if (strncmp(src, "&lt;", 4) == 0) { *dest++ = '<'; src += 4; }
-            else if (strncmp(src, "&gt;", 4) == 0) { *dest++ = '>'; src += 4; }
-            else if (strncmp(src, "&amp;", 5) == 0) { *dest++ = '&'; src += 5; }
-            else if (strncmp(src, "&quot;", 6) == 0) { *dest++ = '"'; src += 6; }
-            else if (strncmp(src, "&apos;", 6) == 0) { *dest++ = '\''; src += 6; }
-            else if (strncmp(src, "&nbsp;", 6) == 0) { *dest++ = ' '; src += 6; }
-            else if (src[1] == '#' && isdigit((unsigned char)src[2])) {
-                src += 2;
-                unsigned val = 0;
-                while (isdigit((unsigned char)*src)) { val = val * 10u + (unsigned)(*src - '0'); src++; }
-                if (*src == ';') src++;
-                *dest++ = (char)(val > 0 && val < 256 ? val : '?');
-            } else {
-                *dest++ = *src++;
+        if (*src != '&') { *dest++ = *src++; continue; }
+        if (src[1] == '#') {
+            bool hex = src[2] == 'x' || src[2] == 'X';
+            const char *q = src + (hex ? 3 : 2);
+            uint32_t val = 0;
+            int digits = 0;
+            while (hex ? isxdigit((unsigned char)*q) : isdigit((unsigned char)*q)) {
+                int dv = isdigit((unsigned char)*q) ? *q - '0' : (tolower((unsigned char)*q) - 'a' + 10);
+                if (val < 0x110000) val = val * (hex ? 16u : 10u) + (uint32_t)dv;
+                q++;
+                digits++;
             }
-        } else {
-            *dest++ = *src++;
+            if (digits) {
+                if (*q == ';') q++;
+                /* Windows-1252 C1 remaps (&#150; and friends). */
+                static const uint16_t c1[32] = {
+                    0x20AC, 0x81, 0x201A, 0x192, 0x201E, 0x2026, 0x2020, 0x2021, 0x2C6, 0x2030,
+                    0x160, 0x2039, 0x152, 0x8D, 0x17D, 0x8F, 0x90, 0x2018, 0x2019, 0x201C,
+                    0x201D, 0x2022, 0x2013, 0x2014, 0x2DC, 0x2122, 0x161, 0x203A, 0x153, 0x9D,
+                    0x17E, 0x178 };
+                if (val >= 0x80 && val < 0xA0) val = c1[val - 0x80];
+                dest += utf8_put(dest, val);
+                src = q;
+                continue;
+            }
+        } else if (isalpha((unsigned char)src[1])) {
+            const char *q = src + 1;
+            while (isalnum((unsigned char)*q) && q - src < 10) q++;
+            size_t nl = (size_t)(q - src - 1);
+            bool done = false;
+            for (size_t k = 0; k < sizeof(k_entities) / sizeof(k_entities[0]); k++) {
+                if (strlen(k_entities[k].name) == nl && strncmp(src + 1, k_entities[k].name, nl) == 0 &&
+                    (*q == ';' || k_entities[k].cp < 0x80)) {
+                    src = *q == ';' ? q + 1 : q;
+                    dest += utf8_put(dest, k_entities[k].cp);
+                    done = true;
+                    break;
+                }
+            }
+            if (done) continue;
         }
+        *dest++ = *src++;
     }
     *dest = '\0';
     return (uint32_t)(dest - str);
 }
 
-/* Text: collapse whitespace runs to one space (keeping single leading and
- * trailing spaces; an all-space run becomes " "), then decode entities. */
+/* Text: kept as written (white-space processing belongs to CSS), with CR LF
+ * and lone CR normalized to LF and character references decoded. */
 static DomStr tok_text(TokChunk *c, const char *s, size_t n) {
     DomStr r;
     r.s = dom_arena_alloc(&c->arena, n + 2, &r.blk);
     size_t cl = 0;
-    bool pending = false;
     for (size_t i = 0; i < n; i++) {
-        unsigned char ch = (unsigned char)s[i];
-        if (c_isspace(ch)) { pending = true; continue; }
-        if (pending) r.s[cl++] = ' ';
-        pending = false;
-        r.s[cl++] = (char)ch;
+        if (s[i] == '\r') {
+            if (i + 1 < n && s[i + 1] == '\n') continue;
+            r.s[cl++] = '\n';
+        } else {
+            r.s[cl++] = s[i];
+        }
     }
-    if (pending && cl > 0) r.s[cl++] = ' ';
-    if (cl == 0) r.s[cl++] = ' ';
     r.s[cl] = '\0';
-    r.len = decode_entities(r.s, cl);
+    r.len = dom_parse_decode_entities(r.s, cl);
     return r;
 }
 
 static DomStr tok_attr_value(TokChunk *c, const char *s, size_t n) {
     if (n == 0) return (DomStr){ NULL, 0, 0 };
     DomStr r = dom_arena_str(&c->arena, s, n);
-    r.len = decode_entities(r.s, strlen(r.s));
+    r.len = dom_parse_decode_entities(r.s, strlen(r.s));
     if (r.len == 0) { dom_str_release(&r); return (DomStr){ NULL, 0, 0 }; }
     return r;
 }
@@ -576,6 +634,15 @@ static uint32_t build_element(Builder *b, DomTok *t, uint32_t parent) {
 }
 
 static void build_text(Builder *b, DomTok *t, uint32_t parent) {
+    /* A newline right after <pre> / <listing> is not content (HTML §13.2.6.4.7). */
+    if (!g_dom.first[parent] && t->text.len && t->text.s[0] == '\n') {
+        const char *tn = css_atom_str(g_dom.tag[parent]);
+        if (tn && (strcasecmp(tn, "pre") == 0 || strcasecmp(tn, "listing") == 0)) {
+            memmove(t->text.s, t->text.s + 1, t->text.len);   /* keeps the NUL */
+            t->text.len--;
+            if (!t->text.len) return;
+        }
+    }
     uint32_t s = dom_alloc_slot(DOM_K_TEXT, dom_id_of(b->owner));
     g_dom.text[s] = t->text;
     t->text = (DomStr){ NULL, 0, 0 };
