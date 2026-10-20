@@ -803,6 +803,20 @@ TEST(test_dom_query_selector_no_match_is_null) {
     return true;
 }
 
+/* <link> href/rel reflect their attributes (the sheet loader reads the
+ * attributes; a plain JS property never loaded YouTube's player CSS). */
+TEST(test_dom_link_reflects_href_and_rel) {
+    JSContextHandle ctx = get_shared_test_context();
+    if (!dom_ready(ctx)) { printf("    (skipped - no document)\n"); return true; }
+    ASSERT_EQ(1, js_int(ctx,
+        "(function(){var l=document.createElement('link'); l.rel='stylesheet'; l.href='https://example.com/a.css';"
+        "var ok = l.getAttribute('rel')==='stylesheet' && l.getAttribute('href')==='https://example.com/a.css'"
+        "  && !Object.prototype.hasOwnProperty.call(l, 'href') && l.href==='https://example.com/a.css';"
+        "l.setAttribute('media', 'print'); ok = ok && l.media==='print';"
+        "return ok ? 1 : 0;})()"));
+    return true;
+}
+
 void run_dom_tests(void) {
     printf("\n--- Node store DOM Tests ---\n");
     RUN_TEST(test_dom_parse_matches_legacy_fixtures);
@@ -828,4 +842,5 @@ void run_dom_tests(void) {
     RUN_TEST(test_dom_fragment_text_and_html_element_basics);
     RUN_TEST(test_dom_intersection_observer_geometry);
     RUN_TEST(test_dom_query_selector_no_match_is_null);
+    RUN_TEST(test_dom_link_reflects_href_and_rel);
 }

@@ -412,6 +412,11 @@ bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
  * bytes per chunk, 0 = default).  Equal to css_stylesheet_parse's result. */
 CssStylesheet *css_layout_parse_sheet_parallel(const char *text, size_t len, size_t chunk);
 
+/* Fetch the stylesheet at absolute `url` into the process-wide sheet cache
+ * that layout reads <link> sheets from (no-op when cached).  True when the
+ * sheet is available.  Engine thread. */
+bool css_layout_fetch_stylesheet_url(const char *url);
+
 /* Access the resolved LayoutBox for a DOM node index, or NULL if not found. */
 LayoutBox* css_layout_box_for_node(LayoutContext *ctx, int dom_node_idx);
 

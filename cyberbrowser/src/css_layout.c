@@ -2567,23 +2567,17 @@ typedef struct UrlSheet { char *url; char *text; size_t len; } UrlSheet;
 static UrlSheet g_url_sheets[URL_SHEET_MAX];
 static int g_url_sheet_n, g_url_sheet_next;
 
-static void layout_fetch_stylesheet(LayoutStyleSheetList *list, const char *base_url, const char *href) {
-    char *url = layout_resolve_url(base_url, href);
-    if (!url) return;
-    for (int i = 0; i < g_url_sheet_n; i++) {
-        if (strcmp(g_url_sheets[i].url, url) == 0) {
-            layout_sheet_list_add_text(list, g_url_sheets[i].text, g_url_sheets[i].len, NULL);
-            free(url);
-            return;
-        }
-    }
+/* The cached sheet for `url`, fetching it on first use (NULL on failure). */
+static const UrlSheet *url_sheet_get(const char *url) {
+    for (int i = 0; i < g_url_sheet_n; i++)
+        if (strcmp(g_url_sheets[i].url, url) == 0) return &g_url_sheets[i];
 
     HttpBuffer buffer = {0};
     char err[256] = {0};
     bool ok = http_get_to_memory(url, &buffer, err, sizeof(err));
+    const UrlSheet *out = NULL;
     if (ok && buffer.data && buffer.size > 0) {
         LOG_INFO("Fetched stylesheet (%zu bytes)", buffer.size);
-        layout_sheet_list_add_text(list, buffer.data, buffer.size, NULL);
         UrlSheet *u = &g_url_sheets[g_url_sheet_next];
         if (g_url_sheet_n == URL_SHEET_MAX) { free(u->url); free(u->text); }
         else g_url_sheet_n++;
@@ -2593,11 +2587,24 @@ static void layout_fetch_stylesheet(LayoutStyleSheetList *list, const char *base
         memcpy(u->text, buffer.data, buffer.size);
         u->text[buffer.size] = '\0';
         u->len = buffer.size;
+        out = u;
     } else {
         LOG_WARN("Failed to fetch stylesheet %.80s: %s", url, err[0] ? err : "unknown");
     }
-    free(url);
     if (buffer.data) free(buffer.data);
+    return out;
+}
+
+bool css_layout_fetch_stylesheet_url(const char *url) {
+    return url && url[0] && url_sheet_get(url) != NULL;
+}
+
+static void layout_fetch_stylesheet(LayoutStyleSheetList *list, const char *base_url, const char *href) {
+    char *url = layout_resolve_url(base_url, href);
+    if (!url) return;
+    const UrlSheet *u = url_sheet_get(url);
+    if (u) layout_sheet_list_add_text(list, u->text, u->len, NULL);
+    free(url);
 }
 
 /* Walk up the native parent chain to find the nearest custom-element host.

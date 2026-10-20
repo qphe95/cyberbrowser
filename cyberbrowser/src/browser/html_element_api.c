@@ -207,6 +207,31 @@ static const char k_character_data_js[] =
 "      var out = ''; for (; s && s.nodeType === 3; s = s.nextSibling) out += s.data; return out; }});\n"
 "})";
 
+/* HTMLLinkElement reflected attributes.  Without them `link.href = url`
+ * only set a JS property, the element had no href attribute, and its sheet
+ * was never loaded (YouTube's player waits for link#player-css's load). */
+static const char k_link_js[] =
+"(function(P){\n"
+"  function def(name, desc) {\n"
+"    if (Object.prototype.hasOwnProperty.call(P, name)) return;\n"
+"    desc.configurable = true; desc.enumerable = true;\n"
+"    Object.defineProperty(P, name, desc);\n"
+"  }\n"
+"  function strAttr(name, attr) {\n"
+"    def(name, {get: function(){ var v = this.getAttribute(attr); return v == null ? '' : v; },\n"
+"               set: function(v){ this.setAttribute(attr, String(v)); }});\n"
+"  }\n"
+"  strAttr('rel', 'rel'); strAttr('media', 'media'); strAttr('type', 'type'); strAttr('as', 'as');\n"
+"  strAttr('integrity', 'integrity'); strAttr('hreflang', 'hreflang');\n"
+"  def('crossOrigin', {get: function(){ var v = this.getAttribute('crossorigin'); return v == null ? null : (v.toLowerCase() === 'use-credentials' ? 'use-credentials' : 'anonymous'); },\n"
+"                      set: function(v){ if (v == null) this.removeAttribute('crossorigin'); else this.setAttribute('crossorigin', String(v)); }});\n"
+"  def('referrerPolicy', {get: function(){ return this.getAttribute('referrerpolicy') || ''; },\n"
+"                         set: function(v){ this.setAttribute('referrerpolicy', String(v)); }});\n"
+"  def('href', {get: function(){ var v = this.getAttribute('href'); if (v == null) return '';\n"
+"                 try { return new URL(v, document.baseURI || location.href).href; } catch (e) { return v; } },\n"
+"               set: function(v){ this.setAttribute('href', String(v)); }});\n"
+"})";
+
 static void run_installer(JSContextHandle ctx, const char *src, size_t len, const char *name, GCValue proto)
 {
     GCValue fn = JS_Eval(ctx, src, len, name, JS_EVAL_TYPE_GLOBAL);
@@ -222,6 +247,12 @@ void html_element_api_install(JSContextHandle ctx, GCValue element_proto)
 {
     if (!JS_IsObject(element_proto)) return;
     run_installer(ctx, k_html_element_js, sizeof(k_html_element_js) - 1, "<html_element_api>", element_proto);
+}
+
+void html_link_api_install(JSContextHandle ctx, GCValue link_proto)
+{
+    if (!JS_IsObject(link_proto)) return;
+    run_installer(ctx, k_link_js, sizeof(k_link_js) - 1, "<link_api>", link_proto);
 }
 
 void html_character_data_api_install(JSContextHandle ctx, GCValue character_data_proto)

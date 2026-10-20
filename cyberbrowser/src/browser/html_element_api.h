@@ -19,6 +19,10 @@ void html_element_api_install(JSContextHandle ctx, GCValue element_proto);
  * insertData, deleteData, replaceData, substringData, splitText, wholeText. */
 void html_character_data_api_install(JSContextHandle ctx, GCValue character_data_proto);
 
+/* HTMLLinkElement: href (resolved), rel, media, type, as, crossOrigin,
+ * integrity, hreflang, referrerPolicy reflect their attributes. */
+void html_link_api_install(JSContextHandle ctx, GCValue link_proto);
+
 #ifdef __cplusplus
 }
 #endif

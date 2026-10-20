@@ -1875,6 +1875,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, link_element_ctor, "prototype", link_element_proto);
     JS_SetPropertyStr(ctx, global, "HTMLLinkElement", link_element_ctor);
     JS_SetPropertyStr(ctx, window, "HTMLLinkElement", link_element_ctor);
+    html_link_api_install(ctx, link_element_proto);
     
     // HTMLSelectElement constructor
     GCValue select_element_ctor = JS_NewCFunction2(ctx, js_html_element_constructor, "HTMLSelectElement", 0, JS_CFUNC_constructor_or_func, 0);

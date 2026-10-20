@@ -211,6 +211,11 @@ static bool dom_attr_has_accessor(NodeId id, const char *name) {
     for (int i = 0; reflected[i]; i++)
         if (strcasecmp(name, reflected[i]) == 0) return true;
     if (strcasecmp(name, "href") == 0 && (dom_tag_is(id, "a") || dom_tag_is(id, "area"))) return true;
+    /* <link> reflections (html_element_api.c). */
+    if (dom_tag_is(id, "link") &&
+        (strcasecmp(name, "href") == 0 || strcasecmp(name, "rel") == 0 || strcasecmp(name, "media") == 0 ||
+         strcasecmp(name, "type") == 0 || strcasecmp(name, "as") == 0 || strcasecmp(name, "integrity") == 0 ||
+         strcasecmp(name, "hreflang") == 0)) return true;
     /* src / srcset of <img> (image_api.c): setting them starts a load. */
     return (strcasecmp(name, "src") == 0 || strcasecmp(name, "srcset") == 0) && dom_tag_is(id, "img");
 }
@@ -1007,6 +1012,40 @@ static void dom_maybe_load_script(JSContextHandle ctx, GCValue node) {
     if (src) JS_FreeCString(ctx, src);
 }
 
+/* A connected <link rel="stylesheet" href> loads its sheet and fires load
+ * (or error) once, as in browsers; pages wait for it (YouTube's player
+ * inserts link#player-css and only creates the player on its load event). */
+static void dom_maybe_load_stylesheet(JSContextHandle ctx, GCValue node) {
+    NodeId n = dom_node_of(node);
+    if (!dom_tag_is(n, "link") || !dom_node_is_connected(ctx, node)) return;
+    const char *rel = dom_attr(n, "rel");
+    const char *href = dom_attr(n, "href");
+    if (!rel || !href || !href[0]) return;
+    /* rel is a token list: "stylesheet", "preload stylesheet", ... */
+    bool sheet = false;
+    for (const char *p = rel; *p; ) {
+        while (*p == ' ' || *p == '\t') p++;
+        const char *e = p;
+        while (*e && *e != ' ' && *e != '\t') e++;
+        if (e - p == 10 && strncasecmp(p, "stylesheet", 10) == 0) sheet = true;
+        p = e;
+    }
+    if (!sheet) return;
+    GCValue done = JS_GetPropertyStr(ctx, node, "__cyber_sheet_loaded");
+    if (JS_ToBool(ctx, done)) return;
+    JS_SetPropertyStr(ctx, node, "__cyber_sheet_loaded", JS_TRUE);
+
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue loc = JS_GetPropertyStr(ctx, global, "location");
+    GCValue hrefv = JS_GetPropertyStr(ctx, loc, "href");
+    const char *base = JS_IsString(hrefv) ? JS_ToCString(ctx, hrefv) : NULL;
+    char *url = dom_resolve_url(base && base[0] ? base : (g_cyber_start_url ? g_cyber_start_url : ""), href);
+    if (base) JS_FreeCString(ctx, base);
+    bool ok = url && url_is_network_url(url) && css_layout_fetch_stylesheet_url(url);
+    free(url);
+    dom_dispatch_script_event(ctx, node, ok ? "load" : "error");
+}
+
 /* ============================================================================
  * Tree mutation
  * ============================================================================ */
@@ -1046,7 +1085,8 @@ bool dom_api_insert(JSContextHandle ctx, NodeId parent, NodeId child, NodeId ref
     /* Wrappers only when something will see them (see dom_api_remove). */
     GCValue parent_js = dom_js(ctx, parent);
     bool observers = mo_child_list_observed(ctx, parent_js);
-    bool need_js = observers || dom_has_wrapper(child) || dom_tag_is(child, "script");
+    bool need_js = observers || dom_has_wrapper(child) || dom_tag_is(child, "script") ||
+                   dom_tag_is(child, "link");
     GCValue child_js = need_js ? dom_js(ctx, child) : JS_NULL;
     /* Remove the child from its current parent first (with its reactions). */
     NodeId old_parent = dom_parent(child);
@@ -1071,6 +1111,7 @@ bool dom_api_insert(JSContextHandle ctx, NodeId parent, NodeId child, NodeId ref
     // Load external scripts that are inserted dynamically after the initial
     // page load (e.g. YouTube's module loader).
     if (need_js) dom_maybe_load_script(ctx, child_js);
+    if (need_js && g_dom_dynamic_scripts_enabled) dom_maybe_load_stylesheet(ctx, child_js);
     if (observers) notify_child_list(ctx, parent_js, child_js);
     return true;
 }
