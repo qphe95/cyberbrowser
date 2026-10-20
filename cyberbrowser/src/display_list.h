@@ -22,7 +22,28 @@ typedef enum {
     DL_BORDER,
     DL_GLYPH,
     DL_IMAGE,
+    /* Commands between a MASK_BEGIN and its MASK_END are composited through
+     * the mask (DisplayList.masks[u.mask_index]). */
+    DL_MASK_BEGIN,
+    DL_MASK_END,
 } DisplayListCmdType;
+
+#define DL_MASK_STOPS 8
+
+/* A CSS mask over a box: a linear gradient (alpha along a line through the
+ * box) or an image whose alpha masks, placed at (ix, iy, iw, ih) and
+ * optionally repeated. */
+typedef struct {
+    float x, y, w, h;          /* the masked box (its border box) */
+    int kind;                  /* 1 image, 2 linear gradient */
+    int image_handle;
+    float ix, iy, iw, ih;
+    int repeat;
+    float angle_deg;           /* CSS gradient angle: 0 = to top, 90 = to right */
+    int nstops;
+    float stop_pos[DL_MASK_STOPS];     /* along the gradient line, 0..1 */
+    float stop_alpha[DL_MASK_STOPS];
+} DisplayMask;
 
 typedef struct {
     float x, y, w, h;
@@ -48,6 +69,7 @@ typedef struct {
         DisplayBorder border;
         DisplayGlyph glyph;
         DisplayImage image;
+        int mask_index;
     } u;
 } DisplayListCmd;
 
@@ -55,6 +77,8 @@ typedef struct {
     DisplayListCmd *cmds;
     int count;
     int capacity;
+    DisplayMask *masks;
+    int mask_count, mask_capacity;
 } DisplayList;
 
 void display_list_init(DisplayList *dl);

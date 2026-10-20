@@ -23,6 +23,7 @@
 #include "job_system.h"
 #include "gc_platform.h"
 
+#include <pthread.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -1392,6 +1393,154 @@ static void layout_resolve_insets(LayoutBox *box, double cb_w, double cb_h)
     if (box->inset_pct_bits & 8) box->left = box->inset_pct[3] * cb_w;
 }
 
+/* Process-lifetime string interning for values boxes point at (mask
+ * images): style application runs on many threads. */
+static const char *layout_intern(const char *s, size_t n)
+{
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static char **tab;
+    static size_t cap, count;
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < n; i++) { h ^= (unsigned char)s[i]; h *= 1099511628211ull; }
+    pthread_mutex_lock(&mu);
+    if (count * 2 >= cap) {
+        size_t nc = cap ? cap * 2 : 1024;
+        char **nt = (char **)calloc(nc, sizeof(char *));
+        if (!nt) { pthread_mutex_unlock(&mu); return NULL; }
+        for (size_t i = 0; i < cap; i++) {
+            if (!tab[i]) continue;
+            uint64_t hh = 1469598103934665603ull;
+            for (const char *q = tab[i]; *q; q++) { hh ^= (unsigned char)*q; hh *= 1099511628211ull; }
+            size_t j = (size_t)hh & (nc - 1);
+            while (nt[j]) j = (j + 1) & (nc - 1);
+            nt[j] = tab[i];
+        }
+        free(tab);
+        tab = nt;
+        cap = nc;
+    }
+    size_t j = (size_t)h & (cap - 1);
+    while (tab[j]) {
+        if (strlen(tab[j]) == n && memcmp(tab[j], s, n) == 0) { pthread_mutex_unlock(&mu); return tab[j]; }
+        j = (j + 1) & (cap - 1);
+    }
+    char *c = (char *)malloc(n + 1);
+    if (c) {
+        memcpy(c, s, n);
+        c[n] = '\0';
+        tab[j] = c;
+        count++;
+    }
+    pthread_mutex_unlock(&mu);
+    return c;
+}
+
+/* mask-image / the mask shorthand's image: url() or linear-gradient(). */
+static void layout_parse_mask_image(LayoutBox *box, const char *value, const char *base_url)
+{
+    box->mask_image = NULL;
+    box->mask_kind = 0;
+    const char *g = strstr(value, "linear-gradient(");
+    const char *u = strstr(value, "url(");
+    if (g && (!u || g < u)) {
+        int depth = 0;
+        const char *e = g;
+        for (; *e; e++) {
+            if (*e == '(') depth++;
+            else if (*e == ')' && --depth == 0) { e++; break; }
+        }
+        box->mask_image = layout_intern(g, (size_t)(e - g));
+        box->mask_kind = box->mask_image ? 2 : 0;
+    } else if (u) {
+        char url[2048];
+        if (css_parse_url_value(u, url, sizeof(url)) && url[0]) {
+            char *abs = layout_resolve_url(base_url, url);
+            if (abs) {
+                box->mask_image = layout_intern(abs, strlen(abs));
+                box->mask_kind = box->mask_image ? 1 : 0;
+                free(abs);
+            }
+        }
+    }
+}
+
+/* One mask-size / mask-position component: px, or a fraction with *pct. */
+static bool layout_mask_len(const char *tok, double font_size, double *out, bool *pct)
+{
+    CssLen l = css_parse_len(tok, font_size);
+    if (l.pct != 0.0 && l.px == 0.0) { *out = l.pct; *pct = true; return true; }
+    *out = l.px;
+    *pct = false;
+    return true;
+}
+
+static void layout_parse_mask_size(LayoutBox *box, const char *value)
+{
+    while (*value && isspace((unsigned char)*value)) value++;
+    box->mask_size_pct = 0;
+    if (strncasecmp(value, "contain", 7) == 0) { box->mask_size_kind = 1; return; }
+    if (strncasecmp(value, "cover", 5) == 0) { box->mask_size_kind = 2; return; }
+    if (strncasecmp(value, "auto", 4) == 0 && !strchr(value, ' ')) { box->mask_size_kind = 0; return; }
+    /* One or two lengths (calc() included), separated at top level. */
+    char a[256] = { 0 }, b[256] = { 0 };
+    int depth = 0;
+    size_t k = 0;
+    const char *p = value;
+    for (; *p; p++) {
+        if (*p == '(') depth++;
+        else if (*p == ')') depth--;
+        else if (depth == 0 && isspace((unsigned char)*p)) break;
+        if (k + 1 < sizeof(a)) a[k++] = *p;
+    }
+    while (*p && isspace((unsigned char)*p)) p++;
+    snprintf(b, sizeof(b), "%s", p);
+    bool pw = false, ph = false;
+    box->mask_size_kind = 3;
+    layout_mask_len(a, box->font_size, &box->mask_size_w, &pw);
+    if (b[0] && strncasecmp(b, "auto", 4) != 0) layout_mask_len(b, box->font_size, &box->mask_size_h, &ph);
+    else box->mask_size_h = -1.0;
+    box->mask_size_pct = (unsigned char)((pw ? 1 : 0) | (ph ? 2 : 0));
+}
+
+static void layout_parse_mask_position(LayoutBox *box, const char *value)
+{
+    char tok[2][128] = { { 0 }, { 0 } };
+    int n = 0;
+    const char *p = value;
+    while (*p && n < 2) {
+        while (*p && isspace((unsigned char)*p)) p++;
+        if (!*p) break;
+        size_t k = 0;
+        int depth = 0;
+        while (*p && (depth > 0 || !isspace((unsigned char)*p))) {
+            if (*p == '(') depth++;
+            else if (*p == ')') depth--;
+            if (k + 1 < sizeof(tok[0])) tok[n][k++] = *p;
+            p++;
+        }
+        n++;
+    }
+    if (n == 1) snprintf(tok[1], sizeof(tok[1]), "center");
+    double v[2] = { 0, 0 };
+    bool pct[2] = { true, true };
+    for (int i = 0; i < 2; i++) {
+        const char *t = tok[i];
+        if (strcasecmp(t, "center") == 0) v[i] = 0.5;
+        else if (strcasecmp(t, "left") == 0 || strcasecmp(t, "top") == 0) v[i] = 0.0;
+        else if (strcasecmp(t, "right") == 0 || strcasecmp(t, "bottom") == 0) v[i] = 1.0;
+        else layout_mask_len(t, box->font_size, &v[i], &pct[i]);
+    }
+    /* "top left" style pairs name y first. */
+    if (strcasecmp(tok[0], "top") == 0 || strcasecmp(tok[0], "bottom") == 0 ||
+        strcasecmp(tok[1], "left") == 0 || strcasecmp(tok[1], "right") == 0) {
+        double tv = v[0]; v[0] = v[1]; v[1] = tv;
+        bool tp = pct[0]; pct[0] = pct[1]; pct[1] = tp;
+    }
+    box->mask_pos_x = v[0];
+    box->mask_pos_y = v[1];
+    box->mask_pos_pct = (unsigned char)((pct[0] ? 1 : 0) | (pct[1] ? 2 : 0));
+}
+
 static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                                      double parent_width, double viewport_width,
                                      const char *base_url)
@@ -1794,6 +1943,24 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         } else {
             box->background_image_url[0] = '\0';
         }
+    } else if (strcasecmp(prop, "mask-image") == 0 || strcasecmp(prop, "-webkit-mask-image") == 0 ||
+               strcasecmp(prop, "mask") == 0 || strcasecmp(prop, "-webkit-mask") == 0) {
+        bool shorthand = strcasecmp(prop, "mask") == 0 || strcasecmp(prop, "-webkit-mask") == 0;
+        layout_parse_mask_image(box, value, base_url);
+        if (shorthand) {
+            /* The shorthand's other parts: repeat keywords and position. */
+            box->mask_no_repeat = strstr(value, "no-repeat") != NULL;
+            if (strstr(value, "center")) {
+                box->mask_pos_x = box->mask_pos_y = 0.5;
+                box->mask_pos_pct = 3;
+            }
+        }
+    } else if (strcasecmp(prop, "mask-size") == 0 || strcasecmp(prop, "-webkit-mask-size") == 0) {
+        layout_parse_mask_size(box, value);
+    } else if (strcasecmp(prop, "mask-position") == 0 || strcasecmp(prop, "-webkit-mask-position") == 0) {
+        layout_parse_mask_position(box, value);
+    } else if (strcasecmp(prop, "mask-repeat") == 0 || strcasecmp(prop, "-webkit-mask-repeat") == 0) {
+        box->mask_no_repeat = strstr(value, "no-repeat") != NULL;
     } else if (strcasecmp(prop, "font-size") == 0) {
         /* Absolute-size keywords (CSS2 table for 16px medium). */
         static const struct { const char *kw; double px; } kw_sizes[] = {

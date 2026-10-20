@@ -676,8 +676,49 @@ static void draw_image(RGB *pixels, int img_width, int img_height,
     }
 }
 
+/* Mask alpha at pixel centre (px, py): a linear gradient along the CSS
+ * angle through the box, or an image's alpha (src: w x h x ch, NULL while
+ * not decoded = transparent). */
+static float mask_alpha_at(const DisplayMask *m, float px, float py,
+                           const uint8_t *src, int sw, int sh, int sch)
+{
+    if (m->kind == 2) {
+        float rad = m->angle_deg * 3.14159265f / 180.0f;
+        float dx = sinf(rad), dy = -cosf(rad);
+        float line = fabsf(m->w * dx) + fabsf(m->h * dy);
+        if (line <= 0.0f) return 1.0f;
+        float t = ((px - (m->x + m->w * 0.5f)) * dx + (py - (m->y + m->h * 0.5f)) * dy) / line + 0.5f;
+        if (t <= m->stop_pos[0]) return m->stop_alpha[0];
+        for (int k = 1; k < m->nstops; k++) {
+            if (t <= m->stop_pos[k]) {
+                float span = m->stop_pos[k] - m->stop_pos[k - 1];
+                float f = span > 0.0f ? (t - m->stop_pos[k - 1]) / span : 1.0f;
+                return m->stop_alpha[k - 1] + (m->stop_alpha[k] - m->stop_alpha[k - 1]) * f;
+            }
+        }
+        return m->stop_alpha[m->nstops - 1];
+    }
+    if (!src || sw <= 0 || sh <= 0 || m->iw <= 0.0f || m->ih <= 0.0f) return 0.0f;
+    float u = (px - m->ix) / m->iw, v = (py - m->iy) / m->ih;
+    if (m->repeat) { u -= floorf(u); v -= floorf(v); }
+    else if (u < 0.0f || u >= 1.0f || v < 0.0f || v >= 1.0f) return 0.0f;
+    int sx = (int)(u * (float)sw), sy = (int)(v * (float)sh);
+    if (sx >= sw) sx = sw - 1;
+    if (sy >= sh) sy = sh - 1;
+    if (sch < 4) return 1.0f;
+    return (float)src[((size_t)sy * sw + sx) * sch + 3] / 255.0f;
+}
+
+typedef struct {
+    int x0, y0, x1, y1;
+    RGB *saved;
+    int mask;
+} MaskLayer;
+
 static bool render_display_list_to_jpg(const DisplayList *dl, const char *path,
                                        int img_width, int img_height) {
+    MaskLayer layers[64];
+    int nlayers = 0;
     size_t pixel_count = (size_t)img_width * (size_t)img_height;
     RGB *pixels = (RGB *)calloc(pixel_count, sizeof(RGB));
     if (!pixels) {
@@ -741,8 +782,53 @@ static bool render_display_list_to_jpg(const DisplayList *dl, const char *path,
         } else if (cmd->type == DL_IMAGE) {
             ImageCache *cache = display_list_get_image_cache();
             if (cache) draw_image(pixels, img_width, img_height, cache, cmd);
+        } else if (cmd->type == DL_MASK_BEGIN) {
+            /* Remember what is under the masked box; MASK_END blends the
+             * box's painting back over it by the mask's alpha. */
+            const DisplayMask *m = &dl->masks[cmd->u.mask_index];
+            MaskLayer *L = nlayers < 64 ? &layers[nlayers] : NULL;
+            if (!L) continue;
+            L->x0 = (int)floorf(m->x); L->y0 = (int)floorf(m->y);
+            L->x1 = (int)ceilf(m->x + m->w); L->y1 = (int)ceilf(m->y + m->h);
+            if (L->x0 < 0) L->x0 = 0;
+            if (L->y0 < 0) L->y0 = 0;
+            if (L->x1 > img_width) L->x1 = img_width;
+            if (L->y1 > img_height) L->y1 = img_height;
+            L->mask = cmd->u.mask_index;
+            L->saved = NULL;
+            if (L->x1 > L->x0 && L->y1 > L->y0) {
+                int w = L->x1 - L->x0;
+                L->saved = (RGB *)malloc((size_t)w * (size_t)(L->y1 - L->y0) * sizeof(RGB));
+                for (int y = L->y0; L->saved && y < L->y1; y++)
+                    memcpy(L->saved + (size_t)(y - L->y0) * w, pixels + (size_t)y * img_width + L->x0,
+                           (size_t)w * sizeof(RGB));
+            }
+            nlayers++;
+        } else if (cmd->type == DL_MASK_END) {
+            if (nlayers == 0) continue;
+            MaskLayer *L = &layers[--nlayers];
+            const DisplayMask *m = &dl->masks[L->mask];
+            int sw = 0, sh = 0, sch = 0;
+            uint8_t *src = NULL;
+            ImageCache *cache = display_list_get_image_cache();
+            if (m->kind == 1 && cache && !image_cache_get(cache, m->image_handle, &sw, &sh, &sch, &src)) src = NULL;
+            int w = L->x1 - L->x0;
+            for (int y = L->y0; L->saved && y < L->y1; y++) {
+                for (int x = L->x0; x < L->x1; x++) {
+                    float a = mask_alpha_at(m, (float)x + 0.5f, (float)y + 0.5f, src, sw, sh, sch);
+                    if (a >= 0.999f) continue;
+                    RGB *cur = &pixels[(size_t)y * img_width + x];
+                    const RGB *old = &L->saved[(size_t)(y - L->y0) * w + (x - L->x0)];
+                    if (a < 0.0f) a = 0.0f;
+                    cur->r = (uint8_t)(old->r + (cur->r - old->r) * a + 0.5f);
+                    cur->g = (uint8_t)(old->g + (cur->g - old->g) * a + 0.5f);
+                    cur->b = (uint8_t)(old->b + (cur->b - old->b) * a + 0.5f);
+                }
+            }
+            free(L->saved);
         }
     }
+    while (nlayers > 0) free(layers[--nlayers].saved);
 
     /* stbi_write_jpg expects interleaved RGB. */
     int ok = stbi_write_jpg(path, img_width, img_height, 3, pixels, 95);
@@ -798,6 +884,9 @@ static bool render_document_to_jpg(HtmlDocument *doc, ImageCache *image_cache,
         dl_ok = css_layout_build_display_list(&layout, &dl);
     }
     if (dl_ok) {
+        /* Images first requested while building the list (mask images,
+         * backgrounds) finish decoding before the raster pass reads them. */
+        image_cache_wait_pending(image_cache);
         printf("Display list commands: %d\n", dl.count);
         printf("Rendering screenshot to %s ...\n", out_path);
         bool raster_ok = false;

@@ -791,6 +791,50 @@ TEST(test_layout_nowrap_atomic_inlines) {
     return ok;
 }
 
+/* mask-image: linear-gradient() wraps the box's subtree in MASK_BEGIN /
+ * MASK_END with the angle and alpha stops parsed; borders paint only the
+ * sides that have them (no extra outline). */
+TEST(test_layout_mask_gradient_display_list) {
+    const char *html =
+        "<html><body style=\"margin:0\">"
+        "<div id=\"m\" style=\"width:200px;height:40px;-webkit-mask-image:linear-gradient(90deg,rgb(0,0,0) 90%,rgba(0,0,0,0))\">"
+        "<div style=\"width:100px;height:20px;background:#f00\"></div></div>"
+        "<div style=\"width:100px;height:10px;border-bottom:1px solid #000\"></div>"
+        "<div style=\"width:100px;height:10px;background:#0f0;border:1px solid #00f\"></div>"
+        "</body></html>";
+    HtmlDocument *doc = html_parse(html, strlen(html));
+    ASSERT_TRUE(doc != NULL);
+    LayoutContext ctx = {0};
+    ASSERT_TRUE(css_layout_run(&ctx, doc, NULL, 800.0, 600.0));
+    DisplayList dl;
+    display_list_init(&dl);
+    ASSERT_TRUE(css_layout_build_display_list(&ctx, &dl));
+    int begin = -1, end = -1, red = -1, black_rects = 0, outlines = 0, green = -1, blue = -1;
+    for (int i = 0; i < dl.count; i++) {
+        const DisplayListCmd *c = &dl.cmds[i];
+        if (c->type == DL_MASK_BEGIN) begin = i;
+        else if (c->type == DL_MASK_END) end = i;
+        else if (c->type == DL_RECT && c->r > 0.9f && c->g < 0.1f) red = i;
+        else if (c->type == DL_RECT && c->r < 0.1f && c->g < 0.1f && c->b < 0.1f) black_rects++;
+        else if (c->type == DL_BORDER) outlines++;
+        if (c->type == DL_RECT && c->g > 0.9f && c->r < 0.1f) green = i;
+        if (c->type == DL_RECT && c->b > 0.9f && c->r < 0.1f && c->g < 0.1f && blue < 0) blue = i;
+    }
+    bool ok = begin >= 0 && red > begin && end > red && dl.mask_count == 1 && black_rects == 1 && outlines == 0 && green >= 0 && blue > green;
+    if (ok) {
+        const DisplayMask *m = &dl.masks[0];
+        ok = m->kind == 2 && near_equal(m->angle_deg, 90.0) && m->nstops == 2 &&
+             near_equal(m->stop_pos[0], 0.9) && near_equal(m->stop_alpha[0], 1.0) &&
+             near_equal(m->stop_pos[1], 1.0) && near_equal(m->stop_alpha[1], 0.0);
+    }
+    if (!ok) printf("    begin %d red %d end %d masks %d black %d outlines %d\n", begin, red, end, dl.mask_count,
+                    black_rects, outlines);
+    display_list_free(&dl);
+    css_layout_tree_free(&ctx);
+    html_document_free(doc);
+    return ok;
+}
+
 static uint32_t be32_at(const uint8_t *p)
 {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
@@ -1018,6 +1062,7 @@ void run_css_layout_tests(void) {
     RUN_TEST(test_layout_calc_nested_vars);
     RUN_TEST(test_layout_preserved_newlines_break_lines);
     RUN_TEST(test_layout_nowrap_atomic_inlines);
+    RUN_TEST(test_layout_mask_gradient_display_list);
     RUN_TEST(test_font_registry_system_and_web_fonts);
     RUN_TEST(test_font_variable_instances);
 }

@@ -31,6 +31,8 @@ void display_list_init(DisplayList *dl)
     dl->cmds = NULL;
     dl->count = 0;
     dl->capacity = 0;
+    dl->masks = NULL;
+    dl->mask_count = dl->mask_capacity = 0;
 }
 
 void display_list_free(DisplayList *dl)
@@ -40,6 +42,9 @@ void display_list_free(DisplayList *dl)
     dl->cmds = NULL;
     dl->count = 0;
     dl->capacity = 0;
+    free(dl->masks);
+    dl->masks = NULL;
+    dl->mask_count = dl->mask_capacity = 0;
 }
 
 bool display_list_reserve(DisplayList *dl, int extra)
@@ -713,6 +718,211 @@ static void dl_clip_range(DisplayList *dl, int from, const float c[4])
     }
 }
 
+/* ---- CSS masks ---- */
+
+static int dl_add_mask(DisplayList *dl, const DisplayMask *m)
+{
+    if (dl->mask_count == dl->mask_capacity) {
+        int nc = dl->mask_capacity ? dl->mask_capacity * 2 : 16;
+        DisplayMask *nm = (DisplayMask *)realloc(dl->masks, (size_t)nc * sizeof(*nm));
+        if (!nm) return -1;
+        dl->masks = nm;
+        dl->mask_capacity = nc;
+    }
+    dl->masks[dl->mask_count] = *m;
+    return dl->mask_count++;
+}
+
+static bool dl_add_mask_cmd(DisplayList *dl, DisplayListCmdType type, int mask_index, const DisplayMask *m)
+{
+    if (!display_list_reserve(dl, 1)) return false;
+    DisplayListCmd *cmd = &dl->cmds[dl->count++];
+    memset(cmd, 0, sizeof(*cmd));
+    cmd->type = type;
+    cmd->x = m->x; cmd->y = m->y; cmd->w = m->w; cmd->h = m->h;
+    cmd->a = 1.0f;
+    cmd->u.mask_index = mask_index;
+    return true;
+}
+
+/* Case-insensitive substring test over the first n bytes of s. */
+static bool memmem_ci(const char *s, size_t n, const char *needle)
+{
+    size_t m = strlen(needle);
+    for (size_t i = 0; i + m <= n; i++)
+        if (strncasecmp(s + i, needle, m) == 0) return true;
+    return false;
+}
+
+/* Alpha of a CSS color token (masks use only alpha). */
+static float mask_color_alpha(const char *s, size_t n)
+{
+    while (n && isspace((unsigned char)*s)) { s++; n--; }
+    if (n >= 11 && strncasecmp(s, "transparent", 11) == 0) return 0.0f;
+    if (n >= 5 && strncasecmp(s, "rgba(", 5) == 0) {
+        const char *last = NULL;
+        for (const char *q = s; q < s + n; q++) if (*q == ',' || *q == '/') last = q;
+        if (last) {
+            float a = (float)atof(last + 1);
+            for (const char *q = last + 1; q < s + n && *q != ')'; q++) if (*q == '%') { a /= 100.0f; break; }
+            return a;
+        }
+        return 1.0f;
+    }
+    if (n >= 4 && strncasecmp(s, "rgb(", 4) == 0) {
+        for (const char *q = s; q < s + n; q++) if (*q == '/') return (float)atof(q + 1);
+        return 1.0f;
+    }
+    if (s[0] == '#') {
+        size_t hl = 0;
+        while (hl + 1 < n && isxdigit((unsigned char)s[hl + 1])) hl++;
+        unsigned v = 0;
+        if (hl == 8) { sscanf(s + 7, "%2x", &v); return (float)v / 255.0f; }
+        if (hl == 4) { sscanf(s + 4, "%1x", &v); return (float)v / 15.0f; }
+    }
+    return 1.0f;
+}
+
+/* linear-gradient(<angle> | to <side>, <color> [<pos>], ...) into m's angle
+ * and alpha stops (px positions over the gradient line of a w x h box). */
+static bool parse_mask_gradient(const char *g, DisplayMask *m, float w, float h)
+{
+    const char *p = strchr(g, '(');
+    if (!p) return false;
+    p++;
+    m->angle_deg = 180.0f;
+    m->nstops = 0;
+    float pos[DL_MASK_STOPS];
+    bool has_pos[DL_MASK_STOPS];
+    bool first = true;
+    while (*p && *p != ')' && m->nstops < DL_MASK_STOPS) {
+        while (*p == ',' || isspace((unsigned char)*p)) p++;
+        const char *st = p;
+        int depth = 0;
+        while (*p && (depth > 0 || (*p != ',' && *p != ')'))) {
+            if (*p == '(') depth++;
+            else if (*p == ')') depth--;
+            p++;
+        }
+        size_t n = (size_t)(p - st);
+        while (n && isspace((unsigned char)st[n - 1])) n--;
+        if (!n) continue;
+        if (first) {
+            first = false;
+            if (n > 3 && strncasecmp(st, "to ", 3) == 0) {
+                bool r = memmem_ci(st, n, "right"), l = memmem_ci(st, n, "left");
+                bool t = memmem_ci(st, n, "top"), b = memmem_ci(st, n, "bottom");
+                float ax = r ? 1.0f : l ? -1.0f : 0.0f, ay = b ? 1.0f : t ? -1.0f : 0.0f;
+                m->angle_deg = (float)(atan2(ax, -ay) * 180.0 / M_PI);
+                if ((r || l) && (t || b) && w > 0 && h > 0)   /* corner: perpendicular to the diagonal */
+                    m->angle_deg = (float)(atan2(ax * h, -ay * w) * 180.0 / M_PI);
+                continue;
+            }
+            char *end = NULL;
+            double v = strtod(st, &end);
+            if (end && end > st && end < st + n) {
+                if (strncasecmp(end, "deg", 3) == 0) { m->angle_deg = (float)v; continue; }
+                if (strncasecmp(end, "turn", 4) == 0) { m->angle_deg = (float)(v * 360.0); continue; }
+                if (strncasecmp(end, "rad", 3) == 0) { m->angle_deg = (float)(v * 180.0 / M_PI); continue; }
+            }
+        }
+        /* color [position]: the position is the last space-separated token
+         * outside parentheses. */
+        const char *cut = NULL;
+        depth = 0;
+        for (const char *q = st; q < st + n; q++) {
+            if (*q == '(') depth++;
+            else if (*q == ')') depth--;
+            else if (depth == 0 && isspace((unsigned char)*q)) cut = q;
+        }
+        int k = m->nstops++;
+        has_pos[k] = false;
+        pos[k] = 0.0f;
+        m->stop_alpha[k] = mask_color_alpha(st, cut ? (size_t)(cut - st) : n);
+        if (cut) {
+            char tok[64];
+            size_t tl = (size_t)(st + n - (cut + 1));
+            if (tl >= sizeof(tok)) tl = sizeof(tok) - 1;
+            memcpy(tok, cut + 1, tl);
+            tok[tl] = '\0';
+            char *end = NULL;
+            double v = strtod(tok, &end);
+            if (end != tok) {
+                has_pos[k] = true;
+                double rad = m->angle_deg * M_PI / 180.0;
+                double line = fabs(w * sin(rad)) + fabs(h * cos(rad));
+                pos[k] = (float)(*end == '%' ? v / 100.0 : (line > 0 ? v / line : 0.0));
+            }
+        }
+    }
+    if (m->nstops < 1) return false;
+    /* Missing positions: first 0, last 1, others spread between neighbours;
+     * positions never decrease. */
+    if (!has_pos[0]) { pos[0] = 0.0f; has_pos[0] = true; }
+    if (!has_pos[m->nstops - 1]) { pos[m->nstops - 1] = 1.0f; has_pos[m->nstops - 1] = true; }
+    for (int i = 1; i < m->nstops; i++) {
+        if (has_pos[i]) { if (pos[i] < pos[i - 1]) pos[i] = pos[i - 1]; continue; }
+        int j = i;
+        while (!has_pos[j]) j++;
+        for (int k = i; k < j; k++) pos[k] = pos[i - 1] + (pos[j] - pos[i - 1]) * (float)(k - i + 1) / (float)(j - i + 1);
+        i = j - 1;
+    }
+    memcpy(m->stop_pos, pos, sizeof(float) * (size_t)m->nstops);
+    return true;
+}
+
+/* The mask for a box with mask-image, or false when it has none usable. */
+static bool box_mask(const LayoutBox *box, DisplayMask *m)
+{
+    memset(m, 0, sizeof(*m));
+    m->x = (float)box->x; m->y = (float)box->y;
+    m->w = (float)box->width; m->h = (float)box->height;
+    m->image_handle = -1;
+    if (box->mask_kind == 2 && box->mask_image) {
+        m->kind = 2;
+        return parse_mask_gradient(box->mask_image, m, m->w, m->h);
+    }
+    if (box->mask_kind != 1 || !box->mask_image || !g_image_cache) return false;
+    m->kind = 1;
+    m->repeat = !box->mask_no_repeat;
+    /* Size: auto = natural size (the box until the image is known). */
+    float iw = m->w, ih = m->h;
+    int nw = 0, nh = 0;
+    int probe = image_cache_request(g_image_cache, box->mask_image, 0, 0);
+    bool natural = probe >= 0 && image_cache_get_natural(g_image_cache, probe, &nw, &nh) && nw > 0 && nh > 0;
+    if (box->mask_size_kind == 0 && natural) { iw = (float)nw; ih = (float)nh; }
+    else if ((box->mask_size_kind == 1 || box->mask_size_kind == 2) && natural) {
+        float sx = m->w / (float)nw, sy = m->h / (float)nh;
+        float s = box->mask_size_kind == 1 ? (sx < sy ? sx : sy) : (sx > sy ? sx : sy);
+        iw = (float)nw * s; ih = (float)nh * s;
+    } else if (box->mask_size_kind == 3) {
+        iw = (float)((box->mask_size_pct & 1) ? box->mask_size_w * m->w : box->mask_size_w);
+        if (box->mask_size_h >= 0.0)
+            ih = (float)((box->mask_size_pct & 2) ? box->mask_size_h * m->h : box->mask_size_h);
+        else
+            ih = natural ? iw * (float)nh / (float)nw : iw;
+    }
+    if (iw < 1.0f || ih < 1.0f) return false;
+    m->iw = iw; m->ih = ih;
+    m->ix = m->x + (float)((box->mask_pos_pct & 1) ? box->mask_pos_x * (m->w - iw) : box->mask_pos_x);
+    m->iy = m->y + (float)((box->mask_pos_pct & 2) ? box->mask_pos_y * (m->h - ih) : box->mask_pos_y);
+    m->image_handle = image_cache_request(g_image_cache, box->mask_image, (int)ceilf(iw), (int)ceilf(ih));
+    return m->image_handle >= 0;
+}
+
+/* One past the last layout index in box i's subtree (preorder numbering). */
+static int subtree_end(const LayoutContext *ctx, int i)
+{
+    int e = i;
+    for (;;) {
+        int c = ctx->tree.nodes[e].first_child_idx, last = -1;
+        for (; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) last = c;
+        if (last < 0) break;
+        e = last;
+    }
+    return e + 1;
+}
+
 static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (*clip)[4]);
 
 bool css_layout_build_display_list(LayoutContext *ctx, DisplayList *dl)
@@ -761,9 +971,15 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
     bool dark_mode = document_is_dark_mode(ctx);
     TextShaper *default_font = display_list_get_default_font();
     int pending_box = -1, pending_from = 0;
+    /* Open masks: each covers its box's subtree, [i, end). */
+    int mask_end[64], mask_idx[64], nmask = 0;
 
     for (int i = 0; i < ctx->tree.count; i++) {
         if (pending_box >= 0 && clip) dl_clip_range(dl, pending_from, clip[pending_box]);
+        while (nmask > 0 && mask_end[nmask - 1] <= i) {
+            nmask--;
+            dl_add_mask_cmd(dl, DL_MASK_END, mask_idx[nmask], &dl->masks[mask_idx[nmask]]);
+        }
         pending_box = i;
         pending_from = dl->count;
         LayoutBox *box = &ctx->boxes[i];
@@ -780,6 +996,38 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         if (ctx->doc) {
             node = (HtmlNode *)po_array_payload(&ctx->doc->array,
                                                 ctx->tree.nodes[i].dom_node_idx);
+        }
+
+        /* mask-image: everything the box and its subtree paint goes through
+         * the mask (closed above once the subtree is done). */
+        if (box->mask_kind && nmask < 64) {
+            DisplayMask m;
+            if (box_mask(box, &m)) {
+                int mi = dl_add_mask(dl, &m);
+                if (mi >= 0 && dl_add_mask_cmd(dl, DL_MASK_BEGIN, mi, &m)) {
+                    mask_end[nmask] = subtree_end(ctx, i);
+                    mask_idx[nmask] = mi;
+                    nmask++;
+                }
+            }
+        }
+
+        /* Backgrounds paint first: under the borders, list marker and the
+         * box's content. */
+        if (box->width >= 2.0f && box->height >= 2.0f && box->width * box->height >= 6.0f) {
+            if (box->background_color_a > 0.0f &&
+                !display_list_add_rect(dl, (float)box->x, (float)box->y,
+                                       (float)box->width, (float)box->height,
+                                       (float)box->background_color_r, (float)box->background_color_g,
+                                       (float)box->background_color_b, (float)box->background_color_a * op))
+                return false;
+            /* Background image, stretched to the padding box. */
+            if (g_image_cache && box->background_image_url[0]) {
+                int handle = image_cache_request(g_image_cache, box->background_image_url,
+                                                 (int)ceil(box->width), (int)ceil(box->height));
+                emit_image(dl, (float)box->x, (float)box->y,
+                           (float)box->width, (float)box->height, handle);
+            }
         }
 
         /* Replaced images: <img src="..."> */
@@ -981,28 +1229,6 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
         if (box->width < 2.0f || box->height < 2.0f) continue;
         if (box->width * box->height < 6.0f) continue;
 
-        /* Background rectangle when a color is explicitly set. */
-        if (box->background_color_a > 0.0f) {
-            if (!display_list_add_rect(dl,
-                                       (float)box->x, (float)box->y,
-                                       (float)box->width, (float)box->height,
-                                       (float)box->background_color_r,
-                                       (float)box->background_color_g,
-                                       (float)box->background_color_b,
-                                       (float)box->background_color_a * op)) {
-                return false;
-            }
-        }
-
-        /* Background image, stretched to the padding box. */
-        if (g_image_cache && box->background_image_url[0] &&
-            box->width >= 1.0 && box->height >= 1.0) {
-            int handle = image_cache_request(g_image_cache, box->background_image_url,
-                                             (int)ceil(box->width), (int)ceil(box->height));
-            emit_image(dl, (float)box->x, (float)box->y,
-                       (float)box->width, (float)box->height, handle);
-        }
-
         /* Placeholder fills for content shells injected without visible CSS in
          * our engine.  This makes skeleton thumbnails, avatars, and text shells
          * visible instead of transparent.  Colors are chosen to contrast with
@@ -1073,26 +1299,12 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
             }
         }
 
-        /* Explicit border. */
-        if (box->border_top > 0 || box->border_right > 0 ||
-            box->border_bottom > 0 || box->border_left > 0) {
-            float thickness = (float)(box->border_top + box->border_right +
-                                      box->border_bottom + box->border_left) / 4.0f;
-            if (thickness <= 0) thickness = 1.0f;
-            if (!display_list_add_border(dl,
-                                         (float)box->x, (float)box->y,
-                                         (float)box->width, (float)box->height,
-                                         thickness,
-                                         (float)box->color_r,
-                                         (float)box->color_g,
-                                         (float)box->color_b,
-                                         (float)box->color_a * op)) {
-                return false;
-            }
-        }
-
     }
     if (pending_box >= 0 && clip) dl_clip_range(dl, pending_from, clip[pending_box]);
+    while (nmask > 0) {
+        nmask--;
+        dl_add_mask_cmd(dl, DL_MASK_END, mask_idx[nmask], &dl->masks[mask_idx[nmask]]);
+    }
 
     return true;
 }

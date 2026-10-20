@@ -210,6 +210,22 @@ typedef struct LayoutBox {
     /* Background image URL, if any. */
     char   background_image_url[256];
 
+    /* mask-image: an absolute image URL (mask_kind 1) or the text of a
+     * linear-gradient(...) (mask_kind 2), interned (lives for the process);
+     * NULL / 0 = no mask.  mask-size: kind 0 auto, 1 contain, 2 cover,
+     * 3 explicit (mask_size_w / _h in px, or fractions of the box when the
+     * matching mask_size_pct bit is set; a negative height means auto).
+     * mask-position: x / y in px, or fractions when mask_pos_pct bits are set.
+     * mask_no_repeat: mask-repeat: no-repeat. */
+    const char *mask_image;
+    unsigned char mask_kind;
+    unsigned char mask_size_kind;
+    unsigned char mask_size_pct;
+    unsigned char mask_pos_pct;
+    unsigned char mask_no_repeat;
+    double mask_size_w, mask_size_h;
+    double mask_pos_x, mask_pos_y;
+
     CssDisplay display;
     CssVisibility visibility;
     CssPosition position;
