@@ -513,6 +513,7 @@ static void free_dead_handle(GCHeader *hdr, bool now) {
     GCHandle h = hdr->handle;
     if (!gc_core_clear_handle(h, gc_header_payload(hdr))) return;
     GC_TRACE(h, now ? "freed by stop-the-world sweep" : "freed by concurrent sweep");
+    if (g_handle_history) gc_core_note_freed(h, now ? GC_FREED_STW_SWEEP : GC_FREED_CONCURRENT_SWEEP);
     if (now) gc_core_hcache_push(h);
     else gc_col_freed_ring_push(h);
     g_core.stats.objects_freed++;

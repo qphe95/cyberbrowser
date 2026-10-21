@@ -314,12 +314,28 @@ extern GCState g_gc;
  * heap are stale when it differs. */
 extern uint32_t g_gc_epoch;
 
+/* Debug build option: report dereferences of dead handles (with
+ * QJS_GC_NO_REUSE=1, which keeps freed handles dead). */
+#ifndef GC_STALE_CHECK
+#define GC_STALE_CHECK 0
+#endif
+#if GC_STALE_CHECK
+void gc_debug_stale_deref(GCHandle handle, void *site);
+#endif
+
 static inline __attribute__((always_inline)) void *gc_deref(GCHandle handle) {
     if (handle == GC_HANDLE_NULL ||
         handle >= atomic_load_explicit(&g_gc.high_water, memory_order_relaxed))
         return NULL;
     void **table = atomic_load_explicit(&g_gc.front, memory_order_acquire);
+#if GC_STALE_CHECK
+    void *r = table[handle];
+    if (__builtin_expect(!r, 0))
+        gc_debug_stale_deref(handle, ({ __label__ site; site: &&site; }));
+    return r;
+#else
     return table[handle];
+#endif
 }
 
 /* Record that the heap slot at p was written (software dirty flag).  Every
@@ -520,6 +536,12 @@ static inline bool gc_handle_is_freed(GCHandle handle) {
  * unreachable.  Weak containers (WeakMap, WeakRef, FinalizationRegistry,
  * the shape hash) use it to drop entries.  Always false outside the step. */
 bool gc_object_is_dead(GCHandle handle);
+
+/* Debug (QJS_GC_NO_REUSE): non-NULL when freed handles are kept dead; then
+ * report what is known about dead handle h, used at 'where'. */
+struct GCHandleHistory;
+extern struct GCHandleHistory *g_handle_history;
+void gc_debug_report_stale_handle(GCHandle h, const char *where);
 /* Old name: "marked" means "not dead". */
 static inline uint8_t gc_handle_get_mark(GCHandle handle) {
     return gc_object_is_dead(handle) ? 0 : 1;

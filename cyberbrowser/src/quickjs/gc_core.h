@@ -166,6 +166,26 @@ void gc_core_trace(GCHandle h, const char *what);
 void gc_core_trace_dump(GCHandle h);
 #define GC_TRACE(h, what) do { if (g_core.trace_handle) gc_core_trace((h), (what)); } while (0)
 
+/* Debug: each handle remembers when it was allocated and freed, and what
+ * held it before it was reused (QJS_GC_HISTORY=1).  With QJS_GC_NO_REUSE=1
+ * freed handles are never handed out again, so a stale handle dereferences
+ * to NULL instead of naming a new object. */
+typedef struct GCHandleHistory {
+    uint32_t alloc_cycle, free_cycle;   /* cycles completed by then */
+    uint16_t type;
+    uint8_t freed_by;                   /* GC_FREED_* */
+    uint8_t alloc_young;
+    /* The previous object with this handle. */
+    uint32_t prev_alloc_cycle, prev_free_cycle;
+    uint16_t prev_type;
+    uint8_t prev_freed_by, prev_young;
+    uint32_t uses;                      /* objects that have had this handle */
+} GCHandleHistory;
+enum { GC_FREED_NOT = 0, GC_FREED_JS, GC_FREED_STW_SWEEP, GC_FREED_CONCURRENT_SWEEP };
+extern GCHandleHistory *g_handle_history;   /* NULL unless QJS_GC_HISTORY or QJS_GC_NO_REUSE */
+extern bool g_handle_no_reuse;
+void gc_core_note_freed(GCHandle h, int how);
+
 /* The other table: the one the JS thread does not read. */
 static inline void **gc_core_back(void) {
     void **f = atomic_load_explicit(&g_gc.front, memory_order_acquire);

@@ -112,7 +112,83 @@ bool gc_core_clear_handle(GCHandle h, void *payload) {
     return true;
 }
 
+GCHandleHistory *g_handle_history;
+bool g_handle_no_reuse;
+static size_t g_handle_history_committed;   /* entries */
+
+static uint32_t cycles_done(void) {
+    return (uint32_t)(g_core.stats.minor_cycles + g_core.stats.major_cycles);
+}
+
+void gc_core_note_freed(GCHandle h, int how) {
+    if (h < g_handle_history_committed) {
+        g_handle_history[h].free_cycle = cycles_done();
+        g_handle_history[h].freed_by = (uint8_t)how;
+    }
+}
+
+/* Print what is known about handle h (QJS_GC_HISTORY / QJS_GC_NO_REUSE). */
+void gc_debug_report_stale_handle(GCHandle h, const char *where) {
+    static const char *how[] = { "not freed", "gc_free from the JS thread",
+                                 "stop-the-world sweep", "concurrent sweep" };
+    fprintf(stderr, "[GC-STALE] %s: handle %u is %s", where, (unsigned)h, gc_deref(h) ? "live" : "dead");
+    if (g_handle_history && h < g_handle_history_committed) {
+        GCHandleHistory *e = &g_handle_history[h];
+        fprintf(stderr, "; now type %u, allocated %s after %u cycles, %s after %u; object #%u on it",
+                e->type, e->alloc_young ? "young" : "old", e->alloc_cycle,
+                how[e->freed_by & 3], e->free_cycle, e->uses);
+        if (e->uses > 1)
+            fprintf(stderr, "; before that type %u, allocated %s after %u cycles, freed by %s after %u",
+                    e->prev_type, e->prev_young ? "young" : "old", e->prev_alloc_cycle,
+                    how[e->prev_freed_by & 3], e->prev_free_cycle);
+        fprintf(stderr, "; %u cycles done (%llu minor, %llu major)", cycles_done(),
+                (unsigned long long)g_core.stats.minor_cycles, (unsigned long long)g_core.stats.major_cycles);
+    }
+    fputc('\n', stderr);
+    if (g_core.trace_handle) gc_core_trace_dump(h);
+    fflush(stderr);
+}
+
+#if GC_STALE_CHECK
+/* Distinct (call site) uses of dead handles: counted, the first handle kept,
+ * printed at exit by gc_debug_stale_dump. */
+#define STALE_SITES 4096
+static struct { void *site; GCHandle first; uint32_t n, type, freed_by; } g_stale[STALE_SITES];
+static atomic_flag g_stale_lock = ATOMIC_FLAG_INIT;
+
+void gc_debug_stale_deref(GCHandle handle, void *site) {
+    if (!g_handle_history || handle >= g_handle_history_committed) return;
+    GCHandleHistory *e = &g_handle_history[handle];
+    if (e->freed_by == GC_FREED_NOT) return;   /* not allocated yet, or in flux */
+    while (atomic_flag_test_and_set_explicit(&g_stale_lock, memory_order_acquire)) {}
+    size_t i = ((uintptr_t)site >> 2) % STALE_SITES;
+    for (size_t k = 0; k < STALE_SITES; k++, i = (i + 1) % STALE_SITES) {
+        if (g_stale[i].site == site) { g_stale[i].n++; break; }
+        if (!g_stale[i].site) {
+            g_stale[i].site = site; g_stale[i].first = handle; g_stale[i].n = 1;
+            g_stale[i].type = e->type; g_stale[i].freed_by = e->freed_by;
+            break;
+        }
+    }
+    atomic_flag_clear_explicit(&g_stale_lock, memory_order_release);
+}
+
+/* Print the call sites (image-relative, for addr2line) at exit. */
+static void gc_debug_stale_dump(void) {
+    extern char __ImageBase;
+    size_t n = 0;
+    for (size_t i = 0; i < STALE_SITES; i++)
+        if (g_stale[i].site && ++n)
+            fprintf(stderr, "[GC-STALE-SITE] rva=0x%llx count=%u first=%u type=%u freed_by=%u\n",
+                    (unsigned long long)((uintptr_t)g_stale[i].site - (uintptr_t)&__ImageBase),
+                    g_stale[i].n, (unsigned)g_stale[i].first, g_stale[i].type, g_stale[i].freed_by);
+    fprintf(stderr, "[GC-STALE-SUMMARY] %zu sites\n", n);
+    fflush(stderr);
+}
+#endif
+
 void gc_core_hcache_push(GCHandle h) {
+    if (g_handle_no_reuse) return;  /* QJS_GC_NO_REUSE: never reuse */
     if (g_core.hcache_n == g_core.hcache_cap) {
         uint32_t cap = g_core.hcache_cap ? g_core.hcache_cap * 2 : 4096;
         GCHandle *n = (GCHandle *)realloc(g_core.hcache, cap * sizeof(GCHandle));
@@ -139,6 +215,16 @@ static GCHandle handle_allocate(void) {
     if (h + 1 > g_gc.committed_handles && !handle_tables_commit_to(h + 1)) {
         fprintf(stderr, "[GC] cannot commit handle table\n");
         abort();
+    }
+    if (g_handle_history && h >= g_handle_history_committed) {
+        size_t chunk = (size_t)1 << 20;   /* entries */
+        size_t upto = ((size_t)h / chunk + 1) * chunk;
+        if (!gc_os_commit(g_handle_history + g_handle_history_committed,
+                          (upto - g_handle_history_committed) * sizeof(GCHandleHistory))) {
+            fprintf(stderr, "[GC] cannot commit handle history\n");
+            abort();
+        }
+        g_handle_history_committed = upto;
     }
     atomic_store_explicit(&g_gc.high_water, h + 1, memory_order_release);
     return h;
@@ -392,6 +478,22 @@ static GCHandle gc_alloc_in(size_t size, JSGCObjectTypeEnum type, bool old, bool
     }
     GCHandle h = handle_allocate();
     hdr->handle = h;
+    if (g_handle_history) {
+        GCHandleHistory *e = &g_handle_history[h];
+        if (e->uses) {
+            e->prev_alloc_cycle = e->alloc_cycle;
+            e->prev_free_cycle = e->free_cycle;
+            e->prev_type = e->type;
+            e->prev_freed_by = e->freed_by;
+            e->prev_young = e->alloc_young;
+        }
+        e->uses++;
+        e->alloc_cycle = cycles_done();
+        e->free_cycle = 0;
+        e->type = (uint16_t)type;
+        e->freed_by = GC_FREED_NOT;
+        e->alloc_young = young;
+    }
     gc_core_handle_dual_write(h, gc_header_payload(hdr));
     GC_TRACE(h, type == JS_GC_OBJ_TYPE_STACK_FRAME ? "allocated (frame)" : "allocated");
     if (type == JS_GC_OBJ_TYPE_JS_CONTEXT)
@@ -464,8 +566,8 @@ void gc_free(GCHandle handle) {
     /* CAS: a concurrent sweep may be freeing the same (unreachable) handle. */
     if (gc_core_clear_handle(handle, p)) {
         GC_TRACE(handle, "gc_free");
-        gc_core_free_handle_from_js(handle);
-    }
+        if (g_handle_history) gc_core_note_freed(handle, GC_FREED_JS);
+        gc_core_free_handle_from_js(handle);    }
 }
 
 /* ============================================================================
@@ -760,6 +862,17 @@ bool gc_init(void) {
     g_core.log_level = lv ? atoi(lv) : 0;
     g_core.poison = getenv("QJS_GC_POISON") != NULL;
     g_core.trace_handle = getenv("QJS_GC_TRACE") != NULL;
+    g_handle_no_reuse = getenv("QJS_GC_NO_REUSE") != NULL;
+    if (g_handle_no_reuse || getenv("QJS_GC_HISTORY")) {
+        g_handle_history = (GCHandleHistory *)gc_os_reserve((size_t)GC_MAX_HANDLES * sizeof(GCHandleHistory), false);
+        g_handle_history_committed = 0;
+        if (g_handle_no_reuse)
+            fprintf(stderr, "[GC] QJS_GC_NO_REUSE: freed handles stay dead%s\n",
+                    GC_STALE_CHECK ? ", dead dereferences are reported at exit" : "");
+#if GC_STALE_CHECK
+        if (g_handle_no_reuse) atexit(gc_debug_stale_dump);
+#endif
+    }
 
     /* Reserve one extra region so the base can be region-aligned. */
     size_t reserve = GC_HEAP_RESERVE + GC_REGION_SIZE;

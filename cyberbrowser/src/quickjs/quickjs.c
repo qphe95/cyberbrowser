@@ -20016,6 +20016,10 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
     p = JS_VALUE_GET_OBJ(func_obj);
     if (unlikely(SAFE_GET_OR(p, JSObjectHandle, class_id, 0) != JS_CLASS_BYTECODE_FUNCTION)) {
         rt2 = ctx_rt;
+        if (unlikely(g_handle_history != NULL) &&
+            (!gc_deref(p) || gc_handle_get_type(p) != JS_GC_OBJ_TYPE_JS_OBJECT ||
+             SAFE_GET_OR(p, JSObjectHandle, class_id, 0) >= (unsigned)SAFE_GET_OR(ctx_rt, JSRuntimeHandle, class_count, 0)))
+            gc_debug_report_stale_handle(p, "call of a handle that is no JS object");
         call_func = ((JSClass*)rt_class_array)[SAFE_GET_OR(p, JSObjectHandle, class_id, 0)].call;
         if (!call_func) {
         not_a_function:

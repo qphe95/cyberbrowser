@@ -732,6 +732,133 @@ static int http_chunked_scan(const char *body, size_t len, size_t *cursor, size_
     }
 }
 
+/* Testing: record and replay every in-memory request.  CYBER_RECORD=<dir>
+ * saves each response to <dir> (index.txt: "METHOD\tURL\tN" lines, N.hdr and
+ * N.body); CYBER_REPLAY=<dir> answers requests from such a recording, the
+ * k-th request for a method and URL with its k-th recorded response (the
+ * last one once they run out), so a page load sees the same network every
+ * time.  Requests the recording lacks go to the network, logged. */
+typedef struct { char *method, *url; int id, used; } ReplayEntry;
+static ReplayEntry *g_replay;
+static int g_replay_n = -1;
+static int g_record_next;
+static pthread_mutex_t g_replay_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static char *replay_read_file(const char *path, size_t *len) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return NULL;
+    fseek(fp, 0, SEEK_END);
+    long n = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    char *data = (char *)malloc((size_t)(n > 0 ? n : 0) + 1);
+    size_t got = data && n > 0 ? fread(data, 1, (size_t)n, fp) : 0;
+    fclose(fp);
+    if (!data) return NULL;
+    data[got] = '\0';
+    *len = got;
+    return data;
+}
+
+static void replay_load_locked(const char *dir) {
+    g_replay_n = 0;
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/index.txt", dir);
+    FILE *fp = fopen(path, "rb");
+    static char line[65536];
+    while (fp && fgets(line, sizeof(line), fp)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        char *t1 = strchr(line, '\t'), *t2 = t1 ? strrchr(t1 + 1, '\t') : NULL;
+        if (!t1 || !t2) continue;
+        *t1 = *t2 = '\0';
+        ReplayEntry *ne = (ReplayEntry *)realloc(g_replay, (size_t)(g_replay_n + 1) * sizeof(*ne));
+        if (!ne) break;
+        g_replay = ne;
+        g_replay[g_replay_n].method = strdup(line);
+        g_replay[g_replay_n].url = strdup(t1 + 1);
+        g_replay[g_replay_n].id = atoi(t2 + 1);
+        g_replay[g_replay_n].used = 0;
+        g_replay_n++;
+    }
+    if (fp) fclose(fp);
+}
+
+/* Answer from CYBER_REPLAY; false when not replaying or not recorded. */
+static bool replay_serve(const char *method, const char *url, HttpBuffer *out, int *outStatus) {
+    const char *dir = getenv("CYBER_REPLAY");
+    if (!dir || !*dir) return false;
+    int id = -1;
+    pthread_mutex_lock(&g_replay_mu);
+    if (g_replay_n < 0) replay_load_locked(dir);
+    int last = -1;
+    for (int i = 0; i < g_replay_n; i++) {
+        if (strcmp(g_replay[i].method, method) != 0 || strcmp(g_replay[i].url, url) != 0) continue;
+        last = i;
+        if (!g_replay[i].used) { g_replay[i].used = 1; id = g_replay[i].id; break; }
+    }
+    if (id < 0 && last >= 0) id = g_replay[last].id;
+    pthread_mutex_unlock(&g_replay_mu);
+    if (id < 0) {
+        fprintf(stderr, "[replay] miss %s %.300s\n", method, url);
+        return false;
+    }
+    char path[1024];
+    size_t blen = 0, hlen = 0;
+    snprintf(path, sizeof(path), "%s/%d.body", dir, id);
+    char *body = replay_read_file(path, &blen);
+    snprintf(path, sizeof(path), "%s/%d.hdr", dir, id);
+    char *hdr = replay_read_file(path, &hlen);
+    if (!body || !hdr) { free(body); free(hdr); return false; }
+    out->data = body;
+    out->size = blen;
+    out->headers = hdr;
+    out->headers_size = hlen;
+    int status = 200;
+    if (strncmp(hdr, "HTTP/", 5) == 0) {
+        const char *sp = strchr(hdr, ' ');
+        if (sp) status = atoi(sp + 1);
+    }
+    if (outStatus) *outStatus = status;
+    return true;
+}
+
+/* Save a response under CYBER_RECORD.  The body is already decoded, so the
+ * saved headers drop Content-Encoding. */
+static void record_save(const char *method, const char *url, const HttpBuffer *out, int status) {
+    const char *dir = getenv("CYBER_RECORD");
+    if (!dir || !*dir || !out) return;
+    pthread_mutex_lock(&g_replay_mu);
+    int id = g_record_next++;
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/%d.body", dir, id);
+    FILE *fp = fopen(path, "wb");
+    if (fp) { if (out->data && out->size) fwrite(out->data, 1, out->size, fp); fclose(fp); }
+    snprintf(path, sizeof(path), "%s/%d.hdr", dir, id);
+    fp = fopen(path, "wb");
+    if (fp) {
+        const char *h = out->headers ? out->headers : "";
+        if (strncmp(h, "HTTP/", 5) != 0) fprintf(fp, "HTTP/1.1 %d OK\r\n", status ? status : 200);
+        while (*h) {
+            const char *e = strstr(h, "\r\n");
+            size_t n = e ? (size_t)(e - h) + 2 : strlen(h);
+            if (strncasecmp(h, "Content-Encoding:", 17) != 0) fwrite(h, 1, n, fp);
+            h += n;
+        }
+        fclose(fp);
+    }
+    snprintf(path, sizeof(path), "%s/index.txt", dir);
+    fp = fopen(path, "ab");
+    if (fp) { fprintf(fp, "%s\t%s\t%d\n", method, url, id); fclose(fp); }
+    pthread_mutex_unlock(&g_replay_mu);
+}
+
+static bool http_request_net(const char *url, const char *method,
+                             const char *postData, size_t postDataLen,
+                             const char **custom_headers, size_t custom_header_count,
+                             HttpBuffer *outBuffer, int *outStatus,
+                             char *err, size_t errLen, const char *cookies,
+                             DownloadState *state,
+                             FILE *bodyStream, size_t *outTotalSize);
+
 static bool http_request_with_method_internal(const char *url, const char *method,
                                                const char *postData, size_t postDataLen,
                                                const char **custom_headers, size_t custom_header_count,
@@ -739,6 +866,26 @@ static bool http_request_with_method_internal(const char *url, const char *metho
                                                char *err, size_t errLen, const char *cookies,
                                                DownloadState *state,
                                                FILE *bodyStream, size_t *outTotalSize) {
+    bool in_memory = outBuffer && !bodyStream && url && method;
+    if (in_memory && replay_serve(method, url, outBuffer, outStatus)) {
+        if (outTotalSize) *outTotalSize = outBuffer->size;
+        return true;
+    }
+    bool ok = http_request_net(url, method, postData, postDataLen, custom_headers, custom_header_count,
+                               outBuffer, outStatus, err, errLen, cookies,
+                               state, bodyStream, outTotalSize);
+    if (ok && in_memory)
+        record_save(method, url, outBuffer, outStatus ? *outStatus : 0);
+    return ok;
+}
+
+static bool http_request_net(const char *url, const char *method,
+                             const char *postData, size_t postDataLen,
+                             const char **custom_headers, size_t custom_header_count,
+                             HttpBuffer *outBuffer, int *outStatus,
+                             char *err, size_t errLen, const char *cookies,
+                             DownloadState *state,
+                             FILE *bodyStream, size_t *outTotalSize) {
     char host[256] = {0};
     char path[2048] = {0};
     char port[8] = {0};
