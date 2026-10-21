@@ -642,6 +642,9 @@ static bool lq_ensure(JSContextHandle ctx)
     }
     g_lq_layouts++;
     g_lq_layout_ms += platform_get_time_ms() - t0;
+    if (g_lq_log)
+        fprintf(stderr, "[LQ] forced layout %llu took %llu ms\n", (unsigned long long)g_lq_layouts,
+                (unsigned long long)(platform_get_time_ms() - t0));
     g_lq_running = false;
     return g_lq_valid;
 }

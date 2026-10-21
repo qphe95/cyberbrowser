@@ -505,6 +505,13 @@ CssStylesheet *css_layout_parse_sheet_parallel(const char *text, size_t len, siz
  * that layout reads <link> sheets from (no-op when cached).  True when the
  * sheet is available.  Engine thread. */
 bool css_layout_fetch_stylesheet_url(const char *url);
+/* Start downloading the sheet a <link rel=stylesheet href=...> of the page
+ * names, in the background (dom_fetch's pool), so the first layout finds
+ * it fetched instead of downloading every sheet in turn. */
+void css_layout_prefetch_stylesheet(const char *href);
+/* Take in the prefetched sheets whose downloads finished (without waiting),
+ * which also starts the downloads of the web fonts they declare. */
+void css_layout_install_prefetched_sheets(void);
 
 /* Access the resolved LayoutBox for a DOM node index, or NULL if not found. */
 LayoutBox* css_layout_box_for_node(LayoutContext *ctx, int dom_node_idx);

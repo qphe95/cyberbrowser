@@ -87,7 +87,7 @@ static FetchEntry *find_entry(const char *url) {
     return NULL;
 }
 
-void dom_fetch_prefetch(const char *url) {
+static void prefetch(const char *url, bool first) {
     if (!url || !url[0]) return;
     pthread_mutex_lock(&g_mu);
     pool_start();
@@ -96,13 +96,22 @@ void dom_fetch_prefetch(const char *url) {
         e->url = strdup(url);
         e->next = g_all;
         g_all = e;
-        if (g_qtail) g_qtail->qnext = e; else g_qhead = e;
-        g_qtail = e;
+        if (first) {
+            e->qnext = g_qhead;
+            g_qhead = e;
+            if (!g_qtail) g_qtail = e;
+        } else {
+            if (g_qtail) g_qtail->qnext = e; else g_qhead = e;
+            g_qtail = e;
+        }
         g_stats.queued++;
         pthread_cond_signal(&g_work);
     }
     pthread_mutex_unlock(&g_mu);
 }
+
+void dom_fetch_prefetch(const char *url) { prefetch(url, false); }
+void dom_fetch_prefetch_first(const char *url) { prefetch(url, true); }
 
 bool dom_fetch_script(const char *url, HttpBuffer *out, char *err, size_t err_len) {
     memset(out, 0, sizeof(*out));
@@ -130,6 +139,15 @@ bool dom_fetch_script(const char *url, HttpBuffer *out, char *err, size_t err_le
     e->state = 3;
     pthread_mutex_unlock(&g_mu);
     return ok;
+}
+
+bool dom_fetch_ready(const char *url) {
+    if (!url) return false;
+    pthread_mutex_lock(&g_mu);
+    FetchEntry *e = find_entry(url);
+    bool ready = e && e->state == 2;
+    pthread_mutex_unlock(&g_mu);
+    return ready;
 }
 
 void dom_fetch_stats(DomFetchStats *out) {

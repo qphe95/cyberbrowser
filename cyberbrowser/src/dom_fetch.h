@@ -23,11 +23,17 @@ extern "C" {
 /* Queue a fetch of `url` (no-op when it is already queued or fetched).
  * CYBER_FETCH_THREADS sets the pool size (default 6; 0 disables prefetch). */
 void dom_fetch_prefetch(const char *url);
+/* The same, ahead of everything queued (stylesheets and fonts, which the
+ * first layout waits for). */
+void dom_fetch_prefetch_first(const char *url);
 
 /* The body of `url`: the prefetched result (waiting for it when it is still
  * in flight) or a synchronous fetch.  The caller owns `out` (free with
  * http_free_buffer).  A prefetched result is handed out once. */
 bool dom_fetch_script(const char *url, HttpBuffer *out, char *err, size_t err_len);
+
+/* Has a queued fetch of `url` finished (dom_fetch_script would not wait)? */
+bool dom_fetch_ready(const char *url);
 
 typedef struct DomFetchStats {
     uint64_t queued, completed, hits, waits, sync_fetches;

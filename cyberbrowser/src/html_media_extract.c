@@ -13,6 +13,7 @@
 #include "platform.h"
 #include "url_utils.h"
 #include "cyber_profile.h"
+#include "css_layout.h"
 
 extern const char *g_cyber_start_url;
 
@@ -934,6 +935,72 @@ static void apply_youtube_player_bootstrap_patch(StrBuf *src) {
     }
 }
 
+/* The value of attribute `name` in the tag text [p, end), or NULL; *len
+ * gets its length. */
+static const char *tag_attr_value(const char *p, const char *end, const char *name, size_t *len)
+{
+    size_t nl = strlen(name);
+    while (p < end) {
+        while (p < end && (isspace((unsigned char)*p) || *p == '/')) p++;
+        const char *an = p;
+        while (p < end && *p != '=' && *p != '>' && !isspace((unsigned char)*p)) p++;
+        size_t al = (size_t)(p - an);
+        while (p < end && isspace((unsigned char)*p)) p++;
+        const char *v = NULL;
+        size_t vl = 0;
+        if (p < end && *p == '=') {
+            p++;
+            while (p < end && isspace((unsigned char)*p)) p++;
+            if (p < end && (*p == '"' || *p == '\'')) {
+                char q = *p++;
+                v = p;
+                while (p < end && *p != q) p++;
+                vl = (size_t)(p - v);
+                if (p < end) p++;
+            } else {
+                v = p;
+                while (p < end && !isspace((unsigned char)*p) && *p != '>') p++;
+                vl = (size_t)(p - v);
+            }
+        }
+        if (al == nl && strncasecmp(an, name, nl) == 0) { *len = vl; return v ? v : ""; }
+        if (al == 0 && p < end) p++;
+    }
+    return NULL;
+}
+
+/* Queue the download of every <link rel="stylesheet" href> in the page. */
+static void prefetch_stylesheet_links(const char *html)
+{
+    for (const char *p = html; (p = strchr(p, '<')) != NULL; p++) {
+        if (strncasecmp(p + 1, "link", 4) != 0 || !(isspace((unsigned char)p[5]) || p[5] == '/')) continue;
+        const char *end = strchr(p, '>');
+        if (!end) break;
+        size_t rl = 0, hl = 0;
+        const char *rel = tag_attr_value(p + 5, end, "rel", &rl);
+        const char *href = tag_attr_value(p + 5, end, "href", &hl);
+        bool sheet = false;
+        for (const char *t = rel; t && t < rel + rl; ) {
+            while (t < rel + rl && isspace((unsigned char)*t)) t++;
+            const char *e = t;
+            while (e < rel + rl && !isspace((unsigned char)*e)) e++;
+            if (e - t == 10 && strncasecmp(t, "stylesheet", 10) == 0) sheet = true;
+            t = e;
+        }
+        if (sheet && href && hl > 0 && hl < 4096) {
+            char *u = (char *)malloc(hl + 1);
+            if (u) {
+                memcpy(u, href, hl);
+                u[hl] = '\0';
+                html_decode_entities(u, hl);
+                css_layout_prefetch_stylesheet(u);
+                free(u);
+            }
+        }
+        p = end;
+    }
+}
+
 bool html_execute_page_scripts(const char *html, JsExecResult *out_result) {
     if (!html || !out_result) return false;
     memset(out_result, 0, sizeof(JsExecResult));
@@ -963,7 +1030,9 @@ bool html_execute_page_scripts(const char *html, JsExecResult *out_result) {
         LOG_INFO("Skipping external script fetches (MAX_EXTERNAL_SCRIPT_SIZE == 0)");
     }
     /* Start every external fetch now so the downloads overlap (they are
-     * still consumed, and executed, in document order). */
+     * still consumed, and executed, in document order).  Stylesheets go
+     * first: the first layout needs all of them. */
+    prefetch_stylesheet_links(html);
     if (MAX_EXTERNAL_SCRIPT_SIZE != 0) {
         for (int i = 0; i < script_count; i++)
             if (scripts[i].type == SCRIPT_TYPE_EXTERNAL && scripts[i].url[0] &&

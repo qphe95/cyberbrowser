@@ -15,6 +15,7 @@
 #include "html_dom.h"
 #include "dom_js.h"
 #include "css_parser.h"
+#include "css_layout.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
 #include "browser_api_impl_types.h"
@@ -3133,6 +3134,9 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
 
         char filename[64];
         snprintf(filename, sizeof(filename), "<script_%d>", i);
+        /* Sheets downloaded meanwhile go into the cache now, which starts
+         * their web fonts downloading well before the first layout. */
+        css_layout_install_prefetched_sheets();
 
         log_to_file("js_quickjs", "Executing script %d: %zu bytes", i, script_lens[i]);
         platform_log(LOG_LEVEL_INFO, "js_quickjs",

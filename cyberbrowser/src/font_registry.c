@@ -3,6 +3,7 @@
  * font_registry.h. */
 
 #include "font_registry.h"
+#include "dom_fetch.h"
 
 #include <ctype.h>
 #include <pthread.h>
@@ -800,7 +801,16 @@ static void add_face_rule(const char *body, const char *end, const char *base)
         fprintf(stderr, "[fonts] @font-face %s %d-%d%s %d ranges: %.100s\n", w.family, w.wmin, w.wmax,
                 w.italic ? " italic" : "", w.nranges, src);
     cache_clear_locked();   /* a new face can change earlier answers */
+    /* A face for Latin text is all but certain to be used: start its
+     * download now (faces of one family often share the file), so the
+     * layout that first asks for it does not wait on the network. */
+    bool latin = w.nranges == 0;
+    for (int i = 0; i < w.nranges && !latin; i++) latin = w.ranges[2 * i] <= 0x41 && w.ranges[2 * i + 1] >= 0x41;
+    bool prefetch = latin && strncmp(src, "data:", 5) != 0;
+    char *url = prefetch ? strdup(src) : NULL;
     pthread_mutex_unlock(&g_mu);
+    if (url) dom_fetch_prefetch_first(url);
+    free(url);
 }
 
 void font_registry_scan_css(const char *css, size_t len, const char *base_url)
@@ -883,7 +893,7 @@ static bool fetch_bytes(const char *url, uint8_t **out, size_t *len)
     }
     HttpBuffer buf = { 0 };
     char err[256] = { 0 };
-    if (!http_get_to_memory(url, &buf, err, sizeof(err)) || !buf.data || buf.size == 0) {
+    if (!dom_fetch_script(url, &buf, err, sizeof(err)) || !buf.data || buf.size == 0) {
         fprintf(stderr, "[fonts] fetch failed %.120s: %s\n", url, err);
         http_free_buffer(&buf);
         return false;

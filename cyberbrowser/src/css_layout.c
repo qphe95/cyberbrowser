@@ -5,6 +5,7 @@
  */
 
 #include "cyber_env.h"
+#include "cyber_profile.h"
 #include "css_layout.h"
 #include "css_parser.h"
 #include "browser_api_impl.h"
@@ -13,6 +14,7 @@
 #include "quickjs_gc_unified.h"
 #include "http_download.h"
 #include "html_dom.h"
+#include "dom_fetch.h"
 #include "dom_store.h"
 #include "dom_wrap.h"
 #include "text_shaper.h"
@@ -3110,9 +3112,11 @@ static const UrlSheet *url_sheet_get(const char *url) {
     for (int i = 0; i < g_url_sheet_n; i++)
         if (strcmp(g_url_sheets[i].url, url) == 0) return &g_url_sheets[i];
 
+    /* A prefetched download (waiting for it if still in flight), else a
+     * download now. */
     HttpBuffer buffer = {0};
     char err[256] = {0};
-    bool ok = http_get_to_memory(url, &buffer, err, sizeof(err));
+    bool ok = dom_fetch_script(url, &buffer, err, sizeof(err));
     const UrlSheet *out = NULL;
     if (ok && buffer.data && buffer.size > 0) {
         LOG_INFO("Fetched stylesheet (%zu bytes)", buffer.size);
@@ -3134,12 +3138,73 @@ static const UrlSheet *url_sheet_get(const char *url) {
     } else {
         LOG_WARN("Failed to fetch stylesheet %.80s: %s", url, err[0] ? err : "unknown");
     }
-    if (buffer.data) free(buffer.data);
+    http_free_buffer(&buffer);
     return out;
 }
 
 bool css_layout_fetch_stylesheet_url(const char *url) {
     return url && url[0] && url_sheet_get(url) != NULL;
+}
+
+/* The base layout resolves sheet and image URLs against: the origin
+ * (scheme + host + "/") of the page's start URL. */
+static void layout_origin_base(char *out, size_t cap)
+{
+    extern const char *g_cyber_start_url;
+    const char *src = (g_cyber_start_url && g_cyber_start_url[0]) ? g_cyber_start_url : "https://www.youtube.com/";
+    const char *scheme = strstr(src, "://");
+    if (scheme) {
+        const char *host = scheme + 3;
+        const char *slash = strchr(host, '/');
+        size_t origin_len = slash ? (size_t)(slash - src) + 1 : strlen(src);
+        if (origin_len >= cap) origin_len = cap - 1;
+        memcpy(out, src, origin_len);
+        out[origin_len] = '\0';
+        if (!slash && origin_len + 1 < cap) {
+            out[origin_len] = '/';
+            out[origin_len + 1] = '\0';
+        }
+    } else {
+        strncpy(out, src, cap - 1);
+        out[cap - 1] = '\0';
+    }
+}
+
+/* Prefetched sheets not taken into the cache yet. */
+#define SHEET_PREFETCH_MAX 64
+static char *g_sheet_prefetch[SHEET_PREFETCH_MAX];
+static int g_sheet_prefetch_n;
+
+void css_layout_prefetch_stylesheet(const char *href)
+{
+    char base[512];
+    layout_origin_base(base, sizeof(base));
+    char *url = layout_resolve_url(base, href);
+    if (!url) return;
+    bool known = false;
+    for (int i = 0; i < g_url_sheet_n && !known; i++) known = strcmp(g_url_sheets[i].url, url) == 0;
+    for (int i = 0; i < g_sheet_prefetch_n && !known; i++) known = strcmp(g_sheet_prefetch[i], url) == 0;
+    if (!known && url_is_network_url(url) && g_sheet_prefetch_n < SHEET_PREFETCH_MAX) {
+        dom_fetch_prefetch_first(url);
+        g_sheet_prefetch[g_sheet_prefetch_n++] = url;
+        return;
+    }
+    free(url);
+}
+
+void css_layout_install_prefetched_sheets(void)
+{
+    int w = 0;
+    for (int i = 0; i < g_sheet_prefetch_n; i++) {
+        char *url = g_sheet_prefetch[i];
+        if (dom_fetch_ready(url)) {
+            url_sheet_get(url);
+            free(url);
+        } else {
+            g_sheet_prefetch[w++] = url;
+        }
+    }
+    g_sheet_prefetch_n = w;
 }
 
 static void layout_fetch_stylesheet(LayoutStyleSheetList *list, const char *base_url, const char *href) {
@@ -6551,6 +6616,7 @@ static void layout_resolve_fonts_pass(LayoutContext *ctx)
  * parallel) and the pass reruns so the boxes pick them up. */
 static void layout_resolve_fonts(LayoutContext *ctx)
 {
+    CP_ACC("layout: resolve fonts");
     layout_resolve_fonts_pass(ctx);
     if (font_registry_load_pending() > 0) layout_resolve_fonts_pass(ctx);
 }
@@ -9478,30 +9544,9 @@ bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
     g_unit_vw = viewport_width > 0.0 ? viewport_width : 1024.0;
     g_unit_vh = viewport_height > 0.0 ? viewport_height : 768.0;
     g_unit_rem = 16.0;
-    /* Base URL for resolving relative stylesheet/image URLs: derive the origin
-     * (scheme + host + "/") from the page's start URL.  Fall back to the
-     * historical default when no start URL has been set. */
-    {
-        extern const char *g_cyber_start_url;
-        const char *src = (g_cyber_start_url && g_cyber_start_url[0])
-                          ? g_cyber_start_url : "https://www.youtube.com/";
-        const char *scheme = strstr(src, "://");
-        if (scheme) {
-            const char *host = scheme + 3;
-            const char *slash = strchr(host, '/');
-            size_t origin_len = slash ? (size_t)(slash - src) + 1 : strlen(src);
-            if (origin_len >= sizeof(ctx->base_url)) origin_len = sizeof(ctx->base_url) - 1;
-            gc_memcpy(ctx->base_url, src, origin_len);
-            ctx->base_url[origin_len] = '\0';
-            if (!slash && origin_len + 1 < sizeof(ctx->base_url)) {
-                ctx->base_url[origin_len] = '/';
-                ctx->base_url[origin_len + 1] = '\0';
-            }
-        } else {
-            strncpy(ctx->base_url, src, sizeof(ctx->base_url) - 1);
-            ctx->base_url[sizeof(ctx->base_url) - 1] = '\0';
-        }
-    }
+    /* Base URL for resolving relative stylesheet/image URLs: the origin of
+     * the page's start URL (the historical default without one). */
+    layout_origin_base(ctx->base_url, sizeof(ctx->base_url));
     if (g_css_log < 0) { const char *e = getenv("CSS_LOG"); g_css_log = e ? atoi(e) : 0; }
     if (g_css_log > 0) fprintf(stderr, "[css] tree build + setup  %8.3f ms\n", layout_now_ms() - _run_t0);
     bool ok = css_layout_document(ctx, sheet);
