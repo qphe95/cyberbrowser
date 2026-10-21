@@ -6376,9 +6376,10 @@ GCValue JS_NewObjectProtoClass(JSContextHandle ctx, GCValue proto_val,
     sh = find_hashed_shape_proto(ctx_rt, proto);
     QJS_LOGD("JS_NewObjectProtoClass: sh=%u", SAFE_HANDLE(sh));
     if (likely(SAFE_VALID(sh))) {
-        QJS_LOGD("JS_NewObjectProtoClass: duplicating shape");
-        sh = js_dup_shape(ctx, sh);
-        QJS_LOGD("JS_NewObjectProtoClass: shape duplicated, sh=%u", SAFE_HANDLE(sh));
+        /* Share the hashed shape, as upstream does: every path that changes
+         * a shape clones a hashed one first, and add_property moves the
+         * object on to the next shared shape. */
+        QJS_LOGD("JS_NewObjectProtoClass: sharing hashed shape sh=%u", SAFE_HANDLE(sh));
     } else {
         QJS_LOGD("JS_NewObjectProtoClass: creating new shape");
         sh = js_new_shape(ctx, proto);

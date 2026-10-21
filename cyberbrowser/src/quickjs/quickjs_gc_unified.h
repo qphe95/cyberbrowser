@@ -311,7 +311,7 @@ typedef struct GCState {
 
 extern GCState g_gc;
 
-static inline void *gc_deref(GCHandle handle) {
+static inline __attribute__((always_inline)) void *gc_deref(GCHandle handle) {
     if (handle == GC_HANDLE_NULL ||
         handle >= atomic_load_explicit(&g_gc.high_water, memory_order_relaxed))
         return NULL;
