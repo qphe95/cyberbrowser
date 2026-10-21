@@ -1939,9 +1939,9 @@ char *html_style_object_css_text(JSContextHandle ctx, GCValue style_obj) {
  * stable.  It renders what the serializer + parser pair rendered: the same
  * attributes (ser_element_attrs), the same composition of shadow roots, the
  * text filters of html_serialize_text and the parser's merging of adjacent
- * text.  Elements with native state are read again on every update; what
- * the dirty bits miss otherwise (properties only JS objects hold) a full
- * update reads.  A page whose shadow roots only JS can compose (not
+ * text.  What the dirty bits miss (properties only JS objects hold, as on
+ * elements with native state) a full update reads; setters of native state
+ * that layout depends on mark their element dirty (video src).  A page whose shadow roots only JS can compose (not
  * ShadyDOM, not store shadow roots) is left to the serializer.
  * CYBER_MIRROR_VERIFY=1 compares each update with serialize + parse.
  * ============================================================================ */
@@ -1959,8 +1959,6 @@ static struct {
     uint64_t version;
     MirrorMap map;              /* store id -> mirror index (validated on use) */
     MirrorMap host;             /* store id -> 1 ShadyDOM host, 2 store shadow host (else 0) */
-    NodeId *natives;            /* elements with native state */
-    int nnatives, cap_natives;
     /* Per update. */
     JSContextHandle ctx;
     bool shady, full, changed, unsupported;
@@ -2314,17 +2312,6 @@ static void mir_compose(NodeId s, int m, NodeList *out) {
 
 static void mir_reconcile(NodeId s, int m, bool child_svg);
 
-static void mir_note_native(NodeId idx) {
-    if (g_mir.nnatives == g_mir.cap_natives) {
-        int nc = g_mir.cap_natives ? g_mir.cap_natives * 2 : 256;
-        NodeId *nn = (NodeId *)realloc(g_mir.natives, (size_t)nc * sizeof(NodeId));
-        if (!nn) return;
-        g_mir.natives = nn;
-        g_mir.cap_natives = nc;
-    }
-    g_mir.natives[g_mir.nnatives++] = idx;
-}
-
 static void mir_tag_lower(NodeId s, char out[64]) {
     const char *tag = dom_tag_name(s);
     if (!tag || !tag[0]) tag = "div";
@@ -2360,7 +2347,6 @@ static int mir_build_element(NodeId s, int parent, bool in_svg) {
 static int mir_build_inner(NodeId s, int idx, const char *tag_lower, bool in_svg) {
     HtmlNode *hn;
     mir_read_attrs(s, idx, tag_lower, in_svg);
-    if (ser_has_native_props(tag_lower)) mir_note_native(s);
     if (html_is_self_closing_tag(tag_lower)) return idx;
     if (html_is_raw_content_tag(tag_lower)) {
         hn = po_array_payload(&g_mir.doc->array, idx);
@@ -2540,31 +2526,11 @@ static void mir_update_element(NodeId s, int m, bool in_svg) {
     }
 }
 
-/* Elements with native state read their attributes through getters. */
-static void mir_update_natives(void) {
-    HtmlDocument *d = g_mir.doc;
-    int w = 0;
-    (void)d;
-    for (int i = 0; i < g_mir.nnatives; i++) {
-        NodeId id = g_mir.natives[i];
-        int idx = mir_map_get(id);
-        if (idx < 0 || !dom_valid(id)) continue;
-        HtmlNode *hn = po_array_payload(&g_mir.doc->array, idx);
-        if (!hn || hn->type != HTML_NODE_ELEMENT) continue;
-        g_mir.natives[w++] = id;
-        char tag_lower[64];
-        mir_tag_lower(hn->store_id, tag_lower);
-        if (mir_read_attrs(hn->store_id, idx, tag_lower, false)) g_mir.changed = true;
-    }
-    g_mir.nnatives = w;
-}
-
 static void mir_drop(void) {
     mir_log_reset();
     if (g_mir.doc) html_document_free(g_mir.doc);   /* the mirror's own reference */
     g_mir.doc = NULL;
     g_mir.valid = false;
-    g_mir.nnatives = 0;
     mir_map_reset();
 }
 
@@ -2638,6 +2604,7 @@ static HtmlDocument *mirror_update(JSContextHandle ctx, GCValue js_doc, bool ful
     g_mir.unsupported = false;
     g_mir.structure = false;
     {
+        CP_ACC("mirror: ShadyDOM check");
         GCValue sd = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "ShadyDOM");
         g_mir.shady = JS_IsObject(sd) && JS_ToBool(ctx, JS_GetPropertyStr(ctx, sd, "inUse"));
     }
@@ -2650,13 +2617,19 @@ static HtmlDocument *mirror_update(JSContextHandle ctx, GCValue js_doc, bool ful
         if (a->tombstone_count > a->active_count + 4096) rebuild = true;
     }
     if (rebuild) {
+        CP_ACC("mirror: rebuild");
         g_mir.valid = mir_rebuild(root);
+    } else if (full) {
+        CP_ACC("mirror: full update");
+        int ri = mir_map_get(root);
+        if (ri < 0) g_mir.valid = mir_rebuild(root);
+        else mir_update_element(root, ri, false);
     } else {
+        CP_ACC("mirror: dirty update");
         int ri = mir_map_get(root);
         if (ri < 0) g_mir.valid = mir_rebuild(root);
         else mir_update_element(root, ri, false);
     }
-    if (!g_mir.unsupported) mir_update_natives();
     g_mir.updates++;
     NodeId dn = dom_node_of(js_doc);
     if (dom_kind(dn) != DOM_K_DOCUMENT) dn = g_dom_document;
@@ -2668,12 +2641,18 @@ static HtmlDocument *mirror_update(JSContextHandle ctx, GCValue js_doc, bool ful
     /* Layout and selector matching read the array in document order (a
      * subtree is a contiguous range): put added and moved nodes back in
      * pre-order, dropping the deleted ones, and index the result. */
-    if (g_mir.structure) mir_reorder();
-    if (g_mir.structure || !g_mir.sheet_sig_valid) mir_note_sheets();
-    html_document_find_roots(g_mir.doc);
+    {
+        CP_ACC("mirror: reorder + sheets");
+        if (g_mir.structure) mir_reorder();
+        if (g_mir.structure || !g_mir.sheet_sig_valid) mir_note_sheets();
+        html_document_find_roots(g_mir.doc);
+    }
     /* Page code run by getters during the update: its marks must survive
      * the clear (the next update sees them), so leave the bits. */
-    if (g_dom.dirty_version == dirty0) dom_clear_dirty(dn);
+    {
+        CP_ACC("mirror: clear dirty bits");
+        if (g_dom.dirty_version == dirty0) dom_clear_dirty(dn);
+    }
     if (g_mir.changed) g_mir.version++;
     if (changed) *changed = g_mir.changed;
     static int verify = -1;
@@ -2690,6 +2669,7 @@ HtmlDocument *html_mirror_document(JSContextHandle ctx, GCValue js_doc, bool ful
         off = e && e[0] == '0';
     }
     if (off) return NULL;
+    CP_ACC("mirror: update");
     HtmlDocument *d = mirror_update(ctx, js_doc, full, changed);
     if (d && version) *version = g_mir.version;   /* >= 1: every build changes it */
     return d;

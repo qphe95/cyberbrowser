@@ -747,6 +747,10 @@ static GCValue js_video_set_src(JSContextHandle ctx, GCValue this_val, GCValue v
     if (src) {
         SAFE_SET_STR(vid, HTMLVideoElementHandle, src, src);
         record_captured_url(src);
+        /* src lives here, not in an attribute: the layout mirror reads it
+         * from the element when the element is dirty. */
+        NodeId node = dom_node_of(this_val);
+        if (node) dom_mark_dirty(node, DOMF_DIRTY_ATTR);
         
         // Resolve blob: URLs back to the registered object (MediaSource, Blob, etc.)
         if (strncmp(src, "blob:", 5) == 0) {
