@@ -5705,54 +5705,6 @@ static JSShapeHandle js_clone_shape(JSContextHandle ctx, JSShapeHandle sh1)
     return sh;
 }
 
-/* Duplicate a shape for exclusive use by a single object.
- * This creates a new shape that is a copy of the original but has its own
- * handle and is NOT in the shape hash table (is_hashed=FALSE).
- * This prevents issues when the object's shape is resized later. */
-static JSShapeHandle js_dup_shape(JSContextHandle ctx, JSShapeHandle sh)
-{
-    JSShapeHandle new_sh = GC_HANDLE_NULL;
-    void *sh_alloc, *new_alloc;
-    size_t size;
-    uint32_t hash_size;
-    GCHandle new_handle;
-    
-    hash_size = SAFE_GET_OR(sh, JSShapeHandle, prop_hash_mask, 0) + 1;
-    size = get_shape_size(hash_size, SAFE_GET_OR(sh, JSShapeHandle, prop_size, 0));
-    
-    /* Allocate new shape */
-    new_handle = gc_alloc(size, JS_GC_OBJ_TYPE_SHAPE);
-    if (new_handle == GC_HANDLE_NULL)
-        return GC_HANDLE_NULL;
-    
-    new_alloc = gc_deref(new_handle);
-    sh_alloc = get_alloc_from_shape(sh);
-    
-    /* Copy all data from old shape */
-    memcpy(new_alloc, sh_alloc, size);
-    
-    /* Create shape handle directly from the allocation handle */
-    new_sh = (JSShapeHandle)(new_handle);
-    
-    /* CRITICAL: Give the new shape its OWN handle.
-     * The new shape is NOT hashed (is_hashed=FALSE) because it's for
-     * exclusive use by a single object. */
-    SAFE_SET_HANDLE(new_sh, JSShapeHandle, handle, new_handle);
-    SAFE_SET(new_sh, JSShapeHandle, is_hashed, FALSE);
-    
-    
-    /* Duplicate all property atoms */
-    JSShapeProperty *pr;
-    uint32_t i;
-    for(i = 0, pr = get_shape_prop(new_sh); i < SAFE_GET_OR(new_sh, JSShapeHandle, prop_count, 0); i++, pr++) {
-        if (pr->atom != JS_ATOM_NULL) {
-            JS_DupAtom(ctx, pr->atom);
-        }
-    }
-    
-    return new_sh;
-}
-
 static void js_free_shape0(JSRuntimeHandle rt, JSShapeHandle sh)
 {
     uint32_t i;
@@ -6033,6 +5985,9 @@ static int compact_properties(JSContextHandle ctx, JSObjectHandle p)
     return 0;
 }
 
+/* Shapes with this many properties are not shared (see add_shape_property). */
+#define JS_SHAPE_DICT_THRESHOLD 32
+
 static int add_shape_property(JSContextHandle ctx, GCHandle *psh_handle,
                               JSObjectHandle p, JSAtom atom, int prop_flags)
 {
@@ -6096,6 +6051,13 @@ static int add_shape_property(JSContextHandle ctx, GCHandle *psh_handle,
     pr->hash_next = prop_hash_start(sh)[h];
     prop_hash_start(sh)[h] = SAFE_GET_OR(sh, JSShapeHandle, prop_count, 0);
 
+    /* Large shapes stay private to their object ("dictionary mode"): a
+     * hashed shape is immutable, so every property added to one clones it,
+     * which made filling an object used as a dictionary quadratic.  A
+     * private shape grows in place.  Upstream QuickJS gets the same effect
+     * from reference counts. */
+    if (prop_idx + 1 >= JS_SHAPE_DICT_THRESHOLD && SAFE_VALID(p))
+        return 0;
     /* The new shape is now suitable for sharing. */
     SAFE_SET(sh, JSShapeHandle, is_hashed, TRUE);
     js_shape_hash_insert(rt, sh);
@@ -6560,7 +6522,9 @@ GCValue JS_NewObjectProto(JSContextHandle ctx, GCValue proto)
 
 GCValue JS_NewArray(JSContextHandle ctx)
 {
-    return JS_NewObjectFromShape(ctx, js_dup_shape(ctx, GC_SHAPE_DEREF(SAFE_GET_OR(ctx, JSContextHandle, array_shape_handle, GC_HANDLE_NULL))),
+    /* Arrays (and arguments and regexp objects) share the context's shape:
+     * it is hashed, and every path that changes a hashed shape clones it. */
+    return JS_NewObjectFromShape(ctx, GC_SHAPE_DEREF(SAFE_GET_OR(ctx, JSContextHandle, array_shape_handle, GC_HANDLE_NULL)),
                                  JS_CLASS_ARRAY, NULL);
 }
 
@@ -17683,7 +17647,7 @@ static GCValue js_build_arguments(JSContextHandle ctx, int argc, GCValue *argv)
     props[2].u.getset.getter_handle = GC_VALUE_GET_HANDLE(SAFE_GET_OR(ctx, JSContextHandle, throw_type_error, GC_UNDEFINED)); /* callee */
     props[2].u.getset.setter_handle = GC_VALUE_GET_HANDLE(SAFE_GET_OR(ctx, JSContextHandle, throw_type_error, GC_UNDEFINED)); /* callee */
     
-    val = JS_NewObjectFromShape(ctx, js_dup_shape(ctx, GC_SHAPE_DEREF(SAFE_GET_OR(ctx, JSContextHandle, arguments_shape_handle, GC_HANDLE_NULL))),
+    val = JS_NewObjectFromShape(ctx, GC_SHAPE_DEREF(SAFE_GET_OR(ctx, JSContextHandle, arguments_shape_handle, GC_HANDLE_NULL)),
                                 JS_CLASS_ARGUMENTS, props);
     if (JS_IsException(val))
         return val;
@@ -17760,7 +17724,7 @@ static GCValue js_build_mapped_arguments(JSContextHandle ctx, int argc,
     props[1].u.value = SAFE_GET_OR(ctx, JSContextHandle, array_proto_values, GC_UNDEFINED); /* Symbol.iterator */
     props[2].u.value = js_rt_current_stack_frame(ctx_rt)->cur_func; /* callee */
     
-    val = JS_NewObjectFromShape(ctx, js_dup_shape(ctx, GC_SHAPE_DEREF(SAFE_GET_OR(ctx, JSContextHandle, mapped_arguments_shape_handle, GC_HANDLE_NULL))),
+    val = JS_NewObjectFromShape(ctx, GC_SHAPE_DEREF(SAFE_GET_OR(ctx, JSContextHandle, mapped_arguments_shape_handle, GC_HANDLE_NULL)),
                                 JS_CLASS_MAPPED_ARGUMENTS, props);
     if (JS_IsException(val))
         return val;
@@ -53072,7 +53036,7 @@ static GCValue JS_NewRegexp(JSContextHandle ctx, GCValue pattern, GCValue bc)
         goto fail;
     }
     props[0].u.value = JS_NewInt32(ctx, 0); /* lastIndex */
-    obj = JS_NewObjectFromShape(ctx, js_dup_shape(ctx, GC_SHAPE_DEREF(SAFE_GET_OR(ctx, JSContextHandle, regexp_shape_handle, GC_HANDLE_NULL))), JS_CLASS_REGEXP, props);
+    obj = JS_NewObjectFromShape(ctx, GC_SHAPE_DEREF(SAFE_GET_OR(ctx, JSContextHandle, regexp_shape_handle, GC_HANDLE_NULL)), JS_CLASS_REGEXP, props);
     if (JS_IsException(obj))
         goto fail;
     p = JS_VALUE_GET_OBJ(obj);
@@ -53670,7 +53634,7 @@ static GCValue js_regexp_exec(JSContextHandle ctx, GCValue this_val,
         props[3].u.value = groups; /* groups */
 
         str_val = JS_UNDEFINED;
-        obj = JS_NewObjectFromShape(ctx, js_dup_shape(ctx, GC_SHAPE_DEREF(SAFE_GET_OR(ctx, JSContextHandle, regexp_result_shape_handle, GC_HANDLE_NULL))),
+        obj = JS_NewObjectFromShape(ctx, GC_SHAPE_DEREF(SAFE_GET_OR(ctx, JSContextHandle, regexp_result_shape_handle, GC_HANDLE_NULL)),
                                     JS_CLASS_ARRAY, props);
         if (JS_IsException(obj))
             goto fail;

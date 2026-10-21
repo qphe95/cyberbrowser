@@ -351,6 +351,33 @@ GC_RUNNING_TEST(test_gc_frame_reuse_past_pool_depth_and_throws,
     "  }"
     "  return 'ok'; })()")
 
+/* Arrays, regexps and arguments objects share their context's shape, and
+ * objects past 32 properties keep a private shape that grows in place:
+ * changing one object must never show through another. */
+GC_RUNNING_TEST(test_gc_shared_and_dictionary_shapes,
+    "(function(){"
+    "  var a = [1, 2], b = [3]; a.extra = 'x';"
+    "  if (b.extra !== undefined || b.length !== 1) return 'array shape leaked';"
+    "  Object.defineProperty(a, 'length', {writable: false});"
+    "  b.push(4); if (b.length !== 2) return 'array length frozen through sharing';"
+    "  var r1 = /a/g, r2 = /b/g; r1.lastIndex = 5;"
+    "  if (r2.lastIndex !== 0) return 'regexp shape leaked';"
+    "  function f() { arguments.tag = 1; return arguments; } function g() { return arguments; }"
+    "  if (g(1).tag !== undefined || f(1).tag !== 1) return 'arguments shape leaked';"
+    "  var d = {}, e = {};"
+    "  for (var i = 0; i < 200; i++) { d['k' + i] = i; if (i < 40) e['k' + i] = -i; }"
+    "  for (var i = 0; i < 200; i += 3) delete d['k' + i];"
+    "  Object.defineProperty(d, 'k1', {enumerable: false});"
+    "  __test_gc();"
+    "  for (var i = 0; i < 200; i++) {"
+    "    var want = i % 3 === 0 ? undefined : i;"
+    "    if (d['k' + i] !== want) return 'dict k' + i + ' = ' + d['k' + i];"
+    "  }"
+    "  for (var i = 0; i < 40; i++) if (e['k' + i] !== -i) return 'second dict k' + i;"
+    "  if (Object.keys(d).indexOf('k1') >= 0) return 'flag change lost';"
+    "  if (Object.keys(e).length !== 40) return 'second dict keys';"
+    "  return 'ok'; })()")
+
 GC_RUNNING_TEST(test_gc_running_keeps_native_temporaries,
     "(function(){ var r = [1, 2, 3].map(function(x){ __test_gc(); return {v: x * 10}; }); "
     "  return (r.length === 3 && r[0].v === 10 && r[2].v === 30) ? 'ok' "
@@ -1851,6 +1878,7 @@ void run_gc_tests(void) {
     RUN_TEST(test_gc_frame_reuse_keeps_captured_frames);
     RUN_TEST(test_gc_frame_reuse_keeps_lazy_parent_frames);
     RUN_TEST(test_gc_frame_reuse_past_pool_depth_and_throws);
+    RUN_TEST(test_gc_shared_and_dictionary_shapes);
     RUN_TEST(test_gc_running_repeated);
     RUN_TEST(test_gc_frame_chain_after_generator);
     RUN_TEST(test_gc_bigint_survives);

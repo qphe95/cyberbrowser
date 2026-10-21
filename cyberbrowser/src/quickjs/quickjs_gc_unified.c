@@ -502,11 +502,61 @@ static GCHandle gc_alloc_in(size_t size, JSGCObjectTypeEnum type, bool old, bool
     return h;
 }
 
+/* Debug (QJS_GC_ALLOC_STATS=1): allocations by calling site and by type,
+ * printed at exit, to see what a page allocates. */
+#define ALLOC_SITES 4096
+static int g_alloc_stats = -1;
+static struct { void *site; uint64_t n, bytes; uint32_t type; } g_asites[ALLOC_SITES];
+static uint64_t g_atype_n[32], g_atype_bytes[32];
+
+static void alloc_stats_dump(void) {
+    extern char __ImageBase;
+    uint64_t tn = 0, tb = 0;
+    for (int t = 0; t < 32; t++) { tn += g_atype_n[t]; tb += g_atype_bytes[t]; }
+    fprintf(stderr, "[ALLOC-STATS] %llu allocations, %llu bytes\n", (unsigned long long)tn, (unsigned long long)tb);
+    for (int t = 0; t < 32; t++)
+        if (g_atype_n[t])
+            fprintf(stderr, "[ALLOC-STATS] type %d: %llu allocations, %llu bytes\n", t,
+                    (unsigned long long)g_atype_n[t], (unsigned long long)g_atype_bytes[t]);
+    uint32_t order[ALLOC_SITES], n = 0;
+    for (uint32_t i = 0; i < ALLOC_SITES; i++) if (g_asites[i].site) order[n++] = i;
+    for (uint32_t a = 0; a < n && a < 40; a++)
+        for (uint32_t b = a + 1; b < n; b++)
+            if (g_asites[order[b]].n > g_asites[order[a]].n) { uint32_t t = order[a]; order[a] = order[b]; order[b] = t; }
+    for (uint32_t a = 0; a < n && a < 40; a++) {
+        uint32_t i = order[a];
+        fprintf(stderr, "[ALLOC-SITE] rva=0x%llx type %u: %llu allocations, %llu bytes\n",
+                (unsigned long long)((uintptr_t)g_asites[i].site - (uintptr_t)&__ImageBase), g_asites[i].type,
+                (unsigned long long)g_asites[i].n, (unsigned long long)g_asites[i].bytes);
+    }
+    fflush(stderr);
+}
+
+static inline void alloc_stats_note(void *site, JSGCObjectTypeEnum type, size_t size) {
+    if (g_alloc_stats < 0) {
+        g_alloc_stats = getenv("QJS_GC_ALLOC_STATS") != NULL;
+        if (g_alloc_stats) atexit(alloc_stats_dump);
+    }
+    if (!g_alloc_stats) return;
+    g_atype_n[type & 31]++;
+    g_atype_bytes[type & 31] += size;
+    size_t i = ((uintptr_t)site >> 2) % ALLOC_SITES;
+    for (size_t k = 0; k < ALLOC_SITES; k++, i = (i + 1) % ALLOC_SITES) {
+        if (g_asites[i].site == site) { g_asites[i].n++; g_asites[i].bytes += size; return; }
+        if (!g_asites[i].site) {
+            g_asites[i].site = site; g_asites[i].n = 1; g_asites[i].bytes = size; g_asites[i].type = type;
+            return;
+        }
+    }
+}
+
 GCHandle gc_alloc(size_t size, JSGCObjectTypeEnum gc_obj_type) {
+    if (unlikely(g_alloc_stats)) alloc_stats_note(__builtin_return_address(0), gc_obj_type, size);
     return gc_alloc_in(size, gc_obj_type, type_starts_old(gc_obj_type), false);
 }
 
 GCHandle gc_alloc_old(size_t size, JSGCObjectTypeEnum gc_obj_type) {
+    if (unlikely(g_alloc_stats)) alloc_stats_note(__builtin_return_address(0), gc_obj_type, size);
     return gc_alloc_in(size, gc_obj_type, true, false);
 }
 
