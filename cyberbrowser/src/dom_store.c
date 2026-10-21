@@ -429,6 +429,7 @@ void dom_set_attr(NodeId id, CssAtom name, const char *value, size_t n) {
         else g_dom.id_atom[s] = CSS_ATOM_NONE;
     }
     if (name == id_name || name == class_name) g_dom.class_version++;
+    dom_mark_dirty(id, DOMF_DIRTY_ATTR);
     dom_note_connected_change(s);
     g_dom.attr_version++;
 }
@@ -451,6 +452,7 @@ bool dom_remove_attr(NodeId id, CssAtom name) {
         const char *nm = css_atom_str(name);
         if (nm && strcmp(nm, "id") == 0) g_dom.id_atom[s] = CSS_ATOM_NONE;
         if (nm && (strcmp(nm, "id") == 0 || strcmp(nm, "class") == 0)) g_dom.class_version++;
+        dom_mark_dirty(id, DOMF_DIRTY_ATTR);
         dom_note_connected_change(s);
         g_dom.attr_version++;
         return true;

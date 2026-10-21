@@ -2532,6 +2532,7 @@ typedef struct SheetEntry {
     char *text;
     char *host;                 /* shadow scope (NULL = document) */
     CssStylesheet *sheet;       /* may have zero rules */
+    uint64_t src;               /* fetch id of a URL sheet's text (0 = none) */
     int refs;                   /* style-set cache entries using it */
     uint64_t last_use;
 } SheetEntry;
@@ -2551,6 +2552,7 @@ typedef struct SheetItem {
     CssStylesheet *parsed;      /* parse result when the cache could not keep it */
     uint64_t hash;              /* precomputed sheet_hash(text) when has_hash */
     bool has_hash;
+    uint64_t src;               /* URL sheet fetch id: same id, same text */
 } SheetItem;
 
 typedef struct LayoutStyleSheetList {
@@ -2563,10 +2565,19 @@ typedef struct LayoutStyleSheetList {
     bool all_cached;
 } LayoutStyleSheetList;
 
+/* Sheet texts run to megabytes and are hashed on every layout: eight bytes
+ * a step (only compared within the process; hits are confirmed by memcmp). */
 static uint64_t sheet_hash(const char *s, size_t n)
 {
-    uint64_t h = 1469598103934665603ull;
-    for (size_t i = 0; i < n; i++) { h ^= (unsigned char)s[i]; h *= 1099511628211ull; }
+    uint64_t h = 1469598103934665603ull ^ (n * 0x9E3779B97F4A7C15ull);
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t w;
+        memcpy(&w, s + i, 8);
+        h = (h ^ w) * 0x9E3779B97F4A7C15ull;
+        h ^= h >> 29;
+    }
+    for (; i < n; i++) { h ^= (unsigned char)s[i]; h *= 1099511628211ull; }
     return h;
 }
 
@@ -2618,14 +2629,16 @@ static void layout_sheet_list_free(LayoutStyleSheetList *list) {
     memset(list, 0, sizeof(*list));
 }
 
-static SheetEntry *sheet_cache_find(uint64_t h, const char *text, size_t len, const char *host)
+static SheetEntry *sheet_cache_find(uint64_t h, const char *text, size_t len, const char *host, uint64_t src)
 {
     for (int i = 0; i < g_sheet_cache_n; i++) {
         SheetEntry *e = g_sheet_cache[i];
         if (e->hash != h || e->len != len) continue;
         if ((e->host == NULL) != (host == NULL)) continue;
         if (host && strcmp(e->host, host) != 0) continue;
-        if (memcmp(e->text, text, len) != 0) continue;
+        /* A URL sheet's text is the same for one fetch: no compare. */
+        if (!(src && e->src == src) && memcmp(e->text, text, len) != 0) continue;
+        if (src && !e->src) e->src = src;
         return e;
     }
     return NULL;
@@ -2835,7 +2848,7 @@ static void layout_sheet_list_resolve(LayoutStyleSheetList *list)
         SheetItem *it = &list->items[i];
         if (it->owned) continue;
         hashes[i] = it->has_hash ? it->hash : sheet_hash(it->text, it->len);
-        SheetEntry *e = sheet_cache_find(hashes[i], it->text, it->len, it->host);
+        SheetEntry *e = sheet_cache_find(hashes[i], it->text, it->len, it->host, it->src);
         if (e) { e->last_use = g_layout_clock; it->entry = e; continue; }
         /* The same text twice in one document parses once. */
         bool dup = false;
@@ -2868,6 +2881,7 @@ static void layout_sheet_list_resolve(LayoutStyleSheetList *list)
         if (sheet) {
             it->entry = sheet_cache_insert(hashes[task_item[t]], it->text, it->len, it->host, sheet);
             if (!it->entry) it->parsed = sheet;
+            else it->entry->src = it->src;
         }
         free(tasks[t].start);
         free(tasks[t].end);
@@ -2886,7 +2900,7 @@ static void layout_sheet_list_resolve(LayoutStyleSheetList *list)
             sh = it->owned;
         } else {
             if (!it->entry && !it->parsed)
-                it->entry = sheet_cache_find(hashes[i], it->text, it->len, it->host);
+                it->entry = sheet_cache_find(hashes[i], it->text, it->len, it->host, it->src);
             if (it->entry) { e = it->entry; sh = e->sheet; e->last_use = g_layout_clock; }
             else if (it->parsed) sh = it->parsed;
             else {
@@ -3012,7 +3026,7 @@ static char* layout_resolve_url(const char *base_url, const char *href) {
 
 /* Fetched stylesheet texts, by URL, for the life of the process: a layout
  * (hit test, re-render) never re-downloads a sheet. */
-typedef struct UrlSheet { char *url; char *text; size_t len; uint64_t hash; } UrlSheet;
+typedef struct UrlSheet { char *url; char *text; size_t len; uint64_t hash; uint64_t id; } UrlSheet;
 static uint64_t sheet_hash(const char *s, size_t n);
 #define URL_SHEET_MAX 64
 static UrlSheet g_url_sheets[URL_SHEET_MAX];
@@ -3039,6 +3053,8 @@ static const UrlSheet *url_sheet_get(const char *url) {
         u->text[buffer.size] = '\0';
         u->len = buffer.size;
         u->hash = sheet_hash(u->text, u->len);
+        static uint64_t s_fetches;
+        u->id = ++s_fetches;
         /* Its @font-face rules, once per fetch (relative to the sheet). */
         font_registry_scan_css(u->text, u->len, url);
         out = u;
@@ -3065,6 +3081,7 @@ static void layout_fetch_stylesheet(LayoutStyleSheetList *list, const char *base
         it->len = u->len;
         it->hash = u->hash;
         it->has_hash = true;
+        it->src = u->id;
     } else if (u) {
         layout_sheet_list_add_text(list, u->text, u->len, NULL);
     }
@@ -3095,10 +3112,15 @@ static void layout_collect_stylesheets_recursive(LayoutContext *ctx, int layout_
 
     if (strcasecmp(node->tag_name, "style") == 0 && node->text_content && node->text_content[0]) {
         /* If this <style> lives inside a stamped shadow root, scope :host,
-         * ::slotted, etc. to the host custom element. */
-        layout_sheet_list_add_text(list, node->text_content, strlen(node->text_content),
-                                   layout_find_host_tag(ctx, dom_idx));
-        font_registry_scan_css(node->text_content, strlen(node->text_content), base_url);
+         * ::slotted, etc. to the host custom element.  The text is borrowed:
+         * the document outlives the sheet list. */
+        size_t len = node->text_len ? strnlen(node->text_content, node->text_len) : strlen(node->text_content);
+        const char *host = layout_find_host_tag(ctx, dom_idx);
+        SheetItem *it = layout_sheet_item_new(list);
+        it->text = node->text_content;
+        it->len = len;
+        it->host = host ? strdup(host) : NULL;
+        font_registry_scan_css(node->text_content, len, base_url);
     } else if (strcasecmp(node->tag_name, "link") == 0) {
         const char *rel = NULL;
         const char *href = NULL;
@@ -5362,6 +5384,11 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
     layout_collect_document_stylesheets(ctx, &list, ctx->base_url);
     if (sheet) layout_sheet_list_add(&list, sheet);
     STAGE("collect sheets");
+    if (g_css_log > 1) {
+        size_t bytes = 0;
+        for (int i = 0; i < list.nitems; i++) bytes += list.items[i].len;
+        fprintf(stderr, "[css] sheets: %d items, %zu bytes\n", list.nitems, bytes);
+    }
     layout_sheet_list_resolve(&list);
     STAGE("parse sheets (cached)");
 
