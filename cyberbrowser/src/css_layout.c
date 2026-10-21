@@ -3481,6 +3481,15 @@ typedef struct StyleThread {
     uint64_t shared, share_misses;
 } StyleThread;
 
+/* A context feature of an element: the key, and for attributes the value. */
+typedef struct StyleCtxItem { uint64_t k, v; } StyleCtxItem;
+
+typedef struct StyleCtxBuf {
+    StyleCtxItem *items;
+    int n, cap;
+    bool fail;
+} StyleCtxBuf;
+
 typedef struct StylePass {
     LayoutContext *ctx;
     const CssStyleSet *set;
@@ -3504,6 +3513,12 @@ typedef struct StylePass {
     unsigned char *force;
     unsigned char *out_changed;
     uint64_t *entry_key;        /* per layout index: the element's key (0 = not an element) */
+    /* Per layout index, for elements whose key changed: their context
+     * features (style_ctx_items) in cx at cx_off (cx_cnt -1: not computed)
+     * and the hash of the rest. */
+    StyleCtxBuf cx;
+    int *cx_off, *cx_cnt;
+    uint64_t *cx_struct;
     _Atomic uint32_t reused, recomputed, verify_mismatches, verify_reusable;
     _Atomic uint32_t why[5];    /* CSS_LOG=2: recompute reasons (no entry, key, ancestor/sibling, :has, parent) */
 } StylePass;
@@ -3528,6 +3543,10 @@ typedef struct StylePass {
 typedef struct StyleCacheEntry {
     NodeId id;
     uint64_t key;
+    /* What other elements' selectors see of it (style_ctx_items). */
+    uint64_t ctx_struct;
+    const struct StyleCtxItem *ctx_items;  /* in the cache arena */
+    uint32_t ctx_n;
     const CssCustomProps *props;
     unsigned char has_after;
     char after[256];
@@ -3658,16 +3677,18 @@ static const char *has_compound_start(const char *sel, const char *end)
 
 /* Adds the tag, ids and classes of compound [st, end) to `ks`; false when
  * it names none (or has escapes this does not decode). */
+/* Adds one feature every element matching compound [st, end) carries (its
+ * id, else its first class, else its tag) to `ks`; false when it names
+ * none (or has escapes this does not decode). */
 static bool has_compound_keys(HasSubjects *hs, HasKeySet *ks, const char *st, const char *end, bool deep)
 {
     for (const char *q = st; q < end; q++) if (*q == '\\') return false;
-    bool named = false;
+    uint64_t tag = 0, cls = 0, id = 0;
     const char *q = st;
     if (q < end && (isalpha((unsigned char)*q) || *q == '-' || *q == '_')) {
         const char *e = q;
         while (e < end && (isalnum((unsigned char)*e) || *e == '-' || *e == '_')) e++;
-        has_add(hs, ks, has_key('t', q, (size_t)(e - q)), deep);
-        named = true;
+        tag = has_key('t', q, (size_t)(e - q));
         q = e;
     }
     while (q < end) {
@@ -3684,13 +3705,19 @@ static bool has_compound_keys(HasSubjects *hs, HasKeySet *ks, const char *st, co
             char kind = *q++;
             const char *e = q;
             while (e < end && (isalnum((unsigned char)*e) || *e == '-' || *e == '_')) e++;
-            if (e > q) { has_add(hs, ks, has_key(kind, q, (size_t)(e - q)), deep); named = true; }
+            if (e > q) {
+                if (kind == '#' && !id) id = has_key('#', q, (size_t)(e - q));
+                if (kind == '.' && !cls) cls = has_key('.', q, (size_t)(e - q));
+            }
             q = e;
         } else {
             q++;
         }
     }
-    return named;
+    uint64_t k = id ? id : cls ? cls : tag;
+    if (!k) return false;
+    has_add(hs, ks, k, deep);
+    return true;
 }
 
 static void has_scan_selector(HasSubjects *hs, const char *sel)
@@ -3798,9 +3825,521 @@ static int has_may_match(const HasSubjects *hs, LayoutContext *ctx, int idx)
     return r;
 }
 
+/* What a compound selector that is not the rightmost one (".a > .b", the .a)
+ * can observe about an element: other elements' matching depends on these
+ * features only, so a change elsewhere in an element's attributes needs no
+ * recompute of its subtree or later siblings. Features inside :has() are
+ * left to the :has() forcing.
+ *
+ * Each such feature also records what a change of it can affect (an
+ * invalidation set): the descendants matching the rightmost compound of the
+ * selectors it appears in (one tag, id, class or attribute name of that
+ * compound, which every match must carry), the whole subtree when that
+ * compound names nothing or the feature sits inside :is() / :not(), and
+ * later siblings when a sibling combinator follows it. */
+typedef struct StyleKeySet {
+    uint64_t *slot;             /* 0 = empty */
+    uint32_t cap, n;
+} StyleKeySet;
+
+typedef struct StyleInval {
+    bool whole;                 /* the element's whole subtree */
+    bool sibling;               /* later siblings and their subtrees */
+    uint64_t *targets;          /* has_key of descendants' features */
+    int n, cap;
+} StyleInval;
+
+typedef struct StyleCtxFeatures {
+    bool all;                   /* something this does not model: every attribute */
+    bool all_tags;
+    bool sibling;               /* '+' or '~' somewhere */
+    /* Structure seen: position, being first, the previous sibling, being
+     * last, position from the end, having no children. */
+    bool s_pos, s_first, s_prev, s_last, s_fromend, s_empty;
+    StyleKeySet keys;           /* has_key: 't' tag, '#' id, '.' class, '[' attribute name */
+    /* Invalidation sets by key (open addressing, `inval_key` 0 = empty). */
+    uint64_t *inval_key;
+    int *inval_idx;
+    uint32_t inval_cap, inval_n;
+    StyleInval *inval;
+    /* While scanning: what the compound being scanned invalidates. */
+    uint64_t cur_target;        /* 0: whole subtree */
+    bool cur_sibling;
+    int nested;
+} StyleCtxFeatures;
+
+static void keyset_add(StyleKeySet *s, uint64_t k, bool *fail)
+{
+    if (!k) k = 1;
+    if (2 * (s->n + 1) > s->cap) {
+        uint32_t nc = s->cap ? s->cap * 2 : 256;
+        uint64_t *ns = (uint64_t *)calloc(nc, sizeof(uint64_t));
+        if (!ns) { *fail = true; return; }
+        for (uint32_t i = 0; i < s->cap; i++) {
+            uint64_t v = s->slot[i];
+            if (!v) continue;
+            uint32_t h = (uint32_t)(v >> 7) & (nc - 1);
+            while (ns[h]) h = (h + 1) & (nc - 1);
+            ns[h] = v;
+        }
+        free(s->slot);
+        s->slot = ns;
+        s->cap = nc;
+    }
+    uint32_t h = (uint32_t)(k >> 7) & (s->cap - 1);
+    while (s->slot[h]) {
+        if (s->slot[h] == k) return;
+        h = (h + 1) & (s->cap - 1);
+    }
+    s->slot[h] = k;
+    s->n++;
+}
+
+static bool keyset_has(const StyleKeySet *s, uint64_t k)
+{
+    if (!s->cap) return false;
+    if (!k) k = 1;
+    uint32_t h = (uint32_t)(k >> 7) & (s->cap - 1);
+    while (s->slot[h]) {
+        if (s->slot[h] == k) return true;
+        h = (h + 1) & (s->cap - 1);
+    }
+    return false;
+}
+
+static void keyset_clear(StyleKeySet *s)
+{
+    if (s->n) memset(s->slot, 0, (size_t)s->cap * sizeof(uint64_t));
+    s->n = 0;
+}
+
+static void ctx_features_free(StyleCtxFeatures *f)
+{
+    free(f->keys.slot);
+    for (uint32_t i = 0; i < f->inval_n; i++) free(f->inval[i].targets);
+    free(f->inval);
+    free(f->inval_key);
+    free(f->inval_idx);
+    memset(f, 0, sizeof(*f));
+}
+
+static const StyleInval *ctx_inval_find(const StyleCtxFeatures *f, uint64_t k)
+{
+    if (!f->inval_cap) return NULL;
+    if (!k) k = 1;
+    uint32_t h = (uint32_t)(k >> 7) & (f->inval_cap - 1);
+    while (f->inval_key[h]) {
+        if (f->inval_key[h] == k) return &f->inval[f->inval_idx[h]];
+        h = (h + 1) & (f->inval_cap - 1);
+    }
+    return NULL;
+}
+
+static StyleInval *ctx_inval_get(StyleCtxFeatures *f, uint64_t k)
+{
+    if (!k) k = 1;
+    StyleInval *found = (StyleInval *)ctx_inval_find(f, k);
+    if (found) return found;
+    if (2 * (f->inval_n + 1) > f->inval_cap) {
+        uint32_t nc = f->inval_cap ? f->inval_cap * 2 : 1024;
+        uint64_t *nk = (uint64_t *)calloc(nc, sizeof(uint64_t));
+        int *ni = (int *)calloc(nc, sizeof(int));
+        StyleInval *nv = (StyleInval *)realloc(f->inval, (size_t)nc * sizeof(StyleInval));
+        if (!nk || !ni || !nv) { free(nk); free(ni); if (nv) f->inval = nv; return NULL; }
+        f->inval = nv;
+        for (uint32_t i = 0; i < f->inval_cap; i++) {
+            if (!f->inval_key[i]) continue;
+            uint32_t h = (uint32_t)(f->inval_key[i] >> 7) & (nc - 1);
+            while (nk[h]) h = (h + 1) & (nc - 1);
+            nk[h] = f->inval_key[i];
+            ni[h] = f->inval_idx[i];
+        }
+        free(f->inval_key);
+        free(f->inval_idx);
+        f->inval_key = nk;
+        f->inval_idx = ni;
+        f->inval_cap = nc;
+    }
+    uint32_t h = (uint32_t)(k >> 7) & (f->inval_cap - 1);
+    while (f->inval_key[h]) h = (h + 1) & (f->inval_cap - 1);
+    f->inval_key[h] = k;
+    f->inval_idx[h] = (int)f->inval_n;
+    StyleInval *v = &f->inval[f->inval_n++];
+    memset(v, 0, sizeof(*v));
+    return v;
+}
+
+static void ctx_add(StyleCtxFeatures *f, char kind, const char *s, size_t n)
+{
+    bool fail = false;
+    uint64_t k = has_key(kind, s, n);
+    keyset_add(&f->keys, k, &fail);
+    StyleInval *v = fail ? NULL : ctx_inval_get(f, k);
+    if (!v) { f->all = true; return; }
+    if (f->nested) { v->whole = v->sibling = true; return; }
+    if (f->cur_sibling) v->sibling = true;
+    else if (!f->cur_target) v->whole = true;
+    else if (!v->whole) {
+        for (int i = 0; i < v->n; i++) if (v->targets[i] == f->cur_target) return;
+        if (v->n == v->cap) {
+            int nc = v->cap ? v->cap * 2 : 4;
+            uint64_t *nt = (uint64_t *)realloc(v->targets, (size_t)nc * sizeof(uint64_t));
+            if (!nt) { v->whole = true; return; }
+            v->targets = nt;
+            v->cap = nc;
+        }
+        v->targets[v->n++] = f->cur_target;
+    }
+}
+
+static bool ctx_ident_char(char c)
+{
+    return isalnum((unsigned char)c) || c == '-' || c == '_' || (unsigned char)c >= 0x80;
+}
+
+/* End of the bracket or paren group opening at `s` (quotes respected). */
+static const char *ctx_skip_group(const char *s, const char *e)
+{
+    if (s < e && (*s == '"' || *s == '\'')) {
+        char q = *s++;
+        for (; s < e; s++) {
+            if (*s == '\\' && s + 1 < e) s++;
+            else if (*s == q) return s + 1;
+        }
+        return e;
+    }
+    int d = 0;
+    char q = 0;
+    for (; s < e; s++) {
+        char c = *s;
+        if (q) { if (c == '\\' && s + 1 < e) s++; else if (c == q) q = 0; continue; }
+        if (c == '"' || c == '\'') q = c;
+        else if (c == '(' || c == '[') d++;
+        else if ((c == ')' || c == ']') && --d == 0) return s + 1;
+    }
+    return e;
+}
+
+/* The attribute name of "[name...]" starting at `q`. */
+static const char *ctx_attr_name(const char *q, const char *e, size_t *len)
+{
+    const char *t = q + 1;
+    while (t < e && *t == ' ') t++;
+    const char *ns = t;
+    while (t < e && (ctx_ident_char(*t) || *t == '|' || *t == '*')) t++;
+    /* [ns|attr]: the name after the bar. */
+    const char *bar = ns;
+    for (const char *b = ns; b < t; b++) if (*b == '|' && b + 1 < t && b[1] != '=') bar = b + 1;
+    *len = (size_t)(t - bar);
+    return bar;
+}
+
+/* One feature every element matching compound [s, e) carries (id, then
+ * class, attribute name, tag), or 0. */
+static uint64_t ctx_compound_target(const char *s, const char *e)
+{
+    uint64_t tag = 0, cls = 0, attr = 0;
+    const char *q = s;
+    for (const char *b = s; b < e; b++) if (*b == '\\') return 0;
+    if (q < e && ctx_ident_char(*q)) {
+        const char *t = q;
+        while (t < e && ctx_ident_char(*t)) t++;
+        tag = has_key('t', q, (size_t)(t - q));
+        q = t;
+    }
+    while (q < e) {
+        char c = *q;
+        if (c == '.' || c == '#') {
+            const char *t = ++q;
+            while (t < e && ctx_ident_char(*t)) t++;
+            if (t > q) {
+                if (c == '#') return has_key('#', q, (size_t)(t - q));
+                if (!cls) cls = has_key('.', q, (size_t)(t - q));
+            }
+            q = t;
+        } else if (c == '[') {
+            size_t nl;
+            const char *name = ctx_attr_name(q, e, &nl);
+            if (nl && !attr) attr = has_key('[', name, nl);
+            q = ctx_skip_group(q, e);
+        } else if (c == '(' || c == '"' || c == '\'') {
+            q = ctx_skip_group(q, e);
+        } else {
+            q++;
+        }
+    }
+    return cls ? cls : attr ? attr : tag;
+}
+
+static void ctx_scan_list(StyleCtxFeatures *f, const char *s, const char *e, bool ctx);
+
+static void ctx_scan_compound(StyleCtxFeatures *f, const char *s, const char *e, bool ctx)
+{
+    const char *q = s;
+    if (q < e && ctx_ident_char(*q)) {
+        const char *t = q;
+        while (t < e && ctx_ident_char(*t)) t++;
+        if (ctx) ctx_add(f, 't', q, (size_t)(t - q));
+        q = t;
+    }
+    while (q < e) {
+        char c = *q;
+        if (c == '\\' || c == '&') { if (ctx) f->all = true; q++; continue; }
+        if (c == '.' || c == '#') {
+            const char *t = ++q;
+            while (t < e && ctx_ident_char(*t)) t++;
+            if (ctx && t > q) ctx_add(f, c, q, (size_t)(t - q));
+            q = t;
+        } else if (c == '[') {
+            size_t nl;
+            const char *name = ctx_attr_name(q, e, &nl);
+            if (ctx && nl) ctx_add(f, '[', name, nl);
+            q = ctx_skip_group(q, e);
+        } else if (c == ':') {
+            bool element = q + 1 < e && q[1] == ':';
+            q += element ? 2 : 1;
+            const char *name = q;
+            while (q < e && ctx_ident_char(*q)) q++;
+            size_t nl = (size_t)(q - name);
+            const char *as = NULL, *ae = NULL;
+            if (q < e && *q == '(') {
+                const char *g = ctx_skip_group(q, e);
+                as = q + 1;
+                ae = g > as ? g - 1 : as;
+                q = g;
+            }
+            if (element) continue;
+#define PN(lit) (nl == sizeof(lit) - 1 && strncasecmp(name, lit, nl) == 0)
+            if (PN("not") || PN("is") || PN("where") || PN("matches") || PN("-webkit-any") || PN("-moz-any")) {
+                if (as) { f->nested++; ctx_scan_list(f, as, ae, ctx); f->nested--; }
+                continue;
+            }
+            if (PN("has")) continue;
+            if (PN("nth-child") || PN("nth-last-child")) {
+                /* :nth-child(An+B of S) */
+                for (const char *o = as; o && o + 4 <= ae; o++)
+                    if (strncasecmp(o, " of ", 4) == 0) { f->nested++; ctx_scan_list(f, o + 4, ae, ctx); f->nested--; break; }
+            }
+            if (!ctx) continue;
+            if (PN("first-child")) f->s_first = true;
+            else if (PN("nth-child")) f->s_pos = true;
+            else if (PN("last-child")) f->s_last = true;
+            else if (PN("only-child")) f->s_first = f->s_last = true;
+            else if (PN("nth-last-child")) f->s_fromend = true;
+            else if (PN("first-of-type") || PN("nth-of-type")) f->s_pos = f->all_tags = true;
+            else if (PN("last-of-type") || PN("nth-last-of-type")) f->s_fromend = f->all_tags = true;
+            else if (PN("only-of-type")) f->s_pos = f->s_fromend = f->all_tags = true;
+            else if (PN("empty")) f->s_empty = true;
+            else if (PN("checked")) ctx_add(f, '[', "checked", 7);
+            else if (PN("disabled") || PN("enabled")) ctx_add(f, '[', "disabled", 8);
+            else if (PN("required") || PN("optional")) ctx_add(f, '[', "required", 8);
+            else if (PN("read-only") || PN("read-write")) {
+                ctx_add(f, '[', "readonly", 8);
+                ctx_add(f, '[', "contenteditable", 15);
+                ctx_add(f, '[', "disabled", 8);
+            }
+            else if (PN("placeholder-shown")) { ctx_add(f, '[', "placeholder", 11); ctx_add(f, '[', "value", 5); }
+            else if (PN("link") || PN("any-link") || PN("-webkit-any-link")) ctx_add(f, '[', "href", 4);
+            else if (PN("lang")) ctx_add(f, '[', "lang", 4);
+            else if (PN("dir")) ctx_add(f, '[', "dir", 3);
+            else if (PN("open") || PN("closed")) ctx_add(f, '[', "open", 4);
+            else if (PN("hover") || PN("active") || PN("focus") || PN("focus-within") || PN("focus-visible") ||
+                     PN("visited") || PN("target") || PN("target-within") || PN("scope") || PN("root") ||
+                     PN("defined") || PN("host") || PN("fullscreen") || PN("-webkit-full-screen") ||
+                     PN("autofill") || PN("-webkit-autofill") || PN("popover-open") || PN("modal") ||
+                     PN("playing") || PN("paused") || PN("picture-in-picture"))
+                ;   /* not modelled from the DOM (as for the element itself) */
+            else
+                f->all = true;
+#undef PN
+        } else {
+            q++;
+        }
+    }
+}
+
+#define CTX_MAX_COMPOUNDS 64
+
+/* One complex selector: every compound followed by a combinator is context,
+ * invalidating the rightmost compound's elements below it (or, before a
+ * sibling combinator, later siblings). */
+static void ctx_scan_complex(StyleCtxFeatures *f, const char *s, const char *e, bool ctx)
+{
+    const char *cs[CTX_MAX_COMPOUNDS], *ce[CTX_MAX_COMPOUNDS];
+    bool sib_after[CTX_MAX_COMPOUNDS];
+    int nc = 0;
+    bool overflow = false;
+    while (s < e && (*s == ' ' || *s == '\n' || *s == '\t')) s++;
+    /* Relative selectors (in :is() arguments too) may lead with a combinator. */
+    const char *start = s;
+    const char *q = s;
+    while (q < e) {
+        char c = *q;
+        if (c == '(' || c == '[' || c == '"' || c == '\'') { q = ctx_skip_group(q, e); continue; }
+        if (c == ' ' || c == '>' || c == '+' || c == '~' || c == '\n' || c == '\t') {
+            const char *end = q;
+            bool sib = false;
+            while (q < e && (*q == ' ' || *q == '>' || *q == '+' || *q == '~' || *q == '\n' || *q == '\t')) {
+                if (*q == '+') { f->sibling = true; f->s_prev = true; sib = true; }
+                if (*q == '~') { f->sibling = true; f->s_pos = true; sib = true; }
+                q++;
+            }
+            if (end > start) {
+                if (nc < CTX_MAX_COMPOUNDS) { cs[nc] = start; ce[nc] = end; sib_after[nc] = sib; nc++; }
+                else overflow = true;
+            }
+            start = q;
+            continue;
+        }
+        q++;
+    }
+    if (q > start) {
+        if (nc < CTX_MAX_COMPOUNDS) { cs[nc] = start; ce[nc] = q; sib_after[nc] = false; nc++; }
+        else overflow = true;
+    }
+    if (!nc) return;
+    uint64_t target = overflow ? 0 : ctx_compound_target(cs[nc - 1], ce[nc - 1]);
+    if (overflow) f->nested++;
+    for (int i = 0; i < nc; i++) {
+        bool context = i < nc - 1;
+        f->cur_target = target;
+        f->cur_sibling = context && sib_after[i];
+        ctx_scan_compound(f, cs[i], ce[i], ctx || context);
+    }
+    if (overflow) f->nested--;
+}
+
+static void ctx_scan_list(StyleCtxFeatures *f, const char *s, const char *e, bool ctx)
+{
+    const char *cs = s;
+    const char *q = s;
+    while (q < e) {
+        char c = *q;
+        if (c == '(' || c == '[' || c == '"' || c == '\'') { q = ctx_skip_group(q, e); continue; }
+        if (c == ',') { ctx_scan_complex(f, cs, q, ctx); cs = ++q; continue; }
+        q++;
+    }
+    if (q > cs) ctx_scan_complex(f, cs, q, ctx);
+}
+
+static void ctx_buf_push(StyleCtxBuf *b, uint64_t k, uint64_t v)
+{
+    if (b->n == b->cap) {
+        int nc = b->cap ? b->cap * 2 : 4096;
+        StyleCtxItem *ni = (StyleCtxItem *)realloc(b->items, (size_t)nc * sizeof(StyleCtxItem));
+        if (!ni) { b->fail = true; return; }
+        b->items = ni;
+        b->cap = nc;
+    }
+    b->items[b->n].k = k;
+    b->items[b->n].v = v;
+    b->n++;
+}
+
+static int ctx_item_cmp(const StyleCtxItem *a, const StyleCtxItem *b)
+{
+    if (a->k != b->k) return a->k < b->k ? -1 : 1;
+    if (a->v != b->v) return a->v < b->v ? -1 : 1;
+    return 0;
+}
+
+/* The context features of an element, appended to `b` sorted and unique;
+ * returns the hash of the rest (structure as in its key: parent id,
+ * position, element siblings, previous and next ids, children). The parent
+ * always counts: a moved element has new ancestors. Tags are left out, as
+ * an element keeps its tag. */
+static uint64_t style_ctx_items(const StyleCtxFeatures *f, const HtmlNode *hn, const uint64_t s[6],
+                                StyleCtxBuf *b)
+{
+    uint64_t h = 1469598103934665603ull;
+    h = style_mix(h, &s[0], sizeof(s[0]));
+    if (f->all) {
+        if (hn->tag_name) h = style_mix(h, hn->tag_name, strlen(hn->tag_name) + 1);
+        for (HtmlAttribute *a = hn->attributes; a; a = a->next) {
+            if (a->name) h = style_mix(h, a->name, strlen(a->name) + 1);
+            if (a->value) h = style_mix(h, a->value, strlen(a->value) + 1);
+        }
+        return style_mix(h, s, 6 * sizeof(s[0]));
+    }
+    int first = b->n;
+    for (HtmlAttribute *a = hn->attributes; a; a = a->next) {
+        if (!a->name) continue;
+        const char *v = a->value ? a->value : "";
+        size_t nl = strlen(a->name);
+        uint64_t ak = has_key('[', a->name, nl);
+        if (keyset_has(&f->keys, ak)) {
+            uint64_t vh = style_mix(1469598103934665603ull, v, strlen(v) + 1);
+            ctx_buf_push(b, ak, vh ? vh : 1);
+        }
+        if (strcmp(a->name, "id") == 0) {
+            if (v[0]) {
+                uint64_t k = has_key('#', v, strlen(v));
+                if (keyset_has(&f->keys, k)) ctx_buf_push(b, k, 0);
+            }
+        } else if (strcmp(a->name, "class") == 0) {
+            for (const char *c = v; *c;) {
+                while (*c == ' ' || *c == '\t' || *c == '\n' || *c == '\r' || *c == '\f') c++;
+                const char *t = c;
+                while (*t && *t != ' ' && *t != '\t' && *t != '\n' && *t != '\r' && *t != '\f') t++;
+                if (t > c) {
+                    uint64_t k = has_key('.', c, (size_t)(t - c));
+                    if (keyset_has(&f->keys, k)) ctx_buf_push(b, k, 0);
+                }
+                c = t;
+            }
+        }
+    }
+    /* Sort (few items) and drop duplicate classes. */
+    StyleCtxItem *it = b->items + first;
+    int m = b->fail ? 0 : b->n - first;
+    for (int i = 1; i < m; i++) {
+        StyleCtxItem x = it[i];
+        int j = i - 1;
+        while (j >= 0 && ctx_item_cmp(&it[j], &x) > 0) { it[j + 1] = it[j]; j--; }
+        it[j + 1] = x;
+    }
+    int u = 0;
+    for (int i = 0; i < m; i++) if (!u || ctx_item_cmp(&it[u - 1], &it[i]) != 0) it[u++] = it[i];
+    if (!b->fail) b->n = first + u;
+    uint64_t v[6] = {
+        f->s_pos ? s[1] : 0,
+        f->s_first ? (s[1] == 0) : 0,
+        f->s_prev ? s[3] : 0,
+        f->s_last ? (s[4] == 0) : 0,
+        f->s_fromend ? s[2] - s[1] : 0,
+        f->s_empty ? (s[5] == 0) : 0,
+    };
+    h = style_mix(h, v, sizeof(v));
+    return h;
+}
+
+/* Does element `hn` carry one of the features in `t`? */
+static bool ctx_targets_match(const StyleKeySet *t, const HtmlNode *hn)
+{
+    if (hn->tag_name && keyset_has(t, has_key('t', hn->tag_name, strlen(hn->tag_name)))) return true;
+    for (HtmlAttribute *a = hn->attributes; a; a = a->next) {
+        if (!a->name) continue;
+        if (keyset_has(t, has_key('[', a->name, strlen(a->name)))) return true;
+        const char *v = a->value ? a->value : "";
+        if (strcmp(a->name, "id") == 0) {
+            if (v[0] && keyset_has(t, has_key('#', v, strlen(v)))) return true;
+        } else if (strcmp(a->name, "class") == 0) {
+            for (const char *c = v; *c;) {
+                while (*c == ' ' || *c == '\t' || *c == '\n' || *c == '\r' || *c == '\f') c++;
+                const char *e = c;
+                while (*e && *e != ' ' && *e != '\t' && *e != '\n' && *e != '\r' && *e != '\f') e++;
+                if (e > c && keyset_has(t, has_key('.', c, (size_t)(e - c)))) return true;
+                c = e;
+            }
+        }
+    }
+    return false;
+}
+
 /* Element keys and the reuse flags for every layout node (serial, before
  * the parallel style pass). */
-static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects *has)
+static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects *has,
+                                const StyleCtxFeatures *cf)
 {
     LayoutContext *ctx = P->ctx;
     int n = ctx->tree.count;
@@ -3809,15 +4348,25 @@ static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects
     P->force = (unsigned char *)calloc((size_t)n + 1, 1);
     g_sc.has_has = has && has->any;
     P->out_changed = (unsigned char *)calloc((size_t)n + 1, 1);
+    P->cx_off = (int *)calloc((size_t)n + 1, sizeof(int));
+    P->cx_cnt = (int *)malloc(((size_t)n + 1) * sizeof(int));
+    P->cx_struct = (uint64_t *)calloc((size_t)n + 1, sizeof(uint64_t));
     uint64_t *key = (uint64_t *)calloc((size_t)n + 1, sizeof(uint64_t));
+    uint64_t (*S)[6] = (uint64_t (*)[6])calloc((size_t)n + 1, sizeof(*S));
     unsigned char *changed = (unsigned char *)calloc((size_t)n + 1, 1);
-    if (!P->cached || !P->key_ok || !P->force || !P->out_changed || !key || !changed) {
+    unsigned char *whole = (unsigned char *)calloc((size_t)n + 1, 1);   /* subtree */
+    unsigned char *sibch = (unsigned char *)calloc((size_t)n + 1, 1);   /* later siblings */
+    int *part = (int *)malloc(((size_t)n + 1) * sizeof(int));          /* partial invalidation */
+    int *depth = (int *)calloc((size_t)n + 1, sizeof(int));
+    int *at = (int *)calloc((size_t)n + 1, sizeof(int));                /* preorder position */
+    P->entry_key = key;
+    if (!P->cached || !P->key_ok || !P->force || !P->out_changed || !P->cx_off || !P->cx_cnt ||
+        !P->cx_struct || !key || !S || !changed || !whole || !sibch || !part || !depth || !at) {
         P->inc = false;
-        free(key);
-        free(changed);
+        free(S); free(changed); free(whole); free(sibch); free(part); free(depth); free(at);
         return;
     }
-    P->entry_key = key;
+    for (int i = 0; i <= n; i++) P->cx_cnt[i] = -1;
     bool usable = g_sc.global == global && g_sc.n > 0;
 
     /* Keys: own tag and attributes, then structure from the parent's view. */
@@ -3833,11 +4382,9 @@ static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects
         key[idx] = h;
     }
     for (int idx = 0; idx < n; idx++) {
-        int kids = 0, elems = 0;
-        for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
-            kids++;
+        int elems = 0;
+        for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx)
             if (key[c]) elems++;
-        }
         int pos = 0;
         NodeId prev = 0;
         NodeId pid = 0;
@@ -3852,44 +4399,113 @@ static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects
                 next = dn ? dn->store_id : 0;
                 break;
             }
-            uint64_t s[6] = { (uint64_t)pid, (uint64_t)pos, (uint64_t)elems, (uint64_t)prev, (uint64_t)next, 0 };
+            uint64_t *s = S[c];
+            s[0] = (uint64_t)pid; s[1] = (uint64_t)pos; s[2] = (uint64_t)elems;
+            s[3] = (uint64_t)prev; s[4] = (uint64_t)next;
             HtmlNode *cn = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
             int ckids = 0;
             for (int g = ctx->tree.nodes[c].first_child_idx; g >= 0; g = ctx->tree.nodes[g].next_sibling_idx) ckids++;
             s[5] = (uint64_t)ckids;
-            key[c] = style_mix(key[c], s, sizeof(s));
+            key[c] = style_mix(key[c], s, 6 * sizeof(uint64_t));
             prev = cn ? cn->store_id : 0;
             pos++;
         }
-        (void)kids;
     }
-    /* The root has no parent in the layout tree. */
+    /* Cache lookup; context features of every element that changed, and
+     * what of them changed (the root has no parent in the layout tree and
+     * keeps an all-zero structure). */
+    StyleCtxBuf *b = &P->cx;
+    b->n = 0;
+    b->fail = false;
+    int nparts = 0;
     for (int idx = 0; idx < n; idx++) {
+        part[idx] = -1;
         if (!key[idx]) continue;
         HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
         const StyleCacheEntry *e = (usable && hn) ? style_cache_find(hn->store_id) : NULL;
         P->cached[idx] = e;
         P->key_ok[idx] = e && e->key == key[idx];
         changed[idx] = !P->key_ok[idx];
+        if (P->key_ok[idx] || !hn) continue;
+        P->cx_off[idx] = b->n;
+        P->cx_struct[idx] = style_ctx_items(cf, hn, S[idx], b);
+        if (b->fail) { P->inc = false; break; }
+        P->cx_cnt[idx] = b->n - P->cx_off[idx];
+        if (!e || e->ctx_struct != P->cx_struct[idx]) {
+            whole[idx] = 1;
+            sibch[idx] = 1;
+            continue;
+        }
+        /* Merge the sorted old and new items: keys on one side only. */
+        const StyleCtxItem *o = e->ctx_items, *w = b->items + P->cx_off[idx];
+        int on = (int)e->ctx_n, wn = P->cx_cnt[idx], i = 0, j = 0;
+        bool any_part = false;
+        while (i < on || j < wn) {
+            int c = i >= on ? 1 : j >= wn ? -1 : ctx_item_cmp(&o[i], &w[j]);
+            if (c == 0) { i++; j++; continue; }
+            uint64_t k = c < 0 ? o[i++].k : w[j++].k;
+            const StyleInval *v = ctx_inval_find(cf, k);
+            if (!v || v->whole) whole[idx] = 1;
+            if (!v || v->sibling) sibch[idx] = 1;
+            if (v && v->n) any_part = true;
+        }
+        if (any_part && !whole[idx]) { part[idx] = nparts++; }
     }
-    /* Forcing (2: recompute this element and its whole subtree): a changed
-     * earlier sibling (sibling selectors, also as a descendant's context),
-     * then down from changed or forced ancestors (descendant selectors).
-     * With :has(), a change anywhere below recomputes the element itself
-     * (1: self only). */
+    if (!P->inc) {
+        free(S); free(changed); free(whole); free(sibch); free(part); free(depth); free(at);
+        return;
+    }
+    /* Forcing (2: recompute this element and its whole subtree): later
+     * siblings of an element whose sibling-visible features changed, then
+     * down from whole-invalidated or forced ancestors. A change no context
+     * compound sees recomputes the element alone, and its children follow
+     * only if its result changed (out_changed). A change some selectors
+     * see recomputes (1: self only) the descendants matching those
+     * selectors' rightmost compounds. With :has(), a change anywhere below
+     * recomputes the element itself (1) or, when the :has() compound has
+     * more selector after it, its subtree (2). */
     const int *pre = ctx->tree.preorder;
-    for (int idx = 0; idx < n; idx++) {
+    for (int idx = 0; idx < n && cf->sibling; idx++) {
         bool seen = false;
         for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
             if (!key[c]) continue;
             if (seen) P->force[c] = 2;
-            if (changed[c]) seen = true;
+            if (sibch[c]) seen = true;
         }
     }
     for (int pos = 0; pos < n; pos++) {
         int idx = pre[pos];
         int p = ctx->tree.nodes[idx].parent_idx;
-        if (p >= 0 && (changed[p] || P->force[p] == 2)) P->force[idx] = 2;
+        at[idx] = pos;
+        depth[idx] = p >= 0 ? depth[p] + 1 : 0;
+        if (p >= 0 && (whole[p] || P->force[p] == 2)) P->force[idx] = 2;
+    }
+    int npartial = 0;
+    if (nparts) {
+        StyleKeySet t = {0};
+        for (int idx = 0; idx < n; idx++) {
+            if (part[idx] < 0 || P->force[idx] == 2) continue;
+            const StyleCacheEntry *e = P->cached[idx];
+            const StyleCtxItem *o = e->ctx_items, *w = b->items + P->cx_off[idx];
+            int on = (int)e->ctx_n, wn = P->cx_cnt[idx], i = 0, j = 0;
+            bool fail = false;
+            keyset_clear(&t);
+            while (i < on || j < wn) {
+                int c = i >= on ? 1 : j >= wn ? -1 : ctx_item_cmp(&o[i], &w[j]);
+                if (c == 0) { i++; j++; continue; }
+                const StyleInval *v = ctx_inval_find(cf, c < 0 ? o[i++].k : w[j++].k);
+                for (int k = 0; v && k < v->n; k++) keyset_add(&t, v->targets[k], &fail);
+            }
+            for (int pos = at[idx] + 1; pos < n; pos++) {
+                int d = pre[pos];
+                if (depth[d] <= depth[idx]) break;
+                if (fail) { P->force[d] = 2; continue; }
+                if (P->force[d] || !key[d]) continue;
+                HtmlNode *dn = layout_node_dom(ctx, ctx->tree.nodes[d].dom_node_idx);
+                if (dn && ctx_targets_match(&t, dn)) { P->force[d] = 1; npartial++; }
+            }
+        }
+        free(t.slot);
     }
     if (has && has->any) {
         unsigned char *below = (unsigned char *)calloc((size_t)n + 1, 1);
@@ -3912,9 +4528,9 @@ static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects
             }
             /* Only elements some :has() rule could be about. */
             for (int idx = 0; idx < n; idx++) {
-                if (!below[idx] || P->force[idx] || !key[idx]) continue;
+                if (!below[idx] || P->force[idx] == 2 || !key[idx]) continue;
                 int m = has_may_match(has, ctx, idx);
-                if (m) P->force[idx] = (unsigned char)m;
+                if (m > P->force[idx]) P->force[idx] = (unsigned char)m;
             }
             free(below);
             /* Subtrees under elements :has() forced whole. */
@@ -3925,7 +4541,19 @@ static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects
             }
         }
     }
-    free(changed);
+    if (g_css_log > 1) {
+        int nch = 0, nw = 0, nf = 0, nfc = 0;
+        for (int idx = 0; idx < n; idx++) {
+            if (!key[idx]) continue;
+            nch += changed[idx];
+            nw += whole[idx];
+            nf += P->force[idx] == 2;
+            nfc += P->force[idx] == 2 && P->cached[idx];
+        }
+        fprintf(stderr, "[css] restyle prepare: %d changed, %d invalidate subtree, %d partial (%d matched), "
+                "%d subtree-forced (%d cached)\n", nch, nw, nparts, npartial, nf, nfc);
+    }
+    free(S); free(changed); free(whole); free(sibch); free(part); free(depth); free(at);
 }
 
 typedef struct { const void *from; const CssCustomProps *to; } StylePropsRemap;
@@ -3958,11 +4586,39 @@ static const CssCustomProps *style_cache_own(const CssCustomProps *m, StyleProps
 }
 
 /* Remember this pass's post-cascade boxes for the next one. */
+/* The context features of entry e: computed this pass, else those of
+ * `old` (copied into the current arena). */
+static void style_cache_set_ctx(StyleCacheEntry *e, StylePass *P, int idx, const StyleCacheEntry *old)
+{
+    const StyleCtxItem *src = NULL;
+    uint32_t cnt = 0;
+    if (P->cx_cnt && P->cx_cnt[idx] >= 0) {
+        src = P->cx.items + P->cx_off[idx];
+        cnt = (uint32_t)P->cx_cnt[idx];
+        e->ctx_struct = P->cx_struct[idx];
+    } else if (old) {
+        src = old->ctx_items;
+        cnt = old->ctx_n;
+        e->ctx_struct = old->ctx_struct;
+    } else {
+        e->ctx_struct = 0;
+    }
+    StyleCtxItem *dst = NULL;
+    if (cnt) {
+        dst = (StyleCtxItem *)frame_arena_alloc(&g_sc.arena, (size_t)cnt * sizeof(StyleCtxItem));
+        if (dst) memcpy(dst, src, (size_t)cnt * sizeof(StyleCtxItem));
+        else { cnt = 0; e->ctx_struct = ~(uint64_t)0; }   /* never matches: next pass invalidates */
+    }
+    e->ctx_items = dst;
+    e->ctx_n = cnt;
+}
+
 static void style_cache_set(StyleCacheEntry *e, StylePass *P, int idx, const char *after,
                             StylePropsRemap *tab, int cap)
 {
     LayoutContext *ctx = P->ctx;
     e->key = P->entry_key ? P->entry_key[idx] : 0;
+    if (P->cx_cnt && P->cx_cnt[idx] >= 0) style_cache_set_ctx(e, P, idx, NULL);
     e->props = style_cache_own(ctx->custom_props[idx], tab, cap);
     e->has_after = after != NULL;
     if (after) memcpy(e->after, after, sizeof(e->after));
@@ -4053,6 +4709,14 @@ static bool style_cache_update(StylePass *P, const StyleGenAfter *gen, int gen_t
     return true;
 }
 
+static unsigned g_restyle_reused, g_restyle_recomputed;
+
+void css_layout_restyle_stats(unsigned *reused, unsigned *recomputed)
+{
+    if (reused) *reused = g_restyle_reused;
+    if (recomputed) *recomputed = g_restyle_recomputed;
+}
+
 static void style_cache_store(StylePass *P, uint64_t global, const StyleGenAfter *gen, int gen_total)
 {
     LayoutContext *ctx = P->ctx;
@@ -4107,6 +4771,7 @@ static void style_cache_store(StylePass *P, uint64_t global, const StyleGenAfter
         StyleCacheEntry *e = &ne[k];
         e->id = hn->store_id;
         e->key = P->entry_key ? P->entry_key[idx] : 0;
+        style_cache_set_ctx(e, P, idx, P->cached[idx]);
         e->props = style_cache_own(ctx->custom_props[idx], tab, cap);
         e->has_after = after[idx] != NULL;
         if (after[idx]) memcpy(e->after, after[idx], sizeof(e->after));
@@ -4755,12 +5420,22 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
             if (sc_global == 0) sc_global = 1;
             static uint64_t has_gen;
             static HasSubjects has;
+            static StyleCtxFeatures cf;
             if (has_gen != set_gen) {
                 has_free(&has);
+                ctx_features_free(&cf);
                 for (int r = 0, nr = css_styleset_rule_count(P.set); r < nr; r++) {
                     const CssRule *rule = css_styleset_rule(P.set, r);
-                    if (rule && rule->selector_text) has_scan_selector(&has, rule->selector_text);
+                    if (!rule || !rule->selector_text) continue;
+                    has_scan_selector(&has, rule->selector_text);
+                    ctx_scan_list(&cf, rule->selector_text, rule->selector_text + strlen(rule->selector_text), false);
                 }
+                if (g_css_log > 0)
+                    fprintf(stderr, "[css] context features: %u keys%s%s%s%s%s%s%s%s%s\n", cf.keys.n,
+                            cf.all ? ", all attributes" : "", cf.all_tags ? ", all tags" : "",
+                            cf.sibling ? ", sibling combinators" : "", cf.s_pos ? ", position" : "",
+                            cf.s_first ? ", first" : "", cf.s_prev ? ", previous" : "", cf.s_last ? ", last" : "",
+                            cf.s_fromend ? ", from end" : "", cf.s_empty ? ", empty" : "");
                 has_gen = set_gen;
                 if (g_css_log > 0 && has.any)
                     fprintf(stderr, "[css] :has() subjects: %d keys, %d ancestor keys%s%s%s\n", has.self.n, has.anc.n,
@@ -4769,12 +5444,13 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
             }
             P.inc = true;
             P.verify = verify_env;
-            style_cache_prepare(&P, sc_global, &has);
+            style_cache_prepare(&P, sc_global, &has, &cf);
             STAGE("restyle prepare");
         } else if (verify_env) {
             fprintf(stderr, "[css] restyle: full (%s)\n", !inc_env ? "CSS_INC=0" : "style set not cached");
         }
     }
+    g_restyle_reused = g_restyle_recomputed = 0;
     job_graph_run(job_new(style_root_job, NULL, &P, 0, 0));
     STAGE("style (parallel)");
 
@@ -4805,6 +5481,8 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
      * content and blockification below). */
     if (P.inc && P.entry_key) {
         style_cache_store(&P, sc_global, gen, gen_total);
+        g_restyle_reused = atomic_load(&P.reused);
+        g_restyle_recomputed = atomic_load(&P.recomputed);
         STAGE("restyle store");
         if (g_css_log > 1)
             fprintf(stderr, "[css] restyle why: noentry %u key %u forced %u has %u parent %u\n",
@@ -4824,6 +5502,10 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
     free(P.force);
     free(P.out_changed);
     free(P.entry_key);
+    free(P.cx.items);
+    free(P.cx_off);
+    free(P.cx_cnt);
+    free(P.cx_struct);
     /* Realize the winning ::after strings (e.g. .hlist li::after " · "). */
     for (int i = 0; i < gen_total; i++) layout_inject_generated_after(ctx, gen[i].idx, gen[i].text);
     free(gen);

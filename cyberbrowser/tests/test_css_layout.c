@@ -1101,6 +1101,82 @@ TEST(test_font_variable_instances) {
     return true;
 }
 
+/* The incremental restyle cache keys elements by node-store id, which
+ * parsed documents lack: number them in document order, so two parses of
+ * the same structure share ids. */
+static HtmlDocument *parse_with_store_ids(const char *html)
+{
+    HtmlDocument *doc = html_parse(html, strlen(html));
+    if (!doc) return NULL;
+    size_t n = po_array_count(&doc->array);
+    for (size_t i = 0; i < n; i++) {
+        if (!po_array_is_active(&doc->array, (int)i)) continue;
+        HtmlNode *hn = (HtmlNode *)po_array_payload(&doc->array, (int)i);
+        if (hn) hn->store_id = (uint32_t)(i + 1);
+    }
+    return doc;
+}
+
+static LayoutBox *box_with_class(LayoutContext *ctx, HtmlDocument *doc, const char *cls)
+{
+    size_t n = po_array_count(&doc->array);
+    for (size_t i = 0; i < n; i++) {
+        if (!po_array_is_active(&doc->array, (int)i)) continue;
+        HtmlNode *hn = (HtmlNode *)po_array_payload(&doc->array, (int)i);
+        if (!hn || hn->type != HTML_NODE_ELEMENT) continue;
+        for (HtmlAttribute *a = hn->attributes; a; a = a->next)
+            if (a->name && strcmp(a->name, "class") == 0 && a->value && strcmp(a->value, cls) == 0)
+                return css_layout_box_for_node(ctx, (int)i);
+    }
+    return NULL;
+}
+
+/* Restyle with the cache matches a full restyle when classes toggle on an
+ * ancestor (descendant selectors) and an earlier sibling (sibling
+ * selectors), and elements no selector ties to the change are reused. */
+TEST(test_layout_incremental_restyle) {
+    const char *tmpl =
+        "<html><head><style>"
+        ".t { width: 10px } .u { width: 20px } .y { height: 5px }"
+        ".a .t { width: 50px } .a > .u { width: 70px }"
+        ".b > .x + .y { height: 33px }"
+        ".k { width: 7px } .a .k2 { width: 9px }"
+        "</style></head><body>"
+        "<div class=\"%s\"><p class=\"t\"></p><p class=\"u\"></p><p class=\"%s\"></p><p class=\"y\"></p></div>"
+        "<section><i class=\"k\"></i><i class=\"k\"></i><i class=\"k\"></i><i class=\"k\"></i></section>"
+        "</body></html>";
+    struct { const char *root, *x; double t, u, y; } steps[] = {
+        { "",    "x", 10, 20, 5 },
+        { "a b", "x", 50, 70, 33 },
+        { "b",   "z", 10, 20, 5 },
+        { "a b", "x", 50, 70, 33 },
+        { "a",   "x", 50, 70, 5 },
+    };
+    for (size_t s = 0; s < sizeof(steps) / sizeof(steps[0]); s++) {
+        char html[2048];
+        snprintf(html, sizeof(html), tmpl, steps[s].root, steps[s].x);
+        HtmlDocument *doc = parse_with_store_ids(html);
+        ASSERT_TRUE(doc != NULL);
+        LayoutContext ctx = {0};
+        ASSERT_TRUE(css_layout_run(&ctx, doc, NULL, 800.0, 600.0));
+        LayoutBox *t = box_with_class(&ctx, doc, "t");
+        LayoutBox *u = box_with_class(&ctx, doc, "u");
+        LayoutBox *y = box_with_class(&ctx, doc, "y");
+        ASSERT_TRUE(t && u && y);
+        ASSERT_TRUE(near_equal(t->width, steps[s].t));
+        ASSERT_TRUE(near_equal(u->width, steps[s].u));
+        ASSERT_TRUE(near_equal(y->height, steps[s].y));
+        unsigned reused = 0, recomputed = 0;
+        css_layout_restyle_stats(&reused, &recomputed);
+        /* After the first pass the <section> subtree and <head> come from
+         * the cache. */
+        if (s > 0) ASSERT_TRUE(reused >= 5);
+        css_layout_tree_free(&ctx);
+        html_document_free(doc);
+    }
+    return true;
+}
+
 void run_css_layout_tests(void) {
     printf("\n--- CSS Layout Engine Tests ---\n");
     RUN_TEST(test_layout_basic_document);
@@ -1130,4 +1206,5 @@ void run_css_layout_tests(void) {
     RUN_TEST(test_layout_box_shadow_display_list);
     RUN_TEST(test_font_registry_system_and_web_fonts);
     RUN_TEST(test_font_variable_instances);
+    RUN_TEST(test_layout_incremental_restyle);
 }
