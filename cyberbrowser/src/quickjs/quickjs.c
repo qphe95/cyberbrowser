@@ -393,8 +393,8 @@ typedef struct JSObject JSObject;
 #define ctx_rt_class_array (js_rt_class_array_ptr(ctx_rt))
 
 /* Object accessors - p is a JSObjectHandle (see SAFE_GET / js_obj_* helpers) */
-/* DEPRECATED: p_prop macro will be removed. Use p_property_array() instead. */
-#define p_prop (js_obj_prop_handle(p))
+/* The property slots of object p (inline or in a separate array). */
+#define p_prop (js_obj_props(p))
 /* WARNING: Returns raw pointer - only valid until next GC point.
  * Dereference again after any GC point. */
 #define p_array_values ((GCValue *)gc_deref(SAFE_GET_OR(p, JSObjectHandle, u.array.u.values_handle, GC_HANDLE_NULL)))
@@ -5469,11 +5469,8 @@ JSProperty *get_property_by_index(GCHandle obj_handle, int prop_idx)
 {
     if (prop_idx < 0) return NULL;
     
-    GCHandle prop_handle = GC_FIELD_GET(obj_handle, JSObject, prop_handle);
-    JSPropertyHandle props = prop_handle;
-    if (!SAFE_VALID(props)) return NULL;
-    
-    return &SAFE_AT(props, JSPropertyHandle, prop_idx);
+    JSProperty *props = js_obj_props(obj_handle);
+    return props ? &props[prop_idx] : NULL;
 }
 
 /* Check if object has a prototype */
@@ -5772,6 +5769,37 @@ static void js_free_shape_null(JSRuntimeHandle rt, JSShapeHandle sh)
 static inline void js_object_begin_resize(JSObjectHandle p);
 static inline void js_object_end_resize(JSObjectHandle p);
 
+/* Give object p room for new_size property slots, keeping the first ones.
+ * Inline slots (JS_OBJ_INLINE_PROPS_MAX) are kept while they suffice,
+ * including when shrinking; past them the properties move to a separate
+ * array.  Returns -1 when out of memory. */
+static int js_obj_props_resize(JSObjectHandle p, uint32_t new_size)
+{
+    GCHandle ph = js_obj_prop_handle(p);
+    if (ph != GC_HANDLE_NULL) {
+        GCHandle nh = gc_realloc(ph, sizeof(JSProperty) * (new_size ? new_size : 1));
+        if (nh == GC_HANDLE_NULL)
+            return -1;
+        js_obj_set_prop_handle(p, nh);
+        return 0;
+    }
+    uint32_t cap = SAFE_GET_OR(p, JSObjectHandle, inline_props, 0);
+    if (new_size <= cap)
+        return 0;
+    GCHandle nh = gc_alloc(sizeof(JSProperty) * new_size, JS_GC_OBJ_TYPE_DATA);
+    if (nh == GC_HANDLE_NULL)
+        return -1;
+    JSObject *o = GC_DEREF_H(p, JSObjectHandle);
+    if (cap)
+        gc_memcpy(gc_deref(nh), (uint8_t *)o + JS_OBJ_INLINE_PROPS_OFFSET, sizeof(JSProperty) * cap);
+    /* Array first, then the inline count: a concurrent marker reading the
+     * object in between sees one storage or the other, never neither. */
+    js_obj_set_prop_handle(p, nh);
+    o = GC_DEREF_H(p, JSObjectHandle);
+    o->inline_props = 0;
+    return 0;
+}
+
 static no_inline int resize_properties(JSContextHandle ctx, GCHandle *psh_handle,
                                        JSObjectHandle p, uint32_t count)
 {
@@ -5789,13 +5817,9 @@ static no_inline int resize_properties(JSContextHandle ctx, GCHandle *psh_handle
     new_size = max_int(count, SAFE_GET_OR(sh, JSShapeHandle, prop_size, 0) * 3 / 2);
     /* Reallocate prop array first to avoid crash or size inconsistency
        in case of memory allocation failure */
-    if (SAFE_VALID(p)) {
-        GCHandle new_prop_handle = gc_realloc(js_obj_prop_handle(p), sizeof(JSProperty) * new_size);
-        if (unlikely(new_prop_handle == GC_HANDLE_NULL)) {
-            js_object_end_resize(p);
-            return -1;
-        }
-        js_obj_set_prop_handle(p, new_prop_handle);
+    if (SAFE_VALID(p) && unlikely(js_obj_props_resize(p, new_size))) {
+        js_object_end_resize(p);
+        return -1;
     }
     new_hash_size = SAFE_GET_OR(sh, JSShapeHandle, prop_hash_mask, 0) + 1;
     while (new_hash_size < new_size)
@@ -5976,11 +6000,9 @@ static int compact_properties(JSContextHandle ctx, JSObjectHandle p)
     }
     SAFE_SET(sh, JSShapeHandle, prop_hash_mask, new_hash_mask);
 
-    /* reduce the size of the object properties */
-    GCHandle new_prop_handle = gc_realloc(js_obj_prop_handle(p), sizeof(JSProperty) * new_size);
-    if (new_prop_handle != GC_HANDLE_NULL) {
-        js_obj_set_prop_handle(p, new_prop_handle);
-    }
+    /* reduce the size of the object properties (failure keeps the larger
+     * storage, which is harmless) */
+    js_obj_props_resize(p, new_size);
     js_object_end_resize(p);
     return 0;
 }
@@ -6021,7 +6043,7 @@ static int add_shape_property(JSContextHandle ctx, GCHandle *psh_handle,
     SAFE_SET(sh, JSShapeHandle, hash, new_shape_hash);
 
     /* Initialize the new shape property.
-       The object property at SAFE_AT(p_prop, JSPropertyArrayHandle, sh.prop_count()) is uninitialized */
+       The object property at p_prop[sh.prop_count()] is uninitialized */
     int prop_idx = SAFE_GET_OR(sh, JSShapeHandle, prop_count, 0);
     prop = get_shape_prop(sh);
     pr = &prop[prop_idx];
@@ -6225,7 +6247,14 @@ static GCValue JS_NewObjectFromShape(JSContextHandle ctx, JSShapeHandle sh, JSCl
     /* GC is automatically triggered by gc_object_alloc if needed */
     QJS_LOGD("JS_NewObjectFromShape: allocating object...");
     
-    obj_handle = gc_alloc(sizeof(JSObject), JS_GC_OBJ_TYPE_JS_OBJECT);
+    /* Small shapes get their property slots inside the object: one
+     * allocation instead of two (see js_obj_props). */
+    int inline_props = SAFE_VALID(sh) ? SAFE_GET_OR(sh, JSShapeHandle, prop_size, 0) : -1;
+    if (inline_props >= 0 && inline_props <= JS_OBJ_INLINE_PROPS_MAX)
+        obj_handle = gc_alloc(JS_OBJ_INLINE_PROPS_OFFSET + sizeof(JSProperty) * inline_props,
+                              JS_GC_OBJ_TYPE_JS_OBJECT);
+    else
+        obj_handle = gc_alloc(sizeof(JSObject), JS_GC_OBJ_TYPE_JS_OBJECT);
     if (obj_handle == GC_HANDLE_NULL) {
         fprintf(stderr, "JS_NewObjectFromShape: allocation failed!\n");
         return JS_ThrowOutOfMemory(ctx);
@@ -6273,13 +6302,19 @@ static GCValue JS_NewObjectFromShape(JSContextHandle ctx, JSShapeHandle sh, JSCl
     }
     
     QJS_LOGD("JS_NewObjectFromShape: allocating prop array, prop_size=%d", SAFE_GET_OR(sh, JSShapeHandle, prop_size, 0));
-    prop_alloc_size = sizeof(JSProperty) * SAFE_GET_OR(sh, JSShapeHandle, prop_size, 0);
-    prop_handle = gc_alloc(prop_alloc_size, JS_GC_OBJ_TYPE_DATA);
-    js_obj_set_prop_handle(p, prop_handle);
-    ph = js_obj_prop_handle(p);
-    if (unlikely(ph == GC_HANDLE_NULL)) {
-        /* GC frees automatically */
-        goto fail;
+    if (inline_props >= 0 && inline_props <= JS_OBJ_INLINE_PROPS_MAX) {
+        /* Slots after the struct, zeroed with the rest of the object. */
+        SAFE_SET(p, JSObjectHandle, inline_props, inline_props);
+        js_obj_set_prop_handle(p, GC_HANDLE_NULL);
+    } else {
+        prop_alloc_size = sizeof(JSProperty) * SAFE_GET_OR(sh, JSShapeHandle, prop_size, 0);
+        prop_handle = gc_alloc(prop_alloc_size, JS_GC_OBJ_TYPE_DATA);
+        js_obj_set_prop_handle(p, prop_handle);
+        ph = js_obj_prop_handle(p);
+        if (unlikely(ph == GC_HANDLE_NULL)) {
+            /* GC frees automatically */
+            goto fail;
+        }
     }
     /* p_prop already derefs p.prop_handle() */;
 
@@ -6308,7 +6343,7 @@ static GCValue JS_NewObjectFromShape(JSContextHandle ctx, JSShapeHandle sh, JSCl
         }
         break;
     case JS_CLASS_C_FUNCTION:
-        gc_set_heap_value(&SAFE_AT(p_prop, JSPropertyArrayHandle, 0).u.value, JS_UNDEFINED);
+        gc_set_heap_value(&p_prop[0].u.value, JS_UNDEFINED);
         break;
     case JS_CLASS_ARGUMENTS:
     case JS_CLASS_MAPPED_ARGUMENTS:
@@ -6359,7 +6394,7 @@ static GCValue JS_NewObjectFromShape(JSContextHandle ctx, JSShapeHandle sh, JSCl
     /* Object already registered with GC by gc_alloc_js_object */
     if (props) {
         for(i = 0; i < SAFE_GET_OR(sh, JSShapeHandle, prop_count, 0); i++)
-            GC_SET(SAFE_AT(p_prop, JSPropertyArrayHandle, i), props[i]);
+            GC_SET(p_prop[i], props[i]);
     }
     if (array_needs_length) {
         pr = add_property(ctx, p, JS_ATOM_length, JS_PROP_WRITABLE | JS_PROP_LENGTH);
@@ -6869,7 +6904,7 @@ static force_inline JSShapeProperty *find_own_property(JSProperty **ppr,
         if (likely(pr->atom == atom)) {
             /* Return property pointer - WARNING: This pointer is only valid
              * until the next GC point. Callers should use immediately. */
-            *ppr = &SAFE_AT(p_prop, JSPropertyArrayHandle, h - 1);
+            *ppr = &p_prop[h - 1];
             /* the compiler should be able to assume that pr != NULL here */
             return pr;
         }
@@ -6903,7 +6938,7 @@ static force_inline JSShapeProperty *find_own_property(JSProperty **ppr,
         int li;
         for (li = 0; li < SAFE_GET_OR(sh, JSShapeHandle, prop_count, 0); li++) {
             if (prop[li].atom == atom) {
-                *ppr = &SAFE_AT(p_prop, JSPropertyArrayHandle, li);
+                *ppr = &p_prop[li];
                 return &prop[li];
             }
         }
@@ -7281,7 +7316,7 @@ void mark_children(JSRuntimeHandle rt, GCHandle handle,
             prs = get_shape_prop(sh);
             int nprops = gc_clamp_count(SAFE_GET_OR(sh, JSShapeHandle, prop_count, 0),
                                         gc_slots(SAFE_HANDLE(sh), offsetof(JSShape, prop), sizeof(JSShapeProperty)));
-            nprops = gc_clamp_count(nprops, gc_slots(p_prop, 0, sizeof(JSProperty)));
+            nprops = gc_clamp_count(nprops, (int)js_obj_props_capacity(p));
             for(i = 0; prs && i < nprops; i++) {
                 if (prs->atom != JS_ATOM_NULL) {
                     if (prs->flags & JS_PROP_TMASK) {
@@ -8153,7 +8188,7 @@ void JS_ComputeMemoryUsage(JSRuntimeHandle rt, JSMemoryUsage *s)
         p = (JSObjectHandle)(handle);  // Use handle directly from loop variable
         sh = GC_SHAPE_DEREF(js_obj_shape_handle(p));
         s->obj_count++;
-        if (SAFE_VALID(p_prop)) {
+        if (p_prop) {
             s->memory_used_count++;
             s->prop_size += SAFE_GET_OR(sh, JSShapeHandle, prop_size, 0) * sizeof(JSProperty);
             s->prop_count += SAFE_GET_OR(sh, JSShapeHandle, prop_count, 0);
@@ -9811,7 +9846,7 @@ static int __exception JS_GetOwnPropertyNamesInternal2(JSContextHandle ctx,
                    name space (implicit GetOwnProperty) */
                 if (unlikely((prs->flags & JS_PROP_TMASK) == JS_PROP_VARREF) &&
                     (flags & (JS_GPN_SET_ENUM | JS_GPN_ENUM_ONLY))) {
-                    JSVarRefHandle var_ref = (JSVarRefHandle)(SAFE_AT(p_prop, JSPropertyArrayHandle, i).u.var_ref_handle);
+                    JSVarRefHandle var_ref = (JSVarRefHandle)(p_prop[i].u.var_ref_handle);
                     if (unlikely(!SAFE_VALID(var_ref) || js_varref_is_value_uninitialized(var_ref))) {
                         JS_ThrowReferenceErrorUninitialized(ctx, prs->atom);
                         return -1;
@@ -10509,22 +10544,18 @@ static JSProperty *add_property(JSContextHandle ctx,
         /* matching shape found: use it */
         /*  the property array may need to be resized */
         if (SAFE_GET_OR(new_sh, JSShapeHandle, prop_size, 0) != SAFE_GET_OR(sh, JSShapeHandle, prop_size, 0)) {
-            GCHandle new_prop_handle = gc_realloc(js_obj_prop_handle(p),
-                                  sizeof(SAFE_AT(p_prop, JSPropertyArrayHandle, 0)) * SAFE_GET_OR(new_sh, JSShapeHandle, prop_size, 0));
-            if (new_prop_handle == GC_HANDLE_NULL)
+            if (js_obj_props_resize(p, SAFE_GET_OR(new_sh, JSShapeHandle, prop_size, 0)))
                 return NULL;
-            js_obj_set_prop_handle(p, new_prop_handle);
-            js_obj_set_prop_handle(p, new_prop_handle);
         }
         js_obj_set_shape_handle(p, SAFE_GET_OR(new_sh, JSShapeHandle, handle, GC_HANDLE_NULL));
         /* The old shape may still be referenced by other objects; leave it
            in the shared hash table and let GC cleanup remove it if dead. */
-        return &SAFE_AT(p_prop, JSPropertyArrayHandle, SAFE_GET_OR(new_sh, JSShapeHandle, prop_count, 0) - 1);
+        return &p_prop[SAFE_GET_OR(new_sh, JSShapeHandle, prop_count, 0) - 1];
     }
     GCHandle sh_handle = js_obj_shape_handle(p);
     if (add_shape_property(ctx, &sh_handle, p, prop, prop_flags))
         return NULL;
-    return &SAFE_AT(p_prop, JSPropertyArrayHandle, SAFE_GET_OR(GC_SHAPE_DEREF(js_obj_shape_handle(p)), JSShapeHandle, prop_count, 0) - 1);
+    return &p_prop[SAFE_GET_OR(GC_SHAPE_DEREF(js_obj_shape_handle(p)), JSShapeHandle, prop_count, 0) - 1];
 }
 
 /* can be called on JS_CLASS_ARRAY, JS_CLASS_ARGUMENTS or
@@ -10639,7 +10670,7 @@ static int delete_property(JSContextHandle ctx, JSObjectHandle p, JSAtom atom)
             }
             SAFE_SET(sh, JSShapeHandle, deleted_prop_count, SAFE_GET_OR(sh, JSShapeHandle, deleted_prop_count, 0) + 1);
             /* free the entry */
-            pr1 = &SAFE_AT(p_prop, JSPropertyArrayHandle, h - 1);
+            pr1 = &p_prop[h - 1];
             if (unlikely(SAFE_GET_OR(p, JSObjectHandle, class_id, 0) == JS_CLASS_GLOBAL_OBJECT)) {
                 if ((pr->flags & JS_PROP_TMASK) == JS_PROP_VARREF)
                     if (remove_global_object_property(ctx, p, pr, pr1))
@@ -10747,11 +10778,11 @@ static int set_array_length(JSContextHandle ctx, JSObjectHandle p, GCValue val,
             }
             SAFE_SET(p, JSObjectHandle, u.array.count, len);
         }
-        gc_set_heap_value(&SAFE_AT(p_prop, JSPropertyArrayHandle, 0).u.value, JS_NewUint32(ctx, len));
+        gc_set_heap_value(&p_prop[0].u.value, JS_NewUint32(ctx, len));
     } else {
         /* Note: length is always a uint32 because the object is an
            array */
-        JS_ToUint32(ctx, &cur_len, SAFE_AT(p_prop, JSPropertyArrayHandle, 0).u.value);
+        JS_ToUint32(ctx, &cur_len, p_prop[0].u.value);
         if (len < cur_len) {
             uint32_t d;
             JSShapeHandle sh = GC_HANDLE_NULL;
@@ -10807,7 +10838,7 @@ static int set_array_length(JSContextHandle ctx, JSObjectHandle p, GCValue val,
         } else {
             cur_len = len;
         }
-        set_value(ctx, &SAFE_AT(p_prop, JSPropertyArrayHandle, 0).u.value, JS_NewUint32(ctx, cur_len));
+        set_value(ctx, &p_prop[0].u.value, JS_NewUint32(ctx, cur_len));
         if (unlikely(cur_len > len)) {
             return JS_ThrowTypeErrorOrFalse(ctx, flags, "not configurable");
         }
@@ -10844,14 +10875,14 @@ static inline int add_fast_array_element(JSContextHandle ctx, JSObjectHandle p,
     new_len = SAFE_GET_OR(p, JSObjectHandle, u.array.count, 0) + 1;
     /* update the length if necessary. We assume that if the length is
        not an integer, then if it >= 2^31.  */
-    if (likely(JS_VALUE_GET_TAG(SAFE_AT(p_prop, JSPropertyArrayHandle, 0).u.value) == JS_TAG_INT)) {
-        array_len = JS_VALUE_GET_INT(SAFE_AT(p_prop, JSPropertyArrayHandle, 0).u.value);
+    if (likely(JS_VALUE_GET_TAG(p_prop[0].u.value) == JS_TAG_INT)) {
+        array_len = JS_VALUE_GET_INT(p_prop[0].u.value);
         if (new_len > array_len) {
             if (unlikely(!(get_shape_prop(GC_SHAPE_DEREF(js_obj_shape_handle(p)))->flags & JS_PROP_WRITABLE))) {
                 
                 return JS_ThrowTypeErrorReadOnly(ctx, flags, JS_ATOM_length);
             }
-            gc_set_heap_value(&SAFE_AT(p_prop, JSPropertyArrayHandle, 0).u.value, JS_NewInt32(ctx, new_len));
+            gc_set_heap_value(&p_prop[0].u.value, JS_NewInt32(ctx, new_len));
         }
     }
     if (unlikely(new_len > SAFE_GET_OR(p, JSObjectHandle, u.array.u1.size, 0))) {
@@ -10909,7 +10940,7 @@ static GCValue js_create_array(JSContextHandle ctx, int len, GCValue *tab)
         for(i = 0; i < len; i++) 
             gc_set_heap_value(&p_array_values[i], tab[i]);
         /* update the 'length' field */
-        set_value(ctx, &SAFE_AT(p_prop, JSPropertyArrayHandle, 0).u.value, JS_NewInt32(ctx, len));
+        set_value(ctx, &p_prop[0].u.value, JS_NewInt32(ctx, len));
     }
     return obj;
 }
@@ -10934,7 +10965,7 @@ static GCValue js_create_array_free(JSContextHandle ctx, int len, GCValue *tab)
         for(i = 0; i < len; i++) 
             gc_set_heap_value(&p_array_values[i], tab[i]);
         /* update the 'length' field */
-        set_value(ctx, &SAFE_AT(p_prop, JSPropertyArrayHandle, 0).u.value, JS_NewInt32(ctx, len));
+        set_value(ctx, &p_prop[0].u.value, JS_NewInt32(ctx, len));
     }
     return obj;
 }
@@ -11530,7 +11561,7 @@ static int JS_CreateProperty(JSContextHandle ctx, JSObjectHandle p,
                 JSShapeProperty *pslen;
             generic_array:
                 /* update the length field */
-                plen = &SAFE_AT(p_prop, JSPropertyArrayHandle, 0);
+                plen = &p_prop[0];
                 JS_ToUint32(ctx, &len, plen->u.value);
                 if ((idx + 1) > len) {
                     pslen = get_shape_prop(GC_SHAPE_DEREF(js_obj_shape_handle(p)));
@@ -15630,7 +15661,7 @@ static void js_print_object(JSPrintValueState *s, JSObjectHandle p)
                     continue;
                 }
                 if (j < s->options.max_item_count) {
-                    pr = &SAFE_AT(p_prop, JSPropertyArrayHandle, i);
+                    pr = &p_prop[i];
                     js_print_comma(s, &comma_state);
                     js_print_atom(s, prs->atom);
                     js_printf(s, ": ");
@@ -22098,17 +22129,17 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                                      !can_extend_fast_array(p))) {
                             goto put_array_el_slow_path;
                         }
-                        if (likely(JS_VALUE_GET_TAG(SAFE_AT(p_prop, JSPropertyArrayHandle, 0).u.value) != JS_TAG_INT))
+                        if (likely(JS_VALUE_GET_TAG(p_prop[0].u.value) != JS_TAG_INT))
                             goto put_array_el_slow_path;
                         /* cannot overflow otherwise the length would not be an integer */
                         new_len = idx + 1;
                         if (unlikely(new_len > SAFE_GET_OR(p, JSObjectHandle, u.array.u1.size, 0)))
                             goto put_array_el_slow_path;
-                        array_len = JS_VALUE_GET_INT(SAFE_AT(p_prop, JSPropertyArrayHandle, 0).u.value);
+                        array_len = JS_VALUE_GET_INT(p_prop[0].u.value);
                         if (new_len > array_len) {
                             if (unlikely(!(get_shape_prop(GC_SHAPE_DEREF(js_obj_shape_handle(p)))->flags & JS_PROP_WRITABLE)))
                                 goto put_array_el_slow_path;
-                            gc_set_heap_value(&SAFE_AT(p_prop, JSPropertyArrayHandle, 0).u.value, JS_NewInt32(ctx, new_len));
+                            gc_set_heap_value(&p_prop[0].u.value, JS_NewInt32(ctx, new_len));
                         }
                         SAFE_SET(p, JSObjectHandle, u.array.count, new_len);
                         gc_set_heap_value(&p_array_values[idx], sp[-1]);
@@ -43409,7 +43440,7 @@ static int JS_WriteObjectTag(BCWriterState *s, GCValue obj)
                     prop_count++;
                 } else {
                     bc_put_atom(s, atom);
-                    if (JS_WriteObjectRec(s, SAFE_AT(p_prop, JSPropertyArrayHandle, i).u.value))
+                    if (JS_WriteObjectRec(s, p_prop[i].u.value))
                         goto fail;
                 }
             }
@@ -48258,8 +48289,8 @@ static GCValue js_array_push(JSContextHandle ctx, GCValue this_val,
         JSObjectHandle p = JS_VALUE_GET_OBJ(this_val);
         if (likely(SAFE_GET_OR(p, JSObjectHandle, class_id, 0) == JS_CLASS_ARRAY && SAFE_GET_OR(p, JSObjectHandle, fast_array, false) &&
                    can_extend_fast_array(p) &&
-                   JS_VALUE_GET_TAG(SAFE_AT(p_prop, JSPropertyArrayHandle, 0).u.value) == JS_TAG_INT &&
-                   JS_VALUE_GET_INT(SAFE_AT(p_prop, JSPropertyArrayHandle, 0).u.value) == SAFE_GET_OR(p, JSObjectHandle, u.array.count, 0) &&
+                   JS_VALUE_GET_TAG(p_prop[0].u.value) == JS_TAG_INT &&
+                   JS_VALUE_GET_INT(p_prop[0].u.value) == SAFE_GET_OR(p, JSObjectHandle, u.array.count, 0) &&
                    (get_shape_prop(GC_SHAPE_DEREF(js_obj_shape_handle(p)))->flags & JS_PROP_WRITABLE) != 0)) {
             /* fast case */
             uint32_t new_len;
@@ -48271,7 +48302,7 @@ static GCValue js_array_push(JSContextHandle ctx, GCValue this_val,
                 }
                 for(i = 0; i < argc; i++)
                     gc_set_heap_value(&p_array_values[SAFE_GET_OR(p, JSObjectHandle, u.array.count, 0) + i], argv[i]);
-                gc_set_heap_value(&SAFE_AT(p_prop, JSPropertyArrayHandle, 0).u.value, JS_NewInt32(ctx, new_len));
+                gc_set_heap_value(&p_prop[0].u.value, JS_NewInt32(ctx, new_len));
                 SAFE_SET(p, JSObjectHandle, u.array.count, new_len);
                 return JS_NewInt32(ctx, new_len);
             }
@@ -53510,11 +53541,11 @@ static force_inline int js_regexp_get_lastIndex(JSContextHandle ctx, int64_t *pl
     JSObjectHandle p = JS_VALUE_GET_OBJ(this_val);
     
     /* lastIndex is always the first property (it is not configurable) */
-    if (likely(JS_VALUE_GET_TAG(SAFE_AT(p_prop, JSPropertyArrayHandle, 0).u.value) == JS_TAG_INT)) {
-        *plast_index = max_int(JS_VALUE_GET_INT(SAFE_AT(p_prop, JSPropertyArrayHandle, 0).u.value), 0);
+    if (likely(JS_VALUE_GET_TAG(p_prop[0].u.value) == JS_TAG_INT)) {
+        *plast_index = max_int(JS_VALUE_GET_INT(p_prop[0].u.value), 0);
         return 0;
     } else {
-        return JS_ToLengthFree(ctx, plast_index, SAFE_AT(p_prop, JSPropertyArrayHandle, 0).u.value);
+        return JS_ToLengthFree(ctx, plast_index, p_prop[0].u.value);
     }
 }
 
@@ -53525,9 +53556,9 @@ static force_inline int js_regexp_set_lastIndex(JSContextHandle ctx, GCValue thi
     JSObjectHandle p = JS_VALUE_GET_OBJ(this_val);
     
     /* lastIndex is always the first property (it is not configurable) */
-    if (likely(JS_VALUE_GET_TAG(SAFE_AT(p_prop, JSPropertyArrayHandle, 0).u.value) == JS_TAG_INT &&
+    if (likely(JS_VALUE_GET_TAG(p_prop[0].u.value) == JS_TAG_INT &&
                (get_shape_prop(GC_SHAPE_DEREF(js_obj_shape_handle(p)))->flags & JS_PROP_WRITABLE))) {
-        set_value(ctx, &SAFE_AT(p_prop, JSPropertyArrayHandle, 0).u.value, JS_NewInt32(ctx, last_index));
+        set_value(ctx, &p_prop[0].u.value, JS_NewInt32(ctx, last_index));
     } else {
         if (JS_SetProperty(ctx, this_val, JS_ATOM_lastIndex,
                            JS_NewInt32(ctx, last_index)) < 0)
@@ -66254,9 +66285,7 @@ void JSRuntime_for_each_context(JSRuntimeHandle rt, ContextIteratorFunc func, vo
 
 static inline JSProperty *js_object_get_prop_slot(JSObjectHandle p, uint32_t prop_idx)
 {
-    GCHandle ph = js_obj_prop_handle(p);
-    JSPropertyArrayHandle arr = ph;
-    return js_prop_array_at(arr, prop_idx);
+    return js_prop_array_at(js_obj_props(p), prop_idx);
 }
 
 static inline void gcvalue_to_raw(GCValue v, uint64_t *low, uint64_t *high)

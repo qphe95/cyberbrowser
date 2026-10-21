@@ -1810,7 +1810,10 @@ struct JSObject {
     uint8_t tmp_mark : 1;        /* used in JS_WriteObjectRec() */
     uint8_t is_HTMLDDA : 1;      /* specific annex B IsHtmlDDA behavior */
     uint8_t is_watched : 1;      /* writes bump JS_watched_write_epoch */
-    uint8_t _padding : 6;        /* unused padding to align weakref_count */
+    /* Property slots stored inside the object, after the struct (see
+     * js_obj_props); 0 when the properties live in prop_handle's array. */
+    uint8_t inline_props : 3;
+    uint8_t _padding : 3;        /* unused padding to align weakref_count */
     /* count the number of weak references to this object. The object
        structure is freed only if weakref_count = 0 */
     uint32_t weakref_count;

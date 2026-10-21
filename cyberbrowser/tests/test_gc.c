@@ -378,6 +378,40 @@ GC_RUNNING_TEST(test_gc_shared_and_dictionary_shapes,
     "  if (Object.keys(e).length !== 40) return 'second dict keys';"
     "  return 'ok'; })()")
 
+/* Objects with up to 4 property slots keep them inside the object and move
+ * them to a separate array when they grow: values survive the move and
+ * collections on either side of it. */
+GC_RUNNING_TEST(test_gc_inline_properties_grow_and_survive,
+    "(function(){"
+    "  var objs = [];"
+    "  for (var n = 0; n < 300; n++) {"
+    "    var o = {};"
+    "    for (var k = 0; k < (n % 12); k++) {"
+    "      o['p' + k] = {v: n * 100 + k};"
+    "      if (k === 2 && n % 5 === 0) __test_gc();"
+    "    }"
+    "    if (n % 7 === 0) Object.defineProperty(o, 'g', {get: function(){ return this.p0; }, configurable: true});"
+    "    if (n % 9 === 0 && (n % 12) > 1) { delete o.p1; o.q = 'q' + n; }"
+    "    objs.push(o);"
+    "  }"
+    "  __test_gc(); var junk = []; for (var j = 0; j < 20000; j++) junk.push({j: j}); __test_gc();"
+    "  for (var n = 0; n < 300; n++) {"
+    "    var o = objs[n];"
+    "    for (var k = 0; k < (n % 12); k++) {"
+    "      if (k === 1 && n % 9 === 0 && (n % 12) > 1) { if ('p1' in o) return 'delete lost ' + n; continue; }"
+    "      if (!o['p' + k] || o['p' + k].v !== n * 100 + k) return 'obj ' + n + ' p' + k;"
+    "    }"
+    "    if (n % 7 === 0 && (n % 12) > 0 && o.g !== o.p0) return 'getter ' + n;"
+    "    if (n % 9 === 0 && (n % 12) > 1 && o.q !== 'q' + n) return 'added after delete ' + n;"
+    "  }"
+    "  var f = Object.freeze({a: 1, b: 2}); try { f.c = 3; } catch (e) {}"
+    "  if (f.c !== undefined || f.a !== 1) return 'freeze';"
+    "  function P(x, y) { this.x = x; this.y = y; } var ps = [];"
+    "  for (var i = 0; i < 1000; i++) ps.push(new P(i, -i));"
+    "  __test_gc();"
+    "  for (var i = 0; i < 1000; i++) if (ps[i].x !== i || ps[i].y !== -i) return 'ctor ' + i;"
+    "  return 'ok'; })()")
+
 GC_RUNNING_TEST(test_gc_running_keeps_native_temporaries,
     "(function(){ var r = [1, 2, 3].map(function(x){ __test_gc(); return {v: x * 10}; }); "
     "  return (r.length === 3 && r[0].v === 10 && r[2].v === 30) ? 'ok' "
@@ -1879,6 +1913,7 @@ void run_gc_tests(void) {
     RUN_TEST(test_gc_frame_reuse_keeps_lazy_parent_frames);
     RUN_TEST(test_gc_frame_reuse_past_pool_depth_and_throws);
     RUN_TEST(test_gc_shared_and_dictionary_shapes);
+    RUN_TEST(test_gc_inline_properties_grow_and_survive);
     RUN_TEST(test_gc_running_repeated);
     RUN_TEST(test_gc_frame_chain_after_generator);
     RUN_TEST(test_gc_bigint_survives);

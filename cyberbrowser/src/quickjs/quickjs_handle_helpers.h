@@ -556,6 +556,35 @@ static inline GCHandle js_obj_prop_handle(GCHandle handle)
     return atomic_load_u32((volatile uint32_t *)&ptr->prop_handle);
 }
 
+/* In-object properties: an object created with room for at most
+ * JS_OBJ_INLINE_PROPS_MAX properties stores them right after its struct, in
+ * the same allocation, and has no separate property array (prop_handle is
+ * null, inline_props holds the slot count).  It moves to a separate array
+ * when it outgrows them (js_obj_props_resize). */
+#define JS_OBJ_INLINE_PROPS_MAX     4
+#define JS_OBJ_INLINE_PROPS_OFFSET  ((sizeof(JSObject) + 7) & ~(size_t)7)
+
+/* The object's property slots, wherever they live; NULL if it has none.
+ * Like any pointer into the heap, valid until the next poll point. */
+static inline JSProperty *js_obj_props(GCHandle handle)
+{
+    JSObject *o = (JSObject *)gc_deref(handle);
+    if (!o) return NULL;
+    GCHandle ph = o->prop_handle;
+    if (ph != GC_HANDLE_NULL) return (JSProperty *)gc_deref(ph);
+    return o->inline_props ? (JSProperty *)((uint8_t *)o + JS_OBJ_INLINE_PROPS_OFFSET) : NULL;
+}
+
+/* Slots the object's property storage holds. */
+static inline uint32_t js_obj_props_capacity(GCHandle handle)
+{
+    JSObject *o = (JSObject *)gc_deref(handle);
+    if (!o) return 0;
+    if (o->prop_handle != GC_HANDLE_NULL)
+        return (uint32_t)(gc_handle_get_size(o->prop_handle) / sizeof(JSProperty));
+    return o->inline_props;
+}
+
 static inline uint32_t js_obj_prop_version_fetch_add(GCHandle handle, uint32_t delta)
 {
     JSObject* p = GC_DEREF_H(handle, JSObjectHandle);
@@ -650,41 +679,39 @@ static inline void js_promise_reaction_set_resolving_func(GCHandle handle, int i
  * JSPropertyArrayHandle (struct JSProperty)
  * ------------------------------------------------------------------------ */
 
-static inline JSProperty* js_prop_array_at(GCHandle handle, size_t index)
+/* Slot `index` of a property storage `base` (js_obj_props). */
+static inline JSProperty* js_prop_array_at(JSProperty *base, size_t index)
 {
-    if (handle == GC_HANDLE_NULL) return NULL;
-    JSProperty* base = (JSProperty*)gc_deref(handle);
-    if (!base) return NULL;
-    return &base[index];
+    return base ? &base[index] : NULL;
 }
 
-static inline GCHandle js_prop_array_get_getter_handle(GCHandle handle, size_t index)
+static inline GCHandle js_prop_array_get_getter_handle(JSProperty *base, size_t index)
 {
-    JSProperty* p = js_prop_array_at(handle, index);
+    JSProperty* p = js_prop_array_at(base, index);
     return p ? p->u.getset.getter_handle : GC_HANDLE_NULL;
 }
 
-static inline GCHandle js_prop_array_get_setter_handle(GCHandle handle, size_t index)
+static inline GCHandle js_prop_array_get_setter_handle(JSProperty *base, size_t index)
 {
-    JSProperty* p = js_prop_array_at(handle, index);
+    JSProperty* p = js_prop_array_at(base, index);
     return p ? p->u.getset.setter_handle : GC_HANDLE_NULL;
 }
 
-static inline GCValue js_prop_array_get_value(GCHandle handle, size_t index)
+static inline GCValue js_prop_array_get_value(JSProperty *base, size_t index)
 {
-    JSProperty* p = js_prop_array_at(handle, index);
+    JSProperty* p = js_prop_array_at(base, index);
     return p ? p->u.value : GC_UNDEFINED;
 }
 
-static inline GCHandle js_prop_array_get_var_ref_handle(GCHandle handle, size_t index)
+static inline GCHandle js_prop_array_get_var_ref_handle(JSProperty *base, size_t index)
 {
-    JSProperty* p = js_prop_array_at(handle, index);
+    JSProperty* p = js_prop_array_at(base, index);
     return p ? p->u.var_ref_handle : GC_HANDLE_NULL;
 }
 
-static inline void js_prop_array_set_value(GCHandle handle, size_t index, GCValue val)
+static inline void js_prop_array_set_value(JSProperty *base, size_t index, GCValue val)
 {
-    JSProperty* p = js_prop_array_at(handle, index);
+    JSProperty* p = js_prop_array_at(base, index);
     if (p) {
         p->u.value = val;
         gc_write_barrier_for_heap_slot(&p->u.value, GC_VALUE_GET_HANDLE(val));
