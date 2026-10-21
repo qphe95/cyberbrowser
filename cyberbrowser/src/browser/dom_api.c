@@ -418,15 +418,18 @@ static NodeId root_host(JSContextHandle ctx, NodeId root) {
     if (dom_kind(root) != DOM_K_FRAGMENT && dom_kind(root) != DOM_K_ELEMENT) return DOM_NULL;
     if (!dom_has_wrapper(root)) return DOM_NULL;
     GCValue obj = dom_js_existing(root);
-    GCValue host = JS_GetPropertyStr(ctx, obj, "host");
-    if (!JS_IsObject(host)) return DOM_NULL;
     if (dom_kind(root) == DOM_K_ELEMENT) {
-        /* Polyfill shadow roots made of plain objects report nodeType 11. */
+        /* Polyfill shadow roots made of plain objects report nodeType 11.
+         * Checked first: the root of a detached subtree is usually an
+         * ordinary element, whose "host" can be a costly getter (a URL's
+         * host on <a>, or page code a polyfill patched in). */
         GCValue nt = JS_GetPropertyStr(ctx, obj, "nodeType");
         int32_t t = 0;
         JS_ToInt32(ctx, &t, nt);
         if (t != DOM_NODE_TYPE_DOCUMENT_FRAGMENT) return DOM_NULL;
     }
+    GCValue host = JS_GetPropertyStr(ctx, obj, "host");
+    if (!JS_IsObject(host)) return DOM_NULL;
     return dom_node_of(host);
 }
 
