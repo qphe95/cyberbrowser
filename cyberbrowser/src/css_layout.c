@@ -3765,11 +3765,26 @@ typedef struct HasKeySet {
     int n, cap;
 } HasKeySet;
 
+/* Everything one compound requires (tag, id, classes): an element matches
+ * only with all of them. */
+#define HAS_REQ_MAX 6
+typedef struct HasReq {
+    uint64_t keys[HAS_REQ_MAX];
+    int n;
+} HasReq;
+typedef struct HasReqList {
+    HasReq *v;
+    int n, cap;
+} HasReqList;
+
 typedef struct HasSubjects {
     bool any;                   /* some rule uses :has() */
     bool universal, universal_deep;
     bool sibling_relative;
     HasKeySet self, anc;
+    /* The same compounds with all their requirements (self_req parallel to
+     * subjects, anc_req to the ancestors they need). */
+    HasReqList self_req, anc_req;
 } HasSubjects;
 
 static uint64_t has_key(char kind, const char *s, size_t n)
@@ -3812,6 +3827,8 @@ static void has_free(HasSubjects *hs)
     free(hs->self.deep);
     free(hs->anc.keys);
     free(hs->anc.deep);
+    free(hs->self_req.v);
+    free(hs->anc_req.v);
     memset(hs, 0, sizeof(*hs));
 }
 
@@ -3839,11 +3856,13 @@ static bool has_compound_keys(HasSubjects *hs, HasKeySet *ks, const char *st, co
 {
     for (const char *q = st; q < end; q++) if (*q == '\\') return false;
     uint64_t tag = 0, cls = 0, id = 0;
+    HasReq req = { {0}, 0 };
     const char *q = st;
     if (q < end && (isalpha((unsigned char)*q) || *q == '-' || *q == '_')) {
         const char *e = q;
         while (e < end && (isalnum((unsigned char)*e) || *e == '-' || *e == '_')) e++;
         tag = has_key('t', q, (size_t)(e - q));
+        if (req.n < HAS_REQ_MAX) req.keys[req.n++] = tag;
         q = e;
     }
     while (q < end) {
@@ -3861,23 +3880,105 @@ static bool has_compound_keys(HasSubjects *hs, HasKeySet *ks, const char *st, co
             const char *e = q;
             while (e < end && (isalnum((unsigned char)*e) || *e == '-' || *e == '_')) e++;
             if (e > q) {
-                if (kind == '#' && !id) id = has_key('#', q, (size_t)(e - q));
-                if (kind == '.' && !cls) cls = has_key('.', q, (size_t)(e - q));
+                uint64_t k = has_key(kind, q, (size_t)(e - q));
+                if (kind == '#' && !id) id = k;
+                if (kind == '.' && !cls) cls = k;
+                if (req.n < HAS_REQ_MAX) req.keys[req.n++] = k;
             }
             q = e;
         } else {
             q++;
         }
     }
+    /* One feature the compound requires stands for it in the key sets the
+     * restyle uses; req keeps them all (css_layout_has_may_depend). */
     uint64_t k = id ? id : cls ? cls : tag;
     if (!k) return false;
     has_add(hs, ks, k, deep);
+    HasReqList *rl = ks == &hs->anc ? &hs->anc_req : &hs->self_req;
+    if (rl->n == rl->cap) {
+        int nc = rl->cap ? rl->cap * 2 : 16;
+        HasReq *nv = (HasReq *)realloc(rl->v, (size_t)nc * sizeof(HasReq));
+        if (!nv) { hs->universal = true; return true; }   /* cannot record: assume anything */
+        rl->v = nv;
+        rl->cap = nc;
+    }
+    rl->v[rl->n++] = req;
     return true;
+}
+
+/* Pseudo-classes that never match here (dynamic states a static render
+ * does not have; css_apply_pseudo gives them never_match). */
+static bool has_pseudo_never_matches(const char *name, size_t nl)
+{
+    static const char *const names[] = {
+        "visited", "hover", "active", "focus", "focus-visible", "focus-within", "target", "target-within",
+        "checked", "disabled", "indeterminate", "read-write", "autofill", "playing", "paused", "current",
+        "past", "future",
+    };
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+        if (strlen(names[i]) == nl && strncasecmp(names[i], name, nl) == 0) return true;
+    return false;
+}
+
+/* Can the :has() argument [arg, end) ever match?  Not when every one of its
+ * alternatives needs a pseudo-class that never matches (outside :not()):
+ * ytd-app[masthead-hidden]:not(:has(#masthead-container:focus-within)) is
+ * then a constant, whatever the DOM under the subject does. */
+static bool has_argument_can_match(const char *arg, const char *end)
+{
+    bool alt_dead = false;
+    int depth = 0;
+    int not_depth[32];
+    int nnot = 0;
+    for (const char *q = arg; q < end; q++) {
+        char c = *q;
+        if (c == '"' || c == '\'') {
+            char qc = c;
+            for (q++; q < end && *q != qc; q++) if (*q == '\\' && q + 1 < end) q++;
+            continue;
+        }
+        if (c == '(') { depth++; continue; }
+        if (c == ')') {
+            if (nnot && not_depth[nnot - 1] == depth) nnot--;
+            depth--;
+            continue;
+        }
+        if (c == ',' && depth == 0) {
+            if (!alt_dead) return true;
+            alt_dead = false;
+            continue;
+        }
+        if (c == ':') {
+            const char *n = q + 1;
+            if (n < end && *n == ':') continue;          /* a pseudo-element */
+            const char *e = n;
+            while (e < end && (isalnum((unsigned char)*e) || *e == '-' || *e == '_')) e++;
+            size_t nl = (size_t)(e - n);
+            if (nl == 3 && strncasecmp(n, "not", 3) == 0 && e < end && *e == '(') {
+                if (nnot < 32) not_depth[nnot++] = depth + 1;
+            } else if (!nnot && has_pseudo_never_matches(n, nl)) {
+                alt_dead = true;
+            }
+            q = e - 1;
+        }
+    }
+    return !alt_dead;
 }
 
 static void has_scan_selector(HasSubjects *hs, const char *sel)
 {
     for (const char *p = strstr(sel, ":has("); p; p = strstr(p + 5, ":has(")) {
+        {
+            /* The argument's extent; a constant :has() has no subjects. */
+            const char *e = p + 5;
+            int d = 1;
+            for (; *e && d > 0; e++) {
+                if (*e == '(') d++;
+                else if (*e == ')') d--;
+            }
+            if (!has_argument_can_match(p + 5, d == 0 ? e - 1 : e)) continue;
+        }
         hs->any = true;
         const char *arg = p + 5;
         while (*arg == ' ') arg++;
@@ -4489,21 +4590,38 @@ bool css_layout_attr_change_matters(const LayoutContext *ctx, const LayoutAttrOw
     return false;
 }
 
-/* Does store element `id` carry a feature in `ks`? */
-static bool has_keys_store(const HasKeySet *ks, NodeId id)
+/* Does store element `id` carry every feature of some compound in `rl`? */
+static bool has_reqs_store(const HasReqList *rl, NodeId id)
 {
-    if (!ks->n) return false;
+    if (!rl->n) return false;
+    uint64_t have[64];
+    int nh = 0;
     const char *tag = dom_tag_name(id);
-    if (tag && has_lookup(ks, has_key('t', tag, strlen(tag)))) return true;
+    if (tag) have[nh++] = has_key('t', tag, strlen(tag));
     const char *v = dom_get_attr_str(id, "id");
-    if (v && v[0] && has_lookup(ks, has_key('#', v, strlen(v)))) return true;
+    if (v && v[0]) have[nh++] = has_key('#', v, strlen(v));
     const char *cls = dom_get_attr_str(id, "class");
+    bool overflow = false;
     for (const char *c = cls; c && *c;) {
         while (*c == ' ' || *c == '\t' || *c == '\n') c++;
         const char *e = c;
         while (*e && *e != ' ' && *e != '\t' && *e != '\n') e++;
-        if (e > c && has_lookup(ks, has_key('.', c, (size_t)(e - c)))) return true;
+        if (e > c) {
+            if (nh < 64) have[nh++] = has_key('.', c, (size_t)(e - c));
+            else overflow = true;
+        }
         c = e;
+    }
+    if (overflow) return true;               /* too many classes to tell */
+    for (int r = 0; r < rl->n; r++) {
+        const HasReq *q = &rl->v[r];
+        bool all = true;
+        for (int k = 0; k < q->n && all; k++) {
+            bool found = false;
+            for (int h = 0; h < nh && !found; h++) found = have[h] == q->keys[k];
+            if (!found) all = false;
+        }
+        if (all) return true;
     }
     return false;
 }
@@ -4517,7 +4635,7 @@ bool css_layout_has_may_depend(const LayoutContext *ctx, uint32_t id)
     if (hs->universal || hs->universal_deep || hs->sibling_relative) return true;
     /* A :has() subject (or the ancestor its compound needs) at or above. */
     for (NodeId a = id; a && dom_kind(a) == DOM_K_ELEMENT; a = dom_parent(a))
-        if (has_keys_store(&hs->self, a) || has_keys_store(&hs->anc, a)) return true;
+        if (has_reqs_store(&hs->self_req, a) || has_reqs_store(&hs->anc_req, a)) return true;
     return false;
 }
 
@@ -6007,9 +6125,10 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
     if (g_css_log > 1) {
         CssStyleDocStats ss;
         css_styledoc_stats(&ss);
-        fprintf(stderr, "[css] features: %llu reused, %llu updated (%llu elements), %llu built\n",
+        fprintf(stderr, "[css] features: %llu reused, %llu updated (%llu elements), %llu built (%llu elements copied)\n",
                 (unsigned long long)ss.reused, (unsigned long long)ss.updated,
-                (unsigned long long)ss.elements_redone, (unsigned long long)ss.built);
+                (unsigned long long)ss.elements_redone, (unsigned long long)ss.built,
+                (unsigned long long)ss.elements_copied);
     }
     STAGE("element features");
     P.nthreads = job_thread_count();
@@ -9259,104 +9378,6 @@ static void layout_position_absolute_subtree(LayoutContext *ctx, int idx)
 /* ============================================================================
  * Public API
  * ============================================================================ */
-
-/* After layout, write resolved geometry and used values back into the JS
- * computed-style table so getComputedStyle can return real values. */
-static void layout_export_computed_geometry(LayoutContext *ctx)
-{
-    if (!SAFE_VALID(ctx->js_ctx) ||
-        gc_handle_get_type(ctx->js_ctx) != JS_GC_OBJ_TYPE_JS_CONTEXT) return;
-    JSContextHandle js = ctx->js_ctx;
-    char buf[128];
-
-    for (int i = 0; i < ctx->tree.count; i++) {
-        HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx);
-        if (!node || node->type != HTML_NODE_ELEMENT || !node->has_js_object) continue;
-
-        GCValue element = node->js_object;
-        DomWrapHandle dom_node = dom_wrap_of(element);
-        if (dom_node == GC_HANDLE_NULL) continue;
-
-        LayoutBox *box = &ctx->boxes[i];
-#define SET_VAL(prop, val_str) do { \
-    JSAtom atom = JS_NewAtom(js, (prop)); \
-    if (atom != JS_ATOM_NULL) { \
-        css_computed_set_property(js, dom_node, atom, (val_str)); \
-        JS_FreeAtom(js, atom); \
-    } \
-} while(0)
-#define SET_PX(prop, val) do { \
-    snprintf(buf, sizeof(buf), "%.2fpx", (val)); \
-    SET_VAL(prop, buf); \
-} while(0)
-
-        SET_PX("width", box->width);
-        SET_PX("height", box->height);
-        SET_PX("margin-top", box->margin_top);
-        SET_PX("margin-right", box->margin_right);
-        SET_PX("margin-bottom", box->margin_bottom);
-        SET_PX("margin-left", box->margin_left);
-        SET_PX("padding-top", box->padding_top);
-        SET_PX("padding-right", box->padding_right);
-        SET_PX("padding-bottom", box->padding_bottom);
-        SET_PX("padding-left", box->padding_left);
-        SET_PX("top", box->y);
-        SET_PX("left", box->x);
-        SET_PX("font-size", box->font_size);
-
-        const char *display_str = "block";
-        switch (box->display) {
-            case CSS_DISPLAY_NONE: display_str = "none"; break;
-            case CSS_DISPLAY_INLINE: display_str = "inline"; break;
-            case CSS_DISPLAY_INLINE_BLOCK: display_str = "inline-block"; break;
-            case CSS_DISPLAY_FLEX: display_str = "flex"; break;
-            case CSS_DISPLAY_GRID: display_str = "grid"; break;
-            default: break;
-        }
-        SET_VAL("display", display_str);
-
-        const char *visibility_str = "visible";
-        if (box->visibility == CSS_VISIBILITY_HIDDEN) visibility_str = "hidden";
-        else if (box->visibility == CSS_VISIBILITY_COLLAPSE) visibility_str = "collapse";
-        SET_VAL("visibility", visibility_str);
-
-        const char *position_str = "static";
-        switch (box->position) {
-            case CSS_POSITION_RELATIVE: position_str = "relative"; break;
-            case CSS_POSITION_ABSOLUTE: position_str = "absolute"; break;
-            case CSS_POSITION_FIXED: position_str = "fixed"; break;
-            case CSS_POSITION_STICKY: position_str = "sticky"; break;
-            default: break;
-        }
-        SET_VAL("position", position_str);
-
-        snprintf(buf, sizeof(buf), "rgba(%d, %d, %d, %.3f)",
-                 (int)(box->color_r * 255.0 + 0.5),
-                 (int)(box->color_g * 255.0 + 0.5),
-                 (int)(box->color_b * 255.0 + 0.5),
-                 box->color_a);
-        SET_VAL("color", buf);
-
-        snprintf(buf, sizeof(buf), "rgba(%d, %d, %d, %.3f)",
-                 (int)(box->background_color_r * 255.0 + 0.5),
-                 (int)(box->background_color_g * 255.0 + 0.5),
-                 (int)(box->background_color_b * 255.0 + 0.5),
-                 box->background_color_a);
-        SET_VAL("background-color", buf);
-
-        /* CSS custom properties are stored separately; mirror them too. */
-        if (ctx->custom_props) {
-            const CssCustomProps *cp = ctx->custom_props[i];
-            for (int j = 0; cp && j < cp->count; j++) {
-                SET_VAL(cp->props[j].name, cp->props[j].value);
-            }
-        }
-
-#undef SET_PX
-#undef SET_VAL
-    }
-}
-
 static void layout_flow_job(Job *j)
 {
     LayoutContext *ctx = (LayoutContext *)j->ctx;
@@ -9516,8 +9537,7 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
         ctx->boxes[i].flags |= LAYOUT_HAS_LAYOUT;
     }
 
-    layout_export_computed_geometry(ctx);
-    STAGE("export computed");
+    STAGE("layout flags");
 
     /* The box dump is written only when asked for: by the caller
      * (ctx->dump_path) or by CSS_DUMP=<path>. */

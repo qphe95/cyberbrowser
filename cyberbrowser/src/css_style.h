@@ -71,7 +71,7 @@ void css_styledoc_free(CssStyleDoc *sd);
  * changed read again; otherwise built afresh.  Owned by the cache (valid
  * until the next call); CYBER_STYLEDOC_VERIFY=1 checks it against a build. */
 const CssStyleDoc *css_styledoc_get(HtmlDocument *doc);
-typedef struct CssStyleDocStats { uint64_t reused, updated, built, elements_redone; } CssStyleDocStats;
+typedef struct CssStyleDocStats { uint64_t reused, updated, built, elements_redone, elements_copied; } CssStyleDocStats;
 void css_styledoc_stats(CssStyleDocStats *out);
 /* First node whose features differ, -1 when equal. */
 int css_styledoc_compare(const CssStyleDoc *a, const CssStyleDoc *b);
