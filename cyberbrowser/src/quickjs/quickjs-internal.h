@@ -256,6 +256,16 @@ static inline void js_varref_set_frame_ptr(GCHandle handle, JSStackFrame *val)
         p->frame_ref.frame_ptr = val;
 }
 
+/* Note that something outside the call chain refers to frame sf, so it is
+ * not reused when its call returns.  Only for a real frame: some callers
+ * pass a raw gc_deref() of an async function's state, which holds its frame
+ * further in (see js_trigger_lazy_function), and a write there corrupts it. */
+static inline void js_frame_mark_escaped(JSStackFrame *sf)
+{
+    if (sf && sf->self_handle != GC_HANDLE_NULL && js_frame_deref(sf->self_handle) == sf)
+        sf->escaped = 1;
+}
+
 /* was set_frame_ref(ptr, async, frame_handle = GC_HANDLE_NULL) */
 static inline void js_varref_set_frame_ref(GCHandle handle, JSStackFrame *ptr,
                                            uint8_t is_async, GCHandle frame_handle)
@@ -263,6 +273,7 @@ static inline void js_varref_set_frame_ref(GCHandle handle, JSStackFrame *ptr,
     JSVarRef *p = js_varref_ptr(handle);
     if (!p)
         return;
+    js_frame_mark_escaped(ptr);  /* the frame now outlives its call */
     p->is_async_frame = is_async;
     if (is_async)
         GC_SET(p->frame_ref.frame_handle, frame_handle);

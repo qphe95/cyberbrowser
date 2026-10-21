@@ -2061,7 +2061,39 @@ void JS_SetRuntimeInfo(JSRuntimeHandle rt, const char *s)
 static GCHandle g_c_frame_pool[C_FRAME_POOL_DEPTH];
 static size_t g_c_frame_pool_size[C_FRAME_POOL_DEPTH];
 static int g_c_frame_depth;
-static uint32_t g_c_frame_pool_epoch;  /* g_gc_epoch the pool belongs to */
+static uint32_t g_c_frame_pool_epoch;  /* g_gc_epoch the pools belong to */
+
+/* Bytecode function frames, the same way: one per depth of bytecode calls.
+ * A frame that escaped (a closure or var_ref took it) leaves the pool when
+ * its call returns and lives on as an ordinary GC object.  JS_CallInternal
+ * clears a pooled frame's references when its call returns, and
+ * JS_GCEnumerateEngineRoots marks the pool. */
+#define BC_FRAME_POOL_DEPTH 256
+static GCHandle g_bc_frame_pool[BC_FRAME_POOL_DEPTH];
+static size_t g_bc_frame_pool_size[BC_FRAME_POOL_DEPTH];
+static int g_bc_frame_depth;
+
+/* The call that got frame sf at call depth 'depth' returned (sf already
+ * off the chain).  A frame that escaped leaves the pool; one that did not
+ * stays, holding nothing. */
+static void js_bc_frame_release(JSStackFrame *sf, int depth)
+{
+    g_bc_frame_depth = depth;
+    if (depth >= BC_FRAME_POOL_DEPTH || g_bc_frame_pool[depth] != sf->self_handle)
+        return;
+    if (sf->escaped) {
+        g_bc_frame_pool[depth] = GC_HANDLE_NULL;
+        g_bc_frame_pool_size[depth] = 0;
+        return;
+    }
+    sf->cur_func = JS_UNDEFINED;
+    sf->prev_frame_handle = GC_HANDLE_NULL;
+    sf->bytecode_handle = GC_HANDLE_NULL;
+    sf->var_refs_handle = GC_HANDLE_NULL;
+    sf->arg_count = 0;
+    sf->var_count = 0;
+    sf->var_ref_count = 0;
+}
 
 /* Forget the pooled frames; their roots too while their heap is live. */
 static void js_c_frame_pool_clear(BOOL heap_live)
@@ -2073,6 +2105,9 @@ static void js_c_frame_pool_clear(BOOL heap_live)
         g_c_frame_pool_size[i] = 0;
     }
     g_c_frame_depth = 0;
+    memset(g_bc_frame_pool, 0, sizeof(g_bc_frame_pool));
+    memset(g_bc_frame_pool_size, 0, sizeof(g_bc_frame_pool_size));
+    g_bc_frame_depth = 0;
     g_c_frame_pool_epoch = g_gc_epoch;
 }
 
@@ -7690,6 +7725,11 @@ void JS_GCEnumerateEngineRoots(JSRuntimeHandle rt, JS_MarkFunc *mark_func)
 {
     GCValue exc = SAFE_GET_OR(rt, JSRuntimeHandle, current_exception, GC_UNDEFINED);
     JS_MarkValue(rt, exc, mark_func);
+    if (g_c_frame_pool_epoch == g_gc_epoch) {
+        for (int i = 0; i < BC_FRAME_POOL_DEPTH; i++)
+            if (g_bc_frame_pool[i] != GC_HANDLE_NULL)
+                mark_func(rt, g_bc_frame_pool[i]);
+    }
     GCHandle atoms = js_rt_atom_array_handle(rt);
     if (atoms != GC_HANDLE_NULL)
         mark_func(rt, atoms);
@@ -18999,6 +19039,7 @@ static GCValue js_closure2(JSContextHandle ctx, GCValue func_obj,
      * This is critical for factories that return closures (e.g., makeClosure(x)). */
     if (SAFE_GET_OR(b, JSFunctionBytecodeHandle, func_parse_state, 0) == JS_FUNC_LAZY && sf && sf->self_handle != GC_HANDLE_NULL) {
         SAFE_SET_HANDLE(p, JSObjectHandle, u.func.parent_frame_handle, sf->self_handle);
+        js_frame_mark_escaped(sf);
     }
     
     if (SAFE_GET_OR(b, JSFunctionBytecodeHandle, closure_var_count, 0)) {
@@ -19833,7 +19874,8 @@ static JSStackFrame *js_alloc_bytecode_frame(JSContextHandle ctx,
                                                GCValue **parg_buf,
                                                GCValue **pvar_buf,
                                                GCValue **pstack_buf,
-                                               JSVarRefHandle **pvar_refs)
+                                               JSVarRefHandle **pvar_refs,
+                                               int *ppool_depth)
 {
     size_t frame_size = sizeof(JSStackFrame);
     size_t args_size = sizeof(GCValue) * arg_count;
@@ -19841,16 +19883,40 @@ static JSStackFrame *js_alloc_bytecode_frame(JSContextHandle ctx,
     size_t stack_buf_size = sizeof(GCValue) * stack_size;
     size_t var_refs_size = sizeof(JSVarRefHandle) * var_ref_count;
     size_t total_size = frame_size + args_size + vars_size + stack_buf_size + var_refs_size;
-    
-    GCHandle handle = gc_alloc(total_size, JS_GC_OBJ_TYPE_STACK_FRAME);
+    int depth = g_bc_frame_depth;
+    BOOL reused = FALSE;
+    GCHandle handle;
+
+    /* A heap torn down by gc_cleanup() without JS_FreeRuntime. */
+    if (unlikely(g_c_frame_pool_epoch != g_gc_epoch)) {
+        js_c_frame_pool_clear(FALSE);
+        depth = 0;
+    }
+    if (depth < BC_FRAME_POOL_DEPTH && g_bc_frame_pool_size[depth] >= total_size) {
+        handle = g_bc_frame_pool[depth];
+        reused = TRUE;
+    } else {
+        handle = gc_alloc(total_size, JS_GC_OBJ_TYPE_STACK_FRAME);
+        if (handle && depth < BC_FRAME_POOL_DEPTH) {
+            g_bc_frame_pool[depth] = handle;
+            g_bc_frame_pool_size[depth] = total_size;
+        }
+    }
     if (!handle) {
         JS_ThrowOutOfMemory(ctx);
         return NULL;
     }
-    
+    *ppool_depth = depth;
+    g_bc_frame_depth = depth + 1;
+
     uint8_t *mem = (uint8_t *)gc_deref(handle);
     JSStackFrame *sf = (JSStackFrame *)mem;
     memset(sf, 0, sizeof(JSStackFrame));
+    /* The collector marks a running frame's whole operand stack, and a
+     * reused frame's holds the last call's values: they would keep dead
+     * objects alive.  (A new frame comes zeroed.) */
+    if (reused && stack_buf_size)
+        memset(mem + frame_size + args_size + vars_size, 0, stack_buf_size);
     GC_SET(sf->self_handle, handle);
     gc_set_heap_handle(&sf->bytecode_handle, SAFE_HANDLE(b));
     
@@ -19941,6 +20007,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
     GCHandle *sf_var_refs;  /* For frame's var_refs array (GCHandle*) */
     JSClassCall *call_func;
     JSRuntimeHandle rt2 = GC_HANDLE_NULL;
+    int pool_depth = -1;  /* call depth when sf came from g_bc_frame_pool */
 
 #define GC_INSTRUCTION_THRESHOLD 100
 
@@ -20133,7 +20200,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
     /* Allocate frame from GC heap instead of C stack */
     sf = js_alloc_bytecode_frame(caller_ctx, b, arg_allocated_size, SAFE_GET_OR(b, JSFunctionBytecodeHandle, var_count, 0),
                                  SAFE_GET_OR(b, JSFunctionBytecodeHandle, stack_size, 0), SAFE_GET_OR(b, JSFunctionBytecodeHandle, var_ref_count, 0),
-                                 &arg_buf, &var_buf, &stack_buf, &var_refs);
+                                 &arg_buf, &var_buf, &stack_buf, &var_refs, &pool_depth);
     if (!sf) {
         return JS_EXCEPTION;
     }
@@ -23036,6 +23103,11 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
          * Leaving it as the current frame made the next call link back to
          * it, turning the frame chain into a cycle. */
         js_rt_pop_stack_frame(rt, sf);
+        if (pool_depth >= 0) {
+            /* A suspended frame outlives the call. */
+            sf->escaped = 1;
+            js_bc_frame_release(sf, pool_depth);
+        }
         return ret_val;
     } else {
     done:
@@ -23044,6 +23116,8 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
          * Just unlink from the frame chain - GC will collect when no longer needed.
          */
         js_rt_pop_stack_frame(rt, sf);
+        if (pool_depth >= 0)
+            js_bc_frame_release(sf, pool_depth);
         return ret_val;
     }
 }
@@ -41103,6 +41177,11 @@ static GCValue js_trigger_lazy_function(JSContextHandle ctx, GCValue lazy_func,
                 /* Direct bytecode - wrap in closure using stored parent frame */
                 JSStackFrame *parent_sf = NULL;
                 if (SAFE_GET_OR(p, JSObjectHandle, u.func.parent_frame_handle, GC_HANDLE_NULL) != GC_HANDLE_NULL) {
+                    /* XXX gc_deref is wrong when the parent is an async
+                     * function (its frame sits inside its state, which
+                     * js_frame_deref knows), but with the right frame the
+                     * closure built here breaks YouTube's modern bundle
+                     * further: that needs its own fix. */
                     parent_sf = (JSStackFrame *)gc_deref(SAFE_GET_OR(p, JSObjectHandle, u.func.parent_frame_handle, GC_HANDLE_NULL));
                 }
                 new_func_obj = js_closure(ctx, new_func_obj, 

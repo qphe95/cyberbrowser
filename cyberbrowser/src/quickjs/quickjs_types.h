@@ -468,6 +468,11 @@ typedef struct JSStackFrame {
     /* var_refs grown after the frame was created (lazy parsing) live in a
      * separate array; GC_HANDLE_NULL when they are inline at var_refs_offset. */
     GCHandle var_refs_handle;
+
+    /* Set when something outside the call chain took a reference to the
+     * frame (a var_ref, a lazy closure's parent frame): it then outlives
+     * its call and is not reused for the next one. */
+    uint8_t escaped;
 } JSStackFrame;
 
 /* ============================================================================

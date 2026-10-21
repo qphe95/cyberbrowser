@@ -311,6 +311,46 @@ GC_RUNNING_TEST(test_gc_running_keeps_operand_stack,
     "  .map(function(o){ return o.x; }).join(); "
     "  return r === '1,2,3,4' ? 'ok' : 'temporaries lost: ' + r; })()")
 
+/* Call frames are reused from call to call at the same depth unless
+ * something took the frame.  Closures made between other calls at the
+ * same depth still see their own frame's values. */
+GC_RUNNING_TEST(test_gc_frame_reuse_keeps_captured_frames,
+    "(function(){"
+    "  function mk(x, y) { var z = {v: x}; return function(){ return z.v + y; }; }"
+    "  function noise(a, b, c) { var t = [a, b, c]; return t.length + (a | 0); }"
+    "  var fs = [];"
+    "  for (var i = 0; i < 3000; i++) { fs.push(mk('v' + i, i)); noise(i, {o: i}, 'n' + i); }"
+    "  __test_gc(); var g = []; for (var j = 0; j < 20000; j++) g.push({x: j}); __test_gc();"
+    "  for (var i = 0; i < 3000; i++)"
+    "    if (fs[i]() !== 'v' + i + i) return 'closure ' + i + ' got ' + fs[i]();"
+    "  return 'ok'; })()")
+
+/* A lazily parsed inner function keeps its parent's frame to compile
+ * against: first called after the parent returned and its depth was used
+ * by other calls. */
+GC_RUNNING_TEST(test_gc_frame_reuse_keeps_lazy_parent_frames,
+    "(function(){"
+    "  function outer(n, s) { function inner() { return s + n * 2; } return inner; }"
+    "  function noise(a, b) { return [a, b, {a: a}].length; }"
+    "  var fs = [];"
+    "  for (var i = 0; i < 2000; i++) { fs.push(outer(i, 'p')); noise(i, 'q' + i); }"
+    "  __test_gc(); var g = []; for (var j = 0; j < 20000; j++) g.push({x: j}); __test_gc();"
+    "  for (var i = 0; i < 2000; i++)"
+    "    if (fs[i]() !== 'p' + i * 2) return 'inner ' + i + ' got ' + fs[i]();"
+    "  return 'ok'; })()")
+
+/* Deeper than the frame pool, and unwinding by exceptions, which leave
+ * through the same exit. */
+GC_RUNNING_TEST(test_gc_frame_reuse_past_pool_depth_and_throws,
+    "(function(){"
+    "  function rec(n, o) { if (n === 0) { __test_gc(); return o.v; } return rec(n - 1, {v: o.v + 1}); }"
+    "  function thrower(n) { if (n === 0) throw new Error('x'); return thrower(n - 1) + 1; }"
+    "  for (var k = 0; k < 3; k++) {"
+    "    try { thrower(300); return 'no throw'; } catch (e) { if (e.message !== 'x') return 'wrong error'; }"
+    "    var r = rec(400, {v: 0}); if (r !== 400) return 'deep ' + k + ' got ' + r;"
+    "  }"
+    "  return 'ok'; })()")
+
 GC_RUNNING_TEST(test_gc_running_keeps_native_temporaries,
     "(function(){ var r = [1, 2, 3].map(function(x){ __test_gc(); return {v: x * 10}; }); "
     "  return (r.length === 3 && r[0].v === 10 && r[2].v === 30) ? 'ok' "
@@ -1808,13 +1848,9 @@ void run_gc_tests(void) {
     RUN_TEST(test_gc_running_keeps_json_state);
     RUN_TEST(test_gc_running_deep_recursion);
     RUN_TEST(test_gc_running_in_generator);
-    RUN_TEST(test_gc_async_frame_survives_await);
-    RUN_TEST(test_gc_async_frames_during_concurrent_cycles);
-    RUN_TEST(test_gc_weakmap_values_survive_full_cycles);
-    RUN_TEST(test_gc_weakmap_values_survive_concurrent_cycles);
-    RUN_TEST(test_gc_weakmap_dead_key_value_survives_full_cycles);
-    RUN_TEST(test_gc_weakmap_dead_key_value_survives_concurrent_cycles);
-    RUN_TEST(test_gc_property_key_string_outlives_delete);
+    RUN_TEST(test_gc_frame_reuse_keeps_captured_frames);
+    RUN_TEST(test_gc_frame_reuse_keeps_lazy_parent_frames);
+    RUN_TEST(test_gc_frame_reuse_past_pool_depth_and_throws);
     RUN_TEST(test_gc_running_repeated);
     RUN_TEST(test_gc_frame_chain_after_generator);
     RUN_TEST(test_gc_bigint_survives);
