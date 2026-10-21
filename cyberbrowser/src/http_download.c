@@ -1183,7 +1183,14 @@ retry_connection:
     
     size_t delimiter_len = 4;
     if (status < 200 || status >= 300) {
-        snprintf(err, errLen, "HTTP error %d", status);
+        /* Rate limits name when to come back (seconds form): callers that
+         * retry read it from the message ("retry-after N"). */
+        char *ra = (status == 429 || status == 503)
+                       ? find_response_header(outBuffer->data, outBuffer->data, header_end, "retry-after:")
+                       : NULL;
+        int ra_s = ra && *ra >= '0' && *ra <= '9' ? atoi(ra) : -1;
+        if (ra_s >= 0) snprintf(err, errLen, "HTTP error %d (retry-after %d)", status, ra_s);
+        else snprintf(err, errLen, "HTTP error %d", status);
         free(outBuffer->data);
         free(outBuffer->headers);
         outBuffer->headers = NULL;

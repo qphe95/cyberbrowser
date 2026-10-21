@@ -37,6 +37,8 @@ bool image_cache_process_pending(ImageCache *cache);
 /* Block until all pending async loads have completed or errored, then process
  * them.  Useful for tests and final cleanup before shutdown. */
 void image_cache_wait_pending(ImageCache *cache);
+/* The same, giving up after timeout_ms; true when nothing is pending. */
+bool image_cache_wait_pending_ms(ImageCache *cache, int timeout_ms);
 
 /* Returns true while at least one async load has not yet completed or errored. */
 bool image_cache_has_pending(ImageCache *cache);

@@ -501,16 +501,22 @@ static bool http_fetch(const char *url, uint8_t **out, size_t *len)
     char err[256] = { 0 };
     bool got = false;
     /* CDNs (notably upload.wikimedia.org) answer bursts with HTTP 429:
-     * retry with backoff. */
+     * retry when the response says to (Retry-After, capped), else with
+     * backoff.  Retrying sooner than asked only draws another 429. */
+    unsigned int delay_ms = 0;
     for (int attempt = 0; attempt < 4 && !got; attempt++) {
         if (attempt > 0) {
-            platform_sleep_ms((unsigned int)(400 * attempt * attempt));
+            platform_sleep_ms(delay_ms);
             http_free_buffer(&buf);
             err[0] = '\0';
         }
         CP_SCOPE_CAT("image-download", "img");
         got = http_get_to_memory(url, &buf, err, sizeof(err));
         if (!got && strstr(err, "429") == NULL) break;
+        const char *ra = strstr(err, "retry-after ");
+        int ra_s = ra ? atoi(ra + 12) : -1;
+        delay_ms = ra_s >= 0 ? (unsigned int)(ra_s > 5 ? 5000 : (ra_s ? ra_s * 1000 : 200))
+                             : (unsigned int)(400 * (attempt + 1) * (attempt + 1));
     }
     if (!got || !buf.data || buf.size == 0) {
         LOG_ERROR("Failed to download image %s: %s", url, err);
@@ -944,6 +950,22 @@ void image_cache_wait_pending(ImageCache *c)
     while (c->busy > 0) pthread_cond_wait(&c->progress, &c->mu);
     pthread_mutex_unlock(&c->mu);
     image_cache_process_pending(c);
+}
+
+bool image_cache_wait_pending_ms(ImageCache *c, int timeout_ms)
+{
+    if (!c) return true;
+    unsigned long long deadline = platform_get_time_ms() + (unsigned long long)(timeout_ms > 0 ? timeout_ms : 0);
+    pthread_mutex_lock(&c->mu);
+    while (c->busy > 0) {
+        unsigned long long now = platform_get_time_ms();
+        if (now >= deadline) break;
+        cond_wait_ms(&c->progress, &c->mu, (int)(deadline - now));
+    }
+    bool done = c->busy == 0;
+    pthread_mutex_unlock(&c->mu);
+    image_cache_process_pending(c);
+    return done;
 }
 
 bool image_cache_wait_progress(ImageCache *c, int timeout_ms)

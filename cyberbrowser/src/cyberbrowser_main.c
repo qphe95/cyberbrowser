@@ -992,8 +992,12 @@ static bool render_document_to_jpg(HtmlDocument *doc, ImageCache *image_cache,
     }
     if (dl_ok) {
         /* Images first requested while building the list (mask images,
-         * backgrounds) finish decoding before the raster pass reads them. */
-        image_cache_wait_pending(image_cache);
+         * backgrounds) finish decoding before the raster pass reads them,
+         * within a bound: a slow download (a rate-limited CDN) must not
+         * hold the screenshot.  One that arrives later requests a layout
+         * (on_image_progress), and the settle loop paints again. */
+        if (!image_cache_wait_pending_ms(image_cache, 1500))
+            printf("Images still loading; painting without them for now\n");
         printf("Display list commands: %d\n", dl.count);
         printf("Rendering screenshot to %s ...\n", out_path);
         bool raster_ok = false;
