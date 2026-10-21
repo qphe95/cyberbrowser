@@ -79,6 +79,10 @@ typedef struct CssCustomProps {
     CssCustomProp *props;
     int count;
     int capacity;
+    /* Open-addressing index over props (position + 1), index_cap a power of
+     * two at least twice capacity; NULL for maps without one. */
+    uint32_t *index;
+    uint32_t index_cap;
 } CssCustomProps;
 
 
@@ -2323,13 +2327,60 @@ static void layout_apply_inline_style(LayoutBox *box, HtmlNode *node,
 
 /* Custom-property maps are immutable once a node's style is computed: a node
  * that sets no custom property shares its parent's map (copy-on-write). */
+static uint32_t cp_hash(const char *s)
+{
+    uint32_t h = 2166136261u;
+    for (; *s; s++) { h ^= (unsigned char)*s; h *= 16777619u; }
+    return h;
+}
+
+/* Position of `name` in m, or -1. */
+static int cp_find(const CssCustomProps *m, const char *name)
+{
+    if (!m->index) {
+        for (int i = 0; i < m->count; i++)
+            if (strcmp(m->props[i].name, name) == 0) return i;
+        return -1;
+    }
+    uint32_t mask = m->index_cap - 1, h = cp_hash(name) & mask;
+    for (;;) {
+        uint32_t v = m->index[h];
+        if (!v) return -1;
+        if (strcmp(m->props[v - 1].name, name) == 0) return (int)v - 1;
+        h = (h + 1) & mask;
+    }
+}
+
+static void cp_index_insert(CssCustomProps *m, int pos)
+{
+    uint32_t mask = m->index_cap - 1, h = cp_hash(m->props[pos].name) & mask;
+    while (m->index[h]) h = (h + 1) & mask;
+    m->index[h] = (uint32_t)pos + 1;
+}
+
+/* Give m an index sized for its capacity (maps of a few entries scan). */
+static void cp_index_build(FrameArena *a, CssCustomProps *m, const CssCustomProps *base)
+{
+    m->index = NULL;
+    m->index_cap = 0;
+    if (m->capacity < 16) return;
+    uint32_t cap = 32;
+    while (cap < 2u * (uint32_t)m->capacity) cap *= 2;
+    m->index = (uint32_t *)frame_arena_alloc(a, cap * sizeof(uint32_t));
+    m->index_cap = cap;
+    if (base && base->index && base->index_cap == cap && base->count == m->count) {
+        memcpy(m->index, base->index, cap * sizeof(uint32_t));   /* same entries, same slots */
+        return;
+    }
+    memset(m->index, 0, cap * sizeof(uint32_t));
+    for (int i = 0; i < m->count; i++) cp_index_insert(m, i);
+}
+
 static const char* css_custom_props_get(const CssCustomProps *props, const char *name)
 {
     if (!props || !name) return NULL;
-    for (int i = 0; i < props->count; i++) {
-        if (strcmp(props->props[i].name, name) == 0) return props->props[i].value;
-    }
-    return NULL;
+    int i = cp_find(props, name);
+    return i >= 0 ? props->props[i].value : NULL;
 }
 
 /* New map holding `base`'s entries with room for `extra` more. */
@@ -2341,21 +2392,22 @@ static CssCustomProps *css_custom_props_fork(FrameArena *a, const CssCustomProps
     if (n) memcpy(m->props, base->props, (size_t)n * sizeof(CssCustomProp));
     m->count = n;
     m->capacity = n + extra;
+    cp_index_build(a, m, base);
     return m;
 }
 
 /* Replace or append (legacy css_custom_props_set semantics). */
 static void css_custom_props_put(FrameArena *a, CssCustomProps *m, const char *name, const char *value)
 {
-    for (int i = 0; i < m->count; i++) {
-        if (strcmp(m->props[i].name, name) == 0) {
-            m->props[i].value = frame_arena_strdup(a, value);
-            return;
-        }
+    int i = cp_find(m, name);
+    if (i >= 0) {
+        m->props[i].value = frame_arena_strdup(a, value);
+        return;
     }
     if (m->count >= m->capacity) return;   /* capacity = number of custom declarations */
     m->props[m->count].name = frame_arena_strdup(a, name);
     m->props[m->count].value = frame_arena_strdup(a, value);
+    if (m->index) cp_index_insert(m, m->count);
     m->count++;
 }
 
@@ -2868,7 +2920,9 @@ typedef struct StyleSetEntry {
     double vw, vh;
     CssStyleSet *set;
     uint64_t last_use;
+    uint64_t gen;               /* build number: identifies this set for the style cache */
 } StyleSetEntry;
+static uint64_t g_styleset_gen;
 
 #define STYLESET_CACHE_MAX 4
 static StyleSetEntry g_styleset_cache[STYLESET_CACHE_MAX];
@@ -2885,9 +2939,11 @@ static void styleset_cache_drop(int i)
 
 /* Returns the compiled set for the list; *owned is true when the caller must
  * free it (lists with uncached sheets are compiled per layout). */
-static CssStyleSet *layout_styleset_get(LayoutStyleSheetList *list, double vw, double vh, bool *owned)
+static CssStyleSet *layout_styleset_get(LayoutStyleSheetList *list, double vw, double vh, bool *owned,
+                                       uint64_t *gen)
 {
     *owned = false;
+    *gen = 0;
     if (!list->all_cached) {
         *owned = true;
         return css_styleset_build(list->sheets, list->count, vw, vh);
@@ -2897,6 +2953,7 @@ static CssStyleSet *layout_styleset_get(LayoutStyleSheetList *list, double vw, d
         if (!c->set || c->n != list->count || c->vw != vw || c->vh != vh) continue;
         if (memcmp(c->sheets, list->entries, (size_t)list->count * sizeof(SheetEntry *)) != 0) continue;
         c->last_use = g_layout_clock;
+        *gen = c->gen;
         return c->set;
     }
     int victim = 0;
@@ -2914,6 +2971,8 @@ static CssStyleSet *layout_styleset_get(LayoutStyleSheetList *list, double vw, d
     c->vh = vh;
     c->set = css_styleset_build(list->sheets, list->count, vw, vh);
     c->last_use = g_layout_clock;
+    c->gen = ++g_styleset_gen;
+    *gen = c->gen;
     return c->set;
 }
 
@@ -3434,7 +3493,641 @@ typedef struct StylePass {
     int reval_words;
     StyleThread *threads;       /* job_thread_count() + 1 (last: outside the pool) */
     int nthreads;
+    /* Incremental restyle (see StyleCache): per layout index, the cache entry
+     * of the same element (or NULL), whether its key still matches, whether
+     * it must be recomputed regardless, and whether its computed style ended
+     * up different from the cached one (children then recompute). */
+    bool inc;
+    bool verify;
+    const struct StyleCacheEntry **cached;
+    unsigned char *key_ok;
+    unsigned char *force;
+    unsigned char *out_changed;
+    uint64_t *entry_key;        /* per layout index: the element's key (0 = not an element) */
+    _Atomic uint32_t reused, recomputed, verify_mismatches, verify_reusable;
+    _Atomic uint32_t why[5];    /* CSS_LOG=2: recompute reasons (no entry, key, ancestor/sibling, :has, parent) */
 } StylePass;
+
+/* ---- Incremental restyle ----
+ *
+ * Forced layouts (scripts reading geometry) restyle the whole document, yet
+ * between two of them scripts usually touch a handful of elements.  The
+ * style cache keeps every element's post-cascade box from the last style
+ * pass, keyed by its node-store id, together with a key over what selector
+ * matching can see of the element itself: tag, attributes (inline styles
+ * included), parent, position among element siblings, its neighbours and
+ * its child count.  An element reuses its cached box when the style set,
+ * viewport and base URL are the same, its key is unchanged, no ancestor's
+ * key changed (descendant selectors), no earlier sibling's key changed
+ * (sibling selectors), nothing in its subtree changed when the style set
+ * uses :has(), and its parent's computed style is unchanged (inheritance).
+ * A recomputed element whose result equals the cached one lets its children
+ * keep theirs.  Custom-property maps referenced by cached boxes are copied
+ * into the cache's own arena with interned strings. */
+
+typedef struct StyleCacheEntry {
+    NodeId id;
+    uint64_t key;
+    const CssCustomProps *props;
+    unsigned char has_after;
+    char after[256];
+    LayoutBox box;
+} StyleCacheEntry;
+
+typedef struct StyleCache {
+    uint64_t global;            /* style set generation, viewport, base URL (0 = empty) */
+    bool has_has;               /* the style set uses :has() */
+    StyleCacheEntry *e;
+    int n, cap;
+    int *index;                 /* open addressing: id -> entry + 1 */
+    int index_cap;
+    FrameArena arena;           /* custom-property maps of cached entries */
+    FrameArena retired;         /* the previous arena, kept one generation */
+} StyleCache;
+
+static StyleCache g_sc;
+
+static const StyleCacheEntry *style_cache_find(NodeId id)
+{
+    if (!id || !g_sc.index_cap) return NULL;
+    uint32_t h = (id * 2654435761u) & (uint32_t)(g_sc.index_cap - 1);
+    for (;;) {
+        int v = g_sc.index[h];
+        if (!v) return NULL;
+        if (g_sc.e[v - 1].id == id) return &g_sc.e[v - 1];
+        h = (h + 1) & (uint32_t)(g_sc.index_cap - 1);
+    }
+}
+
+static uint64_t style_mix(uint64_t h, const void *p, size_t n)
+{
+    const unsigned char *s = (const unsigned char *)p;
+    for (size_t i = 0; i < n; i++) { h ^= s[i]; h *= 1099511628211ull; }
+    return h;
+}
+
+static bool style_props_equal(const CssCustomProps *a, const CssCustomProps *b)
+{
+    if (a == b) return true;
+    if (!a || !b || a->count != b->count) return false;
+    for (int i = 0; i < a->count; i++) {
+        if (strcmp(a->props[i].name, b->props[i].name) != 0) return false;
+        if (strcmp(a->props[i].value ? a->props[i].value : "", b->props[i].value ? b->props[i].value : "") != 0)
+            return false;
+    }
+    return true;
+}
+
+/* What :has() rules can match as their subject: the tags, ids and classes
+ * of the compound selector carrying :has(...), or for a compound that names
+ * none (".list :has(> x)"), those of the compound before it, which then must
+ * match an ancestor; universal when neither names anything. Each key notes
+ * whether its compound has more selector after it (a flip then changes
+ * descendants' matching too, so they recompute with it). Sibling-relative
+ * arguments (:has(+ x), :has(~ x)) are noted for the caller. */
+typedef struct HasKeySet {
+    uint64_t *keys;             /* hashes of 't' tag, '#' id, '.' class */
+    unsigned char *deep;
+    int n, cap;
+} HasKeySet;
+
+typedef struct HasSubjects {
+    bool any;                   /* some rule uses :has() */
+    bool universal, universal_deep;
+    bool sibling_relative;
+    HasKeySet self, anc;
+} HasSubjects;
+
+static uint64_t has_key(char kind, const char *s, size_t n)
+{
+    uint64_t h = 1469598103934665603ull;
+    h = style_mix(h, &kind, 1);
+    for (size_t i = 0; i < n; i++) {
+        char c = (char)tolower((unsigned char)s[i]);
+        h = style_mix(h, &c, 1);
+    }
+    return h;
+}
+
+static void has_add(HasSubjects *hs, HasKeySet *ks, uint64_t k, bool deep)
+{
+    for (int i = 0; i < ks->n; i++)
+        if (ks->keys[i] == k) { if (deep) ks->deep[i] = 1; return; }
+    if (ks->n == ks->cap) {
+        int nc = ks->cap ? ks->cap * 2 : 32;
+        uint64_t *nk = (uint64_t *)realloc(ks->keys, (size_t)nc * sizeof(uint64_t));
+        if (nk) ks->keys = nk;
+        unsigned char *nd = (unsigned char *)realloc(ks->deep, (size_t)nc);
+        if (nd) ks->deep = nd;
+        if (!nk || !nd) { hs->universal = hs->universal_deep = true; return; }
+        ks->cap = nc;
+    }
+    ks->keys[ks->n] = k;
+    ks->deep[ks->n++] = deep;
+}
+
+static int has_lookup(const HasKeySet *ks, uint64_t k)
+{
+    for (int i = 0; i < ks->n; i++) if (ks->keys[i] == k) return ks->deep[i] ? 2 : 1;
+    return 0;
+}
+
+static void has_free(HasSubjects *hs)
+{
+    free(hs->self.keys);
+    free(hs->self.deep);
+    free(hs->anc.keys);
+    free(hs->anc.deep);
+    memset(hs, 0, sizeof(*hs));
+}
+
+/* Start of the compound selector ending at `end`. */
+static const char *has_compound_start(const char *sel, const char *end)
+{
+    const char *st = end;
+    int depth = 0;
+    while (st > sel) {
+        char c = st[-1];
+        if (c == ')' || c == ']') depth++;
+        else if (c == '(' || c == '[') { if (depth == 0) break; depth--; }
+        else if (depth == 0 && (c == ' ' || c == '>' || c == '+' || c == '~' || c == ',')) break;
+        st--;
+    }
+    return st;
+}
+
+/* Adds the tag, ids and classes of compound [st, end) to `ks`; false when
+ * it names none (or has escapes this does not decode). */
+static bool has_compound_keys(HasSubjects *hs, HasKeySet *ks, const char *st, const char *end, bool deep)
+{
+    for (const char *q = st; q < end; q++) if (*q == '\\') return false;
+    bool named = false;
+    const char *q = st;
+    if (q < end && (isalpha((unsigned char)*q) || *q == '-' || *q == '_')) {
+        const char *e = q;
+        while (e < end && (isalnum((unsigned char)*e) || *e == '-' || *e == '_')) e++;
+        has_add(hs, ks, has_key('t', q, (size_t)(e - q)), deep);
+        named = true;
+        q = e;
+    }
+    while (q < end) {
+        if (*q == '[' || *q == '(') {
+            /* Attribute values and pseudo-class arguments say nothing
+             * about the subject's own class or id. */
+            int d = 0;
+            for (; q < end; q++) {
+                if (*q == '[' || *q == '(') d++;
+                else if ((*q == ']' || *q == ')') && --d == 0) break;
+            }
+            q++;
+        } else if (*q == '.' || *q == '#') {
+            char kind = *q++;
+            const char *e = q;
+            while (e < end && (isalnum((unsigned char)*e) || *e == '-' || *e == '_')) e++;
+            if (e > q) { has_add(hs, ks, has_key(kind, q, (size_t)(e - q)), deep); named = true; }
+            q = e;
+        } else {
+            q++;
+        }
+    }
+    return named;
+}
+
+static void has_scan_selector(HasSubjects *hs, const char *sel)
+{
+    for (const char *p = strstr(sel, ":has("); p; p = strstr(p + 5, ":has(")) {
+        hs->any = true;
+        const char *arg = p + 5;
+        while (*arg == ' ') arg++;
+        if (*arg == '+' || *arg == '~') hs->sibling_relative = true;
+        /* After the argument: a combinator before the selector ends means
+         * the :has() compound is not the rightmost one. */
+        bool deep = false;
+        {
+            const char *e = p + 4;
+            int d = 0;
+            for (; *e; e++) {
+                if (*e == '(') d++;
+                else if (*e == ')' && --d == 0) { e++; break; }
+            }
+            int outer = 0;
+            for (; *e; e++) {
+                char c = *e;
+                if (c == '(') d++;
+                else if (c == ')') { if (d > 0) d--; else outer++; }
+                else if (c == ',' && d == 0 && outer == 0) break;
+                else if (d == 0 && (c == '>' || c == '+' || c == '~')) { deep = true; break; }
+                else if (d == 0 && c == ' ') {
+                    const char *t = e;
+                    while (*t == ' ') t++;
+                    if (*t && *t != ',' && *t != ')' && *t != '{') { deep = true; break; }
+                }
+            }
+        }
+        /* The compound carrying :has(, walking out of :not( / :is( /
+         * :where( when :has() is all their argument starts with. */
+        const char *end = p;
+        const char *st = has_compound_start(sel, end);
+        bool named = has_compound_keys(hs, &hs->self, st, end, deep);
+        while (!named && st > sel && st[-1] == '(') {
+            const char *name = st - 1;
+            static const char *const outs[] = { ":not", ":is", ":where", ":matches", ":-webkit-any" };
+            const char *colon = NULL;
+            for (size_t i = 0; i < sizeof(outs) / sizeof(outs[0]); i++) {
+                size_t l = strlen(outs[i]);
+                if ((size_t)(name - sel) >= l && strncasecmp(name - l, outs[i], l) == 0) { colon = name - l; break; }
+            }
+            if (!colon) break;
+            end = colon;
+            st = has_compound_start(sel, end);
+            named = has_compound_keys(hs, &hs->self, st, end, deep);
+        }
+        if (!named && st > sel) {
+            /* ".list :has(...)", ".list > :has(...)": an ancestor of the
+             * subject must match the compound before. */
+            const char *c = st;
+            while (c > sel && c[-1] == ' ') c--;
+            if (c > sel && c[-1] == '>') { c--; while (c > sel && c[-1] == ' ') c--; }
+            if (c < st && c > sel && c[-1] != ',' && c[-1] != '+' && c[-1] != '~' && c[-1] != '(') {
+                const char *ast = has_compound_start(sel, c);
+                named = has_compound_keys(hs, &hs->anc, ast, c, deep);
+            }
+        }
+        if (!named) {
+            if (g_css_log > 1) fprintf(stderr, "[css] :has() universal%s: %.100s\n", deep ? " deep" : "", st);
+            hs->universal = true;
+            if (deep) hs->universal_deep = true;
+        }
+    }
+}
+
+static int has_match_keys(const HasKeySet *ks, const HtmlNode *hn)
+{
+    int r = 0;
+    if (hn->tag_name) r = has_lookup(ks, has_key('t', hn->tag_name, strlen(hn->tag_name)));
+    const char *id = layout_node_attribute((HtmlNode *)hn, "id");
+    if (r < 2 && id && id[0]) { int m = has_lookup(ks, has_key('#', id, strlen(id))); if (m > r) r = m; }
+    const char *cls = layout_node_attribute((HtmlNode *)hn, "class");
+    for (const char *c = cls; c && *c && r < 2;) {
+        while (*c == ' ' || *c == '\t' || *c == '\n') c++;
+        const char *e = c;
+        while (*e && *e != ' ' && *e != '\t' && *e != '\n') e++;
+        if (e > c) { int m = has_lookup(ks, has_key('.', c, (size_t)(e - c))); if (m > r) r = m; }
+        c = e;
+    }
+    return r;
+}
+
+/* Could layout node `idx` be the subject of some :has() rule? 0: no, 1: yes,
+ * 2: yes, and descendants' matching depends on it. */
+static int has_may_match(const HasSubjects *hs, LayoutContext *ctx, int idx)
+{
+    if (hs->universal_deep) return 2;
+    HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+    if (!hn) return 0;
+    int r = hs->universal ? 1 : 0;
+    if (hs->self.n) { int m = has_match_keys(&hs->self, hn); if (m > r) r = m; }
+    if (hs->anc.n && r < 2) {
+        for (int a = ctx->tree.nodes[idx].parent_idx; a >= 0 && r < 2; a = ctx->tree.nodes[a].parent_idx) {
+            HtmlNode *an = layout_node_dom(ctx, ctx->tree.nodes[a].dom_node_idx);
+            if (!an || an->type != HTML_NODE_ELEMENT) continue;
+            int m = has_match_keys(&hs->anc, an);
+            if (m > r) r = m;
+        }
+    }
+    return r;
+}
+
+/* Element keys and the reuse flags for every layout node (serial, before
+ * the parallel style pass). */
+static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects *has)
+{
+    LayoutContext *ctx = P->ctx;
+    int n = ctx->tree.count;
+    P->cached = (const StyleCacheEntry **)calloc((size_t)n + 1, sizeof(*P->cached));
+    P->key_ok = (unsigned char *)calloc((size_t)n + 1, 1);
+    P->force = (unsigned char *)calloc((size_t)n + 1, 1);
+    g_sc.has_has = has && has->any;
+    P->out_changed = (unsigned char *)calloc((size_t)n + 1, 1);
+    uint64_t *key = (uint64_t *)calloc((size_t)n + 1, sizeof(uint64_t));
+    unsigned char *changed = (unsigned char *)calloc((size_t)n + 1, 1);
+    if (!P->cached || !P->key_ok || !P->force || !P->out_changed || !key || !changed) {
+        P->inc = false;
+        free(key);
+        free(changed);
+        return;
+    }
+    P->entry_key = key;
+    bool usable = g_sc.global == global && g_sc.n > 0;
+
+    /* Keys: own tag and attributes, then structure from the parent's view. */
+    for (int idx = 0; idx < n; idx++) {
+        HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+        if (!hn || hn->type != HTML_NODE_ELEMENT) continue;
+        uint64_t h = 1469598103934665603ull;
+        if (hn->tag_name) h = style_mix(h, hn->tag_name, strlen(hn->tag_name) + 1);
+        for (HtmlAttribute *a = hn->attributes; a; a = a->next) {
+            if (a->name) h = style_mix(h, a->name, strlen(a->name) + 1);
+            if (a->value) h = style_mix(h, a->value, strlen(a->value) + 1);
+        }
+        key[idx] = h;
+    }
+    for (int idx = 0; idx < n; idx++) {
+        int kids = 0, elems = 0;
+        for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+            kids++;
+            if (key[c]) elems++;
+        }
+        int pos = 0;
+        NodeId prev = 0;
+        NodeId pid = 0;
+        HtmlNode *pn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+        if (pn) pid = pn->store_id;
+        for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+            if (!key[c]) continue;
+            NodeId next = 0;
+            for (int d = ctx->tree.nodes[c].next_sibling_idx; d >= 0; d = ctx->tree.nodes[d].next_sibling_idx) {
+                if (!key[d]) continue;
+                HtmlNode *dn = layout_node_dom(ctx, ctx->tree.nodes[d].dom_node_idx);
+                next = dn ? dn->store_id : 0;
+                break;
+            }
+            uint64_t s[6] = { (uint64_t)pid, (uint64_t)pos, (uint64_t)elems, (uint64_t)prev, (uint64_t)next, 0 };
+            HtmlNode *cn = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
+            int ckids = 0;
+            for (int g = ctx->tree.nodes[c].first_child_idx; g >= 0; g = ctx->tree.nodes[g].next_sibling_idx) ckids++;
+            s[5] = (uint64_t)ckids;
+            key[c] = style_mix(key[c], s, sizeof(s));
+            prev = cn ? cn->store_id : 0;
+            pos++;
+        }
+        (void)kids;
+    }
+    /* The root has no parent in the layout tree. */
+    for (int idx = 0; idx < n; idx++) {
+        if (!key[idx]) continue;
+        HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+        const StyleCacheEntry *e = (usable && hn) ? style_cache_find(hn->store_id) : NULL;
+        P->cached[idx] = e;
+        P->key_ok[idx] = e && e->key == key[idx];
+        changed[idx] = !P->key_ok[idx];
+    }
+    /* Forcing (2: recompute this element and its whole subtree): a changed
+     * earlier sibling (sibling selectors, also as a descendant's context),
+     * then down from changed or forced ancestors (descendant selectors).
+     * With :has(), a change anywhere below recomputes the element itself
+     * (1: self only). */
+    const int *pre = ctx->tree.preorder;
+    for (int idx = 0; idx < n; idx++) {
+        bool seen = false;
+        for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+            if (!key[c]) continue;
+            if (seen) P->force[c] = 2;
+            if (changed[c]) seen = true;
+        }
+    }
+    for (int pos = 0; pos < n; pos++) {
+        int idx = pre[pos];
+        int p = ctx->tree.nodes[idx].parent_idx;
+        if (p >= 0 && (changed[p] || P->force[p] == 2)) P->force[idx] = 2;
+    }
+    if (has && has->any) {
+        unsigned char *below = (unsigned char *)calloc((size_t)n + 1, 1);
+        if (below) {
+            for (int pos = n - 1; pos >= 0; pos--) {
+                int idx = pre[pos];
+                int p = ctx->tree.nodes[idx].parent_idx;
+                if (p >= 0 && (below[idx] || changed[idx])) below[p] = 1;
+            }
+            /* :has(+ x) / :has(~ x): a change in or under a later sibling
+             * can flip an earlier sibling too. */
+            if (has->sibling_relative) {
+                for (int idx = 0; idx < n; idx++) {
+                    int last = -1;
+                    for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx)
+                        if (key[c] && (below[c] || changed[c])) last = c;
+                    for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0 && c != last; c = ctx->tree.nodes[c].next_sibling_idx)
+                        if (key[c]) below[c] = 1;
+                }
+            }
+            /* Only elements some :has() rule could be about. */
+            for (int idx = 0; idx < n; idx++) {
+                if (!below[idx] || P->force[idx] || !key[idx]) continue;
+                int m = has_may_match(has, ctx, idx);
+                if (m) P->force[idx] = (unsigned char)m;
+            }
+            free(below);
+            /* Subtrees under elements :has() forced whole. */
+            for (int pos = 0; pos < n; pos++) {
+                int idx = pre[pos];
+                int p = ctx->tree.nodes[idx].parent_idx;
+                if (p >= 0 && P->force[p] == 2) P->force[idx] = 2;
+            }
+        }
+    }
+    free(changed);
+}
+
+typedef struct { const void *from; const CssCustomProps *to; } StylePropsRemap;
+
+/* `m` as a map the cache owns: maps of the previous cache stay as they are,
+ * others are copied once (interned strings) into the cache arena. */
+static const CssCustomProps *style_cache_own(const CssCustomProps *m, StylePropsRemap *tab, int cap)
+{
+    if (!m) return NULL;
+    uint32_t h = (uint32_t)(((uintptr_t)m >> 4) * 2654435761u) & (uint32_t)(cap - 1);
+    for (;;) {
+        if (!tab[h].from) break;
+        if (tab[h].from == m) return tab[h].to;
+        h = (h + 1) & (uint32_t)(cap - 1);
+    }
+    CssCustomProps *c = (CssCustomProps *)frame_arena_alloc(&g_sc.arena, sizeof(CssCustomProps));
+    c->count = m->count;
+    c->capacity = m->count;
+    c->props = (CssCustomProp *)frame_arena_alloc(&g_sc.arena, ((size_t)m->count + 1) * sizeof(CssCustomProp));
+    for (int i = 0; i < m->count; i++) {
+        const char *nm = m->props[i].name ? m->props[i].name : "";
+        const char *vl = m->props[i].value ? m->props[i].value : "";
+        c->props[i].name = (char *)layout_intern(nm, strlen(nm));
+        c->props[i].value = (char *)layout_intern(vl, strlen(vl));
+    }
+    cp_index_build(&g_sc.arena, c, NULL);
+    tab[h].from = m;
+    tab[h].to = c;
+    return c;
+}
+
+/* Remember this pass's post-cascade boxes for the next one. */
+static void style_cache_set(StyleCacheEntry *e, StylePass *P, int idx, const char *after,
+                            StylePropsRemap *tab, int cap)
+{
+    LayoutContext *ctx = P->ctx;
+    e->key = P->entry_key ? P->entry_key[idx] : 0;
+    e->props = style_cache_own(ctx->custom_props[idx], tab, cap);
+    e->has_after = after != NULL;
+    if (after) memcpy(e->after, after, sizeof(e->after));
+    else e->after[0] = '\0';
+    e->box = ctx->boxes[idx];
+}
+
+/* In-place form of style_cache_store for an unchanged global key: entries of
+ * reused elements (and of recomputed ones with the same key and result) stay
+ * as they are; false when out of memory (the caller rebuilds). */
+static bool style_cache_update(StylePass *P, const StyleGenAfter *gen, int gen_total, int fresh)
+{
+    LayoutContext *ctx = P->ctx;
+    int n = ctx->tree.count;
+    int need = g_sc.n + fresh;
+    if (need + 1 > g_sc.cap) {
+        int nc = g_sc.cap ? g_sc.cap : 64;
+        while (nc < need + 1) nc *= 2;
+        StyleCacheEntry *ne = (StyleCacheEntry *)realloc(g_sc.e, (size_t)nc * sizeof(StyleCacheEntry));
+        if (!ne) return false;
+        /* P->cached points into the old array. */
+        for (int idx = 0; idx < n; idx++)
+            if (P->cached[idx]) P->cached[idx] = ne + (P->cached[idx] - g_sc.e);
+        g_sc.e = ne;
+        g_sc.cap = nc;
+    }
+    if (2 * (need + 1) > g_sc.index_cap) {
+        int icap = g_sc.index_cap ? g_sc.index_cap : 64;
+        while (icap < 2 * (need + 1)) icap *= 2;
+        int *index = (int *)calloc((size_t)icap, sizeof(int));
+        if (!index) return false;
+        for (int k = 0; k < g_sc.n; k++) {
+            uint32_t h = (g_sc.e[k].id * 2654435761u) & (uint32_t)(icap - 1);
+            while (index[h]) h = (h + 1) & (uint32_t)(icap - 1);
+            index[h] = k + 1;
+        }
+        free(g_sc.index);
+        g_sc.index = index;
+        g_sc.index_cap = icap;
+    }
+    const char **after = (const char **)calloc((size_t)n + 1, sizeof(char *));
+    if (!after) return false;
+    for (int i = 0; i < gen_total; i++) after[gen[i].idx] = gen[i].text;
+    /* Remap table for maps not owned yet; owned ones map to themselves (only
+     * those of written entries are looked up, so seed lazily from them). */
+    int cap = 64;
+    while (cap < 4 * (fresh + 64)) cap *= 2;
+    StylePropsRemap *tab = NULL;
+    int written = 0;
+    for (int idx = 0; idx < n; idx++) {
+        HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+        if (!hn || hn->type != HTML_NODE_ELEMENT || !hn->store_id) continue;
+        StyleCacheEntry *e = (StyleCacheEntry *)P->cached[idx];
+        if (e && P->key_ok[idx] && !P->out_changed[idx] &&
+            e->has_after == (after[idx] != NULL) &&
+            (!after[idx] || strncmp(e->after, after[idx], sizeof(e->after)) == 0))
+            continue;
+        if (!e) {
+            e = &g_sc.e[g_sc.n];
+            e->id = hn->store_id;
+            uint32_t h = (e->id * 2654435761u) & (uint32_t)(g_sc.index_cap - 1);
+            while (g_sc.index[h]) h = (h + 1) & (uint32_t)(g_sc.index_cap - 1);
+            g_sc.index[h] = ++g_sc.n;
+        }
+        if (!tab) {
+            /* Every map this pass copied from the cache is already owned. */
+            int total = 0;
+            for (int i = 0; i < n; i++) if (ctx->custom_props[i]) total++;
+            while (cap < 4 * (total + 1)) cap *= 2;
+            tab = (StylePropsRemap *)calloc((size_t)cap, sizeof(*tab));
+            if (!tab) { free(after); g_sc.global = 0; return true; }
+            for (int i = 0; i < n; i++) {
+                const StyleCacheEntry *ce = P->cached[i];
+                if (!ce || !ce->props || ctx->custom_props[i] != ce->props) continue;
+                const CssCustomProps *m = ce->props;
+                uint32_t h = (uint32_t)(((uintptr_t)m >> 4) * 2654435761u) & (uint32_t)(cap - 1);
+                while (tab[h].from && tab[h].from != m) h = (h + 1) & (uint32_t)(cap - 1);
+                tab[h].from = m;
+                tab[h].to = m;
+            }
+        }
+        style_cache_set(e, P, idx, after[idx], tab, cap);
+        written++;
+    }
+    (void)written;
+    free(tab);
+    free(after);
+    return true;
+}
+
+static void style_cache_store(StylePass *P, uint64_t global, const StyleGenAfter *gen, int gen_total)
+{
+    LayoutContext *ctx = P->ctx;
+    int n = ctx->tree.count;
+    bool keep = g_sc.global == global && g_sc.arena.bytes < ((size_t)32 << 20);
+    if (!keep) {
+        frame_arena_reset(&g_sc.retired);
+        g_sc.retired = g_sc.arena;
+        memset(&g_sc.arena, 0, sizeof(g_sc.arena));
+    }
+    int count = 0, fresh = 0;
+    for (int idx = 0; idx < n; idx++) {
+        HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+        if (!hn || hn->type != HTML_NODE_ELEMENT || !hn->store_id) continue;
+        count++;
+        if (!P->cached[idx]) fresh++;
+    }
+    /* Same cache, few stale entries: update the entries of recomputed
+     * elements in place and append new ones. */
+    if (keep && g_sc.n > 0 && g_sc.n + fresh <= 2 * count + 256 &&
+        style_cache_update(P, gen, gen_total, fresh))
+        return;
+    int cap = 64;
+    while (cap < 4 * (count + g_sc.n + 1)) cap *= 2;
+    StylePropsRemap *tab = (StylePropsRemap *)calloc((size_t)cap, sizeof(*tab));
+    const char **after = (const char **)calloc((size_t)n + 1, sizeof(char *));
+    StyleCacheEntry *ne = (StyleCacheEntry *)malloc(((size_t)count + 1) * sizeof(StyleCacheEntry));
+    int icap = 64;
+    while (icap < 2 * (count + 1)) icap *= 2;
+    int *index = (int *)calloc((size_t)icap, sizeof(int));
+    if (!tab || !after || !ne || !index) {
+        free(tab); free(after); free(ne); free(index);
+        g_sc.global = 0;
+        return;
+    }
+    /* Maps of the previous cache are already owned (their arena lives on). */
+    if (keep) {
+        for (int i = 0; i < g_sc.n; i++) {
+            const CssCustomProps *m = g_sc.e[i].props;
+            if (!m) continue;
+            uint32_t h = (uint32_t)(((uintptr_t)m >> 4) * 2654435761u) & (uint32_t)(cap - 1);
+            while (tab[h].from && tab[h].from != m) h = (h + 1) & (uint32_t)(cap - 1);
+            tab[h].from = m;
+            tab[h].to = m;
+        }
+    }
+    for (int i = 0; i < gen_total; i++) after[gen[i].idx] = gen[i].text;
+    int k = 0;
+    for (int idx = 0; idx < n; idx++) {
+        HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+        if (!hn || hn->type != HTML_NODE_ELEMENT || !hn->store_id) continue;
+        StyleCacheEntry *e = &ne[k];
+        e->id = hn->store_id;
+        e->key = P->entry_key ? P->entry_key[idx] : 0;
+        e->props = style_cache_own(ctx->custom_props[idx], tab, cap);
+        e->has_after = after[idx] != NULL;
+        if (after[idx]) memcpy(e->after, after[idx], sizeof(e->after));
+        else e->after[0] = '\0';
+        e->box = ctx->boxes[idx];
+        uint32_t h = (e->id * 2654435761u) & (uint32_t)(icap - 1);
+        while (index[h]) h = (h + 1) & (uint32_t)(icap - 1);
+        index[h] = k + 1;
+        k++;
+    }
+    free(tab);
+    free(after);
+    free(g_sc.e);
+    free(g_sc.index);
+    g_sc.e = ne;
+    g_sc.n = k;
+    g_sc.cap = count + 1;
+    g_sc.index = index;
+    g_sc.index_cap = icap;
+    g_sc.global = global;
+}
 
 static StyleThread *style_thread(StylePass *P)
 {
@@ -3607,6 +4300,32 @@ static bool layout_apply_wide_keyword(LayoutBox *box, const LayoutBox *parent,
     return true;
 }
 
+/* After computing an element's style: does it differ from the cached one
+ * (its children then recompute)?  CYBER_STYLE_VERIFY=1 also reports
+ * elements whose reuse would have been wrong. */
+static void style_note_result(StylePass *P, int idx, const LayoutBox *box, const CssCustomProps *props,
+                              const StyleCacheEntry *ce, bool would_reuse, const HtmlNode *node)
+{
+    if (!P->inc) return;
+    bool same = ce && memcmp(box, &ce->box, sizeof(*box)) == 0 && style_props_equal(props, ce->props);
+    P->out_changed[idx] = !same;
+    atomic_fetch_add(&P->recomputed, 1);
+    if (P->verify && would_reuse) atomic_fetch_add(&P->verify_reusable, 1);
+    if (P->verify && would_reuse && !same) {
+        uint32_t k = atomic_fetch_add(&P->verify_mismatches, 1);
+        if (k < 20) {
+            size_t off = 0;
+            const unsigned char *a = (const unsigned char *)box, *b = (const unsigned char *)&ce->box;
+            while (off < sizeof(*box) && a[off] == b[off]) off++;
+            fprintf(stderr, "[style-verify] reuse would differ: <%s id=%s class=%.60s> first byte %zu%s\n",
+                    node && node->tag_name ? node->tag_name : "?",
+                    node ? (layout_node_attribute((HtmlNode *)node, "id") ? layout_node_attribute((HtmlNode *)node, "id") : "") : "",
+                    node ? (layout_node_attribute((HtmlNode *)node, "class") ? layout_node_attribute((HtmlNode *)node, "class") : "") : "",
+                    off, off >= sizeof(*box) ? " (custom properties)" : "");
+        }
+    }
+}
+
 static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
 {
     LayoutContext *ctx = P->ctx;
@@ -3624,8 +4343,35 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
     bool share_ok = false;
     bool bits_ready = false;
     int parent_cls = (p >= 0) ? P->cls[p] : -1;
+    const StyleCacheEntry *ce = P->inc ? P->cached[idx] : NULL;
+    bool can_reuse = ce && P->key_ok[idx] && !P->force[idx] && (p < 0 || !P->out_changed[p]);
+    if (P->inc && !can_reuse && g_css_log > 1 && node && node->type == HTML_NODE_ELEMENT) {
+        int why = !ce ? 0 : !P->key_ok[idx] ? 1 : P->force[idx] == 2 ? 2 : P->force[idx] == 1 ? 3 : 4;
+        atomic_fetch_add(&P->why[why], 1);
+    }
     if (node && node->type == HTML_NODE_ELEMENT) {
         css_style_bloom_enter(T->scratch, P->sd, po_array_parent(&ctx->doc->array, dom));
+
+        /* Incremental restyle: the cached box is this element's style. */
+        if (can_reuse && !P->verify) {
+            *box = ce->box;
+            ctx->custom_props[idx] = ce->props;
+            if (!parent && box->font_size > 0.0) g_unit_rem = box->font_size;
+            if (ce->has_after) {
+                if (T->gen_n == T->gen_cap) {
+                    T->gen_cap = T->gen_cap ? T->gen_cap * 2 : 16;
+                    T->gen = (StyleGenAfter *)realloc(T->gen, (size_t)T->gen_cap * sizeof(StyleGenAfter));
+                }
+                T->gen[T->gen_n].pos = pos;
+                T->gen[T->gen_n].idx = idx;
+                memcpy(T->gen[T->gen_n].text, ce->after, sizeof(ce->after));
+                T->gen_n++;
+            }
+            P->out_changed[idx] = 0;
+            atomic_fetch_add(&P->reused, 1);
+            css_style_bloom_push(T->scratch, P->sd, dom);
+            return;
+        }
 
         /* Style sharing: reuse the style of an element with equal features,
          * an equivalent parent style and equal revalidation results. */
@@ -3667,6 +4413,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
                 }
                 T->shared++;
                 css_style_bloom_push(T->scratch, P->sd, dom);
+                style_note_result(P, idx, box, ctx->custom_props[idx], ce, can_reuse, node);
                 return;
             }
             T->share_misses++;
@@ -3902,6 +4649,10 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
         e->has_after = share_has_after;
         if (share_has_after) memcpy(e->after, share_after, sizeof(e->after));
     }
+    if (node && node->type == HTML_NODE_ELEMENT)
+        style_note_result(P, idx, box, ctx->custom_props[idx], ce, can_reuse, node);
+    else if (P->inc)
+        P->out_changed[idx] = 1;
 }
 
 /* Style the subtree at preorder position `pos`; child subtrees larger than
@@ -3956,7 +4707,8 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
     const char *genv = getenv("CSS_GRAIN");
     P.grain = (genv && atoi(genv) > 0) ? atoi(genv) : 128;
     bool set_owned = false;
-    P.set = layout_styleset_get(&list, ctx->viewport_width, ctx->viewport_height, &set_owned);
+    uint64_t set_gen = 0;
+    P.set = layout_styleset_get(&list, ctx->viewport_width, ctx->viewport_height, &set_owned, &set_gen);
     STAGE("compile style set (cached)");
     P.sd = css_styledoc_build(ctx->doc);
     STAGE("element features");
@@ -3986,6 +4738,43 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
     free(size);
 
     STAGE("subtree extents");
+
+    /* Incremental restyle against the previous pass (CSS_INC=0: off). */
+    uint64_t sc_global = 0;
+    {
+        static int inc_env = -1, verify_env = -1;
+        if (inc_env < 0) { const char *e = getenv("CSS_INC"); inc_env = !(e && strcmp(e, "0") == 0); }
+        if (verify_env < 0) verify_env = cyber_getenv("CYBER_STYLE_VERIFY") ? 1 : 0;
+        if (inc_env && set_gen) {
+            sc_global = 1469598103934665603ull;
+            sc_global = style_mix(sc_global, &set_gen, sizeof(set_gen));
+            sc_global = style_mix(sc_global, &ctx->viewport_width, sizeof(ctx->viewport_width));
+            sc_global = style_mix(sc_global, &ctx->viewport_height, sizeof(ctx->viewport_height));
+            sc_global = style_mix(sc_global, ctx->base_url, strlen(ctx->base_url));
+            sc_global = style_mix(sc_global, &P.em_defer, sizeof(P.em_defer));
+            if (sc_global == 0) sc_global = 1;
+            static uint64_t has_gen;
+            static HasSubjects has;
+            if (has_gen != set_gen) {
+                has_free(&has);
+                for (int r = 0, nr = css_styleset_rule_count(P.set); r < nr; r++) {
+                    const CssRule *rule = css_styleset_rule(P.set, r);
+                    if (rule && rule->selector_text) has_scan_selector(&has, rule->selector_text);
+                }
+                has_gen = set_gen;
+                if (g_css_log > 0 && has.any)
+                    fprintf(stderr, "[css] :has() subjects: %d keys, %d ancestor keys%s%s%s\n", has.self.n, has.anc.n,
+                            has.universal ? ", universal" : "", has.universal_deep ? " (deep)" : "",
+                            has.sibling_relative ? ", sibling-relative" : "");
+            }
+            P.inc = true;
+            P.verify = verify_env;
+            style_cache_prepare(&P, sc_global, &has);
+            STAGE("restyle prepare");
+        } else if (verify_env) {
+            fprintf(stderr, "[css] restyle: full (%s)\n", !inc_env ? "CSS_INC=0" : "style set not cached");
+        }
+    }
     job_graph_run(job_new(style_root_job, NULL, &P, 0, 0));
     STAGE("style (parallel)");
 
@@ -4012,6 +4801,29 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
         }
     }
     qsort(gen, (size_t)gen_total, sizeof(StyleGenAfter), style_gen_cmp);
+    /* The cache keeps the boxes as the cascade left them (before generated
+     * content and blockification below). */
+    if (P.inc && P.entry_key) {
+        style_cache_store(&P, sc_global, gen, gen_total);
+        STAGE("restyle store");
+        if (g_css_log > 1)
+            fprintf(stderr, "[css] restyle why: noentry %u key %u forced %u has %u parent %u\n",
+                    (unsigned)P.why[0], (unsigned)P.why[1], (unsigned)P.why[2], (unsigned)P.why[3], (unsigned)P.why[4]);
+        if (g_css_log > 0 || P.verify)
+            fprintf(stderr, "[css] restyle: %u reused, %u recomputed%s",
+                    (unsigned)atomic_load(&P.reused), (unsigned)atomic_load(&P.recomputed),
+                    P.verify ? "" : "\n");
+        if (P.verify)
+            fprintf(stderr, ", %u reusable, %u reuse mismatches\n", (unsigned)atomic_load(&P.verify_reusable),
+                    (unsigned)atomic_load(&P.verify_mismatches));
+    } else if (!P.inc) {
+        g_sc.global = 0;
+    }
+    free(P.cached);
+    free(P.key_ok);
+    free(P.force);
+    free(P.out_changed);
+    free(P.entry_key);
     /* Realize the winning ::after strings (e.g. .hlist li::after " · "). */
     for (int i = 0; i < gen_total; i++) layout_inject_generated_after(ctx, gen[i].idx, gen[i].text);
     free(gen);
