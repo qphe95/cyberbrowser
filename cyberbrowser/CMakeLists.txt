@@ -97,6 +97,7 @@ set(BE_SOURCES
     src/lockfree_hash_table.c
     src/url_analyzer.c
     src/cyber_profile.c
+    src/cyber_sampler.c
     src/session_state.c
     src/tls_client.c
     src/http_download.c
@@ -384,7 +385,7 @@ if(BE_PLATFORM_MACOS)
     find_library(COREFOUNDATION_LIBRARY CoreFoundation)
     target_link_libraries(cyberbrowser_lib PRIVATE ${COREFOUNDATION_LIBRARY})
 elseif(BE_PLATFORM_WINDOWS)
-    target_link_libraries(cyberbrowser_lib PRIVATE ws2_32 crypt32 shell32 bcrypt synchronization)
+    target_link_libraries(cyberbrowser_lib PRIVATE ws2_32 crypt32 shell32 bcrypt synchronization winmm)
     if(MSVC)
         # Static-link MSVC runtime for a portable executable
         set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")

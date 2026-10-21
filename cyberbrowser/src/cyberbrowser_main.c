@@ -35,6 +35,7 @@
 #include "browser/image_api.h"
 #include "browser/layout_api.h"
 #include "cyber_profile.h"
+#include "cyber_sampler.h"
 #include "dom_store.h"
 
 /* stb_image_write implementation lives in cyber_profile.c (library side). */
@@ -433,7 +434,10 @@ static void print_body_snippet(HtmlDocument *doc) {
 /* Phase 3 event loop helpers                                                */
 /* ------------------------------------------------------------------------- */
 
-static bool pump_timers_and_jobs(JSContextHandle ctx) {
+/* One event-loop drain: due timers, scheduler tasks and promise jobs, again
+ * until nothing is due.  With `wait`, also wait (bounded) for timers due
+ * soon and for fetches in flight. */
+static bool pump_event_loop(JSContextHandle ctx, bool wait) {
     if (!SAFE_VALID(ctx)) return false;
     JSRuntimeHandle rt = JS_GetRuntime(ctx);
     bool did_work = false;
@@ -456,6 +460,7 @@ static bool pump_timers_and_jobs(JSContextHandle ctx) {
         }
         (void)ret;
         if (processed == 0 && sched == 0 && jobs == 0) {
+            if (!wait) break;
             /* Nothing immediately due.  Lifecycle callbacks (e.g. the monomer
              * "initialized" job set) are scheduled via setTimeout with a small
              * delay, and YouTube's app never reaches its "rendering" phase if
@@ -487,6 +492,20 @@ static bool pump_timers_and_jobs(JSContextHandle ctx) {
     }
     timer_set_idle_deadline(0);
     return did_work;
+}
+
+static bool pump_timers_and_jobs(JSContextHandle ctx) {
+    return pump_event_loop(ctx, true);
+}
+
+/* Between the boot steps (scripts, DOMContentLoaded/load, element upgrade)
+ * a browser does not hold the page for timers that are not due yet: they
+ * fire later, in the settle loop.  CYBER_PREBOOT_WAIT=1 waits for them
+ * here as well (the old behaviour). */
+static bool pump_due_work(JSContextHandle ctx) {
+    static int wait = -1;
+    if (wait < 0) wait = cyber_getenv("CYBER_PREBOOT_WAIT") ? 1 : 0;
+    return pump_event_loop(ctx, wait != 0);
 }
 
 static void dispatch_page_lifecycle_events(JSContextHandle ctx) {
@@ -1058,6 +1077,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     printf("platform_init ok\n");
+    cyber_sampler_start();
     if (!platform_http_init()) {
         printf("FATAL: platform_http_init() failed\n");
         platform_cleanup();
@@ -1272,7 +1292,7 @@ int main(int argc, char *argv[]) {
                 fprintf(stderr, "[SIG] hook eval ok\n");
             }
         }
-        pump_timers_and_jobs(g_ctx);
+        pump_due_work(g_ctx);
 
         /* Neutralise YouTube's error-logging paths before lifecycle timers fire.
          * The helper g.En("yt.logging.errors.log") creates empty objects along
@@ -1308,7 +1328,7 @@ int main(int argc, char *argv[]) {
         }
         {
             CP_SCOPE("pump-after-lifecycle");
-            pump_timers_and_jobs(g_ctx);
+            pump_due_work(g_ctx);
         }
 
         // Upgrade any custom elements that were defined during script execution.
@@ -1419,7 +1439,7 @@ int main(int argc, char *argv[]) {
                     "  } catch(e) { console.error('[CI] fire failed: ' + (e && e.message)); }"
                     "})();";
                 JS_Eval(g_ctx, fire_ci_js, strlen(fire_ci_js), "<fire_ci>", JS_EVAL_TYPE_GLOBAL);
-                pump_timers_and_jobs(g_ctx);
+                pump_due_work(g_ctx);
             }
             }
             }
@@ -1859,6 +1879,7 @@ int main(int argc, char *argv[]) {
     printf("\nStart page loaded successfully.\n");
 
     CP_END("load-page");
+    cyber_sampler_stop();
     if (cp_profile_enabled()) {
         cp_profile_flush("profile.json");
         cp_profile_write_flamegraph("flamegraph.png");

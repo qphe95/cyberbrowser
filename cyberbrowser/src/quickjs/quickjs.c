@@ -1879,7 +1879,7 @@ int JS_EnqueueJob(JSContextHandle ctx, JSJobFunc *job_func,
     /* Make sure the runtime has a job queue, then publish the job. */
     if (js_job_queue_ensure(rt) == GC_HANDLE_NULL)
         return -1;
-    QJS_LOGE("JS_EnqueueJob: job_handle=%u queue_handle=%u", e_handle, js_rt_job_queue_handle(rt));
+    QJS_LOGD("JS_EnqueueJob: job_handle=%u queue_handle=%u", e_handle, js_rt_job_queue_handle(rt));
     if (!js_job_queue_enqueue(rt, e_handle))
         return -1; /* queue full */
     return 0;

@@ -18,6 +18,14 @@
 #include "gc_value_helpers.h"
 #include "platform.h"
 #include "layout_api.h"
+
+/* CYBER_CE_LOG=1: per-element custom-element diagnostics (define, upgrade,
+ * every callback that throws). */
+static bool ce_log_enabled(void) {
+    static int on = -1;
+    if (on < 0) on = cyber_getenv("CYBER_CE_LOG") ? 1 : 0;
+    return on;
+}
 // mbedtls includes for Crypto API (used by DOMException polyfill)
 #include "mbedtls/md.h"
 
@@ -516,14 +524,20 @@ GCValue js_cyber_ce_flush_reactions(JSContextHandle ctx, GCValue this_val, int a
                     if (!JS_IsUndefined(exc_stack) && !JS_IsNull(exc_stack)) s = JS_ToCString(ctx, exc_stack);
                     if (!JS_IsUndefined(exc_name) && !JS_IsNull(exc_name)) n = JS_ToCString(ctx, exc_name);
                     if (!JS_IsUndefined(tag_val) && !JS_IsNull(tag_val)) tag = JS_ToCString(ctx, tag_val);
-                    fprintf(stderr, "[CE-CALLBACK] %s %s threw: %s (%s)\n", tag ? tag : "?", name, m ? m : "(no message)", n ? n : "?");
-                    if (m && strstr(m, "cannot read property")) {
-                        fprintf(stderr, "[CE-CALLBACK] last undefined property: '%s'\n", g_last_undefined_prop);
+                    /* The first ones in full; past that a count (CYBER_CE_LOG: all). */
+                    static unsigned long thrown;
+                    thrown++;
+                    if (thrown <= 20 || ce_log_enabled()) {
+                        fprintf(stderr, "[CE-CALLBACK] %s %s threw: %s (%s)\n", tag ? tag : "?", name, m ? m : "(no message)", n ? n : "?");
+                        if (m && strstr(m, "cannot read property")) {
+                            fprintf(stderr, "[CE-CALLBACK] last undefined property: '%s'\n", g_last_undefined_prop);
+                        }
+                        if (s) {
+                            fprintf(stderr, "[CE-CALLBACK] stack:\n%s\n", s);
+                        }
+                    } else if ((thrown & (thrown - 1)) == 0) {
+                        fprintf(stderr, "[CE-CALLBACK] %lu callbacks have thrown (CYBER_CE_LOG=1 prints each)\n", thrown);
                     }
-                    if (s) {
-                        fprintf(stderr, "[CE-CALLBACK] stack:\n%s\n", s);
-                    }
-                    fflush(stderr);
                     if (m) JS_FreeCString(ctx, m);
                     if (s) JS_FreeCString(ctx, s);
                     if (n) JS_FreeCString(ctx, n);
@@ -1516,8 +1530,7 @@ GCValue js_custom_elements_define(JSContextHandle ctx, GCValue this_val, int arg
     if (!name) return JS_ThrowTypeError(ctx, "Invalid name");
     
     platform_log(LOG_LEVEL_INFO, "customElements", "define called with name='%s' (argc=%d)", name, argc);
-    fprintf(stderr, "[CE-DEFINE] name='%s' argc=%d\n", name, argc);
-    fflush(stderr);
+    if (ce_log_enabled()) fprintf(stderr, "[CE-DEFINE] name='%s' argc=%d\n", name, argc);
     
     // Validate name format (must contain hyphen)
     // NOTE: Relaxed for browser emulation - some scripts may pass invalid names
@@ -1763,7 +1776,7 @@ GCValue js_cyber_upgrade_element(JSContextHandle ctx, GCValue this_val, int argc
         fflush(stderr);
     }
 
-    {
+    if (ce_log_enabled()) {
         GCValue sr = JS_GetPropertyStr(ctx, el, "shadowRoot");
         GCValue sr_children = JS_GetPropertyStr(ctx, sr, "children");
         GCValue sr_len = JS_GetPropertyStr(ctx, sr_children, "length");
@@ -1779,14 +1792,15 @@ GCValue js_cyber_upgrade_element(JSContextHandle ctx, GCValue this_val, int argc
     // constructor succeeded.
     GCValue is_connected = JS_GetPropertyStr(ctx, el, "isConnected");
     bool connected = JS_ToBool(ctx, is_connected);
-    fprintf(stderr, "[CE-UPGRADE] %s ctor_ok=%d isConnected=%d\n", name_lc, ctor_ok ? 1 : 0, connected ? 1 : 0);
+    if (ce_log_enabled())
+        fprintf(stderr, "[CE-UPGRADE] %s ctor_ok=%d isConnected=%d\n", name_lc, ctor_ok ? 1 : 0, connected ? 1 : 0);
     // Enqueue connectedCallback instead of calling it synchronously.  This
     // lets callbacks that were enqueued during the constructor (e.g. children
     // moved into a newly created shadow root) run before the parent callback,
     // matching the reaction-queue ordering that Polymer apps rely on.
     if (ctor_ok && connected) {
         js_cyber_ce_enqueue_callback(ctx, el, "connectedCallback");
-        fprintf(stderr, "[CE-UPGRADE] %s enqueued connectedCallback\n", name_lc);
+        if (ce_log_enabled()) fprintf(stderr, "[CE-UPGRADE] %s enqueued connectedCallback\n", name_lc);
     }
 
     JS_FreeCString(ctx, tag);
