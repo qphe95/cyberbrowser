@@ -49,7 +49,7 @@ GCValue js_css_escape(JSContextHandle ctx, GCValue this_val, int argc, GCValue *
 
 // CSSStyleSheet.insertRule(rule, index)
 GCValue js_css_style_sheet_insert_rule(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    dom_request_layout();   /* forced layout re-checks the sheets */
+    dom_request_relayout();   /* forced layout re-checks the sheets */
     (void)this_val;
     if (argc < 1) return JS_ThrowTypeError(ctx, "requires at least 1 argument(s)");
     
@@ -88,7 +88,7 @@ GCValue js_css_style_sheet_insert_rule(JSContextHandle ctx, GCValue this_val, in
 
 // CSSStyleSheet.deleteRule(index)
 GCValue js_css_style_sheet_delete_rule(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    dom_request_layout();   /* forced layout re-checks the sheets */
+    dom_request_relayout();   /* forced layout re-checks the sheets */
     (void)this_val;
     if (argc < 1) return JS_UNDEFINED;
     
@@ -120,7 +120,7 @@ GCValue js_css_style_sheet_delete_rule(JSContextHandle ctx, GCValue this_val, in
 
 // CSSStyleSheet.addRule(selector, style, index)
 GCValue js_css_style_sheet_add_rule(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    dom_request_layout();   /* forced layout re-checks the sheets */
+    dom_request_relayout();   /* forced layout re-checks the sheets */
     (void)this_val;
     if (argc < 2) return JS_NewInt32(ctx, -1);
     
@@ -169,7 +169,7 @@ GCValue js_css_style_sheet_get_rules(JSContextHandle ctx, GCValue this_val, int 
 
 // CSSStyleSheet.replace(text)
 GCValue js_css_style_sheet_replace(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    dom_request_layout();   /* forced layout re-checks the sheets */
+    dom_request_relayout();   /* forced layout re-checks the sheets */
     // Synchronously parse the text and return a resolved promise.
     js_css_style_sheet_replace_sync(ctx, this_val, argc, argv);
     return js_create_empty_resolved_promise(ctx);
@@ -177,7 +177,7 @@ GCValue js_css_style_sheet_replace(JSContextHandle ctx, GCValue this_val, int ar
 
 // CSSStyleSheet.replaceSync(text)
 GCValue js_css_style_sheet_replace_sync(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    dom_request_layout();   /* forced layout re-checks the sheets */
+    dom_request_relayout();   /* forced layout re-checks the sheets */
     (void)this_val;
     if (argc < 1) return JS_UNDEFINED;
 

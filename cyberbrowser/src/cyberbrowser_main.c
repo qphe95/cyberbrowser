@@ -947,7 +947,7 @@ static void on_image_progress(const char *url, void *user_data)
 {
     (void)user_data;
     image_api_notify(g_ctx, url);
-    dom_request_layout();
+    dom_request_relayout();
 }
 
 /* Fonts come from the OS font folders and the page's @font-face rules
@@ -1909,9 +1909,11 @@ int main(int argc, char *argv[]) {
     {
         uint64_t lq_queries = 0, lq_layouts = 0, lq_ms = 0;
         layout_api_stats(&lq_queries, &lq_layouts, &lq_ms);
-        printf("Script layout queries: %llu (forced layouts: %llu, %llu ms; cached: %llu)\n",
+        printf("Script layout queries: %llu (forced layouts: %llu, %llu ms, %llu inside changed regions; "
+               "kept: %llu; cached: %llu)\n",
                (unsigned long long)lq_queries, (unsigned long long)lq_layouts,
-               (unsigned long long)lq_ms, (unsigned long long)layout_api_cheap_hits());
+               (unsigned long long)lq_ms, (unsigned long long)layout_api_region_layouts(),
+               (unsigned long long)layout_api_kept(), (unsigned long long)layout_api_cheap_hits());
     }
     printf("\nStart page loaded successfully.\n");
 

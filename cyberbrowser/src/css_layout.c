@@ -13,6 +13,7 @@
 #include "quickjs_gc_unified.h"
 #include "http_download.h"
 #include "html_dom.h"
+#include "dom_store.h"
 #include "dom_wrap.h"
 #include "text_shaper.h"
 #include "display_list.h"
@@ -4002,6 +4003,465 @@ static void keyset_clear(StyleKeySet *s)
     s->n = 0;
 }
 
+/* ---- What attribute changes can affect ----
+ *
+ * Selector matching reads an element's attributes only through the
+ * classes, ids and attribute names its selectors spell out (and :link,
+ * href); every other pseudo-class is structural or never matches.  So a
+ * change of an attribute no selector names, outside what layout reads
+ * itself, changes no computed style and no geometry.  The names come from a
+ * lexical scan of every selector (inside :not(), :is(), :has(), :host() and
+ * ::slotted() arguments too), kept per style-set generation. */
+typedef struct StyleMentions {
+    uint64_t gen;               /* style set generation (0 = empty slot) */
+    StyleKeySet keys;           /* has_key('.' class, '#' id, '[' attribute) */
+    /* Attribute tests by the compound they sit in: one that names a class
+     * or id (the guard) can only match elements carrying it, so for others
+     * the attribute is not tested.  attr_any: tested in some unguarded
+     * compound; attr_named / attr_guarded: tested under some guard /
+     * attr_guard_key(attribute, guard). */
+    StyleKeySet attr_any, attr_named, attr_guarded;
+    HasSubjects has;
+    bool empty;                 /* some selector uses :empty */
+    bool unknown;               /* escapes or allocation failure: everything matters */
+} StyleMentions;
+
+#define STYLE_MENTIONS_SLOTS 4
+static StyleMentions g_mentions[STYLE_MENTIONS_SLOTS];
+static int g_mentions_next;
+
+static bool mention_ident(unsigned char c)
+{
+    return isalnum(c) || c == '-' || c == '_' || c >= 0x80;
+}
+
+/* An identifier at p with CSS escapes decoded (.md\:flex is the class
+ * "md:flex") into buf; returns its end.  *len > cap: too long to keep. */
+static const char *mention_read_ident(const char *p, char *buf, size_t cap, size_t *len)
+{
+    size_t n = 0;
+    while (*p) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '\\' && p[1] && p[1] != '\n') {
+            p++;
+            if (isxdigit((unsigned char)*p)) {
+                unsigned cp = 0;
+                for (int k = 0; k < 6 && isxdigit((unsigned char)*p); k++, p++)
+                    cp = cp * 16 + (unsigned)(isdigit((unsigned char)*p) ? *p - '0' : (tolower((unsigned char)*p) - 'a' + 10));
+                if (*p == ' ' || *p == '\t' || *p == '\n') p++;
+                char u[4];
+                int ul;
+                if (cp < 0x80) { u[0] = (char)cp; ul = 1; }
+                else if (cp < 0x800) { u[0] = (char)(0xC0 | (cp >> 6)); u[1] = (char)(0x80 | (cp & 0x3F)); ul = 2; }
+                else if (cp < 0x10000) { u[0] = (char)(0xE0 | (cp >> 12)); u[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                                         u[2] = (char)(0x80 | (cp & 0x3F)); ul = 3; }
+                else { u[0] = (char)(0xF0 | (cp >> 18)); u[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+                       u[2] = (char)(0x80 | ((cp >> 6) & 0x3F)); u[3] = (char)(0x80 | (cp & 0x3F)); ul = 4; }
+                for (int k = 0; k < ul; k++, n++) if (n < cap) buf[n] = u[k];
+            } else {
+                if (n < cap) buf[n] = *p;
+                n++;
+                p++;
+            }
+            continue;
+        }
+        if (!mention_ident(c)) break;
+        if (n < cap) buf[n] = (char)c;
+        n++;
+        p++;
+    }
+    *len = n;
+    return p;
+}
+
+static void mentions_add(StyleMentions *m, char kind, const char *buf, size_t n, size_t cap, bool *fail)
+{
+    if (n > cap) { m->unknown = true; return; }
+    if (n) keyset_add(&m->keys, has_key(kind, buf, n), fail);
+}
+
+static uint64_t attr_guard_key(uint64_t attr, uint64_t guard)
+{
+    return style_mix(attr, &guard, sizeof(guard));
+}
+
+static void mentions_scan(StyleMentions *m, const char *s)
+{
+    bool fail = false;
+    char buf[512];
+    size_t n;
+    const char *p = s;
+    /* The compound being read: its first class or id, its attribute tests. */
+    uint64_t guard = 0;
+    uint64_t pend[16];
+    int npend = 0;
+#define MENTION_END_COMPOUND() do { \
+        for (int i_ = 0; i_ < npend; i_++) { \
+            if (guard) { \
+                keyset_add(&m->attr_named, pend[i_], &fail); \
+                keyset_add(&m->attr_guarded, attr_guard_key(pend[i_], guard), &fail); \
+            } else { \
+                keyset_add(&m->attr_any, pend[i_], &fail); \
+            } \
+        } \
+        npend = 0; \
+        guard = 0; \
+    } while (0)
+#define MENTION_ATTR(k) do { \
+        uint64_t k_ = (k); \
+        if (npend < 16) pend[npend++] = k_; \
+        else keyset_add(&m->attr_any, k_, &fail); \
+    } while (0)
+    while (*p) {
+        char c = *p;
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '>' || c == '+' || c == '~' ||
+            c == ',' || c == '(' || c == ')') {
+            MENTION_END_COMPOUND();
+            p++;
+            continue;
+        }
+        if (c == '"' || c == '\'') {
+            char q = c;
+            p++;
+            while (*p && *p != q) p += (*p == '\\' && p[1]) ? 2 : 1;
+            if (*p) p++;
+            continue;
+        }
+        if (c == '.' || c == '#') {
+            p = mention_read_ident(p + 1, buf, sizeof(buf), &n);
+            mentions_add(m, c, buf, n, sizeof(buf), &fail);
+            if (!guard && n && n <= sizeof(buf)) guard = has_key(c, buf, n);
+            continue;
+        }
+        if (c == '[') {
+            p++;
+            while (*p == ' ' || *p == '\t' || *p == '\n') p++;
+            p = mention_read_ident(p, buf, sizeof(buf), &n);
+            if (*p == '|' && p[1] != '=') p = mention_read_ident(p + 1, buf, sizeof(buf), &n);
+            mentions_add(m, '[', buf, n, sizeof(buf), &fail);
+            if (n && n <= sizeof(buf)) MENTION_ATTR(has_key('[', buf, n));
+            /* The rest of the test: operator and (quoted) value. */
+            while (*p && *p != ']') {
+                if (*p == '"' || *p == '\'') {
+                    char q = *p++;
+                    while (*p && *p != q) p += (*p == '\\' && p[1]) ? 2 : 1;
+                    if (*p) p++;
+                } else {
+                    p += (*p == '\\' && p[1]) ? 2 : 1;
+                }
+            }
+            if (*p) p++;
+            continue;
+        }
+        if (c == '\\') {      /* an escape in a tag name: tags are not tracked */
+            p = mention_read_ident(p, buf, sizeof(buf), &n);
+            if (p == s || n == 0) p++;
+            continue;
+        }
+        if (c == ':') {
+            while (*p == ':') p++;
+            const char *st = p;
+            while (*p && mention_ident((unsigned char)*p)) p++;
+            size_t nl = (size_t)(p - st);
+            if (nl == 4 && strncasecmp(st, "link", 4) == 0) {
+                keyset_add(&m->keys, has_key('[', "href", 4), &fail);
+                MENTION_ATTR(has_key('[', "href", 4));
+            }
+            if (nl == 5 && strncasecmp(st, "empty", 5) == 0) m->empty = true;
+            continue;
+        }
+        p++;
+    }
+    MENTION_END_COMPOUND();
+#undef MENTION_END_COMPOUND
+#undef MENTION_ATTR
+    if (fail) m->unknown = true;
+}
+
+static void mentions_free(StyleMentions *m)
+{
+    free(m->keys.slot);
+    free(m->attr_any.slot);
+    free(m->attr_named.slot);
+    free(m->attr_guarded.slot);
+    has_free(&m->has);
+    memset(m, 0, sizeof(*m));
+}
+
+static void mentions_build(const CssStyleSet *set, uint64_t gen)
+{
+    for (int i = 0; i < STYLE_MENTIONS_SLOTS; i++)
+        if (g_mentions[i].gen == gen) return;
+    StyleMentions *m = &g_mentions[g_mentions_next];
+    g_mentions_next = (g_mentions_next + 1) % STYLE_MENTIONS_SLOTS;
+    mentions_free(m);
+    for (int r = 0, nr = css_styleset_rule_count(set); r < nr; r++) {
+        const CssRule *rule = css_styleset_rule(set, r);
+        if (!rule || !rule->selector_text) continue;
+        mentions_scan(m, rule->selector_text);
+        has_scan_selector(&m->has, rule->selector_text);
+    }
+    m->gen = gen;
+    if (g_css_log > 0)
+        fprintf(stderr, "[css] mentions: %u keys%s%s%s\n", m->keys.n, m->unknown ? ", unknown" : "",
+                m->has.any ? ", :has()" : "", m->empty ? ", :empty" : "");
+}
+
+static const StyleMentions *mentions_of(const LayoutContext *ctx)
+{
+    if (!ctx || !ctx->style_gen) return NULL;
+    for (int i = 0; i < STYLE_MENTIONS_SLOTS; i++)
+        if (g_mentions[i].gen == ctx->style_gen) return g_mentions[i].unknown ? NULL : &g_mentions[i];
+    return NULL;
+}
+
+/* Attributes layout reads itself (sizes, images, inline style, sheets). */
+static bool layout_reads_attr(const char *name)
+{
+    static const char *const names[] = {
+        "width", "height", "viewbox", "type", "src", "srcset", "rel", "href", "media",
+        "hidden", "colspan", "rowspan", "span", "dir", "lang", "slot", "name", "size", "cols", "rows",
+    };
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+        if (strcasecmp(name, names[i]) == 0) return true;
+    return false;
+}
+
+static bool class_has_token(const char *list, const char *t, size_t n)
+{
+    for (const char *c = list ? list : ""; *c;) {
+        while (*c == ' ' || *c == '\t' || *c == '\n' || *c == '\r' || *c == '\f') c++;
+        const char *e = c;
+        while (*e && *e != ' ' && *e != '\t' && *e != '\n' && *e != '\r' && *e != '\f') e++;
+        if ((size_t)(e - c) == n && n && strncasecmp(c, t, n) == 0) return true;
+        c = e;
+    }
+    return false;
+}
+
+/* A class token in `a` but not in `b` that some selector names? */
+static bool class_tokens_mentioned(const StyleMentions *m, const char *a, const char *b)
+{
+    for (const char *c = a ? a : ""; *c;) {
+        while (*c == ' ' || *c == '\t' || *c == '\n' || *c == '\r' || *c == '\f') c++;
+        const char *e = c;
+        while (*e && *e != ' ' && *e != '\t' && *e != '\n' && *e != '\r' && *e != '\f') e++;
+        size_t n = (size_t)(e - c);
+        if (n && !class_has_token(b, c, n) && keyset_has(&m->keys, has_key('.', c, n))) return true;
+        c = e;
+    }
+    return false;
+}
+
+/* Properties that only change how boxes paint, never where they are or
+ * how big (transforms do move boxes here; custom properties may feed any
+ * other property through var()). */
+static bool style_prop_paint_only(const char *p)
+{
+    static const char *const exact[] = {
+        "color", "opacity", "visibility", "z-index", "cursor", "pointer-events", "user-select",
+        "-webkit-user-select", "fill", "fill-opacity", "stroke", "stroke-width", "stroke-opacity",
+        "stroke-dasharray", "stroke-dashoffset", "box-shadow", "text-shadow", "filter", "backdrop-filter",
+        "-webkit-backdrop-filter", "mix-blend-mode", "isolation", "will-change", "caret-color",
+        "accent-color", "border-color", "border-top-color", "border-right-color", "border-bottom-color",
+        "border-left-color", "clip-path", "-webkit-tap-highlight-color", "touch-action", "outline",
+        "outline-color", "outline-style", "outline-width", "outline-offset", "image-rendering",
+        "text-decoration-color", "text-decoration-style", "text-decoration-thickness",
+        "text-underline-offset", "scroll-behavior", "overscroll-behavior",
+    };
+    for (size_t i = 0; i < sizeof(exact) / sizeof(exact[0]); i++)
+        if (strcasecmp(p, exact[i]) == 0) return true;
+    static const char *const prefix[] = {
+        "background", "transition", "animation", "mask", "-webkit-mask", "scrollbar-",
+    };
+    for (size_t i = 0; i < sizeof(prefix) / sizeof(prefix[0]); i++)
+        if (strncasecmp(p, prefix[i], strlen(prefix[i])) == 0) return true;
+    return false;
+}
+
+/* The value an inline declaration list gives `prop` (the last, an
+ * !important one over others), or NULL. */
+static const char *inline_decl_value(const CssDeclaration *d, int n, const char *prop)
+{
+    const char *v = NULL;
+    bool imp = false;
+    for (int i = 0; i < n; i++) {
+        if (!d[i].property || strcasecmp(d[i].property, prop) != 0) continue;
+        if (imp && !d[i].important) continue;
+        v = d[i].value ? d[i].value : "";
+        imp = d[i].important;
+    }
+    return v;
+}
+
+/* Offsets: moving the box (and its subtree) without reflowing anything. */
+static bool style_prop_offset(const char *p)
+{
+    static const char *const names[] = {
+        "left", "top", "right", "bottom", "inset", "inset-block", "inset-inline", "inset-block-start",
+        "inset-block-end", "inset-inline-start", "inset-inline-end", "transform", "translate",
+        "transform-origin", "rotate", "scale",
+    };
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+        if (strcasecmp(p, names[i]) == 0) return true;
+    return false;
+}
+
+/* The box itself and what it contains: an out-of-flow box keeps these to
+ * its own subtree. */
+static bool style_prop_box_local(const char *p)
+{
+    static const char *const exact[] = {
+        "width", "height", "min-width", "min-height", "max-width", "max-height", "box-sizing",
+        "line-height", "letter-spacing", "word-spacing", "text-align", "text-indent", "text-transform",
+        "white-space", "word-break", "overflow-wrap", "word-wrap", "vertical-align", "aspect-ratio",
+        "object-fit", "object-position", "text-overflow", "-webkit-line-clamp", "-webkit-box-orient",
+        "direction", "tab-size", "hyphens", "gap", "row-gap", "column-gap", "order",
+    };
+    for (size_t i = 0; i < sizeof(exact) / sizeof(exact[0]); i++)
+        if (strcasecmp(p, exact[i]) == 0) return true;
+    static const char *const prefix[] = {
+        "margin", "padding", "border", "font", "overflow", "flex", "justify-", "align-", "place-",
+        "grid", "list-style", "text-decoration", "block-size", "inline-size", "min-block", "min-inline",
+        "max-block", "max-inline",
+    };
+    for (size_t i = 0; i < sizeof(prefix) / sizeof(prefix[0]); i++)
+        if (strncasecmp(p, prefix[i], strlen(prefix[i])) == 0) return true;
+    return false;
+}
+
+/* Which side (LAYOUT_SIDE_*) an inset property sets; every side for the
+ * shorthands, 0x10 for the transform properties. */
+static unsigned style_offset_sides(const char *p)
+{
+    if (strcasecmp(p, "left") == 0) return LAYOUT_SIDE_LEFT;
+    if (strcasecmp(p, "right") == 0) return LAYOUT_SIDE_RIGHT;
+    if (strcasecmp(p, "top") == 0) return LAYOUT_SIDE_TOP;
+    if (strcasecmp(p, "bottom") == 0) return LAYOUT_SIDE_BOTTOM;
+    if (strncasecmp(p, "inset", 5) == 0) return LAYOUT_SIDE_LEFT | LAYOUT_SIDE_RIGHT | LAYOUT_SIDE_TOP | LAYOUT_SIDE_BOTTOM;
+    return 0x10;
+}
+
+/* The furthest reach (css_layout_inline_style_reach) of the declarations
+ * that differ between inline styles `a` and `b`. */
+static int inline_style_reach(const char *a, const char *b, unsigned *sides)
+{
+    if (sides) *sides = 0;
+    int na = 0, nb = 0;
+    CssDeclaration *da = css_parse_inline_style(a ? a : "", &na);
+    CssDeclaration *db = css_parse_inline_style(b ? b : "", &nb);
+    int reach = 0;
+    for (int side = 0; side < 2 && reach < 3; side++) {
+        const CssDeclaration *d = side ? db : da;
+        int n = side ? nb : na;
+        for (int i = 0; i < n && reach < 3; i++) {
+            const char *prop = d[i].property;
+            if (!prop) continue;
+            const char *va = inline_decl_value(da, na, prop), *vb = inline_decl_value(db, nb, prop);
+            if (va && vb && strcmp(va, vb) == 0) continue;
+            int r = style_prop_paint_only(prop) ? 0 : style_prop_offset(prop) ? 1 : style_prop_box_local(prop) ? 2 : 3;
+            if (r == 1 && sides) *sides |= style_offset_sides(prop);
+            if (r > reach) reach = r;
+        }
+    }
+    css_declarations_free(da, na);
+    css_declarations_free(db, nb);
+    return reach;
+}
+
+/* Does some selector test attribute `name` in a compound the element
+ * could match (by its classes and id, before or after)? */
+static bool attr_tested(const StyleMentions *m, const LayoutAttrOwner *o, const char *name)
+{
+    uint64_t k = has_key('[', name, strlen(name));
+    if (keyset_has(&m->attr_any, k)) return true;
+    if (!keyset_has(&m->attr_named, k)) return false;
+    if (!o) return true;
+    for (int side = 0; side < 2; side++) {
+        const char *id = o->id[side];
+        if (id && id[0] && keyset_has(&m->attr_guarded, attr_guard_key(k, has_key('#', id, strlen(id))))) return true;
+        for (const char *c = o->cls[side] ? o->cls[side] : ""; *c;) {
+            while (*c == ' ' || *c == '\t' || *c == '\n' || *c == '\r' || *c == '\f') c++;
+            const char *e = c;
+            while (*e && *e != ' ' && *e != '\t' && *e != '\n' && *e != '\r' && *e != '\f') e++;
+            if (e > c && keyset_has(&m->attr_guarded, attr_guard_key(k, has_key('.', c, (size_t)(e - c))))) return true;
+            c = e;
+        }
+    }
+    return false;
+}
+
+int css_layout_inline_style_reach(const LayoutContext *ctx, const LayoutAttrOwner *owner, const char *a,
+                                  const char *b, unsigned *sides)
+{
+    if (sides) *sides = 0;
+    const StyleMentions *m = mentions_of(ctx);
+    if (!m || attr_tested(m, owner, "style")) return 3;
+    return inline_style_reach(a, b, sides);
+}
+
+/* Could replacing inline style `a` by `b` move or resize a box? */
+static bool inline_style_change_matters(const char *a, const char *b)
+{
+    return inline_style_reach(a, b, NULL) > 0;
+}
+
+bool css_layout_attr_change_matters(const LayoutContext *ctx, const LayoutAttrOwner *owner, const char *name,
+                                    const char *old_v, const char *new_v)
+{
+    const StyleMentions *m = mentions_of(ctx);
+    if (!m || !name) return true;
+    if (strcasecmp(name, "style") == 0)
+        return attr_tested(m, owner, "style") || inline_style_change_matters(old_v, new_v);
+    if (layout_reads_attr(name)) return true;
+    if (attr_tested(m, owner, name)) return true;
+    if (strcasecmp(name, "class") == 0)
+        return class_tokens_mentioned(m, old_v, new_v) || class_tokens_mentioned(m, new_v, old_v);
+    if (strcasecmp(name, "id") == 0) {
+        if (old_v && old_v[0] && keyset_has(&m->keys, has_key('#', old_v, strlen(old_v)))) return true;
+        if (new_v && new_v[0] && keyset_has(&m->keys, has_key('#', new_v, strlen(new_v)))) return true;
+    }
+    return false;
+}
+
+/* Does store element `id` carry a feature in `ks`? */
+static bool has_keys_store(const HasKeySet *ks, NodeId id)
+{
+    if (!ks->n) return false;
+    const char *tag = dom_tag_name(id);
+    if (tag && has_lookup(ks, has_key('t', tag, strlen(tag)))) return true;
+    const char *v = dom_get_attr_str(id, "id");
+    if (v && v[0] && has_lookup(ks, has_key('#', v, strlen(v)))) return true;
+    const char *cls = dom_get_attr_str(id, "class");
+    for (const char *c = cls; c && *c;) {
+        while (*c == ' ' || *c == '\t' || *c == '\n') c++;
+        const char *e = c;
+        while (*e && *e != ' ' && *e != '\t' && *e != '\n') e++;
+        if (e > c && has_lookup(ks, has_key('.', c, (size_t)(e - c)))) return true;
+        c = e;
+    }
+    return false;
+}
+
+bool css_layout_has_may_depend(const LayoutContext *ctx, uint32_t id)
+{
+    const StyleMentions *m = mentions_of(ctx);
+    if (!m) return true;
+    const HasSubjects *hs = &m->has;
+    if (!hs->any) return false;
+    if (hs->universal || hs->universal_deep || hs->sibling_relative) return true;
+    /* A :has() subject (or the ancestor its compound needs) at or above. */
+    for (NodeId a = id; a && dom_kind(a) == DOM_K_ELEMENT; a = dom_parent(a))
+        if (has_keys_store(&hs->self, a) || has_keys_store(&hs->anc, a)) return true;
+    return false;
+}
+
+bool css_layout_uses_empty(const LayoutContext *ctx)
+{
+    const StyleMentions *m = mentions_of(ctx);
+    return !m || m->empty;
+}
+
 static void ctx_features_free(StyleCtxFeatures *f)
 {
     free(f->keys.slot);
@@ -5476,6 +5936,7 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
     bool set_owned = false;
     uint64_t set_gen = 0;
     P.set = layout_styleset_get(&list, ctx->viewport_width, ctx->viewport_height, &set_owned, &set_gen);
+    ctx->style_gen = set_gen;
     STAGE("compile style set (cached)");
     P.sd = css_styledoc_get(ctx->doc);
     if (g_css_log > 1) {
@@ -5530,6 +5991,7 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
             static uint64_t has_gen;
             static HasSubjects has;
             static StyleCtxFeatures cf;
+            mentions_build(P.set, set_gen);
             if (has_gen != set_gen) {
                 has_free(&has);
                 ctx_features_free(&cf);

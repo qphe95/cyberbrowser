@@ -66,6 +66,13 @@ void dom_request_layout(void) {
     g_dom_layout_requests++;
 }
 
+uint64_t g_dom_relayout_requests;
+
+void dom_request_relayout(void) {
+    g_dom_relayout_requests++;
+    dom_request_layout();
+}
+
 // Real DOM Node Implementation
 // ============================================================================
 
@@ -1997,7 +2004,7 @@ GCValue js_document_get_adopted_style_sheets(JSContextHandle ctx, GCValue this_v
 GCValue js_document_set_adopted_style_sheets(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1) return JS_ThrowTypeError(ctx, "adoptedStyleSheets setter requires an array");
     JS_SetPropertyStr(ctx, this_val, "__adoptedStyleSheets", argv[0]);
-    dom_request_layout();
+    dom_request_relayout();
     return JS_UNDEFINED;
 }
 

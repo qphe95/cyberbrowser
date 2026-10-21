@@ -434,7 +434,43 @@ typedef struct LayoutContext {
      * outlive this layout and be laid out again). */
     char **text_gen;
     int text_gen_cap;
+
+    /* Generation of the cached style set this layout used (0: none). */
+    uint64_t style_gen;
 } LayoutContext;
+
+/* What a change can affect, for the style set layout `ctx` used (each
+ * answers true when that is not known):
+ *   css_layout_attr_change_matters: could changing attribute `name` of an
+ *     element from `old_v` to `new_v` (NULL: absent) change any element's
+ *     computed style, or what layout reads of the element?  No when no
+ *     selector names the attribute (or the class tokens or ids that
+ *     changed) and layout does not read it.
+ *   css_layout_has_may_depend: could a change at or under store element
+ *     `id` flip a :has() rule for an element outside its subtree?
+ *   css_layout_uses_empty: does some selector use :empty? */
+/* The element an attribute change is on: its class and id attributes before
+ * and after (NULL: absent), which decide what selectors it can match. */
+typedef struct LayoutAttrOwner {
+    const char *cls[2];
+    const char *id[2];
+} LayoutAttrOwner;
+bool css_layout_attr_change_matters(const LayoutContext *ctx, const LayoutAttrOwner *owner, const char *name,
+                                    const char *old_v, const char *new_v);
+bool css_layout_has_may_depend(const LayoutContext *ctx, uint32_t id);
+bool css_layout_uses_empty(const LayoutContext *ctx);
+/* How far replacing inline style `a` by `b` on an element can reach:
+ *   0 nothing but painting;
+ *   1 the element's offsets (left/top/right/bottom/inset, transform,
+ *     translate): it and its subtree move, nothing else does (*sides gets
+ *     the LAYOUT_SIDE_* bits of the insets that changed, and 0x10 for a
+ *     transform);
+ *   2 the element's own box and contents (sizes, margins, padding, borders,
+ *     fonts, text, overflow, ...): for an out-of-flow box, its subtree only;
+ *   3 further (display, position, float, custom properties, anything else,
+ *     or a selector that tests the style attribute). */
+int css_layout_inline_style_reach(const LayoutContext *ctx, const LayoutAttrOwner *owner, const char *a,
+                                  const char *b, unsigned *sides);
 
 /* A DOM text node's text as this layout sees it (generated content
  * included). */

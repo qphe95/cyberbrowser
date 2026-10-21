@@ -234,7 +234,7 @@ GCValue js_shadow_root_set_adopted_style_sheets(JSContextHandle ctx, GCValue thi
         }
     }
 
-    dom_request_layout();
+    dom_request_relayout();
     return JS_UNDEFINED;
 }
 

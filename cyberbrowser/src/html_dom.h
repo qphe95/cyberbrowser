@@ -184,6 +184,29 @@ HtmlDocument *html_mirror_document(JSContextHandle ctx, GCValue js_doc, bool ful
 void html_mirror_stats(uint64_t *updates, uint64_t *rebuilds, uint64_t *nodes_built);
 /* Test hook: differences between the mirror and serialize + parse now
  * (-1: no mirror). */
+/* What the mirror changed, for consumers that keep results between updates
+ * (layout_api's forced layout).  Each update appends one record per element
+ * whose attribute list changed (old and new lists, both alive while the
+ * document is) and per element whose rendered children changed (added,
+ * removed, moved, text); new subtrees appear only as their parent's record.
+ * A SHEETS record says the document's stylesheets may differ (a style or
+ * link element added, removed, moved or edited). */
+typedef enum { HTML_MIRROR_ATTRS = 1, HTML_MIRROR_CHILDREN = 2, HTML_MIRROR_SHEETS = 3 } HtmlMirrorChangeKind;
+typedef struct HtmlMirrorChange {
+    uint32_t id;                    /* store NodeId of the element */
+    uint8_t kind;                   /* HtmlMirrorChangeKind */
+    uint8_t empty_changed;          /* CHILDREN: the element went from no children to some, or back */
+    const HtmlAttribute *old_attrs; /* ATTRS: the list before and after */
+    const HtmlAttribute *new_attrs;
+} HtmlMirrorChange;
+
+/* The current end of the change log (pass it to html_mirror_changes later). */
+uint64_t html_mirror_change_seq(void);
+/* Records appended after position `since` in *out / *n.  False when they are
+ * not all known (the log was reset by a rebuild or overflowed, or `doc` is
+ * not the mirror document): treat the document as changed everywhere. */
+bool html_mirror_changes(const HtmlDocument *doc, uint64_t since, const HtmlMirrorChange **out, size_t *n);
+
 int html_mirror_check(JSContextHandle ctx, GCValue js_doc);
 
 /* Bytes and elements incremental snapshots copied (tests, benchmarks). */

@@ -21,6 +21,7 @@
 #include "media/media_buffer.h"
 #include "dom_fetch.h"
 #include "css_style.h"
+#include "browser/layout_api.h"
 #include "legacy_html_parse.h"
 
 extern JSContextHandle get_shared_test_context(void);
@@ -769,6 +770,62 @@ TEST(test_dom_layout_metrics_see_each_change) {
     return true;
 }
 
+static uint64_t lq_layout_count(void) {
+    uint64_t n = 0;
+    layout_api_stats(NULL, &n, NULL);
+    return n;
+}
+
+/* A change that cannot alter the boxes a script asks about keeps the forced
+ * layout (as browsers do): an attribute no selector names, anything inside a
+ * display:none subtree and paint-only styles keep it for every query; moving
+ * an absolutely positioned box keeps it for sizes but not positions, and
+ * resizing one keeps it outside the box.  Each answer is the one a new
+ * layout gives. */
+TEST(test_dom_layout_kept_across_changes_it_cannot_see) {
+    JSContextHandle ctx = get_shared_test_context();
+    if (!dom_ready(ctx)) { printf("    (skipped - no document)\n"); return true; }
+    ASSERT_EQ(1, js_int(ctx,
+        "(function(){var b=document.body, p=document.createElement('div');"
+        "p.style.cssText='position: relative; width: 400px';"
+        "var a=document.createElement('div'); a.style.cssText='position: absolute; left: 5px; top: 3px; width: 30px; height: 20px';"
+        "var t=document.createElement('div'); t.style.cssText='width: 100px; height: 10px';"
+        "var h=document.createElement('div'); h.style.display='none'; h.innerHTML='<span>x</span>';"
+        "p.appendChild(a); p.appendChild(t); p.appendChild(h); b.appendChild(p);"
+        "globalThis.__kp={p:p, a:a, t:t, h:h}; return t.offsetWidth===100 ? 1 : 0;})()"));
+    static const struct { const char *js; int layouts; } steps[] = {
+        /* An attribute no selector names. */
+        { "__kp.t.setAttribute('data-kx', '1'); return __kp.t.offsetWidth===100", 0 },
+        /* Inside a display:none subtree. */
+        { "__kp.h.firstChild.textContent='y'; __kp.h.appendChild(document.createElement('b'));"
+          " return __kp.t.offsetWidth===100 && __kp.h.offsetWidth===0", 0 },
+        /* Paint only. */
+        { "__kp.t.style.color='red'; __kp.t.style.opacity='0.5'; return __kp.t.offsetWidth===100", 0 },
+        /* An absolute box moves: sizes hold, its position is laid out. */
+        { "__kp.a.style.left='50px'; return __kp.t.offsetWidth===100 && __kp.a.offsetWidth===30", 0 },
+        { "return __kp.a.offsetLeft===50", 1 },
+        /* It grows: outside it nothing changes; it is laid out. */
+        { "__kp.a.style.width='60px'; return __kp.t.offsetWidth===100 && __kp.t.offsetTop===0", 0 },
+        { "return __kp.a.offsetWidth===60", 1 },
+        /* An in-flow box grows: everything is laid out. */
+        { "__kp.t.style.width='120px'; return __kp.a.offsetWidth===60 && __kp.t.offsetWidth===120", 1 },
+    };
+    for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
+        char js[512];
+        snprintf(js, sizeof(js), "(function(){ %s })() ? 1 : 0", steps[i].js);
+        uint64_t before = lq_layout_count();
+        if (js_int(ctx, js) != 1) { printf("    step %zu answered wrong: %s\n", i, steps[i].js); return false; }
+        uint64_t ran = lq_layout_count() - before;
+        if ((int)ran != steps[i].layouts) {
+            printf("    step %zu ran %llu layouts, expected %d: %s\n", i, (unsigned long long)ran, steps[i].layouts,
+                   steps[i].js);
+            return false;
+        }
+    }
+    ASSERT_EQ(1, js_int(ctx, "__kp.p.remove(); __kp=null; 1"));
+    return true;
+}
+
 /* MSE: a MediaSource opens when a video element attaches it (sourceopen is a
  * task), and appendBuffer's update events come later with updating true in
  * between.  isTypeSupported answers for the decoders actually built. */
@@ -1054,6 +1111,7 @@ void run_dom_tests(void) {
     RUN_TEST(test_dom_style_assignment_forwards_to_css_text);
     RUN_TEST(test_dom_layout_metrics_block_boxes);
     RUN_TEST(test_dom_layout_metrics_see_each_change);
+    RUN_TEST(test_dom_layout_kept_across_changes_it_cannot_see);
     RUN_TEST(test_dom_media_source_events);
     RUN_TEST(test_dom_custom_element_reactions);
     RUN_TEST(test_dom_mutation_observer_reobserve);

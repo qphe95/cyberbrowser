@@ -368,7 +368,7 @@ static void on_async_image_loaded(const char *url, void *user_data)
 {
     (void)url;
     (void)user_data;
-    dom_request_layout();
+    dom_request_relayout();
 }
 
 /* Paint an <img> (or other replaced image) into its content box once its

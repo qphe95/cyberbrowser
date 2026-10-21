@@ -30,6 +30,10 @@ bool layout_query_font_size(JSContextHandle ctx, GCValue element, double *px);
 void layout_api_install(JSContextHandle ctx, GCValue element_proto);
 
 /* Forced layouts run / queries answered since start (diagnostics, tests). */
+/* Forced layouts avoided: changes since the cached one could not alter a box. */
+uint64_t layout_api_kept(void);
+/* Of the forced layouts, those for a query inside a region a change altered. */
+uint64_t layout_api_region_layouts(void);
 void layout_api_stats(uint64_t *queries, uint64_t *layouts, uint64_t *layout_ms);
 /* Queries answered from the cached layout without re-serializing. */
 uint64_t layout_api_cheap_hits(void);

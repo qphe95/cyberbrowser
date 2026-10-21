@@ -1965,8 +1965,57 @@ static struct {
     JSContextHandle ctx;
     bool shady, full, changed, unsupported;
     bool structure;             /* nodes added, removed or moved: reorder */
+    int building;               /* inside a new subtree: no change records */
     uint64_t updates, rebuilds, nodes_built;
+    /* Change log (html_mirror_changes): log[i] has position log_base + i;
+     * positions before log_reset are unknown. */
+    HtmlMirrorChange *log;
+    size_t nlog, cap_log;
+    uint64_t log_base, log_reset;
+    uint64_t sheet_sig;         /* style/link elements and their parents, in order */
+    bool sheet_sig_valid;
 } g_mir;
+
+#define MIR_LOG_MAX 16384
+
+static void mir_log_reset(void) {
+    g_mir.log_base += g_mir.nlog;
+    g_mir.nlog = 0;
+    g_mir.log_reset = g_mir.log_base;
+}
+
+static void mir_log(uint8_t kind, NodeId id, const HtmlAttribute *old_attrs, const HtmlAttribute *new_attrs) {
+    if (g_mir.nlog >= MIR_LOG_MAX) mir_log_reset();
+    if (g_mir.nlog == g_mir.cap_log) {
+        size_t nc = g_mir.cap_log ? g_mir.cap_log * 2 : 256;
+        HtmlMirrorChange *nl = (HtmlMirrorChange *)realloc(g_mir.log, nc * sizeof(*nl));
+        if (!nl) { mir_log_reset(); return; }
+        g_mir.log = nl;
+        g_mir.cap_log = nc;
+    }
+    HtmlMirrorChange *c = &g_mir.log[g_mir.nlog++];
+    c->id = id;
+    c->kind = kind;
+    c->old_attrs = old_attrs;
+    c->new_attrs = new_attrs;
+    c->empty_changed = 0;
+}
+
+uint64_t html_mirror_change_seq(void) { return g_mir.log_base + g_mir.nlog; }
+
+bool html_mirror_changes(const HtmlDocument *doc, uint64_t since, const HtmlMirrorChange **out, size_t *n) {
+    *out = NULL;
+    *n = 0;
+    if (!doc || doc != g_mir.doc || !g_mir.valid) return false;
+    if (since < g_mir.log_reset || since < g_mir.log_base || since > g_mir.log_base + g_mir.nlog) return false;
+    *out = g_mir.log + (since - g_mir.log_base);
+    *n = (size_t)(g_mir.log_base + g_mir.nlog - since);
+    return true;
+}
+
+static bool mir_is_sheet_tag(const char *tag) {
+    return tag && (strcmp(tag, "style") == 0 || strcmp(tag, "link") == 0);
+}
 
 static void mir_map_put_in(MirrorMap *m, NodeId id, int idx) {
     if (2 * (m->n + 1) > m->cap) {
@@ -2081,6 +2130,7 @@ static void mir_attrs_free(MirAttrs *a) {
 
 /* Read element s's attributes into mirror node idx; true when they changed. */
 static bool mir_read_attrs(NodeId s, int idx, const char *tag_lower, bool in_svg) {
+    const HtmlAttribute *old_list = NULL;
     MirAttrs a;
     a.n = 0;
     a.in_svg = in_svg;
@@ -2094,10 +2144,16 @@ static bool mir_read_attrs(NodeId s, int idx, const char *tag_lower, bool in_svg
     }
     if (same && k != a.n) same = false;
     if (!same) {
+        old_list = hn->attributes;
         hn->attributes = NULL;      /* the old list stays in the arena */
         html_document_attrs_changed(g_mir.doc, idx);
         for (int i = 0; i < a.n; i++)
             html_document_add_attr(g_mir.doc, idx, a.names[i], a.values[i], strlen(a.values[i]));
+        if (!g_mir.building) {
+            hn = po_array_payload(&g_mir.doc->array, idx);
+            mir_log(HTML_MIRROR_ATTRS, s, old_list, hn->attributes);
+            if (mir_is_sheet_tag(tag_lower)) mir_log(HTML_MIRROR_SHEETS, s, NULL, NULL);
+        }
     }
     mir_attrs_free(&a);
     return !same;
@@ -2282,6 +2338,8 @@ static bool mir_child_svg(bool in_svg, const char *tag_lower) {
 }
 
 /* Element s as a new mirror node under parent (with its subtree). */
+static int mir_build_inner(NodeId s, int idx, const char *tag_lower, bool in_svg);
+
 static int mir_build_element(NodeId s, int parent, bool in_svg) {
     char tag_lower[64];
     mir_tag_lower(s, tag_lower);
@@ -2293,6 +2351,14 @@ static int mir_build_element(NodeId s, int parent, bool in_svg) {
     hn->store_id = s;
     mir_map_put(s, idx);
     g_mir.nodes_built++;
+    g_mir.building++;
+    idx = mir_build_inner(s, idx, tag_lower, in_svg);
+    g_mir.building--;
+    return idx;
+}
+
+static int mir_build_inner(NodeId s, int idx, const char *tag_lower, bool in_svg) {
+    HtmlNode *hn;
     mir_read_attrs(s, idx, tag_lower, in_svg);
     if (ser_has_native_props(tag_lower)) mir_note_native(s);
     if (html_is_self_closing_tag(tag_lower)) return idx;
@@ -2338,6 +2404,7 @@ static void mir_reconcile(NodeId s, int m, bool child_svg) {
     }
     int pos = 0;            /* index into old[] while the order is unchanged */
     bool reordered = false;
+    bool here = false;      /* a text run here changed */
     MirBuf run = {0};
     NodeId run_first = DOM_NULL;
     for (int i = 0; i <= items.n; i++) {
@@ -2364,7 +2431,7 @@ static void mir_reconcile(NodeId s, int m, bool child_svg) {
                     tn->text_content = (char *)malloc(run.n + 1);
                     if (tn->text_content) memcpy(tn->text_content, run.s, run.n + 1);
                     tn->text_len = run.n;
-                    g_mir.changed = true;
+                    g_mir.changed = here = true;
                 }
                 po_array_append(&d->array, m, ti);
             } else {
@@ -2406,6 +2473,10 @@ static void mir_reconcile(NodeId s, int m, bool child_svg) {
     }
     if (pos != nold) reordered = true;
     if (reordered) g_mir.changed = g_mir.structure = true;
+    if ((reordered || here) && !g_mir.building) {
+        mir_log(HTML_MIRROR_CHILDREN, s, NULL, NULL);
+        if (g_mir.nlog) g_mir.log[g_mir.nlog - 1].empty_changed = (nold > 0) != (pos > 0);
+    }
     /* What was not linked again is gone. */
     for (int i = 0; i < nold; i++)
         if (po_array_is_active(&d->array, old[i]) && po_array_parent(&d->array, old[i]) == PO_ARRAY_DETACHED)
@@ -2447,6 +2518,7 @@ static void mir_update_element(NodeId s, int m, bool in_svg) {
             hn->text_content = t;
             hn->text_len = n;
             g_mir.changed = true;
+            mir_log(strcmp(tag_lower, "style") == 0 ? HTML_MIRROR_SHEETS : HTML_MIRROR_CHILDREN, s, NULL, NULL);
         } else {
             free(t);
         }
@@ -2488,6 +2560,7 @@ static void mir_update_natives(void) {
 }
 
 static void mir_drop(void) {
+    mir_log_reset();
     if (g_mir.doc) html_document_free(g_mir.doc);   /* the mirror's own reference */
     g_mir.doc = NULL;
     g_mir.valid = false;
@@ -2502,12 +2575,34 @@ static bool mir_rebuild(NodeId root) {
     g_mir.doc->refs = 1;
     g_mir.root_id = root;
     g_mir.rebuilds++;
+    mir_log_reset();
+    g_mir.sheet_sig_valid = false;
     mir_build_element(root, -1, false);
     g_mir.changed = true;
     return !g_mir.unsupported;
 }
 
 static int mir_verify(JSContextHandle ctx, GCValue js_doc);
+
+/* Which style and link elements there are, in order, under which parents
+ * (sheets are scoped to their host): a SHEETS record when that changed. */
+static void mir_note_sheets(void) {
+    HtmlDocument *d = g_mir.doc;
+    size_t n = po_array_count(&d->array);
+    uint64_t sig = 1469598103934665603ull;
+    for (size_t i = 0; i < n; i++) {
+        if (!po_array_is_active(&d->array, (int)i)) continue;
+        HtmlNode *hn = po_array_payload(&d->array, (int)i);
+        if (!hn || hn->type != HTML_NODE_ELEMENT || !mir_is_sheet_tag(hn->tag_name)) continue;
+        int p = po_array_parent(&d->array, (int)i);
+        HtmlNode *pn = p >= 0 ? po_array_payload(&d->array, p) : NULL;
+        uint64_t v[2] = { hn->store_id, pn ? pn->store_id : 0 };
+        for (int k = 0; k < 2; k++) { sig ^= v[k]; sig *= 1099511628211ull; }
+    }
+    if (g_mir.sheet_sig_valid && sig != g_mir.sheet_sig) mir_log(HTML_MIRROR_SHEETS, 0, NULL, NULL);
+    g_mir.sheet_sig = sig;
+    g_mir.sheet_sig_valid = true;
+}
 
 static void mir_reorder(void) {
     HtmlDocument *d = g_mir.doc;
@@ -2574,6 +2669,7 @@ static HtmlDocument *mirror_update(JSContextHandle ctx, GCValue js_doc, bool ful
      * subtree is a contiguous range): put added and moved nodes back in
      * pre-order, dropping the deleted ones, and index the result. */
     if (g_mir.structure) mir_reorder();
+    if (g_mir.structure || !g_mir.sheet_sig_valid) mir_note_sheets();
     html_document_find_roots(g_mir.doc);
     /* Page code run by getters during the update: its marks must survive
      * the clear (the next update sees them), so leave the bits. */

@@ -362,6 +362,12 @@ uint64_t dom_change_stamp(void);
  * that holds the JS context (e.g. async image load callbacks). */
 void dom_request_layout(void);
 
+/* A layout request for a change the DOM does not show: a CSSOM sheet edit,
+ * adopted sheets, an image that loaded.  Bumps g_dom_relayout_requests as
+ * well (layout_api never keeps a layout across one). */
+extern uint64_t g_dom_relayout_requests;
+void dom_request_relayout(void);
+
 /* ============================================================================
  * Location object data
  * ============================================================================ */
