@@ -728,10 +728,18 @@ typedef struct {
     /* Store ids of the emitted elements in order (0 for objects without a
      * node); only kept by the render snapshot. */
     uint32_t *ids;
-    const char **tags;
+    const char **tags;       /* interned (css_atom_str), not owned */
     size_t nids, capids;
     bool track;
     bool omit_script_text;   /* render snapshot: script text never renders */
+    /* Incremental render snapshot (see SnapCache): the generation this
+     * buffer records element fragments under (0 = none), whether clean
+     * fragments of the previous snapshot may be copied, and a count of
+     * reads of state the store does not track (the subtrees around them
+     * are not recorded). */
+    uint32_t gen;
+    bool reuse;
+    uint32_t taint;
 } SerializeBuffer;
 
 static bool serialize_buf_init(SerializeBuffer *buf) {
@@ -748,7 +756,6 @@ static void serialize_buf_free(SerializeBuffer *buf) {
     if (!buf) return;
     free(buf->data);
     free(buf->ids);
-    for (size_t i = 0; i < buf->nids; i++) free((void *)buf->tags[i]);
     free(buf->tags);
     memset(buf, 0, sizeof(*buf));
 }
@@ -796,7 +803,8 @@ static void serialize_note_element(SerializeBuffer *buf, NodeId id, const char *
         buf->tags = realloc(buf->tags, buf->capids * sizeof(char *));
     }
     buf->ids[buf->nids] = id;
-    buf->tags[buf->nids] = strdup(tag);
+    css_atom_reserve(1);
+    buf->tags[buf->nids] = css_atom_str(css_atom_intern(tag, strlen(tag)));
     buf->nids++;
 }
 
@@ -1020,6 +1028,13 @@ static void html_serialize_children(JSContextHandle ctx, SerNode host, Serialize
         shadow = JS_GetPropertyStr(ctx, host.obj, "shadowRoot");
         if (JS_IsNull(shadow) || JS_IsUndefined(shadow))
             shadow = JS_GetPropertyStr(ctx, host.obj, "__CE_shadowRoot");
+    }
+    /* A store shadow root changes only through the store (its marks reach the
+     * host); any other shadow object is composed through JS. */
+    if (JS_IsObject(shadow)) {
+        NodeId sid = dom_node_of(shadow);
+        bool store_shadow = sid && host.id && g_dom.shadow[dom_slot(host.id)] == dom_slot(sid);
+        if (!store_shadow) buf->taint++;
     }
     if (!JS_IsObject(shadow) || !shadow_has_content(ctx, shadow)) {
         for (size_t i = 0; i < light.count; i++)
@@ -1282,9 +1297,10 @@ const char *dom_attr_name_for_output(const char *lower) {
     return lower;
 }
 
-static void html_serialize_element(JSContextHandle ctx, SerNode n, SerializeBuffer *buf) {
+static void html_serialize_element_body(JSContextHandle ctx, SerNode n, SerializeBuffer *buf) {
     char tag_lower[64];
     LooseAttrs loose = {0};
+    if (!n.id) buf->taint++;
     if (n.id) {
         const char *tag = dom_tag_name(n.id);
         if (!tag || !tag[0]) tag = "div";
@@ -1297,6 +1313,7 @@ static void html_serialize_element(JSContextHandle ctx, SerNode n, SerializeBuff
         loose_attrs_read(ctx, n.obj, &loose);
     }
     for (char *p = tag_lower; *p; p++) *p = (char)tolower((unsigned char)*p);
+    if (ser_has_native_props(tag_lower)) buf->taint++;   /* getters over native state */
     serialize_note_element(buf, n.id, tag_lower);
 
     serialize_buf_append(buf, "<");
@@ -1399,6 +1416,7 @@ static void html_serialize_element(JSContextHandle ctx, SerNode n, SerializeBuff
         if (n.id && legacy_limits()) {
             ser_text_content(n.id, buf);
         } else if (JS_IsObject(n.obj)) {
+            buf->taint++;
             GCValue tc = JS_GetPropertyStr(ctx, n.obj, "textContent");
             const char *text = JS_ToCString(ctx, tc);
             if (text) { serialize_buf_append(buf, text); JS_FreeCString(ctx, text); }
@@ -1412,6 +1430,108 @@ static void html_serialize_element(JSContextHandle ctx, SerNode n, SerializeBuff
     serialize_buf_append(buf, "</");
     serialize_buf_append(buf, tag_lower);
     serialize_buf_append(buf, ">");
+}
+
+/* Incremental render snapshot.  Each snapshot keeps its buffer; an element
+ * whose subtree read nothing the store does not track records where its
+ * fragment (text and element ids) lies in it.  The next snapshot copies
+ * the fragment of an element with no dirty bit (on it or below: the store
+ * marks every mutation, and style object writes mark their element) and
+ * re-bases the records inside it.  What the dirty bits miss (properties
+ * that live only on JS objects) the periodic full snapshot picks up. */
+typedef struct SnapFrag {
+    NodeId id;
+    uint32_t gen;
+    uint32_t t0, t1;            /* text range in the snapshot buffer */
+    uint32_t i0, i1;            /* element id range */
+} SnapFrag;
+
+static struct {
+    SnapFrag *f;                /* by store slot */
+    uint32_t cap;
+    uint32_t gen;               /* generation of `prev` */
+    SerializeBuffer prev;       /* the last snapshot's buffer */
+    uint64_t reused_bytes, reused_elems;
+} g_snap;
+
+static SnapFrag *snap_frag(NodeId id, bool grow) {
+    uint32_t s = dom_slot(id);
+    if (s >= g_snap.cap) {
+        if (!grow) return NULL;
+        uint32_t nc = g_snap.cap ? g_snap.cap : 4096;
+        while (nc <= s) nc *= 2;
+        SnapFrag *nf = (SnapFrag *)realloc(g_snap.f, (size_t)nc * sizeof(SnapFrag));
+        if (!nf) return NULL;
+        memset(nf + g_snap.cap, 0, (size_t)(nc - g_snap.cap) * sizeof(SnapFrag));
+        g_snap.f = nf;
+        g_snap.cap = nc;
+    }
+    return &g_snap.f[s];
+}
+
+
+/* Copy `id`'s clean fragment of the previous snapshot into buf. */
+static bool snap_try_reuse(SerializeBuffer *buf, NodeId id) {
+    if (!buf->reuse || !buf->gen || !g_snap.gen || (dom_flags(id) & DOMF_DIRTY_MASK)) return false;
+    SnapFrag *e = snap_frag(id, false);
+    if (!e || e->id != id || e->gen != g_snap.gen) return false;
+    const SerializeBuffer *p = &g_snap.prev;
+    if (e->t1 > p->len || e->i1 > p->nids || e->i0 >= e->i1 || p->ids[e->i0] != id) return false;
+    size_t nt = e->t1 - e->t0, ni = e->i1 - e->i0;
+    if (!serialize_buf_grow(buf, nt)) return false;
+    if (buf->nids + ni > buf->capids) {
+        size_t nc = buf->capids ? buf->capids : 256;
+        while (nc < buf->nids + ni) nc *= 2;
+        uint32_t *nids = realloc(buf->ids, nc * sizeof(uint32_t));
+        if (!nids) return false;
+        buf->ids = nids;
+        const char **ntags = realloc(buf->tags, nc * sizeof(char *));
+        if (!ntags) return false;
+        buf->tags = ntags;
+        buf->capids = nc;
+    }
+    int64_t dt = (int64_t)buf->len - (int64_t)e->t0, di = (int64_t)buf->nids - (int64_t)e->i0;
+    uint32_t t0 = e->t0, t1 = e->t1;
+    memcpy(buf->data + buf->len, p->data + e->t0, nt);
+    buf->len += nt;
+    buf->data[buf->len] = '\0';
+    memcpy(buf->ids + buf->nids, p->ids + e->i0, ni * sizeof(uint32_t));
+    memcpy(buf->tags + buf->nids, p->tags + e->i0, ni * sizeof(char *));
+    /* Re-base the records of the elements inside (and of `id` itself). */
+    for (size_t k = buf->nids; k < buf->nids + ni; k++) {
+        NodeId c = buf->ids[k];
+        SnapFrag *ce = c ? snap_frag(c, false) : NULL;
+        if (!ce || ce->id != c || ce->gen != g_snap.gen || ce->t0 < t0 || ce->t1 > t1) continue;
+        ce->t0 = (uint32_t)(ce->t0 + dt);
+        ce->t1 = (uint32_t)(ce->t1 + dt);
+        ce->i0 = (uint32_t)(ce->i0 + di);
+        ce->i1 = (uint32_t)(ce->i1 + di);
+        ce->gen = buf->gen;
+    }
+    buf->nids += ni;
+    g_snap.reused_bytes += nt;
+    g_snap.reused_elems += ni;
+    return true;
+}
+
+static void html_serialize_element_body(JSContextHandle ctx, SerNode n, SerializeBuffer *buf);
+
+static void html_serialize_element(JSContextHandle ctx, SerNode n, SerializeBuffer *buf) {
+    if (n.id && snap_try_reuse(buf, n.id)) return;
+    size_t t0 = buf->len, i0 = buf->nids;
+    uint32_t taint0 = buf->taint;
+    html_serialize_element_body(ctx, n, buf);
+    if (!buf->gen || !n.id) return;
+    SnapFrag *e = snap_frag(n.id, true);
+    if (!e) return;
+    e->id = n.id;
+    /* Recorded only when nothing below read untracked state (and the
+     * offsets fit the record). */
+    e->gen = buf->taint == taint0 && buf->len <= UINT32_MAX && buf->nids <= UINT32_MAX ? buf->gen : 0;
+    e->t0 = (uint32_t)t0;
+    e->t1 = (uint32_t)buf->len;
+    e->i0 = (uint32_t)i0;
+    e->i1 = (uint32_t)buf->nids;
 }
 
 static void html_serialize_text(const char *val, size_t len, SerializeBuffer *buf) {
@@ -1438,6 +1558,7 @@ static void html_serialize_node(JSContextHandle ctx, SerNode n, SerializeBuffer 
             const char *s = dom_text(n.id, &len);
             html_serialize_text(s, len, buf);
         } else {
+            buf->taint++;
             GCValue tc = JS_GetPropertyStr(ctx, n.obj, "textContent");
             size_t len = 0;
             const char *tcs = JS_ToCStringLen(ctx, &len, tc);
@@ -1515,46 +1636,135 @@ void html_render_stats(uint64_t *snapshots, uint64_t *reuses) {
  * the same text as the snapshot `*key` names, nothing is rebuilt (returns
  * NULL with *unchanged set); otherwise *key names the new snapshot.  Taking a
  * snapshot clears the store's dirty bits for the document (§7). */
-HtmlDocument *html_document_from_js_dom_if_changed(JSContextHandle ctx, GCValue js_doc,
-                                                   uint64_t *key, bool *unchanged) {
+static bool snapshot_serialize(JSContextHandle ctx, GCValue doc_elem, SerializeBuffer *buf,
+                               uint32_t gen, bool reuse) {
+    if (!serialize_buf_init(buf)) return false;
+    buf->track = true;
+    buf->omit_script_text = true;
+    buf->gen = gen;
+    buf->reuse = reuse;
+    serialize_buf_append(buf, "<!doctype html>\n");
+    html_serialize_node(ctx, ser_of_value(doc_elem), buf);
+    return true;
+}
+
+static HtmlDocument *snapshot_build(JSContextHandle ctx, GCValue js_doc, uint64_t *key, bool *unchanged,
+                                    bool reuse) {
     if (unchanged) *unchanged = false;
     if (!SAFE_VALID(ctx)) return NULL;
     GCValue doc_elem = render_root_element(ctx, js_doc);
     if (JS_IsUndefined(doc_elem) || JS_IsNull(doc_elem)) return NULL;
 
+    static uint32_t s_gen;
+    if (++s_gen == 0) s_gen = 1;
     SerializeBuffer buf;
-    if (!serialize_buf_init(&buf)) return NULL;
-    buf.track = true;
-    buf.omit_script_text = true;
-    serialize_buf_append(&buf, "<!doctype html>\n");
-    {
-        CP_ACC("snapshot: serialize");
-        html_serialize_node(ctx, ser_of_value(doc_elem), &buf);
+    bool ok;
+    /* Getters the serializer calls can run page code that mutates the DOM
+     * (polyfills flush on access); the dirty bits of those mutations would
+     * be cleared below, so such a snapshot leaves nothing to reuse. */
+    uint64_t dirty0 = g_dom.dirty_version;
+    if (reuse) {
+        CP_ACC("snapshot: serialize (incremental)");
+        ok = snapshot_serialize(ctx, doc_elem, &buf, s_gen, reuse);
+    } else {
+        CP_ACC("snapshot: serialize (full)");
+        ok = snapshot_serialize(ctx, doc_elem, &buf, s_gen, reuse);
+    }
+    if (!ok) return NULL;
+    bool mutated = g_dom.dirty_version != dirty0;
+    static int verify_log = -1;
+    if (verify_log < 0) verify_log = cyber_getenv("CYBER_SNAPSHOT_VERIFY") ? 1 : 0;
+    if (mutated && verify_log) fprintf(stderr, "[snapshot-verify] DOM mutated during serialization\n");
+    /* CYBER_SNAPSHOT_VERIFY=1: an incremental snapshot must equal a full one. */
+    static int verify = -1;
+    if (verify < 0) verify = cyber_getenv("CYBER_SNAPSHOT_VERIFY") ? 1 : 0;
+    if (verify && reuse) {
+        SerializeBuffer full;
+        if (snapshot_serialize(ctx, doc_elem, &full, 0, false)) {
+            bool same = full.len == buf.len && memcmp(full.data, buf.data, buf.len) == 0 &&
+                        full.nids == buf.nids && memcmp(full.ids, buf.ids, buf.nids * sizeof(uint32_t)) == 0;
+            static unsigned long checks, mismatches;
+            checks++;
+            if (!same) {
+                size_t i = 0;
+                while (i < full.len && i < buf.len && full.data[i] == buf.data[i]) i++;
+                size_t from = i > 120 ? i - 120 : 0;
+                fprintf(stderr, "[snapshot-verify] mismatch %lu/%lu at byte %zu (full %zu, incremental %zu bytes)\n"
+                                "  full: %.240s\n  incr: %.240s\n",
+                        ++mismatches, checks, i, full.len, buf.len, full.data + from,
+                        from < buf.len ? buf.data + from : "");
+                size_t k = 0;
+                while (k < full.nids && k < buf.nids && full.ids[k] == buf.ids[k]) k++;
+                if (k < full.nids || k < buf.nids)
+                    fprintf(stderr, "  ids differ at element %zu of %zu/%zu: full %u <%s> (kind %d flags %x), incr %u <%s> (kind %d flags %x)\n",
+                            k, full.nids, buf.nids, k < full.nids ? full.ids[k] : 0, k < full.nids ? full.tags[k] : "-",
+                            k < full.nids ? dom_kind(full.ids[k]) : -1, k < full.nids ? dom_flags(full.ids[k]) : 0,
+                            k < buf.nids ? buf.ids[k] : 0, k < buf.nids ? buf.tags[k] : "-",
+                            k < buf.nids ? dom_kind(buf.ids[k]) : -1, k < buf.nids ? dom_flags(buf.ids[k]) : 0);
+                /* Keep the page correct: use the full text. */
+                serialize_buf_free(&buf);
+                buf = full;
+                buf.gen = 0;
+            } else {
+                serialize_buf_free(&full);
+            }
+            if (checks % 100 == 0)
+                fprintf(stderr, "[snapshot-verify] %lu checks, %lu mismatches\n", checks, mismatches);
+        }
     }
 
     NodeId dn = dom_node_of(js_doc);
     if (dom_kind(dn) != DOM_K_DOCUMENT) dn = g_dom_document;
+    HtmlDocument *doc = NULL;
+    bool same = false;
     if (key) {
         uint64_t k = fnv1a64(buf.data, buf.len);
-        if (*key == k) {
-            if (unchanged) *unchanged = true;
-            g_render_reuses++;
-            dom_clear_dirty(dn);
-            serialize_buf_free(&buf);
-            return NULL;
+        if (*key == k) same = true;
+        else *key = k;
+    }
+    if (same) {
+        if (unchanged) *unchanged = true;
+        g_render_reuses++;
+    } else {
+        {
+            CP_ACC("snapshot: parse");
+            doc = html_parse(buf.data, buf.len);
         }
-        *key = k;
+        if (doc) map_store_ids(doc, &buf);
+        g_render_snapshots++;
     }
-    HtmlDocument *doc;
-    {
-        CP_ACC("snapshot: parse");
-        doc = html_parse(buf.data, buf.len);
-    }
-    if (doc) map_store_ids(doc, &buf);
-    serialize_buf_free(&buf);
-    g_render_snapshots++;
     dom_clear_dirty(dn);
+    if (verify_log) {
+        /* Reuse relies on the clear reaching every dirty bit in the document. */
+        uint32_t r = dom_slot(dn);
+        static int reported;
+        for (uint32_t s = r; s && reported < 5; s = dom_next_in_subtree(s, r)) {
+            if (!(g_dom.flags[s] & DOMF_DIRTY_MASK)) continue;
+            reported++;
+            fprintf(stderr, "[snapshot-verify] dirty bits %x on <%s> survive the clear\n", g_dom.flags[s],
+                    g_dom.kind[s] == DOM_K_ELEMENT ? css_atom_str(g_dom.tag[s]) : "#node");
+        }
+    }
+    /* This snapshot's buffer is the next one's source of fragments. */
+    serialize_buf_free(&g_snap.prev);
+    g_snap.prev = buf;
+    g_snap.gen = mutated ? 0 : buf.gen;
     return doc;
+}
+
+HtmlDocument *html_document_from_js_dom_if_changed(JSContextHandle ctx, GCValue js_doc,
+                                                   uint64_t *key, bool *unchanged) {
+    return snapshot_build(ctx, js_doc, key, unchanged, false);
+}
+
+HtmlDocument *html_document_from_js_dom_incremental(JSContextHandle ctx, GCValue js_doc,
+                                                    uint64_t *key, bool *unchanged) {
+    return snapshot_build(ctx, js_doc, key, unchanged, true);
+}
+
+void html_snapshot_stats(uint64_t *reused_bytes, uint64_t *reused_elements) {
+    if (reused_bytes) *reused_bytes = g_snap.reused_bytes;
+    if (reused_elements) *reused_elements = g_snap.reused_elems;
 }
 
 /* Build a fresh native HtmlDocument from the JS document's current DOM. */

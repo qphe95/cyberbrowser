@@ -120,6 +120,7 @@ typedef struct DomStore {
     uint32_t ntrees, trees_cap, tree_free;
 
     uint64_t structure_version;   /* bumped by every tree mutation */
+    uint64_t dirty_version;       /* bumped by every dom_mark_dirty */
     uint64_t attr_version;        /* bumped by every attribute mutation */
     uint64_t text_version;        /* bumped by every text mutation */
     uint64_t class_version;       /* bumped when an id or class attribute changes */

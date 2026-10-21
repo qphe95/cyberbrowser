@@ -10395,10 +10395,13 @@ static void ctx_find_callback(GCHandle handle, void *user_data)
 }
 
 uint64_t JS_watched_write_epoch;
+void (*JS_watched_write_hook)(GCHandle obj);
 
 #define JS_NOTE_WATCHED_WRITE(p) do { \
-    if (unlikely(SAFE_GET_OR(p, JSObjectHandle, is_watched, false))) \
+    if (unlikely(SAFE_GET_OR(p, JSObjectHandle, is_watched, false))) { \
         JS_watched_write_epoch++; \
+        if (JS_watched_write_hook) JS_watched_write_hook(p); \
+    } \
 } while (0)
 
 void JS_SetWatched(JSContextHandle ctx, GCValue obj)

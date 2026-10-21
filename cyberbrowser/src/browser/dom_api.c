@@ -187,6 +187,55 @@ static GCValue global_proto(JSContextHandle ctx, const char *ctor_name) {
 }
 
 /* The element's style object: DomWrap.style for store wrappers. */
+/* Style object -> element, so a write to el.style marks the element dirty
+ * (the render snapshot reuses clean subtrees).  Open addressing on the
+ * object's GC handle; a recycled handle only marks some element dirty. */
+static GCHandle *g_style_obj;
+static NodeId *g_style_owner;
+static uint32_t g_style_cap, g_style_n;
+
+static void style_owner_written(GCHandle obj) {
+    if (!g_style_cap) return;
+    uint32_t h = (obj * 2654435761u) & (g_style_cap - 1);
+    while (g_style_obj[h]) {
+        if (g_style_obj[h] == obj) {
+            if (dom_valid(g_style_owner[h])) dom_mark_dirty(g_style_owner[h], DOMF_DIRTY_ATTR);
+            return;
+        }
+        h = (h + 1) & (g_style_cap - 1);
+    }
+}
+
+static void style_owner_note(GCValue style, NodeId owner) {
+    if (GC_VALUE_GET_TAG(style) >= 0 || !owner) return;
+    GCHandle obj = GC_VALUE_GET_HANDLE(style);
+    if (obj == GC_HANDLE_NULL) return;
+    if (2 * (g_style_n + 1) > g_style_cap) {
+        uint32_t nc = g_style_cap ? g_style_cap * 2 : 4096;
+        GCHandle *no = (GCHandle *)calloc(nc, sizeof(GCHandle));
+        NodeId *nw = (NodeId *)calloc(nc, sizeof(NodeId));
+        if (!no || !nw) { free(no); free(nw); return; }
+        for (uint32_t i = 0; i < g_style_cap; i++) {
+            if (!g_style_obj[i]) continue;
+            uint32_t h = (g_style_obj[i] * 2654435761u) & (nc - 1);
+            while (no[h]) h = (h + 1) & (nc - 1);
+            no[h] = g_style_obj[i];
+            nw[h] = g_style_owner[i];
+        }
+        free(g_style_obj);
+        free(g_style_owner);
+        g_style_obj = no;
+        g_style_owner = nw;
+        g_style_cap = nc;
+        JS_watched_write_hook = style_owner_written;
+    }
+    uint32_t h = (obj * 2654435761u) & (g_style_cap - 1);
+    while (g_style_obj[h] && g_style_obj[h] != obj) h = (h + 1) & (g_style_cap - 1);
+    if (!g_style_obj[h]) g_style_n++;
+    g_style_obj[h] = obj;
+    g_style_owner[h] = owner;
+}
+
 GCValue dom_element_style(JSContextHandle ctx, GCValue el, bool create) {
     DomWrapHandle wd = dom_wrap_of(el);
     if (wd == GC_HANDLE_NULL) {
@@ -201,6 +250,7 @@ GCValue dom_element_style(JSContextHandle ctx, GCValue el, bool create) {
     SAFE_SET(wd, DomWrapHandle, style, style);
     /* Inline style attribute declarations land on the new object. */
     NodeId n = dom_node_of(el);
+    style_owner_note(style, n);
     const char *attr = dom_attr(n, "style");
     if (attr && attr[0]) css_apply_inline_style_to(ctx, style, attr);
     return style;

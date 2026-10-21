@@ -647,6 +647,55 @@ TEST(test_dom_render_snapshot_reuse) {
     return true;
 }
 
+/* An incremental snapshot (copying clean subtrees of the previous one) is
+ * the same text as a full one after each kind of change, including one deep
+ * in a subtree that was built while detached and then attached. */
+static bool snapshot_inc_matches_full(JSContextHandle ctx, GCValue doc) {
+    uint64_t ki = 0, kf = 0;
+    bool u = false;
+    HtmlDocument *a = html_document_from_js_dom_incremental(ctx, doc, &ki, &u);
+    HtmlDocument *b = html_document_from_js_dom_if_changed(ctx, doc, &kf, &u);
+    if (a) html_document_free(a);
+    if (b) html_document_free(b);
+    return ki != 0 && ki == kf;
+}
+
+TEST(test_dom_render_snapshot_incremental) {
+    JSContextHandle ctx = get_shared_test_context();
+    if (!dom_ready(ctx)) { printf("    (skipped - no document)\n"); return true; }
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue doc = JS_GetPropertyStr(ctx, global, "document");
+    ASSERT_EQ(1, js_int(ctx,
+        "globalThis.__si=document.createElement('div'); __si.innerHTML="
+        "'<p><span>a</span></p><p>b</p><section><em>c</em></section>'; document.body.appendChild(__si); 1"));
+    ASSERT_TRUE(snapshot_inc_matches_full(ctx, doc));
+    uint64_t bytes0 = 0;
+    html_snapshot_stats(&bytes0, NULL);
+    ASSERT_TRUE(snapshot_inc_matches_full(ctx, doc));
+    uint64_t bytes1 = 0;
+    html_snapshot_stats(&bytes1, NULL);
+    ASSERT_TRUE(bytes1 > bytes0);   /* nothing changed: the clean document was copied */
+    static const char *const steps[] = {
+        "__si.querySelector('span').textContent='a2'",
+        "globalThis.__sx=document.createElement('div'); __sx.appendChild(document.createElement('i'));"
+        " __sx.firstChild.textContent='t'; __si.appendChild(__sx)",
+        "__sx.firstChild.textContent='u'",
+        "__sx.firstChild.appendChild(document.createElement('b'))",
+        "__si.querySelector('em').style.color='blue'",
+        "__si.querySelector('em').setAttribute('title','z')",
+        "__si.querySelector('section').remove()",
+        "__si.insertBefore(__sx, __si.firstChild)",
+    };
+    for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
+        char js[512];
+        snprintf(js, sizeof(js), "%s; 1", steps[i]);
+        ASSERT_EQ(1, js_int(ctx, js));
+        ASSERT_TRUE(snapshot_inc_matches_full(ctx, doc));
+    }
+    ASSERT_EQ(1, js_int(ctx, "__si.remove(); __si=null; __sx=null; 1"));
+    return true;
+}
+
 /* el.style is [PutForwards=cssText]: assigning it (Polymer's style="{{..}}"
  * bindings do, in strict mode) sets the inline style instead of throwing. */
 TEST(test_dom_style_assignment_forwards_to_css_text) {
@@ -987,6 +1036,7 @@ void run_dom_tests(void) {
     RUN_TEST(test_dom_index_large_document);
     RUN_TEST(test_dom_fetch_pool_overlaps_in_order);
     RUN_TEST(test_dom_render_snapshot_reuse);
+    RUN_TEST(test_dom_render_snapshot_incremental);
     RUN_TEST(test_dom_style_assignment_forwards_to_css_text);
     RUN_TEST(test_dom_layout_metrics_block_boxes);
     RUN_TEST(test_dom_layout_metrics_see_each_change);

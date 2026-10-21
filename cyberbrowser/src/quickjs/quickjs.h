@@ -1502,6 +1502,8 @@ void JS_SetIsHTMLDDA(JSContextHandle ctx, GCValue obj);
    of them changed. */
 void JS_SetWatched(JSContextHandle ctx, GCValue obj);
 extern uint64_t JS_watched_write_epoch;
+/* Called (when set) with the handle of each watched object written. */
+extern void (*JS_watched_write_hook)(GCHandle obj);
 
 typedef struct JSModuleDef JSModuleDef;
 

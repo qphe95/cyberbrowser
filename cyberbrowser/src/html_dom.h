@@ -151,6 +151,15 @@ HtmlDocument *html_document_from_js_dom(JSContextHandle ctx, GCValue js_doc);
  * `*key` names (returns NULL with *unchanged set); *key is updated. */
 HtmlDocument *html_document_from_js_dom_if_changed(JSContextHandle ctx, GCValue js_doc,
                                                    uint64_t *key, bool *unchanged);
+/* The same, copying the previous snapshot's text for subtrees the store has
+ * not marked dirty since (and that read no JS-only state).  Changes to
+ * properties that live only on JS objects show up at the next full
+ * (non-incremental) snapshot.  CYBER_SNAPSHOT_VERIFY=1 compares each with
+ * a full snapshot. */
+HtmlDocument *html_document_from_js_dom_incremental(JSContextHandle ctx, GCValue js_doc,
+                                                    uint64_t *key, bool *unchanged);
+/* Bytes and elements incremental snapshots copied (tests, benchmarks). */
+void html_snapshot_stats(uint64_t *reused_bytes, uint64_t *reused_elements);
 /* Render snapshots built / reused (tests, benchmarks). */
 void html_render_stats(uint64_t *snapshots, uint64_t *reuses);
 

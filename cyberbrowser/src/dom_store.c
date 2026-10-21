@@ -613,6 +613,7 @@ void dom_mark_dirty(NodeId id, uint16_t bits) {
     if (!dom_valid(id)) return;
     uint32_t s = dom_slot(id);
     g_dom.flags[s] |= bits;
+    g_dom.dirty_version++;
     for (uint32_t p = g_dom.parent[s] ? g_dom.parent[s] : g_dom.host[s]; p;
          p = g_dom.parent[p] ? g_dom.parent[p] : g_dom.host[p]) {
         if (g_dom.flags[p] & DOMF_DIRTY_DESCENDANT) break;
@@ -624,7 +625,10 @@ void dom_clear_dirty(NodeId root) {
     if (!dom_valid(root)) return;
     uint32_t r = dom_slot(root);
     for (uint32_t s = r; s; ) {
-        bool down = (g_dom.flags[s] & DOMF_DIRTY_DESCENDANT) != 0;
+        /* Also below a node with bits of its own: children linked to it may
+         * carry bits set while they were detached (unpropagated), and a
+         * stale DESCENDANT bit would stop later marks from reaching here. */
+        bool down = (g_dom.flags[s] & DOMF_DIRTY_MASK) != 0;
         g_dom.flags[s] &= (uint16_t)~DOMF_DIRTY_MASK;
         if (g_dom.shadow[s]) dom_clear_dirty(dom_id_of(g_dom.shadow[s]));
         if (down && g_dom.first[s]) { s = g_dom.first[s]; continue; }
@@ -702,6 +706,10 @@ const uint32_t *dom_id_index_lookup(CssAtom a, uint32_t *n) {
 extern NodeId g_dom_document;
 
 void dom_note_connected_change(uint32_t s) {
+    /* Every mutation passes here with the node whose content changed (the
+     * parent for (un)linking): mark it dirty, so snapshots that keep
+     * clean subtrees (html_dom.c) see the change. */
+    if (s && g_dom.kind[s] != DOM_K_FREE) dom_mark_dirty(dom_id_of(s), DOMF_DIRTY_CHILDREN);
     if (!s || !g_dom_document || !dom_valid(g_dom_document)) return;
     if (dom_tree_root_slot(s) == dom_slot(g_dom_document)) g_dom.connected_version++;
 }

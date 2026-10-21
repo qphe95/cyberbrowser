@@ -172,11 +172,25 @@ static bool lq_ensure(JSContextHandle ctx)
     bool unchanged = false;
     uint64_t key = g_lq_valid ? g_lq_key : 0;
     HtmlDocument *doc;
+    /* Between full checks the snapshot copies the subtrees nothing marked
+     * dirty; a full one at least every LQ_FULL_CHECK_MS also re-reads the
+     * state only JS objects hold. CYBER_SNAPSHOT_INC=0 always takes full ones. */
+    static int inc_env = -1;
+    if (inc_env < 0) {
+        const char *e = cyber_getenv("CYBER_SNAPSHOT_INC");
+        inc_env = !(e && e[0] == '0');
+    }
+    bool full = !inc_env || !g_lq_cheap_ok || now - g_lq_full_at >= LQ_FULL_CHECK_MS;
     {
         CP_ACC("forced layout: serialize+snapshot");
-        doc = html_document_from_js_dom_if_changed(ctx, js_doc, &key, &unchanged);
+        doc = full ? html_document_from_js_dom_if_changed(ctx, js_doc, &key, &unchanged)
+                   : html_document_from_js_dom_incremental(ctx, js_doc, &key, &unchanged);
     }
-    if (unchanged && g_lq_valid) { lq_note_full_check(now); return true; }
+    if (unchanged && g_lq_valid) {
+        if (full) lq_note_full_check(now);
+        else lq_cheap_key(g_lq_cheap);
+        return true;
+    }
     if (!doc) return g_lq_valid;
 
     g_lq_running = true;
@@ -201,7 +215,8 @@ static bool lq_ensure(JSContextHandle ctx)
     }
     if (g_lq_valid) {
         g_lq_key = key;
-        lq_note_full_check(now);
+        if (full) lq_note_full_check(now);
+        else lq_cheap_key(g_lq_cheap);
         lq_map_slots();
     } else {
         lq_free();
