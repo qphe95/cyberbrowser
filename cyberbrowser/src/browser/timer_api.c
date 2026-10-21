@@ -218,7 +218,7 @@ int add_timer(JSContextHandle ctx, TimerType type, GCValue callback,
     Timer *timer = &g_timer_state.timers[slot];
     timer->id = g_timer_state.next_id++;
     timer->type = type;
-    timer->trigger_time = platform_get_time_ms() + delay_ms;
+    timer->trigger_time = page_time_ms() + delay_ms;
     timer->interval = (type == TIMER_TYPE_INTERVAL) ? delay_ms : 0;
     timer->active = 1;
     
@@ -325,7 +325,7 @@ static GCValue js_idle_deadline_time_remaining(JSContextHandle ctx, GCValue this
     if (JS_IsNumber(deadline_val)) {
         JS_ToInt64(ctx, &deadline, deadline_val);
     }
-    int64_t now = (int64_t)platform_get_time_ms();
+    int64_t now = (int64_t)page_time_ms();
     double remaining = (double)(deadline - now);
     if (remaining < 0) remaining = 0;
     return JS_NewFloat64(ctx, remaining);
@@ -379,7 +379,7 @@ void execute_timer(JSContextHandle ctx, int id) {
         g_timer_state.timer_count--;
     } else if (timer->type == TIMER_TYPE_INTERVAL) {
         // Interval: schedule next trigger
-        timer->trigger_time = platform_get_time_ms() + timer->interval;
+        timer->trigger_time = page_time_ms() + timer->interval;
     }
     
     pthread_mutex_unlock(&g_timer_state.mutex);
@@ -388,13 +388,13 @@ void execute_timer(JSContextHandle ctx, int id) {
     if (JS_IsFunction(ctx, callback)) {
         // For RAF, pass the timestamp as argument
         if (timer->type == TIMER_TYPE_RAF && arg_count == 0) {
-            args[0] = JS_NewFloat64(ctx, (double)platform_get_time_ms());
+            args[0] = JS_NewFloat64(ctx, (double)page_time_ms());
             arg_count = 1;
         }
         
         // For idle callback, pass an IdleDeadline object with a real deadline.
         if (timer->type == TIMER_TYPE_IDLE_CALLBACK && arg_count == 0) {
-            unsigned long long idle_deadline_ms = g_idle_deadline_ms ? g_idle_deadline_ms : (platform_get_time_ms() + 16);
+            unsigned long long idle_deadline_ms = g_idle_deadline_ms ? g_idle_deadline_ms : (page_time_ms() + 16);
             GCValue idle_deadline = JS_NewObject(ctx);
             JS_SetPropertyStr(ctx, idle_deadline, "didTimeout", JS_FALSE);
             JS_SetPropertyStr(ctx, idle_deadline, "__deadline",
@@ -487,7 +487,7 @@ int timer_process_due(JSContextHandle ctx) {
     /* Microtasks queued before this turn (by the scripts that just ran)
      * come before any timer. */
     timer_microtask_checkpoint(ctx);
-    unsigned long long now = platform_get_time_ms();
+    unsigned long long now = page_time_ms();
     /* Finished network requests settle their fetch() promises first. */
     int processed = js_quickjs_net_poll(ctx);
     /* Media tasks (MSE update events, playback events) too. */
@@ -512,7 +512,7 @@ int timer_process_due(JSContextHandle ctx) {
 int timer_has_pending(void) {
     pthread_mutex_lock(&g_timer_state.mutex);
     
-    unsigned long long now = platform_get_time_ms();
+    unsigned long long now = page_time_ms();
     int has_pending = 0;
     
     for (int i = 0; i < MAX_TIMERS; i++) {
@@ -830,7 +830,7 @@ static GCValue scheduler_post_task(JSContextHandle ctx, GCValue callback, const 
     }
     task->id = g_scheduler_next_id++;
     task->priority = scheduler_parse_priority(priority_str);
-    task->scheduled_time = platform_get_time_ms() + delay;
+    task->scheduled_time = page_time_ms() + delay;
     task->callback_handle = store_callback(ctx, callback);
     GCValue promise = scheduler_create_promise(ctx, &task->resolve_handle, &task->reject_handle);
     task->arg_count = 0;
@@ -850,7 +850,7 @@ static GCValue scheduler_yield(JSContextHandle ctx, const char *priority_str) {
     }
     task->id = g_scheduler_next_id++;
     task->priority = scheduler_parse_priority(priority_str);
-    task->scheduled_time = platform_get_time_ms();
+    task->scheduled_time = page_time_ms();
     GCValue promise = scheduler_create_promise(ctx, &task->resolve_handle, &task->reject_handle);
     /* No callback: yield resolves with undefined once the task is processed. */
     scheduler_insert_task(task);
@@ -859,7 +859,7 @@ static GCValue scheduler_yield(JSContextHandle ctx, const char *priority_str) {
 
 int scheduler_process_tasks(JSContextHandle ctx) {
     scheduler_state_ensure_initialized();
-    unsigned long long start = platform_get_time_ms();
+    unsigned long long start = page_time_ms();
     unsigned long long now = start;
     int processed = 0;
     bool keep_going = true;
@@ -869,7 +869,7 @@ int scheduler_process_tasks(JSContextHandle ctx) {
             SchedulerTask *task = g_scheduler_queues[p];
             while (task && task->scheduled_time <= now) {
                 /* Respect the time slice so scheduler tasks don't starve the rendering loop. */
-                if (platform_get_time_ms() - start >= SCHEDULER_TIME_SLICE_MS) {
+                if (page_time_ms() - start >= SCHEDULER_TIME_SLICE_MS) {
                     return processed;
                 }
                 scheduler_remove_task(task);
@@ -904,7 +904,7 @@ int scheduler_process_tasks(JSContextHandle ctx) {
 
                 scheduler_task_free(task);
                 processed++;
-                now = platform_get_time_ms();
+                now = page_time_ms();
 
                 task = g_scheduler_queues[p]; /* head may have changed */
             }

@@ -78,6 +78,16 @@ void js_quickjs_pump_timers_and_jobs(void);
 /* Asynchronous fetch(): requests in flight (started, not yet settled);
  * settle the finished ones (main thread, returns how many); wait up to `ms`
  * for one to finish. */
+/* The page's clock (timers, requestAnimationFrame, idle deadlines): real
+ * time plus the virtual-time offset the event loop adds while it skips
+ * idle waits (JS_time_offset_ms, also in Date and performance.now). */
+static inline unsigned long long page_time_ms(void) {
+    return platform_get_time_ms() + (unsigned long long)JS_time_offset_ms;
+}
+static inline void page_time_advance(unsigned long long ms) {
+    JS_time_offset_ms += (int64_t)ms;
+}
+
 int js_quickjs_network_pending(void);
 int js_quickjs_net_poll(JSContextHandle ctx);
 void js_quickjs_net_wait(unsigned int ms);

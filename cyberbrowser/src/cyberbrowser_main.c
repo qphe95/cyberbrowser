@@ -434,6 +434,22 @@ static void print_body_snippet(HtmlDocument *doc) {
 /* Phase 3 event loop helpers                                                */
 /* ------------------------------------------------------------------------- */
 
+/* Virtual time (CYBER_REAL_TIME=1: off).  When the page is idle, waiting
+ * only for its own timers, the event loop advances the page clock to the
+ * next one instead of sleeping (as headless Chrome's virtual time does).
+ * Never while a fetch or an image is in flight: page timeouts that race the
+ * network must not fire early. */
+static ImageCache *g_loop_images;
+
+static bool virtual_time_idle(void) {
+    static int real = -1;
+    if (real < 0) real = cyber_getenv("CYBER_REAL_TIME") ? 1 : 0;
+    if (real) return false;
+    if (js_quickjs_network_pending() > 0) return false;
+    if (g_loop_images && image_cache_has_pending(g_loop_images)) return false;
+    return true;
+}
+
 /* One event-loop drain: due timers, scheduler tasks and promise jobs, again
  * until nothing is due.  With `wait`, also wait (bounded) for timers due
  * soon and for fetches in flight. */
@@ -442,10 +458,12 @@ static bool pump_event_loop(JSContextHandle ctx, bool wait) {
     JSRuntimeHandle rt = JS_GetRuntime(ctx);
     bool did_work = false;
     int iterations = 0;
-    unsigned long long pump_start = platform_get_time_ms();
+    /* Budgets in page time: with virtual time they bound what a pump skips
+     * ahead exactly as they bounded what it slept. */
+    unsigned long long pump_start = page_time_ms();
     while (iterations < 100) {
         // Give idle callbacks a real, per-iteration idle budget.
-        unsigned long long idle_deadline = platform_get_time_ms() + 8;
+        unsigned long long idle_deadline = page_time_ms() + 8;
         timer_set_idle_deadline(idle_deadline);
 
         /* Top of an event-loop turn: a tick boundary. */
@@ -468,12 +486,14 @@ static bool pump_event_loop(JSContextHandle ctx, bool wait) {
              * bounded window instead of dropping it, so delayed callbacks run. */
             unsigned long long next = timer_next_due_ms();
             if (next != (unsigned long long)-1) {
-                unsigned long long now = platform_get_time_ms();
+                unsigned long long now = page_time_ms();
                 unsigned long long wait = next > now ? next - now : 0;
                 unsigned long long elapsed = now - pump_start;
                 if (wait <= 200 && elapsed + wait <= 3000) {
                     if (js_quickjs_network_pending() > 0)
                         js_quickjs_net_wait((unsigned int)(wait ? wait : 1));
+                    else if (virtual_time_idle())
+                        page_time_advance(wait ? wait : 1);
                     else
                         platform_sleep_ms((unsigned int)(wait ? wait : 1));
                     continue;
@@ -481,7 +501,7 @@ static bool pump_event_loop(JSContextHandle ctx, bool wait) {
             }
             /* A fetch() in flight: wait for its response like for a timer. */
             if (js_quickjs_network_pending() > 0 &&
-                platform_get_time_ms() - pump_start <= 3000) {
+                page_time_ms() - pump_start <= 3000) {
                 js_quickjs_net_wait(50);
                 continue;
             }
@@ -1104,6 +1124,7 @@ int main(int argc, char *argv[]) {
     /* The image cache exists from the start so scripts reading
      * img.naturalWidth / img.complete start fetches early. */
     ImageCache *image_cache = image_cache_create();
+    g_loop_images = image_cache;
     display_list_set_image_cache(image_cache);
     /* Image fetched/failed: fire load/error on its <img> elements and re-render. */
     image_cache_set_notify(image_cache, on_image_progress, NULL);
@@ -1556,7 +1577,9 @@ int main(int argc, char *argv[]) {
         if (qm && *qm) quiet_ms = strtoull(qm, NULL, 10);
     }
     uint64_t last_stamp = dom_change_stamp();
-    unsigned long long last_change_ms = settle_start_ms;
+    /* The quiet window is page time: virtual time can cross it. */
+    unsigned long long last_change_ms = page_time_ms();
+    unsigned long long settle_start_page = last_change_ms;
     CP_BEGIN("quiescence-loop");
     while (loop_iterations < 100) {
         loop_iterations++;
@@ -1608,12 +1631,12 @@ int main(int argc, char *argv[]) {
             break;
         }
         {
-            unsigned long long now = platform_get_time_ms();
+            unsigned long long now = page_time_ms();
             uint64_t stamp = dom_change_stamp();
             if (cyber_getenv("CYBER_SETTLE_LOG")) {
                 static uint64_t ps, pa, pw, pl;
                 fprintf(stderr, "[settle] t=%llu changes=%llu (connected %llu structure %llu style %llu layoutreq %llu) net=%d images=%d timers=%d\n",
-                        now - settle_start_ms, (unsigned long long)(stamp - last_stamp),
+                        now - settle_start_page, (unsigned long long)(stamp - last_stamp),
                         (unsigned long long)(g_dom.connected_version - pa), (unsigned long long)(g_dom.structure_version - ps),
                         (unsigned long long)(JS_watched_write_epoch - pw),
                         (unsigned long long)(g_dom_layout_requests - pl),
@@ -1625,8 +1648,10 @@ int main(int argc, char *argv[]) {
                 last_stamp = stamp;
                 last_change_ms = now;
             } else if (quiet_ms && !g_dom_needs_layout && now - last_change_ms >= quiet_ms) {
-                printf("Page quiet for %llu ms after %d iterations (%llu ms); pending timers left running.\n",
-                       now - last_change_ms, loop_iterations, now - settle_start_ms);
+                printf("Page quiet for %llu ms after %d iterations (%llu ms page time, %llu ms real); "
+                       "pending timers left running.\n",
+                       now - last_change_ms, loop_iterations, now - settle_start_page,
+                       platform_get_time_ms() - settle_start_ms);
                 break;
             }
         }
@@ -1635,7 +1660,15 @@ int main(int argc, char *argv[]) {
              * progress instead of spinning the settle loop. */
             CP_SCOPE("wait-images");
             if (js_quickjs_network_pending() > 0) js_quickjs_net_wait(50);
-            else image_cache_wait_progress(image_cache, 100);
+            else if (virtual_time_idle()) {
+                /* Nothing in flight: skip ahead to the next timer, or to the
+                 * end of the quiet window. */
+                unsigned long long now = page_time_ms();
+                unsigned long long target = quiet_ms ? last_change_ms + quiet_ms : now + 100;
+                unsigned long long next = timer_next_due_ms();
+                if (next != (unsigned long long)-1 && next < target) target = next;
+                page_time_advance(target > now ? target - now : 1);
+            } else image_cache_wait_progress(image_cache, 100);
         }
         if (settle_final || platform_get_time_ms() - settle_start_ms > settle_budget_ms) {
             if (g_dom_needs_layout && !settle_final) {

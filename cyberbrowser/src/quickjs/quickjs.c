@@ -60618,11 +60618,13 @@ static GCValue get_date_string(JSContextHandle ctx, GCValue this_val,
     return JS_NewStringLen(ctx, buf, pos);
 }
 
-/* OS dependent: return the UTC time in ms since 1970. */
+int64_t JS_time_offset_ms;
+
+/* OS dependent: return the UTC time in ms since 1970 (plus virtual time). */
 static int64_t date_now(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
-    return (int64_t)tv.tv_sec * 1000 + (tv.tv_usec / 1000);
+    return (int64_t)tv.tv_sec * 1000 + (tv.tv_usec / 1000) + JS_time_offset_ms;
 }
 
 static GCValue js_date_constructor(JSContextHandle ctx, GCValue new_target,

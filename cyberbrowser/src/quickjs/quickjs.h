@@ -1502,6 +1502,10 @@ void JS_SetIsHTMLDDA(JSContextHandle ctx, GCValue obj);
    of them changed. */
 void JS_SetWatched(JSContextHandle ctx, GCValue obj);
 extern uint64_t JS_watched_write_epoch;
+/* Virtual time: milliseconds added to every clock the page reads (Date,
+ * and the embedder's timers and performance.now).  The embedder advances
+ * it to skip idle waits; it never goes back. */
+extern int64_t JS_time_offset_ms;
 /* Called (when set) with the handle of each watched object written. */
 extern void (*JS_watched_write_hook)(GCHandle obj);
 

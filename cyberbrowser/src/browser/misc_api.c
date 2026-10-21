@@ -3292,7 +3292,7 @@ double performance_get_time_ms(void) {
 GCValue js_performance_now(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)argc; (void)argv;
     // Return high resolution timestamp relative to time origin
-    double now = performance_get_time_ms() - g_performance_time_origin;
+    double now = performance_get_time_ms() + (double)JS_time_offset_ms - g_performance_time_origin;
     return JS_NewFloat64(ctx, now);
 }
 
@@ -3415,7 +3415,7 @@ GCValue js_performance_mark(JSContextHandle ctx, GCValue this_val, int argc, GCV
     PerformanceEntryData* entry = &perf->entries[perf->entry_count++];
     strncpy(entry->name, name, sizeof(entry->name) - 1);
     strncpy(entry->entryType, "mark", sizeof(entry->entryType) - 1);
-    entry->startTime = performance_get_time_ms() - g_performance_time_origin;
+    entry->startTime = performance_get_time_ms() + (double)JS_time_offset_ms - g_performance_time_origin;
     entry->duration = 0;
     
     return JS_UNDEFINED;
@@ -3437,7 +3437,7 @@ GCValue js_performance_measure(JSContextHandle ctx, GCValue this_val, int argc, 
     }
     
     double start_time = 0;
-    double end_time = performance_get_time_ms() - g_performance_time_origin;
+    double end_time = performance_get_time_ms() + (double)JS_time_offset_ms - g_performance_time_origin;
     
     // Parse startMark if provided
     if (argc >= 2 && JS_IsString(argv[1])) {
