@@ -1553,18 +1553,27 @@ void JS_SetCanBlock(JSRuntimeHandle rt, BOOL can_block)
     SAFE_SET(rt, JSRuntimeHandle, can_block, can_block);
 }
 
+/* Instructions left before the interpreter calls the interrupt handler; 0
+ * when no handler is set.  A plain static rather than the runtime's field
+ * so the per-instruction check is one load, not a handle lookup.  JS runs
+ * on one thread. */
+static uint32_t g_interrupt_countdown;
+
 void JS_SetInterruptHandler(JSRuntimeHandle rt, JSInterruptHandler *handler, void *opaque)
 {
     SAFE_SET(rt, JSRuntimeHandle, interrupt_handler, handler);
     SAFE_SET(rt, JSRuntimeHandle, interrupt_opaque, opaque);
     SAFE_SET(rt, JSRuntimeHandle, instruction_counter_init, 10000);
     SAFE_SET(rt, JSRuntimeHandle, instruction_counter, 10000);
+    g_interrupt_countdown = handler ? 10000 : 0;
 }
 
 void JS_ResetInstructionCounter(JSRuntimeHandle rt, uint32_t count)
 {
     SAFE_SET(rt, JSRuntimeHandle, instruction_counter_init, count ? count : 10000);
     SAFE_SET(rt, JSRuntimeHandle, instruction_counter, count ? count : 10000);
+    if (SAFE_GET_OR(rt, JSRuntimeHandle, interrupt_handler, NULL))
+        g_interrupt_countdown = count ? count : 10000;
 }
 
 void JS_SetSharedArrayBufferFunctions(JSRuntimeHandle rt,
@@ -2042,6 +2051,31 @@ void JS_SetRuntimeInfo(JSRuntimeHandle rt, const char *s)
         SAFE_SET(rt, JSRuntimeHandle, rt_info, s);
 }
 
+/* C function frames, one per nesting depth of C calls, reused from call to
+ * call.  Nothing keeps a C frame after its call returns (closures capture
+ * bytecode frames only), and a fresh GC frame per native call made every
+ * call touch new nursery memory.  The frames are roots; js_call_c_function
+ * clears their references when the call returns.  JS runs on one thread. */
+#define C_FRAME_POOL_DEPTH 64
+#define C_FRAME_POOL_MIN   (sizeof(JSStackFrame) + 8 * sizeof(GCValue))
+static GCHandle g_c_frame_pool[C_FRAME_POOL_DEPTH];
+static size_t g_c_frame_pool_size[C_FRAME_POOL_DEPTH];
+static int g_c_frame_depth;
+static uint32_t g_c_frame_pool_epoch;  /* g_gc_epoch the pool belongs to */
+
+/* Forget the pooled frames; their roots too while their heap is live. */
+static void js_c_frame_pool_clear(BOOL heap_live)
+{
+    for (int i = 0; i < C_FRAME_POOL_DEPTH; i++) {
+        if (heap_live && g_c_frame_pool[i] != GC_HANDLE_NULL)
+            gc_remove_root(g_c_frame_pool[i]);
+        g_c_frame_pool[i] = GC_HANDLE_NULL;
+        g_c_frame_pool_size[i] = 0;
+    }
+    g_c_frame_depth = 0;
+    g_c_frame_pool_epoch = g_gc_epoch;
+}
+
 void JS_FreeRuntime(JSRuntimeHandle rt)
 {
     struct list_head *el, *el1;
@@ -2050,6 +2084,7 @@ void JS_FreeRuntime(JSRuntimeHandle rt)
     QJS_LOGI("JS_FreeRuntime: ENTER");
     /* No concurrent collection while the runtime is torn down. */
     gc_background_stop();
+    js_c_frame_pool_clear(TRUE);
 
     /* Free all pending jobs from job queue */
     /* Unified GC: Don't call JS_FreeContext here - contexts are freed by GC.
@@ -19559,15 +19594,36 @@ JSStackFrame *js_frame_deref(GCHandle frame_handle)
 #define JS_CALL_FLAG_COPY_ARGV   (1 << 1)
 #define JS_CALL_FLAG_GENERATOR   (1 << 2)
 
-/* Allocate a C function stack frame from GC heap */
+/* Allocate a C function stack frame from GC heap (from g_c_frame_pool when
+ * one fits) */
 static JSStackFrame *js_alloc_c_frame(JSContextHandle ctx, int argc, int arg_count,
                                       GCValue *argv, GCValue **out_arg_buf)
 {
     size_t frame_size = sizeof(JSStackFrame);
     size_t args_size = (arg_count > argc) ? sizeof(GCValue) * arg_count : 0;
     size_t total_size = frame_size + args_size;
-    
-    GCHandle handle = gc_alloc(total_size, JS_GC_OBJ_TYPE_STACK_FRAME);
+    int depth;
+    GCHandle handle;
+
+    /* A heap torn down by gc_cleanup() without JS_FreeRuntime. */
+    if (unlikely(g_c_frame_pool_epoch != g_gc_epoch))
+        js_c_frame_pool_clear(FALSE);
+    depth = g_c_frame_depth;
+    if (depth < C_FRAME_POOL_DEPTH && g_c_frame_pool_size[depth] >= total_size) {
+        handle = g_c_frame_pool[depth];
+    } else if (depth < C_FRAME_POOL_DEPTH) {
+        size_t cap = total_size > C_FRAME_POOL_MIN ? total_size : C_FRAME_POOL_MIN;
+        handle = gc_alloc(cap, JS_GC_OBJ_TYPE_STACK_FRAME);
+        if (handle) {
+            if (g_c_frame_pool[depth] != GC_HANDLE_NULL)
+                gc_remove_root(g_c_frame_pool[depth]);
+            gc_add_root(handle);
+            g_c_frame_pool[depth] = handle;
+            g_c_frame_pool_size[depth] = cap;
+        }
+    } else {
+        handle = gc_alloc(total_size, JS_GC_OBJ_TYPE_STACK_FRAME);
+    }
     if (!handle) {
         JS_ThrowOutOfMemory(ctx);
         return NULL;
@@ -19616,6 +19672,7 @@ static GCValue js_call_c_function(JSContextHandle ctx, GCValue func_obj,
     sf = js_alloc_c_frame(ctx, argc, arg_count, argv, &arg_buf);
     if (!sf)
         return JS_EXCEPTION;
+    g_c_frame_depth++;
 
     prev_sf = js_rt_current_stack_frame(rt);
     gc_set_heap_handle(&sf->prev_frame_handle, prev_sf ? prev_sf->self_handle : GC_HANDLE_NULL);
@@ -19709,6 +19766,12 @@ static GCValue js_call_c_function(JSContextHandle ctx, GCValue func_obj,
     }
 
     js_rt_pop_stack_frame(rt, sf);
+    if (g_c_frame_depth > 0 && --g_c_frame_depth < C_FRAME_POOL_DEPTH) {
+        /* A pooled frame stays rooted: drop what it references. */
+        sf->cur_func = JS_UNDEFINED;
+        sf->prev_frame_handle = GC_HANDLE_NULL;
+        sf->arg_count = 0;
+    }
     return ret_val;
 }
 
@@ -20157,18 +20220,16 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
 
         /* Cooperative interrupt check. Only active when an interrupt handler
          * has been installed and the counter has been primed. */
-        if (SAFE_GET_OR(rt, JSRuntimeHandle, interrupt_handler, NULL) && SAFE_GET_OR(rt, JSRuntimeHandle, instruction_counter, 0)) {
-            uint32_t cnt = SAFE_GET_OR(rt, JSRuntimeHandle, instruction_counter, 0) - 1;
-            SAFE_SET(rt, JSRuntimeHandle, instruction_counter, cnt);
-            if (cnt == 0) {
-                JSInterruptHandler *handler = SAFE_GET_OR(rt, JSRuntimeHandle, interrupt_handler, NULL);
-                if (handler) {
-                    if (handler(rt, SAFE_GET_OR(rt, JSRuntimeHandle, interrupt_opaque, NULL))) {
-                        JS_ThrowInternalError(ctx, "execution interrupted");
-                        goto exception;
-                    }
+        if (unlikely(g_interrupt_countdown) && unlikely(--g_interrupt_countdown == 0)) {
+            JSInterruptHandler *handler = SAFE_GET_OR(rt, JSRuntimeHandle, interrupt_handler, NULL);
+            uint32_t init = SAFE_GET_OR(rt, JSRuntimeHandle, instruction_counter_init, 0);
+            /* Re-arm first: the handler may clear itself. */
+            g_interrupt_countdown = init ? init : 10000;
+            if (handler) {
+                if (handler(rt, SAFE_GET_OR(rt, JSRuntimeHandle, interrupt_opaque, NULL))) {
+                    JS_ThrowInternalError(ctx, "execution interrupted");
+                    goto exception;
                 }
-                SAFE_SET(rt, JSRuntimeHandle, instruction_counter, SAFE_GET_OR(rt, JSRuntimeHandle, instruction_counter_init, 0) ? SAFE_GET_OR(rt, JSRuntimeHandle, instruction_counter_init, 0) : 10000);
             }
         }
         

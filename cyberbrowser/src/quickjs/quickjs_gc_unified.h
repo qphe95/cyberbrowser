@@ -310,6 +310,9 @@ typedef struct GCState {
 } GCState;
 
 extern GCState g_gc;
+/* Bumped by every gc_init(): handles kept outside the heap from an earlier
+ * heap are stale when it differs. */
+extern uint32_t g_gc_epoch;
 
 static inline __attribute__((always_inline)) void *gc_deref(GCHandle handle) {
     if (handle == GC_HANDLE_NULL ||

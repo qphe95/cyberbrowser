@@ -35,6 +35,7 @@
 #include "gc_core.h"
 
 GCState g_gc;
+uint32_t g_gc_epoch;
 GCCore g_core;
 
 /* ============================================================================
@@ -619,7 +620,9 @@ bool gc_add_root(GCHandle handle) {
 }
 
 void gc_remove_root(GCHandle handle) {
-    for (uint32_t i = 0; i < g_core.roots.count; i++) {
+    /* From the end: roots are mostly removed in the reverse order they were
+     * added (the parser's scoped pairs), so the match is near the top. */
+    for (uint32_t i = g_core.roots.count; i-- > 0;) {
         if (g_core.roots.items[i].handle == handle) {
             g_core.roots.items[i] = g_core.roots.items[--g_core.roots.count];
             return;
@@ -807,6 +810,7 @@ bool gc_init(void) {
 
     g_core.js_thread_id = gc_os_thread_id();
     gc_core_config_defaults();
+    g_gc_epoch++;
     g_gc.initialized = true;
     return true;
 }
