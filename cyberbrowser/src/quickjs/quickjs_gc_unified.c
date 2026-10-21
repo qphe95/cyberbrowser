@@ -165,9 +165,10 @@ static bool region_prepare(GCRegion *r, bool fresh) {
         if (!gc_os_commit(base, GC_REGION_SIZE)) return false;
         r->decommitted = false;
         if (fresh) atomic_fetch_add(&g_core.regions_committed, 1);
-    } else if (r->used_before) {
+    } else if (r->used_before && !r->zeroed) {
         memset(base, 0, GC_REGION_SIZE);
     }
+    r->zeroed = false;
     if (!region_commit_metadata(r)) return false;
     memset(r->start_bits, 0, BITMAP_WORDS * sizeof(uint64_t));
     memset(r->mark_bits[0], 0, BITMAP_WORDS * sizeof(uint64_t));
@@ -295,6 +296,17 @@ void gc_core_region_release(GCRegion *r) {
         if (g_core.poison) {
             gc_os_decommit(gc_core_region_start(x), GC_REGION_SIZE);
             x->decommitted = true;
+        } else if (x->used_before) {
+            /* Zero what was used now, on the thread that releases it (the
+             * collector's, when concurrent), instead of the whole region
+             * on the allocating thread when it is claimed again.  A
+             * humongous continuation's top says nothing: all of it. */
+            uint8_t *base = gc_core_region_start(x);
+            uintptr_t top = atomic_load_explicit(&x->top, memory_order_acquire);
+            size_t used = k == 0 && top > (uintptr_t)base && top <= (uintptr_t)base + GC_REGION_SIZE
+                              ? (size_t)(top - (uintptr_t)base) : GC_REGION_SIZE;
+            memset(base, 0, used);
+            x->zeroed = true;
         }
         atomic_store_explicit(&x->state, GC_RS_FREE, memory_order_release);
         atomic_fetch_sub(&g_core.regions_in_use, 1);
@@ -463,7 +475,7 @@ JSGCObjectTypeEnum gc_handle_get_type(GCHandle handle) {
     return gc_handle_get_type_inline(handle);
 }
 
-bool gc_handle_is_valid(GCHandle handle) {
+bool (gc_handle_is_valid)(GCHandle handle) {
     return gc_deref(handle) != NULL;
 }
 

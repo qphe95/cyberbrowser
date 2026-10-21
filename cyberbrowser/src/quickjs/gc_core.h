@@ -32,6 +32,7 @@ typedef struct GCRegion {
     uint32_t humongous_head;   /* index of the first region of a humongous run */
     uint32_t humongous_count;  /* regions in the run (head only) */
     bool used_before;          /* memory must be zeroed before reuse */
+    bool zeroed;               /* zeroed when released (no zeroing at claim) */
     bool decommitted;          /* pages returned to the OS (poison mode) */
     bool in_cset;              /* being evacuated by a major cycle */
     bool collecting;           /* in the nursery set a minor cycle collects */

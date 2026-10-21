@@ -488,6 +488,9 @@ static inline size_t gc_usable_size(GCHandle handle) {
 }
 
 bool gc_handle_is_valid(GCHandle handle);
+/* Inline at every use (SAFE_VALID runs on most object accesses); the
+ * function stays for callers that take its address. */
+#define gc_handle_is_valid(handle) (gc_deref(handle) != NULL)
 
 /* Number of elem-sized slots that fit in the object behind h after offset
  * bytes.  The concurrent marker reads a count from one object and an array
