@@ -2,7 +2,9 @@
  * every CYBER_SAMPLE_US microseconds (default 1000), records its instruction
  * pointer and the return addresses the x64 unwind tables give, and writes
  * one line per sample ("rva rva ..." leaf first, relative to the image
- * base) to <path> at exit.  tools/sample_report.js symbolizes them. */
+ * base) to <path> at exit.  tools/sample_report.js symbolizes them.
+ * CYBER_SAMPLE_MAX_MS=<n> stops sampling and writes the file after n ms,
+ * for a process that hangs and never exits. */
 #include "cyber_sampler.h"
 
 #include <stdio.h>
@@ -22,6 +24,20 @@ static size_t g_n, g_cap;
 static uint64_t g_base, g_end;
 static unsigned g_interval_us = 1000;
 static char *g_path;
+static unsigned g_max_ms;
+
+static void write_samples(void) {
+    FILE *f = fopen(g_path, "w");
+    if (!f) return;
+    fprintf(f, "# interval_us %u samples %zu\n", g_interval_us, g_n);
+    for (size_t i = 0; i < g_n; i++) {
+        const uint64_t *rec = g_samples + i * (SAMPLE_DEPTH + 1);
+        for (uint64_t d = 0; d < rec[0]; d++) fprintf(f, d ? " %llx" : "%llx", (unsigned long long)rec[1 + d]);
+        fputc('\n', f);
+    }
+    fclose(f);
+    fprintf(stderr, "[sampler] %zu samples written to %s\n", g_n, g_path);
+}
 
 static void record(const CONTEXT *c0) {
     if (g_n == g_cap) {
@@ -57,10 +73,15 @@ static void record(const CONTEXT *c0) {
 static DWORD WINAPI sampler_main(LPVOID arg) {
     (void)arg;
     timeBeginPeriod(1);
-    LARGE_INTEGER freq, next, now;
+    LARGE_INTEGER freq, start, next, now;
     QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&next);
+    start = next;
     while (!g_stop) {
+        if (g_max_ms && (next.QuadPart - start.QuadPart) * 1000 / freq.QuadPart >= g_max_ms) {
+            write_samples();
+            break;
+        }
         next.QuadPart += freq.QuadPart * g_interval_us / 1000000;
         for (;;) {
             QueryPerformanceCounter(&now);
@@ -84,6 +105,8 @@ void cyber_sampler_start(void) {
     if (!p || !p[0] || g_thread) return;
     const char *us = getenv("CYBER_SAMPLE_US");
     if (us && atoi(us) > 0) g_interval_us = (unsigned)atoi(us);
+    const char *max_ms = getenv("CYBER_SAMPLE_MAX_MS");
+    if (max_ms && atoi(max_ms) > 0) g_max_ms = (unsigned)atoi(max_ms);
     g_path = strdup(p);
     HMODULE mod = GetModuleHandleA(NULL);
     g_base = (uint64_t)(uintptr_t)mod;
@@ -102,16 +125,8 @@ void cyber_sampler_stop(void) {
     WaitForSingleObject(g_thread, INFINITE);
     CloseHandle(g_thread);
     g_thread = NULL;
-    FILE *f = fopen(g_path, "w");
-    if (!f) return;
-    fprintf(f, "# interval_us %u samples %zu\n", g_interval_us, g_n);
-    for (size_t i = 0; i < g_n; i++) {
-        const uint64_t *rec = g_samples + i * (SAMPLE_DEPTH + 1);
-        for (uint64_t d = 0; d < rec[0]; d++) fprintf(f, d ? " %llx" : "%llx", (unsigned long long)rec[1 + d]);
-        fputc('\n', f);
-    }
-    fclose(f);
-    fprintf(stderr, "[sampler] %zu samples written to %s\n", g_n, g_path);
+    /* With a time limit the sampler thread wrote the file when it ran out. */
+    if (!g_max_ms) write_samples();
 }
 
 #else

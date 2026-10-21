@@ -36285,10 +36285,13 @@ static void free_bytecode_atoms(JSRuntimeHandle rt,
     pos = 0;
     while (pos < bc_len) {
         op = bc_buf[pos];
-        if (use_short_opcodes)
-            oi = &short_opcode_info(op);
-        else
-            oi = &opcode_info[op];
+        /* short_opcode_info, not opcode_info[op], even before the final
+         * pass: the table holds the temporary opcodes one slot away from
+         * their enum values, and unresolved bytecode (a function freed
+         * after a syntax error) is full of them.  Read directly, a
+         * size-0 entry stopped pos from advancing. */
+        (void)use_short_opcodes;
+        oi = &short_opcode_info(op);
 
         len = oi->size;
         switch(oi->fmt) {
@@ -38356,7 +38359,7 @@ static BOOL code_match(CodeContext *s, int pos, ...)
         }
 
         pos++;
-        switch(opcode_info[op].fmt) {
+        switch(short_opcode_info(op).fmt) {
         case OP_FMT_loc8:
         case OP_FMT_u8:
             {
@@ -42118,12 +42121,13 @@ static GCHandle js_lazy_compile(JSContextHandle ctx, JSFunctionBytecodeHandle st
 
  fail:
     free_token(s, &s->token);
-    if (fd) {
-        js_parse_set_cur_func(s, (JSFunctionDefHandle)(fd->parent_handle));
-        js_free_function_def(ctx, fd);
-    }
+    /* fd is in the proxy's child list, and freeing the proxy frees it:
+     * freeing both released fd's atoms twice, which left the atom table
+     * looping forever. */
     if (proxy)
         js_free_function_def(ctx, proxy);
+    else if (fd)
+        js_free_function_def(ctx, fd);
     js_parse_cleanup_roots(s);
     if (!JS_HasException(ctx))
         JS_ThrowInternalError(ctx, "lazy parse failed");
