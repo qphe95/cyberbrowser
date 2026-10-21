@@ -66,11 +66,29 @@ int po_array_add(PreOrderCompactionArray *array, int parent);
  */
 void po_array_delete(PreOrderCompactionArray *array, int index);
 
+/* Parent value of a node taken out of the tree with po_array_detach. */
+#define PO_ARRAY_DETACHED (-2)
+
+/*
+ * Take a node (and its subtree, which stays active) out of the tree without
+ * deleting it, to be linked again with po_array_append.  A detached node is
+ * in no sibling list (and not a root).
+ */
+void po_array_detach(PreOrderCompactionArray *array, int index);
+
+/* Link a detached node as the last child of `parent`.  False when the node
+ * is not detached or an index is invalid. */
+bool po_array_append(PreOrderCompactionArray *array, int parent, int index);
+
 /*
  * Rewrite the buffer so active nodes are stored in pre-order. All existing
  * indices may change. Returns the number of active nodes.
  */
 size_t po_array_compact(PreOrderCompactionArray *array);
+
+/* The same even without tombstones: after detach/append the array order
+ * is no longer pre-order. */
+size_t po_array_reorder(PreOrderCompactionArray *array);
 
 /* Access the header for a node. Returns NULL for invalid indices. */
 PreOrderCompactionArrayNode* po_array_node(PreOrderCompactionArray *array, int index);

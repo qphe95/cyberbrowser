@@ -651,13 +651,13 @@ TEST(test_dom_render_snapshot_reuse) {
  * the same text as a full one after each kind of change, including one deep
  * in a subtree that was built while detached and then attached. */
 static bool snapshot_inc_matches_full(JSContextHandle ctx, GCValue doc) {
-    uint64_t ki = 0, kf = 0;
+    uint64_t ki = 0;
     bool u = false;
     HtmlDocument *a = html_document_from_js_dom_incremental(ctx, doc, &ki, &u);
-    HtmlDocument *b = html_document_from_js_dom_if_changed(ctx, doc, &kf, &u);
     if (a) html_document_free(a);
-    if (b) html_document_free(b);
-    return ki != 0 && ki == kf;
+    /* The layout mirror, updated in place, renders what serialize + parse
+     * of the document renders. */
+    return ki != 0 && html_mirror_check(ctx, doc) == 0;
 }
 
 TEST(test_dom_render_snapshot_incremental) {
@@ -669,12 +669,11 @@ TEST(test_dom_render_snapshot_incremental) {
         "globalThis.__si=document.createElement('div'); __si.innerHTML="
         "'<p><span>a</span></p><p>b</p><section><em>c</em></section>'; document.body.appendChild(__si); 1"));
     ASSERT_TRUE(snapshot_inc_matches_full(ctx, doc));
-    uint64_t bytes0 = 0;
-    html_snapshot_stats(&bytes0, NULL);
+    uint64_t built0 = 0, built1 = 0;
+    html_mirror_stats(NULL, NULL, &built0);
     ASSERT_TRUE(snapshot_inc_matches_full(ctx, doc));
-    uint64_t bytes1 = 0;
-    html_snapshot_stats(&bytes1, NULL);
-    ASSERT_TRUE(bytes1 > bytes0);   /* nothing changed: the clean document was copied */
+    html_mirror_stats(NULL, NULL, &built1);
+    ASSERT_EQ(built0, built1);   /* nothing changed: nothing was built */
     static const char *const steps[] = {
         "__si.querySelector('span').textContent='a2'",
         "globalThis.__sx=document.createElement('div'); __sx.appendChild(document.createElement('i'));"

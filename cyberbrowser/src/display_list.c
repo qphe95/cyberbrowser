@@ -1160,8 +1160,8 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
          * not been positioned and would all overlap at the origin. */
         if (default_font && ctx->doc) {
             if (node && node->type == HTML_NODE_TEXT &&
-                node->text_content && node->text_len > 0 &&
-                !text_is_whitespace(node->text_content)) {
+                css_layout_node_text(ctx, node) && css_layout_node_text(ctx, node)[0] &&
+                !text_is_whitespace(css_layout_node_text(ctx, node))) {
                 bool root_sized = (box->x == 0.0 && box->y == 0.0 &&
                                    box->width == ctx->viewport_width &&
                                    box->height == ctx->viewport_height);
@@ -1189,7 +1189,7 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                     if (!font) font = default_font;
                     int from_cmd = dl->count;
                     /* The white-space processed text the layout measured. */
-                    const char *run_text = css_layout_box_text(ctx, i, node->text_content);
+                    const char *run_text = css_layout_box_text(ctx, i, css_layout_node_text(ctx, node));
                     if (box->text_lead_skip && run_text[0] == ' ') run_text++;
                     /* -webkit-line-clamp / text-overflow: ellipsis on a near
                      * ancestor cut the run and end it with an ellipsis. */

@@ -429,8 +429,7 @@ void dom_set_attr(NodeId id, CssAtom name, const char *value, size_t n) {
         else g_dom.id_atom[s] = CSS_ATOM_NONE;
     }
     if (name == id_name || name == class_name) g_dom.class_version++;
-    dom_mark_dirty(id, DOMF_DIRTY_ATTR);
-    dom_note_connected_change(s);
+    dom_note_mutation(s, DOMF_DIRTY_ATTR);
     g_dom.attr_version++;
 }
 
@@ -452,8 +451,7 @@ bool dom_remove_attr(NodeId id, CssAtom name) {
         const char *nm = css_atom_str(name);
         if (nm && strcmp(nm, "id") == 0) g_dom.id_atom[s] = CSS_ATOM_NONE;
         if (nm && (strcmp(nm, "id") == 0 || strcmp(nm, "class") == 0)) g_dom.class_version++;
-        dom_mark_dirty(id, DOMF_DIRTY_ATTR);
-        dom_note_connected_change(s);
+        dom_note_mutation(s, DOMF_DIRTY_ATTR);
         g_dom.attr_version++;
         return true;
     }
@@ -478,7 +476,7 @@ void dom_set_text(NodeId id, const char *s, size_t n) {
     uint32_t slot = dom_slot(id);
     dom_str_release(&g_dom.text[slot]);
     g_dom.text[slot] = dom_str_dup(s, n);
-    dom_note_connected_change(slot);
+    dom_note_mutation(slot, DOMF_DIRTY_TEXT);
     g_dom.text_version++;
 }
 
@@ -708,10 +706,14 @@ const uint32_t *dom_id_index_lookup(CssAtom a, uint32_t *n) {
 extern NodeId g_dom_document;
 
 void dom_note_connected_change(uint32_t s) {
+    dom_note_mutation(s, DOMF_DIRTY_CHILDREN);
+}
+
+void dom_note_mutation(uint32_t s, uint16_t bits) {
     /* Every mutation passes here with the node whose content changed (the
-     * parent for (un)linking): mark it dirty, so snapshots that keep
-     * clean subtrees (html_dom.c) see the change. */
-    if (s && g_dom.kind[s] != DOM_K_FREE) dom_mark_dirty(dom_id_of(s), DOMF_DIRTY_CHILDREN);
+     * parent for (un)linking): mark it dirty, so the snapshot and the
+     * layout mirror (html_dom.c), which keep clean subtrees, see it. */
+    if (s && g_dom.kind[s] != DOM_K_FREE) dom_mark_dirty(dom_id_of(s), bits);
     if (!s || !g_dom_document || !dom_valid(g_dom_document)) return;
     if (dom_tree_root_slot(s) == dom_slot(g_dom_document)) g_dom.connected_version++;
 }

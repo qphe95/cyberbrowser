@@ -148,6 +148,7 @@ void html_document_arena_free(HtmlDocument *doc);
 
 void html_document_free(HtmlDocument *doc) {
     if (!doc) return;
+    if (doc->refs > 1) { doc->refs--; return; }
     
     size_t n = po_array_count(&doc->array);
     for (size_t i = 0; i < n; i++) {
@@ -1447,6 +1448,101 @@ static bool snap_try_reuse_open(SerializeBuffer *buf, NodeId id) {
     return serialize_buf_append_raw(buf, g_snap.prev.data + e->o0, e->o1 - e->o0);
 }
 
+static void ser_buf_attr_sink(void *ud, const char *name, const char *value) {
+    serialize_buf_append_attr((SerializeBuffer *)ud, name, value);
+}
+
+/* The attributes an element renders with, in order, through sink: its
+ * store (or script-object) attributes, the style attribute merged with its
+ * style object, then attributes scripts set only as JS properties.  Shared
+ * by the serializer and the layout mirror. */
+typedef void (*SerAttrSink)(void *ud, const char *name, const char *value);
+static void ser_element_attrs(JSContextHandle ctx, SerNode n, const char *tag_lower, LooseAttrs *loose_in,
+                              SerAttrSink sink, void *ud) {
+    /* Attributes; the style attribute merges with the style object below. */
+    const char *attr_style = NULL;
+    char *attr_style_copy = NULL;
+    if (n.id) {
+        int na = dom_attr_count(n.id);
+        /* The legacy DOM listed a parsed element's id and class first. */
+        int *order = malloc((size_t)(na ? na : 1) * sizeof(int)), no = 0;
+        for (int pass = 0; pass < 2; pass++)
+            for (int i = 0; i < na; i++) {
+                const char *nm = css_atom_str(dom_attr_at(n.id, i)->name);
+                bool ic = legacy_limits() && (strcmp(nm, "id") == 0 || strcmp(nm, "class") == 0);
+                if (ic == (pass == 0)) order[no++] = i;
+            }
+        for (int oi = 0; oi < no; oi++) {
+            int i = order[oi];
+            const DomAttr *a = dom_attr_at(n.id, i);
+            static char ntmp[64], vtmp[2048];
+            const char *name = legacy_cut(dom_attr_name_for_output(css_atom_str(a->name)), 64, ntmp);
+            const char *value = legacy_cut(a->value.s ? a->value.s : "", 2048, vtmp);
+            if (!name || !name[0]) continue;
+            if (strcmp(name, "style") == 0) { free(attr_style_copy); attr_style = attr_style_copy = strdup(value); continue; }
+            sink(ud, name, value);
+        }
+        free(order);
+    } else {
+        for (int i = 0; i < loose_in->n; i++) {
+            if (strcasecmp(loose_in->names[i], "style") == 0) { attr_style = loose_in->values[i]; continue; }
+            sink(ud, loose_in->names[i], loose_in->values[i]);
+        }
+    }
+
+    {
+        SerializeBuffer style_buf;
+        serialize_buf_init(&style_buf);
+        if (attr_style && attr_style[0]) {
+            serialize_buf_append(&style_buf, attr_style);
+            size_t sl = strlen(attr_style);
+            if (sl > 0 && attr_style[sl - 1] != ';')
+                serialize_buf_append(&style_buf, ";");
+        }
+        GCValue style_obj = JS_UNDEFINED;
+        if (JS_IsObject(n.obj))
+            style_obj = n.id ? dom_element_style(ctx, n.obj, false)
+                             : JS_GetPropertyStr(ctx, n.obj, "__style");
+        if (JS_IsObject(style_obj)) append_style_object(ctx, style_obj, &style_buf);
+        else if (n.id) append_emulated_style_object(attr_style, &style_buf);
+        if (style_buf.data && style_buf.len > 0)
+            sink(ud, "style", style_buf.data);
+        serialize_buf_free(&style_buf);
+    }
+    free(attr_style_copy);
+
+    /* Attributes set as JS properties only (scripts assigning el.src etc.). */
+    if (JS_IsObject(n.obj)) {
+        static const struct { const char *prop; const char *attr; } extra_attrs[] = {
+            { "id", "id" }, { "className", "class" }, { "class", "class" },
+            { "src", "src" }, { "href", "href" }, { "style", "style" },
+            { "alt", "alt" }, { "title", "title" }, { "width", "width" },
+            { "height", "height" }, { "type", "type" }, { "value", "value" },
+            { "name", "name" }, { "placeholder", "placeholder" }, { NULL, NULL }
+        };
+        /* On a store element every accessor that matters reflects an
+         * attribute (checked first), except on the elements with native
+         * state; elsewhere only own data properties can add anything, and
+         * reading those skips the getters on the prototype chain. */
+        bool own_only = n.id && !ser_has_native_props(tag_lower);
+        for (int i = 0; extra_attrs[i].prop; i++) {
+            bool has;
+            if (n.id) {
+                has = dom_attr(n.id, extra_attrs[i].attr) != NULL;
+            } else {
+                has = false;
+                for (int k = 0; k < loose_in->n; k++)
+                    if (strcasecmp(loose_in->names[k], extra_attrs[i].attr) == 0) { has = true; break; }
+            }
+            if (has) continue;
+            char *value = own_only ? js_object_get_own_string(ctx, n.obj, extra_attrs[i].prop)
+                                   : js_object_get_string(ctx, n.obj, extra_attrs[i].prop);
+            if (value && value[0]) sink(ud, extra_attrs[i].attr, value);
+            free(value);
+        }
+    }
+}
+
 static void html_serialize_element_body(JSContextHandle ctx, SerNode n, SerializeBuffer *buf) {
     char tag_lower[64];
     LooseAttrs loose = {0};
@@ -1474,89 +1570,7 @@ static void html_serialize_element_body(JSContextHandle ctx, SerNode n, Serializ
     }
     serialize_buf_append(buf, "<");
     serialize_buf_append(buf, tag_lower);
-
-    /* Attributes; the style attribute merges with the style object below. */
-    const char *attr_style = NULL;
-    char *attr_style_copy = NULL;
-    if (n.id) {
-        int na = dom_attr_count(n.id);
-        /* The legacy DOM listed a parsed element's id and class first. */
-        int *order = malloc((size_t)(na ? na : 1) * sizeof(int)), no = 0;
-        for (int pass = 0; pass < 2; pass++)
-            for (int i = 0; i < na; i++) {
-                const char *nm = css_atom_str(dom_attr_at(n.id, i)->name);
-                bool ic = legacy_limits() && (strcmp(nm, "id") == 0 || strcmp(nm, "class") == 0);
-                if (ic == (pass == 0)) order[no++] = i;
-            }
-        for (int oi = 0; oi < no; oi++) {
-            int i = order[oi];
-            const DomAttr *a = dom_attr_at(n.id, i);
-            static char ntmp[64], vtmp[2048];
-            const char *name = legacy_cut(dom_attr_name_for_output(css_atom_str(a->name)), 64, ntmp);
-            const char *value = legacy_cut(a->value.s ? a->value.s : "", 2048, vtmp);
-            if (!name || !name[0]) continue;
-            if (strcmp(name, "style") == 0) { free(attr_style_copy); attr_style = attr_style_copy = strdup(value); continue; }
-            serialize_buf_append_attr(buf, name, value);
-        }
-        free(order);
-    } else {
-        for (int i = 0; i < loose.n; i++) {
-            if (strcasecmp(loose.names[i], "style") == 0) { attr_style = loose.values[i]; continue; }
-            serialize_buf_append_attr(buf, loose.names[i], loose.values[i]);
-        }
-    }
-
-    {
-        SerializeBuffer style_buf;
-        serialize_buf_init(&style_buf);
-        if (attr_style && attr_style[0]) {
-            serialize_buf_append(&style_buf, attr_style);
-            size_t sl = strlen(attr_style);
-            if (sl > 0 && attr_style[sl - 1] != ';')
-                serialize_buf_append(&style_buf, ";");
-        }
-        GCValue style_obj = JS_UNDEFINED;
-        if (JS_IsObject(n.obj))
-            style_obj = n.id ? dom_element_style(ctx, n.obj, false)
-                             : JS_GetPropertyStr(ctx, n.obj, "__style");
-        if (JS_IsObject(style_obj)) append_style_object(ctx, style_obj, &style_buf);
-        else if (n.id) append_emulated_style_object(attr_style, &style_buf);
-        if (style_buf.data && style_buf.len > 0)
-            serialize_buf_append_attr(buf, "style", style_buf.data);
-        serialize_buf_free(&style_buf);
-    }
-    free(attr_style_copy);
-
-    /* Attributes set as JS properties only (scripts assigning el.src etc.). */
-    if (JS_IsObject(n.obj)) {
-        static const struct { const char *prop; const char *attr; } extra_attrs[] = {
-            { "id", "id" }, { "className", "class" }, { "class", "class" },
-            { "src", "src" }, { "href", "href" }, { "style", "style" },
-            { "alt", "alt" }, { "title", "title" }, { "width", "width" },
-            { "height", "height" }, { "type", "type" }, { "value", "value" },
-            { "name", "name" }, { "placeholder", "placeholder" }, { NULL, NULL }
-        };
-        /* On a store element every accessor that matters reflects an
-         * attribute (checked first), except on the elements with native
-         * state; elsewhere only own data properties can add anything, and
-         * reading those skips the getters on the prototype chain. */
-        bool own_only = n.id && !ser_has_native_props(tag_lower);
-        for (int i = 0; extra_attrs[i].prop; i++) {
-            bool has;
-            if (n.id) {
-                has = dom_attr(n.id, extra_attrs[i].attr) != NULL;
-            } else {
-                has = false;
-                for (int k = 0; k < loose.n; k++)
-                    if (strcasecmp(loose.names[k], extra_attrs[i].attr) == 0) { has = true; break; }
-            }
-            if (has) continue;
-            char *value = own_only ? js_object_get_own_string(ctx, n.obj, extra_attrs[i].prop)
-                                   : js_object_get_string(ctx, n.obj, extra_attrs[i].prop);
-            if (value && value[0]) serialize_buf_append_attr(buf, extra_attrs[i].attr, value);
-            free(value);
-        }
-    }
+    ser_element_attrs(ctx, n, tag_lower, &loose, ser_buf_attr_sink, buf);
     loose_attrs_free(&loose);
     serialize_buf_append(buf, ">");
 
@@ -1747,10 +1761,34 @@ static bool snapshot_serialize(JSContextHandle ctx, GCValue doc_elem, SerializeB
     return true;
 }
 
+HtmlDocument *html_mirror_document(JSContextHandle ctx, GCValue js_doc, bool full,
+                                   uint64_t *version, bool *changed);
+
 static HtmlDocument *snapshot_build(JSContextHandle ctx, GCValue js_doc, uint64_t *key, bool *unchanged,
                                     bool reuse) {
     if (unchanged) *unchanged = false;
     if (!SAFE_VALID(ctx)) return NULL;
+    /* The layout mirror, kept up to date in place (a full update re-reads
+     * what only JS objects hold, as a non-incremental snapshot did).  The
+     * key is its version; each caller holds a reference. */
+    {
+        uint64_t version = 0;
+        bool changed = false;
+        HtmlDocument *m = html_mirror_document(ctx, js_doc, !reuse, &version, &changed);
+        if (m) {
+            if (key) {
+                if (*key == version) {
+                    if (unchanged) *unchanged = true;
+                    g_render_reuses++;
+                    return NULL;
+                }
+                *key = version;
+            }
+            m->refs++;
+            g_render_snapshots++;
+            return m;
+        }
+    }
     GCValue doc_elem = render_root_element(ctx, js_doc);
     if (JS_IsUndefined(doc_elem) || JS_IsNull(doc_elem)) return NULL;
 
@@ -1887,4 +1925,803 @@ char *html_style_object_css_text(JSContextHandle ctx, GCValue style_obj) {
     char *out = strdup(b.data);
     serialize_buf_free(&b);
     return out;
+}
+
+/* ============================================================================
+ * Layout mirror: one HtmlDocument kept in step with the live document
+ *
+ * Instead of serializing the document to HTML and parsing that back for
+ * every layout, the mirror is built from the store once and then updated in
+ * place: a subtree with no dirty bit is left as it is, a dirty element gets
+ * its attributes (and raw text) read again, and an element whose children
+ * changed has its child list reconciled, reusing the mirror nodes of the
+ * children that stay (by store id), so indices of unchanged nodes are
+ * stable.  It renders what the serializer + parser pair rendered: the same
+ * attributes (ser_element_attrs), the same composition of shadow roots, the
+ * text filters of html_serialize_text and the parser's merging of adjacent
+ * text.  Elements with native state are read again on every update; what
+ * the dirty bits miss otherwise (properties only JS objects hold) a full
+ * update reads.  A page whose shadow roots only JS can compose (not
+ * ShadyDOM, not store shadow roots) is left to the serializer.
+ * CYBER_MIRROR_VERIFY=1 compares each update with serialize + parse.
+ * ============================================================================ */
+
+typedef struct MirrorMap {
+    NodeId *keys;
+    int *vals;
+    uint32_t cap, n;
+} MirrorMap;
+
+static struct {
+    HtmlDocument *doc;
+    NodeId root_id;
+    bool valid;
+    uint64_t version;
+    MirrorMap map;              /* store id -> mirror index (validated on use) */
+    MirrorMap host;             /* store id -> 1 ShadyDOM host, 2 store shadow host (else 0) */
+    NodeId *natives;            /* elements with native state */
+    int nnatives, cap_natives;
+    /* Per update. */
+    JSContextHandle ctx;
+    bool shady, full, changed, unsupported;
+    bool structure;             /* nodes added, removed or moved: reorder */
+    uint64_t updates, rebuilds, nodes_built;
+} g_mir;
+
+static void mir_map_put_in(MirrorMap *m, NodeId id, int idx) {
+    if (2 * (m->n + 1) > m->cap) {
+        uint32_t nc = m->cap ? m->cap * 2 : 16384;
+        NodeId *nk = (NodeId *)calloc(nc, sizeof(NodeId));
+        int *nv = (int *)malloc(nc * sizeof(int));
+        if (!nk || !nv) { free(nk); free(nv); return; }
+        for (uint32_t i = 0; i < m->cap; i++) {
+            if (!m->keys[i]) continue;
+            uint32_t h = (m->keys[i] * 2654435761u) & (nc - 1);
+            while (nk[h]) h = (h + 1) & (nc - 1);
+            nk[h] = m->keys[i];
+            nv[h] = m->vals[i];
+        }
+        free(m->keys);
+        free(m->vals);
+        m->keys = nk;
+        m->vals = nv;
+        m->cap = nc;
+    }
+    uint32_t h = (id * 2654435761u) & (m->cap - 1);
+    while (m->keys[h] && m->keys[h] != id) h = (h + 1) & (m->cap - 1);
+    if (!m->keys[h]) m->n++;
+    m->keys[h] = id;
+    m->vals[h] = idx;
+}
+
+static void mir_map_put(NodeId id, int idx) { mir_map_put_in(&g_mir.map, id, idx); }
+
+static int mir_map_raw(const MirrorMap *m, NodeId id) {
+    if (!id || !m->cap) return -1;
+    uint32_t h = (id * 2654435761u) & (m->cap - 1);
+    while (m->keys[h]) {
+        if (m->keys[h] == id) return m->vals[h];
+        h = (h + 1) & (m->cap - 1);
+    }
+    return -1;
+}
+
+/* The live mirror node of store node id, or -1. */
+static int mir_map_get(NodeId id) {
+    MirrorMap *m = &g_mir.map;
+    if (!id || !m->cap) return -1;
+    uint32_t h = (id * 2654435761u) & (m->cap - 1);
+    while (m->keys[h]) {
+        if (m->keys[h] == id) {
+            int idx = m->vals[h];
+            HtmlDocument *d = g_mir.doc;
+            if (idx < 0 || (size_t)idx >= po_array_count(&d->array) || !po_array_is_active(&d->array, idx))
+                return -1;
+            HtmlNode *hn = po_array_payload(&d->array, idx);
+            return hn && hn->store_id == id ? idx : -1;
+        }
+        h = (h + 1) & (m->cap - 1);
+    }
+    return -1;
+}
+
+static void mir_map_clear(MirrorMap *m) {
+    if (m->keys) memset(m->keys, 0, m->cap * sizeof(NodeId));
+    m->n = 0;
+}
+
+static void mir_map_reset(void) {
+    mir_map_clear(&g_mir.map);
+    mir_map_clear(&g_mir.host);
+}
+
+static void mir_set_host(NodeId s, unsigned char kind) {
+    if (kind || mir_map_raw(&g_mir.host, s) > 0) mir_map_put_in(&g_mir.host, s, kind);
+}
+
+static unsigned char mir_host(NodeId s) {
+    int k = mir_map_raw(&g_mir.host, s);
+    return k > 0 ? (unsigned char)k : 0;
+}
+
+static const char *mir_intern(const char *s, size_t n) {
+    css_atom_reserve(1);
+    return css_atom_str(css_atom_intern(s, n));
+}
+
+/* ---- Attributes ---- */
+
+typedef struct MirAttrs {
+    const char *names[64];
+    char *values[64];
+    int n;
+    bool in_svg;
+} MirAttrs;
+
+static void mir_attr_sink(void *ud, const char *name, const char *value) {
+    MirAttrs *a = (MirAttrs *)ud;
+    if (!name || !name[0] || a->n == 64) return;
+    /* As the parser reads it back: lower case, SVG spellings in SVG. */
+    char lower[128];
+    size_t k = 0;
+    for (; name[k] && k < sizeof(lower) - 1; k++) lower[k] = (char)tolower((unsigned char)name[k]);
+    lower[k] = '\0';
+    const char *nm = a->in_svg ? dom_attr_name_for_output(lower) : lower;
+    const char *in = mir_intern(nm, strlen(nm));
+    for (int i = 0; i < a->n; i++) if (a->names[i] == in) return;   /* first one wins */
+    a->names[a->n] = in;
+    a->values[a->n] = strdup(value ? value : "");
+    a->n++;
+}
+
+static void mir_attrs_free(MirAttrs *a) {
+    for (int i = 0; i < a->n; i++) free(a->values[i]);
+    a->n = 0;
+}
+
+/* Read element s's attributes into mirror node idx; true when they changed. */
+static bool mir_read_attrs(NodeId s, int idx, const char *tag_lower, bool in_svg) {
+    MirAttrs a;
+    a.n = 0;
+    a.in_svg = in_svg;
+    LooseAttrs loose = {0};
+    ser_element_attrs(g_mir.ctx, ser_of_node(s), tag_lower, &loose, mir_attr_sink, &a);
+    HtmlNode *hn = po_array_payload(&g_mir.doc->array, idx);
+    bool same = true;
+    int k = 0;
+    for (HtmlAttribute *at = hn->attributes; at; at = at->next, k++) {
+        if (k >= a.n || at->name != a.names[k] || strcmp(at->value, a.values[k]) != 0) { same = false; break; }
+    }
+    if (same && k != a.n) same = false;
+    if (!same) {
+        hn->attributes = NULL;      /* the old list stays in the arena */
+        for (int i = 0; i < a.n; i++)
+            html_document_add_attr(g_mir.doc, idx, a.names[i], a.values[i], strlen(a.values[i]));
+    }
+    mir_attrs_free(&a);
+    return !same;
+}
+
+/* ---- Text ---- */
+
+/* The part of a text node html_serialize_text writes (none: false). */
+static bool mir_text_kept(const char *val, size_t len, size_t *out_len) {
+    len = strnlen(val, len);
+    if (legacy_limits() && len > 4095) len = 4095;
+    const char *p = val, *end = val + len;
+    while (p < end && isspace((unsigned char)*p)) p++;
+    size_t rest = (size_t)(end - p);
+    if (rest >= 7 && (strncmp(p, "</body>", 7) == 0 || strncmp(p, "</html>", 7) == 0)) return false;
+    size_t tl = rest;
+    while (tl > 0 && isspace((unsigned char)p[tl - 1])) tl--;
+    if (tl >= 7 && strncmp(p, "<!--", 4) == 0 && strncmp(p + tl - 3, "-->", 3) == 0) return false;
+    *out_len = len;
+    return len > 0;
+}
+
+typedef struct MirBuf { char *s; size_t n, cap; } MirBuf;
+
+static void mir_buf_add(MirBuf *b, const char *s, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t nc = b->cap ? b->cap * 2 : 256;
+        while (nc < b->n + n + 1) nc *= 2;
+        char *ns = (char *)realloc(b->s, nc);
+        if (!ns) return;
+        b->s = ns;
+        b->cap = nc;
+    }
+    /* The tokenizer turns CR LF and lone CR into LF. */
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (c == '\r') {
+            if (i + 1 < n && s[i + 1] == '\n') continue;
+            c = '\n';
+        }
+        b->s[b->n++] = c;
+    }
+    b->s[b->n] = '\0';
+}
+
+/* Raw-text element content: the text of its subtree. */
+static char *mir_raw_text(NodeId s, size_t *len_out) {
+    MirBuf b = {0};
+    uint32_t r = dom_slot(s);
+    for (uint32_t x = r; x; x = dom_next_in_subtree(x, r)) {
+        if (g_dom.kind[x] != DOM_K_TEXT) continue;
+        uint32_t tl = 0;
+        const char *t = dom_text(dom_id_of(x), &tl);
+        size_t n = strnlen(t, tl);
+        if (legacy_limits() && n > 4095) n = 4095;
+        mir_buf_add(&b, t, n);
+    }
+    if (!b.s) { b.s = (char *)malloc(1); if (b.s) b.s[0] = '\0'; }
+    *len_out = b.n;
+    return b.s;
+}
+
+/* ---- Composition ---- */
+
+typedef struct NodeList { NodeId *v; int n, cap; } NodeList;
+
+static void nl_push(NodeList *l, NodeId id) {
+    if (l->n == l->cap) {
+        int nc = l->cap ? l->cap * 2 : 32;
+        NodeId *nv = (NodeId *)realloc(l->v, (size_t)nc * sizeof(NodeId));
+        if (!nv) return;
+        l->v = nv;
+        l->cap = nc;
+    }
+    l->v[l->n++] = id;
+}
+
+static bool mir_is_tag(NodeId id, const char *tag) {
+    return dom_kind(id) == DOM_K_ELEMENT && strcmp(dom_tag_name(id), tag) == 0;
+}
+
+/* Is there an element or non-blank text among store node root's children? */
+static bool mir_has_content(NodeId root) {
+    for (NodeId c = dom_first_child(root); c; c = dom_next_sibling(c)) {
+        if (dom_kind(c) == DOM_K_ELEMENT) return true;
+        if (dom_kind(c) == DOM_K_TEXT) {
+            uint32_t tl = 0;
+            const char *t = dom_text(c, &tl);
+            for (uint32_t i = 0; i < tl; i++) if (!isspace((unsigned char)t[i])) return true;
+        }
+    }
+    return false;
+}
+
+/* The nodes element s renders as children, in order (as the serializer
+ * composes them); sets the host kind of mirror node m. */
+static void mir_compose(NodeId s, int m, NodeList *out) {
+    SerNode sn = ser_of_node(s);
+    unsigned char kind = 0;
+    GCValue shadow = JS_NULL;
+    if (JS_IsObject(sn.obj)) {
+        shadow = JS_GetPropertyStr(g_mir.ctx, sn.obj, "shadowRoot");
+        if (JS_IsNull(shadow) || JS_IsUndefined(shadow))
+            shadow = JS_GetPropertyStr(g_mir.ctx, sn.obj, "__CE_shadowRoot");
+    }
+    if (JS_IsObject(shadow)) {
+        NodeId sid = dom_node_of(shadow);
+        bool store_shadow = sid && g_dom.shadow[dom_slot(s)] == dom_slot(sid);
+        if (!store_shadow) {
+            if (!g_mir.shady) { g_mir.unsupported = true; return; }
+            /* ShadyDOM: the real children, top-level <slot>s unwrapped. */
+            kind = 1;
+            for (NodeId c = dom_first_child(s); c; c = dom_next_sibling(c)) {
+                if (mir_is_tag(c, "slot")) {
+                    for (NodeId g = dom_first_child(c); g; g = dom_next_sibling(g)) nl_push(out, g);
+                } else {
+                    nl_push(out, c);
+                }
+            }
+            mir_set_host(s, kind);
+            return;
+        }
+        kind = 2;
+        if (mir_has_content(sid)) {
+            /* Light children distributed to the shadow tree's slots. */
+            NodeList light = {0};
+            for (NodeId c = dom_first_child(s); c; c = dom_next_sibling(c)) nl_push(&light, c);
+            unsigned char *used = (unsigned char *)calloc((size_t)light.n + 1, 1);
+            for (NodeId c = dom_first_child(sid); c; c = dom_next_sibling(c)) {
+                if (!mir_is_tag(c, "slot")) { nl_push(out, c); continue; }
+                const char *name = dom_attr(c, "name");
+                char slot_name[256];
+                snprintf(slot_name, sizeof(slot_name), "%s", name ? name : "");
+                bool any = false;
+                for (int i = 0; i < light.n; i++) {
+                    if (used && used[i]) continue;
+                    const char *ls = dom_kind(light.v[i]) == DOM_K_ELEMENT ? dom_attr(light.v[i], "slot") : NULL;
+                    if (strcmp(ls ? ls : "", slot_name) != 0) continue;
+                    nl_push(out, light.v[i]);
+                    if (used) used[i] = 1;
+                    any = true;
+                }
+                if (!any)
+                    for (NodeId g = dom_first_child(c); g; g = dom_next_sibling(g)) nl_push(out, g);
+            }
+            free(used);
+            free(light.v);
+            mir_set_host(s, kind);
+            return;
+        }
+    }
+    mir_set_host(s, kind);
+    (void)m;
+    for (NodeId c = dom_first_child(s); c; c = dom_next_sibling(c)) nl_push(out, c);
+}
+
+/* ---- Building and updating ---- */
+
+static void mir_reconcile(NodeId s, int m, bool child_svg);
+
+static void mir_note_native(NodeId idx) {
+    if (g_mir.nnatives == g_mir.cap_natives) {
+        int nc = g_mir.cap_natives ? g_mir.cap_natives * 2 : 256;
+        NodeId *nn = (NodeId *)realloc(g_mir.natives, (size_t)nc * sizeof(NodeId));
+        if (!nn) return;
+        g_mir.natives = nn;
+        g_mir.cap_natives = nc;
+    }
+    g_mir.natives[g_mir.nnatives++] = idx;
+}
+
+static void mir_tag_lower(NodeId s, char out[64]) {
+    const char *tag = dom_tag_name(s);
+    if (!tag || !tag[0]) tag = "div";
+    snprintf(out, 64, "%s", tag);
+    for (char *p = out; *p; p++) *p = (char)tolower((unsigned char)*p);
+}
+
+static bool mir_child_svg(bool in_svg, const char *tag_lower) {
+    if (in_svg) return strcmp(tag_lower, "foreignobject") != 0;
+    return strcmp(tag_lower, "svg") == 0;
+}
+
+/* Element s as a new mirror node under parent (with its subtree). */
+static int mir_build_element(NodeId s, int parent, bool in_svg) {
+    char tag_lower[64];
+    mir_tag_lower(s, tag_lower);
+    int idx = html_document_add(g_mir.doc, parent, HTML_NODE_ELEMENT);
+    if (idx < 0) { g_mir.unsupported = true; return -1; }
+    HtmlNode *hn = po_array_payload(&g_mir.doc->array, idx);
+    const char *tag = dom_tag_name(s);
+    hn->tag_name = in_svg && tag && tag[0] ? mir_intern(tag, strlen(tag)) : mir_intern(tag_lower, strlen(tag_lower));
+    hn->store_id = s;
+    mir_map_put(s, idx);
+    g_mir.nodes_built++;
+    mir_read_attrs(s, idx, tag_lower, in_svg);
+    if (ser_has_native_props(tag_lower)) mir_note_native(s);
+    if (html_is_self_closing_tag(tag_lower)) return idx;
+    if (html_is_raw_content_tag(tag_lower)) {
+        hn = po_array_payload(&g_mir.doc->array, idx);
+        if (strcmp(tag_lower, "script") == 0) {
+            hn->text_content = strdup("");
+            hn->text_len = 0;
+        } else {
+            hn->text_content = mir_raw_text(s, &hn->text_len);
+        }
+        return idx;
+    }
+    mir_reconcile(s, idx, mir_child_svg(in_svg, tag_lower));
+    return idx;
+}
+
+static void mir_update_element(NodeId s, int m, bool in_svg);
+
+/* Make mirror node m's children the rendering of s's children. */
+static void mir_reconcile(NodeId s, int m, bool child_svg) {
+    HtmlDocument *d = g_mir.doc;
+    NodeList items = {0};
+    mir_compose(s, m, &items);
+    if (g_mir.unsupported) { free(items.v); return; }
+    /* Detach the current children; the ones that stay are linked again. */
+    int old_local[64];
+    int *old = old_local, nold = 0, cap_old = 64;
+    for (int c = po_array_first_child(&d->array, m); c >= 0; ) {
+        int next = po_array_next_sibling(&d->array, c);
+        if (nold == cap_old) {
+            int nc = cap_old * 2;
+            int *no = (int *)malloc((size_t)nc * sizeof(int));
+            if (!no) break;
+            memcpy(no, old, (size_t)nold * sizeof(int));
+            if (old != old_local) free(old);
+            old = no;
+            cap_old = nc;
+        }
+        old[nold++] = c;
+        po_array_detach(&d->array, c);
+        c = next;
+    }
+    int pos = 0;            /* index into old[] while the order is unchanged */
+    bool reordered = false;
+    MirBuf run = {0};
+    NodeId run_first = DOM_NULL;
+    for (int i = 0; i <= items.n; i++) {
+        NodeId c = i < items.n ? items.v[i] : DOM_NULL;
+        int k = c ? dom_kind(c) : -1;
+        if (k == DOM_K_TEXT) {
+            uint32_t tl = 0;
+            const char *t = dom_text(c, &tl);
+            size_t keep = 0;
+            if (mir_text_kept(t, tl, &keep)) {
+                if (!run_first) run_first = c;
+                mir_buf_add(&run, t, keep);
+            }
+            continue;
+        }
+        if (k != DOM_K_ELEMENT && c) continue;     /* comments and the like render nothing */
+        /* End of a text run: one text node, as the parser merges them. */
+        if (run_first && run.n > 0) {
+            int ti = mir_map_get(run_first);
+            HtmlNode *tn = ti >= 0 ? po_array_payload(&d->array, ti) : NULL;
+            if (tn && tn->type == HTML_NODE_TEXT && po_array_parent(&d->array, ti) == PO_ARRAY_DETACHED) {
+                if (!tn->text_content || tn->text_len != run.n || memcmp(tn->text_content, run.s, run.n) != 0) {
+                    free(tn->text_content);
+                    tn->text_content = (char *)malloc(run.n + 1);
+                    if (tn->text_content) memcpy(tn->text_content, run.s, run.n + 1);
+                    tn->text_len = run.n;
+                    g_mir.changed = true;
+                }
+                po_array_append(&d->array, m, ti);
+            } else {
+                ti = html_document_add(d, m, HTML_NODE_TEXT);
+                if (ti >= 0) {
+                    tn = po_array_payload(&d->array, ti);
+                    tn->text_content = (char *)malloc(run.n + 1);
+                    if (tn->text_content) memcpy(tn->text_content, run.s, run.n + 1);
+                    tn->text_len = run.n;
+                    tn->store_id = run_first;
+                    mir_map_put(run_first, ti);
+                }
+                g_mir.changed = g_mir.structure = true;
+            }
+            if (!reordered && (pos >= nold || old[pos] != ti)) reordered = true;
+            pos++;
+        }
+        run.n = 0;
+        if (run.s) run.s[0] = '\0';
+        run_first = DOM_NULL;
+        if (!c) break;
+        /* An element: its node if it has one, else a new subtree. */
+        int ci = mir_map_get(c);
+        HtmlNode *cn = ci >= 0 ? po_array_payload(&d->array, ci) : NULL;
+        if (cn && cn->type == HTML_NODE_ELEMENT) {
+            if (po_array_parent(&d->array, ci) != PO_ARRAY_DETACHED) {
+                po_array_detach(&d->array, ci);     /* moved here from elsewhere */
+                g_mir.changed = g_mir.structure = true;
+            }
+            po_array_append(&d->array, m, ci);
+            mir_update_element(c, ci, child_svg);
+        } else {
+            ci = mir_build_element(c, m, child_svg);
+            g_mir.changed = g_mir.structure = true;
+            if (g_mir.unsupported) break;
+        }
+        if (!reordered && (pos >= nold || old[pos] != ci)) reordered = true;
+        pos++;
+    }
+    if (pos != nold) reordered = true;
+    if (reordered) g_mir.changed = g_mir.structure = true;
+    /* What was not linked again is gone. */
+    for (int i = 0; i < nold; i++)
+        if (po_array_is_active(&d->array, old[i]) && po_array_parent(&d->array, old[i]) == PO_ARRAY_DETACHED)
+            po_array_delete(&d->array, old[i]);
+    if (old != old_local) free(old);
+    free(run.s);
+    free(items.v);
+}
+
+/* Does element s have a direct text child (or, for a host, anything) dirty? */
+static bool mir_children_dirty(NodeId s, int m) {
+    uint16_t f = dom_flags(s);
+    if (f & DOMF_DIRTY_CHILDREN) return true;
+    if (!(f & DOMF_DIRTY_DESCENDANT)) return false;
+    if (mir_host(s)) return true;
+    (void)m;
+    for (NodeId c = dom_first_child(s); c; c = dom_next_sibling(c))
+        if (dom_kind(c) == DOM_K_TEXT && (dom_flags(c) & DOMF_DIRTY_MASK)) return true;
+    return false;
+}
+
+static void mir_update_element(NodeId s, int m, bool in_svg) {
+    uint16_t f = dom_flags(s);
+    if (!(f & DOMF_DIRTY_MASK) && !g_mir.full) return;
+    char tag_lower[64];
+    mir_tag_lower(s, tag_lower);
+    if ((f & DOMF_DIRTY_ATTR) || g_mir.full) {
+        if (mir_read_attrs(s, m, tag_lower, in_svg)) g_mir.changed = true;
+    }
+    if (html_is_self_closing_tag(tag_lower)) return;
+    if (html_is_raw_content_tag(tag_lower)) {
+        if (strcmp(tag_lower, "script") == 0) return;
+        if (!(f & (DOMF_DIRTY_CHILDREN | DOMF_DIRTY_DESCENDANT)) && !g_mir.full) return;
+        size_t n = 0;
+        char *t = mir_raw_text(s, &n);
+        HtmlNode *hn = po_array_payload(&g_mir.doc->array, m);
+        if (!hn->text_content || hn->text_len != n || memcmp(hn->text_content, t, n) != 0) {
+            free(hn->text_content);
+            hn->text_content = t;
+            hn->text_len = n;
+            g_mir.changed = true;
+        } else {
+            free(t);
+        }
+        return;
+    }
+    bool child_svg = mir_child_svg(in_svg, tag_lower);
+    if (mir_children_dirty(s, m)) {
+        mir_reconcile(s, m, child_svg);
+        return;
+    }
+    /* Same children: visit the dirty ones (all, in a full update). */
+    HtmlDocument *d = g_mir.doc;
+    for (int c = po_array_first_child(&d->array, m); c >= 0 && !g_mir.unsupported;
+         c = po_array_next_sibling(&d->array, c)) {
+        HtmlNode *cn = po_array_payload(&d->array, c);
+        if (!cn || cn->type != HTML_NODE_ELEMENT || !cn->store_id) continue;
+        if (!dom_valid(cn->store_id)) { g_mir.unsupported = true; return; }
+        mir_update_element(cn->store_id, c, child_svg);
+    }
+}
+
+/* Elements with native state read their attributes through getters. */
+static void mir_update_natives(void) {
+    HtmlDocument *d = g_mir.doc;
+    int w = 0;
+    (void)d;
+    for (int i = 0; i < g_mir.nnatives; i++) {
+        NodeId id = g_mir.natives[i];
+        int idx = mir_map_get(id);
+        if (idx < 0 || !dom_valid(id)) continue;
+        HtmlNode *hn = po_array_payload(&g_mir.doc->array, idx);
+        if (!hn || hn->type != HTML_NODE_ELEMENT) continue;
+        g_mir.natives[w++] = id;
+        char tag_lower[64];
+        mir_tag_lower(hn->store_id, tag_lower);
+        if (mir_read_attrs(hn->store_id, idx, tag_lower, false)) g_mir.changed = true;
+    }
+    g_mir.nnatives = w;
+}
+
+static void mir_drop(void) {
+    if (g_mir.doc) html_document_free(g_mir.doc);   /* the mirror's own reference */
+    g_mir.doc = NULL;
+    g_mir.valid = false;
+    g_mir.nnatives = 0;
+    mir_map_reset();
+}
+
+static bool mir_rebuild(NodeId root) {
+    mir_drop();
+    g_mir.doc = html_document_new();
+    if (!g_mir.doc) return false;
+    g_mir.doc->refs = 1;
+    g_mir.root_id = root;
+    g_mir.rebuilds++;
+    mir_build_element(root, -1, false);
+    g_mir.changed = true;
+    return !g_mir.unsupported;
+}
+
+static int mir_verify(JSContextHandle ctx, GCValue js_doc);
+
+static void mir_reorder(void) {
+    HtmlDocument *d = g_mir.doc;
+    size_t n = po_array_count(&d->array);
+    for (size_t i = 0; i < n; i++) {
+        if (po_array_is_active(&d->array, (int)i)) continue;
+        HtmlNode *hn = po_array_payload(&d->array, (int)i);
+        if (hn) { free(hn->text_content); hn->text_content = NULL; }
+    }
+    po_array_reorder(&d->array);
+    mir_map_clear(&g_mir.map);
+    n = po_array_count(&d->array);
+    for (size_t i = 0; i < n; i++) {
+        HtmlNode *hn = po_array_payload(&d->array, (int)i);
+        if (hn && hn->store_id) mir_map_put(hn->store_id, (int)i);
+    }
+}
+
+/* Bring the mirror up to date; NULL when this page needs the serializer
+ * (then the next update rebuilds).  *changed: anything differs from the
+ * previous update. */
+static HtmlDocument *mirror_update(JSContextHandle ctx, GCValue js_doc, bool full, bool *changed) {
+    if (changed) *changed = false;
+    GCValue doc_elem = render_root_element(ctx, js_doc);
+    NodeId root = dom_node_of(doc_elem);
+    if (!root || dom_kind(root) != DOM_K_ELEMENT) {
+        return NULL;
+    }
+    g_mir.ctx = ctx;
+    g_mir.full = full;
+    g_mir.changed = false;
+    g_mir.unsupported = false;
+    g_mir.structure = false;
+    {
+        GCValue sd = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "ShadyDOM");
+        g_mir.shady = JS_IsObject(sd) && JS_ToBool(ctx, JS_GetPropertyStr(ctx, sd, "inUse"));
+    }
+    uint64_t dirty0 = g_dom.dirty_version;
+    bool rebuild = !g_mir.valid || !g_mir.doc || g_mir.root_id != root;
+    if (!rebuild) {
+        /* Deleted nodes and replaced attribute lists pile up: start over
+         * when they outweigh the live document. */
+        PreOrderCompactionArray *a = &g_mir.doc->array;
+        if (a->tombstone_count > a->active_count + 4096) rebuild = true;
+    }
+    if (rebuild) {
+        g_mir.valid = mir_rebuild(root);
+    } else {
+        int ri = mir_map_get(root);
+        if (ri < 0) g_mir.valid = mir_rebuild(root);
+        else mir_update_element(root, ri, false);
+    }
+    if (!g_mir.unsupported) mir_update_natives();
+    g_mir.updates++;
+    NodeId dn = dom_node_of(js_doc);
+    if (dom_kind(dn) != DOM_K_DOCUMENT) dn = g_dom_document;
+    if (g_mir.unsupported || !g_mir.doc) {
+        mir_drop();
+        return NULL;
+    }
+    g_mir.valid = true;
+    /* Layout and selector matching read the array in document order (a
+     * subtree is a contiguous range): put added and moved nodes back in
+     * pre-order, dropping the deleted ones, and index the result. */
+    if (g_mir.structure) mir_reorder();
+    html_document_find_roots(g_mir.doc);
+    /* Page code run by getters during the update: its marks must survive
+     * the clear (the next update sees them), so leave the bits. */
+    if (g_dom.dirty_version == dirty0) dom_clear_dirty(dn);
+    if (g_mir.changed) g_mir.version++;
+    if (changed) *changed = g_mir.changed;
+    static int verify = -1;
+    if (verify < 0) verify = cyber_getenv("CYBER_MIRROR_VERIFY") ? 1 : 0;
+    if (verify) mir_verify(ctx, js_doc);
+    return g_mir.doc;
+}
+
+HtmlDocument *html_mirror_document(JSContextHandle ctx, GCValue js_doc, bool full,
+                                   uint64_t *version, bool *changed) {
+    static int off = -1;
+    if (off < 0) {
+        const char *e = cyber_getenv("CYBER_MIRROR");
+        off = e && e[0] == '0';
+    }
+    if (off) return NULL;
+    HtmlDocument *d = mirror_update(ctx, js_doc, full, changed);
+    if (d && version) *version = g_mir.version;   /* >= 1: every build changes it */
+    return d;
+}
+
+void html_mirror_stats(uint64_t *updates, uint64_t *rebuilds, uint64_t *nodes_built) {
+    if (updates) *updates = g_mir.updates;
+    if (rebuilds) *rebuilds = g_mir.rebuilds;
+    if (nodes_built) *nodes_built = g_mir.nodes_built;
+}
+
+/* ---- Verification (CYBER_MIRROR_VERIFY=1) ---- */
+
+static void mir_path(HtmlDocument *d, int idx, char *out, size_t cap) {
+    char parts[16][48];
+    int n = 0;
+    for (int i = idx; i >= 0 && n < 16; i = po_array_parent(&d->array, i)) {
+        HtmlNode *hn = po_array_payload(&d->array, i);
+        const char *cls = NULL;
+        for (HtmlAttribute *a = hn ? hn->attributes : NULL; a; a = a->next)
+            if (strcmp(a->name, "class") == 0) cls = a->value;
+        snprintf(parts[n++], sizeof(parts[0]), "%s%s%.20s", hn && hn->type == HTML_NODE_TEXT ? "#text" : hn ? hn->tag_name : "?",
+                 cls ? "." : "", cls ? cls : "");
+    }
+    size_t o = 0;
+    out[0] = '\0';
+    for (int k = n - 1; k >= 0 && o + 2 < cap; k--)
+        o += (size_t)snprintf(out + o, cap - o, "%s%s", parts[k], k ? " > " : "");
+}
+
+static int mir_cmp(HtmlDocument *a, int ia, HtmlDocument *b, int ib, int *reported) {
+    int diffs = 0;
+    HtmlNode *x = po_array_payload(&a->array, ia), *y = po_array_payload(&b->array, ib);
+    const char *why = NULL;
+    char detail[256] = "";
+    if (x->type != y->type) why = "node type";
+    else if (x->type == HTML_NODE_ELEMENT) {
+        if (strcmp(x->tag_name, y->tag_name) != 0) { why = "tag"; snprintf(detail, sizeof(detail), "%s vs %s", x->tag_name, y->tag_name); }
+        else if (x->store_id != y->store_id) why = "store id";
+        else {
+            HtmlAttribute *p = x->attributes, *q = y->attributes;
+            for (; p && q; p = p->next, q = q->next)
+                if (strcmp(p->name, q->name) != 0 || strcmp(p->value, q->value) != 0) break;
+            if (p || q) {
+                why = "attributes";
+                snprintf(detail, sizeof(detail), "mirror %s=\"%.60s\" vs parse %s=\"%.60s\"", p ? p->name : "-",
+                         p ? p->value : "", q ? q->name : "-", q ? q->value : "");
+            } else if ((x->text_content == NULL) != (y->text_content == NULL) ||
+                       (x->text_content && strcmp(x->text_content, y->text_content) != 0)) {
+                why = "raw text";
+            }
+        }
+    } else if (x->type == HTML_NODE_TEXT) {
+        if (strcmp(x->text_content ? x->text_content : "", y->text_content ? y->text_content : "") != 0) {
+            why = "text";
+            snprintf(detail, sizeof(detail), "mirror \"%.50s\" vs parse \"%.50s\"", x->text_content ? x->text_content : "",
+                     y->text_content ? y->text_content : "");
+        }
+    }
+    if (why) {
+        if ((*reported)++ < 12) {
+            char path[512];
+            mir_path(a, ia, path, sizeof(path));
+            fprintf(stderr, "[mirror-verify] %s differs at %s %s\n", why, path, detail);
+        }
+        return 1;
+    }
+    int ca = po_array_first_child(&a->array, ia), cb = po_array_first_child(&b->array, ib);
+    for (; ca >= 0 && cb >= 0; ca = po_array_next_sibling(&a->array, ca), cb = po_array_next_sibling(&b->array, cb))
+        diffs += mir_cmp(a, ca, b, cb, reported);
+    if (ca >= 0 || cb >= 0) {
+        if ((*reported)++ < 12) {
+            char path[512];
+            mir_path(a, ia, path, sizeof(path));
+            HtmlNode *extra = ca >= 0 ? po_array_payload(&a->array, ca) : po_array_payload(&b->array, cb);
+            fprintf(stderr, "[mirror-verify] child count differs at %s (extra in %s: %s \"%.40s\")\n", path,
+                    ca >= 0 ? "mirror" : "parse", extra->type == HTML_NODE_TEXT ? "#text" : extra->tag_name,
+                    extra->type == HTML_NODE_TEXT && extra->text_content ? extra->text_content : "");
+        }
+        diffs++;
+    }
+    return diffs;
+}
+
+static int mir_verify(JSContextHandle ctx, GCValue js_doc) {
+    SerializeBuffer buf;
+    GCValue doc_elem = render_root_element(ctx, js_doc);
+    if (!snapshot_serialize(ctx, doc_elem, &buf, 0, false)) return -1;
+    HtmlDocument *p = html_parse(buf.data, buf.len);
+    if (p) map_store_ids(p, &buf);
+    serialize_buf_free(&buf);
+    static unsigned long checks, failing;
+    checks++;
+    if (!p) return -1;
+    int reported = 0;
+    int diffs = 0;
+    if (g_mir.doc->root_idx >= 0 && p->root_idx >= 0) diffs = mir_cmp(g_mir.doc, g_mir.doc->root_idx, p, p->root_idx, &reported);
+    else diffs = g_mir.doc->root_idx != p->root_idx;
+    /* The array must be in pre-order without tombstones (index ranges are
+     * subtrees for layout and selector matching). */
+    {
+        PreOrderCompactionArray *a = &g_mir.doc->array;
+        int expect = 0;
+        bool ordered = a->tombstone_count == 0 && a->count == a->active_count;
+        for (int r = a->first_root; r >= 0 && ordered; r = po_array_next_sibling(a, r)) {
+            /* Pre-order walk over the links (no stack). */
+            int i = r;
+            while (ordered) {
+                if (i != expect++) { ordered = false; break; }
+                int c = po_array_first_child(a, i);
+                if (c >= 0) { i = c; continue; }
+                while (i != r && po_array_next_sibling(a, i) < 0) i = po_array_parent(a, i);
+                if (i == r) break;
+                i = po_array_next_sibling(a, i);
+            }
+        }
+        if (!ordered || (size_t)expect != a->count) {
+            fprintf(stderr, "[mirror-verify] array not in pre-order (count %zu, active %zu, tombstones %zu)\n",
+                    a->count, a->active_count, a->tombstone_count);
+            diffs++;
+        }
+    }
+    if (diffs) failing++;
+    if (diffs || checks % 100 == 0)
+        fprintf(stderr, "[mirror-verify] check %lu: %d differences (%lu of %lu checks differ)\n", checks, diffs, failing, checks);
+    html_document_free(p);
+    return diffs;
+}
+
+int html_mirror_check(JSContextHandle ctx, GCValue js_doc) {
+    if (!g_mir.doc || !g_mir.valid) return -1;
+    return mir_verify(ctx, js_doc);
 }

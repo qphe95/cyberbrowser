@@ -100,6 +100,35 @@ static const char* layout_node_attribute(HtmlNode *node, const char *name)
     return NULL;
 }
 
+const char *css_layout_node_text(const LayoutContext *ctx, const HtmlNode *node)
+{
+    if (!node) return NULL;
+    if (ctx && ctx->text_gen && ctx->doc) {
+        int i = po_array_index_from_payload(&ctx->doc->array, node);
+        if (i >= 0 && i < ctx->text_gen_cap && ctx->text_gen[i]) return ctx->text_gen[i];
+    }
+    return node->text_content;
+}
+
+/* Replace document node dom_idx's text for this layout (copied). */
+static void layout_set_node_text(LayoutContext *ctx, int dom_idx, const char *text, size_t len)
+{
+    if (!ctx->doc || dom_idx < 0) return;
+    if (!ctx->text_gen) {
+        int cap = (int)po_array_count(&ctx->doc->array);
+        ctx->text_gen = (char **)calloc((size_t)cap + 1, sizeof(char *));
+        if (!ctx->text_gen) return;
+        ctx->text_gen_cap = cap;
+    }
+    if (dom_idx >= ctx->text_gen_cap) return;
+    char *t = (char *)malloc(len + 1);
+    if (!t) return;
+    memcpy(t, text, len);
+    t[len] = '\0';
+    free(ctx->text_gen[dom_idx]);
+    ctx->text_gen[dom_idx] = t;
+}
+
 static inline LayoutNodeRef* layout_node_ref(LayoutContext *ctx, int idx)
 {
     return &ctx->tree.nodes[idx];
@@ -141,14 +170,46 @@ static bool layout_build_index_map(LayoutContext *ctx, int **out_map)
     return true;
 }
 
+/* Recycled buffers: one layout's tree and boxes (12 MB on a large page)
+ * become the next one's instead of going back to the OS and faulting in
+ * again.  The style pass writes every box before it is read. */
+typedef struct LayoutSpare { void *p; size_t cap; } LayoutSpare;
+static LayoutSpare g_spare_nodes, g_spare_boxes;
+
+static void *layout_spare_take(LayoutSpare *sp, size_t need)
+{
+    void *p;
+    if (sp->p && sp->cap >= need) {
+        p = sp->p;
+        sp->p = NULL;
+        sp->cap = 0;
+    } else {
+        p = malloc(need ? need : 1);
+    }
+    /* CYBER_LAYOUT_POISON=1: garbage in, so a read before the write shows. */
+    static int poison = -1;
+    if (poison < 0) poison = cyber_getenv("CYBER_LAYOUT_POISON") ? 1 : 0;
+    if (poison && p) memset(p, 0xA5, need);
+    return p;
+}
+
+static void layout_spare_give(LayoutSpare *sp, void *p, size_t cap)
+{
+    if (!p) return;
+    if (sp->p && sp->cap >= cap) { free(p); return; }
+    free(sp->p);
+    sp->p = p;
+    sp->cap = cap;
+}
+
 static bool layout_build_nodes(LayoutContext *ctx, const int *map)
 {
     int dom_count = (int)po_array_count(&ctx->doc->array);
     int active = layout_count_active_nodes(ctx);
 
-    ctx->tree.nodes = (LayoutNodeRef*)calloc(active, sizeof(LayoutNodeRef));
+    ctx->tree.nodes = (LayoutNodeRef*)layout_spare_take(&g_spare_nodes, (size_t)active * sizeof(LayoutNodeRef));
     ctx->tree.count = active;
-    ctx->boxes = (LayoutBox*)calloc(active, sizeof(LayoutBox));
+    ctx->boxes = (LayoutBox*)layout_spare_take(&g_spare_boxes, (size_t)active * sizeof(LayoutBox));
     if (!ctx->tree.nodes || !ctx->boxes) return false;
 
     for (int i = 0; i < dom_count; i++) {
@@ -187,25 +248,22 @@ static bool layout_build_nodes(LayoutContext *ctx, const int *map)
     }
     if (ctx->tree.root_idx < 0 && active > 0) ctx->tree.root_idx = 0;
 
-    /* Initialize default display/visibility for each box. */
-    for (int i = 0; i < active; i++) {
-        LayoutBox *box = &ctx->boxes[i];
-        HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx);
-        if (node && node->type == HTML_NODE_ELEMENT) {
-            box->display = layout_default_display(node->tag_name);
-        } else {
-            box->display = CSS_DISPLAY_INLINE;
-        }
+    return true;
+}
+
+/* A box before its style: the defaults every node starts from.  The style
+ * pass sets each box from this (or copies a styled one), so a tree build
+ * need not initialize the boxes, and their buffer can be recycled. */
+static void layout_box_init(LayoutContext *ctx, int idx)
+{
+    static LayoutBox tmpl;
+    static int tmpl_ready;
+    if (!tmpl_ready) {
+        LayoutBox *box = &tmpl;
+        memset(box, 0, sizeof(*box));
         box->visibility = CSS_VISIBILITY_VISIBLE;
         box->position = CSS_POSITION_STATIC;
         box->overflow = 0;
-        /* HTML UA stylesheet: table cells are middle-aligned by default. */
-        if (node && node->type == HTML_NODE_ELEMENT &&
-            (strcasecmp(node->tag_name, "td") == 0 ||
-             strcasecmp(node->tag_name, "th") == 0))
-            box->vertical_align = 1;
-        else
-            box->vertical_align = 0;
         box->box_sizing = CSS_BOX_SIZING_CONTENT_BOX;
         box->flex_direction = CSS_FLEX_DIRECTION_ROW;
         box->flex_wrap = CSS_FLEX_WRAP_NOWRAP;
@@ -277,9 +335,19 @@ static bool layout_build_nodes(LayoutContext *ctx, const int *map)
         box->gap_col = 0.0;
         box->aspect_ratio = 0.0;
         box->aspect_ratio_prop = 0;
+        tmpl_ready = 1;
     }
-
-    return true;
+    LayoutBox *box = &ctx->boxes[idx];
+    *box = tmpl;
+    HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+    if (node && node->type == HTML_NODE_ELEMENT) {
+        box->display = layout_default_display(node->tag_name);
+        /* HTML UA stylesheet: table cells are middle-aligned by default. */
+        if (strcasecmp(node->tag_name, "td") == 0 || strcasecmp(node->tag_name, "th") == 0)
+            box->vertical_align = 1;
+    } else {
+        box->display = CSS_DISPLAY_INLINE;
+    }
 }
 
 static void layout_build_preorder_recursive(LayoutContext *ctx, int idx, int *preorder, int *pos)
@@ -354,14 +422,18 @@ void css_layout_tree_free(LayoutContext *ctx)
     free((void *)ctx->custom_props);
     frame_arena_reset(&ctx->arena);
     free(ctx->float_stack);
-    free(ctx->tree.nodes);
+    layout_spare_give(&g_spare_nodes, ctx->tree.nodes, (size_t)ctx->tree.count * sizeof(LayoutNodeRef));
     free(ctx->tree.preorder);
     free(ctx->tree.postorder);
-    free(ctx->boxes);
+    layout_spare_give(&g_spare_boxes, ctx->boxes, (size_t)ctx->tree.count * sizeof(LayoutBox));
     free(ctx->intrinsic_cache);
     if (ctx->text_norm) {
         for (int i = 0; i < ctx->tree.count; i++) free(ctx->text_norm[i]);
         free(ctx->text_norm);
+    }
+    if (ctx->text_gen) {
+        for (int i = 0; i < ctx->text_gen_cap; i++) free(ctx->text_gen[i]);
+        free(ctx->text_gen);
     }
     memset(ctx, 0, sizeof(*ctx));
 }
@@ -3400,16 +3472,17 @@ trunc:
 }
 
 /* Deepest-last non-whitespace text descendant of a DOM node, or -1. */
-static int layout_last_text_descendant(HtmlDocument *doc, int idx)
+static int layout_last_text_descendant(LayoutContext *ctx, int idx)
 {
+    HtmlDocument *doc = ctx->doc;
     int result = -1;
     for (int c = po_array_first_child(&doc->array, idx); c >= 0;
          c = po_array_next_sibling(&doc->array, c)) {
-        int sub = layout_last_text_descendant(doc, c);
+        int sub = layout_last_text_descendant(ctx, c);
         if (sub >= 0) result = sub;
         HtmlNode *n = (HtmlNode *)po_array_payload(&doc->array, c);
-        if (n && n->type == HTML_NODE_TEXT && n->text_content &&
-            !layout_text_is_whitespace(n->text_content))
+        const char *t = css_layout_node_text(ctx, n);
+        if (n && n->type == HTML_NODE_TEXT && t && !layout_text_is_whitespace(t))
             result = c;
     }
     return result;
@@ -3430,33 +3503,27 @@ static void layout_inject_generated_after(LayoutContext *ctx, int idx,
     int sib = po_array_next_sibling(&ctx->doc->array, dom_idx);
     if (sib >= 0) {
         HtmlNode *sn = (HtmlNode *)po_array_payload(&ctx->doc->array, sib);
-        if (sn && sn->type == HTML_NODE_TEXT && sn->text_content &&
-            layout_text_is_whitespace(sn->text_content)) {
-            size_t cl = strlen(content);
-            char *nt = (char *)malloc(cl + 1);
-            if (!nt) return;
-            memcpy(nt, content, cl + 1);
-            free(sn->text_content);
-            sn->text_content = nt;
-            sn->text_len = cl;
+        const char *st = css_layout_node_text(ctx, sn);
+        if (sn && sn->type == HTML_NODE_TEXT && st && layout_text_is_whitespace(st)) {
+            layout_set_node_text(ctx, sib, content, strlen(content));
             return;
         }
     }
-    int last = layout_last_text_descendant(ctx->doc, dom_idx);
+    int last = layout_last_text_descendant(ctx, dom_idx);
     if (last >= 0) {
         HtmlNode *tn = (HtmlNode *)po_array_payload(&ctx->doc->array, last);
-        if (tn && tn->text_content) {
-            size_t tl = strlen(tn->text_content), cl = strlen(content);
+        const char *tt = css_layout_node_text(ctx, tn);
+        if (tn && tt) {
+            size_t tl = strlen(tt), cl = strlen(content);
             /* Idempotency guard: skip when the content is already there. */
-            if (tl >= cl && strcmp(tn->text_content + tl - cl, content) == 0)
+            if (tl >= cl && strcmp(tt + tl - cl, content) == 0)
                 return;
             char *nt = (char *)malloc(tl + cl + 1);
             if (!nt) return;
-            memcpy(nt, tn->text_content, tl);
+            memcpy(nt, tt, tl);
             memcpy(nt + tl, content, cl + 1);
-            free(tn->text_content);
-            tn->text_content = nt;
-            tn->text_len = tl + cl;
+            layout_set_node_text(ctx, last, nt, tl + cl);
+            free(nt);
         }
     }
 }
@@ -5106,6 +5173,8 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
             T->share_misses++;
         }
     }
+    /* Computed from the defaults (a recycled box holds the last layout's). */
+    layout_box_init(ctx, idx);
     char share_after[256];
     bool share_has_after = false;
     if (node && node->type == HTML_NODE_ELEMENT) {
@@ -6042,19 +6111,21 @@ static bool layout_measure_text_styled(const LayoutBox *box, const char *text,
 }
 
 /* Concatenate descendant text of a DOM node (used to size inline elements). */
-static void layout_concat_dom_text(HtmlDocument *doc, HtmlNode *node,
+static void layout_concat_dom_text(LayoutContext *ctx, HtmlNode *node,
                                    char *buf, size_t bufsz, size_t *len)
 {
+    HtmlDocument *doc = ctx->doc;
     for (HtmlNode *c = html_node_first_child(doc, node); c && *len + 1 < bufsz;
          c = html_node_next_sibling(doc, c)) {
-        if (c->type == HTML_NODE_TEXT && c->text_content) {
-            size_t tl = strlen(c->text_content);
+        const char *ct = c->type == HTML_NODE_TEXT ? css_layout_node_text(ctx, c) : NULL;
+        if (ct) {
+            size_t tl = strlen(ct);
             if (*len + tl >= bufsz) tl = bufsz - 1 - *len;
-            memcpy(buf + *len, c->text_content, tl);
+            memcpy(buf + *len, ct, tl);
             *len += tl;
             buf[*len] = '\0';
         } else if (c->type == HTML_NODE_ELEMENT) {
-            layout_concat_dom_text(doc, c, buf, bufsz, len);
+            layout_concat_dom_text(ctx, c, buf, bufsz, len);
         }
     }
 }
@@ -6279,7 +6350,7 @@ static void layout_sig_children(LayoutContext *ctx, int idx, int *out_first, int
         if (!layout_is_in_flow(ch) || ch->float_side != 0) continue;
         HtmlNode *dn = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
         if (dn && dn->type == HTML_NODE_TEXT &&
-            layout_text_is_whitespace(dn->text_content)) continue;
+            layout_text_is_whitespace(css_layout_node_text(ctx, dn))) continue;
         if (*out_first < 0) *out_first = c;
         *out_last = c;
     }
@@ -6428,7 +6499,7 @@ static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_ma
     if (box->display == CSS_DISPLAY_NONE) return 0.0;
     HtmlNode *dom = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
     if (dom && dom->type == HTML_NODE_TEXT)
-        return layout_text_intrinsic(box, dom->text_content ? dom->text_content : "",
+        return layout_text_intrinsic(box, css_layout_node_text(ctx, dom) ? css_layout_node_text(ctx, dom) : "",
                                      want_max || box->white_space == 1 || box->white_space == 2);
     if (!dom || dom->type != HTML_NODE_ELEMENT) return 0.0;
 
@@ -6481,7 +6552,7 @@ static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_ma
             LayoutBox *cb = layout_box(ctx, c);
             if (!layout_is_in_flow(cb)) continue;
             HtmlNode *cn = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
-            if (cn && cn->type == HTML_NODE_TEXT && layout_text_is_whitespace(cn->text_content))
+            if (cn && cn->type == HTML_NODE_TEXT && layout_text_is_whitespace(css_layout_node_text(ctx, cn)))
                 continue;
             double w = layout_intrinsic_contribution(ctx, c, want_max);
             if (is_row && (want_max || !wraps)) content += w;
@@ -6509,7 +6580,7 @@ static double layout_intrinsic_compute(LayoutContext *ctx, int idx, bool want_ma
                 pending_space = 0.0;
                 continue;
             }
-            if (cn && cn->type == HTML_NODE_TEXT && layout_text_is_whitespace(cn->text_content)) {
+            if (cn && cn->type == HTML_NODE_TEXT && layout_text_is_whitespace(css_layout_node_text(ctx, cn))) {
                 /* Collapsible space: counts only between inline content. */
                 if (one_line && line > 0.0) {
                     double sw = 0.0;
@@ -6855,7 +6926,7 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
             if (cur.x < line_left) cur.x = line_left;
             HtmlNode *dom = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
             if (pending_mb > 0.0 &&
-                !(dom && dom->type == HTML_NODE_TEXT && layout_text_is_whitespace(dom->text_content))) {
+                !(dom && dom->type == HTML_NODE_TEXT && layout_text_is_whitespace(css_layout_node_text(ctx, dom)))) {
                 /* A line box after a block: the block's bottom margin no
                  * longer collapses with anything. */
                 cur.y += pending_mb;
@@ -6906,9 +6977,9 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
              * honours '\n'. */
             bool keeps_nl = child->white_space >= 2 && child->white_space <= 4;
             if (dom && dom->type == HTML_NODE_TEXT) {
-                if (!layout_text_is_whitespace(dom->text_content) ||
-                    (keeps_nl && dom->text_content && strchr(dom->text_content, '\n'))) {
-                    text = css_layout_box_text(ctx, c, dom->text_content);
+                if (!layout_text_is_whitespace(css_layout_node_text(ctx, dom)) ||
+                    (keeps_nl && css_layout_node_text(ctx, dom) && strchr(css_layout_node_text(ctx, dom), '\n'))) {
+                    text = css_layout_box_text(ctx, c, css_layout_node_text(ctx, dom));
                     if (text[0] == ' ' && cur.x <= line_left + 0.001 && child->white_space != 2 &&
                         child->white_space != 3) {
                         /* A collapsible space at the start of a line is removed. */
@@ -6927,7 +6998,7 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                 } else {
                     size_t cl = 0;
                     concat[0] = '\0';
-                    layout_concat_dom_text(ctx->doc, dom, concat, sizeof(concat), &cl);
+                    layout_concat_dom_text(ctx, dom, concat, sizeof(concat), &cl);
                     if (cl > 0 && !layout_text_is_whitespace(concat)) {
                         text = concat;
                     } else if (cl > 0 && child->display == CSS_DISPLAY_INLINE &&
@@ -7532,7 +7603,7 @@ static void layout_flex_container(LayoutContext *ctx, int idx)
         int w = 0;
         for (int r = 0; r < nkids; r++) {
             HtmlNode *kn = layout_node_dom(ctx, ctx->tree.nodes[kids[r]].dom_node_idx);
-            if (kn && kn->type == HTML_NODE_TEXT && layout_text_is_whitespace(kn->text_content))
+            if (kn && kn->type == HTML_NODE_TEXT && layout_text_is_whitespace(css_layout_node_text(ctx, kn)))
                 continue;
             kids[w++] = kids[r];
         }
@@ -8146,12 +8217,12 @@ static void layout_inline_wrapped_children(LayoutContext *ctx, int idx)
         const char *text = NULL;
         char concat[8192];
         if (dom && dom->type == HTML_NODE_TEXT) {
-            text = css_layout_box_text(ctx, c, dom->text_content ? dom->text_content : "");
+            text = css_layout_box_text(ctx, c, css_layout_node_text(ctx, dom) ? css_layout_node_text(ctx, dom) : "");
         } else if (dom && dom->type == HTML_NODE_ELEMENT && child->display == CSS_DISPLAY_INLINE &&
                    strcasecmp(dom->tag_name, "img") != 0) {
             size_t cl = 0;
             concat[0] = '\0';
-            layout_concat_dom_text(ctx->doc, dom, concat, sizeof(concat), &cl);
+            layout_concat_dom_text(ctx, dom, concat, sizeof(concat), &cl);
             if (cl > 0) text = concat;
         }
         bool has_nl = text && keeps_nl && strchr(text, '\n');
@@ -8252,7 +8323,7 @@ static void layout_node_serial(LayoutContext *ctx, int idx)
                 if (child->display == CSS_DISPLAY_NONE) continue;
                 HtmlNode *dn = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
                 if (dn && dn->type == HTML_NODE_TEXT &&
-                    layout_text_is_whitespace(dn->text_content)) continue;
+                    layout_text_is_whitespace(css_layout_node_text(ctx, dn))) continue;
                 sig_count++;
                 wrap_target = c;
             }
@@ -8297,7 +8368,7 @@ static void layout_node_serial(LayoutContext *ctx, int idx)
             double line_adv = layout_line_advance_box(child);
             bool sized = false;
             if (dom && dom->type == HTML_NODE_TEXT) {
-                if (layout_text_is_whitespace(dom->text_content)) {
+                if (layout_text_is_whitespace(css_layout_node_text(ctx, dom))) {
                     /* Same contextual collapse as the block-flow inline branch:
                      * a space between inline content, nothing at the start. */
                     double content_left_i = box->x + box->padding_left + box->border_left;
@@ -8312,7 +8383,7 @@ static void layout_node_serial(LayoutContext *ctx, int idx)
                     sized = true;
                 } else {
                     double tw = 0.0;
-                    if (layout_measure_text_styled(child, css_layout_box_text(ctx, c, dom->text_content),
+                    if (layout_measure_text_styled(child, css_layout_box_text(ctx, c, css_layout_node_text(ctx, dom)),
                                                    fs, &tw, NULL)) {
                         child->width = tw;
                         child->height = line_adv;
@@ -8353,7 +8424,7 @@ static void layout_node_serial(LayoutContext *ctx, int idx)
                 char concat[8192];
                 size_t cl = 0;
                 concat[0] = '\0';
-                layout_concat_dom_text(ctx->doc, dom, concat, sizeof(concat), &cl);
+                layout_concat_dom_text(ctx, dom, concat, sizeof(concat), &cl);
                 if (cl > 0 && !layout_text_is_whitespace(concat)) {
                     double tw = 0.0;
                     if (layout_measure_text_styled(child, concat, fs, &tw, NULL)) {
@@ -8471,8 +8542,8 @@ static void layout_dump_boxes(LayoutContext *ctx, const char *path)
         }
         const char *vname = (b->visibility == CSS_VISIBILITY_HIDDEN) ? "hidden" : "visible";
         char txt_buf[48] = "";
-        if (node && node->type == HTML_NODE_TEXT && node->text_content) {
-            strncpy(txt_buf, node->text_content, sizeof(txt_buf) - 1);
+        if (node && node->type == HTML_NODE_TEXT && css_layout_node_text(ctx, node)) {
+            strncpy(txt_buf, css_layout_node_text(ctx, node), sizeof(txt_buf) - 1);
             for (size_t k = 0; k < strlen(txt_buf); k++)
                 if (txt_buf[k] == '\t' || txt_buf[k] == '\n' || txt_buf[k] == '\r') txt_buf[k] = ' ';
         }
@@ -8528,7 +8599,7 @@ static void layout_static_position(LayoutContext *ctx, int idx, double *sx, doub
         LayoutBox *kb = layout_box(ctx, k);
         if (!layout_is_in_flow(kb) || kb->float_side != 0) continue;
         HtmlNode *kn = layout_node_dom(ctx, ctx->tree.nodes[k].dom_node_idx);
-        if (kn && kn->type == HTML_NODE_TEXT && layout_text_is_whitespace(kn->text_content)) continue;
+        if (kn && kn->type == HTML_NODE_TEXT && layout_text_is_whitespace(css_layout_node_text(ctx, kn))) continue;
         if (layout_box_is_block_level(kb)) {
             *sy = kb->y + kb->height + kb->margin_bottom;
         } else {
@@ -8786,10 +8857,10 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
             free(ctx->text_norm[i]);
             ctx->text_norm[i] = NULL;
             HtmlNode *tn = layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx);
-            if (!tn || tn->type != HTML_NODE_TEXT || !tn->text_content) continue;
+            if (!tn || tn->type != HTML_NODE_TEXT || !css_layout_node_text(ctx, tn)) continue;
             unsigned char ws = ctx->boxes[i].white_space;
             if (ws == 2 || ws == 3) continue;
-            const char *t = tn->text_content;
+            const char *t = css_layout_node_text(ctx, tn);
             bool needs = false;
             for (const char *q = t; *q; q++) {
                 if (*q == '\n' || *q == '\t' || *q == '\r' || *q == '\f' || (*q == ' ' && q[1] == ' ')) {

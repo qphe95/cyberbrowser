@@ -265,6 +265,9 @@ const uint32_t *dom_id_index_lookup(CssAtom a, uint32_t *n);
 /* A mutation at slot s: count it in connected_version when s is in the
  * document's tree. */
 void dom_note_connected_change(uint32_t s);
+/* The same, marking s dirty with `bits` (dom_note_connected_change marks
+ * DOMF_DIRTY_CHILDREN: a structural change at s). */
+void dom_note_mutation(uint32_t s, uint16_t bits);
 void dom_mark_dirty(NodeId id, uint16_t bits);
 void dom_clear_dirty(NodeId root);
 

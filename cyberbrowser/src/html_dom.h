@@ -76,6 +76,10 @@ struct HtmlDocument {
     int current_parent_idx;
 
     struct HtmlArenaBlock *arena; /* attribute names/values */
+
+    /* Holders beyond the first (html_document_free drops one; the last
+     * frees).  The layout mirror hands its document out this way. */
+    int refs;
 };
 
 
@@ -158,6 +162,17 @@ HtmlDocument *html_document_from_js_dom_if_changed(JSContextHandle ctx, GCValue 
  * a full snapshot. */
 HtmlDocument *html_document_from_js_dom_incremental(JSContextHandle ctx, GCValue js_doc,
                                                     uint64_t *key, bool *unchanged);
+/* The layout mirror (html_dom.c): the document as layout reads it, kept in
+ * step with the live DOM in place.  The snapshot functions above return it
+ * (each caller holds a reference; html_document_free drops it).  NULL when
+ * the page needs the serializer (CYBER_MIRROR=0: always). */
+HtmlDocument *html_mirror_document(JSContextHandle ctx, GCValue js_doc, bool full,
+                                   uint64_t *version, bool *changed);
+void html_mirror_stats(uint64_t *updates, uint64_t *rebuilds, uint64_t *nodes_built);
+/* Test hook: differences between the mirror and serialize + parse now
+ * (-1: no mirror). */
+int html_mirror_check(JSContextHandle ctx, GCValue js_doc);
+
 /* Bytes and elements incremental snapshots copied (tests, benchmarks). */
 void html_snapshot_stats(uint64_t *reused_bytes, uint64_t *reused_elements);
 /* Render snapshots built / reused (tests, benchmarks). */

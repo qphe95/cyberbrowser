@@ -230,6 +230,47 @@ TEST(test_growth_beyond_initial_capacity) {
     return true;
 }
 
+/* Reordering children by detaching and appending keeps the subtrees (and
+ * their indices); compaction then lays them out in the new order. */
+TEST(test_detach_and_append_reorders) {
+    PreOrderCompactionArray array;
+    ASSERT_TRUE(po_array_init(&array, sizeof(TestNode), 8));
+    /* root -> [a -> [a1], b, c] */
+    int root = po_array_add(&array, -1);
+    int a = po_array_add(&array, root);
+    int a1 = po_array_add(&array, a);
+    int b = po_array_add(&array, root);
+    int c = po_array_add(&array, root);
+    int vals[] = {0, 1, 2, 3, 4};
+    int idx[] = {root, a, a1, b, c};
+    for (int i = 0; i < 5; i++) ((TestNode*)po_array_payload(&array, idx[i]))->value = vals[i];
+
+    /* New order: c, a (with a1), and b deleted while detached. */
+    po_array_detach(&array, a);
+    po_array_detach(&array, b);
+    po_array_detach(&array, c);
+    ASSERT_EQ(-1, po_array_first_child(&array, root));
+    ASSERT_EQ(PO_ARRAY_DETACHED, po_array_parent(&array, a));
+    ASSERT_TRUE(po_array_append(&array, root, c));
+    ASSERT_TRUE(po_array_append(&array, root, a));
+    ASSERT_FALSE(po_array_append(&array, root, a));   /* not detached any more */
+    po_array_delete(&array, b);
+    ASSERT_EQ(c, po_array_first_child(&array, root));
+    ASSERT_EQ(a, po_array_next_sibling(&array, c));
+    ASSERT_EQ(-1, po_array_next_sibling(&array, a));
+    ASSERT_EQ(a, po_array_last_child(&array, root));
+    ASSERT_EQ(c, po_array_prev_sibling(&array, a));
+    ASSERT_EQ(a1, po_array_first_child(&array, a));
+    ASSERT_EQ(root, array.first_root);
+    ASSERT_EQ(root, array.last_root);
+
+    ASSERT_EQ((size_t)4, po_array_compact(&array));
+    int expected[] = {0, 4, 1, 2};
+    for (int i = 0; i < 4; i++) ASSERT_EQ(expected[i], ((TestNode*)po_array_payload(&array, i))->value);
+    po_array_free(&array);
+    return true;
+}
+
 void run_preorder_compaction_array_tests(void) {
     printf("\n--- PreOrderCompactionArray Tests ---\n");
     RUN_TEST(test_init_free);
@@ -240,5 +281,6 @@ void run_preorder_compaction_array_tests(void) {
     RUN_TEST(test_multiple_roots);
     RUN_TEST(test_payload_to_index_roundtrip);
     RUN_TEST(test_growth_beyond_initial_capacity);
+    RUN_TEST(test_detach_and_append_reorders);
 }
 

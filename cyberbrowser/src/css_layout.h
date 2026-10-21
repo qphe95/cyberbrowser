@@ -428,7 +428,17 @@ typedef struct LayoutContext {
     /* Per text box: the text with white space collapsed (white-space
      * normal/nowrap/pre-line), or NULL to use the DOM text as is. */
     char **text_norm;
+
+    /* Per document node (index): its text with generated ::after content
+     * realized, or NULL.  Layout never writes the document itself (it may
+     * outlive this layout and be laid out again). */
+    char **text_gen;
+    int text_gen_cap;
 } LayoutContext;
+
+/* A DOM text node's text as this layout sees it (generated content
+ * included). */
+const char *css_layout_node_text(const LayoutContext *ctx, const HtmlNode *node);
 
 /* The text a text box lays out and paints (white space processed). */
 const char *css_layout_box_text(const LayoutContext *ctx, int idx, const char *raw);

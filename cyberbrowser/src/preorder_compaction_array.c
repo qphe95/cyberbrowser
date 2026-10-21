@@ -92,6 +92,7 @@ int po_array_add(PreOrderCompactionArray *array, int parent) {
 static void po_array_unlink(PreOrderCompactionArray *array, int index) {
     PreOrderCompactionArrayNode *node = po_array_node_fast(array, index);
 
+    if (node->parent == PO_ARRAY_DETACHED) return;   /* in no list */
     if (node->parent < 0) {
         if (node->prev_sibling >= 0) {
             po_array_node_fast(array, node->prev_sibling)->next_sibling = node->next_sibling;
@@ -122,9 +123,11 @@ void po_array_delete(PreOrderCompactionArray *array, int index) {
     PreOrderCompactionArrayNode *root_node = po_array_node_fast(array, index);
     if (root_node->state == PO_ARRAY_NODE_TOMBSTONE) return;
 
-    /* Mark the whole subtree as tombstone. */
-    int *stack = (int*)malloc(array->count * sizeof(int));
-    if (!stack) return;
+    /* Mark the whole subtree as tombstone (stack grown as needed: deletes
+     * are usually small subtrees of a large array). */
+    int local[64];
+    int *stack = local;
+    size_t cap = 64;
 
     int top = 0;
     stack[top++] = index;
@@ -136,6 +139,15 @@ void po_array_delete(PreOrderCompactionArray *array, int index) {
 
         int child = node->first_child;
         while (child >= 0) {
+            if ((size_t)top == cap) {
+                size_t nc = cap * 2;
+                int *ns = (int *)malloc(nc * sizeof(int));
+                if (!ns) break;
+                memcpy(ns, stack, (size_t)top * sizeof(int));
+                if (stack != local) free(stack);
+                stack = ns;
+                cap = nc;
+            }
             stack[top++] = child;
             child = po_array_node_fast(array, child)->next_sibling;
         }
@@ -145,16 +157,51 @@ void po_array_delete(PreOrderCompactionArray *array, int index) {
         array->tombstone_count++;
     }
 
-    free(stack);
+    if (stack != local) free(stack);
 
     /* Unlink the root of the deleted subtree from the active tree.
      * The links in the now-tombstoned node are still intact. */
     po_array_unlink(array, index);
 }
 
+void po_array_detach(PreOrderCompactionArray *array, int index) {
+    if (!array || index < 0 || (size_t)index >= array->count) return;
+    PreOrderCompactionArrayNode *node = po_array_node_fast(array, index);
+    if (node->state != PO_ARRAY_NODE_ACTIVE || node->parent == PO_ARRAY_DETACHED) return;
+    po_array_unlink(array, index);
+    node->parent = PO_ARRAY_DETACHED;
+    node->prev_sibling = node->next_sibling = -1;
+}
+
+bool po_array_append(PreOrderCompactionArray *array, int parent, int index) {
+    if (!array || index < 0 || (size_t)index >= array->count) return false;
+    if (parent < 0 || (size_t)parent >= array->count) return false;
+    PreOrderCompactionArrayNode *node = po_array_node_fast(array, index);
+    if (node->state != PO_ARRAY_NODE_ACTIVE || node->parent != PO_ARRAY_DETACHED) return false;
+    PreOrderCompactionArrayNode *p = po_array_node_fast(array, parent);
+    node->parent = parent;
+    node->next_sibling = -1;
+    node->prev_sibling = p->last_child;
+    if (p->last_child >= 0) po_array_node_fast(array, p->last_child)->next_sibling = index;
+    else p->first_child = index;
+    p->last_child = index;
+    return true;
+}
+
+static size_t po_array_rewrite(PreOrderCompactionArray *array);
+
 size_t po_array_compact(PreOrderCompactionArray *array) {
     if (!array) return 0;
     if (array->tombstone_count == 0) return array->active_count;
+    return po_array_rewrite(array);
+}
+
+size_t po_array_reorder(PreOrderCompactionArray *array) {
+    if (!array) return 0;
+    return po_array_rewrite(array);
+}
+
+static size_t po_array_rewrite(PreOrderCompactionArray *array) {
 
     size_t new_capacity = array->active_count;
     if (new_capacity < 16) new_capacity = 16;
