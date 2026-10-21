@@ -826,6 +826,32 @@ TEST(test_dom_layout_kept_across_changes_it_cannot_see) {
     return true;
 }
 
+/* DOM collections are iterable (for...of, spread), as YouTube's modern
+ * build expects: it iterates el.attributes and el.classList in custom
+ * element callbacks, and without iterators every one of them threw. */
+TEST(test_dom_collections_are_iterable) {
+    JSContextHandle ctx = get_shared_test_context();
+    if (!dom_ready(ctx)) { printf("    (skipped - no document)\n"); return true; }
+    int32_t r = js_int(ctx,
+        "(function(){ var d = document.createElement('div'); d.className = 'a b';"
+        " d.setAttribute('data-x', '1'); d.innerHTML = '<i></i><b></b>'; document.body.appendChild(d);"
+        " var cases = [['classList', d.classList, 2], ['attributes', d.attributes, 2],"
+        "  ['childNodes', d.childNodes, 2], ['children', d.children, 2],"
+        "  ['querySelectorAll', d.querySelectorAll('*'), 2],"
+        "  ['getElementsByTagName', d.getElementsByTagName('i'), 1],"
+        "  ['getElementsByClassName', document.getElementsByClassName('a'), 1]];"
+        " var bad = 0;"
+        " for (var i = 0; i < cases.length; i++) {"
+        "   var c = cases[i], n = 0;"
+        "   try { for (var x of c[1]) n++; } catch (e) { n = -1; }"
+        "   if (n !== c[2]) bad |= 1 << i;"
+        " }"
+        " d.remove(); return bad ? 100 + bad : 1; })()");
+    if (r != 1) printf("    not iterable (bit per case): %d\n", r - 100);
+    ASSERT_EQ(1, r);
+    return true;
+}
+
 /* A timer gives back its storage (callback and arguments) when it is
  * cleared or fires: a page that keeps scheduling never runs out.  Storage
  * used to be handed out once, so after ~2300 values every new timer was
@@ -1130,6 +1156,7 @@ void run_dom_tests(void) {
     RUN_TEST(test_dom_layout_metrics_see_each_change);
     RUN_TEST(test_dom_layout_kept_across_changes_it_cannot_see);
     RUN_TEST(test_dom_timers_reuse_storage);
+    RUN_TEST(test_dom_collections_are_iterable);
     RUN_TEST(test_dom_media_source_events);
     RUN_TEST(test_dom_custom_element_reactions);
     RUN_TEST(test_dom_mutation_observer_reobserve);

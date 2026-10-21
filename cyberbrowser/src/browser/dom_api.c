@@ -93,7 +93,11 @@ GCValue js_element_get_children(JSContextHandle ctx, GCValue this_val, int argc,
 GCValue js_element_get_childElementCount(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 
 /* Growable malloc'd list of GCValues. Declare locals with GC_VALUE_VEC_AUTO so
- * the storage is freed when the variable goes out of scope. */
+ * the storage is freed when the variable goes out of scope.  The values are
+ * rooted while listed: callers run script between pushing and using them
+ * (each insertion's connectedCallback), and a concurrent cycle stepping in
+ * meanwhile cannot see malloc'd memory -- a detached child's wrapper held
+ * only here would be freed. */
 typedef struct GCValueVec {
     GCValue *data;
     size_t count;
@@ -108,8 +112,13 @@ static void gc_value_vec_push(GCValueVec *v, GCValue val) {
         v->capacity = cap;
     }
     GC_SET(v->data[v->count++], val);
+    if (GC_VALUE_GET_TAG(val) < 0 && GC_VALUE_GET_HANDLE(val) != GC_HANDLE_NULL)
+        gc_add_root(GC_VALUE_GET_HANDLE(val));
 }
 static void gc_value_vec_free(GCValueVec *v) {
+    for (size_t i = 0; i < v->count; i++)
+        if (GC_VALUE_GET_TAG(v->data[i]) < 0 && GC_VALUE_GET_HANDLE(v->data[i]) != GC_HANDLE_NULL)
+            gc_remove_root(GC_VALUE_GET_HANDLE(v->data[i]));
     free(v->data);
     v->data = NULL;
     v->count = v->capacity = 0;
@@ -2478,6 +2487,10 @@ GCValue js_element_get_classList(JSContextHandle ctx, GCValue this_val, int argc
     JS_SetPropertyStr(ctx, classList, "supports", JS_NewCFunction(ctx, js_dom_token_list_supports, "supports", 1));
     JS_SetPropertyStr(ctx, classList, "item", JS_NewCFunction(ctx, js_dom_token_list_item, "item", 1));
     JS_SetPropertyStr(ctx, classList, "forEach", JS_NewCFunction(ctx, js_dom_token_list_for_each, "forEach", 1));
+    /* Iterable (for...of, spread), as DOMTokenList is. */
+    GCValue values = JS_NewCFunction(ctx, js_dom_token_list_values, "values", 0);
+    JS_SetPropertyStr(ctx, classList, "values", values);
+    JS_SetProperty(ctx, classList, dom_iterator_atom(ctx), values);
     GCValue length_getter = JS_NewCFunction(ctx, js_dom_token_list_get_length, "get length", 0);
     JSAtom length_atom = JS_NewAtom(ctx, "length");
     JS_DefinePropertyGetSet(ctx, classList, length_atom, length_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
@@ -3655,6 +3668,13 @@ GCValue js_element_get_attributes(JSContextHandle ctx, GCValue this_val,
         JS_NewCFunction(ctx, js_named_node_map_set_named_item, "setNamedItem", 1));
     JS_SetPropertyStr(ctx, map, "removeNamedItem",
         JS_NewCFunction(ctx, js_named_node_map_remove_named_item, "removeNamedItem", 1));
+    /* Iterable like NamedNodeMap: Array.prototype's iterator walks the
+     * indexed attributes by length. */
+    {
+        GCValue array_ctor = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "Array");
+        GCValue array_proto = JS_GetPropertyStr(ctx, array_ctor, "prototype");
+        JS_SetProperty(ctx, map, dom_iterator_atom(ctx), JS_GetProperty(ctx, array_proto, dom_iterator_atom(ctx)));
+    }
     return map;
 }
 

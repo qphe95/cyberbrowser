@@ -341,6 +341,48 @@ GC_RUNNING_TEST(test_gc_running_repeated,
     "  var ok = sum === 30 * 19900 && keep.every(function(o, i){ return o.k === i && o.s === 'x' + o.i; }); "
     "  return ok ? 'ok' : 'repeated collection lost data: ' + sum; })()")
 
+/* An async function suspended at an await keeps its locals and the values
+ * on its operand stack (f and a in f(a, await p, b)) while collections and
+ * compactions run, and finds them intact when it resumes.  YouTube's modern
+ * build awaits everywhere; a lost value surfaced as a crash reading a
+ * string fetch() was called with. */
+static void run_jobs(JSContextHandle ctx) {
+    JSContextHandle pctx;
+    while (JS_ExecutePendingJob(JS_GetRuntime(ctx), &pctx) > 0) { }
+}
+
+TEST(test_gc_async_frame_survives_await) {
+    JSContextHandle ctx = get_gc_test_ctx();
+    if (!SAFE_VALID(ctx)) { printf("    (skipped - no context)"); return true; }
+    GCValue r = eval_test(ctx,
+        "globalThis.__async_res = 'pending'; globalThis.__async_resolve = null;"
+        "(async function () {"
+        "  var rnd = String(Math.random());"
+        "  var s = ['a', 'b', rnd].join('-');"
+        "  var o = { k: s, arr: [1, 2, 3], nested: { t: 'n' + rnd } };"
+        "  var big = []; for (var i = 0; i < 200; i++) big.push({ i: i, s: 'v' + i + rnd });"
+        "  function combine(x, y, z) { return x + '|' + y + '|' + z; }"
+        "  await null;"
+        "  var mid = combine('pre' + rnd, await new Promise(function (res) { __async_resolve = res; }), 'post' + rnd);"
+        "  var ok = o.k === s && o.arr.length === 3 && o.nested.t === 'n' + rnd &&"
+        "           big[199].s === 'v199' + rnd && mid === 'pre' + rnd + '|middle|post' + rnd;"
+        "  __async_res = ok ? 'ok' : 'lost: ' + mid;"
+        "})(); 'started'");
+    (void)r;
+    run_jobs(ctx);
+    /* Suspended at the inner await: collect, churn and compact around it. */
+    for (int round = 0; round < 4; round++) {
+        eval_test(ctx, "(function(){ var g = []; for (var i = 0; i < 20000; i++) g.push({ x: 'garbage' + i }); return g.length; })()");
+        JS_RunGC(JS_GetRuntime(ctx));
+    }
+    ASSERT_TRUE(eval_expect_ok(ctx, "typeof __async_resolve === 'function' ? 'ok' : 'not suspended'"));
+    eval_test(ctx, "__async_resolve('middle'); 1");
+    run_jobs(ctx);
+    ASSERT_TRUE(eval_expect_ok(ctx, "__async_res"));
+    ASSERT_EQ(0, (int)gc_test_heap_check());
+    return true;
+}
+
 /* The frame chain must be unlinked when a generator yields; otherwise the
  * next call links back to the suspended frame and the chain becomes a cycle
  * (the collector then never finishes walking it, and direct eval asserts). */
@@ -1299,6 +1341,150 @@ TEST(test_gc_concurrent_major_cycle) {
     return true;
 }
 
+/* Async functions resuming and suspending while concurrent cycles run:
+ * each resume stores fresh objects in the frame (no write barrier: the
+ * interpreter writes frame slots directly) and suspends again, so a frame
+ * the collector scanned while suspended must be seen again before the
+ * cycle frees anything it holds. */
+TEST(test_gc_async_frames_during_concurrent_cycles) {
+    JSContextHandle ctx = get_gc_test_ctx();
+    if (!SAFE_VALID(ctx)) return true;
+    ConcState st;
+    ASSERT_TRUE(conc_begin(&st, 1, GC_REJECT_NORMAL, 256));
+    ASSERT_TRUE(eval_expect_ok(ctx,
+        "globalThis.__aw = { done: 0, bad: '' };"
+        "for (var w = 0; w < 16; w++) (async function (w) {"
+        "  for (var i = 0; i < 300; i++) {"
+        "    var o = { w: w, i: i, s: 'w' + w + 'i' + i, a: [i, i + 1] };"
+        "    var t = 'tmp' + i;"
+        "    await null;"
+        "    var keep = [o, t];"
+        "    await null;"
+        "    if (o.i !== i || o.s !== 'w' + w + 'i' + i || o.a[1] !== i + 1 || t !== 'tmp' + i || keep[0] !== o)"
+        "      { __aw.bad = 'worker ' + w + ' lost round ' + i; return; }"
+        "  }"
+        "  __aw.done++;"
+        "})(w); 'ok'"));
+    JSContextHandle pctx;
+    for (int guard = 0; guard < 2000000; guard++) {
+        int r = JS_ExecutePendingJob(JS_GetRuntime(ctx), &pctx);
+        if (r <= 0) break;
+        if ((guard & 63) == 0) gc_tick();
+    }
+    GCStats s;
+    ASSERT_TRUE(conc_end(&st, &s));
+    ASSERT_EQ(st.before.verify_failures, s.verify_failures);
+    ASSERT_TRUE(eval_expect_ok(ctx,
+        "__aw.bad ? __aw.bad : __aw.done === 16 ? 'ok' : 'only ' + __aw.done + ' finished'"));
+    ASSERT_EQ(0, (int)gc_test_heap_check());
+    return true;
+}
+
+/* A WeakMap keeps a value alive for as long as its key is (an ephemeron):
+ * values reachable only through the map must survive full and concurrent
+ * cycles while their keys live.  url_api.js keeps each URL's state this
+ * way; a lost state crashed in URL.toString. */
+static const char *k_weakmap_setup =
+    "globalThis.__wm = new WeakMap(); globalThis.__wk = [];"
+    "for (var i = 0; i < 3000; i++) { var k = { id: i }; __wk.push(k);"
+    "  __wm.set(k, { s: 'v' + i, inner: { n: i, t: 'inner' + i } }); }"
+    "'ok'";
+static const char *k_weakmap_check =
+    "(function(){ for (var i = 0; i < 3000; i++) { var v = __wm.get(__wk[i]);"
+    "  if (!v || v.s !== 'v' + i || v.inner.n !== i || v.inner.t !== 'inner' + i) return 'lost value ' + i; }"
+    " __wm = null; __wk = null; return 'ok'; })()";
+
+/* A WeakMap whose key dies drops the entry, but its value stays alive while
+ * anything else holds it: the fetch polyfill reads a Request's state with
+ * reqState.get(new Request(...)), so the key dies at once while the state
+ * (and its url string) is still in use. */
+static const char *k_weakmap_dead_key_setup =
+    "globalThis.__wv = []; globalThis.__wm2 = new WeakMap();"
+    "for (var i = 0; i < 3000; i++) { var v = { u: 'url' + i, nested: { n: i, s: 'n' + i } };"
+    "  __wm2.set({ key: i }, v); __wv.push(v); }"
+    "'ok'";
+static const char *k_weakmap_dead_key_check =
+    "(function(){ for (var i = 0; i < 3000; i++) { var v = __wv[i];"
+    "  if (!v || v.u !== 'url' + i || v.nested.n !== i || v.nested.s !== 'n' + i) return 'lost held value ' + i; }"
+    " __wv = null; __wm2 = null; return 'ok'; })()";
+
+TEST(test_gc_weakmap_dead_key_value_survives_full_cycles) {
+    JSContextHandle ctx = get_gc_test_ctx();
+    if (!SAFE_VALID(ctx)) return true;
+    ASSERT_TRUE(eval_expect_ok(ctx, k_weakmap_dead_key_setup));
+    for (int i = 0; i < 3; i++) {
+        eval_test(ctx, "(function(){ var g = []; for (var i = 0; i < 20000; i++) g.push({ x: 'g' + i }); return 1; })()");
+        JS_RunGC(JS_GetRuntime(ctx));
+    }
+    ASSERT_TRUE(eval_expect_ok(ctx, k_weakmap_dead_key_check));
+    ASSERT_EQ(0, (int)gc_test_heap_check());
+    return true;
+}
+
+TEST(test_gc_weakmap_dead_key_value_survives_concurrent_cycles) {
+    JSContextHandle ctx = get_gc_test_ctx();
+    if (!SAFE_VALID(ctx)) return true;
+    ConcState st;
+    ASSERT_TRUE(conc_begin(&st, 1, GC_REJECT_NORMAL, 256));
+    ASSERT_TRUE(eval_expect_ok(ctx, k_weakmap_dead_key_setup));
+    for (int round = 0; round < 200; round++) {
+        eval_test(ctx, "(function(){ var g = []; for (var i = 0; i < 2000; i++) g.push({ x: 'g' + i }); return 1; })()");
+        gc_tick();
+    }
+    GCStats s;
+    ASSERT_TRUE(conc_end(&st, &s));
+    ASSERT_TRUE(eval_expect_ok(ctx, k_weakmap_dead_key_check));
+    ASSERT_EQ(0, (int)gc_test_heap_check());
+    return true;
+}
+
+/* A property name read back as a string (Object.keys, for...in) stays a
+ * valid string after the property is deleted and the atom has no other
+ * use: YouTube's icon cache queues fetches keyed by URL, takes the key with
+ * Object.keys, deletes the entry and then fetch()es the key. */
+GC_RUNNING_TEST(test_gc_property_key_string_outlives_delete,
+    "(function(){ var keys = [];"
+    "  for (var i = 0; i < 500; i++) {"
+    "    var o = {}; o['https://example.test/icon/' + i + '/' + Math.random()] = i;"
+    "    var k = Object.keys(o)[0]; delete o[k]; keys.push(k);"
+    "  }"
+    "  __test_gc(); var g = []; for (var j = 0; j < 20000; j++) g.push({ x: 'g' + j }); __test_gc();"
+    "  for (var i = 0; i < 500; i++) {"
+    "    var k = keys[i];"
+    "    if (typeof k !== 'string' || k.indexOf('https://example.test/icon/' + i + '/') !== 0) return 'key ' + i + ' lost';"
+    "  }"
+    "  return 'ok'; })()")
+
+TEST(test_gc_weakmap_values_survive_full_cycles) {
+    JSContextHandle ctx = get_gc_test_ctx();
+    if (!SAFE_VALID(ctx)) return true;
+    ASSERT_TRUE(eval_expect_ok(ctx, k_weakmap_setup));
+    for (int i = 0; i < 3; i++) {
+        eval_test(ctx, "(function(){ var g = []; for (var i = 0; i < 20000; i++) g.push({ x: 'g' + i }); return 1; })()");
+        JS_RunGC(JS_GetRuntime(ctx));
+    }
+    ASSERT_TRUE(eval_expect_ok(ctx, k_weakmap_check));
+    ASSERT_EQ(0, (int)gc_test_heap_check());
+    return true;
+}
+
+TEST(test_gc_weakmap_values_survive_concurrent_cycles) {
+    JSContextHandle ctx = get_gc_test_ctx();
+    if (!SAFE_VALID(ctx)) return true;
+    ConcState st;
+    ASSERT_TRUE(conc_begin(&st, 1, GC_REJECT_NORMAL, 256));
+    ASSERT_TRUE(eval_expect_ok(ctx, k_weakmap_setup));
+    for (int round = 0; round < 200; round++) {
+        eval_test(ctx, "(function(){ var g = []; for (var i = 0; i < 2000; i++) g.push({ x: 'g' + i }); return 1; })()");
+        gc_tick();
+    }
+    GCStats s;
+    ASSERT_TRUE(conc_end(&st, &s));
+    ASSERT_TRUE(eval_expect_ok(ctx, k_weakmap_check));
+    ASSERT_EQ(0, (int)gc_test_heap_check());
+    return true;
+}
+
 /* Young objects that survive a minor cycle move to old space. */
 TEST(test_gc_minor_cycle_promotes_survivors) {
     JSContextHandle ctx = get_gc_test_ctx();
@@ -1393,7 +1579,12 @@ TEST(test_gc_concurrent_workload_stress) {
     if (!SAFE_VALID(ctx)) return true;
     ConcState st;
     ASSERT_TRUE(conc_begin(&st, 1, GC_REJECT_NORMAL, 128));
-    for (int i = 0; i < 3; i++) ASSERT_TRUE(eval_expect_ok(ctx, k_workload_script));
+    /* A major cycle runs across the workload whatever old space earlier
+     * tests left behind (its trigger is growth, which depends on them). */
+    for (int i = 0; i < 3; i++) {
+        ASSERT_TRUE(eval_expect_ok(ctx, k_workload_script));
+        if (i == 0) gc_request_cycle(true);
+    }
     GCStats s;
     ASSERT_TRUE(conc_end(&st, &s));
     ASSERT_TRUE(s.minor_cycles > st.before.minor_cycles);
@@ -1617,6 +1808,13 @@ void run_gc_tests(void) {
     RUN_TEST(test_gc_running_keeps_json_state);
     RUN_TEST(test_gc_running_deep_recursion);
     RUN_TEST(test_gc_running_in_generator);
+    RUN_TEST(test_gc_async_frame_survives_await);
+    RUN_TEST(test_gc_async_frames_during_concurrent_cycles);
+    RUN_TEST(test_gc_weakmap_values_survive_full_cycles);
+    RUN_TEST(test_gc_weakmap_values_survive_concurrent_cycles);
+    RUN_TEST(test_gc_weakmap_dead_key_value_survives_full_cycles);
+    RUN_TEST(test_gc_weakmap_dead_key_value_survives_concurrent_cycles);
+    RUN_TEST(test_gc_property_key_string_outlives_delete);
     RUN_TEST(test_gc_running_repeated);
     RUN_TEST(test_gc_frame_chain_after_generator);
     RUN_TEST(test_gc_bigint_survives);
@@ -1652,4 +1850,12 @@ void run_gc_tests(void) {
     RUN_TEST(test_gc_boundary_budget_declines);
     RUN_TEST(test_gc_weak_references_cleared);
     RUN_TEST(test_gc_array_buffer_storage_never_moves);
+    /* After the cycle-count tests: these grow old space. */
+    RUN_TEST(test_gc_async_frame_survives_await);
+    RUN_TEST(test_gc_async_frames_during_concurrent_cycles);
+    RUN_TEST(test_gc_weakmap_values_survive_full_cycles);
+    RUN_TEST(test_gc_weakmap_values_survive_concurrent_cycles);
+    RUN_TEST(test_gc_weakmap_dead_key_value_survives_full_cycles);
+    RUN_TEST(test_gc_weakmap_dead_key_value_survives_concurrent_cycles);
+    RUN_TEST(test_gc_property_key_string_outlives_delete);
 }

@@ -759,6 +759,32 @@ GCValue js_dom_token_list_toggle(JSContextHandle ctx, GCValue this_val, int argc
 }
 
 // DOMTokenList.forEach(callback)
+JSAtom dom_iterator_atom(JSContextHandle ctx) {
+    static JSAtom atom = JS_ATOM_NULL;
+    if (atom == JS_ATOM_NULL) {
+        GCValue sym = JS_Eval(ctx, "Symbol.iterator", 15, "<symbol>", JS_EVAL_TYPE_GLOBAL);
+        atom = JS_ValueToAtom(ctx, sym);
+    }
+    return atom;
+}
+
+GCValue js_dom_token_list_values(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    GCValue arr = JS_NewArray(ctx);
+    GCValue elem = token_list_get_element(ctx, this_val);
+    if (!JS_IsUndefined(elem) && !JS_IsNull(elem)) {
+        char *class_name = token_list_get_class_name(ctx, elem);
+        char *tokens[256];
+        int count = token_list_parse(class_name, tokens, 256);
+        for (int i = 0; i < count; i++)
+            JS_SetPropertyUint32(ctx, arr, (uint32_t)i, JS_NewString(ctx, tokens[i] ? tokens[i] : ""));
+        token_list_free_tokens(tokens, count);
+        free(class_name);
+    }
+    GCValue fn = JS_GetProperty(ctx, arr, dom_iterator_atom(ctx));
+    return JS_Call(ctx, fn, arr, 0, NULL);
+}
+
 GCValue js_dom_token_list_for_each(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1 || !JS_IsFunction(ctx, argv[0])) return JS_UNDEFINED;
 

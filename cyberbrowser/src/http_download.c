@@ -1323,6 +1323,62 @@ retry_connection:
     return true;
 }
 
+/* Testing: CYBER_URL_MAP names a file of "url-substring|local-path" lines;
+ * a GET whose URL contains a substring is answered from that file, so a
+ * recorded page (and the scripts it needs) can be replayed exactly. */
+typedef struct { char *needle, *path; } UrlMapEntry;
+static UrlMapEntry *g_url_map;
+static int g_url_map_n = -1;
+static pthread_mutex_t g_url_map_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static const char *url_map_lookup(const char *url) {
+    pthread_mutex_lock(&g_url_map_mu);
+    if (g_url_map_n < 0) {
+        g_url_map_n = 0;
+        const char *f = getenv("CYBER_URL_MAP");
+        FILE *fp = f ? fopen(f, "rb") : NULL;
+        char line[4096];
+        while (fp && fgets(line, sizeof(line), fp)) {
+            line[strcspn(line, "\r\n")] = '\0';
+            char *bar = strchr(line, '|');
+            if (!bar || bar == line) continue;
+            *bar = '\0';
+            UrlMapEntry *nm = (UrlMapEntry *)realloc(g_url_map, (size_t)(g_url_map_n + 1) * sizeof(*nm));
+            if (!nm) break;
+            g_url_map = nm;
+            g_url_map[g_url_map_n].needle = strdup(line);
+            g_url_map[g_url_map_n].path = strdup(bar + 1);
+            g_url_map_n++;
+        }
+        if (fp) fclose(fp);
+    }
+    const char *path = NULL;
+    for (int i = 0; i < g_url_map_n && !path; i++)
+        if (strstr(url, g_url_map[i].needle)) path = g_url_map[i].path;
+    pthread_mutex_unlock(&g_url_map_mu);
+    return path;
+}
+
+static bool url_map_serve(const char *path, HttpBuffer *out, int *outStatus, char *err, size_t errLen) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) { if (err && errLen) snprintf(err, errLen, "CYBER_URL_MAP: cannot open %s", path); return false; }
+    fseek(fp, 0, SEEK_END);
+    long n = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    char *data = (char *)malloc((size_t)(n > 0 ? n : 0) + 1);
+    size_t got = data && n > 0 ? fread(data, 1, (size_t)n, fp) : 0;
+    fclose(fp);
+    if (!data) return false;
+    data[got] = '\0';
+    out->data = data;
+    out->size = got;
+    const char *hdr = "HTTP/1.1 200 OK\r\n\r\n";
+    out->headers = strdup(hdr);
+    out->headers_size = strlen(hdr);
+    if (outStatus) *outStatus = 200;
+    return true;
+}
+
 static bool http_request_with_method(const char *url, const char *method,
                                      const char *postData, size_t postDataLen,
                                      const char **custom_headers, size_t custom_header_count,
@@ -1330,6 +1386,10 @@ static bool http_request_with_method(const char *url, const char *method,
                                      char *err, size_t errLen, const char *cookies,
                                      DownloadState *state,
                                      FILE *bodyStream) {
+    if (outBuffer && !bodyStream && url && (!method || strcmp(method, "GET") == 0)) {
+        const char *path = url_map_lookup(url);
+        if (path) return url_map_serve(path, outBuffer, outStatus, err, errLen);
+    }
     return http_request_with_method_internal(url, method, postData, postDataLen,
                                              custom_headers, custom_header_count,
                                              outBuffer, outStatus, err, errLen, cookies,

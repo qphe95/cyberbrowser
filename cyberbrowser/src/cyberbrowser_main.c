@@ -1448,11 +1448,11 @@ int main(int argc, char *argv[]) {
             }
 
             /* The app's rendering phase is gated on the ytsignals "ci" signal,
-             * normally fired by the app element's Polymer attached() callback.
-             * When that callback is not delivered, the rendering phase (which
-             * routes ytInitialData into the app) never runs.  Fire the signal
-             * directly once the app has stamped. */
-            {
+             * fired by the app element's Polymer attached() callback, which is
+             * delivered now.  Firing it from here as well came too early: when
+             * it worked (it usually threw), the watch page stopped half built
+             * (~2,200 nodes).  CYBER_FIRE_CI=1 still fires it. */
+            if (cyber_getenv("CYBER_FIRE_CI")) {
                 const char *fire_ci_js =
                     "(function(){"
                     "  try {"

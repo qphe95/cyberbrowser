@@ -114,6 +114,10 @@ GCValue js_dom_token_list_toggle(JSContextHandle ctx, GCValue this_val, int argc
 GCValue js_dom_token_list_item(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_dom_token_list_get_length(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_dom_token_list_for_each(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+/* DOMTokenList.prototype.values / [Symbol.iterator]: the current tokens. */
+GCValue js_dom_token_list_values(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+/* The Symbol.iterator atom (well known, never freed). */
+JSAtom dom_iterator_atom(JSContextHandle ctx);
 GCValue js_service_worker_register(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_service_worker_get_registration(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_service_worker_get_registrations(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
