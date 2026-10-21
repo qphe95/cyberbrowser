@@ -196,7 +196,7 @@ static void file_log_quickjs(const char *fmt, ...) {
 
 #define OPTIMIZE         1
 #define SHORT_OPCODES    0  /* Disabled to simplify opcode handling */
-#if defined(EMSCRIPTEN) || defined(_WIN32)
+#if defined(EMSCRIPTEN) || defined(_MSC_VER)   /* no computed goto */
 #define DIRECT_DISPATCH  0
 #else
 #define DIRECT_DISPATCH  1
@@ -19710,6 +19710,9 @@ static GCValue js_call_c_function(JSContextHandle ctx, GCValue func_obj,
     cproto = (JSCFunctionEnum)SAFE_GET_OR(p, JSObjectHandle, u.cfunc.cproto, 0);
     arg_count = SAFE_GET_OR(p, JSObjectHandle, u.cfunc.length, 0);
 
+    /* Native calls are poll points for the collector (bytecode functions
+     * poll at entry). */
+    gc_poll();
     sf = js_alloc_c_frame(ctx, argc, arg_count, argv, &arg_buf);
     if (!sf)
         return JS_EXCEPTION;
@@ -19989,6 +19992,21 @@ static void gv_trace_get(JSContextHandle ctx, JSFunctionBytecodeHandle b,
     fflush(stderr);
 }
 
+/* The interrupt countdown ran out at a poll point: re-arm it and call the
+ * handler.  Returns TRUE (with the exception thrown) to stop execution. */
+static no_inline BOOL js_poll_interrupt(JSRuntimeHandle rt, JSContextHandle ctx)
+{
+    JSInterruptHandler *handler = SAFE_GET_OR(rt, JSRuntimeHandle, interrupt_handler, NULL);
+    uint32_t init = SAFE_GET_OR(rt, JSRuntimeHandle, instruction_counter_init, 0);
+    /* Re-arm first: the handler may clear itself. */
+    g_interrupt_countdown = init ? init : 10000;
+    if (handler && handler(rt, SAFE_GET_OR(rt, JSRuntimeHandle, interrupt_opaque, NULL))) {
+        JS_ThrowInternalError(ctx, "execution interrupted");
+        return TRUE;
+    }
+    return FALSE;
+}
+
 static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                                GCValue this_obj, GCValue new_target,
                                int argc, GCValue *argv, int flags)
@@ -20030,9 +20048,8 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
 #define SWITCH(pc)      goto *dispatch_table[opcode = *pc++];
 #define CASE(op)        case_ ## op
 #define DEFAULT         case_default
-/* Every opcode boundary is a poll point for the concurrent collector (the
- * loop head is not reached between opcodes with direct dispatch). */
-#define BREAK           do { gc_poll(); } while (0); SWITCH(pc)
+/* Polls happen at JS_POLL_POINT (entry, jumps, native calls), not here. */
+#define BREAK           SWITCH(pc)
 #endif
 
     /* Frames live on the GC heap, but every call still recurses on the C
@@ -20280,30 +20297,23 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
     var_refs_handle = SAFE_GET_OR(p, JSObjectHandle, u.func.var_refs_handle, GC_HANDLE_NULL);
     var_refs = ((JSVarRefHandle *)gc_deref(var_refs_handle));
     
+    /* Poll points: function entry, jumps (every loop goes back through one)
+     * and native calls, as upstream QuickJS polls interrupts.  Not every
+     * instruction: that cost a load and a branch per opcode. */
+#define JS_POLL_POINT() \
+    do { \
+        gc_poll(); \
+        if (unlikely(g_interrupt_countdown) && unlikely(--g_interrupt_countdown == 0) && \
+            js_poll_interrupt(rt, ctx)) \
+            goto exception; \
+    } while (0)
+    JS_POLL_POINT();
+
  restart:
     for(;;) {
         int call_argc;
         GCValue *call_argv;
 
-        /* Boundary for the concurrent collector: one relaxed load unless
-         * the GC thread has posted a step. */
-        gc_poll();
-
-        /* Cooperative interrupt check. Only active when an interrupt handler
-         * has been installed and the counter has been primed. */
-        if (unlikely(g_interrupt_countdown) && unlikely(--g_interrupt_countdown == 0)) {
-            JSInterruptHandler *handler = SAFE_GET_OR(rt, JSRuntimeHandle, interrupt_handler, NULL);
-            uint32_t init = SAFE_GET_OR(rt, JSRuntimeHandle, instruction_counter_init, 0);
-            /* Re-arm first: the handler may clear itself. */
-            g_interrupt_countdown = init ? init : 10000;
-            if (handler) {
-                if (handler(rt, SAFE_GET_OR(rt, JSRuntimeHandle, interrupt_opaque, NULL))) {
-                    JS_ThrowInternalError(ctx, "execution interrupted");
-                    goto exception;
-                }
-            }
-        }
-        
 #if EXEC_TRACE_ENABLED
         /* Trace bytecode execution for debugging */
         {
@@ -21368,6 +21378,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
 
         CASE(OP_goto):
             pc += (int32_t)get_u32(pc);
+            JS_POLL_POINT();
             BREAK;
 #if SHORT_OPCODES
         CASE(OP_goto16):
@@ -21391,7 +21402,10 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                 }
                 sp--;
                 if (res) {
-                    pc += (int32_t)get_u32(pc - 4) - 4;
+                    int32_t diff = (int32_t)get_u32(pc - 4) - 4;
+                    pc += diff;
+                    if (diff < 0)
+                        JS_POLL_POINT();
                 }
             }
             BREAK;
@@ -21410,7 +21424,10 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                 }
                 sp--;
                 if (!res) {
-                    pc += (int32_t)get_u32(pc - 4) - 4;
+                    int32_t diff = (int32_t)get_u32(pc - 4) - 4;
+                    pc += diff;
+                    if (diff < 0)
+                        JS_POLL_POINT();
                 }
             }
             BREAK;
