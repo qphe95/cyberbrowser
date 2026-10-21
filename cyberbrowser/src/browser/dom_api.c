@@ -972,6 +972,10 @@ static bool dom_script_type_is_executable(JSContextHandle ctx, GCValue script) {
     return ok;
 }
 
+static void dom_run_fetched_script(JSContextHandle ctx, GCValue script, const char *url, bool ok,
+                                   const char *data, size_t size, const char *err);
+static bool dom_queue_dynamic_script(JSContextHandle ctx, GCValue script, const char *url);
+
 static void dom_execute_external_script(JSContextHandle ctx, GCValue script, const char *src) {
     if (!g_dom_dynamic_scripts_enabled) return;
     if (!src || !src[0]) return;
@@ -1023,12 +1027,26 @@ static void dom_execute_external_script(JSContextHandle ctx, GCValue script, con
     JS_SetPropertyStr(ctx, script, "readyState", JS_NewString(ctx, "loading"));
 
     platform_log(LOG_LEVEL_INFO, "dom_api", "Dynamic script load: %s", url);
+    if (dom_queue_dynamic_script(ctx, script, url)) {
+        free(url);
+        return;
+    }
     HttpBuffer buffer = {0};
     char err[256] = {0};
     cp_profile_begin("fetch-dynamic-script", "net");
     bool ok = dom_fetch_script(url, &buffer, err, sizeof(err));
     cp_profile_end("fetch-dynamic-script");
-    if (ok && buffer.data && buffer.size > 0) {
+    dom_run_fetched_script(ctx, script, url, ok, buffer.data, buffer.size, err);
+    free(url);
+    if (buffer.data) free(buffer.data);
+}
+
+/* Evaluate a fetched script-inserted script and fire load / error. */
+static void dom_run_fetched_script(JSContextHandle ctx, GCValue script, const char *url, bool ok,
+                                   const char *data, size_t size, const char *err) {
+    GCValue global = JS_GetGlobalObject(ctx);
+    if (ok && data && size > 0) {
+        HttpBuffer buffer = { (char *)data, size, NULL, 0 };
         if (CYBER_ENV(CYBER_T_DUMP_SCRIPTS)) {
             static int dyn_dump_idx = 0;
             char dump_name[64];
@@ -1061,12 +1079,92 @@ static void dom_execute_external_script(JSContextHandle ctx, GCValue script, con
             dom_dispatch_script_event(ctx, script, "load");
         }
     } else {
-        platform_log(LOG_LEVEL_WARN, "dom_api", "Dynamic script fetch failed: %s (%s)", url, err[0] ? err : "unknown");
+        platform_log(LOG_LEVEL_WARN, "dom_api", "Dynamic script fetch failed: %s (%s)", url, err && err[0] ? err : "unknown");
         JS_SetPropertyStr(ctx, script, "readyState", JS_NewString(ctx, "error"));
         dom_dispatch_script_event(ctx, script, "error");
     }
-    free(url);
-    if (buffer.data) free(buffer.data);
+}
+
+/* Script-inserted scripts load on network threads (js_quickjs_net_get) so
+ * their downloads overlap each other and the page's scripts, as in browsers
+ * where they are async. They run from the event loop in insertion order
+ * (one valid order for async scripts, and the one the spec requires for
+ * async = false). */
+typedef struct DynScript {
+    struct DynScript *next;
+    GCValue script;             /* rooted while queued */
+    char *url;
+    bool done, ok;
+    char *data;
+    size_t size;
+    char err[256];
+} DynScript;
+
+static DynScript *g_dyn_head, *g_dyn_tail;
+
+static void dyn_root(GCValue v, bool add) {
+    if (GC_VALUE_GET_TAG(v) >= 0) return;
+    GCHandle h = GC_VALUE_GET_HANDLE(v);
+    if (h == GC_HANDLE_NULL) return;
+    if (add) gc_add_root(h); else gc_remove_root(h);
+}
+
+static void dyn_drain(JSContextHandle ctx) {
+    while (g_dyn_head && g_dyn_head->done) {
+        DynScript *d = g_dyn_head;
+        g_dyn_head = d->next;
+        if (!g_dyn_head) g_dyn_tail = NULL;
+        dom_run_fetched_script(ctx, d->script, d->url, d->ok, d->data, d->size, d->err);
+        dyn_root(d->script, false);
+        free(d->url);
+        free(d->data);
+        free(d);
+    }
+}
+
+static void dyn_done(JSContextHandle ctx, void *user, const char *url, bool ok, int status,
+                     PlatformHttpBuffer *resp, const char *err) {
+    (void)url;
+    DynScript *d = (DynScript *)user;
+    d->ok = ok && status >= 200 && status < 300 && resp->data && resp->size > 0;
+    if (d->ok) {
+        d->data = resp->data;
+        d->size = resp->size;
+        resp->data = NULL;
+        resp->size = 0;
+    } else {
+        snprintf(d->err, sizeof(d->err), "%s", err && err[0] ? err : status ? "HTTP error" : "fetch failed");
+    }
+    d->done = true;
+    dyn_drain(ctx);
+}
+
+static bool dom_queue_dynamic_script(JSContextHandle ctx, GCValue script, const char *url) {
+    static int sync = -1;
+    if (sync < 0) sync = cyber_getenv("CYBER_SYNC_SCRIPTS") != NULL;
+    if (sync) return false;
+    (void)ctx;
+    DynScript *d = (DynScript *)calloc(1, sizeof(*d));
+    if (!d) return false;
+    d->url = strdup(url);
+    if (!d->url) { free(d); return false; }
+    d->script = script;
+    dyn_root(script, true);
+    if (g_dyn_tail) g_dyn_tail->next = d; else g_dyn_head = d;
+    g_dyn_tail = d;
+    if (!js_quickjs_net_get(url, dyn_done, d)) {
+        /* Could not start: unqueue (it is the tail) and load inline. */
+        DynScript **pp = &g_dyn_head;
+        DynScript *prev = NULL;
+        while (*pp != d) { prev = *pp; pp = &(*pp)->next; }
+        *pp = NULL;
+        g_dyn_tail = prev;
+        dyn_root(script, false);
+        free(d->url);
+        free(d);
+        return false;
+    }
+    return true;
 }
 
 static void dom_maybe_load_script(JSContextHandle ctx, GCValue node) {

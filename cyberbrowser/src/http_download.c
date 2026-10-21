@@ -18,6 +18,8 @@
 #include <time.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdint.h>
+#include <brotli/decode.h>
 #include "platform.h"
 
 
@@ -574,6 +576,111 @@ static size_t parse_content_range_total_size(const char *data, size_t data_len) 
     return 0;
 }
 
+/* Content codings (RFC 9110 section 8.4.1): requests made into memory
+ * accept gzip, deflate and br; the body is decoded here, as a browser does
+ * before handing it to the page. The inflater is stb_image's (implemented in
+ * image_cache.c), Brotli the bundled decoder. */
+static int64_t g_coded_responses, g_coded_bytes, g_decoded_bytes;   /* for http_net_log_stats */
+
+extern char *stbi_zlib_decode_malloc_guesssize_headerflag(const char *buffer, int len, int initial_size,
+                                                          int *outlen, int parse_header);
+
+static char *http_gunzip(const char *p, size_t n, size_t *out_len) {
+    /* RFC 1952 member header, then raw deflate. */
+    if (n < 18 || (unsigned char)p[0] != 0x1f || (unsigned char)p[1] != 0x8b || p[2] != 8) return NULL;
+    unsigned char flg = (unsigned char)p[3];
+    size_t i = 10;
+    if (flg & 4) {                                  /* FEXTRA */
+        if (i + 2 > n) return NULL;
+        i += 2 + ((unsigned char)p[i] | ((size_t)(unsigned char)p[i + 1] << 8));
+    }
+    if (flg & 8) { while (i < n && p[i]) i++; i++; }   /* FNAME */
+    if (flg & 16) { while (i < n && p[i]) i++; i++; }  /* FCOMMENT */
+    if (flg & 2) i += 2;                               /* FHCRC */
+    if (i >= n || n - i > 0x7fffffff) return NULL;
+    int guess = (int)((n - i) * 4 < 0x7fffffff ? (n - i) * 4 + 1024 : 0x7fffffff);
+    int len = 0;
+    char *out = stbi_zlib_decode_malloc_guesssize_headerflag(p + i, (int)(n - i), guess, &len, 0);
+    if (!out) return NULL;
+    *out_len = (size_t)len;
+    return out;
+}
+
+static char *http_inflate(const char *p, size_t n, size_t *out_len) {
+    /* "deflate" is the zlib format (RFC 1950); some servers send raw deflate. */
+    if (n > 0x7fffffff) return NULL;
+    int guess = (int)(n * 4 < 0x7fffffff ? n * 4 + 1024 : 0x7fffffff);
+    int len = 0;
+    char *out = stbi_zlib_decode_malloc_guesssize_headerflag(p, (int)n, guess, &len, 1);
+    if (!out) out = stbi_zlib_decode_malloc_guesssize_headerflag(p, (int)n, guess, &len, 0);
+    if (!out) return NULL;
+    *out_len = (size_t)len;
+    return out;
+}
+
+static char *http_unbrotli(const char *p, size_t n, size_t *out_len) {
+    BrotliDecoderState *s = BrotliDecoderCreateInstance(NULL, NULL, NULL);
+    if (!s) return NULL;
+    size_t cap = n * 4 + 4096, len = 0;
+    char *out = (char *)malloc(cap);
+    const uint8_t *in = (const uint8_t *)p;
+    size_t avail_in = n;
+    BrotliDecoderResult r = BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT;
+    while (out && r == BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT) {
+        if (len == cap) {
+            char *grown = (char *)realloc(out, cap * 2);
+            if (!grown) { free(out); out = NULL; break; }
+            out = grown;
+            cap *= 2;
+        }
+        size_t avail_out = cap - len;
+        uint8_t *next_out = (uint8_t *)out + len;
+        r = BrotliDecoderDecompressStream(s, &avail_in, &in, &avail_out, &next_out, NULL);
+        len = cap - avail_out;
+    }
+    BrotliDecoderDestroyInstance(s);
+    if (out && r != BROTLI_DECODER_RESULT_SUCCESS) { free(out); out = NULL; }
+    if (!out) return NULL;
+    *out_len = len;
+    return out;
+}
+
+/* Replaces buf's body (data[0..size)) by its decoding per the response's
+ * Content-Encoding; false when a coding is unknown or the data is corrupt. */
+static bool http_decode_content(HttpBuffer *buf, const char *coding, size_t coding_len) {
+    /* Codings apply in the listed order, so decode from the last. */
+    while (coding_len > 0) {
+        size_t end = coding_len;
+        while (end > 0 && (coding[end - 1] == ' ' || coding[end - 1] == '\t' || coding[end - 1] == ',')) end--;
+        size_t start = end;
+        while (start > 0 && coding[start - 1] != ',') start--;
+        const char *c = coding + start;
+        while (c < coding + end && (*c == ' ' || *c == '\t')) c++;
+        size_t cl = (size_t)(coding + end - c);
+        coding_len = start > 0 ? start - 1 : 0;
+        if (cl == 0 || (cl == 8 && strncasecmp(c, "identity", 8) == 0)) continue;
+        char *dec = NULL;
+        size_t dec_len = 0;
+        if ((cl == 4 && strncasecmp(c, "gzip", 4) == 0) || (cl == 6 && strncasecmp(c, "x-gzip", 6) == 0))
+            dec = http_gunzip(buf->data, buf->size, &dec_len);
+        else if (cl == 7 && strncasecmp(c, "deflate", 7) == 0)
+            dec = http_inflate(buf->data, buf->size, &dec_len);
+        else if (cl == 2 && strncasecmp(c, "br", 2) == 0)
+            dec = http_unbrotli(buf->data, buf->size, &dec_len);
+        else
+            return false;
+        if (!dec) return false;
+        /* Callers treat the body as NUL-terminated text. */
+        char *term = (char *)realloc(dec, dec_len + 1);
+        if (!term) { free(dec); return false; }
+        term[dec_len] = '\0';
+        free(buf->data);
+        buf->data = term;
+        buf->size = dec_len;
+    }
+    return true;
+}
+
 /* Incremental chunked-body end detection (RFC 9112 section 7.1).
  * body[0..len) is what has arrived; *cursor is where the next chunk-size
  * line starts (advanced past complete chunks so each byte is scanned once).
@@ -644,6 +751,19 @@ static bool http_request_with_method_internal(const char *url, const char *metho
         return false;
     }
     
+    /* Bodies read into memory may come compressed (decoded below); streamed
+     * file downloads and byte ranges stay identity, as does a request that
+     * names its own Accept-Encoding. */
+    bool want_coding = !bodyStream && strcasecmp(method, "HEAD") != 0;
+    for (size_t i = 0; i < custom_header_count && want_coding; i++) {
+        if (custom_headers[i] && (strncasecmp(custom_headers[i], "Range:", 6) == 0 ||
+                                  strncasecmp(custom_headers[i], "Accept-Encoding:", 16) == 0))
+            want_coding = false;
+    }
+    bool own_coding = false;
+    for (size_t i = 0; i < custom_header_count; i++)
+        if (custom_headers[i] && strncasecmp(custom_headers[i], "Accept-Encoding:", 16) == 0) own_coding = true;
+
     /* Build HTTP request */
     char request[16384];
     int req_len = snprintf(request, sizeof(request),
@@ -652,9 +772,10 @@ static bool http_request_with_method_internal(const char *url, const char *metho
              "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n"
              "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/apng,image/*,*/*;q=0.8\r\n"
              "Accept-Language: en-US,en;q=0.9\r\n"
-             "Accept-Encoding: identity\r\n"
+             "%s"
              "Connection: keep-alive\r\n",
-             method, path, host_hdr);
+             method, path, host_hdr,
+             own_coding ? "" : want_coding ? "Accept-Encoding: gzip, deflate, br\r\n" : "Accept-Encoding: identity\r\n");
     
     /* Add custom headers */
     for (size_t i = 0; i < custom_header_count; i++) {
@@ -1167,7 +1288,30 @@ retry_connection:
         outBuffer->data[body_len] = '\0';
         outBuffer->size = body_len;
     }
-    
+
+    if (outBuffer->headers && outBuffer->size > 0) {
+        char *hdrs = outBuffer->headers;
+        char *ce = find_response_header(hdrs, hdrs, hdrs + outBuffer->headers_size, "content-encoding:");
+        if (ce) {
+            size_t ce_len = strcspn(ce, "\r\n");
+            size_t coded = outBuffer->size;
+            if (!http_decode_content(outBuffer, ce, ce_len)) {
+                snprintf(err, errLen, "Failed to decode Content-Encoding: %.*s", (int)(ce_len < 40 ? ce_len : 40), ce);
+                free(outBuffer->data);
+                free(outBuffer->headers);
+                outBuffer->headers = NULL;
+                outBuffer->headers_size = 0;
+                outBuffer->data = NULL;
+                outBuffer->size = 0;
+                return false;
+            }
+            LOGI("Decoded %.*s body: %zu -> %zu bytes", (int)ce_len, ce, coded, outBuffer->size);
+            __atomic_add_fetch(&g_coded_responses, 1, __ATOMIC_RELAXED);
+            __atomic_add_fetch(&g_coded_bytes, (int64_t)coded, __ATOMIC_RELAXED);
+            __atomic_add_fetch(&g_decoded_bytes, (int64_t)outBuffer->size, __ATOMIC_RELAXED);
+        }
+    }
+
     if (outTotalSize) *outTotalSize = total_size_val;
     return true;
 }
@@ -1237,6 +1381,11 @@ void http_net_log_stats(void) {
             requests, st.connects, st.reuses,
             requests ? 100.0 * (double)st.reuses / (double)requests : 0.0,
             st.stale, st.connect_failures, st.waits);
+    long long coded = (long long)__atomic_load_n(&g_coded_responses, __ATOMIC_RELAXED);
+    if (coded)
+        fprintf(stderr, "[net] %lld compressed responses: %.1f KB on the wire, %.1f KB decoded\n", coded,
+                (double)__atomic_load_n(&g_coded_bytes, __ATOMIC_RELAXED) / 1024.0,
+                (double)__atomic_load_n(&g_decoded_bytes, __ATOMIC_RELAXED) / 1024.0);
 }
 
 void http_net_close_idle(void) {

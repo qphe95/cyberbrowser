@@ -1887,10 +1887,12 @@ typedef struct NetReq {
     int status;
     bool ok;
     char err[256];
-    /* Settling (main thread only). */
+    /* Settling (main thread only): a promise, or `done` (js_quickjs_net_get). */
     GCValue resolve, reject;
     bool cors_check, credentials_include;
     char origin[512];
+    JsNetDoneFn done;
+    void *done_user;
 } NetReq;
 
 static pthread_mutex_t g_net_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -1965,6 +1967,10 @@ static GCValue net_type_error(JSContextHandle ctx, const char *msg)
 /* Settle one finished request's promise (main thread). */
 static void net_req_settle(JSContextHandle ctx, NetReq *r)
 {
+    if (r->done) {
+        r->done(ctx, r->done_user, r->url, r->ok, r->status, &r->resp, r->err);
+        return;
+    }
     GCValue value;
     bool ok = false;
     if (r->ok && r->resp.data && r->status >= 200 && r->status < 300) {
@@ -2014,6 +2020,29 @@ static GCValue net_req_start(JSContextHandle ctx, NetReq *r)
         pthread_detach(th);
     }
     return promise;
+}
+
+bool js_quickjs_net_get(const char *url, JsNetDoneFn done, void *user)
+{
+    NetReq *r = net_req_new(url, "GET", NULL, 0, NULL, 0);
+    if (!r) return false;
+    r->done = done;
+    r->done_user = user;
+    static int sync = -1;
+    if (sync < 0) {
+        const char *e = cyber_getenv("CYBER_SYNC_FETCH");
+        sync = e && e[0] == '1';
+    }
+    pthread_t th;
+    pthread_mutex_lock(&g_net_mutex);
+    g_net_inflight++;
+    pthread_mutex_unlock(&g_net_mutex);
+    if (sync || pthread_create(&th, NULL, net_req_thread, r) != 0) {
+        net_req_thread(r);          /* inline: settled on the next poll */
+    } else {
+        pthread_detach(th);
+    }
+    return true;
 }
 
 int js_quickjs_network_pending(void)

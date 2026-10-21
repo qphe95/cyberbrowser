@@ -6,6 +6,7 @@
 
 /* QuickJS headers */
 #include "quickjs.h"
+#include "platform.h"
 
 /* Android AssetManager - only available on Android */
 #ifdef BE_PLATFORM_ANDROID
@@ -80,6 +81,13 @@ void js_quickjs_pump_timers_and_jobs(void);
 int js_quickjs_network_pending(void);
 int js_quickjs_net_poll(JSContextHandle ctx);
 void js_quickjs_net_wait(unsigned int ms);
+
+/* A GET on a worker thread, like fetch(), finished by `done` on the main
+ * thread from js_quickjs_net_poll (and counted as pending until then).
+ * `done` may take resp->data (setting it to NULL). */
+typedef void (*JsNetDoneFn)(JSContextHandle ctx, void *user, const char *url, bool ok, int status,
+                            PlatformHttpBuffer *resp, const char *err);
+bool js_quickjs_net_get(const char *url, JsNetDoneFn done, void *user);
 
 /* Dispatch DOMContentLoaded and load events on document/window. */
 void js_quickjs_dispatch_lifecycle_events(void);
