@@ -826,6 +826,23 @@ TEST(test_dom_layout_kept_across_changes_it_cannot_see) {
     return true;
 }
 
+/* A timer gives back its storage (callback and arguments) when it is
+ * cleared or fires: a page that keeps scheduling never runs out.  Storage
+ * used to be handed out once, so after ~2300 values every new timer was
+ * silently dropped (setTimeout returned 0) and YouTube's scheduler stalled
+ * with jobs queued. */
+TEST(test_dom_timers_reuse_storage) {
+    JSContextHandle ctx = get_shared_test_context();
+    if (!dom_ready(ctx)) { printf("    (skipped - no document)\n"); return true; }
+    ASSERT_EQ(1, js_int(ctx,
+        "(function(){ for (var i = 0; i < 3000; i++) {"
+        "  var id = setTimeout(function(a, b){}, 100000, i, 'x');"
+        "  if (!(id > 0)) return 100 + (i % 100); clearTimeout(id); }"
+        " var last = setTimeout(function(){}, 100000); clearTimeout(last);"
+        " return last > 0 ? 1 : 0; })()"));
+    return true;
+}
+
 /* MSE: a MediaSource opens when a video element attaches it (sourceopen is a
  * task), and appendBuffer's update events come later with updating true in
  * between.  isTypeSupported answers for the decoders actually built. */
@@ -1112,6 +1129,7 @@ void run_dom_tests(void) {
     RUN_TEST(test_dom_layout_metrics_block_boxes);
     RUN_TEST(test_dom_layout_metrics_see_each_change);
     RUN_TEST(test_dom_layout_kept_across_changes_it_cannot_see);
+    RUN_TEST(test_dom_timers_reuse_storage);
     RUN_TEST(test_dom_media_source_events);
     RUN_TEST(test_dom_custom_element_reactions);
     RUN_TEST(test_dom_mutation_observer_reobserve);

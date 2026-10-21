@@ -78,7 +78,14 @@ typedef struct {
     // Callback storage - parallel array to keep JS objects alive
     // We use a simple scheme: store JS values that the GC knows about
     GCValue callbacks[MAX_TIMERS * (MAX_TIMER_ARGS + 1)];  // +1 for callback itself
-    int callback_count;
+    int callback_count;               // slots ever handed out (high-water mark)
+    /* Slots released by fired or cleared timers and finished tasks, reused
+     * before the high-water mark grows: a page that keeps scheduling (every
+     * setTimeout takes a slot, and one per argument) would otherwise run out
+     * after ~2300 and have every later timer silently dropped. */
+    unsigned char callback_used[MAX_TIMERS * (MAX_TIMER_ARGS + 1)];
+    int free_slots[MAX_TIMERS * (MAX_TIMER_ARGS + 1)];
+    int free_count;
 } TimerState;
 #define TIMER_STATE_INIT { .callbacks = { [0 ... MAX_TIMERS * (MAX_TIMER_ARGS + 1) - 1] = GC_UNDEFINED_INIT } }
 
@@ -105,12 +112,20 @@ static inline int gcvalue_is_reference(GCValue val) {
 // Store a JS value in the callback storage, returns handle index
 int store_callback(JSContextHandle ctx, GCValue val) {
     (void)ctx;
-    if (g_timer_state.callback_count >= MAX_TIMERS * (MAX_TIMER_ARGS + 1)) {
+    int idx;
+    if (g_timer_state.free_count > 0) {
+        idx = g_timer_state.free_slots[--g_timer_state.free_count];
+    } else if (g_timer_state.callback_count < MAX_TIMERS * (MAX_TIMER_ARGS + 1)) {
+        idx = g_timer_state.callback_count++;
+    } else {
+        static int warned;
+        if (!warned++) fprintf(stderr, "[timers] callback storage full (%d in use): new timers are dropped\n",
+                               g_timer_state.callback_count);
         return -1; // Full
     }
     // Store the handle directly
-    int idx = g_timer_state.callback_count;
     g_timer_state.callbacks[idx] = val;
+    g_timer_state.callback_used[idx] = 1;
     
     // Register as GC root if it's a reference type (callback functions need to survive GC)
     if (gcvalue_is_reference(val)) {
@@ -119,9 +134,20 @@ int store_callback(JSContextHandle ctx, GCValue val) {
             gc_add_root(handle);
         }
     }
-    
-    g_timer_state.callback_count++;
     return idx;
+}
+
+/* Drop a stored value: unroot it and make its slot reusable (once). */
+static void release_callback(int idx) {
+    if (idx < 0 || idx >= g_timer_state.callback_count || !g_timer_state.callback_used[idx]) return;
+    GCValue val = g_timer_state.callbacks[idx];
+    if (gcvalue_is_reference(val)) {
+        GCHandle handle = GC_VALUE_GET_HANDLE(val);
+        if (handle != GC_HANDLE_NULL) gc_remove_root(handle);
+    }
+    g_timer_state.callbacks[idx] = JS_UNDEFINED;
+    g_timer_state.callback_used[idx] = 0;
+    g_timer_state.free_slots[g_timer_state.free_count++] = idx;
 }
 
 // Get a stored callback by handle
@@ -136,25 +162,10 @@ GCValue get_callback(int handle) {
 void unregister_timer_roots(Timer *timer) {
     if (!timer) return;
     
-    // Unregister callback root
-    GCValue callback = g_timer_state.callbacks[timer->callback_handle];
-    if (gcvalue_is_reference(callback)) {
-        GCHandle handle = GC_VALUE_GET_HANDLE(callback);
-        if (handle != GC_HANDLE_NULL) {
-            gc_remove_root(handle);
-        }
-    }
-    
-    // Unregister argument roots
-    for (int i = 0; i < timer->arg_count; i++) {
-        GCValue arg = g_timer_state.callbacks[timer->arg_handles[i]];
-        if (gcvalue_is_reference(arg)) {
-            GCHandle handle = GC_VALUE_GET_HANDLE(arg);
-            if (handle != GC_HANDLE_NULL) {
-                gc_remove_root(handle);
-            }
-        }
-    }
+    // Unroot and release the callback and its arguments
+    release_callback(timer->callback_handle);
+    for (int i = 0; i < timer->arg_count; i++) release_callback(timer->arg_handles[i]);
+    timer->arg_count = 0;
 
     /* Free the slot: find_free_timer_slot requires active==0 && id==0.
      * Without this the slot leaked permanently after each one-shot timer,
@@ -178,7 +189,9 @@ void timer_api_reset(void) {
     
     // Clear all stored callbacks
     memset(&g_timer_state.callbacks, 0, sizeof(g_timer_state.callbacks));
+    memset(&g_timer_state.callback_used, 0, sizeof(g_timer_state.callback_used));
     g_timer_state.callback_count = 0;
+    g_timer_state.free_count = 0;
     
     // Reset timers
     memset(&g_timer_state.timers, 0, sizeof(g_timer_state.timers));
@@ -226,6 +239,7 @@ int add_timer(JSContextHandle ctx, TimerType type, GCValue callback,
     int cb_handle = store_callback(ctx, callback);
     if (cb_handle < 0) {
         timer->id = 0;
+        timer->active = 0;
         pthread_mutex_unlock(&g_timer_state.mutex);
         return 0;
     }
@@ -238,7 +252,8 @@ int add_timer(JSContextHandle ctx, TimerType type, GCValue callback,
         if (arg_handle < 0) {
             // Failed, clean up
             timer->arg_count = i;
-            timer->id = 0;
+            unregister_timer_roots(timer);
+            timer->active = 0;
             pthread_mutex_unlock(&g_timer_state.mutex);
             return 0;
         }
@@ -751,14 +766,7 @@ static SchedulerTask* scheduler_task_alloc(void) {
 }
 
 static void unroot_callback_handle(int handle) {
-    if (handle < 0 || handle >= g_timer_state.callback_count) return;
-    GCValue val = g_timer_state.callbacks[handle];
-    if (gcvalue_is_reference(val)) {
-        GCHandle h = GC_VALUE_GET_HANDLE(val);
-        if (h != GC_HANDLE_NULL) {
-            gc_remove_root(h);
-        }
-    }
+    release_callback(handle);
 }
 
 static void scheduler_task_free(SchedulerTask *task) {
