@@ -368,6 +368,12 @@ void dom_request_layout(void);
 extern uint64_t g_dom_relayout_requests;
 void dom_request_relayout(void);
 
+/* Inserted <link rel=stylesheet>: their sheets download in the background
+ * and fire load / error from the event loop.  The poll runs at the top of
+ * each turn; the pending count keeps the page from settling before then. */
+int dom_poll_stylesheet_loads(JSContextHandle ctx);
+int dom_pending_stylesheet_loads(void);
+
 /* ============================================================================
  * Location object data
  * ============================================================================ */

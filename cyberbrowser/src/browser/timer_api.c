@@ -499,12 +499,15 @@ void timer_microtask_checkpoint(JSContextHandle ctx) {
 }
 
 int timer_process_due(JSContextHandle ctx) {
+    fflush(stderr);   /* logs reach the file at least once a turn (see main) */
     /* Microtasks queued before this turn (by the scripts that just ran)
      * come before any timer. */
     timer_microtask_checkpoint(ctx);
     unsigned long long now = page_time_ms();
-    /* Finished network requests settle their fetch() promises first. */
+    /* Finished network requests settle their fetch() promises first, and
+     * inserted stylesheets that arrived fire load. */
     int processed = js_quickjs_net_poll(ctx);
+    processed += dom_poll_stylesheet_loads(ctx);
     /* Media tasks (MSE update events, playback events) too. */
     processed += media_tick(ctx);
     if (processed) timer_microtask_checkpoint(ctx);

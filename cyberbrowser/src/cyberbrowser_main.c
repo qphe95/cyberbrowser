@@ -1022,9 +1022,11 @@ static bool render_document_to_jpg(HtmlDocument *doc, ImageCache *image_cache,
 }
 
 int main(int argc, char *argv[]) {
-    /* Diagnostics on stderr must survive however the process ends (it is
-     * block-buffered when redirected to a file). */
-    setvbuf(stderr, NULL, _IONBF, 0);
+    /* Diagnostics on stderr are buffered (unbuffered, MinGW's printf writes
+     * it a few bytes per system call: a fifth of a second per YouTube load)
+     * and flushed at the top of every event-loop turn, by the crash handler
+     * and at exit: a process killed from outside loses at most one turn. */
+    setvbuf(stderr, NULL, _IOFBF, 1 << 16);
     /* Start URL: argv[1] wins, then CYBER_START_URL, then the compiled-in
      * default (Wikipedia).  The YouTube-specific shims below only run when the
      * resolved URL is a YouTube page. */

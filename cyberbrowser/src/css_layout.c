@@ -3146,6 +3146,12 @@ bool css_layout_fetch_stylesheet_url(const char *url) {
     return url && url[0] && url_sheet_get(url) != NULL;
 }
 
+bool css_layout_stylesheet_cached(const char *url) {
+    for (int i = 0; url && i < g_url_sheet_n; i++)
+        if (strcmp(g_url_sheets[i].url, url) == 0) return true;
+    return false;
+}
+
 /* The base layout resolves sheet and image URLs against: the origin
  * (scheme + host + "/") of the page's start URL. */
 static void layout_origin_base(char *out, size_t cap)

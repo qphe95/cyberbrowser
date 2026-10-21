@@ -1238,9 +1238,43 @@ static void dom_maybe_load_script(JSContextHandle ctx, GCValue node) {
     if (src) JS_FreeCString(ctx, src);
 }
 
+/* Stylesheets of inserted links still downloading (the fetch pool has
+ * them; a layout that needs one meanwhile waits for it there). */
+typedef struct SheetLoad {
+    GCValue link;
+    char *url;
+    struct SheetLoad *next;
+} SheetLoad;
+static SheetLoad *g_sheet_loads;
+static int g_sheet_loads_n;
+
+int dom_pending_stylesheet_loads(void) { return g_sheet_loads_n; }
+
+int dom_poll_stylesheet_loads(JSContextHandle ctx) {
+    int fired = 0;
+    SheetLoad **pp = &g_sheet_loads;
+    while (*pp) {
+        SheetLoad *s = *pp;
+        /* Done: downloaded (take it into the cache) or already taken in. */
+        if (!css_layout_stylesheet_cached(s->url) && !dom_fetch_ready(s->url)) { pp = &s->next; continue; }
+        *pp = s->next;
+        g_sheet_loads_n--;
+        bool ok = css_layout_fetch_stylesheet_url(s->url);
+        if (ok) dom_request_relayout();
+        dom_dispatch_script_event(ctx, s->link, ok ? "load" : "error");
+        dyn_root(s->link, false);
+        free(s->url);
+        free(s);
+        fired++;
+    }
+    return fired;
+}
+
 /* A connected <link rel="stylesheet" href> loads its sheet and fires load
  * (or error) once, as in browsers; pages wait for it (YouTube's player
- * inserts link#player-css and only creates the player on its load event). */
+ * inserts link#player-css and only creates the player on its load event).
+ * A sheet not fetched yet downloads in the background: the inserting script
+ * goes on, and load fires from the event loop once it is in. */
 static void dom_maybe_load_stylesheet(JSContextHandle ctx, GCValue node) {
     NodeId n = dom_node_of(node);
     if (!dom_tag_is(n, "link") || !dom_node_is_connected(ctx, node)) return;
@@ -1267,6 +1301,20 @@ static void dom_maybe_load_stylesheet(JSContextHandle ctx, GCValue node) {
     const char *base = JS_IsString(hrefv) ? JS_ToCString(ctx, hrefv) : NULL;
     char *url = dom_resolve_url(base && base[0] ? base : (g_cyber_start_url ? g_cyber_start_url : ""), href);
     if (base) JS_FreeCString(ctx, base);
+    if (url && url_is_network_url(url) && !css_layout_stylesheet_cached(url) &&
+        !cyber_getenv("CYBER_SYNC_SHEETS")) {
+        SheetLoad *s = (SheetLoad *)calloc(1, sizeof(*s));
+        if (s) {
+            s->link = node;
+            s->url = url;
+            dyn_root(node, true);
+            dom_fetch_prefetch_first(url);
+            s->next = g_sheet_loads;
+            g_sheet_loads = s;
+            g_sheet_loads_n++;
+            return;
+        }
+    }
     bool ok = url && url_is_network_url(url) && css_layout_fetch_stylesheet_url(url);
     free(url);
     dom_dispatch_script_event(ctx, node, ok ? "load" : "error");

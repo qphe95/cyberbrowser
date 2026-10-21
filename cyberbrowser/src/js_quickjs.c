@@ -2055,7 +2055,7 @@ int js_quickjs_network_pending(void)
     pthread_mutex_lock(&g_net_mutex);
     int n = g_net_inflight;
     pthread_mutex_unlock(&g_net_mutex);
-    return n;
+    return n + dom_pending_stylesheet_loads();
 }
 
 int js_quickjs_net_poll(JSContextHandle ctx)
