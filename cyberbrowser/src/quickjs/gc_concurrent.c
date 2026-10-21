@@ -291,6 +291,175 @@ static void pull_page_cb(void *page, void *opaque) {
 }
 #endif
 
+#if GC_SOFTWARE_DIRTY && defined(_WIN32)
+/* ============================================================================
+ * Barrier checker (QJS_GC_BARRIER_CHECK=1, software-dirty builds on Windows)
+ * ============================================================================
+ * The OS write watch sees every store to the heap; the software cards see only
+ * stores made through the write helpers.  At each pull, a page the OS saw
+ * written but whose card is clean had a store that bypassed the helpers.  The
+ * page is compared with a shadow copy from the previous pull, and changed
+ * words that hold references are counted by object type and offset.  Objects
+ * whose header changed since the shadow (new or moved objects: initialising
+ * stores) and frames (written without helpers by design) are skipped. */
+static int g_bcheck = -1;
+static uint8_t *g_bshadow;            /* mirror of the heap reserve */
+static uint8_t *g_bshadow_committed;  /* one byte per 64 KB chunk */
+static uint64_t g_bcheck_pages, g_bcheck_flagged_pages, g_bcheck_words;
+static uint64_t g_bcheck_by_type[32];
+
+#define BCHECK_KEYS 8192
+static struct { uint32_t key, count; GCHandle example; uint16_t class_id; } g_bkeys[BCHECK_KEYS];
+
+static void bcheck_note(uint32_t type, uint32_t off, GCHandle obj, uint16_t class_id) {
+    uint32_t key = (type << 16) | (off < 0xffff ? off : 0xffff);
+    uint32_t i = (key * 2654435761u) % BCHECK_KEYS;
+    for (uint32_t k = 0; k < BCHECK_KEYS; k++, i = (i + 1) % BCHECK_KEYS) {
+        if (g_bkeys[i].count && g_bkeys[i].key == key) { g_bkeys[i].count++; return; }
+        if (!g_bkeys[i].count) {
+            g_bkeys[i].key = key; g_bkeys[i].count = 1;
+            g_bkeys[i].example = obj; g_bkeys[i].class_id = class_id;
+            return;
+        }
+    }
+}
+
+static void bcheck_report(void) {
+    uint32_t order[BCHECK_KEYS], n = 0;
+    for (uint32_t i = 0; i < BCHECK_KEYS; i++) if (g_bkeys[i].count) order[n++] = i;
+    for (uint32_t a = 0; a < n; a++)            /* small n: selection by count */
+        for (uint32_t b = a + 1; b < n; b++)
+            if (g_bkeys[order[b]].count > g_bkeys[order[a]].count) { uint32_t t = order[a]; order[a] = order[b]; order[b] = t; }
+    fprintf(stderr, "[BARRIER-CHECK] %llu pages checked, %llu with unbarriered reference stores, %llu words, %u (type, offset) sites\n",
+            (unsigned long long)g_bcheck_pages, (unsigned long long)g_bcheck_flagged_pages,
+            (unsigned long long)g_bcheck_words, n);
+    for (int t = 0; t < 32; t++)
+        if (g_bcheck_by_type[t])
+            fprintf(stderr, "[BARRIER-CHECK] type %d: %llu words\n", t, (unsigned long long)g_bcheck_by_type[t]);
+    for (uint32_t a = 0; a < n && a < 60; a++) {
+        uint32_t i = order[a];
+        fprintf(stderr, "[BARRIER-CHECK] type %u offset %u%s: %u words (e.g. object %u, class %u)\n",
+                g_bkeys[i].key >> 16, g_bkeys[i].key & 0xffff, (g_bkeys[i].key & 0xffff) == 0xffff ? "+" : "",
+                g_bkeys[i].count, (unsigned)g_bkeys[i].example, g_bkeys[i].class_id);
+    }
+    fflush(stderr);
+}
+
+static bool bcheck_enabled(void) {
+    if (g_bcheck < 0) {
+        g_bcheck = getenv("QJS_GC_BARRIER_CHECK") != NULL;
+        if (g_bcheck) {
+            g_bshadow = (uint8_t *)gc_os_reserve(g_gc.heap_reserved, false);
+            g_bshadow_committed = (uint8_t *)calloc(g_gc.heap_reserved >> 16, 1);
+            if (!g_bshadow || !g_bshadow_committed) g_bcheck = 0;
+            else atexit(bcheck_report);
+        }
+    }
+    return g_bcheck > 0;
+}
+
+static bool bcheck_is_ref_handle(uint32_t w) {
+    if (w == GC_HANDLE_NULL || w >= atomic_load_explicit(&g_gc.high_water, memory_order_acquire)) return false;
+    void **f = atomic_load_explicit(&g_gc.front, memory_order_acquire);
+    return atomic_load_explicit((_Atomic(void *) *)&f[w], memory_order_acquire) != NULL;
+}
+
+/* Page `page` (4 KB) was written with its card clean: report reference
+ * words that changed outside new objects, then refresh its shadow. */
+static void bcheck_page(uintptr_t page, bool card_clean) {
+    size_t off = page - (uintptr_t)g_gc.heap_base;
+    size_t chunk = off >> 16;
+    uint8_t *shadow = g_bshadow + off;
+    if (!g_bshadow_committed[chunk]) {
+        if (!gc_os_commit(g_bshadow + (chunk << 16), (size_t)1 << 16)) return;
+        g_bshadow_committed[chunk] = 1;
+        memcpy(shadow, (void *)page, GC_CARD_SIZE);   /* first sight: nothing to compare */
+        return;
+    }
+    GCRegion *r = gc_core_region_of((void *)page);
+    uint32_t st = r ? atomic_load_explicit(&r->state, memory_order_acquire) : 0;
+    if (card_clean && r && gc_core_region_in_use(st) && !r->permanent) {
+        g_bcheck_pages++;
+        uintptr_t top = atomic_load_explicit(&r->top, memory_order_acquire);
+        uintptr_t end = page + GC_CARD_SIZE < top ? page + GC_CARD_SIZE : top;
+        GCHeader *hdr = gc_core_object_containing((const void *)page);
+        uintptr_t p = hdr ? (uintptr_t)hdr : ((page & ~(uintptr_t)15) + GC_HEADER_SIZE);
+        if (!hdr && p < page) p += GC_GRANULE;
+        bool flagged = false;
+        while (p < end) {
+            GCHeader *h = (GCHeader *)p;
+            size_t total = gc_header_total_size(h);
+            if (!total) break;
+            uint32_t type = gc_header_type(h);
+            /* The header's shadow: if it differs the object is new (or was
+             * copied here) since the last pull, and its stores initialise it. */
+            bool same_header = p >= page && memcmp(shadow + (p - page), (void *)p, GC_HEADER_SIZE) == 0;
+            bool header_before_page = p < page;
+            bool skip = type == JS_GC_OBJ_TYPE_STACK_FRAME || type == JS_GC_OBJ_TYPE_ASYNC_FUNCTION ||
+                        type == JS_GC_OBJ_TYPE_JS_STRING || type == JS_GC_OBJ_TYPE_JS_STRING_ROPE ||
+                        type == JS_GC_OBJ_TYPE_JS_BIGINT || type == JS_GC_OBJ_TYPE_BYTES ||
+                        /* shapes: hash table and property entries hold atoms and indexes;
+                         * proto_handle is set only through its helper */
+                        type == JS_GC_OBJ_TYPE_SHAPE ||
+                        !gc_core_header_is_current(h) || (!same_header && !header_before_page);
+            if (!skip) {
+                uintptr_t payload = p + GC_HEADER_SIZE;
+                uintptr_t a = payload > page ? payload : page;
+                uintptr_t b = p + total < end ? p + total : end;
+                uint16_t class_id = type == JS_GC_OBJ_TYPE_JS_OBJECT ? *(uint16_t *)payload : 0;
+                for (a = (a + 3) & ~(uintptr_t)3; a + 4 <= b; a += 4) {
+                    uint32_t cur = *(uint32_t *)a, old = *(uint32_t *)(shadow + (a - page));
+                    if (cur == old || !bcheck_is_ref_handle(cur)) continue;
+                    /* A GCValue payload (8-aligned) counts only with a reference tag. */
+                    if (((a - payload) & 7) == 0 && a + 8 <= b) {
+                        uint32_t tag = *(uint32_t *)(a + 4);
+                        if (!((unsigned)(int32_t)tag >= (unsigned)JS_TAG_FIRST) && tag != 0) continue;
+                    }
+                    bcheck_note(type, (uint32_t)(a - payload), h->handle, class_id);
+                    g_bcheck_by_type[type & 31]++;
+                    g_bcheck_words++;
+                    flagged = true;
+                }
+            }
+            p += total;
+        }
+        if (flagged) g_bcheck_flagged_pages++;
+    }
+    memcpy(shadow, (void *)page, GC_CARD_SIZE);
+}
+
+typedef struct { uintptr_t *pages; uint32_t n, cap; } BCheckPages;
+static void bcheck_collect_cb(void *page, void *opaque) {
+    BCheckPages *v = (BCheckPages *)opaque;
+    if (v->n == v->cap) {
+        uint32_t cap = v->cap ? v->cap * 2 : 1024;
+        uintptr_t *np = (uintptr_t *)realloc(v->pages, cap * sizeof(uintptr_t));
+        if (!np) return;
+        v->pages = np; v->cap = cap;
+    }
+    v->pages[v->n++] = (uintptr_t)page;
+}
+
+/* Cards the pull in progress found dirty (one byte per card). */
+static uint8_t *g_bpulled;
+
+/* After the card loop of a pull: pull the OS write watch for the same range.
+ * A page counts as unbarriered only if its card was clean in this pull and
+ * is still clean, so a store that lands between the two (its card set after
+ * the card loop) is not mistaken for one. */
+static void bcheck_range(uintptr_t lo, uintptr_t hi) {
+    static BCheckPages v;
+    v.n = 0;
+    if (!gc_os_write_watch_pull((void *)lo, hi - lo, bcheck_collect_cb, &v)) return;
+    for (uint32_t i = 0; i < v.n; i++) {
+        uint32_t card = (uint32_t)((v.pages[i] - (uintptr_t)g_gc.heap_base) >> GC_CARD_SHIFT);
+        bool clean = !g_bpulled[card] &&
+                     atomic_load_explicit((_Atomic uint8_t *)&g_gc.cards[card], memory_order_acquire) == 0;
+        bcheck_page(v.pages[i], clean);
+    }
+}
+#endif
+
 /* Read and reset the dirty state of [lo, hi).  Every dirty card goes into
  * the remembered set and, if `out` is given, into out.  One caller at a
  * time: the GC thread, or the JS thread in a boundary step. */
@@ -300,6 +469,14 @@ static void dirty_pull_range(uintptr_t lo, uintptr_t hi, U32Vec *out) {
     uint32_t c0 = (uint32_t)((lo - (uintptr_t)g_gc.heap_base) >> GC_CARD_SHIFT);
     uint32_t c1 = (uint32_t)((hi - (uintptr_t)g_gc.heap_base + GC_CARD_SIZE - 1) >> GC_CARD_SHIFT);
     uint8_t *cards = g_gc.cards;
+#if defined(_WIN32)
+    bool bcheck = bcheck_enabled();
+    static U32Vec pulled;
+    if (bcheck) {
+        if (!g_bpulled) g_bpulled = (uint8_t *)calloc(g_gc.heap_reserved >> GC_CARD_SHIFT, 1);
+        pulled.n = 0;
+    }
+#endif
     uint32_t c = c0;
     while (c < c1) {
         if ((c & 7) == 0 && c + 8 <= c1) {
@@ -312,9 +489,18 @@ static void dirty_pull_range(uintptr_t lo, uintptr_t hi, U32Vec *out) {
             atomic_exchange_explicit((_Atomic uint8_t *)&cards[c], 0, memory_order_acq_rel)) {
             remset_note(c);
             if (out) u32_push(out, c);
+#if defined(_WIN32)
+            if (bcheck && g_bpulled) { g_bpulled[c] = 1; u32_push(&pulled, c); }
+#endif
         }
         c++;
     }
+#if defined(_WIN32)
+    if (bcheck && g_bpulled) {
+        bcheck_range(lo, hi);
+        for (uint32_t i = 0; i < pulled.n; i++) g_bpulled[pulled.items[i]] = 0;
+    }
+#endif
 #else
     PullCtx ctx = { out };
     if (!gc_os_write_watch_pull((void *)lo, hi - lo, pull_page_cb, &ctx)) {

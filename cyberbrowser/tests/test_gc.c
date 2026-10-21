@@ -1286,10 +1286,10 @@ TEST(test_gc_write_helpers_set_dirty_flags) {
     GCValue v = JS_NewInt32(GC_HANDLE_NULL, 5);
     GC_SET(slots[3], v);
     ASSERT_EQ(1, g_gc.cards[((uintptr_t)&slots[3] - base) >> GC_CARD_SHIFT]);
-    size_t far = n - 2;
-    ASSERT_EQ(0, g_gc.cards[((uintptr_t)&slots[far] - base) >> GC_CARD_SHIFT]);
-    gc_memcpy(&slots[far], &v, sizeof(v));
-    ASSERT_EQ(1, g_gc.cards[((uintptr_t)&slots[far] - base) >> GC_CARD_SHIFT]);
+    size_t far_idx = n - 2;
+    ASSERT_EQ(0, g_gc.cards[((uintptr_t)&slots[far_idx] - base) >> GC_CARD_SHIFT]);
+    gc_memcpy(&slots[far_idx], &v, sizeof(v));
+    ASSERT_EQ(1, g_gc.cards[((uintptr_t)&slots[far_idx] - base) >> GC_CARD_SHIFT]);
 
     /* Off-heap stores do nothing (and do not crash). */
     GCValue local;
