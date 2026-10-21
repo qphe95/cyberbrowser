@@ -1,6 +1,7 @@
 /* Layout snapshots of the node store.  See dom_snapshot.h. */
 #include "dom_snapshot.h"
 
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -43,8 +44,10 @@ const char *html_document_strdup(HtmlDocument *doc, const char *s, size_t n) {
 }
 
 HtmlDocument *html_document_new(void) {
+    static _Atomic uint64_t serials;
     HtmlDocument *doc = calloc(1, sizeof(HtmlDocument));
     if (!doc) return NULL;
+    doc->serial = atomic_fetch_add(&serials, 1) + 1;
     if (!po_array_init(&doc->array, sizeof(HtmlNode), 64)) { free(doc); return NULL; }
     doc->root_idx = doc->head_idx = doc->body_idx = -1;
     doc->current_parent_idx = -1;
@@ -54,6 +57,7 @@ HtmlDocument *html_document_new(void) {
 int html_document_add(HtmlDocument *doc, int parent, HtmlNodeType type) {
     int idx = po_array_add(&doc->array, parent);
     if (idx < 0) return -1;
+    doc->struct_gen++;
     HtmlNode *n = po_array_payload(&doc->array, idx);
     n->type = type;
     n->tag_name = "";
@@ -70,6 +74,14 @@ void html_document_add_attr(HtmlDocument *doc, int idx, const char *name, const 
     HtmlAttribute **tail = &n->attributes;
     while (*tail) tail = &(*tail)->next;
     *tail = a;
+    html_document_attrs_changed(doc, idx);
+}
+
+void html_document_attrs_changed(HtmlDocument *doc, int idx) {
+    HtmlNode *n = po_array_payload(&doc->array, idx);
+    if (!n) return;
+    n->attr_gen = ++doc->attr_gen;
+    n->attr_hash = 0;
 }
 
 void html_document_find_roots(HtmlDocument *doc) {

@@ -4458,15 +4458,21 @@ static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects
     for (int i = 0; i <= n; i++) P->cx_cnt[i] = -1;
     bool usable = g_sc.global == global && g_sc.n > 0;
 
-    /* Keys: own tag and attributes, then structure from the parent's view. */
+    /* Keys: own tag and attributes (kept on the node until its attribute
+     * list changes), then structure from the parent's view. */
     for (int idx = 0; idx < n; idx++) {
         HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
         if (!hn || hn->type != HTML_NODE_ELEMENT) continue;
-        uint64_t h = 1469598103934665603ull;
-        if (hn->tag_name) h = style_mix(h, hn->tag_name, strlen(hn->tag_name) + 1);
-        for (HtmlAttribute *a = hn->attributes; a; a = a->next) {
-            if (a->name) h = style_mix(h, a->name, strlen(a->name) + 1);
-            if (a->value) h = style_mix(h, a->value, strlen(a->value) + 1);
+        uint64_t h = hn->attr_hash;
+        if (!h) {
+            h = 1469598103934665603ull;
+            if (hn->tag_name) h = style_mix(h, hn->tag_name, strlen(hn->tag_name) + 1);
+            for (HtmlAttribute *a = hn->attributes; a; a = a->next) {
+                if (a->name) h = style_mix(h, a->name, strlen(a->name) + 1);
+                if (a->value) h = style_mix(h, a->value, strlen(a->value) + 1);
+            }
+            if (!h) h = 1;
+            hn->attr_hash = h;
         }
         key[idx] = h;
     }
@@ -5471,7 +5477,14 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
     uint64_t set_gen = 0;
     P.set = layout_styleset_get(&list, ctx->viewport_width, ctx->viewport_height, &set_owned, &set_gen);
     STAGE("compile style set (cached)");
-    P.sd = css_styledoc_build(ctx->doc);
+    P.sd = css_styledoc_get(ctx->doc);
+    if (g_css_log > 1) {
+        CssStyleDocStats ss;
+        css_styledoc_stats(&ss);
+        fprintf(stderr, "[css] features: %llu reused, %llu updated (%llu elements), %llu built\n",
+                (unsigned long long)ss.reused, (unsigned long long)ss.updated,
+                (unsigned long long)ss.elements_redone, (unsigned long long)ss.built);
+    }
     STAGE("element features");
     P.nthreads = job_thread_count();
     {
@@ -5625,7 +5638,6 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
     free(P.threads);
     free(P.pre_end);
     free(P.cls);
-    css_styledoc_free((CssStyleDoc *)P.sd);
     if (set_owned) css_styleset_free((CssStyleSet *)P.set);
     layout_sheet_list_free(&list);
     STAGE("free");

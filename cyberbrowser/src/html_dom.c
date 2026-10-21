@@ -2095,6 +2095,7 @@ static bool mir_read_attrs(NodeId s, int idx, const char *tag_lower, bool in_svg
     if (same && k != a.n) same = false;
     if (!same) {
         hn->attributes = NULL;      /* the old list stays in the arena */
+        html_document_attrs_changed(g_mir.doc, idx);
         for (int i = 0; i < a.n; i++)
             html_document_add_attr(g_mir.doc, idx, a.names[i], a.values[i], strlen(a.values[i]));
     }
@@ -2517,6 +2518,7 @@ static void mir_reorder(void) {
         if (hn) { free(hn->text_content); hn->text_content = NULL; }
     }
     po_array_reorder(&d->array);
+    d->struct_gen++;
     mir_map_clear(&g_mir.map);
     n = po_array_count(&d->array);
     for (size_t i = 0; i < n; i++) {

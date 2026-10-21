@@ -59,6 +59,8 @@ struct HtmlNode {
     int has_js_object;                       /* Flag to track if js_object is valid */
     GCHandle layout_box_handle;              /* Optional cached LayoutBox handle */
     uint32_t store_id;                       /* NodeId in the node store (0 = none) */
+    uint32_t attr_gen;                       /* doc->attr_gen when its attribute list last changed */
+    uint64_t attr_hash;                      /* tag + attributes hash for restyle keys (0 = not computed) */
 };
 
 struct HtmlArenaBlock;
@@ -80,7 +82,18 @@ struct HtmlDocument {
     /* Holders beyond the first (html_document_free drops one; the last
      * frees).  The layout mirror hands its document out this way. */
     int refs;
+
+    /* What caches over the document key on: serial is unique per document,
+     * struct_gen changes when nodes are added, removed or moved, and
+     * attr_gen counts attribute-list changes (each node keeps the value of
+     * its last one). */
+    uint64_t serial;
+    uint64_t struct_gen;
+    uint32_t attr_gen;
 };
+
+/* Note that node `idx`'s attribute list was replaced or extended. */
+void html_document_attrs_changed(HtmlDocument *doc, int idx);
 
 
 /* ============================================================================

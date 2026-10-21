@@ -7,6 +7,7 @@
 
 #include <ctype.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -169,6 +170,8 @@ struct CssStyleDoc {
     uint32_t *attr_off; uint16_t *attr_n;
     CssAtom *pool;
     const char **pool_val;   /* attribute value per pool entry (NULL for classes) */
+    uint32_t pool_n, pool_cap;
+    uint32_t pool_live;      /* entries still referenced (the rest: replaced features) */
     int32_t *parent;
     int32_t *pos_first, *pos_last, *type_first, *type_last;
     int32_t *prev_elem;   /* previous element sibling, -1 = none */
@@ -181,6 +184,59 @@ static const char *node_attr(HtmlNode *node, const char *name)
     for (HtmlAttribute *a = node->attributes; a; a = a->next)
         if (strcasecmp(a->name, name) == 0) return a->value;
     return NULL;
+}
+
+static void sd_pool_push(CssStyleDoc *d, CssAtom a, const char *v)
+{
+    if (d->pool_n == d->pool_cap) {
+        uint32_t nc = d->pool_cap ? d->pool_cap * 2 : 1024;
+        d->pool = realloc(d->pool, nc * sizeof(CssAtom));
+        d->pool_val = realloc((void *)d->pool_val, nc * sizeof(const char *));
+        d->pool_cap = nc;
+    }
+    d->pool[d->pool_n] = a;
+    d->pool_val[d->pool_n] = v;
+    d->pool_n++;
+}
+
+/* Atoms an element's features may intern (css_atom_reserve). */
+static size_t sd_atom_estimate(HtmlNode *node)
+{
+    size_t est = 2;
+    for (HtmlAttribute *a = node->attributes; a; a = a->next) est += 2 + strlen(a->value) / 2;
+    return est;
+}
+
+/* Tag, id, link flag, class tokens and attributes of element i (appended
+ * to the pool). */
+static void sd_element_features(CssStyleDoc *d, HtmlNode *node, int i)
+{
+    d->tag[i] = atom_cstr(node->tag_name);
+    const char *id = node_attr(node, "id");
+    d->id[i] = id ? atom_cstr(id) : CSS_ATOM_NONE;
+    d->flags[i] &= (uint8_t)~DF_LINK;
+    if ((strcasecmp(node->tag_name, "a") == 0 || strcasecmp(node->tag_name, "area") == 0) &&
+        node_attr(node, "href"))
+        d->flags[i] |= DF_LINK;
+    /* Class tokens of the first class attribute (the legacy lookup). */
+    d->cls_off[i] = d->pool_n;
+    const char *cls = node_attr(node, "class");
+    if (cls) {
+        const char *p = cls;
+        while (*p) {
+            while (*p && css_sel_is_space(*p)) p++;
+            if (!*p) break;
+            const char *st = p;
+            while (*p && !css_sel_is_space(*p)) p++;
+            sd_pool_push(d, css_atom_intern(st, (size_t)(p - st)), NULL);
+        }
+    }
+    d->cls_n[i] = (uint16_t)(d->pool_n - d->cls_off[i]);
+    d->attr_off[i] = d->pool_n;
+    for (HtmlAttribute *a = node->attributes; a; a = a->next)
+        sd_pool_push(d, atom_cstr(a->name), a->value ? a->value : "");
+    d->attr_n[i] = (uint16_t)(d->pool_n - d->attr_off[i]);
+    d->pool_live += d->cls_n[i] + d->attr_n[i];
 }
 
 CssStyleDoc *css_styledoc_build(HtmlDocument *doc)
@@ -211,49 +267,18 @@ CssStyleDoc *css_styledoc_build(HtmlDocument *doc)
     for (int i = 0; i < n; i++) {
         HtmlNode *node = po_array_payload(&doc->array, i);
         if (!node || node->type != HTML_NODE_ELEMENT) continue;
-        est += 2;
-        for (HtmlAttribute *a = node->attributes; a; a = a->next) est += 2 + strlen(a->value) / 2;
+        est += sd_atom_estimate(node);
     }
     css_atom_reserve(est);
 
-    VEC(CssAtom) pool = {0};
-    VEC(const char *) pval = {0};
     for (int i = 0; i < n; i++) {
         d->parent[i] = po_array_parent(&doc->array, i);
         HtmlNode *node = po_array_payload(&doc->array, i);
         if (!node || node->type != HTML_NODE_ELEMENT) continue;
         d->is_elem[i] = 1;
-        d->tag[i] = atom_cstr(node->tag_name);
         if (node->array_node.first_child >= 0) d->flags[i] |= DF_HAS_CHILD;
-        const char *id = node_attr(node, "id");
-        d->id[i] = id ? atom_cstr(id) : CSS_ATOM_NONE;
-        if ((strcasecmp(node->tag_name, "a") == 0 || strcasecmp(node->tag_name, "area") == 0) &&
-            node_attr(node, "href"))
-            d->flags[i] |= DF_LINK;
-        /* Class tokens of the first class attribute (the legacy lookup). */
-        d->cls_off[i] = (uint32_t)pool.n;
-        const char *cls = node_attr(node, "class");
-        if (cls) {
-            const char *p = cls;
-            while (*p) {
-                while (*p && css_sel_is_space(*p)) p++;
-                if (!*p) break;
-                const char *st = p;
-                while (*p && !css_sel_is_space(*p)) p++;
-                VEC_PUSH(pool, css_atom_intern(st, (size_t)(p - st)));
-                VEC_PUSH(pval, (const char *)NULL);
-            }
-        }
-        d->cls_n[i] = (uint16_t)(pool.n - d->cls_off[i]);
-        d->attr_off[i] = (uint32_t)pool.n;
-        for (HtmlAttribute *a = node->attributes; a; a = a->next) {
-            VEC_PUSH(pool, atom_cstr(a->name));
-            VEC_PUSH(pval, (const char *)(a->value ? a->value : ""));
-        }
-        d->attr_n[i] = (uint16_t)(pool.n - d->attr_off[i]);
+        sd_element_features(d, node, i);
     }
-    d->pool = pool.v;
-    d->pool_val = pval.v;
 
     /* Sibling positions, computed the way css_element_index counts them. */
     size_t natoms = css_atom_count() + 1;
@@ -312,9 +337,95 @@ void css_styledoc_free(CssStyleDoc *d)
     if (!d) return;
     free(d->is_elem); free(d->flags); free(d->tag); free(d->id);
     free(d->cls_off); free(d->cls_n); free(d->attr_off); free(d->attr_n);
-    free(d->pool); free(d->pool_val); free(d->parent);
+    free(d->pool); free((void *)d->pool_val); free(d->parent);
     free(d->prev_elem); free(d->next_elem); free(d->sub_end); free(d->pos_first); free(d->pos_last); free(d->type_first); free(d->type_last);
     free(d);
+}
+
+/* The features of the document last asked for, kept while its structure is
+ * the same: elements whose attributes changed since are read again (their
+ * old pool entries become garbage until the next full build). Everything
+ * else (tags, tree positions, siblings, subtree extents) only changes with
+ * the structure. */
+static struct {
+    CssStyleDoc *d;
+    uint64_t serial, struct_gen;
+    uint32_t attr_gen;
+    int count;
+} g_sdc;
+static CssStyleDocStats g_sdc_stats;
+
+const CssStyleDoc *css_styledoc_get(HtmlDocument *doc)
+{
+    int n = (int)po_array_count(&doc->array);
+    CssStyleDoc *d = g_sdc.d;
+    bool same = d && g_sdc.serial == doc->serial && g_sdc.struct_gen == doc->struct_gen && g_sdc.count == n;
+    if (same && g_sdc.attr_gen != doc->attr_gen) {
+        uint32_t seen = g_sdc.attr_gen;
+        size_t est = 64;
+        for (int i = 0; i < n; i++) {
+            HtmlNode *node = po_array_payload(&doc->array, i);
+            if (node && node->type == HTML_NODE_ELEMENT && node->attr_gen > seen) est += sd_atom_estimate(node);
+        }
+        css_atom_reserve(est);
+        uint32_t redone = 0;
+        for (int i = 0; i < n; i++) {
+            HtmlNode *node = po_array_payload(&doc->array, i);
+            if (!node || node->type != HTML_NODE_ELEMENT || node->attr_gen <= seen) continue;
+            d->pool_live -= d->cls_n[i] + d->attr_n[i];
+            sd_element_features(d, node, i);
+            redone++;
+        }
+        g_sdc.attr_gen = doc->attr_gen;
+        g_sdc_stats.updated++;
+        g_sdc_stats.elements_redone += redone;
+        /* Replaced entries outweigh the live ones: build afresh. */
+        if (d->pool_n > 2 * d->pool_live + 65536) same = false;
+    } else if (same) {
+        g_sdc_stats.reused++;
+    }
+    if (!same) {
+        css_styledoc_free(g_sdc.d);
+        g_sdc.d = d = css_styledoc_build(doc);
+        g_sdc.serial = doc->serial;
+        g_sdc.struct_gen = doc->struct_gen;
+        g_sdc.attr_gen = doc->attr_gen;
+        g_sdc.count = n;
+        g_sdc_stats.built++;
+    }
+    static int verify = -1;
+    if (verify < 0) verify = getenv("CYBER_STYLEDOC_VERIFY") ? 1 : 0;
+    if (verify && d) {
+        CssStyleDoc *f = css_styledoc_build(doc);
+        int bad = css_styledoc_compare(d, f);
+        if (bad >= 0) fprintf(stderr, "[styledoc-verify] cached features differ at node %d\n", bad);
+        css_styledoc_free(f);
+    }
+    return d;
+}
+
+void css_styledoc_stats(CssStyleDocStats *out) { *out = g_sdc_stats; }
+
+/* First node whose features differ (-1: equal). */
+int css_styledoc_compare(const CssStyleDoc *a, const CssStyleDoc *b)
+{
+    if (a->count != b->count) return 0;
+    for (int i = 0; i < a->count; i++) {
+        if (a->is_elem[i] != b->is_elem[i] || a->flags[i] != b->flags[i] || a->tag[i] != b->tag[i] ||
+            a->id[i] != b->id[i] || a->parent[i] != b->parent[i] || a->pos_first[i] != b->pos_first[i] ||
+            a->pos_last[i] != b->pos_last[i] || a->type_first[i] != b->type_first[i] ||
+            a->type_last[i] != b->type_last[i] || a->prev_elem[i] != b->prev_elem[i] ||
+            a->next_elem[i] != b->next_elem[i] || a->sub_end[i] != b->sub_end[i] ||
+            a->cls_n[i] != b->cls_n[i] || a->attr_n[i] != b->attr_n[i])
+            return i;
+        for (int k = 0; k < a->cls_n[i]; k++)
+            if (a->pool[a->cls_off[i] + k] != b->pool[b->cls_off[i] + k]) return i;
+        for (int k = 0; k < a->attr_n[i]; k++) {
+            uint32_t x = a->attr_off[i] + k, y = b->attr_off[i] + k;
+            if (a->pool[x] != b->pool[y] || strcmp(a->pool_val[x], b->pool_val[y]) != 0) return i;
+        }
+    }
+    return -1;
 }
 
 /* ============================================================================

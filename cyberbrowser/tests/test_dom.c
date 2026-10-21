@@ -649,12 +649,21 @@ TEST(test_dom_render_snapshot_reuse) {
 
 /* An incremental snapshot (copying clean subtrees of the previous one) is
  * the same text as a full one after each kind of change, including one deep
- * in a subtree that was built while detached and then attached. */
+ * in a subtree that was built while detached and then attached.  Element
+ * features kept across snapshots (css_styledoc_get) equal a fresh build. */
 static bool snapshot_inc_matches_full(JSContextHandle ctx, GCValue doc) {
     uint64_t ki = 0;
     bool u = false;
     HtmlDocument *a = html_document_from_js_dom_incremental(ctx, doc, &ki, &u);
-    if (a) html_document_free(a);
+    bool features_same = true;
+    if (a) {
+        const CssStyleDoc *kept = css_styledoc_get(a);
+        CssStyleDoc *fresh = css_styledoc_build(a);
+        features_same = css_styledoc_compare(kept, fresh) < 0;
+        css_styledoc_free(fresh);
+        html_document_free(a);
+    }
+    if (!features_same) return false;
     /* The layout mirror, updated in place, renders what serialize + parse
      * of the document renders. */
     return ki != 0 && html_mirror_check(ctx, doc) == 0;
@@ -682,15 +691,21 @@ TEST(test_dom_render_snapshot_incremental) {
         "__sx.firstChild.appendChild(document.createElement('b'))",
         "__si.querySelector('em').style.color='blue'",
         "__si.querySelector('em').setAttribute('title','z')",
+        "__si.querySelector('p').className='k1 k2'",
+        "__si.querySelector('p').id='pid'; __si.querySelector('p').removeAttribute('class')",
         "__si.querySelector('section').remove()",
         "__si.insertBefore(__sx, __si.firstChild)",
     };
+    CssStyleDocStats fs0, fs1;
+    css_styledoc_stats(&fs0);
     for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
         char js[512];
         snprintf(js, sizeof(js), "%s; 1", steps[i]);
         ASSERT_EQ(1, js_int(ctx, js));
         ASSERT_TRUE(snapshot_inc_matches_full(ctx, doc));
     }
+    css_styledoc_stats(&fs1);
+    ASSERT_TRUE(fs1.updated > fs0.updated);   /* attribute-only steps updated in place */
     ASSERT_EQ(1, js_int(ctx, "__si.remove(); __si=null; __sx=null; 1"));
     return true;
 }
