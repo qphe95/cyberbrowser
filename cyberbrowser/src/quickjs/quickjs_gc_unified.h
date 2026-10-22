@@ -1,10 +1,12 @@
 /*
  * Garbage collector for QuickJS: concurrent, region based, handle indexed.
  *
- * Every GC object is reached through a 32-bit handle.  gc_deref() turns a
- * handle into an address with one load from the front handle table.  The
- * collector moves objects by building new addresses in a back table and
- * swapping the two tables at a tick boundary.  See CONCURRENT_GC.md.
+ * Every GC object is reached through a 32-bit handle, which is its address:
+ * the index of its header's 16-byte granule in the heap.  Objects never
+ * move.  gc_deref() turns a handle into the payload address with
+ * arithmetic, after testing the object's bit in the liveness bitmap, so a
+ * freed object's handle dereferences to NULL (until another object is
+ * allocated at the same address).  See GC_PAUSELESS_DESIGN.md.
  *
  * Object layout: an 8-byte header followed by the payload.  Headers sit at
  * 8 mod 16, so payloads are 16-byte aligned.
@@ -219,7 +221,10 @@ static inline void atomic_store_128(volatile uint64_t *addr, uint64_t low, uint6
 #define GC_CARD_SIZE        ((size_t)1 << GC_CARD_SHIFT)          /* 4 KB */
 #define GC_HEAP_RESERVE     ((size_t)16 << 30)                    /* 16 GB of address space */
 #define GC_MAX_REGIONS      (GC_HEAP_RESERVE >> GC_REGION_SHIFT)
-#define GC_MAX_HANDLES      ((uint32_t)1 << 27)
+/* Handles: one per granule of the heap (handle 0, region 0's first header,
+ * is never used: region 0 is reserved). */
+#define GC_MAX_HANDLES      ((uint32_t)(GC_HEAP_RESERVE / GC_GRANULE))
+#define GC_REGION_HANDLES   ((uint32_t)(GC_REGION_SIZE / GC_GRANULE))
 /* Objects larger than this get their own run of regions and never move. */
 #define GC_HUMONGOUS_MIN    (GC_REGION_SIZE / 4)
 
@@ -285,12 +290,11 @@ typedef enum {
 } GCHandleArrayType;
 
 typedef struct GCState {
-    /* Handle tables: gc_deref reads front.  Both tables are reserved at
-     * full size and never move. */
-    void **_Atomic front;
-    void **tables[2];
-    _Atomic uint32_t high_water;      /* next never-used handle */
-    uint32_t committed_handles;       /* handle-table entries committed */
+    /* Liveness bitmap: one bit per granule, set at an object's header from
+     * allocation to free.  Reserved at full size, committed region by region
+     * as the regions come into use. */
+    uint64_t *alive;
+    _Atomic uint32_t handle_limit;    /* handles below it have committed bits */
 
     uint8_t *heap_base;               /* reserved heap range */
     size_t heap_reserved;
@@ -323,19 +327,31 @@ extern uint32_t g_gc_epoch;
 void gc_debug_stale_deref(GCHandle handle, void *site);
 #endif
 
+/* The live object's bit, for a handle below the limit. */
+static inline __attribute__((always_inline)) bool gc_handle_alive(GCHandle handle) {
+    uint64_t w = atomic_load_explicit((_Atomic uint64_t *)&g_gc.alive[handle >> 6], memory_order_acquire);
+    return (w >> (handle & 63)) & 1;
+}
+
+/* Handle <-> header and payload: pure arithmetic. */
+static inline __attribute__((always_inline)) void *gc_handle_header_addr(GCHandle handle) {
+    return g_gc.heap_base + ((size_t)handle << 4) + GC_HEADER_SIZE;
+}
+static inline __attribute__((always_inline)) GCHandle gc_handle_of_header(const void *hdr) {
+    return (GCHandle)(((const uint8_t *)hdr - g_gc.heap_base) >> 4);
+}
+
 static inline __attribute__((always_inline)) void *gc_deref(GCHandle handle) {
     if (handle == GC_HANDLE_NULL ||
-        handle >= atomic_load_explicit(&g_gc.high_water, memory_order_relaxed))
+        handle >= atomic_load_explicit(&g_gc.handle_limit, memory_order_relaxed))
         return NULL;
-    void **table = atomic_load_explicit(&g_gc.front, memory_order_acquire);
+    if (__builtin_expect(!gc_handle_alive(handle), 0)) {
 #if GC_STALE_CHECK
-    void *r = table[handle];
-    if (__builtin_expect(!r, 0))
         gc_debug_stale_deref(handle, ({ __label__ site; site: &&site; }));
-    return r;
-#else
-    return table[handle];
 #endif
+        return NULL;
+    }
+    return g_gc.heap_base + ((size_t)handle << 4) + 2 * GC_HEADER_SIZE;
 }
 
 /* Record that the heap slot at p was written (software dirty flag).  Every
@@ -550,10 +566,15 @@ static inline void gc_handle_set_mark(GCHandle handle, uint8_t mark) {
     (void)handle; (void)mark;
 }
 
-/* Number of handles ever allocated (exclusive upper bound). */
+/* Exclusive upper bound of the handles in use: the regions used so far. */
 static inline uint32_t gc_handle_limit(void) {
-    return atomic_load_explicit(&g_gc.high_water, memory_order_relaxed);
+    return atomic_load_explicit(&g_gc.handle_limit, memory_order_relaxed);
 }
+
+/* The live object with the smallest handle above prev, or GC_HANDLE_NULL:
+ * for (h = gc_next_object(0); h; h = gc_next_object(h)).  Debug and
+ * statistics use only (it scans the liveness bitmap). */
+GCHandle gc_next_object(GCHandle prev);
 
 /* True if ptr points into an object in the GC heap. */
 bool gc_ptr_is_valid(void *ptr);
@@ -608,6 +629,8 @@ static inline void gc_poll(void) {
 
 /* Configuration and statistics. */
 #define GC_HAS_CONCURRENT 1
+/* GC_REJECT_* and the copy statistics are left from the moving collector:
+ * nothing moves now, so they have no effect and stay zero. */
 enum {
     GC_REJECT_NORMAL = 0,   /* reject moved objects only when needed */
     GC_REJECT_ALL,          /* testing: reject every move at the flip */

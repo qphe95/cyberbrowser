@@ -45,75 +45,77 @@ GCCore g_core;
 static inline size_t gc_align16(size_t n) { return (n + 15) & ~(size_t)15; }
 
 /* ============================================================================
- * Handle tables
- * ============================================================================ */
+ * Handles: addresses, and the liveness bitmap
+ * ============================================================================
+ * An object's handle is the index of its header's granule in the heap, so
+ * it never changes and needs no table.  The liveness bitmap holds one bit
+ * per granule, set at the header of every object from allocation to free;
+ * its words for a region are committed when the region first comes into
+ * use, and gc_handle_limit() bounds the committed part. */
 
-#define HANDLE_COMMIT_CHUNK (64u * 1024u)   /* entries committed at a time */
-
-void **gc_core_back_table(void) {
-    void **f = atomic_load_explicit(&g_gc.front, memory_order_acquire);
-    return f == g_gc.tables[0] ? g_gc.tables[1] : g_gc.tables[0];
-}
-
-static bool handle_tables_commit_to(uint32_t limit) {
-    while (g_gc.committed_handles < limit) {
-        uint32_t start = g_gc.committed_handles;
-        size_t bytes = (size_t)HANDLE_COMMIT_CHUNK * sizeof(void *);
-        if (start + HANDLE_COMMIT_CHUNK > GC_MAX_HANDLES) return false;
-        for (int t = 0; t < 2; t++) {
-            if (!gc_os_commit(&g_gc.tables[t][start], bytes)) return false;
-        }
-        g_gc.committed_handles = start + HANDLE_COMMIT_CHUNK;
-    }
-    return true;
-}
-
-/* Write an entry in both tables (JS thread).  Front first, then back: the
- * collector's back-table updates use CAS and rely on this order. */
-void gc_core_handle_dual_write(GCHandle h, void *p) {
-    void **f = atomic_load_explicit(&g_gc.front, memory_order_acquire);
-    void **b = f == g_gc.tables[0] ? g_gc.tables[1] : g_gc.tables[0];
-    atomic_store_explicit((_Atomic(void *) *)&f[h], p, memory_order_release);
-    atomic_store_explicit((_Atomic(void *) *)&b[h], p, memory_order_release);
-}
-
-bool gc_core_clear_handle(GCHandle h, void *payload) {
-    void **f = atomic_load_explicit(&g_gc.front, memory_order_acquire);
-    void *expect = payload;
-    if (!atomic_compare_exchange_strong_explicit((_Atomic(void *) *)&f[h], &expect, NULL,
-                                                 memory_order_acq_rel, memory_order_acquire))
-        return false;
-    void **b = f == g_gc.tables[0] ? g_gc.tables[1] : g_gc.tables[0];
-    /* The back entry normally equals the front one.  Between a flip and the
-     * end of the back table's update it may still hold an older address;
-     * either way nothing may keep pointing at a freed handle. */
-    atomic_store_explicit((_Atomic(void *) *)&b[h], NULL, memory_order_release);
-    return true;
-}
+#define ALIVE_REGION_WORDS (GC_REGION_HANDLES / 64)
 
 GCHandleHistory *g_handle_history;
 bool g_handle_no_reuse;
-static size_t g_handle_history_committed;   /* entries */
+
+/* Commit what handles of region i need (its liveness words, and its
+ * history entries when kept), then let them be used. */
+static bool region_commit_handles(uint32_t i) {
+    if (!gc_os_commit(&g_gc.alive[(size_t)i * ALIVE_REGION_WORDS], ALIVE_REGION_WORDS * sizeof(uint64_t)))
+        return false;
+    if (g_handle_history &&
+        !gc_os_commit(&g_handle_history[(size_t)i * GC_REGION_HANDLES], GC_REGION_HANDLES * sizeof(GCHandleHistory)))
+        return false;
+    uint32_t limit = (i + 1) * GC_REGION_HANDLES;
+    uint32_t cur = atomic_load(&g_gc.handle_limit);
+    while (cur < limit && !atomic_compare_exchange_weak(&g_gc.handle_limit, &cur, limit)) {}
+    return true;
+}
+
+void gc_core_set_alive(GCHandle h) {
+    atomic_fetch_or_explicit((_Atomic uint64_t *)&g_gc.alive[h >> 6], (uint64_t)1 << (h & 63), memory_order_release);
+}
+
+bool gc_core_clear_handle(GCHandle h) {
+    uint64_t bit = (uint64_t)1 << (h & 63);
+    return atomic_fetch_and_explicit((_Atomic uint64_t *)&g_gc.alive[h >> 6], ~bit, memory_order_acq_rel) & bit;
+}
+
+GCHandle gc_next_object(GCHandle prev) {
+    uint32_t limit = gc_handle_limit();
+    uint32_t h = prev + 1;
+    if (h >= limit) return GC_HANDLE_NULL;
+    uint32_t w = h >> 6;
+    uint64_t v = atomic_load((_Atomic uint64_t *)&g_gc.alive[w]) & (~(uint64_t)0 << (h & 63));
+    for (;;) {
+        if (v) {
+            uint32_t r = (w << 6) + (uint32_t)__builtin_ctzll(v);
+            return r < limit ? r : GC_HANDLE_NULL;
+        }
+        if (++w >= (limit + 63) / 64) return GC_HANDLE_NULL;
+        v = atomic_load((_Atomic uint64_t *)&g_gc.alive[w]);
+    }
+}
 
 static uint32_t cycles_done(void) {
     return (uint32_t)(g_core.stats.minor_cycles + g_core.stats.major_cycles);
 }
 
 void gc_core_note_freed(GCHandle h, int how) {
-    if (h < g_handle_history_committed) {
+    if (g_handle_history && h < gc_handle_limit()) {
         g_handle_history[h].free_cycle = cycles_done();
         g_handle_history[h].freed_by = (uint8_t)how;
     }
 }
 
-/* Print what is known about handle h (QJS_GC_HISTORY / QJS_GC_NO_REUSE). */
+/* Print what is known about handle h (QJS_GC_HISTORY). */
 void gc_debug_report_stale_handle(GCHandle h, const char *where) {
     static const char *how[] = { "not freed", "gc_free from the JS thread",
                                  "stop-the-world sweep", "concurrent sweep" };
     fprintf(stderr, "[GC-STALE] %s: handle %u is %s", where, (unsigned)h, gc_deref(h) ? "live" : "dead");
-    if (g_handle_history && h < g_handle_history_committed) {
+    if (g_handle_history && h < gc_handle_limit()) {
         GCHandleHistory *e = &g_handle_history[h];
-        fprintf(stderr, "; now type %u, allocated %s after %u cycles, %s after %u; object #%u on it",
+        fprintf(stderr, "; now type %u, allocated %s after %u cycles, %s after %u; object #%u at this address",
                 e->type, e->alloc_young ? "young" : "old", e->alloc_cycle,
                 how[e->freed_by & 3], e->free_cycle, e->uses);
         if (e->uses > 1)
@@ -136,9 +138,9 @@ static struct { void *site; GCHandle first; uint32_t n, type, freed_by; } g_stal
 static atomic_flag g_stale_lock = ATOMIC_FLAG_INIT;
 
 void gc_debug_stale_deref(GCHandle handle, void *site) {
-    if (!g_handle_history || handle >= g_handle_history_committed) return;
+    if (!g_handle_history || handle >= gc_handle_limit()) return;
     GCHandleHistory *e = &g_handle_history[handle];
-    if (e->freed_by == GC_FREED_NOT) return;   /* not allocated yet, or in flux */
+    if (!e->uses || e->freed_by == GC_FREED_NOT) return;   /* never an object, or in flux */
     while (atomic_flag_test_and_set_explicit(&g_stale_lock, memory_order_acquire)) {}
     size_t i = ((uintptr_t)site >> 2) % STALE_SITES;
     for (size_t k = 0; k < STALE_SITES; k++, i = (i + 1) % STALE_SITES) {
@@ -166,49 +168,6 @@ static void gc_debug_stale_dump(void) {
 }
 #endif
 
-void gc_core_hcache_push(GCHandle h) {
-    if (g_handle_no_reuse) return;  /* QJS_GC_NO_REUSE: never reuse */
-    if (g_core.hcache_n == g_core.hcache_cap) {
-        uint32_t cap = g_core.hcache_cap ? g_core.hcache_cap * 2 : 4096;
-        GCHandle *n = (GCHandle *)realloc(g_core.hcache, cap * sizeof(GCHandle));
-        if (!n) return;  /* leak the handle rather than fail */
-        g_core.hcache = n;
-        g_core.hcache_cap = cap;
-    }
-    g_core.hcache[g_core.hcache_n++] = h;
-}
-
-static GCHandle handle_allocate(void) {
-    if (g_core.hcache_n == 0)
-        gc_core_drain_freed_ring();
-    if (g_core.hcache_n > 0) {
-        GCHandle r = g_core.hcache[--g_core.hcache_n];
-        GC_TRACE(r, "reused by allocation");
-        return r;
-    }
-    uint32_t h = atomic_load_explicit(&g_gc.high_water, memory_order_relaxed);
-    if (h >= GC_MAX_HANDLES) {
-        fprintf(stderr, "[GC] out of handles\n");
-        abort();
-    }
-    if (h + 1 > g_gc.committed_handles && !handle_tables_commit_to(h + 1)) {
-        fprintf(stderr, "[GC] cannot commit handle table\n");
-        abort();
-    }
-    if (g_handle_history && h >= g_handle_history_committed) {
-        size_t chunk = (size_t)1 << 20;   /* entries */
-        size_t upto = ((size_t)h / chunk + 1) * chunk;
-        if (!gc_os_commit(g_handle_history + g_handle_history_committed,
-                          (upto - g_handle_history_committed) * sizeof(GCHandleHistory))) {
-            fprintf(stderr, "[GC] cannot commit handle history\n");
-            abort();
-        }
-        g_handle_history_committed = upto;
-    }
-    atomic_store_explicit(&g_gc.high_water, h + 1, memory_order_release);
-    return h;
-}
-
 /* ============================================================================
  * Regions
  * ============================================================================ */
@@ -230,7 +189,10 @@ static bool region_prepare(GCRegion *r, bool fresh) {
     if (fresh || r->decommitted) {
         if (!gc_os_commit(base, GC_REGION_SIZE)) return false;
         r->decommitted = false;
-        if (fresh) atomic_fetch_add(&g_core.regions_committed, 1);
+        if (fresh) {
+            atomic_fetch_add(&g_core.regions_committed, 1);
+            if (!region_commit_handles((uint32_t)(r - g_core.regions))) return false;
+        }
     } else if (r->used_before && !r->zeroed) {
         memset(base, 0, GC_REGION_SIZE);
     }
@@ -255,10 +217,8 @@ static void region_activate(GCRegion *r, uint32_t space, uint32_t head, uint32_t
     r->tams = (uintptr_t)base;
     r->safe_top = (uintptr_t)base + GC_HEADER_SIZE;
     r->scan_top = (uintptr_t)base + GC_HEADER_SIZE;
-    r->in_cset = false;
     r->collecting = false;
     r->has_young = false;
-    r->keep = false;
     r->pinned = false;
     r->permanent = false;
     r->humongous_head = head;
@@ -357,9 +317,7 @@ void gc_core_region_release(GCRegion *r) {
     uint32_t count = atomic_load(&r->state) == GC_RS_HUMONGOUS ? r->humongous_count : 1;
     for (uint32_t k = 0; k < count; k++) {
         GCRegion *x = &g_core.regions[first + k];
-        x->in_cset = false;
         x->collecting = false;
-        x->keep = false;
         x->pinned = false;
         x->permanent = false;
         x->live_bytes = 0;
@@ -900,7 +858,8 @@ static GCHandle gc_alloc_in(size_t size, JSGCObjectTypeEnum type, bool old, bool
         fprintf(stderr, "[GC] out of memory allocating %zu bytes\n", size);
         abort();
     }
-    GCHandle h = handle_allocate();
+    /* The handle is the address. */
+    GCHandle h = gc_handle_of_header(hdr);
     hdr->handle = h;
     if (g_handle_history) {
         GCHandleHistory *e = &g_handle_history[h];
@@ -918,7 +877,7 @@ static GCHandle gc_alloc_in(size_t size, JSGCObjectTypeEnum type, bool old, bool
         e->freed_by = GC_FREED_NOT;
         e->alloc_young = young;
     }
-    gc_core_handle_dual_write(h, gc_header_payload(hdr));
+    gc_core_set_alive(h);
     GC_TRACE(h, type == JS_GC_OBJ_TYPE_STACK_FRAME ? "allocated (frame)" : "allocated");
     if (type == JS_GC_OBJ_TYPE_JS_CONTEXT)
         gc_core_registry_add(&g_core.contexts, h);
@@ -1033,11 +992,12 @@ void gc_free(GCHandle handle) {
     if (handle == GC_HANDLE_NULL) return;
     void *p = gc_deref(handle);
     if (!p) return;
-    /* CAS: a concurrent sweep may be freeing the same (unreachable) handle. */
-    if (gc_core_clear_handle(handle, p)) {
+    /* Atomic: a concurrent sweep may be freeing the same (unreachable)
+     * object.  Its memory is reused once a sweep formats it into a hole. */
+    if (gc_core_clear_handle(handle)) {
         GC_TRACE(handle, "gc_free");
         if (g_handle_history) gc_core_note_freed(handle, GC_FREED_JS);
-        gc_core_free_handle_from_js(handle);    }
+    }
 }
 
 /* ============================================================================
@@ -1360,11 +1320,16 @@ bool gc_init(void) {
     g_core.trace_handle = getenv("QJS_GC_TRACE") != NULL;
     g_handle_no_reuse = getenv("QJS_GC_NO_REUSE") != NULL;
     if (g_handle_no_reuse || getenv("QJS_GC_HISTORY")) {
+        /* Indexed by handle: committed region by region with the
+         * liveness bitmap. */
         g_handle_history = (GCHandleHistory *)gc_os_reserve((size_t)GC_MAX_HANDLES * sizeof(GCHandleHistory), false);
-        g_handle_history_committed = 0;
-        if (g_handle_no_reuse)
-            fprintf(stderr, "[GC] QJS_GC_NO_REUSE: freed handles stay dead%s\n",
+        /* A handle is an address: keeping freed ones dead means never
+         * reusing memory, so no holes and no released regions. */
+        if (g_handle_no_reuse) {
+            g_core.holes = false;
+            fprintf(stderr, "[GC] QJS_GC_NO_REUSE: freed handles stay dead (memory is not reused)%s\n",
                     GC_STALE_CHECK ? ", dead dereferences are reported at exit" : "");
+        }
 #if GC_STALE_CHECK
         if (g_handle_no_reuse) atexit(gc_debug_stale_dump);
 #endif
@@ -1387,9 +1352,8 @@ bool gc_init(void) {
     g_gc.cards = (uint8_t *)gc_os_reserve(card_bytes, false);
     if (g_gc.cards && !gc_os_commit(g_gc.cards, card_bytes)) g_gc.cards = NULL;
 #endif
-    for (int t = 0; t < 2; t++)
-        g_gc.tables[t] = (void **)gc_os_reserve((size_t)GC_MAX_HANDLES * sizeof(void *), false);
-    if (!g_core.regions || !g_gc.tables[0] || !g_gc.tables[1]
+    g_gc.alive = (uint64_t *)gc_os_reserve((size_t)GC_MAX_HANDLES / 8, false);
+    if (!g_core.regions || !g_gc.alive
 #if GC_SOFTWARE_DIRTY
         || !g_gc.cards
 #endif
@@ -1397,10 +1361,12 @@ bool gc_init(void) {
         fprintf(stderr, "[GC] initialization failed\n");
         return false;
     }
-    atomic_store(&g_gc.front, g_gc.tables[0]);
-    g_gc.committed_handles = 0;
-    if (!handle_tables_commit_to(HANDLE_COMMIT_CHUNK)) return false;
-    atomic_store(&g_gc.high_water, 1);  /* handle 0 is GC_HANDLE_NULL */
+    /* Region 0 is never used: handle 0, its first header, is
+     * GC_HANDLE_NULL.  Its handles still have (zero) liveness bits. */
+    atomic_store(&g_core.regions[0].state, GC_RS_CLAIMED);
+    atomic_store(&g_core.region_hwm, 1);
+    atomic_store(&g_gc.handle_limit, 0);
+    if (!region_commit_handles(0)) return false;
 
     /* Young objects are the unmarked ones, wherever they are: the young
      * context fills holes like the others. */
@@ -1458,7 +1424,6 @@ void gc_cleanup(void) {
         free(r->mark_bits[1]);
     }
     free(g_core.regions);
-    free(g_core.hcache);
     gc_core_free_retired();
     free(g_retired);
     g_retired = NULL;
@@ -1467,8 +1432,11 @@ void gc_cleanup(void) {
     free(g_core.finalizers.items);
     free(g_core.roots.items);
     gc_os_release(g_core.heap_reservation, GC_HEAP_RESERVE + GC_REGION_SIZE);
-    for (int t = 0; t < 2; t++)
-        gc_os_release(g_gc.tables[t], (size_t)GC_MAX_HANDLES * sizeof(void *));
+    gc_os_release(g_gc.alive, (size_t)GC_MAX_HANDLES / 8);
+    if (g_handle_history) {
+        gc_os_release(g_handle_history, (size_t)GC_MAX_HANDLES * sizeof(GCHandleHistory));
+        g_handle_history = NULL;
+    }
 #if GC_SOFTWARE_DIRTY
     gc_os_release(g_gc.cards, GC_HEAP_RESERVE >> GC_CARD_SHIFT);
 #endif
@@ -1496,8 +1464,12 @@ size_t gc_used_bytes(void) {
     return s.heap_used;
 }
 
+/* Live objects: the bits set in the liveness bitmap. */
 uint32_t gc_get_handle_count(void) {
-    return gc_handle_limit();
+    uint32_t n = 0, words = (gc_handle_limit() + 63) / 64;
+    for (uint32_t w = 0; w < words; w++)
+        n += (uint32_t)__builtin_popcountll(atomic_load_explicit((_Atomic uint64_t *)&g_gc.alive[w], memory_order_relaxed));
+    return n;
 }
 
 /* ============================================================================

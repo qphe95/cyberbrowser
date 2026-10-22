@@ -1161,7 +1161,7 @@ static void rebuild_href(LocationData *loc) {
         snprintf(port_part, sizeof(port_part), ":%s", loc->port);
     }
     
-    snprintf(loc->href, sizeof(loc->href), "%s//%s%s%s%s%s%s",
+    snprintf(loc->href, sizeof(loc->href), "%s//%s%s%s%s%s",
         loc->protocol,
         loc->hostname,
         port_part,

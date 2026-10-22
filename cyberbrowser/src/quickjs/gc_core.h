@@ -34,9 +34,7 @@ typedef struct GCRegion {
     bool used_before;          /* memory must be zeroed before reuse */
     bool zeroed;               /* zeroed when released (no zeroing at claim) */
     bool decommitted;          /* pages returned to the OS (poison mode) */
-    bool in_cset;              /* being evacuated by a major cycle */
     bool collecting;           /* in the nursery set a minor cycle collects */
-    bool keep;                 /* a move out of it was rejected: it stays in use */
     bool permanent;            /* holds atoms: never in a cycle, never moved or freed */
     bool pinned;               /* holds an object pinned for this cycle */
     _Atomic uintptr_t top;     /* end of the last fully allocated object */
@@ -112,21 +110,6 @@ typedef struct GCRegistry {
     uint32_t cap;
 } GCRegistry;
 
-/* Single-producer single-consumer queue of handles, made of linked blocks.
- * The producer fills a block and publishes its count; the consumer frees
- * blocks it has drained.  Never blocks either side. */
-#define GC_RING_BLOCK 4096
-typedef struct GCRingBlock {
-    _Atomic uint32_t count;              /* items published by the producer */
-    uint32_t consumed;                   /* consumer-private */
-    struct GCRingBlock *_Atomic next;
-    GCHandle items[GC_RING_BLOCK];
-} GCRingBlock;
-typedef struct GCRing {
-    GCRingBlock *head;   /* consumer side */
-    GCRingBlock *tail;   /* producer side */
-} GCRing;
-
 typedef struct GCCore {
     GCRegion *regions;
     _Atomic uint32_t region_hwm;
@@ -142,9 +125,6 @@ typedef struct GCCore {
     GCAllocCtx gc_copy;    /* GC thread (or sync collector): copies */
     GCAllocCtx js_young_overflow, js_old_overflow, gc_copy_overflow;
 
-    GCHandle *hcache;      /* JS thread free-handle cache */
-    uint32_t hcache_n;
-    uint32_t hcache_cap;
 
     GCRegistry contexts;
     GCRegistry finalizers;
@@ -154,7 +134,6 @@ typedef struct GCCore {
     uint32_t trace_handle;   /* debug: log what happens to this handle */
     bool poison;
     bool nursery_enabled;
-    bool defer_frees;      /* marking in progress: gc_free must not recycle handles */
     uint64_t js_thread_id;
 
     /* Hole reuse (QJS_GC_HOLES, on by default): old regions with holes, for
@@ -176,8 +155,8 @@ extern GCCore g_core;
 
 /* Heap (quickjs_gc_unified.c) */
 GCRegion *gc_core_region_acquire(uint32_t space);
-void gc_core_handle_dual_write(GCHandle h, void *p);
-void gc_core_hcache_push(GCHandle h);
+/* An object's handle comes into use (allocation). */
+void gc_core_set_alive(GCHandle h);
 void gc_core_walk_region(GCRegion *r, uintptr_t from, uintptr_t to,
                          void (*fn)(GCHeader *hdr, void *opaque), void *opaque);
 GCHeader *gc_core_alloc_object_memory(GCAllocCtx *a, size_t payload, JSGCObjectTypeEnum type);
@@ -188,7 +167,6 @@ GCHeader *gc_core_object_containing(const void *p);
 /* The first header at or after p, which lies in no object (see
  * gc_core_object_containing), or `limit`. */
 uintptr_t gc_core_next_header(const GCRegion *r, uintptr_t p, uintptr_t limit);
-void **gc_core_back_table(void);
 void gc_core_registry_add(GCRegistry *reg, GCHandle h);
 /* After a region's sweep (its condemned objects' handles freed): turn its
  * runs of free lines into walkable holes and offer it for recycling.
@@ -244,15 +222,12 @@ static inline bool gc_core_region_in_use(uint32_t st) {
     return st == GC_RS_NURSERY || st == GC_RS_OLD || st == GC_RS_HUMONGOUS;
 }
 
-/* An object is current when the front table maps its handle to it.  Old
- * copies (after a move or a realloc) and freed objects are not current. */
+/* An object is current from allocation to free: its bit in the liveness
+ * bitmap is set.  Fillers and freed objects are not current. */
 static inline bool gc_core_header_is_current(const GCHeader *hdr) {
-    GCHandle h = hdr->handle;
-    if (h == GC_HANDLE_NULL || h >= atomic_load_explicit(&g_gc.high_water, memory_order_acquire))
-        return false;
-    void **f = atomic_load_explicit(&g_gc.front, memory_order_acquire);
-    return atomic_load_explicit((_Atomic(void *) *)&f[h], memory_order_acquire)
-           == (const uint8_t *)hdr + GC_HEADER_SIZE;
+    GCHandle h = gc_handle_of_header(hdr);
+    return h != GC_HANDLE_NULL && h < atomic_load_explicit(&g_gc.handle_limit, memory_order_acquire) &&
+           gc_handle_alive(h);
 }
 
 /* Debug trace (QJS_GC_TRACE=1): events per handle in an in-memory ring,
@@ -281,15 +256,11 @@ extern GCHandleHistory *g_handle_history;   /* NULL unless QJS_GC_HISTORY or QJS
 extern bool g_handle_no_reuse;
 void gc_core_note_freed(GCHandle h, int how);
 
-/* The other table: the one the JS thread does not read. */
-static inline void **gc_core_back(void) {
-    void **f = atomic_load_explicit(&g_gc.front, memory_order_acquire);
-    return f == g_gc.tables[0] ? g_gc.tables[1] : g_gc.tables[0];
-}
 
 /* Clear a handle's entries if they still point at payload (CAS, so a
  * concurrent change by the other thread wins).  True if this call freed it. */
-bool gc_core_clear_handle(GCHandle h, void *payload);
+/* Free a handle: false if it was not in use (freed already). */
+bool gc_core_clear_handle(GCHandle h);
 
 /* Storage the GC thread may be reading (registry arrays) is not freed when
  * it is replaced: it is retired, and freed at the next mark start, when the
@@ -298,8 +269,6 @@ void gc_core_retire(void *p);
 void gc_core_free_retired(void);
 
 /* Collector (gc_collector.c) */
-void gc_core_drain_freed_ring(void);
-void gc_core_free_handle_from_js(GCHandle h);
 void gc_core_note_allocation(size_t bytes, bool young);
 void gc_core_config_defaults(void);
 void gc_core_start_thread(void);

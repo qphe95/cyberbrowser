@@ -22,6 +22,24 @@
 #include "js_quickjs.h"
 #include "browser_api_impl.h"
 
+#ifdef _WIN32
+#include <windows.h>
+/* A crash prints where it happened (image-relative addresses, for addr2line
+ * on the test executable). */
+static LONG WINAPI test_crash_filter(EXCEPTION_POINTERS *ep) {
+    uintptr_t base = (uintptr_t)GetModuleHandleA(NULL);
+    fprintf(stderr, "[FATAL] exception 0x%08lX at rva 0x%llx\n", (unsigned long)ep->ExceptionRecord->ExceptionCode,
+            (unsigned long long)((uintptr_t)ep->ExceptionRecord->ExceptionAddress - base));
+    void *frames[48];
+    USHORT n = RtlCaptureStackBackTrace(0, 48, frames, NULL);
+    for (USHORT i = 0; i < n; i++)
+        if ((uintptr_t)frames[i] > base && (uintptr_t)frames[i] - base < ((uintptr_t)1 << 28))
+            fprintf(stderr, "[FATAL]   frame rva 0x%llx\n", (unsigned long long)((uintptr_t)frames[i] - base));
+    fflush(stderr);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+#endif
+
 extern void run_browser_api_impl_tests(void);
 extern void run_gc_tests(void);
 extern void run_gc_alloc_bench(void);
@@ -121,6 +139,9 @@ GCValue get_shared_test_global(void) {
 int main(int argc, char *argv[]) {
     /* Unbuffered stdout so a crash reveals the exact last line printed. */
     setvbuf(stdout, NULL, _IONBF, 0);
+#ifdef _WIN32
+    SetUnhandledExceptionFilter(test_crash_filter);
+#endif
 
     printf("========================================\n");
     printf("CyberBrowser Test Suite\n");

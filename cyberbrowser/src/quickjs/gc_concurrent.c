@@ -87,82 +87,12 @@ static void u32_free(U32Vec *v) {
 }
 
 /* ============================================================================
- * Freed-handle ring: GC thread -> JS thread
+ * JS-thread side list: the reference log
  * ============================================================================ */
-
-static GCRing g_freed_ring;
-
-static GCRingBlock *ring_block_new(void) {
-    GCRingBlock *b = (GCRingBlock *)calloc(1, sizeof(GCRingBlock));
-    if (!b) {
-        fprintf(stderr, "[GC] out of memory (ring)\n");
-        abort();
-    }
-    return b;
-}
-
-/* Producer side (one thread at a time: the GC thread, or the JS thread in
- * a stop-the-world collection). */
-void gc_col_freed_ring_push(GCHandle h) {
-    GCRing *q = &g_freed_ring;
-    if (!q->tail) {
-        q->tail = ring_block_new();
-        q->head = q->tail;
-    }
-    GCRingBlock *b = q->tail;
-    uint32_t n = atomic_load_explicit(&b->count, memory_order_relaxed);
-    if (n == GC_RING_BLOCK) {
-        GCRingBlock *nb = ring_block_new();
-        atomic_store_explicit(&b->next, nb, memory_order_release);
-        q->tail = nb;
-        b = nb;
-        n = 0;
-    }
-    b->items[n] = h;
-    atomic_store_explicit(&b->count, n + 1, memory_order_release);
-}
-
-/* Consumer side (JS thread).  The head block is kept (the producer may
- * still be filling it). */
-void gc_core_drain_freed_ring(void) {
-    GCRing *q = &g_freed_ring;
-    GCRingBlock *b = q->head;
-    while (b) {
-        uint32_t n = atomic_load_explicit(&b->count, memory_order_acquire);
-        while (b->consumed < n)
-            gc_core_hcache_push(b->items[b->consumed++]);
-        if (n < GC_RING_BLOCK) break;
-        GCRingBlock *next = atomic_load_explicit(&b->next, memory_order_acquire);
-        if (!next) break;
-        q->head = next;
-        free(b);
-        b = next;
-    }
-}
-
-/* ============================================================================
- * JS-thread side lists: deferred frees and the reference log
- * ============================================================================ */
-
-/* Handles the JS thread freed while a cycle was marking.  Reusing one then
- * could hand the marker an object of another type behind a handle it read
- * earlier; they are recycled when marking ends. */
-static U32Vec g_deferred_frees;
 
 /* gc_note_ref: references stored in off-heap memory (no dirty flag). */
 static U32Vec g_ref_log;
 static uint32_t g_ref_log_major_start;
-
-void gc_core_free_handle_from_js(GCHandle h) {
-    if (g_core.defer_frees) u32_push(&g_deferred_frees, h);
-    else gc_core_hcache_push(h);
-}
-
-static void release_deferred_frees(void) {
-    for (uint32_t i = 0; i < g_deferred_frees.n; i++)
-        gc_core_hcache_push(g_deferred_frees.items[i]);
-    g_deferred_frees.n = 0;
-}
 
 void gc_note_ref(GCHandle h) {
     if (h != GC_HANDLE_NULL && g_core.config.background)
@@ -346,9 +276,8 @@ static bool bcheck_enabled(void) {
 }
 
 static bool bcheck_is_ref_handle(uint32_t w) {
-    if (w == GC_HANDLE_NULL || w >= atomic_load_explicit(&g_gc.high_water, memory_order_acquire)) return false;
-    void **f = atomic_load_explicit(&g_gc.front, memory_order_acquire);
-    return atomic_load_explicit((_Atomic(void *) *)&f[w], memory_order_acquire) != NULL;
+    if (w == GC_HANDLE_NULL || w >= atomic_load_explicit(&g_gc.handle_limit, memory_order_acquire)) return false;
+    return gc_handle_alive(w);
 }
 
 /* Page `page` (4 KB) was written with its card clean: report reference
@@ -582,7 +511,6 @@ static void step_mark_start(int kind) {
     }
     uint64_t ta = gc_os_now_ns();
     gc_col_begin_cycle(kind, false);
-    g_core.defer_frees = true;
     uint64_t tb = gc_os_now_ns();
     gc_col_enumerate_roots(rt, false);
     if (g_core.log_level > 3)
@@ -638,8 +566,6 @@ static uint32_t step_remark(int kind, uint64_t t0, uint64_t budget_ns) {
  * finalizers of condemned objects, close the weak window. */
 static void close_weak_window(void) {
     atomic_store_explicit((_Atomic bool *)&g_gc.weak_step_active, false, memory_order_release);
-    g_core.defer_frees = false;
-    release_deferred_frees();
 }
 
 static uint32_t step_weak_apply(void) {
@@ -723,7 +649,6 @@ GC_NOINLINE void gc_poll_slow(void) {
 GC_NOINLINE void gc_tick(void) {
     if (!g_gc.initialized) return;
     atomic_fetch_add_explicit(&g_conc.tick, 1, memory_order_relaxed);
-    gc_core_drain_freed_ring();
     if (atomic_load_explicit(&g_gc_poll_flag, memory_order_acquire))
         boundary_with_stack();
 }
@@ -778,7 +703,6 @@ bool gc_wait_idle(uint32_t timeout_ms) {
         if (gc_os_now_ns() > end) return false;
         if (!atomic_load_explicit(&g_gc_poll_flag, memory_order_acquire)) gc_os_yield();
     }
-    gc_core_drain_freed_ring();
     return true;
 }
 
@@ -1134,7 +1058,6 @@ static void abort_and_wait(void) {
     }
     atomic_store_explicit(&g_conc.abort, 0, memory_order_release);
     close_weak_window();
-    gc_core_drain_freed_ring();
     /* The GC thread is idle: nothing can be pending. */
     atomic_store_explicit(&g_gc_poll_flag, g_conc.force_full, memory_order_release);
 }
@@ -1169,17 +1092,9 @@ void gc_core_after_full_collection(void) {
 }
 
 void gc_core_free_internal(void) {
-    GCRingBlock *b = g_freed_ring.head;
-    while (b) {
-        GCRingBlock *n = atomic_load(&b->next);
-        free(b);
-        b = n;
-    }
-    g_freed_ring.head = g_freed_ring.tail = NULL;
     free(g_col.work.items);
     free(g_col.pins);
     memset(&g_col, 0, sizeof(g_col));
-    u32_free(&g_deferred_frees);
     u32_free(&g_ref_log);
     u32_free(&g_conc.pending_cards);
     for (int k = 0; k < 3; k++) u32_free(&g_conc.weak_dead[k]);
@@ -1319,21 +1234,13 @@ static void check_object(GCHeader *hdr, void *opaque) {
                     (void *)gc_core_object_containing(gc_header_payload(hdr)));
         g_check_problems++;
     }
-    /* The back table holds the same address, or (while an evacuation is in
-     * flight) the address of a copy of this object. */
-    if (gc_core_header_is_current(hdr)) {
-        void *b = atomic_load_explicit((_Atomic(void *) *)&gc_core_back()[hdr->handle], memory_order_acquire);
-        if (b != gc_header_payload(hdr)) {
-            GCHeader *bh = b ? gc_core_object_containing(b) : NULL;
-            if (!bh || gc_header_payload(bh) != b || bh->handle != hdr->handle) g_check_problems++;
-        }
-    }
+    /* A current object's header names its own handle. */
+    if (gc_core_header_is_current(hdr) && hdr->handle != gc_handle_of_header(hdr)) g_check_problems++;
 }
 
 /* Returns the number of inconsistencies found: object headers that are
- * misaligned or not in the start bitmap, current objects whose two
- * handle-table entries disagree, and handle entries that point outside an
- * object.  Call when the collector is idle. */
+ * misaligned or not found from their own addresses, and live handles that
+ * are not the header of an object.  Waits for the collector to be idle. */
 uint32_t gc_test_heap_check(void) {
     /* A sweep formats holes as it goes: walk the heap between cycles. */
     gc_wait_idle(20000);
@@ -1346,11 +1253,8 @@ uint32_t gc_test_heap_check(void) {
         gc_core_walk_region(r, (uintptr_t)gc_core_region_start(r) + GC_HEADER_SIZE,
                             atomic_load(&r->top), check_object, r);
     }
-    uint32_t limit = gc_handle_limit();
-    void **f = atomic_load(&g_gc.front);
-    for (uint32_t h = 1; h < limit; h++) {
-        void *p = f[h];
-        if (!p) continue;
+    for (GCHandle h = gc_next_object(0); h; h = gc_next_object(h)) {
+        void *p = gc_deref(h);
         GCHeader *hdr = gc_core_object_containing(p);
         if (!hdr || gc_header_payload(hdr) != p || hdr->handle != h) g_check_problems++;
     }

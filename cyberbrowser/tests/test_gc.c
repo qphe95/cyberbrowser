@@ -1150,16 +1150,19 @@ TEST(test_gc_realloc_copies_into_a_new_object) {
     return true;
 }
 
-TEST(test_gc_free_recycles_handle) {
+/* A handle is its object's address: freed, it dereferences to NULL, and
+ * the memory waits for a sweep to make it a hole before it is reused. */
+TEST(test_gc_free_kills_handle) {
     BgState st;
     bg_pause(&st);
     GCHandle h = gc_alloc(32, JS_GC_OBJ_TYPE_DATA);
+    ASSERT_TRUE(gc_handle_of_header(gc_header(gc_deref(h))) == h);
     gc_free(h);
     ASSERT_TRUE(gc_deref(h) == NULL);
-    ASSERT_TRUE(gc_core_back()[h] == NULL);
     gc_free(h);   /* double free is ignored */
     GCHandle h2 = gc_alloc(32, JS_GC_OBJ_TYPE_DATA);
-    ASSERT_EQ((int)h, (int)h2);   /* the free-handle cache is LIFO */
+    ASSERT_TRUE(h2 != h);   /* not reused before a sweep */
+    ASSERT_TRUE(gc_deref(h) == NULL);
     gc_free(h2);
     bg_resume(&st);
     return true;
@@ -1925,7 +1928,7 @@ void run_gc_tests(void) {
     RUN_TEST(test_gc_atoms_are_permanent);
     RUN_TEST(test_gc_humongous_object_never_moves);
     RUN_TEST(test_gc_realloc_copies_into_a_new_object);
-    RUN_TEST(test_gc_free_recycles_handle);
+    RUN_TEST(test_gc_free_kills_handle);
 
     printf("\n=== Stop-the-World Collection ===\n");
     RUN_TEST(test_gc_unreachable_objects_freed);

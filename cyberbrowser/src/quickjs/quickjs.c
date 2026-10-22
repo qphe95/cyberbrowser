@@ -5459,7 +5459,7 @@ int find_own_property_handle(GCHandle obj_handle, JSAtom atom,
     return -1;
 }
 
-/* 
+/*
  * get_property_by_index - Get JSProperty pointer from object handle and index.
  * 
  * WARNING: The returned pointer is only valid until the next GC point.
@@ -6228,8 +6228,7 @@ static __maybe_unused void JS_DumpShapes(JSRuntimeHandle rt)
         }
     }
     /* dump non-hashed shapes */
-    for (i = 1; i < gc_handle_limit(); i++) {
-        GCHandle handle = (GCHandle)i;
+    for (GCHandle handle = gc_next_object(0); handle; handle = gc_next_object(handle)) {
         if (gc_handle_get_type_inline(handle) == JS_GC_OBJ_TYPE_JS_OBJECT) {
             p = (JSObjectHandle)(handle);
             if (!SAFE_GET_OR(GC_SHAPE_DEREF(js_obj_shape_handle(p)), JSShapeHandle, is_hashed, 0)) {
@@ -6902,8 +6901,7 @@ static force_inline JSShapeProperty *find_own_property(JSProperty **ppr,
     
     /* Defensive: check if shape handle is valid for handle-based GC */
     QJS_LOGD("find_own_property: shape_handle=%u", js_obj_shape_handle(p));
-    /* Check for invalid handle values */
-    if (unlikely(js_obj_shape_handle(p) == GC_HANDLE_NULL || js_obj_shape_handle(p) > 10000000)) {
+    if (unlikely(js_obj_shape_handle(p) == GC_HANDLE_NULL)) {
         QJS_LOGD("find_own_property: CORRUPTED shape handle %u for object %p", 
                  js_obj_shape_handle(p), SAFE_HANDLE(p));
         /* Log additional object info for debugging */
@@ -8197,8 +8195,7 @@ void JS_ComputeMemoryUsage(JSRuntimeHandle rt, JSMemoryUsage *s)
     
     gc_for_each_object_of_type(JS_GC_OBJ_TYPE_JS_CONTEXT, ctx_count_callback, &ctx_mem_data);
 
-    for (i = 1; i < gc_handle_limit(); i++) {
-        GCHandle handle = (GCHandle)i;
+    for (GCHandle handle = gc_next_object(0); handle; handle = gc_next_object(handle)) {
         void *pin = gc_deref(handle);
         if (!pin)
             continue;
@@ -8488,8 +8485,7 @@ void JS_DumpMemoryUsage(FILE *fp, const JSMemoryUsage *s, JSRuntimeHandle rt)
         {
             int obj_classes[JS_CLASS_INIT_COUNT + 1] = { 0 };
             int class_id;
-            for (i = 1; i < gc_handle_limit(); i++) {
-                GCHandle handle = (GCHandle)i;
+            for (GCHandle handle = gc_next_object(0); handle; handle = gc_next_object(handle)) {
                 void *pin = gc_deref(handle);
                 if (!pin) continue;
                 JSObjectHandle p = GC_HANDLE_NULL;
@@ -44976,8 +44972,7 @@ static JSAtom find_atom(JSContextHandle ctx, const char *name)
                 QJS_LOGI("find_atom: atom %d is NULL", atom);
                 continue;  /* Skip null atoms */
             }
-            /* Check handle value is valid (not null, not unreasonably large) */
-            if (SAFE_HANDLE(p) == GC_HANDLE_NULL || SAFE_HANDLE(p) > 10000000) {
+            if (SAFE_HANDLE(p) == GC_HANDLE_NULL) {
                 QJS_LOGD("find_atom: CORRUPT atom %d, handle=%u", atom, SAFE_HANDLE(p));
                 return JS_ATOM_NULL;
             }

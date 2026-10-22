@@ -77,7 +77,6 @@ void gc_col_sort_uintptr(uintptr_t *a, size_t n);
 
 /* gc_concurrent.c */
 void gc_col_finish_concurrent_cycle(uintptr_t stack_lo);
-void gc_col_freed_ring_push(GCHandle h);
 void gc_col_verify_impl(JSRuntimeHandle rt);
 void gc_col_mark_ref_log(JSRuntimeHandle rt, uint32_t from);
 void gc_core_after_full_collection(void);

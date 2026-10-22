@@ -88,7 +88,7 @@ void gc_get_stats(GCStats *s) {
         used += atomic_load(&r->top) - (uintptr_t)gc_core_region_start(r);
     }
     s->heap_used = used;
-    s->handles_in_use = gc_handle_limit() - 1 - g_core.hcache_n;
+    s->handles_in_use = gc_get_handle_count();
 }
 
 /* ============================================================================
@@ -143,17 +143,14 @@ static inline GCRegion *header_region(const GCHeader *hdr) {
     return gc_core_region_of(hdr);
 }
 
-/* Read a handle's address from the front table, with bounds checks that
- * hold even if the handle came from a torn, stale or conservative read. */
+/* A live object's header from its handle, with checks that hold even if
+ * the handle came from a torn, stale or conservative read: below the limit
+ * (its liveness bit is committed) and alive. */
 static inline GCHeader *handle_header(GCHandle h) {
-    if (h == GC_HANDLE_NULL || h >= atomic_load_explicit(&g_gc.high_water, memory_order_acquire))
+    if (h == GC_HANDLE_NULL || h >= atomic_load_explicit(&g_gc.handle_limit, memory_order_acquire) ||
+        !gc_handle_alive(h))
         return NULL;
-    void **f = atomic_load_explicit(&g_gc.front, memory_order_acquire);
-    void *p = atomic_load_explicit((_Atomic(void *) *)&f[h], memory_order_acquire);
-    if (!p || ((uintptr_t)p & 15)) return NULL;
-    GCHeader *hdr = gc_header(p);
-    if (!gc_core_region_of(hdr)) return NULL;
-    return hdr;
+    return (GCHeader *)gc_handle_header_addr(h);
 }
 
 /* True if the object is unreachable according to the cycle that just
@@ -243,7 +240,7 @@ void gc_core_trace_dump(GCHandle h) {
 static void scan_words(JSRuntimeHandle rt, const GCHeader *hdr) {
     const uint8_t *p = (const uint8_t *)hdr + GC_HEADER_SIZE;
     const uint8_t *end = (const uint8_t *)hdr + gc_header_total_size(hdr);
-    uint32_t limit = atomic_load_explicit(&g_gc.high_water, memory_order_acquire);
+    uint32_t limit = atomic_load_explicit(&g_gc.handle_limit, memory_order_acquire);
     for (; p + 4 <= end; p += 4) {
         uint32_t w = atomic_load_explicit((_Atomic uint32_t *)p, memory_order_relaxed);
         if (w != GC_HANDLE_NULL && w < limit)
@@ -323,7 +320,7 @@ void gc_col_rescan_card(JSRuntimeHandle rt, uint32_t card) {
             uintptr_t a = p + GC_HEADER_SIZE;
             if (a < lo) a = lo;
             uintptr_t b = end < hi ? end : hi;
-            uint32_t limit = atomic_load_explicit(&g_gc.high_water, memory_order_acquire);
+            uint32_t limit = atomic_load_explicit(&g_gc.handle_limit, memory_order_acquire);
             for (a = (a + 3) & ~(uintptr_t)3; a + 4 <= b; a += 4) {
                 uint32_t w = atomic_load_explicit((_Atomic uint32_t *)a, memory_order_relaxed);
                 if (w != GC_HANDLE_NULL && w < limit)
@@ -383,7 +380,7 @@ static void scan_stack(JSRuntimeHandle rt, bool pin, JS_MarkFunc *cb) {
     uintptr_t lo = g_col.stack_lo & ~(uintptr_t)3;
     uintptr_t hi = g_col.stack_hi;
     if (!lo || hi <= lo || hi - lo > ((size_t)512 << 20)) return;
-    uint32_t hwm_handles = atomic_load_explicit(&g_gc.high_water, memory_order_acquire);
+    uint32_t hwm_handles = atomic_load_explicit(&g_gc.handle_limit, memory_order_acquire);
     uintptr_t heap_lo = (uintptr_t)g_gc.heap_base;
     uintptr_t heap_hi = heap_lo + ((uintptr_t)atomic_load(&g_core.region_hwm) << GC_REGION_SHIFT);
 
@@ -499,11 +496,9 @@ static void weak_step(JSRuntimeHandle rt) {
  * JS thread freeing it too (gc_free) or having moved on from it. */
 static void free_dead_handle(GCHeader *hdr, bool now) {
     GCHandle h = hdr->handle;
-    if (!gc_core_clear_handle(h, gc_header_payload(hdr))) return;
+    if (!gc_core_clear_handle(h)) return;
     GC_TRACE(h, now ? "freed by stop-the-world sweep" : "freed by concurrent sweep");
     if (g_handle_history) gc_core_note_freed(h, now ? GC_FREED_STW_SWEEP : GC_FREED_CONCURRENT_SWEEP);
-    if (now) gc_core_hcache_push(h);
-    else gc_col_freed_ring_push(h);
     g_core.stats.objects_freed++;
 }
 

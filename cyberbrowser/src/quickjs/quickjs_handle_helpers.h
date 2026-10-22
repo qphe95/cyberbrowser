@@ -175,10 +175,6 @@ static inline js_limb_t js_bigint_h_get_limb(GCHandle handle, uint32_t index)
 static inline JSBigInt* js_bigint_h_unsafe_data(GCHandle handle)
 {
     if (handle == GC_HANDLE_NULL) return NULL;
-
-    if (handle > 0x10000000) {
-        return (JSBigInt*)(uintptr_t)handle;
-    }
     return (JSBigInt*)gc_deref_unsafe(handle);
 }
 
