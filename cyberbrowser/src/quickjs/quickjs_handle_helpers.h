@@ -562,6 +562,13 @@ static inline GCHandle js_obj_prop_handle(GCHandle handle)
 
 /* The object's property slots, wherever they live; NULL if it has none.
  * Like any pointer into the heap, valid until the next poll point. */
+static inline JSProperty *js_obj_props_of(JSObject *o)
+{
+    GCHandle ph = o->prop_handle;
+    if (ph != GC_HANDLE_NULL) return (JSProperty *)gc_deref(ph);
+    return o->inline_props ? (JSProperty *)((uint8_t *)o + JS_OBJ_INLINE_PROPS_OFFSET) : NULL;
+}
+
 static inline JSProperty *js_obj_props(GCHandle handle)
 {
     JSObject *o = (JSObject *)gc_deref(handle);

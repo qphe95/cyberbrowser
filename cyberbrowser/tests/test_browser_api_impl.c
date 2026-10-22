@@ -891,14 +891,18 @@ TEST(test_requestAnimationFrame_functional) {
     const char *raf_js = "requestAnimationFrame(function(timestamp) { __testRAFCalled = true; __testRAFTime = timestamp; });";
     JS_Eval(ctx, raf_js, strlen(raf_js), "<test_raf>", JS_EVAL_TYPE_GLOBAL);
     
-    // Process timers
+    // Not before the next frame (16 ms of page time), then at it.
     extern int timer_process_due(JSContextHandle ctx);
+    timer_process_due(ctx);
+    GCValue early = JS_GetPropertyStr(ctx, g_global, "__testRAFCalled");
+    if (JS_ToBool(ctx, early)) return false;
+    page_time_advance(16);
     int processed = timer_process_due(ctx);
-    
+
     // Check if callback was executed
     GCValue flag = JS_GetPropertyStr(ctx, g_global, "__testRAFCalled");
     int was_called = JS_ToBool(ctx, flag);
-    
+
     return was_called && processed >= 1;
 }
 

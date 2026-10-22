@@ -4,9 +4,11 @@
  * one line per sample ("rva rva ..." leaf first, relative to the image
  * base) to <path> at exit.  tools/sample_report.js symbolizes them.
  * CYBER_SAMPLE_MAX_MS=<n> stops sampling and writes the file after n ms,
- * for a process that hangs and never exits. */
+ * for a process that hangs and never exits.  CYBER_SAMPLE_CPU=1 keeps only
+ * samples where the thread ran since the previous one (an on-CPU profile). */
 #include "cyber_sampler.h"
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +25,9 @@ static uint64_t *g_samples;     /* SAMPLE_DEPTH + 1 words per sample: depth, rva
 static size_t g_n, g_cap;
 static uint64_t g_base, g_end;
 static unsigned g_interval_us = 1000;
+static bool g_cpu_only;          /* CYBER_SAMPLE_CPU: skip samples where the thread did not run */
+static ULONG64 g_last_cycles;
+static size_t g_skipped;
 static char *g_path;
 static unsigned g_max_ms;
 static volatile LONG g_written;   /* the file is written once */
@@ -31,7 +36,8 @@ static void write_samples(void) {
     if (InterlockedExchange(&g_written, 1)) return;
     FILE *f = fopen(g_path, "w");
     if (!f) return;
-    fprintf(f, "# interval_us %u samples %zu\n", g_interval_us, g_n);
+    fprintf(f, "# interval_us %u samples %zu%s\n", g_interval_us, g_n, g_cpu_only ? " on-cpu" : "");
+    if (g_cpu_only) fprintf(stderr, "[sampler] %zu samples skipped (thread not running)\n", g_skipped);
     for (size_t i = 0; i < g_n; i++) {
         const uint64_t *rec = g_samples + i * (SAMPLE_DEPTH + 1);
         for (uint64_t d = 0; d < rec[0]; d++) fprintf(f, d ? " %llx" : "%llx", (unsigned long long)rec[1 + d]);
@@ -101,7 +107,20 @@ static DWORD WINAPI sampler_main(LPVOID arg) {
         CONTEXT c;
         memset(&c, 0, sizeof(c));
         c.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
-        if (GetThreadContext(g_target, &c)) record(&c);
+        /* CYBER_SAMPLE_CPU=1: only samples where the thread ran since the
+         * last one (its cycle count moved), so waits and descheduled time
+         * do not show up as time in whatever code was interrupted. */
+        ULONG64 cycles = 0;
+        bool ran = true;
+        if (g_cpu_only && QueryThreadCycleTime(g_target, &cycles)) {
+            /* Suspending the thread charges it a little kernel work: count
+             * it as running when it used about a hundredth of the interval
+             * (30 of the 3000 cycles per microsecond of a 3 GHz core). */
+            ran = cycles - g_last_cycles > (ULONG64)g_interval_us * 30;
+            g_last_cycles = cycles;
+        }
+        if (ran && GetThreadContext(g_target, &c)) record(&c);
+        else if (!ran) g_skipped++;
         ResumeThread(g_target);
     }
     timeEndPeriod(1);
@@ -111,6 +130,8 @@ static DWORD WINAPI sampler_main(LPVOID arg) {
 void cyber_sampler_start(void) {
     const char *p = getenv("CYBER_SAMPLE");
     if (!p || !p[0] || g_thread) return;
+    const char *cpu = getenv("CYBER_SAMPLE_CPU");
+    g_cpu_only = cpu && cpu[0] && cpu[0] != '0';
     const char *us = getenv("CYBER_SAMPLE_US");
     if (us && atoi(us) > 0) g_interval_us = (unsigned)atoi(us);
     const char *max_ms = getenv("CYBER_SAMPLE_MAX_MS");

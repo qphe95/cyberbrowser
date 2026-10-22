@@ -1336,6 +1336,8 @@ GCValue JS_NewObjectProto(JSContextHandle ctx, GCValue proto);
 GCValue JS_NewObject(JSContextHandle ctx);
 
 JS_BOOL JS_IsFunction(JSContextHandle ctx, GCValue val);
+/* Debugging: "file:line:col" where bytecode function func is defined. */
+JS_BOOL JS_GetFunctionOrigin(JSContextHandle ctx, GCValue func, char *buf, size_t len);
 JS_BOOL JS_IsConstructor(JSContextHandle ctx, GCValue val);
 JS_BOOL JS_SetConstructorBit(JSContextHandle ctx, GCValue func_obj, JS_BOOL val);
 

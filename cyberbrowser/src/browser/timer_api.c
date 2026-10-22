@@ -355,6 +355,61 @@ void timer_set_idle_deadline(unsigned long long deadline_ms) {
     g_idle_deadline_ms = deadline_ms;
 }
 
+/* CYBER_TIMER_STATS=1: timer callbacks by where they are defined (calls,
+ * wall time, timer type), the busiest printed at exit. */
+#define TSTAT_MAX 4096
+typedef struct { char key[200]; int type; uint64_t calls; double ms; } TimerStat;
+static TimerStat *g_tstats;
+static int g_tstat_n;
+
+static int tstat_cmp(const void *a, const void *b) {
+    double x = ((const TimerStat *)a)->ms, y = ((const TimerStat *)b)->ms;
+    return x < y ? 1 : x > y ? -1 : 0;
+}
+
+static void tstat_dump(void) {
+    static const char *types[] = { "timeout", "interval", "raf", "idle" };
+    qsort(g_tstats, (size_t)g_tstat_n, sizeof(TimerStat), tstat_cmp);
+    uint64_t calls = 0;
+    double ms = 0;
+    for (int i = 0; i < g_tstat_n; i++) { calls += g_tstats[i].calls; ms += g_tstats[i].ms; }
+    fprintf(stderr, "[timers] %llu callbacks, %.1f ms, %d sites\n", (unsigned long long)calls, ms, g_tstat_n);
+    for (int i = 0; i < g_tstat_n && i < 30; i++)
+        fprintf(stderr, "[timers] %7.1f ms %6llu calls %-8s %s\n", g_tstats[i].ms,
+                (unsigned long long)g_tstats[i].calls,
+                g_tstats[i].type >= 0 && g_tstats[i].type < 4 ? types[g_tstats[i].type] : "?", g_tstats[i].key);
+}
+
+static TimerStat *tstat_for(JSContextHandle ctx, GCValue callback, int type) {
+    static int on = -1;
+    if (on < 0) {
+        on = cyber_getenv("CYBER_TIMER_STATS") ? 1 : 0;
+        if (on && (g_tstats = (TimerStat *)calloc(TSTAT_MAX, sizeof(TimerStat)))) atexit(tstat_dump);
+        else on = 0;
+    }
+    if (!on) return NULL;
+    char key[200];
+    if (!JS_GetFunctionOrigin(ctx, callback, key, sizeof(key))) {
+        GCValue nm = JS_GetPropertyStr(ctx, callback, "name");
+        const char *s = JS_IsString(nm) ? JS_ToCString(ctx, nm) : NULL;
+        snprintf(key, sizeof(key), "native %s", s && s[0] ? s : "?");
+        if (s) JS_FreeCString(ctx, s);
+    }
+    for (int i = 0; i < g_tstat_n; i++)
+        if (g_tstats[i].type == type && strcmp(g_tstats[i].key, key) == 0) return &g_tstats[i];
+    if (g_tstat_n == TSTAT_MAX) return NULL;
+    TimerStat *t = &g_tstats[g_tstat_n++];
+    snprintf(t->key, sizeof(t->key), "%s", key);
+    t->type = type;
+    return t;
+}
+
+static double tstat_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
+}
+
 // Execute a timer callback by ID
 void execute_timer(JSContextHandle ctx, int id) {
     CP_ACC("timer callback");
@@ -421,7 +476,10 @@ void execute_timer(JSContextHandle ctx, int id) {
         }
         
         GCValue global_obj = JS_GetGlobalObject(ctx);
+        TimerStat *ts = tstat_for(ctx, callback, (int)timer->type);
+        double ts0 = ts ? tstat_now_ms() : 0;
         GCValue result = JS_Call(ctx, callback, global_obj, arg_count, args);
+        if (ts) { ts->calls++; ts->ms += tstat_now_ms() - ts0; }
         if (JS_IsException(result)) {
             GCValue exc = JS_GetException(ctx);
             const char *exc_str = JS_ToCString(ctx, exc);
@@ -643,6 +701,9 @@ GCValue js_clear_interval(JSContextHandle ctx, GCValue this_val, int argc, GCVal
     return JS_UNDEFINED;
 }
 
+/* The frame interval of requestAnimationFrame, in page time. */
+#define RAF_FRAME_MS 16ull
+
 // requestAnimationFrame(callback)
 GCValue js_request_animation_frame(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
@@ -651,8 +712,14 @@ GCValue js_request_animation_frame(JSContextHandle ctx, GCValue this_val, int ar
         return JS_NewInt32(ctx, 0);
     }
     
-    // RAF typically fires at 60fps (~16.67ms), but we use 0 for immediate execution
-    int id = add_timer(ctx, TIMER_TYPE_RAF, argv[0], 0, 0, NULL);
+    /* Frames come every 16 ms of page time: the callback runs at the next
+     * frame, with every other callback requested before it.  (A delay of 0
+     * ran a page's frame loop on every event-loop turn: YouTube's scheduler
+     * ran 10,000 frames in one load.)  Virtual time skips to the frame when
+     * the page is otherwise idle. */
+    unsigned long long now = page_time_ms();
+    unsigned long long frame = (now / RAF_FRAME_MS + 1) * RAF_FRAME_MS;
+    int id = add_timer(ctx, TIMER_TYPE_RAF, argv[0], frame - now, 0, NULL);
     return JS_NewInt32(ctx, id);
 }
 
