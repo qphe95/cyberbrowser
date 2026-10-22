@@ -5800,6 +5800,23 @@ static int js_obj_props_resize(JSObjectHandle p, uint32_t new_size)
     return 0;
 }
 
+/* A shape was reallocated from old_sh to new_sh (a realloc may move it to a
+ * new handle, as it will once references are addresses).  Only unhashed
+ * shapes are resized, and they have one owner: object p, or the field
+ * *psh_handle points to.  Point the owner and the shape's own handle field
+ * at the new home.  Returns new_sh. */
+static GCHandle js_shape_rehome(JSObjectHandle p, GCHandle *psh_handle, GCHandle old_sh, GCHandle new_sh)
+{
+    if (new_sh == old_sh)
+        return new_sh;
+    SAFE_SET_HANDLE((JSShapeHandle)new_sh, JSShapeHandle, handle, new_sh);
+    if (psh_handle && *psh_handle == old_sh)
+        GC_SET(*psh_handle, new_sh);
+    if (SAFE_VALID(p) && js_obj_shape_handle(p) == old_sh)
+        js_obj_set_shape_handle(p, new_sh);
+    return new_sh;
+}
+
 static no_inline int resize_properties(JSContextHandle ctx, GCHandle *psh_handle,
                                        JSObjectHandle p, uint32_t count)
 {
@@ -5831,9 +5848,13 @@ static no_inline int resize_properties(JSContextHandle ctx, GCHandle *psh_handle
      * into freed memory and the live shape keeps a zeroed hash table (every
      * subsequent property lookup on it fails). */
     uint32_t old_hash_size = SAFE_GET_OR(sh, JSShapeHandle, prop_hash_mask, 0) + 1;
-    if (gc_realloc(sh_handle, get_shape_size(new_hash_size, new_size)) == GC_HANDLE_NULL) {
-        js_object_end_resize(p);
-        return -1;
+    {
+        GCHandle nsh = gc_realloc(sh_handle, get_shape_size(new_hash_size, new_size));
+        if (nsh == GC_HANDLE_NULL) {
+            js_object_end_resize(p);
+            return -1;
+        }
+        sh_handle = js_shape_rehome(p, psh_handle, sh_handle, nsh);
     }
     sh = GC_SHAPE_DEREF(sh_handle);
     
@@ -5979,9 +6000,13 @@ static int compact_properties(JSContextHandle ctx, JSObjectHandle p)
 
     /* Now safe to reallocate: all live properties are in the first j slots
      * and j <= new_size, so gc_realloc's copy will not lose data. */
-    if (gc_realloc(sh_handle, get_shape_size(new_hash_size, new_size)) == GC_HANDLE_NULL) {
-        js_object_end_resize(p);
-        return -1;
+    {
+        GCHandle nsh = gc_realloc(sh_handle, get_shape_size(new_hash_size, new_size));
+        if (nsh == GC_HANDLE_NULL) {
+            js_object_end_resize(p);
+            return -1;
+        }
+        sh_handle = js_shape_rehome(p, NULL, sh_handle, nsh);
     }
 
     /* Re-dereference shape after realloc since memory may have moved */
@@ -20095,10 +20120,8 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
     p = JS_VALUE_GET_OBJ(func_obj);
     if (unlikely(SAFE_GET_OR(p, JSObjectHandle, class_id, 0) != JS_CLASS_BYTECODE_FUNCTION)) {
         rt2 = ctx_rt;
-        if (unlikely(g_handle_history != NULL) &&
-            (!gc_deref(p) || gc_handle_get_type(p) != JS_GC_OBJ_TYPE_JS_OBJECT ||
-             SAFE_GET_OR(p, JSObjectHandle, class_id, 0) >= (unsigned)SAFE_GET_OR(ctx_rt, JSRuntimeHandle, class_count, 0)))
-            gc_debug_report_stale_handle(p, "call of a handle that is no JS object");
+        if (unlikely(g_handle_history != NULL) && !gc_deref(p))
+            gc_debug_report_stale_handle(p, "call");
         call_func = ((JSClass*)rt_class_array)[SAFE_GET_OR(p, JSObjectHandle, class_id, 0)].call;
         if (!call_func) {
         not_a_function:

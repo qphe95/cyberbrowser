@@ -584,6 +584,21 @@ GCHandle gc_realloc(GCHandle handle, size_t new_size) {
     size_t old_size = gc_header_payload_size(old_hdr);
     GCRegion *orr = gc_core_region_of(old_hdr);
     bool young = g_core.nursery_enabled && orr && orr->space == GC_RS_NURSERY;
+    /* Debug (QJS_GC_REALLOC_MOVES=1): return a new handle and free the old
+     * one, as a realloc will once references are addresses, so a caller
+     * that keeps using the old handle shows up (with QJS_GC_NO_REUSE the
+     * old handle dereferences to NULL). */
+    static int moves = -1;
+    if (moves < 0) moves = getenv("QJS_GC_REALLOC_MOVES") != NULL;
+    if (moves) {
+        bool perm = orr && orr->permanent;
+        GCHandle nh = gc_alloc_in(new_size, type, !young || perm, perm);
+        void *np = gc_deref(nh);
+        memcpy(np, old_ptr, old_size < new_size ? old_size : new_size);
+        gc_dirty_range(np, old_size < new_size ? old_size : new_size);
+        gc_free(handle);
+        return nh;
+    }
     GCAllocCtx *a = orr && orr->permanent ? &g_core.js_perm : young ? &g_core.js_young : &g_core.js_old;
     GCHeader *hdr = gc_core_alloc_object_memory(a, new_size, type);
     if (!hdr) {
