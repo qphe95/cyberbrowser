@@ -211,6 +211,7 @@ static LONG WINAPI unhandled_exception_filter(EXCEPTION_POINTERS *ep) {
         USHORT n = RtlCaptureStackBackTrace(0, 32, frames, NULL);
         fprintf(stderr, "[FATAL] backtrace (%d frames):\n", (int)n);
         for (USHORT i = 0; i < n; i++) fprintf(stderr, "  #%2d %p\n", (int)i, frames[i]);
+        fflush(stdout);
         fflush(stderr);
     }
     return EXCEPTION_EXECUTE_HANDLER;
@@ -490,8 +491,11 @@ static bool pump_event_loop(JSContextHandle ctx, bool wait) {
         unsigned long long idle_deadline = page_time_ms() + 8;
         timer_set_idle_deadline(idle_deadline);
 
-        /* Top of an event-loop turn: a tick boundary. */
+        /* Top of an event-loop turn: a tick boundary, and where the
+         * buffered diagnostics go out. */
         gc_tick();
+        fflush(stdout);
+        fflush(stderr);
         /* Images that finished loading: their load events are tasks of
          * this turn (before the timers, which are due later). */
         int images = g_loop_images && image_cache_process_pending(g_loop_images) ? 1 : 0;
@@ -1056,11 +1060,13 @@ static bool render_document_to_jpg(HtmlDocument *doc, ImageCache *image_cache,
 }
 
 int main(int argc, char *argv[]) {
-    /* Diagnostics on stderr are buffered (unbuffered, MinGW's printf writes
-     * it a few bytes per system call: a fifth of a second per YouTube load)
-     * and flushed at the top of every event-loop turn, by the crash handler
-     * and at exit: a process killed from outside loses at most one turn. */
+    /* Diagnostics on stderr and progress on stdout are buffered (unbuffered,
+     * MinGW's printf writes a few bytes per system call: half a second of a
+     * YouTube load for stdout's 1.5 KB) and flushed at the top of every
+     * event-loop turn, by the crash handler and at exit: a process killed
+     * from outside loses at most one turn. */
     setvbuf(stderr, NULL, _IOFBF, 1 << 16);
+    setvbuf(stdout, NULL, _IOFBF, 1 << 16);
     /* Start URL: argv[1] wins, then CYBER_START_URL, then the compiled-in
      * default (Wikipedia).  The YouTube-specific shims below only run when the
      * resolved URL is a YouTube page. */
@@ -1076,8 +1082,6 @@ int main(int argc, char *argv[]) {
 #ifdef _WIN32
     SetUnhandledExceptionFilter(unhandled_exception_filter);
 #endif
-
-    setvbuf(stdout, NULL, _IONBF, 0);
 
     /* Fast JS-engine probe: eval a file and exit (CYBER_PROBE_JS=/path/to.js).
      * Optional CYBER_PROBE_NO_LAZY=1 forces full (non-lazy) parsing. */
