@@ -354,6 +354,7 @@ static bool bcheck_is_ref_handle(uint32_t w) {
 /* Page `page` (4 KB) was written with its card clean: report reference
  * words that changed outside new objects, then refresh its shadow. */
 static void bcheck_page(uintptr_t page, bool card_clean) {
+    if (gc_core_page_is_off((const void *)page)) return;   /* given back: nothing to read */
     size_t off = page - (uintptr_t)g_gc.heap_base;
     size_t chunk = off >> 16;
     uint8_t *shadow = g_bshadow + off;
@@ -877,6 +878,17 @@ static bool remark(JSRuntimeHandle rt) {
  * GC thread: sweeping
  * ============================================================================ */
 
+/* Major cycles also run when the heap has grown by its live size (at least
+ * major_trigger) since the last one: without moving, garbage in old regions
+ * only turns into holes at major cycles. */
+static size_t g_live_after_major, g_committed_after_major;   /* GC thread */
+static size_t g_swept_live;                                    /* GC thread: the last sweep's live bytes */
+
+static size_t committed_bytes(void) {
+    return (size_t)atomic_load(&g_core.regions_in_use) * GC_REGION_SIZE -
+           (size_t)atomic_load(&g_core.pages_decommitted) * GC_OS_PAGE_SIZE;
+}
+
 static void sweep_concurrent(int kind) {
     uint32_t hwm = atomic_load(&g_core.region_hwm);
     uint32_t n_released = 0, n_offered = 0, n_kept = 0;
@@ -935,6 +947,7 @@ static void sweep_concurrent(int kind) {
     if (g_core.log_level)
         fprintf(stderr, "[GC]   %s sweep: %u regions released, %u offered (%.1f MB in holes), %u kept; %.1f MB live\n",
                 kind == GC_CYCLE_MINOR ? "minor" : "major", n_released, n_offered, hole_bytes / 1048576.0, n_kept, live_bytes / 1048576.0);
+    g_swept_live = live_bytes;
     atomic_store_explicit(&g_core.cycle_active, false, memory_order_release);
 }
 
@@ -1021,18 +1034,22 @@ static void run_cycle(int kind) {
         g_core.stats.minor_cycles++;
     } else {
         g_promoted_since_major = 0;
+        g_live_after_major = g_swept_live;
+        g_committed_after_major = committed_bytes();
         g_core.stats.major_cycles++;
     }
 finish:
     if (kind == GC_CYCLE_MINOR) retire_remset(!aborted());
     end_concurrent_cycle();
     GC_LOG("[GC] %s cycle: mark %.2f ms, remark %.2f ms, sweep %.2f ms, evacuate %.2f ms; "
-           "cards %llu, heap %u regions\n",
+           "cards %llu, heap %u regions, %.0f MB committed\n",
            kind == GC_CYCLE_MINOR ? "minor" : "major",
            (t_mark - t_start) / 1e6, (t_remark - t_mark) / 1e6, (t_sweep - t_remark) / 1e6,
            (gc_os_now_ns() - t_sweep) / 1e6,
            (unsigned long long)(g_core.stats.dirty_cards_rescanned - cards0),
-           atomic_load(&g_core.regions_in_use));
+           atomic_load(&g_core.regions_in_use),
+           (atomic_load(&g_core.regions_in_use) * (double)GC_REGION_SIZE -
+            atomic_load(&g_core.pages_decommitted) * (double)GC_OS_PAGE_SIZE) / 1048576.0);
     return;
 abandon:
     /* Marking was not finished: nothing has been freed or moved.  The JS
@@ -1060,6 +1077,8 @@ static void gc_thread_main(void *arg) {
             t = atomic_exchange_explicit(&g_conc.trigger, 0, memory_order_acq_rel);
             if (!t && g_core.config.stress) t = TRIG_MINOR | TRIG_MAJOR;
             if (g_promoted_since_major >= g_core.config.major_trigger) t |= TRIG_MAJOR;
+            size_t growth = g_live_after_major > g_core.config.major_trigger ? g_live_after_major : g_core.config.major_trigger;
+            if (committed_bytes() >= g_committed_after_major + growth) t |= TRIG_MAJOR;
         }
         if (!t || atomic_load_explicit(&g_conc.abort, memory_order_acquire)) {
             if (t) atomic_fetch_or(&g_conc.trigger, t);

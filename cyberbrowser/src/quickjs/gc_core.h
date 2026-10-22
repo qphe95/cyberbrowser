@@ -60,6 +60,10 @@ typedef struct GCRegion {
      * next mark start. */
     uint64_t *new_lines;
     _Atomic bool has_new_lines;
+    /* Pages inside holes given back to the OS (one bit each): zero once
+     * committed again, which entering the hole does. */
+    uint64_t pages_off[(GC_REGION_SIZE / GC_OS_PAGE_SIZE + 63) / 64];
+    uint32_t pages_off_n;
     bool in_recyclable;               /* listed in g_core.recyclable (under its lock) */
 } GCRegion;
 
@@ -129,6 +133,7 @@ typedef struct GCCore {
     uint32_t region_hint;
     _Atomic uint32_t regions_in_use;
     _Atomic uint32_t regions_committed;
+    _Atomic uint32_t pages_decommitted;   /* hole pages given back, over all regions */
     void *heap_reservation;
 
     GCAllocCtx js_young;   /* JS thread: nursery */
@@ -194,6 +199,7 @@ void gc_core_offer_recyclable(GCRegion *r);
  * allocated during the running cycle; clear every flag (next mark start). */
 void gc_core_flag_new_lines(GCRegion *r, uint32_t from, uint32_t to);
 void gc_core_flag_context_holes(void);
+bool gc_core_page_is_off(const void *p);
 void gc_core_clear_new_lines(void);
 /* Mark a copy made under an existing handle as old (gc_collector.c). */
 void gc_col_mark_copy(GCHeader *hdr);

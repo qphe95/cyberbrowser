@@ -364,9 +364,13 @@ void gc_core_region_release(GCRegion *r) {
         x->permanent = false;
         x->live_bytes = 0;
         x->alloc_owner = GC_OWNER_NONE;
-        if (g_core.poison) {
+        if (g_core.poison || x->pages_off_n) {
+            /* Pages inside its holes were given back: give back all of it. */
             gc_os_decommit(gc_core_region_start(x), GC_REGION_SIZE);
             x->decommitted = true;
+            atomic_fetch_sub_explicit(&g_core.pages_decommitted, x->pages_off_n, memory_order_relaxed);
+            memset(x->pages_off, 0, sizeof(x->pages_off));
+            x->pages_off_n = 0;
         } else if (x->used_before) {
             /* Zero what was used now, on the thread that releases it (the
              * collector's, when concurrent), instead of the whole region
@@ -406,6 +410,77 @@ static inline void write_filler(uintptr_t p, size_t total) {
 }
 
 static inline uint32_t line_of(uintptr_t lb, uintptr_t p) { return (uint32_t)((p - lb) >> GC_LINE_SHIFT); }
+
+/* ---- Hole pages given back to the OS ----
+ *
+ * The whole pages strictly inside a hole are decommitted when it is
+ * formatted.  The page holding the hole's first header stays: walkers read
+ * that (zero) header, and go past the hole with the line bytes alone.
+ * Entering the hole commits its pages again, zeroed by the OS. */
+
+static inline uint32_t page_of(const GCRegion *r, uintptr_t p) {
+    return (uint32_t)((p - (uintptr_t)gc_core_region_start(r)) / GC_OS_PAGE_SIZE);
+}
+
+static inline bool page_off(const GCRegion *r, uint32_t pg) {
+    return (r->pages_off[pg >> 6] >> (pg & 63)) & 1;
+}
+
+/* Zero [lo, hi) of a hole, skipping the pages given back (zero already). */
+static void zero_hole(GCRegion *r, uintptr_t lo, uintptr_t hi) {
+    while (lo < hi) {
+        uintptr_t page_end = (lo & ~(uintptr_t)(GC_OS_PAGE_SIZE - 1)) + GC_OS_PAGE_SIZE;
+        uintptr_t e = page_end < hi ? page_end : hi;
+        if (!r->pages_off_n || !page_off(r, page_of(r, lo))) memset((void *)lo, 0, e - lo);
+        lo = e;
+    }
+}
+
+/* Give back the whole pages strictly inside hole [hs, he), in runs. */
+static void decommit_hole_pages(GCRegion *r, uintptr_t hs, uintptr_t he) {
+    uintptr_t base = (uintptr_t)gc_core_region_start(r);
+    uint32_t p0 = page_of(r, hs) + 1, p1 = page_of(r, he);
+    for (uint32_t pg = p0; pg < p1;) {
+        if (page_off(r, pg)) { pg++; continue; }
+        uint32_t q = pg;
+        while (q < p1 && !page_off(r, q)) {
+            r->pages_off[q >> 6] |= (uint64_t)1 << (q & 63);
+            q++;
+        }
+        gc_os_decommit((void *)(base + (uintptr_t)pg * GC_OS_PAGE_SIZE), (size_t)(q - pg) * GC_OS_PAGE_SIZE);
+        r->pages_off_n += q - pg;
+        atomic_fetch_add_explicit(&g_core.pages_decommitted, q - pg, memory_order_relaxed);
+        pg = q;
+    }
+}
+
+/* Commit again the pages of [lo, hi) that were given back. */
+static void commit_hole_pages(GCRegion *r, uintptr_t lo, uintptr_t hi) {
+    if (!r->pages_off_n) return;
+    uintptr_t base = (uintptr_t)gc_core_region_start(r);
+    uint32_t p0 = page_of(r, lo), p1 = page_of(r, hi - 1) + 1;
+    for (uint32_t pg = p0; pg < p1;) {
+        if (!page_off(r, pg)) { pg++; continue; }
+        uint32_t q = pg;
+        while (q < p1 && page_off(r, q)) {
+            r->pages_off[q >> 6] &= ~((uint64_t)1 << (q & 63));
+            q++;
+        }
+        if (!gc_os_commit((void *)(base + (uintptr_t)pg * GC_OS_PAGE_SIZE), (size_t)(q - pg) * GC_OS_PAGE_SIZE)) {
+            fprintf(stderr, "[GC] out of memory (committing hole pages)\n");
+            abort();
+        }
+        r->pages_off_n -= q - pg;
+        atomic_fetch_sub_explicit(&g_core.pages_decommitted, q - pg, memory_order_relaxed);
+        pg = q;
+    }
+}
+
+/* A page of the heap was given back (debug checks that read pages). */
+bool gc_core_page_is_off(const void *p) {
+    GCRegion *r = gc_core_region_of(p);
+    return r && r->pages_off_n && page_off(r, page_of(r, (uintptr_t)p));
+}
 
 typedef struct { uintptr_t start, end; bool live; } HoleExtent;
 static HoleExtent *g_hole_ext;   /* sweeper-private scratch */
@@ -467,7 +542,8 @@ size_t gc_core_format_holes(GCRegion *r) {
         }
         /* Allocations come zeroed: so does the hole, here on the sweeping
          * thread rather than the allocating one. */
-        memset((void *)hs, 0, he - hs);
+        zero_hole(r, hs, he);
+        decommit_hole_pages(r, hs, he);
         /* Marks stick between cycles (marked = old): objects allocated here
          * must start unmarked. */
         for (uint32_t g = gc_core_granule_of(r, (void *)hs), ge = gc_core_granule_of(r, (void *)he); g < ge; g++) {
@@ -586,6 +662,8 @@ static bool find_hole(const GCRegion *r, uint32_t from, size_t min, uint32_t *pi
  * lines are no longer free for anyone else. */
 static void enter_hole(GCAllocCtx *a, uint32_t i, uint32_t j) {
     GCRegion *r = a->region;
+    commit_hole_pages(r, gc_core_line_base(r) + ((uintptr_t)i << GC_LINE_SHIFT),
+                      gc_core_line_base(r) + ((uintptr_t)j << GC_LINE_SHIFT));
     for (uint32_t l = i; l < j; l++) r->free_lines[l >> 6] &= ~((uint64_t)1 << (l & 63));
     a->top = (uint8_t *)(gc_core_line_base(r) + ((uintptr_t)i << GC_LINE_SHIFT));
     a->end = (uint8_t *)(gc_core_line_base(r) + ((uintptr_t)j << GC_LINE_SHIFT));
