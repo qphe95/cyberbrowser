@@ -313,6 +313,7 @@ typedef struct GCState {
     JSHandleArray weakmap_handles;
     JSHandleArray weakref_handles;
     JSHandleArray finrec_handles;
+    JSHandleArray viewed_buffers;     /* ArrayBuffer data with views (pruned in the weak step) */
 } GCState;
 
 extern GCState g_gc;
@@ -663,7 +664,7 @@ typedef struct GCConfig {
     uint32_t boundary_budget_us;  /* time budget of one boundary step */
     size_t nursery_size;          /* bytes allocated young before a minor cycle */
     size_t major_trigger;         /* old-space growth that starts a major cycle */
-    bool verify;                  /* debug: verify every cycle against a full re-mark */
+    uint8_t verify;               /* debug: verify every cycle against a full re-mark (2: also bare handles in raw data) */
     uint32_t stress;              /* testing: 1 = run cycles back to back, 2 = also move dense regions */
     uint32_t reject;              /* testing: GC_REJECT_* */
 } GCConfig;

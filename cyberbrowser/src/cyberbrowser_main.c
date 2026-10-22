@@ -1104,6 +1104,7 @@ int main(int argc, char *argv[]) {
     }
     printf("platform_init ok\n");
     cyber_sampler_start();
+    cyber_heapcheck_start();
     if (!platform_http_init()) {
         printf("FATAL: platform_http_init() failed\n");
         platform_cleanup();

@@ -43,7 +43,8 @@ void gc_core_config_defaults(void) {
     c->boundary_budget_us = 500;
     c->nursery_size = 4u << 20;
     c->major_trigger = 32u << 20;
-    c->verify = getenv("QJS_GC_VERIFY") != NULL;
+    const char *vf = getenv("QJS_GC_VERIFY");
+    c->verify = !vf ? 0 : atoi(vf) >= 2 ? 2 : 1;
     c->stress = 0;
     const char *bg = getenv("QJS_GC_BACKGROUND");
     if (bg) c->background = atoi(bg) != 0;

@@ -513,6 +513,28 @@ TEST(test_gc_async_closure_keeps_args_after_return) {
     return true;
 }
 
+/* An ArrayBuffer lists its views without keeping them alive and updates
+ * them when it is detached (or resized).  Views that died must leave the
+ * list before they are freed, or the update writes into freed memory. */
+TEST(test_gc_buffer_detach_after_views_died) {
+    JSContextHandle ctx = get_gc_test_ctx();
+    if (!SAFE_VALID(ctx)) { printf("    (skipped - no context)"); return true; }
+    GCValue r = eval_test(ctx,
+        "globalThis.__db = new ArrayBuffer(64);"
+        "globalThis.__db_keep = new Uint8Array(__db);"
+        "(function () { for (var i = 0; i < 2000; i++) new Uint8Array(__db, i % 32, 8); })(); 1");
+    (void)r;
+    for (int round = 0; round < 4; round++) {
+        eval_test(ctx, "(function(){ var g = []; for (var i = 0; i < 20000; i++) g.push({ x: 'garbage' + i }); return g.length; })()");
+        JS_RunGC(JS_GetRuntime(ctx));
+    }
+    ASSERT_TRUE(eval_expect_ok(ctx,
+        "(function () { var moved = __db.transfer();"
+        "  return __db_keep.length === 0 && moved.byteLength === 64 ? 'ok' : 'length ' + __db_keep.length; })()"));
+    ASSERT_EQ(0, (int)gc_test_heap_check());
+    return true;
+}
+
 /* The frame chain must be unlinked when a generator yields; otherwise the
  * next call links back to the suspended frame and the chain becomes a cycle
  * (the collector then never finishes walking it, and direct eval asserts). */
@@ -1984,6 +2006,7 @@ void run_gc_tests(void) {
     /* After the cycle-count tests: these grow old space. */
     RUN_TEST(test_gc_async_frame_survives_await);
     RUN_TEST(test_gc_async_closure_keeps_args_after_return);
+    RUN_TEST(test_gc_buffer_detach_after_views_died);
     RUN_TEST(test_gc_async_frames_during_concurrent_cycles);
     RUN_TEST(test_gc_weakmap_values_survive_full_cycles);
     RUN_TEST(test_gc_weakmap_values_survive_concurrent_cycles);

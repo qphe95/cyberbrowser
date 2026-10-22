@@ -2170,6 +2170,7 @@ void JS_FreeRuntime(JSRuntimeHandle rt)
     g_gc.weakmap_handles.count = 0;
     g_gc.weakref_handles.count = 0;
     g_gc.finrec_handles.count = 0;
+    g_gc.viewed_buffers.count = 0;
     
     /* Typed handle arrays are freed in gc_cleanup() */
 
@@ -7187,7 +7188,22 @@ static void js_for_in_iterator_mark(JSRuntimeHandle rt, GCValue val,
 {
     JSObjectHandle p = JS_VALUE_GET_OBJ(val);
     JSForInIteratorHandle it = SAFE_GET_OR(p, JSObjectHandle, u.for_in_iterator_handle, GC_HANDLE_NULL);
+    if (it == GC_HANDLE_NULL) return;
     JS_MarkValue(rt, SAFE_GET_OR(it, JSForInIteratorHandle, obj, GC_UNDEFINED), mark_func);
+    /* The iterator data is a raw object: its property list (and the atoms
+     * in it, as a shape's) are marked here. */
+    GCHandle tab = SAFE_GET_OR(it, JSForInIteratorHandle, tab_atom_handle, GC_HANDLE_NULL);
+    if (tab == GC_HANDLE_NULL) return;
+    mark_func(rt, tab);
+    JSPropertyEnum *tab_atom = (JSPropertyEnum *)gc_deref(tab);
+    int n = gc_clamp_count((int)SAFE_GET_OR(it, JSForInIteratorHandle, atom_count, 0),
+                           gc_slots(tab, 0, sizeof(JSPropertyEnum)));
+    for (int i = 0; i < n; i++) {
+        JSAtom atom = tab_atom[i].atom;
+        if (atom == JS_ATOM_NULL || __JS_AtomIsTaggedInt(atom)) continue;
+        JSStringHandle s = js_atom_array_get(rt, atom);
+        if (s != GC_HANDLE_NULL) mark_func(rt, s);
+    }
 }
 
 /* garbage collection */
@@ -7759,6 +7775,33 @@ void JS_MarkActiveStackFrames(JSRuntimeHandle rt, JS_MarkFunc *mark_func)
     }
 }
 
+/* Classes whose data holds references that are weak by design (the GC
+ * verifier skips them). */
+bool JS_GCClassIsWeak(int class_id)
+{
+    return class_id == JS_CLASS_WEAKMAP || class_id == JS_CLASS_WEAKSET ||
+           class_id == JS_CLASS_WEAK_REF || class_id == JS_CLASS_FINALIZATION_REGISTRY;
+}
+
+/* How many leading bytes of raw object data, owned by object owner, hold
+ * values the owner marks: an array's storage past its length keeps stale
+ * values (SIZE_MAX: all of it). */
+size_t JS_GCDataLiveBytes(GCHandle owner, GCHandle data)
+{
+    if (gc_handle_get_type(owner) != JS_GC_OBJ_TYPE_JS_OBJECT) return SIZE_MAX;
+    JSObjectHandle p = owner;
+    int class_id = SAFE_GET_OR(p, JSObjectHandle, class_id, 0);
+    if ((class_id == JS_CLASS_ARRAY || class_id == JS_CLASS_ARGUMENTS) &&
+        SAFE_GET_OR(p, JSObjectHandle, u.array.u.values_handle, GC_HANDLE_NULL) == data)
+        return (size_t)SAFE_GET_OR(p, JSObjectHandle, u.array.count, 0) * sizeof(GCValue);
+    /* Property storage: the shape's properties (the rest is capacity). */
+    if (js_obj_prop_handle(p) == data) {
+        JSShapeHandle sh = js_obj_shape_handle(p);
+        return (size_t)SAFE_GET_OR(sh, JSShapeHandle, prop_count, 0) * sizeof(JSProperty);
+    }
+    return SIZE_MAX;
+}
+
 /* Roots the engine keeps outside GC objects: the pending exception, the
  * pending jobs and the atom array. */
 void JS_GCEnumerateEngineRoots(JSRuntimeHandle rt, JS_MarkFunc *mark_func)
@@ -7909,6 +7952,36 @@ static void gc_weak_registry_drop_dead(JSHandleArray *arr)
     arr->count = j;
 }
 
+/* An ArrayBuffer lists its views (JSArrayBuffer.typed_arrays) without
+ * keeping them alive, and updates them when it is resized or detached.
+ * Drop the views the cycle condemned before the sweep frees them, and the
+ * lists of condemned buffers. */
+static void gc_weak_prune_buffer_views(void)
+{
+    JSHandleArray *arr = &g_gc.viewed_buffers;
+    uint32_t j = 0;
+    for (uint32_t i = 0; i < arr->count; i++) {
+        GCHandle abuf = arr->handles[i];
+        if (!gc_handle_array_entry_is_valid(abuf) || !gc_handle_live(abuf)) continue;
+        GCHandleList *views = js_abuf_typed_arrays(abuf);
+        if (gc_object_is_dead(abuf)) {
+            gc_handle_list_clear_and_free(views);
+            continue;
+        }
+        int n = 0;
+        for (int k = 0; k < views->count; k++) {
+            GCHandle ta = views->data[k];
+            if (!gc_handle_live(ta) || gc_object_is_dead(ta)) continue;
+            GCHandle obj = SAFE_GET_OR(ta, JSTypedArrayHandle, obj_handle, GC_HANDLE_NULL);
+            if (!gc_handle_live(obj) || gc_object_is_dead(obj)) continue;
+            views->data[n++] = ta;  /* gc-no-dirty: malloc'd list */
+        }
+        views->count = n;
+        if (n) arr->handles[j++] = abuf;
+    }
+    arr->count = j;
+}
+
 static void gc_weak_registries_drop_dead(void)
 {
     gc_weak_registry_drop_dead(&g_gc.weakmap_handles);
@@ -7918,6 +7991,7 @@ static void gc_weak_registries_drop_dead(void)
 
 void JS_GCWeakStep(JSRuntimeHandle rt)
 {
+    gc_weak_prune_buffer_views();
     gc_weak_registries_drop_dead();
     gc_remove_weak_objects(rt);
     gc_cleanup_shape_hash_table(rt);
@@ -8014,6 +8088,7 @@ void JS_GCWeakApply(JSRuntimeHandle rt, void *cleaned_shapes,
     }
     for (uint32_t i = 0; i < counts[2]; i++)
         if (SAFE_VALID(lists[2][i]) && !gc_object_is_dead(lists[2][i])) finrec_delete_weakref(rt, lists[2][i]);
+    gc_weak_prune_buffer_views();
     gc_weak_registries_drop_dead();
 }
 
@@ -64576,6 +64651,10 @@ static int typed_array_init(JSContextHandle ctx, GCValue obj,
     SAFE_SET(ta, JSTypedArrayHandle, offset, offset);
     SAFE_SET(ta, JSTypedArrayHandle, length, len << size_log2);
     SAFE_SET(ta, JSTypedArrayHandle, track_rab, track_rab);
+    /* The list holds views weakly: the weak step drops dead ones
+     * (gc_weak_prune_buffer_views). */
+    if (js_abuf_typed_arrays(abuf)->count == 0)
+        gc_handle_array_add(&g_gc.viewed_buffers, abuf);
     gc_handle_list_push(js_abuf_typed_arrays(abuf), ta_handle);
     SAFE_SET_HANDLE(p, JSObjectHandle, u.typed_array_handle, ta_handle);
     SAFE_SET(p, JSObjectHandle, u.array.count, len);

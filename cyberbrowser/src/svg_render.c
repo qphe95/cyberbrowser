@@ -5,16 +5,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* PlutoSVG keeps pointers into the source, so documents parse a copy. */
+/* PlutoSVG keeps pointers into the source, so documents parse a copy.  The
+ * document owns it from here: a failed parse destroys the document, which
+ * frees the copy. */
 static plutosvg_document_t *load(const char *data, size_t len)
 {
     if (!data || !len || len > 0x7fffffff) return NULL;
     char *copy = (char *)malloc(len);
     if (!copy) return NULL;
     memcpy(copy, data, len);
-    plutosvg_document_t *doc = plutosvg_document_load_from_data(copy, (int)len, -1.0f, -1.0f, free, copy);
-    if (!doc) free(copy);
-    return doc;
+    return plutosvg_document_load_from_data(copy, (int)len, -1.0f, -1.0f, free, copy);
 }
 
 bool svg_intrinsic_size(const char *data, size_t len, float *w, float *h)

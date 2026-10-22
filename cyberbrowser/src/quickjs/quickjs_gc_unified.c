@@ -1421,6 +1421,7 @@ bool gc_init(void) {
     gc_handle_array_init(&g_gc.weakmap_handles, 64);
     gc_handle_array_init(&g_gc.weakref_handles, 64);
     gc_handle_array_init(&g_gc.finrec_handles, 64);
+    gc_handle_array_init(&g_gc.viewed_buffers, 64);
 
     g_core.js_thread_id = gc_os_thread_id();
     gc_core_config_defaults();
@@ -1439,6 +1440,7 @@ void gc_cleanup(void) {
     gc_handle_array_free(&g_gc.weakmap_handles);
     gc_handle_array_free(&g_gc.weakref_handles);
     gc_handle_array_free(&g_gc.finrec_handles);
+    gc_handle_array_free(&g_gc.viewed_buffers);
     for (uint32_t i = 0; i < GC_MAX_REGIONS; i++) {
         GCRegion *r = &g_core.regions[i];
         free(r->line_first);

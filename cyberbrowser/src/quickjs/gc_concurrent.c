@@ -1112,12 +1112,32 @@ static uint64_t *v_bits;
 static GCHandle *v_stack;
 static uint32_t v_n, v_cap;
 static GCHandle v_parent;
+/* Raw data objects reached from the stack scan or engine roots, visited
+ * after everything else so that an owner reaching them is seen first (the
+ * data-object scan below needs the owner). */
+static GCHandle *v_deferred;
+static uint32_t v_ndeferred, v_cap_deferred;
+
+static bool is_explicit_root(GCHandle h) {
+    for (uint32_t i = 0; i < g_core.roots.count; i++)
+        if (g_core.roots.items[i].handle == h) return true;
+    return false;
+}
 
 static void verify_cb(JSRuntimeHandle rt, GCHandle h) {
     (void)rt;
-    if (!gc_col_handle_header(h)) return;
+    GCHeader *hdr = gc_col_handle_header(h);
+    if (!hdr) return;
     uint64_t m = (uint64_t)1 << (h & 63);
     if (v_bits[h >> 6] & m) return;
+    if (v_parent == GC_HANDLE_NULL && gc_header_type(hdr) == JS_GC_OBJ_TYPE_DATA && !is_explicit_root(h)) {
+        if (v_ndeferred == v_cap_deferred) {
+            v_cap_deferred = v_cap_deferred ? v_cap_deferred * 2 : 1024;
+            v_deferred = (GCHandle *)realloc(v_deferred, v_cap_deferred * sizeof(GCHandle));
+        }
+        v_deferred[v_ndeferred++] = h;
+        return;
+    }
     v_bits[h >> 6] |= m;
     if (v_n == v_cap) {
         v_cap = v_cap ? v_cap * 2 : 4096;
@@ -1126,6 +1146,91 @@ static void verify_cb(JSRuntimeHandle rt, GCHandle h) {
     v_stack[2 * v_n] = h;
     v_stack[2 * v_n + 1] = v_parent;
     v_n++;
+}
+
+/* Raw data objects (JS_GC_OBJ_TYPE_DATA) have no traced children: whoever
+ * owns one marks what it holds.  Scan each reachable one for slots that
+ * reference live objects this cycle left unmarked, which a missing mark
+ * function would leave to be swept.  "value" slots are GCValues (a handle
+ * with a reference tag); "handle" slots (QJS_GC_VERIFY=2) are bare 32-bit
+ * words that happen to be the handle of such an object, often a coincidence
+ * (a for-in iterator's property list was a real one).  Reported once per
+ * owner class, size, offset and kind. */
+#define DSCAN_KEYS 256
+static struct { int ptype, pclass; size_t size; long off; int kind; uint32_t n; GCHandle first, child; } g_dscan[DSCAN_KEYS];
+
+static void dscan_note(GCHandle parent, GCHeader *dhdr, long off, int kind, GCHandle child) {
+    GCHeader *ph = gc_col_handle_header(parent);
+    int ptype = ph ? (int)gc_header_type(ph) : -1;
+    int pclass = ph && ptype == JS_GC_OBJ_TYPE_JS_OBJECT ? *(const uint16_t *)gc_header_payload(ph) : -1;
+    size_t size = gc_header_payload_size(dhdr);
+    for (int i = 0; i < DSCAN_KEYS; i++) {
+        if (g_dscan[i].n && g_dscan[i].ptype == ptype && g_dscan[i].pclass == pclass &&
+            g_dscan[i].size == size && g_dscan[i].off == off && g_dscan[i].kind == kind) {
+            g_dscan[i].n++;
+            return;
+        }
+        if (!g_dscan[i].n) {
+            g_dscan[i].ptype = ptype; g_dscan[i].pclass = pclass; g_dscan[i].size = size;
+            g_dscan[i].off = off; g_dscan[i].kind = kind; g_dscan[i].n = 1;
+            g_dscan[i].first = gc_handle_of_header(dhdr); g_dscan[i].child = child;
+            GCHeader *ch = gc_col_handle_header(child);
+            fprintf(stderr, "[GC verify] data object %u (size %zu, owner %u type %d class %d) holds an unmarked %s "
+                    "at offset %ld: handle %u type %d\n",
+                    g_dscan[i].first, size, parent, ptype, pclass, kind ? "handle" : "value", off,
+                    child, ch ? (int)gc_header_type(ch) : -1);
+            return;
+        }
+    }
+}
+
+static bool dscan_unmarked(GCHandle c) {
+    if (c == GC_HANDLE_NULL || !gc_handle_live(c)) return false;
+    GCHeader *ch = gc_col_handle_header(c);
+    if (!ch) return false;
+    GCRegion *cr = gc_core_region_of(ch);
+    return gc_col_in_cycle(cr, ch) && !gc_col_is_marked(cr, ch);
+}
+
+static void dscan_data_object(GCHandle h, GCHandle parent, GCHeader *hdr) {
+    /* Reached only from a root.  The conservative stack scan finds raw
+     * objects (an array's value storage, say) that nothing traces through,
+     * dead or not; only explicit roots must hold marked values. */
+    if (parent == GC_HANDLE_NULL && !is_explicit_root(h)) return;
+    GCHeader *ph = gc_col_handle_header(parent);
+    if (ph && gc_header_type(ph) == JS_GC_OBJ_TYPE_JS_OBJECT) {
+        /* Weak containers hold unmarked targets by design. */
+        extern bool JS_GCClassIsWeak(int class_id);
+        if (JS_GCClassIsWeak(*(const uint16_t *)gc_header_payload(ph))) return;
+    }
+    /* Bare handles only with QJS_GC_VERIFY=2: C structs hold pointers whose
+     * halves, and bytecode bytes, often look like handles. */
+    bool bytes = g_core.config.verify < 2 ||
+                 (ph && gc_header_type(ph) == JS_GC_OBJ_TYPE_FUNCTION_BYTECODE);
+    const uint8_t *p = (const uint8_t *)gc_header_payload(hdr);
+    size_t n = gc_header_payload_size(hdr);
+    if (ph) {
+        extern size_t JS_GCDataLiveBytes(GCHandle owner, GCHandle data);
+        size_t live = JS_GCDataLiveBytes(parent, h);
+        if (live < n) n = live;
+    }
+    for (size_t k = 0; k + 16 <= n; k += 8) {
+        int64_t tag = *(const int64_t *)(p + k + 8);
+        if (tag < JS_TAG_FIRST || tag >= 0) continue;
+        GCHandle c = *(const uint32_t *)(p + k);
+        if (dscan_unmarked(c)) dscan_note(parent, hdr, (long)k, 0, c);
+    }
+    /* Bare handles: words outside anything that looks like a GCValue (an
+     * int or the halves of a double in a value array would match by
+     * chance). */
+    for (size_t k = 0; !bytes && k + 4 <= n; k += 4) {
+        if (k % 8 == 0 && k + 16 <= n) {
+            int64_t tag = *(const int64_t *)(p + k + 8);
+            if (tag >= JS_TAG_FIRST && tag <= JS_TAG_FLOAT64) { k += 12; continue; }
+        }
+        GCHandle c = *(const uint32_t *)(p + k);
+        if (c != h && dscan_unmarked(c)) dscan_note(parent, hdr, (long)k, 1, c);
+    }
 }
 
 /* Re-trace everything reachable now (JS thread, marking just finished) and
@@ -1140,7 +1245,26 @@ void gc_col_verify_impl(JSRuntimeHandle rt) {
     gc_col_enumerate_roots_cb(rt, verify_cb);
     for (uint32_t i = 0; i < g_ref_log.n; i++) verify_cb(rt, g_ref_log.items[i]);
     uint32_t failures = 0;
-    while (v_n > 0) {
+    while (v_n > 0 || v_ndeferred > 0) {
+        if (v_n == 0) {
+            /* Raw data objects no owner reached: check them as roots. */
+            uint32_t nd = v_ndeferred;
+            v_ndeferred = 0;
+            for (uint32_t i = 0; i < nd; i++) {
+                GCHandle d = v_deferred[i];
+                uint64_t m = (uint64_t)1 << (d & 63);
+                if (v_bits[d >> 6] & m) continue;
+                v_bits[d >> 6] |= m;
+                if (v_n == v_cap) {
+                    v_cap = v_cap ? v_cap * 2 : 4096;
+                    v_stack = (GCHandle *)realloc(v_stack, v_cap * 2 * sizeof(GCHandle));
+                }
+                v_stack[2 * v_n] = d;
+                v_stack[2 * v_n + 1] = GC_HANDLE_NULL;
+                v_n++;
+            }
+            if (v_n == 0) break;
+        }
         v_n--;
         GCHandle h = v_stack[2 * v_n];
         GCHandle parent = v_stack[2 * v_n + 1];
@@ -1197,10 +1321,12 @@ void gc_col_verify_impl(JSRuntimeHandle rt) {
                 gc_core_trace_dump(parent);
             }
         }
+        if (gc_header_type(hdr) == JS_GC_OBJ_TYPE_DATA) dscan_data_object(h, parent, hdr);
         v_parent = h;
         mark_children(rt, h, verify_cb);
     }
     v_parent = GC_HANDLE_NULL;
+    v_ndeferred = 0;
     free(v_bits);
     v_bits = NULL;
     if (failures) {

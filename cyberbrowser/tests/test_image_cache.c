@@ -1,6 +1,7 @@
 /* Image cache: early size detection, worker decoding, scaled decodes. */
 #include "test_runner.h"
 #include "image_cache.h"
+#include "svg_render.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -116,6 +117,23 @@ TEST(test_image_cache_png_and_svg) {
     return true;
 }
 
+/* A document PlutoSVG cannot parse is destroyed by PlutoSVG, which frees
+ * the source copy; freeing it again corrupted the heap (YouTube). */
+TEST(test_svg_parse_error_frees_once) {
+    const char *bad = "not an svg <svg/>";
+    float w = 1, h = 1;
+    uint8_t *px = NULL;
+    int pw = 0, ph = 0;
+    for (int i = 0; i < 200; i++) {
+        ASSERT_TRUE(!svg_intrinsic_size(bad, strlen(bad), &w, &h));
+        ASSERT_TRUE(!svg_render_rgba(bad, strlen(bad), 10, 10, 0xff, &px, &pw, &ph));
+        char *p = (char *)malloc(64);   /* heap still usable */
+        ASSERT_TRUE(p != NULL);
+        free(p);
+    }
+    return true;
+}
+
 static int g_notes;
 static void count_note(const char *url, void *ud) { (void)url; (void)ud; g_notes++; }
 
@@ -162,6 +180,7 @@ void run_image_cache_tests(void) {
     RUN_TEST(test_image_cache_jpeg_scaled_decode);
     RUN_TEST(test_image_cache_webp_scaled_decode);
     RUN_TEST(test_image_cache_png_and_svg);
+    RUN_TEST(test_svg_parse_error_frees_once);
     RUN_TEST(test_image_cache_errors_and_notify);
     RUN_TEST(test_image_cache_many_parallel);
 }

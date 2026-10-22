@@ -41,19 +41,13 @@ static void write_samples(void) {
     fprintf(stderr, "[sampler] %zu samples written to %s\n", g_n, g_path);
 }
 
-static void record(const CONTEXT *c0) {
-    if (g_n == g_cap) {
-        size_t nc = g_cap ? g_cap * 2 : 65536;
-        uint64_t *ns = (uint64_t *)realloc(g_samples, nc * (SAMPLE_DEPTH + 1) * sizeof(uint64_t));
-        if (!ns) return;
-        g_samples = ns;
-        g_cap = nc;
-    }
-    uint64_t *rec = g_samples + g_n * (SAMPLE_DEPTH + 1);
+/* The return addresses of a suspended thread, image-relative (0 outside the
+ * image), leaf first; returns how many. */
+static int walk(const CONTEXT *c0, uint64_t *out, int max) {
     CONTEXT c = *c0;
     int d = 0;
-    while (d < SAMPLE_DEPTH && c.Rip) {
-        rec[1 + d++] = c.Rip >= g_base && c.Rip < g_end ? c.Rip - g_base : 0;
+    while (d < max && c.Rip) {
+        out[d++] = c.Rip >= g_base && c.Rip < g_end ? c.Rip - g_base : 0;
         DWORD64 image = 0;
         PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(c.Rip, &image, NULL);
         if (!fn) {
@@ -68,7 +62,19 @@ static void record(const CONTEXT *c0) {
         DWORD64 frame = 0;
         RtlVirtualUnwind(UNW_FLAG_NHANDLER, image, c.Rip, fn, &c, &handler, &frame, NULL);
     }
-    rec[0] = (uint64_t)d;
+    return d;
+}
+
+static void record(const CONTEXT *c0) {
+    if (g_n == g_cap) {
+        size_t nc = g_cap ? g_cap * 2 : 65536;
+        uint64_t *ns = (uint64_t *)realloc(g_samples, nc * (SAMPLE_DEPTH + 1) * sizeof(uint64_t));
+        if (!ns) return;
+        g_samples = ns;
+        g_cap = nc;
+    }
+    uint64_t *rec = g_samples + g_n * (SAMPLE_DEPTH + 1);
+    rec[0] = (uint64_t)walk(c0, rec + 1, SAMPLE_DEPTH);
     g_n++;
 }
 
@@ -131,7 +137,77 @@ void cyber_sampler_stop(void) {
     write_samples();
 }
 
+/* Heap checker (CYBER_HEAPCHECK=1): a thread validates the process heaps
+ * about every millisecond and, at the first damage it finds, prints the
+ * main thread's stack (rvas, for addr2line) and stops.  It tells when the
+ * heap was damaged, not who did it: the stack shows what the main thread
+ * was doing just after. */
+static HANDLE g_hc_target;
+
+static DWORD WINAPI heapcheck_main(LPVOID arg) {
+    (void)arg;
+    timeBeginPeriod(1);
+    for (;;) {
+        HANDLE heaps[64];
+        DWORD n = GetProcessHeaps(64, heaps);
+        for (DWORD i = 0; i < n && i < 64; i++) {
+            if (HeapValidate(heaps[i], 0, NULL)) continue;
+            uint64_t rvas[SAMPLE_DEPTH];
+            int d = 0;
+            if (SuspendThread(g_hc_target) != (DWORD)-1) {
+                CONTEXT c;
+                memset(&c, 0, sizeof(c));
+                c.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+                if (GetThreadContext(g_hc_target, &c)) d = walk(&c, rvas, SAMPLE_DEPTH);
+                ResumeThread(g_hc_target);
+            }
+            /* Print only now: the main thread may have held the heap lock. */
+            fprintf(stderr, "[heapcheck] heap %lu is damaged; main thread:", (unsigned long)i);
+            for (int k = 0; k < d; k++) fprintf(stderr, " %llx", (unsigned long long)rvas[k]);
+            fputc('\n', stderr);
+            fflush(stderr);
+            timeEndPeriod(1);
+            return 0;
+        }
+        Sleep(1);
+    }
+}
+
+/* Heap damage found by the heap manager itself (a bad or double free) is
+ * raised as STATUS_HEAP_CORRUPTION before the process ends: print where. */
+static LONG CALLBACK heapcheck_veh(EXCEPTION_POINTERS *ep) {
+    if (ep->ExceptionRecord->ExceptionCode != 0xC0000374) return EXCEPTION_CONTINUE_SEARCH;
+    uint64_t rvas[SAMPLE_DEPTH];
+    int d = walk(ep->ContextRecord, rvas, SAMPLE_DEPTH);
+    char line[1024];
+    int len = snprintf(line, sizeof(line), "[heapcheck] heap corruption raised at:");
+    for (int k = 0; k < d && len < (int)sizeof(line) - 20; k++)
+        len += snprintf(line + len, sizeof(line) - (size_t)len, " %llx", (unsigned long long)rvas[k]);
+    line[len++] = '\n';
+    DWORD w;
+    WriteFile(GetStdHandle(STD_ERROR_HANDLE), line, (DWORD)len, &w, NULL);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+void cyber_heapcheck_start(void) {
+    const char *p = getenv("CYBER_HEAPCHECK");
+    if (!p || !p[0] || p[0] == '0' || g_hc_target) return;
+    HMODULE mod = GetModuleHandleA(NULL);
+    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)mod;
+    IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)((char *)mod + dos->e_lfanew);
+    g_base = (uint64_t)(uintptr_t)mod;
+    g_end = g_base + nt->OptionalHeader.SizeOfImage;
+    if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &g_hc_target,
+                         THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, 0))
+        return;
+    AddVectoredExceptionHandler(1, heapcheck_veh);
+    HANDLE t = CreateThread(NULL, 0, heapcheck_main, NULL, 0, NULL);
+    if (t) CloseHandle(t);
+    fprintf(stderr, "[heapcheck] validating the process heaps\n");
+}
+
 #else
 void cyber_sampler_start(void) {}
 void cyber_sampler_stop(void) {}
+void cyber_heapcheck_start(void) {}
 #endif
