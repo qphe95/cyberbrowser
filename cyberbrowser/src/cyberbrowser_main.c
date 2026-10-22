@@ -446,8 +446,32 @@ static bool virtual_time_idle(void) {
     if (real < 0) real = cyber_getenv("CYBER_REAL_TIME") ? 1 : 0;
     if (real) return false;
     if (js_quickjs_network_pending() > 0) return false;
-    if (g_loop_images && image_cache_has_pending(g_loop_images)) return false;
+    /* Images being fetched or decoded; finished ones are delivered at the
+     * top of each event-loop turn. */
+    if (g_loop_images && image_cache_has_work(g_loop_images)) return false;
     return true;
+}
+
+/* CYBER_LOOP_LOG=1: log every real wait of the event loop (what it waits
+ * for, the timer delay, what the image cache has in flight), with totals
+ * at exit. */
+static unsigned long long g_loop_wait_ms[2];   /* sleeps, network waits */
+static void loop_log_total(void) {
+    fprintf(stderr, "[loop] waited %llu ms sleeping (images in flight), %llu ms on the network\n",
+            g_loop_wait_ms[0], g_loop_wait_ms[1]);
+}
+static void loop_log_wait(const char *what, unsigned long long wait) {
+    static int on = -1;
+    if (on < 0) {
+        on = cyber_getenv("CYBER_LOOP_LOG") ? 1 : 0;
+        if (on) atexit(loop_log_total);
+    }
+    if (!on || !what) return;
+    int working = 0, undelivered = 0;
+    image_cache_pending_counts(g_loop_images, &working, &undelivered);
+    g_loop_wait_ms[what[0] == 'n'] += wait ? wait : 1;
+    fprintf(stderr, "[loop] %s %llu ms at page time %llu: images working %d, undelivered %d, fetches %d\n",
+            what, wait, page_time_ms(), working, undelivered, js_quickjs_network_pending());
 }
 
 /* One event-loop drain: due timers, scheduler tasks and promise jobs, again
@@ -468,6 +492,9 @@ static bool pump_event_loop(JSContextHandle ctx, bool wait) {
 
         /* Top of an event-loop turn: a tick boundary. */
         gc_tick();
+        /* Images that finished loading: their load events are tasks of
+         * this turn (before the timers, which are due later). */
+        int images = g_loop_images && image_cache_process_pending(g_loop_images) ? 1 : 0;
         int processed = timer_process_due(ctx);
         int sched = scheduler_process_tasks(ctx);
         int jobs = 0;
@@ -477,7 +504,7 @@ static bool pump_event_loop(JSContextHandle ctx, bool wait) {
             jobs++;
         }
         (void)ret;
-        if (processed == 0 && sched == 0 && jobs == 0) {
+        if (processed == 0 && sched == 0 && jobs == 0 && images == 0) {
             if (!wait) break;
             /* Nothing immediately due.  Lifecycle callbacks (e.g. the monomer
              * "initialized" job set) are scheduled via setTimeout with a small
@@ -490,10 +517,16 @@ static bool pump_event_loop(JSContextHandle ctx, bool wait) {
                 unsigned long long wait = next > now ? next - now : 0;
                 unsigned long long elapsed = now - pump_start;
                 if (wait <= 200 && elapsed + wait <= 3000) {
+                    loop_log_wait(js_quickjs_network_pending() > 0 ? "net" :
+                                  virtual_time_idle() ? NULL : "sleep", wait);
                     if (js_quickjs_network_pending() > 0)
                         js_quickjs_net_wait((unsigned int)(wait ? wait : 1));
                     else if (virtual_time_idle())
                         page_time_advance(wait ? wait : 1);
+                    else if (g_loop_images)
+                        /* Until the timer is due or an image finishes (the
+                         * page is then idle and time can skip ahead). */
+                        image_cache_wait_progress(g_loop_images, (int)(wait ? wait : 1));
                     else
                         platform_sleep_ms((unsigned int)(wait ? wait : 1));
                     continue;
@@ -502,6 +535,7 @@ static bool pump_event_loop(JSContextHandle ctx, bool wait) {
             /* A fetch() in flight: wait for its response like for a timer. */
             if (js_quickjs_network_pending() > 0 &&
                 page_time_ms() - pump_start <= 3000) {
+                loop_log_wait("net (no timer)", 50);
                 js_quickjs_net_wait(50);
                 continue;
             }

@@ -42,6 +42,12 @@ bool image_cache_wait_pending_ms(ImageCache *cache, int timeout_ms);
 
 /* Returns true while at least one async load has not yet completed or errored. */
 bool image_cache_has_pending(ImageCache *cache);
+/* True while an entry is queued or being fetched or decoded (finished ones
+ * whose notification is not delivered yet do not count). */
+bool image_cache_has_work(ImageCache *cache);
+/* Entries queued or being worked on, and finished ones whose notification
+ * image_cache_process_pending has not delivered yet (debugging). */
+void image_cache_pending_counts(ImageCache *cache, int *working, int *undelivered);
 
 /* Request an image for painting at want_w x want_h pixels (0 = natural
  * size).  Starts the fetch when needed and returns the handle at once; the

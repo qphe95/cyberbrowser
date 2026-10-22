@@ -1895,6 +1895,8 @@ typedef struct NetReq {
     /* Settling (main thread only): a promise, or `done` (js_quickjs_net_get). */
     GCValue resolve, reject;
     bool cors_check, credentials_include;
+    bool preflight;             /* send a CORS preflight first (worker) */
+    bool preflight_failed;      /* it failed: err says why */
     char origin[512];
     JsNetDoneFn done;
     void *done_user;
@@ -1937,6 +1939,15 @@ static NetReq *net_req_new(const char *url, const char *method, const char *body
 
 static void net_req_run(NetReq *r)
 {
+    /* The preflight runs here too, off the main thread: it is a network
+     * round trip like the request. */
+    if (r->preflight &&
+        !cors_perform_preflight(GC_HANDLE_NULL, r->url, r->method, (const char **)r->headers, r->nheaders,
+                                r->origin, r->credentials_include, r->err, sizeof(r->err))) {
+        r->preflight_failed = true;
+        r->ok = false;
+        return;
+    }
     r->ok = platform_http_request(r->url, r->method, r->body, r->body_len,
                                   (const char **)r->headers, (size_t)r->nheaders,
                                   &r->resp, &r->status, r->err, sizeof(r->err));
@@ -1945,7 +1956,13 @@ static void net_req_run(NetReq *r)
 static void *net_req_thread(void *arg)
 {
     NetReq *r = arg;
+    static int log = -1;
+    if (log < 0) log = cyber_getenv("CYBER_LOOP_LOG") ? 1 : 0;
+    unsigned long long t0 = log ? platform_get_time_ms() : 0;
     net_req_run(r);
+    if (log)
+        fprintf(stderr, "[net] %s %.160s: %llu ms, status %d\n", r->method, r->url,
+                platform_get_time_ms() - t0, r->status);
     pthread_mutex_lock(&g_net_mutex);
     r->next = g_net_done;
     g_net_done = r;
@@ -1978,7 +1995,10 @@ static void net_req_settle(JSContextHandle ctx, NetReq *r)
     }
     GCValue value;
     bool ok = false;
-    if (r->ok && r->resp.data && r->status >= 200 && r->status < 300) {
+    if (r->preflight_failed) {
+        platform_log(LOG_LEVEL_WARN, "js_fetch", "CORS preflight failed: %s", r->err);
+        value = net_type_error(ctx, r->err);
+    } else if (r->ok && r->resp.data && r->status >= 200 && r->status < 300) {
         char cors_err[256] = {0};
         if (r->cors_check &&
             !cors_validate_response_headers(r->resp.headers, r->origin, r->credentials_include,
@@ -2273,20 +2293,10 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
             has_cookie = true;
         }
 
-        // CORS preflight for cross-origin non-simple requests.
-        if (!same_origin && !cors_no_cors) {
-            if (cors_requires_preflight(method, headers, header_count)) {
-                char preflight_err[256] = {0};
-                bool preflight_ok = cors_perform_preflight(ctx, url, method, headers, header_count,
-                                                           origin, credentials_include,
-                                                           preflight_err, sizeof(preflight_err));
-                if (!preflight_ok) {
-                    if (post_body) free(post_body);
-                    platform_log(LOG_LEVEL_WARN, "js_fetch", "CORS preflight failed: %s", preflight_err);
-                    return reject_type_error(ctx, preflight_err);
-                }
-            }
-        }
+        // CORS preflight for cross-origin non-simple requests: sent by the
+        // request's worker before the request itself.
+        bool preflight = !same_origin && !cors_no_cors &&
+                         cors_requires_preflight(method, headers, header_count);
 
         NetReq *req = net_req_new(url, method,
                                   post_body && post_body_len > 0 ? post_body : NULL, post_body_len,
@@ -2295,6 +2305,7 @@ GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv)
         post_body = NULL;
         if (!req) return reject_type_error(ctx, "Network request failed");
         req->cors_check = !same_origin && !cors_no_cors;
+        req->preflight = preflight;
         req->credentials_include = credentials_include;
         snprintf(req->origin, sizeof(req->origin), "%s", origin);
         return net_req_start(ctx, req);

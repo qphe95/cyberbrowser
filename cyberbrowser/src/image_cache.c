@@ -982,6 +982,25 @@ bool image_cache_wait_progress(ImageCache *c, int timeout_ms)
     return any;
 }
 
+void image_cache_pending_counts(ImageCache *c, int *working, int *undelivered)
+{
+    *working = *undelivered = 0;
+    if (!c) return;
+    pthread_mutex_lock(&c->mu);
+    *working = c->busy;
+    for (int k = 0; k < c->count; k++) *undelivered += c->entries[k]->notify_pending;
+    pthread_mutex_unlock(&c->mu);
+}
+
+bool image_cache_has_work(ImageCache *c)
+{
+    if (!c) return false;
+    pthread_mutex_lock(&c->mu);
+    bool busy = c->busy > 0;
+    pthread_mutex_unlock(&c->mu);
+    return busy;
+}
+
 bool image_cache_has_pending(ImageCache *c)
 {
     if (!c) return false;
