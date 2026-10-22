@@ -1976,14 +1976,26 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_NewCFunction(ctx, js_element_querySelector_real, "querySelector", 1));
     JS_SetPropertyStr(ctx, doc_fragment_proto, "querySelectorAll",
         JS_NewCFunction(ctx, js_element_querySelectorAll_real, "querySelectorAll", 1));
-    JS_SetPropertyStr(ctx, doc_fragment_proto, "firstElementChild",
-        JS_NewCFunction(ctx, js_element_get_firstElementChild, "get firstElementChild", 0));
-    JS_SetPropertyStr(ctx, doc_fragment_proto, "lastElementChild",
-        JS_NewCFunction(ctx, js_element_get_lastElementChild, "get lastElementChild", 0));
-    JS_SetPropertyStr(ctx, doc_fragment_proto, "children",
-        JS_NewCFunction(ctx, js_element_get_children, "get children", 0));
-    JS_SetPropertyStr(ctx, doc_fragment_proto, "childElementCount",
-        JS_NewCFunction(ctx, js_element_get_childElementCount, "get childElementCount", 0));
+    /* Accessors, as on Element: as plain properties these held the getter
+     * functions, so fragment.children was a function (not iterable: the
+     * spread in YouTube's style scoping threw, and the watch page's
+     * metadata and related videos never rendered). */
+    {
+        static const struct { const char *name; JSCFunction *get; } acc[] = {
+            { "firstElementChild", js_element_get_firstElementChild },
+            { "lastElementChild", js_element_get_lastElementChild },
+            { "children", js_element_get_children },
+            { "childElementCount", js_element_get_childElementCount },
+        };
+        for (size_t i = 0; i < sizeof(acc) / sizeof(acc[0]); i++) {
+            char getter_name[64];
+            snprintf(getter_name, sizeof(getter_name), "get %s", acc[i].name);
+            JSAtom a = JS_NewAtom(ctx, acc[i].name);
+            JS_DefinePropertyGetSet(ctx, doc_fragment_proto, a, JS_NewCFunction(ctx, acc[i].get, getter_name, 0),
+                                    JS_UNDEFINED, JS_PROP_ENUMERABLE | JS_PROP_CONFIGURABLE);
+            JS_FreeAtom(ctx, a);
+        }
+    }
 
     // ParentNode mixin for DocumentFragment
     JS_SetPropertyStr(ctx, doc_fragment_proto, "append",

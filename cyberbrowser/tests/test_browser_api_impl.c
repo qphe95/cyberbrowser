@@ -934,6 +934,29 @@ TEST(test_mutation_observer_exists) {
     return true;
 }
 
+/* DocumentFragment's element-child members are accessors, as on Element:
+ * children is an iterable collection (YouTube's style scoping spreads it;
+ * as a function it threw and the watch page's metadata never rendered). */
+TEST(test_document_fragment_element_children) {
+    JSContextHandle ctx = get_test_context();
+    if (!SAFE_VALID(ctx)) return false;
+    const char *js =
+        "(function () {"
+        "  var f = document.createDocumentFragment();"
+        "  f.appendChild(document.createTextNode('t'));"
+        "  var a = document.createElement('a'), b = document.createElement('b');"
+        "  f.appendChild(a); f.appendChild(b);"
+        "  var t = document.createElement('template'); t.innerHTML = '<i></i><u></u>';"
+        "  return typeof f.children !== 'function' && f.children.length === 2 && [...f.children].length === 2 &&"
+        "         f.firstElementChild === a && f.lastElementChild === b && f.childElementCount === 2 &&"
+        "         [...t.content.children].length === 2 && t.content.firstElementChild.localName === 'i';"
+        "})()";
+    GCValue r = JS_Eval(ctx, js, strlen(js), "<test>", 0);
+    ASSERT_TRUE(!JS_IsException(r));
+    ASSERT_TRUE(JS_ToBool(ctx, r));
+    return true;
+}
+
 /* Test 11a: DocumentFragment children are expanded by appendChild/insertBefore */
 TEST(test_document_fragment_appendChild_expands) {
     JSContextHandle ctx = get_test_context();
@@ -1000,8 +1023,10 @@ TEST(test_match_media_evaluates_queries) {
         "  c: window.matchMedia('(prefers-color-scheme: dark)').matches,"
         "  d: window.matchMedia('screen and (max-height: 720px) and (min-resolution: 200dpi)').matches,"
         "  e: window.matchMedia('(any-pointer: coarse)').matches,"
-        "  f: window.matchMedia('(orientation: landscape)').matches,"
-        "  g: window.matchMedia('(width: 1920px) and (height: 1080px)').matches,"
+        /* Media queries see the viewport (innerWidth x innerHeight), not
+         * the screen: the render's 1024x2400 window is portrait. */
+        "  f: window.matchMedia('(orientation: landscape)').matches === (innerWidth >= innerHeight),"
+        "  g: window.matchMedia('(width: ' + innerWidth + 'px) and (height: ' + innerHeight + 'px)').matches,"
         "  h: window.matchMedia('not print').matches,"
         "  i: window.matchMedia('screen, print').matches"
         "});";
@@ -1018,7 +1043,15 @@ TEST(test_match_media_evaluates_queries) {
     bool h = JS_ToBool(ctx, JS_GetPropertyStr(ctx, result, "h")); // true
     bool i = JS_ToBool(ctx, JS_GetPropertyStr(ctx, result, "i")); // true
 
-    return a && !b && c && !d && !e && f && g && h && i;
+    bool ok = a && !b && c && !d && !e && f && g && h && i;
+    if (!ok) {
+        const char *probe = "JSON.stringify({w: innerWidth, h: innerHeight, sw: screen.width, sh: screen.height, dpr: devicePixelRatio})";
+        GCValue env = JS_Eval(ctx, probe, strlen(probe), "<test>", 0);
+        const char *s = JS_ToCString(ctx, env);
+        printf("    matches a..i = %d%d%d%d%d%d%d%d%d (want 101001111), viewport %s\n",
+               a, b, c, d, e, f, g, h, i, s ? s : "?");
+    }
+    return ok;
 }
 
 /* Test 11d: MediaQueryList addListener/addEventListener registration */
@@ -1823,16 +1856,18 @@ TEST(test_shadow_root_constructor_exists) {
 }
 
 /* Test ShadowRoot.prototype.host exists */
-TEST(test_shadow_root_host_exists) {
+/* There is no native shadow DOM: the page's ShadyDOM polyfill owns it.
+ * ShadowRoot is a bare constructor and prototype for its instanceof checks
+ * and prototype swaps, without native members such as host. */
+TEST(test_shadow_root_is_bare_for_shadydom) {
     JSContextHandle ctx = get_test_context();
     if (!SAFE_VALID(ctx)) return false;
 
     GCValue shadow_root = JS_GetPropertyStr(ctx, g_global, "ShadowRoot");
+    ASSERT_TRUE(JS_IsFunction(ctx, shadow_root));
     GCValue prototype = JS_GetPropertyStr(ctx, shadow_root, "prototype");
-    GCValue host = JS_GetPropertyStr(ctx, prototype, "host");
-    bool has_prop = !JS_IsUndefined(host);
-
-    ASSERT_TRUE(has_prop);
+    ASSERT_TRUE(JS_IsObject(prototype));
+    ASSERT_TRUE(JS_IsUndefined(JS_GetPropertyStr(ctx, prototype, "host")));
     return true;
 }
 
@@ -1890,16 +1925,15 @@ TEST(test_html_element_exists) {
 }
 
 /* Test HTMLElement.prototype.attachShadow exists */
-TEST(test_html_element_attach_shadow_exists) {
+/* No native attachShadow, so ShadyDOM installs its own (it only does when
+ * the browser has none). */
+TEST(test_no_native_attach_shadow) {
     JSContextHandle ctx = get_test_context();
     if (!SAFE_VALID(ctx)) return false;
 
     GCValue html_element = JS_GetPropertyStr(ctx, g_global, "HTMLElement");
     GCValue prototype = JS_GetPropertyStr(ctx, html_element, "prototype");
-    GCValue attach_shadow = JS_GetPropertyStr(ctx, prototype, "attachShadow");
-    bool has_method = !JS_IsUndefined(attach_shadow);
-
-    ASSERT_TRUE(has_method);
+    ASSERT_TRUE(JS_IsUndefined(JS_GetPropertyStr(ctx, prototype, "attachShadow")));
     return true;
 }
 
@@ -2540,11 +2574,16 @@ TEST(test_media_source_blob_url) {
     const char *str = JS_ToCString(ctx, result);
     printf("    mediaSource debug: %s\n", str ? str : "(null)");
 
+    /* Closed until a media element attaches it (MSE: the src of a video
+     * element is set to its object URL), then open. */
     const char *assert_js = "\n"
         "        var ms = new MediaSource();\n"
         "        var ok = typeof ms.url === 'string' && ms.url.indexOf('blob:') === 0;\n"
-        "        ok = ok && ms.readyState === 'open';\n"
+        "        ok = ok && ms.readyState === 'closed';\n"
         "        ok = ok && window.__blobRegistry[ms.url] === ms;\n"
+        "        var v = document.createElement('video');\n"
+        "        v.src = URL.createObjectURL(ms);\n"
+        "        ok = ok && ms.readyState === 'open';\n"
         "        var sb = ms.addSourceBuffer('video/mp4');\n"
         "        ok = ok && !!sb && sb.mimeType === 'video/mp4';\n"
         "        ok = ok && ms.sourceBuffers.length === 1 && ms.sourceBuffers[0] === sb;\n"
@@ -4902,6 +4941,7 @@ void run_browser_api_impl_tests(void) {
     RUN_TEST(test_requestAnimationFrame_functional);
     RUN_TEST(test_mutation_observer_exists);
     RUN_TEST(test_document_fragment_appendChild_expands);
+    RUN_TEST(test_document_fragment_element_children);
     RUN_TEST(test_mutation_observer_async_callback);
     RUN_TEST(test_match_media_evaluates_queries);
     RUN_TEST(test_match_media_listeners);
@@ -4948,7 +4988,7 @@ void run_browser_api_impl_tests(void) {
     RUN_TEST(test_node_node_value_exists);
     // ShadowRoot
     RUN_TEST(test_shadow_root_constructor_exists);
-    RUN_TEST(test_shadow_root_host_exists);
+    RUN_TEST(test_shadow_root_is_bare_for_shadydom);
     RUN_TEST(test_node_exists);
     RUN_TEST(test_node_get_root_node_exists);
     RUN_TEST(test_node_parent_node_exists);
@@ -5033,7 +5073,7 @@ void run_browser_api_impl_tests(void) {
     // DOM Element Tests
     printf("\n--- DOM Element Tests ---\n");
     RUN_TEST(test_html_element_exists);
-    RUN_TEST(test_html_element_attach_shadow_exists);
+    RUN_TEST(test_no_native_attach_shadow);
     RUN_TEST(test_document_head_exists);
     RUN_TEST(test_document_active_element_exists);
     RUN_TEST(test_document_fonts_exists);
