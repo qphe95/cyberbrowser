@@ -44,7 +44,9 @@ typedef struct GCRegion {
     uintptr_t safe_top;        /* top published at the last boundary */
     uintptr_t scan_top;        /* collector has scanned new objects up to here */
     size_t live_bytes;
-    uint64_t *start_bits;      /* 1 bit per 16-byte granule: object header starts */
+    /* Per line: the granule offset of the first header that starts in it,
+     * or GC_LINE_CONT when none does.  Finds objects from addresses. */
+    uint8_t *line_first;
     uint64_t *mark_bits[2];    /* mark bitmaps, by cycle parity */
     /* Holes (runs of free lines below top) found by the last major sweep,
      * one bit per line; see gc_core_format_holes. */
@@ -59,6 +61,12 @@ typedef struct GCRegion {
 #define GC_LINE_SIZE    ((uintptr_t)1 << GC_LINE_SHIFT)
 #define GC_LINES        ((GC_REGION_SIZE - GC_HEADER_SIZE) >> GC_LINE_SHIFT)
 #define GC_LINE_WORDS   ((GC_LINES + 63) / 64)
+#define GC_LINE_CONT    0xFF
+/* Where lines end: the last bytes of a region, less than a line, are unused. */
+#define GC_LINES_END_OFFSET (GC_HEADER_SIZE + ((uintptr_t)GC_LINES << GC_LINE_SHIFT))
+
+/* A zero header (size 0) starts free space: the rest of a run of free
+ * lines, which a walk skips to the next line where a header starts. */
 
 /* Who may touch a region's holes.  The sweeper moves IDLE or AVAILABLE to
  * SWEEPING and back; an allocation context moves AVAILABLE to OWNED and,
@@ -69,12 +77,16 @@ typedef struct GCAllocCtx {
     GCRegion *region;
     uint8_t *top;
     uint8_t *end;
+    uint8_t *line_end;         /* end of the line holding top: past it, line bytes are due */
     uint32_t space;
     uint32_t owner;
     bool permanent;            /* fills permanent regions */
     bool recycles;             /* may fill holes of old regions */
     bool in_hole;              /* top/end bound a hole of a recycled region */
     uint32_t next_line;        /* recycled region: where to look for the next hole */
+    /* Recycling contexts: a fresh region for objects bigger than a line
+     * that do not fit what is left of the current hole. */
+    struct GCAllocCtx *overflow;
 } GCAllocCtx;
 
 typedef struct GCRegistryEntry {
@@ -115,6 +127,7 @@ typedef struct GCCore {
     GCAllocCtx js_old;     /* JS thread: pretenured objects */
     GCAllocCtx js_perm;    /* JS thread: atoms (permanent) */
     GCAllocCtx gc_copy;    /* GC thread (or sync collector): copies */
+    GCAllocCtx js_old_overflow, gc_copy_overflow;
 
     GCHandle *hcache;      /* JS thread free-handle cache */
     uint32_t hcache_n;
@@ -158,6 +171,9 @@ void gc_core_alloc_ctx_retire(GCAllocCtx *a);
 void gc_core_region_release(GCRegion *r);
 GCRegion *gc_core_init_humongous_run(uint32_t first, uint32_t n);
 GCHeader *gc_core_object_containing(const void *p);
+/* The first header at or after p, which lies in no object (see
+ * gc_core_object_containing), or `limit`. */
+uintptr_t gc_core_next_header(const GCRegion *r, uintptr_t p, uintptr_t limit);
 void **gc_core_back_table(void);
 void gc_core_registry_add(GCRegistry *reg, GCHandle h);
 /* After a region's sweep (its condemned objects' handles freed): turn its
@@ -174,6 +190,21 @@ static inline GCRegion *gc_core_region_of(const void *p) {
 
 static inline uint8_t *gc_core_region_start(const GCRegion *r) {
     return g_gc.heap_base + ((size_t)(r - g_core.regions) << GC_REGION_SHIFT);
+}
+
+static inline uintptr_t gc_core_line_base(const GCRegion *r) {
+    return (uintptr_t)gc_core_region_start(r) + GC_HEADER_SIZE;
+}
+
+/* p holds a zero header: the next header after the free space, or `limit`
+ * if there is none before it. */
+static inline uintptr_t gc_core_skip_free(const GCRegion *r, uintptr_t p, uintptr_t limit) {
+    uintptr_t lb = gc_core_line_base(r);
+    uint32_t l = (uint32_t)((p - lb) >> GC_LINE_SHIFT) + 1;
+    while (l < GC_LINES && r->line_first[l] == GC_LINE_CONT) l++;
+    if (l >= GC_LINES) return limit;
+    uintptr_t q = lb + ((uintptr_t)l << GC_LINE_SHIFT) + ((uintptr_t)r->line_first[l] << 4);
+    return q < limit ? q : limit;
 }
 
 /* Whether a swept region is sparse enough to copy its survivors out and

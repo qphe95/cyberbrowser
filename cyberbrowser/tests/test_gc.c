@@ -1988,3 +1988,115 @@ void run_gc_tests(void) {
     RUN_TEST(test_gc_weakmap_dead_key_value_survives_concurrent_cycles);
     RUN_TEST(test_gc_property_key_string_outlives_delete);
 }
+
+/* ============================================================================
+ * Allocation microbenchmark (`cyberbrowser-tests gc_alloc_bench`, not part of
+ * the default run): old-space allocation filling holes against bump
+ * allocation in fresh regions, in the same process.  "raw" is the allocator
+ * alone (no handle, so the memory is garbage at the next collection);
+ * "gc_alloc_old" adds the handle and table write every object pays today.
+ * ============================================================================ */
+
+enum { BENCH_PREP_BYTES = 64 << 20, BENCH_RUN_BYTES = 32 << 20, BENCH_MAX_N = 1 << 20 };
+static GCHandle g_bench_handles[BENCH_MAX_N];
+static GCHandle *g_bench_kept;
+static size_t g_bench_nkept;
+
+static size_t bench_total(size_t size) { return (size + GC_HEADER_SIZE + 15) & ~(size_t)15; }
+
+/* Old regions with a live object every ~1 KB and holes between. */
+static void bench_make_holes(size_t size) {
+    size_t total = bench_total(size), n = BENCH_PREP_BYTES / total;
+    size_t every = 1024 / total < 3 ? 3 : 1024 / total;
+    g_bench_kept = (GCHandle *)malloc((n / every + 1) * sizeof(GCHandle));
+    g_bench_nkept = 0;
+    for (size_t i = 0; i < n; i++) {
+        GCHandle h = gc_alloc_old(size, JS_GC_OBJ_TYPE_DATA);
+        if (i % every == 0) {
+            gc_add_root(h);
+            g_bench_kept[g_bench_nkept++] = h;
+        } else {
+            gc_free(h);
+        }
+    }
+    gc_run();
+}
+
+static void bench_drop_holes(void) {
+    for (size_t i = 0; i < g_bench_nkept; i++) gc_remove_root(g_bench_kept[i]);
+    free(g_bench_kept);
+    g_bench_kept = NULL;
+    g_bench_nkept = 0;
+    gc_run();
+}
+
+static double bench_raw_ns(size_t size) {
+    size_t n = BENCH_RUN_BYTES / bench_total(size);
+    if (n > BENCH_MAX_N) n = BENCH_MAX_N;
+    GCAllocCtx a;
+    memset(&a, 0, sizeof(a));
+    a.space = GC_RS_OLD;
+    a.owner = GC_OWNER_JS;
+    a.recycles = true;
+    GCAllocCtx o;
+    memset(&o, 0, sizeof(o));
+    o.space = GC_RS_OLD;
+    o.owner = GC_OWNER_JS;
+    a.overflow = &o;
+    uint64_t t0 = gc_os_now_ns();
+    for (size_t i = 0; i < n; i++) {
+        GCHeader *hdr = gc_core_alloc_object_memory(&a, size, JS_GC_OBJ_TYPE_DATA);
+        ((uint32_t *)gc_header_payload(hdr))[0] = (uint32_t)i;
+    }
+    uint64_t t1 = gc_os_now_ns();
+    gc_core_alloc_ctx_retire(&a);
+    return (double)(t1 - t0) / (double)n;
+}
+
+static double bench_handle_ns(size_t size) {
+    size_t n = BENCH_RUN_BYTES / bench_total(size);
+    if (n > BENCH_MAX_N) n = BENCH_MAX_N;
+    GCStats s0, s1;
+    gc_get_stats(&s0);
+    uint64_t t0 = gc_os_now_ns();
+    for (size_t i = 0; i < n; i++) {
+        GCHandle h = gc_alloc_old(size, JS_GC_OBJ_TYPE_DATA);
+        ((uint32_t *)gc_deref(h))[0] = (uint32_t)i;
+        g_bench_handles[i] = h;
+    }
+    uint64_t t1 = gc_os_now_ns();
+    gc_get_stats(&s1);
+    uint64_t cycles = s1.full_collections + s1.minor_cycles + s1.major_cycles -
+                      (s0.full_collections + s0.minor_cycles + s0.major_cycles);
+    if (cycles) printf("  (size %zu: %llu collections during the timed loop)\n", size, (unsigned long long)cycles);
+    for (size_t i = 0; i < n; i++) gc_free(g_bench_handles[i]);
+    return (double)(t1 - t0) / (double)n;
+}
+
+void run_gc_alloc_bench(void) {
+    static const size_t sizes[] = { 24, 56, 120, 248, 1000 };
+    BgState st;
+    bg_pause(&st);
+    printf("\nGC allocation benchmark (ns per object, best of 3; holes %s)\n", g_core.holes ? "on" : "off");
+    printf("  %6s  %10s %10s  %14s %14s\n", "size", "raw bump", "raw holes", "handle bump", "handle holes");
+    for (size_t s = 0; s < sizeof(sizes) / sizeof(sizes[0]); s++) {
+        size_t size = sizes[s];
+        double best[4] = { 1e9, 1e9, 1e9, 1e9 };
+        for (int rep = 0; rep < 3; rep++) {
+            double v;
+            gc_run();
+            if ((v = bench_raw_ns(size)) < best[0]) best[0] = v;
+            gc_run();
+            if ((v = bench_handle_ns(size)) < best[2]) best[2] = v;
+            bench_make_holes(size);
+            if ((v = bench_raw_ns(size)) < best[1]) best[1] = v;
+            bench_drop_holes();
+            bench_make_holes(size);
+            if ((v = bench_handle_ns(size)) < best[3]) best[3] = v;
+            bench_drop_holes();
+        }
+        printf("  %6zu  %10.2f %10.2f  %14.2f %14.2f\n", size, best[0], best[1], best[2], best[3]);
+    }
+    fflush(stdout);
+    bg_resume(&st);
+}

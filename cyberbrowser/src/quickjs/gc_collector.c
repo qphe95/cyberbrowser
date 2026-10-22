@@ -316,19 +316,11 @@ void gc_col_rescan_card(JSRuntimeHandle rt, uint32_t card) {
 
     /* First object overlapping the card. */
     GCHeader *hdr = gc_core_object_containing((const void *)lo);
-    uintptr_t p;
-    if (hdr) {
-        p = (uintptr_t)hdr;
-    } else {
-        /* lo falls in the 8 bytes before a header (or the region's unused
-         * first 8 bytes): the next object starts right after. */
-        p = (lo & ~(uintptr_t)15) + GC_HEADER_SIZE;
-        if (p < lo) p += GC_GRANULE;
-    }
+    uintptr_t p = hdr ? (uintptr_t)hdr : gc_core_next_header(r, lo, hi);
     while (p < hi) {
         GCHeader *h = (GCHeader *)p;
         size_t total = gc_header_total_size(h);
-        if (!total) break;
+        if (!total) { p = gc_core_skip_free(r, p, hi); continue; }
         uintptr_t end = p + total;
         if (!type_is_leaf(gc_header_type(h)) && gc_core_header_is_current(h) &&
             (!in_cycle(r, h) || is_marked(r, h))) {

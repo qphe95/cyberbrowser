@@ -24,6 +24,7 @@
 
 extern void run_browser_api_impl_tests(void);
 extern void run_gc_tests(void);
+extern void run_gc_alloc_bench(void);
 extern void run_exception_debug_tests(void);
 extern void run_logical_operator_tests(void);
 extern void run_nested_iife_tests(void);
@@ -196,6 +197,9 @@ int main(int argc, char *argv[]) {
             selected = strcmp(argv[a], suites[i].name) == 0;
         if (selected) suites[i].run();
     }
+    /* Benchmarks run only when named. */
+    for (int a = 1; a < argc; a++)
+        if (strcmp(argv[a], "gc_alloc_bench") == 0) run_gc_alloc_bench();
 
     /* Note: YouTube data tests run in separate executable (youtube-data-test) */
 

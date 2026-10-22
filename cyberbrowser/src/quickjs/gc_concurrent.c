@@ -383,13 +383,12 @@ static void bcheck_page(uintptr_t page, bool card_clean) {
         uintptr_t top = atomic_load_explicit(&r->top, memory_order_acquire);
         uintptr_t end = page + GC_CARD_SIZE < top ? page + GC_CARD_SIZE : top;
         GCHeader *hdr = gc_core_object_containing((const void *)page);
-        uintptr_t p = hdr ? (uintptr_t)hdr : ((page & ~(uintptr_t)15) + GC_HEADER_SIZE);
-        if (!hdr && p < page) p += GC_GRANULE;
+        uintptr_t p = hdr ? (uintptr_t)hdr : gc_core_next_header(r, page, end);
         bool flagged = false;
         while (p < end) {
             GCHeader *h = (GCHeader *)p;
             size_t total = gc_header_total_size(h);
-            if (!total) break;
+            if (!total) { p = gc_core_skip_free(r, p, end); continue; }
             uint32_t type = gc_header_type(h);
             /* The header's shadow: if it differs the object is new (or was
              * copied here) since the last pull, and its stores initialise it. */
@@ -1614,8 +1613,18 @@ static void check_object(GCHeader *hdr, void *opaque) {
         g_check_problems++;
         return;
     }
-    uint32_t g = gc_core_granule_of(r, hdr);
-    if (!((r->start_bits[g >> 6] >> (g & 63)) & 1)) g_check_problems++;
+    /* Found from its first and last bytes and from its payload. */
+    if (gc_core_object_containing(hdr) != hdr ||
+        gc_core_object_containing((uint8_t *)hdr + total - 1) != hdr ||
+        gc_core_object_containing(gc_header_payload(hdr)) != hdr) {
+        if (g_check_problems < 5)
+            fprintf(stderr, "[GC check] lookup misses object %p (size %zu, region %u, space %u) from %p/%p/%p: %p %p %p\n",
+                    (void *)hdr, total, (unsigned)(r - g_core.regions), r->space, (void *)hdr,
+                    (void *)((uint8_t *)hdr + total - 1), gc_header_payload(hdr),
+                    (void *)gc_core_object_containing(hdr), (void *)gc_core_object_containing((uint8_t *)hdr + total - 1),
+                    (void *)gc_core_object_containing(gc_header_payload(hdr)));
+        g_check_problems++;
+    }
     /* The back table holds the same address, or (while an evacuation is in
      * flight) the address of a copy of this object. */
     if (gc_core_header_is_current(hdr)) {
