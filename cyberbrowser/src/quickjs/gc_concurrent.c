@@ -182,7 +182,6 @@ enum {
     REQ_NONE = 0,
     REQ_MARK_START,
     REQ_REMARK,
-    REQ_FLIP,
     REQ_WEAK_APPLY,
 };
 
@@ -196,13 +195,6 @@ enum {
     TRIG_MINOR = 1,
     TRIG_MAJOR = 2,
 };
-
-typedef struct GCMoved {
-    GCHandle h;
-    uint32_t total;     /* bytes including the header */
-    uint8_t *from;      /* payload of the original */
-    uint8_t *to;        /* payload of the copy */
-} GCMoved;
 
 typedef struct GCConc {
     /* Request / answer protocol.  Each field has one writer. */
@@ -220,7 +212,6 @@ typedef struct GCConc {
     _Atomic uint32_t stop;        /* JS: thread shutdown */
     _Atomic uint64_t tick;        /* JS: boundaries passed */
 
-    _Atomic uint32_t evacuating;  /* GC: copies exist that the back table may hold */
     bool running;                 /* JS: the thread exists */
     bool in_boundary;             /* JS: a boundary step is on the stack */
     bool force_full;              /* JS: run gc_run at the next poll */
@@ -232,10 +223,6 @@ typedef struct GCConc {
 
     /* Work handed between the threads with the request/answer protocol. */
     U32Vec pending_cards;         /* pulled but not yet rescanned */
-    GCMoved *moved;
-    uint32_t moved_n, moved_cap;
-    uint32_t cset_first, cset_count;   /* regions being evacuated (list below) */
-    U32Vec cset;
 
     /* Weak processing results (GC thread -> weak apply step). */
     U32Vec weak_dead[3];          /* WeakMap/WeakSet states, WeakRefs, FinalizationRegistries */
@@ -568,12 +555,13 @@ static void step_mark_start(int kind) {
     /* The GC thread holds no pointer into retired registry storage now. */
     gc_core_free_retired();
     if (g_core.trace_handle) gc_core_trace(0, kind == GC_CYCLE_MINOR ? "--- minor mark start" : "--- major mark start");
-    /* No hole allocation until this cycle's sweep is done (see
-     * gc_core.holes_paused): objects allocated meanwhile go to fresh
-     * regions, above TAMS.  The GC thread has retired gc_copy already. */
-    atomic_store_explicit(&g_core.holes_paused, true, memory_order_release);
-    if (g_core.js_young.in_hole) gc_core_alloc_ctx_retire(&g_core.js_young);
-    if (g_core.js_old.in_hole) gc_core_alloc_ctx_retire(&g_core.js_old);
+    /* Holes keep being filled during the cycle.  What is allocated in them
+     * lies below TAMS, so their lines are flagged as new: the rest of the
+     * holes the contexts are in now, and every hole taken until the sweep is
+     * done.  The last cycle's flags go first. */
+    gc_core_clear_new_lines();
+    atomic_store_explicit(&g_core.cycle_active, true, memory_order_release);
+    gc_core_flag_context_holes();
     if (kind == GC_CYCLE_MINOR) {
         /* The regions allocated into since the last minor cycle hold its
          * young objects and are the ones it sweeps.  A region a context is
@@ -645,98 +633,6 @@ static uint32_t step_remark(int kind, uint64_t t0, uint64_t budget_ns) {
     return ACK_DONE;
 }
 
-static inline bool ranges_overlap_dirty(const uint8_t *dirty, uintptr_t a, uintptr_t b) {
-    uint32_t c0 = (uint32_t)((a - (uintptr_t)g_gc.heap_base) >> GC_CARD_SHIFT);
-    uint32_t c1 = (uint32_t)((b - 1 - (uintptr_t)g_gc.heap_base) >> GC_CARD_SHIFT);
-    for (uint32_t c = c0; c <= c1; c++)
-        if (dirty[c >> 3] & (1u << (c & 7))) return true;
-    return false;
-}
-
-#if !GC_SOFTWARE_DIRTY
-static uint8_t *g_flip_dirty;        /* card bitmap for the flip (Windows) */
-static size_t g_flip_dirty_bytes;
-#endif
-
-/* Flip: reject copies that changed since they were made, or whose
- * originals are pinned, then swap the handle tables. */
-static uint32_t step_flip(uint64_t t0, uint64_t budget_ns) {
-    JSRuntimeHandle rt = g_gc.rt;
-    gc_col_pin_running_code(rt);
-#if !GC_SOFTWARE_DIRTY
-    /* Pages of the evacuated regions written since their objects were
-     * copied (the copier reset each region's write watch first). */
-    U32Vec cards = { 0 };
-    for (uint32_t i = 0; i < g_conc.cset.n; i++) {
-        uintptr_t lo = (uintptr_t)gc_core_region_start(&g_core.regions[g_conc.cset.items[i]]);
-        dirty_pull_range(lo, lo + GC_REGION_SIZE, &cards);
-    }
-    size_t need = (g_conc.card_count + 7) / 8;
-    if (g_flip_dirty_bytes < need) {
-        free(g_flip_dirty);
-        g_flip_dirty = (uint8_t *)calloc(need, 1);
-        g_flip_dirty_bytes = need;
-    }
-    for (uint32_t i = 0; i < cards.n; i++)
-        g_flip_dirty[cards.items[i] >> 3] |= (uint8_t)(1u << (cards.items[i] & 7));
-#endif
-    void **front = atomic_load_explicit(&g_gc.front, memory_order_acquire);
-    void **back = gc_core_back();
-    uint32_t rejected = 0;
-    for (uint32_t i = 0; i < g_conc.moved_n; i++) {
-        GCMoved *m = &g_conc.moved[i];
-        if (front[m->h] != m->from || back[m->h] != m->to) continue;   /* the JS thread moved on */
-        GCRegion *src = gc_core_region_of(m->from);
-        bool reject = gc_col_is_pinned((const GCHeader *)(m->from - GC_HEADER_SIZE));
-#if GC_SOFTWARE_DIRTY
-        /* Software flags only cover reference stores: compare the bytes. */
-        if (!reject && memcmp(m->from - GC_HEADER_SIZE, m->to - GC_HEADER_SIZE, m->total) != 0)
-            reject = true;
-#else
-        if (!reject && ranges_overlap_dirty(g_flip_dirty, (uintptr_t)m->from - GC_HEADER_SIZE,
-                                            (uintptr_t)m->from - GC_HEADER_SIZE + m->total))
-            reject = true;
-#endif
-        if (!reject && g_core.config.reject == GC_REJECT_ALL) reject = true;
-        if (!reject && g_core.config.reject == GC_REJECT_HALF && (i & 1)) reject = true;
-        if (reject) {
-            GC_TRACE(m->h, "copy rejected at flip");
-            atomic_store_explicit((_Atomic(void *) *)&back[m->h], m->from, memory_order_release);
-            src->keep = true;
-            rejected++;
-        }
-        if ((i & 255) == 255 && over_budget(t0, budget_ns)) {
-#if !GC_SOFTWARE_DIRTY
-            /* The write-watch state was consumed: keep it for the retry by
-             * rejecting everything not yet checked. */
-            for (uint32_t k = i + 1; k < g_conc.moved_n; k++) {
-                GCMoved *x = &g_conc.moved[k];
-                if (front[x->h] == x->from && back[x->h] == x->to &&
-                    ranges_overlap_dirty(g_flip_dirty, (uintptr_t)x->from - GC_HEADER_SIZE,
-                                         (uintptr_t)x->from - GC_HEADER_SIZE + x->total)) {
-                    atomic_store_explicit((_Atomic(void *) *)&back[x->h], x->from, memory_order_release);
-                    gc_core_region_of(x->from)->keep = true;
-                }
-            }
-            for (uint32_t k = 0; k < cards.n; k++)
-                g_flip_dirty[cards.items[k] >> 3] = 0;
-            u32_free(&cards);
-#endif
-            g_core.stats.copies_rejected += rejected;
-            return ACK_DECLINED;
-        }
-    }
-#if !GC_SOFTWARE_DIRTY
-    for (uint32_t k = 0; k < cards.n; k++)
-        g_flip_dirty[cards.items[k] >> 3] = 0;
-    u32_free(&cards);
-#endif
-    g_core.stats.copies_rejected += rejected;
-    atomic_store_explicit(&g_gc.front, back, memory_order_release);
-    if (g_core.trace_handle) gc_core_trace(0, "--- flip");
-    return ACK_DONE;
-}
-
 /* Weak apply: fix the weak containers the GC thread flagged, run the
  * finalizers of condemned objects, close the weak window. */
 static void close_weak_window(void) {
@@ -781,9 +677,6 @@ static void run_boundary(uintptr_t stack_lo) {
         break;
     case REQ_REMARK:
         ack = step_remark(kind, t0, budget);
-        break;
-    case REQ_FLIP:
-        ack = step_flip(t0, budget);
         break;
     case REQ_WEAK_APPLY:
         ack = step_weak_apply();
@@ -994,14 +887,18 @@ static void sweep_concurrent(int kind) {
         if (!gc_core_region_in_use(st) || r->permanent) continue;
         /* A minor cycle sweeps where young objects may be. */
         if (kind == GC_CYCLE_MINOR && !r->collecting) continue;
-        /* Hold the region so no context claims it meanwhile.  None is
-         * filling its holes (they are paused), but a region a context still
-         * owns could only be skipped: its dead objects would stay current
-         * after their referents are freed. */
+        /* Hold the region so no context claims it meanwhile.  One a context
+         * is filling holes of is swept all the same (skipping it would leave
+         * its dead objects current after their referents are freed): what
+         * the context allocates is in flagged lines, outside the cycle.  It
+         * is neither formatted nor released. */
         uint32_t rs = atomic_load_explicit(&r->recycle_state, memory_order_acquire);
         if (rs == GC_RECYCLE_OWNED ||
-            !atomic_compare_exchange_strong(&r->recycle_state, &rs, GC_RECYCLE_SWEEPING))
+            !atomic_compare_exchange_strong(&r->recycle_state, &rs, GC_RECYCLE_SWEEPING)) {
+            live_bytes += gc_col_sweep_region(r, r->tams, false);
+            n_kept++;
             continue;
+        }
         uintptr_t top = atomic_load_explicit(&r->top, memory_order_acquire);
         size_t live = gc_col_sweep_region(r, r->tams, false);
         /* Release a region that is empty and that nothing was allocated in
@@ -1014,14 +911,11 @@ static void sweep_concurrent(int kind) {
             continue;
         }
         /* Old regions nothing is filling: turn their free lines into holes
-         * for the recycling allocation contexts, unless the region is about
-         * to be evacuated. */
+         * for the recycling allocation contexts. */
         live_bytes += live;
         size_t hb;
         bool offered = false;
         if (g_core.holes && st == GC_RS_OLD && r->alloc_owner == GC_OWNER_NONE && !r->pinned &&
-            !(kind != GC_CYCLE_MINOR && top == r->tams &&
-              (gc_core_region_evacuates(r, top) || g_core.config.stress >= 2)) &&
             (hb = gc_core_format_holes(r))) {
             hole_bytes += hb;
             n_offered++;
@@ -1033,204 +927,15 @@ static void sweep_concurrent(int kind) {
             atomic_store_explicit(&r->recycle_state, GC_RECYCLE_IDLE, memory_order_release);
             n_kept++;
             if (g_core.log_level > 1)
-                fprintf(stderr, "[GC]     kept region %u: state %u, top %s tams, owner %u, pinned %d, live %zu of %zu%s\n",
+                fprintf(stderr, "[GC]     kept region %u: state %u, top %s tams, owner %u, pinned %d, live %zu of %zu\n",
                         i, st, top == r->tams ? "at" : "past", r->alloc_owner, r->pinned, live,
-                        (size_t)(top - (uintptr_t)gc_core_region_start(r)),
-                        kind != GC_CYCLE_MINOR && gc_core_region_evacuates(r, top) ? ", to evacuate" : "");
+                        (size_t)(top - (uintptr_t)gc_core_region_start(r)));
         }
     }
     if (g_core.log_level)
         fprintf(stderr, "[GC]   %s sweep: %u regions released, %u offered (%.1f MB in holes), %u kept; %.1f MB live\n",
                 kind == GC_CYCLE_MINOR ? "minor" : "major", n_released, n_offered, hole_bytes / 1048576.0, n_kept, live_bytes / 1048576.0);
-    atomic_store_explicit(&g_core.holes_paused, false, memory_order_release);
-}
-
-/* ============================================================================
- * GC thread: evacuation
- * ============================================================================ */
-
-static void moved_push(GCHandle h, uint32_t total, uint8_t *from, uint8_t *to) {
-    if (g_conc.moved_n == g_conc.moved_cap) {
-        uint32_t cap = g_conc.moved_cap ? g_conc.moved_cap * 2 : 4096;
-        GCMoved *n = (GCMoved *)realloc(g_conc.moved, cap * sizeof(GCMoved));
-        if (!n) {
-            fprintf(stderr, "[GC] out of memory (moved list)\n");
-            abort();
-        }
-        g_conc.moved = n;
-        g_conc.moved_cap = cap;
-    }
-    GCMoved *m = &g_conc.moved[g_conc.moved_n++];
-    m->h = h;
-    m->total = total;
-    m->from = from;
-    m->to = to;
-}
-
-/* Copy one object into the back table.  The JS thread keeps using the
- * original until the flip; a CAS that fails means it changed the entry. */
-static void copy_object_concurrent(GCHeader *hdr, void *opaque) {
-    (void)opaque;
-    if (!gc_core_header_is_current(hdr)) return;
-    /* Never moved; finish_flip keeps the region because it is current. */
-    if (gc_header_type(hdr) == JS_GC_OBJ_TYPE_BYTES) return;
-    size_t total = gc_header_total_size(hdr);
-    GCHeader *dst = gc_core_alloc_object_memory(&g_core.gc_copy, total - GC_HEADER_SIZE,
-                                                gc_header_type(hdr));
-    if (!dst) return;
-    memcpy(dst, hdr, total);
-    gc_col_mark_copy(dst);
-    uint8_t *from = (uint8_t *)gc_header_payload(hdr);
-    uint8_t *to = (uint8_t *)gc_header_payload(dst);
-    gc_dirty_range(to, total - GC_HEADER_SIZE);
-    void **back = gc_core_back();
-    void *expect = from;
-    if (atomic_compare_exchange_strong_explicit((_Atomic(void *) *)&back[dst->handle], &expect, to,
-                                                memory_order_acq_rel, memory_order_acquire)) {
-        moved_push(dst->handle, (uint32_t)total, from, to);
-        GC_TRACE(dst->handle, "copied");
-        g_core.stats.objects_copied++;
-    }
-}
-
-static void copy_region(GCRegion *r, uintptr_t limit) {
-    atomic_store_explicit(&g_conc.evacuating, 1, memory_order_release);
-#if !GC_SOFTWARE_DIRTY
-    /* Reset the region's write watch before copying: a write after this
-     * point shows at the flip and rejects the copy. */
-    uintptr_t lo = (uintptr_t)gc_core_region_start(r);
-    dirty_pull_range(lo, lo + GC_REGION_SIZE, NULL);
-#endif
-    uintptr_t start = (uintptr_t)gc_core_region_start(r) + GC_HEADER_SIZE;
-    gc_core_walk_region(r, start, limit, copy_object_concurrent, NULL);
-}
-
-/* Undo the back-table entries of an abandoned evacuation. */
-static void unwind_moves(void) {
-    void **back = gc_core_back();
-    for (uint32_t i = 0; i < g_conc.moved_n; i++) {
-        GCMoved *m = &g_conc.moved[i];
-        void *expect = m->to;
-        atomic_compare_exchange_strong((_Atomic(void *) *)&back[m->h], &expect, (void *)m->from);
-    }
-    g_conc.moved_n = 0;
-    for (uint32_t i = 0; i < g_conc.cset.n; i++) {
-        g_core.regions[g_conc.cset.items[i]].keep = false;
-        g_core.regions[g_conc.cset.items[i]].in_cset = false;
-    }
-    g_conc.cset.n = 0;
-    atomic_store_explicit(&g_conc.evacuating, 0, memory_order_release);
-}
-
-static void any_current_cb(GCHeader *hdr, void *opaque) {
-    if (gc_core_header_is_current(hdr)) *(bool *)opaque = true;
-}
-
-/* After a flip: bring the new back table up to date, then free the
- * regions everything left. */
-static void finish_flip(int kind) {
-    void **front = atomic_load_explicit(&g_gc.front, memory_order_acquire);
-    void **back = gc_core_back();
-    for (uint32_t i = 0; i < g_conc.moved_n; i++) {
-        GCMoved *m = &g_conc.moved[i];
-        if (front[m->h] != m->to) continue;   /* rejected, or changed by the JS thread */
-        void *expect = m->from;
-        atomic_compare_exchange_strong((_Atomic(void *) *)&back[m->h], &expect, (void *)m->to);
-        if (kind == GC_CYCLE_MINOR) g_core.stats.bytes_promoted += m->total;
-    }
-    g_conc.moved_n = 0;
-    for (uint32_t i = 0; i < g_conc.cset.n; i++) {
-        GCRegion *r = &g_core.regions[g_conc.cset.items[i]];
-        bool live = r->keep;
-        if (!live) {
-            /* Belt and braces: anything still current stays. */
-            uintptr_t start = (uintptr_t)gc_core_region_start(r) + GC_HEADER_SIZE;
-            gc_core_walk_region(r, start, atomic_load(&r->top), any_current_cb, &live);
-        }
-        if (live) {
-            if (kind == GC_CYCLE_MINOR) {
-                /* Promoted in place. */
-                r->space = GC_RS_OLD;
-                atomic_store_explicit(&r->state, GC_RS_OLD, memory_order_release);
-                g_core.stats.regions_promoted_in_place++;
-            }
-            r->keep = false;
-            r->in_cset = false;
-            r->collecting = false;
-            continue;
-        }
-        gc_core_region_release(r);
-    }
-    g_conc.cset.n = 0;
-    atomic_store_explicit(&g_conc.evacuating, 0, memory_order_release);
-}
-
-/* Flip, retrying with a larger budget after each decline. */
-static bool flip(void) {
-    uint64_t budget = (uint64_t)g_core.config.boundary_budget_us * 1000ull;
-    for (int attempt = 0; ; attempt++) {
-        uint64_t b = attempt >= 8 ? 0 : budget << attempt;
-        uint32_t ack = post_request(REQ_FLIP, b);
-        if (ack == ACK_DONE) return true;
-        if (ack == ACK_ABORTED || aborted()) return false;
-    }
-}
-
-/* Largest live size one flip validates (the JS thread compares copies with
- * their originals on platforms without OS dirty tracking). */
-#if GC_SOFTWARE_DIRTY
-#define EVAC_BATCH_BYTES ((size_t)512 << 10)
-#else
-#define EVAC_BATCH_BYTES ((size_t)16 << 20)
-#endif
-
-/* Major cycle: evacuate sparse old regions, one batch per flip. */
-static bool evacuate_major(void) {
-    uint32_t hwm = atomic_load(&g_core.region_hwm);
-    uint32_t next = 0;
-    uint32_t n_cset = 0, released0 = atomic_load(&g_core.regions_in_use);
-    while (next < hwm) {
-        size_t batch = 0;
-        g_conc.cset.n = 0;
-        for (; next < hwm && batch < EVAC_BATCH_BYTES; next++) {
-            GCRegion *r = &g_core.regions[next];
-            if (atomic_load_explicit(&r->state, memory_order_acquire) != GC_RS_OLD) continue;
-            if (r->alloc_owner != GC_OWNER_NONE || r->pinned || r->permanent) continue;
-            uintptr_t top = atomic_load_explicit(&r->top, memory_order_acquire);
-            if (top != r->tams) continue;   /* allocated in during the cycle */
-            if (!gc_core_region_evacuates(r, top) && g_core.config.stress < 2) continue;
-            if (r->live_bytes == 0) continue;
-            /* Its holes were offered: a context may be filling them. */
-            if (atomic_load_explicit(&r->recycle_state, memory_order_acquire) != GC_RECYCLE_IDLE) continue;
-            r->in_cset = true;
-            u32_push(&g_conc.cset, next);
-            n_cset++;
-            batch += r->live_bytes;
-        }
-        if (!g_conc.cset.n) break;
-        for (uint32_t i = 0; i < g_conc.cset.n; i++) {
-            GCRegion *r = &g_core.regions[g_conc.cset.items[i]];
-            copy_region(r, r->tams);
-            if (aborted()) {
-                unwind_moves();
-                gc_core_alloc_ctx_retire(&g_core.gc_copy);
-                return false;
-            }
-        }
-        if (!flip()) {
-            unwind_moves();
-            gc_core_alloc_ctx_retire(&g_core.gc_copy);
-            return false;
-        }
-        finish_flip(GC_CYCLE_MAJOR);
-    }
-    /* The copier works in major cycles only: its regions become ordinary
-     * ones, swept and recycled with the rest. */
-    gc_core_alloc_ctx_retire(&g_core.gc_copy);
-    if (g_core.log_level && n_cset)
-        fprintf(stderr, "[GC]   evacuated %u regions, %d fewer in use\n", n_cset,
-                (int)released0 - (int)atomic_load(&g_core.regions_in_use));
-    return true;
+    atomic_store_explicit(&g_core.cycle_active, false, memory_order_release);
 }
 
 /* ============================================================================
@@ -1274,8 +979,8 @@ static void retire_remset(bool completed) {
 }
 
 static void end_concurrent_cycle(void) {
-    /* An abandoned major cycle never reaches its sweep. */
-    atomic_store_explicit(&g_core.holes_paused, false, memory_order_release);
+    /* An abandoned cycle never reaches its sweep. */
+    atomic_store_explicit(&g_core.cycle_active, false, memory_order_release);
     gc_col_end_cycle();
     g_conc.pending_cards.n = 0;
 }
@@ -1291,9 +996,6 @@ static void run_cycle(int kind) {
     uint64_t cards0 = g_core.stats.dirty_cards_rescanned;
     g_next_kind = (uint32_t)kind;
     prepare_bitmaps(kind);
-    /* A major cycle sweeps every region: give up the holes the copier is
-     * filling (the JS thread does the same for its own at mark start). */
-    if (kind != GC_CYCLE_MINOR && g_core.gc_copy.in_hole) gc_core_alloc_ctx_retire(&g_core.gc_copy);
     /* Discard the writes made so far (the tracer reads the objects as they
      * are now), recording them in the remembered set.  Writes between this
      * pull and mark start are pulled, and rescanned, during the cycle. */
@@ -1318,7 +1020,6 @@ static void run_cycle(int kind) {
         g_promoted_since_major += promoted;
         g_core.stats.minor_cycles++;
     } else {
-        if (!evacuate_major()) goto finish;
         g_promoted_since_major = 0;
         g_core.stats.major_cycles++;
     }
@@ -1463,15 +1164,8 @@ void gc_core_free_internal(void) {
     u32_free(&g_ref_log);
     u32_free(&g_conc.pending_cards);
     for (int k = 0; k < 3; k++) u32_free(&g_conc.weak_dead[k]);
-    u32_free(&g_conc.cset);
-    free(g_conc.moved);
     free(g_conc.remset_acc);
     free(g_conc.remset_cur);
-#if !GC_SOFTWARE_DIRTY
-    free(g_flip_dirty);
-    g_flip_dirty = NULL;
-    g_flip_dirty_bytes = 0;
-#endif
     memset(&g_conc, 0, sizeof(g_conc));
     g_ref_log_major_start = 0;
 }
@@ -1549,13 +1243,13 @@ void gc_col_verify_impl(JSRuntimeHandle rt) {
                               pr->space == GC_RS_NURSERY ? "nursery" : "old") : "-");
                 if (ph)
                     fprintf(stderr, "[GC verify]   cycle %s; parent region %u recycle %u owner %u, parent %s tams, "
-                            "in cycle %d, marked %d; child region %u %s; holes paused %d\n",
+                            "in cycle %d, marked %d; child region %u %s; cycle active %d\n",
                             g_col.kind == GC_CYCLE_MINOR ? "minor" : g_col.kind == GC_CYCLE_MAJOR ? "major" : "full",
                             (unsigned)(pr - g_core.regions), atomic_load(&pr->recycle_state), pr->alloc_owner,
                             (uintptr_t)ph < pr->tams ? "below" : "above",
                             gc_col_in_cycle(pr, ph), gc_col_is_marked(pr, ph),
                             (unsigned)(r - g_core.regions), r->collecting ? "collecting" : r->space == GC_RS_NURSERY ? "nursery" : "old",
-                            (int)atomic_load(&g_core.holes_paused));
+                            (int)atomic_load(&g_core.cycle_active));
                 if (g_handle_history) {
                     gc_debug_report_stale_handle(h, "[GC verify]   child");
                     if (ph) gc_debug_report_stale_handle(parent, "[GC verify]   parent");
@@ -1622,6 +1316,8 @@ static void check_object(GCHeader *hdr, void *opaque) {
  * handle-table entries disagree, and handle entries that point outside an
  * object.  Call when the collector is idle. */
 uint32_t gc_test_heap_check(void) {
+    /* A sweep formats holes as it goes: walk the heap between cycles. */
+    gc_wait_idle(20000);
     g_check_problems = 0;
     uint32_t hwm = atomic_load(&g_core.region_hwm);
     for (uint32_t i = 0; i < hwm; i++) {

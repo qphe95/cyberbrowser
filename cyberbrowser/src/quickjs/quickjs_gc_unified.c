@@ -237,6 +237,8 @@ static bool region_prepare(GCRegion *r, bool fresh) {
     r->zeroed = false;
     atomic_store_explicit(&r->recycle_state, GC_RECYCLE_IDLE, memory_order_relaxed);
     if (r->free_lines) memset(r->free_lines, 0, GC_LINE_WORDS * sizeof(uint64_t));
+    if (r->new_lines) memset(r->new_lines, 0, GC_LINE_WORDS * sizeof(uint64_t));
+    atomic_store_explicit(&r->has_new_lines, false, memory_order_relaxed);
     if (!region_commit_metadata(r)) return false;
     memset(r->line_first, GC_LINE_CONT, GC_LINES);
     memset(r->mark_bits[0], 0, BITMAP_WORDS * sizeof(uint64_t));
@@ -513,29 +515,121 @@ static GCRegion *take_recyclable(void) {
     return got;
 }
 
-/* Move a recycling context to its region's next hole; false when none. */
-static bool next_hole(GCAllocCtx *a) {
-    GCRegion *r = a->region;
-    uint32_t i = a->next_line, w = i >> 6;
-    if (w >= GC_LINE_WORDS) return false;
-    /* First free line at or after i, then the first live one after it. */
-    uint64_t v = r->free_lines[w] & (~(uint64_t)0 << (i & 63));
-    while (!v) {
-        if (++w >= GC_LINE_WORDS) return false;
-        v = r->free_lines[w];
+void gc_core_flag_new_lines(GCRegion *r, uint32_t from, uint32_t to) {
+    if (!r->new_lines && !(r->new_lines = (uint64_t *)calloc(GC_LINE_WORDS, sizeof(uint64_t)))) {
+        fprintf(stderr, "[GC] out of memory (line flags)\n");
+        abort();
     }
-    i = (w << 6) + (uint32_t)__builtin_ctzll(v);
-    if (i >= GC_LINES) return false;
-    v = ~r->free_lines[w] & (~(uint64_t)0 << (i & 63));
-    while (!v && ++w < GC_LINE_WORDS) v = ~r->free_lines[w];
-    uint32_t j = v ? (w << 6) + (uint32_t)__builtin_ctzll(v) : GC_LINES;
-    if (j > GC_LINES) j = GC_LINES;
+    for (uint32_t l = from; l < to; l++)
+        atomic_fetch_or_explicit((_Atomic uint64_t *)&r->new_lines[l >> 6], (uint64_t)1 << (l & 63),
+                                 memory_order_release);
+    atomic_store_explicit(&r->has_new_lines, true, memory_order_release);
+}
+
+/* The rest of a context's hole, at mark start.  Objects allocated before it
+ * must stay in the cycle (the line holding the cursor has some), so the
+ * context moves on to the next line boundary first: what it allocates from
+ * there on is in flagged lines only. */
+static void flag_ctx_hole(GCAllocCtx *a) {
+    if (!a->in_hole) return;
+    uintptr_t lb = gc_core_line_base(a->region);
+    uintptr_t next = lb + (((uintptr_t)a->top - lb + GC_LINE_SIZE - 1) & ~(GC_LINE_SIZE - 1));
+    if (next > (uintptr_t)a->end) next = (uintptr_t)a->end;
+    a->top = a->line_end = (uint8_t *)next;
+    gc_core_flag_new_lines(a->region, line_of(lb, next), line_of(lb, (uintptr_t)a->end));
+}
+
+void gc_core_flag_context_holes(void) {
+    GCAllocCtx *all[] = { &g_core.js_young, &g_core.js_young_overflow, &g_core.js_old, &g_core.js_old_overflow,
+                          &g_core.js_perm, &g_core.gc_copy, &g_core.gc_copy_overflow };
+    for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) flag_ctx_hole(all[i]);
+}
+
+void gc_core_clear_new_lines(void) {
+    uint32_t hwm = atomic_load(&g_core.region_hwm);
+    for (uint32_t i = 0; i < hwm; i++) {
+        GCRegion *r = &g_core.regions[i];
+        if (!atomic_load_explicit(&r->has_new_lines, memory_order_relaxed)) continue;
+        atomic_store_explicit(&r->has_new_lines, false, memory_order_release);
+        memset(r->new_lines, 0, GC_LINE_WORDS * sizeof(uint64_t));
+    }
+}
+
+/* The first hole of r at or after line `from` with at least `min` bytes:
+ * lines [*pi, *pj).  False when there is none. */
+static bool find_hole(const GCRegion *r, uint32_t from, size_t min, uint32_t *pi, uint32_t *pj) {
+    for (;;) {
+        uint32_t w = from >> 6;
+        if (w >= GC_LINE_WORDS) return false;
+        /* First free line at or after `from`, then the first live one after it. */
+        uint64_t v = r->free_lines[w] & (~(uint64_t)0 << (from & 63));
+        while (!v) {
+            if (++w >= GC_LINE_WORDS) return false;
+            v = r->free_lines[w];
+        }
+        uint32_t i = (w << 6) + (uint32_t)__builtin_ctzll(v);
+        if (i >= GC_LINES) return false;
+        v = ~r->free_lines[w] & (~(uint64_t)0 << (i & 63));
+        while (!v && ++w < GC_LINE_WORDS) v = ~r->free_lines[w];
+        uint32_t j = v ? (w << 6) + (uint32_t)__builtin_ctzll(v) : GC_LINES;
+        if (j > GC_LINES) j = GC_LINES;
+        if (((size_t)(j - i) << GC_LINE_SHIFT) >= min) {
+            *pi = i;
+            *pj = j;
+            return true;
+        }
+        from = j;
+    }
+}
+
+/* Move a recycling context into hole [i, j) of its region, claiming it: its
+ * lines are no longer free for anyone else. */
+static void enter_hole(GCAllocCtx *a, uint32_t i, uint32_t j) {
+    GCRegion *r = a->region;
+    for (uint32_t l = i; l < j; l++) r->free_lines[l >> 6] &= ~((uint64_t)1 << (l & 63));
     a->top = (uint8_t *)(gc_core_line_base(r) + ((uintptr_t)i << GC_LINE_SHIFT));
     a->end = (uint8_t *)(gc_core_line_base(r) + ((uintptr_t)j << GC_LINE_SHIFT));
     a->line_end = a->top;
     a->next_line = j;
     a->in_hole = true;
+    if (atomic_load_explicit(&g_core.cycle_active, memory_order_acquire)) gc_core_flag_new_lines(r, i, j);
+}
+
+/* Leave the current hole, giving its unused whole lines back. */
+static void leave_hole(GCAllocCtx *a) {
+    GCRegion *r = a->region;
+    uintptr_t lb = gc_core_line_base(r);
+    uint32_t from = (uint32_t)(((uintptr_t)a->top - lb + GC_LINE_SIZE - 1) >> GC_LINE_SHIFT);
+    uint32_t to = line_of(lb, (uintptr_t)a->end);
+    for (uint32_t l = from; l < to; l++) r->free_lines[l >> 6] |= (uint64_t)1 << (l & 63);
+    a->in_hole = false;
+}
+
+/* Into the region's first hole, at or after the current one, that fits
+ * `total` bytes; false when none does. */
+static bool next_hole_fitting(GCAllocCtx *a, size_t total) {
+    uint32_t i, j;
+    if (!find_hole(a->region, a->next_line, total, &i, &j)) return false;
+    if (a->in_hole) leave_hole(a);
+    enter_hole(a, i, j);
     return true;
+}
+
+static bool region_has_free_lines(const GCRegion *r) {
+    for (uint32_t w = 0; w < GC_LINE_WORDS; w++) if (r->free_lines[w]) return true;
+    return false;
+}
+
+/* Hand a recycling context's region back: offered again while it has free
+ * lines (holes the context skipped or left unused), idle otherwise. */
+static void give_back_region(GCRegion *r) {
+    r->alloc_owner = GC_OWNER_NONE;
+    if (region_has_free_lines(r)) {
+        atomic_store_explicit(&r->recycle_state, GC_RECYCLE_AVAILABLE, memory_order_release);
+        gc_core_offer_recyclable(r);
+    } else {
+        atomic_store_explicit(&r->recycle_state, GC_RECYCLE_IDLE, memory_order_release);
+    }
 }
 
 /* Give up the context's region (not its overflow one). */
@@ -543,12 +637,13 @@ static void ctx_retire_region(GCAllocCtx *a) {
     if (a->region) {
         if (a->in_hole) {
             /* Holes lie below top; the region's top does not move.  The rest
-             * of the hole stays zero: free space. */
-            atomic_store_explicit(&a->region->recycle_state, GC_RECYCLE_IDLE, memory_order_release);
+             * of the hole stays zero (free space) and goes back. */
+            leave_hole(a);
+            give_back_region(a->region);
         } else {
             atomic_store_explicit(&a->region->top, (uintptr_t)a->top, memory_order_release);
+            a->region->alloc_owner = GC_OWNER_NONE;
         }
-        a->region->alloc_owner = GC_OWNER_NONE;
     }
     a->region = NULL;
     a->top = a->end = a->line_end = NULL;
@@ -602,50 +697,66 @@ static GCHeader *bump_alloc(GCAllocCtx *a, size_t total, uint32_t info) {
     return alloc_cross(a, total, info);
 }
 
-/* A recycling context's allocation from holes: the current hole (or, for an
- * object bigger than a line that does not fit there, the overflow region),
- * the region's later holes, then other recyclable regions.  NULL when none
- * fits, or while a major cycle runs (the caller bump-allocates as usual). */
-static GCHeader *hole_alloc(GCAllocCtx *a, size_t total, uint32_t info) {
-    if (atomic_load_explicit(&g_core.holes_paused, memory_order_acquire)) {
-        if (a->in_hole) ctx_retire_region(a);
-        return NULL;
+static GCHeader *hole_alloc(GCAllocCtx *a, size_t total, uint32_t info);
+
+/* Allocate in a recycling context's overflow context: holes that fit, then
+ * a fresh region. */
+static GCHeader *overflow_alloc(GCAllocCtx *o, size_t total, uint32_t info) {
+    if (o->top && o->top + total < o->line_end) {
+        GCHeader *hdr = (GCHeader *)o->top;
+        o->top += total;
+        hdr->info = info;
+        if (!o->in_hole) atomic_store_explicit(&o->region->top, (uintptr_t)o->top, memory_order_release);
+        return hdr;
     }
+    GCHeader *hdr = o->recycles && g_core.holes ? hole_alloc(o, total, info) : NULL;
+    return hdr ? hdr : bump_alloc(o, total, info);
+}
+
+/* A recycling context's allocation from holes: the current hole (or, for an
+ * object bigger than a line that does not fit there, the overflow context),
+ * the region's later holes that fit, then other recyclable regions.  NULL
+ * when none fits (the caller bump-allocates as usual). */
+static GCHeader *hole_alloc(GCAllocCtx *a, size_t total, uint32_t info) {
+    /* Skipping the rest of a hole for an object bigger than a line would
+     * waste it: small objects fill it later. */
+    bool overflows = total > GC_LINE_SIZE && a->overflow;
     if (a->in_hole) {
         if (a->top + total <= a->end) return alloc_cross(a, total, info);
-        /* Skipping the rest of the hole would waste it: small objects fill
-         * it later. */
-        if (total > GC_LINE_SIZE && a->overflow) {
-            GCAllocCtx *o = a->overflow;
-            if (o->top && o->top + total < o->line_end) {
-                GCHeader *hdr = (GCHeader *)o->top;
-                o->top += total;
-                hdr->info = info;
-                atomic_store_explicit(&o->region->top, (uintptr_t)o->top, memory_order_release);
-                return hdr;
-            }
-            return bump_alloc(o, total, info);
-        }
-        while (next_hole(a))
-            if (a->top + total <= a->end) return alloc_cross(a, total, info);
+        if (overflows) return overflow_alloc(a->overflow, total, info);
+        if (next_hole_fitting(a, total)) return alloc_cross(a, total, info);
         ctx_retire_region(a);
     }
     /* Only when the context needs new space: keep filling a fresh region it
      * already has. */
     if (a->region && a->top + total <= a->end) return NULL;
+    /* Regions none of whose holes fit go back after the search, so that it
+     * does not take them again. */
+    GCRegion *skipped[8];
+    uint32_t ns = 0;
+    GCHeader *hdr = NULL;
     GCRegion *r;
-    while ((r = take_recyclable())) {
+    while (ns < 8 && (r = take_recyclable())) {
         if (a->region) ctx_retire_region(a);
         r->alloc_owner = a->owner;
         r->has_young = true;
         a->region = r;
         a->next_line = 0;
         a->in_hole = false;
-        while (next_hole(a))
-            if (a->top + total <= a->end) return alloc_cross(a, total, info);
-        ctx_retire_region(a);
+        if (next_hole_fitting(a, total)) {
+            hdr = alloc_cross(a, total, info);
+            break;
+        }
+        /* Keep the region for the small objects its holes fit. */
+        if (overflows && next_hole_fitting(a, 0)) {
+            hdr = overflow_alloc(a->overflow, total, info);
+            break;
+        }
+        a->region = NULL;
+        skipped[ns++] = r;
     }
-    return NULL;
+    for (uint32_t k = 0; k < ns; k++) give_back_region(skipped[k]);
+    return hdr;
 }
 
 GCHeader *gc_core_alloc_object_memory(GCAllocCtx *a, size_t payload, JSGCObjectTypeEnum type) {
@@ -818,45 +929,17 @@ GCHandle gc_realloc(GCHandle handle, size_t new_size) {
     JSGCObjectTypeEnum type = gc_header_type(old_hdr);
     size_t old_size = gc_header_payload_size(old_hdr);
     GCRegion *orr = gc_core_region_of(old_hdr);
-    bool young = g_core.nursery_enabled && orr && orr->space == GC_RS_NURSERY;
-    /* Debug (QJS_GC_REALLOC_MOVES=1): return a new handle and free the old
-     * one, as a realloc will once references are addresses, so a caller
-     * that keeps using the old handle shows up (with QJS_GC_NO_REUSE the
-     * old handle dereferences to NULL). */
-    static int moves = -1;
-    if (moves < 0) moves = getenv("QJS_GC_REALLOC_MOVES") != NULL;
-    if (moves) {
-        bool perm = orr && orr->permanent;
-        GCHandle nh = gc_alloc_in(new_size, type, !young || perm, perm);
-        void *np = gc_deref(nh);
-        memcpy(np, old_ptr, old_size < new_size ? old_size : new_size);
-        gc_dirty_range(np, old_size < new_size ? old_size : new_size);
-        gc_free(handle);
-        return nh;
-    }
-    GCAllocCtx *a = orr && orr->permanent ? &g_core.js_perm : young ? &g_core.js_young : &g_core.js_old;
-    GCHeader *hdr = gc_core_alloc_object_memory(a, new_size, type);
-    if (!hdr) {
-        fprintf(stderr, "[GC] out of memory reallocating %zu bytes\n", new_size);
-        abort();
-    }
-    void *new_ptr = gc_header_payload(hdr);
+    /* Objects never move: the new size is a new object, with a new handle,
+     * which the caller stores where the old one was.  The old one is left to
+     * the collector rather than freed: a holder the caller does not know of
+     * (a shape shared by other objects) keeps a valid object. */
+    bool perm = orr && orr->permanent;
+    GCHandle nh = gc_alloc_in(new_size, type, perm || type_starts_old(type), perm);
+    void *np = gc_deref(nh);
     size_t n = old_size < new_size ? old_size : new_size;
-    memcpy(new_ptr, old_ptr, n);
-    gc_col_mark_copy(hdr);
-    hdr->handle = handle;
-    gc_core_handle_dual_write(handle, new_ptr);
-    /* The copy held its references before it was current: a card rescan in
-     * between skipped it (and the old copy, no longer current either), so
-     * its cards must be dirty again now. */
-    gc_dirty_range(new_ptr, n);
-#if !GC_SOFTWARE_DIRTY
-    for (uintptr_t a = (uintptr_t)new_ptr; a < (uintptr_t)new_ptr + n;
-         a = (a & ~(uintptr_t)(GC_OS_PAGE_SIZE - 1)) + GC_OS_PAGE_SIZE)
-        atomic_fetch_or_explicit((_Atomic uint32_t *)(a & ~(uintptr_t)3), 0, memory_order_relaxed);
-#endif
-    gc_core_note_allocation(gc_header_total_size(hdr), young);
-    return handle;
+    memcpy(np, old_ptr, n);
+    gc_dirty_range(np, n);
+    return nh;
 }
 
 GCHandle gc_realloc2(GCHandle handle, size_t new_size, size_t *pslack) {
@@ -1248,6 +1331,7 @@ bool gc_init(void) {
     g_core.js_young.recycles = true;
     g_core.js_young_overflow.space = GC_RS_OLD;
     g_core.js_young_overflow.owner = GC_OWNER_JS;
+    g_core.js_young_overflow.recycles = true;
     g_core.js_young.overflow = &g_core.js_young_overflow;
     g_core.js_old.space = GC_RS_OLD;
     g_core.js_old.recycles = true;
@@ -1260,6 +1344,7 @@ bool gc_init(void) {
     g_core.gc_copy.owner = GC_OWNER_GC;
     g_core.js_old_overflow.space = GC_RS_OLD;
     g_core.js_old_overflow.owner = GC_OWNER_JS;
+    g_core.js_old_overflow.recycles = true;
     g_core.js_old.overflow = &g_core.js_old_overflow;
     g_core.gc_copy_overflow.space = GC_RS_OLD;
     g_core.gc_copy_overflow.owner = GC_OWNER_GC;
@@ -1290,6 +1375,7 @@ void gc_cleanup(void) {
     for (uint32_t i = 0; i < GC_MAX_REGIONS; i++) {
         GCRegion *r = &g_core.regions[i];
         free(r->line_first);
+        free(r->new_lines);
         free(r->mark_bits[0]);
         free(r->mark_bits[1]);
     }

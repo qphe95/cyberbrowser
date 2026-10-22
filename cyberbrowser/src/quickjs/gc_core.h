@@ -55,6 +55,11 @@ typedef struct GCRegion {
     /* An allocation context has filled it since the last minor cycle's
      * mark start: it may hold young (unmarked) objects. */
     bool has_young;
+    /* Lines of holes taken while a cycle runs, one bit each: objects there
+     * were allocated during the cycle and are outside it.  Cleared at the
+     * next mark start. */
+    uint64_t *new_lines;
+    _Atomic bool has_new_lines;
     bool in_recyclable;               /* listed in g_core.recyclable (under its lock) */
 } GCRegion;
 
@@ -148,14 +153,15 @@ typedef struct GCCore {
     uint64_t js_thread_id;
 
     /* Hole reuse (QJS_GC_HOLES, on by default): old regions with holes, for
-     * the recycling allocation contexts.  Paused from a major cycle's mark
-     * start to the end of its sweep: the sweep must reach every region, and
-     * one a context fills cannot be swept. */
+     * the recycling allocation contexts. */
     bool holes;
     atomic_flag recyclable_lock;
     uint32_t *recyclable;
     uint32_t recyclable_n, recyclable_cap;
-    _Atomic bool holes_paused;
+    /* From a cycle's mark start to the end of its sweep: holes taken in the
+     * meantime lie below their region's TAMS, so their lines are flagged
+     * (GCRegion.new_lines) to keep what is allocated there out of it. */
+    _Atomic bool cycle_active;
 
     GCConfig config;
     GCStats stats;
@@ -184,6 +190,11 @@ void gc_core_registry_add(GCRegistry *reg, GCHandle h);
  * Returns the bytes in holes.  The caller holds the region SWEEPING. */
 size_t gc_core_format_holes(GCRegion *r);
 void gc_core_offer_recyclable(GCRegion *r);
+/* Flag lines [from, to) of r, or the rest of every context's current hole, as
+ * allocated during the running cycle; clear every flag (next mark start). */
+void gc_core_flag_new_lines(GCRegion *r, uint32_t from, uint32_t to);
+void gc_core_flag_context_holes(void);
+void gc_core_clear_new_lines(void);
 /* Mark a copy made under an existing handle as old (gc_collector.c). */
 void gc_col_mark_copy(GCHeader *hdr);
 
@@ -201,6 +212,13 @@ static inline uintptr_t gc_core_line_base(const GCRegion *r) {
     return (uintptr_t)gc_core_region_start(r) + GC_HEADER_SIZE;
 }
 
+/* The object at hdr was allocated, in a hole, during the running cycle. */
+static inline bool gc_core_in_new_line(const GCRegion *r, const void *hdr) {
+    if (!atomic_load_explicit(&r->has_new_lines, memory_order_acquire)) return false;
+    uint32_t l = (uint32_t)(((uintptr_t)hdr - gc_core_line_base(r)) >> GC_LINE_SHIFT);
+    return (atomic_load_explicit((_Atomic uint64_t *)&r->new_lines[l >> 6], memory_order_acquire) >> (l & 63)) & 1;
+}
+
 /* p holds a zero header: the next header after the free space, or `limit`
  * if there is none before it. */
 static inline uintptr_t gc_core_skip_free(const GCRegion *r, uintptr_t p, uintptr_t limit) {
@@ -210,15 +228,6 @@ static inline uintptr_t gc_core_skip_free(const GCRegion *r, uintptr_t p, uintpt
     if (l >= GC_LINES) return limit;
     uintptr_t q = lb + ((uintptr_t)l << GC_LINE_SHIFT) + ((uintptr_t)r->line_first[l] << 4);
     return q < limit ? q : limit;
-}
-
-/* Whether a swept region is sparse enough to copy its survivors out and
- * free it.  With hole reuse only the sparsest are (live under a quarter of
- * the used space): their holes would refill slowly while the region stays
- * committed.  The rest keep their objects in place and offer their holes. */
-static inline bool gc_core_region_evacuates(const GCRegion *r, uintptr_t top) {
-    size_t used = top - (uintptr_t)gc_core_region_start(r);
-    return g_core.holes ? r->live_bytes * 4 <= used : r->live_bytes * 2 <= used;
 }
 
 static inline uint32_t gc_core_granule_of(const GCRegion *r, const void *hdr) {

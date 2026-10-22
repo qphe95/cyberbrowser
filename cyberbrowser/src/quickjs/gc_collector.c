@@ -115,12 +115,12 @@ static void worklist_push(GCWorklist *w, GCHandle h) {
 
 /* True if the collection in progress decides this object's fate.  Objects
  * outside the cycle are live by definition: allocated during the cycle
- * (above TAMS).  In a minor cycle the old objects are in it too, but they
+ * (above TAMS, or in a hole taken since mark start).  In a minor cycle the old objects are in it too, but they
  * are marked already (sticky mark bits), so only young ones get traced or
  * freed. */
 static inline bool in_cycle(const GCRegion *r, const GCHeader *hdr) {
     if (r->permanent) return false;   /* atoms */
-    return g_col.kind != GC_CYCLE_NONE && (uintptr_t)hdr < r->tams;
+    return g_col.kind != GC_CYCLE_NONE && (uintptr_t)hdr < r->tams && !gc_core_in_new_line(r, hdr);
 }
 
 static inline bool is_marked(const GCRegion *r, const GCHeader *hdr) {
@@ -546,59 +546,12 @@ static void sweep_all_now(void) {
             atomic_store(&r->recycle_state, GC_RECYCLE_IDLE);
             gc_core_region_release(r);
         } else if (g_core.holes && st == GC_RS_OLD && r->alloc_owner == GC_OWNER_NONE && !r->pinned &&
-                   atomic_load(&r->recycle_state) != GC_RECYCLE_OWNED && !gc_core_region_evacuates(r, atomic_load(&r->top)) &&
+                   atomic_load(&r->recycle_state) != GC_RECYCLE_OWNED &&
                    gc_core_format_holes(r)) {
             atomic_store(&r->recycle_state, GC_RECYCLE_AVAILABLE);
             gc_core_offer_recyclable(r);
-        } else if (atomic_load(&r->recycle_state) == GC_RECYCLE_AVAILABLE) {
-            /* Sparse now: left for evacuation, its old holes withdrawn. */
-            atomic_store(&r->recycle_state, GC_RECYCLE_IDLE);
         }
     }
-}
-
-/* ============================================================================
- * Evacuation (stop-the-world)
- * ============================================================================ */
-
-static void copy_object_now(GCHeader *hdr, void *opaque) {
-    if (!gc_core_header_is_current(hdr)) return;
-    if (gc_header_type(hdr) == JS_GC_OBJ_TYPE_BYTES) {
-        *(bool *)opaque = true;   /* never moved: the region stays */
-        return;
-    }
-    size_t total = gc_header_total_size(hdr);
-    GCHeader *dst = gc_core_alloc_object_memory(&g_core.gc_copy, total - GC_HEADER_SIZE,
-                                                gc_header_type(hdr));
-    if (!dst) {
-        fprintf(stderr, "[GC] out of memory while compacting\n");
-        abort();
-    }
-    memcpy(dst, hdr, total);
-    gc_col_mark_copy(dst);
-    /* The copy is a new home for whatever the object references: its cards
-     * must be in the nursery's remembered set. */
-    gc_dirty_range(gc_header_payload(dst), total - GC_HEADER_SIZE);
-    gc_core_handle_dual_write(hdr->handle, gc_header_payload(dst));
-    g_core.stats.objects_copied++;
-}
-
-/* Move the live objects out of sparse regions and free the regions. */
-static void evacuate_sparse_regions_now(void) {
-    uint32_t hwm = atomic_load(&g_core.region_hwm);
-    for (uint32_t i = 0; i < hwm; i++) {
-        GCRegion *r = &g_core.regions[i];
-        uint32_t st = atomic_load(&r->state);
-        if (st != GC_RS_OLD && st != GC_RS_NURSERY) continue;
-        if (r->pinned || r->permanent || r->alloc_owner != GC_OWNER_NONE) continue;
-        if (!gc_core_region_evacuates(r, atomic_load(&r->top))) continue;
-        if (atomic_load(&r->recycle_state) != GC_RECYCLE_IDLE) continue;   /* its holes are offered */
-        uintptr_t start = (uintptr_t)gc_core_region_start(r) + GC_HEADER_SIZE;
-        bool left_behind = false;
-        gc_core_walk_region(r, start, atomic_load(&r->top), copy_object_now, &left_behind);
-        if (!left_behind) gc_core_region_release(r);
-    }
-    gc_core_alloc_ctx_retire(&g_core.gc_copy);
 }
 
 /* ============================================================================
@@ -648,8 +601,10 @@ static void full_collection(uintptr_t stack_lo) {
     gc_core_alloc_ctx_retire(&g_core.gc_copy);
 
     if (g_core.trace_handle) gc_core_trace(0, "--- full collection");
-    /* The full collection supersedes any concurrent cycle. */
-    atomic_store(&g_core.holes_paused, false);
+    /* The full collection supersedes any concurrent cycle: nothing is being
+     * allocated during it. */
+    atomic_store(&g_core.cycle_active, false);
+    gc_core_clear_new_lines();
     begin_cycle(GC_CYCLE_FULL, true);
     g_col.pins_n = 0;
     capture_stack_range(stack_lo);
@@ -659,7 +614,6 @@ static void full_collection(uintptr_t stack_lo) {
     if (g_core.config.verify) gc_col_verify_impl(rt);
     weak_step(rt);
     sweep_all_now();
-    evacuate_sparse_regions_now();
     end_cycle();
     gc_core_after_full_collection();
     g_core.stats.full_collections++;

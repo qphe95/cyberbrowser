@@ -1125,20 +1125,28 @@ TEST(test_gc_humongous_object_never_moves) {
     return true;
 }
 
-TEST(test_gc_realloc_keeps_handle_and_contents) {
+/* Objects never move: a realloc is a new object with the old contents; the
+ * old one stays, valid, until the collector finds it unreachable. */
+TEST(test_gc_realloc_copies_into_a_new_object) {
+    BgState st;
+    bg_pause(&st);
     GCHandle h = gc_alloc(64, JS_GC_OBJ_TYPE_DATA);
     uint8_t *p = (uint8_t *)gc_deref(h);
     for (int i = 0; i < 64; i++) p[i] = (uint8_t)i;
-    ASSERT_EQ((int)h, (int)gc_realloc(h, 5000));
-    p = (uint8_t *)gc_deref(h);
+    GCHandle h2 = gc_realloc(h, 5000);
+    ASSERT_TRUE(h2 != GC_HANDLE_NULL);
+    ASSERT_TRUE(h2 != h);
+    ASSERT_TRUE(gc_deref(h) != NULL);
+    p = (uint8_t *)gc_deref(h2);
     for (int i = 0; i < 64; i++) ASSERT_EQ(i, p[i]);
-    ASSERT_TRUE(gc_handle_get_size(h) >= 5000);
-    ASSERT_EQ((int)h, (int)gc_realloc(h, 16));
-    p = (uint8_t *)gc_deref(h);
-    for (int i = 0; i < 16; i++) ASSERT_EQ(i, p[i]);
-    /* Front and back tables agree after the move. */
-    ASSERT_TRUE(gc_core_back()[h] == gc_deref(h));
+    ASSERT_TRUE(gc_handle_get_size(h2) >= 5000);
+    GCHandle h3 = gc_realloc(h2, 16);
     gc_free(h);
+    gc_free(h2);
+    p = (uint8_t *)gc_deref(h3);
+    for (int i = 0; i < 16; i++) ASSERT_EQ(i, p[i]);
+    gc_free(h3);
+    bg_resume(&st);
     return true;
 }
 
@@ -1269,10 +1277,9 @@ TEST(test_gc_finalizers_run_once) {
 }
 
 /* Fill old regions, free most objects and keep every `stride`th, collect.
- * Returns false on a failed check.  `moved`: survivors were copied out (the
- * regions were sparse enough to compact); otherwise they stay put and the
- * free lines between them take new objects. */
-static bool sparse_regions_case(int stride, bool moved) {
+ * Returns false on a failed check.  Nothing moves: the survivors stay put
+ * and, with hole reuse, the free lines between them take new objects. */
+static bool sparse_regions_case(int stride) {
     BgState st;
     bg_pause(&st);
     enum { N = 20000 };
@@ -1296,15 +1303,14 @@ static bool sparse_regions_case(int stride, bool moved) {
     gc_get_stats(&s0);
     gc_run();
     gc_get_stats(&s1);
-    if (moved) {
-        ASSERT_TRUE(s1.objects_copied > s0.objects_copied);
-    } else {
+    ASSERT_EQ((int)s0.objects_copied, (int)s1.objects_copied);
+    if (g_core.holes) {
         int reused = 0;
         for (int i = 0; i < N / 4; i++) {
             GCHandle h = gc_alloc_old(100, JS_GC_OBJ_TYPE_DATA);
-            GCRegion *r = gc_core_region_of(gc_deref(h));
-            for (int k = 0; k < nk; k += 50)
-                if (gc_core_region_of(where[k]) == r) { reused++; break; }
+            /* Below its region's top: in a hole, not bump-allocated. */
+            void *at = gc_deref(h);
+            if ((uintptr_t)at < atomic_load(&gc_core_region_of(at)->top)) reused++;
             gc_free(h);
         }
         ASSERT_TRUE(reused > N / 8);
@@ -1312,7 +1318,7 @@ static bool sparse_regions_case(int stride, bool moved) {
     for (int k = 0; k < nk; k++) {
         uint32_t *p = (uint32_t *)gc_deref(keep[k]);
         ASSERT_TRUE(p != NULL);
-        if (!moved) { ASSERT_TRUE((void *)p == where[k]); }
+        ASSERT_TRUE((void *)p == where[k]);
         ASSERT_EQ(k * stride, (int)p[0]);
         ASSERT_EQ((uint32_t)(k * stride) * 7u, p[24]);
         gc_remove_root(keep[k]);
@@ -1322,16 +1328,13 @@ static bool sparse_regions_case(int stride, bool moved) {
     return true;
 }
 
-/* A tenth live: compacted, with or without hole reuse. */
-TEST(test_gc_compaction_moves_survivors) {
-    return sparse_regions_case(10, true);
+/* A tenth live, and a third. */
+TEST(test_gc_sparse_regions_keep_survivors) {
+    return sparse_regions_case(10);
 }
 
-/* A third live: with hole reuse the survivors stay and the holes are
- * filled; without it the region is not sparse enough to compact. */
-TEST(test_gc_sparse_regions_keep_survivors) {
-    if (!g_core.holes) return true;
-    return sparse_regions_case(3, false);
+TEST(test_gc_denser_regions_keep_survivors) {
+    return sparse_regions_case(3);
 }
 
 /* An object a raw pointer on the stack points into is pinned: compaction
@@ -1729,60 +1732,6 @@ TEST(test_gc_concurrent_workload_stress) {
     return true;
 }
 
-/* Request a major cycle and run boundary steps until one completes (at
- * stress 2 the collector never goes idle). */
-static bool run_major_cycle(void) {
-    GCStats s0, s;
-    gc_get_stats(&s0);
-    gc_request_cycle(true);
-    uint64_t end = gc_os_now_ns() + 20000000000ull;
-    do {
-        gc_tick();
-        gc_os_yield();
-        gc_get_stats(&s);
-        if (gc_os_now_ns() > end) return false;
-    } while (s.major_cycles < s0.major_cycles + 2);
-    return true;
-}
-
-/* Every copy rejected at the flip (major cycles move everything at stress
- * 2): objects stay where they are, still correct. */
-TEST(test_gc_flip_rejects_all_copies) {
-    JSContextHandle ctx = get_gc_test_ctx();
-    if (!SAFE_VALID(ctx)) return true;
-    ConcState st;
-    ASSERT_TRUE(conc_begin(&st, 2, GC_REJECT_ALL, 128));
-    ASSERT_TRUE(eval_expect_ok(ctx, k_workload_script));
-    /* Only major cycles move objects: make sure one runs. */
-    ASSERT_TRUE(run_major_cycle());
-    GCStats s;
-    ASSERT_TRUE(conc_end(&st, &s));
-    ASSERT_TRUE(s.copies_rejected > st.before.copies_rejected);
-    ASSERT_EQ(st.before.verify_failures, s.verify_failures);
-    ASSERT_EQ(0, (int)gc_test_heap_check());
-    return true;
-}
-
-/* Half the copies rejected, and dense regions moved too (stress 2): both
- * flip paths in the same cycles. */
-TEST(test_gc_flip_mixed_accept_reject) {
-    JSContextHandle ctx = get_gc_test_ctx();
-    if (!SAFE_VALID(ctx)) return true;
-    ConcState st;
-    ASSERT_TRUE(conc_begin(&st, 2, GC_REJECT_HALF, 128));
-    ASSERT_TRUE(eval_expect_ok(ctx, k_workload_script));
-    /* Only major cycles move objects: make sure one runs. */
-    ASSERT_TRUE(run_major_cycle());
-    GCStats s;
-    ASSERT_TRUE(conc_end(&st, &s));
-    ASSERT_TRUE(s.copies_rejected > st.before.copies_rejected);
-    ASSERT_TRUE(s.objects_copied - st.before.objects_copied >
-                s.copies_rejected - st.before.copies_rejected);
-    ASSERT_EQ(st.before.verify_failures, s.verify_failures);
-    ASSERT_EQ(0, (int)gc_test_heap_check());
-    return true;
-}
-
 /* gc_run() in the middle of concurrent cycles abandons them cleanly. */
 TEST(test_gc_full_collection_aborts_cycle) {
     JSContextHandle ctx = get_gc_test_ctx();
@@ -1975,15 +1924,15 @@ void run_gc_tests(void) {
     RUN_TEST(test_gc_ptr_to_handle_interior);
     RUN_TEST(test_gc_atoms_are_permanent);
     RUN_TEST(test_gc_humongous_object_never_moves);
-    RUN_TEST(test_gc_realloc_keeps_handle_and_contents);
+    RUN_TEST(test_gc_realloc_copies_into_a_new_object);
     RUN_TEST(test_gc_free_recycles_handle);
 
     printf("\n=== Stop-the-World Collection ===\n");
     RUN_TEST(test_gc_unreachable_objects_freed);
     RUN_TEST(test_gc_roots_keep_objects);
     RUN_TEST(test_gc_finalizers_run_once);
-    RUN_TEST(test_gc_compaction_moves_survivors);
     RUN_TEST(test_gc_sparse_regions_keep_survivors);
+    RUN_TEST(test_gc_denser_regions_keep_survivors);
     RUN_TEST(test_gc_raw_pointer_pins_object);
 
     printf("\n=== Dirty Tracking ===\n");
@@ -1995,8 +1944,6 @@ void run_gc_tests(void) {
     RUN_TEST(test_gc_minor_cycle_promotes_survivors);
     RUN_TEST(test_gc_remembered_set_keeps_young_objects);
     RUN_TEST(test_gc_concurrent_workload_stress);
-    RUN_TEST(test_gc_flip_rejects_all_copies);
-    RUN_TEST(test_gc_flip_mixed_accept_reject);
     RUN_TEST(test_gc_full_collection_aborts_cycle);
     RUN_TEST(test_gc_cycles_progress_inside_long_script);
     RUN_TEST(test_gc_boundary_budget_declines);
