@@ -3875,6 +3875,13 @@ typedef struct HasSubjects {
     /* The same compounds with all their requirements (self_req parallel to
      * subjects, anc_req to the ancestors they need). */
     HasReqList self_req, anc_req;
+    /* Rules whose :has() compound names nothing and has more selector after
+     * it (":has(x) [dialog]"): any element may be the subject, but only
+     * elements matching the rightmost compound can change.  One feature of
+     * each such compound ('t' tag, '#' id, '.' class, '[' attribute name);
+     * those elements are recomputed after any change (universal_deep, the
+     * whole document, when a compound names nothing). */
+    HasKeySet deep_targets;
 } HasSubjects;
 
 static uint64_t has_key(char kind, const char *s, size_t n)
@@ -3919,7 +3926,82 @@ static void has_free(HasSubjects *hs)
     free(hs->anc.deep);
     free(hs->self_req.v);
     free(hs->anc_req.v);
+    free(hs->deep_targets.keys);
+    free(hs->deep_targets.deep);
     memset(hs, 0, sizeof(*hs));
+}
+
+static const char *has_compound_start(const char *sel, const char *end);
+
+/* One feature every element matching the rightmost compound of the complex
+ * selector containing sel[at] carries (see HasSubjects.deep_targets); false
+ * when that compound names none, or sel[at] is inside parentheses. */
+static bool has_rightmost_key(const char *sel, const char *at, uint64_t *key)
+{
+    int d = 0;
+    for (const char *q = sel; q < at; q++) {
+        if (*q == '(' || *q == '[') d++;
+        else if (*q == ')' || *q == ']') d--;
+    }
+    if (d != 0) return false;
+    const char *end = at;
+    for (d = 0; *end; end++) {
+        if (*end == '(' || *end == '[') d++;
+        else if (*end == ')' || *end == ']') d--;
+        else if (d == 0 && (*end == ',' || *end == '{')) break;
+    }
+    while (end > at && end[-1] == ' ') end--;
+    const char *st = has_compound_start(sel, end);
+    for (const char *q = st; q < end; q++) if (*q == '\\') return false;
+    const char *q = st;
+    if (q < end && (isalpha((unsigned char)*q) || *q == '-' || *q == '_')) {
+        const char *e = q;
+        while (e < end && (isalnum((unsigned char)*e) || *e == '-' || *e == '_')) e++;
+        *key = has_key('t', q, (size_t)(e - q));
+        return true;
+    }
+    uint64_t attr = 0;
+    for (d = 0; q < end; q++) {
+        if (*q == '(') { d++; continue; }
+        if (*q == ')') { d--; continue; }
+        if (d) continue;
+        if (*q == '.' || *q == '#') {
+            char kind = *q;
+            const char *e = q + 1;
+            while (e < end && (isalnum((unsigned char)*e) || *e == '-' || *e == '_')) e++;
+            if (e > q + 1) { *key = has_key(kind, q + 1, (size_t)(e - q - 1)); return true; }
+        } else if (*q == '[' && !attr) {
+            const char *n0 = q + 1, *e = n0;
+            while (e < end && (isalnum((unsigned char)*e) || *e == '-' || *e == '_')) e++;
+            if (e > n0) attr = has_key('[', n0, (size_t)(e - n0));
+            while (q < end && *q != ']') q++;
+        }
+    }
+    if (attr) { *key = attr; return true; }
+    return false;
+}
+
+/* Does the element carry one of the deep_targets features? */
+static bool has_match_target(const HasKeySet *ks, const HtmlNode *hn)
+{
+    if (hn->tag_name && has_lookup(ks, has_key('t', hn->tag_name, strlen(hn->tag_name)))) return true;
+    for (HtmlAttribute *a = hn->attributes; a; a = a->next) {
+        if (!a->name) continue;
+        if (has_lookup(ks, has_key('[', a->name, strlen(a->name)))) return true;
+        const char *v = a->value ? a->value : "";
+        if (strcmp(a->name, "id") == 0) {
+            if (v[0] && has_lookup(ks, has_key('#', v, strlen(v)))) return true;
+        } else if (strcmp(a->name, "class") == 0) {
+            for (const char *c = v; *c;) {
+                while (*c == ' ' || *c == '\t' || *c == '\n' || *c == '\r' || *c == '\f') c++;
+                const char *e = c;
+                while (*e && *e != ' ' && *e != '\t' && *e != '\n' && *e != '\r' && *e != '\f') e++;
+                if (e > c && has_lookup(ks, has_key('.', c, (size_t)(e - c)))) return true;
+                c = e;
+            }
+        }
+    }
+    return false;
 }
 
 /* Start of the compound selector ending at `end`. */
@@ -3945,7 +4027,7 @@ static const char *has_compound_start(const char *sel, const char *end)
 static bool has_compound_keys(HasSubjects *hs, HasKeySet *ks, const char *st, const char *end, bool deep)
 {
     for (const char *q = st; q < end; q++) if (*q == '\\') return false;
-    uint64_t tag = 0, cls = 0, id = 0;
+    uint64_t tag = 0, cls = 0, id = 0, attr = 0;
     HasReq req = { {0}, 0 };
     const char *q = st;
     if (q < end && (isalpha((unsigned char)*q) || *q == '-' || *q == '_')) {
@@ -3958,7 +4040,16 @@ static bool has_compound_keys(HasSubjects *hs, HasKeySet *ks, const char *st, co
     while (q < end) {
         if (*q == '[' || *q == '(') {
             /* Attribute values and pseudo-class arguments say nothing
-             * about the subject's own class or id. */
+             * about the subject's own class or id; an attribute's name
+             * is a feature it must carry. */
+            if (*q == '[' && !attr) {
+                const char *n0 = q + 1, *e = n0;
+                while (e < end && (isalnum((unsigned char)*e) || *e == '-' || *e == '_')) e++;
+                if (e > n0) {
+                    attr = has_key('[', n0, (size_t)(e - n0));
+                    if (req.n < HAS_REQ_MAX) req.keys[req.n++] = attr;
+                }
+            }
             int d = 0;
             for (; q < end; q++) {
                 if (*q == '[' || *q == '(') d++;
@@ -3982,7 +4073,7 @@ static bool has_compound_keys(HasSubjects *hs, HasKeySet *ks, const char *st, co
     }
     /* One feature the compound requires stands for it in the key sets the
      * restyle uses; req keeps them all (css_layout_has_may_depend). */
-    uint64_t k = id ? id : cls ? cls : tag;
+    uint64_t k = id ? id : cls ? cls : tag ? tag : attr;
     if (!k) return false;
     has_add(hs, ks, k, deep);
     HasReqList *rl = ks == &hs->anc ? &hs->anc_req : &hs->self_req;
@@ -4127,9 +4218,14 @@ static void has_scan_selector(HasSubjects *hs, const char *sel)
             }
         }
         if (!named) {
-            if (g_css_log > 1) fprintf(stderr, "[css] :has() universal%s: %.100s\n", deep ? " deep" : "", st);
+            uint64_t target;
+            bool targeted = deep && has_rightmost_key(sel, p, &target);
+            if (g_css_log > 1)
+                fprintf(stderr, "[css] :has() universal%s: %.100s\n",
+                        !deep ? "" : targeted ? " deep (rightmost compound targeted)" : " deep", st);
             hs->universal = true;
-            if (deep) hs->universal_deep = true;
+            if (targeted) has_add(hs, &hs->deep_targets, target, false);
+            else if (deep) hs->universal_deep = true;
         }
     }
 }
@@ -4147,6 +4243,11 @@ static int has_match_keys(const HasKeySet *ks, const HtmlNode *hn)
         while (*e && *e != ' ' && *e != '\t' && *e != '\n') e++;
         if (e > c) { int m = has_lookup(ks, has_key('.', c, (size_t)(e - c))); if (m > r) r = m; }
         c = e;
+    }
+    for (HtmlAttribute *a = hn->attributes; a && r < 2; a = a->next) {
+        if (!a->name) continue;
+        int m = has_lookup(ks, has_key('[', a->name, strlen(a->name)));
+        if (m > r) r = m;
     }
     return r;
 }
@@ -4720,6 +4821,13 @@ static bool has_reqs_store(const HasReqList *rl, NodeId id)
             else overflow = true;
         }
         c = e;
+    }
+    for (int i = 0, na = dom_attr_count(id); i < na; i++) {
+        const DomAttr *a = dom_attr_at(id, i);
+        const char *an = a ? css_atom_str(a->name) : NULL;
+        if (!an) continue;
+        if (nh < 64) have[nh++] = has_key('[', an, strlen(an));
+        else overflow = true;
     }
     if (overflow) return true;               /* too many classes to tell */
     for (int r = 0; r < rl->n; r++) {
@@ -5369,15 +5477,31 @@ static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects
                     int last = -1;
                     for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx)
                         if (key[c] && (below[c] || changed[c])) last = c;
+                    /* (No changed child: no earlier sibling to flip.  Without
+                     * this every child of every element was marked.) */
+                    if (last < 0) continue;
                     for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0 && c != last; c = ctx->tree.nodes[c].next_sibling_idx)
                         if (key[c]) below[c] = 1;
                 }
             }
             /* Only elements some :has() rule could be about. */
+            bool any_change = false;
             for (int idx = 0; idx < n; idx++) {
+                if (changed[idx] && key[idx]) any_change = true;
                 if (!below[idx] || P->force[idx] == 2 || !key[idx]) continue;
                 int m = has_may_match(has, ctx, idx);
                 if (m > P->force[idx]) P->force[idx] = (unsigned char)m;
+            }
+            /* Universal :has() subjects with more selector after them: a
+             * change anywhere can flip some ancestor, so the elements the
+             * rightmost compounds can match are recomputed (their children
+             * follow if their style changed). */
+            if (any_change && has->deep_targets.n) {
+                for (int idx = 0; idx < n; idx++) {
+                    if (P->force[idx] || !key[idx]) continue;
+                    HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+                    if (hn && has_match_target(&has->deep_targets, hn)) P->force[idx] = 1;
+                }
             }
             free(below);
             /* Subtrees under elements :has() forced whole. */
@@ -5389,16 +5513,17 @@ static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects
         }
     }
     if (g_css_log > 1) {
-        int nch = 0, nw = 0, nf = 0, nfc = 0;
+        int nch = 0, nw = 0, nf = 0, nfc = 0, n1 = 0;
         for (int idx = 0; idx < n; idx++) {
             if (!key[idx]) continue;
             nch += changed[idx];
             nw += whole[idx];
             nf += P->force[idx] == 2;
             nfc += P->force[idx] == 2 && P->cached[idx];
+            n1 += P->force[idx] == 1;
         }
         fprintf(stderr, "[css] restyle prepare: %d changed, %d invalidate subtree, %d partial (%d matched), "
-                "%d subtree-forced (%d cached)\n", nch, nw, nparts, npartial, nf, nfc);
+                "%d subtree-forced (%d cached), %d self-forced\n", nch, nw, nparts, npartial, nf, nfc, n1);
     }
     free(S); free(changed); free(whole); free(sibch); free(part); free(depth); free(at);
 }
