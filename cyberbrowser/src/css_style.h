@@ -54,6 +54,12 @@ typedef struct CssStyleScratch CssStyleScratch;
 /* Compile `count` sheets (in cascade order) for the given viewport. */
 CssStyleSet *css_styleset_build(CssStylesheet *const *sheets, int count,
                                 double viewport_width, double viewport_height);
+/* The same as css_styleset_build(sheets, count, ...) when `from` was built
+ * from sheets' first css_styleset_sheet_count(from) entries (same
+ * viewport): only the sheets after those are compiled. */
+CssStyleSet *css_styleset_extend(const CssStyleSet *from, CssStylesheet *const *sheets, int count,
+                                 double viewport_width, double viewport_height);
+int  css_styleset_sheet_count(const CssStyleSet *set);
 void css_styleset_free(CssStyleSet *set);
 int  css_styleset_rule_count(const CssStyleSet *set);
 const CssRule *css_styleset_rule(const CssStyleSet *set, int g);

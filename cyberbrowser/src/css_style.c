@@ -577,6 +577,12 @@ struct CssStyleSet {
     BucketMap rule_buckets, after_buckets;
     CssAtom atom_html;
     uint32_t *reval; uint32_t nreval;   /* position-dependent chains (§7.5) */
+    /* What it was built from, and the bucket inputs in build order: an
+     * extension (css_styleset_extend) continues from them. */
+    int nsheets;
+    double vw, vh;
+    struct KeyItem *bkeys, *bakeys; size_t nbkeys, nbakeys;
+    uint32_t *buni, *bauni; size_t nbuni, nbauni;
 };
 
 typedef struct Builder {
@@ -1067,16 +1073,34 @@ static int32_t after_base_list(Builder *b, const char *branch, size_t blen, bool
     return compile_list(b, base);
 }
 
-CssStyleSet *css_styleset_build(CssStylesheet *const *sheets, int count,
-                                double vw, double vh)
+/* A builder vector holding a copy of n elements of src. */
+#define VEC_FROM(vec, src, count) do { \
+    (vec).n = (vec).cap = (count); \
+    (vec).v = (vec).cap ? malloc((vec).cap * sizeof(*(vec).v)) : NULL; \
+    if ((vec).cap) memcpy((vec).v, (src), (vec).cap * sizeof(*(vec).v)); \
+} while (0)
+
+static void *dup_array(const void *src, size_t bytes)
+{
+    void *p = malloc(bytes ? bytes : 1);
+    if (bytes) memcpy(p, src, bytes);
+    return p;
+}
+
+/* Compile sheets[0..count): from scratch, or starting from `from`, built
+ * from the same first from->nsheets sheets, compiling only the rest.  The
+ * builder only appends, so both give the same tables. */
+static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *const *sheets, int count,
+                                     double vw, double vh)
 {
     CssStyleSet *S = calloc(1, sizeof(*S));
     Builder b = {0};
     b.parts = malloc(sizeof(CssSelectorPart) * CSS_MAX_SIMPLE_PARTS);
+    int first = from ? from->nsheets : 0;
 
     size_t est = 64;
-    int nrules = 0;
-    for (int s = 0; s < count; s++) {
+    int nrules = from ? from->nrules : 0;
+    for (int s = first; s < count; s++) {
         if (!sheets[s]) continue;
         nrules += sheets[s]->rule_count;
         for (int r = 0; r < sheets[s]->rule_count; r++)
@@ -1093,9 +1117,24 @@ CssStyleSet *css_styleset_build(CssStylesheet *const *sheets, int count,
     VEC(uint32_t) auni = {0};
     VEC(CAfter) afters = {0};
     I32Vec rchains = {0};
+    if (from) {
+        memcpy(S->rules, from->rules, (size_t)from->nrules * sizeof(CRule));
+        VEC_FROM(b.comps, from->comps, from->ncomps);
+        VEC_FROM(b.chains, from->chains, from->nchains);
+        VEC_FROM(b.lists, from->lists, from->nlists);
+        VEC_FROM(b.atoms, from->atoms, from->natoms);
+        VEC_FROM(b.atests, from->atests, from->natests);
+        for (size_t i = 0; i < b.atests.n; i++)
+            if (b.atests.v[i].val) b.atests.v[i].val = strdup(b.atests.v[i].val);
+        VEC_FROM(keys, from->bkeys, from->nbkeys);
+        VEC_FROM(uni, from->buni, from->nbuni);
+        VEC_FROM(akeys, from->bakeys, from->nbakeys);
+        VEC_FROM(auni, from->bauni, from->nbauni);
+        VEC_FROM(afters, from->afters, (size_t)from->nafters);
+    }
 
-    int g = 0;
-    for (int s = 0; s < count; s++) {
+    int g = from ? from->nrules : 0;
+    for (int s = first; s < count; s++) {
         CssStylesheet *sheet = sheets[s];
         if (!sheet) continue;
         for (int r = 0; r < sheet->rule_count; r++, g++) {
@@ -1213,6 +1252,15 @@ CssStyleSet *css_styleset_build(CssStylesheet *const *sheets, int count,
         S->reval = (uint32_t *)rv.v;
         S->nreval = (uint32_t)rv.n;
     }
+    /* The bucket inputs in build order, for css_styleset_extend (the
+     * buckets sort theirs). */
+    S->nsheets = count;
+    S->vw = vw;
+    S->vh = vh;
+    S->bkeys = (KeyItem *)dup_array(keys.v, keys.n * sizeof(KeyItem)); S->nbkeys = keys.n;
+    S->buni = (uint32_t *)dup_array(uni.v, uni.n * sizeof(uint32_t)); S->nbuni = uni.n;
+    S->bakeys = (KeyItem *)dup_array(akeys.v, akeys.n * sizeof(KeyItem)); S->nbakeys = akeys.n;
+    S->bauni = (uint32_t *)dup_array(auni.v, auni.n * sizeof(uint32_t)); S->nbauni = auni.n;
     bucket_build(&S->rule_buckets, keys.v, keys.n, uni.v, (uint32_t)uni.n);
     bucket_build(&S->after_buckets, akeys.v, akeys.n, auni.v, (uint32_t)auni.n);
     free(keys.v);
@@ -1221,6 +1269,22 @@ CssStyleSet *css_styleset_build(CssStylesheet *const *sheets, int count,
     return S;
 }
 
+CssStyleSet *css_styleset_build(CssStylesheet *const *sheets, int count,
+                                double vw, double vh)
+{
+    return styleset_compile(NULL, sheets, count, vw, vh);
+}
+
+CssStyleSet *css_styleset_extend(const CssStyleSet *from, CssStylesheet *const *sheets, int count,
+                                 double vw, double vh)
+{
+    if (!from || from->nsheets > count || from->vw != vw || from->vh != vh)
+        return css_styleset_build(sheets, count, vw, vh);
+    return styleset_compile(from, sheets, count, vw, vh);
+}
+
+int css_styleset_sheet_count(const CssStyleSet *S) { return S->nsheets; }
+
 void css_styleset_free(CssStyleSet *S)
 {
     if (!S) return;
@@ -1228,6 +1292,7 @@ void css_styleset_free(CssStyleSet *S)
     free(S->atests);
     free(S->comps); free(S->chains); free(S->lists); free(S->atoms);
     free(S->rules); free(S->afters); free(S->reval);
+    free(S->bkeys); free(S->bakeys); free(S->buni); free(S->bauni);
     bucket_free(&S->rule_buckets);
     bucket_free(&S->after_buckets);
     free(S);

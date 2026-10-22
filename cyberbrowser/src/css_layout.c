@@ -3010,6 +3010,10 @@ typedef struct StyleSetEntry {
     CssStyleSet *set;
     uint64_t last_use;
     uint64_t gen;               /* build number: identifies this set for the style cache */
+    /* Built by extending the set of generation base_gen (base_nrules
+     * rules) with more sheets; 0 when compiled from scratch. */
+    uint64_t base_gen;
+    int base_nrules;
 } StyleSetEntry;
 static uint64_t g_styleset_gen;
 
@@ -3050,6 +3054,69 @@ static CssStyleSet *layout_styleset_get(LayoutStyleSheetList *list, double vw, d
         if (!g_styleset_cache[i].set) { victim = i; break; }
         if (g_styleset_cache[i].last_use < g_styleset_cache[victim].last_use) victim = i;
     }
+    if (g_css_log > 1) {
+        /* What changed against the most recently used set. */
+        int last = -1;
+        for (int i = 0; i < STYLESET_CACHE_MAX; i++)
+            if (g_styleset_cache[i].set && (last < 0 || g_styleset_cache[i].last_use > g_styleset_cache[last].last_use)) last = i;
+        if (last >= 0) {
+            StyleSetEntry *o = &g_styleset_cache[last];
+            int same = 0;
+            for (int k = 0; k < list->count; k++)
+                for (int m = 0; m < o->n; m++)
+                    if (o->sheets[m] == list->entries[k]) { same++; break; }
+            fprintf(stderr, "[css] style set miss: %d sheets (was %d), %d kept, viewport %s\n",
+                    list->count, o->n, same, o->vw != vw || o->vh != vh ? "changed" : "same");
+            for (int k = 0; k < list->count; k++) {
+                bool found = false;
+                for (int m = 0; m < o->n && !found; m++) found = o->sheets[m] == list->entries[k];
+                if (!found) fprintf(stderr, "[css]   new sheet %d: %zu bytes%s%s: %.80s\n", k, list->entries[k]->len,
+                                    list->entries[k]->host ? " in " : "", list->entries[k]->host ? list->entries[k]->host : "",
+                                    list->entries[k]->text ? list->entries[k]->text : "");
+            }
+        }
+    }
+    /* Pages add sheets as their components load: extend the cached set
+     * whose sheets begin the list (the longest such) rather than compile
+     * every rule again.  CSS_EXTEND=0: always from scratch. */
+    static int extend_env = -1, verify_env = -1;
+    if (extend_env < 0) { const char *e = getenv("CSS_EXTEND"); extend_env = !(e && strcmp(e, "0") == 0); }
+    if (verify_env < 0) verify_env = getenv("CSS_EXTEND_VERIFY") ? 1 : 0;
+    int base = -1;
+    for (int i = 0; extend_env && i < STYLESET_CACHE_MAX; i++) {
+        StyleSetEntry *c = &g_styleset_cache[i];
+        if (!c->set || c->n > list->count || c->vw != vw || c->vh != vh) continue;
+        if (memcmp(c->sheets, list->entries, (size_t)c->n * sizeof(SheetEntry *)) != 0) continue;
+        if (base < 0 || c->n > g_styleset_cache[base].n) base = i;
+    }
+    CssStyleSet *set;
+    uint64_t base_gen = 0;
+    int base_nrules = 0;
+    if (base >= 0) {
+        const CssStyleSet *from = g_styleset_cache[base].set;
+        set = css_styleset_extend(from, list->sheets, list->count, vw, vh);
+        base_gen = g_styleset_cache[base].gen;
+        base_nrules = css_styleset_rule_count(from);
+        if (g_css_log > 0)
+            fprintf(stderr, "[css] style set extended: %d sheets on %d (%d rules on %d)\n", list->count,
+                    g_styleset_cache[base].n, css_styleset_rule_count(set), base_nrules);
+        if (verify_env) {
+            CssStyleSet *full = css_styleset_build(list->sheets, list->count, vw, vh);
+            int c1, u1, c2, u2;
+            css_styleset_stats(set, &c1, &u1);
+            css_styleset_stats(full, &c2, &u2);
+            bool same = c1 == c2 && u1 == u2 && css_styleset_rule_count(set) == css_styleset_rule_count(full) &&
+                        css_style_reval_count(set) == css_style_reval_count(full);
+            for (int r = 0; same && r < css_styleset_rule_count(set); r++)
+                same = css_styleset_rule(set, r) == css_styleset_rule(full, r) &&
+                       css_styleset_rule_order(set, r) == css_styleset_rule_order(full, r);
+            fprintf(stderr, "[css] style set extension %s a full build\n", same ? "matches" : "DIFFERS FROM");
+            css_styleset_free(full);
+        }
+    } else {
+        set = css_styleset_build(list->sheets, list->count, vw, vh);
+    }
+    /* Evicted only now: the base may be the least recently used. */
     styleset_cache_drop(victim);
     StyleSetEntry *c = &g_styleset_cache[victim];
     c->n = list->count;
@@ -3058,11 +3125,28 @@ static CssStyleSet *layout_styleset_get(LayoutStyleSheetList *list, double vw, d
     for (int k = 0; k < c->n; k++) c->sheets[k]->refs++;
     c->vw = vw;
     c->vh = vh;
-    c->set = css_styleset_build(list->sheets, list->count, vw, vh);
+    c->set = set;
     c->last_use = g_layout_clock;
     c->gen = ++g_styleset_gen;
+    c->base_gen = base_gen;
+    c->base_nrules = base_nrules;
     *gen = c->gen;
     return c->set;
+}
+
+/* The generation a style set of generation `gen` extends, and the rules it
+ * kept from it (false: compiled from scratch, or no longer cached). */
+static bool styleset_base_of(uint64_t gen, uint64_t *base_gen, int *base_nrules)
+{
+    for (int i = 0; i < STYLESET_CACHE_MAX; i++) {
+        const StyleSetEntry *c = &g_styleset_cache[i];
+        if (c->set && c->gen == gen && c->base_gen) {
+            *base_gen = c->base_gen;
+            *base_nrules = c->base_nrules;
+            return true;
+        }
+    }
+    return false;
 }
 
 static char* layout_resolve_url(const char *base_url, const char *href) {
@@ -4364,6 +4448,25 @@ static void mentions_build(const CssStyleSet *set, uint64_t gen)
 {
     for (int i = 0; i < STYLE_MENTIONS_SLOTS; i++)
         if (g_mentions[i].gen == gen) return;
+    /* A set extending one we have the mentions of: add its new rules to
+     * those (a superset; a lookup by the old generation then finds nothing,
+     * which callers treat as "everything matters"). */
+    uint64_t base_gen;
+    int base_nrules;
+    if (styleset_base_of(gen, &base_gen, &base_nrules)) {
+        for (int i = 0; i < STYLE_MENTIONS_SLOTS; i++) {
+            StyleMentions *m = &g_mentions[i];
+            if (m->gen != base_gen) continue;
+            for (int r = base_nrules, nr = css_styleset_rule_count(set); r < nr; r++) {
+                const CssRule *rule = css_styleset_rule(set, r);
+                if (!rule || !rule->selector_text) continue;
+                mentions_scan(m, rule->selector_text);
+                has_scan_selector(&m->has, rule->selector_text);
+            }
+            m->gen = gen;
+            return;
+        }
+    }
     StyleMentions *m = &g_mentions[g_mentions_next];
     g_mentions_next = (g_mentions_next + 1) % STYLE_MENTIONS_SLOTS;
     mentions_free(m);
@@ -6183,9 +6286,16 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
             static StyleCtxFeatures cf;
             mentions_build(P.set, set_gen);
             if (has_gen != set_gen) {
-                has_free(&has);
-                ctx_features_free(&cf);
-                for (int r = 0, nr = css_styleset_rule_count(P.set); r < nr; r++) {
+                /* An extension of the set these describe: scan its new
+                 * rules only. */
+                uint64_t base_gen = 0;
+                int first = 0;
+                if (!(has_gen && styleset_base_of(set_gen, &base_gen, &first) && base_gen == has_gen)) {
+                    has_free(&has);
+                    ctx_features_free(&cf);
+                    first = 0;
+                }
+                for (int r = first, nr = css_styleset_rule_count(P.set); r < nr; r++) {
                     const CssRule *rule = css_styleset_rule(P.set, r);
                     if (!rule || !rule->selector_text) continue;
                     has_scan_selector(&has, rule->selector_text);
