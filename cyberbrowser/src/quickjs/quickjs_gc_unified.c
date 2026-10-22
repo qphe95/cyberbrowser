@@ -256,6 +256,8 @@ static bool region_prepare(GCRegion *r, bool fresh) {
         memset(base, 0, GC_REGION_SIZE);
     }
     r->zeroed = false;
+    atomic_store_explicit(&r->recycle_state, GC_RECYCLE_IDLE, memory_order_relaxed);
+    if (r->free_lines) memset(r->free_lines, 0, GC_LINE_WORDS * sizeof(uint64_t));
     if (!region_commit_metadata(r)) return false;
     memset(r->start_bits, 0, BITMAP_WORDS * sizeof(uint64_t));
     memset(r->mark_bits[0], 0, BITMAP_WORDS * sizeof(uint64_t));
@@ -404,13 +406,211 @@ void gc_core_region_release(GCRegion *r) {
  * Allocation
  * ============================================================================ */
 
+/* ---- Holes: reusing free lines of old regions without moving objects ----
+ *
+ * A line is free when no current object overlaps it.  After a major sweep,
+ * each run of free lines below the region's top becomes a hole: a filler
+ * header spans it, and a dead object crossing either edge is cut at the
+ * edge (the part past the hole's end gets its own filler), so walking the
+ * region header by header still works.  Allocating into a hole writes the
+ * object and a filler for what is left of the hole, so the region stays
+ * walkable while it is filled. */
+
+static inline uintptr_t line_base(const GCRegion *r) {
+    return (uintptr_t)gc_core_region_start(r) + GC_HEADER_SIZE;
+}
+
+static inline void bit_clear_range(uint64_t *bits, uint32_t lo, uint32_t hi) {
+    for (uint32_t i = lo; i < hi; i++) bits[i >> 6] &= ~((uint64_t)1 << (i & 63));
+}
+
+/* A dead (non-current) header of `total` bytes at p. */
+static inline void write_filler(GCRegion *r, uintptr_t p, size_t total) {
+    GCHeader *h = (GCHeader *)p;
+    h->handle = GC_HANDLE_NULL;
+    h->info = (uint32_t)JS_GC_OBJ_TYPE_DATA | (uint32_t)((total / GC_GRANULE) << GC_INFO_SIZE_SHIFT);
+    bit_set_single_writer(r->start_bits, gc_core_granule_of(r, h));
+}
+
+typedef struct { uintptr_t start, end; bool live; } HoleExtent;
+static HoleExtent *g_hole_ext;   /* sweeper-private scratch */
+static uint32_t g_hole_ext_cap;
+
+size_t gc_core_format_holes(GCRegion *r) {
+    uintptr_t lb = line_base(r);
+    uintptr_t top = atomic_load_explicit(&r->top, memory_order_acquire);
+    if (top <= lb) return 0;
+    uint32_t nlines = (uint32_t)((top - lb) >> GC_LINE_SHIFT);   /* lines wholly below top */
+    if (!nlines) return 0;
+    if (!r->free_lines && !(r->free_lines = (uint64_t *)calloc(GC_LINE_WORDS, sizeof(uint64_t))))
+        return 0;
+    uint64_t live[GC_LINE_WORDS];
+    memset(live, 0, sizeof(live));
+    /* Object extents in address order, and the lines live objects touch. */
+    uint32_t n = 0;
+    for (uintptr_t p = lb; p < top;) {
+        GCHeader *h = (GCHeader *)p;
+        size_t total = gc_header_total_size(h);
+        if (!total) break;
+        if (n == g_hole_ext_cap) {
+            uint32_t cap = g_hole_ext_cap ? g_hole_ext_cap * 2 : 4096;
+            HoleExtent *ne = (HoleExtent *)realloc(g_hole_ext, cap * sizeof(HoleExtent));
+            if (!ne) return 0;
+            g_hole_ext = ne;
+            g_hole_ext_cap = cap;
+        }
+        bool cur = gc_core_header_is_current(h);
+        g_hole_ext[n++] = (HoleExtent){ p, p + total, cur };
+        if (cur) {
+            uint32_t l0 = (uint32_t)((p - lb) >> GC_LINE_SHIFT);
+            uint32_t l1 = (uint32_t)((p + total - 1 - lb) >> GC_LINE_SHIFT);
+            for (uint32_t l = l0; l <= l1 && l < GC_LINES; l++) live[l >> 6] |= (uint64_t)1 << (l & 63);
+        }
+        p += total;
+    }
+    memset(r->free_lines, 0, GC_LINE_WORDS * sizeof(uint64_t));
+    size_t free_bytes = 0;
+    uint32_t k = 0;
+    for (uint32_t i = 0; i < nlines;) {
+        if ((live[i >> 6] >> (i & 63)) & 1) { i++; continue; }
+        uint32_t j = i;
+        while (j < nlines && !((live[j >> 6] >> (j & 63)) & 1)) j++;
+        uintptr_t hs = lb + ((uintptr_t)i << GC_LINE_SHIFT), he = lb + ((uintptr_t)j << GC_LINE_SHIFT);
+        /* A (dead) object crossing the start: cut it there. */
+        while (k < n && g_hole_ext[k].end <= hs) k++;
+        if (k < n && g_hole_ext[k].start < hs) {
+            GCHeader *h = (GCHeader *)g_hole_ext[k].start;
+            h->info = (h->info & GC_INFO_TYPE_MASK) |
+                      (uint32_t)(((hs - g_hole_ext[k].start) / GC_GRANULE) << GC_INFO_SIZE_SHIFT);
+        }
+        /* A (dead) object crossing the end: its tail becomes a filler. */
+        uint32_t k2 = k;
+        while (k2 < n && g_hole_ext[k2].end <= he) k2++;
+        bit_clear_range(r->start_bits, gc_core_granule_of(r, (void *)hs), gc_core_granule_of(r, (void *)he));
+        if (k2 < n && g_hole_ext[k2].start < he && g_hole_ext[k2].end > he)
+            write_filler(r, he, g_hole_ext[k2].end - he);
+        write_filler(r, hs, he - hs);
+        for (uint32_t l = i; l < j; l++) r->free_lines[l >> 6] |= (uint64_t)1 << (l & 63);
+        free_bytes += he - hs;
+        k = k2;
+        i = j;
+    }
+    return free_bytes;
+}
+
+/* Offer region r (its holes formatted) to the recycling contexts. */
+void gc_core_offer_recyclable(GCRegion *r) {
+    while (atomic_flag_test_and_set_explicit(&g_core.recyclable_lock, memory_order_acquire)) {}
+    if (g_core.recyclable_n == g_core.recyclable_cap) {
+        uint32_t cap = g_core.recyclable_cap ? g_core.recyclable_cap * 2 : 256;
+        uint32_t *nr = (uint32_t *)realloc(g_core.recyclable, cap * sizeof(uint32_t));
+        if (nr) { g_core.recyclable = nr; g_core.recyclable_cap = cap; }
+    }
+    if (!r->in_recyclable && g_core.recyclable_n < g_core.recyclable_cap) {
+        g_core.recyclable[g_core.recyclable_n++] = (uint32_t)(r - g_core.regions);
+        r->in_recyclable = true;
+    }
+    atomic_flag_clear_explicit(&g_core.recyclable_lock, memory_order_release);
+}
+
+/* Take an AVAILABLE region with holes, or NULL. */
+static GCRegion *take_recyclable(void) {
+    GCRegion *got = NULL;
+    while (atomic_flag_test_and_set_explicit(&g_core.recyclable_lock, memory_order_acquire)) {}
+    while (g_core.recyclable_n && !got) {
+        GCRegion *r = &g_core.regions[g_core.recyclable[--g_core.recyclable_n]];
+        r->in_recyclable = false;
+        uint32_t expect = GC_RECYCLE_AVAILABLE;
+        if (atomic_load_explicit(&r->state, memory_order_acquire) == GC_RS_OLD &&
+            atomic_compare_exchange_strong(&r->recycle_state, &expect, GC_RECYCLE_OWNED))
+            got = r;
+    }
+    atomic_flag_clear_explicit(&g_core.recyclable_lock, memory_order_release);
+    return got;
+}
+
+/* Move a recycling context to its region's next hole; false when none. */
+static bool next_hole(GCAllocCtx *a) {
+    GCRegion *r = a->region;
+    uint32_t i = a->next_line;
+    while (i < GC_LINES && !((r->free_lines[i >> 6] >> (i & 63)) & 1)) i++;
+    if (i >= GC_LINES) return false;
+    uint32_t j = i;
+    while (j < GC_LINES && ((r->free_lines[j >> 6] >> (j & 63)) & 1)) j++;
+    a->top = (uint8_t *)(line_base(r) + ((uintptr_t)i << GC_LINE_SHIFT));
+    a->end = (uint8_t *)(line_base(r) + ((uintptr_t)j << GC_LINE_SHIFT));
+    a->next_line = j;
+    a->in_hole = true;
+    return true;
+}
+
 void gc_core_alloc_ctx_retire(GCAllocCtx *a) {
     if (a->region) {
-        atomic_store_explicit(&a->region->top, (uintptr_t)a->top, memory_order_release);
+        if (a->in_hole) {
+            /* Holes lie below top; the region's top does not move. */
+            atomic_store_explicit(&a->region->recycle_state, GC_RECYCLE_IDLE, memory_order_release);
+        } else {
+            atomic_store_explicit(&a->region->top, (uintptr_t)a->top, memory_order_release);
+        }
         a->region->alloc_owner = GC_OWNER_NONE;
     }
     a->region = NULL;
     a->top = a->end = NULL;
+    a->in_hole = false;
+}
+
+/* Objects up to this size may go into holes. */
+#define GC_HOLE_MAX_OBJECT ((size_t)8 << 10)
+
+/* Bump-allocate `total` bytes in the context's current hole, leaving a
+ * filler over the rest; NULL if it does not fit. */
+static GCHeader *hole_bump(GCAllocCtx *a, size_t total, uint32_t info) {
+    if (!a->in_hole || a->top + total > a->end) return NULL;
+    GCRegion *r = a->region;
+    GCHeader *hdr = (GCHeader *)a->top;
+    a->top += total;
+    /* The rest of the hole first, so a walk never runs past this object
+     * into unformatted memory. */
+    if (a->top < a->end) write_filler(r, (uintptr_t)a->top, (size_t)(a->end - a->top));
+    /* Allocations come zeroed (fresh regions are); a hole still holds
+     * dead objects. */
+    memset((uint8_t *)hdr + GC_HEADER_SIZE, 0, total - GC_HEADER_SIZE);
+    hdr->handle = GC_HANDLE_NULL;
+    hdr->info = info;
+    bit_set_single_writer(r->start_bits, gc_core_granule_of(r, hdr));
+    return hdr;
+}
+
+/* A recycling context's allocation from holes: the current hole, the
+ * region's later holes, then other recyclable regions.  NULL when none
+ * fits, or while a major cycle runs (the caller bump-allocates as usual). */
+static GCHeader *hole_alloc(GCAllocCtx *a, size_t total, uint32_t info) {
+    GCHeader *hdr;
+    if (atomic_load_explicit(&g_core.holes_paused, memory_order_acquire)) {
+        if (a->in_hole) gc_core_alloc_ctx_retire(a);
+        return NULL;
+    }
+    if (a->in_hole) {
+        if ((hdr = hole_bump(a, total, info))) return hdr;
+        while (next_hole(a))
+            if ((hdr = hole_bump(a, total, info))) return hdr;
+        gc_core_alloc_ctx_retire(a);
+    }
+    /* Only when the context needs new space: keep filling a fresh region it
+     * already has. */
+    if (a->region && a->top + total <= a->end) return NULL;
+    GCRegion *r;
+    while ((r = take_recyclable())) {
+        if (a->region) gc_core_alloc_ctx_retire(a);
+        r->alloc_owner = a->owner;
+        a->region = r;
+        a->next_line = 0;
+        a->in_hole = false;
+        while (next_hole(a))
+            if ((hdr = hole_bump(a, total, info))) return hdr;
+        gc_core_alloc_ctx_retire(a);
+    }
+    return NULL;
 }
 
 GCHeader *gc_core_alloc_object_memory(GCAllocCtx *a, size_t payload, JSGCObjectTypeEnum type) {
@@ -432,7 +632,12 @@ GCHeader *gc_core_alloc_object_memory(GCAllocCtx *a, size_t payload, JSGCObjectT
         return hdr;
     }
 
-    if (!a->top || a->top + total > a->end) {
+    if (a->recycles && g_core.holes && total <= GC_HOLE_MAX_OBJECT) {
+        GCHeader *hdr = hole_alloc(a, total, info);
+        if (hdr) return hdr;
+    }
+
+    if (!a->top || a->top + total > a->end || a->in_hole) {
         gc_core_alloc_ctx_retire(a);
         GCRegion *r = gc_core_region_acquire(a->space);
         if (!r) return NULL;
@@ -610,7 +815,15 @@ GCHandle gc_realloc(GCHandle handle, size_t new_size) {
     memcpy(new_ptr, old_ptr, n);
     hdr->handle = handle;
     gc_core_handle_dual_write(handle, new_ptr);
+    /* The copy held its references before it was current: a card rescan in
+     * between skipped it (and the old copy, no longer current either), so
+     * its cards must be dirty again now. */
     gc_dirty_range(new_ptr, n);
+#if !GC_SOFTWARE_DIRTY
+    for (uintptr_t a = (uintptr_t)new_ptr; a < (uintptr_t)new_ptr + n;
+         a = (a & ~(uintptr_t)(GC_OS_PAGE_SIZE - 1)) + GC_OS_PAGE_SIZE)
+        atomic_fetch_or_explicit((_Atomic uint32_t *)(a & ~(uintptr_t)3), 0, memory_order_relaxed);
+#endif
     gc_core_note_allocation(gc_header_total_size(hdr), young);
     return handle;
 }
@@ -926,6 +1139,10 @@ bool gc_init(void) {
     const char *lv = getenv("QJS_GC_LOG");
     g_core.log_level = lv ? atoi(lv) : 0;
     g_core.poison = getenv("QJS_GC_POISON") != NULL;
+    {
+        const char *hz = getenv("QJS_GC_HOLES");
+        g_core.holes = !hz || atoi(hz) != 0;
+    }
     g_core.trace_handle = getenv("QJS_GC_TRACE") != NULL;
     g_handle_no_reuse = getenv("QJS_GC_NO_REUSE") != NULL;
     if (g_handle_no_reuse || getenv("QJS_GC_HISTORY")) {
@@ -974,11 +1191,13 @@ bool gc_init(void) {
     g_core.js_young.space = GC_RS_NURSERY;
     g_core.js_young.owner = GC_OWNER_JS;
     g_core.js_old.space = GC_RS_OLD;
+    g_core.js_old.recycles = true;
     g_core.js_old.owner = GC_OWNER_JS;
     g_core.js_perm.space = GC_RS_OLD;
     g_core.js_perm.owner = GC_OWNER_JS;
     g_core.js_perm.permanent = true;
     g_core.gc_copy.space = GC_RS_OLD;
+    g_core.gc_copy.recycles = true;
     g_core.gc_copy.owner = GC_OWNER_GC;
 
     gc_handle_array_init(&g_gc.atom_handles, 1024);

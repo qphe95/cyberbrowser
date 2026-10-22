@@ -46,7 +46,24 @@ typedef struct GCRegion {
     size_t live_bytes;
     uint64_t *start_bits;      /* 1 bit per 16-byte granule: object header starts */
     uint64_t *mark_bits[2];    /* mark bitmaps, by cycle parity */
+    /* Holes (runs of free lines below top) found by the last major sweep,
+     * one bit per line; see gc_core_format_holes. */
+    uint64_t *free_lines;
+    _Atomic uint32_t recycle_state;   /* GC_RECYCLE_* */
+    bool in_recyclable;               /* listed in g_core.recyclable (under its lock) */
 } GCRegion;
+
+/* Lines: 128-byte units of a region, starting GC_HEADER_SIZE into it so
+ * that a line boundary is a valid header position. */
+#define GC_LINE_SHIFT   7
+#define GC_LINE_SIZE    ((uintptr_t)1 << GC_LINE_SHIFT)
+#define GC_LINES        ((GC_REGION_SIZE - GC_HEADER_SIZE) >> GC_LINE_SHIFT)
+#define GC_LINE_WORDS   ((GC_LINES + 63) / 64)
+
+/* Who may touch a region's holes.  The sweeper moves IDLE or AVAILABLE to
+ * SWEEPING and back; an allocation context moves AVAILABLE to OWNED and,
+ * when done, to IDLE.  So a region is never swept and filled at once. */
+enum { GC_RECYCLE_IDLE = 0, GC_RECYCLE_AVAILABLE, GC_RECYCLE_OWNED, GC_RECYCLE_SWEEPING };
 
 typedef struct GCAllocCtx {
     GCRegion *region;
@@ -55,6 +72,9 @@ typedef struct GCAllocCtx {
     uint32_t space;
     uint32_t owner;
     bool permanent;            /* fills permanent regions */
+    bool recycles;             /* may fill holes of old regions */
+    bool in_hole;              /* top/end bound a hole of a recycled region */
+    uint32_t next_line;        /* recycled region: where to look for the next hole */
 } GCAllocCtx;
 
 typedef struct GCRegistryEntry {
@@ -111,6 +131,16 @@ typedef struct GCCore {
     bool defer_frees;      /* marking in progress: gc_free must not recycle handles */
     uint64_t js_thread_id;
 
+    /* Hole reuse (QJS_GC_HOLES, on by default): old regions with holes, for
+     * the recycling allocation contexts.  Paused from a major cycle's mark
+     * start to the end of its sweep: the sweep must reach every region, and
+     * one a context fills cannot be swept. */
+    bool holes;
+    atomic_flag recyclable_lock;
+    uint32_t *recyclable;
+    uint32_t recyclable_n, recyclable_cap;
+    _Atomic bool holes_paused;
+
     GCConfig config;
     GCStats stats;
 } GCCore;
@@ -130,6 +160,11 @@ GCRegion *gc_core_init_humongous_run(uint32_t first, uint32_t n);
 GCHeader *gc_core_object_containing(const void *p);
 void **gc_core_back_table(void);
 void gc_core_registry_add(GCRegistry *reg, GCHandle h);
+/* After a region's sweep (its condemned objects' handles freed): turn its
+ * runs of free lines into walkable holes and offer it for recycling.
+ * Returns the bytes in holes.  The caller holds the region SWEEPING. */
+size_t gc_core_format_holes(GCRegion *r);
+void gc_core_offer_recyclable(GCRegion *r);
 
 static inline GCRegion *gc_core_region_of(const void *p) {
     uintptr_t off = (uintptr_t)p - (uintptr_t)g_gc.heap_base;
@@ -139,6 +174,15 @@ static inline GCRegion *gc_core_region_of(const void *p) {
 
 static inline uint8_t *gc_core_region_start(const GCRegion *r) {
     return g_gc.heap_base + ((size_t)(r - g_core.regions) << GC_REGION_SHIFT);
+}
+
+/* Whether a swept region is sparse enough to copy its survivors out and
+ * free it.  With hole reuse only the sparsest are (live under a quarter of
+ * the used space): their holes would refill slowly while the region stays
+ * committed.  The rest keep their objects in place and offer their holes. */
+static inline bool gc_core_region_evacuates(const GCRegion *r, uintptr_t top) {
+    size_t used = top - (uintptr_t)gc_core_region_start(r);
+    return g_core.holes ? r->live_bytes * 4 <= used : r->live_bytes * 2 <= used;
 }
 
 static inline uint32_t gc_core_granule_of(const GCRegion *r, const void *hdr) {

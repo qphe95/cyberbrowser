@@ -1268,20 +1268,24 @@ TEST(test_gc_finalizers_run_once) {
     return true;
 }
 
-/* Fill regions, free most objects, keep every tenth: the sparse regions are
- * compacted and the survivors keep their contents. */
-TEST(test_gc_compaction_moves_survivors) {
+/* Fill old regions, free most objects and keep every `stride`th, collect.
+ * Returns false on a failed check.  `moved`: survivors were copied out (the
+ * regions were sparse enough to compact); otherwise they stay put and the
+ * free lines between them take new objects. */
+static bool sparse_regions_case(int stride, bool moved) {
     BgState st;
     bg_pause(&st);
     enum { N = 20000 };
-    static GCHandle keep[N / 10];
+    static GCHandle keep[N];
+    static void *where[N];
     int nk = 0;
     for (int i = 0; i < N; i++) {
-        GCHandle h = gc_alloc(100, JS_GC_OBJ_TYPE_DATA);
+        GCHandle h = gc_alloc_old(100, JS_GC_OBJ_TYPE_DATA);
         uint32_t *p = (uint32_t *)gc_deref(h);
         p[0] = (uint32_t)i;
         p[24] = (uint32_t)i * 7u;
-        if (i % 10 == 0) {
+        if (i % stride == 0) {
+            where[nk] = p;
             keep[nk++] = h;
             gc_add_root(h);
         } else {
@@ -1292,17 +1296,42 @@ TEST(test_gc_compaction_moves_survivors) {
     gc_get_stats(&s0);
     gc_run();
     gc_get_stats(&s1);
-    ASSERT_TRUE(s1.objects_copied > s0.objects_copied);
+    if (moved) {
+        ASSERT_TRUE(s1.objects_copied > s0.objects_copied);
+    } else {
+        int reused = 0;
+        for (int i = 0; i < N / 4; i++) {
+            GCHandle h = gc_alloc_old(100, JS_GC_OBJ_TYPE_DATA);
+            GCRegion *r = gc_core_region_of(gc_deref(h));
+            for (int k = 0; k < nk; k += 50)
+                if (gc_core_region_of(where[k]) == r) { reused++; break; }
+            gc_free(h);
+        }
+        ASSERT_TRUE(reused > N / 8);
+    }
     for (int k = 0; k < nk; k++) {
         uint32_t *p = (uint32_t *)gc_deref(keep[k]);
         ASSERT_TRUE(p != NULL);
-        ASSERT_EQ(k * 10, (int)p[0]);
-        ASSERT_EQ((uint32_t)(k * 10) * 7u, p[24]);
+        if (!moved) { ASSERT_TRUE((void *)p == where[k]); }
+        ASSERT_EQ(k * stride, (int)p[0]);
+        ASSERT_EQ((uint32_t)(k * stride) * 7u, p[24]);
         gc_remove_root(keep[k]);
     }
     ASSERT_EQ(0, (int)gc_test_heap_check());
     bg_resume(&st);
     return true;
+}
+
+/* A tenth live: compacted, with or without hole reuse. */
+TEST(test_gc_compaction_moves_survivors) {
+    return sparse_regions_case(10, true);
+}
+
+/* A third live: with hole reuse the survivors stay and the holes are
+ * filled; without it the region is not sparse enough to compact. */
+TEST(test_gc_sparse_regions_keep_survivors) {
+    if (!g_core.holes) return true;
+    return sparse_regions_case(3, false);
 }
 
 /* An object a raw pointer on the stack points into is pinned: compaction
@@ -1931,6 +1960,7 @@ void run_gc_tests(void) {
     RUN_TEST(test_gc_roots_keep_objects);
     RUN_TEST(test_gc_finalizers_run_once);
     RUN_TEST(test_gc_compaction_moves_survivors);
+    RUN_TEST(test_gc_sparse_regions_keep_survivors);
     RUN_TEST(test_gc_raw_pointer_pins_object);
 
     printf("\n=== Dirty Tracking ===\n");

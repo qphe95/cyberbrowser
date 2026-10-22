@@ -7314,8 +7314,12 @@ void mark_children(JSRuntimeHandle rt, GCHandle handle,
             }
             sh = GC_SHAPE_DEREF(js_obj_shape_handle(p));
             if (!SAFE_VALID(sh)) {
-                QJS_LOGE("mark_children: OBJECT %p shape_handle=%u derefs to NULL!", 
+                QJS_LOGE("mark_children: OBJECT %p shape_handle=%u derefs to NULL!",
                          SAFE_HANDLE(p), js_obj_shape_handle(p));
+                if (g_handle_history) {
+                    gc_debug_report_stale_handle(js_obj_shape_handle(p), "object's shape");
+                    gc_debug_report_stale_handle(SAFE_HANDLE(p), "object with the dead shape");
+                }
                 break;
             }
             /* Validate shape pointer */

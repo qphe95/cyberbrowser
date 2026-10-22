@@ -554,8 +554,18 @@ static void sweep_all_now(void) {
         if (!gc_core_region_in_use(st)) continue;
         if (r->permanent) continue;
         size_t live = gc_col_sweep_region(r, atomic_load(&r->top), true);
-        if (live == 0 && r->alloc_owner == GC_OWNER_NONE && !r->pinned)
+        if (live == 0 && r->alloc_owner == GC_OWNER_NONE && !r->pinned) {
+            atomic_store(&r->recycle_state, GC_RECYCLE_IDLE);
             gc_core_region_release(r);
+        } else if (g_core.holes && st == GC_RS_OLD && r->alloc_owner == GC_OWNER_NONE && !r->pinned &&
+                   atomic_load(&r->recycle_state) != GC_RECYCLE_OWNED && !gc_core_region_evacuates(r, atomic_load(&r->top)) &&
+                   gc_core_format_holes(r)) {
+            atomic_store(&r->recycle_state, GC_RECYCLE_AVAILABLE);
+            gc_core_offer_recyclable(r);
+        } else if (atomic_load(&r->recycle_state) == GC_RECYCLE_AVAILABLE) {
+            /* Sparse now: left for evacuation, its old holes withdrawn. */
+            atomic_store(&r->recycle_state, GC_RECYCLE_IDLE);
+        }
     }
 }
 
@@ -592,8 +602,8 @@ static void evacuate_sparse_regions_now(void) {
         uint32_t st = atomic_load(&r->state);
         if (st != GC_RS_OLD && st != GC_RS_NURSERY) continue;
         if (r->pinned || r->permanent || r->alloc_owner != GC_OWNER_NONE) continue;
-        size_t used = atomic_load(&r->top) - (uintptr_t)gc_core_region_start(r);
-        if (r->live_bytes * 2 > used) continue;
+        if (!gc_core_region_evacuates(r, atomic_load(&r->top))) continue;
+        if (atomic_load(&r->recycle_state) != GC_RECYCLE_IDLE) continue;   /* its holes are offered */
         uintptr_t start = (uintptr_t)gc_core_region_start(r) + GC_HEADER_SIZE;
         bool left_behind = false;
         gc_core_walk_region(r, start, atomic_load(&r->top), copy_object_now, &left_behind);
@@ -647,6 +657,8 @@ static void full_collection(uintptr_t stack_lo) {
     gc_core_alloc_ctx_retire(&g_core.gc_copy);
 
     if (g_core.trace_handle) gc_core_trace(0, "--- full collection");
+    /* The full collection supersedes any concurrent cycle. */
+    atomic_store(&g_core.holes_paused, false);
     begin_cycle(GC_CYCLE_FULL, true);
     g_col.pins_n = 0;
     capture_stack_range(stack_lo);
