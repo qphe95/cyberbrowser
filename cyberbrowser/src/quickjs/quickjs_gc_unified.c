@@ -255,6 +255,7 @@ static void region_activate(GCRegion *r, uint32_t space, uint32_t head, uint32_t
     r->scan_top = (uintptr_t)base + GC_HEADER_SIZE;
     r->in_cset = false;
     r->collecting = false;
+    r->has_young = false;
     r->keep = false;
     r->pinned = false;
     r->permanent = false;
@@ -465,6 +466,12 @@ size_t gc_core_format_holes(GCRegion *r) {
         /* Allocations come zeroed: so does the hole, here on the sweeping
          * thread rather than the allocating one. */
         memset((void *)hs, 0, he - hs);
+        /* Marks stick between cycles (marked = old): objects allocated here
+         * must start unmarked. */
+        for (uint32_t g = gc_core_granule_of(r, (void *)hs), ge = gc_core_granule_of(r, (void *)he); g < ge; g++) {
+            r->mark_bits[0][g >> 6] &= ~((uint64_t)1 << (g & 63));
+            r->mark_bits[1][g >> 6] &= ~((uint64_t)1 << (g & 63));
+        }
         r->line_first[i] = 0;
         memset(r->line_first + i + 1, GC_LINE_CONT, j - i - 1);
         for (uint32_t l = i; l < j; l++) r->free_lines[l >> 6] |= (uint64_t)1 << (l & 63);
@@ -585,6 +592,7 @@ static GCHeader *bump_alloc(GCAllocCtx *a, size_t total, uint32_t info) {
         GCRegion *r = gc_core_region_acquire(a->space);
         if (!r) return NULL;
         r->alloc_owner = a->owner;
+        r->has_young = !a->permanent;
         r->permanent = a->permanent;
         a->region = r;
         a->top = (uint8_t *)atomic_load_explicit(&r->top, memory_order_relaxed);
@@ -629,6 +637,7 @@ static GCHeader *hole_alloc(GCAllocCtx *a, size_t total, uint32_t info) {
     while ((r = take_recyclable())) {
         if (a->region) ctx_retire_region(a);
         r->alloc_owner = a->owner;
+        r->has_young = true;
         a->region = r;
         a->next_line = 0;
         a->in_hole = false;
@@ -834,6 +843,7 @@ GCHandle gc_realloc(GCHandle handle, size_t new_size) {
     void *new_ptr = gc_header_payload(hdr);
     size_t n = old_size < new_size ? old_size : new_size;
     memcpy(new_ptr, old_ptr, n);
+    gc_col_mark_copy(hdr);
     hdr->handle = handle;
     gc_core_handle_dual_write(handle, new_ptr);
     /* The copy held its references before it was current: a card rescan in
@@ -1231,8 +1241,14 @@ bool gc_init(void) {
     if (!handle_tables_commit_to(HANDLE_COMMIT_CHUNK)) return false;
     atomic_store(&g_gc.high_water, 1);  /* handle 0 is GC_HANDLE_NULL */
 
-    g_core.js_young.space = GC_RS_NURSERY;
+    /* Young objects are the unmarked ones, wherever they are: the young
+     * context fills holes like the others. */
+    g_core.js_young.space = GC_RS_OLD;
     g_core.js_young.owner = GC_OWNER_JS;
+    g_core.js_young.recycles = true;
+    g_core.js_young_overflow.space = GC_RS_OLD;
+    g_core.js_young_overflow.owner = GC_OWNER_JS;
+    g_core.js_young.overflow = &g_core.js_young_overflow;
     g_core.js_old.space = GC_RS_OLD;
     g_core.js_old.recycles = true;
     g_core.js_old.owner = GC_OWNER_JS;

@@ -115,18 +115,12 @@ static void worklist_push(GCWorklist *w, GCHandle h) {
 
 /* True if the collection in progress decides this object's fate.  Objects
  * outside the cycle are live by definition: allocated during the cycle
- * (above TAMS) or, in a minor cycle, outside the nursery being collected. */
+ * (above TAMS).  In a minor cycle the old objects are in it too, but they
+ * are marked already (sticky mark bits), so only young ones get traced or
+ * freed. */
 static inline bool in_cycle(const GCRegion *r, const GCHeader *hdr) {
     if (r->permanent) return false;   /* atoms */
-    switch (g_col.kind) {
-    case GC_CYCLE_FULL:
-    case GC_CYCLE_MAJOR:
-        return (uintptr_t)hdr < r->tams;
-    case GC_CYCLE_MINOR:
-        return r->collecting;
-    default:
-        return false;
-    }
+    return g_col.kind != GC_CYCLE_NONE && (uintptr_t)hdr < r->tams;
 }
 
 static inline bool is_marked(const GCRegion *r, const GCHeader *hdr) {
@@ -188,6 +182,8 @@ static void mark_cb(JSRuntimeHandle rt, GCHandle h) {
     if (!in_cycle(r, hdr)) return;
     if (set_mark(r, hdr)) {
         GC_TRACE(h, "marked");
+        if (g_col.kind == GC_CYCLE_MINOR)
+            atomic_fetch_add_explicit(&g_col.promoted, gc_header_total_size(hdr), memory_order_relaxed);
         worklist_push(&g_col.work, h);
     }
 }
@@ -219,7 +215,7 @@ void gc_core_trace(GCHandle h, const char *what) {
     e->kind = (int16_t)g_col.kind;
     e->type = hdr ? (int16_t)gc_header_type(hdr) : -1;
     e->gc_thread = gc_os_thread_id() != g_core.js_thread_id;
-    e->young = r && r->space == GC_RS_NURSERY;
+    e->young = r && hdr && !is_marked(r, hdr);
     e->collecting = r && r->collecting;
     e->marked = r && hdr && in_cycle(r, hdr) ? (is_marked(r, hdr) ? 2 : 1) : 0;
     e->addr = p;
@@ -579,6 +575,7 @@ static void copy_object_now(GCHeader *hdr, void *opaque) {
         abort();
     }
     memcpy(dst, hdr, total);
+    gc_col_mark_copy(dst);
     /* The copy is a new home for whatever the object references: its cards
      * must be in the nursery's remembered set. */
     gc_dirty_range(gc_header_payload(dst), total - GC_HEADER_SIZE);
@@ -613,7 +610,9 @@ static void evacuate_sparse_regions_now(void) {
  * clears them on the GC thread beforehand. */
 static void begin_cycle(int kind, bool clear_bits) {
     g_col.kind = kind;
-    g_col.parity ^= 1;
+    /* A minor cycle keeps the bitmap: what is marked is old. */
+    if (kind != GC_CYCLE_MINOR) g_col.parity ^= 1;
+    atomic_store_explicit(&g_col.promoted, 0, memory_order_relaxed);
     uint32_t hwm = atomic_load(&g_core.region_hwm);
     for (uint32_t i = 0; i < hwm; i++) {
         GCRegion *r = &g_core.regions[i];
@@ -707,3 +706,8 @@ bool gc_col_in_cycle(const GCRegion *r, const GCHeader *hdr) { return in_cycle(r
 GCHeader *gc_col_handle_header(GCHandle h) { return handle_header(h); }
 void gc_col_worklist_push(GCHandle h) { worklist_push(&g_col.work, h); }
 void gc_col_sort_uintptr(uintptr_t *a, size_t n) { qsort(a, n, sizeof(uintptr_t), compare_uintptr); }
+
+/* A copy of an object (gc_realloc, evacuation) under the same handle: its
+ * referrers never wrote that handle again, so no card leads a minor cycle
+ * to it.  It starts out old. */
+void gc_col_mark_copy(GCHeader *hdr) { set_mark(header_region(hdr), hdr); }

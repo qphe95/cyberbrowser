@@ -23,7 +23,10 @@ typedef struct GCWorklist {
 
 typedef struct GCCollector {
     int kind;                 /* GC_CYCLE_* of the cycle being marked/swept */
-    uint32_t parity;          /* mark bitmap in use */
+    /* Mark bitmap in use.  Its bits stick between cycles: a minor cycle
+     * keeps them (marked = old) and a major one switches to a cleared one. */
+    uint32_t parity;
+    _Atomic size_t promoted;  /* bytes the minor cycle marked: survivors that are now old */
     GCWorklist work;
     uintptr_t *pins;          /* headers pinned by the last pin_running_code, sorted */
     uint32_t pins_n, pins_cap;

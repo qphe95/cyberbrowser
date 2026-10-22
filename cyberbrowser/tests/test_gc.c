@@ -1615,7 +1615,8 @@ TEST(test_gc_weakmap_values_survive_concurrent_cycles) {
     return true;
 }
 
-/* Young objects that survive a minor cycle move to old space. */
+/* Young objects (unmarked) that survive a minor cycle become old (marked)
+ * where they are: nothing moves. */
 TEST(test_gc_minor_cycle_promotes_survivors) {
     JSContextHandle ctx = get_gc_test_ctx();
     if (!SAFE_VALID(ctx)) return true;
@@ -1624,13 +1625,16 @@ TEST(test_gc_minor_cycle_promotes_survivors) {
     GCValue r = eval_test(ctx, "globalThis.__young = {tag: 'young-object'}; __young");
     ASSERT_TRUE(is_exception_free(ctx, r));
     GCHandle h = JS_VALUE_GET_HANDLE(r);
-    ASSERT_TRUE(gc_core_region_of(gc_deref(h))->space == GC_RS_NURSERY);
+    void *at = gc_deref(h);
+    GCHeader *hdr = gc_header(at);
+    ASSERT_TRUE(!gc_col_is_marked(gc_core_region_of(hdr), hdr));
     gc_request_cycle(false);
     ASSERT_TRUE(gc_wait_idle(20000));
     GCStats s;
     ASSERT_TRUE(conc_end(&st, &s));
     ASSERT_TRUE(s.minor_cycles > st.before.minor_cycles);
-    ASSERT_TRUE(gc_core_region_of(gc_deref(h))->space == GC_RS_OLD);
+    ASSERT_TRUE(gc_deref(h) == at);
+    ASSERT_TRUE(gc_col_is_marked(gc_core_region_of(hdr), hdr));
     ASSERT_TRUE(eval_expect_ok(ctx, "__young.tag === 'young-object' ? (__young = null, 'ok') : 'lost'"));
     ASSERT_EQ(st.before.verify_failures, s.verify_failures);
     return true;
@@ -1725,18 +1729,35 @@ TEST(test_gc_concurrent_workload_stress) {
     return true;
 }
 
-/* Every copy rejected at the flip: objects are promoted in place and stay
- * where they are, still correct. */
+/* Request a major cycle and run boundary steps until one completes (at
+ * stress 2 the collector never goes idle). */
+static bool run_major_cycle(void) {
+    GCStats s0, s;
+    gc_get_stats(&s0);
+    gc_request_cycle(true);
+    uint64_t end = gc_os_now_ns() + 20000000000ull;
+    do {
+        gc_tick();
+        gc_os_yield();
+        gc_get_stats(&s);
+        if (gc_os_now_ns() > end) return false;
+    } while (s.major_cycles < s0.major_cycles + 2);
+    return true;
+}
+
+/* Every copy rejected at the flip (major cycles move everything at stress
+ * 2): objects stay where they are, still correct. */
 TEST(test_gc_flip_rejects_all_copies) {
     JSContextHandle ctx = get_gc_test_ctx();
     if (!SAFE_VALID(ctx)) return true;
     ConcState st;
     ASSERT_TRUE(conc_begin(&st, 2, GC_REJECT_ALL, 128));
     ASSERT_TRUE(eval_expect_ok(ctx, k_workload_script));
+    /* Only major cycles move objects: make sure one runs. */
+    ASSERT_TRUE(run_major_cycle());
     GCStats s;
     ASSERT_TRUE(conc_end(&st, &s));
     ASSERT_TRUE(s.copies_rejected > st.before.copies_rejected);
-    ASSERT_TRUE(s.regions_promoted_in_place > st.before.regions_promoted_in_place);
     ASSERT_EQ(st.before.verify_failures, s.verify_failures);
     ASSERT_EQ(0, (int)gc_test_heap_check());
     return true;
@@ -1750,6 +1771,8 @@ TEST(test_gc_flip_mixed_accept_reject) {
     ConcState st;
     ASSERT_TRUE(conc_begin(&st, 2, GC_REJECT_HALF, 128));
     ASSERT_TRUE(eval_expect_ok(ctx, k_workload_script));
+    /* Only major cycles move objects: make sure one runs. */
+    ASSERT_TRUE(run_major_cycle());
     GCStats s;
     ASSERT_TRUE(conc_end(&st, &s));
     ASSERT_TRUE(s.copies_rejected > st.before.copies_rejected);

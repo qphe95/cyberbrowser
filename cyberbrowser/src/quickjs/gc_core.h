@@ -52,6 +52,9 @@ typedef struct GCRegion {
      * one bit per line; see gc_core_format_holes. */
     uint64_t *free_lines;
     _Atomic uint32_t recycle_state;   /* GC_RECYCLE_* */
+    /* An allocation context has filled it since the last minor cycle's
+     * mark start: it may hold young (unmarked) objects. */
+    bool has_young;
     bool in_recyclable;               /* listed in g_core.recyclable (under its lock) */
 } GCRegion;
 
@@ -127,7 +130,7 @@ typedef struct GCCore {
     GCAllocCtx js_old;     /* JS thread: pretenured objects */
     GCAllocCtx js_perm;    /* JS thread: atoms (permanent) */
     GCAllocCtx gc_copy;    /* GC thread (or sync collector): copies */
-    GCAllocCtx js_old_overflow, gc_copy_overflow;
+    GCAllocCtx js_young_overflow, js_old_overflow, gc_copy_overflow;
 
     GCHandle *hcache;      /* JS thread free-handle cache */
     uint32_t hcache_n;
@@ -181,6 +184,8 @@ void gc_core_registry_add(GCRegistry *reg, GCHandle h);
  * Returns the bytes in holes.  The caller holds the region SWEEPING. */
 size_t gc_core_format_holes(GCRegion *r);
 void gc_core_offer_recyclable(GCRegion *r);
+/* Mark a copy made under an existing handle as old (gc_collector.c). */
+void gc_col_mark_copy(GCHeader *hdr);
 
 static inline GCRegion *gc_core_region_of(const void *p) {
     uintptr_t off = (uintptr_t)p - (uintptr_t)g_gc.heap_base;

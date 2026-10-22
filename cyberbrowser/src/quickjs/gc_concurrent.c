@@ -568,14 +568,21 @@ static void step_mark_start(int kind) {
     /* The GC thread holds no pointer into retired registry storage now. */
     gc_core_free_retired();
     if (g_core.trace_handle) gc_core_trace(0, kind == GC_CYCLE_MINOR ? "--- minor mark start" : "--- major mark start");
+    /* No hole allocation until this cycle's sweep is done (see
+     * gc_core.holes_paused): objects allocated meanwhile go to fresh
+     * regions, above TAMS.  The GC thread has retired gc_copy already. */
+    atomic_store_explicit(&g_core.holes_paused, true, memory_order_release);
+    if (g_core.js_young.in_hole) gc_core_alloc_ctx_retire(&g_core.js_young);
+    if (g_core.js_old.in_hole) gc_core_alloc_ctx_retire(&g_core.js_old);
     if (kind == GC_CYCLE_MINOR) {
-        /* The nursery that exists now is the one this cycle collects; new
-         * young objects go to fresh regions. */
-        gc_core_alloc_ctx_retire(&g_core.js_young);
+        /* The regions allocated into since the last minor cycle hold its
+         * young objects and are the ones it sweeps.  A region a context is
+         * still filling gets young objects for the next one too. */
         uint32_t hwm = atomic_load(&g_core.region_hwm);
         for (uint32_t i = 0; i < hwm; i++) {
             GCRegion *r = &g_core.regions[i];
-            if (atomic_load(&r->state) == GC_RS_NURSERY) r->collecting = true;
+            r->collecting = r->has_young && gc_core_region_in_use(atomic_load(&r->state));
+            r->has_young = r->alloc_owner != GC_OWNER_NONE;
         }
         uint64_t *t = g_conc.remset_cur;
         g_conc.remset_cur = g_conc.remset_acc;
@@ -587,12 +594,6 @@ static void step_mark_start(int kind) {
     uint64_t ta = gc_os_now_ns();
     gc_col_begin_cycle(kind, false);
     g_core.defer_frees = true;
-    /* No hole allocation until this cycle's sweep is done (see
-     * gc_core.holes_paused); the GC thread has retired gc_copy already. */
-    if (kind != GC_CYCLE_MINOR) {
-        atomic_store_explicit(&g_core.holes_paused, true, memory_order_release);
-        if (g_core.js_old.in_hole) gc_core_alloc_ctx_retire(&g_core.js_old);
-    }
     uint64_t tb = gc_os_now_ns();
     gc_col_enumerate_roots(rt, false);
     if (g_core.log_level > 3)
@@ -893,13 +894,13 @@ bool gc_wait_idle(uint32_t timeout_ms) {
 
 /* Clear the mark bitmaps of the parity the next cycle uses. */
 static void prepare_bitmaps(int kind) {
+    if (kind == GC_CYCLE_MINOR) return;   /* it keeps the bitmap in use */
     uint32_t next = g_col.parity ^ 1;
     uint32_t hwm = atomic_load(&g_core.region_hwm);
     for (uint32_t i = 0; i < hwm; i++) {
         GCRegion *r = &g_core.regions[i];
         uint32_t st = atomic_load_explicit(&r->state, memory_order_acquire);
         if (!gc_core_region_in_use(st)) continue;
-        if (kind == GC_CYCLE_MINOR && st != GC_RS_NURSERY) continue;
         memset(r->mark_bits[next], 0, (GC_REGION_SIZE / GC_GRANULE) / 8);
     }
 }
@@ -961,10 +962,6 @@ static void queue_remset(void) {
             uint32_t b = (uint32_t)__builtin_ctzll(v);
             v &= v - 1;
             uint32_t card = w * 64 + b;
-            /* Cards of the nursery being collected hold no old-to-young
-             * references: its live objects are traced anyway. */
-            GCRegion *r = gc_core_region_of(g_gc.heap_base + ((uintptr_t)card << GC_CARD_SHIFT));
-            if (r && r->collecting) continue;
             u32_push(&g_conc.pending_cards, card);
         }
     }
@@ -995,12 +992,8 @@ static void sweep_concurrent(int kind) {
         GCRegion *r = &g_core.regions[i];
         uint32_t st = atomic_load_explicit(&r->state, memory_order_acquire);
         if (!gc_core_region_in_use(st) || r->permanent) continue;
-        if (kind == GC_CYCLE_MINOR) {
-            if (!r->collecting) continue;
-            gc_col_sweep_region(r, atomic_load(&r->top), false);
-            continue;
-        }
-        if (r->collecting) continue;
+        /* A minor cycle sweeps where young objects may be. */
+        if (kind == GC_CYCLE_MINOR && !r->collecting) continue;
         /* Hold the region so no context claims it meanwhile.  None is
          * filling its holes (they are paused), but a region a context still
          * owns could only be skipped: its dead objects would stay current
@@ -1026,8 +1019,10 @@ static void sweep_concurrent(int kind) {
         live_bytes += live;
         size_t hb;
         bool offered = false;
-        if (g_core.holes && st == GC_RS_OLD && top == r->tams && r->alloc_owner == GC_OWNER_NONE &&
-            !r->pinned && !gc_core_region_evacuates(r, top) && (hb = gc_core_format_holes(r))) {
+        if (g_core.holes && st == GC_RS_OLD && r->alloc_owner == GC_OWNER_NONE && !r->pinned &&
+            !(kind != GC_CYCLE_MINOR && top == r->tams &&
+              (gc_core_region_evacuates(r, top) || g_core.config.stress >= 2)) &&
+            (hb = gc_core_format_holes(r))) {
             hole_bytes += hb;
             n_offered++;
             atomic_store_explicit(&r->recycle_state, GC_RECYCLE_AVAILABLE, memory_order_release);
@@ -1037,13 +1032,17 @@ static void sweep_concurrent(int kind) {
         if (!offered) {
             atomic_store_explicit(&r->recycle_state, GC_RECYCLE_IDLE, memory_order_release);
             n_kept++;
+            if (g_core.log_level > 1)
+                fprintf(stderr, "[GC]     kept region %u: state %u, top %s tams, owner %u, pinned %d, live %zu of %zu%s\n",
+                        i, st, top == r->tams ? "at" : "past", r->alloc_owner, r->pinned, live,
+                        (size_t)(top - (uintptr_t)gc_core_region_start(r)),
+                        kind != GC_CYCLE_MINOR && gc_core_region_evacuates(r, top) ? ", to evacuate" : "");
         }
     }
-    if (kind != GC_CYCLE_MINOR && g_core.log_level)
-        fprintf(stderr, "[GC]   major sweep: %u regions released, %u offered (%.1f MB in holes), %u kept; %.1f MB live\n",
-                n_released, n_offered, hole_bytes / 1048576.0, n_kept, live_bytes / 1048576.0);
-    if (kind != GC_CYCLE_MINOR)
-        atomic_store_explicit(&g_core.holes_paused, false, memory_order_release);
+    if (g_core.log_level)
+        fprintf(stderr, "[GC]   %s sweep: %u regions released, %u offered (%.1f MB in holes), %u kept; %.1f MB live\n",
+                kind == GC_CYCLE_MINOR ? "minor" : "major", n_released, n_offered, hole_bytes / 1048576.0, n_kept, live_bytes / 1048576.0);
+    atomic_store_explicit(&g_core.holes_paused, false, memory_order_release);
 }
 
 /* ============================================================================
@@ -1080,6 +1079,7 @@ static void copy_object_concurrent(GCHeader *hdr, void *opaque) {
                                                 gc_header_type(hdr));
     if (!dst) return;
     memcpy(dst, hdr, total);
+    gc_col_mark_copy(dst);
     uint8_t *from = (uint8_t *)gc_header_payload(hdr);
     uint8_t *to = (uint8_t *)gc_header_payload(dst);
     gc_dirty_range(to, total - GC_HEADER_SIZE);
@@ -1188,6 +1188,7 @@ static bool flip(void) {
 static bool evacuate_major(void) {
     uint32_t hwm = atomic_load(&g_core.region_hwm);
     uint32_t next = 0;
+    uint32_t n_cset = 0, released0 = atomic_load(&g_core.regions_in_use);
     while (next < hwm) {
         size_t batch = 0;
         g_conc.cset.n = 0;
@@ -1203,6 +1204,7 @@ static bool evacuate_major(void) {
             if (atomic_load_explicit(&r->recycle_state, memory_order_acquire) != GC_RECYCLE_IDLE) continue;
             r->in_cset = true;
             u32_push(&g_conc.cset, next);
+            n_cset++;
             batch += r->live_bytes;
         }
         if (!g_conc.cset.n) break;
@@ -1211,49 +1213,23 @@ static bool evacuate_major(void) {
             copy_region(r, r->tams);
             if (aborted()) {
                 unwind_moves();
+                gc_core_alloc_ctx_retire(&g_core.gc_copy);
                 return false;
             }
         }
-        /* The copy region stays the GC thread's across batches and cycles
-         * (its top is published with every allocation). */
         if (!flip()) {
             unwind_moves();
+            gc_core_alloc_ctx_retire(&g_core.gc_copy);
             return false;
         }
         finish_flip(GC_CYCLE_MAJOR);
     }
-    return true;
-}
-
-/* Minor cycle: promote every survivor of the collected nursery.  Sparse
- * regions are copied out (compacting them); dense ones, and everything past
- * one flip's validation budget, are promoted in place. */
-static bool evacuate_minor(void) {
-    uint32_t hwm = atomic_load(&g_core.region_hwm);
-    size_t copied = 0;
-    g_conc.cset.n = 0;
-    for (uint32_t i = 0; i < hwm; i++) {
-        GCRegion *r = &g_core.regions[i];
-        if (!r->collecting || atomic_load(&r->state) != GC_RS_NURSERY) continue;
-        u32_push(&g_conc.cset, i);
-        size_t used = atomic_load(&r->top) - (uintptr_t)gc_core_region_start(r);
-        bool dense = r->live_bytes * 2 > used && g_core.config.stress < 2;
-        if (dense || copied + r->live_bytes > EVAC_BATCH_BYTES) {
-            r->keep = true;
-            continue;
-        }
-        copied += r->live_bytes;
-        if (r->live_bytes) copy_region(r, atomic_load(&r->top));
-        if (aborted()) {
-            unwind_moves();
-            return false;
-        }
-    }
-    if (g_conc.moved_n && !flip()) {
-        unwind_moves();
-        return false;
-    }
-    finish_flip(GC_CYCLE_MINOR);
+    /* The copier works in major cycles only: its regions become ordinary
+     * ones, swept and recycled with the rest. */
+    gc_core_alloc_ctx_retire(&g_core.gc_copy);
+    if (g_core.log_level && n_cset)
+        fprintf(stderr, "[GC]   evacuated %u regions, %d fewer in use\n", n_cset,
+                (int)released0 - (int)atomic_load(&g_core.regions_in_use));
     return true;
 }
 
@@ -1310,7 +1286,7 @@ static size_t g_promoted_since_major;   /* GC thread */
 
 static void run_cycle(int kind) {
     JSRuntimeHandle rt = g_gc.rt;
-    bool marked = false;
+    bool marked = false, started = false;
     uint64_t t_start = gc_os_now_ns(), t_mark, t_remark, t_sweep;
     uint64_t cards0 = g_core.stats.dirty_cards_rescanned;
     g_next_kind = (uint32_t)kind;
@@ -1323,6 +1299,7 @@ static void run_cycle(int kind) {
      * pull and mark start are pulled, and rescanned, during the cycle. */
     dirty_pull_all(NULL);
     if (post_request(REQ_MARK_START, 0) != ACK_DONE) goto abandon;
+    started = true;
     if (kind == GC_CYCLE_MINOR) queue_remset();
     if (!concurrent_mark(rt)) goto abandon;
     t_mark = gc_os_now_ns();
@@ -1335,9 +1312,10 @@ static void run_cycle(int kind) {
     t_sweep = gc_os_now_ns();
     if (aborted()) goto finish;
     if (kind == GC_CYCLE_MINOR) {
-        uint64_t before = g_core.stats.bytes_promoted;
-        if (!evacuate_minor()) goto finish;
-        g_promoted_since_major += g_core.stats.bytes_promoted - before;
+        /* Nothing moves: the survivors, now marked, are old where they are. */
+        size_t promoted = atomic_load_explicit(&g_col.promoted, memory_order_relaxed);
+        g_core.stats.bytes_promoted += promoted;
+        g_promoted_since_major += promoted;
         g_core.stats.minor_cycles++;
     } else {
         if (!evacuate_major()) goto finish;
@@ -1360,6 +1338,9 @@ abandon:
      * thread recycles deferred frees when it sees the abort. */
     (void)marked;
     if (kind == GC_CYCLE_MINOR) retire_remset(false);
+    /* An abandoned major cycle's bitmap is partial: go back to the one the
+     * marks of old objects stick in.  (The JS thread waits for this.) */
+    else if (started) g_col.parity ^= 1;
     g_core.stats.aborted_cycles++;
     end_concurrent_cycle();
 }
