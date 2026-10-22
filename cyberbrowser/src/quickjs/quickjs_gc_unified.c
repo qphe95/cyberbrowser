@@ -108,11 +108,25 @@ void gc_core_note_freed(GCHandle h, int how) {
     }
 }
 
+/* The caller's frames, image-relative (for addr2line). */
+static void stale_backtrace(void) {
+#ifdef _WIN32
+    extern unsigned short __stdcall RtlCaptureStackBackTrace(unsigned long, unsigned long, void **, unsigned long *);
+    extern char __ImageBase;
+    void *frames[24];
+    unsigned short n = RtlCaptureStackBackTrace(2, 24, frames, NULL);
+    fprintf(stderr, "[GC-STALE]   rvas:");
+    for (unsigned short i = 0; i < n; i++)
+        fprintf(stderr, " 0x%llx", (unsigned long long)((uintptr_t)frames[i] - (uintptr_t)&__ImageBase));
+    fputc('\n', stderr);
+#endif
+}
+
 /* Print what is known about handle h (QJS_GC_HISTORY). */
 void gc_debug_report_stale_handle(GCHandle h, const char *where) {
     static const char *how[] = { "not freed", "gc_free from the JS thread",
                                  "stop-the-world sweep", "concurrent sweep" };
-    fprintf(stderr, "[GC-STALE] %s: handle %u is %s", where, (unsigned)h, gc_deref(h) ? "live" : "dead");
+    fprintf(stderr, "[GC-STALE] %s: handle %u is %s", where, (unsigned)h, gc_handle_live(h) ? "live" : "dead");
     if (g_handle_history && h < gc_handle_limit()) {
         GCHandleHistory *e = &g_handle_history[h];
         fprintf(stderr, "; now type %u, allocated %s after %u cycles, %s after %u; object #%u at this address",
@@ -126,6 +140,7 @@ void gc_debug_report_stale_handle(GCHandle h, const char *where) {
                 (unsigned long long)g_core.stats.minor_cycles, (unsigned long long)g_core.stats.major_cycles);
     }
     fputc('\n', stderr);
+    stale_backtrace();
     if (g_core.trace_handle) gc_core_trace_dump(h);
     fflush(stderr);
 }
@@ -141,6 +156,7 @@ void gc_debug_stale_deref(GCHandle handle, void *site) {
     if (!g_handle_history || handle >= gc_handle_limit()) return;
     GCHandleHistory *e = &g_handle_history[handle];
     if (!e->uses || e->freed_by == GC_FREED_NOT) return;   /* never an object, or in flux */
+    bool fresh = false;
     while (atomic_flag_test_and_set_explicit(&g_stale_lock, memory_order_acquire)) {}
     size_t i = ((uintptr_t)site >> 2) % STALE_SITES;
     for (size_t k = 0; k < STALE_SITES; k++, i = (i + 1) % STALE_SITES) {
@@ -148,10 +164,19 @@ void gc_debug_stale_deref(GCHandle handle, void *site) {
         if (!g_stale[i].site) {
             g_stale[i].site = site; g_stale[i].first = handle; g_stale[i].n = 1;
             g_stale[i].type = e->type; g_stale[i].freed_by = e->freed_by;
+            fresh = true;
             break;
         }
     }
     atomic_flag_clear_explicit(&g_stale_lock, memory_order_release);
+    if (fresh) {
+        /* Now as well as at exit: a later crash would lose the dump. */
+        extern char __ImageBase;
+        fprintf(stderr, "[GC-STALE] new site rva=0x%llx handle %u\n",
+                (unsigned long long)((uintptr_t)site - (uintptr_t)&__ImageBase), (unsigned)handle);
+        stale_backtrace();
+        fflush(stderr);
+    }
 }
 
 /* Print the call sites (image-relative, for addr2line) at exit. */
@@ -989,9 +1014,7 @@ GCHandle gc_realloc2(GCHandle handle, size_t new_size, size_t *pslack) {
 }
 
 void gc_free(GCHandle handle) {
-    if (handle == GC_HANDLE_NULL) return;
-    void *p = gc_deref(handle);
-    if (!p) return;
+    if (!gc_handle_live(handle)) return;
     /* Atomic: a concurrent sweep may be freeing the same (unreachable)
      * object.  Its memory is reused once a sweep formats it into a hole. */
     if (gc_core_clear_handle(handle)) {
@@ -1009,7 +1032,7 @@ JSGCObjectTypeEnum gc_handle_get_type(GCHandle handle) {
 }
 
 bool (gc_handle_is_valid)(GCHandle handle) {
-    return gc_deref(handle) != NULL;
+    return gc_handle_live(handle);
 }
 
 bool gc_ptr_in_heap(void *ptr) {
@@ -1213,7 +1236,7 @@ void gc_for_each_object_of_type(JSGCObjectTypeEnum type, GCTypeIteratorFunc func
     if (type == JS_GC_OBJ_TYPE_JS_CONTEXT) {
         for (uint32_t i = 0; i < g_core.contexts.count; i++) {
             GCHandle h = g_core.contexts.items[i].handle;
-            if (gc_deref(h) && gc_handle_get_type_inline(h) == JS_GC_OBJ_TYPE_JS_CONTEXT)
+            if (gc_handle_live(h) && gc_handle_get_type_inline(h) == JS_GC_OBJ_TYPE_JS_CONTEXT)
                 func(h, user_data);
         }
         return;
@@ -1296,7 +1319,7 @@ void gc_handle_array_compact(JSHandleArray *arr) {
     uint32_t j = 0;
     for (uint32_t i = 0; i < arr->count; i++) {
         GCHandle h = arr->handles[i];
-        if (!gc_handle_array_entry_is_valid(h) || !gc_deref(h)) continue;
+        if (!gc_handle_array_entry_is_valid(h) || !gc_handle_live(h)) continue;
         arr->handles[j++] = h;
     }
     arr->count = j;

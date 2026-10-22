@@ -25,8 +25,10 @@ static uint64_t g_base, g_end;
 static unsigned g_interval_us = 1000;
 static char *g_path;
 static unsigned g_max_ms;
+static volatile LONG g_written;   /* the file is written once */
 
 static void write_samples(void) {
+    if (InterlockedExchange(&g_written, 1)) return;
     FILE *f = fopen(g_path, "w");
     if (!f) return;
     fprintf(f, "# interval_us %u samples %zu\n", g_interval_us, g_n);
@@ -125,8 +127,8 @@ void cyber_sampler_stop(void) {
     WaitForSingleObject(g_thread, INFINITE);
     CloseHandle(g_thread);
     g_thread = NULL;
-    /* With a time limit the sampler thread wrote the file when it ran out. */
-    if (!g_max_ms) write_samples();
+    /* Unless the time limit already wrote it. */
+    write_samples();
 }
 
 #else

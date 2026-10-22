@@ -479,7 +479,7 @@ contexts:
     j = 0;
     for (uint32_t i = 0; i < g_core.contexts.count; i++) {
         GCRegistryEntry e = g_core.contexts.items[i];
-        if (gc_object_is_dead(e.handle) || !gc_deref(e.handle)) continue;
+        if (gc_object_is_dead(e.handle) || !gc_handle_live(e.handle)) continue;
         g_core.contexts.items[j++] = e;
     }
     g_core.contexts.count = j;

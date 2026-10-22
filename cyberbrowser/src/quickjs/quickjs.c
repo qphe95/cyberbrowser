@@ -7482,22 +7482,36 @@ void mark_children(JSRuntimeHandle rt, GCHandle handle,
         {
             JSAsyncFunctionStateHandle s = (JSAsyncFunctionStateHandle)(handle);
             JSStackFrame *sf = js_async_func_state_frame_ptr(s);
-            GCValue *sp;
 
-            if (sf && !SAFE_GET_OR(s, JSAsyncFunctionStateHandle, is_completed, FALSE)) {
+            if (sf) {
+                /* As for stack frames, the arguments and locals are marked
+                 * even once the function completed (or while it runs): the
+                 * frame-linked var_refs of lazily compiled closures (see
+                 * get_var_ref_enhanced) keep reading them from the frame.
+                 * The operand stack above the locals is marked only while
+                 * suspended (sp_offset = 0 while running). */
                 JS_MarkValue(rt, sf->cur_func, mark_func);
                 JS_MarkValue(rt, SAFE_GET_OR(s, JSAsyncFunctionStateHandle, this_val, GC_UNDEFINED), mark_func);
-                /* sp_offset = 0 if the function is running */
-                if (sf->sp_offset > 0) {
-                    /* if the function is running, sp_offset is 0 so we
-                       cannot mark the stack. Marking the variables is not needed
-                       because a running function cannot be part of a removable
-                       cycle */
-                    GCValue *var_buf = JS_SF_VAR_BUF(sf);
-                    size_t off = (size_t)((uint8_t *)var_buf - (uint8_t *)gc_deref(handle));
-                    int n = gc_clamp_count(sf->sp_offset, gc_slots(handle, off, sizeof(GCValue)));
-                    for(i = 0; i < n; i++)
-                        JS_MarkValue(rt, var_buf[i], mark_func);
+                int n = sf->arg_count + sf->var_count;
+                if (sf->sp_offset > 0 && !SAFE_GET_OR(s, JSAsyncFunctionStateHandle, is_completed, FALSE))
+                    n = sf->arg_count + sf->sp_offset;
+                GCValue *arg_buf = JS_SF_ARG_BUF(sf);
+                size_t off = (size_t)((uint8_t *)arg_buf - (uint8_t *)gc_deref(handle));
+                n = gc_clamp_count(n, gc_slots(handle, off, sizeof(GCValue)));
+                for(i = 0; i < n; i++)
+                    JS_MarkValue(rt, arg_buf[i], mark_func);
+                if (sf->var_refs_handle != GC_HANDLE_NULL)
+                    mark_func(rt, sf->var_refs_handle);
+                GCHandle *var_refs = JS_SF_VAR_REFS(sf);
+                if (var_refs && sf->var_ref_count > 0) {
+                    int nr = gc_clamp_count(sf->var_ref_count,
+                        sf->var_refs_handle != GC_HANDLE_NULL
+                            ? gc_slots(sf->var_refs_handle, 0, sizeof(GCHandle))
+                            : gc_slots(handle, (size_t)((uint8_t *)sf - (uint8_t *)gc_deref(handle)) + sf->var_refs_offset,
+                                       sizeof(GCHandle)));
+                    for(i = 0; i < nr; i++)
+                        if (var_refs[i] != GC_HANDLE_NULL)
+                            mark_func(rt, var_refs[i]);
                 }
             }
             JS_MarkValue(rt, js_async_func_state_resolving_func(s, 0), mark_func);
@@ -7889,7 +7903,7 @@ static void gc_weak_registry_drop_dead(JSHandleArray *arr)
     uint32_t j = 0;
     for (uint32_t i = 0; i < arr->count; i++) {
         GCHandle h = arr->handles[i];
-        if (!gc_handle_array_entry_is_valid(h) || !gc_deref(h) || gc_object_is_dead(h)) continue;
+        if (!gc_handle_array_entry_is_valid(h) || !gc_handle_live(h) || gc_object_is_dead(h)) continue;
         arr->handles[j++] = h;
     }
     arr->count = j;
@@ -20120,7 +20134,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
     p = JS_VALUE_GET_OBJ(func_obj);
     if (unlikely(SAFE_GET_OR(p, JSObjectHandle, class_id, 0) != JS_CLASS_BYTECODE_FUNCTION)) {
         rt2 = ctx_rt;
-        if (unlikely(g_handle_history != NULL) && !gc_deref(p))
+        if (unlikely(g_handle_history != NULL) && !gc_handle_live(p))
             gc_debug_report_stale_handle(p, "call");
         call_func = ((JSClass*)rt_class_array)[SAFE_GET_OR(p, JSObjectHandle, class_id, 0)].call;
         if (!call_func) {
@@ -23392,7 +23406,10 @@ static JSAsyncFunctionStateHandle async_func_init(JSContextHandle ctx,
     SAFE_SET_VALUE(s, JSAsyncFunctionStateHandle, this_val, this_obj);
     SAFE_SET(s, JSAsyncFunctionStateHandle, argc, argc);
     SAFE_SET(s, JSAsyncFunctionStateHandle, frame.arg_count, arg_buf_len);
-    
+    /* For close_var_refs at completion and for marking. */
+    SAFE_SET(s, JSAsyncFunctionStateHandle, frame.var_count, SAFE_GET_OR(b, JSFunctionBytecodeHandle, var_count, 0));
+    SAFE_SET(s, JSAsyncFunctionStateHandle, frame.var_ref_count, SAFE_GET_OR(b, JSFunctionBytecodeHandle, var_ref_count, 0));
+
     /* var_buf starts after arg_buf */
     uint32_t var_buf_offset = arg_buf_offset + sizeof(GCValue) * arg_buf_len;
     SAFE_SET(s, JSAsyncFunctionStateHandle, frame.var_buf_offset, var_buf_offset);

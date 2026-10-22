@@ -484,6 +484,35 @@ TEST(test_gc_async_frame_survives_await) {
     return true;
 }
 
+/* A closure keeps the arguments of an async function that already returned
+ * (YouTube: async function(T,P){ ... .then(k=>{P(k)}) }).  The frame's
+ * var_refs were never closed and a completed frame's arguments were not
+ * marked, so P was swept and the closure called freed memory. */
+TEST(test_gc_async_closure_keeps_args_after_return) {
+    JSContextHandle ctx = get_gc_test_ctx();
+    if (!SAFE_VALID(ctx)) { printf("    (skipped - no context)"); return true; }
+    GCValue r = eval_test(ctx,
+        "globalThis.__ac_res = []; globalThis.__ac_hits = 0;"
+        "(function () {"
+        "  async function gg(P, p) { return p.then(k => { P(k); return k; }); }"
+        "  for (var i = 0; i < 50; i++) {"
+        "    var p = new Promise(function (res) { __ac_res.push(res); });"
+        "    gg(function (k) { __ac_hits += k; }, p);"
+        "  }"
+        "})(); 'started'");
+    (void)r;
+    run_jobs(ctx);
+    for (int round = 0; round < 4; round++) {
+        eval_test(ctx, "(function(){ var g = []; for (var i = 0; i < 20000; i++) g.push({ x: 'garbage' + i }); return g.length; })()");
+        JS_RunGC(JS_GetRuntime(ctx));
+    }
+    eval_test(ctx, "__ac_res.forEach(function (res) { res(2); }); 1");
+    run_jobs(ctx);
+    ASSERT_TRUE(eval_expect_ok(ctx, "__ac_hits === 100 ? 'ok' : 'hits ' + __ac_hits"));
+    ASSERT_EQ(0, (int)gc_test_heap_check());
+    return true;
+}
+
 /* The frame chain must be unlinked when a generator yields; otherwise the
  * next call links back to the suspended frame and the chain becomes a cycle
  * (the collector then never finishes walking it, and direct eval asserts). */
@@ -1136,7 +1165,7 @@ TEST(test_gc_realloc_copies_into_a_new_object) {
     GCHandle h2 = gc_realloc(h, 5000);
     ASSERT_TRUE(h2 != GC_HANDLE_NULL);
     ASSERT_TRUE(h2 != h);
-    ASSERT_TRUE(gc_deref(h) != NULL);
+    ASSERT_TRUE(gc_handle_live(h));
     p = (uint8_t *)gc_deref(h2);
     for (int i = 0; i < 64; i++) ASSERT_EQ(i, p[i]);
     ASSERT_TRUE(gc_handle_get_size(h2) >= 5000);
@@ -1158,11 +1187,11 @@ TEST(test_gc_free_kills_handle) {
     GCHandle h = gc_alloc(32, JS_GC_OBJ_TYPE_DATA);
     ASSERT_TRUE(gc_handle_of_header(gc_header(gc_deref(h))) == h);
     gc_free(h);
-    ASSERT_TRUE(gc_deref(h) == NULL);
+    ASSERT_TRUE(!gc_handle_live(h));
     gc_free(h);   /* double free is ignored */
     GCHandle h2 = gc_alloc(32, JS_GC_OBJ_TYPE_DATA);
     ASSERT_TRUE(h2 != h);   /* not reused before a sweep */
-    ASSERT_TRUE(gc_deref(h) == NULL);
+    ASSERT_TRUE(!gc_handle_live(h));
     gc_free(h2);
     bg_resume(&st);
     return true;
@@ -1181,7 +1210,7 @@ TEST(test_gc_unreachable_objects_freed) {
     gc_run();
     int freed = 0;
     for (int i = 0; i < 64; i++)
-        if (gc_deref(hidden[i] ^ HIDE_MASK) == NULL) freed++;
+        if (!gc_handle_live(hidden[i] ^ HIDE_MASK)) freed++;
     /* A few may survive through stale words the conservative scan sees. */
     ASSERT_TRUE(freed >= 56);
     ASSERT_EQ(0, (int)gc_test_heap_check());
@@ -1233,7 +1262,7 @@ TEST(test_gc_roots_keep_objects) {
     gc_run();
     int freed = 0;
     for (int i = 0; i < 32; i++)
-        if (gc_deref(hidden[i] ^ HIDE_MASK) == NULL) freed++;
+        if (!gc_handle_live(hidden[i] ^ HIDE_MASK)) freed++;
     ASSERT_TRUE(freed >= 28);   /* stale stack words may keep a few */
     bg_resume(&st);
     return true;
@@ -1271,7 +1300,7 @@ TEST(test_gc_finalizers_run_once) {
         ASSERT_TRUE(g_finalized[i] <= 1);
         if (g_finalized[i] == 1) {
             ran++;
-            ASSERT_TRUE(gc_deref(g_fin_hidden[i] ^ HIDE_MASK) == NULL);
+            ASSERT_TRUE(!gc_handle_live(g_fin_hidden[i] ^ HIDE_MASK));
         }
     }
     ASSERT_TRUE(ran >= 56);
@@ -1954,6 +1983,7 @@ void run_gc_tests(void) {
     RUN_TEST(test_gc_array_buffer_storage_never_moves);
     /* After the cycle-count tests: these grow old space. */
     RUN_TEST(test_gc_async_frame_survives_await);
+    RUN_TEST(test_gc_async_closure_keeps_args_after_return);
     RUN_TEST(test_gc_async_frames_during_concurrent_cycles);
     RUN_TEST(test_gc_weakmap_values_survive_full_cycles);
     RUN_TEST(test_gc_weakmap_values_survive_concurrent_cycles);

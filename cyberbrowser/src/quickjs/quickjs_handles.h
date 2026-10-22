@@ -300,7 +300,12 @@
 #define SAFE_HANDLE(handle) (handle)
 
 #define SAFE_IS_NULL(handle) ((handle) == GC_HANDLE_NULL)
+/* Non-NULL; with GC_CHECKED_DEREF also live. */
+#if GC_CHECKED_DEREF
 #define SAFE_VALID(handle) \
     ((handle) != GC_HANDLE_NULL && gc_handle_is_valid(handle))
+#else
+#define SAFE_VALID(handle) ((handle) != GC_HANDLE_NULL)
+#endif
 
 #endif /* QUICKJS_HANDLES_H */

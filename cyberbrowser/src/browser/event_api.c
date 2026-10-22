@@ -414,14 +414,38 @@ JSClassDef js_focus_event_class_def = {
 };
 
 // ServiceWorker class definitions (minimal - no finalizers needed for simple stubs)
+/* The opaque data is a raw GC object: the values it holds are marked here. */
+static void js_service_worker_container_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func) {
+    GCHandle h = JS_GetOpaqueHandle(val, js_service_worker_container_class_id);
+    if (h == GC_HANDLE_NULL) return;
+    mark_func(rt, h);
+    ServiceWorkerContainerData *swc = (ServiceWorkerContainerData *)gc_deref(h);
+    JS_MarkValue(rt, swc->registrations, mark_func);
+    JS_MarkValue(rt, swc->message_handlers, mark_func);
+    JS_MarkValue(rt, swc->controller, mark_func);
+}
+
+static void js_service_worker_registration_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func) {
+    GCHandle h = JS_GetOpaqueHandle(val, js_service_worker_registration_class_id);
+    if (h == GC_HANDLE_NULL) return;
+    mark_func(rt, h);
+    ServiceWorkerRegistrationData *reg = (ServiceWorkerRegistrationData *)gc_deref(h);
+    JS_MarkValue(rt, reg->installing, mark_func);
+    JS_MarkValue(rt, reg->waiting, mark_func);
+    JS_MarkValue(rt, reg->active, mark_func);
+    if (reg->ctx != GC_HANDLE_NULL) mark_func(rt, reg->ctx);
+}
+
 JSClassDef js_service_worker_container_class_def = {
     .class_name = "ServiceWorkerContainer",
     .finalizer = NULL,
+    .gc_mark   = js_service_worker_container_mark,
 };
 
 JSClassDef js_service_worker_registration_class_def = {
     .class_name = "ServiceWorkerRegistration",
     .finalizer = NULL,
+    .gc_mark   = js_service_worker_registration_mark,
 };
 
 JSClassDef js_service_worker_class_def = {

@@ -4,9 +4,11 @@
  * Every GC object is reached through a 32-bit handle, which is its address:
  * the index of its header's 16-byte granule in the heap.  Objects never
  * move.  gc_deref() turns a handle into the payload address with
- * arithmetic, after testing the object's bit in the liveness bitmap, so a
- * freed object's handle dereferences to NULL (until another object is
- * allocated at the same address).  See GC_PAUSELESS_DESIGN.md.
+ * arithmetic alone, like a pointer: dereferencing a freed object's handle is
+ * a bug.  gc_handle_live() tests the object's bit in the liveness bitmap;
+ * debug builds with GC_CHECKED_DEREF (or GC_STALE_CHECK) make gc_deref test
+ * it too, so a freed handle dereferences to NULL.  See
+ * GC_PAUSELESS_DESIGN.md.
  *
  * Object layout: an 8-byte header followed by the payload.  Headers sit at
  * 8 mod 16, so payloads are 16-byte aligned.
@@ -341,7 +343,26 @@ static inline __attribute__((always_inline)) GCHandle gc_handle_of_header(const 
     return (GCHandle)(((const uint8_t *)hdr - g_gc.heap_base) >> 4);
 }
 
+/* Debug build option: gc_deref of a dead or out-of-range handle yields NULL
+ * (and is reported with GC_STALE_CHECK).  Off, it is the address arithmetic
+ * alone: the collector never frees a reachable object, so a dead handle is
+ * a bug, as a dangling pointer is. */
+#ifndef GC_CHECKED_DEREF
+#define GC_CHECKED_DEREF GC_STALE_CHECK
+#endif
+
+/* Whether handle names a live object (an explicit query; costs a load). */
+static inline __attribute__((always_inline)) bool gc_handle_live(GCHandle handle) {
+    return handle != GC_HANDLE_NULL &&
+           handle < atomic_load_explicit(&g_gc.handle_limit, memory_order_relaxed) &&
+           gc_handle_alive(handle);
+}
+
 static inline __attribute__((always_inline)) void *gc_deref(GCHandle handle) {
+#if !GC_CHECKED_DEREF
+    if (handle == GC_HANDLE_NULL) return NULL;
+    return g_gc.heap_base + ((size_t)handle << 4) + 2 * GC_HEADER_SIZE;
+#endif
     if (handle == GC_HANDLE_NULL ||
         handle >= atomic_load_explicit(&g_gc.handle_limit, memory_order_relaxed))
         return NULL;
@@ -525,7 +546,7 @@ static inline size_t gc_usable_size(GCHandle handle) {
 bool gc_handle_is_valid(GCHandle handle);
 /* Inline at every use (SAFE_VALID runs on most object accesses); the
  * function stays for callers that take its address. */
-#define gc_handle_is_valid(handle) (gc_deref(handle) != NULL)
+#define gc_handle_is_valid(handle) gc_handle_live(handle)
 
 /* Number of elem-sized slots that fit in the object behind h after offset
  * bytes.  The concurrent marker reads a count from one object and an array
@@ -580,7 +601,7 @@ GCHandle gc_next_object(GCHandle prev);
 bool gc_ptr_is_valid(void *ptr);
 bool gc_ptr_in_heap(void *ptr);
 static inline bool gc_ptr_is_valid_handle(GCHandle handle) {
-    return gc_deref(handle) != NULL;
+    return gc_handle_live(handle);
 }
 /* Handle of the object containing ptr, or GC_HANDLE_NULL. */
 GCHandle gc_ptr_to_handle(void *ptr);
