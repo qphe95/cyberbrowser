@@ -352,6 +352,13 @@ static void tokenize(TokChunk *c, bool serial) {
                 }
                 continue;
             }
+            if (pos + 1 < len && h[pos + 1] == '!') {
+                /* Any other "<!...>" (a doctype past the start, CDATA, a
+                 * bogus comment) is dropped up to its '>' (HTML §13.2.5.42). */
+                const char *gt = memchr(h + pos, '>', len - pos);
+                pos = gt ? (size_t)(gt - h) + 1 : len;
+                continue;
+            }
             if (pos + 1 < len && h[pos + 1] == '/') {
                 size_t e = pos + 2;
                 const char *gt = e < len ? memchr(h + e, '>', len - e) : NULL;

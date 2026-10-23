@@ -269,6 +269,15 @@ static void lgp_skip_comment(LgParser *p) {
     }
 }
 
+static bool lgp_skip_markup_decl(LgParser *p) {
+    /* "<!...>" that is not a comment (a doctype past the start, CDATA, a
+     * bogus comment): dropped up to its '>'. */
+    if (!lgp_match(p, "<!") || lgp_match(p, "<!--")) return false;
+    while (p->pos < p->lg_len && p->html[p->pos] != '>') p->pos++;
+    if (p->pos < p->lg_len) p->pos++;
+    return true;
+}
+
 static void lgp_skip_doctype(LgParser *p) {
     if (lgp_match(p, "<!doctype") || lgp_match(p, "<!DOCTYPE")) {
         p->pos += 9;
@@ -409,6 +418,7 @@ static int lgp_parse_element(LgParser *p, int parent_idx) {
                 lgp_skip_comment(p);
                 continue;
             }
+            if (lgp_skip_markup_decl(p)) continue;
             
             /* Check for closing tag */
             if (p->html[p->pos] == '<' && p->pos + 1 < p->lg_len && p->html[p->pos + 1] == '/') {
@@ -555,6 +565,7 @@ LgDoc* lg_parse(const char *html, size_t lg_len) {
             lgp_skip_comment(&parser);
             continue;
         }
+        if (lgp_skip_markup_decl(&parser)) continue;
         
         if (parser.html[parser.pos] == '<') {
             int node_idx = lgp_parse_element(&parser, -1);

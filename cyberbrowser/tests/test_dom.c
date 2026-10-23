@@ -241,6 +241,22 @@ TEST(test_dom_parse_text_white_space_and_entities) {
     return ok;
 }
 
+/* A doctype after white space (or a byte-order mark), and any "<!...>" that
+ * is not a comment elsewhere, is dropped rather than parsed as an element
+ * holding the rest of the page. */
+TEST(test_dom_parse_drops_markup_declarations) {
+    const char *html = "\xEF\xBB\xBF\n  <!DOCTYPE html>\n<html><head></head><body>"
+                       "<p>a<!DOCTYPE x>b<![CDATA[c]]>d<!bogus>e</p></body></html>";
+    char *d = dump_html_parse(html, strlen(html));
+    ASSERT_TRUE(d != NULL);
+    bool ok = strncmp(d, "roots 1 1 1\n", 12) == 0 && strstr(d, "E:html") && !strstr(d, "doctype") &&
+              !strstr(d, "DOCTYPE") && !strstr(d, "CDATA") && !strstr(d, "bogus");
+    if (!ok) printf("    tree:\n%s", d);
+    free(d);
+    ok = ok && same_as_legacy(html, strlen(html), "markup declarations");
+    return ok;
+}
+
 TEST(test_dom_parse_matches_legacy_fuzz) {
     for (uint32_t seed = 1; seed <= 400; seed++) {
         size_t len = 0;
@@ -1287,6 +1303,7 @@ void run_dom_tests(void) {
     printf("\n--- Node store DOM Tests ---\n");
     RUN_TEST(test_dom_parse_matches_legacy_fixtures);
     RUN_TEST(test_dom_parse_matches_legacy_fuzz);
+    RUN_TEST(test_dom_parse_drops_markup_declarations);
     RUN_TEST(test_dom_parse_text_white_space_and_entities);
     RUN_TEST(test_dom_parse_chunked_same_tree);
     RUN_TEST(test_dom_parse_no_length_limits);
