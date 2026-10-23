@@ -98,6 +98,7 @@ static inline void gc_assert_initialized(void) {
 }
 #include "libregexp.h"
 #include "libunicode.h"
+#include "js_struct_index.h"
 
 /* forward declaration - function defined in js_quickjs.c */
 void js_quickjs_on_global_var_defined(JSContextHandle ctx, JSAtom var_name);
@@ -24916,6 +24917,10 @@ typedef struct JSParseState {
     
     /* Parser mode */
     uint8_t js_mode;            /* bitmap of JS_MODE_x */
+
+    /* The structure index of the source (js_struct_index.h), or NULL: body
+     * skips read it instead of scanning. */
+    const JSStructIndex *struct_index;
 } JSParseState;
 
 /* ============================================================================
@@ -29086,6 +29091,158 @@ static int js_lazy_preparse_body(JSParseState *s, JSLazyIdentSet *ids,
     return ret;
 }
 
+/* CYBER_PARSE_STATS=1: where parse and compile time goes, printed at exit.
+ * Script parses include the bodies they skip; lazy compiles include the
+ * nested bodies they skip. */
+static struct {
+    uint64_t eval_n, eval_ns, eval_bytes;
+    uint64_t lazy_n, lazy_ns, lazy_bytes;
+    uint64_t skip_n, skip_ns, skip_bytes, skip_lazy_ns, skip_eager;
+    uint64_t indexed, index_missing, verify_mismatch;
+    int in_lazy;
+} g_parse_stats;
+static int g_parse_stats_on = -1;
+
+static void parse_stats_print(void)
+{
+    fprintf(stderr, "[parse-stats] script parses %llu (%.1f ms, %.1f MB); lazy compiles %llu (%.1f ms, %.1f MB of bodies); "
+            "body skips %llu (%.1f ms, %.1f MB; %.1f ms of it inside lazy compiles; %llu parsed eagerly instead)\n",
+            (unsigned long long)g_parse_stats.eval_n, g_parse_stats.eval_ns / 1e6, g_parse_stats.eval_bytes / 1e6,
+            (unsigned long long)g_parse_stats.lazy_n, g_parse_stats.lazy_ns / 1e6, g_parse_stats.lazy_bytes / 1e6,
+            (unsigned long long)g_parse_stats.skip_n, g_parse_stats.skip_ns / 1e6, g_parse_stats.skip_bytes / 1e6,
+            g_parse_stats.skip_lazy_ns / 1e6, (unsigned long long)g_parse_stats.skip_eager);
+    JSStructIndexStats is;
+    js_struct_index_stats(&is);
+    fprintf(stderr, "[parse-stats] structure index: %llu built (%.1f ms of scans, %llu stopped early), %llu claimed, "
+            "%llu waited for (%.1f ms); skips from the index %llu, without a record %llu; verify mismatches %llu\n",
+            (unsigned long long)is.built, is.scan_ms, (unsigned long long)is.stopped_early,
+            (unsigned long long)is.claimed, (unsigned long long)is.waited, is.wait_ms,
+            (unsigned long long)g_parse_stats.indexed, (unsigned long long)g_parse_stats.index_missing,
+            (unsigned long long)g_parse_stats.verify_mismatch);
+}
+
+/* Nanoseconds since t0 (0 if the clock reads earlier). */
+static uint64_t parse_stats_since(uint64_t t0)
+{
+    uint64_t t = gc_os_now_ns();
+    return t > t0 ? t - t0 : 0;
+}
+
+static BOOL parse_stats_enabled(void)
+{
+    if (g_parse_stats_on < 0) {
+        g_parse_stats_on = getenv("CYBER_PARSE_STATS") != NULL;
+        if (g_parse_stats_on)
+            atexit(parse_stats_print);
+    }
+    return g_parse_stats_on;
+}
+
+/* js_lazy_preparse_body from the structure index: 0 (the same results), 1
+ * (no usable record: scan serially) or -1 (the serial scan would refuse the
+ * body too: parse it eagerly). */
+static int js_lazy_preparse_indexed(JSParseState *s, JSLazyIdentSet *ids,
+                                    int *pflags, const uint8_t **pend)
+{
+    JSContextHandle ctx = s->ctx;
+    const JSStructIndex *ix = s->struct_index;
+    const JSStructRecord *r;
+    uint32_t i;
+
+    if (!ix || (size_t)(s->buf_end - s->buf_start) != ix->src_len)
+        return 1;
+    r = js_struct_index_find(ix, (uint32_t)(s->buf_ptr - 1 - s->buf_start));
+    if (!r)
+        return 1;
+    if (r->flags & JS_STRUCT_EAGER)
+        return -1;
+    for (i = 0; i < r->n_names; i++) {
+        const JSStructName *n = &ix->names[r->names + i];
+        JSAtom a;
+        int ret;
+        /* declared at the body's function level: never an outer name */
+        if (js_struct_index_declares(ix, r, s->buf_start, n))
+            continue;
+        a = JS_NewAtomLen(ctx, (const char *)s->buf_start + n->off, n->len);
+        if (a == JS_ATOM_NULL)
+            goto fail;
+        ret = lazy_ident_set_add(ctx, ids, a);
+        JS_FreeAtom(ctx, a);
+        if (ret)
+            goto fail;
+        /* a private accessor's setter is a separate binding '#x<set>' */
+        if (s->buf_start[n->off] == '#') {
+            JSAtom set_name = get_private_setter_name(ctx, a);
+            if (set_name == JS_ATOM_NULL)
+                goto fail;
+            ret = lazy_ident_set_add(ctx, ids, set_name);
+            JS_FreeAtom(ctx, set_name);
+            if (ret)
+                goto fail;
+        }
+    }
+    *pflags = (int)(r->flags & (JS_STRUCT_USES_THIS | JS_STRUCT_USES_SUPER | JS_STRUCT_USES_NEW));
+    *pend = s->buf_start + r->close;
+    return 0;
+ fail:
+    if (JS_HasException(ctx))
+        JS_GetException(ctx);
+    return -1;
+}
+
+/* CYBER_PARSE_VERIFY=1: every skip from the index is checked against the
+ * serial scan (end, flags and names); differences are reported. */
+static BOOL parse_verify_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0)
+        enabled = getenv("CYBER_PARSE_VERIFY") != NULL;
+    return enabled;
+}
+
+static void parse_verify_skip(JSParseState *s, int r_ix, JSLazyIdentSet *ids,
+                              int flags, const uint8_t *end)
+{
+    JSContextHandle ctx = s->ctx;
+    JSLazyIdentSet ids2;
+    int flags2 = 0, r2;
+    const uint8_t *end2 = NULL;
+    uint32_t i, n1 = 0, n2 = 0, missing = 0;
+    lazy_ident_set_init(&ids2);
+    r2 = js_lazy_preparse_body(s, &ids2, &flags2, &end2) ? -1 : 0;
+    if (r_ix == 0 && r2 == 0) {
+        uint32_t *t1 = (uint32_t *)ids->tab.buf, *t2 = (uint32_t *)ids2.tab.buf;
+        for (i = 0; i < ids->cap; i++)
+            if (t1[i] != JS_ATOM_NULL) {
+                n1++;
+                if (!lazy_ident_set_has(&ids2, t1[i]))
+                    missing++;
+            }
+        for (i = 0; i < ids2.cap; i++)
+            if (t2[i] != JS_ATOM_NULL)
+                n2++;
+    }
+    if (r_ix != r2 || (r2 == 0 && (end != end2 || flags != flags2 || n1 != n2 || missing))) {
+        if (g_parse_stats.verify_mismatch++ < 20) {
+            int col, line = get_line_col(&col, s->buf_start, s->buf_ptr - s->buf_start);
+            fprintf(stderr, "[struct-verify] body at %d:%d: index %d end %+ld flags %d names %u (%u not in the scan's); "
+                    "serial %d end %+ld flags %d names %u\n", line + 1, col + 1,
+                    r_ix, r_ix == 0 ? (long)(end - s->buf_start) : -1L, flags, n1, missing,
+                    r2, r2 == 0 ? (long)(end2 - s->buf_start) : -1L, flags2, n2);
+            if (r_ix == 0 && r2 == 0) {
+                uint32_t *t2 = (uint32_t *)ids2.tab.buf;
+                for (i = 0; i < ids2.cap; i++) {
+                    if (t2[i] != JS_ATOM_NULL && !lazy_ident_set_has(ids, t2[i])) {
+                        const char *nm = JS_AtomToCString(ctx, t2[i]);
+                        fprintf(stderr, "[struct-verify]   only the serial scan has '%s'\n", nm ? nm : "?");
+                    }
+                }
+            }
+        }
+    }
+    lazy_ident_set_free(ctx, &ids2);
+}
+
 /* CYBER_LAZY_VERIFY=1: never skip; check the scanner against the parser */
 static BOOL lazy_verify_enabled(void)
 {
@@ -29178,9 +29335,22 @@ static int js_lazy_try_skip_body(JSParseState *s, JSFunctionDef *fd,
 
     lazy_ident_set_init(&ids);
     js_parse_get_pos(s, &pos);
-    if (js_lazy_preparse_body(s, &ids, &flags, &body_end)) {
-        lazy_ident_set_free(ctx, &ids);
-        return 0;
+    {
+        int r = s->struct_index ? js_lazy_preparse_indexed(s, &ids, &flags, &body_end) : 1;
+        if (r == 1) {
+            if (s->struct_index && parse_stats_enabled())
+                g_parse_stats.index_missing++;
+            r = js_lazy_preparse_body(s, &ids, &flags, &body_end) ? -1 : 0;
+        } else {
+            if (parse_stats_enabled())
+                g_parse_stats.indexed++;
+            if (parse_verify_enabled())
+                parse_verify_skip(s, r, &ids, flags, body_end);
+        }
+        if (r) {
+            lazy_ident_set_free(ctx, &ids);
+            return 0;
+        }
     }
     if (lazy_verify_enabled()) {
         /* debug: parse eagerly and check where the real body ends */
@@ -29225,6 +29395,7 @@ static int js_lazy_try_skip_body(JSParseState *s, JSFunctionDef *fd,
     st->has_this_binding = fd->has_this_binding;
     st->is_func_expr = fd->is_func_expr;
     st->source_total_len = s->buf_end - s->buf_start;
+    st->struct_index = s->struct_index;
     st->func_source_offset = func_start - s->buf_start;
     st->func_source_len = body_end - func_start;
     if (fd->arg_count > 0) {
@@ -42202,7 +42373,23 @@ static __exception int js_parse_function_decl2(JSParseState *s,
            directive in the body is checked again on the first call) */
         if (js_parse_function_check_names(s, fd, func_name))
             goto fail;
-        r = js_lazy_try_skip_body(s, fd, func_type, ptr);
+        {
+            uint64_t t0 = parse_stats_enabled() ? gc_os_now_ns() : 0;
+            const uint8_t *skip_from = s->token.ptr;
+            r = js_lazy_try_skip_body(s, fd, func_type, ptr);
+            if (t0) {
+                uint64_t dt = parse_stats_since(t0);
+                g_parse_stats.skip_ns += dt;
+                if (g_parse_stats.in_lazy)
+                    g_parse_stats.skip_lazy_ns += dt;
+                if (r > 0) {
+                    g_parse_stats.skip_n++;
+                    g_parse_stats.skip_bytes += s->buf_ptr - skip_from;
+                } else if (r == 0) {
+                    g_parse_stats.skip_eager++;
+                }
+            }
+        }
         if (r < 0)
             goto fail;
         if (r > 0)
@@ -42420,6 +42607,7 @@ static GCHandle js_lazy_compile(JSContextHandle ctx, JSFunctionBytecodeHandle st
     s->col_num = state->col_num;
     line_col_cache_init(&s->get_line_col_cache, s->buf_start, s->buf_end, s->buf_ptr,
                         state->line_num, state->col_num);
+    s->struct_index = state->struct_index;
     s->allow_html_comments = TRUE;
     s->enable_lazy_parsing = TRUE;
     if (strict)
@@ -42642,7 +42830,19 @@ static int js_lazy_ensure_compiled(JSObjectHandle p)
             return -1;
         }
         SAFE_SET(lazy_b, JSFunctionBytecodeHandle, func_parse_state, JS_FUNC_PARSING);
-        compiled = js_lazy_compile(ctx, lazy_b);
+        if (parse_stats_enabled()) {
+            uint64_t t0 = gc_os_now_ns();
+            g_parse_stats.in_lazy++;
+            compiled = js_lazy_compile(ctx, lazy_b);
+            g_parse_stats.in_lazy--;
+            g_parse_stats.lazy_ns += parse_stats_since(t0);
+            g_parse_stats.lazy_n++;
+            state = js_bc_resume_parse_state(lazy_b);
+            if (state)
+                g_parse_stats.lazy_bytes += state->source_len;
+        } else {
+            compiled = js_lazy_compile(ctx, lazy_b);
+        }
         SAFE_SET(lazy_b, JSFunctionBytecodeHandle, func_parse_state, JS_FUNC_LAZY);
         if (compiled == GC_HANDLE_NULL)
             return -1;
@@ -42806,6 +43006,7 @@ static GCValue __JS_EvalInternal(JSContextHandle ctx, GCValue this_obj,
     GCStringHandle source_copy = GC_HANDLE_NULL;
     const char *gc_input;
     size_t gc_input_len;
+    uint64_t stats_t0 = parse_stats_enabled() ? gc_os_now_ns() : 0;
     /* Copy source to GC-managed memory so lazy functions can reference it */
     source_copy = gc_strndup(input, input_len);
     if (SAFE_HANDLE(source_copy) == GC_HANDLE_NULL) {
@@ -42816,6 +43017,9 @@ static GCValue __JS_EvalInternal(JSContextHandle ctx, GCValue this_obj,
 
     js_parse_init(ctx, s, gc_input, gc_input_len, filename, flags);
     skip_shebang(&s->buf_ptr, s->buf_end);
+    /* (kept for the runtime's lifetime: lazy functions of the script read it) */
+    if (s->enable_lazy_parsing)
+        s->struct_index = js_struct_index_claim(input, input_len);
 
     eval_type = flags & JS_EVAL_TYPE_MASK;
     m = GC_HANDLE_NULL;
@@ -42896,6 +43100,11 @@ static GCValue __JS_EvalInternal(JSContextHandle ctx, GCValue this_obj,
 
     /* create the function object and all the enclosed functions */
     fun_obj = js_create_function(ctx, fd);
+    if (stats_t0) {
+        g_parse_stats.eval_n++;
+        g_parse_stats.eval_ns += parse_stats_since(stats_t0);
+        g_parse_stats.eval_bytes += input_len;
+    }
     if (JS_IsException(fun_obj))
         goto fail1;
     /* Could add a flag to avoid resolution if necessary */

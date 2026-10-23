@@ -1,6 +1,7 @@
 /* Script fetch pool.  See dom_fetch.h. */
 #include "dom_fetch.h"
 #include "cyber_env.h"
+#include "js_struct_index.h"
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -39,6 +40,26 @@ void dom_fetch_set_fetcher(DomFetchFn fn) {
     pthread_mutex_unlock(&g_mu);
 }
 
+typedef struct FetchDone {
+    FetchEntry *e;
+    HttpBuffer *b;
+    bool ok;
+    const char *err;
+} FetchDone;
+
+/* Hand a finished fetch to the executor (takes and releases g_mu). */
+static void fetch_publish(void *arg) {
+    FetchDone *d = (FetchDone *)arg;
+    pthread_mutex_lock(&g_mu);
+    d->e->buf = *d->b;
+    d->e->ok = d->ok;
+    memcpy(d->e->err, d->err, sizeof(d->e->err));
+    d->e->state = 2;
+    g_stats.completed++;
+    pthread_cond_broadcast(&g_done);
+    pthread_mutex_unlock(&g_mu);
+}
+
 static void *fetch_worker(void *arg) {
     (void)arg;
     pthread_mutex_lock(&g_mu);
@@ -53,13 +74,14 @@ static void *fetch_worker(void *arg) {
         HttpBuffer b = { 0 };
         char err[256] = { 0 };
         bool ok = fn(e->url, &b, err, sizeof(err));
+        FetchDone d = { e, &b, ok, err };
+        /* A script is scanned for its structure index here, on a copy, after
+         * the result is handed out (js_struct_index.h). */
+        if (ok && b.data && b.size)
+            js_struct_index_scan_fetched(e->url, b.data, b.size, fetch_publish, &d);
+        else
+            fetch_publish(&d);
         pthread_mutex_lock(&g_mu);
-        e->buf = b;
-        e->ok = ok;
-        memcpy(e->err, err, sizeof(err));
-        e->state = 2;
-        g_stats.completed++;
-        pthread_cond_broadcast(&g_done);
     }
     return NULL;
 }

@@ -17,6 +17,7 @@
 #include "test_runner.h"
 #include "platform.h"
 #include "quickjs.h"
+#include "js_struct_index.h"
 
 #define LOG_TAG "test_lazy_parsing"
 
@@ -1448,6 +1449,85 @@ TEST(test_lazy_conformance_suite) {
     return true;
 }
 
+/* The same suite, with body skips read from a structure index of the source
+ * (js_struct_index.h) instead of scanned. */
+TEST(test_lazy_conformance_suite_with_index) {
+    JSContextHandle ctx = get_test_context();
+    ASSERT_TRUE(SAFE_VALID(ctx));
+    size_t len = strlen(lazy_suite_js);
+    JSStructIndex *ix = js_struct_index_build((const uint8_t *)lazy_suite_js, len);
+    ASSERT_TRUE(ix != NULL);
+    ASSERT_EQ((uint32_t)len, ix->stop);
+    JSStructIndexStats before, after;
+    js_struct_index_stats(&before);
+    js_struct_index_publish(js_struct_index_announce(lazy_suite_js, len), ix);
+    ASSERT_TRUE(lazy_suite_check(ctx, "indexed"));
+    js_struct_index_stats(&after);
+    ASSERT_EQ(before.claimed + 1, after.claimed);
+    return true;
+}
+
+/* What the index records for a body: where it ends, the names of its whole
+ * subtree, what it declares itself, its flags, and bodies the serial scan
+ * would refuse. */
+TEST(test_struct_index_records) {
+    static const char src[] =
+        "var t = 1;\n"
+        "function f(a) { var x = /}/.test('{'), q = `${'}'}`; "
+        "return function g() { var y; return x + y + this.z + `${a}`; }; }\n"
+        "function h() { return eval('1'); }\n";
+    JSStructIndex *ix = js_struct_index_build((const uint8_t *)src, sizeof(src) - 1);
+    ASSERT_TRUE(ix != NULL);
+    ASSERT_EQ((uint32_t)(sizeof(src) - 1), ix->stop);
+    const char *fb = strchr(src, '{');
+    const char *gb = strstr(src, "g() {") + 4;
+    const char *hb = strstr(src, "h() {") + 4;
+    const JSStructRecord *f = js_struct_index_find(ix, (uint32_t)(fb - src));
+    const JSStructRecord *g = js_struct_index_find(ix, (uint32_t)(gb - src));
+    const JSStructRecord *h = js_struct_index_find(ix, (uint32_t)(hb - src));
+    ASSERT_TRUE(f && g && h);
+    ASSERT_EQ((uint32_t)(strstr(src, "}; }\n") + 4 - src), f->close);
+    ASSERT_EQ((uint32_t)(strstr(src, "`; };") + 4 - src), g->close);
+    ASSERT_TRUE((g->flags & JS_STRUCT_USES_THIS) != 0);
+    ASSERT_TRUE((f->flags & JS_STRUCT_USES_THIS) != 0);   /* the serial scan of f reads g too */
+    ASSERT_TRUE((h->flags & JS_STRUCT_EAGER) != 0);
+    ASSERT_TRUE((f->flags & JS_STRUCT_EAGER) == 0);
+    /* f's names: x q a y (from g) but not t; it declares x and q */
+    const char *want[] = { "x", "q", "a", "y" };
+    for (size_t w = 0; w < 4; w++) {
+        bool found = false;
+        for (uint32_t i = 0; i < f->n_names; i++) {
+            const JSStructName *n = &ix->names[f->names + i];
+            if (n->len == strlen(want[w]) && !memcmp(src + n->off, want[w], n->len)) found = true;
+        }
+        ASSERT_TRUE(found);
+    }
+    for (uint32_t i = 0; i < f->n_names; i++) {
+        const JSStructName *n = &ix->names[f->names + i];
+        ASSERT_TRUE(!(n->len == 1 && src[n->off] == 't'));
+        bool declared = js_struct_index_declares(ix, f, (const uint8_t *)src, n);
+        bool expect = n->len == 1 && (src[n->off] == 'x' || src[n->off] == 'q');
+        ASSERT_EQ(expect, declared);
+    }
+    js_struct_index_free(ix);
+    return true;
+}
+
+/* A ticket whose buffer was changed before the claim (an earlier buffer at
+ * the same address) hands out nothing. */
+TEST(test_struct_index_claim_checks_content) {
+    char *buf = (char *)malloc(64);
+    ASSERT_TRUE(buf != NULL);
+    snprintf(buf, 64, "function a() { return 1; }");
+    size_t len = strlen(buf);
+    void *t = js_struct_index_announce(buf, len);
+    js_struct_index_publish(t, js_struct_index_build((const uint8_t *)buf, len));
+    buf[0] = 'F';
+    ASSERT_TRUE(js_struct_index_claim(buf, len) == NULL);
+    free(buf);
+    return true;
+}
+
 /* ============================================================================
  * Test Registration
  * ============================================================================ */
@@ -1472,4 +1552,7 @@ void run_lazy_parsing_tests(void) {
     RUN_TEST(test_lazy_parsing_state_transitions);
     RUN_TEST(test_lazy_parsing_complex_scenarios);
     RUN_TEST(test_lazy_conformance_suite);
+    RUN_TEST(test_lazy_conformance_suite_with_index);
+    RUN_TEST(test_struct_index_records);
+    RUN_TEST(test_struct_index_claim_checks_content);
 }

@@ -1267,6 +1267,10 @@ typedef struct JSLazyParseState {
 
     /* length of the root source (gc_string_length() would be a strlen) */
     size_t source_total_len;
+
+    /* The root source's structure index (js_struct_index.h), or NULL: it
+     * lives as long as the runtime. */
+    const struct JSStructIndex *struct_index;
 } JSLazyParseState;
 
 /* JSFunctionBytecode structure - must be defined before JSFunctionBytecodeHandle */

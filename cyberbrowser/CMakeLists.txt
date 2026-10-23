@@ -144,6 +144,7 @@ set(QUICKJS_SOURCES
     src/quickjs/job_pool.c
     src/quickjs/js_atom_cache.c
     src/quickjs/js_fast_dispatch.c
+    src/quickjs/js_struct_index.c
 )
 
 # mbedtls sources (for TLS on macOS/Linux)
