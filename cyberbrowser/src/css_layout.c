@@ -4510,6 +4510,15 @@ typedef struct StyleMentions {
     StyleKeySet attr_any, attr_named, attr_guarded;
     HasSubjects has;
     bool empty;                 /* some selector uses :empty */
+    /* some selector uses :nth-last-child(An+B of S): an attribute change can
+     * restyle earlier siblings */
+    bool last_of;
+    /* Features named in the rightmost compound (or in its parentheses) of
+     * some rule that sets a layout property: what can change how an
+     * element's own box is laid out.  subj_all: not recorded (every
+     * mentioned feature counts). */
+    StyleKeySet subj;
+    bool subj_all;
     bool unknown;               /* escapes or allocation failure: everything matters */
 } StyleMentions;
 
@@ -4572,7 +4581,22 @@ static uint64_t attr_guard_key(uint64_t attr, uint64_t guard)
     return style_mix(attr, &guard, sizeof(guard));
 }
 
-static void mentions_scan(StyleMentions *m, const char *s)
+static bool style_prop_paint_only(const char *p);
+
+/* Does rule r set a property that can move or resize a box (anything but
+ * paint; custom properties count, as other rules may lay out by them)? */
+static bool rule_sets_layout(const CssRule *r)
+{
+    for (int i = 0; i < r->declaration_count; i++) {
+        const char *p = r->declarations[i].property;
+        if (p && !style_prop_paint_only(p)) return true;
+    }
+    return false;
+}
+
+/* `layout`: the rule sets layout properties (its rightmost compounds'
+ * features go in m->subj). */
+static void mentions_scan(StyleMentions *m, const char *s, bool layout)
 {
     bool fail = false;
     char buf[512];
@@ -4599,8 +4623,29 @@ static void mentions_scan(StyleMentions *m, const char *s)
         if (npend < 16) pend[npend++] = k_; \
         else keyset_add(&m->attr_any, k_, &fail); \
     } while (0)
+    /* The rightmost compound of each complex selector: the features since
+     * the last combinator outside parentheses (white space there is one when
+     * a compound follows). */
+    uint64_t subj[128];
+    int nsubj = 0, depth = 0;
+    bool ws = false;
+#define MENTION_SUBJ(k) do { if (nsubj < 128) subj[nsubj++] = (k); else m->subj_all = true; } while (0)
+#define MENTION_SUBJ_FLUSH() do { \
+        for (int i_ = 0; layout && i_ < nsubj; i_++) keyset_add(&m->subj, subj[i_], &fail); \
+        nsubj = 0; \
+    } while (0)
     while (*p) {
         char c = *p;
+        if (depth == 0) {
+            bool space = c == ' ' || c == '\t' || c == '\n' || c == '\r';
+            bool comb = c == '>' || c == '+' || c == '~';
+            if (!space && !comb && ws && c != ',' && c != ')') nsubj = 0;
+            ws = space || (ws && comb);
+            if (comb) nsubj = 0;
+            if (c == ',') MENTION_SUBJ_FLUSH();
+        }
+        if (c == '(') depth++;
+        else if (c == ')' && depth > 0) depth--;
         if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '>' || c == '+' || c == '~' ||
             c == ',' || c == '(' || c == ')') {
             MENTION_END_COMPOUND();
@@ -4617,6 +4662,7 @@ static void mentions_scan(StyleMentions *m, const char *s)
         if (c == '.' || c == '#') {
             p = mention_read_ident(p + 1, buf, sizeof(buf), &n);
             mentions_add(m, c, buf, n, sizeof(buf), &fail);
+            if (n && n <= sizeof(buf)) MENTION_SUBJ(has_key(c, buf, n));
             if (!guard && n && n <= sizeof(buf)) guard = has_key(c, buf, n);
             continue;
         }
@@ -4627,6 +4673,7 @@ static void mentions_scan(StyleMentions *m, const char *s)
             if (*p == '|' && p[1] != '=') p = mention_read_ident(p + 1, buf, sizeof(buf), &n);
             mentions_add(m, '[', buf, n, sizeof(buf), &fail);
             if (n && n <= sizeof(buf)) MENTION_ATTR(has_key('[', buf, n));
+            if (n && n <= sizeof(buf)) MENTION_SUBJ(has_key('[', buf, n));
             /* The rest of the test: operator and (quoted) value. */
             while (*p && *p != ']') {
                 if (*p == '"' || *p == '\'') {
@@ -4653,15 +4700,24 @@ static void mentions_scan(StyleMentions *m, const char *s)
             if (nl == 4 && strncasecmp(st, "link", 4) == 0) {
                 keyset_add(&m->keys, has_key('[', "href", 4), &fail);
                 MENTION_ATTR(has_key('[', "href", 4));
+                MENTION_SUBJ(has_key('[', "href", 4));
             }
             if (nl == 5 && strncasecmp(st, "empty", 5) == 0) m->empty = true;
+            if (nl == 14 && strncasecmp(st, "nth-last-child", 14) == 0 && *p == '(') {
+                const char *e = strchr(p, ')');
+                for (const char *o = p; e && o + 4 <= e; o++)
+                    if (strncasecmp(o, " of ", 4) == 0) { m->last_of = true; break; }
+            }
             continue;
         }
         p++;
     }
     MENTION_END_COMPOUND();
+    MENTION_SUBJ_FLUSH();
 #undef MENTION_END_COMPOUND
 #undef MENTION_ATTR
+#undef MENTION_SUBJ
+#undef MENTION_SUBJ_FLUSH
     if (fail) m->unknown = true;
 }
 
@@ -4671,6 +4727,7 @@ static void mentions_free(StyleMentions *m)
     free(m->attr_any.slot);
     free(m->attr_named.slot);
     free(m->attr_guarded.slot);
+    free(m->subj.slot);
     has_free(&m->has);
     memset(m, 0, sizeof(*m));
 }
@@ -4691,7 +4748,7 @@ static void mentions_build(const CssStyleSet *set, uint64_t gen)
             for (int r = base_nrules, nr = css_styleset_rule_count(set); r < nr; r++) {
                 const CssRule *rule = css_styleset_rule(set, r);
                 if (!rule || !rule->selector_text) continue;
-                mentions_scan(m, rule->selector_text);
+                mentions_scan(m, rule->selector_text, rule_sets_layout(rule));
                 has_scan_selector(&m->has, rule->selector_text);
             }
             m->gen = gen;
@@ -4704,7 +4761,7 @@ static void mentions_build(const CssStyleSet *set, uint64_t gen)
     for (int r = 0, nr = css_styleset_rule_count(set); r < nr; r++) {
         const CssRule *rule = css_styleset_rule(set, r);
         if (!rule || !rule->selector_text) continue;
-        mentions_scan(m, rule->selector_text);
+        mentions_scan(m, rule->selector_text, rule_sets_layout(rule));
         has_scan_selector(&m->has, rule->selector_text);
     }
     m->gen = gen;
@@ -4930,59 +4987,34 @@ bool css_layout_attr_change_matters(const LayoutContext *ctx, const LayoutAttrOw
     return false;
 }
 
-/* Does store element `id` carry every feature of some compound in `rl`? */
-static bool has_reqs_store(const HasReqList *rl, NodeId id)
+/* A class token in `a` but not in `b` that some rightmost compound names? */
+static bool class_tokens_in(const StyleKeySet *s, const char *a, const char *b)
 {
-    if (!rl->n) return false;
-    uint64_t have[64];
-    int nh = 0;
-    const char *tag = dom_tag_name(id);
-    if (tag) have[nh++] = has_key('t', tag, strlen(tag));
-    const char *v = dom_get_attr_str(id, "id");
-    if (v && v[0]) have[nh++] = has_key('#', v, strlen(v));
-    const char *cls = dom_get_attr_str(id, "class");
-    bool overflow = false;
-    for (const char *c = cls; c && *c;) {
-        while (*c == ' ' || *c == '\t' || *c == '\n') c++;
+    for (const char *c = a ? a : ""; *c;) {
+        while (*c == ' ' || *c == '\t' || *c == '\n' || *c == '\r' || *c == '\f') c++;
         const char *e = c;
-        while (*e && *e != ' ' && *e != '\t' && *e != '\n') e++;
-        if (e > c) {
-            if (nh < 64) have[nh++] = has_key('.', c, (size_t)(e - c));
-            else overflow = true;
-        }
+        while (*e && *e != ' ' && *e != '\t' && *e != '\n' && *e != '\r' && *e != '\f') e++;
+        size_t n = (size_t)(e - c);
+        if (n && !class_has_token(b, c, n) && keyset_has(s, has_key('.', c, n))) return true;
         c = e;
-    }
-    for (int i = 0, na = dom_attr_count(id); i < na; i++) {
-        const DomAttr *a = dom_attr_at(id, i);
-        const char *an = a ? css_atom_str(a->name) : NULL;
-        if (!an) continue;
-        if (nh < 64) have[nh++] = has_key('[', an, strlen(an));
-        else overflow = true;
-    }
-    if (overflow) return true;               /* too many classes to tell */
-    for (int r = 0; r < rl->n; r++) {
-        const HasReq *q = &rl->v[r];
-        bool all = true;
-        for (int k = 0; k < q->n && all; k++) {
-            bool found = false;
-            for (int h = 0; h < nh && !found; h++) found = have[h] == q->keys[k];
-            if (!found) all = false;
-        }
-        if (all) return true;
     }
     return false;
 }
 
-bool css_layout_has_may_depend(const LayoutContext *ctx, uint32_t id)
+bool css_layout_attr_change_restyles_self(const LayoutContext *ctx, const LayoutAttrOwner *owner, const char *name,
+                                          const char *old_v, const char *new_v)
 {
     const StyleMentions *m = mentions_of(ctx);
-    if (!m) return true;
-    const HasSubjects *hs = &m->has;
-    if (!hs->any) return false;
-    if (hs->universal || hs->universal_deep || hs->sibling_relative) return true;
-    /* A :has() subject (or the ancestor its compound needs) at or above. */
-    for (NodeId a = id; a && dom_kind(a) == DOM_K_ELEMENT; a = dom_parent(a))
-        if (has_reqs_store(&hs->self_req, a) || has_reqs_store(&hs->anc_req, a)) return true;
+    if (!m || m->unknown || m->subj_all || !name) return css_layout_attr_change_matters(ctx, owner, name, old_v, new_v);
+    if (!css_layout_attr_change_matters(ctx, owner, name, old_v, new_v)) return false;
+    if (strcasecmp(name, "style") == 0 || layout_reads_attr(name)) return true;
+    if (keyset_has(&m->subj, has_key('[', name, strlen(name)))) return true;
+    if (strcasecmp(name, "class") == 0)
+        return class_tokens_in(&m->subj, old_v, new_v) || class_tokens_in(&m->subj, new_v, old_v);
+    if (strcasecmp(name, "id") == 0) {
+        if (old_v && old_v[0] && keyset_has(&m->subj, has_key('#', old_v, strlen(old_v)))) return true;
+        if (new_v && new_v[0] && keyset_has(&m->subj, has_key('#', new_v, strlen(new_v)))) return true;
+    }
     return false;
 }
 
@@ -5002,6 +5034,12 @@ bool css_layout_uses_empty(const LayoutContext *ctx)
 {
     const StyleMentions *m = mentions_of(ctx);
     return !m || m->empty;
+}
+
+bool css_layout_uses_last_of(const LayoutContext *ctx)
+{
+    const StyleMentions *m = mentions_of(ctx);
+    return !m || m->unknown || m->last_of;
 }
 
 static void ctx_features_free(StyleCtxFeatures *f)

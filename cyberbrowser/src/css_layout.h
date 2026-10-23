@@ -469,9 +469,9 @@ typedef struct LayoutContext {
  *     computed style, or what layout reads of the element?  No when no
  *     selector names the attribute (or the class tokens or ids that
  *     changed) and layout does not read it.
- *   css_layout_has_may_depend: could a change at or under store element
- *     `id` flip a :has() rule for an element outside its subtree?
- *   css_layout_uses_empty: does some selector use :empty? */
+ *   css_layout_uses_empty: does some selector use :empty?
+ *   css_layout_uses_last_of: does some selector use :nth-last-child(An+B of
+ *     S), so that an attribute change can restyle earlier siblings? */
 /* The element an attribute change is on: its class and id attributes before
  * and after (NULL: absent), which decide what selectors it can match. */
 typedef struct LayoutAttrOwner {
@@ -480,8 +480,14 @@ typedef struct LayoutAttrOwner {
 } LayoutAttrOwner;
 bool css_layout_attr_change_matters(const LayoutContext *ctx, const LayoutAttrOwner *owner, const char *name,
                                     const char *old_v, const char *new_v);
-bool css_layout_has_may_depend(const LayoutContext *ctx, uint32_t id);
+/* The same for the element's own computed style (a selector's rightmost
+ * compound names the attribute, the class tokens or ids that changed, or
+ * layout reads it): no means only other elements (descendants, later
+ * siblings) may restyle. */
+bool css_layout_attr_change_restyles_self(const LayoutContext *ctx, const LayoutAttrOwner *owner, const char *name,
+                                          const char *old_v, const char *new_v);
 bool css_layout_uses_empty(const LayoutContext *ctx);
+bool css_layout_uses_last_of(const LayoutContext *ctx);
 /* :has() and what a change can restyle through it (true when not known):
  *   css_layout_has_any: some rule uses :has();
  *   css_layout_has_sibling_relative: some :has() argument starts with + or ~

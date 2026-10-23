@@ -826,6 +826,77 @@ TEST(test_dom_layout_kept_across_changes_it_cannot_see) {
     return true;
 }
 
+/* A query is laid out again only when a change since the cached layout can
+ * reach its box (layout_api's anchors): a change after it in block flow, in
+ * a flex item with a set basis, or inside a box its content cannot resize
+ * keeps the layout for it; a change to a sibling sized by its content, below
+ * a box sized by its content, or (through :has()) to an ancestor's or an
+ * earlier sibling's style does not.  Each answer is a new layout's. */
+TEST(test_dom_layout_kept_for_queries_a_change_cannot_reach) {
+    JSContextHandle ctx = get_shared_test_context();
+    if (!dom_ready(ctx)) { printf("    (skipped - no document)\n"); return true; }
+    ASSERT_EQ(1, js_int(ctx,
+        "(function(){var d=document, s=d.createElement('style');"
+        "s.textContent='.kq-hq:has(.kq-on){width:120px} .kq-sq:has(+ .kq-on){height:33px}"
+        " .kq-hid{display:none} .kq-big{font-size:30px}';"
+        "d.head.appendChild(s);"
+        "var r=d.createElement('div'); r.style.width='500px';"
+        "r.innerHTML='<div class=kq-hid id=kq-hp><span id=kq-hs>t</span></div>'"
+        " + '<div id=kq-q style=\"height: 20px\">q</div>'"
+        " + '<div id=kq-f style=\"display: flex\"><div id=kq-fa style=\"flex: 0 0 100px; min-width: 0; height: 10px\"></div>'"
+        " + '<div id=kq-fb style=\"flex: 0 0 100px; min-width: 0; height: 10px\"></div></div>'"
+        " + '<div id=kq-g style=\"display: flex\"><div id=kq-ga>aa</div><div id=kq-gb>bb</div></div>'"
+        " + '<div id=kq-box style=\"width: 200px; height: 50px; overflow: hidden\"><span id=kq-bs>x</span></div>'"
+        " + '<div id=kq-after style=\"height: 5px\"></div>'"
+        " + '<div class=kq-hq id=kq-hq><span id=kq-hc>h</span></div>'"
+        " + '<div class=kq-sq id=kq-sq1></div><div id=kq-sq2></div>'"
+        " + '<div class=kq-hid id=kq-hp><span id=kq-hs>t</span></div>'"
+        " + '<div id=kq-tail></div>';"
+        "d.body.appendChild(r);"
+        "var e=function(i){return d.getElementById(i);}, k={r:r, s:s};"
+        "['q','f','fa','fb','g','ga','gb','box','bs','after','hq','hc','sq1','sq2','hp','hs','tail']"
+        ".forEach(function(i){k[i]=e('kq-'+i);});"
+        "k.qt=k.q.offsetTop; k.fal=k.fa.offsetLeft; k.aft=k.after.offsetTop; k.hqw=k.hq.offsetWidth;"
+        "globalThis.__kq=k; return k.q.offsetWidth===500 && k.fa.offsetWidth===100 ? 1 : 0;})()"));
+    static const struct { const char *js; int layouts; } steps[] = {
+        /* After the query in block flow. */
+        { "__kq.tail.appendChild(document.createElement('p'));"
+          " return __kq.q.offsetWidth===500 && __kq.q.offsetTop===__kq.qt", 0 },
+        { "return __kq.tail.offsetWidth===500", 1 },
+        /* A flex item with a set basis and minimum: the others hold. */
+        { "__kq.fb.appendChild(document.createTextNode('a much longer text'));"
+          " return __kq.fa.offsetWidth===100 && __kq.fa.offsetLeft===__kq.fal", 0 },
+        /* Items sized by their content: laid out again. */
+        { "__kq.gb.firstChild.textContent='bbbbbbbbbbbbbbbbbbbb'; return __kq.ga.offsetWidth>0", 1 },
+        /* Inside a box its content cannot resize: outside it and the box
+         * itself hold; inside it is laid out. */
+        { "__kq.bs.textContent='changed text'; return __kq.after.offsetTop===__kq.aft", 0 },
+        { "return __kq.box.offsetHeight===50 && __kq.box.offsetWidth===200", 0 },
+        { "return __kq.bs.offsetWidth>0", 1 },
+        /* :has() restyles the box holding the change. */
+        { "__kq.hc.className='kq-on'; return __kq.hq.offsetWidth===120", 1 },
+        /* ... and, sibling-relative, an earlier sibling. */
+        { "__kq.sq2.className='kq-on'; return __kq.sq1.offsetHeight===33", 1 },
+        /* Left unstyled while hidden, styled when shown. */
+        { "__kq.hs.className='kq-big'; return __kq.q.offsetWidth===500 && __kq.hs.offsetWidth===0", 0 },
+        { "__kq.hp.className=''; return __kq.hs.offsetHeight>=30", 1 },
+    };
+    for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
+        char js[640];
+        snprintf(js, sizeof(js), "(function(){ %s })() ? 1 : 0", steps[i].js);
+        uint64_t before = lq_layout_count();
+        if (js_int(ctx, js) != 1) { printf("    step %zu answered wrong: %s\n", i, steps[i].js); return false; }
+        uint64_t ran = lq_layout_count() - before;
+        if ((int)ran != steps[i].layouts) {
+            printf("    step %zu ran %llu layouts, expected %d: %s\n", i, (unsigned long long)ran, steps[i].layouts,
+                   steps[i].js);
+            return false;
+        }
+    }
+    ASSERT_EQ(1, js_int(ctx, "__kq.r.remove(); __kq.s.remove(); __kq=null; 1"));
+    return true;
+}
+
 /* A computed font size inside a display:none subtree, which layouts leave
  * unstyled, is styled on demand: the query lays out once more styling it. */
 TEST(test_dom_computed_font_size_inside_hidden_subtree) {
@@ -1230,6 +1301,7 @@ void run_dom_tests(void) {
     RUN_TEST(test_dom_layout_metrics_block_boxes);
     RUN_TEST(test_dom_layout_metrics_see_each_change);
     RUN_TEST(test_dom_layout_kept_across_changes_it_cannot_see);
+    RUN_TEST(test_dom_layout_kept_for_queries_a_change_cannot_reach);
     RUN_TEST(test_dom_computed_font_size_inside_hidden_subtree);
     RUN_TEST(test_dom_timers_reuse_storage);
     RUN_TEST(test_dom_collections_are_iterable);
