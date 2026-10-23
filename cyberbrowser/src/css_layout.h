@@ -448,7 +448,19 @@ typedef struct LayoutContext {
      * style_skipped. */
     bool style_all;
     int style_skipped;
+
+    /* Preorder position of the first element a :has() rule whose compound
+     * names nothing restyles when any ancestor's :has() flips (":has(x)
+     * [dialog]"): tree.count for none, 0 when not known. */
+    int has_target_first;
+    /* Per layout index, for the style set's :has() rules (NULL: not known,
+     * when any element may be): LAYOUT_HAS_SUBJECT when one may restyle the
+     * element as its subject (a change below it, or after it among its
+     * siblings, can flip it). */
+    unsigned char *has_flags;
 } LayoutContext;
+
+#define LAYOUT_HAS_SUBJECT 1
 
 /* What a change can affect, for the style set layout `ctx` used (each
  * answers true when that is not known):
@@ -470,6 +482,14 @@ bool css_layout_attr_change_matters(const LayoutContext *ctx, const LayoutAttrOw
                                     const char *old_v, const char *new_v);
 bool css_layout_has_may_depend(const LayoutContext *ctx, uint32_t id);
 bool css_layout_uses_empty(const LayoutContext *ctx);
+/* :has() and what a change can restyle through it (true when not known):
+ *   css_layout_has_any: some rule uses :has();
+ *   css_layout_has_sibling_relative: some :has() argument starts with + or ~
+ *     (a change can restyle earlier siblings of it and of its ancestors).
+ * Which elements a :has() rule may restyle is in LayoutContext.has_flags
+ * and has_target_first. */
+bool css_layout_has_any(const LayoutContext *ctx);
+bool css_layout_has_sibling_relative(const LayoutContext *ctx);
 /* How far replacing inline style `a` by `b` on an element can reach:
  *   0 nothing but painting;
  *   1 the element's offsets (left/top/right/bottom/inset, transform,

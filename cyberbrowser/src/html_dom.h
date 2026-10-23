@@ -65,7 +65,7 @@ struct HtmlNode {
      * the style set's key sets (css_layout.c): valid while has_memo_stamp
      * matches its attr_hash and the key sets' generation; -1 = not known. */
     uint64_t has_memo_stamp;
-    int8_t has_memo[3];
+    int8_t has_memo[5];
 };
 
 struct HtmlArenaBlock;

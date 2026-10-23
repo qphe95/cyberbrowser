@@ -436,6 +436,7 @@ void css_layout_tree_free(LayoutContext *ctx)
     free(ctx->tree.postorder);
     layout_spare_give(&g_spare_boxes, ctx->boxes, (size_t)ctx->tree.count * sizeof(LayoutBox));
     free(ctx->intrinsic_cache);
+    free(ctx->has_flags);
     if (ctx->text_norm) {
         for (int i = 0; i < ctx->tree.count; i++) free(ctx->text_norm[i]);
         free(ctx->text_norm);
@@ -3906,6 +3907,7 @@ typedef struct HasKeySet {
 typedef struct HasReq {
     uint64_t keys[HAS_REQ_MAX];
     int n;
+    unsigned char deep;         /* more selector after the :has() compound */
 } HasReq;
 typedef struct HasReqList {
     HasReq *v;
@@ -3916,6 +3918,9 @@ typedef struct HasSubjects {
     uint64_t gen;               /* style set generation the key sets describe */
     bool any;                   /* some rule uses :has() */
     bool universal, universal_deep;
+    /* A :has() compound naming nothing is the subject (or a rule could not
+     * be recorded): any element may restyle itself. */
+    bool universal_self;
     bool sibling_relative;
     HasKeySet self, anc;
     /* The same compounds with all their requirements (self_req parallel to
@@ -3951,7 +3956,7 @@ static void has_add(HasSubjects *hs, HasKeySet *ks, uint64_t k, bool deep)
         if (nk) ks->keys = nk;
         unsigned char *nd = (unsigned char *)realloc(ks->deep, (size_t)nc);
         if (nd) ks->deep = nd;
-        if (!nk || !nd) { hs->universal = hs->universal_deep = true; return; }
+        if (!nk || !nd) { hs->universal = hs->universal_deep = hs->universal_self = true; return; }
         ks->cap = nc;
     }
     ks->keys[ks->n] = k;
@@ -4118,7 +4123,7 @@ static bool has_compound_keys(HasSubjects *hs, HasKeySet *ks, const char *st, co
         }
     }
     /* One feature the compound requires stands for it in the key sets the
-     * restyle uses; req keeps them all (css_layout_has_may_depend). */
+     * restyle uses; req keeps them all (has_reqs_node). */
     uint64_t k = id ? id : cls ? cls : tag ? tag : attr;
     if (!k) return false;
     has_add(hs, ks, k, deep);
@@ -4126,10 +4131,11 @@ static bool has_compound_keys(HasSubjects *hs, HasKeySet *ks, const char *st, co
     if (rl->n == rl->cap) {
         int nc = rl->cap ? rl->cap * 2 : 16;
         HasReq *nv = (HasReq *)realloc(rl->v, (size_t)nc * sizeof(HasReq));
-        if (!nv) { hs->universal = true; return true; }   /* cannot record: assume anything */
+        if (!nv) { hs->universal = hs->universal_self = true; return true; }   /* cannot record: assume anything */
         rl->v = nv;
         rl->cap = nc;
     }
+    req.deep = deep;
     rl->v[rl->n++] = req;
     return true;
 }
@@ -4270,8 +4276,9 @@ static void has_scan_selector(HasSubjects *hs, const char *sel)
                 fprintf(stderr, "[css] :has() universal%s: %.100s\n",
                         !deep ? "" : targeted ? " deep (rightmost compound targeted)" : " deep", st);
             hs->universal = true;
-            if (targeted) has_add(hs, &hs->deep_targets, target, false);
-            else if (deep) hs->universal_deep = true;
+            if (!deep) hs->universal_self = true;
+            else if (targeted) has_add(hs, &hs->deep_targets, target, false);
+            else hs->universal_deep = true;
         }
     }
 }
@@ -4298,29 +4305,80 @@ static int has_match_keys(const HasKeySet *ks, const HtmlNode *hn)
     return r;
 }
 
+/* Does element hn carry every feature of one of rl's compounds (the full
+ * test has_match_keys approximates with one feature each)?  2 when that
+ * compound has more selector after it, else 1. */
+static int has_reqs_node(const HasReqList *rl, const HtmlNode *hn)
+{
+    if (!rl->n) return 0;
+    uint64_t have[64];
+    int nh = 0;
+    bool overflow = false;
+    if (hn->tag_name) have[nh++] = has_key('t', hn->tag_name, strlen(hn->tag_name));
+    for (HtmlAttribute *a = hn->attributes; a; a = a->next) {
+        if (!a->name) continue;
+        if (nh < 64) have[nh++] = has_key('[', a->name, strlen(a->name));
+        else overflow = true;
+        const char *v = a->value ? a->value : "";
+        if (strcmp(a->name, "id") == 0) {
+            if (v[0]) { if (nh < 64) have[nh++] = has_key('#', v, strlen(v)); else overflow = true; }
+        } else if (strcmp(a->name, "class") == 0) {
+            for (const char *c = v; *c;) {
+                while (*c == ' ' || *c == '\t' || *c == '\n' || *c == '\r' || *c == '\f') c++;
+                const char *e = c;
+                while (*e && *e != ' ' && *e != '\t' && *e != '\n' && *e != '\r' && *e != '\f') e++;
+                if (e > c) { if (nh < 64) have[nh++] = has_key('.', c, (size_t)(e - c)); else overflow = true; }
+                c = e;
+            }
+        }
+    }
+    if (overflow) return 2;
+    int r = 0;
+    for (int i = 0; i < rl->n && r < 2; i++) {
+        const HasReq *q = &rl->v[i];
+        bool all = true;
+        for (int k = 0; k < q->n && all; k++) {
+            bool found = false;
+            for (int h = 0; h < nh && !found; h++) found = have[h] == q->keys[k];
+            all = found;
+        }
+        if (all) r = q->deep ? 2 : 1;
+    }
+    return r;
+}
+
 /* Could layout node `idx` be the subject of some :has() rule? 0: no, 1: yes,
  * 2: yes, and descendants' matching depends on it. */
 /* The :has() checks of an element's own features (0: has_match_keys on
- * hs->self, 1: on hs->anc, 2: has_match_target on hs->deep_targets),
+ * hs->self, 1: on hs->anc, 2: has_match_target on hs->deep_targets, 3 and
+ * 4: has_reqs_node on hs->self_req and hs->anc_req),
  * remembered on the node: forced layouts run them on most elements, and
  * they hash every class name each time.  Valid while the element's
  * attributes (attr_hash, computed by style_cache_prepare) and the key sets
  * are the same. */
+static int has_memo_compute(const HasSubjects *hs, const HtmlNode *hn, int which)
+{
+    switch (which) {
+    case 0: return has_match_keys(&hs->self, hn);
+    case 1: return has_match_keys(&hs->anc, hn);
+    case 2: return has_match_target(&hs->deep_targets, hn);
+    case 3: return has_reqs_node(&hs->self_req, hn);
+    default: return has_reqs_node(&hs->anc_req, hn);
+    }
+}
+
 static int has_memo(const HasSubjects *hs, HtmlNode *hn, int which)
 {
     uint64_t stamp = (hn->attr_hash ^ (hs->gen * 0x9E3779B97F4A7C15ull)) | 1;
     if (!hn->attr_hash) {   /* not hashed this pass: no memo */
-        return which == 0 ? has_match_keys(&hs->self, hn) : which == 1 ? has_match_keys(&hs->anc, hn)
-                          : has_match_target(&hs->deep_targets, hn);
+        return has_memo_compute(hs, hn, which);
     }
     if (hn->has_memo_stamp != stamp) {
         hn->has_memo_stamp = stamp;
-        hn->has_memo[0] = hn->has_memo[1] = hn->has_memo[2] = -1;
+        for (int i = 0; i < 5; i++) hn->has_memo[i] = -1;
     }
     if (hn->has_memo[which] < 0)
-        hn->has_memo[which] = (int8_t)(which == 0 ? has_match_keys(&hs->self, hn)
-                                     : which == 1 ? has_match_keys(&hs->anc, hn)
-                                     : has_match_target(&hs->deep_targets, hn));
+        hn->has_memo[which] = (int8_t)has_memo_compute(hs, hn, which);
     return hn->has_memo[which];
 }
 
@@ -4329,13 +4387,15 @@ static int has_may_match(const HasSubjects *hs, LayoutContext *ctx, int idx)
     if (hs->universal_deep) return 2;
     HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
     if (!hn) return 0;
-    int r = hs->universal ? 1 : 0;
-    if (hs->self.n) { int m = has_memo(hs, hn, 0); if (m > r) r = m; }
-    if (hs->anc.n && r < 2) {
+    /* (A universal :has() compound with more selector after it changes the
+     * elements the rightmost compound names, not itself: deep_targets.) */
+    int r = hs->universal_self ? 1 : 0;
+    if (hs->self_req.n) { int m = has_memo(hs, hn, 3); if (m > r) r = m; }
+    if (hs->anc_req.n && r < 2) {
         for (int a = ctx->tree.nodes[idx].parent_idx; a >= 0 && r < 2; a = ctx->tree.nodes[a].parent_idx) {
             HtmlNode *an = layout_node_dom(ctx, ctx->tree.nodes[a].dom_node_idx);
             if (!an || an->type != HTML_NODE_ELEMENT) continue;
-            int m = has_memo(hs, an, 1);
+            int m = has_memo(hs, an, 4);
             if (m > r) r = m;
         }
     }
@@ -4924,6 +4984,18 @@ bool css_layout_has_may_depend(const LayoutContext *ctx, uint32_t id)
     for (NodeId a = id; a && dom_kind(a) == DOM_K_ELEMENT; a = dom_parent(a))
         if (has_reqs_store(&hs->self_req, a) || has_reqs_store(&hs->anc_req, a)) return true;
     return false;
+}
+
+bool css_layout_has_any(const LayoutContext *ctx)
+{
+    const StyleMentions *m = mentions_of(ctx);
+    return !m || m->unknown || m->has.any;
+}
+
+bool css_layout_has_sibling_relative(const LayoutContext *ctx)
+{
+    const StyleMentions *m = mentions_of(ctx);
+    return !m || m->unknown || m->has.sibling_relative;
 }
 
 bool css_layout_uses_empty(const LayoutContext *ctx)
@@ -6762,6 +6834,37 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
             P.inc = true;
             P.verify = verify_env;
             style_cache_prepare(&P, sc_global, &has, &cf);
+            /* The first element a :has() rule whose compound names nothing
+             * restyles (layout_api's anchors read it). */
+            ctx->has_target_first = n;
+            if (has.any && (has.universal_deep || has.deep_targets.n)) {
+                int k = 0;
+                for (; !has.universal_deep && k < n; k++) {
+                    HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[ctx->tree.preorder[k]].dom_node_idx);
+                    if (hn && hn->type == HTML_NODE_ELEMENT && has_memo(&has, hn, 2)) break;
+                }
+                ctx->has_target_first = k;
+            }
+            /* And which elements a :has() rule may restyle as its subject
+             * (has_may_match's test: its own features, or an ancestor's). */
+            free(ctx->has_flags);
+            ctx->has_flags = NULL;
+            if (!has.universal_self && !has.universal_deep)
+                ctx->has_flags = (unsigned char *)calloc((size_t)n + 1, 1);
+            for (int k = 0; ctx->has_flags && has.any && k < n; k++) {
+                int idx = ctx->tree.preorder[k];
+                int p = ctx->tree.nodes[idx].parent_idx;
+                HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+                if (!hn || hn->type != HTML_NODE_ELEMENT) continue;
+                /* Bit 2: an ancestor carries an ancestor-compound feature. */
+                unsigned char below = p >= 0 ? (unsigned char)(ctx->has_flags[p] & 2) : 0;
+                if (p >= 0 && has.anc_req.n) {
+                    HtmlNode *pn = layout_node_dom(ctx, ctx->tree.nodes[p].dom_node_idx);
+                    if (pn && pn->type == HTML_NODE_ELEMENT && has_memo(&has, pn, 4)) below = 2;
+                }
+                bool subject = below || (has.self_req.n && has_memo(&has, hn, 3));
+                ctx->has_flags[idx] = (unsigned char)(below | (subject ? LAYOUT_HAS_SUBJECT : 0));
+            }
             STAGE("restyle prepare");
         } else if (verify_env) {
             fprintf(stderr, "[css] restyle: full (%s)\n", !inc_env ? "CSS_INC=0" : "style set not cached");
