@@ -3101,19 +3101,17 @@ bool js_quickjs_exec_script(const char *script, size_t script_len, int i, int sc
     // applied; custom-element upgrade and missing standard APIs are
     // implemented in the browser layer instead.
     //
-    // Lazy parsing is disabled: a lazily-stubbed function body is skipped
-    // at parse time, so the parser never registers which outer variables
-    // the nested function captures, and the enclosing function's closure
-    // var table is built WITHOUT those through-captures.  When the nested
-    // function is later resumed on its own, its JS_CLOSURE_REF indices are
-    // computed against a stale parent closure table and bind to
-    // detached/fresh var_refs instead of the shared enclosing bindings
-    // (observed with YouTube's custom-elements fast-shim: the wrapper class
-    // constructor saw the IIFE's e/f construction flags as undefined,
-    // re-running the user constructor until stack overflow).  CYBER_LAZY=1
-    // re-enables lazy parsing for debugging.
+    // Functions are compiled lazily, on their first call: most of a large
+    // bundle never runs during a load.  (The skip scan registers every name
+    // a skipped body uses, so functions nested in it capture the enclosing
+    // bindings, not fresh ones: the closure bug that once forced eager
+    // compiling, test_lazy_conformance_suite's ce-shim-flags.)  CYBER_LAZY=0
+    // compiles every function up front.
     int eval_flags = JS_EVAL_TYPE_GLOBAL;
-    if (!cyber_getenv("CYBER_LAZY")) eval_flags |= JS_EVAL_FLAG_NO_LAZY;
+    {
+        const char *lz = cyber_getenv("CYBER_LAZY");
+        if (lz && lz[0] == '0') eval_flags |= JS_EVAL_FLAG_NO_LAZY;
+    }
     char evname[64];
     snprintf(evname, sizeof(evname), "eval-script-%d (%zu KB)",
              i, script_len / 1024);

@@ -1305,6 +1305,14 @@ static const char *lazy_suite_js =
     "T('tdz-closure-decl', function(){ function f(){ return x; } try { f(); } catch(e) { return e.name; } let x=1; });\n"
     "T('tdz-closure-arrow', function(){ var g=()=>{ return z; }; try { g(); } catch(e) { return e.name; } const z=1; });\n"
     "T('tdz-closure-class', function(){ class C { m(){ return K; } } try { new C().m(); } catch(e) { return e.name; } let K=1; });\n"
+    /* Variables a function nested in a skipped body captures through it: the
+     * custom-elements shim's construction flags (its class constructor, in a
+     * skipped arrow, read them as undefined when the skipped body did not
+     * register the names), a capture through two skipped levels, and a class
+     * reading a binding written after it was made. */
+    "T('ce-shim-flags', function(){ var log=[]; (function(){ 'use strict'; class Native{ constructor(){ log.push('native'); } } let browserConstruction=false, userConstruction=false; const reg=new Map(); function Fake(){ if(!browserConstruction){ userConstruction=true; return new (reg.get('x'))(); } browserConstruction=false; } const define=(tag, cls)=>{ const proto=cls.prototype; const StandIn=class extends Native{ constructor(){ super(); Object.setPrototypeOf(this, proto); if(!userConstruction){ browserConstruction=true; cls.call(this); } userConstruction=false; } }; reg.set(tag, StandIn); return StandIn; }; function User(){ log.push('user'); return Fake.call(this)||this; } const S=define('x', User); new S(); log.push(browserConstruction+','+userConstruction); })(); return log.join(' '); });\n"
+    "T('capture-through-two', function(){ return (function(){ var e=1, f=2; function a(){ return function b(){ return function c(){ e++; return e*10+f; }; }; } var g=a()()(); e=5; return [g, a()()(), e]; })(); });\n"
+    "T('class-in-lazy-sees-later-write', function(){ return (function(){ let flag; function mk(){ return class { get v(){ return flag; } }; } const C=mk(); flag='set'; return new C().v; })(); });\n"
     "out.join('\\n');\n";
 
 static const char *lazy_suite_expected =
@@ -1412,7 +1420,10 @@ static const char *lazy_suite_expected =
     "tostring-arrow=() => { return 1; }|x => x + 1\n"
     "tdz-closure-decl=ReferenceError\n"
     "tdz-closure-arrow=ReferenceError\n"
-    "tdz-closure-class=ReferenceError";
+    "tdz-closure-class=ReferenceError\n"
+    "ce-shim-flags=native user false,false\n"
+    "capture-through-two=[22,62,6]\n"
+    "class-in-lazy-sees-later-write=set";
 
 static BOOL lazy_suite_check(JSContextHandle ctx, const char *label)
 {
