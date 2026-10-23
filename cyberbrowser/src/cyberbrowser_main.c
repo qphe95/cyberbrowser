@@ -301,6 +301,23 @@ static void cleanup_browser_context(void) {
     }
 }
 
+/* At the end of a successful run: the OS reclaims the heap at exit, and
+ * freeing a YouTube-sized runtime object by object took 0.3 s.  Only the
+ * GC thread is stopped, so nothing runs during process exit.
+ * CYBER_FULL_CLEANUP=1 tears everything down (leak and teardown checks). */
+static void finish_browser_context(void) {
+    if (cyber_getenv("CYBER_FULL_CLEANUP")) {
+        cleanup_browser_context();
+        return;
+    }
+    if (SAFE_VALID(g_rt) && getenv("QJS_GC_CENSUS")) {
+        extern void gc_census_dump(void);
+        gc_census_dump();
+    }
+    extern void gc_core_stop_thread(void);
+    gc_core_stop_thread();
+}
+
 static char *fetch_start_page(const char *url, size_t *out_size) {
     printf("Fetching %s ...\n", url);
 
@@ -1063,7 +1080,18 @@ static bool render_document_to_jpg(HtmlDocument *doc, ImageCache *image_cache,
     return true;
 }
 
+/* CYBER_TIMELINE=1: the milestones of a run, in ms since process creation
+ * (what the process spends outside load-page shows too). */
+static void tl_mark(const char *what) {
+    static int on = -1;
+    if (on < 0) on = cyber_getenv("CYBER_TIMELINE") ? 1 : 0;
+    if (!on) return;
+    FILETIME c, e, k, u, now; GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u); GetSystemTimeAsFileTime(&now);
+    unsigned long long a = ((unsigned long long)c.dwHighDateTime << 32) | c.dwLowDateTime, b = ((unsigned long long)now.dwHighDateTime << 32) | now.dwLowDateTime;
+    fprintf(stderr, "[timeline] %-28s %8.1f ms\n", what, (b - a) / 1e4); fflush(stderr);
+}
 int main(int argc, char *argv[]) {
+    tl_mark("main");
     /* Diagnostics on stderr and progress on stdout are buffered (unbuffered,
      * MinGW's printf writes a few bytes per system call: half a second of a
      * YouTube load for stdout's 1.5 KB) and flushed at the top of every
@@ -1139,6 +1167,7 @@ int main(int argc, char *argv[]) {
     printf("========================================\n");
 
     CP_BEGIN("load-page");
+    tl_mark("load-page start");
 
     if (!platform_init()) {
         printf("FATAL: platform_init() failed\n");
@@ -1392,6 +1421,7 @@ int main(int argc, char *argv[]) {
         }
 
         printf("Dispatching DOMContentLoaded and load events ...\n");
+        tl_mark("scripts done");
         {
             CP_SCOPE("lifecycle-events");
             dispatch_page_lifecycle_events(g_ctx);
@@ -1630,6 +1660,7 @@ int main(int argc, char *argv[]) {
     unsigned long long last_change_ms = page_time_ms();
     unsigned long long settle_start_page = last_change_ms;
     CP_BEGIN("quiescence-loop");
+    tl_mark("quiescence start");
     while (loop_iterations < 100) {
         loop_iterations++;
 
@@ -1755,6 +1786,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    tl_mark("before page_final");
     /* Save the final mutated JS DOM for inspection. */
     {
         GCValue js_doc = get_global_document(g_ctx);
@@ -1963,6 +1995,7 @@ int main(int argc, char *argv[]) {
     printf("\nStart page loaded successfully.\n");
 
     CP_END("load-page");
+    tl_mark("load-page end");
     cyber_sampler_stop();
     if (cp_profile_enabled()) {
         cp_profile_flush("profile.json");
@@ -1972,8 +2005,10 @@ int main(int argc, char *argv[]) {
 
     if (cp_profile_enabled() || getenv("CYBER_DEBUG_NET")) http_net_log_stats();
     http_net_close_idle();
-    cleanup_browser_context();
+    tl_mark("before cleanup");
+    finish_browser_context();
     platform_http_cleanup();
     platform_cleanup();
+    tl_mark("after cleanup");
     return 0;
 }
