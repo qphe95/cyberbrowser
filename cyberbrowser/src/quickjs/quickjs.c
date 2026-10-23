@@ -1136,35 +1136,27 @@ static inline void js_dbuf_init(JSContextHandle ctx, DynBuf *s)
 }
 
 /* ============================================================================
- * GCByteBuffer - GC-safe byte buffer handle class
- * 
- * This class wraps a GC-managed byte buffer, storing only a GCHandle internally.
- * The buffer pointer is obtained fresh via gc_deref() on each access, making it
- * safe across GC compaction.
- * 
- * Usage:
+ * GCByteBuffer - the compiler's byte buffers (bytecode, pc2line)
+ *
+ * Plain memory (PARALLEL_PARSE_DESIGN.md, 5.2): js_create_function copies
+ * what the runtime keeps into GC objects.  The name and API are the ones
+ * the compiler has always used.
+ *
  *   GCByteBuffer buffer = {0};
- *   gc_byte_buffer_claim(&buffer, 100);         // Allocate space
  *   gc_byte_buffer_putc(&buffer, val);          // Append
- *   uint8_t *ptr = gc_byte_buffer_ptr(&buffer); // Raw pointer (use with caution)
+ *   uint8_t *ptr = gc_byte_buffer_ptr(&buffer); // valid until the next growth
+ *   gc_byte_buffer_clear(&buffer);              // Free
  * ============================================================================ */
 typedef struct GCByteBuffer {
-    GCHandle handle;        /* Handle to GC-managed buffer */
-    size_t size;            /* Current size (not GC-managed) */
-    size_t allocated_size;  /* Allocated size (not GC-managed) */
+    uint8_t *buf;           /* plain memory, NULL if empty */
+    size_t size;            /* Current size */
+    size_t allocated_size;  /* Allocated size */
     BOOL error;             /* Error flag */
-    BOOL has_handle_header; /* TRUE if data starts after handle header (from take_from_dbuf) */
 } GCByteBuffer;
 
-/* Fresh pointer to the buffer data - valid until the next GC point. */
 static inline uint8_t *gc_byte_buffer_ptr(const GCByteBuffer *b)
 {
-    if (b->handle == GC_HANDLE_NULL) return NULL;
-    uint8_t *base = (uint8_t *)gc_deref(b->handle);
-    /* If buffer was taken from DynBuf, data starts after the handle header */
-    if (b->has_handle_header)
-        return base + sizeof(GCHandle);
-    return base;
+    return b->buf;
 }
 
 /* A DynBuf snapshot of the buffer for use with the dbuf_* functions.
@@ -1173,7 +1165,7 @@ static inline uint8_t *gc_byte_buffer_ptr(const GCByteBuffer *b)
 static inline DynBuf *gc_byte_buffer_as_dbuf(GCByteBuffer *b)
 {
     static _Thread_local DynBuf temp;
-    temp.buf = gc_byte_buffer_ptr(b);
+    temp.buf = b->buf;
     temp.size = b->size;
     temp.allocated_size = b->allocated_size;
     temp.error = b->error;
@@ -1191,30 +1183,18 @@ static int gc_byte_buffer_claim(GCByteBuffer *b, size_t len)
     if (new_size > b->allocated_size) {
         if (b->error)
             return -1;
-        /* (Bytecode under construction: doubling halves the copies made on
-         * the GC heap, and the buffer is dropped once the function is
-         * compiled.) */
         size_t new_alloc = b->allocated_size * 2;
+        uint8_t *nb;
         if (new_alloc < 64)
             new_alloc = 64;
         if (new_alloc < new_size)
             new_alloc = new_size;
-
-        if (b->handle == GC_HANDLE_NULL) {
-            /* Initial allocation */
-            GC_SET(b->handle, gc_alloc(new_alloc, JS_GC_OBJ_TYPE_BYTES));
-            if (b->handle == GC_HANDLE_NULL) {
-                b->error = TRUE;
-                return -1;
-            }
-        } else {
-            /* Reallocation */
-            GC_SET(b->handle, gc_realloc_handle(b->handle, new_alloc));
-            if (b->handle == GC_HANDLE_NULL) {
-                b->error = TRUE;
-                return -1;
-            }
+        nb = (uint8_t *)js_plain_realloc(b->buf, new_alloc);
+        if (!nb) {
+            b->error = TRUE;
+            return -1;
         }
+        b->buf = nb;
         b->allocated_size = new_alloc;
     }
     return 0;
@@ -1225,8 +1205,7 @@ static int gc_byte_buffer_putc(GCByteBuffer *b, uint8_t c)
 {
     if (gc_byte_buffer_claim(b, 1))
         return -1;
-    uint8_t *p = gc_byte_buffer_ptr(b);
-    p[b->size++] = c;
+    b->buf[b->size++] = c;
     return 0;
 }
 
@@ -1235,8 +1214,7 @@ static int gc_byte_buffer_put(GCByteBuffer *b, const uint8_t *data, size_t len)
 {
     if (gc_byte_buffer_claim(b, len))
         return -1;
-    uint8_t *p = gc_byte_buffer_ptr(b);
-    memcpy(p + b->size, data, len);
+    memcpy(b->buf + b->size, data, len);
     b->size += len;
     return 0;
 }
@@ -1244,68 +1222,46 @@ static int gc_byte_buffer_put(GCByteBuffer *b, const uint8_t *data, size_t len)
 /* Free the buffer */
 static inline void gc_byte_buffer_clear(GCByteBuffer *b)
 {
-    b->handle = GC_HANDLE_NULL;
+    js_plain_free(b->buf);
+    b->buf = NULL;
     b->size = 0;
     b->allocated_size = 0;
     b->error = FALSE;
-    b->has_handle_header = FALSE;
 }
 
-/* Release the handle without clearing size (used after copying buffer) */
+/* Free the storage, keeping the size (after copying the buffer) */
 static inline void gc_byte_buffer_release(GCByteBuffer *b)
 {
-    b->handle = GC_HANDLE_NULL;
-    b->has_handle_header = FALSE;
+    js_plain_free(b->buf);
+    b->buf = NULL;
+    b->allocated_size = 0;
 }
 
-/* Take ownership from a DynBuf that was allocated with js_realloc_bytecode_rt.
- * Extracts the GCHandle from the header stored before the buffer. */
+/* Take the storage of a DynBuf made with js_dbuf_bytecode_init. */
 static void gc_byte_buffer_take_from_dbuf(GCByteBuffer *b, DynBuf *db)
 {
-    if (db->buf) {
-        /* Extract handle from header (stored before the actual data) */
-        uint8_t *header = (uint8_t *)db->buf - sizeof(GCHandle);
-        GC_SET(b->handle, *(GCHandle *)header);
-        b->size = db->size;
-        b->allocated_size = db->allocated_size;
-        b->error = db->error;
-        b->has_handle_header = TRUE;  /* Data starts after handle header */
-        /* Clear the source DynBuf without freeing (we took ownership) */
-        db->buf = NULL;
-        db->size = 0;
-        db->allocated_size = 0;
-        db->error = 0;
-    } else {
-        b->handle = GC_HANDLE_NULL;
-        b->size = db->size;
-        b->allocated_size = 0;
-        b->error = db->error;
-        b->has_handle_header = FALSE;
-    }
+    b->buf = db->buf;
+    b->size = db->size;
+    b->allocated_size = db->buf ? db->allocated_size : 0;
+    b->error = db->error;
+    db->buf = NULL;
+    db->size = 0;
+    db->allocated_size = 0;
+    db->error = 0;
 }
 
-/* Header-storing allocator for bytecode buffers (legacy - kept for compatibility).
- * New code should use GCByteBuffer directly.
- */
+/* The allocator of the compiler's DynBufs (bytecode being rewritten):
+ * plain memory, which gc_byte_buffer_take_from_dbuf adopts. */
 static void *js_realloc_bytecode_rt(void *opaque, void *ptr, size_t size)
 {
     (void)opaque;
-    if (size > (INT32_MAX / 2)) {
+    if (size == 0) {
+        js_plain_free(ptr);
         return NULL;
-    } else if (ptr == NULL) {
-        GCHandle h = gc_alloc(sizeof(GCHandle) + size, JS_GC_OBJ_TYPE_BYTES);
-        if (h == GC_HANDLE_NULL) return NULL;
-        void *data = gc_deref_unsafe(h);
-        GC_SET(*(GCHandle*)data, h);
-        return (uint8_t*)data + sizeof(GCHandle);
-    } else {
-        uint8_t *header = (uint8_t*)ptr - sizeof(GCHandle);
-        GCHandle h = gc_realloc_handle(*(GCHandle*)header, sizeof(GCHandle) + size);
-        if (h == GC_HANDLE_NULL) return NULL;
-        void *data = gc_deref_unsafe(h);
-        GC_SET(*(GCHandle*)data, h);
-        return (uint8_t*)data + sizeof(GCHandle);
     }
+    if (size > (INT32_MAX / 2))
+        return NULL;
+    return js_plain_realloc(ptr, size);
 }
 
 static inline void js_dbuf_bytecode_init(JSContextHandle ctx, DynBuf *s)
@@ -1314,26 +1270,10 @@ static inline void js_dbuf_bytecode_init(JSContextHandle ctx, DynBuf *s)
 }
 
 
-/* Header-storing allocator for pc2line DynBuf (legacy - kept for compatibility) */
+/* The same for pc2line. */
 static void *js_realloc_pc2line_rt(void *opaque, void *ptr, size_t size)
 {
-    (void)opaque;
-    if (size == 0) {
-        return NULL;
-    } else if (ptr == NULL) {
-        GCHandle h = gc_alloc(sizeof(GCHandle) + size, JS_GC_OBJ_TYPE_BYTES);
-        if (h == GC_HANDLE_NULL) return NULL;
-        void *data = gc_deref_unsafe(h);
-        GC_SET(*(GCHandle*)data, h);
-        return (uint8_t*)data + sizeof(GCHandle);
-    } else {
-        uint8_t *header = (uint8_t*)ptr - sizeof(GCHandle);
-        GCHandle h = gc_realloc_handle(*(GCHandle*)header, sizeof(GCHandle) + size);
-        if (h == GC_HANDLE_NULL) return NULL;
-        void *data = gc_deref_unsafe(h);
-        GC_SET(*(GCHandle*)data, h);
-        return (uint8_t*)data + sizeof(GCHandle);
-    }
+    return js_realloc_bytecode_rt(opaque, ptr, size);
 }
 
 static inline void js_dbuf_pc2line_init(JSContextHandle ctx, DynBuf *s)
@@ -24919,8 +24859,6 @@ static void js_mark_function_def(JSRuntimeHandle rt, JSFunctionDef *p, JS_MarkFu
     }
     mark_func(rt, p->lazy_parent_scope);
     /* Mark bytecode and pc2line buffers */
-    mark_func(rt, p->byte_code.handle);
-    mark_func(rt, p->pc2line.handle);
     /* Mark parent in the chain */
     mark_func(rt, p->parent_handle);
 }
@@ -37176,6 +37114,8 @@ static void js_free_function_def_tables(JSFunctionDef *fd)
     js_plain_free(fd->cv_htab_handle);
     fd->cv_htab_handle = NULL;
     fd->cv_htab_src = NULL;
+    gc_byte_buffer_clear(&fd->byte_code);
+    gc_byte_buffer_clear(&fd->pc2line);
 }
 
 static void js_free_function_def(JSContextHandle ctx, JSFunctionDef *fd)
@@ -39154,7 +39094,7 @@ static __exception int add_closure_variables(JSContextHandle ctx, JSFunctionDef 
 }
 
 typedef struct CodeContext {
-    GCHandle bc_handle; /* handle to bytecode buffer */
+    const uint8_t *bc_buf; /* the bytecode (plain memory) */
     int bc_len;   /* length of the code buffer */
     int pos;      /* position past the matched code pattern */
     int line_num; /* last visited OP_line_num parameter or -1 */
@@ -39163,17 +39103,12 @@ typedef struct CodeContext {
     int label;
     int val;
     JSAtom atom;
-    BOOL has_handle_header; /* TRUE if buffer was from take_from_dbuf (has GCHandle header) */
 } CodeContext;
 
 /* Fresh pointer to the bytecode buffer - valid until the next GC point. */
 static inline const uint8_t *code_context_bc_buf(const CodeContext *s)
 {
-    if (s->bc_handle == GC_HANDLE_NULL) return NULL;
-    uint8_t *base = (uint8_t *)gc_deref(s->bc_handle);
-    if (s->has_handle_header)
-        return base + sizeof(GCHandle);
-    return base;
+    return s->bc_buf;
 }
 
 #define M2(op1, op2)            ((op1) | ((op2) << 8))
@@ -39463,8 +39398,7 @@ static __exception int resolve_variables(JSContextHandle ctx, JSFunctionDef *s)
 
     /* Resolve variables in bytecode */
 
-    cc.bc_handle = s->byte_code.handle;
-    cc.has_handle_header = s->byte_code.has_handle_header;
+    cc.bc_buf = gc_byte_buffer_ptr(&s->byte_code);
     cc.bc_len = bc_len = s->byte_code.size;
     js_dbuf_bytecode_init(ctx, &bc_out);
     /* The output is about the input's size: start there rather than growing
@@ -40167,8 +40101,7 @@ static __exception int resolve_labels(JSContextHandle ctx, JSFunctionDef *s)
 
     line_num = s->source_pos;
 
-    cc.bc_handle = s->byte_code.handle;
-    cc.has_handle_header = s->byte_code.has_handle_header;
+    cc.bc_buf = gc_byte_buffer_ptr(&s->byte_code);
     cc.bc_len = bc_len = s->byte_code.size;
     js_dbuf_bytecode_init(ctx, &bc_out);
     /* (Short opcodes make the output at most about the input's size.) */
@@ -41626,15 +41559,12 @@ static GCValue js_create_function(JSContextHandle ctx, JSFunctionDef *fd)
         //compute_pc2line_info(fd, &pc2line);
         ///* GC frees */
         /* Read handle from header, then realloc to transfer ownership to bytecode */
-        if (gc_byte_buffer_ptr(&fd->pc2line)) {
-            if (fd->pc2line.has_handle_header) {
-                uint8_t *header = (uint8_t*)gc_byte_buffer_ptr(&fd->pc2line) - sizeof(GCHandle);
-                GCHandle h = gc_realloc_handle(*(GCHandle*)header, fd->pc2line.size);
-                if (h != GC_HANDLE_NULL) {
-                    SAFE_SET_HANDLE(b, JSFunctionBytecodeHandle, debug.pc2line_handle, h);
-                }
-            } else {
-                SAFE_SET_HANDLE(b, JSFunctionBytecodeHandle, debug.pc2line_handle, fd->pc2line.handle);
+        /* the runtime's copy */
+        if (gc_byte_buffer_ptr(&fd->pc2line) && fd->pc2line.size) {
+            GCHandle h = gc_alloc(fd->pc2line.size, JS_GC_OBJ_TYPE_BYTES);
+            if (h != GC_HANDLE_NULL) {
+                memcpy(gc_deref(h), gc_byte_buffer_ptr(&fd->pc2line), fd->pc2line.size);
+                SAFE_SET_HANDLE(b, JSFunctionBytecodeHandle, debug.pc2line_handle, h);
             }
         }
         SAFE_SET(b, JSFunctionBytecodeHandle, debug.pc2line_len, fd->pc2line.size);
