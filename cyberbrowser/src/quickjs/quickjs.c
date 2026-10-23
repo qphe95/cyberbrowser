@@ -36903,6 +36903,187 @@ static void free_bytecode_atoms(JSRuntimeHandle rt,
     }
 }
 
+/* CYBER_BC_DUMP=<file>: one line per function compiled: its source
+ * position, name and a hash of everything the compiler produced for it
+ * (bytecode with atom operands as their text, constants, closure variables,
+ * variable definitions, stack size, flags, line table).  Two builds that
+ * compile alike write the same lines (in the order functions compile). */
+static uint64_t bc_fp_mix(uint64_t h, const void *p, size_t n)
+{
+    const uint8_t *b = (const uint8_t *)p;
+    while (n--)
+        h = (h ^ *b++) * 1099511628211ull;
+    return h;
+}
+
+static uint64_t bc_fp_atom(JSContextHandle ctx, uint64_t h, JSAtom a)
+{
+    char buf[256];
+    const char *s = JS_AtomGetStr(ctx, buf, sizeof(buf), a);
+    return bc_fp_mix(h, s, strlen(s) + 1);
+}
+
+static void bc_fingerprint(JSContextHandle ctx, JSFunctionBytecodeHandle b)
+{
+    static FILE *out;
+    static int on = -1;
+    if (on < 0) {
+        const char *path = getenv("CYBER_BC_DUMP");
+        out = path ? fopen(path, "w") : NULL;
+        on = out != NULL;
+    }
+    if (!on)
+        return;
+    uint64_t h = 1469598103934665603ull, tail = 0;
+    const uint8_t *bc = js_bc_byte_code_buf(b);
+    int len = SAFE_GET_OR(b, JSFunctionBytecodeHandle, byte_code_len, 0), pos = 0, i;
+    /* A lazy stub's dead references to its free names follow its first
+     * return; their order is the order of a set keyed by atom number, which
+     * depends on when other atoms were made: hashed as a set. */
+    BOOL stub = SAFE_GET_OR(b, JSFunctionBytecodeHandle, func_parse_state, 0) == JS_FUNC_LAZY, in_tail = FALSE;
+    /* CYBER_BC_DUMP_AT=<offset>: the bytecode of functions at that source
+     * offset, one instruction per line (opcode number, operand bytes,
+     * atom operands as text) */
+    {
+        const char *at = getenv("CYBER_BC_DUMP_AT");
+        if (at && (uint32_t)atoi(at) == SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_offset, 0)) {
+            int dp = 0;
+            fprintf(out, "@ %u len %d stub %d\n", (unsigned)atoi(at), len, (int)stub);
+            while (dp < len) {
+                int op = bc[dp];
+                const JSOpCode *oi = &short_opcode_info(op);
+                int sz = oi->size > 0 ? oi->size : 1, k;
+                char ab[128];
+                fprintf(out, "@ %5d op %3d fmt %2d:", dp, op, (int)oi->fmt);
+                for (k = 1; k < sz && dp + k < len; k++)
+                    fprintf(out, " %02x", bc[dp + k]);
+                if ((oi->fmt == OP_FMT_atom || oi->fmt == OP_FMT_atom_u8 || oi->fmt == OP_FMT_atom_u16 ||
+                     oi->fmt == OP_FMT_atom_label_u8 || oi->fmt == OP_FMT_atom_label_u16) && dp + 5 <= len)
+                    fprintf(out, "  '%s'", JS_AtomGetStr(ctx, ab, sizeof(ab), get_u32(bc + dp + 1)));
+                fprintf(out, "\n");
+                dp += sz;
+            }
+        }
+    }
+    while (pos < len) {
+        int op = bc[pos];
+        const JSOpCode *oi = &short_opcode_info(op);
+        int sz = oi->size > 0 ? oi->size : 1;
+        uint64_t ih = in_tail ? 1469598103934665603ull : h;
+        if (pos + sz > len)
+            sz = len - pos;
+        switch (oi->fmt) {
+        case OP_FMT_atom:
+        case OP_FMT_atom_u8:
+        case OP_FMT_atom_u16:
+        case OP_FMT_atom_label_u8:
+        case OP_FMT_atom_label_u16:
+            if (pos + 5 <= len) {
+                ih = bc_fp_mix(ih, bc + pos, 1);
+                ih = bc_fp_atom(ctx, ih, get_u32(bc + pos + 1));
+                ih = bc_fp_mix(ih, bc + pos + 5, sz - 5);
+                break;
+            }
+            /* fall through */
+        default:
+            ih = bc_fp_mix(ih, bc + pos, sz);
+            break;
+        }
+        if (in_tail)
+            tail += ih * 0x9E3779B97F4A7C15ull;
+        else
+            h = ih;
+        if (stub && op == OP_return_undef)
+            in_tail = TRUE;
+        pos += sz;
+    }
+    h = bc_fp_mix(h, &tail, sizeof(tail));
+    /* CYBER_BC_DUMP_PARTS=1: also each component's hash (bytecode, constants,
+     * closure variables, variables, flags, line table), to see what differs */
+    uint64_t part[6] = { h, 0, 0, 0, 0, 0 };
+    part[0] = h; h = 1469598103934665603ull;
+    for (i = 0; i < SAFE_GET_OR(b, JSFunctionBytecodeHandle, cpool_count, 0); i++) {
+        GCValue v = js_bc_cpool_ptr(b)[i];
+        int tag = JS_VALUE_GET_TAG(v);
+        h = bc_fp_mix(h, &tag, sizeof(tag));
+        if (tag == JS_TAG_STRING) {
+            const char *str = JS_ToCString(ctx, v);
+            if (str)
+                h = bc_fp_mix(h, str, strlen(str));
+        } else if (tag == JS_TAG_FUNCTION_BYTECODE) {
+            JSFunctionBytecodeHandle c = (JSFunctionBytecodeHandle)GC_VALUE_GET_HANDLE(v);
+            uint32_t off = SAFE_GET_OR(c, JSFunctionBytecodeHandle, debug.source_offset, 0);
+            h = bc_fp_atom(ctx, h, SAFE_GET_OR(c, JSFunctionBytecodeHandle, func_name, JS_ATOM_NULL));
+            h = bc_fp_mix(h, &off, sizeof(off));
+        } else if (tag == JS_TAG_INT || tag == JS_TAG_FLOAT64 || tag == JS_TAG_BOOL) {
+            h = bc_fp_mix(h, &v.u, sizeof(v.u));
+        }
+    }
+    part[1] = h; h = 1469598103934665603ull;
+    /* As a set: a stub's are made in the order of its dead references, and
+     * a lazily compiled function's references into its stub's list follow
+     * that order (their indices are left out). */
+    {
+        uint64_t cvs = 0;
+        for (i = 0; i < SAFE_GET_OR(b, JSFunctionBytecodeHandle, closure_var_count, 0); i++) {
+            int type = (int)js_bc_closure_var_closure_type(b, i);
+            int t[4] = { type, type == JS_CLOSURE_REF || type == JS_CLOSURE_GLOBAL_REF ? -1 : js_bc_closure_var_var_idx(b, i),
+                         (int)js_bc_closure_var_is_lexical(b, i), (int)js_bc_closure_var_is_const(b, i) };
+            uint64_t eh = bc_fp_mix(1469598103934665603ull, t, sizeof(t));
+            eh = bc_fp_atom(ctx, eh, js_bc_closure_var_var_name(b, i));
+            cvs += eh * 0x9E3779B97F4A7C15ull;
+        }
+        h = bc_fp_mix(h, &cvs, sizeof(cvs));
+    }
+    part[2] = h; h = 1469598103934665603ull;
+    {
+        int nv = SAFE_GET_OR(b, JSFunctionBytecodeHandle, arg_count, 0) +
+                 SAFE_GET_OR(b, JSFunctionBytecodeHandle, var_count, 0);
+        for (i = 0; i < nv && SAFE_GET_OR(b, JSFunctionBytecodeHandle, vardefs_offset, 0); i++) {
+            JSBytecodeVarDef *vd = &b_vardefs(b)[i];
+            int t[7] = { vd->has_scope, vd->scope_next, vd->is_const, vd->is_lexical,
+                         vd->is_captured, vd->var_kind, vd->var_ref_idx };
+            h = bc_fp_mix(h, t, sizeof(t));
+            h = bc_fp_atom(ctx, h, vd->var_name);
+        }
+    }
+    part[3] = h; h = 1469598103934665603ull;
+    {
+        int t[10] = { SAFE_GET_OR(b, JSFunctionBytecodeHandle, stack_size, 0),
+                      SAFE_GET_OR(b, JSFunctionBytecodeHandle, arg_count, 0),
+                      SAFE_GET_OR(b, JSFunctionBytecodeHandle, var_count, 0),
+                      SAFE_GET_OR(b, JSFunctionBytecodeHandle, defined_arg_count, 0),
+                      SAFE_GET_OR(b, JSFunctionBytecodeHandle, var_ref_count, 0),
+                      SAFE_GET_OR(b, JSFunctionBytecodeHandle, js_mode, 0),
+                      SAFE_GET_OR(b, JSFunctionBytecodeHandle, func_kind, 0),
+                      SAFE_GET_OR(b, JSFunctionBytecodeHandle, has_prototype, 0),
+                      SAFE_GET_OR(b, JSFunctionBytecodeHandle, need_home_object, 0),
+                      SAFE_GET_OR(b, JSFunctionBytecodeHandle, func_parse_state, 0) };
+        h = bc_fp_mix(h, t, sizeof(t));
+    }
+    part[4] = h; h = 1469598103934665603ull;
+    if (SAFE_GET_OR(b, JSFunctionBytecodeHandle, has_debug, 0)) {
+        GCHandle ph = SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.pc2line_handle, GC_HANDLE_NULL);
+        int pl = SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.pc2line_len, 0);
+        if (ph != GC_HANDLE_NULL && pl > 0)
+            h = bc_fp_mix(h, gc_deref(ph), pl);
+    }
+    {
+        char nb[128], fb[256];
+        part[5] = h;
+        h = bc_fp_mix(1469598103934665603ull, part, sizeof(part));
+        if (getenv("CYBER_BC_DUMP_PARTS"))
+            fprintf(out, "%04x.%04x.%04x.%04x.%04x.%04x ", (unsigned)(part[0] & 0xffff), (unsigned)(part[1] & 0xffff), (unsigned)(part[2] & 0xffff),
+                    (unsigned)(part[3] & 0xffff), (unsigned)(part[4] & 0xffff), (unsigned)(part[5] & 0xffff));
+        fprintf(out, "%s %u+%u %s %016llx\n",
+                JS_AtomGetStr(ctx, fb, sizeof(fb), SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.filename, JS_ATOM_NULL)),
+                SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_offset, 0),
+                SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_len, 0),
+                JS_AtomGetStr(ctx, nb, sizeof(nb), SAFE_GET_OR(b, JSFunctionBytecodeHandle, func_name, JS_ATOM_NULL)),
+                (unsigned long long)h);
+    }
+}
+
 static void js_free_function_def(JSContextHandle ctx, JSFunctionDef *fd)
 {
     int i;
@@ -41457,6 +41638,7 @@ static GCValue js_create_function(JSContextHandle ctx, JSFunctionDef *fd)
     }
 
     /* Lazy function bytecode created if applicable */
+    bc_fingerprint(ctx, b);
 
     /* parent_handle and link_idx are handles - GC frees automatically */
     return GC_MKHANDLE(JS_TAG_FUNCTION_BYTECODE, SAFE_HANDLE(b));
