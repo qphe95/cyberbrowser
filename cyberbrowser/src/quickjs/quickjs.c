@@ -1184,7 +1184,12 @@ static int gc_byte_buffer_claim(GCByteBuffer *b, size_t len)
     if (new_size > b->allocated_size) {
         if (b->error)
             return -1;
-        size_t new_alloc = b->allocated_size + (b->allocated_size / 2);
+        /* (Bytecode under construction: doubling halves the copies made on
+         * the GC heap, and the buffer is dropped once the function is
+         * compiled.) */
+        size_t new_alloc = b->allocated_size * 2;
+        if (new_alloc < 64)
+            new_alloc = 64;
         if (new_alloc < new_size)
             new_alloc = new_size;
 
@@ -38905,6 +38910,9 @@ static __exception int resolve_variables(JSContextHandle ctx, JSFunctionDef *s)
     cc.has_handle_header = s->byte_code.has_handle_header;
     cc.bc_len = bc_len = s->byte_code.size;
     js_dbuf_bytecode_init(ctx, &bc_out);
+    /* The output is about the input's size: start there rather than growing
+     * a GC buffer up to it (every growth is a fresh copy). */
+    dbuf_claim(&bc_out, bc_len + bc_len / 8 + 16);
 
     /* first pass for runtime checks (must be done before the
        variables are created) */
@@ -39610,6 +39618,8 @@ static __exception int resolve_labels(JSContextHandle ctx, JSFunctionDef *s)
     cc.has_handle_header = s->byte_code.has_handle_header;
     cc.bc_len = bc_len = s->byte_code.size;
     js_dbuf_bytecode_init(ctx, &bc_out);
+    /* (Short opcodes make the output at most about the input's size.) */
+    dbuf_claim(&bc_out, bc_len + 16);
 
 #if SHORT_OPCODES
     /* jump_slots_handle uses GCDataArray - no pre-allocation needed */
@@ -40527,11 +40537,11 @@ typedef struct StackSizeState {
     int stack_len_max;
     uint16_t *stack_level_tab;
     int32_t *catch_pos_tab;
-    GCHandle pc_stack_handle;
+    /* (Scratch tables live in malloc'd memory: they are sized by the
+     * bytecode and dropped when the function is done.) */
+    int *pc_stack;
     int dump_on_fail;
-/* Direct access to pc_stack - SAFE because StackSizeState is on C stack (not GC-managed)
- * and compute_stack_size doesn't trigger GC during the computation. */
-#define s_pc_stack ((int *)gc_deref(s->pc_stack_handle))
+#define s_pc_stack (s->pc_stack)
     int pc_stack_len;
     int pc_stack_size;
 } StackSizeState;
@@ -40572,9 +40582,16 @@ static __exception int ss_check(JSContextHandle ctx, StackSizeState *s,
     s->catch_pos_tab[pos] = catch_pos;
 
     /* queue the new PC to explore */
-    if (js_resize_bytes_array(ctx, &s->pc_stack_handle, sizeof(int),
-                        &s->pc_stack_size, s->pc_stack_len + 1))
-        return -1;
+    if (s->pc_stack_len >= s->pc_stack_size) {
+        int new_size = max_int(s->pc_stack_size * 3 / 2, 16);
+        int *new_stack = qjs_realloc(s->pc_stack, sizeof(int) * new_size);
+        if (!new_stack) {
+            JS_ThrowOutOfMemory(ctx);
+            return -1;
+        }
+        s->pc_stack = new_stack;
+        s->pc_stack_size = new_size;
+    }
     s_pc_stack[s->pc_stack_len++] = pos;
     return 0;
 }
@@ -40589,15 +40606,20 @@ static __exception int compute_stack_size(JSContextHandle ctx,
 
     s->bc_len = fd->byte_code.size;
     /* bc_len > 0 */
-    s->stack_level_tab = ((uint16_t *)gc_deref(gc_alloc(sizeof(s->stack_level_tab[0]) * s->bc_len, JS_GC_OBJ_TYPE_BYTES)));
-    if (!s->stack_level_tab)
+    s->pc_stack = NULL;
+    s->catch_pos_tab = NULL;
+    s->stack_level_tab = qjs_realloc(NULL, sizeof(s->stack_level_tab[0]) * s->bc_len);
+    if (!s->stack_level_tab) {
+        JS_ThrowOutOfMemory(ctx);
         return -1;
+    }
     for(i = 0; i < s->bc_len; i++)
         s->stack_level_tab[i] = 0xffff;
-    s->pc_stack_handle = GC_HANDLE_NULL;
-    s->catch_pos_tab = ((int *)(gc_deref(gc_alloc(sizeof(s->catch_pos_tab[0]) * s->bc_len, JS_GC_OBJ_TYPE_BYTES))));  /* Direct access after gc_alloc */
-    if (!s->catch_pos_tab)
+    s->catch_pos_tab = qjs_realloc(NULL, sizeof(s->catch_pos_tab[0]) * s->bc_len);
+    if (!s->catch_pos_tab) {
+        JS_ThrowOutOfMemory(ctx);
         goto fail;
+    }
 
     s->dump_on_fail = 0;
     s->stack_len_max = 0;
@@ -40766,12 +40788,15 @@ static __exception int compute_stack_size(JSContextHandle ctx,
             goto fail;
     done_insn: ;
     }
-    /* GC frees automatically */;
-    /* GC frees automatically */;
-    /* GC frees automatically */;
+    qjs_free(s->stack_level_tab);
+    qjs_free(s->catch_pos_tab);
+    qjs_free(s->pc_stack);
     *pstack_size = s->stack_len_max;
     return 0;
  fail:
+    qjs_free(s->stack_level_tab);
+    qjs_free(s->catch_pos_tab);
+    qjs_free(s->pc_stack);
     /* WORKAROUND: Some Closure Compiler output triggers false-positive
      * stack inconsistency in compute_stack_size due to complex for...of
      * control flow. Use a generous stack size when this happens.
@@ -40781,9 +40806,6 @@ static __exception int compute_stack_size(JSContextHandle ctx,
         *pstack_size = 256; /* generous stack size */
         return 0;
     }
-    /* GC frees automatically */;
-    /* GC frees automatically */;
-    /* GC frees automatically */;
     *pstack_size = 0;
     return -1;
 }

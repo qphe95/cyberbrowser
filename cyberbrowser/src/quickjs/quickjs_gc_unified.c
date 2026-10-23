@@ -1692,8 +1692,12 @@ static bool data_array_resize(GCDataArray *arr, size_t elem_size, int new_count,
         arr->count = new_count;
         return true;
     }
-    int new_cap = new_count > arr->capacity * 3 / 2 ? new_count : arr->capacity * 3 / 2;
-    if (new_cap < 4) new_cap = 4;
+    /* Byte arrays are the compiler's scratch tables, dropped once a function
+     * is compiled: they double, since every growth is a fresh copy on the GC
+     * heap, where the spare room costs nothing for long. */
+    int grown = type == JS_GC_OBJ_TYPE_BYTES ? arr->capacity * 2 : arr->capacity * 3 / 2;
+    int new_cap = new_count > grown ? new_count : grown;
+    if (new_cap < 4) new_cap = type == JS_GC_OBJ_TYPE_BYTES ? 8 : 4;
 
     GCHandle new_handle = gc_alloc(elem_size * new_cap, type);
     if (new_handle == GC_HANDLE_NULL) return false;
