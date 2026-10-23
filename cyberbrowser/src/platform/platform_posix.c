@@ -100,6 +100,12 @@ unsigned long long platform_get_time_ms(void) {
     return (unsigned long long)tv.tv_sec * 1000ULL + (unsigned long long)tv.tv_usec / 1000ULL;
 }
 
+unsigned long long platform_thread_cpu_us(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) != 0) return 0;
+    return (unsigned long long)ts.tv_sec * 1000000ULL + (unsigned long long)ts.tv_nsec / 1000ULL;
+}
+
 void platform_sleep_ms(unsigned int ms) {
     usleep(ms * 1000);
 }

@@ -449,6 +449,11 @@ typedef struct LayoutContext {
     bool style_all;
     int style_skipped;
 
+    /* Style and lay out on the calling thread (input, kept by css_layout_run):
+     * for layouts run often with little to do, which waking the pool costs
+     * more than it saves. */
+    bool serial;
+
     /* Preorder position of the first element a :has() rule whose compound
      * names nothing restyles when any ancestor's :has() flips (":has(x)
      * [dialog]"): tree.count for none, 0 when not known. */

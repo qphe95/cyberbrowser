@@ -51,6 +51,7 @@
 #include "platform.h"
 #include <quickjs.h>
 #include <quickjs_gc_unified.h>
+#include "gc_platform.h"
 #include "browser_api_impl.h"
 
 /* The cached forced layout. */
@@ -70,7 +71,8 @@ static int *g_lq_box_of_slot;
 static NodeId *g_lq_id_of_slot;
 static uint32_t g_lq_slot_cap;
 
-static uint64_t g_lq_queries, g_lq_layouts, g_lq_layout_ms;
+static uint64_t g_lq_queries, g_lq_layouts;
+static uint64_t g_lq_layout_us, g_lq_layout_cpu_us;   /* wall and this thread's CPU */
 /* Mirror change-log position and relayout requests at the cached layout;
  * layouts kept because nothing since could change a box. */
 static uint64_t g_lq_change_pos, g_lq_relayouts, g_lq_kept, g_lq_region_layouts;
@@ -131,7 +133,7 @@ void layout_api_stats(uint64_t *queries, uint64_t *layouts, uint64_t *layout_ms)
 {
     if (queries) *queries = g_lq_queries;
     if (layouts) *layouts = g_lq_layouts;
-    if (layout_ms) *layout_ms = g_lq_layout_ms;
+    if (layout_ms) *layout_ms = g_lq_layout_us / 1000;
 }
 
 uint64_t layout_api_kept(void)
@@ -1218,7 +1220,7 @@ static bool lq_ensure(JSContextHandle ctx)
                 tn ? tn : "?", idv ? idv : "", cls ? cls : "", why);
         fflush(stderr);
     }
-    unsigned long long t0 = platform_get_time_ms();
+    uint64_t t0 = gc_os_now_ns() / 1000, c0 = platform_thread_cpu_us();
     /* CYBER_LQ_LOG: whether the layout changed the box it was run for (when
      * not, a precise enough test of the changes could have kept it). */
     LayoutBox asked_was;
@@ -1231,6 +1233,12 @@ static bool lq_ensure(JSContextHandle ctx)
     g_lq_doc = doc;
     g_lq_layout.js_ctx = ctx;
     g_lq_layout.style_all = g_lq_style_all;
+    /* Forced layouts run often with little to do: on this thread (waking
+     * the pool for them cost more than it saved).  CYBER_LQ_PAR=1: in
+     * parallel. */
+    static int par_env = -1;
+    if (par_env < 0) par_env = cyber_getenv("CYBER_LQ_PAR") && cyber_getenv("CYBER_LQ_PAR")[0] == '1';
+    g_lq_layout.serial = !par_env;
     if (g_lq_style_all) g_lq_style_all_layouts++;
     g_lq_style_all = false;
     {
@@ -1262,10 +1270,12 @@ static bool lq_ensure(JSContextHandle ctx)
         g_lq_key = 0;
     }
     g_lq_layouts++;
-    g_lq_layout_ms += platform_get_time_ms() - t0;
+    uint64_t took = gc_os_now_ns() / 1000 - t0;
+    g_lq_layout_us += took;
+    g_lq_layout_cpu_us += platform_thread_cpu_us() - c0;
     if (g_lq_log)
         fprintf(stderr, "[LQ] forced layout %llu took %llu ms\n", (unsigned long long)g_lq_layouts,
-                (unsigned long long)(platform_get_time_ms() - t0));
+                (unsigned long long)(took / 1000));
     g_lq_running = false;
     return g_lq_valid;
 }
@@ -1526,4 +1536,9 @@ uint64_t layout_api_cheap_hits(void)
 uint64_t layout_api_style_all_layouts(void)
 {
     return g_lq_style_all_layouts;
+}
+
+uint64_t layout_api_cpu_ms(void)
+{
+    return g_lq_layout_cpu_us / 1000;
 }

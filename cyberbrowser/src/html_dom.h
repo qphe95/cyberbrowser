@@ -95,6 +95,12 @@ struct HtmlDocument {
     uint64_t serial;
     uint64_t struct_gen;
     uint32_t attr_gen;
+    /* Bumped when the document's stylesheets may have changed (a style or
+     * link element added, removed, moved or edited: the mirror's SHEETS
+     * records), when sheets_tracked (the mirror's document; others may be
+     * edited untracked). */
+    uint64_t sheet_gen;
+    bool sheets_tracked;
 };
 
 /* Note that node `idx`'s attribute list was replaced or extended. */

@@ -183,6 +183,8 @@ void platform_mutex_unlock(PlatformMutex *mutex);
 
 /* Get current time in milliseconds since epoch */
 unsigned long long platform_get_time_ms(void);
+/* CPU time the calling thread has used, in microseconds. */
+unsigned long long platform_thread_cpu_us(void);
 
 /* Sleep for specified milliseconds */
 void platform_sleep_ms(unsigned int ms);

@@ -97,6 +97,14 @@ unsigned long long platform_get_time_ms(void) {
     return GetTickCount64();
 }
 
+unsigned long long platform_thread_cpu_us(void) {
+    FILETIME created, exited, kernel, user;
+    if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user)) return 0;
+    ULARGE_INTEGER k = { .LowPart = kernel.dwLowDateTime, .HighPart = kernel.dwHighDateTime };
+    ULARGE_INTEGER u = { .LowPart = user.dwLowDateTime, .HighPart = user.dwHighDateTime };
+    return (k.QuadPart + u.QuadPart) / 10;   /* 100 ns units */
+}
+
 void platform_sleep_ms(unsigned int ms) {
     Sleep((DWORD)ms);
 }

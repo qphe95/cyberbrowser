@@ -1983,6 +1983,7 @@ static void mir_log_reset(void) {
 }
 
 static void mir_log(uint8_t kind, NodeId id, const HtmlAttribute *old_attrs, const HtmlAttribute *new_attrs) {
+    if (kind == HTML_MIRROR_SHEETS && g_mir.doc) g_mir.doc->sheet_gen++;   /* even when the log overflows */
     if (g_mir.nlog >= MIR_LOG_MAX) mir_log_reset();
     if (g_mir.nlog == g_mir.cap_log) {
         size_t nc = g_mir.cap_log ? g_mir.cap_log * 2 : 256;
@@ -2538,6 +2539,7 @@ static bool mir_rebuild(NodeId root) {
     mir_drop();
     g_mir.doc = html_document_new();
     if (!g_mir.doc) return false;
+    g_mir.doc->sheets_tracked = true;
     g_mir.doc->refs = 1;
     g_mir.root_id = root;
     g_mir.rebuilds++;

@@ -2652,6 +2652,7 @@ typedef struct LayoutStyleSheetList {
     SheetItem *items;
     int nitems, cap_items;
     bool all_cached;
+    bool incomplete;            /* a linked sheet could not be fetched (try again next layout) */
 } LayoutStyleSheetList;
 
 /* Sheet texts run to megabytes and are hashed on every layout: eight bytes
@@ -3326,6 +3327,8 @@ static void layout_fetch_stylesheet(LayoutStyleSheetList *list, const char *base
         it->src = u->id;
     } else if (u) {
         layout_sheet_list_add_text(list, u->text, u->len, NULL);
+    } else {
+        list->incomplete = true;
     }
     free(url);
 }
@@ -4079,7 +4082,7 @@ static bool has_compound_keys(HasSubjects *hs, HasKeySet *ks, const char *st, co
 {
     for (const char *q = st; q < end; q++) if (*q == '\\') return false;
     uint64_t tag = 0, cls = 0, id = 0, attr = 0;
-    HasReq req = { {0}, 0 };
+    HasReq req = { {0}, 0, 0 };
     const char *q = st;
     if (q < end && (isalpha((unsigned char)*q) || *q == '-' || *q == '_')) {
         const char *e = q;
@@ -6747,7 +6750,7 @@ static void style_root_job(Job *j)
     int n = P->ctx->tree.count;
     const int *pre = P->ctx->tree.preorder;
     for (int pos = 0; pos < n; pos = P->pre_end[pos]) {
-        if (P->dirty_n && P->dirty_n[pre[pos]] <= P->grain)
+        if ((P->dirty_n && P->dirty_n[pre[pos]] <= P->grain) || P->grain == INT32_MAX)
             style_subtree(P, style_thread(P), j, pos);
         else
             job_spawn(job_new(style_job, j, P, (uint32_t)pos, 0));
@@ -6759,19 +6762,103 @@ static int style_gen_cmp(const void *a, const void *b)
     return ((const StyleGenAfter *)a)->pos - ((const StyleGenAfter *)b)->pos;
 }
 
+/* Mix an adopted-sheet array (its sheets' identities) into h. */
+static uint64_t layout_mix_sheet_array(JSContextHandle js, GCValue arr, uint64_t h)
+{
+    if (!JS_IsArray(js, arr)) return style_mix(h, "-", 1);
+    uint32_t n = 0;
+    JS_ToUint32(js, &n, JS_GetPropertyStr(js, arr, "length"));
+    h = style_mix(h, &n, sizeof(n));
+    for (uint32_t i = 0; i < n; i++) {
+        GCValue s = JS_GetPropertyUint32(js, arr, i);
+        h = style_mix(h, &s, sizeof(s));
+    }
+    return h;
+}
+
+/* What decides the adopted sheets layout_collect_constructed_stylesheets
+ * collects, besides their text (whose edits request a relayout): which
+ * sheets the document and each registered shadow root adopt, and whether
+ * each root's host is connected. */
+static uint64_t layout_adopted_fingerprint(LayoutContext *ctx)
+{
+    if (!SAFE_VALID(ctx->js_ctx) || gc_handle_get_type(ctx->js_ctx) != JS_GC_OBJ_TYPE_JS_CONTEXT) return 0;
+    JSContextHandle js = ctx->js_ctx;
+    uint64_t h = 1469598103934665603ull;
+    GCValue global = JS_GetGlobalObject(js);
+    GCValue doc = JS_GetPropertyStr(js, global, "document");
+    if (JS_IsObject(doc)) h = layout_mix_sheet_array(js, JS_GetPropertyStr(js, doc, "__adoptedStyleSheets"), h);
+    GCValue roots = JS_GetPropertyStr(js, global, "__cyber_adopting_roots");
+    if (JS_IsArray(js, roots)) {
+        uint32_t n = 0;
+        JS_ToUint32(js, &n, JS_GetPropertyStr(js, roots, "length"));
+        for (uint32_t i = 0; i < n; i++) {
+            GCValue root = JS_GetPropertyUint32(js, roots, i);
+            GCValue host = JS_GetPropertyStr(js, root, "host");
+            unsigned char connected = JS_IsObject(host) && JS_ToBool(js, JS_GetPropertyStr(js, host, "isConnected"));
+            h = style_mix(h, &host, sizeof(host));
+            h = style_mix(h, &connected, 1);
+            h = layout_mix_sheet_array(js, JS_GetPropertyStr(js, root, "__adoptedStyleSheets"), h);
+        }
+    }
+    return h;
+}
+
+/* Everything the sheets a layout of ctx->doc collects come from: its style
+ * and link elements (doc->sheet_gen), CSSOM edits and adopted-sheet
+ * assignments (g_dom_relayout_requests), the adopted sheets themselves and
+ * the base URL.  0 when not known (a document edited untracked). */
+static uint64_t layout_sheets_key(LayoutContext *ctx)
+{
+    HtmlDocument *doc = ctx->doc;
+    if (!doc || !doc->sheets_tracked || !doc->serial) return 0;
+    uint64_t v[4] = { doc->serial, doc->sheet_gen, g_dom_relayout_requests, layout_adopted_fingerprint(ctx) };
+    uint64_t h = style_mix(1469598103934665603ull, v, sizeof(v));
+    h = style_mix(h, ctx->base_url, strlen(ctx->base_url));
+    return h ? h : 1;
+}
+
+/* The style set the last layout with these sheets used (layouts in a row
+ * collect, hash and look up the same megabytes of sheets otherwise).
+ * CSS_SHEETS_MEMO=0: always collect. */
+static struct {
+    uint64_t key, set_gen;
+    double vw, vh;
+    int nsheets;
+} g_sheets_memo;
+
+static const CssStyleSet *styleset_cached(uint64_t gen, double vw, double vh)
+{
+    for (int i = 0; i < STYLESET_CACHE_MAX; i++) {
+        StyleSetEntry *c = &g_styleset_cache[i];
+        if (!c->set || c->gen != gen || c->vw != vw || c->vh != vh) continue;
+        c->last_use = g_layout_clock;
+        return c->set;
+    }
+    return NULL;
+}
+
 static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
 {
     STAGE_BEGIN();
+    static int memo_env = -1;
+    if (memo_env < 0) { const char *e = getenv("CSS_SHEETS_MEMO"); memo_env = !(e && strcmp(e, "0") == 0); }
+    uint64_t skey = sheet || !memo_env ? 0 : layout_sheets_key(ctx);
+    const CssStyleSet *memo_set = NULL;
+    if (skey && skey == g_sheets_memo.key)
+        memo_set = styleset_cached(g_sheets_memo.set_gen, ctx->viewport_width, ctx->viewport_height);
     LayoutStyleSheetList list = {0};
-    layout_collect_document_stylesheets(ctx, &list, ctx->base_url);
-    if (sheet) layout_sheet_list_add(&list, sheet);
+    if (!memo_set) {
+        layout_collect_document_stylesheets(ctx, &list, ctx->base_url);
+        if (sheet) layout_sheet_list_add(&list, sheet);
+    }
     STAGE("collect sheets");
     if (g_css_log > 1) {
         size_t bytes = 0;
         for (int i = 0; i < list.nitems; i++) bytes += list.items[i].len;
-        fprintf(stderr, "[css] sheets: %d items, %zu bytes\n", list.nitems, bytes);
+        fprintf(stderr, "[css] sheets: %d items, %zu bytes%s\n", list.nitems, bytes, memo_set ? " (as before)" : "");
     }
-    layout_sheet_list_resolve(&list);
+    if (!memo_set) layout_sheet_list_resolve(&list);
     STAGE("parse sheets (cached)");
 
     StylePass P;
@@ -6780,9 +6867,24 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
     P.em_defer = cyber_getenv("CYBER_DISABLE_EM_DEFER") == NULL;
     const char *genv = getenv("CSS_GRAIN");
     P.grain = (genv && atoi(genv) > 0) ? atoi(genv) : 128;
+    if (ctx->serial) P.grain = INT32_MAX;
     bool set_owned = false;
     uint64_t set_gen = 0;
-    P.set = layout_styleset_get(&list, ctx->viewport_width, ctx->viewport_height, &set_owned, &set_gen);
+    if (memo_set) {
+        P.set = memo_set;
+        set_gen = g_sheets_memo.set_gen;
+        list.count = g_sheets_memo.nsheets;
+    } else {
+        P.set = layout_styleset_get(&list, ctx->viewport_width, ctx->viewport_height, &set_owned, &set_gen);
+        g_sheets_memo.key = 0;
+        if (skey && set_gen && !set_owned && !list.incomplete) {
+            g_sheets_memo.key = skey;
+            g_sheets_memo.set_gen = set_gen;
+            g_sheets_memo.vw = ctx->viewport_width;
+            g_sheets_memo.vh = ctx->viewport_height;
+            g_sheets_memo.nsheets = list.count;
+        }
+    }
     ctx->style_gen = set_gen;
     STAGE("compile style set (cached)");
     P.sd = css_styledoc_get(ctx->doc);
@@ -10189,7 +10291,7 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
         int n = ctx->tree.count;
         const char *pe = getenv("CSS_LAYOUT_PAR");
         const char *ge = getenv("CSS_LAYOUT_GRAIN");
-        g_lpar.enabled = job_thread_count() > 1 && !(pe && strcmp(pe, "0") == 0);
+        g_lpar.enabled = job_thread_count() > 1 && !(pe && strcmp(pe, "0") == 0) && !ctx->serial;
         g_lpar.min_nodes = (ge && atoi(ge) > 0) ? atoi(ge) : 64;
         atomic_store(&g_lpar.regions, 0);
         atomic_store(&g_lpar.units, 0);
@@ -10281,11 +10383,12 @@ bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
     double _run_t0 = layout_now_ms();
     JSContextHandle saved_js_ctx = ctx->js_ctx;
     const char *saved_dump_path = ctx->dump_path;
-    bool saved_style_all = ctx->style_all;
+    bool saved_style_all = ctx->style_all, saved_serial = ctx->serial;
     if (!css_layout_tree_build(ctx, doc)) return false;
     GC_SET(ctx->js_ctx, saved_js_ctx);
     ctx->dump_path = saved_dump_path;
     ctx->style_all = saved_style_all;
+    ctx->serial = saved_serial;
     ctx->viewport_width = viewport_width;
     ctx->viewport_height = viewport_height;
     g_unit_vw = viewport_width > 0.0 ? viewport_width : 1024.0;
