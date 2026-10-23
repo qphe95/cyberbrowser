@@ -288,6 +288,7 @@ static void js_xhr_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_func)
     JS_MarkValue(rt, xhr->onerror, mark_func);
     JS_MarkValue(rt, xhr->onreadystatechange, mark_func);
     JS_MarkValue(rt, xhr->headers, mark_func);
+    JS_MarkValue(rt, xhr->response_text, mark_func);
 }
 
 GCValue js_xhr_constructor(JSContextHandle ctx, GCValue new_target, int argc, GCValue *argv) {
@@ -298,6 +299,7 @@ GCValue js_xhr_constructor(JSContextHandle ctx, GCValue new_target, int argc, GC
     SAFE_SET(xhr, XMLHttpRequestHandle, onload, JS_NULL);
     SAFE_SET(xhr, XMLHttpRequestHandle, onerror, JS_NULL);
     SAFE_SET(xhr, XMLHttpRequestHandle, onreadystatechange, JS_NULL);
+    SAFE_SET(xhr, XMLHttpRequestHandle, response_text, JS_UNDEFINED);
     
     GCValue obj = JS_NewObjectClass(ctx, js_xhr_class_id);
     JS_SetOpaqueHandle(obj, xhr);
@@ -324,9 +326,8 @@ static GCValue js_xhr_open(JSContextHandle ctx, GCValue this_val, int argc, GCVa
         SAFE_SET_STR(xhr, XMLHttpRequestHandle, url, url);
         SAFE_SET(xhr, XMLHttpRequestHandle, ready_state, 1); // OPENED
         SAFE_SET(xhr, XMLHttpRequestHandle, status, 0);
-        SAFE_SET_STR(xhr, XMLHttpRequestHandle, response_text, "");
+        SAFE_SET(xhr, XMLHttpRequestHandle, response_text, JS_UNDEFINED);
         SAFE_SET_STR(xhr, XMLHttpRequestHandle, response_headers, "");
-        SAFE_SET_STR(xhr, XMLHttpRequestHandle, request_body, "");
         
         // Capture the URL - this is where we intercept requests
         record_captured_url(url);
@@ -340,16 +341,17 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
     XMLHttpRequestHandle xhr = JS_GetOpaqueHandle2(ctx, this_val, js_xhr_class_id);
     if (SAFE_IS_NULL(xhr)) return JS_ThrowTypeError(ctx, "XMLHttpRequest internal error");
     
-    // Store request body
+    // Request body
+    const char *req_body = "";
     if (argc > 0 && !JS_IsUndefined(argv[0]) && !JS_IsNull(argv[0])) {
         if (JS_IsString(argv[0])) {
             const char *s = JS_ToCString(ctx, argv[0]);
-            if (s) SAFE_SET_STR(xhr, XMLHttpRequestHandle, request_body, s);
+            if (s) req_body = s;
         } else if (JS_IsObject(argv[0])) {
             GCValue json_str = JS_JSONStringify(ctx, argv[0], JS_UNDEFINED, JS_UNDEFINED);
             if (!JS_IsException(json_str) && JS_IsString(json_str)) {
                 const char *s = JS_ToCString(ctx, json_str);
-                if (s) SAFE_SET_STR(xhr, XMLHttpRequestHandle, request_body, s);
+                if (s) req_body = s;
             }
         }
     }
@@ -438,7 +440,7 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
                 if (!preflight_ok) {
                     platform_log(LOG_LEVEL_WARN, "js_xhr_send", "CORS preflight failed: %s", preflight_err);
                     SAFE_SET(xhr, XMLHttpRequestHandle, status, 0);
-                    SAFE_SET_STR(xhr, XMLHttpRequestHandle, response_text, "");
+                    SAFE_SET(xhr, XMLHttpRequestHandle, response_text, JS_UNDEFINED);
                     js_xhr_fire_state(ctx, xhr, this_val, 4);
                     GCValue onerror = JS_GetPropertyStr(ctx, this_val, "onerror");
                     if (JS_IsFunction(ctx, onerror)) JS_Call(ctx, onerror, this_val, 0, NULL);
@@ -450,7 +452,6 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
         PlatformHttpBuffer response_buffer = {0};
         char error_buf[256] = {0};
         int status_code = 0;
-        const char *req_body = SAFE_GET_OR(xhr, XMLHttpRequestHandle, request_body, "");
         size_t req_body_len = strlen(req_body);
 
         bool success = platform_http_request(url, method,
@@ -468,7 +469,7 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
                     platform_http_free_buffer(&response_buffer);
                     platform_log(LOG_LEVEL_WARN, "js_xhr_send", "%s", cors_err);
                     SAFE_SET(xhr, XMLHttpRequestHandle, status, 0);
-                    SAFE_SET_STR(xhr, XMLHttpRequestHandle, response_text, "");
+                    SAFE_SET(xhr, XMLHttpRequestHandle, response_text, JS_UNDEFINED);
                     js_xhr_fire_state(ctx, xhr, this_val, 4);
                     GCValue onerror = JS_GetPropertyStr(ctx, this_val, "onerror");
                     if (JS_IsFunction(ctx, onerror)) JS_Call(ctx, onerror, this_val, 0, NULL);
@@ -476,7 +477,8 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
                 }
             }
             SAFE_SET(xhr, XMLHttpRequestHandle, status, status_code);
-            SAFE_SET_STR(xhr, XMLHttpRequestHandle, response_text, response_buffer.data);
+            SAFE_SET(xhr, XMLHttpRequestHandle, response_text,
+                     JS_NewStringLen(ctx, response_buffer.data, strnlen(response_buffer.data, response_buffer.size)));
             if (response_buffer.headers && response_buffer.headers_size > 0) {
                 char rh[2048];
                 size_t copy_len = response_buffer.headers_size;
@@ -499,7 +501,7 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
         } else {
             platform_http_free_buffer(&response_buffer);
             SAFE_SET(xhr, XMLHttpRequestHandle, status, 0);
-            SAFE_SET_STR(xhr, XMLHttpRequestHandle, response_text, "");
+            SAFE_SET(xhr, XMLHttpRequestHandle, response_text, JS_UNDEFINED);
             js_xhr_fire_state(ctx, xhr, this_val, 4);
             GCValue onerror = JS_GetPropertyStr(ctx, this_val, "onerror");
             if (JS_IsFunction(ctx, onerror)) JS_Call(ctx, onerror, this_val, 0, NULL);
@@ -510,7 +512,7 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
     // Fallback for non-network URLs
     SAFE_SET(xhr, XMLHttpRequestHandle, ready_state, 4); // DONE
     SAFE_SET(xhr, XMLHttpRequestHandle, status, 200);
-    SAFE_SET_STR(xhr, XMLHttpRequestHandle, response_text, "{}");
+    SAFE_SET(xhr, XMLHttpRequestHandle, response_text, JS_NewString(ctx, "{}"));
     
     GCValue onreadystatechange = JS_GetPropertyStr(ctx, this_val, "onreadystatechange");
     if (JS_IsFunction(ctx, onreadystatechange)) {
@@ -605,7 +607,8 @@ static GCValue js_xhr_get_status(JSContextHandle ctx, GCValue this_val) {
 static GCValue js_xhr_get_response_text(JSContextHandle ctx, GCValue this_val) {
     XMLHttpRequestHandle xhr = JS_GetOpaqueHandle2(ctx, this_val, js_xhr_class_id);
     if (SAFE_IS_NULL(xhr)) return JS_ThrowTypeError(ctx, "XMLHttpRequest internal error");
-    return JS_NewString(ctx, SAFE_GET_OR(xhr, XMLHttpRequestHandle, response_text, ""));
+    GCValue text = SAFE_GET_OR(xhr, XMLHttpRequestHandle, response_text, JS_UNDEFINED);
+    return JS_IsString(text) ? text : JS_NewString(ctx, "");
 }
 
 const JSCFunctionListEntry js_xhr_proto_funcs[] = {
