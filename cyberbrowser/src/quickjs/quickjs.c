@@ -24589,12 +24589,23 @@ typedef struct LineNumberSlot {
     uint32_t source_pos;
 } LineNumberSlot;
 
+/* Line/column positions are looked up out of order (compute_pc2line_info
+   walks each function's positions after the whole script is parsed), and
+   counting bytes from the last position crosses up to the whole script, a
+   multi-megabyte line when minified.  Checkpoints: the line and column at
+   chk_origin + k * chk_step, filled in forward as lookups reach them, so a
+   lookup counts at most chk_step bytes. */
+#define LINE_COL_CHK_MAX 1024
 typedef struct {
     /* last source position */
     const uint8_t *ptr;
     int line_num;
     int col_num;
     const uint8_t *buf_start;
+    const uint8_t *chk_origin;
+    size_t chk_step;               /* 0: no checkpoints */
+    int chk_n;
+    int chk_line[LINE_COL_CHK_MAX], chk_col[LINE_COL_CHK_MAX];
 } GetLineColCache;
 
 typedef enum JSParseFunctionEnum {
@@ -25095,25 +25106,100 @@ static void __attribute((unused)) dump_token(JSParseState *s,
 /* Note: we no longer support '\r' as line terminator */
 static int get_line_col(int *pcol_num, const uint8_t *buf, size_t len)
 {
-    int line_num, col_num, c;
-    size_t i;
-    
-    line_num = 0;
-    col_num = 0;
-    for(i = 0; i < len; i++) {
-        c = buf[i];
-        if (c == '\n') {
-            line_num++;
-            col_num = 0;
-        } else if (c < 0x80 || c >= 0xc0) {
-            col_num++;
-        }
+    const uint8_t *p = buf, *end = buf + len, *nl;
+    int line_num = 0, col_num = 0;
+
+    /* The lines: the line ends (memchr); the column: the characters after
+       the last one (bytes other than UTF-8 continuation bytes, 10xxxxxx),
+       eight bytes at a time. */
+    while ((nl = memchr(p, '\n', (size_t)(end - p))) != NULL) {
+        line_num++;
+        p = nl + 1;
     }
+    for (; end - p >= 8; p += 8) {
+        uint64_t w;
+        memcpy(&w, p, 8);
+        col_num += 8 - __builtin_popcountll(w & ~(w << 1) & 0x8080808080808080ull);
+    }
+    for (; p < end; p++)
+        col_num += (*p & 0xc0) != 0x80;
     *pcol_num = col_num;
     return line_num;
 }
 
+/* Position ptr (line, col) is where the cache starts; checkpoints cover up
+   to buf_end. */
+static void line_col_cache_init(GetLineColCache *s, const uint8_t *buf_start, const uint8_t *buf_end,
+                                const uint8_t *ptr, int line_num, int col_num)
+{
+    size_t len = buf_end > ptr ? (size_t)(buf_end - ptr) : 0;
+    s->ptr = ptr;
+    s->line_num = line_num;
+    s->col_num = col_num;
+    s->buf_start = buf_start;
+    s->chk_origin = ptr;
+    s->chk_step = 4096;
+    while (len / s->chk_step >= LINE_COL_CHK_MAX)
+        s->chk_step *= 2;
+    s->chk_line[0] = line_num;
+    s->chk_col[0] = col_num;
+    s->chk_n = 1;
+}
+
+/* (line, col) advanced over buf[0..len). */
+static void line_col_advance(int *pline, int *pcol, const uint8_t *buf, size_t len)
+{
+    int col_num, line_num = get_line_col(&col_num, buf, len);
+    if (line_num == 0) {
+        *pcol += col_num;
+    } else {
+        *pline += line_num;
+        *pcol = col_num;
+    }
+}
+
+static int get_line_col_cached_scan(GetLineColCache *s, int *pcol_num, const uint8_t *ptr);
+
 static int get_line_col_cached(GetLineColCache *s, int *pcol_num, const uint8_t *ptr)
+{
+    size_t k, in_block;
+    if (!s->chk_step || ptr < s->chk_origin ||
+        (k = (size_t)(ptr - s->chk_origin) / s->chk_step) >= LINE_COL_CHK_MAX)
+        return get_line_col_cached_scan(s, pcol_num, ptr);
+    /* Counting from the last position when that is the shorter way (and,
+       going back, crosses no line end, past which it would count back to
+       the start of the line). */
+    in_block = (size_t)(ptr - s->chk_origin) - k * s->chk_step;
+    if (ptr >= s->ptr ? (size_t)(ptr - s->ptr) <= in_block
+                      : (size_t)(s->ptr - ptr) <= in_block && !memchr(ptr, '\n', (size_t)(s->ptr - ptr)))
+        return get_line_col_cached_scan(s, pcol_num, ptr);
+#ifdef QJS_LINECOL_VERIFY_BUILD
+    GetLineColCache old = *s;
+    int old_col, old_line = get_line_col_cached_scan(&old, &old_col, ptr);
+#endif
+    while ((size_t)s->chk_n <= k) {
+        int n = s->chk_n, line_num = s->chk_line[n - 1], col_num = s->chk_col[n - 1];
+        line_col_advance(&line_num, &col_num, s->chk_origin + (size_t)(n - 1) * s->chk_step, s->chk_step);
+        s->chk_line[n] = line_num;
+        s->chk_col[n] = col_num;
+        s->chk_n = n + 1;
+    }
+    s->line_num = s->chk_line[k];
+    s->col_num = s->chk_col[k];
+    line_col_advance(&s->line_num, &s->col_num, s->chk_origin + k * s->chk_step,
+                     (size_t)(ptr - (s->chk_origin + k * s->chk_step)));
+    s->ptr = ptr;
+#ifdef QJS_LINECOL_VERIFY_BUILD
+    if (old_line != s->line_num || old_col != s->col_num)
+        fprintf(stderr, "[linecol-verify] mismatch at +%zu: %d:%d, counted %d:%d\n",
+                (size_t)(ptr - s->buf_start), s->line_num, s->col_num, old_line, old_col);
+#endif
+    *pcol_num = s->col_num;
+    return s->line_num;
+}
+
+/* From the last position (QuickJS's own cache). */
+static int get_line_col_cached_scan(GetLineColCache *s, int *pcol_num, const uint8_t *ptr)
 {
     int line_num, col_num;
     if (ptr >= s->ptr) {
@@ -42332,10 +42418,8 @@ static GCHandle js_lazy_compile(JSContextHandle ctx, JSFunctionBytecodeHandle st
     s->token.ptr = s->buf_ptr;
     s->line_num = state->line_num;
     s->col_num = state->col_num;
-    s->get_line_col_cache.ptr = s->buf_ptr;
-    s->get_line_col_cache.buf_start = s->buf_start;
-    s->get_line_col_cache.line_num = state->line_num;
-    s->get_line_col_cache.col_num = state->col_num;
+    line_col_cache_init(&s->get_line_col_cache, s->buf_start, s->buf_end, s->buf_ptr,
+                        state->line_num, state->col_num);
     s->allow_html_comments = TRUE;
     s->enable_lazy_parsing = TRUE;
     if (strict)
@@ -42657,10 +42741,7 @@ static void js_parse_init(JSContextHandle ctx, JSParseState *s,
     s->token.val = ' ';
     s->token.ptr = s->buf_ptr;
 
-    s->get_line_col_cache.ptr = s->buf_start;
-    s->get_line_col_cache.buf_start = s->buf_start;
-    s->get_line_col_cache.line_num = 0;
-    s->get_line_col_cache.col_num = 0;
+    line_col_cache_init(&s->get_line_col_cache, s->buf_start, s->buf_end, s->buf_start, 0, 0);
     
     /* Enable lazy function parsing by default, unless JS_EVAL_FLAG_NO_LAZY is set */
     {
