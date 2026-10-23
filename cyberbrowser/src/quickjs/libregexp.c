@@ -2732,6 +2732,14 @@ typedef struct {
     StackElem static_stack_buf[32]; /* static stack to avoid allocation in most cases */
 } REExecContext;
 
+/* The backtracking stack holds only pointers into the subject and the
+ * bytecode, so it lives in malloc'd memory rather than on the GC heap.  The
+ * largest stack a thread grew (up to a cap) is kept for its next match, which
+ * then starts at that size instead of growing again from the static buffer. */
+#define RE_STACK_CACHE_MAX ((size_t)1 << 16) /* elements */
+static __thread StackElem *re_stack_cache;
+static __thread size_t re_stack_cache_size;
+
 static no_inline int stack_realloc(REExecContext *s, size_t n)
 {
     StackElem *new_stack;
@@ -2740,13 +2748,20 @@ static no_inline int stack_realloc(REExecContext *s, size_t n)
     if (new_size < n)
         new_size = n;
     if (s->stack_buf == s->static_stack_buf) {
-        new_stack = lre_realloc(s->opaque, NULL, new_size * sizeof(StackElem));
-        if (!new_stack)
-            return -1;
+        if (re_stack_cache && re_stack_cache_size >= new_size) {
+            /* (A match nested in this one finds the cache empty.) */
+            new_stack = re_stack_cache;
+            new_size = re_stack_cache_size;
+            re_stack_cache = NULL;
+        } else {
+            new_stack = malloc(new_size * sizeof(StackElem));
+            if (!new_stack)
+                return -1;
+        }
         /* XXX: could use correct size */
         memcpy(new_stack, s->stack_buf, s->stack_size * sizeof(StackElem));
     } else {
-        new_stack = lre_realloc(s->opaque, s->stack_buf, new_size * sizeof(StackElem));
+        new_stack = realloc(s->stack_buf, new_size * sizeof(StackElem));
         if (!new_stack)
             return -1;
     }
@@ -3336,8 +3351,16 @@ int lre_exec(uint8_t **capture,
 
     ret = lre_exec_backtrack(s, capture, bc_buf + RE_HEADER_LEN, cptr);
 
-    if (s->stack_buf != s->static_stack_buf)
-        lre_realloc(s->opaque, s->stack_buf, 0);
+    if (s->stack_buf != s->static_stack_buf) {
+        if (s->stack_size <= RE_STACK_CACHE_MAX &&
+            (!re_stack_cache || re_stack_cache_size < s->stack_size)) {
+            free(re_stack_cache);
+            re_stack_cache = s->stack_buf;
+            re_stack_cache_size = s->stack_size;
+        } else {
+            free(s->stack_buf);
+        }
+    }
     return ret;
 }
 
