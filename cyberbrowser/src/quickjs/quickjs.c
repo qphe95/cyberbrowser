@@ -24667,6 +24667,8 @@ typedef struct CompileEnv {
     size_t text_len, text_cap;
     uint32_t *htab;         /* 1 + index into names */
     uint32_t htab_cap;
+    JSAtom *rt_atoms;       /* instantiation: runtime atom of each name, 0 if not made yet */
+    int rt_atoms_n;
     /* stencil env: the first error */
     BOOL has_error;
     int error_type, error_line, error_col;
@@ -24710,6 +24712,7 @@ static uint8_t *js_compile_regexp_cstr(JSContextHandle ctx, const CStr *body,
 typedef struct JSFunctionDef {
     JSContextHandle ctx;
     CompileEnv *env; /* the parse's: atoms and errors */
+    int stack_size;  /* js_finish_function's */
     struct JSFunctionDef *self_handle; /* this definition */
     struct JSFunctionDef *parent_handle; /* the parent definition, NULL if none */
     int parent_cpool_idx; /* index in the constant pool of the parent
@@ -25229,6 +25232,9 @@ static void cenv_free(CompileEnv *env)
     pvec_free(&env->names);
     js_plain_free(env->text);
     js_plain_free(env->htab);
+    js_plain_free(env->rt_atoms);
+    env->rt_atoms = NULL;
+    env->rt_atoms_n = 0;
     env->text = NULL;
     env->htab = NULL;
     env->text_len = env->text_cap = env->htab_cap = 0;
@@ -37538,17 +37544,10 @@ static uint64_t bc_fp_atom(JSContextHandle ctx, uint64_t h, JSAtom a)
     return bc_fp_mix(h, s, strlen(s) + 1);
 }
 
-static void bc_fingerprint(JSContextHandle ctx, JSFunctionBytecodeHandle b)
+/* The hash of b, and of each of its parts (out: CYBER_BC_DUMP_AT output). */
+static uint64_t bc_fp_compute(JSContextHandle ctx, JSFunctionBytecodeHandle b, FILE *out,
+                              uint64_t part[6])
 {
-    static FILE *out;
-    static int on = -1;
-    if (on < 0) {
-        const char *path = getenv("CYBER_BC_DUMP");
-        out = path ? fopen(path, "w") : NULL;
-        on = out != NULL;
-    }
-    if (!on)
-        return;
     uint64_t h = 1469598103934665603ull, tail = 0;
     const uint8_t *bc = js_bc_byte_code_buf(b);
     int len = SAFE_GET_OR(b, JSFunctionBytecodeHandle, byte_code_len, 0), pos = 0, i;
@@ -37561,7 +37560,7 @@ static void bc_fingerprint(JSContextHandle ctx, JSFunctionBytecodeHandle b)
      * atom operands as text) */
     {
         const char *at = getenv("CYBER_BC_DUMP_AT");
-        if (at && (uint32_t)atoi(at) == SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_offset, 0)) {
+        if (out && at && (uint32_t)atoi(at) == SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_offset, 0)) {
             int dp = 0;
             fprintf(out, "@ %u len %d stub %d\n", (unsigned)atoi(at), len, (int)stub);
             while (dp < len) {
@@ -37615,7 +37614,6 @@ static void bc_fingerprint(JSContextHandle ctx, JSFunctionBytecodeHandle b)
     h = bc_fp_mix(h, &tail, sizeof(tail));
     /* CYBER_BC_DUMP_PARTS=1: also each component's hash (bytecode, constants,
      * closure variables, variables, flags, line table), to see what differs */
-    uint64_t part[6] = { h, 0, 0, 0, 0, 0 };
     part[0] = h; h = 1469598103934665603ull;
     for (i = 0; i < SAFE_GET_OR(b, JSFunctionBytecodeHandle, cpool_count, 0); i++) {
         GCValue v = js_bc_cpool_ptr(b)[i];
@@ -37683,10 +37681,24 @@ static void bc_fingerprint(JSContextHandle ctx, JSFunctionBytecodeHandle b)
         if (ph != GC_HANDLE_NULL && pl > 0)
             h = bc_fp_mix(h, gc_deref(ph), pl);
     }
+    part[5] = h;
+    return bc_fp_mix(1469598103934665603ull, part, 6 * sizeof(uint64_t));
+}
+
+static void bc_fingerprint(JSContextHandle ctx, JSFunctionBytecodeHandle b)
+{
+    static FILE *out;
+    static int on = -1;
+    if (on < 0) {
+        const char *path = getenv("CYBER_BC_DUMP");
+        out = path ? fopen(path, "w") : NULL;
+        on = out != NULL;
+    }
+    if (!on)
+        return;
     {
         char nb[128], fb[256];
-        part[5] = h;
-        h = bc_fp_mix(1469598103934665603ull, part, sizeof(part));
+        uint64_t part[6], h = bc_fp_compute(ctx, b, out, part);
         if (getenv("CYBER_BC_DUMP_PARTS"))
             fprintf(out, "%04x.%04x.%04x.%04x.%04x.%04x ", (unsigned)(part[0] & 0xffff), (unsigned)(part[1] & 0xffff), (unsigned)(part[2] & 0xffff),
                     (unsigned)(part[3] & 0xffff), (unsigned)(part[4] & 0xffff), (unsigned)(part[5] & 0xffff));
@@ -42061,18 +42073,90 @@ static void cconst_release(JSFunctionDef *fd)
     pvec_free(&fd->tmpl_strs);
 }
 
-static GCValue js_create_function(JSContextHandle ctx, JSFunctionDef *fd)
+/* The runtime atom of a stencil env's atom, made once per name. */
+static JSAtom cenv_atom_to_runtime_cached(CompileEnv *env, JSContextHandle ctx, JSAtom a)
 {
-    GCValue func_obj = GC_UNDEFINED;
-    JSFunctionBytecodeHandle b = GC_HANDLE_NULL;
-    
-    /* Process function bytecode */
+    uint32_t i = a - CENV_LOCAL_ATOM_BASE;
+    if (!cenv_local_name(env, a))
+        return a;
+    if (env->rt_atoms_n < env->names.count) {
+        JSAtom *t = (JSAtom *)js_plain_realloc(env->rt_atoms, sizeof(JSAtom) * env->names.count);
+        if (!t)
+            return JS_ATOM_NULL;
+        memset(t + env->rt_atoms_n, 0, sizeof(JSAtom) * (env->names.count - env->rt_atoms_n));
+        env->rt_atoms = t;
+        env->rt_atoms_n = env->names.count;
+    }
+    if (!env->rt_atoms[i])
+        env->rt_atoms[i] = cenv_atom_to_runtime(env, ctx, a);
+    return env->rt_atoms[i];
+}
+
+/* A finished definition of a stencil env: its atoms become runtime atoms
+ * (instantiation, on the JS thread). */
+static int cenv_remap_function(CompileEnv *env, JSContextHandle ctx, JSFunctionDef *fd)
+{
+    int i, pos, len;
+    uint8_t *bc;
+#define CENV_REMAP(a) do {                                              \
+        JSAtom a_ = (a), m_ = cenv_atom_to_runtime_cached(env, ctx, a_); \
+        if (m_ == JS_ATOM_NULL && a_ != JS_ATOM_NULL)                   \
+            return -1;                                                  \
+        (a) = m_;                                                       \
+    } while (0)
+    CENV_REMAP(fd->func_name);
+    CENV_REMAP(fd->filename);
+    for (i = 0; i < fd->arg_count; i++)
+        CENV_REMAP(fd->args_handle[i].var_name);
+    for (i = 0; i < fd->var_count; i++)
+        CENV_REMAP(fd->vars_handle[i].var_name);
+    for (i = 0; i < fd->closure_var_handle.count; i++)
+        CENV_REMAP(PVEC_AT(fd->closure_var_handle, JSClosureVar, i).var_name);
+    for (i = 0; i < fd->cpool_handle.count; i++) {
+        CConst *cc = &PVEC_AT(fd->cpool_handle, CConst, i);
+        if (cc->kind == CC_ATOM)
+            CENV_REMAP(cc->atom);
+    }
+    if (fd->has_resume_parse_state) {
+        CENV_REMAP(fd->resume_parse_state.func_name);
+        for (i = 0; fd->lazy_arg_names && i < (int)fd->resume_parse_state.arg_count; i++)
+            CENV_REMAP(fd->lazy_arg_names[i]);
+    }
+    bc = gc_byte_buffer_ptr(&fd->byte_code);
+    len = (int)fd->byte_code.size;
+    for (pos = 0; pos < len;) {
+        const JSOpCode *oi = &short_opcode_info(bc[pos]);
+        int sz = oi->size > 0 ? oi->size : 1;
+        switch (oi->fmt) {
+        case OP_FMT_atom:
+        case OP_FMT_atom_u8:
+        case OP_FMT_atom_u16:
+        case OP_FMT_atom_label_u8:
+        case OP_FMT_atom_label_u16:
+            if (pos + 5 <= len) {
+                JSAtom a = get_u32(bc + pos + 1);
+                CENV_REMAP(a);
+                put_u32(bc + pos + 1, a);
+            }
+            break;
+        default:
+            break;
+        }
+        pos += sz;
+    }
+#undef CENV_REMAP
+    return 0;
+}
+
+/* Finish fd and its children (PARALLEL_PARSE_DESIGN.md 5.2): resolve the
+ * variables and labels, compute the stack size.  Plain memory and the env
+ * only: a stencil env's tree is then a stencil.  fd is kept (on error too:
+ * the caller frees it). */
+static int js_finish_function(JSContextHandle ctx, JSFunctionDef *fd)
+{
     int i;
     int stack_size, scope, idx;
-    int function_size, byte_code_offset, cpool_offset;
-    int closure_var_offset, vardefs_offset;
-    BOOL strip_var_debug;
-    
+
     /* recompute scope linkage */
     for (scope = 0; scope < fd->scope_count; scope++) {
         fd_get_scope(fd, scope)->first = -1;
@@ -42112,25 +42196,11 @@ static GCValue js_create_function(JSContextHandle ctx, JSFunctionDef *fd)
             goto fail;
     } 
 
-    /* first create all the child functions */
+    /* first finish the child functions (they resolve against this one) */
     for (i = 0; i < fd->child_handles.count; i++) {
         JSFunctionDefHandle fd1_handle = PVEC_AT(fd->child_handles, JSFunctionDef *, i);
-        if (!SAFE_IS_NULL(fd1_handle)) {
-            int cpool_idx = (fd1_handle)->parent_cpool_idx;
-            /* consumed by js_create_function, which frees it */
-            PVEC_AT(fd->child_handles, JSFunctionDef *, i) = NULL;
-            func_obj = js_create_function(ctx, (fd1_handle));
-            if (JS_IsException(func_obj))
-                goto fail;
-            /* save it in the constant pool: a root until the bytecode holds it */
-            assert(cpool_idx >= 0);
-            {
-                CConst *cc = &PVEC_AT(fd->cpool_handle, CConst, cpool_idx);
-                cc->v = func_obj;
-                gc_add_root(GC_VALUE_GET_HANDLE(func_obj));
-                cc->rooted = 1;
-            }
-        }
+        if (!SAFE_IS_NULL(fd1_handle) && js_finish_function(ctx, fd1_handle))
+            goto fail;
     }
 
     if (resolve_variables(ctx, fd))
@@ -42153,6 +42223,49 @@ static GCValue js_create_function(JSContextHandle ctx, JSFunctionDef *fd)
 
     if (compute_stack_size(ctx, fd, &stack_size) < 0)
         goto fail;
+    fd->stack_size = stack_size;
+    return 0;
+ fail:
+    return -1;
+}
+
+/* The runtime function of a finished definition and its children (GC
+ * objects, on the JS thread).  Consumes fd. */
+static GCValue js_instantiate_function(JSContextHandle ctx, JSFunctionDef *fd)
+{
+    GCValue func_obj = GC_UNDEFINED;
+    JSFunctionBytecodeHandle b = GC_HANDLE_NULL;
+    int i;
+    int stack_size = fd->stack_size;
+    int function_size, byte_code_offset, cpool_offset;
+    int closure_var_offset, vardefs_offset;
+    BOOL strip_var_debug;
+
+    if (fd->env && fd->env->stencil && cenv_remap_function(fd->env, ctx, fd)) {
+        JS_ThrowOutOfMemory(ctx);
+        goto fail;
+    }
+
+    /* the child functions first */
+    for (i = 0; i < fd->child_handles.count; i++) {
+        JSFunctionDefHandle fd1_handle = PVEC_AT(fd->child_handles, JSFunctionDef *, i);
+        if (!SAFE_IS_NULL(fd1_handle)) {
+            int cpool_idx = (fd1_handle)->parent_cpool_idx;
+            /* consumed by js_instantiate_function, which frees it */
+            PVEC_AT(fd->child_handles, JSFunctionDef *, i) = NULL;
+            func_obj = js_instantiate_function(ctx, (fd1_handle));
+            if (JS_IsException(func_obj))
+                goto fail;
+            /* save it in the constant pool: a root until the bytecode holds it */
+            assert(cpool_idx >= 0);
+            {
+                CConst *cc = &PVEC_AT(fd->cpool_handle, CConst, cpool_idx);
+                cc->v = func_obj;
+                gc_add_root(GC_VALUE_GET_HANDLE(func_obj));
+                cc->rooted = 1;
+            }
+        }
+    }
 
     if (fd->strip_debug) {
         function_size = offsetof(JSFunctionBytecode, debug);
@@ -42385,6 +42498,16 @@ static GCValue js_create_function(JSContextHandle ctx, JSFunctionDef *fd)
  fail:
     js_free_function_def(ctx, fd);
     return JS_EXCEPTION;
+}
+
+/* Finish and instantiate fd (consumed). */
+static GCValue js_create_function(JSContextHandle ctx, JSFunctionDef *fd)
+{
+    if (js_finish_function(ctx, fd)) {
+        js_free_function_def(ctx, fd);
+        return JS_EXCEPTION;
+    }
+    return js_instantiate_function(ctx, fd);
 }
 
 /*
@@ -43937,13 +44060,15 @@ typedef struct StencilVerify {
     int mismatches;
 } StencilVerify;
 
-static struct { int scripts, same, failed, differ; } g_stencil_verify;
+static struct { int scripts, same, failed, differ, inst_same, inst_failed, inst_differ; } g_stencil_verify;
 
 static void stencil_verify_report(void)
 {
     fprintf(stderr, "[stencil-verify] scripts %d: same %d, stencil parse failed %d, differ %d\n",
             g_stencil_verify.scripts, g_stencil_verify.same, g_stencil_verify.failed,
             g_stencil_verify.differ);
+    fprintf(stderr, "[stencil-verify] instantiated: same %d, failed %d, differ %d\n",
+            g_stencil_verify.inst_same, g_stencil_verify.inst_failed, g_stencil_verify.inst_differ);
 }
 
 /* r is a runtime atom, l the stencil env's. */
@@ -44063,28 +44188,55 @@ static BOOL sv_cmp_fd(StencilVerify *v, JSFunctionDef *r, JSFunctionDef *l)
     return TRUE;
 }
 
-/* Parse the script of rs (whose tree is rfd) again with a stencil env and
- * compare.  Only a global script that parsed. */
-static void stencil_verify_script(JSParseState *rs, JSFunctionDef *rfd, int flags)
-{
-    JSContextHandle ctx = rs->ctx;
-    JSParseState s1 = { .token = { .u.str.str = GC_UNDEFINED_INIT } }, *s = &s1;
+/* A stencil of a script kept until the runtime compile of the script is
+ * made, to compare the two after instantiation. */
+typedef struct StencilVerifyKeep {
+    JSParseState s;     /* its arena holds the stencil's strings */
     CompileEnv env;
     JSFunctionDef *fd;
-    StencilVerify v = { .ctx = ctx, .env = &env, .filename = rs->filename };
+} StencilVerifyKeep;
+
+static void stencil_verify_keep_free(StencilVerifyKeep *k)
+{
+    if (k->fd)
+        js_free_function_def(k->s.ctx, k->fd);
+    free_token(&k->s, &k->s.token);
+    js_parse_cleanup_roots(&k->s);
+    cenv_free(&k->env);
+    js_plain_free(k);
+}
+
+/* Parse the script of rs (whose tree is rfd) again with a stencil env and
+ * compare.  Only a global script that parsed.  The stencil is kept for
+ * stencil_verify_instantiate when it matched. */
+static StencilVerifyKeep *stencil_verify_script(JSParseState *rs, JSFunctionDef *rfd, int flags)
+{
+    JSContextHandle ctx = rs->ctx;
+    StencilVerifyKeep *k = (StencilVerifyKeep *)js_plain_calloc(1, sizeof(StencilVerifyKeep));
+    JSParseState *s;
+    JSFunctionDef *fd;
+    StencilVerify v = { .ctx = ctx, .filename = rs->filename };
     int err;
 
+    if (!k)
+        return NULL;
+    s = &k->s;
+    v.env = &k->env;
     if (g_stencil_verify.scripts++ == 0)
         atexit(stencil_verify_report);
     js_parse_init(ctx, s, (const char *)rs->buf_start, rs->buf_end - rs->buf_start, rs->filename, flags);
+    s->token.u.str.str = JS_UNDEFINED;
     skip_shebang(&s->buf_ptr, s->buf_end);
     s->struct_index = rs->struct_index;
-    cenv_init_stencil(&env);
-    s->env = &env;
+    cenv_init_stencil(&k->env);
+    s->env = &k->env;
     fd = js_new_function_def(s->env, ctx, NULL, TRUE, FALSE, rs->filename,
                              s->buf_start, &s->get_line_col_cache);
-    if (!fd)
-        goto done;
+    if (!fd) {
+        stencil_verify_keep_free(k);
+        return NULL;
+    }
+    k->fd = fd;
     GC_SET(fd->source_string_handle, rfd->source_string_handle);
     js_parse_set_cur_func(s, fd);
     fd->eval_type = rfd->eval_type;
@@ -44105,22 +44257,87 @@ static void stencil_verify_script(JSParseState *rs, JSFunctionDef *rfd, int flag
     fd->body_scope = fd->scope_level;
 
     err = js_parse_program(s);
-    if (err || env.has_error) {
+    if (err || k->env.has_error) {
         g_stencil_verify.failed++;
         fprintf(stderr, "[stencil-verify] %s: stencil parse failed at %d:%d: %s\n", rs->filename,
-                env.error_line, env.error_col, env.has_error ? env.error_msg : "(exception)");
-        if (!env.has_error)
+                k->env.error_line, k->env.error_col, k->env.has_error ? k->env.error_msg : "(exception)");
+        if (!k->env.has_error)
             JS_GetException(ctx);
     } else if (sv_cmp_fd(&v, rfd, fd)) {
         g_stencil_verify.same++;
+        return k;
     } else {
         g_stencil_verify.differ++;
     }
-    js_free_function_def(ctx, fd);
- done:
-    free_token(s, &s->token);
-    js_parse_cleanup_roots(s);
-    cenv_free(&env);
+    stencil_verify_keep_free(k);
+    return NULL;
+}
+
+/* r is the runtime compile's function, l the instantiated stencil's. */
+static BOOL sv_cmp_bc(StencilVerify *v, JSFunctionBytecodeHandle r, JSFunctionBytecodeHandle l)
+{
+    static const char *const names[6] = { "bytecode", "constants", "closure variables",
+                                          "variables", "flags", "line table" };
+    uint64_t pr[6], pl[6];
+    int i, n;
+
+    if (bc_fp_compute(v->ctx, r, NULL, pr) != bc_fp_compute(v->ctx, l, NULL, pl)) {
+        char nb[64];
+        for (i = 0; i < 6 && pr[i] == pl[i]; i++)
+            ;
+        if (v->mismatches++ < 8)
+            fprintf(stderr, "[stencil-verify] %s @%u %s: instantiated %s differ\n", v->filename,
+                    (unsigned)SAFE_GET_OR(r, JSFunctionBytecodeHandle, debug.source_offset, 0),
+                    JS_AtomGetStr(v->ctx, nb, sizeof(nb), SAFE_GET_OR(r, JSFunctionBytecodeHandle, func_name, JS_ATOM_NULL)),
+                    i < 6 ? names[i] : "?");
+        return FALSE;
+    }
+    n = SAFE_GET_OR(r, JSFunctionBytecodeHandle, cpool_count, 0);
+    for (i = 0; i < n; i++) {
+        GCValue cr = js_bc_cpool_ptr(r)[i], cl = js_bc_cpool_ptr(l)[i];
+        if (JS_VALUE_GET_TAG(cr) == JS_TAG_FUNCTION_BYTECODE &&
+            JS_VALUE_GET_TAG(cl) == JS_TAG_FUNCTION_BYTECODE &&
+            !sv_cmp_bc(v, (JSFunctionBytecodeHandle)GC_VALUE_GET_HANDLE(cr),
+                       (JSFunctionBytecodeHandle)GC_VALUE_GET_HANDLE(cl)))
+            return FALSE;
+    }
+    return TRUE;
+}
+
+/* Finish and instantiate the kept stencil, and compare it with fun_obj
+ * (the runtime compile of the same script).  Frees k. */
+static void stencil_verify_instantiate(StencilVerifyKeep *k, GCValue fun_obj)
+{
+    JSContextHandle ctx = k->s.ctx;
+    StencilVerify v = { .ctx = ctx, .env = &k->env, .filename = k->s.filename };
+    GCValue sobj;
+
+    if (JS_IsException(fun_obj)) {
+        stencil_verify_keep_free(k);
+        return;
+    }
+    if (js_finish_function(ctx, k->fd) || k->env.has_error) {
+        g_stencil_verify.inst_failed++;
+        fprintf(stderr, "[stencil-verify] %s: stencil finish failed: %s\n", k->s.filename,
+                k->env.has_error ? k->env.error_msg : "(exception)");
+        if (!k->env.has_error)
+            JS_GetException(ctx);
+        stencil_verify_keep_free(k);
+        return;
+    }
+    sobj = js_instantiate_function(ctx, k->fd);
+    k->fd = NULL;   /* consumed */
+    if (JS_IsException(sobj)) {
+        g_stencil_verify.inst_failed++;
+        fprintf(stderr, "[stencil-verify] %s: instantiation failed\n", k->s.filename);
+        JS_GetException(ctx);
+    } else if (sv_cmp_bc(&v, (JSFunctionBytecodeHandle)GC_VALUE_GET_HANDLE(fun_obj),
+                         (JSFunctionBytecodeHandle)GC_VALUE_GET_HANDLE(sobj))) {
+        g_stencil_verify.inst_same++;
+    } else {
+        g_stencil_verify.inst_differ++;
+    }
+    stencil_verify_keep_free(k);
 }
 
 static GCValue __JS_EvalInternal(JSContextHandle ctx, GCValue this_obj,
@@ -44129,6 +44346,7 @@ static GCValue __JS_EvalInternal(JSContextHandle ctx, GCValue this_obj,
 {
     JSParseState s1 = { .token = { .u.str.str = GC_UNDEFINED_INIT } }, *s = &s1;
     int err, js_mode, eval_type;
+    struct StencilVerifyKeep *sv_keep = NULL;
     GCValue fun_obj = GC_UNDEFINED, ret_val = GC_UNDEFINED;
     JSStackFrame *sf;
     GCHandle var_refs_handle;
@@ -44230,13 +44448,15 @@ static GCValue __JS_EvalInternal(JSContextHandle ctx, GCValue this_obj,
     }
 
     if (stencil_verify_enabled() && eval_type == JS_EVAL_TYPE_GLOBAL && m == GC_HANDLE_NULL)
-        stencil_verify_script(s, fd, flags);
+        sv_keep = stencil_verify_script(s, fd, flags);
 
     if (m != GC_HANDLE_NULL)
         SAFE_SET(m, JSModuleDefHandle, has_tla, fd->has_await);
 
     /* create the function object and all the enclosed functions */
     fun_obj = js_create_function(ctx, fd);
+    if (sv_keep)
+        stencil_verify_instantiate(sv_keep, fun_obj);
     if (stats_t0) {
         g_parse_stats.eval_n++;
         g_parse_stats.eval_ns += parse_stats_since(stats_t0);
