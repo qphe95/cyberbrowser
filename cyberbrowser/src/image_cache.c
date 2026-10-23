@@ -175,6 +175,10 @@ static uint8_t *base64_decode(const char *in, size_t in_len, size_t *out_len)
             valb -= 8;
         }
     }
+    /* NUL-terminated like the percent-decoded payload: fetch() hands it to
+     * JS_ParseJSON, which reads buf[len].  (The allocation has room: at most
+     * 3 bytes per 4 characters, plus 2.) */
+    out[j] = 0;
     *out_len = j;
     return out;
 }

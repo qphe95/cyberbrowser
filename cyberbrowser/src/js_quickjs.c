@@ -1737,6 +1737,7 @@ static GCValue create_response_from_data(JSContextHandle ctx, const char *url, c
     // Try to parse as JSON
     GCValue json_val = JS_ParseJSON(ctx, data, data_len, "<fetch-response>");
     if (JS_IsException(json_val)) {
+        JS_GetException(ctx);   /* not JSON: clear the parse error, it is not fetch()'s */
         json_val = JS_UNDEFINED;
     }
     if (!JS_IsUndefined(json_val)) {
