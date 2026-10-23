@@ -496,6 +496,9 @@ bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
  * the incremental restyle cache, and those it recomputed (both 0 when the
  * pass did not use the cache). */
 void css_layout_restyle_stats(unsigned *reused, unsigned *recomputed);
+/* Test hook: of the recomputed elements, those that matched exactly as for
+ * their cached style and took it (the matched-properties cache). */
+unsigned css_layout_restyle_matched_same(void);
 
 /* Test hook: parse a stylesheet with the chunked parallel parser (chunk =
  * bytes per chunk, 0 = default).  Equal to css_stylesheet_parse's result. */

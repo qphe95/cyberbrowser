@@ -1177,6 +1177,44 @@ TEST(test_layout_incremental_restyle) {
     return true;
 }
 
+/* Elements an invalidation recomputes but that match exactly as before take
+ * their cached style (matched-properties cache); a parent whose style
+ * changed still makes its children recompute what they inherit. */
+TEST(test_layout_restyle_matched_properties_cache) {
+    const char *tmpl =
+        "<html><head><style>"
+        ".box { width: 100px } .box:has(.flag) { width: 40px } .big { font-size: 30px } .c { height: 5px }"
+        "</style></head><body>"
+        "<section class=\"%s\"><div class=\"box\"><p class=\"%s\"></p><p class=\"c\"></p></div></section>"
+        "</body></html>";
+    struct { const char *root, *child; double width, font; bool matched_same; } steps[] = {
+        { "",    "q",    100, 16, false },
+        { "",    "r",    100, 16, true },    /* .box re-matched for :has(), as before */
+        { "",    "flag", 40,  16, false },
+        { "big", "flag", 40,  30, false },   /* parent changed: .box and .c inherit 30px */
+        { "big", "r",    100, 30, false },
+    };
+    for (size_t s = 0; s < sizeof(steps) / sizeof(steps[0]); s++) {
+        char html[2048];
+        snprintf(html, sizeof(html), tmpl, steps[s].root, steps[s].child);
+        HtmlDocument *doc = parse_with_store_ids(html);
+        ASSERT_TRUE(doc != NULL);
+        LayoutContext ctx = {0};
+        ASSERT_TRUE(css_layout_run(&ctx, doc, NULL, 800.0, 600.0));
+        LayoutBox *box = box_with_class(&ctx, doc, "box");
+        LayoutBox *c = box_with_class(&ctx, doc, "c");
+        ASSERT_TRUE(box && c);
+        ASSERT_TRUE(near_equal(box->width, steps[s].width));
+        ASSERT_TRUE(near_equal(c->height, 5));
+        ASSERT_TRUE(near_equal(box->font_size, steps[s].font));
+        ASSERT_TRUE(near_equal(c->font_size, steps[s].font));
+        if (steps[s].matched_same) ASSERT_TRUE(css_layout_restyle_matched_same() >= 1);
+        css_layout_tree_free(&ctx);
+        html_document_free(doc);
+    }
+    return true;
+}
+
 void run_css_layout_tests(void) {
     printf("\n--- CSS Layout Engine Tests ---\n");
     RUN_TEST(test_layout_basic_document);
@@ -1207,4 +1245,5 @@ void run_css_layout_tests(void) {
     RUN_TEST(test_font_registry_system_and_web_fonts);
     RUN_TEST(test_font_variable_instances);
     RUN_TEST(test_layout_incremental_restyle);
+    RUN_TEST(test_layout_restyle_matched_properties_cache);
 }

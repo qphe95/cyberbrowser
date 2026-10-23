@@ -3765,6 +3765,11 @@ typedef struct StylePass {
     int *cx_off, *cx_cnt;
     uint64_t *cx_struct;
     _Atomic uint32_t reused, recomputed, verify_mismatches, verify_reusable;
+    /* Matched-properties cache: per layout index, a hash of what the cascade
+     * of a recomputed element read (0: none); and how many recomputed
+     * elements matched as before and took the cached box. */
+    uint64_t *match_hash;
+    _Atomic uint32_t matched_same;
     _Atomic uint32_t why[5];    /* CSS_LOG=2: recompute reasons (no entry, key, ancestor/sibling, :has, parent) */
 } StylePass;
 
@@ -3793,6 +3798,7 @@ typedef struct StyleCacheEntry {
     const struct StyleCtxItem *ctx_items;  /* in the cache arena */
     uint32_t ctx_n;
     const CssCustomProps *props;
+    uint64_t match_hash;        /* what its cascade read (StylePass.match_hash), 0 = unknown */
     unsigned char has_after;
     char after[256];
     LayoutBox box;
@@ -5297,6 +5303,7 @@ static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects
     P->force = (unsigned char *)calloc((size_t)n + 1, 1);
     g_sc.has_has = has && has->any;
     P->out_changed = (unsigned char *)calloc((size_t)n + 1, 1);
+    P->match_hash = (uint64_t *)calloc((size_t)n + 1, sizeof(uint64_t));
     P->cx_off = (int *)calloc((size_t)n + 1, sizeof(int));
     P->cx_cnt = (int *)malloc(((size_t)n + 1) * sizeof(int));
     P->cx_struct = (uint64_t *)calloc((size_t)n + 1, sizeof(uint64_t));
@@ -5592,6 +5599,7 @@ static void style_cache_set(StyleCacheEntry *e, StylePass *P, int idx, const cha
     e->key = P->entry_key ? P->entry_key[idx] : 0;
     if (P->cx_cnt && P->cx_cnt[idx] >= 0) style_cache_set_ctx(e, P, idx, NULL);
     e->props = style_cache_own(ctx->custom_props[idx], tab, cap);
+    e->match_hash = P->match_hash ? P->match_hash[idx] : 0;
     e->has_after = after != NULL;
     if (after) memcpy(e->after, after, sizeof(e->after));
     else e->after[0] = '\0';
@@ -5646,8 +5654,11 @@ static bool style_cache_update(StylePass *P, const StyleGenAfter *gen, int gen_t
         StyleCacheEntry *e = (StyleCacheEntry *)P->cached[idx];
         if (e && P->key_ok[idx] && !P->out_changed[idx] &&
             e->has_after == (after[idx] != NULL) &&
-            (!after[idx] || strncmp(e->after, after[idx], sizeof(e->after)) == 0))
+            (!after[idx] || strncmp(e->after, after[idx], sizeof(e->after)) == 0)) {
+            /* Same result: record what its cascade read this time. */
+            if (P->match_hash) e->match_hash = P->match_hash[idx];
             continue;
+        }
         if (!e) {
             e = &g_sc.e[g_sc.n];
             e->id = hn->store_id;
@@ -5681,13 +5692,15 @@ static bool style_cache_update(StylePass *P, const StyleGenAfter *gen, int gen_t
     return true;
 }
 
-static unsigned g_restyle_reused, g_restyle_recomputed;
+static unsigned g_restyle_reused, g_restyle_recomputed, g_restyle_matched_same;
 
 void css_layout_restyle_stats(unsigned *reused, unsigned *recomputed)
 {
     if (reused) *reused = g_restyle_reused;
     if (recomputed) *recomputed = g_restyle_recomputed;
 }
+
+unsigned css_layout_restyle_matched_same(void) { return g_restyle_matched_same; }
 
 static void style_cache_store(StylePass *P, uint64_t global, const StyleGenAfter *gen, int gen_total)
 {
@@ -5745,6 +5758,7 @@ static void style_cache_store(StylePass *P, uint64_t global, const StyleGenAfter
         e->key = P->entry_key ? P->entry_key[idx] : 0;
         style_cache_set_ctx(e, P, idx, P->cached[idx]);
         e->props = style_cache_own(ctx->custom_props[idx], tab, cap);
+        e->match_hash = P->match_hash ? P->match_hash[idx] : 0;
         e->has_after = after[idx] != NULL;
         if (after[idx]) memcpy(e->after, after[idx], sizeof(e->after));
         else e->after[0] = '\0';
@@ -5982,6 +5996,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
     int parent_cls = (p >= 0) ? P->cls[p] : -1;
     const StyleCacheEntry *ce = P->inc ? P->cached[idx] : NULL;
     bool can_reuse = ce && P->key_ok[idx] && !P->force[idx] && (p < 0 || !P->out_changed[p]);
+    bool mpc_would = false;   /* CYBER_STYLE_VERIFY: the matched-properties cache would take ce */
     if (P->inc && !can_reuse && g_css_log > 1 && node && node->type == HTML_NODE_ELEMENT) {
         int why = !ce ? 0 : !P->key_ok[idx] ? 1 : P->force[idx] == 2 ? 2 : P->force[idx] == 1 ? 3 : 4;
         atomic_fetch_add(&P->why[why], 1);
@@ -5993,6 +6008,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
         if (can_reuse && !P->verify) {
             *box = ce->box;
             ctx->custom_props[idx] = ce->props;
+            P->match_hash[idx] = ce->match_hash;
             if (!parent && box->font_size > 0.0) g_unit_rem = box->font_size;
             if (ce->has_after) {
                 if (T->gen_n == T->gen_cap) {
@@ -6123,6 +6139,60 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
         char after_content[256];
         double pseudo_aspect = 0.0;
         bool after_set = style_after_content(P, T, dom, after_content, &pseudo_aspect);
+
+        /* Matched-properties cache: the cascade below is a function of the
+         * declarations matched, the inline styles, the ::after content, the
+         * aspect ratios found above, the root font size and the parent's
+         * computed style.  When all are as they were for the cached box (the
+         * parent's style and its own key unchanged), that box is the result.  Invalidation
+         * recomputes many elements that match exactly as before. */
+        if (P->match_hash) {
+            uint64_t h = 1469598103934665603ull;
+            h = style_mix(h, &count, sizeof(count));
+            for (int d = 0; d < count; d++) {
+                h = style_mix(h, &applied[d].decl, sizeof(applied[d].decl));
+                h = style_mix(h, &applied[d].rule, sizeof(applied[d].rule));
+            }
+            for (int b = 0; b < ninl; b++)
+                for (int i = 0; i < inl[b].count; i++) {
+                    const CssDeclaration *dl = &inl[b].decls[i];
+                    if (dl->property) h = style_mix(h, dl->property, strlen(dl->property) + 1);
+                    if (dl->value) h = style_mix(h, dl->value, strlen(dl->value) + 1);
+                    h = style_mix(h, &dl->important, sizeof(dl->important));
+                }
+            h = style_mix(h, &ninl, sizeof(ninl));
+            h = style_mix(h, &after_set, sizeof(after_set));
+            if (after_set) h = style_mix(h, after_content, strnlen(after_content, sizeof(after_content)) + 1);
+            h = style_mix(h, &pseudo_aspect, sizeof(pseudo_aspect));
+            h = style_mix(h, &box->aspect_ratio, sizeof(box->aspect_ratio));
+            h = style_mix(h, &g_unit_rem, sizeof(g_unit_rem));
+            if (h == 0) h = 1;
+            P->match_hash[idx] = h;
+            /* The key covers the attributes, which presentational hints read. */
+            bool take = ce && ce->match_hash == h && P->key_ok[idx] && (p < 0 || !P->out_changed[p]);
+            if (take && P->verify) mpc_would = true;   /* checked against the full result */
+            if (take && !P->verify) {
+                for (int b = 0; b < ninl; b++) css_declarations_free(inl[b].decls, inl[b].count);
+                *box = ce->box;
+                ctx->custom_props[idx] = ce->props;
+                if (!parent && box->font_size > 0.0) g_unit_rem = box->font_size;
+                if (after_set && after_content[0] != '\0') {
+                    if (T->gen_n == T->gen_cap) {
+                        T->gen_cap = T->gen_cap ? T->gen_cap * 2 : 16;
+                        T->gen = (StyleGenAfter *)realloc(T->gen, (size_t)T->gen_cap * sizeof(StyleGenAfter));
+                    }
+                    T->gen[T->gen_n].pos = pos;
+                    T->gen[T->gen_n].idx = idx;
+                    memcpy(T->gen[T->gen_n].text, after_content, sizeof(after_content));
+                    T->gen_n++;
+                }
+                P->out_changed[idx] = 0;
+                atomic_fetch_add(&P->recomputed, 1);
+                atomic_fetch_add(&P->matched_same, 1);
+                css_style_bloom_push(T->scratch, P->sd, dom);
+                return;
+            }
+        }
 
         for (int d = 0; d < count; d++) {
             const char *prop = applied[d].decl->property;
@@ -6289,7 +6359,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
         if (share_has_after) memcpy(e->after, share_after, sizeof(e->after));
     }
     if (node && node->type == HTML_NODE_ELEMENT)
-        style_note_result(P, idx, box, ctx->custom_props[idx], ce, can_reuse, node);
+        style_note_result(P, idx, box, ctx->custom_props[idx], ce, can_reuse || mpc_would, node);
     else if (P->inc)
         P->out_changed[idx] = 1;
 }
@@ -6446,7 +6516,7 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
             fprintf(stderr, "[css] restyle: full (%s)\n", !inc_env ? "CSS_INC=0" : "style set not cached");
         }
     }
-    g_restyle_reused = g_restyle_recomputed = 0;
+    g_restyle_reused = g_restyle_recomputed = g_restyle_matched_same = 0;
     job_graph_run(job_new(style_root_job, NULL, &P, 0, 0));
     STAGE("style (parallel)");
 
@@ -6479,14 +6549,15 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
         style_cache_store(&P, sc_global, gen, gen_total);
         g_restyle_reused = atomic_load(&P.reused);
         g_restyle_recomputed = atomic_load(&P.recomputed);
+        g_restyle_matched_same = atomic_load(&P.matched_same);
         STAGE("restyle store");
         if (g_css_log > 1)
             fprintf(stderr, "[css] restyle why: noentry %u key %u forced %u has %u parent %u\n",
                     (unsigned)P.why[0], (unsigned)P.why[1], (unsigned)P.why[2], (unsigned)P.why[3], (unsigned)P.why[4]);
         if (g_css_log > 0 || P.verify)
-            fprintf(stderr, "[css] restyle: %u reused, %u recomputed%s",
+            fprintf(stderr, "[css] restyle: %u reused, %u recomputed (%u matched as before)%s",
                     (unsigned)atomic_load(&P.reused), (unsigned)atomic_load(&P.recomputed),
-                    P.verify ? "" : "\n");
+                    (unsigned)atomic_load(&P.matched_same), P.verify ? "" : "\n");
         if (P.verify)
             fprintf(stderr, ", %u reusable, %u reuse mismatches\n", (unsigned)atomic_load(&P.verify_reusable),
                     (unsigned)atomic_load(&P.verify_mismatches));
@@ -6497,6 +6568,7 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
     free(P.key_ok);
     free(P.force);
     free(P.out_changed);
+    free(P.match_hash);
     free(P.entry_key);
     free(P.cx.items);
     free(P.cx_off);
