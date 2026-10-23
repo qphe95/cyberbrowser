@@ -450,7 +450,7 @@ typedef struct LayoutContext {
     int style_skipped;
     /* Per layout index: 1 for a display:none element whose descendants the
      * tree leaves out (css_layout_run guesses which from the style cache and
-     * builds again in full when one turns out shown: prune_failed); how many. */
+     * builds again when one turns out shown: prune_failed); how many. */
     unsigned char *pruned;
     int pruned_n;
     bool prune_failed;

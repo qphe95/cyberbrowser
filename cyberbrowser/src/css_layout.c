@@ -6530,8 +6530,11 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
             h = style_mix(h, &g_unit_rem, sizeof(g_unit_rem));
             if (h == 0) h = 1;
             P->match_hash[idx] = h;
-            /* The key covers the attributes, which presentational hints read. */
-            bool take = ce && !ce->stale && ce->match_hash == h && P->key_ok[idx] && (p < 0 || !P->out_changed[p]);
+            /* The key covers the attributes, which presentational hints read.
+             * (Below a parent whose entry was stored with its children left
+             * out, theirs are older than its: "unchanged" says nothing.) */
+            bool take = ce && !ce->stale && ce->match_hash == h && P->key_ok[idx] &&
+                        (p < 0 || (!P->out_changed[p] && !(P->cached[p] && P->cached[p]->pruned_below)));
             if (take && P->verify) mpc_would = true;   /* checked against the full result */
             if (take && !P->verify) {
                 for (int b = 0; b < ninl; b++) css_declarations_free(inl[b].decls, inl[b].count);
@@ -10413,14 +10416,15 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
     if (ctx->viewport_width > 0.0) g_calc_pct_hint = ctx->viewport_width;
     layout_apply_stylesheet(ctx, sheet);
     /* A display:none guess that came out shown, or :has() rules other than
-     * those the guesses were checked against: css_layout_run builds again
-     * in full. */
+     * those the guesses were checked against: css_layout_run builds again. */
     if (ctx->pruned_n) {
-        bool failed = ctx->prune_has_gen != g_has_gen || ctx->has_target_first < ctx->tree.count;
+        bool failed_has = ctx->prune_has_gen != g_has_gen || ctx->has_target_first < ctx->tree.count;
+        bool failed = failed_has;
         for (int i = 0; !failed && i < ctx->tree.count; i++)
             failed = ctx->pruned[i] && ctx->boxes[i].display != CSS_DISPLAY_NONE;
         if (g_css_log > 0)
-            fprintf(stderr, "[css] %d subtrees left out%s\n", ctx->pruned_n, failed ? ", one shown: again in full" : "");
+            fprintf(stderr, "[css] %d subtrees left out%s\n", ctx->pruned_n,
+                    failed_has ? ", :has() rules changed: again" : failed ? ", one shown: again" : "");
         if (failed) { ctx->prune_failed = true; return false; }
     }
     _st_t = layout_now_ms();
@@ -10586,6 +10590,7 @@ bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
     static int prune_env = -1;
     if (prune_env < 0) { const char *e = getenv("CSS_PRUNE"); prune_env = !(e && strcmp(e, "0") == 0); }
     bool prune = prune_env && !saved_style_all;
+    int prune_retries = 0;
 again:
     if (!layout_tree_build(ctx, doc, prune)) return false;
     GC_SET(ctx->js_ctx, saved_js_ctx);
@@ -10605,8 +10610,13 @@ again:
     if (g_css_log > 0) fprintf(stderr, "[css] tree build + setup  %8.3f ms\n", layout_now_ms() - _run_t0);
     bool ok = css_layout_document(ctx, sheet);
     if (!ok && ctx->prune_failed && prune) {
+        /* The attempt brought what the guesses depend on up to date: a guess
+         * that came out shown is in the style cache now, and the :has()
+         * rules are the new ones.  Built again, the other hidden subtrees
+         * are still left out (and checked again); after two such tries, or
+         * at once when the attempt stored nothing (cache_readonly), in full. */
         css_layout_tree_free(ctx);
-        prune = false;
+        if (saved_readonly || ++prune_retries > 2) prune = false;
         goto again;
     }
     if (!ok) css_layout_tree_free(ctx);
