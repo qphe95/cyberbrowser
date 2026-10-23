@@ -263,6 +263,7 @@ GCValue js_mutation_observer_takeRecords(JSContextHandle ctx, GCValue this_val, 
 GCValue js_mutation_observer_disconnect(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 void mo_notify_child_list(JSContextHandle ctx, GCValue target, GCValue added, GCValue removed);
 bool mo_child_list_observed(JSContextHandle ctx, GCValue target);
+bool mo_any_observing(JSContextHandle ctx);
 void mo_notify_character_data(JSContextHandle ctx, GCValue target, const char *old_value);
 void mo_notify_attribute(JSContextHandle ctx, GCValue target, const char *name, const char *old_value);
 GCValue js_queue_microtask(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);

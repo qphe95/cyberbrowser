@@ -503,6 +503,26 @@ GCValue html_doc_stream_step(HtmlDocStream *s, bool final) {
      * far upgrade and get connectedCallback, once per new subtree. */
     uint32_t n = 0;
     const uint32_t *roots = dom_stream_new_roots(s->st, &n);
+    /* The parser inserts one node at a time: each is a childList record for
+     * observers of its parent, in document order. */
+    if (n && mo_any_observing(ctx)) {
+        uint32_t doc = dom_slot(s->doc), last_parent = 0;
+        bool observed = false;
+        for (uint32_t i = 0; i < n; i++) {
+            if (!in_document(roots[i], doc)) continue;
+            for (uint32_t k = roots[i]; k; k = dom_next_in_subtree(k, roots[i])) {
+                uint32_t p = g_dom.parent[k];
+                if (p != last_parent) {
+                    last_parent = p;
+                    observed = mo_child_list_observed(ctx, dom_js(ctx, dom_id_of(p)));
+                }
+                if (!observed) continue;
+                GCValue added = JS_NewArray(ctx);
+                JS_SetPropertyUint32(ctx, added, 0, dom_js(ctx, dom_id_of(k)));
+                mo_notify_child_list(ctx, dom_js(ctx, dom_id_of(p)), added, JS_NewArray(ctx));
+            }
+        }
+    }
     if (n) {
         js_cyber_ce_push_stack(ctx);
         for (uint32_t i = 0; i < n; i++)

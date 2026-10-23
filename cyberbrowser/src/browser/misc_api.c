@@ -2493,6 +2493,14 @@ static bool mo_registration_interested(JSContextHandle ctx, GCValue ot, GCValue 
     return false;
 }
 
+/* Is any MutationObserver observing anything?  (A cheap test before
+ * building records for many changes at once, as the parser makes.) */
+bool mo_any_observing(JSContextHandle ctx) {
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, JS_GetPropertyStr(ctx, mo_registry(ctx), "length"));
+    return len > 0;
+}
+
 /* Would a childList change of `target` be observed?  (Mutations skip
  * building records, and wrappers for the changed nodes, when not.) */
 bool mo_child_list_observed(JSContextHandle ctx, GCValue target) {
