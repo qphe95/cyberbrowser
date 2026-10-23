@@ -1215,6 +1215,31 @@ TEST(test_layout_restyle_matched_properties_cache) {
     return true;
 }
 
+/* Preserved newlines at the edges of inline runs still break lines:
+ * YouTube's description is a pre-wrap block of spans, one per run, whose
+ * runs end in "\n\n". */
+TEST(test_layout_pre_wrap_breaks_between_inline_runs) {
+    const char *html =
+        "<html><head><style>"
+        ".t { white-space: pre-wrap; width: 600px; line-height: 20px; font-size: 14px }"
+        "</style></head><body>"
+        "<div class=\"t\"><span><span>Line one. \n\n</span><span>Line three \n</span><span>Line four</span></span></div>"
+        "<div class=\"u\" style=\"white-space: pre-wrap; width: 600px; line-height: 20px\"><span>A</span><span>\n\nB</span></div>"
+        "</body></html>";
+    HtmlDocument *doc = parse_with_store_ids(html);
+    ASSERT_TRUE(doc != NULL);
+    LayoutContext ctx = {0};
+    ASSERT_TRUE(css_layout_run(&ctx, doc, NULL, 800.0, 600.0));
+    LayoutBox *t = box_with_class(&ctx, doc, "t");
+    LayoutBox *u = box_with_class(&ctx, doc, "u");
+    ASSERT_TRUE(t && u);
+    ASSERT_TRUE(near_equal(t->height, 80));
+    ASSERT_TRUE(near_equal(u->height, 60));
+    css_layout_tree_free(&ctx);
+    html_document_free(doc);
+    return true;
+}
+
 void run_css_layout_tests(void) {
     printf("\n--- CSS Layout Engine Tests ---\n");
     RUN_TEST(test_layout_basic_document);
@@ -1246,4 +1271,5 @@ void run_css_layout_tests(void) {
     RUN_TEST(test_font_variable_instances);
     RUN_TEST(test_layout_incremental_restyle);
     RUN_TEST(test_layout_restyle_matched_properties_cache);
+    RUN_TEST(test_layout_pre_wrap_breaks_between_inline_runs);
 }

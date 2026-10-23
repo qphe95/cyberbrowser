@@ -8005,7 +8005,13 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
             } else if (text && layout_measure_text_styled(child, text, fs, &tw, NULL)) {
                 child->width = tw;
                 child->height = line_adv;
-                if (!is_text_run && child->display == CSS_DISPLAY_INLINE) {
+                /* With preserved segment breaks the text's width is its
+                 * longest line, while the intrinsic width below lays the
+                 * children out on one line: a break between two children
+                 * (YouTube's description runs, "text\n\n" then "more") made it
+                 * larger and turned the forced breaks off. */
+                bool forced_breaks = keeps_nl && strchr(text, '\n');
+                if (!is_text_run && child->display == CSS_DISPLAY_INLINE && !forced_breaks) {
                     /* Inline element: its max-content width also counts
                      * atomic inline descendants and its own padding. */
                     double iw = layout_intrinsic_width(ctx, c, true);
