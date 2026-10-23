@@ -1086,6 +1086,20 @@ static inline int js_resize_array(JSContextHandle ctx, GCHandle *phandle, int el
         return 0;
 }
 
+/* The same for elements without references (integers, atoms): the storage
+ * starts as BYTES (a realloc keeps the type), so plain stores need no
+ * write barrier. */
+static inline int js_resize_bytes_array(JSContextHandle ctx, GCHandle *phandle, int elem_size,
+                                        int *psize, int req_size)
+{
+    if (unlikely(req_size > *psize) && *phandle == GC_HANDLE_NULL) {
+        GCHandle h = gc_alloc((size_t)elem_size, JS_GC_OBJ_TYPE_BYTES);
+        if (h == GC_HANDLE_NULL) return -1;
+        GC_SET(*phandle, h);
+    }
+    return js_resize_array(ctx, phandle, elem_size, psize, req_size);
+}
+
 /* Wrapper to adapt gc_realloc to DynBufReallocFunc signature.
  * DynBuf uses raw pointers, but gc_realloc uses GCHandles.
  * We store the handle in the opaque field and track the pointer.
@@ -1176,7 +1190,7 @@ static int gc_byte_buffer_claim(GCByteBuffer *b, size_t len)
 
         if (b->handle == GC_HANDLE_NULL) {
             /* Initial allocation */
-            GC_SET(b->handle, gc_alloc(new_alloc, JS_GC_OBJ_TYPE_DATA));
+            GC_SET(b->handle, gc_alloc(new_alloc, JS_GC_OBJ_TYPE_BYTES));
             if (b->handle == GC_HANDLE_NULL) {
                 b->error = TRUE;
                 return -1;
@@ -1267,7 +1281,7 @@ static void *js_realloc_bytecode_rt(void *opaque, void *ptr, size_t size)
     if (size > (INT32_MAX / 2)) {
         return NULL;
     } else if (ptr == NULL) {
-        GCHandle h = gc_alloc(sizeof(GCHandle) + size, JS_GC_OBJ_TYPE_DATA);
+        GCHandle h = gc_alloc(sizeof(GCHandle) + size, JS_GC_OBJ_TYPE_BYTES);
         if (h == GC_HANDLE_NULL) return NULL;
         void *data = gc_deref_unsafe(h);
         GC_SET(*(GCHandle*)data, h);
@@ -1295,7 +1309,7 @@ static void *js_realloc_pc2line_rt(void *opaque, void *ptr, size_t size)
     if (size == 0) {
         return NULL;
     } else if (ptr == NULL) {
-        GCHandle h = gc_alloc(sizeof(GCHandle) + size, JS_GC_OBJ_TYPE_DATA);
+        GCHandle h = gc_alloc(sizeof(GCHandle) + size, JS_GC_OBJ_TYPE_BYTES);
         if (h == GC_HANDLE_NULL) return NULL;
         void *data = gc_deref_unsafe(h);
         GC_SET(*(GCHandle*)data, h);
@@ -7730,6 +7744,17 @@ bool JS_GCClassIsWeak(int class_id)
 {
     return class_id == JS_CLASS_WEAKMAP || class_id == JS_CLASS_WEAKSET ||
            class_id == JS_CLASS_WEAK_REF || class_id == JS_CLASS_FINALIZATION_REGISTRY;
+}
+
+/* Where the references of function bytecode b end (payload offset): after
+ * the constant pool come var definitions, closure variables and the
+ * bytecode itself, which hold atoms and integers only. */
+size_t JS_GCBytecodeRefEnd(GCHandle b)
+{
+    JSFunctionBytecode *p = (JSFunctionBytecode *)gc_deref(b);
+    if (!p) return 0;
+    if (!p->cpool_count) return sizeof(JSFunctionBytecode);
+    return (size_t)p->cpool_offset + (size_t)p->cpool_count * sizeof(GCValue);
 }
 
 /* How many leading bytes of raw object data, owned by object owner, hold
@@ -23179,6 +23204,11 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
          * Leaving it as the current frame made the next call link back to
          * it, turning the frame chain into a cycle. */
         js_rt_pop_stack_frame(rt, sf);
+        /* Off the chain the frame is no longer a root: its slots, stored
+         * without write helpers while it ran, are traced from the heap now.
+         * Flag them as written. */
+        gc_dirty_range(JS_SF_ARG_BUF(sf), sizeof(GCValue) * sf->arg_count);
+        gc_dirty_range(JS_SF_VAR_BUF(sf), (uint8_t *)sp - (uint8_t *)JS_SF_VAR_BUF(sf));
         if (pool_depth >= 0) {
             /* A suspended frame outlives the call. */
             sf->escaped = 1;
@@ -23192,6 +23222,11 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
          * Just unlink from the frame chain - GC will collect when no longer needed.
          */
         js_rt_pop_stack_frame(rt, sf);
+        if (sf->escaped) {
+            /* As above, for the locals and arguments its closures keep. */
+            gc_dirty_range(JS_SF_ARG_BUF(sf), sizeof(GCValue) * sf->arg_count);
+            gc_dirty_range(JS_SF_VAR_BUF(sf), sizeof(GCValue) * sf->var_count);
+        }
         if (pool_depth >= 0)
             js_bc_frame_release(sf, pool_depth);
         return ret_val;
@@ -26997,7 +27032,7 @@ static int new_label_fd(JSFunctionDef *fd)
     int label;
     LabelSlot *ls;
 
-    if (!gc_data_array_resize(&fd->label_slots_handle, sizeof(LabelSlot), fd->label_count + 1))
+    if (!gc_data_array_resize_bytes(&fd->label_slots_handle, sizeof(LabelSlot), fd->label_count + 1))
         return -1;
     fd->label_size = fd->label_slots_handle.capacity;
     label = fd->label_count++;
@@ -27279,7 +27314,7 @@ static int push_scope(JSParseState *s) {
             /* XXX: potential arithmetic overflow */
             new_size = max_int(fd->scope_count + 1, fd->scope_size * 3 / 2);
             /* Reallocation: use GCDataArray resize */
-            if (!gc_data_array_resize(&fd->scopes_handle, sizeof(JSVarScope), new_size))
+            if (!gc_data_array_resize_bytes(&fd->scopes_handle, sizeof(JSVarScope), new_size))
                 return -1;
             fd->scope_size = new_size;
         }
@@ -27339,7 +27374,7 @@ static int add_var(JSContextHandle ctx, JSFunctionDef *fd, JSAtom name)
         int new_size = fd->var_size == 0 ? 8 : fd->var_size * 2;
         if (new_size > JS_MAX_LOCAL_VARS)
             new_size = JS_MAX_LOCAL_VARS;
-        if (js_resize_array(ctx, &fd->vars_handle, sizeof(JSVarDef),
+        if (js_resize_bytes_array(ctx, &fd->vars_handle, sizeof(JSVarDef),
                             &fd->var_size, new_size))
             return -1;
     }
@@ -27428,7 +27463,7 @@ static int add_arg(JSContextHandle ctx, JSFunctionDef *fd, JSAtom name)
         JS_ThrowInternalError(ctx, "too many arguments");
         return -1;
     }
-    if (js_resize_array(ctx, &fd->args_handle, sizeof(JSVarDef),
+    if (js_resize_bytes_array(ctx, &fd->args_handle, sizeof(JSVarDef),
                         &fd->arg_size, fd->arg_count + 1))
         return -1;
     {
@@ -27454,7 +27489,7 @@ static JSGlobalVar *add_global_var(JSContextHandle ctx, JSFunctionDef *s,
 {
     JSGlobalVar *hf;
 
-    if (!gc_data_array_resize(&s->global_vars_handle, sizeof(JSGlobalVar), s->global_var_count + 1))
+    if (!gc_data_array_resize_bytes(&s->global_vars_handle, sizeof(JSGlobalVar), s->global_var_count + 1))
         return NULL;
     s->global_var_size = s->global_vars_handle.capacity;
     hf = &GC_DATA_ARRAY_AT(s_global_vars, JSGlobalVar, s->global_var_count++);
@@ -36451,7 +36486,7 @@ static JSFunctionDef *js_new_function_def(JSContextHandle ctx,
 
     /* XXX: should distinguish arg, var and var object and body scopes */
     /* Allocate scopes array on GC heap immediately */
-    if (!gc_data_array_resize(&SAFE_PTR(fd, JSFunctionDefHandle)->scopes_handle, sizeof(JSVarScope), 4)) {
+    if (!gc_data_array_resize_bytes(&SAFE_PTR(fd, JSFunctionDefHandle)->scopes_handle, sizeof(JSVarScope), 4)) {
         QJS_LOGE("[NEW_FD] scopes_handle.resize failed");
         return NULL;
     }
@@ -36464,7 +36499,7 @@ static JSFunctionDef *js_new_function_def(JSContextHandle ctx,
     SAFE_PTR(fd, JSFunctionDefHandle)->body_scope = -1;
     
     /* Initialize label slots array */
-    if (!gc_data_array_resize(&SAFE_PTR(fd, JSFunctionDefHandle)->label_slots_handle, sizeof(LabelSlot), 4)) {
+    if (!gc_data_array_resize_bytes(&SAFE_PTR(fd, JSFunctionDefHandle)->label_slots_handle, sizeof(LabelSlot), 4)) {
         QJS_LOGE("[NEW_FD] label_slots_handle.resize failed");
         return NULL;
     }
@@ -37067,7 +37102,7 @@ static int add_closure_var(JSContextHandle ctx, JSFunctionDef *s,
         return -1;
     }
 
-    if (!gc_data_array_resize(&s->closure_var_handle, sizeof(JSClosureVar), s->closure_var_handle.count + 1)) {
+    if (!gc_data_array_resize_bytes(&s->closure_var_handle, sizeof(JSClosureVar), s->closure_var_handle.count + 1)) {
         JS_ThrowOutOfMemory(ctx);
         return -1;
     }
@@ -38420,7 +38455,7 @@ static __exception int add_closure_variables(JSContextHandle ctx, JSFunctionDef 
         JSBytecodeVarDef *vardefs = b_vardefs(b);
         vd = &vardefs[SAFE_GET_OR(b, JSFunctionBytecodeHandle, arg_count, 0) + i];
         if (vd->has_scope) {
-            if (!gc_data_array_resize(&s->closure_var_handle, sizeof(JSClosureVar), s->closure_var_handle.count + 1))
+            if (!gc_data_array_resize_bytes(&s->closure_var_handle, sizeof(JSClosureVar), s->closure_var_handle.count + 1))
                 return -1;
             int idx = s->closure_var_handle.count - 1;
             JSClosureVar *cv = &GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, idx);
@@ -38432,7 +38467,7 @@ static __exception int add_closure_variables(JSContextHandle ctx, JSFunctionDef 
     if (!is_arg_scope) {
         /* Add argument variables */
         for(i = 0; i < SAFE_GET_OR(b, JSFunctionBytecodeHandle, arg_count, 0); i++) {
-            if (!gc_data_array_resize(&s->closure_var_handle, sizeof(JSClosureVar), s->closure_var_handle.count + 1))
+            if (!gc_data_array_resize_bytes(&s->closure_var_handle, sizeof(JSClosureVar), s->closure_var_handle.count + 1))
                 return -1;
             int idx = s->closure_var_handle.count - 1;
             JSClosureVar *cv = &GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, idx);
@@ -38450,7 +38485,7 @@ static __exception int add_closure_variables(JSContextHandle ctx, JSFunctionDef 
             JSBytecodeVarDef *vardefs = b_vardefs(b);
             vd = &vardefs[SAFE_GET_OR(b, JSFunctionBytecodeHandle, arg_count, 0) + i];
             if (!vd->has_scope && vd->var_name != JS_ATOM__ret_) {
-                if (!gc_data_array_resize(&s->closure_var_handle, sizeof(JSClosureVar), s->closure_var_handle.count + 1))
+                if (!gc_data_array_resize_bytes(&s->closure_var_handle, sizeof(JSClosureVar), s->closure_var_handle.count + 1))
                     return -1;
                 int idx = s->closure_var_handle.count - 1;
                 JSClosureVar *cv = &GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, idx);
@@ -38463,7 +38498,7 @@ static __exception int add_closure_variables(JSContextHandle ctx, JSFunctionDef 
             JSBytecodeVarDef *vardefs = b_vardefs(b);
             vd = &vardefs[SAFE_GET_OR(b, JSFunctionBytecodeHandle, arg_count, 0) + i];
             if (!vd->has_scope && is_var_in_arg_scope(vd->var_name, (JSVarKindEnum)vd->var_kind)) {
-                if (!gc_data_array_resize(&s->closure_var_handle, sizeof(JSClosureVar), s->closure_var_handle.count + 1))
+                if (!gc_data_array_resize_bytes(&s->closure_var_handle, sizeof(JSClosureVar), s->closure_var_handle.count + 1))
                     return -1;
                 int idx = s->closure_var_handle.count - 1;
                 JSClosureVar *cv = &GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, idx);
@@ -38489,7 +38524,7 @@ static __exception int add_closure_variables(JSContextHandle ctx, JSFunctionDef 
             abort();
         }
         {
-            if (!gc_data_array_resize(&s->closure_var_handle, sizeof(JSClosureVar), s->closure_var_handle.count + 1))
+            if (!gc_data_array_resize_bytes(&s->closure_var_handle, sizeof(JSClosureVar), s->closure_var_handle.count + 1))
                 return -1;
             int idx = s->closure_var_handle.count - 1;
             cv = &GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, idx);
@@ -39179,7 +39214,7 @@ static void add_pc2line_info(JSFunctionDef *s, uint32_t pc, uint32_t source_pos)
     &&  pc >= s->line_number_last_pc
     &&  source_pos != s->line_number_last) {
         int idx = s->line_number_slots_handle.count;
-        if (!gc_data_array_resize(&s->line_number_slots_handle, sizeof(LineNumberSlot), idx + 1))
+        if (!gc_data_array_resize_bytes(&s->line_number_slots_handle, sizeof(LineNumberSlot), idx + 1))
             return;
         GC_DATA_ARRAY_AT(s->line_number_slots_handle, LineNumberSlot, idx).pc = pc;
         GC_DATA_ARRAY_AT(s->line_number_slots_handle, LineNumberSlot, idx).source_pos = source_pos;
@@ -40485,7 +40520,7 @@ static __exception int ss_check(JSContextHandle ctx, StackSizeState *s,
     s->catch_pos_tab[pos] = catch_pos;
 
     /* queue the new PC to explore */
-    if (js_resize_array(ctx, &s->pc_stack_handle, sizeof(int),
+    if (js_resize_bytes_array(ctx, &s->pc_stack_handle, sizeof(int),
                         &s->pc_stack_size, s->pc_stack_len + 1))
         return -1;
     s_pc_stack[s->pc_stack_len++] = pos;
@@ -40502,13 +40537,13 @@ static __exception int compute_stack_size(JSContextHandle ctx,
 
     s->bc_len = fd->byte_code.size;
     /* bc_len > 0 */
-    s->stack_level_tab = ((uint16_t *)gc_deref(gc_alloc(sizeof(s->stack_level_tab[0]) * s->bc_len, JS_GC_OBJ_TYPE_DATA)));
+    s->stack_level_tab = ((uint16_t *)gc_deref(gc_alloc(sizeof(s->stack_level_tab[0]) * s->bc_len, JS_GC_OBJ_TYPE_BYTES)));
     if (!s->stack_level_tab)
         return -1;
     for(i = 0; i < s->bc_len; i++)
         s->stack_level_tab[i] = 0xffff;
     s->pc_stack_handle = GC_HANDLE_NULL;
-    s->catch_pos_tab = ((int *)(gc_deref(gc_alloc(sizeof(s->catch_pos_tab[0]) * s->bc_len, JS_GC_OBJ_TYPE_DATA))));  /* Direct access after gc_alloc */
+    s->catch_pos_tab = ((int *)(gc_deref(gc_alloc(sizeof(s->catch_pos_tab[0]) * s->bc_len, JS_GC_OBJ_TYPE_BYTES))));  /* Direct access after gc_alloc */
     if (!s->catch_pos_tab)
         goto fail;
 
@@ -53532,7 +53567,7 @@ void *lre_realloc(void *opaque, void *ptr, size_t size)
         return NULL;
     } else if (ptr == NULL) {
         /* Allocate new: extra space for handle */
-        GCHandle h = gc_alloc(sizeof(GCHandle) + size, JS_GC_OBJ_TYPE_DATA);
+        GCHandle h = gc_alloc(sizeof(GCHandle) + size, JS_GC_OBJ_TYPE_BYTES);
         if (h == GC_HANDLE_NULL) return NULL;
         void *data = gc_deref_unsafe(h);  /* Safe: immediately store handle below */
         *(GCHandle*)data = h;  /* gc-no-dirty: the buffer's own handle */

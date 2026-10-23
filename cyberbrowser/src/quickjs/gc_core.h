@@ -250,11 +250,14 @@ typedef struct GCHandleHistory {
     uint16_t prev_type;
     uint8_t prev_freed_by, prev_young;
     uint32_t uses;                      /* objects that have had this handle */
+    uint32_t site;                      /* allocation site (QJS_GC_ALLOC_SITES), 0 = unknown */
 } GCHandleHistory;
 enum { GC_FREED_NOT = 0, GC_FREED_JS, GC_FREED_STW_SWEEP, GC_FREED_CONCURRENT_SWEEP };
 extern GCHandleHistory *g_handle_history;   /* NULL unless QJS_GC_HISTORY or QJS_GC_NO_REUSE */
 extern bool g_handle_no_reuse;
 void gc_core_note_freed(GCHandle h, int how);
+/* QJS_GC_ALLOC_SITES: the frames of allocation site `site`, image-relative. */
+int gc_debug_site_frames(uint32_t site, uint64_t *rvas, int max);
 
 
 /* Clear a handle's entries if they still point at payload (CAS, so a

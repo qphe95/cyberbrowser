@@ -200,8 +200,9 @@ typedef enum JSGCObjectTypeEnum {
     JS_GC_OBJ_TYPE_JS_BIGINT,
     JS_GC_OBJ_TYPE_MODULE,
     JS_GC_OBJ_TYPE_JOB_ENTRY,   /* pending job: realm + arguments */
-    JS_GC_OBJ_TYPE_BYTES,       /* raw bytes whose address is cached (ArrayBuffer
-                                   storage): no references, never moved */
+    JS_GC_OBJ_TYPE_BYTES,       /* raw bytes (ArrayBuffer storage, compiler and
+                                   regexp buffers): no references, so stores into
+                                   them need no write barrier */
 } JSGCObjectTypeEnum;
 
 #ifdef __cplusplus
@@ -819,6 +820,7 @@ typedef struct GCDataArray {
  * is exceeded (new elements are zeroed). Returns false on OOM.
  * Defined in quickjs_gc_unified.c. */
 bool gc_data_array_resize(GCDataArray *arr, size_t elem_size, int new_count);
+bool gc_data_array_resize_bytes(GCDataArray *arr, size_t elem_size, int new_count);
 /* Append one element slot and return a pointer to it (NULL on OOM). */
 void *gc_data_array_prepare_push(GCDataArray *arr, size_t elem_size);
 /* Append a copy of *elem. Returns false on OOM. */

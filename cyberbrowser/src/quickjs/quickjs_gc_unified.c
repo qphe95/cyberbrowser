@@ -109,6 +109,44 @@ void gc_core_note_freed(GCHandle h, int how) {
 }
 
 /* The caller's frames, image-relative (for addr2line). */
+/* ---- Allocation sites (QJS_GC_ALLOC_SITES, with the handle history) ----
+ * Each allocation's call stack, interned: the history entry keeps its id. */
+#define SITE_FRAMES 8
+#define SITE_SLOTS  (1u << 16)
+typedef struct AllocSite { uint64_t hash; void *frames[SITE_FRAMES]; uint8_t n; } AllocSite;
+static AllocSite *g_sites;   /* slot 0 unused: id 0 = unknown */
+
+static uint32_t alloc_site_here(void) {
+#ifdef _WIN32
+    extern unsigned short __stdcall RtlCaptureStackBackTrace(unsigned long, unsigned long, void **, unsigned long *);
+    void *frames[SITE_FRAMES];
+    unsigned long hash32 = 0;
+    unsigned short n = RtlCaptureStackBackTrace(2, SITE_FRAMES, frames, &hash32);
+    uint64_t hash = 1469598103934665603ull;
+    for (unsigned short i = 0; i < n; i++) hash = (hash ^ (uintptr_t)frames[i]) * 1099511628211ull;
+    if (!hash) hash = 1;
+    for (uint32_t k = 0, i = (uint32_t)(hash % (SITE_SLOTS - 1)) + 1; k < SITE_SLOTS - 1;
+         k++, i = i % (SITE_SLOTS - 1) + 1) {
+        if (g_sites[i].hash == hash) return i;
+        if (!g_sites[i].hash) {
+            g_sites[i].hash = hash;
+            memcpy(g_sites[i].frames, frames, n * sizeof(void *));
+            g_sites[i].n = (uint8_t)n;
+            return i;
+        }
+    }
+#endif
+    return 0;
+}
+
+int gc_debug_site_frames(uint32_t site, uint64_t *rvas, int max) {
+    extern char __ImageBase;
+    if (!g_sites || !site || site >= SITE_SLOTS) return 0;
+    int n = g_sites[site].n < max ? g_sites[site].n : max;
+    for (int i = 0; i < n; i++) rvas[i] = (uintptr_t)g_sites[site].frames[i] - (uintptr_t)&__ImageBase;
+    return n;
+}
+
 static void stale_backtrace(void) {
 #ifdef _WIN32
     extern unsigned short __stdcall RtlCaptureStackBackTrace(unsigned long, unsigned long, void **, unsigned long *);
@@ -867,7 +905,6 @@ static bool type_starts_old(JSGCObjectTypeEnum type) {
     case JS_GC_OBJ_TYPE_FUNCTION_BYTECODE:
     case JS_GC_OBJ_TYPE_MODULE:
     case JS_GC_OBJ_TYPE_FUNCTION_DEF:
-    case JS_GC_OBJ_TYPE_BYTES:   /* never moves: keep it out of the nursery */
         return true;
     default:
         return false;
@@ -901,6 +938,7 @@ static GCHandle gc_alloc_in(size_t size, JSGCObjectTypeEnum type, bool old, bool
         e->type = (uint16_t)type;
         e->freed_by = GC_FREED_NOT;
         e->alloc_young = young;
+        e->site = g_sites ? alloc_site_here() : 0;
     }
     gc_core_set_alive(h);
     GC_TRACE(h, type == JS_GC_OBJ_TYPE_STACK_FRAME ? "allocated (frame)" : "allocated");
@@ -1346,6 +1384,7 @@ bool gc_init(void) {
         /* Indexed by handle: committed region by region with the
          * liveness bitmap. */
         g_handle_history = (GCHandleHistory *)gc_os_reserve((size_t)GC_MAX_HANDLES * sizeof(GCHandleHistory), false);
+        if (getenv("QJS_GC_ALLOC_SITES") && !g_sites) g_sites = (AllocSite *)calloc(SITE_SLOTS, sizeof(AllocSite));
         /* A handle is an address: keeping freed ones dead means never
          * reusing memory, so no holes and no released regions. */
         if (g_handle_no_reuse) {
@@ -1360,7 +1399,10 @@ bool gc_init(void) {
 
     /* Reserve one extra region so the base can be region-aligned. */
     size_t reserve = GC_HEAP_RESERVE + GC_REGION_SIZE;
-    g_core.heap_reservation = gc_os_reserve(reserve, gc_os_has_write_watch());
+    /* The OS write watch: the dirty tracking itself, or what the barrier
+     * checker compares the cards with. */
+    bool watch = gc_os_has_write_watch() && (!GC_SOFTWARE_DIRTY || getenv("QJS_GC_BARRIER_CHECK"));
+    g_core.heap_reservation = gc_os_reserve(reserve, watch);
     if (!g_core.heap_reservation) {
         fprintf(stderr, "[GC] cannot reserve %zu bytes of address space\n", reserve);
         return false;
@@ -1596,7 +1638,7 @@ void gc_list_del_in_container(GCHandle node, GCHandle container,
  * GCDataArray (see quickjs_types.h)
  * ============================================================================ */
 
-bool gc_data_array_resize(GCDataArray *arr, size_t elem_size, int new_count)
+static bool data_array_resize(GCDataArray *arr, size_t elem_size, int new_count, JSGCObjectTypeEnum type)
 {
     if (new_count <= arr->capacity) {
         /* Zero new elements when growing within capacity */
@@ -1610,7 +1652,7 @@ bool gc_data_array_resize(GCDataArray *arr, size_t elem_size, int new_count)
     int new_cap = new_count > arr->capacity * 3 / 2 ? new_count : arr->capacity * 3 / 2;
     if (new_cap < 4) new_cap = 4;
 
-    GCHandle new_handle = gc_alloc(elem_size * new_cap, JS_GC_OBJ_TYPE_DATA);
+    GCHandle new_handle = gc_alloc(elem_size * new_cap, type);
     if (new_handle == GC_HANDLE_NULL) return false;
     uint8_t *new_data = (uint8_t *)gc_deref(new_handle);
     if (!new_data) return false;
@@ -1626,6 +1668,17 @@ bool gc_data_array_resize(GCDataArray *arr, size_t elem_size, int new_count)
     arr->capacity = new_cap;
     arr->count = new_count;
     return true;
+}
+bool gc_data_array_resize(GCDataArray *arr, size_t elem_size, int new_count)
+{
+    return data_array_resize(arr, elem_size, new_count, JS_GC_OBJ_TYPE_DATA);
+}
+
+/* For elements without references (integers, atoms): the storage is BYTES,
+ * so plain stores into it need no write barrier. */
+bool gc_data_array_resize_bytes(GCDataArray *arr, size_t elem_size, int new_count)
+{
+    return data_array_resize(arr, elem_size, new_count, JS_GC_OBJ_TYPE_BYTES);
 }
 
 void *gc_data_array_prepare_push(GCDataArray *arr, size_t elem_size)

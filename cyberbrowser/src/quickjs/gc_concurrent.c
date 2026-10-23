@@ -35,12 +35,15 @@
  *   is mostly live.
  *
  * Dirty tracking
- *   Windows: the heap is reserved with MEM_WRITE_WATCH and GetWriteWatch
- *   reports written pages.  Elsewhere the engine's write helpers set one
- *   byte per 4 KB card.  Both are pulled through dirty_pull(), which also
- *   records every card in the nursery's remembered set.  The software flags
- *   cover reference stores only, so on those platforms a copy is validated
- *   at the flip by comparing it with the original.
+ *   The engine's write helpers set one byte per 4 KB card.  (Built with
+ *   GC_SOFTWARE_DIRTY=0 on Windows, the heap is reserved with
+ *   MEM_WRITE_WATCH and GetWriteWatch reports written pages instead.)
+ *   Either is pulled through dirty_pull(), which also records every card in
+ *   the nursery's remembered set.  Frames are written without the helpers
+ *   while they are on the call chain (a root); a frame that leaves it and
+ *   stays reachable has its slots flagged then.  QJS_GC_BARRIER_CHECK=1
+ *   (Windows) compares the cards with the OS write watch to find stores
+ *   that bypass the helpers.
  */
 #if !defined(_WIN32) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE
@@ -226,16 +229,22 @@ static uint64_t g_bcheck_pages, g_bcheck_flagged_pages, g_bcheck_words;
 static uint64_t g_bcheck_by_type[32];
 
 #define BCHECK_KEYS 8192
-static struct { uint32_t key, count; GCHandle example; uint16_t class_id; } g_bkeys[BCHECK_KEYS];
+static struct { uint32_t key, count; GCHandle example; uint16_t class_id, type; uint32_t off; } g_bkeys[BCHECK_KEYS];
 
 static void bcheck_note(uint32_t type, uint32_t off, GCHandle obj, uint16_t class_id) {
-    uint32_t key = (type << 16) | (off < 0xffff ? off : 0xffff);
+    /* By allocation site when the history records them, else by (type, offset). */
+    uint32_t site = g_handle_history && obj < gc_handle_limit() ? g_handle_history[obj].site : 0;
+    uint32_t key = site ? 0x80000000u | (type >= 32 ? 0x40000000u : 0) | site : (type << 16) | (off < 0xffff ? off : 0xffff);
     uint32_t i = (key * 2654435761u) % BCHECK_KEYS;
     for (uint32_t k = 0; k < BCHECK_KEYS; k++, i = (i + 1) % BCHECK_KEYS) {
         if (g_bkeys[i].count && g_bkeys[i].key == key) { g_bkeys[i].count++; return; }
         if (!g_bkeys[i].count) {
             g_bkeys[i].key = key; g_bkeys[i].count = 1;
             g_bkeys[i].example = obj; g_bkeys[i].class_id = class_id;
+            g_bkeys[i].type = (uint16_t)type; g_bkeys[i].off = off;
+            /* Now as well as at exit: next to what was running. */
+            fprintf(stderr, "[BARRIER-CHECK] new site: type %u offset %u, object %u (site %u)\n",
+                    type, off, (unsigned)obj, site);
             return;
         }
     }
@@ -255,6 +264,16 @@ static void bcheck_report(void) {
             fprintf(stderr, "[BARRIER-CHECK] type %d: %llu words\n", t, (unsigned long long)g_bcheck_by_type[t]);
     for (uint32_t a = 0; a < n && a < 60; a++) {
         uint32_t i = order[a];
+        if (g_bkeys[i].key & 0x80000000u) {
+            uint64_t rvas[8];
+            int nf = gc_debug_site_frames(g_bkeys[i].key & 0x3fffffffu, rvas, 8);
+            fprintf(stderr, "[BARRIER-CHECK] site %u: %u words, type %u (e.g. object %u offset %u, class %u), allocated at",
+                    g_bkeys[i].key & 0x3fffffffu, g_bkeys[i].count, g_bkeys[i].type, (unsigned)g_bkeys[i].example,
+                    g_bkeys[i].off, g_bkeys[i].class_id);
+            for (int f = 0; f < nf; f++) fprintf(stderr, " 0x%llx", (unsigned long long)rvas[f]);
+            fputc('\n', stderr);
+            continue;
+        }
         fprintf(stderr, "[BARRIER-CHECK] type %u offset %u%s: %u words (e.g. object %u, class %u)\n",
                 g_bkeys[i].key >> 16, g_bkeys[i].key & 0xffff, (g_bkeys[i].key & 0xffff) == 0xffff ? "+" : "",
                 g_bkeys[i].count, (unsigned)g_bkeys[i].example, g_bkeys[i].class_id);
@@ -277,7 +296,10 @@ static bool bcheck_enabled(void) {
 
 static bool bcheck_is_ref_handle(uint32_t w) {
     if (w == GC_HANDLE_NULL || w >= atomic_load_explicit(&g_gc.handle_limit, memory_order_acquire)) return false;
-    return gc_handle_alive(w);
+    if (!gc_handle_alive(w)) return false;
+    /* Atoms and other permanent objects are never collected: no barrier needed. */
+    GCRegion *r = gc_core_region_of(gc_deref(w));
+    return !(r && r->permanent);
 }
 
 /* Page `page` (4 KB) was written with its card clean: report reference
@@ -311,27 +333,37 @@ static void bcheck_page(uintptr_t page, bool card_clean) {
              * copied here) since the last pull, and its stores initialise it. */
             bool same_header = p >= page && memcmp(shadow + (p - page), (void *)p, GC_HEADER_SIZE) == 0;
             bool header_before_page = p < page;
+            /* A new object counts too when a cycle that does not trace it is
+             * running (allocated after mark start): its first stores need the
+             * helpers then, like any other.  Reported as type + 32. */
+            bool fresh = !same_header && !header_before_page &&
+                         atomic_load_explicit(&g_core.cycle_active, memory_order_acquire) && !gc_col_in_cycle(r, h);
             bool skip = type == JS_GC_OBJ_TYPE_STACK_FRAME || type == JS_GC_OBJ_TYPE_ASYNC_FUNCTION ||
                         type == JS_GC_OBJ_TYPE_JS_STRING || type == JS_GC_OBJ_TYPE_JS_STRING_ROPE ||
                         type == JS_GC_OBJ_TYPE_JS_BIGINT || type == JS_GC_OBJ_TYPE_BYTES ||
                         /* shapes: hash table and property entries hold atoms and indexes;
                          * proto_handle is set only through its helper */
                         type == JS_GC_OBJ_TYPE_SHAPE ||
-                        !gc_core_header_is_current(h) || (!same_header && !header_before_page);
+                        !gc_core_header_is_current(h) || (!same_header && !header_before_page && !fresh);
             if (!skip) {
                 uintptr_t payload = p + GC_HEADER_SIZE;
                 uintptr_t a = payload > page ? payload : page;
                 uintptr_t b = p + total < end ? p + total : end;
+                if (type == JS_GC_OBJ_TYPE_FUNCTION_BYTECODE) {
+                    extern size_t JS_GCBytecodeRefEnd(GCHandle b);
+                    uintptr_t ref_end = payload + JS_GCBytecodeRefEnd(h->handle);
+                    if (b > ref_end) b = ref_end;
+                }
                 uint16_t class_id = type == JS_GC_OBJ_TYPE_JS_OBJECT ? *(uint16_t *)payload : 0;
                 for (a = (a + 3) & ~(uintptr_t)3; a + 4 <= b; a += 4) {
-                    uint32_t cur = *(uint32_t *)a, old = *(uint32_t *)(shadow + (a - page));
+                    uint32_t cur = *(uint32_t *)a, old = fresh ? 0 : *(uint32_t *)(shadow + (a - page));
                     if (cur == old || !bcheck_is_ref_handle(cur)) continue;
                     /* A GCValue payload (8-aligned) counts only with a reference tag. */
                     if (((a - payload) & 7) == 0 && a + 8 <= b) {
                         uint32_t tag = *(uint32_t *)(a + 4);
                         if (!((unsigned)(int32_t)tag >= (unsigned)JS_TAG_FIRST) && tag != 0) continue;
                     }
-                    bcheck_note(type, (uint32_t)(a - payload), h->handle, class_id);
+                    bcheck_note(fresh ? type + 32 : type, (uint32_t)(a - payload), h->handle, class_id);
                     g_bcheck_by_type[type & 31]++;
                     g_bcheck_words++;
                     flagged = true;
@@ -502,13 +534,17 @@ static void step_mark_start(int kind) {
             r->collecting = r->has_young && gc_core_region_in_use(atomic_load(&r->state));
             r->has_young = r->alloc_owner != GC_OWNER_NONE;
         }
-        uint64_t *t = g_conc.remset_cur;
-        g_conc.remset_cur = g_conc.remset_acc;
-        g_conc.remset_acc = t;   /* cleared by the GC thread after the last cycle */
         g_conc.young_bytes = 0;
     } else {
         g_conc.old_bytes = 0;
     }
+    /* The remembered set so far goes to this cycle: a minor rescans it; a
+     * major traces every object it could lead to, so the next minor needs
+     * only the cards written from now on.  retire_remset() drops it when
+     * the cycle completes and merges it back if it does not. */
+    uint64_t *t = g_conc.remset_cur;
+    g_conc.remset_cur = g_conc.remset_acc;
+    g_conc.remset_acc = t;   /* cleared by the GC thread after the last cycle */
     uint64_t ta = gc_os_now_ns();
     gc_col_begin_cycle(kind, false);
     uint64_t tb = gc_os_now_ns();
@@ -783,6 +819,36 @@ static void queue_remset(void) {
             u32_push(&g_conc.pending_cards, card);
         }
     }
+    if (g_core.log_level > 1) {
+        /* What the remembered set holds: cards with an old (marked) object
+         * on them, and how many bytes of old objects they cover. */
+        uint32_t with_old = 0, young_only = 0;
+        uint64_t old_bytes = 0;
+        for (uint32_t i = 0; i < g_conc.pending_cards.n; i++) {
+            uint32_t card = g_conc.pending_cards.items[i];
+            uintptr_t lo = (uintptr_t)g_gc.heap_base + ((uintptr_t)card << GC_CARD_SHIFT), hi = lo + GC_CARD_SIZE;
+            GCRegion *r = gc_core_region_of((void *)lo);
+            if (!r || !gc_core_region_in_use(atomic_load(&r->state))) continue;
+            uintptr_t top = atomic_load(&r->top);
+            if (hi > top) hi = top;
+            GCHeader *hdr = gc_core_object_containing((const void *)lo);
+            uintptr_t p = hdr ? (uintptr_t)hdr : gc_core_next_header(r, lo, hi);
+            uint64_t ob = 0;
+            while (p < hi) {
+                GCHeader *h = (GCHeader *)p;
+                size_t total = gc_header_total_size(h);
+                if (!total) { p = gc_core_skip_free(r, p, hi); continue; }
+                if (gc_col_is_marked(r, h)) {
+                    uintptr_t a = p < lo ? lo : p, e = p + total < hi ? p + total : hi;
+                    ob += e - a;
+                }
+                p += total;
+            }
+            if (ob) { with_old++; old_bytes += ob; } else young_only++;
+        }
+        fprintf(stderr, "[GC]   remset: %u cards, %u with old objects (%.1f MB of them), %u young only\n",
+                g_conc.pending_cards.n, with_old, old_bytes / 1048576.0, young_only);
+    }
 }
 
 /* Remark, retrying with a larger budget after each decline. */
@@ -904,8 +970,8 @@ static void weak_compute(JSRuntimeHandle rt) {
         if (gc_object_is_dead(items[i].handle)) g_conc.weak_finalizers = true;
 }
 
-/* The remembered set a minor cycle used: cleared when the cycle completed
- * (every young object it covered was promoted), merged back otherwise. */
+/* The remembered set a cycle took at mark start: cleared when the cycle
+ * completed (what it covered is old now), merged back otherwise. */
 static void retire_remset(bool completed) {
     uint32_t used = (uint32_t)((heap_used_end() - (uintptr_t)g_gc.heap_base) >> GC_CARD_SHIFT);
     uint32_t words = (used + 63) / 64;
@@ -963,7 +1029,7 @@ static void run_cycle(int kind) {
         g_core.stats.major_cycles++;
     }
 finish:
-    if (kind == GC_CYCLE_MINOR) retire_remset(!aborted());
+    retire_remset(!aborted());
     end_concurrent_cycle();
     GC_LOG("[GC] %s cycle: mark %.2f ms, remark %.2f ms, sweep %.2f ms, evacuate %.2f ms; "
            "cards %llu, heap %u regions, %.0f MB committed\n",
@@ -979,10 +1045,10 @@ abandon:
     /* Marking was not finished: nothing has been freed or moved.  The JS
      * thread recycles deferred frees when it sees the abort. */
     (void)marked;
-    if (kind == GC_CYCLE_MINOR) retire_remset(false);
+    retire_remset(false);
     /* An abandoned major cycle's bitmap is partial: go back to the one the
      * marks of old objects stick in.  (The JS thread waits for this.) */
-    else if (started) g_col.parity ^= 1;
+    if (kind != GC_CYCLE_MINOR && started) g_col.parity ^= 1;
     g_core.stats.aborted_cycles++;
     end_concurrent_cycle();
 }
@@ -1367,6 +1433,70 @@ static void check_object(GCHeader *hdr, void *opaque) {
 /* Returns the number of inconsistencies found: object headers that are
  * misaligned or not found from their own addresses, and live handles that
  * are not the header of an object.  Waits for the collector to be idle. */
+/* QJS_GC_CENSUS=1: at exit, after a full collection, the live objects by
+ * type (and JS objects by class, data objects by size): what fills the
+ * heap. */
+static uint64_t census_refs[32 + 256], census_root_refs;
+static int census_parent;
+static void census_cb(JSRuntimeHandle rt, GCHandle h) {
+    (void)rt;
+    void *p = h ? gc_deref(h) : NULL;
+    GCHeader *hdr = p ? gc_core_object_containing(p) : NULL;
+    if (!hdr || gc_header_type(hdr) != JS_GC_OBJ_TYPE_STACK_FRAME) return;
+    if (census_parent < 0) census_root_refs++;
+    else census_refs[census_parent]++;
+}
+
+void gc_census_dump(void) {
+    gc_run();
+    gc_wait_idle(20000);
+    uint64_t tn[32] = {0}, tb[32] = {0}, cn[256] = {0}, cb[256] = {0};
+    uint64_t dn[8] = {0}, db[8] = {0};   /* DATA by size class: <64, <256, <1K, <4K, <16K, <64K, <256K, more */
+    uint64_t total = 0, count = 0;
+    for (GCHandle h = gc_next_object(0); h; h = gc_next_object(h)) {
+        void *p = gc_deref(h);
+        GCHeader *hdr = gc_core_object_containing(p);
+        if (!hdr) continue;
+        uint32_t t = gc_header_type(hdr) & 31;
+        size_t sz = gc_header_total_size(hdr);
+        tn[t]++; tb[t] += sz; total += sz; count++;
+        if (t == JS_GC_OBJ_TYPE_JS_OBJECT) {
+            uint16_t cls = *(const uint16_t *)gc_header_payload(hdr);
+            cn[cls & 255]++; cb[cls & 255] += sz;
+        } else if (t == JS_GC_OBJ_TYPE_DATA) {
+            int k = sz < 64 ? 0 : sz < 256 ? 1 : sz < 1024 ? 2 : sz < 4096 ? 3 : sz < 16384 ? 4 : sz < 65536 ? 5 : sz < 262144 ? 6 : 7;
+            dn[k]++; db[k] += sz;
+        }
+    }
+    fprintf(stderr, "[census] %llu objects, %.1f MB live\n", (unsigned long long)count, total / 1048576.0);
+    for (int t = 0; t < 32; t++)
+        if (tn[t]) fprintf(stderr, "[census] type %2d: %9llu objects %9.1f MB\n", t, (unsigned long long)tn[t], tb[t] / 1048576.0);
+    for (int c = 0; c < 256; c++)
+        if (cb[c] > (1u << 20)) fprintf(stderr, "[census]   class %3d: %9llu objects %9.1f MB\n", c, (unsigned long long)cn[c], cb[c] / 1048576.0);
+    static const char *dsz[] = { "<64", "<256", "<1K", "<4K", "<16K", "<64K", "<256K", ">=256K" };
+    for (int k = 0; k < 8; k++)
+        if (dn[k]) fprintf(stderr, "[census]   data %-7s %9llu objects %9.1f MB\n", dsz[k], (unsigned long long)dn[k], db[k] / 1048576.0);
+
+    /* Who references the stack frames: parents by type (and class). */
+    JSRuntimeHandle rt = g_gc.rt;
+    memset(census_refs, 0, sizeof census_refs);
+    census_parent = -1;
+    gc_col_enumerate_roots_cb(rt, census_cb);
+    for (GCHandle h = gc_next_object(0); h; h = gc_next_object(h)) {
+        GCHeader *hdr = gc_core_object_containing(gc_deref(h));
+        if (!hdr) continue;
+        uint32_t t = gc_header_type(hdr) & 31;
+        census_parent = t == JS_GC_OBJ_TYPE_JS_OBJECT ? 32 + (*(const uint16_t *)gc_header_payload(hdr) & 255) : (int)t;
+        mark_children(rt, h, census_cb);
+    }
+    fprintf(stderr, "[census] stack-frame references: roots %llu\n", (unsigned long long)census_root_refs);
+    for (int k = 0; k < 32 + 256; k++)
+        if (census_refs[k])
+            fprintf(stderr, "[census]   from %s %3d: %llu\n", k < 32 ? "type " : "class", k < 32 ? k : k - 32,
+                    (unsigned long long)census_refs[k]);
+    fflush(stderr);
+}
+
 uint32_t gc_test_heap_check(void) {
     /* A sweep formats holes as it goes: walk the heap between cycles. */
     gc_wait_idle(20000);

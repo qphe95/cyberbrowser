@@ -293,6 +293,10 @@ static void cleanup_browser_context(void) {
     g_js_runtime = GC_HANDLE_NULL;
     g_js_context = GC_HANDLE_NULL;
     if (SAFE_VALID(g_rt)) {
+        if (getenv("QJS_GC_CENSUS")) {
+            extern void gc_census_dump(void);
+            gc_census_dump();
+        }
         JS_FreeRuntime(g_rt);
     }
 }

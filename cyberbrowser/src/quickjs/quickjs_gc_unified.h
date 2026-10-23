@@ -230,14 +230,12 @@ static inline void atomic_store_128(volatile uint64_t *addr, uint64_t low, uint6
 /* Objects larger than this get their own run of regions and never move. */
 #define GC_HUMONGOUS_MIN    (GC_REGION_SIZE / 4)
 
-/* Software dirty flags: on Windows the OS tracks writes (GetWriteWatch), so
- * the write helpers do nothing.  Elsewhere they set a byte per 4 KB card. */
+/* Software dirty flags: the write helpers set a byte per 4 KB card.  With
+ * -DGC_SOFTWARE_DIRTY=0 (Windows only) the OS tracks writes instead
+ * (GetWriteWatch) and the helpers do nothing; that sees every store to a
+ * page, the collector's own included, so it rescans far more. */
 #ifndef GC_SOFTWARE_DIRTY
-#ifdef _WIN32
-#define GC_SOFTWARE_DIRTY 0
-#else
 #define GC_SOFTWARE_DIRTY 1
-#endif
 #endif
 
 /* ============================================================================
