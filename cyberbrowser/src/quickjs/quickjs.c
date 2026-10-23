@@ -29021,23 +29021,13 @@ static void lazy_emit_dummy_ref(JSParseState *s, JSAtom name, int scope_level)
  * the body was skipped and a stub emitted (s->token is then the token after
  * the closing '}'), 0 if the body must be parsed now (parser position
  * unchanged), -1 on error. */
-static int js_lazy_try_skip_body(JSParseState *s, JSFunctionDef *fd,
-                                 JSParseFunctionEnum func_type,
-                                 const uint8_t *func_start)
+/* The GC copy of the whole input that the outermost function being parsed
+ * owns (offsets into it are relative to s->buf_start), or GC_HANDLE_NULL. */
+static GCHandle js_parse_source_root(JSParseState *s)
 {
-    JSContextHandle ctx = s->ctx;
     GCHandle root = GC_HANDLE_NULL;
     JSFunctionDefHandle h;
-    JSParsePos pos;
-    JSLazyIdentSet ids;
-    JSLazyParseState *st;
-    const uint8_t *body_start, *body_end;
-    int flags = 0, line_num, col_num, scope_level;
-    uint32_t i;
-    BOOL is_arrow = (func_type == JS_PARSE_FUNC_ARROW);
 
-    /* The outermost function being parsed owns a GC copy of the whole input
-       (offsets below are relative to s->buf_start). */
     for (h = s->cur_func_handle; !SAFE_IS_NULL(h);
          h = (JSFunctionDefHandle)(SAFE_PTR(h, JSFunctionDefHandle)->parent_handle)) {
         if (SAFE_PTR(h, JSFunctionDefHandle)->source_string_handle != GC_HANDLE_NULL) {
@@ -29046,7 +29036,7 @@ static int js_lazy_try_skip_body(JSParseState *s, JSFunctionDef *fd,
         }
     }
     if (root == GC_HANDLE_NULL)
-        return 0;
+        return GC_HANDLE_NULL;
     {
         /* the root copy must be the buffer being parsed (O(1) check: the
            copy is NUL-terminated right after the input) */
@@ -29054,8 +29044,48 @@ static int js_lazy_try_skip_body(JSParseState *s, JSFunctionDef *fd,
         const char *rp = (const char *)gc_deref(root);
         if (!rp || gc_handle_get_size(root) < len + 1 || rp[len] != '\0' ||
             (len > 0 && (rp[0] != (char)s->buf_start[0] || rp[len - 1] != (char)s->buf_end[-1])))
-            return 0;
+            return GC_HANDLE_NULL;
     }
+    return root;
+}
+
+/* Keep fd's source text [start, start + len) for Function.prototype.toString():
+ * a range of the root copy when there is one, else a copy of its own. */
+static int js_parse_keep_source(JSParseState *s, JSFunctionDef *fd,
+                                const uint8_t *start, size_t len)
+{
+    GCHandle root = js_parse_source_root(s);
+    fd->source_len = len;
+    if (root != GC_HANDLE_NULL) {
+        GC_SET(fd->source_string_handle, root);
+        fd->source_offset = start - s->buf_start;
+        return 0;
+    }
+    {
+        GCStringHandle source_handle = gc_strndup((const char *)start, len);
+        GC_SET(fd->source_string_handle, SAFE_HANDLE(source_handle));
+        fd->source_offset = 0;
+    }
+    return fd->source_string_handle == GC_HANDLE_NULL ? -1 : 0;
+}
+
+static int js_lazy_try_skip_body(JSParseState *s, JSFunctionDef *fd,
+                                 JSParseFunctionEnum func_type,
+                                 const uint8_t *func_start)
+{
+    JSContextHandle ctx = s->ctx;
+    GCHandle root;
+    JSParsePos pos;
+    JSLazyIdentSet ids;
+    JSLazyParseState *st;
+    const uint8_t *body_start, *body_end;
+    int flags = 0, line_num, col_num, scope_level;
+    uint32_t i;
+    BOOL is_arrow = (func_type == JS_PARSE_FUNC_ARROW);
+
+    root = js_parse_source_root(s);
+    if (root == GC_HANDLE_NULL)
+        return 0;
 
     body_start = s->token.ptr;
     line_num = get_line_col_cached(&s->get_line_col_cache, &col_num, body_start);
@@ -29938,14 +29968,8 @@ static __exception int js_parse_class(JSParseState *s, BOOL is_class_expr,
 
     /* store the class source code in the constructor. */
     if (!fd->strip_source) {
-        /* GC frees automatically */;
-        ctor_fd->source_len = s->buf_ptr - class_start_ptr;
-        {
-            GCStringHandle source_handle = gc_strndup((const char *)class_start_ptr, ctor_fd->source_len);
-            GC_SET(ctor_fd->source_string_handle, SAFE_HANDLE(source_handle));
-            if (ctor_fd->source_string_handle == GC_HANDLE_NULL)
-                goto fail;
-        }
+        if (js_parse_keep_source(s, ctor_fd, class_start_ptr, s->buf_ptr - class_start_ptr))
+            goto fail;
     }
 
     /* consume the '}' */
@@ -42069,13 +42093,8 @@ static __exception int js_parse_function_decl2(JSParseState *s,
                 /* save the function source code */
                 /* the end of the function source code is after the last
                    token of the function source stored into s->last_ptr */
-                fd->source_len = s->last_ptr - ptr;
-                {
-                    GCStringHandle source_handle = gc_strndup((const char *)ptr, fd->source_len);
-                    GC_SET(fd->source_string_handle, SAFE_HANDLE(source_handle));
-                    if (fd->source_string_handle == GC_HANDLE_NULL)
-                        goto fail;
-                }
+                if (js_parse_keep_source(s, fd, ptr, s->last_ptr - ptr))
+                    goto fail;
             }
             goto done;
         }
@@ -42129,13 +42148,8 @@ static __exception int js_parse_function_decl2(JSParseState *s,
     }
     if (!fd->strip_source) {
         /* save the function source code */
-        fd->source_len = s->buf_ptr - ptr;
-        {
-            GCStringHandle source_handle = gc_strndup((const char *)ptr, fd->source_len);
-            GC_SET(fd->source_string_handle, SAFE_HANDLE(source_handle));
-            if (fd->source_string_handle == GC_HANDLE_NULL)
-                goto fail;
-        }
+        if (js_parse_keep_source(s, fd, ptr, s->buf_ptr - ptr))
+            goto fail;
     }
 
     if (next_token(s)) {
