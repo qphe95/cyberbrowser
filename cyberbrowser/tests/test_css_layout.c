@@ -1226,13 +1226,15 @@ TEST(test_layout_hidden_subtree_left_unstyled) {
         "</style></head><body>"
         "<div class=\"%s\"><div class=\"%s\"><span>t</span></div></div>"
         "</body></html>";
-    struct { const char *parent, *child; bool all; bool skipped; double font; } steps[] = {
-        { "hid", "w",     false, true,  16 },
-        { "hid", "w big", false, true,  16 },    /* restyled while hidden: its entry goes stale */
-        { "",    "w big", false, false, 30 },    /* shown: styled from scratch */
-        { "hid", "w big", true,  false, 30 },    /* style_all: styled though hidden */
-        { "hid", "w",     false, true,  16 },
-        { "",    "w",     false, false, 16 },
+    /* skipped: a placeholder; left_out: not in the tree (its parent's
+     * cached style is display:none). */
+    struct { const char *parent, *child; bool all, skipped, left_out; double font; } steps[] = {
+        { "hid", "w",     false, true,  false, 16 },
+        { "hid", "w big", false, false, true,  16 },   /* restyled while left out */
+        { "",    "w big", false, false, false, 30 },   /* shown: built again in full, styled */
+        { "hid", "w big", true,  false, false, 30 },   /* style_all: styled though hidden */
+        { "hid", "w",     false, false, true,  16 },
+        { "",    "w",     false, false, false, 16 },
     };
     for (size_t s = 0; s < sizeof(steps) / sizeof(steps[0]); s++) {
         char html[2048];
@@ -1243,14 +1245,17 @@ TEST(test_layout_hidden_subtree_left_unstyled) {
         ctx.style_all = steps[s].all;
         ASSERT_TRUE(css_layout_run(&ctx, doc, NULL, 800.0, 600.0));
         LayoutBox *c = box_with_class(&ctx, doc, steps[s].child);
-        ASSERT_TRUE(c != NULL);
-        ASSERT_EQ(steps[s].skipped, (c->flags & LAYOUT_STYLE_SKIPPED) != 0);
-        ASSERT_EQ(steps[s].skipped, ctx.style_skipped >= 3);   /* the child, the span and its text */
-        if (!steps[s].skipped) {
+        ASSERT_EQ(steps[s].left_out, c == NULL);
+        ASSERT_EQ(steps[s].left_out, ctx.pruned_n >= 1);
+        if (c) {
+            ASSERT_EQ(steps[s].skipped, (c->flags & LAYOUT_STYLE_SKIPPED) != 0);
+            ASSERT_EQ(steps[s].skipped, ctx.style_skipped >= 3);   /* the child, the span and its text */
+        }
+        if (c && !steps[s].skipped) {
             ASSERT_TRUE(near_equal(c->font_size, steps[s].font));
             ASSERT_TRUE(near_equal(c->height, steps[s].parent[0] ? 0 : 5));
             if (!steps[s].parent[0]) ASSERT_TRUE(near_equal(c->width, 70));
-        } else {
+        } else if (c) {
             ASSERT_EQ(CSS_DISPLAY_NONE, c->display);
         }
         css_layout_tree_free(&ctx);

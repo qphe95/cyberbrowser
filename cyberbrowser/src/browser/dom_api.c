@@ -4009,6 +4009,7 @@ static GCValue hit_test_layout_node(JSContextHandle ctx, LayoutContext *layout, 
     if (!layout || idx < 0 || idx >= layout->tree.count) return JS_NULL;
     LayoutBox *box = &layout->boxes[idx];
     LayoutNodeRef *ref = &layout->tree.nodes[idx];
+    if (box->display == CSS_DISPLAY_NONE) return JS_NULL;   /* not laid out (or styled) */
     bool inside = (x >= box->x && x <= box->x + box->width &&
                    y >= box->y && y <= box->y + box->height);
     if (!inside) return JS_NULL;

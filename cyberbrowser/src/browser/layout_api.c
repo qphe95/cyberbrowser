@@ -919,12 +919,41 @@ static bool lq_anchor_independent(int qi, int i)
     LQ_NO("after or at the change");
 }
 
+static bool lq_who_affected_at(int qi);
+
+/* The box holding element `id`, which is not in the cached layout, when
+ * that box is hidden (it or an ancestor display:none), else -1. */
+static int lq_hidden_holder(NodeId id)
+{
+    bool inside;
+    int h = id ? lq_box_or_holder(id, &inside) : -1;
+    if (h < 0 || !inside) return -1;
+    for (int a = h; a >= 0; a = g_lq_layout.tree.nodes[a].parent_idx)
+        if (g_lq_layout.boxes[a].display == CSS_DISPLAY_NONE) return h;
+    return -1;
+}
+
 /* Does the query being answered read a box a change may have altered? */
 static bool lq_who_affected(void)
 {
     if (!g_lq_ndirty && !g_lq_nanchor) return false;
     int qi = g_lq_who ? lq_box_index(g_lq_who) : -1;
-    if (qi < 0) return true;
+    LqAsk ask = g_lq_ask;
+    if (qi < 0) {
+        /* Left out of the layout inside a display:none subtree (or put in one
+         * since): unrendered while the box holding it stays hidden, so it is
+         * asked about as that box's style. */
+        qi = lq_hidden_holder(g_lq_who);
+        if (qi < 0) return true;
+        g_lq_ask = LQ_ASK_STYLE;
+    }
+    bool affected = lq_who_affected_at(qi);
+    g_lq_ask = ask;
+    return affected;
+}
+
+static bool lq_who_affected_at(int qi)
+{
     if (g_lq_ndirty) {
         int m = lq_in_region(g_lq_who, qi);
         /* Where boxes only moved, sizes, extents and styles hold. */
@@ -1322,9 +1351,9 @@ bool layout_query_font_size(JSContextHandle ctx, GCValue element, double *px)
     g_lq_who = 0;
     if (!ok) return false;
     int idx = lq_box_index(id);
-    if (idx >= 0 && (g_lq_layout.boxes[idx].flags & LAYOUT_STYLE_SKIPPED)) {
-        /* Inside a display:none subtree, which layouts do not style: lay out
-         * again styling everything. */
+    if ((idx >= 0 && (g_lq_layout.boxes[idx].flags & LAYOUT_STYLE_SKIPPED)) || (idx < 0 && lq_hidden_holder(id) >= 0)) {
+        /* Inside a display:none subtree, which layouts do not style (or leave
+         * out): lay out again styling everything. */
         layout_api_invalidate();
         g_lq_style_all = true;
         g_lq_who = id;

@@ -151,25 +151,56 @@ static char* layout_resolve_url(const char *base_url, const char *href);
  * Layout tree construction
  * ============================================================================ */
 
-static int layout_count_active_nodes(LayoutContext *ctx)
-{
-    return (int)po_array_active_count(&ctx->doc->array);
-}
+static bool layout_prune_root(HtmlDocument *doc, int i);
+/* Generation of the style set the last restyle's :has() rules (g_has) are
+ * for. */
+static uint64_t g_has_gen;
 
-/* Map active DOM node indices to dense layout indices. */
-static bool layout_build_index_map(LayoutContext *ctx, int **out_map)
+/* Map active DOM node indices to dense layout indices (*count of them).
+ * With `prune`, the descendants of display:none elements are left out
+ * (layout_prune_root), the elements marked in *pruned (layout indices). */
+static bool layout_build_index_map(LayoutContext *ctx, int **out_map, int *count, bool prune,
+                                   unsigned char **pruned)
 {
-    int dom_count = (int)po_array_count(&ctx->doc->array);
-    int *map = (int*)malloc(dom_count * sizeof(int));
+    PreOrderCompactionArray *a = &ctx->doc->array;
+    int dom_count = (int)po_array_count(a);
+    int *map = (int*)malloc(((size_t)dom_count + 1) * sizeof(int));
     if (!map) return false;
     for (int i = 0; i < dom_count; i++) map[i] = -1;
+    *pruned = NULL;
+    /* Leaving out needs parents before children (the mirror keeps its
+     * array in pre-order). */
+    unsigned char *out = NULL;   /* per DOM index: 1 left out, 2 a root whose children are */
+    for (int i = 0; prune && i < dom_count; i++) {
+        if (!po_array_is_active(a, i)) continue;
+        int p = po_array_parent(a, i);
+        if (p >= i) { prune = false; break; }
+    }
+    if (prune) out = (unsigned char *)calloc((size_t)dom_count + 1, 1);
 
-    int layout_idx = 0;
+    int layout_idx = 0, roots = 0;
     for (int i = 0; i < dom_count; i++) {
-        if (!po_array_is_active(&ctx->doc->array, i)) continue;
+        if (!po_array_is_active(a, i)) continue;
+        if (out) {
+            int p = po_array_parent(a, i);
+            if (p >= 0 && out[p]) { out[i] = 1; continue; }
+            if (layout_prune_root(ctx->doc, i)) { out[i] = 2; roots++; }
+        }
         map[i] = layout_idx++;
     }
+    if (out && roots) {
+        *pruned = (unsigned char *)calloc((size_t)layout_idx + 1, 1);
+        for (int i = 0; *pruned && i < dom_count; i++)
+            if (out[i] == 2) (*pruned)[map[i]] = 1;
+        if (!*pruned) {   /* cannot note them: in full */
+            free(out);
+            free(map);
+            return layout_build_index_map(ctx, out_map, count, false, pruned);
+        }
+    }
+    free(out);
     *out_map = map;
+    *count = layout_idx;
     return true;
 }
 
@@ -205,10 +236,9 @@ static void layout_spare_give(LayoutSpare *sp, void *p, size_t cap)
     sp->cap = cap;
 }
 
-static bool layout_build_nodes(LayoutContext *ctx, const int *map)
+static bool layout_build_nodes(LayoutContext *ctx, const int *map, int active)
 {
     int dom_count = (int)po_array_count(&ctx->doc->array);
-    int active = layout_count_active_nodes(ctx);
 
     ctx->tree.nodes = (LayoutNodeRef*)layout_spare_take(&g_spare_nodes, (size_t)active * sizeof(LayoutNodeRef));
     ctx->tree.count = active;
@@ -236,7 +266,7 @@ static bool layout_build_nodes(LayoutContext *ctx, const int *map)
 
         int child_count = 0;
         for (int c = hdr->first_child; c >= 0; c = po_array_next_sibling(&ctx->doc->array, c)) {
-            if (po_array_is_active(&ctx->doc->array, c)) child_count++;
+            if (map[c] >= 0) child_count++;   /* (none when left out) */
         }
         node->child_count = child_count;
     }
@@ -398,16 +428,21 @@ static bool layout_build_orders(LayoutContext *ctx)
     return true;
 }
 
-bool css_layout_tree_build(LayoutContext *ctx, HtmlDocument *doc)
+static bool layout_tree_build(LayoutContext *ctx, HtmlDocument *doc, bool prune)
 {
     if (!ctx || !doc) return false;
     memset(ctx, 0, sizeof(*ctx));
     ctx->doc = doc;
 
     int *map = NULL;
-    if (!layout_build_index_map(ctx, &map)) return false;
+    int count = 0;
+    unsigned char *pruned = NULL;
+    if (!layout_build_index_map(ctx, &map, &count, prune, &pruned)) return false;
+    ctx->pruned = pruned;
+    for (int i = 0; pruned && i < count; i++) ctx->pruned_n += pruned[i];
+    ctx->prune_has_gen = g_has_gen;
 
-    bool ok = layout_build_nodes(ctx, map);
+    bool ok = layout_build_nodes(ctx, map, count);
     if (ok) ok = layout_build_orders(ctx);
 
     if (ok) {
@@ -425,6 +460,11 @@ bool css_layout_tree_build(LayoutContext *ctx, HtmlDocument *doc)
     return ok;
 }
 
+bool css_layout_tree_build(LayoutContext *ctx, HtmlDocument *doc)
+{
+    return layout_tree_build(ctx, doc, false);
+}
+
 void css_layout_tree_free(LayoutContext *ctx)
 {
     if (!ctx) return;
@@ -437,6 +477,7 @@ void css_layout_tree_free(LayoutContext *ctx)
     layout_spare_give(&g_spare_boxes, ctx->boxes, (size_t)ctx->tree.count * sizeof(LayoutBox));
     free(ctx->intrinsic_cache);
     free(ctx->has_flags);
+    free(ctx->pruned);
     if (ctx->text_norm) {
         for (int i = 0; i < ctx->tree.count; i++) free(ctx->text_norm[i]);
         free(ctx->text_norm);
@@ -3347,11 +3388,13 @@ static const char* layout_find_host_tag(LayoutContext *ctx, int dom_idx) {
     return NULL;
 }
 
-static void layout_collect_stylesheets_recursive(LayoutContext *ctx, int layout_idx,
+/* The sheets of the document subtree at `dom_idx` (the document, not the
+ * layout tree: that may leave display:none subtrees out). */
+static void layout_collect_stylesheets_recursive(LayoutContext *ctx, int dom_idx,
                                                   LayoutStyleSheetList *list,
                                                   const char *base_url) {
-    if (layout_idx < 0 || layout_idx >= ctx->tree.count) return;
-    int dom_idx = ctx->tree.nodes[layout_idx].dom_node_idx;
+    PreOrderCompactionArray *da = &ctx->doc->array;
+    if (dom_idx < 0 || !po_array_is_active(da, dom_idx)) return;
     HtmlNode *node = layout_node_dom(ctx, dom_idx);
     if (!node || node->type != HTML_NODE_ELEMENT) goto next;
 
@@ -3379,10 +3422,8 @@ static void layout_collect_stylesheets_recursive(LayoutContext *ctx, int layout_
     }
 
 next:
-    for (int c = ctx->tree.nodes[layout_idx].first_child_idx; c >= 0;
-         c = ctx->tree.nodes[c].next_sibling_idx) {
+    for (int c = po_array_first_child(da, dom_idx); c >= 0; c = po_array_next_sibling(da, c))
         layout_collect_stylesheets_recursive(ctx, c, list, base_url);
-    }
 }
 
 static void layout_collect_js_sheet_array(JSContextHandle ctx, GCValue arr,
@@ -3830,6 +3871,10 @@ typedef struct StyleCacheEntry {
      * not: the element was left unstyled (inside display:none) when its
      * style may have changed. */
     unsigned char stale;
+    /* Its descendants were left out of a tree (a display:none element):
+     * their entries may be stale, so they are restyled when it is next built
+     * with them. */
+    unsigned char pruned_below;
     unsigned char has_after;
     char after[256];
     LayoutBox box;
@@ -4383,6 +4428,53 @@ static int has_memo(const HasSubjects *hs, HtmlNode *hn, int which)
     if (hn->has_memo[which] < 0)
         hn->has_memo[which] = (int8_t)has_memo_compute(hs, hn, which);
     return hn->has_memo[which];
+}
+
+/* The :has() rules of the last restyle's style set (layout_apply_stylesheet),
+ * and its generation (g_has_gen, declared above). */
+static HasSubjects g_has;
+
+/* ---- Leaving hidden subtrees out ----
+ *
+ * What a display:none element holds is neither styled nor laid out
+ * (style_skip_descendants), so a tree build may leave it out, and every
+ * pass over the tree skips it.  Whether an element stays display:none is
+ * known only once styled: the build guesses from the style cache, and
+ * css_layout_run builds again in full when a guess turns out shown
+ * (prune_failed).  The cache entry of an element whose descendants were
+ * left out notes it (pruned_below), and they are restyled when it is next
+ * built with them, whatever their keys say.  The restyle's :has() forcing
+ * does not see changes in a left-out subtree, so an element is left out
+ * only when no :has() rule can flip because of one: no subject at or above
+ * it (nor, for sibling-relative arguments, before those among their
+ * siblings), and no element a rule whose :has() compound names nothing
+ * restyles in the tree.
+ * CSS_PRUNE=0: build in full. */
+static bool layout_prune_root(HtmlDocument *doc, int i)
+{
+    HtmlNode *hn = (HtmlNode *)po_array_payload(&doc->array, i);
+    if (!hn || hn->type != HTML_NODE_ELEMENT || !hn->store_id || hn->array_node.first_child < 0) return false;
+    const StyleCacheEntry *e = style_cache_find(hn->store_id);
+    if (!e || e->stale || e->box.display != CSS_DISPLAY_NONE || !g_sc.global) return false;
+    if (!g_has.any) return true;
+    /* (Rules whose :has() compound names nothing restyle their targets
+     * anywhere: css_layout_document builds again in full when the tree has
+     * one.) */
+    if (g_has.universal_self || g_has.universal_deep) return false;
+    for (int a = i; a >= 0; a = po_array_parent(&doc->array, a)) {
+        HtmlNode *an = (HtmlNode *)po_array_payload(&doc->array, a);
+        if (!an || an->type != HTML_NODE_ELEMENT) continue;
+        /* (An ancestor carrying an ancestor compound's features makes what is
+         * below it subjects.) */
+        if ((g_has.self_req.n && has_memo(&g_has, an, 3)) || (a != i && g_has.anc_req.n && has_memo(&g_has, an, 4)))
+            return false;
+        for (int s = g_has.sibling_relative ? po_array_prev_sibling(&doc->array, a) : -1; s >= 0;
+             s = po_array_prev_sibling(&doc->array, s)) {
+            HtmlNode *sn = (HtmlNode *)po_array_payload(&doc->array, s);
+            if (sn && sn->type == HTML_NODE_ELEMENT && g_has.self_req.n && has_memo(&g_has, sn, 3)) return false;
+        }
+    }
+    return true;
 }
 
 static int has_may_match(const HasSubjects *hs, LayoutContext *ctx, int idx)
@@ -5544,6 +5636,11 @@ static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects
             HtmlNode *cn = layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx);
             int ckids = 0;
             for (int g = ctx->tree.nodes[c].first_child_idx; g >= 0; g = ctx->tree.nodes[g].next_sibling_idx) ckids++;
+            if (ctx->pruned && ctx->pruned[c]) {   /* its children left out: the document's */
+                PreOrderCompactionArray *da = &ctx->doc->array;
+                for (int g = po_array_first_child(da, ctx->tree.nodes[c].dom_node_idx); g >= 0; g = po_array_next_sibling(da, g))
+                    if (po_array_is_active(da, g)) ckids++;
+            }
             s[5] = (uint64_t)ckids;
             key[c] = style_mix(key[c], s, 6 * sizeof(uint64_t));
             prev = cn ? cn->store_id : 0;
@@ -5617,7 +5714,8 @@ static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects
         int p = ctx->tree.nodes[idx].parent_idx;
         at[idx] = pos;
         depth[idx] = p >= 0 ? depth[p] + 1 : 0;
-        if (p >= 0 && (whole[p] || P->force[p] == 2)) P->force[idx] = 2;
+        if (p >= 0 && (whole[p] || P->force[p] == 2 ||
+                       (P->cached[p] && P->cached[p]->pruned_below && !(ctx->pruned && ctx->pruned[p])))) P->force[idx] = 2;
     }
     int npartial = 0;
     if (nparts) {
@@ -5809,6 +5907,7 @@ static void style_cache_set(StyleCacheEntry *e, StylePass *P, int idx, const cha
     e->props = style_cache_own(ctx->custom_props[idx], tab, cap);
     e->match_hash = P->match_hash ? P->match_hash[idx] : 0;
     e->stale = 0;
+    e->pruned_below = ctx->pruned && ctx->pruned[idx];
     e->has_after = after != NULL;
     if (after) memcpy(e->after, after, sizeof(e->after));
     else e->after[0] = '\0';
@@ -5826,6 +5925,7 @@ static void style_cache_set_stale(StyleCacheEntry *e, StylePass *P, int idx, con
     e->props = NULL;
     e->match_hash = 0;
     e->stale = 1;
+    e->pruned_below = old ? old->pruned_below : 0;
     e->has_after = 0;
     e->after[0] = '\0';
 }
@@ -5896,6 +5996,7 @@ static bool style_cache_update(StylePass *P, const StyleGenAfter *gen, int gen_t
             (!after[idx] || strncmp(e->after, after[idx], sizeof(e->after)) == 0)) {
             /* Same result: record what its cascade read this time. */
             if (P->match_hash) e->match_hash = P->match_hash[idx];
+            e->pruned_below = ctx->pruned && ctx->pruned[idx];
             continue;
         }
         if (!e) {
@@ -6001,6 +6102,7 @@ static void style_cache_store(StylePass *P, uint64_t global, const StyleGenAfter
             /* Not styled: its entry still holds (and carries over). */
             e->key = old->key;
             e->stale = 0;
+            e->pruned_below = old->pruned_below;
             style_cache_set_ctx(e, P, idx, old);
             e->props = style_cache_own(old->props, tab, cap);
             e->match_hash = old->match_hash;
@@ -6013,6 +6115,7 @@ static void style_cache_store(StylePass *P, uint64_t global, const StyleGenAfter
             e->props = style_cache_own(ctx->custom_props[idx], tab, cap);
             e->match_hash = P->match_hash ? P->match_hash[idx] : 0;
             e->stale = 0;
+            e->pruned_below = ctx->pruned && ctx->pruned[idx];
             e->has_after = after[idx] != NULL;
             if (after[idx]) memcpy(e->after, after[idx], sizeof(e->after));
             else e->after[0] = '\0';
@@ -6694,10 +6797,12 @@ static void style_skip_descendants(StylePass *P, int pos, bool clean)
         bool parent_clean = p == top ? clean : P->skipped[p] == 1;
         bool keep = parent_clean && P->inc && P->cached[idx] && !P->cached[idx]->stale && P->key_ok[idx] && !P->force[idx];
         P->skipped[idx] = keep ? 1 : 2;
+        /* Only these two fields: whatever reads a box past them checks
+         * display or LAYOUT_STYLE_SKIPPED first (a full box would be a
+         * kilobyte per hidden node per layout). */
         LayoutBox *box = layout_box(ctx, idx);
-        *box = *layout_box_template();
         box->display = CSS_DISPLAY_NONE;
-        box->flags |= LAYOUT_STYLE_SKIPPED;
+        box->flags = LAYOUT_STYLE_SKIPPED;
         ctx->custom_props[idx] = ctx->custom_props[p];
         P->cls[idx] = idx;
         if (P->inc) P->out_changed[idx] = 1;
@@ -6938,24 +7043,22 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
             sc_global = style_mix(sc_global, ctx->base_url, strlen(ctx->base_url));
             sc_global = style_mix(sc_global, &P.em_defer, sizeof(P.em_defer));
             if (sc_global == 0) sc_global = 1;
-            static uint64_t has_gen;
-            static HasSubjects has;
             static StyleCtxFeatures cf;
             mentions_build(P.set, set_gen);
-            if (has_gen != set_gen) {
+            if (g_has_gen != set_gen) {
                 /* An extension of the set these describe: scan its new
                  * rules only. */
                 uint64_t base_gen = 0;
                 int first = 0;
-                if (!(has_gen && styleset_base_of(set_gen, &base_gen, &first) && base_gen == has_gen)) {
-                    has_free(&has);
+                if (!(g_has_gen && styleset_base_of(set_gen, &base_gen, &first) && base_gen == g_has_gen)) {
+                    has_free(&g_has);
                     ctx_features_free(&cf);
                     first = 0;
                 }
                 for (int r = first, nr = css_styleset_rule_count(P.set); r < nr; r++) {
                     const CssRule *rule = css_styleset_rule(P.set, r);
                     if (!rule || !rule->selector_text) continue;
-                    has_scan_selector(&has, rule->selector_text);
+                    has_scan_selector(&g_has, rule->selector_text);
                     ctx_scan_list(&cf, rule->selector_text, rule->selector_text + strlen(rule->selector_text), false);
                 }
                 if (g_css_log > 0)
@@ -6964,24 +7067,24 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
                             cf.sibling ? ", sibling combinators" : "", cf.s_pos ? ", position" : "",
                             cf.s_first ? ", first" : "", cf.s_prev ? ", previous" : "", cf.s_last ? ", last" : "",
                             cf.s_fromend ? ", from end" : "", cf.s_empty ? ", empty" : "");
-                has_gen = set_gen;
-                has.gen = set_gen;
-                if (g_css_log > 0 && has.any)
-                    fprintf(stderr, "[css] :has() subjects: %d keys, %d ancestor keys%s%s%s\n", has.self.n, has.anc.n,
-                            has.universal ? ", universal" : "", has.universal_deep ? " (deep)" : "",
-                            has.sibling_relative ? ", sibling-relative" : "");
+                g_has_gen = set_gen;
+                g_has.gen = set_gen;
+                if (g_css_log > 0 && g_has.any)
+                    fprintf(stderr, "[css] :has() subjects: %d keys, %d ancestor keys%s%s%s\n", g_has.self.n, g_has.anc.n,
+                            g_has.universal ? ", universal" : "", g_has.universal_deep ? " (deep)" : "",
+                            g_has.sibling_relative ? ", sibling-relative" : "");
             }
             P.inc = true;
             P.verify = verify_env;
-            style_cache_prepare(&P, sc_global, &has, &cf);
+            style_cache_prepare(&P, sc_global, &g_has, &cf);
             /* The first element a :has() rule whose compound names nothing
              * restyles (layout_api's anchors read it). */
             ctx->has_target_first = n;
-            if (has.any && (has.universal_deep || has.deep_targets.n)) {
+            if (g_has.any && (g_has.universal_deep || g_has.deep_targets.n)) {
                 int k = 0;
-                for (; !has.universal_deep && k < n; k++) {
+                for (; !g_has.universal_deep && k < n; k++) {
                     HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[ctx->tree.preorder[k]].dom_node_idx);
-                    if (hn && hn->type == HTML_NODE_ELEMENT && has_memo(&has, hn, 2)) break;
+                    if (hn && hn->type == HTML_NODE_ELEMENT && has_memo(&g_has, hn, 2)) break;
                 }
                 ctx->has_target_first = k;
             }
@@ -6989,20 +7092,20 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
              * (has_may_match's test: its own features, or an ancestor's). */
             free(ctx->has_flags);
             ctx->has_flags = NULL;
-            if (!has.universal_self && !has.universal_deep)
+            if (!g_has.universal_self && !g_has.universal_deep)
                 ctx->has_flags = (unsigned char *)calloc((size_t)n + 1, 1);
-            for (int k = 0; ctx->has_flags && has.any && k < n; k++) {
+            for (int k = 0; ctx->has_flags && g_has.any && k < n; k++) {
                 int idx = ctx->tree.preorder[k];
                 int p = ctx->tree.nodes[idx].parent_idx;
                 HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
                 if (!hn || hn->type != HTML_NODE_ELEMENT) continue;
                 /* Bit 2: an ancestor carries an ancestor-compound feature. */
                 unsigned char below = p >= 0 ? (unsigned char)(ctx->has_flags[p] & 2) : 0;
-                if (p >= 0 && has.anc_req.n) {
+                if (p >= 0 && g_has.anc_req.n) {
                     HtmlNode *pn = layout_node_dom(ctx, ctx->tree.nodes[p].dom_node_idx);
-                    if (pn && pn->type == HTML_NODE_ELEMENT && has_memo(&has, pn, 4)) below = 2;
+                    if (pn && pn->type == HTML_NODE_ELEMENT && has_memo(&g_has, pn, 4)) below = 2;
                 }
-                bool subject = below || (has.self_req.n && has_memo(&has, hn, 3));
+                bool subject = below || (g_has.self_req.n && has_memo(&g_has, hn, 3));
                 ctx->has_flags[idx] = (unsigned char)(below | (subject ? LAYOUT_HAS_SUBJECT : 0));
             }
             STAGE("restyle prepare");
@@ -7542,6 +7645,7 @@ static void layout_resolve_fonts_pass(LayoutContext *ctx)
     const LayoutBox *last = NULL;
     for (int i = 0; i < ctx->tree.count; i++) {
         LayoutBox *b = &ctx->boxes[i];
+        if (b->flags & LAYOUT_STYLE_SKIPPED) continue;   /* a placeholder: no font */
         if (last && b->font_weight == last->font_weight && b->font_italic == last->font_italic &&
             strcmp(b->font_family, last->font_family) == 0) {
             b->font_slot = last->font_slot;
@@ -9986,6 +10090,7 @@ static void layout_dump_boxes(LayoutContext *ctx, const char *path)
         LayoutBox *b = &ctx->boxes[i];
         HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx);
         const char *tag = (node && node->type == HTML_NODE_ELEMENT) ? node->tag_name : "#text";
+        if (b->flags & LAYOUT_STYLE_SKIPPED) { fprintf(fp, "%d\t%s\t\t\tnone (not styled)\n", i, tag); continue; }
         const char *id = layout_node_attribute(node, "id");
         const char *cls = layout_node_attribute(node, "class");
         char id_buf[64] = {0};
@@ -10227,6 +10332,17 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
     STAGE("setup");
     if (ctx->viewport_width > 0.0) g_calc_pct_hint = ctx->viewport_width;
     layout_apply_stylesheet(ctx, sheet);
+    /* A display:none guess that came out shown, or :has() rules other than
+     * those the guesses were checked against: css_layout_run builds again
+     * in full. */
+    if (ctx->pruned_n) {
+        bool failed = ctx->prune_has_gen != g_has_gen || ctx->has_target_first < ctx->tree.count;
+        for (int i = 0; !failed && i < ctx->tree.count; i++)
+            failed = ctx->pruned[i] && ctx->boxes[i].display != CSS_DISPLAY_NONE;
+        if (g_css_log > 0)
+            fprintf(stderr, "[css] %d subtrees left out%s\n", ctx->pruned_n, failed ? ", one shown: again in full" : "");
+        if (failed) { ctx->prune_failed = true; return false; }
+    }
     _st_t = layout_now_ms();
 
     /* Fonts: each box's family / weight / style to a registry slot, after
@@ -10246,6 +10362,7 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
             ctx->text_norm[i] = NULL;
             HtmlNode *tn = layout_node_dom(ctx, ctx->tree.nodes[i].dom_node_idx);
             if (!tn || tn->type != HTML_NODE_TEXT || !css_layout_node_text(ctx, tn)) continue;
+            if (ctx->boxes[i].flags & LAYOUT_STYLE_SKIPPED) continue;
             unsigned char ws = ctx->boxes[i].white_space;
             if (ws == 2 || ws == 3) continue;
             const char *t = css_layout_node_text(ctx, tn);
@@ -10301,7 +10418,7 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
         for (int i = 0; i < n; i++) g_lpar.subtree[i] = 1;
         for (int pos = n - 1; pos >= 0; pos--) {
             int i = ctx->tree.preorder[pos];
-            if (ctx->boxes[i].float_side != 0) g_lpar.has_float[i] = 1;
+            if (!(ctx->boxes[i].flags & LAYOUT_STYLE_SKIPPED) && ctx->boxes[i].float_side != 0) g_lpar.has_float[i] = 1;
             int par = ctx->tree.nodes[i].parent_idx;
             if (par >= 0) {
                 g_lpar.subtree[par] += g_lpar.subtree[i];
@@ -10322,6 +10439,7 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
         int i = ctx->tree.preorder[k];
         LayoutBox *b = &ctx->boxes[i];
         int par = ctx->tree.nodes[i].parent_idx;
+        if (b->flags & LAYOUT_STYLE_SKIPPED) { b->opacity_eff = 0.0; continue; }
         b->opacity_eff = (par >= 0 ? ctx->boxes[par].opacity_eff : 1.0) *
                          (b->opacity_set ? b->opacity : 1.0);
         if (b->display == CSS_DISPLAY_NONE) continue;
@@ -10384,7 +10502,12 @@ bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
     JSContextHandle saved_js_ctx = ctx->js_ctx;
     const char *saved_dump_path = ctx->dump_path;
     bool saved_style_all = ctx->style_all, saved_serial = ctx->serial;
-    if (!css_layout_tree_build(ctx, doc)) return false;
+    /* CSS_PRUNE=0: build trees in full. */
+    static int prune_env = -1;
+    if (prune_env < 0) { const char *e = getenv("CSS_PRUNE"); prune_env = !(e && strcmp(e, "0") == 0); }
+    bool prune = prune_env && !saved_style_all;
+again:
+    if (!layout_tree_build(ctx, doc, prune)) return false;
     GC_SET(ctx->js_ctx, saved_js_ctx);
     ctx->dump_path = saved_dump_path;
     ctx->style_all = saved_style_all;
@@ -10400,6 +10523,11 @@ bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
     if (g_css_log < 0) { const char *e = getenv("CSS_LOG"); g_css_log = e ? atoi(e) : 0; }
     if (g_css_log > 0) fprintf(stderr, "[css] tree build + setup  %8.3f ms\n", layout_now_ms() - _run_t0);
     bool ok = css_layout_document(ctx, sheet);
+    if (!ok && ctx->prune_failed && prune) {
+        css_layout_tree_free(ctx);
+        prune = false;
+        goto again;
+    }
     if (!ok) css_layout_tree_free(ctx);
     return ok;
 }
