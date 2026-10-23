@@ -734,8 +734,8 @@ static int extract_scripts_in_order(const char *html, ScriptInfo *scripts, int m
             
             size_t content_len = script_end - content_start;
             
-            // Skip empty scripts or very short ones
-            if (content_len < 50) {
+            // Skip empty scripts (a short one runs: "window.x=1" matters)
+            if (content_len == 0) {
                 p = script_close_end(script_end);
                 continue;
             }
@@ -1219,15 +1219,14 @@ static char *load_parser_script(NodeId node, size_t *out_len) {
         *out_len = si.content_len;
         return (char *)si.content;
     }
-    /* Inline: the element's text.  (Under 50 bytes is skipped, as the
-     * whole-page path does.) */
+    /* Inline: the element's text. */
     StrBuf text SB_AUTO = sb_from("", 0);
     for (NodeId t = dom_first_child(node); t; t = dom_next_sibling(t)) {
         uint32_t n = 0;
         const char *s = dom_kind(t) == DOM_K_TEXT ? dom_text(t, &n) : NULL;
         if (s && n) sb_insert(&text, text.len, s);   /* (text data is NUL-terminated) */
     }
-    if (text.len < 50) return NULL;
+    if (!text.len) return NULL;
     apply_youtube_player_bootstrap_patch(&text);
     char *out = (char *)malloc(text.len + 1);
     if (!out) return NULL;
