@@ -28354,11 +28354,16 @@ typedef struct JSLazyIdentSet {
     DynBuf tab;
     uint32_t cap;
     uint32_t count;
+    /* the atoms in the order they were added: a stub's dead references
+       follow it, which the source alone decides (the table's order depends
+       on atom numbers, which depend on what ran before) */
+    DynBuf order;
 } JSLazyIdentSet;
 
 static void lazy_ident_set_init(JSLazyIdentSet *set)
 {
     dbuf_init2(&set->tab, NULL, unicode_libc_realloc);
+    dbuf_init2(&set->order, NULL, unicode_libc_realloc);
     set->cap = 0;
     set->count = 0;
 }
@@ -28371,6 +28376,7 @@ static void lazy_ident_set_free(JSContextHandle ctx, JSLazyIdentSet *set)
             JS_FreeAtom(ctx, t[i]);
     }
     dbuf_free(&set->tab);
+    dbuf_free(&set->order);
     set->cap = set->count = 0;
 }
 
@@ -28413,6 +28419,8 @@ static int lazy_ident_set_add(JSContextHandle ctx, JSLazyIdentSet *set, JSAtom a
     }
     t[h] = JS_DupAtom(ctx, a);
     set->count++;
+    if (dbuf_put(&set->order, (const uint8_t *)&a, sizeof(a)))
+        return -1;
     return 0;
 }
 
@@ -29428,11 +29436,9 @@ static int js_lazy_try_skip_body(JSParseState *s, JSFunctionDef *fd,
     fd->lazy_dummy_pos = fd->byte_code.size + 1;
     scope_level = fd->scope_level;
     {
-        uint32_t *t = (uint32_t *)ids.tab.buf;
-        for (i = 0; i < ids.cap; i++) {
+        const JSAtom *t = (const JSAtom *)ids.order.buf;
+        for (i = 0; i < ids.count; i++) {
             JSAtom a = t[i];
-            if (a == JS_ATOM_NULL)
-                continue;
             /* a non-arrow function has its own 'arguments' */
             if (a == JS_ATOM_arguments && !is_arrow)
                 continue;
