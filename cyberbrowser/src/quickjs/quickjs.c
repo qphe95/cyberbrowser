@@ -25219,6 +25219,26 @@ static inline int is_hex_digit(int c) {
     return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
 }
 
+/* Source bytes from p to the end of the string literal or template part that
+ * starts there: a bound on its length in characters, so its buffer is
+ * allocated once instead of growing (and then shrinking) on the GC heap. */
+static int js_literal_source_len(const uint8_t *p, const uint8_t *end, int sep)
+{
+    const uint8_t *q;
+    for (q = p; q < end; q++) {
+        if (*q == '\\') {
+            q++;
+        } else if (*q == sep) {
+            break;
+        } else if (sep == '`' && *q == '$' && q + 1 < end && q[1] == '{') {
+            break;
+        }
+    }
+    if (q > end)
+        q = end;
+    return (int)min_int64(q - p, JS_STRING_LEN_MAX);
+}
+
 static __exception int js_parse_template_part(JSParseState *s, const uint8_t *p)
 {
     uint32_t c;
@@ -25226,7 +25246,7 @@ static __exception int js_parse_template_part(JSParseState *s, const uint8_t *p)
     GCValue str = GC_UNDEFINED;
 
     /* p points to the first byte of the template part */
-    if (string_buffer_init(s->ctx, b, 32))
+    if (string_buffer_init(s->ctx, b, js_literal_source_len(p, s->buf_end, '`')))
         goto fail;
     for(;;) {
         if (p >= s->buf_end) {
@@ -25395,7 +25415,7 @@ static __exception int js_parse_string(JSParseState *s, int sep,
     GCValue str = GC_UNDEFINED;
 
     /* string */
-    if (string_buffer_init(s->ctx, b, 32))
+    if (string_buffer_init(s->ctx, b, js_literal_source_len(p, s->buf_end, sep)))
         goto fail;
     for(;;) {
         if (p >= s->buf_end) {
