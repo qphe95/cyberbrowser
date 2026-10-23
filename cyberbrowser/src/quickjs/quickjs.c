@@ -24657,6 +24657,40 @@ static int js_resize_plain_array(JSContextHandle ctx, void **pptr, int elem_size
     return 0;
 }
 
+/* A string the tokenizer made, in plain memory owned by the parse state
+ * (PARALLEL_PARSE_DESIGN.md, 5.2): Latin-1 bytes, or UTF-16 code units when
+ * wide; undef for the template part that failed to cook. */
+typedef struct CStr {
+    const void *data;
+    uint32_t len;
+    uint8_t wide;
+    uint8_t undef;
+} CStr;
+
+/* A constant of the function being compiled (its constant pool), in plain
+ * memory; js_create_function makes the runtime values. */
+typedef enum {
+    CC_VALUE,        /* v: a value without GC references (number, short BigInt) */
+    CC_STRING,       /* str */
+    CC_BYTES,        /* str: an 8-bit string of these bytes (regexp bytecode) */
+    CC_ATOM,         /* JS_AtomToValue(atom) */
+    CC_BIGINT_SRC,   /* str: the source of a BigInt literal, read again */
+    CC_TEMPLATE,     /* a template object: parts first.. first + n - 1 of tmpl_strs */
+    CC_FUNCTION,     /* v: the child function, once js_create_function made it */
+} CConstKind;
+
+typedef struct CConst {
+    uint8_t kind;
+    uint8_t rooted;  /* CC_FUNCTION: v is a GC root until the bytecode holds it */
+    GCValue v;
+    CStr str;
+    JSAtom atom;
+    int first, n;
+} CConst;
+
+static uint8_t *js_compile_regexp_cstr(JSContextHandle ctx, const CStr *body,
+                                       const CStr *flags, int *plen);
+
 typedef struct JSFunctionDef {
     JSContextHandle ctx;
     GCHandle self_handle; /* handle to this JSFunctionDef (set during allocation) */
@@ -24706,7 +24740,6 @@ typedef struct JSFunctionDef {
 #define fd_vars ((JSVarDefArrayHandle)(fd->vars_handle))
 #define fd_args ((JSVarDefArrayHandle)(fd->args_handle))
 #define fd_label_slots (fd->label_slots_handle)
-#define fd_cpool ((GCValueHandle)(fd->cpool_handle))
 #define fd_closure_var (fd->closure_var_handle)
 /* For functions that use 's' as the JSFunctionDef variable name */
 #define s_vars_handle (s->vars_handle)
@@ -24714,7 +24747,6 @@ typedef struct JSFunctionDef {
 #define s_vars ((JSVarDefArrayHandle)(s->vars_handle))
 #define s_args ((JSVarDefArrayHandle)(s->args_handle))
 #define s_label_slots (s->label_slots_handle)
-#define s_cpool ((GCValueHandle)(s->cpool_handle))
 #define s_closure_var (s->closure_var_handle)
 /* For access via s->cur_func_handle where s is JSParseState */
 #define s_cur_func_vars_handle (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->vars_handle)
@@ -24722,7 +24754,6 @@ typedef struct JSFunctionDef {
 #define s_cur_func_vars ((JSVarDefArrayHandle)(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->vars_handle))
 #define s_cur_func_args ((JSVarDefArrayHandle)(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->args_handle))
 #define s_cur_func_label_slots (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->label_slots_handle)
-#define s_cur_func_cpool ((GCValueHandle)(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->cpool_handle))
 #define s_cur_func_closure_var (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->closure_var_handle)
     int defined_arg_count;
     int var_ref_count; /* number of local/arg variable references */
@@ -24769,7 +24800,8 @@ typedef struct JSFunctionDef {
     PVec reloc_entries; /* of RelocEntry, linked by index */
 
     /* constant pool (strings, functions, numbers) */
-    GCHandle cpool_handle; /* handle to GCValue array */
+    PVec cpool_handle; /* of CConst */
+    PVec tmpl_strs; /* of CStr: cooked and raw of each template part, in pairs */
     int cpool_count;
     int cpool_size;
 
@@ -24849,7 +24881,6 @@ typedef struct JSFunctionDef {
 static void js_mark_function_def(JSRuntimeHandle rt, JSFunctionDef *p, JS_MarkFunc *mark_func) {
     if (!p) return;
     /* Mark all GC-managed arrays and handles */
-    mark_func(rt, p->cpool_handle);
     mark_func(rt, p->source_string_handle);
     if (p->has_resume_parse_state) {
         /* lazy stub state, until js_create_function copies it */
@@ -24868,8 +24899,9 @@ typedef struct JSToken {
     const uint8_t *ptr; /* position in the source */
     union {
         struct {
-            GCValue str;
+            GCValue str;    /* JSON tokens */
             int sep;
+            CStr cstr;      /* JS tokens: string literals and template parts */
         } str;
         struct {
             GCValue val;
@@ -24882,6 +24914,7 @@ typedef struct JSToken {
         struct {
             GCValue body;
             GCValue flags;
+            CStr cbody, cflags;
         } regexp;
     } u;
 } JSToken;
@@ -24926,6 +24959,9 @@ typedef struct JSParseState {
     /* The structure index of the source (js_struct_index.h), or NULL: body
      * skips read it instead of scanning. */
     const JSStructIndex *struct_index;
+
+    /* plain memory the parse owns until it ends (the tokenizer's strings) */
+    PVec owned;
 } JSParseState;
 
 /* ============================================================================
@@ -24976,6 +25012,142 @@ static inline void js_parse_cleanup_roots(JSParseState *s) {
         gc_remove_root(SAFE_HANDLE(s->cur_func_handle));
         s->cur_func_handle = GC_HANDLE_NULL;
     }
+    for (int i = 0; i < s->owned.count; i++)
+        js_plain_free(PVEC_AT(s->owned, void *, i));
+    pvec_free(&s->owned);
+}
+
+/* ---- PStrBuf: StringBuffer's semantics in plain memory ----
+ * Latin-1 until a character from U+0100 needs UTF-16; pstr_end hands the
+ * buffer to the parse state (s->owned). */
+typedef struct PStrBuf {
+    JSParseState *ps;
+    uint8_t *buf;
+    int len, size, wide, error;
+} PStrBuf;
+
+static int pstr_error(PStrBuf *b)
+{
+    if (!b->error) {
+        b->error = 1;
+        JS_ThrowOutOfMemory(b->ps->ctx);
+    }
+    return -1;
+}
+
+static int pstr_init(JSParseState *ps, PStrBuf *b, int size)
+{
+    b->ps = ps;
+    b->len = 0;
+    b->wide = 0;
+    b->error = 0;
+    b->size = size < 16 ? 16 : size;
+    b->buf = (uint8_t *)js_plain_realloc(NULL, (size_t)b->size);
+    return b->buf ? 0 : pstr_error(b);
+}
+
+/* room for one more unit, as UTF-16 when wide (or when c needs it) */
+static int pstr_room(PStrBuf *b, uint32_t c)
+{
+    if (b->error)
+        return -1;
+    if (!b->wide && c >= 0x100) {
+        int size = max_int(b->size, b->len + 1);
+        uint16_t *w = (uint16_t *)js_plain_realloc(NULL, (size_t)size * 2);
+        if (!w)
+            return pstr_error(b);
+        for (int i = 0; i < b->len; i++)
+            w[i] = b->buf[i];
+        js_plain_free(b->buf);
+        b->buf = (uint8_t *)w;
+        b->size = size;
+        b->wide = 1;
+    }
+    if (b->len >= b->size) {
+        int size = max_int(b->len + 1, b->size * 3 / 2);
+        uint8_t *nb = (uint8_t *)js_plain_realloc(b->buf, (size_t)size << b->wide);
+        if (!nb)
+            return pstr_error(b);
+        b->buf = nb;
+        b->size = size;
+    }
+    return 0;
+}
+
+/* 0 <= c <= 0xffff */
+static int pstr_putc16(PStrBuf *b, uint32_t c)
+{
+    if (pstr_room(b, c))
+        return -1;
+    if (b->wide)
+        ((uint16_t *)b->buf)[b->len++] = c;
+    else
+        b->buf[b->len++] = c;
+    return 0;
+}
+
+/* 0 <= c <= 0xff */
+static int pstr_putc8(PStrBuf *b, uint32_t c)
+{
+    return pstr_putc16(b, c);
+}
+
+/* 0 <= c <= 0x10ffff */
+static int pstr_putc(PStrBuf *b, uint32_t c)
+{
+    if (c >= 0x10000) {
+        if (pstr_putc16(b, get_hi_surrogate(c)))
+            return -1;
+        c = get_lo_surrogate(c);
+    }
+    return pstr_putc16(b, c);
+}
+
+static void pstr_free(PStrBuf *b)
+{
+    js_plain_free(b->buf);
+    b->buf = NULL;
+}
+
+/* The finished string; the parse state owns its memory from now on. */
+static int pstr_end(PStrBuf *b, CStr *out)
+{
+    if (b->error) {
+        pstr_free(b);
+        return -1;
+    }
+    if (!pvec_push(&b->ps->owned, sizeof(void *), &b->buf)) {
+        pstr_free(b);
+        b->error = 0;
+        return pstr_error(b);
+    }
+    out->data = b->buf;
+    out->len = (uint32_t)b->len;
+    out->wide = (uint8_t)b->wide;
+    out->undef = 0;
+    b->buf = NULL;
+    return 0;
+}
+
+/* The runtime string (or undefined) of a tokenizer string. */
+static GCValue js_cstr_value(JSParseState *s, const CStr *c)
+{
+    if (c->undef)
+        return JS_UNDEFINED;
+    if (c->len == 0)
+        return JS_AtomToString(s->ctx, JS_ATOM_empty_string);
+    if (c->wide)
+        return js_new_string16_len(s->ctx, (const uint16_t *)c->data, (int)c->len);
+    return js_new_string8_len(s->ctx, (const char *)c->data, (int)c->len);
+}
+
+/* As JS_ValueToAtom of that string. */
+static JSAtom js_cstr_atom(JSParseState *s, const CStr *c)
+{
+    GCValue v = js_cstr_value(s, c);
+    if (JS_IsException(v))
+        return JS_ATOM_NULL;
+    return JS_ValueToAtom(s->ctx, v);
 }
 
 typedef struct JSOpCode {
@@ -25078,22 +25250,22 @@ static void __attribute((unused)) dump_token(JSParseState *s,
         {
             const char *str;
             /* XXX: quote the string */
-            str = JS_ToCString(s->ctx, token->u.str.str);
+            str = JS_ToCString(s->ctx, js_cstr_value(s, &token->u.str.cstr));
             printf("string: '%s'\n", str);
         }
         break;
     case TOK_TEMPLATE:
         {
             const char *str;
-            str = JS_ToCString(s->ctx, token->u.str.str);
+            str = JS_ToCString(s->ctx, js_cstr_value(s, &token->u.str.cstr));
             printf("template: `%s`\n", str);
         }
         break;
     case TOK_REGEXP:
         {
             const char *str, *str2;
-            str = JS_ToCString(s->ctx, token->u.regexp.body);
-            str2 = JS_ToCString(s->ctx, token->u.regexp.flags);
+            str = JS_ToCString(s->ctx, js_cstr_value(s, &token->u.regexp.cbody));
+            str2 = JS_ToCString(s->ctx, js_cstr_value(s, &token->u.regexp.cflags));
             printf("regexp: '%s' '%s'\n", str, str2);
         }
         break;
@@ -25343,11 +25515,11 @@ static int js_literal_source_len(const uint8_t *p, const uint8_t *end, int sep)
 static __exception int js_parse_template_part(JSParseState *s, const uint8_t *p)
 {
     uint32_t c;
-    StringBuffer b_s, *b = &b_s;
-    GCValue str = GC_UNDEFINED;
+    PStrBuf b_s, *b = &b_s;
+    CStr str = { 0 };
 
     /* p points to the first byte of the template part */
-    if (string_buffer_init(s->ctx, b, js_literal_source_len(p, s->buf_end, '`')))
+    if (pstr_init(s, b, js_literal_source_len(p, s->buf_end, '`')))
         goto fail;
     for(;;) {
         if (p >= s->buf_end) {
@@ -25381,7 +25553,7 @@ static __exception int js_parse_template_part(JSParseState *s, const uint8_t *p)
             case '0': 
                 if (p[1] >= '0' && p[1] <= '9') {
                     /* Octal escape - copy as-is for leniency */
-                    if (string_buffer_putc8(b, '\\')) goto fail;
+                    if (pstr_putc8(b, '\\')) goto fail;
                     c = *p++;
                 } else {
                     c = '\0'; p++;
@@ -25394,7 +25566,7 @@ static __exception int js_parse_template_part(JSParseState *s, const uint8_t *p)
                     p += 3;
                 } else {
                     /* Invalid hex escape - keep literal */
-                    if (string_buffer_putc8(b, '\\')) goto fail;
+                    if (pstr_putc8(b, '\\')) goto fail;
                     c = *p++;
                 }
                 break;
@@ -25414,7 +25586,7 @@ static __exception int js_parse_template_part(JSParseState *s, const uint8_t *p)
                         p = u_end + 1;
                     } else {
                         /* Invalid - keep literal */
-                        if (string_buffer_putc8(b, '\\')) goto fail;
+                        if (pstr_putc8(b, '\\')) goto fail;
                         c = *p++;
                     }
                 } else if (p + 4 < s->buf_end && is_hex_digit(p[1]) && is_hex_digit(p[2]) && 
@@ -25425,7 +25597,7 @@ static __exception int js_parse_template_part(JSParseState *s, const uint8_t *p)
                     p += 5;
                 } else {
                     /* Invalid unicode escape - keep literal */
-                    if (string_buffer_putc8(b, '\\')) goto fail;
+                    if (pstr_putc8(b, '\\')) goto fail;
                     c = *p++;
                 }
                 break;
@@ -25444,7 +25616,7 @@ static __exception int js_parse_template_part(JSParseState *s, const uint8_t *p)
                 break;
             default:
                 /* Unknown escape - keep literal (lenient mode) */
-                if (string_buffer_putc8(b, '\\')) goto fail;
+                if (pstr_putc8(b, '\\')) goto fail;
                 c = *p++;
                 break;
             }
@@ -25467,41 +25639,38 @@ static __exception int js_parse_template_part(JSParseState *s, const uint8_t *p)
                 p = p_next;
             }
         }
-        if (string_buffer_putc(b, c))
+        if (pstr_putc(b, c))
             goto fail;
     }
-    str = string_buffer_end(b);
-    if (JS_IsException(str))
+    if (pstr_end(b, &str))
         return -1;
     s->token.val = TOK_TEMPLATE;
     s->token.u.str.sep = c;
-    GC_SET(s->token.u.str.str, str);
+    s->token.u.str.cstr = str;
     s->buf_ptr = p;
     return 0;
 
  template_done:
     /* Lenient EOF handling - return partial template */
-    str = string_buffer_end(b);
-    if (JS_IsException(str))
+    if (pstr_end(b, &str))
         return -1;
     s->token.val = TOK_TEMPLATE;
     s->token.u.str.sep = '`';
-    GC_SET(s->token.u.str.str, str);
+    s->token.u.str.cstr = str;
     s->buf_ptr = p;
     return 0;
 
  unexpected_eof:
     /* Be lenient: EOF in template part - return what we have */
-    str = string_buffer_end(b);
-    if (JS_IsException(str))
+    if (pstr_end(b, &str))
         return -1;
     s->token.val = TOK_TEMPLATE;
     s->token.u.str.sep = '`';  /* Mark as end of template */
-    s->token.u.str.str = str;  /* gc-no-dirty: token in the parse state on the C stack */
+    s->token.u.str.cstr = str;
     s->buf_ptr = p;
     return 0;
  fail:
-    string_buffer_free(b);
+    pstr_free(b);
     return -1;
 }
 
@@ -25511,12 +25680,12 @@ static __exception int js_parse_string(JSParseState *s, int sep,
 {
     int ret;
     uint32_t c;
-    StringBuffer b_s, *b = &b_s;
+    PStrBuf b_s, *b = &b_s;
     const uint8_t *p_escape;
-    GCValue str = GC_UNDEFINED;
+    CStr str = { 0 };
 
     /* string */
-    if (string_buffer_init(s->ctx, b, js_literal_source_len(p, s->buf_end, sep)))
+    if (pstr_init(s, b, js_literal_source_len(p, s->buf_end, sep)))
         goto fail;
     for(;;) {
         if (p >= s->buf_end) {
@@ -25603,7 +25772,7 @@ static __exception int js_parse_string(JSParseState *s, int sep,
                     if (c > 0x10FFFF) {
                         /* Invalid UTF-8 in escape - be lenient, treat as literal */
                         c = '\\';  /* Output backslash */
-                        if (string_buffer_putc(b, c))
+                        if (pstr_putc(b, c))
                             goto fail;
                         c = *p;  /* Output original char */
                         p++;
@@ -25619,7 +25788,7 @@ static __exception int js_parse_string(JSParseState *s, int sep,
                     if (ret == -1) {
                         /* Invalid escape sequence - be lenient, keep literal */
                         c = '\\';
-                        if (string_buffer_putc(b, c))
+                        if (pstr_putc(b, c))
                             goto fail;
                         c = *p;
                         p++;
@@ -25643,17 +25812,16 @@ static __exception int js_parse_string(JSParseState *s, int sep,
                 p = p_next;
             }
         }
-        if (string_buffer_putc(b, c))
+        if (pstr_putc(b, c))
             goto fail;
     }
     /* Normal exit - string was properly terminated */
  done:
-    str = string_buffer_end(b);
-    if (JS_IsException(str))
+    if (pstr_end(b, &str))
         return -1;
     token->val = TOK_STRING;
     token->u.str.sep = sep;  /* Use original separator */
-    token->u.str.str = str;  /* gc-no-dirty: token on the C stack */
+    token->u.str.cstr = str;
     *pp = p;
     return 0;
 
@@ -25668,16 +25836,15 @@ static __exception int js_parse_string(JSParseState *s, int sep,
         goto fail;
     }
     /* For non-throw mode (like template parts), return partial string */
-    str = string_buffer_end(b);
-    if (JS_IsException(str))
+    if (pstr_end(b, &str))
         return -1;
     token->val = TOK_STRING;
     token->u.str.sep = sep;  /* Use original separator */
-    token->u.str.str = str;  /* gc-no-dirty: token on the C stack */
+    token->u.str.cstr = str;
     *pp = p;
     return 0;
  fail:
-    string_buffer_free(b);
+    pstr_free(b);
     return -1;
 }
 
@@ -25690,17 +25857,17 @@ static __exception int js_parse_regexp(JSParseState *s)
 {
     const uint8_t *p;
     BOOL in_class;
-    StringBuffer b_s, *b = &b_s;
-    StringBuffer b2_s, *b2 = &b2_s;
+    PStrBuf b_s, *b = &b_s;
+    PStrBuf b2_s, *b2 = &b2_s;
     uint32_t c;
-    GCValue body_str = GC_UNDEFINED, flags_str = GC_UNDEFINED;
+    CStr body_str = { 0 }, flags_str = { 0 };
 
     p = s->buf_ptr;
     p++;
     in_class = FALSE;
-    if (string_buffer_init(s->ctx, b, 32))
+    if (pstr_init(s, b, 32))
         return -1;
-    if (string_buffer_init(s->ctx, b2, 1))
+    if (pstr_init(s, b2, 1))
         goto fail;
     for(;;) {
         if (p >= s->buf_end) {
@@ -25720,7 +25887,7 @@ static __exception int js_parse_regexp(JSParseState *s)
             /* XXX: incorrect as the first character in a class */
             in_class = FALSE;
         } else if (c == '\\') {
-            if (string_buffer_putc8(b, c))
+            if (pstr_putc8(b, c))
                 goto fail;
             c = *p++;
             if (c == '\n' || c == '\r')
@@ -25753,7 +25920,7 @@ static __exception int js_parse_regexp(JSParseState *s)
             }
             p = p_next;
         }
-        if (string_buffer_putc(b, c))
+        if (pstr_putc(b, c))
             goto fail;
     }
 
@@ -25770,27 +25937,24 @@ static __exception int js_parse_regexp(JSParseState *s)
         }
         if (!lre_js_is_ident_next(c))
             break;
-        if (string_buffer_putc(b2, c))
+        if (pstr_putc(b2, c))
             goto fail;
         p = p_next;
     }
 
-    body_str = string_buffer_end(b);
-    flags_str = string_buffer_end(b2);
-    if (JS_IsException(body_str) ||
-        JS_IsException(flags_str)) {
+    if (pstr_end(b, &body_str) | pstr_end(b2, &flags_str)) {
         
         
         return -1;
     }
     s->token.val = TOK_REGEXP;
-    GC_SET(s->token.u.regexp.body, body_str);
-    GC_SET(s->token.u.regexp.flags, flags_str);
+    s->token.u.regexp.cbody = body_str;
+    s->token.u.regexp.cflags = flags_str;
     s->buf_ptr = p;
     return 0;
  fail:
-    string_buffer_free(b);
-    string_buffer_free(b2);
+    pstr_free(b);
+    pstr_free(b2);
     return -1;
 }
 
@@ -27250,42 +27414,80 @@ static int emit_goto(JSParseState *s, int opcode, int label)
 }
 
 /* return the constant pool index. 'val' is not duplicated. */
-static int cpool_add(JSParseState *s, GCValue val)
+static int cpool_add_cconst(JSParseState *s, const CConst *cc)
 {
     JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
 
-    if (js_resize_array(s->ctx, &fd->cpool_handle, sizeof(GCValue),
-                        &fd->cpool_size, fd->cpool_count + 1)) {
-        
+    if (!pvec_push(&fd->cpool_handle, sizeof(CConst), cc)) {
+        JS_ThrowOutOfMemory(s->ctx);
         return -1;
     }
-    { int cpool_idx_ = fd->cpool_count++; GC_SET(SAFE_AT(fd_cpool, GCValueHandle, cpool_idx_), val); }
+    fd->cpool_count = fd->cpool_handle.count;
     return fd->cpool_count - 1;
 }
 
-static __exception int emit_push_const(JSParseState *s, GCValue val,
-                                       BOOL as_atom)
+/* A slot for a child function (js_create_function fills it). */
+static int cpool_add_function(JSParseState *s)
 {
-    int idx;
+    CConst cc = { .kind = CC_FUNCTION, .v = JS_NULL };
+    return cpool_add_cconst(s, &cc);
+}
 
-    if (JS_VALUE_GET_TAG(val) == JS_TAG_STRING && as_atom) {
-        JSAtom atom;
-        /* warning: JS_NewAtomStr frees the string value */
-        val;
-        atom = JS_NewAtomStr(s->ctx, JS_VALUE_GET_STRING(val));
+static __exception int emit_push_cconst(JSParseState *s, const CConst *cc)
+{
+    int idx = cpool_add_cconst(s, cc);
+    if (idx < 0)
+        return -1;
+    emit_op(s, OP_push_const);
+    emit_u32(s, idx);
+    return 0;
+}
+
+/* A string literal: its atom when as_atom and the atom is not an integer,
+ * else a constant. */
+static __exception int emit_push_cstr(JSParseState *s, const CStr *str,
+                                      BOOL as_atom)
+{
+    if (as_atom && !str->undef) {
+        JSAtom atom = js_cstr_atom(s, str);
         if (atom != JS_ATOM_NULL && !__JS_AtomIsTaggedInt(atom)) {
             emit_op(s, OP_push_atom_value);
             emit_u32(s, atom);
             return 0;
         }
     }
+    {
+        CConst cc = { .kind = CC_STRING, .str = *str };
+        return emit_push_cconst(s, &cc);
+    }
+}
 
-    idx = cpool_add(s, val);
-    if (idx < 0)
-        return -1;
-    emit_op(s, OP_push_const);
-    emit_u32(s, idx);
-    return 0;
+/* JS_AtomToValue(atom), as a string literal of that text would be pushed. */
+static __exception int emit_push_atom_value(JSParseState *s, JSAtom atom)
+{
+    if (!__JS_AtomIsTaggedInt(atom) && JS_AtomGetKind(s->ctx, atom) == JS_ATOM_KIND_STRING) {
+        emit_op(s, OP_push_atom_value);
+        emit_u32(s, atom);
+        return 0;
+    }
+    {
+        CConst cc = { .kind = CC_ATOM, .atom = atom };
+        return emit_push_cconst(s, &cc);
+    }
+}
+
+/* A number literal the immediate opcodes cannot hold (s->token is it): a
+ * double, or a BigInt (read again from its source when it is made). */
+static __exception int emit_push_number(JSParseState *s, GCValue val)
+{
+    CConst cc = { .kind = CC_VALUE, .v = val };
+    if (JS_VALUE_GET_TAG(val) == JS_TAG_BIG_INT) {
+        cc.kind = CC_BIGINT_SRC;
+        cc.v = JS_UNDEFINED;
+        cc.str.data = s->token.ptr;
+        cc.str.len = (uint32_t)(s->buf_ptr - s->token.ptr);
+    }
+    return emit_push_cconst(s, &cc);
 }
 
 /* return the variable index or -1 if not found,
@@ -27858,30 +28060,21 @@ static int seal_template_obj(JSContextHandle ctx, GCValue obj)
 static __exception int js_parse_template(JSParseState *s, int call, int *argc)
 {
     JSContextHandle ctx = s->ctx;
-    GCValue raw_array = GC_UNDEFINED, template_object = GC_UNDEFINED;
     JSToken cooked = { .u.str.str = GC_UNDEFINED_INIT };
-    int depth, ret;
+    int depth, ret, template_idx = -1;
 
-    raw_array = JS_UNDEFINED; /* avoid warning */
-    template_object = JS_UNDEFINED; /* avoid warning */
+    (void)ctx;
     if (call) {
-        /* Create a template object: an array of cooked strings */
-        /* Create an array of raw strings and store it to the raw property */
-        template_object = JS_NewArray(ctx);
-        if (JS_IsException(template_object))
+        /* The template object (an array of cooked strings with an array of
+           raw ones as its raw property) is made by js_create_function from
+           the parts recorded here. */
+        CConst cc = { .kind = CC_TEMPLATE,
+                      .first = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->tmpl_strs.count / 2 };
+        template_idx = cpool_add_cconst(s, &cc);
+        if (template_idx < 0)
             return -1;
-        //        pool_idx = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->cpool_count;
-        ret = emit_push_const(s, template_object, 0);
-        
-        if (ret)
-            return -1;
-        raw_array = JS_NewArray(ctx);
-        if (JS_IsException(raw_array))
-            return -1;
-        if (JS_DefinePropertyValue(ctx, template_object, JS_ATOM_raw,
-                                   raw_array, JS_PROP_THROW) < 0) {
-            return -1;
-        }
+        emit_op(s, OP_push_const);
+        emit_u32(s, template_idx);
     }
 
     depth = 0;
@@ -27889,22 +28082,23 @@ static __exception int js_parse_template(JSParseState *s, int call, int *argc)
         const uint8_t *p = s->token.ptr + 1;
         cooked = s->token;
         if (call) {
-            if (JS_DefinePropertyValueUint32(ctx, raw_array, depth,
-                                             s->token.u.str.str,
-                                             JS_PROP_ENUMERABLE | JS_PROP_THROW) < 0) {
-                return -1;
-            }
+            CStr pair[2];
+            JSFunctionDef *tfd;
+            pair[1] = s->token.u.str.cstr;   /* raw */
             /* re-parse the string with escape sequences but do not throw a
                syntax error if it contains invalid sequences
              */
             if (js_parse_string(s, '`', FALSE, p, &cooked, &p)) {
-                cooked.u.str.str = JS_UNDEFINED;
+                cooked.u.str.cstr.undef = 1;
             }
-            if (JS_DefinePropertyValueUint32(ctx, template_object, depth,
-                                             cooked.u.str.str,
-                                             JS_PROP_ENUMERABLE | JS_PROP_THROW) < 0) {
+            pair[0] = cooked.u.str.cstr;
+            tfd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+            if (!pvec_push(&tfd->tmpl_strs, sizeof(CStr), &pair[0]) ||
+                !pvec_push(&tfd->tmpl_strs, sizeof(CStr), &pair[1])) {
+                JS_ThrowOutOfMemory(ctx);
                 return -1;
             }
+            PVEC_AT(tfd->cpool_handle, CConst, template_idx).n++;
         } else {
             JSStringHandle str = GC_HANDLE_NULL;
             /* re-parse the string with escape sequences and throw a
@@ -27914,9 +28108,9 @@ static __exception int js_parse_template(JSParseState *s, int call, int *argc)
             s->token.u.str.str = JS_UNDEFINED;
             if (js_parse_string(s, '`', TRUE, p, &cooked, &p))
                 return -1;
-            str = JS_VALUE_GET_STRING(cooked.u.str.str);
-            if (SAFE_GET_OR(str, JSStringHandle, len, 0) != 0 || depth == 0) {
-                ret = emit_push_const(s, cooked.u.str.str, 1);
+            (void)str;
+            if (cooked.u.str.cstr.len != 0 || depth == 0) {
+                ret = emit_push_cstr(s, &cooked.u.str.cstr, 1);
                 
                 if (ret)
                     return -1;
@@ -27953,9 +28147,7 @@ static __exception int js_parse_template(JSParseState *s, int call, int *argc)
 
  done:
     if (call) {
-        /* Seal the objects */
-        seal_template_obj(ctx, raw_array);
-        seal_template_obj(ctx, template_object);
+        /* (js_create_function seals the objects) */
         *argc = depth + 1;
     } else {
         emit_op(s, OP_call_method);
@@ -28059,7 +28251,7 @@ static int __exception js_parse_property_name(JSParseState *s,
             }
         }
     } else if (s->token.val == TOK_STRING) {
-        name = JS_ValueToAtom(s->ctx, s->token.u.str.str);
+        name = js_cstr_atom(s, &s->token.u.str.cstr);
         if (name == JS_ATOM_NULL)
             goto fail;
         if (next_token(s))
@@ -29728,7 +29920,7 @@ static __exception int js_parse_class_default_ctor(JSParseState *s,
         *pfd = fd;
 
     /* the real object will be set at the end of the compilation */
-    idx = cpool_add(s, JS_NULL);
+    idx = cpool_add_function(s);
     fd->parent_cpool_idx = idx;
 
     return 0;
@@ -29836,7 +30028,7 @@ static void emit_class_init_end(JSParseState *s, ClassFieldsDef *cf)
     emit_op(s, OP_return_undef);
     js_parse_set_cur_func(s, (JSFunctionDefHandle)(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->parent_handle));
 
-    cpool_idx = cpool_add(s, JS_NULL);
+    cpool_idx = cpool_add_function(s);
     SAFE_PTR(cf->fields_init_fd_handle, JSFunctionDefHandle)->parent_cpool_idx = cpool_idx;
     emit_op(s, OP_fclosure);
     emit_u32(s, cpool_idx);
@@ -31426,7 +31618,7 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
                 }
             } else {
             large_number:
-                if (emit_push_const(s, val, 0) < 0)
+                if (emit_push_number(s, val) < 0)
                     return -1;
             }
         }
@@ -31438,7 +31630,7 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
             return -1;
         break;
     case TOK_STRING:
-        if (emit_push_const(s, s->token.u.str.str, 1))
+        if (emit_push_cstr(s, &s->token.u.str.cstr, 1))
             return -1;
         if (next_token(s))
             return -1;
@@ -31458,9 +31650,22 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
             /* the previous token is '/' or '/=', so no need to free */
             if (js_parse_regexp(s))
                 return -1;
-            ret = emit_push_const(s, s->token.u.regexp.body, 0);
-            str = SAFE_GET_OR(s->ctx, JSContextHandle, compile_regexp, NULL)(s->ctx, s->token.u.regexp.body,
-                                         s->token.u.regexp.flags);
+            if (emit_push_cstr(s, &s->token.u.regexp.cbody, 0))
+                return -1;
+            {
+                int bc_len;
+                uint8_t *bc = js_compile_regexp_cstr(s->ctx, &s->token.u.regexp.cbody,
+                                                     &s->token.u.regexp.cflags, &bc_len);
+                CConst cc = { .kind = CC_BYTES };
+                if (bc && !pvec_push(&s->owned, sizeof(void *), &bc)) {
+                    js_plain_free(bc);
+                    return js_parse_error(s, "out of memory");
+                }
+                cc.str.data = bc;
+                cc.str.len = (uint32_t)bc_len;
+                str = bc ? JS_UNDEFINED : JS_EXCEPTION;
+                ret = bc ? emit_push_cconst(s, &cc) : -1;
+            }
             if (JS_IsException(str)) {
                 /* add the line number info */
                 int line_num, col_num;
@@ -31469,8 +31674,6 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
                                 s->filename, line_num + 1, col_num + 1, 0);
                 return -1;
             }
-            ret = emit_push_const(s, str, 0);
-            
             if (ret)
                 return -1;
             /* we use a specific opcode to be sure the correct
@@ -32006,8 +32209,8 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
                 if (get_prev_opcode(fd) == OP_get_super) {
                     GCValue val = GC_UNDEFINED;
                     int ret;
-                    val = JS_AtomToValue(s->ctx, s->token.u.ident.atom);
-                    ret = emit_push_const(s, val, 1);
+                    (void)val;
+                    ret = emit_push_atom_value(s, s->token.u.ident.atom);
                     
                     if (ret)
                         return -1;
@@ -32090,8 +32293,8 @@ static __exception int js_parse_delete(JSParseState *s)
             }
             name = get_u32(gc_byte_buffer_ptr(&fd->byte_code) + fd->last_opcode_pos + 1);
             fd->byte_code.size = fd->last_opcode_pos;
-            val = JS_AtomToValue(s->ctx, name);
-            ret = emit_push_const(s, val, 1);
+            (void)val;
+            ret = emit_push_atom_value(s, name);
             
             JS_FreeAtom(s->ctx, name);
             if (ret)
@@ -36319,7 +36522,7 @@ static __exception int js_parse_with_clause(JSParseState *s, JSReqModuleEntry *r
     while (s->token.val != '}') {
         key_token_ptr = s->token.ptr;
         if (s->token.val == TOK_STRING) {
-            key = JS_ValueToAtom(ctx, s->token.u.str.str);
+            key = js_cstr_atom(s, &s->token.u.str.cstr);
             if (key == JS_ATOM_NULL)
                 return -1;
         } else {
@@ -36356,7 +36559,7 @@ static __exception int js_parse_with_clause(JSParseState *s, JSReqModuleEntry *r
                 return js_parse_error(s, "duplicate with key");
         }
         ret = JS_DefinePropertyValue(ctx, rme->attributes, key,
-                                     s->token.u.str.str, JS_PROP_C_W_E);
+                                     js_cstr_value(s, &s->token.u.str.cstr), JS_PROP_C_W_E);
         JS_FreeAtom(ctx, key);
         if (ret < 0)
             return -1;
@@ -36395,7 +36598,7 @@ static __exception int js_parse_from_clause(JSParseState *s, JSModuleDefHandle m
         js_parse_error(s, "string expected");
         return -1;
     }
-    module_name = JS_ValueToAtom(s->ctx, s->token.u.str.str);
+    module_name = js_cstr_atom(s, &s->token.u.str.cstr);
     if (module_name == JS_ATOM_NULL)
         return -1;
     if (next_token(s)) {
@@ -36456,11 +36659,11 @@ static __exception int js_parse_export(JSParseState *s)
                 if (next_token(s))
                     goto fail;
                 if (s->token.val == TOK_STRING) {
-                    if (js_string_find_invalid_codepoint(JS_VALUE_GET_STRING(s->token.u.str.str)) >= 0) {
+                    if (js_string_find_invalid_codepoint(JS_VALUE_GET_STRING(js_cstr_value(s, &s->token.u.str.cstr))) >= 0) {
                         js_parse_error(s, "contains unpaired surrogate");
                         goto fail;
                     }
-                    export_name = JS_ValueToAtom(s->ctx, s->token.u.str.str);
+                    export_name = js_cstr_atom(s, &s->token.u.str.cstr);
                     if (export_name == JS_ATOM_NULL)
                         goto fail;
                 } else {
@@ -36623,7 +36826,7 @@ static __exception int js_parse_import(JSParseState *s)
 
     first_import = js_module_import_entries_count(m);
     if (s->token.val == TOK_STRING) {
-        module_name = JS_ValueToAtom(ctx, s->token.u.str.str);
+        module_name = js_cstr_atom(s, &s->token.u.str.cstr);
         if (module_name == JS_ATOM_NULL)
             return -1;
         if (next_token(s)) {
@@ -36685,11 +36888,11 @@ static __exception int js_parse_import(JSParseState *s)
                 BOOL is_string;
                 if (s->token.val == TOK_STRING) {
                     is_string = TRUE;
-                    if (js_string_find_invalid_codepoint(JS_VALUE_GET_STRING(s->token.u.str.str)) >= 0) {
+                    if (js_string_find_invalid_codepoint(JS_VALUE_GET_STRING(js_cstr_value(s, &s->token.u.str.cstr))) >= 0) {
                         js_parse_error(s, "contains unpaired surrogate");
                         return -1;
                     }
-                    import_name = JS_ValueToAtom(s->ctx, s->token.u.str.str);
+                    import_name = js_cstr_atom(s, &s->token.u.str.cstr);
                     if (import_name == JS_ATOM_NULL)
                         return -1;
                 } else {
@@ -37089,6 +37292,8 @@ static void bc_fingerprint(JSContextHandle ctx, JSFunctionBytecodeHandle b)
     }
 }
 
+static void cconst_release(JSFunctionDef *fd);
+
 /* The plain-memory tables of a definition (js_create_function's last use,
  * or js_free_function_def). */
 static void js_free_function_def_tables(JSFunctionDef *fd)
@@ -37116,6 +37321,7 @@ static void js_free_function_def_tables(JSFunctionDef *fd)
     fd->cv_htab_src = NULL;
     gc_byte_buffer_clear(&fd->byte_code);
     gc_byte_buffer_clear(&fd->pc2line);
+    cconst_release(fd);
 }
 
 static void js_free_function_def(JSContextHandle ctx, JSFunctionDef *fd)
@@ -41366,6 +41572,76 @@ static int add_global_variables(JSContextHandle ctx, JSFunctionDef *fd)
 /* create a function object from a function definition. The function
    definition is freed. All the child functions are also created. It
    must be done this way to resolve all the variables. */
+/* As js_cstr_value, from a context. */
+static GCValue js_cstr_value_ctx(JSContextHandle ctx, const CStr *c)
+{
+    if (c->undef)
+        return JS_UNDEFINED;
+    if (c->len == 0)
+        return JS_AtomToString(ctx, JS_ATOM_empty_string);
+    if (c->wide)
+        return js_new_string16_len(ctx, (const uint16_t *)c->data, (int)c->len);
+    return js_new_string8_len(ctx, (const char *)c->data, (int)c->len);
+}
+
+/* The runtime value of constant i of fd. */
+static GCValue cconst_value(JSContextHandle ctx, JSFunctionDef *fd, int i)
+{
+    CConst *cc = &PVEC_AT(fd->cpool_handle, CConst, i);
+    switch (cc->kind) {
+    case CC_VALUE:
+    case CC_FUNCTION:
+        return cc->v;
+    case CC_STRING:
+        return js_cstr_value_ctx(ctx, &cc->str);
+    case CC_BYTES:
+        return js_new_string8_len(ctx, (const char *)cc->str.data, (int)cc->str.len);
+    case CC_ATOM:
+        return JS_AtomToValue(ctx, cc->atom);
+    case CC_BIGINT_SRC:
+        return js_atof(ctx, (const char *)cc->str.data, NULL, 0,
+                       ATOD_ACCEPT_BIN_OCT | ATOD_ACCEPT_LEGACY_OCTAL |
+                       ATOD_ACCEPT_UNDERSCORES | ATOD_ACCEPT_SUFFIX);
+    case CC_TEMPLATE: {
+        int first = cc->first, n = cc->n, k;
+        GCValue template_object = JS_NewArray(ctx), raw_array;
+        if (JS_IsException(template_object))
+            return JS_EXCEPTION;
+        raw_array = JS_NewArray(ctx);
+        if (JS_IsException(raw_array))
+            return JS_EXCEPTION;
+        if (JS_DefinePropertyValue(ctx, template_object, JS_ATOM_raw, raw_array, JS_PROP_THROW) < 0)
+            return JS_EXCEPTION;
+        for (k = 0; k < n; k++) {
+            const CStr *pair = &PVEC_AT(fd->tmpl_strs, CStr, (first + k) * 2);
+            if (JS_DefinePropertyValueUint32(ctx, raw_array, k, js_cstr_value_ctx(ctx, &pair[1]),
+                                             JS_PROP_ENUMERABLE | JS_PROP_THROW) < 0 ||
+                JS_DefinePropertyValueUint32(ctx, template_object, k, js_cstr_value_ctx(ctx, &pair[0]),
+                                             JS_PROP_ENUMERABLE | JS_PROP_THROW) < 0)
+                return JS_EXCEPTION;
+        }
+        seal_template_obj(ctx, raw_array);
+        seal_template_obj(ctx, template_object);
+        return template_object;
+    }
+    }
+    return JS_UNDEFINED;
+}
+
+/* The pool is done with: no more roots for the child functions. */
+static void cconst_release(JSFunctionDef *fd)
+{
+    for (int i = fd->cpool_handle.count; i-- > 0;) {
+        CConst *cc = &PVEC_AT(fd->cpool_handle, CConst, i);
+        if (cc->rooted) {
+            gc_remove_root(GC_VALUE_GET_HANDLE(cc->v));
+            cc->rooted = 0;
+        }
+    }
+    pvec_free(&fd->cpool_handle);
+    pvec_free(&fd->tmpl_strs);
+}
+
 static GCValue js_create_function(JSContextHandle ctx, JSFunctionDef *fd)
 {
     GCValue func_obj = GC_UNDEFINED;
@@ -41425,9 +41701,14 @@ static GCValue js_create_function(JSContextHandle ctx, JSFunctionDef *fd)
             func_obj = js_create_function(ctx, SAFE_PTR(fd1_handle, JSFunctionDefHandle));
             if (JS_IsException(func_obj))
                 goto fail;
-            /* save it in the constant pool */
+            /* save it in the constant pool: a root until the bytecode holds it */
             assert(cpool_idx >= 0);
-            GC_SET(SAFE_AT(fd_cpool, GCValueHandle, cpool_idx), func_obj);
+            {
+                CConst *cc = &PVEC_AT(fd->cpool_handle, CConst, cpool_idx);
+                cc->v = func_obj;
+                gc_add_root(GC_VALUE_GET_HANDLE(func_obj));
+                cc->rooted = 1;
+            }
         }
     }
 
@@ -41536,12 +41817,15 @@ static GCValue js_create_function(JSContextHandle ctx, JSFunctionDef *fd)
     SAFE_SET(b, JSFunctionBytecodeHandle, cpool_count, fd->cpool_count);
     if (SAFE_GET_OR(b, JSFunctionBytecodeHandle, cpool_count, 0)) {
         SAFE_SET(b, JSFunctionBytecodeHandle, cpool_offset, cpool_offset);
-        /* Use fresh dereference for GC safety - cpool is inline data */
-        for (int cpool_i = 0; cpool_i < SAFE_GET_OR(b, JSFunctionBytecodeHandle, cpool_count, 0); cpool_i++)
-            gc_set_heap_value(&js_bc_cpool_ptr(b)[cpool_i], SAFE_AT(fd_cpool, GCValueHandle, cpool_i));
+        /* the values, each held by the bytecode before the next is made */
+        for (int cpool_i = 0; cpool_i < fd->cpool_count; cpool_i++) {
+            GCValue v = cconst_value(ctx, fd, cpool_i);
+            if (JS_IsException(v))
+                goto fail;
+            gc_set_heap_value(&js_bc_cpool_ptr(b)[cpool_i], v);
+        }
     }
-    /* GC frees automatically */;
-    fd->cpool_handle = 0;
+    cconst_release(fd);
 
     SAFE_SET(b, JSFunctionBytecodeHandle, stack_size, stack_size);
 
@@ -42654,7 +42938,7 @@ static __exception int js_parse_function_decl2(JSParseState *s,
         JSAtom func_name = fd->func_name;
 
         /* the real object will be set at the end of the compilation */
-        idx = cpool_add(s, JS_NULL);
+        idx = cpool_add_function(s);
         fd->parent_cpool_idx = idx;
 
         if (is_expr) {
@@ -42852,7 +43136,7 @@ static GCHandle js_lazy_compile(JSContextHandle ctx, JSFunctionBytecodeHandle st
     proxy->body_scope = proxy->scope_level;
 
     /* the function itself */
-    cpool_idx = cpool_add(s, JS_NULL);
+    cpool_idx = cpool_add_function(s);
     if (cpool_idx < 0)
         goto fail;
     fd = js_new_function_def(ctx, (JSFunctionDefHandle)(proxy->self_handle), FALSE,
@@ -53661,6 +53945,126 @@ static void js_regexp_mark(JSRuntimeHandle rt, GCValue val, JS_MarkFunc *mark_fu
 }
 
 /* create a string containing the RegExp bytecode */
+/* The LRE_FLAG_* of a flags string, or -1 if it is not valid. */
+static int js_regexp_parse_flags(const char *str, size_t len)
+{
+    int re_flags = 0, mask;
+    size_t i;
+
+    /* XXX: re_flags = LRE_FLAG_OCTAL unless strict mode? */
+    for (i = 0; i < len; i++) {
+        switch(str[i]) {
+        case 'd':
+            mask = LRE_FLAG_INDICES;
+            break;
+        case 'g':
+            mask = LRE_FLAG_GLOBAL;
+            break;
+        case 'i':
+            mask = LRE_FLAG_IGNORECASE;
+            break;
+        case 'm':
+            mask = LRE_FLAG_MULTILINE;
+            break;
+        case 's':
+            mask = LRE_FLAG_DOTALL;
+            break;
+        case 'u':
+            mask = LRE_FLAG_UNICODE;
+            break;
+        case 'v':
+            mask = LRE_FLAG_UNICODE_SETS;
+            break;
+        case 'y':
+            mask = LRE_FLAG_STICKY;
+            break;
+        default:
+            return -1;
+        }
+        if ((re_flags & mask) != 0)
+            return -1;
+        re_flags |= mask;
+    }
+    /* 'u' and 'v' cannot be both set */
+    if ((re_flags & LRE_FLAG_UNICODE_SETS) && (re_flags & LRE_FLAG_UNICODE))
+        return -1;
+    return re_flags;
+}
+
+/* lre_realloc's memory on this thread: plain while the compiler compiles a
+ * regexp literal (its bytecode goes into the constant pool), else GC. */
+static _Thread_local int lre_plain_alloc;
+
+/* A regexp literal of the source, compiled in plain memory: the bytecode
+ * (js_plain_free it), or NULL with the error thrown. */
+static uint8_t *js_compile_regexp_cstr(JSContextHandle ctx, const CStr *body,
+                                       const CStr *flags, int *plen)
+{
+    char fbuf[16], error_msg[64];
+    char *str;
+    size_t len = 0, i;
+    int re_flags;
+    uint8_t *bc;
+
+    if (flags->len >= sizeof(fbuf))
+        goto bad_flags;
+    for (i = 0; i < flags->len; i++) {
+        unsigned c = flags->wide ? ((const uint16_t *)flags->data)[i] : ((const uint8_t *)flags->data)[i];
+        if (c >= 0x80)
+            goto bad_flags;
+        fbuf[i] = (char)c;
+    }
+    re_flags = js_regexp_parse_flags(fbuf, flags->len);
+    if (re_flags < 0) {
+    bad_flags:
+        JS_ThrowSyntaxError(ctx, "invalid regular expression flags");
+        return NULL;
+    }
+
+    /* the pattern in UTF-8 (CESU-8 unless unicode), as JS_ToCStringLen2 */
+    str = (char *)js_plain_realloc(NULL, (size_t)body->len * 3 + 1);
+    if (!str) {
+        JS_ThrowOutOfMemory(ctx);
+        return NULL;
+    }
+    if (!body->wide) {
+        const uint8_t *src = (const uint8_t *)body->data;
+        for (i = 0; i < body->len; i++) {
+            unsigned c = src[i];
+            if (c < 0x80) {
+                str[len++] = (char)c;
+            } else {
+                str[len++] = (char)((c >> 6) | 0xc0);
+                str[len++] = (char)((c & 0x3f) | 0x80);
+            }
+        }
+    } else {
+        const uint16_t *src = (const uint16_t *)body->data;
+        BOOL cesu8 = !(re_flags & (LRE_FLAG_UNICODE | LRE_FLAG_UNICODE_SETS));
+        i = 0;
+        while (i < body->len) {
+            unsigned c = src[i++];
+            if (c < 0x80) {
+                str[len++] = (char)c;
+                continue;
+            }
+            if (is_hi_surrogate(c) && i < body->len && !cesu8 && is_lo_surrogate(src[i]))
+                c = from_surrogate(c, src[i++]);
+            len += unicode_to_utf8((uint8_t *)str + len, c);
+        }
+    }
+    str[len] = '\0';
+
+    lre_plain_alloc++;
+    bc = lre_compile(plen, error_msg, sizeof(error_msg), str, len, re_flags,
+                     (void*)(uintptr_t)(uint32_t)SAFE_HANDLE(ctx));  /* for the stack check */
+    lre_plain_alloc--;
+    js_plain_free(str);
+    if (!bc)
+        JS_ThrowSyntaxError(ctx, "%s", error_msg);
+    return bc;
+}
+
 static GCValue js_compile_regexp(JSContextHandle ctx, GCValue pattern,
                                  GCValue flags)
 {
@@ -54144,6 +54548,13 @@ int lre_check_stack_overflow(void *opaque, size_t alloca_size)
 void *lre_realloc(void *opaque, void *ptr, size_t size)
 {
     (void)opaque;
+    if (lre_plain_alloc) {
+        if (size == 0) {
+            js_plain_free(ptr);
+            return NULL;
+        }
+        return js_plain_realloc(ptr, size);
+    }
     if (size == 0) {
         /* Free request: GC will reclaim memory during sweep.
          * The handle in the header is now orphaned but won't be accessed again. */
