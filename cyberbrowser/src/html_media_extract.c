@@ -1148,11 +1148,6 @@ static void patch_loaded_script(ScriptInfo *si);
  * reaches them, against the document parsed so far.
  * ============================================================================ */
 
-struct HtmlPageStream {
-    HtmlDocStream *doc;
-    int run, ok;                /* scripts run, and run without an exception */
-    bool normalized;
-};
 
 /* The script's src resolved as extract_scripts_in_order resolves it (the
  * attribute value is decoded already), or false when it is not fetched. */
@@ -1236,7 +1231,60 @@ static char *load_parser_script(NodeId node, size_t *out_len) {
     return out;
 }
 
-static void run_parser_script(HtmlPageStream *ps, GCValue script) {
+static void gc_value_root(GCValue v, bool add) {
+    if (!JS_IsObject(v)) return;
+    GCHandle h = GC_VALUE_GET_HANDLE(v);
+    if (h == GC_HANDLE_NULL) return;
+    if (add) gc_add_root(h); else gc_remove_root(h);
+}
+
+/* How a parser-inserted script runs (HTML §4.12.1.1 "prepare the script
+ * element"): blocking the parser where it is; as soon as it is downloaded
+ * (async); or once the page is parsed, in document order (defer, and
+ * modules, which run here as classic scripts). */
+enum { PS_SKIP, PS_BLOCKING, PS_ASYNC, PS_DEFER };
+
+static int classify_parser_script(NodeId node, char *url, size_t cap) {
+    url[0] = '\0';
+    const char *type = dom_get_attr_str(node, "type");
+    if (!parser_script_type_runs(type)) return PS_SKIP;
+    bool module = type && strncasecmp(type, "module", 6) == 0;
+    const char *src = dom_get_attr_str(node, "src");
+    bool external = src && src[0];
+    if (external && (strlen(src) >= cap || !resolve_parser_script_url(src, url, cap))) return PS_SKIP;
+    if ((external || module) && dom_get_attr_str(node, "async")) return PS_ASYNC;
+    if (module || (external && dom_get_attr_str(node, "defer"))) return PS_DEFER;
+    return PS_BLOCKING;
+}
+
+typedef struct QueuedScript {
+    struct QueuedScript *next;
+    GCValue script;                         /* rooted while queued */
+    char url[SCRIPT_URL_MAX_LEN];           /* "" for an inline module */
+} QueuedScript;
+
+typedef struct ScriptQueue { QueuedScript *head, *tail; } ScriptQueue;
+
+struct HtmlPageStream {
+    HtmlDocStream *doc;
+    bool doc_ended;             /* parsing is over (deferred scripts may run) */
+    int run, ok;                /* scripts run, and run without an exception */
+    bool normalized;
+    ScriptQueue async, defer;
+};
+
+static void queue_push(ScriptQueue *q, GCValue script, const char *url) {
+    QueuedScript *e = (QueuedScript *)calloc(1, sizeof(*e));
+    if (!e) return;
+    e->script = script;
+    gc_value_root(script, true);
+    snprintf(e->url, sizeof(e->url), "%s", url);
+    if (url[0]) dom_fetch_prefetch(url);
+    if (q->tail) q->tail->next = e; else q->head = e;
+    q->tail = e;
+}
+
+static void run_script(HtmlPageStream *ps, GCValue script) {
     JSContextHandle ctx = g_js_context;
     if (!ps->normalized) {
         /* As before the whole-page run: polyfills read documentElement.style. */
@@ -1256,11 +1304,44 @@ static void run_parser_script(HtmlPageStream *ps, GCValue script) {
     free(src);
 }
 
+static void run_blocking(HtmlPageStream *ps, GCValue script) {
+    run_script(ps, script);
+}
+
+/* Async scripts whose source is here run now (in the order they finish). */
+static void run_ready_async(HtmlPageStream *ps, bool wait) {
+    for (QueuedScript **pp = &ps->async.head; *pp; ) {
+        QueuedScript *e = *pp;
+        if (!wait && e->url[0] && !dom_fetch_ready(e->url)) { pp = &e->next; continue; }
+        *pp = e->next;
+        if (ps->async.tail == e) {
+            ps->async.tail = NULL;
+            for (QueuedScript *t = ps->async.head; t; t = t->next) ps->async.tail = t;
+        }
+        run_script(ps, e->script);
+        gc_value_root(e->script, false);
+        free(e);
+        pp = &ps->async.head;       /* (it may have queued or run others) */
+    }
+}
+
+/* A script element the parser has just inserted. */
+static void dispatch_parser_script(HtmlPageStream *ps, GCValue script) {
+    char url[SCRIPT_URL_MAX_LEN];
+    switch (classify_parser_script(dom_node_of(script), url, sizeof(url))) {
+    case PS_BLOCKING: run_blocking(ps, script); break;
+    case PS_ASYNC:    queue_push(&ps->async, script, url); break;
+    case PS_DEFER:    queue_push(&ps->defer, script, url); break;
+    default:          break;
+    }
+}
+
 static void page_stream_run(HtmlPageStream *ps, bool final) {
     for (;;) {
+        run_ready_async(ps, false);
         GCValue script = html_doc_stream_step(ps->doc, final);
         if (!JS_IsObject(script)) return;
-        run_parser_script(ps, script);
+        dispatch_parser_script(ps, script);
     }
 }
 
@@ -1276,15 +1357,31 @@ HtmlPageStream *html_page_stream_begin(void) {
 }
 
 void html_page_stream_feed(HtmlPageStream *ps, const char *data, size_t len) {
-    if (!ps || !len) return;
+    if (!ps || !len || ps->doc_ended) return;
     html_doc_stream_append(ps->doc, data, len);
     page_stream_run(ps, false);
 }
 
 bool html_page_stream_finish(HtmlPageStream *ps, JsExecResult *out_result) {
     if (!ps) return false;
+    JSContextHandle ctx = g_js_context;
     page_stream_run(ps, true);
     html_doc_stream_end(ps->doc);
+    ps->doc_ended = true;
+    /* Parsing is over: "interactive", then the deferred scripts in order and
+     * the async ones still downloading, before DOMContentLoaded. */
+    GCValue doc = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document");
+    JS_SetPropertyStr(ctx, doc, "readyState", JS_NewString(ctx, "interactive"));
+    while (ps->defer.head) {
+        QueuedScript *e = ps->defer.head;
+        ps->defer.head = e->next;
+        run_ready_async(ps, false);
+        run_script(ps, e->script);
+        gc_value_root(e->script, false);
+        free(e);
+    }
+    ps->defer.tail = NULL;
+    run_ready_async(ps, true);
     js_quickjs_pump_timers_and_jobs();
     printf("Ran %d page scripts as the page was parsed (%d without an exception)\n", ps->run, ps->ok);
     if (out_result) {
