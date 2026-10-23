@@ -431,10 +431,17 @@ GCValue dom_create_wrapper(JSContextHandle ctx, NodeId id) {
 static NodeId root_host(JSContextHandle ctx, NodeId root) {
     NodeId h = dom_host(root);
     if (h && (dom_flags(root) & DOMF_SHADOW_ROOT)) return h;
-    if (dom_kind(root) != DOM_K_FRAGMENT && dom_kind(root) != DOM_K_ELEMENT) return DOM_NULL;
+    /* A DocumentFragment is not a shadow root because script gave it a
+     * host: ShadyDOM turns its stamped template fragment into a "shadow
+     * root" (ShadowRoot.prototype, a host) and only then appends it to the
+     * host.  Until then its content is in a detached fragment, as in any
+     * browser; counting it connected made moving it into the host
+     * disconnect custom elements that were never connected (YouTube's
+     * subscribe button cleared itself on that disconnect). */
+    if (dom_kind(root) != DOM_K_ELEMENT) return DOM_NULL;
     if (!dom_has_wrapper(root)) return DOM_NULL;
     GCValue obj = dom_js_existing(root);
-    if (dom_kind(root) == DOM_K_ELEMENT) {
+    {
         /* Polyfill shadow roots made of plain objects report nodeType 11.
          * Checked first: the root of a detached subtree is usually an
          * ordinary element, whose "host" can be a costly getter (a URL's

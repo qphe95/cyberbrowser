@@ -936,6 +936,34 @@ TEST(test_dom_custom_element_reactions) {
     return true;
 }
 
+/* A fragment script made into a "shadow root" (ShadyDOM: ShadowRoot.prototype
+ * and a host) is still a detached fragment: its custom elements are not
+ * connected, and moving them into the host connects them without a
+ * disconnect first (YouTube's smartimation cleared its children, the
+ * subscribe button, on that disconnect). */
+TEST(test_dom_custom_elements_in_shady_root_fragment) {
+    JSContextHandle ctx = get_shared_test_context();
+    if (!dom_ready(ctx)) { printf("    (skipped - no document)\n"); return true; }
+    ASSERT_EQ(1, js_int(ctx,
+        "(function(){var log=[];"
+        "class XShady extends HTMLElement {"
+        "  connectedCallback(){ log.push('c' + this.childNodes.length); }"
+        "  disconnectedCallback(){ log.push('d'); this.innerText=''; }"
+        "}"
+        "customElements.define('x-shady-test', XShady);"
+        "var host=document.createElement('div'); document.body.appendChild(host);"
+        "var t=document.createElement('template'); t.innerHTML='<x-shady-test><b></b><i></i></x-shady-test>';"
+        "var frag=document.importNode(t.content, true);"
+        "Object.setPrototypeOf(frag, ShadowRoot.prototype); frag.host=host;"
+        "var x=frag.firstChild;"
+        "var detached = x.isConnected === false && log.length === 0;"
+        "Node.prototype.appendChild.call(host, frag);"
+        "var ok = detached && log.join(',')==='c2' && x.childNodes.length===2 && x.isConnected;"
+        "host.remove();"
+        "return ok ? 1 : 0;})()"));
+    return true;
+}
+
 /* A MutationObserver reused after disconnect() keeps delivering (YouTube's
  * description expander re-observes the same observer from its callback),
  * disconnect() drops queued records, and one observer can watch two nodes. */
@@ -1168,6 +1196,7 @@ void run_dom_tests(void) {
     RUN_TEST(test_dom_collections_are_iterable);
     RUN_TEST(test_dom_media_source_events);
     RUN_TEST(test_dom_custom_element_reactions);
+    RUN_TEST(test_dom_custom_elements_in_shady_root_fragment);
     RUN_TEST(test_dom_mutation_observer_reobserve);
     RUN_TEST(test_dom_clone_keeps_script_styles);
     RUN_TEST(test_dom_response_clone_keeps_body);
