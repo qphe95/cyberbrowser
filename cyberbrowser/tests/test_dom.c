@@ -964,6 +964,26 @@ TEST(test_dom_custom_elements_in_shady_root_fragment) {
     return true;
 }
 
+/* DOM attributes are configurable accessors, as WebIDL defines them:
+ * polyfills (ShadyDOM in patch mode, test harnesses) redefine them. */
+TEST(test_dom_attributes_are_configurable) {
+    JSContextHandle ctx = get_shared_test_context();
+    if (!dom_ready(ctx)) { printf("    (skipped - no document)\n"); return true; }
+    ASSERT_EQ(1, js_int(ctx,
+        "(function(){"
+        "var bad=[];"
+        "[[Element.prototype,['tagName','localName','id','className','innerHTML','outerHTML','children','firstElementChild','classList','attributes']],"
+        " [Node.prototype,['textContent','childNodes','parentNode']], [document.createTextNode('t'),['data']]].forEach(function(e){"
+        "  e[1].forEach(function(n){ var o=e[0], d=null; while(o && !(d=Object.getOwnPropertyDescriptor(o,n))) o=Object.getPrototypeOf(o);"
+        "    if(!d || !d.configurable) bad.push(n); }); });"
+        "var d=document.createElement('div'); d.innerHTML='<b></b>';"
+        "var orig=Object.getOwnPropertyDescriptor(Element.prototype,'innerHTML'), seen=0;"
+        "Object.defineProperty(Element.prototype,'innerHTML',{configurable:true,enumerable:true,get:orig.get,set:function(v){seen++;orig.set.call(this,v);}});"
+        "d.innerHTML='<i></i>'; Object.defineProperty(Element.prototype,'innerHTML',orig);"
+        "return bad.length===0 && seen===1 && d.firstChild.localName==='i' ? 1 : 0;})()"));
+    return true;
+}
+
 /* A MutationObserver reused after disconnect() keeps delivering (YouTube's
  * description expander re-observes the same observer from its callback),
  * disconnect() drops queued records, and one observer can watch two nodes. */
@@ -1197,6 +1217,7 @@ void run_dom_tests(void) {
     RUN_TEST(test_dom_media_source_events);
     RUN_TEST(test_dom_custom_element_reactions);
     RUN_TEST(test_dom_custom_elements_in_shady_root_fragment);
+    RUN_TEST(test_dom_attributes_are_configurable);
     RUN_TEST(test_dom_mutation_observer_reobserve);
     RUN_TEST(test_dom_clone_keeps_script_styles);
     RUN_TEST(test_dom_response_clone_keeps_body);

@@ -2500,7 +2500,7 @@ GCValue js_element_get_classList(JSContextHandle ctx, GCValue this_val, int argc
     JS_SetProperty(ctx, classList, dom_iterator_atom(ctx), values);
     GCValue length_getter = JS_NewCFunction(ctx, js_dom_token_list_get_length, "get length", 0);
     JSAtom length_atom = JS_NewAtom(ctx, "length");
-    JS_DefinePropertyGetSet(ctx, classList, length_atom, length_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, classList, length_atom, length_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, length_atom);
     JS_SetPropertyStr(ctx, this_val, "__classList", classList);
     return classList;

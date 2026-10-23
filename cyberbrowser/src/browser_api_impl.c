@@ -1697,7 +1697,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // Add observedAttributes static getter to prevent Polymer mixin chain from walking to null.constructor
     JS_DefinePropertyGetSet(ctx, event_target_ctor, JS_NewAtom(ctx, "observedAttributes"),
         JS_NewCFunction(ctx, js_event_target_observed_attributes, "observedAttributes", 0),
-        JS_UNDEFINED, JS_PROP_ENUMERABLE);
+        JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_SetPropertyStr(ctx, global, "EventTarget", event_target_ctor);
     JS_SetPropertyStr(ctx, window, "EventTarget", event_target_ctor);
     // Keep event_target_proto for Node's prototype chain
@@ -1958,7 +1958,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_NewCFunction(ctx, js_slot_assigned_elements, "assignedElements", 1));
     GCValue slot_name_getter = JS_NewCFunction(ctx, js_slot_get_name, "get name", 0);
     JSAtom slot_name_atom = JS_NewAtom(ctx, "name");
-    JS_DefinePropertyGetSet(ctx, slot_proto, slot_name_atom, slot_name_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, slot_proto, slot_name_atom, slot_name_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, slot_name_atom);
     JS_SetPropertyStr(ctx, slot_ctor, "prototype", slot_proto);
     JS_SetPropertyStr(ctx, global, "HTMLSlotElement", slot_ctor);
@@ -2176,7 +2176,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_NewCFunction(ctx, js_element_closest, "closest", 1));
     GCValue attr_getter_he = JS_NewCFunction(ctx, js_element_get_attributes, "get attributes", 0);
     JSAtom attr_atom_he = JS_NewAtom(ctx, "attributes");
-    JS_DefinePropertyGetSet(ctx, html_element_proto, attr_atom_he, attr_getter_he, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, html_element_proto, attr_atom_he, attr_getter_he, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, attr_atom_he);
     JS_SetPropertyStr(ctx, html_element_proto, "querySelector",
         JS_NewCFunction(ctx, js_element_querySelector_real, "querySelector", 1));
@@ -2190,7 +2190,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     GCValue tagName_getter = JS_NewCFunction(ctx, js_element_get_tagName, "get tagName", 0);
     JSAtom tagName_atom = JS_NewAtom(ctx, "tagName");
     JS_DefinePropertyGetSet(ctx, element_proto, tagName_atom,
-        tagName_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+        tagName_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, tagName_atom);
 
     // localName getter - the lowercase tag name (needed by Polymer's
@@ -2198,7 +2198,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     GCValue localName_getter = JS_NewCFunction(ctx, js_element_get_localName, "get localName", 0);
     JSAtom localName_atom = JS_NewAtom(ctx, "localName");
     JS_DefinePropertyGetSet(ctx, element_proto, localName_atom,
-        localName_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+        localName_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, localName_atom);
     
     // shadowRoot getter
@@ -2207,7 +2207,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // Note: JS_DefinePropertyGetSet takes ownership of the getter/setter values.
     // Do NOT free getter after passing it - the property now owns it.
     JS_DefinePropertyGetSet(ctx, element_proto, shadow_root_atom,
-        getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+        getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, shadow_root_atom);
     // querySelector and querySelectorAll (REAL DOM IMPLEMENTATION)
     JS_SetPropertyStr(ctx, element_proto, "querySelector",
@@ -2224,12 +2224,12 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JSAtom id_atom = JS_NewAtom(ctx, "id");
         JS_DefinePropertyGetSet(ctx, element_proto, id_atom,
             JS_NewCFunction(ctx, js_element_get_id, "get id", 0),
-            JS_NewCFunction(ctx, js_element_set_id, "set id", 1), JS_PROP_ENUMERABLE);
+            JS_NewCFunction(ctx, js_element_set_id, "set id", 1), JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
         JS_FreeAtom(ctx, id_atom);
         JSAtom cn_atom = JS_NewAtom(ctx, "className");
         JS_DefinePropertyGetSet(ctx, element_proto, cn_atom,
             JS_NewCFunction(ctx, js_element_get_class_name, "get className", 0),
-            JS_NewCFunction(ctx, js_element_set_class_name, "set className", 1), JS_PROP_ENUMERABLE);
+            JS_NewCFunction(ctx, js_element_set_class_name, "set className", 1), JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
         JS_FreeAtom(ctx, cn_atom);
     }
     JS_SetPropertyStr(ctx, element_proto, "removeAttribute",
@@ -2246,7 +2246,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         JS_NewCFunction(ctx, js_element_closest, "closest", 1));
     GCValue attr_getter = JS_NewCFunction(ctx, js_element_get_attributes, "get attributes", 0);
     JSAtom attr_atom = JS_NewAtom(ctx, "attributes");
-    JS_DefinePropertyGetSet(ctx, element_proto, attr_atom, attr_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, element_proto, attr_atom, attr_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, attr_atom);
     JS_SetPropertyStr(ctx, element_proto, "toggleAttribute",
         JS_NewCFunction(ctx, js_element_toggle_attribute, "toggleAttribute", 1));
@@ -2277,7 +2277,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     GCValue style_getter = JS_NewCFunction(ctx, js_element_get_style, "get style", 0);
     GCValue style_setter = JS_NewCFunction(ctx, js_element_set_style, "set style", 1);
     JSAtom style_atom = JS_NewAtom(ctx, "style");
-    JS_DefinePropertyGetSet(ctx, element_proto, style_atom, style_getter, style_setter, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, element_proto, style_atom, style_getter, style_setter, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, style_atom);
 
     // Layout metrics (offsetWidth, clientWidth, scrollHeight, ...) from a forced layout
@@ -2295,37 +2295,37 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // children getter
     GCValue children_getter = JS_NewCFunction(ctx, js_element_get_children, "get children", 0);
     JSAtom children_atom = JS_NewAtom(ctx, "children");
-    JS_DefinePropertyGetSet(ctx, element_proto, children_atom, children_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, element_proto, children_atom, children_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, children_atom);
     
     // firstElementChild getter (REAL)
     GCValue first_elem_child_getter = JS_NewCFunction(ctx, js_element_get_firstElementChild, "get firstElementChild", 0);
     JSAtom first_elem_child_atom = JS_NewAtom(ctx, "firstElementChild");
-    JS_DefinePropertyGetSet(ctx, element_proto, first_elem_child_atom, first_elem_child_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, element_proto, first_elem_child_atom, first_elem_child_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, first_elem_child_atom);
     
     // lastElementChild getter (REAL)
     GCValue last_elem_child_getter = JS_NewCFunction(ctx, js_element_get_lastElementChild, "get lastElementChild", 0);
     JSAtom last_elem_child_atom = JS_NewAtom(ctx, "lastElementChild");
-    JS_DefinePropertyGetSet(ctx, element_proto, last_elem_child_atom, last_elem_child_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, element_proto, last_elem_child_atom, last_elem_child_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, last_elem_child_atom);
     
     // nextElementSibling getter (REAL)
     GCValue next_elem_sibling_getter = JS_NewCFunction(ctx, js_element_get_nextElementSibling, "get nextElementSibling", 0);
     JSAtom next_elem_sibling_atom = JS_NewAtom(ctx, "nextElementSibling");
-    JS_DefinePropertyGetSet(ctx, element_proto, next_elem_sibling_atom, next_elem_sibling_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, element_proto, next_elem_sibling_atom, next_elem_sibling_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, next_elem_sibling_atom);
     
     // previousElementSibling getter (REAL)
     GCValue prev_elem_sibling_getter = JS_NewCFunction(ctx, js_element_get_previousElementSibling, "get previousElementSibling", 0);
     JSAtom prev_elem_sibling_atom = JS_NewAtom(ctx, "previousElementSibling");
-    JS_DefinePropertyGetSet(ctx, element_proto, prev_elem_sibling_atom, prev_elem_sibling_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, element_proto, prev_elem_sibling_atom, prev_elem_sibling_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, prev_elem_sibling_atom);
     
     // childElementCount getter (REAL)
     GCValue child_elem_count_getter = JS_NewCFunction(ctx, js_element_get_childElementCount, "get childElementCount", 0);
     JSAtom child_elem_count_atom = JS_NewAtom(ctx, "childElementCount");
-    JS_DefinePropertyGetSet(ctx, element_proto, child_elem_count_atom, child_elem_count_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, element_proto, child_elem_count_atom, child_elem_count_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, child_elem_count_atom);
     
     // ParentNode mixin
@@ -2348,26 +2348,26 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     GCValue inner_html_getter = JS_NewCFunction(ctx, js_element_get_inner_html, "get innerHTML", 0);
     GCValue inner_html_setter = JS_NewCFunction(ctx, js_element_set_inner_html, "set innerHTML", 1);
     JSAtom inner_html_atom = JS_NewAtom(ctx, "innerHTML");
-    JS_DefinePropertyGetSet(ctx, element_proto, inner_html_atom, inner_html_getter, inner_html_setter, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, element_proto, inner_html_atom, inner_html_getter, inner_html_setter, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, inner_html_atom);
     
     // outerHTML getter/setter
     GCValue outer_html_getter = JS_NewCFunction(ctx, js_element_get_outer_html, "get outerHTML", 0);
     GCValue outer_html_setter = JS_NewCFunction(ctx, js_element_set_outer_html, "set outerHTML", 1);
     JSAtom outer_html_atom = JS_NewAtom(ctx, "outerHTML");
-    JS_DefinePropertyGetSet(ctx, element_proto, outer_html_atom, outer_html_getter, outer_html_setter, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, element_proto, outer_html_atom, outer_html_getter, outer_html_setter, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, outer_html_atom);
     
     // classList getter
     GCValue class_list_getter = JS_NewCFunction(ctx, js_element_get_classList, "get classList", 0);
     JSAtom class_list_atom = JS_NewAtom(ctx, "classList");
-    JS_DefinePropertyGetSet(ctx, element_proto, class_list_atom, class_list_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, element_proto, class_list_atom, class_list_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, class_list_atom);
     
     // dataset getter
     GCValue dataset_getter = JS_NewCFunction(ctx, js_element_get_dataset, "get dataset", 0);
     JSAtom dataset_atom = JS_NewAtom(ctx, "dataset");
-    JS_DefinePropertyGetSet(ctx, element_proto, dataset_atom, dataset_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, element_proto, dataset_atom, dataset_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, dataset_atom);
     
     // ===== Node Content Properties (on Node.prototype) =====
@@ -2395,7 +2395,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     GCValue data_getter = JS_NewCFunction(ctx, js_node_get_data, "get data", 0);
     GCValue data_setter = JS_NewCFunction(ctx, js_node_set_data, "set data", 1);
     JSAtom data_atom = JS_NewAtom(ctx, "data");
-    JS_DefinePropertyGetSet(ctx, character_data_proto, data_atom, data_getter, data_setter, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, character_data_proto, data_atom, data_getter, data_setter, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, data_atom);
     // ChildNode mixin for CharacterData (Text/Comment)
     JS_SetPropertyStr(ctx, character_data_proto, "before",
@@ -2531,7 +2531,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     GCValue doc_cookie_getter = JS_NewCFunction(ctx, js_document_cookie_getter, "get cookie", 0);
     GCValue doc_cookie_setter = JS_NewCFunction(ctx, js_document_cookie_setter, "set cookie", 1);
     JS_DefinePropertyGetSet(ctx, document, JS_NewAtom(ctx, "cookie"),
-        doc_cookie_getter, doc_cookie_setter, JS_PROP_ENUMERABLE);
+        doc_cookie_getter, doc_cookie_setter, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     DEF_PROP_STR(ctx, document, "domain", "");
     DEF_PROP_STR(ctx, document, "title", "");
     DEF_PROP_STR(ctx, document, "baseURI", "");
@@ -2588,11 +2588,11 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     DEF_FUNC(ctx, document, "getElementsByName", js_empty_array, 1);
     GCValue doc_style_sheets_getter = JS_NewCFunction(ctx, js_document_get_style_sheets, "get styleSheets", 0);
     JS_DefinePropertyGetSet(ctx, document, JS_NewAtom(ctx, "styleSheets"),
-        doc_style_sheets_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+        doc_style_sheets_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     GCValue doc_adopted_sheets_getter = JS_NewCFunction(ctx, js_document_get_adopted_style_sheets, "get adoptedStyleSheets", 0);
     GCValue doc_adopted_sheets_setter = JS_NewCFunction(ctx, js_document_set_adopted_style_sheets, "set adoptedStyleSheets", 1);
     JS_DefinePropertyGetSet(ctx, document, JS_NewAtom(ctx, "adoptedStyleSheets"),
-        doc_adopted_sheets_getter, doc_adopted_sheets_setter, JS_PROP_ENUMERABLE);
+        doc_adopted_sheets_getter, doc_adopted_sheets_setter, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     DEF_FUNC(ctx, document, "elementFromPoint", js_document_element_from_point, 2);
     DEF_FUNC(ctx, document, "addEventListener", js_event_target_addEventListener, 2);
     DEF_FUNC(ctx, document, "removeEventListener", js_event_target_removeEventListener, 2);
@@ -2804,58 +2804,58 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     GCValue href_getter = JS_NewCFunction(ctx, js_location_get_href, "get href", 0);
     GCValue href_setter = JS_NewCFunction(ctx, js_location_set_href, "set href", 1);
     JSAtom href_atom = JS_NewAtom(ctx, "href");
-    JS_DefinePropertyGetSet(ctx, location, href_atom, href_getter, href_setter, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, location, href_atom, href_getter, href_setter, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, href_atom);
     
     // protocol - getter only
     GCValue protocol_getter = JS_NewCFunction(ctx, js_location_get_protocol, "get protocol", 0);
     JSAtom protocol_atom = JS_NewAtom(ctx, "protocol");
-    JS_DefinePropertyGetSet(ctx, location, protocol_atom, protocol_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, location, protocol_atom, protocol_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, protocol_atom);
     
     // host - getter only
     GCValue location_host_getter = JS_NewCFunction(ctx, js_location_get_host, "get host", 0);
     JSAtom location_host_atom = JS_NewAtom(ctx, "host");
-    JS_DefinePropertyGetSet(ctx, location, location_host_atom, location_host_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, location, location_host_atom, location_host_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, location_host_atom);
     
     // hostname - getter only
     GCValue hostname_getter = JS_NewCFunction(ctx, js_location_get_hostname, "get hostname", 0);
     JSAtom hostname_atom = JS_NewAtom(ctx, "hostname");
-    JS_DefinePropertyGetSet(ctx, location, hostname_atom, hostname_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, location, hostname_atom, hostname_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, hostname_atom);
     
     // port - getter only
     GCValue port_getter = JS_NewCFunction(ctx, js_location_get_port, "get port", 0);
     JSAtom port_atom = JS_NewAtom(ctx, "port");
-    JS_DefinePropertyGetSet(ctx, location, port_atom, port_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, location, port_atom, port_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, port_atom);
     
     // pathname - getter/setter
     GCValue pathname_getter = JS_NewCFunction(ctx, js_location_get_pathname, "get pathname", 0);
     GCValue pathname_setter = JS_NewCFunction(ctx, js_location_set_pathname, "set pathname", 1);
     JSAtom pathname_atom = JS_NewAtom(ctx, "pathname");
-    JS_DefinePropertyGetSet(ctx, location, pathname_atom, pathname_getter, pathname_setter, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, location, pathname_atom, pathname_getter, pathname_setter, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, pathname_atom);
     
     // search - getter/setter
     GCValue search_getter = JS_NewCFunction(ctx, js_location_get_search, "get search", 0);
     GCValue search_setter = JS_NewCFunction(ctx, js_location_set_search, "set search", 1);
     JSAtom search_atom = JS_NewAtom(ctx, "search");
-    JS_DefinePropertyGetSet(ctx, location, search_atom, search_getter, search_setter, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, location, search_atom, search_getter, search_setter, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, search_atom);
     
     // hash - getter/setter
     GCValue hash_getter = JS_NewCFunction(ctx, js_location_get_hash, "get hash", 0);
     GCValue hash_setter = JS_NewCFunction(ctx, js_location_set_hash, "set hash", 1);
     JSAtom hash_atom = JS_NewAtom(ctx, "hash");
-    JS_DefinePropertyGetSet(ctx, location, hash_atom, hash_getter, hash_setter, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, location, hash_atom, hash_getter, hash_setter, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, hash_atom);
     
     // origin - getter only
     GCValue origin_getter = JS_NewCFunction(ctx, js_location_get_origin, "get origin", 0);
     JSAtom origin_atom = JS_NewAtom(ctx, "origin");
-    JS_DefinePropertyGetSet(ctx, location, origin_atom, origin_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, location, origin_atom, origin_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, origin_atom);
     
     // Methods
@@ -3124,7 +3124,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     DEF_FUNC(ctx, localStorage, "key", js_storage_key, 1);
     JS_DefinePropertyGetSet(ctx, localStorage, JS_NewAtom(ctx, "length"),
         JS_NewCFunction(ctx, js_storage_get_length, "get length", 0),
-        JS_NULL, JS_PROP_ENUMERABLE);
+        JS_NULL, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     
     
     // Create sessionStorage (separate storage instance)
@@ -3136,7 +3136,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     DEF_FUNC(ctx, sessionStorage, "key", js_storage_key, 1);
     JS_DefinePropertyGetSet(ctx, sessionStorage, JS_NewAtom(ctx, "length"),
         JS_NewCFunction(ctx, js_storage_get_length, "get length", 0),
-        JS_NULL, JS_PROP_ENUMERABLE);
+        JS_NULL, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     
     
     JS_SetPropertyStr(ctx, window, "localStorage", localStorage);
@@ -3165,13 +3165,13 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     DEF_FUNC(ctx, css_style_sheet_proto, "replaceSync", js_css_style_sheet_replace_sync, 1);
     GCValue css_rules_getter = JS_NewCFunction(ctx, js_css_style_sheet_get_css_rules, "get cssRules", 0);
     JS_DefinePropertyGetSet(ctx, css_style_sheet_proto, JS_NewAtom(ctx, "cssRules"),
-        css_rules_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+        css_rules_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     GCValue rules_getter = JS_NewCFunction(ctx, js_css_style_sheet_get_rules, "get rules", 0);
     JS_DefinePropertyGetSet(ctx, css_style_sheet_proto, JS_NewAtom(ctx, "rules"),
-        rules_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+        rules_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     GCValue css_text_getter = JS_NewCFunction(ctx, js_css_style_sheet_get_css_text, "get cssText", 0);
     JS_DefinePropertyGetSet(ctx, css_style_sheet_proto, JS_NewAtom(ctx, "cssText"),
-        css_text_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+        css_text_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     // Set prototype on constructor
     JS_SetPropertyStr(ctx, css_style_sheet_ctor, "prototype", css_style_sheet_proto);
     
@@ -3185,10 +3185,10 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     GCValue style_css_text_getter = JS_NewCFunction(ctx, js_css_style_decl_get_css_text, "get cssText", 0);
     GCValue style_css_text_setter = JS_NewCFunction(ctx, js_css_style_decl_set_css_text, "set cssText", 1);
     JS_DefinePropertyGetSet(ctx, css_style_decl_proto, JS_NewAtom(ctx, "cssText"),
-        style_css_text_getter, style_css_text_setter, JS_PROP_ENUMERABLE);
+        style_css_text_getter, style_css_text_setter, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     GCValue style_length_getter = JS_NewCFunction(ctx, js_css_style_decl_get_length, "get length", 0);
     JS_DefinePropertyGetSet(ctx, css_style_decl_proto, JS_NewAtom(ctx, "length"),
-        style_length_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+        style_length_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
 
     // Store for use with elements
     JS_SetPropertyStr(ctx, global, "__CSSStyleDeclarationProto", css_style_decl_proto);
@@ -3350,49 +3350,49 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // Event.prototype.type getter
     GCValue event_type_getter = JS_NewCFunction(ctx, js_event_get_type_wrapper, "get type", 0);
     JSAtom event_type_atom = JS_NewAtom(ctx, "type");
-    JS_DefinePropertyGetSet(ctx, event_proto, event_type_atom, event_type_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, event_proto, event_type_atom, event_type_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, event_type_atom);
     
     // Event.prototype.bubbles getter
     GCValue event_bubbles_getter = JS_NewCFunction(ctx, js_event_get_bubbles_wrapper, "get bubbles", 0);
     JSAtom event_bubbles_atom = JS_NewAtom(ctx, "bubbles");
-    JS_DefinePropertyGetSet(ctx, event_proto, event_bubbles_atom, event_bubbles_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, event_proto, event_bubbles_atom, event_bubbles_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, event_bubbles_atom);
     
     // Event.prototype.cancelable getter
     GCValue event_cancelable_getter = JS_NewCFunction(ctx, js_event_get_cancelable_wrapper, "get cancelable", 0);
     JSAtom event_cancelable_atom = JS_NewAtom(ctx, "cancelable");
-    JS_DefinePropertyGetSet(ctx, event_proto, event_cancelable_atom, event_cancelable_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, event_proto, event_cancelable_atom, event_cancelable_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, event_cancelable_atom);
     
     // Event.prototype.composed getter
     GCValue event_composed_getter = JS_NewCFunction(ctx, js_event_get_composed_wrapper, "get composed", 0);
     JSAtom event_composed_atom = JS_NewAtom(ctx, "composed");
-    JS_DefinePropertyGetSet(ctx, event_proto, event_composed_atom, event_composed_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, event_proto, event_composed_atom, event_composed_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, event_composed_atom);
     
     // Event.prototype.defaultPrevented getter
     GCValue event_defaultPrevented_getter = JS_NewCFunction(ctx, js_event_get_defaultPrevented_wrapper, "get defaultPrevented", 0);
     JSAtom event_defaultPrevented_atom = JS_NewAtom(ctx, "defaultPrevented");
-    JS_DefinePropertyGetSet(ctx, event_proto, event_defaultPrevented_atom, event_defaultPrevented_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, event_proto, event_defaultPrevented_atom, event_defaultPrevented_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, event_defaultPrevented_atom);
     
     // Event.prototype.target getter
     GCValue event_target_getter = JS_NewCFunction(ctx, js_event_get_target_wrapper, "get target", 0);
     JSAtom event_target_atom = JS_NewAtom(ctx, "target");
-    JS_DefinePropertyGetSet(ctx, event_proto, event_target_atom, event_target_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, event_proto, event_target_atom, event_target_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, event_target_atom);
     
     // Event.prototype.currentTarget getter
     GCValue event_currentTarget_getter = JS_NewCFunction(ctx, js_event_get_currentTarget_wrapper, "get currentTarget", 0);
     JSAtom event_currentTarget_atom = JS_NewAtom(ctx, "currentTarget");
-    JS_DefinePropertyGetSet(ctx, event_proto, event_currentTarget_atom, event_currentTarget_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, event_proto, event_currentTarget_atom, event_currentTarget_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, event_currentTarget_atom);
     
     // Event.prototype.eventPhase getter
     GCValue event_eventPhase_getter = JS_NewCFunction(ctx, js_event_get_eventPhase_wrapper, "get eventPhase", 0);
     JSAtom event_eventPhase_atom = JS_NewAtom(ctx, "eventPhase");
-    JS_DefinePropertyGetSet(ctx, event_proto, event_eventPhase_atom, event_eventPhase_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, event_proto, event_eventPhase_atom, event_eventPhase_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, event_eventPhase_atom);
     
     // Event.prototype methods
@@ -3455,7 +3455,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // CustomEvent.prototype.detail getter
     GCValue custom_event_detail_getter = JS_NewCFunction(ctx, js_custom_event_get_detail_wrapper, "get detail", 0);
     JSAtom custom_event_detail_atom = JS_NewAtom(ctx, "detail");
-    JS_DefinePropertyGetSet(ctx, custom_event_proto, custom_event_detail_atom, custom_event_detail_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, custom_event_proto, custom_event_detail_atom, custom_event_detail_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, custom_event_detail_atom);
     
     // CustomEvent constructor
@@ -3499,13 +3499,13 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // MouseEvent.prototype.clientX getter
     GCValue mouse_event_clientX_getter = JS_NewCFunction(ctx, js_mouse_event_get_clientX_wrapper, "get clientX", 0);
     JSAtom mouse_event_clientX_atom = JS_NewAtom(ctx, "clientX");
-    JS_DefinePropertyGetSet(ctx, mouse_event_proto, mouse_event_clientX_atom, mouse_event_clientX_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, mouse_event_proto, mouse_event_clientX_atom, mouse_event_clientX_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, mouse_event_clientX_atom);
     
     // MouseEvent.prototype.clientY getter
     GCValue mouse_event_clientY_getter = JS_NewCFunction(ctx, js_mouse_event_get_clientY_wrapper, "get clientY", 0);
     JSAtom mouse_event_clientY_atom = JS_NewAtom(ctx, "clientY");
-    JS_DefinePropertyGetSet(ctx, mouse_event_proto, mouse_event_clientY_atom, mouse_event_clientY_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, mouse_event_proto, mouse_event_clientY_atom, mouse_event_clientY_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, mouse_event_clientY_atom);
     
     // MouseEvent constructor
@@ -3522,7 +3522,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // FocusEvent.prototype.relatedTarget getter
     GCValue focus_event_relatedTarget_getter = JS_NewCFunction(ctx, js_focus_event_get_relatedTarget_wrapper, "get relatedTarget", 0);
     JSAtom focus_event_relatedTarget_atom = JS_NewAtom(ctx, "relatedTarget");
-    JS_DefinePropertyGetSet(ctx, focus_event_proto, focus_event_relatedTarget_atom, focus_event_relatedTarget_getter, JS_UNDEFINED, JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, focus_event_proto, focus_event_relatedTarget_atom, focus_event_relatedTarget_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, focus_event_relatedTarget_atom);
     
     // FocusEvent constructor
