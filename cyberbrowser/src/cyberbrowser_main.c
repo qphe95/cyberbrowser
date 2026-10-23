@@ -42,6 +42,7 @@
 #include "stb_image_write.h"
 #include "session_state.h"
 #include "html_media_extract.h"
+#include "dom_fetch.h"
 
 int timer_process_due(JSContextHandle ctx);
 int scheduler_process_tasks(JSContextHandle ctx);
@@ -2089,6 +2090,13 @@ int main(int argc, char *argv[]) {
                (unsigned long long)layout_api_region_layouts(),
                (unsigned long long)layout_api_kept(), (unsigned long long)layout_api_cheap_hits(),
                (unsigned long long)layout_api_style_all_layouts(), (unsigned long long)layout_api_ondemand_kept());
+    }
+    {
+        DomFetchStats fs;
+        dom_fetch_stats(&fs);
+        printf("Prefetched scripts and sheets: %llu (%llu ready when needed, %llu waited for: %.0f ms; %llu fetched unprefetched)\n",
+               (unsigned long long)fs.queued, (unsigned long long)fs.hits, (unsigned long long)fs.waits,
+               fs.wait_ms, (unsigned long long)fs.sync_fetches);
     }
     printf("\nStart page loaded successfully.\n");
 
