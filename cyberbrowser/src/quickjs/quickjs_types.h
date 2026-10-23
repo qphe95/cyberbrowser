@@ -470,11 +470,20 @@ typedef struct JSStackFrame {
      * separate array; GC_HANDLE_NULL when they are inline at var_refs_offset. */
     GCHandle var_refs_handle;
 
-    /* Set when something outside the call chain took a reference to the
-     * frame (a var_ref, a lazy closure's parent frame): it then outlives
-     * its call and is not reused for the next one. */
+    /* What outside the call chain refers to the frame (JS_FRAME_*). */
     uint8_t escaped;
 } JSStackFrame;
+
+/* JSStackFrame.escaped.  PINNED: the frame outlives its call and is not
+ * reused for the next one (a lazy closure's parent frame, which resolves
+ * its names later, also through the frames above it; a var_ref outside
+ * the frame's var_refs array; a suspended generator).  VAR_REFS: var_refs
+ * in its array point into it; they are detached when the call returns,
+ * after which the frame is free again.  ANCESTORS: the frames above it are
+ * PINNED too. */
+#define JS_FRAME_PINNED     1
+#define JS_FRAME_VAR_REFS   2
+#define JS_FRAME_ANCESTORS  4
 
 /* ============================================================================
  * JSStackFrame Helper Macros (GC-safe accessors)

@@ -260,25 +260,61 @@ static inline void js_varref_set_frame_ptr(GCHandle handle, JSStackFrame *val)
  * not reused when its call returns.  Only for a real frame: some callers
  * pass a raw gc_deref() of an async function's state, which holds its frame
  * further in (see js_trigger_lazy_function), and a write there corrupts it. */
-static inline void js_frame_mark_escaped(JSStackFrame *sf)
+static inline bool js_frame_is_real(const JSStackFrame *sf)
 {
-    if (sf && sf->self_handle != GC_HANDLE_NULL && js_frame_deref(sf->self_handle) == sf)
-        sf->escaped = 1;
+    return sf && sf->self_handle != GC_HANDLE_NULL && js_frame_deref(sf->self_handle) == sf;
 }
 
-/* was set_frame_ref(ptr, async, frame_handle = GC_HANDLE_NULL) */
+static inline void js_frame_mark_escaped(JSStackFrame *sf)
+{
+    if (js_frame_is_real(sf))
+        sf->escaped |= JS_FRAME_PINNED;
+}
+
+/* A lazy closure's parent frame: its names are resolved when the closure is
+ * first called, against this frame and, by name, the frames above it, so
+ * all of them must outlive their calls. */
+static inline void js_frame_pin_with_ancestors(JSStackFrame *sf)
+{
+    while (js_frame_is_real(sf) && !(sf->escaped & JS_FRAME_ANCESTORS)) {
+        sf->escaped |= JS_FRAME_PINNED | JS_FRAME_ANCESTORS;
+        sf = sf->prev_frame_handle != GC_HANDLE_NULL ? js_frame_deref(sf->prev_frame_handle) : NULL;
+    }
+}
+
+static inline void js_varref_point_at(JSVarRef *p, JSStackFrame *ptr, uint8_t is_async, GCHandle frame_handle)
+{
+    p->is_async_frame = is_async;
+    if (is_async)
+        GC_SET(p->frame_ref.frame_handle, frame_handle);
+    else
+        p->frame_ref.frame_ptr = ptr;
+}
+
+/* A var_ref into frame `ptr` that is not in its var_refs array: nothing
+ * detaches it, so the frame outlives its call.
+ * (was set_frame_ref(ptr, async, frame_handle = GC_HANDLE_NULL)) */
 static inline void js_varref_set_frame_ref(GCHandle handle, JSStackFrame *ptr,
                                            uint8_t is_async, GCHandle frame_handle)
 {
     JSVarRef *p = js_varref_ptr(handle);
     if (!p)
         return;
-    js_frame_mark_escaped(ptr);  /* the frame now outlives its call */
-    p->is_async_frame = is_async;
-    if (is_async)
-        GC_SET(p->frame_ref.frame_handle, frame_handle);
-    else
-        p->frame_ref.frame_ptr = ptr;
+    js_frame_mark_escaped(ptr);
+    js_varref_point_at(p, ptr, is_async, frame_handle);
+}
+
+/* A var_ref the caller stores in frame `ptr`'s var_refs array: detached when
+ * the call returns (js_frame_detach_var_refs), so the frame need not outlive
+ * it. */
+static inline void js_varref_set_frame_ref_in_array(GCHandle handle, JSStackFrame *ptr,
+                                                    uint8_t is_async, GCHandle frame_handle)
+{
+    JSVarRef *p = js_varref_ptr(handle);
+    if (!p)
+        return;
+    if (js_frame_is_real(ptr)) ptr->escaped |= JS_FRAME_VAR_REFS;
+    js_varref_point_at(p, ptr, is_async, frame_handle);
 }
 
 /* was static from_array_handle() */

@@ -351,6 +351,45 @@ GC_RUNNING_TEST(test_gc_frame_reuse_past_pool_depth_and_throws,
     "  }"
     "  return 'ok'; })()")
 
+/* A returning call detaches the var_refs of its frame (the closures it made
+ * keep the values) and its frame is reused by the next call at that depth:
+ * closures of one call share their variables, later calls do not see them,
+ * also deeper than the frame pool once was (256). */
+GC_RUNNING_TEST(test_gc_frame_reuse_detaches_var_refs,
+    "(function(){"
+    "  function counter(start) { var n = start; return { inc: function(){ return ++n; }, get: function(){ return n; } }; }"
+    "  function noise(a, b, c) { var t = [a, b, c]; return t.length + (a | 0); }"
+    "  var cs = [];"
+    "  for (var i = 0; i < 2000; i++) { cs.push(counter(i)); noise(i, {o: i}, 'n' + i); }"
+    "  __test_gc();"
+    "  for (var i = 0; i < 2000; i++) { cs[i].inc(); cs[i].inc(); }"
+    "  for (var i = 0; i < 2000; i++)"
+    "    if (cs[i].get() !== i + 2) return 'counter ' + i + ' got ' + cs[i].get();"
+    "  function deep(d, acc) { if (d === 0) return counter(acc); return deep(d - 1, acc + 1); }"
+    "  var dc = [];"
+    "  for (var k = 0; k < 5; k++) { dc.push(deep(280, k)); noise(k, k, k); }"
+    "  __test_gc();"
+    "  for (var k = 0; k < 5; k++) { dc[k].inc(); if (dc[k].get() !== 281 + k) return 'deep counter ' + k + ' got ' + dc[k].get(); }"
+    "  return 'ok'; })()")
+
+/* A lazily parsed closure first called after its parent and grandparent
+ * returned, and after other calls reused their depths, still resolves both
+ * levels' variables. */
+GC_RUNNING_TEST(test_gc_lazy_closure_after_ancestors_returned,
+    "(function(){"
+    "  function outer(a) { var x = 'x' + a; function mid(b) { var y = b * 3; return function(){ return x + ':' + y + ':' + a; }; } return mid(a + 1); }"
+    "  function noise(p, q, r) { var u = {p: p, q: q}; return [u, r].length; }"
+    "  var fs = [];"
+    "  for (var i = 0; i < 1500; i++) { fs.push(outer(i)); noise(i, 'q', i); noise({}, [], i); }"
+    "  __test_gc();"
+    "  for (var i = 0; i < 1500; i++) { var want = 'x' + i + ':' + (i + 1) * 3 + ':' + i;"
+    "    if (fs[i]() !== want) return 'closure ' + i + ' got ' + fs[i](); }"
+    "  function mapped(a) { var args = arguments; return function(v){ if (v !== undefined) args[0] = v; return a; }; }"
+    "  var m = mapped('orig'); noise(1, 2, 3); __test_gc();"
+    "  if (m() !== 'orig') return 'mapped arguments: ' + m();"
+    "  if (m('set') !== 'set') return 'mapped arguments write: ' + m();"
+    "  return 'ok'; })()")
+
 /* Arrays, regexps and arguments objects share their context's shape, and
  * objects past 32 properties keep a private shape that grows in place:
  * changing one object must never show through another. */
@@ -1967,6 +2006,8 @@ void run_gc_tests(void) {
     RUN_TEST(test_gc_frame_reuse_keeps_captured_frames);
     RUN_TEST(test_gc_frame_reuse_keeps_lazy_parent_frames);
     RUN_TEST(test_gc_frame_reuse_past_pool_depth_and_throws);
+    RUN_TEST(test_gc_frame_reuse_detaches_var_refs);
+    RUN_TEST(test_gc_lazy_closure_after_ancestors_returned);
     RUN_TEST(test_gc_shared_and_dictionary_shapes);
     RUN_TEST(test_gc_inline_properties_grow_and_survive);
     RUN_TEST(test_gc_running_repeated);
