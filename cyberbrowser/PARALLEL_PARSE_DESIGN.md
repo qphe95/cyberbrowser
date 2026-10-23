@@ -85,16 +85,20 @@ What carries over:
   JS thread, and atoms are GC strings in permanent regions.
 - **V8's background compilation of functions predicted to run**, in place of first-call
   compilation.
-- **The parallel-lexing work** for splitting one big script across cores. JavaScript is harder than
-  the grammars those papers use: regular-expression literals, template literals and comments make
-  the state at a chunk boundary context-dependent. No byte certifies a token start, because
-  strings, comments and templates can contain anything. Section 3 handles this by speculating with
-  convergence and then verifying.
+- **simdjson's structural indexing**, to make the one serial scan per script fast.
+
+What doesn't carry over yet: **splitting one script across cores for lexing.** The parallel-lexing
+work exists for grammars where one input is the whole job. Here the scan is a small part of the
+work, and moving it off the JS thread already takes it off the critical path (section 3.6).
+JavaScript is also harder than the grammars those papers use: regular-expression literals,
+template literals and comments make the state at a chunk boundary context-dependent, and no byte
+certifies a token start. Section 11 keeps the design for later, with the measurement that would
+justify it.
 
 ## 2. Pipeline
 
 ```
-bytes arrive ──► S1 structure scan (workers) ──► structure index
+bytes arrive ──► S1 structure scan (one worker per script) ──► structure index
                                                      │
 script runs ◄── S2 skeleton parse (JS thread) ◄──────┘  top level only; bodies skipped by index
      │                    │
@@ -105,9 +109,11 @@ first call ──► S4 instantiate stencil (JS thread) ◄──────┘
                           └──► S5 code cache (disk): structure index, stencils, call profile
 ```
 
-Each stage can ship on its own (section 9).
+Each stage can ship on its own (section 9). The parallelism is across scripts in S1 and across
+functions in S3. Neither needs speculation: a script is scanned from its start, and a function's
+compile depends only on its own unit.
 
-## 3. S1: the structure scan (parallel brace counter)
+## 3. S1: the structure scan (the brace counter, off the JS thread)
 
 ### 3.1 What it produces
 
@@ -158,10 +164,11 @@ That is about 31 states. Two refinements need bracket context:
   starts a regular expression.
 
 Template substitutions add a third: a `}` closing `${` returns to template mode. All three depend
-on the type of the matching opener. Inside a chunk, a local stack knows it. A closer whose opener
-is in an earlier chunk is handled by speculation (section 3.5).
+on the type of the matching opener, which the scanner's bracket stack knows, since it reads the
+script from the start. This is exactly what the serial `js_lazy_scan_body` does today; S1 keeps its
+logic and changes where and how fast it runs.
 
-### 3.3 Stage 1a: SIMD byte classification
+### 3.3 SIMD byte classification
 
 Following simdjson, each 64-byte block becomes bitmasks: quotes (`'`, `"`, backtick), backslash,
 `/`, `*`, newline, brackets `{}()[]`, and identifier bytes. The escape mask comes from the
@@ -175,75 +182,41 @@ The transducer then steps only at event positions, the bits set in those masks. 
 the bytes inside identifiers, whitespace or digits, which dominate minified code. Targets:
 SSE2/AVX2 on x86-64 and NEON on arm64, with a scalar fallback that runs the same transducer.
 
-### 3.4 Stage 1b: chunks, enumeration and convergence
+### 3.4 One scan per script, on a worker
 
-The script is cut into C chunks: four per worker, at least 64 KB each. Below 256 KB, the scan runs
-on one worker, serially, from the exact start state.
+Each script gets one scan job in the worker pool, run serially from the script's start state, so
+the lexer state is always exact. Different scripts scan on different workers at the same time;
+YouTube loads tens of scripts.
 
-A worker scans its chunk from every plausible start state at once, keeping a few live paths:
+The scan keeps today's logic: the bracket stack with opener types, the previous-token class, and
+per-function name collection. Its output is built as it goes:
 
-```c
-typedef struct Path {
-    uint8_t  state;                /* transducer state */
-    uint64_t starts;               /* bitset: the start states that lead here */
-    ChunkOut out;                  /* bracket summary, records, names, assumptions */
-} Path;
-```
+- **Records** are appended when a function body's `{` is pushed and completed when its `}` pops,
+  so the records come out sorted by `open` and `parent` is the record on the stack.
+- **Names** are appended to the innermost record's buffer. When a record completes, its names are
+  sorted by hash (a radix sort) and deduplicated. The free names of a function are its referenced
+  names minus its certain declarations, the same rule as today.
 
-Each event step advances every live path. Two paths that reach the same state at the same
-position merge, since their futures are identical: their `starts` sets are ORed and the later
-output is shared. This is the convergence method of data-parallel FSMs. In minified code most paths
-merge within a few tokens. The lasting ambiguity is inside versus outside a string or comment,
-which resolves at the next quote or comment end. The work is the number of live paths times the
-number of events, so it stays close to one scan. M1 measures the live-path count.
+### 3.5 Pipelining with the download and the skeleton parse
 
-**Split points.** A chunk ends at an event position chosen to keep the plausible start states few.
-The order of preference is just after `;` or `}` followed by an identifier byte, then after a
-newline. Certified split points (2026) would remove speculation entirely for a grammar where some
-byte always starts a token. JavaScript has no such byte, so this design speculates and verifies.
+Script bodies already stream through the HTTP observer (`http_get_to_memory_observed`). The scan
+job consumes bytes as they arrive and stops at the end of the bytes received so far, keeping its
+state. The scan then finishes shortly after the last byte arrives.
 
-### 3.5 Per-chunk output and composition
+The index is published incrementally: a release store of the number of completed top-level
+records. S2 can start before the scan ends and waits only if it reaches a record the scan hasn't
+finished, on the same state word, with `WaitOnAddress` or a futex.
 
-Each surviving path carries:
+### 3.6 Cost, and when the JS thread waits
 
-- **The end state.**
-- **A bracket summary**, an element of the bracket monoid: `U`, the closers in the chunk whose
-  openers lie earlier (type and position, in order), and `O`, the openers left unclosed. Two
-  summaries compose associatively: `(U1, O1) · (U2, O2)` matches the tail of `O1` against the head
-  of `U2`. A type mismatch marks the script `EAGER`, and the serial parser then reports the real
-  error.
-- **Records and names** found in the chunk, tagged with chunk-local depth.
-- **Assumptions:** for each closer in `U` that changes the lexer state (a `)` that might close a
-  control head, a `}` that might close `${` or a block), the outcome assumed and its position.
+Today's serial scan costs ~85 ms per load on the JS thread (12% of parse and compile). In S1 it
+leaves the JS thread entirely, and SIMD event skipping should make the scan several times faster
+per byte.
 
-**Resolving.** Chunk 0 starts in the script's real start state. For chunk *i*, the path whose
-`starts` contains the end state of chunk *i−1* is taken. If no path contains it, because it was
-pruned, chunk *i* runs again from that exact state. All such chunks re-run in parallel, and a
-second round is rarely needed.
-
-Then the summaries compose left to right. There are only tens of chunks, and the cost is
-proportional to the unmatched brackets. Composition settles every assumption. A chunk with a
-wrong assumption re-scans serially from that position, which is expected to be rare. Once the
-brackets match, every `{` opener of type *function body* becomes a `FnRecord`, parents come from
-the matched stack, and each name goes to its innermost record. Per-record name sets are sorted by
-hash with a radix sort, then deduplicated. The free names of a function are its referenced names
-minus its certain declarations, the same rule as today.
-
-### 3.6 Streaming
-
-Script bodies already stream through the HTTP observer (`http_get_to_memory_observed`). When bytes
-arrive in order, chunk *i*'s exact start state is known as soon as chunk *i−1* is done. Streaming
-then needs no speculation at all: one worker scans each chunk as it arrives, and the scan overlaps
-the download.
-
-Speculation is only for scripts that arrive all at once: from the cache, the replay, or a fast
-network.
-
-### 3.7 Cost
-
-Today's serial scan costs ~85 ms per load on the JS thread (12% of parse and compile). Done in S1,
-it leaves the JS thread entirely. SIMD event skipping should make the scan itself several times
-faster per byte, and streaming hides it behind the network.
+For streamed scripts the scan hides behind the network. The JS thread can wait only for a large
+script that arrives all at once (from the cache or a fast network): the 9.7 MB bundle should scan
+in roughly 15–25 ms on one worker (an estimate, measured in M0 and M1). That wait, if it shows up
+on the critical path, is the trigger for the chunk-parallel scan in section 11.
 
 ## 4. S2: skeleton parse on the JS thread
 
@@ -414,10 +387,10 @@ cores.
   - S4 compiles each function serially as well and compares, after mapping atoms: bytecode bytes,
     cpool, var tables, `pc2line` and stack size.
   - The existing `[lazy-verify]` end check stays.
-- **Chunk-boundary fuzzing:** for small scripts, run S1 with a split at every byte offset and
-  compare with the serial scan. The corpus is the test262 parser tests, minified bundles from the
-  four recorded sites, and generated programs dense in regular expressions, templates and
-  comments.
+- **Scanner differential testing:** S1's index against the serial scanner on the test262 parser
+  tests, minified bundles from the four recorded sites, and generated programs dense in regular
+  expressions, templates and comments. S1 also runs with its input fed in random-sized pieces, as
+  streaming delivers it, and must give the same index.
 - **Error parity:** syntax errors in lazily compiled bodies must have the same message, line and
   column whether the body was compiled by a worker or serially.
 - **Concurrency:** workers read only immutable inputs (`ScriptSource`, units) and write only their
@@ -429,13 +402,16 @@ cores.
 
 | | Work | Exit criterion |
 |---|---|---|
-| M0 | Instrumentation: per-script and per-function compile time, first-call list, top-level versus body bytes, live-path counts from a prototype S1 | Section 7's table measured |
-| M1 | S1 (serial first, then chunked with SIMD) and S2 with verify mode | Four sites identical (DOM, layout dumps); `js_lazy_scan_body` off the JS thread |
+| M0 | Instrumentation: per-script and per-function compile time, first-call list, top-level versus body bytes, scan time per script | Section 7's table measured |
+| M1 | S1 as one worker scan per script (SIMD event skipping, pipelined with the download) and S2, with verify mode | Four sites identical (DOM, layout dumps); `js_lazy_scan_body` off the JS thread; time the JS thread waits on S1 measured |
 | M2 | `CompileEnv`, stencils and instantiation, all on the JS thread (no workers yet) | Byte identity in verify mode; no regression in compile time |
-| M3 | Workers, priorities and the take-over protocol | JS-thread parse and compile ≤ 0.25 s on the YouTube replay |
+| M3 | Workers compiling functions in parallel, priorities and the take-over protocol | JS-thread parse and compile ≤ 0.25 s on the YouTube replay |
 | M4 | Code cache | Repeat-visit parse and compile ≤ 0.12 s |
 
 M1 is useful alone: it removes the pre-scan from the JS thread without touching the compiler.
+M2 and M3 are the core of the plan: most of the saving comes from compiling functions off the JS
+thread. Section 11 (one script split across cores) is not on this list; M1's wait measurement
+decides whether it ever is.
 
 ## 10. Risks
 
@@ -444,14 +420,87 @@ M1 is useful alone: it removes the pre-scan from the JS thread without touching 
 - **Wrong closure capture is silent.** A wrong free-name set compiles a function that reads the
   wrong variable. The S2 verify mode compares every set with the serial scanner's, and the
   existing lazy verification still runs.
-- **Speculation at chunk boundaries can be wrong.** Every assumption is checked after composition,
-  and the fallback is a serial re-scan, which is slower but correct. Streaming, the common case,
-  needs no speculation.
+- **The JS thread can wait on S1** for a large script that arrives all at once. The wait is
+  bounded by one serial scan (estimated 15–25 ms for the largest bundle), and M1 measures it.
 - **Instantiation can eat the gain**, as it did for SpiderMonkey at first. Per-script atom caches
   and fixup lists instead of re-parsing keep it linear; M2 measures it before any thread work.
 - **Memory:** stencils for speculative compiles are bounded by the budget and evicted.
 - **Small inline scripts and `document.write`** take the serial path. Scripts under 32 KB skip S1
   and S3: their overhead would exceed the gain.
+
+## 11. Later: splitting one script across cores (if measured)
+
+Not planned. Build it only if M0 and M1 show the JS thread waiting on S1 for large scripts that
+arrive all at once, and the wait matters. The expected gain is small: maybe 15–20 ms on the
+largest bundle, against the hardest code in the whole design.
+
+The design, for when it's needed:
+
+### 11.1 Chunks, enumeration and convergence
+
+The script is cut into C chunks: four per worker, at least 256 KB each. Scripts smaller than a few
+chunks keep the serial scan.
+
+A worker scans its chunk from every plausible start state at once, keeping a few live paths:
+
+```c
+typedef struct Path {
+    uint8_t  state;                /* transducer state */
+    uint64_t starts;               /* bitset: the start states that lead here */
+    ChunkOut out;                  /* bracket summary, records, names, assumptions */
+} Path;
+```
+
+Each event step advances every live path. Two paths that reach the same state at the same
+position merge, since their futures are identical: their `starts` sets are ORed and the later
+output is shared. This is the convergence method of data-parallel FSMs. In minified code most paths
+merge within a few tokens. The lasting ambiguity is inside versus outside a string or comment,
+which resolves at the next quote or comment end. The work is the number of live paths times the
+number of events, so it stays close to one scan. A prototype must measure the live-path count first.
+
+**Split points.** A chunk ends at an event position chosen to keep the plausible start states few.
+The order of preference is just after `;` or `}` followed by an identifier byte, then after a
+newline. Certified split points (2026) would remove speculation entirely for a grammar where some
+byte always starts a token. JavaScript has no such byte, so this design speculates and verifies.
+
+### 11.2 Per-chunk output and composition
+
+Each surviving path carries:
+
+- **The end state.**
+- **A bracket summary**, an element of the bracket monoid: `U`, the closers in the chunk whose
+  openers lie earlier (type and position, in order), and `O`, the openers left unclosed. Two
+  summaries compose associatively: `(U1, O1) · (U2, O2)` matches the tail of `O1` against the head
+  of `U2`. A type mismatch marks the script `EAGER`, and the serial parser then reports the real
+  error.
+- **Records and names** found in the chunk, tagged with chunk-local depth.
+- **Assumptions:** for each closer in `U` that changes the lexer state (a `)` that might close a
+  control head, a `}` that might close `${` or a block), the outcome assumed and its position.
+
+**Resolving.** Chunk 0 starts in the script's real start state. For chunk *i*, the path whose
+`starts` contains the end state of chunk *i−1* is taken. If no path contains it, because it was
+pruned, chunk *i* runs again from that exact state. All such chunks re-run in parallel, and a
+second round is rarely needed.
+
+Then the summaries compose left to right. There are only tens of chunks, and the cost is
+proportional to the unmatched brackets. Composition settles every assumption. A chunk with a
+wrong assumption re-scans serially from that position, which is expected to be rare. Once the
+brackets match, every `{` opener of type *function body* becomes a `FnRecord`, parents come from
+the matched stack, and each name goes to its innermost record. Per-record name sets are sorted by
+hash with a radix sort, then deduplicated. The free names of a function are its referenced names
+minus its certain declarations, the same rule as today.
+
+### 11.3 When it applies
+
+Only for scripts that arrive all at once. A streamed script already has an exact start state for
+each chunk once the previous one is done, which is the serial scan of section 3.5.
+
+### 11.4 Cost
+
+With eight workers, the scan of the 9.7 MB bundle drops from roughly 15–25 ms to 3–5 ms (estimates),
+plus composition. Verification needs chunk-boundary fuzzing: for small scripts, run with a split
+at every byte offset and compare with the serial scan, over test262 parser tests, minified bundles
+and programs dense in regular expressions, templates and comments.
 
 ## References
 
