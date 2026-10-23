@@ -552,6 +552,21 @@ GCValue js_event_target_removeEventListener(JSContextHandle ctx, GCValue this_va
     return JS_UNDEFINED;
 }
 
+/* Set an event's target or currentTarget during dispatch.  An Event's are
+ * getter-only accessors reading its EventData: assigning the JS property
+ * threw a TypeError (with a backtrace) at every node of every dispatch,
+ * thousands on YouTube.  Objects without EventData (some subclasses, a
+ * createEvent object) take an own data property, which their getter
+ * fallback reads. */
+static void event_set_dispatch_field(JSContextHandle ctx, EventHandle ev, GCValue event, bool current, GCValue v) {
+    if (!SAFE_IS_NULL(ev)) {
+        if (current) SAFE_SET(ev, EventHandle, currentTarget, v);
+        else SAFE_SET(ev, EventHandle, target, v);
+        return;
+    }
+    JS_DefinePropertyValueStr(ctx, event, current ? "currentTarget" : "target", v, JS_PROP_C_W_E);
+}
+
 GCValue js_event_target_dispatchEvent(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     if (argc < 1) return JS_FALSE;
     
@@ -564,12 +579,9 @@ GCValue js_event_target_dispatchEvent(JSContextHandle ctx, GCValue this_val, int
     // internal EventData (the getters read from EventData).
     EventHandle ev0 = event_from_object_check(ctx, argv[0]);
     GCValue target = JS_GetPropertyStr(ctx, argv[0], "target");
-    if (JS_IsNull(target) || JS_IsUndefined(target)) {
-        JS_SetPropertyStr(ctx, argv[0], "target", this_val);
-        if (!SAFE_IS_NULL(ev0)) SAFE_SET(ev0, EventHandle, target, this_val);
-    }
-    JS_SetPropertyStr(ctx, argv[0], "currentTarget", this_val);
-    if (!SAFE_IS_NULL(ev0)) SAFE_SET(ev0, EventHandle, currentTarget, this_val);
+    if (JS_IsNull(target) || JS_IsUndefined(target))
+        event_set_dispatch_field(ctx, ev0, argv[0], false, this_val);
+    event_set_dispatch_field(ctx, ev0, argv[0], true, this_val);
 
     // Build the composed path: shadow-including ancestors of the target.
     GCValue path = JS_NewArray(ctx);
@@ -658,8 +670,7 @@ GCValue js_event_target_dispatchEvent(JSContextHandle ctx, GCValue this_val, int
             GCValue node = JS_GetPropertyUint32(ctx, path, pi);
             if (JS_IsUndefined(node) || JS_IsNull(node) || !JS_IsObject(node)) continue;
 
-            JS_SetPropertyStr(ctx, argv[0], "currentTarget", node);
-            if (!SAFE_IS_NULL(ev0)) SAFE_SET(ev0, EventHandle, currentTarget, node);
+            event_set_dispatch_field(ctx, ev0, argv[0], true, node);
 
             char lprop[128];
             snprintf(lprop, sizeof(lprop), "__listeners_%s", type);
@@ -714,8 +725,7 @@ GCValue js_event_target_dispatchEvent(JSContextHandle ctx, GCValue this_val, int
             if (JS_ToBool(ctx, imm2)) break;
         }
         /* Restore currentTarget semantics: outside dispatch it reads as null. */
-        JS_SetPropertyStr(ctx, argv[0], "currentTarget", JS_NULL);
-        if (!SAFE_IS_NULL(ev0)) SAFE_SET(ev0, EventHandle, currentTarget, JS_NULL);
+        event_set_dispatch_field(ctx, ev0, argv[0], true, JS_NULL);
     }
 
     return JS_TRUE;
