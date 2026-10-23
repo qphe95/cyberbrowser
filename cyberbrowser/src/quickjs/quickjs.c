@@ -360,7 +360,7 @@ static uint8_t typed_array_size_log2[JS_TYPED_ARRAY_COUNT] = {
    small, the rope memory overhead becomes high. */
 #define JS_STRING_ROPE_SHORT_LEN  512
 /* specific threshold for initial rope use */
-#define JS_STRING_ROPE_SHORT2_LEN 8192
+#define JS_STRING_ROPE_SHORT2_LEN 1024
 /* rope depth at which we rebalance */
 #define JS_STRING_ROPE_MAX_DEPTH 60
 
