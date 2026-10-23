@@ -1001,6 +1001,144 @@ static void prefetch_stylesheet_links(const char *html)
     }
 }
 
+/* Queue the download of an external script's src (or a script preload's
+ * href), resolved as extract_scripts_in_order resolves it, so that the
+ * fetch the page makes later finds it by the same URL. */
+static void prefetch_script_src(const char *v, size_t vl)
+{
+    if (!v || vl == 0 || vl >= SCRIPT_URL_MAX_LEN) return;
+    char raw[SCRIPT_URL_MAX_LEN], url[SCRIPT_URL_MAX_LEN];
+    memcpy(raw, v, vl);
+    raw[vl] = '\0';
+    html_decode_entities(raw, vl);
+    if (strncmp(raw, "//", 2) == 0) snprintf(url, sizeof(url), "https:%s", raw);
+    else if (raw[0] == '/') snprintf(url, sizeof(url), "%s%s", cyber_get_origin_base(), raw);
+    else if (strncmp(raw, "http", 4) == 0) snprintf(url, sizeof(url), "%s", raw);
+    else return;
+    if (!is_unsafe_external_script(url)) dom_fetch_prefetch(url);
+}
+
+static void prefetch_sheet_href(const char *v, size_t vl)
+{
+    if (!v || vl == 0 || vl >= 4096) return;
+    char *u = (char *)malloc(vl + 1);
+    if (!u) return;
+    memcpy(u, v, vl);
+    u[vl] = '\0';
+    html_decode_entities(u, vl);
+    css_layout_prefetch_stylesheet(u);
+    free(u);
+}
+
+static bool rel_has(const char *rel, size_t rl, const char *tok)
+{
+    size_t tl = strlen(tok);
+    for (const char *t = rel; t && t < rel + rl; ) {
+        while (t < rel + rl && isspace((unsigned char)*t)) t++;
+        const char *e = t;
+        while (e < rel + rl && !isspace((unsigned char)*e)) e++;
+        if ((size_t)(e - t) == tl && strncasecmp(t, tok, tl) == 0) return true;
+        t = e;
+    }
+    return false;
+}
+
+struct HtmlPreloadScan {
+    char *buf;
+    size_t len, cap;
+    size_t pos;             /* scanned up to here */
+    const char *close;      /* raw text (script, style, comment): what ends it */
+};
+
+HtmlPreloadScan *html_preload_scan_begin(void)
+{
+    return (HtmlPreloadScan *)calloc(1, sizeof(HtmlPreloadScan));
+}
+
+void html_preload_scan_end(HtmlPreloadScan *s)
+{
+    if (!s) return;
+    free(s->buf);
+    free(s);
+}
+
+static bool tag_is(const char *p, const char *end, const char *name)
+{
+    size_t n = strlen(name);
+    if ((size_t)(end - p) < n + 1 || strncasecmp(p, name, n) != 0) return false;
+    char c = p[n];
+    return isspace((unsigned char)c) || c == '>' || c == '/';
+}
+
+/* Complete tags only: a tag (or raw text's end) cut by the end of what has
+ * arrived is scanned when the rest comes. */
+static void preload_scan_run(HtmlPreloadScan *s)
+{
+    const char *b = s->buf, *lim = s->buf + s->len;
+    const char *p = b + s->pos;
+    for (;;) {
+        if (s->close) {
+            size_t cl = strlen(s->close);
+            const char *q = p;
+            while (q + cl <= lim && strncasecmp(q, s->close, cl) != 0) q++;
+            if (q + cl > lim) { p = q; break; }   /* (the close may straddle what comes next) */
+            p = q + cl;
+            s->close = NULL;
+            continue;
+        }
+        p = memchr(p, '<', (size_t)(lim - p));
+        if (!p) { p = lim; break; }
+        if (lim - p < 4) break;
+        if (strncmp(p, "<!--", 4) == 0) { s->close = "-->"; p += 4; continue; }
+        const char *end = memchr(p, '>', (size_t)(lim - p));
+        if (!end) break;
+        const char *t = p + 1;
+        size_t vl = 0, rl = 0;
+        if (tag_is(t, end + 1, "script")) {
+            const char *src = tag_attr_value(t + 6, end, "src", &vl);
+            if (src) prefetch_script_src(src, vl);
+            s->close = "</script";
+        } else if (tag_is(t, end + 1, "style")) {
+            s->close = "</style";
+        } else if (tag_is(t, end + 1, "noscript") || tag_is(t, end + 1, "template")) {
+            /* (Not loaded with scripting on; template contents are inert.) */
+            s->close = t[0] == 'n' || t[0] == 'N' ? "</noscript" : "</template";
+        } else if (tag_is(t, end + 1, "link")) {
+            const char *rel = tag_attr_value(t + 4, end, "rel", &rl);
+            const char *href = tag_attr_value(t + 4, end, "href", &vl);
+            if (rel && href) {
+                if (rel_has(rel, rl, "stylesheet")) {
+                    prefetch_sheet_href(href, vl);
+                } else if (rel_has(rel, rl, "preload")) {
+                    size_t al = 0;
+                    const char *as = tag_attr_value(t + 4, end, "as", &al);
+                    if (as && al == 6 && strncasecmp(as, "script", 6) == 0) prefetch_script_src(href, vl);
+                    else if (as && al == 5 && strncasecmp(as, "style", 5) == 0) prefetch_sheet_href(href, vl);
+                }
+            }
+        }
+        p = end + 1;
+    }
+    s->pos = (size_t)(p - b);
+}
+
+void html_preload_scan_feed(HtmlPreloadScan *s, const char *data, size_t len)
+{
+    if (!s || !len) return;
+    if (s->len + len + 1 > s->cap) {
+        size_t cap = s->cap ? s->cap : 65536;
+        while (s->len + len + 1 > cap) cap *= 2;
+        char *nb = (char *)realloc(s->buf, cap);
+        if (!nb) return;
+        s->buf = nb;
+        s->cap = cap;
+    }
+    memcpy(s->buf + s->len, data, len);
+    s->len += len;
+    s->buf[s->len] = '\0';
+    preload_scan_run(s);
+}
+
 bool html_execute_page_scripts(const char *html, JsExecResult *out_result) {
     if (!html || !out_result) return false;
     memset(out_result, 0, sizeof(JsExecResult));

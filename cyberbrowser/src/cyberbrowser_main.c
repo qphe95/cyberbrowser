@@ -318,6 +318,10 @@ static void finish_browser_context(void) {
     gc_core_stop_thread();
 }
 
+static void preload_scan_observe(void *scan, const char *data, size_t len) {
+    html_preload_scan_feed((HtmlPreloadScan *)scan, data, len);
+}
+
 static char *fetch_start_page(const char *url, size_t *out_size) {
     printf("Fetching %s ...\n", url);
 
@@ -342,7 +346,15 @@ static char *fetch_start_page(const char *url, size_t *out_size) {
     headers[nheaders++] = "sec-fetch-user: ?1";
     headers[nheaders++] = "upgrade-insecure-requests: 1";
 
-    bool ok = http_get_to_memory_with_headers(url, headers, nheaders, &buffer, error, sizeof(error));
+    /* Scan the page as it arrives: its scripts and stylesheets start
+     * downloading while the rest of it does (CYBER_PRELOAD_SCAN=0: once it
+     * is all here, as before). */
+    const char *ps = cyber_getenv("CYBER_PRELOAD_SCAN");
+    HtmlPreloadScan *scan = ps && ps[0] == '0' ? NULL : html_preload_scan_begin();
+    bool ok = scan ? http_get_to_memory_observed(url, headers, nheaders, &buffer, error, sizeof(error),
+                                                 preload_scan_observe, scan)
+                   : http_get_to_memory_with_headers(url, headers, nheaders, &buffer, error, sizeof(error));
+    html_preload_scan_end(scan);
     if (!ok || !buffer.data || buffer.size == 0) {
         printf("FATAL: Failed to fetch start page: %s\n", error);
         return NULL;

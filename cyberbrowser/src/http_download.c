@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
+#include <ctype.h>
 #ifndef _WIN32
 #include <unistd.h>
 #include <sys/time.h>
@@ -859,6 +860,99 @@ static bool http_request_net(const char *url, const char *method,
                              DownloadState *state,
                              FILE *bodyStream, size_t *outTotalSize);
 
+/* The observer of http_get_to_memory_observed, for the request this thread
+ * is making (redirects included: only a 2xx body is observed). */
+static __thread HttpBodyObserver g_body_observer;
+static __thread void *g_body_observer_user;
+
+/* Incremental de-chunking and decoding of an observed body. */
+typedef struct BodyObs {
+    bool on;
+    bool chunked;
+    BrotliDecoderState *br;     /* NULL: identity */
+    size_t fed;                 /* raw body bytes consumed */
+    int cstate;                 /* 0 size, 1 extension, 2 LF after size, 3 data, 4 CR after data, 5 LF after data, 6 done */
+    size_t chunk_left;
+} BodyObs;
+
+static void body_obs_emit(BodyObs *o, const uint8_t *p, size_t n) {
+    if (!o->br) {
+        if (n) g_body_observer(g_body_observer_user, (const char *)p, n);
+        return;
+    }
+    uint8_t out[16384];
+    for (;;) {
+        size_t avail_out = sizeof(out);
+        uint8_t *next_out = out;
+        BrotliDecoderResult r = BrotliDecoderDecompressStream(o->br, &n, &p, &avail_out, &next_out, NULL);
+        if (next_out > out) g_body_observer(g_body_observer_user, (const char *)out, (size_t)(next_out - out));
+        if (r == BROTLI_DECODER_RESULT_ERROR) { o->on = false; return; }
+        if (r != BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT) return;
+    }
+}
+
+static void body_obs_feed(BodyObs *o, const uint8_t *p, size_t n) {
+    o->fed += n;
+    if (!o->chunked) { body_obs_emit(o, p, n); return; }
+    while (n && o->on && o->cstate != 6) {
+        if (o->cstate == 3) {
+            size_t k = n < o->chunk_left ? n : o->chunk_left;
+            body_obs_emit(o, p, k);
+            p += k; n -= k; o->chunk_left -= k;
+            if (!o->chunk_left) o->cstate = 4;
+            continue;
+        }
+        int c = *p++; n--;
+        switch (o->cstate) {
+        case 0:
+            if (isxdigit(c)) o->chunk_left = o->chunk_left * 16 + (size_t)(isdigit(c) ? c - '0' : tolower(c) - 'a' + 10);
+            else if (c == '\r') o->cstate = 2;
+            else if (c == '\n') o->cstate = o->chunk_left ? 3 : 6;
+            else o->cstate = 1;
+            break;
+        case 1:
+            if (c == '\r') o->cstate = 2;
+            else if (c == '\n') o->cstate = o->chunk_left ? 3 : 6;
+            break;
+        case 2:
+            o->cstate = o->chunk_left ? 3 : 6;
+            break;
+        case 4:
+            if (c == '\r') o->cstate = 5;
+            else if (c == '\n') o->cstate = 0;
+            else o->on = false;          /* not chunk framing after all */
+            break;
+        case 5:
+            o->cstate = 0;
+            break;
+        }
+    }
+}
+
+/* At the end of the headers: observe this body? */
+static void body_obs_start(BodyObs *o, const char *data, size_t header_len, int status, bool chunked) {
+    memset(o, 0, sizeof(*o));
+    if (!g_body_observer || status < 200 || status >= 300) return;
+    char *ce = find_response_header((char *)data, (char *)data, (char *)data + header_len, "content-encoding:");
+    size_t cl = ce ? strcspn(ce, "\r\n") : 0;
+    while (cl && (*ce == ' ' || *ce == '\t')) { ce++; cl--; }
+    while (cl && (ce[cl - 1] == ' ' || ce[cl - 1] == '\t')) cl--;
+    if (cl == 2 && strncasecmp(ce, "br", 2) == 0) {
+        o->br = BrotliDecoderCreateInstance(NULL, NULL, NULL);
+        if (!o->br) return;
+    } else if (cl && !(cl == 8 && strncasecmp(ce, "identity", 8) == 0)) {
+        return;
+    }
+    o->on = true;
+    o->chunked = chunked;
+}
+
+static void body_obs_end(BodyObs *o) {
+    if (o->br) BrotliDecoderDestroyInstance(o->br);
+    o->br = NULL;
+    o->on = false;
+}
+
 static bool http_request_with_method_internal(const char *url, const char *method,
                                                const char *postData, size_t postDataLen,
                                                const char **custom_headers, size_t custom_header_count,
@@ -869,6 +963,9 @@ static bool http_request_with_method_internal(const char *url, const char *metho
     bool in_memory = outBuffer && !bodyStream && url && method;
     if (in_memory && replay_serve(method, url, outBuffer, outStatus)) {
         if (outTotalSize) *outTotalSize = outBuffer->size;
+        /* (A recorded body is decoded and whole: observed in one piece.) */
+        if (g_body_observer && outBuffer->data && (!outStatus || (*outStatus >= 200 && *outStatus < 300)))
+            g_body_observer(g_body_observer_user, outBuffer->data, outBuffer->size);
         return true;
     }
     bool ok = http_request_net(url, method, postData, postDataLen, custom_headers, custom_header_count,
@@ -1061,6 +1158,7 @@ retry_connection:
     bool message_complete = false;
     bool conn_keep = true;
     const char *fail_msg = NULL;
+    BodyObs obs = { 0 };
 
     LOGI("Starting to read HTTP response...");
     size_t last_size = 0;
@@ -1149,6 +1247,7 @@ retry_connection:
                 } else {
                     conn_keep = false;                  /* body ends at EOF */
                 }
+                if (!bodyStream && !is_head) body_obs_start(&obs, outBuffer->data, header_len_val, st, resp_chunked);
 
                 if (content_length_val > 0) {
                     max_body_time = 30 + (int)((content_length_val / (1024ULL * 1024ULL)) * 120);
@@ -1174,6 +1273,11 @@ retry_connection:
         if (headers_parsed) {
             size_t body_received = body_streaming ? body_written
                                  : (outBuffer->size > header_len_val ? outBuffer->size - header_len_val : 0);
+            if (obs.on) {
+                size_t lim = body_len_known && body_received > body_expected ? body_expected : body_received;
+                if (lim > obs.fed)
+                    body_obs_feed(&obs, (const uint8_t *)outBuffer->data + header_len_val + obs.fed, lim - obs.fed);
+            }
             if (body_len_known) {
                 if (body_received >= body_expected) {
                     message_complete = true;
@@ -1205,6 +1309,7 @@ retry_connection:
         }
     }
 
+    body_obs_end(&obs);
     if (fail_msg) {
         snprintf(err, errLen, "%s", fail_msg);
         free(outBuffer->data);
@@ -1566,6 +1671,19 @@ bool http_get_to_memory_with_headers(const char *url, const char **headers, size
                                      HttpBuffer *outBuffer, char *err, size_t errLen) {
     return http_request_with_method(url, "GET", NULL, 0, headers, headerCount,
                                     outBuffer, NULL, err, errLen, NULL, NULL, NULL);
+}
+
+bool http_get_to_memory_observed(const char *url, const char **headers, size_t headerCount,
+                                 HttpBuffer *outBuffer, char *err, size_t errLen,
+                                 HttpBodyObserver observe, void *user) {
+    HttpBodyObserver prev = g_body_observer;
+    void *prev_user = g_body_observer_user;
+    g_body_observer = observe;
+    g_body_observer_user = user;
+    bool ok = http_get_to_memory_with_headers(url, headers, headerCount, outBuffer, err, errLen);
+    g_body_observer = prev;
+    g_body_observer_user = prev_user;
+    return ok;
 }
 
 bool http_post_to_memory(const char *url, const char *postData, size_t postDataLen,

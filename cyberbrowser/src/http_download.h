@@ -38,6 +38,16 @@ bool http_get_to_memory(const char *url, HttpBuffer *outBuffer,
 bool http_get_to_memory_with_headers(const char *url, const char **headers, size_t headerCount,
                                      HttpBuffer *outBuffer, char *err, size_t errLen);
 
+/* As http_get_to_memory_with_headers, also handing the body to `observe` as
+ * it arrives: de-chunked and decoded (identity or br; a body in another
+ * coding is not observed), in pieces, on the thread that reads it (the
+ * caller's).  For starting what the body asks for (a preload scan) before
+ * the download ends; the buffer still gets the whole body. */
+typedef void (*HttpBodyObserver)(void *user, const char *data, size_t len);
+bool http_get_to_memory_observed(const char *url, const char **headers, size_t headerCount,
+                                 HttpBuffer *outBuffer, char *err, size_t errLen,
+                                 HttpBodyObserver observe, void *user);
+
 bool http_request_to_memory(const char *url, const char *method,
                             const char *postData, size_t postDataLen,
                             const char **headers, size_t headerCount,

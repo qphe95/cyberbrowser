@@ -36,6 +36,15 @@ bool html_extract_visitor_data(const char *html, char *out_vd, size_t out_len);
  */
 bool html_execute_page_scripts(const char *html, struct JsExecResult *out_result);
 
+/* Preload scan of a document while it downloads: queues the fetches of its
+ * stylesheets and external scripts, and of the scripts and stylesheets it
+ * preloads, in document order (as a browser's preload scanner does), so they
+ * overlap the rest of the download.  Feed the decoded body in pieces. */
+typedef struct HtmlPreloadScan HtmlPreloadScan;
+HtmlPreloadScan *html_preload_scan_begin(void);
+void html_preload_scan_feed(HtmlPreloadScan *s, const char *data, size_t len);
+void html_preload_scan_end(HtmlPreloadScan *s);
+
 
 
 /* ytInitialPlayerResponse media extraction is disabled. Kept as a no-op stub. */
