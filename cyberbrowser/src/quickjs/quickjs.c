@@ -24649,6 +24649,30 @@ static int js_resize_plain_array(JSContextHandle ctx, void **pptr, int elem_size
     return 0;
 }
 
+/* A local atom of a stencil env (see CompileEnv): its code units in env->text. */
+typedef struct CEnvName {
+    uint32_t off, len, hash;
+    uint8_t wide;
+} CEnvName;
+
+#define CENV_LOCAL_ATOM_BASE ((JSAtom)JS_ATOM_END)
+
+/* What the compiler needs from outside it (atoms, errors): see cenv_init_*. */
+typedef struct CompileEnv {
+    JSContextHandle ctx;    /* runtime env: atoms and errors go to it */
+    BOOL stencil;
+    /* stencil env: local atoms CENV_LOCAL_ATOM_BASE + index into names */
+    PVec names;             /* of CEnvName */
+    uint8_t *text;
+    size_t text_len, text_cap;
+    uint32_t *htab;         /* 1 + index into names */
+    uint32_t htab_cap;
+    /* stencil env: the first error */
+    BOOL has_error;
+    int error_type, error_line, error_col;
+    char error_msg[256];
+} CompileEnv;
+
 /* A string the tokenizer made, in plain memory owned by the parse state
  * (PARALLEL_PARSE_DESIGN.md, 5.2): Latin-1 bytes, or UTF-16 code units when
  * wide; undef for the template part that failed to cook. */
@@ -24685,6 +24709,7 @@ static uint8_t *js_compile_regexp_cstr(JSContextHandle ctx, const CStr *body,
 
 typedef struct JSFunctionDef {
     JSContextHandle ctx;
+    CompileEnv *env; /* the parse's: atoms and errors */
     struct JSFunctionDef *self_handle; /* this definition */
     struct JSFunctionDef *parent_handle; /* the parent definition, NULL if none */
     int parent_cpool_idx; /* index in the constant pool of the parent
@@ -24857,6 +24882,9 @@ typedef struct JSFunctionDef {
     /* === Resume parser state (Phase 1 implementation) === */
     /* Complete parser state for resuming parsing instead of source reconstruction */
     JSLazyParseState resume_parse_state;
+    JSAtom *lazy_arg_names;   /* plain: resume_parse_state's argument names */
+    char *own_source;         /* plain: this function's source when no root
+                                 copy holds it (source_len bytes) */
     uint8_t has_resume_parse_state;         /* TRUE if resume_parse_state is valid */
 } JSFunctionDef;
 
@@ -24906,6 +24934,8 @@ typedef struct JSParseState {
     JSFunctionDefHandle cur_func_handle; /* the current function definition */
     PVec held; /* of GCHandle: what the definitions refer to (js_parse_hold) */
     GCHandle held_last;
+    CompileEnv *env;     /* atoms and errors: &env_rt, or a stencil env */
+    CompileEnv env_rt;
     BOOL is_module; /* parsing a module */
     BOOL allow_html_comments;
     BOOL ext_json; /* true if accepting JSON superset */
@@ -25115,13 +25145,451 @@ static GCValue js_cstr_value(JSParseState *s, const CStr *c)
     return js_new_string8_len(s->ctx, (const char *)c->data, (int)c->len);
 }
 
+/* ---- CompileEnv: what the compiler asks of the world (PARALLEL_PARSE_DESIGN.md 5.2) ----
+ * Atoms and errors.  The runtime env forwards to its context (the JS
+ * thread: today's behaviour, byte for byte).  A stencil env needs no
+ * context: names that are not predefined become local atoms
+ * (CENV_LOCAL_ATOM_BASE + index into its table), which instantiation maps
+ * to runtime atoms, and the first error is recorded instead of thrown (the
+ * JS thread then compiles serially, which raises the real error). */
+
+/* The predefined string atoms by text, for stencil envs: built once from
+ * js_atom_init, read-only after. */
+#define CENV_PREDEF_HTAB 1024   /* power of 2, > 2 * JS_ATOM_END */
+static const char *cenv_predef_str[JS_ATOM_END];
+static uint8_t cenv_predef_len[JS_ATOM_END];
+static uint16_t cenv_predef_htab[CENV_PREDEF_HTAB];   /* atom, 0 if empty */
+static _Atomic int cenv_predef_state;                /* 0, 1 building, 2 ready */
+
+static uint32_t cenv_hash_units(const void *data, uint32_t len, int wide)
+{
+    uint32_t h = 2166136261u, i;
+    if (wide) {
+        const uint16_t *p = (const uint16_t *)data;
+        for (i = 0; i < len; i++)
+            h = (h ^ p[i]) * 16777619u;
+    } else {
+        const uint8_t *p = (const uint8_t *)data;
+        for (i = 0; i < len; i++)
+            h = (h ^ p[i]) * 16777619u;
+    }
+    return h;
+}
+
+static BOOL cenv_atom_is_predef_string(JSAtom a)
+{
+    return a > 0 && a < JS_ATOM_END && a != JS_ATOM_Private_brand &&
+        a < JS_ATOM_Symbol_toPrimitive;
+}
+
+static void cenv_predef_init(void)
+{
+    int expected = 0;
+    if (atomic_load_explicit(&cenv_predef_state, memory_order_acquire) == 2)
+        return;
+    if (!atomic_compare_exchange_strong(&cenv_predef_state, &expected, 1)) {
+        while (atomic_load_explicit(&cenv_predef_state, memory_order_acquire) != 2)
+            ;
+        return;
+    }
+    {
+        const char *p = js_atom_init;
+        int i;
+        for (i = 1; i < JS_ATOM_END; i++) {
+            size_t len = strlen(p);
+            cenv_predef_str[i] = p;
+            cenv_predef_len[i] = (uint8_t)len;
+            if (cenv_atom_is_predef_string(i)) {
+                uint32_t h = cenv_hash_units(p, (uint32_t)len, 0) & (CENV_PREDEF_HTAB - 1);
+                while (cenv_predef_htab[h])
+                    h = (h + 1) & (CENV_PREDEF_HTAB - 1);
+                cenv_predef_htab[h] = (uint16_t)i;
+            }
+            p += len + 1;
+        }
+    }
+    atomic_store_explicit(&cenv_predef_state, 2, memory_order_release);
+}
+
+static void cenv_init_runtime(CompileEnv *env, JSContextHandle ctx)
+{
+    memset(env, 0, sizeof(*env));
+    env->ctx = ctx;
+}
+
+static void cenv_init_stencil(CompileEnv *env)
+{
+    memset(env, 0, sizeof(*env));
+    env->stencil = TRUE;
+    cenv_predef_init();
+}
+
+static void cenv_free(CompileEnv *env)
+{
+    pvec_free(&env->names);
+    js_plain_free(env->text);
+    js_plain_free(env->htab);
+    env->text = NULL;
+    env->htab = NULL;
+    env->text_len = env->text_cap = env->htab_cap = 0;
+}
+
+/* The first error of a stencil compile. */
+static void __attribute__((format(printf, 3, 0)))
+cenv_record_error_v(CompileEnv *env, JSErrorEnum type, const char *fmt, va_list ap)
+{
+    if (env->has_error)
+        return;
+    env->has_error = TRUE;
+    env->error_type = type;
+    vsnprintf(env->error_msg, sizeof(env->error_msg), fmt, ap);
+}
+
+static void __attribute__((format(printf, 3, 4)))
+cenv_record_error(CompileEnv *env, JSErrorEnum type, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    cenv_record_error_v(env, type, fmt, ap);
+    va_end(ap);
+}
+
+/* A name the stencil env does not handle: the unit compiles serially. */
+static JSAtom cenv_unsupported(CompileEnv *env, const char *what)
+{
+    cenv_record_error(env, JS_INTERNAL_ERROR, "stencil: %s", what);
+    return JS_ATOM_NULL;
+}
+
+/* A local atom's code units. */
+static const CEnvName *cenv_local_name(const CompileEnv *env, JSAtom a)
+{
+    uint32_t i = a - CENV_LOCAL_ATOM_BASE;
+    if (a < CENV_LOCAL_ATOM_BASE || __JS_AtomIsTaggedInt(a) || i >= (uint32_t)env->names.count)
+        return NULL;
+    return &PVEC_AT(env->names, CEnvName, i);
+}
+
+static BOOL cenv_text_reserve(CompileEnv *env, size_t extra)
+{
+    if (env->text_len + extra > env->text_cap) {
+        size_t cap = env->text_cap * 2 + extra + 256;
+        uint8_t *t = (uint8_t *)js_plain_realloc(env->text, cap);
+        if (!t)
+            return FALSE;
+        env->text = t;
+        env->text_cap = cap;
+    }
+    return TRUE;
+}
+
+static BOOL cenv_htab_grow(CompileEnv *env)
+{
+    uint32_t cap = env->htab_cap ? env->htab_cap * 2 : 256, i;
+    uint32_t *t = (uint32_t *)js_plain_calloc(cap, sizeof(uint32_t));
+    if (!t)
+        return FALSE;
+    for (i = 0; i < (uint32_t)env->names.count; i++) {
+        uint32_t h = PVEC_AT(env->names, CEnvName, i).hash & (cap - 1);
+        while (t[h])
+            h = (h + 1) & (cap - 1);
+        t[h] = i + 1;
+    }
+    js_plain_free(env->htab);
+    env->htab = t;
+    env->htab_cap = cap;
+    return TRUE;
+}
+
+/* The atom of a string given as code units: narrow (Latin-1) or wide
+ * (UTF-16, at least one unit >= 0x100), as JS_NewAtomStr would make it. */
+static JSAtom cenv_atom_units(CompileEnv *env, const void *data, uint32_t len, int wide)
+{
+    uint32_t hash, h, i;
+
+    /* canonical integer index */
+    if (!wide && len > 0 && len <= 10) {
+        const uint8_t *p = (const uint8_t *)data;
+        uint64_t n = 0;
+        for (i = 0; i < len && is_num(p[i]); i++)
+            n = n * 10 + (p[i] - '0');
+        if (i == len && (p[0] != '0' || len == 1) && n <= JS_ATOM_MAX_INT)
+            return __JS_AtomFromUInt32((uint32_t)n);
+    }
+    hash = cenv_hash_units(data, len, wide);
+    if (!wide && len < 256) {
+        for (h = hash & (CENV_PREDEF_HTAB - 1); cenv_predef_htab[h]; h = (h + 1) & (CENV_PREDEF_HTAB - 1)) {
+            int a = cenv_predef_htab[h];
+            if (cenv_predef_len[a] == len && !memcmp(cenv_predef_str[a], data, len))
+                return (JSAtom)a;
+        }
+    }
+    if (env->htab_cap) {
+        for (h = hash & (env->htab_cap - 1); env->htab[h]; h = (h + 1) & (env->htab_cap - 1)) {
+            const CEnvName *n = &PVEC_AT(env->names, CEnvName, env->htab[h] - 1);
+            if (n->hash == hash && n->len == len && n->wide == wide &&
+                !memcmp(env->text + n->off, data, (size_t)len << wide))
+                return CENV_LOCAL_ATOM_BASE + env->htab[h] - 1;
+        }
+    }
+    /* new local atom */
+    if ((uint32_t)env->names.count * 2 >= env->htab_cap && !cenv_htab_grow(env))
+        goto oom;
+    if (CENV_LOCAL_ATOM_BASE + (uint32_t)env->names.count >= JS_ATOM_TAG_INT)
+        return cenv_unsupported(env, "too many names");
+    if (!cenv_text_reserve(env, (size_t)len << wide))
+        goto oom;
+    {
+        CEnvName n = { .off = (uint32_t)env->text_len, .len = len, .hash = hash, .wide = (uint8_t)wide };
+        if (!pvec_push(&env->names, sizeof(CEnvName), &n))
+            goto oom;
+        memcpy(env->text + env->text_len, data, (size_t)len << wide);
+        env->text_len += (size_t)len << wide;
+        for (h = hash & (env->htab_cap - 1); env->htab[h]; h = (h + 1) & (env->htab_cap - 1))
+            ;
+        env->htab[h] = env->names.count;
+        return CENV_LOCAL_ATOM_BASE + env->names.count - 1;
+    }
+ oom:
+    cenv_record_error(env, JS_INTERNAL_ERROR, "out of memory");
+    return JS_ATOM_NULL;
+}
+
+/* Code units of UTF-8 text (narrowed when every unit fits in a byte), then
+ * the atom. */
+static JSAtom cenv_atom_from_utf8(CompileEnv *env, const char *str, size_t len)
+{
+    const uint8_t *p = (const uint8_t *)str, *end = p + len;
+    uint16_t sbuf[64], *u = sbuf;
+    uint32_t n = 0, cap = 64;
+    BOOL wide = FALSE;
+    JSAtom a;
+
+    if (count_ascii(p, len) == len)
+        return cenv_atom_units(env, str, (uint32_t)len, 0);
+    while (p < end) {
+        int c = *p;
+        if (c < 0x80) {
+            p++;
+        } else {
+            const uint8_t *q;
+            c = unicode_from_utf8(p, (int)(end - p), &q);
+            if (c < 0) {
+                c = 0xfffd;
+                q = p + 1;
+            }
+            p = q;
+        }
+        if (n + 2 > cap) {
+            uint16_t *nu = (uint16_t *)js_plain_realloc(u == sbuf ? NULL : u, cap * 2 * sizeof(uint16_t));
+            if (!nu)
+                goto oom;
+            if (u == sbuf)
+                memcpy(nu, sbuf, sizeof(sbuf));
+            u = nu;
+            cap *= 2;
+        }
+        if (c > 0xffff) {
+            u[n++] = get_hi_surrogate(c);
+            u[n++] = get_lo_surrogate(c);
+            wide = TRUE;
+        } else {
+            u[n++] = (uint16_t)c;
+            if (c >= 0x100)
+                wide = TRUE;
+        }
+    }
+    if (!wide) {
+        uint32_t i;
+        uint8_t *b = (uint8_t *)u;   /* narrow in place */
+        for (i = 0; i < n; i++)
+            b[i] = (uint8_t)u[i];
+        a = cenv_atom_units(env, b, n, 0);
+    } else {
+        a = cenv_atom_units(env, u, n, 1);
+    }
+    if (u != sbuf)
+        js_plain_free(u);
+    return a;
+ oom:
+    if (u != sbuf)
+        js_plain_free(u);
+    cenv_record_error(env, JS_INTERNAL_ERROR, "out of memory");
+    return JS_ATOM_NULL;
+}
+
+/* JS_NewAtomLen: an identifier or name in UTF-8. */
+static JSAtom cenv_atom(CompileEnv *env, const char *str, size_t len)
+{
+    if (!env->stencil)
+        return JS_NewAtomLen(env->ctx, str, len);
+    return cenv_atom_from_utf8(env, str, len);
+}
+
+/* The atom of a tokenizer string, as JS_ValueToAtom of its value. */
+static JSAtom cenv_atom_cstr(CompileEnv *env, const CStr *c)
+{
+    if (!env->stencil) {
+        GCValue v;
+        if (c->undef)
+            v = JS_UNDEFINED;
+        else if (c->len == 0)
+            v = JS_AtomToString(env->ctx, JS_ATOM_empty_string);
+        else if (c->wide)
+            v = js_new_string16_len(env->ctx, (const uint16_t *)c->data, (int)c->len);
+        else
+            v = js_new_string8_len(env->ctx, (const char *)c->data, (int)c->len);
+        if (JS_IsException(v))
+            return JS_ATOM_NULL;
+        return JS_ValueToAtom(env->ctx, v);
+    }
+    if (c->undef)
+        return JS_ATOM_undefined;
+    return cenv_atom_units(env, c->data, c->len, c->wide);
+}
+
+/* JS_ValueToAtom of a number literal (a property name). */
+static JSAtom cenv_atom_number(CompileEnv *env, GCValue val)
+{
+    if (!env->stencil)
+        return JS_ValueToAtom(env->ctx, val);
+    if (JS_VALUE_GET_TAG(val) == JS_TAG_INT && (uint32_t)JS_VALUE_GET_INT(val) <= JS_ATOM_MAX_INT)
+        return __JS_AtomFromUInt32(JS_VALUE_GET_INT(val));
+    return cenv_unsupported(env, "number property name");
+}
+
+/* JS_AtomGetStr. */
+static const char *cenv_atom_str(CompileEnv *env, char *buf, int buf_size, JSAtom a)
+{
+    const CEnvName *n;
+    if (!env->stencil)
+        return JS_AtomGetStr(env->ctx, buf, buf_size, a);
+    if (__JS_AtomIsTaggedInt(a)) {
+        snprintf(buf, buf_size, "%u", __JS_AtomToUInt32(a));
+    } else if (a > 0 && a < JS_ATOM_END) {
+        snprintf(buf, buf_size, "%s", cenv_predef_str[a]);
+    } else if ((n = cenv_local_name(env, a)) != NULL) {
+        char *q = buf, *q_end = buf + buf_size;
+        uint32_t i;
+        for (i = 0; i < n->len; i++) {
+            unsigned c = n->wide ? ((const uint16_t *)(env->text + n->off))[i] : env->text[n->off + i];
+            if (c < 0x80) {
+                if (q + 1 >= q_end)
+                    break;
+                *q++ = (char)c;
+            } else {
+                if (q + UTF8_CHAR_LEN_MAX >= q_end)
+                    break;
+                q += unicode_to_utf8((uint8_t *)q, c);
+            }
+        }
+        *q = '\0';
+    } else {
+        snprintf(buf, buf_size, "<invalid atom>");
+    }
+    return buf;
+}
+
+/* The runtime atom of a stencil env's atom (on the JS thread). */
+static JSAtom cenv_atom_to_runtime(CompileEnv *env, JSContextHandle ctx, JSAtom a)
+{
+    const CEnvName *n = cenv_local_name(env, a);
+    GCValue v;
+    if (!n)
+        return a;   /* predefined or an integer */
+    if (n->wide)
+        v = js_new_string16_len(ctx, (const uint16_t *)(env->text + n->off), (int)n->len);
+    else
+        v = js_new_string8_len(ctx, (const char *)(env->text + n->off), (int)n->len);
+    if (JS_IsException(v))
+        return JS_ATOM_NULL;
+    return JS_NewAtomStr(ctx, JS_VALUE_GET_STRING(v));
+}
+
+/* JS_AtomGetKind(a) == JS_ATOM_KIND_STRING (a is not a tagged integer). */
+static BOOL cenv_atom_is_string(CompileEnv *env, JSAtom a)
+{
+    if (!env->stencil)
+        return JS_AtomGetKind(env->ctx, a) == JS_ATOM_KIND_STRING;
+    if (a < JS_ATOM_END)
+        return cenv_atom_is_predef_string(a);
+    return TRUE;
+}
+
+/* js_atom_concat_str: name followed by str1. */
+static JSAtom cenv_atom_concat_str(CompileEnv *env, JSAtom name, const char *str1)
+{
+    char buf[ATOM_GET_STR_BUF_SIZE + 32];
+    size_t len;
+    if (!env->stencil)
+        return js_atom_concat_str(env->ctx, name, str1);
+    cenv_atom_str(env, buf, ATOM_GET_STR_BUF_SIZE, name);
+    len = strlen(buf);
+    if (len + 1 >= ATOM_GET_STR_BUF_SIZE)
+        return cenv_unsupported(env, "long name");
+    snprintf(buf + len, sizeof(buf) - len, "%s", str1);
+    return cenv_atom_from_utf8(env, buf, strlen(buf));
+}
+
+/* js_atom_concat_num: name followed by n in decimal. */
+static JSAtom cenv_atom_concat_num(CompileEnv *env, JSAtom name, uint32_t n)
+{
+    char buf[16];
+    size_t len;
+    if (!env->stencil)
+        return js_atom_concat_num(env->ctx, name, n);
+    len = u32toa(buf, n);
+    buf[len] = '\0';
+    return cenv_atom_concat_str(env, name, buf);
+}
+
+/* The compiler's errors other than parse errors (JS_Throw*). */
+static int __attribute__((format(printf, 3, 4)))
+cenv_throw(CompileEnv *env, JSErrorEnum type, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    if (env->stencil) {
+        cenv_record_error_v(env, type, fmt, ap);
+    } else {
+        switch (type) {
+        case JS_SYNTAX_ERROR:
+        case JS_TYPE_ERROR:
+        case JS_INTERNAL_ERROR:
+        case JS_RANGE_ERROR:
+        case JS_REFERENCE_ERROR:
+            JS_ThrowError(env->ctx, type, fmt, ap);
+            break;
+        default:
+            JS_ThrowError(env->ctx, JS_INTERNAL_ERROR, fmt, ap);
+            break;
+        }
+    }
+    va_end(ap);
+    return -1;
+}
+
+/* JS_ThrowSyntaxErrorAtom. */
+static int cenv_throw_syntax_atom(CompileEnv *env, const char *fmt, JSAtom atom)
+{
+    char buf[ATOM_GET_STR_BUF_SIZE];
+    return cenv_throw(env, JS_SYNTAX_ERROR, fmt, cenv_atom_str(env, buf, sizeof(buf), atom));
+}
+
+/* JS_ThrowOutOfMemory. */
+static int cenv_throw_oom(CompileEnv *env)
+{
+    if (env->stencil)
+        cenv_record_error(env, JS_INTERNAL_ERROR, "out of memory");
+    else
+        JS_ThrowOutOfMemory(env->ctx);
+    return -1;
+}
+
 /* As JS_ValueToAtom of that string. */
 static JSAtom js_cstr_atom(JSParseState *s, const CStr *c)
 {
-    GCValue v = js_cstr_value(s, c);
-    if (JS_IsException(v))
-        return JS_ATOM_NULL;
-    return JS_ValueToAtom(s->ctx, v);
+    return cenv_atom_cstr(s->env, c);
 }
 
 typedef struct JSOpCode {
@@ -25396,6 +25864,14 @@ static int js_parse_error_v(JSParseState *s, const uint8_t *ptr, const char *fmt
     JSContextHandle ctx = s->ctx;
     int line_num, col_num;
     line_num = get_line_col(&col_num, s->buf_start, ptr - s->buf_start);
+    if (s->env->stencil) {
+        if (!s->env->has_error) {
+            s->env->error_line = line_num + 1;
+            s->env->error_col = col_num + 1;
+        }
+        cenv_record_error_v(s->env, JS_SYNTAX_ERROR, fmt, ap);
+        return -1;
+    }
     JS_ThrowError2(ctx, JS_SYNTAX_ERROR, fmt, ap, FALSE);
     build_backtrace(ctx, SAFE_GET_OR(ctx_rt, JSRuntimeHandle, current_exception, GC_UNDEFINED), s->filename,
                     line_num + 1, col_num + 1, 0);
@@ -25449,7 +25925,7 @@ static int js_parse_error_reserved_identifier(JSParseState *s)
 {
     char buf1[ATOM_GET_STR_BUF_SIZE];
     return js_parse_error(s, "'%s' is a reserved identifier",
-                          JS_AtomGetStr(s->ctx, buf1, sizeof(buf1),
+                          cenv_atom_str(s->env, buf1, sizeof(buf1),
                                         s->token.u.ident.atom));
 }
 
@@ -25932,41 +26408,26 @@ static __exception int js_parse_regexp(JSParseState *s)
     return -1;
 }
 
-/* Header-storing realloc for identifier buffers.
- * Stores GCHandle at the beginning of each allocation.
- * Layout: [GCHandle handle | actual data...]
- */
+/* Grow an identifier buffer (plain memory once it leaves static_buf;
+ * the caller frees it). */
 static __exception int ident_realloc(JSContextHandle ctx, char **pbuf, size_t *psize,
                                      char *static_buf)
 {
     char *buf, *new_buf;
     size_t size, new_size;
 
+    (void)ctx;
     buf = *pbuf;
     size = *psize;
     if (size >= (SIZE_MAX / 3) * 2)
         new_size = SIZE_MAX;
     else
         new_size = size + (size >> 1);
-    if (buf == static_buf) {
-        /* First allocation: extra space for handle */
-        GCHandle h = gc_alloc(sizeof(GCHandle) + new_size, JS_GC_OBJ_TYPE_DATA);
-        if (h == GC_HANDLE_NULL)
-            return -1;
-        void *data = gc_deref_unsafe(h);  /* Safe: immediately store handle below */
-        *(GCHandle*)data = h;  /* gc-no-dirty: the buffer's own handle */
-        new_buf = (char*)data + sizeof(GCHandle);
+    new_buf = (char *)js_plain_realloc(buf == static_buf ? NULL : buf, new_size);
+    if (!new_buf)
+        return -1;
+    if (buf == static_buf)
         memcpy(new_buf, buf, size);
-    } else {
-        /* Realloc: read handle from header */
-        uint8_t *header = (uint8_t*)buf - sizeof(GCHandle);
-        GCHandle h = gc_realloc_handle(*(GCHandle*)header, sizeof(GCHandle) + new_size);
-        if (h == GC_HANDLE_NULL)
-            return -1;
-        void *data = gc_deref_unsafe(h);  /* Safe: immediately store handle below */
-        *(GCHandle*)data = h;  /* gc-no-dirty: the buffer's own handle */
-        new_buf = (char*)data + sizeof(GCHandle);
-    }
     *pbuf = new_buf;
     *psize = new_size;
     return 0;
@@ -26054,10 +26515,10 @@ static JSAtom parse_ident(JSParseState *s, const uint8_t **pp,
             }
         }
     }
-    atom = JS_NewAtomLen(s->ctx, buf, ident_pos);
+    atom = cenv_atom(s->env, buf, ident_pos);
  done:
     if (unlikely(buf != ident_buf))
-        /* GC frees */;
+        js_plain_free(buf);
     *pp = p;
     return atom;
 }
@@ -26544,7 +27005,7 @@ static JSAtom json_parse_ident(JSParseState *s, const uint8_t **pp, int c)
     atom = JS_NewAtomLen(s->ctx, buf, ident_pos);
  done:
     if (unlikely(buf != ident_buf))
-        /* GC frees */;
+        js_plain_free(buf);
     *pp = p;
     return atom;
 }
@@ -27393,7 +27854,7 @@ static int cpool_add_cconst(JSParseState *s, const CConst *cc)
     JSFunctionDef *fd = (s->cur_func_handle);
 
     if (!pvec_push(&fd->cpool_handle, sizeof(CConst), cc)) {
-        JS_ThrowOutOfMemory(s->ctx);
+        cenv_throw_oom(s->env);
         return -1;
     }
     fd->cpool_count = fd->cpool_handle.count;
@@ -27439,7 +27900,7 @@ static __exception int emit_push_cstr(JSParseState *s, const CStr *str,
 /* JS_AtomToValue(atom), as a string literal of that text would be pushed. */
 static __exception int emit_push_atom_value(JSParseState *s, JSAtom atom)
 {
-    if (!__JS_AtomIsTaggedInt(atom) && JS_AtomGetKind(s->ctx, atom) == JS_ATOM_KIND_STRING) {
+    if (!__JS_AtomIsTaggedInt(atom) && cenv_atom_is_string(s->env, atom)) {
         emit_op(s, OP_push_atom_value);
         emit_u32(s, atom);
         return 0;
@@ -27696,7 +28157,7 @@ static int add_var(JSContextHandle ctx, JSFunctionDef *fd, JSAtom name)
 {
     /* the local variable indexes are currently stored on 16 bits */
     if (fd->var_count >= JS_MAX_LOCAL_VARS) {
-        JS_ThrowInternalError(ctx, "too many local variables");
+        cenv_throw(fd->env, JS_INTERNAL_ERROR, "too many local variables");
         return -1;
     }
     /* Use exponential growth: double when full, starting from 8 */
@@ -27790,7 +28251,7 @@ static int add_arg(JSContextHandle ctx, JSFunctionDef *fd, JSAtom name)
 {
     /* the local variable indexes are currently stored on 16 bits */
     if (fd->arg_count >= JS_MAX_LOCAL_VARS) {
-        JS_ThrowInternalError(ctx, "too many arguments");
+        cenv_throw(fd->env, JS_INTERNAL_ERROR, "too many arguments");
         return -1;
     }
     if (js_resize_plain_array(ctx, (void **)&fd->args_handle, sizeof(JSVarDef),
@@ -28069,7 +28530,7 @@ static __exception int js_parse_template(JSParseState *s, int call, int *argc)
             tfd = (s->cur_func_handle);
             if (!pvec_push(&tfd->tmpl_strs, sizeof(CStr), &pair[0]) ||
                 !pvec_push(&tfd->tmpl_strs, sizeof(CStr), &pair[1])) {
-                JS_ThrowOutOfMemory(ctx);
+                cenv_throw_oom(s->env);
                 return -1;
             }
             PVEC_AT(tfd->cpool_handle, CConst, template_idx).n++;
@@ -28233,7 +28694,7 @@ static int __exception js_parse_property_name(JSParseState *s,
     } else if (s->token.val == TOK_NUMBER) {
         GCValue val = GC_UNDEFINED;
         val = s->token.u.num.val;
-        name = JS_ValueToAtom(s->ctx, val);
+        name = cenv_atom_number(s->env, val);
         if (name == JS_ATOM_NULL)
             goto fail;
         if (next_token(s))
@@ -28341,47 +28802,29 @@ static int js_parse_skip_parens_token(JSParseState *s, int *pbits, BOOL no_line_
     int c, tok_len, bits = 0;
     const uint8_t *last_token_ptr;
 
-    /* Move the nesting-state buffer off the C stack onto the GC heap so
-     * that destructuring / parameter patterns with very deep nesting do
-     * not consume C stack.  The buffer is registered as a temporary root
-     * because js_parse_regexp() / js_parse_template_part() may trigger GC. */
-    state_handle = gc_alloc(state_size, JS_GC_OBJ_TYPE_DATA);
-    if (state_handle == GC_HANDLE_NULL)
+    /* The nesting state is off the C stack (deeply nested destructuring
+     * and parameter patterns), in plain memory. */
+    (void)state_handle;
+    state = (char *)js_plain_realloc(NULL, state_size);
+    if (!state)
         return -1;
-    gc_add_root(state_handle);
-    state = (char *)((char *)gc_deref(state_handle));
-    if (!state) {
-        gc_remove_root(state_handle);
-        return -1;
-    }
     /* protect from underflow */
     state[level++] = 0;
 
     js_parse_get_pos(s, &pos);
     last_tok = 0;
     for (;;) {
-        /* Re-pin after any operation that may have triggered GC. */
-        state = (char *)((char *)gc_deref(state_handle));
 
         switch(s->token.val) {
         case '(':
         case '[':
         case '{':
             if (level >= state_size) {
-                size_t new_size = state_size * 2;
-                GCHandle new_handle = gc_realloc(state_handle, new_size);
-                if (new_handle == GC_HANDLE_NULL) {
-                    /* Old handle was already freed by gc_realloc; nothing to root. */
-                    state_handle = GC_HANDLE_NULL;
+                char *ns = (char *)js_plain_realloc(state, state_size * 2);
+                if (!ns)
                     goto done;
-                }
-                gc_remove_root(state_handle);
-                state_handle = new_handle;
-                gc_add_root(state_handle);
-                state = (char *)((char *)gc_deref(state_handle));
-                if (!state)
-                    goto done;
-                state_size = new_size;
+                state = ns;
+                state_size *= 2;
             }
             state[level++] = s->token.val;
             break;
@@ -28414,19 +28857,11 @@ static int js_parse_skip_parens_token(JSParseState *s, int *pbits, BOOL no_line_
                 /* '${' inside the template : closing '}' and continue
                    parsing the template */
                 if (level >= state_size) {
-                    size_t new_size = state_size * 2;
-                    GCHandle new_handle = gc_realloc(state_handle, new_size);
-                    if (new_handle == GC_HANDLE_NULL) {
-                        state_handle = GC_HANDLE_NULL;
+                    char *ns = (char *)js_plain_realloc(state, state_size * 2);
+                    if (!ns)
                         goto done;
-                    }
-                    gc_remove_root(state_handle);
-                    state_handle = new_handle;
-                    gc_add_root(state_handle);
-                    state = (char *)((char *)gc_deref(state_handle));
-                    if (!state)
-                        goto done;
-                    state_size = new_size;
+                    state = ns;
+                    state_size *= 2;
                 }
                 state[level++] = '`';
             }
@@ -28488,8 +28923,7 @@ static int js_parse_skip_parens_token(JSParseState *s, int *pbits, BOOL no_line_
     if (pbits) {
         *pbits = bits;
     }
-    if (state_handle != GC_HANDLE_NULL)
-        gc_remove_root(state_handle);
+    js_plain_free(state);
     if (js_parse_seek_token(s, &pos))
         return -1;
     return tok;
@@ -28519,7 +28953,7 @@ static int js_parse_skip_parens_token(JSParseState *s, int *pbits, BOOL no_line_
  * state is needed after it has been compiled.
  * ============================================================================ */
 
-static JSAtom get_private_setter_name(JSContextHandle ctx, JSAtom name);
+static JSAtom get_private_setter_name(CompileEnv *env, JSAtom name);
 
 /* Open-addressing set of atoms (JS_ATOM_NULL marks an empty slot). */
 typedef struct JSLazyIdentSet {
@@ -29244,7 +29678,7 @@ static int js_lazy_preparse_body(JSParseState *s, JSLazyIdentSet *ids,
         if (lazy_name_set_has(&decls, s->buf_start,
                               s->buf_start + t[3 * i + 1] - 1, t[3 * i + 2]))
             continue;
-        a = JS_NewAtomLen(ctx, (const char *)s->buf_start + t[3 * i + 1] - 1, t[3 * i + 2]);
+        a = cenv_atom(s->env, (const char *)s->buf_start + t[3 * i + 1] - 1, t[3 * i + 2]);
         if (a == JS_ATOM_NULL)
             goto done;
         r = lazy_ident_set_add(ctx, ids, a);
@@ -29253,7 +29687,7 @@ static int js_lazy_preparse_body(JSParseState *s, JSLazyIdentSet *ids,
             goto done;
         /* a private accessor's setter is a separate binding '#x<set>' */
         if (s->buf_start[t[3 * i + 1] - 1] == '#') {
-            JSAtom set_name = get_private_setter_name(ctx, a);
+            JSAtom set_name = get_private_setter_name(s->env, a);
             if (set_name == JS_ATOM_NULL)
                 goto done;
             r = lazy_ident_set_add(ctx, ids, set_name);
@@ -29343,7 +29777,7 @@ static int js_lazy_preparse_indexed(JSParseState *s, JSLazyIdentSet *ids,
         /* declared at the body's function level: never an outer name */
         if (js_struct_index_declares(ix, r, s->buf_start, n))
             continue;
-        a = JS_NewAtomLen(ctx, (const char *)s->buf_start + n->off, n->len);
+        a = cenv_atom(s->env, (const char *)s->buf_start + n->off, n->len);
         if (a == JS_ATOM_NULL)
             goto fail;
         ret = lazy_ident_set_add(ctx, ids, a);
@@ -29352,7 +29786,7 @@ static int js_lazy_preparse_indexed(JSParseState *s, JSLazyIdentSet *ids,
             goto fail;
         /* a private accessor's setter is a separate binding '#x<set>' */
         if (s->buf_start[n->off] == '#') {
-            JSAtom set_name = get_private_setter_name(ctx, a);
+            JSAtom set_name = get_private_setter_name(s->env, a);
             if (set_name == JS_ATOM_NULL)
                 goto fail;
             ret = lazy_ident_set_add(ctx, ids, set_name);
@@ -29484,13 +29918,13 @@ static int js_parse_keep_source(JSParseState *s, JSFunctionDef *fd,
         fd->source_offset = start - s->buf_start;
         return 0;
     }
-    {
-        GCStringHandle source_handle = gc_strndup((const char *)start, len);
-        GC_SET(fd->source_string_handle, SAFE_HANDLE(source_handle));
-        js_parse_hold(s, fd->source_string_handle);
-        fd->source_offset = 0;
-    }
-    return fd->source_string_handle == GC_HANDLE_NULL ? -1 : 0;
+    fd->own_source = (char *)js_plain_realloc(fd->own_source, len + 1);
+    if (!fd->own_source)
+        return js_parse_error(s, "out of memory");
+    memcpy(fd->own_source, start, len);
+    fd->own_source[len] = '\0';
+    fd->source_offset = 0;
+    return 0;
 }
 
 static int js_lazy_try_skip_body(JSParseState *s, JSFunctionDef *fd,
@@ -29580,21 +30014,15 @@ static int js_lazy_try_skip_body(JSParseState *s, JSFunctionDef *fd,
     st->func_source_offset = func_start - s->buf_start;
     st->func_source_len = body_end - func_start;
     if (fd->arg_count > 0) {
-        GCHandle names_handle = gc_alloc(sizeof(JSAtom) * fd->arg_count, JS_GC_OBJ_TYPE_DATA);
-        if (names_handle == GC_HANDLE_NULL) {
+        JSAtom *names = (JSAtom *)js_plain_realloc(NULL, sizeof(JSAtom) * fd->arg_count);
+        if (!names) {
             lazy_ident_set_free(ctx, &ids);
-            return -1;
+            return js_parse_error(s, "out of memory");
         }
-        {
-            JSAtom *names = (JSAtom *)gc_deref(names_handle);
-            for (i = 0; i < (uint32_t)fd->arg_count; i++) {
-                JSVarDefArrayHandle vd_arr = fd_args; int vd_idx = i;
-                names[i] = JS_DupAtom(ctx, (vd_arr)[vd_idx].var_name);
-            }
-        }
-        st = &fd->resume_parse_state;
-        GC_SET(st->arg_names_handle, names_handle);
-        js_parse_hold(s, names_handle);
+        for (i = 0; i < (uint32_t)fd->arg_count; i++)
+            names[i] = JS_DupAtom(ctx, fd_args[i].var_name);
+        js_plain_free(fd->lazy_arg_names);
+        fd->lazy_arg_names = names;
     }
     fd->func_parse_state = JS_FUNC_LAZY;
     fd->has_resume_parse_state = TRUE;
@@ -29824,7 +30252,7 @@ static __exception int js_parse_object_literal(JSParseState *s)
 
 static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags);
 static void emit_class_field_init(JSParseState *s);
-static JSFunctionDef *js_new_function_def(JSContextHandle ctx,
+static JSFunctionDef *js_new_function_def(CompileEnv *env, JSContextHandle ctx,
                                           JSFunctionDefHandle parent_handle,
                                           BOOL is_eval,
                                           BOOL is_func_expr,
@@ -29853,7 +30281,7 @@ static __exception int js_parse_class_default_ctor(JSParseState *s,
     JSFunctionDef *fd = (s->cur_func_handle);
     int idx;
 
-    fd = js_new_function_def(s->ctx, (JSFunctionDefHandle)(fd->self_handle), FALSE, FALSE, s->filename,
+    fd = js_new_function_def(s->env, s->ctx, (JSFunctionDefHandle)(fd->self_handle), FALSE, FALSE, s->filename,
                              s->token.ptr, &s->get_line_col_cache);
     if (!fd)
         return -1;
@@ -29946,9 +30374,9 @@ static void emit_class_field_init(JSParseState *s)
 }
 
 /* build a private setter function name from the private getter name */
-static JSAtom get_private_setter_name(JSContextHandle ctx, JSAtom name)
+static JSAtom get_private_setter_name(CompileEnv *env, JSAtom name)
 {
-    return js_atom_concat_str(ctx, name, "<set>");
+    return cenv_atom_concat_str(env, name, "<set>");
 }
 
 typedef struct {
@@ -30220,7 +30648,7 @@ static __exception int js_parse_class(JSParseState *s, BOOL is_class_expr,
                     JSAtom setter_name;
                     int ret;
 
-                    setter_name = get_private_setter_name(ctx, name);
+                    setter_name = get_private_setter_name(s->env, name);
                     if (setter_name == JS_ATOM_NULL)
                         goto fail;
                     emit_atom(s, setter_name);
@@ -30275,7 +30703,7 @@ static __exception int js_parse_class(JSParseState *s, BOOL is_class_expr,
             }
             if (name == JS_ATOM_NULL ) {
                 /* save the computed field name into a variable */
-                field_var_name = js_atom_concat_num(ctx, JS_ATOM_computed_field + is_static, cf->computed_fields_count);
+                field_var_name = cenv_atom_concat_num(s->env, JS_ATOM_computed_field + is_static, cf->computed_fields_count);
                 if (field_var_name == JS_ATOM_NULL)
                     goto fail;
                 if (define_var(s, fd, field_var_name, JS_VAR_DEF_CONST) < 0) {
@@ -30943,7 +31371,7 @@ static int js_unsupported_keyword(JSParseState *s, JSAtom atom)
 {
     char buf[ATOM_GET_STR_BUF_SIZE];
     return js_parse_error(s, "unsupported keyword: %s",
-                          JS_AtomGetStr(s->ctx, buf, sizeof(buf), atom));
+                          cenv_atom_str(s->env, buf, sizeof(buf), atom));
 }
 
 static __exception int js_define_var(JSParseState *s, JSAtom name, int tok)
@@ -31119,7 +31547,7 @@ static int js_parse_destructuring_element(JSParseState *s, int tok, int is_arg,
             int prop_type;
             if (s->token.val == TOK_ELLIPSIS) {
                 if (!has_ellipsis) {
-                    JS_ThrowInternalError(s->ctx, "unexpected ellipsis token");
+                    cenv_throw(s->env, JS_INTERNAL_ERROR, "unexpected ellipsis token");
                     return -1;
                 }
                 if (next_token(s))
@@ -32461,7 +32889,7 @@ static __exception int js_parse_unary(JSParseState *s, int parse_flags)
                postifx exponential, ES7 specifies that -2**2 is a
                syntax error. */
             if (parse_flags & PF_POW_FORBIDDEN) {
-                JS_ThrowSyntaxError(s->ctx, "unparenthesized unary expression can't appear on the left-hand side of '**'");
+                cenv_throw(s->env, JS_SYNTAX_ERROR, "unparenthesized unary expression can't appear on the left-hand side of '**'");
                 return -1;
             }
             op_token_ptr = s->token.ptr;
@@ -34604,9 +35032,9 @@ static JSExportEntry *add_export_entry2(JSContextHandle ctx,
         char buf1[ATOM_GET_STR_BUF_SIZE];
         if (s) {
             js_parse_error(s, "duplicate exported name '%s'",
-                           JS_AtomGetStr(ctx, buf1, sizeof(buf1), export_name));
+                           cenv_atom_str(s->env, buf1, sizeof(buf1), export_name));
         } else {
-            JS_ThrowSyntaxErrorAtom(ctx, "duplicate exported name '%s'", export_name);
+            cenv_throw_syntax_atom(s->env, "duplicate exported name '%s'", export_name);
         }
         return NULL;
     }
@@ -36952,7 +37380,7 @@ static __exception int js_parse_source_element(JSParseState *s)
     return 0;
 }
 
-static JSFunctionDef *js_new_function_def(JSContextHandle ctx,
+static JSFunctionDef *js_new_function_def(CompileEnv *env, JSContextHandle ctx,
                                           JSFunctionDefHandle parent_handle,
                                           BOOL is_eval,
                                           BOOL is_func_expr,
@@ -37029,7 +37457,8 @@ static JSFunctionDef *js_new_function_def(JSContextHandle ctx,
     }
     (fd)->label_size = 4;
 
-    (fd)->filename = JS_NewAtom(ctx, filename);
+    (fd)->env = env;
+    (fd)->filename = cenv_atom(env, filename, strlen(filename));
     (fd)->source_pos = source_ptr - get_line_col_cache->buf_start;
     (fd)->get_line_col_cache = get_line_col_cache;
     
@@ -37300,6 +37729,10 @@ static void js_free_function_def_tables(JSFunctionDef *fd)
     gc_byte_buffer_clear(&fd->byte_code);
     gc_byte_buffer_clear(&fd->pc2line);
     cconst_release(fd);
+    js_plain_free(fd->lazy_arg_names);
+    fd->lazy_arg_names = NULL;
+    js_plain_free(fd->own_source);
+    fd->own_source = NULL;
 }
 
 static void js_free_function_def(JSContextHandle ctx, JSFunctionDef *fd)
@@ -37842,12 +38275,12 @@ static int add_closure_var(JSContextHandle ctx, JSFunctionDef *s,
 {
     /* the closure variable indexes are currently stored on 16 bits */
     if (s->closure_var_handle.count >= JS_MAX_LOCAL_VARS) {
-        JS_ThrowInternalError(ctx, "too many closure variables");
+        cenv_throw(s->env, JS_INTERNAL_ERROR, "too many closure variables");
         return -1;
     }
 
     if (!pvec_resize(&s->closure_var_handle, sizeof(JSClosureVar), s->closure_var_handle.count + 1)) {
-        JS_ThrowOutOfMemory(ctx);
+        cenv_throw_oom(s->env);
         return -1;
     }
     {
@@ -38871,7 +39304,7 @@ static int resolve_scope_private_field1(JSContextHandle ctx,
                 }
             }
             /* XXX: no line number info */
-            JS_ThrowSyntaxErrorAtom(ctx, "undefined private field '%s'",
+            cenv_throw_syntax_atom(s->env, "undefined private field '%s'",
                                     var_name);
             return -1;
         } else {
@@ -38949,7 +39382,7 @@ static int resolve_scope_private_field(JSContextHandle ctx, JSFunctionDef *s,
         case JS_VAR_PRIVATE_SETTER:
         case JS_VAR_PRIVATE_GETTER_SETTER:
             {
-                JSAtom setter_name = get_private_setter_name(ctx, var_name);
+                JSAtom setter_name = get_private_setter_name(s->env, var_name);
                 if (setter_name == JS_ATOM_NULL)
                     return -1;
                 idx = resolve_scope_private_field1(ctx, &is_ref,
@@ -39932,7 +40365,7 @@ static __exception int resolve_variables(JSContextHandle ctx, JSFunctionDef *s)
     /* Bytecode resolution complete */
     
     if (s->byte_code.error) {
-        JS_ThrowOutOfMemory(ctx);
+        cenv_throw_oom(s->env);
         return -1;
     }
     return 0;
@@ -41198,7 +41631,7 @@ static __exception int resolve_labels(JSContextHandle ctx, JSFunctionDef *s)
     gc_byte_buffer_take_from_dbuf(&s->byte_code, &bc_out);
     s->use_short_opcodes = TRUE;
     if (s->byte_code.error) {
-        JS_ThrowOutOfMemory(ctx);
+        cenv_throw_oom(s->env);
         return -1;
     }
     return 0;
@@ -41288,14 +41721,14 @@ static __exception int compute_stack_size(JSContextHandle ctx,
     s->catch_pos_tab = NULL;
     s->stack_level_tab = qjs_realloc(NULL, sizeof(s->stack_level_tab[0]) * s->bc_len);
     if (!s->stack_level_tab) {
-        JS_ThrowOutOfMemory(ctx);
+        cenv_throw_oom(fd->env);
         return -1;
     }
     for(i = 0; i < s->bc_len; i++)
         s->stack_level_tab[i] = 0xffff;
     s->catch_pos_tab = qjs_realloc(NULL, sizeof(s->catch_pos_tab[0]) * s->bc_len);
     if (!s->catch_pos_tab) {
-        JS_ThrowOutOfMemory(ctx);
+        cenv_throw_oom(fd->env);
         goto fail;
     }
 
@@ -41316,7 +41749,7 @@ static __exception int compute_stack_size(JSContextHandle ctx,
         uint8_t *bc_ptr = gc_byte_buffer_ptr(&fd->byte_code);
         op = bc_ptr[pos];
         if (op == 0 || op >= OP_COUNT) {
-            JS_ThrowInternalError(ctx, "invalid opcode (op=%d, pc=%d)", op, pos);
+            cenv_throw(fd->env, JS_INTERNAL_ERROR, "invalid opcode (op=%d, pc=%d)", op, pos);
             goto fail;
         }
         oi = &short_opcode_info(op);
@@ -41325,7 +41758,7 @@ static __exception int compute_stack_size(JSContextHandle ctx,
 #endif
         pos_next = pos + oi->size;
         if (pos_next > s->bc_len) {
-            JS_ThrowInternalError(ctx, "bytecode buffer overflow (op=%d, pc=%d)", op, pos);
+            cenv_throw(fd->env, JS_INTERNAL_ERROR, "bytecode buffer overflow (op=%d, pc=%d)", op, pos);
             goto fail;
         }
         n_pop = oi->n_pop;
@@ -41341,14 +41774,14 @@ static __exception int compute_stack_size(JSContextHandle ctx,
         }
 
         if (stack_len < n_pop) {
-            JS_ThrowInternalError(ctx, "stack underflow (op=%d, pc=%d)", op, pos);
+            cenv_throw(fd->env, JS_INTERNAL_ERROR, "stack underflow (op=%d, pc=%d)", op, pos);
             goto fail;
         }
         stack_len += oi->n_push - n_pop;
         if (stack_len > s->stack_len_max) {
             s->stack_len_max = stack_len;
             if (s->stack_len_max > JS_STACK_SIZE_MAX) {
-                JS_ThrowInternalError(ctx, "stack overflow (op=%d, pc=%d)", op, pos);
+                cenv_throw(fd->env, JS_INTERNAL_ERROR, "stack overflow (op=%d, pc=%d)", op, pos);
                 goto fail;
             }
         }
@@ -41450,7 +41883,7 @@ static __exception int compute_stack_size(JSContextHandle ctx,
             break;
         case OP_nip_catch:
             if (catch_pos < 0) {
-                JS_ThrowInternalError(ctx, "nip_catch: no catch op (pc=%d)", pos);
+                cenv_throw(fd->env, JS_INTERNAL_ERROR, "nip_catch: no catch op (pc=%d)", pos);
                 goto fail;
             }
             stack_len = s->stack_level_tab[catch_pos];
@@ -41544,7 +41977,7 @@ static int add_global_variables(JSContextHandle ctx, JSFunctionDef *fd)
             if (me->export_type == JS_EXPORT_TYPE_LOCAL) {
                 idx = find_closure_var(ctx, fd, me->local_name);
                 if (idx < 0) {
-                    JS_ThrowSyntaxErrorAtom(ctx, "exported variable '%s' does not exist",
+                    cenv_throw_syntax_atom(fd->env, "exported variable '%s' does not exist",
                                             me->local_name);
                     return -1;
                 }
@@ -41840,6 +42273,10 @@ static GCValue js_create_function(JSContextHandle ctx, JSFunctionDef *fd)
             }
         }
         SAFE_SET(b, JSFunctionBytecodeHandle, debug.pc2line_len, fd->pc2line.size);
+        if (fd->own_source) {
+            GCStringHandle sh = gc_strndup(fd->own_source, fd->source_len);
+            GC_SET(fd->source_string_handle, SAFE_HANDLE(sh));
+        }
         SAFE_SET_HANDLE(b, JSFunctionBytecodeHandle, debug.source_handle, fd->source_string_handle);
         SAFE_SET(b, JSFunctionBytecodeHandle, debug.source_len, fd->source_len);
         SAFE_SET(b, JSFunctionBytecodeHandle, debug.source_offset, fd->source_offset);
@@ -41906,6 +42343,14 @@ static GCValue js_create_function(JSContextHandle ctx, JSFunctionDef *fd)
             JSLazyParseState* state = js_bc_resume_parse_state(b);
             if (state) {
                 gc_memcpy(state, &fd->resume_parse_state, sizeof(JSLazyParseState));
+                if (fd->lazy_arg_names) {
+                    GCHandle names_handle = gc_alloc(sizeof(JSAtom) * fd->resume_parse_state.arg_count, JS_GC_OBJ_TYPE_DATA);
+                    if (names_handle == GC_HANDLE_NULL)
+                        goto fail;
+                    memcpy(gc_deref(names_handle), fd->lazy_arg_names, sizeof(JSAtom) * fd->resume_parse_state.arg_count);
+                    state = js_bc_resume_parse_state(b);
+                    GC_SET(state->arg_names_handle, names_handle);
+                }
             }
         }
     }
@@ -42383,7 +42828,7 @@ static JSFunctionDef *js_parse_function_class_fields_init(JSParseState *s)
 {
     JSFunctionDef *fd;
 
-    fd = js_new_function_def(s->ctx, s->cur_func_handle, FALSE, FALSE,
+    fd = js_new_function_def(s->env, s->ctx, s->cur_func_handle, FALSE, FALSE,
                              s->filename, s->buf_start,
                              &s->get_line_col_cache);
     if (!fd)
@@ -42529,7 +42974,7 @@ static __exception int js_parse_function_decl2(JSParseState *s,
         }
     }
 
-    fd = js_new_function_def(ctx, (JSFunctionDefHandle)(fd->self_handle), FALSE, is_expr,
+    fd = js_new_function_def(s->env, ctx, (JSFunctionDefHandle)(fd->self_handle), FALSE, is_expr,
                              s->filename, ptr,
                              &s->get_line_col_cache);
     if (!fd) {
@@ -43072,6 +43517,8 @@ static GCHandle js_lazy_compile(JSContextHandle ctx, JSFunctionBytecodeHandle st
 
     memset(s, 0, sizeof(*s));
     GC_SET(s->ctx, ctx);
+    cenv_init_runtime(&s->env_rt, ctx);
+    s->env = &s->env_rt;
     s->filename = filename;
     /* s->buf_start is a raw pointer into the GC string; it lives on the C
        stack, which pins the string for the duration of the parse. */
@@ -43091,7 +43538,7 @@ static GCHandle js_lazy_compile(JSContextHandle ctx, JSFunctionBytecodeHandle st
         s->js_mode = JS_MODE_STRICT;
 
     /* the proxy: a direct-eval scope over the stub's closure variables */
-    proxy = js_new_function_def(ctx, GC_HANDLE_NULL, TRUE, FALSE, filename,
+    proxy = js_new_function_def(s->env, ctx, GC_HANDLE_NULL, TRUE, FALSE, filename,
                                 s->buf_ptr, &s->get_line_col_cache);
     if (!proxy)
         goto fail;
@@ -43128,7 +43575,7 @@ static GCHandle js_lazy_compile(JSContextHandle ctx, JSFunctionBytecodeHandle st
     cpool_idx = cpool_add_function(s);
     if (cpool_idx < 0)
         goto fail;
-    fd = js_new_function_def(ctx, (JSFunctionDefHandle)(proxy->self_handle), FALSE,
+    fd = js_new_function_def(s->env, ctx, (JSFunctionDefHandle)(proxy->self_handle), FALSE,
                              state->is_func_expr, filename, s->buf_ptr,
                              &s->get_line_col_cache);
     if (!fd)
@@ -43413,6 +43860,8 @@ static void js_parse_init(JSContextHandle ctx, JSParseState *s,
 {
     memset(s, 0, sizeof(*s));
     GC_SET(s->ctx, ctx);
+    cenv_init_runtime(&s->env_rt, ctx);
+    s->env = &s->env_rt;
     s->filename = filename;
     s->buf_start = s->buf_ptr = (const uint8_t *)input;
     s->buf_end = s->buf_ptr + input_len;
@@ -43469,6 +43918,211 @@ GCValue JS_EvalFunction(JSContextHandle ctx, GCValue fun_obj)
 }
 
 /* 'input' must be zero terminated i.e. input[input_len] = '\0'. */
+/* ---- CYBER_STENCIL_VERIFY=1: each global script is parsed a second time
+ * with a stencil env, and the two definition trees must agree: the same
+ * bytecode (atoms compared by text), names and constants.  A debug check of
+ * the stencil env until stencils are instantiated (M2 step 6). */
+static int stencil_verify_enabled(void)
+{
+    static int v = -1;
+    if (v < 0)
+        v = getenv("CYBER_STENCIL_VERIFY") != NULL;
+    return v;
+}
+
+typedef struct StencilVerify {
+    JSContextHandle ctx;
+    CompileEnv *env;
+    const char *filename;
+    int mismatches;
+} StencilVerify;
+
+static struct { int scripts, same, failed, differ; } g_stencil_verify;
+
+static void stencil_verify_report(void)
+{
+    fprintf(stderr, "[stencil-verify] scripts %d: same %d, stencil parse failed %d, differ %d\n",
+            g_stencil_verify.scripts, g_stencil_verify.same, g_stencil_verify.failed,
+            g_stencil_verify.differ);
+}
+
+/* r is a runtime atom, l the stencil env's. */
+static BOOL sv_atom_eq(StencilVerify *v, JSAtom r, JSAtom l)
+{
+    return r == cenv_atom_to_runtime(v->env, v->ctx, l);
+}
+
+static BOOL __attribute__((format(printf, 3, 4)))
+sv_differ(StencilVerify *v, JSFunctionDef *r, const char *fmt, ...)
+{
+    va_list ap;
+    if (v->mismatches++ < 8) {
+        char nb[64];
+        fprintf(stderr, "[stencil-verify] %s @%u %s: ", v->filename, (unsigned)r->source_pos,
+                JS_AtomGetStr(v->ctx, nb, sizeof(nb), r->func_name));
+        va_start(ap, fmt);
+        vfprintf(stderr, fmt, ap);
+        va_end(ap);
+        fputc('\n', stderr);
+    }
+    return FALSE;
+}
+
+static BOOL sv_cmp_fd(StencilVerify *v, JSFunctionDef *r, JSFunctionDef *l)
+{
+    int i, pos, len;
+    const uint8_t *rb, *lb;
+
+    if (!sv_atom_eq(v, r->func_name, l->func_name))
+        return sv_differ(v, r, "function name");
+    if (r->arg_count != l->arg_count || r->var_count != l->var_count)
+        return sv_differ(v, r, "args %d/%d vars %d/%d", r->arg_count, l->arg_count,
+                         r->var_count, l->var_count);
+    for (i = 0; i < r->arg_count; i++)
+        if (!sv_atom_eq(v, r->args_handle[i].var_name, l->args_handle[i].var_name))
+            return sv_differ(v, r, "argument %d", i);
+    for (i = 0; i < r->var_count; i++)
+        if (!sv_atom_eq(v, r->vars_handle[i].var_name, l->vars_handle[i].var_name) ||
+            r->vars_handle[i].scope_level != l->vars_handle[i].scope_level)
+            return sv_differ(v, r, "variable %d", i);
+    if (r->closure_var_handle.count != l->closure_var_handle.count)
+        return sv_differ(v, r, "closure variables %d/%d", r->closure_var_handle.count,
+                         l->closure_var_handle.count);
+    for (i = 0; i < r->closure_var_handle.count; i++)
+        if (!sv_atom_eq(v, PVEC_AT(r->closure_var_handle, JSClosureVar, i).var_name,
+                        PVEC_AT(l->closure_var_handle, JSClosureVar, i).var_name))
+            return sv_differ(v, r, "closure variable %d", i);
+    if (r->cpool_count != l->cpool_count)
+        return sv_differ(v, r, "constants %d/%d", r->cpool_count, l->cpool_count);
+    for (i = 0; i < r->cpool_count; i++) {
+        const CConst *rc = &PVEC_AT(r->cpool_handle, CConst, i);
+        const CConst *lc = &PVEC_AT(l->cpool_handle, CConst, i);
+        if (rc->kind != lc->kind)
+            return sv_differ(v, r, "constant %d kind", i);
+        if (rc->kind == CC_ATOM && !sv_atom_eq(v, rc->atom, lc->atom))
+            return sv_differ(v, r, "constant %d atom", i);
+        if ((rc->kind == CC_STRING || rc->kind == CC_BYTES || rc->kind == CC_BIGINT_SRC) &&
+            (rc->str.len != lc->str.len || rc->str.wide != lc->str.wide ||
+             memcmp(rc->str.data, lc->str.data, (size_t)rc->str.len << rc->str.wide)))
+            return sv_differ(v, r, "constant %d text", i);
+        if (rc->kind == CC_VALUE && memcmp(&rc->v, &lc->v, sizeof(rc->v)))
+            return sv_differ(v, r, "constant %d value", i);
+    }
+
+    /* the bytecode, atom operands by text */
+    if (r->byte_code.size != l->byte_code.size)
+        return sv_differ(v, r, "bytecode size %d/%d", (int)r->byte_code.size, (int)l->byte_code.size);
+    rb = gc_byte_buffer_ptr(&r->byte_code);
+    lb = gc_byte_buffer_ptr(&l->byte_code);
+    len = (int)r->byte_code.size;
+    for (pos = 0; pos < len;) {
+        const JSOpCode *oi = &short_opcode_info(rb[pos]);
+        int sz = oi->size > 0 ? oi->size : 1;
+        if (rb[pos] != lb[pos])
+            return sv_differ(v, r, "opcode at %d", pos);
+        switch (oi->fmt) {
+        case OP_FMT_atom:
+        case OP_FMT_atom_u8:
+        case OP_FMT_atom_u16:
+        case OP_FMT_atom_label_u8:
+        case OP_FMT_atom_label_u16:
+            if (pos + 5 > len)
+                return sv_differ(v, r, "truncated at %d", pos);
+            if (!sv_atom_eq(v, get_u32(rb + pos + 1), get_u32(lb + pos + 1))) {
+                char b1[64], b2[64];
+                return sv_differ(v, r, "atom operand at %d (op %d): '%s' (%u) / '%s' (%u)", pos, rb[pos],
+                                 JS_AtomGetStr(v->ctx, b1, sizeof(b1), get_u32(rb + pos + 1)),
+                                 get_u32(rb + pos + 1),
+                                 cenv_atom_str(v->env, b2, sizeof(b2), get_u32(lb + pos + 1)),
+                                 get_u32(lb + pos + 1));
+            }
+            if (pos + sz > len || memcmp(rb + pos + 5, lb + pos + 5, sz - 5))
+                return sv_differ(v, r, "operand at %d", pos);
+            break;
+        default:
+            if (pos + sz > len || memcmp(rb + pos, lb + pos, sz))
+                return sv_differ(v, r, "operand at %d", pos);
+            break;
+        }
+        pos += sz;
+    }
+
+    if (r->child_handles.count != l->child_handles.count)
+        return sv_differ(v, r, "children %d/%d", r->child_handles.count, l->child_handles.count);
+    for (i = 0; i < r->child_handles.count; i++) {
+        JSFunctionDef *rc = PVEC_AT(r->child_handles, JSFunctionDef *, i);
+        JSFunctionDef *lc = PVEC_AT(l->child_handles, JSFunctionDef *, i);
+        if (!rc || !lc) {
+            if (rc != lc)
+                return sv_differ(v, r, "child %d missing", i);
+            continue;
+        }
+        if (!sv_cmp_fd(v, rc, lc))
+            return FALSE;
+    }
+    return TRUE;
+}
+
+/* Parse the script of rs (whose tree is rfd) again with a stencil env and
+ * compare.  Only a global script that parsed. */
+static void stencil_verify_script(JSParseState *rs, JSFunctionDef *rfd, int flags)
+{
+    JSContextHandle ctx = rs->ctx;
+    JSParseState s1 = { .token = { .u.str.str = GC_UNDEFINED_INIT } }, *s = &s1;
+    CompileEnv env;
+    JSFunctionDef *fd;
+    StencilVerify v = { .ctx = ctx, .env = &env, .filename = rs->filename };
+    int err;
+
+    if (g_stencil_verify.scripts++ == 0)
+        atexit(stencil_verify_report);
+    js_parse_init(ctx, s, (const char *)rs->buf_start, rs->buf_end - rs->buf_start, rs->filename, flags);
+    skip_shebang(&s->buf_ptr, s->buf_end);
+    s->struct_index = rs->struct_index;
+    cenv_init_stencil(&env);
+    s->env = &env;
+    fd = js_new_function_def(s->env, ctx, NULL, TRUE, FALSE, rs->filename,
+                             s->buf_start, &s->get_line_col_cache);
+    if (!fd)
+        goto done;
+    GC_SET(fd->source_string_handle, rfd->source_string_handle);
+    js_parse_set_cur_func(s, fd);
+    fd->eval_type = rfd->eval_type;
+    fd->has_this_binding = rfd->has_this_binding;
+    fd->new_target_allowed = rfd->new_target_allowed;
+    fd->super_call_allowed = rfd->super_call_allowed;
+    fd->super_allowed = rfd->super_allowed;
+    fd->arguments_allowed = rfd->arguments_allowed;
+    fd->js_mode = (flags & JS_EVAL_FLAG_STRICT) ? JS_MODE_STRICT : 0;
+    fd->func_name = JS_ATOM__eval_;
+    if (flags & JS_EVAL_FLAG_ASYNC) {
+        fd->in_function_body = TRUE;
+        fd->func_kind = JS_FUNC_ASYNC;
+    }
+    s->is_module = FALSE;
+    s->allow_html_comments = TRUE;
+    push_scope(s);
+    fd->body_scope = fd->scope_level;
+
+    err = js_parse_program(s);
+    if (err || env.has_error) {
+        g_stencil_verify.failed++;
+        fprintf(stderr, "[stencil-verify] %s: stencil parse failed at %d:%d: %s\n", rs->filename,
+                env.error_line, env.error_col, env.has_error ? env.error_msg : "(exception)");
+        if (!env.has_error)
+            JS_GetException(ctx);
+    } else if (sv_cmp_fd(&v, rfd, fd)) {
+        g_stencil_verify.same++;
+    } else {
+        g_stencil_verify.differ++;
+    }
+    js_free_function_def(ctx, fd);
+ done:
+    free_token(s, &s->token);
+    js_parse_cleanup_roots(s);
+    cenv_free(&env);
+}
+
 static GCValue __JS_EvalInternal(JSContextHandle ctx, GCValue this_obj,
                                  const char *input, size_t input_len,
                                  const char *filename, int flags, int scope_idx)
@@ -43528,7 +44182,7 @@ static GCValue __JS_EvalInternal(JSContextHandle ctx, GCValue this_obj,
             js_mode |= JS_MODE_STRICT;
         }
     }
-    fd = js_new_function_def(ctx, GC_HANDLE_NULL, TRUE, FALSE, filename,
+    fd = js_new_function_def(s->env, ctx, GC_HANDLE_NULL, TRUE, FALSE, filename,
                              s->buf_start, &s->get_line_col_cache);
     if (!fd)
         goto fail1;
@@ -43574,6 +44228,9 @@ static GCValue __JS_EvalInternal(JSContextHandle ctx, GCValue this_obj,
         js_free_function_def(ctx, fd);
         goto fail1;
     }
+
+    if (stencil_verify_enabled() && eval_type == JS_EVAL_TYPE_GLOBAL && m == GC_HANDLE_NULL)
+        stencil_verify_script(s, fd, flags);
 
     if (m != GC_HANDLE_NULL)
         SAFE_SET(m, JSModuleDefHandle, has_tla, fd->has_await);
