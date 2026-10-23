@@ -8,6 +8,8 @@
 #include "html_media_extract.h"
 #include "dom_fetch.h"
 #include "html_dom.h"
+#include "dom_store.h"
+#include "dom_js.h"
 #include "http_download.h"
 #include "js_quickjs.h"
 #include "platform.h"
@@ -1139,6 +1141,583 @@ void html_preload_scan_feed(HtmlPreloadScan *s, const char *data, size_t len)
     preload_scan_run(s);
 }
 
+static void patch_loaded_script(ScriptInfo *si);
+
+/* ============================================================================
+ * Streaming the page (html_page_stream_*): scripts run where the parser
+ * reaches them, against the document parsed so far.
+ * ============================================================================ */
+
+struct HtmlPageStream {
+    HtmlDocStream *doc;
+    int run, ok;                /* scripts run, and run without an exception */
+    bool normalized;
+};
+
+/* The script's src resolved as extract_scripts_in_order resolves it (the
+ * attribute value is decoded already), or false when it is not fetched. */
+static bool resolve_parser_script_url(const char *raw, char *url, size_t cap) {
+    if (strncmp(raw, "//", 2) == 0) snprintf(url, cap, "https:%s", raw);
+    else if (raw[0] == '/') snprintf(url, cap, "%s%s", cyber_get_origin_base(), raw);
+    else if (strncmp(raw, "http", 4) == 0) snprintf(url, cap, "%s", raw);
+    else return false;
+    return true;
+}
+
+/* Whether a <script type> is run: none or empty, or the JavaScript types and
+ * module (run as a classic script), as extract_scripts_in_order decides. */
+static bool parser_script_type_runs(const char *type) {
+    if (!type || !type[0]) return true;
+    return strncasecmp(type, "text/javascript", 15) == 0 ||
+           strncasecmp(type, "application/javascript", 22) == 0 ||
+           strncasecmp(type, "module", 6) == 0;
+}
+
+/* Load a parser-inserted script's source as html_execute_page_scripts does
+ * (fetch with the checks and patches, or the inline text with the player
+ * bootstrap patch).  Returns malloc'd source, or NULL when it does not run. */
+static char *load_parser_script(NodeId node, size_t *out_len) {
+    if (!parser_script_type_runs(dom_get_attr_str(node, "type"))) return NULL;
+    const char *src = dom_get_attr_str(node, "src");
+    if (src && src[0] && strlen(src) < SCRIPT_URL_MAX_LEN) {
+        char url[SCRIPT_URL_MAX_LEN];
+        if (!resolve_parser_script_url(src, url, sizeof(url))) return NULL;
+        if (is_unsafe_external_script(url)) {
+            LOG_WARN("Skipping unsafe external script: %.200s", url);
+            return NULL;
+        }
+        HttpBuffer buffer = {0};
+        char error[256] = {0};
+        bool ok;
+        {
+            CP_SCOPE_CAT("fetch-external-script", "net");
+            ok = dom_fetch_script(url, &buffer, error, sizeof(error));
+        }
+        fprintf(stderr, "[html_extract] FETCH external script: %.200s result=%s size=%zu\n",
+                url, ok ? "ok" : "fail", ok ? buffer.size : 0);
+        if (!ok || !buffer.data || !buffer.size) {
+            LOG_WARN("Failed to fetch script %.200s: %s", url, error);
+            http_free_buffer(&buffer);
+            return NULL;
+        }
+        const char *c = buffer.data;
+        while (*c && (isspace((unsigned char)*c) || (unsigned char)*c == 0xEF ||
+                      (unsigned char)*c == 0xBB || (unsigned char)*c == 0xBF)) c++;
+        if (strncasecmp(c, "<!doctype", 9) == 0 || strncasecmp(c, "<html", 5) == 0 ||
+            strncasecmp(c, "<?xml", 5) == 0 || buffer.size > 64 * 1024 * 1024) {
+            LOG_WARN("Script %.200s is not runnable JS, skipping", url);
+            http_free_buffer(&buffer);
+            return NULL;
+        }
+        ScriptInfo si;
+        memset(&si, 0, sizeof(si));
+        si.type = SCRIPT_TYPE_EXTERNAL;
+        snprintf(si.url, sizeof(si.url), "%s", url);
+        si.content = buffer.data;
+        si.content_len = buffer.size;
+        patch_loaded_script(&si);
+        *out_len = si.content_len;
+        return (char *)si.content;
+    }
+    /* Inline: the element's text.  (Under 50 bytes is skipped, as the
+     * whole-page path does.) */
+    StrBuf text SB_AUTO = sb_from("", 0);
+    for (NodeId t = dom_first_child(node); t; t = dom_next_sibling(t)) {
+        uint32_t n = 0;
+        const char *s = dom_kind(t) == DOM_K_TEXT ? dom_text(t, &n) : NULL;
+        if (s && n) sb_insert(&text, text.len, s);   /* (text data is NUL-terminated) */
+    }
+    if (text.len < 50) return NULL;
+    apply_youtube_player_bootstrap_patch(&text);
+    char *out = (char *)malloc(text.len + 1);
+    if (!out) return NULL;
+    memcpy(out, text.data, text.len);
+    out[text.len] = '\0';
+    *out_len = text.len;
+    return out;
+}
+
+static void run_parser_script(HtmlPageStream *ps, GCValue script) {
+    JSContextHandle ctx = g_js_context;
+    if (!ps->normalized) {
+        /* As before the whole-page run: polyfills read documentElement.style. */
+        const char *guard = "(function(){var de=document.documentElement;"
+            "if(de&&(!de.style||typeof de.style!='object')) de.style={};})();";
+        JS_Eval(ctx, guard, strlen(guard), "<dom_normalize>", JS_EVAL_TYPE_GLOBAL);
+        ps->normalized = true;
+    }
+    size_t len = 0;
+    char *src = load_parser_script(dom_node_of(script), &len);
+    if (!src) return;
+    GCValue doc = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document");
+    JS_SetPropertyStr(ctx, doc, "currentScript", script);
+    if (js_quickjs_exec_script(src, len, ps->run, 0)) ps->ok++;
+    ps->run++;
+    JS_SetPropertyStr(ctx, doc, "currentScript", JS_NULL);
+    free(src);
+}
+
+static void page_stream_run(HtmlPageStream *ps, bool final) {
+    for (;;) {
+        GCValue script = html_doc_stream_step(ps->doc, final);
+        if (!JS_IsObject(script)) return;
+        run_parser_script(ps, script);
+    }
+}
+
+HtmlPageStream *html_page_stream_begin(void) {
+    if (!SAFE_VALID(g_js_context)) return NULL;
+    JSContextHandle ctx = g_js_context;
+    GCValue doc = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document");
+    HtmlPageStream *ps = (HtmlPageStream *)calloc(1, sizeof(*ps));
+    if (!ps) return NULL;
+    ps->doc = html_doc_stream_begin(ctx, doc);
+    if (!ps->doc) { free(ps); return NULL; }
+    return ps;
+}
+
+void html_page_stream_feed(HtmlPageStream *ps, const char *data, size_t len) {
+    if (!ps || !len) return;
+    html_doc_stream_append(ps->doc, data, len);
+    page_stream_run(ps, false);
+}
+
+bool html_page_stream_finish(HtmlPageStream *ps, JsExecResult *out_result) {
+    if (!ps) return false;
+    page_stream_run(ps, true);
+    html_doc_stream_end(ps->doc);
+    js_quickjs_pump_timers_and_jobs();
+    printf("Ran %d page scripts as the page was parsed (%d without an exception)\n", ps->run, ps->ok);
+    if (out_result) {
+        memset(out_result, 0, sizeof(*out_result));
+        out_result->captured_url_count = js_quickjs_get_captured_urls(out_result->captured_urls, JS_MAX_CAPTURED_URLS);
+        out_result->status = ps->ok > 0 ? JS_EXEC_SUCCESS : JS_EXEC_ERROR;
+    }
+    bool ok = ps->ok > 0;
+    free(ps);
+    return ok;
+}
+
+/* Diagnostic and compatibility patches of a loaded external script (most
+ * behind CYBER_* switches), applied before it runs. */
+static void patch_loaded_script(ScriptInfo *si)
+{
+    /* Diagnostic: trace the monomer lifecycle state-machine
+     * transitions in the desktop_polymer bundle.  CYBER_TRACE_LIFECYCLE=1. */
+    if (CYBER_ENV(CYBER_T_LIFECYCLE) && si->content_len > 1000000 &&
+        strstr(si->content, "prototype.transition=function(")) {
+        StrBuf patched SB_AUTO = sb_from(si->content, si->content_len);
+        size_t fpos = sb_find(&patched, "prototype.transition=function(", 0);
+        size_t bpos = sb_find_char(&patched, '{', fpos);
+        if (fpos != SB_NPOS && bpos != SB_NPOS) {
+            const char *inj = "try{console.error('[TR] '+this.state+'->'+arguments[0])}catch(e){}";
+            sb_insert(&patched, bpos + 1, inj);
+        }
+        size_t fpos2 = sb_find(&patched, "prototype.parkOrScheduleJob=function(", 0);
+        size_t bpos2 = fpos2 == SB_NPOS ? fpos2 : sb_find_char(&patched, '{', fpos2);
+        if (fpos2 != SB_NPOS && bpos2 != SB_NPOS) {
+            const char *inj2 = "try{var s$=arguments[2];if(s$&&(''+s$).indexOf('eoir')>=0){window.__eoirC=(window.__eoirC||0)+1;if(window.__eoirC<4||window.__eoirC===1000)console.error('[PARK-EOIR #'+window.__eoirC+'] V.name='+(arguments[0]&&arguments[0].name)+' V.body='+(''+arguments[0]).slice(0,60)+' al=='+(typeof appLoad)+' al===sal:'+(typeof appLoad!=='undefined'&&typeof scheduleAppLoad!=='undefined'?appLoad===scheduleAppLoad:'?')+' '+(((new Error('x')).stack||'').split(String.fromCharCode(10)).slice(1,6).join(' <- ')))}else console.error('[PARK] sig='+s$+' prio='+arguments[1])}catch(e){}";
+            sb_insert(&patched, bpos2 + 1, inj2);
+        }
+        /* Log when the lifecycle jobSet resolves (init completes).
+         * The call sits in expression position (after &&), so wrap
+         * it in a comma expression rather than inserting a stmt. */
+        const char *res_anchor = ".completedResolver.resolve()";
+        size_t fpos3 = sb_find(&patched, res_anchor, 0);
+        if (fpos3 != SB_NPOS) {
+            /* Back up over the receiver identifier (minified name
+             * shifts between fetches) and wrap the whole call in a
+             * comma expression — valid in the && chain it sits in. */
+            size_t id_start = fpos3;
+            while (id_start > 0 && (isalnum((unsigned char)patched.data[id_start-1]) ||
+                   patched.data[id_start-1]=='_' || patched.data[id_start-1]=='$'))
+                id_start--;
+            StrBuf recv SB_AUTO = sb_substr(&patched, id_start, fpos3 - id_start);
+            StrBuf call SB_AUTO = sb_join(recv.data, res_anchor, NULL);
+            StrBuf wrapped SB_AUTO = sb_join("(console.error('[JOBSET] resolved'),", call.data, ")", NULL);
+            sb_replace(&patched, id_start, call.len, wrapped.data);
+        }
+        /* Log a jobSet payload job that throws (which would leave the
+         * jobSet's completedResolver permanently unresolved). */
+        size_t fpos4 = sb_find(&patched, "function(){J.payload$jscomp$20.job();", 0);
+        if (fpos4 != SB_NPOS) {
+            /* Find the jobSet `this` capture by locating the receiver
+             * of .scheduledPayloads[ after the wrapper start. */
+            StrBuf js_this SB_AUTO = sb_from_cstr("y");
+            size_t sp = sb_find(&patched, ".scheduledPayloads[", fpos4);
+            if (sp != SB_NPOS) {
+                size_t id_start = sp;
+                while (id_start > 0 && (isalnum((unsigned char)patched.data[id_start-1]) ||
+                       patched.data[id_start-1]=='_' || patched.data[id_start-1]=='$'))
+                    id_start--;
+                sb_free(&js_this);
+                js_this = sb_substr(&patched, id_start, sp - id_start);
+            }
+            StrBuf to4 SB_AUTO = sb_join("function(){console.error('[JOBSET-JOB-RUN] i='+J.i$jscomp$549+' n='+",
+                js_this.data, ".scheduledPayloads.length);try{J.payload$jscomp$20.job()}catch(e$jscomp$1){console.error('[JOBSET-ERR] '+(e$jscomp$1&&e$jscomp$1.message)+' | '+((e$jscomp$1&&e$jscomp$1.stack)||'').split(String.fromCharCode(10))[0]);throw e$jscomp$1};", NULL);
+            const char *from4 = "function(){J.payload$jscomp$20.job();";
+            sb_replace(&patched, fpos4, strlen(from4), to4.data);
+        }
+        /* Trace gkY cancel/flushJobs — a cancel would explain jobSet
+         * payload jobs never running. */
+        size_t fpos6 = sb_find(&patched, "prototype.cancel=function(){for(var ", 0);
+        if (fpos6 != SB_NPOS) {
+            size_t b6 = sb_find_char(&patched, '{', fpos6 + 10);
+            if (b6 != SB_NPOS)
+                sb_insert(&patched, b6 + 1, "try{console.error('[JOBSET-CANCEL]')}catch(e){}");
+        }
+        size_t fpos7 = sb_find(&patched, "prototype.flushJobs=function(){", 0);
+        if (fpos7 != SB_NPOS) {
+            size_t b7 = sb_find_char(&patched, '{', fpos7);
+            if (b7 != SB_NPOS)
+                sb_insert(&patched, b7 + 1, "try{console.error('[JOBSET-FLUSH]')}catch(e){}");
+        }
+        /* Log each jobSet payload's scheduled priority. */
+        size_t fpos8 = sb_find(&patched, "this.scheduler.addJob(Q,i1A(this,V.payload$jscomp$20))", 0);
+        if (fpos8 != SB_NPOS) {
+            const char *a8 = "this.scheduler.addJob(Q,i1A(this,V.payload$jscomp$20))";
+            StrBuf r8 SB_AUTO = sb_join("(console.error('[JOBSET-ADD] i='+V.i$jscomp$549+' prio='+i1A(this,V.payload$jscomp$20)),", a8, ")", NULL);
+            sb_replace(&patched, fpos8, strlen(a8), r8.data);
+        }
+        /* Trace jK.addJob: does the jobSet scheduler delegate to a
+         * registered service or run synchronously? */
+        size_t fpos5 = sb_find(&patched, "jK.prototype.addJob=function(V,y,Q){", 0);
+        if (fpos5 != SB_NPOS) {
+            const char *from5 = "jK.prototype.addJob=function(V,y,Q){";
+            const char *to5 = "jK.prototype.addJob=function(V,y,Q){try{console.error('[JK-ADDJOB] prio='+y)}catch(e){}try{";
+            sb_replace(&patched, fpos5, strlen(from5), to5);
+            const char *tail5 = "Q===void 0?(V(),NaN):_.Mk(V,Q||0)}";
+            size_t tpos5 = sb_find(&patched, tail5, fpos5);
+            if (tpos5 != SB_NPOS) {
+                sb_replace(&patched, tpos5, strlen(tail5), "Q===void 0?(V(),NaN):_.Mk(V,Q||0)}catch(e$2){console.error('[JK-ADDJOB-ERR] '+(e$2&&e$2.message)+' | '+((e$2&&e$2.stack)||'').split(String.fromCharCode(10))[0]);throw e$2}}");
+            }
+        }
+        /* Trace the initial-data consumption (SDs) and ytd-app's
+         * updatePageData (which fires the 'cr' signal). */
+        size_t fpos9 = sb_find(&patched, "SDs=function(V,y){", 0);
+        if (fpos9 != SB_NPOS) {
+            size_t b9 = sb_find_char(&patched, '{', fpos9);
+            if (b9 != SB_NPOS)
+                sb_insert(&patched, b9 + 1, "try{console.error('[SDS] initial data consumed')}catch(e){}");
+        }
+        size_t fposRM = sb_find(&patched, "RM=function(V,y){", 0);
+        if (fposRM != SB_NPOS) {
+            size_t brm = sb_find_char(&patched, '{', fposRM);
+            if (brm != SB_NPOS)
+                sb_insert(&patched, brm + 1, "try{console.error('[RM] run root.loadData='+(V&&V.root&&typeof V.root.loadData))}catch(e){}");
+        }
+        size_t fpos10 = sb_find(&patched, ".updatePageData=function(V){", 0);
+        if (fpos10 != SB_NPOS) {
+            size_t b10 = sb_find_char(&patched, '{', fpos10);
+            if (b10 != SB_NPOS)
+                sb_insert(&patched, b10 + 1, "try{console.error('[UPD] updatePageData called page='+(V&&V.page)+' keys='+(V?Object.keys(V).slice(0,10).join(','):'null')+' pdu='+typeof this.performDataUpdate)}catch(e){}");
+        }
+        size_t fposJ = sb_find(&patched, ".updatePageDataJobId=_.MQ(_.Jv,J)", 0);
+        if (fposJ != SB_NPOS) {
+            const char *aJ = ".updatePageDataJobId=_.MQ(_.Jv,J)";
+            sb_replace(&patched, fposJ, strlen(aJ), ".updatePageDataJobId=(console.error('[UPDJ] scheduling J'),_.MQ(_.Jv,J))");
+        }
+        /* Trace the deferred J body (performDataUpdate + cr fire). */
+        size_t fposJB = sb_find(&patched, "var J=function(){V.filler?y.performDataUpdate(V,Q):zUD(", 0);
+        if (fposJB != SB_NPOS) {
+            size_t bJB = sb_find_char(&patched, '{', fposJB);
+            if (bJB != SB_NPOS)
+                sb_insert(&patched, bJB + 1, "try{console.error('[J] running page='+(V&&V.page))}catch(e){}");
+        }
+        /* Trace fireEvent detail integrity. */
+        size_t fposFE = sb_find(&patched, "V=new CustomEvent(V,{bubbles:!0,cancelable:!1,composed:!0,detail:y});this.dispatchEvent(V)", 0);
+        if (fposFE != SB_NPOS) {
+            const char *aFE = "V=new CustomEvent(V,{bubbles:!0,cancelable:!1,composed:!0,detail:y});this.dispatchEvent(V)";
+            const char *rFE = "V=new CustomEvent(V,{bubbles:!0,cancelable:!1,composed:!0,detail:y});console.error('[FE] fireEvent type='+V.type+' yType='+typeof y+' yStr='+(function(){try{return JSON.stringify(y).slice(0,80)}catch(e){return 'err:'+e.message}})());this.dispatchEvent(V)";
+            sb_replace(&patched, fposFE, strlen(aFE), rFE);
+        }
+        size_t fposPDU = sb_find(&patched, "performDataUpdate=function(V,y){", 0);
+        if (fposPDU != SB_NPOS) {
+            size_t bpdu = sb_find_char(&patched, '{', fposPDU);
+            if (bpdu != SB_NPOS)
+                sb_insert(&patched, bpdu + 1, "try{console.error('[PDU] performDataUpdate')}catch(e){}");
+        }
+        /* Trace zUD invoking the deferred performDataUpdate fn. */
+        size_t fposZ = sb_find(&patched, "try{_.Kp(\"fr_s\"),V()}catch(y){_.NR(y)}", 0);
+        if (fposZ != SB_NPOS) {
+            const char *aZ = "try{_.Kp(\"fr_s\"),V()}catch(y){_.NR(y)}";
+            const char *rZ = "try{_.Kp(\"fr_s\");console.error('[ZUD] invoking fn');V()}catch(y){console.error('[ZUD] fn caught: '+(y&&y.message)+' (skipping NR)')}";
+            sb_replace(&patched, fposZ, strlen(aZ), rZ);
+        }
+        size_t fpos11 = sb_find(&patched, "processSignal(\"cr\")", 0);
+        if (fpos11 != SB_NPOS) {
+            /* Back up over the receiver identifier (e.g. `t.`) and wrap
+             * the WHOLE call in a comma expression — inserting before
+             * `processSignal` alone would produce `t.console.error(...)`,
+             * which throws (t.console is undefined) and aborts the
+             * updatePageData continuation before "cr" fires. */
+            size_t id_start = fpos11;
+            while (id_start > 0 && (isalnum((unsigned char)patched.data[id_start-1]) ||
+                   patched.data[id_start-1]=='_' || patched.data[id_start-1]=='$' ||
+                   patched.data[id_start-1]=='.'))
+                id_start--;
+            StrBuf recv SB_AUTO = sb_substr(&patched, id_start, fpos11 - id_start);
+            StrBuf call SB_AUTO = sb_join(recv.data, "processSignal(\"cr\")", NULL);
+            StrBuf wrapped SB_AUTO = sb_join("(console.error('[CR] firing cr'),", call.data, ")", NULL);
+            sb_replace(&patched, id_start, call.len, wrapped.data);
+        }
+        /* Guard the MiniplayerService PIP check: our DI does not inject
+         * pipController, so `this.pipController.pictureInPictureSupported()`
+         * throws mid-performDataUpdate and aborts the "cr" signal (which
+         * gates the whole "rendered" transition and the metadata commit).
+         * Returning false (no PIP support) is correct here. */
+        size_t fposB3 = sb_find(&patched, "_.L.updateComputedBadges=function(V,y,Q){var v=this,J;", 0);
+        if (fposB3 != SB_NPOS) {
+            const char *aB3 = "_.L.updateComputedBadges=function(V,y,Q){var v=this,J;";
+            const char *rB3 = "_.L.updateComputedBadges=function(V,y,Q){console.error('[UCB] V='+typeof V+' isArr='+Array.isArray(V)+' filter='+typeof (V&&V.filter)+' this='+(this&&this.hostElement&&this.hostElement.tagName));var v=this,J;";
+            sb_replace(&patched, fposB3, strlen(aB3), rB3);
+        }
+        size_t fposPip = sb_find(&patched, "im.prototype.pictureInPictureSupported=function(){return this.pipController.pictureInPictureSupported()}", 0);
+        if (fposPip != SB_NPOS) {
+            const char *aP = "im.prototype.pictureInPictureSupported=function(){return this.pipController.pictureInPictureSupported()}";
+            const char *rP = "im.prototype.pictureInPictureSupported=function(){return this.pipController?this.pipController.pictureInPictureSupported():false}";
+            sb_replace(&patched, fposPip, strlen(aP), rP);
+            fprintf(stderr, "[LC-PATCH] pipController guard injected\n");
+        }
+        /* Trace the J continuation: does it reach the cr fire? */
+        size_t fposCR2 = sb_find(&patched, "var t=_.n_();_.Sy(t,\"cr\")||t.processSignal(\"cr\");v()", 0);
+        if (fposCR2 != SB_NPOS) {
+            const char *aC = "var t=_.n_();_.Sy(t,\"cr\")||t.processSignal(\"cr\");v()";
+            const char *rC = "console.error('[CR2] J-continuation filler='+V.filler);var t=_.n_();console.error('[CR2] Sy(cr)='+_.Sy(t,\"cr\"));_.Sy(t,\"cr\")||t.processSignal(\"cr\");console.error('[CR2] cr fired');v()";
+            sb_replace(&patched, fposCR2, strlen(aC), rC);
+        }
+        /* Guard badge-observer calls that run with a wrong `this` (the
+         * monomer fires some Polymer property observers on the host
+         * element instead of the controller, so `this.updateComputedBadges`
+         * is undefined and throws mid-performDataUpdate, aborting "cr"). */
+        size_t fposB1 = sb_find(&patched, "this.updateComputedBadges(this.badges,this.topStandaloneBadge)", 0);
+        if (fposB1 != SB_NPOS) {
+            const char *aB = "this.updateComputedBadges(this.badges,this.topStandaloneBadge)";
+            const char *rB = "this.updateComputedBadges&&this.updateComputedBadges(this.badges,this.topStandaloneBadge)";
+            size_t p = fposB1;
+            while (p != SB_NPOS) {
+                sb_replace(&patched, p, strlen(aB), rB);
+                p = sb_find(&patched, aB, p + strlen(rB));
+            }
+        }
+        size_t fposB2 = sb_find(&patched, "this.updateComputedBadges(this.badges,this.topStandaloneBadge,this.bottomStandaloneBadge)", 0);
+        if (fposB2 != SB_NPOS) {
+            const char *aB2 = "this.updateComputedBadges(this.badges,this.topStandaloneBadge,this.bottomStandaloneBadge)";
+            const char *rB2 = "this.updateComputedBadges&&this.updateComputedBadges(this.badges,this.topStandaloneBadge,this.bottomStandaloneBadge)";
+            size_t p2 = fposB2;
+            while (p2 != SB_NPOS) {
+                sb_replace(&patched, p2, strlen(aB2), rB2);
+                p2 = sb_find(&patched, aB2, p2 + strlen(rB2));
+            }
+        }
+        size_t fpos12 = sb_find(&patched, "onYtPageManagerAttached=function(V){", 0);
+        if (fpos12 != SB_NPOS) {
+            size_t b12 = sb_find_char(&patched, '{', fpos12);
+            if (b12 != SB_NPOS)
+                sb_insert(&patched, b12 + 1, "try{var g$=_.gU(V);console.error('[PMA] onYtPageManagerAttached gU='+(g$&&g$.tagName)+' id='+(g$&&g$.id)+' target='+(V&&V.target&&V.target.tagName))}catch(e){console.error('[PMA] err '+e.message)}");
+        }
+        size_t fpos12b = sb_find(&patched, "this.pageManagerAttachedPromise.resolve()", 0);
+        if (fpos12b != SB_NPOS) {
+            sb_replace(&patched, fpos12b, strlen("this.pageManagerAttachedPromise.resolve()"), "(console.error('[PMA-RESOLVE] typeof='+typeof this.pageManagerAttachedPromise),this.pageManagerAttachedPromise.resolve())");
+        }
+        /* Trace the page-data-fetched handler (leads to updatePageData). */
+        size_t fpos14 = sb_find(&patched, "onYtPageDataFetched=function(V,y){", 0);
+        if (fpos14 != SB_NPOS) {
+            size_t b14 = sb_find_char(&patched, '{', fpos14);
+            if (b14 != SB_NPOS)
+                sb_insert(&patched, b14 + 1, "try{console.error('[PDF] onYtPageDataFetched y='+(y?Object.keys(y).slice(0,6).join(','):'null')+' pd='+(y&&y.pageData?'y':'n'))}catch(e){}");
+        }
+        size_t fposPPD = sb_find(&patched, "publishPageData=function(V){", 0);
+        if (fposPPD != SB_NPOS) {
+            size_t bppd = sb_find_char(&patched, '{', fposPPD);
+            if (bppd != SB_NPOS)
+                sb_insert(&patched, bppd + 1, "try{var lit$={pageData:V};var d$=Object.getOwnPropertyDescriptor(lit$,'pageData');console.error('[PPD] page='+(V&&V.page)+' keys='+Object.keys(lit$).length+' desc='+JSON.stringify(d$&&{e:d$.enumerable,w:d$.writable,c:d$.configurable})+' vKeys='+(V?Object.keys(V).length:'-'))}catch(e){}");
+        }
+        /* Trace loadData's deferred navigation callback. */
+        size_t fpos15 = sb_find(&patched, "this.loadDepsPromise.then(function(){", 0);
+        if (fpos15 != SB_NPOS) {
+            size_t b15 = sb_find_char(&patched, '{', fpos15);
+            if (b15 != SB_NPOS)
+                sb_insert(&patched, b15 + 1, "try{console.error('[LDD] loadDeps then runs')}catch(e){}");
+        }
+        size_t fpos16 = sb_find(&patched, ".loadData=function(V){var y=this;", 0);
+        if (fpos16 != SB_NPOS) {
+            const char *a16 = ".loadData=function(V){var y=this;";
+            StrBuf r16 SB_AUTO = sb_join(a16, "try{console.error('[LD] loadData entry deps='+(this.loadDepsPromise?'y':'n'))}catch(e){}", NULL);
+            sb_replace(&patched, fpos16, strlen(a16), r16.data);
+        }
+        /* Trace the _.mm custom-promise async pump: EQY schedules,
+         * UR$ drains via a native Promise job. */
+        size_t fpos17 = sb_find(&patched, "EQY=function(V){V.executing_||(V.executing_=!0,_.WV(", 0);
+        if (fpos17 != SB_NPOS) {
+            size_t b17 = sb_find_char(&patched, '{', fpos17);
+            if (b17 != SB_NPOS)
+                sb_insert(&patched, b17 + 1, "try{window.__eqy=(window.__eqy||0)+1;if(window.__eqy<6)console.error('[EQY] schedule')}catch(e){}");
+        }
+        size_t fpos18 = sb_find(&patched, "UR$=function(){for(var V;V=AvU.remove();)", 0);
+        if (fpos18 != SB_NPOS) {
+            size_t b18 = sb_find_char(&patched, '{', fpos18);
+            if (b18 != SB_NPOS)
+                sb_insert(&patched, b18 + 1, "try{window.__ur=(window.__ur||0)+1;if(window.__ur<6)console.error('[UR] drain')}catch(e){}");
+        }
+        /* Trace _.mm callback invocation. */
+        size_t fpos19 = sb_find(&patched, "nQN=function(V,y,Q){y==2?V.JSC$9850_onFulfilled.call(V.context,Q)", 0);
+        if (fpos19 != SB_NPOS) {
+            size_t b19 = sb_find_char(&patched, '{', fpos19);
+            if (b19 != SB_NPOS)
+                sb_insert(&patched, b19 + 1, "try{window.__nqn=(window.__nqn||0)+1;if(window.__nqn<15)console.error('[NQN] state='+y)}catch(e){}");
+        }
+        /* Trace _.bQ event dispatches named 'attached'. */
+        size_t fpos13 = sb_find(&patched, "bQ=function(V,y,Q,v){", 0);
+        if (fpos13 != SB_NPOS) {
+            size_t b13 = sb_find_char(&patched, '{', fpos13);
+            if (b13 != SB_NPOS)
+                sb_insert(&patched, b13 + 1, "try{if(y==='attached'){window.__bqa=(window.__bqa||0)+1;if(window.__bqa<8)console.error('[BQ] attached fired on '+(V&&V.tagName))}}catch(e){}");
+        }
+        if (patched.len != si->content_len) {
+            char *nd = (char *)malloc(patched.len + 1);
+            if (nd) {
+                memcpy(nd, patched.data, patched.len);
+                nd[patched.len] = '\0';
+                si->content = nd;
+                si->content_len = patched.len;
+                fprintf(stderr, "[LC-PATCH] transition trace injected\n");
+            }
+        }
+    }
+    /* Log when the scheduler's O() executor runs jobs and when the
+     * web-animations polyfill's RAF queue schedules/runs its driver. */
+    if (CYBER_ENV(CYBER_T_LIFECYCLE) && si->content_len > 1000 &&
+        strstr(si->content, "m.length==0&&e(d);m.push([C,q]);return C")) {
+        StrBuf patched SB_AUTO = sb_from(si->content, si->content_len);
+        const char *from = "m.length==0&&e(d);m.push([C,q]);return C";
+        const char *to = "if(m.length==0){console.error('[WADRV] schedule driver');e(d)}m.push([C,q]);return C";
+        size_t pos = sb_find(&patched, from, 0);
+        if (pos != SB_NPOS) {
+            sb_replace(&patched, pos, strlen(from), to);
+        }
+        const char *fromD = "function d(q){var C=m;m=[];";
+        const char *toD = "function d(q){console.error('[WADRV] driver runs qlen='+m.length);var C=m;m=[];";
+        size_t posD = sb_find(&patched, fromD, 0);
+        if (posD != SB_NPOS) {
+            sb_replace(&patched, posD, strlen(fromD), toD);
+        }
+        if (patched.len != si->content_len) {
+            char *nd = (char *)malloc(patched.len + 1);
+            if (nd) {
+                memcpy(nd, patched.data, patched.len);
+                nd[patched.len] = '\0';
+                si->content = nd;
+                si->content_len = patched.len;
+                fprintf(stderr, "[LC-PATCH] wa-driver trace injected\n");
+            }
+        }
+    }
+    /* Log jobs that error inside the scheduler's O() executor so we can
+     * see which scheduled job hangs the lifecycle jobSet. */
+    if (CYBER_ENV(CYBER_T_LIFECYCLE) && si->content_len > 1000 &&
+        strstr(si->content, "function O(a){try{a()}catch(b){T(b)}}")) {
+        StrBuf patched SB_AUTO = sb_from(si->content, si->content_len);
+        const char *from = "function O(a){try{a()}catch(b){T(b)}}";
+        const char *to = "function O(a){try{if(!window.__schedRun)window.__schedRun=1;window.__schedRunCount=(window.__schedRunCount||0)+1;if(window.__schedRunCount<20||window.__schedRunCount%500===0)console.error('[SCHED-RUN #'+window.__schedRunCount+']');a()}catch(b){console.error('[SCHED-JOB-ERR] '+(b&&b.message)+' | '+((b&&b.stack)||'').split(String.fromCharCode(10))[0]);T(b)}}";
+        size_t pos = sb_find(&patched, from, 0);
+        if (pos != SB_NPOS) {
+            sb_replace(&patched, pos, strlen(from), to);
+        }
+        /* Trace who keeps re-queueing scheduleAppLoad (the eoir park
+         * flood that starves priority-0 lifecycle jobs). */
+        const char *fromP = "function P(a,b,c,d){++a.F;";
+        const char *toP = "function P(a,b,c,d){try{if(b&&b.name==='scheduleAppLoad'){window.__salC=(window.__salC||0)+1;if(window.__salC<4)console.error('[ADD-SAL] prio='+c+' body='+(''+b).slice(0,90)+' STACK '+((new Error()).stack||'').split(String.fromCharCode(10)).slice(1,7).join(' <- '))}}catch(e){}++a.F;";
+        size_t posP = sb_find(&patched, fromP, 0);
+        if (posP != SB_NPOS) {
+            sb_replace(&patched, posP, strlen(fromP), toP);
+        }
+        /* Trace prio-2 job adds (updatePageData's deferred J). */
+        const char *fromP2 = "var e=a.F;a.h[e]=b;a.l&&!d?a.v.push({id:e,priority:c}):(a.i[c].push(e),";
+        const char *toP2 = "var e=a.F;a.h[e]=b;try{if(c===2)console.error('[SCHED-P2] add id='+e)}catch(e$7){}a.l&&!d?a.v.push({id:e,priority:c}):(a.i[c].push(e),";
+        size_t posP2 = sb_find(&patched, fromP2, 0);
+        if (posP2 != SB_NPOS) {
+            sb_replace(&patched, posP2, strlen(fromP2), toP2);
+        }
+        /* Trace V drains when queue 2 is non-empty. */
+        const char *fromV = "function V(a,b,c){a.C&&a.m===4&&a.g||R(a);";
+        const char *toV = "function V(a,b,c){try{if(a.i[2].length>0)console.error('[SCHED-V] q2='+a.i[2].length+' q3='+a.i[3].length+' m='+a.m)}catch(e$8){}a.C&&a.m===4&&a.g||R(a);";
+        size_t posV = sb_find(&patched, fromV, 0);
+        if (posV != SB_NPOS) {
+            sb_replace(&patched, posV, strlen(fromV), toV);
+        }
+        /* Trace the RAF/timeout callbacks that reset the pump handle. */
+        const char *fromT = "g.T=function(a){this.C=!0;";
+        const char *toT = "g.T=function(a){window.__tCnt=(window.__tCnt||0)+1;if(window.__tCnt<10)console.error('[SCHED-CB] T(RAF) g='+this.g);this.C=!0;";
+        size_t posT = sb_find(&patched, fromT, 0);
+        if (posT != SB_NPOS) {
+            sb_replace(&patched, posT, strlen(fromT), toT);
+        }
+        const char *fromUU = "g.U=function(){V(this)}";
+        const char *toUU = "g.U=function(){window.__u2Cnt=(window.__u2Cnt||0)+1;if(window.__u2Cnt<10)console.error('[SCHED-CB] U(timeout) g='+this.g);V(this)}";
+        size_t posUU = sb_find(&patched, fromUU, 0);
+        if (posUU != SB_NPOS) {
+            sb_replace(&patched, posUU, strlen(fromUU), toUU);
+        }
+        const char *fromU = "function U(a){for(var b=r(J),c=b.next();!c.done;c=b.next())if(a.i[c.value].length)return!0;return!1}";
+        const char *toU = "function U(a){var rr=(function(){for(var b=r(J),c=b.next();!c.done;c=b.next())if(a.i[c.value].length)return!0;return!1})();window.__uCnt=(window.__uCnt||0)+1;if(window.__uCnt<25||window.__uCnt%200===0)console.error('[SCHED-U] ret='+rr+' g='+a.g+' m='+a.m);return rr}";
+        size_t posU = sb_find(&patched, fromU, 0);
+        if (posU != SB_NPOS) {
+            sb_replace(&patched, posU, strlen(fromU), toU);
+        }
+        const char *fromSt = "g.start=function(){this.D=!1;if(this.g===0)switch(this.m=Q(this),this.m){";
+        const char *toSt = "g.start=function(){window.__stCnt=(window.__stCnt||0)+1;if(window.__stCnt<25||window.__stCnt%200===0)console.error('[SCHED-START] g='+this.g+' m0='+this.m);this.D=!1;if(this.g===0)switch(this.m=Q(this),this.m){";
+        size_t posSt = sb_find(&patched, fromSt, 0);
+        if (posSt != SB_NPOS) {
+            sb_replace(&patched, posSt, strlen(fromSt), toSt);
+        }
+        const char *fromRaf = "case 3:this.g=window.requestAnimationFrame(this.M);break;";
+        const char *toRaf = "case 3:this.g=(console.error('[SCHED-ARM] raf m='+this.m),window.requestAnimationFrame(this.M));console.error('[SCHED-ARMED] id='+this.g);break;";
+        size_t posRaf = sb_find(&patched, fromRaf, 0);
+        if (posRaf != SB_NPOS) {
+            sb_replace(&patched, posRaf, strlen(fromRaf), toRaf);
+        }
+        /* Trace queue-0 state: pushes and drain opportunities. */
+        const char *fromQ = "function Q(a){if(a.i[8].length){if(a.C)return 4;if(!document.hidden&&a.B)return 3}for(var b=5;b>=a.j;b--)if(a.i[b].length>0)return b>0?!document.hidden&&a.B?3:2:1;return 0}";
+        const char *toQ = "function Q(a){var r=(function(){if(a.i[8].length){if(a.C)return 4;if(!document.hidden&&a.B)return 3}for(var b=5;b>=a.j;b--)if(a.i[b].length>0)return b>0?!document.hidden&&a.B?3:2:1;return 0})();if(a.i[0].length>0){window.__q0c=(window.__q0c||0)+1;if(window.__q0c<30)console.error('[SCHED-Q] ret='+r+' q0='+a.i[0].length+' q8='+(a.i[8]&&a.i[8].length)+' C='+a.C+' G='+a.G+' m='+a.m)}return r}";
+        size_t posQ = sb_find(&patched, fromQ, 0);
+        if (posQ != SB_NPOS) {
+            sb_replace(&patched, posQ, strlen(fromQ), toQ);
+        }
+        if (patched.len != si->content_len) {
+            char *nd = (char *)malloc(patched.len + 1);
+            if (nd) {
+                memcpy(nd, patched.data, patched.len);
+                nd[patched.len] = '\0';
+                si->content = nd;
+                si->content_len = patched.len;
+                fprintf(stderr, "[LC-PATCH] sched-job-err trace injected\n");
+            }
+        }
+    }
+    /* DIAGNOSTIC: force the lifecycle init to skip the jobSet wait, to
+     * test whether the "rendering" phase (and metadata) runs once the
+     * jobSet hang is bypassed.  CYBER_FORCE_RENDER=1. */
+    if (cyber_getenv("CYBER_FORCE_RENDER") && si->content_len > 1000000 &&
+        strstr(si->content, ".jobSet?v.yield(y.jobSet.completedResolver.promise,4):v.jumpTo(4)")) {
+        StrBuf patched SB_AUTO = sb_from(si->content, si->content_len);
+        const char *from = ".jobSet?v.yield(y.jobSet.completedResolver.promise,4):v.jumpTo(4)";
+        const char *to = ".jobSet?v.jumpTo(4):v.jumpTo(4)";
+        size_t pos = sb_find(&patched, from, 0);
+        if (pos != SB_NPOS) {
+            sb_replace(&patched, pos, strlen(from), to);
+            char *nd = (char *)malloc(patched.len + 1);
+            if (nd) {
+                memcpy(nd, patched.data, patched.len);
+                nd[patched.len] = '\0';
+                si->content = nd;
+                si->content_len = patched.len;
+                fprintf(stderr, "[LC-PATCH] force-render (skip jobSet wait) injected\n");
+            }
+        }
+    }
+}
+
 bool html_execute_page_scripts(const char *html, JsExecResult *out_result) {
     if (!html || !out_result) return false;
     memset(out_result, 0, sizeof(JsExecResult));
@@ -1237,420 +1816,7 @@ bool html_execute_page_scripts(const char *html, JsExecResult *out_result) {
                     scripts[i].content = buffer.data;
                     scripts[i].content_len = buffer.size;
 
-                    /* Diagnostic: trace the monomer lifecycle state-machine
-                     * transitions in the desktop_polymer bundle.  CYBER_TRACE_LIFECYCLE=1. */
-                    if (CYBER_ENV(CYBER_T_LIFECYCLE) && scripts[i].content_len > 1000000 &&
-                        strstr(scripts[i].content, "prototype.transition=function(")) {
-                        StrBuf patched SB_AUTO = sb_from(scripts[i].content, scripts[i].content_len);
-                        size_t fpos = sb_find(&patched, "prototype.transition=function(", 0);
-                        size_t bpos = sb_find_char(&patched, '{', fpos);
-                        if (fpos != SB_NPOS && bpos != SB_NPOS) {
-                            const char *inj = "try{console.error('[TR] '+this.state+'->'+arguments[0])}catch(e){}";
-                            sb_insert(&patched, bpos + 1, inj);
-                        }
-                        size_t fpos2 = sb_find(&patched, "prototype.parkOrScheduleJob=function(", 0);
-                        size_t bpos2 = fpos2 == SB_NPOS ? fpos2 : sb_find_char(&patched, '{', fpos2);
-                        if (fpos2 != SB_NPOS && bpos2 != SB_NPOS) {
-                            const char *inj2 = "try{var s$=arguments[2];if(s$&&(''+s$).indexOf('eoir')>=0){window.__eoirC=(window.__eoirC||0)+1;if(window.__eoirC<4||window.__eoirC===1000)console.error('[PARK-EOIR #'+window.__eoirC+'] V.name='+(arguments[0]&&arguments[0].name)+' V.body='+(''+arguments[0]).slice(0,60)+' al=='+(typeof appLoad)+' al===sal:'+(typeof appLoad!=='undefined'&&typeof scheduleAppLoad!=='undefined'?appLoad===scheduleAppLoad:'?')+' '+(((new Error('x')).stack||'').split(String.fromCharCode(10)).slice(1,6).join(' <- ')))}else console.error('[PARK] sig='+s$+' prio='+arguments[1])}catch(e){}";
-                            sb_insert(&patched, bpos2 + 1, inj2);
-                        }
-                        /* Log when the lifecycle jobSet resolves (init completes).
-                         * The call sits in expression position (after &&), so wrap
-                         * it in a comma expression rather than inserting a stmt. */
-                        const char *res_anchor = ".completedResolver.resolve()";
-                        size_t fpos3 = sb_find(&patched, res_anchor, 0);
-                        if (fpos3 != SB_NPOS) {
-                            /* Back up over the receiver identifier (minified name
-                             * shifts between fetches) and wrap the whole call in a
-                             * comma expression — valid in the && chain it sits in. */
-                            size_t id_start = fpos3;
-                            while (id_start > 0 && (isalnum((unsigned char)patched.data[id_start-1]) ||
-                                   patched.data[id_start-1]=='_' || patched.data[id_start-1]=='$'))
-                                id_start--;
-                            StrBuf recv SB_AUTO = sb_substr(&patched, id_start, fpos3 - id_start);
-                            StrBuf call SB_AUTO = sb_join(recv.data, res_anchor, NULL);
-                            StrBuf wrapped SB_AUTO = sb_join("(console.error('[JOBSET] resolved'),", call.data, ")", NULL);
-                            sb_replace(&patched, id_start, call.len, wrapped.data);
-                        }
-                        /* Log a jobSet payload job that throws (which would leave the
-                         * jobSet's completedResolver permanently unresolved). */
-                        size_t fpos4 = sb_find(&patched, "function(){J.payload$jscomp$20.job();", 0);
-                        if (fpos4 != SB_NPOS) {
-                            /* Find the jobSet `this` capture by locating the receiver
-                             * of .scheduledPayloads[ after the wrapper start. */
-                            StrBuf js_this SB_AUTO = sb_from_cstr("y");
-                            size_t sp = sb_find(&patched, ".scheduledPayloads[", fpos4);
-                            if (sp != SB_NPOS) {
-                                size_t id_start = sp;
-                                while (id_start > 0 && (isalnum((unsigned char)patched.data[id_start-1]) ||
-                                       patched.data[id_start-1]=='_' || patched.data[id_start-1]=='$'))
-                                    id_start--;
-                                sb_free(&js_this);
-                                js_this = sb_substr(&patched, id_start, sp - id_start);
-                            }
-                            StrBuf to4 SB_AUTO = sb_join("function(){console.error('[JOBSET-JOB-RUN] i='+J.i$jscomp$549+' n='+",
-                                js_this.data, ".scheduledPayloads.length);try{J.payload$jscomp$20.job()}catch(e$jscomp$1){console.error('[JOBSET-ERR] '+(e$jscomp$1&&e$jscomp$1.message)+' | '+((e$jscomp$1&&e$jscomp$1.stack)||'').split(String.fromCharCode(10))[0]);throw e$jscomp$1};", NULL);
-                            const char *from4 = "function(){J.payload$jscomp$20.job();";
-                            sb_replace(&patched, fpos4, strlen(from4), to4.data);
-                        }
-                        /* Trace gkY cancel/flushJobs — a cancel would explain jobSet
-                         * payload jobs never running. */
-                        size_t fpos6 = sb_find(&patched, "prototype.cancel=function(){for(var ", 0);
-                        if (fpos6 != SB_NPOS) {
-                            size_t b6 = sb_find_char(&patched, '{', fpos6 + 10);
-                            if (b6 != SB_NPOS)
-                                sb_insert(&patched, b6 + 1, "try{console.error('[JOBSET-CANCEL]')}catch(e){}");
-                        }
-                        size_t fpos7 = sb_find(&patched, "prototype.flushJobs=function(){", 0);
-                        if (fpos7 != SB_NPOS) {
-                            size_t b7 = sb_find_char(&patched, '{', fpos7);
-                            if (b7 != SB_NPOS)
-                                sb_insert(&patched, b7 + 1, "try{console.error('[JOBSET-FLUSH]')}catch(e){}");
-                        }
-                        /* Log each jobSet payload's scheduled priority. */
-                        size_t fpos8 = sb_find(&patched, "this.scheduler.addJob(Q,i1A(this,V.payload$jscomp$20))", 0);
-                        if (fpos8 != SB_NPOS) {
-                            const char *a8 = "this.scheduler.addJob(Q,i1A(this,V.payload$jscomp$20))";
-                            StrBuf r8 SB_AUTO = sb_join("(console.error('[JOBSET-ADD] i='+V.i$jscomp$549+' prio='+i1A(this,V.payload$jscomp$20)),", a8, ")", NULL);
-                            sb_replace(&patched, fpos8, strlen(a8), r8.data);
-                        }
-                        /* Trace jK.addJob: does the jobSet scheduler delegate to a
-                         * registered service or run synchronously? */
-                        size_t fpos5 = sb_find(&patched, "jK.prototype.addJob=function(V,y,Q){", 0);
-                        if (fpos5 != SB_NPOS) {
-                            const char *from5 = "jK.prototype.addJob=function(V,y,Q){";
-                            const char *to5 = "jK.prototype.addJob=function(V,y,Q){try{console.error('[JK-ADDJOB] prio='+y)}catch(e){}try{";
-                            sb_replace(&patched, fpos5, strlen(from5), to5);
-                            const char *tail5 = "Q===void 0?(V(),NaN):_.Mk(V,Q||0)}";
-                            size_t tpos5 = sb_find(&patched, tail5, fpos5);
-                            if (tpos5 != SB_NPOS) {
-                                sb_replace(&patched, tpos5, strlen(tail5), "Q===void 0?(V(),NaN):_.Mk(V,Q||0)}catch(e$2){console.error('[JK-ADDJOB-ERR] '+(e$2&&e$2.message)+' | '+((e$2&&e$2.stack)||'').split(String.fromCharCode(10))[0]);throw e$2}}");
-                            }
-                        }
-                        /* Trace the initial-data consumption (SDs) and ytd-app's
-                         * updatePageData (which fires the 'cr' signal). */
-                        size_t fpos9 = sb_find(&patched, "SDs=function(V,y){", 0);
-                        if (fpos9 != SB_NPOS) {
-                            size_t b9 = sb_find_char(&patched, '{', fpos9);
-                            if (b9 != SB_NPOS)
-                                sb_insert(&patched, b9 + 1, "try{console.error('[SDS] initial data consumed')}catch(e){}");
-                        }
-                        size_t fposRM = sb_find(&patched, "RM=function(V,y){", 0);
-                        if (fposRM != SB_NPOS) {
-                            size_t brm = sb_find_char(&patched, '{', fposRM);
-                            if (brm != SB_NPOS)
-                                sb_insert(&patched, brm + 1, "try{console.error('[RM] run root.loadData='+(V&&V.root&&typeof V.root.loadData))}catch(e){}");
-                        }
-                        size_t fpos10 = sb_find(&patched, ".updatePageData=function(V){", 0);
-                        if (fpos10 != SB_NPOS) {
-                            size_t b10 = sb_find_char(&patched, '{', fpos10);
-                            if (b10 != SB_NPOS)
-                                sb_insert(&patched, b10 + 1, "try{console.error('[UPD] updatePageData called page='+(V&&V.page)+' keys='+(V?Object.keys(V).slice(0,10).join(','):'null')+' pdu='+typeof this.performDataUpdate)}catch(e){}");
-                        }
-                        size_t fposJ = sb_find(&patched, ".updatePageDataJobId=_.MQ(_.Jv,J)", 0);
-                        if (fposJ != SB_NPOS) {
-                            const char *aJ = ".updatePageDataJobId=_.MQ(_.Jv,J)";
-                            sb_replace(&patched, fposJ, strlen(aJ), ".updatePageDataJobId=(console.error('[UPDJ] scheduling J'),_.MQ(_.Jv,J))");
-                        }
-                        /* Trace the deferred J body (performDataUpdate + cr fire). */
-                        size_t fposJB = sb_find(&patched, "var J=function(){V.filler?y.performDataUpdate(V,Q):zUD(", 0);
-                        if (fposJB != SB_NPOS) {
-                            size_t bJB = sb_find_char(&patched, '{', fposJB);
-                            if (bJB != SB_NPOS)
-                                sb_insert(&patched, bJB + 1, "try{console.error('[J] running page='+(V&&V.page))}catch(e){}");
-                        }
-                        /* Trace fireEvent detail integrity. */
-                        size_t fposFE = sb_find(&patched, "V=new CustomEvent(V,{bubbles:!0,cancelable:!1,composed:!0,detail:y});this.dispatchEvent(V)", 0);
-                        if (fposFE != SB_NPOS) {
-                            const char *aFE = "V=new CustomEvent(V,{bubbles:!0,cancelable:!1,composed:!0,detail:y});this.dispatchEvent(V)";
-                            const char *rFE = "V=new CustomEvent(V,{bubbles:!0,cancelable:!1,composed:!0,detail:y});console.error('[FE] fireEvent type='+V.type+' yType='+typeof y+' yStr='+(function(){try{return JSON.stringify(y).slice(0,80)}catch(e){return 'err:'+e.message}})());this.dispatchEvent(V)";
-                            sb_replace(&patched, fposFE, strlen(aFE), rFE);
-                        }
-                        size_t fposPDU = sb_find(&patched, "performDataUpdate=function(V,y){", 0);
-                        if (fposPDU != SB_NPOS) {
-                            size_t bpdu = sb_find_char(&patched, '{', fposPDU);
-                            if (bpdu != SB_NPOS)
-                                sb_insert(&patched, bpdu + 1, "try{console.error('[PDU] performDataUpdate')}catch(e){}");
-                        }
-                        /* Trace zUD invoking the deferred performDataUpdate fn. */
-                        size_t fposZ = sb_find(&patched, "try{_.Kp(\"fr_s\"),V()}catch(y){_.NR(y)}", 0);
-                        if (fposZ != SB_NPOS) {
-                            const char *aZ = "try{_.Kp(\"fr_s\"),V()}catch(y){_.NR(y)}";
-                            const char *rZ = "try{_.Kp(\"fr_s\");console.error('[ZUD] invoking fn');V()}catch(y){console.error('[ZUD] fn caught: '+(y&&y.message)+' (skipping NR)')}";
-                            sb_replace(&patched, fposZ, strlen(aZ), rZ);
-                        }
-                        size_t fpos11 = sb_find(&patched, "processSignal(\"cr\")", 0);
-                        if (fpos11 != SB_NPOS) {
-                            /* Back up over the receiver identifier (e.g. `t.`) and wrap
-                             * the WHOLE call in a comma expression — inserting before
-                             * `processSignal` alone would produce `t.console.error(...)`,
-                             * which throws (t.console is undefined) and aborts the
-                             * updatePageData continuation before "cr" fires. */
-                            size_t id_start = fpos11;
-                            while (id_start > 0 && (isalnum((unsigned char)patched.data[id_start-1]) ||
-                                   patched.data[id_start-1]=='_' || patched.data[id_start-1]=='$' ||
-                                   patched.data[id_start-1]=='.'))
-                                id_start--;
-                            StrBuf recv SB_AUTO = sb_substr(&patched, id_start, fpos11 - id_start);
-                            StrBuf call SB_AUTO = sb_join(recv.data, "processSignal(\"cr\")", NULL);
-                            StrBuf wrapped SB_AUTO = sb_join("(console.error('[CR] firing cr'),", call.data, ")", NULL);
-                            sb_replace(&patched, id_start, call.len, wrapped.data);
-                        }
-                        /* Guard the MiniplayerService PIP check: our DI does not inject
-                         * pipController, so `this.pipController.pictureInPictureSupported()`
-                         * throws mid-performDataUpdate and aborts the "cr" signal (which
-                         * gates the whole "rendered" transition and the metadata commit).
-                         * Returning false (no PIP support) is correct here. */
-                        size_t fposB3 = sb_find(&patched, "_.L.updateComputedBadges=function(V,y,Q){var v=this,J;", 0);
-                        if (fposB3 != SB_NPOS) {
-                            const char *aB3 = "_.L.updateComputedBadges=function(V,y,Q){var v=this,J;";
-                            const char *rB3 = "_.L.updateComputedBadges=function(V,y,Q){console.error('[UCB] V='+typeof V+' isArr='+Array.isArray(V)+' filter='+typeof (V&&V.filter)+' this='+(this&&this.hostElement&&this.hostElement.tagName));var v=this,J;";
-                            sb_replace(&patched, fposB3, strlen(aB3), rB3);
-                        }
-                        size_t fposPip = sb_find(&patched, "im.prototype.pictureInPictureSupported=function(){return this.pipController.pictureInPictureSupported()}", 0);
-                        if (fposPip != SB_NPOS) {
-                            const char *aP = "im.prototype.pictureInPictureSupported=function(){return this.pipController.pictureInPictureSupported()}";
-                            const char *rP = "im.prototype.pictureInPictureSupported=function(){return this.pipController?this.pipController.pictureInPictureSupported():false}";
-                            sb_replace(&patched, fposPip, strlen(aP), rP);
-                            fprintf(stderr, "[LC-PATCH] pipController guard injected\n");
-                        }
-                        /* Trace the J continuation: does it reach the cr fire? */
-                        size_t fposCR2 = sb_find(&patched, "var t=_.n_();_.Sy(t,\"cr\")||t.processSignal(\"cr\");v()", 0);
-                        if (fposCR2 != SB_NPOS) {
-                            const char *aC = "var t=_.n_();_.Sy(t,\"cr\")||t.processSignal(\"cr\");v()";
-                            const char *rC = "console.error('[CR2] J-continuation filler='+V.filler);var t=_.n_();console.error('[CR2] Sy(cr)='+_.Sy(t,\"cr\"));_.Sy(t,\"cr\")||t.processSignal(\"cr\");console.error('[CR2] cr fired');v()";
-                            sb_replace(&patched, fposCR2, strlen(aC), rC);
-                        }
-                        /* Guard badge-observer calls that run with a wrong `this` (the
-                         * monomer fires some Polymer property observers on the host
-                         * element instead of the controller, so `this.updateComputedBadges`
-                         * is undefined and throws mid-performDataUpdate, aborting "cr"). */
-                        size_t fposB1 = sb_find(&patched, "this.updateComputedBadges(this.badges,this.topStandaloneBadge)", 0);
-                        if (fposB1 != SB_NPOS) {
-                            const char *aB = "this.updateComputedBadges(this.badges,this.topStandaloneBadge)";
-                            const char *rB = "this.updateComputedBadges&&this.updateComputedBadges(this.badges,this.topStandaloneBadge)";
-                            size_t p = fposB1;
-                            while (p != SB_NPOS) {
-                                sb_replace(&patched, p, strlen(aB), rB);
-                                p = sb_find(&patched, aB, p + strlen(rB));
-                            }
-                        }
-                        size_t fposB2 = sb_find(&patched, "this.updateComputedBadges(this.badges,this.topStandaloneBadge,this.bottomStandaloneBadge)", 0);
-                        if (fposB2 != SB_NPOS) {
-                            const char *aB2 = "this.updateComputedBadges(this.badges,this.topStandaloneBadge,this.bottomStandaloneBadge)";
-                            const char *rB2 = "this.updateComputedBadges&&this.updateComputedBadges(this.badges,this.topStandaloneBadge,this.bottomStandaloneBadge)";
-                            size_t p2 = fposB2;
-                            while (p2 != SB_NPOS) {
-                                sb_replace(&patched, p2, strlen(aB2), rB2);
-                                p2 = sb_find(&patched, aB2, p2 + strlen(rB2));
-                            }
-                        }
-                        size_t fpos12 = sb_find(&patched, "onYtPageManagerAttached=function(V){", 0);
-                        if (fpos12 != SB_NPOS) {
-                            size_t b12 = sb_find_char(&patched, '{', fpos12);
-                            if (b12 != SB_NPOS)
-                                sb_insert(&patched, b12 + 1, "try{var g$=_.gU(V);console.error('[PMA] onYtPageManagerAttached gU='+(g$&&g$.tagName)+' id='+(g$&&g$.id)+' target='+(V&&V.target&&V.target.tagName))}catch(e){console.error('[PMA] err '+e.message)}");
-                        }
-                        size_t fpos12b = sb_find(&patched, "this.pageManagerAttachedPromise.resolve()", 0);
-                        if (fpos12b != SB_NPOS) {
-                            sb_replace(&patched, fpos12b, strlen("this.pageManagerAttachedPromise.resolve()"), "(console.error('[PMA-RESOLVE] typeof='+typeof this.pageManagerAttachedPromise),this.pageManagerAttachedPromise.resolve())");
-                        }
-                        /* Trace the page-data-fetched handler (leads to updatePageData). */
-                        size_t fpos14 = sb_find(&patched, "onYtPageDataFetched=function(V,y){", 0);
-                        if (fpos14 != SB_NPOS) {
-                            size_t b14 = sb_find_char(&patched, '{', fpos14);
-                            if (b14 != SB_NPOS)
-                                sb_insert(&patched, b14 + 1, "try{console.error('[PDF] onYtPageDataFetched y='+(y?Object.keys(y).slice(0,6).join(','):'null')+' pd='+(y&&y.pageData?'y':'n'))}catch(e){}");
-                        }
-                        size_t fposPPD = sb_find(&patched, "publishPageData=function(V){", 0);
-                        if (fposPPD != SB_NPOS) {
-                            size_t bppd = sb_find_char(&patched, '{', fposPPD);
-                            if (bppd != SB_NPOS)
-                                sb_insert(&patched, bppd + 1, "try{var lit$={pageData:V};var d$=Object.getOwnPropertyDescriptor(lit$,'pageData');console.error('[PPD] page='+(V&&V.page)+' keys='+Object.keys(lit$).length+' desc='+JSON.stringify(d$&&{e:d$.enumerable,w:d$.writable,c:d$.configurable})+' vKeys='+(V?Object.keys(V).length:'-'))}catch(e){}");
-                        }
-                        /* Trace loadData's deferred navigation callback. */
-                        size_t fpos15 = sb_find(&patched, "this.loadDepsPromise.then(function(){", 0);
-                        if (fpos15 != SB_NPOS) {
-                            size_t b15 = sb_find_char(&patched, '{', fpos15);
-                            if (b15 != SB_NPOS)
-                                sb_insert(&patched, b15 + 1, "try{console.error('[LDD] loadDeps then runs')}catch(e){}");
-                        }
-                        size_t fpos16 = sb_find(&patched, ".loadData=function(V){var y=this;", 0);
-                        if (fpos16 != SB_NPOS) {
-                            const char *a16 = ".loadData=function(V){var y=this;";
-                            StrBuf r16 SB_AUTO = sb_join(a16, "try{console.error('[LD] loadData entry deps='+(this.loadDepsPromise?'y':'n'))}catch(e){}", NULL);
-                            sb_replace(&patched, fpos16, strlen(a16), r16.data);
-                        }
-                        /* Trace the _.mm custom-promise async pump: EQY schedules,
-                         * UR$ drains via a native Promise job. */
-                        size_t fpos17 = sb_find(&patched, "EQY=function(V){V.executing_||(V.executing_=!0,_.WV(", 0);
-                        if (fpos17 != SB_NPOS) {
-                            size_t b17 = sb_find_char(&patched, '{', fpos17);
-                            if (b17 != SB_NPOS)
-                                sb_insert(&patched, b17 + 1, "try{window.__eqy=(window.__eqy||0)+1;if(window.__eqy<6)console.error('[EQY] schedule')}catch(e){}");
-                        }
-                        size_t fpos18 = sb_find(&patched, "UR$=function(){for(var V;V=AvU.remove();)", 0);
-                        if (fpos18 != SB_NPOS) {
-                            size_t b18 = sb_find_char(&patched, '{', fpos18);
-                            if (b18 != SB_NPOS)
-                                sb_insert(&patched, b18 + 1, "try{window.__ur=(window.__ur||0)+1;if(window.__ur<6)console.error('[UR] drain')}catch(e){}");
-                        }
-                        /* Trace _.mm callback invocation. */
-                        size_t fpos19 = sb_find(&patched, "nQN=function(V,y,Q){y==2?V.JSC$9850_onFulfilled.call(V.context,Q)", 0);
-                        if (fpos19 != SB_NPOS) {
-                            size_t b19 = sb_find_char(&patched, '{', fpos19);
-                            if (b19 != SB_NPOS)
-                                sb_insert(&patched, b19 + 1, "try{window.__nqn=(window.__nqn||0)+1;if(window.__nqn<15)console.error('[NQN] state='+y)}catch(e){}");
-                        }
-                        /* Trace _.bQ event dispatches named 'attached'. */
-                        size_t fpos13 = sb_find(&patched, "bQ=function(V,y,Q,v){", 0);
-                        if (fpos13 != SB_NPOS) {
-                            size_t b13 = sb_find_char(&patched, '{', fpos13);
-                            if (b13 != SB_NPOS)
-                                sb_insert(&patched, b13 + 1, "try{if(y==='attached'){window.__bqa=(window.__bqa||0)+1;if(window.__bqa<8)console.error('[BQ] attached fired on '+(V&&V.tagName))}}catch(e){}");
-                        }
-                        if (patched.len != scripts[i].content_len) {
-                            char *nd = (char *)malloc(patched.len + 1);
-                            if (nd) {
-                                memcpy(nd, patched.data, patched.len);
-                                nd[patched.len] = '\0';
-                                scripts[i].content = nd;
-                                scripts[i].content_len = patched.len;
-                                fprintf(stderr, "[LC-PATCH] transition trace injected\n");
-                            }
-                        }
-                    }
-                    /* Log when the scheduler's O() executor runs jobs and when the
-                     * web-animations polyfill's RAF queue schedules/runs its driver. */
-                    if (CYBER_ENV(CYBER_T_LIFECYCLE) && scripts[i].content_len > 1000 &&
-                        strstr(scripts[i].content, "m.length==0&&e(d);m.push([C,q]);return C")) {
-                        StrBuf patched SB_AUTO = sb_from(scripts[i].content, scripts[i].content_len);
-                        const char *from = "m.length==0&&e(d);m.push([C,q]);return C";
-                        const char *to = "if(m.length==0){console.error('[WADRV] schedule driver');e(d)}m.push([C,q]);return C";
-                        size_t pos = sb_find(&patched, from, 0);
-                        if (pos != SB_NPOS) {
-                            sb_replace(&patched, pos, strlen(from), to);
-                        }
-                        const char *fromD = "function d(q){var C=m;m=[];";
-                        const char *toD = "function d(q){console.error('[WADRV] driver runs qlen='+m.length);var C=m;m=[];";
-                        size_t posD = sb_find(&patched, fromD, 0);
-                        if (posD != SB_NPOS) {
-                            sb_replace(&patched, posD, strlen(fromD), toD);
-                        }
-                        if (patched.len != scripts[i].content_len) {
-                            char *nd = (char *)malloc(patched.len + 1);
-                            if (nd) {
-                                memcpy(nd, patched.data, patched.len);
-                                nd[patched.len] = '\0';
-                                scripts[i].content = nd;
-                                scripts[i].content_len = patched.len;
-                                fprintf(stderr, "[LC-PATCH] wa-driver trace injected\n");
-                            }
-                        }
-                    }
-                    /* Log jobs that error inside the scheduler's O() executor so we can
-                     * see which scheduled job hangs the lifecycle jobSet. */
-                    if (CYBER_ENV(CYBER_T_LIFECYCLE) && scripts[i].content_len > 1000 &&
-                        strstr(scripts[i].content, "function O(a){try{a()}catch(b){T(b)}}")) {
-                        StrBuf patched SB_AUTO = sb_from(scripts[i].content, scripts[i].content_len);
-                        const char *from = "function O(a){try{a()}catch(b){T(b)}}";
-                        const char *to = "function O(a){try{if(!window.__schedRun)window.__schedRun=1;window.__schedRunCount=(window.__schedRunCount||0)+1;if(window.__schedRunCount<20||window.__schedRunCount%500===0)console.error('[SCHED-RUN #'+window.__schedRunCount+']');a()}catch(b){console.error('[SCHED-JOB-ERR] '+(b&&b.message)+' | '+((b&&b.stack)||'').split(String.fromCharCode(10))[0]);T(b)}}";
-                        size_t pos = sb_find(&patched, from, 0);
-                        if (pos != SB_NPOS) {
-                            sb_replace(&patched, pos, strlen(from), to);
-                        }
-                        /* Trace who keeps re-queueing scheduleAppLoad (the eoir park
-                         * flood that starves priority-0 lifecycle jobs). */
-                        const char *fromP = "function P(a,b,c,d){++a.F;";
-                        const char *toP = "function P(a,b,c,d){try{if(b&&b.name==='scheduleAppLoad'){window.__salC=(window.__salC||0)+1;if(window.__salC<4)console.error('[ADD-SAL] prio='+c+' body='+(''+b).slice(0,90)+' STACK '+((new Error()).stack||'').split(String.fromCharCode(10)).slice(1,7).join(' <- '))}}catch(e){}++a.F;";
-                        size_t posP = sb_find(&patched, fromP, 0);
-                        if (posP != SB_NPOS) {
-                            sb_replace(&patched, posP, strlen(fromP), toP);
-                        }
-                        /* Trace prio-2 job adds (updatePageData's deferred J). */
-                        const char *fromP2 = "var e=a.F;a.h[e]=b;a.l&&!d?a.v.push({id:e,priority:c}):(a.i[c].push(e),";
-                        const char *toP2 = "var e=a.F;a.h[e]=b;try{if(c===2)console.error('[SCHED-P2] add id='+e)}catch(e$7){}a.l&&!d?a.v.push({id:e,priority:c}):(a.i[c].push(e),";
-                        size_t posP2 = sb_find(&patched, fromP2, 0);
-                        if (posP2 != SB_NPOS) {
-                            sb_replace(&patched, posP2, strlen(fromP2), toP2);
-                        }
-                        /* Trace V drains when queue 2 is non-empty. */
-                        const char *fromV = "function V(a,b,c){a.C&&a.m===4&&a.g||R(a);";
-                        const char *toV = "function V(a,b,c){try{if(a.i[2].length>0)console.error('[SCHED-V] q2='+a.i[2].length+' q3='+a.i[3].length+' m='+a.m)}catch(e$8){}a.C&&a.m===4&&a.g||R(a);";
-                        size_t posV = sb_find(&patched, fromV, 0);
-                        if (posV != SB_NPOS) {
-                            sb_replace(&patched, posV, strlen(fromV), toV);
-                        }
-                        /* Trace the RAF/timeout callbacks that reset the pump handle. */
-                        const char *fromT = "g.T=function(a){this.C=!0;";
-                        const char *toT = "g.T=function(a){window.__tCnt=(window.__tCnt||0)+1;if(window.__tCnt<10)console.error('[SCHED-CB] T(RAF) g='+this.g);this.C=!0;";
-                        size_t posT = sb_find(&patched, fromT, 0);
-                        if (posT != SB_NPOS) {
-                            sb_replace(&patched, posT, strlen(fromT), toT);
-                        }
-                        const char *fromUU = "g.U=function(){V(this)}";
-                        const char *toUU = "g.U=function(){window.__u2Cnt=(window.__u2Cnt||0)+1;if(window.__u2Cnt<10)console.error('[SCHED-CB] U(timeout) g='+this.g);V(this)}";
-                        size_t posUU = sb_find(&patched, fromUU, 0);
-                        if (posUU != SB_NPOS) {
-                            sb_replace(&patched, posUU, strlen(fromUU), toUU);
-                        }
-                        const char *fromU = "function U(a){for(var b=r(J),c=b.next();!c.done;c=b.next())if(a.i[c.value].length)return!0;return!1}";
-                        const char *toU = "function U(a){var rr=(function(){for(var b=r(J),c=b.next();!c.done;c=b.next())if(a.i[c.value].length)return!0;return!1})();window.__uCnt=(window.__uCnt||0)+1;if(window.__uCnt<25||window.__uCnt%200===0)console.error('[SCHED-U] ret='+rr+' g='+a.g+' m='+a.m);return rr}";
-                        size_t posU = sb_find(&patched, fromU, 0);
-                        if (posU != SB_NPOS) {
-                            sb_replace(&patched, posU, strlen(fromU), toU);
-                        }
-                        const char *fromSt = "g.start=function(){this.D=!1;if(this.g===0)switch(this.m=Q(this),this.m){";
-                        const char *toSt = "g.start=function(){window.__stCnt=(window.__stCnt||0)+1;if(window.__stCnt<25||window.__stCnt%200===0)console.error('[SCHED-START] g='+this.g+' m0='+this.m);this.D=!1;if(this.g===0)switch(this.m=Q(this),this.m){";
-                        size_t posSt = sb_find(&patched, fromSt, 0);
-                        if (posSt != SB_NPOS) {
-                            sb_replace(&patched, posSt, strlen(fromSt), toSt);
-                        }
-                        const char *fromRaf = "case 3:this.g=window.requestAnimationFrame(this.M);break;";
-                        const char *toRaf = "case 3:this.g=(console.error('[SCHED-ARM] raf m='+this.m),window.requestAnimationFrame(this.M));console.error('[SCHED-ARMED] id='+this.g);break;";
-                        size_t posRaf = sb_find(&patched, fromRaf, 0);
-                        if (posRaf != SB_NPOS) {
-                            sb_replace(&patched, posRaf, strlen(fromRaf), toRaf);
-                        }
-                        /* Trace queue-0 state: pushes and drain opportunities. */
-                        const char *fromQ = "function Q(a){if(a.i[8].length){if(a.C)return 4;if(!document.hidden&&a.B)return 3}for(var b=5;b>=a.j;b--)if(a.i[b].length>0)return b>0?!document.hidden&&a.B?3:2:1;return 0}";
-                        const char *toQ = "function Q(a){var r=(function(){if(a.i[8].length){if(a.C)return 4;if(!document.hidden&&a.B)return 3}for(var b=5;b>=a.j;b--)if(a.i[b].length>0)return b>0?!document.hidden&&a.B?3:2:1;return 0})();if(a.i[0].length>0){window.__q0c=(window.__q0c||0)+1;if(window.__q0c<30)console.error('[SCHED-Q] ret='+r+' q0='+a.i[0].length+' q8='+(a.i[8]&&a.i[8].length)+' C='+a.C+' G='+a.G+' m='+a.m)}return r}";
-                        size_t posQ = sb_find(&patched, fromQ, 0);
-                        if (posQ != SB_NPOS) {
-                            sb_replace(&patched, posQ, strlen(fromQ), toQ);
-                        }
-                        if (patched.len != scripts[i].content_len) {
-                            char *nd = (char *)malloc(patched.len + 1);
-                            if (nd) {
-                                memcpy(nd, patched.data, patched.len);
-                                nd[patched.len] = '\0';
-                                scripts[i].content = nd;
-                                scripts[i].content_len = patched.len;
-                                fprintf(stderr, "[LC-PATCH] sched-job-err trace injected\n");
-                            }
-                        }
-                    }
-                    /* DIAGNOSTIC: force the lifecycle init to skip the jobSet wait, to
-                     * test whether the "rendering" phase (and metadata) runs once the
-                     * jobSet hang is bypassed.  CYBER_FORCE_RENDER=1. */
-                    if (cyber_getenv("CYBER_FORCE_RENDER") && scripts[i].content_len > 1000000 &&
-                        strstr(scripts[i].content, ".jobSet?v.yield(y.jobSet.completedResolver.promise,4):v.jumpTo(4)")) {
-                        StrBuf patched SB_AUTO = sb_from(scripts[i].content, scripts[i].content_len);
-                        const char *from = ".jobSet?v.yield(y.jobSet.completedResolver.promise,4):v.jumpTo(4)";
-                        const char *to = ".jobSet?v.jumpTo(4):v.jumpTo(4)";
-                        size_t pos = sb_find(&patched, from, 0);
-                        if (pos != SB_NPOS) {
-                            sb_replace(&patched, pos, strlen(from), to);
-                            char *nd = (char *)malloc(patched.len + 1);
-                            if (nd) {
-                                memcpy(nd, patched.data, patched.len);
-                                nd[patched.len] = '\0';
-                                scripts[i].content = nd;
-                                scripts[i].content_len = patched.len;
-                                fprintf(stderr, "[LC-PATCH] force-render (skip jobSet wait) injected\n");
-                            }
-                        }
-                    }
+                    patch_loaded_script(&scripts[i]);
                 }
             } else {
                 LOG_WARN("Failed to fetch script [%d]: %s", scripts[i].parse_order, error);

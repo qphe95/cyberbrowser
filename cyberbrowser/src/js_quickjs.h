@@ -112,7 +112,12 @@ void js_quickjs_dispatch_lifecycle_events(void);
  * html: original HTML content for parsing video elements (can be NULL)
  * out_result: output structure for captured URLs
  */
-bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens, 
+/* Run one page script as js_quickjs_exec_scripts runs each (timeout, profile
+ * entry, then the timers and jobs it leaves due); `index` and `count` name it
+ * in logs.  Returns whether it completed without an exception. */
+bool js_quickjs_exec_script(const char *script, size_t script_len, int index, int count);
+
+bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
                              int script_count, const char *html,
                              JsExecResult *out_result);
 

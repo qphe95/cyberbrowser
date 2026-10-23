@@ -127,6 +127,20 @@ bool html_populate_js_document(JSContextHandle ctx, GCValue js_doc, HtmlDocument
 /* The same straight from HTML text (parsed into the node store). */
 bool html_populate_js_document_from_html(JSContextHandle ctx, GCValue js_doc, const char *html, size_t len);
 
+/* The page streamed into `js_doc` as it arrives (HTML's parsing model): the
+ * skeleton's root is replaced, documentElement / head / body follow the
+ * parser, readyState is "loading", and what the parser inserts is connected
+ * at once (custom elements defined so far upgrade).  step builds what has
+ * arrived and returns the parser-inserted <script> element to run before
+ * calling it again, or JS_NULL when it needs more input (or, with `final`,
+ * is done).  end completes a page that lacked <html>, <head> or <body>. */
+typedef struct HtmlDocStream HtmlDocStream;
+HtmlDocStream *html_doc_stream_begin(JSContextHandle ctx, GCValue js_doc);
+void html_doc_stream_append(HtmlDocStream *s, const char *data, size_t len);
+GCValue html_doc_stream_step(HtmlDocStream *s, bool final);
+const char *html_doc_stream_source(HtmlDocStream *s, size_t *len);
+void html_doc_stream_end(HtmlDocStream *s);
+
 /* Create a single HTML element in QuickJS */
 GCValue html_create_element_js(JSContextHandle ctx, const char *tag_name, HtmlAttribute *attrs);
 

@@ -40,6 +40,16 @@ bool html_execute_page_scripts(const char *html, struct JsExecResult *out_result
  * stylesheets and external scripts, and of the scripts and stylesheets it
  * preloads, in document order (as a browser's preload scanner does), so they
  * overlap the rest of the download.  Feed the decoded body in pieces. */
+/* The page parsed into the document as it arrives, each parser-inserted
+ * script run where the parser reaches it (HTML's model), with the same
+ * fetching, patches and limits as html_execute_page_scripts.  Feed the
+ * decoded body in pieces; finish parses the rest, runs what is left and
+ * reports as html_execute_page_scripts does. */
+typedef struct HtmlPageStream HtmlPageStream;
+HtmlPageStream *html_page_stream_begin(void);
+void html_page_stream_feed(HtmlPageStream *ps, const char *data, size_t len);
+bool html_page_stream_finish(HtmlPageStream *ps, struct JsExecResult *out_result);
+
 typedef struct HtmlPreloadScan HtmlPreloadScan;
 HtmlPreloadScan *html_preload_scan_begin(void);
 void html_preload_scan_feed(HtmlPreloadScan *s, const char *data, size_t len);

@@ -865,6 +865,17 @@ static bool http_request_net(const char *url, const char *method,
 static __thread HttpBodyObserver g_body_observer;
 static __thread void *g_body_observer_user;
 
+/* Hand the observer a piece of the body.  It may itself make requests on
+ * this thread (a page script fetching): those are not observed. */
+static void body_observe(const char *data, size_t len) {
+    HttpBodyObserver fn = g_body_observer;
+    void *user = g_body_observer_user;
+    g_body_observer = NULL;
+    fn(user, data, len);
+    g_body_observer = fn;
+    g_body_observer_user = user;
+}
+
 /* Incremental de-chunking and decoding of an observed body. */
 typedef struct BodyObs {
     bool on;
@@ -877,7 +888,7 @@ typedef struct BodyObs {
 
 static void body_obs_emit(BodyObs *o, const uint8_t *p, size_t n) {
     if (!o->br) {
-        if (n) g_body_observer(g_body_observer_user, (const char *)p, n);
+        if (n) body_observe((const char *)p, n);
         return;
     }
     uint8_t out[16384];
@@ -885,7 +896,7 @@ static void body_obs_emit(BodyObs *o, const uint8_t *p, size_t n) {
         size_t avail_out = sizeof(out);
         uint8_t *next_out = out;
         BrotliDecoderResult r = BrotliDecoderDecompressStream(o->br, &n, &p, &avail_out, &next_out, NULL);
-        if (next_out > out) g_body_observer(g_body_observer_user, (const char *)out, (size_t)(next_out - out));
+        if (next_out > out) body_observe((const char *)out, (size_t)(next_out - out));
         if (r == BROTLI_DECODER_RESULT_ERROR) { o->on = false; return; }
         if (r != BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT) return;
     }
@@ -965,7 +976,7 @@ static bool http_request_with_method_internal(const char *url, const char *metho
         if (outTotalSize) *outTotalSize = outBuffer->size;
         /* (A recorded body is decoded and whole: observed in one piece.) */
         if (g_body_observer && outBuffer->data && (!outStatus || (*outStatus >= 200 && *outStatus < 300)))
-            g_body_observer(g_body_observer_user, outBuffer->data, outBuffer->size);
+            body_observe(outBuffer->data, outBuffer->size);
         return true;
     }
     bool ok = http_request_net(url, method, postData, postDataLen, custom_headers, custom_header_count,

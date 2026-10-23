@@ -2,6 +2,7 @@
 #include "dom_parse.h"
 #include "cyber_env.h"
 #include "job_system.h"
+#include "dom_wrap.h"
 
 #include <ctype.h>
 #include <stdatomic.h>
@@ -602,9 +603,40 @@ typedef struct Builder {
     uint32_t sp;
     CssAtom id_name;
     bool keep_top_text;         /* fragment parsing: text outside any element is kept */
+    /* Streaming (dom_stream_*): the tree is live while it is built. */
+    bool streaming;
+    uint8_t *fresh;             /* per open element: created in the current step */
+    uint32_t *roots;            /* nodes the current step attached to older nodes */
+    uint32_t nroots, roots_cap;
+    uint32_t stopped_script;    /* the <script> the step stopped after */
 } Builder;
 
-static uint32_t build_element(Builder *b, DomTok *t, uint32_t parent) {
+static CssAtom g_template_atom;
+
+/* Where a streamed node goes under `parent`: a template's children are its
+ * content's (they are inert, so not roots); others are roots when the parent
+ * is older than this step. */
+static uint32_t stream_parent(Builder *b, uint32_t parent, bool parent_fresh, uint32_t child) {
+    if (!b->streaming) return parent;
+    if (g_dom.kind[parent] == DOM_K_ELEMENT && g_dom.tag[parent] == g_template_atom) {
+        NodeId frag = dom_template_content(dom_id_of(parent));
+        if (!frag) {
+            frag = dom_create_fragment(dom_id_of(b->owner));
+            dom_set_template_content(dom_id_of(parent), frag);
+        }
+        return dom_slot(frag);
+    }
+    if (!parent_fresh && !(g_dom.flags[parent] & DOMF_TEMPLATE_CONTENT)) {
+        if (b->nroots == b->roots_cap) {
+            b->roots_cap = b->roots_cap ? b->roots_cap * 2 : 64;
+            b->roots = realloc(b->roots, b->roots_cap * sizeof(uint32_t));
+        }
+        b->roots[b->nroots++] = child;
+    }
+    return parent;
+}
+
+static uint32_t build_element(Builder *b, DomTok *t, uint32_t parent, bool parent_fresh) {
     uint32_t s = dom_alloc_slot(DOM_K_ELEMENT, dom_id_of(b->owner));
     g_dom.tag[s] = t->tag;
     g_dom.flags[s] = dom_tag_flags(t->tag) | ((t->flags & TKF_SELF_CLOSED) ? DOMF_SELF_CLOSED : 0);
@@ -623,6 +655,7 @@ static uint32_t build_element(Builder *b, DomTok *t, uint32_t parent) {
                 break;
             }
     }
+    parent = stream_parent(b, parent, parent_fresh, s);
     dom_link_append(dom_id_of(parent), dom_id_of(s));
     if (g_dom.flags[s] & DOMF_CE_CANDIDATE) {
         for (uint32_t p = parent; p; p = g_dom.parent[p]) {
@@ -633,7 +666,7 @@ static uint32_t build_element(Builder *b, DomTok *t, uint32_t parent) {
     return s;
 }
 
-static void build_text(Builder *b, DomTok *t, uint32_t parent) {
+static void build_text(Builder *b, DomTok *t, uint32_t parent, bool parent_fresh) {
     /* A newline right after <pre> / <listing> is not content (HTML §13.2.6.4.7). */
     if (!g_dom.first[parent] && t->text.len && t->text.s[0] == '\n') {
         const char *tn = css_atom_str(g_dom.tag[parent]);
@@ -646,6 +679,7 @@ static void build_text(Builder *b, DomTok *t, uint32_t parent) {
     uint32_t s = dom_alloc_slot(DOM_K_TEXT, dom_id_of(b->owner));
     g_dom.text[s] = t->text;
     t->text = (DomStr){ NULL, 0, 0 };
+    parent = stream_parent(b, parent, parent_fresh, s);
     dom_link_append(dom_id_of(parent), dom_id_of(s));
 }
 
@@ -656,21 +690,29 @@ static bool build_tokens(Builder *b, TokChunk *c, size_t *pi, size_t *detour) {
     for (size_t i = *pi; i < c->n; i++) {
         DomTok *t = &c->toks[i];
         uint32_t top = b->sp ? b->stack[b->sp - 1] : 0;
+        bool top_fresh = top && b->streaming && b->fresh[b->sp - 1];
         switch (t->kind) {
         case TK_START: {
             uint32_t parent = top ? top : b->frag;
-            uint32_t s = build_element(b, t, parent);
+            uint32_t s = build_element(b, t, parent, top_fresh);
             uint16_t f = g_dom.flags[s];
-            if (f & DOMF_SELF_CLOSED) break;
-            if (f & DOMF_RAW_TEXT) {
+            if (f & DOMF_RAW_TEXT && !(f & DOMF_SELF_CLOSED)) {
                 if (i + 1 < c->n && c->toks[i + 1].kind == TK_RAW) {
                     DomTok *r = &c->toks[++i];
-                    if (r->text.len) build_text(b, r, s);
+                    if (r->text.len) build_text(b, r, s, true);
                 }
-                break;
             }
-            if (f & DOMF_VOID) break;
-            if (b->sp + 1 < MAX_NESTING) b->stack[b->sp++] = s;
+            /* A streamed script runs before the parser goes on. */
+            if (b->streaming && t->tag == g_raw_atoms[0]) {
+                b->stopped_script = s;
+                *pi = i + 1;
+                return true;
+            }
+            if (f & (DOMF_SELF_CLOSED | DOMF_RAW_TEXT | DOMF_VOID)) break;
+            if (b->sp + 1 < MAX_NESTING) {
+                if (b->streaming) b->fresh[b->sp] = 1;
+                b->stack[b->sp++] = s;
+            }
             break;
         }
         case TK_END:
@@ -689,8 +731,8 @@ static bool build_tokens(Builder *b, TokChunk *c, size_t *pi, size_t *detour) {
             }
             break;
         case TK_TEXT:
-            if (top) build_text(b, t, top);
-            else if (b->keep_top_text) build_text(b, t, b->frag);
+            if (top) build_text(b, t, top, top_fresh);
+            else if (b->keep_top_text) build_text(b, t, b->frag, false);
             break;
         default:
             break;
@@ -707,7 +749,7 @@ static void parse_into(const char *html, size_t len, uint32_t frag, uint32_t own
     size_t nchunks = 0;
     tokenize_all(html, len, &chunks, &nchunks);
     double t0 = now_ms();
-    Builder b = { html, len, frag, owner, malloc(MAX_NESTING * sizeof(uint32_t)), 0, 0, false };
+    Builder b = { .html = html, .len = len, .frag = frag, .owner = owner, .stack = malloc(MAX_NESTING * sizeof(uint32_t)) };
     b.keep_top_text = fragment_mode;
     css_atom_reserve(1);
     b.id_name = css_atom_intern("id", 2);
@@ -759,6 +801,122 @@ NodeId dom_parse_html_fragment(const char *html, size_t len, NodeId owner_doc) {
 void dom_parse_html_into(const char *html, size_t len, NodeId parent, NodeId owner_doc) {
     if (!html || !len || !dom_valid(parent)) return;
     parse_into(html, len, dom_slot(parent), dom_valid(owner_doc) ? dom_slot(owner_doc) : 0, false);
+}
+
+/* ============================================================================
+ * Streaming (dom_stream_*)
+ * ============================================================================ */
+
+struct DomStream {
+    char *buf;
+    size_t len, cap;
+    size_t pos;                 /* where the next tokenizing starts */
+    TokChunk cur;               /* tokens not built yet: [ci, cur.n) */
+    size_t ci;
+    bool have_cur;
+    Builder b;
+};
+
+DomStream *dom_stream_begin(NodeId parent, NodeId owner_doc) {
+    if (!dom_valid(parent)) return NULL;
+    init_raw_atoms();
+    css_atom_reserve(2);
+    if (!g_template_atom) g_template_atom = css_atom_intern("template", 8);
+    DomStream *st = calloc(1, sizeof(DomStream));
+    if (!st) return NULL;
+    st->b.frag = dom_slot(parent);
+    st->b.owner = dom_valid(owner_doc) ? dom_slot(owner_doc) : 0;
+    st->b.stack = malloc(MAX_NESTING * sizeof(uint32_t));
+    st->b.fresh = calloc(MAX_NESTING, 1);
+    st->b.id_name = css_atom_intern("id", 2);
+    st->b.streaming = true;
+    return st;
+}
+
+void dom_stream_append(DomStream *st, const char *data, size_t n) {
+    if (!st || !n) return;
+    if (st->len + n + 1 > st->cap) {
+        size_t cap = st->cap ? st->cap : 65536;
+        while (st->len + n + 1 > cap) cap *= 2;
+        char *nb = realloc(st->buf, cap);
+        if (!nb) return;
+        st->buf = nb;
+        st->cap = cap;
+    }
+    memcpy(st->buf + st->len, data, n);
+    st->len += n;
+    st->buf[st->len] = '\0';
+}
+
+const char *dom_stream_source(DomStream *st, size_t *len) {
+    if (len) *len = st ? st->len : 0;
+    return st ? st->buf : NULL;
+}
+
+NodeId dom_stream_pump(DomStream *st, bool final) {
+    if (!st) return DOM_NULL;
+    Builder *b = &st->b;
+    memset(b->fresh, 0, b->sp);
+    b->nroots = 0;
+    b->stopped_script = 0;
+    b->html = st->buf;
+    b->len = st->len;
+    for (;;) {
+        if (st->have_cur && st->ci < st->cur.n) {
+            size_t detour = 0;
+            if (!build_tokens(b, &st->cur, &st->ci, &detour)) {
+                /* Re-tokenize from inside the stray end tag. */
+                chunk_free(&st->cur);
+                st->have_cur = false;
+                st->pos = detour;
+                continue;
+            }
+            if (b->stopped_script) return dom_id_of(b->stopped_script);
+            continue;
+        }
+        if (st->have_cur) { chunk_free(&st->cur); st->have_cur = false; }
+        if (st->pos >= st->len) return DOM_NULL;
+        TokChunk *c = &st->cur;
+        memset(c, 0, sizeof *c);
+        c->html = st->buf;
+        c->len = c->full_len = st->len;
+        c->start = st->pos;
+        c->limit = st->len;
+        c->doc_start = st->pos == 0;
+        tokenize(c, true);
+        /* Only tokens that have wholly arrived: one reaching the end of the
+         * input may be cut short (a text run, a tag, a script's content). */
+        size_t keep = c->n;
+        if (!final) {
+            keep = 0;
+            while (keep < c->n && c->toks[keep].end < st->len) keep++;
+        }
+        size_t next = final ? c->end : keep ? c->toks[keep - 1].end : st->pos;
+        chunk_release_tokens(c, keep);
+        if (!keep) {
+            chunk_free(c);
+            if (final) st->pos = st->len;
+            return DOM_NULL;
+        }
+        st->pos = next;
+        st->have_cur = true;
+        st->ci = 0;
+    }
+}
+
+const uint32_t *dom_stream_new_roots(DomStream *st, uint32_t *n) {
+    *n = st ? st->b.nroots : 0;
+    return st ? st->b.roots : NULL;
+}
+
+void dom_stream_end(DomStream *st) {
+    if (!st) return;
+    if (st->have_cur) chunk_free(&st->cur);
+    free(st->b.stack);
+    free(st->b.fresh);
+    free(st->b.roots);
+    free(st->buf);
+    free(st);
 }
 
 DomParseRoots dom_parse_roots(NodeId fragment) {

@@ -404,6 +404,155 @@ bool html_populate_js_document_from_html(JSContextHandle ctx, GCValue js_doc, co
     return ok;
 }
 
+/* ============================================================================
+ * Streaming the page into the document (html_doc_stream_*)
+ * ============================================================================ */
+
+struct HtmlDocStream {
+    JSContextHandle ctx;
+    GCValue js_doc;                         /* rooted, as are the old elements */
+    GCValue old_de, old_head, old_body;     /* the skeleton's, for their properties */
+    DomStream *st;
+    NodeId doc, de, head, body;
+};
+
+static void stream_root(GCValue v, bool add) {
+    if (!JS_IsObject(v)) return;
+    GCHandle h = GC_VALUE_GET_HANDLE(v);
+    if (h == GC_HANDLE_NULL) return;
+    if (add) gc_add_root(h); else gc_remove_root(h);
+}
+
+HtmlDocStream *html_doc_stream_begin(JSContextHandle ctx, GCValue js_doc) {
+    NodeId doc = dom_node_of(js_doc);
+    if (dom_kind(doc) != DOM_K_DOCUMENT) return NULL;
+    HtmlDocStream *s = (HtmlDocStream *)calloc(1, sizeof(*s));
+    if (!s) return NULL;
+    s->ctx = ctx;
+    s->doc = doc;
+    s->js_doc = js_doc;
+    s->old_de = JS_GetPropertyStr(ctx, js_doc, "documentElement");
+    s->old_head = JS_GetPropertyStr(ctx, js_doc, "head");
+    s->old_body = JS_GetPropertyStr(ctx, js_doc, "body");
+    stream_root(s->js_doc, true);
+    stream_root(s->old_de, true);
+    stream_root(s->old_head, true);
+    stream_root(s->old_body, true);
+    /* The page replaces the skeleton's root element. */
+    NodeId old = dom_node_of(s->old_de);
+    if (old && dom_parent(old) == doc) dom_detach(old, true);
+    JS_SetPropertyStr(ctx, js_doc, "readyState", JS_NewString(ctx, "loading"));
+    s->st = dom_stream_begin(doc, doc);
+    if (!s->st) { html_doc_stream_end(s); return NULL; }
+    return s;
+}
+
+void html_doc_stream_append(HtmlDocStream *s, const char *data, size_t len) {
+    if (s) dom_stream_append(s->st, data, len);
+}
+
+/* The first element child of `parent` (named `tag`, or any when NULL). */
+static NodeId first_child_tagged(NodeId parent, const char *tag) {
+    for (NodeId c = dom_first_child(parent); c; c = dom_next_sibling(c))
+        if (dom_kind(c) == DOM_K_ELEMENT && (!tag || strcmp(dom_tag_name(c), tag) == 0)) return c;
+    return DOM_NULL;
+}
+
+/* The document's root, head and body as the parser makes them, with the
+ * skeleton's properties moved over (as html_populate_js_document_from_html
+ * does for the whole page at once). */
+static void stream_note_root_elements(HtmlDocStream *s) {
+    JSContextHandle ctx = s->ctx;
+    /* (The root is the first element, whatever its name, as for the whole
+     * page at once.) */
+    if (!s->de && (s->de = first_child_tagged(s->doc, NULL))) {
+        GCValue e = dom_js(ctx, s->de);
+        dom_node_set_owner_document(ctx, e, s->js_doc);
+        html_transfer_element_properties(ctx, e, s->old_de);
+        JS_SetPropertyStr(ctx, s->js_doc, "documentElement", e);
+        g_dom_index_root = s->de;
+    }
+    if (!s->de) return;
+    if (!s->head && (s->head = first_child_tagged(s->de, "head"))) {
+        GCValue e = dom_js(ctx, s->head);
+        dom_node_set_owner_document(ctx, e, s->js_doc);
+        html_transfer_element_properties(ctx, e, s->old_head);
+        JS_SetPropertyStr(ctx, s->js_doc, "head", e);
+        JS_SetPropertyStr(ctx, dom_js(ctx, s->de), "head", e);
+    }
+    if (!s->body && (s->body = first_child_tagged(s->de, "body"))) {
+        GCValue e = dom_js(ctx, s->body);
+        dom_node_set_owner_document(ctx, e, s->js_doc);
+        html_transfer_element_properties(ctx, e, s->old_body);
+        JS_SetPropertyStr(ctx, s->js_doc, "body", e);
+        JS_SetPropertyStr(ctx, dom_js(ctx, s->de), "body", e);
+    }
+}
+
+static bool in_document(uint32_t slot, uint32_t doc) {
+    for (uint32_t p = slot; p; p = g_dom.parent[p]) if (p == doc) return true;
+    return false;
+}
+
+GCValue html_doc_stream_step(HtmlDocStream *s, bool final) {
+    if (!s) return JS_NULL;
+    JSContextHandle ctx = s->ctx;
+    NodeId script = dom_stream_pump(s->st, final);
+    stream_note_root_elements(s);
+    /* What the parser inserted is connected now: custom elements defined so
+     * far upgrade and get connectedCallback, once per new subtree. */
+    uint32_t n = 0;
+    const uint32_t *roots = dom_stream_new_roots(s->st, &n);
+    if (n) {
+        js_cyber_ce_push_stack(ctx);
+        for (uint32_t i = 0; i < n; i++)
+            if (g_dom.kind[roots[i]] == DOM_K_ELEMENT && in_document(roots[i], dom_slot(s->doc)))
+                dom_ce_on_connect(ctx, dom_id_of(roots[i]));
+        js_cyber_ce_flush_reactions(ctx, JS_UNDEFINED, 0, NULL);
+        js_cyber_ce_pop_stack(ctx);
+        dom_request_layout();
+    }
+    return script ? dom_js(ctx, script) : JS_NULL;
+}
+
+const char *html_doc_stream_source(HtmlDocStream *s, size_t *len) {
+    return s ? dom_stream_source(s->st, len) : NULL;
+}
+
+void html_doc_stream_end(HtmlDocStream *s) {
+    if (!s) return;
+    JSContextHandle ctx = s->ctx;
+    /* A page without <html>, <head> or <body> gets them, as the whole-page
+     * population does: what the parser put at the top goes into the root. */
+    if (s->st) {
+        if (!s->de) {
+            NodeId de = shallow_copy(DOM_NULL, "html", s->doc);
+            move_children(s->doc, de, false);
+            dom_attach(s->doc, de, DOM_NULL);
+        }
+        stream_note_root_elements(s);
+        if (s->de && !s->head) {
+            NodeId head = shallow_copy(DOM_NULL, "head", s->doc);
+            dom_attach(s->de, head, dom_first_child(s->de));
+        }
+        if (s->de && !s->body) {
+            /* (After the head, as html_populate_js_document_from_html puts it.) */
+            NodeId body = shallow_copy(DOM_NULL, "body", s->doc);
+            NodeId head = first_child_tagged(s->de, "head");
+            dom_attach(s->de, body, head ? dom_next_sibling(head) : dom_first_child(s->de));
+        }
+        stream_note_root_elements(s);
+        dom_request_layout();
+        dom_stream_end(s->st);
+    }
+    stream_root(s->js_doc, false);
+    stream_root(s->old_de, false);
+    stream_root(s->old_head, false);
+    stream_root(s->old_body, false);
+    (void)ctx;
+    free(s);
+}
+
 bool html_populate_js_document(JSContextHandle ctx, GCValue js_doc, HtmlDocument *doc) {
     if (!SAFE_VALID(ctx) || !doc) return false;
     if (JS_IsUndefined(js_doc) || JS_IsNull(js_doc)) return false;

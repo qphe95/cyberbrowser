@@ -3037,6 +3037,129 @@ static int js_exec_timeout_handler(JSRuntimeHandle rt, void *opaque) {
     return elapsed > state->limit_seconds ? 1 : 0;
 }
 
+/* Run one page script (classic, global): the timeout, the profile entry and
+ * the timers and jobs it leaves due, as for every script of a page.  `i` and
+ * `script_count` name it in logs.  Returns whether it completed. */
+bool js_quickjs_exec_script(const char *script, size_t script_len, int i, int script_count) {
+    JSContextHandle ctx = g_js_context;
+    bool ok = false;
+    const size_t MAX_EXEC_SCRIPT_SIZE = 64 * 1024 * 1024; /* 64 MiB safety limit */
+    if (!script || script_len == 0) {
+        platform_log(LOG_LEVEL_WARN, "js_quickjs",
+            "[EXEC] Script %d is empty or NULL, skipping", i);
+        return false;
+    }
+
+    if (script_len > MAX_EXEC_SCRIPT_SIZE) {
+        platform_log(LOG_LEVEL_WARN, "js_quickjs",
+            "[EXEC] Script %d is %zu bytes, exceeds %zu byte safety limit, skipping",
+            i, script_len, MAX_EXEC_SCRIPT_SIZE);
+        fprintf(stderr, "[js_quickjs] SKIP script %d size=%zu > limit=%zu\n",
+                i, script_len, MAX_EXEC_SCRIPT_SIZE);
+        fflush(stderr);
+        return false;
+    }
+
+    char filename[64];
+    snprintf(filename, sizeof(filename), "<script_%d>", i);
+    /* Sheets downloaded meanwhile go into the cache now, which starts
+     * their web fonts downloading well before the first layout. */
+    css_layout_install_prefetched_sheets();
+
+    log_to_file("js_quickjs", "Executing script %d: %zu bytes", i, script_len);
+    platform_log(LOG_LEVEL_INFO, "js_quickjs",
+        "[EXEC] Executing script %d: %zu bytes", i, script_len);
+    fprintf(stderr, "[js_quickjs] >>> EVAL script %d/%d size=%zu\n",
+            i, script_count, script_len);
+    fflush(stderr);
+
+    // Limit per-script wall-clock time. Large application bundles can enter
+    // long-running initialization loops; this prevents them from blocking
+    // the whole pipeline. The limit scales with script size.
+    struct js_exec_timeout_state timeout_state;
+    clock_gettime(CLOCK_MONOTONIC, &timeout_state.start);
+    timeout_state.limit_seconds = 10.0 + (script_len / (1024.0 * 1024.0)) * 4.0;
+    if (timeout_state.limit_seconds > 120.0) timeout_state.limit_seconds = 120.0;
+    JS_SetInterruptHandler(JS_GetRuntime(ctx), js_exec_timeout_handler, &timeout_state);
+
+    // Reset diagnostic for property-on-undefined errors
+    g_last_undefined_prop[0] = '\0';
+
+    // Debug: dump executed scripts to disk so exception stack frames
+    // (which carry original line numbers) can be mapped to real source.
+    if (CYBER_ENV(CYBER_T_DUMP_SCRIPTS)) {
+        char dump_name[64];
+        snprintf(dump_name, sizeof(dump_name), "exec_script_%d.js", i);
+        FILE *df = fopen(dump_name, "wb");
+        if (df) {
+            fwrite(script, 1, script_len, df);
+            fclose(df);
+        }
+    }
+
+    // Execute script directly. Domain-specific string patches are not
+    // applied; custom-element upgrade and missing standard APIs are
+    // implemented in the browser layer instead.
+    //
+    // Lazy parsing is disabled: a lazily-stubbed function body is skipped
+    // at parse time, so the parser never registers which outer variables
+    // the nested function captures, and the enclosing function's closure
+    // var table is built WITHOUT those through-captures.  When the nested
+    // function is later resumed on its own, its JS_CLOSURE_REF indices are
+    // computed against a stale parent closure table and bind to
+    // detached/fresh var_refs instead of the shared enclosing bindings
+    // (observed with YouTube's custom-elements fast-shim: the wrapper class
+    // constructor saw the IIFE's e/f construction flags as undefined,
+    // re-running the user constructor until stack overflow).  CYBER_LAZY=1
+    // re-enables lazy parsing for debugging.
+    int eval_flags = JS_EVAL_TYPE_GLOBAL;
+    if (!cyber_getenv("CYBER_LAZY")) eval_flags |= JS_EVAL_FLAG_NO_LAZY;
+    char evname[64];
+    snprintf(evname, sizeof(evname), "eval-script-%d (%zu KB)",
+             i, script_len / 1024);
+    CP_BEGIN_CAT(evname, "js");
+    GCValue result = JS_Eval(ctx, script, script_len, filename, eval_flags);
+    CP_END(evname);
+
+    // Clear the interrupt handler so later operations (pumping timers, GC)
+    // are not subject to the per-script deadline.
+    JS_SetInterruptHandler(JS_GetRuntime(ctx), NULL, NULL);
+
+    if (JS_IsException(result)) {
+        char log_msg[64];
+        snprintf(log_msg, sizeof(log_msg), "[EXEC] Script %d threw exception: %%s", i);
+        js_quickjs_log_exception(ctx, "js_quickjs", log_msg, true);
+    } else {
+        ok = true;
+        platform_log(LOG_LEVEL_INFO, "js_quickjs",
+            "[EXEC] Script %d executed successfully", i);
+
+    }
+    fprintf(stderr, "[js_quickjs] <<< EVAL script %d/%d result=%s\n",
+            i, script_count, JS_IsException(result) ? "exception" : "ok");
+    fflush(stderr);
+
+    // Drain both timers and pending Promise jobs after each script so that
+    // fetch()/XHR .then() chains and player bootstrap callbacks run.
+    {
+        CP_SCOPE("pump-after-script");
+        js_quickjs_pump_timers_and_jobs();
+    }
+
+    // NOTE: we intentionally do NOT restore/clobber Node.prototype mutation
+    // methods here.  The ShadyDOM (webcomponents-sd.js) polyfill wraps them
+    // and maintains the shadow tree; re-binding the raw C functions would
+    // destroy its wrappers.  The polyfill reaches the native implementations
+    // through the __shady_native_* aliases it captures itself.
+
+    // Run a GC cycle after every script to prevent handle exhaustion /
+    // memory pressure when many large scripts execute in sequence.
+    // NOTE: disabled during script execution because the compacting GC can
+    // invalidate closure references that capture C functions.
+    // JS_RunGC(JS_GetRuntime(ctx));
+    return ok;
+}
+
 bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens, 
                              int script_count, const char *html,
                              JsExecResult *out_result) {
@@ -3124,129 +3247,15 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
 
     // Execute all scripts
     int success_count = 0;
-    const size_t MAX_EXEC_SCRIPT_SIZE = 64 * 1024 * 1024; /* 64 MiB safety limit */
     platform_log(LOG_LEVEL_INFO, "js_quickjs",
         "[EXEC] Starting execution of %d scripts", script_count);
     fprintf(stderr, "[js_quickjs] START exec loop script_count=%d\n", script_count);
     fflush(stderr);
 
     for (int i = 0; i < script_count; i++) {
-        if (!scripts[i] || script_lens[i] == 0) {
-            platform_log(LOG_LEVEL_WARN, "js_quickjs",
-                "[EXEC] Script %d is empty or NULL, skipping", i);
-            continue;
-        }
-
-        if (script_lens[i] > MAX_EXEC_SCRIPT_SIZE) {
-            platform_log(LOG_LEVEL_WARN, "js_quickjs",
-                "[EXEC] Script %d is %zu bytes, exceeds %zu byte safety limit, skipping",
-                i, script_lens[i], MAX_EXEC_SCRIPT_SIZE);
-            fprintf(stderr, "[js_quickjs] SKIP script %d size=%zu > limit=%zu\n",
-                    i, script_lens[i], MAX_EXEC_SCRIPT_SIZE);
-            fflush(stderr);
-            continue;
-        }
-
-        char filename[64];
-        snprintf(filename, sizeof(filename), "<script_%d>", i);
-        /* Sheets downloaded meanwhile go into the cache now, which starts
-         * their web fonts downloading well before the first layout. */
-        css_layout_install_prefetched_sheets();
-
-        log_to_file("js_quickjs", "Executing script %d: %zu bytes", i, script_lens[i]);
-        platform_log(LOG_LEVEL_INFO, "js_quickjs",
-            "[EXEC] Executing script %d: %zu bytes", i, script_lens[i]);
-        fprintf(stderr, "[js_quickjs] >>> EVAL script %d/%d size=%zu\n",
-                i, script_count, script_lens[i]);
-        fflush(stderr);
-
-        // Limit per-script wall-clock time. Large application bundles can enter
-        // long-running initialization loops; this prevents them from blocking
-        // the whole pipeline. The limit scales with script size.
-        struct js_exec_timeout_state timeout_state;
-        clock_gettime(CLOCK_MONOTONIC, &timeout_state.start);
-        timeout_state.limit_seconds = 10.0 + (script_lens[i] / (1024.0 * 1024.0)) * 4.0;
-        if (timeout_state.limit_seconds > 120.0) timeout_state.limit_seconds = 120.0;
-        JS_SetInterruptHandler(JS_GetRuntime(ctx), js_exec_timeout_handler, &timeout_state);
-
-        // Reset diagnostic for property-on-undefined errors
-        g_last_undefined_prop[0] = '\0';
-
-        // Debug: dump executed scripts to disk so exception stack frames
-        // (which carry original line numbers) can be mapped to real source.
-        if (CYBER_ENV(CYBER_T_DUMP_SCRIPTS)) {
-            char dump_name[64];
-            snprintf(dump_name, sizeof(dump_name), "exec_script_%d.js", i);
-            FILE *df = fopen(dump_name, "wb");
-            if (df) {
-                fwrite(scripts[i], 1, script_lens[i], df);
-                fclose(df);
-            }
-        }
-
-        // Execute script directly. Domain-specific string patches are not
-        // applied; custom-element upgrade and missing standard APIs are
-        // implemented in the browser layer instead.
-        //
-        // Lazy parsing is disabled: a lazily-stubbed function body is skipped
-        // at parse time, so the parser never registers which outer variables
-        // the nested function captures, and the enclosing function's closure
-        // var table is built WITHOUT those through-captures.  When the nested
-        // function is later resumed on its own, its JS_CLOSURE_REF indices are
-        // computed against a stale parent closure table and bind to
-        // detached/fresh var_refs instead of the shared enclosing bindings
-        // (observed with YouTube's custom-elements fast-shim: the wrapper class
-        // constructor saw the IIFE's e/f construction flags as undefined,
-        // re-running the user constructor until stack overflow).  CYBER_LAZY=1
-        // re-enables lazy parsing for debugging.
-        int eval_flags = JS_EVAL_TYPE_GLOBAL;
-        if (!cyber_getenv("CYBER_LAZY")) eval_flags |= JS_EVAL_FLAG_NO_LAZY;
-        char evname[64];
-        snprintf(evname, sizeof(evname), "eval-script-%d (%zu KB)",
-                 i, script_lens[i] / 1024);
-        CP_BEGIN_CAT(evname, "js");
-        GCValue result = JS_Eval(ctx, scripts[i], script_lens[i], filename, eval_flags);
-        CP_END(evname);
-
-        // Clear the interrupt handler so later operations (pumping timers, GC)
-        // are not subject to the per-script deadline.
-        JS_SetInterruptHandler(JS_GetRuntime(ctx), NULL, NULL);
-
-        if (JS_IsException(result)) {
-            char log_msg[64];
-            snprintf(log_msg, sizeof(log_msg), "[EXEC] Script %d threw exception: %%s", i);
-            js_quickjs_log_exception(ctx, "js_quickjs", log_msg, true);
-        } else {
-            success_count++;
-            platform_log(LOG_LEVEL_INFO, "js_quickjs",
-                "[EXEC] Script %d executed successfully", i);
-
-        }
-        fprintf(stderr, "[js_quickjs] <<< EVAL script %d/%d result=%s\n",
-                i, script_count, JS_IsException(result) ? "exception" : "ok");
-        fflush(stderr);
-
-        // Drain both timers and pending Promise jobs after each script so that
-        // fetch()/XHR .then() chains and player bootstrap callbacks run.
-        {
-            CP_SCOPE("pump-after-script");
-            js_quickjs_pump_timers_and_jobs();
-        }
-
-        // NOTE: we intentionally do NOT restore/clobber Node.prototype mutation
-        // methods here.  The ShadyDOM (webcomponents-sd.js) polyfill wraps them
-        // and maintains the shadow tree; re-binding the raw C functions would
-        // destroy its wrappers.  The polyfill reaches the native implementations
-        // through the __shady_native_* aliases it captures itself.
-
-        // Run a GC cycle after every script to prevent handle exhaustion /
-        // memory pressure when many large scripts execute in sequence.
-        // NOTE: disabled during script execution because the compacting GC can
-        // invalidate closure references that capture C functions.
-        // JS_RunGC(JS_GetRuntime(ctx));
+        if (js_quickjs_exec_script(scripts[i], script_lens[i], i, script_count)) success_count++;
     }
 
-    // Process all remaining timers and jobs after all scripts complete.
     js_quickjs_pump_timers_and_jobs();
     log_to_file("js_quickjs", "Drained remaining timers/jobs after all scripts");
 

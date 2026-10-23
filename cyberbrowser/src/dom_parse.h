@@ -49,6 +49,25 @@ void dom_parse_html_into(const char *html, size_t len, NodeId parent, NodeId own
  * parsed <body>'s children when the input has a body, else the top level. */
 NodeId dom_parse_fragment_source(NodeId fragment);
 
+/* Streaming: build a document into `parent` (a live document) as its source
+ * arrives, stopping after each <script> element so the caller can run it
+ * before the rest is parsed (HTML's parser-blocking scripts).  The tree is the
+ * one dom_parse_html builds from the whole input, except that a template's
+ * children go straight into its content.
+ *   append  add arrived bytes (the source is kept whole)
+ *   pump    build what has arrived: returns the <script> element just
+ *           completed (call again after running it), or DOM_NULL when it
+ *           needs more input; `final` when the input is complete
+ *   new_roots  the nodes (slots) this pump attached to nodes from before it, in
+ *           document order (what a connected-callback walk starts from) */
+typedef struct DomStream DomStream;
+DomStream *dom_stream_begin(NodeId parent, NodeId owner_doc);
+void dom_stream_append(DomStream *st, const char *data, size_t len);
+NodeId dom_stream_pump(DomStream *st, bool final);
+const uint32_t *dom_stream_new_roots(DomStream *st, uint32_t *n);
+const char *dom_stream_source(DomStream *st, size_t *len);
+void dom_stream_end(DomStream *st);
+
 /* Head / body / root of a parsed fragment, as html_parse() reports them. */
 typedef struct DomParseRoots { NodeId root, head, body; } DomParseRoots;
 DomParseRoots dom_parse_roots(NodeId fragment);

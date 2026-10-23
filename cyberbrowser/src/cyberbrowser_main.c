@@ -319,11 +319,19 @@ static void finish_browser_context(void) {
     gc_core_stop_thread();
 }
 
-static void preload_scan_observe(void *scan, const char *data, size_t len) {
-    html_preload_scan_feed((HtmlPreloadScan *)scan, data, len);
+typedef struct PageObserver {
+    HtmlPreloadScan *scan;
+    HtmlPageStream *page;
+} PageObserver;
+
+/* The page as it arrives: first what it will fetch, then parse and run. */
+static void page_observe(void *user, const char *data, size_t len) {
+    PageObserver *o = (PageObserver *)user;
+    if (o->scan) html_preload_scan_feed(o->scan, data, len);
+    if (o->page) html_page_stream_feed(o->page, data, len);
 }
 
-static char *fetch_start_page(const char *url, size_t *out_size) {
+static char *fetch_start_page(const char *url, size_t *out_size, HtmlPageStream *page) {
     printf("Fetching %s ...\n", url);
 
     HttpBuffer buffer = {0};
@@ -351,11 +359,11 @@ static char *fetch_start_page(const char *url, size_t *out_size) {
      * downloading while the rest of it does (CYBER_PRELOAD_SCAN=0: once it
      * is all here, as before). */
     const char *ps = cyber_getenv("CYBER_PRELOAD_SCAN");
-    HtmlPreloadScan *scan = ps && ps[0] == '0' ? NULL : html_preload_scan_begin();
-    bool ok = scan ? http_get_to_memory_observed(url, headers, nheaders, &buffer, error, sizeof(error),
-                                                 preload_scan_observe, scan)
-                   : http_get_to_memory_with_headers(url, headers, nheaders, &buffer, error, sizeof(error));
-    html_preload_scan_end(scan);
+    PageObserver obs = { ps && ps[0] == '0' ? NULL : html_preload_scan_begin(), page };
+    bool ok = obs.scan || obs.page
+        ? http_get_to_memory_observed(url, headers, nheaders, &buffer, error, sizeof(error), page_observe, &obs)
+        : http_get_to_memory_with_headers(url, headers, nheaders, &buffer, error, sizeof(error));
+    html_preload_scan_end(obs.scan);
     if (!ok || !buffer.data || buffer.size == 0) {
         printf("FATAL: Failed to fetch start page: %s\n", error);
         return NULL;
@@ -1183,6 +1191,55 @@ static void tl_mark(const char *what) {
     unsigned long long a = ((unsigned long long)c.dwHighDateTime << 32) | c.dwLowDateTime, b = ((unsigned long long)now.dwHighDateTime << 32) | now.dwLowDateTime;
     fprintf(stderr, "[timeline] %-28s %8.1f ms\n", what, (b - a) / 1e4); fflush(stderr);
 }
+/* Before the page's first script: engine polyfills, diagnostics and the
+ * CYBER_PRELUDE_JS hook. */
+static void prepare_page_scripts(void) {
+    {
+        const char *bind_polyfill =
+            "(function(){"
+            "  var orig = Function.prototype.bind;"
+            "  Function.prototype.bind = function(){"
+            "    var b = orig.apply(this, arguments);"
+            "    try { b.__cyber_bound_target = this; } catch(e) {}"
+            "    return b;"
+            "  };"
+            "})();";
+        JS_Eval(g_ctx, bind_polyfill, strlen(bind_polyfill), "<bind_polyfill>", JS_EVAL_TYPE_GLOBAL);
+    }
+    {
+        const char *pre_diag = "console.error('[PRE-DIAG] Element.matches=' + typeof Element.prototype.matches);";
+        JS_Eval(g_ctx, pre_diag, strlen(pre_diag), "<pre_diag>", JS_EVAL_TYPE_GLOBAL);
+    }
+    /* Developer hook: CYBER_PRELUDE_JS=<file> is evaluated in the page
+     * realm before any page script (instrumentation, polyfill tests). */
+    {
+        const char *prelude = cyber_getenv("CYBER_PRELUDE_JS");
+        if (prelude && *prelude) {
+            FILE *pf = fopen(prelude, "rb");
+            if (pf) {
+                fseek(pf, 0, SEEK_END);
+                long psz = ftell(pf);
+                fseek(pf, 0, SEEK_SET);
+                char *pbuf = psz >= 0 ? (char *)malloc((size_t)psz + 1) : NULL;
+                if (pbuf && fread(pbuf, 1, (size_t)psz, pf) == (size_t)psz) {
+                    pbuf[psz] = 0;
+                    GCValue pr = JS_Eval(g_ctx, pbuf, (size_t)psz, "<prelude>", JS_EVAL_TYPE_GLOBAL);
+                    if (JS_IsException(pr)) {
+                        GCValue exc = JS_GetException(g_ctx);
+                        const char *es = JS_ToCString(g_ctx, exc);
+                        fprintf(stderr, "[PRELUDE] exception: %s\n", es ? es : "?");
+                    }
+                }
+                free(pbuf);
+                fclose(pf);
+            } else {
+                fprintf(stderr, "[PRELUDE] cannot open %s\n", prelude);
+            }
+        }
+    }
+    js_quickjs_clear_captured_urls();
+}
+
 int main(int argc, char *argv[]) {
     tl_mark("main");
     /* Diagnostics on stderr and progress on stdout are buffered (unbuffered,
@@ -1354,11 +1411,24 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    /* Parse the page into the document as it arrives and run each script
+     * where the parser reaches it (HTML's model).  CYBER_STREAM_PARSE=0: parse
+     * the whole page, then run every script (the old path). */
+    bool scripts_prepared = false;
+    HtmlPageStream *page_stream = NULL;
+    {
+        const char *sp = cyber_getenv("CYBER_STREAM_PARSE");
+        if (!(sp && sp[0] == '0')) {
+            prepare_page_scripts();
+            scripts_prepared = true;
+            page_stream = html_page_stream_begin();
+        }
+    }
     size_t html_size = 0;
     char *html = NULL;
     {
         CP_SCOPE("fetch-start-page");
-        html = fetch_start_page(start_url, &html_size);
+        html = fetch_start_page(start_url, &html_size, page_stream);
     }
     if (!html) {
         cleanup_browser_context();
@@ -1371,53 +1441,13 @@ int main(int argc, char *argv[]) {
      * and upgrade any custom elements defined during script execution. */
     {
         printf("Executing page scripts ...\n");
-        {
-            const char *bind_polyfill =
-                "(function(){"
-                "  var orig = Function.prototype.bind;"
-                "  Function.prototype.bind = function(){"
-                "    var b = orig.apply(this, arguments);"
-                "    try { b.__cyber_bound_target = this; } catch(e) {}"
-                "    return b;"
-                "  };"
-                "})();";
-            JS_Eval(g_ctx, bind_polyfill, strlen(bind_polyfill), "<bind_polyfill>", JS_EVAL_TYPE_GLOBAL);
-        }
-        {
-            const char *pre_diag = "console.error('[PRE-DIAG] Element.matches=' + typeof Element.prototype.matches);";
-            JS_Eval(g_ctx, pre_diag, strlen(pre_diag), "<pre_diag>", JS_EVAL_TYPE_GLOBAL);
-        }
-        /* Developer hook: CYBER_PRELUDE_JS=<file> is evaluated in the page
-         * realm before any page script (instrumentation, polyfill tests). */
-        {
-            const char *prelude = cyber_getenv("CYBER_PRELUDE_JS");
-            if (prelude && *prelude) {
-                FILE *pf = fopen(prelude, "rb");
-                if (pf) {
-                    fseek(pf, 0, SEEK_END);
-                    long psz = ftell(pf);
-                    fseek(pf, 0, SEEK_SET);
-                    char *pbuf = psz >= 0 ? (char *)malloc((size_t)psz + 1) : NULL;
-                    if (pbuf && fread(pbuf, 1, (size_t)psz, pf) == (size_t)psz) {
-                        pbuf[psz] = 0;
-                        GCValue pr = JS_Eval(g_ctx, pbuf, (size_t)psz, "<prelude>", JS_EVAL_TYPE_GLOBAL);
-                        if (JS_IsException(pr)) {
-                            GCValue exc = JS_GetException(g_ctx);
-                            const char *es = JS_ToCString(g_ctx, exc);
-                            fprintf(stderr, "[PRELUDE] exception: %s\n", es ? es : "?");
-                        }
-                    }
-                    free(pbuf);
-                    fclose(pf);
-                } else {
-                    fprintf(stderr, "[PRELUDE] cannot open %s\n", prelude);
-                }
-            }
-        }
-        js_quickjs_clear_captured_urls();
+        if (!scripts_prepared) prepare_page_scripts();
         JsExecResult js_result;
         bool exec_ok = false;
-        {
+        if (page_stream) {
+            exec_ok = html_page_stream_finish(page_stream, &js_result);
+            page_stream = NULL;
+        } else {
             CP_SCOPE("execute-page-scripts");
             exec_ok = html_execute_page_scripts(html, &js_result);
         }
