@@ -680,6 +680,7 @@ typedef struct GCStats {
     uint64_t boundary_ns_max;
     uint64_t full_ns_total;
     uint64_t full_ns_max;
+    uint64_t full_wait_ns_total;  /* of full_ns: waiting for the GC thread's cycle to stop */
     uint64_t dirty_cards_rescanned;
     uint64_t objects_freed;
     uint64_t objects_copied;

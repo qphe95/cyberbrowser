@@ -632,7 +632,9 @@ void gc_run(void) {
     __asm__ __volatile__("" : : "r"(&regs) : "memory");
 #endif
     uintptr_t lo = here < (uintptr_t)&here ? here : (uintptr_t)&here;
+    uint64_t t0 = gc_os_now_ns();
     gc_col_finish_concurrent_cycle(lo);
+    g_core.stats.full_wait_ns_total += gc_os_now_ns() - t0;
     full_collection(lo);
 }
 

@@ -56,6 +56,8 @@ uint64_t gc_os_thread_id(void);
 uintptr_t gc_os_stack_base(void);
 
 uint64_t gc_os_now_ns(void);
+/* CPU time the calling thread has used. */
+uint64_t gc_os_thread_cpu_ns(void);
 
 #ifdef __cplusplus
 }

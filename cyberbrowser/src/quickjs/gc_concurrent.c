@@ -171,6 +171,52 @@ typedef struct GCConc {
 
 static GCConc g_conc;
 
+/* Debug (QJS_GC_STATS=1): what the collector costs the JS thread, printed at
+ * exit: boundary steps by kind, full collections, waits for the GC thread,
+ * and how long the GC thread waits for the JS thread to reach a poll. */
+static int g_gstats = -1;
+static struct {
+    uint64_t n, ns, max_ns, declined;        /* JS thread: the step itself */
+    uint64_t wait_ns, wait_max_ns;           /* GC thread: post to answer, less the step */
+} g_gstep[4];
+static _Atomic uint64_t g_gstep_last_ns;     /* JS thread -> GC thread: the step just answered */
+static uint64_t g_gwait_idle_ns, g_gwait_idle_n;
+static _Atomic uint64_t g_gthread_cpu_ns;    /* GC thread: its CPU time after its last cycle */
+static uint64_t g_gcycle_n[2], g_gcycle_ns[2];
+static uint64_t g_gjs_cpu0_ns;
+
+static void gstats_dump(void) {
+    static const char *names[4] = { "none", "mark start", "remark", "weak apply" };
+    uint64_t js_cpu = gc_os_thread_cpu_ns() - g_gjs_cpu0_ns, total = 0;
+    fprintf(stderr, "[GC-STATS] JS thread CPU %.1f ms; GC thread CPU %.1f ms\n",
+            js_cpu / 1e6, atomic_load(&g_gthread_cpu_ns) / 1e6);
+    for (int k = 1; k < 4; k++) {
+        total += g_gstep[k].ns;
+        fprintf(stderr, "[GC-STATS] %-10s: %llu steps, %.2f ms total, %.2f ms max, %llu declined; "
+                "GC thread waited %.1f ms for them (%.2f ms max)\n", names[k],
+                (unsigned long long)g_gstep[k].n, g_gstep[k].ns / 1e6, g_gstep[k].max_ns / 1e6,
+                (unsigned long long)g_gstep[k].declined, g_gstep[k].wait_ns / 1e6, g_gstep[k].wait_max_ns / 1e6);
+    }
+    fprintf(stderr, "[GC-STATS] full collections: %llu, %.2f ms (%.2f ms of it waiting for the GC thread), %.2f ms max\n",
+            (unsigned long long)g_core.stats.full_collections, g_core.stats.full_ns_total / 1e6 + g_core.stats.full_wait_ns_total / 1e6,
+            g_core.stats.full_wait_ns_total / 1e6, g_core.stats.full_ns_max / 1e6);
+    fprintf(stderr, "[GC-STATS] gc_wait_idle: %llu calls, %.2f ms\n", (unsigned long long)g_gwait_idle_n, g_gwait_idle_ns / 1e6);
+    total += g_core.stats.full_ns_total + g_core.stats.full_wait_ns_total + g_gwait_idle_ns;
+    fprintf(stderr, "[GC-STATS] cycles: %llu minor (%.1f ms), %llu major (%.1f ms) on the GC thread\n",
+            (unsigned long long)g_gcycle_n[0], g_gcycle_ns[0] / 1e6, (unsigned long long)g_gcycle_n[1], g_gcycle_ns[1] / 1e6);
+    fprintf(stderr, "[GC-STATS] JS thread total in GC steps and waits: %.2f ms (%.1f%% of its CPU)\n",
+            total / 1e6, js_cpu ? 100.0 * total / js_cpu : 0.0);
+    fflush(stderr);
+}
+
+static inline bool gstats_on(void) {
+    if (__builtin_expect(g_gstats < 0, 0)) {
+        g_gstats = getenv("QJS_GC_STATS") != NULL;
+        if (g_gstats) { g_gjs_cpu0_ns = gc_os_thread_cpu_ns(); atexit(gstats_dump); }
+    }
+    return g_gstats;
+}
+
 static inline bool aborted(void) {
     return atomic_load_explicit(&g_conc.abort, memory_order_acquire) ||
            atomic_load_explicit(&g_conc.stop, memory_order_acquire);
@@ -482,10 +528,18 @@ static uint32_t post_request(uint32_t req, uint64_t budget_ns) {
     atomic_store_explicit(&g_conc.req_budget_ns, budget_ns, memory_order_relaxed);
     atomic_store_explicit(&g_conc.request, req, memory_order_release);
     atomic_store_explicit(&g_gc_poll_flag, 1, memory_order_release);
+    uint64_t t_post = g_gstats > 0 ? gc_os_now_ns() : 0;
     for (;;) {
         uint32_t a = atomic_load_explicit(&g_conc.ack_seq, memory_order_acquire);
-        if (a == seq)
+        if (a == seq) {
+            if (t_post && req < 4) {
+                uint64_t dt = gc_os_now_ns() - t_post, step = atomic_load(&g_gstep_last_ns);
+                uint64_t w = dt > step ? dt - step : 0;
+                g_gstep[req].wait_ns += w;
+                if (w > g_gstep[req].wait_max_ns) g_gstep[req].wait_max_ns = w;
+            }
             return atomic_load_explicit(&g_conc.ack, memory_order_acquire);
+        }
         if (atomic_load_explicit(&g_conc.stop, memory_order_acquire)) return ACK_ABORTED;
         gc_os_wait((volatile uint32_t *)&g_conc.ack_seq, a, 20);
     }
@@ -623,7 +677,7 @@ static void run_boundary(uintptr_t stack_lo) {
     if (g_conc.in_boundary) return;
     if (g_conc.force_full) {
         g_conc.force_full = false;
-        gc_run();
+        gc_run();   /* (timed in gc_run) */
         return;
     }
     uint32_t req = atomic_load_explicit(&g_conc.request, memory_order_acquire);
@@ -653,6 +707,13 @@ static void run_boundary(uintptr_t stack_lo) {
     g_core.stats.boundary_ns_total += dt;
     if (dt > g_core.stats.boundary_ns_max) g_core.stats.boundary_ns_max = dt;
     if (ack == ACK_DECLINED) g_core.stats.boundary_declines++;
+    if (gstats_on() && req < 4) {
+        g_gstep[req].n++;
+        g_gstep[req].ns += dt;
+        if (dt > g_gstep[req].max_ns) g_gstep[req].max_ns = dt;
+        if (ack == ACK_DECLINED) g_gstep[req].declined++;
+        atomic_store(&g_gstep_last_ns, dt);
+    }
     atomic_fetch_add_explicit(&g_conc.tick, 1, memory_order_relaxed);
     g_conc.in_boundary = false;
     answer(ack);
@@ -733,13 +794,15 @@ bool gc_is_idle(void) {
 }
 
 bool gc_wait_idle(uint32_t timeout_ms) {
-    uint64_t end = gc_os_now_ns() + (uint64_t)timeout_ms * 1000000ull;
+    uint64_t t0 = gc_os_now_ns(), end = t0 + (uint64_t)timeout_ms * 1000000ull;
+    bool idle = true;
     while (!gc_is_idle()) {
         gc_tick();
-        if (gc_os_now_ns() > end) return false;
+        if (gc_os_now_ns() > end) { idle = false; break; }
         if (!atomic_load_explicit(&g_gc_poll_flag, memory_order_acquire)) gc_os_yield();
     }
-    return true;
+    if (gstats_on()) { g_gwait_idle_n++; g_gwait_idle_ns += gc_os_now_ns() - t0; }
+    return idle;
 }
 
 /* ============================================================================
@@ -1031,6 +1094,12 @@ static void run_cycle(int kind) {
 finish:
     retire_remset(!aborted());
     end_concurrent_cycle();
+    if (g_gstats > 0) {
+        int m = kind == GC_CYCLE_MINOR ? 0 : 1;
+        g_gcycle_n[m]++;
+        g_gcycle_ns[m] += gc_os_now_ns() - t_start;
+        atomic_store(&g_gthread_cpu_ns, gc_os_thread_cpu_ns());
+    }
     GC_LOG("[GC] %s cycle: mark %.2f ms, remark %.2f ms, sweep %.2f ms, evacuate %.2f ms; "
            "cards %llu, heap %u regions, %.0f MB committed\n",
            kind == GC_CYCLE_MINOR ? "minor" : "major",
@@ -1103,6 +1172,7 @@ void gc_core_start_thread(void) {
     atomic_store(&g_conc.stop, 0);
     atomic_store(&g_conc.abort, 0);
     atomic_store(&g_conc.idle, 1);
+    (void)gstats_on();   /* read by the GC thread from its start */
     if (!gc_os_thread_start(&g_conc.thread, gc_thread_main, NULL)) {
         g_core.nursery_enabled = false;
         return;

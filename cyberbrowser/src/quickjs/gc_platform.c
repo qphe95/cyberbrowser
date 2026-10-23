@@ -214,6 +214,13 @@ uint64_t gc_os_now_ns(void) {
     return (uint64_t)((double)now.QuadPart * 1e9 / (double)freq.QuadPart);
 }
 
+uint64_t gc_os_thread_cpu_ns(void) {
+    FILETIME c, e, k, u;
+    if (!GetThreadTimes(GetCurrentThread(), &c, &e, &k, &u)) return 0;
+    return ((((uint64_t)k.dwHighDateTime << 32) | k.dwLowDateTime) +
+            (((uint64_t)u.dwHighDateTime << 32) | u.dwLowDateTime)) * 100;
+}
+
 #else
 
 static void *gc_os_thread_entry(void *p) {
@@ -272,6 +279,12 @@ uintptr_t gc_os_stack_base(void) {
 uint64_t gc_os_now_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+uint64_t gc_os_thread_cpu_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
