@@ -547,6 +547,11 @@ typedef struct DomIndex {
     uint32_t *tag_off, *tag_cnt, *tag_list;
     uint32_t *cls_off, *cls_cnt, *cls_list;
     uint32_t ncls;
+    /* By position: the element's class atoms, cpool[cpos[i] .. cpos[i+1]),
+     * parsed once per build for the passes that read them. */
+    uint32_t *cpos;
+    CssAtom *cpool;
+    uint32_t cpos_cap, cpool_cap;
 } DomIndex;
 
 static DomIndex g_ix;
@@ -585,13 +590,12 @@ static void ix_count_job(Job *job) {
     DomIndex *ix = J->ix;
     uint32_t r = job->a, b = r * IX_RANGE, e = b + IX_RANGE < ix->n ? b + IX_RANGE : ix->n;
     uint32_t *tc = J->tag_cnt + (size_t)r * ix->natoms, *cc = J->cls_cnt + (size_t)r * ix->natoms;
-    CssAtom cls[IX_MAX_CLASSES];
     for (uint32_t i = b; i < e; i++) {
         uint32_t s = ix->order[i];
         if (g_dom.kind[s] != DOM_K_ELEMENT) continue;
         if (g_dom.tag[s] < ix->natoms) tc[g_dom.tag[s]]++;
-        uint32_t nc = class_atoms(s, cls, IX_MAX_CLASSES);
-        for (uint32_t k = 0; k < nc; k++) if (cls[k] < ix->natoms) cc[cls[k]]++;
+        for (uint32_t k = ix->cpos[i]; k < ix->cpos[i + 1]; k++)
+            if (ix->cpool[k] < ix->natoms) cc[ix->cpool[k]]++;
     }
 }
 
@@ -600,13 +604,12 @@ static void ix_scatter_job(Job *job) {
     DomIndex *ix = J->ix;
     uint32_t r = job->a, b = r * IX_RANGE, e = b + IX_RANGE < ix->n ? b + IX_RANGE : ix->n;
     uint32_t *to = J->tag_cnt + (size_t)r * ix->natoms, *co = J->cls_cnt + (size_t)r * ix->natoms;
-    CssAtom cls[IX_MAX_CLASSES];
     for (uint32_t i = b; i < e; i++) {
         uint32_t s = ix->order[i];
         if (g_dom.kind[s] != DOM_K_ELEMENT) continue;
         if (g_dom.tag[s] < ix->natoms) ix->tag_list[to[g_dom.tag[s]]++] = i;
-        uint32_t nc = class_atoms(s, cls, IX_MAX_CLASSES);
-        for (uint32_t k = 0; k < nc; k++) if (cls[k] < ix->natoms) ix->cls_list[co[cls[k]]++] = i;
+        for (uint32_t k = ix->cpos[i]; k < ix->cpos[i + 1]; k++)
+            if (ix->cpool[k] < ix->natoms) ix->cls_list[co[ix->cpool[k]]++] = i;
     }
 }
 
@@ -662,10 +665,28 @@ static void index_build(uint32_t root) {
         if (ix->n) ix->end[0] = ix->n;
         free(stack);
     }
-    /* Make sure class names are atoms before jobs run (they only look up). */
-    CssAtom tmp[IX_MAX_CLASSES];
-    for (uint32_t i = 0; i < ix->n; i++)
-        if (g_dom.kind[ix->order[i]] == DOM_K_ELEMENT) class_atoms(ix->order[i], tmp, IX_MAX_CLASSES);
+    /* Class atoms of every element, parsed once (which also makes every
+     * class name an atom before the jobs run; they only read). */
+    if (ix->cpos_cap < ix->n + 1) {
+        ix->cpos_cap = ix->n + 1;
+        ix->cpos = realloc(ix->cpos, ix->cpos_cap * sizeof(uint32_t));
+    }
+    {
+        CssAtom tmp[IX_MAX_CLASSES];
+        uint32_t used = 0;
+        for (uint32_t i = 0; i < ix->n; i++) {
+            ix->cpos[i] = used;
+            if (g_dom.kind[ix->order[i]] != DOM_K_ELEMENT) continue;
+            uint32_t nc = class_atoms(ix->order[i], tmp, IX_MAX_CLASSES);
+            if (used + nc > ix->cpool_cap) {
+                ix->cpool_cap = (used + nc) * 2 + 256;
+                ix->cpool = realloc(ix->cpool, ix->cpool_cap * sizeof(CssAtom));
+            }
+            memcpy(ix->cpool + used, tmp, nc * sizeof(CssAtom));
+            used += nc;
+        }
+        ix->cpos[ix->n] = used;
+    }
     ix->natoms = (uint32_t)css_atom_count() + 2;
     uint32_t nr = (ix->n + IX_RANGE - 1) / IX_RANGE;
     if (!nr) nr = 1;
