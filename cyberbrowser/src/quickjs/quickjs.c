@@ -1053,6 +1053,12 @@ static void *bc_resize_array(void *ptr, size_t elem_size, int *psize, int req_si
     return new_ptr;
 }
 
+/* Plain memory for the compiler's tables (PVec and the rest; the stdlib
+ * allocator is forbidden below, so that it is not mixed up with GC memory). */
+static void *js_plain_realloc(void *p, size_t n) { return realloc(p, n); }
+static void *js_plain_calloc(size_t n, size_t size) { return calloc(n, size); }
+static void js_plain_free(void *p) { free(p); }
+
 /* Free malloc'd memory for bytecode serialization */
 /* Free function for malloc'd memory - called from GCHandleArray template */
 void js_bc_free(void *ptr)
@@ -24638,6 +24644,79 @@ typedef struct JSVarScope {
 
 /* JSVarDef is defined in quickjs-internal.h */
 
+/* A growable array in plain memory: the compiler's tables, which hold only
+ * integers and atoms (atoms live in permanent regions the collector never
+ * frees).  See PARALLEL_PARSE_DESIGN.md, 5.2.  A zeroed PVec is empty. */
+typedef struct PVec {
+    void *data;
+    int count;
+    int capacity;
+} PVec;
+
+#define PVEC_PTR(v, T) ((T *)(v).data)
+#define PVEC_AT(v, T, index) (((T *)(v).data)[(index)])
+
+/* Resize to n elements (new ones zeroed).  False when out of memory. */
+static bool pvec_resize(PVec *v, size_t elem_size, int n)
+{
+    if (n > v->capacity) {
+        int cap = max_int(n, v->capacity * 3 / 2 + 4);
+        void *d = js_plain_realloc(v->data, (size_t)cap * elem_size);
+        if (!d)
+            return false;
+        v->data = d;
+        v->capacity = cap;
+    }
+    if (n > v->count)
+        memset((uint8_t *)v->data + (size_t)v->count * elem_size, 0, (size_t)(n - v->count) * elem_size);
+    v->count = n;
+    return true;
+}
+
+/* Append one zeroed element and return it (NULL when out of memory). */
+static void *pvec_prepare_push(PVec *v, size_t elem_size)
+{
+    if (!pvec_resize(v, elem_size, v->count + 1))
+        return NULL;
+    return (uint8_t *)v->data + (size_t)(v->count - 1) * elem_size;
+}
+
+static bool pvec_push(PVec *v, size_t elem_size, const void *elem)
+{
+    void *p = pvec_prepare_push(v, elem_size);
+    if (!p)
+        return false;
+    memcpy(p, elem, elem_size);
+    return true;
+}
+
+static void pvec_free(PVec *v)
+{
+    js_plain_free(v->data);
+    v->data = NULL;
+    v->count = 0;
+    v->capacity = 0;
+}
+
+/* js_resize_array for a plain array: grow *pptr to at least req_size
+ * elements (*psize is its capacity). */
+static int js_resize_plain_array(JSContextHandle ctx, void **pptr, int elem_size,
+                                 int *psize, int req_size)
+{
+    (void)ctx;
+    if (likely(req_size <= *psize))
+        return 0;
+    int new_size = max_int(req_size, *psize * 3 / 2);
+    void *p = js_plain_realloc(*pptr, (size_t)new_size * elem_size);
+    if (!p)
+        return -1;
+    /* zeroed, as GC memory is */
+    memset((uint8_t *)p + (size_t)*psize * elem_size, 0, (size_t)(new_size - *psize) * elem_size);
+    *pptr = p;
+    *psize = new_size;
+    return 0;
+}
+
 typedef struct JSFunctionDef {
     JSContextHandle ctx;
     GCHandle self_handle; /* handle to this JSFunctionDef (set during allocation) */
@@ -24676,10 +24755,10 @@ typedef struct JSFunctionDef {
     JSAtom func_name; /* JS_ATOM_NULL if no name */
 
     /* NOTE: vars and args are GCHandles to JSVarDef arrays in unified GC system */
-    GCHandle vars_handle; /* handle to JSVarDef array */
+    JSVarDef *vars_handle; /* plain memory */
     int var_size; /* allocated size for vars[] */
     int var_count;
-    GCHandle args_handle; /* handle to JSVarDef array */
+    JSVarDef *args_handle; /* plain memory */
     int arg_size; /* allocated size for args[] */
     int arg_count; /* number of arguments */
 #define fd_vars_handle (fd->vars_handle)
@@ -24725,12 +24804,12 @@ typedef struct JSFunctionDef {
     int scope_first;    /* index into vd->vars of first lexically scoped variable */
     int scope_size;     /* allocated size of fd->scopes array */
     int scope_count;    /* number of entries used in the fd->scopes array */
-    GCDataArray scopes_handle; /* of JSVarScope */
+    PVec scopes_handle; /* of JSVarScope */
     int body_scope; /* scope of the body of the function or eval */
 
     int global_var_count;
     int global_var_size;
-    GCDataArray global_vars_handle; /* of JSGlobalVar */
+    PVec global_vars_handle; /* of JSGlobalVar */
 #define fd_global_vars (fd->global_vars_handle)
 #define s_global_vars (s->global_vars_handle)
 
@@ -24740,24 +24819,24 @@ typedef struct JSFunctionDef {
     BOOL use_short_opcodes; /* true if short opcodes are used in byte_code */
 
     /* NOTE: These are GCHandles to arrays in unified GC system */
-    GCDataArray label_slots_handle; /* of LabelSlot */
+    PVec label_slots_handle; /* of LabelSlot */
     int label_size; /* allocated size for label_slots[] */
     int label_count;
     int top_break_depth; /* depth in break stack, -1 if empty */
     int break_stack_capacity; /* capacity of break stack array */
-    GCHandle break_stack_handle; /* handle to BlockEnv array, GC_HANDLE_NULL if empty */
+    BlockEnv *break_stack_handle; /* plain memory, NULL if empty */
     
-    GCHandleList reloc_entries; /* list of RelocEntry handles for index-based linking */
+    PVec reloc_entries; /* of RelocEntry, linked by index */
 
     /* constant pool (strings, functions, numbers) */
     GCHandle cpool_handle; /* handle to GCValue array */
     int cpool_count;
     int cpool_size;
 
-    GCDataArray closure_var_handle; /* of JSClosureVar */
+    PVec closure_var_handle; /* of JSClosureVar */
     int original_closure_var_count; /* saved count before js_create_function clears handle */
-    GCDataArray jump_slots_handle; /* of JumpSlot */
-    GCDataArray line_number_slots_handle; /* of LineNumberSlot */
+    PVec jump_slots_handle; /* of JumpSlot */
+    PVec line_number_slots_handle; /* of LineNumberSlot */
     int line_number_last;
     int line_number_last_pc;
 
@@ -24774,14 +24853,14 @@ typedef struct JSFunctionDef {
     uint32_t source_offset; /* offset of this function's text in source_string_handle */
     /* hash index for find_var() in functions with many variables:
        atom -> 1 + index of the last scope-level-0 var with that name */
-    GCHandle var_htab_handle;
+    uint32_t *var_htab_handle;   /* plain memory */
     uint32_t var_htab_cap;
     int var_htab_indexed; /* vars [0, var_htab_indexed) are in the table */
     /* hash index of closure_var_handle (for functions with many closure
        variables): two tables of 'cv_htab_cap' slots holding 1 + index of
        the first entry with a given name / a given (type, var_idx, name) */
-    GCHandle cv_htab_handle;
-    GCHandle cv_htab_src;     /* closure_var_handle.handle that was indexed */
+    uint32_t *cv_htab_handle;    /* plain memory */
+    const void *cv_htab_src;  /* closure_var_handle.data that was indexed */
     uint32_t cv_htab_cap;
     int cv_htab_indexed;
     BOOL cv_has_special;      /* has _var_ / _arg_var_ / _with_ entries */
@@ -24818,11 +24897,11 @@ typedef struct JSFunctionDef {
 } JSFunctionDef;
 
 /* Helper macros for accessing JSVarScope array */
-#define fd_get_scope(fd, idx) (&GC_DATA_ARRAY_AT((fd)->scopes_handle, JSVarScope, idx))
-#define fd_set_scope_first(fd, idx, val) (GC_DATA_ARRAY_AT((fd)->scopes_handle, JSVarScope, idx).first = (val))
-#define fd_get_scope_first(fd, idx) (GC_DATA_ARRAY_AT((fd)->scopes_handle, JSVarScope, idx).first)
-#define fd_set_scope_parent(fd, idx, val) (GC_DATA_ARRAY_AT((fd)->scopes_handle, JSVarScope, idx).parent = (val))
-#define fd_get_scope_parent(fd, idx) (GC_DATA_ARRAY_AT((fd)->scopes_handle, JSVarScope, idx).parent)
+#define fd_get_scope(fd, idx) (&PVEC_AT((fd)->scopes_handle, JSVarScope, idx))
+#define fd_set_scope_first(fd, idx, val) (PVEC_AT((fd)->scopes_handle, JSVarScope, idx).first = (val))
+#define fd_get_scope_first(fd, idx) (PVEC_AT((fd)->scopes_handle, JSVarScope, idx).first)
+#define fd_set_scope_parent(fd, idx, val) (PVEC_AT((fd)->scopes_handle, JSVarScope, idx).parent = (val))
+#define fd_get_scope_parent(fd, idx) (PVEC_AT((fd)->scopes_handle, JSVarScope, idx).parent)
 
 /* Mark a JSFunctionDef and all its internal GC-managed arrays/handles.
  * Called from mark_children for JS_GC_OBJ_TYPE_FUNCTION_DEF.
@@ -24830,26 +24909,14 @@ typedef struct JSFunctionDef {
 static void js_mark_function_def(JSRuntimeHandle rt, JSFunctionDef *p, JS_MarkFunc *mark_func) {
     if (!p) return;
     /* Mark all GC-managed arrays and handles */
-    mark_func(rt, p->scopes_handle.handle);
-    mark_func(rt, p->vars_handle);
-    mark_func(rt, p->args_handle);
-    mark_func(rt, p->global_vars_handle.handle);
-    mark_func(rt, p->label_slots_handle.handle);
-    mark_func(rt, p->break_stack_handle);
     mark_func(rt, p->cpool_handle);
-    mark_func(rt, p->closure_var_handle.handle);
-    mark_func(rt, p->jump_slots_handle.handle);
-    mark_func(rt, p->line_number_slots_handle.handle);
     mark_func(rt, p->source_string_handle);
-    mark_func(rt, p->var_htab_handle);
-    mark_func(rt, p->cv_htab_src);
     if (p->has_resume_parse_state) {
         /* lazy stub state, until js_create_function copies it */
         mark_func(rt, p->resume_parse_state.source_handle);
         mark_func(rt, p->resume_parse_state.arg_names_handle);
         mark_func(rt, p->resume_parse_state.compiled_handle);
     }
-    mark_func(rt, p->cv_htab_handle);
     mark_func(rt, p->lazy_parent_scope);
     /* Mark bytecode and pc2line buffers */
     mark_func(rt, p->byte_code.handle);
@@ -27169,7 +27236,7 @@ static int update_label(JSFunctionDef *s, int label, int delta)
     LabelSlot *ls;
 
     assert(label >= 0 && label < s->label_count);
-    ls = &GC_DATA_ARRAY_AT(s_label_slots, LabelSlot, label);
+    ls = &PVEC_AT(s_label_slots, LabelSlot, label);
     ls->ref_count += delta;
     assert(ls->ref_count >= 0);
     return ls->ref_count;
@@ -27180,11 +27247,11 @@ static int new_label_fd(JSFunctionDef *fd)
     int label;
     LabelSlot *ls;
 
-    if (!gc_data_array_resize_bytes(&fd->label_slots_handle, sizeof(LabelSlot), fd->label_count + 1))
+    if (!pvec_resize(&fd->label_slots_handle, sizeof(LabelSlot), fd->label_count + 1))
         return -1;
     fd->label_size = fd->label_slots_handle.capacity;
     label = fd->label_count++;
-    ls = &GC_DATA_ARRAY_AT(fd_label_slots, LabelSlot, label);
+    ls = &PVEC_AT(fd_label_slots, LabelSlot, label);
     ls->ref_count = 0;
     ls->pos = -1;
     ls->pos2 = -1;
@@ -27208,7 +27275,7 @@ static void emit_label_raw(JSParseState *s, int label)
 {
     emit_u8(s, OP_label);
     emit_u32(s, label);
-    GC_DATA_ARRAY_AT(s_cur_func_label_slots, LabelSlot, label).pos = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code.size;
+    PVEC_AT(s_cur_func_label_slots, LabelSlot, label).pos = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code.size;
 }
 
 /* return the label ID offset */
@@ -27217,7 +27284,7 @@ static int emit_label(JSParseState *s, int label)
     if (label >= 0) {
         emit_op(s, OP_label);
         emit_u32(s, label);
-        GC_DATA_ARRAY_AT(s_cur_func_label_slots, LabelSlot, label).pos = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code.size;
+        PVEC_AT(s_cur_func_label_slots, LabelSlot, label).pos = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code.size;
         return SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code.size - 4;
     } else {
         return -1;
@@ -27238,7 +27305,7 @@ static int emit_goto(JSParseState *s, int opcode, int label)
         }
         emit_op(s, opcode);
         emit_u32(s, label);
-        GC_DATA_ARRAY_AT(s_cur_func_label_slots, LabelSlot, label).ref_count++;
+        PVEC_AT(s_cur_func_label_slots, LabelSlot, label).ref_count++;
         return label;
     }
     return -1;
@@ -27289,7 +27356,7 @@ static int find_arg(JSContextHandle ctx, JSFunctionDef *fd, JSAtom name)
 {
     int i;
     for(i = fd->arg_count; i-- > 0;) {
-        if (SAFE_AT(fd_args, JSVarDefArrayHandle, i).var_name == name)
+        if ((fd_args)[i].var_name == name)
             return i | ARGUMENT_VAR_OFFSET;
     }
     return -1;
@@ -27315,22 +27382,23 @@ static BOOL var_htab_update(JSFunctionDef *fd)
     int i;
     if (fd->var_count < VAR_HTAB_MIN_VARS)
         return FALSE;
-    if (fd->var_htab_handle == GC_HANDLE_NULL ||
+    if (!fd->var_htab_handle ||
         (uint32_t)fd->var_count * 2 > fd->var_htab_cap) {
         uint32_t cap = 128;
-        GCHandle h;
+        uint32_t *h;
         while (cap < (uint32_t)fd->var_count * 4)
             cap *= 2;
-        h = gc_allocz(cap * 2 * sizeof(uint32_t), JS_GC_OBJ_TYPE_DATA);
-        if (h == GC_HANDLE_NULL)
+        h = (uint32_t *)js_plain_calloc((size_t)cap * 2, sizeof(uint32_t));
+        if (!h)
             return FALSE;
-        GC_SET(fd->var_htab_handle, h);
+        js_plain_free(fd->var_htab_handle);
+        fd->var_htab_handle = h;
         fd->var_htab_cap = cap;
         fd->var_htab_indexed = 0;
     }
-    t = (uint32_t *)gc_deref(fd->var_htab_handle);
+    t = fd->var_htab_handle;
     for (i = fd->var_htab_indexed; i < fd->var_count; i++) {
-        JSVarDef *vd = &SAFE_AT(fd_vars, JSVarDefArrayHandle, i);
+        JSVarDef *vd = &(fd_vars)[i];
         if (vd->scope_level == 0 && vd->var_name != JS_ATOM_NULL)
             var_htab_put(t, fd->var_htab_cap, vd->var_name, i + 1);
     }
@@ -27342,7 +27410,7 @@ static int find_var(JSContextHandle ctx, JSFunctionDef *fd, JSAtom name)
 {
     int i;
     if (var_htab_update(fd)) {
-        uint32_t *t = (uint32_t *)gc_deref(fd->var_htab_handle);
+        uint32_t *t = fd->var_htab_handle;
         uint32_t cap = fd->var_htab_cap;
         uint32_t h = (name * 2654435761u) & (cap - 1);
         while (t[2 * h] != JS_ATOM_NULL) {
@@ -27350,8 +27418,8 @@ static int find_var(JSContextHandle ctx, JSFunctionDef *fd, JSAtom name)
                 i = (int)t[2 * h + 1] - 1;
                 /* entries are only ever overwritten with larger indexes;
                    re-check in case a var was renamed or re-scoped */
-                if (SAFE_AT(fd_vars, JSVarDefArrayHandle, i).var_name == name &&
-                    SAFE_AT(fd_vars, JSVarDefArrayHandle, i).scope_level == 0)
+                if ((fd_vars)[i].var_name == name &&
+                    (fd_vars)[i].scope_level == 0)
                     return i;
                 goto slow;
             }
@@ -27361,7 +27429,7 @@ static int find_var(JSContextHandle ctx, JSFunctionDef *fd, JSAtom name)
     }
  slow:
     for(i = fd->var_count; i-- > 0;) {
-        if (SAFE_AT(fd_vars, JSVarDefArrayHandle, i).var_name == name && SAFE_AT(fd_vars, JSVarDefArrayHandle, i).scope_level == 0)
+        if ((fd_vars)[i].var_name == name && (fd_vars)[i].scope_level == 0)
             return i;
     }
     return find_arg(ctx, fd, name);
@@ -27373,10 +27441,10 @@ static int find_var_in_scope(JSContextHandle ctx, JSFunctionDef *fd,
 {
     int scope_idx;
     for(scope_idx = fd_get_scope_first(fd, scope_level); scope_idx >= 0;
-        scope_idx = SAFE_AT(fd_vars, JSVarDefArrayHandle, scope_idx).scope_next) {
-        if (SAFE_AT(fd_vars, JSVarDefArrayHandle, scope_idx).scope_level != scope_level)
+        scope_idx = (fd_vars)[scope_idx].scope_next) {
+        if ((fd_vars)[scope_idx].scope_level != scope_level)
             break;
-        if (SAFE_AT(fd_vars, JSVarDefArrayHandle, scope_idx).var_name == name)
+        if ((fd_vars)[scope_idx].var_name == name)
             return scope_idx;
     }
     return -1;
@@ -27402,8 +27470,8 @@ static int find_var_in_child_scope(JSContextHandle ctx, JSFunctionDef *fd,
     int i;
     for(i = 0; i < fd->var_count; i++) {
         JSVarDefArrayHandle vd_arr = fd_vars; int vd_idx = i;
-        if (SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name == name && SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_level == 0) {
-            if (is_child_scope(ctx, fd, SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_next,
+        if ((vd_arr)[vd_idx].var_name == name && (vd_arr)[vd_idx].scope_level == 0) {
+            if (is_child_scope(ctx, fd, (vd_arr)[vd_idx].scope_next,
                                scope_level))
                 return i;
         }
@@ -27416,7 +27484,7 @@ static JSGlobalVar *find_global_var(JSFunctionDef *fd, JSAtom name)
 {
     int i;
     for(i = 0; i < fd->global_var_count; i++) {
-        JSGlobalVar *hf = &GC_DATA_ARRAY_AT(fd_global_vars, JSGlobalVar, i);
+        JSGlobalVar *hf = &PVEC_AT(fd_global_vars, JSGlobalVar, i);
         if (hf->var_name == name)
             return hf;
     }
@@ -27438,11 +27506,11 @@ static int find_lexical_decl(JSContextHandle ctx, JSFunctionDef *fd, JSAtom name
 {
     while (scope_idx >= 0) {
         JSVarDefArrayHandle vd_arr = fd_vars; int vd_idx = scope_idx;
-        if (SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name == name &&
-            (SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).is_lexical || (SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_kind == JS_VAR_CATCH &&
+        if ((vd_arr)[vd_idx].var_name == name &&
+            ((vd_arr)[vd_idx].is_lexical || ((vd_arr)[vd_idx].var_kind == JS_VAR_CATCH &&
                                 check_catch_var)))
             return scope_idx;
-        scope_idx = SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_next;
+        scope_idx = (vd_arr)[vd_idx].scope_next;
     }
 
     if (fd->is_eval && fd->eval_type == JS_EVAL_TYPE_GLOBAL) {
@@ -27462,7 +27530,7 @@ static int push_scope(JSParseState *s) {
             /* XXX: potential arithmetic overflow */
             new_size = max_int(fd->scope_count + 1, fd->scope_size * 3 / 2);
             /* Reallocation: use GCDataArray resize */
-            if (!gc_data_array_resize_bytes(&fd->scopes_handle, sizeof(JSVarScope), new_size))
+            if (!pvec_resize(&fd->scopes_handle, sizeof(JSVarScope), new_size))
                 return -1;
             fd->scope_size = new_size;
         }
@@ -27522,23 +27590,23 @@ static int add_var(JSContextHandle ctx, JSFunctionDef *fd, JSAtom name)
         int new_size = fd->var_size == 0 ? 8 : fd->var_size * 2;
         if (new_size > JS_MAX_LOCAL_VARS)
             new_size = JS_MAX_LOCAL_VARS;
-        if (js_resize_bytes_array(ctx, &fd->vars_handle, sizeof(JSVarDef),
+        if (js_resize_plain_array(ctx, (void **)&fd->vars_handle, sizeof(JSVarDef),
                             &fd->var_size, new_size))
             return -1;
     }
     {
         int idx = fd->var_count++;
         JSVarDefArrayHandle vd_arr = fd_vars; int vd_idx = idx;
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name = JS_DupAtom(ctx, name);
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_level = 0;
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_next = -1;
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).is_const = FALSE;
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).is_lexical = FALSE;
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).is_captured = FALSE;
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).is_static_private = FALSE;
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_kind = JS_VAR_NORMAL;
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_ref_idx = 0;
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).func_pool_idx = -1;
+        (vd_arr)[vd_idx].var_name = JS_DupAtom(ctx, name);
+        (vd_arr)[vd_idx].scope_level = 0;
+        (vd_arr)[vd_idx].scope_next = -1;
+        (vd_arr)[vd_idx].is_const = FALSE;
+        (vd_arr)[vd_idx].is_lexical = FALSE;
+        (vd_arr)[vd_idx].is_captured = FALSE;
+        (vd_arr)[vd_idx].is_static_private = FALSE;
+        (vd_arr)[vd_idx].var_kind = JS_VAR_NORMAL;
+        (vd_arr)[vd_idx].var_ref_idx = 0;
+        (vd_arr)[vd_idx].func_pool_idx = -1;
         return idx;
     }
 }
@@ -27549,9 +27617,9 @@ static int add_scope_var(JSContextHandle ctx, JSFunctionDef *fd, JSAtom name,
     int idx = add_var(ctx, fd, name);
     if (idx >= 0) {
         JSVarDefArrayHandle vd_arr = fd_vars; int vd_idx = idx;
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_kind = var_kind;
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_level = fd->scope_level;
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_next = fd->scope_first;
+        (vd_arr)[vd_idx].var_kind = var_kind;
+        (vd_arr)[vd_idx].scope_level = fd->scope_level;
+        (vd_arr)[vd_idx].scope_next = fd->scope_first;
         fd_set_scope_first(fd, fd->scope_level, idx);
         fd->scope_first = idx;
     }
@@ -27563,9 +27631,9 @@ static int add_func_var(JSContextHandle ctx, JSFunctionDef *fd, JSAtom name)
     int idx = fd->func_var_idx;
     if (idx < 0 && (idx = add_var(ctx, fd, name)) >= 0) {
         fd->func_var_idx = idx;
-        SAFE_AT(fd_vars, JSVarDefArrayHandle, idx).var_kind = JS_VAR_FUNCTION_NAME;
+        (fd_vars)[idx].var_kind = JS_VAR_FUNCTION_NAME;
         if (fd->js_mode & JS_MODE_STRICT)
-            SAFE_AT(fd_vars, JSVarDefArrayHandle, idx).is_const = TRUE;
+            (fd_vars)[idx].is_const = TRUE;
     }
     return idx;
 }
@@ -27593,10 +27661,10 @@ static int add_arguments_arg(JSContextHandle ctx, JSFunctionDef *fd)
             idx = add_var(ctx, fd, JS_ATOM_arguments);
             if (idx < 0)
                 return -1;
-            SAFE_AT(fd_vars, JSVarDefArrayHandle, idx).scope_next = fd_get_scope_first(fd, ARG_SCOPE_INDEX);
+            (fd_vars)[idx].scope_next = fd_get_scope_first(fd, ARG_SCOPE_INDEX);
             fd_set_scope_first(fd, ARG_SCOPE_INDEX, idx);
-            SAFE_AT(fd_vars, JSVarDefArrayHandle, idx).scope_level = ARG_SCOPE_INDEX;
-            SAFE_AT(fd_vars, JSVarDefArrayHandle, idx).is_lexical = TRUE;
+            (fd_vars)[idx].scope_level = ARG_SCOPE_INDEX;
+            (fd_vars)[idx].is_lexical = TRUE;
 
             fd->arguments_arg_idx = idx;
         }
@@ -27611,22 +27679,22 @@ static int add_arg(JSContextHandle ctx, JSFunctionDef *fd, JSAtom name)
         JS_ThrowInternalError(ctx, "too many arguments");
         return -1;
     }
-    if (js_resize_bytes_array(ctx, &fd->args_handle, sizeof(JSVarDef),
+    if (js_resize_plain_array(ctx, (void **)&fd->args_handle, sizeof(JSVarDef),
                         &fd->arg_size, fd->arg_count + 1))
         return -1;
     {
         int idx = fd->arg_count++;
         JSVarDefArrayHandle vd_arr = fd_args; int vd_idx = idx;
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name = JS_DupAtom(ctx, name);
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_level = 0;
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_next = -1;
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).is_const = FALSE;
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).is_lexical = FALSE;
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).is_captured = FALSE;
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).is_static_private = FALSE;
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_kind = JS_VAR_NORMAL;
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_ref_idx = 0;
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).func_pool_idx = -1;
+        (vd_arr)[vd_idx].var_name = JS_DupAtom(ctx, name);
+        (vd_arr)[vd_idx].scope_level = 0;
+        (vd_arr)[vd_idx].scope_next = -1;
+        (vd_arr)[vd_idx].is_const = FALSE;
+        (vd_arr)[vd_idx].is_lexical = FALSE;
+        (vd_arr)[vd_idx].is_captured = FALSE;
+        (vd_arr)[vd_idx].is_static_private = FALSE;
+        (vd_arr)[vd_idx].var_kind = JS_VAR_NORMAL;
+        (vd_arr)[vd_idx].var_ref_idx = 0;
+        (vd_arr)[vd_idx].func_pool_idx = -1;
         return idx;
     }
 }
@@ -27637,10 +27705,10 @@ static JSGlobalVar *add_global_var(JSContextHandle ctx, JSFunctionDef *s,
 {
     JSGlobalVar *hf;
 
-    if (!gc_data_array_resize_bytes(&s->global_vars_handle, sizeof(JSGlobalVar), s->global_var_count + 1))
+    if (!pvec_resize(&s->global_vars_handle, sizeof(JSGlobalVar), s->global_var_count + 1))
         return NULL;
     s->global_var_size = s->global_vars_handle.capacity;
-    hf = &GC_DATA_ARRAY_AT(s_global_vars, JSGlobalVar, s->global_var_count++);
+    hf = &PVEC_AT(s_global_vars, JSGlobalVar, s->global_var_count++);
     hf->cpool_idx = -1;
     hf->force_init = FALSE;
     hf->is_lexical = FALSE;
@@ -27678,16 +27746,16 @@ static int define_var(JSParseState *s, JSFunctionDef *fd, JSAtom name,
         idx = find_lexical_decl(ctx, fd, name, fd->scope_first, TRUE);
         if (idx >= 0) {
             if (idx < GLOBAL_VAR_OFFSET) {
-                if (SAFE_AT(fd_vars, JSVarDefArrayHandle, idx).scope_level == fd->scope_level) {
+                if ((fd_vars)[idx].scope_level == fd->scope_level) {
                     /* same scope: in non strict mode, functions
                        can be redefined (annex B.3.3.4). */
                     if (!(!(fd->js_mode & JS_MODE_STRICT) &&
                           var_def_type == JS_VAR_DEF_FUNCTION_DECL &&
-                          SAFE_AT(fd_vars, JSVarDefArrayHandle, idx).var_kind == JS_VAR_FUNCTION_DECL)) {
+                          (fd_vars)[idx].var_kind == JS_VAR_FUNCTION_DECL)) {
                         goto redef_lex_error;
                     }
-                } else if (SAFE_AT(fd_vars, JSVarDefArrayHandle, idx).var_kind == JS_VAR_CATCH && 
-                           (SAFE_AT(fd_vars, JSVarDefArrayHandle, idx).scope_level + 2) == fd->scope_level) {
+                } else if ((fd_vars)[idx].var_kind == JS_VAR_CATCH && 
+                           ((fd_vars)[idx].scope_level + 2) == fd->scope_level) {
                     goto redef_lex_error;
                 }
             } else {
@@ -27741,8 +27809,8 @@ static int define_var(JSParseState *s, JSFunctionDef *fd, JSAtom name,
             idx = add_scope_var(ctx, fd, name, var_kind);
             if (idx >= 0) {
                 JSVarDefArrayHandle vdh_arr = fd_vars; int vdh_idx = idx;
-                SAFE_AT(vdh_arr, JSVarDefArrayHandle, vdh_idx).is_lexical = 1;
-                SAFE_AT(vdh_arr, JSVarDefArrayHandle, vdh_idx).is_const = var_def_type == JS_VAR_DEF_CONST;
+                (vdh_arr)[vdh_idx].is_lexical = 1;
+                (vdh_arr)[vdh_idx].is_const = var_def_type == JS_VAR_DEF_CONST;
             }
         }
         break;
@@ -27778,7 +27846,7 @@ static int define_var(JSParseState *s, JSFunctionDef *fd, JSAtom name,
             if (idx >= 0) {
                 if (name == JS_ATOM_arguments && fd->has_arguments_binding)
                     fd->arguments_var_idx = idx;
-                SAFE_AT(fd_vars, JSVarDefArrayHandle, idx).scope_next = fd->scope_level;
+                (fd_vars)[idx].scope_next = fd->scope_level;
             }
         }
         break;
@@ -27800,9 +27868,9 @@ static int add_private_class_field(JSParseState *s, JSFunctionDef *fd,
         return idx;
     {
         JSVarDefArrayHandle vdh_arr = fd_vars; int vdh_idx = idx;
-        SAFE_AT(vdh_arr, JSVarDefArrayHandle, vdh_idx).is_lexical = 1;
-        SAFE_AT(vdh_arr, JSVarDefArrayHandle, vdh_idx).is_const = 1;
-        SAFE_AT(vdh_arr, JSVarDefArrayHandle, vdh_idx).is_static_private = is_static;
+        (vdh_arr)[vdh_idx].is_lexical = 1;
+        (vdh_arr)[vdh_idx].is_const = 1;
+        (vdh_arr)[vdh_idx].is_static_private = is_static;
     }
     return idx;
 }
@@ -29416,7 +29484,7 @@ static int js_lazy_try_skip_body(JSParseState *s, JSFunctionDef *fd,
             JSAtom *names = (JSAtom *)gc_deref(names_handle);
             for (i = 0; i < (uint32_t)fd->arg_count; i++) {
                 JSVarDefArrayHandle vd_arr = fd_args; int vd_idx = i;
-                names[i] = JS_DupAtom(ctx, SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name);
+                names[i] = JS_DupAtom(ctx, (vd_arr)[vd_idx].var_name);
             }
         }
         /* re-fetch: gc_alloc may have moved fd's state */
@@ -29735,11 +29803,11 @@ static int find_private_class_field(JSContextHandle ctx, JSFunctionDef *fd,
     int idx;
     idx = fd_get_scope_first(fd, scope_level);
     while (idx != -1) {
-        if (SAFE_AT(fd_vars, JSVarDefArrayHandle, idx).scope_level != scope_level)
+        if ((fd_vars)[idx].scope_level != scope_level)
             break;
-        if (SAFE_AT(fd_vars, JSVarDefArrayHandle, idx).var_name == name)
+        if ((fd_vars)[idx].var_name == name)
             return idx;
-        idx = SAFE_AT(fd_vars, JSVarDefArrayHandle, idx).scope_next;
+        idx = (fd_vars)[idx].scope_next;
     }
     return -1;
 }
@@ -30014,8 +30082,8 @@ static __exception int js_parse_class(JSParseState *s, BOOL is_class_expr,
                 int idx, var_kind, is_static1;
                 idx = find_private_class_field(ctx, fd, name, fd->scope_level);
                 if (idx >= 0) {
-                    var_kind = SAFE_AT(fd_vars, JSVarDefArrayHandle, idx).var_kind;
-                    is_static1 = SAFE_AT(fd_vars, JSVarDefArrayHandle, idx).is_static_private;
+                    var_kind = (fd_vars)[idx].var_kind;
+                    is_static1 = (fd_vars)[idx].is_static_private;
                     if (var_kind == JS_VAR_PRIVATE_FIELD ||
                         var_kind == JS_VAR_PRIVATE_METHOD ||
                         var_kind == JS_VAR_PRIVATE_GETTER_SETTER ||
@@ -30024,7 +30092,7 @@ static __exception int js_parse_class(JSParseState *s, BOOL is_class_expr,
                          is_static != is_static1)) {
                         goto private_field_already_defined;
                     }
-                    SAFE_AT(fd_vars, JSVarDefArrayHandle, idx).var_kind = JS_VAR_PRIVATE_GETTER_SETTER;
+                    (fd_vars)[idx].var_kind = JS_VAR_PRIVATE_GETTER_SETTER;
                 } else {
                     if (add_private_class_field(s, fd, name,
                                                 (JSVarKindEnum)(JS_VAR_PRIVATE_GETTER + is_set), is_static) < 0)
@@ -30481,9 +30549,9 @@ static BOOL has_with_scope(JSFunctionDef *s, int scope_level)
             int scope_idx = fd_get_scope_first(s, scope_level);
             while (scope_idx >= 0) {
                 JSVarDefArrayHandle vd_arr = s_vars; int vd_idx = scope_idx;
-                if (SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name == JS_ATOM__with_)
+                if ((vd_arr)[vd_idx].var_name == JS_ATOM__with_)
                     return TRUE;
-                scope_idx = SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_next;
+                scope_idx = (vd_arr)[vd_idx].scope_next;
             }
         }
         /* check parent scopes */
@@ -30842,11 +30910,11 @@ static int js_parse_check_duplicate_parameter(JSParseState *s, JSAtom name)
     JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
     int i;
     for (i = 0; i < fd->arg_count; i++) {
-        if (SAFE_AT(fd_args, JSVarDefArrayHandle, i).var_name == name)
+        if ((fd_args)[i].var_name == name)
             goto duplicate;
     }
     for (i = 0; i < fd->var_count; i++) {
-        if (SAFE_AT(fd_vars, JSVarDefArrayHandle, i).var_name == name)
+        if ((fd_vars)[i].var_name == name)
             goto duplicate;
     }
     return 0;
@@ -31355,7 +31423,7 @@ static int js_parse_destructuring_element(JSParseState *s, int tok, int is_arg,
         /* remove test and decrement label ref count */
         memset(gc_byte_buffer_ptr(&SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code) + start_addr, OP_nop,
                assign_addr - start_addr);
-        GC_DATA_ARRAY_AT(s_cur_func_label_slots, LabelSlot, label_parse).ref_count--;
+        PVEC_AT(s_cur_func_label_slots, LabelSlot, label_parse).ref_count--;
         has_initializer = FALSE;
     }
     return has_initializer;
@@ -32891,23 +32959,16 @@ static int push_break_entry(JSContextHandle ctx, JSFunctionDef *fd,
     BlockEnv *be;
     
     /* Allocate or grow the break stack if needed */
-    if (fd->break_stack_handle == GC_HANDLE_NULL) {
-        /* Initial allocation */
-        fd->break_stack_capacity = 8;
-        GC_SET(fd->break_stack_handle, gc_alloc(sizeof(BlockEnv) * fd->break_stack_capacity, 
-                                          JS_GC_OBJ_TYPE_DATA));
-        if (fd->break_stack_handle == GC_HANDLE_NULL)
+    if (!fd->break_stack_handle || new_depth >= fd->break_stack_capacity) {
+        int cap = fd->break_stack_handle ? fd->break_stack_capacity * 2 : 8;
+        BlockEnv *nb = (BlockEnv *)js_plain_realloc(fd->break_stack_handle, sizeof(BlockEnv) * cap);
+        if (!nb)
             return -1;
-    } else if (new_depth >= fd->break_stack_capacity) {
-        /* Grow the array */
-        fd->break_stack_capacity *= 2;
-        GC_SET(fd->break_stack_handle, gc_realloc_handle(fd->break_stack_handle, 
-                                                    sizeof(BlockEnv) * fd->break_stack_capacity));
-        if (fd->break_stack_handle == GC_HANDLE_NULL)
-            return -1;
+        fd->break_stack_handle = nb;
+        fd->break_stack_capacity = cap;
     }
-    
-    stack = (BlockEnv*)gc_deref(fd->break_stack_handle);
+
+    stack = fd->break_stack_handle;
     be = &stack[new_depth];
     be->prev_depth = fd->top_break_depth;
     be->label_name = label_name;
@@ -32926,7 +32987,7 @@ static int push_break_entry(JSContextHandle ctx, JSFunctionDef *fd,
 static void pop_break_entry(JSFunctionDef *fd)
 {
     assert(fd->top_break_depth >= 0);
-    BlockEnv *stack = (BlockEnv*)gc_deref(fd->break_stack_handle);
+    BlockEnv *stack = fd->break_stack_handle;
     fd->top_break_depth = stack[fd->top_break_depth].prev_depth;
 }
 
@@ -32936,7 +32997,7 @@ static void pop_break_entry(JSFunctionDef *fd)
 static BlockEnv *break_entry_at(JSParseState *s, int depth)
 {
     JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
-    BlockEnv *stack = (BlockEnv*)gc_deref(fd->break_stack_handle);
+    BlockEnv *stack = fd->break_stack_handle;
     return &stack[depth];
 }
 
@@ -32949,7 +33010,7 @@ static BlockEnv *top_break_entry(JSParseState *s)
 static __exception int emit_break(JSParseState *s, JSAtom name, int is_cont)
 {
     JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
-    BlockEnv *stack = (BlockEnv*)gc_deref(fd->break_stack_handle);
+    BlockEnv *stack = fd->break_stack_handle;
     int depth, i, scope_level;
 
     scope_level = fd->scope_level;
@@ -33016,7 +33077,7 @@ static void emit_return(JSParseState *s, BOOL hasval)
 
     {
         JSFunctionDef *fd2 = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
-        BlockEnv *stack2 = (BlockEnv*)gc_deref(fd2->break_stack_handle);
+        BlockEnv *stack2 = fd2->break_stack_handle;
         int depth2 = fd2->top_break_depth;
         while (depth2 >= 0) {
             BlockEnv *top = &stack2[depth2];
@@ -33451,7 +33512,7 @@ static __exception int js_parse_for_in_of(JSParseState *s, int label_name,
         SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->last_opcode_pos = bc->size - 5;
         /* relocate labels */
         for (i = label_cont; i < SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->label_count; i++) {
-            LabelSlot *ls = &GC_DATA_ARRAY_AT(s_cur_func_label_slots, LabelSlot, i);
+            LabelSlot *ls = &PVEC_AT(s_cur_func_label_slots, LabelSlot, i);
             if (ls->pos >= pos_next && ls->pos < pos_expr)
                 ls->pos += offset;
         }
@@ -33518,7 +33579,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
     label_name = JS_ATOM_NULL;
     if (is_label(s)) {
         JSFunctionDef *fd2 = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
-        BlockEnv *stack2 = (BlockEnv*)gc_deref(fd2->break_stack_handle);
+        BlockEnv *stack2 = fd2->break_stack_handle;
         int depth2;
 
         label_name = JS_DupAtom(ctx, s->token.u.ident.atom);
@@ -33839,7 +33900,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
             /* Update the break stack entry with the correct label_cont */
             {
                 JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
-                BlockEnv *stack = (BlockEnv*)gc_deref(fd->break_stack_handle);
+                BlockEnv *stack = fd->break_stack_handle;
                 stack[fd->top_break_depth].label_cont = label_cont;
             }
             if (js_parse_expect(s, ')'))
@@ -33867,7 +33928,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
                 SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->last_opcode_pos = bc->size - 5;
                 /* relocate labels */
                 for (i = label_cont; i < SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->label_count; i++) {
-                    LabelSlot *ls = &GC_DATA_ARRAY_AT(s_cur_func_label_slots, LabelSlot, i);
+                    LabelSlot *ls = &PVEC_AT(s_cur_func_label_slots, LabelSlot, i);
                     if (ls->pos >= pos_cont && ls->pos < pos_body)
                         ls->pos += offset;
                 }
@@ -33989,7 +34050,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
                 /* Ugly patch for the the `default` label, shameful and risky */
                 put_u32(gc_byte_buffer_ptr(&SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code) + default_label_pos,
                         label_case);
-                GC_DATA_ARRAY_AT(s_cur_func_label_slots, LabelSlot, label_case).pos = default_label_pos + 4;
+                PVEC_AT(s_cur_func_label_slots, LabelSlot, label_case).pos = default_label_pos + 4;
             } else {
                 emit_label(s, label_case);
             }
@@ -36592,7 +36653,7 @@ static int add_import(JSParseState *s, JSModuleDefHandle m,
 
     if (local_name != JS_ATOM_default) {
         for (i = 0; i < SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->closure_var_handle.count; i++) {
-            if (GC_DATA_ARRAY_AT(s_cur_func_closure_var, JSClosureVar, i).var_name == local_name)
+            if (PVEC_AT(s_cur_func_closure_var, JSClosureVar, i).var_name == local_name)
                 return js_parse_error(s, "duplicate import binding");
         }
     }
@@ -36830,20 +36891,20 @@ static JSFunctionDef *js_new_function_def(JSContextHandle ctx,
 
     /* XXX: should distinguish arg, var and var object and body scopes */
     /* Allocate scopes array on GC heap immediately */
-    if (!gc_data_array_resize_bytes(&SAFE_PTR(fd, JSFunctionDefHandle)->scopes_handle, sizeof(JSVarScope), 4)) {
+    if (!pvec_resize(&SAFE_PTR(fd, JSFunctionDefHandle)->scopes_handle, sizeof(JSVarScope), 4)) {
         QJS_LOGE("[NEW_FD] scopes_handle.resize failed");
         return NULL;
     }
     SAFE_PTR(fd, JSFunctionDefHandle)->scope_size = 4;
     SAFE_PTR(fd, JSFunctionDefHandle)->scope_count = 1;
-    GC_DATA_ARRAY_AT(SAFE_PTR(fd, JSFunctionDefHandle)->scopes_handle, JSVarScope, 0).first = -1;
-    GC_DATA_ARRAY_AT(SAFE_PTR(fd, JSFunctionDefHandle)->scopes_handle, JSVarScope, 0).parent = -1;
+    PVEC_AT(SAFE_PTR(fd, JSFunctionDefHandle)->scopes_handle, JSVarScope, 0).first = -1;
+    PVEC_AT(SAFE_PTR(fd, JSFunctionDefHandle)->scopes_handle, JSVarScope, 0).parent = -1;
     SAFE_PTR(fd, JSFunctionDefHandle)->scope_level = 0;  /* 0: var/arg scope */
     SAFE_PTR(fd, JSFunctionDefHandle)->scope_first = -1;
     SAFE_PTR(fd, JSFunctionDefHandle)->body_scope = -1;
     
     /* Initialize label slots array */
-    if (!gc_data_array_resize_bytes(&SAFE_PTR(fd, JSFunctionDefHandle)->label_slots_handle, sizeof(LabelSlot), 4)) {
+    if (!pvec_resize(&SAFE_PTR(fd, JSFunctionDefHandle)->label_slots_handle, sizeof(LabelSlot), 4)) {
         QJS_LOGE("[NEW_FD] label_slots_handle.resize failed");
         return NULL;
     }
@@ -37090,6 +37151,33 @@ static void bc_fingerprint(JSContextHandle ctx, JSFunctionBytecodeHandle b)
     }
 }
 
+/* The plain-memory tables of a definition (js_create_function's last use,
+ * or js_free_function_def). */
+static void js_free_function_def_tables(JSFunctionDef *fd)
+{
+    js_plain_free(fd->vars_handle);
+    fd->vars_handle = NULL;
+    fd->var_size = 0;
+    js_plain_free(fd->args_handle);
+    fd->args_handle = NULL;
+    fd->arg_size = 0;
+    pvec_free(&fd->scopes_handle);
+    pvec_free(&fd->global_vars_handle);
+    pvec_free(&fd->label_slots_handle);
+    js_plain_free(fd->break_stack_handle);
+    fd->break_stack_handle = NULL;
+    fd->break_stack_capacity = 0;
+    pvec_free(&fd->reloc_entries);
+    pvec_free(&fd->closure_var_handle);
+    pvec_free(&fd->jump_slots_handle);
+    pvec_free(&fd->line_number_slots_handle);
+    js_plain_free(fd->var_htab_handle);
+    fd->var_htab_handle = NULL;
+    js_plain_free(fd->cv_htab_handle);
+    fd->cv_htab_handle = NULL;
+    fd->cv_htab_src = NULL;
+}
+
 static void js_free_function_def(JSContextHandle ctx, JSFunctionDef *fd)
 {
     int i;
@@ -37117,32 +37205,31 @@ static void js_free_function_def(JSContextHandle ctx, JSFunctionDef *fd)
     JS_FreeAtom(ctx, fd->func_name);
 
     for(i = 0; i < fd->var_count; i++) {
-        JS_FreeAtom(ctx, SAFE_AT(fd_vars, JSVarDefArrayHandle, i).var_name);
+        JS_FreeAtom(ctx, (fd_vars)[i].var_name);
     }
     /* GC frees automatically */;
     for(i = 0; i < fd->arg_count; i++) {
-        JS_FreeAtom(ctx, SAFE_AT(fd_args, JSVarDefArrayHandle, i).var_name);
+        JS_FreeAtom(ctx, (fd_args)[i].var_name);
     }
     /* GC frees automatically */;
 
     for(i = 0; i < fd->global_var_count; i++) {
-        JS_FreeAtom(ctx, GC_DATA_ARRAY_AT(fd_global_vars, JSGlobalVar, i).var_name);
+        JS_FreeAtom(ctx, PVEC_AT(fd_global_vars, JSGlobalVar, i).var_name);
     }
     /* GC frees automatically */;
 
     for(i = 0; i < fd->closure_var_handle.count; i++) {
-        JSClosureVar *cv = &GC_DATA_ARRAY_AT(fd_closure_var, JSClosureVar, i);
+        JSClosureVar *cv = &PVEC_AT(fd_closure_var, JSClosureVar, i);
         JS_FreeAtom(ctx, cv->var_name);
     }
     /* GC frees automatically */;
 
-    if ((fd->scopes_handle.handle != GC_HANDLE_NULL))
+    if ((fd->scopes_handle.data != GC_HANDLE_NULL))
         /* GC frees automatically */;
 
     JS_FreeAtom(ctx, fd->filename);
     gc_byte_buffer_clear(&fd->pc2line);
-
-    /* GC frees automatically */;
+    js_free_function_def_tables(fd);
 
     /* child_handles and parent references are handles - GC frees automatically */
 }
@@ -37627,13 +37714,13 @@ static int add_closure_var(JSContextHandle ctx, JSFunctionDef *s,
         return -1;
     }
 
-    if (!gc_data_array_resize_bytes(&s->closure_var_handle, sizeof(JSClosureVar), s->closure_var_handle.count + 1)) {
+    if (!pvec_resize(&s->closure_var_handle, sizeof(JSClosureVar), s->closure_var_handle.count + 1)) {
         JS_ThrowOutOfMemory(ctx);
         return -1;
     }
     {
         int idx = s->closure_var_handle.count - 1;
-        JSClosureVar *cv = &GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, idx);
+        JSClosureVar *cv = &PVEC_AT(s_closure_var, JSClosureVar, idx);
         cv->closure_type = closure_type;
         cv->is_const = is_const;
         cv->is_lexical = is_lexical;
@@ -37676,26 +37763,27 @@ static BOOL cv_htab_update(JSFunctionDef *s)
     uint32_t *t, cap;
     if (n < CV_HTAB_MIN)
         return FALSE;
-    if (s->cv_htab_handle == GC_HANDLE_NULL ||
-        s->cv_htab_src != s->closure_var_handle.handle ||
+    if (!s->cv_htab_handle ||
+        s->cv_htab_src != s->closure_var_handle.data ||
         n < s->cv_htab_indexed || (uint32_t)n * 2 > s->cv_htab_cap) {
-        GCHandle h;
+        uint32_t *h;
         cap = 64;
         while (cap < (uint32_t)n * 4)
             cap *= 2;
-        h = gc_allocz(cap * 2 * sizeof(uint32_t), JS_GC_OBJ_TYPE_DATA);
-        if (h == GC_HANDLE_NULL)
+        h = (uint32_t *)js_plain_calloc((size_t)cap * 2, sizeof(uint32_t));
+        if (!h)
             return FALSE;
-        GC_SET(s->cv_htab_handle, h);
-        GC_SET(s->cv_htab_src, s->closure_var_handle.handle);
+        js_plain_free(s->cv_htab_handle);
+        s->cv_htab_handle = h;
+        s->cv_htab_src = s->closure_var_handle.data;
         s->cv_htab_cap = cap;
         s->cv_htab_indexed = 0;
         s->cv_has_special = FALSE;
     }
     cap = s->cv_htab_cap;
-    t = (uint32_t *)gc_deref(s->cv_htab_handle);
+    t = s->cv_htab_handle;
     for (i = s->cv_htab_indexed; i < n; i++) {
-        JSClosureVar *cv = &GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, i);
+        JSClosureVar *cv = &PVEC_AT(s_closure_var, JSClosureVar, i);
         uint32_t h;
         if (cv->var_name == JS_ATOM__var_ || cv->var_name == JS_ATOM__arg_var_ ||
             cv->var_name == JS_ATOM__with_)
@@ -37707,7 +37795,7 @@ static BOOL cv_htab_update(JSFunctionDef *s)
                 t[h] = i + 1;
                 break;
             }
-            if (GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, t[h] - 1).var_name == cv->var_name)
+            if (PVEC_AT(s_closure_var, JSClosureVar, t[h] - 1).var_name == cv->var_name)
                 break;
             h = (h + 1) & (cap - 1);
         }
@@ -37719,7 +37807,7 @@ static BOOL cv_htab_update(JSFunctionDef *s)
                 t[cap + h] = i + 1;
                 break;
             }
-            cv1 = &GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, t[cap + h] - 1);
+            cv1 = &PVEC_AT(s_closure_var, JSClosureVar, t[cap + h] - 1);
             if (cv1->closure_type == cv->closure_type && cv1->var_idx == cv->var_idx &&
                 (!cv_is_global_type(cv->closure_type) || cv1->var_name == cv->var_name))
                 break;
@@ -37734,10 +37822,10 @@ static BOOL cv_htab_update(JSFunctionDef *s)
    up to date index) */
 static int cv_htab_find_name(JSFunctionDef *s, JSAtom name)
 {
-    uint32_t cap = s->cv_htab_cap, *t = (uint32_t *)gc_deref(s->cv_htab_handle);
+    uint32_t cap = s->cv_htab_cap, *t = s->cv_htab_handle;
     uint32_t h = (name * 2654435761u) & (cap - 1);
     while (t[h]) {
-        if (GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, t[h] - 1).var_name == name)
+        if (PVEC_AT(s_closure_var, JSClosureVar, t[h] - 1).var_name == name)
             return t[h] - 1;
         h = (h + 1) & (cap - 1);
     }
@@ -37749,7 +37837,7 @@ static int find_closure_var(JSContextHandle ctx, JSFunctionDef *s,
 {
     int i;
     for(i = 0; i < s->closure_var_handle.count; i++) {
-        JSClosureVar *cv = &GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, i);
+        JSClosureVar *cv = &PVEC_AT(s_closure_var, JSClosureVar, i);
         if (cv->var_name == var_name)
             return i;
     }
@@ -37777,10 +37865,10 @@ static int get_closure_var(JSContextHandle ctx, JSFunctionDef *s,
             closure_type = JS_CLOSURE_REF;
     }
     if (cv_htab_update(s)) {
-        uint32_t cap = s->cv_htab_cap, *t = (uint32_t *)gc_deref(s->cv_htab_handle);
+        uint32_t cap = s->cv_htab_cap, *t = s->cv_htab_handle;
         uint32_t h = cv_key_hash(closure_type, var_idx, var_name) & (cap - 1);
         while (t[cap + h]) {
-            JSClosureVar *cv = &GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, t[cap + h] - 1);
+            JSClosureVar *cv = &PVEC_AT(s_closure_var, JSClosureVar, t[cap + h] - 1);
             if (cv->var_idx == var_idx && cv->closure_type == closure_type &&
                 (!cv_is_global_type(closure_type) || cv->var_name == var_name))
                 return t[cap + h] - 1;
@@ -37790,7 +37878,7 @@ static int get_closure_var(JSContextHandle ctx, JSFunctionDef *s,
                                is_const, is_lexical, var_kind);
     }
     for(i = 0; i < s->closure_var_handle.count; i++) {
-        JSClosureVar *cv = &GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, i);
+        JSClosureVar *cv = &PVEC_AT(s_closure_var, JSClosureVar, i);
         if (cv->var_idx == var_idx && cv->closure_type == closure_type) {
             /* For global closure vars var_idx is always 0, so it cannot
              * distinguish different globals — the name must match too.
@@ -37889,7 +37977,7 @@ static int add_var_this(JSContextHandle ctx, JSFunctionDef *fd)
     if (idx >= 0 && fd->is_derived_class_constructor) {
         JSVarDefArrayHandle vd_arr = fd_vars; int vd_idx = idx;
         /* XXX: should have is_this flag or var type */
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).is_lexical = 1; /* used to trigger 'uninitialized' checks
+        (vd_arr)[vd_idx].is_lexical = 1; /* used to trigger 'uninitialized' checks
                                in a derived class constructor */
     }
     return idx;
@@ -37969,9 +38057,9 @@ static void create_frame_var_ref(JSContextHandle ctx, JSStackFrame *sf, int var_
 /* Overload for JSVarDefHandle - safe handle-based access */
 static inline void capture_var_ctx(JSContextHandle ctx, JSFunctionDef *s, JSVarDefArrayHandle vd_arr, int vd_idx, BOOL is_arg)
 {
-    if (!SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).is_captured) {
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).is_captured = 1;
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_ref_idx = s->var_ref_count++;
+    if (!(vd_arr)[vd_idx].is_captured) {
+        (vd_arr)[vd_idx].is_captured = 1;
+        (vd_arr)[vd_idx].var_ref_idx = s->var_ref_count++;
         
         /* Also create var_ref in running stack frame if applicable */
         JSStackFrame *sf = js_rt_current_stack_frame(ctx_rt);
@@ -37992,7 +38080,7 @@ static inline void capture_var_ctx(JSContextHandle ctx, JSFunctionDef *s, JSVarD
             /* We can't directly compare, so we check if the frame's bytecode 
                was created from s by checking if s is still valid */
             /* For now, just try to create var_ref in all frames */
-            create_frame_var_ref(ctx, sf, SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_ref_idx, is_arg);
+            create_frame_var_ref(ctx, sf, (vd_arr)[vd_idx].var_ref_idx, is_arg);
             break;
         }
     }
@@ -38001,9 +38089,9 @@ static inline void capture_var_ctx(JSContextHandle ctx, JSFunctionDef *s, JSVarD
 /* Original capture_var without ctx - used in places without ctx access */
 static inline void capture_var_at(JSFunctionDef *s, JSVarDefArrayHandle vd_arr, int vd_idx)
 {
-    if (!SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).is_captured) {
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).is_captured = 1;
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_ref_idx = s->var_ref_count++;
+    if (!(vd_arr)[vd_idx].is_captured) {
+        (vd_arr)[vd_idx].is_captured = 1;
+        (vd_arr)[vd_idx].var_ref_idx = s->var_ref_count++;
     }
 }
 
@@ -38090,9 +38178,9 @@ static int resolve_scope_var(JSContextHandle ctx, JSFunctionDef *s,
     var_idx = -1;
     for (idx = fd_get_scope_first(s, scope_level); idx >= 0;) {
         JSVarDefArrayHandle vd_arr = s_vars; int vd_idx = idx;
-        if (SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name == var_name) {
+        if ((vd_arr)[vd_idx].var_name == var_name) {
             if (op == OP_scope_put_var || op == OP_scope_make_ref) {
-                if (SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).is_const) {
+                if ((vd_arr)[vd_idx].is_const) {
                     dbuf_putc(bc, OP_throw_error);
                     dbuf_put_u32(bc, JS_DupAtom(ctx, var_name));
                     dbuf_putc(bc, JS_THROW_VAR_RO);
@@ -38102,12 +38190,12 @@ static int resolve_scope_var(JSContextHandle ctx, JSFunctionDef *s,
             var_idx = idx;
             break;
         } else
-        if (SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name == JS_ATOM__with_ && !is_pseudo_var) {
+        if ((vd_arr)[vd_idx].var_name == JS_ATOM__with_ && !is_pseudo_var) {
             dbuf_putc(bc, OP_get_loc);
             dbuf_put_u16(bc, idx);
             var_object_test(ctx, s, var_name, op, bc, &label_done, 1);
         }
-        idx = SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_next;
+        idx = (vd_arr)[vd_idx].scope_next;
     }
     is_arg_scope = (idx == ARG_SCOPE_END);
     if (var_idx < 0) {
@@ -38133,7 +38221,7 @@ static int resolve_scope_var(JSContextHandle ctx, JSFunctionDef *s,
     if (var_idx >= 0) {
         if ((op == OP_scope_put_var || op == OP_scope_make_ref) &&
             !(var_idx & ARGUMENT_VAR_OFFSET) &&
-            SAFE_AT(s_vars, JSVarDefArrayHandle, var_idx).is_const) {
+            (s_vars)[var_idx].is_const) {
             /* only happens when assigning a function expression name
                in strict mode */
             dbuf_putc(bc, OP_throw_error);
@@ -38147,7 +38235,7 @@ static int resolve_scope_var(JSContextHandle ctx, JSFunctionDef *s,
         switch (op) {
         case OP_scope_make_ref:
             if (!(var_idx & ARGUMENT_VAR_OFFSET) &&
-                SAFE_AT(s_vars, JSVarDefArrayHandle, var_idx).var_kind == JS_VAR_FUNCTION_NAME) {
+                (s_vars)[var_idx].var_kind == JS_VAR_FUNCTION_NAME) {
                 /* Create a dummy object reference for the func_var */
                 dbuf_putc(bc, OP_object);
                 dbuf_putc(bc, OP_get_loc);
@@ -38163,7 +38251,7 @@ static int resolve_scope_var(JSContextHandle ctx, JSFunctionDef *s,
                     get_op = OP_get_arg;
                     var_idx -= ARGUMENT_VAR_OFFSET;
                 } else {
-                    if (SAFE_AT(s_vars, JSVarDefArrayHandle, var_idx).is_lexical)
+                    if ((s_vars)[var_idx].is_lexical)
                         get_op = OP_get_loc_check;
                     else
                         get_op = OP_get_loc;
@@ -38188,7 +38276,7 @@ static int resolve_scope_var(JSContextHandle ctx, JSFunctionDef *s,
             break;
         case OP_scope_put_var:
             if (!(var_idx & ARGUMENT_VAR_OFFSET) &&
-                SAFE_AT(s_vars, JSVarDefArrayHandle, var_idx).var_kind == JS_VAR_FUNCTION_NAME) {
+                (s_vars)[var_idx].var_kind == JS_VAR_FUNCTION_NAME) {
                 /* in non strict mode, modifying the function name is ignored */
                 dbuf_putc(bc, OP_drop);
                 goto done;
@@ -38208,7 +38296,7 @@ static int resolve_scope_var(JSContextHandle ctx, JSFunctionDef *s,
                 dbuf_put_u16(bc, var_idx - ARGUMENT_VAR_OFFSET);
             } else {
                 if (is_put) {
-                    if (SAFE_AT(s_vars, JSVarDefArrayHandle, var_idx).is_lexical) {
+                    if ((s_vars)[var_idx].is_lexical) {
                         if (op == OP_scope_put_var_init) {
                             /* 'this' can only be initialized once */
                             if (var_name == JS_ATOM_this)
@@ -38222,7 +38310,7 @@ static int resolve_scope_var(JSContextHandle ctx, JSFunctionDef *s,
                         dbuf_putc(bc, OP_put_loc);
                     }
                 } else {
-                    if (SAFE_AT(s_vars, JSVarDefArrayHandle, var_idx).is_lexical) {
+                    if ((s_vars)[var_idx].is_lexical) {
                         if (op == OP_scope_get_var_checkthis) {
                             /* only used for 'this' return in derived class constructors */
                             dbuf_putc(bc, OP_get_loc_checkthis);
@@ -38261,9 +38349,9 @@ static int resolve_scope_var(JSContextHandle ctx, JSFunctionDef *s,
         fd = SAFE_PTR(fd->parent_handle, JSFunctionDefHandle);
         for (idx = fd_get_scope_first(fd, scope_level); idx >= 0;) {
             JSVarDefArrayHandle vd_arr = fd_vars; int vd_idx = idx;
-            if (SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name == var_name) {
+            if ((vd_arr)[vd_idx].var_name == var_name) {
                 if (op == OP_scope_put_var || op == OP_scope_make_ref) {
-                    if (SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).is_const) {
+                    if ((vd_arr)[vd_idx].is_const) {
                         dbuf_putc(bc, OP_throw_error);
                         dbuf_put_u32(bc, JS_DupAtom(ctx, var_name));
                         dbuf_putc(bc, JS_THROW_VAR_RO);
@@ -38272,16 +38360,16 @@ static int resolve_scope_var(JSContextHandle ctx, JSFunctionDef *s,
                 }
                 var_idx = idx;
                 break;
-            } else if (SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name == JS_ATOM__with_ && !is_pseudo_var) {
+            } else if ((vd_arr)[vd_idx].var_name == JS_ATOM__with_ && !is_pseudo_var) {
                 capture_var_at(fd, vd_arr, vd_idx);
-                idx = get_closure_var(ctx, s, fd, JS_CLOSURE_LOCAL, idx, SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name, FALSE, FALSE, JS_VAR_NORMAL);
+                idx = get_closure_var(ctx, s, fd, JS_CLOSURE_LOCAL, idx, (vd_arr)[vd_idx].var_name, FALSE, FALSE, JS_VAR_NORMAL);
                 if (idx >= 0) {
                     dbuf_putc(bc, OP_get_var_ref);
                     dbuf_put_u16(bc, idx);
                     var_object_test(ctx, s, var_name, op, bc, &label_done, 1);
                 }
             }
-            idx = SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_next;
+            idx = (vd_arr)[vd_idx].scope_next;
         }
         is_arg_scope = (idx == ARG_SCOPE_END);
         if (var_idx >= 0)
@@ -38323,7 +38411,7 @@ static int resolve_scope_var(JSContextHandle ctx, JSFunctionDef *s,
             JSVarDefArrayHandle vd_arr = fd_vars; int vd_idx = fd->var_object_idx;
             capture_var_at(fd, vd_arr, vd_idx);
             idx = get_closure_var(ctx, s, fd, JS_CLOSURE_LOCAL,
-                                  fd->var_object_idx, SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name,
+                                  fd->var_object_idx, (vd_arr)[vd_idx].var_name,
                                   FALSE, FALSE, JS_VAR_NORMAL);
             dbuf_putc(bc, OP_get_var_ref);
             dbuf_put_u16(bc, idx);
@@ -38335,7 +38423,7 @@ static int resolve_scope_var(JSContextHandle ctx, JSFunctionDef *s,
             JSVarDefArrayHandle vd_arr = fd_vars; int vd_idx = fd->arg_var_object_idx;
             capture_var_at(fd, vd_arr, vd_idx);
             idx = get_closure_var(ctx, s, fd, JS_CLOSURE_LOCAL,
-                                  fd->arg_var_object_idx, SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name,
+                                  fd->arg_var_object_idx, (vd_arr)[vd_idx].var_name,
                                   FALSE, FALSE, JS_VAR_NORMAL);
             dbuf_putc(bc, OP_get_var_ref);
             dbuf_put_u16(bc, idx);
@@ -38364,7 +38452,7 @@ static int resolve_scope_var(JSContextHandle ctx, JSFunctionDef *s,
             }
         }
         for (idx1 = idx1_start; idx1 < idx1_end; idx1++) {
-            JSClosureVar *cv = &GC_DATA_ARRAY_AT(fd_closure_var, JSClosureVar, idx1);
+            JSClosureVar *cv = &PVEC_AT(fd_closure_var, JSClosureVar, idx1);
             if (var_name == cv->var_name) {
                 if (fd != s) {
                     JSClosureTypeEnum closure_type;
@@ -38476,14 +38564,14 @@ static int resolve_scope_var(JSContextHandle ctx, JSFunctionDef *s,
             idx = get_closure_var(ctx, s, fd,
                                   JS_CLOSURE_LOCAL, var_idx,
                                   var_name,
-                                  SAFE_AT(fd_vars, JSVarDefArrayHandle, var_idx).is_const,
-                                  SAFE_AT(fd_vars, JSVarDefArrayHandle, var_idx).is_lexical,
-                                  (JSVarKindEnum)SAFE_AT(fd_vars, JSVarDefArrayHandle, var_idx).var_kind);
+                                  (fd_vars)[var_idx].is_const,
+                                  (fd_vars)[var_idx].is_lexical,
+                                  (JSVarKindEnum)(fd_vars)[var_idx].var_kind);
         }
         if (idx >= 0) {
         has_idx:
             if ((op == OP_scope_put_var || op == OP_scope_make_ref) &&
-                GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, idx).is_const) {
+                PVEC_AT(s_closure_var, JSClosureVar, idx).is_const) {
                 dbuf_putc(bc, OP_throw_error);
                 dbuf_put_u32(bc, JS_DupAtom(ctx, var_name));
                 dbuf_putc(bc, JS_THROW_VAR_RO);
@@ -38491,7 +38579,7 @@ static int resolve_scope_var(JSContextHandle ctx, JSFunctionDef *s,
             }
             switch (op) {
             case OP_scope_make_ref:
-                if (GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, idx).var_kind == JS_VAR_FUNCTION_NAME) {
+                if (PVEC_AT(s_closure_var, JSClosureVar, idx).var_kind == JS_VAR_FUNCTION_NAME) {
                     /* Create a dummy object reference for the func_var */
                     dbuf_putc(bc, OP_object);
                     dbuf_putc(bc, OP_get_var_ref);
@@ -38504,7 +38592,7 @@ static int resolve_scope_var(JSContextHandle ctx, JSFunctionDef *s,
                 if (label_done == -1 &&
                     can_opt_put_ref_value(bc_buf, ls->pos)) {
                     int get_op;
-                    if (GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, idx).is_lexical)
+                    if (PVEC_AT(s_closure_var, JSClosureVar, idx).is_lexical)
                         get_op = OP_get_var_ref_check;
                     else
                         get_op = OP_get_var_ref;
@@ -38520,7 +38608,7 @@ static int resolve_scope_var(JSContextHandle ctx, JSFunctionDef *s,
                 }
                 break;
             case OP_scope_put_var:
-                if (GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, idx).var_kind == JS_VAR_FUNCTION_NAME) {
+                if (PVEC_AT(s_closure_var, JSClosureVar, idx).var_kind == JS_VAR_FUNCTION_NAME) {
                     /* in non strict mode, modifying the function name is ignored */
                     dbuf_putc(bc, OP_drop);
                     goto done;
@@ -38538,7 +38626,7 @@ static int resolve_scope_var(JSContextHandle ctx, JSFunctionDef *s,
                 is_put = (op == OP_scope_put_var ||
                           op == OP_scope_put_var_init);
                 if (is_put) {
-                    if (GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, idx).is_lexical) {
+                    if (PVEC_AT(s_closure_var, JSClosureVar, idx).is_lexical) {
                         if (op == OP_scope_put_var_init) {
                             /* 'this' can only be initialized once */
                             if (var_name == JS_ATOM_this)
@@ -38552,7 +38640,7 @@ static int resolve_scope_var(JSContextHandle ctx, JSFunctionDef *s,
                         dbuf_putc(bc, OP_put_var_ref);
                     }
                 } else {
-                    if (GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, idx).is_lexical) {
+                    if (PVEC_AT(s_closure_var, JSClosureVar, idx).is_lexical) {
                         dbuf_putc(bc, OP_get_var_ref_check);
                     } else {
                         dbuf_putc(bc, OP_get_var_ref);
@@ -38572,7 +38660,7 @@ done:
     if (label_done >= 0) {
         dbuf_putc(bc, OP_label);
         dbuf_put_u32(bc, label_done);
-        GC_DATA_ARRAY_AT(s_label_slots, LabelSlot, label_done).pos2 = bc->size;
+        PVEC_AT(s_label_slots, LabelSlot, label_done).pos2 = bc->size;
     }
     return pos_next;
 }
@@ -38585,9 +38673,9 @@ static int find_private_class_field_all(JSContextHandle ctx, JSFunctionDef *fd,
 
     idx = fd_get_scope_first(fd, scope_level);
     while (idx >= 0) {
-        if (SAFE_AT(fd_vars, JSVarDefArrayHandle, idx).var_name == name)
+        if ((fd_vars)[idx].var_name == name)
             return idx;
-        idx = SAFE_AT(fd_vars, JSVarDefArrayHandle, idx).scope_next;
+        idx = (fd_vars)[idx].scope_next;
     }
     return -1;
 }
@@ -38617,7 +38705,7 @@ static int resolve_scope_private_field1(JSContextHandle ctx,
     for(;;) {
         idx = find_private_class_field_all(ctx, fd, var_name, scope_level);
         if (idx >= 0) {
-            var_kind = SAFE_AT(fd_vars, JSVarDefArrayHandle, idx).var_kind;
+            var_kind = (fd_vars)[idx].var_kind;
             if (is_ref) {
                 capture_var_at(fd, fd_vars, idx);
                 idx = get_closure_var(ctx, s, fd, JS_CLOSURE_LOCAL, idx, var_name,
@@ -38632,7 +38720,7 @@ static int resolve_scope_private_field1(JSContextHandle ctx,
             if (fd->is_eval) {
                 /* closure of the eval function (top level) */
                 for (idx = 0; idx < fd->closure_var_handle.count; idx++) {
-                    JSClosureVar *cv = &GC_DATA_ARRAY_AT(fd_closure_var, JSClosureVar, idx);
+                    JSClosureVar *cv = &PVEC_AT(fd_closure_var, JSClosureVar, idx);
                     if (cv->var_name == var_name) {
                         var_kind = cv->var_kind;
                         is_ref = TRUE;
@@ -38774,7 +38862,7 @@ static void mark_eval_captured_variables(JSContextHandle ctx, JSFunctionDef *s,
     for (idx = fd_get_scope_first(s, scope_level); idx >= 0;) {
         JSVarDefArrayHandle vd_arr = s_vars; int vd_idx = idx;
         capture_var_at(s, vd_arr, vd_idx);
-        idx = SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_next;
+        idx = (vd_arr)[vd_idx].scope_next;
     }
 }
 
@@ -38837,9 +38925,9 @@ static void add_eval_variables(JSContextHandle ctx, JSFunctionDef *s)
     for(i = 0; i < s->var_count; i++) {
         JSVarDefArrayHandle vd_arr = s_vars; int vd_idx = i;
         /* do not close top level last result */
-        if (SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_level == 0 &&
-            SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name != JS_ATOM__ret_ &&
-            SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name != JS_ATOM_NULL) {
+        if ((vd_arr)[vd_idx].scope_level == 0 &&
+            (vd_arr)[vd_idx].var_name != JS_ATOM__ret_ &&
+            (vd_arr)[vd_idx].var_name != JS_ATOM_NULL) {
             capture_var_at(s, vd_arr, vd_idx);
         }
     }
@@ -38884,8 +38972,8 @@ static void add_eval_variables(JSContextHandle ctx, JSFunctionDef *s)
             JSVarDefArrayHandle vdh_arr = fd_vars; int vdh_idx = scope_idx;
             capture_var_at(fd, vdh_arr, vdh_idx);
             get_closure_var(ctx, s, fd, JS_CLOSURE_LOCAL, scope_idx,
-                            SAFE_AT(vdh_arr, JSVarDefArrayHandle, vdh_idx).var_name, SAFE_AT(vdh_arr, JSVarDefArrayHandle, vdh_idx).is_const, SAFE_AT(vdh_arr, JSVarDefArrayHandle, vdh_idx).is_lexical, (JSVarKindEnum)SAFE_AT(vdh_arr, JSVarDefArrayHandle, vdh_idx).var_kind);
-            scope_idx = SAFE_AT(vdh_arr, JSVarDefArrayHandle, vdh_idx).scope_next;
+                            (vdh_arr)[vdh_idx].var_name, (vdh_arr)[vdh_idx].is_const, (vdh_arr)[vdh_idx].is_lexical, (JSVarKindEnum)(vdh_arr)[vdh_idx].var_kind);
+            scope_idx = (vdh_arr)[vdh_idx].scope_next;
         }
         is_arg_scope = (scope_idx == ARG_SCOPE_END);
         if (!is_arg_scope) {
@@ -38893,34 +38981,34 @@ static void add_eval_variables(JSContextHandle ctx, JSFunctionDef *s)
             /* XXX: propagate is_const and var_kind too ? */
             for(i = 0; i < fd->arg_count; i++) {
                 JSVarDefArrayHandle vdh_arr = fd_args; int vdh_idx = i;
-                if (SAFE_AT(vdh_arr, JSVarDefArrayHandle, vdh_idx).var_name != JS_ATOM_NULL) {
+                if ((vdh_arr)[vdh_idx].var_name != JS_ATOM_NULL) {
                     capture_var_at(fd, vdh_arr, vdh_idx);
                     get_closure_var(ctx, s, fd,
-                                    JS_CLOSURE_ARG, i, SAFE_AT(vdh_arr, JSVarDefArrayHandle, vdh_idx).var_name, FALSE,
-                                    SAFE_AT(vdh_arr, JSVarDefArrayHandle, vdh_idx).is_lexical, JS_VAR_NORMAL);
+                                    JS_CLOSURE_ARG, i, (vdh_arr)[vdh_idx].var_name, FALSE,
+                                    (vdh_arr)[vdh_idx].is_lexical, JS_VAR_NORMAL);
                 }
             }
             for(i = 0; i < fd->var_count; i++) {
                 JSVarDefArrayHandle vdh_arr = fd_vars; int vdh_idx = i;
                 /* do not close top level last result */
-                if (SAFE_AT(vdh_arr, JSVarDefArrayHandle, vdh_idx).scope_level == 0 &&
-                    SAFE_AT(vdh_arr, JSVarDefArrayHandle, vdh_idx).var_name != JS_ATOM__ret_ &&
-                    SAFE_AT(vdh_arr, JSVarDefArrayHandle, vdh_idx).var_name != JS_ATOM_NULL) {
+                if ((vdh_arr)[vdh_idx].scope_level == 0 &&
+                    (vdh_arr)[vdh_idx].var_name != JS_ATOM__ret_ &&
+                    (vdh_arr)[vdh_idx].var_name != JS_ATOM_NULL) {
                     capture_var_at(fd, vdh_arr, vdh_idx);
                     get_closure_var(ctx, s, fd,
-                                    JS_CLOSURE_LOCAL, i, SAFE_AT(vdh_arr, JSVarDefArrayHandle, vdh_idx).var_name, FALSE,
-                                    SAFE_AT(vdh_arr, JSVarDefArrayHandle, vdh_idx).is_lexical, JS_VAR_NORMAL);
+                                    JS_CLOSURE_LOCAL, i, (vdh_arr)[vdh_idx].var_name, FALSE,
+                                    (vdh_arr)[vdh_idx].is_lexical, JS_VAR_NORMAL);
                 }
             }
         } else {
             for(i = 0; i < fd->var_count; i++) {
                 JSVarDefArrayHandle vdh_arr = fd_vars; int vdh_idx = i;
                 /* do not close top level last result */
-                if (SAFE_AT(vdh_arr, JSVarDefArrayHandle, vdh_idx).scope_level == 0 && is_var_in_arg_scope(SAFE_AT(vdh_arr, JSVarDefArrayHandle, vdh_idx).var_name, (JSVarKindEnum)SAFE_AT(vdh_arr, JSVarDefArrayHandle, vdh_idx).var_kind)) {
+                if ((vdh_arr)[vdh_idx].scope_level == 0 && is_var_in_arg_scope((vdh_arr)[vdh_idx].var_name, (JSVarKindEnum)(vdh_arr)[vdh_idx].var_kind)) {
                     capture_var_at(fd, vdh_arr, vdh_idx);
                     get_closure_var(ctx, s, fd,
-                                    JS_CLOSURE_LOCAL, i, SAFE_AT(vdh_arr, JSVarDefArrayHandle, vdh_idx).var_name, FALSE,
-                                    SAFE_AT(vdh_arr, JSVarDefArrayHandle, vdh_idx).is_lexical, JS_VAR_NORMAL);
+                                    JS_CLOSURE_LOCAL, i, (vdh_arr)[vdh_idx].var_name, FALSE,
+                                    (vdh_arr)[vdh_idx].is_lexical, JS_VAR_NORMAL);
                 }
             }
         }
@@ -38929,7 +39017,7 @@ static void add_eval_variables(JSContextHandle ctx, JSFunctionDef *s)
             /* add direct eval variables (we are necessarily at the
                top level). */
             for (idx = 0; idx < fd->closure_var_handle.count; idx++) {
-                JSClosureVar *cv = &GC_DATA_ARRAY_AT(fd_closure_var, JSClosureVar, idx);
+                JSClosureVar *cv = &PVEC_AT(fd_closure_var, JSClosureVar, idx);
                 /* Global variables are removed but module
                    definitions are kept. */
                 if (cv->closure_type != JS_CLOSURE_GLOBAL_REF &&
@@ -38968,22 +39056,23 @@ static __exception int add_closure_variables(JSContextHandle ctx, JSFunctionDef 
     count = SAFE_GET_OR(b, JSFunctionBytecodeHandle, arg_count, 0) + SAFE_GET_OR(b, JSFunctionBytecodeHandle, var_count, 0) + SAFE_GET_OR(b, JSFunctionBytecodeHandle, closure_var_count, 0);
     if (count == 0)
         return 0;
-    {
-        GCHandle cv_handle = gc_alloc(sizeof(JSClosureVar) * count, JS_GC_OBJ_TYPE_DATA);
-        gc_data_array_clear_and_free(&s->closure_var_handle);
-        GC_SET(s->closure_var_handle.handle, cv_handle);
-    }
-    if (s->closure_var_handle.handle == GC_HANDLE_NULL)
+    /* room for all of them (a new array: its index is stale, even at the
+       same address) */
+    pvec_free(&s->closure_var_handle);
+    s->cv_htab_src = NULL;
+    s->closure_var_handle.data = js_plain_calloc((size_t)count, sizeof(JSClosureVar));
+    if (!s->closure_var_handle.data)
         return -1;
+    s->closure_var_handle.capacity = count;
     /* Add lexical variables in scope at the point of evaluation */
     for (i = scope_idx; i >= 0;) {
         JSBytecodeVarDef *vardefs = b_vardefs(b);
         vd = &vardefs[SAFE_GET_OR(b, JSFunctionBytecodeHandle, arg_count, 0) + i];
         if (vd->has_scope) {
-            if (!gc_data_array_resize_bytes(&s->closure_var_handle, sizeof(JSClosureVar), s->closure_var_handle.count + 1))
+            if (!pvec_resize(&s->closure_var_handle, sizeof(JSClosureVar), s->closure_var_handle.count + 1))
                 return -1;
             int idx = s->closure_var_handle.count - 1;
-            JSClosureVar *cv = &GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, idx);
+            JSClosureVar *cv = &PVEC_AT(s_closure_var, JSClosureVar, idx);
             set_closure_from_var(ctx, cv, vd, i);
         }
         i = vd->scope_next;
@@ -38992,10 +39081,10 @@ static __exception int add_closure_variables(JSContextHandle ctx, JSFunctionDef 
     if (!is_arg_scope) {
         /* Add argument variables */
         for(i = 0; i < SAFE_GET_OR(b, JSFunctionBytecodeHandle, arg_count, 0); i++) {
-            if (!gc_data_array_resize_bytes(&s->closure_var_handle, sizeof(JSClosureVar), s->closure_var_handle.count + 1))
+            if (!pvec_resize(&s->closure_var_handle, sizeof(JSClosureVar), s->closure_var_handle.count + 1))
                 return -1;
             int idx = s->closure_var_handle.count - 1;
-            JSClosureVar *cv = &GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, idx);
+            JSClosureVar *cv = &PVEC_AT(s_closure_var, JSClosureVar, idx);
             JSBytecodeVarDef *vardefs = b_vardefs(b);
             vd = &vardefs[i];
             cv->closure_type = JS_CLOSURE_ARG;
@@ -39010,10 +39099,10 @@ static __exception int add_closure_variables(JSContextHandle ctx, JSFunctionDef 
             JSBytecodeVarDef *vardefs = b_vardefs(b);
             vd = &vardefs[SAFE_GET_OR(b, JSFunctionBytecodeHandle, arg_count, 0) + i];
             if (!vd->has_scope && vd->var_name != JS_ATOM__ret_) {
-                if (!gc_data_array_resize_bytes(&s->closure_var_handle, sizeof(JSClosureVar), s->closure_var_handle.count + 1))
+                if (!pvec_resize(&s->closure_var_handle, sizeof(JSClosureVar), s->closure_var_handle.count + 1))
                     return -1;
                 int idx = s->closure_var_handle.count - 1;
-                JSClosureVar *cv = &GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, idx);
+                JSClosureVar *cv = &PVEC_AT(s_closure_var, JSClosureVar, idx);
                 set_closure_from_var(ctx, cv, vd, i);
             }
         }
@@ -39023,10 +39112,10 @@ static __exception int add_closure_variables(JSContextHandle ctx, JSFunctionDef 
             JSBytecodeVarDef *vardefs = b_vardefs(b);
             vd = &vardefs[SAFE_GET_OR(b, JSFunctionBytecodeHandle, arg_count, 0) + i];
             if (!vd->has_scope && is_var_in_arg_scope(vd->var_name, (JSVarKindEnum)vd->var_kind)) {
-                if (!gc_data_array_resize_bytes(&s->closure_var_handle, sizeof(JSClosureVar), s->closure_var_handle.count + 1))
+                if (!pvec_resize(&s->closure_var_handle, sizeof(JSClosureVar), s->closure_var_handle.count + 1))
                     return -1;
                 int idx = s->closure_var_handle.count - 1;
-                JSClosureVar *cv = &GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, idx);
+                JSClosureVar *cv = &PVEC_AT(s_closure_var, JSClosureVar, idx);
                 set_closure_from_var(ctx, cv, vd, i);
             }
         }
@@ -39049,10 +39138,10 @@ static __exception int add_closure_variables(JSContextHandle ctx, JSFunctionDef 
             abort();
         }
         {
-            if (!gc_data_array_resize_bytes(&s->closure_var_handle, sizeof(JSClosureVar), s->closure_var_handle.count + 1))
+            if (!pvec_resize(&s->closure_var_handle, sizeof(JSClosureVar), s->closure_var_handle.count + 1))
                 return -1;
             int idx = s->closure_var_handle.count - 1;
-            cv = &GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, idx);
+            cv = &PVEC_AT(s_closure_var, JSClosureVar, idx);
         }
         cv->closure_type = JS_CLOSURE_REF;
         cv->is_const = js_bc_closure_var_is_const(b, i);
@@ -39222,18 +39311,18 @@ static void instantiate_hoisted_definitions(JSContextHandle ctx, JSFunctionDef *
     /* add the hoisted functions in arguments and local variables */
     for(i = 0; i < s->arg_count; i++) {
         JSVarDefArrayHandle vd_arr = s_args; int vd_idx = i;
-        if (SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).func_pool_idx >= 0) {
+        if ((vd_arr)[vd_idx].func_pool_idx >= 0) {
             dbuf_putc(bc, OP_fclosure);
-            dbuf_put_u32(bc, SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).func_pool_idx);
+            dbuf_put_u32(bc, (vd_arr)[vd_idx].func_pool_idx);
             dbuf_putc(bc, OP_put_arg);
             dbuf_put_u16(bc, i);
         }
     }
     for(i = 0; i < s->var_count; i++) {
         JSVarDefArrayHandle vd_arr = s_vars; int vd_idx = i;
-        if (SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_level == 0 && SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).func_pool_idx >= 0) {
+        if ((vd_arr)[vd_idx].scope_level == 0 && (vd_arr)[vd_idx].func_pool_idx >= 0) {
             dbuf_putc(bc, OP_fclosure);
-            dbuf_put_u32(bc, SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).func_pool_idx);
+            dbuf_put_u32(bc, (vd_arr)[vd_idx].func_pool_idx);
             dbuf_putc(bc, OP_put_loc);
             dbuf_put_u16(bc, i);
         }
@@ -39260,7 +39349,7 @@ static void instantiate_hoisted_definitions(JSContextHandle ctx, JSFunctionDef *
        true) */
     /* XXX: inefficient, add a closure index in JSGlobalVar */
     for(i = 0; i < s->global_var_count; i++) {
-        JSGlobalVar *hf = &GC_DATA_ARRAY_AT(s_global_vars, JSGlobalVar, i);
+        JSGlobalVar *hf = &PVEC_AT(s_global_vars, JSGlobalVar, i);
         BOOL has_var_obj = FALSE;
         BOOL force_init = hf->force_init;
         /* we are in an eval, so the closure contains all the
@@ -39268,7 +39357,7 @@ static void instantiate_hoisted_definitions(JSContextHandle ctx, JSFunctionDef *
         /* If the outer function has a variable environment,
            create a property for the variable there */
         for(idx = 0; idx < s->closure_var_handle.count; idx++) {
-            JSClosureVar *cv = &GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, idx);
+            JSClosureVar *cv = &PVEC_AT(s_closure_var, JSClosureVar, idx);
             if (cv->var_name == hf->var_name) {
                 force_init = FALSE;
                 goto closure_found;
@@ -39313,11 +39402,11 @@ static void instantiate_hoisted_definitions(JSContextHandle ctx, JSFunctionDef *
 
         dbuf_putc(bc, OP_label);
         dbuf_put_u32(bc, label_next);
-        GC_DATA_ARRAY_AT(s_label_slots, LabelSlot, label_next).pos2 = bc->size;
+        PVEC_AT(s_label_slots, LabelSlot, label_next).pos2 = bc->size;
     }
 
     /* GC frees automatically */;
-    gc_data_array_clear_and_free(&s->global_vars_handle);
+    pvec_free(&s->global_vars_handle);
     s->global_var_count = 0;
     s->global_var_size = 0;
 }
@@ -39343,7 +39432,7 @@ static int get_label_pos(JSFunctionDef *s, int label)
 {
     int i, pos;
     for (i = 0; i < 20; i++) {
-        pos = GC_DATA_ARRAY_AT(s_label_slots, LabelSlot, label).pos;
+        pos = PVEC_AT(s_label_slots, LabelSlot, label).pos;
         for (;;) {
             switch (gc_byte_buffer_ptr(&s->byte_code)[pos]) {
             case OP_line_num:
@@ -39386,11 +39475,11 @@ static __exception int resolve_variables(JSContextHandle ctx, JSFunctionDef *s)
        variables are created) */
     /* XXX: inefficient */
     for(i = 0; i < s->global_var_count; i++) {
-        JSGlobalVar *hf = &GC_DATA_ARRAY_AT(s_global_vars, JSGlobalVar, i);
+        JSGlobalVar *hf = &PVEC_AT(s_global_vars, JSGlobalVar, i);
 
         /* check if global variable (XXX: simplify) */
         for(idx = 0; idx < s->closure_var_handle.count; idx++) {
-            JSClosureVar *cv = &GC_DATA_ARRAY_AT(s_closure_var, JSClosureVar, idx);
+            JSClosureVar *cv = &PVEC_AT(s_closure_var, JSClosureVar, idx);
             if (cv->closure_type == JS_CLOSURE_GLOBAL_REF ||
                 cv->closure_type == JS_CLOSURE_GLOBAL_DECL ||
                 cv->closure_type == JS_CLOSURE_GLOBAL ||
@@ -39469,7 +39558,7 @@ static __exception int resolve_variables(JSContextHandle ctx, JSFunctionDef *s)
                 var_name = get_u32(gc_byte_buffer_ptr(&s->byte_code) + pos + 1);
                 label = get_u32(gc_byte_buffer_ptr(&s->byte_code) + pos + 5);
                 scope = get_u16(gc_byte_buffer_ptr(&s->byte_code) + pos + 9);
-                ls = &GC_DATA_ARRAY_AT(s_label_slots, LabelSlot, label);
+                ls = &PVEC_AT(s_label_slots, LabelSlot, label);
                 ls->ref_count--;  /* always remove label reference */
                 pos_next = resolve_scope_var(ctx, s, var_name, scope, op, &bc_out,
                                              gc_byte_buffer_ptr(&s->byte_code), ls, pos_next);
@@ -39499,7 +39588,7 @@ static __exception int resolve_variables(JSContextHandle ctx, JSFunctionDef *s)
 
                 label = get_u32(gc_byte_buffer_ptr(&s->byte_code) + pos + 1);
                 assert(label >= 0 && label < s->label_count);
-                ls = &GC_DATA_ARRAY_AT(s_label_slots, LabelSlot, label);
+                ls = &PVEC_AT(s_label_slots, LabelSlot, label);
                 if (code_match(&cc, ls->pos, OP_ret, -1)) {
                     ls->ref_count--;
                     break;
@@ -39579,7 +39668,7 @@ static __exception int resolve_variables(JSContextHandle ctx, JSFunctionDef *s)
 
                 label = get_u32(gc_byte_buffer_ptr(&s->byte_code) + pos + 1);
                 assert(label >= 0 && label < s->label_count);
-                ls = &GC_DATA_ARRAY_AT(s_label_slots, LabelSlot, label);
+                ls = &PVEC_AT(s_label_slots, LabelSlot, label);
                 ls->pos2 = bc_out.size + short_opcode_info(op).size;
             }
             goto no_change;
@@ -39594,13 +39683,13 @@ static __exception int resolve_variables(JSContextHandle ctx, JSFunctionDef *s)
 
                 for(scope_idx = fd_get_scope_first(s, scope); scope_idx >= 0;) {
                     JSVarDefArrayHandle vd_arr = s_vars; int vd_idx = scope_idx;
-                    if (SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_level == scope) {
+                    if ((vd_arr)[vd_idx].scope_level == scope) {
                         if (scope_idx != s->arguments_arg_idx) {
-                            if (SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_kind == JS_VAR_FUNCTION_DECL ||
-                                SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_kind == JS_VAR_NEW_FUNCTION_DECL) {
+                            if ((vd_arr)[vd_idx].var_kind == JS_VAR_FUNCTION_DECL ||
+                                (vd_arr)[vd_idx].var_kind == JS_VAR_NEW_FUNCTION_DECL) {
                                 /* Initialize lexical variable upon entering scope */
                                 dbuf_putc(&bc_out, OP_fclosure);
-                                dbuf_put_u32(&bc_out, SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).func_pool_idx);
+                                dbuf_put_u32(&bc_out, (vd_arr)[vd_idx].func_pool_idx);
                                 dbuf_putc(&bc_out, OP_put_loc);
                                 dbuf_put_u16(&bc_out, scope_idx);
                             } else {
@@ -39610,7 +39699,7 @@ static __exception int resolve_variables(JSContextHandle ctx, JSFunctionDef *s)
                                 dbuf_put_u16(&bc_out, scope_idx);
                             }
                         }
-                        scope_idx = SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_next;
+                        scope_idx = (vd_arr)[vd_idx].scope_next;
                     } else {
                         break;
                     }
@@ -39624,12 +39713,12 @@ static __exception int resolve_variables(JSContextHandle ctx, JSFunctionDef *s)
 
                 for(scope_idx = fd_get_scope_first(s, scope); scope_idx >= 0;) {
                     JSVarDefArrayHandle vd_arr = s_vars; int vd_idx = scope_idx;
-                    if (SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_level == scope) {
-                        if (SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).is_captured) {
+                    if ((vd_arr)[vd_idx].scope_level == scope) {
+                        if ((vd_arr)[vd_idx].is_captured) {
                             dbuf_putc(&bc_out, OP_close_loc);
                             dbuf_put_u16(&bc_out, scope_idx);
                         }
-                        scope_idx = SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_next;
+                        scope_idx = (vd_arr)[vd_idx].scope_next;
                     } else {
                         break;
                     }
@@ -39742,10 +39831,10 @@ static void add_pc2line_info(JSFunctionDef *s, uint32_t pc, uint32_t source_pos)
     &&  pc >= s->line_number_last_pc
     &&  source_pos != s->line_number_last) {
         int idx = s->line_number_slots_handle.count;
-        if (!gc_data_array_resize_bytes(&s->line_number_slots_handle, sizeof(LineNumberSlot), idx + 1))
+        if (!pvec_resize(&s->line_number_slots_handle, sizeof(LineNumberSlot), idx + 1))
             return;
-        GC_DATA_ARRAY_AT(s->line_number_slots_handle, LineNumberSlot, idx).pc = pc;
-        GC_DATA_ARRAY_AT(s->line_number_slots_handle, LineNumberSlot, idx).source_pos = source_pos;
+        PVEC_AT(s->line_number_slots_handle, LineNumberSlot, idx).pc = pc;
+        PVEC_AT(s->line_number_slots_handle, LineNumberSlot, idx).source_pos = source_pos;
         s->line_number_last_pc = pc;
         s->line_number_last = source_pos;
     }
@@ -39803,8 +39892,8 @@ static void compute_pc2line_info(JSFunctionDef *s)
         }
 
         for (i = 0; i < s->line_number_slots_handle.count; i++) {
-            uint32_t pc = GC_DATA_ARRAY_AT(s->line_number_slots_handle, LineNumberSlot, i).pc;
-            uint32_t source_pos = GC_DATA_ARRAY_AT(s->line_number_slots_handle, LineNumberSlot, i).source_pos;
+            uint32_t pc = PVEC_AT(s->line_number_slots_handle, LineNumberSlot, i).pc;
+            uint32_t source_pos = PVEC_AT(s->line_number_slots_handle, LineNumberSlot, i).source_pos;
             int diff_pc, diff_line, diff_col;
             uint8_t buf[32];
             int len = 0;
@@ -39889,17 +39978,13 @@ static void compute_pc2line_info(JSFunctionDef *s)
  */
 static int add_reloc(JSContextHandle ctx, JSFunctionDef *fd, LabelSlot *ls, uint32_t addr, int size)
 {
-    GCHandle re_handle = gc_alloc(sizeof(RelocEntry), JS_GC_OBJ_TYPE_DATA);
-    if (re_handle == GC_HANDLE_NULL)
+    int re_idx = fd->reloc_entries.count;
+    RelocEntry *re = (RelocEntry *)pvec_prepare_push(&fd->reloc_entries, sizeof(RelocEntry));
+    if (!re)
         return -1;
-    
-    RelocEntry *re = (RelocEntry*)gc_deref(re_handle);
     re->addr = addr;
     re->size = size;
     re->next_idx = ls->first_reloc_idx;
-    
-    int re_idx = fd->reloc_entries.count;
-    gc_handle_list_push(&fd->reloc_entries, re_handle);
     ls->first_reloc_idx = re_idx;
     return re_idx;
 }
@@ -39940,7 +40025,7 @@ static int find_jump_target(JSFunctionDef *s, int label0, int *pop, int *pline)
     update_label(s, label, -1);
     for (i = 0; i < 10; i++) {
         assert(label >= 0 && label < s->label_count);
-        pos = GC_DATA_ARRAY_AT(s_label_slots, LabelSlot, label).pos2;
+        pos = PVEC_AT(s_label_slots, LabelSlot, label).pos2;
         for (;;) {
             switch(op = gc_byte_buffer_ptr(&s->byte_code)[pos]) {
             case OP_line_num:
@@ -40078,7 +40163,7 @@ static __exception int resolve_labels(JSContextHandle ctx, JSFunctionDef *s)
     JumpSlot *jp;
 #endif
 
-    label_slots = GC_DATA_ARRAY_PTR(s_label_slots, LabelSlot);
+    label_slots = PVEC_PTR(s_label_slots, LabelSlot);
 
     line_num = s->source_pos;
 
@@ -40189,7 +40274,7 @@ static __exception int resolve_labels(JSContextHandle ctx, JSFunctionDef *s)
                 {
                     int re_idx = ls->first_reloc_idx;
                     while (re_idx >= 0) {
-                        RelocEntry *re = (RelocEntry*)gc_deref(s->reloc_entries.data[re_idx]);
+                        RelocEntry *re = &PVEC_AT(s->reloc_entries, RelocEntry, re_idx);
                         int diff = ls->addr - re->addr;
                         int next_idx = re->next_idx;
                         switch (re->size) {
@@ -40978,11 +41063,11 @@ static __exception int resolve_labels(JSContextHandle ctx, JSFunctionDef *s)
     s->jump_slots_handle = GC_HANDLE_NULL;
 #endif
     /* GC frees automatically */;
-    gc_data_array_clear_and_free(&s->label_slots_handle);
+    pvec_free(&s->label_slots_handle);
     /* XXX: should delay until copying to runtime bytecode function */
     compute_pc2line_info(s);
     /* GC frees automatically */;
-    gc_data_array_clear_and_free(&s->line_number_slots_handle);
+    pvec_free(&s->line_number_slots_handle);
     /* set the new byte code */
     gc_byte_buffer_clear(&s->byte_code);
     gc_byte_buffer_take_from_dbuf(&s->byte_code, &bc_out);
@@ -41298,7 +41383,7 @@ static int add_global_variables(JSContextHandle ctx, JSFunctionDef *fd)
     if (fd->eval_type == JS_EVAL_TYPE_DIRECT && !(fd->js_mode & JS_MODE_STRICT)) {
         /* XXX: add a flag ? */
         for(idx = 0; idx < fd->closure_var_handle.count; idx++) {
-            JSClosureVar *cv = &GC_DATA_ARRAY_AT(fd_closure_var, JSClosureVar, idx);
+            JSClosureVar *cv = &PVEC_AT(fd_closure_var, JSClosureVar, idx);
             if (cv->var_name == JS_ATOM__var_ ||
                 cv->var_name == JS_ATOM__arg_var_) {
                 need_global_closures = FALSE;
@@ -41315,7 +41400,7 @@ static int add_global_variables(JSContextHandle ctx, JSFunctionDef *fd)
             closure_type = JS_CLOSURE_GLOBAL_DECL;
         for(i = 0; i < fd->global_var_count; i++) {
             JSVarKindEnum var_kind;
-            hf = &GC_DATA_ARRAY_AT(fd_global_vars, JSGlobalVar, i);
+            hf = &PVEC_AT(fd_global_vars, JSGlobalVar, i);
             if (hf->cpool_idx >= 0 && !hf->is_lexical) {
                 var_kind = JS_VAR_GLOBAL_FUNCTION_DECL;
             } else {
@@ -41370,8 +41455,8 @@ static GCValue js_create_function(JSContextHandle ctx, JSFunctionDef *fd)
     }
     for (idx = 0; idx < fd->var_count; idx++) {
         JSVarDefArrayHandle vd_arr = fd_vars; int vd_idx = idx;
-        SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_next = fd_get_scope(fd, SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_level)->first;
-        fd_get_scope(fd, SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_level)->first = idx;
+        (vd_arr)[vd_idx].scope_next = fd_get_scope(fd, (vd_arr)[vd_idx].scope_level)->first;
+        fd_get_scope(fd, (vd_arr)[vd_idx].scope_level)->first = idx;
     }
     for (scope = 2; scope < fd->scope_count; scope++) {
         JSVarScope *sd = fd_get_scope(fd, scope);
@@ -41380,9 +41465,9 @@ static GCValue js_create_function(JSContextHandle ctx, JSFunctionDef *fd)
     }
     for (idx = 0; idx < fd->var_count; idx++) {
         JSVarDefArrayHandle vd_arr = fd_vars; int vd_idx = idx;
-        if (SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_next < 0 && SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_level > 1) {
-            scope = fd_get_scope(fd, SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_level)->parent;
-            SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_next = fd_get_scope(fd, scope)->first;
+        if ((vd_arr)[vd_idx].scope_next < 0 && (vd_arr)[vd_idx].scope_level > 1) {
+            scope = fd_get_scope(fd, (vd_arr)[vd_idx].scope_level)->parent;
+            (vd_arr)[vd_idx].scope_next = fd_get_scope(fd, scope)->first;
         }
     }
 
@@ -41477,36 +41562,36 @@ static GCValue js_create_function(JSContextHandle ctx, JSFunctionDef *fd)
             JSVarDefArrayHandle vd_arr = fd_args; int vd_idx = i;
             JSBytecodeVarDef *vd1 = &b_vardefs(b)[i];
             if (strip_var_debug) {
-                JS_FreeAtom(ctx, SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name);
+                JS_FreeAtom(ctx, (vd_arr)[vd_idx].var_name);
                 vd1->var_name = JS_ATOM_NULL;
             } else {
-                vd1->var_name = SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name;
+                vd1->var_name = (vd_arr)[vd_idx].var_name;
             }
-            vd1->has_scope = (SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_level != 0);
-            vd1->scope_next = SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_next;
-            vd1->is_const = SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).is_const;
-            vd1->is_lexical = SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).is_lexical;
-            vd1->is_captured = SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).is_captured;
-            vd1->var_kind = SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_kind;
-            vd1->var_ref_idx = SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_ref_idx;
+            vd1->has_scope = ((vd_arr)[vd_idx].scope_level != 0);
+            vd1->scope_next = (vd_arr)[vd_idx].scope_next;
+            vd1->is_const = (vd_arr)[vd_idx].is_const;
+            vd1->is_lexical = (vd_arr)[vd_idx].is_lexical;
+            vd1->is_captured = (vd_arr)[vd_idx].is_captured;
+            vd1->var_kind = (vd_arr)[vd_idx].var_kind;
+            vd1->var_ref_idx = (vd_arr)[vd_idx].var_ref_idx;
         }
         
         for(i = 0; i < fd->var_count; i++) {
             JSVarDefArrayHandle vd_arr = fd_vars; int vd_idx = i;
             JSBytecodeVarDef *vd1 = &b_vardefs(b)[i + fd->arg_count];
             if (strip_var_debug) {
-                JS_FreeAtom(ctx, SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name);
+                JS_FreeAtom(ctx, (vd_arr)[vd_idx].var_name);
                 vd1->var_name = JS_ATOM_NULL;
             } else {
-                vd1->var_name = SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name;
+                vd1->var_name = (vd_arr)[vd_idx].var_name;
             }
-            vd1->has_scope = (SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_level != 0);
-            vd1->scope_next = SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_next;
-            vd1->is_const = SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).is_const;
-            vd1->is_lexical = SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).is_lexical;
-            vd1->is_captured = SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).is_captured;
-            vd1->var_kind = SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_kind;
-            vd1->var_ref_idx = SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_ref_idx;
+            vd1->has_scope = ((vd_arr)[vd_idx].scope_level != 0);
+            vd1->scope_next = (vd_arr)[vd_idx].scope_next;
+            vd1->is_const = (vd_arr)[vd_idx].is_const;
+            vd1->is_lexical = (vd_arr)[vd_idx].is_lexical;
+            vd1->is_captured = (vd_arr)[vd_idx].is_captured;
+            vd1->var_kind = (vd_arr)[vd_idx].var_kind;
+            vd1->var_ref_idx = (vd_arr)[vd_idx].var_ref_idx;
         }
         SAFE_SET(b, JSFunctionBytecodeHandle, var_count, fd->var_count);
         SAFE_SET(b, JSFunctionBytecodeHandle, arg_count, fd->arg_count);
@@ -41557,7 +41642,7 @@ static GCValue js_create_function(JSContextHandle ctx, JSFunctionDef *fd)
         SAFE_SET(b, JSFunctionBytecodeHandle, debug.source_len, fd->source_len);
         SAFE_SET(b, JSFunctionBytecodeHandle, debug.source_offset, fd->source_offset);
     }
-    if ((fd->scopes_handle.handle != GC_HANDLE_NULL))
+    if ((fd->scopes_handle.data != GC_HANDLE_NULL))
         /* GC frees automatically */;
 
 
@@ -41566,7 +41651,7 @@ static GCValue js_create_function(JSContextHandle ctx, JSFunctionDef *fd)
         if (strip_var_debug) {
             int i;
             for(i = 0; i < fd->closure_var_handle.count; i++) {
-                JSClosureVar *cv = &GC_DATA_ARRAY_AT(fd_closure_var, JSClosureVar, i);
+                JSClosureVar *cv = &PVEC_AT(fd_closure_var, JSClosureVar, i);
                 if (cv->closure_type != JS_CLOSURE_GLOBAL_REF &&
                     cv->closure_type != JS_CLOSURE_GLOBAL_DECL &&
                     cv->closure_type != JS_CLOSURE_GLOBAL &&
@@ -41578,12 +41663,13 @@ static GCValue js_create_function(JSContextHandle ctx, JSFunctionDef *fd)
             }
         }
         SAFE_SET(b, JSFunctionBytecodeHandle, closure_var_offset, closure_var_offset);
-        memcpy(b_closure_var(b), GC_DATA_ARRAY_PTR(fd_closure_var, JSClosureVar), SAFE_GET_OR(b, JSFunctionBytecodeHandle, closure_var_count, 0) * sizeof(JSClosureVar));
+        memcpy(b_closure_var(b), PVEC_PTR(fd_closure_var, JSClosureVar), SAFE_GET_OR(b, JSFunctionBytecodeHandle, closure_var_count, 0) * sizeof(JSClosureVar));
     }
     /* GC frees automatically */;
     /* GC frees automatically */;
     fd->original_closure_var_count = fd->closure_var_handle.count;
-    gc_data_array_clear_and_free(&fd->closure_var_handle);
+    pvec_free(&fd->closure_var_handle);
+    fd->cv_htab_src = NULL;
 
     SAFE_SET(b, JSFunctionBytecodeHandle, has_prototype, fd->has_prototype);
     SAFE_SET(b, JSFunctionBytecodeHandle, has_simple_parameter_list, fd->has_simple_parameter_list);
@@ -41645,6 +41731,7 @@ static GCValue js_create_function(JSContextHandle ctx, JSFunctionDef *fd)
 
     /* Lazy function bytecode created if applicable */
     bc_fingerprint(ctx, b);
+    js_free_function_def_tables(fd);
 
     /* parent_handle and link_idx are handles - GC frees automatically */
     return GC_MKHANDLE(JS_TAG_FUNCTION_BYTECODE, SAFE_HANDLE(b));
@@ -42052,7 +42139,7 @@ static int js_parse_function_check_names(JSParseState *s, JSFunctionDef *fd,
             return js_parse_error(s, "invalid function name in strict code");
         }
         for (idx = 0; idx < fd->arg_count; idx++) {
-            name = SAFE_AT(fd_args, JSVarDefArrayHandle, idx).var_name;
+            name = (fd_args)[idx].var_name;
 
             if (name == JS_ATOM_eval || name == JS_ATOM_arguments ||
                 is_strict_future_keyword(name)) {
@@ -42067,17 +42154,17 @@ static int js_parse_function_check_names(JSParseState *s, JSFunctionDef *fd,
     ||  fd->func_type == JS_PARSE_FUNC_ARROW
     ||  fd->func_type == JS_PARSE_FUNC_METHOD) {
         for (idx = 0; idx < fd->arg_count; idx++) {
-            name = SAFE_AT(fd_args, JSVarDefArrayHandle, idx).var_name;
+            name = (fd_args)[idx].var_name;
             if (name != JS_ATOM_NULL) {
                 for (i = 0; i < idx; i++) {
-                    if (SAFE_AT(fd_args, JSVarDefArrayHandle, i).var_name == name)
+                    if ((fd_args)[i].var_name == name)
                         goto duplicate;
                 }
                 /* Check if argument name duplicates a destructuring parameter */
                 /* XXX: should have a flag for such variables */
                 for (i = 0; i < fd->var_count; i++) {
-                    if (SAFE_AT(fd_vars, JSVarDefArrayHandle, i).var_name == name &&
-                        SAFE_AT(fd_vars, JSVarDefArrayHandle, i).scope_level == 0)
+                    if ((fd_vars)[i].var_name == name &&
+                        (fd_vars)[i].scope_level == 0)
                         goto duplicate;
                 }
             }
@@ -42471,20 +42558,20 @@ static __exception int js_parse_function_decl2(JSParseState *s,
         idx = fd_get_scope_first(fd, fd->scope_level);
         while (idx >= 0) {
             JSVarDefArrayHandle vd_arr = fd_vars; int vd_idx = idx;
-            if (SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_level != fd->scope_level)
+            if ((vd_arr)[vd_idx].scope_level != fd->scope_level)
                 break;
-            if (find_var(ctx, fd, SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name) < 0) {
-                if (add_var(ctx, fd, SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name) < 0)
+            if (find_var(ctx, fd, (vd_arr)[vd_idx].var_name) < 0) {
+                if (add_var(ctx, fd, (vd_arr)[vd_idx].var_name) < 0)
                     goto fail;
                 (vd_arr = fd_vars, vd_idx = idx); /* fd->vars may have been reallocated */
                 emit_op(s, OP_scope_get_var);
-                emit_atom(s, SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name);
+                emit_atom(s, (vd_arr)[vd_idx].var_name);
                 emit_u16(s, fd->scope_level);
                 emit_op(s, OP_scope_put_var);
-                emit_atom(s, SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).var_name);
+                emit_atom(s, (vd_arr)[vd_idx].var_name);
                 emit_u16(s, 0);
             }
-            idx = SAFE_AT(vd_arr, JSVarDefArrayHandle, vd_idx).scope_next;
+            idx = (vd_arr)[vd_idx].scope_next;
         }
 
         /* the argument scope has no parent, hence we don't use pop_scope(s) */
@@ -42691,7 +42778,7 @@ static __exception int js_parse_function_decl2(JSParseState *s,
             }
             if (lexical_func_idx >= 0) {
                 /* lexical variable will be initialized upon entering scope */
-                SAFE_AT(s_cur_func_vars_handle, JSVarDefArrayHandle, lexical_func_idx).func_pool_idx = idx;
+                (s_cur_func_vars_handle)[lexical_func_idx].func_pool_idx = idx;
                 emit_op(s, OP_drop);
             } else {
                 /* store function object into its lexical name */
@@ -42708,9 +42795,9 @@ static __exception int js_parse_function_decl2(JSParseState *s,
                     goto fail;
                 /* the variable will be assigned at the top of the function */
                 if (var_idx & ARGUMENT_VAR_OFFSET) {
-                    SAFE_AT(s_cur_func_args_handle, JSVarDefArrayHandle, var_idx - ARGUMENT_VAR_OFFSET).func_pool_idx = idx;
+                    (s_cur_func_args_handle)[var_idx - ARGUMENT_VAR_OFFSET].func_pool_idx = idx;
                 } else {
-                    SAFE_AT(s_cur_func_vars_handle, JSVarDefArrayHandle, var_idx).func_pool_idx = idx;
+                    (s_cur_func_vars_handle)[var_idx].func_pool_idx = idx;
                 }
             } else {
                 JSAtom func_var_name;

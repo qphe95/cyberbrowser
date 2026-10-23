@@ -88,7 +88,7 @@ typedef GCHandle JSGeneratorDataHandle;
 typedef GCHandle JSAsyncGeneratorDataHandle;
 typedef GCHandle JSAsyncFrameHandle;
 typedef GCHandle JSVarDefHandle;
-typedef GCHandle JSVarDefArrayHandle;
+typedef struct JSVarDef *JSVarDefArrayHandle;   /* the compiler's, in plain memory */
 typedef GCHandle JSAsyncFromSyncIteratorDataHandle;
 typedef GCHandle JSFinalizationRegistryDataHandle;
 typedef GCHandle JSWeakRefDataHandle;
