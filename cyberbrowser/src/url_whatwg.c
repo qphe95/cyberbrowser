@@ -1421,19 +1421,23 @@ static int basic_parse(const uint32_t *in, int n, const WUrl *base, WUrl *url,
             } else if (c == '#') {
                 set_str(&url->fragment, "");
                 state = ST_FRAGMENT;
-            } else if (c == ' ') {
-                SB o = {0};
-                sb_puts(&o, url->opaque_path ? url->opaque_path : "");
-                if (p + 1 < n && (in[p + 1] == '?' || in[p + 1] == '#'))
-                    sb_puts(&o, "%20");
-                else
-                    sb_putc(&o, ' ');
-                free(url->opaque_path);
-                url->opaque_path = sb_take(&o);
             } else if (c != EOFC) {
+                /* The whole run up to '?', '#' or the end at once: copying
+                 * the path for each code point made a long data: URL
+                 * quadratic. */
                 SB o = {0};
                 sb_puts(&o, url->opaque_path ? url->opaque_path : "");
-                sb_pct_cp(&o, c, SET_C0);
+                for (; p < n && in[p] != '?' && in[p] != '#'; p++) {
+                    if (in[p] == ' ') {
+                        if (p + 1 < n && (in[p + 1] == '?' || in[p + 1] == '#'))
+                            sb_puts(&o, "%20");
+                        else
+                            sb_putc(&o, ' ');
+                    } else {
+                        sb_pct_cp(&o, in[p], SET_C0);
+                    }
+                }
+                p--;   /* the loop steps onto what ended the run */
                 free(url->opaque_path);
                 url->opaque_path = sb_take(&o);
             }
@@ -1458,9 +1462,12 @@ static int basic_parse(const uint32_t *in, int n, const WUrl *base, WUrl *url,
             break;
         case ST_FRAGMENT:
             if (c != EOFC) {
+                /* The rest of the input at once, as for the opaque path. */
                 SB f = {0};
                 sb_puts(&f, url->fragment ? url->fragment : "");
-                sb_pct_cp(&f, c, SET_FRAGMENT);
+                for (; p < n; p++)
+                    sb_pct_cp(&f, in[p], SET_FRAGMENT);
+                p--;
                 free(url->fragment);
                 url->fragment = sb_take(&f);
             }
