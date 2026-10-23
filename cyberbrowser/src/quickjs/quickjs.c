@@ -7588,14 +7588,6 @@ void mark_children(JSRuntimeHandle rt, GCHandle handle,
             }
         }
         break;
-    case JS_GC_OBJ_TYPE_FUNCTION_DEF:
-        {
-            JSFunctionDef *p = (JSFunctionDef*)gc_deref(handle);
-            if (p) {
-                js_mark_function_def(rt, p, mark_func);
-            }
-        }
-        break;
     case JS_GC_OBJ_TYPE_JOB_ENTRY:
         {
             JSJobEntry *e = (JSJobEntry *)gc_deref(handle);
@@ -24693,12 +24685,12 @@ static uint8_t *js_compile_regexp_cstr(JSContextHandle ctx, const CStr *body,
 
 typedef struct JSFunctionDef {
     JSContextHandle ctx;
-    GCHandle self_handle; /* handle to this JSFunctionDef (set during allocation) */
-    GCHandle parent_handle; /* handle to parent JSFunctionDef, GC_HANDLE_NULL if none */
+    struct JSFunctionDef *self_handle; /* this definition */
+    struct JSFunctionDef *parent_handle; /* the parent definition, NULL if none */
     int parent_cpool_idx; /* index in the constant pool of the parent
                              or -1 if none */
     int parent_scope_level; /* scope level in parent at point of definition */
-    GCHandleList child_handles; /* list of child JSFunctionDef handles */
+    PVec child_handles; /* of JSFunctionDef *: the child definitions */
     int link_idx; /* index in parent's child_handles list, -1 if not linked */
 
     BOOL is_eval; /* TRUE if eval code */
@@ -24749,12 +24741,12 @@ typedef struct JSFunctionDef {
 #define s_label_slots (s->label_slots_handle)
 #define s_closure_var (s->closure_var_handle)
 /* For access via s->cur_func_handle where s is JSParseState */
-#define s_cur_func_vars_handle (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->vars_handle)
-#define s_cur_func_args_handle (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->args_handle)
-#define s_cur_func_vars ((JSVarDefArrayHandle)(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->vars_handle))
-#define s_cur_func_args ((JSVarDefArrayHandle)(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->args_handle))
-#define s_cur_func_label_slots (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->label_slots_handle)
-#define s_cur_func_closure_var (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->closure_var_handle)
+#define s_cur_func_vars_handle ((s->cur_func_handle)->vars_handle)
+#define s_cur_func_args_handle ((s->cur_func_handle)->args_handle)
+#define s_cur_func_vars ((JSVarDefArrayHandle)((s->cur_func_handle)->vars_handle))
+#define s_cur_func_args ((JSVarDefArrayHandle)((s->cur_func_handle)->args_handle))
+#define s_cur_func_label_slots ((s->cur_func_handle)->label_slots_handle)
+#define s_cur_func_closure_var ((s->cur_func_handle)->closure_var_handle)
     int defined_arg_count;
     int var_ref_count; /* number of local/arg variable references */
     int var_object_idx; /* -1 if none */
@@ -24875,25 +24867,6 @@ typedef struct JSFunctionDef {
 #define fd_set_scope_parent(fd, idx, val) (PVEC_AT((fd)->scopes_handle, JSVarScope, idx).parent = (val))
 #define fd_get_scope_parent(fd, idx) (PVEC_AT((fd)->scopes_handle, JSVarScope, idx).parent)
 
-/* Mark a JSFunctionDef and all its internal GC-managed arrays/handles.
- * Called from mark_children for JS_GC_OBJ_TYPE_FUNCTION_DEF.
- * Also marks the parent chain so ancestor scopes survive GC. */
-static void js_mark_function_def(JSRuntimeHandle rt, JSFunctionDef *p, JS_MarkFunc *mark_func) {
-    if (!p) return;
-    /* Mark all GC-managed arrays and handles */
-    mark_func(rt, p->source_string_handle);
-    if (p->has_resume_parse_state) {
-        /* lazy stub state, until js_create_function copies it */
-        mark_func(rt, p->resume_parse_state.source_handle);
-        mark_func(rt, p->resume_parse_state.arg_names_handle);
-        mark_func(rt, p->resume_parse_state.compiled_handle);
-    }
-    mark_func(rt, p->lazy_parent_scope);
-    /* Mark bytecode and pc2line buffers */
-    /* Mark parent in the chain */
-    mark_func(rt, p->parent_handle);
-}
-
 typedef struct JSToken {
     int val;
     const uint8_t *ptr; /* position in the source */
@@ -24930,7 +24903,9 @@ typedef struct JSParseState {
     const uint8_t *buf_end;
 
     /* current function code */
-    JSFunctionDefHandle cur_func_handle; /* handle to current function definition */
+    JSFunctionDefHandle cur_func_handle; /* the current function definition */
+    PVec held; /* of GCHandle: what the definitions refer to (js_parse_hold) */
+    GCHandle held_last;
     BOOL is_module; /* parsing a module */
     BOOL allow_html_comments;
     BOOL ext_json; /* true if accepting JSON superset */
@@ -24984,23 +24959,21 @@ typedef struct JSParseState {
 extern bool gc_add_root(GCHandle handle);
 extern void gc_remove_root(GCHandle handle);
 
-/* 
- * Update the current function handle and manage its GC root.
- * This removes the old root (if any) and adds the new one.
- */
+/* The definition being compiled (plain memory, PARALLEL_PARSE_DESIGN.md 5.2). */
 static inline void js_parse_set_cur_func(JSParseState *s, JSFunctionDefHandle new_handle) {
-    /* Remove old root if valid */
-    if (!SAFE_IS_NULL(s->cur_func_handle)) {
-        gc_remove_root(SAFE_HANDLE(s->cur_func_handle));
-    }
-    
-    /* Update the handle */
-    s->cur_func_handle = new_handle;  /* gc-no-dirty: parse state on the C stack */
-    
-    /* Add new root if valid */
-    if (!SAFE_IS_NULL(s->cur_func_handle)) {
-        gc_add_root(SAFE_HANDLE(s->cur_func_handle));
-    }
+    s->cur_func_handle = new_handle;
+}
+
+/* Keep the GC object h alive until the parse ends: the definitions are plain
+ * memory, which the collector does not see. */
+static void js_parse_hold(JSParseState *s, GCHandle h)
+{
+    if (h == GC_HANDLE_NULL || h == s->held_last)
+        return;
+    if (!pvec_push(&s->held, sizeof(GCHandle), &h))
+        return;
+    gc_add_root(h);
+    s->held_last = h;
 }
 
 /*
@@ -25008,10 +24981,11 @@ static inline void js_parse_set_cur_func(JSParseState *s, JSFunctionDefHandle ne
  * Call this before the JSParseState goes out of scope.
  */
 static inline void js_parse_cleanup_roots(JSParseState *s) {
-    if (!SAFE_IS_NULL(s->cur_func_handle)) {
-        gc_remove_root(SAFE_HANDLE(s->cur_func_handle));
-        s->cur_func_handle = GC_HANDLE_NULL;
-    }
+    s->cur_func_handle = NULL;
+    for (int i = s->held.count; i-- > 0;)   /* newest first: O(1) removals */
+        gc_remove_root(PVEC_AT(s->held, GCHandle, i));
+    pvec_free(&s->held);
+    s->held_last = GC_HANDLE_NULL;
     for (int i = 0; i < s->owned.count; i++)
         js_plain_free(PVEC_AT(s->owned, void *, i));
     pvec_free(&s->owned);
@@ -25753,7 +25727,7 @@ static __exception int js_parse_string(JSParseState *s, int sep,
                         /* \0 - null character */
                         p++;
                         c = '\0';
-                    } else if (!(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->js_mode & JS_MODE_STRICT) && sep != '`') {
+                    } else if (!((s->cur_func_handle)->js_mode & JS_MODE_STRICT) && sep != '`') {
                         /* Non-strict mode: parse octal escapes for regular strings */
                         goto parse_escape;
                     } else if (c >= '8') {
@@ -26003,20 +25977,20 @@ static void update_token_ident(JSParseState *s)
 {
     if (s->token.u.ident.atom <= JS_ATOM_LAST_KEYWORD ||
         (s->token.u.ident.atom <= JS_ATOM_LAST_STRICT_KEYWORD &&
-         (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->js_mode & JS_MODE_STRICT)) ||
+         ((s->cur_func_handle)->js_mode & JS_MODE_STRICT)) ||
         (s->token.u.ident.atom == JS_ATOM_yield &&
-         ((SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->func_kind & JS_FUNC_GENERATOR) ||
-          (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->func_type == JS_PARSE_FUNC_ARROW &&
-           !SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->in_function_body && (JSFunctionDefHandle)(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->parent_handle) &&
-           (SAFE_PTR(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->parent_handle, JSFunctionDefHandle)->func_kind & JS_FUNC_GENERATOR)))) ||
+         (((s->cur_func_handle)->func_kind & JS_FUNC_GENERATOR) ||
+          ((s->cur_func_handle)->func_type == JS_PARSE_FUNC_ARROW &&
+           !(s->cur_func_handle)->in_function_body && (JSFunctionDefHandle)((s->cur_func_handle)->parent_handle) &&
+           (((s->cur_func_handle)->parent_handle)->func_kind & JS_FUNC_GENERATOR)))) ||
         (s->token.u.ident.atom == JS_ATOM_await &&
          (s->is_module ||
-          (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->func_kind & JS_FUNC_ASYNC) ||
-          SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->func_type == JS_PARSE_FUNC_CLASS_STATIC_INIT ||
-          (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->func_type == JS_PARSE_FUNC_ARROW &&
-           !SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->in_function_body && (JSFunctionDefHandle)(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->parent_handle) &&
-           ((SAFE_PTR(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->parent_handle, JSFunctionDefHandle)->func_kind & JS_FUNC_ASYNC) ||
-            SAFE_PTR(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->parent_handle, JSFunctionDefHandle)->func_type == JS_PARSE_FUNC_CLASS_STATIC_INIT))))) {
+          ((s->cur_func_handle)->func_kind & JS_FUNC_ASYNC) ||
+          (s->cur_func_handle)->func_type == JS_PARSE_FUNC_CLASS_STATIC_INIT ||
+          ((s->cur_func_handle)->func_type == JS_PARSE_FUNC_ARROW &&
+           !(s->cur_func_handle)->in_function_body && (JSFunctionDefHandle)((s->cur_func_handle)->parent_handle) &&
+           ((((s->cur_func_handle)->parent_handle)->func_kind & JS_FUNC_ASYNC) ||
+            ((s->cur_func_handle)->parent_handle)->func_type == JS_PARSE_FUNC_CLASS_STATIC_INIT))))) {
         if (s->token.u.ident.has_escape) {
             s->token.u.ident.is_reserved = TRUE;
             s->token.val = TOK_IDENT;
@@ -26281,7 +26255,7 @@ static __exception int next_token(JSParseState *s)
         break;
     case '0':
         /* in strict mode, octal literals are not accepted */
-        if (is_digit(p[1]) && (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->js_mode & JS_MODE_STRICT)) {
+        if (is_digit(p[1]) && ((s->cur_func_handle)->js_mode & JS_MODE_STRICT)) {
             js_parse_error(s, "octal literals are deprecated in strict mode");
             goto fail;
         }
@@ -27281,18 +27255,18 @@ void exec_trace_dump(void) {}
 static void emit_op(JSParseState *s, uint8_t val)
 {
     /* Always use fresh handle dereference - don't cache ptr as GC may move objects */
-    SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->last_opcode_pos = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code.size;
-    gc_byte_buffer_putc(&SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code, val);
+    (s->cur_func_handle)->last_opcode_pos = (s->cur_func_handle)->byte_code.size;
+    gc_byte_buffer_putc(&(s->cur_func_handle)->byte_code, val);
 }
 
 static void emit_u8(JSParseState *s, uint8_t val)
 {
-    gc_byte_buffer_putc(&SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code, val);
+    gc_byte_buffer_putc(&(s->cur_func_handle)->byte_code, val);
 }
 
 static void emit_u16(JSParseState *s, uint16_t val)
 {
-    GCByteBuffer *bc = &SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code;
+    GCByteBuffer *bc = &(s->cur_func_handle)->byte_code;
     if (gc_byte_buffer_claim(bc, 2))
         return;
     put_u16(gc_byte_buffer_ptr(bc) + bc->size, val);
@@ -27301,7 +27275,7 @@ static void emit_u16(JSParseState *s, uint16_t val)
 
 static void emit_u32(JSParseState *s, uint32_t val)
 {
-    GCByteBuffer *bc = &SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code;
+    GCByteBuffer *bc = &(s->cur_func_handle)->byte_code;
     if (gc_byte_buffer_claim(bc, 4))
         return;
     put_u32(gc_byte_buffer_ptr(bc) + bc->size, val);
@@ -27311,22 +27285,22 @@ static void emit_u32(JSParseState *s, uint32_t val)
 static void emit_source_pos(JSParseState *s, const uint8_t *source_ptr)
 {
     /* Always use fresh handle dereference - don't cache ptr as GC may move objects */
-    GCByteBuffer *bc = &SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code;
+    GCByteBuffer *bc = &(s->cur_func_handle)->byte_code;
 
     uint32_t source_pos = (uint32_t)(source_ptr - s->buf_start);
-    if (unlikely(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->last_opcode_source_pos != source_pos)) {
+    if (unlikely((s->cur_func_handle)->last_opcode_source_pos != source_pos)) {
         gc_byte_buffer_putc(bc, OP_line_num);
         if (gc_byte_buffer_claim(bc, 4))
             return;
         put_u32(gc_byte_buffer_ptr(bc) + bc->size, source_pos);
         bc->size += 4;
-        SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->last_opcode_source_pos = source_pos;
+        (s->cur_func_handle)->last_opcode_source_pos = source_pos;
     }
 }
 
 static void emit_atom(JSParseState *s, JSAtom name)
 {
-    GCByteBuffer *bc = &SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code;
+    GCByteBuffer *bc = &(s->cur_func_handle)->byte_code;
     if (gc_byte_buffer_claim(bc, 4))
         return; /* not enough memory : don't duplicate the atom */
     put_u32(gc_byte_buffer_ptr(bc) + bc->size, JS_DupAtom(s->ctx, name));
@@ -27365,9 +27339,9 @@ static int new_label_fd(JSFunctionDef *fd)
 static int new_label(JSParseState *s)
 {
     int label;
-    label = new_label_fd(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle));
+    label = new_label_fd((s->cur_func_handle));
     if (unlikely(label < 0)) {
-        (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code.error = TRUE);
+        ((s->cur_func_handle)->byte_code.error = TRUE);
     }
     return label;
 }
@@ -27377,7 +27351,7 @@ static void emit_label_raw(JSParseState *s, int label)
 {
     emit_u8(s, OP_label);
     emit_u32(s, label);
-    PVEC_AT(s_cur_func_label_slots, LabelSlot, label).pos = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code.size;
+    PVEC_AT(s_cur_func_label_slots, LabelSlot, label).pos = (s->cur_func_handle)->byte_code.size;
 }
 
 /* return the label ID offset */
@@ -27386,8 +27360,8 @@ static int emit_label(JSParseState *s, int label)
     if (label >= 0) {
         emit_op(s, OP_label);
         emit_u32(s, label);
-        PVEC_AT(s_cur_func_label_slots, LabelSlot, label).pos = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code.size;
-        return SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code.size - 4;
+        PVEC_AT(s_cur_func_label_slots, LabelSlot, label).pos = (s->cur_func_handle)->byte_code.size;
+        return (s->cur_func_handle)->byte_code.size - 4;
     } else {
         return -1;
     }
@@ -27403,7 +27377,7 @@ static int emit_goto(JSParseState *s, int opcode, int label)
                 return -1;
         }
         if (trace_active && label == 20) {
-            trace_record("EMIT_GOTO_20", SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code.size);
+            trace_record("EMIT_GOTO_20", (s->cur_func_handle)->byte_code.size);
         }
         emit_op(s, opcode);
         emit_u32(s, label);
@@ -27416,7 +27390,7 @@ static int emit_goto(JSParseState *s, int opcode, int label)
 /* return the constant pool index. 'val' is not duplicated. */
 static int cpool_add_cconst(JSParseState *s, const CConst *cc)
 {
-    JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+    JSFunctionDef *fd = (s->cur_func_handle);
 
     if (!pvec_push(&fd->cpool_handle, sizeof(CConst), cc)) {
         JS_ThrowOutOfMemory(s->ctx);
@@ -27662,7 +27636,7 @@ static int find_lexical_decl(JSContextHandle ctx, JSFunctionDef *fd, JSAtom name
 
 static int push_scope(JSParseState *s) {
     if (!SAFE_IS_NULL(s->cur_func_handle)) {
-        JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+        JSFunctionDef *fd = (s->cur_func_handle);
         int scope = fd->scope_count;
         /* XXX: should check for scope overflow */
         if ((fd->scope_count + 1) > fd->scope_size) {
@@ -27698,7 +27672,7 @@ static int get_first_lexical_var(JSFunctionDef *fd, int scope)
 static void pop_scope(JSParseState *s) {
     if (!SAFE_IS_NULL(s->cur_func_handle)) {
         /* disable scoped variables */
-        JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+        JSFunctionDef *fd = (s->cur_func_handle);
         int scope = fd->scope_level;
         emit_op(s, OP_leave_scope);
         emit_u16(s, scope);
@@ -27709,7 +27683,7 @@ static void pop_scope(JSParseState *s) {
 
 static void close_scopes(JSParseState *s, int scope, int scope_stop)
 {
-    JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+    JSFunctionDef *fd = (s->cur_func_handle);
     while (scope > scope_stop) {
         emit_op(s, OP_leave_scope);
         emit_u16(s, scope);
@@ -28069,7 +28043,7 @@ static __exception int js_parse_template(JSParseState *s, int call, int *argc)
            raw ones as its raw property) is made by js_create_function from
            the parts recorded here. */
         CConst cc = { .kind = CC_TEMPLATE,
-                      .first = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->tmpl_strs.count / 2 };
+                      .first = (s->cur_func_handle)->tmpl_strs.count / 2 };
         template_idx = cpool_add_cconst(s, &cc);
         if (template_idx < 0)
             return -1;
@@ -28092,7 +28066,7 @@ static __exception int js_parse_template(JSParseState *s, int call, int *argc)
                 cooked.u.str.cstr.undef = 1;
             }
             pair[0] = cooked.u.str.cstr;
-            tfd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+            tfd = (s->cur_func_handle);
             if (!pvec_push(&tfd->tmpl_strs, sizeof(CStr), &pair[0]) ||
                 !pvec_push(&tfd->tmpl_strs, sizeof(CStr), &pair[1])) {
                 JS_ThrowOutOfMemory(ctx);
@@ -29478,9 +29452,9 @@ static GCHandle js_parse_source_root(JSParseState *s)
     JSFunctionDefHandle h;
 
     for (h = s->cur_func_handle; !SAFE_IS_NULL(h);
-         h = (JSFunctionDefHandle)(SAFE_PTR(h, JSFunctionDefHandle)->parent_handle)) {
-        if (SAFE_PTR(h, JSFunctionDefHandle)->source_string_handle != GC_HANDLE_NULL) {
-            root = SAFE_PTR(h, JSFunctionDefHandle)->source_string_handle;
+         h = (JSFunctionDefHandle)((h)->parent_handle)) {
+        if ((h)->source_string_handle != GC_HANDLE_NULL) {
+            root = (h)->source_string_handle;
             break;
         }
     }
@@ -29513,6 +29487,7 @@ static int js_parse_keep_source(JSParseState *s, JSFunctionDef *fd,
     {
         GCStringHandle source_handle = gc_strndup((const char *)start, len);
         GC_SET(fd->source_string_handle, SAFE_HANDLE(source_handle));
+        js_parse_hold(s, fd->source_string_handle);
         fd->source_offset = 0;
     }
     return fd->source_string_handle == GC_HANDLE_NULL ? -1 : 0;
@@ -29617,9 +29592,9 @@ static int js_lazy_try_skip_body(JSParseState *s, JSFunctionDef *fd,
                 names[i] = JS_DupAtom(ctx, (vd_arr)[vd_idx].var_name);
             }
         }
-        /* re-fetch: gc_alloc may have moved fd's state */
         st = &fd->resume_parse_state;
         GC_SET(st->arg_names_handle, names_handle);
+        js_parse_hold(s, names_handle);
     }
     fd->func_parse_state = JS_FUNC_LAZY;
     fd->has_resume_parse_state = TRUE;
@@ -29674,7 +29649,7 @@ static int js_lazy_try_skip_body(JSParseState *s, JSFunctionDef *fd,
 
 static void set_object_name(JSParseState *s, JSAtom name)
 {
-    JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+    JSFunctionDef *fd = (s->cur_func_handle);
     int opcode;
 
     opcode = get_prev_opcode(fd);
@@ -29702,7 +29677,7 @@ static void set_object_name(JSParseState *s, JSAtom name)
 
 static void set_object_name_computed(JSParseState *s)
 {
-    JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+    JSFunctionDef *fd = (s->cur_func_handle);
     int opcode;
 
     opcode = get_prev_opcode(fd);
@@ -29758,7 +29733,7 @@ static __exception int js_parse_object_literal(JSParseState *s)
             /* shortcut for x: x */
             emit_op(s, OP_scope_get_var);
             emit_atom(s, name);
-            emit_u16(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level);
+            emit_u16(s, (s->cur_func_handle)->scope_level);
             emit_op(s, OP_define_field);
             emit_atom(s, name);
         } else if (s->token.val == '(') {
@@ -29875,7 +29850,7 @@ static __exception int js_parse_class_default_ctor(JSParseState *s,
                                                    JSFunctionDef **pfd)
 {
     JSParseFunctionEnum func_type;
-    JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+    JSFunctionDef *fd = (s->cur_func_handle);
     int idx;
 
     fd = js_new_function_def(s->ctx, (JSFunctionDefHandle)(fd->self_handle), FALSE, FALSE, s->filename,
@@ -29951,7 +29926,7 @@ static void emit_class_field_init(JSParseState *s)
 
     emit_op(s, OP_scope_get_var);
     emit_atom(s, JS_ATOM_class_fields_init);
-    emit_u16(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level);
+    emit_u16(s, (s->cur_func_handle)->scope_level);
 
     /* no need to call the class field initializer if not defined */
     emit_op(s, OP_dup);
@@ -29977,7 +29952,7 @@ static JSAtom get_private_setter_name(JSContextHandle ctx, JSAtom name)
 }
 
 typedef struct {
-    GCHandle fields_init_fd_handle; /* handle to JSFunctionDef for field init, GC_HANDLE_NULL if none */
+    JSFunctionDef *fields_init_fd_handle; /* the field initializer, NULL if none */
     int computed_fields_count;
     BOOL need_brand;
     int brand_push_pos;
@@ -30001,7 +29976,7 @@ static __exception int emit_class_init_start(JSParseState *s,
         /* XXX: would be better to add the code only if needed, maybe in a
            later pass */
         emit_op(s, OP_push_false); /* will be patched later */
-        cf->brand_push_pos = SAFE_PTR(cf->fields_init_fd_handle, JSFunctionDefHandle)->last_opcode_pos;
+        cf->brand_push_pos = (cf->fields_init_fd_handle)->last_opcode_pos;
         label_add_brand = emit_goto(s, OP_if_false, -1);
 
         emit_op(s, OP_scope_get_var);
@@ -30016,7 +29991,7 @@ static __exception int emit_class_init_start(JSParseState *s,
 
         emit_label(s, label_add_brand);
     }
-    js_parse_set_cur_func(s, (JSFunctionDefHandle)(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->parent_handle));
+    js_parse_set_cur_func(s, (JSFunctionDefHandle)((s->cur_func_handle)->parent_handle));
     return 0;
 }
 
@@ -30026,10 +30001,10 @@ static void emit_class_init_end(JSParseState *s, ClassFieldsDef *cf)
 
     js_parse_set_cur_func(s, (JSFunctionDefHandle)(cf->fields_init_fd_handle));
     emit_op(s, OP_return_undef);
-    js_parse_set_cur_func(s, (JSFunctionDefHandle)(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->parent_handle));
+    js_parse_set_cur_func(s, (JSFunctionDefHandle)((s->cur_func_handle)->parent_handle));
 
     cpool_idx = cpool_add_function(s);
-    SAFE_PTR(cf->fields_init_fd_handle, JSFunctionDefHandle)->parent_cpool_idx = cpool_idx;
+    (cf->fields_init_fd_handle)->parent_cpool_idx = cpool_idx;
     emit_op(s, OP_fclosure);
     emit_u32(s, cpool_idx);
     emit_op(s, OP_set_home_object);
@@ -30040,7 +30015,7 @@ static __exception int js_parse_class(JSParseState *s, BOOL is_class_expr,
                                       JSParseExportEnum export_flag)
 {
     JSContextHandle ctx = s->ctx;
-    JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+    JSFunctionDef *fd = (s->cur_func_handle);
     JSAtom name = JS_ATOM_NULL, class_name = JS_ATOM_NULL, class_name1;
     JSAtom class_var_name = JS_ATOM_NULL;
     JSFunctionDef *method_fd, *ctor_fd;
@@ -30176,7 +30151,7 @@ static __exception int js_parse_class(JSParseState *s, BOOL is_class_expr,
                 emit_op(s, OP_drop);
                 // stack is now: <empty>
                 pop_scope(s);
-                js_parse_set_cur_func(s, (JSFunctionDefHandle)(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->parent_handle));
+                js_parse_set_cur_func(s, (JSFunctionDefHandle)((s->cur_func_handle)->parent_handle));
                 continue;
             }
             /* allow "static" field name */
@@ -30257,7 +30232,7 @@ static __exception int js_parse_class(JSParseState *s, BOOL is_class_expr,
                 } else {
                     emit_atom(s, name);
                 }
-                emit_u16(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level);
+                emit_u16(s, (s->cur_func_handle)->scope_level);
             } else {
                 if (name == JS_ATOM_NULL) {
                     emit_op(s, OP_define_method_computed);
@@ -30291,7 +30266,7 @@ static __exception int js_parse_class(JSParseState *s, BOOL is_class_expr,
                 emit_atom(s, name);
                 emit_op(s, OP_scope_put_var_init);
                 emit_atom(s, name);
-                emit_u16(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level);
+                emit_u16(s, (s->cur_func_handle)->scope_level);
             }
 
             if (cf->fields_init_fd_handle == GC_HANDLE_NULL) {
@@ -30310,7 +30285,7 @@ static __exception int js_parse_class(JSParseState *s, BOOL is_class_expr,
                 emit_op(s, OP_to_propkey);
                 emit_op(s, OP_scope_put_var_init);
                 emit_atom(s, field_var_name);
-                emit_u16(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level);
+                emit_u16(s, (s->cur_func_handle)->scope_level);
             }
             js_parse_set_cur_func(s, (JSFunctionDefHandle)(cf->fields_init_fd_handle));
             emit_op(s, OP_scope_get_var);
@@ -30320,13 +30295,13 @@ static __exception int js_parse_class(JSParseState *s, BOOL is_class_expr,
             if (name == JS_ATOM_NULL) {
                 emit_op(s, OP_scope_get_var);
                 emit_atom(s, field_var_name);
-                emit_u16(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level);
+                emit_u16(s, (s->cur_func_handle)->scope_level);
                 cf->computed_fields_count++;
                 JS_FreeAtom(ctx, field_var_name);
             } else if (is_private) {
                 emit_op(s, OP_scope_get_var);
                 emit_atom(s, name);
-                emit_u16(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level);
+                emit_u16(s, (s->cur_func_handle)->scope_level);
             }
 
             if (s->token.val == '=') {
@@ -30349,7 +30324,7 @@ static __exception int js_parse_class(JSParseState *s, BOOL is_class_expr,
                 emit_op(s, OP_define_field);
                 emit_atom(s, name);
             }
-            js_parse_set_cur_func(s, (JSFunctionDefHandle)(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->parent_handle));
+            js_parse_set_cur_func(s, (JSFunctionDefHandle)((s->cur_func_handle)->parent_handle));
             if (js_parse_expect_semi(s))
                 goto fail;
         } else {
@@ -30398,7 +30373,7 @@ static __exception int js_parse_class(JSParseState *s, BOOL is_class_expr,
                 emit_atom(s, name);
                 emit_op(s, OP_scope_put_var_init);
                 emit_atom(s, name);
-                emit_u16(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level);
+                emit_u16(s, (s->cur_func_handle)->scope_level);
             } else {
                 if (name == JS_ATOM_NULL) {
                     emit_op(s, OP_define_method_computed);
@@ -30455,7 +30430,7 @@ static __exception int js_parse_class(JSParseState *s, BOOL is_class_expr,
             }
             /* patch the start of the function to enable the
                OP_add_brand_instance code */
-            gc_byte_buffer_ptr(&SAFE_PTR(cf->fields_init_fd_handle, JSFunctionDefHandle)->byte_code)[cf->brand_push_pos] = OP_push_true;
+            gc_byte_buffer_ptr(&(cf->fields_init_fd_handle)->byte_code)[cf->brand_push_pos] = OP_push_true;
         }
 
         /* store the function to initialize the fields to that it can be
@@ -30471,7 +30446,7 @@ static __exception int js_parse_class(JSParseState *s, BOOL is_class_expr,
         }
         emit_op(s, OP_scope_put_var_init);
         emit_atom(s, JS_ATOM_class_fields_init);
-        emit_u16(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level);
+        emit_u16(s, (s->cur_func_handle)->scope_level);
     }
 
     /* drop the prototype */
@@ -30686,7 +30661,7 @@ static BOOL has_with_scope(JSFunctionDef *s, int scope_level)
         }
         /* check parent scopes */
         scope_level = s->parent_scope_level;
-        s = SAFE_PTR(s->parent_handle, JSFunctionDefHandle);
+        s = (s->parent_handle);
     }
     return FALSE;
 }
@@ -30700,7 +30675,7 @@ static __exception int get_lvalue(JSParseState *s, int *popcode, int *pscope,
     JSAtom name;
 
     /* we check the last opcode to get the lvalue type */
-    fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+    fd = (s->cur_func_handle);
     scope = 0;
     name = JS_ATOM_NULL;
     label = -1;
@@ -30973,7 +30948,7 @@ static int js_unsupported_keyword(JSParseState *s, JSAtom atom)
 
 static __exception int js_define_var(JSParseState *s, JSAtom name, int tok)
 {
-    JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+    JSFunctionDef *fd = (s->cur_func_handle);
     JSVarDefEnum var_def_type;
 
     if (name == JS_ATOM_yield && fd->func_kind == JS_FUNC_GENERATOR) {
@@ -31037,7 +31012,7 @@ static void js_emit_spread_code(JSParseState *s, int depth)
 static int js_parse_check_duplicate_parameter(JSParseState *s, JSAtom name)
 {
     /* Check for duplicate parameter names */
-    JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+    JSFunctionDef *fd = (s->cur_func_handle);
     int i;
     for (i = 0; i < fd->arg_count; i++) {
         if ((fd_args)[i].var_name == name)
@@ -31060,7 +31035,7 @@ duplicate:
    not yet optimized in destructuring */
 static BOOL need_var_reference(JSParseState *s, int tok)
 {
-    JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+    JSFunctionDef *fd = (s->cur_func_handle);
     if (tok != TOK_VAR)
         return FALSE; /* no reference for let/const */
     if (fd->js_mode & JS_MODE_STRICT) {
@@ -31077,7 +31052,7 @@ static JSAtom js_parse_destructuring_var(JSParseState *s, int tok, int is_arg)
     JSAtom name;
 
     if (!(s->token.val == TOK_IDENT && !s->token.u.ident.is_reserved)
-    ||  ((SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->js_mode & JS_MODE_STRICT) &&
+    ||  (((s->cur_func_handle)->js_mode & JS_MODE_STRICT) &&
          (s->token.u.ident.atom == JS_ATOM_eval || s->token.u.ident.atom == JS_ATOM_arguments))) {
         js_parse_error(s, "invalid destructuring target");
         return JS_ATOM_NULL;
@@ -31115,7 +31090,7 @@ static int js_parse_destructuring_element(JSParseState *s, int tok, int is_arg,
     label_parse = new_label(s);
     label_assign = new_label(s);
 
-    start_addr = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code.size;
+    start_addr = (s->cur_func_handle)->byte_code.size;
     if (hasval) {
         /* consume value from the stack */
         emit_op(s, OP_dup);
@@ -31129,7 +31104,7 @@ static int js_parse_destructuring_element(JSParseState *s, int tok, int is_arg,
         /* leave value on the stack */
         emit_op(s, OP_dup);
     }
-    assign_addr = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code.size;
+    assign_addr = (s->cur_func_handle)->byte_code.size;
     if (s->token.val == '{') {
         if (next_token(s))
             return -1;
@@ -31157,12 +31132,12 @@ static int js_parse_destructuring_element(JSParseState *s, int tok, int is_arg,
                         /* Must make a reference for proper `with` semantics */
                         emit_op(s, OP_scope_get_var);
                         emit_atom(s, var_name);
-                        emit_u16(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level);
+                        emit_u16(s, (s->cur_func_handle)->scope_level);
                         JS_FreeAtom(s->ctx, var_name);
                         goto lvalue0;
                     } else {
                         opcode = OP_scope_get_var;
-                        scope = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level;
+                        scope = (s->cur_func_handle)->scope_level;
                         label_lvalue = -1;
                         depth_lvalue = 0;
                     }
@@ -31259,13 +31234,13 @@ static int js_parse_destructuring_element(JSParseState *s, int tok, int is_arg,
                         /* Must make a reference for proper `with` semantics */
                         emit_op(s, OP_scope_get_var);
                         emit_atom(s, var_name);
-                        emit_u16(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level);
+                        emit_u16(s, (s->cur_func_handle)->scope_level);
                         JS_FreeAtom(s->ctx, var_name);
                         goto lvalue1;
                     } else {
                         /* no need to make a reference for let/const */
                         opcode = OP_scope_get_var;
-                        scope = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level;
+                        scope = (s->cur_func_handle)->scope_level;
                         label_lvalue = -1;
                         depth_lvalue = 0;
                     }
@@ -31334,7 +31309,7 @@ static int js_parse_destructuring_element(JSParseState *s, int tok, int is_arg,
                 /* prop_type = PROP_TYPE_VAR, cannot be a computed property */
                 if (is_arg && js_parse_check_duplicate_parameter(s, prop_name))
                     goto prop_error;
-                if ((SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->js_mode & JS_MODE_STRICT) &&
+                if (((s->cur_func_handle)->js_mode & JS_MODE_STRICT) &&
                     (prop_name == JS_ATOM_eval || prop_name == JS_ATOM_arguments)) {
                     js_parse_error(s, "invalid destructuring target");
                     goto prop_error;
@@ -31353,13 +31328,13 @@ static int js_parse_destructuring_element(JSParseState *s, int tok, int is_arg,
                     emit_op(s, OP_dup);
                     emit_op(s, OP_scope_get_var);
                     emit_atom(s, prop_name);
-                    emit_u16(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level);
+                    emit_u16(s, (s->cur_func_handle)->scope_level);
                     goto lvalue1;
                 } else {
                     /* no need to make a reference for let/const */
                     var_name = JS_DupAtom(s->ctx, prop_name);
                     opcode = OP_scope_get_var;
-                    scope = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level;
+                    scope = (s->cur_func_handle)->scope_level;
                     label_lvalue = -1;
                     depth_lvalue = 0;
                     
@@ -31373,11 +31348,11 @@ static int js_parse_destructuring_element(JSParseState *s, int tok, int is_arg,
                 if (js_define_var(s, var_name, tok))
                     goto var_error;
                 if (export_flag) {
-                    if (!add_export_entry(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->module, var_name, var_name,
+                    if (!add_export_entry(s, (s->cur_func_handle)->module, var_name, var_name,
                                           JS_EXPORT_TYPE_LOCAL))
                         goto var_error;
                 }
-                scope = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level; /* XXX: check */
+                scope = (s->cur_func_handle)->scope_level; /* XXX: check */
             }
             if (s->token.val == '=') {  /* handle optional default value */
                 int label_hasval;
@@ -31420,7 +31395,7 @@ static int js_parse_destructuring_element(JSParseState *s, int tok, int is_arg,
             return -1;
         /* the block environment is only needed in generators in case
            'yield' triggers a 'return' */
-        push_break_entry(s->ctx, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle),
+        push_break_entry(s->ctx, (s->cur_func_handle),
                          JS_ATOM_NULL, -1, -1, 2);
         top_break_entry(s)->has_iterator = TRUE;
         emit_op(s, OP_for_of_start);
@@ -31466,13 +31441,13 @@ static int js_parse_destructuring_element(JSParseState *s, int tok, int is_arg,
                         /* Must make a reference for proper `with` semantics */
                         emit_op(s, OP_scope_get_var);
                         emit_atom(s, var_name);
-                        emit_u16(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level);
+                        emit_u16(s, (s->cur_func_handle)->scope_level);
                         JS_FreeAtom(s->ctx, var_name);
                         goto lvalue2;
                     } else {
                         /* no need to make a reference for let/const */
                         opcode = OP_scope_get_var;
-                        scope = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level;
+                        scope = (s->cur_func_handle)->scope_level;
                         label_lvalue = -1;
                         enum_depth = 0;
                     }
@@ -31524,7 +31499,7 @@ static int js_parse_destructuring_element(JSParseState *s, int tok, int is_arg,
         /* close iterator object:
            if completed, enum_obj has been replaced by undefined */
         emit_op(s, OP_iterator_close);
-        pop_break_entry(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle));
+        pop_break_entry((s->cur_func_handle));
         if (next_token(s))
             return -1;
     } else {
@@ -31551,7 +31526,7 @@ static int js_parse_destructuring_element(JSParseState *s, int tok, int is_arg,
             return -1;
         }
         /* remove test and decrement label ref count */
-        memset(gc_byte_buffer_ptr(&SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code) + start_addr, OP_nop,
+        memset(gc_byte_buffer_ptr(&(s->cur_func_handle)->byte_code) + start_addr, OP_nop,
                assign_addr - start_addr);
         PVEC_AT(s_cur_func_label_slots, LabelSlot, label_parse).ref_count--;
         has_initializer = FALSE;
@@ -31743,7 +31718,7 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
                 }
             } else {
                 if (s->token.u.ident.atom == JS_ATOM_arguments &&
-                    !SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->arguments_allowed) {
+                    !(s->cur_func_handle)->arguments_allowed) {
                     js_parse_error(s, "'arguments' identifier is not allowed in class field initializer");
                     return -1;
                 }
@@ -31756,7 +31731,7 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
                 emit_source_pos(s, source_ptr);
                 emit_op(s, OP_scope_get_var);
                 emit_u32(s, name);
-                emit_u16(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level);
+                emit_u16(s, (s->cur_func_handle)->scope_level);
             }
         }
         break;
@@ -31778,7 +31753,7 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
                 return -1;
             if (!token_is_pseudo_keyword(s, JS_ATOM_target))
                 return js_parse_error(s, "expecting target");
-            if (!SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->new_target_allowed)
+            if (!(s->cur_func_handle)->new_target_allowed)
                 return js_parse_error(s, "new.target only allowed within functions");
             if (next_token(s))
                 return -1;
@@ -31804,11 +31779,11 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
         if (next_token(s))
             return -1;
         if (s->token.val == '(') {
-            if (!SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->super_call_allowed)
+            if (!(s->cur_func_handle)->super_call_allowed)
                 return js_parse_error(s, "super() is only valid in a derived class constructor");
             call_type = FUNC_CALL_SUPER_CTOR;
         } else if (s->token.val == '.' || s->token.val == '[') {
-            if (!SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->super_allowed)
+            if (!(s->cur_func_handle)->super_allowed)
                 return js_parse_error(s, "'super' is only valid in a method");
             emit_op(s, OP_scope_get_var);
             emit_atom(s, JS_ATOM_this);
@@ -31871,7 +31846,7 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
 
     optional_chaining_label = -1;
     for(;;) {
-        JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+        JSFunctionDef *fd = (s->cur_func_handle);
         BOOL has_optional_chain = FALSE;
 
         if (s->token.val == TOK_QUESTION_MARK_DOT) {
@@ -32201,7 +32176,7 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
                 }
                 emit_op(s, OP_scope_get_private_field);
                 emit_atom(s, s->token.u.ident.atom);
-                emit_u16(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level);
+                emit_u16(s, (s->cur_func_handle)->scope_level);
             } else {
                 if (!token_is_ident(s->token.val)) {
                     return js_parse_error(s, "expecting field name");
@@ -32250,7 +32225,7 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
         }
     }
     if (optional_chaining_label >= 0) {
-        JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+        JSFunctionDef *fd = (s->cur_func_handle);
         int opcode;
         emit_label_raw(s, optional_chaining_label);
         /* modify the last opcode so that it is an indicator of an
@@ -32271,7 +32246,7 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
 
 static __exception int js_parse_delete(JSParseState *s)
 {
-    JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+    JSFunctionDef *fd = (s->cur_func_handle);
     JSAtom name;
     int opcode;
 
@@ -32432,7 +32407,7 @@ static __exception int js_parse_unary(JSParseState *s, int parse_flags)
                 return -1;
             /* reference access should not return an exception, so we
                patch the get_var */
-            fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+            fd = (s->cur_func_handle);
             if (get_prev_opcode(fd) == OP_scope_get_var) {
                 gc_byte_buffer_ptr(&fd->byte_code)[fd->last_opcode_pos] = OP_scope_get_var_undef;
             }
@@ -32446,15 +32421,15 @@ static __exception int js_parse_unary(JSParseState *s, int parse_flags)
         parse_flags = 0;
         break;
     case TOK_AWAIT:
-        if (!(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->func_kind & JS_FUNC_ASYNC))
+        if (!((s->cur_func_handle)->func_kind & JS_FUNC_ASYNC))
             return js_parse_error(s, "unexpected 'await' keyword");
-        if (!SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->in_function_body)
+        if (!(s->cur_func_handle)->in_function_body)
             return js_parse_error(s, "await in default expression");
         if (next_token(s))
             return -1;
         if (js_parse_unary(s, PF_POW_FORBIDDEN))
             return -1;
-        SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->has_await = TRUE;
+        (s->cur_func_handle)->has_await = TRUE;
         emit_op(s, OP_await);
         parse_flags = 0;
         break;
@@ -32529,7 +32504,7 @@ static __exception int js_parse_expr_binary(JSParseState *s, int level,
         }
         emit_op(s, OP_scope_in_private_field);
         emit_atom(s, atom);
-        emit_u16(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level);
+        emit_u16(s, (s->cur_func_handle)->scope_level);
         JS_FreeAtom(s->ctx, atom);
         return 0;
     } else {
@@ -32777,9 +32752,9 @@ static __exception int js_parse_assign_expr2(JSParseState *s, int parse_flags)
     if (s->token.val == TOK_YIELD) {
         BOOL is_star = FALSE, is_async;
 
-        if (!(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->func_kind & JS_FUNC_GENERATOR))
+        if (!((s->cur_func_handle)->func_kind & JS_FUNC_GENERATOR))
             return js_parse_error(s, "unexpected 'yield' keyword");
-        if (!SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->in_function_body)
+        if (!(s->cur_func_handle)->in_function_body)
             return js_parse_error(s, "yield in default expression");
         if (next_token(s))
             return -1;
@@ -32798,7 +32773,7 @@ static __exception int js_parse_assign_expr2(JSParseState *s, int parse_flags)
         } else {
             emit_op(s, OP_undefined);
         }
-        is_async = (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->func_kind == JS_FUNC_ASYNC_GENERATOR);
+        is_async = ((s->cur_func_handle)->func_kind == JS_FUNC_ASYNC_GENERATOR);
 
         if (is_star) {
             int label_loop, label_return, label_next;
@@ -33070,7 +33045,7 @@ static __exception int js_parse_expr2(JSParseState *s, int parse_flags)
                of get_var to get_ref for method lookup in function
                call inside `with` statement.
              */
-            SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->last_opcode_pos = -1;
+            (s->cur_func_handle)->last_opcode_pos = -1;
         }
         if (s->token.val != ',')
             break;
@@ -33137,20 +33112,20 @@ static void pop_break_entry(JSFunctionDef *fd)
  * itself.  Re-derive the pointer each time: the array may be reallocated. */
 static BlockEnv *break_entry_at(JSParseState *s, int depth)
 {
-    JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+    JSFunctionDef *fd = (s->cur_func_handle);
     BlockEnv *stack = fd->break_stack_handle;
     return &stack[depth];
 }
 
 static BlockEnv *top_break_entry(JSParseState *s)
 {
-    JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+    JSFunctionDef *fd = (s->cur_func_handle);
     return break_entry_at(s, fd->top_break_depth);
 }
 
 static __exception int emit_break(JSParseState *s, JSAtom name, int is_cont)
 {
-    JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+    JSFunctionDef *fd = (s->cur_func_handle);
     BlockEnv *stack = fd->break_stack_handle;
     int depth, i, scope_level;
 
@@ -33204,12 +33179,12 @@ static void emit_return(JSParseState *s, BOOL hasval)
 {
     BlockEnv *top;
 
-    if (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->func_kind != JS_FUNC_NORMAL) {
+    if ((s->cur_func_handle)->func_kind != JS_FUNC_NORMAL) {
         if (!hasval) {
             /* no value: direct return in case of async generator */
             emit_op(s, OP_undefined);
             hasval = TRUE;
-        } else if (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->func_kind == JS_FUNC_ASYNC_GENERATOR) {
+        } else if ((s->cur_func_handle)->func_kind == JS_FUNC_ASYNC_GENERATOR) {
             /* the await must be done before handling the "finally" in
                case it raises an exception */
             emit_op(s, OP_await);
@@ -33217,7 +33192,7 @@ static void emit_return(JSParseState *s, BOOL hasval)
     }
 
     {
-        JSFunctionDef *fd2 = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+        JSFunctionDef *fd2 = (s->cur_func_handle);
         BlockEnv *stack2 = fd2->break_stack_handle;
         int depth2 = fd2->top_break_depth;
         while (depth2 >= 0) {
@@ -33234,7 +33209,7 @@ static void emit_return(JSParseState *s, BOOL hasval)
                 emit_op(s, OP_nip_catch);
                 /* stack: iter_obj next ret_val */
                 if (top->has_iterator) {
-                    if (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->func_kind == JS_FUNC_ASYNC_GENERATOR) {
+                    if ((s->cur_func_handle)->func_kind == JS_FUNC_ASYNC_GENERATOR) {
                         int label_next, label_next2;
                         emit_op(s, OP_nip); /* next */
                         emit_op(s, OP_swap);
@@ -33266,7 +33241,7 @@ static void emit_return(JSParseState *s, BOOL hasval)
             depth2 = top->prev_depth;
         }
     }
-    if (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->is_derived_class_constructor) {
+    if ((s->cur_func_handle)->is_derived_class_constructor) {
         int label_return;
 
         /* 'this' can be uninitialized, so it may be accessed only if
@@ -33287,7 +33262,7 @@ static void emit_return(JSParseState *s, BOOL hasval)
 
         emit_label(s, label_return);
         emit_op(s, OP_return);
-    } else if (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->func_kind != JS_FUNC_NORMAL) {
+    } else if ((s->cur_func_handle)->func_kind != JS_FUNC_NORMAL) {
         emit_op(s, OP_return_async);
     } else {
         emit_op(s, hasval ? OP_return : OP_return_undef);
@@ -33332,7 +33307,7 @@ static __exception int js_parse_var(JSParseState *s, int parse_flags, int tok,
                                     BOOL export_flag)
 {
     JSContextHandle ctx = s->ctx;
-    JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+    JSFunctionDef *fd = (s->cur_func_handle);
     JSAtom name = JS_ATOM_NULL;
 
     for (;;) {
@@ -33350,7 +33325,7 @@ static __exception int js_parse_var(JSParseState *s, int parse_flags, int tok,
             if (js_define_var(s, name, tok))
                 goto var_error;
             if (export_flag) {
-                if (!add_export_entry(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->module, name, name,
+                if (!add_export_entry(s, (s->cur_func_handle)->module, name, name,
                                       JS_EXPORT_TYPE_LOCAL))
                     goto var_error;
             }
@@ -33479,7 +33454,7 @@ static __exception int js_parse_for_in_of(JSParseState *s, int label_name,
                                           BOOL is_async)
 {
     JSContextHandle ctx = s->ctx;
-    JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+    JSFunctionDef *fd = (s->cur_func_handle);
     JSAtom var_name;
     BOOL has_initializer, is_for_of, has_destructuring;
     int tok, tok1, opcode, scope, block_scope_level;
@@ -33502,7 +33477,7 @@ static __exception int js_parse_for_in_of(JSParseState *s, int label_name,
 
     /* local for_in scope starts here so individual elements
        can be closed in statement. */
-    int break_depth = push_break_entry(s->ctx, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle),
+    int break_depth = push_break_entry(s->ctx, (s->cur_func_handle),
                                        label_name, label_break, label_cont, 1);
     if (break_depth < 0)
         return -1;
@@ -33510,7 +33485,7 @@ static __exception int js_parse_for_in_of(JSParseState *s, int label_name,
 
     label_expr = emit_goto(s, OP_goto, -1);
 
-    pos_next = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code.size;
+    pos_next = (s->cur_func_handle)->byte_code.size;
     emit_label(s, label_next);
 
     tok = s->token.val;
@@ -33574,7 +33549,7 @@ static __exception int js_parse_for_in_of(JSParseState *s, int label_name,
     }
     emit_goto(s, OP_goto, label_body);
 
-    pos_expr = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code.size;
+    pos_expr = (s->cur_func_handle)->byte_code.size;
     emit_label(s, label_expr);
     if (s->token.val == '=') {
         /* XXX: potential scoping issue if inside `with` statement */
@@ -33624,7 +33599,7 @@ static __exception int js_parse_for_in_of(JSParseState *s, int label_name,
     }
     /* close the scope after having evaluated the expression so that
        the TDZ values are in the closures */
-    close_scopes(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level, block_scope_level);
+    close_scopes(s, (s->cur_func_handle)->scope_level, block_scope_level);
     if (is_for_of) {
         if (is_async)
             emit_op(s, OP_for_await_of_start);
@@ -33642,7 +33617,7 @@ static __exception int js_parse_for_in_of(JSParseState *s, int label_name,
 
     if (OPTIMIZE) {
         /* move the `next` code here */
-        GCByteBuffer *bc = &SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code;
+        GCByteBuffer *bc = &(s->cur_func_handle)->byte_code;
         int chunk_size = pos_expr - pos_next;
         int offset = bc->size - pos_next;
         int i;
@@ -33650,9 +33625,9 @@ static __exception int js_parse_for_in_of(JSParseState *s, int label_name,
         gc_byte_buffer_put(bc, gc_byte_buffer_ptr(bc) + pos_next, chunk_size);
         memset(gc_byte_buffer_ptr(bc) + pos_next, OP_nop, chunk_size);
         /* `next` part ends with a goto */
-        SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->last_opcode_pos = bc->size - 5;
+        (s->cur_func_handle)->last_opcode_pos = bc->size - 5;
         /* relocate labels */
-        for (i = label_cont; i < SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->label_count; i++) {
+        for (i = label_cont; i < (s->cur_func_handle)->label_count; i++) {
             LabelSlot *ls = &PVEC_AT(s_cur_func_label_slots, LabelSlot, i);
             if (ls->pos >= pos_next && ls->pos < pos_expr)
                 ls->pos += offset;
@@ -33663,7 +33638,7 @@ static __exception int js_parse_for_in_of(JSParseState *s, int label_name,
     if (js_parse_statement(s))
         return -1;
 
-    close_scopes(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level, block_scope_level);
+    close_scopes(s, (s->cur_func_handle)->scope_level, block_scope_level);
 
     emit_label(s, label_cont);
     if (is_for_of) {
@@ -33694,17 +33669,17 @@ static __exception int js_parse_for_in_of(JSParseState *s, int label_name,
     } else {
         emit_op(s, OP_drop);
     }
-    pop_break_entry(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle));
+    pop_break_entry((s->cur_func_handle));
     pop_scope(s);
     return 0;
 }
 
 static void set_eval_ret_undefined(JSParseState *s)
 {
-    if (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->eval_ret_idx >= 0) {
+    if ((s->cur_func_handle)->eval_ret_idx >= 0) {
         emit_op(s, OP_undefined);
         emit_op(s, OP_put_loc);
-        emit_u16(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->eval_ret_idx);
+        emit_u16(s, (s->cur_func_handle)->eval_ret_idx);
     }
 }
 
@@ -33719,7 +33694,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
     /* XXX: support multiple labels on loop statements */
     label_name = JS_ATOM_NULL;
     if (is_label(s)) {
-        JSFunctionDef *fd2 = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+        JSFunctionDef *fd2 = (s->cur_func_handle);
         BlockEnv *stack2 = fd2->break_stack_handle;
         int depth2;
 
@@ -33745,10 +33720,10 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
             BlockEnv break_entry;
 
             label_break = new_label(s);
-            push_break_entry(s->ctx, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle),
+            push_break_entry(s->ctx, (s->cur_func_handle),
                              label_name, label_break, -1, 0);
             top_break_entry(s)->is_regular_stmt = TRUE;
-            if (!(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->js_mode & JS_MODE_STRICT) &&
+            if (!((s->cur_func_handle)->js_mode & JS_MODE_STRICT) &&
                 (decl_mask & DECL_MASK_FUNC_WITH_LABEL)) {
                 mask = DECL_MASK_FUNC | DECL_MASK_FUNC_WITH_LABEL;
             } else {
@@ -33757,7 +33732,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
             if (js_parse_statement_or_decl(s, mask))
                 goto fail;
             emit_label(s, label_break);
-            pop_break_entry(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle));
+            pop_break_entry((s->cur_func_handle));
             goto done;
         }
     }
@@ -33770,11 +33745,11 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
     case TOK_RETURN:
         {
             const uint8_t *op_token_ptr;
-            if (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->is_eval) {
+            if ((s->cur_func_handle)->is_eval) {
                 js_parse_error(s, "return not in a function");
                 goto fail;
             }
-            if (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->func_type == JS_PARSE_FUNC_CLASS_STATIC_INIT) {
+            if ((s->cur_func_handle)->func_type == JS_PARSE_FUNC_CLASS_STATIC_INIT) {
                 js_parse_error(s, "return in a static initializer block");
                 goto fail;
             }
@@ -33839,7 +33814,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
             if (js_parse_expr_paren(s))
                 goto fail;
             label1 = emit_goto(s, OP_if_false, -1);
-            if (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->js_mode & JS_MODE_STRICT)
+            if ((s->cur_func_handle)->js_mode & JS_MODE_STRICT)
                 mask = 0;
             else
                 mask = DECL_MASK_FUNC; /* Annex B.3.4 */
@@ -33870,7 +33845,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
             label_cont = new_label(s);
             label_break = new_label(s);
 
-            push_break_entry(s->ctx, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle),
+            push_break_entry(s->ctx, (s->cur_func_handle),
                              label_name, label_break, label_cont, 0);
 
             if (next_token(s))
@@ -33889,7 +33864,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
 
             emit_label(s, label_break);
 
-            pop_break_entry(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle));
+            pop_break_entry((s->cur_func_handle));
         }
         break;
     case TOK_DO:
@@ -33901,7 +33876,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
             label_break = new_label(s);
             label1 = new_label(s);
 
-            push_break_entry(s->ctx, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle),
+            push_break_entry(s->ctx, (s->cur_func_handle),
                              label_name, label_break, label_cont, 0);
 
             if (next_token(s))
@@ -33928,7 +33903,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
 
             emit_label(s, label_break);
 
-            pop_break_entry(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle));
+            pop_break_entry((s->cur_func_handle));
         }
         break;
     case TOK_FOR:
@@ -33947,14 +33922,14 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
             if (s->token.val == '(') {
                 js_parse_skip_parens_token(s, &bits, FALSE);
             } else if (s->token.val == TOK_AWAIT) {
-                if (!(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->func_kind & JS_FUNC_ASYNC)) {
+                if (!((s->cur_func_handle)->func_kind & JS_FUNC_ASYNC)) {
                     js_parse_error(s, "for await is only valid in asynchronous functions");
                     goto fail;
                 }
                 is_async = TRUE;
                 if (next_token(s))
                     goto fail;
-                SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->has_await = TRUE;
+                (s->cur_func_handle)->has_await = TRUE;
             }
             if (js_parse_expect(s, '('))
                 goto fail;
@@ -33965,7 +33940,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
                     goto fail;
                 break;
             }
-            block_scope_level = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level;
+            block_scope_level = (s->cur_func_handle)->scope_level;
 
             /* create scope for the lexical variables declared in the initial,
                test and increment expressions */
@@ -33994,7 +33969,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
                 }
 
                 /* close the closures before the first iteration */
-                close_scopes(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level, block_scope_level);
+                close_scopes(s, (s->cur_func_handle)->scope_level, block_scope_level);
             }
             if (js_parse_expect(s, ';'))
                 goto fail;
@@ -34005,7 +33980,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
             label_body = new_label(s);
             label_break = new_label(s);
 
-            push_break_entry(s->ctx, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle),
+            push_break_entry(s->ctx, (s->cur_func_handle),
                              label_name, label_break, -1, 0);
 
             /* test expression */
@@ -34029,7 +34004,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
                 /* there is an end expression - create label_cont */
                 emit_goto(s, OP_goto, label_body);
 
-                pos_cont = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code.size;
+                pos_cont = (s->cur_func_handle)->byte_code.size;
                 label_cont = new_label(s);
                 emit_label(s, label_cont);
                 if (js_parse_expr(s))
@@ -34040,25 +34015,25 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
             }
             /* Update the break stack entry with the correct label_cont */
             {
-                JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+                JSFunctionDef *fd = (s->cur_func_handle);
                 BlockEnv *stack = fd->break_stack_handle;
                 stack[fd->top_break_depth].label_cont = label_cont;
             }
             if (js_parse_expect(s, ')'))
                 goto fail;
 
-            pos_body = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code.size;
+            pos_body = (s->cur_func_handle)->byte_code.size;
             emit_label(s, label_body);
             if (js_parse_statement(s))
                 goto fail;
 
             /* close the closures before the next iteration */
             /* XXX: check continue case */
-            close_scopes(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level, block_scope_level);
+            close_scopes(s, (s->cur_func_handle)->scope_level, block_scope_level);
 
             if (OPTIMIZE && label_test != label_body && label_cont != label_test) {
                 /* move the increment code here */
-                GCByteBuffer *bc = &SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code;
+                GCByteBuffer *bc = &(s->cur_func_handle)->byte_code;
                 int chunk_size = pos_body - pos_cont;
                 int offset = bc->size - pos_cont;
                 int i;
@@ -34066,9 +34041,9 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
                 gc_byte_buffer_put(bc, gc_byte_buffer_ptr(bc) + pos_cont, chunk_size);
                 memset(gc_byte_buffer_ptr(bc) + pos_cont, OP_nop, chunk_size);
                 /* increment part ends with a goto */
-                SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->last_opcode_pos = bc->size - 5;
+                (s->cur_func_handle)->last_opcode_pos = bc->size - 5;
                 /* relocate labels */
-                for (i = label_cont; i < SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->label_count; i++) {
+                for (i = label_cont; i < (s->cur_func_handle)->label_count; i++) {
                     LabelSlot *ls = &PVEC_AT(s_cur_func_label_slots, LabelSlot, i);
                     if (ls->pos >= pos_cont && ls->pos < pos_body)
                         ls->pos += offset;
@@ -34078,7 +34053,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
             }
 
             emit_label(s, label_break);
-            pop_break_entry(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle));
+            pop_break_entry((s->cur_func_handle));
             pop_scope(s);
         }
         break;
@@ -34119,7 +34094,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
 
             push_scope(s);
             label_break = new_label(s);
-            push_break_entry(s->ctx, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle),
+            push_break_entry(s->ctx, (s->cur_func_handle),
                              label_name, label_break, -1, 1);
 
             if (js_parse_expect(s, '{'))
@@ -34174,7 +34149,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
                      */
                     emit_op(s, OP_label);
                     emit_u32(s, 0);
-                    default_label_pos = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code.size - 4;
+                    default_label_pos = (s->cur_func_handle)->byte_code.size - 4;
                 } else {
                     if (label_case < 0) {
                         /* falling thru direct from switch expression */
@@ -34189,7 +34164,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
                 goto fail;
             if (default_label_pos >= 0) {
                 /* Ugly patch for the the `default` label, shameful and risky */
-                put_u32(gc_byte_buffer_ptr(&SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->byte_code) + default_label_pos,
+                put_u32(gc_byte_buffer_ptr(&(s->cur_func_handle)->byte_code) + default_label_pos,
                         label_case);
                 PVEC_AT(s_cur_func_label_slots, LabelSlot, label_case).pos = default_label_pos + 4;
             } else {
@@ -34198,7 +34173,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
             emit_label(s, label_break);
             emit_op(s, OP_drop); /* drop the switch expression */
 
-            pop_break_entry(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle));
+            pop_break_entry((s->cur_func_handle));
             pop_scope(s);
         }
         break;
@@ -34218,14 +34193,14 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
 
             emit_goto(s, OP_catch, label_catch);
 
-            push_break_entry(s->ctx, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle),
+            push_break_entry(s->ctx, (s->cur_func_handle),
                              JS_ATOM_NULL, -1, -1, 1);
             top_break_entry(s)->label_finally = label_finally;
 
             if (js_parse_block(s))
                 goto fail;
 
-            pop_break_entry(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle));
+            pop_break_entry((s->cur_func_handle));
 
             if (js_is_live_code(s)) {
                 /* drop the catch offset */
@@ -34270,7 +34245,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
                         /* store the exception value in the catch variable */
                         emit_op(s, OP_scope_put_var);
                         emit_u32(s, name);
-                        emit_u16(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level);
+                        emit_u16(s, (s->cur_func_handle)->scope_level);
                     }
                     if (js_parse_expect(s, ')'))
                         goto fail;
@@ -34279,14 +34254,14 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
                 emit_goto(s, OP_catch, label_catch2);
 
                 push_scope(s);  /* catch block */
-                push_break_entry(s->ctx, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle), JS_ATOM_NULL,
+                push_break_entry(s->ctx, (s->cur_func_handle), JS_ATOM_NULL,
                                  -1, -1, 1);
                 top_break_entry(s)->label_finally = label_finally;
 
                 if (js_parse_block(s))
                     goto fail;
 
-                pop_break_entry(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle));
+                pop_break_entry((s->cur_func_handle));
                 pop_scope(s);  /* catch block */
                 pop_scope(s);  /* catch variable */
 
@@ -34325,18 +34300,18 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
                 if (next_token(s))
                     goto fail;
                 /* on the stack: ret_value gosub_ret_value */
-                push_break_entry(s->ctx, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle), JS_ATOM_NULL,
+                push_break_entry(s->ctx, (s->cur_func_handle), JS_ATOM_NULL,
                                  -1, -1, 2);
 
-                if (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->eval_ret_idx >= 0) {
+                if ((s->cur_func_handle)->eval_ret_idx >= 0) {
                     /* 'finally' updates eval_ret only if not a normal
                        termination */
                     saved_eval_ret_idx =
-                        add_var(s->ctx, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle), JS_ATOM__ret_);
+                        add_var(s->ctx, (s->cur_func_handle), JS_ATOM__ret_);
                     if (saved_eval_ret_idx < 0)
                         goto fail;
                     emit_op(s, OP_get_loc);
-                    emit_u16(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->eval_ret_idx);
+                    emit_u16(s, (s->cur_func_handle)->eval_ret_idx);
                     emit_op(s, OP_put_loc);
                     emit_u16(s, saved_eval_ret_idx);
                     set_eval_ret_undefined(s);
@@ -34345,13 +34320,13 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
                 if (js_parse_block(s))
                     goto fail;
 
-                if (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->eval_ret_idx >= 0) {
+                if ((s->cur_func_handle)->eval_ret_idx >= 0) {
                     emit_op(s, OP_get_loc);
                     emit_u16(s, saved_eval_ret_idx);
                     emit_op(s, OP_put_loc);
-                    emit_u16(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->eval_ret_idx);
+                    emit_u16(s, (s->cur_func_handle)->eval_ret_idx);
                 }
-                pop_break_entry(SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle));
+                pop_break_entry((s->cur_func_handle));
             }
             emit_op(s, OP_ret);
             emit_label(s, label_end);
@@ -34363,7 +34338,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
             goto fail;
         break;
     case TOK_WITH:
-        if (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->js_mode & JS_MODE_STRICT) {
+        if ((s->cur_func_handle)->js_mode & JS_MODE_STRICT) {
             js_parse_error(s, "invalid keyword: with");
             goto fail;
         } else {
@@ -34376,7 +34351,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
                 goto fail;
 
             push_scope(s);
-            with_idx = define_var(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle), JS_ATOM__with_,
+            with_idx = define_var(s, (s->cur_func_handle), JS_ATOM__with_,
                                   JS_VAR_DEF_WITH);
             if (with_idx < 0)
                 goto fail;
@@ -34458,11 +34433,11 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
         emit_source_pos(s, s->token.ptr);
         if (js_parse_expr(s))
             goto fail;
-        if (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->eval_ret_idx >= 0) {
+        if ((s->cur_func_handle)->eval_ret_idx >= 0) {
             /* store the expression value so that it can be returned
                by eval() */
             emit_op(s, OP_put_loc);
-            emit_u16(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->eval_ret_idx);
+            emit_u16(s, (s->cur_func_handle)->eval_ret_idx);
         } else {
             emit_op(s, OP_drop); /* drop the result */
         }
@@ -36620,7 +36595,7 @@ static __exception int js_parse_from_clause(JSParseState *s, JSModuleDefHandle m
 static __exception int js_parse_export(JSParseState *s)
 {
     JSContextHandle ctx = s->ctx;
-    JSModuleDefHandle m = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->module;
+    JSModuleDefHandle m = (s->cur_func_handle)->module;
     JSAtom local_name, export_name;
     int first_export, idx, i, tok;
     JSExportEntry *me;
@@ -36756,7 +36731,7 @@ static __exception int js_parse_export(JSParseState *s)
         /* store the value in the _default_ global variable and export
            it */
         local_name = JS_ATOM__default_;
-        if (define_var(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle), local_name, JS_VAR_DEF_LET) < 0)
+        if (define_var(s, (s->cur_func_handle), local_name, JS_VAR_DEF_LET) < 0)
             return -1;
         emit_op(s, OP_scope_put_var_init);
         emit_atom(s, local_name);
@@ -36793,13 +36768,13 @@ static int add_import(JSParseState *s, JSModuleDefHandle m,
         return js_parse_error(s, "invalid import binding");
 
     if (local_name != JS_ATOM_default) {
-        for (i = 0; i < SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->closure_var_handle.count; i++) {
+        for (i = 0; i < (s->cur_func_handle)->closure_var_handle.count; i++) {
             if (PVEC_AT(s_cur_func_closure_var, JSClosureVar, i).var_name == local_name)
                 return js_parse_error(s, "duplicate import binding");
         }
     }
 
-    var_idx = add_closure_var(ctx, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle),
+    var_idx = add_closure_var(ctx, (s->cur_func_handle),
                               is_star ? JS_CLOSURE_MODULE_DECL : JS_CLOSURE_MODULE_IMPORT,
                               js_module_import_entries_count(m),
                               local_name, TRUE, TRUE, JS_VAR_NORMAL);
@@ -36817,7 +36792,7 @@ static int add_import(JSParseState *s, JSModuleDefHandle m,
 static __exception int js_parse_import(JSParseState *s)
 {
     JSContextHandle ctx = s->ctx;
-    JSModuleDefHandle m = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->module;
+    JSModuleDefHandle m = (s->cur_func_handle)->module;
     JSAtom local_name, import_name, module_name;
     int first_import, i, idx;
 
@@ -36951,7 +36926,7 @@ static __exception int js_parse_import(JSParseState *s)
 
 static __exception int js_parse_source_element(JSParseState *s)
 {
-    JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+    JSFunctionDef *fd = (s->cur_func_handle);
     int tok;
 
     if (s->token.val == TOK_FUNCTION ||
@@ -36985,92 +36960,95 @@ static JSFunctionDef *js_new_function_def(JSContextHandle ctx,
                                           const uint8_t *source_ptr,
                                           GetLineColCache *get_line_col_cache)
 {
-    JSFunctionDefHandle fd = gc_allocz(sizeof(JSFunctionDef), JS_GC_OBJ_TYPE_FUNCTION_DEF);
-    if (SAFE_IS_NULL(fd)) {
-        QJS_LOGE("[NEW_FD] gc_allocz failed");
+    JSFunctionDefHandle fd = (JSFunctionDef *)js_plain_calloc(1, sizeof(JSFunctionDef));
+    if (!fd) {
+        JS_ThrowOutOfMemory(ctx);
         return NULL;
     }
 
     /* Set self_handle for safe handle-based references */
-    GC_SET(SAFE_PTR(fd, JSFunctionDefHandle)->self_handle, SAFE_HANDLE(fd));
-    GC_SET(SAFE_PTR(fd, JSFunctionDefHandle)->ctx, ctx);
-    SAFE_PTR(fd, JSFunctionDefHandle)->link_idx = -1; /* not in parent's child list yet */
+    GC_SET((fd)->self_handle, SAFE_HANDLE(fd));
+    GC_SET((fd)->ctx, ctx);
+    (fd)->link_idx = -1; /* not in parent's child list yet */
     
     /* Initialize break stack */
-    SAFE_PTR(fd, JSFunctionDefHandle)->top_break_depth = -1;
-    SAFE_PTR(fd, JSFunctionDefHandle)->break_stack_capacity = 0;
-    SAFE_PTR(fd, JSFunctionDefHandle)->break_stack_handle = GC_HANDLE_NULL;
+    (fd)->top_break_depth = -1;
+    (fd)->break_stack_capacity = 0;
+    (fd)->break_stack_handle = GC_HANDLE_NULL;
 
     /* insert in parent list */
-    GC_SET(SAFE_PTR(fd, JSFunctionDefHandle)->parent_handle, SAFE_HANDLE(parent_handle));
-    SAFE_PTR(fd, JSFunctionDefHandle)->parent_cpool_idx = -1;
+    GC_SET((fd)->parent_handle, SAFE_HANDLE(parent_handle));
+    (fd)->parent_cpool_idx = -1;
     if (!SAFE_IS_NULL(parent_handle)) {
-        SAFE_PTR(fd, JSFunctionDefHandle)->link_idx = SAFE_PTR(parent_handle, JSFunctionDefHandle)->child_handles.count;
-        gc_handle_list_push(&SAFE_PTR(parent_handle, JSFunctionDefHandle)->child_handles, SAFE_HANDLE(fd));
-        SAFE_PTR(fd, JSFunctionDefHandle)->js_mode = SAFE_PTR(parent_handle, JSFunctionDefHandle)->js_mode;
-        SAFE_PTR(fd, JSFunctionDefHandle)->parent_scope_level = SAFE_PTR(parent_handle, JSFunctionDefHandle)->scope_level;
+        (fd)->link_idx = (parent_handle)->child_handles.count;
+        if (!pvec_push(&(parent_handle)->child_handles, sizeof(JSFunctionDef *), &fd)) {
+            js_plain_free(fd);
+            return NULL;
+        }
+        (fd)->js_mode = (parent_handle)->js_mode;
+        (fd)->parent_scope_level = (parent_handle)->scope_level;
     }
-    SAFE_PTR(fd, JSFunctionDefHandle)->strip_debug = ((SAFE_GET_OR(ctx_rt, JSRuntimeHandle, strip_flags, 0) & JS_STRIP_DEBUG) != 0);
-    SAFE_PTR(fd, JSFunctionDefHandle)->strip_source = ((SAFE_GET_OR(ctx_rt, JSRuntimeHandle, strip_flags, 0) & (JS_STRIP_DEBUG | JS_STRIP_SOURCE)) != 0);
+    (fd)->strip_debug = ((SAFE_GET_OR(ctx_rt, JSRuntimeHandle, strip_flags, 0) & JS_STRIP_DEBUG) != 0);
+    (fd)->strip_source = ((SAFE_GET_OR(ctx_rt, JSRuntimeHandle, strip_flags, 0) & (JS_STRIP_DEBUG | JS_STRIP_SOURCE)) != 0);
 
-    SAFE_PTR(fd, JSFunctionDefHandle)->is_eval = is_eval;
-    SAFE_PTR(fd, JSFunctionDefHandle)->is_func_expr = is_func_expr;
-    SAFE_PTR(fd, JSFunctionDefHandle)->original_closure_var_count = 0;
-    js_dbuf_bytecode_init(ctx, gc_byte_buffer_as_dbuf(&SAFE_PTR(fd, JSFunctionDefHandle)->byte_code));
-    SAFE_PTR(fd, JSFunctionDefHandle)->last_opcode_pos = -1;
-    SAFE_PTR(fd, JSFunctionDefHandle)->func_name = JS_ATOM_NULL;
-    SAFE_PTR(fd, JSFunctionDefHandle)->var_object_idx = -1;
-    SAFE_PTR(fd, JSFunctionDefHandle)->arg_var_object_idx = -1;
-    SAFE_PTR(fd, JSFunctionDefHandle)->arguments_var_idx = -1;
-    SAFE_PTR(fd, JSFunctionDefHandle)->arguments_arg_idx = -1;
-    SAFE_PTR(fd, JSFunctionDefHandle)->func_var_idx = -1;
-    SAFE_PTR(fd, JSFunctionDefHandle)->eval_ret_idx = -1;
-    SAFE_PTR(fd, JSFunctionDefHandle)->this_var_idx = -1;
-    SAFE_PTR(fd, JSFunctionDefHandle)->new_target_var_idx = -1;
-    SAFE_PTR(fd, JSFunctionDefHandle)->this_active_func_var_idx = -1;
-    SAFE_PTR(fd, JSFunctionDefHandle)->home_object_var_idx = -1;
+    (fd)->is_eval = is_eval;
+    (fd)->is_func_expr = is_func_expr;
+    (fd)->original_closure_var_count = 0;
+    js_dbuf_bytecode_init(ctx, gc_byte_buffer_as_dbuf(&(fd)->byte_code));
+    (fd)->last_opcode_pos = -1;
+    (fd)->func_name = JS_ATOM_NULL;
+    (fd)->var_object_idx = -1;
+    (fd)->arg_var_object_idx = -1;
+    (fd)->arguments_var_idx = -1;
+    (fd)->arguments_arg_idx = -1;
+    (fd)->func_var_idx = -1;
+    (fd)->eval_ret_idx = -1;
+    (fd)->this_var_idx = -1;
+    (fd)->new_target_var_idx = -1;
+    (fd)->this_active_func_var_idx = -1;
+    (fd)->home_object_var_idx = -1;
 
     /* XXX: should distinguish arg, var and var object and body scopes */
     /* Allocate scopes array on GC heap immediately */
-    if (!pvec_resize(&SAFE_PTR(fd, JSFunctionDefHandle)->scopes_handle, sizeof(JSVarScope), 4)) {
+    if (!pvec_resize(&(fd)->scopes_handle, sizeof(JSVarScope), 4)) {
         QJS_LOGE("[NEW_FD] scopes_handle.resize failed");
         return NULL;
     }
-    SAFE_PTR(fd, JSFunctionDefHandle)->scope_size = 4;
-    SAFE_PTR(fd, JSFunctionDefHandle)->scope_count = 1;
-    PVEC_AT(SAFE_PTR(fd, JSFunctionDefHandle)->scopes_handle, JSVarScope, 0).first = -1;
-    PVEC_AT(SAFE_PTR(fd, JSFunctionDefHandle)->scopes_handle, JSVarScope, 0).parent = -1;
-    SAFE_PTR(fd, JSFunctionDefHandle)->scope_level = 0;  /* 0: var/arg scope */
-    SAFE_PTR(fd, JSFunctionDefHandle)->scope_first = -1;
-    SAFE_PTR(fd, JSFunctionDefHandle)->body_scope = -1;
+    (fd)->scope_size = 4;
+    (fd)->scope_count = 1;
+    PVEC_AT((fd)->scopes_handle, JSVarScope, 0).first = -1;
+    PVEC_AT((fd)->scopes_handle, JSVarScope, 0).parent = -1;
+    (fd)->scope_level = 0;  /* 0: var/arg scope */
+    (fd)->scope_first = -1;
+    (fd)->body_scope = -1;
     
     /* Initialize label slots array */
-    if (!pvec_resize(&SAFE_PTR(fd, JSFunctionDefHandle)->label_slots_handle, sizeof(LabelSlot), 4)) {
+    if (!pvec_resize(&(fd)->label_slots_handle, sizeof(LabelSlot), 4)) {
         QJS_LOGE("[NEW_FD] label_slots_handle.resize failed");
         return NULL;
     }
-    SAFE_PTR(fd, JSFunctionDefHandle)->label_size = 4;
+    (fd)->label_size = 4;
 
-    SAFE_PTR(fd, JSFunctionDefHandle)->filename = JS_NewAtom(ctx, filename);
-    SAFE_PTR(fd, JSFunctionDefHandle)->source_pos = source_ptr - get_line_col_cache->buf_start;
-    SAFE_PTR(fd, JSFunctionDefHandle)->get_line_col_cache = get_line_col_cache;
+    (fd)->filename = JS_NewAtom(ctx, filename);
+    (fd)->source_pos = source_ptr - get_line_col_cache->buf_start;
+    (fd)->get_line_col_cache = get_line_col_cache;
     
-    js_dbuf_pc2line_init(ctx, gc_byte_buffer_as_dbuf(&SAFE_PTR(fd, JSFunctionDefHandle)->pc2line));
-    SAFE_PTR(fd, JSFunctionDefHandle)->last_opcode_source_pos = (uint32_t)(source_ptr - get_line_col_cache->buf_start);
+    js_dbuf_pc2line_init(ctx, gc_byte_buffer_as_dbuf(&(fd)->pc2line));
+    (fd)->last_opcode_source_pos = (uint32_t)(source_ptr - get_line_col_cache->buf_start);
     
     /* === Initialize lazy function parsing fields === */
-    SAFE_PTR(fd, JSFunctionDefHandle)->func_parse_state = JS_FUNC_PARSED;  /* Default: fully parsed (not lazy) */
-    SAFE_PTR(fd, JSFunctionDefHandle)->lazy_source = NULL;
-    SAFE_PTR(fd, JSFunctionDefHandle)->lazy_source_len = 0;
-    SAFE_PTR(fd, JSFunctionDefHandle)->lazy_source_line = 0;
-    SAFE_PTR(fd, JSFunctionDefHandle)->lazy_source_col = 0;
-    SAFE_PTR(fd, JSFunctionDefHandle)->lazy_parent_scope = GC_HANDLE_NULL;
-    SAFE_PTR(fd, JSFunctionDefHandle)->lazy_is_async = FALSE;
-    SAFE_PTR(fd, JSFunctionDefHandle)->lazy_is_generator = FALSE;
-    SAFE_PTR(fd, JSFunctionDefHandle)->lazy_func_kind = JS_FUNC_NORMAL;
-    SAFE_PTR(fd, JSFunctionDefHandle)->is_expr_body = FALSE;
+    (fd)->func_parse_state = JS_FUNC_PARSED;  /* Default: fully parsed (not lazy) */
+    (fd)->lazy_source = NULL;
+    (fd)->lazy_source_len = 0;
+    (fd)->lazy_source_line = 0;
+    (fd)->lazy_source_col = 0;
+    (fd)->lazy_parent_scope = GC_HANDLE_NULL;
+    (fd)->lazy_is_async = FALSE;
+    (fd)->lazy_is_generator = FALSE;
+    (fd)->lazy_func_kind = JS_FUNC_NORMAL;
+    (fd)->is_expr_body = FALSE;
     
-    return SAFE_PTR(fd, JSFunctionDefHandle);
+    return (fd);
 }
 
 static void free_bytecode_atoms(JSRuntimeHandle rt,
@@ -37328,11 +37306,19 @@ static void js_free_function_def(JSContextHandle ctx, JSFunctionDef *fd)
 {
     int i;
 
+    /* out of the parent's list (a function whose parse failed is freed
+       before its parent) */
+    if (fd->parent_handle && fd->link_idx >= 0 &&
+        fd->link_idx < fd->parent_handle->child_handles.count &&
+        PVEC_AT(fd->parent_handle->child_handles, JSFunctionDef *, fd->link_idx) == fd)
+        PVEC_AT(fd->parent_handle->child_handles, JSFunctionDef *, fd->link_idx) = NULL;
+
     /* free the child functions */
     for (i = 0; i < fd->child_handles.count; i++) {
-        JSFunctionDefHandle fd1_handle = fd->child_handles.data[i];
+        JSFunctionDefHandle fd1_handle = PVEC_AT(fd->child_handles, JSFunctionDef *, i);
         if (!SAFE_IS_NULL(fd1_handle)) {
-            js_free_function_def(ctx, SAFE_PTR(fd1_handle, JSFunctionDefHandle));
+            PVEC_AT(fd->child_handles, JSFunctionDef *, i) = NULL;
+            js_free_function_def(ctx, (fd1_handle));
         }
     }
 
@@ -37376,8 +37362,8 @@ static void js_free_function_def(JSContextHandle ctx, JSFunctionDef *fd)
     JS_FreeAtom(ctx, fd->filename);
     gc_byte_buffer_clear(&fd->pc2line);
     js_free_function_def_tables(fd);
-
-    /* child_handles and parent references are handles - GC frees automatically */
+    pvec_free(&fd->child_handles);
+    js_plain_free(fd);
 }
 
 #ifdef DUMP_BYTECODE
@@ -38000,7 +37986,7 @@ static int get_closure_var(JSContextHandle ctx, JSFunctionDef *s,
 {
     int i;
 
-    JSFunctionDef *s_parent = SAFE_PTR(s->parent_handle, JSFunctionDefHandle);
+    JSFunctionDef *s_parent = (s->parent_handle);
     if (fd != s_parent) {
         var_idx = get_closure_var(ctx, s_parent, fd, closure_type,
                                   var_idx, var_name,
@@ -38215,7 +38201,7 @@ static inline void capture_var_ctx(JSContextHandle ctx, JSFunctionDef *s, JSVarD
             /* Check if this stack frame belongs to the function def being captured */
             if (SAFE_GET_OR(b, JSFunctionBytecodeHandle, has_resume_parse_state, 0)) {
                 JSLazyParseState *state = js_bc_resume_parse_state(b);
-                if (state && state->parent_scope_handle == s->self_handle) {
+                if (state && (uintptr_t)state->parent_scope_handle == (uintptr_t)s->self_handle) {
                     /* This frame is a child of s, keep walking */
                     sf = sf->prev_frame_handle != GC_HANDLE_NULL ? 
                         js_frame_deref(sf->prev_frame_handle) : NULL;
@@ -38492,7 +38478,7 @@ static int resolve_scope_var(JSContextHandle ctx, JSFunctionDef *s,
     /* check parent scopes */
     for (fd = s; fd->parent_handle != GC_HANDLE_NULL;) {
         scope_level = fd->parent_scope_level;
-        fd = SAFE_PTR(fd->parent_handle, JSFunctionDefHandle);
+        fd = (fd->parent_handle);
         for (idx = fd_get_scope_first(fd, scope_level); idx >= 0;) {
             JSVarDefArrayHandle vd_arr = fd_vars; int vd_idx = idx;
             if ((vd_arr)[vd_idx].var_name == var_name) {
@@ -38889,7 +38875,7 @@ static int resolve_scope_private_field1(JSContextHandle ctx,
                                     var_name);
             return -1;
         } else {
-            fd = SAFE_PTR(fd->parent_handle, JSFunctionDefHandle);
+            fd = (fd->parent_handle);
         }
         is_ref = TRUE;
     }
@@ -39088,7 +39074,7 @@ static void add_eval_variables(JSContextHandle ctx, JSFunctionDef *s)
     fd = s;
     for(;;) {
         scope_level = fd->parent_scope_level;
-        fd = SAFE_PTR(fd->parent_handle, JSFunctionDefHandle);
+        fd = (fd->parent_handle);
         if (!fd)
             break;
         /* add 'this' if it was not previously added */
@@ -41695,10 +41681,12 @@ static GCValue js_create_function(JSContextHandle ctx, JSFunctionDef *fd)
 
     /* first create all the child functions */
     for (i = 0; i < fd->child_handles.count; i++) {
-        JSFunctionDefHandle fd1_handle = fd->child_handles.data[i];
+        JSFunctionDefHandle fd1_handle = PVEC_AT(fd->child_handles, JSFunctionDef *, i);
         if (!SAFE_IS_NULL(fd1_handle)) {
-            int cpool_idx = SAFE_PTR(fd1_handle, JSFunctionDefHandle)->parent_cpool_idx;
-            func_obj = js_create_function(ctx, SAFE_PTR(fd1_handle, JSFunctionDefHandle));
+            int cpool_idx = (fd1_handle)->parent_cpool_idx;
+            /* consumed by js_create_function, which frees it */
+            PVEC_AT(fd->child_handles, JSFunctionDef *, i) = NULL;
+            func_obj = js_create_function(ctx, (fd1_handle));
             if (JS_IsException(func_obj))
                 goto fail;
             /* save it in the constant pool: a root until the bytecode holds it */
@@ -41946,8 +41934,8 @@ static GCValue js_create_function(JSContextHandle ctx, JSFunctionDef *fd)
     /* Lazy function bytecode created if applicable */
     bc_fingerprint(ctx, b);
     js_free_function_def_tables(fd);
-
-    /* parent_handle and link_idx are handles - GC frees automatically */
+    pvec_free(&fd->child_handles);   /* (all consumed above) */
+    js_plain_free(fd);
     return GC_MKHANDLE(JS_TAG_FUNCTION_BYTECODE, SAFE_HANDLE(b));
  fail:
     js_free_function_def(ctx, fd);
@@ -42325,8 +42313,8 @@ static __exception int js_parse_directives(JSParseState *s)
         if (!has_semi)
             break;
         if (!strcmp(str, "use strict")) {
-            SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->has_use_strict = TRUE;
-            SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->js_mode |= JS_MODE_STRICT;
+            (s->cur_func_handle)->has_use_strict = TRUE;
+            (s->cur_func_handle)->js_mode |= JS_MODE_STRICT;
         }
     }
     return js_parse_seek_token(s, &pos);
@@ -42428,7 +42416,7 @@ static __exception int js_parse_function_decl2(JSParseState *s,
                                                JSFunctionDef **pfd)
 {
     JSContextHandle ctx = s->ctx;
-    JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+    JSFunctionDef *fd = (s->cur_func_handle);
     BOOL is_expr;
     int func_idx, lexical_func_idx = -1;
     BOOL has_opt_arg;
@@ -42568,10 +42556,10 @@ static __exception int js_parse_function_decl2(JSParseState *s,
     fd->has_this_binding = fd->has_arguments_binding;
     fd->is_derived_class_constructor = (func_type == JS_PARSE_FUNC_DERIVED_CLASS_CONSTRUCTOR);
     if (func_type == JS_PARSE_FUNC_ARROW) {
-        fd->new_target_allowed = SAFE_PTR(fd->parent_handle, JSFunctionDefHandle)->new_target_allowed;
-        fd->super_call_allowed = SAFE_PTR(fd->parent_handle, JSFunctionDefHandle)->super_call_allowed;
-        fd->super_allowed = SAFE_PTR(fd->parent_handle, JSFunctionDefHandle)->super_allowed;
-        fd->arguments_allowed = SAFE_PTR(fd->parent_handle, JSFunctionDefHandle)->arguments_allowed;
+        fd->new_target_allowed = (fd->parent_handle)->new_target_allowed;
+        fd->super_call_allowed = (fd->parent_handle)->super_call_allowed;
+        fd->super_allowed = (fd->parent_handle)->super_allowed;
+        fd->arguments_allowed = (fd->parent_handle)->arguments_allowed;
     } else if (func_type == JS_PARSE_FUNC_CLASS_STATIC_INIT) {
         fd->new_target_allowed = TRUE; // although new.target === undefined
         fd->super_call_allowed = FALSE;
@@ -42958,18 +42946,18 @@ static __exception int js_parse_function_decl2(JSParseState *s,
             emit_op(s, OP_fclosure);
             emit_u32(s, idx);
             if (create_func_var) {
-                if (SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->is_global_var) {
+                if ((s->cur_func_handle)->is_global_var) {
                     JSGlobalVar *hf;
                     /* the global variable must be defined at the start of the
                        function */
-                    hf = add_global_var(ctx, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle), func_name);
+                    hf = add_global_var(ctx, (s->cur_func_handle), func_name);
                     if (!hf)
                         goto fail;
                     /* it is considered as defined at the top level
                        (needed for annex B.3.3.4 and B.3.3.5
                        checks) */
                     hf->scope_level = 0;
-                    hf->force_init = ((SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->js_mode & JS_MODE_STRICT) != 0);
+                    hf->force_init = (((s->cur_func_handle)->js_mode & JS_MODE_STRICT) != 0);
                     /* store directly into global var, bypass lexical scope */
                     emit_op(s, OP_dup);
                     emit_op(s, OP_scope_put_var);
@@ -42977,9 +42965,9 @@ static __exception int js_parse_function_decl2(JSParseState *s,
                     emit_u16(s, 0);
                 } else {
                     /* do not call define_var to bypass lexical scope check */
-                    func_idx = find_var(ctx, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle), func_name);
+                    func_idx = find_var(ctx, (s->cur_func_handle), func_name);
                     if (func_idx < 0) {
-                        func_idx = add_var(ctx, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle), func_name);
+                        func_idx = add_var(ctx, (s->cur_func_handle), func_name);
                         if (func_idx < 0)
                             goto fail;
                     }
@@ -42999,11 +42987,11 @@ static __exception int js_parse_function_decl2(JSParseState *s,
                 /* XXX: could use OP_put_loc directly */
                 emit_op(s, OP_scope_put_var_init);
                 emit_atom(s, func_name);
-                emit_u16(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->scope_level);
+                emit_u16(s, (s->cur_func_handle)->scope_level);
             }
         } else {
-            if (!SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->is_global_var) {
-                int var_idx = define_var(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle), func_name, JS_VAR_DEF_VAR);
+            if (!(s->cur_func_handle)->is_global_var) {
+                int var_idx = define_var(s, (s->cur_func_handle), func_name, JS_VAR_DEF_VAR);
 
                 if (var_idx < 0)
                     goto fail;
@@ -43021,12 +43009,12 @@ static __exception int js_parse_function_decl2(JSParseState *s,
                 else
                     func_var_name = func_name;
                 /* the variable will be assigned at the top of the function */
-                hf = add_global_var(ctx, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle), func_var_name);
+                hf = add_global_var(ctx, (s->cur_func_handle), func_var_name);
                 if (!hf)
                     goto fail;
                 hf->cpool_idx = idx;
                 if (export_flag != JS_PARSE_EXPORT_NONE) {
-                    if (!add_export_entry(s, SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle)->module, func_var_name,
+                    if (!add_export_entry(s, (s->cur_func_handle)->module, func_var_name,
                                           export_flag == JS_PARSE_EXPORT_NAMED ? func_var_name : JS_ATOM_default, JS_EXPORT_TYPE_LOCAL))
                         goto fail;
                 }
@@ -43119,6 +43107,7 @@ static GCHandle js_lazy_compile(JSContextHandle ctx, JSFunctionBytecodeHandle st
     proxy->func_name = JS_DupAtom(ctx, JS_ATOM__eval_);
     /* nested lazy functions of the body find the root source here */
     GC_SET(proxy->source_string_handle, state->source_handle);
+    js_parse_hold(s, state->source_handle);
     nstub = SAFE_GET_OR(stub_b, JSFunctionBytecodeHandle, closure_var_count, 0);
     for (i = 0; i < nstub; i++) {
         int t = js_bc_closure_var_closure_type(stub_b, i);
@@ -43368,7 +43357,7 @@ static __exception int js_parse_function_decl(JSParseState *s,
 
 static __exception int js_parse_program(JSParseState *s)
 {
-    JSFunctionDef *fd = SAFE_PTR(s->cur_func_handle, JSFunctionDefHandle);
+    JSFunctionDef *fd = (s->cur_func_handle);
     int idx;
 
     if (next_token(s))
@@ -43545,6 +43534,7 @@ static GCValue __JS_EvalInternal(JSContextHandle ctx, GCValue this_obj,
         goto fail1;
     /* Store the GC-managed source handle for lazy function references */
     GC_SET(fd->source_string_handle, SAFE_HANDLE(source_copy));
+    js_parse_hold(s, fd->source_string_handle);
     js_parse_set_cur_func(s, (JSFunctionDefHandle)(fd->self_handle));
     fd->eval_type = eval_type;
     fd->has_this_binding = (eval_type != JS_EVAL_TYPE_DIRECT);
@@ -43566,6 +43556,7 @@ static GCValue __JS_EvalInternal(JSContextHandle ctx, GCValue this_obj,
             goto fail;
     }
     GC_SET(fd->module, m);
+    js_parse_hold(s, m);
     if (m != GC_HANDLE_NULL || (flags & JS_EVAL_FLAG_ASYNC)) {
         fd->in_function_body = TRUE;
         fd->func_kind = JS_FUNC_ASYNC;
