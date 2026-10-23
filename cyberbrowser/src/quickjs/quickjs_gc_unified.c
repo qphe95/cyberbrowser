@@ -911,6 +911,48 @@ static bool type_starts_old(JSGCObjectTypeEnum type) {
     }
 }
 
+/* Debug (QJS_GC_ALLOC_PROFILE=path): the calling stack once every
+ * QJS_GC_ALLOC_PROFILE_KB (default 16) kilobytes allocated, a line per
+ * sample "bytes type rva..." (the bytes since the last sample, so the lines
+ * add up to what was allocated; return addresses relative to the image),
+ * for a profile of what allocates. */
+static int g_aprof = -1;
+static FILE *g_aprof_file;
+static uint64_t g_aprof_stride, g_aprof_since;
+
+static void aprof_close(void) {
+    if (g_aprof_file) fclose(g_aprof_file);
+    g_aprof_file = NULL;
+}
+
+static void __attribute__((noinline)) aprof_note(JSGCObjectTypeEnum type, size_t size) {
+    if (g_aprof < 0) {
+        const char *path = getenv("QJS_GC_ALLOC_PROFILE");
+        g_aprof_file = path && path[0] ? fopen(path, "w") : NULL;
+        g_aprof = g_aprof_file != NULL;
+        const char *kb = getenv("QJS_GC_ALLOC_PROFILE_KB");
+        g_aprof_stride = (uint64_t)((kb && atoi(kb) > 0) ? atoi(kb) : 16) * 1024;
+        if (g_aprof) atexit(aprof_close);
+        if (!g_aprof) return;
+    }
+    g_aprof_since += size;
+    if (g_aprof_since < g_aprof_stride) return;
+    void *frames[48];
+    int n = 0;
+#ifdef _WIN32
+    extern char __ImageBase;
+    extern unsigned short __stdcall RtlCaptureStackBackTrace(unsigned long, unsigned long, void **, unsigned long *);
+    n = RtlCaptureStackBackTrace(2, 48, frames, NULL);
+    uintptr_t base = (uintptr_t)&__ImageBase;
+#else
+    uintptr_t base = 0;
+#endif
+    fprintf(g_aprof_file, "%llu %u", (unsigned long long)g_aprof_since, (unsigned)type);
+    for (int i = 0; i < n; i++) fprintf(g_aprof_file, " %llx", (unsigned long long)((uintptr_t)frames[i] - base));
+    fputc('\n', g_aprof_file);
+    g_aprof_since = 0;
+}
+
 static GCHandle gc_alloc_in(size_t size, JSGCObjectTypeEnum type, bool old, bool permanent) {
     if (!g_gc.initialized && !gc_init()) return GC_HANDLE_NULL;
     bool young = !old && !permanent && g_core.nursery_enabled;
@@ -945,6 +987,7 @@ static GCHandle gc_alloc_in(size_t size, JSGCObjectTypeEnum type, bool old, bool
     if (type == JS_GC_OBJ_TYPE_JS_CONTEXT)
         gc_core_registry_add(&g_core.contexts, h);
     gc_core_note_allocation(gc_header_total_size(hdr), young);
+    if (__builtin_expect(g_aprof != 0, 0)) aprof_note(type, size);
     return h;
 }
 
