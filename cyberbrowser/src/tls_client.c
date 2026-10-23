@@ -454,8 +454,23 @@ static bool tls_shared_ca_load(void) {
     return ca_loaded;
 }
 
+/* CYBER_NET_TIMING=1: each new connection's DNS, TCP and TLS times on
+ * stderr. */
+static int net_timing(void) {
+    static int t = -1;
+    if (t < 0) t = getenv("CYBER_NET_TIMING") != NULL;
+    return t;
+}
+
+static double net_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
+}
+
 bool tls_client_connect(TlsClient *client, const char *host, const char *port,
                         char *err, size_t errLen) {
+    double t_start = 0, t_dns = 0, t_tcp = 0;
     if (!client || !host || !port) {
         set_err(err, errLen, "TLS invalid params", TLS_ERR_GENERIC);
         return false;
@@ -472,7 +487,18 @@ bool tls_client_connect(TlsClient *client, const char *host, const char *port,
         LOGW("Could not load CA certs from any path, continuing without verification");
     }
     LOGI("Connecting to %s:%s...", host, port);
+    if (net_timing()) {
+        /* (The lookup is timed on its own; the connect then finds it cached.) */
+        t_start = net_now_ms();
+        struct addrinfo hints, *res = NULL;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        if (getaddrinfo(host, port, &hints, &res) == 0) freeaddrinfo(res);
+        t_dns = net_now_ms();
+    }
     ret = tls_net_connect(&client->net, host, port, err, errLen);
+    if (net_timing()) t_tcp = net_now_ms();
     if (ret != 0) {
         if (!(err && errLen && strncmp(err, "Proxy refused", 13) == 0))
             set_err(err, errLen, "TLS connect failed", ret);
@@ -519,8 +545,15 @@ bool tls_client_connect(TlsClient *client, const char *host, const char *port,
 
     // Enable mbedTLS debug output
 #if defined(MBEDTLS_DEBUG_C)
-    mbedtls_debug_set_threshold(4);
-    mbedtls_ssl_conf_dbg(&client->conf, mbedtls_debug, NULL);
+    /* CYBER_TLS_DEBUG=1..4: mbedtls's own log.  Off by default: at 4 it
+     * hex-dumps every record, formatted even when the log then drops it,
+     * which cost CPU on every byte received. */
+    {
+        const char *d = getenv("CYBER_TLS_DEBUG");
+        int level = d ? atoi(d) : 0;
+        mbedtls_debug_set_threshold(level);
+        if (level > 0) mbedtls_ssl_conf_dbg(&client->conf, mbedtls_debug, NULL);
+    }
 #endif
 
 #ifdef BE_PLATFORM_ANDROID
@@ -608,6 +641,20 @@ bool tls_client_connect(TlsClient *client, const char *host, const char *port,
     LOGI("TLS version: %s, Cipher: %s", tls_version ? tls_version : "unknown", 
          cipher_name ? cipher_name : "unknown");
     
+    if (net_timing()) {
+        struct sockaddr_storage peer;
+#ifdef _WIN32
+        int plen = sizeof(peer);
+        int got = getpeername((SOCKET)client->net.fd, (struct sockaddr *)&peer, &plen);
+#else
+        socklen_t plen = sizeof(peer);
+        int got = getpeername(client->net.fd, (struct sockaddr *)&peer, &plen);
+#endif
+        const char *fam = got == 0 ? (peer.ss_family == AF_INET6 ? "IPv6" : "IPv4") : "?";
+        fprintf(stderr, "[net] %s: dns %.1f, tcp %.1f, tls %.1f ms (%s, %s, %s)\n", host,
+                t_dns - t_start, t_tcp - t_dns, net_now_ms() - t_tcp, fam,
+                tls_version ? tls_version : "?", cipher_name ? cipher_name : "?");
+    }
     ret = (int)mbedtls_ssl_get_verify_result(&client->ssl);
     if (ret != 0) {
         set_err(err, errLen, "TLS verify failed", ret);
