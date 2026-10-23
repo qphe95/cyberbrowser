@@ -3931,6 +3931,28 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         1, JS_CFUNC_constructor, 0);
     JS_SetConstructor(ctx, intersection_observer_ctor, intersection_observer_proto);
     JS_SetPropertyStr(ctx, global, "IntersectionObserver", intersection_observer_ctor);
+    {
+        /* IntersectionObserverEntry: the class of the observer's entries.
+         * Feature checks look for it ("intersectionRatio" in its prototype);
+         * without it YouTube's polyfill replaces the native observer with
+         * one that polls layout on a timer.  Entries hold their values as
+         * own properties; the prototype's accessors are what checks see. */
+        static const char ioe_js[] =
+            "(function(){"
+            "var names=['time','rootBounds','boundingClientRect','intersectionRect','isIntersecting','intersectionRatio','target'];"
+            "function IntersectionObserverEntry(init){"
+            "  if(!(this instanceof IntersectionObserverEntry)) throw new TypeError(\"Failed to construct 'IntersectionObserverEntry': Please use the 'new' operator.\");"
+            "  init=init||{};"
+            "  for(var i=0;i<names.length;i++){var n=names[i],v=init[n];"
+            "    if(n==='isIntersecting')v=!!v; else if(n==='intersectionRatio'||n==='time')v=+v||0; else if(v===undefined)v=null;"
+            "    Object.defineProperty(this,n,{value:v,enumerable:true,configurable:true});}"
+            "}"
+            "names.forEach(function(n){Object.defineProperty(IntersectionObserverEntry.prototype,n,"
+            "  {get:function(){return undefined;},enumerable:true,configurable:true});});"
+            "Object.defineProperty(window,'IntersectionObserverEntry',{value:IntersectionObserverEntry,writable:true,configurable:true});"
+            "})();";
+        JS_Eval(ctx, ioe_js, sizeof(ioe_js) - 1, "<intersection-observer-entry>", JS_EVAL_TYPE_GLOBAL);
+    }
 
     // ===== Performance API =====
     // PerformanceEntry class

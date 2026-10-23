@@ -1075,7 +1075,7 @@ TEST(test_dom_intersection_observer_geometry) {
         "function mk(id, css){ var d=document.createElement('div'); d.id=id; d.style.cssText=css; b.appendChild(d); return d; }"
         "globalThis.__ioin=mk('ioin','height:50px'); globalThis.__iobelow=mk('iobelow','height:50px;margin-top:50000px');"
         "globalThis.__iohid=mk('iohid','height:50px;display:none');"
-        "globalThis.__ioo=new IntersectionObserver(function(es){ es.forEach(function(e){ __iolog.push(e.target.id+':'+e.isIntersecting); }); });"
+        "globalThis.__ioo=new IntersectionObserver(function(es){ es.forEach(function(e){ globalThis.__iolast=e; __iolog.push(e.target.id+':'+e.isIntersecting); }); });"
         "__ioo.observe(__ioin); __ioo.observe(__iobelow); __ioo.observe(__iohid); 1"));
     JSContextHandle pctx = ctx;
     while (JS_ExecutePendingJob(JS_GetRuntime(ctx), &pctx) > 0) {}
@@ -1085,6 +1085,15 @@ TEST(test_dom_intersection_observer_geometry) {
         printf("    first report: %s\n", s ? s : "?");
         return false;
     }
+    /* Entries are IntersectionObserverEntry objects: the polyfills' check
+     * for a native observer ("intersectionRatio" in its prototype) passes,
+     * so they keep this one instead of polling layout on a timer. */
+    ASSERT_EQ(1, js_int(ctx,
+        "(__iolast instanceof IntersectionObserverEntry) && ('intersectionRatio' in IntersectionObserverEntry.prototype) &&"
+        "typeof __iolast.intersectionRatio==='number' && typeof __iolast.time==='number' &&"
+        "__iolast.target && __iolast.boundingClientRect && __iolast.rootBounds &&"
+        "Object.keys(__iolast).indexOf('isIntersecting')>=0 &&"
+        "new IntersectionObserverEntry({intersectionRatio:0.5, isIntersecting:true}).intersectionRatio===0.5"));
     ASSERT_EQ(1, js_int(ctx, "__iolog=[]; __iohid.style.display='block'; __iobelow.style.marginTop='0px'; 1"));
     platform_sleep_ms(120);
     intersection_observers_tick(ctx);

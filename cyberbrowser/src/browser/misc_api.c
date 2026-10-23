@@ -3045,14 +3045,19 @@ static GCValue io_compute(JSContextHandle ctx, GCValue observer, GCValue target,
     }
     *state = st;
 
-    GCValue entry = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, entry, "target", target);
-    JS_SetPropertyStr(ctx, entry, "isIntersecting", JS_NewBool(ctx, hit));
-    JS_SetPropertyStr(ctx, entry, "intersectionRatio", JS_NewFloat64(ctx, ratio));
-    JS_SetPropertyStr(ctx, entry, "boundingClientRect", io_rect(ctx, tb.x, tb.y, tb.width, tb.height));
-    JS_SetPropertyStr(ctx, entry, "intersectionRect", io_rect(ctx, hit ? ix0 : 0, hit ? iy0 : 0, iw, ih));
-    JS_SetPropertyStr(ctx, entry, "rootBounds", io_rect(ctx, l, t, r - l, b - t));
-    JS_SetPropertyStr(ctx, entry, "time", JS_NewFloat64(ctx, (double)platform_get_time_ms()));
+    /* An IntersectionObserverEntry: own data properties (its prototype has
+     * accessors for feature checks, which plain assignment would hit). */
+    GCValue global = JS_GetGlobalObject(ctx);
+    GCValue ctor = JS_GetPropertyStr(ctx, global, "IntersectionObserverEntry");
+    GCValue proto = JS_IsFunction(ctx, ctor) ? JS_GetPropertyStr(ctx, ctor, "prototype") : JS_UNDEFINED;
+    GCValue entry = JS_IsObject(proto) ? JS_NewObjectProto(ctx, proto) : JS_NewObject(ctx);
+    JS_DefinePropertyValueStr(ctx, entry, "time", JS_NewFloat64(ctx, (double)platform_get_time_ms()), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, entry, "rootBounds", io_rect(ctx, l, t, r - l, b - t), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, entry, "boundingClientRect", io_rect(ctx, tb.x, tb.y, tb.width, tb.height), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, entry, "intersectionRect", io_rect(ctx, hit ? ix0 : 0, hit ? iy0 : 0, iw, ih), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, entry, "isIntersecting", JS_NewBool(ctx, hit), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, entry, "intersectionRatio", JS_NewFloat64(ctx, ratio), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, entry, "target", target, JS_PROP_C_W_E);
     return entry;
 }
 
