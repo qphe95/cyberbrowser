@@ -10,6 +10,7 @@
 #include "html_dom.h"
 #include "dom_store.h"
 #include "dom_js.h"
+#include "dom_parse.h"
 #include "http_download.h"
 #include "js_quickjs.h"
 #include "platform.h"
@@ -1268,10 +1269,20 @@ typedef struct ScriptQueue { QueuedScript *head, *tail; } ScriptQueue;
 struct HtmlPageStream {
     HtmlDocStream *doc;
     bool doc_ended;             /* parsing is over (deferred scripts may run) */
+    bool script_created;        /* opened by document.open(): writes append */
     int run, ok;                /* scripts run, and run without an exception */
     bool normalized;
+    int blocking_depth;         /* parser-blocking scripts on the stack */
+    int nonblocking_external;   /* async / defer external scripts running */
+    GCValue pending;            /* (rooted) an external script a write met: it
+                                 * runs after the script that wrote it */
     ScriptQueue async, defer;
 };
+
+/* The page being parsed, which document.write writes into. */
+static HtmlPageStream *g_page;
+/* A document.open()ed page that document.close() has not ended. */
+static HtmlPageStream *g_opened;
 
 static void queue_push(ScriptQueue *q, GCValue script, const char *url) {
     QueuedScript *e = (QueuedScript *)calloc(1, sizeof(*e));
@@ -1284,7 +1295,7 @@ static void queue_push(ScriptQueue *q, GCValue script, const char *url) {
     q->tail = e;
 }
 
-static void run_script(HtmlPageStream *ps, GCValue script) {
+static void run_script(HtmlPageStream *ps, GCValue script, bool nonblocking_external) {
     JSContextHandle ctx = g_js_context;
     if (!ps->normalized) {
         /* As before the whole-page run: polyfills read documentElement.style. */
@@ -1298,14 +1309,18 @@ static void run_script(HtmlPageStream *ps, GCValue script) {
     if (!src) return;
     GCValue doc = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document");
     JS_SetPropertyStr(ctx, doc, "currentScript", script);
-    if (js_quickjs_exec_script(src, len, ps->run, 0)) ps->ok++;
+    if (nonblocking_external) ps->nonblocking_external++;
+    if (js_quickjs_exec_script(src, len, ps->run, 0, ps->blocking_depth <= 1)) ps->ok++;
+    if (nonblocking_external) ps->nonblocking_external--;
     ps->run++;
     JS_SetPropertyStr(ctx, doc, "currentScript", JS_NULL);
     free(src);
 }
 
 static void run_blocking(HtmlPageStream *ps, GCValue script) {
-    run_script(ps, script);
+    ps->blocking_depth++;
+    run_script(ps, script, false);
+    ps->blocking_depth--;
 }
 
 /* Async scripts whose source is here run now (in the order they finish). */
@@ -1318,7 +1333,7 @@ static void run_ready_async(HtmlPageStream *ps, bool wait) {
             ps->async.tail = NULL;
             for (QueuedScript *t = ps->async.head; t; t = t->next) ps->async.tail = t;
         }
-        run_script(ps, e->script);
+        run_script(ps, e->script, e->url[0] != '\0');
         gc_value_root(e->script, false);
         free(e);
         pp = &ps->async.head;       /* (it may have queued or run others) */
@@ -1339,20 +1354,131 @@ static void dispatch_parser_script(HtmlPageStream *ps, GCValue script) {
 static void page_stream_run(HtmlPageStream *ps, bool final) {
     for (;;) {
         run_ready_async(ps, false);
+        if (JS_IsObject(ps->pending)) {
+            GCValue s = ps->pending;
+            ps->pending = JS_NULL;
+            run_blocking(ps, s);
+            gc_value_root(s, false);
+            continue;
+        }
         GCValue script = html_doc_stream_step(ps->doc, final);
         if (!JS_IsObject(script)) return;
         dispatch_parser_script(ps, script);
     }
 }
 
+/* document.write from a parser-blocking script: the markup goes in at the
+ * insertion point and is parsed now, up to that point (HTML §8.4.3); inline
+ * scripts in it run before write returns, an external one after the script
+ * that wrote it. */
+static void page_stream_write(HtmlPageStream *ps, const char *data, size_t len) {
+    DomStream *st = html_doc_stream_parser(ps->doc);
+    dom_stream_insert(st, data, len);
+    if (JS_IsObject(ps->pending)) return;   /* the parser waits for that script */
+    for (;;) {
+        size_t ip = dom_stream_insertion_point(st), len0 = 0, len1 = 0;
+        dom_stream_set_limit(st, ip);
+        GCValue script = html_doc_stream_step(ps->doc, false);
+        dom_stream_set_limit(st, 0);
+        if (!JS_IsObject(script)) { dom_stream_set_insertion_point(st, ip); return; }
+        char url[SCRIPT_URL_MAX_LEN];
+        int kind = classify_parser_script(dom_node_of(script), url, sizeof(url));
+        if (kind == PS_BLOCKING && url[0]) {
+            ps->pending = script;
+            gc_value_root(script, true);
+            dom_stream_set_insertion_point(st, ip);
+            return;
+        }
+        html_doc_stream_source(ps->doc, &len0);
+        if (kind == PS_BLOCKING) run_blocking(ps, script);
+        else if (kind != PS_SKIP) queue_push(kind == PS_ASYNC ? &ps->async : &ps->defer, script, url);
+        /* The writer's insertion point, past what that script wrote. */
+        html_doc_stream_source(ps->doc, &len1);
+        dom_stream_set_insertion_point(st, ip + (len1 - len0));
+    }
+}
+
+/* document.open(): the document is replaced by a page the script writes. */
+static HtmlPageStream *page_stream_open(void) {
+    HtmlPageStream *ps = html_page_stream_begin();
+    if (ps) ps->script_created = true;
+    return ps;
+}
+
+static GCValue js_document_write_common(JSContextHandle ctx, int argc, GCValue *argv, bool newline) {
+    StrBuf text SB_AUTO = sb_from("", 0);
+    for (int i = 0; i < argc; i++) {
+        size_t n = 0;
+        const char *s = JS_ToCStringLen(ctx, &n, argv[i]);
+        if (!s) return JS_EXCEPTION;
+        if (n) sb_insert(&text, text.len, s);   /* (the GC frees the string) */
+    }
+    if (newline) sb_insert(&text, text.len, "\n");
+    HtmlPageStream *ps = g_page;
+    if (ps && !ps->doc_ended && (ps->blocking_depth > 0 || ps->script_created) && !ps->nonblocking_external) {
+        if (ps->blocking_depth > 0) page_stream_write(ps, text.data, text.len);
+        else html_page_stream_feed(ps, text.data, text.len);
+        return JS_UNDEFINED;
+    }
+    if (ps) {
+        /* No insertion point (an async or deferred external script, a timer
+         * or event while the page loads): ignored, as browsers do, rather
+         * than replacing the document being loaded. */
+        platform_log(LOG_LEVEL_WARN, "dom", "document.write() with no insertion point was ignored");
+        return JS_UNDEFINED;
+    }
+    /* After the page has loaded: an implicit document.open(). */
+    if (!g_opened) g_opened = page_stream_open();
+    if (g_opened) html_page_stream_feed(g_opened, text.data, text.len);
+    return JS_UNDEFINED;
+}
+
+static GCValue js_document_write(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    return js_document_write_common(ctx, argc, argv, false);
+}
+
+static GCValue js_document_writeln(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    return js_document_write_common(ctx, argc, argv, true);
+}
+
+static GCValue js_document_open(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)ctx; (void)argc; (void)argv;
+    /* (While the page is parsed, or already opened, it is a no-op.) */
+    if (!g_page && !g_opened) g_opened = page_stream_open();
+    return this_val;
+}
+
+static GCValue js_document_close(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    if (g_opened && g_opened == g_page) {
+        HtmlPageStream *ps = g_opened;
+        g_opened = NULL;
+        html_page_stream_finish(ps, NULL);
+        JS_SetPropertyStr(ctx, this_val, "readyState", JS_NewString(ctx, "complete"));
+    }
+    return JS_UNDEFINED;
+}
+
+static void install_document_write(JSContextHandle ctx, GCValue doc) {
+    JS_SetPropertyStr(ctx, doc, "write", JS_NewCFunction(ctx, js_document_write, "write", 1));
+    JS_SetPropertyStr(ctx, doc, "writeln", JS_NewCFunction(ctx, js_document_writeln, "writeln", 1));
+    JS_SetPropertyStr(ctx, doc, "open", JS_NewCFunction(ctx, js_document_open, "open", 0));
+    JS_SetPropertyStr(ctx, doc, "close", JS_NewCFunction(ctx, js_document_close, "close", 0));
+}
+
 HtmlPageStream *html_page_stream_begin(void) {
-    if (!SAFE_VALID(g_js_context)) return NULL;
+    if (!SAFE_VALID(g_js_context) || g_page) return NULL;
     JSContextHandle ctx = g_js_context;
     GCValue doc = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document");
     HtmlPageStream *ps = (HtmlPageStream *)calloc(1, sizeof(*ps));
     if (!ps) return NULL;
+    ps->pending = JS_NULL;
     ps->doc = html_doc_stream_begin(ctx, doc);
     if (!ps->doc) { free(ps); return NULL; }
+    install_document_write(ctx, doc);
+    g_page = ps;
     return ps;
 }
 
@@ -1376,7 +1502,7 @@ bool html_page_stream_finish(HtmlPageStream *ps, JsExecResult *out_result) {
         QueuedScript *e = ps->defer.head;
         ps->defer.head = e->next;
         run_ready_async(ps, false);
-        run_script(ps, e->script);
+        run_script(ps, e->script, e->url[0] != '\0');
         gc_value_root(e->script, false);
         free(e);
     }
@@ -1390,6 +1516,7 @@ bool html_page_stream_finish(HtmlPageStream *ps, JsExecResult *out_result) {
         out_result->status = ps->ok > 0 ? JS_EXEC_SUCCESS : JS_EXEC_ERROR;
     }
     bool ok = ps->ok > 0;
+    if (g_page == ps) g_page = NULL;
     free(ps);
     return ok;
 }

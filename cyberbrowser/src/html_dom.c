@@ -535,6 +535,10 @@ GCValue html_doc_stream_step(HtmlDocStream *s, bool final) {
     return script ? dom_js(ctx, script) : JS_NULL;
 }
 
+DomStream *html_doc_stream_parser(HtmlDocStream *s) {
+    return s ? s->st : NULL;
+}
+
 const char *html_doc_stream_source(HtmlDocStream *s, size_t *len) {
     return s ? dom_stream_source(s->st, len) : NULL;
 }

@@ -821,6 +821,8 @@ struct DomStream {
     TokChunk cur;               /* tokens not built yet: [ci, cur.n) */
     size_t ci;
     bool have_cur;
+    size_t insert_pos;          /* document.write's insertion point */
+    size_t limit;               /* build no further than this (0: no limit) */
     Builder b;
 };
 
@@ -878,31 +880,43 @@ NodeId dom_stream_pump(DomStream *st, bool final) {
                 st->pos = detour;
                 continue;
             }
-            if (b->stopped_script) return dom_id_of(b->stopped_script);
+            if (b->stopped_script) {
+                /* What the script writes goes right after it. */
+                st->insert_pos = st->cur.toks[st->ci - 1].end;
+                return dom_id_of(b->stopped_script);
+            }
             continue;
         }
         if (st->have_cur) { chunk_free(&st->cur); st->have_cur = false; }
-        if (st->pos >= st->len) return DOM_NULL;
+        size_t end = st->limit && st->limit < st->len ? st->limit : st->len;
+        bool last = final && end == st->len;
+        if (st->pos >= end) return DOM_NULL;
         TokChunk *c = &st->cur;
         memset(c, 0, sizeof *c);
         c->html = st->buf;
-        c->len = c->full_len = st->len;
+        c->len = end;
+        c->full_len = st->len;
         c->start = st->pos;
-        c->limit = st->len;
+        c->limit = end;
         c->doc_start = st->pos == 0;
         tokenize(c, true);
         /* Only tokens that have wholly arrived: one reaching the end of the
          * input may be cut short (a text run, a tag, a script's content). */
         size_t keep = c->n;
-        if (!final) {
+        if (!last) {
+            /* Up to a limit (written input), a tag that ends right there is
+             * whole; at the end of what has arrived it may be cut short. */
             keep = 0;
-            while (keep < c->n && c->toks[keep].end < st->len) keep++;
+            while (keep < c->n && (c->toks[keep].end < end ||
+                                   (end < st->len && c->toks[keep].kind != TK_TEXT &&
+                                    c->toks[keep].end == end && st->buf[end - 1] == '>')))
+                keep++;
         }
-        size_t next = final ? c->end : keep ? c->toks[keep - 1].end : st->pos;
+        size_t next = last ? c->end : keep ? c->toks[keep - 1].end : st->pos;
         chunk_release_tokens(c, keep);
         if (!keep) {
             chunk_free(c);
-            if (final) st->pos = st->len;
+            if (last) st->pos = st->len;
             return DOM_NULL;
         }
         st->pos = next;
@@ -910,6 +924,36 @@ NodeId dom_stream_pump(DomStream *st, bool final) {
         st->ci = 0;
     }
 }
+
+void dom_stream_insert(DomStream *st, const char *data, size_t n) {
+    if (!st || !n) return;
+    size_t at = st->insert_pos <= st->len ? st->insert_pos : st->len;
+    /* Tokens read past the insertion point are read again after the
+     * inserted input. */
+    if (st->have_cur) {
+        if (st->ci < st->cur.n && st->cur.toks[st->ci].src < st->pos) st->pos = st->cur.toks[st->ci].src;
+        chunk_free(&st->cur);
+        st->have_cur = false;
+    }
+    if (st->pos > at) st->pos = at;
+    if (st->len + n + 1 > st->cap) {
+        size_t cap = st->cap ? st->cap : 65536;
+        while (st->len + n + 1 > cap) cap *= 2;
+        char *nb = realloc(st->buf, cap);
+        if (!nb) return;
+        st->buf = nb;
+        st->cap = cap;
+    }
+    memmove(st->buf + at + n, st->buf + at, st->len - at + 1);
+    memcpy(st->buf + at, data, n);
+    st->len += n;
+    if (st->limit >= at && st->limit) st->limit += n;
+    st->insert_pos = at + n;
+}
+
+size_t dom_stream_insertion_point(DomStream *st) { return st ? st->insert_pos : 0; }
+void dom_stream_set_insertion_point(DomStream *st, size_t pos) { if (st) st->insert_pos = pos; }
+void dom_stream_set_limit(DomStream *st, size_t limit) { if (st) st->limit = limit; }
 
 const uint32_t *dom_stream_new_roots(DomStream *st, uint32_t *n) {
     *n = st ? st->b.nroots : 0;

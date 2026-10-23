@@ -140,6 +140,8 @@ void html_doc_stream_append(HtmlDocStream *s, const char *data, size_t len);
 GCValue html_doc_stream_step(HtmlDocStream *s, bool final);
 const char *html_doc_stream_source(HtmlDocStream *s, size_t *len);
 void html_doc_stream_end(HtmlDocStream *s);
+/* The underlying parser stream (document.write's insertion point). */
+struct DomStream *html_doc_stream_parser(HtmlDocStream *s);
 
 /* Create a single HTML element in QuickJS */
 GCValue html_create_element_js(JSContextHandle ctx, const char *tag_name, HtmlAttribute *attrs);

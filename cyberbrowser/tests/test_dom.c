@@ -23,6 +23,7 @@
 #include "css_style.h"
 #include "browser/layout_api.h"
 #include "legacy_html_parse.h"
+#include "html_media_extract.h"
 
 extern JSContextHandle get_shared_test_context(void);
 
@@ -1299,6 +1300,110 @@ TEST(test_dom_link_reflects_href_and_rel) {
     return true;
 }
 
+/* ============================================================================
+ * Streamed page (HTML's parsing model)
+ * ============================================================================ */
+
+extern NodeId g_dom_index_root;
+
+static bool stream_fetch(const char *url, HttpBuffer *out, char *err, size_t err_len) {
+    (void)err; (void)err_len;
+    const char *body = NULL;
+    if (strstr(url, "defer.js")) body = "L('defer:'+document.readyState+':'+!!document.getElementById('b'))";
+    else if (strstr(url, "async.js")) body = "L('async');document.write('<p id=\"bad\">x</p>')";
+    else if (strstr(url, "block.js")) body = "L('block:'+!!document.getElementById('b'))";
+    else if (strstr(url, "written.js")) body = "L('written-ext')";
+    if (!body) return false;
+    out->size = strlen(body);
+    out->data = malloc(out->size + 1);
+    memcpy(out->data, body, out->size + 1);
+    return true;
+}
+
+static const char k_stream_page[] =
+    "\n  <!DOCTYPE html>\n<html><head>\n"
+    "<script>var __sl=[];function L(m){__sl.push(m)}L('ready:'+document.readyState);</script>\n"
+    "<script>var __smo=new MutationObserver(function(rs){rs.forEach(function(r){for(var i=0;i<r.addedNodes.length;i++)"
+    "{var n=r.addedNodes[i];if(n.id)L('mo:'+n.id)}})});__smo.observe(document,{childList:true,subtree:true});</script>\n"
+    "<script src=\"https://stream.test/defer.js\" defer></script>\n"
+    "<script src=\"https://stream.test/async.js\" async></script>\n"
+    "<script>L('short')</script>\n"
+    "</head><body>\n<div id=\"a\">a</div>\n"
+    "<script>L('seesA:'+!!document.getElementById('a')+' seesB:'+!!document.getElementById('b'));"
+    "document.write('<p id=\"w\">written</p><script>L(\"inner:\"+!!document.getElementById(\"w\"))<\\/script>"
+    "<script src=\"https://stream.test/written.js\"><\\/script>');"
+    "L('afterwrite:'+!!document.getElementById('w'));</script>\n"
+    "<div id=\"b\">b</div>\n"
+    "<script src=\"https://stream.test/block.js\"></script>\n"
+    "<script>L('end')</script>\n"
+    "<!x-bogus>\n</body></html>\n";
+
+/* The page fed in pieces of `piece` bytes (0: at once).  Returns the log,
+ * async's entry (which may come at any point) left out. */
+static char *stream_page_log(JSContextHandle ctx, size_t piece) {
+    GCValue doc = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document");
+    GCValue old_de = JS_GetPropertyStr(ctx, doc, "documentElement");
+    GCValue old_head = JS_GetPropertyStr(ctx, doc, "head");
+    GCValue old_body = JS_GetPropertyStr(ctx, doc, "body");
+    dom_fetch_reset();
+    dom_fetch_set_fetcher(stream_fetch);
+    HtmlPageStream *ps = html_page_stream_begin();
+    if (!ps) return NULL;
+    size_t len = strlen(k_stream_page);
+    for (size_t at = 0; at < len; ) {
+        size_t n = piece && len - at > piece ? piece : len - at;
+        html_page_stream_feed(ps, k_stream_page + at, n);
+        at += n;
+    }
+    html_page_stream_finish(ps, NULL);
+    const char *q = "(function(){__smo.disconnect();var a=__sl.filter(function(x){return x!=='async'});"
+                    "return a.join('|')+' #async='+(__sl.length-a.length)"
+                    "+' bad='+!!document.getElementById('bad')"
+                    "+' decl='+document.getElementsByTagName('!doctype').length+document.getElementsByTagName('!x-bogus').length"
+                    "+' root='+document.documentElement.tagName})()";
+    GCValue r = JS_Eval(ctx, q, strlen(q), "<test_dom>", JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(r)) r = JS_GetException(ctx);
+    const char *s = JS_ToCString(ctx, r);
+    char *out = strdup(s ? s : "?");
+    /* The shared document gets its own root back. */
+    NodeId d = dom_node_of(doc), de = dom_node_of(JS_GetPropertyStr(ctx, doc, "documentElement"));
+    if (de && dom_parent(de) == d) dom_detach(de, true);
+    dom_attach(d, dom_node_of(old_de), DOM_NULL);
+    JS_SetPropertyStr(ctx, doc, "documentElement", old_de);
+    JS_SetPropertyStr(ctx, doc, "head", old_head);
+    JS_SetPropertyStr(ctx, doc, "body", old_body);
+    JS_SetPropertyStr(ctx, doc, "readyState", JS_NewString(ctx, "complete"));
+    g_dom_index_root = dom_node_of(old_de);
+    dom_fetch_reset();
+    dom_fetch_set_fetcher(NULL);
+    return out;
+}
+
+/* Scripts run where the parser reaches them, against what is parsed so far;
+ * document.write inserts at the insertion point (its inline scripts run
+ * inside write, its external ones after the writer); async scripts run when
+ * downloaded and cannot write; deferred ones run once parsing is done, in
+ * "interactive"; parser insertions are MutationObserver records; markup
+ * declarations are dropped.  The same however the input is cut. */
+TEST(test_dom_streamed_page_runs_scripts_in_place) {
+    JSContextHandle ctx = get_shared_test_context();
+    ASSERT_TRUE(SAFE_VALID(ctx));
+    const char *want =
+        "ready:loading|short|seesA:true seesB:false|inner:true|afterwrite:true|mo:a|mo:w"
+        "|written-ext|block:true|mo:b|end|defer:interactive:true"
+        " #async=1 bad=false decl=00 root=HTML";
+    static const size_t pieces[] = { 0, 7, 1 };
+    for (size_t i = 0; i < sizeof pieces / sizeof pieces[0]; i++) {
+        char *got = stream_page_log(ctx, pieces[i]);
+        ASSERT_TRUE(got != NULL);
+        bool ok = strcmp(got, want) == 0;
+        if (!ok) printf("    pieces of %zu:\n    got:  %s\n    want: %s\n", pieces[i], got, want);
+        free(got);
+        ASSERT_TRUE(ok);
+    }
+    return true;
+}
+
 void run_dom_tests(void) {
     printf("\n--- Node store DOM Tests ---\n");
     RUN_TEST(test_dom_parse_matches_legacy_fixtures);
@@ -1318,6 +1423,7 @@ void run_dom_tests(void) {
     RUN_TEST(test_dom_index_tracks_mutations);
     RUN_TEST(test_dom_index_large_document);
     RUN_TEST(test_dom_fetch_pool_overlaps_in_order);
+    RUN_TEST(test_dom_streamed_page_runs_scripts_in_place);
     RUN_TEST(test_dom_render_snapshot_reuse);
     RUN_TEST(test_dom_render_snapshot_incremental);
     RUN_TEST(test_dom_style_assignment_forwards_to_css_text);

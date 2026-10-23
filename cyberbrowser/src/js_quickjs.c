@@ -3040,7 +3040,7 @@ static int js_exec_timeout_handler(JSRuntimeHandle rt, void *opaque) {
 /* Run one page script (classic, global): the timeout, the profile entry and
  * the timers and jobs it leaves due, as for every script of a page.  `i` and
  * `script_count` name it in logs.  Returns whether it completed. */
-bool js_quickjs_exec_script(const char *script, size_t script_len, int i, int script_count) {
+bool js_quickjs_exec_script(const char *script, size_t script_len, int i, int script_count, bool pump) {
     JSContextHandle ctx = g_js_context;
     bool ok = false;
     const size_t MAX_EXEC_SCRIPT_SIZE = 64 * 1024 * 1024; /* 64 MiB safety limit */
@@ -3141,7 +3141,7 @@ bool js_quickjs_exec_script(const char *script, size_t script_len, int i, int sc
 
     // Drain both timers and pending Promise jobs after each script so that
     // fetch()/XHR .then() chains and player bootstrap callbacks run.
-    {
+    if (pump) {
         CP_SCOPE("pump-after-script");
         js_quickjs_pump_timers_and_jobs();
     }
@@ -3253,7 +3253,7 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
     fflush(stderr);
 
     for (int i = 0; i < script_count; i++) {
-        if (js_quickjs_exec_script(scripts[i], script_lens[i], i, script_count)) success_count++;
+        if (js_quickjs_exec_script(scripts[i], script_lens[i], i, script_count, true)) success_count++;
     }
 
     js_quickjs_pump_timers_and_jobs();

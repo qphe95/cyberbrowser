@@ -67,6 +67,14 @@ NodeId dom_stream_pump(DomStream *st, bool final);
 const uint32_t *dom_stream_new_roots(DomStream *st, uint32_t *n);
 const char *dom_stream_source(DomStream *st, size_t *len);
 void dom_stream_end(DomStream *st);
+/* document.write: `insert` puts input at the insertion point (right after the
+ * script pump last returned, then after what was inserted there) and moves
+ * the point past it.  A pump with a limit builds no further than it (the
+ * written input, before the rest of the page). */
+void dom_stream_insert(DomStream *st, const char *data, size_t len);
+size_t dom_stream_insertion_point(DomStream *st);
+void dom_stream_set_insertion_point(DomStream *st, size_t pos);
+void dom_stream_set_limit(DomStream *st, size_t limit);
 
 /* Head / body / root of a parsed fragment, as html_parse() reports them. */
 typedef struct DomParseRoots { NodeId root, head, body; } DomParseRoots;
