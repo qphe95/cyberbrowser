@@ -2073,6 +2073,11 @@ static int mir_map_get(NodeId id) {
     return -1;
 }
 
+int html_mirror_index_of(const HtmlDocument *doc, uint32_t id) {
+    if (!doc || doc != g_mir.doc || !g_mir.valid) return -1;
+    return mir_map_get(id);
+}
+
 static void mir_map_clear(MirrorMap *m) {
     if (m->keys) memset(m->keys, 0, m->cap * sizeof(NodeId));
     m->n = 0;

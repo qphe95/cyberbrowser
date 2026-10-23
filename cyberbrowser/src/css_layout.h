@@ -455,11 +455,17 @@ typedef struct LayoutContext {
     int pruned_n;
     bool prune_failed;
     uint64_t prune_has_gen;
+    /* The style cache pass this layout stored (0: none): while it is the
+     * last, the cache holds this layout's styles (css_layout_style_unchanged). */
+    uint64_t style_pass;
 
     /* Style and lay out on the calling thread (input, kept by css_layout_run):
      * for layouts run often with little to do, which waking the pool costs
      * more than it saves. */
     bool serial;
+    /* Read the style cache but leave it as it is (input, kept by
+     * css_layout_run): layouts that check another one. */
+    bool cache_readonly;
 
     /* Preorder position of the first element a :has() rule whose compound
      * names nothing restyles when any ancestor's :has() flips (":has(x)
@@ -506,6 +512,11 @@ bool css_layout_uses_last_of(const LayoutContext *ctx);
  *     (a change can restyle earlier siblings of it and of its ancestors).
  * Which elements a :has() rule may restyle is in LayoutContext.has_flags
  * and has_target_first. */
+/* Would the element at layout index `idx` of the kept layout `ctx`, as the
+ * document now is (its node at `dom_now` in ctx->doc), compute the style it
+ * had in `ctx`?  Its cascade alone runs (on demand); false when not known
+ * (a style pass ran since, or its parent changed). */
+bool css_layout_style_unchanged(LayoutContext *ctx, int idx, int dom_now);
 bool css_layout_has_any(const LayoutContext *ctx);
 bool css_layout_has_sibling_relative(const LayoutContext *ctx);
 /* How far replacing inline style `a` by `b` on an element can reach:

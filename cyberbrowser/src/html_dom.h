@@ -218,6 +218,10 @@ uint64_t html_mirror_change_seq(void);
  * not the mirror document): treat the document as changed everywhere. */
 bool html_mirror_changes(const HtmlDocument *doc, uint64_t since, const HtmlMirrorChange **out, size_t *n);
 
+/* Index of store node `id` in the mirror document `doc`, or -1 (not in it,
+ * or `doc` is not the mirror's). */
+int html_mirror_index_of(const HtmlDocument *doc, uint32_t id);
+
 int html_mirror_check(JSContextHandle ctx, GCValue js_doc);
 
 /* Bytes and elements incremental snapshots copied (tests, benchmarks). */

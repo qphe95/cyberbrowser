@@ -3889,6 +3889,7 @@ typedef struct StyleCache {
     int index_cap;
     FrameArena arena;           /* custom-property maps of cached entries */
     FrameArena retired;         /* the previous arena, kept one generation */
+    uint64_t passes;            /* style passes stored (LayoutContext.style_pass) */
 } StyleCache;
 
 static StyleCache g_sc;
@@ -6045,6 +6046,7 @@ unsigned css_layout_restyle_matched_same(void) { return g_restyle_matched_same; 
 static void style_cache_store(StylePass *P, uint64_t global, const StyleGenAfter *gen, int gen_total)
 {
     LayoutContext *ctx = P->ctx;
+    P->ctx->style_pass = ++g_sc.passes;
     int n = ctx->tree.count;
     bool keep = g_sc.global == global && g_sc.arena.bytes < ((size_t)32 << 20);
     if (!keep) {
@@ -6862,6 +6864,84 @@ static void style_root_job(Job *j)
     }
 }
 
+static const CssStyleSet *styleset_cached(uint64_t gen, double vw, double vh);
+
+/* ---- One element restyled on demand ----
+ *
+ * Would the element at layout index `idx` of the kept layout `ctx`, as the
+ * document now is (its node at `dom_now` there), compute the style it had
+ * then?  Its cascade runs against the current document with its parent's
+ * style as cached, and the result is compared with its own cache entry,
+ * which is its style in `ctx` while no style pass has run since
+ * (ctx->style_pass).  False when not known. */
+bool css_layout_style_unchanged(LayoutContext *ctx, int idx, int dom_now)
+{
+    if (!ctx || !ctx->style_pass || ctx->style_pass != g_sc.passes || !g_sc.global || idx < 0 ||
+        idx >= ctx->tree.count || !ctx->doc)
+        return false;
+    HtmlNode *hn = (HtmlNode *)po_array_payload(&ctx->doc->array, dom_now);
+    if (!hn || hn->type != HTML_NODE_ELEMENT || !hn->store_id) return false;
+    const StyleCacheEntry *ce = style_cache_find(hn->store_id);
+    if (!ce || ce->stale) return false;
+    int p = ctx->tree.nodes[idx].parent_idx;
+    const StyleCacheEntry *pe = NULL;
+    if (p >= 0) {
+        /* The same parent as then, styled as cached. */
+        int pd = po_array_parent(&ctx->doc->array, dom_now);
+        HtmlNode *pn = pd >= 0 ? (HtmlNode *)po_array_payload(&ctx->doc->array, pd) : NULL;
+        HtmlNode *was = layout_node_dom(ctx, ctx->tree.nodes[p].dom_node_idx);
+        if (!pn || !pn->store_id || !was || was->store_id != pn->store_id) return false;
+        pe = style_cache_find(pn->store_id);
+        if (!pe || pe->stale) return false;
+    }
+    const CssStyleSet *set = styleset_cached(ctx->style_gen, ctx->viewport_width, ctx->viewport_height);
+    if (!set) return false;
+
+    StylePass P;
+    memset(&P, 0, sizeof(P));
+    P.ctx = ctx;
+    P.set = set;
+    P.sd = css_styledoc_get(ctx->doc);
+    P.em_defer = cyber_getenv("CYBER_DISABLE_EM_DEFER") == NULL;
+    P.cls = (int *)calloc((size_t)ctx->tree.count + 1, sizeof(int));
+    P.threads = (StyleThread *)calloc(1, sizeof(StyleThread));
+    if (!P.sd || !P.cls || !P.threads) { free(P.cls); free(P.threads); return false; }
+    for (int i = 0; i < ctx->tree.count; i++) P.cls[i] = i;
+    /* Styled into the kept layout's slots, then put back. */
+    LayoutBox *box = &ctx->boxes[idx];
+    LayoutBox kept = *box, parent_kept;
+    const CssCustomProps *kept_props = ctx->custom_props[idx], *parent_props = NULL;
+    int kept_dom = ctx->tree.nodes[idx].dom_node_idx;
+    if (p >= 0) {
+        parent_kept = ctx->boxes[p];
+        parent_props = ctx->custom_props[p];
+        ctx->boxes[p] = pe->box;
+        ctx->custom_props[p] = pe->props;
+    }
+    ctx->tree.nodes[idx].dom_node_idx = dom_now;
+    double rem = g_unit_rem;
+    StyleThread *T = style_thread(&P);
+    style_node(&P, T, 0, idx);
+    bool after = T->gen_n > 0;
+    bool same = memcmp(box, &ce->box, sizeof(*box)) == 0 && style_props_equal(ctx->custom_props[idx], ce->props) &&
+                after == (ce->has_after != 0) &&
+                (!after || strncmp(T->gen[0].text, ce->after, sizeof(ce->after)) == 0);
+    g_unit_rem = rem;
+    ctx->tree.nodes[idx].dom_node_idx = kept_dom;
+    *box = kept;
+    ctx->custom_props[idx] = kept_props;
+    if (p >= 0) {
+        ctx->boxes[p] = parent_kept;
+        ctx->custom_props[p] = parent_props;
+    }
+    free(T->gen);
+    if (T->scratch) css_style_scratch_free(T->scratch);
+    frame_arena_reset(&T->arena);
+    free(P.threads);
+    free(P.cls);
+    return same;
+}
+
 static int style_gen_cmp(const void *a, const void *b)
 {
     return ((const StyleGenAfter *)a)->pos - ((const StyleGenAfter *)b)->pos;
@@ -7153,7 +7233,7 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
     /* The cache keeps the boxes as the cascade left them (before generated
      * content and blockification below). */
     if (P.inc && P.entry_key) {
-        style_cache_store(&P, sc_global, gen, gen_total);
+        if (!ctx->cache_readonly) style_cache_store(&P, sc_global, gen, gen_total);
         g_restyle_reused = atomic_load(&P.reused);
         g_restyle_recomputed = atomic_load(&P.recomputed);
         g_restyle_matched_same = atomic_load(&P.matched_same);
@@ -10501,7 +10581,7 @@ bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
     double _run_t0 = layout_now_ms();
     JSContextHandle saved_js_ctx = ctx->js_ctx;
     const char *saved_dump_path = ctx->dump_path;
-    bool saved_style_all = ctx->style_all, saved_serial = ctx->serial;
+    bool saved_style_all = ctx->style_all, saved_serial = ctx->serial, saved_readonly = ctx->cache_readonly;
     /* CSS_PRUNE=0: build trees in full. */
     static int prune_env = -1;
     if (prune_env < 0) { const char *e = getenv("CSS_PRUNE"); prune_env = !(e && strcmp(e, "0") == 0); }
@@ -10512,6 +10592,7 @@ again:
     ctx->dump_path = saved_dump_path;
     ctx->style_all = saved_style_all;
     ctx->serial = saved_serial;
+    ctx->cache_readonly = saved_readonly;
     ctx->viewport_width = viewport_width;
     ctx->viewport_height = viewport_height;
     g_unit_vw = viewport_width > 0.0 ? viewport_width : 1024.0;

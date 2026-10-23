@@ -37,6 +37,8 @@ uint64_t layout_api_region_layouts(void);
 void layout_api_stats(uint64_t *queries, uint64_t *layouts, uint64_t *layout_ms);
 /* The calling thread's CPU time in forced layouts (layout_ms is wall time). */
 uint64_t layout_api_cpu_ms(void);
+/* Anchors whose own style a query restyled on demand and found as before. */
+uint64_t layout_api_ondemand_kept(void);
 /* Queries answered from the cached layout without re-serializing. */
 uint64_t layout_api_cheap_hits(void);
 /* Layouts that styled display:none subtrees too, for a computed-style query

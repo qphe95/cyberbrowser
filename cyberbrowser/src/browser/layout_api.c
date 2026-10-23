@@ -89,6 +89,10 @@ static bool g_lq_anchor_has[LQ_ANCHOR_MAX];
  * attribute change, its later siblings may restyle. */
 static bool g_lq_anchor_kept[LQ_ANCHOR_MAX];
 static bool g_lq_anchor_sib[LQ_ANCHOR_MAX];
+/* Per anchor: its own style was restyled on demand (lq_anchor_style_kept);
+ * queries that found it as before. */
+static bool g_lq_anchor_tried[LQ_ANCHOR_MAX];
+static uint64_t g_lq_ondemand_kept;
 static int g_lq_nanchor;
 /* Per layout index: preorder position and one past its subtree's last. */
 static int *g_lq_pos, *g_lq_end;
@@ -570,6 +574,7 @@ static bool lq_anchor_add(int a, int bound, bool has, bool kept, bool sib)
                 g_lq_anchor_has[i] = h;
                 g_lq_anchor_kept[i] = k;
                 g_lq_anchor_sib[i] = s;
+                g_lq_anchor_tried[i] = false;
                 g_lq_anchor_ver++;
             }
             return true;
@@ -584,6 +589,7 @@ static bool lq_anchor_add(int a, int bound, bool has, bool kept, bool sib)
         g_lq_anchor_bound[w] = g_lq_anchor_bound[i];
         g_lq_anchor_has[w] = g_lq_anchor_has[i];
         g_lq_anchor_kept[w] = g_lq_anchor_kept[i];
+        g_lq_anchor_tried[w] = g_lq_anchor_tried[i];
         g_lq_anchor_sib[w++] = g_lq_anchor_sib[i];
     }
     g_lq_nanchor = w;
@@ -592,6 +598,7 @@ static bool lq_anchor_add(int a, int bound, bool has, bool kept, bool sib)
     g_lq_anchor_bound[g_lq_nanchor] = bound;
     g_lq_anchor_has[g_lq_nanchor] = has;
     g_lq_anchor_kept[g_lq_nanchor] = kept;
+    g_lq_anchor_tried[g_lq_nanchor] = false;
     g_lq_anchor_sib[g_lq_nanchor++] = sib;
     g_lq_anchor_ver++;
     return true;
@@ -840,10 +847,13 @@ static bool lq_has_free(int qi, int top, int sq, int sc)
     return true;
 }
 
-/* Query box qi wholly before the anchor ci, inside `bound`; `restyles`: the
- * anchor's own style (or its later siblings') may change. */
-static bool lq_before_independent(int qi, int ci, int bound, bool has, bool restyles)
+static bool lq_anchor_style_kept(int i);
+
+/* Query box qi wholly before anchor i, inside `bound`. */
+static bool lq_before_independent(int qi, int i, int bound)
 {
+    int ci = g_lq_anchor[i];
+    bool has = g_lq_anchor_has[i];
     int L = lq_parent(qi);
     while (L >= 0 && !lq_anchor_is_ancestor_or_self(L, ci)) L = lq_parent(L);
     if (L < 0) LQ_NO("no common ancestor");
@@ -856,7 +866,8 @@ static bool lq_before_independent(int qi, int ci, int bound, bool has, bool rest
     /* L places sq as before.  An anchor that is a flex item may change its
      * own basis when restyled (and restyle the items after it). */
     const LayoutBox *Lb = lq_box(L);
-    if (Lb->display == CSS_DISPLAY_FLEX && sc == ci && restyles) LQ_NO("restyled flex item");
+    if (Lb->display == CSS_DISPLAY_FLEX && sc == ci && (g_lq_anchor_sib[i] || !lq_anchor_style_kept(i)))
+        LQ_NO("restyled flex item");
     if (!lq_place_free(L, sq, false)) return false;
     const LayoutBox *Sq = lq_box(sq);
     bool sq_grows = false;                                  /* stretched to a line that may grow */
@@ -897,6 +908,26 @@ static bool lq_contains_independent(int qi, int ci, int bound, bool has)
     return lq_chain_free(qi, bound);
 }
 
+/* Does anchor i's own style hold: noted with its changes, or, restyled on
+ * demand, its element computes the style it had in the cached layout (its
+ * changes then restyle only what is below or after it)?  The answer stands
+ * until another change to it merges in (lq_anchor_add).  CYBER_LQ_ONDEMAND=0:
+ * not restyled. */
+static bool lq_anchor_style_kept(int i)
+{
+    static int env = -1;
+    if (env < 0) { const char *e = cyber_getenv("CYBER_LQ_ONDEMAND"); env = !(e && e[0] == '0'); }
+    if (g_lq_anchor_kept[i]) return true;
+    if (g_lq_anchor_tried[i] || !env) return false;
+    g_lq_anchor_tried[i] = true;
+    int ci = g_lq_anchor[i];
+    int dom = html_mirror_index_of(g_lq_doc, g_lq_ids[ci]);
+    if (dom < 0 || !css_layout_style_unchanged(&g_lq_layout, ci, dom)) return false;
+    g_lq_anchor_kept[i] = true;
+    g_lq_ondemand_kept++;   /* (answers given before stay right, only cautious) */
+    return true;
+}
+
 /* Can query box qi keep its geometry through the change at anchor i? */
 static bool lq_anchor_independent(int qi, int i)
 {
@@ -906,10 +937,9 @@ static bool lq_anchor_independent(int qi, int i)
         if (g_lq_ask == LQ_ASK_EXTENT && lq_anchor_is_ancestor_or_self(qi, bound)) LQ_NO("extent holds the region");
         return true;
     }
-    if (g_lq_end[qi] <= g_lq_pos[ci])
-        return lq_before_independent(qi, ci, bound, g_lq_anchor_has[i], !g_lq_anchor_kept[i] || g_lq_anchor_sib[i]);
+    if (g_lq_end[qi] <= g_lq_pos[ci]) return lq_before_independent(qi, i, bound);
     if (qi != ci && lq_anchor_is_ancestor_or_self(qi, ci)) return lq_contains_independent(qi, ci, bound, g_lq_anchor_has[i]);
-    if (qi == ci && g_lq_anchor_kept[i]) {
+    if (qi == ci && lq_anchor_style_kept(i)) {
         /* Its own style holds: as for a change inside it, but an attribute
          * may restyle its later siblings, which a flex container sizes it by. */
         int p = lq_parent(qi);
@@ -1047,6 +1077,7 @@ static void lq_verify_kept(HtmlDocument *doc, double vw, double vh)
     LayoutContext fresh;
     memset(&fresh, 0, sizeof(fresh));
     fresh.js_ctx = g_lq_layout.js_ctx;
+    fresh.cache_readonly = true;   /* (the kept layout's styles stay cached) */
     bool was = g_lq_running;
     g_lq_running = true;
     bool ok = css_layout_run(&fresh, doc, NULL, vw, vh);
@@ -1103,6 +1134,7 @@ static void lq_verify_asked(HtmlDocument *doc, double vw, double vh)
     LayoutContext fresh;
     memset(&fresh, 0, sizeof(fresh));
     fresh.js_ctx = g_lq_layout.js_ctx;
+    fresh.cache_readonly = true;   /* (the kept layout's styles stay cached) */
     bool was = g_lq_running;
     g_lq_running = true;
     bool ok = css_layout_run(&fresh, doc, NULL, vw, vh);
@@ -1570,4 +1602,9 @@ uint64_t layout_api_style_all_layouts(void)
 uint64_t layout_api_cpu_ms(void)
 {
     return g_lq_layout_cpu_us / 1000;
+}
+
+uint64_t layout_api_ondemand_kept(void)
+{
+    return g_lq_ondemand_kept;
 }

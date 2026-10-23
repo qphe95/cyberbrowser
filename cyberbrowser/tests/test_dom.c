@@ -831,17 +831,20 @@ TEST(test_dom_layout_kept_across_changes_it_cannot_see) {
  * a flex item with a set basis, or inside a box its content cannot resize
  * keeps the layout for it; a change to a sibling sized by its content, below
  * a box sized by its content, or (through :has()) to an ancestor's or an
- * earlier sibling's style does not.  Each answer is a new layout's. */
+ * earlier sibling's style does not, nor does an element's own restyle unless
+ * (restyled on demand) its style comes out as before.  Each answer is a new
+ * layout's. */
 TEST(test_dom_layout_kept_for_queries_a_change_cannot_reach) {
     JSContextHandle ctx = get_shared_test_context();
     if (!dom_ready(ctx)) { printf("    (skipped - no document)\n"); return true; }
     ASSERT_EQ(1, js_int(ctx,
         "(function(){var d=document, s=d.createElement('style');"
         "s.textContent='.kq-hq:has(.kq-on){width:120px} .kq-sq:has(+ .kq-on){height:33px}"
-        " .kq-hid{display:none} .kq-big{font-size:30px}';"
+        " .kq-hid{display:none} .kq-big{font-size:30px} .kq-od.kq-od2{width:300px}';"
         "d.head.appendChild(s);"
         "var r=d.createElement('div'); r.style.width='500px';"
         "r.innerHTML='<div class=kq-hid id=kq-hp><span id=kq-hs>t</span></div>'"
+        " + '<div id=kq-od style=\"height: 10px\"></div>'"
         " + '<div id=kq-q style=\"height: 20px\">q</div>'"
         " + '<div id=kq-f style=\"display: flex\"><div id=kq-fa style=\"flex: 0 0 100px; min-width: 0; height: 10px\"></div>'"
         " + '<div id=kq-fb style=\"flex: 0 0 100px; min-width: 0; height: 10px\"></div></div>'"
@@ -850,11 +853,10 @@ TEST(test_dom_layout_kept_for_queries_a_change_cannot_reach) {
         " + '<div id=kq-after style=\"height: 5px\"></div>'"
         " + '<div class=kq-hq id=kq-hq><span id=kq-hc>h</span></div>'"
         " + '<div class=kq-sq id=kq-sq1></div><div id=kq-sq2></div>'"
-        " + '<div class=kq-hid id=kq-hp><span id=kq-hs>t</span></div>'"
         " + '<div id=kq-tail></div>';"
         "d.body.appendChild(r);"
         "var e=function(i){return d.getElementById(i);}, k={r:r, s:s};"
-        "['q','f','fa','fb','g','ga','gb','box','bs','after','hq','hc','sq1','sq2','hp','hs','tail']"
+        "['q','f','fa','fb','g','ga','gb','box','bs','after','hq','hc','sq1','sq2','hp','hs','od','tail']"
         ".forEach(function(i){k[i]=e('kq-'+i);});"
         "k.qt=k.q.offsetTop; k.fal=k.fa.offsetLeft; k.aft=k.after.offsetTop; k.hqw=k.hq.offsetWidth;"
         "globalThis.__kq=k; return k.q.offsetWidth===500 && k.fa.offsetWidth===100 ? 1 : 0;})()"));
@@ -880,6 +882,10 @@ TEST(test_dom_layout_kept_for_queries_a_change_cannot_reach) {
         /* Left unstyled while hidden, styled when shown. */
         { "__kq.hs.className='kq-big'; return __kq.q.offsetWidth===500 && __kq.hs.offsetWidth===0", 0 },
         { "__kq.hp.className=''; return __kq.hs.offsetHeight>=30", 1 },
+        /* A class a layout rule names, the rule not matching: restyled on
+         * demand, the element's own style holds. */
+        { "__kq.od.className='kq-od'; return __kq.od.offsetHeight===10 && __kq.od.offsetWidth===500", 0 },
+        { "__kq.od.className='kq-od kq-od2'; return __kq.od.offsetWidth===300", 1 },
     };
     for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
         char js[640];
