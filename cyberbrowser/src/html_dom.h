@@ -61,6 +61,11 @@ struct HtmlNode {
     uint32_t store_id;                       /* NodeId in the node store (0 = none) */
     uint32_t attr_gen;                       /* doc->attr_gen when its attribute list last changed */
     uint64_t attr_hash;                      /* tag + attributes hash for restyle keys (0 = not computed) */
+    /* Restyle :has() checks of this element's tag and attributes against
+     * the style set's key sets (css_layout.c): valid while has_memo_stamp
+     * matches its attr_hash and the key sets' generation; -1 = not known. */
+    uint64_t has_memo_stamp;
+    int8_t has_memo[3];
 };
 
 struct HtmlArenaBlock;

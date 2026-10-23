@@ -3829,10 +3829,22 @@ static const StyleCacheEntry *style_cache_find(NodeId id)
     }
 }
 
+/* Mix n bytes into hash h, a word at a time (restyle keys hash a few
+ * hundred thousand words per forced layout; a multiply per byte showed
+ * up in profiles).  Only a key within this process: not stable across
+ * builds. */
 static uint64_t style_mix(uint64_t h, const void *p, size_t n)
 {
     const unsigned char *s = (const unsigned char *)p;
-    for (size_t i = 0; i < n; i++) { h ^= s[i]; h *= 1099511628211ull; }
+    while (n >= 8) {
+        uint64_t w;
+        memcpy(&w, s, 8);
+        h ^= w * 0x9E3779B97F4A7C15ull;
+        h = ((h << 27) | (h >> 37)) * 0xBF58476D1CE4E5B9ull;
+        s += 8;
+        n -= 8;
+    }
+    for (; n; n--, s++) { h ^= *s; h *= 1099511628211ull; }
     return h;
 }
 
@@ -3874,6 +3886,7 @@ typedef struct HasReqList {
 } HasReqList;
 
 typedef struct HasSubjects {
+    uint64_t gen;               /* style set generation the key sets describe */
     bool any;                   /* some rule uses :has() */
     bool universal, universal_deep;
     bool sibling_relative;
@@ -4260,18 +4273,42 @@ static int has_match_keys(const HasKeySet *ks, const HtmlNode *hn)
 
 /* Could layout node `idx` be the subject of some :has() rule? 0: no, 1: yes,
  * 2: yes, and descendants' matching depends on it. */
+/* The :has() checks of an element's own features (0: has_match_keys on
+ * hs->self, 1: on hs->anc, 2: has_match_target on hs->deep_targets),
+ * remembered on the node: forced layouts run them on most elements, and
+ * they hash every class name each time.  Valid while the element's
+ * attributes (attr_hash, computed by style_cache_prepare) and the key sets
+ * are the same. */
+static int has_memo(const HasSubjects *hs, HtmlNode *hn, int which)
+{
+    uint64_t stamp = (hn->attr_hash ^ (hs->gen * 0x9E3779B97F4A7C15ull)) | 1;
+    if (!hn->attr_hash) {   /* not hashed this pass: no memo */
+        return which == 0 ? has_match_keys(&hs->self, hn) : which == 1 ? has_match_keys(&hs->anc, hn)
+                          : has_match_target(&hs->deep_targets, hn);
+    }
+    if (hn->has_memo_stamp != stamp) {
+        hn->has_memo_stamp = stamp;
+        hn->has_memo[0] = hn->has_memo[1] = hn->has_memo[2] = -1;
+    }
+    if (hn->has_memo[which] < 0)
+        hn->has_memo[which] = (int8_t)(which == 0 ? has_match_keys(&hs->self, hn)
+                                     : which == 1 ? has_match_keys(&hs->anc, hn)
+                                     : has_match_target(&hs->deep_targets, hn));
+    return hn->has_memo[which];
+}
+
 static int has_may_match(const HasSubjects *hs, LayoutContext *ctx, int idx)
 {
     if (hs->universal_deep) return 2;
     HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
     if (!hn) return 0;
     int r = hs->universal ? 1 : 0;
-    if (hs->self.n) { int m = has_match_keys(&hs->self, hn); if (m > r) r = m; }
+    if (hs->self.n) { int m = has_memo(hs, hn, 0); if (m > r) r = m; }
     if (hs->anc.n && r < 2) {
         for (int a = ctx->tree.nodes[idx].parent_idx; a >= 0 && r < 2; a = ctx->tree.nodes[a].parent_idx) {
             HtmlNode *an = layout_node_dom(ctx, ctx->tree.nodes[a].dom_node_idx);
             if (!an || an->type != HTML_NODE_ELEMENT) continue;
-            int m = has_match_keys(&hs->anc, an);
+            int m = has_memo(hs, an, 1);
             if (m > r) r = m;
         }
     }
@@ -5507,7 +5544,7 @@ static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects
                 for (int idx = 0; idx < n; idx++) {
                     if (P->force[idx] || !key[idx]) continue;
                     HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
-                    if (hn && has_match_target(&has->deep_targets, hn)) P->force[idx] = 1;
+                    if (hn && has_memo(has, hn, 2)) P->force[idx] = 1;
                 }
             }
             free(below);
@@ -6503,6 +6540,7 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
                             cf.s_first ? ", first" : "", cf.s_prev ? ", previous" : "", cf.s_last ? ", last" : "",
                             cf.s_fromend ? ", from end" : "", cf.s_empty ? ", empty" : "");
                 has_gen = set_gen;
+                has.gen = set_gen;
                 if (g_css_log > 0 && has.any)
                     fprintf(stderr, "[css] :has() subjects: %d keys, %d ancestor keys%s%s%s\n", has.self.n, has.anc.n,
                             has.universal ? ", universal" : "", has.universal_deep ? " (deep)" : "",
