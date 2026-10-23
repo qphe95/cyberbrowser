@@ -1018,6 +1018,86 @@ static void register_font_table(void)
         printf("WARNING: no system font found; text will not be measured or drawn\n");
 }
 
+/* CYBER_LAYOUT_DUMP=1 (or a path): write the final layout's boxes to
+ * layout_dump.txt (or that path).  Off by default: 40 ms a write. */
+static const char *layout_dump_path(void) {
+    const char *e = cyber_getenv("CYBER_LAYOUT_DUMP");
+    if (!e || !e[0] || strcmp(e, "0") == 0) return NULL;
+    return strcmp(e, "1") == 0 ? "layout_dump.txt" : e;
+}
+
+/* The screenshot of the settled page.  The settle loop lays out each
+ * rebuilt document and builds its display list, which requests the images
+ * it shows (their arrival keeps the loop going), and the last one is
+ * rasterized once, after the loop: painting and encoding every
+ * intermediate document cost 0.1 s a run for a file the next one
+ * replaced. */
+typedef struct PendingShot {
+    bool valid;
+    LayoutContext layout;
+    DisplayList dl;
+} PendingShot;
+
+static void pending_shot_free(PendingShot *s) {
+    if (!s->valid) return;
+    display_list_free(&s->dl);
+    css_layout_tree_free(&s->layout);
+    s->valid = false;
+}
+
+/* Lay out `doc` and build its display list (it must outlive the shot). */
+static void pending_shot_build(PendingShot *s, HtmlDocument *doc, ImageCache *image_cache) {
+    pending_shot_free(s);
+    printf("Running CSS layout (%dx%d) ...\n", WIREFRAME_WIDTH, WIREFRAME_HEIGHT);
+    memset(&s->layout, 0, sizeof(s->layout));
+    s->layout.js_ctx = g_ctx;
+    s->layout.dump_path = layout_dump_path();
+    bool ok;
+    {
+        CP_SCOPE("css-layout");
+        ok = css_layout_run(&s->layout, doc, NULL, (double)WIREFRAME_WIDTH, (double)WIREFRAME_HEIGHT);
+    }
+    if (!ok) {
+        printf("WARNING: css_layout_run() failed\n");
+        css_layout_tree_free(&s->layout);
+        return;
+    }
+    printf("Layout boxes: %d\n", s->layout.tree.count);
+    display_list_init(&s->dl);
+    {
+        CP_SCOPE("build-display-list");
+        ok = css_layout_build_display_list(&s->layout, &s->dl);
+    }
+    if (!ok) {
+        printf("WARNING: css_layout_build_display_list() failed\n");
+        display_list_free(&s->dl);
+        css_layout_tree_free(&s->layout);
+        return;
+    }
+    s->valid = true;
+    /* Images first requested while building the list (mask images,
+     * backgrounds) finish loading here, within a bound (a slow CDN must not
+     * hold the screenshot): taken one settle turn at a time, each arrival
+     * laid the page out again.  One that arrives later requests a layout
+     * (on_image_progress), and the settle loop builds the shot again. */
+    if (!image_cache_wait_pending_ms(image_cache, 1500))
+        printf("Images still loading; painting without them for now\n");
+}
+
+/* Paint and save the last shot. */
+static void pending_shot_save(PendingShot *s, const char *out_path) {
+    if (!s->valid) return;
+    printf("Display list commands: %d\n", s->dl.count);
+    printf("Rendering screenshot to %s ...\n", out_path);
+    bool raster_ok;
+    {
+        CP_SCOPE("raster-jpg");
+        raster_ok = render_display_list_to_jpg(&s->dl, out_path, WIREFRAME_WIDTH, WIREFRAME_HEIGHT);
+    }
+    if (raster_ok) printf("Saved screenshot: %s (%dx%d)\n", out_path, WIREFRAME_WIDTH, WIREFRAME_HEIGHT);
+    else printf("WARNING: failed to write %s\n", out_path);
+}
+
 static bool render_document_to_jpg(HtmlDocument *doc, ImageCache *image_cache,
                                    const char *out_path)
 {
@@ -1027,7 +1107,7 @@ static bool render_document_to_jpg(HtmlDocument *doc, ImageCache *image_cache,
     LayoutContext layout;
     memset(&layout, 0, sizeof(layout));
     layout.js_ctx = g_ctx;
-    layout.dump_path = "layout_dump.txt";
+    layout.dump_path = layout_dump_path();
     bool layout_ok = false;
     {
         CP_SCOPE("css-layout");
@@ -1633,6 +1713,7 @@ int main(int argc, char *argv[]) {
      * image loads, and rebuild the native HtmlDocument from the JS DOM whenever
      * a mutation invalidates it.  Exit when nothing is left to do. */
     HtmlDocument *doc = NULL;
+    PendingShot shot = {0};
     image_api_scan(g_ctx);
 
     int loop_iterations = 0;
@@ -1687,6 +1768,7 @@ int main(int argc, char *argv[]) {
                 new_doc = html_document_from_js_dom(g_ctx, js_doc);
             }
             if (new_doc) {
+                pending_shot_free(&shot);   /* it refers into the old document */
                 if (doc) html_document_free(doc);
                 doc = new_doc;
 
@@ -1700,7 +1782,7 @@ int main(int argc, char *argv[]) {
                  * has its own complete stylesheet collection + selector matching
                  * pipeline.  No separate CSS application step is needed here. */
 
-                render_document_to_jpg(doc, image_cache, "wikipedia_screenshot.jpg");
+                pending_shot_build(&shot, doc, image_cache);
             } else {
                 printf("WARNING: failed to rebuild native document from JS DOM\n");
             }
@@ -1761,6 +1843,8 @@ int main(int argc, char *argv[]) {
         }
     }
     CP_END("quiescence-loop");
+    pending_shot_save(&shot, "wikipedia_screenshot.jpg");
+    pending_shot_free(&shot);
 
     /* CYBER_POSTLOAD_JS=/path/to.js: evaluate a script against the settled
      * page (inspect live state; its console output goes to stderr). */
