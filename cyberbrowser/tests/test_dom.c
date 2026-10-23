@@ -826,6 +826,24 @@ TEST(test_dom_layout_kept_across_changes_it_cannot_see) {
     return true;
 }
 
+/* A computed font size inside a display:none subtree, which layouts leave
+ * unstyled, is styled on demand: the query lays out once more styling it. */
+TEST(test_dom_computed_font_size_inside_hidden_subtree) {
+    JSContextHandle ctx = get_shared_test_context();
+    if (!dom_ready(ctx)) { printf("    (skipped - no document)\n"); return true; }
+    uint64_t before = layout_api_style_all_layouts();
+    ASSERT_EQ(1, js_int(ctx,
+        "(function(){var d=document, s=d.createElement('style');"
+        "s.textContent='.fh-p{display:none;font-size:10px}';"
+        "d.head.appendChild(s);"
+        "var p=d.createElement('div'); p.className='fh-p'; p.innerHTML='<span style=\"font-size: 2em\">x</span>';"
+        "d.body.appendChild(p);"
+        "var fs=getComputedStyle(p.firstChild).fontSize;"
+        "p.remove(); s.remove(); return fs==='20px' ? 1 : 0;})()"));
+    ASSERT_EQ(1, (int)(layout_api_style_all_layouts() - before));
+    return true;
+}
+
 /* DOM collections are iterable (for...of, spread), as YouTube's modern
  * build expects: it iterates el.attributes and el.classList in custom
  * element callbacks, and without iterators every one of them threw. */
@@ -1212,6 +1230,7 @@ void run_dom_tests(void) {
     RUN_TEST(test_dom_layout_metrics_block_boxes);
     RUN_TEST(test_dom_layout_metrics_see_each_change);
     RUN_TEST(test_dom_layout_kept_across_changes_it_cannot_see);
+    RUN_TEST(test_dom_computed_font_size_inside_hidden_subtree);
     RUN_TEST(test_dom_timers_reuse_storage);
     RUN_TEST(test_dom_collections_are_iterable);
     RUN_TEST(test_dom_media_source_events);

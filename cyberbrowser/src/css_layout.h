@@ -31,6 +31,9 @@ extern "C" {
 /* Bit flags for LayoutBox.flags */
 #define LAYOUT_NEEDS_LAYOUT 0x01
 #define LAYOUT_HAS_LAYOUT   0x02
+/* Inside a display:none subtree, so not styled (LayoutContext.style_all
+ * off): a display:none placeholder. */
+#define LAYOUT_STYLE_SKIPPED 0x04
 
 /* CSS display value used for visibility decisions. */
 typedef enum {
@@ -437,6 +440,13 @@ typedef struct LayoutContext {
 
     /* Generation of the cached style set this layout used (0: none). */
     uint64_t style_gen;
+
+    /* Style the descendants of display:none elements too (input, kept by
+     * css_layout_run).  Off, nothing renders or lays them out, so they get
+     * placeholder boxes (LAYOUT_STYLE_SKIPPED), and how many there were is
+     * style_skipped. */
+    bool style_all;
+    int style_skipped;
 } LayoutContext;
 
 /* What a change can affect, for the style set layout `ctx` used (each

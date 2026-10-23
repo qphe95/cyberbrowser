@@ -254,10 +254,8 @@ static bool layout_build_nodes(LayoutContext *ctx, const int *map)
     return true;
 }
 
-/* A box before its style: the defaults every node starts from.  The style
- * pass sets each box from this (or copies a styled one), so a tree build
- * need not initialize the boxes, and their buffer can be recycled. */
-static void layout_box_init(LayoutContext *ctx, int idx)
+/* The defaults every box starts from. */
+static const LayoutBox *layout_box_template(void)
 {
     static LayoutBox tmpl;
     static int tmpl_ready;
@@ -340,8 +338,16 @@ static void layout_box_init(LayoutContext *ctx, int idx)
         box->aspect_ratio_prop = 0;
         tmpl_ready = 1;
     }
+    return &tmpl;
+}
+
+/* A box before its style: the defaults plus its tag's display.  The style
+ * pass sets each box from this (or copies a styled one), so a tree build
+ * need not initialize the boxes, and their buffer can be recycled. */
+static void layout_box_init(LayoutContext *ctx, int idx)
+{
     LayoutBox *box = &ctx->boxes[idx];
-    *box = tmpl;
+    *box = *layout_box_template();
     HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
     if (node && node->type == HTML_NODE_ELEMENT) {
         box->display = layout_default_display(node->tag_name);
@@ -1030,43 +1036,45 @@ static unsigned layout_apply_shorthand_sides(LayoutBox *box, const char *value,
 
 static CssDisplay layout_default_display(const char *tag_name) {
     if (!tag_name || !tag_name[0]) return CSS_DISPLAY_BLOCK;
-    /* Non-rendered metadata tags should not generate boxes. */
-    static const char *none_tags[] = {
-        "head", "script", "style", "link", "meta", "title",
-        "base", "template", "noscript", NULL
+    /* Sorted by name (binary search; it runs for every styled element):
+     *   none: non-rendered metadata tags generate no boxes;
+     *   inline-block: form controls (HTML UA stylesheet);
+     *   inline: common replaced/phrasing elements;
+     *   block: what the HTML UA stylesheet makes block-level (tables are
+     *     laid out as blocks by this engine).
+     * Everything else, including custom and unknown elements, is inline. */
+#define N CSS_DISPLAY_NONE
+#define B CSS_DISPLAY_BLOCK
+#define I CSS_DISPLAY_INLINE
+#define IB CSS_DISPLAY_INLINE_BLOCK
+    static const struct { const char *tag; CssDisplay d; } tags[] = {
+        {"a", I}, {"address", B}, {"article", B}, {"aside", B}, {"b", I}, {"base", N},
+        {"blockquote", B}, {"body", B}, {"br", I}, {"button", IB}, {"canvas", I}, {"caption", B},
+        {"center", B}, {"code", I}, {"col", B}, {"colgroup", B}, {"dd", B}, {"details", B},
+        {"dialog", B}, {"dir", B}, {"div", B}, {"dl", B}, {"dt", B}, {"em", I},
+        {"fieldset", B}, {"figcaption", B}, {"figure", B}, {"footer", B}, {"form", B},
+        {"frame", B}, {"frameset", B}, {"h1", B}, {"h2", B}, {"h3", B}, {"h4", B},
+        {"h5", B}, {"h6", B}, {"head", N}, {"header", B}, {"hgroup", B}, {"hr", B},
+        {"html", B}, {"i", I}, {"iframe", I}, {"img", I}, {"input", IB}, {"label", I},
+        {"legend", B}, {"li", CSS_DISPLAY_LIST_ITEM}, {"link", N}, {"listing", B}, {"main", B},
+        {"menu", B}, {"meta", N}, {"nav", B}, {"noscript", N}, {"ol", B}, {"optgroup", B},
+        {"p", B}, {"plaintext", B}, {"pre", B}, {"s", I}, {"script", N}, {"search", B},
+        {"section", B}, {"select", IB}, {"small", I}, {"span", I}, {"strong", I}, {"style", N},
+        {"sub", I}, {"summary", B}, {"sup", I}, {"table", B}, {"tbody", B}, {"td", B},
+        {"template", N}, {"textarea", IB}, {"tfoot", B}, {"th", B}, {"thead", B}, {"title", N},
+        {"tr", B}, {"u", I}, {"ul", B}, {"wbr", I}, {"xmp", B},
     };
-    for (int i = 0; none_tags[i]; i++) {
-        if (strcasecmp(tag_name, none_tags[i]) == 0) return CSS_DISPLAY_NONE;
-    }
-    /* Common replaced/phrasing elements default to inline. */
-    static const char *inline_tags[] = {
-        "span", "a", "em", "strong", "b", "i", "u", "s", "small",
-        "img", "br", "wbr", "code", "sub", "sup", "label",
-        "iframe", "canvas", NULL
-    };
-    /* Form controls are inline-block in the HTML UA stylesheet. */
-    if (strcasecmp(tag_name, "input") == 0 || strcasecmp(tag_name, "button") == 0 ||
-        strcasecmp(tag_name, "textarea") == 0 || strcasecmp(tag_name, "select") == 0)
-        return CSS_DISPLAY_INLINE_BLOCK;
-    for (int i = 0; inline_tags[i]; i++) {
-        if (strcasecmp(tag_name, inline_tags[i]) == 0) return CSS_DISPLAY_INLINE;
-    }
-    if (strcasecmp(tag_name, "li") == 0) return CSS_DISPLAY_LIST_ITEM;
-    /* Elements the HTML UA stylesheet makes block-level (tables are laid out
-     * as blocks by this engine).  Everything else, including custom and
-     * unknown elements, is inline by default. */
-    static const char *block_tags[] = {
-        "html", "body", "div", "p", "h1", "h2", "h3", "h4", "h5", "h6",
-        "ul", "ol", "dl", "dt", "dd", "menu", "dir", "section", "article",
-        "aside", "nav", "header", "footer", "main", "address", "blockquote",
-        "figure", "figcaption", "form", "fieldset", "legend", "hr", "pre",
-        "listing", "xmp", "plaintext", "center", "details", "summary",
-        "dialog", "search", "hgroup", "optgroup", "frameset", "frame",
-        "table", "caption", "colgroup", "col", "thead", "tbody", "tfoot",
-        "tr", "td", "th", NULL
-    };
-    for (int i = 0; block_tags[i]; i++) {
-        if (strcasecmp(tag_name, block_tags[i]) == 0) return CSS_DISPLAY_BLOCK;
+#undef N
+#undef B
+#undef I
+#undef IB
+    int lo = 0, hi = (int)(sizeof(tags) / sizeof(tags[0])) - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        int c = strcasecmp(tag_name, tags[mid].tag);
+        if (c == 0) return tags[mid].d;
+        if (c < 0) hi = mid - 1;
+        else lo = mid + 1;
     }
     return CSS_DISPLAY_INLINE;
 }
@@ -3771,6 +3779,16 @@ typedef struct StylePass {
     uint64_t *match_hash;
     _Atomic uint32_t matched_same;
     _Atomic uint32_t why[5];    /* CSS_LOG=2: recompute reasons (no entry, key, ancestor/sibling, :has, parent) */
+    /* Per layout index: the elements in its subtree that cannot take their
+     * cached style as it is (NULL: not counted, as without the cache). */
+    int *dirty_n;
+    _Atomic uint32_t copied;     /* elements style_copy_subtree took */
+    /* Descendants of display:none elements are not styled (skip_hidden):
+     * per layout index, 1 for those whose cached entry still holds, 2 for
+     * the others (their entries go stale); 0 styled. */
+    bool skip_hidden;
+    unsigned char *skipped;
+    _Atomic uint32_t skipped_n;
 } StylePass;
 
 /* ---- Incremental restyle ----
@@ -3799,6 +3817,10 @@ typedef struct StyleCacheEntry {
     uint32_t ctx_n;
     const CssCustomProps *props;
     uint64_t match_hash;        /* what its cascade read (StylePass.match_hash), 0 = unknown */
+    /* Key and context features are current but box, props and after are
+     * not: the element was left unstyled (inside display:none) when its
+     * style may have changed. */
+    unsigned char stale;
     unsigned char has_after;
     char after[256];
     LayoutBox box;
@@ -5572,6 +5594,37 @@ static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects
     free(S); free(changed); free(whole); free(sibch); free(part); free(depth); free(at);
 }
 
+/* StylePass.dirty_n from what style_cache_prepare found.  With skip_hidden,
+ * elements below a display:none element that keeps its cached style (so
+ * stays display:none) are not styled, and do not count. */
+static void style_count_dirty(StylePass *P)
+{
+    LayoutContext *ctx = P->ctx;
+    int n = ctx->tree.count;
+    const int *pre = ctx->tree.preorder;
+    P->dirty_n = (int *)calloc((size_t)n + 1, sizeof(int));
+    unsigned char *under = P->skip_hidden ? (unsigned char *)calloc((size_t)n + 1, 1) : NULL;
+    if (!P->dirty_n) { free(under); return; }
+    for (int pos = 0; under && pos < n; pos++) {
+        int idx = pre[pos];
+        int p = ctx->tree.nodes[idx].parent_idx;
+        if (p < 0) continue;
+        const StyleCacheEntry *pe = P->cached[p];
+        under[idx] = under[p] || (pe && !pe->stale && P->key_ok[p] && !P->force[p] &&
+                                  pe->box.display == CSS_DISPLAY_NONE);
+    }
+    for (int pos = n - 1; pos >= 0; pos--) {
+        int idx = pre[pos];
+        const StyleCacheEntry *ce = P->cached[idx];
+        if (P->entry_key[idx] && !(under && under[idx]) &&
+            !(ce && !ce->stale && P->key_ok[idx] && !P->force[idx]))
+            P->dirty_n[idx]++;
+        int p = ctx->tree.nodes[idx].parent_idx;
+        if (p >= 0) P->dirty_n[p] += P->dirty_n[idx];
+    }
+    free(under);
+}
+
 typedef struct { const void *from; const CssCustomProps *to; } StylePropsRemap;
 
 /* `m` as a map the cache owns: maps of the previous cache stay as they are,
@@ -5637,10 +5690,26 @@ static void style_cache_set(StyleCacheEntry *e, StylePass *P, int idx, const cha
     if (P->cx_cnt && P->cx_cnt[idx] >= 0) style_cache_set_ctx(e, P, idx, NULL);
     e->props = style_cache_own(ctx->custom_props[idx], tab, cap);
     e->match_hash = P->match_hash ? P->match_hash[idx] : 0;
+    e->stale = 0;
     e->has_after = after != NULL;
     if (after) memcpy(e->after, after, sizeof(e->after));
     else e->after[0] = '\0';
     e->box = ctx->boxes[idx];
+}
+
+/* Entry e of an element left unstyled whose style may have changed: what
+ * the next pass compares (key, context features) is brought up to date, so
+ * it does not count as changed again; its style is unknown. */
+static void style_cache_set_stale(StyleCacheEntry *e, StylePass *P, int idx, const StyleCacheEntry *old)
+{
+    e->key = P->entry_key ? P->entry_key[idx] : 0;
+    if ((P->cx_cnt && P->cx_cnt[idx] >= 0) || !old) style_cache_set_ctx(e, P, idx, NULL);
+    else if (old != e) style_cache_set_ctx(e, P, idx, old);
+    e->props = NULL;
+    e->match_hash = 0;
+    e->stale = 1;
+    e->has_after = 0;
+    e->after[0] = '\0';
 }
 
 /* In-place form of style_cache_store for an unchanged global key: entries of
@@ -5689,6 +5758,21 @@ static bool style_cache_update(StylePass *P, const StyleGenAfter *gen, int gen_t
         HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
         if (!hn || hn->type != HTML_NODE_ELEMENT || !hn->store_id) continue;
         StyleCacheEntry *e = (StyleCacheEntry *)P->cached[idx];
+        /* Not styled: an entry that still holds stays as it is. */
+        if (P->skipped && P->skipped[idx] == 1) continue;
+        if (P->skipped && P->skipped[idx] == 2) {
+            if (e && e->stale && P->key_ok[idx]) continue;
+            const StyleCacheEntry *old = e;
+            if (!e) {
+                e = &g_sc.e[g_sc.n];
+                e->id = hn->store_id;
+                uint32_t h = (e->id * 2654435761u) & (uint32_t)(g_sc.index_cap - 1);
+                while (g_sc.index[h]) h = (h + 1) & (uint32_t)(g_sc.index_cap - 1);
+                g_sc.index[h] = ++g_sc.n;
+            }
+            style_cache_set_stale(e, P, idx, old);
+            continue;
+        }
         if (e && P->key_ok[idx] && !P->out_changed[idx] &&
             e->has_after == (after[idx] != NULL) &&
             (!after[idx] || strncmp(e->after, after[idx], sizeof(e->after)) == 0)) {
@@ -5792,14 +5876,30 @@ static void style_cache_store(StylePass *P, uint64_t global, const StyleGenAfter
         if (!hn || hn->type != HTML_NODE_ELEMENT || !hn->store_id) continue;
         StyleCacheEntry *e = &ne[k];
         e->id = hn->store_id;
-        e->key = P->entry_key ? P->entry_key[idx] : 0;
-        style_cache_set_ctx(e, P, idx, P->cached[idx]);
-        e->props = style_cache_own(ctx->custom_props[idx], tab, cap);
-        e->match_hash = P->match_hash ? P->match_hash[idx] : 0;
-        e->has_after = after[idx] != NULL;
-        if (after[idx]) memcpy(e->after, after[idx], sizeof(e->after));
-        else e->after[0] = '\0';
-        e->box = ctx->boxes[idx];
+        const StyleCacheEntry *old = P->cached[idx];
+        if (P->skipped && P->skipped[idx] == 2) {
+            style_cache_set_stale(e, P, idx, old);
+        } else if (P->skipped && P->skipped[idx] == 1) {
+            /* Not styled: its entry still holds (and carries over). */
+            e->key = old->key;
+            e->stale = 0;
+            style_cache_set_ctx(e, P, idx, old);
+            e->props = style_cache_own(old->props, tab, cap);
+            e->match_hash = old->match_hash;
+            e->has_after = old->has_after;
+            memcpy(e->after, old->after, sizeof(e->after));
+            e->box = old->box;
+        } else {
+            e->key = P->entry_key ? P->entry_key[idx] : 0;
+            style_cache_set_ctx(e, P, idx, old);
+            e->props = style_cache_own(ctx->custom_props[idx], tab, cap);
+            e->match_hash = P->match_hash ? P->match_hash[idx] : 0;
+            e->stale = 0;
+            e->has_after = after[idx] != NULL;
+            if (after[idx]) memcpy(e->after, after[idx], sizeof(e->after));
+            else e->after[0] = '\0';
+            e->box = ctx->boxes[idx];
+        }
         uint32_t h = (e->id * 2654435761u) & (uint32_t)(icap - 1);
         while (index[h]) h = (h + 1) & (uint32_t)(icap - 1);
         index[h] = k + 1;
@@ -5995,7 +6095,7 @@ static void style_note_result(StylePass *P, int idx, const LayoutBox *box, const
                               const StyleCacheEntry *ce, bool would_reuse, const HtmlNode *node)
 {
     if (!P->inc) return;
-    bool same = ce && memcmp(box, &ce->box, sizeof(*box)) == 0 && style_props_equal(props, ce->props);
+    bool same = ce && !ce->stale && memcmp(box, &ce->box, sizeof(*box)) == 0 && style_props_equal(props, ce->props);
     P->out_changed[idx] = !same;
     atomic_fetch_add(&P->recomputed, 1);
     if (P->verify && would_reuse) atomic_fetch_add(&P->verify_reusable, 1);
@@ -6013,6 +6113,8 @@ static void style_note_result(StylePass *P, int idx, const LayoutBox *box, const
         }
     }
 }
+
+static void style_finish_box(StylePass *P, LayoutBox *box, const LayoutBox *parent, bool element);
 
 static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
 {
@@ -6032,7 +6134,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
     bool bits_ready = false;
     int parent_cls = (p >= 0) ? P->cls[p] : -1;
     const StyleCacheEntry *ce = P->inc ? P->cached[idx] : NULL;
-    bool can_reuse = ce && P->key_ok[idx] && !P->force[idx] && (p < 0 || !P->out_changed[p]);
+    bool can_reuse = ce && !ce->stale && P->key_ok[idx] && !P->force[idx] && (p < 0 || !P->out_changed[p]);
     bool mpc_would = false;   /* CYBER_STYLE_VERIFY: the matched-properties cache would take ce */
     if (P->inc && !can_reuse && g_css_log > 1 && node && node->type == HTML_NODE_ELEMENT) {
         int why = !ce ? 0 : !P->key_ok[idx] ? 1 : P->force[idx] == 2 ? 2 : P->force[idx] == 1 ? 3 : 4;
@@ -6206,7 +6308,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
             if (h == 0) h = 1;
             P->match_hash[idx] = h;
             /* The key covers the attributes, which presentational hints read. */
-            bool take = ce && ce->match_hash == h && P->key_ok[idx] && (p < 0 || !P->out_changed[p]);
+            bool take = ce && !ce->stale && ce->match_hash == h && P->key_ok[idx] && (p < 0 || !P->out_changed[p]);
             if (take && P->verify) mpc_would = true;   /* checked against the full result */
             if (take && !P->verify) {
                 for (int b = 0; b < ninl; b++) css_declarations_free(inl[b].decls, inl[b].count);
@@ -6284,7 +6386,33 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
         }
     }
     css_style_bloom_push(T->scratch, P->sd, dom);
+    style_finish_box(P, box, parent, node && node->type == HTML_NODE_ELEMENT);
 
+    if (share_ok) {
+        StyleShareEntry *e = &T->share[T->share_next];
+        T->share_next = (T->share_next + 1) % STYLE_SHARE_SLOTS;
+        if (T->share_n < STYLE_SHARE_SLOTS) T->share_n++;
+        e->idx = idx;
+        e->dom = dom;
+        e->parent_cls = parent_cls;
+        e->tag = css_style_tag(P->sd, dom);
+        e->bits_ready = bits_ready;
+        if (P->reval_words && bits_ready)
+            memcpy(e->bits, T->bits, (size_t)P->reval_words * sizeof(uint64_t));
+        e->has_after = share_has_after;
+        if (share_has_after) memcpy(e->after, share_after, sizeof(e->after));
+    }
+    if (node && node->type == HTML_NODE_ELEMENT)
+        style_note_result(P, idx, box, ctx->custom_props[idx], ce, can_reuse || mpc_would, node);
+    else if (P->inc)
+        P->out_changed[idx] = 1;
+}
+
+/* What the cascade leaves to the parent's final style: inheritance,
+ * parent-relative sizes, em lengths against the final font size, used
+ * border widths and blockification. */
+static void style_finish_box(StylePass *P, LayoutBox *box, const LayoutBox *parent, bool element)
+{
     /* Inheritance and parent-relative values: the parent is final. */
     if (!box->font_size_set && box->font_size_ratio <= 0.0 && parent) {
         box->font_size = parent->font_size;
@@ -6357,7 +6485,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
 
     /* Used border widths: unstyled sides have none; styled sides without
      * an explicit width are medium. */
-    if (node && node->type == HTML_NODE_ELEMENT) {
+    if (element) {
         double *bw[4] = { &box->border_left, &box->border_right, &box->border_top, &box->border_bottom };
         for (int k = 0; k < 4; k++) {
             unsigned char bit = (unsigned char)(1u << k);
@@ -6380,37 +6508,112 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
             box->inline_level = 0;
         }
     }
-
-    if (share_ok) {
-        StyleShareEntry *e = &T->share[T->share_next];
-        T->share_next = (T->share_next + 1) % STYLE_SHARE_SLOTS;
-        if (T->share_n < STYLE_SHARE_SLOTS) T->share_n++;
-        e->idx = idx;
-        e->dom = dom;
-        e->parent_cls = parent_cls;
-        e->tag = css_style_tag(P->sd, dom);
-        e->bits_ready = bits_ready;
-        if (P->reval_words && bits_ready)
-            memcpy(e->bits, T->bits, (size_t)P->reval_words * sizeof(uint64_t));
-        e->has_after = share_has_after;
-        if (share_has_after) memcpy(e->after, share_after, sizeof(e->after));
-    }
-    if (node && node->type == HTML_NODE_ELEMENT)
-        style_note_result(P, idx, box, ctx->custom_props[idx], ce, can_reuse || mpc_would, node);
-    else if (P->inc)
-        P->out_changed[idx] = 1;
 }
 
-/* Style the subtree at preorder position `pos`; child subtrees larger than
- * the grain become jobs of their own (their parent is already styled). */
+static void style_skip_descendants(StylePass *P, int pos, bool clean);
+
+/* A subtree in which no element needs restyling, under a parent whose style
+ * is as cached: every element takes its cached style as it is and text
+ * boxes inherit.  Nothing is matched, so the ancestor filter is left alone. */
+static void style_copy_subtree(StylePass *P, StyleThread *T, int pos)
+{
+    LayoutContext *ctx = P->ctx;
+    const int *pre = ctx->tree.preorder;
+    int end = P->pre_end[pos];
+    uint32_t n = 0;
+    for (int q = pos; q < end; q++) {
+        int idx = pre[q];
+        int p = ctx->tree.nodes[idx].parent_idx;
+        LayoutBox *box = layout_box(ctx, idx);
+        const StyleCacheEntry *ce = P->cached[idx];
+        P->cls[idx] = idx;
+        if (ce) {
+            /* An element (one without an entry would need restyling). */
+            *box = ce->box;
+            ctx->custom_props[idx] = ce->props;
+            P->match_hash[idx] = ce->match_hash;
+            if (ce->has_after) {
+                if (T->gen_n == T->gen_cap) {
+                    T->gen_cap = T->gen_cap ? T->gen_cap * 2 : 16;
+                    T->gen = (StyleGenAfter *)realloc(T->gen, (size_t)T->gen_cap * sizeof(StyleGenAfter));
+                }
+                T->gen[T->gen_n].pos = q;
+                T->gen[T->gen_n].idx = idx;
+                memcpy(T->gen[T->gen_n].text, ce->after, sizeof(ce->after));
+                T->gen_n++;
+            }
+            P->out_changed[idx] = 0;
+            n++;
+            /* Still display:none: what is below is not styled (and may be
+             * stale or changed: style_count_dirty did not count it). */
+            if (P->skip_hidden && box->display == CSS_DISPLAY_NONE && q + 1 < P->pre_end[q]) {
+                style_skip_descendants(P, q, true);
+                q = P->pre_end[q] - 1;
+            }
+        } else {
+            ctx->custom_props[idx] = p >= 0 ? ctx->custom_props[p] : NULL;
+            layout_box_init(ctx, idx);
+            style_finish_box(P, box, p >= 0 ? layout_box(ctx, p) : NULL, false);
+            P->out_changed[idx] = 1;
+        }
+    }
+    atomic_fetch_add(&P->reused, n);
+    atomic_fetch_add(&P->copied, n);
+}
+
+/* The descendants of the display:none element at preorder position `pos`
+ * (whose style is as cached when `clean`): nothing renders or lays them
+ * out, so they get display:none placeholders instead of styles.  Elements
+ * that would have taken their cached style keep their entries; the others'
+ * go stale (StylePass.skipped). */
+static void style_skip_descendants(StylePass *P, int pos, bool clean)
+{
+    LayoutContext *ctx = P->ctx;
+    const int *pre = ctx->tree.preorder;
+    int top = pre[pos];
+    int end = P->pre_end[pos];
+    for (int q = pos + 1; q < end; q++) {
+        int idx = pre[q];
+        int p = ctx->tree.nodes[idx].parent_idx;
+        bool parent_clean = p == top ? clean : P->skipped[p] == 1;
+        bool keep = parent_clean && P->inc && P->cached[idx] && !P->cached[idx]->stale && P->key_ok[idx] && !P->force[idx];
+        P->skipped[idx] = keep ? 1 : 2;
+        LayoutBox *box = layout_box(ctx, idx);
+        *box = *layout_box_template();
+        box->display = CSS_DISPLAY_NONE;
+        box->flags |= LAYOUT_STYLE_SKIPPED;
+        ctx->custom_props[idx] = ctx->custom_props[p];
+        P->cls[idx] = idx;
+        if (P->inc) P->out_changed[idx] = 1;
+    }
+    atomic_fetch_add(&P->skipped_n, (uint32_t)(end - pos - 1));
+}
+
+static void style_job(Job *j);
+
+/* Style the subtree at preorder position `pos`; child subtrees with more
+ * work than the grain become jobs of their own (their parent is already
+ * styled).  With the restyle cache, work is the elements to restyle, and a
+ * child subtree without any (under a parent styled as before) is copied. */
 static void style_subtree(StylePass *P, StyleThread *T, Job *self, int pos)
 {
     const int *pre = P->ctx->tree.preorder;
-    style_node(P, T, pos, pre[pos]);
+    int idx = pre[pos];
+    style_node(P, T, pos, idx);
     int end = P->pre_end[pos];
+    if (P->skip_hidden && layout_box(P->ctx, idx)->display == CSS_DISPLAY_NONE) {
+        if (pos + 1 < end) style_skip_descendants(P, pos, P->inc && !P->out_changed[idx]);
+        return;
+    }
+    bool by_dirty = P->dirty_n && !P->out_changed[idx];
     for (int c = pos + 1; c < end; c = P->pre_end[c]) {
-        if (P->pre_end[c] - c > P->grain) {
-            job_spawn(job_new(self->fn, self, P, (uint32_t)c, 0));
+        int work = P->pre_end[c] - c;
+        if (by_dirty) {
+            work = P->dirty_n[pre[c]];
+            if (work == 0) { style_copy_subtree(P, T, c); continue; }
+        }
+        if (work > P->grain) {
+            job_spawn(job_new(style_job, self, P, (uint32_t)c, 0));
         } else {
             style_subtree(P, T, self, c);
         }
@@ -6423,12 +6626,19 @@ static void style_job(Job *j)
     style_subtree(P, style_thread(P), j, (int)j->a);
 }
 
+/* Top-level subtrees with little to restyle run here, without waking the
+ * pool. */
 static void style_root_job(Job *j)
 {
     StylePass *P = (StylePass *)j->ctx;
     int n = P->ctx->tree.count;
-    for (int pos = 0; pos < n; pos = P->pre_end[pos])
-        job_spawn(job_new(style_job, j, P, (uint32_t)pos, 0));
+    const int *pre = P->ctx->tree.preorder;
+    for (int pos = 0; pos < n; pos = P->pre_end[pos]) {
+        if (P->dirty_n && P->dirty_n[pre[pos]] <= P->grain)
+            style_subtree(P, style_thread(P), j, pos);
+        else
+            job_spawn(job_new(style_job, j, P, (uint32_t)pos, 0));
+    }
 }
 
 static int style_gen_cmp(const void *a, const void *b)
@@ -6554,8 +6764,18 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
             fprintf(stderr, "[css] restyle: full (%s)\n", !inc_env ? "CSS_INC=0" : "style set not cached");
         }
     }
+    /* CYBER_STYLE_HIDDEN=1: style display:none subtrees as well. */
+    {
+        static int hidden_env = -1;
+        if (hidden_env < 0) hidden_env = cyber_getenv("CYBER_STYLE_HIDDEN") ? 1 : 0;
+        P.skip_hidden = !ctx->style_all && !hidden_env && !P.verify;
+        if (P.skip_hidden) P.skipped = (unsigned char *)calloc((size_t)n + 1, 1);
+        if (!P.skipped) P.skip_hidden = false;
+    }
+    if (P.inc && !P.verify) style_count_dirty(&P);
     g_restyle_reused = g_restyle_recomputed = g_restyle_matched_same = 0;
     job_graph_run(job_new(style_root_job, NULL, &P, 0, 0));
+    ctx->style_skipped = (int)atomic_load(&P.skipped_n);
     STAGE("style (parallel)");
 
     /* Merge: generated ::after strings in document order, arenas, stats. */
@@ -6593,15 +6813,19 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
             fprintf(stderr, "[css] restyle why: noentry %u key %u forced %u has %u parent %u\n",
                     (unsigned)P.why[0], (unsigned)P.why[1], (unsigned)P.why[2], (unsigned)P.why[3], (unsigned)P.why[4]);
         if (g_css_log > 0 || P.verify)
-            fprintf(stderr, "[css] restyle: %u reused, %u recomputed (%u matched as before)%s",
-                    (unsigned)atomic_load(&P.reused), (unsigned)atomic_load(&P.recomputed),
-                    (unsigned)atomic_load(&P.matched_same), P.verify ? "" : "\n");
+            fprintf(stderr, "[css] restyle: %u reused (%u copied, %d to restyle), %u recomputed (%u matched as before), %u not styled (hidden)%s",
+                    (unsigned)atomic_load(&P.reused), (unsigned)atomic_load(&P.copied),
+                    P.dirty_n && n ? P.dirty_n[ctx->tree.root_idx] : -1, (unsigned)atomic_load(&P.recomputed),
+                    (unsigned)atomic_load(&P.matched_same), (unsigned)atomic_load(&P.skipped_n),
+                    P.verify ? "" : "\n");
         if (P.verify)
             fprintf(stderr, ", %u reusable, %u reuse mismatches\n", (unsigned)atomic_load(&P.verify_reusable),
                     (unsigned)atomic_load(&P.verify_mismatches));
     } else if (!P.inc) {
         g_sc.global = 0;
     }
+    free(P.dirty_n);
+    free(P.skipped);
     free(P.cached);
     free(P.key_ok);
     free(P.force);
@@ -9913,9 +10137,11 @@ bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
     double _run_t0 = layout_now_ms();
     JSContextHandle saved_js_ctx = ctx->js_ctx;
     const char *saved_dump_path = ctx->dump_path;
+    bool saved_style_all = ctx->style_all;
     if (!css_layout_tree_build(ctx, doc)) return false;
     GC_SET(ctx->js_ctx, saved_js_ctx);
     ctx->dump_path = saved_dump_path;
+    ctx->style_all = saved_style_all;
     ctx->viewport_width = viewport_width;
     ctx->viewport_height = viewport_height;
     g_unit_vw = viewport_width > 0.0 ? viewport_width : 1024.0;

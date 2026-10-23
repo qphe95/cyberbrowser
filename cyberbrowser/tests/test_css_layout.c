@@ -1215,6 +1215,50 @@ TEST(test_layout_restyle_matched_properties_cache) {
     return true;
 }
 
+/* What a display:none element holds is not styled (nothing lays it out or
+ * paints it): it gets display:none placeholders, unless the layout asks for
+ * every style (style_all).  Shown again, it is styled as a full restyle
+ * would, though its classes changed while it was hidden. */
+TEST(test_layout_hidden_subtree_left_unstyled) {
+    const char *tmpl =
+        "<html><head><style>"
+        ".hid { display: none } .w { width: 70px; height: 5px } .big { font-size: 30px }"
+        "</style></head><body>"
+        "<div class=\"%s\"><div class=\"%s\"><span>t</span></div></div>"
+        "</body></html>";
+    struct { const char *parent, *child; bool all; bool skipped; double font; } steps[] = {
+        { "hid", "w",     false, true,  16 },
+        { "hid", "w big", false, true,  16 },    /* restyled while hidden: its entry goes stale */
+        { "",    "w big", false, false, 30 },    /* shown: styled from scratch */
+        { "hid", "w big", true,  false, 30 },    /* style_all: styled though hidden */
+        { "hid", "w",     false, true,  16 },
+        { "",    "w",     false, false, 16 },
+    };
+    for (size_t s = 0; s < sizeof(steps) / sizeof(steps[0]); s++) {
+        char html[2048];
+        snprintf(html, sizeof(html), tmpl, steps[s].parent, steps[s].child);
+        HtmlDocument *doc = parse_with_store_ids(html);
+        ASSERT_TRUE(doc != NULL);
+        LayoutContext ctx = {0};
+        ctx.style_all = steps[s].all;
+        ASSERT_TRUE(css_layout_run(&ctx, doc, NULL, 800.0, 600.0));
+        LayoutBox *c = box_with_class(&ctx, doc, steps[s].child);
+        ASSERT_TRUE(c != NULL);
+        ASSERT_EQ(steps[s].skipped, (c->flags & LAYOUT_STYLE_SKIPPED) != 0);
+        ASSERT_EQ(steps[s].skipped, ctx.style_skipped >= 3);   /* the child, the span and its text */
+        if (!steps[s].skipped) {
+            ASSERT_TRUE(near_equal(c->font_size, steps[s].font));
+            ASSERT_TRUE(near_equal(c->height, steps[s].parent[0] ? 0 : 5));
+            if (!steps[s].parent[0]) ASSERT_TRUE(near_equal(c->width, 70));
+        } else {
+            ASSERT_EQ(CSS_DISPLAY_NONE, c->display);
+        }
+        css_layout_tree_free(&ctx);
+        html_document_free(doc);
+    }
+    return true;
+}
+
 /* Preserved newlines at the edges of inline runs still break lines:
  * YouTube's description is a pre-wrap block of spans, one per run, whose
  * runs end in "\n\n". */
@@ -1272,4 +1316,5 @@ void run_css_layout_tests(void) {
     RUN_TEST(test_layout_incremental_restyle);
     RUN_TEST(test_layout_restyle_matched_properties_cache);
     RUN_TEST(test_layout_pre_wrap_breaks_between_inline_runs);
+    RUN_TEST(test_layout_hidden_subtree_left_unstyled);
 }

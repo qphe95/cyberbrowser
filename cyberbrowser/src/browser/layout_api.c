@@ -55,6 +55,10 @@ static bool g_lq_valid;
 static uint64_t g_lq_key;
 static double g_lq_vw, g_lq_vh;
 static bool g_lq_running;
+/* The next layout styles display:none subtrees too (a computed-style query
+ * reached an element inside one); layouts that did. */
+static bool g_lq_style_all;
+static uint64_t g_lq_style_all_layouts;
 /* Store slot -> layout box index (+1; 0 = no box), and the NodeId that
  * owned the slot when the layout ran (a reused slot is a different node). */
 static int *g_lq_box_of_slot;
@@ -621,6 +625,9 @@ static bool lq_ensure(JSContextHandle ctx)
     lq_free();
     g_lq_doc = doc;
     g_lq_layout.js_ctx = ctx;
+    g_lq_layout.style_all = g_lq_style_all;
+    if (g_lq_style_all) g_lq_style_all_layouts++;
+    g_lq_style_all = false;
     {
         CP_ACC("forced layout: layout");
         g_lq_valid = css_layout_run(&g_lq_layout, doc, NULL, vw, vh);
@@ -691,6 +698,19 @@ bool layout_query_font_size(JSContextHandle ctx, GCValue element, double *px)
     g_lq_who = 0;
     if (!ok) return false;
     int idx = lq_box_index(id);
+    if (idx >= 0 && (g_lq_layout.boxes[idx].flags & LAYOUT_STYLE_SKIPPED)) {
+        /* Inside a display:none subtree, which layouts do not style: lay out
+         * again styling everything. */
+        layout_api_invalidate();
+        g_lq_style_all = true;
+        g_lq_who = id;
+        g_lq_ask = LQ_ASK_STYLE;
+        ok = lq_ensure(ctx);
+        g_lq_ask = LQ_ASK_POS;
+        g_lq_who = 0;
+        if (!ok) return false;
+        idx = lq_box_index(id);
+    }
     if (idx < 0 || g_lq_layout.boxes[idx].font_size <= 0.0) return false;
     *px = g_lq_layout.boxes[idx].font_size;
     return true;
@@ -887,4 +907,9 @@ void layout_api_install(JSContextHandle ctx, GCValue element_proto)
 uint64_t layout_api_cheap_hits(void)
 {
     return g_lq_cheap_hits;
+}
+
+uint64_t layout_api_style_all_layouts(void)
+{
+    return g_lq_style_all_layouts;
 }
