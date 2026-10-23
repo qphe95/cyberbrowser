@@ -580,7 +580,7 @@ int timer_process_due(JSContextHandle ctx) {
     }
 
     /* A rendering opportunity: intersection observers see layout changes. */
-    intersection_observers_tick(ctx);
+    processed += intersection_observers_tick(ctx);
     return processed;
 }
 

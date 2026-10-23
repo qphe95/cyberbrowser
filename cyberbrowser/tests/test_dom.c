@@ -1225,7 +1225,7 @@ TEST(test_dom_fragment_text_and_html_element_basics) {
 /* IntersectionObserver uses the layout: in-view targets intersect, targets
  * below the viewport or without a box do not; later layout changes are
  * reported by the per-frame update, and unchanged targets are not repeated. */
-void intersection_observers_tick(JSContextHandle ctx);
+int intersection_observers_tick(JSContextHandle ctx);
 void platform_sleep_ms(unsigned int ms);
 TEST(test_dom_intersection_observer_geometry) {
     JSContextHandle ctx = get_shared_test_context();
@@ -1237,8 +1237,11 @@ TEST(test_dom_intersection_observer_geometry) {
         "globalThis.__iohid=mk('iohid','height:50px;display:none');"
         "globalThis.__ioo=new IntersectionObserver(function(es){ es.forEach(function(e){ globalThis.__iolast=e; __iolog.push(e.target.id+':'+e.isIntersecting); }); });"
         "__ioo.observe(__ioin); __ioo.observe(__iobelow); __ioo.observe(__iohid); 1"));
+    /* Reported at the next rendering opportunity, not as a microtask. */
     JSContextHandle pctx = ctx;
     while (JS_ExecutePendingJob(JS_GetRuntime(ctx), &pctx) > 0) {}
+    ASSERT_EQ(1, js_int(ctx, "__iolog.length===0"));
+    ASSERT_TRUE(intersection_observers_tick(ctx) >= 1);
     if (js_int(ctx, "__iolog.join(' ')==='ioin:true iobelow:false iohid:false'") != 1) {
         GCValue v = JS_Eval(ctx, "__iolog.join(' ')", 17, "<t>", JS_EVAL_TYPE_GLOBAL);
         const char *s = JS_ToCString(ctx, v);

@@ -3070,16 +3070,17 @@ static GCValue io_compute(JSContextHandle ctx, GCValue observer, GCValue target,
 }
 
 /* Deliver entries for the targets whose threshold state changed since the
- * last delivery (every target once after observe()). */
-static void io_update(JSContextHandle ctx, GCValue observer) {
+ * last delivery (every target once after observe()); whether it called the
+ * callback. */
+static bool io_update(JSContextHandle ctx, GCValue observer) {
     IntersectionObserverDataHandle io = JS_GetOpaqueHandle2(ctx, observer, js_intersection_observer_class_id);
-    if (SAFE_IS_NULL(io)) return;
+    if (SAFE_IS_NULL(io)) return false;
     GCValue cb = SAFE_GET_OR(io, IntersectionObserverDataHandle, callback, JS_NULL);
-    if (!JS_IsFunction(ctx, cb)) return;
+    if (!JS_IsFunction(ctx, cb)) return false;
     GCValue targets = js_intersection_observer_targets(ctx, observer);
     uint32_t len = 0;
     JS_ToUint32(ctx, &len, JS_GetPropertyStr(ctx, targets, "length"));
-    if (!len) return;
+    if (!len) return false;
     GCValue states = JS_GetPropertyStr(ctx, observer, "__io_state");
     if (!JS_IsArray(ctx, states)) {
         states = JS_NewArray(ctx);
@@ -3098,19 +3099,16 @@ static void io_update(JSContextHandle ctx, GCValue observer) {
         JS_SetPropertyUint32(ctx, states, i, JS_NewInt32(ctx, st));
         JS_SetPropertyUint32(ctx, entries, n++, entry);
     }
-    if (!n) return;
+    if (!n) return false;
     GCValue args[2] = { entries, observer };
     GCValue r = JS_Call(ctx, cb, JS_UNDEFINED, 2, args);
     if (JS_IsException(r)) JS_GetException(ctx);
+    return true;
 }
 
-static GCValue js_intersection_observer_job(JSContextHandle ctx, int argc, GCValue *argv) {
-    if (argc < 1) return JS_UNDEFINED;
-    GCValue observer = argv[0];
-    JS_SetPropertyStr(ctx, observer, "__io_scheduled", JS_FALSE);
-    io_update(ctx, observer);
-    return JS_UNDEFINED;
-}
+/* Targets observe() added since the last update: reported at the next
+ * rendering opportunity, not after the 100 ms the tick waits otherwise. */
+static bool g_io_pending;
 
 /* Observers with targets, for the per-frame update. */
 static GCValue io_registry(JSContextHandle ctx) {
@@ -3126,28 +3124,25 @@ static GCValue io_registry(JSContextHandle ctx) {
 }
 
 /* Called from the event loop: re-evaluate every observer (at most every
- * 100 ms), as a browser does each rendering opportunity, so targets that
- * become visible (or stop being visible) after a layout change are told. */
-void intersection_observers_tick(JSContextHandle ctx) {
+ * 100 ms, or at once when observe() added targets), as a browser does each
+ * rendering opportunity ("update intersection observations"), so targets
+ * that become visible (or stop being visible) after a layout change are
+ * told; all observers against one layout.  Returns the callbacks it ran. */
+int intersection_observers_tick(JSContextHandle ctx) {
     CP_ACC("IntersectionObserver tick");
     static unsigned long long last;
     unsigned long long now = platform_get_time_ms();
-    if (now - last < 100) return;
+    if (!g_io_pending && now - last < 100) return 0;
+    g_io_pending = false;
     last = now;
     GCValue global = JS_GetGlobalObject(ctx);
     GCValue reg = JS_GetPropertyStr(ctx, global, "__cyber_io_observers");
-    if (!JS_IsArray(ctx, reg)) return;
+    if (!JS_IsArray(ctx, reg)) return 0;
     uint32_t len = 0;
     JS_ToUint32(ctx, &len, JS_GetPropertyStr(ctx, reg, "length"));
-    for (uint32_t i = 0; i < len; i++) io_update(ctx, JS_GetPropertyUint32(ctx, reg, i));
-}
-
-static void js_intersection_observer_schedule(JSContextHandle ctx, GCValue observer) {
-    GCValue scheduled = JS_GetPropertyStr(ctx, observer, "__io_scheduled");
-    if (JS_ToBool(ctx, scheduled)) return;
-    JS_SetPropertyStr(ctx, observer, "__io_scheduled", JS_TRUE);
-    GCValue args[1] = { observer };
-    JS_EnqueueJob(ctx, js_intersection_observer_job, 1, args);
+    int ran = 0;
+    for (uint32_t i = 0; i < len; i++) ran += io_update(ctx, JS_GetPropertyUint32(ctx, reg, i));
+    return ran;
 }
 
 // IntersectionObserver.prototype.observe(target)
@@ -3172,7 +3167,7 @@ GCValue js_intersection_observer_observe(JSContextHandle ctx, GCValue this_val, 
         JS_ToUint32(ctx, &rl, JS_GetPropertyStr(ctx, reg, "length"));
         JS_SetPropertyUint32(ctx, reg, rl, this_val);
     }
-    js_intersection_observer_schedule(ctx, this_val);
+    g_io_pending = true;
     return JS_UNDEFINED;
 }
 
@@ -3212,7 +3207,6 @@ GCValue js_intersection_observer_disconnect(JSContextHandle ctx, GCValue this_va
     (void)argc; (void)argv;
     JS_SetPropertyStr(ctx, this_val, "__io_targets", JS_NewArray(ctx));
     JS_SetPropertyStr(ctx, this_val, "__io_state", JS_NewArray(ctx));
-    JS_SetPropertyStr(ctx, this_val, "__io_scheduled", JS_FALSE);
     GCValue reg = io_registry(ctx);
     uint32_t rl = 0;
     JS_ToUint32(ctx, &rl, JS_GetPropertyStr(ctx, reg, "length"));
