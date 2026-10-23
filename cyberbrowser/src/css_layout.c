@@ -272,7 +272,7 @@ static const LayoutBox *layout_box_template(void)
         box->align_items = CSS_ALIGN_STRETCH;
         box->font_size = 16.0;
         box->font_size_ratio = 0.0;
-        box->font_family[0] = '\0';
+        box->font_family = "";
         box->font_weight = 400;
         box->font_italic = 0;
         box->font_weight_set = 0;
@@ -288,7 +288,7 @@ static const LayoutBox *layout_box_template(void)
         box->border_color_b = 0.0;
         box->border_color_a = 1.0;
         box->border_color_set = 0;
-        box->background_image_url[0] = '\0';
+        box->background_image_url = "";
         box->color_r = 0.0;
         box->color_g = 0.0;
         box->color_b = 0.0;
@@ -1522,6 +1522,13 @@ static const char *layout_intern(const char *s, size_t n)
     return c;
 }
 
+/* The same, with "" (never NULL) for an empty string or out of memory. */
+static const char *layout_intern_or_empty(const char *s, size_t n)
+{
+    const char *r = n ? layout_intern(s, n) : NULL;
+    return r ? r : "";
+}
+
 /* mask-image / the mask shorthand's image: url() or linear-gradient(). */
 static void layout_parse_mask_image(LayoutBox *box, const char *value, const char *base_url)
 {
@@ -1989,7 +1996,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         /* The shorthand resets omitted longhands: transparent, no image. */
         box->background_color_r = box->background_color_g = box->background_color_b = 0.0;
         box->background_color_a = 0.0;
-        box->background_image_url[0] = '\0';
+        box->background_image_url = "";
         while (*p) {
             while (*p && (isspace((unsigned char)*p) || *p == '/')) p++;
             if (!*p) break;
@@ -2009,7 +2016,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                 if (css_parse_url_value(token, url, sizeof(url)) && url[0]) {
                     char *abs = layout_resolve_url(base_url, url);
                     if (abs) {
-                        snprintf(box->background_image_url, sizeof(box->background_image_url), "%s", abs);
+                        box->background_image_url = layout_intern_or_empty(abs, strlen(abs));
                         free(abs);
                     }
                 }
@@ -2026,11 +2033,11 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         if (css_parse_url_value(value, url, sizeof(url)) && url[0]) {
             char *abs = layout_resolve_url(base_url, url);
             if (abs) {
-                snprintf(box->background_image_url, sizeof(box->background_image_url), "%s", abs);
+                box->background_image_url = layout_intern_or_empty(abs, strlen(abs));
                 free(abs);
             }
         } else {
-            box->background_image_url[0] = '\0';
+            box->background_image_url = "";
         }
     } else if (strcasecmp(prop, "mask-image") == 0 || strcasecmp(prop, "-webkit-mask-image") == 0 ||
                strcasecmp(prop, "mask") == 0 || strcasecmp(prop, "-webkit-mask") == 0) {
@@ -2225,9 +2232,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         if (*p == '"' || *p == '\'') p++;
         size_t len = 0;
         while (p[len] && p[len] != ',' && p[len] != '"' && p[len] != '\'' && !isspace((unsigned char)p[len])) len++;
-        if (len >= sizeof(box->font_family)) len = sizeof(box->font_family) - 1;
-        memcpy(box->font_family, p, len);
-        box->font_family[len] = '\0';
+        box->font_family = layout_intern_or_empty(p, len);
     } else if (strcasecmp(prop, "font-weight") == 0) {
         int w = 400;
         if (strncasecmp(value, "bold", 4) == 0) w = 700;
@@ -5992,7 +5997,7 @@ static void layout_unset_property(LayoutBox *box, const char *prop)
     else if (strcasecmp(prop, "line-height") == 0) { box->line_height_set = 0; box->line_height = 0.0; box->line_height_ratio = 0.0; }
     else if (strcasecmp(prop, "font-weight") == 0) box->font_weight_set = 0;
     else if (strcasecmp(prop, "font-style") == 0) box->font_italic_set = 0;
-    else if (strcasecmp(prop, "font-family") == 0) box->font_family[0] = '\0';
+    else if (strcasecmp(prop, "font-family") == 0) box->font_family = "";
     else if (strcasecmp(prop, "text-align") == 0) box->text_align_set = 0;
     else if (strcasecmp(prop, "white-space") == 0) box->white_space_set = 0;
     else if (strcasecmp(prop, "visibility") == 0) box->visibility_set = 0;
@@ -6443,9 +6448,7 @@ static void style_finish_box(StylePass *P, LayoutBox *box, const LayoutBox *pare
      * technically not inherited, but it visually propagates to inline
      * descendants; inheriting-when-unset approximates that well. */
     if (parent) {
-        if (!box->font_family[0]) {
-            snprintf(box->font_family, sizeof(box->font_family), "%s", parent->font_family);
-        }
+        if (!box->font_family[0]) box->font_family = parent->font_family;
         if (!box->font_weight_set) box->font_weight = parent->font_weight;
         if (!box->font_italic_set) box->font_italic = parent->font_italic;
         if (!box->text_decoration_set) box->text_decoration = parent->text_decoration;

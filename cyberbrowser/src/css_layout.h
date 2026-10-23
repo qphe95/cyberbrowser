@@ -167,7 +167,8 @@ typedef struct LayoutBox {
 
     /* Resolved typography. */
     double font_size;
-    char   font_family[64];
+    /* First font-family name, interned (lives for the process; "" unset). */
+    const char *font_family;
     /* Font weight 100..900 (400 = normal, 700 = bold) and italic flag. */
     int    font_weight;
     unsigned char font_italic;
@@ -210,8 +211,8 @@ typedef struct LayoutBox {
     unsigned char list_style_type;   /* 0=none, 1=disc, 2=circle, 3=square, 4=decimal */
     unsigned char list_style_type_set;
 
-    /* Background image URL, if any. */
-    char   background_image_url[256];
+    /* Background image URL, interned (lives for the process; "" none). */
+    const char *background_image_url;
 
     /* mask-image: an absolute image URL (mask_kind 1) or the text of a
      * linear-gradient(...) (mask_kind 2), interned (lives for the process);
