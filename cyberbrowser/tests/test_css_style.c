@@ -456,6 +456,8 @@ static char *layout_signature(const char *html, const char *css_extra)
     Buf sig = {0};
     for (int i = 0; i < ctx.tree.count; i++) {
         LayoutBox *b = &ctx.boxes[i];
+        /* (inside display:none: only display is set) */
+        if (b->flags & LAYOUT_STYLE_SKIPPED) { buf_add(&sig, "%d skipped|", i); continue; }
         buf_add(&sig, "%d %.6f %.6f %.6f %.6f %.4f %d %d %.4f %.4f %.4f %.4f %d %s|", i,
                 b->x, b->y, b->width, b->height, b->s->font_size, (int)b->s->display, b->s->font_weight,
                 b->s->color_r, b->s->color_g, b->margin_left, b->padding_top, (int)b->s->visibility,
