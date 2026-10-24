@@ -10482,11 +10482,18 @@ typedef struct LayoutFlowBuf {
     LayoutBox *exit;            /* geometry when that call returned */
     LayoutBox *snap1, *snap2;   /* every box after the flow pass, after absolute positioning */
     uint8_t *pass;              /* 1: laid out in the flow pass, 2: in absolute positioning */
-    uint8_t *ok;                /* may be a reuse root (bit 0: in the flow pass, bit 1: absolute) */
+    uint8_t *ok;                /* may be a reuse root (bit 0: in the flow pass, bit 1: absolute,
+                                   bit 2: the containing blocks of what is absolutely
+                                   positioned below are inside) */
     uint8_t *noreuse;           /* laid out with floats placed */
     uint8_t *gen;               /* its text had generated content */
+    uint8_t *copied;            /* its ok and cb are the record's (reused in the absolute pass) */
+    int *cb;                    /* how far below it the highest containing block of what is
+                                   absolutely positioned below is (< 0: above it; FLOW_NO_CB) */
     int *first_child, *next_sibling;
 } LayoutFlowBuf;
+
+#define FLOW_NO_CB (1 << 20)
 
 typedef struct LayoutFlow {
     LayoutFlowBuf rec, cur;     /* the last layout's record, this one's */
@@ -10496,6 +10503,8 @@ typedef struct LayoutFlow {
     unsigned char pass;         /* calls recorded in: 1 flow, 2 absolute positioning (0: none) */
     bool reuse;                 /* rec is good for this layout */
     uint8_t *clean;             /* per index of this layout: its subtree is as recorded */
+    uint8_t *skip;              /* reused in the absolute pass: its subtree is final */
+    int *depth;
     int clean_cap;
 } LayoutFlow;
 
@@ -10516,7 +10525,7 @@ void css_layout_flow_stats(uint64_t *subtrees, uint64_t *boxes)
 static void flow_buf_free(LayoutFlowBuf *b)
 {
     free(b->entry); free(b->exit); free(b->snap1); free(b->snap2);
-    free(b->pass); free(b->ok); free(b->noreuse); free(b->gen);
+    free(b->pass); free(b->ok); free(b->noreuse); free(b->gen); free(b->copied); free(b->cb);
     free(b->first_child); free(b->next_sibling);
     memset(b, 0, sizeof(*b));
 }
@@ -10534,10 +10543,12 @@ static bool flow_buf_ensure(LayoutFlowBuf *b, int n)
     b->ok = (uint8_t *)malloc(m);
     b->noreuse = (uint8_t *)malloc(m);
     b->gen = (uint8_t *)malloc(m);
+    b->copied = (uint8_t *)malloc(m);
+    b->cb = (int *)malloc(m * sizeof(int));
     b->first_child = (int *)malloc(m * sizeof(int));
     b->next_sibling = (int *)malloc(m * sizeof(int));
     if (!b->entry || !b->exit || !b->snap1 || !b->snap2 || !b->pass || !b->ok || !b->noreuse || !b->gen ||
-        !b->first_child || !b->next_sibling) {
+        !b->copied || !b->cb || !b->first_child || !b->next_sibling) {
         flow_buf_free(b);
         return false;
     }
@@ -10551,6 +10562,8 @@ static void layout_flow_free(LayoutFlow *F)
     flow_buf_free(&F->rec);
     flow_buf_free(&F->cur);
     free(F->clean);
+    free(F->skip);
+    free(F->depth);
     free(F);
 }
 
@@ -10598,14 +10611,18 @@ static void layout_flow_begin(LayoutContext *ctx)
     if (!F) F = ctx->flow = (LayoutFlow *)calloc(1, sizeof(LayoutFlow));
     if (!F || !flow_buf_ensure(&F->cur, n)) return;
     if (F->clean_cap < n) {
-        free(F->clean);
+        free(F->clean); free(F->skip); free(F->depth);
         F->clean = (uint8_t *)malloc((size_t)n + 1);
-        F->clean_cap = F->clean ? n : 0;
-        if (!F->clean) return;
+        F->skip = (uint8_t *)malloc((size_t)n + 1);
+        F->depth = (int *)malloc(((size_t)n + 1) * sizeof(int));
+        F->clean_cap = F->clean && F->skip && F->depth ? n : 0;
+        if (!F->clean_cap) return;
     }
     memset(F->cur.entry, 0, (size_t)n * sizeof(uint64_t));
     memset(F->cur.pass, 0, (size_t)n);
     memset(F->cur.noreuse, 0, (size_t)n);
+    memset(F->cur.copied, 0, (size_t)n);
+    memset(F->skip, 0, (size_t)n);
     F->cur.n = n;
     F->pass = 1;
     F->reuse = F->rec_valid && F->epoch == g_flow_epoch && F->vw == ctx->viewport_width &&
@@ -10638,6 +10655,8 @@ static void layout_flow_begin(LayoutContext *ctx)
         clean[i] = c;
     }
 }
+
+static int layout_positioned_ancestor(LayoutContext *ctx, int idx);
 
 static bool flow_parent_is_row(LayoutContext *ctx, int i)
 {
@@ -10684,6 +10703,7 @@ static void flow_reuse_children(LayoutContext *ctx, LayoutFlow *F, const LayoutB
         flow_shift(&C->exit[c], dx, dy);
         C->pass[c] = R->pass[oc];
         C->noreuse[c] = R->noreuse[oc];
+        if (F->pass == 2) { C->ok[c] = R->ok[oc]; C->cb[c] = R->cb[oc]; C->copied[c] = 1; }
         flow_reuse_children(ctx, F, snap, c, oc, dx, dy, mx, my);
     }
 }
@@ -10702,7 +10722,10 @@ static bool flow_try(LayoutContext *ctx, LayoutFlow *F, int idx, uint64_t entry)
     const LayoutFlowBuf *R = &F->rec;
     int o = ctx->flow_old ? ctx->flow_old[idx] : idx;
     unsigned char pass = F->pass;
-    if (o < 0 || R->pass[o] != pass || !(R->ok[o] & (pass == 2 ? 2 : 1)) || R->entry[o] != entry) return false;
+    /* (in the absolute pass, what is absolutely positioned below is placed
+     * against containing blocks inside: the record has it placed) */
+    uint8_t need = pass == 2 ? 6 : 1;
+    if (o < 0 || R->pass[o] != pass || (R->ok[o] & need) != need || R->entry[o] != entry) return false;
     const LayoutBox *snap = pass == 2 ? R->snap2 : R->snap1;
     LayoutBox *r = &ctx->boxes[idx];
     double x = r->x, y = r->y;
@@ -10716,6 +10739,12 @@ static bool flow_try(LayoutContext *ctx, LayoutFlow *F, int idx, uint64_t entry)
     F->cur.entry[idx] = entry;
     F->cur.exit[idx] = *r;
     F->cur.pass[idx] = pass;
+    if (pass == 2) {
+        F->cur.ok[idx] = R->ok[o];
+        F->cur.cb[idx] = R->cb[o];
+        F->cur.copied[idx] = 1;
+        F->skip[idx] = 1;   /* (layout_position_absolute_subtree: its subtree is final) */
+    }
     flow_reuse_children(ctx, F, snap, idx, o, dx, dy, mx, my);
     atomic_fetch_add(&g_flow_hits, 1);
     atomic_fetch_add(&g_flow_hit_boxes, (uint64_t)g_lpar.subtree[idx]);
@@ -10760,18 +10789,32 @@ static void layout_flow_end(LayoutContext *ctx)
         C->next_sibling[i] = ctx->tree.nodes[i].next_sibling_idx;
         C->gen[i] = layout_has_gen(ctx, i);
     }
+    int *depth = F->depth;
+    for (int k = 0; k < n; k++) {
+        int i = ctx->tree.preorder[k], p = ctx->tree.nodes[i].parent_idx;
+        depth[i] = p >= 0 ? depth[p] + 1 : 0;
+    }
     for (int k = n - 1; k >= 0; k--) {
         int i = ctx->tree.preorder[k];
+        if (C->copied[i]) continue;
         const LayoutBox *b = &ctx->boxes[i];
         bool ok = !C->noreuse[i] && b->s->float_side == 0;
         bool ok_abs = ok;
-        for (int c = ctx->tree.nodes[i].first_child_idx; (ok || ok_abs) && c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+        int cb = FLOW_NO_CB;
+        for (int c = ctx->tree.nodes[i].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
             const LayoutStyle *cs = ctx->boxes[c].s;
-            bool c_out = cs->position == CSS_POSITION_ABSOLUTE || cs->position == CSS_POSITION_FIXED;
-            ok = ok && (C->ok[c] & 1) && cs->position != CSS_POSITION_FIXED && !flow_stray(C->snap1, i, c, cs->display);
-            ok_abs = ok_abs && (C->ok[c] & 2) && !c_out && !flow_stray(C->snap2, i, c, cs->display);
+            bool fixed = cs->position == CSS_POSITION_FIXED;
+            ok = ok && (C->ok[c] & 1) && !fixed && !flow_stray(C->snap1, i, c, cs->display);
+            ok_abs = ok_abs && (C->ok[c] & 2) && !fixed && !flow_stray(C->snap2, i, c, cs->display);
+            if (C->cb[c] != FLOW_NO_CB && C->cb[c] + 1 < cb) cb = C->cb[c] + 1;
+            if (cs->position == CSS_POSITION_ABSOLUTE) {
+                int a = layout_positioned_ancestor(ctx, c);
+                int v = a >= 0 ? depth[a] - depth[i] : -FLOW_NO_CB;
+                if (v < cb) cb = v;
+            }
         }
-        C->ok[i] = (uint8_t)((ok ? 1 : 0) | (ok_abs ? 2 : 0));
+        C->cb[i] = cb;
+        C->ok[i] = (uint8_t)((ok ? 1 : 0) | (ok_abs ? 2 : 0) | (cb >= 0 ? 4 : 0));
     }
     LayoutFlowBuf t = F->rec;
     F->rec = F->cur;
@@ -11208,6 +11251,8 @@ static void layout_position_absolute_subtree(LayoutContext *ctx, int idx)
 {
     LayoutBox *box = layout_box(ctx, idx);
     if (box->s->display == CSS_DISPLAY_NONE) return;
+    /* (reused in this pass: what is absolutely positioned in it is placed) */
+    if (ctx->flow && ctx->flow->pass == 2 && ctx->flow->skip[idx]) return;
     if (box->s->position == CSS_POSITION_ABSOLUTE || box->s->position == CSS_POSITION_FIXED) {
         layout_position_absolute_box(ctx, idx);
     }
