@@ -99,6 +99,7 @@ static inline void gc_assert_initialized(void) {
 #include "libregexp.h"
 #include "libunicode.h"
 #include "js_struct_index.h"
+#include "gc_platform.h"
 
 /* forward declaration - function defined in js_quickjs.c */
 void js_quickjs_on_global_var_defined(JSContextHandle ctx, JSAtom var_name);
@@ -723,6 +724,7 @@ static GCValue js_trigger_lazy_function(JSContextHandle ctx, GCValue lazy_func,
                                         GCValue this_obj, GCValue new_target,
                                         int argc, GCValue *argv, int flags);
 static int js_lazy_ensure_compiled(JSObjectHandle p);
+static void lazy_units_quiesce(void);
 static GCValue js_resume_lazy_parse(JSContextHandle ctx,
                                     JSFunctionBytecodeHandle lazy_b,
                                     GCValue lazy_func,
@@ -2084,6 +2086,8 @@ void JS_FreeRuntime(JSRuntimeHandle rt)
     int i;
 
     QJS_LOGI("JS_FreeRuntime: ENTER");
+    /* No compile worker reads the runtime's heap any more. */
+    lazy_units_quiesce();
     /* No concurrent collection while the runtime is torn down. */
     gc_background_stop();
     js_c_frame_pool_clear(TRUE);
@@ -25334,6 +25338,27 @@ static JSAtom cenv_atom_units(CompileEnv *env, const void *data, uint32_t len, i
 {
     uint32_t hash, h, i;
 
+    if (wide) {
+        /* narrow when every unit fits in a byte, as the runtime's strings */
+        const uint16_t *w = (const uint16_t *)data;
+        for (i = 0; i < len && w[i] < 0x100; i++)
+            ;
+        if (i == len) {
+            uint8_t sbuf[256], *b = len <= sizeof(sbuf) ? sbuf : (uint8_t *)js_plain_realloc(NULL, len);
+            JSAtom a;
+            if (!b) {
+                cenv_record_error(env, JS_INTERNAL_ERROR, "out of memory");
+                return JS_ATOM_NULL;
+            }
+            for (i = 0; i < len; i++)
+                b[i] = (uint8_t)w[i];
+            a = cenv_atom_units(env, b, len, 0);
+            if (b != sbuf)
+                js_plain_free(b);
+            return a;
+        }
+    }
+
     /* canonical integer index */
     if (!wide && len > 0 && len <= 10) {
         const uint8_t *p = (const uint8_t *)data;
@@ -25550,6 +25575,8 @@ static JSAtom cenv_atom_to_runtime(CompileEnv *env, JSContextHandle ctx, JSAtom 
     GCValue v;
     if (!n)
         return a;   /* predefined or an integer */
+    if (!n->wide && count_ascii(env->text + n->off, n->len) == n->len)
+        return JS_NewAtomLen(ctx, (const char *)(env->text + n->off), n->len);
     if (n->wide)
         v = js_new_string16_len(ctx, (const uint16_t *)(env->text + n->off), (int)n->len);
     else
@@ -42129,6 +42156,8 @@ static void cconst_release(JSFunctionDef *fd)
     pvec_free(&fd->tmpl_strs);
 }
 
+static uint64_t g_lq_stats_remap_ns;
+
 /* The runtime atom of a stencil env's atom, made once per name. */
 static JSAtom cenv_atom_to_runtime_cached(CompileEnv *env, JSContextHandle ctx, JSAtom a)
 {
@@ -42136,16 +42165,35 @@ static JSAtom cenv_atom_to_runtime_cached(CompileEnv *env, JSContextHandle ctx, 
     if (!cenv_local_name(env, a))
         return a;
     if (env->rt_atoms_n < env->names.count) {
-        JSAtom *t = (JSAtom *)js_plain_realloc(env->rt_atoms, sizeof(JSAtom) * env->names.count);
+        int n = env->names.count + 16;
+        JSAtom *t = (JSAtom *)js_plain_realloc(env->rt_atoms, sizeof(JSAtom) * n);
         if (!t)
             return JS_ATOM_NULL;
-        memset(t + env->rt_atoms_n, 0, sizeof(JSAtom) * (env->names.count - env->rt_atoms_n));
+        memset(t + env->rt_atoms_n, 0, sizeof(JSAtom) * (n - env->rt_atoms_n));
         env->rt_atoms = t;
-        env->rt_atoms_n = env->names.count;
+        env->rt_atoms_n = n;
     }
     if (!env->rt_atoms[i])
         env->rt_atoms[i] = cenv_atom_to_runtime(env, ctx, a);
     return env->rt_atoms[i];
+}
+
+/* Record that local atom l is runtime atom a (an imported name). */
+static void cenv_note_runtime_atom(CompileEnv *env, JSAtom l, JSAtom a)
+{
+    uint32_t i = l - CENV_LOCAL_ATOM_BASE;
+    if (!cenv_local_name(env, l))
+        return;
+    if (env->rt_atoms_n < env->names.count) {
+        int n = env->names.count + 16;
+        JSAtom *t = (JSAtom *)js_plain_realloc(env->rt_atoms, sizeof(JSAtom) * n);
+        if (!t)
+            return;
+        memset(t + env->rt_atoms_n, 0, sizeof(JSAtom) * (n - env->rt_atoms_n));
+        env->rt_atoms = t;
+        env->rt_atoms_n = n;
+    }
+    env->rt_atoms[i] = a;
 }
 
 /* A finished definition of a stencil env: its atoms become runtime atoms
@@ -42297,9 +42345,14 @@ static GCValue js_instantiate_function(JSContextHandle ctx, JSFunctionDef *fd)
     int closure_var_offset, vardefs_offset;
     BOOL strip_var_debug;
 
-    if (fd->env && fd->env->stencil && cenv_remap_function(fd->env, ctx, fd)) {
-        JS_ThrowOutOfMemory(ctx);
-        goto fail;
+    if (fd->env && fd->env->stencil) {
+        uint64_t t0 = gc_os_now_ns();
+        int rr = cenv_remap_function(fd->env, ctx, fd);
+        g_lq_stats_remap_ns += gc_os_now_ns() - t0;
+        if (rr) {
+            JS_ThrowOutOfMemory(ctx);
+            goto fail;
+        }
     }
 
     /* the child functions first */
@@ -43666,6 +43719,8 @@ static __exception int js_parse_function_decl2(JSParseState *s,
  * capture (rare: only if the preparse missed one) resolve as globals,
  * appended after the stub's entries.  Returns the new bytecode handle, or
  * GC_HANDLE_NULL with an exception pending. */
+static GCHandle js_lazy_compile_any(JSContextHandle ctx, JSFunctionBytecodeHandle stub_b);
+
 static GCHandle js_lazy_compile(JSContextHandle ctx, JSFunctionBytecodeHandle stub_b)
 {
     JSLazyParseState *state = js_bc_resume_parse_state(stub_b);
@@ -43937,7 +43992,7 @@ static int js_lazy_ensure_compiled(JSObjectHandle p)
         if (parse_stats_enabled()) {
             uint64_t t0 = gc_os_now_ns();
             g_parse_stats.in_lazy++;
-            compiled = js_lazy_compile(ctx, lazy_b);
+            compiled = js_lazy_compile_any(ctx, lazy_b);
             g_parse_stats.in_lazy--;
             g_parse_stats.lazy_ns += parse_stats_since(t0);
             g_parse_stats.lazy_n++;
@@ -43945,7 +44000,7 @@ static int js_lazy_ensure_compiled(JSObjectHandle p)
             if (state)
                 g_parse_stats.lazy_bytes += state->source_len;
         } else {
-            compiled = js_lazy_compile(ctx, lazy_b);
+            compiled = js_lazy_compile_any(ctx, lazy_b);
         }
         SAFE_SET(lazy_b, JSFunctionBytecodeHandle, func_parse_state, JS_FUNC_LAZY);
         if (compiled == GC_HANDLE_NULL)
@@ -44116,7 +44171,8 @@ typedef struct StencilVerify {
     int mismatches;
 } StencilVerify;
 
-static struct { int scripts, same, failed, differ, inst_same, inst_failed, inst_differ; } g_stencil_verify;
+static struct { int scripts, same, failed, differ, inst_same, inst_failed, inst_differ,
+                lazy_same, lazy_failed, lazy_differ; } g_stencil_verify;
 
 static void stencil_verify_report(void)
 {
@@ -44125,6 +44181,8 @@ static void stencil_verify_report(void)
             g_stencil_verify.differ);
     fprintf(stderr, "[stencil-verify] instantiated: same %d, failed %d, differ %d\n",
             g_stencil_verify.inst_same, g_stencil_verify.inst_failed, g_stencil_verify.inst_differ);
+    fprintf(stderr, "[stencil-verify] lazy units: same %d, failed %d, differ %d\n",
+            g_stencil_verify.lazy_same, g_stencil_verify.lazy_failed, g_stencil_verify.lazy_differ);
 }
 
 /* r is a runtime atom, l the stencil env's. */
@@ -44396,6 +44454,812 @@ static void stencil_verify_instantiate(StencilVerifyKeep *k, GCValue fun_obj)
     stencil_verify_keep_free(k);
 }
 
+/* ---- Lazy units (PARALLEL_PARSE_DESIGN.md 5.1, 5.3) ----
+ * The compile of a lazy function's body as a unit of its own: the JS
+ * thread takes from the stub what the compile reads (lazy_unit_new: the
+ * stub's state, closure variables and names, the names in the unit's
+ * stencil env), the compile itself (lazy_unit_compile) uses only the unit
+ * and the immutable source, so it runs on a compile worker or on the JS
+ * thread, and the JS thread instantiates the stencil
+ * (lazy_unit_instantiate).  A unit whose compile fails is compiled
+ * serially, which raises the real error.
+ *
+ * States: IDLE (not queued) or QUEUED, then RUNNING (a worker has it) or
+ * TAKEN (the JS thread compiles it), then DONE or FAILED; the JS thread
+ * waits on the state word while a worker runs the unit.  References: one
+ * for the stub (the JS thread's) and one while the unit is in the queue;
+ * the JS thread frees a unit (its root is the JS thread's), a worker that
+ * drops the last reference hands it to the JS thread (lazy_units_reap). */
+enum {
+    LU_IDLE, LU_QUEUED, LU_RUNNING, LU_TAKEN, LU_DONE, LU_FAILED,
+};
+
+typedef struct LazyUnitCV {
+    JSAtom name;      /* the unit env's */
+    uint8_t closure_type, is_const, is_lexical, var_kind;
+} LazyUnitCV;
+
+typedef struct LazyUnitOut {
+    JSParseState ps;              /* its arena holds the stencil's strings */
+    JSFunctionDef *proxy;         /* finished, until instantiated */
+    int cpool_idx;
+} LazyUnitOut;
+
+typedef struct LazyUnit {
+    _Atomic uint32_t state;
+    _Atomic int refs;
+    struct LazyUnit *next_dead;
+    uint64_t t_start, compile_ns;   /* stats: when a worker started it, how long it took */
+    uint64_t t_queued;              /* stats: when it was queued */
+    uint8_t from_body;              /* stats: spawned by a body's instantiation (not a script) */
+    /* inputs, made on the JS thread and read-only after */
+    JSContextHandle ctx;
+    GCHandle src;                 /* the script source (held by lazy_src_hold) */
+    const uint8_t *buf_start, *buf_end;
+    JSLazyParseState st;          /* the stub's (its numbers and flags) */
+    char *filename;
+    int nstub;
+    LazyUnitCV *cvs;
+    JSAtom *args;                 /* the unit env's */
+    JSAtom func_name;
+    CompileEnv env;
+    /* output */
+    LazyUnitOut *out;
+} LazyUnit;
+
+/* The sources units read: one root per source, however many units. */
+typedef struct LazySrc { GCHandle h; int n; char *filename; } LazySrc;
+static PVec g_lazy_srcs;   /* of LazySrc */
+static int g_lazy_src_last;
+
+/* Hold source h for a unit of stub_b; its filename (shared by the source's
+ * units), or NULL. */
+static char *lazy_src_hold(JSContextHandle ctx, GCHandle h, JSFunctionBytecodeHandle stub_b)
+{
+    int i = g_lazy_src_last;
+    LazySrc ls = { h, 1, NULL };
+    if (i < g_lazy_srcs.count && PVEC_AT(g_lazy_srcs, LazySrc, i).h == h) {
+        PVEC_AT(g_lazy_srcs, LazySrc, i).n++;
+        return PVEC_AT(g_lazy_srcs, LazySrc, i).filename;
+    }
+    for (i = 0; i < g_lazy_srcs.count; i++) {
+        if (PVEC_AT(g_lazy_srcs, LazySrc, i).h == h) {
+            PVEC_AT(g_lazy_srcs, LazySrc, i).n++;
+            g_lazy_src_last = i;
+            return PVEC_AT(g_lazy_srcs, LazySrc, i).filename;
+        }
+    }
+    {
+        const char *fn = NULL;
+        if (SAFE_GET_OR(stub_b, JSFunctionBytecodeHandle, has_debug, 0) &&
+            SAFE_GET_OR(stub_b, JSFunctionBytecodeHandle, debug.filename, JS_ATOM_NULL) != JS_ATOM_NULL)
+            fn = JS_AtomToCString(ctx, SAFE_GET_OR(stub_b, JSFunctionBytecodeHandle, debug.filename, JS_ATOM_NULL));
+        if (!fn)
+            fn = "<lazy>";
+        ls.filename = (char *)js_plain_realloc(NULL, strlen(fn) + 1);
+        if (ls.filename)
+            strcpy(ls.filename, fn);
+    }
+    if (!ls.filename || !pvec_push(&g_lazy_srcs, sizeof(LazySrc), &ls)) {
+        js_plain_free(ls.filename);
+        return NULL;
+    }
+    g_lazy_src_last = g_lazy_srcs.count - 1;
+    gc_add_root(h);
+    return ls.filename;
+}
+
+static void lazy_src_release(GCHandle h)
+{
+    int i;
+    for (i = g_lazy_srcs.count; i-- > 0;) {
+        LazySrc *ls = &PVEC_AT(g_lazy_srcs, LazySrc, i);
+        if (ls->h == h) {
+            if (--ls->n == 0) {
+                gc_remove_root(h);
+                js_plain_free(ls->filename);
+                *ls = PVEC_AT(g_lazy_srcs, LazySrc, g_lazy_srcs.count - 1);
+                g_lazy_srcs.count--;
+            }
+            return;
+        }
+    }
+}
+
+/* A runtime atom as an atom of the stencil env (on the JS thread). */
+static JSAtom cenv_import_atom(CompileEnv *env, JSContextHandle ctx, JSAtom a)
+{
+    GCValue v;
+    JSStringHandle p;
+    if (a == JS_ATOM_NULL || __JS_AtomIsTaggedInt(a) || a < JS_ATOM_END)
+        return a;
+    if (JS_AtomGetKind(ctx, a) != JS_ATOM_KIND_STRING)
+        return cenv_unsupported(env, "symbol name");
+    v = JS_AtomToString(ctx, a);
+    if (JS_IsException(v))
+        return cenv_unsupported(env, "atom text");
+    p = JS_VALUE_GET_STRING(v);
+    {
+        JSAtom l;
+        if (SAFE_GET_OR(p, JSStringHandle, is_wide_char, 0))
+            l = cenv_atom_units(env, SAFE_GET_OR(p, JSStringHandle, u.str16, NULL),
+                                SAFE_GET_OR(p, JSStringHandle, len, 0), 1);
+        else
+            l = cenv_atom_units(env, SAFE_GET_OR(p, JSStringHandle, u.str8, NULL),
+                                SAFE_GET_OR(p, JSStringHandle, len, 0), 0);
+        cenv_note_runtime_atom(env, l, a);
+        return l;
+    }
+}
+
+static void lazy_unit_out_free(LazyUnit *u)
+{
+    LazyUnitOut *o = u->out;
+    if (!o)
+        return;
+    if (o->proxy)
+        js_free_function_def(u->ctx, o->proxy);
+    free_token(&o->ps, &o->ps.token);
+    js_parse_cleanup_roots(&o->ps);
+    js_plain_free(o);
+    u->out = NULL;
+}
+
+/* On the JS thread. */
+static void lazy_unit_free(LazyUnit *u)
+{
+    if (!u)
+        return;
+    lazy_unit_out_free(u);
+    cenv_free(&u->env);
+    js_plain_free(u->cvs);
+    js_plain_free(u->args);
+    if (u->src)
+        lazy_src_release(u->src);
+    js_plain_free(u);
+}
+
+/* Units whose last reference a worker dropped, for the JS thread to free. */
+static _Atomic(LazyUnit *) g_lazy_dead;
+static int64_t g_lazy_units_bytes;   /* source bytes of the units alive (JS thread) */
+static int g_lazy_units_alive;
+
+/* Drop a reference: the JS thread's (on_js) or the queue's (a worker). */
+static void lazy_unit_unref(LazyUnit *u, BOOL on_js)
+{
+    if (atomic_fetch_sub_explicit(&u->refs, 1, memory_order_acq_rel) != 1)
+        return;
+    if (on_js) {
+        g_lazy_units_bytes -= u->st.source_len;
+        g_lazy_units_alive--;
+        lazy_unit_free(u);
+        return;
+    }
+    {
+        LazyUnit *head = atomic_load_explicit(&g_lazy_dead, memory_order_relaxed);
+        do {
+            u->next_dead = head;
+        } while (!atomic_compare_exchange_weak_explicit(&g_lazy_dead, &head, u,
+                                                        memory_order_release, memory_order_relaxed));
+    }
+}
+
+/* Free the units workers handed back (on the JS thread). */
+static void lazy_units_reap(void)
+{
+    LazyUnit *u = atomic_exchange_explicit(&g_lazy_dead, NULL, memory_order_acquire);
+    while (u) {
+        LazyUnit *next = u->next_dead;
+        g_lazy_units_bytes -= u->st.source_len;
+        g_lazy_units_alive--;
+        lazy_unit_free(u);
+        u = next;
+    }
+}
+
+/* The unit of stub_b's body, or NULL if it cannot have one (the serial
+ * compile then does it). */
+static LazyUnit *lazy_unit_new(JSContextHandle ctx, JSFunctionBytecodeHandle stub_b)
+{
+    JSLazyParseState *state = js_bc_resume_parse_state(stub_b);
+    LazyUnit *u;
+    int i;
+
+    if (!state || state->source_handle == GC_HANDLE_NULL)
+        return NULL;
+    u = (LazyUnit *)js_plain_calloc(1, sizeof(LazyUnit));
+    if (!u)
+        return NULL;
+    atomic_init(&u->refs, 1);
+    atomic_init(&u->state, LU_IDLE);
+    cenv_init_stencil(&u->env);
+    u->ctx = ctx;
+    u->filename = lazy_src_hold(ctx, state->source_handle, stub_b);
+    if (!u->filename) {
+        cenv_free(&u->env);
+        js_plain_free(u);
+        return NULL;
+    }
+    u->src = state->source_handle;
+    u->st = *state;
+    u->st.unit = NULL;
+    u->buf_start = (const uint8_t *)gc_deref(u->src);
+    u->buf_end = u->buf_start + state->source_total_len;
+    u->func_name = cenv_import_atom(&u->env, ctx, state->func_name);
+    u->nstub = SAFE_GET_OR(stub_b, JSFunctionBytecodeHandle, closure_var_count, 0);
+    if (u->nstub) {
+        u->cvs = (LazyUnitCV *)js_plain_calloc(u->nstub, sizeof(LazyUnitCV));
+        if (!u->cvs)
+            goto fail;
+        for (i = 0; i < u->nstub; i++) {
+            LazyUnitCV *cv = &u->cvs[i];
+            cv->name = cenv_import_atom(&u->env, ctx, js_bc_closure_var_var_name(stub_b, i));
+            cv->closure_type = js_bc_closure_var_closure_type(stub_b, i);
+            cv->is_const = js_bc_closure_var_is_const(stub_b, i);
+            cv->is_lexical = js_bc_closure_var_is_lexical(stub_b, i);
+            cv->var_kind = js_bc_closure_var_var_kind(stub_b, i);
+        }
+    }
+    if (state->arg_count > 0 && state->arg_names_handle != GC_HANDLE_NULL) {
+        const JSAtom *names = (const JSAtom *)gc_deref(state->arg_names_handle);
+        u->args = (JSAtom *)js_plain_calloc(state->arg_count, sizeof(JSAtom));
+        if (!u->args)
+            goto fail;
+        for (i = 0; i < (int)state->arg_count; i++)
+            u->args[i] = cenv_import_atom(&u->env, ctx, names[i]);
+    }
+    if (u->env.has_error)
+        goto fail;
+    g_lazy_units_bytes += u->st.source_len;
+    g_lazy_units_alive++;
+    return u;
+ fail:
+    lazy_unit_free(u);
+    return NULL;
+}
+
+/* Parse and finish the unit's body (js_lazy_compile's work, on the unit
+ * alone): any thread.  0, or -1 (the unit's env says why). */
+static int lazy_unit_compile(LazyUnit *u)
+{
+    JSParseState *s;
+    JSContextHandle ctx = u->ctx;
+    const JSLazyParseState *state = &u->st;
+    JSFunctionDef *proxy = NULL, *fd = NULL;
+    int i, cpool_idx, arg_count = state->arg_count;
+    uint8_t func_type = state->func_type;
+    BOOL strict = state->in_strict_mode;
+
+    gc_forbid_enter();
+    u->out = (LazyUnitOut *)js_plain_calloc(1, sizeof(LazyUnitOut));
+    if (!u->out) {
+        cenv_record_error(&u->env, JS_INTERNAL_ERROR, "out of memory");
+        gc_forbid_leave();
+        return -1;
+    }
+    s = &u->out->ps;
+    GC_SET(s->ctx, ctx);
+    s->env = &u->env;
+    s->filename = u->filename;
+    s->buf_start = u->buf_start;
+    s->buf_end = u->buf_end;
+    s->buf_ptr = s->buf_start + state->source_offset;
+    s->token.val = ' ';
+    s->token.ptr = s->buf_ptr;
+    s->line_num = state->line_num;
+    s->col_num = state->col_num;
+    line_col_cache_init(&s->get_line_col_cache, s->buf_start, s->buf_end, s->buf_ptr,
+                        state->line_num, state->col_num);
+    s->struct_index = state->struct_index;
+    s->allow_html_comments = TRUE;
+    s->enable_lazy_parsing = TRUE;
+    if (strict)
+        s->js_mode = JS_MODE_STRICT;
+
+    /* the proxy: a direct-eval scope over the stub's closure variables */
+    proxy = js_new_function_def(s->env, ctx, NULL, TRUE, FALSE, u->filename,
+                                s->buf_ptr, &s->get_line_col_cache);
+    if (!proxy)
+        goto fail;
+    js_parse_set_cur_func(s, proxy);
+    proxy->eval_type = JS_EVAL_TYPE_DIRECT;
+    proxy->has_this_binding = FALSE;
+    proxy->has_arguments_binding = FALSE;
+    proxy->new_target_allowed = TRUE;
+    proxy->super_call_allowed = TRUE;
+    proxy->super_allowed = TRUE;
+    proxy->arguments_allowed = TRUE;
+    proxy->js_mode = strict ? JS_MODE_STRICT : 0;
+    proxy->func_name = JS_ATOM__eval_;
+    /* nested lazy functions of the body find the root source here */
+    GC_SET(proxy->source_string_handle, u->src);
+    for (i = 0; i < u->nstub; i++) {
+        const LazyUnitCV *cv = &u->cvs[i];
+        int t = cv->closure_type;
+        BOOL is_global = (t == JS_CLOSURE_GLOBAL || t == JS_CLOSURE_GLOBAL_DECL ||
+                          t == JS_CLOSURE_GLOBAL_REF);
+        if (add_closure_var(ctx, proxy,
+                            is_global ? JS_CLOSURE_GLOBAL_REF : JS_CLOSURE_REF, i,
+                            cv->name, cv->is_const, cv->is_lexical,
+                            (JSVarKindEnum)cv->var_kind) < 0)
+            goto fail;
+    }
+    push_scope(s);
+    proxy->body_scope = proxy->scope_level;
+
+    /* the function itself */
+    cpool_idx = cpool_add_function(s);
+    if (cpool_idx < 0)
+        goto fail;
+    fd = js_new_function_def(s->env, ctx, proxy, FALSE, state->is_func_expr, u->filename,
+                             s->buf_ptr, &s->get_line_col_cache);
+    if (!fd)
+        goto fail;
+    fd->parent_cpool_idx = cpool_idx;
+    fd->func_name = u->func_name;
+    fd->func_kind = (JSFunctionKindEnum)state->func_kind;
+    fd->func_type = (JSParseFunctionEnum)func_type;
+    fd->has_prototype = state->has_prototype;
+    fd->has_home_object = state->has_home_object;
+    fd->has_arguments_binding = state->has_arguments_binding;
+    fd->has_this_binding = state->has_this_binding;
+    fd->new_target_allowed = state->new_target_allowed;
+    fd->super_call_allowed = state->super_call_allowed;
+    fd->super_allowed = state->super_allowed;
+    fd->arguments_allowed = state->arguments_allowed;
+    fd->is_derived_class_constructor = (func_type == JS_PARSE_FUNC_DERIVED_CLASS_CONSTRUCTOR);
+    fd->has_simple_parameter_list = TRUE;
+    fd->js_mode = strict ? JS_MODE_STRICT : 0;
+    if (arg_count > 0 && u->args) {
+        for (i = 0; i < arg_count; i++) {
+            if (add_arg(ctx, fd, u->args[i]) < 0)
+                goto fail;
+        }
+        fd->defined_arg_count = arg_count;
+    }
+    js_parse_set_cur_func(s, fd);
+    /* argument scope is 0; the body scope is entered like in
+       js_parse_function_decl2 */
+    if (fd->func_kind == JS_FUNC_GENERATOR || fd->func_kind == JS_FUNC_ASYNC_GENERATOR)
+        emit_op(s, OP_initial_yield);
+    fd->in_function_body = TRUE;
+    push_scope(s);
+    fd->body_scope = fd->scope_level;
+
+    if (next_token(s))
+        goto fail;
+    if (s->token.val != '{') {
+        js_parse_error(s, "lazy function: expected '{'");
+        goto fail;
+    }
+    if (next_token(s))
+        goto fail;
+    /* the body's own directive prologue ("use strict") */
+    if (js_parse_directives(s))
+        goto fail;
+    if ((fd->js_mode & JS_MODE_STRICT) && !strict &&
+        js_parse_function_check_names(s, fd, fd->func_name))
+        goto fail;
+    while (s->token.val != '}') {
+        if (js_parse_source_element(s))
+            goto fail;
+    }
+    if (!fd->strip_source) {
+        GC_SET(fd->source_string_handle, u->src);
+        fd->source_offset = state->func_source_offset;
+        fd->source_len = state->func_source_len;
+    }
+    if (js_is_live_code(s))
+        emit_return(s, FALSE);
+    js_parse_set_cur_func(s, proxy);
+    fd = NULL;  /* now owned by the proxy */
+    emit_return(s, FALSE);
+    if (u->env.has_error || js_finish_function(ctx, proxy))
+        goto fail;
+    u->out->proxy = proxy;
+    u->out->cpool_idx = cpool_idx;
+    gc_forbid_leave();
+    return u->env.has_error ? -1 : 0;
+
+ fail:
+    if (proxy)
+        js_free_function_def(ctx, proxy);
+    else if (fd)
+        js_free_function_def(ctx, fd);
+    if (!u->env.has_error)
+        cenv_record_error(&u->env, JS_INTERNAL_ERROR, "lazy unit: compile failed");
+    gc_forbid_leave();
+    return -1;
+}
+
+static void lazy_units_spawn_root(JSContextHandle ctx, JSFunctionBytecodeHandle b);
+static uint8_t g_lq_spawning_body;
+
+/* The bytecode of a compiled unit (on the JS thread), or GC_HANDLE_NULL
+ * with an exception.  The unit's stencil is consumed. */
+static GCHandle lazy_unit_instantiate(JSContextHandle ctx, LazyUnit *u)
+{
+    GCValue proxy_obj, child;
+    JSFunctionBytecodeHandle pb;
+    GCHandle result;
+
+    proxy_obj = js_instantiate_function(ctx, u->out->proxy);
+    u->out->proxy = NULL;
+    if (JS_IsException(proxy_obj))
+        return GC_HANDLE_NULL;
+    pb = (JSFunctionBytecodeHandle)GC_VALUE_GET_HANDLE(proxy_obj);
+    child = js_bc_cpool_value(pb, u->out->cpool_idx);
+    if (JS_VALUE_GET_TAG(child) != JS_TAG_FUNCTION_BYTECODE) {
+        JS_ThrowInternalError(ctx, "lazy function: no bytecode");
+        return GC_HANDLE_NULL;
+    }
+    result = GC_VALUE_GET_HANDLE(child);
+    SAFE_SET((JSFunctionBytecodeHandle)result, JSFunctionBytecodeHandle,
+             func_parse_state, JS_FUNC_PARSED);
+    return result;
+}
+
+/* ---- The compile workers ----
+ * Threads that compile queued units (CYBER_COMPILE_THREADS=<n>, 0 for
+ * none).  Units are queued in batches, one per script or body just made,
+ * in source order; workers take from the newest batch first (the code about
+ * to run is the code just made).  Batches are only appended (by the JS
+ * thread) and freed when the runtime goes, so workers walk them freely. */
+#define LQ_STACK (8u << 20)
+#define LQ_MAX_THREADS 16
+typedef struct LQBatch {
+    struct LQBatch *next;           /* older */
+    uint32_t n;
+    _Atomic uint32_t cursor;        /* the next unit to take */
+    LazyUnit *units[];
+} LQBatch;
+static _Atomic(LQBatch *) g_lq_top;
+static _Atomic uint32_t g_lq_wake, g_lq_paused, g_lq_running;
+static GCThread g_lq_threads[LQ_MAX_THREADS];
+static int g_lq_nthreads = -1;
+static struct {
+    _Atomic uint64_t compiled, failed, worker_ns;
+    uint64_t taken, waited, wait_ns, instantiated, instantiate_ns, units, spawn_ns, serial;
+    uint64_t waited_compile_ns, waited_head_ns;
+} g_lq_stats;
+
+static LazyUnit *lq_pop(void)
+{
+    LQBatch *b;
+    for (b = atomic_load_explicit(&g_lq_top, memory_order_acquire); b; b = b->next) {
+        uint32_t i = atomic_load_explicit(&b->cursor, memory_order_relaxed);
+        while (i < b->n) {
+            if (atomic_compare_exchange_weak_explicit(&b->cursor, &i, i + 1,
+                                                      memory_order_acq_rel, memory_order_relaxed))
+                return b->units[i];
+        }
+    }
+    return NULL;
+}
+
+/* Publish units[0..n) as the newest batch (on the JS thread). */
+static BOOL lq_push_batch(LazyUnit **units, uint32_t n)
+{
+    LQBatch *b = (LQBatch *)js_plain_realloc(NULL, sizeof(LQBatch) + n * sizeof(LazyUnit *));
+    if (!b)
+        return FALSE;
+    b->n = n;
+    atomic_init(&b->cursor, 0);
+    memcpy(b->units, units, n * sizeof(LazyUnit *));
+    b->next = atomic_load_explicit(&g_lq_top, memory_order_relaxed);
+    atomic_store_explicit(&g_lq_top, b, memory_order_release);
+    atomic_fetch_add_explicit(&g_lq_wake, 1, memory_order_release);
+    gc_os_wake_all((volatile uint32_t *)&g_lq_wake);
+    return TRUE;
+}
+
+static void lq_worker(void *arg)
+{
+    uintptr_t limit = gc_os_stack_base() - LQ_STACK + (256u << 10);
+    (void)arg;
+    for (;;) {
+        uint32_t seen = atomic_load_explicit(&g_lq_wake, memory_order_acquire);
+        LazyUnit *u = lq_pop();
+        if (!u) {
+            gc_os_wait((volatile uint32_t *)&g_lq_wake, seen, 100);
+            continue;
+        }
+        {
+            uint32_t expected = LU_QUEUED;
+            atomic_fetch_add_explicit(&g_lq_running, 1, memory_order_acq_rel);
+            if (!atomic_load_explicit(&g_lq_paused, memory_order_acquire) &&
+                atomic_compare_exchange_strong_explicit(&u->state, &expected, LU_RUNNING,
+                                                        memory_order_acq_rel, memory_order_acquire)) {
+                uint64_t t0 = gc_os_now_ns();
+                int r;
+                u->t_start = t0;
+                u->env.stack_limit = limit;
+                r = lazy_unit_compile(u);
+                u->compile_ns = gc_os_now_ns() - t0;
+                atomic_fetch_add_explicit(&g_lq_stats.worker_ns, gc_os_now_ns() - t0, memory_order_relaxed);
+                atomic_fetch_add_explicit(r ? &g_lq_stats.failed : &g_lq_stats.compiled, 1, memory_order_relaxed);
+                if (r && parse_stats_enabled() && atomic_load_explicit(&g_lq_stats.failed, memory_order_relaxed) <= 10)
+                    fprintf(stderr, "[parse-stats] worker compile failed (%s:%d:%d): %s\n", u->filename,
+                            u->env.error_line, u->env.error_col, u->env.error_msg);
+                atomic_store_explicit(&u->state, r ? LU_FAILED : LU_DONE, memory_order_release);
+                gc_os_wake_all((volatile uint32_t *)&u->state);
+            }
+            lazy_unit_unref(u, FALSE);
+            if (atomic_fetch_sub_explicit(&g_lq_running, 1, memory_order_acq_rel) == 1)
+                gc_os_wake_all((volatile uint32_t *)&g_lq_running);
+        }
+    }
+}
+
+static void lq_report(void)
+{
+    if (!parse_stats_enabled())
+        return;
+    fprintf(stderr, "[parse-stats] compile workers %d: units %llu (%.1f ms to make on the JS thread), "
+            "compiled %llu (%.1f ms of worker time), failed %llu; on call: instantiated %llu (%.1f ms), "
+            "taken over %llu, waited %llu (%.1f ms; their compiles %.1f ms, %.1f ms of it done when called), "
+            "serial %llu; atom remap %.1f ms\n",
+            g_lq_nthreads, (unsigned long long)g_lq_stats.units, g_lq_stats.spawn_ns / 1e6,
+            (unsigned long long)g_lq_stats.compiled, g_lq_stats.worker_ns / 1e6,
+            (unsigned long long)g_lq_stats.failed, (unsigned long long)g_lq_stats.instantiated,
+            g_lq_stats.instantiate_ns / 1e6, (unsigned long long)g_lq_stats.taken,
+            (unsigned long long)g_lq_stats.waited, g_lq_stats.wait_ns / 1e6,
+            g_lq_stats.waited_compile_ns / 1e6, g_lq_stats.waited_head_ns / 1e6,
+            (unsigned long long)g_lq_stats.serial, g_lq_stats_remap_ns / 1e6);
+}
+
+/* The number of compile workers (started on first use, on the JS thread). */
+static int lq_threads(void)
+{
+    if (g_lq_nthreads < 0) {
+        const char *e = getenv("CYBER_COMPILE_THREADS");
+        int n = e ? atoi(e) : 0;
+        g_lq_nthreads = 0;
+        if (n > LQ_MAX_THREADS)
+            n = LQ_MAX_THREADS;
+        if (n > 0) {
+            uint32_t i;
+            for (i = 0; i < (uint32_t)n; i++) {
+                if (!gc_os_thread_start_stack(&g_lq_threads[i], lq_worker, NULL, LQ_STACK))
+                    break;
+                g_lq_nthreads++;
+            }
+        }
+        atexit(lq_report);
+    }
+    return g_lq_nthreads;
+}
+
+/* The runtime is about to go: wait for the units running, drop the queued
+ * ones and forget the rest (they belong to the runtime's heap). */
+static void lazy_units_quiesce(void)
+{
+    if (g_lq_nthreads <= 0)
+        return;
+    atomic_store_explicit(&g_lq_paused, 1, memory_order_release);
+    for (;;) {
+        uint32_t n = atomic_load_explicit(&g_lq_running, memory_order_acquire);
+        if (n == 0)
+            break;
+        gc_os_wait((volatile uint32_t *)&g_lq_running, n, 10);
+    }
+    {
+        LQBatch *b = atomic_exchange_explicit(&g_lq_top, NULL, memory_order_acq_rel);
+        while (b) {
+            LQBatch *next = b->next;
+            js_plain_free(b);
+            b = next;
+        }
+    }
+    for (;;) {
+        uint32_t n = atomic_load_explicit(&g_lq_running, memory_order_acquire);
+        if (n == 0)
+            break;
+        gc_os_wait((volatile uint32_t *)&g_lq_running, n, 10);
+    }
+    atomic_store_explicit(&g_lazy_dead, NULL, memory_order_release);
+    {
+        int i;
+        for (i = 0; i < g_lazy_srcs.count; i++)
+            js_plain_free(PVEC_AT(g_lazy_srcs, LazySrc, i).filename);
+    }
+    pvec_free(&g_lazy_srcs);
+    g_lazy_src_last = 0;
+    g_lazy_units_bytes = 0;
+    g_lazy_units_alive = 0;
+    atomic_store_explicit(&g_lq_paused, 0, memory_order_release);
+}
+
+/* Budget of the source bytes the units alive may cover (their stencils'
+ * memory grows with it): CYBER_COMPILE_BUDGET_MB, 32 by default. */
+static int64_t lq_budget(void)
+{
+    static int64_t b = -1;
+    if (b < 0) {
+        const char *e = getenv("CYBER_COMPILE_BUDGET_MB");
+        b = (int64_t)(e ? atoi(e) : 32) << 20;
+    }
+    return b;
+}
+
+/* Queue a unit for each lazy stub among b's functions (and inside the
+ * compiled ones), in source order (on the JS thread). */
+static void lazy_units_spawn(JSContextHandle ctx, JSFunctionBytecodeHandle b, int depth, PVec *batch)
+{
+    int i, n;
+
+    n = SAFE_GET_OR(b, JSFunctionBytecodeHandle, cpool_count, 0);
+    for (i = 0; i < n && g_lazy_units_bytes < lq_budget(); i++) {
+        GCValue v = js_bc_cpool_ptr(b)[i];
+        JSFunctionBytecodeHandle c;
+        JSLazyParseState *st;
+        LazyUnit *u;
+        if (JS_VALUE_GET_TAG(v) != JS_TAG_FUNCTION_BYTECODE)
+            continue;
+        c = (JSFunctionBytecodeHandle)GC_VALUE_GET_HANDLE(v);
+        if (SAFE_GET_OR(c, JSFunctionBytecodeHandle, func_parse_state, 0) != JS_FUNC_LAZY) {
+            if (depth < 64)
+                lazy_units_spawn(ctx, c, depth + 1, batch);
+            continue;
+        }
+        if (!SAFE_GET_OR(c, JSFunctionBytecodeHandle, has_resume_parse_state, 0))
+            continue;
+        st = js_bc_resume_parse_state(c);
+        if (!st || st->unit || st->compiled_handle != GC_HANDLE_NULL)
+            continue;
+        u = lazy_unit_new(ctx, c);
+        if (!u)
+            continue;
+        st = js_bc_resume_parse_state(c);
+        st->unit = u;   /* gc-no-dirty: a plain pointer */
+        g_lq_stats.units++;
+        if (!pvec_push(batch, sizeof(LazyUnit *), &u))
+            break;
+        u->t_queued = gc_os_now_ns();
+        u->from_body = g_lq_spawning_body;
+        atomic_fetch_add_explicit(&u->refs, 1, memory_order_relaxed);
+        atomic_store_explicit(&u->state, LU_QUEUED, memory_order_relaxed);
+    }
+}
+
+/* lazy_units_spawn of a script or a body just made, then wake the workers. */
+static void lazy_units_spawn_root(JSContextHandle ctx, JSFunctionBytecodeHandle b)
+{
+    uint64_t t0;
+    if (lq_threads() <= 0)
+        return;
+    t0 = gc_os_now_ns();
+    lazy_units_reap();
+    {
+        PVec batch = { 0 };
+        int i;
+        lazy_units_spawn(ctx, b, 0, &batch);
+        if (batch.count && !lq_push_batch((LazyUnit **)batch.data, batch.count)) {
+            for (i = 0; i < batch.count; i++) {
+                LazyUnit *u = PVEC_AT(batch, LazyUnit *, i);
+                atomic_store_explicit(&u->state, LU_IDLE, memory_order_relaxed);
+                atomic_fetch_sub_explicit(&u->refs, 1, memory_order_relaxed);
+            }
+        }
+        pvec_free(&batch);
+    }
+    g_lq_stats.spawn_ns += gc_os_now_ns() - t0;
+}
+
+/* The body of stub_b through its unit u (detached from the stub by the
+ * caller): instantiate what a worker compiled, wait for one that is
+ * compiling it, or compile it here.  GC_HANDLE_NULL without an exception
+ * if the unit could not do it (the caller compiles serially). */
+static GCHandle lazy_unit_take(JSContextHandle ctx, LazyUnit *u)
+{
+    uint32_t st = atomic_load_explicit(&u->state, memory_order_acquire);
+    GCHandle r = GC_HANDLE_NULL;
+
+    if (st == LU_QUEUED || st == LU_IDLE) {
+        if (atomic_compare_exchange_strong_explicit(&u->state, &st, LU_TAKEN,
+                                                    memory_order_acq_rel, memory_order_acquire)) {
+            g_lq_stats.taken++;
+            st = lazy_unit_compile(u) ? LU_FAILED : LU_DONE;
+            atomic_store_explicit(&u->state, st, memory_order_release);
+        }
+    }
+    if (st == LU_RUNNING) {
+        uint64_t t0 = gc_os_now_ns();
+        g_lq_stats.waited++;
+        while ((st = atomic_load_explicit(&u->state, memory_order_acquire)) == LU_RUNNING)
+            gc_os_wait((volatile uint32_t *)&u->state, LU_RUNNING, 10);
+        g_lq_stats.wait_ns += gc_os_now_ns() - t0;
+        g_lq_stats.waited_compile_ns += u->compile_ns;
+        if (getenv("CYBER_COMPILE_LOG"))
+            fprintf(stderr, "[compile-wait] %s @%u len %u from %s: queued %.2f ms before, started %.3f ms before, compile %.3f ms\n",
+                    u->filename, u->st.func_source_offset, u->st.source_len, u->from_body ? "body" : "script",
+                    (t0 - u->t_queued) / 1e6, (t0 - u->t_start) / 1e6, u->compile_ns / 1e6);
+        g_lq_stats.waited_head_ns += t0 > u->t_start ? t0 - u->t_start : 0;
+    }
+    if (st == LU_DONE) {
+        uint64_t t0 = gc_os_now_ns();
+        r = lazy_unit_instantiate(ctx, u);
+        g_lq_stats.instantiated++;
+        g_lq_stats.instantiate_ns += gc_os_now_ns() - t0;
+        if (r != GC_HANDLE_NULL)
+        {
+            g_lq_spawning_body = 1;
+            lazy_units_spawn_root(ctx, (JSFunctionBytecodeHandle)r);
+            g_lq_spawning_body = 0;
+        }
+    }
+    lazy_unit_out_free(u);
+    lazy_unit_unref(u, TRUE);
+    return r;
+}
+
+static int lazy_stencil_enabled(void)
+{
+    static int v = -1;
+    if (v < 0)
+        v = getenv("CYBER_LAZY_STENCIL") != NULL;
+    return v;
+}
+
+/* Compile stub_b's body: through its unit if it has one, else through a
+ * unit made now (CYBER_LAZY_STENCIL=1), serially when no unit can do it;
+ * CYBER_STENCIL_VERIFY=1 compiles both ways and compares. */
+static GCHandle js_lazy_compile_any(JSContextHandle ctx, JSFunctionBytecodeHandle stub_b)
+{
+    JSLazyParseState *state = js_bc_resume_parse_state(stub_b);
+    LazyUnit *u;
+    GCHandle r;
+
+    if (state && state->unit) {
+        u = state->unit;
+        state->unit = NULL;
+        r = lazy_unit_take(ctx, u);
+        if (r != GC_HANDLE_NULL || JS_HasException(ctx))
+            return r;
+        g_lq_stats.serial++;
+        return js_lazy_compile(ctx, stub_b);
+    }
+    if (stencil_verify_enabled()) {
+        r = js_lazy_compile(ctx, stub_b);
+        if (r == GC_HANDLE_NULL)
+            return r;
+        if (g_stencil_verify.scripts++ == 0)
+            atexit(stencil_verify_report);
+        u = lazy_unit_new(ctx, stub_b);
+        if (!u || lazy_unit_compile(u)) {
+            g_stencil_verify.lazy_failed++;
+            if (g_stencil_verify.lazy_failed <= 8)
+                fprintf(stderr, "[stencil-verify] lazy unit failed: %s\n",
+                        u ? u->env.error_msg : "no unit");
+        } else {
+            GCHandle l = lazy_unit_instantiate(ctx, u);
+            StencilVerify v = { .ctx = ctx, .env = &u->env, .filename = u->filename };
+            if (l == GC_HANDLE_NULL) {
+                g_stencil_verify.lazy_failed++;
+                JS_GetException(ctx);
+            } else if (sv_cmp_bc(&v, (JSFunctionBytecodeHandle)r, (JSFunctionBytecodeHandle)l)) {
+                g_stencil_verify.lazy_same++;
+            } else {
+                g_stencil_verify.lazy_differ++;
+            }
+        }
+        if (u)
+            lazy_unit_unref(u, TRUE);
+        return r;
+    }
+    if (lazy_stencil_enabled()) {
+        u = lazy_unit_new(ctx, stub_b);
+        if (u && !lazy_unit_compile(u)) {
+            r = lazy_unit_instantiate(ctx, u);
+            lazy_unit_unref(u, TRUE);
+            return r;
+        }
+        if (u)
+            lazy_unit_unref(u, TRUE);
+    }
+    return js_lazy_compile(ctx, stub_b);
+}
+
 static GCValue __JS_EvalInternal(JSContextHandle ctx, GCValue this_obj,
                                  const char *input, size_t input_len,
                                  const char *filename, int flags, int scope_idx)
@@ -44513,6 +45377,8 @@ static GCValue __JS_EvalInternal(JSContextHandle ctx, GCValue this_obj,
     fun_obj = js_create_function(ctx, fd);
     if (sv_keep)
         stencil_verify_instantiate(sv_keep, fun_obj);
+    if (!JS_IsException(fun_obj))
+        lazy_units_spawn_root(ctx, (JSFunctionBytecodeHandle)GC_VALUE_GET_HANDLE(fun_obj));
     if (stats_t0) {
         g_parse_stats.eval_n++;
         g_parse_stats.eval_ns += parse_stats_since(stats_t0);

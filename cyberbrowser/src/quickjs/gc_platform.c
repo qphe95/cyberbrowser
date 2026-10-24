@@ -180,11 +180,16 @@ static DWORD WINAPI gc_os_thread_entry(LPVOID p) {
 }
 
 bool gc_os_thread_start(GCThread *t, GCThreadFn fn, void *arg) {
+    return gc_os_thread_start_stack(t, fn, arg, 0);
+}
+
+bool gc_os_thread_start_stack(GCThread *t, GCThreadFn fn, void *arg, size_t stack_size) {
     GCThreadStart *s = (GCThreadStart *)malloc(sizeof(*s));
     if (!s) return false;
     s->fn = fn;
     s->arg = arg;
-    HANDLE h = CreateThread(NULL, 0, gc_os_thread_entry, s, 0, NULL);
+    HANDLE h = CreateThread(NULL, stack_size, gc_os_thread_entry, s,
+                            stack_size ? STACK_SIZE_PARAM_IS_A_RESERVATION : 0, NULL);
     if (!h) { free(s); return false; }
     t->native = h;
     return true;
@@ -231,13 +236,23 @@ static void *gc_os_thread_entry(void *p) {
 }
 
 bool gc_os_thread_start(GCThread *t, GCThreadFn fn, void *arg) {
+    return gc_os_thread_start_stack(t, fn, arg, 0);
+}
+
+bool gc_os_thread_start_stack(GCThread *t, GCThreadFn fn, void *arg, size_t stack_size) {
     GCThreadStart *s = (GCThreadStart *)malloc(sizeof(*s));
     if (!s) return false;
     s->fn = fn;
     s->arg = arg;
     pthread_t *th = (pthread_t *)malloc(sizeof(pthread_t));
     if (!th) { free(s); return false; }
-    if (pthread_create(th, NULL, gc_os_thread_entry, s) != 0) {
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    if (stack_size)
+        pthread_attr_setstacksize(&attr, stack_size);
+    int err = pthread_create(th, &attr, gc_os_thread_entry, s);
+    pthread_attr_destroy(&attr);
+    if (err != 0) {
         free(s);
         free(th);
         return false;

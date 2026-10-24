@@ -1271,6 +1271,8 @@ typedef struct JSLazyParseState {
     /* The root source's structure index (js_struct_index.h), or NULL: it
      * lives as long as the runtime. */
     const struct JSStructIndex *struct_index;
+    /* The body's compile unit (quickjs.c, LazyUnit), or NULL: plain memory. */
+    struct LazyUnit *unit;
 } JSLazyParseState;
 
 /* JSFunctionBytecode structure - must be defined before JSFunctionBytecodeHandle */

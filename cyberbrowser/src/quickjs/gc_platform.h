@@ -48,6 +48,8 @@ void gc_os_wake_all(volatile uint32_t *addr);
 typedef void (*GCThreadFn)(void *arg);
 typedef struct GCThread { void *native; } GCThread;
 bool gc_os_thread_start(GCThread *t, GCThreadFn fn, void *arg);
+/* The same with a stack of stack_size bytes (0: the default). */
+bool gc_os_thread_start_stack(GCThread *t, GCThreadFn fn, void *arg, size_t stack_size);
 void gc_os_thread_join(GCThread *t);
 void gc_os_yield(void);
 uint64_t gc_os_thread_id(void);
