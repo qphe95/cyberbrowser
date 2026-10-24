@@ -387,6 +387,9 @@ static void layout_slots_free(LayoutSlots *p)
     free(p);
 }
 
+struct LayoutFlow;
+static void layout_flow_free(struct LayoutFlow *F);
+
 /* (carry: the slots are left to layout_tree_carry) */
 static bool layout_build_nodes(LayoutContext *ctx, const int *map, int active, bool carry)
 {
@@ -667,6 +670,9 @@ void css_layout_tree_free(LayoutContext *ctx)
     free(ctx->sc_entry);
     free(ctx->slot_ver);
     free(ctx->has_bits);
+    free(ctx->style_left);
+    layout_flow_free(ctx->flow);
+    free(ctx->flow_old);
     if (ctx->text_norm) {
         for (int i = 0; i < ctx->tree.count; i++) free(ctx->text_norm[i]);
         free(ctx->text_norm);
@@ -7221,6 +7227,8 @@ static void style_copy_subtree(StylePass *P, StyleThread *T, int pos)
                 box->s = ctx->slot[idx];
                 layout_box_init(ctx, idx);
                 style_finish_box(P, box, p >= 0 ? layout_box(ctx, p) : NULL, false);
+            } else {
+                P->kept[idx] = 1;
             }
             P->out_changed[idx] = 1;
         }
@@ -7734,7 +7742,11 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
     }
     free(P.dirty_n);
     free(P.skipped);
-    free(P.kept);
+    /* (which styles it left as they were: the flow pass reuses what it can
+     * of their boxes) */
+    free(ctx->style_left);
+    ctx->style_left = P.retain ? P.kept : NULL;
+    if (!P.retain) free(P.kept);
     free(P.cached);
     free(P.key_ok);
     free(P.force);
@@ -8222,7 +8234,10 @@ static void layout_resolve_fonts(LayoutContext *ctx)
 {
     CP_ACC("layout: resolve fonts");
     layout_resolve_fonts_pass(ctx);
-    if (font_registry_load_pending() > 0) layout_resolve_fonts_pass(ctx);
+    if (font_registry_load_pending() > 0) {
+        layout_resolve_fonts_pass(ctx);
+        css_layout_retained_invalidate();   /* (text measures differently) */
+    }
 }
 
 static bool layout_text_is_whitespace(const char *s)
@@ -8275,6 +8290,7 @@ static void layout_concat_dom_text(LayoutContext *ctx, HtmlNode *node,
 }
 
 static void layout_node_serial(LayoutContext *ctx, int idx);
+static void layout_node_serial_impl(LayoutContext *ctx, int idx);
 
 /* Shift a box and all of its descendants by (dx,dy).  Fixed boxes are skipped
  * (they position against the viewport). */
@@ -10448,7 +10464,341 @@ static void layout_inline_wrapped_children(LayoutContext *ctx, int idx)
     }
 }
 
+/* ---- Incremental flow ----
+ *
+ * On a kept tree, each call of the flow and absolute-positioning passes is
+ * recorded: the box's inputs (its geometry as its container set it, but
+ * where: flow_entry_hash), its geometry when the call returned, and every
+ * box's geometry after each pass.  The next layout takes a call's result
+ * from that record when the box's subtree is clean (the same boxes in the
+ * same order, styles left as they were, no text or children changed), the
+ * inputs hash the same and no float is involved: the subtree's boxes get
+ * their recorded geometry, shifted by how far the box moved.  Valid while
+ * the viewport is the same and no image or font changed the measurements
+ * (css_layout_retained_invalidate).  CYBER_FLOW_REUSE=0: lay out in full. */
+typedef struct LayoutFlowBuf {
+    int n, cap;
+    uint64_t *entry;            /* inputs at its last call (0: none) */
+    LayoutBox *exit;            /* geometry when that call returned */
+    LayoutBox *snap1, *snap2;   /* every box after the flow pass, after absolute positioning */
+    uint8_t *pass;              /* 1: laid out in the flow pass, 2: in absolute positioning */
+    uint8_t *ok;                /* may be a reuse root (bit 0: in the flow pass, bit 1: absolute) */
+    uint8_t *noreuse;           /* laid out with floats placed */
+    uint8_t *gen;               /* its text had generated content */
+    int *first_child, *next_sibling;
+} LayoutFlowBuf;
+
+typedef struct LayoutFlow {
+    LayoutFlowBuf rec, cur;     /* the last layout's record, this one's */
+    bool rec_valid;
+    uint64_t epoch;
+    double vw, vh;
+    unsigned char pass;         /* calls recorded in: 1 flow, 2 absolute positioning (0: none) */
+    bool reuse;                 /* rec is good for this layout */
+    uint8_t *clean;             /* per index of this layout: its subtree is as recorded */
+    int clean_cap;
+} LayoutFlow;
+
+static uint64_t g_flow_epoch = 1;
+static _Atomic uint64_t g_flow_hits, g_flow_hit_boxes;
+
+void css_layout_retained_invalidate(void)
+{
+    g_flow_epoch++;
+}
+
+void css_layout_flow_stats(uint64_t *subtrees, uint64_t *boxes)
+{
+    if (subtrees) *subtrees = atomic_load(&g_flow_hits);
+    if (boxes) *boxes = atomic_load(&g_flow_hit_boxes);
+}
+
+static void flow_buf_free(LayoutFlowBuf *b)
+{
+    free(b->entry); free(b->exit); free(b->snap1); free(b->snap2);
+    free(b->pass); free(b->ok); free(b->noreuse); free(b->gen);
+    free(b->first_child); free(b->next_sibling);
+    memset(b, 0, sizeof(*b));
+}
+
+static bool flow_buf_ensure(LayoutFlowBuf *b, int n)
+{
+    if (b->cap >= n && b->entry) return true;
+    flow_buf_free(b);
+    size_t m = (size_t)n + 1;
+    b->entry = (uint64_t *)malloc(m * sizeof(uint64_t));
+    b->exit = (LayoutBox *)malloc(m * sizeof(LayoutBox));
+    b->snap1 = (LayoutBox *)malloc(m * sizeof(LayoutBox));
+    b->snap2 = (LayoutBox *)malloc(m * sizeof(LayoutBox));
+    b->pass = (uint8_t *)malloc(m);
+    b->ok = (uint8_t *)malloc(m);
+    b->noreuse = (uint8_t *)malloc(m);
+    b->gen = (uint8_t *)malloc(m);
+    b->first_child = (int *)malloc(m * sizeof(int));
+    b->next_sibling = (int *)malloc(m * sizeof(int));
+    if (!b->entry || !b->exit || !b->snap1 || !b->snap2 || !b->pass || !b->ok || !b->noreuse || !b->gen ||
+        !b->first_child || !b->next_sibling) {
+        flow_buf_free(b);
+        return false;
+    }
+    b->cap = n;
+    return true;
+}
+
+static void layout_flow_free(LayoutFlow *F)
+{
+    if (!F) return;
+    flow_buf_free(&F->rec);
+    flow_buf_free(&F->cur);
+    free(F->clean);
+    free(F);
+}
+
+/* What a container sets before laying out a box: its geometry, but where. */
+static uint64_t flow_entry_hash(const LayoutBox *b)
+{
+    const size_t off = offsetof(LayoutBox, width);
+    const unsigned char *p = (const unsigned char *)b + off;
+    size_t n = sizeof(LayoutBox) - off, i = 0;
+    /* four independent lanes (the multiplies overlap), folded at the end */
+    uint64_t h = 1469598103934665603ull, h1 = 0x243F6A8885A308D3ull, h2 = 0x13198A2E03707344ull, h3 = 0xA4093822299F31D0ull;
+    for (; i + 32 <= n; i += 32) {
+        uint64_t w0, w1, w2, w3;
+        memcpy(&w0, p + i, 8); memcpy(&w1, p + i + 8, 8); memcpy(&w2, p + i + 16, 8); memcpy(&w3, p + i + 24, 8);
+        h = (h ^ w0) * 0x9E3779B97F4A7C15ull;
+        h1 = (h1 ^ w1) * 0x9E3779B97F4A7C15ull;
+        h2 = (h2 ^ w2) * 0x9E3779B97F4A7C15ull;
+        h3 = (h3 ^ w3) * 0x9E3779B97F4A7C15ull;
+        h ^= h >> 29; h1 ^= h1 >> 29; h2 ^= h2 >> 29; h3 ^= h3 >> 29;
+    }
+    h = (h ^ (h1 * 0xC2B2AE3D27D4EB4Full) ^ (h2 * 0x165667B19E3779F9ull) ^ (h3 * 0x27D4EB2F165667C5ull)) * 0x9E3779B97F4A7C15ull;
+    for (; i < n; i++) h = (h ^ p[i]) * 0x100000001b3ull;
+    return h ? h : 1;
+}
+
+static bool layout_has_gen(LayoutContext *ctx, int i)
+{
+    int d = ctx->tree.nodes[i].dom_node_idx;
+    return ctx->text_gen && d >= 0 && d < ctx->text_gen_cap && ctx->text_gen[d];
+}
+
+/* Before the flow pass (styles final): this layout's record, and which
+ * subtrees are as recorded. */
+static void layout_flow_begin(LayoutContext *ctx)
+{
+    static int env = -1;
+    if (env < 0) {
+        const char *e = cyber_getenv("CYBER_FLOW_REUSE");
+        env = !(e && e[0] == '0');
+    }
+    int n = ctx->tree.count;
+    /* (only on kept trees: a context that builds every time never reuses) */
+    if (!env || !ctx->tree_kept || n <= 0) return;
+    LayoutFlow *F = ctx->flow;
+    if (!F) F = ctx->flow = (LayoutFlow *)calloc(1, sizeof(LayoutFlow));
+    if (!F || !flow_buf_ensure(&F->cur, n)) return;
+    if (F->clean_cap < n) {
+        free(F->clean);
+        F->clean = (uint8_t *)malloc((size_t)n + 1);
+        F->clean_cap = F->clean ? n : 0;
+        if (!F->clean) return;
+    }
+    memset(F->cur.entry, 0, (size_t)n * sizeof(uint64_t));
+    memset(F->cur.pass, 0, (size_t)n);
+    memset(F->cur.noreuse, 0, (size_t)n);
+    F->cur.n = n;
+    F->pass = 1;
+    F->reuse = F->rec_valid && F->epoch == g_flow_epoch && F->vw == ctx->viewport_width &&
+               F->vh == ctx->viewport_height && ctx->style_left && (ctx->flow_old || F->rec.n == n);
+    if (!F->reuse) return;
+    const LayoutFlowBuf *R = &F->rec;
+    uint8_t *clean = F->clean;
+    memset(clean, 1, (size_t)n);
+    /* The elements whose children changed, and those children (their text
+     * may have). */
+    for (int k = 0; k < ctx->child_n; k++) {
+        int d = html_mirror_index_of(ctx->doc, ctx->child_ids[k]);
+        int li = d >= 0 && d < ctx->dom_map_n ? ctx->dom_map[d] : -1;
+        if (li < 0) continue;
+        clean[li] = 0;
+        for (int c = ctx->tree.nodes[li].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) clean[c] = 0;
+    }
+    /* Children before parents. */
+    for (int k = n - 1; k >= 0; k--) {
+        int i = ctx->tree.preorder[k];
+        int oi = ctx->flow_old ? ctx->flow_old[i] : i;
+        bool c = clean[i] && oi >= 0 && ctx->style_left[i] && !layout_has_gen(ctx, i) && !R->gen[oi];
+        int oc = c ? R->first_child[oi] : -1;
+        for (int ch = ctx->tree.nodes[i].first_child_idx; c && ch >= 0; ch = ctx->tree.nodes[ch].next_sibling_idx) {
+            int och = ctx->flow_old ? ctx->flow_old[ch] : ch;
+            if (oc < 0 || och != oc || !clean[ch]) c = false;
+            else oc = R->next_sibling[oc];
+        }
+        if (c && oc >= 0) c = false;
+        clean[i] = c;
+    }
+}
+
+static bool flow_parent_is_row(LayoutContext *ctx, int i)
+{
+    int p = ctx->tree.nodes[i].parent_idx;
+    if (p < 0) return false;
+    HtmlNode *pn = layout_node_dom(ctx, ctx->tree.nodes[p].dom_node_idx);
+    return pn && pn->type == HTML_NODE_ELEMENT && pn->tag_name && strcasecmp(pn->tag_name, "tr") == 0;
+}
+
+/* A box and its subtree from the record: the box's geometry when its call
+ * returned, its subtree's after the pass, shifted by how far it moved (as
+ * layout_offset_subtree moves boxes). */
+static void flow_shift(LayoutBox *b, double dx, double dy)
+{
+    b->x += dx;
+    b->y += dy;
+    if (b->wrap_cont_w > 0.0) {
+        b->wrap_cont_x += dx;
+        if (b->wrap_cont2_line > 1) b->wrap_cont2_x += dx;
+    }
+}
+
+/* (mx, my: how far the root moved after its call in the recorded layout;
+ * a box the layout never positioned, still at the origin layout_box_start
+ * gave it, moved that much and no more) */
+static void flow_reuse_children(LayoutContext *ctx, LayoutFlow *F, const LayoutBox *snap,
+                                int i, int o, double dx, double dy, double mx, double my)
+{
+    const LayoutFlowBuf *R = &F->rec;
+    LayoutFlowBuf *C = &F->cur;
+    int oc = R->first_child[o];
+    for (int c = ctx->tree.nodes[i].first_child_idx; c >= 0 && oc >= 0;
+         c = ctx->tree.nodes[c].next_sibling_idx, oc = R->next_sibling[oc]) {
+        LayoutBox *b = &ctx->boxes[c];
+        LayoutStyle *s = b->s;
+        double px = b->x, py = b->y;
+        bool unplaced = snap[oc].x == mx && snap[oc].y == my && px == 0.0 && py == 0.0;
+        *b = snap[oc];
+        b->s = s;
+        if (unplaced) { b->x = px; b->y = py; }
+        else flow_shift(b, dx, dy);
+        C->entry[c] = R->entry[oc];
+        C->exit[c] = R->exit[oc];
+        flow_shift(&C->exit[c], dx, dy);
+        C->pass[c] = R->pass[oc];
+        C->noreuse[c] = R->noreuse[oc];
+        flow_reuse_children(ctx, F, snap, c, oc, dx, dy, mx, my);
+    }
+}
+
+static bool flow_try(LayoutContext *ctx, LayoutFlow *F, int idx, uint64_t entry)
+{
+    if (!F->clean[idx] || ctx->float_count != 0) return false;
+    const LayoutStyle *st = ctx->boxes[idx].s;
+    /* An inline box is part of its container's lines (they move it, not
+     * its contents, after its call); a leaf has nothing to reuse; an
+     * absolutely positioned box is placed after its call (by its size):
+     * its own call runs, its contents may come from the record. */
+    if (st->display == CSS_DISPLAY_INLINE || ctx->tree.nodes[idx].first_child_idx < 0) return false;
+    if (st->position == CSS_POSITION_ABSOLUTE || st->position == CSS_POSITION_FIXED) return false;
+    if (flow_parent_is_row(ctx, idx)) return false;
+    const LayoutFlowBuf *R = &F->rec;
+    int o = ctx->flow_old ? ctx->flow_old[idx] : idx;
+    unsigned char pass = F->pass;
+    if (o < 0 || R->pass[o] != pass || !(R->ok[o] & (pass == 2 ? 2 : 1)) || R->entry[o] != entry) return false;
+    const LayoutBox *snap = pass == 2 ? R->snap2 : R->snap1;
+    LayoutBox *r = &ctx->boxes[idx];
+    double x = r->x, y = r->y;
+    double dx = x - snap[o].x, dy = y - snap[o].y;
+    double mx = snap[o].x - R->exit[o].x, my = snap[o].y - R->exit[o].y;
+    LayoutStyle *s = r->s;
+    *r = R->exit[o];
+    r->s = s;
+    r->x = x;
+    r->y = y;
+    F->cur.entry[idx] = entry;
+    F->cur.exit[idx] = *r;
+    F->cur.pass[idx] = pass;
+    flow_reuse_children(ctx, F, snap, idx, o, dx, dy, mx, my);
+    atomic_fetch_add(&g_flow_hits, 1);
+    atomic_fetch_add(&g_flow_hit_boxes, (uint64_t)g_lpar.subtree[idx]);
+    return true;
+}
+
+/* After each pass: every box's geometry (before translations). */
+static void layout_flow_snap(LayoutContext *ctx, bool abs)
+{
+    LayoutFlow *F = ctx->flow;
+    if (!F || !F->pass) return;
+    memcpy(abs ? F->cur.snap2 : F->cur.snap1, ctx->boxes, (size_t)ctx->tree.count * sizeof(LayoutBox));
+}
+
+/* An empty or hidden box c outside its parent p in snapshot g, moved from
+ * the origin it started at: a position some measuring call wrote, which
+ * does not follow the parent. */
+static bool flow_stray(const LayoutBox *g, int p, int c, CssDisplay display)
+{
+    const LayoutBox *b = &g[c], *pb = &g[p];
+    if (display != CSS_DISPLAY_NONE && (b->width != 0.0 || b->height != 0.0)) return false;
+    if (b->x == 0.0 && b->y == 0.0) return false;
+    return b->x < pb->x || b->x > pb->x + pb->width || b->y < pb->y || b->y > pb->y + pb->height;
+}
+
+/* After the layout: its record replaces the last one.  A reuse root: no
+ * float, fixed box or float stack at its entry inside (bit 0); in the
+ * absolute pass also no absolutely positioned box below it (bit 1: they are
+ * placed after its call); nor an empty or hidden box left outside its
+ * parent (flow_stray). */
+static void layout_flow_end(LayoutContext *ctx)
+{
+    LayoutFlow *F = ctx->flow;
+    free(ctx->flow_old);
+    ctx->flow_old = NULL;
+    if (!F || !F->pass) return;
+    F->pass = 0;
+    int n = ctx->tree.count;
+    LayoutFlowBuf *C = &F->cur;
+    for (int i = 0; i < n; i++) {
+        C->first_child[i] = ctx->tree.nodes[i].first_child_idx;
+        C->next_sibling[i] = ctx->tree.nodes[i].next_sibling_idx;
+        C->gen[i] = layout_has_gen(ctx, i);
+    }
+    for (int k = n - 1; k >= 0; k--) {
+        int i = ctx->tree.preorder[k];
+        const LayoutBox *b = &ctx->boxes[i];
+        bool ok = !C->noreuse[i] && b->s->float_side == 0;
+        bool ok_abs = ok;
+        for (int c = ctx->tree.nodes[i].first_child_idx; (ok || ok_abs) && c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+            const LayoutStyle *cs = ctx->boxes[c].s;
+            bool c_out = cs->position == CSS_POSITION_ABSOLUTE || cs->position == CSS_POSITION_FIXED;
+            ok = ok && (C->ok[c] & 1) && cs->position != CSS_POSITION_FIXED && !flow_stray(C->snap1, i, c, cs->display);
+            ok_abs = ok_abs && (C->ok[c] & 2) && !c_out && !flow_stray(C->snap2, i, c, cs->display);
+        }
+        C->ok[i] = (uint8_t)((ok ? 1 : 0) | (ok_abs ? 2 : 0));
+    }
+    LayoutFlowBuf t = F->rec;
+    F->rec = F->cur;
+    F->cur = t;
+    F->rec_valid = true;
+    F->epoch = g_flow_epoch;
+    F->vw = ctx->viewport_width;
+    F->vh = ctx->viewport_height;
+}
+
 static void layout_node_serial(LayoutContext *ctx, int idx)
+{
+    LayoutFlow *F = ctx->flow;
+    if (F && F->pass) {
+        uint64_t e = flow_entry_hash(&ctx->boxes[idx]);
+        if (F->reuse && flow_try(ctx, F, idx, e)) return;
+        if (ctx->float_count != 0) F->cur.noreuse[idx] = 1;
+        layout_node_serial_impl(ctx, idx);
+        F->cur.pass[idx] = F->pass;
+        F->cur.entry[idx] = e;
+        F->cur.exit[idx] = ctx->boxes[idx];
+        return;
+    }
+    layout_node_serial_impl(ctx, idx);
+}
+
+static void layout_node_serial_impl(LayoutContext *ctx, int idx)
 {
     LayoutBox *box = layout_box(ctx, idx);
 
@@ -10874,7 +11224,10 @@ static void layout_flow_job(Job *j)
 {
     LayoutContext *ctx = (LayoutContext *)j->ctx;
     if (ctx->tree.root_idx >= 0) layout_node_serial(ctx, ctx->tree.root_idx);
+    layout_flow_snap(ctx, false);
+    if (ctx->flow && ctx->flow->pass) ctx->flow->pass = 2;
     if (ctx->tree.count > 0) layout_position_absolute_subtree(ctx, ctx->tree.root_idx);
+    layout_flow_snap(ctx, true);
 }
 
 bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
@@ -10996,7 +11349,9 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
      * children, recurses, then resolves its auto height.  Flex items and
      * table cells fork into jobs (layout_units).  Then absolutely/fixed
      * positioned boxes are placed against their final containing blocks. */
+    layout_flow_begin(ctx);
     job_graph_run(job_new(layout_flow_job, NULL, ctx, 0, 0));
+    layout_flow_end(ctx);
     /* Translations (transform) shift boxes and their subtrees after layout;
      * preorder so nested translations accumulate. */
     for (int k = 0; k < ctx->tree.count; k++) {
@@ -11135,6 +11490,9 @@ static bool layout_tree_carry(LayoutContext *ctx, HtmlDocument *doc, bool prune)
     ctx->sc_order = old.sc_order;
     ctx->sc_global = old.sc_global;
     ctx->has_bits_gen = old.has_bits_gen;
+    ctx->flow = old.flow;                    old.flow = NULL;
+    ctx->flow_old = ctx->flow ? (int *)malloc(((size_t)n + 1) * sizeof(int)) : NULL;
+    if (ctx->flow && !ctx->flow_old) { layout_flow_free(ctx->flow); ctx->flow = NULL; }
     /* Store id -> old index. */
     memset(tab, -1, cap * sizeof(int));
     for (int o = 0; o < on; o++) {
@@ -11152,6 +11510,7 @@ static bool layout_tree_carry(LayoutContext *ctx, HtmlDocument *doc, bool prune)
             while (tab[h] >= 0 && old.ids[tab[h]] != id) h = (h + 1) & (cap - 1);
             o = tab[h];
         }
+        if (ctx->flow_old) ctx->flow_old[i] = o >= 0 && !used[o] ? o : -1;
         if (o >= 0 && !used[o]) {
             used[o] = 1;
             ctx->slot[i] = old.slot[o];
@@ -11250,6 +11609,24 @@ static bool layout_tree_keep(LayoutContext *ctx, HtmlDocument *doc, bool prune)
     return true;
 }
 
+/* The same geometry, but for rounding (a reused position is the recorded
+ * one plus a shift). */
+static bool layout_geom_close(const LayoutBox *a, const LayoutBox *b)
+{
+#define GEOM_NEAR(f) (a->f == b->f || fabs(a->f - b->f) <= 1e-6 * (1.0 + fabs(a->f)))
+    return GEOM_NEAR(x) && GEOM_NEAR(y) && GEOM_NEAR(width) && GEOM_NEAR(height) &&
+           GEOM_NEAR(margin_top) && GEOM_NEAR(margin_right) && GEOM_NEAR(margin_bottom) && GEOM_NEAR(margin_left) &&
+           GEOM_NEAR(padding_top) && GEOM_NEAR(padding_right) && GEOM_NEAR(padding_bottom) && GEOM_NEAR(padding_left) &&
+           GEOM_NEAR(content_width) && GEOM_NEAR(content_height) && GEOM_NEAR(baseline) &&
+           GEOM_NEAR(wrap_first_w) && GEOM_NEAR(wrap_cont_w) && GEOM_NEAR(wrap_cont_x) && GEOM_NEAR(wrap_cont2_x) &&
+           GEOM_NEAR(wrap_cont2_w) && a->wrap_cont2_line == b->wrap_cont2_line &&
+           GEOM_NEAR(min_width) && GEOM_NEAR(max_width) && GEOM_NEAR(min_height) && GEOM_NEAR(max_height) &&
+           GEOM_NEAR(top) && GEOM_NEAR(left) && GEOM_NEAR(right) && GEOM_NEAR(bottom) &&
+           a->flags == b->flags && a->height_pct_unresolved == b->height_pct_unresolved &&
+           a->text_lead_skip == b->text_lead_skip && GEOM_NEAR(opacity_eff);
+#undef GEOM_NEAR
+}
+
 /* CYBER_LAYOUT_KEEP_VERIFY=1: after each layout on a kept tree, the same
  * layout on a tree built afresh (storing nothing in the style cache), and
  * every box compared. */
@@ -11281,9 +11658,14 @@ static void layout_keep_verify(LayoutContext *ctx, HtmlDocument *doc, CssStylesh
             int j = at[ctx->tree.nodes[i].dom_node_idx];
             const LayoutBox *a = &ctx->boxes[i], *b = j >= 0 ? &fresh.boxes[j] : NULL;
             if ((a->flags & LAYOUT_STYLE_SKIPPED) || !b || (b->flags & LAYOUT_STYLE_SKIPPED)) continue;
-            bool same = memcmp((const char *)a + g0, (const char *)b + g0, sizeof(LayoutBox) - g0) == 0 &&
-                        memcmp(a->s, b->s, sizeof(LayoutStyle)) == 0;
-            if (!same && bad++ == 0) first = i;
+            bool same_style = memcmp(a->s, b->s, sizeof(LayoutStyle)) == 0;
+            bool same = same_style && (memcmp((const char *)a + g0, (const char *)b + g0, sizeof(LayoutBox) - g0) == 0 ||
+                                       layout_geom_close(a, b));
+            if (!same && bad++ == 0) {
+                first = i;
+                fprintf(stderr, "[keep-verify] box %d: %s; x %.2f/%.2f y %.2f/%.2f w %.2f/%.2f h %.2f/%.2f\n", i,
+                        same_style ? "geometry" : "style", a->x, b->x, a->y, b->y, a->width, b->width, a->height, b->height);
+            }
         }
         free(at);
     }

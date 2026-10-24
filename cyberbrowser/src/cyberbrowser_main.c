@@ -2165,8 +2165,9 @@ int main(int argc, char *argv[]) {
             for (size_t k = 0; k < sizeof(scen) / sizeof(scen[0]); k++) {
                 char js[2048];
                 snprintf(js, sizeof(js), "%s(%d);", scen[k].js, n);
-                uint64_t kept0, built0, kept1, built1;
+                uint64_t kept0, built0, kept1, built1, fs0, fb0, fs1, fb1;
                 css_layout_tree_stats(&kept0, &built0);
+                css_layout_flow_stats(&fs0, &fb0);
                 css_layout_bench_record(true);
                 double t0 = (double)platform_get_time_ms();
                 GCValue r = JS_Eval(g_ctx, js, strlen(js), "<layout-bench>", JS_EVAL_TYPE_GLOBAL);
@@ -2174,8 +2175,11 @@ int main(int argc, char *argv[]) {
                 css_layout_bench_record(false);
                 if (JS_IsException(r)) JS_GetException(g_ctx);
                 css_layout_tree_stats(&kept1, &built1);
-                fprintf(stderr, "[layout-bench] %s: %d rounds in %.0f ms; trees kept %llu, built %llu\n", scen[k].label, n,
-                        t1 - t0, (unsigned long long)(kept1 - kept0), (unsigned long long)(built1 - built0));
+                css_layout_flow_stats(&fs1, &fb1);
+                fprintf(stderr, "[layout-bench] %s: %d rounds in %.0f ms; trees kept %llu, built %llu; "
+                        "%llu subtrees reused (%llu boxes)\n", scen[k].label, n, t1 - t0,
+                        (unsigned long long)(kept1 - kept0), (unsigned long long)(built1 - built0),
+                        (unsigned long long)(fs1 - fs0), (unsigned long long)(fb1 - fb0));
                 css_layout_bench_report(scen[k].label);
             }
         }

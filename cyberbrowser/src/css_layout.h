@@ -522,6 +522,15 @@ typedef struct LayoutContext {
      * the one the last style pass gave it (a box new to the tree: no). */
     uint32_t *ids;
     unsigned char *style_ok;
+    /* Per layout index, set by a style pass on the kept tree: the box's
+     * style is the one it had (its slot, or a text box's style, left as it
+     * was).  And the record of the last layout's calls that this one reuses
+     * clean subtrees from (css_layout.c LayoutFlow), with this layout's
+     * index -> the record's (NULL: the same; a tree rebuilt after children
+     * changed maps them). */
+    unsigned char *style_left;
+    struct LayoutFlow *flow;
+    int *flow_old;
     /* DOM index -> layout index (-1: not in the tree), dom_map_n of them. */
     int *dom_map;
     int dom_map_n;
@@ -617,6 +626,11 @@ bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
 /* Layouts that kept the previous tree, and that built one (tests,
  * benchmarks). */
 void css_layout_tree_stats(uint64_t *kept, uint64_t *built);
+/* Layouts on kept trees reuse clean subtrees from the last layout's calls:
+ * forget them (an image or a font changed the measurements), and how many
+ * subtrees (of how many boxes) were reused. */
+void css_layout_retained_invalidate(void);
+void css_layout_flow_stats(uint64_t *subtrees, uint64_t *boxes);
 
 /* Test hook: elements whose computed style the last style pass took from
  * the incremental restyle cache, and those it recomputed (both 0 when the
