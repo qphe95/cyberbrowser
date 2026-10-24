@@ -520,6 +520,11 @@ typedef struct LayoutContext {
     int *sc_entry;
     uint32_t *slot_ver;
     uint64_t sc_order, sc_global;
+    /* Per layout index, 8 each: the :has() checks of the element's own
+     * features (css_layout.c has_memo_at; -1 not known) and whether it is
+     * an element, for the :has() key sets of generation has_bits_gen. */
+    signed char *has_bits;
+    uint64_t has_bits_gen;
 } LayoutContext;
 
 #define LAYOUT_HAS_SUBJECT 1

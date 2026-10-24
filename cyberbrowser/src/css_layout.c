@@ -580,6 +580,7 @@ void css_layout_tree_free(LayoutContext *ctx)
     free(ctx->sc_key);
     free(ctx->sc_entry);
     free(ctx->slot_ver);
+    free(ctx->has_bits);
     if (ctx->text_norm) {
         for (int i = 0; i < ctx->tree.count; i++) free(ctx->text_norm[i]);
         free(ctx->text_norm);
@@ -4576,6 +4577,46 @@ static int has_memo(const HasSubjects *hs, HtmlNode *hn, int which)
     return hn->has_memo[which];
 }
 
+/* has_memo for layout node idx, from ctx->has_bits when known there (a
+ * kept tree's elements keep them; those whose attributes changed are
+ * forgotten by layout_tree_keep): 0 for a node that is not an element. */
+static int has_memo_at(LayoutContext *ctx, const HasSubjects *hs, int idx, int which)
+{
+    signed char *b = ctx->has_bits && ctx->has_bits_gen == hs->gen ? ctx->has_bits + (size_t)idx * 8 : NULL;
+    if (b && b[5] == 0) return 0;
+    if (b && b[which] >= 0) return b[which];
+    HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+    bool elem = hn && hn->type == HTML_NODE_ELEMENT;
+    int v = elem ? has_memo(hs, hn, which) : 0;
+    if (b) { b[5] = elem; b[which] = (signed char)v; }
+    return v;
+}
+
+static bool has_is_element(LayoutContext *ctx, int idx)
+{
+    signed char *b = ctx->has_bits ? ctx->has_bits + (size_t)idx * 8 : NULL;
+    if (b && b[5] >= 0) return b[5] != 0;
+    HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+    bool elem = hn && hn->type == HTML_NODE_ELEMENT;
+    if (b) b[5] = elem;
+    return elem;
+}
+
+/* ctx->has_bits for the key sets hs: all forgotten when they are not the
+ * ones they were for. */
+static void has_bits_ready(LayoutContext *ctx, const HasSubjects *hs)
+{
+    if (!ctx->has_bits) {
+        ctx->has_bits = (signed char *)malloc(((size_t)ctx->tree.count + 1) * 8);
+        if (!ctx->has_bits) return;
+        ctx->has_bits_gen = hs->gen + 1;
+    }
+    if (ctx->has_bits_gen != hs->gen) {
+        memset(ctx->has_bits, -1, ((size_t)ctx->tree.count + 1) * 8);
+        ctx->has_bits_gen = hs->gen;
+    }
+}
+
 /* The :has() rules of the last restyle's style set (layout_apply_stylesheet),
  * and its generation (g_has_gen, declared above). */
 static HasSubjects g_has;
@@ -4627,17 +4668,14 @@ static bool layout_prune_root(HtmlDocument *doc, int i)
 static int has_may_match(const HasSubjects *hs, LayoutContext *ctx, int idx)
 {
     if (hs->universal_deep) return 2;
-    HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
-    if (!hn) return 0;
+    if (ctx->tree.nodes[idx].dom_node_idx < 0) return 0;
     /* (A universal :has() compound with more selector after it changes the
      * elements the rightmost compound names, not itself: deep_targets.) */
     int r = hs->universal_self ? 1 : 0;
-    if (hs->self_req.n) { int m = has_memo(hs, hn, 3); if (m > r) r = m; }
+    if (hs->self_req.n) { int m = has_memo_at(ctx, hs, idx, 3); if (m > r) r = m; }
     if (hs->anc_req.n && r < 2) {
         for (int a = ctx->tree.nodes[idx].parent_idx; a >= 0 && r < 2; a = ctx->tree.nodes[a].parent_idx) {
-            HtmlNode *an = layout_node_dom(ctx, ctx->tree.nodes[a].dom_node_idx);
-            if (!an || an->type != HTML_NODE_ELEMENT) continue;
-            int m = has_memo(hs, an, 4);
+            int m = has_memo_at(ctx, hs, a, 4);
             if (m > r) r = m;
         }
     }
@@ -5996,8 +6034,7 @@ static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects
             if (any_change && has->deep_targets.n) {
                 for (int idx = 0; idx < n; idx++) {
                     if (P->force[idx] || !key[idx]) continue;
-                    HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
-                    if (hn && has_memo(has, hn, 2)) P->force[idx] = 1;
+                    if (has_memo_at(ctx, has, idx, 2)) P->force[idx] = 1;
                 }
             }
             free(below);
@@ -7488,16 +7525,15 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
                 P.kept = (unsigned char *)calloc((size_t)n + 1, 1);
                 if (!P.kept) P.retain = false;
             }
+            has_bits_ready(ctx, &g_has);
             style_cache_prepare(&P, sc_global, &g_has, &cf);
             /* The first element a :has() rule whose compound names nothing
              * restyles (layout_api's anchors read it). */
             ctx->has_target_first = n;
             if (g_has.any && (g_has.universal_deep || g_has.deep_targets.n)) {
                 int k = 0;
-                for (; !g_has.universal_deep && k < n; k++) {
-                    HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[ctx->tree.preorder[k]].dom_node_idx);
-                    if (hn && hn->type == HTML_NODE_ELEMENT && has_memo(&g_has, hn, 2)) break;
-                }
+                for (; !g_has.universal_deep && k < n; k++)
+                    if (has_memo_at(ctx, &g_has, ctx->tree.preorder[k], 2)) break;
                 ctx->has_target_first = k;
             }
             /* And which elements a :has() rule may restyle as its subject
@@ -7509,15 +7545,11 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
             for (int k = 0; ctx->has_flags && g_has.any && k < n; k++) {
                 int idx = ctx->tree.preorder[k];
                 int p = ctx->tree.nodes[idx].parent_idx;
-                HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
-                if (!hn || hn->type != HTML_NODE_ELEMENT) continue;
+                if (!has_is_element(ctx, idx)) continue;
                 /* Bit 2: an ancestor carries an ancestor-compound feature. */
                 unsigned char below = p >= 0 ? (unsigned char)(ctx->has_flags[p] & 2) : 0;
-                if (p >= 0 && g_has.anc_req.n) {
-                    HtmlNode *pn = layout_node_dom(ctx, ctx->tree.nodes[p].dom_node_idx);
-                    if (pn && pn->type == HTML_NODE_ELEMENT && has_memo(&g_has, pn, 4)) below = 2;
-                }
-                bool subject = below || (g_has.self_req.n && has_memo(&g_has, hn, 3));
+                if (p >= 0 && g_has.anc_req.n && has_memo_at(ctx, &g_has, p, 4)) below = 2;
+                bool subject = below || (g_has.self_req.n && has_memo_at(ctx, &g_has, idx, 3));
                 ctx->has_flags[idx] = (unsigned char)(below | (subject ? LAYOUT_HAS_SUBJECT : 0));
             }
             STAGE("restyle prepare");
@@ -10984,6 +11016,10 @@ static bool layout_tree_keep(LayoutContext *ctx, HtmlDocument *doc, bool prune)
             ctx->attr_cap = nc;
         }
         ctx->attr_ids[ctx->attr_n++] = ch[k].id;
+        /* (its :has() checks are of its old attributes) */
+        int d = ctx->has_bits ? html_mirror_index_of(doc, ch[k].id) : -1;
+        int li = d >= 0 && d < ctx->dom_map_n ? ctx->dom_map[d] : -1;
+        if (li >= 0) memset(ctx->has_bits + (size_t)li * 8, -1, 8);
     }
     /* (The style slots, custom properties and the arena they live in stay
      * for the style pass: layout_restyle_all starts them over when it
