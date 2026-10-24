@@ -1308,6 +1308,12 @@ struct JSFunctionBytecode {
     uint32_t cpool_offset; /* offset to GCValue array (constant pool) */
     int cpool_count;
     int closure_var_count;
+    /* Baseline JIT (quickjs_jit.c): hotness, and the compiled code (NULL:
+     * none yet, JIT_CODE_FAILED: cannot be compiled).  Before debug, which
+     * bytecode stripped of debug information leaves out.  A bytecode object
+     * starts zeroed, so a set jit_code is always its own. */
+    int32_t jit_budget;
+    struct JitCode *jit_code;
     struct {
         /* debug info, move to separate structure to save memory? */
         JSAtom filename;

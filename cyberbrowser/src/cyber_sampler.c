@@ -5,7 +5,9 @@
  * base) to <path> at exit.  tools/sample_report.js symbolizes them.
  * CYBER_SAMPLE_MAX_MS=<n> stops sampling and writes the file after n ms,
  * for a process that hangs and never exits.  CYBER_SAMPLE_CPU=1 keeps only
- * samples where the thread ran since the previous one (an on-CPU profile). */
+ * samples where the thread ran since the previous one (an on-CPU profile).
+ * A frame in the JIT's code region is written as its offset in the region
+ * with bit 62 set; the JIT writes <path>.jit, its map of that region. */
 #include "cyber_sampler.h"
 
 #include <stdbool.h>
@@ -30,6 +32,10 @@ static ULONG64 g_last_cycles;
 static size_t g_skipped;
 static char *g_path;
 static unsigned g_max_ms;
+/* The JIT's code region (quickjs_jit.c), 0 until it has one. */
+void jit_region_bounds(uintptr_t *base, size_t *size);
+extern volatile LONG g_jit_os_busy;
+#define SAMPLE_JIT_FLAG ((uint64_t)1 << 62)
 static volatile LONG g_written;   /* the file is written once */
 
 static void write_samples(void) {
@@ -52,8 +58,13 @@ static void write_samples(void) {
 static int walk(const CONTEXT *c0, uint64_t *out, int max) {
     CONTEXT c = *c0;
     int d = 0;
+    uintptr_t jit_base = 0;
+    size_t jit_size = 0;
+    jit_region_bounds(&jit_base, &jit_size);
     while (d < max && c.Rip) {
-        out[d++] = c.Rip >= g_base && c.Rip < g_end ? c.Rip - g_base : 0;
+        if (c.Rip >= g_base && c.Rip < g_end) out[d++] = c.Rip - g_base;
+        else if (c.Rip - jit_base < jit_size) out[d++] = SAMPLE_JIT_FLAG | (c.Rip - jit_base);
+        else out[d++] = 0;
         DWORD64 image = 0;
         PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(c.Rip, &image, NULL);
         if (!fn) {
@@ -104,6 +115,12 @@ static DWORD WINAPI sampler_main(LPVOID arg) {
             Sleep(left_us > 1500 ? (DWORD)(left_us / 1000) : 0);
         }
         if (SuspendThread(g_target) == (DWORD)-1) break;
+        if (g_jit_os_busy) {
+            /* Unwinding now could wait forever for a lock the stopped
+             * thread holds: skip this sample. */
+            ResumeThread(g_target);
+            continue;
+        }
         CONTEXT c;
         memset(&c, 0, sizeof(c));
         c.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;

@@ -1272,6 +1272,7 @@ int main(int argc, char *argv[]) {
         const char *probe = cyber_getenv("CYBER_PROBE_JS");
         if (probe && probe[0]) {
             if (!platform_init()) { printf("FATAL: platform_init() failed\n"); return 1; }
+            cyber_sampler_start();
             if (!platform_http_init()) { printf("FATAL: platform_http_init() failed\n"); return 1; }
             if (!init_browser_context()) { printf("FATAL: init_browser_context() failed\n"); return 1; }
             register_font_table();   /* layout queries measure text */
@@ -1308,6 +1309,7 @@ int main(int argc, char *argv[]) {
             cleanup_browser_context();
             platform_http_cleanup();
             platform_cleanup();
+            cyber_sampler_stop();
             return JS_IsException(pres) ? 1 : 0;
         }
     }

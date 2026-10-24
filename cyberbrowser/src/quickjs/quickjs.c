@@ -59,6 +59,7 @@
 
 /* Include internal types header for shared struct definitions */
 #include "quickjs-internal.h"
+#include "quickjs_jit.h"
 
 /* Debug: last property accessed on undefined/null (for browser diagnostics) */
 char g_last_undefined_prop[256] = {0};
@@ -579,15 +580,25 @@ void gc_shape_set_proto_handle(GCHandle shape_handle, GCHandle val) {
     }
 }
 
-static inline GCHandle js_shape_get_proto_handle_atomic(JSShapeHandle sh)
-{
-    return js_shape_proto_handle_atomic_load(sh);
-}
+/* js_object_get_proto_handle_atomic, find_own_property, js_get_field_fast:
+ * shared with the JIT's stencils. */
+#include "quickjs_props_inline.h"
 
-static inline GCHandle js_object_get_proto_handle_atomic(JSObjectHandle obj)
+JSShapeProperty *find_own_property_lost(JSProperty **ppr, JSObject *o, JSShape *s, JSShapeHandle sh,
+                                        JSAtom atom)
 {
-    JSShapeHandle sh = GC_SHAPE_DEREF(js_obj_shape_handle(obj));
-    return js_shape_get_proto_handle_atomic(sh);
+    JSShapeProperty *prop = s->prop;
+    for (int li = 0; li < s->prop_count; li++) {
+        if (prop[li].atom == atom) {
+            fprintf(stderr, "[FOP-LOST] atom %u at index %d of %d is not on its hash chain (shape %u)\n",
+                    (unsigned)atom, li, s->prop_count, (unsigned)sh);
+            fflush(stderr);
+            *ppr = &js_obj_props_of(o)[li];
+            return &prop[li];
+        }
+    }
+    *ppr = NULL;
+    return NULL;
 }
 
 /* JSObject boolean checks */
@@ -1529,7 +1540,7 @@ void JS_SetCanBlock(JSRuntimeHandle rt, BOOL can_block)
  * when no handler is set.  A plain static rather than the runtime's field
  * so the per-instruction check is one load, not a handle lookup.  JS runs
  * on one thread. */
-static uint32_t g_interrupt_countdown;
+uint32_t g_interrupt_countdown;   /* not static: compiled code counts it down too */
 
 void JS_SetInterruptHandler(JSRuntimeHandle rt, JSInterruptHandler *handler, void *opaque)
 {
@@ -6845,47 +6856,6 @@ static force_inline JSShapeProperty *find_own_property1(JSObjectHandle p,
     return NULL;
 }
 
-static force_inline JSShapeProperty *find_own_property(JSProperty **ppr,
-                                                       JSObjectHandle p,
-                                                       JSAtom atom)
-{
-    /* The object and its shape are dereferenced once: this runs for every
-     * property access the interpreter makes. */
-    JSObject *o = (JSObject *)gc_deref(p);
-    JSShapeHandle sh = o ? (JSShapeHandle)atomic_load_u32((volatile uint32_t *)&o->shape_handle) : GC_HANDLE_NULL;
-    JSShape *s = (JSShape *)gc_deref(sh);
-    if (unlikely(!s)) {
-        *ppr = NULL;
-        return NULL;
-    }
-    JSShapeProperty *pr, *prop = s->prop;
-    uint32_t h = ((uint32_t *)(prop + s->prop_size))[(uintptr_t)atom & s->prop_hash_mask];
-    while (h) {
-        pr = &prop[h - 1];
-        if (likely(pr->atom == atom)) {
-            /* Valid until the next GC point: callers use it immediately. */
-            *ppr = &js_obj_props_of(o)[h - 1];
-            return pr;
-        }
-        h = pr->hash_next;
-    }
-    /* A miss.  CYBER_TRACE_DF=1 checks the hash chain against the property
-     * array (chains were once lost under the moving collector) and reports a
-     * property the chain does not reach. */
-    if (unlikely(CYBER_ENV(CYBER_T_DF))) {
-        for (int li = 0; li < s->prop_count; li++) {
-            if (prop[li].atom == atom) {
-                fprintf(stderr, "[FOP-LOST] atom %u at index %d of %d is not on its hash chain (shape %u)\n",
-                        (unsigned)atom, li, s->prop_count, (unsigned)sh);
-                fflush(stderr);
-                *ppr = &js_obj_props_of(o)[li];
-                return &prop[li];
-            }
-        }
-    }
-    *ppr = NULL;
-    return NULL;
-}
 
 /* indicate that the object may be part of a function prototype cycle */
 static void set_cycle_flag(JSContextHandle ctx, GCValue obj)
@@ -19711,6 +19681,242 @@ JSStackFrame *js_frame_deref(GCHandle frame_handle)
 
 #define JS_CALL_FLAG_COPY_ARGV   (1 << 1)
 #define JS_CALL_FLAG_GENERATOR   (1 << 2)
+/* Continue, in the interpreter, a call compiled code started: argv is its
+ * JSInterpFrame, whose jit_exit says how compiled code stopped (an
+ * exception to handle, or JSOP_NEXT: run from F->pc). */
+#define JS_CALL_FLAG_JIT_CONTINUE (1 << 4)
+
+static JSStackFrame *js_alloc_bytecode_frame(JSContextHandle ctx, JSFunctionBytecodeHandle b,
+                                             int arg_count, int var_count, int stack_size, int var_ref_count,
+                                             GCValue **parg_buf, GCValue **pvar_buf, GCValue **pstack_buf,
+                                             JSVarRefHandle **pvar_refs, int *ppool_depth);
+
+/* A bytecode function's frame for a call: allocated, arguments copied,
+ * locals cleared, captured variables given their var_refs, and made the
+ * runtime's current frame.  Fills the frame state F (all but the call's
+ * own parameters); NULL when out of memory.  JS_CallInternal and compiled
+ * code's direct calls (jit_call_prepare) both set up frames with this. */
+static inline __attribute__((always_inline))
+JSStackFrame *js_bc_frame_enter(JSContextHandle caller_ctx, JSRuntimeHandle rt, JSObjectHandle p,
+                                JSFunctionBytecodeHandle b, GCValue func_obj, int argc, GCValue *argv,
+                                JSInterpFrame *F)
+{
+    JSStackFrame *sf, *prev_sf;
+    GCValue *arg_buf, *var_buf, *stack_buf;
+    JSVarRefHandle *var_refs;
+    GCHandle *sf_var_refs;
+    JSContextHandle ctx;
+    int i, arg_allocated_size;
+
+    /* Always allocate full arg space to ensure captured vars work */
+    arg_allocated_size = SAFE_GET_OR(b, JSFunctionBytecodeHandle, arg_count, 0);
+
+    /* Allocate frame from GC heap instead of C stack */
+    sf = js_alloc_bytecode_frame(caller_ctx, b, arg_allocated_size, SAFE_GET_OR(b, JSFunctionBytecodeHandle, var_count, 0),
+                                 SAFE_GET_OR(b, JSFunctionBytecodeHandle, stack_size, 0), SAFE_GET_OR(b, JSFunctionBytecodeHandle, var_ref_count, 0),
+                                 &arg_buf, &var_buf, &stack_buf, &var_refs, &F->pool_depth);
+    if (!sf) {
+        return NULL;
+    }
+
+    ctx = (JSContextHandle)(SAFE_GET_OR(b, JSFunctionBytecodeHandle, realm_handle, GC_HANDLE_NULL));
+    sf->js_mode = SAFE_GET_OR(b, JSFunctionBytecodeHandle, js_mode, 0);
+    gc_set_heap_value(&sf->cur_func, (GCValue)func_obj);
+
+    /* Copy arguments to frame's arg_buf */
+    for(i = 0; i < argc && i < SAFE_GET_OR(b, JSFunctionBytecodeHandle, arg_count, 0); i++)
+        arg_buf[i] = argv[i];
+    for(; i < SAFE_GET_OR(b, JSFunctionBytecodeHandle, arg_count, 0); i++)
+        arg_buf[i] = JS_UNDEFINED;
+    sf->arg_count = SAFE_GET_OR(b, JSFunctionBytecodeHandle, arg_count, 0);
+
+    for(i = 0; i < SAFE_GET_OR(b, JSFunctionBytecodeHandle, var_count, 0); i++)
+        var_buf[i] = JS_UNDEFINED;
+
+    sf_var_refs = JS_SF_VAR_REFS(sf);
+    for(i = 0; i < SAFE_GET_OR(b, JSFunctionBytecodeHandle, var_ref_count, 0); i++)
+        gc_set_heap_handle(&sf_var_refs[i], GC_HANDLE_NULL);
+
+    /*
+     * Pre-initialize var_refs for captured arguments and variables.
+     * This ensures nested functions defined early in parent can capture them.
+     * This is critical for deeply nested IIFE patterns like Web Animations polyfill.
+     * (Only a function with var_refs has any.)
+     */
+    if (SAFE_GET_OR(b, JSFunctionBytecodeHandle, var_ref_count, 0) != 0) {
+        JSBytecodeVarDef *vardefs = b_vardefs(b);
+
+        /* First, initialize captured arguments */
+        for (i = 0; i < SAFE_GET_OR(b, JSFunctionBytecodeHandle, arg_count, 0); i++) {
+            JSBytecodeVarDef *vd = &vardefs[i];
+            if (vd->is_captured && vd->var_ref_idx < SAFE_GET_OR(b, JSFunctionBytecodeHandle, var_ref_count, 0)) {
+                JSVarRefHandle var_ref = js_create_var_ref(ctx, FALSE);
+                if (SAFE_VALID(var_ref)) {
+                    js_varref_set_value(var_ref, arg_buf[i]);
+                    SAFE_SET(var_ref, JSVarRefHandle, is_detached, FALSE);
+                    SAFE_SET(var_ref, JSVarRefHandle, var_idx, i);
+                    SAFE_SET(var_ref, JSVarRefHandle, is_arg, TRUE);
+                    /* Handle-based frame ref: a raw frame_ptr (async=FALSE) is
+                     * misread as a GCHandle by the marker, so the frame is never
+                     * kept alive and captured values dangle. */
+                    js_varref_set_frame_ref_in_array(var_ref, sf, TRUE, sf->self_handle);
+                    gc_set_heap_handle(&sf_var_refs[vd->var_ref_idx], SAFE_HANDLE(var_ref));
+                }
+            }
+        }
+
+        /* Then, initialize captured local variables */
+        for (i = 0; i < SAFE_GET_OR(b, JSFunctionBytecodeHandle, var_count, 0); i++) {
+            JSBytecodeVarDef *vd = &vardefs[SAFE_GET_OR(b, JSFunctionBytecodeHandle, arg_count, 0) + i];
+            if (vd->is_captured && vd->var_ref_idx < SAFE_GET_OR(b, JSFunctionBytecodeHandle, var_ref_count, 0)) {
+                JSVarRefHandle var_ref = js_create_var_ref(ctx, vd->is_lexical);
+                if (SAFE_VALID(var_ref)) {
+                    /* Variable not initialized yet - set to undefined */
+                    js_varref_set_value(var_ref, JS_UNDEFINED);
+                    SAFE_SET(var_ref, JSVarRefHandle, is_detached, FALSE);
+                    SAFE_SET(var_ref, JSVarRefHandle, var_idx, i);
+                    SAFE_SET(var_ref, JSVarRefHandle, is_arg, FALSE);
+                    /* Handle-based frame ref (see above). */
+                    js_varref_set_frame_ref_in_array(var_ref, sf, TRUE, sf->self_handle);
+                    gc_set_heap_handle(&sf_var_refs[vd->var_ref_idx], SAFE_HANDLE(var_ref));
+                }
+            }
+        }
+    }
+
+    prev_sf = js_rt_current_stack_frame(rt);
+    gc_set_heap_handle(&sf->prev_frame_handle, prev_sf ? prev_sf->self_handle : GC_HANDLE_NULL);
+    js_rt_set_current_stack_frame(rt, sf);
+
+    F->sf = sf;
+    F->ctx = ctx; /* the current realm */
+    F->arg_buf = arg_buf;
+    F->var_buf = var_buf;
+    F->stack_buf = stack_buf;
+    F->sf_var_refs = sf_var_refs;
+    F->sp = stack_buf;
+    F->pc = js_bc_byte_code_buf(b);
+    /* Set up var_refs pointer for accessing closure variables */
+    F->var_refs_handle = SAFE_GET_OR(p, JSObjectHandle, u.func.var_refs_handle, GC_HANDLE_NULL);
+    F->var_refs = ((JSVarRefHandle *)gc_deref(F->var_refs_handle));
+    return sf;
+}
+
+/* A value compiled code may have just stored, loaded as its two 8-byte
+ * halves: stencils store values that way, and a 16-byte load of them could
+ * not be forwarded from the store buffer (a stall of a dozen cycles). */
+static inline __attribute__((always_inline)) GCValue jit_value_load(const GCValue *s)
+{
+    uint64_t lo, hi;
+    GCValue v;
+    memcpy(&lo, s, 8);
+    memcpy(&hi, (const uint8_t *)s + 8, 8);
+    __asm__("" : "+r"(lo), "+r"(hi));
+    memcpy(&v, &lo, 8);
+    memcpy((uint8_t *)&v + 8, &hi, 8);
+    return v;
+}
+
+/* js_bc_frame_enter for a function with no captured variables whose frame
+ * fits the pooled frame of its depth, which is nearly every call compiled
+ * code makes: the same frame, set up from the bytecode (bp) read once.
+ * NULL, having changed nothing, when it does not apply. */
+static inline __attribute__((always_inline))
+JSStackFrame *js_bc_frame_enter_pooled(JSRuntimeHandle rt, JSObjectHandle p, JSFunctionBytecodeHandle b,
+                                       const JSFunctionBytecode *bp, GCValue func_obj, int argc, GCValue *argv,
+                                       JSInterpFrame *F)
+{
+    const size_t frame_size = sizeof(JSStackFrame);
+    int depth = g_bc_frame_depth;
+    int arg_count = bp->arg_count, var_count = bp->var_count, stack_size = bp->stack_size;
+    size_t stack_buf_size = sizeof(GCValue) * stack_size;
+    size_t total_size = frame_size + sizeof(GCValue) * (arg_count + var_count) + stack_buf_size;
+    JSRuntime *rtp;
+    JSStackFrame *sf;
+    GCValue *arg_buf, *var_buf, *stack_buf;
+    GCHandle handle;
+    uint8_t *mem;
+    int i, n;
+
+    if (bp->var_ref_count != 0 || depth >= BC_FRAME_POOL_DEPTH || g_bc_frame_pool_size[depth] < total_size ||
+        unlikely(g_c_frame_pool_epoch != g_gc_epoch))
+        return NULL;
+    rtp = GC_DEREF_H(rt, JSRuntimeHandle);
+    handle = g_bc_frame_pool[depth];
+    mem = (uint8_t *)gc_deref(handle);
+    sf = (JSStackFrame *)mem;
+    arg_buf = (GCValue *)(mem + frame_size);
+    var_buf = arg_buf + arg_count;
+    stack_buf = var_buf + var_count;
+    F->pool_depth = depth;
+    g_bc_frame_depth = depth + 1;
+
+    /* As js_alloc_bytecode_frame for a reused frame. */
+    memset(sf, 0, frame_size);
+    /* Inline (the stack is a few values): memset is a call out of the
+     * image.  The empty asm keeps gcc from making the loop that call. */
+    for (i = 0; i < stack_size; i++) {
+        uint64_t *q = (uint64_t *)&stack_buf[i];
+        q[0] = 0;
+        q[1] = 0;
+        __asm__("" ::: "memory");
+    }
+    sf->self_handle = handle;
+    sf->bytecode_handle = b;
+    sf->arg_buf_offset = (uint32_t)frame_size;
+    sf->var_buf_offset = (uint32_t)((uint8_t *)var_buf - mem);
+    sf->stack_buf_offset = (uint32_t)((uint8_t *)stack_buf - mem);
+    sf->var_refs_offset = (uint32_t)total_size;
+    sf->arg_count = arg_count;
+    sf->var_count = var_count;
+    sf->stack_size = stack_size;
+    sf->js_mode = bp->js_mode;
+    sf->cur_func = func_obj;
+    sf->prev_frame_handle = rtp->current_stack_frame_handle;
+    gc_dirty_range(sf, frame_size);
+    GC_SET(rtp->current_stack_frame_handle, handle);
+
+    n = argc < arg_count ? argc : arg_count;
+    for (i = 0; i < n; i++)
+        arg_buf[i] = jit_value_load(&argv[i]);
+    for (; i < arg_count; i++)
+        arg_buf[i] = JS_UNDEFINED;
+    for (i = 0; i < var_count; i++)
+        var_buf[i] = JS_UNDEFINED;
+
+    F->sf = sf;
+    F->ctx = (JSContextHandle)bp->realm_handle;
+    F->arg_buf = arg_buf;
+    F->var_buf = var_buf;
+    F->stack_buf = stack_buf;
+    F->sf_var_refs = (GCHandle *)(mem + total_size);
+    F->sp = stack_buf;
+    F->var_refs_handle = SAFE_GET_OR(p, JSObjectHandle, u.func.var_refs_handle, GC_HANDLE_NULL);
+    F->var_refs = (JSVarRefHandle *)gc_deref(F->var_refs_handle);
+    return sf;
+}
+
+/* A normal function's call is over: its frame stops being the current one
+ * and goes back to the pool unless something still refers to it. */
+static inline __attribute__((always_inline))
+void js_bc_frame_leave(JSRuntimeHandle rt, JSStackFrame *sf, int pool_depth)
+{
+    js_rt_pop_stack_frame(rt, sf);
+    if (sf->escaped & JS_FRAME_PINNED) {
+        /* The frame stays alive as long as something refers to it (its
+         * var_refs too stay attached).  As above, for the locals and
+         * arguments it keeps. */
+        gc_dirty_range(JS_SF_ARG_BUF(sf), sizeof(GCValue) * sf->arg_count);
+        gc_dirty_range(JS_SF_VAR_BUF(sf), sizeof(GCValue) * sf->var_count);
+    } else if (sf->escaped & JS_FRAME_VAR_REFS) {
+        /* Only var_refs in its array point into it: they take their
+         * values now (as upstream closes them), so the frame is free
+         * again and keeps nothing alive. */
+        js_frame_detach_var_refs(sf);
+    }
+    if (pool_depth >= 0)
+        js_bc_frame_release(sf, pool_depth);
+}
 
 /* Allocate a C function stack frame from GC heap (from g_c_frame_pool when
  * one fits) */
@@ -20052,6 +20258,227 @@ extern BOOL exec_trace_active;
 extern const char *exec_trace_func_filter;
 #endif
 
+/* The per-opcode helpers (quickjs_jsops.inc, included after
+ * JS_CallInternal) and what runs a call through them.  QJS_JIT=threaded
+ * (testing) runs every instruction through its helper: what the baseline
+ * JIT does for the instructions it does not inline. */
+static int (*const jsop_table[256])(JSInterpFrame *F);
+static const uint8_t jsop_jumps[256];
+/* QJS_JIT: 0 (off), 1 (compile hot functions), stress (compile every
+ * function at its first call), threaded (testing: no compiled code, every
+ * instruction through its helper). */
+enum { JS_JIT_OFF, JS_JIT_ON, JS_JIT_STRESS, JS_JIT_THREADED };
+static int g_jit_mode = -1;
+/* A function compiles once entries (JS_JIT_ENTRY_WEIGHT each) and loop
+ * iterations (the loop's length in bytecode bytes) pass JS_JIT_THRESHOLD:
+ * JIT_DESIGN.md section 8, with H measured by M0 (QJS_OPSTATS). */
+#define JS_JIT_THRESHOLD_DEFAULT 2000
+static int32_t g_jit_threshold = JS_JIT_THRESHOLD_DEFAULT;   /* QJS_JIT_THRESHOLD overrides */
+#define JS_JIT_THRESHOLD g_jit_threshold
+#define JS_JIT_ENTRY_WEIGHT 100
+static void js_jit_exit_stats(void)
+{
+    jit_print_stats();
+}
+static int js_jit_mode_init(void)
+{
+    const char *e = getenv("QJS_JIT");
+    int mode = JS_JIT_OFF;
+    if (e && strcmp(e, "threaded") == 0) mode = JS_JIT_THREADED;
+    else if (e && strcmp(e, "stress") == 0) mode = JS_JIT_STRESS;
+    else if (e && strcmp(e, "1") == 0) mode = JS_JIT_ON;
+    if ((mode == JS_JIT_ON || mode == JS_JIT_STRESS) && !jit_available()) {
+        fprintf(stderr, "[jit] unavailable here: interpreting\n");
+        mode = JS_JIT_OFF;
+    }
+    {
+        const char *t = getenv("QJS_JIT_THRESHOLD");
+        if (t && atoi(t) > 0)
+            g_jit_threshold = atoi(t);
+    }
+    if (getenv("QJS_JIT_LOG") && mode != JS_JIT_OFF)
+        atexit(js_jit_exit_stats);
+    g_jit_mode = mode;
+    return g_jit_mode;
+}
+static inline int js_jit_mode(void)
+{
+    return likely(g_jit_mode >= 0) ? g_jit_mode : js_jit_mode_init();
+}
+static int js_jit_run_threaded(JSInterpFrame *F);
+
+/* The function's compiled code, compiling it if it is hot enough; NULL to
+ * interpret. */
+static const struct JitCode *js_jit_get(JSContextHandle ctx, JSFunctionBytecodeHandle b)
+{
+    JSFunctionBytecode *bp = (JSFunctionBytecode *)gc_deref(b);
+    const uint8_t *bc;
+    JitCode *jc = bp->jit_code;
+    if (jc)
+        return jc == JIT_CODE_FAILED ? NULL : jc;
+    if (g_jit_mode != JS_JIT_STRESS && bp->jit_budget < JS_JIT_THRESHOLD)
+        return NULL;
+    bc = js_bc_byte_code_buf(b);
+    {
+        /* A name for profiles, when sampling. */
+        static int named = -1;
+        char name[192];
+        name[0] = 0;
+        if (named < 0)
+            named = getenv("CYBER_SAMPLE") != NULL;
+        if (named) {
+            char fb[96], nb[64];
+            int col = 0;
+            int line = bp->has_debug ? find_line_num(ctx, b, 0, &col) : -1;
+            snprintf(name, sizeof(name), "%s@%s:%d",
+                     JS_AtomGetStr(ctx, nb, sizeof(nb), bp->func_name),
+                     bp->has_debug ? JS_AtomGetStr(ctx, fb, sizeof(fb), bp->debug.filename) : "?", line);
+            bp = (JSFunctionBytecode *)gc_deref(b);
+        }
+        jc = jit_compile(ctx, b, bc, bp->byte_code_len, b_cpool(b), jsop_table, jsop_jumps,
+                         name[0] ? name : NULL);
+    }
+    bp = (JSFunctionBytecode *)gc_deref(b);
+    bp->jit_code = jc ? jc : JIT_CODE_FAILED;
+    return jc;
+}
+
+/* A loop's back edge in the interpreter: count the iteration, and once the
+ * function is hot, continue at the loop head through restart, which
+ * compiles it and enters the compiled code there (on-stack replacement).
+ * Not in the per-opcode helpers (the generator leaves it out): compiled
+ * code has no use for it. */
+#define JS_JIT_BACKEDGE(len)                                                  \
+    do {                                                                      \
+        if (unlikely(g_jit_mode == JS_JIT_ON)) {                              \
+            JSFunctionBytecode *jbp_ = (JSFunctionBytecode *)gc_deref(b);     \
+            if (!jbp_->jit_code && (jbp_->jit_budget += (len)) >= JS_JIT_THRESHOLD) \
+                goto restart;                                                 \
+        }                                                                     \
+    } while (0)
+
+/* QJS_OPSTATS=1 (compile time, e.g. -DQJS_OPSTATS=1): count executed
+ * instructions by opcode, by adjacent pair and by function, and print at
+ * exit how much execution falls in functions past a hotness threshold (the
+ * baseline JIT's tiering, JIT_DESIGN.md M0). */
+#ifndef QJS_OPSTATS
+#define QJS_OPSTATS 0
+#endif
+#if QJS_OPSTATS
+static uint64_t g_op_count[256], g_pair_count[256][256], g_op_total;
+static int g_op_prev = -1;
+static uint64_t *g_fn_count;    /* executed instructions, by bytecode handle */
+static uint32_t *g_fn_len;      /* its byte_code_len */
+static uint64_t *g_fn_budget;   /* hotness: entries and loop lengths */
+static uint32_t *g_fn_last_pc;  /* offset of its last instruction run */
+static size_t g_fn_cap;
+#define OPSTATS_NH 9
+#define OPSTATS_ENTRY_WEIGHT 100
+static const uint32_t g_hs[OPSTATS_NH] = { 0, 100, 500, 1000, 2000, 5000, 10000, 50000, 200000 };
+static uint64_t g_hot[OPSTATS_NH], g_hot_fns[OPSTATS_NH], g_hot_bytes[OPSTATS_NH];
+/* The same, leaving out functions over OPSTATS_MAX_LEN bytes of bytecode. */
+#define OPSTATS_MAX_LEN 32768
+static uint64_t g_hotc[OPSTATS_NH], g_hotc_fns[OPSTATS_NH], g_hotc_bytes[OPSTATS_NH];
+
+static void opstats_dump(void)
+{
+    static const char *names[256] = {
+#define DEF(id, size, n_pop, n_push, f) [OP_ ## id] = #id,
+#define def(id, size, n_pop, n_push, f)
+#include "quickjs-opcode.h"
+    };
+    FILE *f = stderr;
+    fprintf(f, "[opstats] %llu instructions\n", (unsigned long long)g_op_total);
+    if (!g_op_total) return;
+    int order[256];
+    for (int i = 0; i < 256; i++) order[i] = i;
+    for (int i = 0; i < 256; i++)       /* selection sort: 256 entries */
+        for (int j = i + 1; j < 256; j++)
+            if (g_op_count[order[j]] > g_op_count[order[i]]) { int t = order[i]; order[i] = order[j]; order[j] = t; }
+    for (int i = 0; i < 40 && g_op_count[order[i]]; i++)
+        fprintf(f, "[opstats] op %6.2f%%  %s\n", 100.0 * g_op_count[order[i]] / g_op_total,
+                names[order[i]] ? names[order[i]] : "?");
+    /* The top pairs. */
+    for (int k = 0; k < 40; k++) {
+        uint64_t best = 0; int ba = 0, bb = 0;
+        for (int a = 0; a < 256; a++)
+            for (int c = 0; c < 256; c++)
+                if (g_pair_count[a][c] > best) { best = g_pair_count[a][c]; ba = a; bb = c; }
+        if (!best) break;
+        fprintf(f, "[opstats] pair %6.2f%%  %s + %s\n", 100.0 * best / g_op_total,
+                names[ba] ? names[ba] : "?", names[bb] ? names[bb] : "?");
+        g_pair_count[ba][bb] = 0;
+    }
+    /* Execution past a threshold: the budget is entries plus loop
+     * iterations (backward jumps) weighted by the loop's length, as the
+     * tiering in JIT_DESIGN.md section 8 counts.  Instructions run after a
+     * function's budget passed H would run compiled; the bytecode bytes
+     * are what compiling those functions costs. */
+    for (int k = 0; k < OPSTATS_NH; k++)
+        fprintf(f, "[opstats] H=%-7u %6.2f%% of execution past H, %llu functions, %llu bytecode bytes\n",
+                g_hs[k], 100.0 * g_hot[k] / g_op_total, (unsigned long long)g_hot_fns[k],
+                (unsigned long long)g_hot_bytes[k]);
+    for (int k = 0; k < OPSTATS_NH; k++)
+        fprintf(f, "[opstats] H=%-7u len<=%d: %6.2f%% of execution past H, %llu functions, %llu bytecode bytes\n",
+                g_hs[k], OPSTATS_MAX_LEN, 100.0 * g_hotc[k] / g_op_total, (unsigned long long)g_hotc_fns[k],
+                (unsigned long long)g_hotc_bytes[k]);
+}
+
+static void opstats_hit(int op, JSFunctionBytecodeHandle b, const uint8_t *pc)
+{
+    static int registered;
+    if (!registered) { registered = 1; atexit(opstats_dump); }
+    g_op_total++;
+    g_op_count[op]++;
+    if (g_op_prev >= 0) g_pair_count[g_op_prev][op]++;
+    size_t h = (size_t)SAFE_HANDLE(b);
+    if (h >= g_fn_cap) {
+        size_t cap = g_fn_cap ? g_fn_cap : 1 << 16;
+        while (cap <= h) cap *= 2;
+        g_fn_count = js_plain_realloc(g_fn_count, cap * sizeof(*g_fn_count));
+        g_fn_len = js_plain_realloc(g_fn_len, cap * sizeof(*g_fn_len));
+        g_fn_budget = js_plain_realloc(g_fn_budget, cap * sizeof(*g_fn_budget));
+        g_fn_last_pc = js_plain_realloc(g_fn_last_pc, cap * sizeof(*g_fn_last_pc));
+        memset(g_fn_count + g_fn_cap, 0, (cap - g_fn_cap) * sizeof(*g_fn_count));
+        memset(g_fn_len + g_fn_cap, 0, (cap - g_fn_cap) * sizeof(*g_fn_len));
+        memset(g_fn_budget + g_fn_cap, 0, (cap - g_fn_cap) * sizeof(*g_fn_budget));
+        memset(g_fn_last_pc + g_fn_cap, 0, (cap - g_fn_cap) * sizeof(*g_fn_last_pc));
+        g_fn_cap = cap;
+    }
+    if (!g_fn_count[h]++)
+        g_fn_len[h] = SAFE_GET_OR(b, JSFunctionBytecodeHandle, byte_code_len, 0);
+    uint32_t off = (uint32_t)(pc - 1 - js_bc_byte_code_buf(b));
+    uint64_t before = g_fn_budget[h];
+    if (g_op_prev < 0)
+        g_fn_budget[h] += OPSTATS_ENTRY_WEIGHT;           /* entry */
+    else if (off < g_fn_last_pc[h])
+        g_fn_budget[h] += g_fn_last_pc[h] - off;        /* back edge: the loop's length */
+    g_fn_last_pc[h] = off;
+    g_op_prev = op;
+    for (int k = 0; k < OPSTATS_NH; k++) {
+        if (g_fn_budget[h] >= g_hs[k]) {
+            g_hot[k]++;
+            if (before < g_hs[k]) {
+                g_hot_fns[k]++;
+                g_hot_bytes[k] += g_fn_len[h];
+            }
+            if (g_fn_len[h] <= OPSTATS_MAX_LEN) {
+                g_hotc[k]++;
+                if (before < g_hs[k]) {
+                    g_hotc_fns[k]++;
+                    g_hotc_bytes[k] += g_fn_len[h];
+                }
+            }
+        }
+    }
+}
+#define OPSTATS_HIT(op) opstats_hit((op), b, pc)
+#define OPSTATS_ENTER() (g_op_prev = -1)
+#else
+#define OPSTATS_HIT(op) ((void)0)
+#define OPSTATS_ENTER() ((void)0)
+#endif
+
 static JSAtom g_last_field_atom = JS_ATOM_NULL;
 
 /* CYBER_TRACE_GV: trace writes of specific named functions into var_refs. */
@@ -20139,7 +20566,11 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
 #include "quickjs-opcode.h"
         [ OP_COUNT ... 255 ] = &&case_default
     };
+#if QJS_OPSTATS
+#define SWITCH(pc)      do { opcode = *pc++; OPSTATS_HIT(opcode); goto *dispatch_table[opcode]; } while (0);
+#else
 #define SWITCH(pc)      goto *dispatch_table[opcode = *pc++];
+#endif
 #define CASE(op)        case_ ## op
 #define DEFAULT         case_default
 /* Polls happen at JS_POLL_POINT (entry, jumps, native calls), not here. */
@@ -20151,6 +20582,23 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
      * upstream does: runaway recursion must throw RangeError, not crash. */
     if (js_check_stack_overflow(JS_GetRuntime(caller_ctx), 0))
         return JS_ThrowStackOverflow(caller_ctx);
+
+    if (unlikely(flags & JS_CALL_FLAG_JIT_CONTINUE)) {
+        /* A call compiled code began (jit_call_prepare): take its state,
+         * then handle the exception it stopped on, or interpret from pc. */
+        JSInterpFrame *F = (JSInterpFrame *)argv;
+        int r = F->jit_exit;
+        sp = F->sp; pc = F->pc; ret_val = F->ret_val;
+        ctx = F->ctx; p = F->p; b = F->b; sf = F->sf;
+        stack_buf = F->stack_buf; var_buf = F->var_buf; arg_buf = F->arg_buf;
+        var_refs = F->var_refs; var_refs_handle = F->var_refs_handle; sf_var_refs = F->sf_var_refs;
+        func_obj = F->func_obj; this_obj = F->this_obj; new_target = F->new_target;
+        argc = F->argc; argv = F->argv; flags = F->flags;
+        pool_depth = F->pool_depth;
+        if (r == JSOP_EXCEPTION)
+            goto exception;
+        goto interpret;
+    }
 
     if (unlikely(JS_VALUE_GET_TAG(func_obj) != JS_TAG_OBJECT)) {
         if (flags & JS_CALL_FLAG_GENERATOR) {
@@ -20303,92 +20751,18 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
         b = (JSFunctionBytecodeHandle)(SAFE_GET_OR(p, JSObjectHandle, u.func.function_bytecode_handle, GC_HANDLE_NULL));
     }
 
-    /* Always allocate full arg space to ensure captured vars work */
-    arg_allocated_size = SAFE_GET_OR(b, JSFunctionBytecodeHandle, arg_count, 0);
-
-    /* Allocate frame from GC heap instead of C stack */
-    sf = js_alloc_bytecode_frame(caller_ctx, b, arg_allocated_size, SAFE_GET_OR(b, JSFunctionBytecodeHandle, var_count, 0),
-                                 SAFE_GET_OR(b, JSFunctionBytecodeHandle, stack_size, 0), SAFE_GET_OR(b, JSFunctionBytecodeHandle, var_ref_count, 0),
-                                 &arg_buf, &var_buf, &stack_buf, &var_refs, &pool_depth);
-    if (!sf) {
-        return JS_EXCEPTION;
-    }
-
-    ctx = (JSContextHandle)(SAFE_GET_OR(b, JSFunctionBytecodeHandle, realm_handle, GC_HANDLE_NULL));
-    sf->js_mode = SAFE_GET_OR(b, JSFunctionBytecodeHandle, js_mode, 0);
-    gc_set_heap_value(&sf->cur_func, (GCValue)func_obj);
-
-    /* Copy arguments to frame's arg_buf */
-    for(i = 0; i < argc && i < SAFE_GET_OR(b, JSFunctionBytecodeHandle, arg_count, 0); i++)
-        arg_buf[i] = argv[i];
-    for(; i < SAFE_GET_OR(b, JSFunctionBytecodeHandle, arg_count, 0); i++)
-        arg_buf[i] = JS_UNDEFINED;
-    sf->arg_count = SAFE_GET_OR(b, JSFunctionBytecodeHandle, arg_count, 0);
-
-    for(i = 0; i < SAFE_GET_OR(b, JSFunctionBytecodeHandle, var_count, 0); i++)
-        var_buf[i] = JS_UNDEFINED;
-
-    sf_var_refs = JS_SF_VAR_REFS(sf);
-    for(i = 0; i < SAFE_GET_OR(b, JSFunctionBytecodeHandle, var_ref_count, 0); i++)
-        gc_set_heap_handle(&sf_var_refs[i], GC_HANDLE_NULL);
-    
-    /* 
-     * Pre-initialize var_refs for captured arguments and variables.
-     * This ensures nested functions defined early in parent can capture them.
-     * This is critical for deeply nested IIFE patterns like Web Animations polyfill.
-     */
     {
-        JSBytecodeVarDef *vardefs = b_vardefs(b);
-        
-        /* First, initialize captured arguments */
-        for (i = 0; i < SAFE_GET_OR(b, JSFunctionBytecodeHandle, arg_count, 0); i++) {
-            JSBytecodeVarDef *vd = &vardefs[i];
-            if (vd->is_captured && vd->var_ref_idx < SAFE_GET_OR(b, JSFunctionBytecodeHandle, var_ref_count, 0)) {
-                JSVarRefHandle var_ref = js_create_var_ref(ctx, FALSE);
-                if (SAFE_VALID(var_ref)) {
-                    js_varref_set_value(var_ref, arg_buf[i]);
-                    SAFE_SET(var_ref, JSVarRefHandle, is_detached, FALSE);
-                    SAFE_SET(var_ref, JSVarRefHandle, var_idx, i);
-                    SAFE_SET(var_ref, JSVarRefHandle, is_arg, TRUE);
-                    /* Handle-based frame ref: a raw frame_ptr (async=FALSE) is
-                     * misread as a GCHandle by the marker, so the frame is never
-                     * kept alive and captured values dangle. */
-                    js_varref_set_frame_ref_in_array(var_ref, sf, TRUE, sf->self_handle);
-                    gc_set_heap_handle(&sf_var_refs[vd->var_ref_idx], SAFE_HANDLE(var_ref));
-                }
-            }
-        }
-
-        /* Then, initialize captured local variables */
-        for (i = 0; i < SAFE_GET_OR(b, JSFunctionBytecodeHandle, var_count, 0); i++) {
-            JSBytecodeVarDef *vd = &vardefs[SAFE_GET_OR(b, JSFunctionBytecodeHandle, arg_count, 0) + i];
-            if (vd->is_captured && vd->var_ref_idx < SAFE_GET_OR(b, JSFunctionBytecodeHandle, var_ref_count, 0)) {
-                JSVarRefHandle var_ref = js_create_var_ref(ctx, vd->is_lexical);
-                if (SAFE_VALID(var_ref)) {
-                    /* Variable not initialized yet - set to undefined */
-                    js_varref_set_value(var_ref, JS_UNDEFINED);
-                    SAFE_SET(var_ref, JSVarRefHandle, is_detached, FALSE);
-                    SAFE_SET(var_ref, JSVarRefHandle, var_idx, i);
-                    SAFE_SET(var_ref, JSVarRefHandle, is_arg, FALSE);
-                    /* Handle-based frame ref (see above). */
-                    js_varref_set_frame_ref_in_array(var_ref, sf, TRUE, sf->self_handle);
-                    gc_set_heap_handle(&sf_var_refs[vd->var_ref_idx], SAFE_HANDLE(var_ref));
-                }
-            }
-        }
+        JSInterpFrame E;
+        sf = js_bc_frame_enter(caller_ctx, rt, p, b, func_obj, argc, argv, &E);
+        if (!sf)
+            return JS_EXCEPTION;
+        pool_depth = E.pool_depth;
+        ctx = E.ctx;
+        arg_buf = E.arg_buf; var_buf = E.var_buf; stack_buf = E.stack_buf; sf_var_refs = E.sf_var_refs;
+        sp = E.sp; pc = E.pc;
+        var_refs_handle = E.var_refs_handle; var_refs = E.var_refs;
     }
-    
-    sp = stack_buf;
-    pc = js_bc_byte_code_buf(b);
-    prev_sf = js_rt_current_stack_frame(rt);
-    gc_set_heap_handle(&sf->prev_frame_handle, prev_sf ? prev_sf->self_handle : GC_HANDLE_NULL);
-    js_rt_set_current_stack_frame(rt, sf);
-    ctx = (JSContextHandle)(SAFE_GET_OR(b, JSFunctionBytecodeHandle, realm_handle, GC_HANDLE_NULL)); /* set the current realm */
-    
-    /* Set up var_refs pointer for accessing closure variables */
-    var_refs_handle = SAFE_GET_OR(p, JSObjectHandle, u.func.var_refs_handle, GC_HANDLE_NULL);
-    var_refs = ((JSVarRefHandle *)gc_deref(var_refs_handle));
-    
+        
     /* Poll points: function entry, jumps (every loop goes back through one)
      * and native calls, as upstream QuickJS polls interrupts.  Not every
      * instruction: that cost a load and a branch per opcode. */
@@ -20400,8 +20774,44 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
             goto exception; \
     } while (0)
     JS_POLL_POINT();
+    OPSTATS_ENTER();
+    if (unlikely(js_jit_mode() == JS_JIT_ON)) {
+        JSFunctionBytecode *jbp = (JSFunctionBytecode *)gc_deref(b);
+        if (jbp->jit_budget < JS_JIT_THRESHOLD)
+            jbp->jit_budget += JS_JIT_ENTRY_WEIGHT;
+    }
 
  restart:
+    if (unlikely(js_jit_mode() != JS_JIT_OFF)) {
+        /* Run the call (from pc) outside this loop: compiled, or through
+         * the helpers (QJS_JIT=threaded).  It comes back here only to
+         * finish, to handle an exception or to continue in the interpreter
+         * at pc. */
+        const struct JitCode *jc = g_jit_mode == JS_JIT_THREADED ? NULL : js_jit_get(ctx, b);
+        if (!jc && g_jit_mode != JS_JIT_THREADED)
+            goto interpret;
+        JSInterpFrame F;
+        int r;
+        F.sp = sp; F.pc = pc; F.ret_val = ret_val;
+        F.caller_ctx = caller_ctx; F.ctx = ctx; F.rt = rt; F.p = p; F.b = b; F.sf = sf;
+        F.stack_buf = stack_buf; F.var_buf = var_buf; F.arg_buf = arg_buf;
+        F.var_refs = var_refs; F.var_refs_handle = var_refs_handle; F.sf_var_refs = sf_var_refs;
+        F.func_obj = func_obj; F.this_obj = this_obj; F.new_target = new_target;
+        F.argc = argc; F.argv = argv; F.flags = flags;
+        F.pool_depth = pool_depth;
+        F.code = jc;
+        F.byte_code = js_bc_byte_code_buf(b);
+        F.jit_exit = JSOP_NEXT;
+        r = jc ? jit_enter(jc, &F) : js_jit_run_threaded(&F);
+        sp = F.sp; pc = F.pc; ret_val = F.ret_val;
+        if (r == JSOP_EXCEPTION)
+            goto exception;
+        if (r == JSOP_DONE)
+            goto done;
+        if (r == JSOP_DONE_GENERATOR)
+            goto done_generator;
+    }
+ interpret:
     for(;;) {
         int call_argc;
         GCValue *call_argv;
@@ -21469,8 +21879,13 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
             BREAK;
 
         CASE(OP_goto):
-            pc += (int32_t)get_u32(pc);
-            JS_POLL_POINT();
+            {
+                int32_t diff = (int32_t)get_u32(pc);
+                pc += diff;
+                JS_POLL_POINT();
+                if (diff < 0)
+                    JS_JIT_BACKEDGE(-diff);
+            }
             BREAK;
 #if SHORT_OPCODES
         CASE(OP_goto16):
@@ -21496,8 +21911,10 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                 if (res) {
                     int32_t diff = (int32_t)get_u32(pc - 4) - 4;
                     pc += diff;
-                    if (diff < 0)
+                    if (diff < 0) {
                         JS_POLL_POINT();
+                        JS_JIT_BACKEDGE(-diff);
+                    }
                 }
             }
             BREAK;
@@ -21518,8 +21935,10 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                 if (!res) {
                     int32_t diff = (int32_t)get_u32(pc - 4) - 4;
                     pc += diff;
-                    if (diff < 0)
+                    if (diff < 0) {
                         JS_POLL_POINT();
+                        JS_JIT_BACKEDGE(-diff);
+                    }
                 }
             }
             BREAK;
@@ -23225,22 +23644,379 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
         return ret_val;
     } else {
     done:
-        js_rt_pop_stack_frame(rt, sf);
-        if (sf->escaped & JS_FRAME_PINNED) {
-            /* The frame stays alive as long as something refers to it (its
-             * var_refs too stay attached).  As above, for the locals and
-             * arguments it keeps. */
-            gc_dirty_range(JS_SF_ARG_BUF(sf), sizeof(GCValue) * sf->arg_count);
-            gc_dirty_range(JS_SF_VAR_BUF(sf), sizeof(GCValue) * sf->var_count);
-        } else if (sf->escaped & JS_FRAME_VAR_REFS) {
-            /* Only var_refs in its array point into it: they take their
-             * values now (as upstream closes them), so the frame is free
-             * again and keeps nothing alive. */
-            js_frame_detach_var_refs(sf);
-        }
-        if (pool_depth >= 0)
-            js_bc_frame_release(sf, pool_depth);
+        js_bc_frame_leave(rt, sf, pool_depth);
         return ret_val;
+    }
+}
+
+#define JSOP_HELPER __attribute__((noinline))
+#include "quickjs_jsops.inc"
+
+/* Fast paths compiled code calls (quickjs_jit_ops.c): each does what the
+ * interpreter's inline fast path for the instruction does and returns 1,
+ * or returns 0 having changed nothing when the interpreter would take its
+ * slow path; compiled code then runs the instruction's helper. */
+
+/* Out-of-line parts of compiled code's fast paths (quickjs_jit_ops.c), so
+ * each copy of a stencil stays small: values by address, results stored
+ * through out (which may alias the input). */
+
+/* get_field / get_field2 on an object (handle h): the address of the
+ * value js_get_field_fast would give (valid until the next GC point), or
+ * NULL for the helper. */
+static const GCValue jit_undefined_value = GC_UNDEFINED_INIT;
+const GCValue *jit_field_ref(GCHandle h, JSAtom atom)
+{
+    JSObjectHandle p = (JSObjectHandle)h;
+    JSProperty *pr;
+    JSShapeProperty *prs;
+
+    for (;;) {
+        prs = find_own_property(&pr, p, atom);
+        if (prs) {
+            if (unlikely(prs->flags & JS_PROP_TMASK))
+                return NULL;
+            return &pr->u.value;
+        }
+        if (unlikely(SAFE_GET_OR(p, JSObjectHandle, is_exotic, false)))
+            return NULL;
+        GCHandle proto_handle = js_object_get_proto_handle_atomic(p);
+        if (proto_handle == GC_HANDLE_NULL)
+            return &jit_undefined_value;
+        p = (JSObjectHandle)(proto_handle);
+        if (!SAFE_VALID(p))
+            return &jit_undefined_value;
+    }
+}
+
+/* get_field / get_field2 of a property of a primitive string *v (not
+ * length or an index, which the string answers itself): the address of
+ * the value String.prototype's chain holds, as jit_field_ref; NULL for the
+ * helper (any other primitive, or an atom the string answers). */
+const GCValue *jit_prim_field_ref(JSContextHandle ctx, const GCValue *v, JSAtom atom)
+{
+    if (JS_VALUE_GET_TAG(*v) != JS_TAG_STRING || atom == JS_ATOM_length || __JS_AtomIsTaggedInt(atom))
+        return NULL;
+    GCValue proto = ctx_class_proto[JS_CLASS_STRING];
+    if (JS_VALUE_GET_TAG(proto) != JS_TAG_OBJECT)
+        return NULL;
+    return jit_field_ref(GC_VALUE_GET_HANDLE(proto), atom);
+}
+
+/* The length of the string with handle h. */
+int32_t jit_string_length(GCHandle h)
+{
+    return SAFE_GET_OR((JSStringHandle)h, JSStringHandle, len, 0);
+}
+
+/* The atom "length" (get_field of it compiles to get_length). */
+const uint32_t jit_atom_length = JS_ATOM_length;
+
+/* JS_ToBoolFree of *v when it is quick to tell (object, string, and the
+ * kinds compiled code tests inline), -1 otherwise. */
+int jit_truth(const GCValue *v)
+{
+    int tag = JS_VALUE_GET_TAG(*v);
+    if ((uint32_t)tag <= JS_TAG_UNDEFINED)
+        return JS_VALUE_GET_INT(*v) != 0;
+    if (tag == JS_TAG_OBJECT)
+        return !SAFE_GET_OR(JS_VALUE_GET_OBJ(*v), JSObjectHandle, is_HTMLDDA, false);
+    if (tag == JS_TAG_STRING)
+        return SAFE_GET_OR(JS_VALUE_GET_STRING(*v), JSStringHandle, len, 0) != 0;
+    return -1;
+}
+
+/* get_var_ref / get_var_ref_check: 0 (nothing stored) when the variable is
+ * uninitialized, which the helper handles. */
+int jit_get_var_ref(const JSVarRefHandle *var_refs, uint32_t idx, GCValue *out)
+{
+    GCValue v = js_varref_get_value(var_refs[idx]);
+    if (unlikely(JS_IsUninitialized(v)))
+        return 0;
+    *out = v;
+    return 1;
+}
+
+/* put_var_ref / set_var_ref. */
+void jit_put_var_ref(const JSVarRefHandle *var_refs, uint32_t idx, const GCValue *v)
+{
+    js_varref_set_value(var_refs[idx], *v);
+}
+
+/* Strict equality of a[0] and a[1] when they are of kinds compared by
+ * identity (object, symbol, undefined, null, bool, int: js_strict_eq2
+ * compares tag and payload), -1 otherwise. */
+int jit_strict_eq(const GCValue *a)
+{
+    int ta = JS_VALUE_GET_TAG(a[0]), tb = JS_VALUE_GET_TAG(a[1]);
+#define IDENTITY_TAG(t) ((t) == JS_TAG_OBJECT || (t) == JS_TAG_SYMBOL || (t) == JS_TAG_UNDEFINED || \
+                         (t) == JS_TAG_NULL || (t) == JS_TAG_BOOL || (t) == JS_TAG_INT)
+    if (!IDENTITY_TAG(ta) || !IDENTITY_TAG(tb))
+        return -1;
+#undef IDENTITY_TAG
+    if (ta != tb)
+        return 0;
+    if (ta == JS_TAG_UNDEFINED || ta == JS_TAG_NULL)
+        return 1;
+    if (ta == JS_TAG_OBJECT || ta == JS_TAG_SYMBOL)
+        return GC_VALUE_GET_HANDLE(a[0]) == GC_VALUE_GET_HANDLE(a[1]);
+    return JS_VALUE_GET_INT(a[0]) == JS_VALUE_GET_INT(a[1]);
+}
+
+/* Loose equality of a[0] and a[1]: ints, and null or undefined against null
+ * or undefined (true) or against an int, bool or string (false); -1
+ * otherwise. */
+int jit_loose_eq(const GCValue *a)
+{
+    int ta = JS_VALUE_GET_TAG(a[0]), tb = JS_VALUE_GET_TAG(a[1]);
+    if ((ta | tb) == 0)
+        return JS_VALUE_GET_INT(a[0]) == JS_VALUE_GET_INT(a[1]);
+#define NULLISH(t) ((t) == JS_TAG_UNDEFINED || (t) == JS_TAG_NULL)
+#define PLAIN(t) ((t) == JS_TAG_INT || (t) == JS_TAG_BOOL || (t) == JS_TAG_STRING)
+    if (NULLISH(ta) && NULLISH(tb))
+        return 1;
+    if ((NULLISH(ta) && PLAIN(tb)) || (NULLISH(tb) && PLAIN(ta)))
+        return 0;
+#undef NULLISH
+#undef PLAIN
+    return -1;
+}
+
+/* put_field of a[1] to a[0] (F->pc past its operands): a writable data
+ * property of a[0] itself, or a new one when JS_SetPropertyInternal would
+ * add it with nothing else to do (a[0] an ordinary extensible object, and
+ * no exotic object, setter or read-only property of that name on its
+ * prototype chain).  1 when done, 0 (nothing changed) for the helper, -1
+ * when it threw (out of memory). */
+int jit_put_field_fast(JSInterpFrame *F, const GCValue *a, JSAtom atom)
+{
+    GCValue obj = a[0], val = a[1];
+    JSObjectHandle p, p1;
+    JSProperty *pr;
+    JSShapeProperty *prs;
+    JSContextHandle ctx = F->ctx;
+
+    if (unlikely(JS_VALUE_GET_TAG(obj) != JS_TAG_OBJECT))
+        return 0;
+    p = JS_VALUE_GET_OBJ(obj);
+    prs = find_own_property(&pr, p, atom);
+    if (likely(prs)) {
+        if ((prs->flags & (JS_PROP_TMASK | JS_PROP_WRITABLE | JS_PROP_LENGTH)) != JS_PROP_WRITABLE)
+            return 0;
+        JS_NOTE_WATCHED_WRITE(p);
+        set_value(ctx, &pr->u.value, val);
+        gc_write_barrier(GC_VALUE_GET_HANDLE(obj), GC_VALUE_GET_HANDLE(val));
+        return 1;
+    }
+    if (SAFE_GET_OR(p, JSObjectHandle, is_exotic, true) || !SAFE_GET_OR(p, JSObjectHandle, extensible, false) ||
+        SAFE_GET_OR(p, JSObjectHandle, class_id, 0) == JS_CLASS_GLOBAL_OBJECT)
+        return 0;
+    for (p1 = (JSObjectHandle)js_object_get_proto_handle_atomic(p); p1 != GC_HANDLE_NULL;
+         p1 = (JSObjectHandle)js_object_get_proto_handle_atomic(p1)) {
+        if (!SAFE_VALID(p1) || SAFE_GET_OR(p1, JSObjectHandle, is_exotic, true))
+            return 0;
+        prs = find_own_property(&pr, p1, atom);
+        if (prs) {
+            if ((prs->flags & JS_PROP_TMASK) != JS_PROP_NORMAL || !(prs->flags & JS_PROP_WRITABLE))
+                return 0;
+            break;
+        }
+    }
+    /* As the interpreter before its slow path: the pc, for backtraces. */
+    F->sf->pc_offset = (uint32_t)(F->pc - F->byte_code);
+    pr = add_property(ctx, p, atom, JS_PROP_C_W_E);
+    if (unlikely(!pr))
+        return -1;
+    gc_set_heap_value(&pr->u.value, val);
+    gc_write_barrier(GC_VALUE_GET_HANDLE(obj), GC_VALUE_GET_HANDLE(val));
+    return 1;
+}
+
+/* get_array_el / get_array_el2 of a[0][a[1]] (GET_ARRAY_EL_INLINE): the
+ * element's address (valid until the next GC point), or NULL for the
+ * helper. */
+const GCValue *jit_array_el_ref(const GCValue *a)
+{
+    JSObjectHandle p;
+    uint32_t idx;
+
+    if (unlikely(JS_VALUE_GET_TAG(a[0]) != JS_TAG_OBJECT || JS_VALUE_GET_TAG(a[1]) != JS_TAG_INT))
+        return NULL;
+    p = JS_VALUE_GET_OBJ(a[0]);
+    idx = JS_VALUE_GET_INT(a[1]);
+    if (unlikely(SAFE_GET_OR(p, JSObjectHandle, class_id, 0) != JS_CLASS_ARRAY))
+        return NULL;
+    if (unlikely(idx >= SAFE_GET_OR(p, JSObjectHandle, u.array.count, 0)))
+        return NULL;
+    return &p_array_values[idx];
+}
+
+static GCValue js_create_from_ctor(JSContextHandle ctx, GCValue ctor, int class_id);
+
+/* The result of a direct call replaces the callee (and this or new.target)
+ * and the arguments on the caller's stack, as the interpreter's call,
+ * call_method and call_constructor do. */
+static inline __attribute__((always_inline)) void jit_call_push_result(JSInterpFrame *F, int argc, int kind, GCValue ret)
+{
+    GCValue *call_argv = F->sp - argc;
+    GCValue *sp;
+    int i;
+
+    if (kind == JIT_CALL_PLAIN) {
+        sp = F->sp - (argc + 1);
+    } else {
+        /* Clear stack slots to prevent memory corruption, as the interpreter. */
+        for (i = -2; i < argc; i++)
+            call_argv[i] = JS_UNDEFINED;
+        sp = F->sp - (argc + 2);
+    }
+    *sp++ = ret;
+    F->sp = sp;
+}
+
+/* call / call_method / call_constructor from compiled code (kind
+ * JIT_CALL_*; argc arguments on F->sp, F->pc past the operands), doing
+ * what the interpreter's case does, by the cheapest way that applies:
+ * - the callee is a compiled normal function: its frame is set up as
+ *   JS_CallInternal does, F2 filled and its code's entry returned, which
+ *   the caller runs directly (then jit_call_finish);
+ * - the callee is a C function: it is called, the result is pushed, and
+ *   F2->jit_exit is JSOP_DONE (JSOP_EXCEPTION if it threw);
+ * - otherwise NULL with F2->jit_exit JSOP_NEXT, having changed nothing: the
+ *   call goes through the instruction's helper. */
+void *jit_call_prepare(JSInterpFrame *F, JSInterpFrame *F2, int argc, int kind)
+{
+    GCValue *call_argv = F->sp - argc;
+    GCValue func_obj = jit_value_load(kind == JIT_CALL_CONSTRUCTOR ? &call_argv[-2] : &call_argv[-1]);
+    GCValue this_obj = kind == JIT_CALL_METHOD ? jit_value_load(&call_argv[-2]) : JS_UNDEFINED;
+    GCValue new_target = kind == JIT_CALL_CONSTRUCTOR ? jit_value_load(&call_argv[-1]) : JS_UNDEFINED;
+    int flags = kind == JIT_CALL_CONSTRUCTOR ? JS_CALL_FLAG_CONSTRUCTOR : 0;
+    JSObjectHandle p;
+    JSFunctionBytecodeHandle b;
+    JSFunctionBytecode *bp;
+    const JitCode *jc;
+    int class_id;
+
+    F2->jit_exit = JSOP_NEXT;
+    if (unlikely(JS_VALUE_GET_TAG(func_obj) != JS_TAG_OBJECT))
+        return NULL;
+    p = JS_VALUE_GET_OBJ(func_obj);
+    if (kind == JIT_CALL_CONSTRUCTOR && !SAFE_GET_OR(p, JSObjectHandle, is_constructor, false))
+        return NULL;
+    class_id = SAFE_GET_OR(p, JSObjectHandle, class_id, 0);
+    /* JS_CallInternal's (and the constructor's) checks: the stack, and the
+     * poll at a bytecode function's entry (when it would run the interrupt
+     * handler, the helper calls instead). */
+    if (js_check_stack_overflow(F->rt, 0) || g_interrupt_countdown == 1 || unlikely(g_handle_history != NULL))
+        return NULL;
+
+    if (class_id != JS_CLASS_BYTECODE_FUNCTION) {
+        JSClassCall *call_func;
+        JSRuntimeHandle rt = (JSRuntimeHandle)(SAFE_GET_OR(F->ctx, JSContextHandle, rt_handle, GC_HANDLE_NULL));
+        GCValue ret;
+        if (class_id != JS_CLASS_C_FUNCTION)
+            return NULL;
+        call_func = ((JSClass *)rt_class_array)[class_id].call;
+        if (!call_func)
+            return NULL;
+        /* As the interpreter before a call: the caller's pc, for backtraces. */
+        JS_SF_SET_PC(F->sf, F->pc);
+        /* JS_CallInternal passes this, JS_CallConstructorInternal new.target. */
+        ret = call_func(F->ctx, func_obj, kind == JIT_CALL_CONSTRUCTOR ? new_target : this_obj, argc, call_argv, flags);
+        if (unlikely(JS_IsException(ret))) {
+            F2->jit_exit = JSOP_EXCEPTION;
+            return NULL;
+        }
+        jit_call_push_result(F, argc, kind, ret);
+        F2->jit_exit = JSOP_DONE;
+        return NULL;
+    }
+
+    b = (JSFunctionBytecodeHandle)(SAFE_GET_OR(p, JSObjectHandle, u.func.function_bytecode_handle, GC_HANDLE_NULL));
+    bp = (JSFunctionBytecode *)gc_deref(b);
+    if (!bp || !bp->jit_code || bp->jit_code == JIT_CODE_FAILED || bp->func_parse_state != JS_FUNC_PARSED ||
+        bp->func_kind != JS_FUNC_NORMAL || (kind == JIT_CALL_CONSTRUCTOR && bp->is_derived_class_constructor))
+        return NULL;
+    jc = bp->jit_code;
+    /* As the interpreter before a call (JS_SF_SET_PC): the caller's pc,
+     * for backtraces. */
+    F->sf->pc_offset = (uint32_t)(F->pc - F->byte_code);
+    if (kind == JIT_CALL_CONSTRUCTOR) {
+        /* JS_CallConstructorInternal: the object `this` starts as. */
+        this_obj = js_create_from_ctor(F->ctx, new_target, JS_CLASS_OBJECT);
+        if (JS_IsException(this_obj)) {
+            F2->jit_exit = JSOP_EXCEPTION;
+            return NULL;
+        }
+    }
+    if (js_bc_frame_enter_pooled(F->rt, p, b, bp, func_obj, argc, call_argv, F2)) {
+        F2->pc = jc->byte_code;
+    } else if (!js_bc_frame_enter(F->ctx, F->rt, p, b, func_obj, argc, call_argv, F2)) {
+        F2->jit_exit = JSOP_EXCEPTION;     /* out of memory, thrown */
+        return NULL;
+    }
+    F2->ret_val = JS_UNDEFINED;
+    F2->caller_ctx = F->ctx;
+    F2->rt = F->rt;
+    F2->p = p;
+    F2->b = b;
+    F2->func_obj = func_obj;
+    F2->this_obj = this_obj;
+    F2->new_target = new_target;
+    F2->argc = argc;
+    F2->argv = call_argv;
+    F2->flags = flags;
+    F2->code = jc;
+    F2->byte_code = jc->byte_code;
+    F2->jit_exit = JSOP_NEXT;
+    /* JS_POLL_POINT at entry (known not to call the handler). */
+    gc_poll();
+    if (g_interrupt_countdown)
+        g_interrupt_countdown--;
+    return jc->base;
+}
+
+/* After a direct call's compiled code stopped with r: finish the call (in
+ * the interpreter, when it stopped on an exception or to be interpreted),
+ * then push the result.  Returns JSOP_NEXT, or JSOP_EXCEPTION with the
+ * caller's stack as it was. */
+int jit_call_finish(JSInterpFrame *F, JSInterpFrame *F2, int r, int argc, int kind)
+{
+    GCValue ret;
+
+    if (likely(r == JSOP_DONE)) {
+        ret = jit_value_load(&F2->ret_val);
+        js_bc_frame_leave(F2->rt, F2->sf, F2->pool_depth);
+    } else {
+        F2->jit_exit = r;
+        ret = JS_CallInternal(F->ctx, JS_UNDEFINED, JS_UNDEFINED, JS_UNDEFINED, 0, (GCValue *)F2,
+                              JS_CALL_FLAG_JIT_CONTINUE);
+    }
+    if (unlikely(JS_IsException(ret)))
+        return JSOP_EXCEPTION;
+    /* A constructor's result: what it returned if an object, else this. */
+    if (kind == JIT_CALL_CONSTRUCTOR && JS_VALUE_GET_TAG(ret) != JS_TAG_OBJECT)
+        ret = F2->this_obj;
+    jit_call_push_result(F, argc, kind, ret);
+    return JSOP_NEXT;
+}
+
+/* push_atom_value: the value, when it is the atom's own string or symbol
+ * (constant: atoms a function uses live as long as it does). */
+int jit_atom_value(JSContextHandle ctx, JSAtom atom, GCValue *pval)
+{
+    if (__JS_AtomIsTaggedInt(atom))
+        return 0;
+    *pval = JS_AtomToValue(ctx, atom);
+    return 1;
+}
+
+static int js_jit_run_threaded(JSInterpFrame *F)
+{
+    for (;;) {
+        int r = jsop_table[*F->pc++](F);
+        if (r != JSOP_NEXT)
+            return r;
     }
 }
 

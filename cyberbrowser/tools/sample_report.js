@@ -23,11 +23,47 @@ const samples = lines.filter(l => l.trim()).map(l => l.split(' ').map(x => BigIn
 const objdump = execFileSync('objdump', ['-p', exe], { encoding: 'utf8', maxBuffer: 1 << 26 });
 const base = BigInt('0x' + objdump.match(/ImageBase\s+([0-9a-fA-F]+)/)[1]);
 
+// Frames in the JIT's code (bit 62 set: an offset in its region) are named
+// from <samples>.jit, the JIT's map: jit:<op> for the instruction's code
+// ("(slow)": its out-of-line generic copy), with the compiled function as
+// the caller frame jit:<function>.
+const JIT_FLAG = 1n << 62n;
+const jitFns = [], jitInsns = [];
+if (fs.existsSync(samplesPath + '.jit')) {
+    for (const line of fs.readFileSync(samplesPath + '.jit', 'utf8').split(/\r?\n/)) {
+        const p = line.split(' ');
+        if (p[0] === 'F' || p[0] === 'X') jitFns.push({ off: parseInt(p[1], 16), size: parseInt(p[2], 16), name: p.slice(3).join(' ') });
+        else if (p[0] === 'I' || p[0] === 'S') jitInsns.push({ off: parseInt(p[1], 16), op: p[2] + (p[0] === 'S' ? ' (slow)' : '') });
+        else if (p[0] === 'L') jitInsns.push({ off: parseInt(p[1], 16), op: '(literals)' });
+    }
+    jitFns.sort((a, b) => a.off - b.off);
+    jitInsns.sort((a, b) => a.off - b.off);
+}
+const lastAtOrBelow = (arr, off) => {
+    let lo = 0, hi = arr.length - 1, best = null;
+    while (lo <= hi) { const m = (lo + hi) >> 1; if (arr[m].off <= off) { best = arr[m]; lo = m + 1; } else hi = m - 1; }
+    return best;
+};
+const jitCache = new Map();
+function jitFrames(off) {
+    if (jitCache.has(off)) return jitCache.get(off);
+    const fn = lastAtOrBelow(jitFns, off);
+    let r;
+    if (!fn || off >= fn.off + fn.size) r = [{ fn: 'jit:?', loc: '' }];
+    else {
+        const ins = lastAtOrBelow(jitInsns, off);
+        const op = ins && ins.off >= fn.off ? ins.op : fn.name;
+        r = [{ fn: 'jit:' + op, loc: fn.name }, { fn: 'jit:' + fn.name, loc: '' }];
+    }
+    jitCache.set(off, r);
+    return r;
+}
+
 // Unique addresses -> inline chains (innermost first).  Return addresses
 // point after the call: look up addr-1 for callers.
 const uniq = new Map();
 for (const s of samples)
-    s.forEach((rva, d) => { if (rva) uniq.set(d ? rva - 1n : rva, null); });
+    s.forEach((rva, d) => { if (rva && !(rva & JIT_FLAG)) uniq.set(d ? rva - 1n : rva, null); });
 const addrs = [...uniq.keys()];
 const CHUNK = 20000;
 for (let i = 0; i < addrs.length; i += CHUNK) {
@@ -45,14 +81,18 @@ for (let i = 0; i < addrs.length; i += CHUNK) {
         r++;
     }
 }
-const frames = (rva, d) => (rva ? uniq.get(d ? rva - 1n : rva) : null) || [{ fn: '[outside image]', loc: '' }];
+const frames = (rva, d) => (rva & JIT_FLAG) ? jitFrames(Number((rva & ~JIT_FLAG) - (d ? 1n : 0n)))
+    : (rva ? uniq.get(d ? rva - 1n : rva) : null) || [{ fn: '[outside image]', loc: '' }];
 
-const self = new Map(), selfLine = new Map(), incl = new Map();
+const self = new Map(), selfLine = new Map(), selfCaller = new Map(), incl = new Map();
 const add = (m, k, v = 1) => m.set(k, (m.get(k) || 0) + v);
 for (const s of samples) {
     const leaf = frames(s[0], 0);
     add(self, leaf[0].fn);
     add(selfLine, leaf[0].fn + '  ' + leaf[0].loc);
+    // The leaf's caller: the function it is inlined into, else the next frame.
+    const caller = leaf[1] || (s.length > 1 ? frames(s[1], 1)[0] : null);
+    add(selfCaller, leaf[0].fn + '  <-  ' + (caller ? caller.fn + '  ' + caller.loc : '?'));
     const seen = new Set();
     s.forEach((rva, d) => { for (const f of frames(rva, d)) seen.add(f.fn); });
     for (const fn of seen) add(incl, fn);
@@ -67,7 +107,8 @@ const rules = [
     ['parse/compile', /^(js_parse|next_token|js_create_function|resolve_|__JS_EvalInternal|JS_EvalFunction|js_compile|ident_realloc|emit_|skip_spaces)/],
     ['DOM/layout (native)', /^(dom_|js_node_|js_element|js_document|html_|css_|layout_|lq_|cp_|style_|snapshot_|ser_|js_dom|DomWrap|image_)/],
     ['property access/shapes', /^(find_own_property|JS_GetPropertyInternal|JS_SetPropertyInternal|add_property|js_shape|resize_properties|JS_DefineProperty|delete_property|js_get_length|JS_GetOwnPropertyNames|convert_fast_array|expand_fast_array|js_create_from_ctor|JS_NewObjectFromShape|js_closure)/],
-    ['interpreter', /^(JS_CallInternal|js_call_c_function|js_call_bound|async_func|js_async|js_generator|js_function_apply|JS_Call$|js_array_iterator|js_build_arguments)/],
+    ['JIT code', /^jit:/],
+    ['interpreter', /^(JS_CallInternal|jsop_|js_call_c_function|js_call_bound|async_func|js_async|js_generator|js_function_apply|JS_Call$|js_array_iterator|js_build_arguments)/],
 ];
 const sys = new Map();
 for (const s of samples) {
@@ -106,4 +147,5 @@ show('in the OS, called from', osCaller, 25);
 show('in the OS, called from (line)', osCallerLine, 15);
 show('self, by function (innermost inline)', self);
 show('self, by line', selfLine, 25);
+show('self, with caller', selfCaller, 25);
 show('inclusive, by function', incl);

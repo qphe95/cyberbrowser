@@ -205,6 +205,15 @@ Everything else calls the helper the interpreter itself uses. M1 factors the int
 paths out of `JS_CallInternal` into `js_op_*_slow(ctx, sf, sp, ...)` functions shared by both
 tiers, so the two have one implementation of every semantic corner.
 
+**Values move in 8-byte halves.** Nearly every stencil reads what the previous one just wrote, so
+the store buffer forwards it, unless the load spans two stores: a 16-byte `movups` of a value
+stored as two halves, or an 8-byte load of a payload stored as two 4-byte pieces, stalls for a
+dozen cycles. Measured in M2, that stall was 13% of a call-heavy benchmark, in `return` alone.
+Stencils therefore store a value as an 8-byte payload (an int zero-extended) and an 8-byte tag, and
+copy it as two 8-byte loads and stores; the C code compiled code calls (`jit_call_prepare`, frame
+setup) loads values it may have just been handed the same way (`jit_value_load`), and takes them
+by address, not by value, since the Win64 ABI copies a 16-byte struct argument through memory.
+
 Moving `GCValue` to 8-byte NaN boxing would halve the stack and frame traffic of both tiers. That
 is a separate project.
 
