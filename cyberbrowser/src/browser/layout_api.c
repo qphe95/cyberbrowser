@@ -76,6 +76,7 @@ static uint64_t g_lq_layout_us, g_lq_layout_cpu_us;   /* wall and this thread's 
 /* Mirror change-log position and relayout requests at the cached layout;
  * layouts kept because nothing since could change a box. */
 static uint64_t g_lq_change_pos, g_lq_relayouts, g_lq_kept, g_lq_region_layouts;
+static uint64_t g_lq_change_pos0;   /* the change log position of the cached layout (CYBER_LQ_LOG) */
 
 /* Changes past a subtree, as their anchors (layout indices; see the top of
  * the file and lq_anchor_independent). */
@@ -263,15 +264,15 @@ static int lq_hidden(NodeId id)
     int idx = lq_box_index(id);
     if (idx >= 0) {
         for (int a = nodes[idx].parent_idx; a >= 0; a = nodes[a].parent_idx)
-            if (g_lq_layout.boxes[a].display == CSS_DISPLAY_NONE) return 2;
-        return g_lq_layout.boxes[idx].display == CSS_DISPLAY_NONE ? 1 : 0;
+            if (g_lq_layout.boxes[a].s->display == CSS_DISPLAY_NONE) return 2;
+        return g_lq_layout.boxes[idx].s->display == CSS_DISPLAY_NONE ? 1 : 0;
     }
     /* Not in the layout (added since): what holds it. */
     for (NodeId a = dom_parent(id); a && dom_kind(a) == DOM_K_ELEMENT; a = dom_parent(a)) {
         int ai = lq_box_index(a);
         if (ai < 0) continue;
         for (int b = ai; b >= 0; b = nodes[b].parent_idx)
-            if (g_lq_layout.boxes[b].display == CSS_DISPLAY_NONE) return 2;
+            if (g_lq_layout.boxes[b].s->display == CSS_DISPLAY_NONE) return 2;
         return -1;
     }
     return -1;
@@ -380,14 +381,14 @@ static int lq_in_region(NodeId q, int qi)
  * by its insets? */
 static bool lq_size_definite(const LayoutBox *b, bool horizontal)
 {
-    return horizontal ? (b->width_set || b->width_percent > 0.0 || b->width_keyword)
-                      : (b->height_set || b->height_percent > 0.0);
+    return horizontal ? (b->s->width_set || b->s->width_percent > 0.0 || b->s->width_keyword)
+                      : (b->s->height_set || b->s->height_percent > 0.0);
 }
 
 static bool lq_out_of_flow(int idx)
 {
     const LayoutBox *b = &g_lq_layout.boxes[idx];
-    return b->position == CSS_POSITION_ABSOLUTE || b->position == CSS_POSITION_FIXED;
+    return b->s->position == CSS_POSITION_ABSOLUTE || b->s->position == CSS_POSITION_FIXED;
 }
 
 /* The nearest out-of-flow box at (self) or above `idx`, or -1.  Nothing
@@ -513,7 +514,7 @@ static int lq_change_reach(const HtmlMirrorChange *c, char *why, size_t cap, boo
          * auto width between left and right) keeps its size. */
         if (!inside && !other && (reach == 1 || (reach == 2 && lq_out_of_flow(idx)))) {
             const LayoutBox *b = &g_lq_layout.boxes[idx];
-            unsigned ps = b->positioned_sides | sides;
+            unsigned ps = b->s->positioned_sides | sides;
             bool oof = lq_out_of_flow(idx);
             *move = reach == 1 &&
                     !(oof && (sides & (LAYOUT_SIDE_LEFT | LAYOUT_SIDE_RIGHT)) &&
@@ -609,7 +610,7 @@ static int lq_parent(int i) { return g_lq_layout.tree.nodes[i].parent_idx; }
 
 static bool lq_oof(const LayoutBox *b)
 {
-    return b->position == CSS_POSITION_ABSOLUTE || b->position == CSS_POSITION_FIXED;
+    return b->s->position == CSS_POSITION_ABSOLUTE || b->s->position == CSS_POSITION_FIXED;
 }
 
 /* Why the last independence test said no (CYBER_LQ_LOG=2). */
@@ -620,22 +621,22 @@ static const char *g_lq_no;
  * flow) or of its parent (in flow)? */
 static bool lq_reads_cb_height(const LayoutBox *b)
 {
-    if (lq_oof(b) && (b->positioned_sides & LAYOUT_SIDE_BOTTOM)) return true;
-    if (b->position != CSS_POSITION_STATIC && (b->inset_pct_bits & (1 | 4))) return true;   /* top, bottom % */
-    return b->height_percent > 0.0 || (b->minmax_pct_bits & (4 | 8));               /* height, min/max-height % */
+    if (lq_oof(b) && (b->s->positioned_sides & LAYOUT_SIDE_BOTTOM)) return true;
+    if (b->s->position != CSS_POSITION_STATIC && (b->s->inset_pct_bits & (1 | 4))) return true;   /* top, bottom % */
+    return b->s->height_percent > 0.0 || (b->s->minmax_pct_bits & (4 | 8));               /* height, min/max-height % */
 }
 
 /* Block-level in block flow (not an atomic inline). */
 static bool lq_block_level(const LayoutBox *b)
 {
-    return (b->display == CSS_DISPLAY_BLOCK || b->display == CSS_DISPLAY_FLEX || b->display == CSS_DISPLAY_GRID ||
-            b->display == CSS_DISPLAY_LIST_ITEM || b->display == CSS_DISPLAY_OTHER) && !b->inline_level;
+    return (b->s->display == CSS_DISPLAY_BLOCK || b->s->display == CSS_DISPLAY_FLEX || b->s->display == CSS_DISPLAY_GRID ||
+            b->s->display == CSS_DISPLAY_LIST_ITEM || b->s->display == CSS_DISPLAY_OTHER) && !b->s->inline_level;
 }
 
 /* A box whose height its content cannot change. */
 static bool lq_height_fixed(const LayoutBox *b)
 {
-    return b->height_set && b->height_percent <= 0.0;
+    return b->s->height_set && b->s->height_percent <= 0.0;
 }
 
 /* The box an out-of-flow box b (layout index i) is positioned against, or
@@ -643,10 +644,10 @@ static bool lq_height_fixed(const LayoutBox *b)
 static int lq_containing_block(int i)
 {
     const LayoutBox *b = lq_box(i);
-    if (b->position == CSS_POSITION_FIXED) return -1;
+    if (b->s->position == CSS_POSITION_FIXED) return -1;
     int p = lq_parent(i);
-    if (b->position == CSS_POSITION_ABSOLUTE)
-        while (p >= 0 && lq_box(p)->position == CSS_POSITION_STATIC) p = lq_parent(p);
+    if (b->s->position == CSS_POSITION_ABSOLUTE)
+        while (p >= 0 && lq_box(p)->s->position == CSS_POSITION_STATIC) p = lq_parent(p);
     return p;
 }
 
@@ -657,10 +658,10 @@ static bool lq_height_free(int i, int bound)
 {
     for (;;) {
         const LayoutBox *b = lq_box(i);
-        if (lq_height_fixed(b) && !(b->minmax_pct_bits & (4 | 8))) return true;
-        bool stretched = lq_oof(b) && !b->height_set && (b->positioned_sides & LAYOUT_SIDE_TOP) &&
-                         (b->positioned_sides & LAYOUT_SIDE_BOTTOM);
-        if (!(b->height_percent > 0.0 || stretched)) return false;
+        if (lq_height_fixed(b) && !(b->s->minmax_pct_bits & (4 | 8))) return true;
+        bool stretched = lq_oof(b) && !b->s->height_set && (b->s->positioned_sides & LAYOUT_SIDE_TOP) &&
+                         (b->s->positioned_sides & LAYOUT_SIDE_BOTTOM);
+        if (!(b->s->height_percent > 0.0 || stretched)) return false;
         int ref = lq_oof(b) ? lq_containing_block(i) : lq_parent(i);
         if (ref < 0) return true;                           /* the viewport */
         if (bound >= 0 && !lq_anchor_is_ancestor_or_self(bound, ref)) return true;
@@ -672,8 +673,8 @@ static bool lq_height_free(int i, int bound)
 static bool lq_block_container(int i)
 {
     const LayoutBox *b = lq_box(i);
-    return b->display != CSS_DISPLAY_INLINE && b->display != CSS_DISPLAY_FLEX &&
-           b->display != CSS_DISPLAY_NONE && !(g_lq_kind[i] & LQ_KIND_ROW);
+    return b->s->display != CSS_DISPLAY_INLINE && b->s->display != CSS_DISPLAY_FLEX &&
+           b->s->display != CSS_DISPLAY_NONE && !(g_lq_kind[i] & LQ_KIND_ROW);
 }
 
 /* A flex row item whose main size its content cannot change: a set basis
@@ -682,9 +683,9 @@ static bool lq_flex_main_free(int i)
 {
     const LayoutBox *b = lq_box(i);
     if (g_lq_kind[i] & LQ_KIND_TEXT) return false;
-    bool w_def = (b->width_set || b->width_percent > 0.0) && !b->width_keyword;
-    if (!(b->flex_basis_percent > 0.0 || b->flex_basis >= 0.0 || w_def)) return false;
-    return b->min_width > 0.0 || (b->min_size_set & 1) || b->overflow != 0;
+    bool w_def = (b->s->width_set || b->s->width_percent > 0.0) && !b->s->width_keyword;
+    if (!(b->s->flex_basis_percent > 0.0 || b->s->flex_basis >= 0.0 || w_def)) return false;
+    return b->min_width > 0.0 || (b->s->min_size_set & 1) || b->s->overflow != 0;
 }
 
 /* Is the width of box i, which holds the change, independent of its content? */
@@ -693,28 +694,28 @@ static bool lq_width_free(int i)
     const LayoutBox *b = lq_box(i);
     int p = lq_parent(i);
     if (p < 0) return true;                       /* the root: the viewport */
-    if (b->width_keyword) LQ_NO("width keyword");
-    bool definite = b->width_set || b->width_percent > 0.0;
-    if (b->display == CSS_DISPLAY_INLINE) LQ_NO("inline");
-    if (b->display == CSS_DISPLAY_INLINE_BLOCK || b->inline_level || b->float_side) {
+    if (b->s->width_keyword) LQ_NO("width keyword");
+    bool definite = b->s->width_set || b->s->width_percent > 0.0;
+    if (b->s->display == CSS_DISPLAY_INLINE) LQ_NO("inline");
+    if (b->s->display == CSS_DISPLAY_INLINE_BLOCK || b->s->inline_level || b->s->float_side) {
         if (!definite) LQ_NO("shrink-to-fit width");
         return true;
     }
     if (lq_oof(b)) {
-        if (!definite && !((b->positioned_sides & LAYOUT_SIDE_LEFT) && (b->positioned_sides & LAYOUT_SIDE_RIGHT)))
+        if (!definite && !((b->s->positioned_sides & LAYOUT_SIDE_LEFT) && (b->s->positioned_sides & LAYOUT_SIDE_RIGHT)))
             LQ_NO("shrink-to-fit out-of-flow width");
         return true;
     }
     const LayoutBox *pb = lq_box(p);
-    if (pb->display == CSS_DISPLAY_FLEX) {
-        bool row = pb->flex_direction == CSS_FLEX_DIRECTION_ROW || pb->flex_direction == CSS_FLEX_DIRECTION_ROW_REVERSE;
+    if (pb->s->display == CSS_DISPLAY_FLEX) {
+        bool row = pb->s->flex_direction == CSS_FLEX_DIRECTION_ROW || pb->s->flex_direction == CSS_FLEX_DIRECTION_ROW_REVERSE;
         if (row) {
             if (!lq_flex_main_free(i)) LQ_NO("flex item sized by content");
             return true;
         }
         if (definite) return true;
-        int align = b->align_self ? b->align_self - 1 : (int)pb->align_items;
-        if (align != CSS_ALIGN_STRETCH || (b->margin_auto & (2 | 8))) LQ_NO("column item not stretched");
+        int align = b->s->align_self ? b->s->align_self - 1 : (int)pb->s->align_items;
+        if (align != CSS_ALIGN_STRETCH || (b->s->margin_auto & (2 | 8))) LQ_NO("column item not stretched");
         return true;
     }
     if (g_lq_kind[p] & LQ_KIND_ROW) LQ_NO("table cell");
@@ -726,25 +727,25 @@ static bool lq_width_free(int i)
 static bool lq_place_free(int p, int a, bool changes)
 {
     const LayoutBox *A = lq_box(a), *P = lq_box(p);
-    if (A->has_translate && (A->translate_xpct != 0.0 || A->translate_ypct != 0.0)) LQ_NO("percentage translate");
-    if (A->position == CSS_POSITION_FIXED) {
-        if ((A->positioned_sides & LAYOUT_SIDE_BOTTOM) && !(A->positioned_sides & LAYOUT_SIDE_TOP))
+    if (A->s->has_translate && (A->s->translate_xpct != 0.0 || A->s->translate_ypct != 0.0)) LQ_NO("percentage translate");
+    if (A->s->position == CSS_POSITION_FIXED) {
+        if ((A->s->positioned_sides & LAYOUT_SIDE_BOTTOM) && !(A->s->positioned_sides & LAYOUT_SIDE_TOP))
             LQ_NO("fixed at the bottom");
         return true;
     }
     /* Absolute: against an ancestor whose height may change (its x needs
      * the width, which lq_width_free covers). */
-    if (A->position == CSS_POSITION_ABSOLUTE) {
+    if (A->s->position == CSS_POSITION_ABSOLUTE) {
         if (lq_reads_cb_height(A)) LQ_NO("absolute by its containing block's height");
         return true;
     }
-    if (A->position != CSS_POSITION_STATIC && (A->inset_pct_bits & (1 | 4))) LQ_NO("relative percentage offset");
-    if (P->display == CSS_DISPLAY_FLEX) {
-        if (P->flex_direction != CSS_FLEX_DIRECTION_ROW && P->flex_direction != CSS_FLEX_DIRECTION_ROW_REVERSE)
+    if (A->s->position != CSS_POSITION_STATIC && (A->s->inset_pct_bits & (1 | 4))) LQ_NO("relative percentage offset");
+    if (P->s->display == CSS_DISPLAY_FLEX) {
+        if (P->s->flex_direction != CSS_FLEX_DIRECTION_ROW && P->s->flex_direction != CSS_FLEX_DIRECTION_ROW_REVERSE)
             LQ_NO("column flex container");
-        if (P->flex_wrap != CSS_FLEX_WRAP_NOWRAP) LQ_NO("wrapping flex container");
-        int align = A->align_self ? A->align_self - 1 : (int)P->align_items;
-        if ((align != CSS_ALIGN_STRETCH && align != CSS_ALIGN_FLEX_START) || (A->margin_auto & (1 | 4)))
+        if (P->s->flex_wrap != CSS_FLEX_WRAP_NOWRAP) LQ_NO("wrapping flex container");
+        int align = A->s->align_self ? A->s->align_self - 1 : (int)P->s->align_items;
+        if ((align != CSS_ALIGN_STRETCH && align != CSS_ALIGN_FLEX_START) || (A->s->margin_auto & (1 | 4)))
             LQ_NO("flex item aligned by the line");
         /* Main sizes (and so positions) come from the items' bases: those
          * after a (and a's, when its content changes) must not come from
@@ -752,14 +753,14 @@ static bool lq_place_free(int p, int a, bool changes)
         const LayoutNodeRef *nodes = g_lq_layout.tree.nodes;
         for (int s = changes ? a : nodes[a].next_sibling_idx; s >= 0; s = nodes[s].next_sibling_idx) {
             const LayoutBox *S = lq_box(s);
-            if (S->display == CSS_DISPLAY_NONE || lq_oof(S)) continue;
+            if (S->s->display == CSS_DISPLAY_NONE || lq_oof(S)) continue;
             if ((g_lq_kind[s] & LQ_KIND_TEXT) && s != a) continue;   /* its text changes only with p's children */
             if (!lq_flex_main_free(s)) LQ_NO("flex sibling sized by content");
         }
         return true;
     }
     if (!lq_block_container(p)) LQ_NO("inline or table row container");
-    if (!lq_block_level(A) && !A->float_side) LQ_NO("inline-level");
+    if (!lq_block_level(A) && !A->s->float_side) LQ_NO("inline-level");
     return true;
 }
 
@@ -782,9 +783,9 @@ static bool lq_bfc(int i)
 {
     const LayoutBox *b = lq_box(i);
     int p = lq_parent(i);
-    if (p < 0 || b->float_side || b->overflow != 0 || lq_oof(b)) return true;
-    if (b->display == CSS_DISPLAY_INLINE_BLOCK || (b->inline_level && b->display != CSS_DISPLAY_INLINE)) return true;
-    CssDisplay pd = lq_box(p)->display;
+    if (p < 0 || b->s->float_side || b->s->overflow != 0 || lq_oof(b)) return true;
+    if (b->s->display == CSS_DISPLAY_INLINE_BLOCK || (b->s->inline_level && b->s->display != CSS_DISPLAY_INLINE)) return true;
+    CssDisplay pd = lq_box(p)->s->display;
     return pd == CSS_DISPLAY_FLEX || pd == CSS_DISPLAY_GRID || (g_lq_kind[i] & LQ_KIND_CELL);
 }
 
@@ -794,7 +795,7 @@ static bool lq_bfc(int i)
 static bool lq_size_boundary(int i)
 {
     const LayoutBox *b = lq_box(i);
-    if (b->display == CSS_DISPLAY_NONE || b->display == CSS_DISPLAY_INLINE) return false;
+    if (b->s->display == CSS_DISPLAY_NONE || b->s->display == CSS_DISPLAY_INLINE) return false;
     return lq_bfc(i) && lq_height_free(i, -1) && lq_width_free(i);
 }
 
@@ -866,20 +867,20 @@ static bool lq_before_independent(int qi, int i, int bound)
     /* L places sq as before.  An anchor that is a flex item may change its
      * own basis when restyled (and restyle the items after it). */
     const LayoutBox *Lb = lq_box(L);
-    if (Lb->display == CSS_DISPLAY_FLEX && sc == ci && (g_lq_anchor_sib[i] || !lq_anchor_style_kept(i)))
+    if (Lb->s->display == CSS_DISPLAY_FLEX && sc == ci && (g_lq_anchor_sib[i] || !lq_anchor_style_kept(i)))
         LQ_NO("restyled flex item");
     if (!lq_place_free(L, sq, false)) return false;
     const LayoutBox *Sq = lq_box(sq);
     bool sq_grows = false;                                  /* stretched to a line that may grow */
-    if (Lb->display == CSS_DISPLAY_FLEX && !lq_oof(Sq) && !lq_height_fixed(Sq)) {
-        int align = Sq->align_self ? Sq->align_self - 1 : (int)Lb->align_items;
+    if (Lb->s->display == CSS_DISPLAY_FLEX && !lq_oof(Sq) && !lq_height_fixed(Sq)) {
+        int align = Sq->s->align_self ? Sq->s->align_self - 1 : (int)Lb->s->align_items;
         sq_grows = align == CSS_ALIGN_STRETCH;
     }
     if (sq_grows && (qi == sq || !lq_block_container(sq))) LQ_NO("stretched by the line");
     /* Below L: nothing on the way down reads a height that may change. */
     for (int b = qi; b != sq; b = lq_parent(b)) {
         const LayoutBox *B = lq_box(b);
-        if (B->position == CSS_POSITION_FIXED) continue;
+        if (B->s->position == CSS_POSITION_FIXED) continue;
         int ref = lq_oof(B) ? lq_containing_block(b) : lq_parent(b);
         if (ref < 0) continue;                              /* the viewport */
         bool grows = (g_lq_pos[ref] <= g_lq_pos[L] || (ref == sq && sq_grows)) && !lq_height_fixed(lq_box(ref)) &&
@@ -943,7 +944,7 @@ static bool lq_anchor_independent(int qi, int i)
         /* Its own style holds: as for a change inside it, but an attribute
          * may restyle its later siblings, which a flex container sizes it by. */
         int p = lq_parent(qi);
-        if (g_lq_anchor_sib[i] && p >= 0 && lq_box(p)->display == CSS_DISPLAY_FLEX) LQ_NO("restyled flex siblings");
+        if (g_lq_anchor_sib[i] && p >= 0 && lq_box(p)->s->display == CSS_DISPLAY_FLEX) LQ_NO("restyled flex siblings");
         return lq_contains_independent(qi, ci, bound, g_lq_anchor_has[i]);
     }
     LQ_NO("after or at the change");
@@ -959,7 +960,7 @@ static int lq_hidden_holder(NodeId id)
     int h = id ? lq_box_or_holder(id, &inside) : -1;
     if (h < 0 || !inside) return -1;
     for (int a = h; a >= 0; a = g_lq_layout.tree.nodes[a].parent_idx)
-        if (g_lq_layout.boxes[a].display == CSS_DISPLAY_NONE) return h;
+        if (g_lq_layout.boxes[a].s->display == CSS_DISPLAY_NONE) return h;
     return -1;
 }
 
@@ -1095,7 +1096,7 @@ static void lq_verify_kept(HtmlDocument *doc, double vw, double vh)
         if (past) continue;
         bool shown = true;
         for (int a = i; a >= 0; a = fresh.tree.nodes[a].parent_idx)
-            if (fresh.boxes[a].display == CSS_DISPLAY_NONE) { shown = false; break; }
+            if (fresh.boxes[a].s->display == CSS_DISPLAY_NONE) { shown = false; break; }
         bool kshown = k >= 0 && lq_hidden(hn->store_id) == 0;
         const LayoutBox *f = &fresh.boxes[i];
         const LayoutBox *o = k >= 0 ? &g_lq_layout.boxes[k] : NULL;
@@ -1103,8 +1104,8 @@ static void lq_verify_kept(HtmlDocument *doc, double vw, double vh)
         bool differ = shown != kshown;
         if (!differ && shown)
             differ = (!region && (fabs(f->x - o->x) > 0.01 || fabs(f->y - o->y) > 0.01)) || fabs(f->width - o->width) > 0.01 ||
-                     fabs(f->height - o->height) > 0.01 || f->display != o->display || f->position != o->position ||
-                     fabs(f->font_size - o->font_size) > 0.01;
+                     fabs(f->height - o->height) > 0.01 || f->s->display != o->s->display || f->s->position != o->s->position ||
+                     fabs(f->s->font_size - o->s->font_size) > 0.01;
         if (!differ) continue;
         if (diffs++ < 3) {
             const char *idv = dom_get_attr_str(hn->store_id, "id");
@@ -1146,14 +1147,14 @@ static void lq_verify_asked(HtmlDocument *doc, double vw, double vh)
     }
     bool fshown = fi >= 0;
     for (int a = fi; a >= 0; a = fresh.tree.nodes[a].parent_idx)
-        if (fresh.boxes[a].display == CSS_DISPLAY_NONE) { fshown = false; break; }
+        if (fresh.boxes[a].s->display == CSS_DISPLAY_NONE) { fshown = false; break; }
     int ki = lq_box_index(g_lq_who);
     bool kshown = ki >= 0 && lq_rendered(ki);
     const LayoutBox *f = fi >= 0 ? &fresh.boxes[fi] : NULL, *k = ki >= 0 ? &g_lq_layout.boxes[ki] : NULL;
     bool differ = ok && (fshown != kshown ||
                          (fshown && (fabs(f->x - k->x) > 0.01 || fabs(f->y - k->y) > 0.01 ||
                                      fabs(f->width - k->width) > 0.01 || fabs(f->height - k->height) > 0.01 ||
-                                     fabs(f->font_size - k->font_size) > 0.01)));
+                                     fabs(f->s->font_size - k->s->font_size) > 0.01)));
     checks++;
     if (differ) {
         failing++;
@@ -1273,6 +1274,15 @@ static bool lq_ensure(JSContextHandle ctx)
     }
 
     g_lq_running = true;
+    if (g_lq_log && g_lq_valid && doc == g_lq_doc) {
+        /* what changed since the cached layout, by kind */
+        const HtmlMirrorChange *ch = NULL;
+        size_t nch = 0;
+        unsigned k[4] = { 0 };
+        if (html_mirror_changes(doc, g_lq_change_pos0, &ch, &nch))
+            for (size_t i = 0; i < nch; i++) if (ch[i].kind < 4) k[ch[i].kind]++;
+        fprintf(stderr, "[LQ] changes since the last layout: %u attrs, %u children, %u sheets\n", k[1], k[2], k[3]);
+    }
     if (g_lq_log) {
         const char *tn = g_lq_who ? css_atom_str(g_dom.tag[dom_slot(g_lq_who)]) : "?";
         const char *idv = g_lq_who ? dom_get_attr_str(g_lq_who, "id") : NULL;
@@ -1326,6 +1336,7 @@ static bool lq_ensure(JSContextHandle ctx)
         }
         g_lq_change_pos = html_mirror_change_seq();
         g_lq_relayouts = g_dom_relayout_requests;
+        g_lq_change_pos0 = g_lq_change_pos;
     } else {
         lq_free();
         g_lq_key = 0;
@@ -1354,7 +1365,7 @@ static int lq_box_index(NodeId id)
 static bool lq_rendered(int idx)
 {
     for (int i = idx; i >= 0; i = g_lq_layout.tree.nodes[i].parent_idx)
-        if (g_lq_layout.boxes[i].display == CSS_DISPLAY_NONE) return false;
+        if (g_lq_layout.boxes[i].s->display == CSS_DISPLAY_NONE) return false;
     return idx >= 0;
 }
 
@@ -1396,8 +1407,8 @@ bool layout_query_font_size(JSContextHandle ctx, GCValue element, double *px)
         if (!ok) return false;
         idx = lq_box_index(id);
     }
-    if (idx < 0 || g_lq_layout.boxes[idx].font_size <= 0.0) return false;
-    *px = g_lq_layout.boxes[idx].font_size;
+    if (idx < 0 || g_lq_layout.boxes[idx].s->font_size <= 0.0) return false;
+    *px = g_lq_layout.boxes[idx].s->font_size;
     return true;
 }
 
@@ -1411,11 +1422,11 @@ bool layout_query_element_box(JSContextHandle ctx, GCValue element, LayoutQueryB
     out->y = b->y;
     out->width = b->width;
     out->height = b->height;
-    out->border_top = b->border_top;
-    out->border_right = b->border_right;
-    out->border_bottom = b->border_bottom;
-    out->border_left = b->border_left;
-    out->inline_level = b->display == CSS_DISPLAY_INLINE;
+    out->border_top = b->s->border_top;
+    out->border_right = b->s->border_right;
+    out->border_bottom = b->s->border_bottom;
+    out->border_left = b->s->border_left;
+    out->inline_level = b->s->display == CSS_DISPLAY_INLINE;
     return true;
 }
 
@@ -1437,12 +1448,12 @@ static NodeId lq_offset_parent(NodeId id, int idx)
 {
     if (idx < 0 || is_root_element(id) || is_tag(id, "body")) return DOM_NULL;
     const LayoutBox *b = &g_lq_layout.boxes[idx];
-    if (b->position == CSS_POSITION_FIXED) return DOM_NULL;
-    bool self_static = b->position == CSS_POSITION_STATIC;
+    if (b->s->position == CSS_POSITION_FIXED) return DOM_NULL;
+    bool self_static = b->s->position == CSS_POSITION_STATIC;
     for (NodeId a = dom_parent(id); a && dom_kind(a) == DOM_K_ELEMENT; a = dom_parent(a)) {
         if (is_tag(a, "body")) return a;
         int ai = lq_box_index(a);
-        if (ai >= 0 && g_lq_layout.boxes[ai].position != CSS_POSITION_STATIC) return a;
+        if (ai >= 0 && g_lq_layout.boxes[ai].s->position != CSS_POSITION_STATIC) return a;
         if (self_static && (is_tag(a, "td") || is_tag(a, "th") || is_tag(a, "table"))) return a;
     }
     return DOM_NULL;
@@ -1464,7 +1475,7 @@ static void lq_extent(int idx, double *right, double *bottom)
     const LayoutNodeRef *nodes = g_lq_layout.tree.nodes;
     for (int c = nodes[idx].first_child_idx; c >= 0; c = nodes[c].next_sibling_idx) {
         const LayoutBox *cb = &g_lq_layout.boxes[c];
-        if (cb->display == CSS_DISPLAY_NONE) continue;
+        if (cb->s->display == CSS_DISPLAY_NONE) continue;
         if (cb->x + cb->width > *right) *right = cb->x + cb->width;
         if (cb->y + cb->height > *bottom) *bottom = cb->y + cb->height;
         lq_extent(c, right, bottom);
@@ -1486,7 +1497,7 @@ static GCValue lq_metric(JSContextHandle ctx, GCValue this_val, int which)
     }
     if (idx < 0) return JS_NewInt32(ctx, 0);
     const LayoutBox *b = &g_lq_layout.boxes[idx];
-    bool inl = b->display == CSS_DISPLAY_INLINE;
+    bool inl = b->s->display == CSS_DISPLAY_INLINE;
     switch (which) {
     case M_OFFSET_W: return lq_int(ctx, b->width);
     case M_OFFSET_H: return lq_int(ctx, b->height);
@@ -1499,20 +1510,20 @@ static GCValue lq_metric(JSContextHandle ctx, GCValue this_val, int which)
          * containing block when it is body or there is none. */
         if (pi >= 0 && !is_tag(op, "body")) {
             const LayoutBox *pb = &g_lq_layout.boxes[pi];
-            v -= which == M_OFFSET_T ? pb->y + pb->border_top : pb->x + pb->border_left;
+            v -= which == M_OFFSET_T ? pb->y + pb->s->border_top : pb->x + pb->s->border_left;
         }
         return lq_int(ctx, v);
     }
-    case M_CLIENT_W: return lq_int(ctx, inl ? 0 : b->width - b->border_left - b->border_right);
-    case M_CLIENT_H: return lq_int(ctx, inl ? 0 : b->height - b->border_top - b->border_bottom);
-    case M_CLIENT_T: return lq_int(ctx, inl ? 0 : b->border_top);
-    case M_CLIENT_L: return lq_int(ctx, inl ? 0 : b->border_left);
+    case M_CLIENT_W: return lq_int(ctx, inl ? 0 : b->width - b->s->border_left - b->s->border_right);
+    case M_CLIENT_H: return lq_int(ctx, inl ? 0 : b->height - b->s->border_top - b->s->border_bottom);
+    case M_CLIENT_T: return lq_int(ctx, inl ? 0 : b->s->border_top);
+    case M_CLIENT_L: return lq_int(ctx, inl ? 0 : b->s->border_left);
     case M_SCROLL_W:
     case M_SCROLL_H: {
         if (inl) return JS_NewInt32(ctx, 0);
-        double left = b->x + b->border_left, top = b->y + b->border_top;
-        double cw = root ? g_lq_vw : b->width - b->border_left - b->border_right;
-        double ch = root ? g_lq_vh : b->height - b->border_top - b->border_bottom;
+        double left = b->x + b->s->border_left, top = b->y + b->s->border_top;
+        double cw = root ? g_lq_vw : b->width - b->s->border_left - b->s->border_right;
+        double ch = root ? g_lq_vh : b->height - b->s->border_top - b->s->border_bottom;
         double right = left + cw, bottom = top + ch;
         lq_extent(idx, &right, &bottom);
         return lq_int(ctx, which == M_SCROLL_W ? right - left : bottom - top);

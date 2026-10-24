@@ -110,10 +110,10 @@ typedef enum {
 } CssTextAlign;
 
 /* Layout values for a single DOM node. */
-typedef struct LayoutBox {
-    double x, y;
-    double width, height;
-    /* Parsed CSS width/height values before box-sizing conversion.  width/height
+/* The computed style of a box: what the cascade produced, shared by the
+ * boxes whose styles are equal (LayoutBox.s).  The layout passes only read
+ * it; what they compute is in LayoutBox. */
+typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-sizing conversion.  width/height
      * above always store the final border-box totals. */
     double css_width, css_height;
     /* Set when width/height were explicitly assigned (even to 0): an explicit
@@ -121,15 +121,11 @@ typedef struct LayoutBox {
     unsigned char width_set, height_set;
     /* Set when visibility was explicitly assigned (for inheritance). */
     unsigned char visibility_set;
-    double margin_top, margin_right, margin_bottom, margin_left;
-    double padding_top, padding_right, padding_bottom, padding_left;
     double border_top, border_right, border_bottom, border_left;
     /* Border color (single slot; most real-world borders are uniform).
      * Defaults to the text color (currentColor) when unset. */
     double border_color_r, border_color_g, border_color_b, border_color_a;
     unsigned char border_color_set;
-    double content_width, content_height;
-    double baseline;
 
     /* Resolved colors (RGBA, 0..1). */
     double color_r, color_g, color_b, color_a;
@@ -255,30 +251,12 @@ typedef struct LayoutBox {
     double flex_basis_pct_px;  /* px addend of a calc() basis with a % part */
     double flex_grow;
     double flex_shrink;
-
-    /* Word-wrap state for text boxes whose run wraps across lines.
-     * wrap_cont_w > 0 marks the box as wrapped: display emission wraps the
-     * text with first line width wrap_first_w, continuation lines starting at
-     * wrap_cont_x with width wrap_cont_w.  When a float below the run start
-     * stops intruding mid-wrap, wrap_cont2_line (>1) is the 1-based line
-     * number from which continuation lines instead use wrap_cont2_x /
-     * wrap_cont2_w (e.g. full width once the text passes the float). */
-    double wrap_first_w;
-    double wrap_cont_w;
-    double wrap_cont_x;
-    double wrap_cont2_x;
-    double wrap_cont2_w;
-    int    wrap_cont2_line;
-
-    double min_width, max_width;
-    double min_height, max_height;
     /* min/max sizes with a percentage part, resolved at layout time against
      * the containing block (widths: its width; heights: its height, or none
      * when that is indefinite).  Order min-w, max-w, min-h, max-h; bit i of
      * minmax_pct_bits set when entry i has a percentage part. */
     double minmax_pct[4], minmax_base[4];
     unsigned char minmax_pct_bits;
-    double top, left, right, bottom;
     /* >0 if width/height had a percentage part; *_pct_px is the px addend
      * of a calc() mix (calc(100% - 20px) = 100% and -20px). */
     double width_percent, width_pct_px;
@@ -291,8 +269,6 @@ typedef struct LayoutBox {
      * box since pseudo boxes are not built. */
     double aspect_ratio;
     unsigned char aspect_ratio_prop;
-
-    uint32_t flags;
     /* Bitmask of which top/left/right/bottom values were explicitly set. */
 #define LAYOUT_SIDE_LEFT   0x01
 #define LAYOUT_SIDE_RIGHT  0x02
@@ -323,9 +299,6 @@ typedef struct LayoutBox {
     /* min-width / min-height given explicitly (bit 0 / bit 1), so that an
      * explicit 0 disables the flex automatic minimum size. */
     unsigned char min_size_set;
-    /* Set by layout_resolve_used_sizes when a percentage height could not
-     * resolve (indefinite containing block): the used height is auto. */
-    unsigned char height_pct_unresolved;
     /* Per-side border bookkeeping (bits 1=left 2=right 4=top 8=bottom):
      * a side with border-style none/hidden has a used width of 0, and a
      * styled side without an explicit width is `medium` (3px). */
@@ -344,12 +317,9 @@ typedef struct LayoutBox {
     /* white-space: 0 normal, 1 nowrap, 2 pre, 3 pre-wrap, 4 pre-line. */
     unsigned char white_space;
     unsigned char white_space_set;
-    /* Text node whose collapsible leading space was dropped at a line start. */
-    unsigned char text_lead_skip;
     /* opacity (when opacity_set) and the effective opacity including all
      * ancestors, computed after layout for painting. */
     double opacity;
-    double opacity_eff;
     unsigned char opacity_set;
     /* display:-webkit-box (legacy), -webkit-box-orient:vertical, and
      * -webkit-line-clamp: a vertical legacy box lays out as a block whose
@@ -361,6 +331,44 @@ typedef struct LayoutBox {
     unsigned char text_overflow_ellipsis;
     /* object-fit: 0 fill, 1 contain, 2 cover, 3 none, 4 scale-down. */
     unsigned char object_fit;
+} LayoutStyle;
+
+/* A box of the layout tree: its computed style (shared, read-only once the
+ * style pass is over) and the geometry the layout passes compute. */
+typedef struct LayoutBox {
+    LayoutStyle *s;
+    double x, y;
+    double width, height;
+    double margin_top, margin_right, margin_bottom, margin_left;
+    double padding_top, padding_right, padding_bottom, padding_left;
+    double content_width, content_height;
+    double baseline;
+
+    /* Word-wrap state for text boxes whose run wraps across lines.
+     * wrap_cont_w > 0 marks the box as wrapped: display emission wraps the
+     * text with first line width wrap_first_w, continuation lines starting at
+     * wrap_cont_x with width wrap_cont_w.  When a float below the run start
+     * stops intruding mid-wrap, wrap_cont2_line (>1) is the 1-based line
+     * number from which continuation lines instead use wrap_cont2_x /
+     * wrap_cont2_w (e.g. full width once the text passes the float). */
+    double wrap_first_w;
+    double wrap_cont_w;
+    double wrap_cont_x;
+    double wrap_cont2_x;
+    double wrap_cont2_w;
+    int    wrap_cont2_line;
+
+    double min_width, max_width;
+    double min_height, max_height;
+    double top, left, right, bottom;
+
+    uint32_t flags;
+    /* Set by layout_resolve_used_sizes when a percentage height could not
+     * resolve (indefinite containing block): the used height is auto. */
+    unsigned char height_pct_unresolved;
+    /* Text node whose collapsible leading space was dropped at a line start. */
+    unsigned char text_lead_skip;
+    double opacity_eff;
 } LayoutBox;
 
 /* Flat node reference used by both passes. */
@@ -397,6 +405,7 @@ typedef struct LayoutContext {
     HtmlDocument *doc;
     LayoutTree tree;
     LayoutBox *boxes;       /* boxes[i] corresponds to tree.nodes[i] */
+    LayoutStyle *styles;    /* boxes[i].s: each box's own style while it is styled */
 
     /* Viewport / initial containing block dimensions. */
     double viewport_width;

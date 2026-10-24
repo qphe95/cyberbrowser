@@ -457,9 +457,9 @@ static char *layout_signature(const char *html, const char *css_extra)
     for (int i = 0; i < ctx.tree.count; i++) {
         LayoutBox *b = &ctx.boxes[i];
         buf_add(&sig, "%d %.6f %.6f %.6f %.6f %.4f %d %d %.4f %.4f %.4f %.4f %d %s|", i,
-                b->x, b->y, b->width, b->height, b->font_size, (int)b->display, b->font_weight,
-                b->color_r, b->color_g, b->margin_left, b->padding_top, (int)b->visibility,
-                b->font_family);
+                b->x, b->y, b->width, b->height, b->s->font_size, (int)b->s->display, b->s->font_weight,
+                b->s->color_r, b->s->color_g, b->margin_left, b->padding_top, (int)b->s->visibility,
+                b->s->font_family);
     }
     for (int i = 0; i < (int)po_array_count(&doc->array); i++) {
         HtmlNode *n = po_array_payload(&doc->array, i);

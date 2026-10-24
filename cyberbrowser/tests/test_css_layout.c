@@ -75,7 +75,7 @@ TEST(test_layout_stylesheet) {
     ASSERT_TRUE(near_equal(box->height, 110.0));
     ASSERT_TRUE(near_equal(box->margin_top, 10.0));
     ASSERT_TRUE(near_equal(box->padding_left, 5.0));
-    ASSERT_TRUE(near_equal(box->background_color_r, 1.0));
+    ASSERT_TRUE(near_equal(box->s->background_color_r, 1.0));
 
     printf("    [layout stylesheet] cleanup\n");
     printf("    [layout stylesheet] free layout tree\n");
@@ -329,7 +329,7 @@ TEST(test_layout_background_image_url) {
     int div_idx = po_array_index_from_payload(&doc->array, div);
     LayoutBox *box = css_layout_box_for_node(&ctx, div_idx);
     ASSERT_TRUE(box != NULL);
-    ASSERT_STR_EQ("https://www.youtube.com/red.png", box->background_image_url);
+    ASSERT_STR_EQ("https://www.youtube.com/red.png", box->s->background_image_url);
 
     css_layout_tree_free(&ctx);
     html_document_free(doc);
@@ -1206,8 +1206,8 @@ TEST(test_layout_restyle_matched_properties_cache) {
         ASSERT_TRUE(box && c);
         ASSERT_TRUE(near_equal(box->width, steps[s].width));
         ASSERT_TRUE(near_equal(c->height, 5));
-        ASSERT_TRUE(near_equal(box->font_size, steps[s].font));
-        ASSERT_TRUE(near_equal(c->font_size, steps[s].font));
+        ASSERT_TRUE(near_equal(box->s->font_size, steps[s].font));
+        ASSERT_TRUE(near_equal(c->s->font_size, steps[s].font));
         if (steps[s].matched_same) ASSERT_TRUE(css_layout_restyle_matched_same() >= 1);
         css_layout_tree_free(&ctx);
         html_document_free(doc);
@@ -1258,11 +1258,11 @@ TEST(test_layout_hidden_subtree_left_unstyled) {
             ASSERT_EQ(steps[s].skipped, ctx.style_skipped >= 3);   /* the child, the span and its text */
         }
         if (c && !steps[s].skipped) {
-            ASSERT_TRUE(near_equal(c->font_size, steps[s].font));
+            ASSERT_TRUE(near_equal(c->s->font_size, steps[s].font));
             ASSERT_TRUE(near_equal(c->height, steps[s].parent[0] ? 0 : 5));
             if (!steps[s].parent[0]) ASSERT_TRUE(near_equal(c->width, 70));
         } else if (c) {
-            ASSERT_EQ(CSS_DISPLAY_NONE, c->display);
+            ASSERT_EQ(CSS_DISPLAY_NONE, c->s->display);
         }
         css_layout_tree_free(&ctx);
         html_document_free(doc);
