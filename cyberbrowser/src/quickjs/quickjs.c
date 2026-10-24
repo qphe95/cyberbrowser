@@ -43110,6 +43110,20 @@ static JSFunctionDef *js_parse_function_class_fields_init(JSParseState *s)
 
 /* func_name must be JS_ATOM_NULL for JS_PARSE_FUNC_STATEMENT and
    JS_PARSE_FUNC_EXPR, JS_PARSE_FUNC_ARROW and JS_PARSE_FUNC_VAR */
+/* A function expression right after '(' or '!' (the "(function(){...})()"
+ * and "!function(){...}()" wrappers): called at once nearly always, so its
+ * body is compiled with the code around it (V8's PIFE heuristic). */
+static BOOL js_parse_is_parenthesized_function(JSParseState *s, JSParseFunctionEnum func_type,
+                                               const uint8_t *ptr)
+{
+    const uint8_t *p = ptr;
+    if (func_type != JS_PARSE_FUNC_EXPR)
+        return FALSE;
+    while (p > s->buf_start && (p[-1] == ' ' || p[-1] == '\t' || p[-1] == '\n' || p[-1] == '\r'))
+        p--;
+    return p > s->buf_start && (p[-1] == '(' || p[-1] == '!');
+}
+
 static __exception int js_parse_function_decl2(JSParseState *s,
                                                JSParseFunctionEnum func_type,
                                                JSFunctionKindEnum func_kind,
@@ -43542,6 +43556,7 @@ static __exception int js_parse_function_decl2(JSParseState *s,
      * js_lazy_try_skip_body and js_resume_lazy_parse). */
     allow_lazy_parse = s->enable_lazy_parsing &&
                        s->token.val == '{' &&
+                       !js_parse_is_parenthesized_function(s, func_type, ptr) &&
                        fd->has_simple_parameter_list &&
                        !fd->strip_debug &&
                        func_type != JS_PARSE_FUNC_CLASS_STATIC_INIT &&
