@@ -551,7 +551,8 @@ static bool layout_tree_build(LayoutContext *ctx, HtmlDocument *doc, bool prune)
         if (!ctx->float_stack) ok = false;
     }
 
-    free(map);
+    ctx->dom_map = map;   /* (a kept tree's style pass finds changed elements with it) */
+    ctx->dom_map_n = (int)po_array_count(&doc->array);
     return ok;
 }
 
@@ -574,6 +575,11 @@ void css_layout_tree_free(LayoutContext *ctx)
     free(ctx->intrinsic_cache);
     free(ctx->has_flags);
     free(ctx->pruned);
+    free(ctx->dom_map);
+    free(ctx->attr_ids);
+    free(ctx->sc_key);
+    free(ctx->sc_entry);
+    free(ctx->slot_ver);
     if (ctx->text_norm) {
         for (int i = 0; i < ctx->tree.count; i++) free(ctx->text_norm[i]);
         free(ctx->text_norm);
@@ -3934,6 +3940,14 @@ typedef struct StylePass {
      * up different from the cached one (children then recompute). */
     bool inc;
     bool verify;
+    /* On a kept tree, from the last store's notes (LayoutContext.sc_entry):
+     * prepare recomputes only the elements whose attributes changed (and
+     * those without a note), and the pass leaves alone the style slots that
+     * hold their entry's style (kept[idx] set), and the text boxes under
+     * them. */
+    bool retain;
+    unsigned char *kept;
+    _Atomic uint32_t kept_n;
     const struct StyleCacheEntry **cached;
     unsigned char *key_ok;
     unsigned char *force;
@@ -4005,6 +4019,7 @@ typedef struct StyleCacheEntry {
     unsigned char pruned_below;
     unsigned char has_after;
     char after[256];
+    uint32_t ver;               /* changes whenever style does (style slots note it) */
     LayoutStyle style;
 } StyleCacheEntry;
 
@@ -4018,9 +4033,11 @@ typedef struct StyleCache {
     FrameArena arena;           /* custom-property maps of cached entries */
     FrameArena retired;         /* the previous arena, kept one generation */
     uint64_t passes;            /* style passes stored (LayoutContext.style_pass) */
+    uint64_t order;             /* changes when entries move (LayoutContext.sc_entry) */
 } StyleCache;
 
 static StyleCache g_sc;
+static uint32_t g_sc_ver;      /* StyleCacheEntry.ver */
 
 static const StyleCacheEntry *style_cache_find(NodeId id)
 {
@@ -5690,6 +5707,36 @@ static bool ctx_targets_match(const StyleKeySet *t, const HtmlNode *hn)
     return false;
 }
 
+/* The structure part of element c's key (style_cache_prepare): its parent,
+ * its position among the element children (key nonzero), their count, its
+ * element neighbours and its own child count. */
+static void style_struct_of(LayoutContext *ctx, const uint64_t *key, int c, uint64_t s[6])
+{
+    int idx = ctx->tree.nodes[c].parent_idx;
+    int elems = 0, pos = 0;
+    NodeId prev = 0, next = 0, pid = 0;
+    HtmlNode *pn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+    if (pn) pid = pn->store_id;
+    bool after = false;
+    for (int d = ctx->tree.nodes[idx].first_child_idx; d >= 0; d = ctx->tree.nodes[d].next_sibling_idx) {
+        if (!key[d]) continue;
+        elems++;
+        if (d == c) { after = true; continue; }
+        HtmlNode *dn = layout_node_dom(ctx, ctx->tree.nodes[d].dom_node_idx);
+        if (!after) { pos++; prev = dn ? dn->store_id : 0; }
+        else if (!next) next = dn ? dn->store_id : 0;
+    }
+    int ckids = 0;
+    for (int g = ctx->tree.nodes[c].first_child_idx; g >= 0; g = ctx->tree.nodes[g].next_sibling_idx) ckids++;
+    if (ctx->pruned && ctx->pruned[c]) {
+        PreOrderCompactionArray *da = &ctx->doc->array;
+        for (int g = po_array_first_child(da, ctx->tree.nodes[c].dom_node_idx); g >= 0; g = po_array_next_sibling(da, g))
+            if (po_array_is_active(da, g)) ckids++;
+    }
+    s[0] = (uint64_t)pid; s[1] = (uint64_t)pos; s[2] = (uint64_t)elems;
+    s[3] = (uint64_t)prev; s[4] = (uint64_t)next; s[5] = (uint64_t)ckids;
+}
+
 /* Element keys and the reuse flags for every layout node (serial, before
  * the parallel style pass). */
 static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects *has,
@@ -5723,10 +5770,28 @@ static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects
     }
     for (int i = 0; i <= n; i++) P->cx_cnt[i] = -1;
     bool usable = g_sc.global == global && g_sc.n > 0;
+    /* On a kept tree, the elements whose attributes changed and those the
+     * last store did not note (redo[idx]); the others' keys and entries are
+     * as noted (no element's structure changed). */
+    unsigned char *redo = NULL;
+    if (P->retain) {
+        redo = (unsigned char *)calloc((size_t)n + 1, 1);
+        if (!redo || !usable) P->retain = false;
+    }
+    if (P->retain) {
+        for (int idx = 0; idx < n; idx++) redo[idx] = ctx->sc_entry[idx] == 0;
+        for (int k = 0; k < ctx->attr_n; k++) {
+            int d = html_mirror_index_of(ctx->doc, ctx->attr_ids[k]);
+            int li = d >= 0 && d < ctx->dom_map_n ? ctx->dom_map[d] : -1;
+            if (li >= 0) redo[li] = 1;
+        }
+        for (int idx = 0; idx < n; idx++) if (!redo[idx]) key[idx] = ctx->sc_key[idx];
+    }
 
     /* Keys: own tag and attributes (kept on the node until its attribute
      * list changes), then structure from the parent's view. */
     for (int idx = 0; idx < n; idx++) {
+        if (redo && !redo[idx]) continue;
         HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
         if (!hn || hn->type != HTML_NODE_ELEMENT) continue;
         uint64_t h = hn->attr_hash;
@@ -5743,6 +5808,13 @@ static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects
         key[idx] = h;
     }
     for (int idx = 0; idx < n; idx++) {
+        if (redo) {
+            /* (only parents of elements redone; and their structure only) */
+            bool any = false;
+            for (int c = ctx->tree.nodes[idx].first_child_idx; !any && c >= 0; c = ctx->tree.nodes[c].next_sibling_idx)
+                any = redo[c] && key[c];
+            if (!any) continue;
+        }
         int elems = 0;
         for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx)
             if (key[c]) elems++;
@@ -5772,7 +5844,7 @@ static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects
                     if (po_array_is_active(da, g)) ckids++;
             }
             s[5] = (uint64_t)ckids;
-            key[c] = style_mix(key[c], s, 6 * sizeof(uint64_t));
+            if (!redo || redo[c]) key[c] = style_mix(key[c], s, 6 * sizeof(uint64_t));
             prev = cn ? cn->store_id : 0;
             pos++;
         }
@@ -5787,6 +5859,18 @@ static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects
     for (int idx = 0; idx < n; idx++) {
         part[idx] = -1;
         if (!key[idx]) continue;
+        if (redo && !redo[idx]) {
+            const StyleCacheEntry *e = &g_sc.e[ctx->sc_entry[idx] - 1];
+            P->cached[idx] = e;
+            P->key_ok[idx] = e->key == key[idx];
+            changed[idx] = !P->key_ok[idx];
+            if (P->key_ok[idx]) continue;
+            /* (an entry left stale: its context features as below; its
+             * structure was not computed above) */
+            redo[idx] = 1;
+            int p = ctx->tree.nodes[idx].parent_idx;
+            if (p >= 0) style_struct_of(ctx, key, idx, S[idx]);
+        }
         HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
         const StyleCacheEntry *e = (usable && hn) ? style_cache_find(hn->store_id) : NULL;
         P->cached[idx] = e;
@@ -5817,6 +5901,7 @@ static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects
         }
         if (any_part && !whole[idx]) { part[idx] = nparts++; }
     }
+    free(redo);
     if (!P->inc) {
         free(S); free(changed); free(whole); free(sibch); free(part); free(depth); free(at);
         return;
@@ -6028,6 +6113,25 @@ static void style_cache_set_ctx(StyleCacheEntry *e, StylePass *P, int idx, const
     e->ctx_n = cnt;
 }
 
+static uint32_t style_cache_next_ver(void)
+{
+    if (++g_sc_ver == 0) g_sc_ver = 1;
+    return g_sc_ver;
+}
+
+/* What the store left for element idx, for the next style pass on the
+ * kept tree (LayoutContext.sc_entry): its entry (index k, -1 none), its
+ * key, and whether its style slot holds the entry's style (the slot of an
+ * element left unstyled does not). */
+static void style_slot_note(StylePass *P, int idx, int k, const StyleCacheEntry *e, bool holds)
+{
+    LayoutContext *ctx = P->ctx;
+    if (!ctx->sc_entry) return;
+    ctx->sc_entry[idx] = k + 1;
+    ctx->sc_key[idx] = P->entry_key ? P->entry_key[idx] : 0;
+    ctx->slot_ver[idx] = holds && e ? e->ver : 0;
+}
+
 static void style_cache_set(StyleCacheEntry *e, StylePass *P, int idx, const char *after,
                             StylePropsRemap *tab, int cap)
 {
@@ -6042,6 +6146,7 @@ static void style_cache_set(StyleCacheEntry *e, StylePass *P, int idx, const cha
     if (after) memcpy(e->after, after, sizeof(e->after));
     else e->after[0] = '\0';
     e->style = *ctx->boxes[idx].s;
+    e->ver = style_cache_next_ver();
     HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
     if (hn) hn->hidden_hint = e->style.display == CSS_DISPLAY_NONE ? 1 : 2;
 }
@@ -6060,6 +6165,7 @@ static void style_cache_set_stale(StyleCacheEntry *e, StylePass *P, int idx, con
     e->pruned_below = old ? old->pruned_below : 0;
     e->has_after = 0;
     e->after[0] = '\0';
+    e->ver = style_cache_next_ver();
 }
 
 /* In-place form of style_cache_store for an unchanged global key: entries of
@@ -6105,13 +6211,16 @@ static bool style_cache_update(StylePass *P, const StyleGenAfter *gen, int gen_t
     StylePropsRemap *tab = NULL;
     int written = 0;
     for (int idx = 0; idx < n; idx++) {
+        /* A slot left as it was: its entry, key and note are as they were
+         * (what its cascade read too: the entry's). */
+        if (P->kept && P->kept[idx]) continue;
         HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
         if (!hn || hn->type != HTML_NODE_ELEMENT || !hn->store_id) continue;
         StyleCacheEntry *e = (StyleCacheEntry *)P->cached[idx];
         /* Not styled: an entry that still holds stays as it is. */
-        if (P->skipped && P->skipped[idx] == 1) continue;
+        if (P->skipped && P->skipped[idx] == 1) { style_slot_note(P, idx, e ? (int)(e - g_sc.e) : -1, e, false); continue; }
         if (P->skipped && P->skipped[idx] == 2) {
-            if (e && e->stale && P->key_ok[idx]) continue;
+            if (e && e->stale && P->key_ok[idx]) { style_slot_note(P, idx, (int)(e - g_sc.e), e, false); continue; }
             const StyleCacheEntry *old = e;
             if (!e) {
                 e = &g_sc.e[g_sc.n];
@@ -6121,6 +6230,7 @@ static bool style_cache_update(StylePass *P, const StyleGenAfter *gen, int gen_t
                 g_sc.index[h] = ++g_sc.n;
             }
             style_cache_set_stale(e, P, idx, old);
+            style_slot_note(P, idx, (int)(e - g_sc.e), e, false);
             continue;
         }
         if (e && P->key_ok[idx] && !P->out_changed[idx] &&
@@ -6129,6 +6239,7 @@ static bool style_cache_update(StylePass *P, const StyleGenAfter *gen, int gen_t
             /* Same result: record what its cascade read this time. */
             if (P->match_hash) e->match_hash = P->match_hash[idx];
             e->pruned_below = ctx->pruned && ctx->pruned[idx];
+            style_slot_note(P, idx, (int)(e - g_sc.e), e, true);
             continue;
         }
         if (!e) {
@@ -6156,6 +6267,7 @@ static bool style_cache_update(StylePass *P, const StyleGenAfter *gen, int gen_t
             }
         }
         style_cache_set(e, P, idx, after[idx], tab, cap);
+        style_slot_note(P, idx, (int)(e - g_sc.e), e, true);
         written++;
     }
     (void)written;
@@ -6179,6 +6291,16 @@ static void style_cache_store(StylePass *P, uint64_t global, const StyleGenAfter
     LayoutContext *ctx = P->ctx;
     P->ctx->style_pass = ++g_sc.passes;
     int n = ctx->tree.count;
+    ctx->sc_order = 0;   /* (the notes are good once the store is done) */
+    if (!ctx->sc_entry) {
+        ctx->sc_key = (uint64_t *)calloc((size_t)n + 1, sizeof(uint64_t));
+        ctx->sc_entry = (int *)calloc((size_t)n + 1, sizeof(int));
+        ctx->slot_ver = (uint32_t *)calloc((size_t)n + 1, sizeof(uint32_t));
+        if (!ctx->sc_key || !ctx->sc_entry || !ctx->slot_ver) {
+            free(ctx->sc_key); free(ctx->sc_entry); free(ctx->slot_ver);
+            ctx->sc_key = NULL; ctx->sc_entry = NULL; ctx->slot_ver = NULL;
+        }
+    }
     bool keep = g_sc.global == global && g_sc.arena.bytes < ((size_t)32 << 20);
     if (!keep) {
         frame_arena_reset(&g_sc.retired);
@@ -6187,6 +6309,7 @@ static void style_cache_store(StylePass *P, uint64_t global, const StyleGenAfter
     }
     int count = 0, fresh = 0;
     for (int idx = 0; idx < n; idx++) {
+        if (P->kept && P->kept[idx]) { count++; continue; }   /* (an element with an entry) */
         HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
         if (!hn || hn->type != HTML_NODE_ELEMENT || !hn->store_id) continue;
         count++;
@@ -6195,8 +6318,10 @@ static void style_cache_store(StylePass *P, uint64_t global, const StyleGenAfter
     /* Same cache, few stale entries: update the entries of recomputed
      * elements in place and append new ones. */
     if (keep && g_sc.n > 0 && g_sc.n + fresh <= 2 * count + 256 &&
-        style_cache_update(P, gen, gen_total, fresh))
+        style_cache_update(P, gen, gen_total, fresh)) {
+        if (g_sc.global == global) { ctx->sc_order = g_sc.order; ctx->sc_global = global; }
         return;
+    }
     int cap = 64;
     while (cap < 4 * (count + g_sc.n + 1)) cap *= 2;
     StylePropsRemap *tab = (StylePropsRemap *)calloc((size_t)cap, sizeof(*tab));
@@ -6231,6 +6356,7 @@ static void style_cache_store(StylePass *P, uint64_t global, const StyleGenAfter
         const StyleCacheEntry *old = P->cached[idx];
         if (P->skipped && P->skipped[idx] == 2) {
             style_cache_set_stale(e, P, idx, old);
+            style_slot_note(P, idx, k, e, false);
         } else if (P->skipped && P->skipped[idx] == 1) {
             /* Not styled: its entry still holds (and carries over). */
             e->key = old->key;
@@ -6242,7 +6368,9 @@ static void style_cache_store(StylePass *P, uint64_t global, const StyleGenAfter
             e->has_after = old->has_after;
             memcpy(e->after, old->after, sizeof(e->after));
             e->style = old->style;
+            e->ver = old->ver;
             hn->hidden_hint = e->style.display == CSS_DISPLAY_NONE ? 1 : 2;
+            style_slot_note(P, idx, k, e, false);
         } else {
             e->key = P->entry_key ? P->entry_key[idx] : 0;
             style_cache_set_ctx(e, P, idx, old);
@@ -6253,8 +6381,17 @@ static void style_cache_store(StylePass *P, uint64_t global, const StyleGenAfter
             e->has_after = after[idx] != NULL;
             if (after[idx]) memcpy(e->after, after[idx], sizeof(e->after));
             else e->after[0] = '\0';
-            e->style = *ctx->boxes[idx].s;
+            /* (a slot left as it was holds its entry's style as blockified
+             * and given fonts after the last pass: the entry carries over) */
+            if (P->kept && P->kept[idx]) {
+                e->style = old->style;
+                e->ver = old->ver;
+            } else {
+                e->style = *ctx->boxes[idx].s;
+                e->ver = style_cache_next_ver();
+            }
             hn->hidden_hint = e->style.display == CSS_DISPLAY_NONE ? 1 : 2;
+            style_slot_note(P, idx, k, e, true);
         }
         uint32_t h = (e->id * 2654435761u) & (uint32_t)(icap - 1);
         while (index[h]) h = (h + 1) & (uint32_t)(icap - 1);
@@ -6267,6 +6404,9 @@ static void style_cache_store(StylePass *P, uint64_t global, const StyleGenAfter
     free(g_sc.index);
     g_sc.e = ne;
     g_sc.n = k;
+    g_sc.order++;   /* (entries moved: the kept trees' notes are stale) */
+    ctx->sc_order = g_sc.order;
+    ctx->sc_global = global;
     g_sc.cap = count + 1;
     g_sc.index = index;
     g_sc.index_cap = icap;
@@ -6480,6 +6620,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
     LayoutBox *parent = (p >= 0) ? layout_box(ctx, p) : NULL;
     int dom = ctx->tree.nodes[idx].dom_node_idx;
     HtmlNode *node = layout_node_dom(ctx, dom);
+    box->s = &ctx->styles[idx];   /* (a kept tree's text box may hold a shared style) */
 
     /* Custom properties inherit; the map is shared until this node sets one. */
     const CssCustomProps *pv = (p >= 0) ? ctx->custom_props[p] : NULL;
@@ -6501,7 +6642,8 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
 
         /* Incremental restyle: the cached box is this element's style. */
         if (can_reuse && !P->verify) {
-            layout_style_set(box, &ce->style);
+            if (P->retain && ctx->slot_ver[idx] == ce->ver) { P->kept[idx] = 1; atomic_fetch_add(&P->kept_n, 1); }
+            else layout_style_set(box, &ce->style);
             ctx->custom_props[idx] = ce->props;
             P->match_hash[idx] = ce->match_hash;
             if (!parent && box->s->font_size > 0.0) g_unit_rem = box->s->font_size;
@@ -6546,7 +6688,8 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
                 }
                 if (P->reval_words &&
                     memcmp(e->bits, T->bits, (size_t)P->reval_words * sizeof(uint64_t)) != 0) continue;
-                layout_style_set(box, layout_box(ctx, e->idx)->s);
+                /* (a slot left as it was is past the last pass's blockification: its entry) */
+                layout_style_set(box, P->kept && P->kept[e->idx] ? &P->cached[e->idx]->style : layout_box(ctx, e->idx)->s);
                 ctx->custom_props[idx] = ctx->custom_props[e->idx];
                 P->cls[idx] = P->cls[e->idx];
                 if (e->has_after) {
@@ -6916,7 +7059,8 @@ static void style_copy_subtree(StylePass *P, StyleThread *T, int pos)
         P->cls[idx] = idx;
         if (ce) {
             /* An element (one without an entry would need restyling). */
-            layout_style_set(box, &ce->style);
+            if (P->retain && ctx->slot_ver[idx] == ce->ver) { P->kept[idx] = 1; P->kept_n++; }
+            else layout_style_set(box, &ce->style);
             ctx->custom_props[idx] = ce->props;
             P->match_hash[idx] = ce->match_hash;
             if (ce->has_after) {
@@ -6939,8 +7083,13 @@ static void style_copy_subtree(StylePass *P, StyleThread *T, int pos)
             }
         } else {
             ctx->custom_props[idx] = p >= 0 ? ctx->custom_props[p] : NULL;
-            layout_box_init(ctx, idx);
-            style_finish_box(P, box, p >= 0 ? layout_box(ctx, p) : NULL, false);
+            /* A text box under an element whose slot was left: its style as
+             * it is. */
+            if (!(P->retain && p >= 0 && P->kept[p])) {
+                box->s = &ctx->styles[idx];
+                layout_box_init(ctx, idx);
+                style_finish_box(P, box, p >= 0 ? layout_box(ctx, p) : NULL, false);
+            }
             P->out_changed[idx] = 1;
         }
     }
@@ -7189,6 +7338,8 @@ static const CssStyleSet *styleset_cached(uint64_t gen, double vw, double vh)
     return NULL;
 }
 
+static void layout_restyle_all(LayoutContext *ctx);
+
 static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
 {
     STAGE_BEGIN();
@@ -7322,6 +7473,21 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
             }
             P.inc = true;
             P.verify = verify_env;
+            /* A kept tree whose notes are current (no other store moved the
+             * entries since), and an arena not grown too large: start from
+             * them.  CYBER_STYLE_RETAIN=0: restyle kept trees in full. */
+            static int retain_env = -1;
+            if (retain_env < 0) {
+                const char *e = cyber_getenv("CYBER_STYLE_RETAIN");
+                retain_env = !(e && e[0] == '0');
+            }
+            P.retain = retain_env && ctx->tree_kept && !verify_env && !ctx->style_all && ctx->sc_entry &&
+                       ctx->dom_map && g_sc.order && ctx->sc_order == g_sc.order && ctx->sc_global == sc_global &&
+                       ctx->arena.bytes < ((size_t)16 << 20);
+            if (P.retain) {
+                P.kept = (unsigned char *)calloc((size_t)n + 1, 1);
+                if (!P.kept) P.retain = false;
+            }
             style_cache_prepare(&P, sc_global, &g_has, &cf);
             /* The first element a :has() rule whose compound names nothing
              * restyles (layout_api's anchors read it). */
@@ -7359,6 +7525,8 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
             fprintf(stderr, "[css] restyle: full (%s)\n", !inc_env ? "CSS_INC=0" : "style set not cached");
         }
     }
+    /* A kept tree restyled in full starts its slots over. */
+    if (ctx->tree_kept && !P.retain) layout_restyle_all(ctx);
     /* CYBER_STYLE_HIDDEN=1: style display:none subtrees as well. */
     {
         static int hidden_env = -1;
@@ -7410,6 +7578,8 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
     qsort(gen, (size_t)gen_total, sizeof(StyleGenAfter), style_gen_cmp);
     /* The cache keeps the boxes as the cascade left them (before generated
      * content and blockification below). */
+    /* (a pass that stores nothing leaves the notes behind) */
+    if (!P.inc || !P.entry_key || ctx->cache_readonly) ctx->sc_order = 0;
     if (P.inc && P.entry_key) {
         if (!ctx->cache_readonly) style_cache_store(&P, sc_global, gen, gen_total);
         g_restyle_reused = atomic_load(&P.reused);
@@ -7419,6 +7589,8 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
         if (g_css_log > 1)
             fprintf(stderr, "[css] restyle why: noentry %u key %u forced %u has %u parent %u\n",
                     (unsigned)P.why[0], (unsigned)P.why[1], (unsigned)P.why[2], (unsigned)P.why[3], (unsigned)P.why[4]);
+        if (g_css_log > 0 && P.retain)
+            fprintf(stderr, "[css] restyle on the kept tree: %u style slots left as they were\n", (unsigned)atomic_load(&P.kept_n));
         if (g_css_log > 0 || P.verify)
             fprintf(stderr, "[css] restyle: %u reused (%u copied, %d to restyle), %u recomputed (%u matched as before), %u not styled (hidden)%s",
                     (unsigned)atomic_load(&P.reused), (unsigned)atomic_load(&P.copied),
@@ -7433,6 +7605,7 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
     }
     free(P.dirty_n);
     free(P.skipped);
+    free(P.kept);
     free(P.cached);
     free(P.key_ok);
     free(P.force);
@@ -10771,6 +10944,16 @@ void css_layout_tree_stats(uint64_t *kept, uint64_t *built)
  * restyle).  Everything else a tree build sets up starts over.  Elements
  * it left out stay out: a guess that comes out shown builds again
  * (prune_failed).  CYBER_LAYOUT_KEEP=0: build every time. */
+/* A style pass over the whole kept tree: its style slots, custom
+ * properties and their arena start over, as on a tree built afresh. */
+static void layout_restyle_all(LayoutContext *ctx)
+{
+    for (int i = 0; i < ctx->tree.count; i++) ctx->boxes[i].s = &ctx->styles[i];
+    memset((void *)ctx->custom_props, 0, ((size_t)ctx->tree.count + 1) * sizeof(*ctx->custom_props));
+    frame_arena_reset(&ctx->arena);
+    if (ctx->slot_ver) memset(ctx->slot_ver, 0, (size_t)ctx->tree.count * sizeof(uint32_t));
+}
+
 static bool layout_tree_keep(LayoutContext *ctx, HtmlDocument *doc, bool prune)
 {
     static int keep_env = -1;
@@ -10788,9 +10971,24 @@ static bool layout_tree_keep(LayoutContext *ctx, HtmlDocument *doc, bool prune)
         if (ch[k].kind == HTML_MIRROR_CHILDREN) keep = false;
     if (!keep) { css_layout_tree_free(ctx); return false; }
 
-    for (int i = 0; i < ctx->tree.count; i++) ctx->boxes[i].s = &ctx->styles[i];
-    memset((void *)ctx->custom_props, 0, ((size_t)ctx->tree.count + 1) * sizeof(*ctx->custom_props));
-    frame_arena_reset(&ctx->arena);
+    /* The elements whose attributes changed: where a style pass on the
+     * kept tree starts (layout_apply_stylesheet). */
+    ctx->attr_n = 0;
+    for (size_t k = 0; k < nch; k++) {
+        if (ch[k].kind != HTML_MIRROR_ATTRS || !ch[k].id) continue;
+        if (ctx->attr_n == ctx->attr_cap) {
+            int nc = ctx->attr_cap ? 2 * ctx->attr_cap : 64;
+            uint32_t *na = (uint32_t *)realloc(ctx->attr_ids, (size_t)nc * sizeof(uint32_t));
+            if (!na) { css_layout_tree_free(ctx); return false; }
+            ctx->attr_ids = na;
+            ctx->attr_cap = nc;
+        }
+        ctx->attr_ids[ctx->attr_n++] = ch[k].id;
+    }
+    /* (The style slots, custom properties and the arena they live in stay
+     * for the style pass: layout_restyle_all starts them over when it
+     * restyles everything.) */
+    ctx->tree_kept = true;
     ctx->float_count = 0;
     free(ctx->intrinsic_cache);
     ctx->intrinsic_cache = NULL;

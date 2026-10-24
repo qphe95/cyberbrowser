@@ -503,6 +503,23 @@ typedef struct LayoutContext {
      * keeps it when no element's children changed since. */
     bool tree_keep;
     uint64_t tree_seq;
+    /* This run kept the tree, and the store ids of the elements whose
+     * attributes changed since the last (from the mirror's change log). */
+    bool tree_kept;
+    uint32_t *attr_ids;
+    int attr_n, attr_cap;
+    /* DOM index -> layout index (-1: not in the tree), dom_map_n of them. */
+    int *dom_map;
+    int dom_map_n;
+    /* What the last style cache store recorded per layout index, for a
+     * style pass on the kept tree to start from (css_layout.c): the
+     * element's key, its entry (index + 1, 0 none) and the entry version
+     * its style slot holds (0: not known), valid while the cache's entry
+     * order is sc_order and its global key sc_global. */
+    uint64_t *sc_key;
+    int *sc_entry;
+    uint32_t *slot_ver;
+    uint64_t sc_order, sc_global;
 } LayoutContext;
 
 #define LAYOUT_HAS_SUBJECT 1
