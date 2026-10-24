@@ -184,6 +184,17 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * must be recomputed as ratio x own font-size once that is final. */
     double line_height_ratio;
 
+    /* Specified margins, paddings, min/max sizes and insets in px (their
+     * percentage parts are below): what the box's used values start from
+     * when it is laid out (layout_box_start). */
+    double margin_top, margin_right, margin_bottom, margin_left;
+    double padding_top, padding_right, padding_bottom, padding_left;
+    double min_width, max_width, min_height, max_height;
+    double top, left, right, bottom;
+    /* Left unstyled inside a display:none subtree (only display is set;
+     * the box gets LAYOUT_STYLE_SKIPPED). */
+    unsigned char skipped;
+
     /* em-unit margins/paddings resolve against the element's FINAL computed
      * font-size, which is only known after the pass-3 font-size fixup.
      * Declarations in em are therefore recorded as ratios here (in side
@@ -334,7 +345,9 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
 } LayoutStyle;
 
 /* A box of the layout tree: its computed style (shared, read-only once the
- * style pass is over) and the geometry the layout passes compute. */
+ * style pass is over) and the geometry the layout passes compute.  The
+ * margins, paddings, min/max sizes and insets here are the used values,
+ * which start from the style's specified ones (layout_box_start). */
 typedef struct LayoutBox {
     LayoutStyle *s;
     double x, y;

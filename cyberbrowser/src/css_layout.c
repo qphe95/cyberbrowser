@@ -203,35 +203,18 @@ static inline LayoutNodeRef* layout_node_ref(LayoutContext *ctx, int idx)
     return &ctx->tree.nodes[idx];
 }
 
-/* Copy geometry geom and style st into box dst, which keeps its own style
- * slot (a box never shares the style it is styled into). */
-static inline void layout_box_assign(LayoutBox *dst, const LayoutBox *geom, const LayoutStyle *st)
+/* Style st into box dst, which keeps its own style slot (a box never
+ * shares the style it is styled into).  The style pass leaves geometry
+ * alone: layout starts each box from its style (layout_box_start). */
+static inline void layout_style_set(LayoutBox *dst, const LayoutStyle *st)
 {
-    LayoutStyle *mine = dst->s;
-    *dst = *geom;
-    dst->s = mine;
-    if (mine != st) *mine = *st;
+    if (dst->s != st) *dst->s = *st;
 }
 
-static inline void layout_box_copy(LayoutBox *dst, const LayoutBox *src)
+/* Whether box b has style st. */
+static inline bool layout_style_same(const LayoutBox *b, const LayoutStyle *st)
 {
-    layout_box_assign(dst, src, src->s);
-}
-
-/* Keep box src as geometry *geom and style *st (a cache entry, a save). */
-static inline void layout_box_keep(LayoutBox *geom, LayoutStyle *st, const LayoutBox *src)
-{
-    *geom = *src;
-    *st = *src->s;
-    geom->s = NULL;
-}
-
-/* Whether box b equals geometry geom and style st. */
-static inline bool layout_box_same(const LayoutBox *b, const LayoutBox *geom, const LayoutStyle *st)
-{
-    const size_t g0 = sizeof(LayoutStyle *);
-    return memcmp((const char *)b + g0, (const char *)geom + g0, sizeof(LayoutBox) - g0) == 0 &&
-           memcmp(b->s, st, sizeof(LayoutStyle)) == 0;
+    return memcmp(b->s, st, sizeof(LayoutStyle)) == 0;
 }
 
 static inline LayoutBox* layout_box(LayoutContext *ctx, int idx)
@@ -453,14 +436,14 @@ static const LayoutBox *layout_box_template(void)
         box->s->height_pct_px = 0.0;
         box->s->flex_basis_pct_px = 0.0;
         box->s->flex_shrink = 1.0;
-        box->min_width = 0.0;
-        box->max_width = 0.0;
-        box->min_height = 0.0;
-        box->max_height = 0.0;
-        box->top = 0.0;
-        box->left = 0.0;
-        box->right = 0.0;
-        box->bottom = 0.0;
+        box->s->min_width = 0.0;
+        box->s->max_width = 0.0;
+        box->s->min_height = 0.0;
+        box->s->max_height = 0.0;
+        box->s->top = 0.0;
+        box->s->left = 0.0;
+        box->s->right = 0.0;
+        box->s->bottom = 0.0;
         box->s->positioned_sides = 0;
         box->s->width_percent = 0.0;
         box->s->height_percent = 0.0;
@@ -479,7 +462,7 @@ static const LayoutBox *layout_box_template(void)
 static void layout_box_init(LayoutContext *ctx, int idx)
 {
     LayoutBox *box = &ctx->boxes[idx];
-    layout_box_copy(box, layout_box_template());
+    layout_style_set(box, layout_box_template()->s);
     HtmlNode *node = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
     if (node && node->type == HTML_NODE_ELEMENT) {
         box->s->display = layout_default_display(node->tag_name);
@@ -1044,10 +1027,10 @@ static void css_side_indexes(int count, int idx[4])
 static void layout_note_side_pcts(LayoutBox *box, const char *value, bool padding, int side)
 {
     double *fields[4] = {
-        padding ? &box->padding_top : &box->margin_top,
-        padding ? &box->padding_right : &box->margin_right,
-        padding ? &box->padding_bottom : &box->margin_bottom,
-        padding ? &box->padding_left : &box->margin_left,
+        padding ? &box->s->padding_top : &box->s->margin_top,
+        padding ? &box->s->padding_right : &box->s->margin_right,
+        padding ? &box->s->padding_bottom : &box->s->margin_bottom,
+        padding ? &box->s->padding_left : &box->s->margin_left,
     };
     double *pct = padding ? box->s->padding_pct : box->s->margin_pct;
     double *base = padding ? box->s->padding_base : box->s->margin_base;
@@ -1076,6 +1059,33 @@ static void layout_note_side_pcts(LayoutBox *box, const char *value, bool paddin
             box->s->pct_sides &= (unsigned char)~bit;
         }
     }
+}
+
+/* A box before it is laid out: no geometry yet, and its style's specified
+ * margins, paddings, min/max sizes and insets as the used ones (layout
+ * resolves their percentage parts).  A box left unstyled gets only its
+ * flag: whatever reads it checks that first. */
+static void layout_box_start(LayoutBox *box)
+{
+    const LayoutStyle *s = box->s;
+    if (s->skipped) { box->flags = LAYOUT_STYLE_SKIPPED; return; }
+    memset((char *)box + sizeof(LayoutStyle *), 0, sizeof(LayoutBox) - sizeof(LayoutStyle *));
+    box->margin_top = s->margin_top;
+    box->margin_right = s->margin_right;
+    box->margin_bottom = s->margin_bottom;
+    box->margin_left = s->margin_left;
+    box->padding_top = s->padding_top;
+    box->padding_right = s->padding_right;
+    box->padding_bottom = s->padding_bottom;
+    box->padding_left = s->padding_left;
+    box->min_width = s->min_width;
+    box->max_width = s->max_width;
+    box->min_height = s->min_height;
+    box->max_height = s->max_height;
+    box->top = s->top;
+    box->left = s->left;
+    box->right = s->right;
+    box->bottom = s->bottom;
 }
 
 /* Margins and paddings against the containing block width (CSS 2.1 §8.3,
@@ -1606,7 +1616,7 @@ static void layout_set_inset(LayoutBox *box, int side, const char *value,
                              double pw, double vw)
 {
     static const uint32_t bits[4] = { LAYOUT_SIDE_TOP, LAYOUT_SIDE_RIGHT, LAYOUT_SIDE_BOTTOM, LAYOUT_SIDE_LEFT };
-    double *dst[4] = { &box->top, &box->right, &box->bottom, &box->left };
+    double *dst[4] = { &box->s->top, &box->s->right, &box->s->bottom, &box->s->left };
     box->s->inset_pct_bits &= (unsigned char)~(1u << side);
     if (strcasecmp(value, "auto") == 0) {
         *dst[side] = 0.0;
@@ -1875,17 +1885,17 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         }
         box->s->height_set = (strcasecmp(value, "auto") != 0);
     } else if (strcasecmp(prop, "min-width") == 0) {
-        box->min_width = layout_note_minmax(box, 0, value);
+        box->s->min_width = layout_note_minmax(box, 0, value);
         if (strcasecmp(value, "auto") == 0) box->s->min_size_set &= (unsigned char)~1;
         else box->s->min_size_set |= 1;
     } else if (strcasecmp(prop, "max-width") == 0) {
-        box->max_width = layout_note_minmax(box, 1, value);
+        box->s->max_width = layout_note_minmax(box, 1, value);
     } else if (strcasecmp(prop, "min-height") == 0) {
-        box->min_height = layout_note_minmax(box, 2, value);
+        box->s->min_height = layout_note_minmax(box, 2, value);
         if (strcasecmp(value, "auto") == 0) box->s->min_size_set &= (unsigned char)~2;
         else box->s->min_size_set |= 2;
     } else if (strcasecmp(prop, "max-height") == 0) {
-        box->max_height = layout_note_minmax(box, 3, value);
+        box->s->max_height = layout_note_minmax(box, 3, value);
     } else if (strcasecmp(prop, "top") == 0) {
         layout_set_inset(box, 0, value, parent_width, viewport_width);
     } else if (strcasecmp(prop, "right") == 0) {
@@ -1914,8 +1924,8 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     } else if (strcasecmp(prop, "margin") == 0) {
         double em4[4];
         unsigned fl = layout_apply_shorthand_sides(box, value, parent_width, viewport_width,
-                                                   &box->margin_top, &box->margin_right,
-                                                   &box->margin_bottom, &box->margin_left, em4);
+                                                   &box->s->margin_top, &box->s->margin_right,
+                                                   &box->s->margin_bottom, &box->s->margin_left, em4);
         layout_note_side_pcts(box, value, false, -1);
         box->s->em_deferred &= 0xF0; /* shorthand resets all four margin sides */
         box->s->margin_auto = css_margin_auto_mask(value);
@@ -1929,7 +1939,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         double r;
         if (css_token_is_em(value, &r)) { box->s->margin_em[3] = r; box->s->em_deferred |= 0x08; }
         else box->s->em_deferred &= (unsigned char)~0x08;
-        box->margin_left = css_parse_length(value, parent_width, viewport_width, box->s->font_size);
+        box->s->margin_left = css_parse_length(value, parent_width, viewport_width, box->s->font_size);
         layout_note_side_pcts(box, value, false, 3);
         if (strcasecmp(value, "auto") == 0) box->s->margin_auto |= 8;
         else box->s->margin_auto &= (unsigned char)~8;
@@ -1937,7 +1947,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         double r;
         if (css_token_is_em(value, &r)) { box->s->margin_em[1] = r; box->s->em_deferred |= 0x02; }
         else box->s->em_deferred &= (unsigned char)~0x02;
-        box->margin_right = css_parse_length(value, parent_width, viewport_width, box->s->font_size);
+        box->s->margin_right = css_parse_length(value, parent_width, viewport_width, box->s->font_size);
         layout_note_side_pcts(box, value, false, 1);
         if (strcasecmp(value, "auto") == 0) box->s->margin_auto |= 2;
         else box->s->margin_auto &= (unsigned char)~2;
@@ -1945,7 +1955,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         double r;
         if (css_token_is_em(value, &r)) { box->s->margin_em[0] = r; box->s->em_deferred |= 0x01; }
         else box->s->em_deferred &= (unsigned char)~0x01;
-        box->margin_top = css_parse_length(value, parent_width, viewport_width, box->s->font_size);
+        box->s->margin_top = css_parse_length(value, parent_width, viewport_width, box->s->font_size);
         layout_note_side_pcts(box, value, false, 0);
         if (strcasecmp(value, "auto") == 0) box->s->margin_auto |= 1;
         else box->s->margin_auto &= (unsigned char)~1;
@@ -1953,7 +1963,7 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         double r;
         if (css_token_is_em(value, &r)) { box->s->margin_em[2] = r; box->s->em_deferred |= 0x04; }
         else box->s->em_deferred &= (unsigned char)~0x04;
-        box->margin_bottom = css_parse_length(value, parent_width, viewport_width, box->s->font_size);
+        box->s->margin_bottom = css_parse_length(value, parent_width, viewport_width, box->s->font_size);
         layout_note_side_pcts(box, value, false, 2);
         if (strcasecmp(value, "auto") == 0) box->s->margin_auto |= 4;
         else box->s->margin_auto &= (unsigned char)~4;
@@ -1976,8 +1986,8 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     } else if (strcasecmp(prop, "padding") == 0) {
         double em4[4];
         unsigned fl = layout_apply_shorthand_sides(box, value, parent_width, viewport_width,
-                                                   &box->padding_top, &box->padding_right,
-                                                   &box->padding_bottom, &box->padding_left, em4);
+                                                   &box->s->padding_top, &box->s->padding_right,
+                                                   &box->s->padding_bottom, &box->s->padding_left, em4);
         layout_note_side_pcts(box, value, true, -1);
         box->s->em_deferred &= 0x0F; /* shorthand resets all four padding sides */
         for (int i = 0; i < 4; i++) {
@@ -1990,25 +2000,25 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
         double r;
         if (css_token_is_em(value, &r)) { box->s->padding_em[3] = r; box->s->em_deferred |= 0x80; }
         else box->s->em_deferred &= (unsigned char)~0x80;
-        box->padding_left = css_parse_length(value, parent_width, viewport_width, box->s->font_size);
+        box->s->padding_left = css_parse_length(value, parent_width, viewport_width, box->s->font_size);
         layout_note_side_pcts(box, value, true, 3);
     } else if (strcasecmp(prop, "padding-right") == 0) {
         double r;
         if (css_token_is_em(value, &r)) { box->s->padding_em[1] = r; box->s->em_deferred |= 0x20; }
         else box->s->em_deferred &= (unsigned char)~0x20;
-        box->padding_right = css_parse_length(value, parent_width, viewport_width, box->s->font_size);
+        box->s->padding_right = css_parse_length(value, parent_width, viewport_width, box->s->font_size);
         layout_note_side_pcts(box, value, true, 1);
     } else if (strcasecmp(prop, "padding-top") == 0) {
         double r;
         if (css_token_is_em(value, &r)) { box->s->padding_em[0] = r; box->s->em_deferred |= 0x10; }
         else box->s->em_deferred &= (unsigned char)~0x10;
-        box->padding_top = css_parse_length(value, parent_width, viewport_width, box->s->font_size);
+        box->s->padding_top = css_parse_length(value, parent_width, viewport_width, box->s->font_size);
         layout_note_side_pcts(box, value, true, 0);
     } else if (strcasecmp(prop, "padding-bottom") == 0) {
         double r;
         if (css_token_is_em(value, &r)) { box->s->padding_em[2] = r; box->s->em_deferred |= 0x40; }
         else box->s->em_deferred &= (unsigned char)~0x40;
-        box->padding_bottom = css_parse_length(value, parent_width, viewport_width, box->s->font_size);
+        box->s->padding_bottom = css_parse_length(value, parent_width, viewport_width, box->s->font_size);
         layout_note_side_pcts(box, value, true, 2);
     } else if (strcasecmp(prop, "border-left-width") == 0) {
         box->s->border_left = css_border_width_value(value, parent_width, viewport_width, box->s->font_size);
@@ -3992,7 +4002,6 @@ typedef struct StyleCacheEntry {
     unsigned char pruned_below;
     unsigned char has_after;
     char after[256];
-    LayoutBox box;              /* geometry (box.s unused) */
     LayoutStyle style;
 } StyleCacheEntry;
 
@@ -6028,7 +6037,7 @@ static void style_cache_set(StyleCacheEntry *e, StylePass *P, int idx, const cha
     e->has_after = after != NULL;
     if (after) memcpy(e->after, after, sizeof(e->after));
     else e->after[0] = '\0';
-    layout_box_keep(&e->box, &e->style, &ctx->boxes[idx]);
+    e->style = *ctx->boxes[idx].s;
 }
 
 /* Entry e of an element left unstyled whose style may have changed: what
@@ -6226,7 +6235,6 @@ static void style_cache_store(StylePass *P, uint64_t global, const StyleGenAfter
             e->match_hash = old->match_hash;
             e->has_after = old->has_after;
             memcpy(e->after, old->after, sizeof(e->after));
-            e->box = old->box;
             e->style = old->style;
         } else {
             e->key = P->entry_key ? P->entry_key[idx] : 0;
@@ -6238,7 +6246,7 @@ static void style_cache_store(StylePass *P, uint64_t global, const StyleGenAfter
             e->has_after = after[idx] != NULL;
             if (after[idx]) memcpy(e->after, after[idx], sizeof(e->after));
             else e->after[0] = '\0';
-            layout_box_keep(&e->box, &e->style, &ctx->boxes[idx]);
+            e->style = *ctx->boxes[idx].s;
         }
         uint32_t h = (e->id * 2654435761u) & (uint32_t)(icap - 1);
         while (index[h]) h = (h + 1) & (uint32_t)(icap - 1);
@@ -6383,8 +6391,8 @@ static bool layout_apply_wide_keyword(LayoutBox *box, const LayoutBox *parent,
         };
         for (size_t i = 0; i < sizeof(mm) / sizeof(mm[0]); i++) {
             if (strcasecmp(prop, mm[i].name) != 0) continue;
-            double *dst[4] = { &box->min_width, &box->max_width, &box->min_height, &box->max_height };
-            const double *src[4] = { &parent->min_width, &parent->max_width, &parent->min_height, &parent->max_height };
+            double *dst[4] = { &box->s->min_width, &box->s->max_width, &box->s->min_height, &box->s->max_height };
+            const double *src[4] = { &parent->s->min_width, &parent->s->max_width, &parent->s->min_height, &parent->s->max_height };
             *dst[mm[i].which] = *src[mm[i].which];
             unsigned char bit = (unsigned char)(1u << mm[i].which);
             box->s->minmax_pct_bits = (unsigned char)((box->s->minmax_pct_bits & ~bit) | (parent->s->minmax_pct_bits & bit));
@@ -6435,7 +6443,7 @@ static void style_note_result(StylePass *P, int idx, const LayoutBox *box, const
                               const StyleCacheEntry *ce, bool would_reuse, const HtmlNode *node)
 {
     if (!P->inc) return;
-    bool same = ce && !ce->stale && layout_box_same(box, &ce->box, &ce->style) && style_props_equal(props, ce->props);
+    bool same = ce && !ce->stale && layout_style_same(box, &ce->style) && style_props_equal(props, ce->props);
     P->out_changed[idx] = !same;
     atomic_fetch_add(&P->recomputed, 1);
     if (P->verify && would_reuse) atomic_fetch_add(&P->verify_reusable, 1);
@@ -6485,7 +6493,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
 
         /* Incremental restyle: the cached box is this element's style. */
         if (can_reuse && !P->verify) {
-            layout_box_assign(box, &ce->box, &ce->style);
+            layout_style_set(box, &ce->style);
             ctx->custom_props[idx] = ce->props;
             P->match_hash[idx] = ce->match_hash;
             if (!parent && box->s->font_size > 0.0) g_unit_rem = box->s->font_size;
@@ -6530,7 +6538,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
                 }
                 if (P->reval_words &&
                     memcmp(e->bits, T->bits, (size_t)P->reval_words * sizeof(uint64_t)) != 0) continue;
-                layout_box_copy(box, layout_box(ctx, e->idx));
+                layout_style_set(box, layout_box(ctx, e->idx)->s);
                 ctx->custom_props[idx] = ctx->custom_props[e->idx];
                 P->cls[idx] = P->cls[e->idx];
                 if (e->has_after) {
@@ -6575,10 +6583,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
             }
             if (ts) box->s = ts;
         } else {
-            /* the template's geometry, the shared style */
-            const LayoutBox *tmpl = layout_box_template();
-            *box = *tmpl;
-            box->s = ts;
+            box->s = ts;   /* the shared style */
         }
         css_style_bloom_push(T->scratch, P->sd, dom);
         if (P->inc) P->out_changed[idx] = 1;
@@ -6688,7 +6693,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
             if (take && P->verify) mpc_would = true;   /* checked against the full result */
             if (take && !P->verify) {
                 for (int b = 0; b < ninl; b++) css_declarations_free(inl[b].decls, inl[b].count);
-                layout_box_assign(box, &ce->box, &ce->style);
+                layout_style_set(box, &ce->style);
                 ctx->custom_props[idx] = ce->props;
                 if (!parent && box->s->font_size > 0.0) g_unit_rem = box->s->font_size;
                 if (after_set && after_content[0] != '\0') {
@@ -6840,14 +6845,14 @@ static void style_finish_box(StylePass *P, LayoutBox *box, const LayoutBox *pare
      * font-size (CSS 2.1 §8.3/§8.4). */
     if (P->em_defer && box->s->em_deferred) {
         double fs = box->s->font_size > 0.0 ? box->s->font_size : 16.0;
-        if (box->s->em_deferred & 0x01) box->margin_top     = box->s->margin_em[0] * fs;
-        if (box->s->em_deferred & 0x02) box->margin_right   = box->s->margin_em[1] * fs;
-        if (box->s->em_deferred & 0x04) box->margin_bottom  = box->s->margin_em[2] * fs;
-        if (box->s->em_deferred & 0x08) box->margin_left    = box->s->margin_em[3] * fs;
-        if (box->s->em_deferred & 0x10) box->padding_top    = box->s->padding_em[0] * fs;
-        if (box->s->em_deferred & 0x20) box->padding_right  = box->s->padding_em[1] * fs;
-        if (box->s->em_deferred & 0x40) box->padding_bottom = box->s->padding_em[2] * fs;
-        if (box->s->em_deferred & 0x80) box->padding_left   = box->s->padding_em[3] * fs;
+        if (box->s->em_deferred & 0x01) box->s->margin_top     = box->s->margin_em[0] * fs;
+        if (box->s->em_deferred & 0x02) box->s->margin_right   = box->s->margin_em[1] * fs;
+        if (box->s->em_deferred & 0x04) box->s->margin_bottom  = box->s->margin_em[2] * fs;
+        if (box->s->em_deferred & 0x08) box->s->margin_left    = box->s->margin_em[3] * fs;
+        if (box->s->em_deferred & 0x10) box->s->padding_top    = box->s->padding_em[0] * fs;
+        if (box->s->em_deferred & 0x20) box->s->padding_right  = box->s->padding_em[1] * fs;
+        if (box->s->em_deferred & 0x40) box->s->padding_bottom = box->s->padding_em[2] * fs;
+        if (box->s->em_deferred & 0x80) box->s->padding_left   = box->s->padding_em[3] * fs;
     }
 
     /* A vertical legacy -webkit-box (the line-clamp idiom) is a block. */
@@ -6903,7 +6908,7 @@ static void style_copy_subtree(StylePass *P, StyleThread *T, int pos)
         P->cls[idx] = idx;
         if (ce) {
             /* An element (one without an entry would need restyling). */
-            layout_box_assign(box, &ce->box, &ce->style);
+            layout_style_set(box, &ce->style);
             ctx->custom_props[idx] = ce->props;
             P->match_hash[idx] = ce->match_hash;
             if (ce->has_after) {
@@ -6953,11 +6958,11 @@ static void style_skip_descendants(StylePass *P, int pos, bool clean)
         bool keep = parent_clean && P->inc && P->cached[idx] && !P->cached[idx]->stale && P->key_ok[idx] && !P->force[idx];
         P->skipped[idx] = keep ? 1 : 2;
         /* Only these two fields: whatever reads a box past them checks
-         * display or LAYOUT_STYLE_SKIPPED first (a full box would be a
+         * display or LAYOUT_STYLE_SKIPPED (s->skipped) first (a full box would be a
          * kilobyte per hidden node per layout). */
         LayoutBox *box = layout_box(ctx, idx);
         box->s->display = CSS_DISPLAY_NONE;
-        box->flags = LAYOUT_STYLE_SKIPPED;
+        box->s->skipped = 1;
         ctx->custom_props[idx] = ctx->custom_props[p];
         P->cls[idx] = idx;
         if (P->inc) P->out_changed[idx] = 1;
@@ -7062,15 +7067,13 @@ bool css_layout_style_unchanged(LayoutContext *ctx, int idx, int dom_now)
     for (int i = 0; i < ctx->tree.count; i++) P.cls[i] = i;
     /* Styled into the kept layout's slots, then put back. */
     LayoutBox *box = &ctx->boxes[idx];
-    LayoutBox kept, parent_kept;
-    LayoutStyle kept_style, parent_kept_style;
-    layout_box_keep(&kept, &kept_style, box);
+    LayoutStyle kept_style = *box->s, parent_kept_style;
     const CssCustomProps *kept_props = ctx->custom_props[idx], *parent_props = NULL;
     int kept_dom = ctx->tree.nodes[idx].dom_node_idx;
     if (p >= 0) {
-        layout_box_keep(&parent_kept, &parent_kept_style, &ctx->boxes[p]);
+        parent_kept_style = *ctx->boxes[p].s;
         parent_props = ctx->custom_props[p];
-        layout_box_assign(&ctx->boxes[p], &pe->box, &pe->style);
+        layout_style_set(&ctx->boxes[p], &pe->style);
         ctx->custom_props[p] = pe->props;
     }
     ctx->tree.nodes[idx].dom_node_idx = dom_now;
@@ -7078,15 +7081,15 @@ bool css_layout_style_unchanged(LayoutContext *ctx, int idx, int dom_now)
     StyleThread *T = style_thread(&P);
     style_node(&P, T, 0, idx);
     bool after = T->gen_n > 0;
-    bool same = layout_box_same(box, &ce->box, &ce->style) && style_props_equal(ctx->custom_props[idx], ce->props) &&
+    bool same = layout_style_same(box, &ce->style) && style_props_equal(ctx->custom_props[idx], ce->props) &&
                 after == (ce->has_after != 0) &&
                 (!after || strncmp(T->gen[0].text, ce->after, sizeof(ce->after)) == 0);
     g_unit_rem = rem;
     ctx->tree.nodes[idx].dom_node_idx = kept_dom;
-    layout_box_assign(box, &kept, &kept_style);
+    layout_style_set(box, &kept_style);
     ctx->custom_props[idx] = kept_props;
     if (p >= 0) {
-        layout_box_assign(&ctx->boxes[p], &parent_kept, &parent_kept_style);
+        layout_style_set(&ctx->boxes[p], &parent_kept_style);
         ctx->custom_props[p] = parent_props;
     }
     free(T->gen);
@@ -10592,6 +10595,9 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
         if (failed) { ctx->prune_failed = true; return false; }
     }
     _st_t = layout_now_ms();
+
+    /* The used values every box starts from. */
+    for (int i = 0; i < ctx->tree.count; i++) layout_box_start(&ctx->boxes[i]);
 
     /* Fonts: each box's family / weight / style to a registry slot, after
      * fetching the web fonts the page asks for (once; cached afterwards). */
