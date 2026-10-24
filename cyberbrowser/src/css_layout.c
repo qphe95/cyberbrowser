@@ -251,23 +251,26 @@ static bool layout_build_index_map(LayoutContext *ctx, int **out_map, int *count
     /* Leaving out needs parents before children (the mirror keeps its
      * array in pre-order). */
     unsigned char *out = NULL;   /* per DOM index: 1 left out, 2 a root whose children are */
+    /* (the headers read in place: these loops visit every DOM node) */
+#define DOM_HDR(i) ((const PreOrderCompactionArrayNode *)(a->buffer + (size_t)(i) * a->node_size))
     for (int i = 0; prune && i < dom_count; i++) {
-        if (!po_array_is_active(a, i)) continue;
-        int p = po_array_parent(a, i);
-        if (p >= i) { prune = false; break; }
+        if (DOM_HDR(i)->state != PO_ARRAY_NODE_ACTIVE) continue;
+        if (DOM_HDR(i)->parent >= i) { prune = false; break; }
     }
     if (prune) out = (unsigned char *)calloc((size_t)dom_count + 1, 1);
 
     int layout_idx = 0, roots = 0;
     for (int i = 0; i < dom_count; i++) {
-        if (!po_array_is_active(a, i)) continue;
+        const PreOrderCompactionArrayNode *h = DOM_HDR(i);
+        if (h->state != PO_ARRAY_NODE_ACTIVE) continue;
         if (out) {
-            int p = po_array_parent(a, i);
+            int p = h->parent;
             if (p >= 0 && out[p]) { out[i] = 1; continue; }
-            if (layout_prune_root(ctx->doc, i)) { out[i] = 2; roots++; }
+            if (((const HtmlNode *)h)->hidden_hint != 2 && layout_prune_root(ctx->doc, i)) { out[i] = 2; roots++; }
         }
         map[i] = layout_idx++;
     }
+#undef DOM_HDR
     if (out && roots) {
         *pruned = (unsigned char *)calloc((size_t)layout_idx + 1, 1);
         for (int i = 0; *pruned && i < dom_count; i++)
@@ -4580,6 +4583,7 @@ static bool layout_prune_root(HtmlDocument *doc, int i)
 {
     HtmlNode *hn = (HtmlNode *)po_array_payload(&doc->array, i);
     if (!hn || hn->type != HTML_NODE_ELEMENT || !hn->store_id || hn->array_node.first_child < 0) return false;
+    if (hn->hidden_hint == 2) return false;   /* (a valid entry it has is not display:none) */
     const StyleCacheEntry *e = style_cache_find(hn->store_id);
     if (!e || e->stale || e->style.display != CSS_DISPLAY_NONE || !g_sc.global) return false;
     if (!g_has.any) return true;
@@ -6038,6 +6042,8 @@ static void style_cache_set(StyleCacheEntry *e, StylePass *P, int idx, const cha
     if (after) memcpy(e->after, after, sizeof(e->after));
     else e->after[0] = '\0';
     e->style = *ctx->boxes[idx].s;
+    HtmlNode *hn = layout_node_dom(ctx, ctx->tree.nodes[idx].dom_node_idx);
+    if (hn) hn->hidden_hint = e->style.display == CSS_DISPLAY_NONE ? 1 : 2;
 }
 
 /* Entry e of an element left unstyled whose style may have changed: what
@@ -6236,6 +6242,7 @@ static void style_cache_store(StylePass *P, uint64_t global, const StyleGenAfter
             e->has_after = old->has_after;
             memcpy(e->after, old->after, sizeof(e->after));
             e->style = old->style;
+            hn->hidden_hint = e->style.display == CSS_DISPLAY_NONE ? 1 : 2;
         } else {
             e->key = P->entry_key ? P->entry_key[idx] : 0;
             style_cache_set_ctx(e, P, idx, old);
@@ -6247,6 +6254,7 @@ static void style_cache_store(StylePass *P, uint64_t global, const StyleGenAfter
             if (after[idx]) memcpy(e->after, after[idx], sizeof(e->after));
             else e->after[0] = '\0';
             e->style = *ctx->boxes[idx].s;
+            hn->hidden_hint = e->style.display == CSS_DISPLAY_NONE ? 1 : 2;
         }
         uint32_t h = (e->id * 2654435761u) & (uint32_t)(icap - 1);
         while (index[h]) h = (h + 1) & (uint32_t)(icap - 1);

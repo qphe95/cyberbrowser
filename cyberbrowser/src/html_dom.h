@@ -66,6 +66,10 @@ struct HtmlNode {
      * matches its attr_hash and the key sets' generation; -1 = not known. */
     uint64_t has_memo_stamp;
     int8_t has_memo[5];
+    /* How its style cache entry was last stored: 0 not known, 1 display:none,
+     * 2 shown (css_layout.c: a tree build leaving hidden subtrees out skips
+     * the lookup for 2). */
+    unsigned char hidden_hint;
 };
 
 struct HtmlArenaBlock;
