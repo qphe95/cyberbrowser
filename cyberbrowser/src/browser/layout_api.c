@@ -151,13 +151,19 @@ uint64_t layout_api_region_layouts(void)
     return g_lq_region_layouts;
 }
 
-static void lq_free(void)
+static void lq_free_keeping(bool keep_tree)
 {
-    css_layout_tree_free(&g_lq_layout);   /* also a failed run's partial tree */
+    /* (css_layout_run keeps the tree when it can) */
+    if (!keep_tree) css_layout_tree_free(&g_lq_layout);   /* also a failed run's partial tree */
     if (g_lq_doc) html_document_free(g_lq_doc);
     g_lq_doc = NULL;
     g_lq_valid = false;
     if (g_lq_box_of_slot) memset(g_lq_box_of_slot, 0, g_lq_slot_cap * sizeof(int));
+}
+
+static void lq_free(void)
+{
+    lq_free_keeping(false);
 }
 
 void layout_api_invalidate(void)
@@ -1300,7 +1306,7 @@ static bool lq_ensure(JSContextHandle ctx)
         int oi = lq_box_index(g_lq_who);
         if (oi >= 0 && lq_rendered(oi)) { asked_was = g_lq_layout.boxes[oi]; asked_had = true; }
     }
-    lq_free();
+    lq_free_keeping(doc == g_lq_doc);
     g_lq_doc = doc;
     g_lq_layout.js_ctx = ctx;
     g_lq_layout.style_all = g_lq_style_all;

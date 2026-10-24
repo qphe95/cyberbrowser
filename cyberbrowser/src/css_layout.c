@@ -10757,9 +10757,113 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
     return true;
 }
 
+static uint64_t g_tree_kept, g_tree_built;
+
+void css_layout_tree_stats(uint64_t *kept, uint64_t *built)
+{
+    if (kept) *kept = g_tree_kept;
+    if (built) *built = g_tree_built;
+}
+
+/* The tree the last run on ctx left, for this run on doc: kept when it is
+ * the same mirror document and no element's children changed since (its
+ * nodes and their indices are then as they were; attribute changes only
+ * restyle).  Everything else a tree build sets up starts over.  Elements
+ * it left out stay out: a guess that comes out shown builds again
+ * (prune_failed).  CYBER_LAYOUT_KEEP=0: build every time. */
+static bool layout_tree_keep(LayoutContext *ctx, HtmlDocument *doc, bool prune)
+{
+    static int keep_env = -1;
+    if (keep_env < 0) {
+        const char *e = cyber_getenv("CYBER_LAYOUT_KEEP");
+        keep_env = !(e && e[0] == '0');
+    }
+    if (!ctx->tree_keep) return false;
+    ctx->tree_keep = false;
+    const HtmlMirrorChange *ch = NULL;
+    size_t nch = 0;
+    bool keep = keep_env && ctx->doc == doc && ctx->tree.count > 0 && (prune || !ctx->pruned_n) &&
+                html_mirror_changes(doc, ctx->tree_seq, &ch, &nch);
+    for (size_t k = 0; keep && k < nch; k++)
+        if (ch[k].kind == HTML_MIRROR_CHILDREN) keep = false;
+    if (!keep) { css_layout_tree_free(ctx); return false; }
+
+    for (int i = 0; i < ctx->tree.count; i++) ctx->boxes[i].s = &ctx->styles[i];
+    memset((void *)ctx->custom_props, 0, ((size_t)ctx->tree.count + 1) * sizeof(*ctx->custom_props));
+    frame_arena_reset(&ctx->arena);
+    ctx->float_count = 0;
+    free(ctx->intrinsic_cache);
+    ctx->intrinsic_cache = NULL;
+    free(ctx->has_flags);
+    ctx->has_flags = NULL;
+    if (ctx->text_gen) {
+        for (int i = 0; i < ctx->text_gen_cap; i++) free(ctx->text_gen[i]);
+        free(ctx->text_gen);
+        ctx->text_gen = NULL;
+        ctx->text_gen_cap = 0;
+    }
+    ctx->style_gen = 0;
+    ctx->style_pass = 0;
+    ctx->style_skipped = 0;
+    ctx->prune_failed = false;
+    ctx->has_target_first = 0;
+    return true;
+}
+
+/* CYBER_LAYOUT_KEEP_VERIFY=1: after each layout on a kept tree, the same
+ * layout on a tree built afresh (storing nothing in the style cache), and
+ * every box compared. */
+static void layout_keep_verify(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet)
+{
+    static uint64_t layouts, bad_layouts;
+    LayoutContext fresh;
+    memset(&fresh, 0, sizeof(fresh));
+    GC_SET(fresh.js_ctx, ctx->js_ctx);
+    fresh.style_all = ctx->style_all;
+    fresh.serial = ctx->serial;
+    fresh.cache_readonly = true;
+    uint64_t kept = g_tree_kept, built = g_tree_built;
+    bool ok = css_layout_run(&fresh, doc, sheet, ctx->viewport_width, ctx->viewport_height);
+    g_tree_kept = kept;
+    g_tree_built = built;
+    layouts++;
+    int bad = 0, first = -1;
+    /* (by document node: the two trees may leave out different hidden
+     * subtrees; a box either leaves unstyled is not compared) */
+    int dn_count = (int)po_array_count(&doc->array);
+    int *at = ok ? (int *)malloc(((size_t)dn_count + 1) * sizeof(int)) : NULL;
+    if (!at) bad = -1;
+    else {
+        for (int i = 0; i < dn_count; i++) at[i] = -1;
+        for (int i = 0; i < fresh.tree.count; i++) at[fresh.tree.nodes[i].dom_node_idx] = i;
+        const size_t g0 = sizeof(LayoutStyle *);
+        for (int i = 0; i < ctx->tree.count; i++) {
+            int j = at[ctx->tree.nodes[i].dom_node_idx];
+            const LayoutBox *a = &ctx->boxes[i], *b = j >= 0 ? &fresh.boxes[j] : NULL;
+            if ((a->flags & LAYOUT_STYLE_SKIPPED) || !b || (b->flags & LAYOUT_STYLE_SKIPPED)) continue;
+            bool same = memcmp((const char *)a + g0, (const char *)b + g0, sizeof(LayoutBox) - g0) == 0 &&
+                        memcmp(a->s, b->s, sizeof(LayoutStyle)) == 0;
+            if (!same && bad++ == 0) first = i;
+        }
+        free(at);
+    }
+    if (bad) {
+        bad_layouts++;
+        HtmlNode *dn = first >= 0 ? layout_node_dom(ctx, ctx->tree.nodes[first].dom_node_idx) : NULL;
+        fprintf(stderr, "[keep-verify] layout %llu: %d boxes differ (%d vs %d boxes; first %d <%s>)\n",
+                (unsigned long long)layouts, bad, ctx->tree.count, fresh.tree.count, first,
+                dn && dn->tag_name ? dn->tag_name : "?");
+    }
+    fprintf(stderr, "[keep-verify] %llu layouts on kept trees, %llu differ\n", (unsigned long long)layouts,
+            (unsigned long long)bad_layouts);
+    css_layout_tree_free(&fresh);
+}
+
 bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
                     double viewport_width, double viewport_height)
 {
+    uint64_t seq = html_mirror_change_seq();
+    bool kept_tree = false;
     double _run_t0 = layout_now_ms(), lph_tree_prev = 0.0;
     JSContextHandle saved_js_ctx = ctx->js_ctx;
     const char *saved_dump_path = ctx->dump_path;
@@ -10770,7 +10874,10 @@ bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
     bool prune = prune_env && !saved_style_all;
     int prune_retries = 0;
 again:
-    if (!layout_tree_build(ctx, doc, prune)) return false;
+    kept_tree = layout_tree_keep(ctx, doc, prune);
+    if (kept_tree) g_tree_kept++;
+    else if (layout_tree_build(ctx, doc, prune)) g_tree_built++;
+    else return false;
     GC_SET(ctx->js_ctx, saved_js_ctx);
     ctx->dump_path = saved_dump_path;
     ctx->style_all = saved_style_all;
@@ -10801,6 +10908,13 @@ again:
         goto again;
     }
     if (!ok) css_layout_tree_free(ctx);
+    else {
+        ctx->tree_keep = true;
+        ctx->tree_seq = seq;
+        static int verify_env = -1;
+        if (verify_env < 0) verify_env = cyber_getenv("CYBER_LAYOUT_KEEP_VERIFY") ? 1 : 0;
+        if (verify_env && kept_tree) layout_keep_verify(ctx, doc, sheet);
+    }
     if (g_lph_on) lph_flush(layout_now_ms() - _run_t0);
     return ok;
 }

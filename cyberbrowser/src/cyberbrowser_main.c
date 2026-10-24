@@ -2165,13 +2165,17 @@ int main(int argc, char *argv[]) {
             for (size_t k = 0; k < sizeof(scen) / sizeof(scen[0]); k++) {
                 char js[2048];
                 snprintf(js, sizeof(js), "%s(%d);", scen[k].js, n);
+                uint64_t kept0, built0, kept1, built1;
+                css_layout_tree_stats(&kept0, &built0);
                 css_layout_bench_record(true);
                 double t0 = (double)platform_get_time_ms();
                 GCValue r = JS_Eval(g_ctx, js, strlen(js), "<layout-bench>", JS_EVAL_TYPE_GLOBAL);
                 double t1 = (double)platform_get_time_ms();
                 css_layout_bench_record(false);
                 if (JS_IsException(r)) JS_GetException(g_ctx);
-                fprintf(stderr, "[layout-bench] %s: %d rounds in %.0f ms\n", scen[k].label, n, t1 - t0);
+                css_layout_tree_stats(&kept1, &built1);
+                fprintf(stderr, "[layout-bench] %s: %d rounds in %.0f ms; trees kept %llu, built %llu\n", scen[k].label, n,
+                        t1 - t0, (unsigned long long)(kept1 - kept0), (unsigned long long)(built1 - built0));
                 css_layout_bench_report(scen[k].label);
             }
         }

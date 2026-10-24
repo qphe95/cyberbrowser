@@ -498,6 +498,11 @@ typedef struct LayoutContext {
      * element as its subject (a change below it, or after it among its
      * siblings, can flip it). */
     unsigned char *has_flags;
+    /* The tree a successful css_layout_run left, and the mirror change log
+     * position it was built for: the next run on the same mirror document
+     * keeps it when no element's children changed since. */
+    bool tree_keep;
+    uint64_t tree_seq;
 } LayoutContext;
 
 #define LAYOUT_HAS_SUBJECT 1
@@ -573,6 +578,9 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet);
 /* Convenience: allocate/resolve/free in one call. */
 bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
                     double viewport_width, double viewport_height);
+/* Layouts that kept the previous tree, and that built one (tests,
+ * benchmarks). */
+void css_layout_tree_stats(uint64_t *kept, uint64_t *built);
 
 /* Test hook: elements whose computed style the last style pass took from
  * the incremental restyle cache, and those it recomputed (both 0 when the
