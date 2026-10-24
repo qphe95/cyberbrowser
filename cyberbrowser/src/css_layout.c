@@ -10534,6 +10534,7 @@ static bool flow_buf_ensure(LayoutFlowBuf *b, int n)
 {
     if (b->cap >= n && b->entry) return true;
     flow_buf_free(b);
+    n += n / 4 + 16;   /* (a tree that grows a little keeps its buffers) */
     size_t m = (size_t)n + 1;
     b->entry = (uint64_t *)malloc(m * sizeof(uint64_t));
     b->exit = (LayoutBox *)malloc(m * sizeof(LayoutBox));
@@ -10714,10 +10715,11 @@ static bool flow_try(LayoutContext *ctx, LayoutFlow *F, int idx, uint64_t entry)
     const LayoutStyle *st = ctx->boxes[idx].s;
     /* An inline box is part of its container's lines (they move it, not
      * its contents, after its call); a leaf has nothing to reuse; an
-     * absolutely positioned box is placed after its call (by its size):
-     * its own call runs, its contents may come from the record. */
+     * absolutely positioned box is sized and placed before its call (in
+     * the absolute pass, against its containing block) and may be moved
+     * after it, as any box; a fixed one is not, against the viewport. */
     if (st->display == CSS_DISPLAY_INLINE || ctx->tree.nodes[idx].first_child_idx < 0) return false;
-    if (st->position == CSS_POSITION_ABSOLUTE || st->position == CSS_POSITION_FIXED) return false;
+    if (st->position == CSS_POSITION_FIXED) return false;
     if (flow_parent_is_row(ctx, idx)) return false;
     const LayoutFlowBuf *R = &F->rec;
     int o = ctx->flow_old ? ctx->flow_old[idx] : idx;
@@ -10798,10 +10800,14 @@ static void layout_flow_end(LayoutContext *ctx)
         int i = ctx->tree.preorder[k];
         if (C->copied[i]) continue;
         const LayoutBox *b = &ctx->boxes[i];
+        /* (left unstyled inside display:none: nothing lays it out, and its
+         * style slot holds only display) */
+        if (b->flags & LAYOUT_STYLE_SKIPPED) { C->ok[i] = 7; C->cb[i] = FLOW_NO_CB; continue; }
         bool ok = !C->noreuse[i] && b->s->float_side == 0;
         bool ok_abs = ok;
         int cb = FLOW_NO_CB;
         for (int c = ctx->tree.nodes[i].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) {
+            if (ctx->boxes[c].flags & LAYOUT_STYLE_SKIPPED) continue;
             const LayoutStyle *cs = ctx->boxes[c].s;
             bool fixed = cs->position == CSS_POSITION_FIXED;
             ok = ok && (C->ok[c] & 1) && !fixed && !flow_stray(C->snap1, i, c, cs->display);
@@ -11255,6 +11261,7 @@ static void layout_position_absolute_subtree(LayoutContext *ctx, int idx)
     if (ctx->flow && ctx->flow->pass == 2 && ctx->flow->skip[idx]) return;
     if (box->s->position == CSS_POSITION_ABSOLUTE || box->s->position == CSS_POSITION_FIXED) {
         layout_position_absolute_box(ctx, idx);
+        if (ctx->flow && ctx->flow->pass == 2 && ctx->flow->skip[idx]) return;   /* (its call was reused) */
     }
     for (int c = ctx->tree.nodes[idx].first_child_idx; c >= 0;
          c = ctx->tree.nodes[c].next_sibling_idx) {
