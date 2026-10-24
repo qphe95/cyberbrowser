@@ -254,8 +254,10 @@ static int sd_old_index(const uint32_t *keys, const int32_t *vals, uint32_t mask
  * document, current as of attribute generation `old_gen`), elements whose
  * attributes have not changed since take their features from it by store
  * id instead of interning them again: after nodes are added or moved, only
- * the tree arrays need computing afresh. */
-static CssStyleDoc *styledoc_build(HtmlDocument *doc, const CssStyleDoc *old, uint32_t old_gen, uint32_t *copied)
+ * the tree arrays need computing afresh.  The new build takes over old's
+ * feature pool when not too much of it is garbage (the elements it copies
+ * keep their entries where they are). */
+static CssStyleDoc *styledoc_build(HtmlDocument *doc, CssStyleDoc *old, uint32_t old_gen, uint32_t *copied)
 {
     CssStyleDoc *d = calloc(1, sizeof(*d));
     int n = (int)po_array_count(&doc->array);
@@ -303,37 +305,60 @@ static CssStyleDoc *styledoc_build(HtmlDocument *doc, const CssStyleDoc *old, ui
         }
     }
 
+    /* (the nodes and their links read in place: these loops visit every
+     * node of the document) */
+#define SD_NODE(i) ((HtmlNode *)(doc->array.buffer + (size_t)(i) * doc->array.node_size))
+    /* Each element's index in old (-1: none, or its attributes changed). */
+    int32_t *oj = okeys ? malloc(((size_t)n + 1) * sizeof(int32_t)) : NULL;
+    if (!oj && okeys) { free(okeys); free(ovals); okeys = NULL; ovals = NULL; }
     /* Worst case: every attribute and class token becomes a new atom. */
     size_t est = 64;
     for (int i = 0; i < n; i++) {
-        HtmlNode *node = po_array_payload(&doc->array, i);
-        if (!node || node->type != HTML_NODE_ELEMENT) continue;
-        if (okeys && node->attr_gen <= old_gen && sd_old_index(okeys, ovals, omask, node->store_id) >= 0) continue;
+        HtmlNode *node = SD_NODE(i);
+        if (oj) oj[i] = -1;
+        if (node->type != HTML_NODE_ELEMENT) continue;
+        if (oj && node->attr_gen <= old_gen) oj[i] = sd_old_index(okeys, ovals, omask, node->store_id);
+        if (oj && oj[i] >= 0) continue;
         est += sd_atom_estimate(node);
     }
     css_atom_reserve(est);
+    /* Old's pool, unless most of it is garbage. */
+    bool take = oj && old->pool_n <= 2 * old->pool_live + 65536;
+    if (take) {
+        d->pool = old->pool;
+        d->pool_val = old->pool_val;
+        d->pool_n = old->pool_n;
+        d->pool_cap = old->pool_cap;
+        old->pool = NULL;
+        old->pool_val = NULL;
+        old->pool_n = old->pool_cap = 0;
+    }
 
     uint32_t reused = 0;
     for (int i = 0; i < n; i++) {
-        d->parent[i] = po_array_parent(&doc->array, i);
-        HtmlNode *node = po_array_payload(&doc->array, i);
-        if (!node) continue;
+        HtmlNode *node = SD_NODE(i);
+        d->parent[i] = node->array_node.parent;
         d->store_id[i] = node->store_id;
         if (node->type != HTML_NODE_ELEMENT) continue;
         d->is_elem[i] = 1;
         if (node->array_node.first_child >= 0) d->flags[i] |= DF_HAS_CHILD;
-        int j = okeys && node->attr_gen <= old_gen ? sd_old_index(okeys, ovals, omask, node->store_id) : -1;
+        int j = oj ? oj[i] : -1;
         if (j >= 0) {
             d->tag[i] = old->tag[j];
             d->id[i] = old->id[j];
             d->flags[i] |= old->flags[j] & DF_LINK;
-            d->cls_off[i] = d->pool_n;
-            for (int k = 0; k < old->cls_n[j]; k++)
-                sd_pool_push(d, old->pool[old->cls_off[j] + k], old->pool_val[old->cls_off[j] + k]);
+            if (take) {
+                d->cls_off[i] = old->cls_off[j];
+                d->attr_off[i] = old->attr_off[j];
+            } else {
+                d->cls_off[i] = d->pool_n;
+                for (int k = 0; k < old->cls_n[j]; k++)
+                    sd_pool_push(d, old->pool[old->cls_off[j] + k], old->pool_val[old->cls_off[j] + k]);
+                d->attr_off[i] = d->pool_n;
+                for (int k = 0; k < old->attr_n[j]; k++)
+                    sd_pool_push(d, old->pool[old->attr_off[j] + k], old->pool_val[old->attr_off[j] + k]);
+            }
             d->cls_n[i] = old->cls_n[j];
-            d->attr_off[i] = d->pool_n;
-            for (int k = 0; k < old->attr_n[j]; k++)
-                sd_pool_push(d, old->pool[old->attr_off[j] + k], old->pool_val[old->attr_off[j] + k]);
             d->attr_n[i] = old->attr_n[j];
             d->pool_live += d->cls_n[i] + d->attr_n[i];
             reused++;
@@ -341,6 +366,7 @@ static CssStyleDoc *styledoc_build(HtmlDocument *doc, const CssStyleDoc *old, ui
         }
         sd_element_features(d, node, i);
     }
+    free(oj);
     free(okeys);
     free(ovals);
     if (copied) *copied = reused;
@@ -354,9 +380,8 @@ static CssStyleDoc *styledoc_build(HtmlDocument *doc, const CssStyleDoc *old, ui
             d->pos_first[i] = d->pos_last[i] = d->type_first[i] = d->type_last[i] = 1;
         }
         kids.n = 0;
-        for (int c = po_array_first_child(&doc->array, i); c >= 0;
-             c = po_array_next_sibling(&doc->array, c)) {
-            if (c < n && d->is_elem[c]) VEC_PUSH(kids, c);
+        for (int c = SD_NODE(i)->array_node.first_child; c >= 0 && c < n; c = SD_NODE(c)->array_node.next_sibling) {
+            if (d->is_elem[c]) VEC_PUSH(kids, c);
         }
         if (kids.n == 0) continue;
         int total = (int)kids.n;
@@ -389,6 +414,7 @@ static CssStyleDoc *styledoc_build(HtmlDocument *doc, const CssStyleDoc *old, ui
         for (int k = 0; k < total; k++) tcount[d->tag[kids.v[k]]] = 0;
     }
     free(kids.v);
+#undef SD_NODE
     for (int i = n - 1; i >= 0; i--) {
         int p = d->parent[i];
         if (p >= 0 && p < i && d->sub_end[i] > d->sub_end[p]) d->sub_end[p] = d->sub_end[i];
@@ -458,7 +484,7 @@ const CssStyleDoc *css_styledoc_get(HtmlDocument *doc)
     if (!same) {
         /* The same document with nodes added, removed or moved: the
          * elements that stayed keep their features. */
-        const CssStyleDoc *old = d && g_sdc.serial == doc->serial ? d : NULL;
+        CssStyleDoc *old = d && g_sdc.serial == doc->serial ? d : NULL;
         uint32_t copied = 0;
         CssStyleDoc *nd = styledoc_build(doc, old, g_sdc.attr_gen, &copied);
         g_sdc_stats.elements_copied += copied;
