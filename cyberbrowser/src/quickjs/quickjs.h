@@ -1409,6 +1409,9 @@ JS_BOOL JS_DetectModule(const char *input, size_t input_len);
 /* Compile fetched page scripts of ctx on compile workers before they run
  * (CYBER_COMPILE_THREADS=<n>). */
 void JS_EnableScriptPrecompile(JSContextHandle ctx);
+/* A number no other context made in this process has: a key for data
+ * cached per context (atoms of fixed names, ...). */
+uint32_t JS_GetContextSerial(JSContextHandle ctx);
 GCValue JS_Eval(JSContextHandle ctx, const char *input, size_t input_len,
                 const char *filename, int eval_flags);
 /* same as JS_Eval() but with an explicit 'this_obj' parameter */

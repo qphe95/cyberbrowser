@@ -2367,6 +2367,10 @@ JSContextHandle JS_NewContextRaw(JSRuntimeHandle rt)
     
     /* Zero the entire struct - ctx is user_ptr (after header), no offset needed */
     js_ctx_zero_memory(ctx);
+    {
+        static uint32_t s_serial;
+        SAFE_SET(ctx, JSContextHandle, serial, ++s_serial);
+    }
     QJS_LOGI("STEP1: loaded_modules GCHandleArray initialized");
     QJS_LOGI("STEP2-done");
 
@@ -2417,6 +2421,11 @@ JSContextHandle JS_NewContextRaw(JSRuntimeHandle rt)
     }
     QJS_LOGI("STEP11-done");
     return ctx;
+}
+
+uint32_t JS_GetContextSerial(JSContextHandle ctx)
+{
+    return SAFE_GET_OR(ctx, JSContextHandle, serial, 0);
 }
 
 JSContextHandle JS_NewContext(JSRuntimeHandle rt)

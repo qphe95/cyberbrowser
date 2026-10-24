@@ -281,21 +281,38 @@ static NodeId fragment_from_html_document(HtmlDocument *doc, NodeId owner) {
     return frag;
 }
 
+/* The atom of a fixed name, made once per context. */
+typedef struct HtmlAtom { uint32_t serial; JSAtom atom; } HtmlAtom;
+static JSAtom html_atom(JSContextHandle ctx, HtmlAtom *c, const char *name) {
+    uint32_t serial = JS_GetContextSerial(ctx);
+    if (c->serial != serial) {
+        c->atom = JS_NewAtom(ctx, name);
+        c->serial = serial;
+    }
+    return c->atom;
+}
+
 /* Helper: transfer numeric properties and style from old element to new element */
 static void html_transfer_element_properties(JSContextHandle ctx, GCValue new_elem, GCValue old_elem) {
-    if (JS_IsUndefined(old_elem) || JS_IsNull(old_elem)) return;
-    const char *numeric_props[] = {
+    if (!JS_IsObject(old_elem)) return;
+    static const char *const numeric_props[] = {
         "clientWidth", "clientHeight", "scrollWidth", "scrollHeight",
         "offsetWidth", "offsetHeight", NULL
     };
+    static HtmlAtom numeric_atoms[6], style_atom;
+    /* Only values assigned on the old element move: the prototype's are
+     * read-only getters (setting them does nothing), and calling them laid
+     * out the skeleton page that is being replaced. */
     for (int i = 0; numeric_props[i]; i++) {
-        GCValue val = JS_GetPropertyStr(ctx, old_elem, numeric_props[i]);
-        if (!JS_IsUndefined(val) && !JS_IsNull(val)) {
-            JS_SetPropertyStr(ctx, new_elem, numeric_props[i], val);
-        }
+        JSAtom a = html_atom(ctx, &numeric_atoms[i], numeric_props[i]);
+        JSPropertyDescriptor desc = JS_PROPERTY_DESCRIPTOR_INIT;
+        if (JS_GetOwnProperty(ctx, &desc, old_elem, a) > 0 && !(desc.flags & JS_PROP_GETSET) &&
+            !JS_IsUndefined(desc.value) && !JS_IsNull(desc.value))
+            JS_SetProperty(ctx, new_elem, a, desc.value);
     }
-    GCValue old_style = JS_GetPropertyStr(ctx, old_elem, "style");
-    GCValue new_style = JS_GetPropertyStr(ctx, new_elem, "style");
+    JSAtom sa = html_atom(ctx, &style_atom, "style");
+    GCValue old_style = JS_GetProperty(ctx, old_elem, sa);
+    GCValue new_style = JS_GetProperty(ctx, new_elem, sa);
     if (JS_IsObject(old_style) && JS_IsObject(new_style)) {
         JSPropertyEnum *tab = NULL;
         uint32_t plen = 0;
@@ -305,8 +322,8 @@ static void html_transfer_element_properties(JSContextHandle ctx, GCValue new_el
                 if (key && strcmp(key, "removeProperty") != 0 &&
                     strcmp(key, "setProperty") != 0 &&
                     strcmp(key, "getPropertyValue") != 0 && key[0] != '_') {
-                    GCValue val = JS_GetPropertyStr(ctx, old_style, key);
-                    JS_SetPropertyStr(ctx, new_style, key, val);
+                    GCValue val = JS_GetProperty(ctx, old_style, tab[i].atom);
+                    JS_SetProperty(ctx, new_style, tab[i].atom, val);
                 }
             }
             JS_FreePropertyEnum(ctx, tab, plen);
@@ -1028,29 +1045,26 @@ static void serialize_buf_append_attr(SerializeBuffer *buf, const char *name, co
 
 /* Read a string property from a JS object. Returns a freshly allocated string
  * that the caller must free, or NULL if the property is missing/undefined. */
-static char *js_object_get_string(JSContextHandle ctx, GCValue obj, const char *prop) {
-    if (JS_IsUndefined(obj) || JS_IsNull(obj)) return NULL;
-    GCValue val = JS_GetPropertyStr(ctx, obj, prop);
-    if (JS_IsUndefined(val) || JS_IsNull(val)) return NULL;
-    if (!JS_IsString(val)) return NULL;
-    const char *s = JS_ToCString(ctx, val);
-    if (!s) return NULL;
-    return strdup(s);
-}
-
 /* The object's own string data property `prop` (no getters, no prototype
  * chain), or NULL. */
-static char *js_object_get_own_string(JSContextHandle ctx, GCValue obj, const char *prop) {
+static char *js_object_get_own_string_atom(JSContextHandle ctx, GCValue obj, JSAtom atom) {
     if (!JS_IsObject(obj)) return NULL;
-    JSAtom atom = JS_NewAtom(ctx, prop);
     JSPropertyDescriptor desc = JS_PROPERTY_DESCRIPTOR_INIT;
     int has = JS_GetOwnProperty(ctx, &desc, obj, atom);
-    JS_FreeAtom(ctx, atom);
     if (has <= 0 || (desc.flags & JS_PROP_GETSET) || !JS_IsString(desc.value)) return NULL;
     const char *s = JS_ToCString(ctx, desc.value);
     char *out = s ? strdup(s) : NULL;
     if (s) JS_FreeCString(ctx, s);
     return out;
+}
+
+/* js_object_get_string through an atom. */
+static char *js_object_get_string_atom(JSContextHandle ctx, GCValue obj, JSAtom atom) {
+    if (!JS_IsObject(obj)) return NULL;
+    GCValue val = JS_GetProperty(ctx, obj, atom);
+    if (!JS_IsString(val)) return NULL;
+    const char *s = JS_ToCString(ctx, val);
+    return s ? strdup(s) : NULL;
 }
 
 /* Elements whose script-only properties (value, a video's src, ...) live in
@@ -1382,7 +1396,7 @@ static void append_style_object(JSContextHandle ctx, GCValue style_obj, Serializ
             strcmp(key, "item") == 0 ||
             strcmp(key, "length") == 0 ||
             strcmp(key, "cssText") == 0) continue;
-        GCValue val = JS_GetPropertyStr(ctx, style_obj, key);
+        GCValue val = JS_GetProperty(ctx, style_obj, tab[i].atom);
         if (!JS_IsString(val)) continue;
         /* Engine paths (cssText, setProperty, inline style) store both the
          * kebab-case and the camelCase name; script writes go to camelCase
@@ -1698,6 +1712,7 @@ static void ser_element_attrs(JSContextHandle ctx, SerNode n, const char *tag_lo
          * state; elsewhere only own data properties can add anything, and
          * reading those skips the getters on the prototype chain. */
         bool own_only = n.id && !ser_has_native_props(tag_lower);
+        static HtmlAtom extra_atoms[sizeof(extra_attrs) / sizeof(extra_attrs[0])];
         for (int i = 0; extra_attrs[i].prop; i++) {
             bool has;
             if (n.id) {
@@ -1708,8 +1723,9 @@ static void ser_element_attrs(JSContextHandle ctx, SerNode n, const char *tag_lo
                     if (strcasecmp(loose_in->names[k], extra_attrs[i].attr) == 0) { has = true; break; }
             }
             if (has) continue;
-            char *value = own_only ? js_object_get_own_string(ctx, n.obj, extra_attrs[i].prop)
-                                   : js_object_get_string(ctx, n.obj, extra_attrs[i].prop);
+            JSAtom pa = html_atom(ctx, &extra_atoms[i], extra_attrs[i].prop);
+            char *value = own_only ? js_object_get_own_string_atom(ctx, n.obj, pa)
+                                   : js_object_get_string_atom(ctx, n.obj, pa);
             if (value && value[0]) sink(ud, extra_attrs[i].attr, value);
             free(value);
         }
@@ -2668,7 +2684,9 @@ static void mir_update_element(NodeId s, int m, bool in_svg) {
     if (!(f & DOMF_DIRTY_MASK) && !g_mir.full) return;
     char tag_lower[64];
     mir_tag_lower(s, tag_lower);
-    if ((f & DOMF_DIRTY_ATTR) || g_mir.full) {
+    /* (A full update re-reads what only JS objects hold: an element that
+     * has no wrapper has nothing but its attributes, which are tracked.) */
+    if ((f & DOMF_DIRTY_ATTR) || (g_mir.full && g_dom.wrapper[dom_slot(s)])) {
         if (mir_read_attrs(s, m, tag_lower, in_svg)) g_mir.changed = true;
     }
     if (html_is_self_closing_tag(tag_lower)) return;

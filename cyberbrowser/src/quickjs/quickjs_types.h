@@ -854,6 +854,7 @@ static inline void gc_data_array_clear_and_free(GCDataArray *arr)
 
 struct JSContext {
     GCHandle rt_handle;  /* Handle to JSRuntime - must use gc_deref to access */
+    uint32_t serial;     /* unique per context made (JS_GetContextSerial) */
     /* Note: contexts are tracked via GC type bucket, not intrusive list */
 
     uint16_t binary_object_count;
