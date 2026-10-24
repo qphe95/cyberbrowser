@@ -590,6 +590,12 @@ void css_layout_install_prefetched_sheets(void);
 /* Access the resolved LayoutBox for a DOM node index, or NULL if not found. */
 LayoutBox* css_layout_box_for_node(LayoutContext *ctx, int dom_node_idx);
 
+/* Layout benchmark (CYBER_LAYOUT_BENCH): while recording, each layout's
+ * time per phase is kept; the report prints each phase's median and mean
+ * over the layouts recorded (and resets). */
+void css_layout_bench_record(bool on);
+void css_layout_bench_report(const char *label);
+
 #ifdef __cplusplus
 }
 #endif

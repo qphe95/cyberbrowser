@@ -63,9 +63,75 @@ static LayoutPar g_lpar;
 /* CSS_LOG=1: per-stage times on stderr. */
 static int g_css_log = -1;
 static double layout_now_ms(void) { return (double)gc_os_now_ns() / 1e6; }
+/* Layout benchmark: per-layout phase times while recording. */
+#define LPH_MAX 40
+static struct { const char *name; double *v; int n, cap; double cur; } g_lph[LPH_MAX];
+static int g_lph_n;
+static bool g_lph_on;
+static void lph_note(const char *name, double ms)
+{
+    int i;
+    for (i = 0; i < g_lph_n; i++) if (g_lph[i].name == name || strcmp(g_lph[i].name, name) == 0) break;
+    if (i == g_lph_n) {
+        if (g_lph_n == LPH_MAX) return;
+        g_lph[g_lph_n++].name = name;
+    }
+    g_lph[i].cur += ms;
+}
+/* The end of one layout: its phase times become samples. */
+static void lph_flush(double total_ms)
+{
+    lph_note("(total)", total_ms);
+    for (int i = 0; i < g_lph_n; i++) {
+        if (g_lph[i].n == g_lph[i].cap) {
+            int nc = g_lph[i].cap ? g_lph[i].cap * 2 : 256;
+            double *nv = (double *)realloc(g_lph[i].v, (size_t)nc * sizeof(double));
+            if (!nv) continue;
+            g_lph[i].v = nv;
+            g_lph[i].cap = nc;
+        }
+        g_lph[i].v[g_lph[i].n++] = g_lph[i].cur;
+        g_lph[i].cur = 0.0;
+    }
+}
+static int lph_cmp(const void *a, const void *b)
+{
+    double x = *(const double *)a, y = *(const double *)b;
+    return x < y ? -1 : x > y;
+}
+void css_layout_bench_record(bool on)
+{
+    g_lph_on = on;
+}
+void css_layout_bench_report(const char *label)
+{
+    int layouts = 0;
+    for (int i = 0; i < g_lph_n; i++) if (g_lph[i].n > layouts) layouts = g_lph[i].n;
+    fprintf(stderr, "[layout-bench] %s: %d layouts\n", label, layouts);
+    for (int i = 0; i < g_lph_n; i++) {
+        /* (a phase first seen after some layouts: the earlier ones had none) */
+        int n = g_lph[i].n;
+        if (!n) continue;
+        double sum = 0.0;
+        for (int k = 0; k < n; k++) sum += g_lph[i].v[k];
+        qsort(g_lph[i].v, (size_t)n, sizeof(double), lph_cmp);
+        fprintf(stderr, "[layout-bench] %s: %-28s median %8.3f ms  mean %8.3f ms\n", label, g_lph[i].name,
+                layouts > n ? 0.0 : g_lph[i].v[n / 2], sum / (layouts ? layouts : 1));
+    }
+    for (int i = 0; i < g_lph_n; i++) {
+        free(g_lph[i].v);
+        g_lph[i].v = NULL;
+        g_lph[i].n = g_lph[i].cap = 0;
+        g_lph[i].cur = 0.0;
+    }
+    g_lph_n = 0;
+}
+
 #define STAGE_BEGIN() double _st_t = layout_now_ms()
-#define STAGE(name) do { if (g_css_log > 0) { double _n = layout_now_ms(); \
-    fprintf(stderr, "[css] %-22s %8.3f ms\n", name, _n - _st_t); _st_t = _n; } } while (0)
+#define STAGE(name) do { if (g_css_log > 0 || g_lph_on) { double _n = layout_now_ms(); \
+    if (g_lph_on) lph_note(name, _n - _st_t); \
+    if (g_css_log > 0) fprintf(stderr, "[css] %-22s %8.3f ms\n", name, _n - _st_t); \
+    _st_t = _n; } } while (0)
 
 #define LOG_TAG "css_layout"
 #define LOG_INFO(...) platform_log(LOG_LEVEL_INFO, LOG_TAG, __VA_ARGS__)
@@ -10680,7 +10746,7 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
 bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
                     double viewport_width, double viewport_height)
 {
-    double _run_t0 = layout_now_ms();
+    double _run_t0 = layout_now_ms(), lph_tree_prev = 0.0;
     JSContextHandle saved_js_ctx = ctx->js_ctx;
     const char *saved_dump_path = ctx->dump_path;
     bool saved_style_all = ctx->style_all, saved_serial = ctx->serial, saved_readonly = ctx->cache_readonly;
@@ -10706,6 +10772,7 @@ again:
     layout_origin_base(ctx->base_url, sizeof(ctx->base_url));
     if (g_css_log < 0) { const char *e = getenv("CSS_LOG"); g_css_log = e ? atoi(e) : 0; }
     if (g_css_log > 0) fprintf(stderr, "[css] tree build + setup  %8.3f ms\n", layout_now_ms() - _run_t0);
+    if (g_lph_on) lph_note("tree build + setup", layout_now_ms() - _run_t0 - lph_tree_prev);
     bool ok = css_layout_document(ctx, sheet);
     if (!ok && ctx->prune_failed && prune) {
         /* The attempt brought what the guesses depend on up to date: a guess
@@ -10715,9 +10782,12 @@ again:
          * at once when the attempt stored nothing (cache_readonly), in full. */
         css_layout_tree_free(ctx);
         if (saved_readonly || ++prune_retries > 2) prune = false;
+        /* (the retry's tree build is timed from here) */
+        lph_tree_prev = layout_now_ms() - _run_t0;
         goto again;
     }
     if (!ok) css_layout_tree_free(ctx);
+    if (g_lph_on) lph_flush(layout_now_ms() - _run_t0);
     return ok;
 }
 

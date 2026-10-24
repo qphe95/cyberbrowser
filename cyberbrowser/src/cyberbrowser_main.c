@@ -2129,6 +2129,53 @@ int main(int argc, char *argv[]) {
                (unsigned long long)fs.queued, (unsigned long long)fs.hits, (unsigned long long)fs.waits,
                fs.wait_ms, (unsigned long long)fs.sync_fetches);
     }
+    /* CYBER_LAYOUT_BENCH=<n>: after the load, n rounds of each scenario (a
+     * DOM change, then a query of the changed element, as scripts do), with
+     * each layout's phase times; the scenarios mimic what pages do between
+     * frames and while scrolling (appending items to a list). */
+    {
+        const char *bn = getenv("CYBER_LAYOUT_BENCH");
+        int n = bn ? atoi(bn) : 0;
+        if (n > 0) {
+            /* A visible list the benchmark makes at the top of the body (30
+             * items), so each change is laid out and asked about. */
+            static const char *setup =
+                "(function(){var r=document.createElement('div');r.id='layout-bench';"
+                "r.style.cssText='display:block;width:600px';"
+                "for(var i=0;i<30;i++){var d=document.createElement('div');d.className='bench-item';"
+                "d.textContent='Bench item '+i+' with some text to wrap across a line or two';r.appendChild(d);}"
+                "document.body.insertBefore(r,document.body.firstChild);void r.offsetHeight;})();";
+            static const struct { const char *label, *js; } scen[] = {
+                { "append (infinite scroll)",
+                  "(function(n){var r=document.getElementById('layout-bench');var made=[];"
+                  "for(var i=0;i<n;i++){var d=document.createElement('div');d.className='bench-item';"
+                  "d.textContent='Appended item '+i+' with some text';r.appendChild(d);made.push(d);void d.offsetHeight;}"
+                  "for(var k=0;k<made.length;k++)made[k].remove();void r.offsetHeight;})" },
+                { "inline style change",
+                  "(function(n){var r=document.getElementById('layout-bench');"
+                  "for(var i=0;i<n;i++){var el=r.children[i%r.children.length];el.style.paddingTop=(1+i%3)+'px';void el.offsetHeight;}})" },
+                { "text change",
+                  "(function(n){var r=document.getElementById('layout-bench');"
+                  "for(var i=0;i<n;i++){var el=r.children[i%r.children.length];el.textContent='Changed item '+i+(i%2?' with a longer text that wraps':'');void el.offsetWidth;}})" },
+            };
+            {
+                GCValue r = JS_Eval(g_ctx, setup, strlen(setup), "<layout-bench>", JS_EVAL_TYPE_GLOBAL);
+                if (JS_IsException(r)) JS_GetException(g_ctx);
+            }
+            for (size_t k = 0; k < sizeof(scen) / sizeof(scen[0]); k++) {
+                char js[2048];
+                snprintf(js, sizeof(js), "%s(%d);", scen[k].js, n);
+                css_layout_bench_record(true);
+                double t0 = (double)platform_get_time_ms();
+                GCValue r = JS_Eval(g_ctx, js, strlen(js), "<layout-bench>", JS_EVAL_TYPE_GLOBAL);
+                double t1 = (double)platform_get_time_ms();
+                css_layout_bench_record(false);
+                if (JS_IsException(r)) JS_GetException(g_ctx);
+                fprintf(stderr, "[layout-bench] %s: %d rounds in %.0f ms\n", scen[k].label, n, t1 - t0);
+                css_layout_bench_report(scen[k].label);
+            }
+        }
+    }
     printf("\nStart page loaded successfully.\n");
 
     CP_END("load-page");
