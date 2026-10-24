@@ -623,6 +623,19 @@ uint32_t gc_count_objects_of_type(JSGCObjectTypeEnum type);
 bool gc_add_root(GCHandle handle);
 void gc_remove_root(GCHandle handle);
 
+/* Debug guard (CYBER_GC_FORBID_CHECK=1): a stencil compile
+ * (PARALLEL_PARSE_DESIGN.md 5.2) must not use the GC heap, the atom table
+ * or exceptions.  While gc_forbid_enter() is in effect on a thread, those
+ * abort with the name of what was used.  Off, the check is one load. */
+extern bool g_gc_forbid_checking;
+void gc_forbid_enter(void);
+void gc_forbid_leave(void);
+void gc_forbid_check_slow(const char *what);
+static inline void gc_forbid_check(const char *what) {
+    if (__builtin_expect(g_gc_forbid_checking, 0))
+        gc_forbid_check_slow(what);
+}
+
 /* ============================================================================
  * Collection
  * ============================================================================ */

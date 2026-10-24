@@ -953,7 +953,35 @@ static void __attribute__((noinline)) aprof_note(JSGCObjectTypeEnum type, size_t
     g_aprof_since = 0;
 }
 
+bool g_gc_forbid_checking;
+static _Thread_local int gc_tl_forbid;
+
+void gc_forbid_enter(void) {
+    static int init = -1;
+    if (init < 0) {
+        init = getenv("CYBER_GC_FORBID_CHECK") != NULL;
+        if (init)
+            g_gc_forbid_checking = true;
+    }
+    if (g_gc_forbid_checking)
+        gc_tl_forbid++;
+}
+
+void gc_forbid_leave(void) {
+    if (g_gc_forbid_checking)
+        gc_tl_forbid--;
+}
+
+void gc_forbid_check_slow(const char *what) {
+    if (gc_tl_forbid) {
+        fprintf(stderr, "[gc-forbid] %s during a stencil compile\n", what);
+        fflush(stderr);
+        abort();
+    }
+}
+
 static GCHandle gc_alloc_in(size_t size, JSGCObjectTypeEnum type, bool old, bool permanent) {
+    gc_forbid_check("gc allocation");
     if (!g_gc.initialized && !gc_init()) return GC_HANDLE_NULL;
     bool young = !old && !permanent && g_core.nursery_enabled;
     GCAllocCtx *a = permanent ? &g_core.js_perm : young ? &g_core.js_young : &g_core.js_old;
@@ -1272,12 +1300,14 @@ GCFinalizerFunc *gc_get_handle_finalizer(GCHandle handle) {
 }
 
 bool gc_add_root(GCHandle handle) {
+    gc_forbid_check("gc_add_root");
     if (handle == GC_HANDLE_NULL) return true;
     gc_core_registry_add(&g_core.roots, handle);
     return true;
 }
 
 void gc_remove_root(GCHandle handle) {
+    gc_forbid_check("gc_remove_root");
     /* From the end: roots are mostly removed in the reverse order they were
      * added (the parser's scoped pairs), so the match is near the top. */
     for (uint32_t i = g_core.roots.count; i-- > 0;) {

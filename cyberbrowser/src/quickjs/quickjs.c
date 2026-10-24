@@ -3551,6 +3551,8 @@ JSAtom JS_NewAtomLen(JSContextHandle ctx, const char *str, size_t len)
     GCValue val = GC_UNDEFINED;
     JSRuntimeHandle rt = ctx_rt;
 
+    gc_forbid_check("JS_NewAtomLen");
+
     /* Validate atom_array before use */
     if (js_rt_atom_array_handle(rt) == GC_HANDLE_NULL) {
         QJS_LOGD("JS_NewAtomLen: atom_array is NULL!");
@@ -8888,6 +8890,7 @@ static GCValue JS_ThrowError2(JSContextHandle ctx, JSErrorEnum error_num,
     GCValue obj = GC_UNDEFINED, ret = GC_UNDEFINED;
     int proto_idx = -1;
 
+    gc_forbid_check("an exception");
     vsnprintf(buf, sizeof(buf), fmt, ap);
     /* Map JSErrorEnum to native_error_proto index */
     switch(error_num) {
@@ -14243,6 +14246,10 @@ static GCValue JS_CompactBigInt(JSContextHandle ctx, JSBigIntHandle p)
 #define ATOD_TYPE_BIG_INT     (1 << 7)
 /* accept -0x1 */
 #define ATOD_ACCEPT_PREFIX_AFTER_SIGN (1 << 10)
+/* no GC memory (a stencil compile): a BigInt literal that fits in int32 is
+   its short BigInt, a larger one a marker (JS_TAG_BIG_INT, no object): the
+   compiler reads its source again when it makes the constant */
+#define ATOD_NO_GC (1 << 11)
 
 /* return an exception in case of memory error. Return JS_NAN if
    invalid syntax */
@@ -14366,8 +14373,7 @@ static GCValue js_atof(JSContextHandle ctx, const char *str, const char **pp,
     buf_allocated = FALSE;
     len = p - p_start;
     if (unlikely((len + 2) > sizeof(buf1))) {
-        GCStringHandle buf_handle = gc_alloc(len + 2, JS_GC_OBJ_TYPE_DATA);
-        buf = ((char *)gc_deref(buf_handle));
+        buf = (char *)js_plain_realloc(NULL, len + 2);
         if (!buf)
             goto mem_error;
         buf_allocated = TRUE;
@@ -14412,6 +14418,18 @@ static GCValue js_atof(JSContextHandle ctx, const char *str, const char **pp,
             JSBigIntHandle r = GC_HANDLE_NULL;
             if (has_legacy_octal || is_float)
                 goto fail;
+            if (flags & ATOD_NO_GC) {
+                uint64_t v = 0;
+                const char *q;
+                BOOL big = FALSE;
+                for (q = buf; *q && !big; q++) {
+                    int d = *q >= 'a' ? *q - 'a' + 10 : *q >= 'A' ? *q - 'A' + 10 : *q - '0';
+                    v = v * radix + d;
+                    big = v > INT32_MAX;
+                }
+                val = big ? GC_MKHANDLE(JS_TAG_BIG_INT, GC_HANDLE_NULL) : __JS_NewShortBigInt(ctx, (int64_t)v);
+                break;
+            }
             r = js_bigint_from_string(ctx, buf, radix);
             if (!SAFE_VALID(r)) {
                 val = JS_EXCEPTION;
@@ -14426,7 +14444,7 @@ static GCValue js_atof(JSContextHandle ctx, const char *str, const char **pp,
 
 done:
     if (buf_allocated)
-        /* GC frees */;
+        js_plain_free(buf);
     if (pp)
         *pp = p;
     return val;
@@ -24673,6 +24691,9 @@ typedef struct CompileEnv {
     BOOL has_error;
     int error_type, error_line, error_col;
     char error_msg[256];
+    /* the lowest stack address a compile on this env may use (a worker's),
+       0 for the runtime's limit (the JS thread) */
+    uintptr_t stack_limit;
 } CompileEnv;
 
 /* A string the tokenizer made, in plain memory owned by the parse state
@@ -24706,7 +24727,7 @@ typedef struct CConst {
     int first, n;
 } CConst;
 
-static uint8_t *js_compile_regexp_cstr(JSContextHandle ctx, const CStr *body,
+static uint8_t *js_compile_regexp_cstr(CompileEnv *env, const CStr *body,
                                        const CStr *flags, int *plen);
 
 typedef struct JSFunctionDef {
@@ -25001,7 +25022,7 @@ static inline void js_parse_set_cur_func(JSParseState *s, JSFunctionDefHandle ne
  * memory, which the collector does not see. */
 static void js_parse_hold(JSParseState *s, GCHandle h)
 {
-    if (h == GC_HANDLE_NULL || h == s->held_last)
+    if (h == GC_HANDLE_NULL || h == s->held_last || s->env->stencil)
         return;
     if (!pvec_push(&s->held, sizeof(GCHandle), &h))
         return;
@@ -25424,6 +25445,17 @@ static JSAtom cenv_atom_from_utf8(CompileEnv *env, const char *str, size_t len)
     return JS_ATOM_NULL;
 }
 
+/* js_check_stack_overflow for the compiler. */
+static BOOL cenv_stack_overflow(CompileEnv *env)
+{
+    if (env->stack_limit)
+        return js_get_stack_pointer() < env->stack_limit;
+    {
+        JSContextHandle ctx = env->ctx;
+        return js_check_stack_overflow(ctx_rt, 0);
+    }
+}
+
 /* JS_NewAtomLen: an identifier or name in UTF-8. */
 static JSAtom cenv_atom(CompileEnv *env, const char *str, size_t len)
 {
@@ -25461,6 +25493,21 @@ static JSAtom cenv_atom_number(CompileEnv *env, GCValue val)
         return JS_ValueToAtom(env->ctx, val);
     if (JS_VALUE_GET_TAG(val) == JS_TAG_INT && (uint32_t)JS_VALUE_GET_INT(val) <= JS_ATOM_MAX_INT)
         return __JS_AtomFromUInt32(JS_VALUE_GET_INT(val));
+    /* the number's text, as JS_ToString makes it */
+    if (JS_VALUE_GET_TAG(val) == JS_TAG_INT) {
+        char buf[16];
+        size_t len = i32toa(buf, JS_VALUE_GET_INT(val));
+        return cenv_atom_from_utf8(env, buf, len);
+    }
+    if (JS_VALUE_GET_TAG(val) == JS_TAG_FLOAT64) {
+        char buf[128];
+        JSDTOATempMem dtoa_mem;
+        double d = JS_VALUE_GET_FLOAT64(val);
+        if (js_dtoa_max_len(d, 10, 0, JS_DTOA_FORMAT_FREE) < (int)sizeof(buf)) {
+            int len = js_dtoa(buf, d, 10, 0, JS_DTOA_FORMAT_FREE, &dtoa_mem);
+            return cenv_atom_from_utf8(env, buf, len);
+        }
+    }
     return cenv_unsupported(env, "number property name");
 }
 
@@ -26537,7 +26584,7 @@ static __exception int next_token(JSParseState *s)
     BOOL ident_has_escape;
     JSAtom atom;
 
-    if (js_check_stack_overflow((JSRuntimeHandle)(SAFE_GET_OR(s->ctx, JSContextHandle, rt_handle, GC_HANDLE_NULL)), 0)) {
+    if (cenv_stack_overflow(s->env)) {
         return js_parse_error(s, "stack overflow");
     }
 
@@ -26738,6 +26785,8 @@ static __exception int next_token(JSParseState *s)
             int flags;
             flags = ATOD_ACCEPT_BIN_OCT | ATOD_ACCEPT_LEGACY_OCTAL |
                 ATOD_ACCEPT_UNDERSCORES | ATOD_ACCEPT_SUFFIX;
+            if (s->env->stencil)
+                flags |= ATOD_NO_GC;
             ret = js_atof(s->ctx, (const char *)p, (const char **)&p, 0,
                           flags);
             if (JS_IsException(ret))
@@ -27200,7 +27249,7 @@ static __exception int json_next_token(JSParseState *s)
     int c;
     JSAtom atom;
 
-    if (js_check_stack_overflow((JSRuntimeHandle)(SAFE_GET_OR(s->ctx, JSContextHandle, rt_handle, GC_HANDLE_NULL)), 0)) {
+    if (cenv_stack_overflow(s->env)) {
         return js_parse_error(s, "stack overflow");
     }
 
@@ -27922,7 +27971,7 @@ static __exception int emit_push_atom_value(JSParseState *s, JSAtom atom)
 static __exception int emit_push_number(JSParseState *s, GCValue val)
 {
     CConst cc = { .kind = CC_VALUE, .v = val };
-    if (JS_VALUE_GET_TAG(val) == JS_TAG_BIG_INT) {
+    if (JS_VALUE_GET_TAG(val) == JS_TAG_BIG_INT || JS_VALUE_GET_TAG(val) == JS_TAG_SHORT_BIG_INT) {
         cc.kind = CC_BIGINT_SRC;
         cc.v = JS_UNDEFINED;
         cc.str.data = s->token.ptr;
@@ -32063,7 +32112,7 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
                 return -1;
             {
                 int bc_len;
-                uint8_t *bc = js_compile_regexp_cstr(s->ctx, &s->token.u.regexp.cbody,
+                uint8_t *bc = js_compile_regexp_cstr(s->env, &s->token.u.regexp.cbody,
                                                      &s->token.u.regexp.cflags, &bc_len);
                 CConst cc = { .kind = CC_BYTES };
                 if (bc && !pvec_push(&s->owned, sizeof(void *), &bc)) {
@@ -32079,6 +32128,13 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
                 /* add the line number info */
                 int line_num, col_num;
                 line_num = get_line_col(&col_num, s->buf_start, s->token.ptr - s->buf_start);
+                if (s->env->stencil) {
+                    if (!s->env->error_line) {
+                        s->env->error_line = line_num + 1;
+                        s->env->error_col = col_num + 1;
+                    }
+                    return -1;
+                }
                 build_backtrace(s->ctx, SAFE_GET_OR(SAFE_GET_OR(s->ctx, JSContextHandle, rt_handle, GC_HANDLE_NULL), JSRuntimeHandle, current_exception, GC_UNDEFINED),
                                 s->filename, line_num + 1, col_num + 1, 0);
                 return -1;
@@ -54862,10 +54918,12 @@ static int js_regexp_parse_flags(const char *str, size_t len)
 /* lre_realloc's memory on this thread: plain while the compiler compiles a
  * regexp literal (its bytecode goes into the constant pool), else GC. */
 static _Thread_local int lre_plain_alloc;
+/* the env of a regexp literal being compiled (its stack check) */
+static _Thread_local CompileEnv *lre_stack_env;
 
 /* A regexp literal of the source, compiled in plain memory: the bytecode
  * (js_plain_free it), or NULL with the error thrown. */
-static uint8_t *js_compile_regexp_cstr(JSContextHandle ctx, const CStr *body,
+static uint8_t *js_compile_regexp_cstr(CompileEnv *env, const CStr *body,
                                        const CStr *flags, int *plen)
 {
     char fbuf[16], error_msg[64];
@@ -54885,14 +54943,14 @@ static uint8_t *js_compile_regexp_cstr(JSContextHandle ctx, const CStr *body,
     re_flags = js_regexp_parse_flags(fbuf, flags->len);
     if (re_flags < 0) {
     bad_flags:
-        JS_ThrowSyntaxError(ctx, "invalid regular expression flags");
+        cenv_throw(env, JS_SYNTAX_ERROR, "invalid regular expression flags");
         return NULL;
     }
 
     /* the pattern in UTF-8 (CESU-8 unless unicode), as JS_ToCStringLen2 */
     str = (char *)js_plain_realloc(NULL, (size_t)body->len * 3 + 1);
     if (!str) {
-        JS_ThrowOutOfMemory(ctx);
+        cenv_throw_oom(env);
         return NULL;
     }
     if (!body->wide) {
@@ -54924,12 +54982,13 @@ static uint8_t *js_compile_regexp_cstr(JSContextHandle ctx, const CStr *body,
     str[len] = '\0';
 
     lre_plain_alloc++;
-    bc = lre_compile(plen, error_msg, sizeof(error_msg), str, len, re_flags,
-                     (void*)(uintptr_t)(uint32_t)SAFE_HANDLE(ctx));  /* for the stack check */
+    lre_stack_env = env;
+    bc = lre_compile(plen, error_msg, sizeof(error_msg), str, len, re_flags, NULL);
+    lre_stack_env = NULL;
     lre_plain_alloc--;
     js_plain_free(str);
     if (!bc)
-        JS_ThrowSyntaxError(ctx, "%s", error_msg);
+        cenv_throw(env, JS_SYNTAX_ERROR, "%s", error_msg);
     return bc;
 }
 
@@ -55400,6 +55459,8 @@ fail:
 int lre_check_stack_overflow(void *opaque, size_t alloca_size)
 {
     JSContextHandle ctx = (GCHandle)(uintptr_t)opaque;
+    if (lre_stack_env)
+        return cenv_stack_overflow(lre_stack_env);
     return js_check_stack_overflow(ctx_rt, alloca_size);
 }
 
