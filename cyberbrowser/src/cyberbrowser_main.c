@@ -282,6 +282,7 @@ static bool init_browser_context(void) {
     extern JSContextHandle g_js_context;
     g_js_runtime = g_rt;
     g_js_context = g_ctx;
+    JS_EnableScriptPrecompile(g_ctx);
 
     init_browser_api_impl(g_ctx, g_global);
     js_quickjs_setup_initial_dom();

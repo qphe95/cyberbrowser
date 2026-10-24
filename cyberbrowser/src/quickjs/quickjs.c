@@ -100,6 +100,7 @@ static inline void gc_assert_initialized(void) {
 #include "libunicode.h"
 #include "js_struct_index.h"
 #include "gc_platform.h"
+#include <pthread.h>
 
 /* forward declaration - function defined in js_quickjs.c */
 void js_quickjs_on_global_var_defined(JSContextHandle ctx, JSAtom var_name);
@@ -725,6 +726,9 @@ static GCValue js_trigger_lazy_function(JSContextHandle ctx, GCValue lazy_func,
                                         int argc, GCValue *argv, int flags);
 static int js_lazy_ensure_compiled(JSObjectHandle p);
 static void lazy_units_quiesce(void);
+struct LazyUnit;
+static void lazy_unit_attach(JSContextHandle ctx, struct LazyUnit *u, JSFunctionBytecodeHandle stub_b);
+static void lazy_unit_drop(struct LazyUnit *u);
 static GCValue js_resume_lazy_parse(JSContextHandle ctx,
                                     JSFunctionBytecodeHandle lazy_b,
                                     GCValue lazy_func,
@@ -24678,6 +24682,9 @@ typedef struct CEnvName {
 } CEnvName;
 
 #define CENV_LOCAL_ATOM_BASE ((JSAtom)JS_ATOM_END)
+/* The source of a script stencil (the JS thread's GC copy, given at
+ * instantiation: env->src_real). */
+#define CENV_SRC_PLACEHOLDER ((GCHandle)0xFFFFFFF0u)
 
 /* What the compiler needs from outside it (atoms, errors): see cenv_init_*. */
 typedef struct CompileEnv {
@@ -24698,6 +24705,7 @@ typedef struct CompileEnv {
     /* the lowest stack address a compile on this env may use (a worker's),
        0 for the runtime's limit (the JS thread) */
     uintptr_t stack_limit;
+    GCHandle src_real;      /* instantiation: what CENV_SRC_PLACEHOLDER stands for */
 } CompileEnv;
 
 /* A string the tokenizer made, in plain memory owned by the parse state
@@ -29976,6 +29984,8 @@ static GCHandle js_parse_source_root(JSParseState *s)
     }
     if (root == GC_HANDLE_NULL)
         return GC_HANDLE_NULL;
+    if (root == CENV_SRC_PLACEHOLDER)
+        return root;   /* a script stencil's: the buffer being parsed */
     {
         /* the root copy must be the buffer being parsed (O(1) check: the
            copy is NUL-terminated right after the input) */
@@ -37834,6 +37844,11 @@ static void js_free_function_def(JSContextHandle ctx, JSFunctionDef *fd)
 {
     int i;
 
+    if (fd->resume_parse_state.unit) {
+        lazy_unit_drop(fd->resume_parse_state.unit);
+        fd->resume_parse_state.unit = NULL;
+    }
+
     /* out of the parent's list (a function whose parse failed is freed
        before its parent) */
     if (fd->parent_handle && fd->link_idx >= 0 &&
@@ -42156,7 +42171,7 @@ static void cconst_release(JSFunctionDef *fd)
     pvec_free(&fd->tmpl_strs);
 }
 
-static uint64_t g_lq_stats_remap_ns;
+static uint64_t g_lq_stats_remap_ns, g_remap_names;
 
 /* The runtime atom of a stencil env's atom, made once per name. */
 static JSAtom cenv_atom_to_runtime_cached(CompileEnv *env, JSContextHandle ctx, JSAtom a)
@@ -42173,8 +42188,10 @@ static JSAtom cenv_atom_to_runtime_cached(CompileEnv *env, JSContextHandle ctx, 
         env->rt_atoms = t;
         env->rt_atoms_n = n;
     }
-    if (!env->rt_atoms[i])
+    if (!env->rt_atoms[i]) {
         env->rt_atoms[i] = cenv_atom_to_runtime(env, ctx, a);
+        g_remap_names++;
+    }
     return env->rt_atoms[i];
 }
 
@@ -42210,6 +42227,10 @@ static int cenv_remap_function(CompileEnv *env, JSContextHandle ctx, JSFunctionD
     } while (0)
     CENV_REMAP(fd->func_name);
     CENV_REMAP(fd->filename);
+    if (fd->source_string_handle == CENV_SRC_PLACEHOLDER)
+        fd->source_string_handle = env->src_real;
+    if (fd->resume_parse_state.source_handle == CENV_SRC_PLACEHOLDER)
+        fd->resume_parse_state.source_handle = env->src_real;
     for (i = 0; i < fd->arg_count; i++)
         CENV_REMAP(fd->args_handle[i].var_name);
     for (i = 0; i < fd->var_count; i++)
@@ -42565,6 +42586,11 @@ static GCValue js_instantiate_function(JSContextHandle ctx, JSFunctionDef *fd)
             JSLazyParseState* state = js_bc_resume_parse_state(b);
             if (state) {
                 gc_memcpy(state, &fd->resume_parse_state, sizeof(JSLazyParseState));
+                if (fd->resume_parse_state.unit) {
+                    /* the stub owns its unit now */
+                    lazy_unit_attach(ctx, fd->resume_parse_state.unit, b);
+                    fd->resume_parse_state.unit = NULL;
+                }
                 if (fd->lazy_arg_names) {
                     GCHandle names_handle = gc_alloc(sizeof(JSAtom) * fd->resume_parse_state.arg_count, JS_GC_OBJ_TYPE_DATA);
                     if (names_handle == GC_HANDLE_NULL)
@@ -44172,7 +44198,7 @@ typedef struct StencilVerify {
 } StencilVerify;
 
 static struct { int scripts, same, failed, differ, inst_same, inst_failed, inst_differ,
-                lazy_same, lazy_failed, lazy_differ; } g_stencil_verify;
+                lazy_same, lazy_failed, lazy_differ, pre_same, pre_differ; } g_stencil_verify;
 
 static void stencil_verify_report(void)
 {
@@ -44183,6 +44209,8 @@ static void stencil_verify_report(void)
             g_stencil_verify.inst_same, g_stencil_verify.inst_failed, g_stencil_verify.inst_differ);
     fprintf(stderr, "[stencil-verify] lazy units: same %d, failed %d, differ %d\n",
             g_stencil_verify.lazy_same, g_stencil_verify.lazy_failed, g_stencil_verify.lazy_differ);
+    fprintf(stderr, "[stencil-verify] precompiled scripts: same %d, differ %d\n",
+            g_stencil_verify.pre_same, g_stencil_verify.pre_differ);
 }
 
 /* r is a runtime atom, l the stencil env's. */
@@ -44485,6 +44513,21 @@ typedef struct LazyUnitOut {
     int cpool_idx;
 } LazyUnitOut;
 
+/* The bytes of a script stencil's source, shared with its units. */
+typedef struct SharedSrc {
+    _Atomic int refs;
+    uint8_t *bytes;     /* malloc()ed by the scanner */
+    size_t len;
+} SharedSrc;
+
+static void shared_src_unref(SharedSrc *ss)
+{
+    if (ss && atomic_fetch_sub_explicit(&ss->refs, 1, memory_order_acq_rel) == 1) {
+        js_plain_free(ss->bytes);
+        js_plain_free(ss);
+    }
+}
+
 typedef struct LazyUnit {
     _Atomic uint32_t state;
     _Atomic int refs;
@@ -44503,6 +44546,11 @@ typedef struct LazyUnit {
     JSAtom *args;                 /* the unit env's */
     JSAtom func_name;
     CompileEnv env;
+    /* a unit a worker made from a script stencil: it reads the stencil's
+       copy of the source, and its stub's source handle and filename are
+       known once the stencil is instantiated (attached) */
+    SharedSrc *shared;
+    uint8_t precompiled, attached;
     /* output */
     LazyUnitOut *out;
 } LazyUnit;
@@ -44616,6 +44664,7 @@ static void lazy_unit_free(LazyUnit *u)
     js_plain_free(u->args);
     if (u->src)
         lazy_src_release(u->src);
+    shared_src_unref(u->shared);
     js_plain_free(u);
 }
 
@@ -44630,8 +44679,10 @@ static void lazy_unit_unref(LazyUnit *u, BOOL on_js)
     if (atomic_fetch_sub_explicit(&u->refs, 1, memory_order_acq_rel) != 1)
         return;
     if (on_js) {
-        g_lazy_units_bytes -= u->st.source_len;
-        g_lazy_units_alive--;
+        if (!u->precompiled || u->attached) {
+            g_lazy_units_bytes -= u->st.source_len;
+            g_lazy_units_alive--;
+        }
         lazy_unit_free(u);
         return;
     }
@@ -44650,8 +44701,10 @@ static void lazy_units_reap(void)
     LazyUnit *u = atomic_exchange_explicit(&g_lazy_dead, NULL, memory_order_acquire);
     while (u) {
         LazyUnit *next = u->next_dead;
-        g_lazy_units_bytes -= u->st.source_len;
-        g_lazy_units_alive--;
+        if (!u->precompiled || u->attached) {
+            g_lazy_units_bytes -= u->st.source_len;
+            g_lazy_units_alive--;
+        }
         lazy_unit_free(u);
         u = next;
     }
@@ -44772,7 +44825,7 @@ static int lazy_unit_compile(LazyUnit *u)
     proxy->js_mode = strict ? JS_MODE_STRICT : 0;
     proxy->func_name = JS_ATOM__eval_;
     /* nested lazy functions of the body find the root source here */
-    GC_SET(proxy->source_string_handle, u->src);
+    GC_SET(proxy->source_string_handle, u->precompiled ? CENV_SRC_PLACEHOLDER : u->src);
     for (i = 0; i < u->nstub; i++) {
         const LazyUnitCV *cv = &u->cvs[i];
         int t = cv->closure_type;
@@ -44845,7 +44898,7 @@ static int lazy_unit_compile(LazyUnit *u)
             goto fail;
     }
     if (!fd->strip_source) {
-        GC_SET(fd->source_string_handle, u->src);
+        GC_SET(fd->source_string_handle, u->precompiled ? CENV_SRC_PLACEHOLDER : u->src);
         fd->source_offset = state->func_source_offset;
         fd->source_len = state->func_source_len;
     }
@@ -44947,11 +45000,15 @@ static BOOL lq_push_batch(LazyUnit **units, uint32_t n)
     atomic_init(&b->cursor, 0);
     memcpy(b->units, units, n * sizeof(LazyUnit *));
     b->next = atomic_load_explicit(&g_lq_top, memory_order_relaxed);
-    atomic_store_explicit(&g_lq_top, b, memory_order_release);
+    while (!atomic_compare_exchange_weak_explicit(&g_lq_top, &b->next, b,
+                                                  memory_order_release, memory_order_relaxed))
+        ;
     atomic_fetch_add_explicit(&g_lq_wake, 1, memory_order_release);
     gc_os_wake_all((volatile uint32_t *)&g_lq_wake);
     return TRUE;
 }
+
+static BOOL ss_work(uintptr_t stack_limit);
 
 static void lq_worker(void *arg)
 {
@@ -44959,7 +45016,10 @@ static void lq_worker(void *arg)
     (void)arg;
     for (;;) {
         uint32_t seen = atomic_load_explicit(&g_lq_wake, memory_order_acquire);
-        LazyUnit *u = lq_pop();
+        LazyUnit *u;
+        if (ss_work(limit))
+            continue;
+        u = lq_pop();
         if (!u) {
             gc_os_wait((volatile uint32_t *)&g_lq_wake, seen, 100);
             continue;
@@ -44998,22 +45058,38 @@ static void lq_report(void)
     fprintf(stderr, "[parse-stats] compile workers %d: units %llu (%.1f ms to make on the JS thread), "
             "compiled %llu (%.1f ms of worker time), failed %llu; on call: instantiated %llu (%.1f ms), "
             "taken over %llu, waited %llu (%.1f ms; their compiles %.1f ms, %.1f ms of it done when called), "
-            "serial %llu; atom remap %.1f ms\n",
+            "serial %llu; atom remap %.1f ms (%llu names made)\n",
             g_lq_nthreads, (unsigned long long)g_lq_stats.units, g_lq_stats.spawn_ns / 1e6,
             (unsigned long long)g_lq_stats.compiled, g_lq_stats.worker_ns / 1e6,
             (unsigned long long)g_lq_stats.failed, (unsigned long long)g_lq_stats.instantiated,
             g_lq_stats.instantiate_ns / 1e6, (unsigned long long)g_lq_stats.taken,
             (unsigned long long)g_lq_stats.waited, g_lq_stats.wait_ns / 1e6,
             g_lq_stats.waited_compile_ns / 1e6, g_lq_stats.waited_head_ns / 1e6,
-            (unsigned long long)g_lq_stats.serial, g_lq_stats_remap_ns / 1e6);
+            (unsigned long long)g_lq_stats.serial, g_lq_stats_remap_ns / 1e6,
+            (unsigned long long)g_remap_names);
+}
+
+static uint32_t lq_cpu_count(void)
+{
+#ifdef _WIN32
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return si.dwNumberOfProcessors;
+#else
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return n < 1 ? 1 : (uint32_t)n;
+#endif
 }
 
 /* The number of compile workers (started on first use, on the JS thread). */
 static int lq_threads(void)
 {
     if (g_lq_nthreads < 0) {
+        /* default: 4, fewer on small machines (the JS thread, the GC and the
+           fetch and layout pools run beside them) */
         const char *e = getenv("CYBER_COMPILE_THREADS");
-        int n = e ? atoi(e) : 0;
+        uint32_t ncpu = lq_cpu_count();
+        int n = e ? atoi(e) : ncpu >= 8 ? 4 : ncpu >= 4 ? 2 : 0;
         g_lq_nthreads = 0;
         if (n > LQ_MAX_THREADS)
             n = LQ_MAX_THREADS;
@@ -45032,6 +45108,8 @@ static int lq_threads(void)
 
 /* The runtime is about to go: wait for the units running, drop the queued
  * ones and forget the rest (they belong to the runtime's heap). */
+static void g_ss_quiesce(void);
+
 static void lazy_units_quiesce(void)
 {
     if (g_lq_nthreads <= 0)
@@ -45058,6 +45136,7 @@ static void lazy_units_quiesce(void)
         gc_os_wait((volatile uint32_t *)&g_lq_running, n, 10);
     }
     atomic_store_explicit(&g_lazy_dead, NULL, memory_order_release);
+    g_ss_quiesce();
     {
         int i;
         for (i = 0; i < g_lazy_srcs.count; i++)
@@ -45150,7 +45229,7 @@ static void lazy_units_spawn_root(JSContextHandle ctx, JSFunctionBytecodeHandle 
  * caller): instantiate what a worker compiled, wait for one that is
  * compiling it, or compile it here.  GC_HANDLE_NULL without an exception
  * if the unit could not do it (the caller compiles serially). */
-static GCHandle lazy_unit_take(JSContextHandle ctx, LazyUnit *u)
+static GCHandle lazy_unit_take(JSContextHandle ctx, LazyUnit *u, JSFunctionBytecodeHandle stub_b)
 {
     uint32_t st = atomic_load_explicit(&u->state, memory_order_acquire);
     GCHandle r = GC_HANDLE_NULL;
@@ -45176,6 +45255,12 @@ static GCHandle lazy_unit_take(JSContextHandle ctx, LazyUnit *u)
                     (t0 - u->t_queued) / 1e6, (t0 - u->t_start) / 1e6, u->compile_ns / 1e6);
         g_lq_stats.waited_head_ns += t0 > u->t_start ? t0 - u->t_start : 0;
     }
+    if (st == LU_DONE && u->precompiled) {
+        /* (the compile is over: the env is the JS thread's now) */
+        u->env.src_real = u->src;
+        cenv_note_runtime_atom(&u->env, cenv_atom(&u->env, "<precompiled>", 13),
+                               SAFE_GET_OR(stub_b, JSFunctionBytecodeHandle, debug.filename, JS_ATOM_NULL));
+    }
     if (st == LU_DONE) {
         uint64_t t0 = gc_os_now_ns();
         r = lazy_unit_instantiate(ctx, u);
@@ -45191,6 +45276,448 @@ static GCHandle lazy_unit_take(JSContextHandle ctx, LazyUnit *u)
     lazy_unit_out_free(u);
     lazy_unit_unref(u, TRUE);
     return r;
+}
+
+/* ---- Script stencils: page scripts compiled before they run ----
+ * A fetched script is announced on its fetch thread before the buffer is
+ * handed on (so the JS thread can never miss it), and once its structure
+ * index is built, its copy is compiled by a compile worker: a global
+ * script's stencil, with a placeholder for the source (the GC copy the
+ * JS thread makes when it evaluates) and for the filename (the name it is
+ * evaluated under).  __JS_EvalInternal claims the stencil of the buffer it
+ * evaluates and instantiates it; a stencil not ready is compiled there
+ * serially as before (a running one is waited for). */
+typedef struct ScriptStencil {
+    struct ScriptStencil *next;     /* the registry (g_ss_mu) */
+    struct ScriptStencil *next_job; /* the workers' stack */
+    const char *data;               /* the buffer it will be evaluated from */
+    size_t len;
+    _Atomic uint32_t state;         /* LU_*: IDLE until its copy is given */
+    _Atomic int refs;               /* the registry or claimer's, and the workers' */
+    uint8_t *copy;                  /* the compiled bytes (plain) */
+    SharedSrc *shared;              /* the copy, shared with the units made of it */
+    JSStructIndex *ix;
+    CompileEnv env;
+    JSParseState ps;                /* its arena holds the stencil's strings */
+    JSFunctionDef *fd;              /* finished, until instantiated */
+    JSAtom filename;                /* the env's placeholder */
+    uint64_t compile_ns;
+} ScriptStencil;
+
+#define SS_FLAGS JS_EVAL_TYPE_GLOBAL      /* what page scripts are evaluated with */
+
+static pthread_mutex_t g_ss_mu = PTHREAD_MUTEX_INITIALIZER;
+static ScriptStencil *g_ss_list;
+static ScriptStencil *g_ss_jobs;            /* (g_ss_mu) */
+static JSContextHandle g_ss_ctx;          /* the context scripts compile for */
+static _Atomic(ScriptStencil *) g_ss_dead;
+static struct { uint64_t announced, compiled, failed, claimed, instantiated, waited, not_ready;
+                double compile_ms, wait_ms, instantiate_ms; } g_ss_stats;
+
+static void ss_free(ScriptStencil *ss)
+{
+    if (ss->fd)
+        js_free_function_def(ss->ps.ctx, ss->fd);
+    if (ss->ps.ctx) {
+        free_token(&ss->ps, &ss->ps.token);
+        js_parse_cleanup_roots(&ss->ps);
+    }
+    cenv_free(&ss->env);
+    if (ss->shared)
+        shared_src_unref(ss->shared);
+    else
+        js_plain_free(ss->copy);   /* malloc()ed by the scanner */
+    js_plain_free(ss);
+}
+
+/* Drop a reference; the last one frees it (a worker hands it to the JS
+ * thread, which reaps it). */
+static void ss_unref(ScriptStencil *ss, BOOL on_js)
+{
+    if (atomic_fetch_sub_explicit(&ss->refs, 1, memory_order_acq_rel) != 1)
+        return;
+    if (on_js) {
+        ss_free(ss);
+        return;
+    }
+    {
+        ScriptStencil *head = atomic_load_explicit(&g_ss_dead, memory_order_relaxed);
+        do {
+            ss->next_job = head;
+        } while (!atomic_compare_exchange_weak_explicit(&g_ss_dead, &head, ss,
+                                                        memory_order_release, memory_order_relaxed));
+    }
+}
+
+static void ss_reap(void)
+{
+    ScriptStencil *ss = atomic_exchange_explicit(&g_ss_dead, NULL, memory_order_acquire);
+    while (ss) {
+        ScriptStencil *next = ss->next_job;
+        ss_free(ss);
+        ss = next;
+    }
+}
+
+/* Fetch thread: a script buffer about to be handed on. */
+static void *ss_announce(const char *data, size_t len)
+{
+    ScriptStencil *ss;
+    if (!g_ss_ctx)
+        return NULL;
+    ss = (ScriptStencil *)js_plain_calloc(1, sizeof(ScriptStencil));
+    if (!ss)
+        return NULL;
+    ss->data = data;
+    ss->len = len;
+    atomic_init(&ss->state, LU_IDLE);
+    atomic_init(&ss->refs, 1);
+    pthread_mutex_lock(&g_ss_mu);
+    ss->next = g_ss_list;
+    g_ss_list = ss;
+    g_ss_stats.announced++;
+    pthread_mutex_unlock(&g_ss_mu);
+    return ss;
+}
+
+/* Fetch thread: the copy of the announced buffer and its index; the copy is
+ * the stencil's from now on.  Queued for the workers. */
+static void ss_start(void *ticket, uint8_t *copy, size_t len, JSStructIndex *ix)
+{
+    ScriptStencil *ss = (ScriptStencil *)ticket;
+    uint32_t expected = LU_IDLE;
+    ss->copy = copy;
+    ss->ix = ix;
+    (void)len;
+    atomic_fetch_add_explicit(&ss->refs, 1, memory_order_relaxed);
+    if (!atomic_compare_exchange_strong_explicit(&ss->state, &expected, LU_QUEUED,
+                                                 memory_order_acq_rel, memory_order_acquire)) {
+        /* claimed (and given up) meanwhile */
+        ss_unref(ss, FALSE);
+        return;
+    }
+    pthread_mutex_lock(&g_ss_mu);
+    ss->next_job = g_ss_jobs;
+    g_ss_jobs = ss;
+    pthread_mutex_unlock(&g_ss_mu);
+    atomic_fetch_add_explicit(&g_lq_wake, 1, memory_order_release);
+    gc_os_wake_all((volatile uint32_t *)&g_lq_wake);
+}
+
+/* Worker: a queued script stencil, if any (the newest first). */
+static ScriptStencil *ss_pop_job(void)
+{
+    ScriptStencil *ss;
+    if (!g_ss_jobs)   /* (a racy peek: the common case, no job) */
+        return NULL;
+    pthread_mutex_lock(&g_ss_mu);
+    ss = g_ss_jobs;
+    if (ss)
+        g_ss_jobs = ss->next_job;
+    pthread_mutex_unlock(&g_ss_mu);
+    return ss;
+}
+
+/* A name of one stencil env as an atom of another. */
+static JSAtom cenv_copy_atom(CompileEnv *dst, CompileEnv *src, JSAtom a)
+{
+    const CEnvName *n = cenv_local_name(src, a);
+    if (!n)
+        return a;
+    return cenv_atom_units(dst, src->text + n->off, n->len, n->wide);
+}
+
+/* Worker: the unit of a stub of a finished script stencil (it rides in the
+ * stub's state to instantiation, which attaches it). */
+static LazyUnit *lazy_unit_from_fd(ScriptStencil *ss, JSFunctionDef *fd)
+{
+    LazyUnit *u = (LazyUnit *)js_plain_calloc(1, sizeof(LazyUnit));
+    int i;
+    if (!u)
+        return NULL;
+    atomic_init(&u->refs, 1);
+    atomic_init(&u->state, LU_IDLE);
+    cenv_init_stencil(&u->env);
+    u->ctx = g_ss_ctx;
+    u->precompiled = 1;
+    u->shared = ss->shared;
+    atomic_fetch_add_explicit(&ss->shared->refs, 1, memory_order_relaxed);
+    u->buf_start = ss->shared->bytes;
+    u->buf_end = ss->shared->bytes + ss->shared->len;
+    u->st = fd->resume_parse_state;
+    u->st.unit = NULL;
+    u->st.source_handle = CENV_SRC_PLACEHOLDER;
+    u->filename = (char *)"<precompiled>";
+    u->func_name = cenv_copy_atom(&u->env, &ss->env, fd->func_name);
+    u->nstub = fd->closure_var_handle.count;
+    if (u->nstub) {
+        u->cvs = (LazyUnitCV *)js_plain_calloc(u->nstub, sizeof(LazyUnitCV));
+        if (!u->cvs)
+            goto fail;
+        for (i = 0; i < u->nstub; i++) {
+            const JSClosureVar *cv = &PVEC_AT(fd->closure_var_handle, JSClosureVar, i);
+            u->cvs[i].name = cenv_copy_atom(&u->env, &ss->env, cv->var_name);
+            u->cvs[i].closure_type = cv->closure_type;
+            u->cvs[i].is_const = cv->is_const;
+            u->cvs[i].is_lexical = cv->is_lexical;
+            u->cvs[i].var_kind = cv->var_kind;
+        }
+    }
+    if (u->st.arg_count > 0 && fd->lazy_arg_names) {
+        u->args = (JSAtom *)js_plain_calloc(u->st.arg_count, sizeof(JSAtom));
+        if (!u->args)
+            goto fail;
+        for (i = 0; i < (int)u->st.arg_count; i++)
+            u->args[i] = cenv_copy_atom(&u->env, &ss->env, fd->lazy_arg_names[i]);
+    }
+    if (u->env.has_error)
+        goto fail;
+    return u;
+ fail:
+    cenv_free(&u->env);
+    js_plain_free(u->cvs);
+    js_plain_free(u->args);
+    shared_src_unref(u->shared);
+    js_plain_free(u);
+    return NULL;
+}
+
+static void ss_make_units(ScriptStencil *ss, JSFunctionDef *fd, PVec *batch, int depth)
+{
+    int i;
+    for (i = 0; i < fd->child_handles.count; i++) {
+        JSFunctionDef *c = PVEC_AT(fd->child_handles, JSFunctionDef *, i);
+        if (!c)
+            continue;
+        if (c->func_parse_state == JS_FUNC_LAZY && c->has_resume_parse_state) {
+            LazyUnit *u = lazy_unit_from_fd(ss, c);
+            if (u) {
+                c->resume_parse_state.unit = u;
+                if (pvec_push(batch, sizeof(LazyUnit *), &u)) {
+                    atomic_fetch_add_explicit(&u->refs, 1, memory_order_relaxed);
+                    atomic_store_explicit(&u->state, LU_QUEUED, memory_order_relaxed);
+                }
+            }
+        } else if (depth < 64) {
+            ss_make_units(ss, c, batch, depth + 1);
+        }
+    }
+}
+
+/* Worker: parse and finish the script (as __JS_EvalInternal would, for a
+ * global script of SS_FLAGS).  0, or -1. */
+static int ss_compile(ScriptStencil *ss, uintptr_t stack_limit)
+{
+    JSContextHandle ctx = g_ss_ctx;
+    JSParseState *s = &ss->ps;
+    JSFunctionDef *fd;
+    int err;
+
+    gc_forbid_enter();
+    cenv_init_stencil(&ss->env);
+    ss->env.stack_limit = stack_limit;
+    GC_SET(s->ctx, ctx);
+    s->env = &ss->env;
+    s->filename = "<precompiled>";
+    s->buf_start = s->buf_ptr = ss->copy;
+    s->buf_end = ss->copy + ss->len;
+    s->token.val = ' ';
+    s->token.ptr = s->buf_ptr;
+    line_col_cache_init(&s->get_line_col_cache, s->buf_start, s->buf_end, s->buf_start, 0, 0);
+    s->enable_lazy_parsing = TRUE;
+    skip_shebang(&s->buf_ptr, s->buf_end);
+    s->struct_index = ss->ix;
+    fd = js_new_function_def(s->env, ctx, NULL, TRUE, FALSE, s->filename,
+                             s->buf_start, &s->get_line_col_cache);
+    if (!fd)
+        goto fail;
+    ss->fd = fd;
+    ss->filename = fd->filename;
+    /* the source the stubs and kept sources refer to: the JS thread's copy,
+       given at instantiation */
+    fd->source_string_handle = CENV_SRC_PLACEHOLDER;
+    js_parse_set_cur_func(s, fd);
+    fd->eval_type = JS_EVAL_TYPE_GLOBAL;
+    fd->has_this_binding = TRUE;
+    fd->new_target_allowed = FALSE;
+    fd->super_call_allowed = FALSE;
+    fd->super_allowed = FALSE;
+    fd->arguments_allowed = TRUE;
+    fd->js_mode = 0;
+    fd->func_name = JS_ATOM__eval_;
+    s->is_module = FALSE;
+    s->allow_html_comments = TRUE;
+    push_scope(s);
+    fd->body_scope = fd->scope_level;
+    err = js_parse_program(s);
+    if (err || ss->env.has_error || js_finish_function(ctx, fd))
+        goto fail;
+    /* the units of its stubs, compiled before the script even runs */
+    ss->shared = (SharedSrc *)js_plain_calloc(1, sizeof(SharedSrc));
+    if (ss->shared && !ss->env.has_error) {
+        PVec batch = { 0 };
+        atomic_init(&ss->shared->refs, 1);
+        ss->shared->bytes = ss->copy;
+        ss->shared->len = ss->len;
+        ss_make_units(ss, fd, &batch, 0);
+        if (batch.count && !lq_push_batch((LazyUnit **)batch.data, batch.count)) {
+            int i;
+            for (i = 0; i < batch.count; i++) {
+                LazyUnit *u = PVEC_AT(batch, LazyUnit *, i);
+                atomic_store_explicit(&u->state, LU_IDLE, memory_order_relaxed);
+                atomic_fetch_sub_explicit(&u->refs, 1, memory_order_relaxed);
+            }
+        }
+        pvec_free(&batch);
+    }
+    gc_forbid_leave();
+    return ss->env.has_error ? -1 : 0;
+ fail:
+    gc_forbid_leave();
+    return -1;
+}
+
+/* Worker: run queued script stencils; TRUE if it ran one. */
+static BOOL ss_work(uintptr_t stack_limit)
+{
+    ScriptStencil *ss = ss_pop_job();
+    uint32_t expected = LU_QUEUED;
+    if (!ss)
+        return FALSE;
+    atomic_fetch_add_explicit(&g_lq_running, 1, memory_order_acq_rel);
+    if (!atomic_load_explicit(&g_lq_paused, memory_order_acquire) &&
+        atomic_compare_exchange_strong_explicit(&ss->state, &expected, LU_RUNNING,
+                                                memory_order_acq_rel, memory_order_acquire)) {
+        uint64_t t0 = gc_os_now_ns();
+        int r = ss_compile(ss, stack_limit);
+        ss->compile_ns = gc_os_now_ns() - t0;
+        if (parse_stats_enabled() && r)
+            fprintf(stderr, "[parse-stats] script precompile failed (%d:%d): %s\n",
+                    ss->env.error_line, ss->env.error_col, ss->env.error_msg);
+        atomic_store_explicit(&ss->state, r ? LU_FAILED : LU_DONE, memory_order_release);
+        gc_os_wake_all((volatile uint32_t *)&ss->state);
+    }
+    ss_unref(ss, FALSE);
+    if (atomic_fetch_sub_explicit(&g_lq_running, 1, memory_order_acq_rel) == 1)
+        gc_os_wake_all((volatile uint32_t *)&g_lq_running);
+    return TRUE;
+}
+
+/* JS thread: the stencil of the buffer about to be evaluated, if one was
+ * compiled for it (waiting for a compile in flight), else NULL. */
+static ScriptStencil *ss_claim(const char *data, size_t len, int flags)
+{
+    ScriptStencil **p, *ss;
+    uint32_t st;
+
+    if (!g_ss_ctx)
+        return NULL;
+    ss_reap();
+    pthread_mutex_lock(&g_ss_mu);
+    for (p = &g_ss_list; *p && !((*p)->data == data && (*p)->len == len); p = &(*p)->next)
+        ;
+    ss = *p;
+    if (ss)
+        *p = ss->next;
+    pthread_mutex_unlock(&g_ss_mu);
+    if (!ss)
+        return NULL;
+    g_ss_stats.claimed++;
+    st = atomic_load_explicit(&ss->state, memory_order_acquire);
+    if (st == LU_IDLE || st == LU_QUEUED) {
+        /* not started: give it up (the worker that pops it skips it) */
+        if (atomic_compare_exchange_strong_explicit(&ss->state, &st, LU_TAKEN,
+                                                    memory_order_acq_rel, memory_order_acquire)) {
+            g_ss_stats.not_ready++;
+            ss_unref(ss, TRUE);
+            return NULL;
+        }
+    }
+    if (st == LU_RUNNING) {
+        uint64_t t0 = gc_os_now_ns();
+        g_ss_stats.waited++;
+        while ((st = atomic_load_explicit(&ss->state, memory_order_acquire)) == LU_RUNNING)
+            gc_os_wait((volatile uint32_t *)&ss->state, LU_RUNNING, 10);
+        g_ss_stats.wait_ms += (gc_os_now_ns() - t0) / 1e6;
+    }
+    if (st != LU_DONE || flags != SS_FLAGS) {
+        if (st != LU_DONE)
+            g_ss_stats.failed++;
+        ss_unref(ss, TRUE);
+        return NULL;
+    }
+    g_ss_stats.compile_ms += ss->compile_ns / 1e6;
+    g_ss_stats.compiled++;
+    return ss;
+}
+
+/* JS thread: the function of a claimed stencil, evaluated under filename
+ * with source_copy as its source; consumes the stencil. */
+static GCValue ss_instantiate(JSContextHandle ctx, ScriptStencil *ss, const char *filename,
+                              GCHandle source_copy)
+{
+    GCValue fun_obj;
+    uint64_t t0 = gc_os_now_ns();
+    ss->env.src_real = source_copy;
+    cenv_note_runtime_atom(&ss->env, ss->filename, JS_NewAtom(ctx, filename));
+    fun_obj = js_instantiate_function(ctx, ss->fd);
+    ss->fd = NULL;
+    g_ss_stats.instantiated++;
+    g_ss_stats.instantiate_ms += (gc_os_now_ns() - t0) / 1e6;
+    ss_unref(ss, TRUE);
+    return fun_obj;
+}
+
+static void ss_report(void)
+{
+    if (!parse_stats_enabled())
+        return;
+    fprintf(stderr, "[parse-stats] script stencils: announced %llu, claimed %llu (%llu not started, "
+            "%llu waited for %.1f ms, %llu failed), instantiated %llu (%.1f ms; %.1f ms compile on workers)\n",
+            (unsigned long long)g_ss_stats.announced, (unsigned long long)g_ss_stats.claimed,
+            (unsigned long long)g_ss_stats.not_ready, (unsigned long long)g_ss_stats.waited,
+            g_ss_stats.wait_ms, (unsigned long long)g_ss_stats.failed,
+            (unsigned long long)g_ss_stats.instantiated, g_ss_stats.instantiate_ms, g_ss_stats.compile_ms);
+}
+
+/* The runtime is going (the workers are idle): no more script stencils. */
+static void g_ss_quiesce(void)
+{
+    g_ss_ctx = GC_HANDLE_NULL;
+    pthread_mutex_lock(&g_ss_mu);
+    g_ss_list = NULL;
+    g_ss_jobs = NULL;
+    pthread_mutex_unlock(&g_ss_mu);
+    atomic_store_explicit(&g_ss_dead, NULL, memory_order_release);
+}
+
+/* Compile fetched page scripts of ctx on the compile workers before they
+ * run (when there are workers). */
+void JS_EnableScriptPrecompile(JSContextHandle ctx)
+{
+    if (lq_threads() <= 0)
+        return;
+    g_ss_ctx = ctx;
+    js_struct_index_set_precompile(ss_announce, ss_start);
+    atexit(ss_report);
+}
+
+/* A precompiled unit's stub has been made (JS thread): hold its source. */
+static void lazy_unit_attach(JSContextHandle ctx, LazyUnit *u, JSFunctionBytecodeHandle stub_b)
+{
+    JSLazyParseState *st = js_bc_resume_parse_state(stub_b);
+    u->src = st->source_handle;
+    if (!lazy_src_hold(ctx, u->src, stub_b))
+        u->src = GC_HANDLE_NULL;
+    u->attached = 1;
+    g_lazy_units_bytes += u->st.source_len;
+    g_lazy_units_alive++;
+}
+
+/* A definition holding a unit is freed without being instantiated. */
+static void lazy_unit_drop(LazyUnit *u)
+{
+    lazy_unit_unref(u, TRUE);
 }
 
 static int lazy_stencil_enabled(void)
@@ -45213,7 +45740,26 @@ static GCHandle js_lazy_compile_any(JSContextHandle ctx, JSFunctionBytecodeHandl
     if (state && state->unit) {
         u = state->unit;
         state->unit = NULL;
-        r = lazy_unit_take(ctx, u);
+        r = lazy_unit_take(ctx, u, stub_b);
+        if (stencil_verify_enabled() && r != GC_HANDLE_NULL) {
+            /* verify: the serial compile, compared with the unit's */
+            GCHandle sr;
+            gc_add_root(r);
+            sr = js_lazy_compile(ctx, stub_b);
+            if (sr != GC_HANDLE_NULL) {
+                StencilVerify v = { .ctx = ctx, .filename = "<lazy unit>" };
+                CompileEnv dummy;
+                cenv_init_runtime(&dummy, ctx);
+                v.env = &dummy;
+                if (g_stencil_verify.scripts++ == 0)
+                    atexit(stencil_verify_report);
+                if (sv_cmp_bc(&v, (JSFunctionBytecodeHandle)sr, (JSFunctionBytecodeHandle)r))
+                    g_stencil_verify.lazy_same++;
+                else
+                    g_stencil_verify.lazy_differ++;
+            }
+            gc_remove_root(r);
+        }
         if (r != GC_HANDLE_NULL || JS_HasException(ctx))
             return r;
         g_lq_stats.serial++;
@@ -45267,6 +45813,7 @@ static GCValue __JS_EvalInternal(JSContextHandle ctx, GCValue this_obj,
     JSParseState s1 = { .token = { .u.str.str = GC_UNDEFINED_INIT } }, *s = &s1;
     int err, js_mode, eval_type;
     struct StencilVerifyKeep *sv_keep = NULL;
+    GCValue ss_verify_obj = JS_UNDEFINED;
     GCValue fun_obj = GC_UNDEFINED, ret_val = GC_UNDEFINED;
     JSStackFrame *sf;
     GCHandle var_refs_handle;
@@ -45290,6 +45837,33 @@ static GCValue __JS_EvalInternal(JSContextHandle ctx, GCValue this_obj,
     /* (kept for the runtime's lifetime: lazy functions of the script read it) */
     if (s->enable_lazy_parsing)
         s->struct_index = js_struct_index_claim(input, input_len);
+    /* a stencil compiled at fetch time (the index claim checked the bytes) */
+    if (s->struct_index && (flags & JS_EVAL_TYPE_MASK) == JS_EVAL_TYPE_GLOBAL) {
+        ScriptStencil *ss = ss_claim(input, input_len, flags);
+        if (ss && stencil_verify_enabled()) {
+            /* verify: instantiate it, compile serially below and compare */
+            js_parse_hold(s, SAFE_HANDLE(source_copy));
+            ss_verify_obj = ss_instantiate(ctx, ss, filename, SAFE_HANDLE(source_copy));
+            if (JS_IsException(ss_verify_obj))
+                JS_GetException(ctx);
+            else
+                gc_add_root(GC_VALUE_GET_HANDLE(ss_verify_obj));
+            ss = NULL;
+        }
+        if (ss) {
+            js_parse_hold(s, SAFE_HANDLE(source_copy));
+            fun_obj = ss_instantiate(ctx, ss, filename, SAFE_HANDLE(source_copy));
+            if (JS_IsException(fun_obj))
+                goto fail1;
+            lazy_units_spawn_root(ctx, (JSFunctionBytecodeHandle)GC_VALUE_GET_HANDLE(fun_obj));
+            if (flags & JS_EVAL_FLAG_COMPILE_ONLY)
+                ret_val = fun_obj;
+            else
+                ret_val = JS_EvalFunctionInternal(ctx, fun_obj, this_obj, GC_HANDLE_NULL, NULL);
+            js_parse_cleanup_roots(s);
+            return ret_val;
+        }
+    }
 
     eval_type = flags & JS_EVAL_TYPE_MASK;
     m = GC_HANDLE_NULL;
@@ -45377,12 +45951,29 @@ static GCValue __JS_EvalInternal(JSContextHandle ctx, GCValue this_obj,
     fun_obj = js_create_function(ctx, fd);
     if (sv_keep)
         stencil_verify_instantiate(sv_keep, fun_obj);
+    if (JS_VALUE_GET_TAG(ss_verify_obj) == JS_TAG_FUNCTION_BYTECODE) {
+        StencilVerify v = { .ctx = ctx, .filename = filename };
+        CompileEnv dummy;
+        cenv_init_runtime(&dummy, ctx);
+        v.env = &dummy;
+        if (!JS_IsException(fun_obj) &&
+            sv_cmp_bc(&v, (JSFunctionBytecodeHandle)GC_VALUE_GET_HANDLE(fun_obj),
+                      (JSFunctionBytecodeHandle)GC_VALUE_GET_HANDLE(ss_verify_obj)))
+            g_stencil_verify.pre_same++;
+        else
+            g_stencil_verify.pre_differ++;
+        gc_remove_root(GC_VALUE_GET_HANDLE(ss_verify_obj));
+    }
     if (!JS_IsException(fun_obj))
         lazy_units_spawn_root(ctx, (JSFunctionBytecodeHandle)GC_VALUE_GET_HANDLE(fun_obj));
     if (stats_t0) {
+        uint64_t dt = parse_stats_since(stats_t0);
         g_parse_stats.eval_n++;
-        g_parse_stats.eval_ns += parse_stats_since(stats_t0);
+        g_parse_stats.eval_ns += dt;
         g_parse_stats.eval_bytes += input_len;
+        if (getenv("CYBER_COMPILE_LOG") && dt > 500000)
+            fprintf(stderr, "[compile-script] %s: %zu bytes, %.2f ms on the JS thread (index %s)\n",
+                    filename, input_len, dt / 1e6, s->struct_index ? "yes" : "no");
     }
     if (JS_IsException(fun_obj))
         goto fail1;

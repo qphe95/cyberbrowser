@@ -1406,6 +1406,9 @@ GCValue JS_CallConstructor2(JSContextHandle ctx, GCValue func_obj,
                             int argc, GCValue *argv);
 JS_BOOL JS_DetectModule(const char *input, size_t input_len);
 /* 'input' must be zero terminated i.e. input[input_len] = '\0'. */
+/* Compile fetched page scripts of ctx on compile workers before they run
+ * (CYBER_COMPILE_THREADS=<n>). */
+void JS_EnableScriptPrecompile(JSContextHandle ctx);
 GCValue JS_Eval(JSContextHandle ctx, const char *input, size_t input_len,
                 const char *filename, int eval_flags);
 /* same as JS_Eval() but with an explicit 'this_obj' parameter */

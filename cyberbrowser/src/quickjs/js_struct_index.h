@@ -81,6 +81,14 @@ JSStructIndex *js_struct_index_claim(const char *data, size_t len);
 void js_struct_index_scan_fetched(const char *url, const char *data, size_t len,
                                   void (*release)(void *arg), void *arg);
 
+/* A compiler for the scripts scanned there (quickjs.c, script stencils):
+ * announce(data, len) before the buffer is handed on (a ticket, or NULL),
+ * then start(ticket, copy, len, ix) with the scanned copy (the compiler's
+ * from then on: free() it) and its index. */
+void js_struct_index_set_precompile(void *(*announce)(const char *data, size_t len),
+                                    void (*start)(void *ticket, uint8_t *copy, size_t len,
+                                                  JSStructIndex *ix));
+
 typedef struct JSStructIndexStats {
     uint64_t built, claimed, waited, stopped_early;
     double scan_ms, wait_ms;

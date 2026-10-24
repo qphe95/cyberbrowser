@@ -979,8 +979,8 @@ JSStructIndex *js_struct_index_claim(const char *data, size_t len)
     }
     pthread_mutex_unlock(&g_mu);
     if (ix && content_hash((const uint8_t *)data, len) != hash) {
-        /* not the bytes that were scanned (an earlier buffer at this address) */
-        js_struct_index_free(ix);
+        /* not the bytes that were scanned (an earlier buffer at this address);
+           the index is kept (a script stencil compile may be reading it) */
         ix = NULL;
     }
     if (ix) {
@@ -989,6 +989,17 @@ JSStructIndex *js_struct_index_claim(const char *data, size_t len)
         pthread_mutex_unlock(&g_mu);
     }
     return ix;
+}
+
+static void *(*g_pc_announce)(const char *data, size_t len);
+static void (*g_pc_start)(void *ticket, uint8_t *copy, size_t len, JSStructIndex *ix);
+
+void js_struct_index_set_precompile(void *(*announce)(const char *data, size_t len),
+                                    void (*start)(void *ticket, uint8_t *copy, size_t len,
+                                                  JSStructIndex *ix))
+{
+    g_pc_start = start;
+    g_pc_announce = announce;
 }
 
 void js_struct_index_scan_fetched(const char *url, const char *data, size_t len,
@@ -1026,9 +1037,17 @@ void js_struct_index_scan_fetched(const char *url, const char *data, size_t len,
     }
     memcpy(copy, data, len);
     void *t = js_struct_index_announce(data, len);
+    void *pc = g_pc_announce ? g_pc_announce(data, len) : NULL;
     release(arg);
-    js_struct_index_publish(t, js_struct_index_build(copy, len));
-    free(copy);
+    JSStructIndex *ix = js_struct_index_build(copy, len);
+    js_struct_index_publish(t, ix);
+    if (pc && ix)
+        g_pc_start(pc, copy, len, ix);
+    else {
+        if (pc)
+            g_pc_start(pc, NULL, 0, NULL);
+        free(copy);
+    }
 }
 
 void js_struct_index_stats(JSStructIndexStats *out)

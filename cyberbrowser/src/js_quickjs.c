@@ -2766,6 +2766,8 @@ bool js_quickjs_create_runtime(void) {
     // Create context - this initializes built-in objects
     platform_log(LOG_LEVEL_INFO, "js_quickjs", "Creating global context...");
     g_js_context = JS_NewContext(g_js_runtime);
+    if (g_js_context != GC_HANDLE_NULL)
+        JS_EnableScriptPrecompile(g_js_context);
     
     if (!SAFE_VALID(g_js_context)) {
         platform_log(LOG_LEVEL_ERROR, "js_quickjs", "Context creation failed");
