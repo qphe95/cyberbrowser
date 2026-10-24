@@ -418,7 +418,7 @@ typedef struct LayoutContext {
     HtmlDocument *doc;
     LayoutTree tree;
     LayoutBox *boxes;       /* boxes[i] corresponds to tree.nodes[i] */
-    LayoutStyle *styles;    /* boxes[i].s: each box's own style while it is styled */
+    LayoutStyle *styles;    /* the first block of style slots (slot, below) */
 
     /* Viewport / initial containing block dimensions. */
     double viewport_width;
@@ -504,10 +504,24 @@ typedef struct LayoutContext {
     bool tree_keep;
     uint64_t tree_seq;
     /* This run kept the tree, and the store ids of the elements whose
-     * attributes changed since the last (from the mirror's change log). */
+     * attributes, and whose children, changed since the last (from the
+     * mirror's change log). */
     bool tree_kept;
     uint32_t *attr_ids;
     int attr_n, attr_cap;
+    uint32_t *child_ids;
+    int child_n, child_cap;
+    /* Each box's own style slot (boxes[i].s is it, or a text box's shared
+     * style), from a pool that a tree rebuilt after children changed takes
+     * over with the slots of the boxes it keeps (css_layout.c); styles is
+     * the pool's first block (styles_n slots). */
+    LayoutStyle **slot;
+    struct LayoutSlots *slot_pool;
+    int styles_n;
+    /* Per layout index: the node's store id, and whether its box's style is
+     * the one the last style pass gave it (a box new to the tree: no). */
+    uint32_t *ids;
+    unsigned char *style_ok;
     /* DOM index -> layout index (-1: not in the tree), dom_map_n of them. */
     int *dom_map;
     int dom_map_n;

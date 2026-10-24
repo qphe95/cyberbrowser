@@ -319,16 +319,91 @@ static void layout_spare_give(LayoutSpare *sp, void *p, size_t cap)
     sp->cap = cap;
 }
 
-static bool layout_build_nodes(LayoutContext *ctx, const int *map, int active)
+/* Style slots beyond a tree's first block (LayoutContext.styles): blocks
+ * added for the boxes a kept tree gained, and the slots of the boxes it
+ * lost, for reuse. */
+typedef struct LayoutSlots {
+    LayoutStyle **blocks;
+    int nblocks, blocks_cap;
+    LayoutStyle **free;
+    int nfree, free_cap;
+} LayoutSlots;
+
+static LayoutStyle *layout_slot_take(LayoutContext *ctx)
+{
+    LayoutSlots *p = ctx->slot_pool;
+    if (!p) {
+        p = ctx->slot_pool = (LayoutSlots *)calloc(1, sizeof(LayoutSlots));
+        if (!p) return NULL;
+    }
+    if (p->nfree == 0) {
+        enum { N = 256 };
+        LayoutStyle *b = (LayoutStyle *)malloc(N * sizeof(LayoutStyle));
+        if (!b) return NULL;
+        if (p->nblocks == p->blocks_cap) {
+            int nc = p->blocks_cap ? 2 * p->blocks_cap : 8;
+            LayoutStyle **nb = (LayoutStyle **)realloc(p->blocks, (size_t)nc * sizeof(*nb));
+            if (!nb) { free(b); return NULL; }
+            p->blocks = nb;
+            p->blocks_cap = nc;
+        }
+        if (p->free_cap < p->nfree + N) {
+            int nc = p->free_cap ? 2 * p->free_cap : 2 * N;
+            while (nc < p->nfree + N) nc *= 2;
+            LayoutStyle **nf = (LayoutStyle **)realloc(p->free, (size_t)nc * sizeof(*nf));
+            if (!nf) { free(b); return NULL; }
+            p->free = nf;
+            p->free_cap = nc;
+        }
+        p->blocks[p->nblocks++] = b;
+        for (int i = N - 1; i >= 0; i--) p->free[p->nfree++] = &b[i];
+    }
+    return p->free[--p->nfree];
+}
+
+static void layout_slot_give(LayoutContext *ctx, LayoutStyle *slot)
+{
+    LayoutSlots *p = ctx->slot_pool;
+    if (!p) {
+        p = ctx->slot_pool = (LayoutSlots *)calloc(1, sizeof(LayoutSlots));
+        if (!p) return;   /* (the block it is in lives as long as the tree) */
+    }
+    if (p->nfree == p->free_cap) {
+        int nc = p->free_cap ? 2 * p->free_cap : 256;
+        LayoutStyle **nf = (LayoutStyle **)realloc(p->free, (size_t)nc * sizeof(*nf));
+        if (!nf) return;
+        p->free = nf;
+        p->free_cap = nc;
+    }
+    p->free[p->nfree++] = slot;
+}
+
+static void layout_slots_free(LayoutSlots *p)
+{
+    if (!p) return;
+    for (int i = 0; i < p->nblocks; i++) free(p->blocks[i]);
+    free(p->blocks);
+    free(p->free);
+    free(p);
+}
+
+/* (carry: the slots are left to layout_tree_carry) */
+static bool layout_build_nodes(LayoutContext *ctx, const int *map, int active, bool carry)
 {
     int dom_count = (int)po_array_count(&ctx->doc->array);
 
     ctx->tree.nodes = (LayoutNodeRef*)layout_spare_take(&g_spare_nodes, (size_t)active * sizeof(LayoutNodeRef));
     ctx->tree.count = active;
     ctx->boxes = (LayoutBox*)layout_spare_take(&g_spare_boxes, (size_t)active * sizeof(LayoutBox));
-    ctx->styles = (LayoutStyle*)layout_spare_take(&g_spare_styles, (size_t)active * sizeof(LayoutStyle));
-    if (!ctx->tree.nodes || !ctx->boxes || !ctx->styles) return false;
-    for (int i = 0; i < active; i++) ctx->boxes[i].s = &ctx->styles[i];
+    ctx->ids = (uint32_t *)malloc(((size_t)active + 1) * sizeof(uint32_t));
+    if (!ctx->tree.nodes || !ctx->boxes || !ctx->ids) return false;
+    if (!carry) {
+        ctx->styles = (LayoutStyle*)layout_spare_take(&g_spare_styles, (size_t)active * sizeof(LayoutStyle));
+        ctx->styles_n = active;
+        ctx->slot = (LayoutStyle **)malloc(((size_t)active + 1) * sizeof(LayoutStyle *));
+        if (!ctx->styles || !ctx->slot) return false;
+        for (int i = 0; i < active; i++) ctx->boxes[i].s = ctx->slot[i] = &ctx->styles[i];
+    }
 
     for (int i = 0; i < dom_count; i++) {
         int idx = map[i];
@@ -337,6 +412,7 @@ static bool layout_build_nodes(LayoutContext *ctx, const int *map, int active)
         PreOrderCompactionArrayNode *hdr = po_array_node(&ctx->doc->array, i);
         LayoutNodeRef *node = &ctx->tree.nodes[idx];
         node->dom_node_idx = i;
+        ctx->ids[idx] = ((const HtmlNode *)hdr)->store_id;
         node->parent_idx = (hdr->parent >= 0) ? map[hdr->parent] : -1;
         node->first_child_idx = (hdr->first_child >= 0) ? map[hdr->first_child] : -1;
         node->next_sibling_idx = (hdr->next_sibling >= 0) ? map[hdr->next_sibling] : -1;
@@ -516,7 +592,7 @@ static bool layout_build_orders(LayoutContext *ctx)
     return true;
 }
 
-static bool layout_tree_build(LayoutContext *ctx, HtmlDocument *doc, bool prune)
+static bool layout_tree_build_ex(LayoutContext *ctx, HtmlDocument *doc, bool prune, bool carry)
 {
     if (!ctx || !doc) return false;
     memset(ctx, 0, sizeof(*ctx));
@@ -532,7 +608,7 @@ static bool layout_tree_build(LayoutContext *ctx, HtmlDocument *doc, bool prune)
     for (int i = 0; pruned && i < count; i++) ctx->pruned_n += pruned[i];
     ctx->prune_has_gen = g_has_gen;
 
-    bool ok = layout_build_nodes(ctx, map, count);
+    bool ok = layout_build_nodes(ctx, map, count, carry);
     double tb2 = layout_now_ms();
     if (ok) ok = layout_build_orders(ctx);
     if (g_css_log > 0)
@@ -556,6 +632,11 @@ static bool layout_tree_build(LayoutContext *ctx, HtmlDocument *doc, bool prune)
     return ok;
 }
 
+static bool layout_tree_build(LayoutContext *ctx, HtmlDocument *doc, bool prune)
+{
+    return layout_tree_build_ex(ctx, doc, prune, false);
+}
+
 bool css_layout_tree_build(LayoutContext *ctx, HtmlDocument *doc)
 {
     return layout_tree_build(ctx, doc, false);
@@ -571,7 +652,12 @@ void css_layout_tree_free(LayoutContext *ctx)
     free(ctx->tree.preorder);
     free(ctx->tree.postorder);
     layout_spare_give(&g_spare_boxes, ctx->boxes, (size_t)ctx->tree.count * sizeof(LayoutBox));
-    layout_spare_give(&g_spare_styles, ctx->styles, (size_t)ctx->tree.count * sizeof(LayoutStyle));
+    layout_spare_give(&g_spare_styles, ctx->styles, (size_t)ctx->styles_n * sizeof(LayoutStyle));
+    layout_slots_free(ctx->slot_pool);
+    free(ctx->slot);
+    free(ctx->ids);
+    free(ctx->style_ok);
+    free(ctx->child_ids);
     free(ctx->intrinsic_cache);
     free(ctx->has_flags);
     free(ctx->pruned);
@@ -5823,6 +5909,15 @@ static void style_cache_prepare(StylePass *P, uint64_t global, const HasSubjects
             int li = d >= 0 && d < ctx->dom_map_n ? ctx->dom_map[d] : -1;
             if (li >= 0) redo[li] = 1;
         }
+        /* (an element whose children changed: their structure, and its own
+         * child count) */
+        for (int k = 0; k < ctx->child_n; k++) {
+            int d = html_mirror_index_of(ctx->doc, ctx->child_ids[k]);
+            int li = d >= 0 && d < ctx->dom_map_n ? ctx->dom_map[d] : -1;
+            if (li < 0) continue;
+            redo[li] = 1;
+            for (int c = ctx->tree.nodes[li].first_child_idx; c >= 0; c = ctx->tree.nodes[c].next_sibling_idx) redo[c] = 1;
+        }
         for (int idx = 0; idx < n; idx++) if (!redo[idx]) key[idx] = ctx->sc_key[idx];
     }
 
@@ -6657,7 +6752,7 @@ static void style_node(StylePass *P, StyleThread *T, int pos, int idx)
     LayoutBox *parent = (p >= 0) ? layout_box(ctx, p) : NULL;
     int dom = ctx->tree.nodes[idx].dom_node_idx;
     HtmlNode *node = layout_node_dom(ctx, dom);
-    box->s = &ctx->styles[idx];   /* (a kept tree's text box may hold a shared style) */
+    box->s = ctx->slot[idx];   /* (a kept tree's text box may hold a shared style) */
 
     /* Custom properties inherit; the map is shared until this node sets one. */
     const CssCustomProps *pv = (p >= 0) ? ctx->custom_props[p] : NULL;
@@ -7122,8 +7217,8 @@ static void style_copy_subtree(StylePass *P, StyleThread *T, int pos)
             ctx->custom_props[idx] = p >= 0 ? ctx->custom_props[p] : NULL;
             /* A text box under an element whose slot was left: its style as
              * it is. */
-            if (!(P->retain && p >= 0 && P->kept[p])) {
-                box->s = &ctx->styles[idx];
+            if (!(P->retain && p >= 0 && P->kept[p] && ctx->style_ok && ctx->style_ok[idx])) {
+                box->s = ctx->slot[idx];
                 layout_box_init(ctx, idx);
                 style_finish_box(P, box, p >= 0 ? layout_box(ctx, p) : NULL, false);
             }
@@ -7579,6 +7674,8 @@ static void layout_apply_stylesheet(LayoutContext *ctx, CssStylesheet *sheet)
     g_restyle_reused = g_restyle_recomputed = g_restyle_matched_same = 0;
     job_graph_run(job_new(style_root_job, NULL, &P, 0, 0));
     ctx->style_skipped = (int)atomic_load(&P.skipped_n);
+    if (!ctx->style_ok) ctx->style_ok = (unsigned char *)malloc((size_t)n + 1);
+    if (ctx->style_ok) memset(ctx->style_ok, 1, (size_t)n + 1);
     if (P.text_style_check && atomic_load(&P.text_style_mismatches))
         fprintf(stderr, "[text-style-check] %u text boxes differ from their shared style\n",
                 (unsigned)atomic_load(&P.text_style_mismatches));
@@ -10980,10 +11077,110 @@ void css_layout_tree_stats(uint64_t *kept, uint64_t *built)
  * properties and their arena start over, as on a tree built afresh. */
 static void layout_restyle_all(LayoutContext *ctx)
 {
-    for (int i = 0; i < ctx->tree.count; i++) ctx->boxes[i].s = &ctx->styles[i];
+    for (int i = 0; i < ctx->tree.count; i++) ctx->boxes[i].s = ctx->slot[i];
     memset((void *)ctx->custom_props, 0, ((size_t)ctx->tree.count + 1) * sizeof(*ctx->custom_props));
     frame_arena_reset(&ctx->arena);
     if (ctx->slot_ver) memset(ctx->slot_ver, 0, (size_t)ctx->tree.count * sizeof(uint32_t));
+}
+
+/* The kept tree ctx built again for doc after elements' children changed:
+ * the boxes it still has (the same store ids) keep their style slots (and
+ * the styles in them, and the shared text styles they point to, in the
+ * arena that moves over too), custom properties and the last store's
+ * notes; the ones it lost give their slots back, and new ones take slots
+ * with no note.  False (and ctx freed) when it cannot. */
+static bool layout_tree_carry(LayoutContext *ctx, HtmlDocument *doc, bool prune)
+{
+    LayoutContext old = *ctx;
+    int on = old.tree.count;
+    bool ok = layout_tree_build_ex(ctx, doc, prune, true) && old.slot && old.ids;
+    int n = ok ? ctx->tree.count : 0;
+    uint32_t cap = 64;
+    while (cap < 2u * (uint32_t)on + 2) cap <<= 1;
+    int *tab = ok ? (int *)malloc(cap * sizeof(int)) : NULL;
+    unsigned char *used = ok ? (unsigned char *)calloc((size_t)on + 1, 1) : NULL;
+    if (ok) {
+        ctx->slot = (LayoutStyle **)malloc(((size_t)n + 1) * sizeof(LayoutStyle *));
+        ctx->style_ok = (unsigned char *)calloc((size_t)n + 1, 1);
+        if (old.sc_entry) {
+            ctx->sc_key = (uint64_t *)calloc((size_t)n + 1, sizeof(uint64_t));
+            ctx->sc_entry = (int *)calloc((size_t)n + 1, sizeof(int));
+            ctx->slot_ver = (uint32_t *)calloc((size_t)n + 1, sizeof(uint32_t));
+        }
+        if (old.has_bits) {
+            ctx->has_bits = (signed char *)malloc(((size_t)n + 1) * 8);
+            if (ctx->has_bits) memset(ctx->has_bits, -1, ((size_t)n + 1) * 8);
+        }
+        ok = tab && used && ctx->slot && ctx->style_ok && (!old.sc_entry || (ctx->sc_key && ctx->sc_entry && ctx->slot_ver)) &&
+             (!old.has_bits || ctx->has_bits);
+    }
+    if (!ok) {
+        free(tab);
+        free(used);
+        css_layout_tree_free(ctx);
+        css_layout_tree_free(&old);
+        return false;
+    }
+    /* What moves over whole. */
+    ctx->slot_pool = old.slot_pool;          old.slot_pool = NULL;
+    ctx->styles = old.styles;                old.styles = NULL;
+    ctx->styles_n = old.styles_n;
+    ctx->arena = old.arena;                  memset(&old.arena, 0, sizeof(old.arena));
+    ctx->attr_ids = old.attr_ids;            old.attr_ids = NULL;
+    ctx->attr_n = old.attr_n;
+    ctx->attr_cap = old.attr_cap;
+    ctx->child_ids = old.child_ids;          old.child_ids = NULL;
+    ctx->child_n = old.child_n;
+    ctx->child_cap = old.child_cap;
+    ctx->sc_order = old.sc_order;
+    ctx->sc_global = old.sc_global;
+    ctx->has_bits_gen = old.has_bits_gen;
+    /* Store id -> old index. */
+    memset(tab, -1, cap * sizeof(int));
+    for (int o = 0; o < on; o++) {
+        uint32_t id = old.ids[o];
+        if (!id) continue;
+        uint32_t h = (id * 2654435761u) & (cap - 1);
+        while (tab[h] >= 0 && old.ids[tab[h]] != id) h = (h + 1) & (cap - 1);
+        if (tab[h] < 0) tab[h] = o;
+    }
+    for (int i = 0; i < n; i++) {
+        uint32_t id = ctx->ids[i];
+        int o = -1;
+        if (id) {
+            uint32_t h = (id * 2654435761u) & (cap - 1);
+            while (tab[h] >= 0 && old.ids[tab[h]] != id) h = (h + 1) & (cap - 1);
+            o = tab[h];
+        }
+        if (o >= 0 && !used[o]) {
+            used[o] = 1;
+            ctx->slot[i] = old.slot[o];
+            ctx->boxes[i].s = old.boxes[o].s;
+            ctx->custom_props[i] = old.custom_props[o];
+            ctx->style_ok[i] = old.style_ok ? old.style_ok[o] : 0;
+            if (ctx->sc_entry) {
+                ctx->sc_key[i] = old.sc_key[o];
+                ctx->sc_entry[i] = old.sc_entry[o];
+                ctx->slot_ver[i] = old.slot_ver[o];
+            }
+            if (ctx->has_bits) memcpy(ctx->has_bits + (size_t)i * 8, old.has_bits + (size_t)o * 8, 8);
+        } else {
+            ctx->slot[i] = layout_slot_take(ctx);
+            if (!ctx->slot[i]) {
+                for (int j = i; j < n; j++) ctx->slot[j] = NULL;
+                ok = false;
+                break;
+            }
+            ctx->boxes[i].s = ctx->slot[i];
+        }
+    }
+    for (int o = 0; ok && o < on; o++)
+        if (!used[o]) layout_slot_give(ctx, old.slot[o]);
+    free(tab);
+    free(used);
+    css_layout_tree_free(&old);
+    if (!ok) { css_layout_tree_free(ctx); return false; }
+    return true;
 }
 
 static bool layout_tree_keep(LayoutContext *ctx, HtmlDocument *doc, bool prune)
@@ -10999,25 +11196,34 @@ static bool layout_tree_keep(LayoutContext *ctx, HtmlDocument *doc, bool prune)
     size_t nch = 0;
     bool keep = keep_env && ctx->doc == doc && ctx->tree.count > 0 && (prune || !ctx->pruned_n) &&
                 html_mirror_changes(doc, ctx->tree_seq, &ch, &nch);
-    for (size_t k = 0; keep && k < nch; k++)
-        if (ch[k].kind == HTML_MIRROR_CHILDREN) keep = false;
     if (!keep) { css_layout_tree_free(ctx); return false; }
 
-    /* The elements whose attributes changed: where a style pass on the
-     * kept tree starts (layout_apply_stylesheet). */
-    ctx->attr_n = 0;
+    /* The elements whose attributes, and whose children, changed: where a
+     * style pass on the kept tree starts (layout_apply_stylesheet). */
+    ctx->attr_n = ctx->child_n = 0;
+    bool children = false;
     for (size_t k = 0; k < nch; k++) {
-        if (ch[k].kind != HTML_MIRROR_ATTRS || !ch[k].id) continue;
-        if (ctx->attr_n == ctx->attr_cap) {
-            int nc = ctx->attr_cap ? 2 * ctx->attr_cap : 64;
-            uint32_t *na = (uint32_t *)realloc(ctx->attr_ids, (size_t)nc * sizeof(uint32_t));
+        if (ch[k].kind == HTML_MIRROR_CHILDREN) children = true;
+        if ((ch[k].kind != HTML_MIRROR_ATTRS && ch[k].kind != HTML_MIRROR_CHILDREN) || !ch[k].id) continue;
+        bool attrs = ch[k].kind == HTML_MIRROR_ATTRS;
+        uint32_t **ids = attrs ? &ctx->attr_ids : &ctx->child_ids;
+        int *nn = attrs ? &ctx->attr_n : &ctx->child_n, *cap = attrs ? &ctx->attr_cap : &ctx->child_cap;
+        if (*nn == *cap) {
+            int nc = *cap ? 2 * *cap : 64;
+            uint32_t *na = (uint32_t *)realloc(*ids, (size_t)nc * sizeof(uint32_t));
             if (!na) { css_layout_tree_free(ctx); return false; }
-            ctx->attr_ids = na;
-            ctx->attr_cap = nc;
+            *ids = na;
+            *cap = nc;
         }
-        ctx->attr_ids[ctx->attr_n++] = ch[k].id;
-        /* (its :has() checks are of its old attributes) */
-        int d = ctx->has_bits ? html_mirror_index_of(doc, ch[k].id) : -1;
+        (*ids)[(*nn)++] = ch[k].id;
+    }
+    /* Children changed: the tree is built again, keeping what its boxes
+     * carry over. */
+    if (children && !layout_tree_carry(ctx, doc, prune)) return false;
+    /* (the :has() checks of the elements whose attributes changed are of
+     * their old attributes) */
+    for (int k = 0; ctx->has_bits && k < ctx->attr_n; k++) {
+        int d = html_mirror_index_of(doc, ctx->attr_ids[k]);
         int li = d >= 0 && d < ctx->dom_map_n ? ctx->dom_map[d] : -1;
         if (li >= 0) memset(ctx->has_bits + (size_t)li * 8, -1, 8);
     }
