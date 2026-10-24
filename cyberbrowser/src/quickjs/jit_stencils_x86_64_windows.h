@@ -4,8 +4,8 @@
 #define JIT_STENCILS_X86_64_WINDOWS_H
 
 /* Symbols the stencils use, resolved by name at run time. */
-#define JIT_SYMBOLS(X) X(jit_lookup_pc) X(g_gc) X(jit_get_var_ref) X(jit_put_var_ref) X(g_gc_poll_flag) X(g_interrupt_countdown) X(jit_truth) X(jit_strict_eq) X(jit_loose_eq) X(jit_field_ref) X(jit_prim_field_ref) X(jit_string_length) X(jit_put_field_fast) X(jit_array_el_ref) X(jit_call_prepare) X(jit_call_finish)
-enum { JIT_SYM_jit_lookup_pc, JIT_SYM_g_gc, JIT_SYM_jit_get_var_ref, JIT_SYM_jit_put_var_ref, JIT_SYM_g_gc_poll_flag, JIT_SYM_g_interrupt_countdown, JIT_SYM_jit_truth, JIT_SYM_jit_strict_eq, JIT_SYM_jit_loose_eq, JIT_SYM_jit_field_ref, JIT_SYM_jit_prim_field_ref, JIT_SYM_jit_string_length, JIT_SYM_jit_put_field_fast, JIT_SYM_jit_array_el_ref, JIT_SYM_jit_call_prepare, JIT_SYM_jit_call_finish, JIT_SYM_COUNT };
+#define JIT_SYMBOLS(X) X(jit_lookup_pc) X(g_gc) X(jit_get_var_ref) X(jit_put_var_ref) X(g_gc_poll_flag) X(g_interrupt_countdown) X(jit_truth) X(jit_strict_eq) X(jit_loose_eq) X(jit_field_ref) X(jit_prim_field_ref) X(jit_get_field_ic) X(jit_string_length) X(jit_put_field_fast) X(jit_array_el_ref) X(jit_call_prepare) X(jit_call_finish)
+enum { JIT_SYM_jit_lookup_pc, JIT_SYM_g_gc, JIT_SYM_jit_get_var_ref, JIT_SYM_jit_put_var_ref, JIT_SYM_g_gc_poll_flag, JIT_SYM_g_interrupt_countdown, JIT_SYM_jit_truth, JIT_SYM_jit_strict_eq, JIT_SYM_jit_loose_eq, JIT_SYM_jit_field_ref, JIT_SYM_jit_prim_field_ref, JIT_SYM_jit_get_field_ic, JIT_SYM_jit_string_length, JIT_SYM_jit_put_field_fast, JIT_SYM_jit_array_el_ref, JIT_SYM_jit_call_prepare, JIT_SYM_jit_call_finish, JIT_SYM_COUNT };
 
 /* clang's layout of what the stencils read (quickjs_jit.c checks gcc's). */
 #define JIT_LAYOUT(X) \
@@ -72,7 +72,7 @@ static const uint8_t jit_data_0[384] __attribute__((aligned(16))) = {
 };
 static const JitData jit_datas[] = { { jit_data_0, 384 } };
 
-enum { JIT_ST_trampoline, JIT_ST_add, JIT_ST_add_loc, JIT_ST_and, JIT_ST_call, JIT_ST_dec, JIT_ST_dec_loc, JIT_ST_drop, JIT_ST_dup, JIT_ST_dup1, JIT_ST_dup2, JIT_ST_dup3, JIT_ST_dyn, JIT_ST_eq, JIT_ST_exit, JIT_ST_generic, JIT_ST_generic_branch, JIT_ST_generic_flat, JIT_ST_get_arg, JIT_ST_get_array_el, JIT_ST_get_array_el2, JIT_ST_get_field, JIT_ST_get_field2, JIT_ST_get_length, JIT_ST_get_loc, JIT_ST_get_loc_check, JIT_ST_get_var_ref, JIT_ST_get_var_ref_check, JIT_ST_goto, JIT_ST_gt, JIT_ST_gte, JIT_ST_if_false, JIT_ST_if_false_back, JIT_ST_if_true, JIT_ST_if_true_back, JIT_ST_inc, JIT_ST_inc_loc, JIT_ST_insert2, JIT_ST_insert3, JIT_ST_insert4, JIT_ST_interp, JIT_ST_is_undefined_or_null, JIT_ST_lnot, JIT_ST_lt, JIT_ST_lte, JIT_ST_mod, JIT_ST_mul, JIT_ST_neg, JIT_ST_neq, JIT_ST_nip, JIT_ST_nip1, JIT_ST_null, JIT_ST_or, JIT_ST_perm3, JIT_ST_perm4, JIT_ST_perm5, JIT_ST_post_dec, JIT_ST_post_inc, JIT_ST_push_const, JIT_ST_push_false, JIT_ST_push_i32, JIT_ST_push_this, JIT_ST_push_true, JIT_ST_push_value, JIT_ST_put_arg, JIT_ST_put_field, JIT_ST_put_loc, JIT_ST_put_loc_check, JIT_ST_put_var_ref, JIT_ST_return, JIT_ST_return_undef, JIT_ST_rot3l, JIT_ST_rot3r, JIT_ST_rot4l, JIT_ST_rot5l, JIT_ST_sar, JIT_ST_set_arg, JIT_ST_set_loc, JIT_ST_set_loc_check, JIT_ST_set_loc_uninitialized, JIT_ST_set_var_ref, JIT_ST_shl, JIT_ST_shr, JIT_ST_strict_eq, JIT_ST_strict_neq, JIT_ST_sub, JIT_ST_swap, JIT_ST_swap2, JIT_ST_tail_call, JIT_ST_undefined, JIT_ST_xor, JIT_ST_COUNT };
+enum { JIT_ST_trampoline, JIT_ST_add, JIT_ST_add_loc, JIT_ST_and, JIT_ST_call, JIT_ST_dec, JIT_ST_dec_loc, JIT_ST_drop, JIT_ST_dup, JIT_ST_dup1, JIT_ST_dup2, JIT_ST_dup3, JIT_ST_dyn, JIT_ST_eq, JIT_ST_exit, JIT_ST_generic, JIT_ST_generic_branch, JIT_ST_generic_flat, JIT_ST_get_arg, JIT_ST_get_array_el, JIT_ST_get_array_el2, JIT_ST_get_field, JIT_ST_get_field2, JIT_ST_get_field2_ic, JIT_ST_get_field_ic, JIT_ST_get_length, JIT_ST_get_loc, JIT_ST_get_loc_check, JIT_ST_get_var_ref, JIT_ST_get_var_ref_check, JIT_ST_goto, JIT_ST_gt, JIT_ST_gte, JIT_ST_if_false, JIT_ST_if_false_back, JIT_ST_if_true, JIT_ST_if_true_back, JIT_ST_inc, JIT_ST_inc_loc, JIT_ST_insert2, JIT_ST_insert3, JIT_ST_insert4, JIT_ST_interp, JIT_ST_is_undefined_or_null, JIT_ST_lnot, JIT_ST_lt, JIT_ST_lte, JIT_ST_mod, JIT_ST_mul, JIT_ST_neg, JIT_ST_neq, JIT_ST_nip, JIT_ST_nip1, JIT_ST_null, JIT_ST_or, JIT_ST_perm3, JIT_ST_perm4, JIT_ST_perm5, JIT_ST_post_dec, JIT_ST_post_inc, JIT_ST_push_const, JIT_ST_push_false, JIT_ST_push_i32, JIT_ST_push_this, JIT_ST_push_true, JIT_ST_push_value, JIT_ST_put_arg, JIT_ST_put_field, JIT_ST_put_loc, JIT_ST_put_loc_check, JIT_ST_put_var_ref, JIT_ST_return, JIT_ST_return_undef, JIT_ST_rot3l, JIT_ST_rot3r, JIT_ST_rot4l, JIT_ST_rot5l, JIT_ST_sar, JIT_ST_set_arg, JIT_ST_set_loc, JIT_ST_set_loc_check, JIT_ST_set_loc_uninitialized, JIT_ST_set_var_ref, JIT_ST_shl, JIT_ST_shr, JIT_ST_strict_eq, JIT_ST_strict_neq, JIT_ST_sub, JIT_ST_swap, JIT_ST_swap2, JIT_ST_tail_call, JIT_ST_undefined, JIT_ST_xor, JIT_ST_COUNT };
 static const uint8_t jit_code_trampoline[179] = {
     0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x56,0x57,0x53,0x48,0x81,0xec,0xa0,0x00,0x00,0x00,0x44,0x0f,
     0x29,0xbc,0x24,0x90,0x00,0x00,0x00,0x44,0x0f,0x29,0xb4,0x24,0x80,0x00,0x00,0x00,0x44,0x0f,0x29,0x6c,
@@ -160,8 +160,8 @@ static const uint8_t jit_code_call[254] = {
 static const JitHole jit_holes_call[] = {
     { 11, JIT_HOLE_IMM, 1, 0, 0, 3 },
     { 29, JIT_HOLE_IMM, 0, 0, 0, 3 },
-    { 53, JIT_HOLE_CALL, 14, 0, 0, 1 },
-    { 138, JIT_HOLE_CALL, 15, 0, 0, 1 },
+    { 53, JIT_HOLE_CALL, 15, 0, 0, 1 },
+    { 138, JIT_HOLE_CALL, 16, 0, 0, 1 },
     { 169, JIT_HOLE_BRANCH, 0, 0, 0, 1 },
     { 237, JIT_HOLE_BRANCH, 3, 0, 0, 1 },
     { 250, JIT_HOLE_BRANCH, 2, 0, 0, 1 },
@@ -333,7 +333,7 @@ static const uint8_t jit_code_get_array_el[55] = {
     0x28,0xe9,0x00,0x00,0x00,0x00,0x48,0x83,0xc4,0x28,0xe9,0x00,0x00,0x00,0x00
 };
 static const JitHole jit_holes_get_array_el[] = {
-    { 9, JIT_HOLE_CALL, 13, 0, 0, 1 },
+    { 9, JIT_HOLE_CALL, 14, 0, 0, 1 },
     { 42, JIT_HOLE_BRANCH, 0, 0, 0, 1 },
     { 51, JIT_HOLE_BRANCH, 2, 0, 0, 1 },
     { 0, JIT_HOLE_END, 0, 0, 0, 0 }
@@ -346,7 +346,7 @@ static const uint8_t jit_code_get_array_el2[51] = {
     0x00,0x00,0x48,0x83,0xc4,0x28,0xe9,0x00,0x00,0x00,0x00
 };
 static const JitHole jit_holes_get_array_el2[] = {
-    { 9, JIT_HOLE_CALL, 13, 0, 0, 1 },
+    { 9, JIT_HOLE_CALL, 14, 0, 0, 1 },
     { 38, JIT_HOLE_BRANCH, 0, 0, 0, 1 },
     { 47, JIT_HOLE_BRANCH, 2, 0, 0, 1 },
     { 0, JIT_HOLE_END, 0, 0, 0, 0 }
@@ -389,6 +389,59 @@ static const JitHole jit_holes_get_field2[] = {
 };
 static const uint8_t jit_xdata_get_field2[8] = { 0x01,0x04,0x01,0x00,0x04,0x42,0x00,0x00 };
 static const JitUnwind jit_unwind_get_field2[] = { { 0, 92, 0 } };
+static const uint8_t jit_code_get_field2_ic[202] = {
+    0x48,0x83,0xec,0x28,0x49,0x8d,0x55,0xf0,0x41,0x83,0x7d,0xf8,0xff,0x0f,0x85,0x9b,0x00,0x00,0x00,0x8b,
+    0x02,0x48,0x8b,0x0d,0x00,0x00,0x00,0x00,0x48,0x8b,0x49,0x10,0x48,0x89,0xc6,0x48,0xc1,0xe6,0x04,0x48,
+    0x85,0xc0,0x48,0x8d,0x7c,0x31,0x10,0x48,0x0f,0x44,0xf8,0x8b,0x5c,0x31,0x1c,0x48,0x8b,0x05,0x00,0x00,
+    0x00,0x00,0x3b,0x18,0x75,0x57,0x83,0x78,0x10,0x00,0x75,0x51,0x48,0x01,0xce,0x8b,0x56,0x20,0x48,0x85,
+    0xd2,0x74,0x0d,0x48,0xc1,0xe2,0x04,0x48,0x01,0xd1,0x48,0x83,0xc1,0x10,0xeb,0x0e,0x48,0x83,0xc7,0x40,
+    0x31,0xc9,0xf6,0x46,0x13,0x1c,0x48,0x0f,0x45,0xcf,0x8b,0x40,0x20,0x48,0xc1,0xe0,0x04,0x48,0x01,0xc8,
+    0x48,0x85,0xc0,0x74,0x44,0x48,0x8b,0x08,0x48,0x8b,0x40,0x08,0x49,0x89,0x4d,0x00,0x49,0x89,0x45,0x08,
+    0x49,0x83,0xc5,0x10,0x48,0x83,0xc4,0x28,0xe9,0x00,0x00,0x00,0x00,0x48,0x8b,0x0d,0x00,0x00,0x00,0x00,
+    0x44,0x8b,0x05,0x00,0x00,0x00,0x00,0xe8,0x00,0x00,0x00,0x00,0xeb,0xca,0x41,0x8b,0x4c,0x24,0x24,0x44,
+    0x8b,0x05,0x00,0x00,0x00,0x00,0xe8,0x00,0x00,0x00,0x00,0xeb,0xb7,0x48,0x83,0xc4,0x28,0xe9,0x00,0x00,
+    0x00,0x00
+};
+static const JitHole jit_holes_get_field2_ic[] = {
+    { 24, JIT_HOLE_ADDR_LIT, 1, 0, 0, 3 },
+    { 58, JIT_HOLE_IMM, 1, 0, 0, 3 },
+    { 149, JIT_HOLE_BRANCH, 0, 0, 0, 1 },
+    { 156, JIT_HOLE_IMM, 1, 0, 0, 3 },
+    { 163, JIT_HOLE_IMM, 0, 0, 0, 3 },
+    { 168, JIT_HOLE_CALL, 11, 0, 0, 1 },
+    { 182, JIT_HOLE_IMM, 0, 0, 0, 3 },
+    { 187, JIT_HOLE_CALL, 10, 0, 0, 1 },
+    { 198, JIT_HOLE_BRANCH, 2, 0, 0, 1 },
+    { 0, JIT_HOLE_END, 0, 0, 0, 0 }
+};
+static const uint8_t jit_xdata_get_field2_ic[8] = { 0x01,0x04,0x01,0x00,0x04,0x42,0x00,0x00 };
+static const JitUnwind jit_unwind_get_field2_ic[] = { { 0, 202, 0 } };
+static const uint8_t jit_code_get_field_ic[198] = {
+    0x48,0x83,0xec,0x28,0x49,0x8d,0x55,0xf0,0x41,0x83,0x7d,0xf8,0xff,0x0f,0x85,0x97,0x00,0x00,0x00,0x8b,
+    0x02,0x48,0x8b,0x0d,0x00,0x00,0x00,0x00,0x48,0x8b,0x49,0x10,0x48,0x89,0xc6,0x48,0xc1,0xe6,0x04,0x48,
+    0x85,0xc0,0x48,0x8d,0x7c,0x31,0x10,0x48,0x0f,0x44,0xf8,0x8b,0x5c,0x31,0x1c,0x48,0x8b,0x05,0x00,0x00,
+    0x00,0x00,0x3b,0x18,0x75,0x53,0x83,0x78,0x10,0x00,0x75,0x4d,0x48,0x01,0xce,0x8b,0x56,0x20,0x48,0x85,
+    0xd2,0x74,0x0d,0x48,0xc1,0xe2,0x04,0x48,0x01,0xd1,0x48,0x83,0xc1,0x10,0xeb,0x0e,0x48,0x83,0xc7,0x40,
+    0x31,0xc9,0xf6,0x46,0x13,0x1c,0x48,0x0f,0x45,0xcf,0x8b,0x40,0x20,0x48,0xc1,0xe0,0x04,0x48,0x01,0xc8,
+    0x48,0x85,0xc0,0x74,0x40,0x48,0x8b,0x08,0x48,0x8b,0x40,0x08,0x49,0x89,0x4d,0xf0,0x49,0x89,0x45,0xf8,
+    0x48,0x83,0xc4,0x28,0xe9,0x00,0x00,0x00,0x00,0x48,0x8b,0x0d,0x00,0x00,0x00,0x00,0x44,0x8b,0x05,0x00,
+    0x00,0x00,0x00,0xe8,0x00,0x00,0x00,0x00,0xeb,0xce,0x41,0x8b,0x4c,0x24,0x24,0x44,0x8b,0x05,0x00,0x00,
+    0x00,0x00,0xe8,0x00,0x00,0x00,0x00,0xeb,0xbb,0x48,0x83,0xc4,0x28,0xe9,0x00,0x00,0x00,0x00
+};
+static const JitHole jit_holes_get_field_ic[] = {
+    { 24, JIT_HOLE_ADDR_LIT, 1, 0, 0, 3 },
+    { 58, JIT_HOLE_IMM, 1, 0, 0, 3 },
+    { 145, JIT_HOLE_BRANCH, 0, 0, 0, 1 },
+    { 152, JIT_HOLE_IMM, 1, 0, 0, 3 },
+    { 159, JIT_HOLE_IMM, 0, 0, 0, 3 },
+    { 164, JIT_HOLE_CALL, 11, 0, 0, 1 },
+    { 178, JIT_HOLE_IMM, 0, 0, 0, 3 },
+    { 183, JIT_HOLE_CALL, 10, 0, 0, 1 },
+    { 194, JIT_HOLE_BRANCH, 2, 0, 0, 1 },
+    { 0, JIT_HOLE_END, 0, 0, 0, 0 }
+};
+static const uint8_t jit_xdata_get_field_ic[8] = { 0x01,0x04,0x01,0x00,0x04,0x42,0x00,0x00 };
+static const JitUnwind jit_unwind_get_field_ic[] = { { 0, 198, 0 } };
 static const uint8_t jit_code_get_length[103] = {
     0x48,0x83,0xec,0x28,0x41,0x8b,0x45,0xf8,0x83,0xf8,0xf9,0x75,0x20,0x41,0x8b,0x4d,0xf0,0xe8,0x00,0x00,
     0x00,0x00,0x89,0xc0,0x49,0x89,0x45,0xf0,0x49,0xc7,0x45,0xf8,0x00,0x00,0x00,0x00,0x48,0x83,0xc4,0x28,
@@ -398,7 +451,7 @@ static const uint8_t jit_code_get_length[103] = {
     0x00,0x00,0x00
 };
 static const JitHole jit_holes_get_length[] = {
-    { 18, JIT_HOLE_CALL, 11, 0, 0, 1 },
+    { 18, JIT_HOLE_CALL, 12, 0, 0, 1 },
     { 41, JIT_HOLE_BRANCH, 0, 0, 0, 1 },
     { 56, JIT_HOLE_IMM, 0, 0, 0, 2 },
     { 61, JIT_HOLE_CALL, 9, 0, 0, 1 },
@@ -907,7 +960,7 @@ static const uint8_t jit_code_put_field[86] = {
 static const JitHole jit_holes_put_field[] = {
     { 7, JIT_HOLE_IMM, 1, 0, 0, 3 },
     { 23, JIT_HOLE_IMM, 0, 0, 0, 3 },
-    { 34, JIT_HOLE_CALL, 12, 0, 0, 1 },
+    { 34, JIT_HOLE_CALL, 13, 0, 0, 1 },
     { 50, JIT_HOLE_BRANCH, 0, 0, 0, 1 },
     { 61, JIT_HOLE_BRANCH, 2, 0, 0, 1 },
     { 82, JIT_HOLE_BRANCH, 3, 0, 0, 1 },
@@ -1219,8 +1272,8 @@ static const uint8_t jit_code_tail_call[308] = {
 static const JitHole jit_holes_tail_call[] = {
     { 11, JIT_HOLE_IMM, 1, 0, 0, 3 },
     { 29, JIT_HOLE_IMM, 0, 0, 0, 3 },
-    { 53, JIT_HOLE_CALL, 14, 0, 0, 1 },
-    { 142, JIT_HOLE_CALL, 15, 0, 0, 1 },
+    { 53, JIT_HOLE_CALL, 15, 0, 0, 1 },
+    { 142, JIT_HOLE_CALL, 16, 0, 0, 1 },
     { 210, JIT_HOLE_BRANCH, 3, 0, 0, 1 },
     { 304, JIT_HOLE_BRANCH, 2, 0, 0, 1 },
     { 0, JIT_HOLE_END, 0, 0, 0, 0 }
@@ -1284,6 +1337,8 @@ static const JitStencil jit_stencils[JIT_ST_COUNT] = {
     [JIT_ST_get_array_el2] = { "get_array_el2", jit_code_get_array_el2, 51, jit_holes_get_array_el2, 0, jit_xdata_get_array_el2, 8, jit_unwind_get_array_el2, 1 },
     [JIT_ST_get_field] = { "get_field", jit_code_get_field, 88, jit_holes_get_field, 0, jit_xdata_get_field, 8, jit_unwind_get_field, 1 },
     [JIT_ST_get_field2] = { "get_field2", jit_code_get_field2, 92, jit_holes_get_field2, 0, jit_xdata_get_field2, 8, jit_unwind_get_field2, 1 },
+    [JIT_ST_get_field2_ic] = { "get_field2_ic", jit_code_get_field2_ic, 202, jit_holes_get_field2_ic, 0, jit_xdata_get_field2_ic, 8, jit_unwind_get_field2_ic, 1 },
+    [JIT_ST_get_field_ic] = { "get_field_ic", jit_code_get_field_ic, 198, jit_holes_get_field_ic, 0, jit_xdata_get_field_ic, 8, jit_unwind_get_field_ic, 1 },
     [JIT_ST_get_length] = { "get_length", jit_code_get_length, 103, jit_holes_get_length, 0, jit_xdata_get_length, 8, jit_unwind_get_length, 1 },
     [JIT_ST_get_loc] = { "get_loc", jit_code_get_loc, 33, jit_holes_get_loc, 1, NULL, 0, NULL, 0 },
     [JIT_ST_get_loc_check] = { "get_loc_check", jit_code_get_loc_check, 43, jit_holes_get_loc_check, 0, NULL, 0, NULL, 0 },

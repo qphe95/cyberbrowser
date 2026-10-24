@@ -609,6 +609,37 @@ STENCIL(get_field2)
     sp++;
     CONTINUE();
 }
+/* The same through the site's inline cache (IMM(1), a JitIC): a receiver
+ * whose shape is way 0's, an own property, is read inline. */
+static inline AI const GCValue *ic_field_ref(JSInterpFrame *F, const GCValue *obj)
+{
+    if (__builtin_expect(JS_VALUE_GET_TAG(*obj) == JS_TAG_OBJECT, 1)) {
+        const JitIC *ic = (const JitIC *)IMM(1);
+        JSObject *o = (JSObject *)gc_deref(GC_VALUE_GET_HANDLE(*obj));
+        if (__builtin_expect(o->shape_handle == ic->shape[0] && ic->holder[0] == GC_HANDLE_NULL, 1))
+            return &js_obj_props_of(o)[ic->slot[0]].u.value;
+        return jit_get_field_ic((JitIC *)ic, obj, (JSAtom)IMM(0));
+    }
+    return jit_prim_field_ref(F->ctx, obj, (JSAtom)IMM(0));
+}
+STENCIL(get_field_ic)
+{
+    const GCValue *v = ic_field_ref(F, &sp[-1]);
+    if (__builtin_expect(!v, 0))
+        SLOW();
+    vcopy(&sp[-1], v);
+    CONTINUE();
+}
+STENCIL(get_field2_ic)
+{
+    const GCValue *v = ic_field_ref(F, &sp[-1]);
+    if (__builtin_expect(!v, 0))
+        SLOW();
+    vcopy(&sp[0], v);
+    sp++;
+    CONTINUE();
+}
+
 /* get_field of length (IMM(0)): a string's inline. */
 STENCIL(get_length)
 {

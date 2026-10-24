@@ -5559,6 +5559,56 @@ static bool js_shape_hash_delete(JSRuntimeHandle rt, JSShapeHandle sh)
     return ok;
 }
 
+/* The inline caches' prototype ways (jit_get_field_ic) hold while the
+ * prototypes' own properties stay as they were: a way for atom A is filled
+ * with jit_proto_epoch(A) and holds while it is unchanged.  A change of
+ * property A of a prototype moves g_jit_atom_epoch for A; any other change
+ * of a prototype (its own prototype, slots moving) moves g_jit_proto_epoch.
+ * Both only grow, so their sum changes when either does. */
+uint32_t g_jit_proto_epoch;
+#define JIT_ATOM_EPOCHS 1024
+static uint32_t g_jit_atom_epoch[JIT_ATOM_EPOCHS];
+
+static inline uint32_t jit_proto_epoch(JSAtom atom)
+{
+    return g_jit_proto_epoch + g_jit_atom_epoch[atom & (JIT_ATOM_EPOCHS - 1)];
+}
+
+/* proto is now some shape's prototype.  (The ways filled so far did not
+ * depend on it.) */
+static inline void js_object_mark_prototype(GCHandle proto)
+{
+    JSObject *o = GC_DEREF_H((JSObjectHandle)proto, JSObjectHandle);
+    if (o && !o->is_prototype)
+        o->is_prototype = 1;
+}
+
+/* Object p's own properties are about to change (or have) in a way other
+ * than property atom alone. */
+static inline void js_object_shape_changing(JSObjectHandle p)
+{
+    JSObject *o = GC_DEREF_H(p, JSObjectHandle);
+    if (o && o->is_prototype)
+        g_jit_proto_epoch++;
+}
+
+/* Object p's property atom is about to be added, removed or changed. */
+static inline void js_object_prop_changing(JSObjectHandle p, JSAtom atom)
+{
+    JSObject *o = GC_DEREF_H(p, JSObjectHandle);
+    if (o && o->is_prototype)
+        g_jit_atom_epoch[atom & (JIT_ATOM_EPOCHS - 1)]++;
+}
+
+/* A private shape is about to change in place: its cached transition
+ * (JSShape.trans_child) no longer describes it. */
+static inline void js_shape_forget_transition(JSShapeHandle sh)
+{
+    JSShape *s = GC_DEREF_H(sh, JSShapeHandle);
+    if (s)
+        s->trans_child = GC_HANDLE_NULL;
+}
+
 /* create a new empty shape with prototype 'proto'. It is not hashed */
 static JSShapeHandle js_new_shape_nohash(JSContextHandle ctx, JSObjectHandle proto,
                                            int hash_size, int prop_size)
@@ -5589,6 +5639,8 @@ static JSShapeHandle js_new_shape_nohash(JSContextHandle ctx, JSObjectHandle pro
     js_shape_set_proto_version(sh, 0);            /* even: stable */
     /* Object already registered with GC by gc_alloc_js_object */
     SAFE_SET_HANDLE(sh, JSShapeHandle, proto_handle, proto_handle);  /* Use saved handle */
+    if (proto_handle != GC_HANDLE_NULL)
+        js_object_mark_prototype(proto_handle);
     /* CRITICAL FIX: Initialize property array to zero (contains JSShapeProperty structs).
      * The atom field of each property must be JS_ATOM_NULL (0) to prevent
      * garbage values from being interpreted as valid atom indices. */
@@ -5602,6 +5654,8 @@ static JSShapeHandle js_new_shape_nohash(JSContextHandle ctx, JSObjectHandle pro
     SAFE_SET(sh, JSShapeHandle, deleted_prop_count, 0);
     SAFE_SET(sh, JSShapeHandle, is_hashed, FALSE);
     SAFE_SET(sh, JSShapeHandle, hash, 0);  /* Initialize hash */
+    SAFE_SET(sh, JSShapeHandle, ic_cached, 0);
+    js_shape_forget_transition(sh);
     /* CRITICAL FIX: Root shapes immediately to prevent them from being freed
      * while objects still reference them. Shapes should outlive objects that use them.
      * This prevents the "shape freed while object still references it" crash. */
@@ -5678,6 +5732,8 @@ static JSShapeHandle js_clone_shape(JSContextHandle ctx, JSShapeHandle sh1)
     /* Object already registered with GC by gc_alloc_js_object */
     SAFE_SET_HANDLE(sh, JSShapeHandle, handle, sh_handle);  /* Store the correct handle */
     SAFE_SET(sh, JSShapeHandle, is_hashed, FALSE);
+    SAFE_SET(sh, JSShapeHandle, ic_cached, 0);
+    js_shape_forget_transition(sh);
     if (SAFE_GET_OR(sh, JSShapeHandle, proto_handle, GC_HANDLE_NULL) != GC_HANDLE_NULL) {
         GC_MKHANDLE(JS_TAG_OBJECT, SAFE_GET_OR(sh, JSShapeHandle, proto_handle, GC_HANDLE_NULL));
     }
@@ -5948,6 +6004,8 @@ static int compact_properties(JSContextHandle ctx, JSObjectHandle p)
     sh = GC_SHAPE_DEREF(js_obj_shape_handle(p));
     sh_handle = js_obj_shape_handle(p);
     assert(!SAFE_GET_OR(sh, JSShapeHandle, is_hashed, 0));
+    js_shape_forget_transition(sh);
+    js_object_shape_changing(p);    /* slots move */
 
     new_size = max_int(JS_PROP_INITIAL_SIZE,
                        SAFE_GET_OR(sh, JSShapeHandle, prop_count, 0) - SAFE_GET_OR(sh, JSShapeHandle, deleted_prop_count, 0));
@@ -6047,6 +6105,9 @@ static int add_shape_property(JSContextHandle ctx, GCHandle *psh_handle,
             return -1;
         sh = GC_SHAPE_DEREF(*psh_handle);
     }
+    js_shape_forget_transition(sh);
+    if (SAFE_VALID(p))
+        js_object_prop_changing(p, atom);
 
     new_shape_hash = shape_hash(SAFE_GET_OR(sh, JSShapeHandle, hash, 0), atom);
     new_shape_hash = shape_hash(new_shape_hash, prop_flags);
@@ -6285,6 +6346,7 @@ static GCValue JS_NewObjectFromShape(JSContextHandle ctx, JSShapeHandle sh, JSCl
     SAFE_SET(p, JSObjectHandle, tmp_mark, 0);
     SAFE_SET(p, JSObjectHandle, is_HTMLDDA, 0);
     SAFE_SET(p, JSObjectHandle, is_watched, 0);
+    SAFE_SET(p, JSObjectHandle, is_prototype, 0);
     SAFE_SET(p, JSObjectHandle, weakref_count, 0);
     js_obj_set_prop_version(p, 2); /* start stable (even) */
     SAFE_SET_HANDLE(p, JSObjectHandle, u.opaque_handle, GC_HANDLE_NULL);
@@ -7431,6 +7493,11 @@ void mark_children(JSRuntimeHandle rt, GCHandle handle,
                 GCValue proto_val = GC_MKHANDLE(JS_TAG_OBJECT, shape_proto);
                 JS_MarkValue(rt, proto_val, mark_func);
             }
+            {
+                GCHandle child = SAFE_GET_OR(sh, JSShapeHandle, trans_child, GC_HANDLE_NULL);
+                if (child != GC_HANDLE_NULL)
+                    mark_func(rt, child);
+            }
             /* Mark atoms referenced by this shape's properties.
              * These atoms must stay alive as long as the shape exists.
              */
@@ -7712,6 +7779,8 @@ size_t JS_GCDataLiveBytes(GCHandle owner, GCHandle data)
 
 /* Roots the engine keeps outside GC objects: the pending exception, the
  * pending jobs and the atom array. */
+static void jit_ic_mark_roots(JSRuntimeHandle rt, JS_MarkFunc *mark_func);
+
 void JS_GCEnumerateEngineRoots(JSRuntimeHandle rt, JS_MarkFunc *mark_func)
 {
     GCValue exc = SAFE_GET_OR(rt, JSRuntimeHandle, current_exception, GC_UNDEFINED);
@@ -7724,6 +7793,7 @@ void JS_GCEnumerateEngineRoots(JSRuntimeHandle rt, JS_MarkFunc *mark_func)
     GCHandle atoms = js_rt_atom_array_handle(rt);
     if (atoms != GC_HANDLE_NULL)
         mark_func(rt, atoms);
+    jit_ic_mark_roots(rt, mark_func);
     JobQueue *job_queue = js_job_queue_ptr(rt);
     if (job_queue) {
         JobBuffer *b = (JobBuffer *)atomic_load_ptr((void *volatile *)&job_queue->head_block);
@@ -9203,6 +9273,8 @@ static int JS_SetPrototypeInternal(JSContextHandle ctx, GCValue obj,
     if (js_shape_prepare_update(ctx, p, NULL))
         return -1;
     sh = GC_SHAPE_DEREF(js_obj_shape_handle(p));
+    if (SAFE_VALID(proto))
+        js_object_mark_prototype(SAFE_HANDLE(proto));
     js_shape_proto_handle_atomic_store(sh, SAFE_VALID(proto) ? SAFE_HANDLE(proto) : GC_HANDLE_NULL);
     SAFE_SET(p, JSObjectHandle, is_std_array_prototype, FALSE); 
     return TRUE;
@@ -10513,6 +10585,18 @@ void JS_SetWatched(JSContextHandle ctx, GCValue obj)
 
 /* Note: the property value is not initialized. Return NULL if memory
    error. */
+/* Shape sh, unchanged, gave new_sh by adding prop with prop_flags: remember
+ * it (see JSShape.trans_child) when new_sh is hashed, so never changes. */
+static void js_shape_note_transition(JSShapeHandle sh, JSAtom prop, int prop_flags, JSShapeHandle new_sh)
+{
+    JSShape *s = GC_DEREF_H(sh, JSShapeHandle);
+    if (!s || !SAFE_GET_OR(new_sh, JSShapeHandle, is_hashed, 0) || s->trans_child == SAFE_HANDLE(new_sh))
+        return;
+    s->trans_atom = prop;
+    s->trans_flags = (uint32_t)prop_flags;
+    GC_SET(s->trans_child, SAFE_HANDLE(new_sh));
+}
+
 static JSProperty *add_property(JSContextHandle ctx,
                                 JSObjectHandle p, JSAtom prop, int prop_flags)
 {
@@ -10547,11 +10631,19 @@ static JSProperty *add_property(JSContextHandle ctx,
             gc_for_each_object_of_type(JS_GC_OBJ_TYPE_JS_CONTEXT, ctx_find_callback, &ctx_find_data);
         }
     }
+    js_object_prop_changing(p, prop);
     sh = GC_SHAPE_DEREF(js_obj_shape_handle(p));
-    /* Always try to find an existing shape for the next property, whether the
+    /* The transition this shape made last, else the shape hash table.
+     * Always try to find an existing shape for the next property, whether the
        current shape is shared or private.  This maximizes shape sharing and
        avoids creating duplicate hashed shapes when growing private shapes. */
-    new_sh = find_hashed_shape_prop(ctx_rt, sh, prop, prop_flags);
+    {
+        JSShape *s = GC_DEREF_H(sh, JSShapeHandle);
+        if (s && s->trans_child != GC_HANDLE_NULL && s->trans_atom == prop && s->trans_flags == (uint32_t)prop_flags)
+            new_sh = (JSShapeHandle)s->trans_child;
+        else
+            new_sh = find_hashed_shape_prop(ctx_rt, sh, prop, prop_flags);
+    }
     bool df_pd = CYBER_ENV(CYBER_T_DF) && prop > 1000;
     if (df_pd) {
         const char *pn = JS_AtomToCString(ctx, prop);
@@ -10571,6 +10663,7 @@ static JSProperty *add_property(JSContextHandle ctx,
                 return NULL;
         }
         js_obj_set_shape_handle(p, SAFE_GET_OR(new_sh, JSShapeHandle, handle, GC_HANDLE_NULL));
+        js_shape_note_transition(sh, prop, prop_flags, new_sh);
         /* The old shape may still be referenced by other objects; leave it
            in the shared hash table and let GC cleanup remove it if dead. */
         return &p_prop[SAFE_GET_OR(new_sh, JSShapeHandle, prop_count, 0) - 1];
@@ -10578,6 +10671,9 @@ static JSProperty *add_property(JSContextHandle ctx,
     GCHandle sh_handle = js_obj_shape_handle(p);
     if (add_shape_property(ctx, &sh_handle, p, prop, prop_flags))
         return NULL;
+    /* A hashed shape was cloned and the clone grown: a transition. */
+    if (js_obj_shape_handle(p) != SAFE_HANDLE(sh))
+        js_shape_note_transition(sh, prop, prop_flags, (JSShapeHandle)js_obj_shape_handle(p));
     return &p_prop[SAFE_GET_OR(GC_SHAPE_DEREF(js_obj_shape_handle(p)), JSShapeHandle, prop_count, 0) - 1];
 }
 
@@ -11724,7 +11820,7 @@ static int js_shape_prepare_update(JSContextHandle ctx, JSObjectHandle p,
     uint32_t idx = 0;    /* prevent warning */
 
     sh = GC_SHAPE_DEREF(js_obj_shape_handle(p));
-    if (SAFE_GET_OR(sh, JSShapeHandle, is_hashed, 0)) {
+    if (SAFE_GET_OR(sh, JSShapeHandle, is_hashed, 0) || SAFE_GET_OR(sh, JSShapeHandle, ic_cached, 0)) {
         if (pprs)
             idx = *pprs - get_shape_prop(sh);
         /* clone the shape (the resulting one is no longer hashed) */
@@ -11736,6 +11832,12 @@ static int js_shape_prepare_update(JSContextHandle ctx, JSObjectHandle p,
         if (pprs)
             *pprs = get_shape_prop(sh) + idx;
     }
+    /* The caller changes it now: property *pprs, or anything. */
+    js_shape_forget_transition(sh);
+    if (pprs)
+        js_object_prop_changing(p, (*pprs)->atom);
+    else
+        js_object_shape_changing(p);
     return 0;
 }
 
@@ -18882,7 +18984,10 @@ static JSVarRefHandle js_closure_define_global_var(JSContextHandle ctx, JSClosur
                     return GC_HANDLE_NULL;
                 /* Copy the current property value to the var_ref */
                 js_varref_set_value(var_ref, pr->u.value);
-                /* Convert property to VARREF type */
+                /* Convert property to VARREF type (a shape is changed only
+                   when private: shared ones are cloned first) */
+                if (js_shape_prepare_update(ctx, p, &prs))
+                    return GC_HANDLE_NULL;
                 prs->flags = (prs->flags & ~JS_PROP_TMASK) | JS_PROP_VARREF;
                 gc_set_heap_handle(&pr->u.var_ref_handle, SAFE_HANDLE(var_ref));
             } else {
@@ -18893,6 +18998,8 @@ static JSVarRefHandle js_closure_define_global_var(JSContextHandle ctx, JSClosur
                 (prs->flags & JS_PROP_CONFIGURABLE)) {
                 /* update the property flags if possible when
                    declaring a global function */
+                if (js_shape_prepare_update(ctx, p, &prs))
+                    return GC_HANDLE_NULL;
                 if ((prs->flags & JS_PROP_TMASK) == JS_PROP_GETSET) {
                     free_property(ctx_rt, pr, prs->flags);
                     prs->flags = flags | JS_PROP_VARREF;
@@ -19017,7 +19124,9 @@ static JSVarRefHandle js_closure_global_var(JSContextHandle ctx, JSClosureVar *c
             return GC_HANDLE_NULL;
         /* Copy the current property value to the var_ref */
         js_varref_set_value(var_ref, pr->u.value);
-        /* Convert property to VARREF type */
+        /* Convert property to VARREF type (see above) */
+        if (js_shape_prepare_update(ctx, p, &prs))
+            return GC_HANDLE_NULL;
         prs->flags = (prs->flags & ~JS_PROP_TMASK) | JS_PROP_VARREF;
         gc_set_heap_handle(&pr->u.var_ref_handle, SAFE_HANDLE(var_ref));
         return var_ref;
@@ -23687,6 +23796,195 @@ const GCValue *jit_field_ref(GCHandle h, JSAtom atom)
         if (!SAFE_VALID(p))
             return &jit_undefined_value;
     }
+}
+
+/* --- Inline caches (JIT_DESIGN.md section 7) -------------------------------
+ * A way caches a receiver shape that is hashed, so never changes: an object
+ * with that shape has the property at the same slot, with the same flags,
+ * and the same prototype.  A way whose property sits on a prototype (or is
+ * absent from the chain) also depends on the prototypes' own properties,
+ * and holds only while jit_proto_epoch(atom) is what it was when the way
+ * was filled.  The shapes and holders the ways name are kept alive (the
+ * retention set, a root), so their handles never come to name something
+ * else. */
+
+#define JIT_IC_KEEP_MAX (1u << 17)
+static GCHandle *g_ic_keep;     /* open addressing; GC_HANDLE_NULL: free */
+static uint32_t g_ic_keep_cap, g_ic_keep_n, g_ic_keep_epoch;
+
+/* Keep h alive for the inline caches; 0 when the set is full. */
+static int jit_ic_retain(GCHandle h)
+{
+    if (g_ic_keep_epoch != g_gc_epoch) {   /* a heap torn down and made again */
+        js_plain_free(g_ic_keep);
+        g_ic_keep = NULL;
+        g_ic_keep_cap = g_ic_keep_n = 0;
+        g_ic_keep_epoch = g_gc_epoch;
+    }
+    if (2 * (g_ic_keep_n + 1) > g_ic_keep_cap) {
+        uint32_t cap = g_ic_keep_cap ? g_ic_keep_cap * 2 : 1024, i, j;
+        if (cap > JIT_IC_KEEP_MAX)
+            return 0;
+        GCHandle *t = js_plain_calloc(cap, sizeof(GCHandle));
+        if (!t)
+            return 0;
+        for (i = 0; i < g_ic_keep_cap; i++) {
+            if (g_ic_keep[i] == GC_HANDLE_NULL)
+                continue;
+            for (j = (g_ic_keep[i] * 0x9e3779b1u) & (cap - 1); t[j] != GC_HANDLE_NULL; j = (j + 1) & (cap - 1))
+                ;
+            t[j] = g_ic_keep[i];
+        }
+        js_plain_free(g_ic_keep);
+        g_ic_keep = t;
+        g_ic_keep_cap = cap;
+    }
+    for (uint32_t j = (h * 0x9e3779b1u) & (g_ic_keep_cap - 1);; j = (j + 1) & (g_ic_keep_cap - 1)) {
+        if (g_ic_keep[j] == h)
+            return 1;
+        if (g_ic_keep[j] == GC_HANDLE_NULL) {
+            g_ic_keep[j] = h;
+            g_ic_keep_n++;
+            return 1;
+        }
+    }
+}
+
+/* The megamorphic cache: ways for sites past JIT_IC_WAYS shapes, shared by
+ * all of them, direct-mapped by (shape, atom), with the same rules as a
+ * site's ways (each entry has its own epoch). */
+#define JIT_MEGA_SIZE 8192
+typedef struct JitMegaEntry {
+    GCHandle shape;
+    JSAtom atom;
+    GCHandle holder;
+    uint32_t slot;
+    uint32_t epoch;
+} JitMegaEntry;
+static JitMegaEntry g_ic_mega[JIT_MEGA_SIZE];
+
+static inline JitMegaEntry *jit_mega_entry(GCHandle sh, JSAtom atom)
+{
+    return &g_ic_mega[((sh * 0x9e3779b1u) ^ (atom * 0x85ebca6bu)) >> 19 & (JIT_MEGA_SIZE - 1)];
+}
+
+/* The retention set, for JS_GCEnumerateEngineRoots. */
+static void jit_ic_mark_roots(JSRuntimeHandle rt, JS_MarkFunc *mark_func)
+{
+    if (g_ic_keep_epoch != g_gc_epoch)
+        return;
+    for (uint32_t i = 0; i < g_ic_keep_cap; i++)
+        if (g_ic_keep[i] != GC_HANDLE_NULL)
+            mark_func(rt, g_ic_keep[i]);
+}
+
+/* What a way (or megamorphic entry) for receiver o finds, or NULL when it
+ * does not hold. */
+static inline const GCValue *jit_ic_way_value(JSObject *o, JSAtom atom, GCHandle holder, uint32_t slot,
+                                              uint32_t epoch)
+{
+    if (holder == GC_HANDLE_NULL)
+        return &js_obj_props_of(o)[slot].u.value;
+    /* An exotic object may share the shape: its own lookup comes first. */
+    if (epoch != jit_proto_epoch(atom) || o->is_exotic)
+        return NULL;
+    if (slot == JIT_IC_ABSENT)
+        return &jit_undefined_value;
+    return &js_obj_props_of(GC_DEREF_H((JSObjectHandle)holder, JSObjectHandle))[slot].u.value;
+}
+
+/* get_field / get_field2 on the object *objv through inline cache ic: the
+ * address of the value (as jit_field_ref), or NULL for the helper.  A miss
+ * looks the property up and fills a way when it can. */
+const GCValue *jit_get_field_ic(JitIC *ic, const GCValue *objv, JSAtom atom)
+{
+    JSObjectHandle p0 = (JSObjectHandle)GC_VALUE_GET_HANDLE(*objv), p;
+    JSObject *o = GC_DEREF_H(p0, JSObjectHandle);
+    const GCValue *v;
+    GCHandle sh, holder;
+    JSProperty *pr;
+    JSShapeProperty *prs;
+    uint32_t slot;
+    int i;
+
+    if (!o)
+        return NULL;
+    sh = atomic_load_u32((volatile uint32_t *)&o->shape_handle);
+    for (i = 0; i < ic->n && ic->shape[i] != sh; i++)
+        ;
+    if (i < ic->n && (v = jit_ic_way_value(o, atom, ic->holder[i], ic->slot[i], ic->epoch)))
+        return v;
+    if (ic->mega) {
+        JitMegaEntry *e = jit_mega_entry(sh, atom);
+        if (e->shape == sh && e->atom == atom && (v = jit_ic_way_value(o, atom, e->holder, e->slot, e->epoch)))
+            return v;
+    }
+
+    /* A miss: jit_field_ref's walk, noting where the property is. */
+    for (p = p0;;) {
+        prs = find_own_property(&pr, p, atom);
+        if (prs) {
+            if (unlikely(prs->flags & JS_PROP_TMASK))
+                return NULL;
+            holder = p == p0 ? GC_HANDLE_NULL : SAFE_HANDLE(p);
+            slot = (uint32_t)(pr - js_obj_props_of(GC_DEREF_H(p, JSObjectHandle)));
+            v = &pr->u.value;
+            break;
+        }
+        if (unlikely(SAFE_GET_OR(p, JSObjectHandle, is_exotic, false)))
+            return NULL;
+        GCHandle proto_handle = js_object_get_proto_handle_atomic(p);
+        if (proto_handle == GC_HANDLE_NULL || !SAFE_VALID((JSObjectHandle)proto_handle)) {
+            holder = sh;        /* not the receiver's own; never dereferenced */
+            slot = JIT_IC_ABSENT;
+            v = &jit_undefined_value;
+            break;
+        }
+        p = (JSObjectHandle)proto_handle;
+    }
+
+    /* Fill a way.  A private receiver shape only for its own properties
+     * (see JSShape.ic_cached). */
+    if (!SAFE_GET_OR((JSShapeHandle)sh, JSShapeHandle, is_hashed, 0)) {
+        if (holder != GC_HANDLE_NULL)
+            return v;
+        SAFE_SET((JSShapeHandle)sh, JSShapeHandle, ic_cached, 1);
+    }
+    if (!jit_ic_retain(sh) || (holder != GC_HANDLE_NULL && slot != JIT_IC_ABSENT && !jit_ic_retain(holder)))
+        return v;
+    if (!ic->mega && holder != GC_HANDLE_NULL && ic->epoch != jit_proto_epoch(atom)) {
+        /* The prototype ways are stale: drop them, keep the own ones. */
+        int n = 0;
+        for (int k = 0; k < ic->n; k++) {
+            if (ic->holder[k] != GC_HANDLE_NULL)
+                continue;
+            ic->shape[n] = ic->shape[k];
+            ic->holder[n] = GC_HANDLE_NULL;
+            ic->slot[n] = ic->slot[k];
+            n++;
+        }
+        ic->n = (uint8_t)n;
+        ic->epoch = jit_proto_epoch(atom);
+        for (i = 0; i < n && ic->shape[i] != sh; i++)
+            ;
+    }
+    if (!ic->mega && i >= JIT_IC_WAYS)
+        ic->mega = 1;
+    if (ic->mega) {
+        JitMegaEntry *e = jit_mega_entry(sh, atom);
+        e->shape = sh;
+        e->atom = atom;
+        e->holder = holder;
+        e->slot = slot;
+        e->epoch = jit_proto_epoch(atom);
+        return v;
+    }
+    ic->shape[i] = sh;
+    ic->holder[i] = holder;
+    ic->slot[i] = slot;
+    if (i == ic->n)
+        ic->n++;
+    return v;
 }
 
 /* get_field / get_field2 of a property of a primitive string *v (not

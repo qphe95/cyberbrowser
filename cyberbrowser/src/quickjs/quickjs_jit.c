@@ -553,6 +553,17 @@ typedef struct JitInsn {
     uint64_t imm0, imm1;
 } JitInsn;
 
+/* QJS_JIT_IC=0: no inline caches (get_field looks the property up). */
+static int jit_ics_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("QJS_JIT_IC");
+        on = !e || atoi(e) != 0;
+    }
+    return on;
+}
+
 /* imm0[0..1]: the stencil's IMM(0) and IMM(1). */
 static int jit_specialized(JSContextHandle ctx, int op, const uint8_t *pc, const GCValue *cpool, uint64_t *imm0,
                            int *target, uint32_t off, int *backward)
@@ -607,6 +618,8 @@ static int jit_specialized(JSContextHandle ctx, int op, const uint8_t *pc, const
         imm0[1] = (uint64_t)(uintptr_t)(pc + 5);
         if (op == OP_get_field && *imm0 == jit_atom_length)
             return JIT_ST_get_length;
+        if (op != OP_put_field && jit_ics_on())
+            return op == OP_get_field ? JIT_ST_get_field_ic : JIT_ST_get_field2_ic;
         return op == OP_get_field ? JIT_ST_get_field : op == OP_get_field2 ? JIT_ST_get_field2 : JIT_ST_put_field;
     case OP_goto:
         *target = (int)(off + 1 + (int32_t)jit_u32(pc + 1));
@@ -671,6 +684,7 @@ static void jit_free_code(JitCode *jc)
 {
     if (!jc) return;
     free(jc->pc_map);
+    free(jc->ics);
     free(jc);
 }
 
@@ -686,6 +700,8 @@ JitCode *jit_compile(JSContextHandle ctx, GCHandle owner, const uint8_t *bc, uin
     uint32_t *pc_map = malloc(sizeof(uint32_t) * (len + 1));
     JitCode *jc = calloc(1, sizeof(JitCode));
     JitLits L = { 0 };
+    JitIC *ics = NULL;
+    uint32_t n_ics = 0;
     int n = 0;
     if (!ins || !pc_map || !jc) goto fail;
     for (uint32_t off = 0; off < len; ) {
@@ -702,6 +718,8 @@ JitCode *jit_compile(JSContextHandle ctx, GCHandle owner, const uint8_t *bc, uin
         int sid = jit_specialized(ctx, op, bc + off, cpool, imms, &I->target, off, &backward);
         I->imm0 = imms[0];
         I->imm1 = imms[1];
+        if (sid == JIT_ST_get_field_ic || sid == JIT_ST_get_field2_ic)
+            I->imm1 = n_ics++;      /* its inline cache, made below */
         if (sid >= 0) {
             I->main_sid = sid;
             I->slow_sid = !jit_has_slow(sid) ? JIT_ST_COUNT
@@ -723,6 +741,9 @@ JitCode *jit_compile(JSContextHandle ctx, GCHandle owner, const uint8_t *bc, uin
     ins[n].main_sid = JIT_ST_interp;
     ins[n].slow_sid = JIT_ST_COUNT;
     ins[n].target = -1;
+
+    if (n_ics && !(ics = calloc(n_ics, sizeof(JitIC))))
+        goto fail;
 
     /* Pass 1: sizes and offsets. */
     uint32_t at = 0;
@@ -765,7 +786,8 @@ JitCode *jit_compile(JSContextHandle ctx, GCHandle owner, const uint8_t *bc, uin
         JitPatch P = { 0 };
         uint32_t next_off = i < n ? ins[i + 1].off : len;
         P.imm[0] = I->imm0;
-        P.imm[1] = I->imm1;
+        P.imm[1] = I->main_sid == JIT_ST_get_field_ic || I->main_sid == JIT_ST_get_field2_ic
+            ? (uint64_t)(uintptr_t)&ics[I->imm1] : I->imm1;
         P.branch[JIT_BR_CONTINUE] = base + ins[i < n ? i + 1 : n].main_at;
         P.branch[JIT_BR_TARGET] = I->target >= 0 && pc_map[I->target] != UINT32_MAX ? base + pc_map[I->target] : NULL;
         P.branch[JIT_BR_SLOW] = I->slow_sid != JIT_ST_COUNT ? base + I->slow_at : NULL;
@@ -805,6 +827,8 @@ JitCode *jit_compile(JSContextHandle ctx, GCHandle owner, const uint8_t *bc, uin
     jc->byte_code_len = len;
     jc->pc_map = pc_map;
     jc->owner = owner;
+    jc->ics = ics;
+    jc->n_ics = n_ics;
     if (g_jit.map) {
         fprintf(g_jit.map, "F %zx %x %s\n", (size_t)(base - g_jit.base), jc->size, name ? name : "?");
         for (int i = 0; i < n; i++) {
@@ -833,6 +857,7 @@ JitCode *jit_compile(JSContextHandle ctx, GCHandle owner, const uint8_t *bc, uin
     free(L.vals);
     free(ins);
     free(pc_map);
+    free(ics);
     free(jc);
     return NULL;
 }

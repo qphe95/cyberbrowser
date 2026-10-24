@@ -292,6 +292,36 @@ and missing-property walks, 7%, which can cache absence once prototype shapes ar
 Immutable shapes also make an interpreter-level cache pay, so they are worth doing first either
 way.
 
+**As built (M4, first part).** The engine already treated hashed shapes as immutable: every
+mutator clones a hashed shape first (`js_shape_prepare_update`, `add_shape_property`), and only
+private shapes, each owned by one object, change in place. The remaining in-place flag changes
+(global variables) now go through `js_shape_prepare_update` too. So instead of a new shape
+regime:
+
+- **Transition cache.** Each shape remembers its last transition (atom, flags → hashed child,
+  which it keeps alive), so a repeated `add_property` skips the shape hash table and its
+  whole-shape comparison. On the YouTube replay this halved `find_hashed_shape_prop`.
+- **Per-site caches for `get_field`/`get_field2`** in compiled code (`JitIC`, four ways, way 0
+  tested inline), filled by `jit_get_field_ic`. A way caches a hashed receiver shape: own
+  property (slot), property on a prototype (holder, slot) or absent. A private receiver shape
+  gets own-property ways only; it is marked `ic_cached`, and is then cloned, like a hashed one,
+  before any change but an append (appends keep slots).
+- **Prototype ways** hold while `jit_proto_epoch(atom)` is unchanged: a change to property A
+  of an object that is a prototype (`is_prototype`) bumps A's counter, a structural change
+  (prototype link, slots moving) a global one.
+- **A megamorphic cache** (8192 entries by shape and atom) serves sites past four shapes.
+- **GC:** the shapes and holders ways name sit in a retention set enumerated as a root (mark
+  start and remark run on the JS thread), so a cached handle never comes to name another
+  object.
+
+On the replay, about 90% of compiled `get_field` lookups hit (inline, other ways, prototype ways or
+megamorphic); the misses are accessors (getters, mostly DOM), exotic objects and prototype
+lookups through private receivers. `props` (micro-benchmark) improves 6%. End to end, the load's
+JS thread time moves by less than its run-to-run noise (about ±3% here): property lookups are
+a smaller part of this load than the 16% above, and each hit still touches the receiver's memory.
+Not done yet: `put_field`/`define_field` caches (adding properties, about 2% of the load), getter
+calls through the cache, and caches in the interpreter.
+
 ## 8. Tiering
 
 Each `JSFunctionBytecode` gets a hotness budget. Entry adds a weight, and every back edge adds the

@@ -62,6 +62,23 @@ typedef struct JSInterpFrame {
 
 /* The baseline JIT (quickjs_jit.c). */
 
+/* The inline cache of a get_field / get_field2 site (JIT_DESIGN.md section
+ * 7; jit_get_field_ic in quickjs.c says when a way holds).  Compiled code
+ * tests way 0 inline when it is an own property. */
+#define JIT_IC_WAYS 4
+#define JIT_IC_ABSENT UINT32_MAX
+typedef struct JitIC {
+    GCHandle shape[JIT_IC_WAYS];    /* the receiver's shape (hashed) */
+    GCHandle holder[JIT_IC_WAYS];   /* GC_HANDLE_NULL: the receiver's own
+                                       property; else on a prototype */
+    uint32_t slot[JIT_IC_WAYS];     /* in the holder; JIT_IC_ABSENT: on no object */
+    uint32_t epoch;                 /* g_jit_proto_epoch the prototype ways hold for */
+    uint8_t n;                      /* ways in use */
+    uint8_t mega;                   /* more shapes than ways: no more filling */
+} JitIC;
+extern uint32_t g_jit_proto_epoch;
+const GCValue *jit_get_field_ic(JitIC *ic, const GCValue *obj, JSAtom atom);
+
 /* A compiled function. */
 typedef struct JitCode {
     uint8_t *base;              /* its code */
@@ -70,6 +87,8 @@ typedef struct JitCode {
     const uint8_t *byte_code;   /* what it was compiled from */
     uint32_t *pc_map;           /* bytecode offset -> code offset; UINT32_MAX: none */
     GCHandle owner;             /* its JSFunctionBytecode */
+    JitIC *ics;                 /* its get_field sites' inline caches */
+    uint32_t n_ics;
 } JitCode;
 
 /* JSFunctionBytecode.jit_code of a function that cannot be compiled. */

@@ -1780,6 +1780,10 @@ struct JSShape {
        JSShape.hash is not valid */
     uint8_t is_hashed;
     uint8_t hash_size; /* hash table size (power of 2), stored for GC dereference */
+    /* An inline cache has a way for this private shape (one object's): it
+     * is cloned, as a hashed one, before anything but an append changes it
+     * (js_shape_prepare_update), so the ways' slots stay right. */
+    uint8_t ic_cached;
     uint32_t hash; /* current hash value */
     uint32_t prop_hash_mask;
     int prop_size; /* allocated properties */
@@ -1788,6 +1792,14 @@ struct JSShape {
     uint32_t proto_version;       /* even = stable, odd = prototype update */
     GCHandle proto_handle; /* Handle to prototype object (GC_HANDLE_NULL if none) */
     GCHandle handle; /* Handle to this shape */
+    /* The last transition add_property made from this shape: adding
+     * trans_atom with trans_flags gives the hashed shape trans_child, which
+     * this shape keeps alive.  Valid while this shape is unchanged: a hashed
+     * shape never changes, and a private one forgets it when it changes in
+     * place.  GC_HANDLE_NULL: none. */
+    GCHandle trans_child;
+    JSAtom trans_atom;
+    uint32_t trans_flags;
     JSShapeProperty prop[]; /* prop_size elements - C99 flexible array member */
 };
 
@@ -1821,7 +1833,11 @@ struct JSObject {
     /* Property slots stored inside the object, after the struct (see
      * js_obj_props); 0 when the properties live in prop_handle's array. */
     uint8_t inline_props : 3;
-    uint8_t _padding : 3;        /* unused padding to align weakref_count */
+    /* Some shape has this object as its prototype: a change to its own
+     * properties bumps g_jit_proto_epoch (the inline caches' prototype
+     * ways).  Never cleared. */
+    uint8_t is_prototype : 1;
+    uint8_t _padding : 2;        /* unused padding to align weakref_count */
     /* count the number of weak references to this object. The object
        structure is freed only if weakref_count = 0 */
     uint32_t weakref_count;
