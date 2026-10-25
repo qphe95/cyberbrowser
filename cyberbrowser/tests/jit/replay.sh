@@ -13,7 +13,9 @@
 #   tests/jit/replay.sh <cyberbrowser.exe> <replay root> [runs=5] [setting...]
 #
 # A setting is QJS_JIT's value, optionally with a threshold and more
-# environment variables: 0, 1, 1@20000, 1+QJS_JIT_IC=0+CYBER_SPIN_PCT=1.
+# environment variables: 0, 1, 1@20000, 1+QJS_JIT_IC=0+CYBER_SPIN_PCT=1;
+# "<label>%" before it runs the binary in $EXE_<label> instead (base%1 1
+# with EXE_base=old.exe compares an old build with this one).
 # REPLAYS="yt-home wiki-us" limits the recordings; COUNTERS=1 adds one run
 # per recording and setting with CYBER_COUNTERS=1 and prints its counters
 # side by side; KEEP=<file> keeps the raw results.
@@ -37,12 +39,20 @@ done < "$dir/replays.txt"
 # run <recording> <url> <setting> [extra env...]: the run's output.
 run() {
     local name=$1 url=$2 s=$3; shift 3
+    local bin=$exe
+    if [[ "$s" == *%* ]]; then
+        local label=${s%%\%*} var
+        var="EXE_$label"
+        bin=${!var}
+        [ -n "$bin" ] || { echo "no EXE_$label for setting $s" >&2; return; }
+        s=${s#*%}
+    fi
     local base=${s%%+*} extra=
     [ "$s" != "$base" ] && extra=${s#*+}
     local mode=${base%@*} thr=
     [ "$base" != "$mode" ] && thr=${base#*@}
     (cd "$tmp" && env CYBER_REPLAY="$root/$name" CYBER_TIMELINE=1 $det QJS_JIT=$mode ${thr:+QJS_JIT_THRESHOLD=$thr} \
-        ${extra//+/ } "$@" "$exe" "$url" 2>&1)
+        ${extra//+/ } "$@" "$bin" "$url" 2>&1)
 }
 
 det="CYBER_DET_TIME=1 CYBER_SYNC_FETCH=1 CYBER_REPLAY_OFFLINE=1"

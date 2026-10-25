@@ -396,6 +396,74 @@ value to compiling only the hottest few hundred functions. If no threshold makes
 gain, turn it off by default until N2 and N3 make compiled code worth its cost. It stays in
 the build, tested in every mode, as T2's exit target.
 
+### 5.6 N1 as built
+
+Each change was measured alone: 24 interleaved rounds against the build before it (section
+4.1), with the counters showing what work it removed. Changes are relative to that build.
+
+| Change | Watch | Home | Search | BBC | Wikipedia | Kept |
+|---|---|---|---|---|---|---|
+| Frame pool: no pinning for lazy stubs | −4.0% | −1.0% | −4.7% | ±0 | −1.4% | yes |
+| Define fast path in `JS_DefinePropertyValue` | −6.7% | −6.2% | −6.3% | ±0 | ±0 | yes |
+| Generic get cache in `JS_GetPropertyInternal` (two versions) | +0.4 to +1.5% | +1.0% | +0.8 to +1.0% | ±0 | ±0 | no |
+| `put_field` inline cache in compiled code | +0.7% | ±0 | ±0 | ±0 | ±0 | no |
+| Object and string headers: plain stores, one dirty mark | −1.4% | −1.8% | −1.5% | ±0 | ±0 | yes |
+| T1 threshold 2,000 → 50,000 (from the gate's runs) | −1.3% | −1.7% | −1.2% | −1.8% | ±0 | yes |
+
+**The frame pool.** The counters showed the misses were not sizes: they were frames
+`js_closure2` pinned so that a lazily compiled closure could later resolve names through
+its parent's frame. A stub with a resume-parse state already captured every free name of its
+body, and installing it needs no frame, so only the legacy lazy path still pins.
+
+**Defines.** The 4.7 M `JS_DefineProperty` calls per watch-page load were object literals
+(`define_field`), C natives and closures' `length`, `name`, `prototype` and `constructor`.
+For a new data property of an ordinary extensible object, `JS_DefinePropertyValue` now goes
+from one hash lookup to `add_property` (whose transition cache finds the next shape), skipping
+the descriptor logic. 4.0 M of the 4.7 M take it.
+
+**What did not pay.** The get cache answered 63% of generic gets, then 1.2 M prototype-chain
+gets once restricted to them, and lost both times. A walk on these pages is one or two hash
+lookups. A probe on every miss, and refills after the frequent epoch moves of a loading
+page, cost more than the walks saved. Sharing the megamorphic table also evicted the JIT's
+entries. The `put_field` cache answered 85% of compiled puts, but an out-of-line call costs
+what `jit_put_field_fast`'s own lookup did. Inlining its own-property way into the stencil
+would gain at most about 0.5%. Both were removed. Feedback vectors (N4) revisit them where
+the cache is read inline.
+
+**Unchecked loads and inline allocation, as planned, were the wrong targets.** In the
+profile, `gc_deref` (3%) is the object loads themselves: `find_own_property` already
+dereferences once. What was worth removing was the dirty marking of `SAFE_SET`.
+`JS_NewObjectFromShape` marked an object's cards 13 times for fields the zeroed memory
+already held, and strings, which hold no references, were marked at all. An inline
+allocation fast path would rarely apply: lines are 128 bytes, objects average 94, so most
+allocations cross a line (`alloc_cross`). Each allocation also takes a locked `or` on the
+alive bitmap, which the sweeper writes concurrently. Both belong to the allocator work in N2.
+
+**T1.** With the frame pool fixed, compiled code beats the interpreter: 12.6 G against 13.9 G
+cycles on the watch page. The sweep found no gain at the old threshold (2,000), −2.5% on the
+watch page at 20,000 and 100,000, and the gate confirmed 50,000 as the default. T1 itself
+stays opt-in (`QJS_JIT=1`) until it is turned on by decision, not by this measurement.
+
+**The gate** (N1's starting build against its end, 24 rounds, deterministic replays):
+
+| Recording | JIT on | Interpreter | JIT on, real time (8 rounds) |
+|---|---|---|---|
+| YouTube watch | −12.2% | −12.7% | −7.4% |
+| YouTube home | −10.5% | −7.4% | −8.0% |
+| YouTube search | −10.6% | −12.1% | −13.6% |
+| BBC | −3.4% | ±0 | ±0 |
+| Wikipedia | −2.2% | ±0 | ±0 |
+
+The work is identical (the same calls and DOM nodes in every run), and the tests pass in every
+JIT mode. One run in about 360 of the threshold sweep crashed (yt-search, threshold
+500,000) and did not repeat in 76 more runs; it is open.
+
+**Found for later.** 471,000 of the watch page's 486,000 closures make a prototype object
+eagerly, with its `constructor` and the function's `prototype` defined. Upstream QuickJS
+makes it lazily (`JS_PROP_AUTOINIT`), which this engine disabled for the moving collector.
+Making it lazy again would remove a sixth of the page's object allocations. It goes in N2
+with allocation.
+
 ## 6. The optimizer, built in stages
 
 V8 runs four tiers: Ignition, Sparkplug, Maglev and TurboFan. JavaScriptCore and SpiderMonkey
@@ -516,8 +584,8 @@ without a code generator.
 | | Work | Exit criterion |
 |---|---|---|
 | N0 | Cycle-based timing, four more recordings, per-subsystem counters (section 4) | A 1% change is detectable on every recording |
-| N1 | In this order, each measured alone (section 4.1): a frame pool that does not miss; T1's threshold; generic get and define/add caches in the runtime, `put_field`/`define_field` caches in compiled code; unchecked hot-path loads; inline allocation fast path | −8% JS-thread cycles on the YouTube replays; parity on all five |
-| N2 | Calls without heap frames for simple callees; lighter native calls; call caches | −6% more; parity; GC stress clean |
+| N1 | In this order, each measured alone (section 4.1): a frame pool that does not miss; T1's threshold; generic get and define/add caches in the runtime, `put_field`/`define_field` caches in compiled code; unchecked hot-path loads; inline allocation fast path | −8% JS-thread cycles on the YouTube replays; parity on all five. **Met** (section 5.6): −10.5% to −12.7% |
+| N2 | Calls without heap frames for simple callees; lighter native calls; call caches; lazy function prototypes and the allocator's line crossing (5.6) | −6% more; parity; GC stress clean |
 | N3 | 8-byte values engine-wide | −6% more; memory down; all four JIT modes and replays at parity |
 | N4 | Feedback vectors; T2 stage 1 (IR, block-local virtual stack, guards and exits), x86-64 first | −5% more on JS-heavy pages; counters for guard failures, block lengths and values crossing blocks |
 | N5 | T2 stage 2 (CFG, SSA, kinds across blocks, linear scan, exits anywhere, loop entry); arm64 | Go/no-go from N4's counters; then −8% more on JS-heavy pages |

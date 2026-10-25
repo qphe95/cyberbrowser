@@ -2009,12 +2009,11 @@ static JSStringHandle js_alloc_string_rt(JSRuntimeHandle rt, int max_len, int is
     if (unlikely(handle == GC_HANDLE_NULL))
         return GC_HANDLE_NULL;
     JSStringHandle str = handle;
-    /* Object already registered with GC by gc_alloc_js_object */
-    SAFE_SET(str, JSStringHandle, is_wide_char, is_wide_char);
-    SAFE_SET(str, JSStringHandle, len, max_len);
-    SAFE_SET(str, JSStringHandle, atom_type, 0);
-    SAFE_SET(str, JSStringHandle, hash, 0);          /* optional but costless */
-    SAFE_SET(str, JSStringHandle, hash_next, 0);     /* optional */
+    /* The memory is zero (atom_type, hash, hash_next), and a string holds
+     * no references (type_is_leaf): plain stores, no dirty cards. */
+    JSString *s = GC_DEREF_H(str, JSStringHandle);
+    s->is_wide_char = is_wide_char;
+    s->len = max_len;
     return str;
 }
 
@@ -2068,6 +2067,7 @@ static void js_bc_frame_release(JSStackFrame *sf, int depth)
     if (depth >= BC_FRAME_POOL_DEPTH || g_bc_frame_pool[depth] != sf->self_handle)
         return;
     if (sf->escaped & JS_FRAME_PINNED) {
+        CC_INC(frame_pinned);
         g_bc_frame_pool[depth] = GC_HANDLE_NULL;
         g_bc_frame_pool_size[depth] = 0;
         return;
@@ -6337,21 +6337,16 @@ static GCValue JS_NewObjectFromShape(JSContextHandle ctx, JSShapeHandle sh, JSCl
         fprintf(stderr, "JS_NewObjectFromShape: p is null!\n");
         goto fail;
     }
-    SAFE_SET(p, JSObjectHandle, class_id, class_id);
-    SAFE_SET(p, JSObjectHandle, is_std_array_prototype, 0);
-    SAFE_SET(p, JSObjectHandle, extensible, TRUE);
-    SAFE_SET(p, JSObjectHandle, free_mark, 0);
-    SAFE_SET(p, JSObjectHandle, is_exotic, 0);
-    SAFE_SET(p, JSObjectHandle, fast_array, 0);
-    SAFE_SET(p, JSObjectHandle, is_constructor, 0);
-    SAFE_SET(p, JSObjectHandle, has_immutable_prototype, 0);
-    SAFE_SET(p, JSObjectHandle, tmp_mark, 0);
-    SAFE_SET(p, JSObjectHandle, is_HTMLDDA, 0);
-    SAFE_SET(p, JSObjectHandle, is_watched, 0);
-    SAFE_SET(p, JSObjectHandle, is_prototype, 0);
-    SAFE_SET(p, JSObjectHandle, weakref_count, 0);
-    js_obj_set_prop_version(p, 2); /* start stable (even) */
-    SAFE_SET_HANDLE(p, JSObjectHandle, u.opaque_handle, GC_HANDLE_NULL);
+    /* The memory is zero (gc_core_alloc_object_memory): only the fields
+     * that start otherwise are written, with the object's cards marked once
+     * (one SAFE_SET each was a measurable part of making objects). */
+    {
+        JSObject *po = GC_DEREF_H(p, JSObjectHandle);
+        po->class_id = class_id;
+        po->extensible = TRUE;
+        atomic_store_u32((volatile uint32_t *)&po->prop_version, 2); /* start stable (even) */
+        gc_dirty_range(po, sizeof(*po));
+    }
     /* Use sh.shape_handle() instead of sh.handle() because shapes are offset from alloc base */
     js_obj_set_shape_handle(p, SAFE_GET_OR(sh, JSShapeHandle, handle, GC_HANDLE_NULL));
     
@@ -12195,11 +12190,42 @@ int JS_DefineProperty(JSContextHandle ctx, GCValue this_obj,
     return JS_CreateProperty(ctx, p, prop, val, getter, setter, flags);
 }
 
+/* JS_DefinePropertyValue's fast path (JS_PERF_DESIGN.md section 5.4): a new
+ * data property (prop_flags of JS_PROP_C_W_E) of an ordinary extensible
+ * object, which JS_DefineProperty would add with nothing else to do.  1
+ * when done, 0 (nothing changed) for the general path, -1 when out of
+ * memory. */
+static int js_define_value_fast(JSContextHandle ctx, GCValue obj, JSAtom prop, GCValue val, int prop_flags)
+{
+    JSObjectHandle p = JS_VALUE_GET_OBJ(obj);
+    JSObject *o = GC_DEREF_H(p, JSObjectHandle);
+    JSProperty *pr;
+
+    if (unlikely(!o || o->is_exotic || !o->extensible || o->class_id == JS_CLASS_GLOBAL_OBJECT ||
+                 __JS_AtomIsTaggedInt(prop)))
+        return 0;
+    if (find_own_property(&pr, p, prop))
+        return 0;
+    pr = add_property(ctx, p, prop, prop_flags);
+    if (unlikely(!pr))
+        return -1;
+    gc_set_heap_value(&pr->u.value, val);
+    gc_write_barrier(GC_VALUE_GET_HANDLE(obj), GC_VALUE_GET_HANDLE(val));
+    CC_INC(define_fast);
+    return 1;
+}
+
 /* shortcut to add or redefine a new property value */
 int JS_DefinePropertyValue(JSContextHandle ctx, GCValue this_obj,
                            JSAtom prop, GCValue val, int flags)
 {
     int ret;
+    if (JS_VALUE_GET_TAG(this_obj) == JS_TAG_OBJECT &&
+        !(flags & ~(JS_PROP_THROW | JS_PROP_THROW_STRICT | JS_PROP_C_W_E))) {
+        ret = js_define_value_fast(ctx, this_obj, prop, val, flags & JS_PROP_C_W_E);
+        if (ret)
+            return ret;
+    }
     ret = JS_DefineProperty(ctx, this_obj, prop, val, JS_UNDEFINED, JS_UNDEFINED,
                             flags | JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE | JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
     
@@ -19192,7 +19218,15 @@ static GCValue js_closure2(JSContextHandle ctx, GCValue func_obj,
      * We store it per-closure (not per-bytecode) because multiple closures
      * can be created from the same lazy bytecode, each with different parent scopes.
      * This is critical for factories that return closures (e.g., makeClosure(x)). */
-    if (SAFE_GET_OR(b, JSFunctionBytecodeHandle, func_parse_state, 0) == JS_FUNC_LAZY && sf && sf->self_handle != GC_HANDLE_NULL) {
+    /* Only the legacy lazy path (source re-evaluated by
+     * js_trigger_lazy_function) resolves names through the frame.  A stub
+     * with a resume-parse state captured every free name of its body when
+     * this closure was made (the stub's dead references), and its body is
+     * compiled and installed without a frame (js_lazy_install): pinning the
+     * frame then only cost a frame allocation per closure. */
+    if (SAFE_GET_OR(b, JSFunctionBytecodeHandle, func_parse_state, 0) == JS_FUNC_LAZY &&
+        !SAFE_GET_OR(b, JSFunctionBytecodeHandle, has_resume_parse_state, 0) &&
+        sf && sf->self_handle != GC_HANDLE_NULL) {
         SAFE_SET_HANDLE(p, JSObjectHandle, u.func.parent_frame_handle, sf->self_handle);
         js_frame_pin_with_ancestors(sf);   /* resolved later, by name up the chain too */
     }
@@ -19568,6 +19602,7 @@ static GCValue js_closure(JSContextHandle ctx, GCValue bfunc,
     JSAtom name_atom;
 
     b = (JSFunctionBytecodeHandle)(GC_VALUE_GET_HANDLE(bfunc));
+    CC_INC(closure);
     int target_class_id = func_kind_to_class_id[SAFE_GET_OR(b, JSFunctionBytecodeHandle, func_kind, 0)];
     func_obj = JS_NewObjectClass(ctx, target_class_id);
     if (JS_IsException(func_obj)) {
@@ -19613,6 +19648,7 @@ static GCValue js_closure(JSContextHandle ctx, GCValue bfunc,
         GCValue proto = JS_NewObject(ctx);
         if (JS_IsException(proto))
             goto fail;
+        CC_INC(closure_prototype);
         JS_SetConstructorBit(ctx, func_obj, TRUE);
         if (JS_DefinePropertyValue(ctx, proto, JS_ATOM_constructor, func_obj,
                                    JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE) < 0)
@@ -20309,6 +20345,12 @@ static JSStackFrame *js_alloc_bytecode_frame(JSContextHandle ctx,
         CC_INC(frame_pooled);
     } else {
         CC_INC(frame_allocated);
+        if (depth >= BC_FRAME_POOL_DEPTH)
+            CC_INC(frame_miss_deep);
+        else if (g_bc_frame_pool_size[depth] == 0)
+            CC_INC(frame_miss_empty);
+        else
+            CC_INC(frame_miss_size);
         /* A pooled frame gets headroom: calls at one depth run functions of
          * different sizes, and a slot sized for the last one was replaced
          * at every larger call. */
@@ -20398,8 +20440,10 @@ enum { JS_JIT_OFF, JS_JIT_ON, JS_JIT_STRESS, JS_JIT_THREADED };
 static int g_jit_mode = -1;
 /* A function compiles once entries (JS_JIT_ENTRY_WEIGHT each) and loop
  * iterations (the loop's length in bytecode bytes) pass JS_JIT_THRESHOLD:
- * JIT_DESIGN.md section 8, with H measured by M0 (QJS_OPSTATS). */
-#define JS_JIT_THRESHOLD_DEFAULT 2000
+ * JIT_DESIGN.md section 8.  50000 (about 500 calls) from the replays'
+ * sweep (JS_PERF_DESIGN.md section 5.5): 2000 compiled thousands of
+ * functions that never repaid it. */
+#define JS_JIT_THRESHOLD_DEFAULT 50000
 static int32_t g_jit_threshold = JS_JIT_THRESHOLD_DEFAULT;   /* QJS_JIT_THRESHOLD overrides */
 #define JS_JIT_THRESHOLD g_jit_threshold
 #define JS_JIT_ENTRY_WEIGHT 100
@@ -23834,6 +23878,25 @@ const GCValue *jit_field_ref(GCHandle h, JSAtom atom)
  * retention set, a root), so their handles never come to name something
  * else. */
 
+/* The megamorphic cache: ways for sites past JIT_IC_WAYS shapes, shared by
+ * all of them, direct-mapped by (shape, atom), with the same rules as a
+ * site's ways (each entry has its own epoch).  Its entries belong to the
+ * heap of g_ic_keep_epoch. */
+#define JIT_MEGA_SIZE 8192
+typedef struct JitMegaEntry {
+    GCHandle shape;
+    JSAtom atom;
+    GCHandle holder;
+    uint32_t slot;
+    uint32_t epoch;
+} JitMegaEntry;
+static JitMegaEntry g_ic_mega[JIT_MEGA_SIZE];
+
+static inline JitMegaEntry *jit_mega_entry(GCHandle sh, JSAtom atom)
+{
+    return &g_ic_mega[((sh * 0x9e3779b1u) ^ (atom * 0x85ebca6bu)) >> 19 & (JIT_MEGA_SIZE - 1)];
+}
+
 #define JIT_IC_KEEP_MAX (1u << 17)
 static GCHandle *g_ic_keep;     /* open addressing; GC_HANDLE_NULL: free */
 static uint32_t g_ic_keep_cap, g_ic_keep_n, g_ic_keep_epoch;
@@ -23846,6 +23909,7 @@ static int jit_ic_retain(GCHandle h)
         g_ic_keep = NULL;
         g_ic_keep_cap = g_ic_keep_n = 0;
         g_ic_keep_epoch = g_gc_epoch;
+        memset(g_ic_mega, 0, sizeof(g_ic_mega));
     }
     if (2 * (g_ic_keep_n + 1) > g_ic_keep_cap) {
         uint32_t cap = g_ic_keep_cap ? g_ic_keep_cap * 2 : 1024, i, j;
@@ -23874,24 +23938,6 @@ static int jit_ic_retain(GCHandle h)
             return 1;
         }
     }
-}
-
-/* The megamorphic cache: ways for sites past JIT_IC_WAYS shapes, shared by
- * all of them, direct-mapped by (shape, atom), with the same rules as a
- * site's ways (each entry has its own epoch). */
-#define JIT_MEGA_SIZE 8192
-typedef struct JitMegaEntry {
-    GCHandle shape;
-    JSAtom atom;
-    GCHandle holder;
-    uint32_t slot;
-    uint32_t epoch;
-} JitMegaEntry;
-static JitMegaEntry g_ic_mega[JIT_MEGA_SIZE];
-
-static inline JitMegaEntry *jit_mega_entry(GCHandle sh, JSAtom atom)
-{
-    return &g_ic_mega[((sh * 0x9e3779b1u) ^ (atom * 0x85ebca6bu)) >> 19 & (JIT_MEGA_SIZE - 1)];
 }
 
 /* The retention set, for JS_GCEnumerateEngineRoots. */
@@ -24140,6 +24186,7 @@ int jit_put_field_fast(JSInterpFrame *F, const GCValue *a, JSAtom atom)
         JS_NOTE_WATCHED_WRITE(p);
         set_value(ctx, &pr->u.value, val);
         gc_write_barrier(GC_VALUE_GET_HANDLE(obj), GC_VALUE_GET_HANDLE(val));
+        CC_INC(put_fast_own);
         return 1;
     }
     if (SAFE_GET_OR(p, JSObjectHandle, is_exotic, true) || !SAFE_GET_OR(p, JSObjectHandle, extensible, false) ||
@@ -24163,6 +24210,7 @@ int jit_put_field_fast(JSInterpFrame *F, const GCValue *a, JSAtom atom)
         return -1;
     gc_set_heap_value(&pr->u.value, val);
     gc_write_barrier(GC_VALUE_GET_HANDLE(obj), GC_VALUE_GET_HANDLE(val));
+    CC_INC(put_fast_add);
     return 1;
 }
 

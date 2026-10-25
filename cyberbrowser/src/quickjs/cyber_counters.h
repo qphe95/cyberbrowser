@@ -19,14 +19,23 @@
     X(call_jit_native)              /* compiled code calling a C function directly */ \
     X(call_jit_helper)              /* compiled code's call through the helper */ \
     X(call_native)                  /* any C function call (js_call_c_function) */ \
+    X(closure)                      /* js_closure: function objects made */ \
+    X(closure_prototype)            /* ... with a prototype object made for them */ \
     X(frame_pooled)                 /* bytecode frames taken from the pool */ \
     X(frame_allocated)              /* ... allocated */ \
+    X(frame_miss_size)              /* ... the pooled frame at that depth too small */ \
+    X(frame_miss_empty)             /* ... none pooled at that depth (first call, or it was pinned) */ \
+    X(frame_miss_deep)              /* ... deeper than the pool */ \
+    X(frame_pinned)                 /* pooled frames that left the pool, pinned */ \
     /* Property access */ \
     X(get_interp)                   /* interpreter get_field / get_field2 */ \
     X(get_interp_slow)              /* ... through JS_GetPropertyInternal */ \
     X(get_generic)                  /* JS_GetPropertyInternal, any caller */ \
     X(set_generic)                  /* JS_SetPropertyInternal */ \
+    X(put_fast_own)                 /* compiled put_field: an own property written (jit_put_field_fast) */ \
+    X(put_fast_add)                 /* ... a property added */ \
     X(define_property)              /* JS_DefineProperty */ \
+    X(define_fast)                  /* JS_DefinePropertyValue's fast path (not in define_property) */ \
     X(add_property)                 /* add_property */ \
     X(shape_transition_cached)      /* add_property through the shape's transition cache */ \
     X(shape_transition_hashed)      /* ... found in the shape hash table */ \

@@ -181,6 +181,46 @@ t('getters-and-frozen', function () {
     return r.join();
 });
 
+// put_field sites: an own way and an add way per shape, then each thing
+// that must stop an add way (a setter or read-only property appearing on
+// the prototype, the receiver made non-extensible or frozen) or an own one.
+function setQ(o, v) { o.q = v; return o; }
+function setQStrict(o, v) { 'use strict'; o.q = v; return o; }
+function desc(o) { return Object.keys(o).join('') + '=' + o.q; }
+t('put-add-ways', function () {
+    var r = [], proto = { base: 1 }, seen = [];
+    function make() { var o = Object.create(proto); o.k = 1; return o; }
+    for (var i = 0; i < 6; i++) r.push(desc(setQ(make(), i)));          // add way
+    for (var i = 0; i < 3; i++) { var o = setQ(make(), 'a'); r.push(desc(setQ(o, 'b'))); }  // own way
+    Object.defineProperty(proto, 'q', { set: function (v) { seen.push(v); }, get: function () { return 'got'; }, configurable: true });
+    for (var i = 0; i < 3; i++) r.push(desc(setQ(make(), 's' + i)));    // the setter now
+    delete proto.q;
+    for (var i = 0; i < 3; i++) r.push(desc(setQ(make(), 'd' + i)));    // added again
+    Object.defineProperty(proto, 'q', { value: 'ro', writable: false, configurable: true });
+    for (var i = 0; i < 2; i++) r.push(desc(setQ(make(), 'w' + i)));
+    try { setQStrict(make(), 'strict'); r.push('no throw'); } catch (e) { r.push(e.name); }
+    delete proto.q;
+    var ne = Object.preventExtensions(make()), fr = Object.freeze(setQ(make(), 'f'));
+    try { setQStrict(ne, 1); r.push('no throw'); } catch (e) { r.push(e.name); }
+    try { setQStrict(fr, 2); r.push('no throw'); } catch (e) { r.push(e.name); }
+    setQ(ne, 3); setQ(fr, 4);
+    r.push(desc(ne), desc(fr), desc(setQ(make(), 'end')));
+    return r.join(' ') + ' / ' + seen.join();
+});
+t('put-polymorphic', function () {
+    // More shapes than ways, adds and writes mixed, receivers that are
+    // prototypes of others.
+    var r = [], objs = [];
+    for (var i = 0; i < 10; i++) { var o = {}; o['p' + i] = i; objs.push(o); }
+    for (var round = 0; round < 3; round++)
+        for (var i = 0; i < objs.length; i++) setQ(objs[i], round * 10 + i);
+    var parent = {}, child = Object.create(parent);
+    for (var i = 0; i < 3; i++) { setQ({}, 0); }
+    setQ(parent, 'P');
+    r.push(objs.map(desc).join(','), child.q, desc(setQ(child, 'C')), parent.q);
+    return r.join(' ');
+});
+
 console.error('JITTEST-BEGIN');
 log.forEach(function (l) { console.error(l); });
 console.error('JITTEST-END');

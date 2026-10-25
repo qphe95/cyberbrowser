@@ -181,5 +181,5 @@ for (const [cat] of [...sys.entries()].sort((a, b) => b[1] - a[1])) {
 }
 show('self, by function (innermost inline)', self);
 show('self, by line', selfLine, 25);
-show('self, with caller', selfCaller, 25);
+show('self, with caller', selfCaller, +process.env.CALLERS || 25);   // CALLERS=<n>: more rows
 show('inclusive, by function', incl);
