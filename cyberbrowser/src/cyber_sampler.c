@@ -4,10 +4,15 @@
  * one line per sample ("rva rva ..." leaf first, relative to the image
  * base) to <path> at exit.  tools/sample_report.js symbolizes them.
  * CYBER_SAMPLE_MAX_MS=<n> stops sampling and writes the file after n ms,
- * for a process that hangs and never exits.  CYBER_SAMPLE_CPU=1 keeps only
+ * for a process that hangs and never exits (CYBER_SAMPLE_LOAD=1 stops at
+ * the page load's "page settled" mark).  CYBER_SAMPLE_CPU=1 keeps only
  * samples where the thread ran since the previous one (an on-CPU profile).
  * A frame in the JIT's code region is written as its offset in the region
- * with bit 62 set; the JIT writes <path>.jit, its map of that region. */
+ * with bit 62 set; the JIT writes <path>.jit, its map of that region.  A
+ * frame in another module (system and C runtime DLLs) is written as its
+ * address with bit 61 set, and named at exit through DbgHelp in a table of
+ * "# ext <address> <module>!<symbol>+<offset>" lines (exported names only:
+ * a function a DLL does not export shows as the export before it). */
 #include "cyber_sampler.h"
 
 #include <stdbool.h>
@@ -36,7 +41,79 @@ static unsigned g_max_ms;
 void jit_region_bounds(uintptr_t *base, size_t *size);
 extern volatile LONG g_jit_os_busy;
 #define SAMPLE_JIT_FLAG ((uint64_t)1 << 62)
+#define SAMPLE_EXT_FLAG ((uint64_t)1 << 61)
 static volatile LONG g_written;   /* the file is written once */
+
+/* The names of the frames outside the image, through DbgHelp (loaded
+ * here, at exit, so the build needs no import library and sampling does no
+ * symbol work).  Each address once. */
+typedef BOOL (WINAPI *SymInitializeFn)(HANDLE, PCSTR, BOOL);
+typedef DWORD (WINAPI *SymSetOptionsFn)(DWORD);
+typedef BOOL (WINAPI *SymFromAddrFn)(HANDLE, DWORD64, PDWORD64, void *);
+typedef struct {                /* SYMBOL_INFO */
+    ULONG SizeOfStruct, TypeIndex;
+    ULONG64 Reserved[2];
+    ULONG Index, Size;
+    ULONG64 ModBase;
+    ULONG Flags;
+    ULONG64 Value, Address;
+    ULONG Register, Scope, Tag, NameLen, MaxNameLen;
+    CHAR Name[1];
+} SamplerSymbolInfo;
+
+static int ext_cmp(const void *a, const void *b) {
+    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    return x < y ? -1 : x > y;
+}
+
+static void write_ext_symbols(FILE *f) {
+    size_t n = 0;
+    for (size_t i = 0; i < g_n; i++) {
+        const uint64_t *rec = g_samples + i * (SAMPLE_DEPTH + 1);
+        for (uint64_t d = 0; d < rec[0]; d++) n += (rec[1 + d] & SAMPLE_EXT_FLAG) != 0;
+    }
+    if (!n) return;
+    uint64_t *addrs = (uint64_t *)malloc(n * sizeof(uint64_t));
+    if (!addrs) return;
+    n = 0;
+    for (size_t i = 0; i < g_n; i++) {
+        const uint64_t *rec = g_samples + i * (SAMPLE_DEPTH + 1);
+        for (uint64_t d = 0; d < rec[0]; d++)
+            if (rec[1 + d] & SAMPLE_EXT_FLAG) addrs[n++] = rec[1 + d] & ~SAMPLE_EXT_FLAG;
+    }
+    qsort(addrs, n, sizeof(uint64_t), ext_cmp);
+    HMODULE dbghelp = LoadLibraryA("dbghelp.dll");
+    SymInitializeFn sym_init = dbghelp ? (SymInitializeFn)(void *)GetProcAddress(dbghelp, "SymInitialize") : NULL;
+    SymSetOptionsFn sym_opts = dbghelp ? (SymSetOptionsFn)(void *)GetProcAddress(dbghelp, "SymSetOptions") : NULL;
+    SymFromAddrFn sym_from = dbghelp ? (SymFromAddrFn)(void *)GetProcAddress(dbghelp, "SymFromAddr") : NULL;
+    HANDLE proc = GetCurrentProcess();
+    if (sym_opts) sym_opts(0x2 /* SYMOPT_UNDNAME */ | 0x4 /* SYMOPT_DEFERRED_LOADS */);
+    bool syms = sym_init && sym_from && sym_init(proc, NULL, TRUE);
+    union { SamplerSymbolInfo info; char buf[sizeof(SamplerSymbolInfo) + 256]; } u;
+    for (size_t i = 0; i < n; i++) {
+        if (i && addrs[i] == addrs[i - 1]) continue;
+        char module[MAX_PATH] = "?";
+        HMODULE m = NULL;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCSTR)(uintptr_t)addrs[i], &m) && m) {
+            char full[MAX_PATH];
+            if (GetModuleFileNameA(m, full, sizeof(full))) {
+                const char *b = strrchr(full, '\\');
+                snprintf(module, sizeof(module), "%s", b ? b + 1 : full);
+            }
+        }
+        DWORD64 disp = 0;
+        memset(&u, 0, sizeof(u));
+        u.info.SizeOfStruct = sizeof(SamplerSymbolInfo);
+        u.info.MaxNameLen = 255;
+        if (syms && sym_from(proc, addrs[i], &disp, &u.info))
+            fprintf(f, "# ext %llx %s!%s+%llx\n", (unsigned long long)addrs[i], module, u.info.Name,
+                    (unsigned long long)disp);
+        else
+            fprintf(f, "# ext %llx %s!?\n", (unsigned long long)addrs[i], module);
+    }
+    free(addrs);
+}
 
 static void write_samples(void) {
     if (InterlockedExchange(&g_written, 1)) return;
@@ -49,6 +126,7 @@ static void write_samples(void) {
         for (uint64_t d = 0; d < rec[0]; d++) fprintf(f, d ? " %llx" : "%llx", (unsigned long long)rec[1 + d]);
         fputc('\n', f);
     }
+    write_ext_symbols(f);
     fclose(f);
     fprintf(stderr, "[sampler] %zu samples written to %s\n", g_n, g_path);
 }
@@ -64,7 +142,7 @@ static int walk(const CONTEXT *c0, uint64_t *out, int max) {
     while (d < max && c.Rip) {
         if (c.Rip >= g_base && c.Rip < g_end) out[d++] = c.Rip - g_base;
         else if (c.Rip - jit_base < jit_size) out[d++] = SAMPLE_JIT_FLAG | (c.Rip - jit_base);
-        else out[d++] = 0;
+        else out[d++] = SAMPLE_EXT_FLAG | c.Rip;
         DWORD64 image = 0;
         PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(c.Rip, &image, NULL);
         if (!fn) {
@@ -82,14 +160,20 @@ static int walk(const CONTEXT *c0, uint64_t *out, int max) {
     return d;
 }
 
+/* Room for the next sample.  Called while the target runs: allocating while
+ * it is suspended could wait forever for a heap lock it holds. */
+static bool reserve_sample(void) {
+    if (g_n < g_cap) return true;
+    size_t nc = g_cap ? g_cap * 2 : 65536;
+    uint64_t *ns = (uint64_t *)realloc(g_samples, nc * (SAMPLE_DEPTH + 1) * sizeof(uint64_t));
+    if (!ns) return false;
+    g_samples = ns;
+    g_cap = nc;
+    return true;
+}
+
 static void record(const CONTEXT *c0) {
-    if (g_n == g_cap) {
-        size_t nc = g_cap ? g_cap * 2 : 65536;
-        uint64_t *ns = (uint64_t *)realloc(g_samples, nc * (SAMPLE_DEPTH + 1) * sizeof(uint64_t));
-        if (!ns) return;
-        g_samples = ns;
-        g_cap = nc;
-    }
+    if (g_n == g_cap) return;
     uint64_t *rec = g_samples + g_n * (SAMPLE_DEPTH + 1);
     rec[0] = (uint64_t)walk(c0, rec + 1, SAMPLE_DEPTH);
     g_n++;
@@ -114,6 +198,7 @@ static DWORD WINAPI sampler_main(LPVOID arg) {
             LONGLONG left_us = (next.QuadPart - now.QuadPart) * 1000000 / freq.QuadPart;
             Sleep(left_us > 1500 ? (DWORD)(left_us / 1000) : 0);
         }
+        if (!reserve_sample()) break;
         if (SuspendThread(g_target) == (DWORD)-1) break;
         if (g_jit_os_busy) {
             /* Unwinding now could wait forever for a lock the stopped

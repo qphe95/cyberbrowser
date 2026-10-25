@@ -186,8 +186,37 @@ void jit_region_bounds(uintptr_t *base, size_t *size)
     *size = g_jit.state > 0 ? JIT_REGION_SIZE : 0;
 }
 
+/* The map's instruction lines, formatted by hand into a buffer: one per
+ * compiled instruction, and printf's formatting of them was a visible part
+ * of the profiles they are for. */
+static char g_jit_map_buf[1 << 16];
+static size_t g_jit_map_len;
+
+static void jit_map_flush(void)
+{
+    if (g_jit.map && g_jit_map_len) fwrite(g_jit_map_buf, 1, g_jit_map_len, g_jit.map);
+    g_jit_map_len = 0;
+}
+
+/* "<kind> <offset in hex> <op>\n" */
+static void jit_map_insn(char kind, size_t off, const char *op)
+{
+    if (g_jit_map_len > sizeof(g_jit_map_buf) - 64) jit_map_flush();
+    char *p = g_jit_map_buf + g_jit_map_len, digits[16];
+    int nd = 0;
+    *p++ = kind;
+    *p++ = ' ';
+    do { digits[nd++] = "0123456789abcdef"[off & 15]; off >>= 4; } while (off);
+    while (nd) *p++ = digits[--nd];
+    *p++ = ' ';
+    for (int k = 0; op[k] && k < 40; k++) *p++ = op[k];
+    *p++ = '\n';
+    g_jit_map_len = (size_t)(p - g_jit_map_buf);
+}
+
 static void jit_map_close(void)
 {
+    jit_map_flush();
     if (g_jit.map) fclose(g_jit.map);
     g_jit.map = NULL;
 }
@@ -832,9 +861,9 @@ JitCode *jit_compile(JSContextHandle ctx, GCHandle owner, const uint8_t *bc, uin
     if (g_jit.map) {
         fprintf(g_jit.map, "F %zx %x %s\n", (size_t)(base - g_jit.base), jc->size, name ? name : "?");
         for (int i = 0; i < n; i++) {
-            fprintf(g_jit.map, "I %zx %s\n", (size_t)(base + ins[i].main_at - g_jit.base), jit_op_name[ins[i].op]);
+            jit_map_insn('I', (size_t)(base + ins[i].main_at - g_jit.base), jit_op_name[ins[i].op]);
             if (ins[i].slow_sid != JIT_ST_COUNT)
-                fprintf(g_jit.map, "S %zx %s\n", (size_t)(base + ins[i].slow_at - g_jit.base), jit_op_name[ins[i].op]);
+                jit_map_insn('S', (size_t)(base + ins[i].slow_at - g_jit.base), jit_op_name[ins[i].op]);
         }
         fprintf(g_jit.map, "L %zx\n", (size_t)(L.base - g_jit.base));
     }

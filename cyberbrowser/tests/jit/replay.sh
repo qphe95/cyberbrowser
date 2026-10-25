@@ -1,7 +1,7 @@
 #!/bin/bash
 # Measure recorded page loads (tests/jit/replays.txt) under several settings
 # (JS_PERF_DESIGN.md section 4).  Each run reports the JS thread's CPU cycles
-# until the page settled ("before page_final"), its CPU time and the DOM
+# until the page settled (the "page settled" mark), its CPU time and the DOM
 # node count.  The page runs on the deterministic clock with fetches done
 # inline (CYBER_DET_TIME=1 CYBER_SYNC_FETCH=1; REAL=1: real time), so every
 # run does the same work.  Settings and recordings take turns within each
@@ -55,7 +55,7 @@ for i in $(seq "$runs"); do
         for k in $(seq 0 $((n_settings - 1))); do
             s=${all_settings[$(( (k + i) % n_settings ))]}
             out=$(run "$1" "$2" "$s")
-            mark=$(echo "$out" | grep 'before page_final')
+            mark=$(echo "$out" | grep 'page settled')
             cycles=$(echo "$mark" | sed -n 's/.*, *\([0-9.]*\) Mcycles.*/\1/p')
             cpu=$(echo "$mark" | sed -n 's/.*thread cpu *\([0-9.]*\) ms.*/\1/p')
             nodes=$(echo "$out" | grep -m1 'DOM nodes' | sed 's/.*: //')

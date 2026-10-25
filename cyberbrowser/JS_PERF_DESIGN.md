@@ -9,9 +9,10 @@ for it.
 ## Summary
 
 The copy-and-patch tier did what a baseline tier can do. It removed interpreter dispatch: the
-interpreter loop's own time on the YouTube replay fell from 465 ms to 64 ms. The page's JS
-thread barely got faster, because dispatch was a small part of its time and the JIT's own
-costs (stencils, call setup, compiling) took most of what dispatch gave back.
+interpreter loop's own time on the YouTube replay fell from 465 ms to 64 ms. Once N0 made the
+replays do identical work every run, T1 measured no net gain on these pages: dispatch was a
+small part of their time, and the JIT's own costs (stencils, call setup, compiling, 20 MB of
+code) took all of what dispatch gave back.
 
 Chrome teaches the same thing. Sparkplug, V8's non-optimizing compiler, was reported at 5–15%
 on Speedometer and real-world benchmarks, on top of an engine whose values, objects, calls and
@@ -20,12 +21,18 @@ every tier and used by the next one), not from its baseline compiler.
 
 So the recommendation is:
 
-1. **Keep T1.** It is cheap, correct, interpreter-compatible, and the exit target for any
-   later tier. Do not rewrite it in assembly or as a Sparkplug clone: that buys little.
+1. **Keep T1, but make it earn its place.** It is correct, interpreter-compatible, and the
+   exit target for any later tier, so it stays. Do not rewrite it in assembly or as a
+   Sparkplug clone: that buys little. Until later milestones make compiled code pay, compile
+   only what is hot enough to repay compiling (N1 measures the threshold), or leave it off by
+   default.
 2. **Make the engine itself cheap, for every tier and every native call:** 8-byte values;
-   unchecked field loads on hot paths; calls without heap frames; an inline allocation fast
-   path; caches for adding and defining properties. This is where most of the remaining time
-   is, and it speeds up the interpreter, T1, natives and the DOM bindings alike.
+   unchecked field loads on hot paths; fewer frame allocations, then calls without heap frames;
+   an inline allocation fast path; caches for defining, adding and generically getting
+   properties. This is where most of the remaining time is, and it speeds up the interpreter,
+   T1, natives and the DOM bindings alike. The JS engine is not all of the time, though: DOM
+   and layout code are 15–72% of the loads measured (section 4.2), and this plan does not
+   cover them.
 3. **Add feedback vectors:** per-function slots recording shapes, types and call targets,
    written by the interpreter and T1, and read by every tier.
 4. **Then one optimizer, T2, built in stages toward Maglev's design.** Stage 1 compiles hot
@@ -40,7 +47,8 @@ So the recommendation is:
 ## 1. What T1 and the first caches taught
 
 Measured on the recorded YouTube watch-page load (`replays/yt-dQw4w9WgXcQ`, replayed with
-`tests/jit/replay.sh`; JS-thread CPU about 3.0–3.4 s per load).
+`tests/jit/replay.sh`; JS-thread CPU about 3.0–3.4 s per load), before N0. Section 4.2 has
+the profile N0 measured, with all of the time attributed.
 
 **Where the JS thread's time goes** (CPU samples, JIT on, first match from the leaf):
 
@@ -62,7 +70,8 @@ Measured on the recorded YouTube watch-page load (`replays/yt-dQw4w9WgXcQ`, repl
 | Stencils' own time | — | ~155 ms |
 | JS-to-JS call setup (`jit_call_prepare`, frames) | part of the loop | ~135 ms |
 | Compiling (3,646 functions, 582 KB of bytecode into 20 MB of code) | — | ~40 ms |
-| Whole load, JS-thread CPU | baseline | about −4%, within ±3% run-to-run noise |
+| Whole load, JS-thread CPU (real time, before N0) | baseline | about −4%, within ±3% run-to-run noise |
+| Whole load, JS-thread cycles (deterministic replays, N0) | baseline | −0.3% to +3.1% across the five recordings, none outside its interval |
 
 **The lessons:**
 
@@ -80,8 +89,10 @@ Measured on the recorded YouTube watch-page load (`replays/yt-dQw4w9WgXcQ`, repl
 - **The profile is broad.** No single opcode, function or helper dominates. That favours
   changes that make *everything* cheaper (values, frames, allocation) over changes that make
   some code paths much faster.
-- **The benchmark is too noisy to steer by.** A ±3% run-to-run spread hides most single
-  changes. Measurement comes first (section 4, N0).
+- **The benchmark was biased, not just noisy.** Real time leaked into what the page did, so a
+  slower run did more work, which also flattered faster code. The −4% first measured for T1
+  came partly from that. N0 fixed it (section 4): with identical work every run, T1 gains
+  nothing on these pages.
 
 ## 2. How Chrome got fast, and what carries over
 
@@ -89,7 +100,7 @@ Measured on the recorded YouTube watch-page load (`replays/yt-dQw4w9WgXcQ`, repl
 |---|---|---|
 | **Ignition** (2016) | A register machine with an accumulator; handlers generated from one description (CSA, later Turboshaft) | Fewer, larger instructions than a stack machine, and less stack traffic per operation. Our bytecode stays a stack machine; T2 recovers the difference by tracking the stack symbolically (section 6.1) |
 | **Hidden classes, inline caches, feedback vectors** | Every property access, call and arithmetic site records what it saw, in a per-function feedback vector; every tier reads it | The single most transferable idea. Our caches today live in compiled code only and are thrown away by the next tier. Section 5.4 |
-| **Sparkplug** (2021) | Bytecode to machine code in one pass, with no IR; interpreter-compatible frames; calls builtins for most operations | Exactly what T1 is. Its published gains (5–15%) match what we see. It is worth having as the cheap tier and the exit target, not as the source of speed |
+| **Sparkplug** (2021) | Bytecode to machine code in one pass, with no IR; interpreter-compatible frames; calls builtins for most operations | Exactly what T1 is. Sparkplug gains 5–15% on an engine whose values, calls and allocation are already cheap; T1 gains nothing measurable on ours (section 4.1). It is worth having as the exit target, not as the source of speed |
 | **Maglev** (2023) | CFG SSA built from bytecode and feedback; speculation with deoptimization; about 10× slower to compile than Sparkplug, 10–100× faster than TurboFan | The target design for T2. Its cost (frame states, deoptimization, a register allocator, inlining) pays only where hot, type-stable code exists, so T2 reaches it in stages, each measured first (section 6) |
 | **TurboFan / Turboshaft** | The top tier | Out of scope |
 | **Compact values and pointer compression** (2020) | Small integers and 32-bit compressed pointers in tagged words; about 40% less heap | We have compressed references already; our values are still 16 bytes. Section 5.1 |
@@ -110,21 +121,25 @@ Unlike them, T2 treats this as its first stage, not its final form.
 
 ## 3. What each lever can reach
 
-Estimates for the YouTube load (about 3.2 s of JS-thread CPU), to be checked by N0's
-measurements before each milestone starts. The ranges overlap: each lever shrinks the base
-the next one works on.
+Estimates for the YouTube watch and search loads, whose profiles (section 4.2) are the most
+JS-heavy of the five recordings. They are checked by measurement as each milestone starts.
+The ranges overlap: each lever shrinks the base the next one works on.
 
 | Lever | Attacks | Estimated gain |
 |---|---|---|
 | 8-byte values (5.1) | Stack, frame and property traffic everywhere; half the value memory | 5–10% |
-| Unchecked hot-path loads (5.1) | Null checks on every handle field read (`SAFE_GET_OR`) | 2–4% |
-| Inline allocation fast path, fewer allocations (5.2) | Part of the 20% in GC | 4–8% |
-| Calls without heap frames, JS and native (5.3) | Call setup, frame initialization, native-call glue | 4–8% |
-| Caches for adding and defining properties; caches in the interpreter (5.4) | `JS_DefineProperty`, `add_property`, interpreter lookups | 2–4% |
-| T2 stage 1 (6.1) | Tag checks, stack traffic and helper calls within blocks of hot code | 3–6% of what is left |
+| Unchecked hot-path loads (5.1) | Null checks on every handle field read (`SAFE_GET_OR`, about 3% of the load in `gc_deref` alone) | 2–4% |
+| Inline allocation fast path, fewer allocations (5.2) | Part of the 21% in GC | 4–8% |
+| A frame pool that does not miss (5.3) | 577,000 frame allocations, 308 MB per watch-page load | 1–3% |
+| Calls without heap frames, JS and native (5.3) | Call setup, frame initialization, native-call glue | 3–6% |
+| Caches for defining, adding and generically getting properties (5.4) | `JS_DefineProperty`, `add_property`, `JS_GetPropertyInternal` from natives | 2–4% |
+| T1's threshold (5.5) | Compiling, and code that runs too little to repay it | 0–2% |
+| T2 stage 1 (6.1) | Tag checks, stack traffic and helper calls within blocks of hot code | 2–5% of what is left |
 | T2 stages 2–3 (6.2, 6.3) | Values and checks across blocks and loops; inlining; allocation sinking | Unknown until stage 1's counters |
 
-Together, the first five rows are the bulk of a plausible 20–30%. None of them is a compiler.
+Together, the rows before T2 are the bulk of a plausible 20–30% of the JS-heavy loads' JS-thread
+time. None of them is a compiler. On pages dominated by DOM and layout, such as the Wikipedia
+article (72% DOM and layout), the gain is proportionally smaller.
 
 ## 4. Measuring (N0)
 
@@ -151,8 +166,15 @@ Nothing in this document should start without a measurement that can see a 1% ch
   spread, and its change from the first setting with a 95% bootstrap interval. `COUNTERS=1`
   adds the counters side by side.
 - **The timeline** (`CYBER_TIMELINE=1`) reports the JS thread's cycles
-  (`QueryThreadCycleTime`). `CYBER_SPIN_PCT=<p>` adds exactly p% cycles before the final mark,
-  to calibrate the measurement.
+  (`QueryThreadCycleTime`). The load is timed to the **"page settled"** mark, at the end of the
+  settle loop. After it, the harness rasterizes and JPEG-encodes a screenshot and writes
+  dumps, which earlier measurements included: 2% of the YouTube watch page and 22% of BBC.
+  `CYBER_SPIN_PCT=<p>` adds exactly p% cycles at that mark, to calibrate the measurement.
+- **The sampling profiler** (`CYBER_SAMPLE`) names frames in system DLLs (through DbgHelp, by
+  their DLL's exports). `CYBER_SAMPLE_LOAD=1` stops it at "page settled", so profiles match
+  the timing. `tools/sample_report.js` names functions without symbols by their source file,
+  shows each subsystem's top functions, and shows time in the OS by the first function in our
+  code that led there.
 - **`CYBER_COUNTERS=1`** (`src/quickjs/cyber_counters.h`) counts calls by kind, frames,
   property paths, inline-cache outcomes and allocations by type and size, and prints them at
   exit.
@@ -184,22 +206,77 @@ interpreter). Every run of every recording, under every setting, made the same n
 The spread per run was 0.2–1.2%. The A/A copy's interval included 0 on all five recordings.
 The 1% spin was detected on three recordings and borderline on two. **A change of about 1.5% is
 detectable on every recording at 12 rounds; 1% needs about 24.** The exit criterion is met at
-that run count.
+that run count. (That calibration was timed to the later mark, screenshot included; the
+spread does not depend on where the mark is.)
+
+**What this means for how the work is done.** Single changes in N1 will often be 1–3%. Each is
+measured on its own: its counters first (deterministic, so they show whether it removed the
+work it targets), then 24 interleaved rounds against the previous binary. Changes are not
+batched, because a batch's total hides one that costs more than it saves.
 
 **What N0 already shows:**
 
-- **The JIT gains nothing on these pages once work is held equal.** Against the interpreter it
-  measured −1.0% (the YouTube watch page), +1.5% (home) and +1.9% (BBC), and was within noise on
-  the other two. The 4% gain measured before N0 was partly the measurement's bias. T1's own
-  costs and its 20 MB of code cancel what dispatch saved.
+- **The JIT gains nothing on these pages once work is held equal.** Against the interpreter,
+  timed to "page settled" over 12 rounds, T1 measured −0.3% (the YouTube watch page), +2.9%
+  (home), +1.9% (search), +3.1% (BBC) and +0.9% (Wikipedia). None was outside its 95% interval;
+  if anything T1 is slightly slower. That run's spread was 1–4% per run against the
+  calibration's 0.2–1.2%: the machine's load varies between sessions, so each gate run checks
+  its own spread before its result is used. The 4% gain
+  measured before N0 was partly the measurement's bias. T1's own costs and its 20 MB of code
+  cancel what dispatch saved.
+- **The interpreter runs little, so its caches matter little.** Under the JIT, a watch-page
+  load makes about 92,000 interpreted calls and 1 M interpreted property gets, against 4.9 M
+  compiled calls. Most generic property work comes from natives and the runtime instead.
 - **Frames:** 577,000 of 5 million bytecode frames per watch-page load miss the pool and are
-  allocated, 308 MB of them. That is the largest single allocation stream after objects, and an
-  N2 target that does not need stack frames: a better pool may do.
+  allocated, 308 MB of them. That is the largest single allocation stream after objects. A
+  pool that does not miss is a small change, ahead of N2's stack frames.
 - **Property definition, not assignment, adds most properties.** There are 4.7 M
   `JS_DefineProperty` calls (object literals and natives building objects) against 5.3 M
   property adds, and 5.3 M generic gets (`JS_GetPropertyInternal`) from natives and the
   interpreter's slow path. These are N1's cache targets.
 - **The shape transition cache** answers 84% of property adds (4.4 M of 5.3 M).
+
+### 4.2 Where all of the time goes
+
+CPU samples to "page settled" on the deterministic replays, JIT on, each sample attributed to
+the first subsystem found from its leaf. Time in system DLLs counts toward the subsystem of
+the code that called into them.
+
+| Subsystem | YT watch | YT home | YT search | BBC | Wikipedia |
+|---|---|---|---|---|---|
+| GC | 21.4% | 23.8% | 21.7% | 12.9% | 5.7% |
+| DOM and layout (native) | 19.6% | 14.8% | 21.1% | 26.5% | 72.2% |
+| Compiled code | 18.0% | 10.3% | 17.8% | 0.4% | 2.5% |
+| Interpreter and native-call glue | 14.8% | 16.3% | 13.1% | 13.7% | 3.5% |
+| Property access and shapes | 13.4% | 13.1% | 11.6% | 6.8% | 2.4% |
+| Strings and numbers | 6.0% | 7.8% | 5.1% | 5.2% | 3.4% |
+| Parsing and compiling | 3.6% | 9.3% | 6.3% | 15.7% | 1.9% |
+| Fonts and text | 0.9% | 1.3% | 1.4% | 14.9% | 5.6% |
+| Harness (replay reads, logging) | 0.9% | 1.7% | 0.6% | 2.4% | 0.4% |
+| Regular expressions | 0.7% | 0.9% | 0.6% | 0.4% | 1.3% |
+| Other | 0.7% | 0.7% | 0.9% | 1.2% | 1.1% |
+
+Inside the buckets (the watch page):
+
+- **GC:** handle dereferences (`gc_deref`, 3.3%), allocation (`gc_alloc_in`, `gc_align16`,
+  `alloc_cross`, `gc_core_alloc_object_memory`; about 6%), dirty-card marking
+  (`gc_dirty_range`, `gc_dirty_slot`; 3.4%) and `memcpy` in `gc_realloc`.
+- **Compiled code:** the call path (`jit_call_prepare`, frame setup; about 4%), cached property
+  reads (`jit:get_field`, `jit_get_field_ic`; about 4%) and closure variables
+  (`js_varref_*`; 1.5%).
+- **Interpreter:** `JS_CallInternal` (2.1%), native-call glue (`js_call_c_function`, 1.1%),
+  and compiling (unwind registration, writing code).
+- **Property access:** lookups (`find_own_property`, `find_own_property_handle`; 3.5%),
+  definitions (`JS_DefineProperty`, `JS_CreateProperty`; 1.6%), generic gets and shape-table
+  lookups.
+- **Time in system DLLs,** about 19% of samples, is now named. The largest parts are the C heap
+  behind `js_plain_*` (`RtlAllocateHeap`/`RtlFreeHeap`, about 3%) and `memcpy` (2.6%). Waits on
+  FFmpeg's decoder threads come next, then the GC's memory commits and waits, string compares
+  in style matching, and reading font files.
+
+Two measurement artifacts were found and removed this way: the JIT's map for the profiler
+(formatted with `printf` per instruction, 2% of a profile) and, on some runs, a deadlock in the
+sampler, which grew its buffer while the main thread was suspended.
 
 ## 5. Making the engine cheap
 
@@ -255,6 +332,12 @@ Today every bytecode call initializes a pooled heap frame (`JSStackFrame` and it
 Every native call takes a pooled C frame too. The frames are heap objects because closures,
 generators and the collector need to find them.
 
+- **A pool that does not miss (N1).** The pool keeps one frame per call depth, sized for the
+  largest function seen at that depth so far, with headroom. A call needing a larger frame,
+  or a frame pinned by a closure, allocates a new one: 577,000 times (308 MB) per watch-page
+  load. First, the counters should say which of those it is. A size class per depth (a few
+  frames of increasing size), or keeping the replaced frame for reuse, removes most of them
+  without changing how frames work.
 - **Frames on the machine stack for calls that need nothing else.** That means a callee that
   captures no variables, isn't a generator and doesn't use `arguments`. The bytecode compiler
   knows this statically (`var_ref_count == 0` and the function kind). The collector already
@@ -288,6 +371,30 @@ experiment showed it could not before. T1 uses the same slots. T2 reads the type
 bits to decide what to specialize, in every stage.
 
 The retention set, prototype epochs and the megamorphic cache of M4 carry over unchanged.
+
+**Before feedback vectors (N1): caches where the runtime's generic paths are.** N0 shows the
+interpreter runs little under the JIT, while natives and the runtime call
+`JS_GetPropertyInternal` 5.3 M times and `JS_DefineProperty` 4.7 M times per watch-page load.
+N1 puts the caches there:
+
+- **A generic get cache:** a global table keyed by (shape, atom) inside
+  `JS_GetPropertyInternal`, with the rules of the megamorphic cache (hashed shapes; prototype
+  entries checked against the epoch). It serves natives, the DOM bindings and the interpreter
+  at once.
+- **A define/add cache:** for a definition that adds a data property to an object, the
+  shape's transition cache (M4) already gives the new shape. Give `JS_DefineProperty` and
+  `JS_CreateProperty` a fast path for that case, so the common definition skips the general
+  descriptor logic.
+- **`put_field` and `define_field` caches** in compiled code, as for `get_field`.
+
+### 5.5 T1's threshold
+
+T1 compiles a function after about 20 entries, or the equivalent in loop iterations: 3,646
+functions and 20 MB of code on the watch page, most of them run too little to repay
+compiling. With deterministic replays the threshold can now be measured. Sweep it, from today's
+value to compiling only the hottest few hundred functions. If no threshold makes T1 a net
+gain, turn it off by default until N2 and N3 make compiled code worth its cost. It stays in
+the build, tested in every mode, as T2's exit target.
 
 ## 6. The optimizer, built in stages
 
@@ -394,7 +501,7 @@ without a code generator.
 
 ### 6.5 Tiering
 
-- **Interpreter → T1:** at today's threshold.
+- **Interpreter → T1:** at the threshold N1 measures (5.5), if T1 is on by default by then.
 - **T1 → T2:** when a function's counter passes a much higher threshold (to be measured, of
   the order of 10^5 executed instructions) and its feedback has settled, meaning no new types
   or shapes seen for a while.
@@ -409,7 +516,7 @@ without a code generator.
 | | Work | Exit criterion |
 |---|---|---|
 | N0 | Cycle-based timing, four more recordings, per-subsystem counters (section 4) | A 1% change is detectable on every recording |
-| N1 | Unchecked hot-path loads; inline allocation fast path; property-add/define/put caches; interpreter uses the same caches | −8% JS-thread cycles on the replays; parity |
+| N1 | In this order, each measured alone (section 4.1): a frame pool that does not miss; T1's threshold; generic get and define/add caches in the runtime, `put_field`/`define_field` caches in compiled code; unchecked hot-path loads; inline allocation fast path | −8% JS-thread cycles on the YouTube replays; parity on all five |
 | N2 | Calls without heap frames for simple callees; lighter native calls; call caches | −6% more; parity; GC stress clean |
 | N3 | 8-byte values engine-wide | −6% more; memory down; all four JIT modes and replays at parity |
 | N4 | Feedback vectors; T2 stage 1 (IR, block-local virtual stack, guards and exits), x86-64 first | −5% more on JS-heavy pages; counters for guard failures, block lengths and values crossing blocks |
@@ -417,7 +524,9 @@ without a code generator.
 | N6 | T2 stage 3 (inlining, escape analysis) | Go/no-go from N5's data |
 
 The order is by gain per unit of work and risk. N1 is local changes behind existing
-interfaces. N2 changes frames but keeps their layout visible to the collector. N3 touches
+interfaces, ordered by what N0 measured: the frame pool and the threshold first (small and
+measured), then the caches where the 10 M generic property operations happen, then the two
+engine-wide mechanical changes. N2 changes frames but keeps their layout visible to the collector. N3 touches
 everything, but mechanically, and is safest after the measurement and test infrastructure
 has caught the smaller changes. N4 needs N1's caches and N0's counters to be worth building,
 and each later stage starts only on its predecessor's data.
@@ -434,6 +543,15 @@ and each later stage starts only on its predecessor's data.
 - **Interpreter caches slowing cold code.** A cache lookup on a site seen once costs more
   than the plain lookup. Mitigation: allocate feedback vectors only for functions past a
   small threshold (V8's lazy feedback allocation).
+- **The deterministic replays are a model of the page, not the page.** Under
+  `CYBER_DET_TIME`, time advances by calls made rather than by the clock, and the event loop
+  waits for in-flight loads at each turn. Pages take the same paths every run and the same
+  path as when recorded, but a change that alters timing-dependent behaviour (how many
+  intervals fire) would not show it. Mitigation: confirm a milestone's gain with a real-time
+  replay (`REAL=1`) at the end, with more rounds.
+- **The JS engine is not all of the time.** DOM and layout are 15–27% of the YouTube and BBC
+  loads and 72% of the Wikipedia one, and nothing in this plan touches them. Gains are stated
+  as a share of each load's JS-thread time, which includes them.
 - **T2 guards that keep failing.** Mitigation: count exits per site, recompile without the
   guard after a few, and fall back to T1 for a function that keeps failing.
 - **Two code generators (stencils and the T2 assembler).** Mitigation: T2's operation set is

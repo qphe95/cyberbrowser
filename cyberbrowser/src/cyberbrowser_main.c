@@ -1204,16 +1204,19 @@ static bool render_document_to_jpg(HtmlDocument *doc, ImageCache *image_cache,
  * scheduler-tick granularity: tests/jit/replay.sh compares them.
  *
  * CYBER_SPIN_PCT=<p> (calibration, JS_PERF_DESIGN.md section 4): before
- * the "before page_final" mark, spin until the thread has used p% more
+ * the "page settled" mark, spin until the thread has used p% more
  * cycles, so a known slowdown can be checked against the measurement. */
 static void tl_mark(const char *what) {
     static int on = -1;
+    /* CYBER_SAMPLE_LOAD=1: profile the page load only, as the replays time
+     * it (not the screenshot and dumps after it). */
+    if (strcmp(what, "page settled") == 0 && cyber_getenv("CYBER_SAMPLE_LOAD")) cyber_sampler_stop();
     if (on < 0) on = cyber_getenv("CYBER_TIMELINE") ? 1 : 0;
     if (!on) return;
     ULONG64 cycles = 0;
     QueryThreadCycleTime(GetCurrentThread(), &cycles);
     const char *spin = cyber_getenv("CYBER_SPIN_PCT");
-    if (spin && strcmp(what, "before page_final") == 0) {
+    if (spin && strcmp(what, "page settled") == 0) {
         ULONG64 until = cycles + (ULONG64)((double)cycles * atof(spin) / 100.0), now_c = cycles;
         volatile unsigned x = 0;
         while (now_c < until) {
@@ -1933,6 +1936,9 @@ int main(int argc, char *argv[]) {
         }
     }
     CP_END("quiescence-loop");
+    /* The page load is over: what follows is the harness's (the screenshot,
+     * dumps).  tests/jit/replay.sh times the load to here. */
+    tl_mark("page settled");
     pending_shot_save(&shot, "wikipedia_screenshot.jpg");
     pending_shot_free(&shot);
 
