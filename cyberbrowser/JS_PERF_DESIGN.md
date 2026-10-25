@@ -351,6 +351,37 @@ generators and the collector need to find them.
   callee's bytecode and compiled entry, so a monomorphic call skips the class checks and the
   bytecode load.
 
+**As built (N2): a JS stack.** After N1's pool fix, frames were no longer allocated, so what
+a stack frame could save was the pool's bookkeeping: a heap frame's dirty marks, its handle
+links, and the clearing when it returns. The frames went to a dedicated JS stack rather than
+the machine stack. Frames vary in size. A stencil cannot `alloca` beside its `musttail`
+continuation, and a fixed buffer per call frame would eat the 1 MB thread stack at
+YouTube's 300–600 calls deep. JavaScriptCore keeps its JS stack apart for the same reasons.
+
+- **The chain by pointer.** `JSRuntime.current_frame` and `JSStackFrame.prev_frame` link
+  the frames while they run (a running frame never moves). `prev_frame_handle` remains for
+  heap frames that outlive their calls. Alone this was −0.5% to −1.0% on the YouTube replays.
+- **Which calls.** `js_bc_stack_frame_ok` scans a function's bytecode once. A normal
+  function with no var_refs qualifies unless it makes closures or classes, builds mapped
+  `arguments`, calls `eval`, or makes references to locals: each can leave a var_ref into
+  the frame (`get_var_ref_enhanced` makes them for lazily parsed children too).
+  `QJS_JS_STACK=0` turns it off.
+- **The frame.** A 16 MB region, pushed and popped by pointer bump. The frame has the pooled
+  frame's layout and no handle. The collector marks it as every frame on the chain
+  (`JS_MarkActiveStackFrames`), so its slots need no dirty flags. Returning resets the top.
+  Running out falls back to a heap frame.
+
+On the watch page 4.54 M of 5.03 M bytecode frames go there. Against N2's previous build:
+−1.8% (watch), −2.0% (home), −2.2% (search), BBC and Wikipedia at parity, with the same calls
+and DOM nodes. GC stress, poisoning and `QJS_GC_VERIFY` runs are clean: `tests/jit/frames.js`
+in every JIT mode, the watch, search and Wikipedia replays with the JIT on and off, and the
+test suite. (The suite's `test_dom_wrappers_are_lazy` fails sometimes under stress with the
+JS stack on or off: under stress the count of live nodes falls as earlier garbage is swept.)
+
+Next on this path: a callee's arguments in place. Today the arguments are copied from the
+caller's operand stack into the new frame. With caller and callee both on the JS stack, the
+callee's argument slots can be the caller's.
+
 ### 5.4 Feedback vectors and caches in every tier
 
 Give each `JSFunctionBytecode` a feedback vector, allocated lazily when the function first
@@ -441,8 +472,8 @@ alive bitmap, which the sweeper writes concurrently. Both belong to the allocato
 
 **T1.** With the frame pool fixed, compiled code beats the interpreter: 12.6 G against 13.9 G
 cycles on the watch page. The sweep found no gain at the old threshold (2,000), −2.5% on the
-watch page at 20,000 and 100,000, and the gate confirmed 50,000 as the default. T1 itself
-stays opt-in (`QJS_JIT=1`) until it is turned on by decision, not by this measurement.
+watch page at 20,000 and 100,000, and the gate confirmed 50,000 as the default. On this
+result T1 is now on by default (`QJS_JIT=0` turns it off).
 
 **The gate** (N1's starting build against its end, 24 rounds, deterministic replays):
 

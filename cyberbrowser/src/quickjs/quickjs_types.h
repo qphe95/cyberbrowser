@@ -437,8 +437,14 @@ typedef struct JSStackFrame {
      * This ensures compaction safety.
      */
     
-    /* Previous frame in call stack - GCHandle for GC safety */
+    /* Previous frame in call stack - GCHandle for GC safety: GC_HANDLE_NULL
+     * when that frame has none (it is on the JS stack, js_stack_frame_enter).
+     * A frame that outlived its call is walked from by this. */
     GCHandle prev_frame_handle;
+    /* The same while the frame is on the call chain (JS_SF_PREV): a frame
+     * there does not move (running code addresses it), and frames on the
+     * JS stack have no handle. */
+    struct JSStackFrame *prev_frame;
     
     GCValue cur_func; /* current function, JS_UNDEFINED if the frame is detached */
     
@@ -513,7 +519,7 @@ struct JSStackFrame *js_frame_deref(GCHandle frame_handle);
 #define JS_SF_STACK_BUF(sf) ((GCValue*)((uint8_t*)(sf) + (sf)->stack_buf_offset))
 
 /* Access previous frame */
-#define JS_SF_PREV(sf) js_frame_deref((sf)->prev_frame_handle)
+#define JS_SF_PREV(sf) ((sf)->prev_frame)
 
 /* Forward declaration for bytecode buffer accessor (takes GCHandle) */
 #ifdef __cplusplus
@@ -949,7 +955,10 @@ struct JSRuntime {
     uint32_t permanent_atom_count;
     GCHandle atom_gc_marks_handle;  /* Handle to mark bits array (GC_HANDLE_NULL if not needed) */
 
-    GCHandle current_stack_frame_handle;  /* GC-safe handle to current stack frame */
+    GCHandle current_stack_frame_handle;  /* unused: see current_frame */
+    /* The call chain's newest frame (JSStackFrame.prev_frame links the
+     * rest); NULL when no JS runs. */
+    struct JSStackFrame *current_frame;
 
     JSHostPromiseRejectionTracker *host_promise_rejection_tracker;
     void *host_promise_rejection_tracker_opaque;
@@ -1292,7 +1301,10 @@ struct JSFunctionBytecode {
     uint8_t has_debug : 1;
     uint8_t read_only_bytecode : 1;
     uint8_t is_direct_or_indirect_eval : 1; /* used by JS_GetScriptOrModuleName() */
-    /* XXX: 10 bits available */
+    /* Where its calls' frames go (js_bc_stack_frame_ok): 0 not known yet,
+     * 1 the JS stack, 2 the heap. */
+    uint8_t frame_where : 2;
+    /* XXX: 8 bits available */
     GCHandle byte_code_handle; /* Handle to bytecode buffer (GC-managed) */
     int byte_code_len;
     uint32_t byte_code_offset; /* offset from base of allocation to bytecode (for inline bytecode) */

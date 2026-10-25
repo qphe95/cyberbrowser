@@ -960,6 +960,9 @@ static void js_free_shape(JSRuntimeHandle rt, JSShapeHandle sh);
 static void js_free_shape_null(JSRuntimeHandle rt, JSShapeHandle sh);
 static int js_shape_prepare_update(JSContextHandle ctx, JSObjectHandle p,
                                    JSShapeProperty **pprs);
+static int js_autoinit_resolve(JSContextHandle ctx, JSObjectHandle p, JSAtom atom, const GCValue *val);
+static BOOL js_bc_stack_frame_ok(JSFunctionBytecodeHandle b, JSFunctionBytecode *bp);
+static JSContextHandle JS_GetFunctionRealm(JSContextHandle ctx, GCValue func_obj);
 static int init_shape_hash(JSRuntimeHandle rt);
 static __exception int js_get_length32(JSContextHandle ctx, uint32_t *pres,
                                        GCValue obj);
@@ -2074,6 +2077,7 @@ static void js_bc_frame_release(JSStackFrame *sf, int depth)
     }
     sf->cur_func = JS_UNDEFINED;
     sf->prev_frame_handle = GC_HANDLE_NULL;
+    sf->prev_frame = NULL;
     sf->bytecode_handle = GC_HANDLE_NULL;
     sf->var_refs_handle = GC_HANDLE_NULL;
     sf->arg_count = 0;
@@ -9576,9 +9580,10 @@ GCValue JS_GetPropertyInternal(JSContextHandle ctx, GCValue obj,
                         return JS_UNDEFINED;
                     return val;
                 } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
-                    /* AUTOINIT disabled - should never happen with eager initialization */
-                    fprintf(stderr, "ERROR: JS_PROP_AUTOINIT encountered in JS_GetPropertyInternal - this should not happen!\n");
-                    return JS_EXCEPTION;
+                    /* A lazy prototype: made now, then found again. */
+                    if (js_autoinit_resolve(ctx, (JSObjectHandle)current_handle, prop, NULL))
+                        return JS_EXCEPTION;
+                    continue;
                 }
             } else {
                 return pr->u.value;
@@ -10165,9 +10170,10 @@ retry:
                     }
                     GC_SET(desc->value, val);
                 } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
-                    /* AUTOINIT disabled - should never happen with eager initialization */
-                    fprintf(stderr, "ERROR: JS_PROP_AUTOINIT encountered in JS_GetOwnPropertyInternal - this should not happen!\n");
-                    return -1;
+                    /* A lazy prototype: its value is asked for. */
+                    if (js_autoinit_resolve(ctx, p, prop, NULL))
+                        return -1;
+                    goto retry;
                 }
             } else {
                 GC_SET(desc->value, pr->u.value);
@@ -10180,11 +10186,8 @@ retry:
                     JS_ThrowReferenceErrorUninitialized(ctx, prs->atom);
                     return -1;
                 }
-            } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
-                /* AUTOINIT disabled - should never happen with eager initialization */
-                fprintf(stderr, "ERROR: JS_PROP_AUTOINIT encountered in JS_GetOwnPropertyInternal (2) - this should not happen!\n");
-                return -1;
             }
+            /* A lazy prototype exists without being made. */
         }
         return TRUE;
     }
@@ -11220,9 +11223,9 @@ int JS_SetPropertyInternal(JSContextHandle ctx, GCValue obj,
                 js_varref_set_value(var_ref, val);
             return TRUE;
         } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
-            /* AUTOINIT disabled - should never happen with eager initialization */
-            fprintf(stderr, "ERROR: JS_PROP_AUTOINIT encountered in JS_SetPropertyInternal - this should not happen!\n");
-            return -1;
+            /* A lazy prototype (writable) gets the value: no object made. */
+            JS_NOTE_WATCHED_WRITE(p1);
+            return js_autoinit_resolve(ctx, p1, prop, &val) ? -1 : TRUE;
         } else {
             goto read_only_prop;
         }
@@ -11343,9 +11346,10 @@ int JS_SetPropertyInternal(JSContextHandle ctx, GCValue obj,
             if ((prs->flags & JS_PROP_TMASK) == JS_PROP_GETSET) {
                 return call_setter(ctx, prop, (JSObjectHandle)(pr->u.getset.setter_handle), this_obj, val, flags);
             } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
-                /* AUTOINIT disabled - should never happen with eager initialization */
-                fprintf(stderr, "ERROR: JS_PROP_AUTOINIT encountered in JS_SetPropertyGeneric - this should not happen!\n");
-                return -1;
+                /* A lazy prototype on the chain: made, then found again. */
+                if (js_autoinit_resolve(ctx, p1, prop, NULL))
+                    return -1;
+                goto retry2;
             } else if (!(prs->flags & JS_PROP_WRITABLE)) {
                 goto read_only_prop;
             } else {
@@ -11848,6 +11852,50 @@ static int js_shape_prepare_update(JSContextHandle ctx, JSObjectHandle p,
     return 0;
 }
 
+/* Lazy prototypes (JS_PERF_DESIGN.md section 5.6).  js_closure gives a
+ * function's `prototype` the type JS_PROP_AUTOINIT, its slot holding
+ * undefined (nothing the collector must know about), and makes no object.
+ * A path that meets a property of that type calls this and looks the
+ * property up again: it becomes a data property holding *val, or without
+ * val a new object whose `constructor` is the function, made in the
+ * function's realm.  -1 on exception. */
+static int js_autoinit_resolve(JSContextHandle ctx, JSObjectHandle p, JSAtom atom, const GCValue *val)
+{
+    JSShapeProperty *prs;
+    JSProperty *pr;
+    GCValue func = GC_MKHANDLE(JS_TAG_OBJECT, p), proto;
+
+    if (atom != JS_ATOM_prototype) {
+        JS_ThrowInternalError(ctx, "lazy property other than prototype");
+        return -1;
+    }
+    if (val) {
+        proto = *val;
+    } else {
+        JSContextHandle realm = JS_GetFunctionRealm(ctx, func);
+        if (!SAFE_VALID(realm))
+            realm = ctx;
+        proto = JS_NewObject(realm);
+        if (JS_IsException(proto))
+            return -1;
+        if (JS_DefinePropertyValue(realm, proto, JS_ATOM_constructor, func,
+                                   JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE) < 0)
+            return -1;
+        CC_INC(prototype_made);
+    }
+    /* The allocations may have moved the object: look again. */
+    prs = find_own_property(&pr, p, atom);
+    if (!prs || (prs->flags & JS_PROP_TMASK) != JS_PROP_AUTOINIT)
+        return 0;
+    if (js_shape_prepare_update(ctx, p, &prs))
+        return -1;
+    prs->flags &= ~JS_PROP_TMASK;
+    find_own_property(&pr, p, atom);
+    gc_set_heap_value(&pr->u.value, proto);
+    gc_write_barrier(SAFE_HANDLE(p), GC_VALUE_GET_HANDLE(proto));
+    return 0;
+}
+
 static int js_update_property_flags(JSContextHandle ctx, JSObjectHandle p,
                                     JSShapeProperty **pprs, int flags)
 {
@@ -11939,9 +11987,10 @@ int JS_DefineProperty(JSContextHandle ctx, GCValue this_obj,
         }
 
         if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
-            /* AUTOINIT disabled - should never happen with eager initialization */
-            fprintf(stderr, "ERROR: JS_PROP_AUTOINIT encountered in JS_DefineProperty - this should not happen!\n");
-            return -1;
+            /* A lazy prototype: made, then redefined. */
+            if (js_autoinit_resolve(ctx, p, prop, NULL))
+                return -1;
+            goto redo_prop_update;
         }
 
         if (flags & (JS_PROP_HAS_VALUE | JS_PROP_HAS_WRITABLE |
@@ -15867,8 +15916,8 @@ static void js_print_object(JSPrintValueState *s, JSObjectHandle p)
                             js_print_value(s, js_varref_get_value(var_ref));
                         }
                     } else if ((prs->flags & JS_PROP_TMASK) == JS_PROP_AUTOINIT) {
-                        /* AUTOINIT disabled - should not occur */
-                        js_printf(s, "[autoinit disabled]");
+                        /* A lazy prototype (js_autoinit_resolve), not made yet. */
+                        js_printf(s, "[lazy prototype]");
                     } else {
                         js_print_value(s, pr->u.value);
                     }
@@ -19227,6 +19276,7 @@ static GCValue js_closure2(JSContextHandle ctx, GCValue func_obj,
     if (SAFE_GET_OR(b, JSFunctionBytecodeHandle, func_parse_state, 0) == JS_FUNC_LAZY &&
         !SAFE_GET_OR(b, JSFunctionBytecodeHandle, has_resume_parse_state, 0) &&
         sf && sf->self_handle != GC_HANDLE_NULL) {
+        CC_INC(closure_legacy_lazy);
         SAFE_SET_HANDLE(p, JSObjectHandle, u.func.parent_frame_handle, sf->self_handle);
         js_frame_pin_with_ancestors(sf);   /* resolved later, by name up the chain too */
     }
@@ -19641,21 +19691,17 @@ static GCValue js_closure(JSContextHandle ctx, GCValue bfunc,
         JS_DefinePropertyValue(ctx, func_obj, JS_ATOM_prototype, proto,
                                JS_PROP_WRITABLE);
     } else if (SAFE_GET_OR(b, JSFunctionBytecodeHandle, has_prototype, 0)) {
-        /* Create prototype eagerly instead of lazily to avoid AUTOINIT/GC
-         * issues.  As js_instantiate_prototype() would: the prototype gets a
-         * `constructor` back-reference (it had none, so new F().constructor
-         * was Object), and `prototype` is writable but not configurable. */
-        GCValue proto = JS_NewObject(ctx);
-        if (JS_IsException(proto))
-            goto fail;
-        CC_INC(closure_prototype);
+        /* `prototype`, writable but not configurable, is made on first use
+         * (js_autoinit_resolve): most closures are never constructors.
+         * When made, it gets a `constructor` back-reference. */
+        JSProperty *pr;
         JS_SetConstructorBit(ctx, func_obj, TRUE);
-        if (JS_DefinePropertyValue(ctx, proto, JS_ATOM_constructor, func_obj,
-                                   JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE) < 0)
+        pr = add_property(ctx, JS_VALUE_GET_OBJ(func_obj), JS_ATOM_prototype,
+                          JS_PROP_WRITABLE | JS_PROP_AUTOINIT);
+        if (unlikely(!pr))
             goto fail;
-        if (JS_DefinePropertyValue(ctx, func_obj, JS_ATOM_prototype, proto,
-                                   JS_PROP_WRITABLE) < 0)
-            goto fail;
+        gc_set_heap_value(&pr->u.value, JS_UNDEFINED);
+        CC_INC(closure_prototype);
     }
     return func_obj;
  fail:
@@ -19859,7 +19905,7 @@ JSStackFrame *js_bc_frame_enter(JSContextHandle caller_ctx, JSRuntimeHandle rt, 
                                 JSFunctionBytecodeHandle b, GCValue func_obj, int argc, GCValue *argv,
                                 JSInterpFrame *F)
 {
-    JSStackFrame *sf, *prev_sf;
+    JSStackFrame *sf;
     GCValue *arg_buf, *var_buf, *stack_buf;
     JSVarRefHandle *var_refs;
     GCHandle *sf_var_refs;
@@ -19942,9 +19988,7 @@ JSStackFrame *js_bc_frame_enter(JSContextHandle caller_ctx, JSRuntimeHandle rt, 
         }
     }
 
-    prev_sf = js_rt_current_stack_frame(rt);
-    gc_set_heap_handle(&sf->prev_frame_handle, prev_sf ? prev_sf->self_handle : GC_HANDLE_NULL);
-    js_rt_set_current_stack_frame(rt, sf);
+    js_rt_push_stack_frame(rt, sf);
 
     F->sf = sf;
     F->ctx = ctx; /* the current realm */
@@ -19975,6 +20019,98 @@ static inline __attribute__((always_inline)) GCValue jit_value_load(const GCValu
     return v;
 }
 
+/* The JS stack (JS_PERF_DESIGN.md section 5.3): the frames of calls nothing
+ * refers to after or outside the call (js_bc_stack_frame_ok), in plain
+ * memory used last in, first out, as JavaScriptCore's JS stack.  A frame
+ * there has no handle and no GC object around it: it is linked into the
+ * call chain by pointer (JSStackFrame.prev_frame), and the collector marks
+ * it as every frame on the chain (JS_MarkActiveStackFrames), so its slots
+ * need no dirty flags; when the call returns the memory is simply the next
+ * frame's.  Frames that may escape stay heap objects (the pool, below). */
+#define JS_STACK_SIZE ((size_t)16 << 20)
+#define JS_POOL_STACK (-2)              /* JSInterpFrame.pool_depth of a JS stack frame */
+static uint8_t *g_js_stack, *g_js_stack_top, *g_js_stack_end;
+static uint32_t g_js_stack_epoch;      /* g_gc_epoch its frames belong to */
+
+/* js_bc_frame_enter_pooled's work on the JS stack.  NULL, having changed
+ * nothing, when the frame does not fit (or the stack cannot be made). */
+static inline __attribute__((always_inline))
+JSStackFrame *js_stack_frame_enter(JSRuntimeHandle rt, JSObjectHandle p, JSFunctionBytecodeHandle b,
+                                   const JSFunctionBytecode *bp, GCValue func_obj, int argc, GCValue *argv,
+                                   JSInterpFrame *F)
+{
+    const size_t frame_size = (sizeof(JSStackFrame) + 15) & ~(size_t)15;
+    int arg_count = bp->arg_count, var_count = bp->var_count, stack_size = bp->stack_size;
+    size_t total_size = frame_size + sizeof(GCValue) * (arg_count + var_count + stack_size);
+    JSRuntime *rtp;
+    JSStackFrame *sf;
+    GCValue *arg_buf, *var_buf, *stack_buf;
+    uint8_t *mem;
+    int i, n;
+
+    if (unlikely(g_js_stack_epoch != g_gc_epoch || !g_js_stack)) {
+        /* A new heap: no frame of the last one runs. */
+        if (!g_js_stack && !(g_js_stack = js_plain_calloc(1, JS_STACK_SIZE)))
+            return NULL;
+        g_js_stack_top = g_js_stack;
+        g_js_stack_end = g_js_stack + JS_STACK_SIZE;
+        g_js_stack_epoch = g_gc_epoch;
+    }
+    mem = g_js_stack_top;
+    if (unlikely((size_t)(g_js_stack_end - mem) < total_size))
+        return NULL;
+    CC_INC(frame_js_stack);
+    g_js_stack_top = mem + total_size;
+    rtp = GC_DEREF_H(rt, JSRuntimeHandle);
+    sf = (JSStackFrame *)mem;
+    arg_buf = (GCValue *)(mem + frame_size);
+    var_buf = arg_buf + arg_count;
+    stack_buf = var_buf + var_count;
+    F->pool_depth = JS_POOL_STACK;
+
+    memset(sf, 0, sizeof(JSStackFrame));
+    /* The collector marks the whole operand stack of a frame on the chain:
+     * the last frame's values there are stale (as in a pooled frame). */
+    for (i = 0; i < stack_size; i++) {
+        uint64_t *q = (uint64_t *)&stack_buf[i];
+        q[0] = 0;
+        q[1] = 0;
+        __asm__("" ::: "memory");
+    }
+    sf->bytecode_handle = b;
+    sf->arg_buf_offset = (uint32_t)frame_size;
+    sf->var_buf_offset = (uint32_t)((uint8_t *)var_buf - mem);
+    sf->stack_buf_offset = (uint32_t)((uint8_t *)stack_buf - mem);
+    sf->var_refs_offset = (uint32_t)total_size;
+    sf->arg_count = arg_count;
+    sf->var_count = var_count;
+    sf->stack_size = stack_size;
+    sf->js_mode = bp->js_mode;
+    sf->cur_func = func_obj;
+    sf->prev_frame = rtp->current_frame;
+    sf->prev_frame_handle = sf->prev_frame ? sf->prev_frame->self_handle : GC_HANDLE_NULL;
+    rtp->current_frame = sf;
+
+    n = argc < arg_count ? argc : arg_count;
+    for (i = 0; i < n; i++)
+        arg_buf[i] = jit_value_load(&argv[i]);
+    for (; i < arg_count; i++)
+        arg_buf[i] = JS_UNDEFINED;
+    for (i = 0; i < var_count; i++)
+        var_buf[i] = JS_UNDEFINED;
+
+    F->sf = sf;
+    F->ctx = (JSContextHandle)bp->realm_handle;
+    F->arg_buf = arg_buf;
+    F->var_buf = var_buf;
+    F->stack_buf = stack_buf;
+    F->sf_var_refs = (GCHandle *)(mem + total_size);
+    F->sp = stack_buf;
+    F->var_refs_handle = SAFE_GET_OR(p, JSObjectHandle, u.func.var_refs_handle, GC_HANDLE_NULL);
+    F->var_refs = (JSVarRefHandle *)gc_deref(F->var_refs_handle);
+    return sf;
+}
+
 /* js_bc_frame_enter for a function with no captured variables whose frame
  * fits the pooled frame of its depth, which is nearly every call compiled
  * code makes: the same frame, set up from the bytecode (bp) read once.
@@ -19996,6 +20132,9 @@ JSStackFrame *js_bc_frame_enter_pooled(JSRuntimeHandle rt, JSObjectHandle p, JSF
     uint8_t *mem;
     int i, n;
 
+    if (js_bc_stack_frame_ok(b, (JSFunctionBytecode *)bp) &&
+        (sf = js_stack_frame_enter(rt, p, b, bp, func_obj, argc, argv, F)))
+        return sf;
     if (bp->var_ref_count != 0 || depth >= BC_FRAME_POOL_DEPTH || g_bc_frame_pool_size[depth] < total_size ||
         unlikely(g_c_frame_pool_epoch != g_gc_epoch))
         return NULL;
@@ -20031,9 +20170,10 @@ JSStackFrame *js_bc_frame_enter_pooled(JSRuntimeHandle rt, JSObjectHandle p, JSF
     sf->stack_size = stack_size;
     sf->js_mode = bp->js_mode;
     sf->cur_func = func_obj;
-    sf->prev_frame_handle = rtp->current_stack_frame_handle;
+    sf->prev_frame = rtp->current_frame;
+    sf->prev_frame_handle = sf->prev_frame ? sf->prev_frame->self_handle : GC_HANDLE_NULL;
     gc_dirty_range(sf, frame_size);
-    GC_SET(rtp->current_stack_frame_handle, handle);
+    rtp->current_frame = sf;
 
     n = argc < arg_count ? argc : arg_count;
     for (i = 0; i < n; i++)
@@ -20060,6 +20200,12 @@ JSStackFrame *js_bc_frame_enter_pooled(JSRuntimeHandle rt, JSObjectHandle p, JSF
 static inline __attribute__((always_inline))
 void js_bc_frame_leave(JSRuntimeHandle rt, JSStackFrame *sf, int pool_depth)
 {
+    if (pool_depth == JS_POOL_STACK) {
+        /* Nothing refers to it: the memory is the next frame's. */
+        GC_DEREF_H(rt, JSRuntimeHandle)->current_frame = sf->prev_frame;
+        g_js_stack_top = (uint8_t *)sf;
+        return;
+    }
     js_rt_pop_stack_frame(rt, sf);
     if (sf->escaped & JS_FRAME_PINNED) {
         /* The frame stays alive as long as something refers to it (its
@@ -20141,7 +20287,7 @@ static GCValue js_call_c_function(JSContextHandle ctx, GCValue func_obj,
     JSRuntimeHandle rt = ctx_rt;
     JSCFunctionType func;
     JSObjectHandle p = GC_HANDLE_NULL;
-    JSStackFrame *sf, *prev_sf;
+    JSStackFrame *sf;
     GCValue ret_val = GC_UNDEFINED;
     GCValue *arg_buf;
     GCValue this_obj = this_obj_const;
@@ -20162,9 +20308,7 @@ static GCValue js_call_c_function(JSContextHandle ctx, GCValue func_obj,
         return JS_EXCEPTION;
     g_c_frame_depth++;
 
-    prev_sf = js_rt_current_stack_frame(rt);
-    gc_set_heap_handle(&sf->prev_frame_handle, prev_sf ? prev_sf->self_handle : GC_HANDLE_NULL);
-    js_rt_set_current_stack_frame(rt, sf);
+    js_rt_push_stack_frame(rt, sf);
     ctx = (JSContextHandle)(SAFE_GET_OR(p, JSObjectHandle, u.cfunc.realm_handle, GC_HANDLE_NULL));
     sf->js_mode = 0;
     gc_set_heap_value(&sf->cur_func, (GCValue)func_obj);
@@ -20258,6 +20402,7 @@ static GCValue js_call_c_function(JSContextHandle ctx, GCValue func_obj,
         /* A pooled frame stays rooted: drop what it references. */
         sf->cur_func = JS_UNDEFINED;
         sf->prev_frame_handle = GC_HANDLE_NULL;
+        sf->prev_frame = NULL;
         sf->arg_count = 0;
     }
     return ret_val;
@@ -20433,7 +20578,8 @@ extern const char *exec_trace_func_filter;
  * JIT does for the instructions it does not inline. */
 static int (*const jsop_table[256])(JSInterpFrame *F);
 static const uint8_t jsop_jumps[256];
-/* QJS_JIT: 0 (off), 1 (compile hot functions), stress (compile every
+/* QJS_JIT: 0 (off), 1 (compile hot functions: the default where the JIT
+ * is available, JS_PERF_DESIGN.md section 5.6), stress (compile every
  * function at its first call), threaded (testing: no compiled code, every
  * instruction through its helper). */
 enum { JS_JIT_OFF, JS_JIT_ON, JS_JIT_STRESS, JS_JIT_THREADED };
@@ -20454,12 +20600,13 @@ static void js_jit_exit_stats(void)
 static int js_jit_mode_init(void)
 {
     const char *e = getenv("QJS_JIT");
-    int mode = JS_JIT_OFF;
-    if (e && strcmp(e, "threaded") == 0) mode = JS_JIT_THREADED;
+    int mode = JS_JIT_ON;
+    if (e && strcmp(e, "0") == 0) mode = JS_JIT_OFF;
+    else if (e && strcmp(e, "threaded") == 0) mode = JS_JIT_THREADED;
     else if (e && strcmp(e, "stress") == 0) mode = JS_JIT_STRESS;
-    else if (e && strcmp(e, "1") == 0) mode = JS_JIT_ON;
     if ((mode == JS_JIT_ON || mode == JS_JIT_STRESS) && !jit_available()) {
-        fprintf(stderr, "[jit] unavailable here: interpreting\n");
+        if (e)      /* asked for, not just the default */
+            fprintf(stderr, "[jit] unavailable here: interpreting\n");
         mode = JS_JIT_OFF;
     }
     {
@@ -20707,7 +20854,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
     JSContextHandle ctx = GC_HANDLE_NULL;
     JSObjectHandle p = GC_HANDLE_NULL;
     JSFunctionBytecodeHandle b = GC_HANDLE_NULL;
-    JSStackFrame *sf = NULL, *prev_sf;
+    JSStackFrame *sf = NULL;
     const uint8_t *pc;
     int opcode, arg_allocated_size, i;
     GCValue *stack_buf, *var_buf, *arg_buf, *sp, ret_val = GC_UNDEFINED;
@@ -20796,9 +20943,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
             }
             sf->sp_offset = 0; /* sp_offset = 0 means function is running */
             pc = JS_SF_CUR_PC(sf);
-            prev_sf = js_rt_current_stack_frame(rt);
-            gc_set_heap_handle(&sf->prev_frame_handle, prev_sf ? prev_sf->self_handle : GC_HANDLE_NULL);
-            js_rt_set_current_stack_frame(rt, sf);
+            js_rt_push_stack_frame(rt, sf);
             /* Set up var_refs pointer for accessing closure variables */
             var_refs_handle = SAFE_GET_OR(p, JSObjectHandle, u.func.var_refs_handle, GC_HANDLE_NULL);
             var_refs = ((JSVarRefHandle *)gc_deref(var_refs_handle));
@@ -20924,7 +21069,15 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
 
     {
         JSInterpFrame E;
-        sf = js_bc_frame_enter(caller_ctx, rt, p, b, func_obj, argc, argv, &E);
+        JSFunctionBytecode *ebp = GC_DEREF_H(b, JSFunctionBytecodeHandle);
+        sf = NULL;
+        if (js_bc_stack_frame_ok(b, ebp)) {
+            sf = js_stack_frame_enter(rt, p, b, ebp, func_obj, argc, argv, &E);
+            if (sf)
+                E.pc = js_bc_byte_code_buf(b);
+        }
+        if (!sf)
+            sf = js_bc_frame_enter(caller_ctx, rt, p, b, func_obj, argc, argv, &E);
         if (!sf)
             return JS_EXCEPTION;
         pool_depth = E.pool_depth;
@@ -26910,6 +27063,58 @@ static const JSOpCode opcode_info[OP_COUNT + (OP_TEMP_END - OP_TEMP_START)] = {
 #define short_opcode_info(op) \
     opcode_info[(op) >= OP_TEMP_START ? (op) - 1 : (op)]
 #endif
+
+/* Whether bp's calls may put their frames on the JS stack (js_stack_frame_
+ * enter): nothing may refer to the frame after or outside the call.  A
+ * frame escapes through var_refs into it (its own captured variables, and
+ * those closures, classes, mapped arguments, eval and references to locals
+ * make, lazily parsed children included: get_var_ref_enhanced), or by
+ * being suspended (generators, async functions).  Worked out from the
+ * bytecode once. */
+static BOOL js_bc_stack_frame_ok(JSFunctionBytecodeHandle b, JSFunctionBytecode *bp)
+{
+    if (likely(bp->frame_where))
+        return bp->frame_where == 1;
+    if (bp->func_parse_state != JS_FUNC_PARSED)
+        return FALSE;   /* asked again once it is */
+    static int on = -1;     /* QJS_JS_STACK=0: every frame on the heap */
+    if (on < 0)
+        on = !getenv("QJS_JS_STACK") || atoi(getenv("QJS_JS_STACK")) != 0;
+    int ok = on && bp->func_kind == JS_FUNC_NORMAL && bp->var_ref_count == 0;
+    const uint8_t *code = ok ? js_bc_byte_code_buf(b) : NULL;
+    int len = bp->byte_code_len;
+    for (int pc = 0; ok && code && pc < len; ) {
+        int op = code[pc];
+        switch (op) {
+        case OP_fclosure:
+#if SHORT_OPCODES
+        case OP_fclosure8:
+#endif
+        case OP_eval:
+        case OP_apply_eval:
+        case OP_define_class:
+        case OP_define_class_computed:
+        case OP_make_loc_ref:
+        case OP_make_arg_ref:
+        case OP_make_var_ref_ref:
+            ok = 0;
+            break;
+        case OP_special_object:
+            if (pc + 1 < len && (code[pc + 1] == OP_SPECIAL_OBJECT_MAPPED_ARGUMENTS ||
+                                 code[pc + 1] == OP_SPECIAL_OBJECT_VAR_OBJECT))
+                ok = 0;
+            break;
+        }
+        int size = short_opcode_info(op).size;
+        if (size <= 0)
+            ok = 0;
+        pc += size;
+    }
+    if (!code)
+        ok = 0;
+    bp->frame_where = ok ? 1 : 2;
+    return ok;
+}
 
 static __exception int next_token(JSParseState *s);
 

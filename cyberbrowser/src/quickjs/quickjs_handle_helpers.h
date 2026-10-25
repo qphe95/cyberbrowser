@@ -876,8 +876,7 @@ static inline GCHandle js_rt_compare_exchange_job_queue_handle(GCHandle handle, 
 static inline JSStackFrame* js_rt_current_stack_frame(GCHandle handle)
 {
     JSRuntime* p = GC_DEREF_H(handle, JSRuntimeHandle);
-    if (!p || p->current_stack_frame_handle == GC_HANDLE_NULL) return NULL;
-    return js_frame_deref(p->current_stack_frame_handle);
+    return p ? p->current_frame : NULL;
 }
 
 static inline GCHandle js_rt_job_queue_handle(GCHandle handle)
@@ -952,10 +951,15 @@ static inline void js_rt_set_class_count(GCHandle handle, int count)
     if (p) atomic_store_u32((volatile uint32_t *)&p->class_count, (uint32_t)count);
 }
 
-static inline void js_rt_set_current_stack_frame(GCHandle handle, JSStackFrame* frame)
+/* Make sf the current frame, linked to the one it is called from. */
+static inline void js_rt_push_stack_frame(GCHandle handle, JSStackFrame* sf)
 {
     JSRuntime* p = GC_DEREF_H(handle, JSRuntimeHandle);
-    if (p) GC_SET(p->current_stack_frame_handle, frame ? frame->self_handle : GC_HANDLE_NULL);
+    if (!p) return;
+    JSStackFrame *prev = p->current_frame;
+    sf->prev_frame = prev;
+    GC_SET(sf->prev_frame_handle, prev ? prev->self_handle : GC_HANDLE_NULL);
+    p->current_frame = sf;
 }
 
 /* Unlink the current frame (return, yield, await).  While a frame is on the
@@ -968,14 +972,14 @@ static inline void js_rt_pop_stack_frame(GCHandle handle, JSStackFrame* sf)
     JSRuntime* p = GC_DEREF_H(handle, JSRuntimeHandle);
     if (!p || !sf) return;
     /* The frame is its own object, or sits inside one (async functions). */
-    GCHeader *hdr = gc_header_from_handle(sf->self_handle);
+    GCHeader *hdr = sf->self_handle != GC_HANDLE_NULL ? gc_header_from_handle(sf->self_handle) : NULL;
     if (hdr) {
         uint8_t *start = (uint8_t *)gc_header_payload(hdr);
         uint8_t *end = start + gc_header_payload_size(hdr);
         if ((uint8_t *)sf >= start && (uint8_t *)sf < end)
             gc_dirty_range(sf, (size_t)(end - (uint8_t *)sf));
     }
-    GC_SET(p->current_stack_frame_handle, sf->prev_frame_handle);
+    p->current_frame = sf->prev_frame;
 }
 
 static inline void js_rt_set_job_queue_handle(GCHandle handle, GCHandle h)

@@ -180,6 +180,22 @@ for (const [cat] of [...sys.entries()].sort((a, b) => b[1] - a[1])) {
         .forEach(([k, v]) => console.log('    ' + pct(v), ms(v), ' ', k));
 }
 show('self, by function (innermost inline)', self);
-show('self, by line', selfLine, 25);
+show('self, by line', selfLine, +process.env.LINES || 25);   // LINES=<n>: more rows
 show('self, with caller', selfCaller, +process.env.CALLERS || 25);   // CALLERS=<n>: more rows
 show('inclusive, by function', incl);
+
+// FOCUS=<function>: who calls it (inclusive of what it calls), two levels up.
+if (process.env.FOCUS) {
+    const focus = process.env.FOCUS, up1 = new Map(), up2 = new Map();
+    for (const s of samples) {
+        const all = [];
+        s.forEach((rva, d) => { for (const f of frames(rva, d)) all.push(f); });
+        const i = all.findIndex(f => f.fn === focus);
+        if (i < 0) continue;
+        const a = all[i + 1], b = all[i + 2];
+        add(up1, a ? a.fn + '  ' + a.loc : '?');
+        add(up2, (a ? a.fn : '?') + '  <-  ' + (b ? b.fn : '?'));
+    }
+    show(`${focus}, called from`, up1, 30);
+    show(`${focus}, called from (two levels)`, up2, 30);
+}

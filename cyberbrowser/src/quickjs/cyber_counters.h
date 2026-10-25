@@ -20,7 +20,10 @@
     X(call_jit_helper)              /* compiled code's call through the helper */ \
     X(call_native)                  /* any C function call (js_call_c_function) */ \
     X(closure)                      /* js_closure: function objects made */ \
-    X(closure_prototype)            /* ... with a prototype object made for them */ \
+    X(closure_prototype)            /* ... with a (lazy) prototype */ \
+    X(prototype_made)               /* lazy prototypes made on first use */ \
+    X(closure_legacy_lazy)          /* closures of lazy functions without a resume-parse state (pin frames) */ \
+    X(frame_js_stack)               /* bytecode frames on the JS stack */ \
     X(frame_pooled)                 /* bytecode frames taken from the pool */ \
     X(frame_allocated)              /* ... allocated */ \
     X(frame_miss_size)              /* ... the pooled frame at that depth too small */ \
