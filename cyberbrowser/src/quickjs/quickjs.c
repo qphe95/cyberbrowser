@@ -13660,9 +13660,9 @@ static JSBigIntHandle js_bigint_shr(JSContextHandle ctx, JSBigInt* a,
 
     d = shift1 / JS_LIMB_BITS;
     shift = shift1 % JS_LIMB_BITS;
-    a_sign = (a->tab[a->len - 1] >> (JS_LIMB_BITS - 1)) ? -1 : 0;
+    a_sign = (a->tab[a->len - 1] >> (JS_LIMB_BITS - 1)) ? -1 : 0;   /* -1 or 0, as the limbs shifted in */
     if (d >= a->len)
-        return js_bigint_new_si(ctx, -a_sign);
+        return js_bigint_new_si(ctx, a_sign);
     n1 = a->len - d;
     r = js_bigint_new(ctx, n1);
     if (!SAFE_VALID(r))
@@ -13673,7 +13673,7 @@ static JSBigIntHandle js_bigint_shr(JSContextHandle ctx, JSBigInt* a,
         }
         /* no normalization is needed */
     } else {
-        mp_shr(SAFE_GET_OR(r, JSBigIntHandle, tab, NULL), a->tab + d, n1, shift, -a_sign);
+        mp_shr(SAFE_GET_OR(r, JSBigIntHandle, tab, NULL), a->tab + d, n1, shift, (js_limb_t)a_sign);
         r = js_bigint_normalize(ctx, r);
     }
     return r;
@@ -17327,7 +17327,7 @@ static no_inline int js_relational_slow(JSContextHandle ctx, GCValue *sp,
 static BOOL tag_is_number(uint32_t tag)
 {
     return (tag == JS_TAG_INT || 
-            tag == JS_TAG_FLOAT64 ||
+            JS_TAG_IS_FLOAT64(tag) ||
             tag == JS_TAG_BIG_INT || tag == JS_TAG_SHORT_BIG_INT);
 }
 
@@ -20015,6 +20015,9 @@ JSStackFrame *js_bc_frame_enter(JSContextHandle caller_ctx, JSRuntimeHandle rt, 
  * not be forwarded from the store buffer (a stall of a dozen cycles). */
 static inline __attribute__((always_inline)) GCValue jit_value_load(const GCValue *s)
 {
+#ifdef QJS_VALUE8
+    return *s;      /* one 8-byte move: nothing to work around */
+#endif
     uint64_t lo, hi;
     GCValue v;
     memcpy(&lo, s, 8);
@@ -21023,7 +21026,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
         if (!call_func) {
         not_a_function:
             {
-                int tag = JS_VALUE_GET_TAG(func_obj);
+                int tag = JS_VALUE_GET_NORM_TAG(func_obj);
                 const char *type_str = "unknown";
                 switch(tag) {
                     case JS_TAG_INT: type_str = "int"; break;
@@ -26927,7 +26930,7 @@ static JSAtom cenv_atom_number(CompileEnv *env, GCValue val)
         size_t len = i32toa(buf, JS_VALUE_GET_INT(val));
         return cenv_atom_from_utf8(env, buf, len);
     }
-    if (JS_VALUE_GET_TAG(val) == JS_TAG_FLOAT64) {
+    if (JS_VALUE_GET_NORM_TAG(val) == JS_TAG_FLOAT64) {
         char buf[128];
         JSDTOATempMem dtoa_mem;
         double d = JS_VALUE_GET_FLOAT64(val);
@@ -39168,8 +39171,8 @@ static uint64_t bc_fp_compute(JSContextHandle ctx, JSFunctionBytecodeHandle b, F
             uint32_t off = SAFE_GET_OR(c, JSFunctionBytecodeHandle, debug.source_offset, 0);
             h = bc_fp_atom(ctx, h, SAFE_GET_OR(c, JSFunctionBytecodeHandle, func_name, JS_ATOM_NULL));
             h = bc_fp_mix(h, &off, sizeof(off));
-        } else if (tag == JS_TAG_INT || tag == JS_TAG_FLOAT64 || tag == JS_TAG_BOOL) {
-            h = bc_fp_mix(h, &GCV_U(v), sizeof(GCV_U(v)));   /* the payload (N3: the whole value) */
+        } else if (tag == JS_TAG_INT || JS_TAG_IS_FLOAT64(tag) || tag == JS_TAG_BOOL) {
+            h = bc_fp_mix(h, &v, sizeof(v));
         }
     }
     part[1] = h; h = 1469598103934665603ull;
@@ -66623,60 +66626,66 @@ static GCValue js_bigint_asUintN(JSContextHandle ctx,
 {
     uint64_t bits;
     GCValue res = GC_UNDEFINED, a = GC_UNDEFINED;
-    
+    JSBigIntBuf buf;
+    JSBigIntHandle p = GC_HANDLE_NULL, r;
+    int a_len, len, rlen, shift, i;
+    js_limb_t a_fill, v;
+
     if (JS_ToIndex(ctx, &bits, argv[0]))
         return JS_EXCEPTION;
     a = JS_ToBigInt(ctx, argv[1]);
     if (JS_IsException(a))
         return JS_EXCEPTION;
-    if (bits == 0) {
-        
-        res = __JS_NewShortBigInt(ctx, 0);
-    } else if (JS_VALUE_GET_TAG(a) == JS_TAG_SHORT_BIG_INT) {
-        /* fast case */
-        if (bits >= JS_SHORT_BIG_INT_BITS) {
-            res = a;
-        } else {
-            uint64_t v;
-            int shift;
-            shift = 64 - bits;
-            v = JS_VALUE_GET_SHORT_BIG_INT(a);
-            v = v << shift;
-            if (asIntN)
-                v = (int64_t)v >> shift;
-            else
-                v = v >> shift;
-            res = __JS_NewShortBigInt(ctx, v);
-        }
-    } else {
-        JSBigIntHandle r = GC_HANDLE_NULL, p = (JSBigIntHandle)(GC_VALUE_GET_HANDLE(a));
-        if (bits >= SAFE_GET_OR(p, JSBigIntHandle, len, 0) * JS_LIMB_BITS) {
-            res = a;
-        } else {
-            int len, shift, i;
-            js_limb_t v;
-            len = (bits + JS_LIMB_BITS - 1) / JS_LIMB_BITS;
-            r = js_bigint_new(ctx, len);
-            if (!SAFE_VALID(r)) {
-                
-                return JS_EXCEPTION;
-            }
-            SAFE_SET(r, JSBigIntHandle, len, len);
-            for(i = 0; i < len - 1; i++)
-                SAFE_GET_OR(r, JSBigIntHandle, tab, NULL)[i] = SAFE_GET_OR(p, JSBigIntHandle, tab, NULL)[i];
-            shift = (-bits) & (JS_LIMB_BITS - 1);
-            /* 0 <= shift <= JS_LIMB_BITS - 1 */
-            v = SAFE_GET_OR(p, JSBigIntHandle, tab, NULL)[len - 1] << shift;
-            if (asIntN)
-                v = (js_slimb_t)v >> shift;
-            else
-                v = v >> shift;
-            SAFE_GET_OR(r, JSBigIntHandle, tab, NULL)[len - 1] = v;
-            r = js_bigint_normalize(ctx, r);
-            
-            res = JS_CompactBigInt(ctx, r);
-        }
+    if (bits == 0)
+        return __JS_NewShortBigInt(ctx, 0);
+    if (JS_VALUE_GET_TAG(a) == JS_TAG_SHORT_BIG_INT && bits < 64) {
+        /* fast case: in 64 bits, whatever JS_SHORT_BIG_INT_BITS is (with
+         * 32-bit short big ints, asUintN(33, -1n) does not fit one) */
+        uint64_t u = (uint64_t)(int64_t)JS_VALUE_GET_SHORT_BIG_INT(a) << (64 - bits);
+        if (asIntN)
+            return JS_NewBigInt64(ctx, (int64_t)u >> (64 - bits));
+        return JS_NewBigUint64(ctx, u >> (64 - bits));
     }
+
+    /* The limbs of a (two's complement), sign-extended past its length. */
+    if (JS_VALUE_GET_TAG(a) == JS_TAG_SHORT_BIG_INT) {
+        JSBigInt *pa = js_bigint_set_short(&buf, a);
+        a_len = pa->len;
+    } else {
+        p = (JSBigIntHandle)GC_VALUE_GET_HANDLE(a);
+        a_len = SAFE_GET_OR(p, JSBigIntHandle, len, 0);
+    }
+#define ASU_LIMB(i) ((i) < a_len ? (SAFE_VALID(p) ? SAFE_GET_OR(p, JSBigIntHandle, tab, NULL)[i] \
+                                                    : ((JSBigInt *)buf.big_int_buf)->tab[i]) : a_fill)
+    a_fill = 0;
+    a_fill = (ASU_LIMB(a_len - 1) >> (JS_LIMB_BITS - 1)) ? (js_limb_t)-1 : 0;
+    if (bits >= (uint64_t)a_len * JS_LIMB_BITS && (asIntN || !a_fill))
+        return a;           /* already within the range */
+    if (bits > (uint64_t)JS_BIGINT_MAX_SIZE * JS_LIMB_BITS) {
+        JS_ThrowRangeError(ctx, "BigInt is too large to allocate");
+        return JS_EXCEPTION;
+    }
+    len = (int)((bits + JS_LIMB_BITS - 1) / JS_LIMB_BITS);
+    /* asUintN: a zero limb above, so a top bit set reads as positive */
+    rlen = len + !asIntN;
+    r = js_bigint_new(ctx, rlen);
+    if (!SAFE_VALID(r))
+        return JS_EXCEPTION;
+    for (i = 0; i < len - 1; i++)
+        SAFE_GET_OR(r, JSBigIntHandle, tab, NULL)[i] = ASU_LIMB(i);
+    shift = (-bits) & (JS_LIMB_BITS - 1);
+    /* 0 <= shift <= JS_LIMB_BITS - 1 */
+    v = ASU_LIMB(len - 1) << shift;
+    if (asIntN)
+        v = (js_slimb_t)v >> shift;
+    else
+        v = v >> shift;
+    SAFE_GET_OR(r, JSBigIntHandle, tab, NULL)[len - 1] = v;
+    if (!asIntN)
+        SAFE_GET_OR(r, JSBigIntHandle, tab, NULL)[len] = 0;
+#undef ASU_LIMB
+    r = js_bigint_normalize(ctx, r);
+    res = JS_CompactBigInt(ctx, r);
     return res;
 }
 
@@ -71233,19 +71242,50 @@ static inline JSProperty *js_object_get_prop_slot(JSObjectHandle p, uint32_t pro
     return js_prop_array_at(js_obj_props(p), prop_idx);
 }
 
-static inline void gcvalue_to_raw(GCValue v, uint64_t *low, uint64_t *high)
+/* Atomic access to one value slot: 16 bytes through cmpxchg16b, or one
+ * 8-byte word with 8-byte values (QJS_VALUE8). */
+#ifdef QJS_VALUE8
+static inline GCValue gcv_atomic_load(GCValue *p)
 {
-    memcpy(low, &v, sizeof(uint64_t));
-    memcpy(high, (char *)&v + sizeof(uint64_t), sizeof(uint64_t));
-}
-
-static inline GCValue raw_to_gcvalue(uint64_t low, uint64_t high)
-{
-    GCValue v = GC_UNDEFINED;
-    memcpy(&v, &low, sizeof(uint64_t));
-    memcpy((char *)&v + sizeof(uint64_t), &high, sizeof(uint64_t));
+    GCValue v;
+    GCV_BITS(v) = atomic_load_explicit((_Atomic uint64_t *)p, memory_order_acquire);
     return v;
 }
+static inline void gcv_atomic_store(GCValue *p, GCValue v)
+{
+    atomic_store_explicit((_Atomic uint64_t *)p, GCV_BITS(v), memory_order_release);
+}
+/* *expected gets the slot's value when they differ. */
+static inline bool gcv_atomic_cas(GCValue *p, GCValue *expected, GCValue desired)
+{
+    return atomic_compare_exchange_strong((_Atomic uint64_t *)p, &GCV_BITS(*expected), GCV_BITS(desired));
+}
+#else
+static inline GCValue gcv_atomic_load(GCValue *p)
+{
+    uint64_t w[2];
+    GCValue v;
+    atomic_load_128((volatile uint64_t *)p, &w[0], &w[1]);
+    memcpy(&v, w, sizeof(v));
+    return v;
+}
+static inline void gcv_atomic_store(GCValue *p, GCValue v)
+{
+    uint64_t w[2];
+    memcpy(w, &v, sizeof(v));
+    atomic_store_128((volatile uint64_t *)p, w[0], w[1]);
+}
+static inline bool gcv_atomic_cas(GCValue *p, GCValue *expected, GCValue desired)
+{
+    uint64_t e[2], d[2];
+    bool ok;
+    memcpy(e, expected, sizeof(e));
+    memcpy(d, &desired, sizeof(d));
+    ok = atomic_compare_exchange_128((volatile uint64_t *)p, &e[0], &e[1], d[0], d[1]);
+    memcpy(expected, e, sizeof(e));
+    return ok;
+}
+#endif
 
 bool js_object_prealloc_properties(JSContextHandle ctx, GCHandle obj_handle, uint32_t min_count)
 {
@@ -71274,9 +71314,7 @@ bool js_object_set_property_value_atomic(JSContextHandle ctx, GCHandle obj_handl
         if (!slot)
             return false;
 
-        uint64_t low, high;
-        gcvalue_to_raw(val, &low, &high);
-        atomic_store_128((volatile uint64_t *)&slot->u.value, low, high);
+        gcv_atomic_store(&slot->u.value, val);
         gc_dirty_slot(&slot->u.value);
 
         uint32_t v1 = js_obj_prop_version(p);
@@ -71307,15 +71345,10 @@ bool js_object_cas_property_value_atomic(JSContextHandle ctx, GCHandle obj_handl
         if (!slot)
             return false;
 
-        uint64_t exp_low, exp_high, des_low, des_high;
-        gcvalue_to_raw(expected, &exp_low, &exp_high);
-        gcvalue_to_raw(desired, &des_low, &des_high);
-
-        bool success = atomic_compare_exchange_128((volatile uint64_t *)&slot->u.value,
-                                                   &exp_low, &exp_high,
-                                                   des_low, des_high);
+        GCValue actual = expected;
+        bool success = gcv_atomic_cas(&slot->u.value, &actual, desired);
         if (out_actual)
-            GC_SET(*out_actual, raw_to_gcvalue(exp_low, exp_high));
+            GC_SET(*out_actual, actual);
 
         uint32_t v1 = js_obj_prop_version(p);
         if (v1 == v0) {
@@ -71345,9 +71378,7 @@ GCValue js_object_get_property_value_atomic(JSContextHandle ctx, GCHandle obj_ha
         if (!slot)
             return result;
 
-        uint64_t low = 0, high = 0;
-        atomic_load_128((volatile uint64_t *)&slot->u.value, &low, &high);
-        result = raw_to_gcvalue(low, high);
+        result = gcv_atomic_load(&slot->u.value);
 
         if (js_obj_prop_version(p) == v0)
             return result;
@@ -71366,9 +71397,7 @@ GCValue js_ctx_class_proto_get(JSContextHandle ctx, JSClassID class_id)
         GCValue *tab = ((GCValue*)gc_deref(SAFE_GET_OR(ctx, JSContextHandle, class_proto_handle, GC_HANDLE_NULL)));
         if (!tab || class_id >= (JSClassID)js_rt_class_count(ctx_rt))
             return JS_NULL;
-        uint64_t low = 0, high = 0;
-        atomic_load_128((volatile uint64_t *)&tab[class_id], &low, &high);
-        GCValue val = raw_to_gcvalue(low, high);
+        GCValue val = gcv_atomic_load(&tab[class_id]);
         if (js_ctx_class_proto_version(ctx) == v0)
             return val;
     }
@@ -71382,9 +71411,7 @@ void js_ctx_class_proto_set(JSContextHandle ctx, JSClassID class_id, GCValue val
     js_ctx_class_proto_version_fetch_add(ctx, 1); /* odd */
     GCValue *tab = ((GCValue*)gc_deref(SAFE_GET_OR(ctx, JSContextHandle, class_proto_handle, GC_HANDLE_NULL)));
     if (tab && class_id < (JSClassID)js_rt_class_count(ctx_rt)) {
-        uint64_t low, high;
-        gcvalue_to_raw(val, &low, &high);
-        atomic_store_128((volatile uint64_t *)&tab[class_id], low, high);
+        gcv_atomic_store(&tab[class_id], val);
         gc_dirty_slot(&tab[class_id]);
         GCHandle target = GC_VALUE_GET_HANDLE(val);
         if (target != GC_HANDLE_NULL)

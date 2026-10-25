@@ -84,7 +84,11 @@ typedef struct JitData {
     uint32_t size;
 } JitData;
 
+#ifdef QJS_VALUE8
+#include "jit_stencils_x86_64_windows_value8.h"   /* tools/jit_stencils.js --value8 */
+#else
 #include "jit_stencils_x86_64_windows.h"
+#endif
 
 typedef int JitFn(JSInterpFrame *F, GCValue *sp, GCValue *var_buf, GCValue *arg_buf);
 
@@ -177,7 +181,7 @@ static struct {
 
 /* For the sampling profiler (cyber_sampler.c): while set, the JIT holds a
  * lock the profiler's unwinding needs. */
-volatile LONG g_jit_os_busy;
+volatile long g_jit_os_busy;   /* LONG */
 
 /* For the sampling profiler (cyber_sampler.c). */
 void jit_region_bounds(uintptr_t *base, size_t *size)
@@ -621,8 +625,13 @@ static int jit_specialized(JSContextHandle ctx, int op, const uint8_t *pc, const
     case OP_push_atom_value: {
         GCValue v;
         if (!jit_atom_value(ctx, jit_u32(pc + 1), &v)) return -1;
+#ifdef QJS_VALUE8
+        imm0[0] = (uint32_t)GCV_BITS(v);     /* vset's payload and tag: the value's two words */
+        imm0[1] = (uint64_t)(int64_t)(int32_t)(GCV_BITS(v) >> 32);
+#else
         memcpy(imm0, &GCV_U(v), 8);          /* payload and tag: the stencils' two halves */
         imm0[1] = (uint64_t)GCV_TAG(v);
+#endif
         return JIT_ST_push_value;
     }
     case OP_call:
@@ -937,5 +946,15 @@ JitCode *jit_compile(JSContextHandle ctx, GCHandle owner, const uint8_t *bc, uin
 
 void jit_print_stats(void) {}
 int jit_available(void) { return 0; }
+
+#ifdef _WIN32
+/* For the sampling profiler (cyber_sampler.c): no JIT region. */
+volatile long g_jit_os_busy;   /* LONG */
+#endif
+void jit_region_bounds(uintptr_t *base, size_t *size)
+{
+    *base = 0;
+    *size = 0;
+}
 
 #endif

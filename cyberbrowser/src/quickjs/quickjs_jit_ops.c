@@ -69,6 +69,26 @@ extern uint32_t g_interrupt_countdown;
  * asm keeps clang from merging the halves back into one SSE access. */
 #define AI __attribute__((always_inline))
 typedef uint64_t __attribute__((may_alias)) u64a;
+#ifdef QJS_VALUE8
+/* 8-byte values (N3): one move each.  vset's payload is the low word and
+ * tag the high one, so a value's bits split that way make it again. */
+static inline AI void vset(GCValue *d, uint64_t payload, int64_t tag)
+{
+    *(u64a *)d = GC_VALUE8(tag, payload);
+}
+typedef struct V { uint64_t b; } V;
+static inline AI V vld(const GCValue *s)
+{
+    V v = { *(const u64a *)s };
+    __asm__("" : "+r"(v.b));
+    return v;
+}
+static inline AI void vst(GCValue *d, V v) { *(u64a *)d = v.b; }
+static inline AI void vset_f64(GCValue *d, double x)
+{
+    *(u64a *)d = GCV_BITS(GC_NewFloat64(x));
+}
+#else
 static inline AI void vset(GCValue *d, uint64_t payload, int64_t tag)
 {
     ((u64a *)d)[0] = payload;
@@ -82,14 +102,15 @@ static inline AI V vld(const GCValue *s)
     return v;
 }
 static inline AI void vst(GCValue *d, V v) { vset(d, v.p, (int64_t)v.t); }
-static inline AI void vcopy(GCValue *d, const GCValue *s) { vst(d, vld(s)); }
-static inline AI void vset_int(GCValue *d, int32_t i) { vset(d, (uint32_t)i, JS_TAG_INT); }
-static inline AI void vset_bool(GCValue *d, int b) { vset(d, b != 0, JS_TAG_BOOL); }
 static inline AI void vset_f64(GCValue *d, double x)
 {
     __builtin_memcpy(d, &x, 8);
     ((u64a *)d)[1] = JS_TAG_FLOAT64;
 }
+#endif
+static inline AI void vcopy(GCValue *d, const GCValue *s) { vst(d, vld(s)); }
+static inline AI void vset_int(GCValue *d, int32_t i) { vset(d, (uint32_t)i, JS_TAG_INT); }
+static inline AI void vset_bool(GCValue *d, int b) { vset(d, b != 0, JS_TAG_BOOL); }
 
 /* JS_POLL_POINT would do nothing but count down: nothing to collect and
  * no interrupt due.  Otherwise the instruction runs through its helper,
@@ -395,7 +416,7 @@ STENCIL(neg)
             vset_int(&sp[-1], -v);
         CONTINUE();
     }
-    if (tag == JS_TAG_FLOAT64) {
+    if (JS_TAG_IS_FLOAT64(tag)) {
         vset_f64(&sp[-1], -JS_VALUE_GET_FLOAT64(sp[-1]));
         CONTINUE();
     }
@@ -411,7 +432,7 @@ static inline AI int quick_int32(const GCValue *v, int32_t *out)
         *out = JS_VALUE_GET_INT(*v);
         return 1;
     }
-    if (tag == JS_TAG_FLOAT64) {
+    if (JS_TAG_IS_FLOAT64(tag)) {
         double d = JS_VALUE_GET_FLOAT64(*v);
         if (d > -2147483649.0 && d < 2147483648.0) {
             *out = (int32_t)d;
@@ -463,7 +484,7 @@ static inline AI int quick_number(const GCValue *v, double *out)
         *out = JS_VALUE_GET_INT(*v);
         return 1;
     }
-    if (tag == JS_TAG_FLOAT64) {
+    if (JS_TAG_IS_FLOAT64(tag)) {
         *out = JS_VALUE_GET_FLOAT64(*v);
         return 1;
     }

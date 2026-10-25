@@ -112,12 +112,12 @@ static void gc_value_vec_push(GCValueVec *v, GCValue val) {
         v->capacity = cap;
     }
     GC_SET(v->data[v->count++], val);
-    if (GC_VALUE_GET_TAG(val) < 0 && GC_VALUE_GET_HANDLE(val) != GC_HANDLE_NULL)
+    if (GC_IS_REFERENCE(val) && GC_VALUE_GET_HANDLE(val) != GC_HANDLE_NULL)
         gc_add_root(GC_VALUE_GET_HANDLE(val));
 }
 static void gc_value_vec_free(GCValueVec *v) {
     for (size_t i = 0; i < v->count; i++)
-        if (GC_VALUE_GET_TAG(v->data[i]) < 0 && GC_VALUE_GET_HANDLE(v->data[i]) != GC_HANDLE_NULL)
+        if (GC_IS_REFERENCE(v->data[i]) && GC_VALUE_GET_HANDLE(v->data[i]) != GC_HANDLE_NULL)
             gc_remove_root(GC_VALUE_GET_HANDLE(v->data[i]));
     free(v->data);
     v->data = NULL;
@@ -223,7 +223,7 @@ static void style_owner_written(GCHandle obj) {
 }
 
 static void style_owner_note(GCValue style, NodeId owner) {
-    if (GC_VALUE_GET_TAG(style) >= 0 || !owner) return;
+    if (!GC_IS_REFERENCE(style) || !owner) return;
     GCHandle obj = GC_VALUE_GET_HANDLE(style);
     if (obj == GC_HANDLE_NULL) return;
     if (2 * (g_style_n + 1) > g_style_cap) {
@@ -1179,7 +1179,7 @@ typedef struct DynScript {
 static DynScript *g_dyn_head, *g_dyn_tail;
 
 static void dyn_root(GCValue v, bool add) {
-    if (GC_VALUE_GET_TAG(v) >= 0) return;
+    if (!GC_IS_REFERENCE(v)) return;
     GCHandle h = GC_VALUE_GET_HANDLE(v);
     if (h == GC_HANDLE_NULL) return;
     if (add) gc_add_root(h); else gc_remove_root(h);

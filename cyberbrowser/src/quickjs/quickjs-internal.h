@@ -628,13 +628,9 @@ struct JSProperty {
             GCHandle setter_handle; /* GC_HANDLE_NULL if undefined */
         } getset;
         GCHandle var_ref_handle;  /* JS_PROP_VARREF - handle to JSVarRef */
-        struct {            /* JS_PROP_AUTOINIT */
-            /* in order to use only 2 pointers, we compress the realm
-               and the init function pointer */
-            uintptr_t realm_and_id; /* realm and init_id (JS_AUTOINIT_ID_x)
-                                       in the 2 low bits */
-            GCHandle opaque_handle; /* Handle to opaque data, GC_HANDLE_NULL if none */
-        } init;
+        /* JS_PROP_AUTOINIT (a lazy prototype, js_autoinit_resolve): value,
+         * undefined.  No other member, so a property is one value: 8 bytes
+         * with 8-byte values. */
     } u;
 };
 

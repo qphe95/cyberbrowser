@@ -106,7 +106,7 @@ void timer_state_ensure_initialized(void) {
 // Helper to check if a GCValue contains a reference type that needs root registration
 static inline int gcvalue_is_reference(GCValue val) {
     // Negative tags are reference types (objects, strings, symbols, etc.)
-    return GC_VALUE_GET_TAG(val) < 0;
+    return GC_IS_REFERENCE(val);
 }
 
 // Store a JS value in the callback storage, returns handle index

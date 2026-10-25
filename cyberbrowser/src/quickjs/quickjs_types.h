@@ -166,7 +166,7 @@ enum {
 
 /* BigInt limb size - default to 64 bits on 64-bit platforms */
 #ifndef JS_LIMB_BITS
-#if defined(__SIZEOF_INT128__) && (INTPTR_MAX >= INT64_MAX)
+#if defined(__SIZEOF_INT128__) && (INTPTR_MAX >= INT64_MAX) && !defined(QJS_VALUE8)
 #define JS_LIMB_BITS 64
 #else
 #define JS_LIMB_BITS 32
@@ -310,6 +310,25 @@ typedef union GCValueUnion {
  * QJS_OPAQUE_VALUES the fields get other names, so any other direct access
  * (.u, .tag on a value) is a compile error: the list of code that has to
  * change before values become 8 bytes. */
+#ifdef QJS_VALUE8
+/* N3 step 2: 8-byte values, NaN-boxed as upstream QuickJS's JS_NAN_BOXING.
+ * A value is (tag << 32) | payload: an int32, a bool, a 32-bit handle (the
+ * negative tags), a catch offset or a short big int in the payload.  A
+ * double is stored as its bits minus GC_FLOAT64_TAG_ADDEND << 32, which
+ * leaves every double's upper word outside the tags' window [JS_TAG_FIRST,
+ * JS_TAG_FLOAT64) once NaNs are canonical: GC_TAG_IS_FLOAT64 tests that,
+ * and JS_VALUE_GET_NORM_TAG gives JS_TAG_FLOAT64 for any double.  The
+ * raw tag of a double is meaningless; compare it only with the other tags.
+ * A struct, not a bare integer, so values are not added or compared with
+ * == by mistake. */
+typedef struct GCValue {
+    uint64_t bits_;
+} GCValue;
+#define GCV_BITS(v) ((v).bits_)
+#define GC_FLOAT64_TAG_ADDEND (0x7ff80000u - (uint32_t)JS_TAG_FIRST + 1)
+#define GC_VALUE8(tag, payload) \
+    ((uint64_t)(uint32_t)(int32_t)(tag) << 32 | (uint32_t)(payload))
+#else
 #ifdef QJS_OPAQUE_VALUES
 #define GCV_FIELD_U   u_opaque_
 #define GCV_FIELD_TAG tag_opaque_
@@ -323,16 +342,51 @@ typedef struct GCValue {
 } GCValue;
 #define GCV_U(v)   ((v).GCV_FIELD_U)
 #define GCV_TAG(v) ((v).GCV_FIELD_TAG)
+#endif
 
 /* Constant initialiser for an undefined GCValue (usable for static storage).
  * Automatic variables can use GC_UNDEFINED instead. */
+#ifdef QJS_VALUE8
+#define GC_UNDEFINED_INIT { GC_VALUE8(JS_TAG_UNDEFINED, 0) }
+#else
 #define GC_UNDEFINED_INIT { { .handle = GC_HANDLE_NULL }, JS_TAG_UNDEFINED }
+#endif
 
 typedef const GCValue GCValueConst;
 
 /* JSValueHandle is GCValue for value parameters in functions */
 typedef GCValue JSValueHandle;
 
+#ifdef QJS_VALUE8
+static inline GCValue gc_value8(int32_t tag, uint32_t payload) {
+    GCValue v; GCV_BITS(v) = GC_VALUE8(tag, payload); return v;
+}
+#define GC_TAG_IS_FLOAT64_8(tag) \
+    ((uint32_t)((tag) - JS_TAG_FIRST) >= (uint32_t)(JS_TAG_FLOAT64 - JS_TAG_FIRST))
+#define GC_VALUE_GET_TAG(v) ((int)(int32_t)(GCV_BITS(v) >> 32))
+static inline int gc_value8_norm_tag(GCValue v) {
+    int tag = GC_VALUE_GET_TAG(v);
+    return GC_TAG_IS_FLOAT64_8(tag) ? JS_TAG_FLOAT64 : tag;
+}
+static inline double gc_value8_float64(GCValue v) {
+    union { uint64_t u; double d; } u;
+    u.u = GCV_BITS(v) + ((uint64_t)GC_FLOAT64_TAG_ADDEND << 32);
+    return u.d;
+}
+#define GC_VALUE_GET_NORM_TAG(v) gc_value8_norm_tag(v)
+#define GC_VALUE_GET_INT(v) ((int32_t)(uint32_t)GCV_BITS(v))
+#define GC_VALUE_GET_BOOL(v) GC_VALUE_GET_INT(v)
+#define GC_VALUE_GET_FLOAT64(v) gc_value8_float64(v)
+#define GC_VALUE_GET_HANDLE(v) ((GCHandle)(uint32_t)GCV_BITS(v))
+#define JS_VALUE_GET_HANDLE(v) GC_VALUE_GET_HANDLE(v)
+#define GC_VALUE_GET_SHORT_BIG_INT(v) GC_VALUE_GET_INT(v)
+static inline GCValue GC_NULL_VAL(void) { return gc_value8(JS_TAG_NULL, 0); }
+static inline GCValue GC_UNDEFINED_VAL(void) { return gc_value8(JS_TAG_UNDEFINED, 0); }
+static inline GCValue GC_FALSE_VAL(void) { return gc_value8(JS_TAG_BOOL, 0); }
+static inline GCValue GC_TRUE_VAL(void) { return gc_value8(JS_TAG_BOOL, 1); }
+static inline GCValue GC_EXCEPTION_VAL(void) { return gc_value8(JS_TAG_EXCEPTION, 0); }
+static inline GCValue GC_UNINITIALIZED_VAL(void) { return gc_value8(JS_TAG_UNINITIALIZED, 0); }
+#else
 /* GCValue accessor macros */
 #define GC_VALUE_GET_TAG(v) ((int)(GCV_TAG(v)))
 #define GC_VALUE_GET_NORM_TAG(v) GC_VALUE_GET_TAG(v)
@@ -341,7 +395,7 @@ typedef GCValue JSValueHandle;
 #define GC_VALUE_GET_FLOAT64(v) (GCV_U(v).float64)
 #define GC_VALUE_GET_HANDLE(v) (GCV_U(v).handle)
 #define JS_VALUE_GET_HANDLE(v) GC_VALUE_GET_HANDLE(v)
-#define GC_VALUE_GET_SHORT_BIG_INT(v) GC_VALUE_GET_INT(v)
+#define GC_VALUE_GET_SHORT_BIG_INT(v) (GCV_U(v).short_big_int)   /* all JS_SHORT_BIG_INT_BITS of it */
 
 /* Special values - inline functions */
 static inline GCValue GC_NULL_VAL(void) {
@@ -362,6 +416,7 @@ static inline GCValue GC_EXCEPTION_VAL(void) {
 static inline GCValue GC_UNINITIALIZED_VAL(void) {
     GCValue v; GCV_TAG(v) = JS_TAG_UNINITIALIZED; GCV_U(v).handle = GC_HANDLE_NULL; return v;
 }
+#endif
 
 /* Backward compatibility macros */
 #define GC_NULL       GC_NULL_VAL()
@@ -646,6 +701,24 @@ typedef GCValue JSClassCall(JSContextHandle ctx, GCValue func_obj, GCValue this_
  * Inline Helper Functions
  * ============================================================================ */
 
+#ifdef QJS_VALUE8
+static inline GCValue GC_NewFloat64(double d)
+{
+    union { double d; uint64_t u; } u;
+    GCValue v;
+    u.d = d;
+    /* NaNs canonical: a payload NaN could fall in the tags' window. */
+    if ((u.u & 0x7fffffffffffffffull) > 0x7ff0000000000000ull)
+        u.u = 0x7ff8000000000000ull;
+    GCV_BITS(v) = u.u - ((uint64_t)GC_FLOAT64_TAG_ADDEND << 32);
+    return v;
+}
+static inline GCValue GC_NewInt32(int32_t val) { return gc_value8(JS_TAG_INT, (uint32_t)val); }
+static inline GCValue GC_NewBool(JS_BOOL val) { return gc_value8(JS_TAG_BOOL, val != 0); }
+static inline GCValue GC_NewCatchOffset(int32_t val) { return gc_value8(JS_TAG_CATCH_OFFSET, (uint32_t)val); }
+static inline GCValue GC_NewHandle(GCHandle h) { return gc_value8(JS_TAG_OBJECT, h); }
+static inline GCValue GC_NewException(void) { return gc_value8(JS_TAG_EXCEPTION, 0); }
+#else
 static inline GCValue GC_NewFloat64(double d)
 {
     GCValue v;
@@ -693,6 +766,7 @@ static inline GCValue GC_NewException(void)
     GCV_U(v).handle = GC_HANDLE_NULL;
     return v;
 }
+#endif
 
 /* ============================================================================
  * GCHandleList - growable malloc'd array of GCHandle values

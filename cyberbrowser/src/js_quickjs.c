@@ -1977,7 +1977,7 @@ static void *net_req_thread(void *arg)
 
 static void net_root(GCValue v, bool add)
 {
-    if (GC_VALUE_GET_TAG(v) >= 0) return;
+    if (!GC_IS_REFERENCE(v)) return;
     GCHandle h = GC_VALUE_GET_HANDLE(v);
     if (h == GC_HANDLE_NULL) return;
     if (add) gc_add_root(h); else gc_remove_root(h);

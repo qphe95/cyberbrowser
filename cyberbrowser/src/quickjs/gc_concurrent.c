@@ -404,9 +404,16 @@ static void bcheck_page(uintptr_t page, bool card_clean) {
                 for (a = (a + 3) & ~(uintptr_t)3; a + 4 <= b; a += 4) {
                     uint32_t cur = *(uint32_t *)a, old = fresh ? 0 : *(uint32_t *)(shadow + (a - page));
                     if (cur == old || !bcheck_is_ref_handle(cur)) continue;
-                    /* A GCValue payload (8-aligned) counts only with a reference tag. */
+                    /* A GCValue payload (8-aligned) counts only with a reference
+                     * tag: the word after it (8-byte values) or the 8 bytes after
+                     * it (16-byte ones). */
+#ifdef QJS_VALUE8
                     if (((a - payload) & 7) == 0 && a + 8 <= b) {
                         uint32_t tag = *(uint32_t *)(a + 4);
+#else
+                    if (((a - payload) & 7) == 0 && a + 16 <= b) {
+                        uint32_t tag = (uint32_t)*(int64_t *)(a + 8);
+#endif
                         if (!((unsigned)(int32_t)tag >= (unsigned)JS_TAG_FIRST) && tag != 0) continue;
                     }
                     bcheck_note(fresh ? type + 32 : type, (uint32_t)(a - payload), h->handle, class_id);
@@ -1350,8 +1357,14 @@ static void dscan_data_object(GCHandle h, GCHandle parent, GCHeader *hdr) {
         size_t live = JS_GCDataLiveBytes(parent, h);
         if (live < n) n = live;
     }
+#ifdef QJS_VALUE8
+    /* A value: the handle in the low word, a reference tag in the high one. */
+    for (size_t k = 0; k + 8 <= n; k += 8) {
+        int32_t tag = *(const int32_t *)(p + k + 4);
+#else
     for (size_t k = 0; k + 16 <= n; k += 8) {
         int64_t tag = *(const int64_t *)(p + k + 8);
+#endif
         if (tag < JS_TAG_FIRST || tag >= 0) continue;
         GCHandle c = *(const uint32_t *)(p + k);
         if (dscan_unmarked(c)) dscan_note(parent, hdr, (long)k, 0, c);
@@ -1360,10 +1373,17 @@ static void dscan_data_object(GCHandle h, GCHandle parent, GCHeader *hdr) {
      * int or the halves of a double in a value array would match by
      * chance). */
     for (size_t k = 0; !bytes && k + 4 <= n; k += 4) {
+#ifdef QJS_VALUE8
+        if (k % 8 == 0 && k + 8 <= n) {
+            int32_t tag = *(const int32_t *)(p + k + 4);
+            if (tag >= JS_TAG_FIRST && tag < JS_TAG_FLOAT64) { k += 4; continue; }
+        }
+#else
         if (k % 8 == 0 && k + 16 <= n) {
             int64_t tag = *(const int64_t *)(p + k + 8);
             if (tag >= JS_TAG_FIRST && tag <= JS_TAG_FLOAT64) { k += 12; continue; }
         }
+#endif
         GCHandle c = *(const uint32_t *)(p + k);
         if (c != h && dscan_unmarked(c)) dscan_note(parent, hdr, (long)k, 1, c);
     }

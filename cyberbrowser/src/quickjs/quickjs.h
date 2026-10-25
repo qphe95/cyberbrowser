@@ -75,13 +75,17 @@ extern "C" {
 #define JS_NAN_BOXING
 #endif
 
-#if defined(__SIZEOF_INT128__) && (INTPTR_MAX >= INT64_MAX)
+#if defined(__SIZEOF_INT128__) && (INTPTR_MAX >= INT64_MAX) && !defined(QJS_VALUE8)   /* 8-byte values: 32-bit short big ints, so 32-bit limbs (as upstream with NaN boxing) */
 #define JS_LIMB_BITS 64
 #else
 #define JS_LIMB_BITS 32
 #endif
 
+#ifdef QJS_VALUE8
+#define JS_SHORT_BIG_INT_BITS 32    /* what fits a NaN box's payload */
+#else
 #define JS_SHORT_BIG_INT_BITS JS_LIMB_BITS
+#endif
     
 /* JS_TAG_* values are defined in quickjs_types.h */
 
@@ -296,7 +300,7 @@ static inline GCValue GC_NewShortBigIntNan(int32_t d)
     GCHandle _gc_handle = GC_HANDLE_NULL; \
     int _gc_tag = GC_VALUE_GET_TAG(obj); \
     if (_gc_tag < 0) { \
-        void *_gc_ptr = gc_deref(GCV_U(obj).handle); \
+        void *_gc_ptr = gc_deref(GC_VALUE_GET_HANDLE(obj)); \
         if (_gc_ptr != NULL) { \
             field_type *_obj = (field_type *)_gc_ptr; \
             _gc_handle = _obj->field_name; \
@@ -699,7 +703,7 @@ void gc_shape_set_hashed(GCHandle shape_handle, int val);
 #define GC_IS_UNDEFINED(v)    (GC_VALUE_GET_TAG(v) == JS_TAG_UNDEFINED)
 #define GC_IS_BOOL(v)         (GC_VALUE_GET_TAG(v) == JS_TAG_BOOL)
 #define GC_IS_INT(v)          (GC_VALUE_GET_TAG(v) == JS_TAG_INT)
-#define GC_IS_FLOAT64(v)      (GC_VALUE_GET_TAG(v) == JS_TAG_FLOAT64)
+#define GC_IS_FLOAT64(v)      GC_TAG_IS_FLOAT64(GC_VALUE_GET_TAG(v))
 #define GC_IS_STRING(v)       (GC_VALUE_GET_TAG(v) == JS_TAG_STRING || \
                                GC_VALUE_GET_TAG(v) == JS_TAG_STRING_ROPE)
 #define GC_IS_SYMBOL(v)       (GC_VALUE_GET_TAG(v) == JS_TAG_SYMBOL)
@@ -707,9 +711,26 @@ void gc_shape_set_hashed(GCHandle shape_handle, int val);
                                GC_VALUE_GET_TAG(v) == JS_TAG_SHORT_BIG_INT)
 #define GC_IS_EXCEPTION(v)    (GC_VALUE_GET_TAG(v) == JS_TAG_EXCEPTION)
 
-/* Reference types have negative tags */
-#define GC_IS_REFERENCE(v)    (GC_VALUE_GET_TAG(v) < 0)
+/* Reference types have negative tags (unsigned: with 8-byte values a
+ * double's raw tag can be negative too, but never in [JS_TAG_FIRST, 0)) */
+#define GC_IS_REFERENCE(v)    ((unsigned)GC_VALUE_GET_TAG(v) >= (unsigned)JS_TAG_FIRST)
 
+#ifdef QJS_VALUE8
+#define GC_MKVAL(tag, val) gc_value8((tag), (uint32_t)(val))
+#define GC_MKHANDLE(tag, handle_val) gc_value8((tag), (handle_val))
+#define GC_TAG_IS_FLOAT64(tag) GC_TAG_IS_FLOAT64_8(tag)
+static inline GCValue GC_NAN_VAL(void) { return GC_NewFloat64(__builtin_nan("")); }
+#define GC_NAN GC_NAN_VAL()
+static inline JS_BOOL GC_VALUE_IS_NAN(GCValue v)
+{
+    /* canonical: one encoding */
+    return GCV_BITS(v) == 0x7ff8000000000000ull - ((uint64_t)GC_FLOAT64_TAG_ADDEND << 32);
+}
+static inline GCValue GC_NewShortBigInt(int64_t d)
+{
+    return gc_value8(JS_TAG_SHORT_BIG_INT, (uint32_t)(int32_t)d);
+}
+#else
 /* Create GCValue for primitive types */
 #ifdef _MSC_VER
 static inline GCValue GC_MKVAL_FUNC(int64_t tag, int32_t val) {
@@ -769,6 +790,7 @@ static inline GCValue GC_NewShortBigInt(int64_t d)
     GCV_U(v).short_big_int = d;
     return v;
 }
+#endif /* QJS_VALUE8 */
 
 #endif /* !JS_NAN_BOXING */
 
@@ -840,10 +862,10 @@ static inline GCValue __JS_NewShortBigInt(JSContextHandle ctx, int64_t val)
 #ifndef GC_VALUE_GET_PTR
 #define GC_VALUE_GET_PTR(v) ({ \
     void *_ptr = NULL; \
-    if (GC_VALUE_GET_TAG(v) < 0) { \
+    if (GC_IS_REFERENCE(v)) { \
         _ptr = gc_deref(GC_VALUE_GET_HANDLE(v)); \
     } else { \
-        _ptr = (void *)((intptr_t)GCV_U(v).int32 & ~0xf); \
+        _ptr = (void *)((intptr_t)GC_VALUE_GET_INT(v) & ~0xf); \
     } \
     _ptr; \
 })

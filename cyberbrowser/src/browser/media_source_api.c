@@ -116,7 +116,7 @@ static MediaTask *g_tasks;
 static int g_ntasks, g_captasks;
 
 static void root_value(GCValue v, bool add) {
-    if (GC_VALUE_GET_TAG(v) >= 0) return;
+    if (!GC_IS_REFERENCE(v)) return;
     GCHandle h = GC_VALUE_GET_HANDLE(v);
     if (h == GC_HANDLE_NULL) return;
     if (add) gc_add_root(h); else gc_remove_root(h);

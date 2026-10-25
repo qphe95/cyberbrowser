@@ -6,6 +6,8 @@
 //
 //   node tools/jit_stencils.js            regenerate (needs clang on PATH)
 //   node tools/jit_stencils.js --check    fail if the header is not current
+//   ... --value8                           the same for 8-byte values (QJS_VALUE8):
+//                                          jit_stencils_x86_64_windows_value8.h
 //
 // Each function jit_op_<name> becomes stencil <name>: its bytes, its holes
 // (every relocation, all rip-relative 32-bit) and its unwind ranges.  The
@@ -19,11 +21,13 @@ const { execFileSync } = require('child_process');
 
 const root = path.join(__dirname, '..', 'src', 'quickjs');
 const srcPath = path.join(root, 'quickjs_jit_ops.c');
-const outPath = path.join(root, 'jit_stencils_x86_64_windows.h');
+const VALUE8 = process.argv.includes('--value8');
+const outPath = path.join(root, VALUE8 ? 'jit_stencils_x86_64_windows_value8.h' : 'jit_stencils_x86_64_windows.h');
 const TARGET = 'x86_64-w64-windows-gnu';
 const CFLAGS = ['-target', TARGET, '-O2', '-std=gnu11', '-fno-stack-protector', '-ffunction-sections',
                 '-fno-jump-tables', '-fno-builtin', '-fno-asynchronous-unwind-tables', '-funwind-tables',
-                '-mno-red-zone', '-I', root, '-I', path.join(root, '..'), '-w'];
+                '-mno-red-zone', '-I', root, '-I', path.join(root, '..'), '-w',
+                ...(VALUE8 ? ['-DQJS_VALUE8'] : [])];
 
 // The structure fields stencils use, whose offsets gcc must agree on.
 const LAYOUT = [

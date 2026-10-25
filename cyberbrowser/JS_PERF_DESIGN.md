@@ -330,6 +330,52 @@ outside the engine touches the fields. Step 2 is therefore concentrated in `quic
 (about 80 tag sites to review), the stencils and three GC scans, with the deterministic
 replays and the four-mode differential tests to check it.
 
+**Step 2 as built (N3): 8-byte values are the default.** `QJS_VALUE8` (the CMake default;
+`-DQJS_VALUE16=ON` keeps the old layout) makes `GCValue` a one-word struct, NaN-boxed as
+upstream QuickJS's `JS_NAN_BOXING`: `(tag << 32) | payload` for ints, bools, handles, catch
+offsets and short big ints. Doubles are stored offset by `GC_FLOAT64_TAG_ADDEND << 32`, which
+moves every double's upper word out of the tags' window once NaNs are canonical. It stays a
+struct, so values cannot be added or compared with `==` by mistake. Most of the engine was
+already written for this, inherited from upstream: its switches default to
+`JS_TAG_IS_FLOAT64(tag)`, and its range checks are unsigned. What had to change:
+
+- **Signed reference tests.** A double's raw tag is usually negative, so `tag < 0` would take
+  it for a reference. `GC_IS_REFERENCE` became the unsigned test, and nine browser sites that
+  wrote `GC_VALUE_GET_TAG(v) < 0` use it. In the DOM's root marking those would have marked
+  random handles.
+- **Four float tag checks** read the raw tag (`tag_is_number`, a constant's atom, the
+  bytecode fingerprint, a debug printer); the other 50-odd already used the normalized tag.
+- **Raw layout:** 16-byte atomics on value slots (`gcv_atomic_load`/`store`/`cas` now),
+  `jit_value_load`'s two halves, the GC verifier's and barrier check's value scans, and the
+  JIT's constant immediates. The stencils get a second header
+  (`tools/jit_stencils.js --value8`), and their value helpers are single moves.
+- **`JSProperty`** lost its unused AUTOINIT payload, so a property slot is 8 bytes too.
+- **Short big ints are 32-bit, and limbs too** (as upstream with NaN boxing), because the
+  BigInt code assumes a one-limb value fits a short one.
+
+The BigInt check found three bugs that were already in the 16-byte build. `GC_VALUE_GET_SHORT_BIG_INT`
+read 32 of the 64 bits (`2n ** 31n` printed `-2147483648`, `2n ** 32n` printed `0`).
+`js_bigint_shr` shifted the wrong limbs into negative values (`(-(2n ** 70n)) >> 3n` was
+positive). `BigInt.asUintN` returned negative values unchanged when `bits` was at least
+their width (`asUintN(64, -1n)` was `-1n`). All three are fixed, and `tests/jit/bigint.js`
+checks against known answers.
+
+Results (24 rounds against the 16-byte build, the same calls and DOM nodes, deterministic over
+repeated runs, clean under GC stress, poisoning and `QJS_GC_VERIFY`):
+
+| Recording | JIT on | Interpreter | Bytes allocated |
+|---|---|---|---|
+| YouTube watch | −12.4% | −17.4% | −21% (objects −24%, property and array storage −40%) |
+| YouTube home | −11.6% | −13.5% | |
+| YouTube search | −11.0% | −16.0% | |
+| BBC | −3.5% | −3.8% | |
+| Wikipedia | −2.0% | −3.4% | −24% |
+
+**The JIT now loses to the interpreter**: 10.5 G against 9.9 G cycles on the watch page. The
+interpreter's value copies got cheaper, and the stencils, still the copy-and-patch design of
+M2, did not gain as much. T1 is on by default since N1. Either it is turned off until T2
+(section 6), or its stencils are tuned for 8-byte values first.
+
 **Unchecked loads on hot paths.** `SAFE_GET_OR` checks for a null handle on every field read,
 and `gc_deref` checks again. On paths where the handle is known valid (an object from a value
 whose tag says object, a shape from a live object), use unchecked accessors. Keep the checked
@@ -677,7 +723,7 @@ without a code generator.
 | N0 | Cycle-based timing, four more recordings, per-subsystem counters (section 4) | A 1% change is detectable on every recording |
 | N1 | In this order, each measured alone (section 4.1): a frame pool that does not miss; T1's threshold; generic get and define/add caches in the runtime, `put_field`/`define_field` caches in compiled code; unchecked hot-path loads; inline allocation fast path | −8% JS-thread cycles on the YouTube replays; parity on all five. **Met** (section 5.6): −10.5% to −12.7% |
 | N2 | Calls without heap frames for simple callees; lighter native calls; call caches; lazy function prototypes and the allocator's line crossing (5.6) | −6% more; parity; GC stress clean. **Partly met** (5.3): −3% to −5% with the JIT on, −5% interpreted; parity; GC stress clean |
-| N3 | 8-byte values engine-wide | −6% more; memory down; all four JIT modes and replays at parity |
+| N3 | 8-byte values engine-wide | −6% more; memory down; all four JIT modes and replays at parity. **Met** (5.1): −11% to −12% with the JIT on, −13% to −17% interpreted, 21% fewer bytes allocated |
 | N4 | Feedback vectors; T2 stage 1 (IR, block-local virtual stack, guards and exits), x86-64 first | −5% more on JS-heavy pages; counters for guard failures, block lengths and values crossing blocks |
 | N5 | T2 stage 2 (CFG, SSA, kinds across blocks, linear scan, exits anywhere, loop entry); arm64 | Go/no-go from N4's counters; then −8% more on JS-heavy pages |
 | N6 | T2 stage 3 (inlining, escape analysis) | Go/no-go from N5's data |

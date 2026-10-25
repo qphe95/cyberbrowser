@@ -28,6 +28,12 @@ endif()
 option(BE_BUILD_TESTS "Build tests" ON)
 option(BE_BUILD_SHARED "Build as shared library" OFF)
 option(BE_BUILD_VULKAN "Build Vulkan renderer backend" OFF)
+# JS values are 8 bytes, NaN-boxed (JS_PERF_DESIGN.md section 5.1, N3); ON
+# keeps the 16-byte layout, the reference the 8-byte one was checked against.
+option(QJS_VALUE16 "16-byte JS values instead of 8-byte NaN-boxed ones" OFF)
+if(NOT QJS_VALUE16)
+    add_compile_definitions(QJS_VALUE8)
+endif()
 
 # =============================================================================
 # Platform detection
