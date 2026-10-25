@@ -296,7 +296,7 @@ static inline GCValue GC_NewShortBigIntNan(int32_t d)
     GCHandle _gc_handle = GC_HANDLE_NULL; \
     int _gc_tag = GC_VALUE_GET_TAG(obj); \
     if (_gc_tag < 0) { \
-        void *_gc_ptr = gc_deref((obj).u.handle); \
+        void *_gc_ptr = gc_deref(GCV_U(obj).handle); \
         if (_gc_ptr != NULL) { \
             field_type *_obj = (field_type *)_gc_ptr; \
             _gc_handle = _obj->field_name; \
@@ -714,8 +714,8 @@ void gc_shape_set_hashed(GCHandle shape_handle, int val);
 #ifdef _MSC_VER
 static inline GCValue GC_MKVAL_FUNC(int64_t tag, int32_t val) {
     GCValue v;
-    v.u.int32 = val;
-    v.tag = tag;
+    GCV_U(v).int32 = val;
+    GCV_TAG(v) = tag;
     return v;
 }
 #define GC_MKVAL(tag, val) GC_MKVAL_FUNC(tag, val)
@@ -727,8 +727,8 @@ static inline GCValue GC_MKVAL_FUNC(int64_t tag, int32_t val) {
 #ifdef _MSC_VER
 static inline GCValue GC_MKHANDLE_FUNC(int64_t tag, GCHandle handle_val) {
     GCValue v;
-    v.u.handle = handle_val;
-    v.tag = tag;
+    GCV_U(v).handle = handle_val;
+    GCV_TAG(v) = tag;
     return v;
 }
 #define GC_MKHANDLE(tag, handle_val) GC_MKHANDLE_FUNC(tag, handle_val)
@@ -741,9 +741,9 @@ static inline GCValue GC_MKHANDLE_FUNC(int64_t tag, GCHandle handle_val) {
 /* Special values - inline functions */
 static inline GCValue GC_NAN_VAL(void) {
     GCValue v = GC_UNDEFINED;
-    v.tag = JS_TAG_FLOAT64;
+    GCV_TAG(v) = JS_TAG_FLOAT64;
     union { uint64_t u; double d; } nan = { 0x7FF8000000000000ULL };
-    v.u.float64 = nan.d;
+    GCV_U(v).float64 = nan.d;
     return v;
 }
 #define GC_NAN GC_NAN_VAL()
@@ -756,17 +756,17 @@ static inline JS_BOOL GC_VALUE_IS_NAN(GCValue v)
         double d;
         uint64_t u64;
     } u;
-    if (v.tag != JS_TAG_FLOAT64)
+    if (GCV_TAG(v) != JS_TAG_FLOAT64)
         return 0;
-    u.d = v.u.float64;
+    u.d = GCV_U(v).float64;
     return (u.u64 & 0x7fffffffffffffff) > 0x7ff0000000000000;
 }
 
 static inline GCValue GC_NewShortBigInt(int64_t d)
 {
     GCValue v;
-    v.tag = JS_TAG_SHORT_BIG_INT;
-    v.u.short_big_int = d;
+    GCV_TAG(v) = JS_TAG_SHORT_BIG_INT;
+    GCV_U(v).short_big_int = d;
     return v;
 }
 
@@ -843,7 +843,7 @@ static inline GCValue __JS_NewShortBigInt(JSContextHandle ctx, int64_t val)
     if (GC_VALUE_GET_TAG(v) < 0) { \
         _ptr = gc_deref(GC_VALUE_GET_HANDLE(v)); \
     } else { \
-        _ptr = (void *)((intptr_t)(v).u.int32 & ~0xf); \
+        _ptr = (void *)((intptr_t)GCV_U(v).int32 & ~0xf); \
     } \
     _ptr; \
 })

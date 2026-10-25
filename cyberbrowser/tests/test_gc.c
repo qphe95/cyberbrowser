@@ -756,10 +756,7 @@ TEST(test_atom_hash_gc_cleanup) {
 }
 
 static GCValue int32_value(int32_t v) {
-    GCValue r = GC_UNDEFINED;
-    r.tag = JS_TAG_INT;
-    r.u.int32 = v;
-    return r;
+    return GC_NewInt32(v);
 }
 
 TEST(test_property_array_prealloc) {

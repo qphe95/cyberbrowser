@@ -305,11 +305,24 @@ typedef union GCValueUnion {
     GCHandle handle;
 } GCValueUnion;
 
+/* JS_PERF_DESIGN.md section 5.1, N3 step 1: only the accessors below read
+ * or write a value's fields, through GCV_U and GCV_TAG.  Built with
+ * QJS_OPAQUE_VALUES the fields get other names, so any other direct access
+ * (.u, .tag on a value) is a compile error: the list of code that has to
+ * change before values become 8 bytes. */
+#ifdef QJS_OPAQUE_VALUES
+#define GCV_FIELD_U   u_opaque_
+#define GCV_FIELD_TAG tag_opaque_
+#else
+#define GCV_FIELD_U   u
+#define GCV_FIELD_TAG tag
+#endif
 typedef struct GCValue {
-    GCValueUnion u;
-    int64_t tag;
-    
+    GCValueUnion GCV_FIELD_U;
+    int64_t GCV_FIELD_TAG;
 } GCValue;
+#define GCV_U(v)   ((v).GCV_FIELD_U)
+#define GCV_TAG(v) ((v).GCV_FIELD_TAG)
 
 /* Constant initialiser for an undefined GCValue (usable for static storage).
  * Automatic variables can use GC_UNDEFINED instead. */
@@ -321,33 +334,33 @@ typedef const GCValue GCValueConst;
 typedef GCValue JSValueHandle;
 
 /* GCValue accessor macros */
-#define GC_VALUE_GET_TAG(v) ((int)((v).tag))
+#define GC_VALUE_GET_TAG(v) ((int)(GCV_TAG(v)))
 #define GC_VALUE_GET_NORM_TAG(v) GC_VALUE_GET_TAG(v)
-#define GC_VALUE_GET_INT(v) ((v).u.int32)
-#define GC_VALUE_GET_BOOL(v) ((v).u.int32)
-#define GC_VALUE_GET_FLOAT64(v) ((v).u.float64)
-#define GC_VALUE_GET_HANDLE(v) ((v).u.handle)
+#define GC_VALUE_GET_INT(v) (GCV_U(v).int32)
+#define GC_VALUE_GET_BOOL(v) (GCV_U(v).int32)
+#define GC_VALUE_GET_FLOAT64(v) (GCV_U(v).float64)
+#define GC_VALUE_GET_HANDLE(v) (GCV_U(v).handle)
 #define JS_VALUE_GET_HANDLE(v) GC_VALUE_GET_HANDLE(v)
 #define GC_VALUE_GET_SHORT_BIG_INT(v) GC_VALUE_GET_INT(v)
 
 /* Special values - inline functions */
 static inline GCValue GC_NULL_VAL(void) {
-    GCValue v; v.tag = JS_TAG_NULL; v.u.handle = GC_HANDLE_NULL; return v;
+    GCValue v; GCV_TAG(v) = JS_TAG_NULL; GCV_U(v).handle = GC_HANDLE_NULL; return v;
 }
 static inline GCValue GC_UNDEFINED_VAL(void) {
-    GCValue v; v.tag = JS_TAG_UNDEFINED; v.u.handle = GC_HANDLE_NULL; return v;
+    GCValue v; GCV_TAG(v) = JS_TAG_UNDEFINED; GCV_U(v).handle = GC_HANDLE_NULL; return v;
 }
 static inline GCValue GC_FALSE_VAL(void) {
-    GCValue v; v.tag = JS_TAG_BOOL; v.u.int32 = 0; return v;
+    GCValue v; GCV_TAG(v) = JS_TAG_BOOL; GCV_U(v).int32 = 0; return v;
 }
 static inline GCValue GC_TRUE_VAL(void) {
-    GCValue v; v.tag = JS_TAG_BOOL; v.u.int32 = 1; return v;
+    GCValue v; GCV_TAG(v) = JS_TAG_BOOL; GCV_U(v).int32 = 1; return v;
 }
 static inline GCValue GC_EXCEPTION_VAL(void) {
-    GCValue v; v.tag = JS_TAG_EXCEPTION; v.u.handle = GC_HANDLE_NULL; return v;
+    GCValue v; GCV_TAG(v) = JS_TAG_EXCEPTION; GCV_U(v).handle = GC_HANDLE_NULL; return v;
 }
 static inline GCValue GC_UNINITIALIZED_VAL(void) {
-    GCValue v; v.tag = JS_TAG_UNINITIALIZED; v.u.handle = GC_HANDLE_NULL; return v;
+    GCValue v; GCV_TAG(v) = JS_TAG_UNINITIALIZED; GCV_U(v).handle = GC_HANDLE_NULL; return v;
 }
 
 /* Backward compatibility macros */
@@ -636,48 +649,48 @@ typedef GCValue JSClassCall(JSContextHandle ctx, GCValue func_obj, GCValue this_
 static inline GCValue GC_NewFloat64(double d)
 {
     GCValue v;
-    v.tag = JS_TAG_FLOAT64;
-    v.u.float64 = d;
+    GCV_TAG(v) = JS_TAG_FLOAT64;
+    GCV_U(v).float64 = d;
     return v;
 }
 
 static inline GCValue GC_NewInt32(int32_t val)
 {
     GCValue v;
-    v.tag = JS_TAG_INT;
-    v.u.int32 = val;
+    GCV_TAG(v) = JS_TAG_INT;
+    GCV_U(v).int32 = val;
     return v;
 }
 
 static inline GCValue GC_NewBool(JS_BOOL val)
 {
     GCValue v;
-    v.tag = JS_TAG_BOOL;
-    v.u.int32 = val != 0;
+    GCV_TAG(v) = JS_TAG_BOOL;
+    GCV_U(v).int32 = val != 0;
     return v;
 }
 
 static inline GCValue GC_NewCatchOffset(int32_t val)
 {
     GCValue v;
-    v.tag = JS_TAG_CATCH_OFFSET;
-    v.u.int32 = val;
+    GCV_TAG(v) = JS_TAG_CATCH_OFFSET;
+    GCV_U(v).int32 = val;
     return v;
 }
 
 static inline GCValue GC_NewHandle(GCHandle h)
 {
     GCValue v;
-    v.tag = JS_TAG_OBJECT;
-    v.u.handle = h;
+    GCV_TAG(v) = JS_TAG_OBJECT;
+    GCV_U(v).handle = h;
     return v;
 }
 
 static inline GCValue GC_NewException(void)
 {
     GCValue v;
-    v.tag = JS_TAG_EXCEPTION;
-    v.u.handle = GC_HANDLE_NULL;
+    GCV_TAG(v) = JS_TAG_EXCEPTION;
+    GCV_U(v).handle = GC_HANDLE_NULL;
     return v;
 }
 

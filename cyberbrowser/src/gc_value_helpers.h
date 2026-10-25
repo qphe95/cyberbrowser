@@ -18,12 +18,12 @@ extern "C" {
 
 /* Check if GCValue represents a valid object */
 static inline int gc_is_valid_object(GCValue v) {
-    return GC_IS_OBJECT(v) && v.u.handle != GC_HANDLE_NULL;
+    return GC_IS_OBJECT(v) && GC_VALUE_GET_HANDLE(v) != GC_HANDLE_NULL;
 }
 
 /* Check if GCValue is a valid reference type */
 static inline int gc_is_valid_reference(GCValue v) {
-    return GC_IS_REFERENCE(v) && v.u.handle != GC_HANDLE_NULL;
+    return GC_IS_REFERENCE(v) && GC_VALUE_GET_HANDLE(v) != GC_HANDLE_NULL;
 }
 
 /*
@@ -41,9 +41,9 @@ static inline int gc_is_valid_reference(GCValue v) {
 static inline GCValue GC_PROP_GET_STR(JSContextHandle ctx, GCValue obj, const char *prop) {
     GCValue result = GC_UNDEFINED;
     int tag = GC_VALUE_GET_TAG(obj);
-    if (tag < 0 && obj.u.handle != GC_HANDLE_NULL) {
+    if (tag < 0 && GC_VALUE_GET_HANDLE(obj) != GC_HANDLE_NULL) {
         /* Use handle directly instead of converting through pointer */
-        GCValue wrapped = GC_MKHANDLE(tag, obj.u.handle);
+        GCValue wrapped = GC_MKHANDLE(tag, GC_VALUE_GET_HANDLE(obj));
         result = JS_GetPropertyStr(ctx, wrapped, prop);
     }
     return result;
@@ -55,9 +55,9 @@ static inline GCValue GC_PROP_GET_STR(JSContextHandle ctx, GCValue obj, const ch
 static inline int GC_PROP_SET_STR(JSContextHandle ctx, GCValue obj, const char *prop, GCValue val) {
     int result = -1;
     int tag = GC_VALUE_GET_TAG(obj);
-    if (tag < 0 && obj.u.handle != GC_HANDLE_NULL) {
+    if (tag < 0 && GC_VALUE_GET_HANDLE(obj) != GC_HANDLE_NULL) {
         /* Use handle directly instead of converting through pointer */
-        GCValue wrapped = GC_MKHANDLE(tag, obj.u.handle);
+        GCValue wrapped = GC_MKHANDLE(tag, GC_VALUE_GET_HANDLE(obj));
         result = JS_SetPropertyStr(ctx, wrapped, prop, val);
     }
     return result;

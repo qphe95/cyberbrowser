@@ -39169,7 +39169,7 @@ static uint64_t bc_fp_compute(JSContextHandle ctx, JSFunctionBytecodeHandle b, F
             h = bc_fp_atom(ctx, h, SAFE_GET_OR(c, JSFunctionBytecodeHandle, func_name, JS_ATOM_NULL));
             h = bc_fp_mix(h, &off, sizeof(off));
         } else if (tag == JS_TAG_INT || tag == JS_TAG_FLOAT64 || tag == JS_TAG_BOOL) {
-            h = bc_fp_mix(h, &v.u, sizeof(v.u));
+            h = bc_fp_mix(h, &GCV_U(v), sizeof(GCV_U(v)));   /* the payload (N3: the whole value) */
         }
     }
     part[1] = h; h = 1469598103934665603ull;
@@ -71159,8 +71159,6 @@ int JSJobEntry_get_argc(uint32_t job_handle) {
 
 GCValue JSJobEntry_get_argv(uint32_t job_handle, int index) {
     GCValue result = GC_UNDEFINED;
-    result.tag = JS_TAG_UNDEFINED;
-    result.u.handle = GC_HANDLE_NULL;
     if (job_handle == GC_HANDLE_NULL) return result;
     JSJobEntryHandle jh = job_handle;
     if (!SAFE_VALID(jh)) return result;
@@ -71190,8 +71188,6 @@ JSStackFrame *JSRuntime_get_current_stack_frame(JSRuntimeHandle rt) {
 
 GCValue JSStackFrame_get_cur_func(JSStackFrame *sf) {
     GCValue result = GC_UNDEFINED;
-    result.tag = JS_TAG_UNDEFINED;
-    result.u.handle = GC_HANDLE_NULL;
     if (!sf) return result;
     return sf->cur_func;
 }

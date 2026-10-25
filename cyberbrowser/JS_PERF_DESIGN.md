@@ -305,6 +305,31 @@ path is incremental:
 
 The GC's marker reads values too, and changes in the same step.
 
+**Step 1 as built (N3).** `GCValue`'s fields are reached through `GCV_U(v)` and `GCV_TAG(v)`
+in the accessor layer (`quickjs_types.h`, `quickjs.h`). Configured with `-DQJS_OPAQUE_VALUES`,
+the fields get other names, so any direct `.u` or `.tag` on a value is a compile error. The
+`build-opaque` configuration builds everything, the browser and tests included, and passes
+the test suite. Direct accesses were few: 15 in all (6 in `gc_value_helpers.h`, 4 redundant
+stores, the bytecode fingerprint, the JIT's payload/tag immediates, one stencil and a test),
+now through the accessors.
+
+What step 2 has to change hides from that check, because it uses the layout without naming
+the fields:
+
+| Where | Sites | What changes |
+|---|---|---|
+| Tags compared with `JS_TAG_FLOAT64` | 24 `case` labels (17 under `switch(tag)` of a raw tag), 28 `==`/`!=`, 27 tag variables read raw | With NaN boxing a double has no single tag: these read `JS_VALUE_GET_NORM_TAG` (54 places already do) |
+| The JIT | 62 uses of the stencils' value helpers (`vset`, `vld`, `vcopy`…), the payload/tag immediates, `jit_value_load`, the layout asserts | Values become one 8-byte move: the helpers and the immediates change, and the store-forwarding workaround goes |
+| The GC | A conservative scan reading a tag word at +4 (`gc_concurrent.c:407`), the verifier's two scans for the 16-byte pattern | Read the 8-byte encoding |
+| `JSProperty` | The `init` member (16 bytes) is unused since AUTOINIT stores nothing | Remove it, so property slots shrink to 8 bytes with values |
+| Short big ints | `JS_SHORT_BIG_INT_BITS` is 64 | 32 bits fit in a NaN box, as upstream QuickJS has it |
+| `quickjs.h` | A dead NaN-boxing branch for 32-bit pointers (it typedefs `GCValue` as `uint64_t` and does not compile) | The starting point for the encoding, or deleted |
+
+The browser side barely notices: 9 raw tag reads in 5 files, all through the macros. Nothing
+outside the engine touches the fields. Step 2 is therefore concentrated in `quickjs.c`
+(about 80 tag sites to review), the stencils and three GC scans, with the deterministic
+replays and the four-mode differential tests to check it.
+
 **Unchecked loads on hot paths.** `SAFE_GET_OR` checks for a null handle on every field read,
 and `gc_deref` checks again. On paths where the handle is known valid (an object from a value
 whose tag says object, a shape from a live object), use unchecked accessors. Keep the checked

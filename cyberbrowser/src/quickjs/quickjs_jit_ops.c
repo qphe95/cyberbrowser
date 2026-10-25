@@ -690,9 +690,7 @@ STENCIL(get_array_el2)
 /* A constant value: IMM(0) its payload, IMM(1) its tag. */
 STENCIL(push_value)
 {
-    uint64_t payload = IMM(0);
-    __builtin_memcpy(&sp[0].u, &payload, 8);
-    sp[0].tag = (int64_t)IMM(1);
+    vset(&sp[0], IMM(0), (int64_t)IMM(1));
     sp++;
     CONTINUE();
 }

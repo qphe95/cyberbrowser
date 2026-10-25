@@ -621,8 +621,8 @@ static int jit_specialized(JSContextHandle ctx, int op, const uint8_t *pc, const
     case OP_push_atom_value: {
         GCValue v;
         if (!jit_atom_value(ctx, jit_u32(pc + 1), &v)) return -1;
-        memcpy(imm0, &v, 8);
-        imm0[1] = (uint64_t)v.tag;
+        memcpy(imm0, &GCV_U(v), 8);          /* payload and tag: the stencils' two halves */
+        imm0[1] = (uint64_t)GCV_TAG(v);
         return JIT_ST_push_value;
     }
     case OP_call:
