@@ -20640,10 +20640,11 @@ extern const char *exec_trace_func_filter;
  * JIT does for the instructions it does not inline. */
 static int (*const jsop_table[256])(JSInterpFrame *F);
 static const uint8_t jsop_jumps[256];
-/* QJS_JIT: 0 (off), 1 (compile hot functions: the default where the JIT
- * is available, JS_PERF_DESIGN.md section 5.6), stress (compile every
- * function at its first call), threaded (testing: no compiled code, every
- * instruction through its helper). */
+/* QJS_JIT: 0 (off: the default), 1 (compile hot functions), stress (compile
+ * every function at its first call), threaded (testing: no compiled code,
+ * every instruction through its helper).  Off by default since 8-byte
+ * values made the interpreter faster than T1's code (JS_PERF_DESIGN.md
+ * section 5.1), until the optimizer (section 6). */
 enum { JS_JIT_OFF, JS_JIT_ON, JS_JIT_STRESS, JS_JIT_THREADED };
 static int g_jit_mode = -1;
 /* A function compiles once entries (JS_JIT_ENTRY_WEIGHT each) and loop
@@ -20662,8 +20663,8 @@ static void js_jit_exit_stats(void)
 static int js_jit_mode_init(void)
 {
     const char *e = getenv("QJS_JIT");
-    int mode = JS_JIT_ON;
-    if (e && strcmp(e, "0") == 0) mode = JS_JIT_OFF;
+    int mode = JS_JIT_OFF;
+    if (e && strcmp(e, "1") == 0) mode = JS_JIT_ON;
     else if (e && strcmp(e, "threaded") == 0) mode = JS_JIT_THREADED;
     else if (e && strcmp(e, "stress") == 0) mode = JS_JIT_STRESS;
     if ((mode == JS_JIT_ON || mode == JS_JIT_STRESS) && !jit_available()) {

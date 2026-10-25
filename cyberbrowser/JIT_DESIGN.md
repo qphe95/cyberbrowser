@@ -45,8 +45,9 @@ only when the hit is one load and one compare; section 7 says what that requires
 - **Targets:** x86-64 (Windows with mingw, Linux) and arm64 (Android, macOS).
 - **25–40% less JS execution time on the YouTube load**, if the hot code concentrates as expected.
   This is an estimate; milestone M0 measures the ceiling first.
-- **`QJS_JIT=0`** turns it off (it is on by default where available, since `JS_PERF_DESIGN.md`
-  N1), and a stress mode compiles every function at its first call.
+- **`QJS_JIT=1`** turns it on (it was on by default from `JS_PERF_DESIGN.md` N1 until 8-byte
+  values made the interpreter faster in N3), and a stress mode compiles every function at its
+  first call.
 
 ## Non-goals (v1)
 

@@ -373,8 +373,11 @@ repeated runs, clean under GC stress, poisoning and `QJS_GC_VERIFY`):
 
 **The JIT now loses to the interpreter**: 10.5 G against 9.9 G cycles on the watch page. The
 interpreter's value copies got cheaper, and the stencils, still the copy-and-patch design of
-M2, did not gain as much. T1 is on by default since N1. Either it is turned off until T2
-(section 6), or its stencils are tuned for 8-byte values first.
+M2, did not gain as much. **So T1 is off by default again** (`QJS_JIT=1` turns it on), until
+the optimizer (section 6) gives compiled code something the interpreter cannot match. Same
+binary, 24 rounds, the interpreter against T1: −5.5% (watch), −4.0% (home), −7.3% (search),
+BBC and Wikipedia at parity. T1 stays in the build, tested in every mode, as T2's exit target
+(6.5).
 
 **Unchecked loads on hot paths.** `SAFE_GET_OR` checks for a null handle on every field read,
 and `gc_deref` checks again. On paths where the handle is known valid (an object from a value
@@ -579,7 +582,7 @@ alive bitmap, which the sweeper writes concurrently. Both belong to the allocato
 **T1.** With the frame pool fixed, compiled code beats the interpreter: 12.6 G against 13.9 G
 cycles on the watch page. The sweep found no gain at the old threshold (2,000), −2.5% on the
 watch page at 20,000 and 100,000, and the gate confirmed 50,000 as the default. On this
-result T1 is now on by default (`QJS_JIT=0` turns it off).
+result T1 was turned on by default, until N3 (section 5.1).
 
 **The gate** (N1's starting build against its end, 24 rounds, deterministic replays):
 
