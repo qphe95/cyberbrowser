@@ -79,6 +79,36 @@ t('eval-and-with', function () {
     function withUser() { with (o) { return q + leaf(1, 1); } }
     return [caller(), withUser()].join(' ');
 });
+t('args-in-place', function () {
+    // A callee's arguments can be its caller's operand-stack slots.
+    function mutate(a, b, c) { a = a + 100; b = 'b' + b; c = c === undefined ? 'pad' : c; return a + ':' + b + ':' + c; }
+    function extra(a) { return a + '/' + arguments.length + '/' + Array.prototype.slice.call(arguments, 1).join(''); }
+    function strictExtra(a) { 'use strict'; a = 0; return arguments[0] + ',' + arguments.length; }
+    var o = { k: 3, m: function (x, y) { x = x * this.k; return x + (y | 0); } };
+    function C(a, b) { a = a + 1; this.v = a + (b || 0); }
+    var r = [], v = 7;
+    for (var i = 0; i < 4; i++) {
+        var before = v;
+        r.push(mutate(v, i), extra(i, 'x', 'y'), strictExtra(i + 1, 2), o.m(v, i), new C(i, v).v,
+               mutate(mutate(i, i), extra(v)), Math.max(leaf(i, 1), mutate.length), v === before);
+        r.push(mutate.apply(null, [i]), mutate.call(null, i, i, i), mutate(...[1, 2]));
+    }
+    return r.join(' ');
+});
+t('zero-params', function () {
+    // Functions without parameters, called at the top of their caller's
+    // operand stack, whose own callees take arguments in place: their
+    // frames must still be marked (they once were not), so what they hold
+    // survives collections.
+    function make(i, s) { return { i: i, s: s + i, a: [i, i + 1] }; }
+    function keep(o, p) { return o.i + p.a[1] + o.s.length; }
+    function z() { var o = make(1, 'z'), p = make(2, 'q'); var t = 0; for (var k = 0; k < 200; k++) t += keep(make(k, 'x'), p); return t + keep(o, p); }
+    function y() { return z() + z(); }
+    function x() { var s = 0; for (var i = 0; i < 40; i++) s += y(); return s; }
+    var r = 0;
+    for (var round = 0; round < 10; round++) r += x();
+    return r;
+});
 t('gc-churn', function () {
     // Allocation in deep stack frames, so collections run while they do.
     function build(n) { var a = []; for (var i = 0; i < n; i++) a.push({ v: i, s: 'x' + i }); return a; }

@@ -378,9 +378,44 @@ in every JIT mode, the watch, search and Wikipedia replays with the JIT on and o
 test suite. (The suite's `test_dom_wrappers_are_lazy` fails sometimes under stress with the
 JS stack on or off: under stress the count of live nodes falls as earlier garbage is swept.)
 
-Next on this path: a callee's arguments in place. Today the arguments are copied from the
-caller's operand stack into the new frame. With caller and callee both on the JS stack, the
-callee's argument slots can be the caller's.
+**C function calls** (4.2 M per watch-page load, as many as bytecode calls) take their
+frame from the JS stack too, rather than the per-depth pool of rooted heap frames. The frame
+holds `cur_func` for backtraces, plus the arguments copied when there are fewer than the
+function's length. Those copies sit between `arg_buf_offset` and `var_refs_offset`, where
+the collector marks a bytecode frame's slots. Against the bytecode-only JS stack: −1.3%
+(watch), −2.0% (home), −0.6% (search), BBC and Wikipedia at parity.
+
+**Arguments in place did not pay, and was removed.** A callee called from the newest JS
+stack frame used the caller's operand-stack slots as its arguments (a negative
+`arg_buf_offset`), padding with undefined above the caller's `sp`. 2.7 M calls per
+watch-page load took it. Measured against native frames alone it was +0.3% to +0.5%: the
+copies it saved cost less than its checks. Getting it right also exposed a bug that is worth
+remembering. A function with no parameters, called with `argv` at the stack top, got an
+`arg_buf_offset` of 0. `JS_MarkActiveStackFrames` takes such a frame for a C function's and
+marks none of its slots. The replays then varied from run to run, only with the concurrent
+collector's minor cycles running, and `QJS_GC_VERIFY` could not see it, because it enumerates
+roots the same way. What found it was checking, in each marking pass, that every live frame's
+slots fell inside a range that pass actually marked. Two invariants from the work remain:
+`get_var_ref_enhanced` refuses a frame without a handle (the closure code's walk up the
+dynamic chain could reach one), and `tests/jit/frames.js` covers arguments mutated in callees,
+padding and zero-parameter calls under GC stress.
+
+**The N2 gate** (N1's last build against N2's, 24 rounds, deterministic replays):
+
+| Recording | JIT on | Interpreter | Default against default (interpreter then, JIT now) |
+|---|---|---|---|
+| YouTube watch | −3.1% | −5.2% | −6.0% |
+| YouTube home | −5.0% | −5.3% | −5.0% |
+| YouTube search | −3.7% | −5.0% | −3.6% |
+| BBC | ±0 | ±0 | ±0 |
+| Wikipedia | ±0 | ±0 | ±0 |
+
+The work is identical (the same calls and DOM nodes), the tests pass in every JIT mode, and
+GC stress, poisoning and `QJS_GC_VERIFY` runs of the replays are clean. The −6% target was
+not reached with the JIT on: lazy prototypes (about −1%), the JS stack (−2%) and native frames
+on it (−1% to −2%) are what calls and allocation had left after N1. The rest of what N2
+listed is better done with N3: per-site call caches belong in feedback vectors (5.4), and the
+allocator's line crossing (5.6) with 8-byte values, which change every object's size.
 
 ### 5.4 Feedback vectors and caches in every tier
 
@@ -616,7 +651,7 @@ without a code generator.
 |---|---|---|
 | N0 | Cycle-based timing, four more recordings, per-subsystem counters (section 4) | A 1% change is detectable on every recording |
 | N1 | In this order, each measured alone (section 4.1): a frame pool that does not miss; T1's threshold; generic get and define/add caches in the runtime, `put_field`/`define_field` caches in compiled code; unchecked hot-path loads; inline allocation fast path | −8% JS-thread cycles on the YouTube replays; parity on all five. **Met** (section 5.6): −10.5% to −12.7% |
-| N2 | Calls without heap frames for simple callees; lighter native calls; call caches; lazy function prototypes and the allocator's line crossing (5.6) | −6% more; parity; GC stress clean |
+| N2 | Calls without heap frames for simple callees; lighter native calls; call caches; lazy function prototypes and the allocator's line crossing (5.6) | −6% more; parity; GC stress clean. **Partly met** (5.3): −3% to −5% with the JIT on, −5% interpreted; parity; GC stress clean |
 | N3 | 8-byte values engine-wide | −6% more; memory down; all four JIT modes and replays at parity |
 | N4 | Feedback vectors; T2 stage 1 (IR, block-local virtual stack, guards and exits), x86-64 first | −5% more on JS-heavy pages; counters for guard failures, block lengths and values crossing blocks |
 | N5 | T2 stage 2 (CFG, SSA, kinds across blocks, linear scan, exits anywhere, loop entry); arm64 | Go/no-go from N4's counters; then −8% more on JS-heavy pages |

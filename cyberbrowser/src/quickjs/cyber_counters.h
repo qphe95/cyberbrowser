@@ -24,6 +24,7 @@
     X(prototype_made)               /* lazy prototypes made on first use */ \
     X(closure_legacy_lazy)          /* closures of lazy functions without a resume-parse state (pin frames) */ \
     X(frame_js_stack)               /* bytecode frames on the JS stack */ \
+    X(frame_js_stack_c)             /* C function frames on the JS stack */ \
     X(frame_pooled)                 /* bytecode frames taken from the pool */ \
     X(frame_allocated)              /* ... allocated */ \
     X(frame_miss_size)              /* ... the pooled frame at that depth too small */ \

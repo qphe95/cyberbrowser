@@ -18805,6 +18805,12 @@ static JSVarRefHandle get_var_ref_enhanced(JSContextHandle ctx, JSStackFrame *sf
     JSBytecodeVarDef *vd;
     BOOL is_async_frame;
     
+    /* Only a bytecode frame on the heap can be referred to: a frame on the
+     * JS stack (no handle) is gone when its call returns, and has no
+     * var_refs array (js_bc_stack_frame_ok); a C function's has no
+     * variables. */
+    if (sf->self_handle == GC_HANDLE_NULL || sf->bytecode_handle == GC_HANDLE_NULL)
+        return GC_HANDLE_NULL;
     p = JS_VALUE_GET_OBJ(sf->cur_func);
     b = (JSFunctionBytecodeHandle)(SAFE_GET_OR(p, JSObjectHandle, u.func.function_bytecode_handle, GC_HANDLE_NULL));
     
@@ -20032,6 +20038,26 @@ static inline __attribute__((always_inline)) GCValue jit_value_load(const GCValu
 static uint8_t *g_js_stack, *g_js_stack_top, *g_js_stack_end;
 static uint32_t g_js_stack_epoch;      /* g_gc_epoch its frames belong to */
 
+/* total_size bytes on top of the JS stack, or NULL (nothing changed) when
+ * they do not fit or the stack cannot be made. */
+static inline __attribute__((always_inline)) uint8_t *js_stack_alloc(size_t total_size)
+{
+    uint8_t *mem;
+    if (unlikely(g_js_stack_epoch != g_gc_epoch || !g_js_stack)) {
+        /* A new heap: no frame of the last one runs. */
+        if (!g_js_stack && !(g_js_stack = js_plain_calloc(1, JS_STACK_SIZE)))
+            return NULL;
+        g_js_stack_top = g_js_stack;
+        g_js_stack_end = g_js_stack + JS_STACK_SIZE;
+        g_js_stack_epoch = g_gc_epoch;
+    }
+    mem = g_js_stack_top;
+    if (unlikely((size_t)(g_js_stack_end - mem) < total_size))
+        return NULL;
+    g_js_stack_top = mem + total_size;
+    return mem;
+}
+
 /* js_bc_frame_enter_pooled's work on the JS stack.  NULL, having changed
  * nothing, when the frame does not fit (or the stack cannot be made). */
 static inline __attribute__((always_inline))
@@ -20048,19 +20074,9 @@ JSStackFrame *js_stack_frame_enter(JSRuntimeHandle rt, JSObjectHandle p, JSFunct
     uint8_t *mem;
     int i, n;
 
-    if (unlikely(g_js_stack_epoch != g_gc_epoch || !g_js_stack)) {
-        /* A new heap: no frame of the last one runs. */
-        if (!g_js_stack && !(g_js_stack = js_plain_calloc(1, JS_STACK_SIZE)))
-            return NULL;
-        g_js_stack_top = g_js_stack;
-        g_js_stack_end = g_js_stack + JS_STACK_SIZE;
-        g_js_stack_epoch = g_gc_epoch;
-    }
-    mem = g_js_stack_top;
-    if (unlikely((size_t)(g_js_stack_end - mem) < total_size))
+    if (!(mem = js_stack_alloc(total_size)))
         return NULL;
     CC_INC(frame_js_stack);
-    g_js_stack_top = mem + total_size;
     rtp = GC_DEREF_H(rt, JSRuntimeHandle);
     sf = (JSStackFrame *)mem;
     arg_buf = (GCValue *)(mem + frame_size);
@@ -20303,6 +20319,42 @@ static GCValue js_call_c_function(JSContextHandle ctx, GCValue func_obj,
     /* Native calls are poll points for the collector (bytecode functions
      * poll at entry). */
     gc_poll();
+    /* The frame (for backtraces, and the arguments padded to the
+     * function's length) on the JS stack: nothing refers to a C function's
+     * frame after its call.  Copied arguments sit where a bytecode frame's
+     * would, between arg_buf_offset and var_refs_offset, for the collector
+     * (JS_MarkActiveStackFrames); arguments not copied are the caller's. */
+    {
+        const size_t frame_size = (sizeof(JSStackFrame) + 15) & ~(size_t)15;
+        int copy = arg_count > argc;
+        size_t total_size = frame_size + (copy ? sizeof(GCValue) * arg_count : 0);
+        uint8_t *mem = js_stack_alloc(total_size);
+        if (likely(mem)) {
+            JSRuntime *rtp = GC_DEREF_H(rt, JSRuntimeHandle);
+            CC_INC(frame_js_stack_c);
+            sf = (JSStackFrame *)mem;
+            memset(sf, 0, sizeof(JSStackFrame));
+            if (copy) {
+                arg_buf = (GCValue *)(mem + frame_size);
+                for (i = 0; i < argc; i++)
+                    arg_buf[i] = argv[i];
+                for (; i < arg_count; i++)
+                    arg_buf[i] = JS_UNDEFINED;
+                sf->arg_count = arg_count;
+                sf->arg_buf_offset = (uint32_t)frame_size;
+                sf->var_refs_offset = (uint32_t)total_size;
+            } else {
+                arg_buf = argv;
+                sf->arg_count = argc;
+            }
+            sf->cur_func = func_obj;
+            sf->prev_frame = rtp->current_frame;
+            sf->prev_frame_handle = sf->prev_frame ? sf->prev_frame->self_handle : GC_HANDLE_NULL;
+            rtp->current_frame = sf;
+            ctx = (JSContextHandle)(SAFE_GET_OR(p, JSObjectHandle, u.cfunc.realm_handle, GC_HANDLE_NULL));
+            goto frame_ready;
+        }
+    }
     sf = js_alloc_c_frame(ctx, argc, arg_count, argv, &arg_buf);
     if (!sf)
         return JS_EXCEPTION;
@@ -20312,6 +20364,7 @@ static GCValue js_call_c_function(JSContextHandle ctx, GCValue func_obj,
     ctx = (JSContextHandle)(SAFE_GET_OR(p, JSObjectHandle, u.cfunc.realm_handle, GC_HANDLE_NULL));
     sf->js_mode = 0;
     gc_set_heap_value(&sf->cur_func, (GCValue)func_obj);
+ frame_ready:
 
     func = SAFE_GET_OR(p, JSObjectHandle, u.cfunc.c_function, (JSCFunctionType){0});
     switch(cproto) {
@@ -20397,6 +20450,12 @@ static GCValue js_call_c_function(JSContextHandle ctx, GCValue func_obj,
         abort();
     }
 
+    if (sf->self_handle == GC_HANDLE_NULL) {
+        /* On the JS stack: the memory is the next frame's. */
+        GC_DEREF_H(rt, JSRuntimeHandle)->current_frame = sf->prev_frame;
+        g_js_stack_top = (uint8_t *)sf;
+        return ret_val;
+    }
     js_rt_pop_stack_frame(rt, sf);
     if (g_c_frame_depth > 0 && --g_c_frame_depth < C_FRAME_POOL_DEPTH) {
         /* A pooled frame stays rooted: drop what it references. */
