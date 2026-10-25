@@ -172,6 +172,26 @@ bool dom_fetch_ready(const char *url) {
     return ready;
 }
 
+bool dom_fetch_wait_all(int timeout_ms) {
+    double deadline = now_ms() + timeout_ms;
+    pthread_mutex_lock(&g_mu);
+    for (;;) {
+        bool busy = false;
+        for (FetchEntry *e = g_all; e && !busy; e = e->next)
+            busy = e->state < 2;
+        if (!busy || now_ms() >= deadline) {
+            pthread_mutex_unlock(&g_mu);
+            return !busy;
+        }
+        /* Woken by each download finishing; timed, in case none does. */
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 10000000L;
+        if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+        pthread_cond_timedwait(&g_done, &g_mu, &ts);
+    }
+}
+
 void dom_fetch_stats(DomFetchStats *out) {
     pthread_mutex_lock(&g_mu);
     *out = g_stats;

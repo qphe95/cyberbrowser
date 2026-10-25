@@ -34,6 +34,9 @@ bool dom_fetch_script(const char *url, HttpBuffer *out, char *err, size_t err_le
 
 /* Has a queued fetch of `url` finished (dom_fetch_script would not wait)? */
 bool dom_fetch_ready(const char *url);
+/* Wait until every prefetch has finished downloading (at most timeout_ms);
+ * false on timeout.  For CYBER_DET_TIME (det_clock.h). */
+bool dom_fetch_wait_all(int timeout_ms);
 
 typedef struct DomFetchStats {
     uint64_t queued, completed, hits, waits, sync_fetches;

@@ -6,6 +6,7 @@
  * intended as a quick smoke-test executable for the cyberbrowser core.
  */
 #include "cyber_env.h"
+#include "det_clock.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -518,6 +519,20 @@ static void loop_log_wait(const char *what, unsigned long long wait) {
             what, wait, page_time_ms(), working, undelivered, js_quickjs_network_pending());
 }
 
+/* CYBER_DET_TIME (det_clock.h): at the top of each event-loop turn, wait
+ * until no fetch, stylesheet or image is in flight, so the page receives
+ * each at the same point of its run every time.  The waits are real time,
+ * which the deterministic clock does not see. */
+static void det_drain_in_flight(void) {
+    if (!det_clock_on()) return;
+    bool net = js_quickjs_net_wait_all(2000);
+    bool sheets = dom_fetch_wait_all(2000);
+    bool images = !g_loop_images || image_cache_wait_pending_ms(g_loop_images, 2000);
+    if (!net || !sheets || !images)
+        fprintf(stderr, "[det] still in flight after 2 s:%s%s%s\n", net ? "" : " fetches",
+                sheets ? "" : " prefetches", images ? "" : " images");
+}
+
 /* One event-loop drain: due timers, scheduler tasks and promise jobs, again
  * until nothing is due.  With `wait`, also wait (bounded) for timers due
  * soon and for fetches in flight. */
@@ -536,6 +551,7 @@ static bool pump_event_loop(JSContextHandle ctx, bool wait) {
 
         /* Top of an event-loop turn: a tick boundary, and where the
          * buffered diagnostics go out. */
+        det_drain_in_flight();
         gc_tick();
         fflush(stdout);
         fflush(stderr);
@@ -1183,14 +1199,41 @@ static bool render_document_to_jpg(HtmlDocument *doc, ImageCache *image_cache,
 }
 
 /* CYBER_TIMELINE=1: the milestones of a run, in ms since process creation
- * (what the process spends outside load-page shows too). */
+ * (what the process spends outside load-page shows too), with the CPU time
+ * and the CPU cycles this (the JS) thread used so far.  Cycles have no
+ * scheduler-tick granularity: tests/jit/replay.sh compares them.
+ *
+ * CYBER_SPIN_PCT=<p> (calibration, JS_PERF_DESIGN.md section 4): before
+ * the "before page_final" mark, spin until the thread has used p% more
+ * cycles, so a known slowdown can be checked against the measurement. */
 static void tl_mark(const char *what) {
     static int on = -1;
     if (on < 0) on = cyber_getenv("CYBER_TIMELINE") ? 1 : 0;
     if (!on) return;
+    ULONG64 cycles = 0;
+    QueryThreadCycleTime(GetCurrentThread(), &cycles);
+    const char *spin = cyber_getenv("CYBER_SPIN_PCT");
+    if (spin && strcmp(what, "before page_final") == 0) {
+        ULONG64 until = cycles + (ULONG64)((double)cycles * atof(spin) / 100.0), now_c = cycles;
+        volatile unsigned x = 0;
+        while (now_c < until) {
+            for (int i = 0; i < 10000; i++) x += i;
+            QueryThreadCycleTime(GetCurrentThread(), &now_c);
+        }
+        cycles = now_c;
+    }
     FILETIME c, e, k, u, now; GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u); GetSystemTimeAsFileTime(&now);
     unsigned long long a = ((unsigned long long)c.dwHighDateTime << 32) | c.dwLowDateTime, b = ((unsigned long long)now.dwHighDateTime << 32) | now.dwLowDateTime;
-    fprintf(stderr, "[timeline] %-28s %8.1f ms\n", what, (b - a) / 1e4); fflush(stderr);
+    FILETIME tc, te, tk, tu; GetThreadTimes(GetCurrentThread(), &tc, &te, &tk, &tu);
+    unsigned long long cpu = (((unsigned long long)tk.dwHighDateTime << 32) | tk.dwLowDateTime) +
+                             (((unsigned long long)tu.dwHighDateTime << 32) | tu.dwLowDateTime);
+    /* Under CYBER_DET_TIME, also the calls made so far: the work the page
+     * did, the same at every run that took the same path. */
+    char calls[48] = "";
+    if (det_clock_on()) snprintf(calls, sizeof(calls), ", %llu calls", (unsigned long long)g_det_calls);
+    fprintf(stderr, "[timeline] %-28s %8.1f ms  (thread cpu %8.1f ms, %9.1f Mcycles%s)\n", what, (b - a) / 1e4,
+            cpu / 1e4, cycles / 1e6, calls);
+    fflush(stderr);
 }
 /* Before the page's first script: engine polyfills, diagnostics and the
  * CYBER_PRELUDE_JS hook. */
@@ -1242,6 +1285,7 @@ static void prepare_page_scripts(void) {
 }
 
 int main(int argc, char *argv[]) {
+    det_clock_set_js_thread();     /* this thread runs the page */
     tl_mark("main");
     /* Diagnostics on stderr and progress on stdout are buffered (unbuffered,
      * MinGW's printf writes a few bytes per system call: half a second of a

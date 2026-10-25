@@ -49,6 +49,7 @@
 #include "dom_wrap.h"
 #include "html_dom.h"
 #include "platform.h"
+#include "det_clock.h"
 #include <quickjs.h>
 #include <quickjs_gc_unified.h>
 #include "gc_platform.h"
@@ -1202,7 +1203,7 @@ static bool lq_ensure(JSContextHandle ctx)
 
     uint64_t cheap[LQ_CHEAP_N];
     lq_cheap_key(cheap);
-    unsigned long long now = platform_get_time_ms();
+    unsigned long long now = (unsigned long long)page_clock_now_ms();
     bool full = false;
     uint64_t key = g_lq_valid ? g_lq_key : 0;
     HtmlDocument *doc = NULL;

@@ -17,6 +17,7 @@
 #include "css_parser.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
+#include "det_clock.h"
 #include "layout_api.h"
 
 /* CYBER_CE_LOG=1: per-element custom-element diagnostics (define, upgrade,
@@ -3059,7 +3060,7 @@ static GCValue io_compute(JSContextHandle ctx, GCValue observer, GCValue target,
     GCValue ctor = JS_GetPropertyStr(ctx, global, "IntersectionObserverEntry");
     GCValue proto = JS_IsFunction(ctx, ctor) ? JS_GetPropertyStr(ctx, ctor, "prototype") : JS_UNDEFINED;
     GCValue entry = JS_IsObject(proto) ? JS_NewObjectProto(ctx, proto) : JS_NewObject(ctx);
-    JS_DefinePropertyValueStr(ctx, entry, "time", JS_NewFloat64(ctx, (double)platform_get_time_ms()), JS_PROP_C_W_E);
+    JS_DefinePropertyValueStr(ctx, entry, "time", JS_NewFloat64(ctx, page_clock_now_ms()), JS_PROP_C_W_E);
     JS_DefinePropertyValueStr(ctx, entry, "rootBounds", io_rect(ctx, l, t, r - l, b - t), JS_PROP_C_W_E);
     JS_DefinePropertyValueStr(ctx, entry, "boundingClientRect", io_rect(ctx, tb.x, tb.y, tb.width, tb.height), JS_PROP_C_W_E);
     JS_DefinePropertyValueStr(ctx, entry, "intersectionRect", io_rect(ctx, hit ? ix0 : 0, hit ? iy0 : 0, iw, ih), JS_PROP_C_W_E);
@@ -3131,7 +3132,7 @@ static GCValue io_registry(JSContextHandle ctx) {
 int intersection_observers_tick(JSContextHandle ctx) {
     CP_ACC("IntersectionObserver tick");
     static unsigned long long last;
-    unsigned long long now = platform_get_time_ms();
+    unsigned long long now = (unsigned long long)page_clock_now_ms();
     if (!g_io_pending && now - last < 100) return 0;
     g_io_pending = false;
     last = now;
@@ -3281,8 +3282,11 @@ JSClassDef js_performance_observer_class_def = {
 // Performance.now() - high resolution timestamp
 double g_performance_time_origin = 0.0;
 
+/* The page clock at high resolution; CYBER_DET_TIME: deterministic
+ * (det_clock.h). */
 #ifdef _MSC_VER
 double performance_get_time_ms(void) {
+    if (det_clock_on()) return page_clock_ms();
     LARGE_INTEGER freq, count;
     QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&count);
@@ -3290,6 +3294,7 @@ double performance_get_time_ms(void) {
 }
 #else
 double performance_get_time_ms(void) {
+    if (det_clock_on()) return page_clock_ms();
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
@@ -4029,7 +4034,7 @@ JSClassDef js_date_class_def = {
 
 // Helper: Get current time in milliseconds using platform API
 long long date_get_current_time_ms(void) {
-    return (long long)platform_get_time_ms();
+    return (long long)page_clock_now_ms();
 }
 
 // Helper: Parse ISO date string to timestamp (simplified)

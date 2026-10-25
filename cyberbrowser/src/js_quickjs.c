@@ -2124,6 +2124,29 @@ void js_quickjs_net_wait(unsigned int ms)
     pthread_mutex_unlock(&g_net_mutex);
 }
 
+bool js_quickjs_net_wait_all(unsigned int ms)
+{
+    unsigned long long deadline = platform_get_time_ms() + ms;
+    pthread_mutex_lock(&g_net_mutex);
+    for (;;) {
+        int done = 0;
+        for (NetReq *r = g_net_done; r; r = r->next)
+            done++;
+        unsigned long long now = platform_get_time_ms();
+        if (done >= g_net_inflight || now >= deadline) {
+            pthread_mutex_unlock(&g_net_mutex);
+            return done >= g_net_inflight;
+        }
+#ifdef _WIN32
+        SleepConditionVariableSRW(&g_net_cond, &g_net_mutex, (DWORD)(deadline - now), 0);
+#else
+        pthread_mutex_unlock(&g_net_mutex);
+        platform_sleep_ms(1);
+        pthread_mutex_lock(&g_net_mutex);
+#endif
+    }
+}
+
 GCValue js_fetch(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     CP_ACC("fetch()");
     const char *url = NULL;

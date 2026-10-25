@@ -80,6 +80,7 @@ set(BE_SOURCES
     src/frame_arena.c
     src/job_system.c
     src/cyber_env.c
+    src/det_clock.c
     src/dom_store.c
     src/dom_parse.c
     src/dom_snapshot.c
@@ -332,8 +333,8 @@ add_library(plutosvg_static STATIC
     ${PLUTOVG_SOURCES}
     ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/plutosvg/plutosvg.c)
 target_include_directories(plutosvg_static PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/plutosvg
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/plutovg/include
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/plutosvg>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/plutovg/include>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/plutovg/source)
 target_compile_definitions(plutosvg_static
     PUBLIC PLUTOVG_BUILD_STATIC PLUTOSVG_BUILD_STATIC
@@ -349,7 +350,7 @@ file(GLOB BROTLI_DEC_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/brotli/dec/*.c)
 add_library(brotlidec_static STATIC ${BROTLI_DEC_SOURCES})
 target_include_directories(brotlidec_static PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/brotli/include)
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/brotli/include>)
 if(NOT MSVC)
     target_compile_options(brotlidec_static PRIVATE -O2 -w)
 endif()
@@ -491,7 +492,8 @@ endif()
 # =============================================================================
 include(GNUInstallDirs)
 
-install(TARGETS cyberbrowser_lib
+# The static libraries cyberbrowser_lib links publicly go in its export set.
+install(TARGETS cyberbrowser_lib plutosvg_static brotlidec_static
     EXPORT cyberbrowser-targets
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}

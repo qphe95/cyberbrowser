@@ -33,6 +33,47 @@
 #include "quickjs-internal.h"
 #include "gc_platform.h"
 #include "gc_core.h"
+#include "cyber_counters.h"
+
+/* --- Event counters (cyber_counters.h) ----------------------------------- */
+
+int g_cyber_counters_on;
+uint64_t g_cyber_counters[CC_COUNT];
+uint64_t g_cyber_alloc_count[CC_ALLOC_TYPES], g_cyber_alloc_bytes[CC_ALLOC_TYPES];
+
+static void cyber_counters_dump(void)
+{
+    static const char *const names[CC_COUNT] = {
+#define CYBER_COUNTER_NAME(name) #name,
+        CYBER_COUNTER_LIST(CYBER_COUNTER_NAME)
+#undef CYBER_COUNTER_NAME
+    };
+    /* JSGCObjectTypeEnum's order. */
+    static const char *const types[] = {
+        "js_object", "function_bytecode", "shape", "var_ref", "async_function", "js_context",
+        "js_runtime", "stack_frame", "function_def", "auto", "data", "js_string", "js_string_rope",
+        "js_bigint", "module", "job_entry", "bytes",
+    };
+    for (int i = 0; i < CC_COUNT; i++)
+        fprintf(stderr, "[counters] %s %llu\n", names[i], (unsigned long long)g_cyber_counters[i]);
+    for (int i = 0; i < CC_ALLOC_TYPES; i++) {
+        if (!g_cyber_alloc_count[i])
+            continue;
+        const char *t = i < (int)(sizeof(types) / sizeof(types[0])) ? types[i] : "other";
+        fprintf(stderr, "[counters] alloc_%s %llu\n", t, (unsigned long long)g_cyber_alloc_count[i]);
+        fprintf(stderr, "[counters] alloc_%s_bytes %llu\n", t, (unsigned long long)g_cyber_alloc_bytes[i]);
+    }
+    fflush(stderr);
+}
+
+__attribute__((constructor)) static void cyber_counters_init(void)
+{
+    const char *e = getenv("CYBER_COUNTERS");
+    if (e && *e && strcmp(e, "0") != 0) {
+        g_cyber_counters_on = 1;
+        atexit(cyber_counters_dump);
+    }
+}
 
 GCState g_gc;
 uint32_t g_gc_epoch;
@@ -985,6 +1026,7 @@ static GCHandle gc_alloc_in(size_t size, JSGCObjectTypeEnum type, bool old, bool
     if (!g_gc.initialized && !gc_init()) return GC_HANDLE_NULL;
     bool young = !old && !permanent && g_core.nursery_enabled;
     GCAllocCtx *a = permanent ? &g_core.js_perm : young ? &g_core.js_young : &g_core.js_old;
+    CC_ALLOC(type, size);
     GCHeader *hdr = gc_core_alloc_object_memory(a, size, type);
     if (!hdr) {
         fprintf(stderr, "[GC] out of memory allocating %zu bytes\n", size);

@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <math.h>
+#include "det_clock.h"
 #include <quickjs.h>
 #include <quickjs_gc_unified.h>
 #include "browser_api_impl.h"
@@ -583,12 +584,12 @@ static MediaPlayer *player_of(GCValue video) {
 
 static double player_time(const MediaPlayer *p) {
     if (p->paused || p->waiting || p->seeking || p->ready < HAVE_FUTURE_DATA) return p->t;
-    return p->t + (double)(platform_get_time_ms() - p->base_ms) / 1000.0 * p->rate;
+    return p->t + (double)((unsigned long long)page_clock_now_ms() - p->base_ms) / 1000.0 * p->rate;
 }
 
 static void player_settle_clock(MediaPlayer *p) {
     p->t = player_time(p);
-    p->base_ms = platform_get_time_ms();
+    p->base_ms = (unsigned long long)page_clock_now_ms();
 }
 
 static double player_duration(MediaPlayer *p) {
@@ -683,18 +684,18 @@ static void player_update(JSContextHandle ctx, MediaPlayer *p) {
     }
     if (p->seeking && ready >= HAVE_CURRENT_DATA) {
         p->seeking = false;
-        p->base_ms = platform_get_time_ms();
+        p->base_ms = (unsigned long long)page_clock_now_ms();
         media_queue_event(p->video, "seeked", false);
         media_queue_event(p->video, "timeupdate", false);
     }
     if (ready >= HAVE_FUTURE_DATA && old < HAVE_FUTURE_DATA) {
-        p->base_ms = platform_get_time_ms();
+        p->base_ms = (unsigned long long)page_clock_now_ms();
         media_queue_event(p->video, "canplay", false);
         if (ready == HAVE_ENOUGH_DATA) media_queue_event(p->video, "canplaythrough", false);
         if (!p->paused) { p->waiting = false; media_queue_event(p->video, "playing", false); }
     }
 
-    unsigned long long now = platform_get_time_ms();
+    unsigned long long now = (unsigned long long)page_clock_now_ms();
     MediaSourceDataHandle ms = JS_GetOpaqueHandle(p->ms, js_media_source_class_id);
     bool stream_ended = !SAFE_IS_NULL(ms) && SAFE_GET_OR(ms, MediaSourceDataHandle, ready_state, 0) == 2;
     if (!p->paused && !p->ended && stream_ended && !isnan(duration) && player_time(p) >= duration - 0.05) {
@@ -758,7 +759,7 @@ bool media_element_attach(JSContextHandle ctx, GCValue video, GCValue ms_obj) {
     g_media_ctx = ctx;
     p->paused = true;
     p->rate = 1.0;
-    p->base_ms = platform_get_time_ms();
+    p->base_ms = (unsigned long long)page_clock_now_ms();
     g_players[g_nplayers++] = p;
     JS_SetPropertyStr(ctx, ms_obj, "__mediaElement", video);
     SAFE_SET(ms, MediaSourceDataHandle, ready_state, 1);   /* open */
@@ -795,7 +796,7 @@ void media_element_seek(GCValue video, double t) {
     if (!p || isnan(t)) return;
     if (t < 0) t = 0;
     p->t = t;
-    p->base_ms = platform_get_time_ms();
+    p->base_ms = (unsigned long long)page_clock_now_ms();
     p->seeking = true;
     p->ended = false;
     media_queue_event(p->video, "seeking", false);
@@ -834,7 +835,7 @@ void media_element_play(GCValue video) {
     if (!p || !p->paused) return;
     if (p->ended) { p->t = 0.0; p->ended = false; }
     p->paused = false;
-    p->base_ms = platform_get_time_ms();
+    p->base_ms = (unsigned long long)page_clock_now_ms();
     media_queue_event(p->video, "play", false);
     if (p->ready >= HAVE_FUTURE_DATA) media_queue_event(p->video, "playing", false);
     else { p->waiting = true; media_queue_event(p->video, "waiting", false); }

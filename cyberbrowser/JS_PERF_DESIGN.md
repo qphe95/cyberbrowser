@@ -143,6 +143,64 @@ Nothing in this document should start without a measurement that can see a 1% ch
 - **A gate per milestone:** the median over 15 interleaved runs, on every recording, beyond
   the measured noise.
 
+### 4.1 As built
+
+- **`tests/jit/replay.sh`** replays the recordings listed in `tests/jit/replays.txt` under
+  several settings, with settings and recordings interleaved and the settings' order rotated
+  each round. **`tools/replay_stats.js`** reports each setting's median JS-thread cycles, its
+  spread, and its change from the first setting with a 95% bootstrap interval. `COUNTERS=1`
+  adds the counters side by side.
+- **The timeline** (`CYBER_TIMELINE=1`) reports the JS thread's cycles
+  (`QueryThreadCycleTime`). `CYBER_SPIN_PCT=<p>` adds exactly p% cycles before the final mark,
+  to calibrate the measurement.
+- **`CYBER_COUNTERS=1`** (`src/quickjs/cyber_counters.h`) counts calls by kind, frames,
+  property paths, inline-cache outcomes and allocations by type and size, and prints them at
+  exit.
+- **Five recordings:** YouTube watch, home and search pages, BBC News, and Wikipedia's
+  "United States".
+- **Deterministic replays.** Real time leaked into the page's work. Timers and observers read
+  real time, so a slower run ran more interval callbacks and smaller scheduler slices. Fetches,
+  stylesheets and images arrived at different points of the run. Replay misses went to the live
+  network. The same page varied by up to 20% in work between runs, which made timing bimodal.
+  It also biased every comparison: faster code was credited with doing less work.
+
+  `replay.sh` therefore runs with:
+  - `CYBER_DET_TIME=1` (`src/det_clock.h`): a page clock that starts at a fixed date and
+    advances by a fixed amount per call made (a count that doesn't depend on which tier runs
+    the code) and per clock read, plus virtual time. It covers timers, `Date`,
+    `performance.now`, media playback and observers, and `Math.random` gets a fixed seed.
+    At the start of each event-loop turn, the loop also waits until no fetch, stylesheet or
+    image is in flight, so the page receives each at the same point every run.
+  - `CYBER_SYNC_FETCH=1`.
+  - `CYBER_REPLAY_OFFLINE=1`: a request missing from the recording fails at once.
+
+  Recordings are made with `CYBER_DET_TIME=1 CYBER_SYNC_FETCH=1` too, so the page's "random"
+  URLs match the replay's. The recorder now numbers responses in the order they were requested,
+  and replays them in that order. Each run reports its call count, and the statistics compare
+  only runs at the recording's most common count.
+
+**Calibration** (12 rounds; settings: JIT, an A/A copy of it, the JIT plus a 1% spin, and the
+interpreter). Every run of every recording, under every setting, made the same number of calls.
+The spread per run was 0.2–1.2%. The A/A copy's interval included 0 on all five recordings.
+The 1% spin was detected on three recordings and borderline on two. **A change of about 1.5% is
+detectable on every recording at 12 rounds; 1% needs about 24.** The exit criterion is met at
+that run count.
+
+**What N0 already shows:**
+
+- **The JIT gains nothing on these pages once work is held equal.** Against the interpreter it
+  measured −1.0% (the YouTube watch page), +1.5% (home) and +1.9% (BBC), and was within noise on
+  the other two. The 4% gain measured before N0 was partly the measurement's bias. T1's own
+  costs and its 20 MB of code cancel what dispatch saved.
+- **Frames:** 577,000 of 5 million bytecode frames per watch-page load miss the pool and are
+  allocated, 308 MB of them. That is the largest single allocation stream after objects, and an
+  N2 target that does not need stack frames: a better pool may do.
+- **Property definition, not assignment, adds most properties.** There are 4.7 M
+  `JS_DefineProperty` calls (object literals and natives building objects) against 5.3 M
+  property adds, and 5.3 M generic gets (`JS_GetPropertyInternal`) from natives and the
+  interpreter's slow path. These are N1's cache targets.
+- **The shape transition cache** answers 84% of property adds (4.4 M of 5.3 M).
+
 ## 5. Making the engine cheap
 
 ### 5.1 Values and loads

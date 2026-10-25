@@ -760,6 +760,11 @@ static char *replay_read_file(const char *path, size_t *len) {
     return data;
 }
 
+static int replay_entry_cmp(const void *a, const void *b) {
+    int x = ((const ReplayEntry *)a)->id, y = ((const ReplayEntry *)b)->id;
+    return x < y ? -1 : x > y;
+}
+
 static void replay_load_locked(const char *dir) {
     g_replay_n = 0;
     char path[1024];
@@ -781,6 +786,9 @@ static void replay_load_locked(const char *dir) {
         g_replay_n++;
     }
     if (fp) fclose(fp);
+    /* The index lists responses as they finished; serve each URL's in the
+     * order they were asked for (their numbers). */
+    qsort(g_replay, (size_t)g_replay_n, sizeof(*g_replay), replay_entry_cmp);
 }
 
 /* Answer from CYBER_REPLAY; false when not replaying or not recorded. */
@@ -824,11 +832,23 @@ static bool replay_serve(const char *method, const char *url, HttpBuffer *out, i
 
 /* Save a response under CYBER_RECORD.  The body is already decoded, so the
  * saved headers drop Content-Encoding. */
-static void record_save(const char *method, const char *url, const HttpBuffer *out, int status) {
+/* A response's number under CYBER_RECORD, taken when its request starts
+ * (-1: not recording), so that the responses of one URL are numbered, and
+ * replayed, in the order the page asked for them, whichever finished first. */
+static int record_reserve(void) {
     const char *dir = getenv("CYBER_RECORD");
-    if (!dir || !*dir || !out) return;
+    if (!dir || !*dir) return -1;
     pthread_mutex_lock(&g_replay_mu);
     int id = g_record_next++;
+    pthread_mutex_unlock(&g_replay_mu);
+    return id;
+}
+
+/* Save a response under CYBER_RECORD as number id (record_reserve). */
+static void record_save(int id, const char *method, const char *url, const HttpBuffer *out, int status) {
+    const char *dir = getenv("CYBER_RECORD");
+    if (!dir || !*dir || !out || id < 0) return;
+    pthread_mutex_lock(&g_replay_mu);
     char path[1024];
     snprintf(path, sizeof(path), "%s/%d.body", dir, id);
     FILE *fp = fopen(path, "wb");
@@ -979,11 +999,36 @@ static bool http_request_with_method_internal(const char *url, const char *metho
             body_observe(outBuffer->data, outBuffer->size);
         return true;
     }
+    /* CYBER_REPLAY_OFFLINE=1 (benchmark replays): a request the recording
+     * lacks fails at once rather than going to the network, so every run
+     * sees the same responses and none waits on a slow or hanging fetch. */
+    static int offline = -1;
+    if (offline < 0) offline = getenv("CYBER_REPLAY") && getenv("CYBER_REPLAY_OFFLINE") ? 1 : 0;
+    if (offline) {
+        if (err && errLen) snprintf(err, errLen, "not in the recording (CYBER_REPLAY_OFFLINE)");
+        if (outStatus) *outStatus = 0;
+        return false;
+    }
+    int record_id = in_memory ? record_reserve() : -1;
+    /* CYBER_NET_LOG=1: each request's start, duration, size and thread. */
+    static int net_log = -1;
+    if (net_log < 0) net_log = getenv("CYBER_NET_LOG") ? 1 : 0;
+    struct timespec t0;
+    if (net_log) clock_gettime(CLOCK_MONOTONIC, &t0);
     bool ok = http_request_net(url, method, postData, postDataLen, custom_headers, custom_header_count,
                                outBuffer, outStatus, err, errLen, cookies,
                                state, bodyStream, outTotalSize);
+    if (net_log) {
+        struct timespec t1;
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        double s = t0.tv_sec * 1e3 + t0.tv_nsec / 1e6, e = t1.tv_sec * 1e3 + t1.tv_nsec / 1e6;
+        size_t bytes = outBuffer ? outBuffer->size : (outTotalSize ? *outTotalSize : 0);
+        fprintf(stderr, "[net-log] start %.1f dur %.1f status %d bytes %zu tid %lu %s %.200s\n", s, e - s,
+                outStatus ? *outStatus : 0, bytes, (unsigned long)GetCurrentThreadId(), method ? method : "GET",
+                url ? url : "");
+    }
     if (ok && in_memory)
-        record_save(method, url, outBuffer, outStatus ? *outStatus : 0);
+        record_save(record_id, method, url, outBuffer, outStatus ? *outStatus : 0);
     return ok;
 }
 

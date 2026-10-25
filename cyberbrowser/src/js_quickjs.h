@@ -7,6 +7,7 @@
 /* QuickJS headers */
 #include "quickjs.h"
 #include "platform.h"
+#include "det_clock.h"
 
 /* Android AssetManager - only available on Android */
 #ifdef BE_PLATFORM_ANDROID
@@ -79,10 +80,11 @@ void js_quickjs_pump_timers_and_jobs(void);
  * settle the finished ones (main thread, returns how many); wait up to `ms`
  * for one to finish. */
 /* The page's clock (timers, requestAnimationFrame, idle deadlines): real
- * time plus the virtual-time offset the event loop adds while it skips
- * idle waits (JS_time_offset_ms, also in Date and performance.now). */
+ * time (det_clock.h: deterministic under CYBER_DET_TIME) plus the
+ * virtual-time offset the event loop adds while it skips idle waits
+ * (JS_time_offset_ms, also in Date and performance.now). */
 static inline unsigned long long page_time_ms(void) {
-    return platform_get_time_ms() + (unsigned long long)JS_time_offset_ms;
+    return (unsigned long long)page_clock_ms() + (unsigned long long)JS_time_offset_ms;
 }
 static inline void page_time_advance(unsigned long long ms) {
     JS_time_offset_ms += (int64_t)ms;
@@ -91,6 +93,9 @@ static inline void page_time_advance(unsigned long long ms) {
 int js_quickjs_network_pending(void);
 int js_quickjs_net_poll(JSContextHandle ctx);
 void js_quickjs_net_wait(unsigned int ms);
+/* Wait until every request in flight has finished (settled or not; at most
+ * ms); false on timeout.  For CYBER_DET_TIME (det_clock.h). */
+bool js_quickjs_net_wait_all(unsigned int ms);
 
 /* A GET on a worker thread, like fetch(), finished by `done` on the main
  * thread from js_quickjs_net_poll (and counted as pending until then).

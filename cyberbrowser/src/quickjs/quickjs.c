@@ -60,6 +60,8 @@
 /* Include internal types header for shared struct definitions */
 #include "quickjs-internal.h"
 #include "quickjs_jit.h"
+#include "cyber_counters.h"
+#include "det_clock.h"
 
 /* Debug: last property accessed on undefined/null (for browser diagnostics) */
 char g_last_undefined_prop[256] = {0};
@@ -9466,6 +9468,7 @@ GCValue JS_GetPropertyInternal(JSContextHandle ctx, GCValue obj,
     int prop_idx;
     int tag;
 
+    CC_INC(get_generic);
     tag = JS_VALUE_GET_TAG(obj);
     if (unlikely(tag != JS_TAG_OBJECT)) {
         switch(tag) {
@@ -10639,10 +10642,17 @@ static JSProperty *add_property(JSContextHandle ctx,
        avoids creating duplicate hashed shapes when growing private shapes. */
     {
         JSShape *s = GC_DEREF_H(sh, JSShapeHandle);
-        if (s && s->trans_child != GC_HANDLE_NULL && s->trans_atom == prop && s->trans_flags == (uint32_t)prop_flags)
+        CC_INC(add_property);
+        if (s && s->trans_child != GC_HANDLE_NULL && s->trans_atom == prop && s->trans_flags == (uint32_t)prop_flags) {
             new_sh = (JSShapeHandle)s->trans_child;
-        else
+            CC_INC(shape_transition_cached);
+        } else {
             new_sh = find_hashed_shape_prop(ctx_rt, sh, prop, prop_flags);
+            if (SAFE_VALID(new_sh))
+                CC_INC(shape_transition_hashed);
+            else
+                CC_INC(shape_transition_new);
+        }
     }
     bool df_pd = CYBER_ENV(CYBER_T_DF) && prop > 1000;
     if (df_pd) {
@@ -11107,6 +11117,8 @@ int JS_SetPropertyInternal(JSContextHandle ctx, GCValue obj,
     JSShapeProperty *prs;
     JSProperty *pr;
     int tag;
+
+    CC_INC(set_generic);
     JSPropertyDescriptor desc = JS_PROPERTY_DESCRIPTOR_INIT;
     int ret;
     uint32_t idx;
@@ -11872,6 +11884,7 @@ int JS_DefineProperty(JSContextHandle ctx, GCValue this_obj,
     int mask, res;
     GCValue val = val_const;  /* Make a mutable copy */
 
+    CC_INC(define_property);
     /* Debug: Log this_obj value */
     QJS_LOGD("JS_DefineProperty: ENTRY this_obj tag=%d", JS_VALUE_GET_TAG(this_obj));
 
@@ -19950,6 +19963,7 @@ JSStackFrame *js_bc_frame_enter_pooled(JSRuntimeHandle rt, JSObjectHandle p, JSF
     if (bp->var_ref_count != 0 || depth >= BC_FRAME_POOL_DEPTH || g_bc_frame_pool_size[depth] < total_size ||
         unlikely(g_c_frame_pool_epoch != g_gc_epoch))
         return NULL;
+    CC_INC(frame_pooled);
     rtp = GC_DEREF_H(rt, JSRuntimeHandle);
     handle = g_bc_frame_pool[depth];
     mem = (uint8_t *)gc_deref(handle);
@@ -20098,6 +20112,8 @@ static GCValue js_call_c_function(JSContextHandle ctx, GCValue func_obj,
     int arg_count, i;
     JSCFunctionEnum cproto;
 
+    CC_INC(call_native);
+    DET_CLOCK_CALL();
     p = JS_VALUE_GET_OBJ(func_obj);
     cproto = (JSCFunctionEnum)SAFE_GET_OR(p, JSObjectHandle, u.cfunc.cproto, 0);
     arg_count = SAFE_GET_OR(p, JSObjectHandle, u.cfunc.length, 0);
@@ -20290,7 +20306,9 @@ static JSStackFrame *js_alloc_bytecode_frame(JSContextHandle ctx,
     if (depth < BC_FRAME_POOL_DEPTH && g_bc_frame_pool_size[depth] >= total_size) {
         handle = g_bc_frame_pool[depth];
         reused = TRUE;
+        CC_INC(frame_pooled);
     } else {
+        CC_INC(frame_allocated);
         /* A pooled frame gets headroom: calls at one depth run functions of
          * different sizes, and a slot sized for the last one was replaced
          * at every larger call. */
@@ -20884,6 +20902,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
     } while (0)
     JS_POLL_POINT();
     OPSTATS_ENTER();
+    DET_CLOCK_CALL();
     if (unlikely(js_jit_mode() == JS_JIT_ON)) {
         JSFunctionBytecode *jbp = (JSFunctionBytecode *)gc_deref(b);
         if (jbp->jit_budget < JS_JIT_THRESHOLD)
@@ -20897,6 +20916,10 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
          * finish, to handle an exception or to continue in the interpreter
          * at pc. */
         const struct JitCode *jc = g_jit_mode == JS_JIT_THREADED ? NULL : js_jit_get(ctx, b);
+        if (jc)
+            CC_INC(call_bytecode_entered_jit);
+        else
+            CC_INC(call_bytecode_interpreted);
         if (!jc && g_jit_mode != JS_JIT_THREADED)
             goto interpret;
         JSInterpFrame F;
@@ -20919,6 +20942,8 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
             goto done;
         if (r == JSOP_DONE_GENERATOR)
             goto done_generator;
+    } else {
+        CC_INC(call_bytecode_interpreted);
     }
  interpret:
     for(;;) {
@@ -22289,7 +22314,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                     pc += 4;                                            \
                 }                                                       \
                 if (CYBER_ENV(CYBER_T_NAF)) g_last_field_atom = atom; \
-                                                                        \
+                CC_INC(get_interp);                                     \
                 obj = sp[-1];                                           \
                 if (likely(JS_VALUE_GET_TAG(obj) == JS_TAG_OBJECT)) {   \
                     p = JS_VALUE_GET_OBJ(obj);                          \
@@ -22322,6 +22347,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                     }                                                   \
                 } else {                                                \
                 name ## _slow_path:                                     \
+                    CC_INC(get_interp_slow);                            \
                     JS_SF_SET_PC(sf, pc);                                    \
                     val = JS_GetPropertyInternal(ctx, obj, atom, sp[-1], 0); \
                     if (unlikely(JS_IsException(val)))                  \
@@ -23909,30 +23935,39 @@ const GCValue *jit_get_field_ic(JitIC *ic, const GCValue *objv, JSAtom atom)
 
     if (!o)
         return NULL;
+    CC_INC(ic_lookup);
     sh = atomic_load_u32((volatile uint32_t *)&o->shape_handle);
     for (i = 0; i < ic->n && ic->shape[i] != sh; i++)
         ;
-    if (i < ic->n && (v = jit_ic_way_value(o, atom, ic->holder[i], ic->slot[i], ic->epoch)))
+    if (i < ic->n && (v = jit_ic_way_value(o, atom, ic->holder[i], ic->slot[i], ic->epoch))) {
+        CC_INC(ic_hit);
         return v;
+    }
     if (ic->mega) {
         JitMegaEntry *e = jit_mega_entry(sh, atom);
-        if (e->shape == sh && e->atom == atom && (v = jit_ic_way_value(o, atom, e->holder, e->slot, e->epoch)))
+        if (e->shape == sh && e->atom == atom && (v = jit_ic_way_value(o, atom, e->holder, e->slot, e->epoch))) {
+            CC_INC(ic_hit_mega);
             return v;
+        }
     }
 
     /* A miss: jit_field_ref's walk, noting where the property is. */
     for (p = p0;;) {
         prs = find_own_property(&pr, p, atom);
         if (prs) {
-            if (unlikely(prs->flags & JS_PROP_TMASK))
+            if (unlikely(prs->flags & JS_PROP_TMASK)) {
+                CC_INC(ic_uncacheable);
                 return NULL;
+            }
             holder = p == p0 ? GC_HANDLE_NULL : SAFE_HANDLE(p);
             slot = (uint32_t)(pr - js_obj_props_of(GC_DEREF_H(p, JSObjectHandle)));
             v = &pr->u.value;
             break;
         }
-        if (unlikely(SAFE_GET_OR(p, JSObjectHandle, is_exotic, false)))
+        if (unlikely(SAFE_GET_OR(p, JSObjectHandle, is_exotic, false))) {
+            CC_INC(ic_uncacheable);
             return NULL;
+        }
         GCHandle proto_handle = js_object_get_proto_handle_atomic(p);
         if (proto_handle == GC_HANDLE_NULL || !SAFE_VALID((JSObjectHandle)proto_handle)) {
             holder = sh;        /* not the receiver's own; never dereferenced */
@@ -23968,6 +24003,7 @@ const GCValue *jit_get_field_ic(JitIC *ic, const GCValue *objv, JSAtom atom)
         for (i = 0; i < n && ic->shape[i] != sh; i++)
             ;
     }
+    CC_INC(ic_fill);
     if (!ic->mega && i >= JIT_IC_WAYS)
         ic->mega = 1;
     if (ic->mega) {
@@ -24182,7 +24218,8 @@ static inline __attribute__((always_inline)) void jit_call_push_result(JSInterpF
  *   F2->jit_exit is JSOP_DONE (JSOP_EXCEPTION if it threw);
  * - otherwise NULL with F2->jit_exit JSOP_NEXT, having changed nothing: the
  *   call goes through the instruction's helper. */
-void *jit_call_prepare(JSInterpFrame *F, JSInterpFrame *F2, int argc, int kind)
+static inline __attribute__((always_inline))
+void *jit_call_prepare_kind(JSInterpFrame *F, JSInterpFrame *F2, int argc, int kind)
 {
     GCValue *call_argv = F->sp - argc;
     GCValue func_obj = jit_value_load(kind == JIT_CALL_CONSTRUCTOR ? &call_argv[-2] : &call_argv[-1]);
@@ -24268,10 +24305,25 @@ void *jit_call_prepare(JSInterpFrame *F, JSInterpFrame *F2, int argc, int kind)
     F2->byte_code = jc->byte_code;
     F2->jit_exit = JSOP_NEXT;
     /* JS_POLL_POINT at entry (known not to call the handler). */
+    DET_CLOCK_CALL();
     gc_poll();
     if (g_interrupt_countdown)
         g_interrupt_countdown--;
     return jc->base;
+}
+
+void *jit_call_prepare(JSInterpFrame *F, JSInterpFrame *F2, int argc, int kind)
+{
+    void *entry = jit_call_prepare_kind(F, F2, argc, kind);
+    if (unlikely(g_cyber_counters_on)) {
+        if (entry)
+            CC_INC(call_jit_direct);
+        else if (F2->jit_exit == JSOP_NEXT)
+            CC_INC(call_jit_helper);
+        else
+            CC_INC(call_jit_native);
+    }
+    return entry;
 }
 
 /* After a direct call's compiled code stopped with r: finish the call (in
@@ -57228,6 +57280,9 @@ static void js_random_init(JSContextHandle ctx)
     struct timeval tv;
     gettimeofday(&tv, NULL);
     SAFE_SET(ctx, JSContextHandle, random_state, ((int64_t)tv.tv_sec * 1000000) + tv.tv_usec);
+    /* CYBER_DET_TIME: the same numbers every run. */
+    if (det_clock_on())
+        SAFE_SET(ctx, JSContextHandle, random_state, 0x2545F4914F6CDD1DLL);
     /* the state must be non zero */
     if (SAFE_GET_OR(ctx, JSContextHandle, random_state, 0) == 0)
         SAFE_SET(ctx, JSContextHandle, random_state, 1);
@@ -65360,11 +65415,10 @@ static GCValue get_date_string(JSContextHandle ctx, GCValue this_val,
 
 int64_t JS_time_offset_ms;
 
-/* OS dependent: return the UTC time in ms since 1970 (plus virtual time). */
+/* The UTC time in ms since 1970 (the page clock, det_clock.h), plus
+ * virtual time. */
 static int64_t date_now(void) {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (int64_t)tv.tv_sec * 1000 + (tv.tv_usec / 1000) + JS_time_offset_ms;
+    return (int64_t)page_clock_epoch_ms() + JS_time_offset_ms;
 }
 
 static GCValue js_date_constructor(JSContextHandle ctx, GCValue new_target,
