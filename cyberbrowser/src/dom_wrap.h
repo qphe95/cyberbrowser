@@ -55,6 +55,12 @@ void dom_wrap_init_runtime(JSRuntimeHandle rt);
 typedef GCValue (*DomWrapFactory)(JSContextHandle ctx, NodeId id);
 void dom_wrap_set_factory(DomWrapFactory f);
 
+/* The realm a document's nodes are wrapped in (a frame's document has its
+ * own); GC_HANDLE_NULL for the caller's.  A node gets its wrapper there
+ * whichever realm first touches it. */
+typedef JSContextHandle (*DomRealmOfDocument)(NodeId doc);
+void dom_wrap_set_realm_resolver(DomRealmOfDocument f);
+
 /* New DomWrap record (GC data) for `id`. */
 DomWrapHandle dom_wrap_new(NodeId id);
 /* Mark a DomWrap record and the references it holds. */

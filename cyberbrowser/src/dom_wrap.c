@@ -13,6 +13,9 @@ extern JSClassID js_video_class_id;
 extern JSClassID js_shadow_root_class_id;
 
 static DomWrapFactory g_factory;
+static DomRealmOfDocument g_realm_of;
+
+void dom_wrap_set_realm_resolver(DomRealmOfDocument f) { g_realm_of = f; }
 static JSContextHandle g_ctx;          /* the engine's context (one per process) */
 static uint32_t g_wrappers, g_tree_objects;
 
@@ -387,6 +390,11 @@ GCValue dom_js(JSContextHandle ctx, NodeId id) {
     if (!dom_valid(id)) return JS_NULL;
     uint32_t h = g_dom.wrapper[dom_slot(id)];
     if (h) return GC_MKHANDLE(JS_TAG_OBJECT, h);
+    if (g_realm_of) {
+        NodeId doc = dom_kind(id) == DOM_K_DOCUMENT ? id : dom_owner(id);
+        JSContextHandle realm = doc ? g_realm_of(doc) : GC_HANDLE_NULL;
+        if (SAFE_VALID(realm)) ctx = realm;
+    }
     g_ctx = ctx;
     if (!g_factory) return JS_NULL;
     GCValue obj = g_factory(ctx, id);

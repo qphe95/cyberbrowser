@@ -494,7 +494,23 @@ GCValue js_focus_event_get_relatedTarget(JSContextHandle ctx, GCValue this_val) 
 // EventTarget Implementation
 // ============================================================================
 
+/* The realm's DOM events (browser/dom_events.js) take over these entry
+ * points once installed: listeners and dispatch live there.  Returns false
+ * when they are not installed (the C versions below then run). */
+static bool event_target_forward(JSContextHandle ctx, const char *name, GCValue this_val,
+                                 int argc, GCValue *argv, GCValue *ret)
+{
+    GCValue et = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__cyberEventTarget");
+    if (!JS_IsObject(et)) return false;
+    GCValue fn = JS_GetPropertyStr(ctx, et, name);
+    if (!JS_IsFunction(ctx, fn)) return false;
+    *ret = JS_Call(ctx, fn, this_val, argc, argv);
+    return true;
+}
+
 GCValue js_event_target_addEventListener(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    GCValue fwd;
+    if (event_target_forward(ctx, "add", this_val, argc, argv, &fwd)) return fwd;
     // Store event handlers in an array per event type to support multiple listeners
     if (argc < 2) return JS_UNDEFINED;
     
@@ -522,6 +538,8 @@ GCValue js_event_target_addEventListener(JSContextHandle ctx, GCValue this_val, 
 }
 
 GCValue js_event_target_removeEventListener(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    GCValue fwd;
+    if (event_target_forward(ctx, "remove", this_val, argc, argv, &fwd)) return fwd;
     if (argc < 2) return JS_UNDEFINED;
     
     const char *event = JS_ToCString(ctx, argv[0]);
@@ -568,6 +586,12 @@ static void event_set_dispatch_field(JSContextHandle ctx, EventHandle ev, GCValu
 }
 
 GCValue js_event_target_dispatchEvent(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    GCValue fwd;
+    if (event_target_forward(ctx, "dispatch", this_val, argc, argv, &fwd)) {
+        /* (C callers fire and forget: an exception is reported, not passed on) */
+        if (JS_IsException(fwd)) { JS_GetException(ctx); return JS_FALSE; }
+        return fwd;
+    }
     if (argc < 1) return JS_FALSE;
     
     // Get event type from the event object

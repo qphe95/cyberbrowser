@@ -21,6 +21,7 @@ enum {
     TK_END,             /* "</...": src = '<', end = after the first '>' (or EOF) */
     TK_TEXT,            /* text run, collapsed and decoded */
     TK_RAW,             /* raw content of the preceding raw-text start tag */
+    TK_COMMENT,         /* comment (or bogus comment): text = its data */
     TK_MALFORMED,       /* "<" without a tag name, skipped */
 };
 enum { TKF_SELF_CLOSED = 1 };
@@ -342,21 +343,40 @@ static void tokenize(TokChunk *c, bool serial) {
     while (pos < len && pos < c->limit) {
         if (h[pos] == '<') {
             if (pos + 4 <= len && memcmp(h + pos, "<!--", 4) == 0) {
-                pos += 4;
-                for (;;) {
-                    const char *d = pos < len ? memchr(h + pos, '-', len - pos) : NULL;
-                    if (!d) { pos = len; break; }
-                    pos = (size_t)(d - h);
-                    if (pos + 3 <= len && d[1] == '-' && d[2] == '>') { pos += 3; break; }
-                    pos++;
+                /* A comment: its data runs to the next "-->" (as the legacy
+                 * parser's extent; HTML ends "<!-->" and "<!--->" at once). */
+                size_t from = pos, data = pos + 4, data_end;
+                {
+                    pos = data;
+                    for (;;) {
+                        const char *d = pos < len ? memchr(h + pos, '-', len - pos) : NULL;
+                        if (!d) { data_end = pos = len; break; }
+                        pos = (size_t)(d - h);
+                        if (pos + 3 <= len && d[1] == '-' && d[2] == '>') { data_end = pos; pos += 3; break; }
+                        pos++;
+                    }
                 }
+                DomTok *t = tok_push(c);
+                t->kind = TK_COMMENT;
+                t->src = (uint32_t)from;
+                t->end = (uint32_t)pos;
+                t->text = dom_arena_str(&c->arena, h + data, data_end - data);
                 continue;
             }
-            if (pos + 1 < len && h[pos + 1] == '!') {
-                /* Any other "<!...>" (a doctype past the start, CDATA, a
-                 * bogus comment) is dropped up to its '>' (HTML §13.2.5.42). */
+            if (pos + 1 < len && (h[pos + 1] == '!' || h[pos + 1] == '?')) {
+                /* Any other "<!...>" and "<?...>" is a bogus comment up to its
+                 * '>' (HTML §13.2.5.42; a doctype past the start is dropped). */
                 const char *gt = memchr(h + pos, '>', len - pos);
-                pos = gt ? (size_t)(gt - h) + 1 : len;
+                size_t from = pos, e = gt ? (size_t)(gt - h) : len;
+                pos = gt ? e + 1 : len;
+                size_t data = from + (h[from + 1] == '!' ? 2 : 1);
+                if (h[from + 1] == '!' && data + 7 <= len && strncasecmp(h + data, "doctype", 7) == 0)
+                    continue;
+                DomTok *t = tok_push(c);
+                t->kind = TK_COMMENT;
+                t->src = (uint32_t)from;
+                t->end = (uint32_t)pos;
+                t->text = dom_arena_str(&c->arena, h + data, e > data ? e - data : 0);
                 continue;
             }
             if (pos + 1 < len && h[pos + 1] == '/') {
@@ -391,7 +411,7 @@ static void chunk_release_tokens(TokChunk *c, size_t from) {
         if (t->kind == TK_START) {
             for (int a = 0; a < t->nattr; a++) dom_str_release(&t->attrs[a].value);
             dom_block_release(t->attr_blk);
-        } else if (t->kind == TK_TEXT || t->kind == TK_RAW) {
+        } else if (t->kind == TK_TEXT || t->kind == TK_RAW || t->kind == TK_COMMENT) {
             dom_str_release(&t->text);
         }
     }
@@ -690,6 +710,14 @@ static void build_text(Builder *b, DomTok *t, uint32_t parent, bool parent_fresh
     dom_link_append(dom_id_of(parent), dom_id_of(s));
 }
 
+static void build_comment(Builder *b, DomTok *t, uint32_t parent, bool parent_fresh) {
+    uint32_t s = dom_alloc_slot(DOM_K_COMMENT, dom_id_of(b->owner));
+    g_dom.text[s] = t->text;
+    t->text = (DomStr){ NULL, 0, 0 };
+    parent = stream_parent(b, parent, parent_fresh, s);
+    dom_link_append(dom_id_of(parent), dom_id_of(s));
+}
+
 /* Feed tokens [*i, n) of `c`.  Returns false when the builder needs the rest
  * of the input re-tokenized from *detour (a top-level end tag that the legacy
  * parser resumed from inside). */
@@ -740,6 +768,10 @@ static bool build_tokens(Builder *b, TokChunk *c, size_t *pi, size_t *detour) {
         case TK_TEXT:
             if (top) build_text(b, t, top, top_fresh);
             else if (b->keep_top_text) build_text(b, t, b->frag, false);
+            break;
+        case TK_COMMENT:
+            if (top) build_comment(b, t, top, top_fresh);
+            else if (b->keep_top_text) build_comment(b, t, b->frag, false);
             break;
         default:
             break;

@@ -25,6 +25,7 @@
 #include "frame_arena.h"
 #include "job_system.h"
 #include "gc_platform.h"
+#include "url_whatwg.h"
 
 #include <pthread.h>
 #include <string.h>
@@ -3430,6 +3431,10 @@ static bool styleset_base_of(uint64_t gen, uint64_t *base_gen, int *base_nrules)
 static char* layout_resolve_url(const char *base_url, const char *href) {
     if (!href || !href[0]) return NULL;
     if (url_has_scheme(href)) return strdup(href);
+    if (base_url && url_has_scheme(base_url)) {
+        char *abs = wurl_resolve(base_url, href);
+        if (abs) return abs;
+    }
     if (strncmp(href, "//", 2) == 0) {
         char buf[2048];
         snprintf(buf, sizeof(buf), "https:%s", href);
@@ -3514,12 +3519,16 @@ bool css_layout_stylesheet_cached(const char *url) {
     return false;
 }
 
-/* The base layout resolves sheet and image URLs against: the origin
- * (scheme + host + "/") of the page's start URL. */
+/* The base layout resolves sheet and image URLs against: the page's URL
+ * (its origin when the URL does not fit). */
 static void layout_origin_base(char *out, size_t cap)
 {
     extern const char *g_cyber_start_url;
     const char *src = (g_cyber_start_url && g_cyber_start_url[0]) ? g_cyber_start_url : "https://www.youtube.com/";
+    if (strlen(src) < cap) {
+        memcpy(out, src, strlen(src) + 1);
+        return;
+    }
     const char *scheme = strstr(src, "://");
     if (scheme) {
         const char *host = scheme + 3;
@@ -3536,6 +3545,19 @@ static void layout_origin_base(char *out, size_t cap)
         strncpy(out, src, cap - 1);
         out[cap - 1] = '\0';
     }
+}
+
+/* The location of the layout's realm, as its base URL (a frame's
+ * document resolves against its own page). */
+static void layout_realm_base(LayoutContext *ctx)
+{
+    if (!SAFE_VALID(ctx->js_ctx) || gc_handle_get_type(ctx->js_ctx) != JS_GC_OBJ_TYPE_JS_CONTEXT) return;
+    GCValue loc = JS_GetPropertyStr(ctx->js_ctx, JS_GetGlobalObject(ctx->js_ctx), "location");
+    GCValue href = JS_IsObject(loc) ? JS_GetPropertyStr(ctx->js_ctx, loc, "href") : JS_UNDEFINED;
+    if (!JS_IsString(href)) return;
+    const char *s = JS_ToCString(ctx->js_ctx, href);
+    if (s && url_has_scheme(s) && strncmp(s, "about:", 6) != 0 && strlen(s) < sizeof(ctx->base_url))
+        snprintf(ctx->base_url, sizeof(ctx->base_url), "%s", s);
 }
 
 /* Prefetched sheets not taken into the cache yet. */
@@ -11762,9 +11784,10 @@ again:
     g_unit_vw = viewport_width > 0.0 ? viewport_width : 1024.0;
     g_unit_vh = viewport_height > 0.0 ? viewport_height : 768.0;
     g_unit_rem = 16.0;
-    /* Base URL for resolving relative stylesheet/image URLs: the origin of
-     * the page's start URL (the historical default without one). */
+    /* Base URL for resolving relative stylesheet/image URLs: the URL of the
+     * document's realm (a frame's page has its own), else the start URL. */
     layout_origin_base(ctx->base_url, sizeof(ctx->base_url));
+    layout_realm_base(ctx);
     if (g_css_log < 0) { const char *e = getenv("CSS_LOG"); g_css_log = e ? atoi(e) : 0; }
     if (g_css_log > 0) fprintf(stderr, "[css] tree build + setup  %8.3f ms\n", layout_now_ms() - _run_t0);
     if (g_lph_on) lph_note("tree build + setup", layout_now_ms() - _run_t0 - lph_tree_prev);

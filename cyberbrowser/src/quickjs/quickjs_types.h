@@ -1351,6 +1351,7 @@ typedef struct JSLazyParseState {
     uint8_t has_arguments_binding;
     uint8_t has_this_binding;
     uint8_t is_func_expr;
+    uint8_t is_module;                  /* in a module (import.meta, top-level await rules) */
 
     /* Whole function text (for Function.prototype.toString), as an offset
      * into source_handle. */

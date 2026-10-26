@@ -181,7 +181,7 @@ static GCValue js_document_implementation_create_html_document(JSContextHandle c
     JS_SetPropertyStr(ctx, doc, "visibilityState", JS_NewString(ctx, "visible"));
 
     DEF_FUNC(ctx, doc, "createElement", js_document_create_element, 1);
-    DEF_FUNC(ctx, doc, "createElementNS", js_document_create_element, 2);
+    DEF_FUNC(ctx, doc, "createElementNS", js_document_create_element_ns, 2);
     DEF_FUNC(ctx, doc, "createTextNode", js_document_create_text_node, 1);
     DEF_FUNC(ctx, doc, "createComment", js_document_create_comment, 1);
     DEF_FUNC(ctx, doc, "createDocumentFragment", js_document_create_document_fragment, 0);
@@ -2550,7 +2550,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, document, "webkitExitFullscreen",
         JS_NewCFunction(ctx, js_dummy_function, "webkitExitFullscreen", 0));
     DEF_FUNC(ctx, document, "createElement", js_document_create_element, 1);
-    DEF_FUNC(ctx, document, "createElementNS", js_document_create_element, 2);
+    DEF_FUNC(ctx, document, "createElementNS", js_document_create_element_ns, 2);
     DEF_FUNC(ctx, document, "createTextNode", js_document_create_text_node, 1);
     DEF_FUNC(ctx, document, "createComment", js_document_create_comment, 1);
     DEF_FUNC(ctx, document, "createDocumentFragment", js_document_create_document_fragment, 0);
@@ -3595,13 +3595,11 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, window, "Range", range_ctor);
 
     // ===== Shadow DOM APIs =====
-    // We deliberately do NOT implement native shadow DOM.  The page's
-    // webcomponents-sd.js (ShadyDOM) polyfill owns shadow DOM: it installs its
-    // own Element.prototype.attachShadow, ShadowRoot implementation, and
-    // __shady_* tree bookkeeping.  We only expose a bare `ShadowRoot`
-    // constructor + prototype as a global so the polyfill's
-    // `instanceof ShadowRoot` checks and `b.__proto__ = ShadowRoot.prototype`
-    // assignments resolve against a real constructor object.
+    // Native shadow DOM: Element.prototype.attachShadow and ShadowRoot
+    // (browser/shadow_dom_api.c).  A page that forces the ShadyDOM polyfill
+    // (YouTube's inline config sets ShadyDOM={force:true}) still replaces
+    // attachShadow with its own and keeps its __shady_* bookkeeping; its
+    // `instanceof ShadowRoot` checks resolve against this constructor.
     {
         GCValue shadow_root_ctor = JS_NewCFunction2(ctx, js_dummy_function, "ShadowRoot",
             0, JS_CFUNC_constructor, 0);
@@ -3614,7 +3612,14 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
             GCValue df_proto = JS_IsObject(df_ctor) ? JS_GetPropertyStr(ctx, df_ctor, "prototype") : JS_UNDEFINED;
             if (JS_IsObject(df_proto)) JS_SetPrototype(ctx, shadow_root_proto, df_proto);
         }
+        JS_SetPropertyFunctionList(ctx, shadow_root_proto, js_shadow_root_native_funcs,
+                                   js_shadow_root_native_funcs_count);
         JS_SetPropertyStr(ctx, global, "ShadowRoot", shadow_root_ctor);
+        GCValue el_ctor = JS_GetPropertyStr(ctx, global, "Element");
+        GCValue el_proto = JS_IsObject(el_ctor) ? JS_GetPropertyStr(ctx, el_ctor, "prototype") : JS_UNDEFINED;
+        if (JS_IsObject(el_proto))
+            JS_SetPropertyStr(ctx, el_proto, "attachShadow",
+                JS_NewCFunction(ctx, js_element_attach_shadow, "attachShadow", 1));
     }
 
     // ===== Custom Elements API =====
@@ -4557,6 +4562,14 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     }
 
     LOG_INFO("Fetch/scheduler polyfill set");
+
+    /* Last, over what is above: the parts of the platform written in JS
+     * (browser/platform_api.c: node lists, User Timing, DOM events,
+     * messaging, form controls), <iframe> with realms of their own
+     * (browser/frame_api.c) and unhandledrejection (browser/timer_api.c). */
+    platform_api_install(ctx, global, global);
+    frame_api_install(ctx, global);
+    timer_install_rejection_tracker(JS_GetRuntime(ctx));
 }
 
 /*

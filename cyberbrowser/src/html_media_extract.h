@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include "quickjs.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -47,6 +48,7 @@ bool html_execute_page_scripts(const char *html, struct JsExecResult *out_result
  * reports as html_execute_page_scripts does. */
 typedef struct HtmlPageStream HtmlPageStream;
 HtmlPageStream *html_page_stream_begin(void);
+HtmlPageStream *html_page_stream_begin_frame(JSContextHandle ctx, const char *base_url);
 void html_page_stream_feed(HtmlPageStream *ps, const char *data, size_t len);
 bool html_page_stream_finish(HtmlPageStream *ps, struct JsExecResult *out_result);
 

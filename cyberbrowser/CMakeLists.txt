@@ -76,6 +76,8 @@ set(BE_SOURCES
     src/media/media_buffer.c
     src/svg_render.c
     src/browser/url_api.c
+    src/browser/platform_api.c
+    src/browser/frame_api.c
     src/browser/fetch_api.c
     src/browser/timer_api.c
     src/browser_api_impl.c

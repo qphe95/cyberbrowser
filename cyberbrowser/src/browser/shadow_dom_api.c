@@ -286,6 +286,18 @@ const JSCFunctionListEntry js_shadow_root_proto_funcs[] = {
 };
 const size_t js_shadow_root_proto_funcs_count = sizeof(js_shadow_root_proto_funcs) / sizeof(js_shadow_root_proto_funcs[0]);
 
+/* ShadowRoot.prototype's own members over DocumentFragment's (a native
+ * shadow root's tree is its store fragment: Node's members work on it). */
+const JSCFunctionListEntry js_shadow_root_native_funcs[] = {
+    JS_CGETSET_DEF("mode", js_shadow_root_get_mode, NULL),
+    JS_CGETSET_DEF("delegatesFocus", js_shadow_root_get_delegates_focus, NULL),
+    JS_CGETSET_DEF("slotAssignment", js_shadow_root_get_slot_assignment, NULL),
+    JS_CGETSET_DEF("innerHTML", js_shadow_root_get_innerHTML, js_shadow_root_set_innerHTML),
+    JS_CGETSET_DEF("adoptedStyleSheets", js_shadow_root_get_adopted_style_sheets, js_shadow_root_set_adopted_style_sheets),
+    JS_CGETSET_DEF("styleSheets", js_shadow_root_get_style_sheets, NULL),
+};
+const size_t js_shadow_root_native_funcs_count = sizeof(js_shadow_root_native_funcs) / sizeof(js_shadow_root_native_funcs[0]);
+
 // Spec-valid host local names for Element.prototype.attachShadow().
 // Custom element names (containing a hyphen) are always valid.
 static bool is_valid_shadow_host_local_name(const char *name) {
@@ -315,8 +327,6 @@ GCValue js_element_attach_shadow(JSContextHandle ctx, GCValue this_val, int argc
     }
 
     const char *tag_name = dom_node_name(host_node);
-    fprintf(stderr, "[ATTACH-SHADOW-ENTER] host=%s\n", tag_name);
-    fflush(stderr);
 
     GCValue existing_shadow = JS_GetPropertyStr(ctx, this_val, "__shadowRoot");
     if (!JS_IsUndefined(existing_shadow) && !JS_IsNull(existing_shadow) && JS_IsObject(existing_shadow)) {

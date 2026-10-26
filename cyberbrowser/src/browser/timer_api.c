@@ -58,6 +58,7 @@ typedef struct {
     unsigned long long trigger_time;  // Time when timer should fire (ms)
     unsigned long long interval;      // For intervals: repeat interval (ms)
     int active;                       // 1 if active, 0 if cleared
+    JSContextHandle realm;            // the realm that scheduled it (it runs there)
     
     // Callback storage - we store the function as a JS value
     // Since GCValue is a handle, we need to keep it alive
@@ -212,9 +213,8 @@ int find_free_timer_slot(void) {
 }
 
 // Add a new timer
-int add_timer(JSContextHandle ctx, TimerType type, GCValue callback, 
+int add_timer(JSContextHandle ctx, TimerType type, GCValue callback,
                      unsigned long long delay_ms, int arg_count, GCValue *args) {
-    (void)ctx;
     timer_state_ensure_initialized();
     pthread_mutex_lock(&g_timer_state.mutex);
     
@@ -234,6 +234,7 @@ int add_timer(JSContextHandle ctx, TimerType type, GCValue callback,
     timer->trigger_time = page_time_ms() + delay_ms;
     timer->interval = (type == TIMER_TYPE_INTERVAL) ? delay_ms : 0;
     timer->active = 1;
+    timer->realm = ctx;
     
     // Store callback
     int cb_handle = store_callback(ctx, callback);
@@ -293,6 +294,21 @@ int clear_timer_by_id(int id) {
     }
     pthread_mutex_unlock(&g_timer_state.mutex);
     return 0;
+}
+
+/* Clear every timer a realm scheduled (a frame's, when it goes away). */
+void timer_cancel_realm(JSContextHandle realm) {
+    timer_state_ensure_initialized();
+    pthread_mutex_lock(&g_timer_state.mutex);
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        Timer *t = &g_timer_state.timers[i];
+        if (t->active && t->realm == realm) {
+            unregister_timer_roots(t);
+            t->active = 0;
+            g_timer_state.timer_count--;
+        }
+    }
+    pthread_mutex_unlock(&g_timer_state.mutex);
 }
 
 // Find the next timer that should fire, returns its ID or 0 if none
@@ -429,6 +445,8 @@ void execute_timer(JSContextHandle ctx, int id) {
         pthread_mutex_unlock(&g_timer_state.mutex);
         return;
     }
+    /* (it runs in its realm: `this` is that window) */
+    if (SAFE_VALID(timer->realm)) ctx = timer->realm;
     
     // Get callback and args while holding lock
     GCValue callback = get_callback(timer->callback_handle);
@@ -549,11 +567,81 @@ void execute_timer(JSContextHandle ctx, int id) {
 
 // Process all due timers - called from interrupt handler
 // Returns 1 if any timers were processed
+/* Promises rejected with no handler (HTML 8.1.7.3, "about-to-be-notified
+ * rejected promises"), by the realm that rejected them: after a microtask
+ * checkpoint, those still unhandled fire unhandledrejection at their
+ * realm's window, and are reported unless that is canceled. */
+#define MAX_REJECTIONS 256
+static struct { GCValue promise; JSContextHandle realm; } g_rejections[MAX_REJECTIONS];
+static int g_rejection_count;
+
+static void promise_rejection_tracker(JSContextHandle ctx, GCValue promise, GCValue reason,
+                                      JS_BOOL is_handled, void *opaque) {
+    (void)reason; (void)opaque;
+    if (!is_handled) {
+        if (g_rejection_count >= MAX_REJECTIONS || !JS_IsObject(promise)) return;
+        gc_add_root(GC_VALUE_GET_HANDLE(promise));
+        g_rejections[g_rejection_count].promise = promise;
+        g_rejections[g_rejection_count].realm = ctx;
+        g_rejection_count++;
+        return;
+    }
+    for (int i = 0; i < g_rejection_count; i++) {
+        if (GC_VALUE_GET_HANDLE(g_rejections[i].promise) != GC_VALUE_GET_HANDLE(promise)) continue;
+        gc_remove_root(GC_VALUE_GET_HANDLE(promise));
+        g_rejections[i] = g_rejections[--g_rejection_count];
+        return;
+    }
+}
+
+void timer_install_rejection_tracker(JSRuntimeHandle rt) {
+    JS_SetHostPromiseRejectionTracker(rt, promise_rejection_tracker, NULL);
+}
+
+static void notify_rejections(void) {
+    while (g_rejection_count > 0) {
+        GCValue promise = g_rejections[0].promise;
+        JSContextHandle realm = g_rejections[0].realm;
+        g_rejections[0] = g_rejections[--g_rejection_count];
+        GCValue reason = JS_PromiseResult(realm, promise);
+        GCValue global = JS_GetGlobalObject(realm);
+        GCValue ctor = JS_GetPropertyStr(realm, global, "PromiseRejectionEvent");
+        bool canceled = false;
+        if (JS_IsFunction(realm, ctor)) {
+            GCValue init = JS_NewObject(realm);
+            JS_SetPropertyStr(realm, init, "cancelable", JS_TRUE);
+            JS_SetPropertyStr(realm, init, "promise", promise);
+            JS_SetPropertyStr(realm, init, "reason", reason);
+            GCValue args[2] = { JS_NewString(realm, "unhandledrejection"), init };
+            GCValue ev = JS_CallConstructor(realm, ctor, 2, args);
+            if (JS_IsObject(ev)) {
+                GCValue r = js_event_target_dispatchEvent(realm, global, 1, &ev);
+                canceled = JS_IsBool(r) && !JS_ToBool(realm, r);
+            } else {
+                JS_GetException(realm);
+            }
+        }
+        if (!canceled) {
+            const char *m = JS_ToCString(realm, reason);
+            GCValue st = JS_IsObject(reason) ? JS_GetPropertyStr(realm, reason, "stack") : JS_UNDEFINED;
+            const char *s = JS_IsString(st) ? JS_ToCString(realm, st) : NULL;
+            platform_log(LOG_LEVEL_WARN, "console", "Uncaught (in promise) %s%s%s", m ? m : "?",
+                         s ? "\n" : "", s ? s : "");
+            if (!m) JS_GetException(realm);
+        }
+        gc_remove_root(GC_VALUE_GET_HANDLE(promise));
+    }
+}
+
 void timer_microtask_checkpoint(JSContextHandle ctx) {
     CP_ACC("microtask checkpoint");
     JSRuntimeHandle rt = JS_GetRuntime(ctx);
     JSContextHandle pctx = GC_HANDLE_NULL;
     for (int guard = 0; guard < 100000 && JS_ExecutePendingJob(rt, &pctx) > 0; guard++) {}
+    if (g_rejection_count) {
+        notify_rejections();
+        for (int guard = 0; guard < 100000 && JS_ExecutePendingJob(rt, &pctx) > 0; guard++) {}
+    }
 }
 
 int timer_process_due(JSContextHandle ctx) {
@@ -569,6 +657,8 @@ int timer_process_due(JSContextHandle ctx) {
     /* Media tasks (MSE update events, playback events) too. */
     processed += media_tick(ctx);
     if (processed) timer_microtask_checkpoint(ctx);
+    /* Frame navigations (browser/frame_api.c): a frame's page loads. */
+    if (frame_api_process()) { processed++; timer_microtask_checkpoint(ctx); }
     
     // Process up to 10 timers per call to avoid blocking too long
     for (int i = 0; i < 10; i++) {
@@ -577,6 +667,8 @@ int timer_process_due(JSContextHandle ctx) {
         
         execute_timer(ctx, due_id);
         processed++;
+        /* each timer is a task: the microtasks it queued run before the next */
+        timer_microtask_checkpoint(ctx);
     }
 
     /* A rendering opportunity: intersection observers see layout changes. */
@@ -586,6 +678,7 @@ int timer_process_due(JSContextHandle ctx) {
 
 // Check if any timer is pending (for interrupt handler)
 int timer_has_pending(void) {
+    if (frame_api_pending()) return 1;
     pthread_mutex_lock(&g_timer_state.mutex);
     
     unsigned long long now = page_time_ms();

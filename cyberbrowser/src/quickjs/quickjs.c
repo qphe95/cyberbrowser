@@ -10481,20 +10481,20 @@ static GCValue JS_GetPropertyValue(JSContextHandle ctx, GCValue this_obj,
     slow_path:
         /* ToObject() must be done before ToPropertyKey() */
         if (JS_IsNull(this_obj) || JS_IsUndefined(this_obj)) {
-            GCValue prop_str_val = JS_ToString(ctx, prop);
-            const char *prop_str = JS_IsException(prop_str_val) ? NULL : JS_ToCString(ctx, prop_str_val);
-            snprintf(g_last_undefined_prop, sizeof(g_last_undefined_prop), "%s", prop_str ? prop_str : "?");
-            fprintf(stderr, "[QJS DEBUG] prop='%s' of %s\n", prop_str ? prop_str : "?", JS_IsNull(this_obj) ? "null" : "undefined");
-            JS_ThrowTypeError(ctx, "cannot read property of %s", JS_IsNull(this_obj) ? "null" : "undefined");
-            GCValue exc = JS_GetException(ctx);
-            GCValue stack_val = JS_GetPropertyStr(ctx, exc, "stack");
-            if (!JS_IsUndefined(stack_val) && !JS_IsNull(stack_val)) {
-                const char *stack = JS_ToCString(ctx, stack_val);
-                if (stack) {
-                    fprintf(stderr, "[QJS DEBUG] stack:\n%s\n", stack);
-                }
+            /* (the key is named only when it is a number or a string:
+             * converting anything else could run code or throw) */
+            const char *what = JS_IsNull(this_obj) ? "null" : "undefined";
+            if (JS_VALUE_GET_TAG(prop) == JS_TAG_INT) {
+                snprintf(g_last_undefined_prop, sizeof(g_last_undefined_prop), "%d", JS_VALUE_GET_INT(prop));
+                return JS_ThrowTypeError(ctx, "cannot read property '%d' of %s", JS_VALUE_GET_INT(prop), what);
             }
-            return JS_EXCEPTION;
+            if (JS_IsString(prop)) {
+                const char *ps = JS_ToCString(ctx, prop);
+                snprintf(g_last_undefined_prop, sizeof(g_last_undefined_prop), "%s", ps ? ps : "?");
+                return JS_ThrowTypeError(ctx, "cannot read property '%s' of %s", g_last_undefined_prop, what);
+            }
+            snprintf(g_last_undefined_prop, sizeof(g_last_undefined_prop), "?");
+            return JS_ThrowTypeError(ctx, "cannot read property of %s", what);
         }
         if (unlikely(JS_VALUE_GET_TAG(prop) == JS_TAG_STRING && !js_string_value_is_sane(ctx, prop)))
             return JS_ThrowInternalError(ctx, "invalid string property key");
@@ -30971,7 +30971,37 @@ static int seal_template_obj(JSContextHandle ctx, GCValue obj)
     return 0;
 }
 
+/* A tagged template's parts as they are parsed: they go into the
+ * function's tmpl_strs together at the end, since templates nested in its
+ * substitutions add theirs in between. */
+typedef struct TemplateParts {
+    CStr *v;            /* cooked, raw pairs */
+    int n, cap;
+    int template_idx;
+} TemplateParts;
+
+static int js_parse_template1(JSParseState *s, int call, int *argc, TemplateParts *tp);
+
 static __exception int js_parse_template(JSParseState *s, int call, int *argc)
+{
+    TemplateParts tp = { NULL, 0, 0, -1 };
+    int ret = js_parse_template1(s, call, argc, &tp);
+    if (ret == 0 && call && tp.template_idx >= 0) {
+        JSFunctionDef *tfd = s->cur_func_handle;
+        PVEC_AT(tfd->cpool_handle, CConst, tp.template_idx).first = tfd->tmpl_strs.count / 2;
+        for (int i = 0; i < tp.n; i++) {
+            if (!pvec_push(&tfd->tmpl_strs, sizeof(CStr), &tp.v[i])) {
+                cenv_throw_oom(s->env);
+                ret = -1;
+                break;
+            }
+        }
+    }
+    js_plain_free(tp.v);
+    return ret;
+}
+
+static int js_parse_template1(JSParseState *s, int call, int *argc, TemplateParts *tp)
 {
     JSContextHandle ctx = s->ctx;
     JSToken cooked = { .u.str.str = GC_UNDEFINED_INIT };
@@ -30981,10 +31011,10 @@ static __exception int js_parse_template(JSParseState *s, int call, int *argc)
     if (call) {
         /* The template object (an array of cooked strings with an array of
            raw ones as its raw property) is made by js_create_function from
-           the parts recorded here. */
-        CConst cc = { .kind = CC_TEMPLATE,
-                      .first = (s->cur_func_handle)->tmpl_strs.count / 2 };
+           the parts recorded here (first is set when they are added). */
+        CConst cc = { .kind = CC_TEMPLATE, .first = 0 };
         template_idx = cpool_add_cconst(s, &cc);
+        tp->template_idx = template_idx;
         if (template_idx < 0)
             return -1;
         emit_op(s, OP_push_const);
@@ -31007,11 +31037,18 @@ static __exception int js_parse_template(JSParseState *s, int call, int *argc)
             }
             pair[0] = cooked.u.str.cstr;
             tfd = (s->cur_func_handle);
-            if (!pvec_push(&tfd->tmpl_strs, sizeof(CStr), &pair[0]) ||
-                !pvec_push(&tfd->tmpl_strs, sizeof(CStr), &pair[1])) {
-                cenv_throw_oom(s->env);
-                return -1;
+            if (tp->n + 2 > tp->cap) {
+                int cap = tp->cap ? tp->cap * 2 : 8;
+                CStr *v = js_plain_realloc(tp->v, sizeof(CStr) * cap);
+                if (!v) {
+                    cenv_throw_oom(s->env);
+                    return -1;
+                }
+                tp->v = v;
+                tp->cap = cap;
             }
+            tp->v[tp->n++] = pair[0];
+            tp->v[tp->n++] = pair[1];
             PVEC_AT(tfd->cpool_handle, CConst, template_idx).n++;
         } else {
             JSStringHandle str = GC_HANDLE_NULL;
@@ -32054,7 +32091,14 @@ static int js_lazy_scan_body(JSParseState *s, JSLazyNameSet *names,
                 case 'i':
                     if (lz_kw(start, len, "if")) { last = LZ_KW_CTRL; continue; }
                     if (lz_kw(start, len, "in") || lz_kw(start, len, "instanceof") ||
-                        lz_kw(start, len, "import")) { last = LZ_KW_EXPR; continue; }
+                        lz_kw(start, len, "import")) {
+                        /* 'for (var x in a, b)': what follows 'in' is an
+                         * expression, whose commas declare nothing */
+                        if (decl_level == level && start[1] == 'n' && len == 2)
+                            decl_level = -1;
+                        last = LZ_KW_EXPR;
+                        continue;
+                    }
                     break;
                 case 'l':
                     if (lz_kw(start, len, "let")) {
@@ -32495,6 +32539,7 @@ static int js_lazy_try_skip_body(JSParseState *s, JSFunctionDef *fd,
     st->has_arguments_binding = fd->has_arguments_binding;
     st->has_this_binding = fd->has_this_binding;
     st->is_func_expr = fd->is_func_expr;
+    st->is_module = s->is_module;
     st->source_total_len = s->buf_end - s->buf_start;
     st->struct_index = s->struct_index;
     st->func_source_offset = func_start - s->buf_start;
@@ -37410,12 +37455,36 @@ static void js_mark_module_def(JSRuntimeHandle rt, JSModuleDefHandle m,
     int i;
     if (!SAFE_VALID(m)) return;
 
+    /* The arrays' storage and the other modules this one refers to (the
+     * entry arrays were never marked: a collection freed them under a
+     * module still in use). */
+    {
+        GCHandle hs[] = {
+            js_module_req_module_entries(m)->handle, js_module_export_entries(m)->handle,
+            js_module_star_export_entries(m)->handle, js_module_import_entries(m)->handle,
+            SAFE_GET_OR(m, JSModuleDefHandle, async_parent_modules_handle, GC_HANDLE_NULL),
+            SAFE_GET_OR(m, JSModuleDefHandle, cycle_root_handle, GC_HANDLE_NULL),
+            SAFE_GET_OR(m, JSModuleDefHandle, stack_prev_handle, GC_HANDLE_NULL),
+        };
+        for (i = 0; i < (int)(sizeof(hs) / sizeof(hs[0])); i++)
+            if (hs[i] != GC_HANDLE_NULL) mark_func(rt, hs[i]);
+        GCHandle parents = SAFE_GET_OR(m, JSModuleDefHandle, async_parent_modules_handle, GC_HANDLE_NULL);
+        if (parents != GC_HANDLE_NULL) {
+            int np = gc_clamp_count(SAFE_GET_OR(m, JSModuleDefHandle, async_parent_modules_count, 0),
+                                    gc_slots(parents, 0, sizeof(GCHandle)));
+            GCHandle *ph = (GCHandle *)gc_deref(parents);
+            for (i = 0; ph && i < np; i++)
+                if (ph[i] != GC_HANDLE_NULL) mark_func(rt, ph[i]);
+        }
+    }
+
     /* Mark GC references in req_module_entries (GC-managed array via GCDataArray) */
     int nreq = gc_clamp_count(js_module_req_module_entries_count(m),
                               gc_slots(js_module_req_module_entries(m)->handle, 0, sizeof(JSReqModuleEntry)));
     for(i = 0; i < nreq; i++) {
         JSReqModuleEntry *rme = &GC_DATA_ARRAY_AT((*js_module_req_module_entries(m)), JSReqModuleEntry, i);
         JS_MarkValue(rt, rme->attributes, mark_func);
+        if (rme->module_handle != GC_HANDLE_NULL) mark_func(rt, rme->module_handle);
     }
     
     /* Mark GC references in export_entries (GC-managed array via GCDataArray) */
@@ -37997,12 +38066,15 @@ typedef enum {
 typedef struct ExportedNameEntry {
     JSAtom export_name;
     ExportedNameEntryEnum export_type;
-    union {
-        JSExportEntry *me; /* using when the list is built - self pointer, not GC object */
-        GCHandle var_ref_handle; /* EXPORTED_NAME_NORMAL - handle to JSVarRef */
-    } u;
+    /* while the list is built: the index of the module's own local export,
+     * or -1 when it needs resolving (an index, as the entries array may
+     * move) */
+    int me_idx;
+    GCHandle var_ref_handle; /* EXPORTED_NAME_NORMAL - handle to JSVarRef */
 } ExportedNameEntry;
 
+/* The state's arrays are plain memory (grown by plain_array_grow, freed by
+ * export_names_free). */
 typedef struct GetExportNamesState {
     JSModuleDefHandle *modules;
     int modules_size;
@@ -38023,6 +38095,25 @@ static int find_exported_name(GetExportNamesState *s, JSAtom name)
     return -1;
 }
 
+static int plain_array_grow(void **parray, int elem_size, int *psize, int req)
+{
+    if (req <= *psize)
+        return 0;
+    int n = max_int(req, *psize * 3 / 2 + 4);
+    void *a = js_plain_realloc(*parray, (size_t)n * elem_size);
+    if (!a)
+        return -1;
+    *parray = a;
+    *psize = n;
+    return 0;
+}
+
+static void export_names_free(GetExportNamesState *s)
+{
+    js_plain_free(s->modules);
+    js_plain_free(s->exported_names);
+}
+
 static __exception int get_exported_names(JSContextHandle ctx,
                                           GetExportNamesState *s,
                                           JSModuleDefHandle m, BOOL from_star)
@@ -38036,10 +38127,12 @@ static __exception int get_exported_names(JSContextHandle ctx,
         if (s->modules[i] == m)
             return 0;
     }
-    if (js_resize_array(ctx, (GCHandle *)&s->modules, sizeof(s->modules[0]),
-                        &s->modules_size, s->modules_count + 1))
+    if (plain_array_grow((void **)&s->modules, sizeof(s->modules[0]),
+                          &s->modules_size, s->modules_count + 1)) {
+        JS_ThrowOutOfMemory(ctx);
         return -1;
-    GC_SET(s->modules[s->modules_count++], m);
+    }
+    s->modules[s->modules_count++] = m;
 
     for(i = 0; i < js_module_export_entries_count(m); i++) {
         JSExportEntry *me = &GC_DATA_ARRAY_PTR((*js_module_export_entries(m)), JSExportEntry)[i];
@@ -38047,20 +38140,23 @@ static __exception int get_exported_names(JSContextHandle ctx,
             continue;
         j = find_exported_name(s, me->export_name);
         if (j < 0) {
-            if (js_resize_array(ctx, (GCHandle *)&s->exported_names, sizeof(s->exported_names[0]),
-                                &s->exported_names_size,
-                                s->exported_names_count + 1))
+            if (plain_array_grow((void **)&s->exported_names, sizeof(s->exported_names[0]),
+                                  &s->exported_names_size,
+                                  s->exported_names_count + 1)) {
+                JS_ThrowOutOfMemory(ctx);
                 return -1;
+            }
             en = &s->exported_names[s->exported_names_count++];
+            memset(en, 0, sizeof(*en));
             en->export_name = me->export_name;
             /* avoid a second lookup for simple module exports */
             if (from_star || me->export_type != JS_EXPORT_TYPE_LOCAL)
-                en->u.me = NULL;
+                en->me_idx = -1;
             else
-                en->u.me = me;
+                en->me_idx = i;
         } else {
             en = &s->exported_names[j];
-            en->u.me = NULL;
+            en->me_idx = -1;
         }
     }
     for(i = 0; i < js_module_star_export_entries_count(m); i++) {
@@ -38155,7 +38251,6 @@ static GCValue js_build_module_ns(JSContextHandle ctx, JSModuleDefHandle m)
 
     memset(s, 0, sizeof(*s));
     ret = get_exported_names(ctx, s, m, FALSE);
-    /* GC frees automatically */;
     if (ret)
         goto fail;
 
@@ -38166,8 +38261,9 @@ static GCValue js_build_module_ns(JSContextHandle ctx, JSModuleDefHandle m)
         JSExportEntry *res_me;
         JSModuleDefHandle res_m = GC_HANDLE_NULL;
 
-        if (en->u.me) {
-            res_me = en->u.me; /* fast case: no resolution needed */
+        if (en->me_idx >= 0) {
+            /* fast case: no resolution needed */
+            res_me = &GC_DATA_ARRAY_PTR((*js_module_export_entries(m)), JSExportEntry)[en->me_idx];
             res_m = m;
             res = JS_RESOLVE_RES_FOUND;
         } else {
@@ -38187,13 +38283,13 @@ static GCValue js_build_module_ns(JSContextHandle ctx, JSModuleDefHandle m)
                 JSModuleDefHandle res_mod = res_m;
                 if (!SAFE_VALID(res_mod)) goto fail;
                 if (res_me->u.local.var_ref_handle != GC_HANDLE_NULL) {
-                    GC_SET(en->u.var_ref_handle, res_me->u.local.var_ref_handle);
+                    en->var_ref_handle = res_me->u.local.var_ref_handle;
                 } else {
                     JSObjectHandle p1 = JS_VALUE_GET_OBJ(SAFE_GET_OR(res_mod, JSModuleDefHandle, func_obj, GC_UNDEFINED));
                     GCHandle var_refs_handle = SAFE_GET_OR(p1, JSObjectHandle, u.func.var_refs_handle, GC_HANDLE_NULL);
-                    GC_SET(en->u.var_ref_handle, gc_handle_array_get(var_refs_handle, res_me->u.local.var_idx));
+                    en->var_ref_handle = gc_handle_array_get(var_refs_handle, res_me->u.local.var_idx);
                 }
-                if (en->u.var_ref_handle == GC_HANDLE_NULL)
+                if (en->var_ref_handle == GC_HANDLE_NULL)
                     en->export_type = EXPORTED_NAME_DELAYED;
                 else
                     en->export_type = EXPORTED_NAME_NORMAL;
@@ -38210,7 +38306,7 @@ static GCValue js_build_module_ns(JSContextHandle ctx, JSModuleDefHandle m)
         switch(en->export_type) {
         case EXPORTED_NAME_NORMAL:
             {
-                JSVarRefHandle var_ref = (JSVarRefHandle)(en->u.var_ref_handle);
+                JSVarRefHandle var_ref = (JSVarRefHandle)(en->var_ref_handle);
                 pr = add_property(ctx, p, en->export_name,
                                   JS_PROP_ENUMERABLE | JS_PROP_WRITABLE |
                                   JS_PROP_VARREF);
@@ -38272,7 +38368,7 @@ static GCValue js_build_module_ns(JSContextHandle ctx, JSModuleDefHandle m)
         }
     }
 
-    /* GC frees automatically */;
+    export_names_free(s);
 
     JS_DefinePropertyValue(ctx, obj, JS_ATOM_Symbol_toStringTag,
                            JS_AtomToString(ctx, JS_ATOM_Module),
@@ -38281,8 +38377,7 @@ static GCValue js_build_module_ns(JSContextHandle ctx, JSModuleDefHandle m)
     SAFE_SET(p, JSObjectHandle, extensible, FALSE);
     return obj;
  fail:
-    /* GC frees automatically */;
-    
+    export_names_free(s);
     return JS_EXCEPTION;
 }
 
@@ -38983,7 +39078,7 @@ static void js_set_module_evaluated(JSContextHandle ctx, JSModuleDefHandle m)
 }
 
 typedef struct {
-    JSModuleDefHandle *tab;
+    JSModuleDefHandle *tab;     /* plain memory */
     int count;
     int size;
 } ExecModuleList;
@@ -39021,10 +39116,11 @@ static int gather_available_ancestors(JSContextHandle ctx, JSModuleDefHandle mod
             assert(SAFE_GET_OR(m, JSModuleDefHandle, pending_async_dependencies, 0) > 0);
             SAFE_SET(m, JSModuleDefHandle, pending_async_dependencies, SAFE_GET_OR(m, JSModuleDefHandle, pending_async_dependencies, 0) - 1);
             if (SAFE_GET_OR(m, JSModuleDefHandle, pending_async_dependencies, 0) == 0) {
-                if (js_resize_array(ctx, (GCHandle *)&exec_list->tab, sizeof(exec_list->tab[0]), &exec_list->size, exec_list->count + 1)) {
+                if (plain_array_grow((void **)&exec_list->tab, sizeof(exec_list->tab[0]), &exec_list->size, exec_list->count + 1)) {
+                    JS_ThrowOutOfMemory(ctx);
                     return -1;
                 }
-                GC_SET(exec_list->tab[exec_list->count++], m);
+                exec_list->tab[exec_list->count++] = m;
                 if (!SAFE_GET_OR(m, JSModuleDefHandle, has_tla, FALSE)) {
                     if (gather_available_ancestors(ctx, m, exec_list))
                         return -1;
@@ -39126,7 +39222,7 @@ static GCValue js_async_module_execution_fulfilled(JSContextHandle ctx, GCValue 
     exec_list->size = 0;
 
     if (gather_available_ancestors(ctx, module, exec_list) < 0) {
-        /* GC frees automatically */;
+        js_plain_free(exec_list->tab);
         return JS_EXCEPTION;
     }
 
@@ -39158,7 +39254,7 @@ static GCValue js_async_module_execution_fulfilled(JSContextHandle ctx, GCValue 
             }
         }
     }
-    /* GC frees automatically */;
+    js_plain_free(exec_list->tab);
     return JS_UNDEFINED;
 }
 
@@ -39342,7 +39438,7 @@ static int js_inner_module_evaluation(JSContextHandle ctx, JSModuleDefHandle m,
    modules. Return a promise or an exception. */
 static GCValue js_evaluate_module(JSContextHandle ctx, JSModuleDefHandle m)
 {
-    JSModuleDefHandle m1 = GC_HANDLE_NULL, *stack_top;
+    JSModuleDefHandle m1 = GC_HANDLE_NULL, stack_top = GC_HANDLE_NULL;
     GCValue ret_val = GC_UNDEFINED, result = GC_UNDEFINED;
 
 #ifdef DUMP_MODULE_EXEC
@@ -39365,17 +39461,16 @@ static GCValue js_evaluate_module(JSContextHandle ctx, JSModuleDefHandle m)
     js_module_set_resolving_func(m, 0, resolving_funcs[0]);
     js_module_set_resolving_func(m, 1, resolving_funcs[1]);
 
-    stack_top = NULL;
-    if (js_inner_module_evaluation(ctx, m, 0, stack_top, &result) < 0) {
-        while (stack_top != NULL) {
-            m1 = *stack_top;
+    if (js_inner_module_evaluation(ctx, m, 0, &stack_top, &result) < 0) {
+        while (!SAFE_IS_NULL(stack_top)) {
+            m1 = stack_top;
             JSModuleDefHandle m1_ptr = m1;
             assert(SAFE_GET_OR(m1_ptr, JSModuleDefHandle, status, JS_MODULE_STATUS_UNLINKED) == JS_MODULE_STATUS_EVALUATING);
             SAFE_SET(m1_ptr, JSModuleDefHandle, status, JS_MODULE_STATUS_EVALUATED);
             SAFE_SET(m1_ptr, JSModuleDefHandle, eval_has_exception, TRUE);
             SAFE_SET_VALUE(m1_ptr, JSModuleDefHandle, eval_exception, result);
             SAFE_SET_HANDLE(m1_ptr, JSModuleDefHandle, cycle_root_handle, SAFE_HANDLE(m)); /* spec bug: should be present */
-            stack_top = (JSModuleDefHandle *)(uintptr_t)SAFE_GET_OR(m1_ptr, JSModuleDefHandle, stack_prev_handle, GC_HANDLE_NULL);
+            stack_top = (JSModuleDefHandle)(SAFE_GET_OR(m1_ptr, JSModuleDefHandle, stack_prev_handle, GC_HANDLE_NULL));
         }
         
         assert(SAFE_GET_OR(m, JSModuleDefHandle, status, JS_MODULE_STATUS_UNLINKED) == JS_MODULE_STATUS_EVALUATED);
@@ -39399,7 +39494,7 @@ static GCValue js_evaluate_module(JSContextHandle ctx, JSModuleDefHandle m)
                               1, (GCValue *)&value);
             
         }
-        assert(stack_top == NULL);
+        assert(SAFE_IS_NULL(stack_top));
     }
     return SAFE_GET_OR(m, JSModuleDefHandle, promise, GC_UNDEFINED);
 }
@@ -41448,8 +41543,10 @@ static int resolve_scope_var(JSContextHandle ctx, JSFunctionDef *s,
             var_idx = find_var(ctx, fd, var_name);
             if (var_idx >= 0)
                 break;
-            /* Check for global 'var' declarations that need to be captured */
-            if (fd->is_global_var && fd->global_var_count > 0) {
+            /* Check for global 'var' declarations that need to be captured
+             * (a script's: a module's are its closure variables, found
+             * below) */
+            if (fd->is_global_var && fd->global_var_count > 0 && !SAFE_VALID(fd->module)) {
                 JSGlobalVar *hf = find_global_var(fd, var_name);
                 if (hf) {
                     /* Create a closure variable for this global var */
@@ -46201,7 +46298,8 @@ static GCHandle js_lazy_compile(JSContextHandle ctx, JSFunctionBytecodeHandle st
     line_col_cache_init(&s->get_line_col_cache, s->buf_start, s->buf_end, s->buf_ptr,
                         state->line_num, state->col_num);
     s->struct_index = state->struct_index;
-    s->allow_html_comments = TRUE;
+    s->is_module = state->is_module;
+    s->allow_html_comments = !state->is_module;
     s->enable_lazy_parsing = TRUE;
     if (strict)
         s->js_mode = JS_MODE_STRICT;
@@ -47213,7 +47311,8 @@ static int lazy_unit_compile(LazyUnit *u)
     line_col_cache_init(&s->get_line_col_cache, s->buf_start, s->buf_end, s->buf_ptr,
                         state->line_num, state->col_num);
     s->struct_index = state->struct_index;
-    s->allow_html_comments = TRUE;
+    s->is_module = state->is_module;
+    s->allow_html_comments = !state->is_module;
     s->enable_lazy_parsing = TRUE;
     if (strict)
         s->js_mode = JS_MODE_STRICT;

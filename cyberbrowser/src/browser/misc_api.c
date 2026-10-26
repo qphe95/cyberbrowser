@@ -19,6 +19,9 @@
 #include "platform.h"
 #include "det_clock.h"
 #include "layout_api.h"
+#include "dom_js.h"
+#include "dom_wrap.h"
+#include "dom_store.h"
 
 /* CYBER_CE_LOG=1: per-element custom-element diagnostics (define, upgrade,
  * every callback that throws). */
@@ -673,6 +676,26 @@ GCValue js_html_element_constructor(JSContextHandle ctx, GCValue new_target, int
     GCValue proto = JS_GetPropertyStr(ctx, new_target, "prototype");
     if (!JS_IsException(proto) && JS_IsObject(proto)) {
         JS_SetPrototype(ctx, obj, proto);
+    }
+    /* `new Ctor()` for a defined custom element: the element itself, in the
+     * realm's document (HTML 4.13.4, "HTML element constructors") */
+    if (JS_IsFunction(ctx, new_target)) {
+        /* (own: a subclass of a defined class is not that definition) */
+        GCValue name_v = JS_GetPropertyStr(ctx, new_target, "__cyber_ce_name");
+        GCValue parent = JS_GetPrototype(ctx, new_target);
+        GCValue inherited = JS_IsObject(parent) ? JS_GetPropertyStr(ctx, parent, "__cyber_ce_name") : JS_UNDEFINED;
+        if (JS_IsString(inherited) && JS_StrictEq(ctx, inherited, name_v)) name_v = JS_UNDEFINED;
+        size_t nlen = 0;
+        const char *name = JS_IsString(name_v) ? JS_ToCStringLen(ctx, &nlen, name_v) : NULL;
+        GCValue doc = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document");
+        NodeId owner = dom_node_of(doc);
+        if (name && nlen && owner) {
+            NodeId el = dom_create_element_str(name, nlen, owner);
+            if (el) {
+                dom_bind(ctx, el, obj);
+                dom_element_setup_wrapper(ctx, el, obj);
+            }
+        }
     }
     return obj;
 }
@@ -1543,6 +1566,11 @@ GCValue js_custom_elements_define(JSContextHandle ctx, GCValue this_val, int arg
     
     // Store in registry (the this_val should be the customElements object)
     JS_SetPropertyStr(ctx, this_val, name, argv[1]);
+    /* and the name on the constructor, for `new Ctor()` (the definition
+     * whose constructor is new.target; HTML 4.13.4 "HTML element constructors") */
+    if (JS_IsFunction(ctx, argv[1]))
+        JS_DefinePropertyValueStr(ctx, argv[1], "__cyber_ce_name", JS_NewString(ctx, name),
+                                  JS_PROP_CONFIGURABLE);
 
     // Enqueue upgrade reactions for any existing elements of this tag name.
     // The spec pushes a CEReactions stack frame while define() runs and flushes
@@ -3991,6 +4019,16 @@ DEF_DOM_RECT_SETTER(height, height)
 
 #undef DEF_DOM_RECT_SETTER
 
+/* DOMRectReadOnly.toJSON (Geometry 2): the eight values as an object. */
+static GCValue js_dom_rect_to_json(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    static const char *const keys[] = { "x", "y", "width", "height", "top", "right", "bottom", "left" };
+    GCValue o = JS_NewObject(ctx);
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
+        JS_SetPropertyStr(ctx, o, keys[i], JS_GetPropertyStr(ctx, this_val, keys[i]));
+    return o;
+}
+
 const JSCFunctionListEntry js_dom_rect_proto_funcs[] = {
     JS_CGETSET_DEF("x", js_dom_rect_get_x, js_dom_rect_set_x),
     JS_CGETSET_DEF("y", js_dom_rect_get_y, js_dom_rect_set_y),
@@ -4000,7 +4038,7 @@ const JSCFunctionListEntry js_dom_rect_proto_funcs[] = {
     JS_CGETSET_DEF("right", js_dom_rect_get_right, NULL),
     JS_CGETSET_DEF("bottom", js_dom_rect_get_bottom, NULL),
     JS_CGETSET_DEF("left", js_dom_rect_get_left, NULL),
-    JS_CFUNC_DEF("toJSON", 0, js_empty_string),
+    JS_CFUNC_DEF("toJSON", 0, js_dom_rect_to_json),
 };
 const size_t js_dom_rect_proto_funcs_count = sizeof(js_dom_rect_proto_funcs) / sizeof(js_dom_rect_proto_funcs[0]);
 
@@ -4013,7 +4051,7 @@ const JSCFunctionListEntry js_dom_rect_read_only_proto_funcs[] = {
     JS_CGETSET_DEF("right", js_dom_rect_get_right, NULL),
     JS_CGETSET_DEF("bottom", js_dom_rect_get_bottom, NULL),
     JS_CGETSET_DEF("left", js_dom_rect_get_left, NULL),
-    JS_CFUNC_DEF("toJSON", 0, js_empty_string),
+    JS_CFUNC_DEF("toJSON", 0, js_dom_rect_to_json),
 };
 const size_t js_dom_rect_read_only_proto_funcs_count = sizeof(js_dom_rect_read_only_proto_funcs) / sizeof(js_dom_rect_read_only_proto_funcs[0]);
 

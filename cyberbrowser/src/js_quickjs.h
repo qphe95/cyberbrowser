@@ -121,8 +121,16 @@ void js_quickjs_dispatch_lifecycle_events(void);
  * entry, then the timers and jobs it leaves due); `index` and `count` name it
  * in logs; `pump` false for a script run inside another one (written by
  * document.write), where the microtask checkpoint waits for the outer one.
- * Returns whether it completed without an exception. */
-bool js_quickjs_exec_script(const char *script, size_t script_len, int index, int count, bool pump);
+ * `module_url` non-NULL runs it as an ES module of that URL (its imports
+ * resolve against it).  It runs in ctx (a frame's realm; NULL for the
+ * page's).  Returns whether it completed without an exception. */
+/* A page module (url names it, import.meta.url too): compiled, linked and
+ * evaluated; its evaluation promise, or JS_EXCEPTION. */
+GCValue js_quickjs_eval_module(JSContextHandle ctx, const char *src, size_t len, const char *url, int flags);
+void js_quickjs_set_module_url(JSContextHandle ctx, JSModuleDefHandle m, const char *url);
+
+bool js_quickjs_exec_script(JSContextHandle ctx, const char *script, size_t script_len, int index,
+                            int count, bool pump, const char *module_url);
 
 bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
                              int script_count, const char *html,

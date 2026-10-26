@@ -2464,15 +2464,16 @@ GCValue css_new_style_object(JSContextHandle ctx, GCValue el) {
 }
 
 // Document and Element stubs with createElement support
+/* document.createElementNS(namespace, qualifiedName): the element named
+ * qualifiedName (the namespace is not kept). */
+GCValue js_document_create_element_ns(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    if (argc < 2) return JS_ThrowTypeError(ctx, "createElementNS requires 2 arguments");
+    return js_document_create_element(ctx, this_val, 1, &argv[1]);
+}
+
+/* document.createElement(localName, options): options ({is}) is ignored. */
 GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    // Handle createElementNS which passes (namespace, tagName)
-    const char *tag = NULL;
-    if (argc == 1) {
-        tag = JS_ToCString(ctx, argv[0]);
-    } else if (argc >= 2) {
-        // For createElementNS, argv[0] is namespace, argv[1] is tagName
-        tag = JS_ToCString(ctx, argv[1]);
-    }
+    const char *tag = argc >= 1 ? JS_ToCString(ctx, argv[0]) : NULL;
     
     GCValue elem = JS_NULL;
     
@@ -2914,7 +2915,6 @@ void js_quickjs_dispatch_lifecycle_events(void) {
         "document.readyState = 'interactive';"
         "var dcl = new Event('DOMContentLoaded', { bubbles: true });"
         "document.dispatchEvent(dcl);"
-        "window.dispatchEvent(dcl);"
         "document.readyState = 'complete';"
         "var loadEvt = new Event('load');"
         "window.dispatchEvent(loadEvt);"
@@ -3062,11 +3062,30 @@ static int js_exec_timeout_handler(JSRuntimeHandle rt, void *opaque) {
     return elapsed > state->limit_seconds ? 1 : 0;
 }
 
+/* A module of the page: compiled, import.meta.url set to its URL, then
+ * linked and evaluated (its imports load through the module loader).
+ * Returns its evaluation promise, or JS_EXCEPTION. */
+GCValue js_quickjs_eval_module(JSContextHandle ctx, const char *src, size_t len, const char *url, int flags)
+{
+    GCValue mv = JS_Eval(ctx, src, len, url, JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY | flags);
+    if (JS_IsException(mv)) return mv;
+    js_quickjs_set_module_url(ctx, JS_VALUE_GET_MODULE_HANDLE(mv), url);
+    return JS_EvalFunction(ctx, mv);
+}
+
+void js_quickjs_set_module_url(JSContextHandle ctx, JSModuleDefHandle m, const char *url)
+{
+    GCValue meta = JS_GetImportMeta(ctx, m);
+    if (JS_IsObject(meta)) JS_SetPropertyStr(ctx, meta, "url", JS_NewString(ctx, url));
+    else if (JS_IsException(meta)) JS_GetException(ctx);
+}
+
 /* Run one page script (classic, global): the timeout, the profile entry and
  * the timers and jobs it leaves due, as for every script of a page.  `i` and
  * `script_count` name it in logs.  Returns whether it completed. */
-bool js_quickjs_exec_script(const char *script, size_t script_len, int i, int script_count, bool pump) {
-    JSContextHandle ctx = g_js_context;
+bool js_quickjs_exec_script(JSContextHandle ctx, const char *script, size_t script_len, int i,
+                            int script_count, bool pump, const char *module_url) {
+    if (!SAFE_VALID(ctx)) ctx = g_js_context;
     bool ok = false;
     const size_t MAX_EXEC_SCRIPT_SIZE = 64 * 1024 * 1024; /* 64 MiB safety limit */
     if (!script || script_len == 0) {
@@ -3132,7 +3151,7 @@ bool js_quickjs_exec_script(const char *script, size_t script_len, int i, int sc
     // bindings, not fresh ones: the closure bug that once forced eager
     // compiling, test_lazy_conformance_suite's ce-shim-flags.)  CYBER_LAZY=0
     // compiles every function up front.
-    int eval_flags = JS_EVAL_TYPE_GLOBAL;
+    int eval_flags = module_url ? JS_EVAL_TYPE_MODULE : JS_EVAL_TYPE_GLOBAL;
     {
         const char *lz = cyber_getenv("CYBER_LAZY");
         if (lz && lz[0] == '0') eval_flags |= JS_EVAL_FLAG_NO_LAZY;
@@ -3141,7 +3160,9 @@ bool js_quickjs_exec_script(const char *script, size_t script_len, int i, int sc
     snprintf(evname, sizeof(evname), "eval-script-%d (%zu KB)",
              i, script_len / 1024);
     CP_BEGIN_CAT(evname, "js");
-    GCValue result = JS_Eval(ctx, script, script_len, filename, eval_flags);
+    GCValue result = module_url
+        ? js_quickjs_eval_module(ctx, script, script_len, module_url, eval_flags & ~JS_EVAL_TYPE_MODULE)
+        : JS_Eval(ctx, script, script_len, filename, eval_flags);
     CP_END(evname);
 
     // Clear the interrupt handler so later operations (pumping timers, GC)
@@ -3167,6 +3188,14 @@ bool js_quickjs_exec_script(const char *script, size_t script_len, int i, int sc
     if (pump) {
         CP_SCOPE("pump-after-script");
         js_quickjs_pump_timers_and_jobs();
+    }
+    /* A module's evaluation is a promise: an error anywhere in its graph
+     * rejects it, reported as a classic script's exception is. */
+    if (module_url && ok && JS_IsObject(result) &&
+        JS_PromiseState(ctx, result) == JS_PROMISE_REJECTED) {
+        JS_Throw(ctx, JS_PromiseResult(ctx, result));
+        js_quickjs_log_exception(ctx, "js_quickjs", "[EXEC] Module threw exception: %s", true);
+        ok = false;
     }
 
     // NOTE: we intentionally do NOT restore/clobber Node.prototype mutation
@@ -3276,7 +3305,7 @@ bool js_quickjs_exec_scripts(const char **scripts, const size_t *script_lens,
     fflush(stderr);
 
     for (int i = 0; i < script_count; i++) {
-        if (js_quickjs_exec_script(scripts[i], script_lens[i], i, script_count, true)) success_count++;
+        if (js_quickjs_exec_script(g_js_context, scripts[i], script_lens[i], i, script_count, true, NULL)) success_count++;
     }
 
     js_quickjs_pump_timers_and_jobs();

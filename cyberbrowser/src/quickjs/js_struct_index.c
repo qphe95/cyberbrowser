@@ -725,7 +725,14 @@ static bool scan(Scan *s)
                 case 'i':
                     if (kw(start, len, "if")) { last = LZ_KW_CTRL; continue; }
                     if (kw(start, len, "in") || kw(start, len, "instanceof") ||
-                        kw(start, len, "import")) { last = LZ_KW_EXPR; continue; }
+                        kw(start, len, "import")) {
+                        /* 'for (var x in a, b)': what follows 'in' is an
+                         * expression, whose commas declare nothing */
+                        if (len == 2 && cx->decl_level == s->level)
+                            cx->decl_level = -1;
+                        last = LZ_KW_EXPR;
+                        continue;
+                    }
                     break;
                 case 'l':
                     if (kw(start, len, "let") && body_level) {

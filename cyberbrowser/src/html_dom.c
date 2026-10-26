@@ -356,11 +356,50 @@ static void move_children(NodeId from, NodeId to, bool skip_head_body) {
     }
 }
 
+/* The top-level nodes of markup that has no html, head or body element
+ * (HTML 13.2.6.4.1-6): the leading metadata elements go into the head,
+ * everything from the first other content on into the body. */
+static void imply_head_and_body(NodeId frag, NodeId head, NodeId body) {
+    static const char *const metadata[] = {
+        "base", "link", "meta", "noscript", "script", "style", "template", "title", NULL
+    };
+    bool in_head = true;
+    NodeId c = dom_first_child(frag);
+    while (c) {
+        NodeId next = dom_next_sibling(c);
+        NodeId to = body;
+        if (in_head) {
+            int k = dom_kind(c);
+            if (k == DOM_K_ELEMENT) {
+                const char *t = dom_tag_name(c);
+                bool meta = false;
+                for (int i = 0; metadata[i] && !meta; i++) meta = strcmp(t, metadata[i]) == 0;
+                if (meta) to = head;
+                else in_head = false;
+            } else if (k == DOM_K_TEXT) {
+                uint32_t n = 0;
+                const char *s = dom_text(c, &n);
+                bool blank = true;
+                for (uint32_t i = 0; s && i < n && blank; i++)
+                    blank = s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r' || s[i] == '\f';
+                if (blank) { c = next; continue; }     /* (dropped, as the parser does) */
+                in_head = false;
+            } else {
+                to = head;
+            }
+        }
+        dom_detach(c, false);
+        dom_attach(to, c, DOM_NULL);
+        c = next;
+    }
+}
+
 /* Populate document `js_doc` from a parsed fragment: NEW documentElement,
  * head and body (copies of the parsed ones, as the legacy DOM did), the
  * parsed head and body children moved under them, and the root's other
- * children after them.  Properties of the old skeleton are transferred. */
-static bool populate_from_fragment(JSContextHandle ctx, GCValue js_doc, NodeId frag) {
+ * children after them.  Properties of the old skeleton are transferred.
+ * `page`: it is the page's document (the DOM index follows its root). */
+static bool populate_from_fragment(JSContextHandle ctx, GCValue js_doc, NodeId frag, bool page) {
     NodeId doc = dom_node_of(js_doc);
     if (dom_kind(doc) != DOM_K_DOCUMENT) return false;
     DomParseRoots roots = dom_parse_roots(frag);
@@ -368,14 +407,18 @@ static bool populate_from_fragment(JSContextHandle ctx, GCValue js_doc, NodeId f
     GCValue old_body_element = JS_GetPropertyStr(ctx, js_doc, "body");
     GCValue old_head_element = JS_GetPropertyStr(ctx, js_doc, "head");
 
-    NodeId de = shallow_copy(roots.root, "html", doc);
+    /* (markup without an <html> element, "<li>..</li>", is still a whole
+     * document: html, head and body are implied around it) */
+    bool has_html = roots.root && strcmp(dom_tag_name(roots.root), "html") == 0;
+    NodeId de = shallow_copy(has_html ? roots.root : DOM_NULL, "html", doc);
     NodeId head = shallow_copy(roots.head, "head", doc);
     NodeId body = shallow_copy(roots.body, "body", doc);
     if (roots.head) move_children(roots.head, head, false);
     if (roots.body) move_children(roots.body, body, false);
     dom_attach(de, head, DOM_NULL);
     dom_attach(de, body, DOM_NULL);
-    if (roots.root) move_children(roots.root, de, true);
+    if (has_html) move_children(roots.root, de, true);
+    else if (!roots.head && !roots.body) imply_head_and_body(frag, head, body);
     dom_adopt_template_contents(de);
 
     GCValue new_doc_element = dom_js(ctx, de);
@@ -406,7 +449,8 @@ static bool populate_from_fragment(JSContextHandle ctx, GCValue js_doc, NodeId f
     JS_SetPropertyStr(ctx, js_doc, "body", new_body_element);
     JS_SetPropertyStr(ctx, new_doc_element, "head", new_head_element);
     JS_SetPropertyStr(ctx, new_doc_element, "body", new_body_element);
-    g_dom_index_root = de;
+    /* (the page's root only: not a DOMParser document's) */
+    if (page) g_dom_index_root = de;
     dom_request_layout();
     return true;
 }
@@ -415,7 +459,7 @@ bool html_populate_js_document_from_html(JSContextHandle ctx, GCValue js_doc, co
     if (!SAFE_VALID(ctx) || !html || !len) return false;
     NodeId doc = owner_doc_of(js_doc);
     NodeId frag = dom_parse_html(html, len, doc);
-    bool ok = populate_from_fragment(ctx, js_doc, frag);
+    bool ok = populate_from_fragment(ctx, js_doc, frag, true);
     dom_free_subtree(frag);
     LOG_INFO("JS document populated from HTML (%zu bytes, %u nodes in store)", len, g_dom.live);
     return ok;
@@ -487,7 +531,8 @@ static void stream_note_root_elements(HtmlDocStream *s) {
         dom_node_set_owner_document(ctx, e, s->js_doc);
         html_transfer_element_properties(ctx, e, s->old_de);
         JS_SetPropertyStr(ctx, s->js_doc, "documentElement", e);
-        g_dom_index_root = s->de;
+        /* (the page's root only: a frame's document has its own) */
+        if (s->doc == g_dom_document) g_dom_index_root = s->de;
     }
     if (!s->de) return;
     if (!s->head && (s->head = first_child_tagged(s->de, "head"))) {
@@ -598,7 +643,7 @@ bool html_populate_js_document(JSContextHandle ctx, GCValue js_doc, HtmlDocument
     if (!SAFE_VALID(ctx) || !doc) return false;
     if (JS_IsUndefined(js_doc) || JS_IsNull(js_doc)) return false;
     NodeId frag = fragment_from_html_document(doc, owner_doc_of(js_doc));
-    bool ok = populate_from_fragment(ctx, js_doc, frag);
+    bool ok = populate_from_fragment(ctx, js_doc, frag, true);
     dom_free_subtree(frag);
     return ok;
 }
@@ -634,7 +679,7 @@ static GCValue new_js_document(JSContextHandle ctx) {
 GCValue dom_new_parsed_document(JSContextHandle ctx, const char *html, size_t len) {
     GCValue js_doc = new_js_document(ctx);
     NodeId frag = dom_parse_html(html, len, dom_node_of(js_doc));
-    populate_from_fragment(ctx, js_doc, frag);
+    populate_from_fragment(ctx, js_doc, frag, false);
     dom_free_subtree(frag);
     return js_doc;
 }
@@ -644,7 +689,7 @@ GCValue html_create_js_document(JSContextHandle ctx, HtmlDocument *doc) {
     if (!SAFE_VALID(ctx) || !doc) return JS_NULL;
     GCValue js_doc = new_js_document(ctx);
     NodeId frag = fragment_from_html_document(doc, dom_node_of(js_doc));
-    populate_from_fragment(ctx, js_doc, frag);
+    populate_from_fragment(ctx, js_doc, frag, true);
     dom_free_subtree(frag);
     return js_doc;
 }

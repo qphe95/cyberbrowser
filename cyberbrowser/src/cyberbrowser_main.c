@@ -44,6 +44,7 @@
 #include "session_state.h"
 #include "html_media_extract.h"
 #include "dom_fetch.h"
+#include "url_whatwg.h"
 
 int timer_process_due(JSContextHandle ctx);
 int scheduler_process_tasks(JSContextHandle ctx);
@@ -77,6 +78,13 @@ static char *cyber_module_resolve(const char *base, const char *specifier)
 
     /* Absolute URL (http://, https://, or any scheme:) — use as-is. */
     if (url_has_scheme(specifier)) return strdup(specifier);
+
+    /* "./x", "../x" and "/x" resolve against the importing module's URL. */
+    if (specifier[0] == '.' || (specifier[0] == '/' && specifier[1] != '/')) {
+        const char *b = (base && url_has_scheme(base)) ? base : g_cyber_start_url;
+        char *abs = b ? wurl_resolve(b, specifier) : NULL;
+        if (abs) return abs;
+    }
 
     /* Determine the origin from the base URL. */
     char origin[512] = "";
@@ -174,10 +182,12 @@ static JSModuleDefHandle cyber_module_loader(JSContextHandle ctx, const char *mo
         platform_log(LOG_LEVEL_INFO, "module_loader", "Dumped module to %s url=%s", dump_name, url);
     }
 
-    /* Compile the source as a module.  JS_Eval with JS_EVAL_TYPE_MODULE parses
-     * and registers the module, returning a JS_TAG_MODULE value whose handle
-     * we extract and return. */
-    GCValue mv = JS_Eval(ctx, buffer.data, buffer.size, url, JS_EVAL_TYPE_MODULE);
+    /* Compile the source as a module (only: the importer links and evaluates
+     * the whole graph).  JS_Eval registers it and returns a JS_TAG_MODULE
+     * value whose handle we extract and return. */
+    GCValue mv = JS_Eval(ctx, buffer.data, buffer.size, url,
+                         JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY |
+                         (cyber_getenv("CYBER_LAZY") && cyber_getenv("CYBER_LAZY")[0] == '0' ? JS_EVAL_FLAG_NO_LAZY : 0));
     free(buffer.data);
     if (JS_IsException(mv)) {
         GCValue exc = JS_GetException(ctx);
@@ -190,6 +200,7 @@ static JSModuleDefHandle cyber_module_loader(JSContextHandle ctx, const char *mo
     }
 
     JSModuleDefHandle m = JS_VALUE_GET_MODULE_HANDLE(mv);
+    if (SAFE_VALID(m)) js_quickjs_set_module_url(ctx, m, url);
     if (!SAFE_VALID(m)) {
         platform_log(LOG_LEVEL_WARN, "module_loader", "Module %s did not produce a def", url);
         JS_ThrowReferenceError(ctx, "module '%s' produced no definition", url);
@@ -630,7 +641,6 @@ static void dispatch_page_lifecycle_events(JSContextHandle ctx) {
         "document.readyState = 'interactive';"
         "var dcl = new Event('DOMContentLoaded', { bubbles: true });"
         "document.dispatchEvent(dcl);"
-        "window.dispatchEvent(dcl);"
         "document.readyState = 'complete';"
         "var loadEvt = new Event('load');"
         "window.dispatchEvent(loadEvt);"
@@ -1833,10 +1843,25 @@ int main(int argc, char *argv[]) {
     /* The quiet window is page time: virtual time can cross it. */
     unsigned long long last_change_ms = page_time_ms();
     unsigned long long settle_start_page = last_change_ms;
+    /* CYBER_RUN_UNTIL=<global>: a page that runs on its own for long (a
+     * benchmark) keeps the loop going, with no turn limit and no quiet
+     * window, until that global of the page is truthy (or the settle
+     * budget runs out). */
+    const char *run_until = cyber_getenv("CYBER_RUN_UNTIL");
+    if (run_until && !*run_until) run_until = NULL;
     CP_BEGIN("quiescence-loop");
     tl_mark("quiescence start");
-    while (loop_iterations < 100) {
+    while (loop_iterations < 100 || run_until) {
         loop_iterations++;
+        if (run_until) {
+            GCValue g = JS_GetGlobalObject(g_ctx);
+            GCValue v = JS_GetPropertyStr(g_ctx, g, run_until);
+            if (JS_ToBool(g_ctx, v)) {
+                printf("%s set after %d iterations (%llu ms real).\n", run_until, loop_iterations,
+                       platform_get_time_ms() - settle_start_ms);
+                break;
+            }
+        }
 
         bool had_timers = false;
         bool had_images = false;
@@ -1883,7 +1908,9 @@ int main(int argc, char *argv[]) {
 
         if (!had_timers && !had_images && !g_dom_needs_layout &&
             !image_cache_has_pending(image_cache) && js_quickjs_network_pending() == 0) {
-            break;
+            if (!run_until)
+                break;
+            platform_sleep_ms(1);   /* idle until a timer is due */
         }
         {
             unsigned long long now = page_time_ms();
@@ -1902,7 +1929,7 @@ int main(int argc, char *argv[]) {
             if (stamp != last_stamp || had_images || js_quickjs_network_pending() > 0) {
                 last_stamp = stamp;
                 last_change_ms = now;
-            } else if (quiet_ms && !g_dom_needs_layout && now - last_change_ms >= quiet_ms) {
+            } else if (quiet_ms && !run_until && !g_dom_needs_layout && now - last_change_ms >= quiet_ms) {
                 printf("Page quiet for %llu ms after %d iterations (%llu ms page time, %llu ms real); "
                        "pending timers left running.\n",
                        now - last_change_ms, loop_iterations, now - settle_start_page,

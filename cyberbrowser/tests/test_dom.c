@@ -140,7 +140,7 @@ static const char *const FRAGS[] = {
     "text", " ", "  \n\t ", "\r\n", "x y  z", "<x-foo a=1 b=\"2\" c='3' d>", "</x-foo>", "<a b=c/d>",
     "<a b=\"unterminated", "<a b='q'x>", "<a =x>", "<a / b>",
     "<html>", "</html>", "<head>", "</head>", "<body>", "</body>", "<li>", "<ul>", "</ul>",
-    "<table><tr><td>", "</td></tr></table>", "<?xml v?>", "<!x>", "</x <y>",
+    "<table><tr><td>", "</td></tr></table>", "<!y>", "<!x>", "</x <y>",
     "<A HREF=Q>", "</A>", "<DIV CLASS=Z>", "</Div>", "\v", "\f", "<a\vb=1>", "<svg viewBox=\"0 0 1 1\">",
     "</svg>", "<input value=\"a>b\">", "</li >", "</ div>",
 };
@@ -256,6 +256,32 @@ TEST(test_dom_parse_drops_markup_declarations) {
     free(d);
     ok = ok && same_as_legacy(html, strlen(html), "markup declarations");
     return ok;
+}
+
+/* Comments are nodes (they were dropped); so are bogus comments, "<?...>"
+ * and "<!x>" (HTML 13.2.5.42-44; the legacy parser made "<?xml>" an
+ * element, which is why the fuzz cases have none). */
+TEST(test_dom_parse_keeps_comments) {
+    const char *html = "<p>a<!--c1-->b<?pi x?>c<!---->d<!x>e</p>";
+    NodeId frag = dom_parse_html(html, strlen(html), DOM_NULL);
+    NodeId p = dom_first_child(frag);
+    static const struct { int kind; const char *data; } want[] = {
+        { DOM_K_TEXT, "a" }, { DOM_K_COMMENT, "c1" }, { DOM_K_TEXT, "b" }, { DOM_K_COMMENT, "?pi x?" },
+        { DOM_K_TEXT, "c" }, { DOM_K_COMMENT, "" }, { DOM_K_TEXT, "d" }, { DOM_K_COMMENT, "x" },
+        { DOM_K_TEXT, "e" },
+    };
+    bool ok = dom_kind(p) == DOM_K_ELEMENT;
+    NodeId c = ok ? dom_first_child(p) : DOM_NULL;
+    for (size_t i = 0; ok && i < sizeof want / sizeof want[0]; i++, c = dom_next_sibling(c)) {
+        uint32_t n = 0;
+        const char *s = dom_text(c, &n);
+        ok = dom_kind(c) == want[i].kind && n == strlen(want[i].data) && (!n || memcmp(s, want[i].data, n) == 0);
+        if (!ok) printf("    child %zu: kind %d '%.*s'\n", i, dom_kind(c), (int)n, s ? s : "");
+    }
+    ok = ok && !c;
+    dom_free_subtree(frag);
+    ASSERT_TRUE(ok);
+    return true;
 }
 
 TEST(test_dom_parse_matches_legacy_fuzz) {
@@ -1412,6 +1438,7 @@ void run_dom_tests(void) {
     RUN_TEST(test_dom_parse_matches_legacy_fixtures);
     RUN_TEST(test_dom_parse_matches_legacy_fuzz);
     RUN_TEST(test_dom_parse_drops_markup_declarations);
+    RUN_TEST(test_dom_parse_keeps_comments);
     RUN_TEST(test_dom_parse_text_white_space_and_entities);
     RUN_TEST(test_dom_parse_chunked_same_tree);
     RUN_TEST(test_dom_parse_no_length_limits);

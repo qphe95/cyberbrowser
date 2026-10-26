@@ -317,6 +317,10 @@ static char* dl_resolve_url(const char *base_url, const char *href)
     if (!href || !href[0]) return NULL;
     if (url_has_scheme(href))
         return strdup(href);
+    if (base_url && url_has_scheme(base_url)) {
+        char *abs = wurl_resolve(base_url, href);
+        if (abs) return abs;
+    }
     if (strncmp(href, "//", 2) == 0) {
         char buf[2048];
         snprintf(buf, sizeof(buf), "https:%s", href);

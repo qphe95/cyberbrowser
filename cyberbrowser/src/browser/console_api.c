@@ -547,6 +547,39 @@ static void js_computed_style_inherit(JSContextHandle ctx, GCValue style, DomWra
     }
 }
 
+/* The used width (or height) of the style's element, in px, or the
+ * declared value when it has no block-level box. */
+static GCValue js_computed_style_get_used(JSContextHandle ctx, GCValue style, bool height) {
+    GCValue element = JS_GetPropertyStr(ctx, style, "__cyber_el");
+    GCValue declared = JS_GetPropertyStr(ctx, style, height ? "__cyber_h" : "__cyber_w");
+    LayoutQueryBox b;
+    if (!JS_IsObject(element) || !layout_query_element_box(ctx, element, &b) || b.inline_level)
+        return JS_IsString(declared) ? declared : JS_NewString(ctx, "auto");
+    const char *bs = JS_ToCString(ctx, JS_GetPropertyStr(ctx, style, "boxSizing"));
+    double v = height ? b.height : b.width;
+    if (!(bs && strcmp(bs, "border-box") == 0)) {
+        const char *pads[2] = { height ? "paddingTop" : "paddingLeft", height ? "paddingBottom" : "paddingRight" };
+        for (int i = 0; i < 2; i++) {
+            const char *p = JS_ToCString(ctx, JS_GetPropertyStr(ctx, style, pads[i]));
+            if (p && strstr(p, "px")) v -= atof(p);
+        }
+        v -= height ? b.border_top + b.border_bottom : b.border_left + b.border_right;
+    }
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%gpx", v > 0 ? v : 0);
+    return JS_NewString(ctx, buf);
+}
+
+static GCValue js_computed_style_get_used_width(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    return js_computed_style_get_used(ctx, this_val, false);
+}
+
+static GCValue js_computed_style_get_used_height(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    return js_computed_style_get_used(ctx, this_val, true);
+}
+
 // getComputedStyle - reads from the per-element computed-style table and
 // falls back to sensible defaults so scripts can safely call .replace() etc.
 GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
@@ -701,6 +734,24 @@ GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, G
                 snprintf(buf, sizeof(buf), "%gpx", px);
                 JS_SetPropertyStr(ctx, style, "fontSize", JS_NewString(ctx, buf));
                 JS_SetPropertyStr(ctx, style, "font-size", JS_NewString(ctx, buf));
+            }
+        }
+        /* width and height resolve to their used values in px for a rendered
+         * box (CSSOM 9, "resolved value"): what scripts measure layout by.
+         * Read through accessors, so only a script that reads them lays out. */
+        if (!has_pseudo) {
+            JS_DefinePropertyValueStr(ctx, style, "__cyber_el", element, JS_PROP_CONFIGURABLE);
+            static const struct { const char *name; JSCFunction *get; } used[] = {
+                { "width", js_computed_style_get_used_width }, { "height", js_computed_style_get_used_height },
+            };
+            for (int i = 0; i < 2; i++) {
+                JS_DefinePropertyValueStr(ctx, style, i ? "__cyber_h" : "__cyber_w",
+                                          JS_GetPropertyStr(ctx, style, used[i].name), JS_PROP_CONFIGURABLE);
+                JSAtom a = JS_NewAtom(ctx, used[i].name);
+                JS_DeleteProperty(ctx, style, a, 0);
+                JS_DefinePropertyGetSet(ctx, style, a, JS_NewCFunction(ctx, used[i].get, used[i].name, 0),
+                                        JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+                JS_FreeAtom(ctx, a);
             }
         }
         /* The answer may have forced a layout: stamp it after. */

@@ -1,6 +1,6 @@
 # Faster JavaScript after the baseline JIT
 
-Status: N0–N3 done; N4 onward revised after the steady-state benchmarks (section 4.3).
+Status: N0–N3 done; N4 onward revised after the steady-state benchmarks (section 4.4); measured on Speedometer since (section 4.3).
 Follows `JIT_DESIGN.md` (T1 and the first inline caches, M2 and part of M4) and builds on the
 handle-free references of `GC_PAUSELESS_DESIGN.md`. It changes the order of the remaining work:
 engine representation and runtime paths first, then feedback shared by all tiers, then a
@@ -20,7 +20,7 @@ allocation are already cheap. V8's speed comes mostly from those, and from feedb
 every tier and used by the next one), not from its baseline compiler.
 
 The steady-state benchmarks (JetStream's Octane, Web Tooling Benchmark and other plain-JS
-tests; section 4.3) confirm it on code that runs long enough for any JIT to pay. Against the
+tests; section 4.4) confirm it on code that runs long enough for any JIT to pay. Against the
 interpreter, T1 is 30–36% faster on tight numeric loops (crypto, navier-stokes,
 gaussian-blur), up to 23% slower on code built from objects, calls, class fields, Proxy and
 BigInts, and −0.4% over all 62 tests. Its first iteration is about as fast as its steady
@@ -52,7 +52,7 @@ So the recommendation is:
    unboxed in registers across blocks and loops, and exits to the interpreter at the current
    bytecode when a guard fails. Because frames are interpreter-compatible, that exit is a
    deoptimization that needs no separate machinery. The block-local first stage of the
-   previous plan is dropped: the wins measured in 4.3 are in loops, which a block-local tier
+   previous plan is dropped: the wins measured in 4.4 are in loops, which a block-local tier
    cannot keep in registers. Loop entry (on-stack replacement), then inlining and escape
    analysis, follow on measurement. The end state is the interpreter and T2, with T1 kept
    only if it measures a gain between them.
@@ -156,7 +156,7 @@ Together, the rows before T2 are the bulk of a plausible 20–30% of the JS-heav
 time. None of them is a compiler. On pages dominated by DOM and layout, such as the Wikipedia
 article (72% DOM and layout), the gain is proportionally smaller. The page loads are mostly
 code that runs once, so they bound what any compiler can gain on loads; the steady-state
-benchmarks (4.3) are where a compiler shows what it can do, and both are measured for each
+benchmark (Speedometer, 4.3) is where a compiler shows what it can do, and both are measured for each
 milestone from N4 on.
 
 ## 4. Measuring (N0)
@@ -296,36 +296,138 @@ Two measurement artifacts were found and removed this way: the JIT's map for the
 (formatted with `printf` per instruction, 2% of a profile) and, on some runs, a deadlock in the
 sampler, which grew its buffer while the main thread was suspended.
 
-### 4.3 Steady-state benchmarks
+### 4.3 Speedometer
 
-The replays are page loads: most of their code runs once or a few times, which is what a
-browser mostly does, but it cannot show what a compiler gains on code that runs long enough
-to be optimized. For that, the standard suites are used as they are, with no benchmark
-written here.
+The replays are page loads: most of their code runs once, which is what a browser mostly
+does, but they cannot show what a compiler gains on code that runs long enough to be
+optimized. For that, the benchmark is **Speedometer** (WebKit's, run unmodified from a
+checkout of its main branch outside the repository). It is real framework code driving a
+real DOM: TodoMVC in a dozen frameworks, two news sites (Next.js and Nuxt), two editors
+(CodeMirror and TipTap), charts (Observable Plot, Chart.js, React Stockcharts) and WebKit's
+performance dashboard. Each suite runs in an iframe and is timed per step: the synchronous
+part (the clicks and typing the step simulates, and the framework's work in response) and
+the asynchronous part (to the next frame, with a forced layout). The score is 1000 over the
+geometric mean of the suites' totals. This replaced plain-JS suites (JetStream; section 4.4):
+browsing is framework code on the DOM, not crypto kernels.
 
-- **`tools/jsbench.js`** loads JetStream's own driver (`JetStreamDriver.js`, from a checkout of
-  WebKit's JetStream outside the repository) and captures, for each test, the script its
-  command-line runner would evaluate: the files, preloads, iteration counts, deterministic
-  `Math.random` and runner code, exactly as JetStream assembles them. Each is written out as a
-  standalone script, with a prefix that stands in for the shell, and run through
-  `CYBER_PROBE_JS` in a fresh process. JetStream includes Octane and the Web Tooling Benchmark,
-  so one harness covers all three suites. Tests that need WebAssembly, workers or modules are
-  left out.
-- **`tests/jit/jsbench.sh`** runs the tests under several settings, interleaved and rotated as
-  in `replay.sh`. Each run reports every iteration's time, reduced to the first iteration
-  (startup), the mean of the last half (steady state) and the total.
-  **`tools/jsbench_stats.js`** reports each setting's medians and its change from the first,
-  with 95% bootstrap intervals, and the geometric mean over the tests.
-- **Coverage:** 62 of JetStream's 68 plain-JS tests run. Basic and WSL need the legacy
-  `RegExp.lastMatch` statics, the two babylonjs-scene tests need browser APIs a probe script
-  lacks, source-map needs `WebAssembly.instantiate`, and OfflineAssembler exceeds 15 minutes
-  interpreted.
+- **`tools/speedometer_server.js`** serves the checkout on 127.0.0.1 (the suites need HTTP:
+  modules, frames, fetches).
+- **`tools/speedometer_prelude.js`** is evaluated in Speedometer's page before its scripts
+  (`CYBER_PRELUDE_JS`). On `SpeedometerDone` it prints the suites' times, the geometric mean
+  and the score as `SPEEDOMETER-DONE <json>` and sets `__cyberDone`, which ends the
+  browser's event loop (`CYBER_RUN_UNTIL=__cyberDone` keeps it running until then instead of
+  the usual settle limits).
+- **`tests/jit/speedometer.sh`** `<cyberbrowser.exe> <Speedometer dir> [iterations] [rounds]
+  [setting...]` runs the whole benchmark, all suites in one browser process as a browser runs
+  it, under each setting (`interp`, `t1`, `t2`, or env assignments), interleaved and rotated
+  as in `replay.sh`. **`tools/speedometer_stats.js`** reports each setting's median score and
+  suite times over the rounds, their range, and the change from the first setting.
+  `SPEEDOMETER_SUITES=A,B` runs some suites only.
 
-Bringing the suite up found three engine bugs, all older than N3: a GC crash when a WeakMap's
-state outlived its object (babel), class fields named `async` rejected by the parser
-(esprima-next), and a lazily parsed body that took the parameter of `function of(n)` for a
-declaration of its own, hiding the enclosing `n` (lebab's lodash). One interpreted run of Air
-in three crashed; it is open.
+**What it took to run.** Speedometer did not run at first: its page is an ES module, and
+the browser had no frames. Every suite now completes and does its work (checked step by
+step: the items added, checked and deleted, the pages navigated, the charts drawn). In the
+engine:
+
+- ES modules: `<script type="module">`, static and dynamic imports resolved against the
+  importing module, and module scripts inserted by script. The module loader evaluated each
+  import while resolving it; evaluation passed a null stack; `import * as` and async
+  modules grew plain arrays as GC arrays; functions read module-level bindings as script
+  globals (always `undefined`); the module's entry arrays were not marked, so a collection
+  freed them under a running page (a crash in the concurrent marker); a lazily compiled
+  function inside a module forgot it was module code (`import.meta` failed).
+- The lazy scanners (the serial one and the structure index's) took `for (var x in a, e)`
+  for a declaration list and lost `e` from the enclosing scope (React's synthetic events).
+- Tagged templates nested in another template's substitution corrupted the outer one's
+  strings (Lit).
+- `undefined[0]` threw a bare uninitialized value instead of a TypeError.
+
+In the browser:
+
+- **Frames** (`browser/frame_api.c`): each same-origin iframe gets a realm of its own, a
+  context of the runtime with the whole API installed, whose global is the frame's window,
+  and a document. Setting `src` queues a navigation that the event loop runs: the page is
+  fetched, parsed and its scripts run in the frame's realm (the page pipeline now takes the
+  realm, document and base URL), then `load` fires in the frame and on the iframe.
+  `contentWindow`, `contentDocument`, `parent`, `top` and `frameElement`; the frame's
+  viewport is the iframe's size; nodes are wrapped in their document's realm; timers run in
+  the realm that scheduled them and are cleared with the frame.
+- **DOM events** (`browser/dom_events.js`): the event interfaces (`KeyboardEvent`,
+  `InputEvent` and others were dummy constructors), and dispatch as the standard defines it:
+  capture, target and bubble phases, `once`, `passive`, `handleEvent` objects, shadow
+  retargeting, `preventDefault`'s result, exceptions reported without stopping the others,
+  the `on*` handler attributes (React and Preact test `'oninput' in document`; jQuery's
+  router tests `onhashchange`), `click()` with checkbox, radio, label, submit and link
+  activation (it was a no-op), `MessageChannel`, `postMessage`, and session history
+  (`pushState` did not change the URL; fragment navigation fired no events).
+- **Form controls** (`browser/form_controls.js`): `value`, `checked`, `selected` and the rest
+  as state of their own, apart from the attributes, with the user agent's toggling bypassing
+  the setters (React tracks values by wrapping them).
+- **Canvas** (`browser/canvas_api.js`): the whole 2D context state (transforms, styles,
+  paths, `measureText`, image data). Drawing is not rasterized.
+- **Platform pieces** (`browser/platform_api.js`): User Timing entries (`performance.mark`
+  returned nothing and aborted the process after 256 marks), `NodeList` and
+  `HTMLCollection`, the HTML element interfaces, the table API, `TreeWalker` and
+  `NodeIterator` (the walker ignored `whatToShow` and skipped the subtrees of skipped nodes),
+  `isEqualNode`, `ChildNode` on text and comments, attribute nodes, `getElementById` on
+  fragments, `document.getSelection` and the rest of `Selection`.
+- **Elsewhere:** comments are nodes (the parser dropped them; Lit's markers are comments),
+  `DOMParser` documents always have a body, unhandled promise rejections are reported (and
+  fire `unhandledrejection`), each timer is a task with a microtask checkpoint after it,
+  native shadow DOM is installed (a page that forces ShadyDOM, as YouTube does, still uses
+  the polyfill), `new` on a custom element class makes the element, `createElement`'s second
+  argument is options (it was taken for the tag name: Vue's elements were all named
+  `undefined`), `nomodule` scripts do not run, attributes are not mirrored over IDL
+  attributes (`disabled=""` removed itself), relative script and stylesheet URLs resolve
+  against the document, `getComputedStyle` gives `width` and `height` in used px.
+
+**Interpreter, T1 and T2** (Speedometer main, all 20 default suites, 10 iterations, 3
+interleaved rounds; medians, ms per iteration; T2 at its default threshold of 20,000):
+
+| | Interpreter | T1 | vs interp. | T2 | vs interp. |
+|---|---|---|---|---|---|
+| **Score** (higher is better) | **3.38** (3.36–3.43) | 3.19 (3.17–3.25) | **−5.1%** | 3.23 (3.20–3.25) | **−3.8%** |
+| Geometric mean, ms | 298.6 | 315.7 | +5.7% | 310.2 | +3.9% |
+| TodoMVC-JavaScript-ES5 | 201.6 | 213.9 | +6.1% | 205.4 | +1.8% |
+| TodoMVC-JavaScript-ES6-Webpack-Complex-DOM | 832.0 | 876.4 | +5.3% | 841.7 | +1.2% |
+| TodoMVC-WebComponents | 312.9 | 308.5 | −1.4% | 330.8 | +5.7% |
+| TodoMVC-React-Complex-DOM | 524.4 | 595.8 | +13.6% | 564.5 | +7.7% |
+| TodoMVC-React-Redux | 351.3 | 373.2 | +6.2% | 376.6 | +7.2% |
+| TodoMVC-Backbone | 118.1 | 123.9 | +4.9% | 134.5 | +13.8% |
+| TodoMVC-Angular-Complex-DOM | 487.9 | 500.8 | +2.7% | 524.3 | +7.5% |
+| TodoMVC-Vue | 100.3 | 118.9 | +18.6% | 114.1 | +13.8% |
+| TodoMVC-jQuery | 1100.8 | 1166.9 | +6.0% | 1120.2 | +1.8% |
+| TodoMVC-Preact-Complex-DOM | 233.7 | 249.6 | +6.8% | 276.9 | +18.5% |
+| TodoMVC-Svelte-Complex-DOM | 233.5 | 249.1 | +6.7% | 242.4 | +3.8% |
+| TodoMVC-Lit-Complex-DOM | 853.9 | 870.4 | +1.9% | 855.5 | +0.2% |
+| NewsSite-Next | 286.4 | 316.5 | +10.5% | 292.7 | +2.2% |
+| NewsSite-Nuxt | 262.9 | 282.8 | +7.6% | 271.4 | +3.3% |
+| Editor-CodeMirror | 150.1 | 152.2 | +1.4% | 156.9 | +4.5% |
+| Editor-TipTap | 139.6 | 162.7 | +16.5% | 149.4 | +7.0% |
+| Charts-observable-plot | 182.7 | 193.1 | +5.7% | 187.8 | +2.8% |
+| Charts-chartjs | 495.8 | 528.2 | +6.5% | 524.1 | +5.7% |
+| React-Stockcharts-SVG | 434.4 | 477.9 | +10.0% | 481.5 | +10.8% |
+| Perf-Dashboard | 205.0 | 216.4 | +5.6% | 197.6 | −3.6% |
+
+Neither compiler gains on Speedometer. The three settings' score ranges do not overlap: T1
+loses 5% and T2 4%, and only Perf-Dashboard gains under T2. It looks like the page-load
+finding again (section 1), now on code that runs for many iterations; not yet profiled, the
+likely reasons are that framework code is calls, closures, property accesses on many shapes
+and DOM bindings, spread thin, with little that stays monomorphic and hot long enough to pay
+for compiling it, and that much of a run is not JS the tiers compile at all: the DOM,
+layout and styling in C. Which parts
+dominate, and what T2 must handle better here (calls, megamorphic sites, compile cost on
+code that runs a few thousand times), is the next measurement.
+
+### 4.4 Earlier: JetStream's plain-JS tests (harness removed)
+
+Sections 1, 5 and 6 cite measurements made on 62 of JetStream's 68 plain-JS tests (Octane, the
+Web Tooling Benchmark and the rest), captured from JetStream's own driver and run as probe
+scripts. That harness (`tools/jsbench.js`, `tools/jsbench_stats.js`, `tests/jit/jsbench.sh`)
+has been removed in favor of Speedometer; its findings stand as recorded. Bringing that suite
+up found three engine bugs: a GC crash when a WeakMap's state outlived its object, class
+fields named `async` rejected by the parser, and a lazily parsed body that took the parameter
+of `function of(n)` for a declaration of its own.
 
 **T1 against the interpreter** (3 rounds, 8-byte values, threshold 50,000):
 
@@ -338,31 +440,13 @@ in three crashed; it is open.
 | Everything else | 41 tests | within ±7%; 19 tests within noise |
 | **All 62 (geometric mean)** | | **−0.4%** (first iteration −0.1%) |
 
-T1 is faster on 13 tests and slower on 30, beyond each one's interval.
-
-**Where T1 loses** (CPU samples, raytrace-private-class-fields and UniPoker):
-
-- **Calls.** Compiled-to-compiled calls go through `jit_call_prepare_kind`, `jit_call_prepare`,
-  `jit_call_finish` and frame entry: about 12% of raytrace-private-class-fields under T1. The
-  interpreter makes the same calls inside `JS_CallInternal`, cheaper.
-- **Sites with no cache are as slow in both tiers.** Private fields (`find_own_property` from
-  `JS_GetPrivateField`, 11–14% in both tiers), field definitions (`jsop_define_field`) and
-  bitwise operators on values outside int32 (`js_binary_logic_slow`) take the same runtime
-  path; T1 adds its stencils' frame loads and stores (`jit:get_loc`, `jit:put_loc`) on top.
-- **GC is 15–29% of these runs in both tiers**, and property lookups 10–26%: costs no tier
-  removes without caches and allocation work.
-
-**What it means:**
-
-- **Tiering T1 later would not help.** It already compiles only after 50,000 entries or loop
-  iterations, and on these tests its first iteration is as fast as its last: the code is
-  compiled early and stays slower. A non-speculative tier cannot keep a value in a register
-  across a call, prove a type once, or skip a generic call path, which is where the time goes.
-- **What wins is specialization:** the six tests where T1 gains a third are those where a
-  stencil's fast path (int32 arithmetic, array element access) is all the work. A speculating
-  compiler gets that on every kind of site feedback has made monomorphic.
-- **Caches pay in every tier.** Private-field and definition sites need feedback slots read
-  by the interpreter too, not only by compiled code.
+T1 was faster on 13 tests and slower on 30, beyond each one's interval. Where it lost:
+compiled-to-compiled calls through `jit_call_prepare`/`jit_call_finish` (about 12% of
+raytrace-private-class-fields), sites with no cache (private fields, field definitions,
+bitwise operators outside int32) as slow in both tiers with T1's frame loads and stores on
+top, and GC (15–29%) and property lookups (10–26%) that no tier removes without caches. So
+tiering T1 later would not help (its first iteration was as fast as its last); what wins is
+specialization, and caches pay in every tier.
 
 ## 5. Making the engine cheap
 
@@ -587,7 +671,7 @@ arithmetic and comparison site, numbered by the bytecode compiler:
   `JitCode`. Add `put_field` (existing writable property), `define_field` and property adds
   (transition: old shape → new shape, slot), getters (holder, getter function), and private
   fields and brands (`get_private_field`, `put_private_field`, `define_private_field`: shape
-  → slot), which today take a shape-table lookup on every access in every tier (4.3).
+  → slot), which today take a shape-table lookup on every access in every tier (4.4).
 - **Call sites:** the callee (monomorphic or megamorphic), and whether it is compiled.
 - **Arithmetic and comparison sites:** the operand kinds seen (int, double, string, other),
   as bits.
@@ -601,7 +685,7 @@ caches are the ones that matter until T2 exists. T2 reads the type, shape and ca
 slots to decide what to specialize.
 
 Each change is measured on both benchmarks: the replays (24 rounds, as in N1) and the
-steady-state suite (4.3), interpreted. The feedback slots cost a little on cold code; the
+steady-state suite (4.4), interpreted. The feedback slots cost a little on cold code; the
 replays show whether lazy allocation keeps that below the gain.
 
 **As built so far (N4, not yet gated).** A function gets its vector (`JSFeedback`) once its
@@ -657,7 +741,7 @@ gain, turn it off by default until N2 and N3 make compiled code worth its cost. 
 the build, tested in every mode.
 
 N1 found 50,000 best on the replays (5.6), and after N3 the interpreter beat T1 there, so T1
-is off by default (5.1). The steady-state suite (4.3) settles the threshold question: on code
+is off by default (5.1). The steady-state suite (4.4) settled the threshold question: on code
 that runs for seconds, T1 compiles early at any threshold and is as slow in its last iteration
 as in its first, so no threshold makes it a gain where it loses. Its future is decided with
 T2's (6.6), not by tuning.
@@ -736,13 +820,13 @@ V8 runs four tiers: Ignition, Sparkplug, Maglev and TurboFan. JavaScriptCore and
 also put an optimizer between their baseline and top tiers. What each optimizer gains over its
 baseline is the same: values kept unboxed in registers, a type or shape checked once rather
 than at every use, property accesses compiled to a check and a load, and calls made straight
-to a known callee. A baseline compiler can do none of it, and section 4.3 measures the
+to a known callee. A baseline compiler can do none of it, and section 4.4 measures the
 consequence here: T1 gains a third where a stencil's fast path is all the work, and loses
 where the work is calls, objects and uncached sites.
 
 So the third tier is **one optimizer, T2, shaped like Maglev from its first version**. The
 previous plan built it in stages, starting with a block-local tier (a virtual stack and
-registers within a basic block). That stage is dropped. The gains measured in 4.3 are in
+registers within a basic block). That stage is dropped. The gains measured in 4.4 are in
 loops, and a block-local tier writes every value back to the frame at each block's end, so it
 would keep nothing in a register across a loop iteration; no engine runs such a tier for that
 reason. Building the graph in SSA form from the start costs little more than a virtual stack
@@ -1195,7 +1279,7 @@ against it costing more than it gains on code that runs once. N6 brings T2 to th
   are added.
 - **Two code generators while T1 lives.** Mitigation: T1 is frozen, so only T2's assembler
   changes; both share the helpers, frames and caches; 6.6 removes T1 if it does not pay.
-- **The benchmarks are not the pages.** JetStream measures code that runs for seconds; pages
+- **The benchmarks are not the pages.** Speedometer measures code that runs for seconds; pages
   run most code once. A T2 tuned on the suite could cost more than it gains on loads.
   Mitigation: every gate includes the replays, with "parity on the others" as a hard
   condition, and the threshold is measured on both.

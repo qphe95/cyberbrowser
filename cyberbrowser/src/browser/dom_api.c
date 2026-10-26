@@ -294,6 +294,21 @@ static bool dom_attr_has_accessor(NodeId id, const char *name) {
     return (strcasecmp(name, "src") == 0 || strcasecmp(name, "srcset") == 0) && dom_tag_is(id, "img");
 }
 
+/* Whether the legacy reflection of attribute `name` as a plain property
+ * applies to obj: not over an IDL attribute or method of its interface
+ * (assigning disabled="" through its setter would remove the attribute,
+ * value="x" would set the control's value). */
+static bool dom_attr_reflects_as_expando(JSContextHandle ctx, NodeId id, GCValue obj, const char *name) {
+    if (strcmp(name, "id") == 0 || strcmp(name, "class") == 0 || strcmp(name, "style") == 0) return false;
+    if (id && dom_attr_has_accessor(id, name)) return false;
+    GCValue proto = JS_GetPrototype(ctx, obj);
+    if (!JS_IsObject(proto)) return true;
+    JSAtom a = JS_NewAtom(ctx, name);
+    int has = JS_HasProperty(ctx, proto, a);
+    JS_FreeAtom(ctx, a);
+    return has <= 0;
+}
+
 void dom_element_setup_wrapper(JSContextHandle ctx, NodeId id, GCValue obj) {
     uint32_t s = dom_slot(id);
     /* Attributes are reflected as plain properties (the legacy DOM did this
@@ -302,8 +317,7 @@ void dom_element_setup_wrapper(JSContextHandle ctx, NodeId id, GCValue obj) {
     for (int i = 0; i < l->n; i++) {
         const char *name = css_atom_str(l->a[i].name);
         if (!name || !name[0]) continue;
-        if (strcmp(name, "id") == 0 || strcmp(name, "class") == 0 || strcmp(name, "style") == 0) continue;
-        if (dom_attr_has_accessor(id, name)) continue;
+        if (!dom_attr_reflects_as_expando(ctx, id, obj, name)) continue;
         DomStr v = g_dom.attrs[s].a[i].value;      /* re-read: setters may run JS */
         JS_SetPropertyStr(ctx, obj, name, JS_NewStringLen(ctx, v.s ? v.s : "", v.len));
         if (!dom_valid(id)) return;
@@ -328,11 +342,6 @@ void dom_element_setup_wrapper(JSContextHandle ctx, NodeId id, GCValue obj) {
                                           JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
         }
     }
-    if (dom_tag_is(id, "canvas")) {
-        JS_SetPropertyStr(ctx, obj, "getContext", JS_NewCFunction(ctx, js_canvas_get_context_fn(), "getContext", 1));
-        JS_SetPropertyStr(ctx, obj, "width", JS_NewInt32(ctx, 0));
-        JS_SetPropertyStr(ctx, obj, "height", JS_NewInt32(ctx, 0));
-    }
 }
 
 /* Factory for wrappers of store nodes (dom_wrap.h). */
@@ -341,19 +350,55 @@ void dom_element_setup_wrapper(JSContextHandle ctx, NodeId id, GCValue obj) {
  * a specific interface (ShadyDOM patches HTMLSlotElement.prototype) reach it.
  * Interfaces the browser does not define fall back to HTMLElement. */
 static const char *element_interface_name(NodeId id) {
+    /* HTML's elements and their interfaces (HTML section 4, "DOM
+     * interface"); the others are HTMLElement. */
     static const struct { const char *tag, *iface; } map[] = {
         { "a", "HTMLAnchorElement" },       { "area", "HTMLAreaElement" },
+        { "base", "HTMLBaseElement" },      { "blockquote", "HTMLQuoteElement" },
+        { "body", "HTMLBodyElement" },      { "br", "HTMLBRElement" },
         { "button", "HTMLButtonElement" },  { "canvas", "HTMLCanvasElement" },
-        { "div", "HTMLDivElement" },        { "fencedframe", "HTMLFencedFrameElement" },
-        { "form", "HTMLFormElement" },      { "iframe", "HTMLIFrameElement" },
+        { "caption", "HTMLTableCaptionElement" }, { "col", "HTMLTableColElement" },
+        { "colgroup", "HTMLTableColElement" }, { "data", "HTMLDataElement" },
+        { "datalist", "HTMLDataListElement" }, { "del", "HTMLModElement" },
+        { "details", "HTMLDetailsElement" }, { "dialog", "HTMLDialogElement" },
+        { "div", "HTMLDivElement" },        { "dl", "HTMLDListElement" },
+        { "embed", "HTMLEmbedElement" },    { "fencedframe", "HTMLFencedFrameElement" },
+        { "fieldset", "HTMLFieldSetElement" }, { "form", "HTMLFormElement" },
+        { "h1", "HTMLHeadingElement" },     { "h2", "HTMLHeadingElement" },
+        { "h3", "HTMLHeadingElement" },     { "h4", "HTMLHeadingElement" },
+        { "h5", "HTMLHeadingElement" },     { "h6", "HTMLHeadingElement" },
+        { "head", "HTMLHeadElement" },      { "hr", "HTMLHRElement" },
+        { "html", "HTMLHtmlElement" },      { "iframe", "HTMLIFrameElement" },
         { "img", "HTMLImageElement" },      { "input", "HTMLInputElement" },
-        { "link", "HTMLLinkElement" },      { "option", "HTMLOptionElement" },
-        { "script", "HTMLScriptElement" },  { "select", "HTMLSelectElement" },
-        { "slot", "HTMLSlotElement" },      { "style", "HTMLStyleElement" },
+        { "ins", "HTMLModElement" },        { "label", "HTMLLabelElement" },
+        { "legend", "HTMLLegendElement" },  { "li", "HTMLLIElement" },
+        { "link", "HTMLLinkElement" },      { "map", "HTMLMapElement" },
+        { "menu", "HTMLMenuElement" },      { "meta", "HTMLMetaElement" },
+        { "meter", "HTMLMeterElement" },    { "object", "HTMLObjectElement" },
+        { "ol", "HTMLOListElement" },       { "optgroup", "HTMLOptGroupElement" },
+        { "option", "HTMLOptionElement" },  { "output", "HTMLOutputElement" },
+        { "p", "HTMLParagraphElement" },    { "picture", "HTMLPictureElement" },
+        { "pre", "HTMLPreElement" },        { "progress", "HTMLProgressElement" },
+        { "q", "HTMLQuoteElement" },        { "script", "HTMLScriptElement" },
+        { "select", "HTMLSelectElement" },  { "slot", "HTMLSlotElement" },
+        { "source", "HTMLSourceElement" },  { "span", "HTMLSpanElement" },
+        { "style", "HTMLStyleElement" },    { "table", "HTMLTableElement" },
+        { "tbody", "HTMLTableSectionElement" }, { "td", "HTMLTableCellElement" },
         { "template", "HTMLTemplateElement" }, { "textarea", "HTMLTextAreaElement" },
+        { "tfoot", "HTMLTableSectionElement" }, { "th", "HTMLTableCellElement" },
+        { "thead", "HTMLTableSectionElement" }, { "time", "HTMLTimeElement" },
+        { "title", "HTMLTitleElement" },    { "tr", "HTMLTableRowElement" },
+        { "track", "HTMLTrackElement" },    { "ul", "HTMLUListElement" },
     };
-    for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++)
-        if (dom_tag_is(id, map[i].tag)) return map[i].iface;
+    enum { N = sizeof(map) / sizeof(map[0]) };
+    static CssAtom atoms[N];
+    if (!atoms[0]) {
+        css_atom_reserve(N);
+        for (size_t i = 0; i < N; i++) atoms[i] = css_atom_intern(map[i].tag, strlen(map[i].tag));
+    }
+    CssAtom t = dom_tag(id);
+    for (size_t i = 0; i < N; i++)
+        if (atoms[i] == t) return map[i].iface;
     return "HTMLElement";
 }
 
@@ -396,8 +441,8 @@ GCValue dom_create_wrapper(JSContextHandle ctx, NodeId id) {
         if (!JS_IsObject(proto)) proto = global_proto(ctx, "Node");
         if (JS_IsObject(proto)) JS_SetPrototype(ctx, obj, proto);
         dom_bind(ctx, id, obj);
-        JS_SetPropertyStr(ctx, obj, "nodeType", JS_NewInt32(ctx, DOM_NODE_TYPE_COMMENT));
-        JS_SetPropertyStr(ctx, obj, "nodeName", JS_NewString(ctx, "#comment"));
+        /* (nodeType and nodeName are Node.prototype's getters, by kind:
+         * assigning them threw, and built a stack trace, per comment) */
         return obj;
     }
     case DOM_K_FRAGMENT: {
@@ -736,10 +781,24 @@ GCValue css_get_element_by_id(JSContextHandle ctx, JSAtom id)
     return dom_js(ctx, n);
 }
 
-static GCValue nodes_to_array(JSContextHandle ctx, const NodeId *ids, uint32_t n) {
+/* A list of nodes: an array whose prototype is the realm's `kind`
+ * ("NodeList" or "HTMLCollection") prototype, so item(), forEach and
+ * `instanceof` work (and pages may extend those prototypes). */
+static GCValue node_list_value(JSContextHandle ctx, GCValue arr, const char *kind) {
+    GCValue ctor = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), kind);
+    GCValue proto = JS_IsObject(ctor) ? JS_GetPropertyStr(ctx, ctor, "prototype") : JS_UNDEFINED;
+    if (JS_IsObject(proto)) JS_SetPrototype(ctx, arr, proto);
+    return arr;
+}
+
+static GCValue nodes_to_list(JSContextHandle ctx, const NodeId *ids, uint32_t n, const char *kind) {
     GCValue arr = JS_NewArray(ctx);
     for (uint32_t i = 0; i < n; i++) JS_SetPropertyUint32(ctx, arr, i, dom_js(ctx, ids[i]));
-    return arr;
+    return node_list_value(ctx, arr, kind);
+}
+
+static GCValue nodes_to_array(JSContextHandle ctx, const NodeId *ids, uint32_t n) {
+    return nodes_to_list(ctx, ids, n, "HTMLCollection");
 }
 
 GCValue css_get_elements_by_class_name(JSContextHandle ctx, JSAtom class_atom)
@@ -1036,16 +1095,29 @@ static void dom_dispatch_script_event(JSContextHandle ctx, GCValue script, const
     }
 }
 
-static bool dom_script_type_is_executable(JSContextHandle ctx, GCValue script) {
-    GCValue typev = JS_GetPropertyStr(ctx, script, "type");
-    if (JS_IsUndefined(typev) || JS_IsNull(typev)) return true;
-    const char *type = JS_IsString(typev) ? JS_ToCString(ctx, typev) : NULL;
-    bool ok = true;
-    if (type && type[0]) {
-        if (strstr(type, "module") || strstr(type, "importmap")) ok = false;
+/* What a script element runs as (HTML 4.12.1.1, "prepare the script
+ * element"): DOM_SCRIPT_NONE, DOM_SCRIPT_CLASSIC (but not with nomodule,
+ * which only browsers without modules run) or DOM_SCRIPT_MODULE. */
+enum { DOM_SCRIPT_NONE, DOM_SCRIPT_CLASSIC, DOM_SCRIPT_MODULE };
+static int dom_script_kind(JSContextHandle ctx, GCValue script) {
+    NodeId n = dom_node_of(script);
+    const char *type = n ? dom_get_attr_str(n, "type") : NULL;
+    if (!n) {
+        GCValue typev = JS_GetPropertyStr(ctx, script, "type");
+        type = JS_IsString(typev) ? JS_ToCString(ctx, typev) : NULL;
     }
-    if (type) JS_FreeCString(ctx, type);
-    return ok;
+    if (type && type[0]) {
+        if (strcasecmp(type, "module") == 0) return DOM_SCRIPT_MODULE;
+        if (strstr(type, "importmap") || (!strstr(type, "javascript") && !strstr(type, "ecmascript") &&
+                                         strcasecmp(type, "text/jscript") != 0))
+            return DOM_SCRIPT_NONE;
+    }
+    if (n && dom_get_attr_str(n, "nomodule")) return DOM_SCRIPT_NONE;
+    return DOM_SCRIPT_CLASSIC;
+}
+
+static bool dom_script_type_is_executable(JSContextHandle ctx, GCValue script) {
+    return dom_script_kind(ctx, script) != DOM_SCRIPT_NONE;
 }
 
 static void dom_run_fetched_script(JSContextHandle ctx, GCValue script, const char *url, bool ok,
@@ -1139,8 +1211,12 @@ static void dom_run_fetched_script(JSContextHandle ctx, GCValue script, const ch
         JS_SetPropertyStr(ctx, doc, "currentScript", script);
         JS_SetPropertyStr(ctx, script, "readyState", JS_NewString(ctx, "loaded"));
 
+        /* (a module is named by its URL; its imports load as it is linked) */
+        bool module = dom_script_kind(ctx, script) == DOM_SCRIPT_MODULE;
+        if (module) JS_SetPropertyStr(ctx, doc, "currentScript", JS_NULL);
         cp_profile_begin("eval-dynamic-script", "js");
-        GCValue result = JS_Eval(ctx, buffer.data, buffer.size, url, JS_EVAL_TYPE_GLOBAL);
+        GCValue result = module ? js_quickjs_eval_module(ctx, buffer.data, buffer.size, url, 0)
+                                : JS_Eval(ctx, buffer.data, buffer.size, url, JS_EVAL_TYPE_GLOBAL);
         cp_profile_end("eval-dynamic-script");
 
         JS_SetPropertyStr(ctx, script, "readyState", JS_NewString(ctx, "complete"));
@@ -1919,7 +1995,7 @@ GCValue js_node_get_childNodes(JSContextHandle ctx, GCValue this_val, int argc, 
     uint32_t idx = 0;
     for (NodeId c = dom_first_child(n); c; c = dom_next_sibling(c))
         JS_SetPropertyUint32(ctx, arr, idx++, dom_js(ctx, c));
-    return arr;
+    return node_list_value(ctx, arr, "NodeList");
 }
 
 GCValue js_node_get_nodeType(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
@@ -2196,11 +2272,9 @@ GCValue js_element_set_attribute(JSContextHandle ctx, GCValue this_val, int argc
         NodeId n = dom_node_of(this_val);
         char *old_value = n ? attr_dup(n, name) : NULL;
         // Store the attribute on the object itself too (the legacy DOM's
-        // reflection), except for names with a reflecting accessor.
-        if (strcmp(name, "id") != 0 && strcmp(name, "class") != 0 && strcmp(name, "style") != 0 &&
-            !(n && dom_attr_has_accessor(n, name))) {
+        // reflection), except for names its interface has.
+        if (dom_attr_reflects_as_expando(ctx, n, this_val, name))
             JS_SetPropertyStr(ctx, this_val, name, JS_NewStringLen(ctx, value, vlen));
-        }
         n = dom_node_of(this_val);
         if (n) {
             css_atom_reserve(1);
@@ -2412,7 +2486,7 @@ static GCValue query_all(JSContextHandle ctx, NodeId scope, GCValue sel, bool in
     if (!s) return JS_NewArray(ctx);
     DomNodeList l = dom_query_all(scope, s, n, include_self);
     JS_FreeCString(ctx, s);
-    GCValue arr = nodes_to_array(ctx, l.ids, l.n);
+    GCValue arr = nodes_to_list(ctx, l.ids, l.n, "NodeList");
     dom_node_list_free(&l);
     return arr;
 }
@@ -3935,7 +4009,7 @@ GCValue js_dom_parser_parse_from_string(JSContextHandle ctx, GCValue this_val, i
     const char *mime = JS_ToCString(ctx, argv[1]);
     if (!str) { str = ""; len = 0; }
     bool as_xml = mime && strstr(mime, "xml") != NULL;
-    if (!len) return JS_NULL;
+    /* (an empty string is a document with an empty body) */
     GCValue js_doc = dom_new_parsed_document(ctx, str, len);
     if (JS_IsObject(js_doc))
         JS_SetPropertyStr(ctx, js_doc, "contentType", JS_NewString(ctx, as_xml ? "application/xml" : "text/html"));

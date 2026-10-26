@@ -1924,16 +1924,15 @@ TEST(test_html_element_exists) {
     return true;
 }
 
-/* Test HTMLElement.prototype.attachShadow exists */
-/* No native attachShadow, so ShadyDOM installs its own (it only does when
- * the browser has none). */
+/* Test HTMLElement.prototype.attachShadow exists (native, inherited from
+ * Element.prototype; a page forcing ShadyDOM replaces it with its own) */
 TEST(test_no_native_attach_shadow) {
     JSContextHandle ctx = get_test_context();
     if (!SAFE_VALID(ctx)) return false;
 
     GCValue html_element = JS_GetPropertyStr(ctx, g_global, "HTMLElement");
     GCValue prototype = JS_GetPropertyStr(ctx, html_element, "prototype");
-    ASSERT_TRUE(JS_IsUndefined(JS_GetPropertyStr(ctx, prototype, "attachShadow")));
+    ASSERT_TRUE(JS_IsFunction(ctx, JS_GetPropertyStr(ctx, prototype, "attachShadow")));
     return true;
 }
 
@@ -2239,10 +2238,14 @@ TEST(test_window_add_event_listener_real) {
     if (!SAFE_VALID(ctx)) return false;
 
     const char *js_code = "\n"
-        "        var called = false;\n"
-        "        window.addEventListener('test', function() { called = true; });\n"
-        "        var listeners = window.__listeners_test;\n"
-        "        Array.isArray(listeners) && listeners.length === 1 && typeof listeners[0] === 'function';\n"
+        "        var called = 0;\n"
+        "        function f(e) { called++; }\n"
+        "        window.addEventListener('test', f);\n"
+        "        window.addEventListener('test', f);\n"  /* (a duplicate is ignored) */
+        "        window.dispatchEvent(new Event('test'));\n"
+        "        window.removeEventListener('test', f);\n"
+        "        window.dispatchEvent(new Event('test'));\n"
+        "        called === 1;\n"
         "    ";
 
     GCValue result = JS_Eval(ctx, js_code, strlen(js_code), "<test>", 0);
@@ -3596,8 +3599,9 @@ TEST(test_mouse_event_created) {
     if (!SAFE_VALID(ctx)) return false;
 
     GCValue mouse_event = JS_GetPropertyStr(ctx, g_global, "MouseEvent");
-    GCValue ev = JS_CallConstructor(ctx, mouse_event, 0, NULL);
-    bool created = !JS_IsException(ev);
+    GCValue type = JS_NewString(ctx, "click");
+    GCValue ev = JS_CallConstructor(ctx, mouse_event, 1, &type);
+    bool created = !JS_IsException(ev) && JS_IsObject(ev);
     
     ASSERT_TRUE(created);
     return true;
@@ -4884,6 +4888,163 @@ TEST(test_console_clear_execution) {
     return true;
 }
 
+/* ============================================================================
+ * Web platform behavior Speedometer's suites depend on (JS_PERF_DESIGN.md
+ * section 4.3): engine bugs and DOM APIs found by running it.
+ * ============================================================================ */
+
+/* Evaluate src (as a module when module) and require it to be true; the
+ * source is printed when it is not. */
+static bool eval_true(JSContextHandle ctx, const char *src, bool module) {
+    GCValue r = JS_Eval(ctx, src, strlen(src), module ? "test.mjs" : "<test>",
+                        module ? JS_EVAL_TYPE_MODULE : JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(r)) {
+        GCValue e = JS_GetException(ctx);
+        const char *m = JS_ToCString(ctx, e);
+        printf("    threw %s: %s\n", m ? m : "?", src);
+        return false;
+    }
+    if (module) return true;   /* (a module's checks set globalThis.__t) */
+    bool ok = JS_ToBool(ctx, r);
+    if (!ok) printf("    false: %s\n", src);
+    return ok;
+}
+
+/* A tagged template inside another's substitution kept the outer's parts
+ * (they were recorded in one list, the inner's in the middle). */
+TEST(test_nested_tagged_templates) {
+    JSContextHandle ctx = get_test_context();
+    if (!SAFE_VALID(ctx)) return false;
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ function tag(s){ return s.raw.join('|'); }"
+        "  return tag`A${0 ? tag`<i .c=${1} />` : 0}B${2}C` === 'A|B|C'; })()", false));
+    return true;
+}
+
+/* The lazy scan took 'for (var o in a, e)' for a declaration list, so e
+ * (an enclosing name) was not captured. */
+TEST(test_lazy_for_in_comma) {
+    JSContextHandle ctx = get_test_context();
+    if (!SAFE_VALID(ctx)) return false;
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ function on(e){ function t(n){ for (var o in n, e) return o; } return t; }"
+        "  return on({a: 1})(0) === 'a'; })()", false));
+    return true;
+}
+
+/* Module code: module-level bindings seen from functions (they were resolved
+ * as script globals), import.meta in lazily compiled functions. */
+TEST(test_module_bindings_and_import_meta) {
+    JSContextHandle ctx = get_test_context();
+    if (!SAFE_VALID(ctx)) return false;
+    ASSERT_TRUE(eval_true(ctx,
+        "let X = [1]; const Y = {a: 2}; function f() { return X[0] + Y.a; }"
+        "function m() { return typeof import.meta; }"
+        "globalThis.__t = f() === 3 && m() === 'object';", true));
+    JSRuntimeHandle rt = JS_GetRuntime(ctx);
+    JSContextHandle pctx = GC_HANDLE_NULL;
+    while (JS_ExecutePendingJob(rt, &pctx) > 0) {}
+    ASSERT_TRUE(eval_true(ctx, "globalThis.__t === true", false));
+    return true;
+}
+
+/* DOM events: capture, target and bubble order, once, handleEvent,
+ * preventDefault's return value, on* handlers and content attributes. */
+TEST(test_dom_event_dispatch) {
+    JSContextHandle ctx = get_test_context();
+    if (!SAFE_VALID(ctx)) return false;
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ var log = [], o = document.createElement('div'), i = document.createElement('span');"
+        "  o.appendChild(i); document.body.appendChild(o);"
+        "  o.addEventListener('x', function(){ log.push('oc'); }, true);"
+        "  o.addEventListener('x', function(){ log.push('ob'); });"
+        "  i.addEventListener('x', function(){ log.push('once'); }, {once: true});"
+        "  i.addEventListener('x', {handleEvent: function(){ log.push('h'); }});"
+        "  i.dispatchEvent(new Event('x', {bubbles: true})); i.dispatchEvent(new Event('x'));"
+        "  var c = document.createElement('div'); c.addEventListener('y', function(e){ e.preventDefault(); });"
+        "  var canceled = !c.dispatchEvent(new Event('y', {cancelable: true}));"
+        "  c.setAttribute('onclick', 'window.__clicked = 1'); c.click();"
+        "  o.remove();"
+        "  return log.join() === 'oc,once,h,ob,oc,h' && canceled && window.__clicked === 1 &&"
+        "    ('oninput' in document) && typeof new KeyboardEvent('keydown', {keyCode: 13}).keyCode === 'number'; })()",
+        false));
+    return true;
+}
+
+/* Form controls: value and checkedness apart from the attributes, click()
+ * toggling a checkbox (and firing change) without its JS setter. */
+TEST(test_form_controls_state) {
+    JSContextHandle ctx = get_test_context();
+    if (!SAFE_VALID(ctx)) return false;
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ var d = document.createElement('div');"
+        "  d.innerHTML = '<input disabled value=\"a\"><input type=\"checkbox\">"
+        "<select><option>x</option><option value=\"Y\" selected>y</option></select>';"
+        "  var t = d.children[0], c = d.children[1], s = d.children[2], changes = 0;"
+        "  t.value = 'b'; c.addEventListener('change', function(){ changes++; });"
+        "  Object.defineProperty(c, 'checked', { set: function(){ throw new Error('setter'); },"
+        "    get: Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked').get });"
+        "  c.click();"
+        "  return t.disabled && t.value === 'b' && t.getAttribute('value') === 'a' &&"
+        "    c.checked === true && changes === 1 && s.value === 'Y' && s.selectedIndex === 1; })()",
+        false));
+    return true;
+}
+
+/* DOM: DOMParser documents (with an implied body), comments in parsed
+ * markup, NodeList, TreeWalker's whatToShow, createElement(tag, options),
+ * isEqualNode. */
+TEST(test_dom_parsing_and_traversal) {
+    JSContextHandle ctx = get_test_context();
+    if (!SAFE_VALID(ctx)) return false;
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ var doc = new DOMParser().parseFromString('<li>a</li>', 'text/html');"
+        "  var t = document.createElement('template');"
+        "  t.innerHTML = 'x<?m$1$><ul>y<!--c--></ul>';"
+        "  var w = document.createTreeWalker(t.content, 129), seen = [], n;"
+        "  while ((n = w.nextNode())) seen.push(n.nodeType === 8 ? n.data : n.localName);"
+        "  var l = document.createElement('li', undefined);"
+        "  var a = document.createElement('p'), b = document.createElement('p'); a.id = b.id = 'q';"
+        "  return doc.body.firstChild.localName === 'li' && seen.join() === '?m$1$,ul,c' &&"
+        "    l.localName === 'li' && document.body.querySelectorAll('*') instanceof NodeList &&"
+        "    a.isEqualNode(b) && document.importNode(t.content, true).childNodes.length === 3; })()",
+        false));
+    return true;
+}
+
+/* new Ctor() for a defined custom element is that element. */
+TEST(test_custom_element_new) {
+    JSContextHandle ctx = get_test_context();
+    if (!SAFE_VALID(ctx)) return false;
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ class TItem extends HTMLElement { constructor(){ super();"
+        "    this.attachShadow({mode: 'open'}).innerHTML = '<b>s</b>'; } }"
+        "  customElements.define('t-item-new', TItem);"
+        "  var e = new TItem();"
+        "  return e.localName === 't-item-new' && e instanceof TItem && e.shadowRoot.innerHTML === '<b>s</b>'; })()",
+        false));
+    return true;
+}
+
+/* User Timing entries, messaging, session history, the canvas context. */
+TEST(test_platform_timing_messaging_history_canvas) {
+    JSContextHandle ctx = get_test_context();
+    if (!SAFE_VALID(ctx)) return false;
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ for (var i = 0; i < 300; i++) performance.mark('m' + i);"
+        "  var me = performance.measure('x', 'm0', 'm299');"
+        "  var g = document.createElement('canvas').getContext('2d');"
+        "  g.fillStyle = 'red'; g.save(); g.translate(5, 0); var e = g.getTransform().e; g.restore();"
+        "  var mc = new MessageChannel();"
+        "  history.pushState({k: 1}, '', '#t');"
+        "  return me.entryType === 'measure' && performance.getEntriesByType('mark').length >= 300 &&"
+        "    g.fillStyle === '#ff0000' && e === 5 && g.getTransform().e === 0 &&"
+        "    typeof mc.port1.addEventListener === 'function' && history.state.k === 1 &&"
+        "    location.hash === '#t'; })()",
+        false));
+    return true;
+}
+
 /* Run all browser API implementation tests */
 void run_browser_api_impl_tests(void) {
     printf("\n=== Browser API Implementation Tests ===\n");
@@ -5136,6 +5297,14 @@ void run_browser_api_impl_tests(void) {
     RUN_TEST(test_move_node_to_shadow_root);
     RUN_TEST(test_template_inner_html_content);
     RUN_TEST(test_shadow_root_inner_html_parses);
+    RUN_TEST(test_nested_tagged_templates);
+    RUN_TEST(test_lazy_for_in_comma);
+    RUN_TEST(test_module_bindings_and_import_meta);
+    RUN_TEST(test_dom_event_dispatch);
+    RUN_TEST(test_form_controls_state);
+    RUN_TEST(test_dom_parsing_and_traversal);
+    RUN_TEST(test_custom_element_new);
+    RUN_TEST(test_platform_timing_messaging_history_canvas);
     // RUN_TEST(test_js_extraction);
     // RUN_TEST(test_js_extraction_save_data);
     cleanup_test_context();

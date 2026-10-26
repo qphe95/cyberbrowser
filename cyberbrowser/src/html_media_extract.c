@@ -17,6 +17,7 @@
 #include "url_utils.h"
 #include "cyber_profile.h"
 #include "css_layout.h"
+#include "url_whatwg.h"
 
 extern const char *g_cyber_start_url;
 
@@ -1150,18 +1151,35 @@ static void patch_loaded_script(ScriptInfo *si);
  * ============================================================================ */
 
 
+static const char *page_base_url(void);
+
 /* The script's src resolved as extract_scripts_in_order resolves it (the
- * attribute value is decoded already), or false when it is not fetched. */
+ * attribute value is decoded already), or false when it is not fetched.
+ * A frame's page resolves against its own URL. */
 static bool resolve_parser_script_url(const char *raw, char *url, size_t cap) {
+    const char *base = page_base_url();
+    if (base && base != g_cyber_start_url) {
+        char *abs = wurl_resolve(base, raw);
+        if (!abs || strlen(abs) >= cap) { free(abs); return false; }
+        snprintf(url, cap, "%s", abs);
+        free(abs);
+        return true;
+    }
     if (strncmp(raw, "//", 2) == 0) snprintf(url, cap, "https:%s", raw);
     else if (raw[0] == '/') snprintf(url, cap, "%s%s", cyber_get_origin_base(), raw);
     else if (strncmp(raw, "http", 4) == 0) snprintf(url, cap, "%s", raw);
-    else return false;
+    else {
+        /* A path relative to the document. */
+        char *abs = wurl_resolve(g_cyber_start_url, raw);
+        if (!abs || strlen(abs) >= cap) { free(abs); return false; }
+        snprintf(url, cap, "%s", abs);
+        free(abs);
+    }
     return true;
 }
 
 /* Whether a <script type> is run: none or empty, or the JavaScript types and
- * module (run as a classic script), as extract_scripts_in_order decides. */
+ * module, as extract_scripts_in_order decides. */
 static bool parser_script_type_runs(const char *type) {
     if (!type || !type[0]) return true;
     return strncasecmp(type, "text/javascript", 15) == 0 ||
@@ -1242,7 +1260,7 @@ static void gc_value_root(GCValue v, bool add) {
 /* How a parser-inserted script runs (HTML §4.12.1.1 "prepare the script
  * element"): blocking the parser where it is; as soon as it is downloaded
  * (async); or once the page is parsed, in document order (defer, and
- * modules, which run here as classic scripts). */
+ * modules). */
 enum { PS_SKIP, PS_BLOCKING, PS_ASYNC, PS_DEFER };
 
 static int classify_parser_script(NodeId node, char *url, size_t cap) {
@@ -1250,6 +1268,8 @@ static int classify_parser_script(NodeId node, char *url, size_t cap) {
     const char *type = dom_get_attr_str(node, "type");
     if (!parser_script_type_runs(type)) return PS_SKIP;
     bool module = type && strncasecmp(type, "module", 6) == 0;
+    /* nomodule: for browsers without modules */
+    if (!module && dom_get_attr_str(node, "nomodule")) return PS_SKIP;
     const char *src = dom_get_attr_str(node, "src");
     bool external = src && src[0];
     if (external && (strlen(src) >= cap || !resolve_parser_script_url(src, url, cap))) return PS_SKIP;
@@ -1267,10 +1287,14 @@ typedef struct QueuedScript {
 typedef struct ScriptQueue { QueuedScript *head, *tail; } ScriptQueue;
 
 struct HtmlPageStream {
+    JSContextHandle ctx;        /* the document's realm */
+    char base_url[SCRIPT_URL_MAX_LEN];  /* "" for the main page (g_cyber_start_url) */
+    HtmlPageStream *prev;       /* the page being parsed when this one began */
     HtmlDocStream *doc;
     bool doc_ended;             /* parsing is over (deferred scripts may run) */
     bool script_created;        /* opened by document.open(): writes append */
     int run, ok;                /* scripts run, and run without an exception */
+    bool frame;                 /* a frame's page */
     bool normalized;
     int blocking_depth;         /* parser-blocking scripts on the stack */
     int nonblocking_external;   /* async / defer external scripts running */
@@ -1284,6 +1308,10 @@ static HtmlPageStream *g_page;
 /* A document.open()ed page that document.close() has not ended. */
 static HtmlPageStream *g_opened;
 
+static const char *page_base_url(void) {
+    return g_page && g_page->base_url[0] ? g_page->base_url : g_cyber_start_url;
+}
+
 static void queue_push(ScriptQueue *q, GCValue script, const char *url) {
     QueuedScript *e = (QueuedScript *)calloc(1, sizeof(*e));
     if (!e) return;
@@ -1296,7 +1324,7 @@ static void queue_push(ScriptQueue *q, GCValue script, const char *url) {
 }
 
 static void run_script(HtmlPageStream *ps, GCValue script, bool nonblocking_external) {
-    JSContextHandle ctx = g_js_context;
+    JSContextHandle ctx = ps->ctx;
     if (!ps->normalized) {
         /* As before the whole-page run: polyfills read documentElement.style. */
         const char *guard = "(function(){var de=document.documentElement;"
@@ -1307,10 +1335,21 @@ static void run_script(HtmlPageStream *ps, GCValue script, bool nonblocking_exte
     size_t len = 0;
     char *src = load_parser_script(dom_node_of(script), &len);
     if (!src) return;
+    /* A module is named by its URL (the document's for an inline one), which
+     * its imports resolve against; currentScript is null while it runs. */
+    NodeId node = dom_node_of(script);
+    const char *type = dom_get_attr_str(node, "type");
+    bool module = type && strncasecmp(type, "module", 6) == 0;
+    char module_url[SCRIPT_URL_MAX_LEN];
+    if (module) {
+        const char *s = dom_get_attr_str(node, "src");
+        if (!(s && s[0] && resolve_parser_script_url(s, module_url, sizeof(module_url))))
+            snprintf(module_url, sizeof(module_url), "%s", page_base_url() ? page_base_url() : "<inline module>");
+    }
     GCValue doc = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document");
-    JS_SetPropertyStr(ctx, doc, "currentScript", script);
+    JS_SetPropertyStr(ctx, doc, "currentScript", module ? JS_NULL : script);
     if (nonblocking_external) ps->nonblocking_external++;
-    if (js_quickjs_exec_script(src, len, ps->run, 0, ps->blocking_depth <= 1)) ps->ok++;
+    if (js_quickjs_exec_script(ctx, src, len, ps->run, 0, ps->blocking_depth <= 1, module ? module_url : NULL)) ps->ok++;
     if (nonblocking_external) ps->nonblocking_external--;
     ps->run++;
     JS_SetPropertyStr(ctx, doc, "currentScript", JS_NULL);
@@ -1468,17 +1507,33 @@ static void install_document_write(JSContextHandle ctx, GCValue doc) {
     JS_SetPropertyStr(ctx, doc, "close", JS_NewCFunction(ctx, js_document_close, "close", 0));
 }
 
-HtmlPageStream *html_page_stream_begin(void) {
-    if (!SAFE_VALID(g_js_context) || g_page) return NULL;
-    JSContextHandle ctx = g_js_context;
+static HtmlPageStream *page_stream_begin(JSContextHandle ctx, const char *base_url) {
     GCValue doc = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document");
     HtmlPageStream *ps = (HtmlPageStream *)calloc(1, sizeof(*ps));
     if (!ps) return NULL;
+    ps->ctx = ctx;
+    if (base_url) snprintf(ps->base_url, sizeof(ps->base_url), "%s", base_url);
     ps->pending = JS_NULL;
     ps->doc = html_doc_stream_begin(ctx, doc);
     if (!ps->doc) { free(ps); return NULL; }
     install_document_write(ctx, doc);
+    ps->prev = g_page;
     g_page = ps;
+    return ps;
+}
+
+HtmlPageStream *html_page_stream_begin(void) {
+    if (!SAFE_VALID(g_js_context) || g_page) return NULL;
+    return page_stream_begin(g_js_context, NULL);
+}
+
+/* A frame's page (browser/frame_api.c): parsed into ctx's document, its
+ * scripts run in ctx, its URLs resolved against base_url.  It may begin
+ * while another page is parsed (that one resumes when this one finishes). */
+HtmlPageStream *html_page_stream_begin_frame(JSContextHandle ctx, const char *base_url) {
+    if (!SAFE_VALID(ctx)) return NULL;
+    HtmlPageStream *ps = page_stream_begin(ctx, base_url);
+    if (ps) ps->frame = true;
     return ps;
 }
 
@@ -1490,7 +1545,7 @@ void html_page_stream_feed(HtmlPageStream *ps, const char *data, size_t len) {
 
 bool html_page_stream_finish(HtmlPageStream *ps, JsExecResult *out_result) {
     if (!ps) return false;
-    JSContextHandle ctx = g_js_context;
+    JSContextHandle ctx = ps->ctx;
     page_stream_run(ps, true);
     html_doc_stream_end(ps->doc);
     ps->doc_ended = true;
@@ -1509,14 +1564,18 @@ bool html_page_stream_finish(HtmlPageStream *ps, JsExecResult *out_result) {
     ps->defer.tail = NULL;
     run_ready_async(ps, true);
     js_quickjs_pump_timers_and_jobs();
-    printf("Ran %d page scripts as the page was parsed (%d without an exception)\n", ps->run, ps->ok);
+    if (ps->frame)
+        platform_log(LOG_LEVEL_INFO, "frame", "Ran %d frame scripts (%d without an exception) for %s",
+                     ps->run, ps->ok, ps->base_url);
+    else
+        printf("Ran %d page scripts as the page was parsed (%d without an exception)\n", ps->run, ps->ok);
     if (out_result) {
         memset(out_result, 0, sizeof(*out_result));
         out_result->captured_url_count = js_quickjs_get_captured_urls(out_result->captured_urls, JS_MAX_CAPTURED_URLS);
         out_result->status = ps->ok > 0 ? JS_EXEC_SUCCESS : JS_EXEC_ERROR;
     }
     bool ok = ps->ok > 0;
-    if (g_page == ps) g_page = NULL;
+    if (g_page == ps) g_page = ps->prev;
     free(ps);
     return ok;
 }
