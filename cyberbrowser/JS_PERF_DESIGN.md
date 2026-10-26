@@ -867,6 +867,75 @@ warm functions below T2's threshold, and for functions T2 does not compile or ga
 
 Either way, nothing in T2 waits for this decision.
 
+### 6.7 T2's interfaces (N5, step 5b)
+
+N5 is built in steps that each work on their own: 5a records call and arithmetic feedback in
+functions that are T2 candidates; 5b builds the compiler's skeleton with no speculation; 5c
+adds int32 and float64 speculation; 5d shape guards and inline property access; 5e direct
+calls; 5f register allocation across blocks and check removal. 5b gains nothing by itself.
+What it settles is the part every later step depends on: entry, exits, frame states, code
+generation and agreement with the interpreter in every mode.
+
+**Files.** `quickjs_t2.c` (graph building, passes and code emission), `quickjs_t2_x64.h` (a
+macro assembler for x86-64), `quickjs_t2.h`. Code memory, unwind registration and the
+profiler's map come from `quickjs_jit.c`, which exports allocation and unwind entry points.
+
+**The code is an ordinary Win64 function**, `int f(JSInterpFrame *F)`, with a prologue that
+saves the callee-saved registers it uses and one `RUNTIME_FUNCTION` describing it, so the
+OS, the sampler and C++ exceptions unwind through it like compiled C. It needs no trampoline:
+`JS_CallInternal` calls it directly where it would enter T1 (`restart:`), and handles its
+result as T1's: `JSOP_NEXT` continues the same frame in the interpreter at `F->pc` with
+`F->sp`, `JSOP_EXCEPTION` goes to the interpreter's handler lookup, `JSOP_DONE` returns.
+`JSFunctionBytecode.t2_code` holds it (before `debug`, so stripped bytecode keeps it).
+
+**Registers.** `rbx` holds `F`; `r12`, `r13`, `r14` hold `arg_buf`, `var_buf` and
+`stack_buf`. `rsi`, `rdi`, `rbp` and `r15` hold values; so do the caller-saved registers
+between calls. In 5b a value is always a tagged 8-byte `GCValue`, kept in a slot of the
+native frame from its definition to its last use (the conservative stack scan sees it there
+across helper calls); from 5c an int32 may be unboxed in a general register and a float64 in
+an XMM register, and 5f allocates registers.
+
+**The graph.** One block per bytecode basic block, each a list of nodes in SSA form. A node has
+an operation, its inputs, the representation of its result (tagged, int32, float64, none), and
+the offset of the bytecode instruction it belongs to. Building is one pass in bytecode order
+with a map from each interpreter slot (argument, local, operand-stack entry) to its value:
+
+- **A slot is either in the frame or held by a value.** Reading a slot that is in the frame
+  makes a load node; `get_loc`, `put_loc`, `dup`, `swap`, constants and the like only update
+  the map. A slot written since it was last stored is dirty.
+- **A generic node** calls the instruction's helper `jsop_<op>(F)`, the code the interpreter
+  itself runs. Before it, the dirty slots are stored and `F->sp` and `F->pc` set; after it,
+  every slot is in the frame again, because a helper (or a function it calls, through a
+  closure's reference to a captured local) may have written any of them. From 5c, slots the
+  bytecode says no closure captures stay in registers across helpers.
+- **Block boundaries.** In 5b every slot is stored at the end of a block, so a block starts
+  with all slots in the frame and needs no phis. The graph has phis from the start: 5f keeps
+  values in registers across blocks by giving each block parameters for the slots its
+  predecessors leave in registers.
+- **Branches** (`goto`, `if_true`, `if_false` and the fused compare-and-branch forms) are
+  modelled; truthiness is tested inline for booleans and int32s and through `jit_truth`
+  otherwise.
+
+**Frame states and exits.** Every node that can leave compiled code (a helper that threw, and
+from 5c a failed guard) records the frame state of its instruction: the stack depth and, for
+each slot that is dirty there, the value that holds it. Its exit stub stores those values,
+boxing unboxed ones, sets `F->sp` and `F->pc` to the instruction's start, and returns
+`JSOP_NEXT` (or `JSOP_EXCEPTION`). The interpreter then runs the instruction itself. One
+mechanism serves the exceptions of 5b, the guards of 5c and, with entry at loop headers read
+the other way, on-stack replacement.
+
+**What 5b compiles.** Functions whose instructions are all either modelled or have a helper
+that does not jump (`jsop_jumps`). Functions with `try`, `with`, `gosub`, generators and
+async functions are left to the interpreter at first. A function T2 cannot compile is marked
+and never tried again.
+
+**Modes and checks.** `QJS_T2=1` compiles functions past a hotness threshold; `QJS_T2=stress`
+compiles every function at its first call, which runs the whole test suite through T2;
+`QJS_T2_LOG=1` reports what was compiled and why not. `QJS_T2_VERIFY=1` checks, at each
+return to the interpreter, that `F->sp` matches the stack depth the bytecode has at `F->pc`.
+`tests/jit/run.sh` gains the T2 modes, so every JIT test compares T2's output with the
+interpreter's.
+
 ## 7. Milestones
 
 | | Work | Exit criterion |

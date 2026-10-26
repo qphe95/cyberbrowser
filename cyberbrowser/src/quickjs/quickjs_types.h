@@ -1417,6 +1417,9 @@ struct JSFunctionBytecode {
     /* Its feedback vector (JSFeedback, quickjs.c), made once jit_budget
      * passes the feedback threshold; GC_HANDLE_NULL before. */
     GCHandle feedback_handle;
+    /* Its optimized code (quickjs_t2.c): NULL none yet, T2_CODE_FAILED
+     * cannot be compiled. */
+    struct T2Code *t2_code;
     struct {
         /* debug info, move to separate structure to save memory? */
         JSAtom filename;

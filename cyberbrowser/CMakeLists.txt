@@ -153,6 +153,7 @@ set(QUICKJS_SOURCES
     src/quickjs/js_fast_dispatch.c
     src/quickjs/js_struct_index.c
     src/quickjs/quickjs_jit.c
+    src/quickjs/quickjs_t2.c
 )
 
 # mbedtls sources (for TLS on macOS/Linux)

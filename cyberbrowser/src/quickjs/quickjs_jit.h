@@ -134,6 +134,10 @@ JitCode *jit_compile(JSContextHandle ctx, GCHandle owner, const uint8_t *bc, uin
                      const GCValue *cpool, int (*const *helpers)(JSInterpFrame *F), const uint8_t *jumps,
                      const char *name);
 void jit_region_bounds(uintptr_t *base, size_t *size);
+/* Code memory for the optimizer (quickjs_t2.c). */
+uint8_t *jit_code_alloc(size_t n);
+uint8_t *jit_code_rw(uint8_t *p);
+int jit_code_publish(uint8_t *p, uint32_t size, uint32_t xdata_off, uint32_t total, const char *name);
 void jit_print_stats(void);
 int jit_available(void);
 

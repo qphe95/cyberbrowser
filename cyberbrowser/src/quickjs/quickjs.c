@@ -60,6 +60,7 @@
 /* Include internal types header for shared struct definitions */
 #include "quickjs-internal.h"
 #include "quickjs_jit.h"
+#include "quickjs_t2.h"
 #include "cyber_counters.h"
 #include "det_clock.h"
 
@@ -20829,6 +20830,105 @@ static const struct JitCode *js_jit_get(JSContextHandle ctx, JSFunctionBytecodeH
     return jc;
 }
 
+/* The optimizer (quickjs_t2.c; JS_PERF_DESIGN.md section 6).  Off by
+ * default while it is built: QJS_T2=1 compiles functions past
+ * JS_T2_THRESHOLD (QJS_T2_THRESHOLD overrides), QJS_T2=stress every
+ * function at its first call. */
+enum { JS_T2_OFF, JS_T2_ON, JS_T2_STRESS };
+static int g_t2_mode = -1;
+#define JS_T2_THRESHOLD_DEFAULT 20000
+static int32_t g_t2_threshold = JS_T2_THRESHOLD_DEFAULT;
+
+static void js_t2_exit_stats(void)
+{
+    t2_print_stats();
+}
+
+static int js_t2_mode_init(void)
+{
+    const char *e = getenv("QJS_T2"), *t = getenv("QJS_T2_THRESHOLD");
+    int mode = JS_T2_OFF;
+    if (e && strcmp(e, "1") == 0) mode = JS_T2_ON;
+    else if (e && strcmp(e, "stress") == 0) mode = JS_T2_STRESS;
+    if (mode != JS_T2_OFF && !t2_available()) {
+        fprintf(stderr, "[t2] unavailable here: interpreting\n");
+        mode = JS_T2_OFF;
+    }
+    if (t && atoi(t) > 0)
+        g_t2_threshold = atoi(t);
+    if (mode != JS_T2_OFF && getenv("QJS_T2_LOG"))
+        atexit(js_t2_exit_stats);
+    g_t2_mode = mode;
+    return mode;
+}
+
+static inline int js_t2_mode(void)
+{
+    return likely(g_t2_mode >= 0) ? g_t2_mode : js_t2_mode_init();
+}
+
+/* The function's T2 code, compiling it if it is hot enough; NULL to run it
+ * otherwise. */
+static const T2Code *js_t2_get(JSContextHandle ctx, JSFunctionBytecodeHandle b)
+{
+    JSFunctionBytecode *bp = (JSFunctionBytecode *)gc_deref(b);
+    T2Code *tc = bp->t2_code;
+    if (tc)
+        return tc == T2_CODE_FAILED ? NULL : tc;
+    if (g_t2_mode != JS_T2_STRESS && bp->jit_budget < g_t2_threshold)
+        return NULL;
+    if (bp->func_kind != JS_FUNC_NORMAL || bp->func_parse_state != JS_FUNC_PARSED ||
+        bp->byte_code_len <= 0) {
+        bp->t2_code = T2_CODE_FAILED;
+        return NULL;
+    }
+    {
+        char name[192], fb[96], nb[64];
+        T2Source src;
+        name[0] = 0;
+        if (getenv("QJS_T2_LOG") || getenv("CYBER_SAMPLE")) {
+            int col = 0;
+            int line = bp->has_debug ? find_line_num(ctx, b, 0, &col) : -1;
+            snprintf(name, sizeof(name), "%s@%s:%d",
+                     JS_AtomGetStr(ctx, nb, sizeof(nb), bp->func_name),
+                     bp->has_debug ? JS_AtomGetStr(ctx, fb, sizeof(fb), bp->debug.filename) : "?", line);
+            bp = (JSFunctionBytecode *)gc_deref(b);
+        }
+        src.bc = js_bc_byte_code_buf(b);
+        src.len = (uint32_t)bp->byte_code_len;
+        src.arg_count = bp->arg_count;
+        src.var_count = bp->var_count;
+        src.stack_size = bp->stack_size;
+        src.cpool = b_cpool(b);
+        src.helpers = jsop_table;
+        src.jumps = jsop_jumps;
+        src.name = name[0] ? name : NULL;
+        tc = t2_compile(&src);
+    }
+    bp = (JSFunctionBytecode *)gc_deref(b);
+    bp->t2_code = tc ? tc : T2_CODE_FAILED;
+    return tc;
+}
+
+static no_inline BOOL js_poll_interrupt(JSRuntimeHandle rt, JSContextHandle ctx);
+
+/* JS_POLL_POINT for T2 code at a backward jump: 1 when an interrupt
+ * threw. */
+int t2_poll(JSInterpFrame *F)
+{
+    gc_poll();
+    if (unlikely(g_interrupt_countdown) && unlikely(--g_interrupt_countdown == 0) &&
+        js_poll_interrupt(F->rt, F->ctx))
+        return 1;
+    return 0;
+}
+
+/* if_true / if_false of v, for T2 code. */
+int t2_to_bool(JSInterpFrame *F, GCValue v)
+{
+    return JS_ToBool(F->ctx, v);
+}
+
 /* A loop's back edge in the interpreter: count the iteration, and once the
  * function is hot, continue at the loop head through restart, which
  * compiles it and enters the compiled code there (on-stack replacement).
@@ -20836,7 +20936,8 @@ static const struct JitCode *js_jit_get(JSContextHandle ctx, JSFunctionBytecodeH
  * code has no use for it. */
 #define JS_JIT_BACKEDGE(len)                                                  \
     do {                                                                      \
-        if (unlikely(!fb) || unlikely(g_jit_mode == JS_JIT_ON)) {             \
+        if (unlikely(!fb) || unlikely(g_jit_mode == JS_JIT_ON) ||            \
+            unlikely(g_t2_mode > JS_T2_OFF)) {                                \
             JSFunctionBytecode *jbp_ = (JSFunctionBytecode *)gc_deref(b);     \
             if (jbp_->jit_budget < JS_HOTNESS_MAX)                            \
                 jbp_->jit_budget += (len);                                    \
@@ -21279,14 +21380,42 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
     OPSTATS_ENTER();
     DET_CLOCK_CALL();
     {
-        /* Hotness, for the feedback vector and T1. */
+        /* Hotness, for the feedback vector, T1 and T2. */
         JSFunctionBytecode *jbp = (JSFunctionBytecode *)gc_deref(b);
-        if (jbp->feedback_handle == GC_HANDLE_NULL ? jbp->jit_budget < JS_HOTNESS_MAX :
+        if (jbp->feedback_handle == GC_HANDLE_NULL || js_t2_mode() != JS_T2_OFF ?
+            jbp->jit_budget < JS_HOTNESS_MAX :
             js_jit_mode() == JS_JIT_ON && jbp->jit_budget < JS_JIT_THRESHOLD)
             jbp->jit_budget += JS_JIT_ENTRY_WEIGHT;
     }
 
  restart:
+    if (unlikely(g_t2_mode != JS_T2_OFF) && pc == js_bc_byte_code_buf(b)) {
+        /* T2 enters at the function's start only (no loop entry yet). */
+        const T2Code *tc = js_t2_get(ctx, b);
+        if (tc) {
+            JSInterpFrame F;
+            int r;
+            F.sp = sp; F.pc = pc; F.ret_val = ret_val;
+            F.caller_ctx = caller_ctx; F.ctx = ctx; F.rt = rt; F.p = p; F.b = b; F.sf = sf;
+            F.stack_buf = stack_buf; F.var_buf = var_buf; F.arg_buf = arg_buf;
+            F.var_refs = var_refs; F.var_refs_handle = var_refs_handle; F.sf_var_refs = sf_var_refs;
+            F.func_obj = func_obj; F.this_obj = this_obj; F.new_target = new_target;
+            F.argc = argc; F.argv = argv; F.flags = flags;
+            F.pool_depth = pool_depth;
+            F.code = NULL;
+            F.byte_code = pc;
+            F.jit_exit = JSOP_NEXT;
+            r = tc->entry(&F);
+            sp = F.sp; pc = F.pc; ret_val = F.ret_val;
+            if (r == JSOP_EXCEPTION)
+                goto exception;
+            if (r == JSOP_DONE)
+                goto done;
+            if (r == JSOP_DONE_GENERATOR)
+                goto done_generator;
+            goto interpret;     /* an exit: the interpreter continues at pc */
+        }
+    }
     if (unlikely(js_jit_mode() != JS_JIT_OFF)) {
         /* Run the call (from pc) outside this loop: compiled, or through
          * the helpers (QJS_JIT=threaded).  It comes back here only to

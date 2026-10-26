@@ -932,6 +932,48 @@ int jit_available(void)
     return jit_setup() > 0;
 }
 
+/* --- Code for the optimizer (quickjs_t2.c) -------------------------------- */
+
+/* Room for n bytes in the region: the executable address, written through
+ * jit_code_rw(); NULL when there is none. */
+uint8_t *jit_code_alloc(size_t n)
+{
+    if (jit_setup() <= 0) return NULL;
+    uint8_t *p = jit_alloc(n, 16);
+    if (!p || jit_commit(p, n)) return NULL;
+    return p;
+}
+
+uint8_t *jit_code_rw(uint8_t *p)
+{
+    return JIT_W(p);
+}
+
+/* The function at [p, p+size) is written, its UNWIND_INFO at p+xdata_off:
+ * describe it to the unwinder and the profiler's map, and make it
+ * runnable.  In allocation order (the unwind table is sorted by address). */
+int jit_code_publish(uint8_t *p, uint32_t size, uint32_t xdata_off, uint32_t total, const char *name)
+{
+    LONG n = g_jit.n_unwind;
+    if ((uint32_t)n >= JIT_MAX_UNWIND) return -1;
+    size_t need = ((size_t)n + 1) * sizeof(RUNTIME_FUNCTION);
+    if (need > g_jit.unwind_committed) {
+        size_t c = g_jit.unwind_committed + (64 << 10);
+        if (!VirtualAlloc(g_jit.unwind, c, MEM_COMMIT, PAGE_READWRITE)) return -1;
+        g_jit.unwind_committed = c;
+    }
+    RUNTIME_FUNCTION *rf = &g_jit.unwind[n];
+    rf->BeginAddress = (DWORD)(p - g_jit.base);
+    rf->EndAddress = (DWORD)(p - g_jit.base) + size;
+    rf->UnwindData = (DWORD)(p - g_jit.base) + xdata_off;
+    MemoryBarrier();
+    g_jit.n_unwind = n + 1;
+    jit_flush(p, total);
+    if (g_jit.map)
+        fprintf(g_jit.map, "F %zx %x t2:%s\n", (size_t)(p - g_jit.base), size, name ? name : "?");
+    return 0;
+}
+
 #else /* !JIT_SUPPORTED */
 
 int (*g_jit_trampoline)(JSInterpFrame *F, void *target);
@@ -946,6 +988,13 @@ JitCode *jit_compile(JSContextHandle ctx, GCHandle owner, const uint8_t *bc, uin
 
 void jit_print_stats(void) {}
 int jit_available(void) { return 0; }
+uint8_t *jit_code_alloc(size_t n) { (void)n; return NULL; }
+uint8_t *jit_code_rw(uint8_t *p) { return p; }
+int jit_code_publish(uint8_t *p, uint32_t size, uint32_t xdata_off, uint32_t total, const char *name)
+{
+    (void)p; (void)size; (void)xdata_off; (void)total; (void)name;
+    return -1;
+}
 
 #ifdef _WIN32
 /* For the sampling profiler (cyber_sampler.c): no JIT region. */
