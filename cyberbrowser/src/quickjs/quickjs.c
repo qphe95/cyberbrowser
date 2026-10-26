@@ -20916,6 +20916,7 @@ static const T2Code *js_t2_get(JSContextHandle ctx, JSFunctionBytecodeHandle b)
             JSFeedback *fb = js_feedback_make(b);
             src.site_of = fb ? js_feedback_site_of(fb) : NULL;
             src.arith = fb ? js_feedback_arith(fb) : NULL;
+            src.ics = fb ? js_feedback_sites(fb) : NULL;
         }
         tc = t2_compile(&src);
     }
@@ -20951,7 +20952,9 @@ int t2_to_bool(JSInterpFrame *F, GCValue v)
 void t2_deopt(JSInterpFrame *F, uint8_t *state, const GCValue *a, const GCValue *b)
 {
     JSFunctionBytecode *bp = (JSFunctionBytecode *)gc_deref(F->b);
-    int numbers = JS_IsNumber(*a) && (!b || JS_IsNumber(*b));
+    /* no operands: a guard on something other than numbers (an array, a
+       shape) failed */
+    int numbers = a && JS_IsNumber(*a) && (!b || JS_IsNumber(*b));
     if (state)
         *state |= numbers ? T2_ARITH_DOUBLE : T2_ARITH_OTHER;
     if (!bp)
@@ -24511,6 +24514,32 @@ static int jit_ic_retain(GCHandle h)
     }
 }
 
+/* For T2 (quickjs_t2.c): compiled code names shapes and holders by handle,
+ * so they must stay alive while it may run; the retention set keeps them
+ * (0 when it is full: then the site is not compiled inline).  And where
+ * the prototype epochs (jit_proto_epoch) live. */
+int t2_retain(GCHandle h)
+{
+    return jit_ic_retain(h);
+}
+
+const uint16_t t2_class_array = JS_CLASS_ARRAY;
+
+const uint32_t *t2_proto_epoch_addr(void)
+{
+    return &g_jit_proto_epoch;
+}
+
+const uint32_t *t2_atom_epoch_addr(JSAtom atom)
+{
+    return &g_jit_atom_epoch[atom & (JIT_ATOM_EPOCHS - 1)];
+}
+
+uint32_t t2_proto_epoch(JSAtom atom)
+{
+    return jit_proto_epoch(atom);
+}
+
 /* The retention set, for JS_GCEnumerateEngineRoots. */
 static void jit_ic_mark_roots(JSRuntimeHandle rt, JS_MarkFunc *mark_func)
 {
@@ -27830,6 +27859,7 @@ static inline int js_feedback_op_site_kind(int op)
     case OP_and: case OP_or: case OP_xor: case OP_shl: case OP_sar: case OP_shr:
     case OP_inc: case OP_dec: case OP_neg: case OP_post_inc: case OP_post_dec:
     case OP_inc_loc: case OP_dec_loc: case OP_add_loc:
+    case OP_get_array_el: case OP_get_array_el2: case OP_put_array_el:
         return 2;
     default:
         return 0;

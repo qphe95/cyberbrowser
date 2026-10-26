@@ -964,6 +964,53 @@ a block's end, a return, an exit. A branch on a comparison tests its boolean dir
 - **Tests:** `tests/jit/t2arith.js` warms each operation on int32s, then sends overflow,
   `-0`, NaN, doubles, strings, objects and booleans, in both T2 modes.
 
+**5d as built: properties and arrays.** `get_field`, `get_field2` and `put_field` compile
+inline from the site's feedback cache when its ways can be: up to four shapes, own data
+properties, and for gets also prototype data properties and absent ones (each behind the
+prototype epoch check of `jit_proto_epoch`, and not for an exotic receiver). The code tests
+the receiver's tag and shape against the ways and loads or stores the slot directly,
+marking the card on a store; a watched object exits. `get_array_el`, `get_array_el2` and
+`put_array_el` on a fast array (class `Array`, `fast_array` set) with an int32 index below
+its count load and store the element inline.
+
+- **Compiled code keeps what it names alive.** The interpreter's caches hold shapes weakly
+  (5.4), but compiled code compares against shape handles and reads holders by handle: a
+  dead shape whose handle was reused would match the wrong layout. The shapes and holders a
+  T2 site compiles inline go in the inline caches' retention set, as T1's do; it is bounded
+  by compiled code, not by everything the interpreter ever saw.
+- **Exits.** A shape miss, a stale epoch, a non-object or a watched object drops the code;
+  the interpreter fills the missing way, and the next compilation includes it. Array
+  accesses have a state byte: a failed array guard marks the site generic.
+- **Not yet:** getters, adds and private fields stay helper calls; element kinds (an array
+  known to hold only int32s or only doubles, read without a tag test) are not tracked, so an
+  element read is tagged and unboxed by the arithmetic that uses it; typed arrays use their
+  helpers.
+- **Tests:** `tests/jit/t2props.js` (polymorphic and fifth shapes, prototype changes and
+  shadowing, absent properties defined later, getters added after compiling, read-only,
+  frozen and accessor receivers, adds and deletes, out-of-bounds, holey, frozen, typed and
+  non-array element accesses, shape churn under GC). The `t2` mode of `tests/jit/run.sh`
+  lowers the feedback threshold, so caches fill before T2 compiles.
+
+**Where T2 stands after 5d** (12 tests, 2 rounds, steady state against the interpreter, at
+the default thresholds):
+
+| | T2 | T1 |
+|---|---|---|
+| navier-stokes | −61% | −33% |
+| crypto | −42% | −29% |
+| stanford-crypto-aes | −39% | −33% |
+| Box2D | −9% | −12% |
+| richards | −4% | −4% |
+| delta-blue | +3% | −2% |
+| gaussian-blur | ±0 | −31% |
+| Air, acorn, chai, earley-boyer, raytrace | +14% to +19% | +1% to +35% |
+| **Geometric mean** | **−10.5%** | **−9.2%** |
+
+T2 now beats T1 on arithmetic-heavy code and over the twelve. What remains: calls, still
+through the generic helper and the interpreter's frame setup (5e: direct calls); values
+stored to the frame at every helper and block end (5f); and gaussian-blur's hot loop, which
+runs in a function called once, so T2 never enters it (loop entry, 6.2).
+
 ## 7. Milestones
 
 | | Work | Exit criterion |

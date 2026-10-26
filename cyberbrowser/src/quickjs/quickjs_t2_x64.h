@@ -383,6 +383,85 @@ static inline void x_store32(XAsm *a, int base, int32_t disp, int src)
     x_mem(a, src, base, disp);
 }
 
+/* cmp r32, imm32 */
+static inline void x_cmp32_i(XAsm *a, int r, uint32_t imm)
+{
+    x_rex(a, 0, 0, 0, r);
+    x_byte(a, 0x81);
+    x_modrm_rr(a, 7, r);
+    x_u32(a, imm);
+}
+
+/* shl r64, imm8 */
+static inline void x_shl64_i(XAsm *a, int r, uint8_t n)
+{
+    x_rex(a, 1, 0, 0, r);
+    x_byte(a, 0xc1);
+    x_modrm_rr(a, 4, r);
+    x_byte(a, n);
+}
+
+/* test byte [base + disp], imm8 */
+static inline void x_test_mem8_i(XAsm *a, int base, int32_t disp, uint8_t imm)
+{
+    x_rex(a, 0, 0, 0, base);
+    x_byte(a, 0xf6);
+    x_mem(a, 0, base, disp);
+    x_byte(a, imm);
+}
+
+/* movzx r32, word [base + disp] */
+static inline void x_load16(XAsm *a, int dst, int base, int32_t disp)
+{
+    x_rex(a, 0, dst, 0, base);
+    x_byte(a, 0x0f); x_byte(a, 0xb7);
+    x_mem(a, dst, base, disp);
+}
+
+/* cmp r32, dword [base + disp] */
+static inline void x_cmp32_mem(XAsm *a, int r, int base, int32_t disp)
+{
+    x_rex(a, 0, r, 0, base);
+    x_byte(a, 0x3b);
+    x_mem(a, r, base, disp);
+}
+
+/* ModRM + SIB for [base + index*scale + disp] (index not rsp). */
+static void x_mem_sib(XAsm *a, int r, int base, int index, int scale, int32_t disp)
+{
+    int ss = scale == 8 ? 3 : scale == 4 ? 2 : scale == 2 ? 1 : 0;
+    int mod = disp == 0 && (base & 7) != X_RBP ? 0 : (disp >= -128 && disp <= 127 ? 1 : 2);
+    x_byte(a, (uint8_t)((mod << 6) | ((r & 7) << 3) | 4));
+    x_byte(a, (uint8_t)((ss << 6) | ((index & 7) << 3) | (base & 7)));
+    if (mod == 1) x_byte(a, (uint8_t)(int8_t)disp);
+    else if (mod == 2) x_u32(a, (uint32_t)disp);
+}
+
+/* mov dst, [base + index*8 + disp] */
+static inline void x_load_idx8(XAsm *a, int dst, int base, int index, int32_t disp)
+{
+    x_rex(a, 1, dst, index, base);
+    x_byte(a, 0x8b);
+    x_mem_sib(a, dst, base, index, 8, disp);
+}
+
+/* mov [base + index*8 + disp], src */
+static inline void x_store_idx8(XAsm *a, int base, int index, int32_t disp, int src)
+{
+    x_rex(a, 1, src, index, base);
+    x_byte(a, 0x89);
+    x_mem_sib(a, src, base, index, 8, disp);
+}
+
+/* mov byte [base + index], imm8 */
+static inline void x_store8_idx_i(XAsm *a, int base, int index, uint8_t imm)
+{
+    x_rex(a, 0, 0, index, base);
+    x_byte(a, 0xc6);
+    x_mem_sib(a, 0, base, index, 1, 0);
+    x_byte(a, imm);
+}
+
 /* --- SSE2 (xmm0..xmm7 only) ---------------------------------------------- */
 
 /* movq xmm, r64 */

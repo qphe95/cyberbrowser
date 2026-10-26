@@ -30,6 +30,7 @@ typedef struct T2Source {
        NULL when it has none (then nothing is speculated). */
     const uint16_t *site_of;
     uint8_t *arith;
+    const JitIC *ics;           /* its property sites' inline caches */
 } T2Source;
 
 /* An arithmetic site's state: what made T2's speculation on it fail. */
@@ -44,5 +45,10 @@ void t2_print_stats(void);
 int t2_poll(JSInterpFrame *F);
 int t2_to_bool(JSInterpFrame *F, GCValue v);
 void t2_deopt(JSInterpFrame *F, uint8_t *state, const GCValue *a, const GCValue *b);
+int t2_retain(GCHandle h);
+extern const uint16_t t2_class_array;   /* JS_CLASS_ARRAY */
+const uint32_t *t2_proto_epoch_addr(void);
+const uint32_t *t2_atom_epoch_addr(JSAtom atom);
+uint32_t t2_proto_epoch(JSAtom atom);
 
 #endif /* QUICKJS_T2_H */

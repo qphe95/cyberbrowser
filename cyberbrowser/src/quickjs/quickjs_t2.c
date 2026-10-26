@@ -211,6 +211,12 @@ enum {
     T2N_F64_NEG,
     T2N_F64_CMP,    /* bool: a cc b (false when unordered, but !=) */
     T2N_BOOL_NOT,
+    /* Objects (5d): a guarded object a, from the site's inline cache
+       (ic: B->ics) */
+    T2N_GET_FIELD,  /* a.atom */
+    T2N_PUT_FIELD,  /* a.atom = b (an own writable property) */
+    T2N_GET_ELEM,   /* a[b], a a fast array, b an int32 in bounds */
+    T2N_PUT_ELEM,   /* a[b] = c */
 };
 
 /* A value's representation. */
@@ -223,7 +229,9 @@ typedef struct T2Node {
     uint8_t op;
     uint8_t rep;        /* of its result */
     uint8_t cc;         /* comparisons */
-    int32_t a, b;       /* inputs */
+    int32_t a, b, c;    /* inputs */
+    int32_t ic;         /* GET_FIELD, PUT_FIELD: its ways (B->ics) */
+    JSAtom atom;        /* GET_FIELD, PUT_FIELD */
     int32_t slot;       /* LOAD, STORE */
     uint32_t pc;        /* the instruction's offset */
     int32_t depth;      /* stack depth before it (GENERIC, POLL, RETURN) */
@@ -276,11 +284,31 @@ typedef struct T2Builder {
     int why_op;         /* ... the instruction, or -1 */
     int cur_exit;       /* the exit of the instruction being built, -1: none yet */
     uint32_t cur_pc;
+    JitIC *ics;         /* the inline caches compiled inline, as they were */
+    int n_ics, cap_ics;
 } T2Builder;
 
 #define T2_ARG(B, i) (i)
 #define T2_LOC(B, i) ((B)->src->arg_count + (i))
 #define T2_STK(B, i) ((B)->src->arg_count + (B)->src->var_count + (i))
+
+/* Whether instruction op has a state byte in the feedback vector (the
+ * arithmetic sites of js_feedback_op_site_kind, and array accesses). */
+static int t2_has_state(int op)
+{
+    switch (op) {
+    case OP_add: case OP_sub: case OP_mul: case OP_div:
+    case OP_lt: case OP_lte: case OP_gt: case OP_gte:
+    case OP_eq: case OP_neq: case OP_strict_eq: case OP_strict_neq:
+    case OP_and: case OP_or: case OP_xor: case OP_shl: case OP_sar: case OP_shr:
+    case OP_inc: case OP_dec: case OP_neg: case OP_post_inc: case OP_post_dec:
+    case OP_inc_loc: case OP_dec_loc: case OP_add_loc:
+    case OP_get_array_el: case OP_get_array_el2: case OP_put_array_el:
+        return 1;
+    default:
+        return 0;
+    }
+}
 
 static int t2_grow(T2Builder *B, void **p, int *cap, int n, size_t elem)
 {
@@ -300,7 +328,7 @@ static int t2_node(T2Builder *B, int op, int rep)
     memset(n, 0, sizeof(*n));
     n->op = (uint8_t)op;
     n->rep = (uint8_t)rep;
-    n->a = n->b = n->slot = n->t = n->e = n->exit = n->i32_of = n->f64_of = -1;
+    n->a = n->b = n->c = n->ic = n->slot = n->t = n->e = n->exit = n->i32_of = n->f64_of = -1;
     n->spill = -1;
     return B->n_nodes++;
 }
@@ -419,7 +447,8 @@ static int t2_exit(T2Builder *B, int opnd0, int opnd1)
     x->first = B->n_entries;
     x->n = 0;
     x->state = NULL;
-    if (B->src->site_of && B->src->arith && B->src->site_of[B->cur_pc] != 0xffff)
+    if (t2_has_state(B->src->bc[B->cur_pc]) && B->src->site_of && B->src->arith &&
+        B->src->site_of[B->cur_pc] != 0xffff)
         x->state = &B->src->arith[B->src->site_of[B->cur_pc]];
     x->opnd[0] = opnd0;
     x->opnd[1] = opnd1;
@@ -437,7 +466,7 @@ static int t2_exit(T2Builder *B, int opnd0, int opnd1)
 }
 
 /* The arithmetic state of the instruction being built (0: nothing has made
- * speculation fail yet, or no feedback). */
+ * speculation fail yet, or no feedback); array accesses have one too. */
 static int t2_arith_state(T2Builder *B)
 {
     const T2Source *src = B->src;
@@ -598,6 +627,102 @@ static int t2_add_const(T2Builder *B, int s, int delta)
     return B->oom ? -1 : r;
 }
 
+/* The inline cache of the property site at the instruction being built, if
+ * its ways can be compiled inline: own data properties, and for gets also
+ * prototype data properties and absent properties (not getters, not a
+ * megamorphic site); for puts only own writable ones (no adds).  Its shapes
+ * and holders are retained: the code names them by handle.  The cache's
+ * index in B->ics, or -1. */
+static int t2_inline_ic(T2Builder *B, int is_put)
+{
+    const T2Source *src = B->src;
+    if (!src->ics || !src->site_of || src->site_of[B->cur_pc] == 0xffff) return -1;
+    const JitIC *ic = &src->ics[src->site_of[B->cur_pc]];
+    if (ic->mega || ic->n == 0 || ic->n > JIT_IC_WAYS) return -1;
+    for (int k = 0; k < ic->n; k++) {
+        uint32_t slot = ic->slot[k];
+        if (is_put) {
+            if (ic->holder[k] != GC_HANDLE_NULL || slot >= 0x7fffffffu) return -1;   /* adds, getters */
+        } else if (slot != JIT_IC_ABSENT && (slot & 0x80000000u)) {
+            return -1;                                                          /* getters */
+        }
+    }
+    if (!is_put && ic->epoch != t2_proto_epoch(t2_u32(src->bc + B->cur_pc + 1))) {
+        /* prototype ways already stale: compile only the own ones */
+        for (int k = 0; k < ic->n; k++)
+            if (ic->holder[k] != GC_HANDLE_NULL) return -1;
+    }
+    for (int k = 0; k < ic->n; k++) {
+        if (!t2_retain(ic->shape[k])) return -1;
+        if (ic->holder[k] != GC_HANDLE_NULL && ic->slot[k] != JIT_IC_ABSENT && !t2_retain(ic->holder[k]))
+            return -1;
+    }
+    if (!t2_grow(B, (void **)&B->ics, &B->cap_ics, B->n_ics, sizeof(JitIC))) return -1;
+    B->ics[B->n_ics] = *ic;
+    return B->n_ics++;
+}
+
+/* get_field / get_field2 / put_field inline from the site's cache: 1 when
+ * built, 0 for the helper. */
+static int t2_field(T2Builder *B, int op, JSAtom atom)
+{
+    int is_put = op == OP_put_field;
+    int so = T2_STK(B, B->depth - (is_put ? 2 : 1));
+    int ic = t2_inline_ic(B, is_put);
+    if (ic < 0) return 0;
+    int no = t2_value(B, so);
+    if (B->oom || B->nodes[no].rep != T2R_TAGGED) return 0;
+    int nv = -1;
+    if (is_put) {
+        nv = t2_value(B, T2_STK(B, B->depth - 1));
+        if (B->oom) return 0;
+    }
+    int x = t2_exit(B, -1, -1);
+    int r = t2_node2(B, is_put ? T2N_PUT_FIELD : T2N_GET_FIELD, is_put ? T2R_NONE : T2R_TAGGED, no, nv);
+    if (B->oom || x < 0) return 0;
+    B->nodes[r].exit = x;
+    B->nodes[r].ic = ic;
+    B->nodes[r].atom = atom;
+    if (is_put) {
+        B->depth -= 2;
+    } else if (op == OP_get_field) {
+        B->depth--;
+        t2_push_val(B, r);
+    } else {
+        t2_push_val(B, r);  /* get_field2: obj obj.f */
+    }
+    return 1;
+}
+
+/* get_array_el / get_array_el2 / put_array_el on a fast array: 1 when
+ * built, 0 for the helper. */
+static int t2_elem(T2Builder *B, int op)
+{
+    int is_put = op == OP_put_array_el;
+    int d = B->depth, so = T2_STK(B, d - (is_put ? 3 : 2)), si = T2_STK(B, d - (is_put ? 2 : 1));
+    if (t2_arith_state(B) & T2_ARITH_OTHER) return 0;
+    int no = t2_value(B, so), ni = t2_value(B, si), nv = -1;
+    if (is_put) nv = t2_value(B, T2_STK(B, d - 1));
+    if (B->oom || B->nodes[no].rep != T2R_TAGGED || t2_const_not_number(B, ni)) return 0;
+    int ii = t2_as_i32(B, ni, -1, -1);
+    if (ii < 0) return 0;
+    int x = t2_exit(B, -1, -1);
+    int r = t2_node2(B, is_put ? T2N_PUT_ELEM : T2N_GET_ELEM, is_put ? T2R_NONE : T2R_TAGGED, no, ii);
+    if (B->oom || x < 0) return 0;
+    B->nodes[r].c = nv;
+    B->nodes[r].exit = x;
+    if (is_put) {
+        B->depth -= 3;
+    } else if (op == OP_get_array_el) {
+        B->depth -= 2;
+        t2_push_val(B, r);
+    } else {
+        B->depth--;         /* get_array_el2: obj prop -> obj value */
+        t2_push_val(B, r);
+    }
+    return 1;
+}
+
 /* Generic: the instruction at pos through its helper. */
 static int t2_generic(T2Builder *B, uint32_t pos)
 {
@@ -681,6 +806,18 @@ static int t2_build_block(T2Builder *B, uint32_t pos)
         case OP_lt: case OP_lte: case OP_gt: case OP_gte:
         case OP_eq: case OP_neq: case OP_strict_eq: case OP_strict_neq:
             if (!t2_binary(B, op) && !t2_generic(B, pos))
+                return 0;
+            break;
+        case OP_get_field:
+        case OP_get_field2:
+        case OP_put_field:
+            if (!t2_field(B, op, t2_u32(bc + pos + 1)) && !t2_generic(B, pos))
+                return 0;
+            break;
+        case OP_get_array_el:
+        case OP_get_array_el2:
+        case OP_put_array_el:
+            if (!t2_elem(B, op) && !t2_generic(B, pos))
                 return 0;
             break;
         case OP_inc:
@@ -848,6 +985,7 @@ static int t2_build_block(T2Builder *B, uint32_t pos)
 #define T2_ARGS X_R12
 #define T2_VARS X_R13
 #define T2_STKR X_R14
+#define T2_HEAP X_R15   /* g_gc.heap_base: a handle's object is at heap + h*16 + 16 */
 static const int t2_saved[] = { X_RBX, X_RSI, X_RDI, X_RBP, X_R12, X_R13, X_R14, X_R15 };
 #define T2_N_SAVED ((int)(sizeof(t2_saved) / sizeof(t2_saved[0])))
 #define T2_MAX_FRAME 3072   /* stays below a page: no stack probe */
@@ -948,7 +1086,8 @@ static inline void t2_set_frame_pc(T2Gen *G, uint32_t pc, int d)
 static int t2_has_result(int op)
 {
     return op != T2N_CONST && op != T2N_STORE && op != T2N_GENERIC && op != T2N_BRANCH &&
-           op != T2N_JUMP && op != T2N_POLL && op != T2N_RETURN;
+           op != T2N_JUMP && op != T2N_POLL && op != T2N_RETURN && op != T2N_PUT_FIELD &&
+           op != T2N_PUT_ELEM;
 }
 
 /* Native stack slots: each value gets one at its definition and gives it
@@ -961,6 +1100,7 @@ static int t2_assign_spills(T2Builder *B, uint32_t *n_spills)
         T2Node *N = &B->nodes[i];
         if (N->a >= 0) B->nodes[N->a].last_use = i;
         if (N->b >= 0) B->nodes[N->b].last_use = i;
+        if (N->c >= 0) B->nodes[N->c].last_use = i;
         if (N->exit >= 0) {
             T2Exit *x = &B->exits[N->exit];
             for (int k = 0; k < x->n; k++)
@@ -971,8 +1111,8 @@ static int t2_assign_spills(T2Builder *B, uint32_t *n_spills)
     if (!free_list) return 0;
     for (int i = 0; i < B->n_nodes; i++) {
         T2Node *N = &B->nodes[i];
-        int ins[2] = { N->a, N->b };
-        for (int k = 0; k < 2; k++) {
+        int ins[3] = { N->a, N->b, N->c };
+        for (int k = 0; k < 3; k++) {
             int m = ins[k];
             if (m >= 0 && B->nodes[m].last_use == i && B->nodes[m].spill >= 0) {
                 free_list[n_free++] = B->nodes[m].spill;
@@ -1042,6 +1182,197 @@ static void t2_emit_cmp(T2Gen *G, T2Node *N, int is_f64)
         x_alu_ri32(a, 4, X_RAX, 1);         /* and eax, 1 */
         break;
     }
+}
+
+/* --- Objects -------------------------------------------------------------- */
+
+/* Where JSObject's flag bits are (bitfields: found once, by setting each). */
+static struct {
+    int ready;
+    int32_t exotic_off, fast_array_off, watched_off;    /* their bytes */
+    uint8_t exotic, fast_array, watched;                /* their bits */
+} t2_obj;
+
+static int t2_find_bit(const uint8_t *b, size_t n, uint8_t *mask)
+{
+    for (size_t k = 0; k < n; k++)
+        if (b[k]) { *mask = b[k]; return (int)k; }
+    return -1;
+}
+
+static void t2_obj_layout(void)
+{
+    JSObject o;
+    if (t2_obj.ready) return;
+    memset(&o, 0, sizeof(o)); o.is_exotic = 1;
+    t2_obj.exotic_off = t2_find_bit((const uint8_t *)&o, sizeof(o), &t2_obj.exotic);
+    memset(&o, 0, sizeof(o)); o.fast_array = 1;
+    t2_obj.fast_array_off = t2_find_bit((const uint8_t *)&o, sizeof(o), &t2_obj.fast_array);
+    memset(&o, 0, sizeof(o)); o.is_watched = 1;
+    t2_obj.watched_off = t2_find_bit((const uint8_t *)&o, sizeof(o), &t2_obj.watched);
+    t2_obj.ready = 1;
+}
+
+#define T2_OBJ(field) ((int32_t)(2 * GC_HEADER_SIZE + offsetof(JSObject, field)))
+#define T2_OBJ_BYTE(off) ((int32_t)(2 * GC_HEADER_SIZE) + (off))
+#define T2_OBJ_INLINE_PROPS ((int32_t)(2 * GC_HEADER_SIZE + ((sizeof(JSObject) + 7) & ~(size_t)7)))
+
+/* rax: a tagged value; exit unless it is an object.  Then rdx: its handle's
+ * base (heap + h*16; the object's fields at T2_OBJ offsets). */
+static void t2_emit_object(T2Gen *G, int exit_label)
+{
+    XAsm *a = &G->a;
+    x_mov_rr(a, X_RCX, X_RAX);
+    x_shr64_i(a, X_RCX, 32);
+    x_cmp32_i(a, X_RCX, (uint32_t)JS_TAG_OBJECT);
+    x_jcc(a, X_CC_NE, exit_label);
+    x_byte(a, 0x89); x_byte(a, 0xc2);       /* mov edx, eax */
+    x_shl64_i(a, X_RDX, 4);
+    x_alu_rr64(a, X_ADD, X_RDX, T2_HEAP);
+}
+
+/* r8: the property array of the object at base reg (its own array, or its
+ * inline slots). */
+static void t2_emit_props(T2Gen *G, int reg)
+{
+    XAsm *a = &G->a;
+    int in_obj = x_new_label(a), have = x_new_label(a);
+    x_load32(a, X_R8, reg, T2_OBJ(prop_handle));
+    x_test32(a, X_R8, X_R8);
+    x_jcc(a, X_CC_E, in_obj);
+    x_shl64_i(a, X_R8, 4);
+    x_alu_rr64(a, X_ADD, X_R8, T2_HEAP);
+    x_alu_ri(a, 0, X_R8, 2 * GC_HEADER_SIZE);
+    x_jmp(a, have);
+    x_bind(a, in_obj);
+    x_lea(a, X_R8, reg, T2_OBJ_INLINE_PROPS);
+    x_bind(a, have);
+}
+
+/* The prototype epoch of atom still the one the ways were filled with
+ * (jit_proto_epoch); exit if not.  Clobbers r9, r10. */
+static void t2_emit_epoch_check(T2Gen *G, JSAtom atom, uint32_t epoch, int exit_label)
+{
+    XAsm *a = &G->a;
+    x_mov_ri(a, X_R9, (uint64_t)(uintptr_t)t2_proto_epoch_addr());
+    x_load32(a, X_R10, X_R9, 0);
+    x_mov_ri(a, X_R9, (uint64_t)(uintptr_t)t2_atom_epoch_addr(atom));
+    x_rex(a, 0, X_R10, 0, X_R9); x_byte(a, 0x03); x_mem(a, X_R10, X_R9, 0);   /* add r10d, [r9] */
+    x_cmp32_i(a, X_R10, epoch);
+    x_jcc(a, X_CC_NE, exit_label);
+}
+
+/* Mark the card of the heap slot at address reg (gc_dirty_slot); clobbers
+ * rax, rcx. */
+static void t2_emit_card(T2Gen *G, int reg)
+{
+    XAsm *a = &G->a;
+#if GC_SOFTWARE_DIRTY
+    x_mov_rr(a, X_RAX, reg);
+    x_alu_rr64(a, X_SUB, X_RAX, T2_HEAP);
+    x_shr64_i(a, X_RAX, GC_CARD_SHIFT);
+    x_mov_ri(a, X_RCX, (uint64_t)(uintptr_t)&g_gc.cards);
+    x_load(a, X_RCX, X_RCX, 0);
+    x_store8_idx_i(a, X_RCX, X_RAX, 1);
+#else
+    (void)a; (void)reg;
+#endif
+}
+
+static void t2_emit_get_field(T2Gen *G, int i)
+{
+    T2Builder *B = G->B;
+    T2Node *N = &B->nodes[i];
+    const JitIC *ic = &B->ics[N->ic];
+    XAsm *a = &G->a;
+    int ex = t2_exit_label(G, N->exit), done = x_new_label(a), way[JIT_IC_WAYS];
+    t2_get(G, X_RAX, N->a);
+    t2_emit_object(G, ex);
+    x_load32(a, X_RCX, X_RDX, T2_OBJ(shape_handle));
+    for (int k = 0; k < ic->n; k++) {
+        way[k] = x_new_label(a);
+        x_cmp32_i(a, X_RCX, ic->shape[k]);
+        x_jcc(a, X_CC_E, way[k]);
+    }
+    x_jmp(a, ex);
+    for (int k = 0; k < ic->n; k++) {
+        x_bind(a, way[k]);
+        if (ic->holder[k] == GC_HANDLE_NULL) {
+            t2_emit_props(G, X_RDX);
+            x_load(a, X_RAX, X_R8, (int32_t)ic->slot[k] * 8);
+        } else {
+            /* on a prototype (or on none): an exotic receiver looks first */
+            x_test_mem8_i(a, X_RDX, T2_OBJ_BYTE(t2_obj.exotic_off), t2_obj.exotic);
+            x_jcc(a, X_CC_NE, ex);
+            t2_emit_epoch_check(G, N->atom, ic->epoch, ex);
+            if (ic->slot[k] == JIT_IC_ABSENT) {
+                x_mov_ri(a, X_RAX, t2_bits(JS_UNDEFINED));
+            } else {
+                x_mov_ri(a, X_R9, ic->holder[k]);
+                x_shl64_i(a, X_R9, 4);
+                x_alu_rr64(a, X_ADD, X_R9, T2_HEAP);
+                t2_emit_props(G, X_R9);
+                x_load(a, X_RAX, X_R8, (int32_t)ic->slot[k] * 8);
+            }
+        }
+        x_jmp(a, done);
+    }
+    x_bind(a, done);
+    t2_put(G, i, X_RAX);
+}
+
+static void t2_emit_put_field(T2Gen *G, int i)
+{
+    T2Builder *B = G->B;
+    T2Node *N = &B->nodes[i];
+    const JitIC *ic = &B->ics[N->ic];
+    XAsm *a = &G->a;
+    int ex = t2_exit_label(G, N->exit), done = x_new_label(a), way[JIT_IC_WAYS];
+    t2_get_boxed(G, N->b);
+    x_mov_rr(a, X_R11, X_RAX);              /* the value */
+    t2_get(G, X_RAX, N->a);
+    t2_emit_object(G, ex);
+    x_test_mem8_i(a, X_RDX, T2_OBJ_BYTE(t2_obj.watched_off), t2_obj.watched);
+    x_jcc(a, X_CC_NE, ex);
+    x_load32(a, X_RCX, X_RDX, T2_OBJ(shape_handle));
+    for (int k = 0; k < ic->n; k++) {
+        way[k] = x_new_label(a);
+        x_cmp32_i(a, X_RCX, ic->shape[k]);
+        x_jcc(a, X_CC_E, way[k]);
+    }
+    x_jmp(a, ex);
+    for (int k = 0; k < ic->n; k++) {
+        x_bind(a, way[k]);
+        t2_emit_props(G, X_RDX);
+        x_lea(a, X_R8, X_R8, (int32_t)ic->slot[k] * 8);
+        x_store(a, X_R8, 0, X_R11);
+        t2_emit_card(G, X_R8);
+        x_jmp(a, done);
+    }
+    x_bind(a, done);
+}
+
+/* a[b] of a fast array (a[b] = c): r8 the element's address, after the
+ * guards. */
+static void t2_emit_elem_addr(T2Gen *G, T2Node *N, int ex)
+{
+    XAsm *a = &G->a;
+    t2_get(G, X_RAX, N->a);
+    t2_emit_object(G, ex);
+    x_load16(a, X_RCX, X_RDX, T2_OBJ(class_id));
+    x_cmp32_i(a, X_RCX, t2_class_array);
+    x_jcc(a, X_CC_NE, ex);
+    x_test_mem8_i(a, X_RDX, T2_OBJ_BYTE(t2_obj.fast_array_off), t2_obj.fast_array);
+    x_jcc(a, X_CC_E, ex);
+    t2_get(G, X_RCX, N->b);
+    x_cmp32_mem(a, X_RCX, X_RDX, T2_OBJ(u.array.count));
+    x_jcc(a, X_CC_AE, ex);                  /* unsigned: a negative index too */
+    x_byte(a, 0x89); x_byte(a, 0xc9);       /* mov ecx, ecx */
+    x_load32(a, X_R8, X_RDX, T2_OBJ(u.array.u.values_handle));
+    x_shl64_i(a, X_R8, 4);
+    x_alu_rr64(a, X_ADD, X_R8, T2_HEAP);
+    x_lea(a, X_R8, X_R8, 2 * GC_HEADER_SIZE);
+    x_rex(a, 1, X_R8, X_RCX, X_R8); x_byte(a, 0x8d); x_mem_sib(a, X_R8, X_R8, X_RCX, 8, 0); /* lea r8, [r8+rcx*8] */
 }
 
 static void t2_emit_node(T2Gen *G, int i)
@@ -1223,6 +1554,24 @@ static void t2_emit_node(T2Gen *G, int i)
         t2_emit_cmp(G, N, 1);
         t2_put(G, i, X_RAX);
         break;
+    case T2N_GET_FIELD:
+        t2_emit_get_field(G, i);
+        break;
+    case T2N_PUT_FIELD:
+        t2_emit_put_field(G, i);
+        break;
+    case T2N_GET_ELEM:
+        t2_emit_elem_addr(G, N, t2_exit_label(G, N->exit));
+        x_load(a, X_RAX, X_R8, 0);
+        t2_put(G, i, X_RAX);
+        break;
+    case T2N_PUT_ELEM:
+        t2_get_boxed(G, N->c);
+        x_mov_rr(a, X_R11, X_RAX);
+        t2_emit_elem_addr(G, N, t2_exit_label(G, N->exit));
+        x_store(a, X_R8, 0, X_R11);
+        t2_emit_card(G, X_R8);
+        break;
     case T2N_BOOL_NOT:
         t2_get(G, X_RAX, N->a);
         x_alu_ri32(a, 6, X_RAX, 1);             /* xor eax, 1 */
@@ -1297,6 +1646,7 @@ static uint32_t t2_unwind_info(T2Gen *G, uint8_t *out)
 
 static struct {
     uint64_t compiled, failed, bytes;
+    uint64_t inline_get, inline_put, inline_elem, generic;     /* sites, in compiled code */
 } g_t2;
 
 static void t2_free_builder(T2Builder *B, T2Gen *G)
@@ -1305,6 +1655,7 @@ static void t2_free_builder(T2Builder *B, T2Gen *G)
     free(B->nodes);
     free(B->exits);
     free(B->entries);
+    free(B->ics);
     free(B->slots);
     free(B->shape.depth);
     free(B->shape.block_start);
@@ -1318,6 +1669,7 @@ T2Code *t2_compile(const T2Source *src)
     T2Code *tc = NULL;
     uint32_t n_spills = 0;
     int *block_first = NULL;
+    t2_obj_layout();
     B.src = src;
     B.why_op = -1;
     G.B = &B;
@@ -1373,6 +1725,8 @@ T2Code *t2_compile(const T2Source *src)
     x_load(a, T2_ARGS, T2_F, offsetof(JSInterpFrame, arg_buf));
     x_load(a, T2_VARS, T2_F, offsetof(JSInterpFrame, var_buf));
     x_load(a, T2_STKR, T2_F, offsetof(JSInterpFrame, stack_buf));
+    x_mov_ri(a, T2_HEAP, (uint64_t)(uintptr_t)&g_gc.heap_base);
+    x_load(a, T2_HEAP, T2_HEAP, 0);
 
     /* Blocks. */
     for (uint32_t p = 0; p < src->len; p++) {
@@ -1413,6 +1767,13 @@ T2Code *t2_compile(const T2Source *src)
         g_t2.bytes += total;
     }
     g_t2.compiled++;
+    for (int i = 0; i < B.n_nodes; i++) {
+        int op = B.nodes[i].op;
+        g_t2.inline_get += op == T2N_GET_FIELD;
+        g_t2.inline_put += op == T2N_PUT_FIELD;
+        g_t2.inline_elem += op == T2N_GET_ELEM || op == T2N_PUT_ELEM;
+        g_t2.generic += op == T2N_GENERIC;
+    }
     if (getenv("QJS_T2_LOG"))
         fprintf(stderr, "[t2] compiled %s: %u bytecode bytes, %d nodes, %d exits, %u bytes\n",
                 src->name ? src->name : "?", src->len, B.n_nodes, B.n_exits, tc->size);
@@ -1439,9 +1800,12 @@ int t2_available(void)
 
 void t2_print_stats(void)
 {
-    fprintf(stderr, "[t2] %llu functions compiled (%llu bytes), %llu not compiled\n",
+    fprintf(stderr, "[t2] %llu functions compiled (%llu bytes), %llu not compiled; "
+            "inline sites: %llu gets, %llu puts, %llu array; %llu helper calls\n",
             (unsigned long long)g_t2.compiled, (unsigned long long)g_t2.bytes,
-            (unsigned long long)g_t2.failed);
+            (unsigned long long)g_t2.failed, (unsigned long long)g_t2.inline_get,
+            (unsigned long long)g_t2.inline_put, (unsigned long long)g_t2.inline_elem,
+            (unsigned long long)g_t2.generic);
 }
 
 #else /* !T2_SUPPORTED */

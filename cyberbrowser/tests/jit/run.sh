@@ -2,7 +2,7 @@
 # Differential test of the JIT (JIT_DESIGN.md section 10): run each
 # tests/jit/*.js through CYBER_PROBE_JS with QJS_JIT=0 and with each mode
 # given (default: stress), and compare what they print.  A mode is QJS_JIT's
-# value, or t2 / t2stress for the optimizer (QJS_T2=1 with a low threshold,
+# value, or t2 / t2stress for the optimizer (QJS_T2=1 with low thresholds,
 # QJS_T2=stress), interpreting otherwise.
 #   tests/jit/run.sh <cyberbrowser.exe> [mode...]
 exe=$1; shift
@@ -12,7 +12,7 @@ tmp=$(mktemp -d)
 fail=0
 mode_env() {
     case "$1" in
-        t2) echo "QJS_JIT=0 QJS_T2=1 QJS_T2_THRESHOLD=300" ;;
+        t2) echo "QJS_JIT=0 QJS_T2=1 QJS_T2_THRESHOLD=1000 QJS_FEEDBACK_THRESHOLD=100" ;;
         t2stress) echo "QJS_JIT=0 QJS_T2=stress" ;;
         *) echo "QJS_JIT=$1" ;;
     esac
