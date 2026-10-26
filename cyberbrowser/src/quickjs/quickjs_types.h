@@ -1392,7 +1392,7 @@ struct JSFunctionBytecode {
      * 1 the JS stack, 2 the heap. */
     uint8_t frame_where : 2;
     uint8_t no_feedback : 1;   /* its feedback vector could not be made */
-    /* XXX: 7 bits available */
+    uint8_t t2_deopts;         /* times its T2 code was dropped (t2_deopt) */
     GCHandle byte_code_handle; /* Handle to bytecode buffer (GC-managed) */
     int byte_code_len;
     uint32_t byte_code_offset; /* offset from base of allocation to bytecode (for inline bytecode) */

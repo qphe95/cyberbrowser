@@ -1,14 +1,16 @@
 /*
  * quickjs_t2.c - the optimizer, T2 (JS_PERF_DESIGN.md section 6).
  *
- * Step 5b (section 6.7): the skeleton, with no speculation.  A function is
- * built into a graph of nodes, block by block in bytecode order, then
- * emitted as an ordinary Win64 function of the interpreter's frame state.
- * Stack shuffles, local and argument moves, constants and branches are
- * modelled; every other instruction calls its helper (jsop_<op>), the code
- * the interpreter itself runs.  Before a helper, and at the end of every
- * block, the slots the graph holds are stored to the frame, so a helper
- * and every block start see the interpreter's own frame.
+ * A function is built into a graph of nodes, block by block in bytecode
+ * order, then emitted as an ordinary Win64 function of the interpreter's
+ * frame state (section 6.7).  Stack shuffles, local and argument moves,
+ * constants and branches are modelled; so is arithmetic, speculated on
+ * int32s or float64s (step 5c) behind guards that leave for the
+ * interpreter at the instruction's start when they fail.  Every other
+ * instruction calls its helper (jsop_<op>), the code the interpreter itself
+ * runs.  Before a helper, and at the end of every block, the slots the
+ * graph holds are stored to the frame (boxed), so a helper and every block
+ * start see the interpreter's own frame.
  */
 #include "quickjs_gc_unified.h"
 #include "quickjs.h"
@@ -186,24 +188,48 @@ static int t2_shape(const T2Source *src, T2Shape *S)
 /* --- The graph ----------------------------------------------------------- */
 
 enum {
-    T2N_CONST,      /* imm: the value's bits */
+    T2N_CONST,      /* imm: the value (raw bits in its representation) */
     T2N_LOAD,       /* slot's frame cell */
-    T2N_STORE,      /* slot's frame cell = a */
+    T2N_STORE,      /* slot's frame cell = a (boxed) */
     T2N_GENERIC,    /* the helper of the instruction at pc, stack depth `depth` */
-    T2N_TRUTH,      /* JS_ToBool(a) */
-    T2N_BRANCH,     /* to block t if a, else to block e */
+    T2N_TRUTH,      /* JS_ToBool(a), a tagged */
+    T2N_BRANCH,     /* to block t if a (bool or int32) is not 0, else to block e */
     T2N_JUMP,       /* to block t */
     T2N_POLL,       /* JS_POLL_POINT for the jump at pc */
     T2N_RETURN,     /* return a (the instruction at pc) */
+    /* Speculation (5c): a node with an exit leaves through it when its
+       guard fails. */
+    T2N_UNBOX_I32,  /* tagged a, an int32 */
+    T2N_UNBOX_F64,  /* tagged a, a number */
+    T2N_I32_TO_F64,
+    T2N_I32_ADD, T2N_I32_SUB, T2N_I32_MUL,  /* exit on overflow (mul: and -0) */
+    T2N_I32_AND, T2N_I32_OR, T2N_I32_XOR,
+    T2N_I32_SHL, T2N_I32_SAR, T2N_I32_SHR,  /* shr: exit when the result is not an int32 */
+    T2N_I32_NEG,    /* exit on 0 (-0) and INT32_MIN */
+    T2N_I32_CMP,    /* bool: a cc b */
+    T2N_F64_ADD, T2N_F64_SUB, T2N_F64_MUL, T2N_F64_DIV,
+    T2N_F64_NEG,
+    T2N_F64_CMP,    /* bool: a cc b (false when unordered, but !=) */
+    T2N_BOOL_NOT,
 };
+
+/* A value's representation. */
+enum { T2R_TAGGED, T2R_I32, T2R_BOOL, T2R_F64, T2R_NONE };
+
+/* Comparisons (T2N_I32_CMP, T2N_F64_CMP). */
+enum { T2C_LT, T2C_LE, T2C_GT, T2C_GE, T2C_EQ, T2C_NE };
 
 typedef struct T2Node {
     uint8_t op;
-    int32_t a;          /* input node */
+    uint8_t rep;        /* of its result */
+    uint8_t cc;         /* comparisons */
+    int32_t a, b;       /* inputs */
     int32_t slot;       /* LOAD, STORE */
     uint32_t pc;        /* the instruction's offset */
     int32_t depth;      /* stack depth before it (GENERIC, POLL, RETURN) */
     int32_t t, e;       /* block targets (offsets) */
+    int32_t exit;       /* its exit (T2Exit), -1: none */
+    int32_t i32_of, f64_of;     /* its unboxed copies in this block, -1: none */
     uint64_t imm;
     int32_t last_use;   /* the last node reading it (codegen) */
     int32_t spill;      /* its native stack slot (codegen), -1: none */
@@ -216,50 +242,91 @@ typedef struct T2Slot {
     int32_t n;          /* ALIAS: the slot; VAL: the node */
 } T2Slot;
 
+/* Where a failed guard leaves: the instruction it belongs to, run again by
+ * the interpreter.  The frame then needs the slots the graph held there
+ * (entries: slot and value, boxed when stored), and the instruction's
+ * operands tell t2_deopt what the site saw. */
+typedef struct T2Exit {
+    uint32_t pc;
+    int32_t depth;
+    int32_t first, n;           /* its entries */
+    uint8_t *state;             /* the site's arithmetic state */
+    int32_t opnd[2];            /* operand slots, -1: none */
+    int label;                  /* codegen */
+} T2Exit;
+
+typedef struct T2Entry {
+    int32_t slot, node;
+} T2Entry;
+
 typedef struct T2Builder {
     const T2Source *src;
     T2Shape shape;
     T2Node *nodes;
     int n_nodes, cap_nodes;
+    T2Exit *exits;
+    int n_exits, cap_exits;
+    T2Entry *entries;
+    int n_entries, cap_entries;
     T2Slot *slots;      /* args, then locals, then the operand stack */
     int n_slots;
     int depth;          /* the operand stack's current depth */
     int oom;
     const char *why;    /* why it cannot be compiled */
     int why_op;         /* ... the instruction, or -1 */
+    int cur_exit;       /* the exit of the instruction being built, -1: none yet */
+    uint32_t cur_pc;
 } T2Builder;
 
 #define T2_ARG(B, i) (i)
 #define T2_LOC(B, i) ((B)->src->arg_count + (i))
 #define T2_STK(B, i) ((B)->src->arg_count + (B)->src->var_count + (i))
 
-static int t2_node(T2Builder *B, int op)
+static int t2_grow(T2Builder *B, void **p, int *cap, int n, size_t elem)
 {
-    if (B->n_nodes == B->cap_nodes) {
-        int cap = B->cap_nodes ? 2 * B->cap_nodes : 256;
-        T2Node *n = realloc(B->nodes, cap * sizeof(T2Node));
-        if (!n) { B->oom = 1; return 0; }
-        B->nodes = n;
-        B->cap_nodes = cap;
-    }
+    if (n < *cap) return 1;
+    int c = *cap ? 2 * *cap : 256;
+    void *q = realloc(*p, (size_t)c * elem);
+    if (!q) { B->oom = 1; return 0; }
+    *p = q;
+    *cap = c;
+    return 1;
+}
+
+static int t2_node(T2Builder *B, int op, int rep)
+{
+    if (!t2_grow(B, (void **)&B->nodes, &B->cap_nodes, B->n_nodes, sizeof(T2Node))) return 0;
     T2Node *n = &B->nodes[B->n_nodes];
     memset(n, 0, sizeof(*n));
     n->op = (uint8_t)op;
-    n->a = n->slot = n->t = n->e = -1;
+    n->rep = (uint8_t)rep;
+    n->a = n->b = n->slot = n->t = n->e = n->exit = n->i32_of = n->f64_of = -1;
     n->spill = -1;
     return B->n_nodes++;
 }
 
+static int t2_node2(T2Builder *B, int op, int rep, int a, int b)
+{
+    int n = t2_node(B, op, rep);
+    if (!B->oom) { B->nodes[n].a = a; B->nodes[n].b = b; }
+    return n;
+}
+
+static int t2_const_raw(T2Builder *B, int rep, uint64_t bits)
+{
+    int n = t2_node(B, T2N_CONST, rep);
+    if (!B->oom) B->nodes[n].imm = bits;
+    return n;
+}
+
 static int t2_const(T2Builder *B, GCValue v)
 {
-    int n = t2_node(B, T2N_CONST);
-    if (!B->oom) B->nodes[n].imm = t2_bits(v);
-    return n;
+    return t2_const_raw(B, T2R_TAGGED, t2_bits(v));
 }
 
 static int t2_load(T2Builder *B, int slot)
 {
-    int n = t2_node(B, T2N_LOAD);
+    int n = t2_node(B, T2N_LOAD, T2R_TAGGED);
     if (!B->oom) B->nodes[n].slot = slot;
     return n;
 }
@@ -325,7 +392,7 @@ static void t2_sync(T2Builder *B)
             t2_value(B, k);
     for (int k = 0; k < live; k++) {
         if (B->slots[k].kind == T2S_VAL) {
-            int n = t2_node(B, T2N_STORE);
+            int n = t2_node(B, T2N_STORE, T2R_NONE);
             if (B->oom) return;
             B->nodes[n].slot = k;
             B->nodes[n].a = B->slots[k].n;
@@ -333,6 +400,217 @@ static void t2_sync(T2Builder *B)
     }
     for (int k = 0; k < B->n_slots; k++)
         B->slots[k].kind = T2S_FRAME;
+}
+
+/* The exit of the instruction being built, made the first time a guard
+ * needs it: the frame state before the instruction.  Aliases are resolved
+ * first, so the exit only stores values. */
+static int t2_exit(T2Builder *B, int opnd0, int opnd1)
+{
+    if (B->cur_exit >= 0) return B->cur_exit;
+    int live = T2_STK(B, B->depth);
+    for (int k = 0; k < live; k++)
+        if (B->slots[k].kind == T2S_ALIAS)
+            t2_value(B, k);
+    if (!t2_grow(B, (void **)&B->exits, &B->cap_exits, B->n_exits, sizeof(T2Exit))) return -1;
+    T2Exit *x = &B->exits[B->n_exits];
+    x->pc = B->cur_pc;
+    x->depth = B->depth;
+    x->first = B->n_entries;
+    x->n = 0;
+    x->state = NULL;
+    if (B->src->site_of && B->src->arith && B->src->site_of[B->cur_pc] != 0xffff)
+        x->state = &B->src->arith[B->src->site_of[B->cur_pc]];
+    x->opnd[0] = opnd0;
+    x->opnd[1] = opnd1;
+    x->label = -1;
+    for (int k = 0; k < live; k++) {
+        if (B->slots[k].kind != T2S_VAL) continue;
+        if (!t2_grow(B, (void **)&B->entries, &B->cap_entries, B->n_entries, sizeof(T2Entry))) return -1;
+        B->entries[B->n_entries].slot = k;
+        B->entries[B->n_entries].node = B->slots[k].n;
+        B->n_entries++;
+        x->n++;
+    }
+    B->cur_exit = B->n_exits++;
+    return B->cur_exit;
+}
+
+/* The arithmetic state of the instruction being built (0: nothing has made
+ * speculation fail yet, or no feedback). */
+static int t2_arith_state(T2Builder *B)
+{
+    const T2Source *src = B->src;
+    if (!src->site_of || !src->arith || src->site_of[B->cur_pc] == 0xffff)
+        return T2_ARITH_OTHER;      /* no state to record a failure in */
+    return src->arith[src->site_of[B->cur_pc]];
+}
+
+/* Node n as an int32 (guarded through the instruction's exit when it is
+ * tagged), or -1 when it cannot be one. */
+static int t2_as_i32(T2Builder *B, int n, int opnd0, int opnd1)
+{
+    T2Node *N = &B->nodes[n];
+    if (N->rep == T2R_I32) return n;
+    if (N->rep != T2R_TAGGED) return -1;
+    if (N->op == T2N_CONST) {
+        GCValue v;
+        memcpy(&v, &N->imm, 8);
+        if (GC_VALUE_GET_TAG(v) != JS_TAG_INT) return -1;
+        return t2_const_raw(B, T2R_I32, (uint32_t)GC_VALUE_GET_INT(v));
+    }
+    if (N->i32_of >= 0) return N->i32_of;
+    int x = t2_exit(B, opnd0, opnd1);
+    if (x < 0) return -1;
+    int u = t2_node2(B, T2N_UNBOX_I32, T2R_I32, n, -1);
+    if (B->oom) return -1;
+    B->nodes[u].exit = x;
+    B->nodes[n].i32_of = u;
+    return u;
+}
+
+/* Node n as a float64, or -1 when it cannot be one. */
+static int t2_as_f64(T2Builder *B, int n, int opnd0, int opnd1)
+{
+    T2Node *N = &B->nodes[n];
+    if (N->rep == T2R_F64) return n;
+    if (N->rep == T2R_I32) {
+        if (N->f64_of >= 0) return N->f64_of;
+        int c = t2_node2(B, T2N_I32_TO_F64, T2R_F64, n, -1);
+        if (!B->oom) B->nodes[n].f64_of = c;
+        return B->oom ? -1 : c;
+    }
+    if (N->rep != T2R_TAGGED) return -1;
+    if (N->op == T2N_CONST) {
+        GCValue v;
+        double d;
+        uint64_t bits;
+        memcpy(&v, &N->imm, 8);
+        if (GC_VALUE_GET_TAG(v) == JS_TAG_INT) d = GC_VALUE_GET_INT(v);
+        else if (GC_IS_FLOAT64(v)) d = GC_VALUE_GET_FLOAT64(v);
+        else return -1;
+        memcpy(&bits, &d, 8);
+        return t2_const_raw(B, T2R_F64, bits);
+    }
+    if (N->f64_of >= 0) return N->f64_of;
+    int x = t2_exit(B, opnd0, opnd1);
+    if (x < 0) return -1;
+    int u = t2_node2(B, T2N_UNBOX_F64, T2R_F64, n, -1);
+    if (B->oom) return -1;
+    B->nodes[u].exit = x;
+    B->nodes[n].f64_of = u;
+    return u;
+}
+
+/* Whether node n is a constant that is not a number: speculating on it
+ * would only fail. */
+static int t2_const_not_number(T2Builder *B, int n)
+{
+    T2Node *N = &B->nodes[n];
+    GCValue v;
+    if (N->op != T2N_CONST || N->rep != T2R_TAGGED) return 0;
+    memcpy(&v, &N->imm, 8);
+    return GC_VALUE_GET_TAG(v) != JS_TAG_INT && !GC_IS_FLOAT64(v);
+}
+
+/* A binary arithmetic or comparison instruction on the two stack tops,
+ * speculated on int32s or float64s as the site's state says: 1 when built,
+ * 0 for the helper. */
+static int t2_binary(T2Builder *B, int op)
+{
+    int sa = T2_STK(B, B->depth - 2), sb = T2_STK(B, B->depth - 1);
+    int state = t2_arith_state(B);
+    int i32op = -1, f64op = -1, cc = -1, r = -1;
+    switch (op) {
+    case OP_add: i32op = T2N_I32_ADD; f64op = T2N_F64_ADD; break;
+    case OP_sub: i32op = T2N_I32_SUB; f64op = T2N_F64_SUB; break;
+    case OP_mul: i32op = T2N_I32_MUL; f64op = T2N_F64_MUL; break;
+    case OP_div: f64op = T2N_F64_DIV; break;
+    case OP_and: i32op = T2N_I32_AND; break;
+    case OP_or: i32op = T2N_I32_OR; break;
+    case OP_xor: i32op = T2N_I32_XOR; break;
+    case OP_shl: i32op = T2N_I32_SHL; break;
+    case OP_sar: i32op = T2N_I32_SAR; break;
+    case OP_shr: i32op = T2N_I32_SHR; break;
+    case OP_lt: cc = T2C_LT; break;
+    case OP_lte: cc = T2C_LE; break;
+    case OP_gt: cc = T2C_GT; break;
+    case OP_gte: cc = T2C_GE; break;
+    case OP_eq: case OP_strict_eq: cc = T2C_EQ; break;
+    case OP_neq: case OP_strict_neq: cc = T2C_NE; break;
+    default: return 0;
+    }
+    if (cc >= 0) { i32op = T2N_I32_CMP; f64op = T2N_F64_CMP; }
+    if (state & T2_ARITH_OTHER) return 0;
+    int na = t2_value(B, sa), nb = t2_value(B, sb);
+    if (B->oom || t2_const_not_number(B, na) || t2_const_not_number(B, nb)) return 0;
+    int ra = B->nodes[na].rep, rb = B->nodes[nb].rep;
+    if (ra == T2R_BOOL || rb == T2R_BOOL) return 0;
+    /* an operand already a float64: the float64 path, if there is one */
+    if (ra == T2R_F64 || rb == T2R_F64) {
+        if (f64op < 0) return 0;
+        state |= T2_ARITH_DOUBLE;
+    }
+    if (!(state & T2_ARITH_DOUBLE) && i32op >= 0) {
+        int ia = t2_as_i32(B, na, sa, sb), ib = ia < 0 ? -1 : t2_as_i32(B, nb, sa, sb);
+        if (ia < 0 || ib < 0) return 0;
+        /* the exit before its guard: making it may load slots */
+        int x = i32op == T2N_I32_ADD || i32op == T2N_I32_SUB || i32op == T2N_I32_MUL ||
+                i32op == T2N_I32_SHR ? t2_exit(B, sa, sb) : -1;
+        r = t2_node2(B, i32op, cc >= 0 ? T2R_BOOL : T2R_I32, ia, ib);
+        if (B->oom) return 0;
+        B->nodes[r].exit = x;
+    } else if (f64op >= 0 && (state & T2_ARITH_DOUBLE || i32op < 0)) {
+        int fa = t2_as_f64(B, na, sa, sb), fb = fa < 0 ? -1 : t2_as_f64(B, nb, sa, sb);
+        if (fa < 0 || fb < 0) return 0;
+        r = t2_node2(B, f64op, cc >= 0 ? T2R_BOOL : T2R_F64, fa, fb);
+    } else {
+        return 0;
+    }
+    if (B->oom) return 0;
+    B->nodes[r].cc = (uint8_t)(cc < 0 ? 0 : cc);
+    B->depth -= 2;
+    t2_push_val(B, r);
+    return 1;
+}
+
+/* x + delta (inc, dec, post_inc, post_dec, inc_loc, dec_loc) on slot s's
+ * value: the result node, or -1 for the helper. */
+static int t2_add_const(T2Builder *B, int s, int delta)
+{
+    int state = t2_arith_state(B), n = t2_value(B, s), r;
+    if (B->oom || state & T2_ARITH_OTHER) return -1;
+    if (!(state & T2_ARITH_DOUBLE)) {
+        int ia = t2_as_i32(B, n, s, -1);
+        if (ia < 0) return -1;
+        int x = t2_exit(B, s, -1), c = t2_const_raw(B, T2R_I32, (uint32_t)delta);
+        r = t2_node2(B, T2N_I32_ADD, T2R_I32, ia, c);
+        if (B->oom) return -1;
+        B->nodes[r].exit = x;
+    } else {
+        double d = delta;
+        uint64_t bits;
+        int fa = t2_as_f64(B, n, s, -1);
+        if (fa < 0) return -1;
+        memcpy(&bits, &d, 8);
+        r = t2_node2(B, T2N_F64_ADD, T2R_F64, fa, t2_const_raw(B, T2R_F64, bits));
+    }
+    return B->oom ? -1 : r;
+}
+
+/* Generic: the instruction at pos through its helper. */
+static int t2_generic(T2Builder *B, uint32_t pos)
+{
+    const uint8_t *bc = B->src->bc;
+    int op = bc[pos];
+    t2_sync(B);
+    int n = t2_node(B, T2N_GENERIC, T2R_NONE);
+    if (B->oom) return 0;
+    B->nodes[n].pc = pos;
+    B->nodes[n].depth = B->depth;
+    B->nodes[n].imm = op;
+    B->depth = B->depth - t2_npop(bc, pos) + t2_op_info[op].n_push;
+    return 1;
 }
 
 /* Build the block starting at pos; 0 when the function cannot be
@@ -349,6 +627,8 @@ static int t2_build_block(T2Builder *B, uint32_t pos)
         const T2OpInfo *oi = &t2_op_info[op];
         uint32_t next = pos + oi->size;
         if (B->oom) return 0;
+        B->cur_exit = -1;
+        B->cur_pc = pos;
         switch (op) {
         case OP_push_i32:
             t2_push_val(B, t2_const(B, JS_MKVAL(JS_TAG_INT, (int32_t)t2_u32(bc + pos + 1))));
@@ -396,6 +676,96 @@ static int t2_build_block(T2Builder *B, uint32_t pos)
             t2_set_val(B, y, vx);
             break;
         }
+        case OP_add: case OP_sub: case OP_mul: case OP_div:
+        case OP_and: case OP_or: case OP_xor: case OP_shl: case OP_sar: case OP_shr:
+        case OP_lt: case OP_lte: case OP_gt: case OP_gte:
+        case OP_eq: case OP_neq: case OP_strict_eq: case OP_strict_neq:
+            if (!t2_binary(B, op) && !t2_generic(B, pos))
+                return 0;
+            break;
+        case OP_inc:
+        case OP_dec: {
+            int r = t2_add_const(B, T2_STK(B, B->depth - 1), op == OP_inc ? 1 : -1);
+            if (r < 0) { if (!t2_generic(B, pos)) return 0; break; }
+            B->depth--;
+            t2_push_val(B, r);
+            break;
+        }
+        case OP_post_inc:
+        case OP_post_dec: { /* a -> a a+1: a stays as it is when it is a number */
+            int r = t2_add_const(B, T2_STK(B, B->depth - 1), op == OP_post_inc ? 1 : -1);
+            if (r < 0) { if (!t2_generic(B, pos)) return 0; break; }
+            t2_push_val(B, r);
+            break;
+        }
+        case OP_inc_loc:
+        case OP_dec_loc: {
+            int s = T2_LOC(B, bc[pos + 1]);
+            int r = t2_add_const(B, s, op == OP_inc_loc ? 1 : -1);
+            if (r < 0) { if (!t2_generic(B, pos)) return 0; break; }
+            t2_set_val(B, s, r);
+            break;
+        }
+        case OP_add_loc: {  /* loc += pop */
+            int s = T2_LOC(B, bc[pos + 1]), sb = T2_STK(B, B->depth - 1);
+            int state = t2_arith_state(B), r = -1;
+            if (!(state & T2_ARITH_OTHER)) {
+                int na = t2_value(B, s), nb = t2_value(B, sb);
+                if (!t2_const_not_number(B, nb)) {
+                    if (!(state & T2_ARITH_DOUBLE)) {
+                        int ia = t2_as_i32(B, na, s, sb), ib = ia < 0 ? -1 : t2_as_i32(B, nb, s, sb);
+                        if (ia >= 0 && ib >= 0) {
+                            int x = t2_exit(B, s, sb);
+                            r = t2_node2(B, T2N_I32_ADD, T2R_I32, ia, ib);
+                            if (!B->oom) B->nodes[r].exit = x;
+                        }
+                    } else {
+                        int fa = t2_as_f64(B, na, s, sb), fb = fa < 0 ? -1 : t2_as_f64(B, nb, s, sb);
+                        if (fa >= 0 && fb >= 0)
+                            r = t2_node2(B, T2N_F64_ADD, T2R_F64, fa, fb);
+                    }
+                }
+            }
+            if (B->oom) return 0;
+            if (r < 0) { if (!t2_generic(B, pos)) return 0; break; }
+            B->depth--;
+            t2_set_val(B, s, r);
+            break;
+        }
+        case OP_neg: {
+            int s = T2_STK(B, B->depth - 1), state = t2_arith_state(B), r = -1;
+            if (!(state & T2_ARITH_OTHER)) {
+                int na = t2_value(B, s);
+                if (!(state & T2_ARITH_DOUBLE)) {
+                    int ia = t2_as_i32(B, na, s, -1);
+                    if (ia >= 0) {
+                        int x = t2_exit(B, s, -1);
+                        r = t2_node2(B, T2N_I32_NEG, T2R_I32, ia, -1);
+                        if (!B->oom) B->nodes[r].exit = x;
+                    }
+                } else {
+                    int fa = t2_as_f64(B, na, s, -1);
+                    if (fa >= 0) r = t2_node2(B, T2N_F64_NEG, T2R_F64, fa, -1);
+                }
+            }
+            if (B->oom) return 0;
+            if (r < 0) { if (!t2_generic(B, pos)) return 0; break; }
+            B->depth--;
+            t2_push_val(B, r);
+            break;
+        }
+        case OP_lnot: {     /* of a known boolean; anything else through the helper */
+            int s = T2_STK(B, B->depth - 1);
+            if (B->slots[s].kind == T2S_VAL && B->nodes[B->slots[s].n].rep == T2R_BOOL) {
+                int r = t2_node2(B, T2N_BOOL_NOT, T2R_BOOL, B->slots[s].n, -1);
+                if (B->oom) return 0;
+                B->depth--;
+                t2_push_val(B, r);
+            } else if (!t2_generic(B, pos)) {
+                return 0;
+            }
+            break;
+        }
         case OP_goto:
         case OP_if_true:
         case OP_if_false: {
@@ -406,21 +776,23 @@ static int t2_build_block(T2Builder *B, uint32_t pos)
             }
             t2_sync(B);
             if ((uint32_t)target <= pos) {
-                n = t2_node(B, T2N_POLL);
+                n = t2_node(B, T2N_POLL, T2R_NONE);
                 if (B->oom) return 0;
                 B->nodes[n].pc = pos;
                 B->nodes[n].depth = B->depth + (op != OP_goto);
             }
             if (op == OP_goto) {
-                n = t2_node(B, T2N_JUMP);
+                n = t2_node(B, T2N_JUMP, T2R_NONE);
                 if (B->oom) return 0;
                 B->nodes[n].t = target;
             } else {
-                int t = t2_node(B, T2N_TRUTH);
-                if (B->oom) return 0;
-                B->nodes[t].a = cond;
-                B->nodes[t].pc = pos;
-                n = t2_node(B, T2N_BRANCH);
+                int t = cond;
+                if (B->nodes[cond].rep != T2R_BOOL && B->nodes[cond].rep != T2R_I32) {
+                    t = t2_node2(B, T2N_TRUTH, T2R_BOOL, cond, -1);
+                    if (B->oom) return 0;
+                    B->nodes[t].pc = pos;
+                }
+                n = t2_node(B, T2N_BRANCH, T2R_NONE);
                 if (B->oom) return 0;
                 B->nodes[n].a = t;
                 B->nodes[n].t = op == OP_if_true ? target : (int)next;
@@ -435,7 +807,7 @@ static int t2_build_block(T2Builder *B, uint32_t pos)
             /* the interpreter's return path reads the frame (closing
                captured variables) */
             t2_sync(B);
-            n = t2_node(B, T2N_RETURN);
+            n = t2_node(B, T2N_RETURN, T2R_NONE);
             if (B->oom) return 0;
             B->nodes[n].a = v;
             B->nodes[n].pc = pos;
@@ -448,13 +820,8 @@ static int t2_build_block(T2Builder *B, uint32_t pos)
                 B->why_op = op;
                 return 0;
             }
-            t2_sync(B);
-            n = t2_node(B, T2N_GENERIC);
-            if (B->oom) return 0;
-            B->nodes[n].pc = pos;
-            B->nodes[n].depth = B->depth;
-            B->nodes[n].imm = op;
-            B->depth = B->depth - t2_npop(bc, pos) + oi->n_push;
+            if (!t2_generic(B, pos))
+                return 0;
             if (t2_ends_block(op))
                 return 1;   /* throw, tail calls: the helper never continues here */
             break;
@@ -466,7 +833,7 @@ static int t2_build_block(T2Builder *B, uint32_t pos)
         }
         if (B->shape.block_start[pos]) {
             t2_sync(B);
-            n = t2_node(B, T2N_JUMP);
+            n = t2_node(B, T2N_JUMP, T2R_NONE);
             if (B->oom) return 0;
             B->nodes[n].t = pos;
             return 1;
@@ -484,6 +851,7 @@ static int t2_build_block(T2Builder *B, uint32_t pos)
 static const int t2_saved[] = { X_RBX, X_RSI, X_RDI, X_RBP, X_R12, X_R13, X_R14, X_R15 };
 #define T2_N_SAVED ((int)(sizeof(t2_saved) / sizeof(t2_saved[0])))
 #define T2_MAX_FRAME 3072   /* stays below a page: no stack probe */
+#define T2_F64_ADDEND ((uint64_t)GC_FLOAT64_TAG_ADDEND << 32)
 
 typedef struct T2Gen {
     T2Builder *B;
@@ -503,7 +871,7 @@ static void t2_slot_addr(T2Builder *B, int slot, int *base, int32_t *disp)
     else { *base = T2_STKR; *disp = (slot - src->arg_count - src->var_count) * 8; }
 }
 
-/* Node n's value into register r. */
+/* Node n's raw bits (its representation's) into register r. */
 static void t2_get(T2Gen *G, int r, int n)
 {
     T2Node *N = &G->B->nodes[n];
@@ -515,39 +883,165 @@ static void t2_get(T2Gen *G, int r, int n)
 
 static void t2_put(T2Gen *G, int n, int r)
 {
-    x_store(&G->a, X_RSP, 32 + G->B->nodes[n].spill * 8, r);
+    if (G->B->nodes[n].spill >= 0)
+        x_store(&G->a, X_RSP, 32 + G->B->nodes[n].spill * 8, r);
 }
 
-/* F->sp and F->pc as the interpreter has them at instruction pc, with
- * stack depth d. */
-static void t2_set_frame_pc(T2Gen *G, uint32_t pc, int d)
+/* Node n's value as a tagged GCValue into rax (clobbers rcx, rdx). */
+static void t2_get_boxed(T2Gen *G, int n)
+{
+    XAsm *a = &G->a;
+    T2Node *N = &G->B->nodes[n];
+    if (N->op == T2N_CONST) {
+        GCValue v;
+        if (N->rep == T2R_I32) v = JS_MKVAL(JS_TAG_INT, (int32_t)(uint32_t)N->imm);
+        else if (N->rep == T2R_BOOL) v = JS_MKVAL(JS_TAG_BOOL, N->imm != 0);
+        else if (N->rep == T2R_F64) { double d; memcpy(&d, &N->imm, 8); v = GC_NewFloat64(d); }
+        else memcpy(&v, &N->imm, 8);
+        x_mov_ri(a, X_RAX, t2_bits(v));
+        return;
+    }
+    t2_get(G, X_RAX, n);
+    switch (N->rep) {
+    case T2R_I32:       /* an int32's value is its zero-extended bits */
+        x_byte(a, 0x89); x_byte(a, 0xc0);   /* mov eax, eax */
+        break;
+    case T2R_BOOL:
+        x_byte(a, 0x89); x_byte(a, 0xc0);   /* mov eax, eax */
+        x_mov_ri(a, X_RCX, (uint64_t)(uint32_t)JS_TAG_BOOL << 32);
+        x_alu_rr64(a, X_OR, X_RAX, X_RCX);
+        break;
+    case T2R_F64: {     /* NaNs canonical, then the double's encoding */
+        int ok = x_new_label(a);
+        x_mov_rr(a, X_RCX, X_RAX);
+        x_bt64_i(a, 6, X_RCX, 63);          /* btr: |bits| */
+        x_mov_ri(a, X_RDX, 0x7ff0000000000000ull);
+        x_cmp_rr(a, X_RCX, X_RDX);
+        x_jcc(a, X_CC_BE, ok);
+        x_mov_ri(a, X_RAX, 0x7ff8000000000000ull);
+        x_bind(a, ok);
+        x_mov_ri(a, X_RCX, T2_F64_ADDEND);
+        x_alu_rr64(a, X_SUB, X_RAX, X_RCX);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+/* F->sp (stack depth d) and F->pc for the instruction at pc: just past its
+ * opcode, as a helper runs it (at > 0), or at its start, where the
+ * interpreter continues after an exit (at = 0). */
+static void t2_set_frame_at(T2Gen *G, uint32_t pc, int d, int at)
 {
     x_lea(&G->a, X_RAX, T2_STKR, d * 8);
     x_store(&G->a, T2_F, offsetof(JSInterpFrame, sp), X_RAX);
-    x_mov_ri(&G->a, X_RAX, (uint64_t)(uintptr_t)(G->B->src->bc + pc + 1));
+    x_mov_ri(&G->a, X_RAX, (uint64_t)(uintptr_t)(G->B->src->bc + pc + at));
     x_store(&G->a, T2_F, offsetof(JSInterpFrame, pc), X_RAX);
 }
 
+static inline void t2_set_frame_pc(T2Gen *G, uint32_t pc, int d)
+{
+    t2_set_frame_at(G, pc, d, 1);
+}
+
+static int t2_has_result(int op)
+{
+    return op != T2N_CONST && op != T2N_STORE && op != T2N_GENERIC && op != T2N_BRANCH &&
+           op != T2N_JUMP && op != T2N_POLL && op != T2N_RETURN;
+}
+
 /* Native stack slots: each value gets one at its definition and gives it
- * back after its last use. */
+ * back after its last use (in a block, or at an exit that stores it). */
 static int t2_assign_spills(T2Builder *B, uint32_t *n_spills)
 {
     int *free_list, n_free = 0, top = 0;
     for (int i = 0; i < B->n_nodes; i++) B->nodes[i].last_use = -1;
-    for (int i = 0; i < B->n_nodes; i++)
-        if (B->nodes[i].a >= 0) B->nodes[B->nodes[i].a].last_use = i;
+    for (int i = 0; i < B->n_nodes; i++) {
+        T2Node *N = &B->nodes[i];
+        if (N->a >= 0) B->nodes[N->a].last_use = i;
+        if (N->b >= 0) B->nodes[N->b].last_use = i;
+        if (N->exit >= 0) {
+            T2Exit *x = &B->exits[N->exit];
+            for (int k = 0; k < x->n; k++)
+                B->nodes[B->entries[x->first + k].node].last_use = i;
+        }
+    }
     free_list = malloc(sizeof(int) * (B->n_nodes + 1));
     if (!free_list) return 0;
     for (int i = 0; i < B->n_nodes; i++) {
         T2Node *N = &B->nodes[i];
-        if (N->a >= 0 && B->nodes[N->a].last_use == i && B->nodes[N->a].spill >= 0)
-            free_list[n_free++] = B->nodes[N->a].spill;
-        if ((N->op == T2N_LOAD || N->op == T2N_TRUTH) && N->last_use >= 0)
+        int ins[2] = { N->a, N->b };
+        for (int k = 0; k < 2; k++) {
+            int m = ins[k];
+            if (m >= 0 && B->nodes[m].last_use == i && B->nodes[m].spill >= 0) {
+                free_list[n_free++] = B->nodes[m].spill;
+                B->nodes[m].last_use = -2;  /* given back */
+            }
+        }
+        if (t2_has_result(N->op) && N->last_use >= 0)
             N->spill = n_free ? free_list[--n_free] : top++;
+        /* values only an exit read die here too */
+        if (N->exit >= 0) {
+            T2Exit *x = &B->exits[N->exit];
+            for (int k = 0; k < x->n; k++) {
+                T2Node *M = &B->nodes[B->entries[x->first + k].node];
+                if (M->last_use == i && M->spill >= 0) {
+                    free_list[n_free++] = M->spill;
+                    M->last_use = -2;
+                }
+            }
+        }
     }
     free(free_list);
     *n_spills = (uint32_t)top;
     return 1;
+}
+
+static int t2_exit_label(T2Gen *G, int x)
+{
+    T2Exit *E = &G->B->exits[x];
+    if (E->label < 0) E->label = x_new_label(&G->a);
+    return E->label;
+}
+
+/* Set al from the flags of a comparison (int: signed cc; f64: after
+ * ucomisd with the operands ordered for the cc). */
+static void t2_emit_cmp(T2Gen *G, T2Node *N, int is_f64)
+{
+    XAsm *a = &G->a;
+    if (!is_f64) {
+        static const uint8_t ccs[] = { X_CC_L, X_CC_LE, X_CC_G, X_CC_GE, X_CC_E, X_CC_NE };
+        t2_get(G, X_RAX, N->a);
+        t2_get(G, X_RCX, N->b);
+        x_alu_rr32(a, X_CMP, X_RAX, X_RCX);
+        x_setcc_eax(a, ccs[N->cc]);
+        return;
+    }
+    /* xmm0 = a, xmm1 = b */
+    t2_get(G, X_RAX, N->a);
+    x_movq_xr(a, 0, X_RAX);
+    t2_get(G, X_RAX, N->b);
+    x_movq_xr(a, 1, X_RAX);
+    switch (N->cc) {
+    case T2C_LT: x_ucomisd(a, 1, 0); x_setcc_eax(a, X_CC_A); break;    /* b > a */
+    case T2C_LE: x_ucomisd(a, 1, 0); x_setcc_eax(a, X_CC_AE); break;
+    case T2C_GT: x_ucomisd(a, 0, 1); x_setcc_eax(a, X_CC_A); break;
+    case T2C_GE: x_ucomisd(a, 0, 1); x_setcc_eax(a, X_CC_AE); break;
+    case T2C_EQ:    /* ZF and not PF */
+        x_ucomisd(a, 0, 1);
+        x_setcc_eax(a, X_CC_E);
+        x_setcc_r8(a, 0xb, X_RCX);          /* setnp cl */
+        x_alu_rr32(a, X_AND, X_RAX, X_RCX);
+        break;
+    case T2C_NE:    /* not ZF, or PF */
+        x_ucomisd(a, 0, 1);
+        x_setcc_eax(a, X_CC_NE);
+        x_setcc_r8(a, 0xa, X_RCX);          /* setp cl */
+        x_alu_rr32(a, X_OR, X_RAX, X_RCX);
+        x_alu_ri32(a, 4, X_RAX, 1);         /* and eax, 1 */
+        break;
+    }
 }
 
 static void t2_emit_node(T2Gen *G, int i)
@@ -567,7 +1061,7 @@ static void t2_emit_node(T2Gen *G, int i)
         t2_put(G, i, X_RAX);
         break;
     case T2N_STORE:
-        t2_get(G, X_RAX, N->a);
+        t2_get_boxed(G, N->a);
         t2_slot_addr(B, N->slot, &base, &disp);
         x_store(a, base, disp, X_RAX);
         break;
@@ -583,10 +1077,11 @@ static void t2_emit_node(T2Gen *G, int i)
         break;
     }
     case T2N_TRUTH:
+        t2_get_boxed(G, N->a);
+        x_mov_rr(a, X_RDX, X_RAX);
         x_mov_rr(a, X_RCX, T2_F);
-        t2_get(G, X_RDX, N->a);
         x_call_abs(a, (const void *)t2_to_bool);
-        if (N->spill >= 0) t2_put(G, i, X_RAX);
+        t2_put(G, i, X_RAX);
         break;
     case T2N_BRANCH:
         t2_get(G, X_RAX, N->a);
@@ -610,12 +1105,162 @@ static void t2_emit_node(T2Gen *G, int i)
         break;
     }
     case T2N_RETURN:
-        t2_get(G, X_RAX, N->a);
+        t2_get_boxed(G, N->a);
         x_store(a, T2_F, offsetof(JSInterpFrame, ret_val), X_RAX);
         t2_set_frame_pc(G, N->pc, N->depth);
         x_mov_ri(a, X_RAX, JSOP_DONE);
         x_jmp(a, G->epilogue);
         break;
+    case T2N_UNBOX_I32:     /* an int32 is its zero-extended bits */
+        t2_get(G, X_RAX, N->a);
+        x_mov_ri(a, X_RCX, 0xffffffffu);
+        x_cmp_rr(a, X_RAX, X_RCX);
+        x_jcc(a, X_CC_A, t2_exit_label(G, N->exit));
+        t2_put(G, i, X_RAX);
+        break;
+    case T2N_UNBOX_F64: {
+        int is_int = x_new_label(a), done = x_new_label(a);
+        t2_get(G, X_RAX, N->a);
+        x_mov_rr(a, X_RCX, X_RAX);
+        x_shr64_i(a, X_RCX, 32);
+        x_test32(a, X_RCX, X_RCX);
+        x_jcc(a, X_CC_E, is_int);
+        x_alu_ri32(a, 0, X_RCX, (int8_t)-JS_TAG_FIRST);          /* tag - JS_TAG_FIRST */
+        x_alu_ri32(a, 7, X_RCX, (int8_t)(JS_TAG_FLOAT64 - JS_TAG_FIRST));
+        x_jcc(a, X_CC_B, t2_exit_label(G, N->exit));            /* a tag: not a double */
+        x_mov_ri(a, X_RCX, T2_F64_ADDEND);
+        x_alu_rr64(a, X_ADD, X_RAX, X_RCX);
+        x_jmp(a, done);
+        x_bind(a, is_int);
+        x_cvtsi2sd32(a, 0, X_RAX);
+        x_movq_rx(a, X_RAX, 0);
+        x_bind(a, done);
+        t2_put(G, i, X_RAX);
+        break;
+    }
+    case T2N_I32_TO_F64:
+        t2_get(G, X_RAX, N->a);
+        x_cvtsi2sd32(a, 0, X_RAX);
+        x_movq_rx(a, X_RAX, 0);
+        t2_put(G, i, X_RAX);
+        break;
+    case T2N_I32_ADD:
+    case T2N_I32_SUB:
+        t2_get(G, X_RAX, N->a);
+        t2_get(G, X_RCX, N->b);
+        x_alu_rr32(a, N->op == T2N_I32_ADD ? X_ADD : X_SUB, X_RAX, X_RCX);
+        x_jcc(a, X_CC_O, t2_exit_label(G, N->exit));
+        t2_put(G, i, X_RAX);
+        break;
+    case T2N_I32_MUL: {
+        int ok = x_new_label(a);
+        t2_get(G, X_RAX, N->a);
+        t2_get(G, X_RCX, N->b);
+        x_mov_rr(a, X_RDX, X_RAX);
+        x_imul32(a, X_RAX, X_RCX);
+        x_jcc(a, X_CC_O, t2_exit_label(G, N->exit));
+        x_test32(a, X_RAX, X_RAX);
+        x_jcc(a, X_CC_NE, ok);
+        x_alu_rr32(a, X_OR, X_RDX, X_RCX);      /* 0 from a negative operand: -0 */
+        x_jcc(a, 8 /* S */, t2_exit_label(G, N->exit));
+        x_bind(a, ok);
+        t2_put(G, i, X_RAX);
+        break;
+    }
+    case T2N_I32_AND:
+    case T2N_I32_OR:
+    case T2N_I32_XOR:
+        t2_get(G, X_RAX, N->a);
+        t2_get(G, X_RCX, N->b);
+        x_alu_rr32(a, N->op == T2N_I32_AND ? X_AND : N->op == T2N_I32_OR ? X_OR : X_XOR, X_RAX, X_RCX);
+        x_byte(a, 0x89); x_byte(a, 0xc0);       /* mov eax, eax */
+        t2_put(G, i, X_RAX);
+        break;
+    case T2N_I32_SHL:
+    case T2N_I32_SAR:
+    case T2N_I32_SHR:
+        t2_get(G, X_RAX, N->a);
+        t2_get(G, X_RCX, N->b);
+        x_shift_cl32(a, N->op == T2N_I32_SHL ? 4 : N->op == T2N_I32_SAR ? 7 : 5, X_RAX);
+        if (N->op == T2N_I32_SHR) {
+            x_test32(a, X_RAX, X_RAX);
+            x_jcc(a, 8 /* S */, t2_exit_label(G, N->exit));   /* above INT32_MAX */
+        }
+        t2_put(G, i, X_RAX);
+        break;
+    case T2N_I32_NEG:
+        t2_get(G, X_RAX, N->a);
+        x_test32_i(a, X_RAX, 0x7fffffffu);      /* 0 (-0) or INT32_MIN */
+        x_jcc(a, X_CC_E, t2_exit_label(G, N->exit));
+        x_neg32(a, X_RAX);
+        x_byte(a, 0x89); x_byte(a, 0xc0);       /* mov eax, eax */
+        t2_put(G, i, X_RAX);
+        break;
+    case T2N_I32_CMP:
+        t2_emit_cmp(G, N, 0);
+        t2_put(G, i, X_RAX);
+        break;
+    case T2N_F64_ADD:
+    case T2N_F64_SUB:
+    case T2N_F64_MUL:
+    case T2N_F64_DIV: {
+        static const uint8_t ops[] = { X_ADDSD, X_SUBSD, X_MULSD, X_DIVSD };
+        t2_get(G, X_RAX, N->a);
+        x_movq_xr(a, 0, X_RAX);
+        t2_get(G, X_RAX, N->b);
+        x_movq_xr(a, 1, X_RAX);
+        x_sse_sd(a, ops[N->op - T2N_F64_ADD], 0, 1);
+        x_movq_rx(a, X_RAX, 0);
+        t2_put(G, i, X_RAX);
+        break;
+    }
+    case T2N_F64_NEG:
+        t2_get(G, X_RAX, N->a);
+        x_bt64_i(a, 7, X_RAX, 63);              /* btc: flip the sign */
+        t2_put(G, i, X_RAX);
+        break;
+    case T2N_F64_CMP:
+        t2_emit_cmp(G, N, 1);
+        t2_put(G, i, X_RAX);
+        break;
+    case T2N_BOOL_NOT:
+        t2_get(G, X_RAX, N->a);
+        x_alu_ri32(a, 6, X_RAX, 1);             /* xor eax, 1 */
+        x_byte(a, 0x89); x_byte(a, 0xc0);       /* mov eax, eax */
+        t2_put(G, i, X_RAX);
+        break;
+    }
+}
+
+/* The exits, out of line: store the slots the graph held, boxed, set
+ * F->sp and F->pc to the instruction's start, tell t2_deopt what failed,
+ * and continue in the interpreter. */
+static void t2_emit_exits(T2Gen *G)
+{
+    T2Builder *B = G->B;
+    XAsm *a = &G->a;
+    for (int x = 0; x < B->n_exits; x++) {
+        T2Exit *E = &B->exits[x];
+        int base;
+        int32_t disp;
+        if (E->label < 0) continue;     /* no guard uses it */
+        x_bind(a, E->label);
+        for (int k = 0; k < E->n; k++) {
+            T2Entry *en = &B->entries[E->first + k];
+            t2_get_boxed(G, en->node);
+            t2_slot_addr(B, en->slot, &base, &disp);
+            x_store(a, base, disp, X_RAX);
+        }
+        t2_set_frame_at(G, E->pc, E->depth, 0);
+        x_mov_rr(a, X_RCX, T2_F);
+        x_mov_ri(a, X_RDX, (uint64_t)(uintptr_t)E->state);
+        if (E->opnd[0] >= 0) { t2_slot_addr(B, E->opnd[0], &base, &disp); x_lea(a, X_R8, base, disp); }
+        else x_mov_ri(a, X_R8, 0);
+        if (E->opnd[1] >= 0) { t2_slot_addr(B, E->opnd[1], &base, &disp); x_lea(a, X_R9, base, disp); }
+        else x_mov_ri(a, X_R9, 0);
+        x_call_abs(a, (const void *)t2_deopt);
+        x_mov_ri(a, X_RAX, JSOP_NEXT);
+        x_jmp(a, G->epilogue);
     }
 }
 
@@ -654,12 +1299,25 @@ static struct {
     uint64_t compiled, failed, bytes;
 } g_t2;
 
+static void t2_free_builder(T2Builder *B, T2Gen *G)
+{
+    x_free(&G->a);
+    free(B->nodes);
+    free(B->exits);
+    free(B->entries);
+    free(B->slots);
+    free(B->shape.depth);
+    free(B->shape.block_start);
+    free(G->block_label);
+}
+
 T2Code *t2_compile(const T2Source *src)
 {
     T2Builder B = { 0 };
     T2Gen G = { 0 };
     T2Code *tc = NULL;
     uint32_t n_spills = 0;
+    int *block_first = NULL;
     B.src = src;
     B.why_op = -1;
     G.B = &B;
@@ -672,7 +1330,7 @@ T2Code *t2_compile(const T2Source *src)
     }
 
     /* Build: blocks in bytecode order, each a run of nodes. */
-    int *block_first = malloc(sizeof(int) * (src->len + 1));
+    block_first = malloc(sizeof(int) * (src->len + 1));
     if (!block_first) goto fail;
     for (uint32_t p = 0; p <= src->len; p++) {
         block_first[p] = -1;
@@ -681,15 +1339,22 @@ T2Code *t2_compile(const T2Source *src)
     for (uint32_t p = 0; p < src->len; p++) {
         if (!B.shape.block_start[p] || B.shape.depth[p] < 0) continue;
         block_first[p] = B.n_nodes;
-        if (!t2_build_block(&B, p)) { free(block_first); goto fail; }
+        if (!t2_build_block(&B, p)) goto fail;
     }
-    if (!t2_assign_spills(&B, &n_spills)) { free(block_first); goto fail; }
+    /* An exit stores values computed before its guard, never after. */
+    for (int i = 0; i < B.n_nodes; i++) {
+        if (B.nodes[i].exit < 0) continue;
+        T2Exit *x = &B.exits[B.nodes[i].exit];
+        for (int k = 0; k < x->n; k++)
+            if (B.entries[x->first + k].node >= i) { B.why = "an exit reads a later value (a T2 bug)"; goto fail; }
+    }
+    if (!t2_assign_spills(&B, &n_spills)) goto fail;
 
     /* Frame: 32 bytes of shadow space and the spills, sized so calls see a
      * 16-byte aligned rsp: the return address and 8 pushes leave rsp at 8
      * mod 16, so the frame is 8 mod 16. */
     G.frame = ((32 + n_spills * 8 + 15) & ~15u) + 8;
-    if (G.frame > T2_MAX_FRAME) { B.why = "too many values"; free(block_first); goto fail; }
+    if (G.frame > T2_MAX_FRAME) { B.why = "too many values"; goto fail; }
 
     XAsm *a = &G.a;
     G.epilogue = x_new_label(a);
@@ -719,7 +1384,7 @@ T2Code *t2_compile(const T2Source *src)
         for (int i = block_first[p]; i < end; i++)
             t2_emit_node(&G, i);
     }
-    free(block_first);
+    t2_emit_exits(&G);
 
     /* Epilogue: eax holds the result. */
     x_bind(a, G.epilogue);
@@ -748,15 +1413,11 @@ T2Code *t2_compile(const T2Source *src)
         g_t2.bytes += total;
     }
     g_t2.compiled++;
-    x_free(&G.a);
-    free(B.nodes);
-    free(B.slots);
-    free(B.shape.depth);
-    free(B.shape.block_start);
-    free(G.block_label);
     if (getenv("QJS_T2_LOG"))
-        fprintf(stderr, "[t2] compiled %s: %u bytecode bytes, %d nodes, %u bytes\n",
-                src->name ? src->name : "?", src->len, B.n_nodes, tc->size);
+        fprintf(stderr, "[t2] compiled %s: %u bytecode bytes, %d nodes, %d exits, %u bytes\n",
+                src->name ? src->name : "?", src->len, B.n_nodes, B.n_exits, tc->size);
+    free(block_first);
+    t2_free_builder(&B, &G);
     return tc;
 
  fail:
@@ -766,12 +1427,8 @@ T2Code *t2_compile(const T2Source *src)
                 B.oom ? "out of memory" : B.why ? B.why : "?",
                 B.why_op >= 0 ? ": " : "", B.why_op >= 0 && t2_op_name[B.why_op] ? t2_op_name[B.why_op] : "");
     free(tc);
-    x_free(&G.a);
-    free(B.nodes);
-    free(B.slots);
-    free(B.shape.depth);
-    free(B.shape.block_start);
-    free(G.block_label);
+    free(block_first);
+    t2_free_builder(&B, &G);
     return NULL;
 }
 

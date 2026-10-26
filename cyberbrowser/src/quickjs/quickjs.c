@@ -20697,19 +20697,22 @@ static int32_t g_jit_threshold = JS_JIT_THRESHOLD_DEFAULT;   /* QJS_JIT_THRESHOL
 
 /* Feedback vectors (JS_PERF_DESIGN.md section 5.4).  A function gets one
  * once its hotness (jit_budget, counted in every mode) passes
- * JS_FEEDBACK_THRESHOLD: one inline cache per property site, numbered in
- * bytecode order, and a map from each instruction's offset to its site.
- * The interpreter reads and fills the caches; the optimizer will read them
- * to decide what to specialize.  It lives on the GC heap (bytecode is never
- * freed explicitly), in old space, as data the collector does not trace:
- * the shapes and holders its caches name are kept alive by the inline
- * caches' retention set, as T1's are.  Objects do not move, so the
- * interpreter holds a plain pointer to it for the length of a call. */
+ * JS_FEEDBACK_THRESHOLD: one inline cache per property site and one state
+ * byte per arithmetic site, each numbered in bytecode order, and a map from
+ * each instruction's offset to its site.  The interpreter reads and fills
+ * the caches; T2 speculates from them, and records in an arithmetic site's
+ * state what made its speculation fail (t2_deopt).  It lives on the GC heap
+ * (bytecode is never freed explicitly), in old space, as data the collector
+ * does not trace: the caches name their shapes and holders weakly
+ * (js_feedback_clear_dead).  Objects do not move, so the interpreter holds a
+ * plain pointer to it for the length of a call. */
 typedef struct JSFeedback {
     GCHandle byte_code_handle;  /* the bytecode it numbers */
     uint32_t byte_code_len;
     uint32_t n_sites;
-    /* JitIC sites[n_sites], then uint16_t site_of[byte_code_len] */
+    uint32_t n_arith;
+    /* JitIC sites[n_sites], uint16_t site_of[byte_code_len],
+       uint8_t arith[n_arith] (T2_ARITH_*) */
 } JSFeedback;
 #define JS_FEEDBACK_NO_SITE 0xffff
 #define JIT_IC_GETTER 0x80000000u   /* a getter way's slot (js_feedback_get_field) */
@@ -20725,6 +20728,11 @@ static inline JitIC *js_feedback_sites(JSFeedback *fb)
 static inline const uint16_t *js_feedback_site_of(JSFeedback *fb)
 {
     return (const uint16_t *)(js_feedback_sites(fb) + fb->n_sites);
+}
+
+static inline uint8_t *js_feedback_arith(JSFeedback *fb)
+{
+    return (uint8_t *)(js_feedback_site_of(fb) + fb->byte_code_len);
 }
 
 /* The inline cache of the site at bytecode offset off, or NULL. */
@@ -20903,6 +20911,12 @@ static const T2Code *js_t2_get(JSContextHandle ctx, JSFunctionBytecodeHandle b)
         src.helpers = jsop_table;
         src.jumps = jsop_jumps;
         src.name = name[0] ? name : NULL;
+        {
+            /* Speculation needs somewhere to record what made it fail. */
+            JSFeedback *fb = js_feedback_make(b);
+            src.site_of = fb ? js_feedback_site_of(fb) : NULL;
+            src.arith = fb ? js_feedback_arith(fb) : NULL;
+        }
         tc = t2_compile(&src);
     }
     bp = (JSFunctionBytecode *)gc_deref(b);
@@ -20927,6 +20941,29 @@ int t2_poll(JSInterpFrame *F)
 int t2_to_bool(JSInterpFrame *F, GCValue v)
 {
     return JS_ToBool(F->ctx, v);
+}
+
+/* A guard of F's T2 code failed at an arithmetic site (state; its operands
+ * a and b, b NULL for one; the frame is the interpreter's again): record
+ * what the site saw, so the next compilation speculates less, and drop the
+ * code.  A function that keeps failing stays interpreted. */
+#define JS_T2_MAX_DEOPTS 16
+void t2_deopt(JSInterpFrame *F, uint8_t *state, const GCValue *a, const GCValue *b)
+{
+    JSFunctionBytecode *bp = (JSFunctionBytecode *)gc_deref(F->b);
+    int numbers = JS_IsNumber(*a) && (!b || JS_IsNumber(*b));
+    if (state)
+        *state |= numbers ? T2_ARITH_DOUBLE : T2_ARITH_OTHER;
+    if (!bp)
+        return;
+    /* jit_budget counts deopts too, in its own scale: a fresh compilation
+       waits for the threshold again */
+    bp->jit_budget = 0;
+    bp->t2_deopts++;
+    bp->t2_code = bp->t2_deopts >= JS_T2_MAX_DEOPTS ? T2_CODE_FAILED : NULL;
+    if (getenv("QJS_T2_LOG"))
+        fprintf(stderr, "[t2] deopt at %u (%s)\n", (unsigned)(F->pc - js_bc_byte_code_buf(F->b)),
+                numbers ? "double" : "other");
 }
 
 /* A loop's back edge in the interpreter: count the iteration, and once the
@@ -27773,7 +27810,9 @@ static const JSOpCode opcode_info[OP_COUNT + (OP_TEMP_END - OP_TEMP_START)] = {
 #endif
 
 /* Whether instruction op has a feedback site. */
-static inline BOOL js_feedback_op_has_site(int op)
+/* Whether instruction op has a property feedback site (1), an arithmetic
+ * one (2), or none (0). */
+static inline int js_feedback_op_site_kind(int op)
 {
     switch (op) {
     case OP_get_field:
@@ -27784,9 +27823,16 @@ static inline BOOL js_feedback_op_has_site(int op)
     case OP_put_field:
     case OP_get_private_field:
     case OP_put_private_field:
-        return TRUE;
+        return 1;
+    case OP_add: case OP_sub: case OP_mul: case OP_div:
+    case OP_lt: case OP_lte: case OP_gt: case OP_gte:
+    case OP_eq: case OP_neq: case OP_strict_eq: case OP_strict_neq:
+    case OP_and: case OP_or: case OP_xor: case OP_shl: case OP_sar: case OP_shr:
+    case OP_inc: case OP_dec: case OP_neg: case OP_post_inc: case OP_post_dec:
+    case OP_inc_loc: case OP_dec_loc: case OP_add_loc:
+        return 2;
     default:
-        return FALSE;
+        return 0;
     }
 }
 
@@ -27797,7 +27843,7 @@ static JSFeedback *js_feedback_make(JSFunctionBytecodeHandle b)
     JSFunctionBytecode *bp = (JSFunctionBytecode *)gc_deref(b);
     JSFeedback *fb = js_feedback_of(bp);
     const uint8_t *bc;
-    uint32_t len, off, n = 0;
+    uint32_t len, off, n = 0, na = 0;
     uint16_t *site_of;
     GCHandle h;
 
@@ -27808,29 +27854,32 @@ static JSFeedback *js_feedback_make(JSFunctionBytecodeHandle b)
     if (!bc || bp->func_parse_state != JS_FUNC_PARSED)
         goto fail;
     for (off = 0; off < len; ) {
-        int size = short_opcode_info(bc[off]).size;
+        int size = short_opcode_info(bc[off]).size, kind = js_feedback_op_site_kind(bc[off]);
         if (size <= 0)
             goto fail;
-        n += js_feedback_op_has_site(bc[off]);
+        n += kind == 1;
+        na += kind == 2;
         off += size;
     }
-    if (n == 0 || n >= JS_FEEDBACK_NO_SITE)
+    if ((n == 0 && na == 0) || n >= JS_FEEDBACK_NO_SITE || na >= JS_FEEDBACK_NO_SITE)
         goto fail;
-    h = gc_alloc_old(sizeof(JSFeedback) + n * sizeof(JitIC) + len * sizeof(uint16_t),
+    h = gc_alloc_old(sizeof(JSFeedback) + n * sizeof(JitIC) + len * sizeof(uint16_t) + na,
                      JS_GC_OBJ_TYPE_DATA);
     if (h == GC_HANDLE_NULL)
         goto fail;
     fb = (JSFeedback *)gc_deref(h);
     memset(fb, 0, sizeof(*fb));
     fb->n_sites = n;
+    fb->n_arith = na;
     fb->byte_code_len = len;
     memset(js_feedback_sites(fb), 0, n * sizeof(JitIC));
     site_of = (uint16_t *)js_feedback_site_of(fb);
-    n = 0;
+    memset(js_feedback_arith(fb), 0, na);
+    n = na = 0;
     for (off = 0; off < len; ) {
-        int op = bc[off], size = short_opcode_info(op).size;
+        int op = bc[off], size = short_opcode_info(op).size, kind = js_feedback_op_site_kind(op);
         uint32_t k;
-        uint16_t s = js_feedback_op_has_site(op) ? (uint16_t)n++ : JS_FEEDBACK_NO_SITE;
+        uint16_t s = kind == 1 ? (uint16_t)n++ : kind == 2 ? (uint16_t)na++ : JS_FEEDBACK_NO_SITE;
         for (k = 0; k < (uint32_t)size; k++)
             site_of[off + k] = s;
         off += size;

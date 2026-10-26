@@ -871,8 +871,10 @@ Either way, nothing in T2 waits for this decision.
 
 N5 is built in steps that each work on their own: 5a records call and arithmetic feedback in
 functions that are T2 candidates; 5b builds the compiler's skeleton with no speculation; 5c
-adds int32 and float64 speculation; 5d shape guards and inline property access; 5e direct
-calls; 5f register allocation across blocks and check removal. 5b gains nothing by itself.
+adds int32 and float64 speculation; 5d shape guards and inline property access, and array
+element kinds (an array known to hold only int32s or only doubles, with no holes, read and
+written with a bounds check and no tag test); 5e direct calls; 5f register allocation across
+blocks and check removal. 5b gains nothing by itself.
 What it settles is the part every later step depends on: entry, exits, frame states, code
 generation and agreement with the interpreter in every mode.
 
@@ -935,6 +937,32 @@ compiles every function at its first call, which runs the whole test suite throu
 return to the interpreter, that `F->sp` matches the stack depth the bytecode has at `F->pc`.
 `tests/jit/run.sh` gains the T2 modes, so every JIT test compares T2's output with the
 interpreter's.
+
+**5c as built: arithmetic speculation.** `add`, `sub`, `mul`, `div`, the comparisons and
+equalities, the bitwise operators and shifts, `neg`, `inc`/`dec` in all their forms
+(`post_inc`, `inc_loc`, `add_loc`) and `lnot` of a known boolean are speculated on int32s,
+or on float64s once a site has seen a number outside int32. Values carry a representation
+(tagged, int32, boolean, float64) and are boxed only where they reach the frame: a helper,
+a block's end, a return, an exit. A branch on a comparison tests its boolean directly.
+
+- **Feedback from exits, not from the interpreter (5a folded in).** Rather than have the
+  interpreter record operand kinds at every arithmetic instruction, T2 speculates int32
+  first. A failed guard stores the frame, and `t2_deopt` looks at the instruction's
+  operands: both numbers mark the site float64, anything else marks it generic, in the
+  site's state byte in the feedback vector. The code is dropped and the function compiles
+  again when it is hot again. A site only widens (int32, then float64, then generic), so a
+  function recompiles at most twice per site; past 16 drops it stays interpreted. The
+  interpreter's arithmetic is untouched and pays nothing.
+- **Guards:** an int32 is a tagged value whose upper word is 0 (one unsigned compare); a
+  float64 is one whose upper word lies outside the tags' window. Overflow, `-0` from `mul`
+  and `neg`, and a `>>>` result above INT32_MAX exit; such a `>>>` site then uses its
+  helper (Uint32 values are not represented yet).
+- **An exit is made before its guard**, because making it loads any slot that aliases
+  another; the compiler refuses a graph where an exit would store a value computed after
+  its guard. (The first version made it after, and exits stored unloaded slots:
+  `tests/jit/t2arith.js` found it.)
+- **Tests:** `tests/jit/t2arith.js` warms each operation on int32s, then sends overflow,
+  `-0`, NaN, doubles, strings, objects and booleans, in both T2 modes.
 
 ## 7. Milestones
 

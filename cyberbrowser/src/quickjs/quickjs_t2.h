@@ -26,7 +26,15 @@ typedef struct T2Source {
     int (*const *helpers)(JSInterpFrame *F);   /* jsop_table */
     const uint8_t *jumps;                      /* jsop_jumps */
     const char *name;                          /* for profiles; may be NULL */
+    /* Its feedback vector's map (offset -> site) and arithmetic states;
+       NULL when it has none (then nothing is speculated). */
+    const uint16_t *site_of;
+    uint8_t *arith;
 } T2Source;
+
+/* An arithmetic site's state: what made T2's speculation on it fail. */
+#define T2_ARITH_DOUBLE 1   /* a number outside int32, or an int32 result that was not */
+#define T2_ARITH_OTHER  2   /* a value that is not a number */
 
 T2Code *t2_compile(const T2Source *src);
 int t2_available(void);
@@ -35,5 +43,6 @@ void t2_print_stats(void);
 /* Called by T2 code (quickjs.c). */
 int t2_poll(JSInterpFrame *F);
 int t2_to_bool(JSInterpFrame *F, GCValue v);
+void t2_deopt(JSInterpFrame *F, uint8_t *state, const GCValue *a, const GCValue *b);
 
 #endif /* QUICKJS_T2_H */

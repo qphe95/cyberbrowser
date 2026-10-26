@@ -282,4 +282,151 @@ static inline void x_jcc(XAsm *a, int cc, int label)
     x_ref_label(a, label);
 }
 
+/* --- Integer arithmetic ------------------------------------------------- */
+
+/* op r32, r32 (dst op= src): x_ADD, x_OR, x_AND, x_SUB, x_XOR, x_CMP are
+ * the opcode bytes of the r/m32, r32 forms. */
+enum { X_ADD = 0x01, X_OR = 0x09, X_AND = 0x21, X_SUB = 0x29, X_XOR = 0x31, X_CMP = 0x39 };
+
+static inline void x_alu_rr32(XAsm *a, int op, int dst, int src)
+{
+    x_rex(a, 0, src, 0, dst);
+    x_byte(a, (uint8_t)op);
+    x_modrm_rr(a, src, dst);
+}
+
+static inline void x_alu_rr64(XAsm *a, int op, int dst, int src)
+{
+    x_rex(a, 1, src, 0, dst);
+    x_byte(a, (uint8_t)op);
+    x_modrm_rr(a, src, dst);
+}
+
+/* imul dst32, src32 */
+static inline void x_imul32(XAsm *a, int dst, int src)
+{
+    x_rex(a, 0, dst, 0, src);
+    x_byte(a, 0x0f); x_byte(a, 0xaf);
+    x_modrm_rr(a, dst, src);
+}
+
+/* neg r32 */
+static inline void x_neg32(XAsm *a, int r)
+{
+    x_rex(a, 0, 0, 0, r);
+    x_byte(a, 0xf7);
+    x_modrm_rr(a, 3, r);
+}
+
+/* shl/shr/sar r32, cl: kind 4 shl, 5 shr, 7 sar */
+static inline void x_shift_cl32(XAsm *a, int kind, int r)
+{
+    x_rex(a, 0, 0, 0, r);
+    x_byte(a, 0xd3);
+    x_modrm_rr(a, kind, r);
+}
+
+/* shr r64, imm8 */
+static inline void x_shr64_i(XAsm *a, int r, uint8_t n)
+{
+    x_rex(a, 1, 0, 0, r);
+    x_byte(a, 0xc1);
+    x_modrm_rr(a, 5, r);
+    x_byte(a, n);
+}
+
+/* test r32, imm32 */
+static inline void x_test32_i(XAsm *a, int r, uint32_t imm)
+{
+    x_rex(a, 0, 0, 0, r);
+    x_byte(a, 0xf7);
+    x_modrm_rr(a, 0, r);
+    x_u32(a, imm);
+}
+
+/* add/cmp r32, imm8: op 0 add, 7 cmp */
+static inline void x_alu_ri32(XAsm *a, int op, int r, int8_t imm)
+{
+    x_rex(a, 0, 0, 0, r);
+    x_byte(a, 0x83);
+    x_modrm_rr(a, op, r);
+    x_byte(a, (uint8_t)imm);
+}
+
+/* setcc al; movzx eax, al */
+static inline void x_setcc_eax(XAsm *a, int cc)
+{
+    x_byte(a, 0x0f); x_byte(a, (uint8_t)(0x90 | cc)); x_byte(a, 0xc0);
+    x_byte(a, 0x0f); x_byte(a, 0xb6); x_byte(a, 0xc0);
+}
+
+/* setcc r8 for r in rax..rbx (al, cl, dl, bl) */
+static inline void x_setcc_r8(XAsm *a, int cc, int r)
+{
+    x_byte(a, 0x0f); x_byte(a, (uint8_t)(0x90 | cc)); x_modrm_rr(a, 0, r);
+}
+
+/* bt[c|r] r64, imm8: kind 6 btr, 7 btc */
+static inline void x_bt64_i(XAsm *a, int kind, int r, uint8_t bit)
+{
+    x_rex(a, 1, 0, 0, r);
+    x_byte(a, 0x0f); x_byte(a, 0xba);
+    x_modrm_rr(a, kind, r);
+    x_byte(a, bit);
+}
+
+/* mov dword [base + disp], src32 */
+static inline void x_store32(XAsm *a, int base, int32_t disp, int src)
+{
+    x_rex(a, 0, src, 0, base);
+    x_byte(a, 0x89);
+    x_mem(a, src, base, disp);
+}
+
+/* --- SSE2 (xmm0..xmm7 only) ---------------------------------------------- */
+
+/* movq xmm, r64 */
+static inline void x_movq_xr(XAsm *a, int x, int r)
+{
+    x_byte(a, 0x66);
+    x_rex(a, 1, x, 0, r);
+    x_byte(a, 0x0f); x_byte(a, 0x6e);
+    x_modrm_rr(a, x, r);
+}
+
+/* movq r64, xmm */
+static inline void x_movq_rx(XAsm *a, int r, int x)
+{
+    x_byte(a, 0x66);
+    x_rex(a, 1, x, 0, r);
+    x_byte(a, 0x0f); x_byte(a, 0x7e);
+    x_modrm_rr(a, x, r);
+}
+
+/* addsd/subsd/mulsd/divsd xmm, xmm: 0x58 add, 0x5c sub, 0x59 mul, 0x5e div */
+enum { X_ADDSD = 0x58, X_MULSD = 0x59, X_SUBSD = 0x5c, X_DIVSD = 0x5e };
+static inline void x_sse_sd(XAsm *a, int op, int dst, int src)
+{
+    x_byte(a, 0xf2);
+    x_byte(a, 0x0f); x_byte(a, (uint8_t)op);
+    x_modrm_rr(a, dst, src);
+}
+
+/* ucomisd x1, x2 */
+static inline void x_ucomisd(XAsm *a, int x1, int x2)
+{
+    x_byte(a, 0x66);
+    x_byte(a, 0x0f); x_byte(a, 0x2e);
+    x_modrm_rr(a, x1, x2);
+}
+
+/* cvtsi2sd xmm, r32 */
+static inline void x_cvtsi2sd32(XAsm *a, int x, int r)
+{
+    x_byte(a, 0xf2);
+    x_rex(a, 0, x, 0, r);
+    x_byte(a, 0x0f); x_byte(a, 0x2a);
+    x_modrm_rr(a, x, r);
+}
+
 #endif /* QUICKJS_T2_X64_H */
