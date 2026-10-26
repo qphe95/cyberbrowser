@@ -1,6 +1,8 @@
 # Faster JavaScript after the baseline JIT
 
-Status: N0–N3 done; N4 onward revised after the steady-state benchmarks (section 4.4); measured on Speedometer since (section 4.3).
+Status: N0–N3 done; N4 onward revised after the steady-state benchmarks (section 4.4). The gate is the
+YouTube replays (section 4); Speedometer (4.3) is a secondary check. N5 in progress: T2 is at parity
+with the interpreter on the replays (section 6.7, "N5 on the replays").
 Follows `JIT_DESIGN.md` (T1 and the first inline caches, M2 and part of M4) and builds on the
 handle-free references of `GC_PAUSELESS_DESIGN.md`. It changes the order of the remaining work:
 engine representation and runtime paths first, then feedback shared by all tiers, then a
@@ -155,9 +157,8 @@ The ranges overlap: each lever shrinks the base the next one works on.
 Together, the rows before T2 are the bulk of a plausible 20–30% of the JS-heavy loads' JS-thread
 time. None of them is a compiler. On pages dominated by DOM and layout, such as the Wikipedia
 article (72% DOM and layout), the gain is proportionally smaller. The page loads are mostly
-code that runs once, so they bound what any compiler can gain on loads; the steady-state
-benchmark (Speedometer, 4.3) is where a compiler shows what it can do, and both are measured for each
-milestone from N4 on.
+code that runs once, so they bound what any compiler can gain on loads. They are the gate for
+each milestone; Speedometer (4.3) is measured as a secondary check on code that runs longer.
 
 ## 4. Measuring (N0)
 
@@ -300,15 +301,17 @@ sampler, which grew its buffer while the main thread was suspended.
 
 The replays are page loads: most of their code runs once, which is what a browser mostly
 does, but they cannot show what a compiler gains on code that runs long enough to be
-optimized. For that, the benchmark is **Speedometer** (WebKit's, run unmodified from a
+optimized. For that, a second benchmark is **Speedometer** (WebKit's, run unmodified from a
 checkout of its main branch outside the repository). It is real framework code driving a
 real DOM: TodoMVC in a dozen frameworks, two news sites (Next.js and Nuxt), two editors
 (CodeMirror and TipTap), charts (Observable Plot, Chart.js, React Stockcharts) and WebKit's
 performance dashboard. Each suite runs in an iframe and is timed per step: the synchronous
 part (the clicks and typing the step simulates, and the framework's work in response) and
 the asynchronous part (to the next frame, with a forced layout). The score is 1000 over the
-geometric mean of the suites' totals. This replaced plain-JS suites (JetStream; section 4.4):
-browsing is framework code on the DOM, not crypto kernels.
+geometric mean of the suites' totals. It replaced plain-JS suites (JetStream; section 4.4):
+browsing is framework code on the DOM, not crypto kernels. For a while it was the benchmark;
+the gate went back to the YouTube replays, which are what the browser is for, and Speedometer
+stays as a check that framework code runs and how the tiers do on it.
 
 - **`tools/speedometer_server.js`** serves the checkout on 127.0.0.1 (the suites need HTTP:
   modules, frames, fetches).
@@ -1223,6 +1226,102 @@ came before register allocation.
   −42%) and the rest within noise; the twelve-test mean stays in the range of −23%. With
   three free registers and values dying at every block end, the gain is confined to tight
   loops; the tests where T2 still trails the interpreter are bound by helper calls.
+
+**N5 on the replays: deopts, helpers, entry and check removal.** Measured on the YouTube
+replays (the gate), T2 at its default threshold was slower than the interpreter on all five
+recordings (5 runs: yt-dQw4w9WgXcQ +5.6%, yt-home +5.1%, yt-search +14.2%, news-bbc +3.9%,
+wiki-us +5.4%). Three measurements said why:
+
+- **A profile split by tier.** `OWN=1 node tools/sample_report.js` gives each sample to the
+  innermost frame that runs a function (T2 code, or `JS_CallInternal` for the interpreter)
+  under the helper it called (`OWN_IN=<helper>[,<callee>]` goes further in). On yt-search,
+  T2 code and what it called took 878 ms where the interpreter had taken 672 ms for the same
+  functions; compiling was 62 ms of it.
+- **Counters.** `QJS_T2_LOG=1` now names the opcode of each deopt; `QJS_T2_COUNT=1` counts,
+  in the compiled code, the nodes and helpers it runs, the calls by outcome, and how often
+  each compilation is entered afterwards. yt-search compiled 955 functions 2,213 times,
+  10.7 MB of code: 1,460 deopts (equalities speculated on int32s that compared strings and
+  objects: 619; shape misses: 486; array sites given other objects: 282) each dropped the
+  code, some functions 16 times. Compiled code ran 8.8M helper calls, each storing the frame
+  and reloading it.
+- **Micro-benchmarks of entry.** A loop in the interpreter calling `function (a, b) { return
+  a + b; }` 2M times took 65 ms with T2 against 46 ms interpreted: entering T2 code cost more
+  than interpreting the function.
+
+What changed:
+
+- **Feedback from the interpreter.** The interpreter's slow paths for arithmetic,
+  comparisons, equalities and array elements now record in the site's state byte what a
+  failed guard would (`js_feedback_note`): float64, not numbers, or for an equality whether
+  it compares by identity. Only with T2 on, and only until the site's state stops changing,
+  so the interpreter pays nothing otherwise. T2 no longer speculates on sites that would
+  fail.
+- **Strict equality on anything** (`T2N_STRICT_EQ`) compares bits against a constant that
+  compares by identity, else calls `js_strict_eq2`; it never exits.
+- **Property accesses no longer deopt.** Every `get_field` and `put_field` site compiles:
+  inline ways for own and prototype data properties and adds, and a miss path through the
+  interpreter's cache that does the whole access: other shapes, megamorphic sites, getters
+  and setters in C and in JavaScript, primitives, proxies, stale prototype epochs, exotic
+  receivers. JavaScript can then run in the middle of compiled code, so the arguments and
+  locals it could see (captured ones; all of them with eval, with or an arguments object)
+  are stored to the frame before such an access and read from it again after (observable
+  slots, `t2_expose`), and an exception thrown there leaves through the instruction's exit
+  with `JSOP_EXCEPTION` (a throwing exit), keeping the code.
+- **Direct C calls instead of helpers** (`T2N_CCALL`): `object`, `fclosure`,
+  `define_field`, `in`, `instanceof`, `add` and loose equality when not speculated, and
+  element accesses that are not a fast array's, each with its operands in registers, the
+  observable slots stored only when it may run JavaScript, and a throwing exit.
+  `push_atom_value` is a constant, `typeof` and `lnot` of any value are compiled
+  (truthiness inline for int32s, booleans, null, undefined and objects), and the stack
+  shuffles (`insert`, `perm`, `rot`, `swap2`, `nip1`, `dup1`, `dup3`) only move values.
+  Helper call sites on yt-search went from 8,285 to 724 (same threshold).
+- **Cheaper entry.** The prologue saves only the registers the code uses; a return does not
+  write `F->sp` and `F->pc` (the caller's done path reads neither); the interpreter checks
+  the bytecode's `t2_code` directly at a call. A float64 result is boxed as an int32 when it
+  is one, as the interpreter's fast paths downstream want. The add micro-benchmark: 65 ms
+  → 49–51 ms (interpreter 45–48 ms).
+- **A frame bug, found on the way.** `js_stack_frame_enter` and the pooled frame path cleared
+  16 bytes per operand-stack slot, written for 16-byte values: with 8-byte values, twice the
+  stack and 8 bytes past the frame. Fixing it made the interpreter itself 6–7% faster on the
+  replays (yt-search 14.9 → 13.9 Gcycles).
+- **Check removal, within a block.** A property site that has seen one own-property shape
+  tests just it and exits otherwise (a deopt; a recompilation after one goes back to the
+  ways and the miss path), so the shape is known after it: a later access to the same value
+  in the block, with nothing between that runs JavaScript or changes shapes, takes the slot
+  with no test. On yt-search 537 sites test one shape and 7 none: values do not cross blocks
+  yet, and most accesses are separated by calls.
+- **The threshold counts calls too.** T2 enters at a function's start, so a function made hot
+  by its loops gains only on its later calls. On yt-home 535 of 690 compilations were entered
+  fewer than 1,000 times afterwards, against about 40 µs to compile. T2 now also waits for
+  1,000 calls (`QJS_T2_MIN_CALLS`); counted per function since its last compilation.
+- **`getenv` once.** The compiler and `t2_deopt` read their switches on every compilation and
+  deopt; on Windows that scans the environment (25 ms on yt-search).
+- **Tests:** `tests/jit/t2access.js` (getters and setters in JavaScript reading and writing
+  the caller's captured locals, throwing ones, read-only and frozen receivers in strict and
+  sloppy code, primitives, proxies, null and undefined, shape churn, prototype changes) and
+  `tests/jit/t2ops.js` (the direct C calls with valueOf, traps and throws in the middle,
+  compound assignments and destructuring). All JIT tests pass in every mode, and the T2
+  modes under GC stress.
+
+| yt-search | Before | After (with the 1,000-call threshold) |
+|---|---|---|
+| Compilations (functions) | 2,213 (955) | 462 |
+| Deopts | 1,460 | 7 |
+| Code | 10.7 MB | 1.6 MB |
+| Helper call sites | 8,285 | 208 |
+| T2 entries | 3.9M | 3.7M |
+
+**Where it stands.** On every recording T2 is now within noise of the interpreter. The
+fastest-run comparisons of one batch (4 runs) were yt-dQw4w9WgXcQ +0.6%, yt-home −1.7%,
+yt-search −0.5%; across batches the differences moved by ±2–5% with machine load, which also
+moved the interpreter's own medians by up to 5%. N5's exit criteria are not met: −3% on the
+JS-heavy replays is not reached, and the steady-state target was not re-measured. The tier
+profile says why the gain is small: on yt-search the interpreter's own dispatch is about
+300 ms of 3 s of JavaScript-thread time, and T2 removes about a quarter of it. The rest is
+calls (4.4M, frame setup each), natives, closures, property misses and the collector. What
+can still move the replays is cheaper calls (by call-site target, without the generic
+path), inlining small callees and allocation sinking (6.3), values across blocks, and loop
+entry (6.2).
 
 ## 7. Milestones
 

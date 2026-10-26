@@ -20129,9 +20129,11 @@ JSStackFrame *js_stack_frame_enter(JSRuntimeHandle rt, JSObjectHandle p, JSFunct
     /* The collector marks the whole operand stack of a frame on the chain:
      * the last frame's values there are stale (as in a pooled frame). */
     for (i = 0; i < stack_size; i++) {
+        /* each slot's bytes (a value is 8 or 16 of them) */
         uint64_t *q = (uint64_t *)&stack_buf[i];
         q[0] = 0;
-        q[1] = 0;
+        if (sizeof(GCValue) > 8)
+            q[1] = 0;
         __asm__("" ::: "memory");
     }
     sf->bytecode_handle = b;
@@ -20211,9 +20213,11 @@ JSStackFrame *js_bc_frame_enter_pooled(JSRuntimeHandle rt, JSObjectHandle p, JSF
     /* Inline (the stack is a few values): memset is a call out of the
      * image.  The empty asm keeps gcc from making the loop that call. */
     for (i = 0; i < stack_size; i++) {
+        /* each slot's bytes (a value is 8 or 16 of them) */
         uint64_t *q = (uint64_t *)&stack_buf[i];
         q[0] = 0;
-        q[1] = 0;
+        if (sizeof(GCValue) > 8)
+            q[1] = 0;
         __asm__("" ::: "memory");
     }
     sf->self_handle = handle;
@@ -20846,6 +20850,11 @@ enum { JS_T2_OFF, JS_T2_ON, JS_T2_STRESS };
 static int g_t2_mode = -1;
 #define JS_T2_THRESHOLD_DEFAULT 20000
 static int32_t g_t2_threshold = JS_T2_THRESHOLD_DEFAULT;
+/* T2 enters at a function's start only: its loops make it hot, but only its
+ * calls after compiling run the code.  It also waits for this many calls
+ * (QJS_T2_MIN_CALLS overrides). */
+#define JS_T2_MIN_CALLS_DEFAULT 1000
+static int32_t g_t2_min_calls = JS_T2_MIN_CALLS_DEFAULT;
 
 static void js_t2_exit_stats(void)
 {
@@ -20864,6 +20873,8 @@ static int js_t2_mode_init(void)
     }
     if (t && atoi(t) > 0)
         g_t2_threshold = atoi(t);
+    if ((t = getenv("QJS_T2_MIN_CALLS")) && atoi(t) >= 0)
+        g_t2_min_calls = atoi(t);
     if (mode != JS_T2_OFF && getenv("QJS_T2_LOG"))
         atexit(js_t2_exit_stats);
     g_t2_mode = mode;
@@ -20883,7 +20894,7 @@ static const T2Code *js_t2_get(JSContextHandle ctx, JSFunctionBytecodeHandle b)
     T2Code *tc = bp->t2_code;
     if (tc)
         return tc == T2_CODE_FAILED ? NULL : tc;
-    if (g_t2_mode != JS_T2_STRESS && bp->jit_budget < g_t2_threshold)
+    if (g_t2_mode != JS_T2_STRESS && (bp->jit_budget < g_t2_threshold || bp->t2_calls < g_t2_min_calls))
         return NULL;
     if (bp->func_kind != JS_FUNC_NORMAL || bp->func_parse_state != JS_FUNC_PARSED ||
         bp->byte_code_len <= 0) {
@@ -20894,7 +20905,9 @@ static const T2Code *js_t2_get(JSContextHandle ctx, JSFunctionBytecodeHandle b)
         char name[192], fb[96], nb[64];
         T2Source src;
         name[0] = 0;
-        if (getenv("QJS_T2_LOG") || getenv("CYBER_SAMPLE")) {
+        static int named = -1;
+        if (named < 0) named = t2_logging() || getenv("CYBER_SAMPLE") != NULL;
+        if (named) {
             int col = 0;
             int line = bp->has_debug ? find_line_num(ctx, b, 0, &col) : -1;
             snprintf(name, sizeof(name), "%s@%s:%d",
@@ -20912,6 +20925,8 @@ static const T2Code *js_t2_get(JSContextHandle ctx, JSFunctionBytecodeHandle b)
         src.helpers = jsop_table;
         src.jumps = jsop_jumps;
         src.name = name[0] ? name : NULL;
+        src.ctx = ctx;
+        src.deopts = bp->t2_deopts;
         {
             /* Speculation needs somewhere to record what made it fail. */
             JSFeedback *fb = js_feedback_make(b);
@@ -20979,12 +20994,55 @@ void t2_deopt(JSInterpFrame *F, uint8_t *state, const GCValue *a, const GCValue 
     /* jit_budget counts deopts too, in its own scale: a fresh compilation
        waits for the threshold again */
     bp->jit_budget = 0;
+    bp->t2_calls = 0;
     bp->t2_deopts++;
     bp->t2_code = bp->t2_deopts >= JS_T2_MAX_DEOPTS ? T2_CODE_FAILED : NULL;
-    if (getenv("QJS_T2_LOG"))
-        fprintf(stderr, "[t2] deopt at %u (%s)\n", (unsigned)(F->pc - js_bc_byte_code_buf(F->b)),
-                numbers ? "double" : "other");
+    if (t2_logging())
+        fprintf(stderr, "[t2] deopt at %u op %d (%s)\n", (unsigned)(F->pc - js_bc_byte_code_buf(F->b)),
+                F->pc[0], numbers ? "double" : state ? "other" : "no state");
 }
+
+/* The interpreter ran the arithmetic, comparison, equality or array site at
+ * offset off on operands its int32 fast path does not take: record in the
+ * site's state what a failed T2 guard would, so T2 does not speculate on it
+ * in the first place.  kind: JS_NOTE_ARITH (numbers: float64, else not
+ * numbers), JS_NOTE_UNARY (the same of a alone), JS_NOTE_STRICT_EQ and
+ * JS_NOTE_EQ (also whether they compare by identity, t2_eq), JS_NOTE_ELEM
+ * (an array site off its fast path), JS_NOTE_DOUBLE (known numbers, not
+ * both int32s). */
+enum { JS_NOTE_ARITH, JS_NOTE_UNARY, JS_NOTE_STRICT_EQ, JS_NOTE_EQ, JS_NOTE_ELEM, JS_NOTE_DOUBLE };
+static no_inline void js_feedback_note(JSFeedback *fb, uint32_t off, GCValue a, GCValue b, int kind)
+{
+    uint32_t s = js_feedback_site_of(fb)[off];
+    uint8_t bits;
+    if (s == JS_FEEDBACK_NO_SITE || s >= fb->n_arith)
+        return;
+    if (kind == JS_NOTE_ELEM)
+        bits = T2_ARITH_OTHER;
+    else if (kind == JS_NOTE_DOUBLE)
+        bits = T2_ARITH_DOUBLE;
+    else if (JS_IsNumber(a) && (kind == JS_NOTE_UNARY || JS_IsNumber(b)))
+        bits = T2_ARITH_DOUBLE;
+    else if (kind == JS_NOTE_ARITH || kind == JS_NOTE_UNARY)
+        bits = T2_ARITH_OTHER;
+    else
+        bits = t2_eq(a, b, kind == JS_NOTE_EQ) >= 0 ? T2_ARITH_OTHER : T2_ARITH_OTHER | T2_ARITH_GENERIC;
+    js_feedback_arith(fb)[s] |= bits;
+}
+/* In JS_CallInternal: the instruction started len bytes before pc.  Only
+ * for T2, and only until the site's state says not to speculate at all (a
+ * site only widens). */
+#define JS_FEEDBACK_NOTE(len, a, b, kind)                                     \
+    do {                                                                      \
+        if (fb && unlikely(g_t2_mode > JS_T2_OFF)) {                          \
+            uint32_t s_ = js_feedback_site_of(fb)[pc - (len) - fb_bc];        \
+            if (s_ < fb->n_arith && !(js_feedback_arith(fb)[s_] &            \
+                  ((kind) == JS_NOTE_STRICT_EQ || (kind) == JS_NOTE_EQ ?      \
+                   T2_ARITH_GENERIC : (kind) == JS_NOTE_DOUBLE ?              \
+                   T2_ARITH_DOUBLE | T2_ARITH_OTHER : T2_ARITH_OTHER)))       \
+                js_feedback_note(fb, (uint32_t)(pc - (len) - fb_bc), a, b, kind); \
+        }                                                                     \
+    } while (0)
 
 /* A loop's back edge in the interpreter: count the iteration, and once the
  * function is hot, continue at the loop head through restart, which
@@ -21439,17 +21497,18 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
     {
         /* Hotness, for the feedback vector, T1 and T2. */
         JSFunctionBytecode *jbp = (JSFunctionBytecode *)gc_deref(b);
+        const T2Code *tc;
         if (jbp->feedback_handle == GC_HANDLE_NULL || js_t2_mode() != JS_T2_OFF ?
             jbp->jit_budget < JS_HOTNESS_MAX :
             js_jit_mode() == JS_JIT_ON && jbp->jit_budget < JS_JIT_THRESHOLD)
             jbp->jit_budget += JS_JIT_ENTRY_WEIGHT;
-    }
-
- restart:
-    if (unlikely(g_t2_mode != JS_T2_OFF) && pc == js_bc_byte_code_buf(b)) {
         /* T2 enters at the function's start only (no loop entry yet). */
-        const T2Code *tc = js_t2_get(ctx, b);
-        if (tc) {
+        if (unlikely(js_t2_mode() != JS_T2_OFF) &&
+            (tc = jbp->t2_code) != T2_CODE_FAILED &&
+            (tc || ((jbp->t2_calls += jbp->t2_calls != 0xffff,
+                     (jbp->jit_budget >= g_t2_threshold && jbp->t2_calls >= g_t2_min_calls) ||
+                     g_t2_mode == JS_T2_STRESS) &&
+                    (tc = js_t2_get(ctx, b))))) {
             JSInterpFrame F;
             int r;
             F.sp = sp; F.pc = pc; F.ret_val = ret_val;
@@ -21473,6 +21532,8 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
             goto interpret;     /* an exit: the interpreter continues at pc */
         }
     }
+
+ restart:
     if (unlikely(js_jit_mode() != JS_JIT_OFF)) {
         /* Run the call (from pc) outside this loop: compiled, or through
          * the helpers (QJS_JIT=threaded).  It comes back here only to
@@ -23265,6 +23326,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                     val = p_array_values[idx];   \
                 } else {                                                \
                     name ## _slow_path:                                 \
+                    JS_FEEDBACK_NOTE(1, obj, prop, JS_NOTE_ELEM);       \
                     JS_SF_SET_PC(sf, pc);                                    \
                     val = JS_GetPropertyValue(ctx, obj, prop);          \
                     if (unlikely(JS_IsException(val))) {                \
@@ -23437,6 +23499,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                     sp -= 3;
                 } else {
                 put_array_el_slow_path:
+                    JS_FEEDBACK_NOTE(1, sp[-3], sp[-2], JS_NOTE_ELEM);
                     JS_SF_SET_PC(sf, pc);
                     ret = JS_SetPropertyValue(ctx, sp[-3], sp[-2], sp[-1], JS_PROP_THROW_STRICT);
                     
@@ -23562,15 +23625,18 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                     }
                     sp--;
                 } else if (GC_VALUE_IS_BOTH_FLOAT(op1, op2)) {
+                    JS_FEEDBACK_NOTE(1, op1, op2, JS_NOTE_DOUBLE);
                     sp[-2] = __JS_NewFloat64(ctx, JS_VALUE_GET_FLOAT64(op1) +
                                              JS_VALUE_GET_FLOAT64(op2));
                     sp--;
                 } else if (JS_IsString(op1) && JS_IsString(op2)) {
+                    JS_FEEDBACK_NOTE(1, op1, op2, JS_NOTE_ARITH);
                     sp[-2] = JS_ConcatString(ctx, op1, op2);
                     sp--;
                     if (JS_IsException(sp[-1]))
                         goto exception;
                 } else {
+                    JS_FEEDBACK_NOTE(1, op1, op2, JS_NOTE_ARITH);
                     JS_SF_SET_PC(sf, pc);
                     if (js_add_slow(ctx, sp))
                         goto exception;
@@ -23598,11 +23664,13 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                     }
                     sp--;
                 } else if (GC_VALUE_IS_BOTH_FLOAT(*pv, op2)) {
+                    JS_FEEDBACK_NOTE(2, *pv, op2, JS_NOTE_DOUBLE);
                     *pv = __JS_NewFloat64(ctx, JS_VALUE_GET_FLOAT64(*pv) +
                                                JS_VALUE_GET_FLOAT64(op2));
                     sp--;
                 } else if (JS_VALUE_GET_TAG(*pv) == JS_TAG_STRING &&
                            JS_VALUE_GET_TAG(op2) == JS_TAG_STRING) {
+                    JS_FEEDBACK_NOTE(2, *pv, op2, JS_NOTE_ARITH);
                     sp--;
                     JS_SF_SET_PC(sf, pc);
                     if (JS_ConcatStringInPlace(ctx, JS_VALUE_GET_STRING(*pv), op2)) {
@@ -23617,6 +23685,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                     GCValue ops[2] = { [0 ... (2) - 1] = GC_UNDEFINED_INIT };
                     /* In case of exception, js_add_slow frees ops[0]
                        and ops[1], so we must duplicate *pv */
+                    JS_FEEDBACK_NOTE(2, *pv, op2, JS_NOTE_ARITH);
                     JS_SF_SET_PC(sf, pc);
                     ops[0] = *pv;
                     ops[1] = op2;
@@ -23642,6 +23711,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                     }
                     sp--;
                 } else if (GC_VALUE_IS_BOTH_FLOAT(op1, op2)) {
+                    JS_FEEDBACK_NOTE(1, op1, op2, JS_NOTE_DOUBLE);
                     sp[-2] = __JS_NewFloat64(ctx, JS_VALUE_GET_FLOAT64(op1) -
                                              JS_VALUE_GET_FLOAT64(op2));
                     sp--;
@@ -23674,6 +23744,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                     sp[-2] = JS_NewInt32(ctx, r);
                     sp--;
                 } else if (GC_VALUE_IS_BOTH_FLOAT(op1, op2)) {
+                    JS_FEEDBACK_NOTE(1, op1, op2, JS_NOTE_DOUBLE);
                     d = JS_VALUE_GET_FLOAT64(op1) * JS_VALUE_GET_FLOAT64(op2);
                 mul_fp_res:
                     sp[-2] = __JS_NewFloat64(ctx, d);
@@ -23722,6 +23793,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
             BREAK;
         CASE(OP_pow):
         binary_arith_slow:
+            JS_FEEDBACK_NOTE(1, sp[-2], sp[-1], JS_NOTE_ARITH);
             JS_SF_SET_PC(sf, pc);
             if (js_binary_arith_slow(ctx, sp, (OPCodeEnum)opcode))
                 goto exception;
@@ -24044,6 +24116,9 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                     sp[-2] = JS_NewBool(ctx, JS_VALUE_GET_INT(op1) binary_op JS_VALUE_GET_INT(op2)); \
                     sp--;                                               \
                 } else {                                                \
+                    JS_FEEDBACK_NOTE(1, op1, op2,                       \
+                        opcode == OP_strict_eq || opcode == OP_strict_neq ? JS_NOTE_STRICT_EQ : \
+                        opcode == OP_eq || opcode == OP_neq ? JS_NOTE_EQ : JS_NOTE_ARITH); \
                     JS_SF_SET_PC(sf, pc);                                    \
                     if (slow_call)                                      \
                         goto exception;                                 \
@@ -25367,10 +25442,14 @@ int t2_call(JSInterpFrame *F, int argc, int kind)
     JSInterpFrame F2;
     int (*entry)(JSInterpFrame *) = (int (*)(JSInterpFrame *))jit_call_prepare_kind(F, &F2, argc, kind, 1);
     if (!entry) {
-        if (F2.jit_exit == JSOP_DONE)
+        if (F2.jit_exit == JSOP_DONE) {
+            g_t2_dyn_calls[1]++;
             return JSOP_NEXT;
+        }
+        g_t2_dyn_calls[F2.jit_exit == JSOP_EXCEPTION ? 3 : 2]++;
         return F2.jit_exit == JSOP_EXCEPTION ? JSOP_EXCEPTION : -1;
     }
+    g_t2_dyn_calls[0]++;
     return jit_call_finish(F, &F2, entry(&F2), argc, kind);
 }
 
@@ -25423,6 +25502,164 @@ int t2_add_field(JSInterpFrame *F, GCValue obj, JSAtom atom, GCValue val)
     gc_set_heap_value(&pr->u.value, val);
     gc_write_barrier(GC_VALUE_GET_HANDLE(obj), GC_VALUE_GET_HANDLE(val));
     return 0;
+}
+
+/* get_field / get_field2 of atom from obj, from T2 code whose inline ways
+ * missed (F->pc past the opcode, F->sp at its depth; the slots JavaScript
+ * could see are in the frame): through the interpreter's cache of the site
+ * ic (js_feedback_get_field, which fills it) when there is one, getters
+ * called, anything else as the interpreter's slow path gets it.  The value,
+ * JS_EXCEPTION when it threw, or the uninitialized value for null and
+ * undefined (the interpreter throws its own error). */
+GCValue t2_get_field_miss(JSInterpFrame *F, GCValue obj, JitIC *ic, JSAtom atom)
+{
+    GCHandle getter;
+    const GCValue *v;
+    int tag = JS_VALUE_GET_TAG(obj);
+    F->sf->pc_offset = (uint32_t)(F->pc - F->byte_code);
+    if (unlikely(tag == JS_TAG_NULL || tag == JS_TAG_UNDEFINED))
+        return JS_UNINITIALIZED;
+    if (tag != JS_TAG_OBJECT || !ic)
+        return JS_GetPropertyInternal(F->ctx, obj, atom, obj, 0);
+    v = js_feedback_get_field(ic, &obj, atom, &getter);
+    if (likely(v))
+        return *v;
+    if (getter != GC_HANDLE_NULL)
+        return JS_CallFree(F->ctx, GC_MKHANDLE(JS_TAG_OBJECT, getter), obj, 0, NULL);
+    return JS_GetPropertyInternal(F->ctx, obj, atom, obj, 0);
+}
+
+/* Whether function object f is a C function. */
+int t2_is_c_function(GCHandle f)
+{
+    return SAFE_GET_OR((JSObjectHandle)f, JSObjectHandle, class_id, 0) == JS_CLASS_C_FUNCTION;
+}
+
+/* Whether way k of get site ic is a getter on a prototype written in C,
+ * which T2's miss path calls itself (t2_get_field_miss). */
+int t2_ic_way_c_getter(const JitIC *ic, int k)
+{
+    JSObject *h;
+    GCHandle g;
+    if (ic->holder[k] == GC_HANDLE_NULL || ic->slot[k] == JIT_IC_ABSENT || !(ic->slot[k] & JIT_IC_GETTER))
+        return 0;
+    h = GC_DEREF_H((JSObjectHandle)ic->holder[k], JSObjectHandle);
+    if (!h)
+        return 0;
+    g = js_obj_props_of(h)[ic->slot[k] & ~JIT_IC_GETTER].u.getset.getter_handle;
+    return g != GC_HANDLE_NULL && t2_is_c_function(g);
+}
+
+/* put_field of val to obj, from T2 code whose inline ways missed (F->pc
+ * past the opcode, F->sp at its depth; the slots JavaScript could see are
+ * in the frame): through the interpreter's cache of the site ic
+ * (js_feedback_put_field) when it can, else as the interpreter's slow path
+ * does, setters called.  1 when done, -1 when it threw, 0 for null and
+ * undefined (the interpreter throws its own error). */
+int t2_put_field_miss(JSInterpFrame *F, GCValue obj, JitIC *ic, GCValue val)
+{
+    JSAtom atom = get_u32(F->pc);
+    int tag = JS_VALUE_GET_TAG(obj), r;
+    F->sf->pc_offset = (uint32_t)(F->pc - F->byte_code);
+    if (unlikely(tag == JS_TAG_NULL || tag == JS_TAG_UNDEFINED))
+        return 0;
+    if (tag == JS_TAG_OBJECT && ic) {
+        r = js_feedback_put_field(F->ctx, ic, obj, atom, val);
+        if (r != 0)
+            return r;
+    }
+    return JS_SetPropertyInternal(F->ctx, obj, atom, val, obj, JS_PROP_THROW_STRICT) < 0 ? -1 : 1;
+}
+
+/* typeof of v, from T2 code. */
+GCValue t2_typeof(JSInterpFrame *F, GCValue v)
+{
+    return JS_AtomToString(F->ctx, js_operator_typeof(F->ctx, v));
+}
+
+/* The instructions T2 code calls directly (quickjs_t2.h). */
+GCValue t2_op_object(JSInterpFrame *F, GCValue a, GCValue b, GCValue c)
+{
+    (void)a; (void)b; (void)c;
+    return JS_NewObject(F->ctx);
+}
+
+/* obj val -> obj */
+GCValue t2_op_define_field(JSInterpFrame *F, GCValue obj, GCValue val, GCValue c)
+{
+    (void)c;
+    if (JS_DefinePropertyValue(F->ctx, obj, get_u32(F->pc), val, JS_PROP_C_W_E | JS_PROP_THROW) < 0)
+        return JS_EXCEPTION;
+    return obj;
+}
+
+GCValue t2_op_fclosure(JSInterpFrame *F, GCValue a, GCValue b, GCValue c)
+{
+    (void)a; (void)b; (void)c;
+    return js_closure(F->ctx, b_cpool(F->b)[get_u32(F->pc)], F->var_refs_handle, F->sf, FALSE);
+}
+
+GCValue t2_op_in(JSInterpFrame *F, GCValue a, GCValue b, GCValue c)
+{
+    GCValue sp[2] = { a, b };
+    (void)c;
+    F->sf->pc_offset = (uint32_t)(F->pc - F->byte_code);
+    return js_operator_in(F->ctx, sp + 2) ? JS_EXCEPTION : sp[0];
+}
+
+GCValue t2_op_instanceof(JSInterpFrame *F, GCValue a, GCValue b, GCValue c)
+{
+    GCValue sp[2] = { a, b };
+    (void)c;
+    F->sf->pc_offset = (uint32_t)(F->pc - F->byte_code);
+    return js_operator_instanceof(F->ctx, sp + 2) ? JS_EXCEPTION : sp[0];
+}
+
+GCValue t2_op_add(JSInterpFrame *F, GCValue a, GCValue b, GCValue c)
+{
+    GCValue sp[2] = { a, b };
+    (void)c;
+    if (JS_IsString(a) && JS_IsString(b))
+        return JS_ConcatString(F->ctx, a, b);
+    F->sf->pc_offset = (uint32_t)(F->pc - F->byte_code);
+    return js_add_slow(F->ctx, sp + 2) ? JS_EXCEPTION : sp[0];
+}
+
+GCValue t2_op_eq(JSInterpFrame *F, GCValue a, GCValue b, GCValue c)
+{
+    GCValue sp[2] = { a, b };
+    (void)c;
+    F->sf->pc_offset = (uint32_t)(F->pc - F->byte_code);
+    return js_eq_slow(F->ctx, sp + 2, 0) ? JS_EXCEPTION : sp[0];
+}
+
+GCValue t2_op_neq(JSInterpFrame *F, GCValue a, GCValue b, GCValue c)
+{
+    GCValue sp[2] = { a, b };
+    (void)c;
+    F->sf->pc_offset = (uint32_t)(F->pc - F->byte_code);
+    return js_eq_slow(F->ctx, sp + 2, 1) ? JS_EXCEPTION : sp[0];
+}
+
+/* get_array_el / get_array_el2 of obj[prop] off the fast path */
+GCValue t2_op_get_elem(JSInterpFrame *F, GCValue obj, GCValue prop, GCValue c)
+{
+    (void)c;
+    F->sf->pc_offset = (uint32_t)(F->pc - F->byte_code);
+    return JS_GetPropertyValue(F->ctx, obj, prop);
+}
+
+/* put_array_el of obj[prop] = val off the fast path */
+GCValue t2_op_put_elem(JSInterpFrame *F, GCValue obj, GCValue prop, GCValue val)
+{
+    F->sf->pc_offset = (uint32_t)(F->pc - F->byte_code);
+    return JS_SetPropertyValue(F->ctx, obj, prop, val, JS_PROP_THROW_STRICT) < 0 ? JS_EXCEPTION : JS_UNDEFINED;
+}
+
+/* strict_eq / strict_neq of any two values, from T2 code. */
+int t2_strict_eq(JSInterpFrame *F, GCValue a, GCValue b)
+{
+    return js_strict_eq2(F->ctx, a, b, JS_EQ_STRICT);
 }
 
 /* push_this in a function that is not strict: this as an object. */

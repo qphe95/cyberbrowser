@@ -27,6 +27,8 @@ typedef struct T2Source {
     int (*const *helpers)(JSInterpFrame *F);   /* jsop_table */
     const uint8_t *jumps;                      /* jsop_jumps */
     const char *name;                          /* for profiles; may be NULL */
+    JSContextHandle ctx;                       /* its realm (atoms' values) */
+    int deopts;                                /* how often its T2 code was dropped */
     /* Its feedback vector's map (offset -> site) and arithmetic states;
        NULL when it has none (then nothing is speculated). */
     const uint16_t *site_of;
@@ -43,6 +45,8 @@ typedef struct T2Source {
 #define T2_ARITH_GENERIC 4  /* an equality's identity test failed too */
 
 T2Code *t2_compile(const T2Source *src);
+/* QJS_T2_LOG=1: what T2 compiles, deopts and why (read once). */
+int t2_logging(void);
 int t2_available(void);
 void t2_print_stats(void);
 
@@ -59,6 +63,20 @@ enum { T2_VAR_PLAIN, T2_VAR_CHECK, T2_VAR_GLOBAL };
 GCValue t2_var_get(JSInterpFrame *F, int idx, int mode);
 int t2_var_put(JSInterpFrame *F, int idx, int mode, GCValue v);
 int t2_add_field(JSInterpFrame *F, GCValue obj, JSAtom atom, GCValue val);
+GCValue t2_get_field_miss(JSInterpFrame *F, GCValue obj, JitIC *ic, JSAtom atom);
+int t2_put_field_miss(JSInterpFrame *F, GCValue obj, JitIC *ic, GCValue val);
+int t2_strict_eq(JSInterpFrame *F, GCValue a, GCValue b);
+GCValue t2_typeof(JSInterpFrame *F, GCValue v);
+/* Instructions T2 code calls directly (T2N_CCALL): F->pc past the opcode,
+ * F->sp at the instruction's depth, the slots JavaScript could see in the
+ * frame; the instruction's operands as values (deepest first).  The result,
+ * or JS_EXCEPTION when it threw. */
+typedef GCValue T2CCall(JSInterpFrame *F, GCValue a, GCValue b, GCValue c);
+T2CCall t2_op_object, t2_op_define_field, t2_op_fclosure, t2_op_in, t2_op_instanceof,
+        t2_op_add, t2_op_eq, t2_op_neq, t2_op_get_elem, t2_op_put_elem;
+int t2_is_c_function(GCHandle f);
+int t2_ic_way_c_getter(const JitIC *ic, int k);
+extern uint64_t g_t2_dyn_calls[4];     /* t2_call outcomes (QJS_T2_COUNT) */
 extern const uint16_t t2_class_array;   /* JS_CLASS_ARRAY */
 const uint32_t *t2_proto_epoch_addr(void);
 const uint32_t *t2_atom_epoch_addr(JSAtom atom);

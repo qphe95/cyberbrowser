@@ -223,6 +223,14 @@ static inline void x_cmp_rr(XAsm *a, int r1, int r2)
     x_modrm_rr(a, r2, r1);
 }
 
+/* test r64, r64 */
+static inline void x_test64(XAsm *a, int r1, int r2)
+{
+    x_rex(a, 1, r2, 0, r1);
+    x_byte(a, 0x85);
+    x_modrm_rr(a, r2, r1);
+}
+
 /* test r32, r32 */
 static inline void x_test32(XAsm *a, int r1, int r2)
 {
@@ -506,6 +514,15 @@ static inline void x_cvtsi2sd32(XAsm *a, int x, int r)
     x_rex(a, 0, x, 0, r);
     x_byte(a, 0x0f); x_byte(a, 0x2a);
     x_modrm_rr(a, x, r);
+}
+
+/* cvttsd2si r32, xmm */
+static inline void x_cvttsd2si32(XAsm *a, int r, int x)
+{
+    x_byte(a, 0xf2);
+    x_rex(a, 0, r, 0, x);
+    x_byte(a, 0x0f); x_byte(a, 0x2c);
+    x_modrm_rr(a, r, x);
 }
 
 #endif /* QUICKJS_T2_X64_H */

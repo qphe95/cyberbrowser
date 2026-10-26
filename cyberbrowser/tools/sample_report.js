@@ -176,7 +176,7 @@ show('in the OS, by function, called from', osBoth, 25);
 console.log('\n== subsystems, by leaf ==');
 for (const [cat] of [...sys.entries()].sort((a, b) => b[1] - a[1])) {
     console.log(`  ${cat}: ${pct(sys.get(cat)).trim()}`);
-    [...sysLeaf.get(cat).entries()].sort((a, b) => b[1] - a[1]).slice(0, 8)
+    [...sysLeaf.get(cat).entries()].sort((a, b) => b[1] - a[1]).slice(0, +process.env.LEAVES || 8)
         .forEach(([k, v]) => console.log('    ' + pct(v), ms(v), ' ', k));
 }
 show('self, by function (innermost inline)', self);
@@ -185,6 +185,38 @@ show('self, with caller', selfCaller, +process.env.CALLERS || 25);   // CALLERS=
 show('inclusive, by function', incl);
 
 // FOCUS=<function>: who calls it (inclusive of what it calls), two levels up.
+// OWN=1: the time of JavaScript itself, by tier: each sample goes to the
+// innermost frame that runs a function (T2 code, or JS_CallInternal for the
+// interpreter and T1), under the frame it called (its helper), or "self".
+if (process.env.OWN) {
+    const own = new Map(), tot = new Map();
+    for (const s of samples) {
+        const chain = [];
+        s.forEach((rva, d) => { for (const f of frames(rva, d)) chain.push(f.fn); });
+        const j = chain.findIndex(fn => fn.startsWith('jit:t2:') || fn === 'JS_CallInternal');
+        if (j < 0) continue;
+        const tier = chain[j] === 'JS_CallInternal' ? 'interpreter' : 'T2';
+        let k = j - 1;
+        while (k >= 0 && chain[k] === chain[j]) k--;
+        add(tot, tier);
+        add(own, tier + '  ' + (k >= 0 ? chain[k] : 'self'));
+        // OWN_IN=<helper>[,<callee>...]: under that path, what it called in turn
+        if (process.env.OWN_IN && k >= 0) {
+            const path = process.env.OWN_IN.split(',');
+            let m = k, ok = true;
+            for (const p of path) {
+                if (m < 0 || chain[m] !== p) { ok = false; break; }
+                const at = m;
+                while (m >= 0 && chain[m] === chain[at]) m--;
+            }
+            if (ok) add(own, tier + '  ' + path.join(' > ') + ' > ' + (m >= 0 ? chain[m] : 'self'));
+        }
+    }
+    console.log('\n== JavaScript by tier (up to the next function) ==');
+    for (const [k, v] of tot) console.log(pct(v), ms(v), ' ', k);
+    show('JavaScript by tier, by what it called', own, +process.env.OWN > 1 ? +process.env.OWN : 50);
+}
+
 if (process.env.FOCUS) {
     const focus = process.env.FOCUS, up1 = new Map(), up2 = new Map();
     for (const s of samples) {

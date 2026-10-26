@@ -12,7 +12,7 @@ tmp=$(mktemp -d)
 fail=0
 mode_env() {
     case "$1" in
-        t2) echo "QJS_JIT=0 QJS_T2=1 QJS_T2_THRESHOLD=1000 QJS_FEEDBACK_THRESHOLD=100" ;;
+        t2) echo "QJS_JIT=0 QJS_T2=1 QJS_T2_THRESHOLD=1000 QJS_T2_MIN_CALLS=0 QJS_FEEDBACK_THRESHOLD=100" ;;
         t2stress) echo "QJS_JIT=0 QJS_T2=stress" ;;
         *) echo "QJS_JIT=$1" ;;
     esac
