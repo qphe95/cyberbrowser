@@ -237,6 +237,8 @@ typedef struct T2Node {
     int32_t a, b, c;    /* inputs */
     int32_t ic;         /* GET_FIELD, PUT_FIELD: its ways (B->ics) */
     int32_t argc, kind; /* CALL */
+    uint8_t home;       /* LOAD, STORE: the slot's home (a carried slot), not its frame cell */
+    int32_t homed_n;    /* GENERIC, CALL, POLL: carried slots homed here (B->homed prefix) */
     JSAtom atom;        /* GET_FIELD, PUT_FIELD */
     int32_t slot;       /* LOAD, STORE */
     uint32_t pc;        /* the instruction's offset */
@@ -266,6 +268,7 @@ typedef struct T2Exit {
     int32_t first, n;           /* its entries */
     uint8_t *state;             /* the site's arithmetic state */
     int32_t opnd[2];            /* operand slots, -1: none */
+    int32_t homed_n;            /* carried slots homed here (B->homed prefix) */
     int label;                  /* codegen */
 } T2Exit;
 
@@ -292,6 +295,21 @@ typedef struct T2Builder {
     uint32_t cur_pc;
     JitIC *ics;         /* the inline caches compiled inline, as they were */
     int n_ics, cap_ics;
+    /* Carried slots (5f): arguments and locals that no helper can see (no
+       closure captures them, no instruction T2 leaves to a helper names
+       them), kept between instructions in a home in the native frame
+       instead of the interpreter's frame cell, in one representation at
+       every block boundary.  In the entry block a slot is homed the first
+       time it is stored; until then its frame cell holds it (its initial
+       value).  Every later block starts with all of them homed. */
+    uint8_t *carried;   /* by slot */
+    uint8_t *crep;      /* by slot: its representation in its home */
+    uint8_t *crep_seen; /* by slot: the widest representation stored to its home */
+    int *home_of;       /* by slot: its home's index */
+    int n_carried;
+    uint8_t *is_homed;  /* by slot */
+    int *homed;         /* slots in the order they were homed */
+    int n_homed;
 } T2Builder;
 
 #define T2_ARG(B, i) (i)
@@ -360,9 +378,59 @@ static int t2_const(T2Builder *B, GCValue v)
 
 static int t2_load(T2Builder *B, int slot)
 {
-    int n = t2_node(B, T2N_LOAD, T2R_TAGGED);
-    if (!B->oom) B->nodes[n].slot = slot;
+    int home = B->carried && B->carried[slot] && B->is_homed[slot];
+    int n = t2_node(B, T2N_LOAD, home ? B->crep[slot] : T2R_TAGGED);
+    if (!B->oom) {
+        B->nodes[n].slot = slot;
+        B->nodes[n].home = (uint8_t)home;
+    }
     return n;
+}
+
+/* The representations a carried slot can have, widest last. */
+static int t2_rep_meet(int a, int b)
+{
+    if (a == T2R_NONE) return b;
+    if (b == T2R_NONE) return a;
+    if (a == b) return a;
+    if ((a == T2R_I32 || a == T2R_F64) && (b == T2R_I32 || b == T2R_F64)) return T2R_F64;
+    return T2R_TAGGED;
+}
+
+static void t2_mark_homed(T2Builder *B, int s)
+{
+    if (B->is_homed[s]) return;
+    B->is_homed[s] = 1;
+    B->homed[B->n_homed++] = s;
+}
+
+/* Store node v to slot k: its home if it is carried (noting the
+ * representation for the next build), else its frame cell. */
+static void t2_store_slot(T2Builder *B, int k, int v, int to_home)
+{
+    if (to_home && B->nodes[v].op == T2N_CONST && B->nodes[v].rep == T2R_TAGGED) {
+        /* a number constant is stored as one (var i = 0) */
+        GCValue c;
+        memcpy(&c, &B->nodes[v].imm, 8);
+        if (GC_VALUE_GET_TAG(c) == JS_TAG_INT) {
+            v = t2_const_raw(B, T2R_I32, (uint32_t)GC_VALUE_GET_INT(c));
+        } else if (GC_IS_FLOAT64(c)) {
+            double d = GC_VALUE_GET_FLOAT64(c);
+            uint64_t bits;
+            memcpy(&bits, &d, 8);
+            v = t2_const_raw(B, T2R_F64, bits);
+        }
+        if (B->oom) return;
+    }
+    int n = t2_node(B, T2N_STORE, T2R_NONE);
+    if (B->oom) return;
+    B->nodes[n].slot = k;
+    B->nodes[n].a = v;
+    B->nodes[n].home = (uint8_t)to_home;
+    if (to_home) {
+        B->crep_seen[k] = (uint8_t)t2_rep_meet(B->crep_seen[k], B->nodes[v].rep);
+        t2_mark_homed(B, k);
+    }
 }
 
 /* The node holding slot s's value (loading it if the frame holds it). */
@@ -418,22 +486,29 @@ static inline void t2_push_copy(T2Builder *B, int src)
 /* Store every slot the graph holds (args, locals, the stack below depth)
  * to its frame cell: loads first, so an alias reads its cell before any
  * store overwrites it.  Afterwards the frame holds every slot. */
-static void t2_sync(T2Builder *B)
+static void t2_sync_at(T2Builder *B, int block_end)
 {
     int live = T2_STK(B, B->depth);
     for (int k = 0; k < live; k++)
         if (B->slots[k].kind == T2S_ALIAS)
             t2_value(B, k);
     for (int k = 0; k < live; k++) {
+        int carried = B->carried && B->carried[k];
         if (B->slots[k].kind == T2S_VAL) {
-            int n = t2_node(B, T2N_STORE, T2R_NONE);
-            if (B->oom) return;
-            B->nodes[n].slot = k;
-            B->nodes[n].a = B->slots[k].n;
+            t2_store_slot(B, k, B->slots[k].n, carried);
+        } else if (carried && block_end && !B->is_homed[k]) {
+            /* leaving the entry block with its initial value: home it */
+            t2_store_slot(B, k, t2_load(B, k), 1);
         }
+        if (B->oom) return;
     }
     for (int k = 0; k < B->n_slots; k++)
         B->slots[k].kind = T2S_FRAME;
+}
+
+static inline void t2_sync(T2Builder *B)
+{
+    t2_sync_at(B, 0);
 }
 
 /* The exit of the instruction being built, made the first time a guard
@@ -458,6 +533,7 @@ static int t2_exit(T2Builder *B, int opnd0, int opnd1)
         x->state = &B->src->arith[B->src->site_of[B->cur_pc]];
     x->opnd[0] = opnd0;
     x->opnd[1] = opnd1;
+    x->homed_n = B->n_homed;
     x->label = -1;
     for (int k = 0; k < live; k++) {
         if (B->slots[k].kind != T2S_VAL) continue;
@@ -760,18 +836,102 @@ static int t2_elem(T2Builder *B, int op)
     return 1;
 }
 
+/* Choose the carried slots (T2Builder.carried): none in a function whose
+ * frame something can observe (eval, with, references to locals, an
+ * arguments object) or whose entry is also a jump target; else every
+ * argument and local no closure captures and no instruction T2 leaves to
+ * a helper names.  0 when out of memory. */
+static int t2_choose_carried(T2Builder *B)
+{
+    const T2Source *src = B->src;
+    const uint8_t *bc = src->bc;
+    int nv = src->arg_count + src->var_count;
+    uint8_t *bad;
+    if (nv == 0 || !src->captured || getenv("QJS_T2_NO_CARRY")) return 1;
+    bad = calloc(nv, 1);
+    if (!bad) return 0;
+    for (uint32_t off = 0; off < src->len; off += t2_op_info[bc[off]].size) {
+        int op = bc[off], fmt = t2_op_info[op].fmt, idx = -1;
+        switch (op) {
+        case OP_eval: case OP_apply_eval: case OP_special_object:
+        case OP_make_loc_ref: case OP_make_arg_ref: case OP_make_var_ref_ref: case OP_make_var_ref:
+        case OP_with_get_var: case OP_with_put_var: case OP_with_delete_var:
+        case OP_with_make_ref: case OP_with_get_ref:
+            free(bad);
+            return 1;
+        default:
+            break;
+        }
+        if (t2_jump_target(bc, off) == 0) { free(bad); return 1; }
+        if (fmt == T2_FMT_loc8) idx = T2_LOC(B, bc[off + 1]);
+        else if (fmt == T2_FMT_loc) idx = T2_LOC(B, t2_u16(bc + off + 1));
+        else if (fmt == T2_FMT_arg) idx = T2_ARG(B, t2_u16(bc + off + 1));
+        if (idx < 0 || idx >= nv) continue;
+        switch (op) {
+        case OP_get_loc: case OP_put_loc: case OP_set_loc:
+        case OP_get_arg: case OP_put_arg: case OP_set_arg:
+        case OP_get_loc_check: case OP_put_loc_check: case OP_set_loc_check:
+        case OP_inc_loc: case OP_dec_loc: case OP_add_loc:
+            break;          /* modelled (or written to the frame around their helper) */
+        default:
+            bad[idx] = 1;   /* a helper reads or writes it */
+            break;
+        }
+    }
+    B->carried = calloc(B->n_slots, 1);
+    B->crep = malloc(B->n_slots);
+    B->crep_seen = malloc(B->n_slots);
+    B->home_of = malloc(sizeof(int) * B->n_slots);
+    B->is_homed = calloc(B->n_slots, 1);
+    B->homed = malloc(sizeof(int) * B->n_slots);
+    if (!B->carried || !B->crep || !B->crep_seen || !B->home_of || !B->is_homed || !B->homed) {
+        free(bad);
+        return 0;
+    }
+    for (int k = 0; k < nv; k++) {
+        B->carried[k] = !src->captured[k] && !bad[k];
+        B->crep[k] = T2R_I32;           /* optimistic; widened by the builds */
+        B->home_of[k] = B->carried[k] ? B->n_carried++ : -1;
+    }
+    free(bad);
+    if (B->n_carried == 0) {
+        free(B->carried);
+        B->carried = NULL;
+    }
+    return 1;
+}
+
 /* Generic: the instruction at pos through its helper. */
 static int t2_generic(T2Builder *B, uint32_t pos)
 {
     const uint8_t *bc = B->src->bc;
-    int op = bc[pos];
+    int op = bc[pos], fmt = t2_op_info[op].fmt, touched = -1;
+    /* the local a helper reads or writes (inc_loc, dec_loc, add_loc when
+       they are not speculated) */
+    if (fmt == T2_FMT_loc8) touched = T2_LOC(B, bc[pos + 1]);
+    else if (fmt == T2_FMT_loc) touched = T2_LOC(B, t2_u16(bc + pos + 1));
+    else if (fmt == T2_FMT_arg) touched = T2_ARG(B, t2_u16(bc + pos + 1));
+    if (touched >= 0 && !(B->carried && B->carried[touched])) touched = -1;
     t2_sync(B);
+    if (touched >= 0 && B->is_homed[touched])
+        t2_store_slot(B, touched, t2_value(B, touched), 0);     /* to its frame cell */
+    for (int k = 0; k < B->n_slots; k++)
+        B->slots[k].kind = T2S_FRAME;
     int n = t2_node(B, T2N_GENERIC, T2R_NONE);
     if (B->oom) return 0;
     B->nodes[n].pc = pos;
     B->nodes[n].depth = B->depth;
     B->nodes[n].imm = op;
+    B->nodes[n].homed_n = B->n_homed;
     B->depth = B->depth - t2_npop(bc, pos) + t2_op_info[op].n_push;
+    if (touched >= 0 && B->is_homed[touched]) {
+        /* the helper changed its frame cell: the slot takes it from there */
+        int v = t2_node(B, T2N_LOAD, T2R_TAGGED);
+        if (B->oom) return 0;
+        B->nodes[v].slot = touched;
+        B->slots[touched].kind = T2S_VAL;
+        B->slots[touched].n = v;
+    }
     return 1;
 }
 
@@ -784,6 +944,9 @@ static int t2_build_block(T2Builder *B, uint32_t pos)
     for (int k = 0; k < B->n_slots; k++)
         B->slots[k].kind = T2S_FRAME;
     B->depth = B->shape.depth[pos];
+    if (B->carried && pos != 0)
+        for (int k = 0; k < B->n_slots; k++)
+            if (B->carried[k]) t2_mark_homed(B, k);
     for (;;) {
         int op = bc[pos], n;
         const T2OpInfo *oi = &t2_op_info[op];
@@ -859,6 +1022,7 @@ static int t2_build_block(T2Builder *B, uint32_t pos)
             t2_sync(B);
             n = t2_node(B, T2N_CALL, T2R_NONE);
             if (B->oom) return 0;
+            B->nodes[n].homed_n = B->n_homed;
             B->nodes[n].pc = pos;
             B->nodes[n].depth = B->depth;
             B->nodes[n].imm = op;
@@ -989,10 +1153,11 @@ static int t2_build_block(T2Builder *B, uint32_t pos)
                 cond = t2_value(B, T2_STK(B, B->depth - 1));
                 B->depth--;
             }
-            t2_sync(B);
+            t2_sync_at(B, 1);
             if ((uint32_t)target <= pos) {
                 n = t2_node(B, T2N_POLL, T2R_NONE);
                 if (B->oom) return 0;
+                B->nodes[n].homed_n = B->n_homed;
                 B->nodes[n].pc = pos;
                 B->nodes[n].depth = B->depth + (op != OP_goto);
             }
@@ -1047,7 +1212,7 @@ static int t2_build_block(T2Builder *B, uint32_t pos)
             return 0;
         }
         if (B->shape.block_start[pos]) {
-            t2_sync(B);
+            t2_sync_at(B, 1);
             n = t2_node(B, T2N_JUMP, T2R_NONE);
             if (B->oom) return 0;
             B->nodes[n].t = pos;
@@ -1072,6 +1237,8 @@ static const int t2_saved[] = { X_RBX, X_RSI, X_RDI, X_RBP, X_R12, X_R13, X_R14,
 typedef struct T2Gen {
     T2Builder *B;
     XAsm a;
+    uint32_t n_spills;      /* homes follow the spills */
+    int *flush_label;       /* by homed prefix length: store the homes, then the epilogue */
     int *block_label;       /* by bytecode offset; -1: none */
     int epilogue;           /* label: eax holds the result */
     uint32_t frame;         /* bytes below the saved registers */
@@ -1095,6 +1262,12 @@ static void t2_get(T2Gen *G, int r, int n)
         x_mov_ri(&G->a, r, N->imm);
     else
         x_load(&G->a, r, X_RSP, 32 + N->spill * 8);
+}
+
+/* A carried slot's home, as [rsp + disp]. */
+static int32_t t2_home_disp(T2Gen *G, int slot)
+{
+    return (int32_t)(32 + (G->n_spills + (uint32_t)G->B->home_of[slot]) * 8);
 }
 
 static void t2_put(T2Gen *G, int n, int r)
@@ -1143,6 +1316,62 @@ static void t2_get_boxed(T2Gen *G, int n)
     default:
         break;
     }
+}
+
+/* rax: raw bits in representation rep; make it a tagged value (clobbers
+ * rcx, rdx). */
+static void t2_box_rax(T2Gen *G, int rep)
+{
+    XAsm *a = &G->a;
+    switch (rep) {
+    case T2R_I32:
+        x_byte(a, 0x89); x_byte(a, 0xc0);   /* mov eax, eax */
+        break;
+    case T2R_BOOL:
+        x_byte(a, 0x89); x_byte(a, 0xc0);
+        x_mov_ri(a, X_RCX, (uint64_t)(uint32_t)JS_TAG_BOOL << 32);
+        x_alu_rr64(a, X_OR, X_RAX, X_RCX);
+        break;
+    case T2R_F64: {
+        int ok = x_new_label(a);
+        x_mov_rr(a, X_RCX, X_RAX);
+        x_bt64_i(a, 6, X_RCX, 63);
+        x_mov_ri(a, X_RDX, 0x7ff0000000000000ull);
+        x_cmp_rr(a, X_RCX, X_RDX);
+        x_jcc(a, X_CC_BE, ok);
+        x_mov_ri(a, X_RAX, 0x7ff8000000000000ull);
+        x_bind(a, ok);
+        x_mov_ri(a, X_RCX, T2_F64_ADDEND);
+        x_alu_rr64(a, X_SUB, X_RAX, X_RCX);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+/* Store the homes of the first n homed slots to their frame cells (for the
+ * interpreter, at an exit or an exception); clobbers rax, rcx, rdx. */
+static void t2_emit_flush(T2Gen *G, int n)
+{
+    T2Builder *B = G->B;
+    for (int k = 0; k < n; k++) {
+        int s = B->homed[k], base;
+        int32_t disp;
+        x_load(&G->a, X_RAX, X_RSP, t2_home_disp(G, s));
+        t2_box_rax(G, B->crep[s]);
+        t2_slot_addr(B, s, &base, &disp);
+        x_store(&G->a, base, disp, X_RAX);
+    }
+}
+
+/* Where code leaves T2 with eax set and n slots homed: through a stub that
+ * stores the homes first. */
+static int t2_leave_label(T2Gen *G, int n)
+{
+    if (n <= 0) return G->epilogue;
+    if (G->flush_label[n] < 0) G->flush_label[n] = x_new_label(&G->a);
+    return G->flush_label[n];
 }
 
 /* F->sp (stack depth d) and F->pc for the instruction at pc: just past its
@@ -1465,11 +1694,31 @@ static void t2_emit_node(T2Gen *G, int i)
         break;
     case T2N_LOAD:
         if (N->spill < 0) break;
-        t2_slot_addr(B, N->slot, &base, &disp);
-        x_load(a, X_RAX, base, disp);
+        if (N->home) {
+            x_load(a, X_RAX, X_RSP, t2_home_disp(G, N->slot));
+        } else {
+            t2_slot_addr(B, N->slot, &base, &disp);
+            x_load(a, X_RAX, base, disp);
+        }
         t2_put(G, i, X_RAX);
         break;
     case T2N_STORE:
+        if (N->home) {
+            /* into the home's representation: the same, int32 to float64,
+               or boxed */
+            int from = B->nodes[N->a].rep, to = B->crep[N->slot];
+            if (from == to) {
+                t2_get(G, X_RAX, N->a);
+            } else if (from == T2R_I32 && to == T2R_F64) {
+                t2_get(G, X_RAX, N->a);
+                x_cvtsi2sd32(a, 0, X_RAX);
+                x_movq_rx(a, X_RAX, 0);
+            } else {
+                t2_get_boxed(G, N->a);  /* to == T2R_TAGGED */
+            }
+            x_store(a, X_RSP, t2_home_disp(G, N->slot), X_RAX);
+            break;
+        }
         t2_get_boxed(G, N->a);
         t2_slot_addr(B, N->slot, &base, &disp);
         x_store(a, base, disp, X_RAX);
@@ -1481,7 +1730,7 @@ static void t2_emit_node(T2Gen *G, int i)
         x_call_abs(a, (const void *)B->src->helpers[N->imm]);
         x_test32(a, X_RAX, X_RAX);
         x_jcc(a, X_CC_E, ok);
-        x_jmp(a, G->epilogue);      /* exception, done: the helper set F */
+        x_jmp(a, t2_leave_label(G, N->homed_n));   /* exception, done: the helper set F */
         x_bind(a, ok);
         break;
     }
@@ -1509,7 +1758,7 @@ static void t2_emit_node(T2Gen *G, int i)
         x_test32(a, X_RAX, X_RAX);
         x_jcc(a, X_CC_E, ok);
         x_mov_ri(a, X_RAX, JSOP_EXCEPTION);
-        x_jmp(a, G->epilogue);
+        x_jmp(a, t2_leave_label(G, N->homed_n));
         x_bind(a, ok);
         break;
     }
@@ -1663,14 +1912,14 @@ static void t2_emit_node(T2Gen *G, int i)
         x_jcc(a, X_CC_E, helper);
         x_test32(a, X_RAX, X_RAX);
         x_jcc(a, X_CC_E, ok);
-        x_jmp(a, G->epilogue);                      /* JSOP_EXCEPTION */
+        x_jmp(a, t2_leave_label(G, N->homed_n));    /* JSOP_EXCEPTION */
         x_bind(a, helper);
         t2_set_frame_pc(G, N->pc, N->depth);
         x_mov_rr(a, X_RCX, T2_F);
         x_call_abs(a, (const void *)B->src->helpers[op]);
         x_test32(a, X_RAX, X_RAX);
         x_jcc(a, X_CC_E, ok);
-        x_jmp(a, G->epilogue);                      /* exception, or a tail call done */
+        x_jmp(a, t2_leave_label(G, N->homed_n));    /* exception, or a tail call done */
         x_bind(a, ok);
         if (tail) {
             /* the result, pushed on the stack: return it */
@@ -1736,6 +1985,7 @@ static void t2_emit_exits(T2Gen *G)
         int32_t disp;
         if (E->label < 0) continue;     /* no guard uses it */
         x_bind(a, E->label);
+        t2_emit_flush(G, E->homed_n);   /* the entries below supersede some */
         for (int k = 0; k < E->n; k++) {
             T2Entry *en = &B->entries[E->first + k];
             t2_get_boxed(G, en->node);
@@ -1751,6 +2001,15 @@ static void t2_emit_exits(T2Gen *G)
         else x_mov_ri(a, X_R9, 0);
         x_call_abs(a, (const void *)t2_deopt);
         x_mov_ri(a, X_RAX, JSOP_NEXT);
+        x_jmp(a, G->epilogue);
+    }
+    /* the flush stubs: eax kept in r10 */
+    for (int k = 1; k <= B->n_carried; k++) {
+        if (G->flush_label[k] < 0) continue;
+        x_bind(a, G->flush_label[k]);
+        x_mov_rr(a, X_R10, X_RAX);
+        t2_emit_flush(G, k);
+        x_mov_rr(a, X_RAX, X_R10);
         x_jmp(a, G->epilogue);
     }
 }
@@ -1798,6 +2057,13 @@ static void t2_free_builder(T2Builder *B, T2Gen *G)
     free(B->exits);
     free(B->entries);
     free(B->ics);
+    free(B->carried);
+    free(B->crep);
+    free(B->crep_seen);
+    free(B->home_of);
+    free(B->is_homed);
+    free(B->homed);
+    free(G->flush_label);
     free(B->slots);
     free(B->shape.depth);
     free(B->shape.block_start);
@@ -1823,17 +2089,36 @@ T2Code *t2_compile(const T2Source *src)
         goto fail;
     }
 
-    /* Build: blocks in bytecode order, each a run of nodes. */
+    if (!t2_choose_carried(&B)) goto fail;
+
+    /* Build: blocks in bytecode order, each a run of nodes.  Again while a
+     * carried slot's representation widens (int32, float64, tagged): the
+     * stores to its home decide it. */
     block_first = malloc(sizeof(int) * (src->len + 1));
     if (!block_first) goto fail;
-    for (uint32_t p = 0; p <= src->len; p++) {
-        block_first[p] = -1;
-        G.block_label[p] = -1;
-    }
-    for (uint32_t p = 0; p < src->len; p++) {
-        if (!B.shape.block_start[p] || B.shape.depth[p] < 0) continue;
-        block_first[p] = B.n_nodes;
-        if (!t2_build_block(&B, p)) goto fail;
+    for (int iter = 0;; iter++) {
+        B.n_nodes = B.n_exits = B.n_entries = B.n_ics = B.n_homed = 0;
+        if (B.carried) {
+            memset(B.is_homed, 0, B.n_slots);
+            memset(B.crep_seen, T2R_NONE, B.n_slots);
+        }
+        for (uint32_t p = 0; p <= src->len; p++) {
+            block_first[p] = -1;
+            G.block_label[p] = -1;
+        }
+        for (uint32_t p = 0; p < src->len; p++) {
+            if (!B.shape.block_start[p] || B.shape.depth[p] < 0) continue;
+            block_first[p] = B.n_nodes;
+            if (!t2_build_block(&B, p)) goto fail;
+        }
+        if (!B.carried) break;
+        int changed = 0;
+        for (int k = 0; k < B.n_slots; k++) {
+            if (!B.carried[k]) continue;
+            int w = iter >= 4 ? T2R_TAGGED : t2_rep_meet(B.crep[k], B.crep_seen[k]);
+            if (w != B.crep[k]) { B.crep[k] = (uint8_t)w; changed = 1; }
+        }
+        if (!changed) break;
     }
     /* An exit stores values computed before its guard, never after. */
     for (int i = 0; i < B.n_nodes; i++) {
@@ -1844,11 +2129,15 @@ T2Code *t2_compile(const T2Source *src)
     }
     if (!t2_assign_spills(&B, &n_spills)) goto fail;
 
-    /* Frame: 32 bytes of shadow space and the spills, sized so calls see a
-     * 16-byte aligned rsp: the return address and 8 pushes leave rsp at 8
-     * mod 16, so the frame is 8 mod 16. */
-    G.frame = ((32 + n_spills * 8 + 15) & ~15u) + 8;
+    /* Frame: 32 bytes of shadow space, the spills and the homes, sized so
+     * calls see a 16-byte aligned rsp: the return address and 8 pushes
+     * leave rsp at 8 mod 16, so the frame is 8 mod 16. */
+    G.n_spills = n_spills;
+    G.frame = ((32 + (n_spills + (uint32_t)B.n_carried) * 8 + 15) & ~15u) + 8;
     if (G.frame > T2_MAX_FRAME) { B.why = "too many values"; goto fail; }
+    G.flush_label = malloc(sizeof(int) * (B.n_carried + 1));
+    if (!G.flush_label) goto fail;
+    for (int k = 0; k <= B.n_carried; k++) G.flush_label[k] = -1;
 
     XAsm *a = &G.a;
     G.epilogue = x_new_label(a);
@@ -1916,9 +2205,15 @@ T2Code *t2_compile(const T2Source *src)
         g_t2.inline_elem += op == T2N_GET_ELEM || op == T2N_PUT_ELEM;
         g_t2.generic += op == T2N_GENERIC;
     }
-    if (getenv("QJS_T2_LOG"))
-        fprintf(stderr, "[t2] compiled %s: %u bytecode bytes, %d nodes, %d exits, %u bytes\n",
-                src->name ? src->name : "?", src->len, B.n_nodes, B.n_exits, tc->size);
+    if (getenv("QJS_T2_LOG")) {
+        int nr[4] = { 0 };
+        for (int k = 0; B.carried && k < B.n_slots; k++)
+            if (B.carried[k] && B.crep[k] < 4) nr[B.crep[k]]++;
+        fprintf(stderr, "[t2] compiled %s: %u bytecode bytes, %d nodes, %d exits, %u bytes; "
+                "carried %d int32, %d float64, %d tagged\n",
+                src->name ? src->name : "?", src->len, B.n_nodes, B.n_exits, tc->size,
+                nr[T2R_I32], nr[T2R_F64], nr[T2R_TAGGED] + nr[T2R_BOOL]);
+    }
     free(block_first);
     t2_free_builder(&B, &G);
     return tc;

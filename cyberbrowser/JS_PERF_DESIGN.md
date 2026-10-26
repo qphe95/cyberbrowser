@@ -1048,6 +1048,42 @@ helper and 7% in loose equality on objects.
 | navier-stokes, crypto, stanford-crypto-aes | −39% to −61% | −39% to −61% | −26% to −32% |
 | **Geometric mean (12 tests)** | −10.5% | **−17.1%** | −8.0% |
 
+**5f, first part as built: carried locals.** Before it, every value went back to the
+interpreter's frame at each block end and each helper call, so a loop reloaded and
+re-checked its counter and accumulator every iteration.
+
+- **Which slots.** An argument or local is carried when no closure captures it
+  (`JSBytecodeVarDef.is_captured`) and no instruction T2 leaves to a helper names it. A
+  function with `eval`, `with`, references to locals or an `arguments` object carries
+  none, and neither does one whose entry is also a jump target. A modelled instruction
+  that falls back to its helper (`inc_loc` on a string, say) has the slot written to the
+  frame around the call.
+- **Homes.** A carried slot lives in a home in the native frame, in one representation at
+  every block boundary: int32 if every store to it is one, float64 if every store is a
+  number, tagged otherwise. The builds repeat while a representation widens (at most
+  twice per slot). A number constant counts as its representation (`var i = 0`), and a
+  slot leaving the entry block with its initial value is tagged.
+- **Back to the frame.** Helpers never see carried slots. Exits and exceptions store
+  them to the frame first, through per-site stubs, so a `catch` in the same function, or
+  the interpreter after an exit, reads current values. In the entry block a slot is homed
+  only once it is first stored; each exit and exception path records how many slots were
+  homed at that point.
+- **Tests:** `tests/jit/t2loops.js` (counters and sums; overflow mid-loop; a local turning
+  into a string mid-loop; an exception caught in the same function reading carried
+  locals; closures over `var` and `let` loop variables, `arguments` and `eval`, which are
+  not carried; loops at the function's start; locals unassigned on some paths; `let`;
+  doubles; string building; nested loops).
+
+**The effect is small.** On a micro-benchmark of two numeric loops T2 is 20–22 ms with
+carrying against 26–27 ms without (the interpreter: 68–74 ms). Over the twelve tests the
+geometric mean is −17.3% against −17.1% after 5e, within noise: the tests where T2 still
+loses spend their time in property adds, global and closure variable accesses, and calls
+to functions T2 has not compiled, not in local-variable traffic. Carried values still go
+through memory (homes and spill slots in the native frame), so the second part of 5f,
+register allocation across blocks, is what turns this into a larger gain on loops; the
+helper-bound tests need their own instructions compiled (adds, globals, closure
+variables) more than either.
+
 ## 7. Milestones
 
 | | Work | Exit criterion |

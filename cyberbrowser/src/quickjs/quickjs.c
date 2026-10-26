@@ -20919,7 +20919,20 @@ static const T2Code *js_t2_get(JSContextHandle ctx, JSFunctionBytecodeHandle b)
             src.arith = fb ? js_feedback_arith(fb) : NULL;
             src.ics = fb ? js_feedback_sites(fb) : NULL;
         }
-        tc = t2_compile(&src);
+        {
+            /* Which arguments and locals a closure captures (T2 keeps the
+               others out of the frame between instructions). */
+            int nv = src.arg_count + src.var_count;
+            uint8_t *captured = nv ? js_plain_calloc(nv, 1) : NULL;
+            if (nv && captured) {
+                const JSBytecodeVarDef *vd = bp->vardefs_offset ? b_vardefs(b) : NULL;
+                for (int k = 0; k < nv; k++)
+                    captured[k] = !vd || vd[k].is_captured;
+            }
+            src.captured = captured;
+            tc = nv && !captured ? NULL : t2_compile(&src);
+            js_plain_free(captured);
+        }
     }
     bp = (JSFunctionBytecode *)gc_deref(b);
     bp->t2_code = tc ? tc : T2_CODE_FAILED;

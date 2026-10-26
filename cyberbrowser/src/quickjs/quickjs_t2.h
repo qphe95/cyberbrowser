@@ -32,6 +32,9 @@ typedef struct T2Source {
     const uint16_t *site_of;
     uint8_t *arith;
     const JitIC *ics;           /* its property sites' inline caches */
+    /* By argument, then local: whether a closure captures it (then it lives
+       in the frame, where the closure's reference points). */
+    const uint8_t *captured;
 } T2Source;
 
 /* An arithmetic site's state: what made T2's speculation on it fail. */
