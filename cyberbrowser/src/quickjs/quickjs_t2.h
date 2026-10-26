@@ -22,6 +22,7 @@ typedef struct T2Source {
     const uint8_t *bc;
     uint32_t len;
     int arg_count, var_count, stack_size;
+    int strict;                                /* a strict-mode function */
     const GCValue *cpool;
     int (*const *helpers)(JSInterpFrame *F);   /* jsop_table */
     const uint8_t *jumps;                      /* jsop_jumps */
@@ -36,6 +37,7 @@ typedef struct T2Source {
 /* An arithmetic site's state: what made T2's speculation on it fail. */
 #define T2_ARITH_DOUBLE 1   /* a number outside int32, or an int32 result that was not */
 #define T2_ARITH_OTHER  2   /* a value that is not a number */
+#define T2_ARITH_GENERIC 4  /* an equality's identity test failed too */
 
 T2Code *t2_compile(const T2Source *src);
 int t2_available(void);
@@ -46,6 +48,9 @@ int t2_poll(JSInterpFrame *F);
 int t2_to_bool(JSInterpFrame *F, GCValue v);
 void t2_deopt(JSInterpFrame *F, uint8_t *state, const GCValue *a, const GCValue *b);
 int t2_retain(GCHandle h);
+int t2_call(JSInterpFrame *F, int argc, int kind);
+GCValue t2_this(JSInterpFrame *F);
+int t2_eq(GCValue a, GCValue b, int loose);
 extern const uint16_t t2_class_array;   /* JS_CLASS_ARRAY */
 const uint32_t *t2_proto_epoch_addr(void);
 const uint32_t *t2_atom_epoch_addr(JSAtom atom);

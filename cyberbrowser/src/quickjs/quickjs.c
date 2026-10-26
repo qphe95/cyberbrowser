@@ -20907,6 +20907,7 @@ static const T2Code *js_t2_get(JSContextHandle ctx, JSFunctionBytecodeHandle b)
         src.arg_count = bp->arg_count;
         src.var_count = bp->var_count;
         src.stack_size = bp->stack_size;
+        src.strict = (bp->js_mode & JS_MODE_STRICT) != 0;
         src.cpool = b_cpool(b);
         src.helpers = jsop_table;
         src.jumps = jsop_jumps;
@@ -20955,8 +20956,11 @@ void t2_deopt(JSInterpFrame *F, uint8_t *state, const GCValue *a, const GCValue 
     /* no operands: a guard on something other than numbers (an array, a
        shape) failed */
     int numbers = a && JS_IsNumber(*a) && (!b || JS_IsNumber(*b));
+    /* a site widens one step at a time: int32, float64 (numbers), other
+       (equalities: by identity), generic */
     if (state)
-        *state |= numbers ? T2_ARITH_DOUBLE : T2_ARITH_OTHER;
+        *state |= *state & T2_ARITH_OTHER ? T2_ARITH_GENERIC :
+                  numbers ? T2_ARITH_DOUBLE : T2_ARITH_OTHER;
     if (!bp)
         return;
     /* jit_budget counts deopts too, in its own scale: a fresh compilation
@@ -25186,15 +25190,16 @@ static inline __attribute__((always_inline)) void jit_call_push_result(JSInterpF
 /* call / call_method / call_constructor from compiled code (kind
  * JIT_CALL_*; argc arguments on F->sp, F->pc past the operands), doing
  * what the interpreter's case does, by the cheapest way that applies:
- * - the callee is a compiled normal function: its frame is set up as
- *   JS_CallInternal does, F2 filled and its code's entry returned, which
- *   the caller runs directly (then jit_call_finish);
+ * - the callee is a compiled normal function (T1 code, or T2 code when t2
+ *   is set): its frame is set up as JS_CallInternal does, F2 filled and
+ *   its code's entry returned, which the caller runs directly (then
+ *   jit_call_finish);
  * - the callee is a C function: it is called, the result is pushed, and
  *   F2->jit_exit is JSOP_DONE (JSOP_EXCEPTION if it threw);
  * - otherwise NULL with F2->jit_exit JSOP_NEXT, having changed nothing: the
  *   call goes through the instruction's helper. */
 static inline __attribute__((always_inline))
-void *jit_call_prepare_kind(JSInterpFrame *F, JSInterpFrame *F2, int argc, int kind)
+void *jit_call_prepare_kind(JSInterpFrame *F, JSInterpFrame *F2, int argc, int kind, int t2)
 {
     GCValue *call_argv = F->sp - argc;
     GCValue func_obj = jit_value_load(kind == JIT_CALL_CONSTRUCTOR ? &call_argv[-2] : &call_argv[-1]);
@@ -25204,7 +25209,9 @@ void *jit_call_prepare_kind(JSInterpFrame *F, JSInterpFrame *F2, int argc, int k
     JSObjectHandle p;
     JSFunctionBytecodeHandle b;
     JSFunctionBytecode *bp;
-    const JitCode *jc;
+    const JitCode *jc = NULL;
+    const T2Code *tc = NULL;
+    const uint8_t *bc;
     int class_id;
 
     F2->jit_exit = JSOP_NEXT;
@@ -25244,10 +25251,21 @@ void *jit_call_prepare_kind(JSInterpFrame *F, JSInterpFrame *F2, int argc, int k
 
     b = (JSFunctionBytecodeHandle)(SAFE_GET_OR(p, JSObjectHandle, u.func.function_bytecode_handle, GC_HANDLE_NULL));
     bp = (JSFunctionBytecode *)gc_deref(b);
-    if (!bp || !bp->jit_code || bp->jit_code == JIT_CODE_FAILED || bp->func_parse_state != JS_FUNC_PARSED ||
+    if (!bp || bp->func_parse_state != JS_FUNC_PARSED ||
         bp->func_kind != JS_FUNC_NORMAL || (kind == JIT_CALL_CONSTRUCTOR && bp->is_derived_class_constructor))
         return NULL;
-    jc = bp->jit_code;
+    if (t2) {
+        tc = bp->t2_code;
+        if (!tc || tc == T2_CODE_FAILED)
+            return NULL;
+        bc = js_bc_byte_code_buf(b);
+        bp = (JSFunctionBytecode *)gc_deref(b);
+    } else {
+        jc = bp->jit_code;
+        if (!jc || jc == JIT_CODE_FAILED)
+            return NULL;
+        bc = jc->byte_code;
+    }
     /* As the interpreter before a call (JS_SF_SET_PC): the caller's pc,
      * for backtraces. */
     F->sf->pc_offset = (uint32_t)(F->pc - F->byte_code);
@@ -25260,7 +25278,7 @@ void *jit_call_prepare_kind(JSInterpFrame *F, JSInterpFrame *F2, int argc, int k
         }
     }
     if (js_bc_frame_enter_pooled(F->rt, p, b, bp, func_obj, argc, call_argv, F2)) {
-        F2->pc = jc->byte_code;
+        F2->pc = bc;
     } else if (!js_bc_frame_enter(F->ctx, F->rt, p, b, func_obj, argc, call_argv, F2)) {
         F2->jit_exit = JSOP_EXCEPTION;     /* out of memory, thrown */
         return NULL;
@@ -25277,19 +25295,19 @@ void *jit_call_prepare_kind(JSInterpFrame *F, JSInterpFrame *F2, int argc, int k
     F2->argv = call_argv;
     F2->flags = flags;
     F2->code = jc;
-    F2->byte_code = jc->byte_code;
+    F2->byte_code = bc;
     F2->jit_exit = JSOP_NEXT;
     /* JS_POLL_POINT at entry (known not to call the handler). */
     DET_CLOCK_CALL();
     gc_poll();
     if (g_interrupt_countdown)
         g_interrupt_countdown--;
-    return jc->base;
+    return t2 ? (void *)tc->entry : jc->base;
 }
 
 void *jit_call_prepare(JSInterpFrame *F, JSInterpFrame *F2, int argc, int kind)
 {
-    void *entry = jit_call_prepare_kind(F, F2, argc, kind);
+    void *entry = jit_call_prepare_kind(F, F2, argc, kind, 0);
     if (unlikely(g_cyber_counters_on)) {
         if (entry)
             CC_INC(call_jit_direct);
@@ -25324,6 +25342,60 @@ int jit_call_finish(JSInterpFrame *F, JSInterpFrame *F2, int r, int argc, int ki
         ret = F2->this_obj;
     jit_call_push_result(F, argc, kind, ret);
     return JSOP_NEXT;
+}
+
+/* call / call_method / call_constructor (kind JIT_CALL_*) from T2 code,
+ * F->sp past the arguments and F->pc past the operands: a callee with T2
+ * code is entered directly (no JS_CallInternal), a C function called
+ * directly.  JSOP_NEXT with the result pushed, JSOP_EXCEPTION, or -1 when
+ * nothing was done and the instruction's helper should run. */
+int t2_call(JSInterpFrame *F, int argc, int kind)
+{
+    JSInterpFrame F2;
+    int (*entry)(JSInterpFrame *) = (int (*)(JSInterpFrame *))jit_call_prepare_kind(F, &F2, argc, kind, 1);
+    if (!entry) {
+        if (F2.jit_exit == JSOP_DONE)
+            return JSOP_NEXT;
+        return F2.jit_exit == JSOP_EXCEPTION ? JSOP_EXCEPTION : -1;
+    }
+    return jit_call_finish(F, &F2, entry(&F2), argc, kind);
+}
+
+/* push_this in a function that is not strict: this as an object. */
+GCValue t2_this(JSInterpFrame *F)
+{
+    int tag = JS_VALUE_GET_TAG(F->this_obj);
+    if (likely(tag == JS_TAG_OBJECT))
+        return F->this_obj;
+    if (tag == JS_TAG_NULL || tag == JS_TAG_UNDEFINED)
+        return SAFE_GET_OR(F->ctx, JSContextHandle, global_obj, GC_UNDEFINED);
+    return JS_ToObject(F->ctx, F->this_obj);
+}
+
+/* a === b (loose: a == b) when it is an identity test: objects, symbols,
+ * null, undefined, booleans; null == undefined.  1 or 0, or -1 when it
+ * compares values (numbers, strings, big ints) or converts. */
+int t2_eq(GCValue a, GCValue b, int loose)
+{
+    int ta = JS_VALUE_GET_NORM_TAG(a), tb = JS_VALUE_GET_NORM_TAG(b);
+#define T2_IDENTITY_TAG(t) ((t) == JS_TAG_OBJECT || (t) == JS_TAG_SYMBOL || (t) == JS_TAG_NULL || (t) == JS_TAG_UNDEFINED || (t) == JS_TAG_BOOL)
+#define T2_NULLISH(t) ((t) == JS_TAG_NULL || (t) == JS_TAG_UNDEFINED)
+    if (!T2_IDENTITY_TAG(ta) || !T2_IDENTITY_TAG(tb))
+        return -1;
+    if (ta == tb)
+        return GCV_BITS(a) == GCV_BITS(b);
+    if (!loose)
+        return 0;
+    if (T2_NULLISH(ta) && T2_NULLISH(tb))
+        return 1;
+    /* an object == null or undefined: false, but for document.all */
+    if ((ta == JS_TAG_OBJECT && T2_NULLISH(tb)) || (tb == JS_TAG_OBJECT && T2_NULLISH(ta))) {
+        JSObjectHandle o = JS_VALUE_GET_OBJ(ta == JS_TAG_OBJECT ? a : b);
+        return SAFE_GET_OR(o, JSObjectHandle, is_HTMLDDA, 0) ? -1 : 0;
+    }
+    return -1;      /* a boolean or symbol against another kind: converts */
+#undef T2_IDENTITY_TAG
+#undef T2_NULLISH
 }
 
 /* push_atom_value: the value, when it is the atom's own string or symbol

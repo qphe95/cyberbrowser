@@ -1011,6 +1011,43 @@ through the generic helper and the interpreter's frame setup (5e: direct calls);
 stored to the frame at every helper and block end (5f); and gaussian-blur's hot loop, which
 runs in a function called once, so T2 never enters it (loop entry, 6.2).
 
+**5e as built: calls.** Profiled under T2, richards spent about 38% of its time in calls
+(`JS_CallInternal`, frame entry, and the per-entry check for T2 code), 8% in `push_this`'s
+helper and 7% in loose equality on objects.
+
+- **Direct calls.** `call`, `call_method`, `call_constructor` and the tail calls go through
+  `t2_call`: a callee with T2 code gets its frame set up and its code called directly, a C
+  function is called directly, and anything else runs the instruction's helper. It shares
+  T1's `jit_call_prepare_kind` (now told which tier's code to look for) and
+  `jit_call_finish`, which continues a callee's frame in the interpreter when its code
+  exits.
+- **`push_this`** is a load of `this` in a strict function, and a small call (`t2_this`)
+  otherwise. `get_loc_check`, `put_loc_check` and `set_loc_check` test for an uninitialized
+  `let`/`const` inline and exit to throw.
+- **Equality by identity.** An equality site that has seen non-numbers, or one compared
+  with `null`, `undefined`, a boolean or an object constant, compares by identity
+  (`t2_eq`): objects, symbols, `null`, `undefined` and booleans; `null == undefined`; an
+  object `== null` is false except for `document.all`. Numbers, strings and big ints exit,
+  and the site's state takes a fourth step, generic.
+- **Not yet:** builtins (`Math.*`, `push`, `charCodeAt`) are called directly but not
+  inlined; the profiles above did not show them.
+- **Tests:** `tests/jit/t2calls.js` (recursion to a stack overflow, exceptions through T2
+  frames, `arguments`, rest and default parameters, constructors returning objects and
+  primitives, derived classes, `this` in sloppy and strict code through call, apply and
+  bind, natives, tail calls, closures, calling non-functions, identity equalities and their
+  value cases, `let` read before its declaration).
+
+| | T2 after 5d | T2 after 5e | T1 |
+|---|---|---|---|
+| richards | −4% | **−34%** | −3% |
+| delta-blue | +3% | **−15%** | −1% |
+| Air | +16% | +7% | +36% |
+| raytrace | +16% | +3% | +2% |
+| earley-boyer, acorn | +14% to +17% | +4% to +6% | +2% |
+| chai | +19% | +15% | +17% |
+| navier-stokes, crypto, stanford-crypto-aes | −39% to −61% | −39% to −61% | −26% to −32% |
+| **Geometric mean (12 tests)** | −10.5% | **−17.1%** | −8.0% |
+
 ## 7. Milestones
 
 | | Work | Exit criterion |
