@@ -516,6 +516,7 @@ typedef struct JSMapState {
     uint32_t hash_size; /* = 2 ^ hash_bits */
     uint32_t record_count_threshold; /* count at which a hash table
                                         resize is needed */
+    GCHandle owner_handle; /* the Map/Set/WeakMap/WeakSet object */
     /* NOTE: WeakMap/WeakSet use g_gc.weakmap_handles array, no header needed */
 } JSMapState;
 
@@ -534,6 +535,7 @@ typedef struct JSFinalizationRegistryData {
     GCListHead entries; /* list of JSFinRecEntry.link */
     GCHandle realm_handle; /* Handle to JSContext realm */
     GCValue cb;
+    GCHandle owner_handle; /* the FinalizationRegistry object */
     /* NOTE: Uses g_gc.finrec_handles array, no header needed */
 } JSFinalizationRegistryData;
 

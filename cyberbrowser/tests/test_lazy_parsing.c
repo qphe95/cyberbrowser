@@ -1314,6 +1314,11 @@ static const char *lazy_suite_js =
     "T('ce-shim-flags', function(){ var log=[]; (function(){ 'use strict'; class Native{ constructor(){ log.push('native'); } } let browserConstruction=false, userConstruction=false; const reg=new Map(); function Fake(){ if(!browserConstruction){ userConstruction=true; return new (reg.get('x'))(); } browserConstruction=false; } const define=(tag, cls)=>{ const proto=cls.prototype; const StandIn=class extends Native{ constructor(){ super(); Object.setPrototypeOf(this, proto); if(!userConstruction){ browserConstruction=true; cls.call(this); } userConstruction=false; } }; reg.set(tag, StandIn); return StandIn; }; function User(){ log.push('user'); return Fake.call(this)||this; } const S=define('x', User); new S(); log.push(browserConstruction+','+userConstruction); })(); return log.join(' '); });\n"
     "T('capture-through-two', function(){ return (function(){ var e=1, f=2; function a(){ return function b(){ return function c(){ e++; return e*10+f; }; }; } var g=a()()(); e=5; return [g, a()()(), e]; })(); });\n"
     "T('class-in-lazy-sees-later-write', function(){ return (function(){ let flag; function mk(){ return class { get v(){ return flag; } }; } const C=mk(); flag='set'; return new C().v; })(); });\n"
+    /* A function declared with a contextual word as its name: its
+     * parameters are not declarations of the skipped body (lodash's
+     * 'function of(n)' hid the enclosing 'n'). */
+    "T('contextual-word-fn-name', function(){ var n='outer'; var f=function(){ return n; function of(n){ return n; } }; var g=function(){ return n; function yield(n){} }; var h=function(){ return n; function await(n){} }; return [f(), g(), h()]; });\n"
+    "T('class-field-contextual-names', function(){ var C=class { async; get; set; static; of = 1 }; return Object.keys(new C()); });\n"
     "out.join('\\n');\n";
 
 static const char *lazy_suite_expected =
@@ -1424,7 +1429,9 @@ static const char *lazy_suite_expected =
     "tdz-closure-class=ReferenceError\n"
     "ce-shim-flags=native user false,false\n"
     "capture-through-two=[22,62,6]\n"
-    "class-in-lazy-sees-later-write=set";
+    "class-in-lazy-sees-later-write=set\n"
+    "contextual-word-fn-name=[\"outer\",\"outer\",\"outer\"]\n"
+    "class-field-contextual-names=[\"async\",\"get\",\"set\",\"static\",\"of\"]";
 
 static BOOL lazy_suite_check(JSContextHandle ctx, const char *label)
 {

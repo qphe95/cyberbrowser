@@ -649,6 +649,9 @@ static bool scan(Scan *s)
                 int prev = last;
                 bool body_level = s->nctx > 1 && s->level == cx->base + 1 &&
                                   (prev == LZ_START || prev == LZ_CLOSE_BLOCK);
+                /* await, of, yield: an expression may follow, unless the
+                   word is a name being declared (function of(n) {...}) */
+                bool ctx_kw = false;
                 while (p < end && is_ident_char(*p))
                     p++;
                 if (p < end && (*p == '\\' || *p >= 0x80)) {
@@ -669,7 +672,7 @@ static bool scan(Scan *s)
                 }
                 switch (start[0]) {
                 case 'a':
-                    if (kw(start, len, "await")) { last = LZ_KW_EXPR; goto add; }
+                    if (kw(start, len, "await")) { ctx_kw = true; break; }
                     break;
                 case 'b':
                     if (kw(start, len, "break")) { last = LZ_IDENT; continue; }
@@ -740,7 +743,7 @@ static bool scan(Scan *s)
                     if (kw(start, len, "null")) { last = LZ_OPERAND; continue; }
                     break;
                 case 'o':
-                    if (kw(start, len, "of")) { last = LZ_KW_EXPR; goto add; }
+                    if (kw(start, len, "of")) { ctx_kw = true; break; }
                     break;
                 case 'r':
                     if (kw(start, len, "return")) { last = LZ_KW_EXPR; continue; }
@@ -770,7 +773,7 @@ static bool scan(Scan *s)
                     if (kw(start, len, "while") || kw(start, len, "with")) { last = LZ_KW_CTRL; continue; }
                     break;
                 case 'y':
-                    if (kw(start, len, "yield")) { last = LZ_KW_EXPR; goto add; }
+                    if (kw(start, len, "yield")) { ctx_kw = true; break; }
                     break;
                 }
                 last = LZ_IDENT;
@@ -780,8 +783,9 @@ static bool scan(Scan *s)
                 } else if (cx->expect_binding && cx->decl_level == s->level) {
                     cx->expect_binding = false;
                     add_decl(s, start, len);
+                } else if (ctx_kw) {
+                    last = LZ_KW_EXPR;
                 }
-            add:
                 add_name(s, start, len);
                 continue;
             }

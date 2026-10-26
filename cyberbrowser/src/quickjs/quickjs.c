@@ -7915,17 +7915,44 @@ void gc_cleanup_shape_hash_table(JSRuntimeHandle rt)
 /* Weak step of a collection: drop weak references to objects the cycle
  * found unreachable.  The collector calls this on the JS thread with
  * gc_object_is_dead() answering for the cycle. */
+/* A WeakMap/WeakSet state or a FinalizationRegistry's data is a weak
+ * container only while the object it belongs to lives: that object's mark
+ * function is what marks its records (entries).  Kept alive without it (a
+ * stale conservative reference to the container is enough), it lists records
+ * the sweep frees, whose handles are then recycled.  Either thread may ask:
+ * the owner is checked to be an object that still points back. */
+static BOOL gc_weak_owner_live(GCHandle owner, GCHandle container)
+{
+    if (!gc_handle_live(owner) || gc_object_is_dead(owner) ||
+        gc_handle_get_type_inline(owner) != JS_GC_OBJ_TYPE_JS_OBJECT)
+        return FALSE;
+    JSObject *p = (JSObject *)gc_deref(owner);
+    return p && p->u.opaque_handle == container;
+}
+
+/* kind: 0 WeakMap/WeakSet states, 1 WeakRef data, 2 FinalizationRegistry data */
+static GCHandle gc_weak_container_owner(GCHandle h, int kind)
+{
+    switch (kind) {
+    case 0: return ((JSMapState *)gc_deref(h))->owner_handle;
+    case 2: return ((JSFinalizationRegistryData *)gc_deref(h))->owner_handle;
+    }
+    return GC_HANDLE_NULL;
+}
+
 /* Drop registry entries whose container (WeakMap state, WeakRef data,
- * FinalizationRegistry data) the finished cycle condemned.  This must happen
- * now, in the weak window: once the sweep frees the container its handle is
- * recycled, and a lingering entry would make a later weak step treat an
- * unrelated object as a weak container. */
-static void gc_weak_registry_drop_dead(JSHandleArray *arr)
+ * FinalizationRegistry data) the finished cycle condemned, or whose owner it
+ * condemned.  This must happen now, in the weak window: once the sweep frees
+ * the container (or its records) the handles are recycled, and a lingering
+ * entry would make a later weak step treat unrelated objects as a weak
+ * container. */
+static void gc_weak_registry_drop_dead(JSHandleArray *arr, int kind)
 {
     uint32_t j = 0;
     for (uint32_t i = 0; i < arr->count; i++) {
         GCHandle h = arr->handles[i];
         if (!gc_handle_array_entry_is_valid(h) || !gc_handle_live(h) || gc_object_is_dead(h)) continue;
+        if (kind != 1 && !gc_weak_owner_live(gc_weak_container_owner(h, kind), h)) continue;
         arr->handles[j++] = h;
     }
     arr->count = j;
@@ -7963,9 +7990,9 @@ static void gc_weak_prune_buffer_views(void)
 
 static void gc_weak_registries_drop_dead(void)
 {
-    gc_weak_registry_drop_dead(&g_gc.weakmap_handles);
-    gc_weak_registry_drop_dead(&g_gc.weakref_handles);
-    gc_weak_registry_drop_dead(&g_gc.finrec_handles);
+    gc_weak_registry_drop_dead(&g_gc.weakmap_handles, 0);
+    gc_weak_registry_drop_dead(&g_gc.weakref_handles, 1);
+    gc_weak_registry_drop_dead(&g_gc.finrec_handles, 2);
 }
 
 void JS_GCWeakStep(JSRuntimeHandle rt)
@@ -7999,12 +8026,15 @@ int JS_GCWeakContainerHasDead(GCHandle h, int kind)
 {
     uint32_t guard = 0;
     if (h == GC_HANDLE_NULL || !gc_handle_is_valid(h)) return 0;
+    /* A container whose owner died is dropped, not cleaned (weak apply). */
+    if (kind != 1 && !gc_weak_owner_live(gc_weak_container_owner(h, kind), h)) return 0;
     switch (kind) {
     case 0: {
         JSMapState *ms = (JSMapState *)gc_deref(h);
         if (!ms || !ms->is_weak) return 0;
         GCHandle mr = ms->records.next;
         while (mr != GC_HANDLE_NULL && guard++ < (1u << 24)) {
+            if (!gc_handle_live(mr)) break;
             JSMapRecord *r = (JSMapRecord *)gc_deref(mr);
             if (!r) break;
             if (!r->empty && gc_weak_value_dead(r->key)) return 1;
@@ -8021,6 +8051,7 @@ int JS_GCWeakContainerHasDead(GCHandle h, int kind)
         if (!fr) return 0;
         GCHandle e = fr->entries.next;
         while (e != GC_HANDLE_NULL && guard++ < (1u << 24)) {
+            if (!gc_handle_live(e)) break;
             JSFinRecEntry *fe = (JSFinRecEntry *)gc_deref(e);
             if (!fe) break;
             if (gc_weak_value_dead(fe->target) || gc_weak_value_dead(fe->token)) return 1;
@@ -30195,7 +30226,8 @@ static int __exception js_parse_property_name(JSParseState *s,
                 goto fail1;
             if (s->token.val == ':' || s->token.val == ',' ||
                 s->token.val == '}' || s->token.val == '(' ||
-                s->token.val == '=') {
+                s->token.val == '=' ||
+                (s->token.val == ';' && allow_private)) {
                 is_non_reserved_ident = TRUE;
                 goto ident_found;
             }
@@ -31048,6 +31080,9 @@ static int js_lazy_scan_body(JSParseState *s, JSLazyNameSet *names,
                 const uint8_t *start = p;
                 size_t len;
                 int prev = last;
+                /* await, of, yield: an expression may follow, unless the
+                   word is a name being declared (function of(n) {...}) */
+                BOOL ctx_kw = FALSE;
                 while (p < end && lz_is_ident_char(*p))
                     p++;
                 if (p < end && (*p == '\\' || *p >= 0x80))
@@ -31059,7 +31094,7 @@ static int js_lazy_scan_body(JSParseState *s, JSLazyNameSet *names,
                 }
                 switch (start[0]) {
                 case 'a':
-                    if (lz_kw(start, len, "await")) { last = LZ_KW_EXPR; goto add_name; }
+                    if (lz_kw(start, len, "await")) { ctx_kw = TRUE; break; }
                     break;
                 case 'b':
                     if (lz_kw(start, len, "break")) { last = LZ_IDENT; continue; }
@@ -31133,7 +31168,7 @@ static int js_lazy_scan_body(JSParseState *s, JSLazyNameSet *names,
                     if (lz_kw(start, len, "null")) { last = LZ_OPERAND; continue; }
                     break;
                 case 'o':
-                    if (lz_kw(start, len, "of")) { last = LZ_KW_EXPR; goto add_name; }
+                    if (lz_kw(start, len, "of")) { ctx_kw = TRUE; break; }
                     break;
                 case 'r':
                     if (lz_kw(start, len, "return")) { last = LZ_KW_EXPR; continue; }
@@ -31163,7 +31198,7 @@ static int js_lazy_scan_body(JSParseState *s, JSLazyNameSet *names,
                     if (lz_kw(start, len, "while") || lz_kw(start, len, "with")) { last = LZ_KW_CTRL; continue; }
                     break;
                 case 'y':
-                    if (lz_kw(start, len, "yield")) { last = LZ_KW_EXPR; goto add_name; }
+                    if (lz_kw(start, len, "yield")) { ctx_kw = TRUE; break; }
                     break;
                 }
                 last = LZ_IDENT;
@@ -31175,8 +31210,9 @@ static int js_lazy_scan_body(JSParseState *s, JSLazyNameSet *names,
                     expect_binding = FALSE;
                     if (lazy_name_set_add(decls, base, start, len))
                         return -1;
+                } else if (ctx_kw) {
+                    last = LZ_KW_EXPR;
                 }
-            add_name:
                 if (lazy_name_set_add(names, base, start, len))
                     return -1;
                 continue;
@@ -61881,12 +61917,15 @@ static GCValue js_map_constructor(JSContextHandle ctx, GCValue new_target,
     s = (JSMapStateHandle)(s_handle);
     js_map_state_init_records(s);
     SAFE_SET(s, JSMapStateHandle, is_weak, is_weak);
+    /* Owner first: a weak state is dropped from the registry when its owner
+     * does not point back (gc_weak_owner_live). */
+    SAFE_SET_HANDLE(s, JSMapStateHandle, owner_handle, JS_VALUE_GET_OBJ(obj));
+    JS_SetOpaqueHandle(obj, s_handle);
     if (is_weak) {
         /* Add to typed weakmap handle array for GC sweep */
         if (gc_handle_array_add(&g_gc.weakmap_handles, s_handle) < 0)
             goto fail;
     }
-    JS_SetOpaqueHandle(obj, s_handle);
     SAFE_SET(s, JSMapStateHandle, hash_bits, 1);
     SAFE_SET(s, JSMapStateHandle, hash_size, 1U << SAFE_GET_OR(s, JSMapStateHandle, hash_bits, 0));
     SAFE_SET_HANDLE(s, JSMapStateHandle, hash_table_handle, gc_allocz(sizeof(GCHandle) * SAFE_GET_OR(s, JSMapStateHandle, hash_size, 0), JS_GC_OBJ_TYPE_DATA));
@@ -70925,13 +70964,14 @@ static GCValue js_finrec_constructor(JSContextHandle ctx, GCValue new_target,
     if (frd_handle == GC_HANDLE_NULL)
         return JS_EXCEPTION;
     JSFinalizationRegistryDataHandle frd = frd_handle;
-    /* Add to typed finrec handle array for GC sweep */
-    if (gc_handle_array_add(&g_gc.finrec_handles, frd_handle) < 0)
-        return JS_EXCEPTION;
     js_finreg_init_entries(frd);
     SAFE_SET_HANDLE(frd, JSFinalizationRegistryDataHandle, realm_handle, SAFE_HANDLE(ctx));
     SAFE_SET_VALUE(frd, JSFinalizationRegistryDataHandle, cb, cb);
+    SAFE_SET_HANDLE(frd, JSFinalizationRegistryDataHandle, owner_handle, JS_VALUE_GET_OBJ(obj));
     JS_SetOpaqueHandle(obj, frd_handle);
+    /* Add to typed finrec handle array for GC sweep (owner set first) */
+    if (gc_handle_array_add(&g_gc.finrec_handles, frd_handle) < 0)
+        return JS_EXCEPTION;
     return obj;
 }
 
