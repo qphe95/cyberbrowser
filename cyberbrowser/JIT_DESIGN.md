@@ -425,6 +425,10 @@ Following Maglev rather than a sea of nodes, which V8 itself is leaving for CFG 
 T2 makes sense only if M0–M4 show hot, type-stable code worth it. YouTube's profile is broad, so
 T1 and the caches are the first and surest steps.
 
+`JS_PERF_DESIGN.md` (section 6) now carries T2's design. After the steady-state benchmarks,
+T1 is frozen (off by default, no new work), and T2 is entered from the interpreter and exits
+to it.
+
 ## References
 
 - Xu, Kjolstad, *Copy-and-Patch Compilation* (2021): [arxiv.org/pdf/2011.13127](https://arxiv.org/pdf/2011.13127).

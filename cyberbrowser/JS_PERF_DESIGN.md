@@ -1,10 +1,10 @@
 # Faster JavaScript after the baseline JIT
 
-Status: proposal. Follows `JIT_DESIGN.md` (T1 and the first inline caches, M2 and part of M4)
-and builds on the handle-free references of `GC_PAUSELESS_DESIGN.md`. It changes the order of
-the remaining work: engine representation and runtime paths first, then feedback shared by all
-tiers, then an optimizer built in stages, each started only when the previous one's data asks
-for it.
+Status: N0–N3 done; N4 onward revised after the steady-state benchmarks (section 4.3).
+Follows `JIT_DESIGN.md` (T1 and the first inline caches, M2 and part of M4) and builds on the
+handle-free references of `GC_PAUSELESS_DESIGN.md`. It changes the order of the remaining work:
+engine representation and runtime paths first, then feedback shared by all tiers, then a
+speculative optimizer shaped like Maglev, entered from the interpreter.
 
 ## Summary
 
@@ -19,14 +19,24 @@ on Speedometer and real-world benchmarks, on top of an engine whose values, obje
 allocation are already cheap. V8's speed comes mostly from those, and from feedback (inline caches recorded in
 every tier and used by the next one), not from its baseline compiler.
 
+The steady-state benchmarks (JetStream's Octane, Web Tooling Benchmark and other plain-JS
+tests; section 4.3) confirm it on code that runs long enough for any JIT to pay. Against the
+interpreter, T1 is 30–36% faster on tight numeric loops (crypto, navier-stokes,
+gaussian-blur), up to 23% slower on code built from objects, calls, class fields, Proxy and
+BigInts, and −0.4% over all 62 tests. Its first iteration is about as fast as its steady
+state, so the loss is in each execution, not in compiling or warming up. A later start would
+not change it. What T1 lacks is what only speculation gives: values kept unboxed in registers,
+property accesses compiled to a shape check and a load, and calls made directly to a known
+callee.
+
 So the recommendation is:
 
-1. **Keep T1, but make it earn its place.** It is correct, interpreter-compatible, and the
-   exit target for any later tier, so it stays. Do not rewrite it in assembly or as a
-   Sparkplug clone: that buys little. Until later milestones make compiled code pay, compile
-   only what is hot enough to repay compiling (N1 measures the threshold), or leave it off by
-   default.
-2. **Make the engine itself cheap, for every tier and every native call:** 8-byte values;
+1. **Freeze T1; do not build on it.** It stays in the build, off by default, tested in every
+   mode, but gets no new work. The optimizer does not depend on it: its exits go to the
+   interpreter, whose frames T1 shares. Whether T1 stays at all is decided when the optimizer
+   is measured, interpreter + T2 against interpreter + T1 + T2 (section 6.6).
+2. **Make the engine itself cheap, for every tier and every native call** (N1–N3, done):
+   8-byte values;
    unchecked field loads on hot paths; fewer frame allocations, then calls without heap frames;
    an inline allocation fast path; caches for defining, adding and generically getting
    properties. This is where most of the remaining time is, and it speeds up the interpreter,
@@ -34,15 +44,18 @@ So the recommendation is:
    and layout code are 15–72% of the loads measured (section 4.2), and this plan does not
    cover them.
 3. **Add feedback vectors:** per-function slots recording shapes, types and call targets,
-   written by the interpreter and T1, and read by every tier.
-4. **Then one optimizer, T2, built in stages toward Maglev's design.** Stage 1 compiles hot
-   functions from bytecode into a small IR, specializes on feedback, keeps values in
-   registers within a basic block, and exits to the interpreter at the current bytecode when
-   a guard fails. Because frames are interpreter-compatible, that exit is a deoptimization
-   that needs no separate machinery. Stage 2 extends the same compiler across the function
-   (CFG, SSA, register allocation, exits anywhere). Stage 3 adds inlining and escape
-   analysis. Each stage starts only when the previous one's counters show it would pay. The
-   end state is three tiers, the shape of Chrome's engine without TurboFan.
+   written by the interpreter and read by the optimizer. Their inline caches also serve the
+   interpreter, for the sites that have none today (private fields, field definitions).
+4. **Then one optimizer, T2, shaped like Maglev from its first version.** It builds a
+   control-flow graph in SSA form straight from bytecode and feedback, specializes on
+   feedback (int32 and double arithmetic, shape-checked loads, direct calls), keeps values
+   unboxed in registers across blocks and loops, and exits to the interpreter at the current
+   bytecode when a guard fails. Because frames are interpreter-compatible, that exit is a
+   deoptimization that needs no separate machinery. The block-local first stage of the
+   previous plan is dropped: the wins measured in 4.3 are in loops, which a block-local tier
+   cannot keep in registers. Loop entry (on-stack replacement), then inlining and escape
+   analysis, follow on measurement. The end state is the interpreter and T2, with T1 kept
+   only if it measures a gain between them.
 
 ## 1. What T1 and the first caches taught
 
@@ -100,15 +113,15 @@ the profile N0 measured, with all of the time attributed.
 |---|---|---|
 | **Ignition** (2016) | A register machine with an accumulator; handlers generated from one description (CSA, later Turboshaft) | Fewer, larger instructions than a stack machine, and less stack traffic per operation. Our bytecode stays a stack machine; T2 recovers the difference by tracking the stack symbolically (section 6.1) |
 | **Hidden classes, inline caches, feedback vectors** | Every property access, call and arithmetic site records what it saw, in a per-function feedback vector; every tier reads it | The single most transferable idea. Our caches today live in compiled code only and are thrown away by the next tier. Section 5.4 |
-| **Sparkplug** (2021) | Bytecode to machine code in one pass, with no IR; interpreter-compatible frames; calls builtins for most operations | Exactly what T1 is. Sparkplug gains 5–15% on an engine whose values, calls and allocation are already cheap; T1 gains nothing measurable on ours (section 4.1). It is worth having as the exit target, not as the source of speed |
-| **Maglev** (2023) | CFG SSA built from bytecode and feedback; speculation with deoptimization; about 10× slower to compile than Sparkplug, 10–100× faster than TurboFan | The target design for T2. Its cost (frame states, deoptimization, a register allocator, inlining) pays only where hot, type-stable code exists, so T2 reaches it in stages, each measured first (section 6) |
+| **Sparkplug** (2021) | Bytecode to machine code in one pass, with no IR; interpreter-compatible frames; calls builtins for most operations | Exactly what T1 is. Sparkplug gains 5–15% on an engine whose values, calls and allocation are already cheap; T1 gains nothing measurable on ours (section 4.1), and −0.4% over the steady-state suite (4.3). Since T2 exits to the interpreter, T1 is not needed as an exit target either; it is frozen until T2 shows whether a middle tier pays (6.6) |
+| **Maglev** (2023) | CFG SSA built from bytecode and feedback; speculation with deoptimization; about 10× slower to compile than Sparkplug, 10–100× faster than TurboFan | The target design for T2. Its cost (frame states, deoptimization, a register allocator, inlining) pays only where hot, type-stable code exists; the steady-state suite (4.3) shows where that is. T2 starts from its graph, speculation and exits, and adds loop entry, inlining and escape analysis on measurement (section 6) |
 | **TurboFan / Turboshaft** | The top tier | Out of scope |
 | **Compact values and pointer compression** (2020) | Small integers and 32-bit compressed pointers in tagged words; about 40% less heap | We have compressed references already; our values are still 16 bytes. Section 5.1 |
 | **Cheap calls** | JS frames live on the machine stack; builtins are called with a fixed convention ("short builtin calls"), with no heap objects per call | Our frames, JS and native, are GC objects (pooled per depth) that every call initializes and every return releases. Section 5.3 |
 | **Fast allocation** | Bump-pointer allocation inline in generated code; a parallel scavenger for the young generation | Our allocation path is a C call with alignment and hole handling (`gc_align16`, `alloc_cross`). Section 5.2 |
 | **Embedded builtins** | Common runtime functions written once, callable from every tier at low cost | Our helpers (`jsop_*`, `jit_*`) play this part; the cost of reaching them is what 5.3 cuts |
 
-Two more precedents bear on T2's first stage:
+Two more precedents bear on T2's exit model:
 
 - **HHVM's region JIT** compiles "tracelets" specialized on observed types, with side exits to
   the interpreter.
@@ -117,7 +130,8 @@ Two more precedents bear on T2's first stage:
 
 Both get part of an optimizer's benefit without SSA, by using the interpreter as the
 deoptimization target. Our interpreter-compatible frames make that unusually cheap here.
-Unlike them, T2 treats this as its first stage, not its final form.
+T2 takes the exit model from them, but not their limit to straight-line regions: its graph
+covers the whole function from the first version (section 6).
 
 ## 3. What each lever can reach
 
@@ -134,12 +148,16 @@ The ranges overlap: each lever shrinks the base the next one works on.
 | Calls without heap frames, JS and native (5.3) | Call setup, frame initialization, native-call glue | 3–6% |
 | Caches for defining, adding and generically getting properties (5.4) | `JS_DefineProperty`, `add_property`, `JS_GetPropertyInternal` from natives | 2–4% |
 | T1's threshold (5.5) | Compiling, and code that runs too little to repay it | 0–2% |
-| T2 stage 1 (6.1) | Tag checks, stack traffic and helper calls within blocks of hot code | 2–5% of what is left |
-| T2 stages 2–3 (6.2, 6.3) | Values and checks across blocks and loops; inlining; allocation sinking | Unknown until stage 1's counters |
+| Feedback vectors with caches in the interpreter (5.4) | Uncached private-field and definition sites; call-site targets | 1–3% on pages; up to 10% on class-heavy benchmarks |
+| T2 (6.1, 6.2) | Tag checks, stack traffic, helper calls and call setup in hot code, across blocks and loops | 2–5% on pages; 25–40% steady state on the benchmarks' hot loops (4.3) |
+| T2 inlining and allocation sinking (6.3) | Calls to small callees; short-lived objects | Unknown until T2's counters |
 
 Together, the rows before T2 are the bulk of a plausible 20–30% of the JS-heavy loads' JS-thread
 time. None of them is a compiler. On pages dominated by DOM and layout, such as the Wikipedia
-article (72% DOM and layout), the gain is proportionally smaller.
+article (72% DOM and layout), the gain is proportionally smaller. The page loads are mostly
+code that runs once, so they bound what any compiler can gain on loads; the steady-state
+benchmarks (4.3) are where a compiler shows what it can do, and both are measured for each
+milestone from N4 on.
 
 ## 4. Measuring (N0)
 
@@ -278,6 +296,74 @@ Two measurement artifacts were found and removed this way: the JIT's map for the
 (formatted with `printf` per instruction, 2% of a profile) and, on some runs, a deadlock in the
 sampler, which grew its buffer while the main thread was suspended.
 
+### 4.3 Steady-state benchmarks
+
+The replays are page loads: most of their code runs once or a few times, which is what a
+browser mostly does, but it cannot show what a compiler gains on code that runs long enough
+to be optimized. For that, the standard suites are used as they are, with no benchmark
+written here.
+
+- **`tools/jsbench.js`** loads JetStream's own driver (`JetStreamDriver.js`, from a checkout of
+  WebKit's JetStream outside the repository) and captures, for each test, the script its
+  command-line runner would evaluate: the files, preloads, iteration counts, deterministic
+  `Math.random` and runner code, exactly as JetStream assembles them. Each is written out as a
+  standalone script, with a prefix that stands in for the shell, and run through
+  `CYBER_PROBE_JS` in a fresh process. JetStream includes Octane and the Web Tooling Benchmark,
+  so one harness covers all three suites. Tests that need WebAssembly, workers or modules are
+  left out.
+- **`tests/jit/jsbench.sh`** runs the tests under several settings, interleaved and rotated as
+  in `replay.sh`. Each run reports every iteration's time, reduced to the first iteration
+  (startup), the mean of the last half (steady state) and the total.
+  **`tools/jsbench_stats.js`** reports each setting's medians and its change from the first,
+  with 95% bootstrap intervals, and the geometric mean over the tests.
+- **Coverage:** 62 of JetStream's 68 plain-JS tests run. Basic and WSL need the legacy
+  `RegExp.lastMatch` statics, the two babylonjs-scene tests need browser APIs a probe script
+  lacks, source-map needs `WebAssembly.instantiate`, and OfflineAssembler exceeds 15 minutes
+  interpreted.
+
+Bringing the suite up found three engine bugs, all older than N3: a GC crash when a WeakMap's
+state outlived its object (babel), class fields named `async` rejected by the parser
+(esprima-next), and a lazily parsed body that took the parameter of `function of(n)` for a
+declaration of its own, hiding the enclosing `n` (lebab's lodash). One interpreted run of Air
+in three crashed; it is open.
+
+**T1 against the interpreter** (3 rounds, 8-byte values, threshold 50,000):
+
+| Kind of code | Tests | Steady state, T1 |
+|---|---|---|
+| Integer and bitwise loops over arrays | stanford-crypto-aes, -sha256, -pbkdf2, crypto, navier-stokes, gaussian-blur | −29% to −36% |
+| Numeric code with objects | Box2D, delta-blue, raytrace, ai-astar | −7% to −14% |
+| Objects, calls, class fields, closures | raytrace-private-class-fields, chai, UniPoker, Air, ML, mobx, js-tokens, prettier, acorn | +7% to +20% |
+| BigInts | bigint-bigdenary, bigint-paillier | +6% to +23% |
+| Everything else | 41 tests | within ±7%; 19 tests within noise |
+| **All 62 (geometric mean)** | | **−0.4%** (first iteration −0.1%) |
+
+T1 is faster on 13 tests and slower on 30, beyond each one's interval.
+
+**Where T1 loses** (CPU samples, raytrace-private-class-fields and UniPoker):
+
+- **Calls.** Compiled-to-compiled calls go through `jit_call_prepare_kind`, `jit_call_prepare`,
+  `jit_call_finish` and frame entry: about 12% of raytrace-private-class-fields under T1. The
+  interpreter makes the same calls inside `JS_CallInternal`, cheaper.
+- **Sites with no cache are as slow in both tiers.** Private fields (`find_own_property` from
+  `JS_GetPrivateField`, 11–14% in both tiers), field definitions (`jsop_define_field`) and
+  bitwise operators on values outside int32 (`js_binary_logic_slow`) take the same runtime
+  path; T1 adds its stencils' frame loads and stores (`jit:get_loc`, `jit:put_loc`) on top.
+- **GC is 15–29% of these runs in both tiers**, and property lookups 10–26%: costs no tier
+  removes without caches and allocation work.
+
+**What it means:**
+
+- **Tiering T1 later would not help.** It already compiles only after 50,000 entries or loop
+  iterations, and on these tests its first iteration is as fast as its last: the code is
+  compiled early and stays slower. A non-speculative tier cannot keep a value in a register
+  across a call, prove a type once, or skip a generic call path, which is where the time goes.
+- **What wins is specialization:** the six tests where T1 gains a third are those where a
+  stencil's fast path (int32 arithmetic, array element access) is all the work. A speculating
+  compiler gets that on every kind of site feedback has made monomorphic.
+- **Caches pay in every tier.** Private-field and definition sites need feedback slots read
+  by the interpreter too, not only by compiled code.
+
 ## 5. Making the engine cheap
 
 ### 5.1 Values and loads
@@ -376,8 +462,8 @@ interpreter's value copies got cheaper, and the stencils, still the copy-and-pat
 M2, did not gain as much. **So T1 is off by default again** (`QJS_JIT=1` turns it on), until
 the optimizer (section 6) gives compiled code something the interpreter cannot match. Same
 binary, 24 rounds, the interpreter against T1: −5.5% (watch), −4.0% (home), −7.3% (search),
-BBC and Wikipedia at parity. T1 stays in the build, tested in every mode, as T2's exit target
-(6.5).
+BBC and Wikipedia at parity. T1 stays in the build, tested in every mode; T2 exits to the
+interpreter, and whether T1 stays is decided when T2 is measured (6.6).
 
 **Unchecked loads on hot paths.** `SAFE_GET_OR` checks for a null handle on every field read,
 and `gc_deref` checks again. On paths where the handle is known valid (an object from a value
@@ -499,7 +585,9 @@ arithmetic and comparison site, numbered by the bytecode compiler:
 
 - **Property sites:** the `JitIC` ways of today (shapes, holders, slots), moved here from
   `JitCode`. Add `put_field` (existing writable property), `define_field` and property adds
-  (transition: old shape → new shape, slot), and getters (holder, getter function).
+  (transition: old shape → new shape, slot), getters (holder, getter function), and private
+  fields and brands (`get_private_field`, `put_private_field`, `define_private_field`: shape
+  → slot), which today take a shape-table lookup on every access in every tier (4.3).
 - **Call sites:** the callee (monomorphic or megamorphic), and whether it is compiled.
 - **Arithmetic and comparison sites:** the operand kinds seen (int, double, string, other),
   as bits.
@@ -507,8 +595,14 @@ arithmetic and comparison site, numbered by the bytecode compiler:
 
 The interpreter reads and writes the property and call slots on its fast paths, as T1 does
 now. Immutable shapes (M4) make the interpreter's cache pay, which the reverted October
-experiment showed it could not before. T1 uses the same slots. T2 reads the type and shape
-bits to decide what to specialize, in every stage.
+experiment showed it could not before. The interpreter is the tier that records feedback:
+with T1 off by default, it is also the tier that runs everything T2 has not compiled, so its
+caches are the ones that matter until T2 exists. T2 reads the type, shape and call-target
+slots to decide what to specialize.
+
+Each change is measured on both benchmarks: the replays (24 rounds, as in N1) and the
+steady-state suite (4.3), interpreted. The feedback slots cost a little on cold code; the
+replays show whether lazy allocation keeps that below the gain.
 
 The retention set, prototype epochs and the megamorphic cache of M4 carry over unchanged.
 
@@ -534,7 +628,13 @@ functions and 20 MB of code on the watch page, most of them run too little to re
 compiling. With deterministic replays the threshold can now be measured. Sweep it, from today's
 value to compiling only the hottest few hundred functions. If no threshold makes T1 a net
 gain, turn it off by default until N2 and N3 make compiled code worth its cost. It stays in
-the build, tested in every mode, as T2's exit target.
+the build, tested in every mode.
+
+N1 found 50,000 best on the replays (5.6), and after N3 the interpreter beat T1 there, so T1
+is off by default (5.1). The steady-state suite (4.3) settles the threshold question: on code
+that runs for seconds, T1 compiles early at any threshold and is as slow in its last iteration
+as in its first, so no threshold makes it a gain where it loses. Its future is decided with
+T2's (6.6), not by tuning.
 
 ### 5.6 N1 as built
 
@@ -604,120 +704,142 @@ makes it lazily (`JS_PROP_AUTOINIT`), which this engine disabled for the moving 
 Making it lazy again would remove a sixth of the page's object allocations. It goes in N2
 with allocation.
 
-## 6. The optimizer, built in stages
+## 6. The optimizer
 
 V8 runs four tiers: Ignition, Sparkplug, Maglev and TurboFan. JavaScriptCore and SpiderMonkey
-also put an optimizer between their baseline and top tiers. Nobody runs a "block-local"
-speculative tier as a permanent extra step, and there is a reason: such a tier wins only
-inside basic blocks. JS code full of calls and property accesses has short blocks, and every
-call writes values back to the frame. Most of what Maglev gains crosses blocks: unboxed
-values kept in registers, a check made once for the whole function, and registers allocated
-over the whole function. A permanent block-local tier would risk being neither cheap nor fast,
-and would leave three compilers and an interpreter to maintain.
+also put an optimizer between their baseline and top tiers. What each optimizer gains over its
+baseline is the same: values kept unboxed in registers, a type or shape checked once rather
+than at every use, property accesses compiled to a check and a load, and calls made straight
+to a known callee. A baseline compiler can do none of it, and section 4.3 measures the
+consequence here: T1 gains a third where a stencil's fast path is all the work, and loses
+where the work is calls, objects and uncached sites.
 
-So the third tier here is **one optimizer, T2, built in stages**. Each stage ships on its own
-and is measured, and the next stage extends the same compiler rather than replacing it. The
-end state has three tiers (interpreter, T1, T2), the shape of Chrome's engine without
-TurboFan.
+So the third tier is **one optimizer, T2, shaped like Maglev from its first version**. The
+previous plan built it in stages, starting with a block-local tier (a virtual stack and
+registers within a basic block). That stage is dropped. The gains measured in 4.3 are in
+loops, and a block-local tier writes every value back to the frame at each block's end, so it
+would keep nothing in a register across a loop iteration; no engine runs such a tier for that
+reason. Building the graph in SSA form from the start costs little more than a virtual stack
+(Maglev builds it in one pass over the bytecode, as below) and is what every later step needs.
 
-What makes the staging possible is the exit model. T1 and the interpreter share frames, so a
-failed guard can exit to the interpreter at a bytecode boundary: it writes back the values
-the interpreter's frame should hold and sets `pc`. That *is* a deoptimization. Its frame
-state, meaning where each interpreter slot's value lives at that bytecode, is the same
-concept Maglev records, but simpler, because the target is always the interpreter's own
-frame. Stage 1 needs it only within a block. Stage 2 needs it across the function. Stage 3
-adds inlined frames. The mechanism is built once and grows.
+What makes this affordable is the exit model. T1 and the interpreter share frames, so a failed
+guard can exit to the interpreter at a bytecode boundary: it writes back the values the
+interpreter's frame should hold and sets `pc`. That *is* a deoptimization. Its frame state,
+meaning where each interpreter slot's value lives at that bytecode, is the concept Maglev
+records, but simpler, because the target is always the interpreter's own frame. T2 needs no
+other deoptimizer, and it does not need T1.
 
-**Input:** the bytecode, plus the feedback vector.
+**Input:** the bytecode, plus the feedback vector (5.4).
 
 **Output:** machine code that uses the interpreter's frame layout, like T1.
 
-### 6.1 Stage 1: guards, exits and a block-local virtual stack
+### 6.1 T2: the graph, speculation and exits
 
-The first stage removes the work every bytecode instruction still does in T1: tag checks,
-operand-stack loads and stores, and calls to helpers for cached property accesses.
+- **Graph building in one pass.** T2 walks the bytecode once, in order, simulating the
+  operand stack and locals abstractly: each slot holds the SSA value that defines it. `get_loc`,
+  `put_loc`, `dup`, `swap` and constants make no nodes. Basic blocks start at jump targets and
+  exception handlers; a loop header gets a phi for each slot the loop writes, filled when its
+  back edge is reached. This is how Maglev builds its graph, with no separate SSA
+  construction pass.
+- **Nodes.** A short list: load and store frame slot, int32 and float64 arithmetic with
+  overflow guards, compares and branches, tag and box/unbox conversions, guard kind, guard
+  shape, load and store property slot, load and store array element (with a bounds guard),
+  call helper, call compiled code, call builtin, return, and exit. Every node that can fail
+  carries the frame state of its bytecode: for each interpreter slot live there, the SSA value
+  that holds it.
+- **Speculation from feedback.** An arithmetic site that has seen only int32s becomes one kind
+  guard per operand and untagged int32 arithmetic, with an overflow guard; doubles become
+  float64 arithmetic. A property site that has seen one shape becomes a shape guard and a
+  slot load or store; a few shapes, a short chain of compares. A call site with one target
+  becomes a target guard and a direct call. Sites feedback calls megamorphic, or has never
+  seen, stay calls to the same runtime helpers T1 and the interpreter use.
+- **Representation selection.** Each value is tagged, int32 or float64. A pass over the graph
+  picks, per value, the representation its uses want, so a loop's int32 induction variable and
+  a float64 accumulator stay unboxed across the loop, and boxing happens only where a value
+  escapes to the frame, a helper or an exit.
+- **Removing checks.** A value a guard has proven needs no second guard, in any block it
+  dominates. Shape guards on an object not written in a loop move to the loop's preheader.
+  Redundant loads of the same slot of the same object, with no store or call between, are
+  shared. This is the "simple global optimizations" list, kept short on purpose.
+- **Exits.** A failed guard jumps to a per-site exit stub. The stub boxes the frame state's
+  values, writes them to the interpreter's frame, sets `pc` to the instruction's start, and
+  continues in the interpreter, which runs the instruction and updates the feedback. A site
+  whose exit keeps firing makes the function recompile without that speculation; a function
+  that keeps exiting stays interpreted (or in T1, if T1 stays).
+- **Calls.** A direct call to a compiled callee enters it with the interpreter's frame layout
+  on the JS stack (5.3), with no `jit_call_prepare` path: the target guard proved what the
+  generic path checks. Calls to small builtins that feedback identifies (`Math.*`,
+  `charCodeAt`, array `length` and `push`) are inlined behind the target guard.
+- **Register allocation:** linear scan over the graph, in block order, with values live across
+  calls spilled to their frame slots (which the interpreter and the collector already
+  understand).
+- **Exceptions and generators.** A function with `try` compiles; a throw exits to the
+  interpreter's handler lookup like any exit. Generators, async functions and functions using
+  `with` or direct `eval` are not compiled by the first version.
 
-- **An IR from the start.** Stage 1 translates bytecode into a small IR of operations on
-  virtual registers, one list per basic block, rather than emitting machine code straight
-  from bytecode. The operations are: load and store frame slot, guard tag, guard shape, int32
-  arithmetic with overflow guard, double arithmetic, load and store property slot, call
-  helper, call compiled code, branch and exit. This costs little in stage 1, and it is what
-  stage 2 builds its control-flow graph and SSA on.
-- **A virtual stack.** Within a block, translation tracks for each operand-stack slot and
-  each local which virtual register holds its value, or that it is still in the frame, or a
-  known constant. It also tracks what is known of its kind: int32, double, object of shape S,
-  or unknown. `get_loc`, `dup`, `swap` and constants become bookkeeping with no code. Values
-  are written to the frame only at the end of a block, before a call or a helper, and at a
-  guard's exit.
-- **Guards from feedback.** Where feedback says a site has only seen int32s, T2 emits one tag
-  check and then untagged arithmetic, keeping the result in a register as an int32. A site
-  that has seen one shape gets an inline shape compare and a direct slot load. Later uses of
-  a value a guard has proven need no check.
-- **Exits.** A failed guard jumps to a per-site exit stub. The stub writes the block's live
-  values to the frame (boxing int32s and doubles), sets `pc` to the instruction's start, and
-  returns to the interpreter. The instruction then runs in the interpreter, which also
-  updates the feedback. A site whose exit keeps firing recompiles without that guard.
-- **Calls.** Monomorphic call sites with a compiled callee call its entry directly (5.3).
-  Calls to small builtins that feedback identifies (`charCodeAt`, `Math.*`, array `length`
-  and `push`) get inline fast paths behind a callee check.
-- **Registers** are handed out in stack order as values are pushed and freed when they are
-  consumed. Within a block that is close to optimal for a stack machine.
+Compiling stays roughly linear: one pass to build the graph, one for representations and
+checks, one for registers, one to emit. It runs on the JS thread at first; moving it to a
+background thread is an option once its cost is measured.
 
-Stage 1 is also how the stages are steered. Its counters say how often guards hold, how much
-code is type-stable, how long blocks are, and which values are written back at block ends
-only to be reloaded by the next block. That last count is exactly what stage 2 would remove.
+### 6.2 Loop entry
 
-### 6.2 Stage 2: the whole function
+The steady-state tests call their hot functions many times, so entering T2 at function entry
+is enough for them. Pages do not: a loop in a function that runs once (initialization,
+parsing a response, building a list) never re-enters it. T2's second step is **entry at a loop
+header** from the interpreter (on-stack replacement): at a back edge whose counter passes the
+threshold, the function is compiled with an extra entry at that header, which reads the
+header's frame state in the other direction, loading each live slot from the interpreter's
+frame and unboxing it under a guard. Because the frames are shared, no frame is converted.
 
-When stage 1's counters show that values cross block boundaries in hot code, extend the same
-compiler:
+### 6.3 Inlining and allocation
 
-- **A CFG and SSA** over stage 1's blocks and operations. Loop headers get phis. Kinds are
-  propagated over the graph, so an int32 induction variable stays unboxed in a register
-  across a loop, and a value checked once needs no check in later blocks.
-- **Linear-scan register allocation** over the function, replacing stack-order allocation.
-- **Exits anywhere.** Each guard records its frame state: for every interpreter slot live at
-  that bytecode, the SSA value that holds it. The exit stub boxes and writes those values,
-  which generalizes stage 1's block-local exits.
-- **Simple global optimizations** that SSA makes cheap: removing redundant guards and
-  loads, folding constants, and moving shape checks out of loops.
-
-This is Maglev's design, minus inlining. Compiling stays roughly linear, about one pass for
-SSA, one for kinds and one for allocation, so it can still run on the JS thread.
-
-### 6.3 Stage 3: inlining and allocation
-
-If stage 2's data shows hot calls to small monomorphic callees, and short-lived objects in
-hot code:
+If T2's counters show hot calls to small monomorphic callees, and short-lived objects in hot
+code:
 
 - **Inlining** of small monomorphic callees. A frame state then describes a stack of
   interpreter frames, and an exit materializes the inlined frames before entering the
   interpreter.
 - **Escape analysis and allocation sinking.** An object that never leaves the function is
   kept in registers and allocated only on the exits that need it. This is the one
-  optimization that attacks the 20% in GC directly.
+  optimization that attacks GC directly (15–29% of the steady-state tests, 21% of the YouTube
+  loads).
 
 ### 6.4 Code generation
 
 Register allocation doesn't fit copy-and-patch well: stencils pin their operands to fixed
 registers, and every combination would need its own variant. T2 therefore uses a small macro
-assembler per target. It emits x86-64 and arm64 from the IR's short list of operations, and
-it serves all three stages.
-
-T1 stays copy-and-patch: it is the tier every function reaches, and it ports to arm64
-without a code generator.
+assembler per target. It emits x86-64 first, then arm64, from the graph's short list of
+nodes. It is the one new code generator; it does not share T1's stencils, only the runtime
+helpers, frames and caches they call.
 
 ### 6.5 Tiering
 
-- **Interpreter → T1:** at the threshold N1 measures (5.5), if T1 is on by default by then.
-- **T1 → T2:** when a function's counter passes a much higher threshold (to be measured, of
-  the order of 10^5 executed instructions) and its feedback has settled, meaning no new types
-  or shapes seen for a while.
-- **T2 → T1:** a function whose guards fail repeatedly goes back to T1 (recompiling with
-  fewer guards first, once). Its T2 code is freed when its bytecode's T1 code would be.
-- **Entering T2 in a loop:** stage 1 enters at function start only. Stage 2 adds entry at a
-  loop header from an interpreter or T1 frame (on-stack replacement). Since the frames are
-  shared, that needs only the header's frame state, read in the other direction.
+- **Interpreter:** runs everything first and records feedback. A function's feedback vector is
+  allocated after a few calls (lazy feedback allocation), so code that runs once pays nothing
+  for it.
+- **Interpreter → T2:** when a function's budget, counted in calls and loop iterations
+  weighted by its size (as V8's interrupt budget), passes the threshold, and its feedback has
+  settled, meaning no site changed state since the last check. The threshold is measured on
+  both benchmarks, starting near V8's (on the order of 10^4–10^5 executed instructions).
+- **T2 → interpreter:** a guard failure exits for that execution. A function whose guards fail
+  repeatedly recompiles once without the failing speculation, then stays interpreted for a
+  while before T2 tries again with fresher feedback.
+- **Loop entry** (6.2) uses the same budget, counted at back edges.
+
+### 6.6 T1's future
+
+T1 is frozen: off by default, kept correct and tested in every mode (`QJS_JIT=1`), with no
+new features. When T2 is measured (N5's gate), three configurations are compared on both
+benchmarks: the interpreter alone, the interpreter + T2, and the interpreter + T1 + T2 (T1 for
+warm functions below T2's threshold, and for functions T2 does not compile or gave up on).
+
+- If T1 adds a measurable gain on top of T2, it stays as the middle tier, the role Sparkplug
+  has in V8, at a threshold measured then.
+- If it does not, it is removed: the stencil extraction, its two stencil headers (16- and
+  8-byte values), its code cache and its test modes. One compiler and an interpreter are much
+  less to maintain than two compilers.
+
+Either way, nothing in T2 waits for this decision.
 
 ## 7. Milestones
 
@@ -727,17 +849,20 @@ without a code generator.
 | N1 | In this order, each measured alone (section 4.1): a frame pool that does not miss; T1's threshold; generic get and define/add caches in the runtime, `put_field`/`define_field` caches in compiled code; unchecked hot-path loads; inline allocation fast path | −8% JS-thread cycles on the YouTube replays; parity on all five. **Met** (section 5.6): −10.5% to −12.7% |
 | N2 | Calls without heap frames for simple callees; lighter native calls; call caches; lazy function prototypes and the allocator's line crossing (5.6) | −6% more; parity; GC stress clean. **Partly met** (5.3): −3% to −5% with the JIT on, −5% interpreted; parity; GC stress clean |
 | N3 | 8-byte values engine-wide | −6% more; memory down; all four JIT modes and replays at parity. **Met** (5.1): −11% to −12% with the JIT on, −13% to −17% interpreted, 21% fewer bytes allocated |
-| N4 | Feedback vectors; T2 stage 1 (IR, block-local virtual stack, guards and exits), x86-64 first | −5% more on JS-heavy pages; counters for guard failures, block lengths and values crossing blocks |
-| N5 | T2 stage 2 (CFG, SSA, kinds across blocks, linear scan, exits anywhere, loop entry); arm64 | Go/no-go from N4's counters; then −8% more on JS-heavy pages |
-| N6 | T2 stage 3 (inlining, escape analysis) | Go/no-go from N5's data |
+| N4 | Feedback vectors (5.4), read and written by the interpreter: property sites (including private fields and definitions), call targets, arithmetic kinds; lazily allocated. The steady-state suite (4.3) made a gate: the Air crash fixed, its spread measured | Interpreted: −5% geometric mean on the steady-state suite, −2% more on the JS-heavy replays, parity on the others; feedback that T2 can read, with counters for how many sites are monomorphic |
+| N5 | T2 (6.1), x86-64: graph built from bytecode and feedback, speculation with exits to the interpreter, representation selection, check removal, direct calls, linear scan; entry at function start. T1's future decided (6.6) | Against the interpreter: −25% geometric mean steady state on the suite, no test more than 5% slower; −3% more on the JS-heavy replays, parity on the others; all modes and GC stress clean |
+| N6 | Loop entry (6.2); T2's threshold measured; arm64 | Loop-heavy replays and run-once loops gain; arm64 passes every mode |
+| N7 | Inlining and escape analysis (6.3) | Go/no-go from N5's and N6's counters (hot small callees, short-lived objects) |
 
 The order is by gain per unit of work and risk. N1 is local changes behind existing
 interfaces, ordered by what N0 measured: the frame pool and the threshold first (small and
 measured), then the caches where the 10 M generic property operations happen, then the two
 engine-wide mechanical changes. N2 changes frames but keeps their layout visible to the collector. N3 touches
 everything, but mechanically, and is safest after the measurement and test infrastructure
-has caught the smaller changes. N4 needs N1's caches and N0's counters to be worth building,
-and each later stage starts only on its predecessor's data.
+has caught the smaller changes. N4 pays on its own, in the interpreter that now runs
+everything, and gives T2 its input. N5 is the largest step, a new compiler, and is judged
+mostly on the steady-state suite, where a compiler can show its effect; the replays guard
+against it costing more than it gains on code that runs once. N6 brings T2 to that code.
 
 ## 8. Risks
 
@@ -761,17 +886,23 @@ and each later stage starts only on its predecessor's data.
   loads and 72% of the Wikipedia one, and nothing in this plan touches them. Gains are stated
   as a share of each load's JS-thread time, which includes them.
 - **T2 guards that keep failing.** Mitigation: count exits per site, recompile without the
-  guard after a few, and fall back to T1 for a function that keeps failing.
-- **Two code generators (stencils and the T2 assembler).** Mitigation: T2's operation set is
-  small, and both share the helpers, frames and caches. Differential testing in all modes
-  (interpreter, T1, T2 stress) covers both.
-- **Stage 1 alone gains little.** Block-local work is limited where blocks are short, which
-  is why no engine keeps such a tier on its own. Mitigation: stage 1 is built as the start of
-  the optimizer (an IR, the exit model, the code generator), so its work carries into stage
-  2, and its counters show early whether stage 2 would pay.
-- **The broad profile may stay broad.** If N1–N3 shrink the runtime costs but no hot code
-  emerges, T2 may not pay for itself either. N0's counters and N4's exit criterion make that
-  visible early, before the larger stages are started.
+  speculation after a few, and leave a function that keeps failing in the interpreter.
+- **T2 is a large first step.** Dropping the block-local stage means the first T2 already has
+  a graph, representations and a register allocator. Mitigation: its first version compiles a
+  subset (no generators, async functions, `with` or direct `eval`; megamorphic sites as helper
+  calls), with a stress mode that compiles every function at its first call and compares each
+  exit's frame state against the interpreter's (`QJS_T2_VERIFY`), and the differential tests
+  of every mode. Graph building and exits are tested first, with no speculation, before guards
+  are added.
+- **Two code generators while T1 lives.** Mitigation: T1 is frozen, so only T2's assembler
+  changes; both share the helpers, frames and caches; 6.6 removes T1 if it does not pay.
+- **The benchmarks are not the pages.** JetStream measures code that runs for seconds; pages
+  run most code once. A T2 tuned on the suite could cost more than it gains on loads.
+  Mitigation: every gate includes the replays, with "parity on the others" as a hard
+  condition, and the threshold is measured on both.
+- **The broad profile may stay broad.** If the pages show no hot code even after N4, T2 gains
+  on them only through loop entry. N4's counters (monomorphic sites, hot loops in run-once
+  functions) make that visible before N6.
 
 ## References
 
