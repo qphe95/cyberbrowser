@@ -1084,6 +1084,42 @@ register allocation across blocks, is what turns this into a larger gain on loop
 helper-bound tests need their own instructions compiled (adds, globals, closure
 variables) more than either.
 
+**Adds, globals and closure variables.** Those three took the slower tests' time, so they
+came before register allocation.
+
+- **Property adds.** A `put_field` site's add ways (an object of a known shape gaining the
+  property) compile inline: the shape guard, then checks that the receiver is ordinary,
+  extensible and not watched and that the prototype epoch is unchanged (so no setter or
+  read-only property of that name appeared), then `t2_add_field`, which adds through the
+  shape's transition cache. This skips `JS_SetPropertyInternal`'s lookup and prototype
+  walk, which constructors paid on every `this.x = ...`.
+- **Closure and global variables.** `get_var_ref`, `put_var_ref`, `set_var_ref`, their
+  `_check` forms, `get_var`, `get_var_undef`, `put_var` and `put_var_init` call
+  `t2_var_get` and `t2_var_put` directly, without storing T2's values first: a closure
+  variable never names the running function's own frame, and neither runs JavaScript. A
+  global with no binding yet (a builtin such as `Math`) is read as the global object's own
+  data property, as the interpreter's fallback reads it. A getter, a name not defined, a
+  `let` used before its declaration or a write to a `const` exits; these sites have a
+  state byte, so a site that exits goes generic on recompilation.
+- **Tests:** `tests/jit/t2vars.js` (closures read and written and their values changing
+  type, let-TDZ through closures, declared globals, top-level `let` and `const`, builtins,
+  undefined globals, a global becoming a getter, implicit global writes, `const`
+  assignment, adds in constructors, adds growing the property array, adds to
+  non-extensible objects, after a setter or a read-only property appears on the
+  prototype, and to arrays).
+
+| | T2 after 5e | T2 now | T1 |
+|---|---|---|---|
+| raytrace | +3% | **−26%** | +4% |
+| delta-blue | −15% | **−22%** | +1% |
+| richards | −34% | **−40%** | −2% |
+| earley-boyer | +6% | **−8%** | +2% |
+| navier-stokes | −61% | −69% | −31% |
+| acorn | +4% | ±0 | +3% |
+| Air | +7% | +3% | +38% |
+| chai | +15% | +14% | +18% |
+| **Geometric mean (12 tests)** | −17.1% | **−24.0%** | −7.4% |
+
 ## 7. Milestones
 
 | | Work | Exit criterion |

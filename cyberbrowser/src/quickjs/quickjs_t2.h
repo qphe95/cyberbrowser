@@ -54,6 +54,11 @@ int t2_retain(GCHandle h);
 int t2_call(JSInterpFrame *F, int argc, int kind);
 GCValue t2_this(JSInterpFrame *F);
 int t2_eq(GCValue a, GCValue b, int loose);
+/* Variable accesses (t2_var_get, t2_var_put): how much they may do. */
+enum { T2_VAR_PLAIN, T2_VAR_CHECK, T2_VAR_GLOBAL };
+GCValue t2_var_get(JSInterpFrame *F, int idx, int mode);
+int t2_var_put(JSInterpFrame *F, int idx, int mode, GCValue v);
+int t2_add_field(JSInterpFrame *F, GCValue obj, JSAtom atom, GCValue val);
 extern const uint16_t t2_class_array;   /* JS_CLASS_ARRAY */
 const uint32_t *t2_proto_epoch_addr(void);
 const uint32_t *t2_atom_epoch_addr(JSAtom atom);

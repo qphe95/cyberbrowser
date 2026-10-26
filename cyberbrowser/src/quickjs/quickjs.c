@@ -25374,6 +25374,57 @@ int t2_call(JSInterpFrame *F, int argc, int kind)
     return jit_call_finish(F, &F2, entry(&F2), argc, kind);
 }
 
+/* get_var, get_var_undef, get_var_ref (mode T2_VAR_GLOBAL) and
+ * get_var_ref_check (T2_VAR_CHECK) from T2 code: the variable's value; for
+ * a global that has none yet, the global object's own data property of
+ * that name, as the interpreter's fallback finds it.  The uninitialized
+ * value when the instruction must run in the interpreter (a getter, a name
+ * not defined, a let read before its declaration). */
+GCValue t2_var_get(JSInterpFrame *F, int idx, int mode)
+{
+    GCValue v = js_varref_get_value(F->var_refs[idx]);
+    JSObjectHandle g;
+    JSShapeProperty *prs;
+    JSProperty *pr;
+    if (likely(!JS_IsUninitialized(v)) || mode == T2_VAR_CHECK)
+        return v;
+    g = JS_VALUE_GET_OBJ(SAFE_GET_OR(F->ctx, JSContextHandle, global_obj, GC_UNDEFINED));
+    prs = find_own_property(&pr, g, js_bc_closure_var_var_name(F->b, idx));
+    if (prs && !(prs->flags & JS_PROP_TMASK))
+        return pr->u.value;
+    return JS_UNINITIALIZED;
+}
+
+/* put_var, put_var_init (T2_VAR_GLOBAL), put_var_ref, set_var_ref
+ * (T2_VAR_PLAIN) and put_var_ref_check (T2_VAR_CHECK) of v from T2 code:
+ * 0 when done, 1 when the instruction must run in the interpreter (a
+ * global not declared or const, a let written before its declaration). */
+int t2_var_put(JSInterpFrame *F, int idx, int mode, GCValue v)
+{
+    JSVarRefHandle var_ref = F->var_refs[idx];
+    if (mode != T2_VAR_PLAIN) {
+        if (js_varref_is_value_uninitialized(var_ref))
+            return 1;
+        if (mode == T2_VAR_GLOBAL && SAFE_GET_OR(var_ref, JSVarRefHandle, is_const, 0))
+            return 1;
+    }
+    js_varref_set_value(var_ref, v);
+    return 0;
+}
+
+/* put_field adding atom to the object obj, from T2 code that checked its
+ * shape (an add way of the site's cache), the prototype epoch, and that
+ * it is extensible and not watched: 0, or -1 (out of memory). */
+int t2_add_field(JSInterpFrame *F, GCValue obj, JSAtom atom, GCValue val)
+{
+    JSProperty *pr = add_property(F->ctx, JS_VALUE_GET_OBJ(obj), atom, JS_PROP_C_W_E);
+    if (unlikely(!pr))
+        return -1;
+    gc_set_heap_value(&pr->u.value, val);
+    gc_write_barrier(GC_VALUE_GET_HANDLE(obj), GC_VALUE_GET_HANDLE(val));
+    return 0;
+}
+
 /* push_this in a function that is not strict: this as an object. */
 GCValue t2_this(JSInterpFrame *F)
 {
@@ -27945,6 +27996,9 @@ static inline int js_feedback_op_site_kind(int op)
     case OP_inc: case OP_dec: case OP_neg: case OP_post_inc: case OP_post_dec:
     case OP_inc_loc: case OP_dec_loc: case OP_add_loc:
     case OP_get_array_el: case OP_get_array_el2: case OP_put_array_el:
+    case OP_get_var: case OP_get_var_undef: case OP_put_var: case OP_put_var_init:
+    case OP_get_var_ref: case OP_put_var_ref: case OP_set_var_ref:
+    case OP_get_var_ref_check: case OP_put_var_ref_check:
         return 2;
     default:
         return 0;
