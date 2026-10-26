@@ -1120,6 +1120,26 @@ came before register allocation.
 | chai | +15% | +14% | +18% |
 | **Geometric mean (12 tests)** | −17.1% | **−24.0%** | −7.4% |
 
+**5f, second part as built: registers and fused branches.**
+
+- **Registers.** T2's code generation never touches `rsi`, `rdi` and `rbp`, and they
+  survive calls into C. The two most used carried slots get `rsi` and `rdi` as their
+  homes; the remaining one holds values, first come first served, with the same
+  lifetimes as the native stack slots (values do not cross blocks, so this is close to a
+  linear scan). The collector finds tagged values held only in a register because both
+  of its stack scans begin with `setjmp`, which spills every callee-saved register;
+  the T2 tests also pass under GC stress. `QJS_T2_NO_REGS=1` turns registers off.
+- **Fused compare and branch.** A comparison whose only use is a branch is no longer
+  stored as a boolean and tested: the branch compares and jumps on the flags (int32
+  comparisons, and float64 ones other than equality). Its operands stay live until the
+  branch, past the stores of the block's end.
+- **The effect is small.** On the loop micro-benchmark: 20 ms with fusion alone, 17–18 ms
+  with registers (22 ms before; the interpreter 68–72 ms). A partial timing run (1–2
+  rounds) shows the numeric tests 2–3 points better (crypto −44%, stanford-crypto-aes
+  −42%) and the rest within noise; the twelve-test mean stays in the range of −23%. With
+  three free registers and values dying at every block end, the gain is confined to tight
+  loops; the tests where T2 still trails the interpreter are bound by helper calls.
+
 ## 7. Milestones
 
 | | Work | Exit criterion |

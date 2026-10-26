@@ -252,6 +252,8 @@ typedef struct T2Node {
     uint64_t imm;
     int32_t last_use;   /* the last node reading it (codegen) */
     int32_t spill;      /* its native stack slot (codegen), -1: none */
+    int8_t reg;         /* or the register holding it (codegen), -1: none */
+    uint8_t fused;      /* a comparison its branch emits (codegen) */
 } T2Node;
 
 /* What a slot holds while a block is built. */
@@ -360,6 +362,7 @@ static int t2_node(T2Builder *B, int op, int rep)
     n->rep = (uint8_t)rep;
     n->a = n->b = n->c = n->ic = n->slot = n->t = n->e = n->exit = n->i32_of = n->f64_of = -1;
     n->spill = -1;
+    n->reg = -1;
     return B->n_nodes++;
 }
 
@@ -1273,6 +1276,7 @@ static const int t2_saved[] = { X_RBX, X_RSI, X_RDI, X_RBP, X_R12, X_R13, X_R14,
 typedef struct T2Gen {
     T2Builder *B;
     XAsm a;
+    int8_t *home_reg;       /* by slot: the register a carried slot's home is, -1: memory */
     uint32_t n_spills;      /* homes follow the spills */
     int *flush_label;       /* by homed prefix length: store the homes, then the epilogue */
     int *block_label;       /* by bytecode offset; -1: none */
@@ -1296,20 +1300,38 @@ static void t2_get(T2Gen *G, int r, int n)
     T2Node *N = &G->B->nodes[n];
     if (N->op == T2N_CONST)
         x_mov_ri(&G->a, r, N->imm);
-    else
+    else if (N->reg >= 0) {
+        if (N->reg != r) x_mov_rr(&G->a, r, N->reg);
+    } else
         x_load(&G->a, r, X_RSP, 32 + N->spill * 8);
 }
 
-/* A carried slot's home, as [rsp + disp]. */
+/* A carried slot's home in memory, as [rsp + disp]. */
 static int32_t t2_home_disp(T2Gen *G, int slot)
 {
     return (int32_t)(32 + (G->n_spills + (uint32_t)G->B->home_of[slot]) * 8);
 }
 
+static void t2_home_load(T2Gen *G, int r, int slot)
+{
+    if (G->home_reg[slot] >= 0) x_mov_rr(&G->a, r, G->home_reg[slot]);
+    else x_load(&G->a, r, X_RSP, t2_home_disp(G, slot));
+}
+
+static void t2_home_store(T2Gen *G, int slot, int r)
+{
+    if (G->home_reg[slot] >= 0) x_mov_rr(&G->a, G->home_reg[slot], r);
+    else x_store(&G->a, X_RSP, t2_home_disp(G, slot), r);
+}
+
 static void t2_put(T2Gen *G, int n, int r)
 {
-    if (G->B->nodes[n].spill >= 0)
-        x_store(&G->a, X_RSP, 32 + G->B->nodes[n].spill * 8, r);
+    T2Node *N = &G->B->nodes[n];
+    if (N->reg >= 0) {
+        if (N->reg != r) x_mov_rr(&G->a, N->reg, r);
+    } else if (N->spill >= 0) {
+        x_store(&G->a, X_RSP, 32 + N->spill * 8, r);
+    }
 }
 
 /* Node n's value as a tagged GCValue into rax (clobbers rcx, rdx). */
@@ -1394,7 +1416,7 @@ static void t2_emit_flush(T2Gen *G, int n)
     for (int k = 0; k < n; k++) {
         int s = B->homed[k], base;
         int32_t disp;
-        x_load(&G->a, X_RAX, X_RSP, t2_home_disp(G, s));
+        t2_home_load(G, X_RAX, s);
         t2_box_rax(G, B->crep[s]);
         t2_slot_addr(B, s, &base, &disp);
         x_store(&G->a, base, disp, X_RAX);
@@ -1433,11 +1455,42 @@ static int t2_has_result(int op)
            op != T2N_PUT_ELEM && op != T2N_CALL && op != T2N_CHECK_INIT && op != T2N_VAR_PUT;
 }
 
-/* Native stack slots: each value gets one at its definition and gives it
- * back after its last use (in a block, or at an exit that stores it). */
-static int t2_assign_spills(T2Builder *B, uint32_t *n_spills)
+/* Fuse a comparison into the branch that is its only use: the branch
+ * compares and jumps on the flags (an int32 comparison, or a float64 one
+ * other than equality, which needs two flags).  Its inputs then live until
+ * the branch, past the stores between them. */
+static void t2_fuse_branches(T2Builder *B)
 {
-    int *free_list, n_free = 0, top = 0;
+    int *uses = calloc(B->n_nodes + 1, sizeof(int));
+    if (!uses) return;
+    for (int i = 0; i < B->n_nodes; i++) {
+        T2Node *N = &B->nodes[i];
+        if (N->a >= 0) uses[N->a]++;
+        if (N->b >= 0) uses[N->b]++;
+        if (N->c >= 0) uses[N->c]++;
+    }
+    for (int x = 0; x < B->n_exits; x++)
+        for (int k = 0; k < B->exits[x].n; k++)
+            uses[B->entries[B->exits[x].first + k].node]++;
+    for (int i = 0; i < B->n_nodes; i++) {
+        T2Node *N = &B->nodes[i];
+        if (N->op != T2N_BRANCH || N->a < 0 || uses[N->a] != 1) continue;
+        T2Node *C = &B->nodes[N->a];
+        if (C->op == T2N_I32_CMP || (C->op == T2N_F64_CMP && C->cc != T2C_EQ && C->cc != T2C_NE))
+            C->fused = 1;
+    }
+    free(uses);
+}
+
+/* Where each value lives, from its definition to its last use (in a block,
+ * or at an exit that stores it): one of the free callee-saved registers
+ * (pool, n_pool) while one is free, else a native stack slot.  Values do
+ * not cross blocks (carried slots have homes), so first come first served
+ * is close to what a linear scan would do. */
+static int t2_assign_spills(T2Builder *B, uint32_t *n_spills, const int *pool, int n_pool)
+{
+    int *free_list, n_free = 0, top = 0, free_regs[4], n_free_regs = 0;
+    for (int k = 0; k < n_pool; k++) free_regs[n_free_regs++] = pool[k];
     for (int i = 0; i < B->n_nodes; i++) B->nodes[i].last_use = -1;
     for (int i = 0; i < B->n_nodes; i++) {
         T2Node *N = &B->nodes[i];
@@ -1449,33 +1502,47 @@ static int t2_assign_spills(T2Builder *B, uint32_t *n_spills)
             for (int k = 0; k < x->n; k++)
                 B->nodes[B->entries[x->first + k].node].last_use = i;
         }
+        /* a fused comparison is computed at its branch */
+        if (N->op == T2N_BRANCH && N->a >= 0 && B->nodes[N->a].fused) {
+            T2Node *C = &B->nodes[N->a];
+            if (C->a >= 0) B->nodes[C->a].last_use = i;
+            if (C->b >= 0) B->nodes[C->b].last_use = i;
+        }
     }
     free_list = malloc(sizeof(int) * (B->n_nodes + 1));
     if (!free_list) return 0;
+#define T2_GIVE_BACK(M) do {                                                 \
+        if ((M)->reg >= 0) free_regs[n_free_regs++] = (M)->reg;              \
+        else if ((M)->spill >= 0) free_list[n_free++] = (M)->spill;          \
+        (M)->last_use = -2;     /* given back */                             \
+    } while (0)
     for (int i = 0; i < B->n_nodes; i++) {
         T2Node *N = &B->nodes[i];
         int ins[3] = { N->a, N->b, N->c };
+        if (N->op == T2N_BRANCH && N->a >= 0 && B->nodes[N->a].fused) {
+            ins[0] = B->nodes[N->a].a;
+            ins[1] = B->nodes[N->a].b;
+        }
         for (int k = 0; k < 3; k++) {
             int m = ins[k];
-            if (m >= 0 && B->nodes[m].last_use == i && B->nodes[m].spill >= 0) {
-                free_list[n_free++] = B->nodes[m].spill;
-                B->nodes[m].last_use = -2;  /* given back */
-            }
+            if (m >= 0 && B->nodes[m].last_use == i)
+                T2_GIVE_BACK(&B->nodes[m]);
         }
-        if (t2_has_result(N->op) && N->last_use >= 0)
-            N->spill = n_free ? free_list[--n_free] : top++;
+        if (t2_has_result(N->op) && N->last_use >= 0 && !N->fused) {
+            if (n_free_regs) N->reg = (int8_t)free_regs[--n_free_regs];
+            else N->spill = n_free ? free_list[--n_free] : top++;
+        }
         /* values only an exit read die here too */
         if (N->exit >= 0) {
             T2Exit *x = &B->exits[N->exit];
             for (int k = 0; k < x->n; k++) {
                 T2Node *M = &B->nodes[B->entries[x->first + k].node];
-                if (M->last_use == i && M->spill >= 0) {
-                    free_list[n_free++] = M->spill;
-                    M->last_use = -2;
-                }
+                if (M->last_use == i)
+                    T2_GIVE_BACK(M);
             }
         }
     }
+#undef T2_GIVE_BACK
     free(free_list);
     *n_spills = (uint32_t)top;
     return 1;
@@ -1486,6 +1553,30 @@ static int t2_exit_label(T2Gen *G, int x)
     T2Exit *E = &G->B->exits[x];
     if (E->label < 0) E->label = x_new_label(&G->a);
     return E->label;
+}
+
+/* Compare a comparison's operands and return the condition under which
+ * it is true (a fused branch jumps on it). */
+static int t2_emit_cmp_flags(T2Gen *G, T2Node *N)
+{
+    XAsm *a = &G->a;
+    static const uint8_t ccs[] = { X_CC_L, X_CC_LE, X_CC_G, X_CC_GE, X_CC_E, X_CC_NE };
+    if (N->op == T2N_I32_CMP) {
+        t2_get(G, X_RAX, N->a);
+        t2_get(G, X_RCX, N->b);
+        x_alu_rr32(a, X_CMP, X_RAX, X_RCX);
+        return ccs[N->cc];
+    }
+    t2_get(G, X_RAX, N->a);
+    x_movq_xr(a, 0, X_RAX);
+    t2_get(G, X_RAX, N->b);
+    x_movq_xr(a, 1, X_RAX);
+    switch (N->cc) {
+    case T2C_LT: x_ucomisd(a, 1, 0); return X_CC_A;    /* b > a */
+    case T2C_LE: x_ucomisd(a, 1, 0); return X_CC_AE;
+    case T2C_GT: x_ucomisd(a, 0, 1); return X_CC_A;
+    default:     x_ucomisd(a, 0, 1); return X_CC_AE;   /* T2C_GE */
+    }
 }
 
 /* Set al from the flags of a comparison (int: signed cc; f64: after
@@ -1749,9 +1840,9 @@ static void t2_emit_node(T2Gen *G, int i)
     case T2N_CONST:
         break;
     case T2N_LOAD:
-        if (N->spill < 0) break;
+        if (N->spill < 0 && N->reg < 0) break;   /* never used */
         if (N->home) {
-            x_load(a, X_RAX, X_RSP, t2_home_disp(G, N->slot));
+            t2_home_load(G, X_RAX, N->slot);
         } else {
             t2_slot_addr(B, N->slot, &base, &disp);
             x_load(a, X_RAX, base, disp);
@@ -1772,7 +1863,7 @@ static void t2_emit_node(T2Gen *G, int i)
             } else {
                 t2_get_boxed(G, N->a);  /* to == T2R_TAGGED */
             }
-            x_store(a, X_RSP, t2_home_disp(G, N->slot), X_RAX);
+            t2_home_store(G, N->slot, X_RAX);
             break;
         }
         t2_get_boxed(G, N->a);
@@ -1798,6 +1889,11 @@ static void t2_emit_node(T2Gen *G, int i)
         t2_put(G, i, X_RAX);
         break;
     case T2N_BRANCH:
+        if (B->nodes[N->a].fused) {
+            x_jcc(a, t2_emit_cmp_flags(G, &B->nodes[N->a]), G->block_label[N->t]);
+            x_jmp(a, G->block_label[N->e]);
+            break;
+        }
         t2_get(G, X_RAX, N->a);
         x_test32(a, X_RAX, X_RAX);
         x_jcc(a, X_CC_NE, G->block_label[N->t]);
@@ -1911,6 +2007,7 @@ static void t2_emit_node(T2Gen *G, int i)
         t2_put(G, i, X_RAX);
         break;
     case T2N_I32_CMP:
+        if (N->fused) break;    /* its branch compares */
         t2_emit_cmp(G, N, 0);
         t2_put(G, i, X_RAX);
         break;
@@ -1934,6 +2031,7 @@ static void t2_emit_node(T2Gen *G, int i)
         t2_put(G, i, X_RAX);
         break;
     case T2N_F64_CMP:
+        if (N->fused) break;
         t2_emit_cmp(G, N, 1);
         t2_put(G, i, X_RAX);
         break;
@@ -2140,6 +2238,7 @@ static void t2_free_builder(T2Builder *B, T2Gen *G)
     free(B->is_homed);
     free(B->homed);
     free(G->flush_label);
+    free(G->home_reg);
     free(B->slots);
     free(B->shape.depth);
     free(B->shape.block_start);
@@ -2203,7 +2302,35 @@ T2Code *t2_compile(const T2Source *src)
         for (int k = 0; k < x->n; k++)
             if (B.entries[x->first + k].node >= i) { B.why = "an exit reads a later value (a T2 bug)"; goto fail; }
     }
-    if (!t2_assign_spills(&B, &n_spills)) goto fail;
+    /* Registers: the two most used carried slots get rsi and rdi as homes;
+     * the rest of rsi, rdi, rbp hold values (QJS_T2_NO_REGS=1: none). */
+    G.home_reg = malloc(B.n_slots);
+    if (!G.home_reg) goto fail;
+    memset(G.home_reg, -1, B.n_slots);
+    int pool[3], n_pool = 0;
+    if (!getenv("QJS_T2_NO_REGS")) {
+        static const int regs[3] = { X_RSI, X_RDI, X_RBP };
+        int n_home_regs = 0;
+        if (B.carried) {
+            int *uses = calloc(B.n_slots, sizeof(int));
+            if (!uses) goto fail;
+            for (int i = 0; i < B.n_nodes; i++)
+                if ((B.nodes[i].op == T2N_LOAD || B.nodes[i].op == T2N_STORE) && B.nodes[i].home)
+                    uses[B.nodes[i].slot]++;
+            for (; n_home_regs < 2; n_home_regs++) {
+                int best = -1;
+                for (int k = 0; k < B.n_slots; k++)
+                    if (B.carried[k] && G.home_reg[k] < 0 && uses[k] > 0 && (best < 0 || uses[k] > uses[best]))
+                        best = k;
+                if (best < 0) break;
+                G.home_reg[best] = (int8_t)regs[n_home_regs];
+            }
+            free(uses);
+        }
+        for (int k = n_home_regs; k < 3; k++) pool[n_pool++] = regs[k];
+    }
+    t2_fuse_branches(&B);
+    if (!t2_assign_spills(&B, &n_spills, pool, n_pool)) goto fail;
 
     /* Frame: 32 bytes of shadow space, the spills and the homes, sized so
      * calls see a 16-byte aligned rsp: the return address and 8 pushes
