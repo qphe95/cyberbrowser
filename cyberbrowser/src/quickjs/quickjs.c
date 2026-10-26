@@ -7384,6 +7384,8 @@ void mark_children(JSRuntimeHandle rt, GCHandle handle,
             }
             if (SAFE_GET_OR(b, JSFunctionBytecodeHandle, realm_handle, GC_HANDLE_NULL))
                 mark_func(rt, SAFE_GET_OR(b, JSFunctionBytecodeHandle, realm_handle, GC_HANDLE_NULL));
+            if (SAFE_GET_OR(b, JSFunctionBytecodeHandle, feedback_handle, GC_HANDLE_NULL))
+                mark_func(rt, SAFE_GET_OR(b, JSFunctionBytecodeHandle, feedback_handle, GC_HANDLE_NULL));
             /* Mark the pc2line buffer handle if present */
             if (SAFE_GET_OR(b, JSFunctionBytecodeHandle, has_debug, 0) && SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.pc2line_handle, GC_HANDLE_NULL))
                 mark_func(rt, SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.pc2line_handle, GC_HANDLE_NULL));
@@ -7995,8 +7997,11 @@ static void gc_weak_registries_drop_dead(void)
     gc_weak_registry_drop_dead(&g_gc.finrec_handles, 2);
 }
 
+static void js_feedback_clear_dead(void);
+
 void JS_GCWeakStep(JSRuntimeHandle rt)
 {
+    js_feedback_clear_dead();
     gc_weak_prune_buffer_views();
     gc_weak_registries_drop_dead();
     gc_remove_weak_objects(rt);
@@ -8098,6 +8103,7 @@ void JS_GCWeakApply(JSRuntimeHandle rt, void *cleaned_shapes,
     }
     for (uint32_t i = 0; i < counts[2]; i++)
         if (SAFE_VALID(lists[2][i]) && !gc_object_is_dead(lists[2][i])) finrec_delete_weakref(rt, lists[2][i]);
+    js_feedback_clear_dead();
     gc_weak_prune_buffer_views();
     gc_weak_registries_drop_dead();
 }
@@ -20687,6 +20693,74 @@ static int g_jit_mode = -1;
 static int32_t g_jit_threshold = JS_JIT_THRESHOLD_DEFAULT;   /* QJS_JIT_THRESHOLD overrides */
 #define JS_JIT_THRESHOLD g_jit_threshold
 #define JS_JIT_ENTRY_WEIGHT 100
+
+/* Feedback vectors (JS_PERF_DESIGN.md section 5.4).  A function gets one
+ * once its hotness (jit_budget, counted in every mode) passes
+ * JS_FEEDBACK_THRESHOLD: one inline cache per property site, numbered in
+ * bytecode order, and a map from each instruction's offset to its site.
+ * The interpreter reads and fills the caches; the optimizer will read them
+ * to decide what to specialize.  It lives on the GC heap (bytecode is never
+ * freed explicitly), in old space, as data the collector does not trace:
+ * the shapes and holders its caches name are kept alive by the inline
+ * caches' retention set, as T1's are.  Objects do not move, so the
+ * interpreter holds a plain pointer to it for the length of a call. */
+typedef struct JSFeedback {
+    GCHandle byte_code_handle;  /* the bytecode it numbers */
+    uint32_t byte_code_len;
+    uint32_t n_sites;
+    /* JitIC sites[n_sites], then uint16_t site_of[byte_code_len] */
+} JSFeedback;
+#define JS_FEEDBACK_NO_SITE 0xffff
+#define JIT_IC_GETTER 0x80000000u   /* a getter way's slot (js_feedback_get_field) */
+#define JS_FEEDBACK_THRESHOLD_DEFAULT 800   /* about 8 calls */
+static int32_t g_feedback_threshold = -1;   /* <= 0: off (QJS_FEEDBACK=0) */
+#define JS_HOTNESS_MAX (1 << 30)
+
+static inline JitIC *js_feedback_sites(JSFeedback *fb)
+{
+    return (JitIC *)(fb + 1);
+}
+
+static inline const uint16_t *js_feedback_site_of(JSFeedback *fb)
+{
+    return (const uint16_t *)(js_feedback_sites(fb) + fb->n_sites);
+}
+
+/* The inline cache of the site at bytecode offset off, or NULL. */
+static inline JitIC *js_feedback_site(JSFeedback *fb, uint32_t off)
+{
+    uint32_t s = js_feedback_site_of(fb)[off];
+    return s == JS_FEEDBACK_NO_SITE ? NULL : &js_feedback_sites(fb)[s];
+}
+
+static int32_t js_feedback_threshold(void)
+{
+    if (unlikely(g_feedback_threshold < 0)) {
+        const char *e = getenv("QJS_FEEDBACK");
+        const char *t = getenv("QJS_FEEDBACK_THRESHOLD");
+        g_feedback_threshold = e && strcmp(e, "0") == 0 ? 0 :
+            t && atoi(t) > 0 ? atoi(t) : JS_FEEDBACK_THRESHOLD_DEFAULT;
+    }
+    return g_feedback_threshold;
+}
+
+static JSFeedback *js_feedback_make(JSFunctionBytecodeHandle b);
+static int js_feedback_register(GCHandle h);
+const GCValue *js_feedback_get_field(JitIC *ic, const GCValue *objv, JSAtom atom, GCHandle *getter);
+int js_feedback_put_field(JSContextHandle ctx, JitIC *ic, GCValue obj, JSAtom atom, GCValue val);
+static JSProperty *js_feedback_private_field(JitIC *ic, JSObjectHandle p, JSAtom atom);
+
+/* The function's feedback vector, or NULL (none yet, or one made for other
+ * bytecode). */
+static inline JSFeedback *js_feedback_of(JSFunctionBytecode *bp)
+{
+    JSFeedback *fb;
+    if (bp->feedback_handle == GC_HANDLE_NULL)
+        return NULL;
+    fb = (JSFeedback *)gc_deref(bp->feedback_handle);
+    return fb && fb->byte_code_len == (uint32_t)bp->byte_code_len ? fb : NULL;
+}
+
 static void js_jit_exit_stats(void)
 {
     jit_print_stats();
@@ -20762,9 +20836,17 @@ static const struct JitCode *js_jit_get(JSContextHandle ctx, JSFunctionBytecodeH
  * code has no use for it. */
 #define JS_JIT_BACKEDGE(len)                                                  \
     do {                                                                      \
-        if (unlikely(g_jit_mode == JS_JIT_ON)) {                              \
+        if (unlikely(!fb) || unlikely(g_jit_mode == JS_JIT_ON)) {             \
             JSFunctionBytecode *jbp_ = (JSFunctionBytecode *)gc_deref(b);     \
-            if (!jbp_->jit_code && (jbp_->jit_budget += (len)) >= JS_JIT_THRESHOLD) \
+            if (jbp_->jit_budget < JS_HOTNESS_MAX)                            \
+                jbp_->jit_budget += (len);                                    \
+            if (!fb && !jbp_->no_feedback && js_feedback_threshold() > 0 &&   \
+                jbp_->jit_budget >= g_feedback_threshold) {                   \
+                fb = js_feedback_make(b);                                     \
+                fb_bc = js_bc_byte_code_buf(b);                               \
+            }                                                                 \
+            if (g_jit_mode == JS_JIT_ON && !jbp_->jit_code &&                 \
+                jbp_->jit_budget >= JS_JIT_THRESHOLD)                         \
                 goto restart;                                                 \
         }                                                                     \
     } while (0)
@@ -20959,6 +21041,8 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
     JSClassCall *call_func;
     JSRuntimeHandle rt2 = GC_HANDLE_NULL;
     int pool_depth = -1;  /* call depth when sf came from g_bc_frame_pool */
+    JSFeedback *fb = NULL;      /* b's feedback vector, while interpreting */
+    const uint8_t *fb_bc = NULL;    /* b's bytecode, the base of fb's offsets */
 
 #define GC_INSTRUCTION_THRESHOLD 100
 
@@ -21194,9 +21278,11 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
     JS_POLL_POINT();
     OPSTATS_ENTER();
     DET_CLOCK_CALL();
-    if (unlikely(js_jit_mode() == JS_JIT_ON)) {
+    {
+        /* Hotness, for the feedback vector and T1. */
         JSFunctionBytecode *jbp = (JSFunctionBytecode *)gc_deref(b);
-        if (jbp->jit_budget < JS_JIT_THRESHOLD)
+        if (jbp->feedback_handle == GC_HANDLE_NULL ? jbp->jit_budget < JS_HOTNESS_MAX :
+            js_jit_mode() == JS_JIT_ON && jbp->jit_budget < JS_JIT_THRESHOLD)
             jbp->jit_budget += JS_JIT_ENTRY_WEIGHT;
     }
 
@@ -21237,6 +21323,15 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
         CC_INC(call_bytecode_interpreted);
     }
  interpret:
+    {
+        JSFunctionBytecode *fbp = (JSFunctionBytecode *)gc_deref(b);
+        fb = js_feedback_of(fbp);
+        if (!fb && !fbp->no_feedback && fbp->jit_budget >= js_feedback_threshold() &&
+            g_feedback_threshold > 0)
+            fb = js_feedback_make(b);
+        if (fb)
+            fb_bc = js_bc_byte_code_buf(b);
+    }
     for(;;) {
         int call_argc;
         GCValue *call_argv;
@@ -22597,6 +22692,8 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                 JSObjectHandle p = GC_HANDLE_NULL;                           \
                 JSProperty *pr;                                         \
                 JSShapeProperty *prs;                                   \
+                JitIC *ic;                                              \
+                const uint8_t *op_pc = pc - 1;                          \
                                                                         \
                 if (is_length) {                                        \
                     atom = JS_ATOM_length;                              \
@@ -22609,6 +22706,30 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
                 obj = sp[-1];                                           \
                 if (likely(JS_VALUE_GET_TAG(obj) == JS_TAG_OBJECT)) {   \
                     p = JS_VALUE_GET_OBJ(obj);                          \
+                    if (fb && (ic = js_feedback_site(fb, (uint32_t)(op_pc - fb_bc))) && \
+                        likely(!ic->mega)) {                            \
+                        /* the site's inline cache: way 0 inline, the   \
+                           rest (and filling) in js_feedback_get_field */ \
+                        JSObject *o_ = GC_DEREF_H(p, JSObjectHandle);   \
+                        const GCValue *v_;                              \
+                        GCHandle getter_;                               \
+                        if (likely(ic->n && ic->holder[0] == GC_HANDLE_NULL && \
+                                   ic->shape[0] == o_->shape_handle &&  \
+                                   !(ic->slot[0] & JIT_IC_GETTER))) {   \
+                            CC_INC(ic_hit);                             \
+                            val = js_obj_props_of(o_)[ic->slot[0]].u.value; \
+                        } else if ((v_ = js_feedback_get_field(ic, &obj, atom, &getter_))) { \
+                            val = *v_;                                  \
+                        } else if (getter_ != GC_HANDLE_NULL) {         \
+                            JS_SF_SET_PC(sf, pc);                       \
+                            val = JS_CallFree(ctx, GC_MKHANDLE(JS_TAG_OBJECT, getter_), \
+                                              obj, 0, NULL);            \
+                            if (unlikely(JS_IsException(val)))          \
+                                goto exception;                         \
+                        } else {                                        \
+                            goto name ## _slow_path;                    \
+                        }                                               \
+                    } else                                              \
                     for(;;) {                                           \
                         prs = find_own_property(&pr, p, atom);          \
                         if (prs) {                                      \
@@ -22681,6 +22802,19 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
 
                 obj = sp[-2];
                 if (likely(JS_VALUE_GET_TAG(obj) == JS_TAG_OBJECT)) {
+                    JitIC *ic;
+                    if (fb && (ic = js_feedback_site(fb, (uint32_t)(pc - 5 - fb_bc)))) {
+                        JS_SF_SET_PC(sf, pc);
+                        ret = js_feedback_put_field(ctx, ic, obj, atom, sp[-1]);
+                        if (unlikely(ret <= 0)) {
+                            if (ret == 0)
+                                goto put_field_slow_path;
+                            sp -= 2;
+                            goto exception;
+                        }
+                        sp -= 2;
+                        BREAK;
+                    }
                     p = JS_VALUE_GET_OBJ(obj);
                     prs = find_own_property(&pr, p, atom);
                     if (!prs)
@@ -22727,7 +22861,18 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
         CASE(OP_get_private_field):
             {
                 GCValue val = GC_UNDEFINED;
+                JitIC *ic;
+                JSProperty *pr;
 
+                if (fb && JS_VALUE_GET_TAG(sp[-2]) == JS_TAG_OBJECT &&
+                    JS_VALUE_GET_TAG(sp[-1]) == JS_TAG_SYMBOL &&
+                    (ic = js_feedback_site(fb, (uint32_t)(pc - 1 - fb_bc))) &&
+                    (pr = js_feedback_private_field(ic, JS_VALUE_GET_OBJ(sp[-2]),
+                                                    js_symbol_to_atom(ctx, sp[-1])))) {
+                    sp[-2] = pr->u.value;
+                    sp--;
+                    BREAK;
+                }
                 val = JS_GetPrivateField(ctx, sp[-2], sp[-1]);
                 
                 
@@ -22741,6 +22886,19 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
         CASE(OP_put_private_field):
             {
                 int ret;
+                JitIC *ic;
+                JSProperty *pr;
+
+                if (fb && JS_VALUE_GET_TAG(sp[-3]) == JS_TAG_OBJECT &&
+                    JS_VALUE_GET_TAG(sp[-1]) == JS_TAG_SYMBOL &&
+                    (ic = js_feedback_site(fb, (uint32_t)(pc - 1 - fb_bc))) &&
+                    (pr = js_feedback_private_field(ic, JS_VALUE_GET_OBJ(sp[-3]),
+                                                    js_symbol_to_atom(ctx, sp[-1])))) {
+                    set_value(ctx, &pr->u.value, sp[-2]);
+                    gc_write_barrier(GC_VALUE_GET_HANDLE(sp[-3]), GC_VALUE_GET_HANDLE(sp[-2]));
+                    sp -= 3;
+                    BREAK;
+                }
                 ret = JS_SetPrivateField(ctx, sp[-3], sp[-1], sp[-2]);
                 
                 
@@ -24314,6 +24472,333 @@ const GCValue *jit_get_field_ic(JitIC *ic, const GCValue *objv, JSAtom atom)
     if (i == ic->n)
         ic->n++;
     return v;
+}
+
+/* get_field / get_field2 on the object *objv through the interpreter's
+ * feedback site ic (JSFeedback): as jit_get_field_ic, but its ways hold
+ * their shapes and holders weakly.  Nothing keeps them alive: the weak step
+ * of every collection clears the ways naming objects it condemned
+ * (js_feedback_clear_dead), before the sweep can free their handles for
+ * reuse.  A site past JIT_IC_WAYS shapes is left megamorphic and looks the
+ * property up every time, without a cache.  The value's address; or NULL
+ * with *getter set when the property is an accessor whose getter the
+ * caller calls with obj as this; or NULL with *getter GC_HANDLE_NULL for
+ * the slow path (another accessor, an exotic object).  A getter way's slot
+ * has JIT_IC_GETTER set: the getter is read from the property each time,
+ * so redefining it needs no invalidation. */
+
+const GCValue *js_feedback_get_field(JitIC *ic, const GCValue *objv, JSAtom atom, GCHandle *getter)
+{
+    JSObjectHandle p0 = (JSObjectHandle)GC_VALUE_GET_HANDLE(*objv), p;
+    JSObject *o = GC_DEREF_H(p0, JSObjectHandle);
+    const GCValue *v;
+    GCHandle sh, holder;
+    JSProperty *pr;
+    JSShapeProperty *prs;
+    uint32_t slot;
+    int i = 0;
+
+    *getter = GC_HANDLE_NULL;
+    if (!o)
+        return NULL;
+    sh = o->shape_handle;
+    if (likely(!ic->mega)) {
+        CC_INC(ic_lookup);
+        for (; i < ic->n && ic->shape[i] != sh; i++)
+            ;
+        if (i < ic->n) {
+            if (likely(!(ic->slot[i] & JIT_IC_GETTER)) || ic->slot[i] == JIT_IC_ABSENT) {
+                if ((v = jit_ic_way_value(o, atom, ic->holder[i], ic->slot[i], ic->epoch))) {
+                    CC_INC(ic_hit);
+                    return v;
+                }
+            } else if (ic->holder[i] == GC_HANDLE_NULL ||
+                       (ic->epoch == jit_proto_epoch(atom) && !o->is_exotic)) {
+                JSObject *h = ic->holder[i] == GC_HANDLE_NULL ? o :
+                    GC_DEREF_H((JSObjectHandle)ic->holder[i], JSObjectHandle);
+                *getter = js_obj_props_of(h)[ic->slot[i] & ~JIT_IC_GETTER].u.getset.getter_handle;
+                if (*getter != GC_HANDLE_NULL) {
+                    CC_INC(ic_hit);
+                    return NULL;
+                }
+            }
+        }
+    }
+
+    /* A miss (or a megamorphic site): the interpreter's walk. */
+    for (p = p0;;) {
+        prs = find_own_property(&pr, p, atom);
+        if (prs) {
+            if (unlikely(prs->flags & JS_PROP_TMASK)) {
+                if ((prs->flags & JS_PROP_TMASK) != JS_PROP_GETSET ||
+                    pr->u.getset.getter_handle == GC_HANDLE_NULL) {
+                    CC_INC(ic_uncacheable);
+                    return NULL;
+                }
+                *getter = pr->u.getset.getter_handle;
+                v = NULL;
+            } else {
+                v = &pr->u.value;
+            }
+            holder = p == p0 ? GC_HANDLE_NULL : SAFE_HANDLE(p);
+            slot = (uint32_t)(pr - js_obj_props_of(GC_DEREF_H(p, JSObjectHandle)));
+            if (!v)
+                slot |= JIT_IC_GETTER;
+            break;
+        }
+        if (unlikely(SAFE_GET_OR(p, JSObjectHandle, is_exotic, false))) {
+            CC_INC(ic_uncacheable);
+            return NULL;
+        }
+        GCHandle proto_handle = js_object_get_proto_handle_atomic(p);
+        if (proto_handle == GC_HANDLE_NULL || !SAFE_VALID((JSObjectHandle)proto_handle)) {
+            holder = sh;        /* not the receiver's own; never dereferenced */
+            slot = JIT_IC_ABSENT;
+            v = &jit_undefined_value;
+            break;
+        }
+        p = (JSObjectHandle)proto_handle;
+    }
+    if (ic->mega)
+        return v;
+
+    /* Fill a way.  A private receiver shape only for its own properties
+     * (see JSShape.ic_cached). */
+    if (!SAFE_GET_OR((JSShapeHandle)sh, JSShapeHandle, is_hashed, 0)) {
+        if (holder != GC_HANDLE_NULL)
+            return v;
+        SAFE_SET((JSShapeHandle)sh, JSShapeHandle, ic_cached, 1);
+    }
+    if (holder != GC_HANDLE_NULL && ic->epoch != jit_proto_epoch(atom)) {
+        /* The prototype ways are stale: drop them, keep the own ones. */
+        int n = 0;
+        for (int k = 0; k < ic->n; k++) {
+            if (ic->holder[k] != GC_HANDLE_NULL)
+                continue;
+            ic->shape[n] = ic->shape[k];
+            ic->holder[n] = GC_HANDLE_NULL;
+            ic->slot[n] = ic->slot[k];
+            n++;
+        }
+        ic->n = (uint8_t)n;
+        ic->epoch = jit_proto_epoch(atom);
+        for (i = 0; i < n && ic->shape[i] != sh; i++)
+            ;
+    }
+    if (i >= JIT_IC_WAYS) {
+        ic->mega = 1;
+        ic->n = 0;
+        return v;
+    }
+    CC_INC(ic_fill);
+    ic->shape[i] = sh;
+    ic->holder[i] = holder;
+    ic->slot[i] = slot;
+    if (i == ic->n)
+        ic->n++;
+    return v;
+}
+
+/* put_field / private-field sites: a way whose slot is JIT_IC_ADD says the
+ * receiver lacks the property and may get it by adding (its holder is the
+ * receiver's shape, never dereferenced). */
+#define JIT_IC_ADD (JIT_IC_ABSENT - 1)
+
+/* Fill way i of ic (i == ic->n: a new one) unless the site has too many. */
+static inline void js_feedback_fill(JitIC *ic, int i, GCHandle sh, GCHandle holder, uint32_t slot)
+{
+    if (i >= JIT_IC_WAYS) {
+        ic->mega = 1;
+        ic->n = 0;
+        return;
+    }
+    CC_INC(ic_fill);
+    ic->shape[i] = sh;
+    ic->holder[i] = holder;
+    ic->slot[i] = slot;
+    if (i == ic->n)
+        ic->n++;
+}
+
+/* put_field of val to the object obj through feedback site ic (the caller
+ * has set the frame's pc): a writable data property of obj itself, or a
+ * new one when JS_SetPropertyInternal would add it with nothing else to do
+ * (jit_put_field_fast's conditions; an add way holds while
+ * jit_proto_epoch(atom) does).  1 when done, 0 (nothing changed) for the
+ * slow path, -1 when it threw. */
+int js_feedback_put_field(JSContextHandle ctx, JitIC *ic, GCValue obj, JSAtom atom, GCValue val)
+{
+    JSObjectHandle p = JS_VALUE_GET_OBJ(obj), p1;
+    JSObject *o = GC_DEREF_H(p, JSObjectHandle);
+    JSProperty *pr;
+    JSShapeProperty *prs;
+    GCHandle sh;
+    int i = 0;
+
+    if (!o)
+        return 0;
+    sh = o->shape_handle;
+    if (likely(!ic->mega)) {
+        for (; i < ic->n && ic->shape[i] != sh; i++)
+            ;
+        if (i < ic->n) {
+            if (ic->slot[i] != JIT_IC_ADD) {
+                JS_NOTE_WATCHED_WRITE(p);
+                set_value(ctx, &js_obj_props_of(o)[ic->slot[i]].u.value, val);
+                gc_write_barrier(GC_VALUE_GET_HANDLE(obj), GC_VALUE_GET_HANDLE(val));
+                CC_INC(ic_hit);
+                return 1;
+            }
+            if (ic->epoch == jit_proto_epoch(atom) && o->extensible) {
+                CC_INC(ic_hit);
+                goto add;
+            }
+        }
+    }
+    prs = find_own_property(&pr, p, atom);
+    if (prs) {
+        if ((prs->flags & (JS_PROP_TMASK | JS_PROP_WRITABLE | JS_PROP_LENGTH)) != JS_PROP_WRITABLE)
+            return 0;
+        JS_NOTE_WATCHED_WRITE(p);
+        set_value(ctx, &pr->u.value, val);
+        gc_write_barrier(GC_VALUE_GET_HANDLE(obj), GC_VALUE_GET_HANDLE(val));
+        if (!ic->mega) {
+            if (!SAFE_GET_OR((JSShapeHandle)sh, JSShapeHandle, is_hashed, 0))
+                SAFE_SET((JSShapeHandle)sh, JSShapeHandle, ic_cached, 1);
+            js_feedback_fill(ic, i, sh, GC_HANDLE_NULL, (uint32_t)(pr - js_obj_props_of(o)));
+        }
+        return 1;
+    }
+    if (o->is_exotic || !o->extensible || o->class_id == JS_CLASS_GLOBAL_OBJECT)
+        return 0;
+    for (p1 = (JSObjectHandle)js_object_get_proto_handle_atomic(p); p1 != GC_HANDLE_NULL;
+         p1 = (JSObjectHandle)js_object_get_proto_handle_atomic(p1)) {
+        if (!SAFE_VALID(p1) || SAFE_GET_OR(p1, JSObjectHandle, is_exotic, true))
+            return 0;
+        prs = find_own_property(&pr, p1, atom);
+        if (prs) {
+            if ((prs->flags & JS_PROP_TMASK) != JS_PROP_NORMAL || !(prs->flags & JS_PROP_WRITABLE))
+                return 0;
+            break;
+        }
+    }
+    /* An add way only for a hashed shape: a private one changes in place. */
+    if (!ic->mega && SAFE_GET_OR((JSShapeHandle)sh, JSShapeHandle, is_hashed, 0)) {
+        if (ic->epoch != jit_proto_epoch(atom)) {
+            /* The add ways are stale: drop them, keep the own ones. */
+            int n = 0;
+            for (int k = 0; k < ic->n; k++) {
+                if (ic->slot[k] == JIT_IC_ADD)
+                    continue;
+                ic->shape[n] = ic->shape[k];
+                ic->holder[n] = GC_HANDLE_NULL;
+                ic->slot[n] = ic->slot[k];
+                n++;
+            }
+            ic->n = (uint8_t)n;
+            ic->epoch = jit_proto_epoch(atom);
+            for (i = 0; i < n && ic->shape[i] != sh; i++)
+                ;
+        }
+        js_feedback_fill(ic, i, sh, sh, JIT_IC_ADD);
+    }
+ add:
+    pr = add_property(ctx, p, atom, JS_PROP_C_W_E);
+    if (unlikely(!pr))
+        return -1;
+    gc_set_heap_value(&pr->u.value, val);
+    gc_write_barrier(GC_VALUE_GET_HANDLE(obj), GC_VALUE_GET_HANDLE(val));
+    return 1;
+}
+
+/* The private field atom of obj through feedback site ic, whose epoch holds
+ * the site's private name (it has no prototype ways): the property, or
+ * NULL when obj lacks it (the caller then throws through the slow path). */
+static JSProperty *js_feedback_private_field(JitIC *ic, JSObjectHandle p, JSAtom atom)
+{
+    JSObject *o = GC_DEREF_H(p, JSObjectHandle);
+    JSProperty *pr;
+    GCHandle sh = o->shape_handle;
+    int i = 0;
+
+    if (likely(!ic->mega && ic->epoch == atom)) {
+        for (; i < ic->n && ic->shape[i] != sh; i++)
+            ;
+        if (i < ic->n) {
+            CC_INC(ic_hit);
+            return &js_obj_props_of(o)[ic->slot[i]];
+        }
+    }
+    if (!find_own_property(&pr, p, atom))
+        return NULL;
+    if (!ic->mega) {
+        if (ic->epoch != atom) {    /* another private name: start over */
+            ic->n = 0;
+            ic->epoch = atom;
+            i = 0;
+        }
+        if (!SAFE_GET_OR((JSShapeHandle)sh, JSShapeHandle, is_hashed, 0))
+            SAFE_SET((JSShapeHandle)sh, JSShapeHandle, ic_cached, 1);
+        js_feedback_fill(ic, i, sh, GC_HANDLE_NULL, (uint32_t)(pr - js_obj_props_of(o)));
+    }
+    return pr;
+}
+
+/* Every feedback vector made, for js_feedback_clear_dead (plain memory). */
+static GCHandle *g_feedback_all;
+static uint32_t g_feedback_all_n, g_feedback_all_cap, g_feedback_all_epoch;
+
+/* 0 when out of memory: a vector the weak step cannot clear must not be
+ * used. */
+static int js_feedback_register(GCHandle h)
+{
+    if (g_feedback_all_epoch != g_gc_epoch) {   /* a heap torn down and made again */
+        g_feedback_all_n = 0;
+        g_feedback_all_epoch = g_gc_epoch;
+    }
+    if (g_feedback_all_n == g_feedback_all_cap) {
+        uint32_t cap = g_feedback_all_cap ? 2 * g_feedback_all_cap : 1024;
+        GCHandle *a = js_plain_realloc(g_feedback_all, cap * sizeof(GCHandle));
+        if (!a)
+            return 0;
+        g_feedback_all = a;
+        g_feedback_all_cap = cap;
+    }
+    g_feedback_all[g_feedback_all_n++] = h;
+    return 1;
+}
+
+/* Weak step (JS thread, gc_object_is_dead() answering for the cycle): drop
+ * the vectors that died, and clear the ways of the others that name a
+ * condemned shape or holder. */
+static void js_feedback_clear_dead(void)
+{
+    uint32_t i, j = 0;
+    if (g_feedback_all_epoch != g_gc_epoch)
+        return;
+    for (i = 0; i < g_feedback_all_n; i++) {
+        GCHandle h = g_feedback_all[i];
+        JSFeedback *fb;
+        if (!gc_handle_live(h) || gc_object_is_dead(h))
+            continue;
+        fb = (JSFeedback *)gc_deref(h);
+        for (uint32_t s = 0; s < fb->n_sites; s++) {
+            JitIC *ic = &js_feedback_sites(fb)[s];
+            int n = 0;
+            for (int k = 0; k < ic->n; k++) {
+                if (gc_object_is_dead(ic->shape[k]) ||
+                    (ic->holder[k] != GC_HANDLE_NULL && gc_object_is_dead(ic->holder[k])))
+                    continue;
+                ic->shape[n] = ic->shape[k];
+                ic->holder[n] = ic->holder[k];
+                ic->slot[n] = ic->slot[k];
+                n++;
+            }
+            ic->n = (uint8_t)n;
+        }
+        g_feedback_all[j++] = h;
+    }
+    g_feedback_all_n = j;
 }
 
 /* get_field / get_field2 of a property of a primitive string *v (not
@@ -27157,6 +27642,81 @@ static const JSOpCode opcode_info[OP_COUNT + (OP_TEMP_END - OP_TEMP_START)] = {
 #define short_opcode_info(op) \
     opcode_info[(op) >= OP_TEMP_START ? (op) - 1 : (op)]
 #endif
+
+/* Whether instruction op has a feedback site. */
+static inline BOOL js_feedback_op_has_site(int op)
+{
+    switch (op) {
+    case OP_get_field:
+    case OP_get_field2:
+#if SHORT_OPCODES
+    case OP_get_length:
+#endif
+    case OP_put_field:
+    case OP_get_private_field:
+    case OP_put_private_field:
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+
+/* Make b's feedback vector (or return the one it has); NULL, and
+ * no_feedback set, when it cannot have one. */
+static JSFeedback *js_feedback_make(JSFunctionBytecodeHandle b)
+{
+    JSFunctionBytecode *bp = (JSFunctionBytecode *)gc_deref(b);
+    JSFeedback *fb = js_feedback_of(bp);
+    const uint8_t *bc;
+    uint32_t len, off, n = 0;
+    uint16_t *site_of;
+    GCHandle h;
+
+    if (fb || bp->no_feedback)
+        return fb;
+    len = (uint32_t)bp->byte_code_len;
+    bc = js_bc_byte_code_buf(b);
+    if (!bc || bp->func_parse_state != JS_FUNC_PARSED)
+        goto fail;
+    for (off = 0; off < len; ) {
+        int size = short_opcode_info(bc[off]).size;
+        if (size <= 0)
+            goto fail;
+        n += js_feedback_op_has_site(bc[off]);
+        off += size;
+    }
+    if (n == 0 || n >= JS_FEEDBACK_NO_SITE)
+        goto fail;
+    h = gc_alloc_old(sizeof(JSFeedback) + n * sizeof(JitIC) + len * sizeof(uint16_t),
+                     JS_GC_OBJ_TYPE_DATA);
+    if (h == GC_HANDLE_NULL)
+        goto fail;
+    fb = (JSFeedback *)gc_deref(h);
+    memset(fb, 0, sizeof(*fb));
+    fb->n_sites = n;
+    fb->byte_code_len = len;
+    memset(js_feedback_sites(fb), 0, n * sizeof(JitIC));
+    site_of = (uint16_t *)js_feedback_site_of(fb);
+    n = 0;
+    for (off = 0; off < len; ) {
+        int op = bc[off], size = short_opcode_info(op).size;
+        uint32_t k;
+        uint16_t s = js_feedback_op_has_site(op) ? (uint16_t)n++ : JS_FEEDBACK_NO_SITE;
+        for (k = 0; k < (uint32_t)size; k++)
+            site_of[off + k] = s;
+        off += size;
+    }
+    if (!js_feedback_register(h))
+        goto fail;
+    bp = (JSFunctionBytecode *)gc_deref(b);
+    fb->byte_code_handle = bp->byte_code_handle;    /* gc-no-dirty: not traced */
+    SAFE_SET_HANDLE(b, JSFunctionBytecodeHandle, feedback_handle, h);
+    return fb;
+ fail:
+    bp = (JSFunctionBytecode *)gc_deref(b);
+    bp->no_feedback = 1;
+    return NULL;
+}
 
 /* Whether bp's calls may put their frames on the JS stack (js_stack_frame_
  * enter): nothing may refer to the frame after or outside the call.  A

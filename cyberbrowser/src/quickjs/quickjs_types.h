@@ -1391,7 +1391,8 @@ struct JSFunctionBytecode {
     /* Where its calls' frames go (js_bc_stack_frame_ok): 0 not known yet,
      * 1 the JS stack, 2 the heap. */
     uint8_t frame_where : 2;
-    /* XXX: 8 bits available */
+    uint8_t no_feedback : 1;   /* its feedback vector could not be made */
+    /* XXX: 7 bits available */
     GCHandle byte_code_handle; /* Handle to bytecode buffer (GC-managed) */
     int byte_code_len;
     uint32_t byte_code_offset; /* offset from base of allocation to bytecode (for inline bytecode) */
@@ -1413,6 +1414,9 @@ struct JSFunctionBytecode {
      * starts zeroed, so a set jit_code is always its own. */
     int32_t jit_budget;
     struct JitCode *jit_code;
+    /* Its feedback vector (JSFeedback, quickjs.c), made once jit_budget
+     * passes the feedback threshold; GC_HANDLE_NULL before. */
+    GCHandle feedback_handle;
     struct {
         /* debug info, move to separate structure to save memory? */
         JSAtom filename;

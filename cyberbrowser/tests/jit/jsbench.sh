@@ -15,7 +15,8 @@
 # (0, 1, 1+QJS_JIT_THRESHOLD=20000); "<label>%" before it runs $EXE_<label>
 # instead.  TESTS="richards acorn-wtb" limits the tests (default: every
 # script in the directory); KEEP=<file> keeps the raw results; TIMEOUT
-# (seconds, default 1200) bounds a run.
+# (seconds, default 1200) bounds a run.  A failed run's output is kept as
+# <results>.fail.<test>.<setting>.<round>.log.
 exe=$1; dir=$2; runs=${3:-3}
 shift 3 2>/dev/null
 settings=${*:-"0 1"}
@@ -51,6 +52,8 @@ for i in $(seq "$runs"); do
                 times="[$(echo "$out" | grep '^\[E/console\] JSBENCH-ITER ' | sed 's/.*JSBENCH-ITER //' | paste -sd, -)]"
             if [ -z "$times" ]; then
                 echo "bench $t $s $i NA NA NA" >> "$results"
+                # keep the failed run's output (a crash's backtrace) next to the results
+                echo "$out" > "$results.fail.$t.${s//[^A-Za-z0-9_=.-]/_}.$i.log"
                 continue
             fi
             echo "$times" | node -e '

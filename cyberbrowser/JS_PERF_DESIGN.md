@@ -604,6 +604,32 @@ Each change is measured on both benchmarks: the replays (24 rounds, as in N1) an
 steady-state suite (4.3), interpreted. The feedback slots cost a little on cold code; the
 replays show whether lazy allocation keeps that below the gain.
 
+**As built so far (N4, not yet gated).** A function gets its vector (`JSFeedback`) once its
+hotness passes about 8 calls, counted in every mode. It holds one cache per `get_field`,
+`get_field2`, `get_length`, `put_field`, `get_private_field` and `put_private_field` site,
+and a map from each instruction's offset to its site; it lives in old space on the GC heap.
+The interpreter checks way 0 inline. Ways cover own and prototype properties, absent
+properties, getters (called directly), writes to existing properties, adds, and private
+fields. A site past four shapes uses no cache.
+
+- **Weak, not retained.** Reusing T1's retention set made Air 22% slower: the JS thread
+  marked every shape the caches had ever named, each cycle (mark start and remark rose from
+  47 to 248–294 ms). The interpreter's ways hold their shapes and holders weakly instead,
+  and the weak step of every collection clears the ways naming condemned objects before
+  the sweep can free their handles (`js_feedback_clear_dead`). T1 keeps its own caches.
+- **Megamorphic sites skip the cache.** acorn sends half its gets through sites with more
+  shapes than ways, where the shared megamorphic table cost more than the plain lookup.
+- **Call targets and arithmetic kinds move to N5.** Only T2 reads them; recorded now they
+  would cost the interpreter's tightest paths with nothing to gain. N5 records them in
+  functions that are candidates for T2.
+- **Tests:** `tests/jit/feedback.js` changes what each kind of way assumed (prototype
+  changes, getters, setters and read-only properties appearing after an add is cached,
+  frozen and non-extensible objects, private names, shapes dying under GC) and matches
+  node, feedback off and GC stress.
+- **First numbers** (8 tests, 3 rounds, before getters and puts were cached): richards
+  −6%, delta-blue −7% to −11%; acorn and chai +4% to +8%, before megamorphic sites skipped
+  the cache. The gate (the full suite and the replays) is still to run.
+
 The retention set, prototype epochs and the megamorphic cache of M4 carry over unchanged.
 
 **Before feedback vectors (N1): caches where the runtime's generic paths are.** N0 shows the

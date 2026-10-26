@@ -264,6 +264,9 @@ for (const op of allOps) {
     fn.push('    int i, call_argc;');
     fn.push('    GCValue *call_argv;');
     fn.push('    (void)i; (void)call_argc; (void)call_argv;');
+    // The interpreter's feedback vector: compiled code has its own caches.
+    fn.push('    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;');
+    fn.push('    (void)fb; (void)fb_bc;');
     fn.push('    ' + READ.map(r => `(void)${r[1]};`).join(' '));
     fn.push('    switch (opcode) {');
     fn.push(text);

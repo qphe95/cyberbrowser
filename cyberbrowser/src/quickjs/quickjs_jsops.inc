@@ -42,6 +42,8 @@ static JSOP_HELPER int jsop_push_i32(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_push_i32):
@@ -90,6 +92,8 @@ static JSOP_HELPER int jsop_push_bigint_i32(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_push_bigint_i32):
@@ -138,6 +142,8 @@ static JSOP_HELPER int jsop_push_const(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_push_const):
@@ -186,6 +192,8 @@ static JSOP_HELPER int jsop_push_atom_value(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_push_atom_value):
@@ -234,6 +242,8 @@ static JSOP_HELPER int jsop_undefined(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_undefined):
@@ -281,6 +291,8 @@ static JSOP_HELPER int jsop_null(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_null):
@@ -328,6 +340,8 @@ static JSOP_HELPER int jsop_push_this(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_push_this):
@@ -394,6 +408,8 @@ static JSOP_HELPER int jsop_push_false(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_push_false):
@@ -441,6 +457,8 @@ static JSOP_HELPER int jsop_push_true(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_push_true):
@@ -488,6 +506,8 @@ static JSOP_HELPER int jsop_object(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_object):
@@ -551,6 +571,8 @@ static JSOP_HELPER int jsop_special_object(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_special_object):
@@ -639,6 +661,8 @@ static JSOP_HELPER int jsop_rest(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_rest):
@@ -694,6 +718,8 @@ static JSOP_HELPER int jsop_drop(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_drop):
@@ -742,6 +768,8 @@ static JSOP_HELPER int jsop_nip(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_nip):
@@ -791,6 +819,8 @@ static JSOP_HELPER int jsop_nip1(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_nip1): /* a b c -> b c */
@@ -841,6 +871,8 @@ static JSOP_HELPER int jsop_dup(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_dup):
@@ -889,6 +921,8 @@ static JSOP_HELPER int jsop_dup2(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_dup2): /* a b -> a b a b */
@@ -938,6 +972,8 @@ static JSOP_HELPER int jsop_dup3(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_dup3): /* a b c -> a b c a b c */
@@ -988,6 +1024,8 @@ static JSOP_HELPER int jsop_dup1(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_dup1): /* a b -> a a b */
@@ -1037,6 +1075,8 @@ static JSOP_HELPER int jsop_insert2(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_insert2): /* obj a -> a obj a (dup_x1) */
@@ -1087,6 +1127,8 @@ static JSOP_HELPER int jsop_insert3(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_insert3): /* obj prop a -> a obj prop a (dup_x2) */
@@ -1138,6 +1180,8 @@ static JSOP_HELPER int jsop_insert4(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_insert4): /* this obj prop a -> a this obj prop a */
@@ -1190,6 +1234,8 @@ static JSOP_HELPER int jsop_perm3(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_perm3): /* obj a b -> a obj b (213) */
@@ -1242,6 +1288,8 @@ static JSOP_HELPER int jsop_rot3l(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_rot3l): /* x a b -> a b x (231) */
@@ -1295,6 +1343,8 @@ static JSOP_HELPER int jsop_rot4l(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_rot4l): /* x a b c -> a b c x */
@@ -1349,6 +1399,8 @@ static JSOP_HELPER int jsop_rot5l(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_rot5l): /* x a b c d -> a b c d x */
@@ -1404,6 +1456,8 @@ static JSOP_HELPER int jsop_rot3r(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_rot3r): /* a b x -> x a b (312) */
@@ -1457,6 +1511,8 @@ static JSOP_HELPER int jsop_perm4(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_perm4): /* obj prop a b -> a obj prop b */
@@ -1510,6 +1566,8 @@ static JSOP_HELPER int jsop_perm5(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_perm5): /* this obj prop a b -> a this obj prop b */
@@ -1564,6 +1622,8 @@ static JSOP_HELPER int jsop_swap(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_swap): /* a b -> b a */
@@ -1616,6 +1676,8 @@ static JSOP_HELPER int jsop_swap2(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_swap2): /* a b c d -> c d a b */
@@ -1672,6 +1734,8 @@ static JSOP_HELPER int jsop_fclosure(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_fclosure):
@@ -1725,6 +1789,8 @@ static JSOP_HELPER int jsop_call(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_call):
@@ -1788,6 +1854,8 @@ static JSOP_HELPER int jsop_tail_call(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_call):
@@ -1851,6 +1919,8 @@ static JSOP_HELPER int jsop_call_constructor(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_call_constructor):
@@ -1915,6 +1985,8 @@ static JSOP_HELPER int jsop_call_method(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_call_method):
@@ -1981,6 +2053,8 @@ static JSOP_HELPER int jsop_tail_call_method(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_call_method):
@@ -2047,6 +2121,8 @@ static JSOP_HELPER int jsop_array_from(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_array_from):
@@ -2101,6 +2177,8 @@ static JSOP_HELPER int jsop_apply(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_apply):
@@ -2163,6 +2241,8 @@ static JSOP_HELPER int jsop_lazy_function(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_lazy_function):
@@ -2246,6 +2326,8 @@ static JSOP_HELPER int jsop_return(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_return):
@@ -2293,6 +2375,8 @@ static JSOP_HELPER int jsop_return_undef(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_return_undef):
@@ -2341,6 +2425,8 @@ static JSOP_HELPER int jsop_check_ctor_return(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_check_ctor_return):
@@ -2398,6 +2484,8 @@ static JSOP_HELPER int jsop_check_ctor(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_check_ctor):
@@ -2449,6 +2537,8 @@ static JSOP_HELPER int jsop_init_ctor(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_check_ctor):
@@ -2516,6 +2606,8 @@ static JSOP_HELPER int jsop_check_brand(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_check_brand):
@@ -2571,6 +2663,8 @@ static JSOP_HELPER int jsop_add_brand(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_add_brand):
@@ -2623,6 +2717,8 @@ static JSOP_HELPER int jsop_throw(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_throw):
@@ -2671,6 +2767,8 @@ static JSOP_HELPER int jsop_throw_error(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_throw_error):
@@ -2741,6 +2839,8 @@ static JSOP_HELPER int jsop_eval(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_eval):
@@ -2812,6 +2912,8 @@ static JSOP_HELPER int jsop_apply_eval(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_apply_eval):
@@ -2890,6 +2992,8 @@ static JSOP_HELPER int jsop_regexp(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_regexp):
@@ -2943,6 +3047,8 @@ static JSOP_HELPER int jsop_get_super(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_get_super):
@@ -2999,6 +3105,8 @@ static JSOP_HELPER int jsop_import(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_import):
@@ -3057,6 +3165,8 @@ static JSOP_HELPER int jsop_get_var_undef(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_get_var_undef):
@@ -3138,6 +3248,8 @@ static JSOP_HELPER int jsop_get_var(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_get_var_undef):
@@ -3219,6 +3331,8 @@ static JSOP_HELPER int jsop_put_var(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_put_var):
@@ -3322,6 +3436,8 @@ static JSOP_HELPER int jsop_put_var_init(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_put_var):
@@ -3425,6 +3541,8 @@ static JSOP_HELPER int jsop_get_loc(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_get_loc):
@@ -3478,6 +3596,8 @@ static JSOP_HELPER int jsop_put_loc(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_put_loc):
@@ -3531,6 +3651,8 @@ static JSOP_HELPER int jsop_set_loc(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_set_loc):
@@ -3583,6 +3705,8 @@ static JSOP_HELPER int jsop_get_arg(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_get_arg):
@@ -3636,6 +3760,8 @@ static JSOP_HELPER int jsop_put_arg(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_put_arg):
@@ -3689,6 +3815,8 @@ static JSOP_HELPER int jsop_set_arg(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_set_arg):
@@ -3743,6 +3871,8 @@ static JSOP_HELPER int jsop_get_var_ref(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_get_var_ref):
@@ -3814,6 +3944,8 @@ static JSOP_HELPER int jsop_put_var_ref(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_put_var_ref):
@@ -3868,6 +4000,8 @@ static JSOP_HELPER int jsop_set_var_ref(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_set_var_ref):
@@ -3921,6 +4055,8 @@ static JSOP_HELPER int jsop_get_var_ref_check(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_get_var_ref_check):
@@ -3983,6 +4119,8 @@ static JSOP_HELPER int jsop_put_var_ref_check(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_put_var_ref_check):
@@ -4041,6 +4179,8 @@ static JSOP_HELPER int jsop_put_var_ref_check_init(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_put_var_ref_check_init):
@@ -4099,6 +4239,8 @@ static JSOP_HELPER int jsop_set_loc_uninitialized(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_set_loc_uninitialized):
@@ -4151,6 +4293,8 @@ static JSOP_HELPER int jsop_get_loc_check(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_get_loc_check):
@@ -4208,6 +4352,8 @@ static JSOP_HELPER int jsop_get_loc_checkthis(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_get_loc_checkthis):
@@ -4265,6 +4411,8 @@ static JSOP_HELPER int jsop_put_loc_check(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_put_loc_check):
@@ -4322,6 +4470,8 @@ static JSOP_HELPER int jsop_set_loc_check(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_set_loc_check):
@@ -4378,6 +4528,8 @@ static JSOP_HELPER int jsop_put_loc_check_init(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_put_loc_check_init):
@@ -4435,6 +4587,8 @@ static JSOP_HELPER int jsop_close_loc(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_close_loc):
@@ -4488,6 +4642,8 @@ static JSOP_HELPER int jsop_make_loc_ref(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_make_loc_ref):
@@ -4564,6 +4720,8 @@ static JSOP_HELPER int jsop_make_arg_ref(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_make_loc_ref):
@@ -4640,6 +4798,8 @@ static JSOP_HELPER int jsop_make_var_ref_ref(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_make_loc_ref):
@@ -4716,6 +4876,8 @@ static JSOP_HELPER int jsop_make_var_ref(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_make_var_ref):
@@ -4773,6 +4935,8 @@ static JSOP_HELPER int jsop_goto(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_goto):
@@ -4826,6 +4990,8 @@ static JSOP_HELPER int jsop_if_true(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_if_true):
@@ -4893,6 +5059,8 @@ static JSOP_HELPER int jsop_if_false(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_if_false):
@@ -4961,6 +5129,8 @@ static JSOP_HELPER int jsop_catch(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_catch):
@@ -5014,6 +5184,8 @@ static JSOP_HELPER int jsop_gosub(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_gosub):
@@ -5068,6 +5240,8 @@ static JSOP_HELPER int jsop_ret(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_ret):
@@ -5130,6 +5304,8 @@ static JSOP_HELPER int jsop_for_in_start(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_for_in_start):
@@ -5179,6 +5355,8 @@ static JSOP_HELPER int jsop_for_in_next(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_for_in_next):
@@ -5229,6 +5407,8 @@ static JSOP_HELPER int jsop_for_of_start(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_for_of_start):
@@ -5280,6 +5460,8 @@ static JSOP_HELPER int jsop_for_of_next(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_for_of_next):
@@ -5334,6 +5516,8 @@ static JSOP_HELPER int jsop_for_await_of_next(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_for_await_of_next):
@@ -5384,6 +5568,8 @@ static JSOP_HELPER int jsop_for_await_of_start(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_for_await_of_start):
@@ -5435,6 +5621,8 @@ static JSOP_HELPER int jsop_iterator_get_value_done(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_iterator_get_value_done):
@@ -5485,6 +5673,8 @@ static JSOP_HELPER int jsop_iterator_check_object(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_iterator_check_object):
@@ -5536,6 +5726,8 @@ static JSOP_HELPER int jsop_iterator_close(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_iterator_close):
@@ -5593,6 +5785,8 @@ static JSOP_HELPER int jsop_nip_catch(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_nip_catch):
@@ -5655,6 +5849,8 @@ static JSOP_HELPER int jsop_iterator_next(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_iterator_next):
@@ -5713,6 +5909,8 @@ static JSOP_HELPER int jsop_iterator_call(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_iterator_call):
@@ -5791,6 +5989,8 @@ static JSOP_HELPER int jsop_lnot(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_lnot):
@@ -5852,6 +6052,8 @@ static JSOP_HELPER int jsop_get_field(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_get_field):
@@ -5900,6 +6102,8 @@ static JSOP_HELPER int jsop_get_field2(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_get_field2):
@@ -5949,6 +6153,8 @@ static JSOP_HELPER int jsop_put_field(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_put_field):
@@ -5965,6 +6171,19 @@ static JSOP_HELPER int jsop_put_field(JSInterpFrame *F)
 
                 obj = sp[-2];
                 if (likely(JS_VALUE_GET_TAG(obj) == JS_TAG_OBJECT)) {
+                    JitIC *ic;
+                    if (fb && (ic = js_feedback_site(fb, (uint32_t)(pc - 5 - fb_bc)))) {
+                        JS_SF_SET_PC(sf, pc);
+                        ret = js_feedback_put_field(ctx, ic, obj, atom, sp[-1]);
+                        if (unlikely(ret <= 0)) {
+                            if (ret == 0)
+                                goto put_field_slow_path;
+                            sp -= 2;
+                            goto exception;
+                        }
+                        sp -= 2;
+                        BREAK;
+                    }
                     p = JS_VALUE_GET_OBJ(obj);
                     prs = find_own_property(&pr, p, atom);
                     if (!prs)
@@ -6036,6 +6255,8 @@ static JSOP_HELPER int jsop_private_symbol(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_private_symbol):
@@ -6094,12 +6315,25 @@ static JSOP_HELPER int jsop_get_private_field(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_get_private_field):
             {
                 GCValue val = GC_UNDEFINED;
+                JitIC *ic;
+                JSProperty *pr;
 
+                if (fb && JS_VALUE_GET_TAG(sp[-2]) == JS_TAG_OBJECT &&
+                    JS_VALUE_GET_TAG(sp[-1]) == JS_TAG_SYMBOL &&
+                    (ic = js_feedback_site(fb, (uint32_t)(pc - 1 - fb_bc))) &&
+                    (pr = js_feedback_private_field(ic, JS_VALUE_GET_OBJ(sp[-2]),
+                                                    js_symbol_to_atom(ctx, sp[-1])))) {
+                    sp[-2] = pr->u.value;
+                    sp--;
+                    BREAK;
+                }
                 val = JS_GetPrivateField(ctx, sp[-2], sp[-1]);
                 
                 
@@ -6152,11 +6386,26 @@ static JSOP_HELPER int jsop_put_private_field(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_put_private_field):
             {
                 int ret;
+                JitIC *ic;
+                JSProperty *pr;
+
+                if (fb && JS_VALUE_GET_TAG(sp[-3]) == JS_TAG_OBJECT &&
+                    JS_VALUE_GET_TAG(sp[-1]) == JS_TAG_SYMBOL &&
+                    (ic = js_feedback_site(fb, (uint32_t)(pc - 1 - fb_bc))) &&
+                    (pr = js_feedback_private_field(ic, JS_VALUE_GET_OBJ(sp[-3]),
+                                                    js_symbol_to_atom(ctx, sp[-1])))) {
+                    set_value(ctx, &pr->u.value, sp[-2]);
+                    gc_write_barrier(GC_VALUE_GET_HANDLE(sp[-3]), GC_VALUE_GET_HANDLE(sp[-2]));
+                    sp -= 3;
+                    BREAK;
+                }
                 ret = JS_SetPrivateField(ctx, sp[-3], sp[-1], sp[-2]);
                 
                 
@@ -6208,6 +6457,8 @@ static JSOP_HELPER int jsop_define_private_field(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_define_private_field):
@@ -6263,6 +6514,8 @@ static JSOP_HELPER int jsop_define_field(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_define_field):
@@ -6336,6 +6589,8 @@ static JSOP_HELPER int jsop_set_name(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_set_name):
@@ -6392,6 +6647,8 @@ static JSOP_HELPER int jsop_set_name_computed(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_set_name_computed):
@@ -6444,6 +6701,8 @@ static JSOP_HELPER int jsop_set_proto(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_set_proto):
@@ -6501,6 +6760,8 @@ static JSOP_HELPER int jsop_set_home_object(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_set_home_object):
@@ -6548,6 +6809,8 @@ static JSOP_HELPER int jsop_define_method(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_define_method):
@@ -6648,6 +6911,8 @@ static JSOP_HELPER int jsop_define_method_computed(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_define_method):
@@ -6748,6 +7013,8 @@ static JSOP_HELPER int jsop_define_class(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_define_class):
@@ -6809,6 +7076,8 @@ static JSOP_HELPER int jsop_define_class_computed(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_define_class):
@@ -6870,6 +7139,8 @@ static JSOP_HELPER int jsop_get_array_el(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_get_array_el):
@@ -6918,6 +7189,8 @@ static JSOP_HELPER int jsop_get_array_el2(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_get_array_el2):
@@ -6966,6 +7239,8 @@ static JSOP_HELPER int jsop_get_array_el3(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_get_array_el3):
@@ -7056,6 +7331,8 @@ static JSOP_HELPER int jsop_get_ref_value(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_get_ref_value):
@@ -7138,6 +7415,8 @@ static JSOP_HELPER int jsop_get_super_value(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_get_super_value):
@@ -7202,6 +7481,8 @@ static JSOP_HELPER int jsop_put_array_el(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_put_array_el):
@@ -7297,6 +7578,8 @@ static JSOP_HELPER int jsop_put_ref_value(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_put_ref_value):
@@ -7380,6 +7663,8 @@ static JSOP_HELPER int jsop_put_super_value(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_put_super_value):
@@ -7448,6 +7733,8 @@ static JSOP_HELPER int jsop_define_array_el(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_define_array_el):
@@ -7503,6 +7790,8 @@ static JSOP_HELPER int jsop_append(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_append):    /* array pos enumobj -- array pos */
@@ -7556,6 +7845,8 @@ static JSOP_HELPER int jsop_copy_data_properties(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_copy_data_properties):    /* target source excludeList */
@@ -7617,6 +7908,8 @@ static JSOP_HELPER int jsop_add(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_add):
@@ -7692,6 +7985,8 @@ static JSOP_HELPER int jsop_add_loc(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_add_loc):
@@ -7785,6 +8080,8 @@ static JSOP_HELPER int jsop_sub(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_sub):
@@ -7860,6 +8157,8 @@ static JSOP_HELPER int jsop_mul(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_mul):
@@ -7945,6 +8244,8 @@ static JSOP_HELPER int jsop_div(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_div):
@@ -8013,6 +8314,8 @@ static JSOP_HELPER int jsop_mod(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_mod):
@@ -8086,6 +8389,8 @@ static JSOP_HELPER int jsop_pow(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_pow):
@@ -8138,6 +8443,8 @@ static JSOP_HELPER int jsop_plus(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_plus):
@@ -8198,6 +8505,8 @@ static JSOP_HELPER int jsop_neg(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_neg):
@@ -8275,6 +8584,8 @@ static JSOP_HELPER int jsop_inc(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_inc):
@@ -8337,6 +8648,8 @@ static JSOP_HELPER int jsop_dec(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_dec):
@@ -8399,6 +8712,8 @@ static JSOP_HELPER int jsop_post_inc(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_post_inc):
@@ -8462,6 +8777,8 @@ static JSOP_HELPER int jsop_post_dec(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_post_dec):
@@ -8525,6 +8842,8 @@ static JSOP_HELPER int jsop_inc_loc(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_inc_loc):
@@ -8595,6 +8914,8 @@ static JSOP_HELPER int jsop_dec_loc(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_dec_loc):
@@ -8665,6 +8986,8 @@ static JSOP_HELPER int jsop_not(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_not):
@@ -8723,6 +9046,8 @@ static JSOP_HELPER int jsop_shl(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_shl):
@@ -8787,6 +9112,8 @@ static JSOP_HELPER int jsop_shr(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_shr):
@@ -8852,6 +9179,8 @@ static JSOP_HELPER int jsop_sar(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_sar):
@@ -8916,6 +9245,8 @@ static JSOP_HELPER int jsop_and(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_and):
@@ -8978,6 +9309,8 @@ static JSOP_HELPER int jsop_or(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_or):
@@ -9040,6 +9373,8 @@ static JSOP_HELPER int jsop_xor(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_xor):
@@ -9105,6 +9440,8 @@ static JSOP_HELPER int jsop_lt(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
             OP_CMP(OP_lt, <, js_relational_slow(ctx, sp, (OPCodeEnum)opcode));
@@ -9150,6 +9487,8 @@ static JSOP_HELPER int jsop_lte(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
             OP_CMP(OP_lte, <=, js_relational_slow(ctx, sp, (OPCodeEnum)opcode));
@@ -9195,6 +9534,8 @@ static JSOP_HELPER int jsop_gt(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
             OP_CMP(OP_gt, >, js_relational_slow(ctx, sp, (OPCodeEnum)opcode));
@@ -9240,6 +9581,8 @@ static JSOP_HELPER int jsop_gte(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
             OP_CMP(OP_gte, >=, js_relational_slow(ctx, sp, (OPCodeEnum)opcode));
@@ -9285,6 +9628,8 @@ static JSOP_HELPER int jsop_eq(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
             OP_CMP(OP_eq, ==, js_eq_slow(ctx, sp, 0));
@@ -9330,6 +9675,8 @@ static JSOP_HELPER int jsop_neq(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
             OP_CMP(OP_neq, !=, js_eq_slow(ctx, sp, 1));
@@ -9375,6 +9722,8 @@ static JSOP_HELPER int jsop_strict_eq(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
             OP_CMP(OP_strict_eq, ==, js_strict_eq_slow(ctx, sp, 0));
@@ -9420,6 +9769,8 @@ static JSOP_HELPER int jsop_strict_neq(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
             OP_CMP(OP_strict_neq, !=, js_strict_eq_slow(ctx, sp, 1));
@@ -9466,6 +9817,8 @@ static JSOP_HELPER int jsop_in(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_in):
@@ -9516,6 +9869,8 @@ static JSOP_HELPER int jsop_private_in(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_private_in):
@@ -9566,6 +9921,8 @@ static JSOP_HELPER int jsop_instanceof(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_instanceof):
@@ -9616,6 +9973,8 @@ static JSOP_HELPER int jsop_typeof(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_typeof):
@@ -9671,6 +10030,8 @@ static JSOP_HELPER int jsop_delete(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_delete):
@@ -9721,6 +10082,8 @@ static JSOP_HELPER int jsop_delete_var(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_delete_var):
@@ -9781,6 +10144,8 @@ static JSOP_HELPER int jsop_to_object(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_to_object):
@@ -9836,6 +10201,8 @@ static JSOP_HELPER int jsop_to_propkey(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_to_propkey):
@@ -9897,6 +10264,8 @@ static JSOP_HELPER int jsop_with_get_var(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_with_get_var):
@@ -10043,6 +10412,8 @@ static JSOP_HELPER int jsop_with_put_var(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_with_get_var):
@@ -10189,6 +10560,8 @@ static JSOP_HELPER int jsop_with_delete_var(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_with_get_var):
@@ -10335,6 +10708,8 @@ static JSOP_HELPER int jsop_with_make_ref(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_with_get_var):
@@ -10481,6 +10856,8 @@ static JSOP_HELPER int jsop_with_get_ref(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_with_get_var):
@@ -10627,6 +11004,8 @@ static JSOP_HELPER int jsop_await(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_await):
@@ -10674,6 +11053,8 @@ static JSOP_HELPER int jsop_yield(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_yield):
@@ -10721,6 +11102,8 @@ static JSOP_HELPER int jsop_yield_star(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_yield_star):
@@ -10769,6 +11152,8 @@ static JSOP_HELPER int jsop_async_yield_star(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_yield_star):
@@ -10817,6 +11202,8 @@ static JSOP_HELPER int jsop_return_async(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_return_async):
@@ -10864,6 +11251,8 @@ static JSOP_HELPER int jsop_initial_yield(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_initial_yield):
@@ -10912,6 +11301,8 @@ static JSOP_HELPER int jsop_nop(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_nop):
@@ -10958,6 +11349,8 @@ static JSOP_HELPER int jsop_is_undefined_or_null(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_is_undefined_or_null):
@@ -11016,6 +11409,8 @@ static JSOP_HELPER int jsop_invalid(JSInterpFrame *F)
     int i, call_argc;
     GCValue *call_argv;
     (void)i; (void)call_argc; (void)call_argv;
+    JSFeedback *const fb = NULL; const uint8_t *const fb_bc = NULL;
+    (void)fb; (void)fb_bc;
     (void)caller_ctx; (void)ctx; (void)rt; (void)p; (void)b; (void)sf; (void)stack_buf; (void)var_buf; (void)arg_buf; (void)var_refs; (void)var_refs_handle; (void)sf_var_refs; (void)func_obj; (void)this_obj; (void)new_target; (void)argc; (void)argv; (void)flags;
     switch (opcode) {
         CASE(OP_invalid):
