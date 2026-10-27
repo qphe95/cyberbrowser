@@ -11,8 +11,15 @@
  * and, unless its site is opaque, to the storage service, both badged with
  * the site the core gave it) and its surface; revoking those channels when the
  * tab ends; messaging the UI.  Every child runs in a job that ends with the
- * coordinator.  Each child's output goes to logs\<name>.log next to the
- * executables. */
+ * coordinator, and in the sandbox for its kind (sandbox.c).  Each child's
+ * output goes to logs\<name>.log next to the executables.
+ *
+ *   cb_coord.exe --remove-profiles   delete the sandbox's AppContainer profiles
+ *
+ * CYBER_NO_SANDBOX=1 starts the children unconfined; CYBER_UI_SCRIPT (tests
+ * drive the UI and save screenshots) leaves the UI unconfined.
+ * CYBER_TAB_EXE=cb_escape.exe starts the escape tests in place of the tabs
+ * of URLs that end in "#escape". */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +29,7 @@
 #include "spawn.h"
 #include "proto.h"
 #include "coord_core.h"
+#include "sandbox.h"
 
 _Static_assert(PROTO_SITE_MAX == SITE_MAX, "a badge is a site label");
 
@@ -36,6 +44,7 @@ static Child g_ui, g_net, g_store;
 static HANDLE g_tab_proc[COORD_MAX_TABS];
 static CoordState g_state;
 static CoordActions g_actions;          /* large: kept off the stack */
+static wchar_t g_root[MAX_PATH];        /* browser_data\sites */
 
 static HANDLE open_log(const char *name) {
     wchar_t path[MAX_PATH * 2];
@@ -71,14 +80,20 @@ static void close_in(HANDLE proc, HANDLE h) {
 }
 
 /* Start <exe> with a control channel (and extra arguments). */
-static bool start_child(Child *c, const wchar_t *exe, const char *log_name, const char *extra, DWORD flags) {
+static bool start_child(Child *c, const wchar_t *exe, const char *log_name, const char *extra, DWORD flags,
+                        int kind) {
     if (!chan_create(&c->ctl, 1u << 18)) return false;
     static char args[16384];
     snprintf(args, sizeof(args), "--chan %llu %llu %llu%s%s", spawn_handle_arg(c->ctl.section),
              spawn_handle_arg(c->ctl.ev[0]), spawn_handle_arg(c->ctl.ev[1]), extra ? " " : "", extra ? extra : "");
     HANDLE log = open_log(log_name);
     HANDLE inh[3] = { c->ctl.section, c->ctl.ev[0], c->ctl.ev[1] };
-    c->proc = spawn_child(exe, args, inh, 3, log != INVALID_HANDLE_VALUE ? log : NULL, g_job, flags);
+    SpawnSandbox sb;
+    bool confined = kind < 0 || sandbox_for((SandboxKind)kind, 0, &sb);
+    c->proc = confined ? spawn_child(exe, args, inh, 3, log != INVALID_HANDLE_VALUE ? log : NULL, g_job, flags,
+                                     kind < 0 ? NULL : &sb)
+                       : NULL;
+    if (confined && kind >= 0) sandbox_release(&sb);
     if (log != INVALID_HANDLE_VALUE) CloseHandle(log);
     return c->proc != NULL;
 }
@@ -132,10 +147,29 @@ static bool start_tab(const CoordAction *a) {
                  spawn_handle_arg(ui.section), spawn_handle_arg(ui.ev[0]), spawn_handle_arg(ui.ev[1]),
                  spawn_handle_arg(net.section), spawn_handle_arg(net.ev[0]), spawn_handle_arg(net.ev[1]),
                  store_arg, spawn_handle_arg(surface), a->width, a->height, a->tab, url_hex);
-        HANDLE inh[10] = { ui.section, ui.ev[0], ui.ev[1], net.section, net.ev[0], net.ev[1], surface,
-                           store.section, store.ev[0], store.ev[1] };
-        HANDLE proc = spawn_child(L"cb_tab.exe", args, inh, have_store ? 10 : 7,
-                                  log != INVALID_HANDLE_VALUE ? log : NULL, g_job, CREATE_NO_WINDOW);
+        HANDLE inh[10] = { ui.section, ui.ev[0], ui.ev[1], net.section, net.ev[0], net.ev[1], surface };
+        int ninh = 7;
+        if (have_store) {
+            inh[ninh++] = store.section;
+            inh[ninh++] = store.ev[0];
+            inh[ninh++] = store.ev[1];
+        }
+        static wchar_t exe[64];
+        const char *alt = getenv("CYBER_TAB_EXE");
+        bool escape = a->len >= 7 && !memcmp(a->data + a->len - 7, "#escape", 7);
+        _snwprintf(exe, 64, L"%hs", alt && alt[0] && escape ? alt : "cb_tab.exe");
+        SpawnSandbox sb;
+        HANDLE proc = NULL;
+        if (sandbox_for(SB_TAB, a->slot, &sb)) {
+            /* Detached: a console would come with a console host process,
+             * which the tab could open. */
+            proc = spawn_child(exe, args, inh, ninh, log != INVALID_HANDLE_VALUE ? log : NULL, g_job,
+                               DETACHED_PROCESS, &sb);
+            sandbox_release(&sb);
+        } else {
+            fprintf(stderr, "cb_coord: no sandbox for tab %u\n", a->tab);
+        }
+        if (!proc) sandbox_tab_ended(a->slot);
         if (proc) {
             /* The servers first: the tab may already be asking. */
             bool granted = grant(&g_net, &net, a->tab, GRANT_TAB, a->site) &&
@@ -162,7 +196,9 @@ static bool start_tab(const CoordAction *a) {
                 revoke(&g_net, a->tab);
                 revoke(&g_store, a->tab);
                 TerminateProcess(proc, 1);
+                WaitForSingleObject(proc, 1000);
                 CloseHandle(proc);
+                sandbox_tab_ended(a->slot);
             }
         }
     }
@@ -212,6 +248,12 @@ static void perform(const CoordAction *a) {
          * then the storage service finishes. */
         quit_server(&g_net, 3000);
         quit_server(&g_store, 2000);
+        /* Their profiles go once the tabs have. */
+        for (int i = 0; i < COORD_MAX_TABS; i++)
+            if (g_tab_proc[i]) TerminateProcess(g_tab_proc[i], 0);
+        for (int i = 0; i < COORD_MAX_TABS; i++)
+            if (g_tab_proc[i]) WaitForSingleObject(g_tab_proc[i], 1000);
+        sandbox_end();
         CloseHandle(g_job);             /* KILL_ON_JOB_CLOSE ends the rest */
         ExitProcess(0);
     }
@@ -230,7 +272,42 @@ static void step(const CoordEvent *e) {
     }
 }
 
+/* browser_data\sites next to the executables, else in %LOCALAPPDATA%, made
+ * if need be; the storage service gets it, and access to it alone. */
+static bool make_root(void) {
+    wchar_t base[MAX_PATH];
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (attempt == 0) {
+            _snwprintf(base, MAX_PATH, L"%ls", spawn_exe_dir());
+        } else {
+            DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH - 64);
+            if (n == 0 || n >= MAX_PATH - 64) return false;
+            wcscat(base, L"\\cyberbrowser\\");
+            CreateDirectoryW(base, NULL);
+        }
+        wchar_t data[MAX_PATH];
+        _snwprintf(data, MAX_PATH, L"%lsbrowser_data", base);
+        CreateDirectoryW(data, NULL);
+        _snwprintf(g_root, MAX_PATH, L"%ls\\sites", data);
+        CreateDirectoryW(g_root, NULL);
+        DWORD attr = GetFileAttributesW(g_root);
+        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) &&
+            !(attr & FILE_ATTRIBUTE_REPARSE_POINT) && sandbox_grant_folder(g_root))
+            return true;
+    }
+    return false;
+}
+
 int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "--remove-profiles")) {
+        printf("removed %d sandbox profiles\n", sandbox_remove_profiles());
+        return 0;
+    }
+    if (!sandbox_init()) fprintf(stderr, "cb_coord: running without the sandbox\n");
+    if (!make_root()) {
+        fprintf(stderr, "cb_coord: no browser_data folder\n");
+        return 1;
+    }
     g_job = CreateJobObjectW(NULL, NULL);
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION lim;
     memset(&lim, 0, sizeof(lim));
@@ -239,15 +316,23 @@ int main(int argc, char **argv) {
 
     /* The servers, connected to each other: the network process keeps its
      * cookie jars in each site's folder. */
-    if (!start_child(&g_store, L"cb_store.exe", "store", NULL, CREATE_NO_WINDOW) ||
-        !start_child(&g_net, L"cb_net.exe", "net", NULL, CREATE_NO_WINDOW)) {
+    char root_arg[MAX_PATH * 6 + 16], root_utf8[MAX_PATH * 3];
+    WideCharToMultiByte(CP_UTF8, 0, g_root, -1, root_utf8, sizeof(root_utf8), NULL, NULL);
+    strcpy(root_arg, "--root ");
+    hex(root_arg + 7, (const uint8_t *)root_utf8, (uint32_t)strlen(root_utf8));
+    if (!start_child(&g_store, L"cb_store.exe", "store", root_arg, DETACHED_PROCESS, SB_STORE) ||
+        !start_child(&g_net, L"cb_net.exe", "net", NULL, DETACHED_PROCESS, SB_NET)) {
         fprintf(stderr, "cb_coord: could not start cb_store.exe or cb_net.exe\n");
         return 1;
     }
     Chan net_store;
     if (!chan_create(&net_store, 1u << 20) || !grant(&g_store, &net_store, 0, GRANT_NET, NULL) ||
         !grant(&g_net, &net_store, 0, GRANT_STORE, NULL)) {
-        fprintf(stderr, "cb_coord: could not connect cb_net.exe to cb_store.exe\n");
+        DWORD err = GetLastError(), sc = 0, nc = 0;
+        GetExitCodeProcess(g_store.proc, &sc);
+        GetExitCodeProcess(g_net.proc, &nc);
+        fprintf(stderr, "cb_coord: could not connect cb_net.exe to cb_store.exe (%lu; exit codes %lx %lx)\n", err,
+                sc, nc);
         return 1;
     }
     chan_close(&net_store);
@@ -262,7 +347,10 @@ int main(int argc, char **argv) {
         hex(urls + used, (const uint8_t *)argv[i], (uint32_t)n);
         used += 2 * n;
     }
-    if (!start_child(&g_ui, L"cb_ui.exe", "ui", used ? urls : NULL, 0)) {
+    const char *script = getenv("CYBER_UI_SCRIPT");
+    bool test_ui = script && script[0];
+    if (test_ui && sandbox_enabled()) fprintf(stderr, "cb_coord: CYBER_UI_SCRIPT: the UI runs without its sandbox\n");
+    if (!start_child(&g_ui, L"cb_ui.exe", "ui", used ? urls : NULL, 0, test_ui ? -1 : SB_UI)) {
         fprintf(stderr, "cb_coord: could not start cb_ui.exe\n");
         return 1;
     }
@@ -301,7 +389,10 @@ int main(int argc, char **argv) {
             e.kind = CE_UI_EXITED;
             step(&e);
         } else if (which == -3) {
-            fprintf(stderr, "cb_coord: the network process or the storage service ended\n");
+            DWORD nc = 0, sc = 0;
+            GetExitCodeProcess(g_net.proc, &nc);
+            GetExitCodeProcess(g_store.proc, &sc);
+            fprintf(stderr, "cb_coord: the network process or the storage service ended (%lx, %lx)\n", nc, sc);
             e.kind = CE_SERVICE_EXITED;
             step(&e);
         } else {
@@ -309,6 +400,7 @@ int main(int argc, char **argv) {
             GetExitCodeProcess(g_tab_proc[which], &code);
             CloseHandle(g_tab_proc[which]);
             g_tab_proc[which] = NULL;
+            sandbox_tab_ended(which);
             e.kind = CE_TAB_EXITED;
             e.slot = which;
             e.exit_code = code;

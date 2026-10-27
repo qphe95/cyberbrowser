@@ -14,7 +14,9 @@
 #define STORE_QUOTA_BYTES (64ull << 20) /* per site */
 
 /* 1-8 components of [a-z0-9_.-]{1,64} separated by '/', none of them "."
- * or "..", none starting with '.'. */
+ * or "..", none starting or ending with '.' (Windows drops trailing dots,
+ * so "cookies." would name "cookies"), none a DOS device name ("nul",
+ * "com1.txt"). */
 bool store_rel_path_ok(const char *rel, uint32_t len);
 
 /* "<site label>/<rel>" into out (cap bytes), '/' separated; false unless both
@@ -22,8 +24,8 @@ bool store_rel_path_ok(const char *rel, uint32_t len);
 bool store_join(const char *site, const char *rel, uint32_t rel_len, char *out, uint32_t cap);
 
 /* May a client with badge `client_site` (NULL for the network process) act
- * on `target_site`'s `rel`?  A tab only on its own site; the network process
- * only on a site's "cookies" file. */
+ * on `target_site`'s `rel`?  A tab only on its own site, and never on its
+ * "cookies" file; the network process only on a site's "cookies" file. */
 bool store_allowed(const char *client_site, const char *target_site, const char *rel, uint32_t rel_len);
 
 /* The bytes a site would use after replacing a file of old_size bytes with

@@ -174,17 +174,18 @@ other sites with credentials). Per request, it enforces:
 - **Private Network Access:** public sites can't reach `localhost` or private addresses.
 
 The network process sees every site's traffic in plaintext, so a compromise of it leaks across
-sites; Chrome accepts the same risk for its network service. It has no file access, so what it
-can leak is what is in flight and in the in-memory jars. A per-site network process is
-possible later, at a memory cost.
+sites; Chrome accepts the same risk for its network service. It can't write files, and it
+reaches the cookie jars on disk only through the storage service. It can read what the user
+can (section 6.4: an AppContainer couldn't reach `localhost`), so a compromise of it could
+also read the user's files. A per-site network process is possible later, at a memory cost.
 
 ### 2.5 Storage service
 
 Owns `browser_data/sites/`. A tab asks it to open, read, write, list, rename or delete a file
 by a path relative to its site's folder; the site comes from the channel's badge, never from
 the message. Its core (path grammar, containment, quotas) is verified (section 3.3, P4).
-It runs with a token that can reach `browser_data/sites/` and nothing else on disk, so even a
-bug outside its verified core can't touch the user's files.
+It runs in an LPAC sandbox that can reach `browser_data/sites/` and none of the user's other
+files (section 6.4), so even a bug outside its verified core can't touch them.
 
 It is one process for all sites, which means a compromise of it would expose every site's
 data. It's small, it parses only paths, and its core is proved, which is why that's
@@ -539,38 +540,61 @@ and the shader translators stay tested, fuzzed and sandboxed rather than proved.
 
 ## 6. The tab sandbox (Windows)
 
-Every tab process starts with:
+`src/proc/sandbox.c` (the coordinator's side) and `src/proc/spawn.c` (the process
+attributes) set this up. Every tab process starts with:
 
 ### 6.1 A token with no rights
 
-- **Less Privileged AppContainer (LPAC)**, a fresh SID per process. LPAC, unlike a plain
-  AppContainer, doesn't get the default read access that `ALL APPLICATION PACKAGES` has to
-  much of the system. Only `ALL RESTRICTED APPLICATION PACKAGES` gets it, which covers the
-  system DLLs and fonts.
-- **No capabilities.** In particular, no `internetClient`, so no sockets.
-- A unique SID per process, so two tab processes can't open each other's processes,
-  threads, sections or events even if both run as the same user. Each process, thread and
-  channel section is also created with an explicit security descriptor that grants access to
-  the coordinator only; the ends receive duplicated handles. Whether `CreateProcess` with
-  `SECURITY_CAPABILITIES` accepts a derived SID with no registered AppContainer profile
-  (one per tab would mean a registry entry per tab) is the first thing to check in M3.
-  Chromium's sandbox creates "lowbox" tokens for this.
+- **Less Privileged AppContainer (LPAC).** LPAC, unlike a plain AppContainer, doesn't get
+  the default access that `ALL APPLICATION PACKAGES` has to much of the system. Only
+  `ALL RESTRICTED APPLICATION PACKAGES` gets it, which covers the system DLLs and fonts.
+  The token carries the `WIN://NOALLAPPPKG` attribute that marks it.
+- **No capabilities.** In particular, no `internetClient`: Winsock won't even start.
+- **An AppContainer profile of its own.** `CreateProcess` refuses an AppContainer SID with
+  no registered profile (`ERROR_FILE_NOT_FOUND`; the question this section left open). So
+  the coordinator registers a profile for each tab process,
+  `cyberbrowser.tab.<coordinator pid>.<n>`, and deletes it when the process ends. Its SID
+  is no other process's, ever. That matters beyond isolation: an AppContainer can write to
+  its profile's folder (`%LOCALAPPDATA%\Packages\<name>\AC`) and registry storage. With a
+  profile reused for the next tab, a page could leave data there for another site's page,
+  which the escape tests showed. Registering takes about 7 ms and deleting 2.4 ms. A
+  coordinator that crashed can't delete its tabs' profiles, so the next one deletes the
+  profiles of coordinators that are gone; `cb_coord.exe --remove-profiles` deletes all of
+  the browser's profiles.
+- **Its objects out of reach.** The coordinator gives each child's process and initial
+  thread objects a DACL of the user and SYSTEM only and a medium integrity label (set after
+  creation, while the child is suspended: in the creation-time security descriptor, a label
+  needs `SeRelabelPrivilege`). Every sandboxed process runs at low integrity, so none can
+  open another, whatever the DACL says. The tab's token gets a default DACL (the user,
+  SYSTEM and its own AppContainer SID) for the objects it creates itself, such as its later
+  threads. That matters for the network process, which isn't an AppContainer (section 6.4).
+  Channel sections and events have no names, so a process reaches only those it was given
+  handles to.
 
 ### 6.2 A job object
 
-`JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 1` (no child processes), a memory limit, kill on
-coordinator exit (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`), and UI restrictions (no clipboard,
-no global atoms, no `SetWindowsHookEx`, no changing display settings).
+Each child has a job of its own, nested in the coordinator's job, which ends them all
+when the coordinator does (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`). A tab's job sets:
+- one active process (no child processes);
+- a 4 GB memory limit;
+- UI restrictions: no desktops, display settings, system parameters, logging off, global
+  atoms, clipboard, or USER handles from outside the job.
+
+The child process policy (`PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY`) would repeat the
+first limit. It isn't used, because with it our processes fail their DLL initialization
+(`STATUS_DLL_INIT_FAILED`). Children start detached (`DETACHED_PROCESS`), with their
+output going to an inherited log file. A console would come with a console host process,
+which the escape tests found a tab could open.
 
 ### 6.3 Process mitigation policies (set at creation)
 
 | Policy | Effect |
 |---|---|
-| Win32k system calls disabled | Removes the largest kernel attack surface. The tab executable must not import `user32`, `gdi32`, `SHELL32` or `WINMM`, and doesn't need them: it has no windows and no GPU. |
-| No child processes | Duplicates the job limit. |
+| Win32k system calls disabled | Removes the largest kernel attack surface. The tab executable imports only `kernel32`, `advapi32`, `msvcrt`, `bcrypt`, `crypt32` and `ws2_32`, none of which loads `user32`. `SHELL32` is loaded on demand by the one function that uses it. Everything else is linked statically, MinGW's `libwinpthread` included: a sandboxed process can't load DLLs from outside System32 and its own folder. A process with win32k disabled can't initialize `user32` at all, so it can't make windows, use the clipboard or reach the GPU. |
 | Image load: no remote images, no low-label images, prefer `System32` | DLL planting. |
 | Dynamic code prohibited (ACG) | No new executable memory, so shellcode can't be written and run. Compatible today because T1 and T2 are off; when the JIT returns, it runs in a separate JIT process (as in Edge) or this policy is dropped for that tab (section 12). |
-| Strict handle checks, extension points disabled, CFG where the toolchain supports it | Hardening. |
+| Strict handle checks, extension points disabled, heap terminate, bottom-up and high-entropy ASLR, no non-system fonts | Hardening. |
+| CFG | Not yet: MinGW's GCC can't build with it. |
 
 ### 6.4 The other processes' sandboxes
 
@@ -578,9 +602,27 @@ no global atoms, no `SetWindowsHookEx`, no changing display settings).
 |---|---|---|
 | GPU | AppContainer, no capabilities | win32k and the graphics driver (it can't do without them); job with no child processes; ACG off (drivers generate code) |
 | Web-GPU | LPAC, no capabilities, a fresh SID per process | win32k and the driver, as for GPU; memory limit; no windows (it renders only into shared textures) |
-| Network | LPAC with `internetClient` | Sockets; win32k disabled |
-| UI | AppContainer | win32k for windows and input; no network or files except through `store` |
-| Storage | Restricted token, normal integrity | Only `browser_data/sites/`; win32k disabled |
+| Network | Restricted, write-restricted, low integrity | Sockets, including loopback; reads what the user can, writes nowhere; win32k disabled; a 2 GB job |
+| UI | AppContainer (profile `cyberbrowser.ui`) | win32k for windows and input; no network or files except through `store` |
+| Storage | LPAC (profile `cyberbrowser.store`), no capabilities | Full control of `browser_data/sites/` alone, granted by the coordinator on that folder; win32k disabled; a 512 MB job |
+
+The network process isn't an AppContainer, which differs from the plan above (LPAC with
+`internetClient`). An AppContainer can't connect to loopback addresses at all unless an
+administrator exempts it, so `localhost` pages and local development servers would fail,
+and it couldn't read the replays either. Instead it runs with a restricted token:
+- **No privileges.** The administrators group is deny-only.
+- **Low integrity,** so it can't write to the user's files or open medium-integrity processes.
+- **Write-restricted.** Any write access also needs one of its restricting SIDs (restricted
+  code, Everyone, Users, Authenticated Users), which the user's files, the other children's
+  objects and the tabs' own objects don't grant. So it can't write to a tab's threads or
+  memory either.
+
+What it can still do is read whatever the user can read; a compromise of it leaks across
+sites anyway (section 2.4).
+
+In the scripted tests (`CYBER_UI_SCRIPT`) the UI runs unconfined, since it reads the script
+and writes screenshots wherever the test says. `CYBER_NO_SANDBOX=1` starts every child
+unconfined, for debugging.
 
 ## 7. Tabs, windows and navigation
 
@@ -869,15 +911,96 @@ the single-process harness on top of it; the CPU rasterizer is `src/raster_cpu.c
   algorithm on 41,590 hosts built from every rule: no differences. To update it,
   download the list again and rerun the generator.
 
+**M3 (done):** every child of the coordinator runs sandboxed (section 6).
+
+- **What each process gets:**
+
+  | Process | Token | win32k | Dynamic code | Job |
+  |---|---|---|---|---|
+  | Tab | LPAC, a profile per process, low integrity | off | prohibited | 4 GB |
+  | Storage | LPAC, low integrity | off | allowed | 512 MB |
+  | Network | restricted, write-restricted, low integrity | off | allowed | 2 GB |
+  | UI | AppContainer, low integrity | on | allowed | no limit |
+
+  A tab reads its fonts straight from `C:\Windows\Fonts`, which LPAC may read and list. It
+  can't read the user's own fonts in `%LOCALAPPDATA%`.
+- **Changes that made the sandbox possible:**
+  - Children link statically, `libwinpthread` included.
+  - `SHELL32` is loaded on demand rather than imported (it would load `user32`).
+  - The tab no longer starts Winsock, which LPAC refuses.
+  - The coordinator creates `browser_data\sites` and grants the storage service's
+    AppContainer full control of it, then passes the path with `--root`.
+- **Escape tests:** `tests/sandbox/escape_test.sh <build dir>` runs `cb_escape.exe`
+  (`src/proc/escape_main.c`) in a tab's sandbox, among normal tabs of two sites, and passes:
+  75 attempts, none got through. It tries:
+  - **Files:** to read and create files outside its folder (the user's profile, temp,
+    `browser_data`, the executables' folder, `C:\Users\Public`, `C:\ProgramData`, the SAM
+    hive), to list the user's folders, and to write to the registry.
+  - **Sockets and processes:** to open sockets, to start processes (inside and outside its
+    job), to open every other process with every dangerous right, to take over another
+    process's threads, and to debug.
+  - **Privileges and memory:** to enable privileges, to make executable memory, and to
+    commit more than its job allows.
+  - **Storage:** other sites' files and its own cookie jar, through 30 kinds of path: `..`,
+    absolute and UNC paths, 8.3 names, alternate data streams, device names, trailing dots,
+    a junction and a hard link the test plants in its folder. Also a write over its quota.
+  - **Network:** HttpOnly cookies through `document.cookie`, another site's cookies through
+    `document.cookie` and through requests, and `file:` URLs.
+  - **Windows and the GPU:** to load `user32`, make a window, open the clipboard, and create
+    a D3D11 device.
+  - **Malformed messages:**
+    - 3,000 well-framed requests with lying lengths to each server, which must still answer
+      afterwards;
+    - broken framing, and messages that claim 256 MB and never arrive;
+    - scribbling on the rings' indices in shared memory;
+    - impossible frames, a 16 KB title and `file:`/`javascript:` navigations to the UI.
+
+  Afterwards the script checks that:
+  - the network process and the storage service lived;
+  - the next tabs' `localStorage` counter and cookies carried on;
+  - no file was planted in the other site's folder;
+  - no tab was started for a non-http URL;
+  - a cookie the hostile tab set for the other site never reached that site's requests;
+  - the UI lived;
+  - no tab profile outlived the browser.
+- **Found and fixed by the escape tests:**
+  - A tab could read and write its own site's `cookies` file through the storage service,
+    so it could read its HttpOnly cookies. Tabs may no longer name it.
+  - The path grammar allowed a trailing dot, which Windows drops (`cookies.` names
+    `cookies`), and DOS device names (`nul`, `com1.txt`). Both are refused now.
+  - Tab profiles were first one per slot, reused by the next tab of that slot, so a page
+    could leave files in the profile's folder for another site's page. Each process now
+    gets its own profile.
+  - Children started with `CREATE_NO_WINDOW` still got a console host process, which the
+    tab could open. They start detached now.
+  - `big_recv` allocated a message's full announced size (up to 256 MB) on its first
+    part. A tab could announce a huge message and stop, and push the storage service past
+    its 512 MB job limit, and the browser ends when a service does. The buffer now grows
+    with what arrives.
+- **Costs:**
+  - Starting a tab takes about 10 ms longer, for registering and deleting its profile
+    (ten tabs: 10.70 s against 10.60 s unconfined).
+  - A blank tab's memory is unchanged: 48.5 MB private either way.
+- **Tests:**
+  - The replays load the same through the sandboxed processes: Wikipedia 42,606 DOM nodes,
+    the YouTube watch page 7,471.
+  - Replays need fresh `browser_data`. Wikipedia keeps its modules in `localStorage`, so
+    after a live visit it asks for module versions the recording doesn't have.
+  - `proc_tests` (87 checks), the unit tests, the JIT tests and `chan_bench` pass.
+- **Not covered yet:**
+  - The UI is unconfined in scripted tests.
+  - Display lists with other tabs' resource ids wait for the GPU process (M5).
+  - CFG needs another toolchain.
+  - The network process can still read what the user can (section 6.4).
+
 **Not in M1** (later milestones, or not yet planned):
 - Typing into the page (forms, text fields).
 - `scroll` events and `window.scrollY` for the page.
 - `position: fixed` that stays put while scrolling.
 - Script-initiated navigation (`location = ...`).
 - Back and forward.
-- No sandbox yet (M3).
 
-**Escape tests.** A test build of `cb_tab.exe` with a hostile mode tries, from inside the
+**Escape tests** (done in M3 except where the GPU process is needed). A hostile tab tries, from inside the
 sandbox: to open files outside its folder (other sites' folders, the user's profile,
 `browser_data/ui`), with `..`, reparse points, hard links, short (8.3) names, and ADS
 (`file:stream`); to open sockets; to start a process; to open other tab processes, their
@@ -914,9 +1037,10 @@ coordinator, storage, network and GPU processes must stay up.
   each verified core small, pure and table-driven is what makes it tractable; it must stay
   that way as features are added, which means the shims and the unverified processes take the
   complexity.
-- **Undocumented corners of the Windows sandbox** (lowbox tokens without profiles, win32k
-  lockdown with our runtime libraries, swap chains on another process's windows). Each is
-  checked with a small spike before the milestone that needs it.
+- **Undocumented corners of the Windows sandbox.** Each is checked with a small spike before
+  the milestone that needs it. M3 settled two: AppContainers need registered profiles (one
+  per tab process, section 6.1), and win32k lockdown works with our runtime libraries once
+  they are linked statically. Swap chains on another process's windows remain, for M5.
 - **An interactive UI is new.** Windows, a tab strip, an address bar, and turning mouse and
   keyboard input into DOM events, scrolling and focus are needed for M1 and don't exist yet.
 

@@ -46,9 +46,6 @@ int big_recv(Chan *c, BigRx *rx) {
             uint32_t total;
             memcpy(&total, p, 4);
             if (total > BIG_MAX || n - 4 > total) return -1;
-            free(rx->buf);
-            rx->buf = (uint8_t *)malloc((size_t)total + 1);
-            if (!rx->buf) return -1;
             rx->type = rx->part.type;
             rx->total = total;
             rx->have = 0;
@@ -59,6 +56,16 @@ int big_recv(Chan *c, BigRx *rx) {
             return -1;
         }
         if (n > rx->total - rx->have) return -1;
+        /* The buffer grows with what arrives, not with what the sender
+         * claims: a peer that announces 256 MB and stops costs us little. */
+        if (rx->have + n + 1 > rx->cap) {
+            uint32_t cap = rx->cap ? rx->cap : 4096;
+            while (cap < rx->have + n + 1) cap = cap > BIG_MAX / 2 ? BIG_MAX + 1 : cap * 2;
+            uint8_t *nb = (uint8_t *)realloc(rx->buf, cap);
+            if (!nb) return -1;
+            rx->buf = nb;
+            rx->cap = cap;
+        }
         memcpy(rx->buf + rx->have, p, n);
         rx->have += n;
         if (rx->have == rx->total) {
@@ -72,5 +79,6 @@ int big_recv(Chan *c, BigRx *rx) {
 void big_free(BigRx *rx) {
     free(rx->buf);
     rx->buf = NULL;
+    rx->cap = 0;
     rx->busy = false;
 }

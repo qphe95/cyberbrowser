@@ -95,6 +95,18 @@ static void test_store(void) {
     CHECK(!store_allowed("https+a.com", "https+b.com", "x", 1));
     CHECK(store_allowed(NULL, "https+b.com", "cookies", 7));
     CHECK(!store_allowed(NULL, "https+b.com", "local_storage/x", 15));
+    CHECK(!store_allowed("https+a.com", "https+a.com", "cookies", 7));          /* HttpOnly cookies */
+    CHECK(store_allowed("https+a.com", "https+a.com", "x/cookies", 9));
+    CHECK(!rel_ok("cookies."));                                                    /* = "cookies" on Windows */
+    CHECK(!rel_ok("a./b"));
+    CHECK(rel_ok("a.b/c.d"));
+    CHECK(!rel_ok("nul"));
+    CHECK(!rel_ok("x/con.txt"));
+    CHECK(!rel_ok("com1"));
+    CHECK(!rel_ok("lpt9.log"));
+    CHECK(rel_ok("console"));
+    CHECK(rel_ok("com10"));
+    CHECK(rel_ok("nully"));
     CHECK(store_quota_ok(0, 0, 100));
     CHECK(store_quota_ok(STORE_QUOTA_BYTES, 100, 100));
     CHECK(!store_quota_ok(STORE_QUOTA_BYTES, 100, 101));

@@ -20,6 +20,7 @@ bool big_send(Chan *c, uint16_t type, const void *a, uint32_t alen, const void *
 typedef struct BigRx {
     uint16_t type;
     uint8_t *buf;                   /* the whole message, NUL-terminated after `total` */
+    uint32_t cap;                   /* bytes allocated at buf (a taker of buf zeroes both) */
     uint32_t total, have;
     bool busy;                      /* a message is being assembled */
     ChanMsg part;

@@ -277,6 +277,16 @@ char* platform_asset_read(const char *assetName, size_t *outSize) {
 
 static char g_media_save_path[MAX_PATH] = {0};
 
+/* SHGetFolderPathA, loaded when first needed: importing SHELL32 would load
+ * user32 and gdi32 into every process, which a tab's sandbox (win32k
+ * disabled) doesn't allow. */
+static HRESULT get_folder_path(int csidl, char *path) {
+    typedef HRESULT (WINAPI *GetFolderPathA)(HWND, int, HANDLE, DWORD, LPSTR);
+    HMODULE shell = LoadLibraryA("shell32.dll");
+    GetFolderPathA fn = shell ? (GetFolderPathA)(void *)GetProcAddress(shell, "SHGetFolderPathA") : NULL;
+    return fn ? fn(NULL, csidl, NULL, 0, path) : E_FAIL;
+}
+
 bool platform_media_save_init(const char *app_name, char *err, size_t err_len) {
     if (!app_name || !app_name[0]) {
         if (err && err_len > 0) snprintf(err, err_len, "app_name is null");
@@ -284,7 +294,7 @@ bool platform_media_save_init(const char *app_name, char *err, size_t err_len) {
     }
 
     char path[MAX_PATH];
-    HRESULT hr = SHGetFolderPathA(NULL, CSIDL_MYMUSIC, NULL, 0, path);
+    HRESULT hr = get_folder_path(CSIDL_MYMUSIC, path);
     if (FAILED(hr)) {
         /* Fallback to USERPROFILE\Music */
         const char *profile = getenv("USERPROFILE");
@@ -327,7 +337,7 @@ bool platform_media_save_init_video(const char *app_name, char *err, size_t err_
     }
 
     char path[MAX_PATH];
-    HRESULT hr = SHGetFolderPathA(NULL, CSIDL_MYVIDEO, NULL, 0, path);
+    HRESULT hr = get_folder_path(CSIDL_MYVIDEO, path);
     if (FAILED(hr)) {
         /* Fallback to USERPROFILE\Videos */
         const char *profile = getenv("USERPROFILE");

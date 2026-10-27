@@ -500,8 +500,8 @@ if(BE_PLATFORM_WINDOWS)
     target_link_libraries(chan_bench PRIVATE cb_ipc)
 
     # The coordinator: its core (coord_core.c) is pure C with no Win32 calls.
-    add_executable(cb_coord src/proc/coordinator.c src/proc/coord_core.c src/proc/site.c)
-    target_link_libraries(cb_coord PRIVATE cb_ipc)
+    add_executable(cb_coord src/proc/coordinator.c src/proc/coord_core.c src/proc/site.c src/proc/sandbox.c)
+    target_link_libraries(cb_coord PRIVATE cb_ipc userenv)
     target_compile_options(cb_coord PRIVATE -Wall -Wextra)
 
     # Tests of the pure parts: sites, the storage rules, the coordinator's core.
@@ -528,14 +528,28 @@ if(BE_PLATFORM_WINDOWS)
 
     # The network process: HTTP and TLS from the engine library, no JS.
     add_executable(cb_net src/proc/net_main.c)
-    target_include_directories(cb_net PRIVATE /src)
-    target_include_directories(cb_net BEFORE PRIVATE /src/win32)
+    target_include_directories(cb_net PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_include_directories(cb_net BEFORE PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/win32)
     target_link_libraries(cb_net PRIVATE cyberbrowser_lib cb_ipc)
 
     # The storage service: no engine.
     add_executable(cb_store src/proc/store_main.c src/proc/store_core.c src/proc/site.c)
     target_link_libraries(cb_store PRIVATE cb_ipc)
     target_compile_options(cb_store PRIVATE -Wall -Wextra)
+
+    # A hostile tab for the escape tests (SANDBOX_DESIGN.md section 11.1): run
+    # in a tab's sandbox, it tries to get out and reports what it reached.
+    add_executable(cb_escape src/proc/escape_main.c src/proc/site.c)
+    target_link_libraries(cb_escape PRIVATE cb_ipc ws2_32)
+    target_compile_options(cb_escape PRIVATE -Wall -Wextra)
+
+    # Sandboxed processes can't read DLLs outside System32 (the MinGW runtime
+    # in C:\msys64 included), so they link everything else statically.
+    if(MINGW)
+        foreach(t cb_coord cb_ui cb_tab cb_net cb_store cb_escape)
+            target_link_options(${t} PRIVATE -static)
+        endforeach()
+    endif()
 endif()
 
 # =============================================================================

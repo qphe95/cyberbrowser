@@ -228,6 +228,7 @@ static DWORD WINAPI reader(void *arg) {
             j->msg = rx.buf;                /* taken over */
             j->next = NULL;
             rx.buf = NULL;
+            rx.cap = 0;
             InterlockedIncrement(&c->refs);
             EnterCriticalSection(&g_jobs_lock);
             if (g_jobs_tail) g_jobs_tail->next = j; else g_jobs_head = j;

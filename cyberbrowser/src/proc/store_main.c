@@ -2,10 +2,12 @@
  * sections 2.5 and 3.3), the Win32 shim around store_core.c.
  *
  * Started by the coordinator with its control channel:
- *   cb_store.exe --chan S E0 E1
+ *   cb_store.exe --chan S E0 E1 [--root HEX]
  *
- * Owns browser_data/sites/ next to the executables (or, if that can't be
- * written, %LOCALAPPDATA%\cyberbrowser\browser_data\sites).  The coordinator
+ * Owns browser_data/sites/: the folder --root names (UTF-8, as hex), which
+ * the coordinator made and gave the sandboxed service access to; without
+ * it, next to the executables (or, if that can't be written,
+ * %LOCALAPPDATA%\cyberbrowser\browser_data\sites).  The coordinator
  * grants it a channel per tab, badged with the tab's site, and one to the
  * network process.  A client names files by paths relative to its site's
  * folder; store_core.c decides what is allowed, and every file is opened
@@ -76,8 +78,25 @@ static bool final_path(HANDLE h, wchar_t *out, DWORD cap) {
     return n > 0 && n < cap;
 }
 
-static bool init_root(void) {
-    if (!make_root(spawn_exe_dir())) {
+/* The root the coordinator chose (hex of UTF-8), made and granted to us. */
+static bool given_root(const char *hex) {
+    char utf8[MAX_PATH * 3];
+    size_t n = strlen(hex) / 2;
+    if (n == 0 || n >= sizeof(utf8)) return false;
+    for (size_t i = 0; i < n; i++) {
+        unsigned v;
+        if (sscanf(hex + 2 * i, "%2x", &v) != 1) return false;
+        utf8[i] = (char)v;
+    }
+    utf8[n] = 0;
+    return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, -1, g_root, MAX_PATH) > 0 &&
+           writable_dir(g_root);
+}
+
+static bool init_root(const char *root_hex) {
+    if (root_hex) {
+        if (!given_root(root_hex)) return false;
+    } else if (!make_root(spawn_exe_dir())) {
         wchar_t base[MAX_PATH];
         DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH - 32);
         if (n == 0 || n >= MAX_PATH - 32) return false;
@@ -315,7 +334,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "cb_store: bad arguments\n");
         return 1;
     }
-    if (!init_root()) { fprintf(stderr, "cb_store: no writable browser_data\n"); return 1; }
+    const char *root_hex = argc >= 7 && !strcmp(argv[5], "--root") ? argv[6] : NULL;
+    if (!init_root(root_hex)) { fprintf(stderr, "cb_store: no writable browser_data\n"); return 1; }
     static ChanMsg m;
     for (;;) {
         /* Everyone's messages, then sleep until one more arrives. */

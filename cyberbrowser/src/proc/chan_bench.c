@@ -99,7 +99,7 @@ int main(int argc, char **argv) {
     snprintf(args, sizeof(args), "--child %llu %llu %llu", spawn_handle_arg(c.section),
              spawn_handle_arg(c.ev[0]), spawn_handle_arg(c.ev[1]));
     HANDLE inh[3] = { c.section, c.ev[0], c.ev[1] };
-    HANDLE proc = spawn_child(L"chan_bench.exe", args, inh, 3, NULL, NULL, 0);
+    HANDLE proc = spawn_child(L"chan_bench.exe", args, inh, 3, NULL, NULL, 0, NULL);
     if (!proc) return 1;
 
     static ChanMsg m;

@@ -287,6 +287,7 @@ static DWORD WINAPI net_receiver(void *arg) {
             p->len = rx.total;
             p->done = true;
             rx.buf = NULL;
+            rx.cap = 0;
             break;
         }
         WakeAllConditionVariable(&g_net_cv);
@@ -543,7 +544,8 @@ int main(int argc, char **argv) {
     memory_report("at start");
 
     send_state(TAB_LOADING);
-    if (!platform_init() || !platform_http_init() || !page_engine_init(NULL)) {
+    /* No platform_init: it only starts Winsock, which the sandbox refuses. */
+    if (!page_engine_init(NULL)) {
         send_state(TAB_LOAD_FAILED);
         return 1;
     }
