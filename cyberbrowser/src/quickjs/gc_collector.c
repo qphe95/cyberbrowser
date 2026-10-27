@@ -39,10 +39,10 @@ GCCollector g_col;
 void gc_core_config_defaults(void) {
     GCConfig *c = &g_core.config;
     c->background = true;
-    c->nursery = true;
+    c->nursery = false;     /* QJS_GC_NURSERY=1: generational (slower on the replays: JS_PERF_DESIGN 5.7) */
     c->boundary_budget_us = 500;
     c->nursery_size = 4u << 20;
-    c->major_trigger = 32u << 20;
+    c->major_trigger = 128u << 20;  /* fewer concurrent cycles: JS_PERF_DESIGN 5.7 */
     const char *vf = getenv("QJS_GC_VERIFY");
     c->verify = !vf ? 0 : atoi(vf) >= 2 ? 2 : 1;
     c->stress = 0;

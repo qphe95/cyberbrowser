@@ -817,6 +817,64 @@ makes it lazily (`JS_PROP_AUTOINIT`), which this engine disabled for the moving 
 Making it lazy again would remove a sixth of the page's object allocations. It goes in N2
 with allocation.
 
+### 5.7 Allocation, collection and calls (after N5)
+
+With T1 and T2 off (both are by default: `QJS_JIT=1`, `QJS_T2=1` turn them on), the
+interpreter's own costs on the replays were measured again. On yt-search the "GC" slice of the
+JavaScript thread was 21% (629 ms), but little of it was collecting: the collector runs on its
+own thread, and the JavaScript thread spent 66 ms in its steps and waits. The rest was the
+allocation path, the first touch of new objects, and the indirect cost of a collector thread
+that ran nearly as much as the page (2.5 s of CPU on yt-search) and competed for the caches.
+`QJS_GC_ALLOC_STATS=1` counted 8.3M allocations, 457 MB, in one yt-search load: objects 2.8M
+(200 MB), strings 1.2M (91 MB), closure-variable references 1.05M, property-array growth
+0.8M, closures' reference arrays 0.46M.
+
+- **The young generation is off.** With `QJS_GC_NURSERY=1` (the old default) yt-search ran 50
+  minor cycles, 47 ms each on the collector thread, and 7 major ones; without it, 20 major
+  cycles and 25% less collector work, and every recording loaded faster (medians over 5
+  runs: yt-dQw4w9WgXcQ −7.7%, yt-home −6.4%, yt-search −6.1%, wiki-us −1.3%, news-bbc −2.2%)
+  at the same peak memory (1.14 GB on yt-search, 0.48 GB on wiki-us). A minor cycle here
+  costs nearly what a major one does, so it did not pay; making minor cycles cheap is the
+  way back to a generational heap.
+- **A major cycle starts every 128 MB of allocation** (`QJS_GC_MAJOR_KB`; was 32 MB): fewer
+  concurrent cycles, −2% to −5% on the YouTube recordings, for 37 MB more at peak on
+  yt-search (+3%) and about none on wiki-us.
+- **Closure-variable references are made when a closure takes one.** `js_bc_frame_enter`
+  made a var_ref for every captured argument and local at every call of a function that
+  has any, and detached them all at its return, whether or not a closure was made.
+  `get_var_ref_enhanced`, which closures use, already makes them on demand.
+  `QJS_EAGER_VAR_REFS=1` brings the old behaviour back; the final DOM of all five
+  recordings is the same either way. On a function that captures but rarely makes a
+  closure, 2M calls took 124 ms before and 73 ms after.
+- **Calls take the inline frame setup.** `JS_CallInternal` now enters frames through
+  `js_bc_frame_enter_pooled` (the JS stack, else the pooled heap frame of the call's depth,
+  set up from the bytecode read once, with no `memset` calls), as compiled code's calls
+  already did, and that path now also takes functions with captured variables: their
+  var_refs array starts empty.
+- **Smaller things:** a new closure's `length` and `name` are added directly (it has
+  neither), not defined through a lookup; the call's stack check uses the runtime it already
+  has instead of an out-of-line `JS_GetRuntime`. A closure made at every call: 262 ms →
+  221 ms for 1M calls.
+
+| Median of 5 runs, Mcycles | Before (`QJS_GC_NURSERY=1 QJS_GC_MAJOR_KB=32768 QJS_EAGER_VAR_REFS=1`) | After | Change |
+|---|---|---|---|
+| yt-dQw4w9WgXcQ | 10,385 | 9,162 | **−11.8%** |
+| yt-home | 4,649 | 4,234 | **−8.9%** |
+| yt-search | 12,290 | 10,960 | **−10.8%** |
+| wiki-us | 4,219 | 4,141 | −1.8% |
+| news-bbc | 696 | 697 | ±0 |
+
+Both settings ran in the same binary, so the table leaves out the two smaller changes and
+the operand-stack fix of section 6.7 (which had made the interpreter 6–7% faster before
+this). Since the start of N5's measurements the interpreter went from 14.9 to 11.0 Gcycles
+on yt-search (−26%). On yt-search the JavaScript thread's "GC" slice is now 322 ms (13%),
+most of it the first touch of objects through their handles and the allocation path.
+
+What was not done: allocation sinking and inlining in T2 (6.3) wait for T2 to be on; card
+marking on every heap store could stop outside marking cycles; objects that grow their
+property arrays (0.8M resizes) could start with more room; the per-call frame setup is now
+mostly the frame's own fields.
+
 ## 6. The optimizer
 
 V8 runs four tiers: Ignition, Sparkplug, Maglev and TurboFan. JavaScriptCore and SpiderMonkey

@@ -6652,6 +6652,28 @@ static void js_function_set_properties(JSContextHandle ctx, GCValue func_obj,
                            JS_AtomToString(ctx, name), JS_PROP_CONFIGURABLE);
 }
 
+/* js_function_set_properties of a function object just made, which has
+ * neither property: added directly (each through its shape's cached
+ * transition), without looking them up first.  -1 when out of memory. */
+static int js_function_add_properties(JSContextHandle ctx, GCValue func_obj,
+                                      JSAtom name, int len)
+{
+    JSObjectHandle p = JS_VALUE_GET_OBJ(func_obj);
+    JSProperty *pr = add_property(ctx, p, JS_ATOM_length, JS_PROP_CONFIGURABLE);
+    if (unlikely(!pr))
+        return -1;
+    gc_set_heap_value(&pr->u.value, JS_NewInt32(ctx, len));
+    GCValue str = JS_AtomToString(ctx, name);
+    if (unlikely(JS_IsException(str)))
+        return -1;
+    pr = add_property(ctx, p, JS_ATOM_name, JS_PROP_CONFIGURABLE);
+    if (unlikely(!pr))
+        return -1;
+    gc_set_heap_value(&pr->u.value, str);
+    gc_write_barrier(SAFE_HANDLE(p), GC_VALUE_GET_HANDLE(str));
+    return 0;
+}
+
 static BOOL js_class_has_bytecode(JSClassID class_id)
 {
     return (class_id == JS_CLASS_BYTECODE_FUNCTION ||
@@ -19717,8 +19739,9 @@ static GCValue js_closure(JSContextHandle ctx, GCValue bfunc,
     name_atom = SAFE_GET_OR(b, JSFunctionBytecodeHandle, func_name, 0);
     if (name_atom == JS_ATOM_NULL)
         name_atom = JS_ATOM_empty_string;
-    js_function_set_properties(ctx, func_obj, name_atom,
-                               SAFE_GET_OR(b, JSFunctionBytecodeHandle, defined_arg_count, 0));
+    if (js_function_add_properties(ctx, func_obj, name_atom,
+                                   SAFE_GET_OR(b, JSFunctionBytecodeHandle, defined_arg_count, 0)))
+        goto fail;
 
     if (SAFE_GET_OR(b, JSFunctionBytecodeHandle, func_kind, 0) & JS_FUNC_GENERATOR) {
         GCValue proto = GC_UNDEFINED;
@@ -19934,6 +19957,11 @@ JSStackFrame *js_frame_deref(GCHandle frame_handle)
  * exception to handle, or JSOP_NEXT: run from F->pc). */
 #define JS_CALL_FLAG_JIT_CONTINUE (1 << 4)
 
+/* QJS_EAGER_VAR_REFS=1: make every captured variable's var_ref when its
+ * function is called, as before (they are otherwise made when a closure
+ * takes them, get_var_ref_enhanced). */
+static int g_eager_var_refs = -1;
+
 static JSStackFrame *js_alloc_bytecode_frame(JSContextHandle ctx, JSFunctionBytecodeHandle b,
                                              int arg_count, int var_count, int stack_size, int var_ref_count,
                                              GCValue **parg_buf, GCValue **pvar_buf, GCValue **pstack_buf,
@@ -19986,12 +20014,15 @@ JSStackFrame *js_bc_frame_enter(JSContextHandle caller_ctx, JSRuntimeHandle rt, 
         gc_set_heap_handle(&sf_var_refs[i], GC_HANDLE_NULL);
 
     /*
-     * Pre-initialize var_refs for captured arguments and variables.
-     * This ensures nested functions defined early in parent can capture them.
-     * This is critical for deeply nested IIFE patterns like Web Animations polyfill.
-     * (Only a function with var_refs has any.)
+     * Pre-initialize var_refs for captured arguments and variables
+     * (QJS_EAGER_VAR_REFS=1 only).  By default a closure that captures one
+     * makes it (get_var_ref_enhanced), so a call that creates no closure
+     * allocates none: on the YouTube replays a million calls made var_refs
+     * nothing took.
      */
-    if (SAFE_GET_OR(b, JSFunctionBytecodeHandle, var_ref_count, 0) != 0) {
+    if (unlikely(g_eager_var_refs < 0))
+        g_eager_var_refs = getenv("QJS_EAGER_VAR_REFS") != NULL;
+    if (unlikely(g_eager_var_refs) && SAFE_GET_OR(b, JSFunctionBytecodeHandle, var_ref_count, 0) != 0) {
         JSBytecodeVarDef *vardefs = b_vardefs(b);
 
         /* First, initialize captured arguments */
@@ -20170,10 +20201,12 @@ JSStackFrame *js_stack_frame_enter(JSRuntimeHandle rt, JSObjectHandle p, JSFunct
     return sf;
 }
 
-/* js_bc_frame_enter for a function with no captured variables whose frame
- * fits the pooled frame of its depth, which is nearly every call compiled
- * code makes: the same frame, set up from the bytecode (bp) read once.
- * NULL, having changed nothing, when it does not apply. */
+/* js_bc_frame_enter for a frame that goes on the JS stack, or fits the
+ * pooled frame of its depth, which is nearly every call: the same frame,
+ * set up from the bytecode (bp) read once.  A function with captured
+ * variables gets its var_refs array cleared (closures make them as they
+ * take them, get_var_ref_enhanced).  NULL, having changed nothing, when it
+ * does not apply. */
 static inline __attribute__((always_inline))
 JSStackFrame *js_bc_frame_enter_pooled(JSRuntimeHandle rt, JSObjectHandle p, JSFunctionBytecodeHandle b,
                                        const JSFunctionBytecode *bp, GCValue func_obj, int argc, GCValue *argv,
@@ -20182,20 +20215,24 @@ JSStackFrame *js_bc_frame_enter_pooled(JSRuntimeHandle rt, JSObjectHandle p, JSF
     const size_t frame_size = sizeof(JSStackFrame);
     int depth = g_bc_frame_depth;
     int arg_count = bp->arg_count, var_count = bp->var_count, stack_size = bp->stack_size;
+    int var_ref_count = bp->var_ref_count;
     size_t stack_buf_size = sizeof(GCValue) * stack_size;
-    size_t total_size = frame_size + sizeof(GCValue) * (arg_count + var_count) + stack_buf_size;
+    size_t refs_offset = frame_size + sizeof(GCValue) * (arg_count + var_count) + stack_buf_size;
+    size_t total_size = refs_offset + sizeof(GCHandle) * var_ref_count;
     JSRuntime *rtp;
     JSStackFrame *sf;
     GCValue *arg_buf, *var_buf, *stack_buf;
-    GCHandle handle;
+    GCHandle handle, *refs;
     uint8_t *mem;
     int i, n;
 
     if (js_bc_stack_frame_ok(b, (JSFunctionBytecode *)bp) &&
         (sf = js_stack_frame_enter(rt, p, b, bp, func_obj, argc, argv, F)))
         return sf;
-    if (bp->var_ref_count != 0 || depth >= BC_FRAME_POOL_DEPTH || g_bc_frame_pool_size[depth] < total_size ||
-        unlikely(g_c_frame_pool_epoch != g_gc_epoch))
+    if (unlikely(g_eager_var_refs < 0))
+        g_eager_var_refs = getenv("QJS_EAGER_VAR_REFS") != NULL;
+    if ((var_ref_count != 0 && g_eager_var_refs) || depth >= BC_FRAME_POOL_DEPTH ||
+        g_bc_frame_pool_size[depth] < total_size || unlikely(g_c_frame_pool_epoch != g_gc_epoch))
         return NULL;
     CC_INC(frame_pooled);
     rtp = GC_DEREF_H(rt, JSRuntimeHandle);
@@ -20220,15 +20257,21 @@ JSStackFrame *js_bc_frame_enter_pooled(JSRuntimeHandle rt, JSObjectHandle p, JSF
             q[1] = 0;
         __asm__("" ::: "memory");
     }
+    refs = (GCHandle *)(mem + refs_offset);
+    for (i = 0; i < var_ref_count; i++) {
+        refs[i] = GC_HANDLE_NULL;
+        __asm__("" ::: "memory");
+    }
     sf->self_handle = handle;
     sf->bytecode_handle = b;
     sf->arg_buf_offset = (uint32_t)frame_size;
     sf->var_buf_offset = (uint32_t)((uint8_t *)var_buf - mem);
     sf->stack_buf_offset = (uint32_t)((uint8_t *)stack_buf - mem);
-    sf->var_refs_offset = (uint32_t)total_size;
+    sf->var_refs_offset = (uint32_t)refs_offset;
     sf->arg_count = arg_count;
     sf->var_count = var_count;
     sf->stack_size = stack_size;
+    sf->var_ref_count = var_ref_count;
     sf->js_mode = bp->js_mode;
     sf->cur_func = func_obj;
     sf->prev_frame = rtp->current_frame;
@@ -20249,7 +20292,7 @@ JSStackFrame *js_bc_frame_enter_pooled(JSRuntimeHandle rt, JSObjectHandle p, JSF
     F->arg_buf = arg_buf;
     F->var_buf = var_buf;
     F->stack_buf = stack_buf;
-    F->sf_var_refs = (GCHandle *)(mem + total_size);
+    F->sf_var_refs = refs;
     F->sp = stack_buf;
     F->var_refs_handle = SAFE_GET_OR(p, JSObjectHandle, u.func.var_refs_handle, GC_HANDLE_NULL);
     F->var_refs = (JSVarRefHandle *)gc_deref(F->var_refs_handle);
@@ -21292,7 +21335,7 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
     /* Frames live on the GC heap, but every call still recurses on the C
      * stack (JS_CallInternal -> JS_CallInternal), so check it here as
      * upstream does: runaway recursion must throw RangeError, not crash. */
-    if (js_check_stack_overflow(JS_GetRuntime(caller_ctx), 0))
+    if (js_check_stack_overflow(rt, 0))     /* rt: caller_ctx's */
         return JS_ThrowStackOverflow(caller_ctx);
 
     if (unlikely(flags & JS_CALL_FLAG_JIT_CONTINUE)) {
@@ -21464,13 +21507,10 @@ static GCValue JS_CallInternal(JSContextHandle caller_ctx, GCValue func_obj,
     {
         JSInterpFrame E;
         JSFunctionBytecode *ebp = GC_DEREF_H(b, JSFunctionBytecodeHandle);
-        sf = NULL;
-        if (js_bc_stack_frame_ok(b, ebp)) {
-            sf = js_stack_frame_enter(rt, p, b, ebp, func_obj, argc, argv, &E);
-            if (sf)
-                E.pc = js_bc_byte_code_buf(b);
-        }
-        if (!sf)
+        sf = js_bc_frame_enter_pooled(rt, p, b, ebp, func_obj, argc, argv, &E);
+        if (sf)
+            E.pc = js_bc_byte_code_buf(b);
+        else
             sf = js_bc_frame_enter(caller_ctx, rt, p, b, func_obj, argc, argv, &E);
         if (!sf)
             return JS_EXCEPTION;
