@@ -1,5 +1,5 @@
 /* MSE media buffers: segment framing, demux to samples, buffered ranges and
- * on-demand video decode (media_buffer.h). */
+ * video decode on a worker thread (media_buffer.h). */
 #include "media_buffer.h"
 
 #include <ctype.h>
@@ -65,6 +65,7 @@ double media_buffer_duration(const MediaBuffer *mb) { (void)mb; return 0.0; }
 void media_buffer_video_size(const MediaBuffer *mb, int *w, int *h) { (void)mb; *w = *h = 0; }
 bool media_buffer_frame_at(MediaBuffer *mb, double t, const uint8_t **p, int *w, int *h, uint64_t *id)
 { (void)mb; (void)t; (void)p; (void)w; (void)h; (void)id; return false; }
+void media_buffer_prefetch(MediaBuffer *mb, double t) { (void)mb; (void)t; }
 
 #else
 
@@ -72,6 +73,7 @@ bool media_buffer_frame_at(MediaBuffer *mb, double t, const uint8_t **p, int *w,
 #include <libavformat/avformat.h>
 #include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
+#include <pthread.h>
 
 bool media_available(void) { return true; }
 
@@ -102,17 +104,38 @@ struct MediaBuffer {
     int nranges;
     bool ranges_dirty;
 
-    /* Video decode. */
+    /* Video decode, on the buffer's worker thread (started at the first
+     * frame asked for).  It decodes the frame painting asks for and the
+     * next few after it into slots, so that the next paint finds its frame
+     * there; painting waits only for a frame not decoded yet.  mu guards
+     * the samples (appends and removals happen on the JS thread, the
+     * worker feeds the decoder from them), the slots and the request; the
+     * decoder state is the worker's alone. */
+    pthread_mutex_t mu;
+    pthread_cond_t wake;        /* worker: a request, a reset, stop */
+    pthread_cond_t ready;       /* painting: a frame published, or the worker gave up */
+    pthread_t worker;
+    bool worker_on, stop;
+    bool reset;                 /* the samples changed: decode from a keyframe again */
+    int64_t want;               /* us: the frame asked for (INT64_MIN = none) */
+    bool want_failed;           /* the worker could not produce it */
+    uint64_t gen;               /* bumped by each request */
     AVCodecContext *dec;
     int next_feed;              /* index of the next sample to send, -1 = reset */
     int64_t last_out_pts;       /* us, of the newest frame received */
     AVFrame *frame;
     struct SwsContext *sws;
-    uint8_t *rgba;
-    int rgba_w, rgba_h;
-    int64_t rgba_pts;           /* us, INT64_MIN = none */
+    struct VFrame {
+        uint8_t *rgba;
+        int w, h;
+        int64_t pts;            /* us, INT64_MIN = empty */
+        uint64_t id;
+    } slot[4];
+    int shown;                  /* the slot painting holds (until its next call), -1 */
     uint64_t frame_id;
 };
+#define VSLOTS 4
+#define VAHEAD 3    /* frames decoded past the one asked for */
 
 #define US 1000000.0
 
@@ -346,7 +369,9 @@ static void read_init(MediaBuffer *mb)
     close_demux(fmt);
 }
 
-static void decoder_reset(MediaBuffer *mb) { mb->next_feed = -1; }
+/* The samples changed (JS thread, mu held): the worker starts again from a
+ * keyframe. */
+static void decoder_reset(MediaBuffer *mb) { mb->reset = true; }
 
 static int sample_dts_cmp(const void *a, const void *b)
 {
@@ -435,7 +460,9 @@ static bool demux_media(MediaBuffer *mb, const uint8_t *data, size_t len, double
             if (ns[j].pts > ns[i].pts + 1e-9 && ns[j].pts < next) next = ns[j].pts;
         ns[i].dur = next < 1e299 && next - ns[i].pts < 1.0 ? next - ns[i].pts : fallback_dur;
     }
+    pthread_mutex_lock(&mb->mu);
     add_samples(mb, ns, nn);
+    pthread_mutex_unlock(&mb->mu);
     free(ns);
     return true;
 }
@@ -450,7 +477,12 @@ MediaBuffer *media_buffer_create(const char *mime)
     if (mime && strncasecmp(mime, "video", 5) == 0) mb->kind = MEDIA_KIND_VIDEO;
     else if (mime && strncasecmp(mime, "audio", 5) == 0) mb->kind = MEDIA_KIND_AUDIO;
     mb->next_feed = -1;
-    mb->rgba_pts = INT64_MIN;
+    pthread_mutex_init(&mb->mu, NULL);
+    pthread_cond_init(&mb->wake, NULL);
+    pthread_cond_init(&mb->ready, NULL);
+    mb->want = INT64_MIN;
+    mb->shown = -1;
+    for (int i = 0; i < VSLOTS; i++) mb->slot[i].pts = INT64_MIN;
     return mb;
 }
 
@@ -462,16 +494,40 @@ static void decoder_free(MediaBuffer *mb)
     mb->next_feed = -1;
 }
 
+/* Stop the worker and wait for it (JS thread): the decoder is then free to
+ * change, and the slots to go. */
+static void worker_stop(MediaBuffer *mb)
+{
+    if (!mb->worker_on) return;
+    pthread_mutex_lock(&mb->mu);
+    mb->stop = true;
+    pthread_cond_broadcast(&mb->wake);
+    pthread_mutex_unlock(&mb->mu);
+    pthread_join(mb->worker, NULL);
+    mb->worker_on = false;
+    mb->stop = false;
+}
+
+static void slots_clear(MediaBuffer *mb)
+{
+    for (int i = 0; i < VSLOTS; i++) mb->slot[i].pts = INT64_MIN;
+    mb->shown = -1;
+}
+
 void media_buffer_destroy(MediaBuffer *mb)
 {
     if (!mb) return;
+    worker_stop(mb);
     for (int i = 0; i < mb->n; i++) free(mb->s[i].data);
     free(mb->s);
     free(mb->init);
     free(mb->pending);
     free(mb->ranges);
-    free(mb->rgba);
+    for (int i = 0; i < VSLOTS; i++) free(mb->slot[i].rgba);
     decoder_free(mb);
+    pthread_mutex_destroy(&mb->mu);
+    pthread_cond_destroy(&mb->wake);
+    pthread_cond_destroy(&mb->ready);
     if (mb->par) avcodec_parameters_free(&mb->par);
     free(mb);
 }
@@ -497,7 +553,10 @@ bool media_buffer_append(MediaBuffer *mb, const uint8_t *data, size_t len, doubl
         if (mb->init) {
             memcpy(mb->init, buf, init_end);
             mb->init_len = init_end;
+            /* a new stream: the worker's decoder and frames go */
+            worker_stop(mb);
             decoder_free(mb);
+            slots_clear(mb);
             read_init(mb);
         }
     }
@@ -524,6 +583,7 @@ void media_buffer_reset_parser(MediaBuffer *mb)
 void media_buffer_remove(MediaBuffer *mb, double start, double end)
 {
     if (!mb || end <= start) return;
+    pthread_mutex_lock(&mb->mu);
     int w = 0;
     for (int i = 0; i < mb->n; i++) {
         if (mb->s[i].pts >= start && mb->s[i].pts < end) { free(mb->s[i].data); continue; }
@@ -534,6 +594,7 @@ void media_buffer_remove(MediaBuffer *mb, double start, double end)
         mb->ranges_dirty = true;
         decoder_reset(mb);
     }
+    pthread_mutex_unlock(&mb->mu);
 }
 
 static int range_cmp(const void *a, const void *b)
@@ -601,21 +662,22 @@ static bool decoder_open(MediaBuffer *mb)
     return mb->frame != NULL;
 }
 
-static bool frame_to_rgba(MediaBuffer *mb, const AVFrame *f)
+/* f as RGBA into slot v (worker). */
+static bool frame_to_rgba(MediaBuffer *mb, const AVFrame *f, struct VFrame *v)
 {
     int w = f->width, h = f->height;
     if (w <= 0 || h <= 0) return false;
     mb->sws = sws_getCachedContext(mb->sws, w, h, (enum AVPixelFormat)f->format,
                                    w, h, AV_PIX_FMT_RGBA, SWS_BILINEAR, NULL, NULL, NULL);
     if (!mb->sws) return false;
-    if (w != mb->rgba_w || h != mb->rgba_h) {
-        free(mb->rgba);
-        mb->rgba = malloc((size_t)w * (size_t)h * 4);
-        if (!mb->rgba) { mb->rgba_w = mb->rgba_h = 0; return false; }
-        mb->rgba_w = w;
-        mb->rgba_h = h;
+    if (w != v->w || h != v->h || !v->rgba) {
+        free(v->rgba);
+        v->rgba = malloc((size_t)w * (size_t)h * 4);
+        if (!v->rgba) { v->w = v->h = 0; return false; }
+        v->w = w;
+        v->h = h;
     }
-    uint8_t *dst[4] = { mb->rgba, NULL, NULL, NULL };
+    uint8_t *dst[4] = { v->rgba, NULL, NULL, NULL };
     int stride[4] = { w * 4, 0, 0, 0 };
     sws_scale(mb->sws, (const uint8_t *const *)f->data, f->linesize, 0, h, dst, stride);
     return true;
@@ -626,72 +688,242 @@ static int64_t frame_pts(const AVFrame *f)
     return f->best_effort_timestamp != AV_NOPTS_VALUE ? f->best_effort_timestamp : f->pts;
 }
 
-bool media_buffer_frame_at(MediaBuffer *mb, double t, const uint8_t **rgba, int *w, int *h,
-                           uint64_t *frame_id)
+/* The pts (us) of the sample on screen at t: the latest one presented by
+ * then, the first one when t precedes everything buffered; INT64_MIN when
+ * there is none.  mu held. */
+static int64_t sample_at(const MediaBuffer *mb, double t)
 {
-    if (!mb || mb->kind != MEDIA_KIND_VIDEO || mb->n == 0 || !decoder_open(mb)) return false;
-    /* The sample on screen at t: the latest one presented by then (the
-     * first one when t precedes everything buffered). */
     int target = -1;
     for (int i = 0; i < mb->n; i++)
         if (mb->s[i].pts <= t + 1e-6 && (target < 0 || mb->s[i].pts > mb->s[target].pts)) target = i;
-    if (target < 0) {
-        target = 0;
-        for (int i = 1; i < mb->n; i++) if (mb->s[i].pts < mb->s[target].pts) target = i;
-    }
-    int64_t want = (int64_t)llround(mb->s[target].pts * US);
-    if (mb->rgba && mb->rgba_pts == want) goto out;
+    if (target < 0)
+        for (int i = 0; i < mb->n; i++) if (target < 0 || mb->s[i].pts < mb->s[target].pts) target = i;
+    return target < 0 ? INT64_MIN : (int64_t)llround(mb->s[target].pts * US);
+}
 
-    /* Decode from the keyframe at or before the target, unless the decoder
-     * is already on the way there. */
-    int key = 0;
-    for (int i = 0; i <= target; i++) if (mb->s[i].key) key = i;
-    if (mb->next_feed < 0 || mb->next_feed <= key || mb->last_out_pts > want) {
-        avcodec_flush_buffers(mb->dec);
-        mb->next_feed = key;
-        mb->last_out_pts = INT64_MIN;
+/* The slot holding the frame of pts want, or -1.  mu held. */
+static int slot_of(const MediaBuffer *mb, int64_t want)
+{
+    for (int i = 0; i < VSLOTS; i++)
+        if (mb->slot[i].pts != INT64_MIN && llabs(mb->slot[i].pts - want) <= 1000) return i;
+    return -1;
+}
+
+/* A slot to decode into: an empty one, else the oldest frame that is not
+ * shown and not the one asked for; -1 when the frames ahead fill them all.
+ * mu held. */
+static int slot_free(const MediaBuffer *mb)
+{
+    int best = -1;
+    for (int i = 0; i < VSLOTS; i++) {
+        if (i == mb->shown) continue;
+        if (mb->slot[i].pts == INT64_MIN) return i;
+        if (llabs(mb->slot[i].pts - mb->want) <= 1000) continue;
+        if (mb->slot[i].pts > mb->want) continue;   /* ahead: still wanted */
+        if (best < 0 || mb->slot[i].pts < mb->slot[best].pts) best = i;
     }
+    return best;
+}
+
+/* Frames decoded past the one asked for, still in the slots.  mu held. */
+static int slots_ahead(const MediaBuffer *mb)
+{
+    int n = 0;
+    for (int i = 0; i < VSLOTS; i++)
+        if (mb->slot[i].pts != INT64_MIN && mb->slot[i].pts > mb->want + 1000) n++;
+    return n;
+}
+
+/* The worker: decode toward the frame asked for, then a few past it.  The
+ * decoder is fed from the samples under mu (send_packet copies the data);
+ * decoding and the RGBA conversion run unlocked. */
+static void *worker_main(void *arg)
+{
+    MediaBuffer *mb = arg;
     AVPacket *pkt = av_packet_alloc();
-    if (!pkt) return false;
-    bool got = false, draining = false;
-    int64_t best = INT64_MIN;
-    while (!got) {
-        int r = avcodec_receive_frame(mb->dec, mb->frame);
-        if (r == 0) {
-            int64_t fp = frame_pts(mb->frame);
-            mb->last_out_pts = fp;
-            if (fp <= want + 1000 && fp >= best) {
-                best = fp;
-                if (frame_to_rgba(mb, mb->frame)) { mb->rgba_pts = fp; mb->frame_id++; }
-            }
-            if (fp >= want - 1000) got = true;
-            av_frame_unref(mb->frame);
+    AVFrame *tmp = av_frame_alloc(), *prev = av_frame_alloc();
+    bool drained = false;       /* sent the end of data: no more packets until a flush */
+    if (!pkt || !tmp || !prev) {
+        pthread_mutex_lock(&mb->mu);
+        mb->want_failed = true;
+        pthread_cond_broadcast(&mb->ready);
+        while (!mb->stop) pthread_cond_wait(&mb->wake, &mb->mu);
+        pthread_mutex_unlock(&mb->mu);
+        av_packet_free(&pkt);
+        av_frame_free(&tmp);
+        av_frame_free(&prev);
+        return NULL;
+    }
+    pthread_mutex_lock(&mb->mu);
+    while (!mb->stop) {
+        int64_t want = mb->want;
+        bool have = want != INT64_MIN && slot_of(mb, want) >= 0;
+        if (want == INT64_MIN || mb->want_failed || (have && (slots_ahead(mb) >= VAHEAD || slot_free(mb) < 0))) {
+            pthread_cond_wait(&mb->wake, &mb->mu);
             continue;
         }
-        if (r == AVERROR_EOF) { decoder_reset(mb); break; }
-        if (r != AVERROR(EAGAIN)) break;
-        if (draining) break;
-        if (mb->next_feed < mb->n) {
-            const Sample *s = &mb->s[mb->next_feed++];
-            pkt->data = s->data;
-            pkt->size = s->size;
-            pkt->pts = (int64_t)llround(s->pts * US);
-            pkt->dts = (int64_t)llround(s->dts * US);
-            pkt->flags = s->key ? AV_PKT_FLAG_KEY : 0;
-            avcodec_send_packet(mb->dec, pkt);
-        } else {
+        uint64_t gen = mb->gen;
+        if (!have) {
+            /* From the keyframe at or before the frame asked for, unless the
+               decoder is already on the way there. */
+            int key = 0, target = -1;
+            for (int i = 0; i < mb->n; i++)
+                if (llabs((int64_t)llround(mb->s[i].pts * US) - want) <= 1000) { target = i; break; }
+            for (int i = 0; target >= 0 && i <= target; i++) if (mb->s[i].key) key = i;
+            if (target < 0) { mb->want_failed = true; pthread_cond_broadcast(&mb->ready); continue; }
+            if (mb->reset || mb->next_feed < 0 || mb->next_feed <= key || mb->last_out_pts > want) {
+                mb->reset = false;
+                pthread_mutex_unlock(&mb->mu);
+                avcodec_flush_buffers(mb->dec);
+                pthread_mutex_lock(&mb->mu);
+                mb->next_feed = key;
+                mb->last_out_pts = INT64_MIN;
+                drained = false;
+                av_frame_unref(prev);
+            }
+        } else if (mb->reset) {
+            /* the samples changed under frames decoded ahead: start over at
+               the next request */
+            mb->reset = false;
+            mb->next_feed = -1;
+            continue;
+        }
+        /* One step: a frame out, else a packet in. */
+        pthread_mutex_unlock(&mb->mu);
+        int r = avcodec_receive_frame(mb->dec, tmp);
+        pthread_mutex_lock(&mb->mu);
+        if (r == 0) {
+            int64_t fp = frame_pts(tmp);
+            mb->last_out_pts = fp;
+            if (fp < want - 1000) {
+                /* before the frame asked for: kept (by reference) in case
+                   the data ends before it, when it is what shows */
+                if (gen == mb->gen) {
+                    av_frame_unref(prev);
+                    av_frame_move_ref(prev, tmp);
+                } else {
+                    av_frame_unref(tmp);
+                }
+                continue;
+            }
+            /* the frame asked for, or one past it */
+            int k = slot_free(mb);
+            if (k >= 0) {
+                struct VFrame *v = &mb->slot[k];
+                v->pts = INT64_MIN;     /* being written */
+                pthread_mutex_unlock(&mb->mu);
+                bool ok = frame_to_rgba(mb, tmp, v);
+                pthread_mutex_lock(&mb->mu);
+                if (ok) {
+                    v->pts = fp;
+                    v->id = ++mb->frame_id;
+                    pthread_cond_broadcast(&mb->ready);
+                }
+            }
+            av_frame_unref(tmp);
+            continue;
+        }
+        if (r == AVERROR(EAGAIN) && !drained && mb->next_feed >= 0 && mb->next_feed < mb->n) {
+            const Sample *sm = &mb->s[mb->next_feed++];
+            pkt->data = sm->data;
+            pkt->size = sm->size;
+            pkt->pts = (int64_t)llround(sm->pts * US);
+            pkt->dts = (int64_t)llround(sm->dts * US);
+            pkt->flags = sm->key ? AV_PKT_FLAG_KEY : 0;
+            avcodec_send_packet(mb->dec, pkt);  /* copies the data (unrefcounted packet) */
+            continue;
+        }
+        if (r == AVERROR(EAGAIN) && !drained && mb->next_feed >= mb->n) {
             avcodec_send_packet(mb->dec, NULL);   /* no more data: drain */
-            draining = true;
+            drained = true;
+            continue;
+        }
+        /* end of data, or an error: the frames there are, no more (the next
+           request flushes the decoder) */
+        mb->next_feed = -1;
+        drained = false;
+        if (slot_of(mb, want) < 0) {
+            /* the newest frame before it shows, as before the worker */
+            int k = prev->buf[0] && gen == mb->gen ? slot_free(mb) : -1;
+            if (k >= 0) {
+                struct VFrame *v = &mb->slot[k];
+                v->pts = INT64_MIN;
+                pthread_mutex_unlock(&mb->mu);
+                bool ok = frame_to_rgba(mb, prev, v);
+                pthread_mutex_lock(&mb->mu);
+                if (ok) {
+                    v->pts = want;
+                    v->id = ++mb->frame_id;
+                }
+            }
+            av_frame_unref(prev);
+            if (slot_of(mb, want) < 0) mb->want_failed = true;
+            pthread_cond_broadcast(&mb->ready);
+        } else {
+            pthread_cond_wait(&mb->wake, &mb->mu);
         }
     }
+    pthread_mutex_unlock(&mb->mu);
     av_packet_free(&pkt);
-    if (!mb->rgba || mb->rgba_pts == INT64_MIN) return false;
-out:
-    *rgba = mb->rgba;
-    *w = mb->rgba_w;
-    *h = mb->rgba_h;
-    if (frame_id) *frame_id = mb->frame_id;
+    av_frame_free(&tmp);
+    av_frame_free(&prev);
+    return NULL;
+}
+
+/* Ask the worker for the frame at t (starting it if needed); called with
+ * mu held.  Returns the frame's pts, INT64_MIN if there is none. */
+static int64_t request_frame(MediaBuffer *mb, double t)
+{
+    int64_t want = sample_at(mb, t);
+    if (want == INT64_MIN) return INT64_MIN;
+    if (want != mb->want) {
+        mb->want = want;
+        mb->want_failed = false;
+        mb->gen++;
+    }
+    pthread_cond_broadcast(&mb->wake);
+    return want;
+}
+
+static bool worker_start(MediaBuffer *mb)
+{
+    if (mb->worker_on) return true;
+    if (!decoder_open(mb)) return false;
+    if (pthread_create(&mb->worker, NULL, worker_main, mb) != 0) return false;
+    mb->worker_on = true;
     return true;
+}
+
+void media_buffer_prefetch(MediaBuffer *mb, double t)
+{
+    if (!mb || mb->kind != MEDIA_KIND_VIDEO || mb->n == 0 || !worker_start(mb)) return;
+    pthread_mutex_lock(&mb->mu);
+    request_frame(mb, t);
+    pthread_mutex_unlock(&mb->mu);
+}
+
+bool media_buffer_frame_at(MediaBuffer *mb, double t, const uint8_t **rgba, int *w, int *h,
+                           uint64_t *frame_id)
+{
+    if (!mb || mb->kind != MEDIA_KIND_VIDEO || mb->n == 0 || !worker_start(mb)) return false;
+    pthread_mutex_lock(&mb->mu);
+    mb->shown = -1;
+    int64_t want = request_frame(mb, t);
+    if (want == INT64_MIN) { pthread_mutex_unlock(&mb->mu); return false; }
+    /* Decoded ahead already, or wait for the worker. */
+    int k;
+    while ((k = slot_of(mb, want)) < 0 && !mb->want_failed)
+        pthread_cond_wait(&mb->ready, &mb->mu);
+    if (k >= 0) {
+        mb->shown = k;
+        *rgba = mb->slot[k].rgba;
+        *w = mb->slot[k].w;
+        *h = mb->slot[k].h;
+        if (frame_id) *frame_id = mb->slot[k].id;
+        pthread_cond_broadcast(&mb->wake);   /* it may decode further ahead now */
+    }
+    pthread_mutex_unlock(&mb->mu);
+    return k >= 0;
 }
 
 #endif /* CYBER_HAVE_FFMPEG */

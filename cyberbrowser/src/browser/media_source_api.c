@@ -582,9 +582,15 @@ static MediaPlayer *player_of(GCValue video) {
     return NULL;
 }
 
+/* The media time at page time now_ms. */
+static double player_time_at(const MediaPlayer *p, unsigned long long now_ms) {
+    if (p->paused || p->waiting || p->seeking || p->ready < HAVE_FUTURE_DATA) return p->t;
+    return p->t + (double)(now_ms - p->base_ms) / 1000.0 * p->rate;
+}
+
 static double player_time(const MediaPlayer *p) {
     if (p->paused || p->waiting || p->seeking || p->ready < HAVE_FUTURE_DATA) return p->t;
-    return p->t + (double)((unsigned long long)page_clock_now_ms() - p->base_ms) / 1000.0 * p->rate;
+    return player_time_at(p, (unsigned long long)page_clock_now_ms());
 }
 
 static void player_settle_clock(MediaPlayer *p) {
@@ -645,6 +651,8 @@ static int player_ranges(JSContextHandle ctx, MediaPlayer *p, MediaRange *out, i
     }
     return n;
 }
+
+static MediaBuffer *player_video_buffer(JSContextHandle ctx, MediaPlayer *p);
 
 static void player_update(JSContextHandle ctx, MediaPlayer *p) {
     MediaBuffer *mbs[8];
@@ -711,6 +719,12 @@ static void player_update(JSContextHandle ctx, MediaPlayer *p) {
     if (running && now - p->last_timeupdate_ms >= 250) {
         p->last_timeupdate_ms = now;
         media_queue_event(p->video, "timeupdate", false);
+    }
+    /* Decode the frame the next paint will ask for while the page runs
+     * (at the time already read: each read moves CYBER_DET_TIME's clock). */
+    if (p->ready >= HAVE_CURRENT_DATA) {
+        MediaBuffer *vmb = player_video_buffer(ctx, p);
+        if (vmb) media_buffer_prefetch(vmb, player_time_at(p, now));
     }
     /* A new frame needs a repaint (but is not a document change: the
      * page can still be quiet while a video plays). */

@@ -55,4 +55,8 @@ void media_buffer_video_size(const MediaBuffer *mb, int *w, int *h);
 bool media_buffer_frame_at(MediaBuffer *mb, double t, const uint8_t **rgba, int *w, int *h,
                            uint64_t *frame_id);
 
+/* Start decoding the frame at time t without waiting for it, so that a
+ * later media_buffer_frame_at(t) finds it decoded. */
+void media_buffer_prefetch(MediaBuffer *mb, double t);
+
 #endif
