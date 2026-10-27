@@ -78,17 +78,20 @@ void gc_set_config(const GCConfig *cfg) {
 void gc_get_stats(GCStats *s) {
     *s = g_core.stats;
     s->regions_in_use = atomic_load(&g_core.regions_in_use);
-    s->heap_committed = (size_t)atomic_load(&g_core.regions_committed) * GC_REGION_SIZE;
-    size_t used = 0;
+    size_t used = 0, committed = 0;
     uint32_t hwm = atomic_load(&g_core.region_hwm);
     for (uint32_t i = 0; i < hwm; i++) {
         GCRegion *r = &g_core.regions[i];
         uint32_t st = atomic_load(&r->state);
+        /* committed: regions not given back, less the hole pages given back */
+        if (st != GC_RS_UNUSED && !r->decommitted)
+            committed += GC_REGION_SIZE - (size_t)r->pages_off_n * GC_OS_PAGE_SIZE;
         if (st == GC_RS_HUMONGOUS_CONT) { used += GC_REGION_SIZE; continue; }
         if (!gc_core_region_in_use(st)) continue;
         used += atomic_load(&r->top) - (uintptr_t)gc_core_region_start(r);
     }
     s->heap_used = used;
+    s->heap_committed = committed;
     s->handles_in_use = gc_get_handle_count();
 }
 

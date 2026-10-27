@@ -22,6 +22,10 @@ TextShaper *text_shaper_create_from_memory(uint8_t *data, size_t size, int font_
  * (at the loaded size) and advances grown to match. */
 TextShaper *text_shaper_create_from_memory_ex(uint8_t *data, size_t size, int font_index, float size_pixels,
                                               int embolden);
+/* The same from a read-only view of a font file (MapViewOfFile on Windows),
+ * unmapped when the shaper goes (and on failure): the file's pages are
+ * shared, not the process's private memory. */
+TextShaper *text_shaper_create_from_mapped(uint8_t *view, size_t size, int font_index, float size_pixels);
 /* Does the font carry variation axes (fvar)?  Only its default instance is
  * drawn. */
 bool text_shaper_is_variable(const TextShaper *shaper);

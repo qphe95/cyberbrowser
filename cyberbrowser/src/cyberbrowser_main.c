@@ -15,6 +15,7 @@
 #include <time.h>
 #ifdef _WIN32
 #include <windows.h>
+#include <psapi.h>
 #endif
 
 #include "platform.h"
@@ -1216,6 +1217,14 @@ static bool render_document_to_jpg(HtmlDocument *doc, ImageCache *image_cache,
  * CYBER_SPIN_PCT=<p> (calibration, JS_PERF_DESIGN.md section 4): before
  * the "page settled" mark, spin until the thread has used p% more
  * cycles, so a known slowdown can be checked against the measurement. */
+/* CYBER_MEM=2: a JS heap object's count and bytes. */
+static void mem_type_cb(GCHandle h, void *d)
+{
+    unsigned long long *tc = (unsigned long long *)d;
+    tc[0]++;
+    tc[1] += gc_header_total_size(gc_header_from_handle(h));
+}
+
 static void tl_mark(const char *what) {
     static int on = -1;
     /* CYBER_SAMPLE_LOAD=1: profile the page load only, as the replays time
@@ -1246,6 +1255,109 @@ static void tl_mark(const char *what) {
     if (det_clock_on()) snprintf(calls, sizeof(calls), ", %llu calls", (unsigned long long)g_det_calls);
     fprintf(stderr, "[timeline] %-28s %8.1f ms  (thread cpu %8.1f ms, %9.1f Mcycles%s)\n", what, (b - a) / 1e4,
             cpu / 1e4, cycles / 1e6, calls);
+    /* CYBER_MEM=1: where the memory is at this mark: the process's private
+     * bytes and working set (and their peaks), the JS heap's committed
+     * regions and the bytes allocated in them, and the C heaps' committed
+     * and allocated bytes. */
+    if (cyber_getenv("CYBER_MEM")) {
+        PROCESS_MEMORY_COUNTERS_EX pm;
+        GCStats gs;
+        HANDLE heaps[64];
+        unsigned long long hc = 0, ha = 0;
+        memset(&pm, 0, sizeof(pm));
+        pm.cb = sizeof(pm);
+        K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&pm, sizeof(pm));
+        gc_get_stats(&gs);
+        DWORD nh = GetProcessHeaps(64, heaps);
+        for (DWORD i = 0; i < nh && i < 64; i++) {
+            HEAP_SUMMARY hs;
+            memset(&hs, 0, sizeof(hs));
+            hs.cb = sizeof(hs);
+            if (HeapSummary(heaps[i], 0, &hs)) {
+                hc += hs.cbCommitted;
+                ha += hs.cbAllocated;
+            }
+        }
+        fprintf(stderr, "[memory] %-30s private %6.1f MB (peak %6.1f), working set %6.1f MB (peak %6.1f); "
+                "JS heap %6.1f MB committed, %6.1f MB in regions; C heaps %6.1f MB committed, %6.1f MB allocated (%lu heaps)\n",
+                what, pm.PrivateUsage / 1048576.0, pm.PeakPagefileUsage / 1048576.0, pm.WorkingSetSize / 1048576.0,
+                pm.PeakWorkingSetSize / 1048576.0, gs.heap_committed / 1048576.0, gs.heap_used / 1048576.0,
+                hc / 1048576.0, ha / 1048576.0, (unsigned long)nh);
+        /* CYBER_MEM=2 at "page settled": the C heaps' blocks by size class,
+         * and the largest ones. */
+        if (atoi(cyber_getenv("CYBER_MEM")) >= 2 && (strcmp(what, "page settled") == 0 || strcmp(what, "idle collection done") == 0)) {
+            unsigned long long cls_n[40] = { 0 }, cls_b[40] = { 0 }, big[16] = { 0 };
+            for (DWORD i = 0; i < nh && i < 64; i++) {
+                PROCESS_HEAP_ENTRY e;
+                memset(&e, 0, sizeof(e));
+                if (!HeapLock(heaps[i])) continue;
+                while (HeapWalk(heaps[i], &e)) {
+                    if (!(e.wFlags & PROCESS_HEAP_ENTRY_BUSY)) continue;
+                    unsigned long long sz = e.cbData;
+                    int c = 0;
+                    while (c < 39 && (1ull << (c + 1)) <= sz) c++;
+                    cls_n[c]++;
+                    cls_b[c] += sz;
+                    for (int k = 0; k < 16; k++)
+                        if (sz > big[k]) { memmove(big + k + 1, big + k, (15 - k) * sizeof(big[0])); big[k] = sz; break; }
+                }
+                HeapUnlock(heaps[i]);
+            }
+            for (int c = 0; c < 40; c++)
+                if (cls_n[c])
+                    fprintf(stderr, "[memory] blocks %10llu..%-10llu %9llu blocks %8.1f MB\n",
+                            1ull << c, (2ull << c) - 1, cls_n[c], cls_b[c] / 1048576.0);
+            /* the JS heap's objects by type (JS_GC_OBJ_TYPE_*) */
+            for (int t = 0; t < 24; t++) {
+                unsigned long long tc[2] = { 0, 0 };
+                gc_for_each_object_of_type((JSGCObjectTypeEnum)t, mem_type_cb, tc);
+                if (tc[0])
+                    fprintf(stderr, "[memory] JS heap type %2d: %9llu objects %8.1f MB\n", t, tc[0], tc[1] / 1048576.0);
+            }
+            fprintf(stderr, "[memory] largest blocks:");
+            for (int k = 0; k < 16 && big[k]; k++) fprintf(stderr, " %.1fMB", big[k] / 1048576.0);
+            fprintf(stderr, "\n");
+            /* CYBER_MEM_SIZES=lo-hi: the commonest exact sizes in [lo, hi],
+             * with the first bytes of a few blocks of each. */
+            const char *rs = cyber_getenv("CYBER_MEM_SIZES");
+            if (rs) {
+                unsigned long long lo = strtoull(rs, NULL, 10), hi = strchr(rs, '-') ? strtoull(strchr(rs, '-') + 1, NULL, 10) : lo;
+                enum { NS = 4096 };
+                static unsigned long long sz_of[NS], n_of[NS];
+                static void *ex_of[NS][3];
+                int ns = 0;
+                for (DWORD i = 0; i < nh && i < 64; i++) {
+                    PROCESS_HEAP_ENTRY e;
+                    memset(&e, 0, sizeof(e));
+                    if (!HeapLock(heaps[i])) continue;
+                    while (HeapWalk(heaps[i], &e)) {
+                        if (!(e.wFlags & PROCESS_HEAP_ENTRY_BUSY) || e.cbData < lo || e.cbData > hi) continue;
+                        int k = 0;
+                        while (k < ns && sz_of[k] != e.cbData) k++;
+                        if (k == ns) { if (ns == NS) continue; sz_of[ns] = e.cbData; n_of[ns] = 0; ns++; }
+                        if (n_of[k] < 3) ex_of[k][n_of[k]] = e.lpData;
+                        n_of[k]++;
+                    }
+                    HeapUnlock(heaps[i]);
+                }
+                for (int r = 0; r < 8; r++) {
+                    int best = -1;
+                    for (int k = 0; k < ns; k++) if (n_of[k] && (best < 0 || n_of[k] > n_of[best])) best = k;
+                    if (best < 0) break;
+                    fprintf(stderr, "[memory] size %llu: %llu blocks\n", sz_of[best], n_of[best]);
+                    for (int x = 0; x < 3 && x < (int)n_of[best]; x++) {
+                        const unsigned char *p = ex_of[best][x];
+                        fprintf(stderr, "[memory]   ");
+                        for (int j = 0; j < 48; j++) fprintf(stderr, "%02x", p[j]);
+                        fprintf(stderr, "  ");
+                        for (int j = 0; j < 48; j++) fputc(p[j] >= 32 && p[j] < 127 ? p[j] : '.', stderr);
+                        fprintf(stderr, "\n");
+                    }
+                    n_of[best] = 0;
+                }
+            }
+        }
+    }
     fflush(stderr);
 }
 /* Before the page's first script: engine polyfills, diagnostics and the
@@ -1966,6 +2078,15 @@ int main(int argc, char *argv[]) {
     /* The page load is over: what follows is the harness's (the screenshot,
      * dumps).  tests/jit/replay.sh times the load to here. */
     tl_mark("page settled");
+    /* The page is idle: collect now, in the background, rather than at the
+     * next 128 MB of allocation (half the JS heap is garbage by then, and
+     * the free pages go back to the OS). */
+    if (gc_is_background()) {
+        gc_request_cycle(true);
+        /* CYBER_MEM: the memory once that collection is over */
+        if (cyber_getenv("CYBER_MEM") && gc_wait_idle(5000))
+            tl_mark("idle collection done");
+    }
     pending_shot_save(&shot, "wikipedia_screenshot.jpg");
     pending_shot_free(&shot);
 

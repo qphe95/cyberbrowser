@@ -1,6 +1,10 @@
 #include "text_shaper.h"
 
 #include <stdatomic.h>
+#include <stdbool.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -33,6 +37,7 @@ typedef struct GlyphEntry {
 struct TextShaper {
     uint8_t        *ttf_data;
     size_t          ttf_size;
+    bool            ttf_mapped;    /* a view of the font file, not malloc()ed */
     int             slot;          /* font-registry slot (-1 = none) */
     int             embolden;      /* synthetic bold: extra pixels per glyph */
     stbtt_fontinfo  font;
@@ -43,7 +48,7 @@ struct TextShaper {
     float           line_gap;
     float           baseline;
 
-    uint8_t        *atlas;
+    uint8_t        *atlas;         /* made at the first glyph drawn */
     int             atlas_w;
     int             atlas_h;
     int             pack_x;
@@ -113,9 +118,19 @@ static GlyphEntry *add_glyph(TextShaper *s)
     return &s->glyphs[s->glyph_count++];
 }
 
+/* The glyph atlas, made when the first glyph is drawn (rendering only):
+ * fonts that are measured but never drawn need none.  NULL when out of
+ * memory. */
+static uint8_t *ts_atlas(TextShaper *s)
+{
+    if (!s->atlas) s->atlas = (uint8_t *)calloc(1, (size_t)s->atlas_w * (size_t)s->atlas_h);
+    return s->atlas;
+}
+
 static bool pack_bitmap(TextShaper *s, int bw, int bh, int *out_x, int *out_y)
 {
     if (bw <= 0 || bh <= 0) { *out_x = *out_y = 0; return true; }
+    if (!ts_atlas(s)) return false;
     if (s->pack_x + bw > s->atlas_w) {
         s->pack_x = 0;
         s->pack_y += s->pack_row_h + 1;
@@ -319,25 +334,37 @@ TextShaper *text_shaper_create_from_memory(uint8_t *data, size_t size, int font_
     return text_shaper_create_from_memory_ex(data, size, font_index, size_pixels, 0);
 }
 
-TextShaper *text_shaper_create_from_memory_ex(uint8_t *data, size_t size, int font_index, float size_pixels,
-                                              int embolden)
+/* A shaper's font data given back: unmapped, or freed. */
+static void ts_release_data(uint8_t *data, bool mapped)
 {
-    if (!data || size == 0 || size_pixels <= 0) { free(data); return NULL; }
+#ifdef _WIN32
+    if (mapped) {
+        if (data) UnmapViewOfFile(data);
+        return;
+    }
+#endif
+    (void)mapped;
+    free(data);
+}
+
+static TextShaper *ts_create(uint8_t *data, size_t size, int font_index, float size_pixels,
+                             int embolden, bool mapped)
+{
+    if (!data || size == 0 || size_pixels <= 0) { ts_release_data(data, mapped); return NULL; }
     int offset = stbtt_GetFontOffsetForIndex(data, font_index < 0 ? 0 : font_index);
-    if (offset < 0) { free(data); return NULL; }
+    if (offset < 0) { ts_release_data(data, mapped); return NULL; }
 
     TextShaper *s = (TextShaper *)calloc(1, sizeof(TextShaper));
-    if (!s) { free(data); return NULL; }
+    if (!s) { ts_release_data(data, mapped); return NULL; }
 
     s->ttf_data = data;
     s->ttf_size = size;
+    s->ttf_mapped = mapped;
     s->slot = -1;
     s->embolden = embolden > 0 ? embolden : 0;
     s->size_pixels = size_pixels;
     s->atlas_w = TS_ATLAS_WIDTH;
     s->atlas_h = TS_ATLAS_HEIGHT;
-    s->atlas = (uint8_t *)calloc(1, (size_t)s->atlas_w * (size_t)s->atlas_h);
-    if (!s->atlas) { free(s); free(data); return NULL; }
 
     if (!stbtt_InitFont(&s->font, s->ttf_data, offset)) {
         text_shaper_destroy(s);
@@ -382,13 +409,24 @@ void text_shaper_destroy(TextShaper *s)
     free((void *)s->kern);
     free(s->glyphs);
     free(s->atlas);
-    free(s->ttf_data);
+    ts_release_data(s->ttf_data, s->ttf_mapped);
     free(s);
+}
+
+TextShaper *text_shaper_create_from_memory_ex(uint8_t *data, size_t size, int font_index, float size_pixels,
+                                              int embolden)
+{
+    return ts_create(data, size, font_index, size_pixels, embolden, false);
+}
+
+TextShaper *text_shaper_create_from_mapped(uint8_t *view, size_t size, int font_index, float size_pixels)
+{
+    return ts_create(view, size, font_index, size_pixels, 0, true);
 }
 
 const uint8_t *text_shaper_atlas_pixels(const TextShaper *s)
 {
-    return s ? s->atlas : NULL;
+    return s ? ts_atlas((TextShaper *)s) : NULL;
 }
 
 int text_shaper_atlas_width(const TextShaper *s)

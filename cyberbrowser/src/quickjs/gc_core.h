@@ -117,6 +117,7 @@ typedef struct GCCore {
     _Atomic uint32_t regions_in_use;
     _Atomic uint32_t regions_committed;
     _Atomic uint32_t pages_decommitted;   /* hole pages given back, over all regions */
+    _Atomic uint32_t free_committed;      /* free regions kept committed (GC_FREE_COMMITTED_MAX) */
     void *heap_reservation;
 
     GCAllocCtx js_young;   /* JS thread: nursery */

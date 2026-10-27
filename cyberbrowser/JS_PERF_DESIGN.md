@@ -875,6 +875,67 @@ marking on every heap store could stop outside marking cycles; objects that grow
 property arrays (0.8M resizes) could start with more room; the per-call frame setup is now
 mostly the frame's own fields.
 
+### 5.8 Memory
+
+A YouTube load peaked at 1.0–1.35 GB of private memory. `CYBER_MEM=1` now adds a line to
+each timeline mark: private bytes and working set (and their peaks), the JS heap's committed
+memory and the bytes its regions hold, and the C heaps' committed and allocated bytes.
+`CYBER_MEM=2` adds, at "page settled" (and after the idle collection, below), the C heaps'
+blocks by size class and the largest, the JS heap's objects by type, and with
+`CYBER_MEM_SIZES=lo-hi` the commonest exact sizes in that range with each one's first bytes.
+The allocation sites came from a temporary `malloc` wrapper (`-Wl,--wrap`), not kept.
+
+At "page settled" on yt-dQw4w9WgXcQ the C heaps held 980 MB and the JS heap 329 MB. Most of the
+C heap was the lazy-compile units of PARALLEL_PARSE_DESIGN.md 5.1: 50,000 function bodies
+compiled ahead on the compile workers, of which 40,000 were never called and kept their
+stencils.
+
+- **A lazy compile's line/column cache** (`GetLineColCache`) held two arrays of 1,024
+  checkpoints, 8 KB inside every parse state, and a waiting unit keeps its parse state: 340 MB
+  on yt-dQw4w9WgXcQ. It now has as many checkpoints as the range looked up needs (a lazily
+  compiled function's own text, usually one), four inline and more in memory the parse owns.
+  Peak private memory −27% to −35% on the YouTube recordings by itself.
+- **Not kept: a cap on compiling ahead.** Stopping the workers while the stencils waiting for
+  their first call covered more than 2 MB of source (a waiting stencil costs about 15 times
+  its source) saved another 120 MB at peak on the YouTube recordings, but the functions it
+  left uncompiled were compiled on the JS thread when called: +2% to +3% load time on yt-home
+  and yt-dQw4w9WgXcQ (6 MB: about +1%). Load time comes first, so the workers compile
+  everything queued, as before.
+- **Smaller parts of the units:** a stencil env's name table starts at 16 slots, not 256; its
+  error message (256 bytes) is made with the first error.
+- **System fonts are mapped** (`MapViewOfFile`), not read into the heap: 18 MB of font files
+  become the files' shared pages. Glyph atlases (1 MB each) are made when a glyph is first
+  drawn.
+- **A 4 MB JS stack** (was 16): calls run 300–600 frames deep, a few hundred bytes each, and a
+  frame that does not fit goes on the heap.
+- **Style sets** keep their compiled tables at their length, not their doubling capacity, and
+  the cached set an extension replaced is the one dropped.
+- **The JS heap:** free regions past a 16 MB reserve are decommitted rather than zeroed and
+  kept, and a major collection runs when the page settles (idle), not at the next 128 MB of
+  allocation. The JS heap's figure now counts what is committed (regions given back and hole
+  pages left out).
+
+| Peak private memory (whole run) | Before | After | Change | Load time (5 runs) |
+|---|---|---|---|---|
+| yt-dQw4w9WgXcQ | 1,347 MB | 842 MB | **−37%** | −0.7% (within noise) |
+| yt-home | 1,022 MB | 570 MB | **−44%** | +0.5% (within noise) |
+| yt-search | 1,278 MB | 794 MB | **−38%** | −0.3% (within noise) |
+| news-bbc | 484 MB | 331 MB | **−32%** | −10.9% |
+| wiki-us | 556 MB | 517 MB | −7% | −0.6% (within noise) |
+
+Peak working set fell as much (yt-dQw4w9WgXcQ 1,227 → 763 MB). The final DOM and the
+screenshot are byte-identical to before on all five recordings.
+
+**What is left** (yt-dQw4w9WgXcQ, about 840 MB): the JS heap commits about 300 MB for about
+130 MB of live objects after a full collection. The collector does not move objects, so the
+free space is small holes between live ones, mostly in pages it cannot give back; only
+evacuating sparse regions would recover it. The C heap's largest parts are the stencils
+compiled ahead and never called (about 170 MB, cut only at a cost in load time, above),
+the scripts' structure
+indexes (23 MB), the CSS atom table (24 MB, reserved ahead so that parallel parse jobs intern
+without locks), frame arenas (22 MB), DOM store blocks (20 MB), and 62,000 function
+bytecode objects (27 MB on the JS heap, most of them lazy stubs).
+
 ## 6. The optimizer
 
 V8 runs four tiers: Ignition, Sparkplug, Maglev and TurboFan. JavaScriptCore and SpiderMonkey

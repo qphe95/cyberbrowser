@@ -154,6 +154,13 @@ typedef VEC(int32_t) I32Vec;
     } \
     (vec).v[(vec).n++] = (x); \
 } while (0)
+/* Shrink a vector to its length (when the build is over). */
+#define VEC_FIT(vec) do { \
+    if ((vec).n && (vec).n < (vec).cap) { \
+        void *fit_ = realloc((vec).v, (vec).n * sizeof(*(vec).v)); \
+        if (fit_) { (vec).v = fit_; (vec).cap = (vec).n; } \
+    } \
+} while (0)
 
 /* ============================================================================
  * Per-document element features
@@ -1250,6 +1257,12 @@ static CssStyleSet *styleset_compile(const CssStyleSet *from, CssStylesheet *con
     }
     free(rchains.v);
     S->nrules = g;
+    /* The builder's vectors grew by doubling: keep only what they hold. */
+    VEC_FIT(b.comps);
+    VEC_FIT(b.chains);
+    VEC_FIT(b.lists);
+    VEC_FIT(b.atoms);
+    VEC_FIT(b.atests);
     S->comps = b.comps.v; S->ncomps = b.comps.n;
     S->chains = b.chains.v; S->nchains = b.chains.n;
     S->lists = b.lists.v; S->nlists = b.lists.n;

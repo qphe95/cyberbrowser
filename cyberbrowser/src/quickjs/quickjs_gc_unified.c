@@ -290,6 +290,8 @@ static bool region_commit_metadata(GCRegion *r) {
 /* Bring a claimed region's memory and bitmaps to a clean state. */
 static bool region_prepare(GCRegion *r, bool fresh) {
     uint8_t *base = gc_core_region_start(r);
+    if (!fresh && !r->decommitted && r->used_before)
+        atomic_fetch_sub_explicit(&g_core.free_committed, 1, memory_order_relaxed);
     if (fresh || r->decommitted) {
         if (!gc_os_commit(base, GC_REGION_SIZE)) return false;
         r->decommitted = false;
@@ -415,6 +417,11 @@ static GCRegion *region_acquire_humongous(uint32_t n) {
     return &g_core.regions[i];
 }
 
+/* Free regions kept committed, for a quick claim: the rest go back to the
+ * OS (a page load frees hundreds of megabytes of them at a collection, and
+ * zeroing them only to keep them was the larger cost). */
+#define GC_FREE_COMMITTED_MAX 16
+
 /* Return a region (or a whole humongous run) to the free pool. */
 void gc_core_region_release(GCRegion *r) {
     uint32_t first = (uint32_t)(r - g_core.regions);
@@ -426,8 +433,10 @@ void gc_core_region_release(GCRegion *r) {
         x->permanent = false;
         x->live_bytes = 0;
         x->alloc_owner = GC_OWNER_NONE;
-        if (g_core.poison || x->pages_off_n) {
-            /* Pages inside its holes were given back: give back all of it. */
+        if (g_core.poison || x->pages_off_n ||
+            atomic_load_explicit(&g_core.free_committed, memory_order_relaxed) >= GC_FREE_COMMITTED_MAX) {
+            /* Pages inside its holes were given back, or enough free
+             * regions are kept: give back all of it. */
             gc_os_decommit(gc_core_region_start(x), GC_REGION_SIZE);
             x->decommitted = true;
             atomic_fetch_sub_explicit(&g_core.pages_decommitted, x->pages_off_n, memory_order_relaxed);
@@ -444,6 +453,7 @@ void gc_core_region_release(GCRegion *r) {
                               ? (size_t)(top - (uintptr_t)base) : GC_REGION_SIZE;
             memset(base, 0, used);
             x->zeroed = true;
+            atomic_fetch_add_explicit(&g_core.free_committed, 1, memory_order_relaxed);
         }
         atomic_store_explicit(&x->state, GC_RS_FREE, memory_order_release);
         atomic_fetch_sub(&g_core.regions_in_use, 1);

@@ -430,6 +430,24 @@ static TextShaper *load_sys_locked(SysFace *f)
     if (f->slot >= 0) return atomic_load(&g_slots[f->slot]);
     if (f->slot == -2) return NULL;
     TextShaper *s = NULL;
+#ifdef _WIN32
+    /* Mapped, not read: a system font's pages are the file's (shared, and
+       dropped under memory pressure), not the process's private memory. */
+    HANDLE fh = CreateFileA(f->path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                            FILE_ATTRIBUTE_NORMAL, NULL);
+    if (fh != INVALID_HANDLE_VALUE) {
+        LARGE_INTEGER sz;
+        HANDLE map = GetFileSizeEx(fh, &sz) && sz.QuadPart > 0
+            ? CreateFileMappingA(fh, NULL, PAGE_READONLY, 0, 0, NULL) : NULL;
+        if (map) {
+            uint8_t *view = (uint8_t *)MapViewOfFile(map, FILE_MAP_READ, 0, 0, 0);
+            if (view)
+                s = text_shaper_create_from_mapped(view, (size_t)sz.QuadPart, f->index, FONT_PIXELS);
+            CloseHandle(map);   /* the view keeps the mapping */
+        }
+        CloseHandle(fh);
+    }
+#else
     FILE *fp = fopen(f->path, "rb");
     if (fp) {
         fseek(fp, 0, SEEK_END);
@@ -442,6 +460,7 @@ static TextShaper *load_sys_locked(SysFace *f)
             free(data);
         fclose(fp);
     }
+#endif
     f->slot = s ? add_slot_locked(s) : -2;
     if (f->slot < 0) f->slot = -2;
     return f->slot >= 0 ? atomic_load(&g_slots[f->slot]) : NULL;

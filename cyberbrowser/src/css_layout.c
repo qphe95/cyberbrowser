@@ -3395,6 +3395,10 @@ static CssStyleSet *layout_styleset_get(LayoutStyleSheetList *list, double vw, d
     } else {
         set = css_styleset_build(list->sheets, list->count, vw, vh);
     }
+    /* The base was extended into this set: a page only adds sheets, so it
+     * is not asked for again.  It goes rather than the least recently
+     * used (it holds as many compiled rules, nearly). */
+    if (base >= 0) victim = base;
     /* Evicted only now: the base may be the least recently used. */
     styleset_cache_drop(victim);
     StyleSetEntry *c = &g_styleset_cache[victim];

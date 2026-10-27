@@ -20105,7 +20105,9 @@ static inline __attribute__((always_inline)) GCValue jit_value_load(const GCValu
  * it as every frame on the chain (JS_MarkActiveStackFrames), so its slots
  * need no dirty flags; when the call returns the memory is simply the next
  * frame's.  Frames that may escape stay heap objects (the pool, below). */
-#define JS_STACK_SIZE ((size_t)16 << 20)
+/* 4 MB: YouTube's calls run 300-600 frames deep, a few hundred bytes each;
+ * a frame that does not fit goes on the heap (js_bc_frame_enter). */
+#define JS_STACK_SIZE ((size_t)4 << 20)
 #define JS_POOL_STACK (-2)              /* JSInterpFrame.pool_depth of a JS stack frame */
 static uint8_t *g_js_stack, *g_js_stack_top, *g_js_stack_end;
 static uint32_t g_js_stack_epoch;      /* g_gc_epoch its frames belong to */
@@ -27082,8 +27084,11 @@ typedef struct LineNumberSlot {
    counting bytes from the last position crosses up to the whole script, a
    multi-megabyte line when minified.  Checkpoints: the line and column at
    chk_origin + k * chk_step, filled in forward as lookups reach them, so a
-   lookup counts at most chk_step bytes. */
+   lookup counts at most chk_step bytes.  As many as the range looked up
+   needs (a lazily compiled function's body, usually one): inline when few,
+   else plain memory the parse owns (line_col_cache_init). */
 #define LINE_COL_CHK_MAX 1024
+#define LINE_COL_CHK_INLINE 4
 typedef struct {
     /* last source position */
     const uint8_t *ptr;
@@ -27092,9 +27097,11 @@ typedef struct {
     const uint8_t *buf_start;
     const uint8_t *chk_origin;
     size_t chk_step;               /* 0: no checkpoints */
-    int chk_n;
-    int chk_line[LINE_COL_CHK_MAX], chk_col[LINE_COL_CHK_MAX];
+    int chk_n, chk_cap;
+    int *chk;                      /* line, col of each; NULL: chk_inline */
+    int chk_inline[2 * LINE_COL_CHK_INLINE];
 } GetLineColCache;
+#define LINE_COL_CHK(s) ((s)->chk ? (s)->chk : (s)->chk_inline)
 
 typedef enum JSParseFunctionEnum {
     JS_PARSE_FUNC_STATEMENT,
@@ -27224,7 +27231,7 @@ typedef struct CompileEnv {
     /* stencil env: the first error */
     BOOL has_error;
     int error_type, error_line, error_col;
-    char error_msg[256];
+    char *error_msg;        /* (256 bytes, made with the first error) */
     /* the lowest stack address a compile on this env may use (a worker's),
        0 for the runtime's limit (the JS thread) */
     uintptr_t stack_limit;
@@ -27789,6 +27796,8 @@ static void cenv_free(CompileEnv *env)
     js_plain_free(env->text);
     js_plain_free(env->htab);
     js_plain_free(env->rt_atoms);
+    js_plain_free(env->error_msg);
+    env->error_msg = NULL;
     env->rt_atoms = NULL;
     env->rt_atoms_n = 0;
     env->text = NULL;
@@ -27804,7 +27813,10 @@ cenv_record_error_v(CompileEnv *env, JSErrorEnum type, const char *fmt, va_list 
         return;
     env->has_error = TRUE;
     env->error_type = type;
-    vsnprintf(env->error_msg, sizeof(env->error_msg), fmt, ap);
+    if (!env->error_msg)
+        env->error_msg = (char *)js_plain_realloc(NULL, 256);
+    if (env->error_msg)
+        vsnprintf(env->error_msg, 256, fmt, ap);
 }
 
 static void __attribute__((format(printf, 3, 4)))
@@ -27847,7 +27859,7 @@ static BOOL cenv_text_reserve(CompileEnv *env, size_t extra)
 
 static BOOL cenv_htab_grow(CompileEnv *env)
 {
-    uint32_t cap = env->htab_cap ? env->htab_cap * 2 : 256, i;
+    uint32_t cap = env->htab_cap ? env->htab_cap * 2 : 16, i;   /* most envs name a few */
     uint32_t *t = (uint32_t *)js_plain_calloc(cap, sizeof(uint32_t));
     if (!t)
         return FALSE;
@@ -28506,11 +28518,13 @@ static int get_line_col(int *pcol_num, const uint8_t *buf, size_t len)
 }
 
 /* Position ptr (line, col) is where the cache starts; checkpoints cover up
-   to buf_end. */
-static void line_col_cache_init(GetLineColCache *s, const uint8_t *buf_start, const uint8_t *buf_end,
-                                const uint8_t *ptr, int line_num, int col_num)
+   to end, the end of what the parse looks up (positions past it are
+   counted from the last one); more than a few go in memory the parse owns
+   (owned, freed with it). */
+static void line_col_cache_init(GetLineColCache *s, const uint8_t *buf_start, const uint8_t *end,
+                                const uint8_t *ptr, int line_num, int col_num, PVec *owned)
 {
-    size_t len = buf_end > ptr ? (size_t)(buf_end - ptr) : 0;
+    size_t len = end > ptr ? (size_t)(end - ptr) : 0;
     s->ptr = ptr;
     s->line_num = line_num;
     s->col_num = col_num;
@@ -28519,8 +28533,19 @@ static void line_col_cache_init(GetLineColCache *s, const uint8_t *buf_start, co
     s->chk_step = 4096;
     while (len / s->chk_step >= LINE_COL_CHK_MAX)
         s->chk_step *= 2;
-    s->chk_line[0] = line_num;
-    s->chk_col[0] = col_num;
+    s->chk_cap = (int)(len / s->chk_step) + 1;
+    s->chk = NULL;
+    if (s->chk_cap > LINE_COL_CHK_INLINE) {
+        s->chk = (int *)js_plain_realloc(NULL, sizeof(int) * 2 * (size_t)s->chk_cap);
+        if (s->chk && !pvec_push(owned, sizeof(void *), &s->chk)) {
+            js_plain_free(s->chk);
+            s->chk = NULL;
+        }
+        if (!s->chk)
+            s->chk_cap = LINE_COL_CHK_INLINE;
+    }
+    LINE_COL_CHK(s)[0] = line_num;
+    LINE_COL_CHK(s)[1] = col_num;
     s->chk_n = 1;
 }
 
@@ -28542,7 +28567,7 @@ static int get_line_col_cached(GetLineColCache *s, int *pcol_num, const uint8_t 
 {
     size_t k, in_block;
     if (!s->chk_step || ptr < s->chk_origin ||
-        (k = (size_t)(ptr - s->chk_origin) / s->chk_step) >= LINE_COL_CHK_MAX)
+        (k = (size_t)(ptr - s->chk_origin) / s->chk_step) >= (size_t)s->chk_cap)
         return get_line_col_cached_scan(s, pcol_num, ptr);
     /* Counting from the last position when that is the shorter way (and,
        going back, crosses no line end, past which it would count back to
@@ -28555,15 +28580,16 @@ static int get_line_col_cached(GetLineColCache *s, int *pcol_num, const uint8_t 
     GetLineColCache old = *s;
     int old_col, old_line = get_line_col_cached_scan(&old, &old_col, ptr);
 #endif
+    int *chk = LINE_COL_CHK(s);
     while ((size_t)s->chk_n <= k) {
-        int n = s->chk_n, line_num = s->chk_line[n - 1], col_num = s->chk_col[n - 1];
+        int n = s->chk_n, line_num = chk[2 * (n - 1)], col_num = chk[2 * (n - 1) + 1];
         line_col_advance(&line_num, &col_num, s->chk_origin + (size_t)(n - 1) * s->chk_step, s->chk_step);
-        s->chk_line[n] = line_num;
-        s->chk_col[n] = col_num;
+        chk[2 * n] = line_num;
+        chk[2 * n + 1] = col_num;
         s->chk_n = n + 1;
     }
-    s->line_num = s->chk_line[k];
-    s->col_num = s->chk_col[k];
+    s->line_num = chk[2 * k];
+    s->col_num = chk[2 * k + 1];
     line_col_advance(&s->line_num, &s->col_num, s->chk_origin + k * s->chk_step,
                      (size_t)(ptr - (s->chk_origin + k * s->chk_step)));
     s->ptr = ptr;
@@ -46572,8 +46598,10 @@ static GCHandle js_lazy_compile(JSContextHandle ctx, JSFunctionBytecodeHandle st
     s->token.ptr = s->buf_ptr;
     s->line_num = state->line_num;
     s->col_num = state->col_num;
-    line_col_cache_init(&s->get_line_col_cache, s->buf_start, s->buf_end, s->buf_ptr,
-                        state->line_num, state->col_num);
+    /* only the function's own text is looked up */
+    line_col_cache_init(&s->get_line_col_cache, s->buf_start,
+                        s->buf_start + state->func_source_offset + state->func_source_len, s->buf_ptr,
+                        state->line_num, state->col_num, &s->owned);
     s->struct_index = state->struct_index;
     s->is_module = state->is_module;
     s->allow_html_comments = !state->is_module;
@@ -46912,7 +46940,7 @@ static void js_parse_init(JSContextHandle ctx, JSParseState *s,
     s->token.val = ' ';
     s->token.ptr = s->buf_ptr;
 
-    line_col_cache_init(&s->get_line_col_cache, s->buf_start, s->buf_end, s->buf_start, 0, 0);
+    line_col_cache_init(&s->get_line_col_cache, s->buf_start, s->buf_end, s->buf_start, 0, 0, &s->owned);
     
     /* Enable lazy function parsing by default, unless JS_EVAL_FLAG_NO_LAZY is set */
     {
@@ -47585,8 +47613,10 @@ static int lazy_unit_compile(LazyUnit *u)
     s->token.ptr = s->buf_ptr;
     s->line_num = state->line_num;
     s->col_num = state->col_num;
-    line_col_cache_init(&s->get_line_col_cache, s->buf_start, s->buf_end, s->buf_ptr,
-                        state->line_num, state->col_num);
+    /* only the function's own text is looked up */
+    line_col_cache_init(&s->get_line_col_cache, s->buf_start,
+                        s->buf_start + state->func_source_offset + state->func_source_len, s->buf_ptr,
+                        state->line_num, state->col_num, &s->owned);
     s->struct_index = state->struct_index;
     s->is_module = state->is_module;
     s->allow_html_comments = !state->is_module;
@@ -48308,7 +48338,7 @@ static int ss_compile(ScriptStencil *ss, uintptr_t stack_limit)
     s->buf_end = ss->copy + ss->len;
     s->token.val = ' ';
     s->token.ptr = s->buf_ptr;
-    line_col_cache_init(&s->get_line_col_cache, s->buf_start, s->buf_end, s->buf_start, 0, 0);
+    line_col_cache_init(&s->get_line_col_cache, s->buf_start, s->buf_end, s->buf_start, 0, 0, &s->owned);
     s->enable_lazy_parsing = TRUE;
     skip_shebang(&s->buf_ptr, s->buf_end);
     s->struct_index = ss->ix;
