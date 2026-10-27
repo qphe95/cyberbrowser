@@ -108,6 +108,8 @@ set(BE_SOURCES
     src/cyber_profile.c
     src/cyber_sampler.c
     src/session_state.c
+    src/page_engine.c
+    src/raster_cpu.c
     src/tls_client.c
     src/http_download.c
     
