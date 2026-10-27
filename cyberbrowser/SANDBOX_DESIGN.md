@@ -771,6 +771,61 @@ memory of an idle tab process (about:blank). Things that would reduce it, in ord
 The single-process mode (`--single-process`, and what the replay harness uses) stays through
 every milestone, so the YouTube replay benchmark keeps measuring the engine alone.
 
+### 11.1 Progress
+
+**M0 (done):** the page engine is a library (`src/page_engine.h`); `src/cyberbrowser_main.c` is
+the single-process harness on top of it; the CPU rasterizer is `src/raster_cpu.c`.
+
+**M1 (done):** `cb_coord.exe [url ...]` opens a browser window.
+
+- **Executables.** `cb_coord.exe` (the coordinator), `cb_ui.exe` (the window), `cb_tab.exe` (a
+  tab). `cyberbrowser.exe` stays the single-process harness under its old name until the
+  multi-process browser becomes the default, so `tests/jit/replay.sh` and the tests are
+  unchanged.
+- **libchan** (`src/ipc/chan.c`): the rings and events of section 4.2. Every message is
+  copied out of shared memory before it is used, and indices and lengths are read once and
+  checked. `chan_bench.exe` measures it between two processes:
+
+  | Measurement | Cost |
+  |---|---|
+  | Blocking round trip (each side sleeps on its event) | 4.7 µs |
+  | Spinning round trip (no system calls) | 0.13 µs |
+  | Stream of 32-byte messages | 6 million/s |
+  | Stream of 16 KB messages | 1.2 GB/s |
+
+- **The coordinator.** Its decisions are a pure state machine (`src/proc/coord_core.c`): no
+  Win32, no library calls, no allocation, bounded loops, ready for M4. A shim
+  (`src/proc/coordinator.c`) performs its actions. Children inherit only the handles they're
+  given (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`) and run in a job that ends with the coordinator.
+  It accepts `http:`, `https:` and `about:blank` URLs only.
+- **Tabs.** A tab loads its page with the engine and then runs `page_turn` without blocking,
+  so input is answered while timers are pending. It rasterizes the visible part of each new
+  frame (the display list shifted by the scroll offset) into one of its surface's two
+  buffers. A click is hit-tested on the tab's own layout and dispatched as a DOM `click`; if
+  nothing cancels it and it is on an `<a href>`, the UI navigates. Every navigation starts a
+  new tab process: the engine holds one page per process.
+- **The UI.** Win32 and GDI: a tab strip, an address bar, the content area, keyboard
+  shortcuts, the wheel. It shows a crashed tab as such, and the other tabs carry on.
+  `CYBER_UI_SCRIPT=<file>` drives it for tests (open, navigate, click, scroll, resize, save a
+  screenshot of the window).
+- **Memory of a tab process:** 20 MB private at start, 42 MB once the engine is initialized
+  (JS runtime, browser APIs, fonts indexed), 47 MB with `about:blank` loaded (25 MB working
+  set). With a page: 250–500 MB private for Wikipedia articles, 280 MB for github.com. The
+  executable's code is shared between all of them (section 10).
+- **Fixed on the way:** a live page fetch sent with gzip was never handed to the streaming
+  parser (only brotli and plain bodies were decoded as they arrived), so a live load of
+  Wikipedia parsed an empty page. Whatever couldn't be observed while it arrived is now
+  observed once the response is complete. Replays were unaffected, since their bodies are
+  decoded already.
+
+**Not in M1** (later milestones, or not yet planned):
+- Typing into the page (forms, text fields).
+- `scroll` events and `window.scrollY` for the page.
+- `position: fixed` that stays put while scrolling.
+- Script-initiated navigation (`location = ...`).
+- Back and forward.
+- No sandbox yet (M3).
+
 **Escape tests.** A test build of `cb_tab.exe` with a hostile mode tries, from inside the
 sandbox: to open files outside its folder (other sites' folders, the user's profile,
 `browser_data/ui`), with `..`, reparse points, hard links, short (8.3) names, and ADS

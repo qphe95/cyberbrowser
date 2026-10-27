@@ -478,6 +478,50 @@ if(BE_PLATFORM_WINDOWS)
 endif()
 
 # =============================================================================
+# The multi-process browser (SANDBOX_DESIGN.md): cb_coord.exe starts the UI
+# (cb_ui.exe) and a process per tab (cb_tab.exe).  cyberbrowser.exe stays the
+# single-process harness the replays and tests use.
+# =============================================================================
+if(BE_PLATFORM_WINDOWS)
+    # libchan and starting child processes: no engine, so the coordinator and
+    # the UI link only this.
+    add_library(cb_ipc STATIC
+        src/ipc/chan.c
+        src/proc/spawn.c
+    )
+    target_include_directories(cb_ipc PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/ipc
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/proc
+    )
+    target_compile_options(cb_ipc PRIVATE -Wall -Wextra)
+
+    add_executable(chan_bench src/proc/chan_bench.c)
+    target_link_libraries(chan_bench PRIVATE cb_ipc)
+
+    # The coordinator: its core (coord_core.c) is pure C with no Win32 calls.
+    add_executable(cb_coord src/proc/coordinator.c src/proc/coord_core.c)
+    target_link_libraries(cb_coord PRIVATE cb_ipc)
+    target_compile_options(cb_coord PRIVATE -Wall -Wextra)
+
+    # The UI: windows and input, no engine.
+    add_executable(cb_ui WIN32 src/proc/ui_main.c)
+    target_link_libraries(cb_ui PRIVATE cb_ipc user32 gdi32)
+    target_compile_options(cb_ui PRIVATE -Wall -Wextra)
+
+    # A tab: the page engine.
+    add_executable(cb_tab src/proc/tab_main.c)
+    target_include_directories(cb_tab PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/quickjs
+    )
+    target_include_directories(cb_tab BEFORE PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/win32)
+    target_link_libraries(cb_tab PRIVATE cyberbrowser_lib cb_ipc)
+    if(MINGW)
+        target_link_options(cb_tab PRIVATE "-Wl,--stack,67108864")
+    endif()
+endif()
+
+# =============================================================================
 # Tests
 # =============================================================================
 if(BE_BUILD_TESTS)

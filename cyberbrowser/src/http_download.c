@@ -884,6 +884,8 @@ static bool http_request_net(const char *url, const char *method,
  * is making (redirects included: only a 2xx body is observed). */
 static __thread HttpBodyObserver g_body_observer;
 static __thread void *g_body_observer_user;
+/* Decoded bytes the observer has had: a prefix of the final body. */
+static __thread size_t g_body_observed;
 
 /* Hand the observer a piece of the body.  It may itself make requests on
  * this thread (a page script fetching): those are not observed. */
@@ -891,6 +893,7 @@ static void body_observe(const char *data, size_t len) {
     HttpBodyObserver fn = g_body_observer;
     void *user = g_body_observer_user;
     g_body_observer = NULL;
+    g_body_observed += len;
     fn(user, data, len);
     g_body_observer = fn;
     g_body_observer_user = user;
@@ -1734,9 +1737,16 @@ bool http_get_to_memory_observed(const char *url, const char **headers, size_t h
                                  HttpBodyObserver observe, void *user) {
     HttpBodyObserver prev = g_body_observer;
     void *prev_user = g_body_observer_user;
+    size_t prev_observed = g_body_observed;
     g_body_observer = observe;
     g_body_observer_user = user;
+    g_body_observed = 0;
     bool ok = http_get_to_memory_with_headers(url, headers, headerCount, outBuffer, err, errLen);
+    /* What could not be observed as it arrived (a gzip body, or framing the
+     * incremental decoder gave up on) is observed now, decoded and whole. */
+    if (ok && outBuffer->data && g_body_observed < outBuffer->size)
+        body_observe(outBuffer->data + g_body_observed, outBuffer->size - g_body_observed);
+    g_body_observed = prev_observed;
     g_body_observer = prev;
     g_body_observer_user = prev_user;
     return ok;

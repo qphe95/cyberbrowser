@@ -1129,12 +1129,13 @@ void page_close(void) {
     g_html = NULL;
 }
 
-void page_turn(bool run_timers, int width, int height, PageTurn *out) {
+void page_turn(bool run_timers, bool wait, int width, int height, PageTurn *out) {
     bool had_timers = false;
     bool had_images = false;
+    out->new_frame = false;
     {
         CP_SCOPE("pump-timers");
-        if (run_timers) had_timers = pump_timers_and_jobs(g_ctx);
+        if (run_timers) had_timers = pump_event_loop(g_ctx, wait);
     }
     {
         CP_SCOPE("process-images");
@@ -1167,12 +1168,28 @@ void page_turn(bool run_timers, int width, int height, PageTurn *out) {
              * pipeline.  No separate CSS application step is needed here. */
 
             page_frame_build(&g_frame, g_doc, g_loop_images, width, height);
+            out->new_frame = g_frame.valid;
         } else {
             printf("WARNING: failed to rebuild native document from JS DOM\n");
         }
     }
     out->had_timers = had_timers;
     out->had_images = had_images;
+}
+
+void page_request_layout(void) {
+    dom_request_layout();
+}
+
+GCValue dom_element_at(JSContextHandle ctx, LayoutContext *layout, double x, double y);
+
+GCValue page_element_at(double x, double y) {
+    if (!g_frame.valid) return JS_NULL;
+    return dom_element_at(g_ctx, &g_frame.layout, x, y);
+}
+
+const char *page_title(void) {
+    return g_doc ? get_title_text(g_doc) : NULL;
 }
 
 bool page_needs_layout(void) {

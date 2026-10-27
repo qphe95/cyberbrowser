@@ -482,7 +482,7 @@ int main(int argc, char *argv[]) {
         }
 
         PageTurn turn;
-        page_turn(!settle_final, WIREFRAME_WIDTH, WIREFRAME_HEIGHT, &turn);
+        page_turn(!settle_final, true, WIREFRAME_WIDTH, WIREFRAME_HEIGHT, &turn);
         bool had_timers = turn.had_timers;
         bool had_images = turn.had_images;
 

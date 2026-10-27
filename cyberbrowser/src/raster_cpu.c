@@ -18,6 +18,7 @@
 typedef struct {
     uint8_t r, g, b;
 } RGB;
+_Static_assert(sizeof(RGB) == 3, "raster_display_list's buffer is packed RGB");
 
 static inline void set_pixel(RGB *pixels, int width, int height, int x, int y, RGB c) {
     if (x < 0 || y < 0 || x >= width || y >= height) return;
@@ -246,16 +247,11 @@ typedef struct {
     int mask;
 } MaskLayer;
 
-bool render_display_list_to_jpg(const DisplayList *dl, const char *path,
-                                       int img_width, int img_height) {
+void raster_display_list(const DisplayList *dl, uint8_t *rgb, int img_width, int img_height) {
     MaskLayer layers[64];
     int nlayers = 0;
     size_t pixel_count = (size_t)img_width * (size_t)img_height;
-    RGB *pixels = (RGB *)calloc(pixel_count, sizeof(RGB));
-    if (!pixels) {
-        printf("FATAL: out of memory allocating %dx%d image buffer\n", img_width, img_height);
-        return false;
-    }
+    RGB *pixels = (RGB *)rgb;
 
     /* White background. */
     for (size_t i = 0; i < pixel_count; i++) {
@@ -394,7 +390,16 @@ bool render_display_list_to_jpg(const DisplayList *dl, const char *path,
         }
     }
     while (nlayers > 0) free(layers[--nlayers].saved);
+}
 
+bool render_display_list_to_jpg(const DisplayList *dl, const char *path,
+                                int img_width, int img_height) {
+    RGB *pixels = (RGB *)calloc((size_t)img_width * (size_t)img_height, sizeof(RGB));
+    if (!pixels) {
+        printf("FATAL: out of memory allocating %dx%d image buffer\n", img_width, img_height);
+        return false;
+    }
+    raster_display_list(dl, (uint8_t *)pixels, img_width, img_height);
     /* stbi_write_jpg expects interleaved RGB. */
     int ok = stbi_write_jpg(path, img_width, img_height, 3, pixels, 95);
     free(pixels);

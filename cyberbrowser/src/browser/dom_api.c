@@ -4104,6 +4104,12 @@ static GCValue hit_test_layout_node(JSContextHandle ctx, LayoutContext *layout, 
     return JS_NULL;
 }
 
+/* The element under (x, y) of a layout (document coordinates), or null. */
+GCValue dom_element_at(JSContextHandle ctx, LayoutContext *layout, double x, double y) {
+    if (!layout || layout->tree.root_idx < 0) return JS_NULL;
+    return hit_test_layout_node(ctx, layout, layout->tree.root_idx, x, y);
+}
+
 /* The layout elementFromPoint() hit-tests, kept while the document renders
  * the same (§7: no rebuild and no relayout when nothing changed). */
 static struct {

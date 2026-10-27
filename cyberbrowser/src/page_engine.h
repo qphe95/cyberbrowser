@@ -68,14 +68,22 @@ void page_frame_free(PageFrame *f);
 /* The frame of the page's current document (rebuilt by page_turn). */
 PageFrame *page_frame(void);
 
-/* One turn of the loaded page: run due work (unless !run_timers), deliver
- * finished images, and if the DOM changed, rebuild the document and its
- * frame at width x height. */
+/* One turn of the loaded page: run due work (unless !run_timers; with
+ * `wait`, as page_pump), deliver finished images, and if the DOM changed,
+ * rebuild the document and its frame at width x height. */
 typedef struct PageTurn {
     bool had_timers;
     bool had_images;
+    bool new_frame;     /* page_frame() was rebuilt */
 } PageTurn;
-void page_turn(bool run_timers, int width, int height, PageTurn *out);
+void page_turn(bool run_timers, bool wait, int width, int height, PageTurn *out);
+/* Lay the page out again at the next turn (the viewport changed). */
+void page_request_layout(void);
+/* The element under (x, y) of the current frame, in document coordinates
+ * (a JS value), or JS_NULL. */
+GCValue page_element_at(double x, double y);
+/* The title of the current document (its first <title>), or NULL. */
+const char *page_title(void);
 /* A DOM change is waiting to be laid out. */
 bool page_needs_layout(void);
 /* Nothing ran in the last turn: wait for a fetch or an image to make
