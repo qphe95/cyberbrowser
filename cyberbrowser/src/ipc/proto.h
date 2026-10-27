@@ -107,4 +107,80 @@ typedef struct UtFrameDone {
     uint32_t frame;
 } UtFrameDone;
 
+/* ---- coordinator -> network process and storage service ------------------ */
+/* Each server gets a control channel from the coordinator.  A grant hands it
+ * the server end of a channel to a client, with the client's badge: the
+ * coordinator's label for it, never the client's own word. */
+#define PROTO_SITE_MAX 128          /* = SITE_MAX */
+
+enum {
+    CS_GRANT = 1,       /* CsGrant */
+    CS_REVOKE,          /* CsRevoke: stop serving that client, close its channel */
+    CS_QUIT,            /* (empty): save what is pending and exit */
+};
+
+enum {
+    GRANT_TAB = 1,      /* a tab, badged with its site ("" = opaque) */
+    GRANT_NET,          /* at the storage service: the network process */
+    GRANT_STORE,        /* at the network process: its channel to the storage service */
+};
+
+typedef struct CsGrant {
+    uint32_t client;    /* the tab's id (0 for GRANT_NET and GRANT_STORE) */
+    uint32_t kind;
+    uint64_t chan_section, chan_ev0, chan_ev1;   /* HANDLE values in the server */
+    char site[PROTO_SITE_MAX];
+} CsGrant;
+
+typedef struct CsRevoke {
+    uint32_t client;
+} CsRevoke;
+
+/* ---- tab <-> network process (bigmsg.h messages) -------------------------- */
+enum {
+    TN_REQUEST = 1,     /* NetRequest + method, url, headers (each NUL-terminated) + body */
+    TN_COOKIE_GET,      /* NetCookieGet + url: document.cookie */
+    TN_COOKIE_SET,      /* url, NUL, cookie line: document.cookie = ... */
+    NT_RESPONSE,        /* NetResponse + headers + error + body */
+};
+
+typedef struct NetRequest {
+    uint32_t id;
+    uint32_t method_len, url_len, headers_len;  /* each counts its NUL */
+    uint32_t nheaders;
+    uint32_t body_len;
+} NetRequest;
+
+typedef struct NetCookieGet {
+    uint32_t id;
+} NetCookieGet;
+
+typedef struct NetResponse {
+    uint32_t id;
+    uint32_t ok;
+    int32_t status;
+    uint32_t headers_len, error_len, body_len;
+} NetResponse;
+
+/* ---- clients <-> storage service (bigmsg.h messages) --------------------- */
+/* A path is relative to the client's site folder (store_core.h); only the
+ * network process names a site (for a site's cookies file). */
+enum {
+    TS_READ = 1,        /* StoreRequest + site + path */
+    TS_WRITE,           /* StoreRequest + site + path + data: replace the file */
+    TS_DELETE,          /* StoreRequest + site + path */
+    ST_RESULT,          /* StoreResult + data (TS_READ) */
+};
+
+typedef struct StoreRequest {
+    uint32_t id;
+    uint32_t site_len, path_len, data_len;
+} StoreRequest;
+
+typedef struct StoreResult {
+    uint32_t id;
+    uint32_t ok;
+    uint32_t data_len;
+} StoreResult;
+
 #endif

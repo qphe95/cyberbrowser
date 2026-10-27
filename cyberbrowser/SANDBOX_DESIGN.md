@@ -202,7 +202,7 @@ interface into the UI's windows. It is described in section 5.
 
 A tab's site is the scheme and **registrable domain** of its top-level document's URL:
 `https://www.youtube.com/watch?v=…` → `https://youtube.com`. The registrable domain is eTLD+1
-from the Public Suffix List (shipped with the browser, about 230 KB; `a.github.io` and
+from the Public Suffix List (compiled into the browser, about 190 KB; `a.github.io` and
 `b.github.io` are different sites because `github.io` is a public suffix). Ports are
 ignored, as in the web's definition of a site. Special cases:
 
@@ -817,6 +817,57 @@ the single-process harness on top of it; the CPU rasterizer is `src/raster_cpu.c
   Wikipedia parsed an empty page. Whatever couldn't be observed while it arrived is now
   observed once the response is complete. Replays were unaffected, since their bodies are
   decoded already.
+
+**M2 (done):** the network process (`cb_net.exe`) and the storage service (`cb_store.exe`).
+
+- **The coordinator labels each tab with its site** (`src/proc/site.c`: scheme and
+  registrable domain; `about:blank` is opaque). When it starts a tab it grants channels to
+  the network process and, unless the site is opaque, the storage service, badged with that
+  label. It revokes them when the tab ends. The network process and the storage service are
+  connected at start, and on quit the network process saves its cookie jars before
+  everything ends.
+- **Tabs have no network.** `http_download.c` takes a remote transport (`http_set_remote`):
+  in a tab every request and `document.cookie` access goes to the network process, and the
+  network code refuses to run. Large messages travel as parts (`src/ipc/bigmsg.c`); a
+  receiver thread files responses by request id, so the engine's fetch threads can wait on
+  them concurrently. Sampled during live loads of Wikipedia and GitHub: tabs held no TCP
+  connections, the network process held them all.
+- **Cookies live in the network process**, one jar per site (`http_cookie_jar_use` chooses
+  a thread's jar). A request carries only its tab's site's cookies, added by the network
+  process; HttpOnly cookies never reach a tab. Jars are saved every 2 seconds and at quit
+  to `browser_data/sites/<site>/cookies` through the storage service, and loaded when a
+  site's first tab starts.
+- **The storage service** (`src/proc/store_main.c`) owns `browser_data/sites/`. What a client
+  may name is decided by `src/proc/store_core.c`: the path grammar of section 3.3, a tab
+  only in its own site's folder, the network process only a site's `cookies` file, a
+  64 MB quota per site. Every file is opened refusing reparse points and hard links, and
+  checked with `GetFinalPathNameByHandleW` to be in that folder. Writes go to a temporary
+  file and replace the old one. One deviation from section 3.3: a read returns the file's
+  content rather than a read-only handle, since the files so far are small.
+- **`localStorage` persists**, per origin, in `local_storage/<scheme>_<host>_<port>` under
+  the site's folder. It is loaded on first use, and the tab saves changes at most every
+  500 ms.
+- **Tested** with a local test server, over two browser sessions: the `localStorage`
+  counter carried over; the network process sent the saved cookies, HttpOnly included, on
+  the first request of the second session; `document.cookie` never showed the HttpOnly
+  one. A tab of another site (`127.0.0.1` beside `localhost`) saw none of the first site's
+  cookies or storage. Replays work through the network process (`CYBER_REPLAY` is served
+  there): Wikipedia 42,607 DOM nodes, against 42,608 in the harness; the YouTube watch page
+  7,366 against 7,485. The tab runs in real time rather than on the deterministic clock,
+  and doesn't stop when the page settles.
+- `proc_tests.exe` checks the pure parts: sites, the storage rules, the coordinator's core.
+- **Fixed on the way**, both also in the single-process browser:
+  - The engine's JS `fetch` wrapper put `document.cookie` into a `Cookie` header, so
+    credentialed fetches never sent HttpOnly cookies. The native layer adds cookies from the
+    jar, by credentials mode.
+  - The image cache read any image source that wasn't a network or `data:` URL from the
+    local disk. Tabs now turn that off (`image_cache_allow_local_files`).
+- **The Public Suffix List**, all of it (10,397 rules, with wildcards and exceptions), is
+  `third_party/psl/public_suffix_list.dat`. `tools/gen_psl.js` compiles it into sorted
+  tables in `src/proc/psl_data.h` (about 190 KB in each binary that uses `site.c`), which
+  `site_of` binary-searches. Checked against a separate implementation of the list's
+  algorithm on 41,590 hosts built from every rule: no differences. To update it,
+  download the list again and rerun the generator.
 
 **Not in M1** (later milestones, or not yet planned):
 - Typing into the page (forms, text fields).

@@ -188,7 +188,15 @@ typedef struct HttpCookie {
     struct HttpCookie *next;
 } HttpCookie;
 
-static HttpCookie *g_cookie_jar = NULL;
+/* A jar: the process's, or (in the network process) one per site, chosen
+ * per thread by http_cookie_jar_use. */
+struct HttpCookieJar {
+    HttpCookie *head;
+    uint64_t version;           /* bumped by every Set-Cookie and document.cookie write */
+};
+static HttpCookieJar g_process_jar;
+static __thread HttpCookieJar *t_jar;
+#define g_cookie_jar ((t_jar ? t_jar : &g_process_jar)->head)
 /* Requests may run on several threads (the script fetch pool): the jar is
  * guarded by a mutex and each thread builds its Cookie header in its own
  * buffer. */
@@ -411,16 +419,27 @@ static void cookie_set_internal_unlocked(const char *url, const char *header, bo
 static void cookie_set_internal(const char *url, const char *header, bool from_document) {
     pthread_mutex_lock(&g_cookie_mutex);
     cookie_set_internal_unlocked(url, header, from_document);
+    (t_jar ? t_jar : &g_process_jar)->version++;
     pthread_mutex_unlock(&g_cookie_mutex);
 }
 
+/* A process that fetches through another (a tab, SANDBOX_DESIGN.md
+ * section 2.4): requests and document.cookie go to g_remote, and the
+ * network code refuses to run. */
+static const HttpRemote *g_remote;
+
+void http_set_remote(const HttpRemote *remote) {
+    g_remote = remote;
+}
+
 void http_cookie_set_for_request(const char *url, const char *set_cookie_header) {
-    if (!url || !set_cookie_header) return;
+    if (!url || !set_cookie_header || g_remote) return;
     cookie_set_internal(url, set_cookie_header, false);
 }
 
 void http_cookie_set_for_document(const char *url, const char *cookie_line) {
     if (!url || !cookie_line) return;
+    if (g_remote) { g_remote->cookie_set_for_document(url, cookie_line); return; }
     cookie_set_internal(url, cookie_line, true);
 }
 
@@ -485,13 +504,103 @@ static const char* cookie_build_string(const char *url, bool for_http) {
 }
 
 const char* http_cookie_get_for_request(const char *url) {
-    if (!url) return NULL;
+    /* Through the network process: it adds the cookies (HttpOnly ones
+     * never reach this process). */
+    if (!url || g_remote) return NULL;
     return cookie_build_string(url, true);
 }
 
 const char* http_cookie_get_for_document(const char *url) {
     if (!url) return NULL;
+    if (g_remote) {
+        char *s = g_remote->cookie_get_for_document(url);
+        if (!s) return NULL;
+        snprintf(g_cookie_buffer, sizeof(g_cookie_buffer), "%s", s);
+        free(s);
+        return g_cookie_buffer[0] ? g_cookie_buffer : NULL;
+    }
     return cookie_build_string(url, false);
+}
+
+HttpCookieJar *http_cookie_jar_new(void) {
+    return (HttpCookieJar *)calloc(1, sizeof(HttpCookieJar));
+}
+
+void http_cookie_jar_use(HttpCookieJar *jar) {
+    t_jar = jar;
+}
+
+uint64_t http_cookie_jar_version(HttpCookieJar *jar) {
+    pthread_mutex_lock(&g_cookie_mutex);
+    uint64_t v = jar->version;
+    pthread_mutex_unlock(&g_cookie_mutex);
+    return v;
+}
+
+/* One line per persistent cookie: name, value, domain, path, expires and
+ * flags (h HttpOnly, s Secure, o host-only), tab-separated. */
+char *http_cookie_jar_save(HttpCookieJar *jar, size_t *len) {
+    pthread_mutex_lock(&g_cookie_mutex);
+    size_t cap = 1, n = 0;
+    for (HttpCookie *c = jar->head; c; c = c->next) cap += sizeof(*c) + 64;
+    char *out = (char *)malloc(cap);
+    time_t now = time(NULL);
+    for (HttpCookie *c = jar->head; out && c; c = c->next) {
+        if (c->expires <= now) continue;            /* session or expired: not kept */
+        if (strpbrk(c->name, "\t\n") || strpbrk(c->value, "\t\n") || strpbrk(c->domain, "\t\n") || strpbrk(c->path, "\t\n"))
+            continue;
+        n += (size_t)snprintf(out + n, cap - n, "%s\t%s\t%s\t%s\t%lld\t%s%s%s\n", c->name, c->value, c->domain,
+                              c->path, (long long)c->expires, c->http_only ? "h" : "", c->secure ? "s" : "",
+                              c->host_only ? "o" : "");
+    }
+    if (out) out[n] = 0;
+    pthread_mutex_unlock(&g_cookie_mutex);
+    *len = out ? n : 0;
+    return out;
+}
+
+void http_cookie_jar_load(HttpCookieJar *jar, const char *data, size_t len) {
+    pthread_mutex_lock(&g_cookie_mutex);
+    time_t now = time(NULL);
+    const char *p = data, *end = data + len;
+    while (p < end) {
+        const char *eol = memchr(p, '\n', (size_t)(end - p));
+        if (!eol) eol = end;
+        char line[sizeof(HttpCookie)];
+        size_t ln = (size_t)(eol - p);
+        if (ln < sizeof(line)) {
+            memcpy(line, p, ln);
+            line[ln] = 0;
+            char *f[6];
+            int nf = 0;
+            for (char *q = line; nf < 6; ) {
+                f[nf++] = q;
+                char *t = strchr(q, '\t');
+                if (!t) break;
+                *t = 0;
+                q = t + 1;
+            }
+            long long exp = nf == 6 ? atoll(f[4]) : 0;
+            if (nf == 6 && f[0][0] && exp > now && strlen(f[0]) < 256 && strlen(f[1]) < 4096 &&
+                strlen(f[2]) < 256 && strlen(f[3]) < 1024) {
+                HttpCookie *c = (HttpCookie *)calloc(1, sizeof(HttpCookie));
+                if (c) {
+                    strcpy(c->name, f[0]);
+                    strcpy(c->value, f[1]);
+                    strcpy(c->domain, f[2]);
+                    strcpy(c->path, f[3]);
+                    c->expires = (time_t)exp;
+                    c->http_only = strchr(f[5], 'h') != NULL;
+                    c->secure = strchr(f[5], 's') != NULL;
+                    c->host_only = strchr(f[5], 'o') != NULL;
+                    c->next = jar->head;
+                    jar->head = c;
+                }
+            }
+        }
+        p = eol + 1;
+    }
+    pthread_mutex_unlock(&g_cookie_mutex);
 }
 
 void http_cookie_clear(void) {
@@ -994,6 +1103,10 @@ static bool http_request_with_method_internal(const char *url, const char *metho
                                                char *err, size_t errLen, const char *cookies,
                                                DownloadState *state,
                                                FILE *bodyStream, size_t *outTotalSize) {
+    if (g_remote) {
+        if (err && errLen) snprintf(err, errLen, "this process has no network");
+        return false;
+    }
     bool in_memory = outBuffer && !bodyStream && url && method;
     if (in_memory && replay_serve(method, url, outBuffer, outStatus)) {
         if (outTotalSize) *outTotalSize = outBuffer->size;
@@ -1697,6 +1810,16 @@ static bool http_request_with_method(const char *url, const char *method,
                                      char *err, size_t errLen, const char *cookies,
                                      DownloadState *state,
                                      FILE *bodyStream) {
+    if (g_remote) {
+        if (!outBuffer || bodyStream || !url) {
+            if (err && errLen) snprintf(err, errLen, "not available through the network process");
+            return false;
+        }
+        (void)cookies;
+        (void)state;
+        return g_remote->request(url, method ? method : "GET", postData, postDataLen,
+                                 custom_headers, custom_header_count, outBuffer, outStatus, err, errLen);
+    }
     if (outBuffer && !bodyStream && url && (!method || strcmp(method, "GET") == 0)) {
         const char *path = url_map_lookup(url);
         if (path) return url_map_serve(path, outBuffer, outStatus, err, errLen);

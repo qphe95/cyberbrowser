@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /* Android JNI support - only included when building for Android */
 #ifdef BE_PLATFORM_ANDROID
@@ -80,6 +81,30 @@ void http_cookie_set_for_document(const char *url, const char *cookie_line);
 const char* http_cookie_get_for_request(const char *url);
 const char* http_cookie_get_for_document(const char *url);
 void http_cookie_clear(void);
+
+/* Cookie jars.  A thread's requests and cookie calls use the jar it chose
+ * (NULL: the process's).  The network process keeps one per site. */
+typedef struct HttpCookieJar HttpCookieJar;
+HttpCookieJar *http_cookie_jar_new(void);
+void http_cookie_jar_use(HttpCookieJar *jar);
+/* Changes with every cookie written to the jar. */
+uint64_t http_cookie_jar_version(HttpCookieJar *jar);
+/* The jar's persistent cookies as text (malloc'd), and back. */
+char *http_cookie_jar_save(HttpCookieJar *jar, size_t *len);
+void http_cookie_jar_load(HttpCookieJar *jar, const char *data, size_t len);
+
+/* A process with no network of its own (a tab): every request and
+ * document.cookie access goes to these, and the network code refuses to
+ * run.  request: as http_request_to_memory (the body in out->data,
+ * NUL-terminated; the response headers in out->headers). */
+typedef struct HttpRemote {
+    bool (*request)(const char *url, const char *method, const char *body, size_t body_len,
+                    const char **headers, size_t nheaders, HttpBuffer *out, int *status,
+                    char *err, size_t err_len);
+    char *(*cookie_get_for_document)(const char *url);      /* malloc'd, or NULL */
+    void (*cookie_set_for_document)(const char *url, const char *line);
+} HttpRemote;
+void http_set_remote(const HttpRemote *remote);
 
 /* Android-specific functions - only available on Android */
 #ifdef BE_PLATFORM_ANDROID

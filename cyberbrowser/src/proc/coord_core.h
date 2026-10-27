@@ -7,12 +7,15 @@
  * proved (M4).  The shim (coordinator.c) turns messages and process exits into
  * events and performs the actions with Win32 calls.
  *
- * M1: the UI asks for tabs; the core checks each request and starts or ends
- * tab processes.  Labels and channel grants between tabs come with M2. */
+ * The UI asks for tabs; the core checks each request, labels the tab with
+ * its site (site.h), and starts or ends its process.  Starting a tab also
+ * grants it channels to the network process and (unless its site is opaque)
+ * the storage service, both badged with that site. */
 
 #include <stdbool.h>
 #include <stdint.h>
 #include "proto.h"
+#include "site.h"
 
 #define COORD_MAX_TABS 60       /* the shim waits on all their processes at once */
 
@@ -21,6 +24,7 @@ typedef enum { SLOT_FREE = 0, SLOT_STARTING, SLOT_RUNNING, SLOT_CLOSING } CoordS
 typedef struct CoordSlot {
     CoordSlotState state;
     uint32_t tab;               /* the UI's id */
+    char site[SITE_MAX];        /* its label; "" = opaque (no storage) */
 } CoordSlot;
 
 typedef struct CoordState {
@@ -34,6 +38,7 @@ typedef enum {
     CE_TAB_STARTED,             /* slot: CA_START_TAB succeeded */
     CE_TAB_START_FAILED,        /* slot: it didn't */
     CE_TAB_EXITED,              /* slot, exit_code: its process ended */
+    CE_SERVICE_EXITED,          /* the network process or the storage service ended */
 } CoordEventKind;
 
 typedef struct CoordEvent {
@@ -46,8 +51,9 @@ typedef struct CoordEvent {
 } CoordEvent;
 
 typedef enum {
-    CA_START_TAB,               /* slot, tab, width, height, url (len bytes) */
+    CA_START_TAB,               /* slot, tab, width, height, site, url (len bytes) */
     CA_KILL_TAB,                /* slot */
+    CA_TAB_GONE,                /* slot, tab: revoke its channels to the servers */
     CA_SEND_UI,                 /* type, data (len bytes) */
     CA_EXIT,                    /* end every process and exit */
 } CoordActionKind;
@@ -56,6 +62,7 @@ typedef struct CoordAction {
     CoordActionKind kind;
     int slot;
     uint32_t tab, width, height;
+    char site[SITE_MAX];
     uint16_t type;
     uint32_t len;
     uint8_t data[PROTO_URL_MAX];

@@ -17,6 +17,9 @@ typedef struct ImageCache ImageCache;
 typedef void (*ImageLoadCallback)(const char *url, void *user_data);
 
 ImageCache *image_cache_create(void);
+/* Whether an image source that is a local path is read from disk (default
+ * true; a tab process reads no files). */
+void image_cache_allow_local_files(bool allow);
 void        image_cache_destroy(ImageCache *cache);
 
 /* Load an image from a local path or an http(s) URL. Returns a handle >= 0 or -1 on failure. */

@@ -533,6 +533,15 @@ static bool http_fetch(const char *url, uint8_t **out, size_t *len)
     return true;
 }
 
+/* Image sources that are local paths (the harness's CYBER_LAYOUT_HTML
+ * probe); a tab process reads no files. */
+static bool g_local_files = true;
+
+void image_cache_allow_local_files(bool allow)
+{
+    g_local_files = allow;
+}
+
 static bool fetch_entry(ImageEntry *e)
 {
     const char *src = e->source;
@@ -541,7 +550,7 @@ static bool fetch_entry(ImageEntry *e)
         return e->bytes != NULL;
     }
     if (url_is_network_url(src)) return http_fetch(src, &e->bytes, &e->nbytes);
-    return read_file(src, &e->bytes, &e->nbytes);
+    return g_local_files && read_file(src, &e->bytes, &e->nbytes);
 }
 
 /* ------------------------------------------------------------------------- */

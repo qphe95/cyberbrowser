@@ -487,6 +487,7 @@ if(BE_PLATFORM_WINDOWS)
     # the UI link only this.
     add_library(cb_ipc STATIC
         src/ipc/chan.c
+        src/ipc/bigmsg.c
         src/proc/spawn.c
     )
     target_include_directories(cb_ipc PUBLIC
@@ -499,17 +500,22 @@ if(BE_PLATFORM_WINDOWS)
     target_link_libraries(chan_bench PRIVATE cb_ipc)
 
     # The coordinator: its core (coord_core.c) is pure C with no Win32 calls.
-    add_executable(cb_coord src/proc/coordinator.c src/proc/coord_core.c)
+    add_executable(cb_coord src/proc/coordinator.c src/proc/coord_core.c src/proc/site.c)
     target_link_libraries(cb_coord PRIVATE cb_ipc)
     target_compile_options(cb_coord PRIVATE -Wall -Wextra)
+
+    # Tests of the pure parts: sites, the storage rules, the coordinator's core.
+    add_executable(proc_tests src/proc/proc_tests.c src/proc/coord_core.c src/proc/site.c src/proc/store_core.c)
+    target_link_libraries(proc_tests PRIVATE cb_ipc)
+    target_compile_options(proc_tests PRIVATE -Wall -Wextra)
 
     # The UI: windows and input, no engine.
     add_executable(cb_ui WIN32 src/proc/ui_main.c)
     target_link_libraries(cb_ui PRIVATE cb_ipc user32 gdi32)
     target_compile_options(cb_ui PRIVATE -Wall -Wextra)
 
-    # A tab: the page engine.
-    add_executable(cb_tab src/proc/tab_main.c)
+    # A tab: the page engine, with no network or files of its own.
+    add_executable(cb_tab src/proc/tab_main.c src/proc/site.c)
     target_include_directories(cb_tab PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/src/quickjs
@@ -519,6 +525,17 @@ if(BE_PLATFORM_WINDOWS)
     if(MINGW)
         target_link_options(cb_tab PRIVATE "-Wl,--stack,67108864")
     endif()
+
+    # The network process: HTTP and TLS from the engine library, no JS.
+    add_executable(cb_net src/proc/net_main.c)
+    target_include_directories(cb_net PRIVATE /src)
+    target_include_directories(cb_net BEFORE PRIVATE /src/win32)
+    target_link_libraries(cb_net PRIVATE cyberbrowser_lib cb_ipc)
+
+    # The storage service: no engine.
+    add_executable(cb_store src/proc/store_main.c src/proc/store_core.c src/proc/site.c)
+    target_link_libraries(cb_store PRIVATE cb_ipc)
+    target_compile_options(cb_store PRIVATE -Wall -Wextra)
 endif()
 
 # =============================================================================

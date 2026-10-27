@@ -14,6 +14,7 @@
 #include "css_parser.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
+#include "storage_api.h"
 
 /* ============================================================================
  * Storage API Implementation (localStorage/sessionStorage)
@@ -23,8 +24,86 @@
 static StorageData g_local_storage_data = {0};
 static StorageData g_session_storage_data = {0};
 
-// Helper to identify which storage type based on object
+static const StorageBackend *g_backend;
+static bool g_local_loaded, g_local_changed;
+
+void storage_set_backend(const StorageBackend *backend) {
+    g_backend = backend;
+}
+
+/* The store as [u32 key length][key][u32 value length][value]... */
+static void local_load(void) {
+    g_local_loaded = true;
+    char *data = NULL;
+    size_t len = 0;
+    if (!g_backend || !g_backend->load(&data, &len)) return;
+    StorageData *st = &g_local_storage_data;
+    size_t p = 0;
+    while (p + 4 <= len) {
+        uint32_t kl, vl;
+        memcpy(&kl, data + p, 4);
+        if (kl > len - p - 4) break;
+        const char *k = data + p + 4;
+        p += 4 + (size_t)kl;
+        if (p + 4 > len) break;
+        memcpy(&vl, data + p, 4);
+        if (vl > len - p - 4) break;
+        const char *v = data + p + 4;
+        p += 4 + (size_t)vl;
+        if (st->bytes + kl + vl > STORAGE_QUOTA_BYTES) break;
+        if (st->count == st->cap) {
+            int ncap = st->cap ? st->cap * 2 : 16;
+            StorageItem *ni = realloc(st->items, (size_t)ncap * sizeof(StorageItem));
+            if (!ni) break;
+            st->items = ni;
+            st->cap = ncap;
+        }
+        StorageItem *it = &st->items[st->count];
+        it->key = malloc((size_t)kl + 1);
+        it->value = malloc((size_t)vl + 1);
+        if (!it->key || !it->value) { free(it->key); free(it->value); break; }
+        memcpy(it->key, k, kl); it->key[kl] = '\0'; it->key_len = kl;
+        memcpy(it->value, v, vl); it->value[vl] = '\0'; it->value_len = vl;
+        st->count++;
+        st->bytes += kl + vl;
+    }
+    free(data);
+}
+
+bool storage_local_take_changes(char **data, size_t *len) {
+    if (!g_local_changed) return false;
+    StorageData *st = &g_local_storage_data;
+    size_t n = 0;
+    for (int i = 0; i < st->count; i++) n += 8 + st->items[i].key_len + st->items[i].value_len;
+    char *out = malloc(n ? n : 1);
+    if (!out) return false;
+    size_t p = 0;
+    for (int i = 0; i < st->count; i++) {
+        uint32_t kl = (uint32_t)st->items[i].key_len, vl = (uint32_t)st->items[i].value_len;
+        memcpy(out + p, &kl, 4); memcpy(out + p + 4, st->items[i].key, kl); p += 4 + kl;
+        memcpy(out + p, &vl, 4); memcpy(out + p + 4, st->items[i].value, vl); p += 4 + vl;
+    }
+    g_local_changed = false;
+    *data = out;
+    *len = n;
+    return true;
+}
+
+static StorageData* get_storage_data_of(JSContextHandle ctx, GCValue obj);
+
+/* The store of a Storage object; localStorage is loaded on first use. */
 static StorageData* get_storage_data(JSContextHandle ctx, GCValue obj) {
+    StorageData *st = get_storage_data_of(ctx, obj);
+    if (st == &g_local_storage_data && !g_local_loaded) local_load();
+    return st;
+}
+
+static void changed(StorageData *st) {
+    if (st == &g_local_storage_data) g_local_changed = true;
+}
+
+// Helper to identify which storage type based on object
+static StorageData* get_storage_data_of(JSContextHandle ctx, GCValue obj) {
     // Compare object with known localStorage/sessionStorage globals
     GCValue global = JS_GetGlobalObject(ctx);
     GCValue localStorageGlob = JS_GetPropertyStr(ctx, global, "localStorage");
@@ -130,6 +209,7 @@ GCValue js_storage_set_item(JSContextHandle ctx, GCValue this_val, int argc, GCV
         it->value = v; it->value_len = value_len;
     }
     storage->bytes = storage->bytes - old + key_len + value_len;
+    changed(storage);
     
     return JS_UNDEFINED;
 }
@@ -152,6 +232,7 @@ GCValue js_storage_remove_item(JSContextHandle ctx, GCValue this_val, int argc, 
         free(it->value);
         memmove(it, it + 1, (size_t)(storage->count - idx - 1) * sizeof(StorageItem));
         storage->count--;
+        changed(storage);
     }
     
     return JS_UNDEFINED;
@@ -170,6 +251,7 @@ GCValue js_storage_clear(JSContextHandle ctx, GCValue this_val, int argc, GCValu
     }
     storage->count = 0;
     storage->bytes = 0;
+    changed(storage);
     
     return JS_UNDEFINED;
 }

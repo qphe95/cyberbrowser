@@ -1,8 +1,14 @@
 /* tab_main.c - cb_tab.exe: a tab process (SANDBOX_DESIGN.md section 2.3).
  *
- * Started by the coordinator with its channel to the UI, its surface, the
+ * Started by the coordinator with its channels to the UI, the network process
+ * and (unless its site is opaque) the storage service, its surface, the
  * viewport size and the URL (hex):
- *   cb_tab.exe --chan S E0 E1 --surface H --size W H --tab N --url HEX
+ *   cb_tab.exe --chan S E0 E1 --net S E0 E1 [--store S E0 E1] --surface H
+ *              --size W H --tab N --url HEX
+ *
+ * It has no network or files of its own: every request and document.cookie
+ * goes to the network process, which adds the site's cookies, and
+ * localStorage is loaded from and saved to the storage service.
  *
  * It loads the page with the page engine, then runs the page's event loop,
  * paints the visible part of each new frame into its surface, and answers the
@@ -16,8 +22,10 @@
 #include <psapi.h>
 
 #include "chan.h"
+#include "bigmsg.h"
 #include "proto.h"
 #include "spawn.h"
+#include "site.h"
 
 #include "platform.h"
 #include "quickjs.h"
@@ -25,6 +33,9 @@
 #include "det_clock.h"
 #include "page_engine.h"
 #include "raster_cpu.h"
+#include "http_download.h"
+#include "image_cache.h"
+#include "browser/storage_api.h"
 
 unsigned long long timer_next_due_ms(void);
 unsigned long long page_time_ms(void);
@@ -239,6 +250,235 @@ static bool drain(void) {
     return any;
 }
 
+/* ---- the network process ------------------------------------------------- */
+
+/* Requests come from several threads (the JS thread, script and image
+ * fetchers).  Each sends its request whole under g_net_send, then waits for
+ * its response, which the receiver thread files by id. */
+typedef struct Pending {
+    uint32_t id;
+    bool done;
+    uint8_t *msg;                       /* the NT_RESPONSE, whole */
+    uint32_t len;
+    struct Pending *next;
+} Pending;
+
+static Chan g_net;                      /* side 0: the tab */
+static CRITICAL_SECTION g_net_send, g_net_lock;
+static CONDITION_VARIABLE g_net_cv;
+static Pending *g_pending;
+static volatile LONG g_net_id;
+static volatile bool g_net_broken;
+
+static DWORD WINAPI net_receiver(void *arg) {
+    (void)arg;
+    BigRx rx = { 0 };
+    for (;;) {
+        int r = big_recv(&g_net, &rx);
+        if (r < 0) break;
+        if (r == 0) { chan_wait(&g_net, 1000); continue; }
+        if (rx.type != NT_RESPONSE || rx.total < sizeof(NetResponse)) continue;
+        uint32_t id;
+        memcpy(&id, rx.buf, 4);
+        EnterCriticalSection(&g_net_lock);
+        for (Pending *p = g_pending; p; p = p->next) {
+            if (p->id != id || p->done) continue;
+            p->msg = rx.buf;            /* taken over */
+            p->len = rx.total;
+            p->done = true;
+            rx.buf = NULL;
+            break;
+        }
+        WakeAllConditionVariable(&g_net_cv);
+        LeaveCriticalSection(&g_net_lock);
+    }
+    fprintf(stderr, "[tab %u] the network channel broke\n", g_tab);
+    EnterCriticalSection(&g_net_lock);
+    g_net_broken = true;
+    WakeAllConditionVariable(&g_net_cv);
+    LeaveCriticalSection(&g_net_lock);
+    return 0;
+}
+
+/* Send a message that expects a response, and wait for it (malloc'd). */
+static uint8_t *net_call(uint16_t type, uint32_t id, const void *a, uint32_t alen, const void *b, uint32_t blen,
+                         const void *c, uint32_t clen, uint32_t *len) {
+    Pending p = { id, false, NULL, 0, NULL };
+    EnterCriticalSection(&g_net_lock);
+    p.next = g_pending;
+    g_pending = &p;
+    LeaveCriticalSection(&g_net_lock);
+    EnterCriticalSection(&g_net_send);
+    bool sent = !g_net_broken && big_send(&g_net, type, a, alen, b, blen, c, clen, 30000);
+    LeaveCriticalSection(&g_net_send);
+    EnterCriticalSection(&g_net_lock);
+    while (sent && !p.done && !g_net_broken) SleepConditionVariableCS(&g_net_cv, &g_net_lock, INFINITE);
+    for (Pending **pp = &g_pending; *pp; pp = &(*pp)->next)
+        if (*pp == &p) { *pp = p.next; break; }
+    LeaveCriticalSection(&g_net_lock);
+    *len = p.len;
+    return p.msg;
+}
+
+static bool net_request(const char *url, const char *method, const char *body, size_t body_len,
+                        const char **headers, size_t nheaders, HttpBuffer *out, int *status,
+                        char *err, size_t err_len) {
+    memset(out, 0, sizeof(*out));
+    if (body_len > BIG_MAX / 2) { snprintf(err, err_len, "request body too large"); return false; }
+    /* method, url, headers: NUL-terminated, after the fixed part */
+    size_t hlen = 0;
+    for (size_t i = 0; i < nheaders; i++) hlen += strlen(headers[i]) + 1;
+    size_t mlen = strlen(method) + 1, ulen = strlen(url) + 1;
+    char *strs = (char *)malloc(mlen + ulen + hlen + 1);
+    if (!strs) return false;
+    memcpy(strs, method, mlen);
+    memcpy(strs + mlen, url, ulen);
+    size_t o = mlen + ulen;
+    for (size_t i = 0; i < nheaders; i++) {
+        size_t n = strlen(headers[i]) + 1;
+        memcpy(strs + o, headers[i], n);
+        o += n;
+    }
+    NetRequest q = { (uint32_t)InterlockedIncrement(&g_net_id), (uint32_t)mlen, (uint32_t)ulen, (uint32_t)hlen,
+                     (uint32_t)nheaders, (uint32_t)body_len };
+    uint32_t len = 0;
+    uint8_t *m = net_call(TN_REQUEST, q.id, &q, sizeof(q), strs, (uint32_t)o, body, (uint32_t)body_len, &len);
+    free(strs);
+    NetResponse r;
+    if (!m || len < sizeof(r)) {
+        free(m);
+        snprintf(err, err_len, "no response from the network process");
+        return false;
+    }
+    memcpy(&r, m, sizeof(r));
+    if ((uint64_t)sizeof(r) + r.headers_len + r.error_len + r.body_len != len) {
+        free(m);
+        snprintf(err, err_len, "malformed response from the network process");
+        return false;
+    }
+    const uint8_t *p = m + sizeof(r);
+    if (status) *status = r.status;
+    if (!r.ok) {
+        snprintf(err, err_len, "%.*s", (int)r.error_len, (const char *)p + r.headers_len);
+        free(m);
+        return false;
+    }
+    out->headers = (char *)malloc((size_t)r.headers_len + 1);
+    out->data = (char *)malloc((size_t)r.body_len + 1);
+    if (!out->headers || !out->data) {
+        free(out->headers); free(out->data); free(m);
+        memset(out, 0, sizeof(*out));
+        return false;
+    }
+    memcpy(out->headers, p, r.headers_len);
+    out->headers[r.headers_len] = 0;
+    out->headers_size = r.headers_len;
+    memcpy(out->data, p + r.headers_len + r.error_len, r.body_len);
+    out->data[r.body_len] = 0;
+    out->size = r.body_len;
+    free(m);
+    return true;
+}
+
+static char *net_cookie_get(const char *url) {
+    NetCookieGet g = { (uint32_t)InterlockedIncrement(&g_net_id) };
+    uint32_t len = 0;
+    uint8_t *m = net_call(TN_COOKIE_GET, g.id, &g, sizeof(g), url, (uint32_t)strlen(url), NULL, 0, &len);
+    NetResponse r;
+    char *s = NULL;
+    if (m && len >= sizeof(r)) {
+        memcpy(&r, m, sizeof(r));
+        if (r.ok && (uint64_t)sizeof(r) + r.headers_len + r.error_len + r.body_len == len) {
+            s = (char *)malloc((size_t)r.body_len + 1);
+            if (s) {
+                memcpy(s, m + sizeof(r) + r.headers_len + r.error_len, r.body_len);
+                s[r.body_len] = 0;
+            }
+        }
+    }
+    free(m);
+    return s;
+}
+
+static void net_cookie_set(const char *url, const char *line) {
+    EnterCriticalSection(&g_net_send);
+    if (!g_net_broken)
+        big_send(&g_net, TN_COOKIE_SET, url, (uint32_t)strlen(url) + 1, line, (uint32_t)strlen(line), NULL, 0, 30000);
+    LeaveCriticalSection(&g_net_send);
+}
+
+static const HttpRemote g_remote = { net_request, net_cookie_get, net_cookie_set };
+
+/* ---- the storage service (the JS thread only) ---------------------------------- */
+
+static Chan g_store;                    /* side 0: the tab */
+static bool g_have_store;
+static BigRx g_store_rx;
+static uint32_t g_store_id;
+static char g_local_path[80];           /* local_storage/<origin> */
+
+static bool store_call(uint16_t type, const char *path, const void *data, uint32_t dlen,
+                       char **out, size_t *out_len) {
+    if (!g_have_store) return false;
+    StoreRequest r = { ++g_store_id, 0, (uint32_t)strlen(path), dlen };
+    if (!big_send(&g_store, type, &r, sizeof(r), path, r.path_len, data, dlen, 5000)) return false;
+    for (;;) {
+        int got = big_recv(&g_store, &g_store_rx);
+        if (got < 0) { g_have_store = false; return false; }
+        if (got == 0) { if (!chan_wait(&g_store, 10000)) return false; continue; }
+        StoreResult res;
+        if (g_store_rx.type != ST_RESULT || g_store_rx.total < sizeof(res)) continue;
+        memcpy(&res, g_store_rx.buf, sizeof(res));
+        if (res.id != r.id) continue;
+        if (res.data_len != g_store_rx.total - sizeof(res)) return false;
+        if (out && res.ok) {
+            *out = (char *)malloc((size_t)res.data_len + 1);
+            if (!*out) return false;
+            memcpy(*out, g_store_rx.buf + sizeof(res), res.data_len);
+            *out_len = res.data_len;
+        }
+        return res.ok != 0;
+    }
+}
+
+static bool local_storage_load(char **data, size_t *len) {
+    return g_local_path[0] && store_call(TS_READ, g_local_path, NULL, 0, data, len);
+}
+
+static const StorageBackend g_storage = { local_storage_load };
+
+/* The page origin's localStorage file: local_storage/<scheme>_<host>_<port>,
+ * or a hash of that if it is too long for a path component. */
+static void local_storage_path(const char *url) {
+    char scheme[8], host[SITE_HOST_MAX + 1];
+    if (!site_url_host((const uint8_t *)url, (uint32_t)strlen(url), scheme, sizeof(scheme), host, sizeof(host)))
+        return;
+    int port = !strcmp(scheme, "https") ? 443 : 80;
+    const char *a = strstr(url, "://") + 3, *end = a + strcspn(a, "/?#");
+    for (const char *p = end; p > a; p--)
+        if (p[-1] == ':') { port = atoi(p); break; } else if (p[-1] < '0' || p[-1] > '9') break;
+    char origin[SITE_HOST_MAX + 32];
+    snprintf(origin, sizeof(origin), "%s_%s_%d", scheme, host, port);
+    if (strlen(origin) > 64) {
+        uint64_t h = 1469598103934665603ull;
+        for (const char *p = origin; *p; p++) h = (h ^ (uint8_t)*p) * 1099511628211ull;
+        snprintf(origin, sizeof(origin), "h%016llx", (unsigned long long)h);
+    }
+    snprintf(g_local_path, sizeof(g_local_path), "local_storage/%s", origin);
+}
+
+static void save_local_storage(void) {
+    static ULONGLONG last;
+    if (!g_have_store || GetTickCount64() - last < 500) return;
+    last = GetTickCount64();
+    char *data;
+    size_t len;
+    if (!storage_local_take_changes(&data, &len)) return;
+    if (!store_call(TS_WRITE, g_local_path, data, (uint32_t)len, NULL, NULL))
+        fprintf(stderr, "[tab %u] could not save localStorage\n", g_tab);
+    free(data);
+}
+
 /* ---- main --------------------------------------------------------------- */
 
 static char *unhex(const char *s) {
@@ -256,12 +496,16 @@ static char *unhex(const char *s) {
 int main(int argc, char **argv) {
     det_clock_set_js_thread();
     HANDLE sec = NULL, e0 = NULL, e1 = NULL, surface = NULL;
+    HANDLE net[3] = { 0 }, store[3] = { 0 };
     const char *url_hex = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--chan") && i + 3 < argc) {
             sec = spawn_handle_from_arg(argv[++i]);
             e0 = spawn_handle_from_arg(argv[++i]);
             e1 = spawn_handle_from_arg(argv[++i]);
+        } else if ((!strcmp(argv[i], "--net") || !strcmp(argv[i], "--store")) && i + 3 < argc) {
+            HANDLE *h = argv[i][2] == 'n' ? net : store;
+            for (int k = 0; k < 3; k++) h[k] = spawn_handle_from_arg(argv[++i]);
         } else if (!strcmp(argv[i], "--surface") && i + 1 < argc) {
             surface = spawn_handle_from_arg(argv[++i]);
         } else if (!strcmp(argv[i], "--size") && i + 2 < argc) {
@@ -273,7 +517,7 @@ int main(int argc, char **argv) {
             url_hex = argv[++i];
         }
     }
-    if (!sec || !surface || !url_hex || g_width == 0 || g_height == 0 ||
+    if (!sec || !net[0] || !surface || !url_hex || g_width == 0 || g_height == 0 ||
         g_width > SURFACE_MAX_W || g_height > SURFACE_MAX_H) {
         fprintf(stderr, "cb_tab: bad arguments\n");
         return 1;
@@ -281,7 +525,20 @@ int main(int argc, char **argv) {
     if (!chan_attach(&g_chan, sec, e0, e1, 1)) { fprintf(stderr, "cb_tab: no channel\n"); return 1; }
     g_surface = (uint8_t *)MapViewOfFile(surface, FILE_MAP_WRITE, 0, 0, SURFACE_BYTES);
     if (!g_surface) { fprintf(stderr, "cb_tab: no surface\n"); return 1; }
+    if (!chan_attach(&g_net, net[0], net[1], net[2], 0)) { fprintf(stderr, "cb_tab: no network channel\n"); return 1; }
+    g_have_store = store[0] && chan_attach(&g_store, store[0], store[1], store[2], 0);
+    InitializeCriticalSection(&g_net_send);
+    InitializeCriticalSection(&g_net_lock);
+    InitializeConditionVariable(&g_net_cv);
+    CloseHandle(CreateThread(NULL, 0, net_receiver, NULL, 0, NULL));
+    /* No network or files of our own. */
+    http_set_remote(&g_remote);
+    image_cache_allow_local_files(false);
     const char *url = unhex(url_hex);
+    if (g_have_store) {
+        local_storage_path(url);
+        storage_set_backend(&g_storage);
+    }
     fprintf(stderr, "[tab %u] %s (%ux%u)\n", g_tab, url, g_width, g_height);
     memory_report("at start");
 
@@ -322,6 +579,7 @@ int main(int argc, char **argv) {
             memory_report("3 s after load");
             reported = true;
         }
+        save_local_storage();
         fflush(stdout);
         fflush(stderr);
         if (input || t.had_timers || t.had_images || t.new_frame || page_needs_layout()) continue;

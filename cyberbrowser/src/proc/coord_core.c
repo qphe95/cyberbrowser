@@ -27,6 +27,7 @@ static CoordAction *add(CoordActions *out, CoordActionKind kind) {
     a->kind = kind;
     a->slot = -1;
     a->tab = a->width = a->height = 0;
+    a->site[0] = 0;
     a->type = 0;
     a->len = 0;
     return a;
@@ -61,6 +62,7 @@ void coord_init(CoordState *s) {
     for (int i = 0; i < COORD_MAX_TABS; i++) {
         s->slots[i].state = SLOT_FREE;
         s->slots[i].tab = 0;
+        s->slots[i].site[0] = 0;
     }
     s->exiting = false;
 }
@@ -88,6 +90,17 @@ static void ui_message(CoordState *s, const CoordEvent *e, CoordActions *out) {
             tab_failed(out, tab);
             return;
         }
+        /* Its site: the label of the process, the badge of its channels.
+         * about:blank is opaque (""): no site, no storage. */
+        char site[SITE_MAX];
+        site[0] = 0;
+        if (!(url_len == 11 && prefix(url, url_len, "about:blank"))) {
+            char scheme[8], host[SITE_HOST_MAX + 1];
+            if (!site_url_host(url, url_len, scheme, sizeof(scheme), host, sizeof(host)) || !site_of(scheme, host, site)) {
+                tab_failed(out, tab);
+                return;
+            }
+        }
         if (w == 0 || w > SURFACE_MAX_W) w = SURFACE_MAX_W;
         if (h == 0 || h > SURFACE_MAX_H) h = SURFACE_MAX_H;
         int free_slot = -1;
@@ -101,6 +114,8 @@ static void ui_message(CoordState *s, const CoordEvent *e, CoordActions *out) {
         if (!a) return;
         s->slots[free_slot].state = SLOT_STARTING;
         s->slots[free_slot].tab = tab;
+        copy_bytes((uint8_t *)s->slots[free_slot].site, (const uint8_t *)site, SITE_MAX);
+        copy_bytes((uint8_t *)a->site, (const uint8_t *)site, SITE_MAX);
         a->slot = free_slot;
         a->tab = tab;
         a->width = w;
@@ -135,6 +150,7 @@ void coord_step(CoordState *s, const CoordEvent *e, CoordActions *out) {
         ui_message(s, e, out);
         return;
     case CE_UI_EXITED:
+    case CE_SERVICE_EXITED:
         exit_all(s, out);
         return;
     case CE_TAB_STARTED:
@@ -152,6 +168,11 @@ void coord_step(CoordState *s, const CoordEvent *e, CoordActions *out) {
             x.tab = s->slots[e->slot].tab;
             x.exit_code = e->exit_code;
             send_ui(out, CU_TAB_EXITED, &x, sizeof(x));
+        }
+        CoordAction *a = add(out, CA_TAB_GONE);
+        if (a) {
+            a->slot = e->slot;
+            a->tab = s->slots[e->slot].tab;
         }
         s->slots[e->slot].state = SLOT_FREE;
         return;

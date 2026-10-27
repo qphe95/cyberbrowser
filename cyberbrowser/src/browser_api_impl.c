@@ -4521,9 +4521,8 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
         "    if (req.referrer && req.referrer !== 'no-referrer' && !headers['Referer']) {\n"
         "      headers['Referer'] = (req.referrer === 'about:client') ? docUrl : req.referrer;\n"
         "    }\n"
-        "    if (req.credentials === 'include' || (req.credentials === 'same-origin' && sameOrigin(req.url, origin))) {\n"
-        "      try { var cookies = document.cookie; if (cookies) headers['Cookie'] = cookies; } catch(e){}\n"
-        "    }\n"
+        /* Cookies are the native fetch's to add (by credentials mode), from
+         * the jar: document.cookie would leave out HttpOnly ones. */
         "\n"
         "    return nativeFetch(req.url, {method:req.method, headers:headers, body:req.body, mode:req.mode, credentials:req.credentials}).then(function(nativeResp){\n"
         "      var resp = new Response(null, {status:nativeResp.status, statusText:nativeResp.statusText, headers:nativeResp.headers});\n"
