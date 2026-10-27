@@ -97,6 +97,7 @@ that compromise worth as little as possible:
 | Web-GPU, one per site using WebGL or WebGPU | `cb_webgpu.exe` | Untrusted, runs page shaders | Its own GPU device. No files, network or windows. |
 | Tab | `cb_tab.exe` | Untrusted, assumed compromised | Nothing ambient: no files, network, GPU, win32k or child processes. |
 | Network | `cb_net.exe` | Untrusted (parses TLS and HTTP from the network) | Outbound network only. |
+| Loopback relay (M4) | `cb_loop.exe` | Trusted, verified core | TCP connections to `127.0.0.1` and `::1` only, relaying bytes for the network process (section 6.4). |
 | Storage | `cb_store.exe` | Trusted, verified core | Read and write under `browser_data/sites/`, nothing else. |
 
 Separate executables, not one `.exe` with roles, because what an executable imports decides what
@@ -620,6 +621,25 @@ and it couldn't read the replays either. Instead it runs with a restricted token
 What it can still do is read whatever the user can read; a compromise of it leaks across
 sites anyway (section 2.4).
 
+**Planned for M4: a loopback relay.** That read access is the price of loopback and the
+replays, and the network process, which parses TLS and HTTP from any site, is the most
+exposed process after the tabs. In M4 it moves to LPAC with `internetClient`, as first
+planned, and loses both:
+- **Loopback** goes through `cb_loop.exe`, a relay with a verified core (section 8.1). For a
+  URL whose host is on loopback, the network process asks the relay over a channel to connect
+  to a port. The relay connects to `127.0.0.1` or `::1` and nothing else, and passes bytes
+  both ways without reading them. The network process still does all the HTTP parsing. The
+  relay's messages are a fixed format: connect to port N, data, close.
+- **The relay's token** is the tightest one Winsock still starts under: restricted, low
+  integrity, ideally with no read access to the user's files (to be tested). A bug in it is
+  reachable only through a compromised network process, or from a local server's replies.
+- **Replays:** the coordinator grants the network process's AppContainer read access to the
+  replay folder when `CYBER_REPLAY` is set, as it grants the storage service
+  `browser_data/sites`. Replays don't touch the relay, so the benchmark doesn't change.
+
+The relay doesn't decide which pages may reach `localhost`: that's Private Network Access, a
+policy of the network process (M7).
+
 In the scripted tests (`CYBER_UI_SCRIPT`) the UI runs unconfined, since it reads the script
 and writes screenshots wherever the test says. `CYBER_NO_SANDBOX=1` starts every child
 unconfined, for debugging.
@@ -676,6 +696,7 @@ throughout: no reload, its JS state, media and network requests continue.
 | `libchan`, the channel library | ~1,000 lines | P1, P2 |
 | `site_of` and the host grammar | ~500 lines plus the PSL table | P1, and that it computes eTLD+1 as specified |
 | Storage service core | ~1,500 lines | P1, P4 |
+| Loopback relay core | ~300 lines | P1, P7, P8 |
 | GPU command decoder | ~1,500 lines | P1, P5 |
 
 Each verified component has the same shape as the coordinator:
@@ -734,6 +755,9 @@ plugin, with Alt-Ergo, Z3 and CVC5 as provers:
   states equal in what `t` can observe and asserts the results are equal too.
 - **P7. Bounded steps.** Every step of every verified core terminates within a bounded number
   of operations (WP loop variants), so a hostile client can't hang them.
+- **P8. The relay reaches only loopback.** Every connect action the relay core emits names
+  `127.0.0.1` or `::1`, and every byte it forwards on a connection comes from the channel
+  message for that connection or from that connection's socket, in order and unchanged.
 
 **How these add up to isolation between sites.** Data from site `s` sits in `s`'s tab process,
 `s`'s folder, `s`'s channels, the network process, the GPU process's textures for `s`'s tabs,
@@ -803,7 +827,7 @@ memory of an idle tab process (about:blank). Things that would reduce it, in ord
 | M1 | Processes without sandboxing: coordinator, `libchan`, UI with one window, tabs drawing on the CPU into a shared buffer the UI shows | Browse with several tabs in one window; channel costs and idle tab memory measured |
 | M2 | Network and storage processes; tabs fetch and store over their channels; `localStorage` and cookies persisted per site | No socket or file code in `cb_tab.exe`; replays work through the network process |
 | M3 | Sandboxes: LPAC, job objects, mitigations, no win32k in tabs | The escape tests (below) pass |
-| M4 | Proofs: coordinator, `libchan`, `site_of`, storage core (P1–P4, P6, P7); TLA+ model of the protocol | All goals proved in CI |
+| M4 | Proofs: coordinator, `libchan`, `site_of`, storage core (P1–P4, P6, P7); TLA+ model of the protocol. The loopback relay with its verified core (P1, P7, P8), and the network process moved to LPAC (section 6.4) | All goals proved in CI; `localhost` pages and replays work with the network process in LPAC; the escape tests pass |
 | M5 | GPU process: display-list format, verified decoder (P5), Vulkan rasterizer, compositing into the UI's windows | Pages render the same as the CPU path (screenshot diff on the replays); CPU fallback works |
 | M6 | Multiple windows; dragging tabs out and between windows; compositor scrolling | Drag works while a video plays, without a reload |
 | M7 | Cross-site iframe partitioning, ORB, Private Network Access | |
