@@ -121,8 +121,9 @@ enum {
 
 enum {
     GRANT_TAB = 1,      /* a tab, badged with its site ("" = opaque) */
-    GRANT_NET,          /* at the storage service: the network process */
+    GRANT_NET,          /* at the storage service or the loopback relay: the network process */
     GRANT_STORE,        /* at the network process: its channel to the storage service */
+    GRANT_LOOP,         /* at the network process: its channel to the loopback relay */
 };
 
 typedef struct CsGrant {
@@ -182,5 +183,39 @@ typedef struct StoreResult {
     uint32_t ok;
     uint32_t data_len;
 } StoreResult;
+
+/* ---- network process <-> loopback relay (chan.h messages) ----------------- */
+/* Connections to 127.0.0.1 and ::1 (loop_core.h).  Every message starts with
+ * the connection's id, which the network process picks. */
+#define LOOP_DATA_MAX 16380         /* bytes in one NL_DATA or LN_DATA: a channel message less the id */
+
+enum { LOOP_V4 = 4, LOOP_V6 = 6 };  /* 127.0.0.1, ::1 */
+
+enum {
+    NL_CONNECT = 1,     /* NlConnect */
+    NL_DATA,            /* id + 1..LOOP_DATA_MAX bytes; the next only after LN_SENT */
+    NL_CREDIT,          /* NlCredit: it consumed that many bytes of LN_DATA */
+    NL_CLOSE,           /* id */
+    LN_CONNECTED,       /* LnConnected */
+    LN_DATA,            /* id + 1..LOOP_DATA_MAX bytes */
+    LN_SENT,            /* id: the last NL_DATA is written to the socket */
+    LN_CLOSED,          /* id: the socket ended */
+};
+
+typedef struct NlConnect {
+    uint32_t id;
+    uint32_t family;    /* LOOP_V4 or LOOP_V6 */
+    uint32_t port;
+} NlConnect;
+
+typedef struct NlCredit {
+    uint32_t id;
+    uint32_t bytes;
+} NlCredit;
+
+typedef struct LnConnected {
+    uint32_t id;
+    uint32_t ok;
+} LnConnected;
 
 #endif

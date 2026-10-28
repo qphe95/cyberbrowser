@@ -23,10 +23,6 @@ struct ChanShared {
     ChanRing ring[2];
 };
 
-#define HDR_BYTES 8u
-
-static uint32_t pad8(uint32_t n) { return (n + 7u) & ~7u; }
-
 static size_t section_bytes(uint32_t ring_bytes) {
     return sizeof(ChanShared) + 2 * (size_t)ring_bytes;
 }
@@ -43,7 +39,7 @@ static bool map(Chan *c, uint32_t ring_bytes) {
 
 bool chan_create(Chan *c, uint32_t ring_bytes) {
     memset(c, 0, sizeof(*c));
-    if (ring_bytes < 2 * (CHAN_MSG_MAX + HDR_BYTES) || (ring_bytes & (ring_bytes - 1))) return false;
+    if (ring_bytes < CHAN_RING_MIN || ring_bytes > CHAN_RING_MAX || (ring_bytes & (ring_bytes - 1))) return false;
     size_t bytes = section_bytes(ring_bytes);
     c->section = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
                                     (DWORD)((uint64_t)bytes >> 32), (DWORD)bytes, NULL);
@@ -70,8 +66,8 @@ bool chan_attach(Chan *c, HANDLE section, HANDLE ev0, HANDLE ev1, int side) {
     if (!probe) return false;
     uint32_t magic = probe->magic, ring_bytes = probe->ring_bytes;
     UnmapViewOfFile(probe);
-    if (magic != CHAN_MAGIC || ring_bytes < 2 * (CHAN_MSG_MAX + HDR_BYTES) ||
-        ring_bytes > (1u << 28) || (ring_bytes & (ring_bytes - 1)))
+    if (magic != CHAN_MAGIC || ring_bytes < CHAN_RING_MIN ||
+        ring_bytes > CHAN_RING_MAX || (ring_bytes & (ring_bytes - 1)))
         return false;
     return map(c, ring_bytes);
 }
@@ -91,49 +87,26 @@ void chan_inheritable(Chan *c, bool on) {
     SetHandleInformation(c->ev[1], HANDLE_FLAG_INHERIT, f);
 }
 
-/* Copy n bytes into the ring at byte counter pos, wrapping. */
-static void ring_write(uint8_t *ring, uint32_t size, uint64_t pos, const void *src, uint32_t n) {
-    uint32_t at = (uint32_t)(pos & (size - 1)), first = size - at;
-    if (first >= n) {
-        memcpy(ring + at, src, n);
-    } else {
-        memcpy(ring + at, src, first);
-        memcpy(ring, (const uint8_t *)src + first, n - first);
-    }
-}
-
-static void ring_read(const uint8_t *ring, uint32_t size, uint64_t pos, void *dst, uint32_t n) {
-    uint32_t at = (uint32_t)(pos & (size - 1)), first = size - at;
-    if (first >= n) {
-        memcpy(dst, ring + at, n);
-    } else {
-        memcpy(dst, ring + at, first);
-        memcpy((uint8_t *)dst + first, ring, n - first);
-    }
-}
+/* The rings' contents are chan_ring.c's; this side reads each shared counter
+ * once and hands the values over. */
 
 bool chan_send(Chan *c, uint16_t type, const void *payload, uint32_t len, DWORD timeout_ms) {
     if (!c->sh || c->broken || len > CHAN_MSG_MAX) return false;
     ChanRing *r = &c->sh->ring[c->side];
-    uint8_t *ring = c->data[c->side];
-    uint32_t size = c->ring_bytes, need = HDR_BYTES + pad8(len);
     uint64_t tail = r->tail;        /* ours: only we write it */
+    uint64_t new_tail = 0;
     DWORD start = GetTickCount();
     for (int spins = 0;; spins++) {
         uint64_t head = __atomic_load_n(&r->head, __ATOMIC_ACQUIRE);
-        uint64_t used = tail - head;
-        if (used > size) { c->broken = true; return false; }
-        if (size - used >= need) break;
+        int put = chan_ring_put(c->data[c->side], c->ring_bytes, head, tail, type, (const uint8_t *)payload, len,
+                                &new_tail);
+        if (put < 0) { c->broken = true; return false; }
+        if (put > 0) break;
         if (GetTickCount() - start > timeout_ms) return false;
         if (spins < 64) YieldProcessor();
         else Sleep(spins < 1000 ? 0 : 1);
     }
-    uint8_t hdr[HDR_BYTES] = { 0 };
-    memcpy(hdr, &len, 4);
-    memcpy(hdr + 4, &type, 2);
-    ring_write(ring, size, tail, hdr, HDR_BYTES);
-    if (len) ring_write(ring, size, tail + HDR_BYTES, payload, len);
-    __atomic_store_n(&r->tail, tail + need, __ATOMIC_RELEASE);
+    __atomic_store_n(&r->tail, new_tail, __ATOMIC_RELEASE);
     /* Pairs with chan_arm: the store of tail before the load of waiting. */
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     if (__atomic_load_n(&r->waiting, __ATOMIC_RELAXED)) SetEvent(c->ev[1 - c->side]);
@@ -144,25 +117,13 @@ int chan_recv(Chan *c, ChanMsg *m) {
     if (!c->sh || c->broken) return -1;
     int dir = 1 - c->side;
     ChanRing *r = &c->sh->ring[dir];
-    const uint8_t *ring = c->data[dir];
-    uint32_t size = c->ring_bytes;
     uint64_t head = r->head;        /* ours */
     uint64_t tail = __atomic_load_n(&r->tail, __ATOMIC_ACQUIRE);   /* read once */
-    uint64_t avail = tail - head;
-    if (avail == 0) return 0;
-    if (avail > size || avail < HDR_BYTES) { c->broken = true; return -1; }
-    uint8_t hdr[HDR_BYTES];
-    ring_read(ring, size, head, hdr, HDR_BYTES);
-    uint32_t len;
-    uint16_t type;
-    memcpy(&len, hdr, 4);
-    memcpy(&type, hdr + 4, 2);
-    if (len > CHAN_MSG_MAX || HDR_BYTES + (uint64_t)pad8(len) > avail) { c->broken = true; return -1; }
-    if (len) ring_read(ring, size, head + HDR_BYTES, m->data, len);
-    m->type = type;
-    m->len = len;
-    __atomic_store_n(&r->head, head + HDR_BYTES + pad8(len), __ATOMIC_RELEASE);
-    return 1;
+    uint64_t new_head = 0;
+    int got = chan_ring_take(c->data[dir], c->ring_bytes, head, tail, m, &new_head);
+    if (got < 0) { c->broken = true; return -1; }
+    if (got > 0) __atomic_store_n(&r->head, new_head, __ATOMIC_RELEASE);
+    return got;
 }
 
 bool chan_arm(Chan *c) {

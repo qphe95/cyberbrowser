@@ -17,7 +17,7 @@
 #include <stdint.h>
 #include <windows.h>
 
-#define CHAN_MSG_MAX 16384          /* largest payload */
+#include "chan_ring.h"
 
 typedef struct ChanShared ChanShared;
 
@@ -30,12 +30,6 @@ typedef struct Chan {
     uint8_t *data[2];               /* ring data, per direction */
     bool broken;                    /* the peer corrupted the ring */
 } Chan;
-
-typedef struct ChanMsg {
-    uint16_t type;
-    uint32_t len;
-    uint8_t data[CHAN_MSG_MAX];     /* a private copy */
-} ChanMsg;
 
 /* Create a channel and be its side 0.  ring_bytes: a power of two, at least
  * 2 * (CHAN_MSG_MAX + 8). */

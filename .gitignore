@@ -65,3 +65,7 @@ diag_out.txt
 **/.DS_Store
 
 probes/
+
+# Proof tools: Frama-C/WP's prover cache and TLC's state files (tools/prove.sh)
+.frama-c/
+cyberbrowser/proofs/tla/states/

@@ -257,6 +257,52 @@ static void tls_init(TlsClient *client) {
     mbedtls_x509_crt_init(&client->ca);
     client->connected = false;
     client->plain = false;
+    client->loop_id = 0;
+    client->recv_timeout_ms = client->send_timeout_ms = 30000;
+}
+
+/* ---- loopback through the relay ------------------------------------------- */
+
+static const TlsLoopback *g_loopback;
+
+void tls_set_loopback(const TlsLoopback *lb) { g_loopback = lb; }
+
+bool tls_loopback_host(const char *host) {
+    size_t n = strlen(host);
+    return !strcmp(host, "localhost") || (n > 10 && !strcmp(host + n - 10, ".localhost")) ||
+           !strcmp(host, "127.0.0.1") || !strcmp(host, "::1") || !strcmp(host, "[::1]");
+}
+
+/* mbedtls's I/O callbacks for a connection through the relay. */
+static int loop_bio_send(void *ctx, const unsigned char *buf, size_t len) {
+    TlsClient *c = (TlsClient *)ctx;
+    int r = g_loopback->send(c->loop_id, buf, len, c->send_timeout_ms);
+    return r < 0 ? MBEDTLS_ERR_NET_SEND_FAILED : r;
+}
+
+static int loop_bio_recv(void *ctx, unsigned char *buf, size_t len) {
+    TlsClient *c = (TlsClient *)ctx;
+    int r = g_loopback->recv(c->loop_id, buf, len, c->recv_timeout_ms);
+    return r < 0 ? MBEDTLS_ERR_NET_RECV_FAILED : r;
+}
+
+void tls_client_set_timeouts(TlsClient *client, unsigned recv_ms, unsigned send_ms) {
+    client->recv_timeout_ms = recv_ms;
+    client->send_timeout_ms = send_ms;
+    if (client->loop_id) return;
+#ifndef _WIN32
+    struct timeval tv;
+    tv.tv_sec = recv_ms / 1000;
+    tv.tv_usec = (recv_ms % 1000) * 1000;
+    setsockopt(client->net.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    tv.tv_sec = send_ms / 1000;
+    tv.tv_usec = (send_ms % 1000) * 1000;
+    setsockopt(client->net.fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#else
+    DWORD r = recv_ms, w = send_ms;
+    setsockopt((SOCKET)client->net.fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&r, sizeof(r));
+    setsockopt((SOCKET)client->net.fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&w, sizeof(w));
+#endif
 }
 
 /* ============================================================================
@@ -326,9 +372,21 @@ static bool https_proxy_for(const char *host, char *phost, size_t phl, char *ppo
     return phost[0] != 0;
 }
 
-/* Connect `net` to host:port, through the HTTPS proxy when one applies. */
-static int tls_net_connect(mbedtls_net_context *net, const char *host, const char *port,
+/* Connect the client to host:port: a loopback host through the relay when
+ * there is one, else through the HTTPS proxy when one applies, else
+ * directly. */
+static int tls_net_connect(TlsClient *client, const char *host, const char *port,
                            char *err, size_t errLen) {
+    mbedtls_net_context *net = &client->net;
+    if (g_loopback && tls_loopback_host(host)) {
+        int id = g_loopback->connect(host, port);
+        if (id <= 0) {
+            if (err && errLen) snprintf(err, errLen, "Loopback relay could not connect to %s:%s", host, port);
+            return MBEDTLS_ERR_NET_CONNECT_FAILED;
+        }
+        client->loop_id = id;
+        return 0;
+    }
     char phost[256], pport[16];
     if (!https_proxy_for(host, phost, sizeof(phost), pport, sizeof(pport)))
         return mbedtls_net_connect(net, host, port, MBEDTLS_NET_PROTO_TCP);
@@ -497,7 +555,7 @@ bool tls_client_connect(TlsClient *client, const char *host, const char *port,
         if (getaddrinfo(host, port, &hints, &res) == 0) freeaddrinfo(res);
         t_dns = net_now_ms();
     }
-    ret = tls_net_connect(&client->net, host, port, err, errLen);
+    ret = tls_net_connect(client, host, port, err, errLen);
     if (net_timing()) t_tcp = net_now_ms();
     if (ret != 0) {
         if (!(err && errLen && strncmp(err, "Proxy refused", 13) == 0))
@@ -507,26 +565,17 @@ bool tls_client_connect(TlsClient *client, const char *host, const char *port,
     LOGI("TCP connected to %s:%s", host, port);
     
     // Set socket timeout for handshake and I/O
-    int sockfd = client->net.fd;
-#ifndef _WIN32
-    struct timeval tv;
-    tv.tv_sec = 30;  // 30 second timeout
-    tv.tv_usec = 0;
-    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
-    setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
-#else
-    DWORD timeout_ms = 30000;
-    setsockopt((SOCKET)sockfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
-    setsockopt((SOCKET)sockfd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout_ms, sizeof(timeout_ms));
-#endif
-    
-    // Disable TCP_NODELAY for better compatibility
-    int flag = 1;
-    setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
+    tls_client_set_timeouts(client, 30000, 30000);
+    if (!client->loop_id) {
+        int sockfd = client->net.fd;
+        // Disable TCP_NODELAY for better compatibility
+        int flag = 1;
+        setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
 
-    // Configure perfect Android TCP stack simulation
-    if (!configure_perfect_android_tcp_stack(&client->net, err, errLen)) {
-        return false;
+        // Configure perfect Android TCP stack simulation
+        if (!configure_perfect_android_tcp_stack(&client->net, err, errLen)) {
+            return false;
+        }
     }
 
     // Configure TLS record sizing to match Chrome patterns
@@ -614,8 +663,10 @@ bool tls_client_connect(TlsClient *client, const char *host, const char *port,
         set_err(err, errLen, "TLS set hostname failed", ret);
         return false;
     }
-    mbedtls_ssl_set_bio(&client->ssl, &client->net,
-                        mbedtls_net_send, mbedtls_net_recv, NULL);
+    if (client->loop_id)
+        mbedtls_ssl_set_bio(&client->ssl, client, loop_bio_send, loop_bio_recv, NULL);
+    else
+        mbedtls_ssl_set_bio(&client->ssl, &client->net, mbedtls_net_send, mbedtls_net_recv, NULL);
     LOGI("Starting TLS handshake with %s:%s...", host, port);
     int handshake_attempts = 0;
     while ((ret = mbedtls_ssl_handshake(&client->ssl)) != 0) {
@@ -645,7 +696,7 @@ bool tls_client_connect(TlsClient *client, const char *host, const char *port,
         struct sockaddr_storage peer;
 #ifdef _WIN32
         int plen = sizeof(peer);
-        int got = getpeername((SOCKET)client->net.fd, (struct sockaddr *)&peer, &plen);
+        int got = client->loop_id ? -1 : getpeername((SOCKET)client->net.fd, (struct sockaddr *)&peer, &plen);
 #else
         socklen_t plen = sizeof(peer);
         int got = getpeername(client->net.fd, (struct sockaddr *)&peer, &plen);
@@ -672,7 +723,7 @@ bool tcp_client_connect(TlsClient *client, const char *host, const char *port,
     }
     tls_init(client);
     client->plain = true;
-    int ret = tls_net_connect(&client->net, host, port, err, errLen);
+    int ret = tls_net_connect(client, host, port, err, errLen);
     if (ret != 0) {
         if (err && errLen && !err[0]) set_err(err, errLen, "TCP connect failed", ret);
         return false;
@@ -687,7 +738,7 @@ ssize_t tls_client_read(TlsClient *client, unsigned char *buf, size_t len) {
         return -1;
     }
     if (client->plain) {
-        int r = mbedtls_net_recv(&client->net, buf, len);
+        int r = client->loop_id ? loop_bio_recv(client, buf, len) : mbedtls_net_recv(&client->net, buf, len);
         if (r == MBEDTLS_ERR_SSL_WANT_READ) return 0;
         if (r <= 0) { client->connected = false; return -1; }
         return r;
@@ -727,7 +778,7 @@ ssize_t tls_client_write(TlsClient *client, const unsigned char *buf, size_t len
         return -1;
     }
     if (client->plain) {
-        int w = mbedtls_net_send(&client->net, buf, len);
+        int w = client->loop_id ? loop_bio_send(client, buf, len) : mbedtls_net_send(&client->net, buf, len);
         if (w == MBEDTLS_ERR_SSL_WANT_WRITE) return 0;
         return w;
     }
@@ -745,6 +796,8 @@ void tls_client_close(TlsClient *client) {
     if (client->connected && !client->plain) {
         mbedtls_ssl_close_notify(&client->ssl);
     }
+    if (client->loop_id && g_loopback) g_loopback->close(client->loop_id);
+    client->loop_id = 0;
     mbedtls_net_free(&client->net);
     mbedtls_x509_crt_free(&client->ca);
     mbedtls_ssl_free(&client->ssl);
@@ -841,6 +894,7 @@ static void pool_destroy_client(TlsClient *c) {
 static bool pool_client_alive(TlsClient *c) {
     if (!c->connected) return false;
     if (!c->plain && mbedtls_ssl_check_pending(&c->ssl)) return false;
+    if (c->loop_id) return g_loopback && !g_loopback->readable(c->loop_id);
     int r = mbedtls_net_poll(&c->net, MBEDTLS_NET_POLL_READ, 0);
     if (r < 0) return false;
     return (r & MBEDTLS_NET_POLL_READ) == 0;

@@ -97,7 +97,7 @@ that compromise worth as little as possible:
 | Web-GPU, one per site using WebGL or WebGPU | `cb_webgpu.exe` | Untrusted, runs page shaders | Its own GPU device. No files, network or windows. |
 | Tab | `cb_tab.exe` | Untrusted, assumed compromised | Nothing ambient: no files, network, GPU, win32k or child processes. |
 | Network | `cb_net.exe` | Untrusted (parses TLS and HTTP from the network) | Outbound network only. |
-| Loopback relay (M4) | `cb_loop.exe` | Trusted, verified core | TCP connections to `127.0.0.1` and `::1` only, relaying bytes for the network process (section 6.4). |
+| Loopback relay | `cb_loop.exe` | Trusted, verified core | TCP connections to `127.0.0.1` and `::1` only, relaying bytes for the network process (section 6.4). |
 | Storage | `cb_store.exe` | Trusted, verified core | Read and write under `browser_data/sites/`, nothing else. |
 
 Separate executables, not one `.exe` with roles, because what an executable imports decides what
@@ -176,9 +176,9 @@ other sites with credentials). Per request, it enforces:
 
 The network process sees every site's traffic in plaintext, so a compromise of it leaks across
 sites; Chrome accepts the same risk for its network service. It can't write files, and it
-reaches the cookie jars on disk only through the storage service. It can read what the user
-can (section 6.4: an AppContainer couldn't reach `localhost`), so a compromise of it could
-also read the user's files. A per-site network process is possible later, at a memory cost.
+reaches the cookie jars on disk only through the storage service. It runs in LPAC and can't
+read the user's files either: it reaches `localhost` through the loopback relay (section
+6.4). A per-site network process is possible later, at a memory cost.
 
 ### 2.5 Storage service
 
@@ -568,7 +568,7 @@ attributes) set this up. Every tab process starts with:
   needs `SeRelabelPrivilege`). Every sandboxed process runs at low integrity, so none can
   open another, whatever the DACL says. The tab's token gets a default DACL (the user,
   SYSTEM and its own AppContainer SID) for the objects it creates itself, such as its later
-  threads. That matters for the network process, which isn't an AppContainer (section 6.4).
+  threads. That matters for the loopback relay, which isn't an AppContainer (section 6.4).
   Channel sections and events have no names, so a process reaches only those it was given
   handles to.
 
@@ -603,39 +603,37 @@ which the escape tests found a tab could open.
 |---|---|---|
 | GPU | AppContainer, no capabilities | win32k and the graphics driver (it can't do without them); job with no child processes; ACG off (drivers generate code) |
 | Web-GPU | LPAC, no capabilities, a fresh SID per process | win32k and the driver, as for GPU; memory limit; no windows (it renders only into shared textures) |
-| Network | Restricted, write-restricted, low integrity | Sockets, including loopback; reads what the user can, writes nowhere; win32k disabled; a 2 GB job |
+| Network | LPAC (profile `cyberbrowser.net`) with `internetClient`, `privateNetworkClientServer`, `registryRead` and `lpacCryptoServices` | Sockets, except to loopback; none of the user's files, only the replay folder (reading) or the recording folder (writing) when those are used; win32k disabled; a 2 GB job |
+| Loopback relay | Restricted (every access), low integrity | TCP to `127.0.0.1` and `::1`; reads the system's files, not the user's; writes nowhere; win32k disabled; a 256 MB job |
 | UI | AppContainer (profile `cyberbrowser.ui`) | win32k for windows and input; no network or files except through `store` |
 | Storage | LPAC (profile `cyberbrowser.store`), no capabilities | Full control of `browser_data/sites/` alone, granted by the coordinator on that folder; win32k disabled; a 512 MB job |
 
-The network process isn't an AppContainer, which differs from the plan above (LPAC with
-`internetClient`). An AppContainer can't connect to loopback addresses at all unless an
-administrator exempts it, so `localhost` pages and local development servers would fail,
-and it couldn't read the replays either. Instead it runs with a restricted token:
-- **No privileges.** The administrators group is deny-only.
-- **Low integrity,** so it can't write to the user's files or open medium-integrity processes.
-- **Write-restricted.** Any write access also needs one of its restricting SIDs (restricted
-  code, Everyone, Users, Authenticated Users), which the user's files, the other children's
-  objects and the tabs' own objects don't grant. So it can't write to a tab's threads or
-  memory either.
-
-What it can still do is read whatever the user can read; a compromise of it leaks across
-sites anyway (section 2.4).
-
-**Planned for M4: a loopback relay.** That read access is the price of loopback and the
-replays, and the network process, which parses TLS and HTTP from any site, is the most
-exposed process after the tabs. In M4 it moves to LPAC with `internetClient`, as first
-planned, and loses both:
-- **Loopback** goes through `cb_loop.exe`, a relay with a verified core (section 8.1). For a
-  URL whose host is on loopback, the network process asks the relay over a channel to connect
-  to a port. The relay connects to `127.0.0.1` or `::1` and nothing else, and passes bytes
-  both ways without reading them. The network process still does all the HTTP parsing. The
-  relay's messages are a fixed format: connect to port N, data, close.
-- **The relay's token** is the tightest one Winsock still starts under: restricted, low
-  integrity, ideally with no read access to the user's files (to be tested). A bug in it is
-  reachable only through a compromised network process, or from a local server's replies.
+**The loopback relay (M4).** An AppContainer can't connect to loopback addresses at all unless
+an administrator exempts it, so `localhost` pages and local development servers go through
+`cb_loop.exe`, a relay with a verified core (`src/proc/loop_core.c`, P8):
+- **The protocol.** For a URL whose host is `localhost`, `*.localhost`, `127.0.0.1` or
+  `::1`, the network process asks the relay over a channel to connect to a port of
+  `127.0.0.1` or `::1` (`NL_CONNECT`). The relay connects there and nowhere else, and passes
+  bytes both ways without reading them (`NL_DATA`, `LN_DATA`). The network process still
+  does all the TLS and HTTP. The relay's buffers stay fixed: it writes one `NL_DATA` at a
+  time to a socket, and reads from a socket only while the bytes it passed on that the
+  network process hasn't credited back (`NL_CREDIT`) stay under 256 KB. The TLS client (`tls_client.c`) routes loopback
+  hosts through `net_loopback.h`, implemented in the network process by
+  `src/proc/loop_client.c`.
+- **The relay's token** is a restricted token at low integrity, restricted for every access,
+  not only writes. Each access needs one of its restricting SIDs (restricted code, Everyone,
+  Users, Authenticated Users) as well as the user's. The system's files grant those reading,
+  so DLLs load and Winsock starts. The user's profile, the other children and the tabs'
+  objects don't, so it can neither read nor write them. A spike confirmed this: under that
+  token a file in `Documents` is refused and loopback connects, while under the
+  write-restricted token of M3 the same file opened.
 - **Replays:** the coordinator grants the network process's AppContainer read access to the
-  replay folder when `CYBER_REPLAY` is set, as it grants the storage service
-  `browser_data/sites`. Replays don't touch the relay, so the benchmark doesn't change.
+  folder `CYBER_REPLAY` names, and full access to the one `CYBER_RECORD` names, as it grants
+  the storage service `browser_data/sites`. Replays don't touch the relay.
+- **LPAC needs two named capabilities** besides `internetClient` (and
+  `privateNetworkClientServer`, for the local network): `registryRead` (without it Winsock
+  won't start: `WSAStartup` fails with 10107, reading its catalog) and `lpacCryptoServices`
+  (the certificate store). Their SIDs come from `DeriveCapabilitySidsFromName`.
 
 The relay doesn't decide which pages may reach `localhost`: that's Private Network Access, a
 policy of the network process (M7).
@@ -690,14 +688,18 @@ throughout: no reload, its JS state, media and network requests continue.
 
 ### 8.1 What is verified
 
-| Component | Size (target) | What is proved |
-|---|---|---|
-| Coordinator core | 2,000–3,000 lines | P1, P3, P6, P7 |
-| `libchan`, the channel library | ~1,000 lines | P1, P2 |
-| `site_of` and the host grammar | ~500 lines plus the PSL table | P1, and that it computes eTLD+1 as specified |
-| Storage service core | ~1,500 lines | P1, P4 |
-| Loopback relay core | ~300 lines | P1, P7, P8 |
-| GPU command decoder | ~1,500 lines | P1, P5 |
+| Component | Size (target) | Size (M4) | What is proved | Goals (M4) |
+|---|---|---|---|---|
+| Coordinator core (`coord_core.c`) | 2,000–3,000 lines | 390 lines | P1, P3, P6 (local respect), P7 | 1,063 |
+| `libchan`'s rings (`chan_ring.c`) | ~1,000 lines | 100 lines | P1, P2 | 143 |
+| `site_of` and the host grammar (`site.c`) | ~500 lines plus the PSL table | 290 lines | P1, P7, and that every label it makes is well formed | 407 |
+| Storage service core (`store_core.c`) | ~1,500 lines | 120 lines | P1, P4, P7 | 613 |
+| Loopback relay core (`loop_core.c`) | ~300 lines | 320 lines | P1, P7, P8 | 522 |
+| GPU command decoder | ~1,500 lines | (M5) | P1, P5 | |
+
+The cores came out much smaller than the targets because what they decide is still small:
+three kinds of tab channel, no spare process, no navigation swaps. Section 8.6 says what M4
+proved exactly, and where it differs from the properties below.
 
 Each verified component has the same shape as the coordinator:
 
@@ -771,12 +773,17 @@ are trusted for it.
 The protocol between processes (navigation swaps, a tab closing while its calls are in flight,
 a process restarting while channels to it are granted) is modeled in TLA+ and model-checked
 with TLC for small numbers of tabs, windows and channels. That checks the design; the C proofs
-check the code.
+check the code. M4's model (`proofs/tla/Protocol.tla`) covers what exists so far: tabs that
+start, close and crash with requests in flight, grants and revocations reaching the servers
+later over their control channels, and tab ids reused across sites (section 8.6).
 
 ### 8.4 What is trusted (not proved)
 
 The Windows kernel and its AppContainer, job and mitigation enforcement; the shims and their
-ACSL contracts; the network process; the UI process; the GPU process outside its decoder,
+ACSL contracts (the coordinator's, the storage service's, the relay's, and `chan.c`, which
+reads each shared counter once and hands the values to `chan_ring.c`); the hypotheses of WP's
+memory model (section 8.6); the network process and its side of the relay
+(`loop_client.c`); the UI process; the GPU process outside its decoder,
 and the graphics driver; the web-GPU processes (ANGLE, wgpu, Naga), trusted only to the
 extent that a compromise of one exposes its own site's GPU work and the driver; the C compiler (GCC/MinGW; CompCert, a verified compiler, if its
 targets cover Windows x64 when we get there); the hardware; and the Frama-C tool chain and
@@ -784,10 +791,113 @@ provers. Leaks through timing are not covered (see "Non-goals").
 
 ### 8.5 Tooling
 
-Frama-C runs on Linux and macOS; on this machine it would run in WSL or a container. Getting
-it needs downloads (opam and Frama-C with its provers, a few hundred MB; the TLA+ tools,
-about 30 MB), to be approved before M4 starts. The proofs run in CI, and an unproved goal
-fails the build.
+Frama-C runs on Linux and macOS; here it runs in WSL (Ubuntu 24.04).
+`tools/proof_setup.sh` installs everything without root, into `~/.local` and `~/.opam`:
+- GMP 6.3.0, built from source (`zarith` needs it, and WSL had no headers);
+- opam 2.6.1, OCaml 5.2.1, Frama-C 33.0, Why3 1.8.2 and Alt-Ergo 2.6.4, from opam;
+- Z3 4.13.4 and CVC5 1.2.1, as release binaries;
+- `tla2tools.jar` 1.7.4, run with the Java that WSL already had;
+- a stub `dot`: Frama-C's package wants Graphviz, which only draws graphs we don't use.
+
+`tools/prove.sh [chan coord site store loop tla]` runs WP on each core (with the RTE plugin
+for P1, the `Typed+Cast+ref` memory model, and `-wp-check-memory-model`) and TLC on the
+model. It fails if any goal is unproved. All five cores take about 8 minutes from scratch on
+12 cores, and the two model checks about 9.5 minutes. The repository has no CI yet, so the script is
+run by hand before changes to a core are committed.
+
+### 8.6 What M4 proved, and how it differs from the plan
+
+- **P1, P7 everywhere.** Every core is free of undefined behavior for any input (RTE goals:
+  memory accesses, signed overflow, shifts, division, casts), and every loop has a variant.
+  Unsigned wraparound isn't flagged, because it is defined in C and the channel counters wrap
+  on purpose; out-of-bounds accesses are flagged whatever the arithmetic before them.
+- **P2.** `chan_ring_put` and `chan_ring_take` stay inside the ring and the private message
+  whatever the counters and the ring's bytes hold, and a message they return is at most
+  `CHAN_MSG_MAX` bytes. Reading each counter once is `chan.c`'s part, which is reviewed, not
+  proved: it reads `tail` once with an acquire load and passes the value in.
+- **P3, in the core's terms.**
+  - **Labels:** every label a slot holds is well formed, or `""` for an opaque origin.
+  - **Badges:** a tab starts with channels badged with its slot's label, the network
+    process's always and the storage service's only for a site.
+  - **Starts and ends:** a start takes a free slot. A slot's label and tab id never change
+    while it is in use. Revocations name the slot's own tab, and the UI's ids name one tab
+    at a time.
+  - **URLs:** a URL is started only if it is `http:`, `https:` or `about:blank` and
+    printable.
+
+  To make that provable, the decision about which servers a tab gets channels to moved from
+  the shim into the core (`grant_net`, `grant_store`). That the shim hands each process only
+  its own handles is reviewed, not proved.
+- **P4.** Every path `store_rel_path_ok` accepts satisfies the grammar of section 3.3, as an
+  ACSL predicate:
+  - components of `[a-z0-9_.-]`, none empty;
+  - none starting or ending with `.` (so no `.`, `..` or trailing dot);
+  - none a device name.
+
+  `store_join` makes `<label>/<path>` and nothing else. `store_allowed` lets a tab only at
+  its own label and never at `cookies`, and the network process only at `cookies`. The quota
+  check implies `used - old + new <= quota`. Labels hold only lowercase letters, so two
+  sites never share a folder even on a case-insensitive file system. Opening the file
+  (refusing reparse points and hard links) is the shim's, and tested by the escape tests.
+- **`site_of`: well-formed labels, not "eTLD+1 as specified".** The proofs show every label
+  it makes is `<scheme>+<suffix of the host>` with exactly one `+` and only `[a-z0-9.-]`,
+  which is what the folders and badges rely on. Which suffix the Public Suffix List picks
+  isn't proved: the binary search would need the table's order and contents as axioms. It is
+  checked instead against an independent implementation on 41,590 hosts (M2), and its table
+  lookups bound every read by the table's size, so their safety doesn't depend on the
+  generated data.
+- **P6 as local respect, without the two-run harness.** The coordinator gets nothing from a
+  tab but its exit (the process ending, with its exit code). The proof shows that such an
+  event changes no other slot and causes only that tab's revocation and a message to the
+  UI. The only data it carries, the exit code, goes to the UI alone. What the coordinator
+  sends a tab, its start action, comes from the UI's request and that slot alone. Given
+  that, the self-composition harness adds nothing yet. It will be needed when tabs ask the
+  coordinator for things: `opener` channels and the spare process.
+  - **Two flows remain, outside P6's scope:**
+    - A site's tabs can take all 60 slots, so another site's tab fails to open (an
+      availability channel).
+    - When a slot frees up, the next tab may reuse it; that slot number goes nowhere a tab
+      can read.
+  - **Found and fixed by the analysis:** each tab's AppContainer profile was named with a
+    count of the tabs started before it. A tab can read its own profile name, so the count
+    told a page how many tabs of any site came before it. The name is now 64 random bits
+    (`sandbox.c`).
+- **P8.** Every connect action of the relay core is to `LOOP_V4` or `LOOP_V6`, which the shim
+  maps to `127.0.0.1` and `::1` and nothing else, on a port from 1 to 65535. Bytes written to
+  a socket are an `NL_DATA`'s, unchanged, for the open connection with that message's id.
+  Bytes sent to the network process as `LN_DATA` are the ones read from that connection's
+  socket, unchanged, under its id.
+- **Memory model.** WP's `Typed+Cast+ref` model treats pointer parameters used only as
+  references as separate objects. It states the hypotheses that requires, and
+  `-wp-check-memory-model` proves them at every internal call. At the shims' calls they are
+  assumptions, and they hold there:
+  - the inputs don't overlap the constant PSL tables or string literals;
+  - an event doesn't overlap the state or the action list.
+
+  The plain `Typed` model left 7 goals unproved, because every write to an action made the
+  provers re-derive, for each slot, that the slot table was untouched.
+- **The cores were reshaped to be provable,** without changing what they do:
+  - `chan.c` was split into a Win32 shim and `chan_ring.c`;
+  - masks became `%` and `/`, which the provers handle; `chan_bench` shows no change;
+  - slot updates go through two small functions with contracts (`set_state`, `start_slot`);
+  - each step changes the state before it writes its actions.
+- **The TLA+ model** checks the invariants and liveness properties in
+  `proofs/tla/Protocol.tla`, with 2 tab ids, 2 sites and an opaque origin. TLC found no
+  violation of the invariants in 13.0 million distinct states with up to 3 tab processes
+  (`Protocol.cfg`), nor of the liveness properties and invariants together in 141,505 states
+  with up to 2 (`ProtocolLive.cfg`, smaller because checking liveness keeps the whole state
+  graph). The deadlock check is off: with the starts bounded, every behavior ends quiet.
+
+  The invariants:
+  - a server serves a request only with the badge of the process at the other end of its
+    channel;
+  - what a server holds is badged truly, and the storage service holds no opaque tab;
+  - a server has one client per tab id;
+  - a server holds a channel only while its tab is the id's current one, or its revocation
+    is on its way.
+
+  The liveness properties: a closed tab ends and its id frees, and every dead tab's channel
+  is eventually revoked at every server.
 
 ## 9. Iframes from other sites
 
@@ -827,7 +937,7 @@ memory of an idle tab process (about:blank). Things that would reduce it, in ord
 | M1 | Processes without sandboxing: coordinator, `libchan`, UI with one window, tabs drawing on the CPU into a shared buffer the UI shows | Browse with several tabs in one window; channel costs and idle tab memory measured |
 | M2 | Network and storage processes; tabs fetch and store over their channels; `localStorage` and cookies persisted per site | No socket or file code in `cb_tab.exe`; replays work through the network process |
 | M3 | Sandboxes: LPAC, job objects, mitigations, no win32k in tabs | The escape tests (below) pass |
-| M4 | Proofs: coordinator, `libchan`, `site_of`, storage core (P1–P4, P6, P7); TLA+ model of the protocol. The loopback relay with its verified core (P1, P7, P8), and the network process moved to LPAC (section 6.4) | All goals proved in CI; `localhost` pages and replays work with the network process in LPAC; the escape tests pass |
+| M4 | Proofs: coordinator, `libchan`, `site_of`, storage core (P1–P4, P6, P7); TLA+ model of the protocol. The loopback relay with its verified core (P1, P7, P8), and the network process moved to LPAC (section 6.4) | All goals proved (`tools/prove.sh`; CI when there is one); `localhost` pages and replays work with the network process in LPAC; the escape tests pass |
 | M5 | GPU process: display-list format, verified decoder (P5), Vulkan rasterizer, compositing into the UI's windows | Pages render the same as the CPU path (screenshot diff on the replays); CPU fallback works |
 | M6 | Multiple windows; dragging tabs out and between windows; compositor scrolling | Drag works while a video plays, without a reload |
 | M7 | Cross-site iframe partitioning, ORB, Private Network Access | |
@@ -943,7 +1053,7 @@ the single-process harness on top of it; the CPU rasterizer is `src/raster_cpu.c
   |---|---|---|---|---|
   | Tab | LPAC, a profile per process, low integrity | off | prohibited | 4 GB |
   | Storage | LPAC, low integrity | off | allowed | 512 MB |
-  | Network | restricted, write-restricted, low integrity | off | allowed | 2 GB |
+  | Network | restricted, write-restricted, low integrity (LPAC since M4) | off | allowed | 2 GB |
   | UI | AppContainer, low integrity | on | allowed | no limit |
 
   A tab reads its fonts straight from `C:\Windows\Fonts`, which LPAC may read and list. It
@@ -1015,7 +1125,51 @@ the single-process harness on top of it; the CPU rasterizer is `src/raster_cpu.c
   - The UI is unconfined in scripted tests.
   - Display lists with other tabs' resource ids wait for the GPU process (M5).
   - CFG needs another toolchain.
-  - The network process can still read what the user can (section 6.4).
+  - The network process can still read what the user can (section 6.4). Done in M4: it runs
+    in LPAC now.
+
+**M4 (done):** the verified cores are proved (section 8.6), the protocol is model-checked,
+and the network process runs in LPAC, reaching loopback through the relay (section 6.4).
+
+- **Proofs:** `tools/prove.sh` proves 2,748 goals in the five cores (Frama-C 33.0 with
+  Alt-Ergo, Z3 and CVC5) in about 8 minutes, and TLC checks the protocol model in about 9.5: no violation in 13.0
+  million states (safety, up to 3 tab processes) or 141,505 (liveness, up to 2).
+- **The relay:**
+  - `cb_loop.exe` (`loop_main.c` around `loop_core.c`), with a fully restricted,
+    low-integrity token;
+  - the network process's side is `loop_client.c`, which the TLS client uses for loopback
+    hosts.
+- **What each process gets now:**
+
+  | Process | Token | Can read the user's files |
+  |---|---|---|
+  | Tab | LPAC, a profile per process | no |
+  | Storage | LPAC | `browser_data/sites` only |
+  | Network | LPAC, network capabilities | only a replay or recording folder it is given |
+  | Loopback relay | restricted (every access), low integrity | no (system files only) |
+  | UI | AppContainer | no |
+
+- **Found and fixed:**
+  - Tab profile names counted the tabs started before them, which a tab can read (section
+    8.6). They are random now.
+  - The relay's token was planned as write-restricted, which still reads the user's files. A
+    spike showed a token restricted for every access still runs Winsock and connects to
+    loopback, so the relay reads only system files.
+- **Tests:**
+  - The escape tests pass: 75 attempts, none got through, and the services survived. Their
+    pages on `localhost` and `127.0.0.1` now load through the relay.
+  - A live HTTPS page (Wikipedia) loads through the LPAC network process, certificates
+    checked.
+  - The replays load the same through the sandboxed processes: Wikipedia 42,606 to 42,608
+    DOM nodes (the same spread with the sandbox off), the YouTube watch page 7,471.
+  - `proc_tests` (114 checks, the relay core's among them) and `chan_bench` pass. The rings'
+    new arithmetic costs nothing measurable: 4.1 µs round trip, 1.2 GB/s for 16 KB messages.
+- **Not covered yet:**
+  - Which public suffix `site_of` picks is tested, not proved (section 8.6).
+  - P6's two-run harness waits until tabs send the coordinator requests.
+  - The shims, `chan.c`'s reads of the shared counters, and the network process stay
+    trusted (section 8.4).
+  - There is no CI to run the proofs on every change.
 
 **Not in M1** (later milestones, or not yet planned):
 - Typing into the page (forms, text fields).

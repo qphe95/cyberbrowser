@@ -487,6 +487,7 @@ if(BE_PLATFORM_WINDOWS)
     # the UI link only this.
     add_library(cb_ipc STATIC
         src/ipc/chan.c
+        src/ipc/chan_ring.c
         src/ipc/bigmsg.c
         src/proc/spawn.c
     )
@@ -501,11 +502,13 @@ if(BE_PLATFORM_WINDOWS)
 
     # The coordinator: its core (coord_core.c) is pure C with no Win32 calls.
     add_executable(cb_coord src/proc/coordinator.c src/proc/coord_core.c src/proc/site.c src/proc/sandbox.c)
-    target_link_libraries(cb_coord PRIVATE cb_ipc userenv)
+    target_link_libraries(cb_coord PRIVATE cb_ipc userenv bcrypt)
     target_compile_options(cb_coord PRIVATE -Wall -Wextra)
 
-    # Tests of the pure parts: sites, the storage rules, the coordinator's core.
-    add_executable(proc_tests src/proc/proc_tests.c src/proc/coord_core.c src/proc/site.c src/proc/store_core.c)
+    # Tests of the pure parts: sites, the storage rules, the coordinator's and
+    # the relay's cores.
+    add_executable(proc_tests src/proc/proc_tests.c src/proc/coord_core.c src/proc/site.c src/proc/store_core.c
+                   src/proc/loop_core.c)
     target_link_libraries(proc_tests PRIVATE cb_ipc)
     target_compile_options(proc_tests PRIVATE -Wall -Wextra)
 
@@ -527,7 +530,7 @@ if(BE_PLATFORM_WINDOWS)
     endif()
 
     # The network process: HTTP and TLS from the engine library, no JS.
-    add_executable(cb_net src/proc/net_main.c)
+    add_executable(cb_net src/proc/net_main.c src/proc/loop_client.c)
     target_include_directories(cb_net PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_include_directories(cb_net BEFORE PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/win32)
     target_link_libraries(cb_net PRIVATE cyberbrowser_lib cb_ipc)
@@ -536,6 +539,12 @@ if(BE_PLATFORM_WINDOWS)
     add_executable(cb_store src/proc/store_main.c src/proc/store_core.c src/proc/site.c)
     target_link_libraries(cb_store PRIVATE cb_ipc)
     target_compile_options(cb_store PRIVATE -Wall -Wextra)
+
+    # The loopback relay: connections to 127.0.0.1 and ::1 for the network
+    # process, which can't reach loopback from its AppContainer.
+    add_executable(cb_loop src/proc/loop_main.c src/proc/loop_core.c)
+    target_link_libraries(cb_loop PRIVATE cb_ipc ws2_32)
+    target_compile_options(cb_loop PRIVATE -Wall -Wextra)
 
     # A hostile tab for the escape tests (SANDBOX_DESIGN.md section 11.1): run
     # in a tab's sandbox, it tries to get out and reports what it reached.
@@ -546,7 +555,7 @@ if(BE_PLATFORM_WINDOWS)
     # Sandboxed processes can't read DLLs outside System32 (the MinGW runtime
     # in C:\msys64 included), so they link everything else statically.
     if(MINGW)
-        foreach(t cb_coord cb_ui cb_tab cb_net cb_store cb_escape)
+        foreach(t cb_coord cb_ui cb_tab cb_net cb_store cb_loop cb_escape)
             target_link_options(${t} PRIVATE -static)
         endforeach()
     endif()

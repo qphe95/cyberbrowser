@@ -22,6 +22,7 @@
 
 #include "platform.h"
 #include "http_download.h"
+#include "loop_client.h"
 
 #define MAX_CLIENTS 64
 #define WORKERS 16
@@ -253,6 +254,10 @@ static void grant(const CsGrant *g) {
            e1 = (HANDLE)(uintptr_t)g->chan_ev1;
     if (g->kind == GRANT_STORE) {
         g_have_store = chan_attach(&g_store, s, e0, e1, 0);
+        return;
+    }
+    if (g->kind == GRANT_LOOP) {
+        if (!loop_client_start(s, e0, e1)) { CloseHandle(s); CloseHandle(e0); CloseHandle(e1); }
         return;
     }
     if (g->kind != GRANT_TAB || g->site[PROTO_SITE_MAX - 1]) return;

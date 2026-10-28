@@ -4,8 +4,8 @@
  *   cb_coord.exe [url ...]      open a window with a tab for each url
  *
  * It starts the network process (cb_net.exe), the storage service
- * (cb_store.exe) and the UI (cb_ui.exe), and connects the network process to
- * the storage service.  It turns the UI's messages and its children's exits
+ * (cb_store.exe), the loopback relay (cb_loop.exe) and the UI (cb_ui.exe), and
+ * connects the network process to the storage service and to the relay.  It turns the UI's messages and its children's exits
  * into events for the core (coord_core.c), and performs the core's actions:
  * starting a tab process with its channels (to the UI, to the network process
  * and, unless its site is opaque, to the storage service, both badged with
@@ -40,7 +40,7 @@ typedef struct Child {
 } Child;
 
 static HANDLE g_job;
-static Child g_ui, g_net, g_store;
+static Child g_ui, g_net, g_store, g_loop;
 static HANDLE g_tab_proc[COORD_MAX_TABS];
 static CoordState g_state;
 static CoordActions g_actions;          /* large: kept off the stack */
@@ -124,7 +124,7 @@ static void revoke(Child *server, uint32_t client) {
 
 static bool start_tab(const CoordAction *a) {
     Chan ui, net, store;
-    bool have_store = a->site[0] != 0;      /* opaque: no storage */
+    bool have_store = a->grant_store;       /* the core: not for an opaque site */
     memset(&store, 0, sizeof(store));
     if (!chan_create(&ui, 1u << 18)) return false;
     if (!chan_create(&net, 1u << 20)) { chan_close(&ui); return false; }
@@ -172,7 +172,7 @@ static bool start_tab(const CoordAction *a) {
         if (!proc) sandbox_tab_ended(a->slot);
         if (proc) {
             /* The servers first: the tab may already be asking. */
-            bool granted = grant(&g_net, &net, a->tab, GRANT_TAB, a->site) &&
+            bool granted = a->grant_net && grant(&g_net, &net, a->tab, GRANT_TAB, a->site) &&
                            (!have_store || grant(&g_store, &store, a->tab, GRANT_TAB, a->site));
             CuTabStarted m;
             memset(&m, 0, sizeof(m));
@@ -248,6 +248,7 @@ static void perform(const CoordAction *a) {
          * then the storage service finishes. */
         quit_server(&g_net, 3000);
         quit_server(&g_store, 2000);
+        quit_server(&g_loop, 500);
         /* Their profiles go once the tabs have. */
         for (int i = 0; i < COORD_MAX_TABS; i++)
             if (g_tab_proc[i]) TerminateProcess(g_tab_proc[i], 0);
@@ -272,6 +273,21 @@ static void step(const CoordEvent *e) {
     }
 }
 
+/* The network process reads the replays (CYBER_REPLAY) and writes
+ * recordings (CYBER_RECORD) in folders it is given access to: in its
+ * AppContainer it has none to the user's files. */
+static void grant_replays(void) {
+    static const wchar_t *vars[2] = { L"CYBER_REPLAY", L"CYBER_RECORD" };
+    for (int i = 0; i < 2; i++) {
+        wchar_t dir[MAX_PATH];
+        DWORD n = GetEnvironmentVariableW(vars[i], dir, MAX_PATH);
+        if (n == 0 || n >= MAX_PATH) continue;
+        if (i == 1) CreateDirectoryW(dir, NULL);
+        if (!sandbox_grant_folder(dir, SB_NET, i == 1))
+            fprintf(stderr, "cb_coord: could not give the network process access to %ls\n", dir);
+    }
+}
+
 /* browser_data\sites next to the executables, else in %LOCALAPPDATA%, made
  * if need be; the storage service gets it, and access to it alone. */
 static bool make_root(void) {
@@ -292,7 +308,7 @@ static bool make_root(void) {
         CreateDirectoryW(g_root, NULL);
         DWORD attr = GetFileAttributesW(g_root);
         if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) &&
-            !(attr & FILE_ATTRIBUTE_REPARSE_POINT) && sandbox_grant_folder(g_root))
+            !(attr & FILE_ATTRIBUTE_REPARSE_POINT) && sandbox_grant_folder(g_root, SB_STORE, true))
             return true;
     }
     return false;
@@ -320,9 +336,11 @@ int main(int argc, char **argv) {
     WideCharToMultiByte(CP_UTF8, 0, g_root, -1, root_utf8, sizeof(root_utf8), NULL, NULL);
     strcpy(root_arg, "--root ");
     hex(root_arg + 7, (const uint8_t *)root_utf8, (uint32_t)strlen(root_utf8));
+    grant_replays();
     if (!start_child(&g_store, L"cb_store.exe", "store", root_arg, DETACHED_PROCESS, SB_STORE) ||
-        !start_child(&g_net, L"cb_net.exe", "net", NULL, DETACHED_PROCESS, SB_NET)) {
-        fprintf(stderr, "cb_coord: could not start cb_store.exe or cb_net.exe\n");
+        !start_child(&g_net, L"cb_net.exe", "net", NULL, DETACHED_PROCESS, SB_NET) ||
+        !start_child(&g_loop, L"cb_loop.exe", "loop", NULL, DETACHED_PROCESS, SB_LOOP)) {
+        fprintf(stderr, "cb_coord: could not start cb_store.exe, cb_net.exe or cb_loop.exe\n");
         return 1;
     }
     Chan net_store;
@@ -336,6 +354,14 @@ int main(int argc, char **argv) {
         return 1;
     }
     chan_close(&net_store);
+    /* The relay, for loopback hosts: the network process can't reach them. */
+    Chan net_loop;
+    if (!chan_create(&net_loop, 1u << 20) || !grant(&g_loop, &net_loop, 0, GRANT_NET, NULL) ||
+        !grant(&g_net, &net_loop, 0, GRANT_LOOP, NULL)) {
+        fprintf(stderr, "cb_coord: could not connect cb_net.exe to cb_loop.exe\n");
+        return 1;
+    }
+    chan_close(&net_loop);
 
     /* The UI, with the start URLs (hex). */
     static char urls[16000];
@@ -359,14 +385,15 @@ int main(int argc, char **argv) {
     static ChanMsg m;
     for (;;) {
         /* Wait for the UI's channel, or a child's exit. */
-        HANDLE waits[4 + COORD_MAX_TABS];
-        int slot_of[4 + COORD_MAX_TABS];
+        HANDLE waits[5 + COORD_MAX_TABS];
+        int slot_of[5 + COORD_MAX_TABS];
         int n = 0;
         bool armed = chan_arm(&g_ui.ctl);
         waits[n] = chan_event(&g_ui.ctl); slot_of[n++] = -1;
         waits[n] = g_ui.proc; slot_of[n++] = -2;
         waits[n] = g_net.proc; slot_of[n++] = -3;
         waits[n] = g_store.proc; slot_of[n++] = -3;
+        waits[n] = g_loop.proc; slot_of[n++] = -3;
         for (int i = 0; i < COORD_MAX_TABS; i++)
             if (g_tab_proc[i]) { waits[n] = g_tab_proc[i]; slot_of[n++] = i; }
         DWORD w = armed ? WaitForMultipleObjects((DWORD)n, waits, FALSE, INFINITE) : WAIT_OBJECT_0;

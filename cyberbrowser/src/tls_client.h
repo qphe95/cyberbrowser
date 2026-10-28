@@ -15,6 +15,7 @@
 #include "mbedtls/ssl.h"
 #include "mbedtls/x509_crt.h"
 #include "psa/crypto.h"
+#include "net_loopback.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -35,7 +36,15 @@ typedef struct TlsClient {
     /* Connection pool bookkeeping (conn_pool_*). */
     char pool_key[280]; /* "s|host|port" or "p|host|port" */
     int requests;       /* requests served on this connection */
+    /* A connection through the loopback relay (tls_set_loopback) has no
+     * socket here: loop_id names it, and the timeouts stand in for the
+     * socket's. */
+    int loop_id;        /* > 0: through the relay */
+    unsigned recv_timeout_ms, send_timeout_ms;
 } TlsClient;
+
+/* The read and write timeouts of the connection. */
+void tls_client_set_timeouts(TlsClient *client, unsigned recv_ms, unsigned send_ms);
 
 bool tls_client_connect(TlsClient *client, const char *host, const char *port,
                         char *err, size_t errLen);

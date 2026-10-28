@@ -10,6 +10,7 @@
 #include <userenv.h>
 #include <sddl.h>
 #include <aclapi.h>
+#include <bcrypt.h>
 
 #include "coord_core.h"
 
@@ -20,13 +21,16 @@ static SECURITY_ATTRIBUTES g_object_sa;
 static PSID g_user;                     /* this process's user */
 static PSID g_tab_sids[COORD_MAX_TABS];
 static wchar_t g_tab_names[COORD_MAX_TABS][64];  /* their profiles, deleted when the tab ends */
-static unsigned g_tab_serial;
-static PSID g_store_sid, g_ui_sid;
+static PSID g_store_sid, g_ui_sid, g_net_sid;
+static union { SID s; char b[SECURITY_MAX_SID_SIZE]; } g_net_caps[2];
+static SID_AND_ATTRIBUTES g_net_cap_list[8];
+static DWORD g_net_ncaps;
 static union { ACL acl; char b[512]; } g_tab_dacl[COORD_MAX_TABS];
 
 #define TAB_MEMORY_LIMIT   (4ull << 30)
 #define NET_MEMORY_LIMIT   (2ull << 30)
 #define STORE_MEMORY_LIMIT (512ull << 20)
+#define LOOP_MEMORY_LIMIT  (256ull << 20)
 
 /* The AppContainer SID of profile `name`, registering the profile the first
  * time: CreateProcess refuses an AppContainer SID with no profile. */
@@ -43,13 +47,17 @@ static PSID profile_sid(const wchar_t *name) {
 }
 
 /* A profile of its own for the tab process about to start in `slot`,
- * "cyberbrowser.tab.<coordinator pid>.<n>": its SID is no other process's,
- * ever, and what the tab leaves in the profile's folder and registry
- * storage goes with it (sandbox_tab_ended). */
+ * "cyberbrowser.tab.<coordinator pid>.<64 random bits>": its SID is no
+ * other process's, ever, and what the tab leaves in the profile's folder and
+ * registry storage goes with it (sandbox_tab_ended).  The name is random,
+ * not a count: a tab can read its own, and a count would tell it how many
+ * tabs (of any site) came before it. */
 static PSID new_tab_sid(int slot) {
     if (slot < 0 || slot >= COORD_MAX_TABS) return NULL;
     sandbox_tab_ended(slot);
-    _snwprintf(g_tab_names[slot], 64, L"cyberbrowser.tab.%lu.%u", GetCurrentProcessId(), ++g_tab_serial);
+    unsigned long long r = 0;
+    if (BCryptGenRandom(NULL, (PUCHAR)&r, sizeof(r), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) return NULL;
+    _snwprintf(g_tab_names[slot], 64, L"cyberbrowser.tab.%lu.%016llx", GetCurrentProcessId(), r);
     g_tab_sids[slot] = profile_sid(g_tab_names[slot]);
     if (!g_tab_sids[slot]) g_tab_names[slot][0] = 0;
     return g_tab_sids[slot];
@@ -104,6 +112,23 @@ static void sweep_tab_profiles(void) {
     }
 }
 
+/* The SID of a named capability ("registryRead"), as AppContainers carry
+ * it; kept for the process's life. */
+static PSID named_capability(const wchar_t *name) {
+    typedef BOOL(WINAPI * Derive)(LPCWSTR, PSID **, DWORD *, PSID **, DWORD *);
+    Derive derive = (Derive)(void *)GetProcAddress(GetModuleHandleW(L"kernelbase.dll"),
+                                                   "DeriveCapabilitySidsFromName");
+    PSID *groups = NULL, *sids = NULL;
+    DWORD ngroups = 0, nsids = 0;
+    if (!derive || !derive(name, &groups, &ngroups, &sids, &nsids)) return NULL;
+    PSID sid = nsids ? sids[0] : NULL;
+    for (DWORD i = 0; i < ngroups; i++) LocalFree(groups[i]);
+    for (DWORD i = 1; i < nsids; i++) LocalFree(sids[i]);
+    LocalFree(groups);
+    LocalFree(sids);
+    return sid;
+}
+
 bool sandbox_init(void) {
     const char *off = getenv("CYBER_NO_SANDBOX");
     if (off && off[0] && off[0] != '0') {
@@ -137,7 +162,33 @@ bool sandbox_init(void) {
     sweep_tab_profiles();
     g_store_sid = profile_sid(L"cyberbrowser.store");
     g_ui_sid = profile_sid(L"cyberbrowser.ui");
-    g_on = g_store_sid && g_ui_sid;
+    g_net_sid = profile_sid(L"cyberbrowser.net");
+    /* The network process's capabilities: the internet, and the local
+     * network (routers, printers, development machines). */
+    static const WELL_KNOWN_SID_TYPE caps[2] = {
+        WinCapabilityInternetClientSid, WinCapabilityPrivateNetworkClientServerSid,
+    };
+    for (int i = 0; i < 2; i++) {
+        DWORD n = sizeof(g_net_caps[i]);
+        if (!CreateWellKnownSid(caps[i], NULL, &g_net_caps[i], &n)) return false;
+        g_net_cap_list[i].Sid = &g_net_caps[i];
+        g_net_cap_list[i].Attributes = SE_GROUP_ENABLED;
+    }
+    g_net_ncaps = 2;
+    /* And the named ones LPAC needs to start Winsock and check
+     * certificates: reading the registry (the Winsock catalog), and the
+     * cryptographic services. */
+    static const wchar_t *named[] = { L"registryRead", L"lpacCryptoServices" };
+    for (int i = 0; i < (int)(sizeof(named) / sizeof(named[0])); i++) {
+        PSID sid = named_capability(named[i]);
+        if (!sid) {
+            fprintf(stderr, "[sandbox] no capability %ls\n", named[i]);
+            return false;
+        }
+        g_net_cap_list[g_net_ncaps].Sid = sid;
+        g_net_cap_list[g_net_ncaps++].Attributes = SE_GROUP_ENABLED;
+    }
+    g_on = g_store_sid && g_ui_sid && g_net_sid;
     return g_on;
 }
 
@@ -145,10 +196,13 @@ bool sandbox_enabled(void) {
     return g_on;
 }
 
-/* The low-integrity, write-restricted token of the network process: it may
- * read what the user may, but writes need one of the restricting SIDs, which
- * the user's files, other processes and the tabs' objects don't grant. */
-static HANDLE net_token(void) {
+/* The low-integrity, restricted token of the loopback relay (an
+ * AppContainer can't connect to loopback addresses).  Every access needs one
+ * of the restricting SIDs (restricted code, Everyone, Users, Authenticated
+ * Users) as well as the user's: the system's files grant them reading, so
+ * DLLs load and Winsock starts, but the user's profile, other processes and
+ * the tabs' objects don't, so it can neither read nor write them. */
+static HANDLE loop_token(void) {
     HANDLE self = NULL, tok = NULL;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT,
                           &self))
@@ -169,7 +223,7 @@ static HANDLE net_token(void) {
     CreateWellKnownSid(WinBuiltinAdministratorsSid, NULL, &admins, &n);
     deny[0].Sid = &admins;
     deny[0].Attributes = 0;
-    bool ok = CreateRestrictedToken(self, DISABLE_MAX_PRIVILEGE | WRITE_RESTRICTED, 1, deny, 0, NULL, 4, rs, &tok);
+    bool ok = CreateRestrictedToken(self, DISABLE_MAX_PRIVILEGE, 1, deny, 0, NULL, 4, rs, &tok);
     CloseHandle(self);
     if (!ok) return NULL;
     /* Low integrity. */
@@ -209,7 +263,7 @@ static HANDLE child_job(SandboxKind kind) {
     lim.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
     lim.BasicLimitInformation.ActiveProcessLimit = 1;
     unsigned long long mem = kind == SB_TAB ? TAB_MEMORY_LIMIT : kind == SB_NET ? NET_MEMORY_LIMIT
-                           : kind == SB_STORE ? STORE_MEMORY_LIMIT : 0;
+                           : kind == SB_STORE ? STORE_MEMORY_LIMIT : kind == SB_LOOP ? LOOP_MEMORY_LIMIT : 0;
     if (mem) {
         lim.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
         lim.ProcessMemoryLimit = (SIZE_T)mem;
@@ -253,8 +307,8 @@ bool sandbox_for(SandboxKind kind, int slot, SpawnSandbox *sb) {
         sb->appcontainer = new_tab_sid(slot);
         sb->lpac = true;
         /* What the tab creates (its threads, say): this user, SYSTEM and
-         * the tab itself, and nothing the network process's restricting
-         * SIDs match, so it can't write to them. */
+         * the tab itself, and nothing the loopback relay's restricting
+         * SIDs match, so it can't open them. */
         if (sb->appcontainer) {
             ACL *a = &g_tab_dacl[slot].acl;
             union { SID s; char b[SECURITY_MAX_SID_SIZE]; } system;
@@ -275,11 +329,20 @@ bool sandbox_for(SandboxKind kind, int slot, SpawnSandbox *sb) {
         sb->appcontainer = g_ui_sid;
         break;
     case SB_NET:
-        sb->token = net_token();
+        /* LPAC with the network: it reads no files but those it is given
+         * (sandbox_grant_folder: the replays), and reaches loopback only
+         * through the relay. */
+        sb->appcontainer = g_net_sid;
+        sb->lpac = true;
+        sb->caps = g_net_cap_list;
+        sb->ncaps = g_net_ncaps;
+        break;
+    case SB_LOOP:
+        sb->token = loop_token();
         if (!sb->token) return false;
         break;
     }
-    if (kind != SB_NET && !sb->appcontainer) return false;
+    if (kind != SB_LOOP && !sb->appcontainer) return false;
     sb->job = child_job(kind);
     if (!sb->job) {
         sandbox_release(sb);
@@ -295,8 +358,10 @@ void sandbox_release(SpawnSandbox *sb) {
     sb->job = sb->token = NULL;
 }
 
-bool sandbox_grant_folder(const wchar_t *dir) {
+bool sandbox_grant_folder(const wchar_t *dir, SandboxKind kind, bool write) {
     if (!g_on) return true;
+    PSID sid = kind == SB_STORE ? g_store_sid : kind == SB_NET ? g_net_sid : NULL;
+    if (!sid) return false;
     PACL old = NULL, acl = NULL;
     PSECURITY_DESCRIPTOR sd = NULL;
     if (GetNamedSecurityInfoW(dir, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &old, NULL, &sd) !=
@@ -304,12 +369,12 @@ bool sandbox_grant_folder(const wchar_t *dir) {
         return false;
     EXPLICIT_ACCESSW ea;
     memset(&ea, 0, sizeof(ea));
-    ea.grfAccessPermissions = GENERIC_ALL;
+    ea.grfAccessPermissions = write ? GENERIC_ALL : GENERIC_READ | GENERIC_EXECUTE;
     ea.grfAccessMode = GRANT_ACCESS;
     ea.grfInheritance = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
     ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
     ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
-    ea.Trustee.ptstrName = (LPWSTR)g_store_sid;
+    ea.Trustee.ptstrName = (LPWSTR)sid;
     bool ok = SetEntriesInAclW(1, &ea, old, &acl) == ERROR_SUCCESS &&
               SetNamedSecurityInfoW((LPWSTR)dir, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, acl, NULL) ==
                   ERROR_SUCCESS;

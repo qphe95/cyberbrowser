@@ -1,5 +1,5 @@
 /* proc_tests.c - tests of the multi-process browser's pure parts: sites,
- * the storage service's rules, the coordinator's core.
+ * the storage service's rules, the coordinator's and the relay's cores.
  *   proc_tests.exe        prints failures, exits 1 if any */
 #include <stdio.h>
 #include <string.h>
@@ -7,6 +7,7 @@
 #include "site.h"
 #include "store_core.h"
 #include "coord_core.h"
+#include "loop_core.h"
 
 static int g_fail, g_run;
 
@@ -161,10 +162,80 @@ static void test_coord(void) {
     CHECK(g_a.n == 0);
 }
 
+static LoopState g_ls;
+static LoopActions g_la;
+
+static void net_msg(uint16_t type, const void *data, uint32_t len) {
+    LoopEvent e;
+    memset(&e, 0, sizeof(e));
+    e.kind = LE_NET_MESSAGE;
+    e.type = type;
+    e.data = (const uint8_t *)data;
+    e.len = len;
+    loop_step(&g_ls, &e, &g_la);
+}
+
+static void sock_event(LoopEventKind kind, int slot, bool ok, const void *data, uint32_t len) {
+    LoopEvent e;
+    memset(&e, 0, sizeof(e));
+    e.kind = kind;
+    e.slot = slot;
+    e.ok = ok;
+    e.data = (const uint8_t *)data;
+    e.len = len;
+    loop_step(&g_ls, &e, &g_la);
+}
+
+static void test_loop(void) {
+    loop_init(&g_ls);
+    NlConnect c = { 7, LOOP_V4, 8080 };
+    net_msg(NL_CONNECT, &c, sizeof(c));
+    CHECK(g_la.n == 1 && g_la.a[0].kind == LA_CONNECT && g_la.a[0].family == LOOP_V4 && g_la.a[0].port == 8080);
+    int slot = g_la.a[0].slot;
+    net_msg(NL_CONNECT, &c, sizeof(c));                     /* the same id twice */
+    CHECK(g_la.n == 1 && g_la.a[0].kind == LA_NET_SEND && g_la.a[0].type == LN_CONNECTED &&
+          g_la.a[0].data[4] == 0);
+    NlConnect bad = { 8, 5, 80 };                           /* not loopback: no such family */
+    net_msg(NL_CONNECT, &bad, sizeof(bad));
+    CHECK(g_la.n == 1 && g_la.a[0].kind == LA_NET_SEND && g_la.a[0].type == LN_CONNECTED);
+    bad.family = LOOP_V6;
+    bad.port = 70000;
+    net_msg(NL_CONNECT, &bad, sizeof(bad));
+    CHECK(g_la.n == 1 && g_la.a[0].kind == LA_NET_SEND && g_la.a[0].type == LN_CONNECTED);
+    sock_event(LE_CONNECTED, slot, true, NULL, 0);
+    CHECK(g_la.n == 1 && g_la.a[0].type == LN_CONNECTED && g_la.a[0].data[4] == 1);
+    /* Bytes to the socket, unchanged, one NL_DATA at a time. */
+    uint8_t d[8] = { 7, 0, 0, 0, 'G', 'E', 'T', ' ' };
+    net_msg(NL_DATA, d, sizeof(d));
+    CHECK(g_la.n == 1 && g_la.a[0].kind == LA_SOCK_SEND && g_la.a[0].len == 4 && !memcmp(g_la.a[0].data, "GET ", 4));
+    net_msg(NL_DATA, d, sizeof(d));                         /* before LN_SENT: the connection ends */
+    CHECK(g_la.n == 2 && g_la.a[0].kind == LA_SOCK_CLOSE && g_la.a[1].type == LN_CLOSED);
+    /* Again, with the window. */
+    c.id = 9;
+    net_msg(NL_CONNECT, &c, sizeof(c));
+    slot = g_la.a[0].slot;
+    sock_event(LE_CONNECTED, slot, true, NULL, 0);
+    static uint8_t big[LOOP_DATA_MAX];
+    int reads = 0;
+    while (loop_want_read(&g_ls, slot)) {
+        sock_event(LE_SOCK_DATA, slot, true, big, sizeof(big));
+        CHECK(g_la.n == 1 && g_la.a[0].type == LN_DATA && g_la.a[0].len == 4 + sizeof(big) && g_la.a[0].data[0] == 9);
+        reads++;
+    }
+    CHECK(reads == (int)(LOOP_WINDOW / LOOP_DATA_MAX));
+    NlCredit cr = { 9, LOOP_WINDOW };
+    net_msg(NL_CREDIT, &cr, sizeof(cr));
+    CHECK(loop_want_read(&g_ls, slot));
+    sock_event(LE_SOCK_CLOSED, slot, false, NULL, 0);
+    CHECK(g_la.n == 2 && g_la.a[0].kind == LA_SOCK_CLOSE && g_la.a[1].type == LN_CLOSED);
+    CHECK(!loop_want_read(&g_ls, slot));
+}
+
 int main(void) {
     test_sites();
     test_store();
     test_coord();
+    test_loop();
     printf("%d checks, %d failed\n", g_run, g_fail);
     return g_fail ? 1 : 0;
 }

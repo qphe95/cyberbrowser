@@ -1279,20 +1279,7 @@ retry_connection:
     }
     
     /* Set socket timeout */
-    int sockfd = client->net.fd;
-#ifndef _WIN32
-    struct timeval tv;
-    tv.tv_sec = 60;
-    tv.tv_usec = 0;
-    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    tv.tv_sec = 10;
-    setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-#else
-    DWORD recv_timeout = 60000;
-    DWORD send_timeout = 10000;
-    setsockopt((SOCKET)sockfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&recv_timeout, sizeof(recv_timeout));
-    setsockopt((SOCKET)sockfd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&send_timeout, sizeof(send_timeout));
-#endif
+    tls_client_set_timeouts(client, 60000, 10000);
     LOGI("Set socket timeout (read=60s, write=10s)");
 
     /* Read response */
