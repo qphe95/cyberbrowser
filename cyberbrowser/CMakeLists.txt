@@ -110,6 +110,7 @@ set(BE_SOURCES
     src/session_state.c
     src/page_engine.c
     src/raster_cpu.c
+    src/raster_page.c
     src/tls_client.c
     src/http_download.c
     
@@ -506,9 +507,9 @@ if(BE_PLATFORM_WINDOWS)
     target_compile_options(cb_coord PRIVATE -Wall -Wextra)
 
     # Tests of the pure parts: sites, the storage rules, the coordinator's and
-    # the relay's cores.
+    # the relay's cores, the GPU process's decoder.
     add_executable(proc_tests src/proc/proc_tests.c src/proc/coord_core.c src/proc/site.c src/proc/store_core.c
-                   src/proc/loop_core.c)
+                   src/proc/loop_core.c src/proc/gpu_decode.c)
     target_link_libraries(proc_tests PRIVATE cb_ipc)
     target_compile_options(proc_tests PRIVATE -Wall -Wextra)
 
@@ -518,7 +519,7 @@ if(BE_PLATFORM_WINDOWS)
     target_compile_options(cb_ui PRIVATE -Wall -Wextra)
 
     # A tab: the page engine, with no network or files of its own.
-    add_executable(cb_tab src/proc/tab_main.c src/proc/site.c)
+    add_executable(cb_tab src/proc/tab_main.c src/proc/site.c src/proc/gpu_client.c)
     target_include_directories(cb_tab PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/src/quickjs
@@ -546,6 +547,34 @@ if(BE_PLATFORM_WINDOWS)
     target_link_libraries(cb_loop PRIVATE cb_ipc ws2_32)
     target_compile_options(cb_loop PRIVATE -Wall -Wextra)
 
+    # The GPU process: the verified decoder, then Vulkan (loaded at run time
+    # from System32) or the CPU rasterizer; no page engine.
+    # Its shaders, compiled to SPIR-V and embedded (glslc, from MSYS2's
+    # shaderc or the Vulkan SDK).
+    find_program(GLSLC glslc REQUIRED)
+    set(GPU_SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/proc/shaders)
+    set(GPU_SHADER_OUT ${CMAKE_CURRENT_BINARY_DIR}/shaders)
+    set(GPU_SHADER_INCS)
+    foreach(s gpu.vert gpu.frag mask.frag)
+        add_custom_command(
+            OUTPUT ${GPU_SHADER_OUT}/${s}.inc
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${GPU_SHADER_OUT}
+            COMMAND ${GLSLC} -O -mfmt=c -o ${GPU_SHADER_OUT}/${s}.inc ${GPU_SHADER_DIR}/${s}
+            DEPENDS ${GPU_SHADER_DIR}/${s} ${GPU_SHADER_DIR}/common.glsl
+            VERBATIM)
+        list(APPEND GPU_SHADER_INCS ${GPU_SHADER_OUT}/${s}.inc)
+    endforeach()
+    add_executable(cb_gpu src/proc/gpu_main.c src/proc/gpu_decode.c src/proc/gpu_vk.c src/raster_cpu.c
+                   ${GPU_SHADER_INCS})
+    target_include_directories(cb_gpu PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/quickjs
+        ${GPU_SHADER_OUT}
+    )
+    target_include_directories(cb_gpu BEFORE PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/win32)
+    target_link_libraries(cb_gpu PRIVATE cb_ipc gdi32 user32)
+    target_compile_options(cb_gpu PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
+
     # A hostile tab for the escape tests (SANDBOX_DESIGN.md section 11.1): run
     # in a tab's sandbox, it tries to get out and reports what it reached.
     add_executable(cb_escape src/proc/escape_main.c src/proc/site.c)
@@ -555,7 +584,7 @@ if(BE_PLATFORM_WINDOWS)
     # Sandboxed processes can't read DLLs outside System32 (the MinGW runtime
     # in C:\msys64 included), so they link everything else statically.
     if(MINGW)
-        foreach(t cb_coord cb_ui cb_tab cb_net cb_store cb_loop cb_escape)
+        foreach(t cb_coord cb_ui cb_tab cb_net cb_store cb_loop cb_gpu cb_escape)
             target_link_options(${t} PRIVATE -static)
         endforeach()
     endif()

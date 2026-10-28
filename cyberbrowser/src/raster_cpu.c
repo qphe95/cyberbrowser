@@ -1,6 +1,8 @@
 /*
  * raster_cpu.c - the CPU rasterizer (raster_cpu.h): paints a display list
- * into an RGB buffer and writes it as a JPEG.
+ * into an RGB buffer, with the glyph atlases and images a RasterResources
+ * gives.  No page engine: the GPU process links it too (raster_page.c has the
+ * page engine's side).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,9 +13,6 @@
 #include "raster_cpu.h"
 #include "display_list.h"
 #include "font_registry.h"
-#include "text_shaper.h"
-#include "image_cache.h"
-#include "stb_image_write.h"
 
 typedef struct {
     uint8_t r, g, b;
@@ -132,15 +131,13 @@ static void draw_glyph(RGB *pixels, int img_width, int img_height,
 }
 
 static void draw_image(RGB *pixels, int img_width, int img_height,
-                       ImageCache *cache, const DisplayListCmd *cmd)
+                       const RasterResources *res, const DisplayListCmd *cmd)
 {
     int src_w = 0, src_h = 0, src_ch = 0;
-    uint8_t *src = NULL;
-    if (!image_cache_get(cache, cmd->u.image.image_handle,
-                         &src_w, &src_h, &src_ch, &src)) {
+    const uint8_t *src = NULL;
+    if (!res->image || !res->image(res->user, cmd->u.image.image_handle, &src, &src_w, &src_h, &src_ch))
         return;
-    }
-    if (src_w <= 0 || src_h <= 0) return;
+    if (!src || src_w <= 0 || src_h <= 0 || src_ch != 4) return;
 
     int dx0 = (int)floorf(cmd->x);
     int dy0 = (int)floorf(cmd->y);
@@ -247,7 +244,8 @@ typedef struct {
     int mask;
 } MaskLayer;
 
-void raster_display_list(const DisplayList *dl, uint8_t *rgb, int img_width, int img_height) {
+void raster_display_list_with(const DisplayList *dl, const RasterResources *res, uint8_t *rgb, int img_width,
+                              int img_height) {
     MaskLayer layers[64];
     int nlayers = 0;
     size_t pixel_count = (size_t)img_width * (size_t)img_height;
@@ -260,9 +258,8 @@ void raster_display_list(const DisplayList *dl, uint8_t *rgb, int img_width, int
         pixels[i].b = 255;
     }
 
-    /* Per-slot atlases (font_registry.h), resolved when a glyph first
-     * references the slot. */
-    TextShaper *slot_fonts[FONT_SLOTS_MAX] = {0};
+    /* Per-slot atlases, resolved when a glyph first references the slot. */
+    bool slot_seen[FONT_SLOTS_MAX] = {0};
     const uint8_t *slot_atlas[FONT_SLOTS_MAX] = {0};
     int slot_atlas_w[FONT_SLOTS_MAX] = {0};
     int slot_atlas_h[FONT_SLOTS_MAX] = {0};
@@ -291,14 +288,11 @@ void raster_display_list(const DisplayList *dl, uint8_t *rgb, int img_width, int
         } else if (cmd->type == DL_GLYPH) {
             int slot = cmd->u.glyph.font_slot;
             if (slot < FONT_SLOTS_MAX) {
-                if (!slot_fonts[slot]) {
-                    slot_fonts[slot] = font_registry_slot(slot);
-                    slot_atlas[slot] = slot_fonts[slot]
-                        ? text_shaper_atlas_pixels(slot_fonts[slot]) : NULL;
-                    slot_atlas_w[slot] = slot_fonts[slot]
-                        ? text_shaper_atlas_width(slot_fonts[slot]) : 0;
-                    slot_atlas_h[slot] = slot_fonts[slot]
-                        ? text_shaper_atlas_height(slot_fonts[slot]) : 0;
+                if (!slot_seen[slot]) {
+                    slot_seen[slot] = true;
+                    if (!res->atlas || !res->atlas(res->user, slot, &slot_atlas[slot], &slot_atlas_w[slot],
+                                                   &slot_atlas_h[slot]))
+                        slot_atlas[slot] = NULL;
                 }
                 if (slot_atlas[slot]) {
                     draw_glyph(pixels, img_width, img_height,
@@ -307,8 +301,7 @@ void raster_display_list(const DisplayList *dl, uint8_t *rgb, int img_width, int
                 }
             }
         } else if (cmd->type == DL_IMAGE) {
-            ImageCache *cache = display_list_get_image_cache();
-            if (cache) draw_image(pixels, img_width, img_height, cache, cmd);
+            draw_image(pixels, img_width, img_height, res, cmd);
         } else if (cmd->type == DL_SHADOW) {
             /* Blurred rounded rectangle: coverage from the signed distance
              * to its edge through a Gaussian (sigma = blur / 2), minus the
@@ -370,9 +363,9 @@ void raster_display_list(const DisplayList *dl, uint8_t *rgb, int img_width, int
             MaskLayer *L = &layers[--nlayers];
             const DisplayMask *m = &dl->masks[L->mask];
             int sw = 0, sh = 0, sch = 0;
-            uint8_t *src = NULL;
-            ImageCache *cache = display_list_get_image_cache();
-            if (m->kind == 1 && cache && !image_cache_get(cache, m->image_handle, &sw, &sh, &sch, &src)) src = NULL;
+            const uint8_t *src = NULL;
+            if (m->kind == 1 && (!res->image || !res->image(res->user, m->image_handle, &src, &sw, &sh, &sch)))
+                src = NULL;
             int w = L->x1 - L->x0;
             for (int y = L->y0; L->saved && y < L->y1; y++) {
                 for (int x = L->x0; x < L->x1; x++) {
@@ -390,18 +383,4 @@ void raster_display_list(const DisplayList *dl, uint8_t *rgb, int img_width, int
         }
     }
     while (nlayers > 0) free(layers[--nlayers].saved);
-}
-
-bool render_display_list_to_jpg(const DisplayList *dl, const char *path,
-                                int img_width, int img_height) {
-    RGB *pixels = (RGB *)calloc((size_t)img_width * (size_t)img_height, sizeof(RGB));
-    if (!pixels) {
-        printf("FATAL: out of memory allocating %dx%d image buffer\n", img_width, img_height);
-        return false;
-    }
-    raster_display_list(dl, (uint8_t *)pixels, img_width, img_height);
-    /* stbi_write_jpg expects interleaved RGB. */
-    int ok = stbi_write_jpg(path, img_width, img_height, 3, pixels, 95);
-    free(pixels);
-    return ok != 0;
 }

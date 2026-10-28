@@ -93,7 +93,7 @@ that compromise worth as little as possible:
 |---|---|---|---|
 | Coordinator | `cyberbrowser.exe` | Trusted, verified | The user's rights. Starts every process; grants every channel. |
 | UI | `cb_ui.exe` | Untrusted, handles no web content | Owns the windows and input. No GPU, files or network. |
-| GPU | `cb_gpu.exe` | Untrusted, parses only the verified command format | The GPU, and drawing into the UI's windows. No files or network. |
+| GPU | `cb_gpu.exe` | Untrusted, parses only the verified command format | The GPU, and drawing into the UI's windows (it shares the UI's AppContainer, section 5.7.1). No files or network. |
 | Web-GPU, one per site using WebGL or WebGPU | `cb_webgpu.exe` | Untrusted, runs page shaders | Its own GPU device. No files, network or windows. |
 | Tab | `cb_tab.exe` | Untrusted, assumed compromised | Nothing ambient: no files, network, GPU, win32k or child processes. |
 | Network | `cb_net.exe` | Untrusted (parses TLS and HTTP from the network) | Outbound network only. |
@@ -423,12 +423,73 @@ CPU with the same decoder, so the security story doesn't change. If the GPU proc
 the coordinator starts a new one, grants the `draw` channels again, and every client sends a
 full display list and its resources again; tabs keep running.
 
+### 5.5.1 As built in M5
+
+What M5 built differs from sections 5.2 to 5.5 in these ways, all for simplicity at today's
+size:
+- **The wire format** (`src/ipc/gpu_wire.h`) has the display list's own seven record types
+  (rect, border, glyph, image, mask begin and end, shadow), not clips, transforms or opacity
+  layers, which the engine doesn't produce yet. Every number is an integer:
+  - lengths in 1/256 px;
+  - colors and gradient stops in 1/65535, so 8-bit CSS colors arrive exactly;
+  - texture coordinates in 2^-24, so atlas positions arrive exactly.
+- **What crosses** goes over the tab's draw channel (`bigmsg.h` messages), not a command
+  section and a transfer section:
+  - the frame (`TG_FRAME`);
+  - rows of a font slot's glyph atlas (`TG_ATLAS`, only rows that changed);
+  - decoded images (`TG_IMAGE`, again when their pixels change).
+
+  The GPU process copies each message out of the channel before it is decoded. A tab's
+  uploads count against 1 GB; past it, images are dropped.
+- **One texture per tab,** at the viewport's size, not tiles: the tab sends the visible part
+  of its frame, as it painted before. Tiles and layers come with compositor scrolling (M6).
+- **The decoder** (`src/proc/gpu_decode.c`) is proved (P1, P5, P7; section 8.6). The
+  rasterizers draw only what it passes.
+- **Two rasterizers.** The Vulkan one is `src/proc/gpu_vk.c`, with shaders in
+  `src/proc/shaders`, compiled by `glslc` at build time and embedded; it loads
+  `vulkan-1.dll` at run time. It computes the same coverage as the CPU rasterizer
+  (`raster_cpu.c`), so the two agree to within rounding (section 11.1, M5). Without
+  Vulkan, or with `CYBER_GPU=cpu`, the GPU process draws with `raster_cpu.c` and presents
+  with GDI.
+- **A crash or exit of the GPU process** is an event for the coordinator's core
+  (`CE_GPU_EXITED`). Its actions restart the GPU process and grant every live tab a new
+  draw channel, badged with its label (`CA_REGRANT_GPU`, proved as part of P3). The new
+  channel reaches the tab over a one-way channel from the coordinator (`CT_GPU`). The UI
+  gets its own new channel (`CU_GPU`) and makes a new content window: the old one stays
+  tied to the dead process's swap chain. After three starts within a minute the next GPU
+  process draws on the CPU. `CYBER_GPU_CRASH_TEST=N` makes it exit after N frames, for
+  tests.
+- **Screenshots for tests** ask the GPU process for the content's pixels (`UG_SHOT`), which
+  only the UI may do. A tab's channel has no message that returns pixels.
+
 ### 5.6 What stays in the tab
 
 `<canvas>` 2D (it needs `getImageData`, which reads pixels back) is drawn on the CPU in the tab
 and uploaded as an image every frame it changes. Video frames are decoded in the tab (on its
 decode thread, `src/media/media_buffer.c`) and uploaded as images; zero-copy video decode on
 the GPU is a later optimization that would need a hardware decoder in the GPU process.
+
+### 5.7.1 The GPU process and the UI share an AppContainer
+
+Spikes for M5 showed what Windows allows. An AppContainer process can create a Vulkan device
+and a surface on another process's window, but:
+- creating a swap chain on it fails (`VK_ERROR_NATIVE_WINDOW_IN_USE_KHR`) unless both
+  processes are in the same AppContainer;
+- creating a child window of its own inside the other process's window fails too (access
+  denied).
+
+So the GPU process runs in the UI's AppContainer (`cyberbrowser.ui`), with a job of its own
+(8 GB). It presents into the UI's content window, a child window that passes mouse input to
+its parent (`HTTRANSPARENT`). The UI's AppContainer has no capabilities and no files, so the
+GPU process gains little beyond the UI's windows. The cost: a compromised GPU process could
+post input messages to the UI's windows (open or close tabs, type a URL). The UI still accepts
+only `http:`, `https:` and `about:blank`, and has no files or network of its own. The
+alternative, sending every frame's pixels to the UI to draw with GDI, keeps the processes
+apart at the cost of a copy per frame. It was considered and set aside.
+
+For the same reason the UI now stays sandboxed in scripted tests: an unconfined UI's window
+can't take the GPU process's frames. The coordinator gives the UI's AppContainer the script's
+folder, where its screenshots go too.
 
 ### 5.7 WebGL and WebGPU
 
@@ -601,7 +662,7 @@ which the escape tests found a tab could open.
 
 | Process | Token | Notable rights |
 |---|---|---|
-| GPU | AppContainer, no capabilities | win32k and the graphics driver (it can't do without them); job with no child processes; ACG off (drivers generate code) |
+| GPU | The UI's AppContainer (`cyberbrowser.ui`), no capabilities (section 5.7.1) | win32k and the graphics driver (it can't do without them); its own job: one process, 8 GB, UI restrictions except handles (it presents into the UI's window); ACG off (drivers generate code) |
 | Web-GPU | LPAC, no capabilities, a fresh SID per process | win32k and the driver, as for GPU; memory limit; no windows (it renders only into shared textures) |
 | Network | LPAC (profile `cyberbrowser.net`) with `internetClient`, `privateNetworkClientServer`, `registryRead` and `lpacCryptoServices` | Sockets, except to loopback; none of the user's files, only the replay folder (reading) or the recording folder (writing) when those are used; win32k disabled; a 2 GB job |
 | Loopback relay | Restricted (every access), low integrity | TCP to `127.0.0.1` and `::1`; reads the system's files, not the user's; writes nowhere; win32k disabled; a 256 MB job |
@@ -688,14 +749,14 @@ throughout: no reload, its JS state, media and network requests continue.
 
 ### 8.1 What is verified
 
-| Component | Size (target) | Size (M4) | What is proved | Goals (M4) |
+| Component | Size (target) | Size (M5) | What is proved | Goals (M5) |
 |---|---|---|---|---|
-| Coordinator core (`coord_core.c`) | 2,000–3,000 lines | 390 lines | P1, P3, P6 (local respect), P7 | 1,063 |
-| `libchan`'s rings (`chan_ring.c`) | ~1,000 lines | 100 lines | P1, P2 | 143 |
-| `site_of` and the host grammar (`site.c`) | ~500 lines plus the PSL table | 290 lines | P1, P7, and that every label it makes is well formed | 407 |
-| Storage service core (`store_core.c`) | ~1,500 lines | 120 lines | P1, P4, P7 | 613 |
-| Loopback relay core (`loop_core.c`) | ~300 lines | 320 lines | P1, P7, P8 | 522 |
-| GPU command decoder | ~1,500 lines | (M5) | P1, P5 | |
+| Coordinator core (`coord_core.c`) | 2,000–3,000 lines | 430 lines | P1, P3, P6 (local respect), P7 | 4,898 |
+| `libchan`'s rings (`chan_ring.c`) | ~1,000 lines | 100 lines | P1, P2 | 214 |
+| `site_of` and the host grammar (`site.c`) | ~500 lines plus the PSL table | 290 lines | P1, P7, and that every label it makes is well formed | 2,709 |
+| Storage service core (`store_core.c`) | ~1,500 lines | 120 lines | P1, P4, P7 | 5,153 |
+| Loopback relay core (`loop_core.c`) | ~300 lines | 320 lines | P1, P7, P8 | 874 |
+| GPU display-list decoder (`gpu_decode.c`) | ~1,500 lines | 300 lines | P1, P5, P7 | 1,263 |
 
 The cores came out much smaller than the targets because what they decide is still small:
 three kinds of tab channel, no spare process, no navigation swaps. Section 8.6 says what M4
@@ -801,8 +862,11 @@ Frama-C runs on Linux and macOS; here it runs in WSL (Ubuntu 24.04).
 
 `tools/prove.sh [chan coord site store loop tla]` runs WP on each core (with the RTE plugin
 for P1, the `Typed+Cast+ref` memory model, and `-wp-check-memory-model`) and TLC on the
-model. It fails if any goal is unproved. All five cores take about 8 minutes from scratch on
-12 cores, and the two model checks about 9.5 minutes. The repository has no CI yet, so the script is
+model. It fails if any goal is unproved. Since M5 it splits goals into their cases
+(`-wp-split`), which counts more goals but proves each faster, and gives the decoder 120 s a
+goal (60 s for the rest). The six cores take about 50 minutes from a cold cache on 12 cores,
+and the two model checks about 9.5 minutes. A goal that timed out is cached as such: clear
+`.frama-c/wp/cache` before retrying with a longer limit. The repository has no CI yet, so the script is
 run by hand before changes to a core are committed.
 
 ### 8.6 What M4 proved, and how it differs from the plan
@@ -938,7 +1002,7 @@ memory of an idle tab process (about:blank). Things that would reduce it, in ord
 | M2 | Network and storage processes; tabs fetch and store over their channels; `localStorage` and cookies persisted per site | No socket or file code in `cb_tab.exe`; replays work through the network process |
 | M3 | Sandboxes: LPAC, job objects, mitigations, no win32k in tabs | The escape tests (below) pass |
 | M4 | Proofs: coordinator, `libchan`, `site_of`, storage core (P1–P4, P6, P7); TLA+ model of the protocol. The loopback relay with its verified core (P1, P7, P8), and the network process moved to LPAC (section 6.4) | All goals proved (`tools/prove.sh`; CI when there is one); `localhost` pages and replays work with the network process in LPAC; the escape tests pass |
-| M5 | GPU process: display-list format, verified decoder (P5), Vulkan rasterizer, compositing into the UI's windows | Pages render the same as the CPU path (screenshot diff on the replays); CPU fallback works |
+| M5 | GPU process: display-list format, verified decoder (P5), Vulkan rasterizer, compositing into the UI's windows | Pages render the same as the CPU path (screenshot diff on the replays); CPU fallback works (done) |
 | M6 | Multiple windows; dragging tabs out and between windows; compositor scrolling | Drag works while a video plays, without a reload |
 | M7 | Cross-site iframe partitioning, ORB, Private Network Access | |
 | M8 | Web-GPU process: WebGPU on `wgpu-native`, WebGL 1 and 2 on ANGLE (pinned prebuilt DLLs), on the GPU; shared canvas textures; the driver block list and feature limits; fuzzing | The WebGPU and WebGL conformance suites pass at a level to be set then; a crashing web-GPU process takes down only its canvases; on a blocked driver the APIs are unavailable |
@@ -1171,6 +1235,57 @@ and the network process runs in LPAC, reaching loopback through the relay (secti
     trusted (section 8.4).
   - There is no CI to run the proofs on every change.
 
+**M5 (done):** tabs no longer rasterize. They send display lists to the GPU process
+(`cb_gpu.exe`), which decodes them with a proved decoder and draws them with Vulkan, or with
+the CPU rasterizer where there is no usable GPU (section 5.5.1).
+
+- **Rendering matches the CPU path.** Each replay was screenshotted through the GPU process
+  twice, on the CPU rasterizer and on Vulkan (an RTX 4070 SUPER). No pixel differs by more
+  than 10%:
+
+  | Replay | Pixels differing (of 1,152,000) | By more than 10% |
+  |---|---|---|
+  | YouTube watch page | 88 | 0 |
+  | YouTube home | 1,322 | 0 |
+  | YouTube search | 12 | 0 |
+  | BBC News | 0 | 0 |
+  | Wikipedia | 18 | 0 |
+
+  The first Vulkan run differed in one image row and column. Vulkan allows division 2.5 ulp
+  off, so `floor()` of a texel coordinate landing on an integer picked the neighbouring
+  texel. One `fma` correction step in the shaders (`div_`) fixed it.
+- **The CPU fallback works** (`CYBER_GPU=cpu`, or no Vulkan), and so do restarts. With the
+  GPU process made to exit after 4 frames, the page came back after the restart identical to
+  before. Made to exit on every frame, the browser survived 48 restarts and switched to the
+  CPU rasterizer at the fourth start within a minute.
+- **The proofs:** the decoder, 1,263 goals (P1, P5, P7). The coordinator core, re-proved
+  with the GPU's grants and restarts, 4,898 goals. All six cores and the model checks take about an hour from a cold cache.
+- **The escape tests pass:** 11 of 11 checks, none of the attempts got through. The hostile
+  tab now also attacks the GPU process:
+  - 107 frames naming image ids and font slots it never uploaded (dropped: another tab's
+    namespace is out of reach);
+  - lying counts, extreme coordinates, 2,000 unbalanced mask brackets, masks of no kind;
+  - uploads past the end of an atlas, and 1.5 GB of images (past 1 GB, dropped);
+  - broken framing, and scribbling on the draw channel's shared memory.
+
+  The GPU process kept drawing for it, and sent it nothing but "drawn".
+- **Memory,** with a blank tab and the Wikipedia replay loaded:
+  - a blank tab is 45.8 MB private, down from 48.5: it no longer rasterizes;
+  - the GPU process is 298 MB private. That is the driver, and two copies of each tab's
+    resources: textures, and CPU copies for the fallback rasterizer. Dropping the CPU copies
+    when Vulkan works would save most of the second.
+- **Tests:**
+  - `proc_tests`: 122 checks, the decoder's among them.
+  - The unit tests and the JIT tests pass.
+  - The replays load as before: Wikipedia 42,608 DOM nodes, the YouTube watch page 7,471.
+- **Not covered yet:**
+  - The UI's own interface is still GDI, in the UI process; only page content goes through
+    the GPU process.
+  - Tiles, layers and compositor scrolling wait for M6.
+  - No WebGL or WebGPU (M8).
+  - The Vulkan rasterizer waits for each frame (one command buffer). Overlapping a frame's
+    drawing with the next one's recording is a later optimization.
+
 **Not in M1** (later milestones, or not yet planned):
 - Typing into the page (forms, text fields).
 - `scroll` events and `window.scrollY` for the page.
@@ -1218,7 +1333,8 @@ coordinator, storage, network and GPU processes must stay up.
 - **Undocumented corners of the Windows sandbox.** Each is checked with a small spike before
   the milestone that needs it. M3 settled two: AppContainers need registered profiles (one
   per tab process, section 6.1), and win32k lockdown works with our runtime libraries once
-  they are linked statically. Swap chains on another process's windows remain, for M5.
+  they are linked statically. M5 settled the third: a swap chain on another process's window
+  needs both processes in one AppContainer (section 5.7.1).
 - **An interactive UI is new.** Windows, a tab strip, an address bar, and turning mouse and
   keyboard input into DOM events, scrolling and focus are needed for M1 and don't exist yet.
 

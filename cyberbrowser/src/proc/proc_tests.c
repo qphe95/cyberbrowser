@@ -1,5 +1,6 @@
 /* proc_tests.c - tests of the multi-process browser's pure parts: sites,
- * the storage service's rules, the coordinator's and the relay's cores.
+ * the storage service's rules, the coordinator's and the relay's cores, the
+ * GPU process's decoder.
  *   proc_tests.exe        prints failures, exits 1 if any */
 #include <stdio.h>
 #include <string.h>
@@ -8,6 +9,7 @@
 #include "store_core.h"
 #include "coord_core.h"
 #include "loop_core.h"
+#include "gpu_decode.h"
 
 static int g_fail, g_run;
 
@@ -231,11 +233,70 @@ static void test_loop(void) {
     CHECK(!loop_want_read(&g_ls, slot));
 }
 
+/* A TG_FRAME of the given records (counts as given, or the true ones). */
+static uint8_t g_msg[1 << 20];
+static uint32_t frame_msg(const WireCmd *c, uint32_t n, const WireMask *m, uint32_t nm) {
+    GpuFrame f = { 1, 800, 600, n, nm };
+    memcpy(g_msg, &f, sizeof(f));
+    memcpy(g_msg + sizeof(f), c, n * sizeof(WireCmd));
+    memcpy(g_msg + sizeof(f) + n * sizeof(WireCmd), m, nm * sizeof(WireMask));
+    return (uint32_t)(sizeof(f) + n * sizeof(WireCmd) + nm * sizeof(WireMask));
+}
+
+static void test_gpu_decode(void) {
+    static GpuClientRes res;
+    static WireCmd in[300], out[400];
+    static uint8_t levels[400];
+    static WireMask masks[4], mout[4];
+    GpuFrame f;
+    uint32_t n, nm;
+    memset(&res, 0, sizeof(res));
+    res.font[3] = 1;
+    res.image[9] = 1;
+    memset(in, 0, sizeof(in));
+    /* Only what this tab uploaded resolves. */
+    in[0].type = WIRE_GLYPH; in[0].ref = 3;
+    in[1].type = WIRE_GLYPH; in[1].ref = 4;             /* another tab's slot */
+    in[2].type = WIRE_IMAGE; in[2].ref = 9;
+    in[3].type = WIRE_IMAGE; in[3].ref = 10;            /* another tab's image */
+    in[4].type = WIRE_IMAGE; in[4].ref = 0xffffffffu;
+    in[5].type = 99;                                    /* no such record */
+    in[6].type = WIRE_RECT; in[6].x = (int32_t)0x80000000; in[6].w = 0x7fffffff; in[6].u0 = 0xffffffffu;
+    uint32_t len = frame_msg(in, 7, NULL, 0);
+    CHECK(gpu_decode(g_msg, len, &res, &f, out, levels, 400, &n, mout, 4, &nm));
+    CHECK(n == 3 && out[0].type == WIRE_GLYPH && out[1].type == WIRE_IMAGE && out[1].ref == 9 && out[2].type == WIRE_RECT);
+    CHECK(out[2].x == -GPU_COORD_MAX && out[2].w == GPU_COORD_MAX && out[2].u0 == WIRE_UV_ONE);
+    /* Lengths that lie are refused whole. */
+    CHECK(!gpu_decode(g_msg, len - 1, &res, &f, out, levels, 400, &n, mout, 4, &nm));
+    ((GpuFrame *)g_msg)->ncmds = 0xffffffffu;
+    CHECK(!gpu_decode(g_msg, len, &res, &f, out, levels, 400, &n, mout, 4, &nm));
+    /* Brackets: balanced, at most GPU_MAX_DEPTH deep, a mask of a good kind. */
+    memset(masks, 0, sizeof(masks));
+    masks[0].kind = 3;
+    masks[1].kind = 77;                                 /* no such kind */
+    for (int i = 0; i < 200; i++) { in[i].type = WIRE_MASK_BEGIN; in[i].ref = 0; }
+    in[200].type = WIRE_MASK_BEGIN; in[200].ref = 1;
+    in[201].type = WIRE_MASK_END;
+    len = frame_msg(in, 202, masks, 2);
+    CHECK(gpu_decode(g_msg, len, &res, &f, out, levels, 400, &n, mout, 4, &nm));
+    int depth = 0, max = 0, bad = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        depth += out[i].type == WIRE_MASK_BEGIN ? 1 : out[i].type == WIRE_MASK_END ? -1 : 0;
+        if (depth < 0 || levels[i] != depth) bad++;
+        if (depth > max) max = depth;
+    }
+    CHECK(bad == 0 && depth == 0 && max == GPU_MAX_DEPTH && mout[1].kind == 0);
+    in[0].type = WIRE_MASK_END;                         /* closes of nothing */
+    len = frame_msg(in, 1, NULL, 0);
+    CHECK(gpu_decode(g_msg, len, &res, &f, out, levels, 400, &n, mout, 4, &nm) && n == 0);
+}
+
 int main(void) {
     test_sites();
     test_store();
     test_coord();
     test_loop();
+    test_gpu_decode();
     printf("%d checks, %d failed\n", g_run, g_fail);
     return g_fail ? 1 : 0;
 }

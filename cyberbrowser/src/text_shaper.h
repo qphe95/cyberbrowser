@@ -40,6 +40,11 @@ void        text_shaper_destroy(TextShaper *shaper);
 const uint8_t *text_shaper_atlas_pixels(const TextShaper *shaper);
 int            text_shaper_atlas_width(const TextShaper *shaper);
 int            text_shaper_atlas_height(const TextShaper *shaper);
+/* Rows 0 .. used - 1 hold every glyph drawn so far. */
+int            text_shaper_atlas_used_rows(const TextShaper *shaper);
+/* The rows [y0, y1) drawn into since the last call (false: none): what a
+ * copy of the atlas elsewhere (the GPU process's) needs again. */
+bool           text_shaper_atlas_take_dirty(TextShaper *shaper, int *y0, int *y1);
 
 /* Vertical metrics as fractions of the em (descent positive). */
 bool text_shaper_vmetrics(const TextShaper *shaper, float *ascent, float *descent,

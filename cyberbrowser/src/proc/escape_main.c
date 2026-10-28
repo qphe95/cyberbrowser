@@ -42,10 +42,11 @@
 #include "proto.h"
 #include "spawn.h"
 #include "site.h"
+#include "gpu_wire.h"
 
 static int g_attempts, g_escaped, g_failed;
-static Chan g_ui, g_net, g_store;
-static bool g_have_store;
+static Chan g_ui, g_net, g_store, g_gpu;
+static bool g_have_store, g_have_gpu;
 static uint32_t g_tab;
 static char g_url[PROTO_URL_MAX + 1];
 static char g_site[SITE_MAX];
@@ -666,7 +667,7 @@ static void fuzz_requests(Chan *c, const char *name, int n, uint16_t first, uint
 static void fuzz_ui(void) {
     TuFrame f = { 1, 7, SURFACE_MAX_W + 1, SURFACE_MAX_H * 4, 0xffffffffu, 0xffffffffu };
     chan_send(&g_ui, TU_FRAME, &f, sizeof(f), 100);
-    f.buffer = 1; f.width = 0xffffffffu; f.height = 1;
+    f.unused = 1; f.width = 0xffffffffu; f.height = 1;
     chan_send(&g_ui, TU_FRAME, &f, sizeof(f), 100);
     chan_send(&g_ui, TU_FRAME, &f, 3, 100);
     static char title[CHAN_MSG_MAX];
@@ -700,6 +701,143 @@ static void scribble(HANDLE section, const char *name) {
     fflush(stdout);
 }
 
+/* ---- the GPU process ------------------------------------------------------------------- */
+
+/* A TG_FRAME of n records like c (and nm masks like m), its header's counts
+ * as given (they may lie). */
+static bool gpu_frame(uint32_t frame, uint32_t ncmds, uint32_t nmasks, const WireCmd *c, uint32_t n,
+                      const WireMask *m, uint32_t nm) {
+    size_t bytes = sizeof(GpuFrame) + (size_t)n * sizeof(WireCmd) + (size_t)nm * sizeof(WireMask);
+    uint8_t *buf = (uint8_t *)malloc(bytes);
+    if (!buf) return false;
+    GpuFrame f = { frame, 800, 600, ncmds, nmasks };
+    memcpy(buf, &f, sizeof(f));
+    for (uint32_t i = 0; i < n; i++) memcpy(buf + sizeof(f) + i * sizeof(WireCmd), c, sizeof(WireCmd));
+    for (uint32_t i = 0; i < nm; i++)
+        memcpy(buf + sizeof(f) + n * sizeof(WireCmd) + i * sizeof(WireMask), m, sizeof(WireMask));
+    bool ok = big_send(&g_gpu, TG_FRAME, buf, (uint32_t)bytes, NULL, 0, NULL, 0, 2000);
+    free(buf);
+    return ok;
+}
+
+/* Wait for GT_FRAME_DONE of `frame`; false if anything else comes back, or
+ * nothing within ms. */
+static bool gpu_done(uint32_t frame, DWORD ms, bool *other) {
+    static BigRx rx;
+    DWORD start = GetTickCount();
+    while (GetTickCount() - start < ms) {
+        int r = big_recv(&g_gpu, &rx);
+        if (r < 0) return false;
+        if (r == 0) {
+            chan_wait(&g_gpu, 20);
+            continue;
+        }
+        if (rx.type != GT_FRAME_DONE || rx.total != sizeof(GtFrameDone)) {
+            *other = true;
+            continue;
+        }
+        GtFrameDone d;
+        memcpy(&d, rx.buf, sizeof(d));
+        if (d.frame == frame) return true;
+    }
+    return false;
+}
+
+/* The GPU process draws every tab's content; a tab may name only what it
+ * uploaded itself, and nothing comes back but "drawn". */
+static void gpu(void) {
+    if (!g_have_gpu) {
+        printf("[escape] FAILED: no GPU channel\n");
+        g_failed++;
+        return;
+    }
+    bool other = false;
+    WireCmd c;
+    memset(&c, 0, sizeof(c));
+    c.w = c.h = 100 * WIRE_UNIT;
+    c.a = 65535;
+    WireMask m;
+    memset(&m, 0, sizeof(m));
+    uint32_t frame = 1000;
+    /* Other tabs' images and font slots: never uploaded here. */
+    c.type = WIRE_IMAGE;
+    int drawn = 0;
+    for (uint32_t id = 0; id < 64; id++) {
+        c.ref = id;
+        if (gpu_frame(++frame, 1, 0, &c, 1, NULL, 0) && gpu_done(frame, 2000, &other)) drawn++;
+    }
+    c.type = WIRE_GLYPH;
+    for (uint32_t slot = 0; slot < 300; slot += 7) {
+        c.ref = slot;
+        if (gpu_frame(++frame, 1, 0, &c, 1, NULL, 0) && gpu_done(frame, 2000, &other)) drawn++;
+    }
+    printf("[escape] note sent %d frames naming other tabs' image ids and font slots: the GPU process looks them up in this tab's namespace only (the proofs, P5)\n", drawn);
+    /* Lying counts, extreme numbers, brackets that don't balance, masks of
+     * no kind, stops past the end. */
+    c.type = WIRE_RECT;
+    c.x = c.y = (int32_t)0x80000000;
+    c.w = c.h = 0x7fffffff;
+    c.u0 = c.v1 = 0xffffffffu;
+    gpu_frame(++frame, 1000000, 0, &c, 1, NULL, 0);          /* says a million, sends one */
+    gpu_frame(++frame, 0xffffffffu, 0xffffffffu, &c, 1, NULL, 0);
+    gpu_frame(++frame, 1, 0, &c, 1, NULL, 0);
+    gpu_done(frame, 2000, &other);
+    c.type = WIRE_MASK_BEGIN;
+    c.ref = 0;
+    m.kind = 77;
+    m.nstops = 0xffffffffu;
+    m.image = 5;
+    gpu_frame(++frame, 2000, 1, &c, 2000, &m, 1);            /* 2000 opens, a mask of no kind */
+    gpu_done(frame, 5000, &other);
+    m.kind = 2;
+    gpu_frame(++frame, 2000, 1, &c, 2000, &m, 1);            /* 2000 opens of a good mask */
+    gpu_done(frame, 5000, &other);
+    c.type = WIRE_MASK_END;
+    gpu_frame(++frame, 500, 0, &c, 500, NULL, 0);            /* closes of nothing */
+    gpu_done(frame, 2000, &other);
+    c.type = WIRE_SHADOW;
+    c.ref = 0xfffffff0u;
+    gpu_frame(++frame, 10, 1, &c, 10, &m, 1);
+    gpu_done(frame, 2000, &other);
+    /* Uploads that lie: a slot past the end, rows past the atlas, a size
+     * that doesn't match the bytes, and more images than a tab may keep. */
+    static uint8_t junk[1 << 16];
+    for (size_t i = 0; i < sizeof(junk); i++) junk[i] = (uint8_t)rnd();
+    TgAtlas a = { 300, 1024, 1024, 0, 1 };
+    big_send(&g_gpu, TG_ATLAS, &a, sizeof(a), junk, 1024, NULL, 0, 2000);
+    a.slot = 3;
+    a.y0 = 1023;
+    a.rows = 50;
+    big_send(&g_gpu, TG_ATLAS, &a, sizeof(a), junk, 50 * 1024, NULL, 0, 2000);
+    TgImage t = { 99999, 16384, 16384 };
+    big_send(&g_gpu, TG_IMAGE, &t, sizeof(t), junk, sizeof(junk), NULL, 0, 2000);
+    t.id = 7;
+    t.width = t.height = 64;
+    big_send(&g_gpu, TG_IMAGE, &t, sizeof(t), junk, 100, NULL, 0, 2000);
+    uint8_t *big = (uint8_t *)malloc(64u << 20);
+    int over = 0;
+    if (big) {
+        memset(big, 0x5a, 64u << 20);
+        TgImage b = { 0, 4096, 4096 };
+        for (uint32_t id = 100; id < 100 + 24; id++) {          /* 1.5 GB asked for, 1 GB allowed */
+            b.id = id;
+            if (big_send(&g_gpu, TG_IMAGE, &b, sizeof(b), big, 64u << 20, NULL, 0, 10000)) over++;
+        }
+        free(big);
+    }
+    printf("[escape] note uploaded %d images of 64 MB: past a tab's 1 GB the GPU process keeps no more\n", over);
+    /* It still draws for us, and never sent anything but "drawn". */
+    c.type = WIRE_RECT;
+    c.x = c.y = 0;
+    c.w = c.h = 10 * WIRE_UNIT;
+    c.ref = 0;
+    c.u0 = c.v1 = 0;
+    bool answers = gpu_frame(++frame, 1, 0, &c, 1, NULL, 0) && gpu_done(frame, 20000, &other);
+    must("the GPU process draws after them", answers);
+    must("the GPU process sends a tab nothing but \"drawn\" (no pixels back)", !other);
+    fflush(stdout);
+}
+
 /* ---- main ---------------------------------------------------------------------------- */
 
 static void unhex(const char *h) {
@@ -714,14 +852,12 @@ static void unhex(const char *h) {
 }
 
 int main(int argc, char **argv) {
-    HANDLE ui[3] = { 0 }, net[3] = { 0 }, st[3] = { 0 }, surface = NULL;
+    HANDLE ui[3] = { 0 }, net[3] = { 0 }, st[3] = { 0 }, gp[3] = { 0 };
     for (int i = 1; i < argc; i++) {
         HANDLE *h = !strcmp(argv[i], "--chan") ? ui : !strcmp(argv[i], "--net") ? net
-                  : !strcmp(argv[i], "--store") ? st : NULL;
+                  : !strcmp(argv[i], "--store") ? st : !strcmp(argv[i], "--gpu") ? gp : NULL;
         if (h && i + 3 < argc) {
             for (int k = 0; k < 3; k++) h[k] = spawn_handle_from_arg(argv[++i]);
-        } else if (!strcmp(argv[i], "--surface") && i + 1 < argc) {
-            surface = spawn_handle_from_arg(argv[++i]);
         } else if (!strcmp(argv[i], "--tab") && i + 1 < argc) {
             g_tab = (uint32_t)atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--url") && i + 1 < argc) {
@@ -733,6 +869,7 @@ int main(int argc, char **argv) {
         return 100;
     }
     g_have_store = st[0] && chan_attach(&g_store, st[0], st[1], st[2], 0);
+    g_have_gpu = gp[0] && chan_attach(&g_gpu, gp[0], gp[1], gp[2], 0);
     char scheme[8], host[SITE_HOST_MAX + 1];
     if (site_url_host((const uint8_t *)g_url, (uint32_t)strlen(g_url), scheme, sizeof(scheme), host, sizeof(host)))
         site_of(scheme, host, g_site);
@@ -748,6 +885,7 @@ int main(int argc, char **argv) {
     memory();
     storage();
     network();
+    gpu();
 
     /* Malformed requests: answered or ignored, never fatal. */
     char got[64];
@@ -766,21 +904,16 @@ int main(int argc, char **argv) {
      * script checks they live on and serve the next tabs. */
     fuzz(&g_store, "storage service", 3000);
     fuzz(&g_net, "network process", 3000);
+    if (g_have_gpu) fuzz(&g_gpu, "GPU process", 3000);
     scribble(st[0], "storage");
     scribble(net[0], "network");
+    if (g_have_gpu) scribble(gp[0], "GPU");
     windows();
     printf("[escape] done: %d attempts, %d escaped, %d failed\n", g_attempts, g_escaped, g_failed);
     fflush(stdout);
 
     /* Last, the UI: it ends a tab that navigates (every navigation gets a
      * new process), so this may be the end of us. */
-    if (surface) {
-        uint8_t *p = (uint8_t *)MapViewOfFile(surface, FILE_MAP_WRITE, 0, 0, SURFACE_HEADER);
-        if (p) {
-            for (int i = 0; i < SURFACE_HEADER; i++) p[i] = (uint8_t)rnd();
-            UnmapViewOfFile(p);
-        }
-    }
     scribble(ui[0], "UI");
     fuzz_ui();
     /* Stay up a while, so the servers deal with the wreckage while we live. */

@@ -18,6 +18,9 @@
  *          can read the system's files but not the user's (an AppContainer
  *          can't reach loopback addresses); win32k disabled.
  *   ui     an AppContainer with win32k, for its windows.
+ *   gpu    the UI's AppContainer (an AppContainer can present into another
+ *          process's window only if both are in the same one), win32k and
+ *          the graphics driver; a job of its own.
  *
  * Every child's process and thread objects carry a medium integrity label,
  * so no sandboxed process (all run at low integrity) can open another. */
@@ -25,7 +28,7 @@
 #include <stdbool.h>
 #include "spawn.h"
 
-typedef enum SandboxKind { SB_TAB, SB_STORE, SB_NET, SB_UI, SB_LOOP } SandboxKind;
+typedef enum SandboxKind { SB_TAB, SB_STORE, SB_NET, SB_UI, SB_LOOP, SB_GPU } SandboxKind;
 
 /* Set up; false if the sandbox is off (CYBER_NO_SANDBOX=1) or couldn't be. */
 bool sandbox_init(void);
@@ -41,8 +44,9 @@ void sandbox_release(SpawnSandbox *sb);
 void sandbox_tab_ended(int slot);
 void sandbox_end(void);
 
-/* Give the storage service (SB_STORE) or the network process (SB_NET)
- * access to `dir` and what it holds: full control if write, else reading. */
+/* Give the storage service (SB_STORE), the network process (SB_NET) or the
+ * UI (SB_UI) access to `dir` and what it holds: full control if write, else
+ * reading. */
 bool sandbox_grant_folder(const wchar_t *dir, SandboxKind kind, bool write);
 
 /* Delete every AppContainer profile the browser registered ("cyberbrowser.*":

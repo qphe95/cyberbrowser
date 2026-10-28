@@ -4,20 +4,22 @@
  *   cb_coord.exe [url ...]      open a window with a tab for each url
  *
  * It starts the network process (cb_net.exe), the storage service
- * (cb_store.exe), the loopback relay (cb_loop.exe) and the UI (cb_ui.exe), and
- * connects the network process to the storage service and to the relay.  It turns the UI's messages and its children's exits
- * into events for the core (coord_core.c), and performs the core's actions:
- * starting a tab process with its channels (to the UI, to the network process
- * and, unless its site is opaque, to the storage service, both badged with
- * the site the core gave it) and its surface; revoking those channels when the
- * tab ends; messaging the UI.  Every child runs in a job that ends with the
+ * (cb_store.exe), the loopback relay (cb_loop.exe), the GPU process
+ * (cb_gpu.exe) and the UI (cb_ui.exe), and connects the network process to
+ * the storage service and to the relay, and the UI to the GPU process.  It
+ * turns the UI's messages and its children's exits into events for the core
+ * (coord_core.c), and performs the core's actions: starting a tab process with
+ * its channels (to the UI, to the network process, to the GPU process and,
+ * unless its site is opaque, to the storage service, badged with the site the
+ * core gave it); revoking them when the tab ends; messaging the UI.  Every child runs in a job that ends with the
  * coordinator, and in the sandbox for its kind (sandbox.c).  Each child's
  * output goes to logs\<name>.log next to the executables.
  *
  *   cb_coord.exe --remove-profiles   delete the sandbox's AppContainer profiles
  *
- * CYBER_NO_SANDBOX=1 starts the children unconfined; CYBER_UI_SCRIPT (tests
- * drive the UI and save screenshots) leaves the UI unconfined.
+ * CYBER_NO_SANDBOX=1 starts the children unconfined.  CYBER_UI_SCRIPT (tests
+ * drive the UI and save screenshots) gives the UI's AppContainer access to the
+ * script's folder, where the screenshots go too.
  * CYBER_TAB_EXE=cb_escape.exe starts the escape tests in place of the tabs
  * of URLs that end in "#escape". */
 #include <stdio.h>
@@ -40,8 +42,10 @@ typedef struct Child {
 } Child;
 
 static HANDLE g_job;
-static Child g_ui, g_net, g_store, g_loop;
+static Child g_ui, g_net, g_store, g_loop, g_gpu;
 static HANDLE g_tab_proc[COORD_MAX_TABS];
+static Chan g_tab_ctl[COORD_MAX_TABS];  /* to each tab, one way (side 0: the coordinator) */
+static DWORD g_gpu_starts[3];           /* when the last GPU processes started */
 static CoordState g_state;
 static CoordActions g_actions;          /* large: kept off the stack */
 static wchar_t g_root[MAX_PATH];        /* browser_data\sites */
@@ -123,19 +127,22 @@ static void revoke(Child *server, uint32_t client) {
 }
 
 static bool start_tab(const CoordAction *a) {
-    Chan ui, net, store;
+    Chan ui, net, store, draw, ctl;
     bool have_store = a->grant_store;       /* the core: not for an opaque site */
     memset(&store, 0, sizeof(store));
-    if (!chan_create(&ui, 1u << 18)) return false;
+    if (!chan_create(&ctl, 1u << 16)) return false;
+    if (!chan_create(&ui, 1u << 18)) { chan_close(&ctl); return false; }
     if (!chan_create(&net, 1u << 20)) { chan_close(&ui); return false; }
-    if (have_store && !chan_create(&store, 1u << 18)) { chan_close(&ui); chan_close(&net); return false; }
-    HANDLE surface = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
-                                        (DWORD)(SURFACE_BYTES >> 32), (DWORD)SURFACE_BYTES, NULL);
+    if (!chan_create(&draw, 1u << 22)) { chan_close(&ui); chan_close(&net); return false; }
+    if (have_store && !chan_create(&store, 1u << 18)) {
+        chan_close(&ui); chan_close(&net); chan_close(&draw);
+        return false;
+    }
     char name[32];
     snprintf(name, sizeof(name), "tab-%u", a->tab);
     HANDLE log = open_log(name);
     bool ok = false;
-    if (surface) {
+    {
         static char args[PROTO_URL_MAX * 2 + 512];
         char url_hex[PROTO_URL_MAX * 2 + 1], store_arg[80] = "";
         hex(url_hex, a->data, a->len);
@@ -143,12 +150,16 @@ static bool start_tab(const CoordAction *a) {
             snprintf(store_arg, sizeof(store_arg), " --store %llu %llu %llu", spawn_handle_arg(store.section),
                      spawn_handle_arg(store.ev[0]), spawn_handle_arg(store.ev[1]));
         snprintf(args, sizeof(args),
-                 "--chan %llu %llu %llu --net %llu %llu %llu%s --surface %llu --size %u %u --tab %u --url %s",
+                 "--chan %llu %llu %llu --ctl %llu %llu %llu --net %llu %llu %llu%s --gpu %llu %llu %llu "
+                 "--size %u %u --tab %u --url %s",
                  spawn_handle_arg(ui.section), spawn_handle_arg(ui.ev[0]), spawn_handle_arg(ui.ev[1]),
+                 spawn_handle_arg(ctl.section), spawn_handle_arg(ctl.ev[0]), spawn_handle_arg(ctl.ev[1]),
                  spawn_handle_arg(net.section), spawn_handle_arg(net.ev[0]), spawn_handle_arg(net.ev[1]),
-                 store_arg, spawn_handle_arg(surface), a->width, a->height, a->tab, url_hex);
-        HANDLE inh[10] = { ui.section, ui.ev[0], ui.ev[1], net.section, net.ev[0], net.ev[1], surface };
-        int ninh = 7;
+                 store_arg, spawn_handle_arg(draw.section), spawn_handle_arg(draw.ev[0]),
+                 spawn_handle_arg(draw.ev[1]), a->width, a->height, a->tab, url_hex);
+        HANDLE inh[15] = { ui.section, ui.ev[0], ui.ev[1], net.section, net.ev[0], net.ev[1],
+                           draw.section, draw.ev[0], draw.ev[1], ctl.section, ctl.ev[0], ctl.ev[1] };
+        int ninh = 12;
         if (have_store) {
             inh[ninh++] = store.section;
             inh[ninh++] = store.ev[0];
@@ -173,28 +184,29 @@ static bool start_tab(const CoordAction *a) {
         if (proc) {
             /* The servers first: the tab may already be asking. */
             bool granted = a->grant_net && grant(&g_net, &net, a->tab, GRANT_TAB, a->site) &&
-                           (!have_store || grant(&g_store, &store, a->tab, GRANT_TAB, a->site));
+                           (!have_store || grant(&g_store, &store, a->tab, GRANT_TAB, a->site)) &&
+                           a->grant_gpu && grant(&g_gpu, &draw, a->tab, GRANT_TAB, a->site);
             CuTabStarted m;
             memset(&m, 0, sizeof(m));
             m.tab = a->tab;
             HANDLE hs = dup_to(g_ui.proc, ui.section, 0, true), h0 = dup_to(g_ui.proc, ui.ev[0], 0, true),
-                   h1 = dup_to(g_ui.proc, ui.ev[1], 0, true),
-                   hsurf = dup_to(g_ui.proc, surface, FILE_MAP_READ, false);
+                   h1 = dup_to(g_ui.proc, ui.ev[1], 0, true);
             m.chan_section = spawn_handle_arg(hs);
             m.chan_ev0 = spawn_handle_arg(h0);
             m.chan_ev1 = spawn_handle_arg(h1);
-            m.surface = spawn_handle_arg(hsurf);
-            m.surface_bytes = SURFACE_BYTES;
-            if (granted && hs && h0 && h1 && hsurf && chan_send(&g_ui.ctl, CU_TAB_STARTED, &m, sizeof(m), 1000)) {
+            if (granted && hs && h0 && h1 && chan_send(&g_ui.ctl, CU_TAB_STARTED, &m, sizeof(m), 1000)) {
                 g_tab_proc[a->slot] = proc;
+                if (g_tab_ctl[a->slot].sh) chan_close(&g_tab_ctl[a->slot]);
+                g_tab_ctl[a->slot] = ctl;
+                memset(&ctl, 0, sizeof(ctl));
                 ok = true;
             } else {
                 close_in(g_ui.proc, hs);
                 close_in(g_ui.proc, h0);
                 close_in(g_ui.proc, h1);
-                close_in(g_ui.proc, hsurf);
                 revoke(&g_net, a->tab);
                 revoke(&g_store, a->tab);
+                revoke(&g_gpu, a->tab);
                 TerminateProcess(proc, 1);
                 WaitForSingleObject(proc, 1000);
                 CloseHandle(proc);
@@ -203,12 +215,74 @@ static bool start_tab(const CoordAction *a) {
         }
     }
     /* The children have their own handles now. */
+    if (ctl.sh) chan_close(&ctl);
     chan_close(&ui);
     chan_close(&net);
+    chan_close(&draw);
     if (have_store) chan_close(&store);
-    if (surface) CloseHandle(surface);
     if (log != INVALID_HANDLE_VALUE) CloseHandle(log);
     return ok;
+}
+
+/* Give the UI a channel to the GPU process. */
+static bool connect_ui_gpu(void) {
+    Chan ch;
+    if (!chan_create(&ch, 1u << 22)) return false;
+    bool ok = false;
+    if (grant(&g_gpu, &ch, 0, GRANT_UI, NULL)) {
+        HANDLE s = dup_to(g_ui.proc, ch.section, 0, true), e0 = dup_to(g_ui.proc, ch.ev[0], 0, true),
+               e1 = dup_to(g_ui.proc, ch.ev[1], 0, true);
+        CuGpu m = { spawn_handle_arg(s), spawn_handle_arg(e0), spawn_handle_arg(e1) };
+        ok = s && e0 && e1 && chan_send(&g_ui.ctl, CU_GPU, &m, sizeof(m), 1000);
+        if (!ok) {
+            close_in(g_ui.proc, s);
+            close_in(g_ui.proc, e0);
+            close_in(g_ui.proc, e1);
+        }
+    }
+    chan_close(&ch);
+    return ok;
+}
+
+/* A GPU process again (CA_RESTART_GPU).  After three starts within a
+ * minute the next uses the CPU rasterizer: a driver that keeps crashing it
+ * shouldn't take the pages with it. */
+static void restart_gpu(void) {
+    if (g_gpu.proc) CloseHandle(g_gpu.proc);
+    chan_close(&g_gpu.ctl);
+    memset(&g_gpu, 0, sizeof(g_gpu));
+    DWORD now = GetTickCount();
+    static bool on_cpu;
+    if (!on_cpu && g_gpu_starts[0] && now - g_gpu_starts[0] < 60000) {
+        on_cpu = true;
+        fprintf(stderr, "cb_coord: the GPU process keeps ending: drawing on the CPU from now on\n");
+        SetEnvironmentVariableW(L"CYBER_GPU", L"cpu");
+    }
+    memmove(g_gpu_starts, g_gpu_starts + 1, sizeof(g_gpu_starts) - sizeof(DWORD));
+    g_gpu_starts[2] = now;
+    if (!start_child(&g_gpu, L"cb_gpu.exe", "gpu", NULL, DETACHED_PROCESS, SB_GPU) || !connect_ui_gpu())
+        fprintf(stderr, "cb_coord: could not start the GPU process again\n");
+}
+
+/* A tab's draw channel to the new GPU process (CA_REGRANT_GPU): granted to
+ * the GPU process with the tab's badge, and sent to the tab. */
+static void regrant_gpu(const CoordAction *a) {
+    if (a->slot < 0 || a->slot >= COORD_MAX_TABS || !g_tab_proc[a->slot] || !g_gpu.proc) return;
+    Chan draw;
+    if (!chan_create(&draw, 1u << 22)) return;
+    if (grant(&g_gpu, &draw, a->tab, GRANT_TAB, a->site)) {
+        HANDLE p = g_tab_proc[a->slot];
+        HANDLE s = dup_to(p, draw.section, 0, true), e0 = dup_to(p, draw.ev[0], 0, true),
+               e1 = dup_to(p, draw.ev[1], 0, true);
+        CtGpu m = { spawn_handle_arg(s), spawn_handle_arg(e0), spawn_handle_arg(e1) };
+        if (!s || !e0 || !e1 || !chan_send(&g_tab_ctl[a->slot], CT_GPU, &m, sizeof(m), 1000)) {
+            close_in(p, s);
+            close_in(p, e0);
+            close_in(p, e1);
+            revoke(&g_gpu, a->tab);
+        }
+    }
+    chan_close(&draw);
 }
 
 /* Ask a server to save what is pending and exit; wait a while for it. */
@@ -236,9 +310,17 @@ static void perform(const CoordAction *a) {
         if (a->slot >= 0 && a->slot < COORD_MAX_TABS && g_tab_proc[a->slot])
             TerminateProcess(g_tab_proc[a->slot], 0);
         break;
+    case CA_RESTART_GPU:
+        restart_gpu();
+        break;
+    case CA_REGRANT_GPU:
+        regrant_gpu(a);
+        break;
     case CA_TAB_GONE:
+        if (a->slot >= 0 && a->slot < COORD_MAX_TABS && g_tab_ctl[a->slot].sh) chan_close(&g_tab_ctl[a->slot]);
         revoke(&g_net, a->tab);
         revoke(&g_store, a->tab);
+        revoke(&g_gpu, a->tab);
         break;
     case CA_SEND_UI:
         chan_send(&g_ui.ctl, a->type, a->data, a->len, 1000);
@@ -249,6 +331,7 @@ static void perform(const CoordAction *a) {
         quit_server(&g_net, 3000);
         quit_server(&g_store, 2000);
         quit_server(&g_loop, 500);
+        quit_server(&g_gpu, 500);
         /* Their profiles go once the tabs have. */
         for (int i = 0; i < COORD_MAX_TABS; i++)
             if (g_tab_proc[i]) TerminateProcess(g_tab_proc[i], 0);
@@ -271,6 +354,21 @@ static void step(const CoordEvent *e) {
         for (int i = 0; i < g_actions.n; i++) perform(&g_actions.a[i]);
         for (int i = 0; i < g_nresults && n <= COORD_MAX_ACTIONS; i++) queue[n++] = g_results[i];
     }
+}
+
+/* A test script (CYBER_UI_SCRIPT) and its screenshots live in one folder,
+ * which the UI's AppContainer is given. */
+static void script_folder(void) {
+    wchar_t dir[MAX_PATH];
+    DWORD n = GetEnvironmentVariableW(L"CYBER_UI_SCRIPT", dir, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return;
+    for (wchar_t *p = dir; *p; p++)
+        if (*p == L'/') *p = L'\\';
+    wchar_t *slash = wcsrchr(dir, L'\\');
+    if (!slash) return;
+    *slash = 0;
+    if (!sandbox_grant_folder(dir, SB_UI, true))
+        fprintf(stderr, "cb_coord: could not give the UI access to %ls\n", dir);
 }
 
 /* The network process reads the replays (CYBER_REPLAY) and writes
@@ -373,10 +471,13 @@ int main(int argc, char **argv) {
         hex(urls + used, (const uint8_t *)argv[i], (uint32_t)n);
         used += 2 * n;
     }
-    const char *script = getenv("CYBER_UI_SCRIPT");
-    bool test_ui = script && script[0];
-    if (test_ui && sandbox_enabled()) fprintf(stderr, "cb_coord: CYBER_UI_SCRIPT: the UI runs without its sandbox\n");
-    if (!start_child(&g_ui, L"cb_ui.exe", "ui", used ? urls : NULL, 0, test_ui ? -1 : SB_UI)) {
+    /* The GPU process, then the UI it presents into. */
+    if (!start_child(&g_gpu, L"cb_gpu.exe", "gpu", NULL, DETACHED_PROCESS, SB_GPU)) {
+        fprintf(stderr, "cb_coord: could not start cb_gpu.exe\n");
+        return 1;
+    }
+    script_folder();
+    if (!start_child(&g_ui, L"cb_ui.exe", "ui", used ? urls : NULL, 0, SB_UI) || !connect_ui_gpu()) {
         fprintf(stderr, "cb_coord: could not start cb_ui.exe\n");
         return 1;
     }
@@ -385,8 +486,8 @@ int main(int argc, char **argv) {
     static ChanMsg m;
     for (;;) {
         /* Wait for the UI's channel, or a child's exit. */
-        HANDLE waits[5 + COORD_MAX_TABS];
-        int slot_of[5 + COORD_MAX_TABS];
+        HANDLE waits[6 + COORD_MAX_TABS];
+        int slot_of[6 + COORD_MAX_TABS];
         int n = 0;
         bool armed = chan_arm(&g_ui.ctl);
         waits[n] = chan_event(&g_ui.ctl); slot_of[n++] = -1;
@@ -394,6 +495,7 @@ int main(int argc, char **argv) {
         waits[n] = g_net.proc; slot_of[n++] = -3;
         waits[n] = g_store.proc; slot_of[n++] = -3;
         waits[n] = g_loop.proc; slot_of[n++] = -3;
+        if (g_gpu.proc) { waits[n] = g_gpu.proc; slot_of[n++] = -4; }
         for (int i = 0; i < COORD_MAX_TABS; i++)
             if (g_tab_proc[i]) { waits[n] = g_tab_proc[i]; slot_of[n++] = i; }
         DWORD w = armed ? WaitForMultipleObjects((DWORD)n, waits, FALSE, INFINITE) : WAIT_OBJECT_0;
@@ -414,6 +516,12 @@ int main(int argc, char **argv) {
             if (r < 0) { e.kind = CE_UI_EXITED; step(&e); }
         } else if (which == -2) {
             e.kind = CE_UI_EXITED;
+            step(&e);
+        } else if (which == -4) {
+            DWORD gc = 0;
+            GetExitCodeProcess(g_gpu.proc, &gc);
+            fprintf(stderr, "cb_coord: the GPU process ended (%lx): starting another\n", gc);
+            e.kind = CE_GPU_EXITED;
             step(&e);
         } else if (which == -3) {
             DWORD nc = 0, sc = 0;

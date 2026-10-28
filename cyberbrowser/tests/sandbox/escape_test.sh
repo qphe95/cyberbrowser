@@ -10,9 +10,10 @@
 #   - every attempt of the hostile tab was blocked and its checks worked;
 #   - no file was planted in the other site's folder;
 #   - no tab was started for the file: and other non-http URLs it asked for;
-#   - the network process and the storage service survived (the coordinator
-#     reports it if one ends) and still work: the last localhost page's
-#     localStorage counter and cookies carry on from the first;
+#   - the network process, the storage service, the relay and the GPU process
+#     survived (the coordinator reports it if one ends) and still work: the GPU
+#     process drew the next pages (the UI's last screenshot), and the last
+#     localhost page's localStorage counter and cookies carry on from the first;
 #   - the cookie it set for the other site reached none of that site's
 #     requests;
 #   - the UI lived on (its last screenshot was saved);
@@ -89,7 +90,7 @@ check "nothing planted in the other site's folder" $([ ! -e "$sites/$other/escap
 check "no tab for a non-http URL" \
     $(! grep -h -E "^\[tab [0-9]+\] [^ ]+ \([0-9]+x[0-9]+\)$" $tab_logs | grep -v -q "\] http"; echo $?)
 check "the coordinator ended normally" $([ "$coord" = 0 ]; echo $?)
-check "the network process and the storage service lived" $(! grep -q "ended" "$tmp/coord.txt"; echo $?)
+check "the network, storage, relay and GPU processes lived" $(! grep -q "ended" "$tmp/coord.txt"; echo $?)
 pings=$(grep "^localhost:$port GET /ping" "$tmp/requests.log" | sed -n 's/.*fromjs=\([0-9]*\).*/\1/p')
 first=$(echo "$pings" | head -1)
 last=$(echo "$pings" | tail -1)

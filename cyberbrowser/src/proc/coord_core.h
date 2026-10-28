@@ -38,7 +38,8 @@ typedef enum {
     CE_TAB_STARTED,             /* slot: CA_START_TAB succeeded */
     CE_TAB_START_FAILED,        /* slot: it didn't */
     CE_TAB_EXITED,              /* slot, exit_code: its process ended */
-    CE_SERVICE_EXITED,          /* the network process or the storage service ended */
+    CE_SERVICE_EXITED,          /* the network process, the storage service or the relay ended */
+    CE_GPU_EXITED,              /* the GPU process ended: it is started again */
 } CoordEventKind;
 
 typedef struct CoordEvent {
@@ -57,6 +58,8 @@ typedef enum {
     CA_TAB_GONE,                /* slot, tab: revoke its channels to the servers */
     CA_SEND_UI,                 /* type, data (len bytes) */
     CA_EXIT,                    /* end every process and exit */
+    CA_RESTART_GPU,             /* start a GPU process again, and connect the UI to it */
+    CA_REGRANT_GPU,             /* slot, tab, site: a new draw channel for that tab, badged with site */
 } CoordActionKind;
 
 typedef struct CoordAction {
@@ -64,7 +67,7 @@ typedef struct CoordAction {
     int slot;
     uint32_t tab, width, height;
     char site[SITE_MAX];
-    bool grant_net, grant_store;    /* CA_START_TAB */
+    bool grant_net, grant_store, grant_gpu;     /* CA_START_TAB */
     uint16_t type;
     uint32_t len;
     uint8_t data[PROTO_URL_MAX];
@@ -115,10 +118,16 @@ typedef struct CoordActions {
             0 <= a->slot < COORD_MAX_TABS && s->slots[a->slot].state == SLOT_STARTING &&
             s->slots[a->slot].tab == a->tab && badge_ok(&a->site[0]) &&
             (\forall integer k; 0 <= k < SITE_MAX ==> a->site[k] == s->slots[a->slot].site[k]) &&
-            a->grant_net && (a->grant_store <==> a->site[0] != 0) &&
+            a->grant_net && a->grant_gpu && (a->grant_store <==> a->site[0] != 0) &&
             1 <= a->len <= PROTO_URL_MAX && (\forall integer k; 0 <= k < a->len ==> 0x20 < a->data[k] < 0x7f)) &&
         ((a->kind == CA_KILL_TAB || a->kind == CA_TAB_GONE) ==> 0 <= a->slot < COORD_MAX_TABS) &&
-        (a->kind == CA_SEND_UI ==> a->len <= PROTO_URL_MAX);
+        (a->kind == CA_SEND_UI ==> a->len <= PROTO_URL_MAX) &&
+        // A new GPU process: a live tab's draw channel again, badged with its label.
+        (a->kind == CA_REGRANT_GPU ==>
+            0 <= a->slot < COORD_MAX_TABS &&
+            (s->slots[a->slot].state == SLOT_STARTING || s->slots[a->slot].state == SLOT_RUNNING) &&
+            s->slots[a->slot].tab == a->tab && badge_ok(&a->site[0]) &&
+            (\forall integer k; 0 <= k < SITE_MAX ==> a->site[k] == s->slots[a->slot].site[k]));
 
     predicate tab_event(integer kind) =
         kind == CE_TAB_STARTED || kind == CE_TAB_START_FAILED || kind == CE_TAB_EXITED;

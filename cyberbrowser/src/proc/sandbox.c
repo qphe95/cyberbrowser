@@ -31,6 +31,7 @@ static union { ACL acl; char b[512]; } g_tab_dacl[COORD_MAX_TABS];
 #define NET_MEMORY_LIMIT   (2ull << 30)
 #define STORE_MEMORY_LIMIT (512ull << 20)
 #define LOOP_MEMORY_LIMIT  (256ull << 20)
+#define GPU_MEMORY_LIMIT   (8ull << 30)
 
 /* The AppContainer SID of profile `name`, registering the profile the first
  * time: CreateProcess refuses an AppContainer SID with no profile. */
@@ -263,7 +264,8 @@ static HANDLE child_job(SandboxKind kind) {
     lim.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
     lim.BasicLimitInformation.ActiveProcessLimit = 1;
     unsigned long long mem = kind == SB_TAB ? TAB_MEMORY_LIMIT : kind == SB_NET ? NET_MEMORY_LIMIT
-                           : kind == SB_STORE ? STORE_MEMORY_LIMIT : kind == SB_LOOP ? LOOP_MEMORY_LIMIT : 0;
+                           : kind == SB_STORE ? STORE_MEMORY_LIMIT : kind == SB_LOOP ? LOOP_MEMORY_LIMIT
+                           : kind == SB_GPU ? GPU_MEMORY_LIMIT : 0;
     if (mem) {
         lim.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
         lim.ProcessMemoryLimit = (SIZE_T)mem;
@@ -272,8 +274,11 @@ static HANDLE child_job(SandboxKind kind) {
     ui.UIRestrictionsClass = JOB_OBJECT_UILIMIT_DESKTOP | JOB_OBJECT_UILIMIT_DISPLAYSETTINGS |
                              JOB_OBJECT_UILIMIT_EXITWINDOWS | JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS;
     if (kind != SB_UI)
-        ui.UIRestrictionsClass |= JOB_OBJECT_UILIMIT_GLOBALATOMS | JOB_OBJECT_UILIMIT_HANDLES |
-                                  JOB_OBJECT_UILIMIT_READCLIPBOARD | JOB_OBJECT_UILIMIT_WRITECLIPBOARD;
+        ui.UIRestrictionsClass |= JOB_OBJECT_UILIMIT_GLOBALATOMS | JOB_OBJECT_UILIMIT_READCLIPBOARD |
+                                  JOB_OBJECT_UILIMIT_WRITECLIPBOARD;
+    /* The GPU process presents into the UI's window: a USER handle from
+     * outside its job. */
+    if (kind != SB_UI && kind != SB_GPU) ui.UIRestrictionsClass |= JOB_OBJECT_UILIMIT_HANDLES;
     if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &lim, sizeof(lim)) ||
         !SetInformationJobObject(job, JobObjectBasicUIRestrictions, &ui, sizeof(ui))) {
         CloseHandle(job);
@@ -294,7 +299,7 @@ bool sandbox_for(SandboxKind kind, int slot, SpawnSandbox *sb) {
                 PROCESS_CREATION_MITIGATION_POLICY_IMAGE_LOAD_NO_LOW_LABEL_ALWAYS_ON |
                 PROCESS_CREATION_MITIGATION_POLICY_IMAGE_LOAD_PREFER_SYSTEM32_ALWAYS_ON |
                 PROCESS_CREATION_MITIGATION_POLICY_FONT_DISABLE_ALWAYS_ON;
-    if (kind != SB_UI) m |= PROCESS_CREATION_MITIGATION_POLICY_WIN32K_SYSTEM_CALL_DISABLE_ALWAYS_ON;
+    if (kind != SB_UI && kind != SB_GPU) m |= PROCESS_CREATION_MITIGATION_POLICY_WIN32K_SYSTEM_CALL_DISABLE_ALWAYS_ON;
     if (kind == SB_TAB) m |= PROCESS_CREATION_MITIGATION_POLICY_PROHIBIT_DYNAMIC_CODE_ALWAYS_ON;
     sb->mitigations[0] = m;
     /* No child processes: the job allows one process.  (The child process
@@ -326,6 +331,11 @@ bool sandbox_for(SandboxKind kind, int slot, SpawnSandbox *sb) {
         sb->lpac = true;
         break;
     case SB_UI:
+        sb->appcontainer = g_ui_sid;
+        break;
+    case SB_GPU:
+        /* The UI's AppContainer: its windows are the only thing that gives
+         * (presenting into them); its job is its own. */
         sb->appcontainer = g_ui_sid;
         break;
     case SB_NET:
@@ -360,7 +370,7 @@ void sandbox_release(SpawnSandbox *sb) {
 
 bool sandbox_grant_folder(const wchar_t *dir, SandboxKind kind, bool write) {
     if (!g_on) return true;
-    PSID sid = kind == SB_STORE ? g_store_sid : kind == SB_NET ? g_net_sid : NULL;
+    PSID sid = kind == SB_STORE ? g_store_sid : kind == SB_NET ? g_net_sid : kind == SB_UI ? g_ui_sid : NULL;
     if (!sid) return false;
     PACL old = NULL, acl = NULL;
     PSECURITY_DESCRIPTOR sd = NULL;

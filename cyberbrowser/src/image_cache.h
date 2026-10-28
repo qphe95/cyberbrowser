@@ -95,6 +95,11 @@ bool image_cache_get(ImageCache *cache, int handle,
                      int *out_width, int *out_height, int *out_channels,
                      uint8_t **out_pixels);
 
+/* Which pixels image_cache_get would return: a number new for each decode
+ * or replacement (a video frame), 0 while there are none.  A copy of the
+ * pixels taken at generation g is current while this stays g. */
+uint64_t image_cache_generation(ImageCache *cache, int handle);
+
 #ifdef __cplusplus
 }
 #endif

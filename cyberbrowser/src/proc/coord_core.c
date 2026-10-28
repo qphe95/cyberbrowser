@@ -77,7 +77,7 @@ static CoordAction *add(CoordActions *out, CoordActionKind kind) {
     a->slot = -1;
     a->tab = a->width = a->height = 0;
     a->site[0] = 0;
-    a->grant_net = a->grant_store = false;
+    a->grant_net = a->grant_store = a->grant_gpu = false;
     a->type = 0;
     a->len = 0;
     return a;
@@ -200,7 +200,7 @@ static void start_slot(CoordState *s, int i, uint32_t tab, const char *site) {
     assigns *a;
     ensures a->kind == CA_START_TAB && a->slot == slot && a->tab == tab && badge_ok(&a->site[0]);
     ensures \forall integer k; 0 <= k < SITE_MAX ==> a->site[k] == site[k];
-    ensures a->grant_net && (a->grant_store <==> a->site[0] != 0);
+    ensures a->grant_net && a->grant_gpu && (a->grant_store <==> a->site[0] != 0);
     ensures a->len == len && \forall integer k; 0 <= k < len ==> 0x20 < a->data[k] < 0x7f;
  */
 static void fill_start(CoordAction *a, int slot, uint32_t tab, uint32_t w, uint32_t h, const char *site,
@@ -211,9 +211,9 @@ static void fill_start(CoordAction *a, int slot, uint32_t tab, uint32_t w, uint3
     a->width = w;
     a->height = h;
     copy_site(a->site, site);
-    /* The network process for every tab, the storage service unless the
-     * site is opaque. */
-    a->grant_net = true;
+    /* The network and GPU processes for every tab, the storage service
+     * unless the site is opaque. */
+    a->grant_net = a->grant_gpu = true;
     a->grant_store = site[0] != 0;
     a->type = 0;
     a->len = len;
@@ -340,6 +340,52 @@ static void ui_message(CoordState *s, const CoordEvent *e, CoordActions *out) {
     }
 }
 
+/* A live tab's new draw channel, whole. */
+/*@ requires \valid(a) && \valid_read(site + (0 .. SITE_MAX - 1)) && \separated(a, site + (0 .. SITE_MAX - 1));
+    requires badge_ok(site) && 0 <= slot < COORD_MAX_TABS;
+    assigns *a;
+    ensures a->kind == CA_REGRANT_GPU && a->slot == slot && a->tab == tab && badge_ok(&a->site[0]);
+    ensures \forall integer k; 0 <= k < SITE_MAX ==> a->site[k] == site[k];
+ */
+static void fill_regrant(CoordAction *a, int slot, uint32_t tab, const char *site) {
+    a->kind = CA_REGRANT_GPU;
+    a->slot = slot;
+    a->tab = tab;
+    a->width = a->height = 0;
+    a->grant_net = a->grant_store = a->grant_gpu = false;
+    a->type = 0;
+    a->len = 0;
+    copy_site(a->site, site);
+}
+
+/* The GPU process ended: start another, and give every live tab a draw
+ * channel to it, badged with its label.  No slot changes. */
+/*@ requires \valid(s) && \valid(out) && \separated(s, out);
+    requires state_ok(s) && tabs_unique(s) && out->n == 0;
+    assigns out->n, out->a[0 .. COORD_MAX_ACTIONS - 1];
+    ensures 0 <= out->n <= COORD_MAX_ACTIONS;
+    ensures \forall integer k; 0 <= k < out->n ==>
+        out->a[k].kind == CA_RESTART_GPU || (out->a[k].kind == CA_REGRANT_GPU && action_ok(s, &out->a[k]));
+ */
+static void gpu_exited(const CoordState *s, CoordActions *out) {
+    add(out, CA_RESTART_GPU);
+    /*@ loop invariant 0 <= i <= COORD_MAX_TABS && 0 <= out->n <= i + 1 && out->n <= COORD_MAX_ACTIONS;
+        loop invariant \forall integer k; 0 <= k < out->n ==>
+            out->a[k].kind == CA_RESTART_GPU || out->a[k].kind == CA_REGRANT_GPU;
+        loop invariant \forall integer k; 0 <= k < out->n && out->a[k].kind == CA_REGRANT_GPU ==>
+            action_ok(s, &out->a[k]);
+        loop assigns i, out->n, out->a[0 .. COORD_MAX_ACTIONS - 1];
+        loop variant COORD_MAX_TABS - i;
+     */
+    for (int i = 0; i < COORD_MAX_TABS; i++) {
+        if (s->slots[i].state != SLOT_STARTING && s->slots[i].state != SLOT_RUNNING) continue;
+        /*@ assert badge_ok(&s->slots[i].site[0]); */
+        CoordAction *a = add(out, CA_REGRANT_GPU);
+        if (!a) return;
+        fill_regrant(a, i, s->slots[i].tab, s->slots[i].site);
+    }
+}
+
 void coord_step(CoordState *s, const CoordEvent *e, CoordActions *out) {
     out->n = 0;
     if (s->exiting) return;
@@ -351,6 +397,9 @@ void coord_step(CoordState *s, const CoordEvent *e, CoordActions *out) {
     case CE_UI_EXITED:
     case CE_SERVICE_EXITED:
         exit_all(s, out);
+        return;
+    case CE_GPU_EXITED:
+        gpu_exited(s, out);
         return;
     case CE_TAB_STARTED:
         if (slot_ok && s->slots[e->slot].state == SLOT_STARTING) set_state(s, e->slot, SLOT_RUNNING);

@@ -1,17 +1,20 @@
 /* tab_main.c - cb_tab.exe: a tab process (SANDBOX_DESIGN.md section 2.3).
  *
- * Started by the coordinator with its channels to the UI, the network process
- * and (unless its site is opaque) the storage service, its surface, the
+ * Started by the coordinator with its channels to the UI, the network process,
+ * (unless its site is opaque) the storage service and the GPU process, the
  * viewport size and the URL (hex):
- *   cb_tab.exe --chan S E0 E1 --net S E0 E1 [--store S E0 E1] --surface H
- *              --size W H --tab N --url HEX
+ *   cb_tab.exe --chan S E0 E1 --ctl S E0 E1 --net S E0 E1 [--store S E0 E1]
+ *              --gpu S E0 E1 --size W H --tab N --url HEX
+ * --ctl is the coordinator's channel to it, one way: a new draw channel
+ * when the GPU process starts again.
  *
  * It has no network or files of its own: every request and document.cookie
  * goes to the network process, which adds the site's cookies, and
  * localStorage is loaded from and saved to the storage service.
  *
  * It loads the page with the page engine, then runs the page's event loop,
- * paints the visible part of each new frame into its surface, and answers the
+ * sends the visible part of each new frame to the GPU process as a display
+ * list (gpu_client.c), which draws it, and answers the
  * UI's input: resizes, scrolls and clicks.  A click on a link asks the UI to
  * navigate; every navigation gets a new tab process (the engine holds one
  * page per process). */
@@ -32,7 +35,7 @@
 #include "js_quickjs.h"
 #include "det_clock.h"
 #include "page_engine.h"
-#include "raster_cpu.h"
+#include "gpu_client.h"
 #include "http_download.h"
 #include "image_cache.h"
 #include "browser/storage_api.h"
@@ -41,10 +44,11 @@ unsigned long long timer_next_due_ms(void);
 unsigned long long page_time_ms(void);
 
 static Chan g_chan;                     /* side 1: the tab */
-static uint8_t *g_surface;
+static Chan g_ctl;                      /* side 1: from the coordinator */
+static bool g_have_ctl;
 static uint32_t g_tab, g_width, g_height;
 static uint32_t g_scroll, g_content_height;
-static uint32_t g_frame_no, g_buffer;
+static uint32_t g_frame_no;
 static bool g_in_flight, g_need_paint;
 static char g_title[PROTO_TITLE_MAX];
 
@@ -115,32 +119,21 @@ static void shift_frame(const DisplayList *dl, float dy) {
     g_shifted.mask_capacity = g_shifted_mask_cap;
 }
 
+/* The visible part of the frame to the GPU process, which draws it into
+ * this tab's content; the next goes when it has (GT_FRAME_DONE).  The UI
+ * hears the frame's size and scroll position. */
 static void paint(void) {
     PageFrame *f = page_frame();
     if (!f->valid) return;
-    static uint8_t *rgb;
-    static size_t rgb_bytes;
-    size_t need = (size_t)g_width * g_height * 3;
-    if (rgb_bytes < need) {
-        free(rgb);
-        rgb = (uint8_t *)malloc(need);
-        rgb_bytes = rgb ? need : 0;
-        if (!rgb) return;
-    }
     clamp_scroll();
     shift_frame(&f->dl, (float)g_scroll);
-    raster_display_list(&g_shifted, rgb, (int)g_width, (int)g_height);
-    uint8_t *out = g_surface + SURFACE_HEADER + (size_t)g_buffer * SURFACE_BUFFER_BYTES;
-    const uint8_t *in = rgb;
-    for (size_t i = 0, n = (size_t)g_width * g_height; i < n; i++, in += 3, out += 4) {
-        out[0] = in[2];
-        out[1] = in[1];
-        out[2] = in[0];
-        out[3] = 255;
+    if (!gpu_client_send(&g_shifted, ++g_frame_no, g_width, g_height)) {
+        fprintf(stderr, "[tab %u] the GPU process isn't answering\n", g_tab);
+        g_need_paint = false;
+        return;
     }
-    TuFrame fr = { ++g_frame_no, g_buffer, g_width, g_height, g_scroll, g_content_height };
+    TuFrame fr = { g_frame_no, 0, g_width, g_height, g_scroll, g_content_height };
     chan_send(&g_chan, TU_FRAME, &fr, sizeof(fr), 1000);
-    g_buffer ^= 1;
     g_in_flight = true;
     g_need_paint = false;
 }
@@ -228,13 +221,6 @@ static void handle(const ChanMsg *m) {
         click(p.x, p.y);
         return;
     }
-    case UT_FRAME_DONE: {
-        if (m->len != sizeof(UtFrameDone)) return;
-        UtFrameDone d;
-        memcpy(&d, m->data, sizeof(d));
-        if (d.frame == g_frame_no) g_in_flight = false;
-        return;
-    }
     }
 }
 
@@ -247,7 +233,38 @@ static bool drain(void) {
         any = true;
     }
     if (r < 0) ExitProcess(2);          /* the UI broke the channel */
+    while (g_have_ctl && (r = chan_recv(&g_ctl, &m)) > 0) {
+        if (m.type != CT_GPU || m.len != sizeof(CtGpu)) continue;
+        CtGpu g;
+        memcpy(&g, m.data, sizeof(g));
+        /* A new GPU process: everything goes again, and a frame now. */
+        if (gpu_client_attach((HANDLE)(uintptr_t)g.chan_section, (HANDLE)(uintptr_t)g.chan_ev0,
+                              (HANDLE)(uintptr_t)g.chan_ev1)) {
+            fprintf(stderr, "[tab %u] drawing with a new GPU process\n", g_tab);
+            g_in_flight = false;
+            g_need_paint = true;
+        }
+        any = true;
+    }
+    uint32_t done;
+    int g;
+    while ((g = gpu_client_poll(&done)) > 0) {
+        if (done == g_frame_no) g_in_flight = false;
+        any = true;
+    }
+    if (g < 0) g_in_flight = false;     /* no GPU process: nothing to wait for */
     return any;
+}
+
+/* Sleep until the UI or the GPU process sends something, at most ms. */
+static void wait_input(DWORD ms) {
+    bool ready = !chan_arm(&g_chan) | !gpu_client_arm();
+    if (g_have_ctl && !chan_arm(&g_ctl)) ready = true;
+    HANDLE w[3] = { chan_event(&g_chan), gpu_client_event(), g_have_ctl ? chan_event(&g_ctl) : NULL };
+    if (!ready) WaitForMultipleObjects(g_have_ctl ? 3 : 2, w, FALSE, ms);
+    chan_disarm(&g_chan);
+    gpu_client_disarm();
+    if (g_have_ctl) chan_disarm(&g_ctl);
 }
 
 /* ---- the network process ------------------------------------------------- */
@@ -496,19 +513,18 @@ static char *unhex(const char *s) {
 
 int main(int argc, char **argv) {
     det_clock_set_js_thread();
-    HANDLE sec = NULL, e0 = NULL, e1 = NULL, surface = NULL;
-    HANDLE net[3] = { 0 }, store[3] = { 0 };
+    HANDLE sec = NULL, e0 = NULL, e1 = NULL;
+    HANDLE net[3] = { 0 }, store[3] = { 0 }, gpu[3] = { 0 }, ctl[3] = { 0 };
     const char *url_hex = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--chan") && i + 3 < argc) {
             sec = spawn_handle_from_arg(argv[++i]);
             e0 = spawn_handle_from_arg(argv[++i]);
             e1 = spawn_handle_from_arg(argv[++i]);
-        } else if ((!strcmp(argv[i], "--net") || !strcmp(argv[i], "--store")) && i + 3 < argc) {
-            HANDLE *h = argv[i][2] == 'n' ? net : store;
+        } else if ((!strcmp(argv[i], "--net") || !strcmp(argv[i], "--store") || !strcmp(argv[i], "--gpu") ||
+                    !strcmp(argv[i], "--ctl")) && i + 3 < argc) {
+            HANDLE *h = argv[i][2] == 'n' ? net : argv[i][2] == 's' ? store : argv[i][2] == 'g' ? gpu : ctl;
             for (int k = 0; k < 3; k++) h[k] = spawn_handle_from_arg(argv[++i]);
-        } else if (!strcmp(argv[i], "--surface") && i + 1 < argc) {
-            surface = spawn_handle_from_arg(argv[++i]);
         } else if (!strcmp(argv[i], "--size") && i + 2 < argc) {
             g_width = (uint32_t)atoi(argv[++i]);
             g_height = (uint32_t)atoi(argv[++i]);
@@ -518,14 +534,14 @@ int main(int argc, char **argv) {
             url_hex = argv[++i];
         }
     }
-    if (!sec || !net[0] || !surface || !url_hex || g_width == 0 || g_height == 0 ||
+    if (!sec || !net[0] || !gpu[0] || !url_hex || g_width == 0 || g_height == 0 ||
         g_width > SURFACE_MAX_W || g_height > SURFACE_MAX_H) {
         fprintf(stderr, "cb_tab: bad arguments\n");
         return 1;
     }
     if (!chan_attach(&g_chan, sec, e0, e1, 1)) { fprintf(stderr, "cb_tab: no channel\n"); return 1; }
-    g_surface = (uint8_t *)MapViewOfFile(surface, FILE_MAP_WRITE, 0, 0, SURFACE_BYTES);
-    if (!g_surface) { fprintf(stderr, "cb_tab: no surface\n"); return 1; }
+    g_have_ctl = ctl[0] && chan_attach(&g_ctl, ctl[0], ctl[1], ctl[2], 1);
+    if (!gpu_client_attach(gpu[0], gpu[1], gpu[2])) { fprintf(stderr, "cb_tab: no GPU channel\n"); return 1; }
     if (!chan_attach(&g_net, net[0], net[1], net[2], 0)) { fprintf(stderr, "cb_tab: no network channel\n"); return 1; }
     g_have_store = store[0] && chan_attach(&g_store, store[0], store[1], store[2], 0);
     InitializeCriticalSection(&g_net_send);
@@ -560,7 +576,7 @@ int main(int argc, char **argv) {
         send_state(TAB_LOAD_FAILED);
         snprintf(g_title, sizeof(g_title), "Failed to load");
         chan_send(&g_chan, TU_TITLE, g_title, (uint32_t)strlen(g_title), 1000);
-        for (;;) { drain(); chan_wait(&g_chan, INFINITE); }
+        for (;;) { drain(); wait_input(INFINITE); }
     }
     send_state(TAB_LOADED);
 
@@ -591,6 +607,6 @@ int main(int argc, char **argv) {
         unsigned long long next = timer_next_due_ms(), now = page_time_ms();
         if (next != (unsigned long long)-1) ms = next > now ? (DWORD)(next - now < 50 ? next - now : 50) : 0;
         if (js_quickjs_network_pending() > 0 || image_cache_has_pending(page_image_cache())) ms = ms < 5 ? ms : 5;
-        if (ms) chan_wait(&g_chan, ms);
+        if (ms) wait_input(ms);
     }
 }

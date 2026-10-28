@@ -4,7 +4,7 @@
 # TLA+ model of the protocol.  Runs on Linux (here WSL), after
 # tools/proof_setup.sh.
 #
-#   tools/prove.sh [component ...]    chan coord site store loop tla (default: all)
+#   tools/prove.sh [component ...]    chan coord site store loop gpu tla (default: all)
 #
 # Fails if any goal is unproved.
 set -e
@@ -16,11 +16,12 @@ mkdir -p "$out"
 jobs=${PROVE_JOBS:-$(nproc)}
 timeout=${PROVE_TIMEOUT:-60}
 
-wp() {   # wp <name> <files...>
-    local name=$1; shift
+wp() {   # wp <name> <memory model> <files...>
+    local name=$1 model=$2; shift 2
     echo "== $name"
     frama-c -cpp-extra-args="-Isrc/ipc -Isrc/proc -DFRAMA_C" -machdep x86_64 \
-        -wp -wp-rte -wp-model "Typed+Cast+ref" -wp-check-memory-model -warn-signed-overflow -no-warn-unsigned-overflow \
+        -wp -wp-rte -wp-model "$model" -wp-check-memory-model -wp-split \
+        -warn-signed-overflow -no-warn-unsigned-overflow \
         -wp-prover alt-ergo,z3,cvc5 -wp-par "$jobs" -wp-timeout "$timeout" \
         -wp-session "$out/$name.session" -wp-cache update \
         "$@" -then -report-unclassified-warning ERROR -report \
@@ -30,14 +31,18 @@ wp() {   # wp <name> <files...>
         grep -qE "^\[wp\] Proved goals: +([0-9]+) / \1$" "$out/$name.log"
 }
 
-all="chan coord site store loop tla"
+all="chan coord site store loop gpu tla"
 for c in ${@:-$all}; do
     case $c in
-    chan)  wp chan src/ipc/chan_ring.c ;;
-    coord) wp coord src/proc/coord_core.c src/proc/site.c ;;
-    site)  wp site src/proc/site.c ;;
-    store) wp store src/proc/store_core.c src/proc/site.c ;;
-    loop)  wp loop src/proc/loop_core.c ;;
+    # Typed+Cast+ref separates pointer parameters used as references (the
+    # cores' state, event and actions); the decoder has none, and its
+    # read-only resource table is simplest without it.
+    chan)  wp chan  Typed+Cast+ref src/ipc/chan_ring.c ;;
+    coord) wp coord Typed+Cast+ref src/proc/coord_core.c src/proc/site.c ;;
+    site)  wp site  Typed+Cast+ref src/proc/site.c ;;
+    store) wp store Typed+Cast+ref src/proc/store_core.c src/proc/site.c ;;
+    loop)  wp loop  Typed+Cast+ref src/proc/loop_core.c ;;
+    gpu)   timeout=${PROVE_TIMEOUT:-120} wp gpu Typed+Cast src/proc/gpu_decode.c ;;   # its postconditions need longer
     tla)
         # Safety on the larger model, liveness on the smaller one.  No deadlock
         # check: with the starts bounded, every behavior ends in a quiet state.

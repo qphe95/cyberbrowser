@@ -67,7 +67,10 @@ enum {
 typedef struct ImagePixels {
     int width, height;
     uint8_t *data;      /* RGBA, top-left origin */
+    uint64_t gen;       /* new for every pixels published (image_cache_generation) */
 } ImagePixels;
+
+static _Atomic uint64_t g_pixels_gen;
 
 typedef enum { FMT_UNKNOWN = 0, FMT_JPEG, FMT_PNG, FMT_GIF, FMT_WEBP, FMT_BMP, FMT_SVG } ImageFormat;
 
@@ -626,6 +629,7 @@ static void work_entry(ImageCache *c, ImageEntry *e)
             atomic_store(&e->state, prev == ST_READY ? ST_READY : ST_ERROR);
         }
     } else {
+        px->gen = atomic_fetch_add(&g_pixels_gen, 1) + 1;
         ImagePixels *old = atomic_exchange(&e->pixels, px);
         if (old) {
             if (c->nretired == c->capretired) {
@@ -1042,6 +1046,16 @@ bool image_cache_get(ImageCache *c, int handle,
     return true;
 }
 
+uint64_t image_cache_generation(ImageCache *c, int handle)
+{
+    if (!c || handle < 0) return 0;
+    pthread_mutex_lock(&c->mu);
+    ImageEntry *e = handle < c->count ? c->entries[handle] : NULL;
+    pthread_mutex_unlock(&c->mu);
+    ImagePixels *px = e ? atomic_load(&e->pixels) : NULL;
+    return px ? px->gen : 0;
+}
+
 bool image_cache_get_natural(ImageCache *c, int handle, int *out_w, int *out_h)
 {
     if (!c || handle < 0) return false;
@@ -1122,6 +1136,7 @@ int image_cache_put_rgba(ImageCache *c, const char *key, int w, int h, const uin
     e->decoded_full = 1;
     atomic_store(&e->nat_w, w);
     atomic_store(&e->nat_h, h);
+    px->gen = atomic_fetch_add(&g_pixels_gen, 1) + 1;
     ImagePixels *old = atomic_exchange(&e->pixels, px);
     atomic_store(&e->state, ST_READY);
     if (old) {

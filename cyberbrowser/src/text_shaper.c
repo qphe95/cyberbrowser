@@ -54,6 +54,7 @@ struct TextShaper {
     int             pack_x;
     int             pack_y;
     int             pack_row_h;
+    int             dirty_y0, dirty_y1;  /* atlas rows drawn since text_shaper_atlas_take_dirty */
 
     GlyphEntry     *glyphs;
     int             glyph_count;
@@ -253,6 +254,13 @@ static GlyphEntry *ensure_glyph(TextShaper *s, uint32_t codepoint)
     if (!pack_bitmap(s, bw, bh, &px, &py)) return NULL;
 
     if (gw > 0 && bh > 0) {
+        if (s->dirty_y1 <= s->dirty_y0) {
+            s->dirty_y0 = py;
+            s->dirty_y1 = py + bh;
+        } else {
+            if (py < s->dirty_y0) s->dirty_y0 = py;
+            if (py + bh > s->dirty_y1) s->dirty_y1 = py + bh;
+        }
         uint8_t *dst = s->atlas + py * s->atlas_w + px;
         stbtt_MakeGlyphBitmap(&s->font, dst, gw, bh, s->atlas_w, s->scale, s->scale, glyph_index);
         /* Synthetic bold: smear each row right by `e` pixels (max filter). */
@@ -437,6 +445,22 @@ int text_shaper_atlas_width(const TextShaper *s)
 int text_shaper_atlas_height(const TextShaper *s)
 {
     return s ? s->atlas_h : 0;
+}
+
+int text_shaper_atlas_used_rows(const TextShaper *s)
+{
+    if (!s || !s->atlas) return 0;
+    int rows = s->pack_y + s->pack_row_h;
+    return rows < s->atlas_h ? rows : s->atlas_h;
+}
+
+bool text_shaper_atlas_take_dirty(TextShaper *s, int *y0, int *y1)
+{
+    if (!s || s->dirty_y1 <= s->dirty_y0) return false;
+    *y0 = s->dirty_y0;
+    *y1 = s->dirty_y1 < s->atlas_h ? s->dirty_y1 : s->atlas_h;
+    s->dirty_y0 = s->dirty_y1 = 0;
+    return true;
 }
 
 bool text_shaper_vmetrics(const TextShaper *s, float *ascent, float *descent, float *line_gap)

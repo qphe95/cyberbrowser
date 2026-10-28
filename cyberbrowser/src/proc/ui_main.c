@@ -2,12 +2,16 @@
  *
  * Started by the coordinator with its channel (and start URLs, hex):
  *   cb_ui.exe --chan S E0 E1 [HEX ...]
+ * It gets its channel to the GPU process from the coordinator (CU_GPU), and
+ * again if that restarts.
  *
  * Owns the window: the tab strip, the address bar and the content area, and
  * the tab table (which tabs exist, which is active, each one's URL and
- * title).  Each tab paints into a surface the UI maps read-only; the UI shows
- * the active tab's latest frame and sends it the user's input.  Following a
- * link or typing a URL replaces the tab's process with a new one.
+ * title).  The content area is a child window the GPU process presents the
+ * active tab's frames into (UG_WINDOW); until it has (GU_SHOWN), it stays
+ * hidden and the UI shows "Loading..." or what went wrong.  The UI sends the
+ * active tab the user's input.  Following a link or typing a URL replaces
+ * the tab's process with a new one.
  *
  * Keys: Ctrl+T new tab, Ctrl+W close tab, Ctrl+L address bar, Ctrl+Tab next
  * tab, Page Up/Down, arrows and Space scroll.
@@ -22,6 +26,7 @@
 #include <windowsx.h>
 
 #include "chan.h"
+#include "bigmsg.h"
 #include "proto.h"
 #include "spawn.h"
 
@@ -39,11 +44,10 @@ typedef struct Tab {
     char url[PROTO_URL_MAX + 1];
     char title[PROTO_TITLE_MAX + 1];
     int state;
-    bool started;               /* channel and surface attached */
+    bool started;               /* channel attached */
     Chan chan;                  /* side 0: the UI */
-    HANDLE surface_h;
-    const uint8_t *surface;
-    bool has_frame;
+    bool has_frame;             /* it sent one to the GPU process */
+    bool shown;                 /* the GPU process presented one */
     TuFrame frame;
     DWORD last_frame_tick;
 } Tab;
@@ -52,7 +56,11 @@ static Chan g_coord;            /* side 1: the UI */
 static Tab g_tabs[MAX_TABS];
 static int g_ntabs, g_active = -1;
 static uint32_t g_next_id = 1;
-static HWND g_wnd, g_addr;
+static HWND g_wnd, g_addr, g_content;
+static Chan g_gpu;              /* side 0: the UI */
+static bool g_have_gpu;
+static BigRx g_gpu_rx;
+static UgWindow g_told;         /* what the GPU process was last told */
 static WNDPROC g_addr_proc;
 static HFONT g_font;
 static int g_cw = 1280, g_ch = 900;     /* client size */
@@ -78,15 +86,23 @@ static wchar_t *wide(const char *s, wchar_t *buf, int cap) {
 /* ---- tabs ---------------------------------------------------------------- */
 
 static void release(Tab *t) {
-    if (t->started) {
-        chan_close(&t->chan);
-        if (t->surface) UnmapViewOfFile(t->surface);
-        if (t->surface_h) CloseHandle(t->surface_h);
-    }
+    if (t->started) chan_close(&t->chan);
     t->started = false;
-    t->surface = NULL;
-    t->surface_h = NULL;
     t->has_frame = false;
+    t->shown = false;
+}
+
+/* Tell the GPU process what the content window shows (the active tab once
+ * it has a frame), and show the window once that is presented. */
+static void show_content(void) {
+    Tab *t = g_active >= 0 && g_active < g_ntabs ? &g_tabs[g_active] : NULL;
+    UgWindow w = { (uint64_t)(uintptr_t)g_content, t && t->started && t->has_frame ? t->id : 0,
+                   (uint32_t)content_w(), (uint32_t)content_h() };
+    if (g_have_gpu && memcmp(&w, &g_told, sizeof(w)) != 0 &&
+        big_send(&g_gpu, UG_WINDOW, &w, sizeof(w), NULL, 0, NULL, 0, 1000))
+        g_told = w;
+    bool visible = w.tab && t->shown;
+    if (visible != (IsWindowVisible(g_content) != 0)) ShowWindow(g_content, visible ? SW_SHOWNA : SW_HIDE);
 }
 
 static void start_process(Tab *t) {
@@ -125,6 +141,7 @@ static void update_chrome(void) {
         SetWindowTextW(g_addr, L"");
         SetWindowTextW(g_wnd, L"CyberBrowser");
     }
+    show_content();
     InvalidateRect(g_wnd, NULL, FALSE);
 }
 
@@ -181,6 +198,14 @@ static void typed_url(const char *in, char *out, size_t cap) {
 
 /* ---- messages from the coordinator and the tabs ----------------------------- */
 
+static bool g_told_once;        /* a GPU process connected before */
+
+/* The content window (content_proc): hidden until a frame is presented. */
+static HWND make_content(void) {
+    return CreateWindowW(L"CyberContent", NULL, WS_CHILD | WS_CLIPSIBLINGS, 0, CONTENT_Y, content_w(), content_h(),
+                         g_wnd, NULL, GetModuleHandleW(NULL), NULL);
+}
+
 static void from_coord(const ChanMsg *m) {
     switch (m->type) {
     case CU_TAB_STARTED: {
@@ -188,19 +213,17 @@ static void from_coord(const ChanMsg *m) {
         CuTabStarted s;
         memcpy(&s, m->data, sizeof(s));
         HANDLE hs = (HANDLE)(uintptr_t)s.chan_section, h0 = (HANDLE)(uintptr_t)s.chan_ev0,
-               h1 = (HANDLE)(uintptr_t)s.chan_ev1, hsurf = (HANDLE)(uintptr_t)s.surface;
+               h1 = (HANDLE)(uintptr_t)s.chan_ev1;
         Tab *t = tab_by_id(s.tab);
-        if (!t || s.surface_bytes != SURFACE_BYTES) {
+        if (!t) {
             /* A tab closed (or navigated) since it was asked for: drop its
              * handles and end its process. */
-            CloseHandle(hs); CloseHandle(h0); CloseHandle(h1); CloseHandle(hsurf);
+            CloseHandle(hs); CloseHandle(h0); CloseHandle(h1);
             UcTab c = { s.tab };
             chan_send(&g_coord, UC_CLOSE_TAB, &c, sizeof(c), 1000);
             return;
         }
         if (!chan_attach(&t->chan, hs, h0, h1, 0)) { t->state = ST_FAILED; return; }
-        t->surface_h = hsurf;
-        t->surface = (const uint8_t *)MapViewOfFile(hsurf, FILE_MAP_READ, 0, 0, SURFACE_BYTES);
         t->started = true;
         ui_log("[ui] tab %u started", t->id);
         return;
@@ -217,6 +240,29 @@ static void from_coord(const ChanMsg *m) {
         t->state = ST_CRASHED;
         snprintf(t->title, sizeof(t->title), "Crashed (%u)", x.exit_code);
         update_chrome();
+        return;
+    }
+    case CU_GPU: {
+        if (m->len != sizeof(CuGpu)) return;
+        CuGpu g;
+        memcpy(&g, m->data, sizeof(g));
+        if (g_have_gpu) chan_close(&g_gpu);
+        big_free(&g_gpu_rx);
+        memset(&g_gpu_rx, 0, sizeof(g_gpu_rx));
+        g_have_gpu = chan_attach(&g_gpu, (HANDLE)(uintptr_t)g.chan_section, (HANDLE)(uintptr_t)g.chan_ev0,
+                                 (HANDLE)(uintptr_t)g.chan_ev1, 0);
+        memset(&g_told, 0, sizeof(g_told));
+        for (int i = 0; i < g_ntabs; i++) g_tabs[i].shown = false;
+        /* A new GPU process (not the first): a new content window too.  The
+         * old one stays tied to the old process's swap chain, and another
+         * can't be made on it (VK_ERROR_NATIVE_WINDOW_IN_USE_KHR). */
+        if (g_content && g_told_once) {
+            DestroyWindow(g_content);
+            g_content = make_content();
+        }
+        g_told_once = true;
+        ui_log("[ui] %s the GPU process", g_have_gpu ? "connected to" : "could not connect to");
+        show_content();
         return;
     }
     case CU_TAB_FAILED: {
@@ -240,16 +286,12 @@ static void from_tab(Tab *t, const ChanMsg *m) {
         if (m->len != sizeof(TuFrame)) return;
         TuFrame f;
         memcpy(&f, m->data, sizeof(f));
-        if (f.buffer > 1 || f.width == 0 || f.height == 0 || f.width > SURFACE_MAX_W || f.height > SURFACE_MAX_H) return;
+        if (f.width == 0 || f.height == 0 || f.width > SURFACE_MAX_W || f.height > SURFACE_MAX_H) return;
         t->frame = f;
-        t->has_frame = true;
         t->last_frame_tick = GetTickCount();
-        /* From now on only f.buffer is read: the tab may reuse the other. */
-        UtFrameDone d = { f.frame };
-        chan_send(&t->chan, UT_FRAME_DONE, &d, sizeof(d), 100);
-        if (t == &g_tabs[g_active]) {
-            RECT r = { 0, CONTENT_Y, g_cw, g_ch };
-            InvalidateRect(g_wnd, &r, FALSE);
+        if (!t->has_frame) {
+            t->has_frame = true;
+            show_content();
         }
         return;
     }
@@ -283,11 +325,34 @@ static void from_tab(Tab *t, const ChanMsg *m) {
     }
 }
 
+static void from_gpu(void) {
+    if (g_gpu_rx.type == GU_SHOWN && g_gpu_rx.total == sizeof(GuShown)) {
+        GuShown x;
+        memcpy(&x, g_gpu_rx.buf, sizeof(x));
+        Tab *t = tab_by_id(x.tab);
+        if (t) {
+            t->shown = true;
+            show_content();
+        }
+    }
+}
+
+static void drain_gpu(void) {
+    int r;
+    while (g_have_gpu && (r = big_recv(&g_gpu, &g_gpu_rx)) > 0) from_gpu();
+    if (g_have_gpu && r < 0) {
+        ui_log("[ui] the GPU process broke its channel");
+        chan_close(&g_gpu);
+        g_have_gpu = false;
+    }
+}
+
 static void drain_all(void) {
     static ChanMsg m;
     int r;
     while ((r = chan_recv(&g_coord, &m)) > 0) from_coord(&m);
     if (r < 0) ExitProcess(3);
+    drain_gpu();
     for (int i = 0; i < g_ntabs; i++) {
         Tab *t = &g_tabs[i];
         while (t->started && (r = chan_recv(&t->chan, &m)) > 0) from_tab(t, &m);
@@ -348,23 +413,11 @@ static void paint_to(HDC dc, int w, int h) {
     RECT nt = new_tab_rect();
     DrawTextW(dc, L"+", -1, &nt, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
 
+    /* Under the content window, when it is shown: what to show until then. */
     RECT content = { 0, CONTENT_Y, w, h };
     Tab *t = g_active >= 0 ? &g_tabs[g_active] : NULL;
-    if (t && t->started && t->has_frame && t->surface) {
-        const TuFrame *f = &t->frame;
-        BITMAPINFO bi;
-        memset(&bi, 0, sizeof(bi));
-        bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
-        bi.bmiHeader.biWidth = (LONG)f->width;
-        bi.bmiHeader.biHeight = -(LONG)f->height;      /* top-down */
-        bi.bmiHeader.biPlanes = 1;
-        bi.bmiHeader.biBitCount = 32;
-        bi.bmiHeader.biCompression = BI_RGB;
-        const uint8_t *px = t->surface + SURFACE_HEADER + (size_t)f->buffer * SURFACE_BUFFER_BYTES;
-        SetDIBitsToDevice(dc, 0, CONTENT_Y, f->width, f->height, 0, 0, 0, f->height, px, &bi, DIB_RGB_COLORS);
-        /* What the frame doesn't cover (the window grew since). */
-        if ((int)f->width < w) fill(dc, (RECT){ (int)f->width, CONTENT_Y, w, h }, RGB(255, 255, 255));
-        if (CONTENT_Y + (int)f->height < h) fill(dc, (RECT){ 0, CONTENT_Y + (int)f->height, w, h }, RGB(255, 255, 255));
+    if (t && t->started && t->shown) {
+        fill(dc, content, RGB(255, 255, 255));
     } else {
         fill(dc, content, RGB(255, 255, 255));
         const wchar_t *msg = !t ? L"" : t->state == ST_FAILED ? L"This page could not be loaded."
@@ -389,6 +442,38 @@ static void paint_window(void) {
     EndPaint(g_wnd, &ps);
 }
 
+/* The content window's pixels, from the GPU process (BGRX, top-down, into
+ * a malloc'd *px): false if it shows nothing. */
+static bool content_pixels(uint8_t **px, uint32_t *w, uint32_t *h) {
+    if (!g_have_gpu || !big_send(&g_gpu, UG_SHOT, NULL, 0, NULL, 0, NULL, 0, 1000)) return false;
+    DWORD start = GetTickCount();
+    while (GetTickCount() - start < 10000) {
+        int r = big_recv(&g_gpu, &g_gpu_rx);
+        if (r < 0) return false;
+        if (r == 0) {
+            chan_wait(&g_gpu, 50);
+            continue;
+        }
+        if (g_gpu_rx.type != GU_SHOT) {
+            from_gpu();
+            continue;
+        }
+        GuShot s;
+        if (g_gpu_rx.total < sizeof(s)) return false;
+        memcpy(&s, g_gpu_rx.buf, sizeof(s));
+        if (!s.width || !s.height || s.width > SURFACE_MAX_W || s.height > SURFACE_MAX_H ||
+            g_gpu_rx.total - sizeof(s) != (size_t)s.width * s.height * 4)
+            return false;
+        *px = (uint8_t *)malloc((size_t)s.width * s.height * 4);
+        if (!*px) return false;
+        memcpy(*px, g_gpu_rx.buf + sizeof(s), (size_t)s.width * s.height * 4);
+        *w = s.width;
+        *h = s.height;
+        return true;
+    }
+    return false;
+}
+
 /* The window as the user sees it, with the address bar, saved as a BMP. */
 static bool save_shot(const char *path) {
     HDC wdc = GetDC(g_wnd);
@@ -405,6 +490,21 @@ static bool save_shot(const char *path) {
     HBITMAP dib = CreateDIBSection(wdc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
     HGDIOBJ old = SelectObject(mem, dib);
     paint_to(mem, g_cw, g_ch);
+    /* The content, as the GPU process drew it. */
+    uint8_t *px = NULL;
+    uint32_t pw = 0, ph = 0;
+    if (IsWindowVisible(g_content) && content_pixels(&px, &pw, &ph)) {
+        BITMAPINFO pi;
+        memset(&pi, 0, sizeof(pi));
+        pi.bmiHeader.biSize = sizeof(pi.bmiHeader);
+        pi.bmiHeader.biWidth = (LONG)pw;
+        pi.bmiHeader.biHeight = -(LONG)ph;
+        pi.bmiHeader.biPlanes = 1;
+        pi.bmiHeader.biBitCount = 32;
+        pi.bmiHeader.biCompression = BI_RGB;
+        SetDIBitsToDevice(mem, 0, CONTENT_Y, pw, ph, 0, 0, 0, ph, px, &pi, DIB_RGB_COLORS);
+        free(px);
+    }
     /* The address bar is a child window: draw it too. */
     RECT ar;
     GetWindowRect(g_addr, &ar);
@@ -452,6 +552,18 @@ static void select_tab(int i) {
     if (i < 0 || i >= g_ntabs) return;
     g_active = i;
     update_chrome();
+}
+
+/* The content window: the GPU process presents into it.  Mouse input goes
+ * through it to the main window, which sends it to the tab. */
+static LRESULT CALLBACK content_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_NCHITTEST) return HTTRANSPARENT;
+    if (msg == WM_ERASEBKGND) return 1;
+    if (msg == WM_PAINT) {
+        ValidateRect(w, NULL);
+        return 0;
+    }
+    return DefWindowProcW(w, msg, wp, lp);
 }
 
 static void mouse_down(int x, int y) {
@@ -513,7 +625,9 @@ static LRESULT CALLBACK wnd_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         g_cw = LOWORD(lp);
         g_ch = HIWORD(lp);
         if (g_addr) MoveWindow(g_addr, 10, STRIP_H + 5, g_cw - 20, ADDR_H - 10, TRUE);
+        if (g_content) MoveWindow(g_content, 0, CONTENT_Y, content_w(), content_h(), FALSE);
         resize_tabs();
+        show_content();
         InvalidateRect(w, NULL, FALSE);
         return 0;
     case WM_LBUTTONDOWN:
@@ -612,6 +726,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "cb_ui: no channel\n");
         return 1;
     }
+    int first_url = 5;
 
     g_font = CreateFontW(-15, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
     WNDCLASSW wc;
@@ -626,13 +741,21 @@ int main(int argc, char **argv) {
     g_wnd = CreateWindowW(L"CyberBrowser", L"CyberBrowser", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                           CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top,
                           NULL, NULL, wc.hInstance, NULL);
+    WNDCLASSW cc;
+    memset(&cc, 0, sizeof(cc));
+    cc.lpfnWndProc = content_proc;
+    cc.hInstance = wc.hInstance;
+    cc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    cc.lpszClassName = L"CyberContent";
+    RegisterClassW(&cc);
+    g_content = make_content();
     g_addr = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
                            10, STRIP_H + 5, g_cw - 20, ADDR_H - 10, g_wnd, NULL, wc.hInstance, NULL);
     SendMessageW(g_addr, WM_SETFONT, (WPARAM)g_font, TRUE);
     g_addr_proc = (WNDPROC)SetWindowLongPtrW(g_addr, GWLP_WNDPROC, (LONG_PTR)addr_proc);
     ShowWindow(g_wnd, SW_SHOW);
 
-    for (int i = 5; i < argc; i++) {
+    for (int i = first_url; i < argc; i++) {
         char url[PROTO_URL_MAX + 1];
         size_t n = strlen(argv[i]) / 2;
         if (n > PROTO_URL_MAX) continue;
@@ -650,10 +773,14 @@ int main(int argc, char **argv) {
 
     for (;;) {
         /* Sleep until a window message or a message on any channel. */
-        HANDLE waits[MAX_TABS + 1];
+        HANDLE waits[MAX_TABS + 2];
         int n = 0;
         bool ready = !chan_arm(&g_coord);
         waits[n++] = chan_event(&g_coord);
+        if (g_have_gpu) {
+            if (!chan_arm(&g_gpu)) ready = true;
+            waits[n++] = chan_event(&g_gpu);
+        }
         for (int i = 0; i < g_ntabs; i++) {
             if (!g_tabs[i].started) continue;
             if (!chan_arm(&g_tabs[i].chan)) ready = true;
@@ -661,6 +788,7 @@ int main(int argc, char **argv) {
         }
         if (!ready) MsgWaitForMultipleObjectsEx((DWORD)n, waits, g_script ? 15 : INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         chan_disarm(&g_coord);
+        if (g_have_gpu) chan_disarm(&g_gpu);
         for (int i = 0; i < g_ntabs; i++)
             if (g_tabs[i].started) chan_disarm(&g_tabs[i].chan);
         MSG msg;

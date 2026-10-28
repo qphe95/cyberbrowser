@@ -30,46 +30,41 @@ typedef struct UcTab {
 
 /* ---- coordinator -> UI ------------------------------------------------- */
 enum {
-    CU_TAB_STARTED = 1, /* CuTabStarted: its channel and surface, as handles in the UI */
+    CU_TAB_STARTED = 1, /* CuTabStarted: its channel, as handles in the UI */
     CU_TAB_EXITED,      /* CuTabExited */
     CU_TAB_FAILED,      /* UcTab: it could not be started */
+    CU_GPU,             /* CuGpu: the UI's channel to the GPU process (again, if it restarted) */
 };
 
 typedef struct CuTabStarted {
     uint32_t tab;
     uint64_t chan_section, chan_ev0, chan_ev1;   /* HANDLE values, valid in the UI */
-    uint64_t surface;                            /* HANDLE: read-only section */
-    uint64_t surface_bytes;
 } CuTabStarted;
+
+typedef struct CuGpu {
+    uint64_t chan_section, chan_ev0, chan_ev1;   /* HANDLE values, valid in the UI */
+} CuGpu;
 
 typedef struct CuTabExited {
     uint32_t tab;
     uint32_t exit_code;
 } CuTabExited;
 
-/* ---- the surface a tab paints into ------------------------------------ */
-/* A section of SURFACE_BYTES: a header, then two buffers of
- * SURFACE_MAX_W * SURFACE_MAX_H pixels (32-bit BGRX, top-down rows of
- * `width` pixels).  The tab paints into one buffer while the UI shows the
- * other: it sends TU_FRAME, and paints into that buffer again only after the
- * UI answers UT_FRAME_DONE.  The UI takes width and height from the message,
- * not from shared memory, and checks them against the maximum. */
+/* The largest viewport: a tab's content is drawn by the GPU process (the
+ * tab <-> GPU process messages below). */
 #define SURFACE_MAX_W 2560
 #define SURFACE_MAX_H 1600
-#define SURFACE_HEADER 4096
-#define SURFACE_BUFFER_BYTES ((uint64_t)SURFACE_MAX_W * SURFACE_MAX_H * 4)
-#define SURFACE_BYTES (SURFACE_HEADER + 2 * SURFACE_BUFFER_BYTES)
 
 /* ---- tab -> UI ---------------------------------------------------------- */
 enum {
-    TU_FRAME = 1,       /* TuFrame: buffer `buffer` holds frame `frame` */
+    TU_FRAME = 1,       /* TuFrame: frame `frame` went to the GPU process */
     TU_TITLE,           /* UTF-8 title */
     TU_NAVIGATE,        /* TuNavigate + URL: the user followed a link */
     TU_STATE,           /* TuState */
 };
 
 typedef struct TuFrame {
-    uint32_t frame, buffer;
+    uint32_t frame, unused;
     uint32_t width, height;
     uint32_t scroll_y, content_height;
 } TuFrame;
@@ -83,12 +78,21 @@ typedef struct TuState {
     uint32_t state;
 } TuState;
 
+/* ---- coordinator -> tab ------------------------------------------------- */
+/* One way: the coordinator never reads from a tab. */
+enum {
+    CT_GPU = 1,         /* CtGpu: a new GPU process; draw on this channel from now on */
+};
+
+typedef struct CtGpu {
+    uint64_t chan_section, chan_ev0, chan_ev1;   /* HANDLE values, valid in the tab */
+} CtGpu;
+
 /* ---- UI -> tab ---------------------------------------------------------- */
 enum {
     UT_RESIZE = 1,      /* UtSize */
     UT_SCROLL,          /* UtScroll */
     UT_CLICK,           /* UtPoint */
-    UT_FRAME_DONE,      /* UtFrameDone: the UI is done with that frame's buffer */
 };
 
 typedef struct UtSize {
@@ -102,10 +106,6 @@ typedef struct UtScroll {
 typedef struct UtPoint {
     int32_t x, y;       /* in the viewport */
 } UtPoint;
-
-typedef struct UtFrameDone {
-    uint32_t frame;
-} UtFrameDone;
 
 /* ---- coordinator -> network process and storage service ------------------ */
 /* Each server gets a control channel from the coordinator.  A grant hands it
@@ -124,6 +124,7 @@ enum {
     GRANT_NET,          /* at the storage service or the loopback relay: the network process */
     GRANT_STORE,        /* at the network process: its channel to the storage service */
     GRANT_LOOP,         /* at the network process: its channel to the loopback relay */
+    GRANT_UI,           /* at the GPU process: the UI's channel */
 };
 
 typedef struct CsGrant {
@@ -217,5 +218,54 @@ typedef struct LnConnected {
     uint32_t id;
     uint32_t ok;
 } LnConnected;
+
+/* ---- tab <-> GPU process (bigmsg.h messages, the tab's draw channel) ------- */
+/* A tab sends what it draws as a display list (gpu_wire.h), and before it
+ * the resources the list names that the GPU process doesn't have yet: bands
+ * of its font slots' glyph atlases and decoded images.  Ids are the tab's
+ * own: the GPU process keeps each tab's apart (gpu_decode.h). */
+enum {
+    TG_FRAME = 1,       /* GpuFrame + WireCmd[ncmds] + WireMask[nmasks] */
+    TG_ATLAS,           /* TgAtlas + rows * width bytes: rows y0.. of a font slot's atlas */
+    TG_IMAGE,           /* TgImage + width * height * 4 bytes (RGBA): an image, new or replaced */
+    GT_FRAME_DONE,      /* GtFrameDone: drawn; the tab may send the next frame */
+};
+
+typedef struct TgAtlas {
+    uint32_t slot;
+    uint32_t width, height;     /* the whole atlas: the same at every upload of a slot */
+    uint32_t y0, rows;
+} TgAtlas;
+
+typedef struct TgImage {
+    uint32_t id;
+    uint32_t width, height;
+} TgImage;
+
+typedef struct GtFrameDone {
+    uint32_t frame;
+} GtFrameDone;
+
+/* ---- UI <-> GPU process ---------------------------------------------------- */
+enum {
+    UG_WINDOW = 1,      /* UgWindow: the content window shows that tab (0: none) */
+    UG_SHOT,            /* (empty): send what the content window shows, as GU_SHOT */
+    GU_SHOT,            /* GuShot + width * height * 4 bytes, BGRX, top-down */
+    GU_SHOWN,           /* GuShown: a frame of that tab is in the content window */
+};
+
+typedef struct UgWindow {
+    uint64_t hwnd;              /* the UI's content window */
+    uint32_t tab;
+    uint32_t width, height;
+} UgWindow;
+
+typedef struct GuShot {
+    uint32_t width, height;     /* 0 x 0: nothing shown */
+} GuShot;
+
+typedef struct GuShown {
+    uint32_t tab;
+} GuShown;
 
 #endif
