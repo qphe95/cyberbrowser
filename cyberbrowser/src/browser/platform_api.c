@@ -2,7 +2,8 @@
  * and the User Timing marks and measures (browser/platform_api.js); DOM
  * events (browser/dom_events.js); the form controls' IDL attributes
  * (browser/form_controls.js); <canvas> and its 2D context
- * (browser/canvas_api.js). */
+ * (browser/canvas_api.js), then its WebGL and WebGPU contexts
+ * (browser/webgpu_api.c). */
 #include <string.h>
 #include <quickjs.h>
 #include <quickjs_gc_unified.h>
@@ -50,4 +51,5 @@ void platform_api_install(JSContextHandle ctx, GCValue global, GCValue window)
     platform_api_run(ctx, dom_events_js, "<dom_events>", global, window);
     platform_api_run(ctx, form_controls_js, "<form_controls>", global, window);
     platform_api_run(ctx, canvas_api_js, "<canvas_api>", global, window);
+    webgpu_api_install(ctx, global, window);
 }

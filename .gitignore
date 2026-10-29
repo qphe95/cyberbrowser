@@ -69,3 +69,6 @@ probes/
 # Proof tools: Frama-C/WP's prover cache and TLC's state files (tools/prove.sh)
 .frama-c/
 cyberbrowser/proofs/tla/states/
+
+# Prebuilt libraries fetched by tools/fetch_prebuilt.sh
+cyberbrowser/third_party/prebuilt/files/

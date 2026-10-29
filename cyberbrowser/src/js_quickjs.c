@@ -45,6 +45,7 @@ size_t js_stack_budget(void) {
 #include "session_state.h"
 #include "cyber_profile.h"
 #include "url_utils.h"
+#include "url_whatwg.h"
 #include "media/media_buffer.h"
 
 // Forward declarations from dom_api.c
@@ -323,8 +324,15 @@ static GCValue js_xhr_open(JSContextHandle ctx, GCValue this_val, int argc, GCVa
     const char *url = JS_ToCString(ctx, argv[1]);
     
     if (method && url) {
+        /* A relative URL resolves against the document's. */
+        GCValue loc = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "location");
+        GCValue hrefv = JS_IsObject(loc) ? JS_GetPropertyStr(ctx, loc, "href") : JS_UNDEFINED;
+        const char *base = JS_IsString(hrefv) ? JS_ToCString(ctx, hrefv) : NULL;
+        char *abs = wurl_resolve(base && base[0] ? base : NULL, url);
+        if (base) JS_FreeCString(ctx, base);
         SAFE_SET_STR(xhr, XMLHttpRequestHandle, method, method);
-        SAFE_SET_STR(xhr, XMLHttpRequestHandle, url, url);
+        SAFE_SET_STR(xhr, XMLHttpRequestHandle, url, abs ? abs : url);
+        free(abs);
         SAFE_SET(xhr, XMLHttpRequestHandle, ready_state, 1); // OPENED
         SAFE_SET(xhr, XMLHttpRequestHandle, status, 0);
         SAFE_SET(xhr, XMLHttpRequestHandle, response_text, JS_UNDEFINED);
@@ -527,6 +535,14 @@ static GCValue js_xhr_send(JSContextHandle ctx, GCValue this_val, int argc, GCVa
     return JS_UNDEFINED;
 }
 
+// overrideMimeType(type): responses are always read as text here, so nothing changes.
+static GCValue js_xhr_override_mime_type(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)argc; (void)argv;
+    XMLHttpRequestHandle xhr = JS_GetOpaqueHandle2(ctx, this_val, js_xhr_class_id);
+    if (SAFE_IS_NULL(xhr)) return JS_ThrowTypeError(ctx, "XMLHttpRequest internal error");
+    return JS_UNDEFINED;
+}
+
 static GCValue js_xhr_set_request_header(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     XMLHttpRequestHandle xhr = JS_GetOpaqueHandle2(ctx, this_val, js_xhr_class_id);
     if (SAFE_IS_NULL(xhr)) return JS_ThrowTypeError(ctx, "XMLHttpRequest internal error");
@@ -616,6 +632,7 @@ const JSCFunctionListEntry js_xhr_proto_funcs[] = {
     JS_CFUNC_DEF("open", 3, js_xhr_open),
     JS_CFUNC_DEF("send", 1, js_xhr_send),
     JS_CFUNC_DEF("setRequestHeader", 2, js_xhr_set_request_header),
+    JS_CFUNC_DEF("overrideMimeType", 1, js_xhr_override_mime_type),
     JS_CFUNC_DEF("getResponseHeader", 1, js_xhr_get_response_header),
     JS_CFUNC_DEF("getAllResponseHeaders", 0, js_xhr_get_all_response_headers),
     JS_CGETSET_DEF("readyState", js_xhr_get_ready_state, NULL),

@@ -22,6 +22,7 @@ void html_character_data_api_install(JSContextHandle ctx, GCValue character_data
 /* HTMLLinkElement: href (resolved), rel, media, type, as, crossOrigin,
  * integrity, hreflang, referrerPolicy reflect their attributes. */
 void html_link_api_install(JSContextHandle ctx, GCValue link_proto);
+void html_script_api_install(JSContextHandle ctx, GCValue script_proto);
 
 #ifdef __cplusplus
 }

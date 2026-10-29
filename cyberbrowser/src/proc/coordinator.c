@@ -11,7 +11,9 @@
  * (coord_core.c), and performs the core's actions: starting a tab process with
  * its channels (to the UI, to the network process, to the GPU process and,
  * unless its site is opaque, to the storage service, badged with the site the
- * core gave it); revoking them when the tab ends; messaging the UI.  Every child runs in a job that ends with the
+ * core gave it); revoking them when the tab ends; messaging the UI; starting
+ * a site's web-GPU process (cb_webgpu.exe, section 5.7) and giving its tabs
+ * channels to it, badged with the site.  Every child runs in a job that ends with the
  * coordinator, and in the sandbox for its kind (sandbox.c).  Each child's
  * output goes to logs\<name>.log next to the executables.
  *
@@ -43,7 +45,12 @@ typedef struct Child {
 
 static HANDLE g_job;
 static Child g_ui, g_net, g_store, g_loop, g_gpu;
+static Child g_webgpu[COORD_MAX_WEBGPU];
 static HANDLE g_tab_proc[COORD_MAX_TABS];
+/* Tabs and web-GPU processes are too many to wait on at once (64 handles):
+ * a thread-pool wait on each sets g_exited, and the loop looks which ended. */
+static HANDLE g_exited;
+static HANDLE g_tab_wait[COORD_MAX_TABS], g_webgpu_wait[COORD_MAX_WEBGPU];
 static Chan g_tab_ctl[COORD_MAX_TABS];  /* to each tab, one way (side 0: the coordinator) */
 static DWORD g_gpu_starts[3];           /* when the last GPU processes started */
 static CoordState g_state;
@@ -83,9 +90,33 @@ static void close_in(HANDLE proc, HANDLE h) {
     if (h) DuplicateHandle(proc, h, NULL, NULL, 0, FALSE, DUPLICATE_CLOSE_SOURCE);
 }
 
+static VOID CALLBACK on_exit(PVOID ctx, BOOLEAN timed_out) {
+    (void)ctx;
+    (void)timed_out;
+    SetEvent(g_exited);
+}
+
+static HANDLE watch(HANDLE proc) {
+    HANDLE w = NULL;
+    if (!RegisterWaitForSingleObject(&w, proc, on_exit, NULL, INFINITE, WT_EXECUTEONLYONCE)) return NULL;
+    return w;
+}
+
+static void unwatch(HANDLE *w) {
+    if (*w) UnregisterWaitEx(*w, INVALID_HANDLE_VALUE);
+    *w = NULL;
+}
+
 /* Start <exe> with a control channel (and extra arguments). */
+static bool start_child_in(Child *c, const wchar_t *exe, const char *log_name, const char *extra, DWORD flags,
+                           int kind, int slot);
 static bool start_child(Child *c, const wchar_t *exe, const char *log_name, const char *extra, DWORD flags,
                         int kind) {
+    return start_child_in(c, exe, log_name, extra, flags, kind, 0);
+}
+
+static bool start_child_in(Child *c, const wchar_t *exe, const char *log_name, const char *extra, DWORD flags,
+                           int kind, int slot) {
     if (!chan_create(&c->ctl, 1u << 18)) return false;
     static char args[16384];
     snprintf(args, sizeof(args), "--chan %llu %llu %llu%s%s", spawn_handle_arg(c->ctl.section),
@@ -93,7 +124,7 @@ static bool start_child(Child *c, const wchar_t *exe, const char *log_name, cons
     HANDLE log = open_log(log_name);
     HANDLE inh[3] = { c->ctl.section, c->ctl.ev[0], c->ctl.ev[1] };
     SpawnSandbox sb;
-    bool confined = kind < 0 || sandbox_for((SandboxKind)kind, 0, &sb);
+    bool confined = kind < 0 || sandbox_for((SandboxKind)kind, slot, &sb);
     c->proc = confined ? spawn_child(exe, args, inh, 3, log != INVALID_HANDLE_VALUE ? log : NULL, g_job, flags,
                                      kind < 0 ? NULL : &sb)
                        : NULL;
@@ -196,6 +227,7 @@ static bool start_tab(const CoordAction *a) {
             m.chan_ev1 = spawn_handle_arg(h1);
             if (granted && hs && h0 && h1 && chan_send(&g_ui.ctl, CU_TAB_STARTED, &m, sizeof(m), 1000)) {
                 g_tab_proc[a->slot] = proc;
+                g_tab_wait[a->slot] = watch(proc);
                 if (g_tab_ctl[a->slot].sh) chan_close(&g_tab_ctl[a->slot]);
                 g_tab_ctl[a->slot] = ctl;
                 memset(&ctl, 0, sizeof(ctl));
@@ -285,6 +317,62 @@ static void regrant_gpu(const CoordAction *a) {
     chan_close(&draw);
 }
 
+/* A site's web-GPU process (CA_START_WEBGPU), with its control channel. */
+static bool start_webgpu(const CoordAction *a) {
+    int w = a->webgpu;
+    if (w < 0 || w >= COORD_MAX_WEBGPU) return false;
+    if (g_webgpu[w].proc) {
+        unwatch(&g_webgpu_wait[w]);
+        CloseHandle(g_webgpu[w].proc);
+        chan_close(&g_webgpu[w].ctl);
+    }
+    memset(&g_webgpu[w], 0, sizeof(g_webgpu[w]));
+    char name[32], extra[32 + 2 * SITE_MAX];
+    snprintf(name, sizeof(name), "webgpu-%d", w);
+    strcpy(extra, "--site ");
+    hex(extra + 7, (const uint8_t *)a->site, (uint32_t)strnlen(a->site, SITE_MAX - 1));
+    if (!start_child_in(&g_webgpu[w], L"cb_webgpu.exe", name, extra, DETACHED_PROCESS, SB_WEBGPU, w)) {
+        chan_close(&g_webgpu[w].ctl);
+        memset(&g_webgpu[w], 0, sizeof(g_webgpu[w]));
+        sandbox_webgpu_ended(w);
+        return false;
+    }
+    g_webgpu_wait[w] = watch(g_webgpu[w].proc);
+    return true;
+}
+
+/* Which web-GPU process each tab was given (w + 1; 0 none), so that when it
+ * ends its tabs hear at once that their canvases are lost, rather than
+ * waiting on a channel nobody answers. */
+static int g_tab_webgpu[COORD_MAX_TABS];
+
+/* A tab's channel to its site's web-GPU process (CA_GRANT_WEBGPU): granted
+ * there with the tab's badge, and sent to the tab. */
+static void grant_webgpu(const CoordAction *a) {
+    int w = a->webgpu;
+    if (a->slot < 0 || a->slot >= COORD_MAX_TABS || !g_tab_proc[a->slot] || w < 0 || w >= COORD_MAX_WEBGPU ||
+        !g_webgpu[w].proc)
+        return;
+    Chan gl;
+    if (!chan_create(&gl, 1u << 22)) return;
+    bool sent = false;
+    if (grant(&g_webgpu[w], &gl, a->tab, GRANT_TAB, a->site)) {
+        HANDLE p = g_tab_proc[a->slot];
+        HANDLE s = dup_to(p, gl.section, 0, true), e0 = dup_to(p, gl.ev[0], 0, true), e1 = dup_to(p, gl.ev[1], 0, true);
+        CtGpu m = { spawn_handle_arg(s), spawn_handle_arg(e0), spawn_handle_arg(e1) };
+        sent = s && e0 && e1 && chan_send(&g_tab_ctl[a->slot], CT_WEBGPU, &m, sizeof(m), 1000);
+        if (sent) g_tab_webgpu[a->slot] = w + 1;
+        if (!sent) {
+            close_in(p, s);
+            close_in(p, e0);
+            close_in(p, e1);
+            revoke(&g_webgpu[w], a->tab);
+        }
+    }
+    chan_close(&gl);
+    if (!sent && g_tab_ctl[a->slot].sh) chan_send(&g_tab_ctl[a->slot], CT_WEBGPU_FAILED, NULL, 0, 1000);
+}
+
 /* Ask a server to save what is pending and exit; wait a while for it. */
 static void quit_server(Child *c, DWORD ms) {
     if (!c->proc) return;
@@ -318,9 +406,31 @@ static void perform(const CoordAction *a) {
         break;
     case CA_TAB_GONE:
         if (a->slot >= 0 && a->slot < COORD_MAX_TABS && g_tab_ctl[a->slot].sh) chan_close(&g_tab_ctl[a->slot]);
+        if (a->slot >= 0 && a->slot < COORD_MAX_TABS) g_tab_webgpu[a->slot] = 0;
         revoke(&g_net, a->tab);
         revoke(&g_store, a->tab);
         revoke(&g_gpu, a->tab);
+        for (int w = 0; w < COORD_MAX_WEBGPU; w++)
+            if (g_webgpu[w].proc) revoke(&g_webgpu[w], a->tab);
+        break;
+    case CA_START_WEBGPU:
+        if (g_nresults < COORD_MAX_ACTIONS) {
+            CoordEvent *r = &g_results[g_nresults++];
+            memset(r, 0, sizeof(*r));
+            r->kind = start_webgpu(a) ? CE_WEBGPU_STARTED : CE_WEBGPU_EXITED;
+            r->slot = a->webgpu;
+        }
+        break;
+    case CA_GRANT_WEBGPU:
+        grant_webgpu(a);
+        break;
+    case CA_KILL_WEBGPU:
+        if (a->webgpu >= 0 && a->webgpu < COORD_MAX_WEBGPU && g_webgpu[a->webgpu].proc)
+            TerminateProcess(g_webgpu[a->webgpu].proc, 0);
+        break;
+    case CA_WEBGPU_FAILED:
+        if (a->slot >= 0 && a->slot < COORD_MAX_TABS && g_tab_ctl[a->slot].sh)
+            chan_send(&g_tab_ctl[a->slot], CT_WEBGPU_FAILED, NULL, 0, 1000);
         break;
     case CA_SEND_UI:
         chan_send(&g_ui.ctl, a->type, a->data, a->len, 1000);
@@ -335,6 +445,10 @@ static void perform(const CoordAction *a) {
         /* Their profiles go once the tabs have. */
         for (int i = 0; i < COORD_MAX_TABS; i++)
             if (g_tab_proc[i]) TerminateProcess(g_tab_proc[i], 0);
+        for (int w = 0; w < COORD_MAX_WEBGPU; w++)
+            if (g_webgpu[w].proc) TerminateProcess(g_webgpu[w].proc, 0);
+        for (int w = 0; w < COORD_MAX_WEBGPU; w++)
+            if (g_webgpu[w].proc) WaitForSingleObject(g_webgpu[w].proc, 1000);
         for (int i = 0; i < COORD_MAX_TABS; i++)
             if (g_tab_proc[i]) WaitForSingleObject(g_tab_proc[i], 1000);
         sandbox_end();
@@ -384,6 +498,16 @@ static void grant_replays(void) {
         if (!sandbox_grant_folder(dir, SB_NET, i == 1))
             fprintf(stderr, "cb_coord: could not give the network process access to %ls\n", dir);
     }
+}
+
+/* The web-GPU process's libraries (third_party/prebuilt, copied by the
+ * build into webgpu\ next to the executables): readable by AppContainers.
+ * It loads them by full path from there. */
+static void webgpu_folder(void) {
+    wchar_t dir[MAX_PATH];
+    _snwprintf(dir, MAX_PATH, L"%lswebgpu", spawn_exe_dir());
+    if (GetFileAttributesW(dir) == INVALID_FILE_ATTRIBUTES) return;
+    if (!sandbox_grant_packages_read(dir)) fprintf(stderr, "cb_coord: could not open %ls to the web-GPU process\n", dir);
 }
 
 /* browser_data\sites next to the executables, else in %LOCALAPPDATA%, made
@@ -477,6 +601,8 @@ int main(int argc, char **argv) {
         return 1;
     }
     script_folder();
+    webgpu_folder();
+    g_exited = CreateEventW(NULL, FALSE, FALSE, NULL);
     if (!start_child(&g_ui, L"cb_ui.exe", "ui", used ? urls : NULL, 0, SB_UI) || !connect_ui_gpu()) {
         fprintf(stderr, "cb_coord: could not start cb_ui.exe\n");
         return 1;
@@ -486,8 +612,8 @@ int main(int argc, char **argv) {
     static ChanMsg m;
     for (;;) {
         /* Wait for the UI's channel, or a child's exit. */
-        HANDLE waits[6 + COORD_MAX_TABS];
-        int slot_of[6 + COORD_MAX_TABS];
+        HANDLE waits[8];
+        int slot_of[8];
         int n = 0;
         bool armed = chan_arm(&g_ui.ctl);
         waits[n] = chan_event(&g_ui.ctl); slot_of[n++] = -1;
@@ -496,8 +622,7 @@ int main(int argc, char **argv) {
         waits[n] = g_store.proc; slot_of[n++] = -3;
         waits[n] = g_loop.proc; slot_of[n++] = -3;
         if (g_gpu.proc) { waits[n] = g_gpu.proc; slot_of[n++] = -4; }
-        for (int i = 0; i < COORD_MAX_TABS; i++)
-            if (g_tab_proc[i]) { waits[n] = g_tab_proc[i]; slot_of[n++] = i; }
+        waits[n] = g_exited; slot_of[n++] = -5;
         DWORD w = armed ? WaitForMultipleObjects((DWORD)n, waits, FALSE, INFINITE) : WAIT_OBJECT_0;
         chan_disarm(&g_ui.ctl);
         if (w >= WAIT_OBJECT_0 + (DWORD)n) continue;
@@ -531,15 +656,41 @@ int main(int argc, char **argv) {
             e.kind = CE_SERVICE_EXITED;
             step(&e);
         } else {
-            DWORD code = 0;
-            GetExitCodeProcess(g_tab_proc[which], &code);
-            CloseHandle(g_tab_proc[which]);
-            g_tab_proc[which] = NULL;
-            sandbox_tab_ended(which);
-            e.kind = CE_TAB_EXITED;
-            e.slot = which;
-            e.exit_code = code;
-            step(&e);
+            /* Which tabs and web-GPU processes ended. */
+            for (int i = 0; i < COORD_MAX_TABS; i++) {
+                if (!g_tab_proc[i] || WaitForSingleObject(g_tab_proc[i], 0) != WAIT_OBJECT_0) continue;
+                DWORD code = 0;
+                GetExitCodeProcess(g_tab_proc[i], &code);
+                unwatch(&g_tab_wait[i]);
+                CloseHandle(g_tab_proc[i]);
+                g_tab_proc[i] = NULL;
+                sandbox_tab_ended(i);
+                memset(&e, 0, sizeof(e));
+                e.kind = CE_TAB_EXITED;
+                e.slot = i;
+                e.exit_code = code;
+                step(&e);
+            }
+            for (int w = 0; w < COORD_MAX_WEBGPU; w++) {
+                if (!g_webgpu[w].proc || WaitForSingleObject(g_webgpu[w].proc, 0) != WAIT_OBJECT_0) continue;
+                DWORD code = 0;
+                GetExitCodeProcess(g_webgpu[w].proc, &code);
+                fprintf(stderr, "cb_coord: web-GPU process %d ended (%lx)\n", w, code);
+                unwatch(&g_webgpu_wait[w]);
+                CloseHandle(g_webgpu[w].proc);
+                chan_close(&g_webgpu[w].ctl);
+                memset(&g_webgpu[w], 0, sizeof(g_webgpu[w]));
+                sandbox_webgpu_ended(w);
+                for (int t = 0; t < COORD_MAX_TABS; t++) {
+                    if (g_tab_webgpu[t] != w + 1) continue;
+                    g_tab_webgpu[t] = 0;
+                    if (g_tab_ctl[t].sh) chan_send(&g_tab_ctl[t], CT_WEBGPU_FAILED, NULL, 0, 100);
+                }
+                memset(&e, 0, sizeof(e));
+                e.kind = CE_WEBGPU_EXITED;
+                e.slot = w;
+                step(&e);
+            }
         }
     }
 }

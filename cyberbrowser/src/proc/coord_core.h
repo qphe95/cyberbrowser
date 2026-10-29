@@ -10,7 +10,12 @@
  * The UI asks for tabs; the core checks each request, labels the tab with
  * its site (site.h), and starts or ends its process.  Starting a tab also
  * grants it channels to the network process and (unless its site is opaque)
- * the storage service, both badged with that site. */
+ * the storage service, both badged with that site.
+ *
+ * A tab of a site that asks for WebGL or WebGPU (UC_WEBGPU, from the UI)
+ * gets a channel to that site's web-GPU process (section 5.7), started on
+ * the first such request and ended when the site's last tab is.  A tab is
+ * only ever granted its own site's (P3); an opaque tab gets none. */
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -18,6 +23,7 @@
 #include "site.h"
 
 #define COORD_MAX_TABS 60       /* the shim waits on all their processes at once */
+#define COORD_MAX_WEBGPU 16     /* sites with a web-GPU process at once */
 
 typedef enum { SLOT_FREE = 0, SLOT_STARTING, SLOT_RUNNING, SLOT_CLOSING } CoordSlotState;
 
@@ -25,10 +31,19 @@ typedef struct CoordSlot {
     CoordSlotState state;
     uint32_t tab;               /* the UI's id */
     char site[SITE_MAX];        /* its label; "" = opaque (no storage) */
+    bool want_webgpu;           /* waits for its site's web-GPU process to start */
 } CoordSlot;
+
+/* A site's web-GPU process: free, starting, running, or closing (killed,
+ * its exit not seen yet).  Its label never changes while in use. */
+typedef struct CoordWebgpu {
+    CoordSlotState state;
+    char site[SITE_MAX];
+} CoordWebgpu;
 
 typedef struct CoordState {
     CoordSlot slots[COORD_MAX_TABS];
+    CoordWebgpu webgpu[COORD_MAX_WEBGPU];
     bool exiting;
 } CoordState;
 
@@ -40,6 +55,8 @@ typedef enum {
     CE_TAB_EXITED,              /* slot, exit_code: its process ended */
     CE_SERVICE_EXITED,          /* the network process, the storage service or the relay ended */
     CE_GPU_EXITED,              /* the GPU process ended: it is started again */
+    CE_WEBGPU_STARTED,          /* slot: web-GPU process slot's CA_START_WEBGPU succeeded */
+    CE_WEBGPU_EXITED,           /* slot: it failed to start, or ended */
 } CoordEventKind;
 
 typedef struct CoordEvent {
@@ -60,11 +77,17 @@ typedef enum {
     CA_EXIT,                    /* end every process and exit */
     CA_RESTART_GPU,             /* start a GPU process again, and connect the UI to it */
     CA_REGRANT_GPU,             /* slot, tab, site: a new draw channel for that tab, badged with site */
+    CA_START_WEBGPU,            /* webgpu, site: start a web-GPU process labeled site */
+    CA_GRANT_WEBGPU,            /* slot, tab, webgpu, site: a channel between that tab and that
+                                   web-GPU process, badged with site (CT_WEBGPU to the tab) */
+    CA_KILL_WEBGPU,             /* webgpu: end it (its site has no tabs left) */
+    CA_WEBGPU_FAILED,           /* slot, tab: tell the tab it gets none (CT_WEBGPU_FAILED) */
 } CoordActionKind;
 
 typedef struct CoordAction {
     CoordActionKind kind;
     int slot;
+    int webgpu;                 /* a web-GPU process slot, for the *_WEBGPU actions */
     uint32_t tab, width, height;
     char site[SITE_MAX];
     bool grant_net, grant_store, grant_gpu;     /* CA_START_TAB */
@@ -88,7 +111,17 @@ typedef struct CoordActions {
     // A badge: a site label, or "" for an opaque origin (no storage).
     predicate badge_ok{L}(char *site) = site[0] == 0 || label_ok(site);
 
+    // Two labels, whole.
+    predicate same_label{L}(char *a, char *b) = \forall integer k; 0 <= k < SITE_MAX ==> a[k] == b[k];
+
+    // A web-GPU process in use is labeled with a site (never opaque).
+    predicate webgpu_ok{L}(CoordState *s) =
+        \forall integer w; 0 <= w < COORD_MAX_WEBGPU ==>
+            slot_state_ok(s->webgpu[w].state) &&
+            (s->webgpu[w].state != SLOT_FREE ==> s->webgpu[w].site[0] != 0 && label_ok(&s->webgpu[w].site[0]));
+
     predicate state_ok{L}(CoordState *s) =
+        webgpu_ok(s) &&
         \forall integer i; 0 <= i < COORD_MAX_TABS ==>
             slot_state_ok(s->slots[i].state) &&
             (s->slots[i].state != SLOT_FREE ==> badge_ok(&s->slots[i].site[0]));
@@ -105,10 +138,13 @@ typedef struct CoordActions {
 
     // P3: a process's label never changes while its slot is in use.
     predicate labels_kept{L1, L2}(CoordState *s) =
-        \forall integer i; 0 <= i < COORD_MAX_TABS &&
+        (\forall integer i; 0 <= i < COORD_MAX_TABS &&
             \at(s->slots[i].state, L1) != SLOT_FREE && \at(s->slots[i].state, L2) != SLOT_FREE ==>
             \at(s->slots[i].tab, L1) == \at(s->slots[i].tab, L2) &&
-            \forall integer k; 0 <= k < SITE_MAX ==> \at(s->slots[i].site[k], L1) == \at(s->slots[i].site[k], L2);
+            \forall integer k; 0 <= k < SITE_MAX ==> \at(s->slots[i].site[k], L1) == \at(s->slots[i].site[k], L2)) &&
+        (\forall integer w; 0 <= w < COORD_MAX_WEBGPU &&
+            \at(s->webgpu[w].state, L1) != SLOT_FREE && \at(s->webgpu[w].state, L2) != SLOT_FREE ==>
+            \forall integer k; 0 <= k < SITE_MAX ==> \at(s->webgpu[w].site[k], L1) == \at(s->webgpu[w].site[k], L2));
 
     // P3: a tab is started with channels badged with its slot's label, the
     // network process's always and the storage service's only for a site,
@@ -127,14 +163,29 @@ typedef struct CoordActions {
             0 <= a->slot < COORD_MAX_TABS &&
             (s->slots[a->slot].state == SLOT_STARTING || s->slots[a->slot].state == SLOT_RUNNING) &&
             s->slots[a->slot].tab == a->tab && badge_ok(&a->site[0]) &&
-            (\forall integer k; 0 <= k < SITE_MAX ==> a->site[k] == s->slots[a->slot].site[k]));
+            (\forall integer k; 0 <= k < SITE_MAX ==> a->site[k] == s->slots[a->slot].site[k])) &&
+        // A web-GPU process is started labeled with its slot's site.
+        (a->kind == CA_START_WEBGPU ==>
+            0 <= a->webgpu < COORD_MAX_WEBGPU && s->webgpu[a->webgpu].state == SLOT_STARTING &&
+            a->site[0] != 0 && label_ok(&a->site[0]) && same_label(&a->site[0], &s->webgpu[a->webgpu].site[0])) &&
+        // P3: a tab is connected only to its own site's web-GPU process, a
+        // running one, with a channel badged with that site.
+        (a->kind == CA_GRANT_WEBGPU ==>
+            0 <= a->slot < COORD_MAX_TABS && s->slots[a->slot].state == SLOT_RUNNING &&
+            s->slots[a->slot].tab == a->tab &&
+            0 <= a->webgpu < COORD_MAX_WEBGPU && s->webgpu[a->webgpu].state == SLOT_RUNNING &&
+            a->site[0] != 0 && label_ok(&a->site[0]) &&
+            same_label(&a->site[0], &s->slots[a->slot].site[0]) &&
+            same_label(&a->site[0], &s->webgpu[a->webgpu].site[0])) &&
+        (a->kind == CA_KILL_WEBGPU ==> 0 <= a->webgpu < COORD_MAX_WEBGPU) &&
+        (a->kind == CA_WEBGPU_FAILED ==> 0 <= a->slot < COORD_MAX_TABS);
 
     predicate tab_event(integer kind) =
         kind == CE_TAB_STARTED || kind == CE_TAB_START_FAILED || kind == CE_TAB_EXITED;
  */
 
 /*@ requires \valid(s);
-    assigns s->slots[0 .. COORD_MAX_TABS - 1], s->exiting;
+    assigns s->slots[0 .. COORD_MAX_TABS - 1], s->webgpu[0 .. COORD_MAX_WEBGPU - 1], s->exiting;
     ensures state_ok(s) && tabs_unique(s);
  */
 void coord_init(CoordState *s);
@@ -154,11 +205,14 @@ void coord_init(CoordState *s);
         \let i = out->a[k].slot; out->a[k].tab == \at(s->slots[i].tab, Old);
     // P6, local respect: an event of a tab's process (it started, failed to,
     // or ended) changes nothing of any other slot and causes actions only
-    // about that tab: its revocation, and a message to the UI.
+    // about that tab: its revocation, a message to the UI, and ending its
+    // site's web-GPU process when it was the site's last tab.
     ensures tab_event(e->kind) ==>
         (\forall integer j; 0 <= j < COORD_MAX_TABS && j != e->slot ==> slot_unchanged{Old, Here}(s, j)) &&
         (\forall integer k; 0 <= k < out->n ==>
-            (out->a[k].kind == CA_TAB_GONE && out->a[k].slot == e->slot) || out->a[k].kind == CA_SEND_UI);
+            (out->a[k].kind == CA_TAB_GONE && out->a[k].slot == e->slot) || out->a[k].kind == CA_SEND_UI ||
+            (out->a[k].kind == CA_KILL_WEBGPU &&
+             same_label(&s->webgpu[out->a[k].webgpu].site[0], &s->slots[e->slot].site[0])));
  */
 void coord_step(CoordState *s, const CoordEvent *e, CoordActions *out);
 

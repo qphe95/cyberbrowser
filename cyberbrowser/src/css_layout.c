@@ -8467,7 +8467,9 @@ static bool layout_is_replaced_form_element(const char *tag)
 /* Used size of an inline <svg>, a replaced element: CSS width/height (px, or
  * a percentage of the parent's content box when that is definite), else its
  * width/height attributes, else what the viewBox ratio gives from the other
- * dimension, else 300x150 (CSS replaced-element defaults). */
+ * dimension, else 300x150 (CSS replaced-element defaults).  A <canvas> the
+ * same, its natural size and ratio its bitmap's: the width and height
+ * attributes, 300x150 by default (HTML 4.12.5). */
 static void layout_svg_size(LayoutContext *ctx, int c, HtmlNode *dom, double *out_w, double *out_h)
 {
     LayoutBox *b = layout_box(ctx, c);
@@ -8485,6 +8487,17 @@ static void layout_svg_size(LayoutContext *ctx, int c, HtmlNode *dom, double *ou
     if (w < 0.0 && wa && wa[0] && !strchr(wa, '%')) w = atof(wa);
     if (h < 0.0 && ha && ha[0] && !strchr(ha, '%')) h = atof(ha);
     double ratio = 0.0;   /* width / height */
+    if (dom->tag_name && strcasecmp(dom->tag_name, "canvas") == 0) {
+        double aw = wa && wa[0] ? atof(wa) : 300.0, ah = ha && ha[0] ? atof(ha) : 150.0;
+        if (aw < 0.0) aw = 300.0;
+        if (ah < 0.0) ah = 150.0;
+        ratio = aw > 0.0 && ah > 0.0 ? aw / ah : 0.0;
+        if (w < 0.0) w = h >= 0.0 && ratio > 0.0 ? h * ratio : aw;
+        if (h < 0.0) h = ratio > 0.0 ? w / ratio : ah;
+        *out_w = w;
+        *out_h = h;
+        return;
+    }
     const char *vb = layout_node_attribute(dom, "viewbox");
     if (vb) {
         double v[4];
@@ -9262,7 +9275,7 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
                     child->width = iw;
                     child->height = ih;
                 } else if (dom && dom->type == HTML_NODE_ELEMENT && dom->tag_name &&
-                           strcasecmp(dom->tag_name, "svg") == 0) {
+                           (strcasecmp(dom->tag_name, "svg") == 0 || strcasecmp(dom->tag_name, "canvas") == 0)) {
                     layout_svg_size(ctx, c, dom, &child->width, &child->height);
                 } else if (dom && layout_is_replaced_form_element(dom->tag_name)) {
                     if (child->width <= 0.0) child->width = 80.0;
@@ -10994,6 +11007,11 @@ static void layout_node_serial_impl(LayoutContext *ctx, int idx)
                     child->height = ih;
                     sized = true;
                 }
+            }
+            if (!sized && dom && dom->type == HTML_NODE_ELEMENT && dom->tag_name &&
+                strcasecmp(dom->tag_name, "canvas") == 0) {
+                layout_svg_size(ctx, c, dom, &child->width, &child->height);
+                sized = true;
             }
             if (!sized && dom && dom->type == HTML_NODE_ELEMENT &&
                 child->s->display == CSS_DISPLAY_INLINE) {

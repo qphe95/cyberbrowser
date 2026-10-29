@@ -630,6 +630,117 @@ decoder of `gl` records (sizes, ids, enum ranges), and the resource tables that 
 to library objects. These are similar to the GPU decoder and `libchan`. The validator's rules
 and the shader translators stay tested, fuzzed and sandboxed rather than proved.
 
+### 5.7.2 As built in M8
+
+**The process.** `cb_webgpu.exe` (`src/proc/webgpu_main.c`), one per site, labeled with the site.
+- **Startup.** The coordinator starts it the first time a tab of the site asks: the tab sends
+  `TU_WANT_WEBGPU` to the UI, the UI sends `UC_WEBGPU` to the coordinator, and the coordinator
+  answers with `CT_WEBGPU` (a channel) or `CT_WEBGPU_FAILED` on the tab's control channel.
+- **Who it serves.** It accepts only channels badged with its own site. The coordinator core
+  grants a tab only its own site's process (P3, proved).
+- **Ending.** It ends with the site's last tab (`CA_KILL_WEBGPU`), or after 30 s with no tabs.
+  Either way, what the libraries kept for those tabs goes with it.
+- **Sandbox.** An AppContainer of its own per process (`cyberbrowser.webgpu.<pid>.<n>`) with
+  no capabilities, win32k on, and a 4 GB job. The libraries are in `webgpu\` next to the
+  executables, readable by every AppContainer.
+
+**The libraries.**
+- **wgpu-native** v29.0.1.1, from its GitHub release.
+- **ANGLE** at commit 890b5d8f, from MSYS2's `mingw-w64-x86_64-angleproject` package.
+  Neither Chrome nor Electron ships ANGLE as DLLs any more. This one is built with MinGW, so
+  it brings the MinGW runtime DLLs, pinned too.
+- **Pinned.** `third_party/prebuilt/manifest` pins every file by SHA-256, and
+  `tools/fetch_prebuilt.sh` fetches and checks them. A stale ANGLE is a known-exploitable
+  ANGLE: updating this pin is part of every security update.
+- **Loading.** Both load at run time by full path, on the first context a tab asks for.
+
+**WebGL** (`src/proc/webgl_backend.c`, `src/browser/webgl_api.js`).
+- **The context.** Each context is an ANGLE context on D3D11 with:
+  - `EGL_CONTEXT_WEBGL_COMPATIBILITY_ANGLE`, so ANGLE does WebGL's checks;
+  - robust access, and resources initialized before first use;
+  - lost on a GPU reset;
+  - binding a name `glGen*` never made is refused, and there are no client-side arrays.
+- **Calls go as records:** `[u32 op][u32 n][args]`.
+  - The 101 plain calls are generated from one table (`tools/gen_webgl.js` makes
+    `webgl_gen.c`, `.h` and `.js`).
+  - Uploads, uniforms and the like are special ops (256 and up).
+  - Queries are ops 300 and up; each appends its answer to the reply.
+- **What the tab never sees.** A tab's object ids map to GL names per context, so an id it
+  never made, or another context's, names `WEBGL_NO_NAME` and ANGLE refuses it. Anything
+  that reads memory goes through ANGLE's `robust*` entry points with the size the tab
+  claimed.
+- **When records go.** The tab batches them and sends them at the end of the task, or at
+  once when something must be answered.
+- **Context loss.** A lost context, or the process gone, fires `webglcontextlost` at the
+  canvas.
+- **Extensions.** These are ANGLE's requestable ones under their WebGL names.
+  `EXT_disjoint_timer_query` is never offered.
+
+**WebGPU** (`src/proc/webgpu_wgpu.c`, `src/browser/webgpu_api.js`).
+- **The wire format.** Records carry descriptors as value trees, parsed within limits
+  (`webgpu_wire.h`: depth 12, 16,384 nodes).
+- **The adapter.** `requestAdapter` checks the block list, and gives the vendor, the
+  architecture and the features. There is no `timestamp-query`. Devices get WebGPU's
+  default limits.
+- **Promises.** `mapAsync`, `onSubmittedWorkDone`, `popErrorScope` and `requestAdapter`
+  are answered synchronously; their promises resolve when the reply comes.
+- **wgpu-native aborts on page mistakes.** It aborts the process (a Rust panic) on much of
+  what WebGPU defines as a validation error. The fuzzer found these cases:
+  - an enum value it can't map, or a required one missing;
+  - a missing module or view;
+  - popping an error scope never pushed;
+  - reading the mapping of an invalid buffer;
+  - a second adapter handle released;
+  - any submit that fails its checks: a command buffer encoded wrong, one submitted
+    twice, one using a mapped or destroyed buffer.
+
+  None of these reach it:
+  - a call that would abort is skipped, and reported as a validation error in the
+    page's next error scope;
+  - buffers are created, and command buffers finished, inside error scopes of the
+    process's own, so an invalid one is never kept;
+  - a submit is checked first against what each command buffer uses (buffers and
+    textures, mapped or destroyed: tracked per resource);
+  - there is one adapter per process, each id with its own reference.
+- **Leaks in wgpu-native.**
+  - It keeps a device's memory for good when a command buffer is finished and never
+    submitted. When a tab goes, its leftover valid command buffers are submitted (no
+    one is left to see them) before the device is released.
+  - `wgpuDeviceDestroy` leaked too. `device.destroy()` instead destroys the device's
+    buffers and textures and stops using it.
+  - Some cases remain, a submit refused while a buffer is mapped among them. They use up
+    only that site's process, and end with it.
+- **Ids.** Object ids come from one per-tab allocator shared with WebGL. They go back when
+  WebGPU makes an object unusable, or when the page lets go of it
+  (`FinalizationRegistry`).
+
+**Canvases on the screen.** Each frame a canvas was drawn to:
+1. the tab asks for its pixels (`TW_PRESENT`);
+2. the web-GPU process reads them back (WebGL from its surface, WebGPU from the canvas
+   texture);
+3. the tab puts them in its image cache as `cyber-canvas:<node>`;
+4. the display list draws them like an image, so the verified decoder (P5) resolves
+   them in the tab's own namespace.
+
+**Deviation.** Section 5.7 planned textures shared with the compositor. This is a copy
+through the tab instead: simpler, and no new path into the compositor. The cost is a
+readback and an upload per presented frame, which matters for large canvases at 60 fps.
+Shared textures remain the plan for when that cost shows.
+
+**Cost to pages that don't use them.** The two scripts (about 80 KB) are evaluated in a realm
+only when it first touches WebGL or WebGPU: a global like `WebGLRenderingContext`,
+`getContext("webgl"/"webgl2"/"webgpu")` or `navigator.gpu` (`webgpu_lazy.js`). Until then
+these are stand-ins.
+
+**The block list** (`src/proc/gpu_blocklist.c`) is vendor and driver-version rules.
+- **Blocked:** a blocked device has neither WebGL nor WebGPU: `getContext` returns null and
+  `requestAdapter` resolves to null. It covers software rasterizers, and old Intel, AMD and
+  NVIDIA drivers.
+- **Fewer features:** a rule may only deny features instead: compute shaders, storage
+  textures, optional features.
+- **Test hooks:** `CYBER_GPU_BLOCK` (a device-name substring) and `CYBER_GPU_DENY` (a
+  feature mask).
+
 ## 6. The tab sandbox (Windows)
 
 `src/proc/sandbox.c` (the coordinator's side) and `src/proc/spawn.c` (the process
@@ -1010,6 +1121,128 @@ run by hand before changes to a core are committed.
   The liveness properties: a closed tab ends and its id frees, and every dead tab's channel
   is eventually revoked at every server.
 
+### 8.7 Plan for M9: proving the shims
+
+**Why.** A proof covers the functions it is run on, under their preconditions. The cores
+decide correctly, but the shims around them are ordinary C:
+- they turn a tab's bytes into the events the cores see;
+- they turn the cores' actions into Windows calls: which handle goes into which process.
+
+A compromised tab reaches the shims first. A misread id, or a handle copied into the wrong
+process, is an escape the proofs can't see. M9 moves that line: the shims keep only thin
+wrappers around Windows calls, with ACSL contracts. Everything that reads a tab's bytes, or
+chooses a handle or a process, moves into proved code.
+
+#### 8.7.1 What a tab reaches
+
+From a review of the code at M8. No privileged process reads a handle value or a file path
+from a tab. Every handle is made and granted by the coordinator's shim.
+
+| Process | Unproved code facing tabs | Proved today | Behind it, out of M9's scope |
+|---|---|---|---|
+| All servers | `chan.c` (`chan_attach` reads the shared header's size and magic); `bigmsg.c` `big_recv`, reassembling up to 256 MB | `chan_ring.c` (P2) | |
+| Network | `run_request`'s parsing of `NetRequest`; cookie messages; CORS (`may_read`), `initiator_ok`, the frame list; PNA in `tls_client.c` (`space_allowed`) | `site_of`, `net_space_v4`/`v6`, `orb_verdict` | the HTTP, TLS and URL code (about 5,400 lines) |
+| Storage | `request`'s parsing; `to_path`; the containment check on handles | `store_allowed`, `store_join`, `store_quota_ok` | |
+| GPU | `upload_atlas`, `upload_image`; `frame`'s header and the view it presents | `gpu_decode` (P5) | the rasterizers (about 1,450 lines) |
+| Web-GPU | `client_message`; the WebGL record walker (`webgl_run`, `run_special`, `webgl_gen.c`); the WebGPU value-tree parser and object ids (`webgpu_wgpu.c`) | nothing | ANGLE, wgpu, Naga |
+| UI | `from_tab` (about 60 lines: frames, titles, state, navigations) | `coord_url_ok`, through the coordinator | the window code |
+| Coordinator | Reads no tab bytes. `perform` copies handles (`dup_to`): the maps from slot to process, from web-GPU index to process, from channel to server, and from an exit to its slot | the decisions (P3, P6) | `spawn.c`, `sandbox.c` |
+
+#### 8.7.2 Findings to fix first
+
+The review and the M8 conformance runs found these. Each gets a fix and, where a tab can
+cause it, an attack in the escape test.
+- **A redirect to another site runs as the first site.** For a navigation, the network
+  process follows redirects anywhere and returns the last page. The tab runs that page with
+  its own site's origin and storage. So an open redirect on site A would run site B's script
+  as A. This was found by reading the code; it needs confirming with a test first. The fix:
+  a navigation whose final site isn't the tab's is refused with its final URL, and the tab
+  asks the UI to navigate there. The coordinator then starts a tab of the right site. A new
+  property, P10, says that a document a tab is given is from the tab's own site.
+- **Redirects keep the old URL.** Even within the site, a page keeps the URL from before the
+  redirect, so its relative URLs resolve against the wrong folder. A relative `Location` isn't
+  resolved at all. The network reply should carry the final URL, and the tab should use it.
+- **PNA is enforced by an unproved copy.** `tls_client.c` `space_allowed` compares address
+  spaces itself. The proved `net_space_allows` is called only by the tests.
+- **A tab can pick the test hook's tab executable.** A navigation URL ending in `#escape`
+  starts `CYBER_TAB_EXE` instead of `cb_tab.exe` when that variable is set (`coordinator.c`).
+  The URL trigger should go: the escape test can set the variable alone.
+- **An atlas left half-made.** If replacing a font atlas runs out of memory, the slot stays
+  marked uploaded with no pixels (`gpu_main.c` `upload_atlas`). Then P5's guarantee, that
+  every glyph names an uploaded atlas, no longer means a usable one.
+- **Denial of service across sites.** None of these crosses a site's data, but each lets one
+  tab slow the others:
+  - a tab that doesn't read its replies holds a network worker for 30 s (of 16), and the
+    single-threaded storage service for 10 s;
+  - the network process's job queue is unbounded, and its `malloc` unchecked;
+  - each channel can make a server hold 256 MB;
+  - a tab can open 60 tabs through `TU_NAVIGATE` and use up every slot.
+- **Smaller:**
+  - the relay's `step` drops events past a depth of 4, so the core and its sockets can
+    disagree;
+  - the storage service never drops a broken network-process client (`revoke` matches tabs
+    only);
+  - whether a WebGPU canvas texture can be used after `canvas_texture` released it hasn't
+    been traced.
+
+#### 8.7.3 The work, in order of what a tab reaches first
+
+1. **The channels' framing.** `big_recv` and `chan_attach`'s checks move into a proved core:
+   - no undefined behavior for any bytes (P1);
+   - a message is exactly the fragments sent, at most `BIG_MAX`;
+   - a per-channel limit on what a server holds.
+2. **The coordinator's handles.** `perform` splits in two:
+   - a proved `coord_plan` turns an action into a list of operations, each "copy handle *h* of
+     table *T*, entry *i*, into the process of table *U*, entry *j*";
+   - a wrapper makes each Windows call, with an ACSL contract for `DuplicateHandle`,
+     `CloseHandle` and the spawn.
+
+   With the handle tables as ghost state, the proof shows:
+   - a tab's process receives only channels to servers badged with its slot's label, and a
+     web-GPU channel only from its own site's process;
+   - a process's exit is paired with the slot that started it.
+
+   This proves at the code level what section 8.6 lists as reviewed. The `#escape` trigger
+   goes.
+3. **Each server's decoding of a tab's messages,** as functions without Windows calls, each
+   proved free of undefined behavior and to accept only messages of a stated grammar, with
+   every field it passes on in range:
+   - network: `NetRequest` and the cookie messages;
+   - storage: `StoreRequest` and `to_path`;
+   - GPU: atlases, images and the frame header (fixing the atlas finding);
+   - UI: `from_tab`;
+   - web-GPU: the WebGL record walker and the WebGPU value-tree parser (section 5.7's plan).
+4. **The network process's policy into `net_policy.c`:**
+   - PNA through `net_space_allows`;
+   - CORS (`may_read`), `initiator_ok` and the frame list;
+   - the redirect check for navigations (P10).
+5. **The rest of each shim, with Eva.** Frama-C's Eva runs on each process's whole shim, with
+   stubs for the Windows calls. Every alarm is fixed or explained in this document. That
+   shows the shim has no undefined behavior (P1). It doesn't show that the shim does the
+   right thing; steps 2 to 4 cover that for what a tab controls.
+6. **The protocol model.** `Protocol.tla` gains redirected navigations: a tab's document
+   comes from its own site, or the tab is replaced by one of the final site's.
+
+**Escape tests to add:**
+- a cross-site redirect of the tab's own navigation;
+- replies left unread on the network and storage channels;
+- a 256 MB message;
+- navigations to `#escape`;
+- an out-of-memory atlas, by fault injection in a test build.
+
+**After M9,** section 8.4's trusted list is:
+- the Windows wrappers, named one by one;
+- the UI's window code;
+- the HTTP, TLS and URL code behind the decoded requests;
+- the rasterizers;
+- ANGLE, wgpu, Naga and the driver;
+- what it lists today below the processes (the kernel, the compiler, the tools).
+
+**Cost.** `tools/prove.sh` already takes about an hour. Each new core gets its own target, so
+a change proves only what it touches. Steps 1, 2 and 4 are like M4's work. Step 3's web-GPU
+decoders are the largest. If they would hold up the rest, they can follow as their own
+milestone.
+
 ## 9. Iframes from other sites
 
 In the first phases a cross-site iframe runs in its embedder's process, as in browsers before
@@ -1098,6 +1331,7 @@ memory of an idle tab process (about:blank). Things that would reduce it, in ord
 | M6 | Multiple windows; dragging tabs out and between windows; compositor scrolling | Drag works while a video plays, without a reload (done) |
 | M7 | Cross-site iframe partitioning, ORB, Private Network Access | Frames from other sites load with their storage and cookies apart; the network process enforces ORB, CORS and PNA; the escape tests pass (done) |
 | M8 | Web-GPU process: WebGPU on `wgpu-native`, WebGL 1 and 2 on ANGLE (pinned prebuilt DLLs), on the GPU; shared canvas textures; the driver block list and feature limits; fuzzing | The WebGPU and WebGL conformance suites pass at a level to be set then; a crashing web-GPU process takes down only its canvases; on a blocked driver the APIs are unavailable |
+| M9 | Proving the shims (section 8.7): every privileged process's decoding of what a tab sends, and the coordinator's handing out of handles, in proved code; the rest of each shim free of undefined behavior (Eva); the findings of section 8.7.2 fixed first | All goals proved, Eva with no open alarm on the shims it covers; the escape tests pass with the new attacks; replays unchanged |
 | Later | Out-of-process iframes; JIT process; GPU video decode | |
 
 The single-process mode (`--single-process`, and what the replay harness uses) stays through
@@ -1468,6 +1702,130 @@ the same process, without a reload.
     transferred across realms.
   - A frame can't navigate the page (`top.location = ...`): the stand-in ignores it.
   - A frame's `about:blank` child keeps localStorage in memory only.
+
+**M8 (done; the conformance level is WebGL 1's first run, below, and the WebGL 2 suite and
+the WebGPU CTS are still to run):** the web-GPU process: WebGL 1 and 2 on ANGLE,
+WebGPU on wgpu-native, on the GPU (section 5.7.2).
+
+- **The test** (`tests/webgpu/webgpu_test.sh <build> [port] [fuzz batches]`) checks 46
+  things:
+  - **WebGL 1 and 2.**
+    - A triangle is drawn and read back.
+    - Uniforms, bindings, textures, vertex arrays, buffers read back, and syncs work.
+    - Errors come for out-of-range writes.
+    - Another context's objects are refused.
+    - The extensions offered include no GPU timers.
+  - **WebGPU.**
+    - An adapter with WebGPU's limits, and no timestamp queries.
+    - A compute shader runs, and a triangle is drawn into a texture and read back.
+    - Validation errors reach error scopes.
+    - 30 frames go to a canvas.
+  - **On the screen.** Both canvases appear, orange inside and blue outside.
+  - **Crash containment.** A web-GPU process that ends after 10 frames
+    (`CYBER_WEBGPU_CRASH_TEST`):
+    - the tab hears at once (the coordinator tells tabs whose process ended);
+    - the context is lost and `webglcontextlost` fires;
+    - the page lives on;
+    - the next page draws with a new process;
+    - nothing else ends.
+  - **The block list.**
+    - A blocked driver has neither API (`getContext` returns null, the adapter is null).
+    - A denied feature (compute) is refused as a validation error. The command buffer
+      using it is invalid, so none of it runs.
+  - **Process lifetime.** The site's last tab gone ends its process; the next tab of the site
+    gets a new one.
+  - **Fuzzing,** against the real libraries (`cb_webgpu_fuzz`):
+    - `gl`: random WebGL records, shaped by each op's length;
+    - `gpu`: random WebGPU records and value trees;
+    - `gpuseq`: well-formed calls on real objects, used right and wrong.
+
+    After each batch, a clear must read back. Long runs: `gl` 7,000 batches; `gpu`
+    11,000; `gpuseq` 13,000 over four seeds (each run stops after about 3,000, when
+    wgpu-native's leaks have used up device memory).
+- **The fuzzer found eight ways a page could abort the web-GPU process** through
+  wgpu-native. Each is now refused as a validation error (section 5.7.2):
+  - an unknown or missing enum;
+  - a missing module or view;
+  - an error scope popped that was never pushed;
+  - the mapping of an invalid buffer;
+  - a second adapter handle;
+  - a submit using a mapped or destroyed buffer;
+  - a command buffer encoded wrong;
+  - a submit to a destroyed device.
+
+  It also found two leaks of device memory, which it then worked around. The cases left
+  are bounded by the process's life.
+- **The escape tests pass,** 11 of 11 checks and 79 attempts. The hostile tab now also:
+  - asks for impossible contexts;
+  - presents canvases it never made;
+  - sends 2,000 batches of lying WebGL records, a value tree 3,000 deep, and 1,500
+    batches of lying WebGPU records;
+  - then breaks the channel.
+
+  The web-GPU process draws afterwards, and never ends.
+- **The proofs:** the coordinator core with its web-GPU table, 1,091 properties (P3,
+  `webgpu_ok`). Its proofs had started to time out: each write of an action now goes through a
+  small helper that promises what it leaves unchanged. The TLA+ model gains web-GPU processes:
+  - each serves only live tabs of its own site, and never opaque's (`WebgpuClientsTrue`);
+  - one per site (`OneWebgpuPerSite`);
+  - a tab waiting for one is answered or dies (`WebgpuAnswered`).
+
+  These are checked on the smaller live model (2 tab starts, 1 web-GPU start). The larger
+  safety model runs with web-GPU off, since together they pass 40 million states.
+- **The replays:** an M7 build against this one (`tests/jit/replay.sh`, 5 runs each, CPU
+  cycles; the machine was busy with the proofs during runs 2 to 5, so rounds are compared
+  in pairs):
+  - **YouTube home and search:** no change. Within ±4% per round, and 0.1% more JS calls.
+  - **YouTube watch page:** 5 to 8% more cycles and 5.7% more JS calls. Its script reads
+    `WebGLRenderingContext`, which now exists, and it then takes a longer path, as it
+    would in Chrome. Installing the APIs costs about 7 ms. Pages that never touch them pay
+    nothing beyond the stand-ins.
+- **The conformance suites** (`tests/conformance/conformance_test.sh`, run against shallow
+  clones of the Khronos WebGL suite and the WebGPU CTS). The browser can't yet run their own
+  harnesses: a script can't navigate (`location.href = ...` only updates the object), and a
+  page keeps its URL from before a redirect. So the UI script opens each page by its URL, and
+  a small server takes the counts each page posts.
+  - **WebGL 1 (1.0.4), the level M8 sets:** 568 of 971 pages pass every check, and 38,186 of
+    55,452 checks pass (69%). 107 pages never answered (76 timed out, 31 crashed).
+  - **The fixes the suite found:**
+    - `<script>.text` and `.src`;
+    - XHR's `overrideMimeType`, and relative URLs in XHR (they weren't resolved);
+    - `bufferData` with null or a non-buffer argument;
+    - binding one buffer for indices and for vertices (refused, as WebGL requires);
+    - `FLIP_Y` on typed arrays with unpadded last rows, and the 16-bit packed types;
+    - `texImage2D` from a WebGL canvas.
+
+    The XHR fix was made after that run. Of the failed checks, about 2,400 were on the
+    OpenGL ES ports, which load their shaders by relative XHR; a sample of them now passes
+    every check.
+  - **What fails most:**
+    - textures from a 2D canvas: the 2D context doesn't rasterize, so they come out
+      transparent black;
+    - context loss and restore;
+    - video sources;
+    - some extensions (float and half-float textures, instancing's errors).
+  - **Not run yet:** the WebGL 2 suite (2,865 pages, with dEQP) and the WebGPU CTS (693 spec
+    files). The runner covers both.
+- **Tests:** `proc_tests` 164 checks (17 for the web-GPU flows of the coordinator core). The
+  unit tests, the JIT tests, the sites tests and the window tests pass. In the window
+  tests, the one exception is dragging a tab back into its first window: it doesn't move.
+  That code is unchanged, and the drop depends on where windows are on the desktop, but it
+  is not checked against M7 here.
+- **Not covered yet:**
+  - **The WebGL 2 suite and the WebGPU CTS haven't been run,** and WebGL 1 passes 69% of its
+    checks (above). The level is set at that run; raising it is correctness work for later.
+  - Canvases reach the screen as a copy through the tab, not as textures shared with the
+    compositor. That costs a readback and an upload per presented frame.
+  - WebGPU's promises resolve when the web-GPU process answers. That process waits on the
+    GPU, so a long `mapAsync` holds the tab's JS thread.
+  - `copyExternalImageToTexture` and `texImage2D` take `<img>`, `<video>`, `ImageData` and
+    `ImageBitmap`-like objects. `texImage2D` also takes a WebGL canvas, and a 2D canvas
+    (which comes out blank). `copyExternalImageToTexture` takes no canvas yet.
+  - Missing for now: query sets and render bundles; external textures;
+    `getCompilationInfo` messages (shader errors come as validation errors).
+  - wgpu-native still leaks a device's memory in a few cases a page can bring about, a submit
+    refused while a buffer is mapped among them. They end with the site's process.
+  - The record decoders are fuzzed, not proved (section 5.7 plans that next).
 
 **Not in M1** (later milestones, or not yet planned):
 - Typing into the page (forms, text fields).

@@ -26,12 +26,16 @@ static union { SID s; char b[SECURITY_MAX_SID_SIZE]; } g_net_caps[2];
 static SID_AND_ATTRIBUTES g_net_cap_list[8];
 static DWORD g_net_ncaps;
 static union { ACL acl; char b[512]; } g_tab_dacl[COORD_MAX_TABS];
+static PSID g_webgpu_sids[COORD_MAX_WEBGPU];
+static wchar_t g_webgpu_names[COORD_MAX_WEBGPU][64];
+static union { ACL acl; char b[512]; } g_webgpu_dacl[COORD_MAX_WEBGPU];
 
 #define TAB_MEMORY_LIMIT   (4ull << 30)
 #define NET_MEMORY_LIMIT   (2ull << 30)
 #define STORE_MEMORY_LIMIT (512ull << 20)
 #define LOOP_MEMORY_LIMIT  (256ull << 20)
 #define GPU_MEMORY_LIMIT   (8ull << 30)
+#define WEBGPU_MEMORY_LIMIT (4ull << 30)
 
 /* The AppContainer SID of profile `name`, registering the profile the first
  * time: CreateProcess refuses an AppContainer SID with no profile. */
@@ -64,6 +68,40 @@ static PSID new_tab_sid(int slot) {
     return g_tab_sids[slot];
 }
 
+/* The same for the web-GPU process about to start in `slot`:
+ * "cyberbrowser.webgpu.<coordinator pid>.<64 random bits>". */
+static PSID new_webgpu_sid(int slot) {
+    if (slot < 0 || slot >= COORD_MAX_WEBGPU) return NULL;
+    sandbox_webgpu_ended(slot);
+    unsigned long long r = 0;
+    if (BCryptGenRandom(NULL, (PUCHAR)&r, sizeof(r), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) return NULL;
+    _snwprintf(g_webgpu_names[slot], 64, L"cyberbrowser.webgpu.%lu.%016llx", GetCurrentProcessId(), r);
+    g_webgpu_sids[slot] = profile_sid(g_webgpu_names[slot]);
+    if (!g_webgpu_sids[slot]) g_webgpu_names[slot][0] = 0;
+    return g_webgpu_sids[slot];
+}
+
+void sandbox_webgpu_ended(int slot) {
+    if (slot < 0 || slot >= COORD_MAX_WEBGPU || !g_webgpu_names[slot][0]) return;
+    DeleteAppContainerProfile(g_webgpu_names[slot]);
+    FreeSid(g_webgpu_sids[slot]);
+    g_webgpu_sids[slot] = NULL;
+    g_webgpu_names[slot][0] = 0;
+}
+
+/* What a process of AppContainer `sid` creates: this user, SYSTEM and
+ * itself, and nothing the loopback relay's restricting SIDs match. */
+static ACL *own_dacl(ACL *a, DWORD size, PSID sid) {
+    union { SID s; char b[SECURITY_MAX_SID_SIZE]; } system;
+    DWORD n = sizeof(system);
+    CreateWellKnownSid(WinLocalSystemSid, NULL, &system, &n);
+    InitializeAcl(a, size, ACL_REVISION);
+    AddAccessAllowedAce(a, ACL_REVISION, GENERIC_ALL, g_user);
+    AddAccessAllowedAce(a, ACL_REVISION, GENERIC_ALL, &system);
+    AddAccessAllowedAce(a, ACL_REVISION, GENERIC_ALL, sid);
+    return a;
+}
+
 void sandbox_tab_ended(int slot) {
     if (slot < 0 || slot >= COORD_MAX_TABS || !g_tab_names[slot][0]) return;
     DeleteAppContainerProfile(g_tab_names[slot]);
@@ -74,6 +112,7 @@ void sandbox_tab_ended(int slot) {
 
 void sandbox_end(void) {
     for (int i = 0; i < COORD_MAX_TABS; i++) sandbox_tab_ended(i);
+    for (int i = 0; i < COORD_MAX_WEBGPU; i++) sandbox_webgpu_ended(i);
 }
 
 /* The monikers of the registered profiles that start with `prefix`. */
@@ -104,8 +143,10 @@ static int list_profiles(const wchar_t *prefix, wchar_t (*out)[64], int cap) {
 static void sweep_tab_profiles(void) {
     static wchar_t names[512][64];
     int n = list_profiles(L"cyberbrowser.tab.", names, 512);
+    n += list_profiles(L"cyberbrowser.webgpu.", names + n, 512 - n);
     for (int i = 0; i < n; i++) {
-        unsigned long pid = wcstoul(names[i] + 17, NULL, 10);
+        const wchar_t *pidp = wcschr(names[i] + 13, L'.');
+        unsigned long pid = pidp ? wcstoul(pidp + 1, NULL, 10) : 0;
         HANDLE p = pid ? OpenProcess(SYNCHRONIZE, FALSE, pid) : NULL;
         bool alive = p && WaitForSingleObject(p, 0) == WAIT_TIMEOUT;
         if (p) CloseHandle(p);
@@ -265,7 +306,7 @@ static HANDLE child_job(SandboxKind kind) {
     lim.BasicLimitInformation.ActiveProcessLimit = 1;
     unsigned long long mem = kind == SB_TAB ? TAB_MEMORY_LIMIT : kind == SB_NET ? NET_MEMORY_LIMIT
                            : kind == SB_STORE ? STORE_MEMORY_LIMIT : kind == SB_LOOP ? LOOP_MEMORY_LIMIT
-                           : kind == SB_GPU ? GPU_MEMORY_LIMIT : 0;
+                           : kind == SB_GPU ? GPU_MEMORY_LIMIT : kind == SB_WEBGPU ? WEBGPU_MEMORY_LIMIT : 0;
     if (mem) {
         lim.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
         lim.ProcessMemoryLimit = (SIZE_T)mem;
@@ -299,7 +340,8 @@ bool sandbox_for(SandboxKind kind, int slot, SpawnSandbox *sb) {
                 PROCESS_CREATION_MITIGATION_POLICY_IMAGE_LOAD_NO_LOW_LABEL_ALWAYS_ON |
                 PROCESS_CREATION_MITIGATION_POLICY_IMAGE_LOAD_PREFER_SYSTEM32_ALWAYS_ON |
                 PROCESS_CREATION_MITIGATION_POLICY_FONT_DISABLE_ALWAYS_ON;
-    if (kind != SB_UI && kind != SB_GPU) m |= PROCESS_CREATION_MITIGATION_POLICY_WIN32K_SYSTEM_CALL_DISABLE_ALWAYS_ON;
+    if (kind != SB_UI && kind != SB_GPU && kind != SB_WEBGPU)
+        m |= PROCESS_CREATION_MITIGATION_POLICY_WIN32K_SYSTEM_CALL_DISABLE_ALWAYS_ON;
     if (kind == SB_TAB) m |= PROCESS_CREATION_MITIGATION_POLICY_PROHIBIT_DYNAMIC_CODE_ALWAYS_ON;
     sb->mitigations[0] = m;
     /* No child processes: the job allows one process.  (The child process
@@ -325,6 +367,13 @@ bool sandbox_for(SandboxKind kind, int slot, SpawnSandbox *sb) {
             AddAccessAllowedAce(a, ACL_REVISION, GENERIC_ALL, sb->appcontainer);
             sb->default_dacl = a;
         }
+        break;
+    case SB_WEBGPU:
+        /* Not LPAC: the graphics drivers' user-mode parts need what an
+         * AppContainer has (the GPU process runs in one too). */
+        sb->appcontainer = new_webgpu_sid(slot);
+        if (sb->appcontainer)
+            sb->default_dacl = own_dacl(&g_webgpu_dacl[slot].acl, sizeof(g_webgpu_dacl[slot]), sb->appcontainer);
         break;
     case SB_STORE:
         sb->appcontainer = g_store_sid;
@@ -385,6 +434,32 @@ bool sandbox_grant_folder(const wchar_t *dir, SandboxKind kind, bool write) {
     ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
     ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
     ea.Trustee.ptstrName = (LPWSTR)sid;
+    bool ok = SetEntriesInAclW(1, &ea, old, &acl) == ERROR_SUCCESS &&
+              SetNamedSecurityInfoW((LPWSTR)dir, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, acl, NULL) ==
+                  ERROR_SUCCESS;
+    if (acl) LocalFree(acl);
+    LocalFree(sd);
+    return ok;
+}
+
+bool sandbox_grant_packages_read(const wchar_t *dir) {
+    if (!g_on) return true;
+    union { SID s; char b[SECURITY_MAX_SID_SIZE]; } any;
+    DWORD n = sizeof(any);
+    if (!CreateWellKnownSid(WinBuiltinAnyPackageSid, NULL, &any, &n)) return false;
+    PACL old = NULL, acl = NULL;
+    PSECURITY_DESCRIPTOR sd = NULL;
+    if (GetNamedSecurityInfoW(dir, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &old, NULL, &sd) !=
+        ERROR_SUCCESS)
+        return false;
+    EXPLICIT_ACCESSW ea;
+    memset(&ea, 0, sizeof(ea));
+    ea.grfAccessPermissions = GENERIC_READ | GENERIC_EXECUTE;
+    ea.grfAccessMode = GRANT_ACCESS;
+    ea.grfInheritance = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
+    ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+    ea.Trustee.ptstrName = (LPWSTR)&any;
     bool ok = SetEntriesInAclW(1, &ea, old, &acl) == ERROR_SUCCESS &&
               SetNamedSecurityInfoW((LPWSTR)dir, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, acl, NULL) ==
                   ERROR_SUCCESS;

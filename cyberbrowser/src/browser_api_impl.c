@@ -1909,6 +1909,7 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, script_element_ctor, "prototype", script_element_proto);
     JS_SetPropertyStr(ctx, script_element_ctor, "supports",
         JS_NewCFunction(ctx, js_html_script_element_supports, "supports", 1));
+    html_script_api_install(ctx, script_element_proto);
     JS_SetPropertyStr(ctx, global, "HTMLScriptElement", script_element_ctor);
     JS_SetPropertyStr(ctx, window, "HTMLScriptElement", script_element_ctor);
 

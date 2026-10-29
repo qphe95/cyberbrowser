@@ -1,0 +1,26 @@
+# Prebuilt libraries for the web-GPU process (SANDBOX_DESIGN.md section 5.7),
+# pinned by SHA-256.  tools/fetch_prebuilt.sh fetches and checks them into
+# third_party/prebuilt/files/ (not committed); a mismatch fails.
+#
+# archive <name> <sha256> <url>
+# file    <archive name> <path in it> <sha256>
+# local   <path under the MSYS2 root> <sha256> <package and version>
+
+# wgpu-native v29.0.1.1 (WebGPU, webgpu.h), the project's Windows x86-64 release.
+archive wgpu 7e67d7445c42aeb85e30f88930fd8d7d83ee769e3390aeb1ada75ebf3cf78132 https://github.com/gfx-rs/wgpu-native/releases/download/v29.0.1.1/wgpu-windows-x86_64-msvc-release.zip
+file wgpu lib/wgpu_native.dll 5e26249c40dcdac43f5adca3195fcf40e4ec6c67472b38510165f411fcc198e7
+file wgpu include/webgpu/webgpu.h 2516cf5a7bec4385bf76ecc550d45015c1e3df77962211f3cef3f57507b2f2c8
+file wgpu include/webgpu/wgpu.h 873faa1c1b63d48e4d866000fc51a163e85d0f7c6c01425c687d3f12d073ff74
+
+# ANGLE (WebGL, EGL and GLES), MSYS2's mingw-w64-x86_64-angleproject
+# 2.1.r25748.890b5d8f-6: ANGLE at commit 890b5d8f, built with MinGW.  Neither
+# Chrome nor Electron ships ANGLE as DLLs any more.
+archive angle 758a85e878435bed76104d933f1f6c1268dca63eca0dceda357a6ef4180701f0 https://mirror.msys2.org/mingw/mingw64/mingw-w64-x86_64-angleproject-2.1.r25748.890b5d8f-6-any.pkg.tar.zst
+file angle mingw64/bin/libEGL.dll 0033437d679274030766277ea6dc4f95efa7dd836dc08f2bc92efcfd20110e21
+file angle mingw64/bin/libGLESv2.dll 52d62906224c9d81075304a56eff44b0b11c9e04a41a64203b78e46621623a96
+
+# The MinGW runtime ANGLE links against, from the MSYS2 that builds this.
+local mingw64/bin/libgcc_s_seh-1.dll 3d06aa666251bb355eb7b758db87a869a7f9124cdc7523dc7f7a753c28472960 mingw-w64-x86_64-gcc-libs-16.1.0-4
+local mingw64/bin/libstdc++-6.dll 96eb855392956023d7aa2f4a7b94a292ca15c2f4104ee41dde74a9491bc2b566 mingw-w64-x86_64-gcc-libs-16.1.0-4
+local mingw64/bin/libwinpthread-1.dll f7d57886d46b8065f8a7951c5ec8fe52d97a0f55b165c3d0c733854119b5803f mingw-w64-x86_64-libwinpthread-14.0.0.r37.g2bfe61fba-1
+local mingw64/bin/zlib1.dll 93e9243a44c29200eeacaf9658efe2558581770e4b11ca4b500e18e424a6e3b5 mingw-w64-x86_64-zlib-1.3.2-2

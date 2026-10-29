@@ -165,6 +165,83 @@ static void test_coord(void) {
     CHECK(g_a.n == 0);
 }
 
+static void step(CoordEventKind kind, int slot) {
+    CoordEvent e;
+    memset(&e, 0, sizeof(e));
+    e.kind = kind;
+    e.slot = slot;
+    coord_step(&g_s, &e, &g_a);
+}
+
+/* A tab opened and started: its slot. */
+static int started_tab(uint32_t tab, const char *url) {
+    open_tab(tab, url);
+    if (g_a.n != 1 || g_a.a[0].kind != CA_START_TAB) return -1;
+    int slot = g_a.a[0].slot;
+    step(CE_TAB_STARTED, slot);
+    return slot;
+}
+
+static void want_webgpu(uint32_t tab) {
+    UcTab t = { tab };
+    ui(UC_WEBGPU, &t, sizeof(t));
+}
+
+/* The web-GPU processes (section 5.7): one per site, started when a tab of
+ * it first asks, granted only to that site's tabs, ended with its last. */
+static void test_webgpu(void) {
+    coord_init(&g_s);
+    int yt1 = started_tab(1, "https://www.youtube.com/");
+    int ex = started_tab(2, "https://example.com/");
+    CHECK(yt1 >= 0 && ex >= 0);
+    want_webgpu(1);
+    CHECK(g_a.n == 1 && g_a.a[0].kind == CA_START_WEBGPU && !strcmp(g_a.a[0].site, "https+youtube.com"));
+    int w1 = g_a.a[0].webgpu;
+    want_webgpu(1);                                          /* asked again while it starts */
+    CHECK(g_a.n == 0);
+    want_webgpu(2);                                          /* another site: a process of its own */
+    CHECK(g_a.n == 1 && g_a.a[0].kind == CA_START_WEBGPU && !strcmp(g_a.a[0].site, "https+example.com") &&
+          g_a.a[0].webgpu != w1);
+    int w2 = g_a.a[0].webgpu;
+    step(CE_WEBGPU_STARTED, w1);                             /* granted to the youtube tab only */
+    CHECK(g_a.n == 1 && g_a.a[0].kind == CA_GRANT_WEBGPU && g_a.a[0].slot == yt1 && g_a.a[0].tab == 1 &&
+          g_a.a[0].webgpu == w1 && !strcmp(g_a.a[0].site, "https+youtube.com"));
+    int yt3 = started_tab(3, "https://music.youtube.com/");   /* the same site: the same process, at once */
+    want_webgpu(3);
+    CHECK(g_a.n == 1 && g_a.a[0].kind == CA_GRANT_WEBGPU && g_a.a[0].slot == yt3 && g_a.a[0].webgpu == w1);
+    step(CE_WEBGPU_EXITED, w2);                              /* example.com's failed to start */
+    CHECK(g_a.n == 1 && g_a.a[0].kind == CA_WEBGPU_FAILED && g_a.a[0].slot == ex && g_a.a[0].tab == 2);
+    step(CE_WEBGPU_STARTED, w2);                             /* (a start nobody asked for) */
+    CHECK(g_a.n == 0);
+    int blank = started_tab(4, "about:blank");               /* an opaque origin: none */
+    CHECK(blank >= 0);
+    want_webgpu(4);
+    CHECK(g_a.n == 1 && g_a.a[0].kind == CA_WEBGPU_FAILED && g_a.a[0].slot == blank);
+    want_webgpu(99);                                         /* no such tab */
+    CHECK(g_a.n == 0);
+    ui(UC_WEBGPU, "\x01", 1);                                /* too short */
+    CHECK(g_a.n == 0);
+    step(CE_TAB_EXITED, yt1);                                /* one youtube tab left: it stays */
+    bool killed = false;
+    for (int k = 0; k < g_a.n; k++) killed |= g_a.a[k].kind == CA_KILL_WEBGPU;
+    CHECK(!killed);
+    step(CE_TAB_EXITED, yt3);                                /* the last: it ends */
+    killed = false;
+    for (int k = 0; k < g_a.n; k++) killed |= g_a.a[k].kind == CA_KILL_WEBGPU && g_a.a[k].webgpu == w1;
+    CHECK(killed);
+    step(CE_WEBGPU_EXITED, w1);
+    CHECK(g_a.n == 0);
+    int yt5 = started_tab(5, "https://youtube.com/");        /* and a new one for the site's next tab */
+    want_webgpu(5);
+    CHECK(yt5 >= 0 && g_a.n == 1 && g_a.a[0].kind == CA_START_WEBGPU && !strcmp(g_a.a[0].site, "https+youtube.com"));
+    /* A crash while tabs use it: they ask again, and get a new one. */
+    step(CE_WEBGPU_STARTED, g_a.a[0].webgpu);
+    int w5 = g_a.a[0].webgpu;
+    step(CE_WEBGPU_EXITED, w5);
+    want_webgpu(5);
+    CHECK(g_a.n == 1 && g_a.a[0].kind == CA_START_WEBGPU);
+}
+
 static LoopState g_ls;
 static LoopActions g_la;
 
@@ -342,6 +419,7 @@ int main(void) {
     test_sites();
     test_store();
     test_coord();
+    test_webgpu();
     test_loop();
     test_gpu_decode();
     test_net_policy();

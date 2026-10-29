@@ -232,6 +232,20 @@ static const char k_link_js[] =
 "               set: function(v){ this.setAttribute('href', String(v)); }});\n"
 "})";
 
+/* HTMLScriptElement: src as a URL ('' for inline scripts; the WebGL suite
+ * finds its files by it) and text.  Assigning src stays a plain property, as
+ * it always was: setAttribute('src') would run the script at once. */
+static const char k_script_js[] =
+"(function(P){\n"
+"  if (Object.prototype.hasOwnProperty.call(P, 'src')) return;\n"
+"  Object.defineProperty(P, 'src', {configurable: true, enumerable: true,\n"
+"    get: function(){ var v = this.getAttribute('src'); if (v == null) return '';\n"
+"      try { return new URL(v, document.baseURI || location.href).href; } catch (e) { return v; } },\n"
+"    set: function(v){ Object.defineProperty(this, 'src', {value: v, writable: true, configurable: true, enumerable: true}); }});\n"
+"  Object.defineProperty(P, 'text', {configurable: true, enumerable: true,\n"
+"    get: function(){ return this.textContent; }, set: function(v){ this.textContent = v; }});\n"
+"})";
+
 static void run_installer(JSContextHandle ctx, const char *src, size_t len, const char *name, GCValue proto)
 {
     GCValue fn = JS_Eval(ctx, src, len, name, JS_EVAL_TYPE_GLOBAL);
@@ -253,6 +267,12 @@ void html_link_api_install(JSContextHandle ctx, GCValue link_proto)
 {
     if (!JS_IsObject(link_proto)) return;
     run_installer(ctx, k_link_js, sizeof(k_link_js) - 1, "<link_api>", link_proto);
+}
+
+void html_script_api_install(JSContextHandle ctx, GCValue script_proto)
+{
+    if (!JS_IsObject(script_proto)) return;
+    run_installer(ctx, k_script_js, sizeof(k_script_js) - 1, "<script_api>", script_proto);
 }
 
 void html_character_data_api_install(JSContextHandle ctx, GCValue character_data_proto)

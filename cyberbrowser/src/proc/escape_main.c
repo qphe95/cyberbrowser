@@ -6,7 +6,8 @@
  * (tests/sandbox/escape_test.sh).  It plays a tab whose renderer an attacker
  * controls, and tries to get out: to files, the registry, sockets, other
  * processes and threads, new processes, windows and the GPU, executable
- * memory, more memory than its job allows, other sites' storage and cookies;
+ * memory, more memory than its job allows, other sites' storage and cookies,
+ * its site's web-GPU process (records that lie, objects it never made);
  * and it sends malformed messages to every server and scribbles on the
  * channels' shared memory.  Each attempt prints a line:
  *
@@ -46,8 +47,8 @@
 #include "gpu_wire.h"
 
 static int g_attempts, g_escaped, g_failed;
-static Chan g_ui, g_net, g_store, g_gpu;
-static bool g_have_store, g_have_gpu;
+static Chan g_ui, g_net, g_store, g_gpu, g_ctl, g_wgpu;
+static bool g_have_store, g_have_gpu, g_have_ctl, g_have_wgpu;
 static uint32_t g_tab;
 static char g_url[PROTO_URL_MAX + 1];
 static char g_site[SITE_MAX];
@@ -897,6 +898,141 @@ static void gpu(void) {
     fflush(stdout);
 }
 
+/* ---- the site's web-GPU process -------------------------------------------------------- */
+
+/* Asked for as a tab asks (through the UI), granted on the control channel. */
+static bool wgpu_connect(void) {
+    if (!g_have_ctl || !chan_send(&g_ui, TU_WANT_WEBGPU, NULL, 0, 1000)) return false;
+    static ChanMsg m;
+    for (int i = 0; i < 150; i++) {
+        int r = chan_recv(&g_ctl, &m);
+        if (r < 0) return false;
+        if (r == 0) { chan_wait(&g_ctl, 100); continue; }
+        if (m.type == CT_WEBGPU_FAILED) return false;
+        if (m.type != CT_WEBGPU || m.len != sizeof(CtGpu)) continue;
+        CtGpu g;
+        memcpy(&g, m.data, sizeof(g));
+        return chan_attach(&g_wgpu, (HANDLE)(uintptr_t)g.chan_section, (HANDLE)(uintptr_t)g.chan_ev0,
+                           (HANDLE)(uintptr_t)g.chan_ev1, 0);
+    }
+    return false;
+}
+
+/* The next message of type t (its body in rx), or false after ms. */
+static bool wgpu_reply(BigRx *rx, uint16_t t, DWORD ms) {
+    unsigned long long until = GetTickCount64() + ms;
+    for (;;) {
+        int r = big_recv(&g_wgpu, rx);
+        if (r < 0) return false;
+        if (r > 0 && rx->type == t) return true;
+        if (r == 0) {
+            if (GetTickCount64() >= until) return false;
+            chan_wait(&g_wgpu, 50);
+        }
+    }
+}
+
+/* A WebGL context 1 cleared green and read back: true if it reads green. */
+static bool wgpu_gl_works(BigRx *rx) {
+    static const uint32_t recs[] = {
+        4, 8, 0x8D40, 0,                    /* bindFramebuffer(FRAMEBUFFER, null) */
+        13, 16, 0, 0x3f800000u, 0, 0x3f800000u,    /* clearColor(0, 1, 0, 1) */
+        12, 4, 0x4000,                      /* clear(COLOR_BUFFER_BIT) */
+        313, 28, 0, 0, 1, 1, 0x1908, 0x1401, 4,    /* readPixels: 4 bytes */
+    };
+    TwGlRun q = { 1, 77, 1 };
+    if (!big_send(&g_wgpu, TW_GL_RUN, &q, sizeof(q), recs, sizeof(recs), NULL, 0, 2000)) return false;
+    if (!wgpu_reply(rx, WT_GL_RESULT, 10000) || rx->total < sizeof(WtResult) + 8) return false;
+    const uint8_t *px = rx->buf + sizeof(WtResult) + 4;
+    return px[0] == 0 && px[1] == 255 && px[2] == 0;
+}
+
+static void webgpu(void) {
+    g_have_wgpu = wgpu_connect();
+    must("the site's web-GPU process is granted, as to any tab", g_have_wgpu);
+    if (!g_have_wgpu) return;
+    static BigRx rx;
+    TwGlCreate cr = { 1, 2, 64, 64, 0 };
+    big_send(&g_wgpu, TW_GL_CREATE, &cr, sizeof(cr), NULL, 0, NULL, 0, 2000);
+    bool made = wgpu_reply(&rx, WT_GL_CREATED, 10000) && rx.total >= sizeof(WtCreated) && ((WtCreated *)rx.buf)->ok;
+    must("a WebGL context", made && wgpu_gl_works(&rx));
+    /* Contexts it may not have: huge, of no version, past the limit. */
+    static const uint32_t bad[][5] = { { 2, 2, 100000, 100000, 0 }, { 3, 7, 1, 1, 0xffffffffu },
+                                       { 0, 1, 0, 0, 0 }, { 0xffffffffu, 2, 0xffffffffu, 1, 31 } };
+    int refused = 0;
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        TwGlCreate b = { bad[i][0], bad[i][1], bad[i][2], bad[i][3], bad[i][4] };
+        big_send(&g_wgpu, TW_GL_CREATE, &b, sizeof(b), NULL, 0, NULL, 0, 2000);
+        if (wgpu_reply(&rx, WT_GL_CREATED, 10000) && rx.total >= sizeof(WtCreated) && !((WtCreated *)rx.buf)->ok) refused++;
+    }
+    printf("[escape] note asked for %d impossible WebGL contexts: %d refused (huge ones are clamped by ANGLE)\n",
+           (int)(sizeof(bad) / sizeof(bad[0])), refused);
+    /* Other tabs' contexts and canvases: ids are this tab's own, so these
+     * name nothing (or this tab's), never another tab's pixels. */
+    int frames = 0;
+    for (uint32_t id = 1; id < 300; id += 13) {
+        TwPresent pr = { id, 1000 + id };
+        if (!big_send(&g_wgpu, TW_PRESENT, &pr, sizeof(pr), NULL, 0, NULL, 0, 2000)) break;
+        if (wgpu_reply(&rx, WT_FRAME, 5000) && rx.total > sizeof(WtFrame) && ((WtFrame *)rx.buf)->ctx != 1) frames++;
+    }
+    blocked_or("present another tab's canvas (its pixels sent here)", frames > 0, "pixels for a context it never made");
+    /* WebGL records that lie: random ops and lengths, ids never made. */
+    static uint8_t recs[8192];
+    for (int i = 0; i < 2000; i++) {
+        uint32_t len = 0;
+        while (len + 16 < sizeof(recs) && rnd() % 8) {
+            uint32_t op = rnd() % 3 ? 1 + rnd() % 101 : rnd() % 2 ? 256 + rnd() % 21 : 300 + rnd() % 41;
+            uint32_t n = rnd() % 4 ? 4 * (rnd() % 8) : rnd() % 3 ? rnd() % 64 : rnd();
+            memcpy(recs + len, &op, 4);
+            memcpy(recs + len + 4, &n, 4);
+            len += 8;
+            for (uint32_t k = 0; k < n && len < sizeof(recs); k++) recs[len++] = (uint8_t)(rnd() % 3 ? rnd() % 16 : rnd());
+        }
+        TwGlRun q = { 1 + rnd() % 3, (uint32_t)i, rnd() % 4 == 0 };
+        big_send(&g_wgpu, TW_GL_RUN, &q, sizeof(q), recs, len, NULL, 0, 2000);
+        if (q.reply) wgpu_reply(&rx, WT_GL_RESULT, 10000);
+        if (i % 100 == 0) {
+            TwGlResize rs = { 1, rnd() % 5000, rnd() % 5000 };
+            big_send(&g_wgpu, TW_GL_RESIZE, &rs, sizeof(rs), NULL, 0, NULL, 0, 2000);
+        }
+    }
+    TwGlResize back = { 1, 64, 64 };
+    big_send(&g_wgpu, TW_GL_RESIZE, &back, sizeof(back), NULL, 0, NULL, 0, 2000);
+    printf("[escape] note sent 2000 batches of lying WebGL records\n");
+    /* WebGPU records that lie: trees nested past the limit, counts that
+     * claim the world, ids never made, an adapter asked for and misused. */
+    static uint8_t gpu[70000];
+    uint32_t len = 0, deep = 3000;
+    uint32_t op = 1, n = 4 + deep + 1, id = 9;
+    memcpy(gpu, &op, 4); memcpy(gpu + 4, &n, 4); memcpy(gpu + 8, &id, 4);
+    len = 12;
+    for (uint32_t k = 0; k < deep; k++) gpu[len++] = 5;             /* [[[[... arrays without counts */
+    gpu[len++] = 0;
+    TwGpuRun gr = { 1, 1 };
+    big_send(&g_wgpu, TW_GPU_RUN, &gr, sizeof(gr), gpu, len, NULL, 0, 2000);
+    bool answered = wgpu_reply(&rx, WT_GPU_RESULT, 10000);
+    for (int i = 0; i < 1500; i++) {
+        len = 0;
+        while (len + 64 < sizeof(gpu) && rnd() % 6) {
+            uint32_t o = rnd() % 4 ? 1 + rnd() % 33 : rnd(), at = len;
+            memcpy(gpu + len, &o, 4);
+            len += 8;
+            for (int k = 0; k < 3; k++) { uint32_t v = rnd() % 3 ? rnd() % 40 : rnd(); memcpy(gpu + len, &v, 4); len += 4; }
+            uint32_t junk = rnd() % 4 ? rnd() % 40 : rnd() % 6000;
+            for (uint32_t k = 0; k < junk && len < sizeof(gpu); k++) gpu[len++] = (uint8_t)(rnd() % 2 ? rnd() % 9 : rnd());
+            uint32_t nn = rnd() % 10 ? len - at - 8 : rnd();
+            memcpy(gpu + at + 4, &nn, 4);
+        }
+        TwGpuRun q = { 2 + (uint32_t)i, rnd() % 4 == 0 };
+        big_send(&g_wgpu, TW_GPU_RUN, &q, sizeof(q), gpu, len, NULL, 0, 2000);
+        if (q.reply) wgpu_reply(&rx, WT_GPU_RESULT, 15000);
+    }
+    printf("[escape] note sent a tree nested %u deep (%s) and 1500 batches of lying WebGPU records\n", deep,
+           answered ? "refused" : "no answer");
+    must("the web-GPU process still draws for us after them", wgpu_gl_works(&rx));
+    fflush(stdout);
+}
+
 /* ---- main ---------------------------------------------------------------------------- */
 
 static void unhex(const char *h) {
@@ -911,10 +1047,11 @@ static void unhex(const char *h) {
 }
 
 int main(int argc, char **argv) {
-    HANDLE ui[3] = { 0 }, net[3] = { 0 }, st[3] = { 0 }, gp[3] = { 0 };
+    HANDLE ui[3] = { 0 }, net[3] = { 0 }, st[3] = { 0 }, gp[3] = { 0 }, ct[3] = { 0 };
     for (int i = 1; i < argc; i++) {
         HANDLE *h = !strcmp(argv[i], "--chan") ? ui : !strcmp(argv[i], "--net") ? net
-                  : !strcmp(argv[i], "--store") ? st : !strcmp(argv[i], "--gpu") ? gp : NULL;
+                  : !strcmp(argv[i], "--store") ? st : !strcmp(argv[i], "--gpu") ? gp
+                  : !strcmp(argv[i], "--ctl") ? ct : NULL;
         if (h && i + 3 < argc) {
             for (int k = 0; k < 3; k++) h[k] = spawn_handle_from_arg(argv[++i]);
         } else if (!strcmp(argv[i], "--tab") && i + 1 < argc) {
@@ -929,6 +1066,7 @@ int main(int argc, char **argv) {
     }
     g_have_store = st[0] && chan_attach(&g_store, st[0], st[1], st[2], 0);
     g_have_gpu = gp[0] && chan_attach(&g_gpu, gp[0], gp[1], gp[2], 0);
+    g_have_ctl = ct[0] && chan_attach(&g_ctl, ct[0], ct[1], ct[2], 1);
     char scheme[8], host[SITE_HOST_MAX + 1];
     if (site_url_host((const uint8_t *)g_url, (uint32_t)strlen(g_url), scheme, sizeof(scheme), host, sizeof(host)))
         site_of(scheme, host, g_site);
@@ -945,6 +1083,7 @@ int main(int argc, char **argv) {
     storage();
     network();
     gpu();
+    webgpu();
 
     /* Malformed requests: answered or ignored, never fatal. */
     char got[64];
@@ -964,6 +1103,7 @@ int main(int argc, char **argv) {
     fuzz(&g_store, "storage service", 3000);
     fuzz(&g_net, "network process", 3000);
     if (g_have_gpu) fuzz(&g_gpu, "GPU process", 3000);
+    if (g_have_wgpu) fuzz(&g_wgpu, "web-GPU process", 3000);
     scribble(st[0], "storage");
     scribble(net[0], "network");
     if (g_have_gpu) scribble(gp[0], "GPU");

@@ -39,6 +39,7 @@
 #include "http_download.h"
 #include "image_cache.h"
 #include "browser/storage_api.h"
+#include "browser/webgpu_bridge.h"
 
 unsigned long long timer_next_due_ms(void);
 unsigned long long page_time_ms(void);
@@ -234,6 +235,78 @@ static void handle(const ChanMsg *m) {
     }
 }
 
+/* From the coordinator: a new GPU process (CT_GPU), or the answer to a
+ * request for the web-GPU process (CT_WEBGPU, CT_WEBGPU_FAILED). */
+static int g_webgpu_answer;             /* 0 waiting, 1 granted, -1 refused or ended */
+static Chan g_webgpu;                   /* side 0: the tab */
+
+static void ctl_message(const ChanMsg *m) {
+    if ((m->type == CT_GPU || m->type == CT_WEBGPU) && m->len == sizeof(CtGpu)) {
+        CtGpu g;
+        memcpy(&g, m->data, sizeof(g));
+        HANDLE s = (HANDLE)(uintptr_t)g.chan_section, e0 = (HANDLE)(uintptr_t)g.chan_ev0,
+               e1 = (HANDLE)(uintptr_t)g.chan_ev1;
+        if (m->type == CT_WEBGPU) {
+            if (g_webgpu_answer == 0) g_webgpu_answer = chan_attach(&g_webgpu, s, e0, e1, 0) ? 1 : -1;
+            return;
+        }
+        /* A new GPU process: everything goes again, and a frame now. */
+        if (gpu_client_attach(s, e0, e1)) {
+            fprintf(stderr, "[tab %u] drawing with a new GPU process\n", g_tab);
+            g_in_flight = false;
+            g_need_paint = true;
+        }
+    } else if (m->type == CT_WEBGPU_FAILED) {
+        if (g_webgpu_answer > 0) fprintf(stderr, "[tab %u] the web-GPU process ended\n", g_tab);
+        g_webgpu_answer = -1;
+    }
+}
+
+/* ---- the site's web-GPU process (browser/webgpu_bridge.h) ----------------------- */
+
+/* Asked of the coordinator (through the UI) once; its answer waited for. */
+static bool webgpu_connect(void) {
+    if (!g_have_ctl || !chan_send(&g_chan, TU_WANT_WEBGPU, NULL, 0, 1000)) return false;
+    static ChanMsg m;
+    unsigned long long until = GetTickCount64() + 15000;
+    while (g_webgpu_answer == 0 && GetTickCount64() < until) {
+        int r = chan_recv(&g_ctl, &m);
+        if (r < 0) return false;
+        if (r > 0) { ctl_message(&m); continue; }
+        chan_wait(&g_ctl, 100);
+    }
+    fprintf(stderr, "[tab %u] web-GPU process: %s\n", g_tab, g_webgpu_answer > 0 ? "granted" : "none");
+    return g_webgpu_answer > 0;
+}
+
+static bool webgpu_send(uint16_t type, const void *a, uint32_t alen, const void *b, uint32_t blen) {
+    return big_send(&g_webgpu, type, a, alen, b, blen, NULL, 0, 10000);
+}
+
+/* Shaders compile and work finishes while the page waits: allow it 30 s,
+ * unless the coordinator says the process ended. */
+static bool webgpu_recv(uint16_t *type, const uint8_t **body, uint32_t *len) {
+    static BigRx rx;
+    static ChanMsg m;
+    unsigned long long until = GetTickCount64() + 30000;
+    for (;;) {
+        while (g_have_ctl && chan_recv(&g_ctl, &m) > 0) ctl_message(&m);
+        if (g_webgpu_answer < 0) return false;
+        int r = big_recv(&g_webgpu, &rx);
+        if (r < 0) return false;
+        if (r > 0) {
+            *type = rx.type;
+            *body = rx.buf;
+            *len = rx.total;
+            return true;
+        }
+        if (GetTickCount64() >= until) return false;
+        chan_wait(&g_webgpu, 100);
+    }
+}
+
+static const WebgpuBridge g_webgpu_bridge = { webgpu_connect, webgpu_send, webgpu_recv };
+
 static bool drain(void) {
     static ChanMsg m;
     bool any = false;
@@ -244,16 +317,11 @@ static bool drain(void) {
     }
     if (r < 0) ExitProcess(2);          /* the UI broke the channel */
     while (g_have_ctl && (r = chan_recv(&g_ctl, &m)) > 0) {
-        if (m.type != CT_GPU || m.len != sizeof(CtGpu)) continue;
-        CtGpu g;
-        memcpy(&g, m.data, sizeof(g));
-        /* A new GPU process: everything goes again, and a frame now. */
-        if (gpu_client_attach((HANDLE)(uintptr_t)g.chan_section, (HANDLE)(uintptr_t)g.chan_ev0,
-                              (HANDLE)(uintptr_t)g.chan_ev1)) {
-            fprintf(stderr, "[tab %u] drawing with a new GPU process\n", g_tab);
-            g_in_flight = false;
-            g_need_paint = true;
-        }
+        ctl_message(&m);
+        any = true;
+    }
+    if (webgpu_canvas_dirty_take()) {
+        g_need_paint = true;
         any = true;
     }
     uint32_t done;
@@ -598,6 +666,7 @@ int main(int argc, char **argv) {
             g_site[0] = 0;
     }
     if (g_have_store && g_site[0]) storage_set_backend(&g_storage);
+    if (g_have_ctl && g_site[0]) webgpu_bridge_set(&g_webgpu_bridge);
     fprintf(stderr, "[tab %u] %s (%ux%u)\n", g_tab, url, g_width, g_height);
     memory_report("at start");
 

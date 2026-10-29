@@ -90,7 +90,8 @@ check "nothing planted in the other site's folder" $([ ! -e "$sites/$other/escap
 check "no tab for a non-http URL" \
     $(! grep -h -E "^\[tab [0-9]+\] [^ ]+ \([0-9]+x[0-9]+\)$" $tab_logs | grep -v -q "\] http"; echo $?)
 check "the coordinator ended normally" $([ "$coord" = 0 ]; echo $?)
-check "the network, storage, relay and GPU processes lived" $(! grep -q "ended" "$tmp/coord.txt"; echo $?)
+check "the network, storage, relay, GPU and web-GPU processes lived (a web-GPU one may end, idle, with 0)" \
+    $(! grep -v "web-GPU process [0-9]* ended (0)" "$tmp/coord.txt" | grep -q "ended"; echo $?)
 pings=$(grep "^localhost:$port GET /ping" "$tmp/requests.log" | sed -n 's/.*fromjs=\([0-9]*\).*/\1/p')
 first=$(echo "$pings" | head -1)
 last=$(echo "$pings" | tail -1)

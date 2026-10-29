@@ -495,6 +495,12 @@ static void from_tab(Tab *t, const ChanMsg *m) {
         InvalidateRect(g_wins[t->win].wnd, NULL, FALSE);
         return;
     }
+    case TU_WANT_WEBGPU: {
+        /* For this tab only: the id is the channel's, not the tab's word. */
+        UcTab w = { t->id };
+        chan_send(&g_coord, UC_WEBGPU, &w, sizeof(w), 1000);
+        return;
+    }
     case TU_NAVIGATE: {
         if (m->len <= sizeof(TuNavigate) || m->len > sizeof(TuNavigate) + PROTO_URL_MAX) return;
         TuNavigate n;
@@ -964,6 +970,9 @@ static bool script_command(void) {
     if (sscanf(g_cmd, "open %4095s", arg) == 1) { open_tab_in(g_focus, arg); return true; }
     if (sscanf(g_cmd, "go %4095s", arg) == 1) { if (t) navigate(t, arg); return true; }
     if (sscanf(g_cmd, "wait %d", &a) == 1) return now - g_cmd_start >= (DWORD)a;
+    /* waitfile <path> <ms>: until the file exists (a test server says it is done), or ms. */
+    if (sscanf(g_cmd, "waitfile %4095s %d", arg, &a) == 2)
+        return GetFileAttributesA(arg) != INVALID_FILE_ATTRIBUTES || now - g_cmd_start >= (DWORD)a;
     if (!strncmp(g_cmd, "waitload", 8)) {
         int limit = 60000;
         sscanf(g_cmd, "waitload %d", &limit);

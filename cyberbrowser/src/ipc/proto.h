@@ -17,6 +17,7 @@ enum {
     UC_OPEN_TAB = 1,    /* UcOpenTab + URL: start a tab process */
     UC_CLOSE_TAB,       /* UcTab: end it */
     UC_QUIT,            /* (empty): end everything */
+    UC_WEBGPU,          /* UcTab: that tab asks for a channel to its site's web-GPU process */
 };
 
 typedef struct UcOpenTab {
@@ -61,6 +62,7 @@ enum {
     TU_TITLE,           /* UTF-8 title */
     TU_NAVIGATE,        /* TuNavigate + URL: the user followed a link */
     TU_STATE,           /* TuState */
+    TU_WANT_WEBGPU,     /* (empty): it needs its site's web-GPU process (passed on as UC_WEBGPU) */
 };
 
 typedef struct TuFrame {
@@ -82,6 +84,8 @@ typedef struct TuState {
 /* One way: the coordinator never reads from a tab. */
 enum {
     CT_GPU = 1,         /* CtGpu: a new GPU process; draw on this channel from now on */
+    CT_WEBGPU,          /* CtGpu: its channel to its site's web-GPU process (WebGL, WebGPU) */
+    CT_WEBGPU_FAILED,   /* (empty): none can be had (no site, a blocked driver, ...), or the one given ended */
 };
 
 typedef struct CtGpu {
@@ -248,6 +252,74 @@ typedef struct TgImage {
 typedef struct GtFrameDone {
     uint32_t frame;
 } GtFrameDone;
+
+/* ---- tab <-> its site's web-GPU process (bigmsg.h messages, the gl channel) - */
+/* WebGL and WebGPU (SANDBOX_DESIGN.md section 5.7).  A context is named by
+ * the tab's id for it; its calls go as records (webgl_backend.h, webgpu_wire.h)
+ * and are answered only where the API returns something.  A presented
+ * canvas comes back as pixels, which the tab draws like any image. */
+enum {
+    TW_GL_CREATE = 1,   /* TwGlCreate: a WebGL context */
+    TW_GL_RESIZE,       /* TwGlResize */
+    TW_GL_RUN,          /* TwGlRun + records; answered with WT_GL_RESULT if reply */
+    TW_PRESENT,         /* TwPresent: the canvas's pixels, as WT_FRAME */
+    TW_DESTROY,         /* TwContext: that context goes */
+    TW_GPU_RUN,         /* TwGpuRun + WebGPU commands (webgpu_wire.h); WT_GPU_RESULT if reply */
+    WT_GL_CREATED,      /* WtCreated + why not (UTF-8) */
+    WT_GL_RESULT,       /* WtResult + the queries' results */
+    WT_FRAME,           /* WtFrame + width * height * 4 bytes, RGBA, top-down */
+    WT_LOST,            /* TwContext: the context is lost (a GPU reset) */
+    WT_GPU_RESULT,      /* WtResult + results (webgpu_wire.h) */
+};
+
+typedef struct TwGlCreate {
+    uint32_t ctx;
+    uint32_t version;   /* 1 or 2 */
+    uint32_t width, height;
+    uint32_t flags;     /* WEBGL_ALPHA, ... (webgl_backend.h) */
+} TwGlCreate;
+
+typedef struct TwGlResize {
+    uint32_t ctx;
+    uint32_t width, height;
+} TwGlResize;
+
+typedef struct TwGlRun {
+    uint32_t ctx;
+    uint32_t seq;
+    uint32_t reply;     /* answer when done (its queries' results, or none) */
+} TwGlRun;
+
+typedef struct TwPresent {
+    uint32_t ctx;
+    uint32_t seq;
+} TwPresent;
+
+typedef struct TwContext {
+    uint32_t ctx;
+} TwContext;
+
+typedef struct TwGpuRun {
+    uint32_t seq;
+    uint32_t reply;
+} TwGpuRun;
+
+typedef struct WtCreated {
+    uint32_t ctx;
+    uint32_t ok;
+} WtCreated;
+
+typedef struct WtResult {
+    uint32_t ctx;       /* 0 for WebGPU */
+    uint32_t seq;
+    uint32_t ok;        /* 0: a record was malformed, the rest dropped */
+} WtResult;
+
+typedef struct WtFrame {
+    uint32_t ctx;
+    uint32_t seq;
+    uint32_t width, height;
+} WtFrame;
 
 /* ---- UI <-> GPU process ---------------------------------------------------- */
 enum {

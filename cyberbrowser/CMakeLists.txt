@@ -77,6 +77,7 @@ set(BE_SOURCES
     src/svg_render.c
     src/browser/url_api.c
     src/browser/platform_api.c
+    src/browser/webgpu_api.c
     src/browser/frame_api.c
     src/browser/fetch_api.c
     src/browser/timer_api.c
@@ -575,6 +576,33 @@ if(BE_PLATFORM_WINDOWS)
     target_link_libraries(cb_gpu PRIVATE cb_ipc gdi32 user32)
     target_compile_options(cb_gpu PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
 
+    # A site's web-GPU process (SANDBOX_DESIGN.md section 5.7): WebGL on ANGLE
+    # and WebGPU on wgpu-native, loaded at run time from webgpu\ next to the
+    # executables.  tools/fetch_prebuilt.sh fetches and checks them into
+    # third_party/prebuilt/files; the build copies them there.
+    set(PREBUILT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/prebuilt/files)
+    add_executable(cb_webgpu src/proc/webgpu_main.c src/proc/webgl_backend.c src/proc/webgl_gen.c
+                   src/proc/webgpu_wgpu.c src/proc/gpu_blocklist.c src/proc/site.c)
+    target_include_directories(cb_webgpu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${PREBUILT_DIR})
+    target_link_libraries(cb_webgpu PRIVATE cb_ipc)
+    target_compile_options(cb_webgpu PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
+    if(EXISTS ${PREBUILT_DIR}/wgpu_native.dll)
+        foreach(f wgpu_native.dll libEGL.dll libGLESv2.dll libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll zlib1.dll)
+            add_custom_command(TARGET cb_webgpu POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:cb_webgpu>/webgpu
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different ${PREBUILT_DIR}/${f} $<TARGET_FILE_DIR:cb_webgpu>/webgpu/${f})
+        endforeach()
+    else()
+        message(WARNING "No prebuilt web-GPU libraries: run tools/fetch_prebuilt.sh (WebGL and WebGPU stay unavailable)")
+    endif()
+    # Its record decoders under random records (tests/webgpu/webgpu_fuzz.c),
+    # unsandboxed, next to cb_webgpu so it finds the same libraries.
+    add_executable(cb_webgpu_fuzz tests/webgpu/webgpu_fuzz.c src/proc/webgl_backend.c src/proc/webgl_gen.c
+                   src/proc/webgpu_wgpu.c src/proc/gpu_blocklist.c)
+    target_include_directories(cb_webgpu_fuzz PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${PREBUILT_DIR})
+    target_compile_options(cb_webgpu_fuzz PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
+    target_link_options(cb_webgpu_fuzz PRIVATE -static)
+
     # A hostile tab for the escape tests (SANDBOX_DESIGN.md section 11.1): run
     # in a tab's sandbox, it tries to get out and reports what it reached.
     add_executable(cb_escape src/proc/escape_main.c src/proc/site.c)
@@ -585,7 +613,7 @@ if(BE_PLATFORM_WINDOWS)
     # Sandboxed processes can't read DLLs outside System32 (the MinGW runtime
     # in C:\msys64 included), so they link everything else statically.
     if(MINGW)
-        foreach(t cb_coord cb_ui cb_tab cb_net cb_store cb_loop cb_gpu cb_escape)
+        foreach(t cb_coord cb_ui cb_tab cb_net cb_store cb_loop cb_gpu cb_webgpu cb_escape)
             target_link_options(${t} PRIVATE -static)
         endforeach()
     endif()

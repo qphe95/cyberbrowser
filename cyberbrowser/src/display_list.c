@@ -11,6 +11,7 @@
 #include "image_cache.h"
 #include "svg_render.h"
 #include "browser_api_impl_types.h"
+#include "browser/webgpu_bridge.h"
 
 /* The frame a <video> shows now (browser/media_source_api.c). */
 bool media_video_frame_for_node(uint32_t node, const uint8_t **rgba, int *w, int *h,
@@ -1158,6 +1159,21 @@ static bool build_display_list_impl(LayoutContext *ctx, DisplayList *dl, float (
                 if (vstyle.object_fit == 0) vstyle.object_fit = 1;
                 emit_image_async(dl, &vbox, key, op);
             }
+            continue;
+        }
+
+        /* <canvas> with a WebGL or WebGPU context: its last presented frame
+         * (browser/webgpu_api.c puts it in the image cache), stretched to
+         * the content box as a canvas is. */
+        if (node && node->type == HTML_NODE_ELEMENT && node->store_id &&
+            strcasecmp(node->tag_name, "canvas") == 0 && g_image_cache && webgpu_canvas_has_frame(node->store_id)) {
+            char key[48];
+            snprintf(key, sizeof(key), "cyber-canvas:%u", node->store_id);
+            LayoutBox cbox = *box;
+            LayoutStyle cstyle = *box->s;
+            cbox.s = &cstyle;
+            cstyle.object_fit = 0;
+            emit_image_async(dl, &cbox, key, op);
             continue;
         }
 
