@@ -616,6 +616,7 @@ static void collect_ce_candidates(NodeId root, uint32_t **out, uint32_t *n) {
  * that already have one (upgraded elements).  Upgrades run only on connect. */
 void dom_ce_on_connect(JSContextHandle ctx, NodeId subtree) {
     CP_ACC("CE connect+upgrade");
+    frame_api_on_connect(ctx, subtree);
     uint32_t *ids = NULL, n = 0;
     collect_ce_candidates(subtree, &ids, &n);
     if (!n) { free(ids); return; }

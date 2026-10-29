@@ -348,9 +348,13 @@ static char *fetch_start_page(const char *url, size_t *out_size, HtmlPageStream 
      * is all here, as before). */
     const char *ps = cyber_getenv("CYBER_PRELOAD_SCAN");
     PageObserver obs = { ps && ps[0] == '0' ? NULL : html_preload_scan_begin(), page };
+    HttpRequestContext was;
+    http_request_context_get(&was);
+    http_request_context_set(HTTP_MODE_NAVIGATE, "");
     bool ok = obs.scan || obs.page
         ? http_get_to_memory_observed(url, headers, nheaders, &buffer, error, sizeof(error), page_observe, &obs)
         : http_get_to_memory_with_headers(url, headers, nheaders, &buffer, error, sizeof(error));
+    http_request_context_set(was.mode, was.initiator);
     html_preload_scan_end(obs.scan);
     if (!ok || !buffer.data || buffer.size == 0) {
         printf("FATAL: Failed to fetch start page: %s\n", error);

@@ -258,6 +258,7 @@ static void tls_init(TlsClient *client) {
     client->connected = false;
     client->plain = false;
     client->loop_id = 0;
+    client->space = -1;
     client->recv_timeout_ms = client->send_timeout_ms = 30000;
 }
 
@@ -372,12 +373,85 @@ static bool https_proxy_for(const char *host, char *phost, size_t phl, char *ppo
     return phost[0] != 0;
 }
 
+static TlsSpaceFn g_space_of;
+static __thread int t_space_limit = -1;
+static __thread int t_last_space = -1;
+
+void tls_set_space_policy(TlsSpaceFn classify) { g_space_of = classify; }
+void tls_set_space_limit(int limit) { t_space_limit = limit; }
+int tls_last_space(void) { return t_last_space; }
+void tls_reset_last_space(void) { t_last_space = -1; }
+
+static bool space_allowed(int space) {
+    return t_space_limit < 0 || (space >= 0 && space <= t_space_limit);
+}
+
+static void space_refused(const char *host, const char *port, char *err, size_t errLen) {
+    LOGW("Private Network Access: %s:%s is more private than the page", host, port);
+    if (err && errLen)
+        snprintf(err, errLen, "Private Network Access: %s:%s is more private than the page", host, port);
+}
+
+/* The space of loopback host:port (for the relay, which resolves nothing). */
+static int loopback_space(const char *host, const char *port) {
+    struct sockaddr_in6 a6;
+    struct sockaddr_in a4;
+    unsigned p = (unsigned)atoi(port);
+    if (!strcmp(host, "::1") || !strcmp(host, "[::1]")) {
+        memset(&a6, 0, sizeof(a6));
+        a6.sin6_family = AF_INET6;
+        a6.sin6_port = htons((unsigned short)p);
+        a6.sin6_addr.s6_addr[15] = 1;
+        return g_space_of((const struct sockaddr *)&a6);
+    }
+    memset(&a4, 0, sizeof(a4));
+    a4.sin_family = AF_INET;
+    a4.sin_port = htons((unsigned short)p);
+    a4.sin_addr.s_addr = htonl(0x7f000001);
+    return g_space_of((const struct sockaddr *)&a4);
+}
+
+/* With a classifier: resolve host and pick the first address the thread may
+ * reach, as a numeric host in ip (and its space); false if there is none. */
+static bool pick_address(const char *host, const char *port, char *ip, size_t ip_len, int *space,
+                         char *err, size_t errLen) {
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host, port, &hints, &res) != 0 || !res) {
+        if (err && errLen) snprintf(err, errLen, "Could not resolve %s", host);
+        return false;
+    }
+    bool found = false, refused = false;
+    for (struct addrinfo *a = res; a && !found; a = a->ai_next) {
+        int s = g_space_of(a->ai_addr);
+        if (!space_allowed(s)) { refused = true; continue; }
+        if (getnameinfo(a->ai_addr, (socklen_t)a->ai_addrlen, ip, (socklen_t)ip_len, NULL, 0, NI_NUMERICHOST) != 0)
+            continue;
+        *space = s;
+        found = true;
+    }
+    freeaddrinfo(res);
+    if (!found && refused) space_refused(host, port, err, errLen);
+    else if (!found && err && errLen) snprintf(err, errLen, "Could not resolve %s", host);
+    return found;
+}
+
 /* Connect the client to host:port: a loopback host through the relay when
  * there is one, else through the HTTPS proxy when one applies, else
- * directly. */
+ * directly.  With a space classifier, only to an address the thread's
+ * limit allows. */
 static int tls_net_connect(TlsClient *client, const char *host, const char *port,
                            char *err, size_t errLen) {
     mbedtls_net_context *net = &client->net;
+    if (g_space_of && tls_loopback_host(host)) {
+        client->space = loopback_space(host, port);
+        if (!space_allowed(client->space)) {
+            space_refused(host, port, err, errLen);
+            return MBEDTLS_ERR_NET_CONNECT_FAILED;
+        }
+    }
     if (g_loopback && tls_loopback_host(host)) {
         int id = g_loopback->connect(host, port);
         if (id <= 0) {
@@ -388,8 +462,18 @@ static int tls_net_connect(TlsClient *client, const char *host, const char *port
         return 0;
     }
     char phost[256], pport[16];
+    char ip[INET6_ADDRSTRLEN + 1];
+    const char *to = host;
+    if (g_space_of && !tls_loopback_host(host)) {
+        /* Resolved here, so what is checked is what is connected to (no
+         * second lookup to rebind).  Through a proxy, the proxy resolves:
+         * the check is then only as good as this lookup. */
+        if (!pick_address(host, port, ip, sizeof(ip), &client->space, err, errLen))
+            return MBEDTLS_ERR_NET_CONNECT_FAILED;
+        to = ip;
+    }
     if (!https_proxy_for(host, phost, sizeof(phost), pport, sizeof(pport)))
-        return mbedtls_net_connect(net, host, port, MBEDTLS_NET_PROTO_TCP);
+        return mbedtls_net_connect(net, to, port, MBEDTLS_NET_PROTO_TCP);
     LOGI("Connecting to %s:%s through proxy %s:%s", host, port, phost, pport);
     int ret = mbedtls_net_connect(net, phost, pport, MBEDTLS_NET_PROTO_TCP);
     if (ret != 0) return ret;
@@ -558,7 +642,7 @@ bool tls_client_connect(TlsClient *client, const char *host, const char *port,
     ret = tls_net_connect(client, host, port, err, errLen);
     if (net_timing()) t_tcp = net_now_ms();
     if (ret != 0) {
-        if (!(err && errLen && strncmp(err, "Proxy refused", 13) == 0))
+        if (!(err && errLen && (strncmp(err, "Proxy refused", 13) == 0 || strncmp(err, "Private Network", 15) == 0)))
             set_err(err, errLen, "TLS connect failed", ret);
         return false;
     }
@@ -900,8 +984,24 @@ static bool pool_client_alive(TlsClient *c) {
     return (r & MBEDTLS_NET_POLL_READ) == 0;
 }
 
+static TlsClient *pool_acquire(bool tls, const char *host, const char *port, bool fresh,
+                               bool *reused, char *err, size_t errLen);
+
 TlsClient *conn_pool_acquire(bool tls, const char *host, const char *port, bool fresh,
                              bool *reused, char *err, size_t errLen) {
+    TlsClient *c = pool_acquire(tls, host, port, fresh, reused, err, errLen);
+    if (c && g_space_of && !space_allowed(c->space)) {
+        /* Opened for another page, to an address this one may not reach. */
+        conn_pool_release(c, true);
+        space_refused(host, port, err, errLen);
+        return NULL;
+    }
+    if (c) t_last_space = c->space;
+    return c;
+}
+
+static TlsClient *pool_acquire(bool tls, const char *host, const char *port, bool fresh,
+                               bool *reused, char *err, size_t errLen) {
     if (reused) *reused = false;
     if (!host || !port) {
         set_err(err, errLen, "invalid host", TLS_ERR_GENERIC);

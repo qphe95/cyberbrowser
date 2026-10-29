@@ -432,6 +432,22 @@ void http_set_remote(const HttpRemote *remote) {
     g_remote = remote;
 }
 
+static __thread HttpRequestContext t_req_ctx;
+static __thread char t_last_url[2048];
+
+void http_request_context_set(int mode, const char *initiator) {
+    t_req_ctx.mode = mode;
+    snprintf(t_req_ctx.initiator, sizeof(t_req_ctx.initiator), "%s", initiator ? initiator : "");
+}
+
+void http_request_context_get(HttpRequestContext *out) {
+    *out = t_req_ctx;
+}
+
+const char *http_last_url(void) {
+    return t_last_url;
+}
+
 void http_cookie_set_for_request(const char *url, const char *set_cookie_header) {
     if (!url || !set_cookie_header || g_remote) return;
     cookie_set_internal(url, set_cookie_header, false);
@@ -1108,6 +1124,7 @@ static bool http_request_with_method_internal(const char *url, const char *metho
         return false;
     }
     bool in_memory = outBuffer && !bodyStream && url && method;
+    if (url) snprintf(t_last_url, sizeof(t_last_url), "%s", url);       /* each hop of a redirect */
     if (in_memory && replay_serve(method, url, outBuffer, outStatus)) {
         if (outTotalSize) *outTotalSize = outBuffer->size;
         /* (A recorded body is decoded and whole: observed in one piece.) */

@@ -106,6 +106,27 @@ typedef struct HttpRemote {
 } HttpRemote;
 void http_set_remote(const HttpRemote *remote);
 
+/* What the requests this thread makes next are for (SANDBOX_DESIGN.md
+ * section 2.4), which the network process needs for ORB, CORS and Private
+ * Network Access.  The caller sets it before a request and restores the
+ * previous one after (http_request_context_get).  Unset: no-cors, from the
+ * page's own origin. */
+enum {
+    HTTP_MODE_NO_CORS = 0,      /* subresources: images, scripts, styles, fonts, media */
+    HTTP_MODE_CORS,             /* fetch / XMLHttpRequest across origins */
+    HTTP_MODE_NAVIGATE,         /* the page's own document */
+    HTTP_MODE_FRAME,            /* an iframe's document */
+};
+typedef struct HttpRequestContext {
+    int mode;                   /* HTTP_MODE_* */
+    char initiator[512];        /* the requesting document's origin; "" = the page's */
+} HttpRequestContext;
+void http_request_context_set(int mode, const char *initiator);
+void http_request_context_get(HttpRequestContext *out);
+
+/* The URL the last request on this thread ended at (after redirects). */
+const char *http_last_url(void);
+
 /* Android-specific functions - only available on Android */
 #ifdef BE_PLATFORM_ANDROID
 // WebView-based downloading

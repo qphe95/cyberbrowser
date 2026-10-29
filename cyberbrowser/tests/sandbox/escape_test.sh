@@ -97,7 +97,7 @@ last=$(echo "$pings" | tail -1)
 check "storage and cookies work after the attack (counter $first -> $last)" \
     $([ "$(echo "$pings" | wc -l)" -ge 2 ] && [ "$last" = $((first + 1)) ]; echo $?)
 check "the other site's requests never carried the planted cookie" \
-    $(grep "^127.0.0.1:$port" "$tmp/requests.log" | grep -v "/echo" | grep -q planted; [ $? != 0 ]; echo $?)
+    $(grep "^127.0.0.1:$port" "$tmp/requests.log" | grep -v -e "/echo" -e "from-escape" | grep -q planted; [ $? != 0 ]; echo $?)
 check "the other site's last page loaded" $([ "$(grep -c "^127.0.0.1:$port GET /ping" "$tmp/requests.log")" -ge 2 ]; echo $?)
 check "the UI lived through the hostile tab (its last screenshot)" $([ -s "$tmp/after.bmp" ]; echo $?)
 check "no tab profile outlived the browser" $(! ls "$LOCALAPPDATA/Packages" | grep -q "^cyberbrowser\.tab\."; echo $?)

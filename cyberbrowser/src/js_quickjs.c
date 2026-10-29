@@ -18,6 +18,7 @@
 #include "css_layout.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
+#include "http_download.h"
 #include "browser_api_impl_types.h"
 #include "dom_wrap.h"
 #ifndef _WIN32
@@ -1943,6 +1944,11 @@ static NetReq *net_req_new(const char *url, const char *method, const char *body
 
 static void net_req_run(NetReq *r)
 {
+    /* What the network process needs for CORS and ORB (it checks them
+     * itself): cors across origins, and the requesting document. */
+    HttpRequestContext was;
+    http_request_context_get(&was);
+    http_request_context_set(r->cors_check ? HTTP_MODE_CORS : HTTP_MODE_NO_CORS, r->origin);
     /* The preflight runs here too, off the main thread: it is a network
      * round trip like the request. */
     if (r->preflight &&
@@ -1950,11 +1956,13 @@ static void net_req_run(NetReq *r)
                                 r->origin, r->credentials_include, r->err, sizeof(r->err))) {
         r->preflight_failed = true;
         r->ok = false;
+        http_request_context_set(was.mode, was.initiator);
         return;
     }
     r->ok = platform_http_request(r->url, r->method, r->body, r->body_len,
                                   (const char **)r->headers, (size_t)r->nheaders,
                                   &r->resp, &r->status, r->err, sizeof(r->err));
+    http_request_context_set(was.mode, was.initiator);
 }
 
 static void *net_req_thread(void *arg)

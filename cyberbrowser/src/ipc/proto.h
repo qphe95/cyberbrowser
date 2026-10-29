@@ -141,7 +141,7 @@ typedef struct CsRevoke {
 
 /* ---- tab <-> network process (bigmsg.h messages) -------------------------- */
 enum {
-    TN_REQUEST = 1,     /* NetRequest + method, url, headers (each NUL-terminated) + body */
+    TN_REQUEST = 1,     /* NetRequest + method, url, headers, initiator (each NUL-terminated) + body */
     TN_COOKIE_GET,      /* NetCookieGet + url: document.cookie */
     TN_COOKIE_SET,      /* url, NUL, cookie line: document.cookie = ... */
     NT_RESPONSE,        /* NetResponse + headers + error + body */
@@ -152,6 +152,8 @@ typedef struct NetRequest {
     uint32_t method_len, url_len, headers_len;  /* each counts its NUL */
     uint32_t nheaders;
     uint32_t body_len;
+    uint32_t mode;              /* HTTP_MODE_* (http_download.h): what it is for, the tab's word */
+    uint32_t initiator_len;     /* the requesting document's origin, counting its NUL ("": the page's) */
 } NetRequest;
 
 typedef struct NetCookieGet {

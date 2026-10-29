@@ -15,29 +15,55 @@
 #include "gc_value_helpers.h"
 #include "platform.h"
 #include "storage_api.h"
+#include "url_whatwg.h"
 
 /* ============================================================================
  * Storage API Implementation (localStorage/sessionStorage)
  * ============================================================================ */
 
-// Static storage data for localStorage and sessionStorage
-static StorageData g_local_storage_data = {0};
-static StorageData g_session_storage_data = {0};
+/* Each origin's stores: frames of other origins share the page's process
+ * (frame_api.c), and see only their own origin's. */
+typedef struct OriginStores {
+    char *origin;
+    StorageData local, session;
+    bool loaded, changed;               /* localStorage: loaded from the backend; changed since saved */
+} OriginStores;
+
+static OriginStores *g_stores;
+static int g_nstores, g_cap_stores;
 
 static const StorageBackend *g_backend;
-static bool g_local_loaded, g_local_changed;
 
 void storage_set_backend(const StorageBackend *backend) {
     g_backend = backend;
 }
 
+static OriginStores *stores_of(const char *origin) {
+    for (int i = 0; i < g_nstores; i++)
+        if (!strcmp(g_stores[i].origin, origin)) return &g_stores[i];
+    if (g_nstores == g_cap_stores) {
+        int ncap = g_cap_stores ? g_cap_stores * 2 : 4;
+        OriginStores *n = realloc(g_stores, (size_t)ncap * sizeof(*n));
+        if (!n) return NULL;
+        g_stores = n;
+        g_cap_stores = ncap;
+    }
+    OriginStores *o = &g_stores[g_nstores];
+    memset(o, 0, sizeof(*o));
+    o->origin = strdup(origin);
+    if (!o->origin) return NULL;
+    g_nstores++;
+    return o;
+}
+
 /* The store as [u32 key length][key][u32 value length][value]... */
-static void local_load(void) {
-    g_local_loaded = true;
+static void local_load(OriginStores *o) {
+    o->loaded = true;
     char *data = NULL;
     size_t len = 0;
-    if (!g_backend || !g_backend->load(&data, &len)) return;
-    StorageData *st = &g_local_storage_data;
+    /* An opaque origin's storage lives in memory only. */
+    if (!g_backend || !strcmp(o->origin, "null") || !g_backend->load(o->origin, &data, &len)) return;
+    StorageData *st = &o->local;
     size_t p = 0;
     while (p + 4 <= len) {
         uint32_t kl, vl;
@@ -70,69 +96,68 @@ static void local_load(void) {
     free(data);
 }
 
-bool storage_local_take_changes(char **data, size_t *len) {
-    if (!g_local_changed) return false;
-    StorageData *st = &g_local_storage_data;
-    size_t n = 0;
-    for (int i = 0; i < st->count; i++) n += 8 + st->items[i].key_len + st->items[i].value_len;
-    char *out = malloc(n ? n : 1);
-    if (!out) return false;
-    size_t p = 0;
-    for (int i = 0; i < st->count; i++) {
-        uint32_t kl = (uint32_t)st->items[i].key_len, vl = (uint32_t)st->items[i].value_len;
-        memcpy(out + p, &kl, 4); memcpy(out + p + 4, st->items[i].key, kl); p += 4 + kl;
-        memcpy(out + p, &vl, 4); memcpy(out + p + 4, st->items[i].value, vl); p += 4 + vl;
+bool storage_local_take_changes(char **origin, char **data, size_t *len) {
+    for (int i = 0; i < g_nstores; i++) {
+        OriginStores *o = &g_stores[i];
+        if (!o->changed || !strcmp(o->origin, "null")) continue;
+        StorageData *st = &o->local;
+        size_t n = 0;
+        for (int k = 0; k < st->count; k++) n += 8 + st->items[k].key_len + st->items[k].value_len;
+        char *out = malloc(n ? n : 1);
+        char *org = strdup(o->origin);
+        if (!out || !org) { free(out); free(org); return false; }
+        size_t p = 0;
+        for (int k = 0; k < st->count; k++) {
+            uint32_t kl = (uint32_t)st->items[k].key_len, vl = (uint32_t)st->items[k].value_len;
+            memcpy(out + p, &kl, 4); memcpy(out + p + 4, st->items[k].key, kl); p += 4 + kl;
+            memcpy(out + p, &vl, 4); memcpy(out + p + 4, st->items[k].value, vl); p += 4 + vl;
+        }
+        o->changed = false;
+        *origin = org;
+        *data = out;
+        *len = n;
+        return true;
     }
-    g_local_changed = false;
-    *data = out;
-    *len = n;
-    return true;
+    return false;
 }
 
-static StorageData* get_storage_data_of(JSContextHandle ctx, GCValue obj);
+/* The origin of the realm ctx (its document's location), malloc'd. */
+static char *realm_origin(JSContextHandle ctx) {
+    GCValue loc = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "location");
+    GCValue href = JS_IsObject(loc) ? JS_GetPropertyStr(ctx, loc, "href") : JS_UNDEFINED;
+    const char *h = JS_IsString(href) ? JS_ToCString(ctx, href) : NULL;
+    char *out = NULL;
+    WUrl u;
+    if (h && wurl_parse(h, strlen(h), NULL, &u) == 0) {
+        out = wurl_origin(&u);
+        wurl_free(&u);
+    }
+    if (h) JS_FreeCString(ctx, h);
+    return out ? out : strdup("null");
+}
 
-/* The store of a Storage object; localStorage is loaded on first use. */
+/* The store a Storage object (of realm ctx) stands for, and whether it is
+ * localStorage; localStorage is loaded on first use. */
+static StorageData *get_storage_data_in(JSContextHandle ctx, GCValue obj, OriginStores **of) {
+    char *origin = realm_origin(ctx);
+    OriginStores *o = origin ? stores_of(origin) : NULL;
+    free(origin);
+    if (!o) return NULL;
+    GCValue global = JS_GetGlobalObject(ctx);
+    bool session = JS_StrictEq(ctx, obj, JS_GetPropertyStr(ctx, global, "sessionStorage"));
+    if (of) *of = o;
+    if (session) return &o->session;
+    if (!o->loaded) local_load(o);
+    return &o->local;
+}
+
 static StorageData* get_storage_data(JSContextHandle ctx, GCValue obj) {
-    StorageData *st = get_storage_data_of(ctx, obj);
-    if (st == &g_local_storage_data && !g_local_loaded) local_load();
-    return st;
+    return get_storage_data_in(ctx, obj, NULL);
 }
 
 static void changed(StorageData *st) {
-    if (st == &g_local_storage_data) g_local_changed = true;
-}
-
-// Helper to identify which storage type based on object
-static StorageData* get_storage_data_of(JSContextHandle ctx, GCValue obj) {
-    // Compare object with known localStorage/sessionStorage globals
-    GCValue global = JS_GetGlobalObject(ctx);
-    GCValue localStorageGlob = JS_GetPropertyStr(ctx, global, "localStorage");
-    GCValue sessionStorageGlob = JS_GetPropertyStr(ctx, global, "sessionStorage");
-    
-    // Check if obj is the same as global localStorage
-    if (JS_StrictEq(ctx, obj, localStorageGlob)) {
-        return &g_local_storage_data;
-    }
-    // Check if obj is the same as global sessionStorage
-    if (JS_StrictEq(ctx, obj, sessionStorageGlob)) {
-        return &g_session_storage_data;
-    }
-    
-    // Also check for window.localStorage and window.sessionStorage pattern
-    GCValue window = JS_GetPropertyStr(ctx, global, "window");
-    if (!JS_IsUndefined(window) && !JS_IsNull(window)) {
-        GCValue winLocalStorage = JS_GetPropertyStr(ctx, window, "localStorage");
-        GCValue winSessionStorage = JS_GetPropertyStr(ctx, window, "sessionStorage");
-        if (JS_StrictEq(ctx, obj, winLocalStorage)) {
-            return &g_local_storage_data;
-        }
-        if (JS_StrictEq(ctx, obj, winSessionStorage)) {
-            return &g_session_storage_data;
-        }
-    }
-    
-    // Default to localStorage if we can't identify
-    return &g_local_storage_data;
+    for (int i = 0; i < g_nstores; i++)
+        if (st == &g_stores[i].local) g_stores[i].changed = true;
 }
 
 // Helper to find item index by key in storage

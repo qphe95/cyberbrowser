@@ -463,6 +463,7 @@ GCValue js_url_revoke_object_url(JSContextHandle ctx, GCValue this_val, int argc
 void url_api_install(JSContextHandle ctx, GCValue global);
 void platform_api_install(JSContextHandle ctx, GCValue global, GCValue window);
 void frame_api_install(JSContextHandle ctx, GCValue global);
+void frame_api_on_connect(JSContextHandle ctx, NodeId subtree);
 extern const JSCFunctionListEntry js_shadow_root_native_funcs[];
 extern const size_t js_shadow_root_native_funcs_count;
 void timer_install_rejection_tracker(JSRuntimeHandle rt);

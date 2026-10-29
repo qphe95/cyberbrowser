@@ -790,7 +790,7 @@ no focus events yet. Test scripts drag with the same mouse handlers (`dragout`,
 
 ### 8.1 What is verified
 
-| Component | Size (target) | Size (M6) | What is proved | Goals (M6) |
+| Component | Size (target) | Size (M7) | What is proved | Goals (M7) |
 |---|---|---|---|---|
 | Coordinator core (`coord_core.c`) | 2,000–3,000 lines | 430 lines | P1, P3, P6 (local respect), P7 | 4,898 |
 | `libchan`'s rings (`chan_ring.c`) | ~1,000 lines | 100 lines | P1, P2 | 214 |
@@ -798,6 +798,7 @@ no focus events yet. Test scripts drag with the same mouse handlers (`dragout`,
 | Storage service core (`store_core.c`) | ~1,500 lines | 120 lines | P1, P4, P7 | 5,153 |
 | Loopback relay core (`loop_core.c`) | ~300 lines | 320 lines | P1, P7, P8 | 874 |
 | GPU display-list decoder (`gpu_decode.c`) | ~1,500 lines | 300 lines | P1, P5, P7 | 1,265 |
+| Network policy core (`net_policy.c`) | — | 210 lines | P1, P7, P9 | 1,873 |
 
 The cores came out much smaller than the targets because what they decide is still small:
 three kinds of tab channel, no spare process, no navigation swaps. Section 8.6 says what M4
@@ -862,6 +863,11 @@ plugin, with Alt-Ergo, Z3 and CVC5 as provers:
 - **P8. The relay reaches only loopback.** Every connect action the relay core emits names
   `127.0.0.1` or `::1`, and every byte it forwards on a connection comes from the channel
   message for that connection or from that connection's socket, in order and unchanged.
+- **P9. No page reaches a more private network.** The network process's policy core
+  (`net_policy.c`) allows a connection only to an address space no more private than the
+  requesting tab's: public pages reach no private or loopback address, private pages no
+  loopback one. Its address classes and its ORB verdict are proved free of undefined
+  behavior and bounded (P1, P7) for any bytes. Applying them is the shim's work.
 
 **How these add up to isolation between sites.** Data from site `s` sits in `s`'s tab process,
 `s`'s folder, `s`'s channels, the network process, the GPU process's textures for `s`'s tabs,
@@ -905,7 +911,7 @@ Frama-C runs on Linux and macOS; here it runs in WSL (Ubuntu 24.04).
 for P1, the `Typed+Cast+ref` memory model, and `-wp-check-memory-model`) and TLC on the
 model. It fails if any goal is unproved. Since M5 it splits goals into their cases
 (`-wp-split`), which counts more goals but proves each faster, and gives the decoder 240 s a
-goal (60 s for the rest; 120 s until M6). The six cores take about 50 minutes from a cold cache on 12 cores,
+goal (60 s for the rest; 120 s until M6). The seven cores take about 45 minutes from a cold cache on 12 cores,
 and the two model checks about 9.5 minutes. A goal that timed out is cached as such: clear
 the session (`/tmp/cb_prove/<core>.session`) before retrying with a longer limit. The repository has no CI yet, so the script is
 run by hand before changes to a core are committed.
@@ -1014,6 +1020,51 @@ about folders exact, but a compromised embedder can read what the iframe has in 
 Out-of-process iframes (a tab made of several processes, composited together by the GPU
 process, with input routed by hit testing in the UI) come after M7.
 
+### 9.1 As built in M7
+
+- **Frames of other origins load,** each in a realm of its own in the page's process
+  (`frame_api.c`). Across origins a window is a stand-in made in the realm that looks at
+  it. The stand-in offers only:
+  - `postMessage`;
+  - `location`, to navigate (reading it throws `SecurityError`);
+  - `parent`, `top`, `frames`, `length` and `closed`.
+
+  `contentDocument` and `frameElement` are `null`. Messages are queued and delivered on
+  the event loop as JSON clones, with the sender's origin and its stand-in as `source`; a
+  message whose `targetOrigin` doesn't match is dropped. `about:blank` frames take their
+  parent's origin and fetch nothing.
+- **Iframes load when they are connected,** parsed or inserted by script, as well as when
+  script sets `src`. Before M7 only the last loaded them.
+- **localStorage is kept per origin.** A frame's origin from another site keeps its store at
+  `partitions/<its site>/local_storage/<origin>` under the page's site folder. A `+` becomes
+  `_`, since path components can't contain one.
+- **Cookies** were already partitioned: the network process keeps one jar per top-level site,
+  and a frame's requests and `document.cookie` use it. Third-party cookies live in that
+  site's `cookies` file rather than under `partitions/`.
+- **Every request says what it is for** (`NetRequest`'s `mode` and `initiator`, from
+  `http_request_context_set`): the page's document, a frame's document, cors, or no-cors.
+  It also says which origin asks.
+- **ORB and CORS** (section 2.4) are checked in the network process on the final URL, after
+  redirects:
+  - a no-cors response from another origin gets through only if `orb_verdict` allows it;
+  - a cors response only with an `Access-Control-Allow-Origin` naming the initiator, or
+    `*`.
+- **PNA:** a tab's address space is its document connection's (until then its site's host's:
+  `localhost` or an IP). Every other connect, redirects included, resolves the host in the
+  network process and goes only to an address the tab may reach (P9). So does a pooled
+  connection opened for another tab. `CYBER_PNA_PUBLIC_PORTS` makes loopback ports public,
+  for tests.
+- **What a compromised tab can still do:**
+  - the mode and initiator are its word, so it can claim "frame document" and read another
+    site's page, as frames require while they share their embedder's process;
+  - an initiator counts only if it is the tab's own site or an origin it loaded a frame
+    from, so claiming one gains nothing more;
+  - what it reads comes without that site's own cookies, which stay in that site's jar;
+  - PNA doesn't rest on its word: its documents are exempt, but its document connection
+    sets its space.
+
+  Out-of-process iframes close the frame gap.
+
 ## 10. Memory
 
 **Code is already shared.** Windows maps an executable's image section once and shares its
@@ -1045,7 +1096,7 @@ memory of an idle tab process (about:blank). Things that would reduce it, in ord
 | M4 | Proofs: coordinator, `libchan`, `site_of`, storage core (P1–P4, P6, P7); TLA+ model of the protocol. The loopback relay with its verified core (P1, P7, P8), and the network process moved to LPAC (section 6.4) | All goals proved (`tools/prove.sh`; CI when there is one); `localhost` pages and replays work with the network process in LPAC; the escape tests pass |
 | M5 | GPU process: display-list format, verified decoder (P5), Vulkan rasterizer, compositing into the UI's windows | Pages render the same as the CPU path (screenshot diff on the replays); CPU fallback works (done) |
 | M6 | Multiple windows; dragging tabs out and between windows; compositor scrolling | Drag works while a video plays, without a reload (done) |
-| M7 | Cross-site iframe partitioning, ORB, Private Network Access | |
+| M7 | Cross-site iframe partitioning, ORB, Private Network Access | Frames from other sites load with their storage and cookies apart; the network process enforces ORB, CORS and PNA; the escape tests pass (done) |
 | M8 | Web-GPU process: WebGPU on `wgpu-native`, WebGL 1 and 2 on ANGLE (pinned prebuilt DLLs), on the GPU; shared canvas textures; the driver block list and feature limits; fuzzing | The WebGPU and WebGL conformance suites pass at a level to be set then; a crashing web-GPU process takes down only its canvases; on a blocked driver the APIs are unavailable |
 | Later | Out-of-process iframes; JIT process; GPU video decode | |
 
@@ -1374,6 +1425,49 @@ the same process, without a reload.
     frame.
   - The video repaints twice a second (the engine's pace for media, unchanged).
   - The UI's tab strip is still GDI, and there are no focus events.
+
+**M7 (done):** frames from other sites, ORB, CORS and Private Network Access (section 9.1).
+
+- **The test** (`tests/sites/sites_test.sh <build> [port A] [port B]`; 127.0.0.1 and
+  localhost are two sites) checks 19 things:
+  - **Frames.** A frame from another site:
+    - loads, with its own localStorage, stored under the page's site;
+    - can't reach its parent's document or element, nor the page the frame's;
+    - talks to the page through `postMessage` both ways, with the right origins;
+    - doesn't get a message meant for another origin.
+
+    The frame's site, opened as a page of its own, sees none of the frame's storage or
+    cookies. An `about:blank` frame made by script is the page's own origin.
+  - **ORB and CORS.** ORB blocks JSON and HTML read across sites and lets scripts
+    through. A cors read without `Access-Control-Allow-Origin` fails; with it, it works.
+  - **PNA.** On a port made public, a page can't fetch from a loopback address, nor frame a
+    page there, but fetches from a public one.
+- **The escape tests pass,** 11 of 11 checks and 78 attempts. The hostile tab now also tries
+  to read another site's page as a no-cors subresource, in that site's name, and with
+  cors. All three are blocked. It can read the page by claiming a frame document, which the
+  test notes, as section 9.1 says.
+- **The proofs:** the network policy core, 1,873 goals (P1, P7, P9). WP took the enum's
+  constants as unsigned, so `client < NET_SPACE_PUBLIC` was never true for it: the
+  comparisons are now `int`.
+- **The replays:** the YouTube watch page still plays and drags (`window_test.sh`).
+  Its frames now load: an `about:blank` one, and a sign-in one that isn't in the
+  recording. Loading them costs nothing measurable. The A/B was run in one build, with a
+  temporary switch turning frame loading off (`tests/jit/replay.sh`, 5 runs each, median
+  CPU cycles):
+
+  | Replay | Frames off | Frames on |
+  |---|---|---|
+  | YouTube watch page | 10,921 M | 10,582 M |
+  | YouTube home | 4,932 M | 4,886 M |
+  | YouTube search | 13,439 M | 12,672 M |
+- **Tests:** `proc_tests` 147 checks (24 for the policy core); the unit tests, the JIT tests
+  and the window tests pass.
+- **Not covered yet:**
+  - Frames aren't painted (same-origin ones weren't either).
+  - Messages are JSON clones, not structured clones, and `MessagePort`s can't be
+    transferred across realms.
+  - A frame can't navigate the page (`top.location = ...`): the stand-in ignores it.
+  - A frame's `about:blank` child keeps localStorage in memory only.
 
 **Not in M1** (later milestones, or not yet planned):
 - Typing into the page (forms, text fields).

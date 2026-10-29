@@ -357,7 +357,10 @@ static bool net_request(const char *url, const char *method, const char *body, s
     size_t hlen = 0;
     for (size_t i = 0; i < nheaders; i++) hlen += strlen(headers[i]) + 1;
     size_t mlen = strlen(method) + 1, ulen = strlen(url) + 1;
-    char *strs = (char *)malloc(mlen + ulen + hlen + 1);
+    HttpRequestContext rc;
+    http_request_context_get(&rc);
+    size_t ilen = strlen(rc.initiator) + 1;
+    char *strs = (char *)malloc(mlen + ulen + hlen + ilen);
     if (!strs) return false;
     memcpy(strs, method, mlen);
     memcpy(strs + mlen, url, ulen);
@@ -367,8 +370,10 @@ static bool net_request(const char *url, const char *method, const char *body, s
         memcpy(strs + o, headers[i], n);
         o += n;
     }
+    memcpy(strs + o, rc.initiator, ilen);
+    o += ilen;
     NetRequest q = { (uint32_t)InterlockedIncrement(&g_net_id), (uint32_t)mlen, (uint32_t)ulen, (uint32_t)hlen,
-                     (uint32_t)nheaders, (uint32_t)body_len };
+                     (uint32_t)nheaders, (uint32_t)body_len, (uint32_t)rc.mode, (uint32_t)ilen };
     uint32_t len = 0;
     uint8_t *m = net_call(TN_REQUEST, q.id, &q, sizeof(q), strs, (uint32_t)o, body, (uint32_t)body_len, &len);
     free(strs);
@@ -443,7 +448,7 @@ static Chan g_store;                    /* side 0: the tab */
 static bool g_have_store;
 static BigRx g_store_rx;
 static uint32_t g_store_id;
-static char g_local_path[80];           /* local_storage/<origin> */
+static char g_site[SITE_MAX];            /* the page's site: its frames from others are partitioned */
 
 static bool store_call(uint16_t type, const char *path, const void *data, uint32_t dlen,
                        char **out, size_t *out_len) {
@@ -469,42 +474,66 @@ static bool store_call(uint16_t type, const char *path, const void *data, uint32
     }
 }
 
-static bool local_storage_load(char **data, size_t *len) {
-    return g_local_path[0] && store_call(TS_READ, g_local_path, NULL, 0, data, len);
+/* A name as a path component: itself if it is one ([a-z0-9_.-], at most
+ * 64), else h<a 64-bit hash>. */
+static void component(const char *name, char *out, size_t cap) {
+    bool ok = strlen(name) <= 64 && name[0] && name[0] != '.';
+    for (const char *p = name; ok && *p; p++)
+        ok = (*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || *p == '_' || *p == '.' || *p == '-';
+    if (ok) {
+        snprintf(out, cap, "%s", name);
+        return;
+    }
+    uint64_t h = 1469598103934665603ull;
+    for (const char *p = name; *p; p++) h = (h ^ (uint8_t)*p) * 1099511628211ull;
+    snprintf(out, cap, "h%016llx", (unsigned long long)h);
+}
+
+/* An origin's localStorage file: local_storage/<scheme>_<host>_<port>,
+ * under partitions/<its site> when its site isn't the page's (a frame from
+ * another site keeps its storage under the page's site: section 9). */
+static bool local_storage_path(const char *origin, char *out, size_t cap) {
+    char scheme[8], host[SITE_HOST_MAX + 1], site[SITE_MAX];
+    if (!site_url_host((const uint8_t *)origin, (uint32_t)strlen(origin), scheme, sizeof(scheme), host,
+                       sizeof(host)) || !site_of(scheme, host, site))
+        return false;
+    int port = !strcmp(scheme, "https") ? 443 : 80;
+    const char *a = strstr(origin, "://") + 3, *end = a + strcspn(a, "/?#");
+    for (const char *p = end; p > a; p--)
+        if (p[-1] == ':') { port = atoi(p); break; } else if (p[-1] < '0' || p[-1] > '9') break;
+    char name[SITE_HOST_MAX + 32], file[80], part[80];
+    snprintf(name, sizeof(name), "%s_%s_%d", scheme, host, port);
+    component(name, file, sizeof(file));
+    if (!strcmp(site, g_site)) {
+        snprintf(out, cap, "local_storage/%s", file);
+        return true;
+    }
+    for (char *p = site; *p; p++) if (*p == '+') *p = '_';          /* not in a path component */
+    component(site, part, sizeof(part));
+    snprintf(out, cap, "partitions/%s/local_storage/%s", part, file);
+    return true;
+}
+
+static bool local_storage_load(const char *origin, char **data, size_t *len) {
+    char path[256];
+    return local_storage_path(origin, path, sizeof(path)) && store_call(TS_READ, path, NULL, 0, data, len);
 }
 
 static const StorageBackend g_storage = { local_storage_load };
-
-/* The page origin's localStorage file: local_storage/<scheme>_<host>_<port>,
- * or a hash of that if it is too long for a path component. */
-static void local_storage_path(const char *url) {
-    char scheme[8], host[SITE_HOST_MAX + 1];
-    if (!site_url_host((const uint8_t *)url, (uint32_t)strlen(url), scheme, sizeof(scheme), host, sizeof(host)))
-        return;
-    int port = !strcmp(scheme, "https") ? 443 : 80;
-    const char *a = strstr(url, "://") + 3, *end = a + strcspn(a, "/?#");
-    for (const char *p = end; p > a; p--)
-        if (p[-1] == ':') { port = atoi(p); break; } else if (p[-1] < '0' || p[-1] > '9') break;
-    char origin[SITE_HOST_MAX + 32];
-    snprintf(origin, sizeof(origin), "%s_%s_%d", scheme, host, port);
-    if (strlen(origin) > 64) {
-        uint64_t h = 1469598103934665603ull;
-        for (const char *p = origin; *p; p++) h = (h ^ (uint8_t)*p) * 1099511628211ull;
-        snprintf(origin, sizeof(origin), "h%016llx", (unsigned long long)h);
-    }
-    snprintf(g_local_path, sizeof(g_local_path), "local_storage/%s", origin);
-}
 
 static void save_local_storage(void) {
     static ULONGLONG last;
     if (!g_have_store || GetTickCount64() - last < 500) return;
     last = GetTickCount64();
-    char *data;
+    char *origin, *data, path[256];
     size_t len;
-    if (!storage_local_take_changes(&data, &len)) return;
-    if (!store_call(TS_WRITE, g_local_path, data, (uint32_t)len, NULL, NULL))
-        fprintf(stderr, "[tab %u] could not save localStorage\n", g_tab);
-    free(data);
+    while (storage_local_take_changes(&origin, &data, &len)) {
+        if (local_storage_path(origin, path, sizeof(path)) &&
+            !store_call(TS_WRITE, path, data, (uint32_t)len, NULL, NULL))
+            fprintf(stderr, "[tab %u] could not save localStorage of %s\n", g_tab, origin);
+        free(origin);
+        free(data);
+    }
 }
 
 /* ---- main --------------------------------------------------------------- */
@@ -562,10 +591,13 @@ int main(int argc, char **argv) {
     http_set_remote(&g_remote);
     image_cache_allow_local_files(false);
     const char *url = unhex(url_hex);
-    if (g_have_store) {
-        local_storage_path(url);
-        storage_set_backend(&g_storage);
+    {
+        char scheme[8], host[SITE_HOST_MAX + 1];
+        if (!site_url_host((const uint8_t *)url, (uint32_t)strlen(url), scheme, sizeof(scheme), host, sizeof(host)) ||
+            !site_of(scheme, host, g_site))
+            g_site[0] = 0;
     }
+    if (g_have_store && g_site[0]) storage_set_backend(&g_storage);
     fprintf(stderr, "[tab %u] %s (%ux%u)\n", g_tab, url, g_width, g_height);
     memory_report("at start");
 

@@ -24,6 +24,9 @@ http.createServer((req, res) => {
   if (req.url === '/echo') {
     res.writeHead(200, { 'content-type': 'text/plain' });
     res.end(cookie);
+  } else if (req.url.startsWith('/page')) {
+    res.writeHead(200, { 'content-type': 'text/html' });     // a page that sets no cookies
+    res.end('<!doctype html><html><body>another site</body></html>');
   } else if (req.url === '/ping') {
     res.writeHead(200, { 'content-type': 'text/plain' });
     res.end('pong');

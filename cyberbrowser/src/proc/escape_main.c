@@ -39,6 +39,7 @@
 
 #include "chan.h"
 #include "bigmsg.h"
+#include "http_download.h"     /* HTTP_MODE_* */
 #include "proto.h"
 #include "spawn.h"
 #include "site.h"
@@ -498,19 +499,25 @@ static void storage(void) {
     store(TS_DELETE, NULL, "escape/own", NULL, 0, NULL, 0);
 }
 
-/* A request through the network process; the body into out. */
-static bool fetch(const char *url, const char *method, char *out, uint32_t cap) {
+/* A request through the network process, saying it is for mode (an
+ * HTTP_MODE_*) from initiator; the body into out. */
+static bool fetch_as(const char *url, const char *method, uint32_t mode, const char *initiator, char *out,
+                     uint32_t cap) {
     NetRequest q;
     memset(&q, 0, sizeof(q));
     q.id = ++g_id;
     q.method_len = (uint32_t)strlen(method) + 1;
     q.url_len = (uint32_t)strlen(url) + 1;
     q.headers_len = 0;
-    char buf[PROTO_URL_MAX + 32];
+    q.mode = mode;
+    q.initiator_len = (uint32_t)strlen(initiator) + 1;
+    char buf[2 * PROTO_URL_MAX + 32];
     memcpy(buf, method, q.method_len);
     memcpy(buf + q.method_len, url, q.url_len);
+    memcpy(buf + q.method_len + q.url_len, initiator, q.initiator_len);
     uint32_t len;
-    uint8_t *m = call(&g_net, TN_REQUEST, &q, sizeof(q), buf, q.method_len + q.url_len, NULL, 0, q.id, &len);
+    uint8_t *m = call(&g_net, TN_REQUEST, &q, sizeof(q), buf, q.method_len + q.url_len + q.initiator_len, NULL, 0,
+                      q.id, &len);
     NetResponse r;
     if (!m || len < sizeof(r)) return false;
     memcpy(&r, m, sizeof(r));
@@ -521,6 +528,10 @@ static bool fetch(const char *url, const char *method, char *out, uint32_t cap) 
         out[n] = 0;
     }
     return r.ok != 0;
+}
+
+static bool fetch(const char *url, const char *method, char *out, uint32_t cap) {
+    return fetch_as(url, method, HTTP_MODE_NO_CORS, "", out, cap);
 }
 
 static void network(void) {
@@ -572,6 +583,21 @@ static void network(void) {
     memcpy(set + ul + 1, line, sizeof(line));
     big_send(&g_net, TN_COOKIE_SET, set, (uint32_t)(ul + 1 + sizeof(line)), NULL, 0, NULL, 0, 1000);
     note("set a cookie for another site in its own jar", "the test script checks that site's own tabs never see it");
+    /* Another site's page, read as a no-cors subresource (ORB), in its own
+     * name (the initiator it claims isn't one it loaded), or as cors. */
+    char other[64];
+    snprintf(other, sizeof(other), "http://127.0.0.1:%s", port);
+    snprintf(url, sizeof(url), "%s/page?from-escape", other);    /* (a page that sets no cookies) */
+    blocked_or("read another site's page as a subresource",
+               fetch_as(url, "GET", HTTP_MODE_NO_CORS, "", got, sizeof(got)) && strstr(got, "<html") != NULL, got);
+    blocked_or("read another site's page claiming to be it",
+               fetch_as(url, "GET", HTTP_MODE_NO_CORS, other, got, sizeof(got)) && strstr(got, "<html") != NULL, got);
+    blocked_or("read another site's page with cors",
+               fetch_as(url, "GET", HTTP_MODE_CORS, other, got, sizeof(got)) && strstr(got, "<html") != NULL, got);
+    note("read another site's page as a frame document",
+         fetch_as(url, "GET", HTTP_MODE_FRAME, "", got, sizeof(got)) && strstr(got, "<html")
+             ? "it can, as frames share their embedder's process (section 9); without that site's own cookies"
+             : "refused");
     /* Local files through the network process. */
     blocked_or("fetch file:///C:/Windows/win.ini", fetch("file:///C:/Windows/win.ini", "GET", got, sizeof(got)) &&
                                                        strstr(got, "fonts") != NULL,

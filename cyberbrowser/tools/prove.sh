@@ -31,7 +31,7 @@ wp() {   # wp <name> <memory model> <files...>
         grep -qE "^\[wp\] Proved goals: +([0-9]+) / \1$" "$out/$name.log"
 }
 
-all="chan coord site store loop gpu tla"
+all="chan coord site store loop gpu net tla"
 for c in ${@:-$all}; do
     case $c in
     # Typed+Cast+ref separates pointer parameters used as references (the
@@ -43,6 +43,7 @@ for c in ${@:-$all}; do
     store) wp store Typed+Cast+ref src/proc/store_core.c src/proc/site.c ;;
     loop)  wp loop  Typed+Cast+ref src/proc/loop_core.c ;;
     gpu)   timeout=${PROVE_TIMEOUT:-240} wp gpu Typed+Cast src/proc/gpu_decode.c ;;   # its postconditions need longer
+    net)   wp net   Typed+Cast src/proc/net_policy.c ;;
     tla)
         # Safety on the larger model, liveness on the smaller one.  No deadlock
         # check: with the starts bounded, every behavior ends in a quiet state.

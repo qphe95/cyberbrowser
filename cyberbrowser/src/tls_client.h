@@ -12,6 +12,7 @@
 #endif
 
 #include "mbedtls/net_sockets.h"
+#include "tls_space.h"
 #include "mbedtls/ssl.h"
 #include "mbedtls/x509_crt.h"
 #include "psa/crypto.h"
@@ -41,6 +42,7 @@ typedef struct TlsClient {
      * socket's. */
     int loop_id;        /* > 0: through the relay */
     unsigned recv_timeout_ms, send_timeout_ms;
+    int space;          /* the peer's address space (tls_set_space_policy), -1 unknown */
 } TlsClient;
 
 /* The read and write timeouts of the connection. */

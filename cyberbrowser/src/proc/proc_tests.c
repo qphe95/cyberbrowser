@@ -10,6 +10,7 @@
 #include "coord_core.h"
 #include "loop_core.h"
 #include "gpu_decode.h"
+#include "net_policy.h"
 
 static int g_fail, g_run;
 
@@ -292,12 +293,58 @@ static void test_gpu_decode(void) {
     CHECK(gpu_decode(g_msg, len, &res, &f, out, levels, 400, &n, mout, 4, &nm) && n == 0);
 }
 
+/* What a page may reach (PNA) and read across origins (ORB). */
+static int orb(const char *mime, bool nosniff, int status, const char *body) {
+    return orb_verdict((const uint8_t *)mime, (uint32_t)strlen(mime), nosniff, status, (const uint8_t *)body,
+                       (uint32_t)strlen(body));
+}
+
+static void test_net_policy(void) {
+    static const uint8_t lo[4] = { 127, 0, 0, 1 }, ten[4] = { 10, 1, 2, 3 }, cg[4] = { 172, 20, 0, 1 },
+                         cg_out[4] = { 172, 32, 0, 1 }, home[4] = { 192, 168, 1, 1 }, pub[4] = { 8, 8, 8, 8 },
+                         zero[4] = { 0, 0, 0, 0 };
+    CHECK(net_space_v4(lo) == NET_SPACE_LOCAL && net_space_v4(zero) == NET_SPACE_LOCAL);
+    CHECK(net_space_v4(ten) == NET_SPACE_PRIVATE && net_space_v4(cg) == NET_SPACE_PRIVATE &&
+          net_space_v4(home) == NET_SPACE_PRIVATE);
+    CHECK(net_space_v4(cg_out) == NET_SPACE_PUBLIC && net_space_v4(pub) == NET_SPACE_PUBLIC);
+    uint8_t v6[16];
+    memset(v6, 0, sizeof(v6));
+    v6[15] = 1;
+    CHECK(net_space_v6(v6) == NET_SPACE_LOCAL);                         /* ::1 */
+    v6[10] = v6[11] = 0xff; v6[12] = 192; v6[13] = 168; v6[14] = 0; v6[15] = 9;
+    CHECK(net_space_v6(v6) == NET_SPACE_PRIVATE);                       /* ::ffff:192.168.0.9 */
+    memset(v6, 0, sizeof(v6));
+    v6[0] = 0xfd;
+    CHECK(net_space_v6(v6) == NET_SPACE_PRIVATE);                       /* fd00::/8 */
+    v6[0] = 0x20; v6[1] = 0x01;
+    CHECK(net_space_v6(v6) == NET_SPACE_PUBLIC);                        /* 2001:: */
+    CHECK(net_space_allows(NET_SPACE_LOCAL, NET_SPACE_PUBLIC) && net_space_allows(NET_SPACE_PRIVATE, NET_SPACE_PRIVATE));
+    CHECK(!net_space_allows(NET_SPACE_PUBLIC, NET_SPACE_PRIVATE) && !net_space_allows(NET_SPACE_PRIVATE, NET_SPACE_LOCAL));
+    CHECK(!net_space_allows(7, NET_SPACE_PUBLIC) && !net_space_allows(NET_SPACE_LOCAL, -1));
+    /* ORB: what embeds passes, documents don't. */
+    CHECK(orb("image/png", true, 404, "<html>") == ORB_ALLOW);
+    CHECK(orb("text/javascript; charset=utf-8", false, 200, "var a;") == ORB_ALLOW);
+    CHECK(orb(" Text/CSS", false, 200, "") == ORB_ALLOW);
+    CHECK(orb("application/pdf", false, 200, "%PDF") == ORB_BLOCK);
+    CHECK(orb("text/html", true, 200, "var a;") == ORB_BLOCK);
+    CHECK(orb("application/json", false, 200, "  {\"secret\": 1}") == ORB_BLOCK);
+    CHECK(orb("text/plain", false, 200, "\xef\xbb\xbf<!DOCTYPE html><p>") == ORB_BLOCK);
+    CHECK(orb("", false, 200, ")]}'\n[1]") == ORB_BLOCK);
+    CHECK(orb("text/plain", false, 200, "{ \"a\\\"b\" : 1 }") == ORB_BLOCK);
+    CHECK(orb("text/html", false, 500, "var a;") == ORB_BLOCK);
+    CHECK(orb("application/octet-stream", false, 200, "var x = {a: 1};") == ORB_ALLOW);
+    CHECK(orb("text/plain", false, 200, "{a: 1}") == ORB_ALLOW);          /* a block, not JSON */
+    CHECK(orb("application/xml", false, 200, "<?xml version='1.0'?>") == ORB_BLOCK);
+    CHECK(orb("text/html", false, 200, "<html") == ORB_ALLOW);           /* cut short: no tag yet */
+}
+
 int main(void) {
     test_sites();
     test_store();
     test_coord();
     test_loop();
     test_gpu_decode();
+    test_net_policy();
     printf("%d checks, %d failed\n", g_run, g_fail);
     return g_fail ? 1 : 0;
 }

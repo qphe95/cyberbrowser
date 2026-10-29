@@ -509,7 +509,7 @@ if(BE_PLATFORM_WINDOWS)
     # Tests of the pure parts: sites, the storage rules, the coordinator's and
     # the relay's cores, the GPU process's decoder.
     add_executable(proc_tests src/proc/proc_tests.c src/proc/coord_core.c src/proc/site.c src/proc/store_core.c
-                   src/proc/loop_core.c src/proc/gpu_decode.c)
+                   src/proc/loop_core.c src/proc/gpu_decode.c src/proc/net_policy.c)
     target_link_libraries(proc_tests PRIVATE cb_ipc)
     target_compile_options(proc_tests PRIVATE -Wall -Wextra)
 
@@ -531,7 +531,7 @@ if(BE_PLATFORM_WINDOWS)
     endif()
 
     # The network process: HTTP and TLS from the engine library, no JS.
-    add_executable(cb_net src/proc/net_main.c src/proc/loop_client.c)
+    add_executable(cb_net src/proc/net_main.c src/proc/loop_client.c src/proc/net_policy.c src/proc/site.c)
     target_include_directories(cb_net PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_include_directories(cb_net BEFORE PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/win32)
     target_link_libraries(cb_net PRIVATE cyberbrowser_lib cb_ipc)
@@ -579,6 +579,7 @@ if(BE_PLATFORM_WINDOWS)
     # in a tab's sandbox, it tries to get out and reports what it reached.
     add_executable(cb_escape src/proc/escape_main.c src/proc/site.c)
     target_link_libraries(cb_escape PRIVATE cb_ipc ws2_32)
+    target_include_directories(cb_escape PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_compile_options(cb_escape PRIVATE -Wall -Wextra)
 
     # Sandboxed processes can't read DLLs outside System32 (the MinGW runtime
