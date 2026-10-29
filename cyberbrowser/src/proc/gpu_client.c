@@ -63,12 +63,14 @@ static uint32_t uv(float v) {
     return (uint32_t)llround((double)v * WIRE_UV_ONE);
 }
 
-uint32_t gpu_encode_frame(const DisplayList *dl, uint32_t frame, uint32_t width, uint32_t height, uint8_t **out) {
+uint32_t gpu_encode_frame(const DisplayList *dl, const GpuFrame *hdr, uint8_t **out) {
     size_t bytes = WIRE_FRAME_BYTES + (size_t)dl->count * WIRE_CMD_BYTES + (size_t)dl->mask_count * WIRE_MASK_BYTES;
     if (bytes > BIG_MAX) return 0;
     uint8_t *buf = (uint8_t *)malloc(bytes);
     if (!buf) return 0;
-    GpuFrame f = { frame, width, height, (uint32_t)dl->count, (uint32_t)dl->mask_count };
+    GpuFrame f = *hdr;
+    f.ncmds = (uint32_t)dl->count;
+    f.nmasks = (uint32_t)dl->mask_count;
     memcpy(buf, &f, sizeof(f));
     WireCmd *wc = (WireCmd *)(buf + WIRE_FRAME_BYTES);
     for (int i = 0; i < dl->count; i++) {
@@ -192,7 +194,7 @@ static bool send_image(int handle) {
     return true;
 }
 
-bool gpu_client_send(const DisplayList *dl, uint32_t frame, uint32_t width, uint32_t height) {
+bool gpu_client_send(const DisplayList *dl, const GpuFrame *hdr) {
     if (!g_attached) return false;
     static bool slot_used[GPU_FONT_SLOTS];
     memset(slot_used, 0, sizeof(slot_used));
@@ -208,7 +210,7 @@ bool gpu_client_send(const DisplayList *dl, uint32_t frame, uint32_t width, uint
     for (int i = 0; i < dl->mask_count; i++)
         if (dl->masks[i].kind == 1 && !send_image(dl->masks[i].image_handle)) return false;
     uint8_t *msg = NULL;
-    uint32_t n = gpu_encode_frame(dl, frame, width, height, &msg);
+    uint32_t n = gpu_encode_frame(dl, hdr, &msg);
     if (!n) return false;
     bool ok = big_send(&g_ch, TG_FRAME, msg, n, NULL, 0, NULL, 0, 5000);
     free(msg);

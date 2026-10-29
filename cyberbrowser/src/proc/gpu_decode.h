@@ -29,7 +29,7 @@
 #define GPU_MAX_H 4096
 #define GPU_NO_IMAGE 0xffffffffu
 
-#define WIRE_FRAME_BYTES 20u
+#define WIRE_FRAME_BYTES 40u
 #define WIRE_CMD_BYTES 52u
 #define WIRE_MASK_BYTES 168u
 

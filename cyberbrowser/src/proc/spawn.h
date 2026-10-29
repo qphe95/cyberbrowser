@@ -30,7 +30,8 @@ typedef struct SpawnSandbox {
  * program name).  `inherit` handles are made inheritable for the call only.
  * std_out (may be NULL) becomes the child's stdout and stderr.  The child is
  * put in `job` if not NULL, then in sb->job.  sb may be NULL (no sandbox).
- * Returns the process handle, or NULL. */
+ * Returns the process handle, or NULL (also if ninherit > SPAWN_MAX_INHERIT). */
+#define SPAWN_MAX_INHERIT 24
 HANDLE spawn_child(const wchar_t *exe_name, const char *args, HANDLE *inherit, int ninherit,
                    HANDLE std_out, HANDLE job, DWORD flags, const SpawnSandbox *sb);
 

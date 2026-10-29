@@ -42,9 +42,15 @@ HANDLE spawn_child(const wchar_t *exe_name, const char *args, HANDLE *inherit, i
     size_t used = wcslen(cmd);
     MultiByteToWideChar(CP_UTF8, 0, args, -1, cmd + used, (int)(cap - used));
 
-    HANDLE list[16];
+    /* A tab inherits 15 (five channels).  Refuse rather than leave one out:
+     * a channel missing an event loses its wakeups. */
+    HANDLE list[SPAWN_MAX_INHERIT + 1];
     int n = 0;
-    for (int i = 0; i < ninherit && n < 14; i++) list[n++] = inherit[i];
+    if (ninherit > SPAWN_MAX_INHERIT) {
+        free(cmd);
+        return NULL;
+    }
+    for (int i = 0; i < ninherit; i++) list[n++] = inherit[i];
     if (std_out) list[n++] = std_out;
     for (int i = 0; i < n; i++) SetHandleInformation(list[i], HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
 

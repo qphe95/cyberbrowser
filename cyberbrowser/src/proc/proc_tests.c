@@ -236,7 +236,7 @@ static void test_loop(void) {
 /* A TG_FRAME of the given records (counts as given, or the true ones). */
 static uint8_t g_msg[1 << 20];
 static uint32_t frame_msg(const WireCmd *c, uint32_t n, const WireMask *m, uint32_t nm) {
-    GpuFrame f = { 1, 800, 600, n, nm };
+    GpuFrame f = { 1, 800, 600, n, nm, 100, 400, 250, 7, 5000 };
     memcpy(g_msg, &f, sizeof(f));
     memcpy(g_msg + sizeof(f), c, n * sizeof(WireCmd));
     memcpy(g_msg + sizeof(f) + n * sizeof(WireCmd), m, nm * sizeof(WireMask));
@@ -266,6 +266,7 @@ static void test_gpu_decode(void) {
     CHECK(gpu_decode(g_msg, len, &res, &f, out, levels, 400, &n, mout, 4, &nm));
     CHECK(n == 3 && out[0].type == WIRE_GLYPH && out[1].type == WIRE_IMAGE && out[1].ref == 9 && out[2].type == WIRE_RECT);
     CHECK(out[2].x == -GPU_COORD_MAX && out[2].w == GPU_COORD_MAX && out[2].u0 == WIRE_UV_ONE);
+    CHECK(f.width == 800 && f.height == 600 && f.ncmds == 7);   /* the layer's place is read by gpu_main.c */
     /* Lengths that lie are refused whole. */
     CHECK(!gpu_decode(g_msg, len - 1, &res, &f, out, levels, 400, &n, mout, 4, &nm));
     ((GpuFrame *)g_msg)->ncmds = 0xffffffffu;

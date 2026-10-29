@@ -1377,8 +1377,10 @@ static void layout_blockify(LayoutContext *ctx)
             LayoutBox *cb = layout_box(ctx, c);
             if (layout_display_is_block_level(cb->s->display) && !cb->s->inline_level &&
                 cb->s->position != CSS_POSITION_ABSOLUTE && cb->s->position != CSS_POSITION_FIXED &&
-                cb->s->float_side == 0)
+                cb->s->float_side == 0) {
                 promote = true;
+                box->s->block_in_inline = 1;
+            }
         }
         if (promote) box->s->display = CSS_DISPLAY_BLOCK;
     }
@@ -8880,6 +8882,19 @@ static bool layout_establishes_bfc(LayoutContext *ctx, int idx)
     return false;
 }
 
+/* The height that percentage heights of idx's children resolve against: its
+ * content height, or, when idx is an inline laid out as a block
+ * (block-in-inline: YouTube's ytw-player-with-controls), that of the
+ * nearest ancestor that isn't one, the containing block a browser uses. */
+static double layout_pct_base_height(LayoutContext *ctx, int idx)
+{
+    for (int i = idx, hops = 0; i >= 0 && hops < 8; i = ctx->tree.nodes[i].parent_idx, hops++) {
+        LayoutBox *b = layout_box(ctx, i);
+        if (!b->s->block_in_inline || !layout_height_auto(b)) return b->content_height;
+    }
+    return 0.0;
+}
+
 static void layout_block_flow_inner(LayoutContext *ctx, int idx);
 
 static void layout_block_flow(LayoutContext *ctx, int idx)
@@ -8934,7 +8949,7 @@ static void layout_block_flow_inner(LayoutContext *ctx, int idx)
 
         /* Resolve used sizes against this container's content box. */
         layout_resolve_used_sizes(child, layout_node_dom(ctx, ctx->tree.nodes[c].dom_node_idx),
-                                  avail_width, box->content_height);
+                                  avail_width, layout_pct_base_height(ctx, idx));
 
         if (child->s->float_side != 0 && (layout_is_block_flow(child->s->display) ||
                                        child->s->display == CSS_DISPLAY_INLINE_BLOCK)) {

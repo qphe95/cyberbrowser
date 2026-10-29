@@ -298,6 +298,10 @@ typedef struct LayoutStyle {    /* Parsed CSS width/height values before box-siz
      * (inline-flex / inline-grid / inline-table; inline-block uses
      * CSS_DISPLAY_INLINE_BLOCK).  Cleared by blockification. */
     unsigned char inline_level;
+    /* An inline element laid out as a block because it holds block-level
+     * children (block-in-inline): percentages in it resolve against the
+     * block around it.  Set by blockification. */
+    unsigned char block_in_inline;
     /* display: table-caption (sized at min-content in a shrink-to-fit table). */
     unsigned char table_caption;
     /* Margins specified as `auto`: 1=top 2=right 4=bottom 8=left. */

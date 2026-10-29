@@ -416,6 +416,35 @@ content larger than the viewport, the UI sends scroll input to both the tab and 
 process, and the GPU process moves the layer at once while the tab catches up. The page
 scrolls smoothly even while its JS is busy.
 
+### 5.4.1 As built in M6
+
+- **Windows.** The UI has up to 8 windows, each with its own tab strip, address bar and
+  content window. Tabs live in one table, and each window lists its own, in order. The UI
+  tells the GPU process what each content window shows (`UG_WINDOW`: the window, the tab,
+  the size; 0 × 0 when the window is gone). The GPU process keeps a swap chain per window
+  (on the CPU, it presents each with GDI). `GU_SHOWN` names the window as well as the tab,
+  so a tab dragged on isn't taken as shown in the window it left.
+- **One layer per tab,** not tiles or separate scroll layers. The tab draws the viewport
+  plus half a viewport above and below it, cut at the page's ends. Its frame header
+  (`GpuFrame`) says where the layer lies in the page:
+  - `origin_y`, the page's y at the layer's top row;
+  - `view_h`, the viewport's height;
+  - `scroll_y`, the page's y at the viewport's top;
+  - `scroll_seq`, the last of the UI's scrolls the tab had seen;
+  - `content_h`, the page's height.
+- **Compositor scrolling.** The UI numbers each scroll of a tab. It sends the scroll to the
+  tab (`UtScroll`) and to the GPU process (`UG_SCROLL`) at the same time. The GPU process
+  shows the layer from the frame's `scroll_y`, moved by the scrolls numbered after the
+  frame's `scroll_seq`, clamped at each step as the tab clamps. It presents again at once.
+  Rows the layer doesn't cover stay white until the tab draws them. A page whose JS is
+  busy still scrolls (section 11.1, M6).
+- **The header is the tab's word.** The decoder skips the five numbers (its proof only
+  moved the records 20 bytes on); `gpu_main.c` reads them from the message. It uses 64-bit
+  arithmetic and clamps where the viewport may land, within `GPU_MAX_H` rows either side of
+  the layer.
+- **`position: fixed`** is drawn in the layer like everything else. During a compositor
+  scroll it moves with the page until the tab's next frame puts it back.
+
 ### 5.5 When there is no GPU, or the GPU process crashes
 
 The CPU rasterizer stays. Without a usable GPU, the GPU process rasterizes display lists on the
@@ -442,7 +471,8 @@ size:
   The GPU process copies each message out of the channel before it is decoded. A tab's
   uploads count against 1 GB; past it, images are dropped.
 - **One texture per tab,** at the viewport's size, not tiles: the tab sends the visible part
-  of its frame, as it painted before. Tiles and layers come with compositor scrolling (M6).
+  of its frame, as it painted before. M6 makes it a layer taller than the viewport, for
+  compositor scrolling (section 5.4.1).
 - **The decoder** (`src/proc/gpu_decode.c`) is proved (P1, P5, P7; section 8.6). The
   rasterizers draw only what it passes.
 - **Two rasterizers.** The Vulkan one is `src/proc/gpu_vk.c`, with shaders in
@@ -745,18 +775,29 @@ The tab process isn't involved, since tabs don't own windows, and neither is the
 Dropping onto another window is the same with an existing window. The page keeps running
 throughout: no reload, its JS state, media and network requests continue.
 
+As built in M6, a press on a tab becomes a drag once the mouse moves 8 px. Where it's
+released decides the outcome:
+- on its own strip, the tab moves along the strip;
+- on another window's strip, the tab joins that window where it was dropped;
+- anywhere else, the tab gets a window of its own at the drop point. A tab alone in its
+  window moves the window instead.
+
+A window left with no tabs closes, and closing the last window ends the browser. There are
+no focus events yet. Test scripts drag with the same mouse handlers (`dragout`,
+`dragto W`), or move tabs directly (`detach`, `attach W`).
+
 ## 8. Verification
 
 ### 8.1 What is verified
 
-| Component | Size (target) | Size (M5) | What is proved | Goals (M5) |
+| Component | Size (target) | Size (M6) | What is proved | Goals (M6) |
 |---|---|---|---|---|
 | Coordinator core (`coord_core.c`) | 2,000–3,000 lines | 430 lines | P1, P3, P6 (local respect), P7 | 4,898 |
 | `libchan`'s rings (`chan_ring.c`) | ~1,000 lines | 100 lines | P1, P2 | 214 |
 | `site_of` and the host grammar (`site.c`) | ~500 lines plus the PSL table | 290 lines | P1, P7, and that every label it makes is well formed | 2,709 |
 | Storage service core (`store_core.c`) | ~1,500 lines | 120 lines | P1, P4, P7 | 5,153 |
 | Loopback relay core (`loop_core.c`) | ~300 lines | 320 lines | P1, P7, P8 | 874 |
-| GPU display-list decoder (`gpu_decode.c`) | ~1,500 lines | 300 lines | P1, P5, P7 | 1,263 |
+| GPU display-list decoder (`gpu_decode.c`) | ~1,500 lines | 300 lines | P1, P5, P7 | 1,265 |
 
 The cores came out much smaller than the targets because what they decide is still small:
 three kinds of tab channel, no spare process, no navigation swaps. Section 8.6 says what M4
@@ -863,10 +904,10 @@ Frama-C runs on Linux and macOS; here it runs in WSL (Ubuntu 24.04).
 `tools/prove.sh [chan coord site store loop tla]` runs WP on each core (with the RTE plugin
 for P1, the `Typed+Cast+ref` memory model, and `-wp-check-memory-model`) and TLC on the
 model. It fails if any goal is unproved. Since M5 it splits goals into their cases
-(`-wp-split`), which counts more goals but proves each faster, and gives the decoder 120 s a
-goal (60 s for the rest). The six cores take about 50 minutes from a cold cache on 12 cores,
+(`-wp-split`), which counts more goals but proves each faster, and gives the decoder 240 s a
+goal (60 s for the rest; 120 s until M6). The six cores take about 50 minutes from a cold cache on 12 cores,
 and the two model checks about 9.5 minutes. A goal that timed out is cached as such: clear
-`.frama-c/wp/cache` before retrying with a longer limit. The repository has no CI yet, so the script is
+the session (`/tmp/cb_prove/<core>.session`) before retrying with a longer limit. The repository has no CI yet, so the script is
 run by hand before changes to a core are committed.
 
 ### 8.6 What M4 proved, and how it differs from the plan
@@ -1003,7 +1044,7 @@ memory of an idle tab process (about:blank). Things that would reduce it, in ord
 | M3 | Sandboxes: LPAC, job objects, mitigations, no win32k in tabs | The escape tests (below) pass |
 | M4 | Proofs: coordinator, `libchan`, `site_of`, storage core (P1–P4, P6, P7); TLA+ model of the protocol. The loopback relay with its verified core (P1, P7, P8), and the network process moved to LPAC (section 6.4) | All goals proved (`tools/prove.sh`; CI when there is one); `localhost` pages and replays work with the network process in LPAC; the escape tests pass |
 | M5 | GPU process: display-list format, verified decoder (P5), Vulkan rasterizer, compositing into the UI's windows | Pages render the same as the CPU path (screenshot diff on the replays); CPU fallback works (done) |
-| M6 | Multiple windows; dragging tabs out and between windows; compositor scrolling | Drag works while a video plays, without a reload |
+| M6 | Multiple windows; dragging tabs out and between windows; compositor scrolling | Drag works while a video plays, without a reload (done) |
 | M7 | Cross-site iframe partitioning, ORB, Private Network Access | |
 | M8 | Web-GPU process: WebGPU on `wgpu-native`, WebGL 1 and 2 on ANGLE (pinned prebuilt DLLs), on the GPU; shared canvas textures; the driver block list and feature limits; fuzzing | The WebGPU and WebGL conformance suites pass at a level to be set then; a crashing web-GPU process takes down only its canvases; on a blocked driver the APIs are unavailable |
 | Later | Out-of-process iframes; JIT process; GPU video decode | |
@@ -1285,6 +1326,54 @@ the CPU rasterizer where there is no usable GPU (section 5.5.1).
   - No WebGL or WebGPU (M8).
   - The Vulkan rasterizer waits for each frame (one command buffer). Overlapping a frame's
     drawing with the next one's recording is a later optimization.
+
+**M6 (done):** several windows, tabs dragged out of and between them, and compositor
+scrolling (sections 5.4.1 and 7.4). A tab dragged while its video plays keeps playing, in
+the same process, without a reload.
+
+- **The test** (`tests/ui/window_test.sh <build> [replay root]`) drives the UI's test
+  script and checks its screenshots:
+  - **Scrolling while the page's JS is busy** for 4 s: 200 ms after the scroll, the window
+    shows the old content moved by exactly 200 px. The tab's own frame comes when its JS
+    is done.
+  - **A page whose frames keep coming,** dragged with the mouse handlers into a window of
+    its own and back. The frames keep changing in every window, and no tab process starts
+    again.
+  - **With the replay root, the YouTube watch page** while its video plays, dragged out and
+    back. In each 1.5 s between screenshots, 69 to 75% of the video's pixels change, and
+    the tab's process stays the same.
+
+  It passes on Vulkan and on the CPU rasterizer. It also passes with the GPU process
+  restarting during the drags (`CYBER_GPU_CRASH_TEST=12`): every window gets a new
+  content window and shows its tab again.
+- **Found and fixed on the way:**
+  - **No video on the YouTube watch page,** at least since M5. A custom element with no
+    display rule (`ytw-player-with-controls`) holding block children is laid out as a
+    block (block-in-inline). The player's `height: 100%` resolved against that block's
+    auto height, 0, so the video was clipped away. Percentages inside such a box now
+    resolve against the block around it, as browsers do (`layout_pct_base_height`). Of
+    the 17 recorded sites, the change reaches Apple's `<picture>` and an SVG on Google,
+    and both render byte for byte as before. Only the YouTube player changes.
+  - **A tab's localStorage writes stalled for 10 s,** freezing the page, since M5.
+    `spawn_child` passed at most 14 inherited handles. With M5's draw channel a tab has
+    15, so the storage channel's second event never reached the tab. The storage service
+    then woke only when the network process wrote to it. The cap is now 24, and a spawn
+    asked for more fails.
+- **The replays** still render the same on Vulkan as on the CPU rasterizer. No pixel differs
+  by more than 10%. The YouTube watch page now differs in 13,831 pixels, all slight, because
+  its video shows.
+- **The proofs:** the decoder reads the header's first five numbers as before and skips the
+  new five (`gpu_main.c` reads those), 1,265 goals. Every other core is unchanged.
+- **The escape tests pass,** 11 of 11. The hostile tab now also sends frames placing its
+  layer anywhere at all (2^32 - 1, 0, 2^31), with a frame the UI believes so that they're
+  presented. The GPU process clamps them.
+- **Tests:** `proc_tests` 123 checks; the unit tests (449) and the JIT tests pass.
+- **Not covered yet:**
+  - One layer per tab, half a viewport beyond each edge. A fling past that shows white
+    until the tab draws. `position: fixed` moves with a compositor scroll until the next
+    frame.
+  - The video repaints twice a second (the engine's pace for media, unchanged).
+  - The UI's tab strip is still GDI, and there are no focus events.
 
 **Not in M1** (later milestones, or not yet planned):
 - Typing into the page (forms, text fields).

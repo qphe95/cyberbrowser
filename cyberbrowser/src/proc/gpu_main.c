@@ -8,9 +8,15 @@
  * and site) and one to the UI (GRANT_UI).  A tab uploads glyph atlas bands
  * and images into its own namespace and sends display lists; each is copied
  * out of the channel, decoded against that tab's namespace alone, drawn into
- * that tab's target, and, if the UI's content window shows that tab,
- * presented there.  Nothing is ever read back to a tab.  The UI says which
- * tab its content window shows, and asks for its pixels for screenshots.
+ * that tab's target, and presented in each of the UI's content windows that
+ * shows that tab.  Nothing is ever read back to a tab.  The UI says which
+ * tab each of its windows shows, and asks for their pixels for screenshots.
+ *
+ * Compositor scrolling: a tab draws a layer reaching past its viewport, and
+ * says where the viewport lay in it (GpuFrame).  The UI sends each scroll to
+ * the tab and here at once (UG_SCROLL), numbered; until a frame says the tab
+ * has seen a scroll, its windows show the layer moved by it, so scrolling
+ * keeps up however busy the tab is.
  *
  * It draws with Vulkan (gpu_vk.c) when it can, else with the CPU rasterizer
  * (raster_cpu.c), presenting with GDI; CYBER_GPU=cpu asks for the CPU.
@@ -51,16 +57,28 @@ typedef struct Client {
     uint64_t bytes;
     GpuTarget *target;
     uint32_t width, height;
-    bool drawn;
+    GpuFrame at;                        /* the last frame's place in the page */
+    struct { uint32_t seq; int32_t dy; } scrolls[64];  /* the UI's, since the last frame's */
+    uint32_t nscrolls;
 } Client;
+
+/* One of the UI's content windows. */
+typedef struct Window {
+    HWND hwnd;
+    uint32_t tab;                       /* what it shows, 0 none */
+    uint32_t w, h;
+    bool shown;                         /* the UI heard it shows tab (GU_SHOWN) */
+    bool dirty;                         /* to present again */
+} Window;
+
+#define MAX_WINDOWS 16
 
 static Chan g_ctl, g_ui;
 static bool g_have_ui;
 static BigRx g_ui_rx;
 static Client *g_clients[MAX_CLIENTS];
 static const GpuBackend *g_be;
-static HWND g_window;                   /* the UI's content window */
-static uint32_t g_shown, g_win_w, g_win_h;
+static Window g_windows[MAX_WINDOWS];
 
 /* ---- the CPU backend ----------------------------------------------------------- */
 
@@ -113,22 +131,30 @@ static void cpu_target_free(GpuTarget *t) {
     free(t);
 }
 
-static bool cpu_present(HWND hwnd, uint32_t w, uint32_t h, GpuTarget *t) {
+static bool cpu_present(HWND hwnd, uint32_t w, uint32_t h, GpuTarget *t, int32_t src_y) {
     HDC dc = GetDC(hwnd);
     if (!dc) return false;
-    BITMAPINFO bi;
-    memset(&bi, 0, sizeof(bi));
-    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
-    bi.bmiHeader.biWidth = (LONG)t->w;
-    bi.bmiHeader.biHeight = -(LONG)t->h;
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    bi.bmiHeader.biCompression = BI_RGB;
-    SetDIBitsToDevice(dc, 0, 0, t->w, t->h, 0, 0, 0, t->h, t->bgrx, &bi, DIB_RGB_COLORS);
-    /* What the frame doesn't cover (the window grew since). */
+    int64_t top = src_y < 0 ? 0 : src_y, bottom = (int64_t)src_y + h;
+    if (bottom > t->h) bottom = t->h;
     HBRUSH white = (HBRUSH)GetStockObject(WHITE_BRUSH);
+    if (bottom > top) {
+        BITMAPINFO bi;
+        memset(&bi, 0, sizeof(bi));
+        bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+        bi.bmiHeader.biWidth = (LONG)t->w;
+        bi.bmiHeader.biHeight = -(LONG)(bottom - top);
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        SetDIBitsToDevice(dc, 0, (int)(top - src_y), t->w, (DWORD)(bottom - top), 0, 0, 0, (UINT)(bottom - top),
+                          t->bgrx + (size_t)top * t->w * 4, &bi, DIB_RGB_COLORS);
+    } else {
+        top = bottom = src_y;
+    }
+    /* What the target doesn't cover. */
+    if (top > src_y) { RECT r = { 0, 0, (LONG)w, (LONG)(top - src_y) }; FillRect(dc, &r, white); }
     if (t->w < w) { RECT r = { (LONG)t->w, 0, (LONG)w, (LONG)h }; FillRect(dc, &r, white); }
-    if (t->h < h) { RECT r = { 0, (LONG)t->h, (LONG)w, (LONG)h }; FillRect(dc, &r, white); }
+    if (bottom - src_y < h) { RECT r = { 0, (LONG)(bottom - src_y), (LONG)w, (LONG)h }; FillRect(dc, &r, white); }
     ReleaseDC(hwnd, dc);
     return true;
 }
@@ -141,7 +167,7 @@ static bool cpu_readback(GpuTarget *t, uint8_t *out, uint32_t *w, uint32_t *h) {
 }
 
 static const GpuBackend g_cpu = {
-    "cpu", NULL, NULL, NULL, cpu_render, cpu_target_free, cpu_present, cpu_readback,
+    "cpu", NULL, NULL, NULL, cpu_render, cpu_target_free, cpu_present, cpu_readback, NULL,
 };
 
 /* ---- a tab's resources --------------------------------------------------------- */
@@ -314,12 +340,44 @@ static void to_display_list(const WireCmd *cmds, uint32_t n, const WireMask *mas
     dl->mask_count = (int)nm;
 }
 
-static void present(Client *c) {
-    if (!g_window || !c || c->tab != g_shown || !c->target) return;
-    if (g_be->present(g_window, g_win_w, g_win_h, c->target) && !c->drawn) {
-        c->drawn = true;
-        GuShown s = { c->tab };
-        if (g_have_ui) big_send(&g_ui, GU_SHOWN, &s, sizeof(s), NULL, 0, NULL, 0, 100);
+static Client *client_of(uint32_t tab);
+
+/* Where the viewport of c lies now, in the page: as its last frame says,
+ * moved by the scrolls the tab hadn't seen, clamped as the tab clamps. */
+static int64_t view_y(const Client *c) {
+    int64_t max = c->at.content_h > c->at.view_h ? (int64_t)c->at.content_h - c->at.view_h : 0;
+    int64_t y = c->at.scroll_y < max ? c->at.scroll_y : max;
+    for (uint32_t i = 0; i < c->nscrolls; i++) {
+        y += c->scrolls[i].dy;
+        y = y < 0 ? 0 : y > max ? max : y;
+    }
+    return y;
+}
+
+/* The row of c's layer at the top of its viewport now. */
+static int32_t layer_row(const Client *c) {
+    int64_t r = view_y(c) - (int64_t)c->at.origin_y;
+    return r < -GPU_MAX_H ? -GPU_MAX_H : r > GPU_MAX_H ? GPU_MAX_H : (int32_t)r;
+}
+
+static void mark_dirty(uint32_t tab) {
+    for (int i = 0; i < MAX_WINDOWS; i++)
+        if (g_windows[i].hwnd && g_windows[i].tab == tab) g_windows[i].dirty = true;
+}
+
+/* Present every window with something new to show. */
+static void present_dirty(void) {
+    for (int i = 0; i < MAX_WINDOWS; i++) {
+        Window *w = &g_windows[i];
+        if (!w->hwnd || !w->dirty) continue;
+        w->dirty = false;
+        Client *c = client_of(w->tab);
+        if (!c || !c->target) continue;
+        if (g_be->present(w->hwnd, w->w, w->h, c->target, layer_row(c)) && !w->shown) {
+            w->shown = true;
+            GuShown s = { c->tab, (uint64_t)(uintptr_t)w->hwnd };
+            if (g_have_ui) big_send(&g_ui, GU_SHOWN, &s, sizeof(s), NULL, 0, NULL, 0, 100);
+        }
     }
 }
 
@@ -365,7 +423,17 @@ static void frame(Client *c, const uint8_t *m, uint32_t len) {
     if (g_be->render(&c->target, f.width, f.height, &dl, atlases, images, &res)) {
         c->width = f.width;
         c->height = f.height;
-        present(c);
+        /* The layer's place: the header's last five numbers, which the
+         * decoder leaves alone (they are only clamped where they are used). */
+        memcpy(&c->at, m, sizeof(c->at));
+        c->at.width = f.width;
+        c->at.height = f.height;
+        /* The scrolls this frame has seen are in its scroll_y. */
+        uint32_t k = 0;
+        for (uint32_t i = 0; i < c->nscrolls; i++)
+            if ((int32_t)(c->scrolls[i].seq - f.scroll_seq) > 0) c->scrolls[k++] = c->scrolls[i];
+        c->nscrolls = k;
+        mark_dirty(c->tab);
     }
     static int crash_after = -1;
     if (crash_after < 0) crash_after = getenv("CYBER_GPU_CRASH_TEST") ? atoi(getenv("CYBER_GPU_CRASH_TEST")) : 0;
@@ -396,30 +464,81 @@ static Client *client_of(uint32_t tab) {
 
 /* ---- the UI ---------------------------------------------------------------------- */
 
+static Window *window_of(HWND hwnd) {
+    for (int i = 0; i < MAX_WINDOWS; i++)
+        if (hwnd && g_windows[i].hwnd == hwnd) return &g_windows[i];
+    return NULL;
+}
+
 static void ui_message(void) {
     if (g_ui_rx.type == UG_WINDOW && g_ui_rx.total == sizeof(UgWindow)) {
-        UgWindow w;
-        memcpy(&w, g_ui_rx.buf, sizeof(w));
-        HWND hwnd = (HWND)(uintptr_t)w.hwnd;
-        if (hwnd && !IsWindow(hwnd)) hwnd = NULL;
-        bool changed = w.tab != g_shown;
-        g_window = hwnd;
-        g_shown = w.tab;
-        g_win_w = w.width < GPU_MAX_W ? w.width : GPU_MAX_W;
-        g_win_h = w.height < GPU_MAX_H ? w.height : GPU_MAX_H;
-        Client *c = client_of(g_shown);
-        if (c && changed) c->drawn = false;
-        present(c);
-    } else if (g_ui_rx.type == UG_SHOT) {
-        Client *c = client_of(g_shown);
-        static uint8_t *px;
-        GuShot s = { 0, 0 };
-        if (c && c->target) {
-            free(px);
-            px = (uint8_t *)malloc((size_t)c->width * c->height * 4);
-            if (px && !g_be->readback(c->target, px, &s.width, &s.height)) s.width = s.height = 0;
+        UgWindow u;
+        memcpy(&u, g_ui_rx.buf, sizeof(u));
+        HWND hwnd = (HWND)(uintptr_t)u.hwnd;
+        Window *w = window_of(hwnd);
+        if (u.width == 0 && u.height == 0) {
+            /* The window is gone. */
+            if (w) {
+                if (g_be->window_gone) g_be->window_gone(hwnd);
+                memset(w, 0, sizeof(*w));
+            }
+            return;
         }
-        big_send(&g_ui, GU_SHOT, &s, sizeof(s), px, s.width * s.height * 4, NULL, 0, 5000);
+        if (!hwnd || !IsWindow(hwnd)) return;
+        for (int i = 0; i < MAX_WINDOWS && !w; i++)
+            if (!g_windows[i].hwnd) {
+                w = &g_windows[i];
+                memset(w, 0, sizeof(*w));
+                w->hwnd = hwnd;
+            }
+        if (!w) return;
+        if (u.tab != w->tab) w->shown = false;
+        w->tab = u.tab;
+        w->w = u.width < GPU_MAX_W ? u.width : GPU_MAX_W;
+        w->h = u.height < GPU_MAX_H ? u.height : GPU_MAX_H;
+        w->dirty = true;
+    } else if (g_ui_rx.type == UG_SCROLL && g_ui_rx.total == sizeof(UgScroll)) {
+        UgScroll q;
+        memcpy(&q, g_ui_rx.buf, sizeof(q));
+        Client *c = client_of(q.tab);
+        if (!c) return;
+        uint32_t cap = (uint32_t)(sizeof(c->scrolls) / sizeof(c->scrolls[0]));
+        if (c->nscrolls == cap) {
+            /* The tab is far behind: forget the oldest (its next frame
+             * puts the viewport right). */
+            memmove(&c->scrolls[0], &c->scrolls[1], (cap - 1) * sizeof(c->scrolls[0]));
+            c->nscrolls--;
+        }
+        c->scrolls[c->nscrolls].seq = q.seq;
+        c->scrolls[c->nscrolls].dy = q.dy < -GPU_COORD_MAX ? -GPU_COORD_MAX : q.dy > GPU_COORD_MAX ? GPU_COORD_MAX : q.dy;
+        c->nscrolls++;
+        mark_dirty(c->tab);
+    } else if (g_ui_rx.type == UG_SHOT && g_ui_rx.total == sizeof(UgShot)) {
+        /* What the window shows: its rows of the layer, white where it has none. */
+        UgShot q;
+        memcpy(&q, g_ui_rx.buf, sizeof(q));
+        Window *w = window_of((HWND)(uintptr_t)q.hwnd);
+        Client *c = w ? client_of(w->tab) : NULL;
+        static uint8_t *px, *out;
+        GuShot s = { 0, 0 };
+        if (c && c->target && w->h) {
+            free(px);
+            free(out);
+            px = (uint8_t *)malloc((size_t)c->width * c->height * 4);
+            out = (uint8_t *)malloc((size_t)c->width * w->h * 4);
+            uint32_t tw = 0, th = 0;
+            if (px && out && g_be->readback(c->target, px, &tw, &th)) {
+                int32_t row = layer_row(c);
+                memset(out, 255, (size_t)tw * w->h * 4);
+                for (uint32_t y = 0; y < w->h; y++) {
+                    int64_t sy = (int64_t)row + y;
+                    if (sy >= 0 && sy < th) memcpy(out + (size_t)y * tw * 4, px + (size_t)sy * tw * 4, (size_t)tw * 4);
+                }
+                s.width = tw;
+                s.height = w->h;
+            }
+        }
+        big_send(&g_ui, GU_SHOT, &s, sizeof(s), out, s.width * s.height * 4, NULL, 0, 5000);
     }
 }
 
@@ -517,6 +636,7 @@ int main(int argc, char **argv) {
                 revoke(c->tab);
             }
         }
+        present_dirty();
         fflush(stderr);
         HANDLE waits[MAX_CLIENTS + 2];
         int n = 0;

@@ -7,8 +7,9 @@
  * the hardware blends it.  A mask's begin copies the region under it aside;
  * its end draws mask.frag over the region, mixing what was saved with what
  * was drawn since by the mask's alpha.  Each tab has its own target image;
- * presenting copies the shown tab's into the window's swap chain.  Simple
- * and synchronous: one command buffer, waited for after each submit. */
+ * presenting copies the viewport's part of it into the swap chain of each
+ * window that shows it.  Simple and synchronous: one command buffer, waited
+ * for after each submit. */
 #define VK_NO_PROTOTYPES
 #define VK_USE_PLATFORM_WIN32_KHR
 #include "gpu_backend.h"
@@ -633,42 +634,67 @@ static bool vk_render(GpuTarget **tp, uint32_t w, uint32_t h, const DisplayList 
 
 /* ---- presenting and reading back ------------------------------------------------------------- */
 
-static HWND g_hwnd;
-static VkSurfaceKHR g_surface;
-static VkSwapchainKHR g_chain;
-static VkImage g_chain_img[8];
-static uint32_t g_chain_n, g_chain_w, g_chain_h;
+/* A window's swap chain: one per UI window that shows a tab. */
+typedef struct Chain {
+    HWND hwnd;
+    VkSurfaceKHR surface;
+    VkSwapchainKHR chain;
+    VkImage img[8];
+    uint32_t n, w, h;
+} Chain;
 
-static void chain_free(void) {
+#define MAX_CHAINS 16
+static Chain g_chains[MAX_CHAINS];
+
+static void chain_free(Chain *c) {
     vkDeviceWaitIdle(g_dev);
-    if (g_chain) vkDestroySwapchainKHR(g_dev, g_chain, NULL);
-    g_chain = VK_NULL_HANDLE;
+    if (c->chain) vkDestroySwapchainKHR(g_dev, c->chain, NULL);
+    c->chain = VK_NULL_HANDLE;
+    c->w = c->h = 0;
 }
 
-static bool chain_make(HWND hwnd) {
-    if (hwnd != g_hwnd) {
-        chain_free();
-        if (g_surface) vkDestroySurfaceKHR(g_inst, g_surface, NULL);
-        g_surface = VK_NULL_HANDLE;
+static void vk_window_gone(HWND hwnd) {
+    for (int i = 0; i < MAX_CHAINS; i++) {
+        Chain *c = &g_chains[i];
+        if (!c->hwnd || c->hwnd != hwnd) continue;
+        chain_free(c);
+        if (c->surface) vkDestroySurfaceKHR(g_inst, c->surface, NULL);
+        memset(c, 0, sizeof(*c));
+    }
+}
+
+/* hwnd's chain, made (or remade at its window's size) if need be. */
+static Chain *chain_make(HWND hwnd) {
+    Chain *c = NULL;
+    for (int i = 0; i < MAX_CHAINS && !c; i++)
+        if (g_chains[i].hwnd == hwnd) c = &g_chains[i];
+    if (!c) {
+        for (int i = 0; i < MAX_CHAINS && !c; i++)
+            if (!g_chains[i].hwnd) c = &g_chains[i];
+        if (!c) {
+            fprintf(stderr, "[gpu] too many windows\n");
+            return NULL;
+        }
         VkWin32SurfaceCreateInfoKHR si = { VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR };
         si.hinstance = GetModuleHandleW(NULL);
         si.hwnd = hwnd;
-        if (!ok(vkCreateWin32SurfaceKHR(g_inst, &si, NULL, &g_surface), "vkCreateWin32SurfaceKHR")) return false;
+        if (!ok(vkCreateWin32SurfaceKHR(g_inst, &si, NULL, &c->surface), "vkCreateWin32SurfaceKHR")) return NULL;
+        c->hwnd = hwnd;
         VkBool32 can = VK_FALSE;
-        vkGetPhysicalDeviceSurfaceSupportKHR(g_pd, g_qfam, g_surface, &can);
+        vkGetPhysicalDeviceSurfaceSupportKHR(g_pd, g_qfam, c->surface, &can);
         if (!can) {
             fprintf(stderr, "[gpu] the queue can't present to that window\n");
-            return false;
+            vk_window_gone(hwnd);
+            return NULL;
         }
-        g_hwnd = hwnd;
     }
     VkSurfaceCapabilitiesKHR caps;
-    if (!ok(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_pd, g_surface, &caps), "surface capabilities")) return false;
-    if (caps.currentExtent.width == 0 || caps.currentExtent.height == 0) return false;    /* minimized */
-    if (g_chain && caps.currentExtent.width == g_chain_w && caps.currentExtent.height == g_chain_h) return true;
-    VkSwapchainKHR old = g_chain;
+    if (!ok(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_pd, c->surface, &caps), "surface capabilities")) return NULL;
+    if (caps.currentExtent.width == 0 || caps.currentExtent.height == 0) return NULL;      /* minimized */
+    if (c->chain && caps.currentExtent.width == c->w && caps.currentExtent.height == c->h) return c;
+    VkSwapchainKHR old = c->chain;
     VkSwapchainCreateInfoKHR ci = { VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR };
-    ci.surface = g_surface;
+    ci.surface = c->surface;
     ci.minImageCount = caps.minImageCount < 2 ? 2 : caps.minImageCount;
     if (caps.maxImageCount && ci.minImageCount > caps.maxImageCount) ci.minImageCount = caps.maxImageCount;
     ci.imageFormat = FMT;
@@ -682,52 +708,63 @@ static bool chain_make(HWND hwnd) {
     ci.clipped = VK_TRUE;
     ci.oldSwapchain = old;
     vkDeviceWaitIdle(g_dev);
-    VkResult r = vkCreateSwapchainKHR(g_dev, &ci, NULL, &g_chain);
+    VkResult r = vkCreateSwapchainKHR(g_dev, &ci, NULL, &c->chain);
     if (old) vkDestroySwapchainKHR(g_dev, old, NULL);
     if (!ok(r, "vkCreateSwapchainKHR")) {
-        g_chain = VK_NULL_HANDLE;
-        return false;
+        c->chain = VK_NULL_HANDLE;
+        c->w = c->h = 0;
+        return NULL;
     }
-    g_chain_n = 8;
-    vkGetSwapchainImagesKHR(g_dev, g_chain, &g_chain_n, g_chain_img);
-    g_chain_w = caps.currentExtent.width;
-    g_chain_h = caps.currentExtent.height;
-    return true;
+    c->n = 8;
+    vkGetSwapchainImagesKHR(g_dev, c->chain, &c->n, c->img);
+    c->w = caps.currentExtent.width;
+    c->h = caps.currentExtent.height;
+    return c;
 }
 
-static bool vk_present(HWND hwnd, uint32_t w, uint32_t h, GpuTarget *t) {
+static bool vk_present(HWND hwnd, uint32_t w, uint32_t h, GpuTarget *t, int32_t src_y) {
     (void)w;
     (void)h;
     for (int attempt = 0; attempt < 2; attempt++) {
-        if (!chain_make(hwnd)) return false;
+        Chain *c = chain_make(hwnd);
+        if (!c) return false;
         uint32_t idx = 0;
-        VkResult r = vkAcquireNextImageKHR(g_dev, g_chain, 2000000000ull, g_acquired, VK_NULL_HANDLE, &idx);
-        if (r == VK_ERROR_OUT_OF_DATE_KHR) { g_chain_w = 0; chain_free(); continue; }
+        VkResult r = vkAcquireNextImageKHR(g_dev, c->chain, 2000000000ull, g_acquired, VK_NULL_HANDLE, &idx);
+        if (r == VK_ERROR_OUT_OF_DATE_KHR) { chain_free(c); continue; }
         if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) return ok(r, "vkAcquireNextImageKHR");
         if (!begin()) return false;
         VkImageLayout cl = VK_IMAGE_LAYOUT_UNDEFINED;
-        barrier(g_cb, g_chain_img[idx], &cl, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        barrier(g_cb, c->img[idx], &cl, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         VkClearColorValue white = { { 1.0f, 1.0f, 1.0f, 1.0f } };
         VkImageSubresourceRange all = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-        vkCmdClearColorImage(g_cb, g_chain_img[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &white, 1, &all);
-        barrier(g_cb, t->img.img, &t->img.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-        VkImageCopy cp;
-        memset(&cp, 0, sizeof(cp));
-        cp.srcSubresource.aspectMask = cp.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        cp.srcSubresource.layerCount = cp.dstSubresource.layerCount = 1;
-        cp.extent.width = t->img.w < g_chain_w ? t->img.w : g_chain_w;
-        cp.extent.height = t->img.h < g_chain_h ? t->img.h : g_chain_h;
-        cp.extent.depth = 1;
-        vkCmdCopyImage(g_cb, t->img.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_chain_img[idx],
-                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
-        barrier(g_cb, g_chain_img[idx], &cl, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+        vkCmdClearColorImage(g_cb, c->img[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &white, 1, &all);
+        /* Rows [src_y, src_y + window height) of the target; what lies
+         * outside it stays white. */
+        int64_t top = src_y < 0 ? 0 : src_y, bottom = (int64_t)src_y + c->h;
+        if (bottom > t->img.h) bottom = t->img.h;
+        uint32_t cw = t->img.w < c->w ? t->img.w : c->w;
+        if (bottom > top && cw) {
+            barrier(g_cb, t->img.img, &t->img.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            VkImageCopy cp;
+            memset(&cp, 0, sizeof(cp));
+            cp.srcSubresource.aspectMask = cp.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            cp.srcSubresource.layerCount = cp.dstSubresource.layerCount = 1;
+            cp.srcOffset.y = (int32_t)top;
+            cp.dstOffset.y = (int32_t)(top - src_y);
+            cp.extent.width = cw;
+            cp.extent.height = (uint32_t)(bottom - top);
+            cp.extent.depth = 1;
+            vkCmdCopyImage(g_cb, t->img.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, c->img[idx],
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cp);
+        }
+        barrier(g_cb, c->img[idx], &cl, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
         if (!submit(g_acquired)) return false;
         VkPresentInfoKHR pi = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
         pi.swapchainCount = 1;
-        pi.pSwapchains = &g_chain;
+        pi.pSwapchains = &c->chain;
         pi.pImageIndices = &idx;
         r = vkQueuePresentKHR(g_queue, &pi);
-        if (r == VK_ERROR_OUT_OF_DATE_KHR) { g_chain_w = 0; chain_free(); continue; }
+        if (r == VK_ERROR_OUT_OF_DATE_KHR) { chain_free(c); continue; }
         return r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR;
     }
     return false;
@@ -1004,6 +1041,7 @@ static bool pipelines(void) {
 
 static const GpuBackend g_vk = {
     "Vulkan", vk_texture_new, vk_texture_update, vk_texture_free, vk_render, vk_target_free, vk_present, vk_readback,
+    vk_window_gone,
 };
 
 const GpuBackend *gpu_vk_backend(void) {

@@ -190,7 +190,12 @@ bool gpu_decode(const uint8_t *msg, uint32_t len, const GpuClientRes *res, GpuFr
         loop assigns i, masks[0 .. mask_cap - 1];
         loop variant in_masks - i;
      */
-    for (uint32_t i = 0; i < in_masks; i++) decode_mask(mp + i * WIRE_MASK_BYTES, res, &masks[i]);
+    for (uint32_t i = 0; i < in_masks; i++) {
+        decode_mask(mp + i * WIRE_MASK_BYTES, res, &masks[i]);
+        /* (Steps for the prover: the new mask, then the ones before it.) */
+        //@ assert mask_ok(&masks[i], res);
+        //@ assert \forall integer k; 0 <= k < i ==> mask_ok(&masks[k], res);
+    }
     *nmasks = in_masks;
 
     /* The commands, dropping what doesn't resolve.  Each mask bracket the

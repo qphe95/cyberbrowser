@@ -13,8 +13,8 @@
  * localStorage is loaded from and saved to the storage service.
  *
  * It loads the page with the page engine, then runs the page's event loop,
- * sends the visible part of each new frame to the GPU process as a display
- * list (gpu_client.c), which draws it, and answers the
+ * sends the part of each new frame around the viewport to the GPU process as
+ * a display list (gpu_client.c), which draws it, and answers the
  * UI's input: resizes, scrolls and clicks.  A click on a link asks the UI to
  * navigate; every navigation gets a new tab process (the engine holds one
  * page per process). */
@@ -48,6 +48,7 @@ static Chan g_ctl;                      /* side 1: from the coordinator */
 static bool g_have_ctl;
 static uint32_t g_tab, g_width, g_height;
 static uint32_t g_scroll, g_content_height;
+static uint32_t g_scroll_seq;           /* the UI's last scroll (UtScroll.seq) */
 static uint32_t g_frame_no;
 static bool g_in_flight, g_need_paint;
 static char g_title[PROTO_TITLE_MAX];
@@ -84,12 +85,12 @@ static void clamp_scroll(void) {
     if (g_scroll > max) g_scroll = max;
 }
 
-/* The frame's display list moved up by the scroll offset, without what
- * lies wholly outside the viewport. */
+/* The frame's display list moved up by dy, without what lies wholly
+ * outside rows [0, h). */
 static DisplayList g_shifted;
 static int g_shifted_cap, g_shifted_mask_cap;
 
-static void shift_frame(const DisplayList *dl, float dy) {
+static void shift_frame(const DisplayList *dl, float dy, uint32_t h) {
     if (g_shifted_cap < dl->count) {
         g_shifted_cap = dl->count;
         g_shifted.cmds = (DisplayListCmd *)realloc(g_shifted.cmds, (size_t)g_shifted_cap * sizeof(DisplayListCmd));
@@ -103,7 +104,7 @@ static void shift_frame(const DisplayList *dl, float dy) {
         DisplayListCmd c = dl->cmds[i];
         c.y -= dy;
         bool bracket = c.type == DL_MASK_BEGIN || c.type == DL_MASK_END;
-        if (!bracket && (c.y + c.h < 0 || c.y > (float)g_height)) continue;
+        if (!bracket && (c.y + c.h < 0 || c.y > (float)h)) continue;
         if (c.type == DL_BORDER) c.u.border.y -= dy;
         g_shifted.cmds[n++] = c;
     }
@@ -119,15 +120,23 @@ static void shift_frame(const DisplayList *dl, float dy) {
     g_shifted.mask_capacity = g_shifted_mask_cap;
 }
 
-/* The visible part of the frame to the GPU process, which draws it into
- * this tab's content; the next goes when it has (GT_FRAME_DONE).  The UI
- * hears the frame's size and scroll position. */
+/* The frame around the viewport (a layer, half a viewport more above and
+ * below) to the GPU process, which draws it into this tab's content and
+ * shows the viewport's part, moving it at once when the user scrolls; the
+ * next goes when it has (GT_FRAME_DONE).  The UI hears the frame's size and
+ * scroll position. */
 static void paint(void) {
     PageFrame *f = page_frame();
     if (!f->valid) return;
     clamp_scroll();
-    shift_frame(&f->dl, (float)g_scroll);
-    if (!gpu_client_send(&g_shifted, ++g_frame_no, g_width, g_height)) {
+    uint32_t margin = g_height / 2;
+    uint32_t origin = g_scroll > margin ? g_scroll - margin : 0;
+    uint32_t layer_h = g_scroll - origin + g_height + margin;
+    if (g_content_height > origin && layer_h > g_content_height - origin) layer_h = g_content_height - origin;
+    if (layer_h < g_height) layer_h = g_height;
+    shift_frame(&f->dl, (float)origin, layer_h);
+    GpuFrame hdr = { ++g_frame_no, g_width, layer_h, 0, 0, origin, g_height, g_scroll, g_scroll_seq, g_content_height };
+    if (!gpu_client_send(&g_shifted, &hdr)) {
         fprintf(stderr, "[tab %u] the GPU process isn't answering\n", g_tab);
         g_need_paint = false;
         return;
@@ -210,6 +219,7 @@ static void handle(const ChanMsg *m) {
         int64_t y = (int64_t)g_scroll + sc.dy;
         g_scroll = y < 0 ? 0 : (uint32_t)(y > 100000000 ? 100000000 : y);
         clamp_scroll();
+        g_scroll_seq = sc.seq;
         g_need_paint = true;
         return;
     }

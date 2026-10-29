@@ -42,7 +42,7 @@ for c in ${@:-$all}; do
     site)  wp site  Typed+Cast+ref src/proc/site.c ;;
     store) wp store Typed+Cast+ref src/proc/store_core.c src/proc/site.c ;;
     loop)  wp loop  Typed+Cast+ref src/proc/loop_core.c ;;
-    gpu)   timeout=${PROVE_TIMEOUT:-120} wp gpu Typed+Cast src/proc/gpu_decode.c ;;   # its postconditions need longer
+    gpu)   timeout=${PROVE_TIMEOUT:-240} wp gpu Typed+Cast src/proc/gpu_decode.c ;;   # its postconditions need longer
     tla)
         # Safety on the larger model, liveness on the smaller one.  No deadlock
         # check: with the starts bounded, every behavior ends in a quiet state.

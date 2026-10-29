@@ -101,6 +101,7 @@ typedef struct UtSize {
 
 typedef struct UtScroll {
     int32_t dy;
+    uint32_t seq;       /* the UI's count of scrolls to this tab: the GPU process gets the same (UG_SCROLL) */
 } UtScroll;
 
 typedef struct UtPoint {
@@ -248,17 +249,30 @@ typedef struct GtFrameDone {
 
 /* ---- UI <-> GPU process ---------------------------------------------------- */
 enum {
-    UG_WINDOW = 1,      /* UgWindow: the content window shows that tab (0: none) */
-    UG_SHOT,            /* (empty): send what the content window shows, as GU_SHOT */
+    UG_WINDOW = 1,      /* UgWindow: that content window shows that tab (0: none; 0 x 0: the window is gone) */
+    UG_SHOT,            /* UgShot: send what that content window shows, as GU_SHOT */
     GU_SHOT,            /* GuShot + width * height * 4 bytes, BGRX, top-down */
-    GU_SHOWN,           /* GuShown: a frame of that tab is in the content window */
+    GU_SHOWN,           /* GuShown: a frame of that tab is in that content window */
+    UG_SCROLL,          /* UgScroll: the user scrolled that tab; move its content now (compositor scrolling) */
 };
 
+/* Each of the UI's windows has a content window; the GPU process presents
+ * the tab it shows there. */
 typedef struct UgWindow {
     uint64_t hwnd;              /* the UI's content window */
     uint32_t tab;
     uint32_t width, height;
 } UgWindow;
+
+typedef struct UgShot {
+    uint64_t hwnd;
+} UgShot;
+
+typedef struct UgScroll {
+    uint32_t tab;
+    uint32_t seq;               /* as in the UtScroll the tab gets */
+    int32_t dy;
+} UgScroll;
 
 typedef struct GuShot {
     uint32_t width, height;     /* 0 x 0: nothing shown */
@@ -266,6 +280,7 @@ typedef struct GuShot {
 
 typedef struct GuShown {
     uint32_t tab;
+    uint64_t hwnd;
 } GuShown;
 
 #endif

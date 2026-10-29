@@ -703,6 +703,9 @@ static void scribble(HANDLE section, const char *name) {
 
 /* ---- the GPU process ------------------------------------------------------------------- */
 
+/* Where the frames say their layer lies in the page (they may lie too). */
+static GpuFrame g_place = { 0, 0, 0, 0, 0, 0, 600, 0, 0, 600 };
+
 /* A TG_FRAME of n records like c (and nm masks like m), its header's counts
  * as given (they may lie). */
 static bool gpu_frame(uint32_t frame, uint32_t ncmds, uint32_t nmasks, const WireCmd *c, uint32_t n,
@@ -710,7 +713,12 @@ static bool gpu_frame(uint32_t frame, uint32_t ncmds, uint32_t nmasks, const Wir
     size_t bytes = sizeof(GpuFrame) + (size_t)n * sizeof(WireCmd) + (size_t)nm * sizeof(WireMask);
     uint8_t *buf = (uint8_t *)malloc(bytes);
     if (!buf) return false;
-    GpuFrame f = { frame, 800, 600, ncmds, nmasks };
+    GpuFrame f = g_place;
+    f.frame = frame;
+    f.width = 800;
+    f.height = 600;
+    f.ncmds = ncmds;
+    f.nmasks = nmasks;
     memcpy(buf, &f, sizeof(f));
     for (uint32_t i = 0; i < n; i++) memcpy(buf + sizeof(f) + i * sizeof(WireCmd), c, sizeof(WireCmd));
     for (uint32_t i = 0; i < nm; i++)
@@ -826,6 +834,31 @@ static void gpu(void) {
         free(big);
     }
     printf("[escape] note uploaded %d images of 64 MB: past a tab's 1 GB the GPU process keeps no more\n", over);
+    /* Shown in the UI's window (a frame it believes), frames that say their
+     * layer lies anywhere at all: the GPU process clamps where it shows it. */
+    TuFrame shown = { frame, 0, 800, 600, 0, 600 };
+    chan_send(&g_ui, TU_FRAME, &shown, sizeof(shown), 100);
+    static const uint32_t places[][5] = {
+        { 0xffffffffu, 0, 0xffffffffu, 0xffffffffu, 0xffffffffu }, { 0, 0xffffffffu, 0x7fffffffu, 0, 0x80000000u },
+        { 0x80000000u, 1, 0, 0x80000000u, 0xffffffffu }, { 5000, 600, 100, 3, 0 },
+    };
+    c.type = WIRE_RECT;
+    c.x = c.y = 0;
+    c.w = c.h = 100 * WIRE_UNIT;
+    c.u0 = c.v1 = 0;
+    int placed = 0;
+    for (size_t i = 0; i < sizeof(places) / sizeof(places[0]); i++) {
+        g_place.origin_y = places[i][0];
+        g_place.view_h = places[i][1];
+        g_place.scroll_y = places[i][2];
+        g_place.scroll_seq = places[i][3];
+        g_place.content_h = places[i][4];
+        if (gpu_frame(++frame, 1, 0, &c, 1, NULL, 0) && gpu_done(frame, 2000, &other)) placed++;
+        Sleep(100);                     /* presented in between */
+    }
+    g_place.origin_y = g_place.scroll_y = g_place.scroll_seq = 0;
+    g_place.view_h = g_place.content_h = 600;
+    printf("[escape] note sent %d frames placing their layer anywhere at all\n", placed);
     /* It still draws for us, and never sent anything but "drawn". */
     c.type = WIRE_RECT;
     c.x = c.y = 0;

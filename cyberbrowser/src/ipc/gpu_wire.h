@@ -31,8 +31,17 @@ enum {
 
 typedef struct GpuFrame {
     uint32_t frame;                 /* the tab's frame number */
-    uint32_t width, height;         /* the viewport, px */
+    uint32_t width, height;         /* the layer drawn, px */
     uint32_t ncmds, nmasks;
+    /* Where the layer lies in the page, for compositor scrolling: the GPU
+     * process shows view_h rows of it from scroll_y, moved by the scrolls
+     * the UI sent after scroll_seq.  The decoder doesn't read them; gpu_main.c
+     * takes them as they come and clamps where it uses them. */
+    uint32_t origin_y;              /* the page y of the layer's top row */
+    uint32_t view_h;                /* the viewport's height */
+    uint32_t scroll_y;              /* the page y of the viewport's top */
+    uint32_t scroll_seq;            /* the last of the UI's scrolls (UtScroll) in scroll_y */
+    uint32_t content_h;             /* the page's height */
 } GpuFrame;
 
 typedef struct WireCmd {
