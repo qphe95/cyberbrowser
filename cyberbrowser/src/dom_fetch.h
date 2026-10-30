@@ -31,6 +31,8 @@ void dom_fetch_prefetch_first(const char *url);
  * in flight) or a synchronous fetch.  The caller owns `out` (free with
  * http_free_buffer).  A prefetched result is handed out once. */
 bool dom_fetch_script(const char *url, HttpBuffer *out, char *err, size_t err_len);
+/* Called every 100 ms while dom_fetch_script waits (NULL: never). */
+void dom_fetch_set_wait_hook(void (*fn)(void));
 
 /* Has a queued fetch of `url` finished (dom_fetch_script would not wait)? */
 bool dom_fetch_ready(const char *url);

@@ -473,8 +473,11 @@ static bool vk_render(GpuTarget **tp, uint32_t w, uint32_t h, const DisplayList 
         switch (c->type) {
         case DL_RECT:
         case DL_BORDER:
-            x1 = floor(c->x + c->w) + 1;
-            y1 = floor(c->y + c->h) + 1;
+            /* The pixels [floor(x), ceil(x + w)): the same a mask over the
+             * box covers, so a rounded box clips its whole fill (one more
+             * row and column leaked past its corners). */
+            x1 = ceil(c->x + c->w);
+            y1 = ceil(c->y + c->h);
             if (c->type == DL_BORDER) {
                 float th = c->u.border.thickness > 0 ? c->u.border.thickness : 1.0f;
                 o->info[2] = (int32_t)ceilf(th);

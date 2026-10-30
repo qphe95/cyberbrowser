@@ -338,6 +338,13 @@ typedef struct PageObserver {
     bool url_set;                       /* set_document_url done */
 } PageObserver;
 
+static void (*g_load_progress)(void);
+
+void page_set_load_progress(void (*fn)(void)) {
+    g_load_progress = fn;
+    dom_fetch_set_wait_hook(fn);        /* (a script holding the parser up) */
+}
+
 /* The page as it arrives: first what it will fetch, then parse and run. */
 static void page_observe(void *user, const char *data, size_t len) {
     PageObserver *o = (PageObserver *)user;
@@ -348,6 +355,7 @@ static void page_observe(void *user, const char *data, size_t len) {
     }
     if (o->scan) html_preload_scan_feed(o->scan, data, len);
     if (o->page) html_page_stream_feed(o->page, data, len);
+    if (o->page && g_load_progress) g_load_progress();
 }
 
 static char *fetch_start_page(const char *url, size_t *out_size, HtmlPageStream *page) {
@@ -1222,6 +1230,14 @@ const char *page_title(void) {
 
 bool page_needs_layout(void) {
     return g_dom_needs_layout != 0;
+}
+
+bool page_refresh_videos(void) {
+    return g_loop_images && media_refresh_video_frames(g_loop_images);
+}
+
+bool page_video_playing(void) {
+    return media_video_playing();
 }
 
 void page_wait_for_work(unsigned long long quiet_from, unsigned long long quiet_ms) {

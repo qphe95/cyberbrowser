@@ -414,6 +414,7 @@ static uint8_t *call(Chan *c, uint16_t type, const void *a, uint32_t alen, const
             continue;
         }
         uint32_t got;
+        if (c == &g_net && rx.type == NT_PART) continue;     /* (a document's body as it came) */
         if (rx.total >= 4) {
             memcpy(&got, rx.buf, 4);
             if (got == id) {

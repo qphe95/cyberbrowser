@@ -156,6 +156,38 @@ static void send_title(void) {
     chan_send(&g_chan, TU_TITLE, g_title, (uint32_t)strlen(g_title), 1000);
 }
 
+/* While the page loads (page_set_load_progress): every 100 ms, what is
+ * parsed so far goes to the screen, as browsers paint a page before it has
+ * all arrived.  Only the GPU process's "drawn" is taken meanwhile; the UI's
+ * input waits for the load (no page script runs from here mid-parse). */
+static bool g_loading;
+
+static void load_progress(void) {
+    static ULONGLONG last;
+    static bool busy;                   /* (its layout may itself wait on the network) */
+    ULONGLONG now = GetTickCount64();
+    if (!g_loading || busy || now - last < 100) return;
+    busy = true;
+    last = now;
+    uint32_t done;
+    int g;
+    while ((g = gpu_client_poll(&done)) > 0)
+        if (done == g_frame_no) g_in_flight = false;
+    if (g < 0) g_in_flight = false;
+    if (!g_in_flight) {
+        page_request_layout();
+        PageTurn t;
+        page_turn(false, false, (int)g_width, (int)g_height, &t);
+        if (t.new_frame) {
+            g_content_height = frame_extent(&page_frame()->dl);
+            clamp_scroll();
+            paint();
+            send_title();
+        }
+    }
+    busy = false;
+}
+
 /* ---- input ------------------------------------------------------------- */
 
 /* Dispatch a click at the element, as a browser does; if nothing cancels
@@ -357,7 +389,19 @@ typedef struct Pending {
     uint8_t *msg;                       /* the NT_RESPONSE, whole */
     uint32_t len;
     struct Pending *next;
+    struct Part *parts, **parts_end;    /* NT_PARTs not yet observed */
 } Pending;
+
+/* A piece of a document's body (NT_PART), for its request's observer. */
+typedef struct Part {
+    struct Part *next;
+    char url[PROTO_URL_MAX + 1];        /* where it came from, after redirects */
+    uint32_t len;
+    char data[];
+} Part;
+
+static DWORD g_main_thread;
+static void load_progress(void);
 
 static Chan g_net;                      /* side 0: the tab */
 static CRITICAL_SECTION g_net_send, g_net_lock;
@@ -374,6 +418,30 @@ static DWORD WINAPI net_receiver(void *arg) {
         int r = big_recv(&g_net, &rx);
         if (r < 0) break;
         if (r == 0) { chan_wait(&g_net, 1000); continue; }
+        if (rx.type == NT_PART && rx.total > 8) {
+            uint32_t id, ulen;
+            memcpy(&id, rx.buf, 4);
+            memcpy(&ulen, rx.buf + 4, 4);
+            if (ulen > PROTO_URL_MAX || ulen >= rx.total - 8) continue;
+            Part *part = (Part *)malloc(sizeof(Part) + rx.total - 8 - ulen);
+            if (!part) continue;
+            part->next = NULL;
+            memcpy(part->url, rx.buf + 8, ulen);
+            part->url[ulen] = 0;
+            part->len = rx.total - 8 - ulen;
+            memcpy(part->data, rx.buf + 8 + ulen, part->len);
+            EnterCriticalSection(&g_net_lock);
+            Pending *p = g_pending;
+            while (p && (p->id != id || p->done)) p = p->next;
+            if (p) {
+                *p->parts_end = part;
+                p->parts_end = &part->next;
+                WakeAllConditionVariable(&g_net_cv);
+            }
+            LeaveCriticalSection(&g_net_lock);
+            if (!p) free(part);
+            continue;
+        }
         if (rx.type != NT_RESPONSE || rx.total < sizeof(NetResponse)) continue;
         uint32_t id;
         memcpy(&id, rx.buf, 4);
@@ -401,7 +469,8 @@ static DWORD WINAPI net_receiver(void *arg) {
 /* Send a message that expects a response, and wait for it (malloc'd). */
 static uint8_t *net_call(uint16_t type, uint32_t id, const void *a, uint32_t alen, const void *b, uint32_t blen,
                          const void *c, uint32_t clen, uint32_t *len) {
-    Pending p = { id, false, NULL, 0, NULL };
+    Pending p = { id, false, NULL, 0, NULL, NULL, NULL };
+    p.parts_end = &p.parts;
     EnterCriticalSection(&g_net_lock);
     p.next = g_pending;
     g_pending = &p;
@@ -409,10 +478,43 @@ static uint8_t *net_call(uint16_t type, uint32_t id, const void *a, uint32_t ale
     EnterCriticalSection(&g_net_send);
     bool sent = !g_net_broken && big_send(&g_net, type, a, alen, b, blen, c, clen, 30000);
     LeaveCriticalSection(&g_net_send);
+    /* While it waits: the parts of a document go to this thread's observer
+     * (the parser) as they come, and on the main thread during the load,
+     * what is there is painted (load_progress), even while a script holds
+     * the parser. */
+    bool main = GetCurrentThreadId() == g_main_thread;
     EnterCriticalSection(&g_net_lock);
-    while (sent && !p.done && !g_net_broken) SleepConditionVariableCS(&g_net_cv, &g_net_lock, INFINITE);
+    while (sent && !g_net_broken) {
+        Part *parts = p.parts;
+        p.parts = NULL;
+        p.parts_end = &p.parts;
+        if (parts) {
+            LeaveCriticalSection(&g_net_lock);
+            for (Part *q = parts, *n; q; q = n) {
+                n = q->next;
+                /* (The document's URL: page_observe takes it from here.) */
+                if (q->url[0]) http_set_last_url(q->url);
+                http_body_observe(q->data, q->len);
+                free(q);
+            }
+            EnterCriticalSection(&g_net_lock);
+            continue;
+        }
+        if (p.done) break;
+        if (main) {
+            LeaveCriticalSection(&g_net_lock);
+            load_progress();
+            EnterCriticalSection(&g_net_lock);
+            if (p.done || p.parts) continue;
+        }
+        SleepConditionVariableCS(&g_net_cv, &g_net_lock, main ? 100 : INFINITE);
+    }
     for (Pending **pp = &g_pending; *pp; pp = &(*pp)->next)
         if (*pp == &p) { *pp = p.next; break; }
+    for (Part *q = p.parts, *n; q; q = n) {
+        n = q->next;
+        free(q);
+    }
     LeaveCriticalSection(&g_net_lock);
     *len = p.len;
     return p.msg;
@@ -706,7 +808,12 @@ int main(int argc, char **argv) {
     JSContextHandle ctx = page_engine_context();
     JS_Eval(ctx, CLICK_JS, sizeof(CLICK_JS) - 1, "<tab-click>", JS_EVAL_TYPE_GLOBAL);
     bool blank = strcmp(url, "about:blank") == 0;
+    g_main_thread = GetCurrentThreadId();
+    page_set_load_progress(load_progress);
+    g_loading = true;
     bool loaded = blank || page_load();
+    g_loading = false;
+    page_set_load_progress(NULL);
     if (blank) {
         page_request_layout();
     } else if (!loaded && g_elsewhere[0]) {
@@ -740,6 +847,9 @@ int main(int argc, char **argv) {
             g_need_paint = true;
             send_title();
         }
+        /* A playing video's new frame: the same display list, its image anew. */
+        bool video = page_refresh_videos();
+        if (video) g_need_paint = true;
         if (g_need_paint && !g_in_flight) paint();
         if (!reported && GetTickCount64() - loaded_at > 3000) {
             memory_report("3 s after load");
@@ -755,6 +865,7 @@ int main(int argc, char **argv) {
         unsigned long long next = timer_next_due_ms(), now = page_time_ms();
         if (next != (unsigned long long)-1) ms = next > now ? (DWORD)(next - now < 50 ? next - now : 50) : 0;
         if (js_quickjs_network_pending() > 0 || image_cache_has_pending(page_image_cache())) ms = ms < 5 ? ms : 5;
+        if (page_video_playing()) ms = ms < 8 ? ms : 8;         /* (its next frame) */
         if (ms) wait_input(ms);
     }
 }

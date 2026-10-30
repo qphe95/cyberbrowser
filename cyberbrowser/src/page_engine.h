@@ -46,6 +46,10 @@ void page_prepare(const char *url);
 /* Fetch the page, parse it, run its scripts, dispatch DOMContentLoaded and
  * load, and upgrade its custom elements.  False if it couldn't be fetched. */
 bool page_load(void);
+/* Called while page_load streams the page in, after each part is parsed (and
+ * its scripts run): the embedder may paint what is there so far, with
+ * page_request_layout and page_turn(false, ...).  NULL: not called. */
+void page_set_load_progress(void (*fn)(void));
 /* Free the page's document, frame and image cache. */
 void page_close(void);
 
@@ -86,6 +90,12 @@ GCValue page_element_at(double x, double y);
 const char *page_title(void);
 /* A DOM change is waiting to be laid out. */
 bool page_needs_layout(void);
+/* Playing videos' new frames into the image cache: true if the frame needs
+ * a repaint (no layout).  An embedder that calls this shows video at its
+ * frame rate; one that doesn't gets a layout every 500 ms instead. */
+bool page_refresh_videos(void);
+/* A video is playing: the next frame is due soon. */
+bool page_video_playing(void);
 /* Nothing ran in the last turn: wait for a fetch or an image to make
  * progress, or (with virtual time, nothing in flight) move the page clock
  * to the next timer or to the end of the quiet window that started at page

@@ -1941,6 +1941,30 @@ bool http_request_to_memory(const char *url, const char *method,
                                     outBuffer, outStatus, err, errLen, NULL, NULL, NULL);
 }
 
+bool http_request_to_memory_observed(const char *url, const char *method,
+                                     const char *postData, size_t postDataLen,
+                                     const char **headers, size_t headerCount,
+                                     HttpBuffer *outBuffer, int *outStatus,
+                                     char *err, size_t errLen,
+                                     HttpBodyObserver observe, void *user) {
+    HttpBodyObserver prev = g_body_observer;
+    void *prev_user = g_body_observer_user;
+    size_t prev_observed = g_body_observed;
+    g_body_observer = observe;
+    g_body_observer_user = user;
+    g_body_observed = 0;
+    bool ok = http_request_with_method(url, method, postData, postDataLen, headers, headerCount,
+                                       outBuffer, outStatus, err, errLen, NULL, NULL, NULL);
+    g_body_observed = prev_observed;
+    g_body_observer = prev;
+    g_body_observer_user = prev_user;
+    return ok;
+}
+
+void http_body_observe(const char *data, size_t len) {
+    if (g_body_observer && len) body_observe(data, len);
+}
+
 void http_net_log_stats(void) {
     ConnPoolStats st;
     conn_pool_get_stats(&st);

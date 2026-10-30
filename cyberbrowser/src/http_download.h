@@ -54,6 +54,18 @@ bool http_request_to_memory(const char *url, const char *method,
                             const char **headers, size_t headerCount,
                             HttpBuffer *outBuffer, int *outStatus,
                             char *err, size_t errLen);
+/* The same, with its body observed as it arrives (as above, but nothing more
+ * at the end: the buffer has it all).  The network process streams a
+ * document to its tab this way. */
+bool http_request_to_memory_observed(const char *url, const char *method,
+                                     const char *postData, size_t postDataLen,
+                                     const char **headers, size_t headerCount,
+                                     HttpBuffer *outBuffer, int *outStatus,
+                                     char *err, size_t errLen,
+                                     HttpBodyObserver observe, void *user);
+/* Hand this thread's observer (http_get_to_memory_observed) a piece of the
+ * body that arrived another way: a remote request's (http_set_remote) parts. */
+void http_body_observe(const char *data, size_t len);
 
 bool http_post_to_memory(const char *url, const char *postData, size_t postDataLen,
                          const char **headers, size_t headerCount,

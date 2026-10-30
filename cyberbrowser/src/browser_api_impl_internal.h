@@ -454,6 +454,13 @@ bool media_tick_pending(void);
 /* The frame a video element shows now (for painting). */
 bool media_video_frame_for_node(NodeId node, const uint8_t **rgba,
                                 int *w, int *h, uint64_t *frame_id);
+/* Each video's frame for now into cache, as the display list draws it
+ * ("cyber-video-frame:<node>"), when it changed: true if any did.  Showing
+ * it then takes a repaint, not a layout. */
+struct ImageCache;
+bool media_refresh_video_frames(struct ImageCache *cache);
+/* Is a video playing (frames due)? */
+bool media_video_playing(void);
 extern const JSCFunctionListEntry js_media_source_proto_funcs[];
 extern const size_t js_media_source_proto_funcs_count;
 extern const JSCFunctionListEntry js_source_buffer_proto_funcs[];

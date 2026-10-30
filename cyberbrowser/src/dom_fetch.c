@@ -135,6 +135,12 @@ static void prefetch(const char *url, bool first) {
 void dom_fetch_prefetch(const char *url) { prefetch(url, false); }
 void dom_fetch_prefetch_first(const char *url) { prefetch(url, true); }
 
+static void (*g_wait_hook)(void);
+
+void dom_fetch_set_wait_hook(void (*fn)(void)) {
+    g_wait_hook = fn;
+}
+
 bool dom_fetch_script(const char *url, HttpBuffer *out, char *err, size_t err_len) {
     memset(out, 0, sizeof(*out));
     if (!url) return false;
@@ -149,7 +155,25 @@ bool dom_fetch_script(const char *url, HttpBuffer *out, char *err, size_t err_le
     if (e->state < 2) {
         double t0 = now_ms();
         g_stats.waits++;
-        while (e->state < 2) pthread_cond_wait(&g_done, &g_mu);
+        /* With a wait hook (the page engine's, while the page loads), it runs
+         * every 100 ms meanwhile, unlocked: the page is painted so far. */
+        while (e->state < 2) {
+            if (!g_wait_hook) {
+                pthread_cond_wait(&g_done, &g_mu);
+                continue;
+            }
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_nsec += 100000000L;
+            if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+            pthread_cond_timedwait(&g_done, &g_mu, &ts);
+            if (e->state < 2) {
+                void (*hook)(void) = g_wait_hook;
+                pthread_mutex_unlock(&g_mu);
+                hook();
+                pthread_mutex_lock(&g_mu);
+            }
+        }
         g_stats.wait_ms += now_ms() - t0;
     } else {
         g_stats.hits++;

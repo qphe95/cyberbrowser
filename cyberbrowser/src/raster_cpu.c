@@ -271,10 +271,17 @@ void raster_display_list_with(const DisplayList *dl, const RasterResources *res,
         int x1 = (int)floorf(cmd->x + cmd->w);
         int y1 = (int)floorf(cmd->y + cmd->h);
 
+        if (cmd->type == DL_RECT || cmd->type == DL_BORDER) {
+            /* The pixels [floor(x), ceil(x + w)), as a mask over the box
+             * covers (fill_rect's ends are inclusive). */
+            x1 = (int)ceilf(cmd->x + cmd->w) - 1;
+            y1 = (int)ceilf(cmd->y + cmd->h) - 1;
+        }
         if (cmd->type == DL_RECT) {
-            fill_rect(pixels, img_width, img_height,
-                      x0, y0, x1, y1,
-                      cmd->r, cmd->g, cmd->b, cmd->a);
+            if (x1 >= x0 && y1 >= y0)
+                fill_rect(pixels, img_width, img_height,
+                          x0, y0, x1, y1,
+                          cmd->r, cmd->g, cmd->b, cmd->a);
         } else if (cmd->type == DL_BORDER) {
             float thickness = cmd->u.border.thickness;
             if (thickness <= 0) thickness = 1.0f;

@@ -20,6 +20,7 @@
 #include "browser_api_impl_types.h"
 #include "browser_api_impl_handle_helpers.h"
 #include "browser_api_impl_internal.h"
+#include "image_cache.h"
 #include "html_dom.h"
 #include "css_parser.h"
 #include "gc_value_helpers.h"
@@ -568,7 +569,13 @@ typedef struct MediaPlayer {
     bool sent_metadata, sent_loadeddata;
     unsigned long long last_timeupdate_ms;
     unsigned long long last_paint_ms;
+    uint64_t shown_frame;       /* the frame media_refresh_video_frames last put */
+    int shown_w, shown_h;
 } MediaPlayer;
+
+/* Someone shows new frames without a layout (media_refresh_video_frames):
+ * a playing video then asks for no layouts of its own. */
+static bool g_refreshing;
 
 #define MAX_PLAYERS 32
 static MediaPlayer *g_players[MAX_PLAYERS];
@@ -727,8 +734,10 @@ static void player_update(JSContextHandle ctx, MediaPlayer *p) {
         if (vmb) media_buffer_prefetch(vmb, player_time_at(p, now));
     }
     /* A new frame needs a repaint (but is not a document change: the
-     * page can still be quiet while a video plays). */
-    if ((running || p->ready != old) && now - p->last_paint_ms >= 500) {
+     * page can still be quiet while a video plays).  With frames refreshed
+     * in place (media_refresh_video_frames), only a new state needs a
+     * layout. */
+    if (p->ready != old || (running && !g_refreshing && now - p->last_paint_ms >= 500)) {
         p->last_paint_ms = now;
         g_dom_needs_layout = 1;
     }
@@ -886,6 +895,39 @@ void media_element_video_size(JSContextHandle ctx, GCValue video, int *w, int *h
     MediaPlayer *p = player_of(video);
     MediaBuffer *mb = p ? player_video_buffer(ctx, p) : NULL;
     if (mb) media_buffer_video_size(mb, w, h);
+}
+
+bool media_refresh_video_frames(ImageCache *cache) {
+    g_refreshing = true;
+    bool any = false;
+    for (int i = 0; i < g_nplayers; i++) {
+        MediaPlayer *p = g_players[i];
+        if (!p->node || p->ready < HAVE_CURRENT_DATA) continue;
+        MediaBuffer *mb = player_video_buffer(g_media_ctx, p);
+        const uint8_t *px = NULL;
+        int w = 0, h = 0;
+        uint64_t id = 0;
+        if (!mb || !media_buffer_frame_at(mb, player_time(p), &px, &w, &h, &id) || id == p->shown_frame) continue;
+        p->shown_frame = id;
+        if (w != p->shown_w || h != p->shown_h) {
+            p->shown_w = w;
+            p->shown_h = h;
+            g_dom_needs_layout = 1;     /* a new size: placed anew */
+        }
+        char key[48];
+        snprintf(key, sizeof(key), "cyber-video-frame:%u", p->node);
+        image_cache_put_rgba(cache, key, w, h, px);
+        any = true;
+    }
+    return any;
+}
+
+bool media_video_playing(void) {
+    for (int i = 0; i < g_nplayers; i++) {
+        MediaPlayer *p = g_players[i];
+        if (!p->paused && !p->waiting && p->ready >= HAVE_FUTURE_DATA) return true;
+    }
+    return false;
 }
 
 bool media_video_frame_for_node(NodeId node, const uint8_t **rgba,

@@ -149,6 +149,9 @@ enum {
     TN_COOKIE_GET,      /* NetCookieGet + url: document.cookie */
     TN_COOKIE_SET,      /* url, NUL, cookie line: document.cookie = ... */
     NT_RESPONSE,        /* NetResponse + url + headers + error + body */
+    NT_PART,            /* u32 id, u32 url length, url (where it came from, after redirects) + bytes: a
+                         * navigation's body as it arrives, decoded, before its NT_RESPONSE (which
+                         * still has it whole) */
 };
 
 typedef struct NetRequest {

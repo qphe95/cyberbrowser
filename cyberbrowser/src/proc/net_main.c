@@ -93,6 +93,8 @@ typedef struct Site {
 
 /* A reply waiting to be sent. */
 typedef struct Out {
+    uint16_t type;                  /* NT_RESPONSE, or NT_PART (head: the id; b.data: the bytes) */
+    uint64_t size;                  /* what it counts against the queue's bytes */
     uint8_t *head;                  /* NetResponse + url */
     uint32_t head_len;
     char *err;                      /* a failure's */
@@ -232,6 +234,8 @@ static void client_stop(Client *c, const char *why) {
     LeaveCriticalSection(&c->out_lock);
 }
 
+static void queue_out(Client *c, Out *o);
+
 /* Queue a reply for c's sender.  ok: NET_OK (b's headers and body are taken
  * over), NET_FAILED (err), NET_ELSEWHERE (url).  url: where the request
  * ended (NULL: none). */
@@ -256,14 +260,23 @@ static void reply(Client *c, uint32_t id, uint32_t ok, int status, const char *u
     memcpy(o->head, &r, sizeof(r));
     if (ulen) memcpy(o->head + sizeof(r), url, ulen);
     o->head_len = (uint32_t)(sizeof(r) + ulen);
-    uint64_t size = (uint64_t)o->head_len + r.headers_len + r.error_len + r.body_len;
+    o->type = NT_RESPONSE;
+    o->size = (uint64_t)o->head_len + r.headers_len + r.error_len + r.body_len;
+    queue_out(c, o);
+}
+
+/* Queue o for c's sender, within the queue's limits (else c is served no
+ * more). */
+static void queue_out(Client *c, Out *o) {
+    uint64_t size = o->size;
+    bool counted = o->type == NT_RESPONSE;      /* (parts count in bytes only: a page comes in many) */
     EnterCriticalSection(&c->out_lock);
-    bool full = c->out_n >= CLIENT_OUT_MAX || c->out_bytes + size > CLIENT_OUT_BYTES_MAX;
+    bool full = (counted && c->out_n >= CLIENT_OUT_MAX) || c->out_bytes + size > CLIENT_OUT_BYTES_MAX;
     bool queued = !c->dead && !full;
     if (queued) {
         if (c->out_tail) c->out_tail->next = o; else c->out_head = o;
         c->out_tail = o;
-        c->out_n++;
+        if (counted) c->out_n++;
         c->out_bytes += size;
         WakeAllConditionVariable(&c->out_cv);
     }
@@ -272,6 +285,46 @@ static void reply(Client *c, uint32_t id, uint32_t ok, int status, const char *u
         out_free(o);
         if (full) client_stop(c, "too many replies it hasn't taken");
     }
+}
+
+/* A piece of a navigation's body, for c to parse (and paint) as it comes:
+ * queued ahead of the request's reply (NT_PART). */
+typedef struct PartTo {
+    Client *c;
+    uint32_t id;
+    int verdict;                        /* P10 on the URL the body is from: -1 not yet asked */
+} PartTo;
+
+static int doc_verdict(const Client *c, int mode, const char *url);
+
+static void part(void *user, const char *data, size_t len) {
+    PartTo *t = (PartTo *)user;
+    if (!len || len > CHAN_MSG_MAX * 64 || t->c->dead) return;
+    /* Every hop was filtered (same_site_only); the body's own URL is asked
+     * again before any of it goes. */
+    if (t->verdict < 0) {
+        const char *at = http_last_url();
+        t->verdict = at[0] ? doc_verdict(t->c, HTTP_MODE_NAVIGATE, at) : NET_DOC_ELSEWHERE;
+    }
+    if (t->verdict != NET_DOC_OK) return;
+    const char *at = http_last_url();
+    uint32_t ulen = (uint32_t)strnlen(at, PROTO_URL_MAX);
+    Out *o = (Out *)calloc(1, sizeof(Out));
+    if (o) o->head = (uint8_t *)malloc(8 + ulen);
+    if (o && o->head) o->b.data = (char *)malloc(len);
+    if (!o || !o->head || !o->b.data) {
+        if (o) out_free(o);
+        return;                         /* (the reply still has it all) */
+    }
+    memcpy(o->head, &t->id, 4);
+    memcpy(o->head + 4, &ulen, 4);
+    memcpy(o->head + 8, at, ulen);
+    o->head_len = 8 + ulen;
+    memcpy(o->b.data, data, len);
+    o->b.size = len;
+    o->type = NT_PART;
+    o->size = o->head_len + (uint64_t)len;
+    queue_out(t->c, o);
 }
 
 /* A tab's replies, in order.  A tab that doesn't take them holds only this
@@ -283,20 +336,24 @@ static DWORD WINAPI sender(void *arg) {
         while (!c->out_head && !c->dead) SleepConditionVariableCS(&c->out_cv, &c->out_lock, INFINITE);
         Out *o = c->dead ? NULL : c->out_head;
         if (o) {
-            NetResponse r;
-            memcpy(&r, o->head, sizeof(r));
             c->out_head = o->next;
             if (!c->out_head) c->out_tail = NULL;
-            c->out_n--;
-            c->out_bytes -= (uint64_t)o->head_len + r.headers_len + r.error_len + r.body_len;
+            if (o->type == NT_RESPONSE) c->out_n--;
+            c->out_bytes -= o->size;
         }
         LeaveCriticalSection(&c->out_lock);
         if (!o) break;
-        NetResponse r;
-        memcpy(&r, o->head, sizeof(r));
-        bool ok = r.ok == NET_OK;
-        bool sent = big_send(&c->chan, NT_RESPONSE, o->head, o->head_len, ok ? o->b.headers : o->err,
-                             ok ? r.headers_len : r.error_len, ok ? o->b.data : NULL, r.body_len, SEND_TIMEOUT_MS);
+        bool sent;
+        if (o->type == NT_PART) {
+            sent = big_send(&c->chan, NT_PART, o->head, o->head_len, o->b.data, (uint32_t)o->b.size, NULL, 0,
+                            SEND_TIMEOUT_MS);
+        } else {
+            NetResponse r;
+            memcpy(&r, o->head, sizeof(r));
+            bool ok = r.ok == NET_OK;
+            sent = big_send(&c->chan, NT_RESPONSE, o->head, o->head_len, ok ? o->b.headers : o->err,
+                            ok ? r.headers_len : r.error_len, ok ? o->b.data : NULL, r.body_len, SEND_TIMEOUT_MS);
+        }
         out_free(o);
         if (!sent) client_stop(c, "it doesn't take its replies");
     }
@@ -505,8 +562,12 @@ static void run_request(Client *c, const uint8_t *m, uint32_t len) {
     HttpBuffer b = { 0 };
     int status = 0;
     char err[512] = "";
-    bool ok = http_request_to_memory(url, method, q.body_len ? (const char *)m + q.body : NULL, q.body_len, headers,
-                                     q.nheaders, &b, &status, err, sizeof(err));
+    /* A document streams to the tab as it comes (NT_PART), to be parsed and
+     * painted before it has all arrived. */
+    PartTo to = { c, q.id, -1 };
+    bool ok = http_request_to_memory_observed(url, method, q.body_len ? (const char *)m + q.body : NULL, q.body_len,
+                                              headers, q.nheaders, &b, &status, err, sizeof(err),
+                                              doc ? part : NULL, &to);
     http_cookie_jar_use(NULL);
     tls_set_space_limit(-1);
     http_set_redirect_filter(NULL, NULL);
