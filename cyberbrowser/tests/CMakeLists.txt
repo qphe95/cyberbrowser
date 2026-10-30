@@ -13,6 +13,7 @@ add_executable(cyberbrowser-tests
     test_preorder_compaction_array.c
     test_css_parser.c
     test_css_layout.c
+    test_import_map.c
     test_css_style.c
     test_image_cache.c
     test_http_pool.c

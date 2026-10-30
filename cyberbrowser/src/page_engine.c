@@ -39,6 +39,7 @@
 #include "html_media_extract.h"
 #include "dom_fetch.h"
 #include "url_whatwg.h"
+#include "import_map.h"
 
 int timer_process_due(JSContextHandle ctx);
 int scheduler_process_tasks(JSContextHandle ctx);
@@ -72,6 +73,10 @@ static void page_mark(const char *what) {
 static char *cyber_module_resolve(const char *base, const char *specifier)
 {
     if (!specifier || !specifier[0]) return NULL;
+
+    /* The page's <script type="importmap"> mappings come first. */
+    char *mapped = import_map_resolve(specifier, (base && url_has_scheme(base)) ? base : g_cyber_start_url);
+    if (mapped) return mapped;
 
     /* Absolute URL (http://, https://, or any scheme:) — use as-is. */
     if (url_has_scheme(specifier)) return strdup(specifier);

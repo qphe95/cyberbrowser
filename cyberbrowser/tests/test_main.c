@@ -51,6 +51,7 @@ extern void run_code_cache_tests(void);
 extern void run_preorder_compaction_array_tests(void);
 extern void run_css_parser_tests(void);
 extern void run_css_layout_tests(void);
+extern void run_import_map_tests(void);
 extern void run_css_style_tests(void);
 extern void run_image_cache_tests(void);
 extern void run_http_pool_tests(void);
@@ -209,6 +210,7 @@ int main(int argc, char *argv[]) {
         { "preorder_compaction_array", run_preorder_compaction_array_tests },
         { "css_parser", run_css_parser_tests },
         { "css_layout", run_css_layout_tests },
+        { "import_map", run_import_map_tests },
         { "css_style", run_css_style_tests },
         { "image_cache", run_image_cache_tests },
         { "http_pool", run_http_pool_tests },

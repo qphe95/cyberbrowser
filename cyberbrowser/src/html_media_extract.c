@@ -18,6 +18,7 @@
 #include "cyber_profile.h"
 #include "css_layout.h"
 #include "url_whatwg.h"
+#include "import_map.h"
 
 extern const char *g_cyber_start_url;
 
@@ -1263,9 +1264,12 @@ static void gc_value_root(GCValue v, bool add) {
  * modules). */
 enum { PS_SKIP, PS_BLOCKING, PS_ASYNC, PS_DEFER };
 
+static void register_import_map(NodeId node);
+
 static int classify_parser_script(NodeId node, char *url, size_t cap) {
     url[0] = '\0';
     const char *type = dom_get_attr_str(node, "type");
+    if (type && strcasecmp(type, "importmap") == 0) { register_import_map(node); return PS_SKIP; }
     if (!parser_script_type_runs(type)) return PS_SKIP;
     bool module = type && strncasecmp(type, "module", 6) == 0;
     /* nomodule: for browsers without modules */
@@ -1310,6 +1314,21 @@ static HtmlPageStream *g_opened;
 
 static const char *page_base_url(void) {
     return g_page && g_page->base_url[0] ? g_page->base_url : g_cyber_start_url;
+}
+
+/* An inline <script type="importmap"> of the main page (an external one is
+ * an error, HTML §4.12.1.1; a frame's would need a map per realm). */
+static void register_import_map(NodeId node) {
+    if (!g_page || g_page->frame) return;
+    const char *src = dom_get_attr_str(node, "src");
+    if (src && src[0]) return;
+    StrBuf text SB_AUTO = sb_from("", 0);
+    for (NodeId t = dom_first_child(node); t; t = dom_next_sibling(t)) {
+        uint32_t n = 0;
+        const char *s = dom_kind(t) == DOM_K_TEXT ? dom_text(t, &n) : NULL;
+        if (s && n) sb_insert(&text, text.len, s);
+    }
+    if (text.len) import_map_add(text.data, text.len, page_base_url());
 }
 
 static void queue_push(ScriptQueue *q, GCValue script, const char *url) {
@@ -1524,6 +1543,7 @@ static HtmlPageStream *page_stream_begin(JSContextHandle ctx, const char *base_u
 
 HtmlPageStream *html_page_stream_begin(void) {
     if (!SAFE_VALID(g_js_context) || g_page) return NULL;
+    import_map_reset();
     return page_stream_begin(g_js_context, NULL);
 }
 
