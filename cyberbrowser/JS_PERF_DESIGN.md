@@ -320,7 +320,7 @@ stays as a check that framework code runs and how the tiers do on it.
   and the score as `SPEEDOMETER-DONE <json>` and sets `__cyberDone`, which ends the
   browser's event loop (`CYBER_RUN_UNTIL=__cyberDone` keeps it running until then instead of
   the usual settle limits).
-- **`tests/jit/speedometer.sh`** `<cyberbrowser.exe> <Speedometer dir> [iterations] [rounds]
+- **`tests/jit/speedometer.sh`** `<cb_harness.exe> <Speedometer dir> [iterations] [rounds]
   [setting...]` runs the whole benchmark, all suites in one browser process as a browser runs
   it, under each setting (`interp`, `t1`, `t2`, or env assignments), interleaved and rotated
   as in `replay.sh`. **`tools/speedometer_stats.js`** reports each setting's median score and

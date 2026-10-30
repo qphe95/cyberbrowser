@@ -5,7 +5,7 @@
 # as in replay.sh.  tools/speedometer_stats.js then reports, per setting, the
 # score and each suite's time (medians over the rounds) and the change from
 # the first setting.
-#   tests/jit/speedometer.sh <cyberbrowser.exe> <Speedometer dir> [iterations=5] [rounds=3] [setting...]
+#   tests/jit/speedometer.sh <cb_harness.exe> <Speedometer dir> [iterations=5] [rounds=3] [setting...]
 # A setting is interp (QJS_JIT=0), t1 (QJS_JIT=1), t2 (QJS_T2=1), or any
 # space-free env assignments joined by commas (QJS_JIT=0,QJS_T2=stress).
 # The default settings are interp t1 t2.  SPEEDOMETER_SUITES=A,B runs those
@@ -14,7 +14,7 @@
 exe=$1; dir=$2; iterations=${3:-5}; rounds=${4:-3}; shift 4 2>/dev/null
 settings=${*:-interp t1 t2}
 if [ ! -x "$exe" ] || [ ! -f "$dir/index.html" ]; then
-    echo "usage: $0 <cyberbrowser.exe> <Speedometer dir> [iterations] [rounds] [setting...]" >&2
+    echo "usage: $0 <cb_harness.exe> <Speedometer dir> [iterations] [rounds] [setting...]" >&2
     exit 2
 fi
 here=$(cd "$(dirname "$0")" && pwd)

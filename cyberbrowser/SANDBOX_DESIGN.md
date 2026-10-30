@@ -91,7 +91,7 @@ that compromise worth as little as possible:
 
 | Process | Executable | Trust | Rights |
 |---|---|---|---|
-| Coordinator | `cyberbrowser.exe` | Trusted, verified | The user's rights. Starts every process; grants every channel. |
+| Coordinator | `cb_coord.exe` (opened through `cyberbrowser.exe`) | Trusted, verified | The user's rights. Starts every process; grants every channel. |
 | UI | `cb_ui.exe` | Untrusted, handles no web content | Owns the windows and input. No GPU, files or network. |
 | GPU | `cb_gpu.exe` | Untrusted, parses only the verified command format | The GPU, and drawing into the UI's windows (it shares the UI's AppContainer, section 5.7.1). No files or network. |
 | Web-GPU, one per site using WebGL or WebGPU | `cb_webgpu.exe` | Untrusted, runs page shaders | Its own GPU device. No files, network or windows. |
@@ -1427,9 +1427,10 @@ the single-process harness on top of it; the CPU rasterizer is `src/raster_cpu.c
 **M1 (done):** `cb_coord.exe [url ...]` opens a browser window.
 
 - **Executables.** `cb_coord.exe` (the coordinator), `cb_ui.exe` (the window), `cb_tab.exe` (a
-  tab). `cyberbrowser.exe` stays the single-process harness under its old name until the
-  multi-process browser becomes the default, so `tests/jit/replay.sh` and the tests are
-  unchanged.
+  tab). `cyberbrowser.exe` was the single-process harness until the multi-process browser
+  became the default (after M9): it is now what a user opens, a launcher with no console that
+  starts `cb_coord.exe` beside it. The harness is `cb_harness.exe`, which
+  `tests/jit/replay.sh` and the tests take as their executable.
 - **libchan** (`src/ipc/chan.c`): the rings and events of section 4.2. Every message is
   copied out of shared memory before it is used, and indices and lengths are read once and
   checked. `chan_bench.exe` measures it between two processes:

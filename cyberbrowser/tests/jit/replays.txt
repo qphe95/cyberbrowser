@@ -3,7 +3,7 @@
 # on the deterministic clock so the page asks for the same URLs as when
 # replay.sh replays it:
 #   mkdir <root>/<dir>
-#   CYBER_DET_TIME=1 CYBER_SYNC_FETCH=1 CYBER_RECORD=<root>/<dir> cyberbrowser.exe <url>
+#   CYBER_DET_TIME=1 CYBER_SYNC_FETCH=1 CYBER_RECORD=<root>/<dir> cb_harness.exe <url>
 # (Add CYBER_STREAM_PARSE=0 for a page other than YouTube: there the
 # streaming parser runs no scripts while a recording is made.)
 yt-dQw4w9WgXcQ https://www.youtube.com/watch?v=dQw4w9WgXcQ

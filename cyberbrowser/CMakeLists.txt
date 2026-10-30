@@ -420,27 +420,28 @@ elseif(BE_PLATFORM_WINDOWS)
 endif()
 
 # =============================================================================
-# CyberBrowser executable (start-page loader; defaults to Wikipedia, URL via
-# argv[1] or CYBER_START_URL)
+# The single-process harness, cb_harness.exe (start-page loader; defaults to
+# Wikipedia, URL via argv[1] or CYBER_START_URL): the replays and tests run
+# it.  cyberbrowser.exe is the browser (below).
 # =============================================================================
-add_executable(cyberbrowser
+add_executable(cb_harness
     src/cyberbrowser_main.c
 )
 
-target_include_directories(cyberbrowser
+target_include_directories(cb_harness
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/src/quickjs
         ${CMAKE_CURRENT_SOURCE_DIR}/src/stb
 )
 
-target_link_libraries(cyberbrowser
+target_link_libraries(cb_harness
     PRIVATE
         cyberbrowser_lib
 )
 
 if(BE_PLATFORM_WINDOWS)
-    target_include_directories(cyberbrowser BEFORE PRIVATE
+    target_include_directories(cb_harness BEFORE PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/win32
     )
     # Give the main executable the same generous C stack that the test
@@ -448,7 +449,7 @@ if(BE_PLATFORM_WINDOWS)
     # through nested IIFEs during both parsing and execution; a 64 MiB
     # stack prevents C stack overflow in JS_Eval.
     if(MINGW)
-        target_link_options(cyberbrowser PRIVATE "-Wl,--stack,67108864")
+        target_link_options(cb_harness PRIVATE "-Wl,--stack,67108864")
     endif()
 endif()
 
@@ -492,8 +493,8 @@ endif()
 
 # =============================================================================
 # The multi-process browser (SANDBOX_DESIGN.md): cb_coord.exe starts the UI
-# (cb_ui.exe) and a process per tab (cb_tab.exe).  cyberbrowser.exe stays the
-# single-process harness the replays and tests use.
+# (cb_ui.exe) and a process per tab (cb_tab.exe).  cyberbrowser.exe starts
+# cb_coord.exe beside it, with no console: the browser you open.
 # =============================================================================
 if(BE_PLATFORM_WINDOWS)
     # libchan and starting child processes: no engine, so the coordinator and
@@ -520,6 +521,12 @@ if(BE_PLATFORM_WINDOWS)
                    src/proc/sandbox.c)
     target_link_libraries(cb_coord PRIVATE cb_ipc userenv bcrypt)
     target_compile_options(cb_coord PRIVATE -Wall -Wextra)
+
+    # cyberbrowser.exe: what a user opens.  It starts cb_coord.exe from its
+    # own folder with no console window and waits for it.
+    add_executable(cyberbrowser WIN32 src/proc/launcher_main.c)
+    target_compile_options(cyberbrowser PRIVATE -Wall -Wextra -municode)
+    target_link_options(cyberbrowser PRIVATE -municode)    # (wWinMain)
 
     # Tests of the pure parts: sites, the storage rules, the coordinator's core
     # and plans, the relay's core, the GPU process's decoder and uploads, the

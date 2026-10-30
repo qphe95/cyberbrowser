@@ -2020,7 +2020,7 @@ bool html_execute_page_scripts(const char *html, JsExecResult *out_result) {
     
     // External scripts up to ~64 MiB are now safe to fetch.  The parser
     // nesting-state buffer has been moved from the C stack to the GC heap,
-    // and cyberbrowser.exe is linked with a 64 MiB C stack, so large
+    // and cb_harness.exe is linked with a 64 MiB C stack, so large
     // ~10 MiB application bundles no longer overflow during JS_Eval.
     const size_t MAX_EXTERNAL_SCRIPT_SIZE = 64 * 1024 * 1024;
     

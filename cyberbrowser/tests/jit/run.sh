@@ -4,7 +4,7 @@
 # given (default: stress), and compare what they print.  A mode is QJS_JIT's
 # value, or t2 / t2stress for the optimizer (QJS_T2=1 with low thresholds,
 # QJS_T2=stress), interpreting otherwise.
-#   tests/jit/run.sh <cyberbrowser.exe> [mode...]
+#   tests/jit/run.sh <cb_harness.exe> [mode...]
 exe=$1; shift
 modes=${*:-stress}
 dir=$(cd "$(dirname "$0")" && pwd)

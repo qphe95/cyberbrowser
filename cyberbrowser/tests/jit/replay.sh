@@ -10,7 +10,7 @@
 # then reports, per recording, each setting's median and its change from
 # the first setting with a 95% confidence interval.
 #
-#   tests/jit/replay.sh <cyberbrowser.exe> <replay root> [runs=5] [setting...]
+#   tests/jit/replay.sh <cb_harness.exe> <replay root> [runs=5] [setting...]
 #
 # A setting is QJS_JIT's value, optionally with a threshold and more
 # environment variables: 0, 1, 1@20000, 1+QJS_JIT_IC=0+CYBER_SPIN_PCT=1;

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Symbolize and summarize CYBER_SAMPLE output.
-//   node tools/sample_report.js <samples.txt> <cyberbrowser.exe> [top=40]
+//   node tools/sample_report.js <samples.txt> <cb_harness.exe> [top=40]
 // Prints self time by (innermost inlined) function, inclusive time by
 // function, and a coarse breakdown by subsystem.  Needs addr2line/objdump
 // (MinGW) on PATH and an executable built with -g.

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Time each benchmark in bench.js with the interpreter and the JIT.
-#   tests/jit/bench/bench.sh <cyberbrowser.exe> [runs=3] [modes="0 1"] [bench...]
+#   tests/jit/bench/bench.sh <cb_harness.exe> [runs=3] [modes="0 1"] [bench...]
 # Prints, per benchmark and mode, the best time of the runs in ms as the
 # script measured it, the best wall time of the process (startup included)
 # in parentheses, and the checksum (which must not depend on the mode).

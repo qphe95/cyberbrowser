@@ -19,7 +19,7 @@
 #include <stdint.h>
 
 /* Implementation (not just declarations) of stb_image_write lives here in
- * the library so both cyberbrowser.exe and flamegraph_viewer.exe link it;
+ * the library so both cb_harness.exe and flamegraph_viewer.exe link it;
  * stb_truetype's implementation stays in text_shaper.c. */
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
