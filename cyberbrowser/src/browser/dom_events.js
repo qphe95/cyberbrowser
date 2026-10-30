@@ -666,11 +666,15 @@
         if (own && (own.get || own.set)) return;    /* (a native one already) */
         Object.defineProperty(P, name, { configurable: true, enumerable: true,
             get: function () {
-                var h = this[HANDLERS];
+                /* <body>'s window handlers are the window's (HTML 8.1.8.2) */
+                var self = bodyForwards(this, type) ? global : this;
+                var h = self[HANDLERS];
                 if (h && Object.prototype.hasOwnProperty.call(h, type)) return h[type];
-                /* the content attribute, compiled on first use */
-                if (typeof this.getAttribute === 'function') {
-                    var code = this.getAttribute(name);
+                /* the content attribute, compiled on first use (the window's
+                 * are <body>'s) */
+                var holder = self === global && BODY_FORWARDED.indexOf(type) >= 0 && global.document ? global.document.body : self;
+                if (holder && typeof holder.getAttribute === 'function') {
+                    var code = holder.getAttribute(name);
                     if (code !== null) {
                         var fn = null;
                         try {
@@ -678,15 +682,21 @@
                                 ? new Function('event', 'source', 'lineno', 'colno', 'error', code)
                                 : new Function('event', code);
                         } catch (e) { report(e); }
-                        setHandler(this, type, fn);
+                        setHandler(self, type, fn);
                         return fn;
                     }
                 }
                 return null;
             },
             set: function (v) {
-                setHandler(this, type, typeof v === 'function' || (v !== null && typeof v === 'object') ? v : null);
+                var self = bodyForwards(this, type) ? global : this;
+                setHandler(self, type, typeof v === 'function' || (v !== null && typeof v === 'object') ? v : null);
             } });
+    }
+    /* The handlers <body> (and <frameset>) forward to the window. */
+    var BODY_FORWARDED = ['blur', 'error', 'focus', 'load', 'resize', 'scroll'].concat(WINDOW_HANDLERS);
+    function bodyForwards(el, type) {
+        return el !== global && el && global.document && el === global.document.body && BODY_FORWARDED.indexOf(type) >= 0;
     }
     function setHandler(target, type, v) {
         var h = target[HANDLERS];

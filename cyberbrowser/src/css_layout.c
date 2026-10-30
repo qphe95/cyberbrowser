@@ -3946,6 +3946,24 @@ static const char* layout_find_host_tag(LayoutContext *ctx, int dom_idx) {
     return NULL;
 }
 
+/* A <style> or <link> whose sheet scripts changed through the CSSOM
+ * (cssom.js): the sheet's serialization (malloc'd); NULL otherwise. */
+static char *layout_cssom_sheet_text(LayoutContext *ctx, HtmlNode *node) {
+    if (!node->store_id || !SAFE_VALID(ctx->js_ctx) ||
+        gc_handle_get_type(ctx->js_ctx) != JS_GC_OBJ_TYPE_JS_CONTEXT) return NULL;
+    JSContextHandle js = ctx->js_ctx;
+    GCValue el = dom_js_existing(node->store_id);
+    if (!JS_IsObject(el)) return NULL;
+    GCValue sh = JS_GetPropertyStr(js, el, "__cyberSheet");
+    if (!JS_IsObject(sh) || !JS_ToBool(js, JS_GetPropertyStr(js, sh, "__cyberModified"))) return NULL;
+    GCValue fn = JS_GetPropertyStr(js, sh, "__cyberText");
+    if (!JS_IsFunction(js, fn)) return NULL;
+    GCValue t = JS_Call(js, fn, sh, 0, NULL);
+    if (JS_IsException(t)) { JS_GetException(js); return NULL; }
+    const char *s = JS_ToCString(js, t);
+    return strdup(s ? s : "");
+}
+
 /* The sheets of the document subtree at `dom_idx` (the document, not the
  * layout tree: that may leave display:none subtrees out). */
 static void layout_collect_stylesheets_recursive(LayoutContext *ctx, int dom_idx,
@@ -3956,7 +3974,14 @@ static void layout_collect_stylesheets_recursive(LayoutContext *ctx, int dom_idx
     HtmlNode *node = layout_node_dom(ctx, dom_idx);
     if (!node || node->type != HTML_NODE_ELEMENT) goto next;
 
-    if (strcasecmp(node->tag_name, "style") == 0 && node->text_content && node->text_content[0]) {
+    char *cssom = (strcasecmp(node->tag_name, "style") == 0 || strcasecmp(node->tag_name, "link") == 0)
+                   ? layout_cssom_sheet_text(ctx, node) : NULL;
+    if (cssom) {
+        const char *host = layout_find_host_tag(ctx, dom_idx);
+        layout_sheet_list_add_text(list, cssom, strlen(cssom), host);
+        font_registry_scan_css(cssom, strlen(cssom), base_url);
+        free(cssom);
+    } else if (strcasecmp(node->tag_name, "style") == 0 && node->text_content && node->text_content[0]) {
         /* If this <style> lives inside a stamped shadow root, scope :host,
          * ::slotted, etc. to the host custom element.  The text is borrowed:
          * the document outlives the sheet list. */
@@ -13477,7 +13502,7 @@ static bool cascade_at(LayoutContext *ctx, int dom, const CssCustomProps *props,
         bool imp = pass == 1;
         for (int d = 0; d < count; d++) {
             const CssDeclaration *dl = applied[d].decl;
-            if (applied[d].important != imp || !dl->property || !dl->value || dl->property[0] == '-' && dl->property[1] == '-') continue;
+            if (applied[d].important != imp || !dl->property || !dl->value || (dl->property[0] == '-' && dl->property[1] == '-')) continue;
             char *r = strstr(dl->value, "var(") ? css_var_resolve(dl->value, props) : NULL;
             fn(ud, dl->property, r ? r : dl->value, imp);
             free(r);
@@ -13485,7 +13510,7 @@ static bool cascade_at(LayoutContext *ctx, int dom, const CssCustomProps *props,
         for (int b = 0; b < ninl; b++)
             for (int i = 0; i < inl[b].count; i++) {
                 const CssDeclaration *dl = &inl[b].decls[i];
-                if (dl->important != imp || !dl->property || !dl->value || dl->property[0] == '-' && dl->property[1] == '-') continue;
+                if (dl->important != imp || !dl->property || !dl->value || (dl->property[0] == '-' && dl->property[1] == '-')) continue;
                 char *r = strstr(dl->value, "var(") ? css_var_resolve(dl->value, props) : NULL;
                 fn(ud, dl->property, r ? r : dl->value, imp);
                 free(r);

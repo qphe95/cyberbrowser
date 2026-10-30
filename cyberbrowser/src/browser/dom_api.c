@@ -3632,8 +3632,15 @@ static GCValue create_attr_obj(JSContextHandle ctx, GCValue owner_element,
     JS_SetPropertyStr(ctx, attr, "nodeName", JS_NewString(ctx, name ? name : ""));
     JS_SetPropertyStr(ctx, attr, "nodeValue", JS_NewString(ctx, value ? value : ""));
     JS_SetPropertyStr(ctx, attr, "namespaceURI", JS_NULL);
+    JS_SetPropertyStr(ctx, attr, "localName", JS_NewString(ctx, name ? name : ""));
+    JS_SetPropertyStr(ctx, attr, "prefix", JS_NULL);
+    JS_SetPropertyStr(ctx, attr, "textContent", JS_NewString(ctx, value ? value : ""));
+    JS_SetPropertyStr(ctx, attr, "nodeType", JS_NewInt32(ctx, 2));
     JS_SetPropertyStr(ctx, attr, "specified", JS_TRUE);
     JS_SetPropertyStr(ctx, attr, "ownerElement", owner_element);
+    /* (an Attr, when the realm has the interface) */
+    GCValue proto = global_proto(ctx, "Attr");
+    if (JS_IsObject(proto)) JS_SetPrototype(ctx, attr, proto);
     return attr;
 }
 

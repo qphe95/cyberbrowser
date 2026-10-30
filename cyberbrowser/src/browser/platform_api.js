@@ -612,7 +612,11 @@
     define(PerfProto, 'measure', function measure(name, start, end) {
         name = String(name);
         var s, e, detail = null;
-        if (start !== null && typeof start === 'object') {
+        /* (an options dictionary with none of its members counts as no start) */
+        var nonEmpty = start !== null && typeof start === 'object' &&
+            (start.start !== undefined || start.end !== undefined || start.duration !== undefined || start.detail !== undefined);
+        if (start !== null && typeof start === 'object' && !nonEmpty) start = undefined;
+        if (nonEmpty) {
             var o = start;
             if (end !== undefined) throw new TypeError('measure: options with an end mark');
             if (o.start !== undefined && o.end !== undefined && o.duration !== undefined)

@@ -1527,7 +1527,7 @@ static void ser_tok(Ser *S, int i, Buf *b, const int *kids, int nk) {
     switch (t->type) {
     case T_IDENT: ser_ident(b, t->str); break;
     case T_FUNC: {
-        if (strcasecmp(t->str, "calc") == 0 && calc_serialize(S->ts, i, b)) break;
+        if (is_math_fn(t->str) && calc_serialize(S->ts, i, b)) break;
         char *lower = strdup(t->str);
         for (char *p = lower; *p; p++) *p = (char)tolower((unsigned char)*p);
         buf_str(b, lower);
@@ -1656,6 +1656,8 @@ static bool calc_add(CalcSum *s, double v, const char *unit) {
 
 static bool calc_simplify_sum(const Toks *ts, int b, int e, CalcSum *out);
 
+static bool calc_math_function(const Toks *ts, const Tok *f, CalcSum *out);
+
 static bool calc_simplify_value(const Toks *ts, int i, CalcSum *out) {
     const Tok *t = &ts->t[i];
     memset(out, 0, sizeof *out);
@@ -1669,11 +1671,147 @@ static bool calc_simplify_value(const Toks *ts, int i, CalcSum *out) {
         return calc_add(out, t->num * sc, u);
     }
     case T_PAREN: return calc_simplify_sum(ts, t->first, t->end, out);
+    case T_IDENT:
+        /* the constants (CSS Values 4 §10.7.1) */
+        if (!strcasecmp(t->str, "e")) return calc_add(out, M_E, "");
+        if (!strcasecmp(t->str, "pi")) return calc_add(out, M_PI, "");
+        if (!strcasecmp(t->str, "infinity")) return calc_add(out, INFINITY, "");
+        if (!strcasecmp(t->str, "-infinity")) return calc_add(out, -INFINITY, "");
+        if (!strcasecmp(t->str, "nan")) return calc_add(out, NAN, "");
+        return false;
     case T_FUNC:
         if (strcasecmp(t->str, "calc") == 0) return calc_simplify_sum(ts, t->first, t->end, out);
-        return false;
+        return calc_math_function(ts, t, out);
     default: return false;
     }
+}
+
+/* One term (a sum that simplified to a single value), or false. */
+static bool calc_one(const CalcSum *s, double *v, const char **unit) {
+    if (s->n != 1) return false;
+    *v = s->t[0].v;
+    *unit = s->t[0].unit;
+    return true;
+}
+
+/* A math function other than calc() whose arguments resolve (CSS Values 4
+ * §10.3-10.8): its value as a one-term sum. */
+static bool calc_math_function(const Toks *ts, const Tok *f, CalcSum *out) {
+    const char *name = f->str;
+    /* the comma-separated arguments; round()'s first may be a strategy */
+    CalcSum args[8];
+    int na = 0, strategy = 0;   /* 0 nearest, 1 up, 2 down, 3 to-zero */
+    int s = f->first;
+    for (int j = f->first; ; j = j < f->end ? tok_next(ts, j) : j + 1) {
+        if (j >= f->end || ts->t[j].type == T_COMMA) {
+            if (j == s || na == 8) return false;
+            if (!strcasecmp(name, "round") && na == 0 && tok_next(ts, s) == j && ts->t[s].type == T_IDENT &&
+                (tok_ident(&ts->t[s], "nearest") || tok_ident(&ts->t[s], "up") || tok_ident(&ts->t[s], "down") ||
+                 tok_ident(&ts->t[s], "to-zero"))) {
+                strategy = tok_ident(&ts->t[s], "up") ? 1 : tok_ident(&ts->t[s], "down") ? 2 :
+                           tok_ident(&ts->t[s], "to-zero") ? 3 : 0;
+            } else if (!calc_simplify_sum(ts, s, j, &args[na++])) return false;
+            s = j + 1;
+            if (j >= f->end) break;
+        }
+    }
+    if (!na) return false;
+    double v[8];
+    const char *u[8];
+    for (int i = 0; i < na; i++) if (!calc_one(&args[i], &v[i], &u[i])) return false;
+    /* functions over values of one type take arguments of the same unit */
+    #define SAME_UNITS() do { for (int i = 1; i < na; i++) if (strcmp(u[i], u[0])) return false; } while (0)
+    memset(out, 0, sizeof *out);
+    double r;
+    const char *unit = u[0];
+    if (!strcasecmp(name, "min") || !strcasecmp(name, "max")) {
+        SAME_UNITS();
+        r = v[0];
+        for (int i = 1; i < na; i++) {
+            if (isnan(v[i])) { r = NAN; break; }
+            r = !strcasecmp(name, "min") ? (v[i] < r ? v[i] : r) : (v[i] > r ? v[i] : r);
+        }
+    } else if (!strcasecmp(name, "clamp")) {
+        if (na != 3) return false;
+        SAME_UNITS();
+        r = v[1] < v[0] ? v[0] : v[1];
+        if (r > v[2]) r = v[2];
+        if (v[0] > v[2]) r = v[0];
+        if (isnan(v[0]) || isnan(v[1]) || isnan(v[2])) r = NAN;
+    } else if (!strcasecmp(name, "abs")) {
+        if (na != 1) return false;
+        r = fabs(v[0]);
+    } else if (!strcasecmp(name, "sign")) {
+        if (na != 1) return false;
+        r = v[0] > 0 ? 1 : v[0] < 0 ? -1 : v[0];   /* (keeps -0, 0 and NaN) */
+        unit = "";
+    } else if (!strcasecmp(name, "round") || !strcasecmp(name, "mod") || !strcasecmp(name, "rem")) {
+        double a = v[0], b = na > 1 ? v[1] : 1;
+        if (na > 2 || (na == 1 && (u[0][0] || strcasecmp(name, "round")))) return false;
+        if (!strcasecmp(name, "round")) b = fabs(b);    /* (the step's sign does not matter) */
+        if (na == 2) SAME_UNITS();
+        if (!strcasecmp(name, "round")) {
+            if (b == 0 || isnan(a) || isnan(b)) r = NAN;
+            else if (isinf(b)) r = isinf(a) ? NAN : (strategy == 1 ? (a > 0 ? INFINITY : -0.0) :
+                                                   strategy == 2 ? (a < 0 ? -INFINITY : 0.0) : (a < 0 ? -0.0 : 0.0));
+            else if (isinf(a)) r = a;
+            else {
+                double q = a / b, lo = floor(q) * b, hi = ceil(q) * b;
+                switch (strategy) {
+                case 1: r = hi; break;
+                case 2: r = lo; break;
+                case 3: r = fabs(lo) < fabs(hi) ? lo : hi; break;
+                default: r = (a - lo) < (hi - a) ? lo : hi; break;
+                }
+                if (r == 0 && a < 0) r = -0.0;
+            }
+        } else {
+            if (b == 0 || isinf(a) || isnan(a) || isnan(b)) r = NAN;
+            else if (isinf(b)) r = !strcasecmp(name, "rem") || (a >= 0) == (b > 0) ? a : NAN;
+            else r = !strcasecmp(name, "mod") ? a - b * floor(a / b) : a - b * trunc(a / b);
+        }
+    } else if (!strcasecmp(name, "sin") || !strcasecmp(name, "cos") || !strcasecmp(name, "tan")) {
+        if (na != 1 || (u[0][0] && strcmp(u[0], "deg"))) return false;
+        double x = u[0][0] ? v[0] * M_PI / 180 : v[0];
+        r = !strcasecmp(name, "sin") ? sin(x) : !strcasecmp(name, "cos") ? cos(x) : tan(x);
+        if (!strcasecmp(name, "tan") && u[0][0] && fmod(fabs(v[0]) - 90, 180) == 0) r = v[0] > 0 ? INFINITY : -INFINITY;
+        unit = "";
+    } else if (!strcasecmp(name, "asin") || !strcasecmp(name, "acos") || !strcasecmp(name, "atan")) {
+        if (na != 1 || u[0][0]) return false;
+        r = (!strcasecmp(name, "asin") ? asin(v[0]) : !strcasecmp(name, "acos") ? acos(v[0]) : atan(v[0])) * 180 / M_PI;
+        unit = "deg";
+    } else if (!strcasecmp(name, "atan2")) {
+        if (na != 2) return false;
+        SAME_UNITS();
+        r = atan2(v[0], v[1]) * 180 / M_PI;
+        unit = "deg";
+    } else if (!strcasecmp(name, "pow")) {
+        if (na != 2 || u[0][0] || u[1][0]) return false;
+        r = pow(v[0], v[1]);
+    } else if (!strcasecmp(name, "sqrt")) {
+        if (na != 1 || u[0][0]) return false;
+        r = sqrt(v[0]);
+    } else if (!strcasecmp(name, "hypot")) {
+        SAME_UNITS();
+        r = 0;
+        for (int i = 0; i < na; i++) r += v[i] * v[i];
+        r = sqrt(r);
+        for (int i = 0; i < na; i++) if (isinf(v[i])) r = INFINITY;
+    } else if (!strcasecmp(name, "log")) {
+        if (na > 2 || u[0][0] || (na == 2 && u[1][0])) return false;
+        r = na == 2 ? log(v[0]) / log(v[1]) : log(v[0]);
+    } else if (!strcasecmp(name, "exp")) {
+        if (na != 1 || u[0][0]) return false;
+        r = exp(v[0]);
+    } else return false;
+    #undef SAME_UNITS
+    /* (a percentage or relative length the function compared or combined
+     * cannot be resolved here: only units that are the same everywhere) */
+    if (!strcmp(u[0], "%") && (!strcasecmp(name, "abs") || !strcasecmp(name, "sign"))) return false;
+    out->n = 1;
+    out->t[0].v = r;
+    snprintf(out->t[0].unit, sizeof out->t[0].unit, "%s", unit);
+    return true;
 }
 
 static bool calc_simplify_product(const Toks *ts, int b, int e, CalcSum *out) {
@@ -1736,9 +1874,8 @@ static int calc_term_cmp(const void *a, const void *b) {
 
 /* calc(...) at token i, simplified into b; false to keep it as written. */
 static bool calc_serialize(const Toks *ts, int i, Buf *b) {
-    const Tok *t = &ts->t[i];
     CalcSum s;
-    if (!calc_simplify_sum(ts, t->first, t->end, &s)) return false;
+    if (!calc_simplify_value(ts, i, &s)) return false;
     /* (zero terms of a sum with others go) */
     int n = 0;
     for (int k = 0; k < s.n; k++) if (s.t[k].v != 0 || s.n == 1) s.t[n++] = s.t[k];
@@ -1746,8 +1883,12 @@ static bool calc_serialize(const Toks *ts, int i, Buf *b) {
     s.n = n;
     qsort(s.t, (size_t)s.n, sizeof s.t[0], calc_term_cmp);
     if (g_env && s.n == 1 && strcmp(s.t[0].unit, "%")) {
-        /* a computed calc() of one term is that value */
-        fmt_number(b, s.t[0].v);
+        /* a computed calc() of one term is that value; NaN is censored to
+         * 0 and infinities clamped to the largest finite values */
+        double v = s.t[0].v;
+        if (isnan(v)) v = 0;
+        else if (isinf(v)) v = v > 0 ? 3.4028234663852886e38 : -3.4028234663852886e38;
+        fmt_number(b, v);
         buf_str(b, s.t[0].unit);
         return true;
     }
@@ -1755,6 +1896,12 @@ static bool calc_serialize(const Toks *ts, int i, Buf *b) {
     for (int k = 0; k < s.n; k++) {
         double v = s.t[k].v;
         if (k) { buf_str(b, v < 0 ? " - " : " + "); v = fabs(v); }
+        if (!isfinite(v)) {
+            /* infinity and NaN: a keyword times one of the unit */
+            buf_str(b, isnan(v) ? "NaN" : v > 0 ? "infinity" : "-infinity");
+            if (s.t[k].unit[0]) { buf_str(b, " * 1"); buf_str(b, s.t[k].unit); }
+            continue;
+        }
         fmt_number(b, v);
         buf_str(b, s.t[k].unit);
     }

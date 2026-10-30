@@ -637,7 +637,15 @@ typedef struct Builder {
     uint32_t *roots;            /* nodes the current step attached to older nodes */
     uint32_t nroots, roots_cap;
     uint32_t stopped_script;    /* the <script> the step stopped after */
+    /* A whole document (streaming into the Document): html, head and body
+     * are implied as the HTML tree builder's insertion modes do. */
+    bool doc_mode;
+    uint8_t phase;              /* DOC_* */
+    uint32_t el_html, el_head, el_body;   /* their slots, once there */
 } Builder;
+
+/* The insertion modes before "in body" (HTML §13.2.6.4.1-6). */
+enum { DOC_INITIAL, DOC_BEFORE_HEAD, DOC_IN_HEAD, DOC_AFTER_HEAD, DOC_IN_BODY };
 
 static CssAtom g_template_atom;
 
@@ -719,18 +727,138 @@ static void build_comment(Builder *b, DomTok *t, uint32_t parent, bool parent_fr
     dom_link_append(dom_id_of(parent), dom_id_of(s));
 }
 
+static CssAtom g_a_html, g_a_head, g_a_body, g_head_content[11];
+
+static void doc_atoms(void) {
+    if (g_a_html) return;
+    static const char *const hc[] = { "base", "basefont", "bgsound", "link", "meta", "noframes", "script",
+                                      "style", "template", "title", "noscript" };
+    css_atom_reserve(16);
+    g_a_html = css_atom_intern("html", 4);
+    g_a_head = css_atom_intern("head", 4);
+    g_a_body = css_atom_intern("body", 4);
+    for (int i = 0; i < 11; i++) g_head_content[i] = css_atom_intern(hc[i], strlen(hc[i]));
+}
+
+static bool head_content(CssAtom tag) {
+    for (int i = 0; i < 11; i++) if (g_head_content[i] == tag) return true;
+    return false;
+}
+
+static void push_open(Builder *b, uint32_t s) {
+    if (b->sp + 1 >= MAX_NESTING) return;
+    if (b->streaming) b->fresh[b->sp] = 1;
+    b->stack[b->sp++] = s;
+}
+
+/* An element the markup leaves out (html, head, body), opened under parent. */
+static uint32_t implied(Builder *b, CssAtom tag, uint32_t parent) {
+    DomTok t;
+    memset(&t, 0, sizeof t);
+    t.kind = TK_START;
+    t.tag = tag;
+    bool fresh = false;
+    for (uint32_t i = 0; i < b->sp; i++) if (b->stack[i] == parent) fresh = b->streaming && b->fresh[i];
+    uint32_t s = build_element(b, &t, parent, fresh);
+    push_open(b, s);
+    return s;
+}
+
+/* A second <html> or <body>: its attributes the element does not have yet. */
+static void merge_attrs(uint32_t s, const DomTok *t) {
+    if (!s) return;
+    const DomAttrList *l = &g_dom.attrs[s];
+    for (int i = 0; i < t->nattr; i++) {
+        bool has = false;
+        for (int k = 0; k < l->n && !has; k++) has = l->a[k].name == t->attrs[i].name;
+        if (!has) dom_set_attr(dom_id_of(s), t->attrs[i].name, t->attrs[i].value.s ? t->attrs[i].value.s : "",
+                               t->attrs[i].value.len);
+        l = &g_dom.attrs[s];
+    }
+}
+
+/* Before a start tag (tag) or text (tag 0) of a whole document: imply what
+ * the markup left out.  True when the token was taken (a second html or
+ * body, a head after one), false to build it at the new top. */
+static bool doc_before(Builder *b, const DomTok *t, CssAtom tag) {
+    for (;;) {
+        switch (b->phase) {
+        case DOC_INITIAL:
+            if (tag == g_a_html) return false;          /* (built below, and noted) */
+            b->el_html = implied(b, g_a_html, b->frag);
+            b->phase = DOC_BEFORE_HEAD;
+            continue;
+        case DOC_BEFORE_HEAD:
+            if (tag == g_a_html) { merge_attrs(b->el_html, t); return true; }
+            if (tag == g_a_head) return false;
+            b->el_head = implied(b, g_a_head, b->el_html);
+            if (tag && head_content(tag)) { b->phase = DOC_IN_HEAD; return false; }
+            b->sp--;                                    /* (an empty head) */
+            b->phase = DOC_AFTER_HEAD;
+            continue;
+        case DOC_IN_HEAD:
+            if (tag && head_content(tag)) return false;
+            if (tag == g_a_html) { merge_attrs(b->el_html, t); return true; }
+            if (tag == g_a_head) return true;
+            if (b->sp && b->stack[b->sp - 1] == b->el_head) b->sp--;
+            b->phase = DOC_AFTER_HEAD;
+            continue;
+        case DOC_AFTER_HEAD:
+            if (tag == g_a_body) return false;
+            if (tag == g_a_html) { merge_attrs(b->el_html, t); return true; }
+            if (tag == g_a_head) return true;
+            b->el_body = implied(b, g_a_body, b->el_html);
+            b->phase = DOC_IN_BODY;
+            continue;
+        default:
+            if (tag == g_a_body) { merge_attrs(b->el_body, t); return true; }
+            if (tag == g_a_html) { merge_attrs(b->el_html, t); return true; }
+            if (tag == g_a_head) return true;
+            return false;
+        }
+    }
+}
+
+/* Is end tag t </name> (ASCII case-insensitive, then > or white space)? */
+static bool end_tag_is(const Builder *b, const DomTok *t, const char *name) {
+    size_t n = strlen(name), at = t->src + 2;
+    if (at + n > b->len || strncasecmp(b->html + at, name, n) != 0) return false;
+    if (at + n == b->len) return true;
+    char c = b->html[at + n];
+    return c == '>' || c_isspace((unsigned char)c) || c == '/';
+}
+
+/* Whether text is white space only (it does not open a body). */
+static bool all_space(const DomStr *d) {
+    for (uint32_t i = 0; i < d->len; i++) if (!c_isspace((unsigned char)d->s[i])) return false;
+    return true;
+}
+
 /* Feed tokens [*i, n) of `c`.  Returns false when the builder needs the rest
  * of the input re-tokenized from *detour (a top-level end tag that the legacy
  * parser resumed from inside). */
 static bool build_tokens(Builder *b, TokChunk *c, size_t *pi, size_t *detour) {
     for (size_t i = *pi; i < c->n; i++) {
         DomTok *t = &c->toks[i];
+        if (b->doc_mode) {
+            if (t->kind == TK_START && doc_before(b, t, t->tag)) continue;
+            if (t->kind == TK_TEXT && b->phase != DOC_IN_BODY) {
+                if (all_space(&t->text)) continue;      /* (white space before the body) */
+                doc_before(b, t, 0);
+            }
+            if (t->kind == TK_END && (end_tag_is(b, t, "body") || end_tag_is(b, t, "html"))) continue;  /* (the body stays open) */
+        }
         uint32_t top = b->sp ? b->stack[b->sp - 1] : 0;
         bool top_fresh = top && b->streaming && b->fresh[b->sp - 1];
         switch (t->kind) {
         case TK_START: {
             uint32_t parent = top ? top : b->frag;
             uint32_t s = build_element(b, t, parent, top_fresh);
+            if (b->doc_mode) {
+                if (t->tag == g_a_html && !b->el_html) { b->el_html = s; b->phase = DOC_BEFORE_HEAD; }
+                else if (t->tag == g_a_head && !b->el_head) { b->el_head = s; b->phase = DOC_IN_HEAD; }
+                else if (t->tag == g_a_body && !b->el_body) { b->el_body = s; b->phase = DOC_IN_BODY; }
+            }
             uint16_t f = g_dom.flags[s];
             if (f & DOMF_RAW_TEXT && !(f & DOMF_SELF_CLOSED)) {
                 if (i + 1 < c->n && c->toks[i + 1].kind == TK_RAW) {
@@ -755,8 +883,10 @@ static bool build_tokens(Builder *b, TokChunk *c, size_t *pi, size_t *detour) {
             if (top) {
                 const char *tn = css_atom_str(g_dom.tag[top]);
                 size_t tl = strlen(tn);
-                if (t->src + 2 + tl <= b->len && strncasecmp(b->html + t->src + 2, tn, tl) == 0)
+                if (t->src + 2 + tl <= b->len && strncasecmp(b->html + t->src + 2, tn, tl) == 0) {
                     b->sp--;
+                    if (b->doc_mode && top == b->el_head && b->phase == DOC_IN_HEAD) b->phase = DOC_AFTER_HEAD;
+                }
             } else {
                 /* Top level: the legacy parser skipped the '<' and discarded
                  * text up to the next '<'.  If that '<' lies inside this
@@ -872,6 +1002,8 @@ DomStream *dom_stream_begin(NodeId parent, NodeId owner_doc) {
     st->b.fresh = calloc(MAX_NESTING, 1);
     st->b.id_name = css_atom_intern("id", 2);
     st->b.streaming = true;
+    /* (a whole document: html, head and body implied) */
+    if (g_dom.kind[st->b.frag] == DOM_K_DOCUMENT) { doc_atoms(); st->b.doc_mode = true; }
     return st;
 }
 

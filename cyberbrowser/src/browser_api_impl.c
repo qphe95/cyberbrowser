@@ -260,6 +260,17 @@ GCValue js_promise_reject(JSContextHandle ctx, GCValue this_val, int argc, GCVal
     return JS_ThrowTypeError(ctx, "not supported");
 }
 
+/* element.classList = v ([PutForwards=value]): the class attribute becomes String(v). */
+static GCValue js_element_set_class_list(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    GCValue v = JS_ToString(ctx, argc > 0 ? argv[0] : JS_UNDEFINED);
+    if (JS_IsException(v)) return v;
+    GCValue set = JS_GetPropertyStr(ctx, this_val, "setAttribute");
+    if (!JS_IsFunction(ctx, set)) return JS_UNDEFINED;
+    GCValue args[2] = { JS_NewString(ctx, "class"), v };
+    GCValue r = JS_Call(ctx, set, this_val, 2, args);
+    return JS_IsException(r) ? r : JS_UNDEFINED;
+}
+
 /* An interface object that cannot be constructed (new CSSStyleDeclaration()). */
 static GCValue js_illegal_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val; (void)argc; (void)argv;
@@ -2115,10 +2126,11 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_DefinePropertyGetSet(ctx, element_proto, outer_html_atom, outer_html_getter, outer_html_setter, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, outer_html_atom);
     
-    // classList getter
+    // classList getter, and [PutForwards=value] setter
     GCValue class_list_getter = JS_NewCFunction(ctx, js_element_get_classList, "get classList", 0);
+    GCValue class_list_setter = JS_NewCFunction(ctx, js_element_set_class_list, "set classList", 1);
     JSAtom class_list_atom = JS_NewAtom(ctx, "classList");
-    JS_DefinePropertyGetSet(ctx, element_proto, class_list_atom, class_list_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+    JS_DefinePropertyGetSet(ctx, element_proto, class_list_atom, class_list_getter, class_list_setter, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
     JS_FreeAtom(ctx, class_list_atom);
     
     // dataset getter

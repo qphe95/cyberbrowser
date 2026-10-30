@@ -219,7 +219,10 @@ static char *block_text(StyleBlock *b) {
 
 /* After a change: the owner's style attribute and its layout. */
 static void block_changed(StyleBlock *b) {
-    if (b->syncing || !b->owner || !dom_valid(b->owner)) return;
+    if (b->syncing) return;
+    /* a rule's declarations (CSSStyleRule.style): its sheet renders anew */
+    if (!b->owner && !b->cs) { dom_request_relayout(); return; }
+    if (!b->owner || !dom_valid(b->owner)) return;
     char *text = block_text(b);
     if (text) {
         if (text[0] || dom_get_attr_str(b->owner, "style")) dom_set_attr_str(b->owner, "style", text);
@@ -587,6 +590,20 @@ static void build_attrs(void) {
     }
 }
 
+/* __cyberStyleDecl(text): a declaration block of no element (a CSS rule's). */
+static GCValue js_new_style_decl(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val;
+    const char *text = argc > 0 && JS_IsString(argv[0]) ? JS_ToCString(ctx, argv[0]) : "";
+    return css_style_decl_new(ctx, DOM_NULL, text ? text : "");
+}
+
+/* __cyberRelayout(): a style sheet changed through the CSSOM. */
+static GCValue js_relayout(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    dom_request_relayout();
+    return JS_UNDEFINED;
+}
+
 static const JSCFunctionListEntry g_methods[] = {
     JS_CFUNC_DEF("setProperty", 2, js_set_property),
     JS_CFUNC_DEF("removeProperty", 1, js_remove_property),
@@ -602,6 +619,10 @@ void css_style_decl_install(JSContextHandle ctx, GCValue proto) {
         JS_NewClass(rt, js_css_style_decl_class_id, &js_css_style_decl_class_def);
     build_attrs();
     JS_SetPropertyFunctionList(ctx, proto, g_methods, (int)(sizeof g_methods / sizeof g_methods[0]));
+    JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberStyleDecl",
+                              JS_NewCFunction(ctx, js_new_style_decl, "__cyberStyleDecl", 1), JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, JS_GetGlobalObject(ctx), "__cyberRelayout",
+                              JS_NewCFunction(ctx, js_relayout, "__cyberRelayout", 0), JS_PROP_CONFIGURABLE);
     JS_SetPropertyFunctionList(ctx, proto, g_attr_entries, g_attr_count);
     static const struct { const char *name; JSCFunction *get, *set; } acc[] = {
         { "cssText", js_get_css_text, js_set_css_text },

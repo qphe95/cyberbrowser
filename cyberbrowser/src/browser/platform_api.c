@@ -23,6 +23,10 @@ static const char *form_controls_js =
 #include "form_controls_js.inc"
 ;
 
+static const char *cssom_js =
+#include "cssom_js.inc"
+;
+
 static const char *canvas_api_js =
 #include "canvas_api_js.inc"
 ;
@@ -50,6 +54,7 @@ void platform_api_install(JSContextHandle ctx, GCValue global, GCValue window)
     platform_api_run(ctx, platform_api_js, "<platform_api>", global, window);
     platform_api_run(ctx, dom_events_js, "<dom_events>", global, window);
     platform_api_run(ctx, form_controls_js, "<form_controls>", global, window);
+    platform_api_run(ctx, cssom_js, "<cssom>", global, window);
     platform_api_run(ctx, canvas_api_js, "<canvas_api>", global, window);
     webgpu_api_install(ctx, global, window);
 }

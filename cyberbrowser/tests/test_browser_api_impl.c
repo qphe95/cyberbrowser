@@ -4994,6 +4994,35 @@ TEST(test_computed_style_values) {
     return true;
 }
 
+/* The CSSOM: <style>.sheet rules, selector serialization, insertRule's
+ * checks, and a rule changed through it applying to elements. */
+TEST(test_cssom_style_sheets) {
+    JSContextHandle ctx = get_test_context();
+    if (!SAFE_VALID(ctx)) return false;
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ var st = document.createElement('style'), log = [];"
+        "  st.textContent = '@media (min-width: 1px) { .cx1 { color: red } } .cx1>i , .cx2 { margin:0 } bogus(( {}';"
+        "  document.head.appendChild(st);"
+        "  function eq(a, b) { if (a !== b) log.push(a + ' != ' + b); }"
+        "  var sh = st.sheet, r = sh.cssRules;"
+        "  eq(r.length, 2); eq(r[0] instanceof CSSMediaRule, true); eq(r[0].media.mediaText, '(min-width: 1px)');"
+        "  eq(r[1].selectorText, '.cx1 > i, .cx2'); eq(r[1].style.margin, '0px');"
+        "  eq(r[0].cssRules[0].cssText, '.cx1 { color: red; }');"
+        "  var threw = false; try { sh.insertRule(':bogus { color: red }'); } catch (e) { threw = e.name === 'SyntaxError'; }"
+        "  eq(threw, true);"
+        "  sh.insertRule('.cx3 { color: rgb(0, 0, 255) }', 2); eq(r.length, 3); eq(r[2].selectorText, '.cx3');"
+        "  var d = document.createElement('div'); d.className = 'cx3'; document.body.appendChild(d);"
+        "  eq(getComputedStyle(d).color, 'rgb(0, 0, 255)');"
+        "  r[2].style.color = 'rgb(0, 128, 0)'; eq(getComputedStyle(d).color, 'rgb(0, 128, 0)');"
+        "  eq(Array.prototype.indexOf.call(document.styleSheets, sh) >= 0, true);"
+        "  var c = new CSSStyleSheet(); c.replaceSync('a { color: red }'); eq(c.cssRules[0].cssText, 'a { color: red; }');"
+        "  d.remove(); st.remove();"
+        "  if (log.length) throw new Error(log.join('; '));"
+        "  return true; })()",
+        false));
+    return true;
+}
+
 /* Named access on the window: an element by its id, behind every real
  * global, gone with the element. */
 TEST(test_window_named_access) {
@@ -5365,6 +5394,7 @@ void run_browser_api_impl_tests(void) {
     RUN_TEST(test_dom_event_dispatch);
     RUN_TEST(test_window_named_access);
     RUN_TEST(test_computed_style_values);
+    RUN_TEST(test_cssom_style_sheets);
     RUN_TEST(test_abort_signal);
     RUN_TEST(test_form_controls_state);
     RUN_TEST(test_dom_parsing_and_traversal);

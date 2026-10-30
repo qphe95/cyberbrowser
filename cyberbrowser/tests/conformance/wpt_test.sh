@@ -6,7 +6,8 @@
 #
 #   tests/conformance/wpt_test.sh <build dir> <wpt> <results dir> <dir or file under wpt>...
 #
-# PORT (default 38527) is the server's.  A run picks up where results.json in
+# PORT (default 38527) is the server's; WPT_TIMEOUT_MULT scales testharness's
+# time limits (0.3: a test that hangs gives up after 3 s, not 10).  A run picks up where results.json in
 # <results dir> left off; it prints and writes summary.txt at the end, and
 # node tests/conformance/failures.js <results dir> lists what failed.
 build=$(cd "$1" && pwd)

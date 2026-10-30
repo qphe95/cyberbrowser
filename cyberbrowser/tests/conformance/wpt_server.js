@@ -20,8 +20,10 @@ const http = require('http'), fs = require('fs'), path = require('path');
 const [rootArg, port, out, ...dirs] = process.argv.slice(2);
 const root = path.resolve(rootArg);
 const origin = 'http://127.0.0.1:' + port;
-/* testharness's own time limits (10 s, long 60 s) and some room. */
-const SHORT_MS = 10000, LONG_MS = 60000, SLACK_MS = 5000;
+/* testharness's own time limits (10 s, long 60 s), scaled by WPT_TIMEOUT_MULT
+ * (testharness's timeout_multiplier; default 1), and some room. */
+const MULT = +(process.env.WPT_TIMEOUT_MULT || 1);
+const SHORT_MS = 10000 * MULT, LONG_MS = 60000 * MULT, SLACK_MS = 2000 + 3000 * MULT;
 
 /* ---- the tests ---- */
 
@@ -118,6 +120,7 @@ function record(r) {
 
 /* Stands in for /resources/testharnessreport.js. */
 const REPORT = `(function () {
+  if (typeof setup === 'function' && ${MULT} !== 1) setup({ timeout_multiplier: ${MULT} });
   var start = Date.now();
   var TEST = ['PASS', 'FAIL', 'TIMEOUT', 'NOTRUN', 'PRECONDITION_FAILED'];
   var HARNESS = ['OK', 'ERROR', 'TIMEOUT', 'PRECONDITION_FAILED'];

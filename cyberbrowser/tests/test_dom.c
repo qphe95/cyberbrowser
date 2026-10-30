@@ -180,6 +180,50 @@ static char *read_file(const char *path, size_t *len) {
  * Parser tests
  * ============================================================================ */
 
+/* A streamed document gets html, head and body where the markup leaves them
+ * out (HTML §13.2.6.4.1-6): head content in the head, a later <body>'s
+ * attributes on the body, </body> leaving it open. */
+static bool streamed_as(const char *html, const char *want) {
+    NodeId doc = dom_create_document();
+    DomStream *st = dom_stream_begin(doc, doc);
+    dom_stream_append(st, html, strlen(html));
+    while (dom_stream_pump(st, true)) {}
+    dom_stream_end(st);
+    /* tag names, depth first: "html(head(meta,title),body(div))" */
+    char out[256] = "";
+    size_t n = 0;
+    NodeId stack[16];
+    int depth = 0;
+    for (NodeId c = dom_first_child(doc); c; ) {
+        if (dom_kind(c) == DOM_K_ELEMENT) {
+            n += (size_t)snprintf(out + n, sizeof out - n, "%s%s", out[0] && out[n - 1] != '(' ? "," : "", dom_tag_name(c));
+            if (dom_first_child(c) && depth < 16) {
+                bool has_el = false;
+                for (NodeId k = dom_first_child(c); k; k = dom_next_sibling(k)) if (dom_kind(k) == DOM_K_ELEMENT) has_el = true;
+                if (has_el) { n += (size_t)snprintf(out + n, sizeof out - n, "("); stack[depth++] = c; c = dom_first_child(c); continue; }
+            }
+        }
+        while (!dom_next_sibling(c) && depth) { n += (size_t)snprintf(out + n, sizeof out - n, ")"); c = stack[--depth]; }
+        c = dom_next_sibling(c);
+    }
+    bool ok = strcmp(out, want) == 0;
+    if (!ok) printf("    %s -> %s, want %s\n", html, out, want);
+    dom_free_subtree(doc);
+    return ok;
+}
+
+TEST(test_dom_stream_implies_html_head_body) {
+    bool ok = true;
+    ok &= streamed_as("<!doctype html><meta charset=utf-8><title>x</title><div>a</div>", "html(head(meta,title),body(div))");
+    ok &= streamed_as("<!doctype html><body onload=\"f()\"><div>a</div>", "html(head,body(div))");
+    ok &= streamed_as("<div>a</div>", "html(head,body(div))");
+    ok &= streamed_as("<html><div>a</div>", "html(head,body(div))");
+    ok &= streamed_as("<title>t</title><body class=b><i>x</i></body></html><b>y</b>", "html(head(title),body(i,b))");
+    ok &= streamed_as("<html><head><title>t</title></head><body><p>x</p></body></html>", "html(head(title),body(p))");
+    ASSERT_TRUE(ok);
+    return true;
+}
+
 /* An unquoted attribute value runs to a space or '>': '/' is part of it
  * (<script src=/a.js> was src=""). */
 TEST(test_dom_parse_unquoted_attr_slash) {
@@ -1455,6 +1499,7 @@ void run_dom_tests(void) {
     printf("\n--- Node store DOM Tests ---\n");
     RUN_TEST(test_dom_parse_matches_legacy_fixtures);
     RUN_TEST(test_dom_parse_unquoted_attr_slash);
+    RUN_TEST(test_dom_stream_implies_html_head_body);
     RUN_TEST(test_dom_parse_matches_legacy_fuzz);
     RUN_TEST(test_dom_parse_drops_markup_declarations);
     RUN_TEST(test_dom_parse_keeps_comments);

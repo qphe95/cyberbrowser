@@ -1207,7 +1207,11 @@ static bool lq_ensure(JSContextHandle ctx)
     bool full = false;
     uint64_t key = g_lq_valid ? g_lq_key : 0;
     HtmlDocument *doc = NULL;
-    if (g_lq_valid && g_lq_cheap_ok && now - g_lq_full_at < LQ_FULL_CHECK_MS &&
+    /* (a relayout request, e.g. a style sheet changed through the CSSOM,
+     * leaves the document as it was but not its layout) */
+    bool relayout = g_lq_valid && g_dom_relayout_requests != g_lq_relayouts;
+    if (relayout) snprintf(why, sizeof(why), "relayout request");
+    if (!relayout && g_lq_valid && g_lq_cheap_ok && now - g_lq_full_at < LQ_FULL_CHECK_MS &&
         memcmp(cheap, g_lq_cheap, sizeof(cheap)) == 0) {
         g_lq_cheap_hits++;
         if (!lq_who_affected()) {
@@ -1233,7 +1237,7 @@ static bool lq_ensure(JSContextHandle ctx)
         if (unchanged && g_lq_valid) {
             if (full) lq_note_full_check(now);
             else lq_cheap_key(g_lq_cheap);
-            if (!lq_who_affected()) {
+            if (!relayout && !lq_who_affected()) {
                 if (skip_verify) lq_verify_asked(g_lq_doc, vw, vh);
                 return true;
             }
@@ -1265,7 +1269,10 @@ static bool lq_ensure(JSContextHandle ctx)
             snprintf(why, sizeof(why), doc != g_lq_doc ? "new document" : "CYBER_LQ_SKIP=0");
         }
     }
-    if (!doc) {
+    if (!doc && relayout) {
+        doc = g_lq_doc;
+        doc->refs++;
+    } else if (!doc) {
         /* The cached document is current, but the query reads a box a
          * change may have altered: lay it out again. */
         int qi = g_lq_who ? lq_box_index(g_lq_who) : -1;
