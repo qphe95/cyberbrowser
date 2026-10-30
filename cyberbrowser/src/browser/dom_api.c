@@ -32,6 +32,7 @@
 #include "dom_snapshot.h"
 #include "dom_wrap.h"
 #include "dom_js.h"
+#include "css_style_decl.h"
 #include "dom_fetch.h"
 #include "dom_query.h"
 #include "code_cache.h"
@@ -263,13 +264,9 @@ GCValue dom_element_style(JSContextHandle ctx, GCValue el, bool create) {
     DomWrap *w = (DomWrap *)gc_deref(wd);
     if (w && JS_IsObject(w->style)) return w->style;
     if (!create) return JS_UNDEFINED;
+    /* (the style attribute's declarations are the new block's) */
     GCValue style = css_new_style_object(ctx, el);
     SAFE_SET(wd, DomWrapHandle, style, style);
-    /* Inline style attribute declarations land on the new object. */
-    NodeId n = dom_node_of(el);
-    style_owner_note(style, n);
-    const char *attr = dom_attr(n, "style");
-    if (attr && attr[0]) css_apply_inline_style_to(ctx, style, attr);
     return style;
 }
 
@@ -2287,8 +2284,7 @@ GCValue js_element_set_attribute(JSContextHandle ctx, GCValue this_val, int argc
             if (strcasecmp(name, "style") == 0) {
                 /* The attribute replaces the live style object's declarations. */
                 GCValue style = dom_element_style(ctx, this_val, false);
-                if (JS_IsObject(style))
-                    JS_SetPropertyStr(ctx, style, "cssText", JS_NewStringLen(ctx, value, vlen));
+                if (JS_IsObject(style)) css_style_decl_sync_from_attr(ctx, style, value);
             }
         }
         if (strcmp(name, "src") == 0 && value[0]) {
@@ -2392,7 +2388,7 @@ GCValue js_element_remove_attribute(JSContextHandle ctx, GCValue this_val, int a
             if (a) dom_remove_attr(n, a);
             if (strcasecmp(name, "style") == 0) {
                 GCValue style = dom_element_style(ctx, this_val, false);
-                if (JS_IsObject(style)) JS_SetPropertyStr(ctx, style, "cssText", JS_NewString(ctx, ""));
+                if (JS_IsObject(style)) css_style_decl_sync_from_attr(ctx, style, "");
             }
         }
         invoke_attribute_changed(ctx, this_val, name, old_value, NULL);

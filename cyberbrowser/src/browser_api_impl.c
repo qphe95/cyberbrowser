@@ -18,6 +18,9 @@
 #include "browser_api_impl_internal.h"
 #include "html_dom.h"
 #include "dom_js.h"
+#include "dom_query.h"
+#include "browser/css_style_decl.h"
+#include "css_props.h"
 #include "css_parser.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
@@ -257,6 +260,60 @@ GCValue js_promise_reject(JSContextHandle ctx, GCValue this_val, int argc, GCVal
     return JS_ThrowTypeError(ctx, "not supported");
 }
 
+/* An interface object that cannot be constructed (new CSSStyleDeclaration()). */
+static GCValue js_illegal_constructor(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    return JS_ThrowTypeError(ctx, "Illegal constructor");
+}
+
+/* The WindowProperties object (HTML §7.2.2.3): a property that nothing
+ * nearer on the global's chain has is the document's element with that id
+ * (an iframe's: its window).  Names (name="" on forms, images, ...) and the
+ * several-elements HTMLCollection case are not done. */
+JSClassID js_window_properties_class_id;
+
+static int js_window_properties_get_own(JSContextHandle ctx, JSPropertyDescriptor *desc,
+                                        GCValue obj, JSAtom prop) {
+    (void)obj;
+    static int busy;    /* reading `document` below must not come back here */
+    if (busy) return 0;
+    GCValue key = JS_AtomToValue(ctx, prop);
+    if (!JS_IsString(key)) return 0;
+    size_t len = 0;
+    const char *name = JS_ToCStringLen(ctx, &len, key);
+    if (!name) return 0;
+    busy = 1;
+    GCValue doc = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "document");
+    busy = 0;
+    NodeId d = JS_IsObject(doc) ? dom_node_of(doc) : DOM_NULL;
+    NodeId el = d ? dom_query_by_id(d, name, len) : DOM_NULL;
+    JS_FreeCString(ctx, name);
+    if (!el) return 0;
+    GCValue v = dom_js(ctx, el);
+    if (JS_IsException(v)) return -1;
+    const char *tag = dom_tag_name(el);
+    if (tag && (strcasecmp(tag, "iframe") == 0 || strcasecmp(tag, "frame") == 0)) {
+        GCValue w = JS_GetPropertyStr(ctx, v, "contentWindow");
+        if (JS_IsObject(w)) v = w;
+    }
+    if (desc) {
+        desc->flags = JS_PROP_CONFIGURABLE | JS_PROP_WRITABLE;
+        desc->value = v;
+        desc->getter = JS_UNDEFINED;
+        desc->setter = JS_UNDEFINED;
+    }
+    return 1;
+}
+
+static JSClassExoticMethods js_window_properties_exotic = {
+    .get_own_property = js_window_properties_get_own,
+};
+
+JSClassDef js_window_properties_class_def = {
+    .class_name = "WindowProperties",
+    .exotic = &js_window_properties_exotic,
+};
+
 // Media-query evaluator for window.matchMedia.
 static int js_match_media_get_viewport_width(JSContextHandle ctx) {
     GCValue global = JS_GetGlobalObject(ctx);
@@ -273,325 +330,6 @@ static int js_match_media_get_viewport_height(JSContextHandle ctx) {
     int32_t h = 1080;
     JS_ToInt32(ctx, &h, v);
     return h;
-}
-
-static const char *js_mm_skip_ws(const char *p) {
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
-    return p;
-}
-static const char *js_mm_skip_ws_rev(const char *start, const char *p) {
-    while (p > start && (*(p - 1) == ' ' || *(p - 1) == '\t' || *(p - 1) == '\n' || *(p - 1) == '\r')) p--;
-    return p;
-}
-
-static bool js_mm_streq_ci(const char *s, const char *e, const char *lit) {
-    const char *p = js_mm_skip_ws(s);
-    e = js_mm_skip_ws_rev(s, e);
-    while (p < e && *lit) {
-        if (tolower((unsigned char)*p) != tolower((unsigned char)*lit)) return false;
-        p++;
-        lit++;
-    }
-    return p == e && *lit == '\0';
-}
-
-static bool js_mm_parse_double(const char *s, const char *e, double *out) {
-    s = js_mm_skip_ws(s);
-    e = js_mm_skip_ws_rev(s, e);
-    char buf[64];
-    size_t n = (size_t)(e - s);
-    if (n == 0 || n >= sizeof(buf)) return false;
-    memcpy(buf, s, n);
-    buf[n] = '\0';
-    char *end = NULL;
-    double v = strtod(buf, &end);
-    if (end == buf) return false;
-    *out = v;
-    return true;
-}
-
-static bool js_mm_parse_double_unit(const char *s, const char *e, double *out) {
-    s = js_mm_skip_ws(s);
-    e = js_mm_skip_ws_rev(s, e);
-    char buf[128];
-    size_t n = (size_t)(e - s);
-    if (n == 0 || n >= sizeof(buf)) return false;
-    memcpy(buf, s, n);
-    buf[n] = '\0';
-    char *end = NULL;
-    double v = strtod(buf, &end);
-    if (end == buf) return false;
-    while (*end == ' ' || *end == '\t') end++;
-    if (strncasecmp(end, "dppx", 4) == 0) v *= 96.0;
-    else if (strncasecmp(end, "dpcm", 4) == 0) v *= 2.54;
-    *out = v;
-    return true;
-}
-
-static bool js_mm_parse_ratio(const char *s, const char *e, double *out) {
-    s = js_mm_skip_ws(s);
-    e = js_mm_skip_ws_rev(s, e);
-    const char *slash = NULL;
-    for (const char *p = s; p < e; p++) if (*p == '/') { slash = p; break; }
-    if (!slash) return js_mm_parse_double(s, e, out);
-    double num = 0, den = 0;
-    if (!js_mm_parse_double(s, slash, &num)) return false;
-    if (!js_mm_parse_double(slash + 1, e, &den)) return false;
-    if (den == 0.0) return false;
-    *out = num / den;
-    return true;
-}
-
-static bool js_mm_known_boolean_feature(const char *name, const char *name_end) {
-    // These are known media features; a bare feature name (without a value) is treated as supported.
-    static const char *features[] = {
-        "width", "height", "aspect-ratio", "orientation",
-        "prefers-color-scheme", "prefers-reduced-motion", "prefers-contrast",
-        "forced-colors", "-ms-high-contrast",
-        "pointer", "any-pointer", "hover", "any-hover",
-        "display-mode", "color-gamut", "dynamic-range", "video-dynamic-range",
-        "resolution", "min-resolution", "max-resolution",
-        "update", "overflow-block", "overflow-inline", "scripting",
-        NULL
-    };
-    for (int i = 0; features[i]; i++) {
-        if (js_mm_streq_ci(name, name_end, features[i])) return true;
-    }
-    return false;
-}
-
-static bool js_mm_eval_feature(const char *inner, const char *inner_end, int width, int height) {
-    // inner is the content of a pair of parentheses, e.g. "min-width: 123px".
-    const char *colon = NULL;
-    for (const char *p = inner; p < inner_end; p++) {
-        if (*p == ':') { colon = p; break; }
-    }
-    if (!colon) {
-        return js_mm_known_boolean_feature(inner, inner_end);
-    }
-
-    const char *name = inner;
-    const char *name_end = colon;
-    const char *val = colon + 1;
-    const char *val_end = inner_end;
-
-    double v = 0;
-    bool has_double = js_mm_parse_double(val, val_end, &v);
-
-    if (js_mm_streq_ci(name, name_end, "min-width")) {
-        if (!has_double) return false;
-        return width >= v - 0.001;
-    }
-    if (js_mm_streq_ci(name, name_end, "max-width")) {
-        if (!has_double) return false;
-        return width <= v + 0.001;
-    }
-    if (js_mm_streq_ci(name, name_end, "width")) {
-        if (!has_double) return false;
-        return fabs(width - v) <= 0.5;
-    }
-    if (js_mm_streq_ci(name, name_end, "min-height")) {
-        if (!has_double) return false;
-        return height >= v - 0.001;
-    }
-    if (js_mm_streq_ci(name, name_end, "max-height")) {
-        if (!has_double) return false;
-        return height <= v + 0.001;
-    }
-    if (js_mm_streq_ci(name, name_end, "height")) {
-        if (!has_double) return false;
-        return fabs(height - v) <= 0.5;
-    }
-    if (js_mm_streq_ci(name, name_end, "min-aspect-ratio")) {
-        double r = (double)width / (double)(height ? height : 1);
-        double q = 0;
-        if (!js_mm_parse_ratio(val, val_end, &q)) return false;
-        return r >= q - 0.0001;
-    }
-    if (js_mm_streq_ci(name, name_end, "max-aspect-ratio")) {
-        double r = (double)width / (double)(height ? height : 1);
-        double q = 0;
-        if (!js_mm_parse_ratio(val, val_end, &q)) return false;
-        return r <= q + 0.0001;
-    }
-    if (js_mm_streq_ci(name, name_end, "aspect-ratio")) {
-        double r = (double)width / (double)(height ? height : 1);
-        double q = 0;
-        if (!js_mm_parse_ratio(val, val_end, &q)) return false;
-        return fabs(r - q) <= 0.001;
-    }
-    if (js_mm_streq_ci(name, name_end, "min-resolution") ||
-        js_mm_streq_ci(name, name_end, "max-resolution") ||
-        js_mm_streq_ci(name, name_end, "resolution")) {
-        double dpi = 0;
-        if (!js_mm_parse_double_unit(val, val_end, &dpi)) return false;
-        const double device_dpi = 96.0;
-        if (js_mm_streq_ci(name, name_end, "min-resolution")) return device_dpi >= dpi - 0.001;
-        if (js_mm_streq_ci(name, name_end, "max-resolution")) return device_dpi <= dpi + 0.001;
-        return fabs(device_dpi - dpi) <= 0.5;
-    }
-    if (js_mm_streq_ci(name, name_end, "orientation")) {
-        bool landscape = width >= height;
-        if (js_mm_streq_ci(val, val_end, "landscape")) return landscape;
-        if (js_mm_streq_ci(val, val_end, "portrait")) return !landscape;
-        return false;
-    }
-    if (js_mm_streq_ci(name, name_end, "prefers-color-scheme")) {
-        if (js_mm_streq_ci(val, val_end, "dark")) return true;
-        if (js_mm_streq_ci(val, val_end, "light")) return false;
-        return false;
-    }
-    if (js_mm_streq_ci(name, name_end, "prefers-reduced-motion")) {
-        if (js_mm_streq_ci(val, val_end, "reduce")) return false;
-        if (js_mm_streq_ci(val, val_end, "no-preference")) return true;
-        return false;
-    }
-    if (js_mm_streq_ci(name, name_end, "prefers-contrast")) {
-        if (js_mm_streq_ci(val, val_end, "more")) return false;
-        if (js_mm_streq_ci(val, val_end, "less")) return false;
-        if (js_mm_streq_ci(val, val_end, "no-preference")) return true;
-        return false;
-    }
-    if (js_mm_streq_ci(name, name_end, "forced-colors")) {
-        if (js_mm_streq_ci(val, val_end, "active")) return false;
-        if (js_mm_streq_ci(val, val_end, "none")) return true;
-        return false;
-    }
-    if (js_mm_streq_ci(name, name_end, "-ms-high-contrast")) {
-        if (js_mm_streq_ci(val, val_end, "active")) return false;
-        if (js_mm_streq_ci(val, val_end, "none")) return true;
-        return false;
-    }
-    if (js_mm_streq_ci(name, name_end, "pointer") || js_mm_streq_ci(name, name_end, "any-pointer")) {
-        if (js_mm_streq_ci(val, val_end, "fine")) return true;
-        if (js_mm_streq_ci(val, val_end, "coarse")) return false;
-        if (js_mm_streq_ci(val, val_end, "none")) return false;
-        return false;
-    }
-    if (js_mm_streq_ci(name, name_end, "hover") || js_mm_streq_ci(name, name_end, "any-hover")) {
-        if (js_mm_streq_ci(val, val_end, "hover")) return true;
-        if (js_mm_streq_ci(val, val_end, "none")) return false;
-        return false;
-    }
-    if (js_mm_streq_ci(name, name_end, "display-mode")) {
-        if (js_mm_streq_ci(val, val_end, "browser")) return true;
-        return false;
-    }
-    if (js_mm_streq_ci(name, name_end, "color-gamut")) {
-        if (js_mm_streq_ci(val, val_end, "srgb")) return true;
-        if (js_mm_streq_ci(val, val_end, "p3")) return false;
-        if (js_mm_streq_ci(val, val_end, "rec2020")) return false;
-        return false;
-    }
-    if (js_mm_streq_ci(name, name_end, "dynamic-range") || js_mm_streq_ci(name, name_end, "video-dynamic-range")) {
-        if (js_mm_streq_ci(val, val_end, "standard")) return true;
-        if (js_mm_streq_ci(val, val_end, "high")) return false;
-        return false;
-    }
-    if (js_mm_streq_ci(name, name_end, "update")) {
-        if (js_mm_streq_ci(val, val_end, "fast")) return true;
-        return false;
-    }
-    if (js_mm_streq_ci(name, name_end, "overflow-block") || js_mm_streq_ci(name, name_end, "overflow-inline")) {
-        if (js_mm_streq_ci(val, val_end, "scroll")) return true;
-        return false;
-    }
-    if (js_mm_streq_ci(name, name_end, "scripting")) {
-        if (js_mm_streq_ci(val, val_end, "enabled")) return true;
-        return false;
-    }
-    // Unknown feature/value combinations evaluate to false to avoid selecting mobile/specialised branches.
-    return false;
-}
-
-static bool js_mm_eval_term(const char *s, const char *e, int width, int height) {
-    s = js_mm_skip_ws(s);
-    e = js_mm_skip_ws_rev(s, e);
-    if (s >= e) return true;
-
-    // Media type without parentheses.
-    if (js_mm_streq_ci(s, e, "screen") || js_mm_streq_ci(s, e, "all")) return true;
-    if (js_mm_streq_ci(s, e, "print") || js_mm_streq_ci(s, e, "tv")) return false;
-
-    // Parenthesised feature.
-    if (*s == '(' && *(e - 1) == ')') {
-        return js_mm_eval_feature(s + 1, e - 1, width, height);
-    }
-
-    // Unknown bare term: false.
-    return false;
-}
-
-static bool js_mm_eval_condition(const char *s, const char *e, int width, int height) {
-    s = js_mm_skip_ws(s);
-    e = js_mm_skip_ws_rev(s, e);
-    if (s >= e) return true;
-
-    bool negate = false;
-    if (e - s >= 4 && strncasecmp(s, "not ", 4) == 0) {
-        negate = true;
-        s = js_mm_skip_ws(s + 4);
-    } else if (e - s >= 5 && strncasecmp(s, "only ", 5) == 0) {
-        s = js_mm_skip_ws(s + 5);
-    }
-
-    // Split remaining condition by " and " at depth 0.
-    const char *p = s;
-    int depth = 0;
-    bool ok = true;
-    const char *term_start = s;
-    while (p <= e) {
-        if (p < e && *p == '(') depth++;
-        else if (p < e && *p == ')') depth--;
-        bool at_end = (p == e);
-        bool is_and = false;
-        if (!at_end && depth == 0 && p + 5 <= e && strncasecmp(p, " and ", 5) == 0) {
-            is_and = true;
-        }
-        if (at_end || is_and) {
-            const char *term_end = is_and ? p : e;
-            if (!js_mm_eval_term(term_start, term_end, width, height)) { ok = false; break; }
-            if (is_and) {
-                p += 5;
-                term_start = p;
-                continue;
-            }
-        }
-        p++;
-    }
-    return negate ? !ok : ok;
-}
-
-static bool js_mm_eval_query(const char *query, int width, int height) {
-    char buf[1024];
-    strncpy(buf, query, sizeof(buf) - 1);
-    buf[sizeof(buf) - 1] = '\0';
-
-    const char *p = buf;
-    const char *end = buf + strlen(buf);
-    int depth = 0;
-    const char *cond_start = p;
-    while (p <= end) {
-        if (p < end && *p == '(') depth++;
-        else if (p < end && *p == ')') depth--;
-        bool at_end = (p == end);
-        bool is_or = false;
-        if (!at_end && depth == 0) {
-            if (*p == ',') is_or = true;
-            else if (p + 4 <= end && strncasecmp(p, " or ", 4) == 0) is_or = true;
-        }
-        if (at_end || is_or) {
-            const char *cond_end = is_or ? p : end;
-            if (js_mm_eval_condition(cond_start, cond_end, width, height)) return true;
-            if (is_or) {
-                if (*p == ',') { p++; cond_start = p; }
-                else { p += 4; cond_start = p; }
-                continue;
-            }
-        }
-        p++;
-    }
-    return false;
 }
 
 // MediaQueryList listener helpers (viewport is static, so listeners are just stored).
@@ -656,7 +394,7 @@ GCValue js_match_media(JSContextHandle ctx, GCValue this_val, int argc, GCValue 
     }
     int width = js_match_media_get_viewport_width(ctx);
     int height = js_match_media_get_viewport_height(ctx);
-    bool matches = js_mm_eval_query(q, width, height);
+    bool matches = css_media_query_matches(q, width, height);
 
     GCValue result = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, result, "matches", JS_NewBool(ctx, matches));
@@ -1690,6 +1428,16 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     JS_SetPropertyStr(ctx, global, "Window", window_ctor);
     // Set global object's prototype to Window.prototype (window instanceof Window should be true)
     JS_SetPrototype(ctx, global, window_proto);
+    // Named access (HTML §7.2.2.3): elements by id, from the WindowProperties
+    // object between Window.prototype and Object.prototype.
+    {
+        JSRuntimeHandle wrt = JS_GetRuntime(ctx);
+        if (!js_window_properties_class_id) JS_NewClassID(&js_window_properties_class_id);
+        if (!JS_IsRegisteredClass(wrt, js_window_properties_class_id))
+            JS_NewClass(wrt, js_window_properties_class_id, &js_window_properties_class_def);
+        GCValue named = JS_NewObjectProtoClass(ctx, JS_GetPrototype(ctx, window_proto), js_window_properties_class_id);
+        if (!JS_IsException(named)) JS_SetPrototype(ctx, window_proto, named);
+    }
 
     // ===== Create DOM Constructors with proper prototype chain in C =====
     // Reference counting rules:
@@ -3184,20 +2932,17 @@ void init_browser_api_impl(JSContextHandle ctx, GCValue global) {
     // Set prototype on constructor
     JS_SetPropertyStr(ctx, css_style_sheet_ctor, "prototype", css_style_sheet_proto);
     
-    // CSSStyleDeclaration prototype (for element.style)
+    // CSSStyleDeclaration prototype (for element.style): its methods and
+    // the IDL attribute of every property (css_style_decl.c)
     GCValue css_style_decl_proto = JS_NewObject(ctx);
-    DEF_FUNC(ctx, css_style_decl_proto, "setProperty", js_css_style_decl_set_property, 3);
-    DEF_FUNC(ctx, css_style_decl_proto, "removeProperty", js_css_style_decl_remove_property, 1);
-    DEF_FUNC(ctx, css_style_decl_proto, "getPropertyValue", js_css_style_decl_get_property_value, 1);
-    DEF_FUNC(ctx, css_style_decl_proto, "getPropertyPriority", js_css_style_decl_get_property_priority, 1);
-    DEF_FUNC(ctx, css_style_decl_proto, "item", js_css_style_decl_item, 1);
-    GCValue style_css_text_getter = JS_NewCFunction(ctx, js_css_style_decl_get_css_text, "get cssText", 0);
-    GCValue style_css_text_setter = JS_NewCFunction(ctx, js_css_style_decl_set_css_text, "set cssText", 1);
-    JS_DefinePropertyGetSet(ctx, css_style_decl_proto, JS_NewAtom(ctx, "cssText"),
-        style_css_text_getter, style_css_text_setter, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
-    GCValue style_length_getter = JS_NewCFunction(ctx, js_css_style_decl_get_length, "get length", 0);
-    JS_DefinePropertyGetSet(ctx, css_style_decl_proto, JS_NewAtom(ctx, "length"),
-        style_length_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
+    css_style_decl_install(ctx, css_style_decl_proto);
+    GCValue css_style_decl_ctor = JS_NewCFunction2(ctx, js_illegal_constructor, "CSSStyleDeclaration", 0,
+                                                   JS_CFUNC_constructor, 0);
+    JS_SetPropertyStr(ctx, css_style_decl_ctor, "prototype", css_style_decl_proto);
+    JS_DefinePropertyValueStr(ctx, css_style_decl_proto, "constructor", css_style_decl_ctor,
+                              JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, global, "CSSStyleDeclaration", css_style_decl_ctor,
+                              JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
 
     // Store for use with elements
     JS_SetPropertyStr(ctx, global, "__CSSStyleDeclarationProto", css_style_decl_proto);

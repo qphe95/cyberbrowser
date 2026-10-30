@@ -468,7 +468,12 @@
         ['addEventListener', 'removeEventListener', 'dispatchEvent'].forEach(function (k) {
             if (Object.prototype.hasOwnProperty.call(WP, k)) delete WP[k];
         });
-        if (Object.getPrototypeOf(WP) === Object.prototype) Object.setPrototypeOf(WP, ETP);
+        /* (through WindowProperties, the named-access object, when there is one:
+         * Window.prototype -> WindowProperties -> EventTarget.prototype) */
+        var top = WP;
+        while (Object.getPrototypeOf(top) && Object.getPrototypeOf(top) !== Object.prototype && Object.getPrototypeOf(top) !== ETP)
+            top = Object.getPrototypeOf(top);
+        if (Object.getPrototypeOf(top) === Object.prototype) Object.setPrototypeOf(top, ETP);
     }
     [global, win, global.document].forEach(function (o) {
         if (!o) return;
@@ -896,6 +901,109 @@
             });
         });
     }
+
+    /* ---- AbortController / AbortSignal (DOM 3.1-3.2) ---- */
+    var ABORT = Symbol('cyber.abortSignal'), SIGNAL = Symbol('cyber.abortController');
+    function abortState(s) {
+        var a = s != null ? s[ABORT] : undefined;
+        if (!a) throw new TypeError('Illegal invocation');
+        return a;
+    }
+    function AbortSignal() { throw new TypeError("Failed to construct 'AbortSignal': Illegal constructor"); }
+    AbortSignal.prototype = Object.create(ETP);
+    define(AbortSignal.prototype, 'constructor', AbortSignal);
+    Object.defineProperty(AbortSignal.prototype, Symbol.toStringTag, { value: 'AbortSignal', configurable: true });
+    function newSignal() {
+        var s = Object.create(AbortSignal.prototype);
+        Object.defineProperty(s, ABORT, { value: { aborted: false, reason: undefined, algorithms: [],
+            dependent: false, sources: [], dependents: [] } });
+        return s;
+    }
+    function abortReason(reason) {
+        return reason === undefined ? DOMExceptionOr('signal is aborted without reason', 'AbortError') : reason;
+    }
+    function runAbortSteps(s) {
+        var a = s[ABORT], algs = a.algorithms;
+        a.algorithms = [];
+        algs.forEach(function (f) { try { f(); } catch (e) { report(e); } });
+        var ev = new Event('abort');
+        st(ev).isTrusted = true;
+        dispatch(s, ev);
+    }
+    /* "signal abort": the signal, then its dependents, all aborted before any event */
+    function signalAbort(s, reason) {
+        var a = s[ABORT];
+        if (a.aborted) return;
+        a.aborted = true;
+        a.reason = abortReason(reason);
+        var deps = [];
+        a.dependents.forEach(function (d) {
+            var da = d[ABORT];
+            if (da.aborted) return;
+            da.aborted = true;
+            da.reason = a.reason;
+            deps.push(d);
+        });
+        runAbortSteps(s);
+        deps.forEach(runAbortSteps);
+    }
+    getter(AbortSignal.prototype, 'aborted', function () { return abortState(this).aborted; });
+    getter(AbortSignal.prototype, 'reason', function () { return abortState(this).reason; });
+    define(AbortSignal.prototype, 'throwIfAborted', function () {
+        var a = abortState(this);
+        if (a.aborted) throw a.reason;
+    });
+    handlerAccessor(AbortSignal.prototype, 'abort');
+    define(AbortSignal, 'abort', function abort(reason) {
+        var s = newSignal(), a = s[ABORT];
+        a.aborted = true;
+        a.reason = abortReason(reason);
+        return s;
+    });
+    define(AbortSignal, 'timeout', function timeout(ms) {
+        ms = Number(ms);
+        if (!isFinite(ms) || ms < 0 || ms > Number.MAX_SAFE_INTEGER)
+            throw new TypeError("Failed to execute 'timeout' on 'AbortSignal': Value is outside the 'unsigned long long' value range.");
+        var s = newSignal();
+        global.setTimeout(function () {
+            signalAbort(s, DOMExceptionOr('signal timed out', 'TimeoutError'));
+        }, Math.floor(ms));
+        return s;
+    });
+    define(AbortSignal, 'any', function any(signals) {
+        var list = Array.from(signals, function (s) { abortState(s); return s; });
+        var r = newSignal(), ra = r[ABORT];
+        for (var i = 0; i < list.length; i++) {
+            if (list[i][ABORT].aborted) { ra.aborted = true; ra.reason = list[i][ABORT].reason; return r; }
+        }
+        ra.dependent = true;
+        function follow(src) {
+            if (ra.sources.indexOf(src) >= 0) return;
+            ra.sources.push(src);
+            src[ABORT].dependents.push(r);
+        }
+        list.forEach(function (s) {
+            var sa = s[ABORT];
+            if (!sa.dependent) follow(s);
+            else sa.sources.forEach(follow);
+        });
+        return r;
+    });
+    expose('AbortSignal', AbortSignal);
+
+    function AbortController() {
+        if (!new.target) throw new TypeError("Failed to construct 'AbortController': Please use the 'new' operator");
+        Object.defineProperty(this, SIGNAL, { value: newSignal() });
+    }
+    function controllerSignal(c) {
+        var s = c != null ? c[SIGNAL] : undefined;
+        if (!s) throw new TypeError('Illegal invocation');
+        return s;
+    }
+    getter(AbortController.prototype, 'signal', function () { return controllerSignal(this); });
+    define(AbortController.prototype, 'abort', function abort(reason) { signalAbort(controllerSignal(this), reason); });
+    Object.defineProperty(AbortController.prototype, Symbol.toStringTag, { value: 'AbortController', configurable: true });
+    expose('AbortController', AbortController);
 
     /* for the C entry points (event_api.c), which forward here */
     Object.defineProperty(global, '__cyberEventTarget', { value: Object.freeze({

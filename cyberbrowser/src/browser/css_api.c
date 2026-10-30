@@ -14,6 +14,7 @@
 #include "html_dom.h"
 #include "dom_js.h"
 #include "css_parser.h"
+#include "css_props.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
 
@@ -25,13 +26,26 @@
 // Forward declaration for DOMTokenList.contains
 GCValue js_dom_token_list_contains(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 
-// CSS.supports(property, value)
+// CSS.supports(property, value) / CSS.supports(conditionText)
 GCValue js_css_supports(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
-    if (argc < 2) return JS_FALSE;
-    
-    // Always return true for simplicity - actual CSS support checking is complex
-    return JS_TRUE;
+    if (argc < 1) return JS_ThrowTypeError(ctx, "Failed to execute 'supports' on 'CSS': 1 argument required");
+    const char *a = JS_ToCString(ctx, argv[0]);
+    if (!a) return JS_EXCEPTION;
+    if (argc < 2) {
+        /* a <supports-condition>, or a bare declaration (as browsers take it) */
+        if (css_supports_condition(a)) return JS_TRUE;
+        size_t n = strlen(a) + 3;
+        char *wrapped = malloc(n);
+        if (!wrapped) return JS_FALSE;
+        snprintf(wrapped, n, "(%s)", a);
+        bool ok = css_supports_condition(wrapped);
+        free(wrapped);
+        return JS_NewBool(ctx, ok);
+    }
+    const char *v = JS_ToCString(ctx, argv[1]);
+    if (!v) return JS_EXCEPTION;
+    return JS_NewBool(ctx, css_supports_property(a, v));
 }
 
 // CSS.escape(value)

@@ -14,6 +14,7 @@
 #include "browser_api_impl_internal.h"
 #include "html_dom.h"
 #include "dom_js.h"
+#include "browser/css_style_decl.h"
 #include "css_parser.h"
 #include "css_layout.h"
 #include "gc_value_helpers.h"
@@ -2472,21 +2473,9 @@ JSCFunction *js_canvas_get_context_fn(void) { return js_canvas_get_context; }
  * the cssText / length accessors; without it `style.cssText = ...` would
  * only store a plain property and declare nothing. */
 GCValue css_new_style_object(JSContextHandle ctx, GCValue el) {
-    (void)el;
-    GCValue style = JS_NewObject(ctx);
-    if (JS_IsException(style)) return JS_UNDEFINED;
-    GCValue proto = JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "__CSSStyleDeclarationProto");
-    if (JS_IsObject(proto)) JS_SetPrototype(ctx, style, proto);
-    JS_SetPropertyStr(ctx, style, "animationTimingFunction", JS_NewString(ctx, ""));
-    JS_SetPropertyStr(ctx, style, "removeProperty",
-        JS_NewCFunction(ctx, js_style_remove_property, "removeProperty", 1));
-    JS_SetPropertyStr(ctx, style, "setProperty",
-        JS_NewCFunction(ctx, js_style_set_property, "setProperty", 3));
-    JS_SetPropertyStr(ctx, style, "getPropertyValue",
-        JS_NewCFunction(ctx, js_style_get_property_value, "getPropertyValue", 1));
-    /* Style writes change the render snapshot (forced layout watches them). */
-    JS_SetWatched(ctx, style);
-    return style;
+    NodeId n = dom_node_of(el);
+    GCValue style = css_style_decl_new(ctx, n, n ? dom_get_attr_str(n, "style") : NULL);
+    return JS_IsException(style) ? JS_UNDEFINED : style;
 }
 
 // Document and Element stubs with createElement support

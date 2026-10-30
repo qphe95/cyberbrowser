@@ -13424,6 +13424,60 @@ bool css_layout_document(LayoutContext *ctx, CssStylesheet *sheet)
     return true;
 }
 
+/* The declarations that apply to box idx's element (css_layout.h). */
+bool css_layout_element_cascade(LayoutContext *ctx, int idx, CssCascadeFn fn, void *ud)
+{
+    if (!ctx || idx < 0 || idx >= ctx->tree.count || !ctx->doc) return false;
+    const CssStyleSet *set = styleset_cached(ctx->style_gen, ctx->viewport_width, ctx->viewport_height);
+    if (!set) return false;
+    int dom = ctx->tree.nodes[idx].dom_node_idx;
+    HtmlNode *node = layout_node_dom(ctx, dom);
+    if (!node || node->type != HTML_NODE_ELEMENT) return false;
+    const CssStyleDoc *sd = css_styledoc_get(ctx->doc);
+    CssStyleScratch *t = css_style_scratch_new(set);
+    if (!t) return false;
+    css_style_bloom_enter(t, sd, po_array_parent(&ctx->doc->array, dom));
+    const CssAppliedDecl *applied = NULL;
+    int count = css_style_match(set, sd, dom, t, &applied);
+    const CssCustomProps *props = ctx->custom_props ? ctx->custom_props[idx] : NULL;
+    InlineBlock inl[4];
+    int ninl = 0;
+    for (HtmlAttribute *attr = node->attributes; attr && ninl < 4; attr = attr->next) {
+        if (strcasecmp(attr->name, "style") != 0) continue;
+        inl[ninl].decls = css_parse_inline_style(attr->value, &inl[ninl].count);
+        ninl++;
+    }
+    /* normal sheet declarations, inline, !important sheet, !important inline */
+    for (int pass = 0; pass < 2; pass++) {
+        bool imp = pass == 1;
+        for (int d = 0; d < count; d++) {
+            const CssDeclaration *dl = applied[d].decl;
+            if (applied[d].important != imp || !dl->property || !dl->value || dl->property[0] == '-' && dl->property[1] == '-') continue;
+            char *r = strstr(dl->value, "var(") ? css_var_resolve(dl->value, props) : NULL;
+            fn(ud, dl->property, r ? r : dl->value, imp);
+            free(r);
+        }
+        for (int b = 0; b < ninl; b++)
+            for (int i = 0; i < inl[b].count; i++) {
+                const CssDeclaration *dl = &inl[b].decls[i];
+                if (dl->important != imp || !dl->property || !dl->value || dl->property[0] == '-' && dl->property[1] == '-') continue;
+                char *r = strstr(dl->value, "var(") ? css_var_resolve(dl->value, props) : NULL;
+                fn(ud, dl->property, r ? r : dl->value, imp);
+                free(r);
+            }
+    }
+    for (int b = 0; b < ninl; b++) css_declarations_free(inl[b].decls, inl[b].count);
+    css_style_scratch_free(t);
+    return true;
+}
+
+/* The computed value of custom property name on box idx's element. */
+const char *css_layout_element_custom(LayoutContext *ctx, int idx, const char *name)
+{
+    if (!ctx || idx < 0 || idx >= ctx->tree.count || !ctx->custom_props) return NULL;
+    return css_custom_props_get(ctx->custom_props[idx], name);
+}
+
 static uint64_t g_tree_kept, g_tree_built;
 
 void css_layout_tree_stats(uint64_t *kept, uint64_t *built)

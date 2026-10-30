@@ -6,6 +6,7 @@
 
 #include "css_parser.h"
 #include "dom_js.h"
+#include "browser/css_style_decl.h"
 #include "http_download.h"
 #include "platform.h"
 #include "url_utils.h"
@@ -412,9 +413,10 @@ static void css_parse_at_rule(const char *s, size_t len, size_t *pos,
     char *eff = NULL;
     if (is_media) {
         if (parent_cond && parent_cond[0] && cond && cond[0]) {
-            size_t n = strlen(parent_cond) + strlen(cond) + 6;
+            /* Each query list must match: joined by CSS_MEDIA_AND. */
+            size_t n = strlen(parent_cond) + strlen(cond) + 2;
             eff = (char *)malloc(n);
-            if (eff) snprintf(eff, n, "%s and %s", parent_cond, cond);
+            if (eff) snprintf(eff, n, "%s%c%s", parent_cond, CSS_MEDIA_AND, cond);
         } else if (parent_cond && parent_cond[0]) {
             eff = strdup(parent_cond);
         } else if (cond && cond[0]) {
@@ -1307,6 +1309,7 @@ int css_applied_decl_compare(const void *a, const void *b) {
 
 void css_set_style_property(JSContextHandle ctx, GCValue style, const char *prop, const char *value) {
     if (!prop || !value) return;
+    if (css_style_decl_is(ctx, style)) { css_style_decl_set(ctx, style, prop, value, ""); return; }
     JS_SetPropertyStr(ctx, style, prop, JS_NewString(ctx, value));
     char *camel = css_to_camel_case(prop);
     if (camel) {
@@ -1317,23 +1320,6 @@ void css_set_style_property(JSContextHandle ctx, GCValue style, const char *prop
     }
 }
 
-static void css_seed_vendor_style_properties(JSContextHandle ctx, GCValue style) {
-    /* Web Animations polyfill and other libraries do vendor-prefix detection
-     * with `'webkitTransform' in element.style`.  Seed the common transform
-     * properties so those `in` checks complete without throwing. */
-    static const char *props[] = {
-        "webkitTransform", "msTransform",
-        "webkitTransformOrigin",
-        "webkitPerspective", "webkitPerspectiveOrigin",
-        "transform", "transformOrigin",
-        "perspective", "perspectiveOrigin",
-        NULL
-    };
-    for (int i = 0; props[i]; i++) {
-        JS_SetPropertyStr(ctx, style, props[i], JS_NewString(ctx, ""));
-    }
-}
-
 GCValue css_ensure_style_object(JSContextHandle ctx, GCValue element) {
     /* Store wrappers keep their style object in the wrapper record. */
     if (dom_wrap_of(element) != GC_HANDLE_NULL) return dom_element_style(ctx, element, true);
@@ -1341,17 +1327,7 @@ GCValue css_ensure_style_object(JSContextHandle ctx, GCValue element) {
      * `style` accessor getter when it calls this helper. */
     GCValue style = JS_GetPropertyStr(ctx, element, "__style");
     if (JS_IsUndefined(style) || JS_IsNull(style) || !JS_IsObject(style)) {
-        style = JS_NewObject(ctx);
-        JS_SetPropertyStr(ctx, style, "animationTimingFunction", JS_NewString(ctx, ""));
-        css_seed_vendor_style_properties(ctx, style);
-        JS_SetPropertyStr(ctx, style, "__element", element);
-
-        GCValue global = JS_GetGlobalObject(ctx);
-        GCValue proto = JS_GetPropertyStr(ctx, global, "__CSSStyleDeclarationProto");
-        if (JS_IsObject(proto)) {
-            JS_SetPrototype(ctx, style, proto);
-        }
-        JS_SetWatched(ctx, style);
+        style = css_style_decl_new(ctx, DOM_NULL, NULL);
         JS_SetPropertyStr(ctx, element, "__style", style);
     }
     return style;
@@ -1454,11 +1430,12 @@ int css_specificity_from_selector_text_matching(const char *selector,
 /* ============================================================================
  * Media query evaluation
  *
- * Media types: screen/all match, everything else (print, speech, ...) does
- * not.  Features: width/height (incl. min-/max-) with px/em/rem/calc()
- * values, and orientation.  Any other feature (prefers-*, hover, pointer,
- * ...) never matches — it is safer to drop a rule than to apply one meant
- * for a different medium.
+ * Media Queries 4 against the one medium there is: a dark-scheme screen of
+ * the viewport's size at 1dppx, with a fine pointer that hovers.  Types:
+ * screen/all match, everything else (print, speech, ...) does not.  Plain
+ * (min-width: 40em), boolean (hover) and range (400px <= width < 60em)
+ * features; not/and/or conditions.  An unknown feature or malformed
+ * condition is "unknown", which (even under not) never matches.
  * ============================================================================ */
 
 static void css_media_skip_ws(const char **sp) {
@@ -1473,9 +1450,17 @@ static double css_media_number(const char **sp) {
     double v = strtod(*sp, &end);
     if (end == *sp) return 0.0;
     *sp = end;
-    if (strncasecmp(*sp, "rem", 3) == 0) { v *= 16.0; *sp += 3; }
-    else if (strncasecmp(*sp, "em", 2) == 0) { v *= 16.0; *sp += 2; }
-    else if (strncasecmp(*sp, "px", 2) == 0) { *sp += 2; }
+    static const struct { const char *u; double px; } units[] = {
+        { "rem", 16.0 }, { "em", 16.0 }, { "px", 1.0 }, { "in", 96.0 }, { "cm", 96.0 / 2.54 },
+        { "mm", 96.0 / 25.4 }, { "pt", 96.0 / 72.0 }, { "pc", 16.0 }, { "q", 96.0 / 101.6 },
+    };
+    for (size_t i = 0; i < sizeof(units) / sizeof(units[0]); i++) {
+        size_t n = strlen(units[i].u);
+        if (strncasecmp(*sp, units[i].u, n) == 0 && !isalpha((unsigned char)(*sp)[n])) {
+            *sp += n;
+            return v * units[i].px;
+        }
+    }
     return v;
 }
 
@@ -1534,121 +1519,360 @@ static double css_media_length(const char **sp) {
     return css_media_number(sp);
 }
 
-/* Evaluate one parenthesized media feature, e.g. "min-width: calc(640px - 1px)".
- * Unknown features never match. */
-static bool css_media_feature_matches(const char *feature, double vw, double vh) {
-    const char *colon = strchr(feature, ':');
-    char name[64];
-    size_t nlen = colon ? (size_t)(colon - feature) : strlen(feature);
-    size_t lead = 0;
-    while (nlen > 0 && css_is_space(feature[lead + nlen - 1])) nlen--;
-    while (lead < nlen && css_is_space(feature[lead])) lead++;
-    nlen -= lead;
-    if (nlen == 0 || nlen >= sizeof(name)) return false;
-    for (size_t i = 0; i < nlen; i++) name[i] = (char)tolower((unsigned char)feature[lead + i]);
-    name[nlen] = '\0';
-
-    if (strcmp(name, "orientation") == 0) {
-        if (!colon) return true;
-        const char *v = colon + 1;
-        while (*v && css_is_space(*v)) v++;
-        bool portrait = vh >= vw;
-        if (strncasecmp(v, "portrait", 8) == 0) return portrait;
-        if (strncasecmp(v, "landscape", 9) == 0) return !portrait;
-        return false;
-    }
-    if (strcmp(name, "width") == 0 || strcmp(name, "min-width") == 0 ||
-        strcmp(name, "max-width") == 0 || strcmp(name, "height") == 0 ||
-        strcmp(name, "min-height") == 0 || strcmp(name, "max-height") == 0) {
-        if (!colon) return false;
-        const char *p = colon + 1;
-        double val = css_media_length(&p);
-        double vp = strstr(name, "width") ? vw : vh;
-        if (strncmp(name, "min-", 4) == 0) return vp >= val - 0.5;
-        if (strncmp(name, "max-", 4) == 0) return vp <= val + 0.5;
-        return vp >= val - 0.5 && vp <= val + 0.5;
-    }
-    return false;
+/* The [s, e) operand trimmed into buf (lower case when fold): false when
+ * empty or too long. */
+static bool mq_operand(const char *s, const char *e, char *buf, size_t cap, bool fold) {
+    while (s < e && css_is_space(*s)) s++;
+    while (e > s && css_is_space(e[-1])) e--;
+    size_t n = (size_t)(e - s);
+    if (n == 0 || n >= cap) return false;
+    for (size_t i = 0; i < n; i++) buf[i] = fold ? (char)tolower((unsigned char)s[i]) : s[i];
+    buf[n] = '\0';
+    return true;
 }
 
-/* Evaluate a single media query (no comma): [only|not] [type] [and (feature)]* */
-static bool css_media_single_query_matches(const char *q, double vw, double vh) {
-    const char *s = q;
-    bool negate = false;
-    bool result = true;
-    css_media_skip_ws(&s);
-    if (strncasecmp(s, "only", 4) == 0 && css_is_space(s[4])) {
-        s += 4;
-        css_media_skip_ws(&s);
-    } else if (strncasecmp(s, "not", 3) == 0 && css_is_space(s[3])) {
-        negate = true;
-        s += 3;
-        css_media_skip_ws(&s);
+/* A whole operand as a length in px (or a plain number). */
+static bool mq_length(const char *s, const char *e, double *out) {
+    char buf[256];
+    if (!mq_operand(s, e, buf, sizeof(buf), false)) return false;
+    const char *p = buf;
+    *out = css_media_length(&p);
+    css_media_skip_ws(&p);
+    return p != buf && !*p;
+}
+
+static bool mq_number(const char *s, const char *e, double *out) {
+    char buf[64];
+    if (!mq_operand(s, e, buf, sizeof(buf), false)) return false;
+    char *end = NULL;
+    *out = strtod(buf, &end);
+    return end != buf && !*end;
+}
+
+/* A resolution in dppx: <n>dpi, dpcm, dppx or x. */
+static bool mq_resolution(const char *s, const char *e, double *out) {
+    char buf[64];
+    if (!mq_operand(s, e, buf, sizeof(buf), true)) return false;
+    char *end = NULL;
+    double v = strtod(buf, &end);
+    if (end == buf) return false;
+    if (strcmp(end, "dppx") == 0 || strcmp(end, "x") == 0) *out = v;
+    else if (strcmp(end, "dpi") == 0) *out = v / 96.0;
+    else if (strcmp(end, "dpcm") == 0) *out = v * 2.54 / 96.0;
+    else return false;
+    return true;
+}
+
+/* A ratio: <n> or <n> / <n>. */
+static bool mq_ratio(const char *s, const char *e, double *out) {
+    const char *slash = memchr(s, '/', (size_t)(e - s));
+    if (!slash) return mq_number(s, e, out);
+    double a, b;
+    if (!mq_number(s, slash, &a) || !mq_number(slash + 1, e, &b) || b == 0.0) return false;
+    *out = a / b;
+    return true;
+}
+
+enum { MQ_LEN, MQ_RATIO, MQ_RES, MQ_NUM, MQ_IDENT };
+
+typedef struct MqFeature {
+    const char *name;
+    int type;
+    double num;         /* the screen's value (MQ_IDENT: unused) */
+    const char *ident;  /* MQ_IDENT: the screen's value */
+} MqFeature;
+
+/* The feature named name (lower case) on a vw x vh screen; false if unknown. */
+static bool mq_feature_lookup(const char *name, double vw, double vh, MqFeature *f) {
+    static const struct { const char *name, *value; } idents[] = {
+        { "prefers-color-scheme", "dark" }, { "prefers-reduced-motion", "no-preference" },
+        { "prefers-contrast", "no-preference" }, { "prefers-reduced-transparency", "no-preference" },
+        { "prefers-reduced-data", "no-preference" }, { "forced-colors", "none" },
+        { "inverted-colors", "none" }, { "-ms-high-contrast", "none" },
+        { "hover", "hover" }, { "any-hover", "hover" }, { "pointer", "fine" }, { "any-pointer", "fine" },
+        { "display-mode", "browser" }, { "color-gamut", "srgb" }, { "dynamic-range", "standard" },
+        { "video-dynamic-range", "standard" }, { "update", "fast" }, { "overflow-block", "scroll" },
+        { "overflow-inline", "scroll" }, { "scripting", "enabled" }, { "scan", "progressive" },
+    };
+    memset(f, 0, sizeof(*f));
+    f->name = name;
+    double ratio = vh > 0 ? vw / vh : 0;
+    if (strcmp(name, "width") == 0 || strcmp(name, "device-width") == 0) { f->type = MQ_LEN; f->num = vw; }
+    else if (strcmp(name, "height") == 0 || strcmp(name, "device-height") == 0) { f->type = MQ_LEN; f->num = vh; }
+    else if (strcmp(name, "aspect-ratio") == 0 || strcmp(name, "device-aspect-ratio") == 0) { f->type = MQ_RATIO; f->num = ratio; }
+    else if (strcmp(name, "resolution") == 0) { f->type = MQ_RES; f->num = 1.0; }
+    else if (strcmp(name, "device-pixel-ratio") == 0) { f->type = MQ_NUM; f->num = 1.0; }
+    else if (strcmp(name, "color") == 0) { f->type = MQ_NUM; f->num = 8.0; }
+    else if (strcmp(name, "color-index") == 0 || strcmp(name, "monochrome") == 0 ||
+             strcmp(name, "grid") == 0) { f->type = MQ_NUM; f->num = 0.0; }
+    else if (strcmp(name, "orientation") == 0) { f->type = MQ_IDENT; f->ident = vh >= vw ? "portrait" : "landscape"; }
+    else {
+        for (size_t i = 0; i < sizeof(idents) / sizeof(idents[0]); i++)
+            if (strcmp(name, idents[i].name) == 0) { f->type = MQ_IDENT; f->ident = idents[i].value; return true; }
+        return false;
     }
-    /* Optional media type identifier. */
-    if (*s && *s != '(') {
-        const char *t = s;
-        while (*t && (isalnum((unsigned char)*t) || *t == '-')) t++;
-        size_t tl = (size_t)(t - s);
-        if (tl > 0) {
-            if (!(tl == 6 && strncasecmp(s, "screen", 6) == 0) &&
-                !(tl == 3 && strncasecmp(s, "all", 3) == 0)) {
-                result = false;  /* print, speech, tv, ... never match */
-            }
-            s = t;
-            css_media_skip_ws(&s);
+    return true;
+}
+
+/* An operand of a range feature's type; false when it does not parse. */
+static bool mq_value(const MqFeature *f, const char *s, const char *e, double *out) {
+    switch (f->type) {
+    case MQ_LEN:   return mq_length(s, e, out);
+    case MQ_RATIO: return mq_ratio(s, e, out);
+    case MQ_RES:   return mq_resolution(s, e, out);
+    case MQ_NUM:   return mq_number(s, e, out);
+    default:       return false;
+    }
+}
+
+enum { MQ_LT, MQ_LE, MQ_GT, MQ_GE, MQ_EQ };
+
+static bool mq_compare(double a, int op, double b) {
+    const double eps = 1e-9;
+    switch (op) {
+    case MQ_LT: return a < b - eps;
+    case MQ_LE: return a <= b + eps;
+    case MQ_GT: return a > b + eps;
+    case MQ_GE: return a >= b - eps;
+    default:    return a >= b - eps && a <= b + eps;
+    }
+}
+
+/* Whether [s, e) is a feature name (an identifier, not a number). */
+static bool mq_is_name(const char *s, const char *e) {
+    while (s < e && css_is_space(*s)) s++;
+    if (s >= e) return false;
+    if (*s == '-') s++;
+    return s < e && (isalpha((unsigned char)*s) || *s == '-');
+}
+
+/* A feature in parentheses (its text [s, e)): 1, 0, or -1 for unknown. */
+static int mq_feature(const char *s, const char *e, double vw, double vh) {
+    char name[64];
+    MqFeature f;
+    /* Range form: up to two comparison operators at depth 0. */
+    const char *ops[2] = { NULL, NULL };
+    int opk[2] = { 0, 0 }, opn[2] = { 0, 0 }, nops = 0, depth = 0;
+    const char *colon = NULL;
+    for (const char *p = s; p < e; p++) {
+        if (*p == '(') depth++;
+        else if (*p == ')') depth--;
+        else if (depth == 0 && *p == ':' && !colon) colon = p;
+        else if (depth == 0 && (*p == '<' || *p == '>' || *p == '=')) {
+            if (nops == 2) return -1;
+            int k, n = 1;
+            if (*p == '=') k = MQ_EQ;
+            else if (p + 1 < e && p[1] == '=') { k = *p == '<' ? MQ_LE : MQ_GE; n = 2; }
+            else k = *p == '<' ? MQ_LT : MQ_GT;
+            ops[nops] = p; opk[nops] = k; opn[nops] = n; nops++;
+            p += n - 1;
         }
     }
-    /* Parenthesized features joined by "and". */
+    if (colon && nops) return -1;
+
+    if (colon) {
+        if (!mq_operand(s, colon, name, sizeof(name), true)) return -1;
+        const char *n = name;
+        if (strncmp(n, "-webkit-", 8) == 0 && strstr(n, "device-pixel-ratio")) n += 8;
+        int prefix = 0;     /* 1 min-, 2 max- */
+        if (strncmp(n, "min-", 4) == 0) { prefix = 1; n += 4; }
+        else if (strncmp(n, "max-", 4) == 0) { prefix = 2; n += 4; }
+        if (!mq_feature_lookup(n, vw, vh, &f)) return -1;
+        if (f.type == MQ_IDENT) {
+            char v[64];
+            if (prefix || !mq_operand(colon + 1, e, v, sizeof(v), true)) return -1;
+            return strcmp(v, f.ident) == 0;
+        }
+        double v;
+        if (!mq_value(&f, colon + 1, e, &v)) return -1;
+        return mq_compare(f.num, prefix == 1 ? MQ_GE : prefix == 2 ? MQ_LE : MQ_EQ, v);
+    }
+
+    if (!nops) {
+        /* Boolean context: true unless the value is zero, none or no-preference. */
+        if (!mq_operand(s, e, name, sizeof(name), true) || !mq_feature_lookup(name, vw, vh, &f)) return -1;
+        if (f.type == MQ_IDENT) return strcmp(f.ident, "none") != 0 && strcmp(f.ident, "no-preference") != 0;
+        return f.num != 0.0;
+    }
+
+    /* "name op value", "value op name" or "value op name op value". */
+    const char *a_end = ops[0], *b_start = ops[0] + opn[0];
+    if (nops == 1) {
+        bool name_first = mq_is_name(s, a_end);
+        const char *ns = name_first ? s : b_start, *ne = name_first ? a_end : e;
+        const char *vs = name_first ? b_start : s, *ve = name_first ? e : a_end;
+        if (!mq_operand(ns, ne, name, sizeof(name), true) || !mq_feature_lookup(name, vw, vh, &f) ||
+            f.type == MQ_IDENT) return -1;
+        double v;
+        if (!mq_value(&f, vs, ve, &v)) return -1;
+        return name_first ? mq_compare(f.num, opk[0], v) : mq_compare(v, opk[0], f.num);
+    }
+    /* Both operators point the same way (< or >, neither =). */
+    bool lt0 = opk[0] == MQ_LT || opk[0] == MQ_LE, lt1 = opk[1] == MQ_LT || opk[1] == MQ_LE;
+    if (opk[0] == MQ_EQ || opk[1] == MQ_EQ || lt0 != lt1) return -1;
+    if (!mq_operand(b_start, ops[1], name, sizeof(name), true) || !mq_feature_lookup(name, vw, vh, &f) ||
+        f.type == MQ_IDENT) return -1;
+    double lo, hi;
+    if (!mq_value(&f, s, a_end, &lo) || !mq_value(&f, ops[1] + opn[1], e, &hi)) return -1;
+    return mq_compare(lo, opk[0], f.num) && mq_compare(f.num, opk[1], hi);
+}
+
+typedef struct Mq {
+    const char *p, *end;
+    double vw, vh;
+    bool bad;           /* malformed */
+} Mq;
+
+static void mq_ws(Mq *m) {
+    while (m->p < m->end && css_is_space(*m->p)) m->p++;
+}
+
+/* The keyword word next (case-insensitive, then a space or '('): consumed. */
+static bool mq_word(Mq *m, const char *word) {
+    mq_ws(m);
+    size_t n = strlen(word);
+    if ((size_t)(m->end - m->p) <= n || strncasecmp(m->p, word, n) != 0) return false;
+    char c = m->p[n];
+    if (!css_is_space(c) && c != '(') return false;
+    m->p += n;
+    return true;
+}
+
+static int mq_condition(Mq *m);
+
+/* "( condition )" or "( feature )"; anything else in parentheses is unknown. */
+static int mq_in_parens(Mq *m) {
+    mq_ws(m);
+    if (m->p >= m->end || *m->p != '(') { m->bad = true; return -1; }
+    const char *close = m->p + 1;
+    int depth = 1;
+    for (; close < m->end; close++) {
+        if (*close == '(') depth++;
+        else if (*close == ')' && --depth == 0) break;
+    }
+    if (close >= m->end) { m->bad = true; return -1; }
+    Mq in = { m->p + 1, close, m->vw, m->vh, false };
+    mq_ws(&in);
+    int r;
+    if (in.p < in.end && (*in.p == '(' || mq_word(&in, "not"))) {
+        in.p = m->p + 1;
+        r = mq_condition(&in);
+        mq_ws(&in);
+        if (in.bad || in.p != in.end) r = -1;
+    } else {
+        r = mq_feature(m->p + 1, close, m->vw, m->vh);
+    }
+    m->p = close + 1;
+    return r;
+}
+
+/* not <in-parens> | <in-parens> [and <in-parens>]* | <in-parens> [or <in-parens>]*,
+ * three-valued (-1 unknown). */
+static int mq_condition(Mq *m) {
+    if (mq_word(m, "not")) {
+        int r = mq_in_parens(m);
+        return r < 0 ? -1 : !r;
+    }
+    int r = mq_in_parens(m);
+    int joiner = 0;     /* 1 and, 2 or */
     for (;;) {
-        if (strncasecmp(s, "and", 3) == 0 && (css_is_space(s[3]) || s[3] == '(')) {
-            s += 3;
-            css_media_skip_ws(&s);
-        }
-        if (*s != '(') break;
-        const char *close = s + 1;
-        int depth = 1;
-        while (*close && depth > 0) {
-            if (*close == '(') depth++;
-            else if (*close == ')') depth--;
-            if (depth > 0) close++;
-        }
-        if (depth != 0) return false;  /* unbalanced parens */
-        char feat[256];
-        size_t fl = (size_t)(close - (s + 1));
-        if (fl >= sizeof(feat)) fl = sizeof(feat) - 1;
-        memcpy(feat, s + 1, fl);
-        feat[fl] = '\0';
-        if (!css_media_feature_matches(feat, vw, vh)) result = false;
-        s = close + 1;
-        css_media_skip_ws(&s);
+        int j = mq_word(m, "and") ? 1 : mq_word(m, "or") ? 2 : 0;
+        if (!j) break;
+        if (joiner && j != joiner) { m->bad = true; return -1; }   /* mixed without parens */
+        joiner = j;
+        int t = mq_in_parens(m);
+        if (j == 1) r = (r == 0 || t == 0) ? 0 : (r < 0 || t < 0) ? -1 : 1;
+        else        r = (r == 1 || t == 1) ? 1 : (r < 0 || t < 0) ? -1 : 0;
     }
-    return negate ? !result : result;
+    return r;
+}
+
+/* One query of a list, [s, e). */
+static bool mq_query(const char *s, const char *e, double vw, double vh) {
+    Mq m = { s, e, vw, vh, false };
+    mq_ws(&m);
+    if (m.p >= m.end) return false;
+    /* "(...)" and "not (...)" are a condition; otherwise a media type leads. */
+    const char *start = m.p;
+    bool condition = *m.p == '(';
+    if (!condition && mq_word(&m, "not")) {
+        mq_ws(&m);
+        condition = m.p < m.end && *m.p == '(';
+    }
+    m.p = start;
+    if (condition) {
+        int r = mq_condition(&m);
+        mq_ws(&m);
+        return !m.bad && m.p == m.end && r == 1;
+    }
+    bool negate = false;
+    if (mq_word(&m, "not")) negate = true;
+    else mq_word(&m, "only");
+    mq_ws(&m);
+    const char *t = m.p;
+    while (m.p < m.end && (isalnum((unsigned char)*m.p) || *m.p == '-')) m.p++;
+    size_t tl = (size_t)(m.p - t);
+    if (!tl) return false;
+    bool type = (tl == 6 && strncasecmp(t, "screen", 6) == 0) || (tl == 3 && strncasecmp(t, "all", 3) == 0);
+    int r = type ? 1 : 0;
+    mq_ws(&m);
+    if (m.p < m.end) {
+        if (!mq_word(&m, "and")) return false;
+        int c;
+        if (mq_word(&m, "not")) { c = mq_in_parens(&m); c = c < 0 ? -1 : !c; }
+        else {
+            /* <condition-without-or> */
+            c = mq_in_parens(&m);
+            while (mq_word(&m, "and")) {
+                int d = mq_in_parens(&m);
+                c = (c == 0 || d == 0) ? 0 : (c < 0 || d < 0) ? -1 : 1;
+            }
+        }
+        mq_ws(&m);
+        if (m.bad || m.p != m.end || c < 0) return false;
+        r = r && c == 1;
+    }
+    return negate ? !r : r;
+}
+
+bool css_media_query_matches(const char *query, double vw, double vh) {
+    if (!query) return true;
+    const char *s = query;
+    while (css_is_space(*s)) s++;
+    if (!*s) return true;
+    /* A list matches when any comma-separated query does. */
+    for (;;) {
+        const char *comma = s;
+        int depth = 0;
+        for (; *comma; comma++) {
+            if (*comma == '(') depth++;
+            else if (*comma == ')') { if (depth > 0) depth--; }
+            else if (*comma == ',' && depth == 0) break;
+        }
+        if (mq_query(s, comma, vw, vh)) return true;
+        if (!*comma) return false;
+        s = comma + 1;
+    }
 }
 
 bool css_rule_media_matches(const CssRule *rule, double viewport_width, double viewport_height) {
     if (!rule || !rule->media_query || !rule->media_query[0]) return true;
-    /* A media query list matches if ANY comma-separated query matches. */
+    /* Nested @media blocks: every list (joined by CSS_MEDIA_AND) must match. */
     const char *s = rule->media_query;
     for (;;) {
-        const char *comma = s;
-        int depth = 0;
-        while (*comma) {
-            if (*comma == '(') depth++;
-            else if (*comma == ')') { if (depth > 0) depth--; }
-            else if (*comma == ',' && depth == 0) break;
-            comma++;
-        }
-        char qbuf[512];
-        size_t qlen = (size_t)(comma - s);
-        if (qlen >= sizeof(qbuf)) qlen = sizeof(qbuf) - 1;
-        memcpy(qbuf, s, qlen);
-        qbuf[qlen] = '\0';
-        if (css_media_single_query_matches(qbuf, viewport_width, viewport_height)) return true;
-        if (!*comma) break;
-        s = comma + 1;
+        const char *sep = strchr(s, CSS_MEDIA_AND);
+        size_t n = sep ? (size_t)(sep - s) : strlen(s);
+        char stack[512];
+        char *q = n < sizeof(stack) ? stack : (char *)malloc(n + 1);
+        if (!q) return false;
+        memcpy(q, s, n);
+        q[n] = '\0';
+        bool ok = css_media_query_matches(q, viewport_width, viewport_height);
+        if (q != stack) free(q);
+        if (!ok) return false;
+        if (!sep) return true;
+        s = sep + 1;
     }
-    return false;
 }
 
 static char* css_strdup(const char *s) {

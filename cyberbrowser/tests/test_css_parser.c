@@ -84,6 +84,42 @@ TEST(test_parse_media_rules_entered) {
     return true;
 }
 
+TEST(test_media_query_level4) {
+    /* A 1280x800 dark-scheme screen with a fine, hovering pointer. */
+    static const struct { const char *q; bool want; } cases[] = {
+        { "(width>=1012px)", true }, { "(width<=1011.98px)", false },
+        { "(1012px <= width < 1280px)", false }, { "(1012px <= width <= 1280px)", true },
+        { "(80rem > width)", false }, { "(width >= calc(48rem - .02px))", true },
+        { "screen and (width>=63.25rem)", true }, { "print and (width>=1px)", false },
+        { "not print", true }, { "not screen and (width<100px)", true }, { "only screen", true },
+        { "(min-width: 1280px)", true }, { "(max-width: 1279.5px)", false }, { "(width: 1280px)", true },
+        { "(prefers-color-scheme:dark)", true }, { "(prefers-color-scheme: light)", false },
+        { "(prefers-reduced-motion)", false }, { "(prefers-reduced-motion:no-preference)", true },
+        { "(hover:hover) and (pointer:fine)", true }, { "(pointer:coarse)", false },
+        { "(forced-colors:active)", false }, { "not (forced-colors:active)", true },
+        { "(width < 500px) or (orientation: landscape)", true },
+        { "((width > 2000px) or (hover)) and (color)", true },
+        { "(resolution>=2x), (-webkit-min-device-pixel-ratio:1)", true },
+        { "(resolution>=192dpi)", false }, { "(min-aspect-ratio: 16/10)", true },
+        { "(unknown-feature)", false }, { "not (unknown-feature)", false },
+        { "(width > 1px) and (height > 1px) or (hover)", false },   /* mixed and/or */
+        { "garbage(", false }, { "", true },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        bool got = css_media_query_matches(cases[i].q, 1280, 800);
+        if (got != cases[i].want) printf("    \"%s\": got %d\n", cases[i].q, got);
+        ASSERT_TRUE(got == cases[i].want);
+    }
+    /* Nested @media blocks: each query list must match. */
+    const char *css = "@media screen, print { @media (width>=2000px) { a { color: red; } } }";
+    CssStylesheet *sheet = css_stylesheet_parse(css, strlen(css));
+    ASSERT_TRUE(sheet != NULL && sheet->rule_count == 1);
+    ASSERT_FALSE(css_rule_media_matches(&sheet->rules[0], 1280, 800));
+    ASSERT_TRUE(css_rule_media_matches(&sheet->rules[0], 2400, 800));
+    css_stylesheet_free(sheet);
+    return true;
+}
+
 TEST(test_parse_inline_style) {
     const char *style = "color: red; background-color: blue; font-size: 12px ";
     int count = 0;
@@ -168,6 +204,7 @@ void run_css_parser_tests(void) {
     RUN_TEST(test_parse_multiple_rules);
     RUN_TEST(test_parse_comments_and_whitespace);
     RUN_TEST(test_parse_media_rules_entered);
+    RUN_TEST(test_media_query_level4);
     RUN_TEST(test_parse_inline_style);
     RUN_TEST(test_parse_inline_style_empty);
     RUN_TEST(test_css_index_tables);

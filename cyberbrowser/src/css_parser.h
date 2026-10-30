@@ -97,6 +97,16 @@ int css_specificity_from_selector_text_matching(const char *selector,
 /* Returns true if a rule's enclosing @media condition matches the viewport. */
 bool css_rule_media_matches(const CssRule *rule, double viewport_width, double viewport_height);
 
+/* Joins the query lists of nested @media blocks in CssRule.media_query:
+ * the rule applies when every list matches. */
+#define CSS_MEDIA_AND '\x1f'
+
+/* Whether a media query list (Media Queries 4: types, and/or/not, plain and
+ * range features) matches a screen of this viewport (CSS px).  The screen
+ * is dark-scheme (as matchMedia has always said), 1dppx, with a fine
+ * pointer that hovers. */
+bool css_media_query_matches(const char *query, double viewport_width, double viewport_height);
+
 /* Transform a stylesheet's selectors for a shadow host (e.g. :host, ::slotted).
  * Used by both the JS CSS applier and the layout-engine collector. */
 void css_scope_stylesheet(CssStylesheet *sheet, const char *host_tag);

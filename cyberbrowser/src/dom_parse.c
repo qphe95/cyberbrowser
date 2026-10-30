@@ -274,10 +274,11 @@ static size_t tok_start_tag(TokChunk *c, size_t pos, bool serial) {
                     ve = p;
                     if (p < len) p++;
                 } else {
+                    /* Unquoted: up to a space or '>' ('/' is part of it). */
                     vb = p;
                     while (p < len) {
                         char ch = h[p];
-                        if (ch == '>' || ch == '/' || c_isspace((unsigned char)ch)) break;
+                        if (ch == '>' || c_isspace((unsigned char)ch)) break;
                         p++;
                     }
                     ve = p;

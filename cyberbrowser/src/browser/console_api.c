@@ -14,6 +14,7 @@
 #include "html_dom.h"
 #include "dom_js.h"
 #include "css_parser.h"
+#include "css_style_decl.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
 #include "layout_api.h"
@@ -580,10 +581,28 @@ static GCValue js_computed_style_get_used_height(JSContextHandle ctx, GCValue th
     return js_computed_style_get_used(ctx, this_val, true);
 }
 
-// getComputedStyle - reads from the per-element computed-style table and
-// falls back to sensible defaults so scripts can safely call .replace() etc.
+static GCValue js_get_computed_style_legacy(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
+
+/* getComputedStyle(element): a live, read-only CSSStyleDeclaration of the
+ * element's resolved values (computed_style.c), one per element. */
 GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     CP_ACC("getComputedStyle");
+    GCValue element = argc > 0 ? argv[0] : JS_UNDEFINED;
+    NodeId id = JS_IsObject(element) ? dom_node_of(element) : DOM_NULL;
+    if (!id) return js_get_computed_style_legacy(ctx, this_val, argc, argv);
+    if (dom_kind(id) != DOM_K_ELEMENT)
+        return JS_ThrowTypeError(ctx, "Failed to execute 'getComputedStyle' on 'Window': parameter 1 is not of type 'Element'.");
+    GCValue cached = JS_GetPropertyStr(ctx, element, "__cyber_cs");
+    if (css_style_decl_is(ctx, cached)) return cached;
+    GCValue cs = css_style_decl_new_computed(ctx, id);
+    if (JS_IsException(cs)) return cs;
+    JS_DefinePropertyValueStr(ctx, element, "__cyber_cs", cs, JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+    return cs;
+}
+
+/* getComputedStyle of an object that is not a store node: the old table
+ * of defaults (kept for the objects scripts pass that are not elements). */
+static GCValue js_get_computed_style_legacy(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
     GCValue element = argc > 0 ? argv[0] : JS_UNDEFINED;
     GCValue pseudo = argc > 1 ? argv[1] : JS_UNDEFINED;
@@ -671,7 +690,17 @@ GCValue js_get_computed_style(JSContextHandle ctx, GCValue this_val, int argc, G
         /* Merge the element's inline style object so getComputedStyle reflects
          * properties set via element.style.foo even before layout runs. */
         GCValue inline_style = JS_GetPropertyStr(ctx, element, "style");
-        if (JS_IsObject(inline_style)) {
+        if (css_style_decl_is(ctx, inline_style)) {
+            int nd = css_style_decl_count(ctx, inline_style);
+            for (int i = 0; i < nd; i++) {
+                const char *name, *value;
+                if (!css_style_decl_at(ctx, inline_style, i, &name, &value, NULL)) continue;
+                JS_SetPropertyStr(ctx, style, name, JS_NewString(ctx, value));
+                char *camel = css_to_camel_case(name);
+                if (camel && strcmp(camel, name)) JS_SetPropertyStr(ctx, style, camel, JS_NewString(ctx, value));
+                free(camel);
+            }
+        } else if (JS_IsObject(inline_style)) {
             JSPropertyEnum *props = NULL;
             uint32_t prop_count = 0;
             if (JS_GetOwnPropertyNames(ctx, &props, &prop_count, inline_style, JS_GPN_STRING_MASK) == 0 && props) {

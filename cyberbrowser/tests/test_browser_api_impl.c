@@ -4948,6 +4948,68 @@ TEST(test_module_bindings_and_import_meta) {
     return true;
 }
 
+/* AbortController / AbortSignal: abort() fires once with a reason, removes
+ * {signal} listeners; AbortSignal.abort/any and dependents. */
+TEST(test_abort_signal) {
+    JSContextHandle ctx = get_test_context();
+    if (!SAFE_VALID(ctx)) return false;
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ var c = new AbortController(), s = c.signal, fired = 0, heard = 0, t = new EventTarget();"
+        "  s.onabort = function(e){ fired++; }; t.addEventListener('x', function(){ heard++; }, {signal: s});"
+        "  var d = AbortSignal.any([s, new AbortController().signal]), dep = 0; d.addEventListener('abort', function(){ dep++; });"
+        "  t.dispatchEvent(new Event('x')); c.abort('why'); c.abort('again'); t.dispatchEvent(new Event('x'));"
+        "  var pre = AbortSignal.abort(), threw = false; try { pre.throwIfAborted(); } catch (e) { threw = e.name === 'AbortError'; }"
+        "  var ctorThrows = false; try { new AbortSignal(); } catch (e) { ctorThrows = true; }"
+        "  return s.aborted && s.reason === 'why' && fired === 1 && heard === 1 && d.aborted && d.reason === 'why' &&"
+        "    dep === 1 && pre.aborted && threw && ctorThrows && s instanceof EventTarget &&"
+        "    typeof AbortSignal.timeout(10).aborted === 'boolean'; })()",
+        false));
+    return true;
+}
+
+/* getComputedStyle: the cascade, inheritance, computed units and colors,
+ * live and read-only. */
+TEST(test_computed_style_values) {
+    JSContextHandle ctx = get_test_context();
+    if (!SAFE_VALID(ctx)) return false;
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ var st = document.createElement('style'); st.textContent = '.cxa { color: #00ff00; border-top: 2px solid; }';"
+        "  document.head.appendChild(st);"
+        "  var p = document.createElement('div'); p.style.fontSize = '20px'; p.className = 'cxa';"
+        "  var c = document.createElement('span'); c.style.marginLeft = '2em'; c.style.backgroundColor = 'currentcolor';"
+        "  p.appendChild(c); document.body.appendChild(p);"
+        "  var cs = getComputedStyle(c), ps = getComputedStyle(p), log = [];"
+        "  function eq(a, b) { if (a !== b) log.push(a + ' != ' + b); }"
+        "  eq(cs.color, 'rgb(0, 255, 0)'); eq(cs.backgroundColor, 'rgb(0, 255, 0)');"
+        "  eq(cs.marginLeft, '40px'); eq(cs.fontSize, '20px'); eq(ps.borderTopWidth, '2px');"
+        "  eq(ps.borderBottomWidth, '0px'); eq(cs.fontWeight, '400'); eq(ps.display, 'block');"
+        "  eq(cs.getPropertyValue('border-top-style'), 'none'); eq('background-attachment' in cs, true);"
+        "  c.style.marginLeft = '10px'; eq(cs.marginLeft, '10px');"
+        "  var threw = false; try { cs.color = 'red'; } catch (e) { threw = e.name === 'NoModificationAllowedError'; }"
+        "  eq(threw, true); eq(cs.length > 200, true);"
+        "  p.remove(); st.remove();"
+        "  if (log.length) throw new Error(log.join('; '));"
+        "  return !log.length; })()",
+        false));
+    return true;
+}
+
+/* Named access on the window: an element by its id, behind every real
+ * global, gone with the element. */
+TEST(test_window_named_access) {
+    JSContextHandle ctx = get_test_context();
+    if (!SAFE_VALID(ctx)) return false;
+    ASSERT_TRUE(eval_true(ctx,
+        "(function(){ var d = document.createElement('div'); d.id = 'cyberNamedX'; document.body.appendChild(d);"
+        "  var s = document.createElement('span'); s.id = 'setTimeout'; document.body.appendChild(s);"
+        "  var ok = cyberNamedX === d && window.cyberNamedX === d && ('cyberNamedX' in window) &&"
+        "    typeof setTimeout === 'function' && !window.hasOwnProperty('cyberNamedX');"
+        "  d.remove(); s.remove();"
+        "  return ok && typeof cyberNamedX === 'undefined' && window.cyberNamedX === undefined; })()",
+        false));
+    return true;
+}
+
 /* DOM events: capture, target and bubble order, once, handleEvent,
  * preventDefault's return value, on* handlers and content attributes. */
 TEST(test_dom_event_dispatch) {
@@ -5301,6 +5363,9 @@ void run_browser_api_impl_tests(void) {
     RUN_TEST(test_lazy_for_in_comma);
     RUN_TEST(test_module_bindings_and_import_meta);
     RUN_TEST(test_dom_event_dispatch);
+    RUN_TEST(test_window_named_access);
+    RUN_TEST(test_computed_style_values);
+    RUN_TEST(test_abort_signal);
     RUN_TEST(test_form_controls_state);
     RUN_TEST(test_dom_parsing_and_traversal);
     RUN_TEST(test_custom_element_new);

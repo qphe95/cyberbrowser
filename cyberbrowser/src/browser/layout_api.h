@@ -25,6 +25,22 @@ bool layout_query_element_box(JSContextHandle ctx, GCValue element, LayoutQueryB
  * values for getComputedStyle when only a relative declaration is known). */
 bool layout_query_font_size(JSContextHandle ctx, GCValue element, double *px);
 
+/* For getComputedStyle: the element's cascaded declarations
+ * (css_layout_element_cascade) from a layout that styled it, even inside a
+ * display:none subtree, and its used box when it is rendered.  False when
+ * the element has no style (not connected, not an element). */
+typedef struct {
+    bool rendered;
+    double content_width, content_height;
+    double margin[4], padding[4], border[4];   /* top right bottom left */
+    double font_size;
+    const char *display;    /* the layout's display (the default of an element that declares none) */
+} LayoutQueryUsed;
+typedef void (*LayoutCascadeFn)(void *ud, const char *prop, const char *value, bool important);
+bool layout_query_cascade(JSContextHandle ctx, GCValue element, LayoutCascadeFn fn, void *ud, LayoutQueryUsed *used);
+/* The computed value of custom property name on the element (malloc'd), or NULL. */
+char *layout_query_custom(JSContextHandle ctx, GCValue element, const char *name);
+
 /* offsetWidth/Height/Top/Left, offsetParent, clientWidth/Height/Top/Left,
  * scrollWidth/Height, scrollTop/Left on Element.prototype. */
 void layout_api_install(JSContextHandle ctx, GCValue element_proto);

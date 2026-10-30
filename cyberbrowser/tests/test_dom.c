@@ -180,6 +180,22 @@ static char *read_file(const char *path, size_t *len) {
  * Parser tests
  * ============================================================================ */
 
+/* An unquoted attribute value runs to a space or '>': '/' is part of it
+ * (<script src=/a.js> was src=""). */
+TEST(test_dom_parse_unquoted_attr_slash) {
+    const char *html = "<script src=/resources/a.js></script><img src=a.png/><a href=x/y/ title=t>";
+    NodeId frag = dom_parse_html(html, strlen(html), DOM_NULL);
+    NodeId s = dom_first_child(frag), i = dom_next_sibling(s), a = dom_next_sibling(i);
+    const char *ss = dom_get_attr_str(s, "src"), *is = dom_get_attr_str(i, "src");
+    const char *ah = dom_get_attr_str(a, "href"), *at = dom_get_attr_str(a, "title");
+    bool ok = ss && strcmp(ss, "/resources/a.js") == 0 && is && strcmp(is, "a.png/") == 0 &&
+              ah && strcmp(ah, "x/y/") == 0 && at && strcmp(at, "t") == 0;
+    if (!ok) printf("    src=%s src=%s href=%s title=%s\n", ss ? ss : "-", is ? is : "-", ah ? ah : "-", at ? at : "-");
+    dom_free_subtree(frag);
+    ASSERT_TRUE(ok);
+    return true;
+}
+
 TEST(test_dom_parse_matches_legacy_fixtures) {
     static const char *const cases[] = {
         "",
@@ -1163,7 +1179,7 @@ TEST(test_dom_clone_keeps_script_styles) {
         "(function(){var d=document.createElement('div'); d.innerHTML='<span><svg viewBox=\"0 0 24 24\"></svg></span>';"
         "var s=d.querySelector('svg'); s.style.pointerEvents='none'; s.style.width='100%';"
         "var c=d.cloneNode(true).querySelector('svg'), i=document.importNode(d,true).querySelector('svg');"
-        "var ok=function(e){ var a=e.getAttribute('style')||''; return a.indexOf('pointer-events:none')>=0 && a.indexOf('width:100%')>=0; };"
+        "var ok=function(e){ var a=e.getAttribute('style')||''; return a.indexOf('pointer-events: none')>=0 && a.indexOf('width: 100%')>=0; };"
         "return ok(c) && ok(i) && c.style.width==='100%' ? 1 : 0;})()"));
     return true;
 }
@@ -1436,6 +1452,7 @@ TEST(test_dom_streamed_page_runs_scripts_in_place) {
 void run_dom_tests(void) {
     printf("\n--- Node store DOM Tests ---\n");
     RUN_TEST(test_dom_parse_matches_legacy_fixtures);
+    RUN_TEST(test_dom_parse_unquoted_attr_slash);
     RUN_TEST(test_dom_parse_matches_legacy_fuzz);
     RUN_TEST(test_dom_parse_drops_markup_declarations);
     RUN_TEST(test_dom_parse_keeps_comments);

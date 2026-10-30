@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <ctype.h>
 #include "html_dom.h"
+#include "browser/css_style_decl.h"
 #include "gc_value_helpers.h"
 #include "platform.h"
 #include "browser_api_impl.h"
@@ -313,7 +314,11 @@ static void html_transfer_element_properties(JSContextHandle ctx, GCValue new_el
     JSAtom sa = html_atom(ctx, &style_atom, "style");
     GCValue old_style = JS_GetProperty(ctx, old_elem, sa);
     GCValue new_style = JS_GetProperty(ctx, new_elem, sa);
-    if (JS_IsObject(old_style) && JS_IsObject(new_style)) {
+    if (css_style_decl_is(ctx, old_style) && JS_IsObject(new_style)) {
+        char *t = css_style_decl_text(ctx, old_style);
+        if (t) JS_SetPropertyStr(ctx, new_style, "cssText", JS_NewString(ctx, t));
+        free(t);
+    } else if (JS_IsObject(old_style) && JS_IsObject(new_style)) {
         JSPropertyEnum *tab = NULL;
         uint32_t plen = 0;
         if (JS_GetOwnPropertyNames(ctx, &tab, &plen, old_style, JS_GPN_STRING_MASK) == 0 && tab) {
@@ -1424,6 +1429,12 @@ static void loose_attrs_read(JSContextHandle ctx, GCValue node, LooseAttrs *out)
 }
 
 static void append_style_object(JSContextHandle ctx, GCValue style_obj, SerializeBuffer *style_buf) {
+    if (css_style_decl_is(ctx, style_obj)) {
+        char *t = css_style_decl_text(ctx, style_obj);
+        if (t && t[0]) serialize_buf_append(style_buf, t);
+        free(t);
+        return;
+    }
     JSPropertyEnum *tab = NULL;
     uint32_t plen = 0;
     if (JS_GetOwnPropertyNames(ctx, &tab, &plen, style_obj, JS_GPN_STRING_MASK) != 0 || !tab) return;
@@ -1476,72 +1487,6 @@ static void append_style_object(JSContextHandle ctx, GCValue style_obj, Serializ
         serialize_buf_append(style_buf, ";");
     }
     JS_FreePropertyEnum(ctx, tab, plen);
-}
-
-/* The style object an element has always had, when it has not been created
- * yet: the createElement() object with the inline style attribute applied
- * (each declaration under its name and its camelCase name).  Emits exactly
- * what append_style_object() would for that object. */
-typedef struct { char *k; char *v; } StyleProp;
-static int style_prop_find(StyleProp *p, int n, const char *k) {
-    for (int i = 0; i < n; i++) if (strcmp(p[i].k, k) == 0) return i;
-    return -1;
-}
-static int style_prop_set(StyleProp **p, int *n, int *cap, const char *k, const char *v) {
-    int i = style_prop_find(*p, *n, k);
-    if (i >= 0) { free((*p)[i].v); (*p)[i].v = strdup(v); return i; }
-    if (*n == *cap) { *cap = *cap ? *cap * 2 : 16; *p = realloc(*p, *cap * sizeof(StyleProp)); }
-    (*p)[*n].k = strdup(k);
-    (*p)[*n].v = strdup(v);
-    return (*n)++;
-}
-static void append_emulated_style_object(const char *attr, SerializeBuffer *style_buf) {
-    if (!attr || !attr[0]) return;
-    int count = 0;
-    CssDeclaration *decls = css_parse_inline_style(attr, &count);
-    if (!decls) return;
-    StyleProp *props = NULL;
-    int n = 0, cap = 0;
-    style_prop_set(&props, &n, &cap, "animationTimingFunction", "");
-    for (int i = 0; i < count; i++) {
-        if (!decls[i].property || !decls[i].value) continue;
-        style_prop_set(&props, &n, &cap, decls[i].property, decls[i].value);
-        char *camel = css_to_camel_case(decls[i].property);
-        if (camel && strcmp(camel, decls[i].property) != 0)
-            style_prop_set(&props, &n, &cap, camel, decls[i].value);
-        free(camel);
-    }
-    css_declarations_free(decls, count);
-    for (int i = 0; i < n; i++) {
-        char key[128];
-        snprintf(key, sizeof(key), "%s", props[i].k);
-        if (!key[0] || key[0] == '_') continue;
-        int ki = style_prop_find(props, n, key);
-        const char *v = ki >= 0 ? props[ki].v : NULL;
-        if (!v || !v[0]) continue;
-        char val_buf[1024];
-        snprintf(val_buf, sizeof(val_buf), "%s", v);
-        char kebab[128];
-        size_t kn = 0;
-        bool had_upper = false;
-        for (const char *p = key; *p && kn < sizeof(kebab) - 2; p++) {
-            if (*p >= 'A' && *p <= 'Z') {
-                kebab[kn++] = '-';
-                kebab[kn++] = (char)tolower((unsigned char)*p);
-                had_upper = true;
-            } else {
-                kebab[kn++] = *p;
-            }
-        }
-        kebab[kn] = '\0';
-        if (had_upper && style_prop_find(props, n, kebab) >= 0) continue;
-        serialize_buf_append(style_buf, kebab);
-        serialize_buf_append(style_buf, ":");
-        serialize_buf_append(style_buf, val_buf);
-        serialize_buf_append(style_buf, ";");
-    }
-    for (int i = 0; i < n; i++) { free(props[i].k); free(props[i].v); }
-    free(props);
 }
 
 static const char *legacy_cut(const char *s, size_t max, char *tmp) {
@@ -1731,12 +1676,12 @@ static void ser_element_attrs(JSContextHandle ctx, SerNode n, const char *tag_lo
             if (sl > 0 && attr_style[sl - 1] != ';')
                 serialize_buf_append(&style_buf, ";");
         }
-        GCValue style_obj = JS_UNDEFINED;
-        if (JS_IsObject(n.obj))
-            style_obj = n.id ? dom_element_style(ctx, n.obj, false)
-                             : JS_GetPropertyStr(ctx, n.obj, "__style");
-        if (JS_IsObject(style_obj)) append_style_object(ctx, style_obj, &style_buf);
-        else if (n.id) append_emulated_style_object(attr_style, &style_buf);
+        /* A store element's style object writes its declarations back to
+         * the attribute (css_style_decl.c): the attribute is the style. */
+        if (!n.id && JS_IsObject(n.obj)) {
+            GCValue style_obj = JS_GetPropertyStr(ctx, n.obj, "__style");
+            if (JS_IsObject(style_obj)) append_style_object(ctx, style_obj, &style_buf);
+        }
         if (style_buf.data && style_buf.len > 0)
             sink(ud, "style", style_buf.data);
         serialize_buf_free(&style_buf);

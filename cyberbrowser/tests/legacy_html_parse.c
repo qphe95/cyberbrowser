@@ -238,7 +238,7 @@ static LgAttr* lgp_read_attribute(LgParser *p) {
                 size_t val_len = 0;
                 while (p->pos < p->lg_len && val_len < LG_MAX_ATTR_VALUE_LEN - 1) {
                     char c = p->html[p->pos];
-                    if (c == '>' || c == '/' || isspace((unsigned char)c)) {
+                    if (c == '>' || isspace((unsigned char)c)) {  /* ('/' is part of it) */
                         break;
                     }
                     value[val_len++] = c;

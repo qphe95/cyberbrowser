@@ -648,6 +648,17 @@ bool css_layout_run(LayoutContext *ctx, HtmlDocument *doc, CssStylesheet *sheet,
 /* Layouts that kept the previous tree, and that built one (tests,
  * benchmarks). */
 void css_layout_tree_stats(uint64_t *kept, uint64_t *built);
+
+/* The declarations that apply to box idx's element, in cascade order (the
+ * last one for a property wins): the normal stylesheet declarations, the
+ * inline style, then the !important ones of each; var() resolved against
+ * the element's custom properties (not reported).  Uses the style set of ctx's last layout; false when it is gone
+ * or idx is not an element. */
+typedef void (*CssCascadeFn)(void *ud, const char *prop, const char *value, bool important);
+bool css_layout_element_cascade(LayoutContext *ctx, int idx, CssCascadeFn fn, void *ud);
+/* The computed value of custom property name (--x) on box idx's element
+ * from ctx's last layout, or NULL. */
+const char *css_layout_element_custom(LayoutContext *ctx, int idx, const char *name);
 /* Layouts on kept trees reuse clean subtrees from the last layout's calls:
  * forget them (an image or a font changed the measurements), and how many
  * subtrees (of how many boxes) were reused. */

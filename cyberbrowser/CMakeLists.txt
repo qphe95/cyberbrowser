@@ -70,6 +70,8 @@ set(BE_SOURCES
     src/browser/crypto_api.c
     src/browser/storage_api.c
     src/browser/css_api.c
+    src/browser/css_style_decl.c
+    src/browser/computed_style.c
     src/browser/service_worker_api.c
     src/browser/geolocation_api.c
     src/browser/console_api.c
@@ -106,6 +108,7 @@ set(BE_SOURCES
     src/dom_fetch.c
     src/url_whatwg.c
     src/import_map.c
+    src/css_props.c
     src/css_layout.c
     src/display_list.c
     src/text_shaper.c

@@ -1419,6 +1419,54 @@ bool layout_query_font_size(JSContextHandle ctx, GCValue element, double *px)
     return true;
 }
 
+bool layout_query_cascade(JSContextHandle ctx, GCValue element, LayoutCascadeFn fn, void *ud, LayoutQueryUsed *used)
+{
+    memset(used, 0, sizeof(*used));
+    double fs = 0;
+    /* (styles the element, laying out again with everything styled when it
+     * is inside a display:none subtree) */
+    if (!layout_query_font_size(ctx, element, &fs)) return false;
+    NodeId id = dom_node_of(element);
+    int idx = lq_box_index(id);
+    if (idx < 0) return false;
+    const LayoutBox *b = &g_lq_layout.boxes[idx];
+    used->font_size = b->s->font_size;
+    static const char *const roles[] = { NULL, "table", "table-row-group", "table-row", "table-cell", "table-caption", "table-column" };
+    switch (b->s->display) {
+    case CSS_DISPLAY_BLOCK: used->display = "block"; break;
+    case CSS_DISPLAY_INLINE_BLOCK: used->display = "inline-block"; break;
+    case CSS_DISPLAY_FLEX: used->display = "flex"; break;
+    case CSS_DISPLAY_GRID: used->display = "grid"; break;
+    case CSS_DISPLAY_NONE: used->display = "none"; break;
+    case CSS_DISPLAY_LIST_ITEM: used->display = "list-item"; break;
+    case CSS_DISPLAY_OTHER:
+        used->display = b->s->table_role > 0 && b->s->table_role < 7 ? roles[b->s->table_role] : "inline";
+        break;
+    default: used->display = "inline"; break;
+    }
+    used->rendered = lq_rendered(idx) && !(b->flags & LAYOUT_STYLE_SKIPPED) && b->s->display != CSS_DISPLAY_NONE;
+    if (used->rendered) {
+        used->content_width = b->content_width;
+        used->content_height = b->content_height;
+        double m[4] = { b->margin_top, b->margin_right, b->margin_bottom, b->margin_left };
+        double p[4] = { b->padding_top, b->padding_right, b->padding_bottom, b->padding_left };
+        double r[4] = { b->s->border_top, b->s->border_right, b->s->border_bottom, b->s->border_left };
+        memcpy(used->margin, m, sizeof m);
+        memcpy(used->padding, p, sizeof p);
+        memcpy(used->border, r, sizeof r);
+    }
+    return css_layout_element_cascade(&g_lq_layout, idx, fn, ud);
+}
+
+char *layout_query_custom(JSContextHandle ctx, GCValue element, const char *name)
+{
+    double fs = 0;
+    if (!layout_query_font_size(ctx, element, &fs)) return NULL;   /* (styles it) */
+    int idx = lq_box_index(dom_node_of(element));
+    const char *v = idx >= 0 ? css_layout_element_custom(&g_lq_layout, idx, name) : NULL;
+    return v ? strdup(v) : NULL;
+}
+
 bool layout_query_element_box(JSContextHandle ctx, GCValue element, LayoutQueryBox *out)
 {
     memset(out, 0, sizeof(*out));
