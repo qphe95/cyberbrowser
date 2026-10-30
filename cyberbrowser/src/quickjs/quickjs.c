@@ -1063,6 +1063,11 @@ extern void gc_set_threshold(size_t threshold);
 /* Resize malloc'd array helper for bytecode serialization */
 static void *bc_resize_array(void *ptr, size_t elem_size, int *psize, int req_size)
 {
+    /* Room already: unchanged.  (Without this, every call grew the array by
+     * half, and the writer calls it for each new atom: exponential growth,
+     * copied and zeroed each time.) */
+    if (ptr && req_size <= *psize)
+        return ptr;
     int new_size = max_int(req_size, *psize * 3 / 2);
     size_t new_bytes = (size_t)new_size * elem_size;
     void *new_ptr = realloc(ptr, new_bytes);
@@ -46978,10 +46983,15 @@ static GCValue JS_EvalFunctionInternal(JSContextHandle ctx, GCValue fun_obj,
             return JS_EXCEPTION;
         }
     } else {
-        
+
         ret_val = JS_ThrowTypeError(ctx, "bytecode function expected");
     }
     return ret_val;
+}
+
+const char *JS_GetBuildId(void)
+{
+    return "quickjs-cyber " __DATE__ " " __TIME__;
 }
 
 GCValue JS_EvalFunction(JSContextHandle ctx, GCValue fun_obj)
@@ -49034,12 +49044,18 @@ typedef struct BCWriterState {
     BOOL allow_bytecode : 8;
     BOOL allow_sab : 8;
     BOOL allow_reference : 8;
+    BOOL share_source : 8;   /* JS_WRITE_OBJ_SHARE_SOURCE */
     uint32_t first_atom;
     /* NOTE: All arrays below are malloc'd (not GC-managed) to avoid
      * GC marking issues during bytecode serialization. They must be
      * freed before returning from JS_WriteObject2. */
-    uint32_t *atom_to_idx;   /* malloc'd array: atom -> idx mapping */
-    int atom_to_idx_size;
+    /* atom -> idx: an open-addressed hash of (atom - first_atom + 1, idx)
+     * pairs, 0 = empty.  (An array indexed by atom grew to the highest atom
+     * written, in the hundreds of thousands once a large page is loaded, and
+     * was zeroed at each growth: minutes to write one script.) */
+    uint32_t *atom_to_idx;   /* malloc'd: 2 * atom_to_idx_size words */
+    int atom_to_idx_size;    /* slots, a power of two (0: none yet) */
+    int atom_to_idx_count;
     JSAtom *idx_to_atom;     /* malloc'd array: idx -> atom mapping */
     int idx_to_atom_count;
     int idx_to_atom_size;
@@ -49126,6 +49142,40 @@ static void bc_set_flags(uint32_t *pflags, int *pidx, uint32_t val, int n)
     *pidx += n;
 }
 
+/* The slot of key (atom - first_atom + 1) in s->atom_to_idx: its own, or the
+ * empty one it would take. */
+static uint32_t *bc_atom_slot(BCWriterState *s, uint32_t key)
+{
+    uint32_t mask = (uint32_t)s->atom_to_idx_size - 1;
+    uint32_t h = (key * 2654435761u) & mask;
+    for (;;) {
+        uint32_t *e = &s->atom_to_idx[2 * h];
+        if (e[0] == key || e[0] == 0)
+            return e;
+        h = (h + 1) & mask;
+    }
+}
+
+static int bc_atom_table_grow(BCWriterState *s)
+{
+    int old_size = s->atom_to_idx_size, new_size = old_size ? old_size * 2 : 256;
+    uint32_t *old = s->atom_to_idx;
+    uint32_t *t = (uint32_t *)js_plain_calloc((size_t)new_size * 2, sizeof(uint32_t));
+    if (!t)
+        return -1;
+    s->atom_to_idx = t;
+    s->atom_to_idx_size = new_size;
+    for (int i = 0; i < old_size; i++) {
+        if (old[2 * i] != 0) {
+            uint32_t *e = bc_atom_slot(s, old[2 * i]);
+            e[0] = old[2 * i];
+            e[1] = old[2 * i + 1];
+        }
+    }
+    js_plain_free(old);
+    return 0;
+}
+
 static int bc_atom_to_idx(BCWriterState *s, uint32_t *pres, JSAtom atom)
 {
     uint32_t v;
@@ -49135,18 +49185,16 @@ static int bc_atom_to_idx(BCWriterState *s, uint32_t *pres, JSAtom atom)
         return 0;
     }
     atom -= s->first_atom;
-    if (atom < s->atom_to_idx_size && s->atom_to_idx[atom] != 0) {
-        *pres = s->atom_to_idx[atom];
-        return 0;
+    uint32_t key = (uint32_t)atom + 1;
+    if (s->atom_to_idx_size) {
+        uint32_t *e = bc_atom_slot(s, key);
+        if (e[0] == key) {
+            *pres = e[1];
+            return 0;
+        }
     }
-    if (atom >= s->atom_to_idx_size) {
-        s->atom_to_idx = (uint32_t*)bc_resize_array(s->atom_to_idx,
-                                                    sizeof(s->atom_to_idx[0]),
-                                                    &s->atom_to_idx_size,
-                                                    atom + 1);
-        if (!s->atom_to_idx)
-            return -1;
-    }
+    if ((s->atom_to_idx_count + 1) * 2 > s->atom_to_idx_size && bc_atom_table_grow(s))
+        return -1;
     s->idx_to_atom = (JSAtom*)bc_resize_array(s->idx_to_atom,
                                               sizeof(s->idx_to_atom[0]),
                                               &s->idx_to_atom_size,
@@ -49157,7 +49205,12 @@ static int bc_atom_to_idx(BCWriterState *s, uint32_t *pres, JSAtom atom)
     v = s->idx_to_atom_count++;
     s->idx_to_atom[v] = atom + s->first_atom;
     v += s->first_atom;
-    s->atom_to_idx[atom] = v;
+    {
+        uint32_t *e = bc_atom_slot(s, key);
+        e[0] = key;
+        e[1] = v;
+        s->atom_to_idx_count++;
+    }
     *pres = v;
     return 0;
  fail:
@@ -49425,9 +49478,18 @@ static int JS_WriteFunctionTag(BCWriterState *s, GCValue obj)
         dbuf_put(&s->dbuf, ((uint8_t*)gc_deref(SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.pc2line_handle, GC_HANDLE_NULL))), SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.pc2line_len, 0));
         if (((char*)gc_deref(SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_handle, GC_HANDLE_NULL)))) {
             bc_put_leb128(s, SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_len, 0));
-            dbuf_put(&s->dbuf, (uint8_t *)((char*)gc_deref(SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_handle, GC_HANDLE_NULL))) +
-                     SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_offset, 0),
-                     SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_len, 0));
+            if (s->share_source) {
+                /* Its place in the script's text, which the reader has: a
+                 * nested function's text is inside its parent's, and copying
+                 * each made a script's bytecode several times its size.
+                 * (No text, no place: the reader reads one after a length.) */
+                if (SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_len, 0))
+                    bc_put_leb128(s, SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_offset, 0));
+            } else {
+                dbuf_put(&s->dbuf, (uint8_t *)((char*)gc_deref(SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_handle, GC_HANDLE_NULL))) +
+                         SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_offset, 0),
+                         SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_len, 0));
+            }
         } else {
             bc_put_leb128(s, 0);
         }
@@ -49849,6 +49911,7 @@ uint8_t *JS_WriteObject2(JSContextHandle ctx, size_t *psize, GCValue obj,
     s->allow_bytecode = ((flags & JS_WRITE_OBJ_BYTECODE) != 0);
     s->allow_sab = ((flags & JS_WRITE_OBJ_SAB) != 0);
     s->allow_reference = ((flags & JS_WRITE_OBJ_REFERENCE) != 0);
+    s->share_source = ((flags & JS_WRITE_OBJ_SHARE_SOURCE) != 0);
     /* XXX: could use a different version when bytecode is included */
     if (s->allow_bytecode)
         s->first_atom = JS_ATOM_END;
@@ -49909,6 +49972,11 @@ typedef struct BCReaderState {
     BOOL allow_bytecode : 8;
     BOOL is_rom_data : 8;
     BOOL allow_reference : 8;
+    /* JS_ReadObjectWithSource: the script's text, and its one GC copy, made
+     * when a function first needs it */
+    const char *share_src;
+    size_t share_src_len;
+    GCHandle share_handle;
     /* object references */
     JSObjectHandle *objects;   /* malloc'd array: object handle references */
     int objects_count;
@@ -50477,7 +50545,21 @@ static GCValue JS_ReadFunctionTag(BCReaderState *s)
         if (bc_get_leb128_int(s, &debug_source_len_val))
             goto fail;
         SAFE_SET(b, JSFunctionBytecodeHandle, debug.source_len, debug_source_len_val);
-        if (SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_len, 0)) {
+        if (s->share_src && debug_source_len_val) {
+            /* Its range in the script's text (JS_WRITE_OBJ_SHARE_SOURCE). */
+            int off;
+            if (bc_get_leb128_int(s, &off) || off < 0 || debug_source_len_val < 0 ||
+                (size_t)off + (size_t)debug_source_len_val > s->share_src_len)
+                goto fail;
+            if (s->share_handle == GC_HANDLE_NULL) {
+                s->share_handle = gc_allocz(s->share_src_len + 1, JS_GC_OBJ_TYPE_DATA);
+                if (s->share_handle == GC_HANDLE_NULL)
+                    goto fail;
+                memcpy(gc_deref(s->share_handle), s->share_src, s->share_src_len);
+            }
+            SAFE_SET_HANDLE(b, JSFunctionBytecodeHandle, debug.source_handle, s->share_handle);
+            SAFE_SET(b, JSFunctionBytecodeHandle, debug.source_offset, off);
+        } else if (SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_len, 0)) {
             bc_read_trace(s, "source: %d bytes\n", SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_len, 0));
             GCHandle source_handle = gc_allocz(SAFE_GET_OR(b, JSFunctionBytecodeHandle, debug.source_len, 0), JS_GC_OBJ_TYPE_DATA);
             if (source_handle == GC_HANDLE_NULL)
@@ -51038,8 +51120,25 @@ static void bc_reader_free(BCReaderState *s)
     js_bc_free(s->objects);
 }
 
+static GCValue js_read_object(JSContextHandle ctx, const uint8_t *buf, size_t buf_len,
+                              int flags, const char *src, size_t src_len);
+
 GCValue JS_ReadObject(JSContextHandle ctx, const uint8_t *buf, size_t buf_len,
                        int flags)
+{
+    return js_read_object(ctx, buf, buf_len, flags, NULL, 0);
+}
+
+GCValue JS_ReadObjectWithSource(JSContextHandle ctx, const uint8_t *buf, size_t buf_len,
+                                int flags, const char *src, size_t src_len)
+{
+    if (!src)
+        return JS_ThrowTypeError(ctx, "no source for the bytecode");
+    return js_read_object(ctx, buf, buf_len, flags, src, src_len);
+}
+
+static GCValue js_read_object(JSContextHandle ctx, const uint8_t *buf, size_t buf_len,
+                              int flags, const char *src, size_t src_len)
 {
     BCReaderState ss, *s = &ss;
     GCValue obj = GC_UNDEFINED;
@@ -51056,6 +51155,8 @@ GCValue JS_ReadObject(JSContextHandle ctx, const uint8_t *buf, size_t buf_len,
     s->is_rom_data = ((flags & JS_READ_OBJ_ROM_DATA) != 0);
     s->allow_sab = ((flags & JS_READ_OBJ_SAB) != 0);
     s->allow_reference = ((flags & JS_READ_OBJ_REFERENCE) != 0);
+    s->share_src = src;
+    s->share_src_len = src_len;
     if (s->allow_bytecode)
         s->first_atom = JS_ATOM_END;
     else

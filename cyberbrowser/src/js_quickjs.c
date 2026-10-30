@@ -46,6 +46,7 @@ size_t js_stack_budget(void) {
 #include "cyber_profile.h"
 #include "url_utils.h"
 #include "url_whatwg.h"
+#include "code_cache.h"
 #include "media/media_buffer.h"
 
 // Forward declarations from dom_api.c
@@ -3185,8 +3186,12 @@ bool js_quickjs_exec_script(JSContextHandle ctx, const char *script, size_t scri
     snprintf(evname, sizeof(evname), "eval-script-%d (%zu KB)",
              i, script_len / 1024);
     CP_BEGIN_CAT(evname, "js");
+    /* A classic script compiled before (code_cache.h) runs from its bytecode,
+     * unparsed. */
+    GCValue cached = module_url ? JS_UNDEFINED : code_cache_lookup(ctx, script, script_len);
     GCValue result = module_url
         ? js_quickjs_eval_module(ctx, script, script_len, module_url, eval_flags & ~JS_EVAL_TYPE_MODULE)
+        : !JS_IsUndefined(cached) ? JS_EvalFunction(ctx, cached)
         : JS_Eval(ctx, script, script_len, filename, eval_flags);
     CP_END(evname);
 

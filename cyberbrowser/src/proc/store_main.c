@@ -63,9 +63,17 @@ typedef struct Client {
 /* Bytes each site uses, counted from its folder when first needed. */
 typedef struct Usage {
     char site[SITE_MAX];
-    uint64_t used;
+    uint64_t used;                  /* its quota's: the files outside cache/ */
+    uint64_t cache_used;            /* the files under cache/ */
     struct Usage *next;
 } Usage;
+
+/* The caches (the network process's HTTP cache under cache/http/, a tab's
+ * bytecode cache under cache/code/) live in the site's folder, apart from its
+ * quota (store_quota_ok, for what the site stores itself): within
+ * CACHE_BUDGET, least recently used going first. */
+#define CACHE_BUDGET (256ull << 20)
+#define CACHE_ENTRY_MAX (32u << 20)
 
 static Chan g_ctl;
 static Client *g_clients[MAX_CLIENTS];
@@ -201,9 +209,88 @@ static Usage *usage_of(const char *site) {
     wchar_t dir[MAX_PATH * 2];
     _snwprintf(dir, MAX_PATH * 2, L"%ls\\%hs", g_root, site);
     u->used = folder_bytes(dir, 0);
+    _snwprintf(dir, MAX_PATH * 2, L"%ls\\%hs\\cache", g_root, site);
+    u->cache_used = folder_bytes(dir, 0);
+    u->used -= u->cache_used > u->used ? u->used : u->cache_used;     /* (the quota is for the rest) */
     u->next = g_usage;
     g_usage = u;
     return u;
+}
+
+static bool is_cache(const char *rel) {
+    return !strncmp(rel, "cache/", 6);
+}
+
+typedef struct CacheFile {
+    wchar_t path[MAX_PATH * 2];
+    uint64_t size;
+    uint64_t time;                  /* last written or read (cache_touch) */
+} CacheFile;
+
+static void cache_files(const wchar_t *dir, int depth, CacheFile **files, size_t *n, size_t *cap) {
+    if (depth > 3) return;
+    wchar_t pat[MAX_PATH * 2];
+    _snwprintf(pat, MAX_PATH * 2, L"%ls\\*", dir);
+    WIN32_FIND_DATAW fd;
+    HANDLE f = FindFirstFileW(pat, &fd);
+    if (f == INVALID_HANDLE_VALUE) return;
+    do {
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+        wchar_t sub[MAX_PATH * 2];
+        _snwprintf(sub, MAX_PATH * 2, L"%ls\\%ls", dir, fd.cFileName);
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            cache_files(sub, depth + 1, files, n, cap);
+            continue;
+        }
+        if (*n == *cap) {
+            size_t c2 = *cap ? *cap * 2 : 64;
+            CacheFile *nf = (CacheFile *)realloc(*files, c2 * sizeof(CacheFile));
+            if (!nf) break;
+            *files = nf;
+            *cap = c2;
+        }
+        CacheFile *cf = &(*files)[(*n)++];
+        wcscpy(cf->path, sub);
+        cf->size = ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+        cf->time = ((uint64_t)fd.ftLastWriteTime.dwHighDateTime << 32) | fd.ftLastWriteTime.dwLowDateTime;
+    } while (FindNextFileW(f, &fd));
+    FindClose(f);
+}
+
+static int cache_older(const void *a, const void *b) {
+    uint64_t x = ((const CacheFile *)a)->time, y = ((const CacheFile *)b)->time;
+    return x < y ? -1 : x > y;
+}
+
+/* Delete site's least recently used cache files (not keep) until the cache
+ * has room for need more bytes. */
+static void cache_evict(Usage *u, const char *site, uint64_t need, const wchar_t *keep) {
+    if (u->cache_used + need <= CACHE_BUDGET) return;
+    wchar_t dir[MAX_PATH * 2];
+    _snwprintf(dir, MAX_PATH * 2, L"%ls\\%hs\\cache", g_root, site);
+    CacheFile *files = NULL;
+    size_t n = 0, cap = 0;
+    cache_files(dir, 0, &files, &n, &cap);
+    qsort(files, n, sizeof(CacheFile), cache_older);
+    for (size_t i = 0; i < n; i++) {
+        if (u->cache_used + need <= CACHE_BUDGET) break;
+        if (keep && !wcscmp(files[i].path, keep)) continue;
+        if (!DeleteFileW(files[i].path)) continue;
+        u->cache_used -= files[i].size > u->cache_used ? u->cache_used : files[i].size;
+    }
+    free(files);
+}
+
+/* A cache entry read: the most recently used now. */
+static void cache_touch(const wchar_t *path) {
+    HANDLE h = CreateFileW(path, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                           FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    FILETIME now;
+    GetSystemTimeAsFileTime(&now);
+    SetFileTime(h, NULL, NULL, &now);
+    CloseHandle(h);
 }
 
 /* ---- requests -------------------------------------------------------------------- */
@@ -291,11 +378,20 @@ static uint64_t file_size(const wchar_t *path) {
     return ((uint64_t)a.nFileSizeHigh << 32) | a.nFileSizeLow;
 }
 
-static bool do_write(const wchar_t *path, const char *site, const uint8_t *data, uint32_t len) {
+static bool do_write(const wchar_t *path, const char *site, const char *rel, const uint8_t *data, uint32_t len) {
     Usage *u = usage_of(site);
     if (!u) return false;               /* out of memory */
     uint64_t old = file_size(path);
-    if (!store_quota_ok(u->used, old > u->used ? u->used : old, len)) return false;
+    bool cache = is_cache(rel);
+    if (cache) {
+        /* Room in the cache's budget, the oldest entries going. */
+        if (len > CACHE_ENTRY_MAX) return false;
+        uint64_t was = old > u->cache_used ? u->cache_used : old;
+        cache_evict(u, site, len > was ? len - was : 0, path);
+        if (u->cache_used - was + len > CACHE_BUDGET) return false;
+    } else if (!store_quota_ok(u->used, old > u->used ? u->used : old, len)) {
+        return false;
+    }
     if (!make_parents(path)) return false;
     /* Write beside it, check where it really is, then replace it.  A client
      * can't name the temporary file: '~' is outside its grammar. */
@@ -307,13 +403,17 @@ static bool do_write(const wchar_t *path, const char *site, const uint8_t *data,
     DWORD put = 0;
     bool ok = contained(h, site) && WriteFile(h, data, len, &put, NULL) && put == len;
     CloseHandle(h);
-    if (ok) ok = MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    /* (A cache entry is replaced without write-through: losing one is fine.) */
+    if (ok) ok = MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING | (cache ? 0 : MOVEFILE_WRITE_THROUGH)) != 0;
     if (!ok) DeleteFileW(tmp);
-    else u->used = u->used - (old > u->used ? u->used : old) + len;
+    else {
+        if (cache) u->cache_used = u->cache_used - (old > u->cache_used ? u->cache_used : old) + len;
+        else u->used = u->used - (old > u->used ? u->used : old) + len;
+    }
     return ok;
 }
 
-static bool do_delete(const wchar_t *path, const char *site) {
+static bool do_delete(const wchar_t *path, const char *site, const char *rel) {
     HANDLE h = CreateFileW(path, DELETE, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
     if (h == INVALID_HANDLE_VALUE) return false;
     bool inside = contained(h, site);
@@ -322,7 +422,8 @@ static bool do_delete(const wchar_t *path, const char *site) {
     uint64_t old = file_size(path);
     if (!DeleteFileW(path)) return false;
     Usage *u = usage_of(site);
-    if (u) u->used -= old > u->used ? u->used : old;
+    if (u && is_cache(rel)) u->cache_used -= old > u->cache_used ? u->cache_used : old;
+    else if (u) u->used -= old > u->used ? u->used : old;
     return true;
 }
 
@@ -343,11 +444,12 @@ static void request(Client *c, uint16_t type, const uint8_t *m, uint32_t len) {
         uint8_t *out = NULL;
         uint32_t olen = 0;
         bool ok = do_read(path, q.target, &out, &olen);
+        if (ok && is_cache(q.rel)) cache_touch(path);
         reply(c, q.id, ok, out, olen);
     } else if (type == TS_WRITE) {
-        reply(c, q.id, do_write(path, q.target, m + q.data_off, q.data_len), NULL, 0);
+        reply(c, q.id, do_write(path, q.target, q.rel, m + q.data_off, q.data_len), NULL, 0);
     } else if (type == TS_DELETE) {
-        reply(c, q.id, do_delete(path, q.target), NULL, 0);
+        reply(c, q.id, do_delete(path, q.target, q.rel), NULL, 0);
     }
 }
 

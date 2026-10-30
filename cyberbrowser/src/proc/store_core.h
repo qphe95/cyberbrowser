@@ -46,6 +46,11 @@
         len == 7 && rel[0] == 'c' && rel[1] == 'o' && rel[2] == 'o' && rel[3] == 'k' &&
         rel[4] == 'i' && rel[5] == 'e' && rel[6] == 's';
 
+    // Under cache/http/: the network process's HTTP cache (net_cache.h).
+    predicate is_http_cache{L}(char *rel, integer len) =
+        len > 11 && rel[0] == 'c' && rel[1] == 'a' && rel[2] == 'c' && rel[3] == 'h' && rel[4] == 'e' &&
+        rel[5] == '/' && rel[6] == 'h' && rel[7] == 't' && rel[8] == 't' && rel[9] == 'p' && rel[10] == '/';
+
     // a and b are the same NUL-terminated label.
     predicate same_label{L}(char *a, char *b) =
         \exists integer n; 0 <= n < SITE_MAX && a[n] == 0 && (\forall integer i; 0 <= i <= n ==> a[i] == b[i]);
@@ -78,13 +83,15 @@ bool store_join(const char *site, const char *rel, uint32_t rel_len, char *out, 
 
 /* May a client with badge `client_site` (NULL for the network process) act
  * on `target_site`'s `rel`?  A tab only on its own site, and never on its
- * "cookies" file; the network process only on a site's "cookies" file. */
+ * "cookies" file or its HTTP cache (cache/http/...); the network process
+ * only on those. */
 /*@ requires client_site == \null || \valid_read(client_site + (0 .. SITE_MAX - 1));
     requires \valid_read(target_site + (0 .. SITE_MAX - 1)) && \valid_read(rel + (0 .. rel_len - 1));
     assigns \nothing;
     ensures \result ==> label_ok(target_site) && rel_ok(rel, rel_len);
-    ensures \result && client_site != \null ==> same_label(client_site, target_site) && !is_cookies(rel, rel_len);
-    ensures \result && client_site == \null ==> is_cookies(rel, rel_len);
+    ensures \result && client_site != \null ==>
+        same_label(client_site, target_site) && !is_cookies(rel, rel_len) && !is_http_cache(rel, rel_len);
+    ensures \result && client_site == \null ==> is_cookies(rel, rel_len) || is_http_cache(rel, rel_len);
  */
 bool store_allowed(const char *client_site, const char *target_site, const char *rel, uint32_t rel_len);
 
@@ -165,8 +172,9 @@ typedef struct StoreReq {
     ensures \result == STORE_REQ_OK ==>
         label_ok(&q->target[0]) && rel_ok(&q->rel[0], q->rel_len) &&
         (\forall integer i; 0 <= i < q->rel_len ==> q->rel[i] == (char)m[STORE_REQ_HEAD + le32(m + 4) + i]) &&
-        (client_site != \null ==> same_label(client_site, &q->target[0]) && !is_cookies(&q->rel[0], q->rel_len)) &&
-        (client_site == \null ==> is_cookies(&q->rel[0], q->rel_len) &&
+        (client_site != \null ==> same_label(client_site, &q->target[0]) && !is_cookies(&q->rel[0], q->rel_len) &&
+            !is_http_cache(&q->rel[0], q->rel_len)) &&
+        (client_site == \null ==> (is_cookies(&q->rel[0], q->rel_len) || is_http_cache(&q->rel[0], q->rel_len)) &&
             \forall integer i; 0 <= i < le32(m + 4) ==> q->target[i] == (char)m[STORE_REQ_HEAD + i]) &&
         wpath(path, cap, root, root_len, &q->target[0], &q->rel[0], q->rel_len);
  */

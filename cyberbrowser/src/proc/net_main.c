@@ -61,6 +61,7 @@
 #include "http_download.h"
 #include "loop_client.h"
 #include "net_decode.h"
+#include "net_cache.h"
 #include "net_policy.h"
 #include "site.h"
 #include "tls_space.h"
@@ -159,8 +160,13 @@ static void client_release(Client *c) {
 
 /* ---- the storage service (main thread only) ------------------------------- */
 
-static bool store_call(uint16_t type, const char *site, const char *path, const void *data, uint32_t dlen,
-                       uint8_t **out, uint32_t *out_len) {
+/* A storage request in site's folder, from any thread (one at a time, under
+ * g_store_lock); what a read returns is a copy for the caller (*out,
+ * malloc'd, NUL-terminated). */
+static CRITICAL_SECTION g_store_lock;
+
+static bool store_call_locked(uint16_t type, const char *site, const char *path, const void *data, uint32_t dlen,
+                              uint8_t **out, uint32_t *out_len) {
     if (!g_have_store) return false;
     uint8_t head[sizeof(StoreRequest) + PROTO_SITE_MAX + 64];
     StoreRequest r = { ++g_store_id, (uint32_t)strlen(site), (uint32_t)strlen(path), dlen };
@@ -179,13 +185,35 @@ static bool store_call(uint16_t type, const char *site, const char *path, const 
         memcpy(&res, g_store_rx.buf, sizeof(res));
         if (res.id != r.id) continue;
         if (res.data_len != g_store_rx.total - sizeof(res)) return false;
-        if (out) {
-            *out = g_store_rx.buf + sizeof(res);
+        if (out && res.ok) {
+            *out = (uint8_t *)malloc((size_t)res.data_len + 1);
+            if (!*out) return false;
+            memcpy(*out, g_store_rx.buf + sizeof(res), res.data_len);
+            (*out)[res.data_len] = 0;
             *out_len = res.data_len;
         }
         return res.ok != 0;
     }
 }
+
+static bool store_call(uint16_t type, const char *site, const char *path, const void *data, uint32_t dlen,
+                       uint8_t **out, uint32_t *out_len) {
+    EnterCriticalSection(&g_store_lock);
+    bool ok = store_call_locked(type, site, path, data, dlen, out, out_len);
+    LeaveCriticalSection(&g_store_lock);
+    return ok;
+}
+
+/* The HTTP cache's files, in a site's folder (net_cache.h). */
+static bool cache_read(const char *site, const char *path, uint8_t **data, uint32_t *len) {
+    return store_call(TS_READ, site, path, NULL, 0, data, len);
+}
+
+static void cache_write(const char *site, const char *path, const void *data, uint32_t len) {
+    store_call(TS_WRITE, site, path, data, len, NULL, NULL);
+}
+
+static const NetCacheIo g_cache_io = { cache_read, cache_write };
 
 static HttpCookieJar *site_jar(const char *label) {
     for (Site *s = g_sites; s; s = s->next)
@@ -198,10 +226,11 @@ static HttpCookieJar *site_jar(const char *label) {
         free(s);
         return NULL;
     }
-    uint8_t *data;
+    uint8_t *data = NULL;
     uint32_t len;
     if (store_call(TS_READ, label, "cookies", NULL, 0, &data, &len))
         http_cookie_jar_load(s->jar, (const char *)data, len);
+    free(data);
     s->saved_version = http_cookie_jar_version(s->jar);
     s->next = g_sites;
     g_sites = s;
@@ -537,8 +566,9 @@ static void run_request(Client *c, const uint8_t *m, uint32_t len) {
     /* (Each string is NUL-terminated in m: net_decode_request.) */
     const char *method = (const char *)m + q.method, *url = (const char *)m + q.url;
     const char *initiator = (const char *)m + q.initiator;
-    const char *headers[NET_HEADERS_MAX];
+    const char *headers[NET_HEADERS_MAX + 2];       /* (+2: the cache's validators) */
     for (uint32_t i = 0; i < q.nheaders; i++) headers[i] = (const char *)m + q.header[i];
+    uint32_t nheaders = q.nheaders;
     /* The jar's cookies go with it unless it brings its own Cookie header
      * (empty: none), or it is a preflight (http_download.c). */
     bool credentialed = _stricmp(method, "OPTIONS") != 0;
@@ -562,17 +592,56 @@ static void run_request(Client *c, const uint8_t *m, uint32_t len) {
     HttpBuffer b = { 0 };
     int status = 0;
     char err[512] = "";
-    /* A document streams to the tab as it comes (NT_PART), to be parsed and
-     * painted before it has all arrived. */
-    PartTo to = { c, q.id, -1 };
-    bool ok = http_request_to_memory_observed(url, method, q.body_len ? (const char *)m + q.body : NULL, q.body_len,
-                                              headers, q.nheaders, &b, &status, err, sizeof(err),
-                                              doc ? part : NULL, &to);
+    /* The HTTP cache (net_cache.h), in the tab's site's folder: a fresh entry
+     * is the response; a stale one is asked about again (its validators). */
+    bool cacheable = c->site[0] && net_cache_request_ok(method, headers, q.nheaders);
+    NetCached cached = { 0 };
+    char inm[300], ims[100];
+    bool ok;
+    if (cacheable && net_cache_lookup(c->site, url, &cached) && cached.fresh) {
+        b = cached.b;
+        memset(&cached.b, 0, sizeof(cached.b));
+        status = cached.status;
+        ok = true;
+    } else {
+        if (cached.found && cached.etag[0]) {
+            snprintf(inm, sizeof(inm), "If-None-Match: %s", cached.etag);
+            headers[nheaders++] = inm;
+        }
+        if (cached.found && cached.last_modified[0]) {
+            snprintf(ims, sizeof(ims), "If-Modified-Since: %s", cached.last_modified);
+            headers[nheaders++] = ims;
+        }
+        /* A document streams to the tab as it comes (NT_PART), to be parsed
+         * and painted before it has all arrived. */
+        PartTo to = { c, q.id, -1 };
+        ok = http_request_to_memory_observed(url, method, q.body_len ? (const char *)m + q.body : NULL, q.body_len,
+                                             headers, nheaders, &b, &status, err, sizeof(err),
+                                             doc ? part : NULL, &to);
+    }
     http_cookie_jar_use(NULL);
     tls_set_space_limit(-1);
     http_set_redirect_filter(NULL, NULL);
     char final_url[2048];
-    snprintf(final_url, sizeof(final_url), "%s", http_last_url()[0] ? http_last_url() : url);
+    /* (From the cache: no request was made, and where it ended is url.) */
+    /* (http_download reports a 304 as a failure: here it is the answer.) */
+    bool from_cache = cacheable && cached.found && (cached.fresh || status == 304);
+    snprintf(final_url, sizeof(final_url), "%s", !from_cache && http_last_url()[0] ? http_last_url() : url);
+    if (cacheable && cached.found && !cached.fresh && status == 304) {
+        /* Not modified: the stored response (kept fresh again if it may be). */
+        net_cache_revalidated(c->site, url, &b, &cached);
+        http_free_buffer(&b);
+        b = cached.b;
+        memset(&cached.b, 0, sizeof(cached.b));
+        status = cached.status;
+        ok = true;
+        err[0] = 0;
+    } else if (ok && cacheable) {
+        if (status == 200 && !cached.fresh && !strcmp(final_url, url)) {
+            net_cache_store(c->site, url, status, &b);
+        }
+    }
+    net_cached_free(&cached);
     if (!ok && rd.elsewhere[0]) {
         fprintf(stderr, "[net] tab %u: %s redirects to %s, another site's: elsewhere\n", c->tab, url, rd.elsewhere);
         reply(c, q.id, NET_ELSEWHERE, 0, rd.elsewhere, NULL, "redirected to another site");
@@ -720,6 +789,9 @@ static void grant(const CsGrant *g) {
            e1 = (HANDLE)(uintptr_t)g->chan_ev1;
     if (g->kind == GRANT_STORE) {
         g_have_store = chan_attach(&g_store, s, e0, e1, 0);
+        /* The HTTP cache keeps its entries there (CYBER_HTTP_CACHE=0: none). */
+        const char *hc = getenv("CYBER_HTTP_CACHE");
+        if (g_have_store && !(hc && hc[0] == '0')) net_cache_init(&g_cache_io);
         return;
     }
     if (g->kind == GRANT_LOOP) {
@@ -793,6 +865,7 @@ int main(int argc, char **argv) {
     if (g_npublic_ports) fprintf(stderr, "[net] CYBER_PNA_PUBLIC_PORTS=%s\n", pp);
     tls_set_space_policy(space_of);
     InitializeCriticalSection(&g_jobs_lock);
+    InitializeCriticalSection(&g_store_lock);
     InitializeConditionVariable(&g_jobs_cv);
     for (int i = 0; i < WORKERS; i++) CloseHandle(CreateThread(NULL, 0, worker, NULL, 0, NULL));
 

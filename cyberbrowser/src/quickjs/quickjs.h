@@ -1577,6 +1577,10 @@ int JS_ExecutePendingJob(JSRuntimeHandle rt, JSContextHandle *pctx);
 #define JS_WRITE_OBJ_REFERENCE (1 << 3) /* allow object references to
                                            encode arbitrary object
                                            graph */
+#define JS_WRITE_OBJ_SHARE_SOURCE (1 << 4) /* a function's source text is
+                                           written as its offset and length in
+                                           the script's: read it back with
+                                           JS_ReadObjectWithSource */
 uint8_t *JS_WriteObject(JSContextHandle ctx, size_t *psize, GCValue obj,
                         int flags);
 uint8_t *JS_WriteObject2(JSContextHandle ctx, size_t *psize, GCValue obj,
@@ -1588,9 +1592,16 @@ uint8_t *JS_WriteObject2(JSContextHandle ctx, size_t *psize, GCValue obj,
 #define JS_READ_OBJ_REFERENCE (1 << 3) /* allow object references */
 GCValue JS_ReadObject(JSContextHandle ctx, const uint8_t *buf, size_t buf_len,
                       int flags);
+/* Bytecode written with JS_WRITE_OBJ_SHARE_SOURCE: its functions' source is
+   src (the script's text, copied once); a range outside it fails the read. */
+GCValue JS_ReadObjectWithSource(JSContextHandle ctx, const uint8_t *buf, size_t buf_len,
+                                int flags, const char *src, size_t src_len);
 /* instantiate and evaluate a bytecode function. Only used when
    reading a script or module with JS_ReadObject() */
 GCValue JS_EvalFunction(JSContextHandle ctx, GCValue fun_obj);
+/* This build of the engine (when quickjs.c was compiled): bytecode written by
+   one build is read only by the same (a bytecode cache checks it). */
+const char *JS_GetBuildId(void);
 /* load the dependencies of the module 'obj'. Useful when JS_ReadObject()
    returns a module. */
 int JS_ResolveModule(JSContextHandle ctx, GCValue obj);

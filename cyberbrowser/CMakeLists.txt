@@ -66,6 +66,7 @@ find_package(Threads REQUIRED)
 set(BE_SOURCES
     src/html_media_extract.c
     src/js_quickjs.c
+    src/code_cache.c
     src/browser/crypto_api.c
     src/browser/storage_api.c
     src/browser/css_api.c
@@ -558,7 +559,7 @@ if(BE_PLATFORM_WINDOWS)
 
     # The network process: HTTP and TLS from the engine library, no JS.
     # (Its policy core, net_policy.c, is in the library: tls_client.c applies PNA with it.)
-    add_executable(cb_net src/proc/net_main.c src/proc/loop_client.c src/proc/net_decode.c src/proc/site.c)
+    add_executable(cb_net src/proc/net_main.c src/proc/loop_client.c src/proc/net_decode.c src/proc/net_cache.c src/proc/site.c)
     target_include_directories(cb_net PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_include_directories(cb_net BEFORE PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/win32)
     target_link_libraries(cb_net PRIVATE cyberbrowser_lib cb_ipc)

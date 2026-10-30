@@ -34,6 +34,7 @@
 #include "dom_js.h"
 #include "dom_fetch.h"
 #include "dom_query.h"
+#include "code_cache.h"
 
 // createElement lives in js_quickjs.c and is used by the outerHTML setter.
 extern GCValue js_document_create_element(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
@@ -1216,8 +1217,11 @@ static void dom_run_fetched_script(JSContextHandle ctx, GCValue script, const ch
         bool module = dom_script_kind(ctx, script) == DOM_SCRIPT_MODULE;
         if (module) JS_SetPropertyStr(ctx, doc, "currentScript", JS_NULL);
         cp_profile_begin("eval-dynamic-script", "js");
+        /* (A classic script compiled before runs from its bytecode: code_cache.h.) */
+        GCValue cached = module ? JS_UNDEFINED : code_cache_lookup(ctx, buffer.data, buffer.size);
         GCValue result = module ? js_quickjs_eval_module(ctx, buffer.data, buffer.size, url, 0)
-                                : JS_Eval(ctx, buffer.data, buffer.size, url, JS_EVAL_TYPE_GLOBAL);
+                         : !JS_IsUndefined(cached) ? JS_EvalFunction(ctx, cached)
+                                                   : JS_Eval(ctx, buffer.data, buffer.size, url, JS_EVAL_TYPE_GLOBAL);
         cp_profile_end("eval-dynamic-script");
 
         JS_SetPropertyStr(ctx, script, "readyState", JS_NewString(ctx, "complete"));

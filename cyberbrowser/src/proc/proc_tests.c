@@ -109,6 +109,13 @@ static void test_store(void) {
     CHECK(!store_allowed(NULL, "https+b.com", "local_storage/x", 15));
     CHECK(!store_allowed("https+a.com", "https+a.com", "cookies", 7));          /* HttpOnly cookies */
     CHECK(store_allowed("https+a.com", "https+a.com", "x/cookies", 9));
+    /* The HTTP cache: the network process's, never a tab's; the bytecode
+     * cache: the tab's. */
+    CHECK(store_allowed(NULL, "https+a.com", "cache/http/0123abcd", 19));
+    CHECK(!store_allowed("https+a.com", "https+a.com", "cache/http/0123abcd", 19));
+    CHECK(!store_allowed(NULL, "https+a.com", "cache/code/0123abcd", 19));
+    CHECK(store_allowed("https+a.com", "https+a.com", "cache/code/0123abcd", 19));
+    CHECK(!store_allowed(NULL, "https+a.com", "cache/http", 10));
     CHECK(!rel_ok("cookies."));                                                    /* = "cookies" on Windows */
     CHECK(!rel_ok("a./b"));
     CHECK(rel_ok("a.b/c.d"));

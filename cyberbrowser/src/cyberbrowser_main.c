@@ -38,6 +38,7 @@
 #include "image_cache.h"
 #include "browser/image_api.h"
 #include "browser/layout_api.h"
+#include "code_cache.h"
 #include "cyber_profile.h"
 #include "cyber_sampler.h"
 #include "dom_store.h"
@@ -277,6 +278,43 @@ static void save_loaded_html(void) {
     }
 }
 
+/* The bytecode cache in a folder (CYBER_CODE_CACHE=<folder>; off by default,
+ * so the replays measure the engine as it parses). */
+static char g_code_cache_dir[1024];
+
+static bool harness_cache_load(const char *key, uint8_t **data, size_t *len) {
+    char path[1100];
+    snprintf(path, sizeof(path), "%s/%s", g_code_cache_dir, key);
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    *data = n > 0 ? (uint8_t *)malloc((size_t)n) : NULL;
+    bool ok = *data && fread(*data, 1, (size_t)n, f) == (size_t)n;
+    fclose(f);
+    if (!ok) { free(*data); *data = NULL; return false; }
+    *len = (size_t)n;
+    return true;
+}
+
+static void harness_cache_save(const char *key, const uint8_t *data, size_t len) {
+    char path[1100];
+    snprintf(path, sizeof(path), "%s/%s", g_code_cache_dir, key);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    fwrite(data, 1, len, f);
+    fclose(f);
+}
+
+static void harness_code_cache(void) {
+    static const CodeCacheStore store = { harness_cache_load, harness_cache_save };
+    const char *dir = cyber_getenv("CYBER_CODE_CACHE");
+    if (!dir || !dir[0]) return;
+    snprintf(g_code_cache_dir, sizeof(g_code_cache_dir), "%s", dir);
+    code_cache_set_store(&store);
+}
+
 int main(int argc, char *argv[]) {
     det_clock_set_js_thread();     /* this thread runs the page */
     tl_mark("main");
@@ -383,6 +421,7 @@ int main(int argc, char *argv[]) {
     }
     printf("init_browser_context ok\n");
     g_ctx = page_engine_context();
+    harness_code_cache();
 
     /* Fonts before any script runs: layout queries from scripts
      * (offsetHeight, getBoundingClientRect) measure text with them. */
@@ -843,6 +882,16 @@ int main(int argc, char *argv[]) {
     CP_END("load-page");
     tl_mark("load-page end");
     cyber_sampler_stop();
+    /* The bytecode cache (CYBER_CODE_CACHE): what this load compiled goes in
+     * now, after the load was measured. */
+    if (code_cache_flush(g_ctx, 1 << 20)) {}
+    {
+        CodeCacheStats cs;
+        code_cache_stats(&cs);
+        if (cs.hits || cs.misses)
+            printf("Bytecode cache: %d hits, %d misses, %d rejected, %d saved (hashing %.1f ms, reading %.1f ms)\n",
+                   cs.hits, cs.misses, cs.rejected, cs.saved, cs.hash_ms, cs.read_ms);
+    }
     if (cp_profile_enabled()) {
         cp_profile_flush("profile.json");
         cp_profile_write_flamegraph("flamegraph.png");

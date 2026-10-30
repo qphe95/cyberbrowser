@@ -47,6 +47,7 @@ extern void run_exception_debug_tests(void);
 extern void run_logical_operator_tests(void);
 extern void run_nested_iife_tests(void);
 extern void run_lazy_parsing_tests(void);
+extern void run_code_cache_tests(void);
 extern void run_preorder_compaction_array_tests(void);
 extern void run_css_parser_tests(void);
 extern void run_css_layout_tests(void);
@@ -204,6 +205,7 @@ int main(int argc, char *argv[]) {
         { "logical_operator", run_logical_operator_tests },
         { "nested_iife", run_nested_iife_tests },
         { "lazy_parsing", run_lazy_parsing_tests },
+        { "code_cache", run_code_cache_tests },
         { "preorder_compaction_array", run_preorder_compaction_array_tests },
         { "css_parser", run_css_parser_tests },
         { "css_layout", run_css_layout_tests },

@@ -9,6 +9,7 @@ add_executable(cyberbrowser-tests
     test_logical_operators.c
     test_nested_iife.c
     test_lazy_parsing.c
+    test_code_cache.c
     test_preorder_compaction_array.c
     test_css_parser.c
     test_css_layout.c

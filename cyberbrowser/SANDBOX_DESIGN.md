@@ -275,6 +275,41 @@ Quotas: the service counts bytes per site and refuses writes past the site's quo
 `navigator.storage.estimate()` figure), so one site can't fill the disk. Since every write
 goes through the service, it sees every byte that could grow a file.
 
+### 3.4 The caches
+
+Both caches live in the site's folder under `cache/`, so they are partitioned by top-level
+site: a page can't learn from timing whether another site's tab fetched or ran something.
+- **The budget.** Cache entries don't count toward the site's quota (that is for what the site
+  stores itself). They have a budget of their own, 256 MB per site with entries of at most
+  32 MB. The storage service evicts the least recently used entries to stay within it: a read
+  marks an entry used.
+- **The HTTP cache** (`src/proc/net_cache.c`), in `cache/http/<sha256(url)>`, is the network
+  process's. It is filled with responses to the requests the site's tabs make. Only the
+  network process may write there: the storage policy (`store_allowed`, proved) gives it
+  `cookies` and `cache/http/...` and nothing else, and gives a tab neither, so a tab can't
+  plant a response that would later be served as its site's.
+  - **What is kept:** GET responses with status 200, not redirected, without `Set-Cookie`,
+    `Vary` (but `Accept-Encoding`) or `no-store`, to requests without `Range`,
+    `Authorization` or `no-cache`.
+  - **Freshness:** `max-age`, `Expires`, or a tenth of the time since `Last-Modified` (at most
+    a day). A stale entry with an `ETag` or `Last-Modified` is asked for again with
+    `If-None-Match` / `If-Modified-Since`, and a 304 serves it.
+  - A response from the cache goes through the same checks as one from the network (P10,
+    CORS, ORB). `CYBER_HTTP_CACHE=0` turns it off.
+- **The bytecode cache** (`src/code_cache.c`), in `cache/code/<sha256(source)>`, is the tab's.
+  A classic script of 4 KB or more that a page ran is compiled again in full when the page is
+  idle (a lazily compiled script can't be written) and written with `JS_WriteObject`; the
+  next load of the same source runs that instead of parsing it. An entry records the engine
+  build that wrote it and its source's whole SHA-256, both checked before its bytecode is
+  read. Functions keep their source text as ranges in the script's
+  (`JS_WRITE_OBJ_SHARE_SOURCE`), which the page supplies, so an entry is about 1.3 times its
+  script. The harness takes a folder for it (`CYBER_CODE_CACHE`, off by default).
+- **What a bad entry can do.** The bytecode reader is not hardened against crafted input. An
+  entry is written only by a tab of its site, so a compromised tab could plant bytecode that
+  its site's later tabs run: the compromise would outlive the tab, but stay in its site,
+  whose tabs it already controls. The same holds for anything a site stores. The HTTP cache
+  has no such path: its entries come only from the network process.
+
 ## 4. IPC
 
 ### 4.1 Control plane and data plane
@@ -341,7 +376,7 @@ Every channel has an interface, and the coordinator grants it only for these pai
 |---|---|---|---|
 | `fetch` | `site(s)` → `net` | `site(s)`, tab id | The tab is locked to `s` |
 | `store` | `site(s)` → `store` | `site(s)` | The tab is locked to `s` |
-| `store.partition` | `net` → `store` | `net`; may name any site's `cookies` file, nothing else | Once, at start |
+| `store.partition` | `net` → `store` | `net`; may name any site's `cookies` file and its HTTP cache (`cache/http/...`), nothing else | Once, at start |
 | `draw` | `site(s)` or `ui` → `gpu` | tab id or `ui` | The tab starts; the UI starts |
 | `input` | `ui` → `site(s)` | `ui` | The tab starts |
 | `tab` | `site(s)` → `ui` | tab id, `site(s)` | The tab starts |
@@ -957,7 +992,8 @@ plugin, with Alt-Ergo, Z3 and CVC5 as provers:
 - **P4. File containment.** Every file the storage core opens for a client badged `site(s)`
   is `browser_data/sites/<folder(s)>/` followed by a path accepted by the grammar of section
   3.3, and `folder` is injective, so two sites never share a folder. A client badged `net` gets
-  only `cookies` files. The quota is never exceeded.
+  only `cookies` files and HTTP cache entries (`cache/http/...`, section 3.4), which a tab never
+  gets. The quota is never exceeded.
 - **P5. The GPU decoder stays in its client's namespace.** Every resource id in a decoded
   operation refers to a resource uploaded by the client that sent the display list, every
   coordinate and size is finite and within bounds, and nesting is balanced.

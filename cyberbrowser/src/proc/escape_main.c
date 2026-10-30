@@ -494,6 +494,10 @@ static void storage(void) {
     /* Its cookies file is the network process's alone. */
     blocked_or("read its own site's cookies file", store(TS_READ, NULL, "cookies", NULL, 0, got, sizeof(got)), got);
     blocked_or("write its own site's cookies file", store(TS_WRITE, NULL, "cookies", "x", 1, NULL, 0), "written");
+    /* Its site's HTTP cache is the network process's to fill: an entry
+     * planted here would be served as the site's response. */
+    blocked_or("plant an entry in its own site's HTTP cache",
+               store(TS_WRITE, NULL, "cache/http/0123456789abcdef0123456789abcdef", "x", 1, NULL, 0), "written");
     /* Over its quota (64 MB), by a byte: still within the channel's limit, so
      * the storage service itself refuses it.  (More than that is past the
      * limit, and the service drops the channel.) */

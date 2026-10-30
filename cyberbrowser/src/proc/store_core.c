@@ -113,11 +113,16 @@ bool store_allowed(const char *client_site, const char *target_site, const char 
     if (!site_label_ok(target_site) || !store_rel_path_ok(rel, rel_len)) return false;
     bool cookies = rel_len == 7 && rel[0] == 'c' && rel[1] == 'o' && rel[2] == 'o' && rel[3] == 'k' &&
                    rel[4] == 'i' && rel[5] == 'e' && rel[6] == 's';
+    bool http_cache = rel_len > 11 && rel[0] == 'c' && rel[1] == 'a' && rel[2] == 'c' && rel[3] == 'h' &&
+                      rel[4] == 'e' && rel[5] == '/' && rel[6] == 'h' && rel[7] == 't' && rel[8] == 't' &&
+                      rel[9] == 'p' && rel[10] == '/';
     /* A tab: its own site's folder, but not the cookie jar, which holds
-     * the HttpOnly cookies it mustn't see. */
-    if (client_site) return equal(client_site, target_site) && !cookies;
-    /* The network process: a site's cookie jar, nothing else. */
-    return cookies;
+     * the HttpOnly cookies it mustn't see, nor the HTTP cache, which only
+     * the network process may fill (a tab's own entries would be served as
+     * the site's responses). */
+    if (client_site) return equal(client_site, target_site) && !cookies && !http_cache;
+    /* The network process: a site's cookie jar and HTTP cache, nothing else. */
+    return cookies || http_cache;
 }
 
 bool store_quota_ok(uint64_t used, uint64_t old_size, uint64_t new_size) {

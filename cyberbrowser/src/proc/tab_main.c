@@ -36,6 +36,7 @@
 #include "js_quickjs.h"
 #include "det_clock.h"
 #include "page_engine.h"
+#include "code_cache.h"
 #include "gpu_client.h"
 #include "http_download.h"
 #include "image_cache.h"
@@ -715,6 +716,25 @@ static bool local_storage_load(const char *origin, char **data, size_t *len) {
 
 static const StorageBackend g_storage = { local_storage_load };
 
+/* The bytecode cache (code_cache.h) in the site's folder: cache/code/<key>,
+ * which the storage service keeps within the site's cache budget. */
+static bool code_cache_load(const char *key, uint8_t **data, size_t *len) {
+    char path[64];
+    snprintf(path, sizeof(path), "cache/code/%s", key);
+    char *d = NULL;
+    if (!store_call(TS_READ, path, NULL, 0, &d, len)) return false;
+    *data = (uint8_t *)d;
+    return true;
+}
+
+static void code_cache_save(const char *key, const uint8_t *data, size_t len) {
+    char path[64];
+    snprintf(path, sizeof(path), "cache/code/%s", key);
+    if (len <= 0xffffffffu) store_call(TS_WRITE, path, data, (uint32_t)len, NULL, NULL);
+}
+
+static const CodeCacheStore g_code_cache = { code_cache_load, code_cache_save };
+
 static void save_local_storage(void) {
     static ULONGLONG last;
     if (!g_have_store || GetTickCount64() - last < 500) return;
@@ -792,6 +812,7 @@ int main(int argc, char **argv) {
             g_site[0] = 0;
     }
     if (g_have_store && g_site[0]) storage_set_backend(&g_storage);
+    if (g_have_store && g_site[0]) code_cache_set_store(&g_code_cache);
     if (g_have_ctl && g_site[0]) webgpu_bridge_set(&g_webgpu_bridge);
     fprintf(stderr, "[tab %u] %s (%ux%u)\n", g_tab, url, g_width, g_height);
     memory_report("at start");
@@ -853,12 +874,20 @@ int main(int argc, char **argv) {
         if (g_need_paint && !g_in_flight) paint();
         if (!reported && GetTickCount64() - loaded_at > 3000) {
             memory_report("3 s after load");
+            CodeCacheStats cs;
+            code_cache_stats(&cs);
+            if (cs.hits || cs.misses)
+                fprintf(stderr, "[tab %u] bytecode cache: %d hits, %d misses, %d rejected, %d saved (reading %.0f ms)\n",
+                        g_tab, cs.hits, cs.misses, cs.rejected, cs.saved, cs.read_ms + cs.hash_ms);
             reported = true;
         }
         save_local_storage();
         fflush(stdout);
         fflush(stderr);
         if (input || t.had_timers || t.had_images || t.new_frame || page_needs_layout()) continue;
+        /* Idle: a script this page compiled goes into the bytecode cache
+         * (one a turn: each is a full compile). */
+        if (code_cache_flush(page_engine_context(), 1)) continue;
         /* Idle: sleep until input, the next timer, or (with a fetch or an
          * image in flight) a short while. */
         DWORD ms = 50;
