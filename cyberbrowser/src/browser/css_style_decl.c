@@ -218,10 +218,16 @@ static char *block_text(StyleBlock *b) {
 }
 
 /* After a change: the owner's style attribute and its layout. */
-static void block_changed(StyleBlock *b) {
+static void block_changed(JSContextHandle ctx, GCValue obj, StyleBlock *b) {
     if (b->syncing) return;
-    /* a rule's declarations (CSSStyleRule.style): its sheet renders anew */
-    if (!b->owner && !b->cs) { dom_request_relayout(); return; }
+    /* a rule's declarations (CSSStyleRule.style): the callback cssom.js
+     * gave __cyberStyleDecl marks its sheet changed */
+    if (!b->owner && !b->cs) {
+        GCValue cb = JS_GetPropertyStr(ctx, obj, "__onchange");
+        if (JS_IsFunction(ctx, cb)) JS_Call(ctx, cb, JS_UNDEFINED, 0, NULL);
+        else dom_request_relayout();
+        return;
+    }
     if (!b->owner || !dom_valid(b->owner)) return;
     char *text = block_text(b);
     if (text) {
@@ -393,7 +399,7 @@ bool css_style_decl_set(JSContextHandle ctx, GCValue obj, const char *prop, cons
     StyleBlock *b = block_of(ctx, obj);
     if (!b || !prop || !value) return false;
     bool ok = block_set(b, prop, strlen(prop), value, priority);
-    if (ok) block_changed(b);
+    if (ok) block_changed(ctx, obj, b);
     return ok;
 }
 
@@ -427,7 +433,7 @@ static GCValue js_set_property(JSContextHandle ctx, GCValue this_val, int argc, 
     const char *prio = argc > 2 && !JS_IsUndefined(argv[2]) ? JS_ToCString(ctx, argv[2]) : "";
     if (!prop || !value || !prio) return JS_EXCEPTION;
     b = block_of(ctx, this_val);    /* (conversions may run script) */
-    if (b && block_set(b, prop, pl, value, prio)) block_changed(b);
+    if (b && block_set(b, prop, pl, value, prio)) block_changed(ctx, this_val, b);
     return JS_UNDEFINED;
 }
 
@@ -441,7 +447,7 @@ static GCValue js_remove_property(JSContextHandle ctx, GCValue this_val, int arg
     if (!b) return JS_NewString(ctx, "");
     char *old = block_get(b, prop, pl, NULL);
     bool had = old && old[0];
-    if (had && block_set(b, prop, pl, "", "")) block_changed(b);
+    if (had && block_set(b, prop, pl, "", "")) block_changed(ctx, this_val, b);
     GCValue r = JS_NewString(ctx, old ? old : "");
     free(old);
     return r;
@@ -515,7 +521,7 @@ static GCValue js_set_css_text(JSContextHandle ctx, GCValue this_val, int argc, 
     b = block_of(ctx, this_val);
     if (!b) return JS_UNDEFINED;
     block_set_text(b, text);
-    block_changed(b);
+    block_changed(ctx, this_val, b);
     return JS_UNDEFINED;
 }
 
@@ -546,7 +552,7 @@ static GCValue js_attr_set(JSContextHandle ctx, GCValue this_val, GCValue val, i
     if (!value) return JS_EXCEPTION;
     b = block_of(ctx, this_val);
     const CssPropDef *p = g_attr_props[magic];
-    if (b && block_set(b, p->name, strlen(p->name), value, "")) block_changed(b);
+    if (b && block_set(b, p->name, strlen(p->name), value, "")) block_changed(ctx, this_val, b);
     return JS_UNDEFINED;
 }
 
@@ -594,7 +600,11 @@ static void build_attrs(void) {
 static GCValue js_new_style_decl(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     (void)this_val;
     const char *text = argc > 0 && JS_IsString(argv[0]) ? JS_ToCString(ctx, argv[0]) : "";
-    return css_style_decl_new(ctx, DOM_NULL, text ? text : "");
+    GCValue obj = css_style_decl_new(ctx, DOM_NULL, text ? text : "");
+    /* __cyberStyleDecl(text, onchange): onchange runs after each change */
+    if (argc > 1 && JS_IsFunction(ctx, argv[1]) && JS_IsObject(obj))
+        JS_DefinePropertyValueStr(ctx, obj, "__onchange", argv[1], 0);
+    return obj;
 }
 
 /* __cyberRelayout(): a style sheet changed through the CSSOM. */

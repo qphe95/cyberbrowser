@@ -81,8 +81,6 @@ GCValue js_storage_remove_item(JSContextHandle ctx, GCValue this_val, int argc, 
 GCValue js_storage_clear(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_storage_key(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_storage_get_length(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
-GCValue js_dom_token_list_contains(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
-GCValue js_dom_token_list_supports(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_css_supports(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_css_escape(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_css_style_sheet_insert_rule(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
@@ -108,16 +106,17 @@ GCValue js_css_style_decl_get_css_text(JSContextHandle ctx, GCValue this_val, in
 GCValue js_css_style_decl_set_css_text(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_css_style_decl_get_length(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_css_style_decl_item(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
-GCValue js_dom_token_list_add(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
-GCValue js_dom_token_list_remove(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
-GCValue js_dom_token_list_toggle(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
-GCValue js_dom_token_list_item(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
-GCValue js_dom_token_list_get_length(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
-GCValue js_dom_token_list_for_each(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 /* DOMTokenList.prototype.values / [Symbol.iterator]: the current tokens. */
-GCValue js_dom_token_list_values(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 /* The Symbol.iterator atom (well known, never freed). */
 JSAtom dom_iterator_atom(JSContextHandle ctx);
+/* DOMTokenList (browser/dom_token_list.c): the interface and element lists. */
+void dom_token_list_install(JSContextHandle ctx, GCValue global, GCValue window);
+/* URL, URLSearchParams (browser/url_classes.c); <a>/<area> URL attributes and baseURI. */
+void url_classes_install(JSContextHandle ctx, GCValue global);
+void url_hyperlinks_install(JSContextHandle ctx, GCValue global);
+/* __cyberEventPath for dom_events.js (browser/event_path.c). */
+void event_path_install(JSContextHandle ctx, GCValue global);
+void dom_element_set_attr(JSContextHandle ctx, NodeId n, const char *name, const char *value);
 GCValue js_service_worker_register(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_service_worker_get_registration(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_service_worker_get_registrations(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
@@ -229,7 +228,6 @@ GCValue js_document_querySelector(JSContextHandle ctx, GCValue this_val, int arg
 GCValue js_document_querySelectorAll(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_click(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_get_animations(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
-GCValue js_element_get_classList(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_get_dataset(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_get_inner_html(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);
 GCValue js_element_set_inner_html(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv);

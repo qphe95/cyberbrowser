@@ -601,7 +601,7 @@ TEST(test_dom_query_selectors) {
     ASSERT_EQ(0, js_int(ctx, "__q.querySelectorAll('[data-x=ABC s]').length"));
     ASSERT_EQ(1, js_int(ctx, "__q.querySelectorAll('[*|data-x], *|li[|data-x]').length"));
     ASSERT_EQ(1, js_int(ctx, "__q.querySelectorAll('input[type=CHECKBOX]').length"));
-    ASSERT_EQ(4, js_int(ctx, "__q.querySelectorAll(':is(li, [)').length + __q.querySelectorAll(':where()').length"));
+    ASSERT_EQ(4, js_int(ctx, "__q.querySelectorAll(':is(li, ##)').length + __q.querySelectorAll(':where()').length"));
     ASSERT_EQ(1, js_int(ctx, "(function(){__q.querySelectorAll('li:nth-child(odd of .a)');return 1})()"));
     ASSERT_EQ(1, js_int(ctx, "__q.remove(); __q=null; 1"));
     return true;

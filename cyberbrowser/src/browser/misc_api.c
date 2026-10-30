@@ -2962,19 +2962,32 @@ GCValue js_intersection_observer_constructor(JSContextHandle ctx, GCValue new_ta
     GCValue obj = JS_NewObjectClass(ctx, js_intersection_observer_class_id);
     JS_SetOpaqueHandle(obj, io);
 
-    /* thresholds: a number or a list, sorted (default [0]). */
-    static const char *k_thresholds =
-        "(function(o, t){ var l = t === undefined ? [0] : (Array.isArray(t) ? t.slice() : [t]);"
-        "  l = l.map(Number).filter(function(x){ return x >= 0 && x <= 1; }).sort(function(a, b){ return a - b; });"
-        "  if (!l.length) l = [0];"
-        "  Object.defineProperty(o, '__io_thresholds', {value: l, writable: true});"
-        "  Object.defineProperty(o, 'thresholds', {value: Object.freeze(l.slice()), enumerable: true}); })";
-    GCValue fn = JS_Eval(ctx, k_thresholds, strlen(k_thresholds), "<io>", JS_EVAL_TYPE_GLOBAL);
-    GCValue targs[2] = { obj, argc > 1 && JS_IsObject(argv[1]) ? JS_GetPropertyStr(ctx, argv[1], "threshold") : JS_UNDEFINED };
-    if (JS_IsFunction(ctx, fn)) {
-        GCValue r = JS_Call(ctx, fn, JS_UNDEFINED, 2, targs);
-        if (JS_IsException(r)) return r;
+    /* thresholds: a number or a list, those in [0, 1] sorted (default [0]) */
+    GCValue t = argc > 1 && JS_IsObject(argv[1]) ? JS_GetPropertyStr(ctx, argv[1], "threshold") : JS_UNDEFINED;
+    double th[64];
+    int nt = 0;
+    uint32_t len = 1;
+    bool list = JS_IsArray(ctx, t);
+    if (list) JS_ToUint32(ctx, &len, JS_GetPropertyStr(ctx, t, "length"));
+    for (uint32_t i = 0; !JS_IsUndefined(t) && i < len && nt < 64; i++) {
+        double v;
+        if (JS_ToFloat64(ctx, &v, list ? JS_GetPropertyUint32(ctx, t, i) : t)) return JS_EXCEPTION;
+        if (v >= 0 && v <= 1) {
+            int k = nt++;
+            while (k > 0 && th[k - 1] > v) { th[k] = th[k - 1]; k--; }     /* (sorted as they come) */
+            th[k] = v;
+        }
     }
+    if (!nt) th[nt++] = 0;
+    GCValue l = JS_NewArray(ctx), pub = JS_NewArray(ctx);
+    for (int i = 0; i < nt; i++) {
+        JS_SetPropertyUint32(ctx, l, (uint32_t)i, JS_NewFloat64(ctx, th[i]));
+        JS_SetPropertyUint32(ctx, pub, (uint32_t)i, JS_NewFloat64(ctx, th[i]));
+    }
+    GCValue freeze = JS_GetPropertyStr(ctx, JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), "Object"), "freeze");
+    if (JS_IsFunction(ctx, freeze)) JS_Call(ctx, freeze, JS_UNDEFINED, 1, &pub);
+    JS_DefinePropertyValueStr(ctx, obj, "__io_thresholds", l, JS_PROP_WRITABLE);
+    JS_DefinePropertyValueStr(ctx, obj, "thresholds", pub, JS_PROP_ENUMERABLE);
     GCValue root = SAFE_GET_OR(io, IntersectionObserverDataHandle, root, JS_NULL);
     JS_SetPropertyStr(ctx, obj, "root", JS_IsObject(root) ? root : JS_NULL);
     char margin[32] = "";

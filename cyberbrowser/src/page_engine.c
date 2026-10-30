@@ -705,22 +705,6 @@ void page_frame_build(PageFrame *f, HtmlDocument *doc, ImageCache *images, int w
 /* Before the page's first script: engine polyfills, diagnostics and the
  * CYBER_PRELUDE_JS hook. */
 static void prepare_page_scripts(void) {
-    {
-        const char *bind_polyfill =
-            "(function(){"
-            "  var orig = Function.prototype.bind;"
-            "  Function.prototype.bind = function(){"
-            "    var b = orig.apply(this, arguments);"
-            "    try { b.__cyber_bound_target = this; } catch(e) {}"
-            "    return b;"
-            "  };"
-            "})();";
-        JS_Eval(g_ctx, bind_polyfill, strlen(bind_polyfill), "<bind_polyfill>", JS_EVAL_TYPE_GLOBAL);
-    }
-    {
-        const char *pre_diag = "console.error('[PRE-DIAG] Element.matches=' + typeof Element.prototype.matches);";
-        JS_Eval(g_ctx, pre_diag, strlen(pre_diag), "<pre_diag>", JS_EVAL_TYPE_GLOBAL);
-    }
     /* Developer hook: CYBER_PRELUDE_JS=<file> is evaluated in the page
      * realm before any page script (instrumentation, polyfill tests). */
     {

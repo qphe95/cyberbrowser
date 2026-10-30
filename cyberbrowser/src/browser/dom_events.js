@@ -92,6 +92,7 @@
         var s = st(this);
         if (!s.dispatching) return [];
         /* the path the current target sees: without the shadow trees closed to it */
+        if (s.flat) { var out = []; for (var i = 0; i < s.flat.length; i += 4) out.push(s.flat[i]); return out; }
         return s.path.map(function (p) { return p.item; });
     });
     define(EP, 'initEvent', function initEvent(type, bubbles, cancelable) {
@@ -251,6 +252,7 @@
     }
     function addEventListener(type, callback, options) {
         var target = this == null ? global : this;
+        listenerChanges++;
         var o = flatten(options);
         if (callback === null || callback === undefined) return;
         if (typeof callback !== 'function' && typeof callback !== 'object')
@@ -384,9 +386,13 @@
                 if (s.stopImmediate) return;
             }
         }
-        /* the on<type> handler, in the non-capture pass */
+        /* the on<type> handler, in the non-capture pass: read through its
+         * property unless the native path says there is no content attribute
+         * and none was set (nor forwarded from <body> to the window) */
         if (!capturePass) {
-            var h = handlerProp(item, s.type);
+            /* (a native path's flags say whether a handler may be set) */
+            var h = entry.flags === undefined || (entry.flags & (EP_ON_ATTR | EP_HANDLER | EP_ALWAYS | EP_ON_PROP))
+                    ? handlerProp(item, s.type) : null;
             if (h) {
                 var r;
                 try {
@@ -411,10 +417,15 @@
         var t = target, related = retarget(origRelated, target);
         var guard = 0;
         s.path = path;
-        while (t && guard++ < 4096) {
-            path.push({ item: t, target: retarget(target, t),
-                        relatedTarget: origRelated ? retarget(origRelated, t) : null });
-            t = parentOf(t, ev, s);
+        /* a node's path comes from the node store in one call (event_path.c) */
+        var flat = nativePath ? nativePath(target, s.type, s.composed, origRelated || null, HANDLER_TYPE[s.type] === true) : null;
+        if (flat) return dispatchFlat(ev, s, target, origRelated, flat);
+        {
+            while (t && guard++ < 4096) {
+                path.push({ item: t, target: retarget(target, t),
+                            relatedTarget: origRelated ? retarget(origRelated, t) : null });
+                t = parentOf(t, ev, s);
+            }
         }
         (void related);
         /* capture: from the outermost to the target */
@@ -436,6 +447,41 @@
         s.stop = s.stopImmediate = false;
         return !s.canceled;
     }
+    /* Dispatch over a native path ([item, target, relatedTarget, flags] per
+     * entry, event_path.c): only the entries where something may run are
+     * visited; composedPath() reads the items from s.flat. */
+    var EP_LISTENERS = 1, EP_ON_ATTR = 2, EP_HANDLER = 4, EP_ALWAYS = 8, EP_ON_PROP = 16, EP_ALL = 31;
+    /* addEventListener and handler sets: once a listener runs that adds one,
+     * the flags may be stale, and every later entry is visited */
+    var listenerChanges = 0;
+    function dispatchFlat(ev, s, target, origRelated, flat) {
+        s.flat = flat;
+        var n = flat.length >> 2, changes = listenerChanges;
+        for (var i = n - 1; i >= 0; i--) {
+            var fl = changes === listenerChanges ? flat[4 * i + 3] : EP_ALL;
+            if (!(fl & EP_LISTENERS)) continue;
+            var e = { item: flat[4 * i], target: flat[4 * i + 1], relatedTarget: flat[4 * i + 2], flags: fl };
+            invoke(ev, s, e, i === 0 || e.item === e.target ? AT_TARGET : CAPTURING_PHASE, true);
+        }
+        for (var j = 0; j < n; j++) {
+            var f = changes === listenerChanges ? flat[4 * j + 3] : EP_ALL;
+            if (!f) continue;
+            var item = flat[4 * j], tgt = flat[4 * j + 1];
+            var atTarget = j === 0 || item === tgt;
+            if (!atTarget && !s.bubbles) continue;
+            invoke(ev, s, { item: item, target: tgt, relatedTarget: flat[4 * j + 2], flags: f },
+                   atTarget ? AT_TARGET : BUBBLING_PHASE, false);
+        }
+        s.phase = NONE;
+        s.currentTarget = null;
+        s.target = n ? flat[1] : target;
+        s.relatedTarget = origRelated ? retarget(origRelated, target) : null;
+        s.dispatching = false;
+        s.stop = s.stopImmediate = false;
+        s.flat = null;
+        return !s.canceled;
+    }
+    var nativePath = typeof global.__cyberEventPath === 'function' ? global.__cyberEventPath : null;
     function DOMExceptionOr(msg, name) {
         if (typeof global.DOMException === 'function') return new global.DOMException(msg, name);
         var e = new Error(msg); e.name = name; return e;
@@ -660,6 +706,9 @@
         'message', 'messageerror', 'offline', 'online', 'pagehide', 'pageshow', 'popstate',
         'rejectionhandled', 'storage', 'unhandledrejection', 'unload', 'pagereveal', 'pageswap'];
     var DOCUMENT_HANDLERS = ['readystatechange', 'visibilitychange', 'fullscreenchange', 'fullscreenerror'];
+    /* the types whose on<type> properties are the handler accessors below */
+    var HANDLER_TYPE = Object.create(null);
+    GLOBAL_HANDLERS.concat(WINDOW_HANDLERS, DOCUMENT_HANDLERS).forEach(function (t) { HANDLER_TYPE[t] = true; });
     function handlerAccessor(P, type) {
         var name = 'on' + type;
         var own = Object.getOwnPropertyDescriptor(P, name);
@@ -699,6 +748,7 @@
         return el !== global && el && global.document && el === global.document.body && BODY_FORWARDED.indexOf(type) >= 0;
     }
     function setHandler(target, type, v) {
+        listenerChanges++;
         var h = target[HANDLERS];
         if (!h) {
             h = Object.create(null);

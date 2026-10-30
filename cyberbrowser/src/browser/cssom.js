@@ -634,7 +634,10 @@
     }
 
     /* declarations: the native CSSStyleDeclaration */
-    function decls(text) { return global.__cyberStyleDecl(text || ''); }
+    function decls(text, rule) {
+        /* (writes through rule.style mark the rule's sheet changed) */
+        return global.__cyberStyleDecl(text || '', rule ? function () { touched(rule); } : undefined);
+    }
     function declText(d) { return d.cssText; }
 
     function blockText(prefix, rules, indent) {
@@ -648,7 +651,7 @@
     getter(CSSStyleRule.prototype, 'selectorText', function () { return this.__selector; }, function (v) {
         try { this.__selector = parseSelectorList(String(v)); touched(this); } catch (e) { /* (ignored) */ }
     });
-    getter(CSSStyleRule.prototype, 'style', function () { touched(this); return this.__style; }, function (v) {
+    getter(CSSStyleRule.prototype, 'style', function () { return this.__style; }, function (v) {
         this.__style.cssText = String(v);
         touched(this);
     });
@@ -722,10 +725,10 @@
     CSSNamespaceRule.prototype.__text = function () {
         return '@namespace ' + (this.__prefix ? serIdent(this.__prefix) + ' ' : '') + 'url(' + serString(this.__uri) + ');';
     };
-    getter(CSSFontFaceRule.prototype, 'style', function () { touched(this); return this.__style; });
+    getter(CSSFontFaceRule.prototype, 'style', function () { return this.__style; });
     CSSFontFaceRule.prototype.__text = function () { var d = declText(this.__style); return '@font-face {' + (d ? ' ' + d + ' ' : ' ') + '}'; };
     getter(CSSPageRule.prototype, 'selectorText', function () { return this.__selector; }, function (v) { this.__selector = String(v).trim(); touched(this); });
-    getter(CSSPageRule.prototype, 'style', function () { touched(this); return this.__style; });
+    getter(CSSPageRule.prototype, 'style', function () { return this.__style; });
     CSSPageRule.prototype.__text = function () {
         var d = declText(this.__style);
         return '@page' + (this.__selector ? ' ' + this.__selector : '') + ' {' + (d ? ' ' + d + ' ' : ' ') + '}';
@@ -768,7 +771,7 @@
         this.__key = k;
         touched(this);
     });
-    getter(CSSKeyframeRule.prototype, 'style', function () { touched(this); return this.__style; });
+    getter(CSSKeyframeRule.prototype, 'style', function () { return this.__style; });
     CSSKeyframeRule.prototype.__text = function () { var d = declText(this.__style); return this.__key + ' {' + (d ? ' ' + d + ' ' : ' ') + '}'; };
     getter(CSSPropertyRule.prototype, 'name', function () { return this.__name; });
     getter(CSSPropertyRule.prototype, 'syntax', function () { return this.__descs.syntax || ''; });
@@ -781,7 +784,7 @@
     };
     getter(CSSCounterStyleRule.prototype, 'name', function () { return this.__name; });
     CSSCounterStyleRule.prototype.__text = function () { return '@counter-style ' + this.__name + ' {' + (this.__body ? ' ' + this.__body + ' ' : ' ') + '}'; };
-    getter(CSSNestedDeclarations.prototype, 'style', function () { touched(this); return this.__style; });
+    getter(CSSNestedDeclarations.prototype, 'style', function () { return this.__style; });
     CSSNestedDeclarations.prototype.__text = function () { return declText(this.__style); };
 
     /* ==================================================================
@@ -893,13 +896,15 @@
             if (p.at || p.block === null) return null;
             var key = keyText(p.prelude);
             if (key === null) return null;
-            r = makeRule(CSSKeyframeRule, 'keyframe', { __key: key, __style: decls(p.block) });
+            r = makeRule(CSSKeyframeRule, 'keyframe', { __key: key, __style: null });
+            r.__style = decls(p.block, r);
         } else if (!p.at) {
             if (p.block === null) return null;
             var sel;
             try { sel = parseSelectorList(p.prelude); } catch (e) { return null; }
             var b = splitBlock(p.block);
-            r = makeRule(CSSStyleRule, 'style', { __selector: sel, __style: decls(b[0]), __rules: [] });
+            r = makeRule(CSSStyleRule, 'style', { __selector: sel, __style: null, __rules: [] });
+            r.__style = decls(b[0], r);
             for (var k = 0; k < b[1].length; k++) {
                 var nested = parseRules(b[1][k], 'style', r);
                 for (var m = 0; m < nested.length; m++) r.__rules.push(nested[m]);
@@ -969,11 +974,13 @@
                 break;
             case 'font-face':
                 if (p.block === null || p.prelude) return null;
-                r = makeRule(CSSFontFaceRule, 'font-face', { __style: decls(p.block) });
+                r = makeRule(CSSFontFaceRule, 'font-face', { __style: null });
+                r.__style = decls(p.block, r);
                 break;
             case 'page':
                 if (p.block === null) return null;
-                r = makeRule(CSSPageRule, 'page', { __selector: p.prelude, __style: decls(p.block), __rules: [] });
+                r = makeRule(CSSPageRule, 'page', { __selector: p.prelude, __style: null, __rules: [] });
+                r.__style = decls(p.block, r);
                 break;
             case 'keyframes':
             case '-webkit-keyframes':

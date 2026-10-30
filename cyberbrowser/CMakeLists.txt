@@ -71,6 +71,9 @@ set(BE_SOURCES
     src/browser/storage_api.c
     src/browser/css_api.c
     src/browser/css_style_decl.c
+    src/browser/dom_token_list.c
+    src/browser/url_classes.c
+    src/browser/event_path.c
     src/browser/computed_style.c
     src/browser/service_worker_api.c
     src/browser/geolocation_api.c

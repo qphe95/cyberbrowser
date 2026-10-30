@@ -313,13 +313,21 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                 if (sp->p < sp->e && *sp->p == '(') {
                     sp->p++;
                     args = sp->p;
-                    int depth = 1;
+                    /* to the matching ')': brackets and strings inside must
+                     * close before it (an unclosed one spoils the whole) */
+                    int depth = 1, square = 0;
+                    char quote = 0;
                     while (sp->p < sp->e && depth) {
-                        if (*sp->p == '(') depth++;
-                        else if (*sp->p == ')') depth--;
+                        char c = *sp->p;
+                        if (quote) { if (c == '\\' && sp->p + 1 < sp->e) sp->p++; else if (c == quote) quote = 0; }
+                        else if (c == '"' || c == '\'') quote = c;
+                        else if (c == '[') square++;
+                        else if (c == ']') square--;
+                        else if (c == '(') depth++;
+                        else if (c == ')') depth--;
                         if (depth) sp->p++;
                     }
-                    if (sp->p >= sp->e) { sp->err = true; free(name); break; }
+                    if (sp->p >= sp->e || square || quote) { sp->err = true; free(name); break; }
                     alen = (size_t)(sp->p - args);
                     sp->p++;
                 }

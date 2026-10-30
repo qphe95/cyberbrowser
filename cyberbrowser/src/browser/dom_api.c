@@ -2323,6 +2323,14 @@ static GCValue set_reflected(JSContextHandle ctx, GCValue this_val, int argc, GC
     return JS_UNDEFINED;
 }
 
+/* An attribute set from C the way setAttribute sets it (DOMTokenList). */
+void dom_element_set_attr(JSContextHandle ctx, NodeId n, const char *name, const char *value) {
+    char *old = attr_dup(n, name);
+    dom_set_attr_str(n, name, value);
+    attr_changed(ctx, dom_js(ctx, n), n, name, old, value);
+    free(old);
+}
+
 GCValue js_element_set_id(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
     return set_reflected(ctx, this_val, argc, argv, "id");
 }
@@ -2564,32 +2572,6 @@ void query_selector_all_recursive(JSContextHandle ctx, GCValue elem, const char*
 // ============================================================================
 // Element Content Getters/Setters
 // ============================================================================
-
-// classList getter - returns a functional DOMTokenList backed by className
-GCValue js_element_get_classList(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
-    (void)argc; (void)argv;
-    GCValue existing = JS_GetPropertyStr(ctx, this_val, "__classList");
-    if (!JS_IsUndefined(existing) && !JS_IsNull(existing)) return existing;
-    GCValue classList = JS_NewObject(ctx);
-    JS_SetPropertyStr(ctx, classList, "__element", this_val);
-    JS_SetPropertyStr(ctx, classList, "add", JS_NewCFunction(ctx, js_dom_token_list_add, "add", 1));
-    JS_SetPropertyStr(ctx, classList, "remove", JS_NewCFunction(ctx, js_dom_token_list_remove, "remove", 1));
-    JS_SetPropertyStr(ctx, classList, "toggle", JS_NewCFunction(ctx, js_dom_token_list_toggle, "toggle", 2));
-    JS_SetPropertyStr(ctx, classList, "contains", JS_NewCFunction(ctx, js_dom_token_list_contains, "contains", 1));
-    JS_SetPropertyStr(ctx, classList, "supports", JS_NewCFunction(ctx, js_dom_token_list_supports, "supports", 1));
-    JS_SetPropertyStr(ctx, classList, "item", JS_NewCFunction(ctx, js_dom_token_list_item, "item", 1));
-    JS_SetPropertyStr(ctx, classList, "forEach", JS_NewCFunction(ctx, js_dom_token_list_for_each, "forEach", 1));
-    /* Iterable (for...of, spread), as DOMTokenList is. */
-    GCValue values = JS_NewCFunction(ctx, js_dom_token_list_values, "values", 0);
-    JS_SetPropertyStr(ctx, classList, "values", values);
-    JS_SetProperty(ctx, classList, dom_iterator_atom(ctx), values);
-    GCValue length_getter = JS_NewCFunction(ctx, js_dom_token_list_get_length, "get length", 0);
-    JSAtom length_atom = JS_NewAtom(ctx, "length");
-    JS_DefinePropertyGetSet(ctx, classList, length_atom, length_getter, JS_UNDEFINED, JS_PROP_CONFIGURABLE | JS_PROP_ENUMERABLE);
-    JS_FreeAtom(ctx, length_atom);
-    JS_SetPropertyStr(ctx, this_val, "__classList", classList);
-    return classList;
-}
 
 // dataset getter - returns DOMStringMap stub
 GCValue js_element_get_dataset(JSContextHandle ctx, GCValue this_val, int argc, GCValue *argv) {
