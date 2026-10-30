@@ -19,6 +19,8 @@
 #include <winsock2.h>
 #include <windows.h>
 #include <stdlib.h>
+#include <errno.h>
+#include <time.h>
 
 /* ============================================================================
  * Mutex
@@ -54,6 +56,7 @@ static inline int pthread_mutex_unlock(pthread_mutex_t *mutex) {
  * ============================================================================ */
 
 typedef HANDLE pthread_t;
+typedef struct { int unused; } pthread_attr_t;     /* (attributes are ignored) */
 
 typedef struct {
     void *(*start_routine)(void *);
@@ -117,6 +120,19 @@ static inline int pthread_cond_destroy(pthread_cond_t *cond) {
 
 static inline int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
     return SleepConditionVariableSRW(cond, mutex, INFINITE, 0) ? 0 : -1;
+}
+
+/* Until abstime (CLOCK_REALTIME), as POSIX has it: ETIMEDOUT when it passed. */
+static inline int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
+                                         const struct timespec *abstime) {
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    long long ms = ((long long)abstime->tv_sec - (long long)now.tv_sec) * 1000LL +
+                   ((long long)abstime->tv_nsec - (long long)now.tv_nsec) / 1000000LL;
+    if (ms < 0) ms = 0;
+    if (ms > 0x7ffffffeLL) ms = 0x7ffffffeLL;
+    if (SleepConditionVariableSRW(cond, mutex, (DWORD)ms, 0)) return 0;
+    return GetLastError() == ERROR_TIMEOUT ? ETIMEDOUT : EINVAL;
 }
 
 static inline int pthread_cond_signal(pthread_cond_t *cond) {

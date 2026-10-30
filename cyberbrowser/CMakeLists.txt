@@ -140,6 +140,7 @@ elseif(BE_PLATFORM_ANDROID)
 elseif(BE_PLATFORM_WINDOWS)
     list(APPEND BE_SOURCES
         src/platform/platform_windows.c
+        src/win32/win32_time.c          # clock_gettime, nanosleep: no winpthreads
     )
 endif()
 
@@ -217,7 +218,9 @@ target_include_directories(cyberbrowser_lib
 )
 
 if(BE_PLATFORM_WINDOWS)
-    target_include_directories(cyberbrowser_lib BEFORE PRIVATE
+    # The Win32 <pthread.h> (src/win32/pthread.h) for the library and all who
+    # use it: no MinGW winpthreads in any executable.
+    target_include_directories(cyberbrowser_lib BEFORE PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/src/win32
     )
 endif()
