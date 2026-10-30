@@ -22,6 +22,13 @@ if(MSVC AND NOT CMAKE_C_COMPILER_ID STREQUAL "Clang")
         "With Visual Studio use the ClangCL toolset (-T ClangCL), or build with MinGW.")
 endif()
 
+# With MinGW, every executable links its runtime (libgcc, libwinpthread)
+# statically: each is one file that runs on any Windows, needing only the
+# DLLs Windows has.
+if(MINGW)
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static")
+endif()
+
 # =============================================================================
 # Options
 # =============================================================================
