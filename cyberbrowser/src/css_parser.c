@@ -306,6 +306,34 @@ static CssRule* css_stylesheet_add_rule(CssStylesheet *sheet) {
     return rule;
 }
 
+/* Removes comments from a selector in place.  A comment separates tokens, so
+ * one between two identifier characters (`bar` and `i` in `[a=bar/ ** /i]`)
+ * becomes a space; elsewhere it vanishes, keeping `div` and `.x` one compound. */
+static void css_strip_comments(char *s) {
+    char *o = s, q = 0;
+    for (char *p = s; *p; ) {
+        if (q) {
+            if (*p == '\\' && p[1]) *o++ = *p++;
+            else if (*p == q) q = 0;
+            *o++ = *p++;
+        } else if (*p == '"' || *p == '\'') {
+            q = *p;
+            *o++ = *p++;
+        } else if (p[0] == '/' && p[1] == '*') {
+            char *e = strstr(p + 2, "*/");
+            p = e ? e + 2 : p + strlen(p);
+            unsigned char a = o > s ? (unsigned char)o[-1] : 0, b = (unsigned char)*p;
+            if ((isalnum(a) || a == '-' || a == '_' || a >= 0x80) &&
+                (isalnum(b) || b == '-' || b == '_' || b == '\\' || b >= 0x80))
+                *o++ = ' ';
+        } else {
+            *o++ = *p++;
+        }
+    }
+    while (o > s && css_is_space(o[-1])) o--;
+    *o = '\0';
+}
+
 /* Read a selector until the first unquoted '{'. Returns NULL if none found. */
 static char* css_read_selector(const char *s, size_t len, size_t *pos) {
     css_skip_space_and_comments(s, len, pos);
@@ -325,7 +353,9 @@ static char* css_read_selector(const char *s, size_t len, size_t *pos) {
         (*pos)++;
     }
     if (*pos >= len || s[*pos] != '{') return NULL;
-    return css_strndup_trim(s + start, *pos - start);
+    char *sel = css_strndup_trim(s + start, *pos - start);
+    if (sel && strstr(sel, "/*")) css_strip_comments(sel);
+    return sel;
 }
 
 /* Read an at-rule precondition: everything up to (not including) the next
@@ -792,6 +822,9 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
              * each optionally followed by an i/s case flag. */
             i++;
             while (i < n && css_is_space(s[i])) i++;
+            /* `*|name` / `|name`: attributes carry no namespace here. */
+            if (i + 1 < n && s[i] == '*' && s[i + 1] == '|') i += 2;
+            else if (i + 1 < n && s[i] == '|' && s[i + 1] != '=') i++;
             size_t attr_start = i;
             while (i < n && s[i] != '=' && s[i] != '~' && s[i] != '|' &&
                    s[i] != '^' && s[i] != '$' && s[i] != '*' && s[i] != ']' &&
@@ -837,8 +870,32 @@ static void css_parse_simple_selector(const char *s, size_t n, CssSimpleSelector
                 }
                 val[vl] = '\0';
                 while (i < n && css_is_space(s[i])) i++;
-                if (i < n && (s[i] == 'i' || s[i] == 'I')) { ci = true; i++; }
-                else if (i < n && (s[i] == 's' || s[i] == 'S')) { i++; }
+                /* The flag is the identifier i or s (escapes allowed);
+                 * without one, HTML's legacy attributes ignore case. */
+                bool flag = false;
+                if (!bad && i < n && s[i] != ']') {
+                    char f[8];
+                    size_t fl = 0;
+                    while (i < n && s[i] != ']' && !css_is_space(s[i]) && fl < sizeof f - 1) {
+                        if (s[i] == '\\' && i + 1 < n && isxdigit((unsigned char)s[i + 1])) {
+                            unsigned c = 0;
+                            for (int k = 0; k < 6 && i + 1 < n && isxdigit((unsigned char)s[i + 1]); k++, i++)
+                                c = c * 16 + (unsigned)(isdigit((unsigned char)s[i + 1]) ? s[i + 1] - '0' : tolower((unsigned char)s[i + 1]) - 'a' + 10);
+                            f[fl++] = c < 0x80 ? (char)c : '?';
+                            i++;
+                            if (i < n && css_is_space(s[i])) i++;
+                            continue;
+                        }
+                        if (s[i] == '\\' && i + 1 < n) i++;
+                        f[fl++] = s[i++];
+                    }
+                    while (i < n && css_is_space(s[i])) i++;
+                    if (fl == 1 && (f[0] == 'i' || f[0] == 'I')) ci = true;
+                    else if (!(fl == 1 && (f[0] == 's' || f[0] == 'S'))) bad = true;
+                    if (i < n && s[i] != ']') bad = true;
+                    flag = true;
+                }
+                if (!flag && css_attr_legacy_ci(s + attr_start, attr_end - attr_start)) ci = true;
             }
             if (attr_end > attr_start && out->attr_count < CSS_MAX_ATTRS) {
                 int k = out->attr_count;

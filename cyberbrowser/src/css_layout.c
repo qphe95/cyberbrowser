@@ -8,6 +8,7 @@
 #include "cyber_profile.h"
 #include "css_layout.h"
 #include "css_parser.h"
+#include "css_props.h"
 #include "browser_api_impl.h"
 #include "platform.h"
 #include "url_utils.h"
@@ -976,78 +977,52 @@ static bool css_parse_color(const char *value, double *r, double *g, double *b, 
     while (*value && isspace((unsigned char)*value)) value++;
     if (!*value) return false;
 
-    if (value[0] == '#') {
-        int rr = 0, gg = 0, bb = 0;
-        if (sscanf(value + 1, "%02x%02x%02x", &rr, &gg, &bb) == 3) {
-            *r = rr / 255.0; *g = gg / 255.0; *b = bb / 255.0;
-            return true;
+    size_t vlen = strlen(value);
+    while (vlen && isspace((unsigned char)value[vlen - 1])) vlen--;
+    if (value[0] == '#' && (vlen == 4 || vlen == 7)) {
+        /* the common hex forms without a tokenizer */
+        int d[6];
+        for (size_t i = 1; i < vlen; i++) {
+            char c = (char)tolower((unsigned char)value[i]);
+            if (!isxdigit((unsigned char)c)) return false;
+            d[i - 1] = isdigit((unsigned char)c) ? c - '0' : c - 'a' + 10;
         }
-        /* 3-digit hex: #fff */
-        if (sscanf(value + 1, "%1x%1x%1x", &rr, &gg, &bb) == 3) {
-            *r = (rr * 17) / 255.0; *g = (gg * 17) / 255.0; *b = (bb * 17) / 255.0;
-            return true;
-        }
-        return false;
+        if (vlen == 4) { *r = d[0] * 17 / 255.0; *g = d[1] * 17 / 255.0; *b = d[2] * 17 / 255.0; }
+        else { *r = (d[0] * 16 + d[1]) / 255.0; *g = (d[2] * 16 + d[3]) / 255.0; *b = (d[4] * 16 + d[5]) / 255.0; }
+        return true;
     }
-
-    /* rgb() / rgba() */
     if (strncasecmp(value, "rgb", 3) == 0) {
-        int rr = 0, gg = 0, bb = 0;
-        double aa = 1.0;
-        const char *p = value + 3;
-        if (*p == 'a') p++;
-        if (*p == '(') {
-            p++;
-            /* Parse r,g,b and optional a */
-            rr = (int)strtol(p, (char**)&p, 10);
-            while (*p && (*p == ',' || *p == ' ' || *p == '/')) p++;
-            gg = (int)strtol(p, (char**)&p, 10);
-            while (*p && (*p == ',' || *p == ' ' || *p == '/')) p++;
-            bb = (int)strtol(p, (char**)&p, 10);
-            while (*p && (*p == ',' || *p == ' ' || *p == '/')) p++;
-            if (*p && *p != ')') {
-                aa = strtod(p, (char**)&p);
+        /* rgb(N, N, N) / rgba(N, N, N, A) with plain numbers, without a
+         * tokenizer; anything else (percentages, none, calc) falls through */
+        const char *p = value + 3 + (tolower((unsigned char)value[3]) == 'a');
+        double v[4] = { 0, 0, 0, 1 };
+        int n = 0;
+        if (*p++ == '(') {
+            for (; n < 4; n++) {
+                while (*p == ' ') p++;
+                char *e;
+                v[n] = strtod(p, &e);
+                if (e == p || !(isdigit((unsigned char)e[-1]) || e[-1] == '.')) break;
+                p = e;
+                while (*p == ' ') p++;
+                if (*p == ',') { p++; continue; }
+                if (*p == ')' && (n == 2 || n == 3)) {
+                    for (int k = 0; k < 3; k++) v[k] = v[k] < 0 ? 0 : v[k] > 255 ? 255 : v[k];
+                    *r = v[0] / 255; *g = v[1] / 255; *b = v[2] / 255;
+                    *a = v[3] < 0 ? 0 : v[3] > 1 ? 1 : v[3];
+                    return true;
+                }
+                break;
             }
-            *r = rr / 255.0; *g = gg / 255.0; *b = bb / 255.0; *a = aa;
-            return true;
         }
-        return false;
     }
-
-    /* hsl() / hsla() */
-    if (strncasecmp(value, "hsl", 3) == 0) {
-        double h, s, l;
-        double aa = 1.0;
-        const char *p = value + 3;
-        if (*p == 'a') p++;
-        if (*p == '(') {
-            p++;
-            h = strtod(p, (char**)&p);
-            while (*p && (*p == ',' || *p == ' ' || *p == '/')) p++;
-            s = strtod(p, (char**)&p);
-            while (*p && (*p == ',' || *p == ' ' || *p == '/')) p++;
-            l = strtod(p, (char**)&p);
-            while (*p && (*p == ',' || *p == ' ' || *p == '/')) p++;
-            if (*p && *p != ')') {
-                aa = strtod(p, (char**)&p);
-            }
-            /* Convert HSL to RGB */
-            s /= 100.0; l /= 100.0;
-            double c = (1.0 - fabs(2.0 * l - 1.0)) * s;
-            double hp = h / 60.0;
-            double x = c * (1.0 - fabs(fmod(hp, 2.0) - 1.0));
-            double r1 = 0, g1 = 0, b1 = 0;
-            if (hp < 1) { r1 = c; g1 = x; b1 = 0; }
-            else if (hp < 2) { r1 = x; g1 = c; b1 = 0; }
-            else if (hp < 3) { r1 = 0; g1 = c; b1 = x; }
-            else if (hp < 4) { r1 = 0; g1 = x; b1 = c; }
-            else if (hp < 5) { r1 = x; g1 = 0; b1 = c; }
-            else { r1 = c; g1 = 0; b1 = x; }
-            double m = l - c / 2.0;
-            *r = r1 + m; *g = g1 + m; *b = b1 + m; *a = aa;
-            return true;
-        }
-        return false;
+    if (value[0] == '#' || memchr(value, '(', vlen)) {
+        /* every other syntax (rgb() hsl() hwb() lab() lch() oklab() oklch()
+         * color() color-mix() light-dark(), relative colors) */
+        double c[4];
+        if (!css_color_parse(value, c)) return false;
+        *r = c[0] / 255; *g = c[1] / 255; *b = c[2] / 255; *a = c[3];
+        return true;
     }
 
     /* Named colors (CSS Color 4 section 6.1), and transparent. */
@@ -2205,6 +2180,8 @@ static void layout_apply_grid_declaration(LayoutBox *box, const char *prop, cons
     }
 }
 
+static void layout_unset_property(LayoutBox *box, const char *prop);
+
 static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
                                      double parent_width, double viewport_width,
                                      const char *base_url)
@@ -2213,6 +2190,29 @@ static void layout_apply_declaration(LayoutBox *box, const CssDeclaration *decl,
     const char *value = decl->value;
     if (!prop || !value) return;
 
+    if (strcasecmp(prop, "font") == 0) {
+        /* The shorthand as its longhands (each reset when not given). */
+        const CssPropDef *p = css_prop_find("font", 4);
+        const char **names;
+        char **vals = NULL;
+        int n = p ? css_prop_longhands(p, &names) : 0;
+        if (n <= 0 || css_prop_expand(p, value, &vals) != n) return;
+        for (int i = 0; i < n; i++) {
+            if (!vals[i][0]) {
+                /* (a var(): pending substitution) */
+            } else if (strcasecmp(names[i], "font-size") != 0 && css_is_inherited(names[i]) &&
+                       (!strcasecmp(vals[i], "inherit") || !strcasecmp(vals[i], "initial") ||
+                        !strcasecmp(vals[i], "unset") || !strncasecmp(vals[i], "revert", 6))) {
+                layout_unset_property(box, names[i]);   /* as layout_apply_wide_keyword */
+            } else {
+                CssDeclaration d = { (char *)names[i], vals[i], decl->important };
+                layout_apply_declaration(box, &d, parent_width, viewport_width, base_url);
+            }
+            free(vals[i]);
+        }
+        free(vals);
+        return;
+    }
     if (strcasecmp(prop, "display") == 0) {
         box->s->display = css_parse_display(value);
         box->s->inline_level = css_display_is_inline_level(value) ? 1 : 0;

@@ -2,6 +2,7 @@
 #include "dom_query.h"
 #include "cyber_env.h"
 #include "job_system.h"
+#include "css_selector_internal.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -76,19 +77,67 @@ typedef struct SelParser {
     bool err;
 } SelParser;
 
-static void sp_ws(SelParser *sp) { while (sp->p < sp->e && isspace((unsigned char)*sp->p)) sp->p++; }
+/* Comments separate tokens without being whitespace (a comment between `div`
+ * and `.x` leaves one compound); an unterminated one runs to the end. */
+static void sp_comments(SelParser *sp) {
+    while (sp->p + 1 < sp->e && sp->p[0] == '/' && sp->p[1] == '*') {
+        const char *q = sp->p + 2;
+        while (q + 1 < sp->e && !(q[0] == '*' && q[1] == '/')) q++;
+        sp->p = q + 1 < sp->e ? q + 2 : sp->e;
+    }
+}
+
+/* Skips whitespace and comments; whether there was whitespace. */
+static bool sp_ws(SelParser *sp) {
+    bool ws = false;
+    for (;;) {
+        sp_comments(sp);
+        if (sp->p >= sp->e || !isspace((unsigned char)*sp->p)) return ws;
+        sp->p++;
+        ws = true;
+    }
+}
 
 static bool ident_char(unsigned char c) {
     return isalnum(c) || c == '-' || c == '_' || c >= 0x80 || c == '\\';
 }
 
-/* An identifier with simple backslash escapes, unescaped into a new string. */
+static size_t put_utf8(char *o, uint32_t c) {
+    if (c == 0 || c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF)) c = 0xFFFD;
+    if (c < 0x80) { o[0] = (char)c; return 1; }
+    if (c < 0x800) { o[0] = (char)(0xC0 | c >> 6); o[1] = (char)(0x80 | (c & 63)); return 2; }
+    if (c < 0x10000) { o[0] = (char)(0xE0 | c >> 12); o[1] = (char)(0x80 | (c >> 6 & 63)); o[2] = (char)(0x80 | (c & 63)); return 3; }
+    o[0] = (char)(0xF0 | c >> 18); o[1] = (char)(0x80 | (c >> 12 & 63));
+    o[2] = (char)(0x80 | (c >> 6 & 63)); o[3] = (char)(0x80 | (c & 63));
+    return 4;
+}
+
+/* A hex escape's code point, at the digits after the backslash; eats one
+ * whitespace after them. */
+static uint32_t sp_hex(SelParser *sp) {
+    uint32_t c = 0;
+    for (int k = 0; k < 6 && sp->p < sp->e && isxdigit((unsigned char)*sp->p); k++, sp->p++)
+        c = c * 16 + (uint32_t)(isdigit((unsigned char)*sp->p) ? *sp->p - '0' : tolower((unsigned char)*sp->p) - 'a' + 10);
+    if (sp->p < sp->e && isspace((unsigned char)*sp->p)) sp->p++;
+    return c;
+}
+
+/* An identifier with backslash escapes (hex ones too), unescaped into a new string. */
 static char *sp_ident(SelParser *sp, uint32_t *len) {
     const char *b = sp->p;
-    char *out = malloc((size_t)(sp->e - b) + 1);
+    char *out = malloc((size_t)(sp->e - b) * 4 + 1);
     uint32_t n = 0;
     while (sp->p < sp->e && ident_char((unsigned char)*sp->p)) {
-        if (*sp->p == '\\' && sp->p + 1 < sp->e) { sp->p++; out[n++] = *sp->p++; continue; }
+        if (*sp->p == '\\') {
+            if (sp->p + 1 >= sp->e || sp->p[1] == '\n') break;
+            sp->p++;
+            if (isxdigit((unsigned char)*sp->p)) {
+                n += (uint32_t)put_utf8(out + n, sp_hex(sp));
+                continue;
+            }
+            out[n++] = *sp->p++;
+            continue;
+        }
         out[n++] = *sp->p++;
     }
     out[n] = '\0';
@@ -106,6 +155,10 @@ static void add_simple(SelCompound *c, SelSimple s) {
 
 static bool parse_nth(const char *s, size_t n, int *a, int *b) {
     char buf[64];
+    /* `An+B of S`: the S filter isn't applied (it counts all siblings). */
+    for (size_t i = 1; i + 3 < n; i++)
+        if (isspace((unsigned char)s[i - 1]) && tolower((unsigned char)s[i]) == 'o' &&
+            tolower((unsigned char)s[i + 1]) == 'f' && isspace((unsigned char)s[i + 2])) { n = i; break; }
     if (n >= sizeof buf) return false;
     size_t k = 0;
     for (size_t i = 0; i < n; i++) if (!isspace((unsigned char)s[i])) buf[k++] = (char)tolower((unsigned char)s[i]);
@@ -127,10 +180,45 @@ static bool parse_nth(const char *s, size_t n, int *a, int *b) {
     return true;
 }
 
+/* A forgiving selector list (:is, :where): the branches that parse; an
+ * empty list (matching nothing) when none do. */
+static SelList *parse_forgiving(const char *a, size_t n) {
+    SelList *l = calloc(1, sizeof(SelList));
+    l->ok = true;
+    size_t b = 0;
+    int depth = 0;
+    char q = 0;
+    for (size_t i = 0; i <= n; i++) {
+        char c = i < n ? a[i] : ',';
+        if (q) { if (c == '\\') i++; else if (c == q) q = 0; continue; }
+        if (c == '"' || c == '\'') { q = c; continue; }
+        if (c == '(' || c == '[') depth++;
+        else if (c == ')' || c == ']') depth--;
+        if (c != ',' || depth > 0) continue;
+        SelParser sp = { a + b, a + i, false };
+        SelList *one = parse_list(&sp, true);
+        if (one->ok && !sp.err && one->n == 1) {
+            l->x = realloc(l->x, (size_t)(l->n + 1) * sizeof(SelComplex));
+            l->x[l->n++] = one->x[0];
+            one->n = 0;
+        }
+        sel_free(one);
+        b = i + 1;
+    }
+    return l;
+}
+
 /* Parse one compound; returns false at the end of the complex selector. */
 static bool parse_compound(SelParser *sp, SelCompound *c) {
     bool any = false;
     while (sp->p < sp->e && !sp->err) {
+        sp_comments(sp);
+        if (sp->p >= sp->e) break;
+        /* `*|` and `|` before a type selector: any / no namespace, which
+         * for this store's elements is the same. */
+        if (!any && sp->p + 1 < sp->e && sp->p[0] == '*' && sp->p[1] == '|') sp->p += 2;
+        else if (!any && sp->p + 1 < sp->e && sp->p[0] == '|' && sp->p[1] != '=') sp->p++;
+        if (sp->p >= sp->e) { sp->err = true; break; }
         char ch = *sp->p;
         SelSimple s;
         memset(&s, 0, sizeof s);
@@ -148,12 +236,18 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
         } else if (ch == '[') {
             sp->p++;
             sp_ws(sp);
+            /* `*|name` and `|name`: any and no namespace (attributes carry
+             * none here).  A prefix would need @namespace, so it's invalid. */
+            if (sp->p + 1 < sp->e && sp->p[0] == '*' && sp->p[1] == '|') sp->p += 2;
+            else if (sp->p + 1 < sp->e && sp->p[0] == '|' && sp->p[1] != '=') sp->p++;
             uint32_t nl = 0;
             char *name = sp_ident(sp, &nl);
+            if (name && sp->p + 1 < sp->e && sp->p[0] == '|' && sp->p[1] != '=') { free(name); sp->err = true; break; }
             if (!name) break;
             css_atom_reserve(1);
             s.kind = SS_ATTR;
             s.atom = css_atom_intern(name, nl);
+            bool legacy = css_attr_legacy_ci(name, nl);
             free(name);
             sp_ws(sp);
             s.op = AO_EXISTS;
@@ -167,21 +261,38 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                 sp_ws(sp);
                 if (sp->p < sp->e && (*sp->p == '"' || *sp->p == '\'')) {
                     char q = *sp->p++;
-                    const char *vb = sp->p;
-                    while (sp->p < sp->e && *sp->p != q) sp->p++;
-                    if (sp->p >= sp->e) { sp->err = true; break; }
-                    s.vlen = (uint32_t)(sp->p - vb);
-                    s.val = malloc(s.vlen + 1);
-                    memcpy(s.val, vb, s.vlen);
+                    s.val = malloc((size_t)(sp->e - sp->p) * 4 + 1);
+                    while (sp->p < sp->e && *sp->p != q) {
+                        if (*sp->p == '\\' && sp->p + 1 < sp->e) {
+                            sp->p++;
+                            if (*sp->p == '\n') { sp->p++; continue; }
+                            if (isxdigit((unsigned char)*sp->p)) {
+                                s.vlen += (uint32_t)put_utf8(s.val + s.vlen, sp_hex(sp));
+                                continue;
+                            }
+                        }
+                        s.val[s.vlen++] = *sp->p++;
+                    }
                     s.val[s.vlen] = '\0';
+                    if (sp->p >= sp->e) { sp->err = true; free(s.val); break; }
                     sp->p++;
                 } else {
                     s.val = sp_ident(sp, &s.vlen);
                     if (!s.val) break;
                 }
                 sp_ws(sp);
-                if (sp->p < sp->e && (*sp->p == 'i' || *sp->p == 'I')) { s.ci = 1; sp->p++; sp_ws(sp); }
-                else if (sp->p < sp->e && (*sp->p == 's' || *sp->p == 'S')) { sp->p++; sp_ws(sp); }
+                /* The flag: exactly i or s, ASCII case-insensitively (escapes allowed). */
+                if (sp->p < sp->e && *sp->p != ']') {
+                    uint32_t fl = 0;
+                    char *f = ident_char((unsigned char)*sp->p) ? sp_ident(sp, &fl) : NULL;
+                    char fc = f && fl == 1 ? (char)tolower((unsigned char)f[0]) : 0;
+                    free(f);
+                    if (fc != 'i' && fc != 's') { sp->err = true; free(s.val); break; }
+                    s.ci = fc == 'i';
+                    sp_ws(sp);
+                } else {
+                    s.ci = legacy;
+                }
             }
             if (sp->p >= sp->e || *sp->p != ']') { sp->err = true; free(s.val); break; }
             sp->p++;
@@ -215,10 +326,14 @@ static bool parse_compound(SelParser *sp, SelCompound *c) {
                 if (strcmp(name, "not") == 0 || strcmp(name, "is") == 0 || strcmp(name, "where") == 0 ||
                     strcmp(name, "matches") == 0 || strcmp(name, "-webkit-any") == 0) {
                     if (!args) { sp->err = true; free(name); break; }
-                    SelParser sub = { args, args + alen, false };
-                    s.sub = parse_list(&sub, true);
-                    if (!s.sub || !s.sub->ok) { sel_free(s.sub); sp->err = true; free(name); break; }
-                    s.kind = strcmp(name, "not") == 0 ? SS_NOT : SS_IS;
+                    bool is_not = strcmp(name, "not") == 0;
+                    s.sub = is_not ? NULL : parse_forgiving(args, alen);
+                    if (is_not) {
+                        SelParser sub = { args, args + alen, false };
+                        s.sub = parse_list(&sub, true);
+                        if (!s.sub || !s.sub->ok) { sel_free(s.sub); sp->err = true; free(name); break; }
+                    }
+                    s.kind = is_not ? SS_NOT : SS_IS;
                 } else if (strcmp(name, "nth-child") == 0 || strcmp(name, "nth-last-child") == 0) {
                     if (!args || !parse_nth(args, alen, &s.a, &s.b)) { sp->err = true; free(name); break; }
                     s.kind = name[4] == 'l' ? SS_NTH_LAST_CHILD : SS_NTH_CHILD;
@@ -271,13 +386,12 @@ static SelList *parse_list(SelParser *sp, bool nested) {
             if (!parse_compound(sp, &c)) { free(c.s); break; }
             cx.c = realloc(cx.c, (size_t)(cx.n + 1) * sizeof(SelCompound));
             cx.c[cx.n++] = c;
-            const char *before = sp->p;
-            sp_ws(sp);
+            bool ws = sp_ws(sp);
             if (sp->p >= sp->e || *sp->p == ',') break;
             if (*sp->p == '>' || *sp->p == '+' || *sp->p == '~') {
                 comb = *sp->p++;
                 sp_ws(sp);
-            } else if (sp->p > before) {
+            } else if (ws) {
                 comb = ' ';
             } else {
                 sp->err = true;

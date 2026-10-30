@@ -1684,6 +1684,8 @@ static void ser_element_attrs(JSContextHandle ctx, SerNode n, const char *tag_lo
         }
         if (style_buf.data && style_buf.len > 0)
             sink(ud, "style", style_buf.data);
+        else if (attr_style)
+            sink(ud, "style", "");   /* present but empty: [style] still matches */
         serialize_buf_free(&style_buf);
     }
     free(attr_style_copy);

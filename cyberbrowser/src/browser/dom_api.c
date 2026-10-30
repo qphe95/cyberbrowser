@@ -2468,13 +2468,22 @@ GCValue js_document_getElementById(JSContextHandle ctx, GCValue this_val, int ar
     return dom_js(ctx, found);
 }
 
+/* A SyntaxError for a selector that doesn't parse (frees it). */
+static GCValue bad_selector(JSContextHandle ctx, const char *s) {
+    char msg[160];
+    snprintf(msg, sizeof msg, "'%.120s' is not a valid selector", s);
+    JS_FreeCString(ctx, s);
+    return throw_dom_exception(ctx, "SyntaxError", msg);
+}
+
 /* querySelector[All] over a scope (§7 "Queries"): compiled selectors, index
  * candidates, document order. */
 static GCValue query_first(JSContextHandle ctx, NodeId scope, GCValue sel, bool include_self) {
     CP_ACC("querySelector");
     size_t n = 0;
     const char *s = JS_ToCStringLen(ctx, &n, sel);
-    if (!s) return JS_NULL;
+    if (!s) return JS_EXCEPTION;
+    if (!dom_query_valid(s, n)) return bad_selector(ctx, s);
     NodeId r = dom_query_first(scope, s, n, include_self);
     JS_FreeCString(ctx, s);
     return dom_js(ctx, r);
@@ -2484,7 +2493,8 @@ static GCValue query_all(JSContextHandle ctx, NodeId scope, GCValue sel, bool in
     CP_ACC("querySelectorAll");
     size_t n = 0;
     const char *s = JS_ToCStringLen(ctx, &n, sel);
-    if (!s) return JS_NewArray(ctx);
+    if (!s) return JS_EXCEPTION;
+    if (!dom_query_valid(s, n)) return bad_selector(ctx, s);
     DomNodeList l = dom_query_all(scope, s, n, include_self);
     JS_FreeCString(ctx, s);
     GCValue arr = nodes_to_list(ctx, l.ids, l.n, "NodeList");
@@ -3799,25 +3809,31 @@ GCValue js_element_matches(JSContextHandle ctx, GCValue this_val,
                            int argc, GCValue *argv) {
     if (argc < 1) return JS_FALSE;
     const char *selector = JS_ToCString(ctx, argv[0]);
-    if (!selector) return JS_FALSE;
-    return JS_NewBool(ctx, matches_selector(ctx, this_val, selector));
+    if (!selector) return JS_EXCEPTION;
+    if (!dom_query_valid(selector, strlen(selector))) return bad_selector(ctx, selector);
+    bool r = matches_selector(ctx, this_val, selector);
+    JS_FreeCString(ctx, selector);
+    return JS_NewBool(ctx, r);
 }
 
 GCValue js_element_closest(JSContextHandle ctx, GCValue this_val,
                            int argc, GCValue *argv) {
     if (argc < 1) return JS_NULL;
     const char *selector = JS_ToCString(ctx, argv[0]);
-    if (!selector) return JS_NULL;
+    if (!selector) return JS_EXCEPTION;
+    if (!dom_query_valid(selector, strlen(selector))) return bad_selector(ctx, selector);
 
     GCValue cur = this_val;
     while (!JS_IsNull(cur) && JS_IsObject(cur)) {
         if (matches_selector(ctx, cur, selector)) {
+            JS_FreeCString(ctx, selector);
             return cur;
         }
         NodeId node = dom_node_of(cur);
         if (!(node)) break;
         cur = dom_js_parent(ctx, node);
     }
+    JS_FreeCString(ctx, selector);
     return JS_NULL;
 }
 

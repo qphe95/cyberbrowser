@@ -589,8 +589,20 @@ TEST(test_dom_query_selectors) {
     ASSERT_EQ(1, js_int(ctx, "__q.querySelector('div') !== __q"));
     ASSERT_EQ(1, js_int(ctx, "__q.querySelector('#qroot') === null"));
     ASSERT_EQ(1, js_int(ctx, "__q.firstChild.matches('ul#u1') && __q.querySelector('span').closest('p').tagName==='P'"));
-    /* Unparsable selectors match nothing. */
-    ASSERT_EQ(0, js_int(ctx, "(function(){try{return __q.querySelectorAll('li[').length}catch(e){return 0}})()"));
+    /* Unparsable selectors throw a SyntaxError (querySelector, matches, closest). */
+    ASSERT_EQ(1, js_int(ctx, "(function(){try{__q.querySelectorAll('li[');return 0}catch(e){return e.name==='SyntaxError'?1:0}})()"));
+    ASSERT_EQ(1, js_int(ctx, "(function(){try{__q.matches('[a i]');return 0}catch(e){return e.name==='SyntaxError'?1:0}})()"));
+    ASSERT_EQ(1, js_int(ctx, "(function(){try{__q.closest('');return 0}catch(e){return e.name==='SyntaxError'?1:0}})()"));
+    /* Comments, escapes, the i/s flags, namespace wildcards, legacy
+     * case-insensitive attributes, forgiving :is() and An+B of S. */
+    ASSERT_EQ(2, js_int(ctx, "__q.querySelectorAll('li/* c */.a').length"));
+    ASSERT_EQ(1, js_int(ctx, "__q.querySelectorAll('[data-x=ABC/**/i]').length"));
+    ASSERT_EQ(1, js_int(ctx, "__q.querySelectorAll('[data-x=\"\\\\61 bc\" s]').length"));
+    ASSERT_EQ(0, js_int(ctx, "__q.querySelectorAll('[data-x=ABC s]').length"));
+    ASSERT_EQ(1, js_int(ctx, "__q.querySelectorAll('[*|data-x], *|li[|data-x]').length"));
+    ASSERT_EQ(1, js_int(ctx, "__q.querySelectorAll('input[type=CHECKBOX]').length"));
+    ASSERT_EQ(4, js_int(ctx, "__q.querySelectorAll(':is(li, [)').length + __q.querySelectorAll(':where()').length"));
+    ASSERT_EQ(1, js_int(ctx, "(function(){__q.querySelectorAll('li:nth-child(odd of .a)');return 1})()"));
     ASSERT_EQ(1, js_int(ctx, "__q.remove(); __q=null; 1"));
     return true;
 }

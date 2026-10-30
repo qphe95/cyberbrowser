@@ -156,9 +156,57 @@ TEST(test_css_props_supports) {
     return true;
 }
 
+/* color: value's computed value is want (currentcolor is blue). */
+static bool computes(const char *value, const char *want) {
+    const CssPropDef *p = css_prop_find("color", 5);
+    CssComputeEnv env = { 16, 16, 800, 600, { 0, 0, 255, 1 } };
+    char *spec = css_prop_parse(p, value);
+    char *got = spec ? css_prop_compute(p, spec, &env) : NULL;
+    bool ok = got && strcmp(got, want) == 0;
+    if (!ok) printf("    color: \"%s\" -> %s, want %s\n", value, got ? got : "invalid", want);
+    free(spec);
+    free(got);
+    return ok;
+}
+
+TEST(test_css_props_colors) {
+    static const struct { const char *v, *spec, *computed; } cases[] = {
+        { "lab(20 0 10/50%)", "lab(20 0 10 / 0.5)", "lab(20 0 10 / 0.5)" },
+        { "oklch(0.5 0.1 400deg)", "oklch(0.5 0.1 40)", "oklch(0.5 0.1 40)" },
+        { "color(srgb 10% 0.2 none)", "color(srgb 0.1 0.2 none)", "color(srgb 0.1 0.2 none)" },
+        { "hwb(120 30% 50%)", "rgb(77, 128, 77)", "rgb(77, 128, 77)" },
+        { "hsl(120 none 50%)", "hsl(120 none 50%)", "hsl(120 none 50%)" },
+        { "rgb(128 none none)", "color(srgb 0.501961 none none)", "color(srgb 0.501961 none none)" },
+        { "rgb(from rebeccapurple r g b)", "rgb(from rebeccapurple r g b)", "color(srgb 0.4 0.2 0.6)" },
+        { "hsl(from rebeccapurple h s none / alpha)", NULL, "hsl(270 50% none)" },
+        { "lab(from lab(25 20 50) 35 a b / alpha)", NULL, "lab(35 20 50)" },
+        { "oklab(from oklab(0.5 .05 0.1 / 0.8) calc(l + 0.01) a b / alpha)", NULL, "oklab(0.51 0.05 0.1 / 0.8)" },
+        { "color-mix(in lch, 25% lch(10 20 30deg), lch(50 60 70deg))", NULL, "lch(40 50 60)" },
+        { "color-mix(in srgb, red, blue)", "color-mix(in srgb, red, blue)", "color(srgb 0.5 0 0.5)" },
+        { "color-mix(in hsl, red 50%, blue)", "color-mix(in hsl, red, blue)", NULL },
+        { "color-mix(in srgb, currentcolor, red)", "color-mix(in srgb, currentcolor, red)", "color(srgb 0.5 0 0.5)" },
+        { "color-mix(in hwb, hwb(none none none), hwb(30deg 30% 40%))", NULL, "color(srgb 0.6 0.45098 0.301961)" },
+        { "light-dark(black, white)", "light-dark(black, white)", "rgb(0, 0, 0)" },
+    };
+    bool ok = true;
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        if (cases[i].spec) ok &= parses("color", cases[i].v, cases[i].spec);
+        if (cases[i].computed) ok &= computes(cases[i].v, cases[i].computed);
+    }
+    double rgba[4];
+    ASSERT_TRUE(css_color_parse("oklch(62.8% 0.2577 29.23)", rgba));     /* red */
+    ok &= rgba[0] > 254 && rgba[1] < 1 && rgba[2] < 1;
+    ASSERT_TRUE(css_color_parse("color-mix(in oklab, white 50%, black)", rgba));
+    ok &= rgba[0] > 98 && rgba[0] < 101 && rgba[3] == 1;
+    ASSERT_FALSE(css_color_parse("rgb(1, 2 3)", rgba));
+    ASSERT_FALSE(css_color_parse("hwb(1, 2%, 3%)", rgba));
+    return ok;
+}
+
 void run_css_props_tests(void) {
     printf("\n--- CSS Property Table Tests ---\n");
     RUN_TEST(test_css_props_longhands);
     RUN_TEST(test_css_props_shorthands);
     RUN_TEST(test_css_props_supports);
+    RUN_TEST(test_css_props_colors);
 }

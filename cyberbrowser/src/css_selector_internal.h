@@ -24,6 +24,22 @@
 #include <string.h>
 #include <strings.h>
 
+/* HTML's attributes whose values selectors compare ASCII case-insensitively
+ * unless the selector says `s` (HTML "Selectors", case-sensitivity). */
+static inline bool css_attr_legacy_ci(const char *name, size_t n) {
+    static const char *const names[] = {
+        "accept", "accept-charset", "align", "alink", "axis", "bgcolor", "charset", "checked",
+        "clear", "codetype", "color", "compact", "declare", "defer", "dir", "direction",
+        "disabled", "enctype", "face", "frame", "hreflang", "http-equiv", "lang", "language",
+        "link", "media", "method", "multiple", "nohref", "noresize", "noshade", "nowrap",
+        "readonly", "rel", "rev", "rules", "scope", "scrolling", "selected", "shape", "target",
+        "text", "type", "valign", "valuetype", "vlink",
+    };
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+        if (strlen(names[i]) == n && strncasecmp(names[i], name, n) == 0) return true;
+    return false;
+}
+
 /* Does attribute value `have` (NULL = attribute absent) satisfy the test? */
 static inline bool css_attr_value_matches(int op, bool ci, const char *want,
                                           const char *have) {

@@ -13,7 +13,7 @@
 static const CssTypeDef g_types[] = {
     /* color (CSS Color 4/5) */
     { "color", "<hex-color> | <named-color> | transparent | currentcolor | <system-color> | <color-function> | "
-               "light-dark( <color> , <color> ) | <color-mix>" },
+               "light-dark( <color> , <color> ) | <color-mix> | <relative-color>" },
     { "color-function", "<rgb-fn> | <hsl-fn> | <hwb-fn> | <lab-fn> | <lch-fn> | <oklab-fn> | <oklch-fn> | <color-fn>" },
     { "rgb-fn", "rgb( <legacy-rgb-args> ) | rgba( <legacy-rgb-args> ) | rgb( <modern-rgb-args> ) | rgba( <modern-rgb-args> )" },
     { "legacy-rgb-args", "<percentage>#{3} [ , <alpha-value> ]? | <number>#{3} [ , <alpha-value> ]?" },
