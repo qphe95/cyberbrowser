@@ -22,8 +22,15 @@
  * CYBER_NO_SANDBOX=1 starts the children unconfined.  CYBER_UI_SCRIPT (tests
  * drive the UI and save screenshots) gives the UI's AppContainer access to the
  * script's folder, where the screenshots go too.
- * CYBER_TAB_EXE=cb_escape.exe starts the escape tests in place of the tabs
- * of URLs that end in "#escape". */
+ * CYBER_TAB_EXE=cb_escape.exe with CYBER_TAB_EXE_URL=<url> starts the escape
+ * tests in place of the first tab opened on exactly that URL (a test hook:
+ * only the coordinator's environment chooses it, never what a tab sends).
+ *
+ * What it does with handles is decided by coord_plan.c (proved): for each of
+ * the core's actions, a list of operations naming each handle, the process
+ * it goes into and its badge.  This file performs them (coord_do) with thin
+ * wrappers around DuplicateHandle, CloseHandle, the spawn and
+ * TerminateProcess, each with a contract the proofs assume. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,6 +40,7 @@
 #include "spawn.h"
 #include "proto.h"
 #include "coord_core.h"
+#include "coord_plan.h"
 #include "sandbox.h"
 
 _Static_assert(PROTO_SITE_MAX == SITE_MAX, "a badge is a site label");
@@ -55,7 +63,14 @@ static Chan g_tab_ctl[COORD_MAX_TABS];  /* to each tab, one way (side 0: the coo
 static DWORD g_gpu_starts[3];           /* when the last GPU processes started */
 static CoordState g_state;
 static CoordActions g_actions;          /* large: kept off the stack */
+/* The proved mirror of the tables above (coord_plan.h), changed only by
+ * coord_run and the exit scans, as the wrappers change these. */
+static CoordTables g_tables;
+static CoordPlan g_plan;
 static wchar_t g_root[MAX_PATH];        /* browser_data\sites */
+/* The escape tests' hostile tab (CYBER_TAB_EXE, CYBER_TAB_EXE_URL), read
+ * at the start; cleared once used. */
+static char g_tab_exe[64], g_tab_exe_url[PROTO_URL_MAX + 1];
 
 static HANDLE open_log(const char *name) {
     wchar_t path[MAX_PATH * 2];
@@ -77,6 +92,20 @@ static void hex(char *out, const uint8_t *p, uint32_t n) {
     out[2 * n] = 0;
 }
 
+/* ---- The Windows wrappers ------------------------------------------------------
+ * Trusted, not proved.  Each says, as an ACSL contract over the objects
+ * Windows keeps (written informally: Frama-C doesn't read this file), what
+ * the proofs of coord_plan.c take it to do.  The tables they name:
+ * g_tab_proc / g_tab_ctl (tab slot i), g_webgpu (web-GPU process w), and the
+ * servers g_ui, g_net, g_store, g_gpu. */
+
+/*@ // DuplicateHandle
+    requires proc is a process handle of those tables, h one of the coordinator's own;
+    assigns proc's handle table;
+    ensures \result != NULL ==> proc, and no other process, gains a handle to h's object,
+        with h's access, whose value is \result;
+    ensures \result == NULL ==> no handle table changed;
+ */
 static HANDLE dup_to(HANDLE proc, HANDLE h, DWORD access, bool same) {
     HANDLE out = NULL;
     if (!DuplicateHandle(GetCurrentProcess(), h, proc, &out, access, FALSE,
@@ -86,6 +115,11 @@ static HANDLE dup_to(HANDLE proc, HANDLE h, DWORD access, bool same) {
 }
 
 /* Undo dup_to for handles the other process never got told about. */
+/*@ // DuplicateHandle(DUPLICATE_CLOSE_SOURCE)
+    requires h == NULL || h is a value dup_to returned for proc;
+    assigns proc's handle table;
+    ensures proc no longer holds h;
+ */
 static void close_in(HANDLE proc, HANDLE h) {
     if (h) DuplicateHandle(proc, h, NULL, NULL, 0, FALSE, DUPLICATE_CLOSE_SOURCE);
 }
@@ -134,6 +168,13 @@ static bool start_child_in(Child *c, const wchar_t *exe, const char *log_name, c
 }
 
 /* Hand a server the server end of channel `ch` for a client, with its badge. */
+/*@ // DuplicateHandle, and a CS_GRANT on the server's control channel
+    requires server is g_net, g_store, g_gpu, g_loop or one of g_webgpu; ch is open;
+    assigns server's handle table, server->ctl;
+    ensures \result ==> server holds ch's section and events, and has been sent
+        CS_GRANT { client, kind, site } naming them;
+    ensures !\result ==> server holds none of them;
+ */
 static bool grant(Child *server, const Chan *ch, uint32_t client, uint32_t kind, const char *site) {
     HANDLE s = dup_to(server->proc, ch->section, 0, true), e0 = dup_to(server->proc, ch->ev[0], 0, true),
            e1 = dup_to(server->proc, ch->ev[1], 0, true);
@@ -152,108 +193,168 @@ static bool grant(Child *server, const Chan *ch, uint32_t client, uint32_t kind,
     return false;
 }
 
+/*@ // a CS_REVOKE on the server's control channel
+    assigns server->ctl;
+    ensures server has been sent CS_REVOKE { client }, if its channel had room within 1 s;
+ */
 static void revoke(Child *server, uint32_t client) {
     CsRevoke v = { client };
     chan_send(&server->ctl, CS_REVOKE, &v, sizeof(v), 1000);
 }
 
-static bool start_tab(const CoordAction *a) {
-    Chan ui, net, store, draw, ctl;
-    bool have_store = a->grant_store;       /* the core: not for an opaque site */
-    memset(&store, 0, sizeof(store));
-    if (!chan_create(&ctl, 1u << 16)) return false;
-    if (!chan_create(&ui, 1u << 18)) { chan_close(&ctl); return false; }
-    if (!chan_create(&net, 1u << 20)) { chan_close(&ui); return false; }
-    if (!chan_create(&draw, 1u << 22)) { chan_close(&ui); chan_close(&net); return false; }
-    if (have_store && !chan_create(&store, 1u << 18)) {
-        chan_close(&ui); chan_close(&net); chan_close(&draw);
-        return false;
-    }
+/* What a plan makes as it goes (OP_CHAN, OP_SPAWN_TAB), until it ends
+ * (plan_end): its channels, by CoordChan, and a tab process not yet a
+ * slot's, with its log. */
+static Chan g_ch[CH_COUNT];
+static bool g_ch_open[CH_COUNT];
+static HANDLE g_new_proc, g_new_log = INVALID_HANDLE_VALUE;
+
+/* The children have their own handles now. */
+/*@ // CloseHandle, on the coordinator's own handles only
+    assigns g_ch, g_ch_open, g_new_log;
+    ensures every channel of the plan is closed in the coordinator (not in the children it
+        was given to), and the log too;
+ */
+static void plan_end(void) {
+    for (int c = 0; c < CH_COUNT; c++)
+        if (g_ch_open[c]) chan_close(&g_ch[c]);
+    memset(g_ch_open, 0, sizeof(g_ch_open));
+    if (g_new_log != INVALID_HANDLE_VALUE) CloseHandle(g_new_log);
+    g_new_log = INVALID_HANDLE_VALUE;
+}
+
+/* OP_SPAWN_TAB: tab slot's process, in a tab's sandbox, given exactly the
+ * plan's channels (inherited at its start: the handle list). */
+/*@ // CreateProcess (spawn_child), in sandbox_for(SB_TAB, slot)
+    requires the plan made CH_CTL, CH_UI, CH_NET, CH_DRAW (and, for a site, CH_STORE);
+    assigns g_new_proc, g_new_log;
+    ensures \result ==> g_new_proc is a new process in slot's sandbox, in g_job, holding
+        exactly those channels' handles and no others of the coordinator's;
+    ensures !\result ==> no process was started, and slot's sandbox is released;
+ */
+static bool spawn_tab(const CoordAction *a, int slot) {
+    if (!g_ch_open[CH_CTL] || !g_ch_open[CH_UI] || !g_ch_open[CH_NET] || !g_ch_open[CH_DRAW]) return false;
+    Chan *ui = &g_ch[CH_UI], *net = &g_ch[CH_NET], *store = &g_ch[CH_STORE], *draw = &g_ch[CH_DRAW],
+         *ctl = &g_ch[CH_CTL];
+    bool have_store = g_ch_open[CH_STORE];
     char name[32];
     snprintf(name, sizeof(name), "tab-%u", a->tab);
-    HANDLE log = open_log(name);
-    bool ok = false;
-    {
-        static char args[PROTO_URL_MAX * 2 + 512];
-        char url_hex[PROTO_URL_MAX * 2 + 1], store_arg[80] = "";
-        hex(url_hex, a->data, a->len);
-        if (have_store)
-            snprintf(store_arg, sizeof(store_arg), " --store %llu %llu %llu", spawn_handle_arg(store.section),
-                     spawn_handle_arg(store.ev[0]), spawn_handle_arg(store.ev[1]));
-        snprintf(args, sizeof(args),
-                 "--chan %llu %llu %llu --ctl %llu %llu %llu --net %llu %llu %llu%s --gpu %llu %llu %llu "
-                 "--size %u %u --tab %u --url %s",
-                 spawn_handle_arg(ui.section), spawn_handle_arg(ui.ev[0]), spawn_handle_arg(ui.ev[1]),
-                 spawn_handle_arg(ctl.section), spawn_handle_arg(ctl.ev[0]), spawn_handle_arg(ctl.ev[1]),
-                 spawn_handle_arg(net.section), spawn_handle_arg(net.ev[0]), spawn_handle_arg(net.ev[1]),
-                 store_arg, spawn_handle_arg(draw.section), spawn_handle_arg(draw.ev[0]),
-                 spawn_handle_arg(draw.ev[1]), a->width, a->height, a->tab, url_hex);
-        HANDLE inh[15] = { ui.section, ui.ev[0], ui.ev[1], net.section, net.ev[0], net.ev[1],
-                           draw.section, draw.ev[0], draw.ev[1], ctl.section, ctl.ev[0], ctl.ev[1] };
-        int ninh = 12;
-        if (have_store) {
-            inh[ninh++] = store.section;
-            inh[ninh++] = store.ev[0];
-            inh[ninh++] = store.ev[1];
-        }
-        static wchar_t exe[64];
-        const char *alt = getenv("CYBER_TAB_EXE");
-        bool escape = a->len >= 7 && !memcmp(a->data + a->len - 7, "#escape", 7);
-        _snwprintf(exe, 64, L"%hs", alt && alt[0] && escape ? alt : "cb_tab.exe");
-        SpawnSandbox sb;
-        HANDLE proc = NULL;
-        if (sandbox_for(SB_TAB, a->slot, &sb)) {
-            /* Detached: a console would come with a console host process,
-             * which the tab could open. */
-            proc = spawn_child(exe, args, inh, ninh, log != INVALID_HANDLE_VALUE ? log : NULL, g_job,
-                               DETACHED_PROCESS, &sb);
-            sandbox_release(&sb);
-        } else {
-            fprintf(stderr, "cb_coord: no sandbox for tab %u\n", a->tab);
-        }
-        if (!proc) sandbox_tab_ended(a->slot);
-        if (proc) {
-            /* The servers first: the tab may already be asking. */
-            bool granted = a->grant_net && grant(&g_net, &net, a->tab, GRANT_TAB, a->site) &&
-                           (!have_store || grant(&g_store, &store, a->tab, GRANT_TAB, a->site)) &&
-                           a->grant_gpu && grant(&g_gpu, &draw, a->tab, GRANT_TAB, a->site);
-            CuTabStarted m;
-            memset(&m, 0, sizeof(m));
-            m.tab = a->tab;
-            HANDLE hs = dup_to(g_ui.proc, ui.section, 0, true), h0 = dup_to(g_ui.proc, ui.ev[0], 0, true),
-                   h1 = dup_to(g_ui.proc, ui.ev[1], 0, true);
-            m.chan_section = spawn_handle_arg(hs);
-            m.chan_ev0 = spawn_handle_arg(h0);
-            m.chan_ev1 = spawn_handle_arg(h1);
-            if (granted && hs && h0 && h1 && chan_send(&g_ui.ctl, CU_TAB_STARTED, &m, sizeof(m), 1000)) {
-                g_tab_proc[a->slot] = proc;
-                g_tab_wait[a->slot] = watch(proc);
-                if (g_tab_ctl[a->slot].sh) chan_close(&g_tab_ctl[a->slot]);
-                g_tab_ctl[a->slot] = ctl;
-                memset(&ctl, 0, sizeof(ctl));
-                ok = true;
-            } else {
-                close_in(g_ui.proc, hs);
-                close_in(g_ui.proc, h0);
-                close_in(g_ui.proc, h1);
-                revoke(&g_net, a->tab);
-                revoke(&g_store, a->tab);
-                revoke(&g_gpu, a->tab);
-                TerminateProcess(proc, 1);
-                WaitForSingleObject(proc, 1000);
-                CloseHandle(proc);
-                sandbox_tab_ended(a->slot);
-            }
-        }
+    g_new_log = open_log(name);
+    static char args[PROTO_URL_MAX * 2 + 512];
+    char url_hex[PROTO_URL_MAX * 2 + 1], store_arg[80] = "";
+    hex(url_hex, a->data, a->len);
+    if (have_store)
+        snprintf(store_arg, sizeof(store_arg), " --store %llu %llu %llu", spawn_handle_arg(store->section),
+                 spawn_handle_arg(store->ev[0]), spawn_handle_arg(store->ev[1]));
+    snprintf(args, sizeof(args),
+             "--chan %llu %llu %llu --ctl %llu %llu %llu --net %llu %llu %llu%s --gpu %llu %llu %llu "
+             "--size %u %u --tab %u --url %s",
+             spawn_handle_arg(ui->section), spawn_handle_arg(ui->ev[0]), spawn_handle_arg(ui->ev[1]),
+             spawn_handle_arg(ctl->section), spawn_handle_arg(ctl->ev[0]), spawn_handle_arg(ctl->ev[1]),
+             spawn_handle_arg(net->section), spawn_handle_arg(net->ev[0]), spawn_handle_arg(net->ev[1]),
+             store_arg, spawn_handle_arg(draw->section), spawn_handle_arg(draw->ev[0]),
+             spawn_handle_arg(draw->ev[1]), a->width, a->height, a->tab, url_hex);
+    HANDLE inh[15] = { ui->section, ui->ev[0], ui->ev[1], net->section, net->ev[0], net->ev[1],
+                       draw->section, draw->ev[0], draw->ev[1], ctl->section, ctl->ev[0], ctl->ev[1] };
+    int ninh = 12;
+    if (have_store) {
+        inh[ninh++] = store->section;
+        inh[ninh++] = store->ev[0];
+        inh[ninh++] = store->ev[1];
     }
-    /* The children have their own handles now. */
-    if (ctl.sh) chan_close(&ctl);
-    chan_close(&ui);
-    chan_close(&net);
-    chan_close(&draw);
-    if (have_store) chan_close(&store);
-    if (log != INVALID_HANDLE_VALUE) CloseHandle(log);
-    return ok;
+    /* The escape tests' hostile tab, for the one tab opened on the URL the
+     * coordinator was configured with. */
+    static wchar_t exe[64];
+    bool hostile = g_tab_exe[0] && strlen(g_tab_exe_url) == a->len && !memcmp(g_tab_exe_url, a->data, a->len);
+    _snwprintf(exe, 64, L"%hs", hostile ? g_tab_exe : "cb_tab.exe");
+    if (hostile) g_tab_exe[0] = 0;
+    SpawnSandbox sb;
+    HANDLE proc = NULL;
+    if (sandbox_for(SB_TAB, slot, &sb)) {
+        /* Detached: a console would come with a console host process,
+         * which the tab could open. */
+        proc = spawn_child(exe, args, inh, ninh, g_new_log != INVALID_HANDLE_VALUE ? g_new_log : NULL, g_job,
+                           DETACHED_PROCESS, &sb);
+        sandbox_release(&sb);
+    } else {
+        fprintf(stderr, "cb_coord: no sandbox for tab %u\n", a->tab);
+    }
+    if (!proc) sandbox_tab_ended(slot);
+    g_new_proc = proc;
+    return proc != NULL;
+}
+
+/* OP_GIVE_UI: the tab's channel to the UI. */
+/*@ // DuplicateHandle into g_ui.proc, and CU_TAB_STARTED on its control channel
+    requires ch is open;
+    assigns g_ui.proc's handle table, g_ui.ctl;
+    ensures \result ==> the UI holds ch's handles, and has been told they are tab's;
+    ensures !\result ==> the UI holds none of them;
+ */
+static bool give_ui(uint32_t tab, const Chan *ch) {
+    CuTabStarted m;
+    memset(&m, 0, sizeof(m));
+    m.tab = tab;
+    HANDLE hs = dup_to(g_ui.proc, ch->section, 0, true), h0 = dup_to(g_ui.proc, ch->ev[0], 0, true),
+           h1 = dup_to(g_ui.proc, ch->ev[1], 0, true);
+    m.chan_section = spawn_handle_arg(hs);
+    m.chan_ev0 = spawn_handle_arg(h0);
+    m.chan_ev1 = spawn_handle_arg(h1);
+    if (hs && h0 && h1 && chan_send(&g_ui.ctl, CU_TAB_STARTED, &m, sizeof(m), 1000)) return true;
+    close_in(g_ui.proc, hs);
+    close_in(g_ui.proc, h0);
+    close_in(g_ui.proc, h1);
+    return false;
+}
+
+/* OP_COMMIT_TAB: the new process and its control channel are slot's. */
+/*@ // RegisterWaitForSingleObject; CloseHandle of slot's old control channel
+    requires g_new_proc != NULL;
+    assigns g_tab_proc[slot], g_tab_wait[slot], g_tab_ctl[slot], g_new_proc, g_ch[CH_CTL], g_ch_open[CH_CTL];
+    ensures g_tab_proc[slot] == \old(g_new_proc) && g_tab_ctl[slot] == \old(g_ch[CH_CTL]);
+ */
+static void commit_tab(int slot) {
+    g_tab_proc[slot] = g_new_proc;
+    g_new_proc = NULL;
+    g_tab_wait[slot] = watch(g_tab_proc[slot]);
+    if (g_tab_ctl[slot].sh) chan_close(&g_tab_ctl[slot]);
+    g_tab_ctl[slot] = g_ch[CH_CTL];
+    memset(&g_ch[CH_CTL], 0, sizeof(g_ch[CH_CTL]));
+    g_ch_open[CH_CTL] = false;
+}
+
+/* OP_DISCARD_TAB: the new process ends, never having been slot's. */
+/*@ // TerminateProcess, WaitForSingleObject, CloseHandle
+    assigns g_new_proc;
+    ensures \old(g_new_proc) has ended (or 1 s passed), and slot's sandbox is released;
+ */
+static void discard_tab(int slot) {
+    if (!g_new_proc) return;
+    TerminateProcess(g_new_proc, 1);
+    WaitForSingleObject(g_new_proc, 1000);
+    CloseHandle(g_new_proc);
+    g_new_proc = NULL;
+    sandbox_tab_ended(slot);
+}
+
+/* OP_GIVE_TAB: channel ch's handles into slot's process, told with msg
+ * (CT_GPU, CT_WEBGPU) on its control channel. */
+/*@ // DuplicateHandle into g_tab_proc[slot], and msg on g_tab_ctl[slot]
+    requires g_tab_proc[slot] != NULL; ch is open;
+    assigns g_tab_proc[slot]'s handle table, g_tab_ctl[slot];
+    ensures \result ==> that process, and no other, holds ch's handles, and was told;
+    ensures !\result ==> it holds none of them;
+ */
+static bool give_tab(int slot, const Chan *ch, uint16_t msg) {
+    HANDLE p = g_tab_proc[slot];
+    if (!p) return false;
+    HANDLE s = dup_to(p, ch->section, 0, true), e0 = dup_to(p, ch->ev[0], 0, true), e1 = dup_to(p, ch->ev[1], 0, true);
+    CtGpu m = { spawn_handle_arg(s), spawn_handle_arg(e0), spawn_handle_arg(e1) };
+    if (s && e0 && e1 && chan_send(&g_tab_ctl[slot], msg, &m, sizeof(m), 1000)) return true;
+    close_in(p, s);
+    close_in(p, e0);
+    close_in(p, e1);
+    return false;
 }
 
 /* Give the UI a channel to the GPU process. */
@@ -296,31 +397,15 @@ static void restart_gpu(void) {
         fprintf(stderr, "cb_coord: could not start the GPU process again\n");
 }
 
-/* A tab's draw channel to the new GPU process (CA_REGRANT_GPU): granted to
- * the GPU process with the tab's badge, and sent to the tab. */
-static void regrant_gpu(const CoordAction *a) {
-    if (a->slot < 0 || a->slot >= COORD_MAX_TABS || !g_tab_proc[a->slot] || !g_gpu.proc) return;
-    Chan draw;
-    if (!chan_create(&draw, 1u << 22)) return;
-    if (grant(&g_gpu, &draw, a->tab, GRANT_TAB, a->site)) {
-        HANDLE p = g_tab_proc[a->slot];
-        HANDLE s = dup_to(p, draw.section, 0, true), e0 = dup_to(p, draw.ev[0], 0, true),
-               e1 = dup_to(p, draw.ev[1], 0, true);
-        CtGpu m = { spawn_handle_arg(s), spawn_handle_arg(e0), spawn_handle_arg(e1) };
-        if (!s || !e0 || !e1 || !chan_send(&g_tab_ctl[a->slot], CT_GPU, &m, sizeof(m), 1000)) {
-            close_in(p, s);
-            close_in(p, e0);
-            close_in(p, e1);
-            revoke(&g_gpu, a->tab);
-        }
-    }
-    chan_close(&draw);
-}
-
-/* A site's web-GPU process (CA_START_WEBGPU), with its control channel. */
-static bool start_webgpu(const CoordAction *a) {
-    int w = a->webgpu;
-    if (w < 0 || w >= COORD_MAX_WEBGPU) return false;
+/* OP_SPAWN_WEBGPU: web-GPU process w, labeled site, with its control channel. */
+/*@ // CreateProcess (start_child_in), in sandbox_for(SB_WEBGPU, w); RegisterWaitForSingleObject
+    requires 0 <= w < COORD_MAX_WEBGPU;
+    assigns g_webgpu[w], g_webgpu_wait[w];
+    ensures \result ==> g_webgpu[w].proc is a new process in w's sandbox, told its site is site,
+        holding only its control channel's handles;
+    ensures !\result ==> g_webgpu[w] is empty, and w's sandbox released;
+ */
+static bool start_webgpu(int w, const char *site) {
     if (g_webgpu[w].proc) {
         unwatch(&g_webgpu_wait[w]);
         CloseHandle(g_webgpu[w].proc);
@@ -330,7 +415,7 @@ static bool start_webgpu(const CoordAction *a) {
     char name[32], extra[32 + 2 * SITE_MAX];
     snprintf(name, sizeof(name), "webgpu-%d", w);
     strcpy(extra, "--site ");
-    hex(extra + 7, (const uint8_t *)a->site, (uint32_t)strnlen(a->site, SITE_MAX - 1));
+    hex(extra + 7, (const uint8_t *)site, (uint32_t)strnlen(site, SITE_MAX - 1));
     if (!start_child_in(&g_webgpu[w], L"cb_webgpu.exe", name, extra, DETACHED_PROCESS, SB_WEBGPU, w)) {
         chan_close(&g_webgpu[w].ctl);
         memset(&g_webgpu[w], 0, sizeof(g_webgpu[w]));
@@ -341,38 +426,6 @@ static bool start_webgpu(const CoordAction *a) {
     return true;
 }
 
-/* Which web-GPU process each tab was given (w + 1; 0 none), so that when it
- * ends its tabs hear at once that their canvases are lost, rather than
- * waiting on a channel nobody answers. */
-static int g_tab_webgpu[COORD_MAX_TABS];
-
-/* A tab's channel to its site's web-GPU process (CA_GRANT_WEBGPU): granted
- * there with the tab's badge, and sent to the tab. */
-static void grant_webgpu(const CoordAction *a) {
-    int w = a->webgpu;
-    if (a->slot < 0 || a->slot >= COORD_MAX_TABS || !g_tab_proc[a->slot] || w < 0 || w >= COORD_MAX_WEBGPU ||
-        !g_webgpu[w].proc)
-        return;
-    Chan gl;
-    if (!chan_create(&gl, 1u << 22)) return;
-    bool sent = false;
-    if (grant(&g_webgpu[w], &gl, a->tab, GRANT_TAB, a->site)) {
-        HANDLE p = g_tab_proc[a->slot];
-        HANDLE s = dup_to(p, gl.section, 0, true), e0 = dup_to(p, gl.ev[0], 0, true), e1 = dup_to(p, gl.ev[1], 0, true);
-        CtGpu m = { spawn_handle_arg(s), spawn_handle_arg(e0), spawn_handle_arg(e1) };
-        sent = s && e0 && e1 && chan_send(&g_tab_ctl[a->slot], CT_WEBGPU, &m, sizeof(m), 1000);
-        if (sent) g_tab_webgpu[a->slot] = w + 1;
-        if (!sent) {
-            close_in(p, s);
-            close_in(p, e0);
-            close_in(p, e1);
-            revoke(&g_webgpu[w], a->tab);
-        }
-    }
-    chan_close(&gl);
-    if (!sent && g_tab_ctl[a->slot].sh) chan_send(&g_tab_ctl[a->slot], CT_WEBGPU_FAILED, NULL, 0, 1000);
-}
-
 /* Ask a server to save what is pending and exit; wait a while for it. */
 static void quit_server(Child *c, DWORD ms) {
     if (!c->proc) return;
@@ -380,81 +433,151 @@ static void quit_server(Child *c, DWORD ms) {
     WaitForSingleObject(c->proc, ms);
 }
 
+/* OP_EXIT. */
+/*@ // TerminateProcess, ExitProcess
+    ensures \false;     // it doesn't return: every child ends with the job
+ */
+static void exit_all(void) {
+    /* The network process saves its cookie jars to the storage service,
+     * then the storage service finishes. */
+    quit_server(&g_net, 3000);
+    quit_server(&g_store, 2000);
+    quit_server(&g_loop, 500);
+    quit_server(&g_gpu, 500);
+    /* Their profiles go once the tabs have. */
+    for (int i = 0; i < COORD_MAX_TABS; i++)
+        if (g_tab_proc[i]) TerminateProcess(g_tab_proc[i], 0);
+    for (int w = 0; w < COORD_MAX_WEBGPU; w++)
+        if (g_webgpu[w].proc) TerminateProcess(g_webgpu[w].proc, 0);
+    for (int w = 0; w < COORD_MAX_WEBGPU; w++)
+        if (g_webgpu[w].proc) WaitForSingleObject(g_webgpu[w].proc, 1000);
+    for (int i = 0; i < COORD_MAX_TABS; i++)
+        if (g_tab_proc[i]) WaitForSingleObject(g_tab_proc[i], 1000);
+    sandbox_end();
+    CloseHandle(g_job);             /* KILL_ON_JOB_CLOSE ends the rest */
+    ExitProcess(0);
+}
+
+/* The server an operation names. */
+static Child *server(int srv, int w) {
+    switch (srv) {
+    case SRV_NET: return &g_net;
+    case SRV_STORE: return &g_store;
+    case SRV_GPU: return &g_gpu;
+    case SRV_WEBGPU: return w >= 0 && w < COORD_MAX_WEBGPU ? &g_webgpu[w] : NULL;
+    default: return NULL;
+    }
+}
+
+/* One operation of a plan (coord_plan.h): the contract there, and each
+ * wrapper's above.  The checks here only guard the shim's arrays: the plan
+ * was proved to name entries in range, and in use. */
+bool coord_do(const CoordAction *a, const CoordOp *o) {
+    int i = o->slot, w = o->w;
+    bool tab = i >= 0 && i < COORD_MAX_TABS, web = w >= 0 && w < COORD_MAX_WEBGPU;
+    bool chan = o->ch >= 0 && o->ch < CH_COUNT;
+    Child *srv = server(o->srv, w);
+    switch (o->kind) {
+    case OP_CHAN:
+        if (!chan) return false;
+        if (g_ch_open[o->ch]) chan_close(&g_ch[o->ch]);
+        g_ch_open[o->ch] = chan_create(&g_ch[o->ch], o->size);
+        return g_ch_open[o->ch];
+    case OP_SPAWN_TAB:
+        return tab && spawn_tab(a, i);
+    case OP_GRANT:
+        return chan && g_ch_open[o->ch] && srv && srv->proc && grant(srv, &g_ch[o->ch], a->tab, GRANT_TAB, a->site);
+    case OP_GIVE_UI:
+        return chan && g_ch_open[o->ch] && give_ui(a->tab, &g_ch[o->ch]);
+    case OP_GIVE_TAB:
+        return tab && chan && g_ch_open[o->ch] && give_tab(i, &g_ch[o->ch], o->msg);
+    case OP_COMMIT_TAB:
+        if (!tab || !g_new_proc) return false;
+        commit_tab(i);
+        return true;
+    case OP_DISCARD_TAB:
+        if (tab) discard_tab(i);
+        return true;
+    case OP_REVOKE:
+        if (srv && (o->srv != SRV_WEBGPU || srv->proc)) revoke(srv, a->tab);
+        return true;
+    case OP_KILL_TAB:
+        if (tab && g_tab_proc[i]) TerminateProcess(g_tab_proc[i], 0);
+        return true;
+    case OP_CLOSE_CTL:
+        if (tab && g_tab_ctl[i].sh) chan_close(&g_tab_ctl[i]);
+        return true;
+    case OP_FORGET_WEBGPU:
+        return true;
+    case OP_SEND_TAB:
+        return tab && g_tab_ctl[i].sh && chan_send(&g_tab_ctl[i], o->msg, NULL, 0, o->quick ? 100 : 1000);
+    case OP_SPAWN_WEBGPU:
+        return web && start_webgpu(w, a->site);
+    case OP_KILL_WEBGPU:
+        if (web && g_webgpu[w].proc) TerminateProcess(g_webgpu[w].proc, 0);
+        return true;
+    case OP_SEND_UI:
+        return chan_send(&g_ui.ctl, a->type, a->data, a->len, 1000);
+    case OP_RESTART_GPU:
+        restart_gpu();
+        return g_gpu.proc != NULL;
+    case OP_EXIT:
+        exit_all();
+        return true;
+    }
+    return false;
+}
+
+/* Has tab slot i's process ended?  If so its exit code, and the shim lets
+ * go of it. */
+/*@ // WaitForSingleObject, GetExitCodeProcess, UnregisterWaitEx, CloseHandle
+    assigns *code, g_tab_proc[i], g_tab_wait[i];
+    ensures \result <==> \old(g_tab_proc[i]) had ended;
+    ensures \result ==> g_tab_proc[i] == NULL and slot i's sandbox is released;
+ */
+bool coord_tab_signaled(int i, uint32_t *code) {
+    if (!g_tab_proc[i] || WaitForSingleObject(g_tab_proc[i], 0) != WAIT_OBJECT_0) return false;
+    DWORD c = 0;
+    GetExitCodeProcess(g_tab_proc[i], &c);
+    *code = c;
+    unwatch(&g_tab_wait[i]);
+    CloseHandle(g_tab_proc[i]);
+    g_tab_proc[i] = NULL;
+    sandbox_tab_ended(i);
+    return true;
+}
+
+/* The same for web-GPU process w. */
+/*@ // WaitForSingleObject, GetExitCodeProcess, UnregisterWaitEx, CloseHandle
+    assigns *code, g_webgpu[w], g_webgpu_wait[w];
+    ensures \result <==> \old(g_webgpu[w].proc) had ended;
+    ensures \result ==> g_webgpu[w] is empty and w's sandbox is released;
+ */
+bool coord_webgpu_signaled(int w, uint32_t *code) {
+    if (!g_webgpu[w].proc || WaitForSingleObject(g_webgpu[w].proc, 0) != WAIT_OBJECT_0) return false;
+    DWORD c = 0;
+    GetExitCodeProcess(g_webgpu[w].proc, &c);
+    *code = c;
+    fprintf(stderr, "cb_coord: web-GPU process %d ended (%lx)\n", w, c);
+    unwatch(&g_webgpu_wait[w]);
+    CloseHandle(g_webgpu[w].proc);
+    chan_close(&g_webgpu[w].ctl);
+    memset(&g_webgpu[w], 0, sizeof(g_webgpu[w]));
+    sandbox_webgpu_ended(w);
+    return true;
+}
+
 /* Results of actions, stepped after the actions that produced them. */
 static CoordEvent g_results[COORD_MAX_ACTIONS];
 static int g_nresults;
 
+/* An action: planned (coord_plan), performed (coord_run, through coord_do). */
 static void perform(const CoordAction *a) {
-    switch (a->kind) {
-    case CA_START_TAB:
-        if (g_nresults < COORD_MAX_ACTIONS) {
-            CoordEvent *r = &g_results[g_nresults++];
-            memset(r, 0, sizeof(*r));
-            r->kind = start_tab(a) ? CE_TAB_STARTED : CE_TAB_START_FAILED;
-            r->slot = a->slot;
-        }
-        break;
-    case CA_KILL_TAB:
-        if (a->slot >= 0 && a->slot < COORD_MAX_TABS && g_tab_proc[a->slot])
-            TerminateProcess(g_tab_proc[a->slot], 0);
-        break;
-    case CA_RESTART_GPU:
-        restart_gpu();
-        break;
-    case CA_REGRANT_GPU:
-        regrant_gpu(a);
-        break;
-    case CA_TAB_GONE:
-        if (a->slot >= 0 && a->slot < COORD_MAX_TABS && g_tab_ctl[a->slot].sh) chan_close(&g_tab_ctl[a->slot]);
-        if (a->slot >= 0 && a->slot < COORD_MAX_TABS) g_tab_webgpu[a->slot] = 0;
-        revoke(&g_net, a->tab);
-        revoke(&g_store, a->tab);
-        revoke(&g_gpu, a->tab);
-        for (int w = 0; w < COORD_MAX_WEBGPU; w++)
-            if (g_webgpu[w].proc) revoke(&g_webgpu[w], a->tab);
-        break;
-    case CA_START_WEBGPU:
-        if (g_nresults < COORD_MAX_ACTIONS) {
-            CoordEvent *r = &g_results[g_nresults++];
-            memset(r, 0, sizeof(*r));
-            r->kind = start_webgpu(a) ? CE_WEBGPU_STARTED : CE_WEBGPU_EXITED;
-            r->slot = a->webgpu;
-        }
-        break;
-    case CA_GRANT_WEBGPU:
-        grant_webgpu(a);
-        break;
-    case CA_KILL_WEBGPU:
-        if (a->webgpu >= 0 && a->webgpu < COORD_MAX_WEBGPU && g_webgpu[a->webgpu].proc)
-            TerminateProcess(g_webgpu[a->webgpu].proc, 0);
-        break;
-    case CA_WEBGPU_FAILED:
-        if (a->slot >= 0 && a->slot < COORD_MAX_TABS && g_tab_ctl[a->slot].sh)
-            chan_send(&g_tab_ctl[a->slot], CT_WEBGPU_FAILED, NULL, 0, 1000);
-        break;
-    case CA_SEND_UI:
-        chan_send(&g_ui.ctl, a->type, a->data, a->len, 1000);
-        break;
-    case CA_EXIT:
-        /* The network process saves its cookie jars to the storage service,
-         * then the storage service finishes. */
-        quit_server(&g_net, 3000);
-        quit_server(&g_store, 2000);
-        quit_server(&g_loop, 500);
-        quit_server(&g_gpu, 500);
-        /* Their profiles go once the tabs have. */
-        for (int i = 0; i < COORD_MAX_TABS; i++)
-            if (g_tab_proc[i]) TerminateProcess(g_tab_proc[i], 0);
-        for (int w = 0; w < COORD_MAX_WEBGPU; w++)
-            if (g_webgpu[w].proc) TerminateProcess(g_webgpu[w].proc, 0);
-        for (int w = 0; w < COORD_MAX_WEBGPU; w++)
-            if (g_webgpu[w].proc) WaitForSingleObject(g_webgpu[w].proc, 1000);
-        for (int i = 0; i < COORD_MAX_TABS; i++)
-            if (g_tab_proc[i]) WaitForSingleObject(g_tab_proc[i], 1000);
-        sandbox_end();
-        CloseHandle(g_job);             /* KILL_ON_JOB_CLOSE ends the rest */
-        ExitProcess(0);
-    }
+    coord_plan(&g_state, &g_tables, a, &g_plan);
+    CoordEvent r;
+    bool result = coord_run(&g_tables, a, &g_plan, &r);
+    plan_end();
+    if (result && g_nresults < COORD_MAX_ACTIONS) g_results[g_nresults++] = r;
 }
 
 /* Step the core and perform what it decided, then step the results. */
@@ -523,10 +646,16 @@ static bool make_root(void) {
             wcscat(base, L"\\cyberbrowser\\");
             CreateDirectoryW(base, NULL);
         }
+        /* Microsoft's _snwprintf leaves no NUL when it cuts short: a base too
+         * long for the root is passed over. */
         wchar_t data[MAX_PATH];
+        int n = _snwprintf(g_root, MAX_PATH, L"%lsbrowser_data\\sites", base);
+        if (n < 0 || n >= MAX_PATH) {
+            g_root[0] = 0;
+            continue;
+        }
         _snwprintf(data, MAX_PATH, L"%lsbrowser_data", base);
         CreateDirectoryW(data, NULL);
-        _snwprintf(g_root, MAX_PATH, L"%ls\\sites", data);
         CreateDirectoryW(g_root, NULL);
         DWORD attr = GetFileAttributesW(g_root);
         if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) &&
@@ -542,6 +671,12 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (!sandbox_init()) fprintf(stderr, "cb_coord: running without the sandbox\n");
+    const char *alt = getenv("CYBER_TAB_EXE"), *alt_url = getenv("CYBER_TAB_EXE_URL");
+    if (alt && alt[0] && alt_url && alt_url[0] && strlen(alt) < sizeof(g_tab_exe) &&
+        strlen(alt_url) < sizeof(g_tab_exe_url)) {
+        strcpy(g_tab_exe, alt);
+        strcpy(g_tab_exe_url, alt_url);
+    }
     if (!make_root()) {
         fprintf(stderr, "cb_coord: no browser_data folder\n");
         return 1;
@@ -608,6 +743,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     coord_init(&g_state);
+    coord_tables_init(&g_tables, g_gpu.proc != NULL);
 
     static ChanMsg m;
     for (;;) {
@@ -656,39 +792,15 @@ int main(int argc, char **argv) {
             e.kind = CE_SERVICE_EXITED;
             step(&e);
         } else {
-            /* Which tabs and web-GPU processes ended. */
-            for (int i = 0; i < COORD_MAX_TABS; i++) {
-                if (!g_tab_proc[i] || WaitForSingleObject(g_tab_proc[i], 0) != WAIT_OBJECT_0) continue;
-                DWORD code = 0;
-                GetExitCodeProcess(g_tab_proc[i], &code);
-                unwatch(&g_tab_wait[i]);
-                CloseHandle(g_tab_proc[i]);
-                g_tab_proc[i] = NULL;
-                sandbox_tab_ended(i);
-                memset(&e, 0, sizeof(e));
-                e.kind = CE_TAB_EXITED;
-                e.slot = i;
-                e.exit_code = code;
-                step(&e);
-            }
-            for (int w = 0; w < COORD_MAX_WEBGPU; w++) {
-                if (!g_webgpu[w].proc || WaitForSingleObject(g_webgpu[w].proc, 0) != WAIT_OBJECT_0) continue;
-                DWORD code = 0;
-                GetExitCodeProcess(g_webgpu[w].proc, &code);
-                fprintf(stderr, "cb_coord: web-GPU process %d ended (%lx)\n", w, code);
-                unwatch(&g_webgpu_wait[w]);
-                CloseHandle(g_webgpu[w].proc);
-                chan_close(&g_webgpu[w].ctl);
-                memset(&g_webgpu[w], 0, sizeof(g_webgpu[w]));
-                sandbox_webgpu_ended(w);
-                for (int t = 0; t < COORD_MAX_TABS; t++) {
-                    if (g_tab_webgpu[t] != w + 1) continue;
-                    g_tab_webgpu[t] = 0;
-                    if (g_tab_ctl[t].sh) chan_send(&g_tab_ctl[t], CT_WEBGPU_FAILED, NULL, 0, 100);
-                }
-                memset(&e, 0, sizeof(e));
-                e.kind = CE_WEBGPU_EXITED;
-                e.slot = w;
+            /* Which tabs and web-GPU processes ended: each found in its
+             * table entry, and its event names that entry (coord_plan.c).
+             * A web-GPU process's tabs hear at once that their canvases
+             * are lost, rather than waiting on a channel nobody answers. */
+            for (int i = 0; (i = coord_next_tab_exit(&g_tables, i, &e)) >= 0; i++) step(&e);
+            static CoordAction none;            /* (the notices name no action) */
+            for (int w = 0; (w = coord_next_webgpu_exit(&g_state, &g_tables, w, &g_plan, &e)) >= 0; w++) {
+                CoordEvent unused;
+                coord_run(&g_tables, &none, &g_plan, &unused);
                 step(&e);
             }
         }

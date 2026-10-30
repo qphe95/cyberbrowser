@@ -1,5 +1,6 @@
 /* gpu_main.c - cb_gpu.exe: the GPU process (SANDBOX_DESIGN.md section 5),
- * the shim around the verified decoder (gpu_decode.c).
+ * the shim around the verified decoder (gpu_decode.c) and the verified
+ * reading of a tab's uploads and frame headers (gpu_input.c).
  *
  * Started by the coordinator with its control channel:
  *   cb_gpu.exe --chan S E0 E1
@@ -35,14 +36,13 @@
 #include "site.h"
 #include "gpu_wire.h"
 #include "gpu_decode.h"
+#include "gpu_input.h"
 #include "gpu_backend.h"
 
 #define MAX_CLIENTS 61                  /* + the control and UI channels: 63 waits */
-#define CLIENT_BYTES (1024ull << 20)    /* a tab's resources, at most */
 
 typedef struct Res {
-    uint8_t *px;                        /* the CPU copy: w * h (atlas) or w * h * 4 (image) */
-    uint32_t w, h;
+    GpuPixels p;                        /* the CPU copy: w * h (atlas) or w * h * 4 (image) */
     GpuTexture *tex;
 } Res;
 
@@ -58,7 +58,7 @@ typedef struct Client {
     GpuTarget *target;
     uint32_t width, height;
     GpuFrame at;                        /* the last frame's place in the page */
-    struct { uint32_t seq; int32_t dy; } scrolls[64];  /* the UI's, since the last frame's */
+    GpuScroll scrolls[GPU_MAX_SCROLLS]; /* the UI's, since the last frame's */
     uint32_t nscrolls;
 } Client;
 
@@ -159,7 +159,8 @@ static bool cpu_present(HWND hwnd, uint32_t w, uint32_t h, GpuTarget *t, int32_t
     return true;
 }
 
-static bool cpu_readback(GpuTarget *t, uint8_t *out, uint32_t *w, uint32_t *h) {
+static bool cpu_readback(GpuTarget *t, uint8_t *out, size_t cap, uint32_t *w, uint32_t *h) {
+    if ((size_t)t->w * t->h * 4 > cap) return false;
     memcpy(out, t->bgrx, (size_t)t->w * t->h * 4);
     *w = t->w;
     *h = t->h;
@@ -175,84 +176,73 @@ static const GpuBackend g_cpu = {
 static bool client_atlas(void *user, int slot, const uint8_t **pixels, int *w, int *h) {
     Client *c = (Client *)user;
     if (slot < 0 || slot >= GPU_FONT_SLOTS || !c->ns.font[slot]) return false;
-    *pixels = c->atlas[slot].px;
-    *w = (int)c->atlas[slot].w;
-    *h = (int)c->atlas[slot].h;
+    *pixels = c->atlas[slot].p.px;
+    *w = (int)c->atlas[slot].p.w;
+    *h = (int)c->atlas[slot].p.h;
     return true;
 }
 
 static bool client_image(void *user, int id, const uint8_t **pixels, int *w, int *h, int *ch) {
     Client *c = (Client *)user;
     if (id < 0 || id >= GPU_MAX_IMAGES || !c->ns.image[id]) return false;
-    *pixels = c->images[id].px;
-    *w = (int)c->images[id].w;
-    *h = (int)c->images[id].h;
+    *pixels = c->images[id].p.px;
+    *w = (int)c->images[id].p.w;
+    *h = (int)c->images[id].p.h;
     *ch = 4;
     return true;
 }
 
 static void res_free(Res *r) {
     if (r->tex && g_be->texture_free) g_be->texture_free(r->tex);
-    free(r->px);
+    free(r->p.px);
     memset(r, 0, sizeof(*r));
 }
 
-/* TG_ATLAS: rows of a font slot's atlas. */
-static void upload_atlas(Client *c, const uint8_t *m, uint32_t len) {
-    TgAtlas a;
-    if (len < sizeof(a)) return;
-    memcpy(&a, m, sizeof(a));
-    if (a.slot >= GPU_FONT_SLOTS || a.width == 0 || a.height == 0 || a.width > 4096 || a.height > 4096 ||
-        a.y0 > a.height || a.rows > a.height - a.y0 || len - sizeof(a) != (uint64_t)a.rows * a.width)
+/* Allocate r for w x h at bpp bytes a pixel (gpu_upload_plan said so),
+ * counting it in c's bytes.  On failure r holds nothing, and the slot or
+ * id stays unmarked. */
+static void res_new(Client *c, Res *r, uint32_t w, uint32_t h, uint32_t bpp) {
+    uint64_t bytes = (uint64_t)w * h * bpp;
+    res_free(r);
+    r->p.px = (uint8_t *)(bpp == 1 ? calloc(1, bytes) : malloc(bytes));
+    if (!r->p.px) {
+        fprintf(stderr, "[gpu] tab %u: out of memory for a %ux%u %s\n", c->tab, w, h, bpp == 1 ? "atlas" : "image");
         return;
-    Res *r = &c->atlas[a.slot];
-    if (!r->px || r->w != a.width || r->h != a.height) {
-        uint64_t bytes = (uint64_t)a.width * a.height;
-        if (c->bytes + bytes > CLIENT_BYTES) return;
-        if (r->px) c->bytes -= (uint64_t)r->w * r->h;
-        res_free(r);
-        r->px = (uint8_t *)calloc(1, bytes);
-        if (!r->px) return;
-        r->w = a.width;
-        r->h = a.height;
-        c->bytes += bytes;
-        if (g_be->texture_new) r->tex = g_be->texture_new(false, a.width, a.height);
     }
-    memcpy(r->px + (size_t)a.y0 * a.width, m + sizeof(a), (size_t)a.rows * a.width);
-    if (r->tex) g_be->texture_update(r->tex, a.y0, a.rows, r->px + (size_t)a.y0 * a.width);
-    c->ns.font[a.slot] = 1;
+    r->p.w = w;
+    r->p.h = h;
+    c->bytes += bytes;
+    if (g_be->texture_new) r->tex = g_be->texture_new(bpp == 4, w, h);
 }
 
-/* TG_IMAGE: an image, new or replaced. */
+/* TG_ATLAS: rows of a font slot's atlas.  gpu_input.c (proved) reads it,
+ * decides whether to replace the atlas, and marks the slot once the rows
+ * are in place. */
+static void upload_atlas(Client *c, const uint8_t *m, uint32_t len) {
+    TgAtlas a;
+    if (!gpu_atlas_parse(m, len, &a)) return;
+    Res *r = &c->atlas[a.slot];
+    int plan = gpu_upload_plan(&c->ns.font[a.slot], &c->bytes, &r->p, a.width, a.height, 1, true);
+    if (plan == GPU_UP_DROP) return;
+    if (plan == GPU_UP_NEW) res_new(c, r, a.width, a.height, 1);
+    if (!gpu_atlas_put(&c->ns, &r->p, &a, m, len)) return;
+    if (r->tex) g_be->texture_update(r->tex, a.y0, a.rows, r->p.px + (size_t)a.y0 * a.width);
+}
+
+/* TG_IMAGE: an image, new or replaced, the same way. */
 static void upload_image(Client *c, const uint8_t *m, uint32_t len) {
     TgImage t;
-    if (len < sizeof(t)) return;
-    memcpy(&t, m, sizeof(t));
-    if (t.id >= GPU_MAX_IMAGES || t.width == 0 || t.height == 0 || t.width > 16384 || t.height > 16384 ||
-        len - sizeof(t) != (uint64_t)t.width * t.height * 4)
-        return;
+    if (!gpu_image_parse(m, len, &t)) return;
     Res *r = &c->images[t.id];
-    uint64_t bytes = (uint64_t)t.width * t.height * 4;
-    if (!r->px || r->w != t.width || r->h != t.height) {
-        uint64_t old = r->px ? (uint64_t)r->w * r->h * 4 : 0;
-        if (c->bytes - old + bytes > CLIENT_BYTES) {
-            fprintf(stderr, "[gpu] tab %u: over its %llu MB for resources, image %u dropped\n", c->tab,
-                    CLIENT_BYTES >> 20, t.id);
-            return;
-        }
-        c->bytes -= old;
-        c->ns.image[t.id] = 0;
-        res_free(r);
-        r->px = (uint8_t *)malloc(bytes);
-        if (!r->px) return;
-        r->w = t.width;
-        r->h = t.height;
-        c->bytes += bytes;
-        if (g_be->texture_new) r->tex = g_be->texture_new(true, t.width, t.height);
+    int plan = gpu_upload_plan(&c->ns.image[t.id], &c->bytes, &r->p, t.width, t.height, 4, false);
+    if (plan == GPU_UP_DROP) {
+        fprintf(stderr, "[gpu] tab %u: over its %llu MB for resources, image %u dropped\n", c->tab,
+                GPU_CLIENT_BYTES >> 20, t.id);
+        return;
     }
-    memcpy(r->px, m + sizeof(t), bytes);
-    if (r->tex) g_be->texture_update(r->tex, 0, t.height, r->px);
-    c->ns.image[t.id] = 1;
+    if (plan == GPU_UP_NEW) res_new(c, r, t.width, t.height, 4);
+    if (!gpu_image_put(&c->ns, &r->p, &t, m, len)) return;
+    if (r->tex) g_be->texture_update(r->tex, 0, t.height, r->p.px);
 }
 
 /* ---- frames -------------------------------------------------------------------- */
@@ -342,22 +332,10 @@ static void to_display_list(const WireCmd *cmds, uint32_t n, const WireMask *mas
 
 static Client *client_of(uint32_t tab);
 
-/* Where the viewport of c lies now, in the page: as its last frame says,
- * moved by the scrolls the tab hadn't seen, clamped as the tab clamps. */
-static int64_t view_y(const Client *c) {
-    int64_t max = c->at.content_h > c->at.view_h ? (int64_t)c->at.content_h - c->at.view_h : 0;
-    int64_t y = c->at.scroll_y < max ? c->at.scroll_y : max;
-    for (uint32_t i = 0; i < c->nscrolls; i++) {
-        y += c->scrolls[i].dy;
-        y = y < 0 ? 0 : y > max ? max : y;
-    }
-    return y;
-}
-
-/* The row of c's layer at the top of its viewport now. */
+/* The row of c's layer at the top of its viewport now: where its last frame
+ * put the viewport, moved by the scrolls the tab hadn't seen (gpu_input.c). */
 static int32_t layer_row(const Client *c) {
-    int64_t r = view_y(c) - (int64_t)c->at.origin_y;
-    return r < -GPU_MAX_H ? -GPU_MAX_H : r > GPU_MAX_H ? GPU_MAX_H : (int32_t)r;
+    return gpu_layer_row(&c->at, c->scrolls, c->nscrolls);
 }
 
 static void mark_dirty(uint32_t tab) {
@@ -388,9 +366,12 @@ static void frame(Client *c, const uint8_t *m, uint32_t len) {
     static WireMask *masks;
     static uint32_t cmd_cap, mask_cap;
     static DisplayList dl;
-    uint32_t in_cmds = len >= WIRE_FRAME_BYTES ? ((const GpuFrame *)m)->ncmds : 0;
-    uint32_t in_masks = len >= WIRE_FRAME_BYTES ? ((const GpuFrame *)m)->nmasks : 0;
-    if (in_cmds > GPU_MAX_CMDS || in_masks > GPU_MAX_MASKS) return;
+    GpuFrame head;                      /* the header as it came (gpu_input.c), for allocating and placing */
+    if (!gpu_frame_header(m, len, &head)) {
+        if (len < WIRE_FRAME_BYTES) fprintf(stderr, "[gpu] tab %u: malformed frame (%u bytes)\n", c->tab, len);
+        return;
+    }
+    uint32_t in_cmds = head.ncmds, in_masks = head.nmasks;
     if (cmd_cap < in_cmds + GPU_MAX_DEPTH) {
         cmd_cap = in_cmds + GPU_MAX_DEPTH;
         cmds = (WireCmd *)realloc(cmds, (size_t)cmd_cap * sizeof(WireCmd));
@@ -424,15 +405,13 @@ static void frame(Client *c, const uint8_t *m, uint32_t len) {
         c->width = f.width;
         c->height = f.height;
         /* The layer's place: the header's last five numbers, which the
-         * decoder leaves alone (they are only clamped where they are used). */
-        memcpy(&c->at, m, sizeof(c->at));
+         * decoder leaves alone (they are only clamped where they are used,
+         * gpu_layer_row). */
+        c->at = head;
         c->at.width = f.width;
         c->at.height = f.height;
         /* The scrolls this frame has seen are in its scroll_y. */
-        uint32_t k = 0;
-        for (uint32_t i = 0; i < c->nscrolls; i++)
-            if ((int32_t)(c->scrolls[i].seq - f.scroll_seq) > 0) c->scrolls[k++] = c->scrolls[i];
-        c->nscrolls = k;
+        c->nscrolls = gpu_scrolls_seen(c->scrolls, c->nscrolls, head.scroll_seq);
         mark_dirty(c->tab);
     }
     static int crash_after = -1;
@@ -524,10 +503,14 @@ static void ui_message(void) {
         if (c && c->target && w->h) {
             free(px);
             free(out);
-            px = (uint8_t *)malloc((size_t)c->width * c->height * 4);
+            size_t px_cap = (size_t)c->width * c->height * 4;
+            px = (uint8_t *)malloc(px_cap);
             out = (uint8_t *)malloc((size_t)c->width * w->h * 4);
             uint32_t tw = 0, th = 0;
-            if (px && out && g_be->readback(c->target, px, &tw, &th)) {
+            /* (The target can differ from the tab's size, if a resize was
+             * made and its render failed: the readback is refused then, and
+             * out is only ever written c->width wide.) */
+            if (px && out && g_be->readback(c->target, px, px_cap, &tw, &th) && tw == c->width) {
                 int32_t row = layer_row(c);
                 memset(out, 255, (size_t)tw * w->h * 4);
                 for (uint32_t y = 0; y < w->h; y++) {
@@ -547,7 +530,7 @@ static void ui_message(void) {
 static void client_free(Client *c) {
     for (int i = 0; i < GPU_FONT_SLOTS; i++) res_free(&c->atlas[i]);
     for (int i = 0; c->images && i < GPU_MAX_IMAGES; i++)
-        if (c->images[i].px) res_free(&c->images[i]);
+        if (c->images[i].p.px) res_free(&c->images[i]);
     free(c->images);
     if (c->target) g_be->target_free(c->target);
     big_free(&c->rx);
@@ -576,6 +559,7 @@ static void grant(const CsGrant *g) {
         return;
     }
     c->tab = g->client;
+    c->rx.limit = BIG_MAX;  /* images (16384^2 RGBA) and frames (~64 MB) can be large; CLIENT_BYTES bounds what stays */
     memcpy(c->site, g->site, SITE_MAX);
     g_clients[slot] = c;
 }

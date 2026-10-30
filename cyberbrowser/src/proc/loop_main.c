@@ -14,6 +14,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <windows.h>
 
@@ -39,6 +40,11 @@ static Sock g_socks[LOOP_MAX_CONNS];
 
 static void step(const LoopEvent *e);
 
+/* Events that performing an action led to, stepped after it (step). */
+static bool g_stepping;
+static LoopEvent g_follow[LOOP_MAX_ACTIONS];
+static int g_nfollow;
+
 static void sock_close(int i) {
     Sock *k = &g_socks[i];
     if (k->s != INVALID_SOCKET) closesocket(k->s);
@@ -49,13 +55,24 @@ static void sock_close(int i) {
     k->out_len = k->out_off = 0;
 }
 
+/* A socket's event: stepped now, or, while an action is being performed,
+ * queued to be stepped after it. */
 static void event_slot(LoopEventKind kind, int slot, bool ok) {
     LoopEvent e;
     memset(&e, 0, sizeof(e));
     e.kind = kind;
     e.slot = slot;
     e.ok = ok;
-    step(&e);
+    if (!g_stepping) {
+        step(&e);
+        return;
+    }
+    if (g_nfollow == LOOP_MAX_ACTIONS) {
+        /* Can't happen: loop_step's contract (see step). */
+        fprintf(stderr, "[loop] more events than loop_step allows\n");
+        abort();
+    }
+    g_follow[g_nfollow++] = e;
 }
 
 /* Connect slot i to the loopback address of family (the only addresses
@@ -160,16 +177,29 @@ static void perform(const LoopAction *a) {
 }
 
 /* Step the core and perform its actions.  An action can lead to another
- * event (a failed connect, a socket that ends while written to), stepped in
- * turn: its own actions, a copy, are done before this step's next. */
+ * event: LA_CONNECT to LE_CONNECTED (a connect that failed at once), and
+ * LA_SOCK_SEND to LE_SOCK_SENT or LE_SOCK_CLOSED; at most one each, which
+ * event_slot queues.  They are stepped after that action, before this
+ * step's next (the order M4's recursion had).  loop_step's contract says
+ * such an event's actions are only LA_SOCK_CLOSE and LA_NET_SEND, which lead
+ * to none: so every event is stepped, nothing goes deeper than one level,
+ * and the queue never holds more than one. */
 static void step(const LoopEvent *e) {
-    static int depth;
-    if (depth > 4) return;
-    depth++;
+    g_stepping = true;
     loop_step(&g_state, e, &g_actions);
     LoopActions acts = g_actions;
-    for (int i = 0; i < acts.n; i++) perform(&acts.a[i]);
-    depth--;
+    for (int i = 0; i < acts.n; i++) {
+        g_nfollow = 0;
+        perform(&acts.a[i]);
+        for (int k = 0; k < g_nfollow; k++) {
+            LoopEvent f = g_follow[k];
+            loop_step(&g_state, &f, &g_actions);
+            LoopActions more = g_actions;
+            for (int j = 0; j < more.n; j++) perform(&more.a[j]);
+        }
+    }
+    g_nfollow = 0;
+    g_stepping = false;
 }
 
 static void grant(const CsGrant *g) {

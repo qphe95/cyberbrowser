@@ -1,5 +1,6 @@
-/* net_policy.c - Private Network Access and Opaque Response Blocking
- * decisions (net_policy.h).  No library calls: the prover sees all of it. */
+/* net_policy.c - the network process's decisions (net_policy.h): Private
+ * Network Access, Opaque Response Blocking, the documents a tab is given
+ * (P10), initiators and CORS.  No library calls: the prover sees all of it. */
 #include "net_policy.h"
 
 /* ---- address spaces ----------------------------------------------------------------- */
@@ -213,4 +214,107 @@ int orb_verdict(const uint8_t *mime, uint32_t mime_len, bool nosniff, int status
     if (status < 200 || status > 299) return ORB_BLOCK;
     if (sniffs_as_doc(body, body_len)) return ORB_BLOCK;
     return ORB_ALLOW;
+}
+
+/* ---- documents, initiators, CORS ------------------------------------------------------ */
+
+bool net_same(const uint8_t *a, uint32_t an, const uint8_t *b, uint32_t bn) {
+    if (an != bn) return false;
+    /*@ loop invariant 0 <= i <= an;
+        loop invariant \forall integer k; 0 <= k < i ==> a[k] == b[k];
+        loop assigns i;
+        loop variant an - i;
+     */
+    for (uint32_t i = 0; i < an; i++)
+        if (a[i] != b[i]) return false;
+    return true;
+}
+
+int net_doc_verdict(int mode, const uint8_t *tab_site, uint32_t tab_len, const uint8_t *doc_site, uint32_t doc_len) {
+    if (mode != (int)NET_MODE_NAVIGATE) return NET_DOC_OK;
+    return tab_len > 0 && net_same(tab_site, tab_len, doc_site, doc_len) ? NET_DOC_OK : NET_DOC_ELSEWHERE;
+}
+
+/* Entry k of f is o[0 .. n). */
+/*@ requires \valid_read(f) && frames_ok(f) && 0 <= k < f->n && \valid_read(o + (0 .. n - 1));
+    assigns \nothing;
+    ensures \result <==> frame_is(f, k, o, n);
+ */
+static bool frame_eq(const NetFrames *f, uint32_t k, const uint8_t *o, uint32_t n) {
+    if (f->len[k] != n) return false;
+    /*@ loop invariant 0 <= i <= n;
+        loop invariant \forall integer j; 0 <= j < i ==> f->origin[k][j] == o[j];
+        loop assigns i;
+        loop variant n - i;
+     */
+    for (uint32_t i = 0; i < n; i++)
+        if (f->origin[k][i] != o[i]) return false;
+    return true;
+}
+
+bool net_frames_has(const NetFrames *f, const uint8_t *o, uint32_t n) {
+    /*@ loop invariant 0 <= k <= f->n;
+        loop invariant \forall integer j; 0 <= j < k ==> !frame_is(f, j, o, n);
+        loop assigns k;
+        loop variant f->n - k;
+     */
+    for (uint32_t k = 0; k < f->n; k++)
+        if (frame_eq(f, k, o, n)) return true;
+    return false;
+}
+
+bool net_frames_add(NetFrames *f, const uint8_t *o, uint32_t n) {
+    if (net_frames_has(f, o, n)) return true;
+    if (n > NET_ORIGIN_MAX || f->n >= NET_FRAMES_MAX) return false;
+    uint32_t k = f->n;
+    /*@ loop invariant 0 <= i <= n;
+        loop invariant \forall integer j; 0 <= j < i ==> f->origin[k][j] == o[j];
+        loop assigns i, f->origin[k][0 .. NET_ORIGIN_MAX - 1];
+        loop variant n - i;
+     */
+    for (uint32_t i = 0; i < n; i++) f->origin[k][i] = o[i];
+    f->len[k] = n;
+    f->n = k + 1;
+    /*@ assert frame_is(f, k, o, n); */
+    /*@ assert in_frames(f, o, n); */
+    return true;
+}
+
+bool net_initiator_ok(const NetFrames *f, const uint8_t *tab_site, uint32_t tab_len, const uint8_t *init,
+                      uint32_t init_len, const uint8_t *init_site, uint32_t init_site_len) {
+    if (init_site_len > 0 && net_same(init_site, init_site_len, tab_site, tab_len)) return true;
+    return net_frames_has(f, init, init_len);
+}
+
+/* "true", ignoring ASCII case. */
+/*@ requires \valid_read(a + (0 .. n - 1));
+    assigns \nothing;
+    ensures \result <==> n == 4 && (a[0] == 't' || a[0] == 'T') && (a[1] == 'r' || a[1] == 'R') &&
+                         (a[2] == 'u' || a[2] == 'U') && (a[3] == 'e' || a[3] == 'E');
+ */
+static bool is_true(const uint8_t *a, uint32_t n) {
+    return n == 4 && (a[0] == 't' || a[0] == 'T') && (a[1] == 'r' || a[1] == 'R') && (a[2] == 'u' || a[2] == 'U') &&
+           (a[3] == 'e' || a[3] == 'E');
+}
+
+int net_may_read(const NetRead *r) {
+    if (r->mode < (int)NET_MODE_NO_CORS || r->mode > (int)NET_MODE_FRAME) return NET_READ_MODE;
+    if (r->mode == (int)NET_MODE_NAVIGATE || r->mode == (int)NET_MODE_FRAME) return NET_READ_OK;
+    /* An initiator the tab may not speak for is taken as the page. */
+    bool counts = r->init_len > 0 && net_initiator_ok(r->frames, r->tab_site, r->tab_site_len, r->init, r->init_len,
+                                                      r->init_site, r->init_site_len);
+    bool cross = counts ? !net_same(r->final_origin, r->final_origin_len, r->init, r->init_len)
+                        : !net_same(r->final_site, r->final_site_len, r->tab_site, r->tab_site_len);
+    if (!cross) return NET_READ_OK;
+    if (r->mode == (int)NET_MODE_CORS) {
+        if (!r->have_acao) return NET_READ_NO_ACAO;
+        bool star = r->acao_len == 1 && r->acao[0] == '*';
+        if (r->credentialed && (star || !is_true(r->acac, r->acac_len))) return NET_READ_CREDENTIALS;
+        if (star) return NET_READ_OK;
+        if (counts) return net_same(r->acao, r->acao_len, r->init, r->init_len) ? NET_READ_OK : NET_READ_ACAO;
+        return r->acao_site_len > 0 && net_same(r->acao_site, r->acao_site_len, r->tab_site, r->tab_site_len)
+                   ? NET_READ_OK : NET_READ_ACAO;
+    }
+    return orb_verdict(r->mime, r->mime_len, r->nosniff, r->status, r->body, r->body_len) == ORB_ALLOW
+               ? NET_READ_OK : NET_READ_ORB;
 }

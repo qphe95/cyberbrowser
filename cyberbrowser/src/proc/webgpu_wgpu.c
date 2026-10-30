@@ -9,6 +9,7 @@
 #define WGPU_SKIP_DECLARATIONS
 #include "webgpu.h"
 #include "webgpu_wire.h"
+#include "webgpu_decode.h"
 #include "gpu_blocklist.h"
 
 /* ---- wgpu's entry points --------------------------------------------------------- */
@@ -21,7 +22,7 @@
     X(DeviceCreatePipelineLayout) X(DeviceCreateBindGroup) X(DeviceCreateRenderPipeline) \
     X(DeviceCreateComputePipeline) X(DeviceCreateCommandEncoder) X(DevicePushErrorScope) X(DevicePopErrorScope) \
     X(DeviceGetLimits) X(BufferMapAsync) X(BufferGetConstMappedRange) X(BufferGetMappedRange) X(BufferUnmap) \
-    X(BufferDestroy) X(BufferRelease) X(BufferGetSize) X(TextureCreateView) X(TextureDestroy) X(TextureRelease) \
+    X(BufferDestroy) X(BufferRelease) X(BufferGetSize) X(TextureCreateView) X(TextureDestroy) X(TextureAddRef) X(TextureRelease) \
     X(TextureViewRelease) X(SamplerRelease) X(ShaderModuleRelease) X(ShaderModuleGetCompilationInfo) \
     X(BindGroupLayoutRelease) X(PipelineLayoutRelease) X(BindGroupRelease) X(RenderPipelineRelease) \
     X(ComputePipelineRelease) X(RenderPipelineGetBindGroupLayout) X(ComputePipelineGetBindGroupLayout) \
@@ -75,83 +76,17 @@ static WGPUStringView sv(const char *s) {
 
 /* ---- value trees --------------------------------------------------------------------- */
 
-typedef struct Node {
-    uint8_t tag;
-    uint32_t n;                     /* array/object: children; string/bytes: length */
-    double num;                     /* number; id */
-    const uint8_t *data;            /* string/bytes */
-    const uint8_t *key;             /* in an object: its key */
-    uint32_t key_len;
-    int first, next;                /* children, siblings: node indices, -1 none */
-} Node;
+/* Parsed by webgpu_decode.c's wire_parse (proved): every node's bytes and
+ * key lie inside the record they were read from (g_in, as offsets), and
+ * every child and sibling index names a later node of g_tree, so the walks
+ * below stay inside it and end. */
+typedef WireNode Node;
 
-typedef struct Tree {
-    Node nodes[WIRE_MAX_NODES];
-    int n;
-} Tree;
+static WireTree g_tree;
+static const uint8_t *g_in;             /* the record g_tree was read from */
 
-static Tree g_tree;
-
-static uint32_t take_u32(const uint8_t **p, const uint8_t *end, bool *ok) {
-    if (end - *p < 4) { *ok = false; return 0; }
-    uint32_t v;
-    memcpy(&v, *p, 4);
-    *p += 4;
-    return v;
-}
-
-/* One value at *p (and what it holds); its node index, -1 if malformed. */
-static int parse(Tree *t, const uint8_t **p, const uint8_t *end, int depth) {
-    if (depth > WIRE_MAX_DEPTH || *p >= end || t->n >= WIRE_MAX_NODES) return -1;
-    int i = t->n++;
-    Node *node = &t->nodes[i];
-    memset(node, 0, sizeof(*node));
-    node->first = node->next = -1;
-    node->tag = *(*p)++;
-    bool ok = true;
-    switch (node->tag) {
-    case V_NULL: case V_FALSE: case V_TRUE: break;
-    case V_NUMBER:
-        if (end - *p < 8) return -1;
-        memcpy(&node->num, *p, 8);
-        *p += 8;
-        break;
-    case V_ID: node->num = take_u32(p, end, &ok); break;
-    case V_STRING: case V_BYTES:
-        node->n = take_u32(p, end, &ok);
-        if (!ok || node->n > (uint32_t)(end - *p) || node->n > WIRE_MAX_STRING) return -1;
-        node->data = *p;
-        *p += node->n;
-        break;
-    case V_ARRAY: case V_OBJECT: {
-        node->n = take_u32(p, end, &ok);
-        if (!ok || node->n > WIRE_MAX_NODES) return -1;
-        int last = -1;
-        for (uint32_t k = 0; k < node->n; k++) {
-            const uint8_t *key = NULL;
-            uint32_t key_len = 0;
-            if (node->tag == V_OBJECT) {
-                key_len = take_u32(p, end, &ok);
-                if (!ok || key_len > 256 || key_len > (uint32_t)(end - *p)) return -1;
-                key = *p;
-                *p += key_len;
-            }
-            int c = parse(t, p, end, depth + 1);
-            if (c < 0) return -1;
-            t->nodes[c].key = key;
-            t->nodes[c].key_len = key_len;
-            if (last < 0) t->nodes[i].first = c;
-            else t->nodes[last].next = c;
-            last = c;
-        }
-        break;
-    }
-    default: return -1;
-    }
-    return ok ? i : -1;
-}
-
-static const Node *nd(int i) { return i >= 0 ? &g_tree.nodes[i] : NULL; }
+static const Node *nd(int i) { return i >= 0 && i < g_tree.n ? &g_tree.nodes[i] : NULL; }
+static const uint8_t *data_of(const Node *n) { return g_in + n->off; }
 
 /* A member of object o, or -1. */
 static int get(int o, const char *key) {
@@ -159,7 +94,7 @@ static int get(int o, const char *key) {
     if (!n || n->tag != V_OBJECT) return -1;
     size_t kl = strlen(key);
     for (int c = n->first; c >= 0; c = g_tree.nodes[c].next)
-        if (g_tree.nodes[c].key_len == kl && !memcmp(g_tree.nodes[c].key, key, kl)) return c;
+        if (g_tree.nodes[c].key_len == kl && !memcmp(g_in + g_tree.nodes[c].key_off, key, kl)) return c;
     return -1;
 }
 
@@ -175,7 +110,10 @@ static uint32_t count(int a) { const Node *n = nd(a); return n && n->tag == V_AR
 
 static double num(int i, double dflt) {
     const Node *n = nd(i);
-    return n && n->tag == V_NUMBER ? n->num : dflt;
+    if (!n || n->tag != V_NUMBER) return dflt;
+    double v;
+    memcpy(&v, &n->bits, 8);
+    return v;
 }
 
 static uint32_t u32(int i, uint32_t dflt) {
@@ -197,7 +135,7 @@ static bool flag(int i, bool dflt) {
 static const char *string(int i, char *buf, size_t cap) {
     const Node *n = nd(i);
     if (!n || n->tag != V_STRING || n->n >= cap) return NULL;
-    memcpy(buf, n->data, n->n);
+    memcpy(buf, data_of(n), n->n);
     buf[n->n] = 0;
     return buf;
 }
@@ -333,10 +271,9 @@ static const Name FEATURES[] = { { "depth-clip-control", WGPUFeatureName_DepthCl
 
 /* ---- a tab's objects ------------------------------------------------------------------ */
 
-enum { O_NONE = 0, O_ADAPTER, O_DEVICE, O_QUEUE, O_BUFFER, O_TEXTURE, O_VIEW, O_SAMPLER, O_MODULE, O_BGL, O_PL, O_BG,
-       O_RPIPE, O_CPIPE, O_ENCODER, O_RPASS, O_CPASS, O_CMDBUF };
-
-#define MAX_IDS 65536
+/* The table of a tab's ids (WgpuObj, O_*) is webgpu_decode.h's, and so is
+ * the lookup by id (wgpu_obj, proved). */
+#define MAX_IDS WGPU_MAX_IDS
 #define MAX_CANVASES 64
 
 /* A buffer's or texture's state, shared by its id and by what uses it
@@ -344,27 +281,14 @@ enum { O_NONE = 0, O_ADAPTER, O_DEVICE, O_QUEUE, O_BUFFER, O_TEXTURE, O_VIEW, O_
  * process on a submit that fails WebGPU's checks (a buffer still mapped, a
  * destroyed one, a command buffer encoded wrong or submitted twice), so
  * submits are checked here first, and refused as a validation error. */
-typedef struct Res { int refs; bool destroyed, mapped; } Res;
-
-typedef struct Obj {
-    uint8_t kind;
-    void *h;
-    uint32_t device;                /* the device it was made by (buffers: for waiting) */
-    uint32_t scopes;                /* a device's error scopes pushed (wgpu-native aborts on a pop of none) */
-    bool lost;                      /* a device destroyed: nothing of it reaches wgpu again (much of what
-                                     * wgpu-native does on a lost device aborts) */
-    bool ended;                     /* a pass ended */
-    bool bad;                       /* uses more than can be tracked: never submitted */
-    uint32_t parent;                /* a pass's encoder */
-    Res *res;                       /* a buffer's or a texture's (a view's: its texture's) */
-    Res **uses;                     /* what a bind group, an encoder or a command buffer uses */
-    uint32_t nuses, cap_uses;
-    uint64_t size, map_off, map_size;   /* a buffer's size, and the range mapped */
-} Obj;
+struct WgpuRes { int refs; bool destroyed, mapped; };
+typedef WgpuRes Res;
+typedef WgpuObj Obj;
 
 typedef struct Canvas {
     uint32_t id, device;
     WGPUTexture texture;
+    Res *res;                       /* the texture's, shared with every id given it (G_CURRENT_TEXTURE) */
     WGPUTextureFormat format;
     uint32_t width, height;
     bool opaque;
@@ -409,17 +333,15 @@ static void use_obj(Obj *o) {
     if (o->bad) g_holder->bad = true;
 }
 
+/* Only this client's objects, of that kind, live (wgpu_obj, proved). */
 static Obj *obj(WgpuClient *c, uint32_t id, int kind) {
-    if (!id || id >= MAX_IDS || c->objs[id].kind != kind || !c->objs[id].h) return NULL;
-    Obj *o = &c->objs[id];
-    if (o->lost || (kind != O_ADAPTER && o->device && o->device < MAX_IDS && c->objs[o->device].lost)) return NULL;
-    return o;
+    return wgpu_obj(c->objs, id, (uint32_t)kind);
 }
 
 static void *handle(WgpuClient *c, int i, int kind) {
     const Node *n = nd(i);
     if (!n || n->tag != V_ID) return NULL;
-    Obj *o = obj(c, (uint32_t)n->num, kind);
+    Obj *o = obj(c, n->n, kind);
     use_obj(o);
     return o ? o->h : NULL;
 }
@@ -458,7 +380,7 @@ static void release(int kind, void *h) {
 static bool put_obj(WgpuClient *c, uint32_t id, int kind, void *h, uint32_t device) {
     if (!h) return false;
     Res *r = NULL;
-    if (!id || id >= MAX_IDS || c->objs[id].kind ||
+    if (!wgpu_id_free(c->objs, id) ||
         ((kind == O_BUFFER || kind == O_TEXTURE) && !(r = (Res *)calloc(1, sizeof(Res))))) {
         release(kind, h);
         return false;
@@ -515,7 +437,10 @@ static void submit_leftover(WgpuClient *c, Obj *cb) {
 void wgpu_client_free(WgpuClient *c) {
     if (!c) return;
     for (int i = 0; i < MAX_CANVASES; i++)
-        if (c->canvases[i].texture) w.TextureRelease(c->canvases[i].texture);
+        if (c->canvases[i].texture) {
+            w.TextureRelease(c->canvases[i].texture);
+            res_drop(c->canvases[i].res);
+        }
     /* Buffers unmapped, command buffers left over submitted; passes and
      * encoders released first, devices last, each device's work finished
      * first, as wgpu-native frees a device's resources only when polled. */
@@ -760,14 +685,16 @@ static void request_device(WgpuClient *c, uint32_t id, uint32_t queue_id, uint32
 static void buffer_map(WgpuClient *c, const uint8_t *p, uint32_t n, Out *o) {
     if (n < 24) { o->failed = true; return; }
     uint32_t id, mode;
-    double off, size;
+    uint64_t off_bits, size_bits, off, size;
     memcpy(&id, p, 4);
     memcpy(&mode, p + 4, 4);
-    memcpy(&off, p + 8, 8);
-    memcpy(&size, p + 16, 8);
+    memcpy(&off_bits, p + 8, 8);
+    memcpy(&size_bits, p + 16, 8);
+    /* The page's numbers as whole numbers, and the range inside the buffer
+     * (proved, webgpu_decode.c): what is read back is that range. */
     Obj *b = obj(c, id, O_BUFFER);
-    if (!b || off < 0 || size < 0 || off > 9e15 || size > (256 << 20) || b->res->mapped || b->res->destroyed ||
-        (uint64_t)off % 8 || (uint64_t)size % 4 || (uint64_t)off + (uint64_t)size > b->size) {
+    if (!b || !wire_whole(off_bits, &off) || !wire_whole(size_bits, &size) || b->res->mapped || b->res->destroyed ||
+        !wgpu_map_ok(off, size, b->size)) {
         put_u32(o, 0);
         return;
     }
@@ -780,8 +707,8 @@ static void buffer_map(WgpuClient *c, const uint8_t *p, uint32_t n, Out *o) {
     wait_for((volatile int *)&done);
     if (done != 1) { put_u32(o, 0); return; }
     b->res->mapped = true;
-    b->map_off = (uint64_t)off;
-    b->map_size = (uint64_t)size;
+    b->map_off = off;
+    b->map_size = size;
     put_u32(o, 1);
     if (mode == 1) {
         const void *m = w.BufferGetConstMappedRange(b->h, (size_t)off, (size_t)size);
@@ -793,14 +720,14 @@ static void buffer_map(WgpuClient *c, const uint8_t *p, uint32_t n, Out *o) {
 static void buffer_unmap(WgpuClient *c, const uint8_t *p, uint32_t n) {
     if (n < 12) return;
     uint32_t id;
-    double off;
+    uint64_t bits, off;
     memcpy(&id, p, 4);
-    memcpy(&off, p + 4, 8);
+    memcpy(&bits, p + 4, 8);
     Obj *b = obj(c, id, O_BUFFER);
     if (!b || !b->res->mapped) return;
     uint32_t len = n - 12;
-    if (len && off >= 0 && off < 9e15 && (uint64_t)off % 8 == 0 && len % 4 == 0 && (uint64_t)off >= b->map_off &&
-        (uint64_t)off + len <= b->map_off + b->map_size) {
+    /* The bytes copied land inside the range mapped (proved, webgpu_decode.c). */
+    if (wire_whole(bits, &off) && wgpu_write_ok(off, len, b->map_off, b->map_size)) {
         void *m = w.BufferGetMappedRange(b->h, (size_t)off, len);
         if (m) memcpy(m, p + 12, len);
     }
@@ -874,7 +801,7 @@ static size_t constants(int o, WGPUConstantEntry *out, char (*names)[64], size_t
     for (int ch = n->first; ch >= 0 && k < cap; ch = g_tree.nodes[ch].next) {
         const Node *e = &g_tree.nodes[ch];
         if (e->key_len >= 64) continue;
-        memcpy(names[k], e->key, e->key_len);
+        memcpy(names[k], g_in + e->key_off, e->key_len);
         names[k][e->key_len] = 0;
         out[k] = (WGPUConstantEntry)WGPU_CONSTANT_ENTRY_INIT;
         out[k].key = sv(names[k]);
@@ -1192,9 +1119,14 @@ static Canvas *canvas(WgpuClient *c, uint32_t id, bool make) {
     return NULL;
 }
 
-/* A canvas's texture at its size (G_CONFIGURE, and a resize). */
+/* A canvas's texture at its size (G_CONFIGURE, a resize, and one the page
+ * destroyed).  The old one is released here, but the ids the page was
+ * given it by G_CURRENT_TEXTURE each hold a reference of their own, so
+ * they stay valid until the page lets go of them. */
 static void canvas_texture(WgpuClient *c, Canvas *cv) {
     if (cv->texture) { w.TextureRelease(cv->texture); cv->texture = NULL; }
+    res_drop(cv->res);
+    cv->res = NULL;
     Obj *dev = obj(c, cv->device, O_DEVICE);
     if (!dev || !cv->width || !cv->height || cv->width > 8192 || cv->height > 8192) return;
     WGPUTextureDescriptor td = WGPU_TEXTURE_DESCRIPTOR_INIT;
@@ -1226,21 +1158,20 @@ static bool run_one(WgpuClient *c, uint32_t op, const uint8_t *p, uint32_t n, Ou
     int t = -1;
     if (k >= 0) {
         if (n < (uint32_t)k * 4 + 1) return false;
-        const uint8_t *q = p + k * 4, *end = p + n;
+        uint32_t q = (uint32_t)k * 4;
+        g_in = p;
         g_tree.n = 0;
-        t = parse(&g_tree, &q, end, 0);
+        t = wire_parse(p, n, &q, &g_tree);
         if (t < 0) return false;
         if (op == G_WRITE_TEXTURE) {            /* the tree, then the bytes */
-            const Node *bytes = NULL;
-            int bi = -1;
-            if (q < end) { bi = parse(&g_tree, &q, end, 0); bytes = nd(bi); }
+            const Node *bytes = nd(wire_parse(p, n, &q, &g_tree));
             if (!bytes || bytes->tag != V_BYTES) return false;
             Obj *qu = obj(c, a, O_QUEUE);
             if (!qu) return true;
             WGPUTexelCopyTextureInfo dst = copy_texture(c, get(t, "destination"));
             WGPUTexelCopyBufferLayout lay = copy_layout(get(t, "layout"));
             WGPUExtent3D x = extent(get(t, "size"));
-            if (dst.texture && !g_bad) w.QueueWriteTexture(qu->h, &dst, bytes->data, bytes->n, &lay, &x);
+            if (dst.texture && !g_bad) w.QueueWriteTexture(qu->h, &dst, data_of(bytes), bytes->n, &lay, &x);
             else if (g_bad) c->error = g_bad;
             return true;
         }
@@ -1365,7 +1296,7 @@ static bool run_one(WgpuClient *c, uint32_t op, const uint8_t *p, uint32_t n, Ou
         const Node *code = nd(get(t, "code"));
         if (!dev || !code || code->tag != V_STRING) return true;
         WGPUShaderSourceWGSL src = WGPU_SHADER_SOURCE_WGSL_INIT;
-        src.code.data = (const char *)code->data;
+        src.code.data = (const char *)data_of(code);
         src.code.length = code->n;
         WGPUShaderModuleDescriptor sd = WGPU_SHADER_MODULE_DESCRIPTOR_INIT;
         sd.nextInChain = &src.chain;
@@ -1509,7 +1440,7 @@ static bool run_one(WgpuClient *c, uint32_t op, const uint8_t *p, uint32_t n, Ou
         const char *why = count(t) > 64 ? "more than 64 command buffers" : NULL;
         for (uint32_t k2 = 0; k2 < count(t) && nb < 64; k2++) {
             const Node *x = nd(item(t, k2));
-            Obj *cb = x && x->tag == V_ID ? obj(c, (uint32_t)x->num, O_CMDBUF) : NULL;
+            Obj *cb = x && x->tag == V_ID ? obj(c, x->n, O_CMDBUF) : NULL;
             if (!cb) { why = "a command buffer is invalid, or was submitted already"; continue; }
             for (size_t j = 0; j < nb; j++) if (used[j] == cb) { why = "a command buffer submitted twice"; cb = NULL; break; }
             if (!cb) continue;
@@ -1527,11 +1458,11 @@ static bool run_one(WgpuClient *c, uint32_t op, const uint8_t *p, uint32_t n, Ou
     }
     case G_WRITE_BUFFER: {             /* queue, buffer, offset (f64), bytes */
         if (n < 16) return false;
-        double off;
-        memcpy(&off, p + 8, 8);
+        uint64_t bits, off;
+        memcpy(&bits, p + 8, 8);
         Obj *q = obj(c, a, O_QUEUE), *bf = obj(c, b, O_BUFFER);
         if (bf && (bf->res->destroyed || bf->res->mapped)) { refuse(c, "writeBuffer to a destroyed or mapped buffer"); return true; }
-        if (q && bf && off >= 0 && off < 9e15) w.QueueWriteBuffer(q->h, bf->h, (uint64_t)off, p + 16, n - 16);
+        if (q && bf && wire_whole(bits, &off)) w.QueueWriteBuffer(q->h, bf->h, off, p + 16, n - 16);
         return true;
     }
     case G_WORK_DONE: {
@@ -1566,22 +1497,25 @@ static bool run_one(WgpuClient *c, uint32_t op, const uint8_t *p, uint32_t n, Ou
     }
     case G_CURRENT_TEXTURE: {           /* id, canvas */
         Canvas *cv = canvas(c, b, false);
-        if (cv && cv->texture && a && a < MAX_IDS && !c->objs[a].kind) {
-            /* The canvas keeps its own reference; the page's id gets another. */
-            WGPUTextureViewDescriptor vd = WGPU_TEXTURE_VIEW_DESCRIPTOR_INIT;
-            (void)vd;
-            Res *r = (Res *)calloc(1, sizeof(Res));
-            if (!r) return true;
-            r->refs = 1;
+        /* A texture the page destroyed is replaced (presenting it would
+         * submit a copy of a destroyed texture, which wgpu-native aborts on). */
+        if (cv && cv->res && cv->res->destroyed) canvas_texture(c, cv);
+        if (cv && cv->texture && wgpu_id_free(c->objs, a)) {
+            /* The page's id holds a wgpu reference of its own (so the
+             * canvas's, released by canvas_texture on a configure or a
+             * resize, leaves it valid: no use after free), and the canvas's
+             * Res, shared with every id given this texture (so destroying it
+             * through one is seen by a submit through another). */
+            if (!cv->res) {
+                cv->res = (Res *)calloc(1, sizeof(Res));
+                if (!cv->res) return true;
+                cv->res->refs = 1;
+            }
+            w.TextureAddRef(cv->texture);
             c->objs[a].kind = O_TEXTURE;
             c->objs[a].h = cv->texture;
             c->objs[a].device = cv->device;
-            c->objs[a].res = r;
-            /* A reference of its own, so a release of the page's leaves the canvas's. */
-            typedef void (*AddRef)(WGPUTexture);
-            static AddRef add_ref;
-            if (!add_ref) add_ref = (AddRef)(void *)GetProcAddress(g_dll, "wgpuTextureAddRef");
-            if (add_ref) add_ref(cv->texture);
+            c->objs[a].res = res_hold(cv->res);
         }
         return true;
     }
@@ -1626,16 +1560,14 @@ static bool run_one(WgpuClient *c, uint32_t op, const uint8_t *p, uint32_t n, Ou
 
 bool wgpu_run(WgpuClient *c, const uint8_t *recs, uint32_t len, uint8_t **out, uint32_t *out_len, uint32_t *out_cap) {
     Out o = { out, out_len, out_cap, false };
-    for (uint32_t at = 0; at + 8 <= len; ) {
-        uint32_t op, n;
-        memcpy(&op, recs + at, 4);
-        memcpy(&n, recs + at + 4, 4);
-        if (n > len - at - 8) return false;
-        if (!run_one(c, op, recs + at + 8, n, &o) || o.failed) return false;
+    uint32_t at = 0, op, off, n;
+    int got;
+    while ((got = wire_next(recs, len, at, &op, &off, &n)) > 0) {
+        if (!run_one(c, op, recs + off, n, &o) || o.failed) return false;
         if (g_bad && op != G_PASS && op != G_ENCODE) c->error = g_bad;
-        at += 8 + n;
+        at = off + n;
     }
-    return true;
+    return got == 0;
 }
 
 void wgpu_resize(WgpuClient *c, uint32_t id, uint32_t width, uint32_t height) {
@@ -1651,6 +1583,7 @@ void wgpu_present(WgpuClient *c, uint32_t id, uint8_t **px, size_t *cap, uint32_
     Canvas *cv = canvas(c, id, false);
     Obj *dev = cv ? obj(c, cv->device, O_DEVICE) : NULL;
     if (!cv || !cv->texture || !dev || cv->format == WGPUTextureFormat_RGBA16Float) return;
+    if (cv->res && cv->res->destroyed) return;     /* the page destroyed it: nothing to copy */
     uint32_t stride = (cv->width * 4 + 255) & ~255u;
     WGPUBufferDescriptor bd = WGPU_BUFFER_DESCRIPTOR_INIT;
     bd.size = (uint64_t)stride * cv->height;

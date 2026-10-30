@@ -1,0 +1,51 @@
+# Alarms Eva reports wherever libchan runs (every process), each group under
+# the reason it can't happen.  Format: comment lines (#) give the reason for
+# the keys that follow; a key is "file:function: kind: property", as
+# tools/prove.sh prints it (no line numbers: a key covers every place in that
+# function).  Judgements: IMPRECISION (Eva can't see it; the reason is the
+# argument), LATENT (can't happen with today's callers, worth a fix).
+
+# IMPRECISION.  The rings' preconditions (chan_ring.h).  chan_create and
+# chan_attach accept ring_bytes only if it is a power of two in
+# [CHAN_RING_MIN, CHAN_RING_MAX] (chan.c, the checks before map()), and map()
+# maps exactly sizeof(ChanShared) + 2 * ring_bytes, with data[0] right after
+# the header and data[1] ring_bytes further: each ring is inside the view.
+# Eva can't evaluate (size & (size - 1)) == 0 on a range of sizes, nor tie
+# the size of the view (a range: ring_bytes comes from the peer's header) to
+# ring_bytes; its domains don't relate a block's size to a variable.
+chan.c:chan_recv: precondition of chan_ring_take: \valid_read(ring + (0 .. size - 1))
+chan.c:chan_recv: precondition of chan_ring_take: ring_size_ok(size)
+chan.c:chan_send: precondition of chan_ring_put: \valid(ring + (0 .. size - 1))
+chan.c:chan_send: precondition of chan_ring_put: ring_size_ok(size)
+
+# LATENT.  chan_send's `int spins` counts the waits for room.  After 1000
+# spins each wait is Sleep(1), at least a millisecond, so reaching 2^31 takes
+# about 25 days of a full ring; the loop ends when timeout_ms passes, and
+# every caller passes at most 30,000 ms (big_send passes its own caller's,
+# also at most 30,000).  Worth making it unsigned or saturating anyway.
+chan.c:chan_send: signed_overflow: spins + 1 ≤ 2147483647
+
+# IMPRECISION.  big_send: n is cut to CHAN_MSG_MAX - used before the copy, so
+# used + n <= CHAN_MSG_MAX (part's size), and off + n <= plen[k], the piece's
+# length, which the caller's buffer has (bigmsg.h).  Eva keeps used, n and
+# off apart (no relation between them).
+bigmsg.c:big_send: precondition of memcpy: valid_dest: valid_or_empty(dest, n)
+bigmsg.c:big_send: precondition of memcpy: valid_src: valid_read_or_empty(src, n)
+
+# IMPRECISION.  big_recv: before the copy, the growth loop makes
+# cap >= have + n + 1 and buf holds cap bytes, so buf + have .. + n - 1 and
+# buf[total] (total == have then) are inside; n <= part.len - 4 or part.len,
+# and part.len <= CHAN_MSG_MAX (chan_ring_take's postcondition), so the
+# source is inside part.data.  Eva doesn't relate buf's (variable) size to
+# cap, have and n.
+bigmsg.c:big_recv: mem_access: \valid(rx->buf + rx->total)
+bigmsg.c:big_recv: precondition of memcpy: valid_dest: valid_or_empty(dest, n)
+bigmsg.c:big_recv: precondition of memcpy: valid_src: valid_read_or_empty(src, n)
+
+# IMPRECISION (Eva's heap).  Eva keeps one summary block for everything
+# allocated at a call site in a loop (a "weak" base).  Freeing one of them
+# makes every pointer to any of them "maybe dangling".  rx->buf is only
+# replaced by realloc's result (the old block is then the one freed) or freed
+# by big_free, which sets it to NULL: no pointer to a freed buffer is kept.
+bigmsg.c:big_free: dangling_pointer: ¬\dangling(&rx->buf)
+bigmsg.c:big_recv: dangling_pointer: ¬\dangling(&rx->buf)

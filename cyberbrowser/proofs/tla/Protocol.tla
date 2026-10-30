@@ -13,13 +13,21 @@
 (* none; one ends when its site's last tab does, and may crash at any time,  *)
 (* breaking its channels (the tabs may ask again).                           *)
 (*                                                                           *)
+(* And redirected navigations (M9, P10): the network process loads a tab's   *)
+(* navigation, following redirects anywhere, and gives the tab the page only *)
+(* if it ends at the site of the tab's badge; otherwise it refuses it with   *)
+(* its final URL, the tab asks the UI to navigate there (TU_NAVIGATE), and   *)
+(* the UI replaces the tab with one of the final site's (UC_CLOSE_TAB, then  *)
+(* UC_OPEN_TAB with a new id).                                               *)
+(*                                                                           *)
 (* Safety: a server serves a request only on a channel it was granted, with  *)
 (* the badge of the tab process at the other end; never after that tab's    *)
 (* revocation; and holds one client per tab id.  A web-GPU process serves    *)
 (* only tabs of its own site, and a site has one at a time.  Liveness: a     *)
 (* closed tab's process ends, its slot frees, and its channels are revoked;  *)
 (* a tab waiting for its site's web-GPU process to start is connected to it  *)
-(* or told it gets none.                                                     *)
+(* or told it gets none.  A tab is only ever given a document of its own    *)
+(* site, and every refused navigation is followed.                           *)
 
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
@@ -29,9 +37,10 @@ CONSTANTS
     MaxStarts,  \* bound on tab processes started (each gets fresh channels)
     MaxWStarts, \* bound on web-GPU processes started (more: the table is full)
     WSites,     \* the sites whose tabs ask for one ({}: a model without them)
-    Requests    \* do tabs send requests to the servers (Send)?  The liveness
+    Requests,   \* do tabs send requests to the servers (Send)?  The liveness
                 \* properties don't depend on them: ProtocolLive.cfg leaves
                 \* them out, to have room for the web-GPU processes.
+    Redirects   \* are navigations that end at another site refused (Load)?
 
 Servers == {"net", "store"}
 States == {"free", "starting", "running", "closing"}
@@ -50,10 +59,14 @@ VARIABLES
     wproc,      \* web-GPU processes, by number: [site, state (the coordinator's view), alive]
     wstarts,    \* web-GPU processes started so far (= the next number)
     wclients,   \* the tab channels each web-GPU process serves
-    wreq        \* each tab process's ask for a web-GPU process
+    wreq,       \* each tab process's ask for a web-GPU process
+    navto,      \* each tab process's refused navigation: the final URL's site it asks the UI for
+    wrongdoc    \* a tab was given a document of a site not its own
 
-vars == <<slot, proc, ctl, clients, inflight, wrong, starts, want, wproc, wstarts, wclients, wreq>>
+vars == <<slot, proc, ctl, clients, inflight, wrong, starts, want, wproc, wstarts, wclients, wreq,
+          navto, wrongdoc>>
 wvars == <<want, wproc, wstarts, wclients, wreq>>
+rvars == <<navto, wrongdoc>>
 
 Chans == 0 .. MaxStarts - 1
 NoChan == MaxStarts         \* a free slot's channel: none
@@ -74,6 +87,8 @@ TypeOK ==
     /\ \A w \in DOMAIN wproc : wproc[w] \in [site: Sites, state: States, alive: BOOLEAN]
     /\ wclients \in [WChans -> SUBSET Chans]
     /\ wreq \in [Chans -> Asks]
+    /\ navto \in [Chans -> Sites \cup {"none"}]
+    /\ wrongdoc \in BOOLEAN
 
 Init ==
     /\ slot = [i \in Ids |-> [state |-> "free", site |-> CHOOSE s \in Sites : TRUE, chan |-> NoChan]]
@@ -88,21 +103,28 @@ Init ==
     /\ wstarts = 0
     /\ wclients = [w \in WChans |-> {}]
     /\ wreq = [c \in Chans |-> "none"]
+    /\ navto = [c \in Chans |-> "none"]
+    /\ wrongdoc = FALSE
 
-(* The UI opens tab i on a URL of site s (UC_OPEN_TAB): the coordinator   *)
-(* starts its process with fresh channels and grants them to the servers, *)
-(* badged with s: the storage service only for a site (grant_store).      *)
+(* The coordinator starts tab i on a URL of site s in slot table sl: its  *)
+(* process with fresh channels, granted to the servers badged with s: the *)
+(* storage service only for a site (grant_store).                         *)
+StartTab(i, s, sl) ==
+    LET c == starts IN
+    /\ slot' = [sl EXCEPT ![i] = [state |-> "starting", site |-> s, chan |-> c]]
+    /\ proc' = [k \in 0 .. c |-> IF k = c THEN [id |-> i, site |-> s, alive |-> TRUE] ELSE proc[k]]
+    /\ ctl' = [ctl EXCEPT !["net"] = Append(@, Grant(c, i, s)),
+                          !["store"] = IF s = "opaque" THEN @ ELSE Append(@, Grant(c, i, s))]
+    /\ starts' = c + 1
+    /\ want' = [want EXCEPT ![i] = FALSE]       \* start_slot
+
+(* The UI opens tab i on a URL of site s (UC_OPEN_TAB). *)
 Open(i, s) ==
     /\ slot[i].state = "free"
     /\ starts < MaxStarts
-    /\ LET c == starts IN
-       /\ slot' = [slot EXCEPT ![i] = [state |-> "starting", site |-> s, chan |-> c]]
-       /\ proc' = [k \in 0 .. c |-> IF k = c THEN [id |-> i, site |-> s, alive |-> TRUE] ELSE proc[k]]
-       /\ ctl' = [ctl EXCEPT !["net"] = Append(@, Grant(c, i, s)),
-                             !["store"] = IF s = "opaque" THEN @ ELSE Append(@, Grant(c, i, s))]
-       /\ starts' = c + 1
-    /\ want' = [want EXCEPT ![i] = FALSE]       \* start_slot
+    /\ StartTab(i, s, slot)
     /\ UNCHANGED <<clients, inflight, wrong, wproc, wstarts, wclients, wreq>>
+    /\ UNCHANGED rvars
 
 (* The process started (CE_TAB_STARTED). *)
 Started(i) ==
@@ -110,6 +132,7 @@ Started(i) ==
     /\ slot' = [slot EXCEPT ![i].state = "running"]
     /\ UNCHANGED <<proc, ctl, clients, inflight, wrong, starts>>
     /\ UNCHANGED wvars
+    /\ UNCHANGED rvars
 
 (* The UI closes it (UC_CLOSE_TAB): the coordinator ends the process. *)
 Close(i) ==
@@ -117,6 +140,7 @@ Close(i) ==
     /\ slot' = [slot EXCEPT ![i].state = "closing"]
     /\ UNCHANGED <<proc, ctl, clients, inflight, wrong, starts>>
     /\ UNCHANGED wvars
+    /\ UNCHANGED rvars
 
 (* A process ends: killed after Close, or a crash at any time.  Its      *)
 (* channels to web-GPU processes break.                                  *)
@@ -125,6 +149,7 @@ Dies(c) ==
     /\ proc' = [proc EXCEPT ![c].alive = FALSE]
     /\ wclients' = [w \in WChans |-> wclients[w] \ {c}]
     /\ UNCHANGED <<slot, ctl, clients, inflight, wrong, starts, want, wproc, wstarts, wreq>>
+    /\ UNCHANGED rvars
 
 (* The coordinator sees it end (CE_TAB_EXITED): the slot frees and both  *)
 (* servers are told to revoke the id (CA_TAB_GONE).  If it was its site's *)
@@ -141,6 +166,7 @@ Exited(i) ==
                        IF last /\ wproc[w].site = s /\ wproc[w].state \in Live
                        THEN [wproc[w] EXCEPT !.state = "closing"] ELSE wproc[w]]
     /\ UNCHANGED <<proc, clients, inflight, wrong, starts, want, wstarts, wclients, wreq>>
+    /\ UNCHANGED rvars
 
 (* A live tab sends a request on its channel to a server: the network     *)
 (* process always, the storage service only if it was given a channel.    *)
@@ -151,6 +177,7 @@ Send(c, v) ==
     /\ inflight' = inflight \cup {[chan |-> c, srv |-> v]}
     /\ UNCHANGED <<slot, proc, ctl, clients, wrong, starts>>
     /\ UNCHANGED wvars
+    /\ UNCHANGED rvars
 
 (* A server takes the next control message, in order. *)
 Control(v) ==
@@ -162,6 +189,7 @@ Control(v) ==
     /\ ctl' = [ctl EXCEPT ![v] = Tail(@)]
     /\ UNCHANGED <<slot, proc, inflight, wrong, starts>>
     /\ UNCHANGED wvars
+    /\ UNCHANGED rvars
 
 (* A server serves a request on a channel it holds, with that channel's  *)
 (* badge (`wrong` notes a badge other than the sender's site).  A request *)
@@ -174,6 +202,7 @@ Serve(r) ==
     /\ inflight' = inflight \ {r}
     /\ UNCHANGED <<slot, proc, ctl, clients, starts>>
     /\ UNCHANGED wvars
+    /\ UNCHANGED rvars
 
 (* A channel whose tab has ended and been revoked: its requests drop. *)
 Drop(r) ==
@@ -182,6 +211,7 @@ Drop(r) ==
     /\ inflight' = inflight \ {r}
     /\ UNCHANGED <<slot, proc, ctl, clients, wrong, starts>>
     /\ UNCHANGED wvars
+    /\ UNCHANGED rvars
 
 ---------------------------------------------------------------------------
 (* Web-GPU processes (section 5.7) *)
@@ -234,6 +264,7 @@ Request(c) ==
            /\ UNCHANGED wclients
        ELSE Failed
     /\ UNCHANGED <<slot, proc, ctl, clients, inflight, wrong, starts>>
+    /\ UNCHANGED rvars
 
 \* The ids waiting for site s's web-GPU process.
 Wanting(s) == {i \in Ids : want[i] /\ slot[i].site = s}
@@ -251,6 +282,7 @@ WStarted(w) ==
           /\ wclients' = Connect(w, gc)
           /\ wreq' = [c \in Chans |-> IF c \in gc THEN "granted" ELSE wreq[c]]
     /\ UNCHANGED <<slot, proc, ctl, clients, inflight, wrong, starts, wstarts>>
+    /\ UNCHANGED rvars
 
 (* It ends: killed after its site's last tab, or a crash (or a failed     *)
 (* start) at any time.  Its channels break.                               *)
@@ -260,6 +292,7 @@ WDies(w) ==
     /\ wproc' = [wproc EXCEPT ![w].alive = FALSE]
     /\ wclients' = [wclients EXCEPT ![w] = {}]
     /\ UNCHANGED <<slot, proc, ctl, clients, inflight, wrong, starts, want, wstarts, wreq>>
+    /\ UNCHANGED rvars
 
 (* The coordinator sees it end (CE_WEBGPU_EXITED, webgpu_exited): its     *)
 (* slot frees, and the tabs of its site still waiting hear they get none. *)
@@ -273,6 +306,59 @@ WExited(w) ==
           /\ want' = [i \in Ids |-> want[i] /\ i \notin W]
           /\ wreq' = [c \in Chans |-> IF c \in fc THEN "failed" ELSE wreq[c]]
     /\ UNCHANGED <<slot, proc, ctl, clients, inflight, wrong, starts, wstarts, wclients>>
+    /\ UNCHANGED rvars
+
+---------------------------------------------------------------------------
+(* Redirected navigations (M9, P10) *)
+
+\* Where a navigation can end: a site (a network load never ends opaque).
+Finals == Sites \ {"opaque"}
+
+(* The network process loads a navigation of the tab on channel c, which  *)
+(* ends, after any redirects, at site f.  It acts on the badge it holds   *)
+(* for the channel: the page goes to the tab only if f is that site       *)
+(* (`wrongdoc` notes a page of a site not the tab's own); otherwise it is *)
+(* refused with its final URL, which the tab asks the UI to navigate to.  *)
+(* A load before the grant has reached the network process waits.  (A     *)
+(* load the tab is given changes no state: it is checked as it happens.)  *)
+(* Only a running tab, its id's current one, navigates: once refused, it  *)
+(* waits for the UI, which closes it; so each tab process is refused at   *)
+(* most once, which bounds the model without a counter.                  *)
+Load(c, f) ==
+    /\ proc[c].alive
+    /\ slot[proc[c].id].chan = c /\ slot[proc[c].id].state = "running"
+    /\ navto[c] = "none"
+    /\ \E x \in clients["net"] :
+        /\ x.chan = c
+        /\ IF x.badge = f
+           THEN /\ wrongdoc' = (wrongdoc \/ f # proc[c].site)
+                /\ UNCHANGED navto
+           ELSE /\ Redirects
+                /\ navto' = [navto EXCEPT ![c] = f]
+                /\ UNCHANGED wrongdoc
+    /\ UNCHANGED <<slot, proc, ctl, clients, inflight, wrong, starts>>
+    /\ UNCHANGED wvars
+
+(* The UI takes the tab's TU_NAVIGATE: if the tab is still its id's      *)
+(* current one, it closes it (UC_CLOSE_TAB) and opens the final URL in a *)
+(* new tab with a free id (UC_OPEN_TAB), which the coordinator starts     *)
+(* labeled with the final site; with no free id or start left, the open  *)
+(* fails (CU_TAB_FAILED) and only the close remains.  A tab that has gone *)
+(* since: the UI drops the request.                                       *)
+Replace(c) ==
+    /\ navto[c] # "none"
+    /\ navto' = [navto EXCEPT ![c] = "none"]
+    /\ LET i == proc[c].id
+           f == navto[c]
+           closed == [slot EXCEPT ![i].state = "closing"]
+           free == {j \in Ids : closed[j].state = "free"}
+       IN IF slot[i].chan = c /\ slot[i].state \in Live THEN
+             IF free # {} /\ starts < MaxStarts
+             THEN \E j \in free : StartTab(j, f, closed)
+             ELSE /\ slot' = closed
+                  /\ UNCHANGED <<proc, ctl, starts, want>>
+          ELSE UNCHANGED <<slot, proc, ctl, starts, want>>
+    /\ UNCHANGED <<clients, inflight, wrong, wproc, wstarts, wclients, wreq, wrongdoc>>
 
 ---------------------------------------------------------------------------
 
@@ -283,6 +369,7 @@ Next ==
     \/ \E v \in Servers : Control(v)
     \/ \E r \in inflight : Serve(r) \/ Drop(r)
     \/ \E w \in WChans : WStarted(w) \/ WDies(w) \/ WExited(w)
+    \/ \E c \in DOMAIN proc : Replace(c) \/ \E f \in Finals : Load(c, f)
 
 (* The coordinator kills a closed tab, notices every exit, and the       *)
 (* servers keep reading their control channels.  It kills a closing     *)
@@ -294,6 +381,7 @@ Fairness ==
     /\ \A v \in Servers : WF_vars(Control(v))
     /\ \A w \in WChans : WF_vars(WStarted(w)) /\ WF_vars(WExited(w))
     /\ \A w \in WChans : WF_vars(w \in DOMAIN wproc /\ wproc[w].state = "closing" /\ WDies(w))
+    /\ \A c \in Chans : WF_vars(c \in DOMAIN proc /\ Replace(c))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -346,6 +434,12 @@ OneWebgpuPerSite ==
     \A v, w \in DOMAIN wproc :
         v # w /\ wproc[v].site = wproc[w].site => ~(wproc[v].state \in Live /\ wproc[w].state \in Live)
 
+\* P10: a tab is given only documents of its own site, and is replaced only
+\* for a navigation that ended at another.
+DocTrue ==
+    /\ ~wrongdoc
+    /\ \A c \in DOMAIN proc : navto[c] # "none" => navto[c] # proc[c].site
+
 (* Liveness *)
 
 \* A tab the UI closes ends, and its id frees.
@@ -365,4 +459,9 @@ WebgpuAnswered ==
     \A c \in Chans :
         (c \in DOMAIN proc /\ wreq[c] = "waiting") ~>
             (c \in DOMAIN proc /\ (wreq[c] \in {"granted", "failed"} \/ ~proc[c].alive))
+
+\* A navigation refused for ending at another site is followed: the UI
+\* replaces the tab (or drops the request of a tab that has gone).
+RedirectsFollowed ==
+    \A c \in Chans : (c \in DOMAIN proc /\ navto[c] # "none") ~> navto[c] = "none"
 =============================================================================

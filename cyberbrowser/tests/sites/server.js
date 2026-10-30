@@ -70,6 +70,25 @@ const routes = {
     t('public-to-local', 'http://127.0.0.1:${A}/acao');
     t('public-to-public', 'http://127.0.0.1:${B}/acao');
   </script>`),
+  // Redirects (SANDBOX_DESIGN.md P10): within the site to another folder,
+  // by a relative Location, the page's URL and relative URLs are where it
+  // landed; to another site, the page runs in a tab of that site, with none
+  // of the first site's storage.
+  '/dir1/start': () => ({ redirect: '../dir2/landing' }),
+  '/dir2/landing': () => page('landing', `<script>
+    ${say}
+    localStorage.setItem('who', 'first-site');
+    say('landed location=' + location.href + ' base=' + document.baseURI);
+    fetch('rel').then(function (r) { return r.text(); })
+      .then(function (s) { say('landed rel=' + s); }, function () { say('landed rel failed'); });
+  </script>`),
+  '/dir1/rel': () => ['text/plain', 'in-dir1'],
+  '/dir2/rel': () => ['text/plain', 'in-dir2'],
+  '/go-other': () => ({ redirect: `http://localhost:${A}/landed-other` }),
+  '/landed-other': () => page('landed other', `<script>
+    ${say}
+    say('other landed at ' + location.href + ' origin=' + location.origin + ' ls=' + localStorage.getItem('who'));
+  </script>`),
   '/data.json': () => ['application/json', '{"secret": "across sites"}'],
   '/script.js': () => ['text/javascript', 'var fromScript = 1;'],
   '/acao': () => ['text/plain', 'shared', { 'access-control-allow-origin': '*' }],
@@ -80,7 +99,10 @@ for (const port of [A, B]) {
     const r = routes[req.url.split('?')[0]];
     if (!r) { res.writeHead(404); res.end(); return; }
     const out = r();
-    if (typeof out === 'string') {
+    if (out.redirect) {
+      res.writeHead(302, { location: out.redirect });
+      res.end();
+    } else if (typeof out === 'string') {
       res.writeHead(200, { 'content-type': 'text/html' });
       res.end(out);
     } else {

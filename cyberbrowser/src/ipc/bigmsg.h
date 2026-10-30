@@ -5,12 +5,11 @@
  * message's type and its total size, the rest have type BIG_MORE.  A sender
  * on a channel shared by several threads holds its lock for the whole
  * message, so the parts of one message arrive together and the receiver
- * assembles one message at a time. */
+ * assembles one message at a time.  Which parts make a message is decided by
+ * the proved big_core.c; this side takes parts and grows the buffer. */
 
 #include "chan.h"
-
-#define BIG_MORE 0xffff
-#define BIG_MAX (256u << 20)        /* largest message */
+#include "big_core.h"               /* BIG_MORE, BIG_MAX */
 
 /* Send the concatenation of up to three pieces (any may be NULL / 0) as one
  * message.  timeout_ms bounds each part's wait for room. */
@@ -23,11 +22,13 @@ typedef struct BigRx {
     uint32_t cap;                   /* bytes allocated at buf (a taker of buf zeroes both) */
     uint32_t total, have;
     bool busy;                      /* a message is being assembled */
+    uint32_t limit;                 /* the largest message accepted; 0 (or more than BIG_MAX): BIG_MAX */
     ChanMsg part;
 } BigRx;
 
 /* Take parts from the channel: 1 when a whole message is in rx (until the
- * next call), 0 none complete yet, -1 the channel or the message is broken. */
+ * next call), 0 none complete yet, -1 the channel or the message is broken
+ * (a part out of sequence, or a message over rx->limit). */
 int big_recv(Chan *c, BigRx *rx);
 void big_free(BigRx *rx);
 

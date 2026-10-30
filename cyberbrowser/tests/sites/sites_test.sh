@@ -1,6 +1,7 @@
 #!/bin/bash
 # Frames from other sites, ORB, CORS and Private Network Access
-# (SANDBOX_DESIGN.md M7), through the browser on the pages of server.js.
+# (SANDBOX_DESIGN.md M7), and redirects of a page's document (M9, P10),
+# through the browser on the pages of server.js.
 # 127.0.0.1 and localhost are two sites; port B is made public
 # (CYBER_PNA_PUBLIC_PORTS) for the PNA run.
 #
@@ -67,6 +68,28 @@ expect "a public page can't fetch from a local address" "$p" "public-to-local fa
 expect "it can fetch from a public one" "$p" "public-to-public read 6"
 never "nor frame a local page" "$p" "frame sees"
 expect "the network process blocked with PNA" "$tmp/net.txt" "Private Network Access: 127.0.0.1:$A"
+
+# Redirects of the page's own document (P10): within its site, the page is
+# where it landed; to another site, it runs in a tab of that site.
+cat > "$tmp/r.txt" <<EOF
+open http://127.0.0.1:$A/dir1/start
+wait 4000
+open http://127.0.0.1:$A/go-other
+wait 6000
+quit
+EOF
+run "$tmp/r.txt"
+p="$tmp/pages.txt"
+expect "a redirect within the site: the page's URL is where it landed" "$p" \
+       "landed location=http://127.0.0.1:$A/dir2/landing base=http://127.0.0.1:$A/dir2/landing"
+expect "its relative URLs resolve against it" "$p" "landed rel=in-dir2"
+expect "a redirect to another site: the page runs in a tab of that site" "$p" \
+       "other landed at http://localhost:$A/landed-other origin=http://localhost:$A ls=null"
+never "and never as the first site" "$p" "other landed at http://127.0.0.1"
+expect "the network process sent the first tab there" "$tmp/net.txt" \
+       "redirects to http://localhost:$A/landed-other, another site's: elsewhere"
+expect "a tab of the final site was started" <(cat "$build"/logs/tab-*.log) \
+       "^\[tab [0-9]+\] http://localhost:$A/landed-other \("
 
 kill $server 2> /dev/null
 echo "$fails failed; logs in $tmp"

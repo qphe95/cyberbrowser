@@ -2,12 +2,15 @@
  * (SANDBOX_DESIGN.md section 11.1).
  *
  * The coordinator starts it in place of cb_tab.exe, with a tab's arguments and
- * sandbox, for URLs that end in "#escape" when CYBER_TAB_EXE=cb_escape.exe
+ * sandbox, for the first tab opened on the URL in CYBER_TAB_EXE_URL when
+ * CYBER_TAB_EXE=cb_escape.exe: both set in the coordinator's environment
  * (tests/sandbox/escape_test.sh).  It plays a tab whose renderer an attacker
  * controls, and tries to get out: to files, the registry, sockets, other
  * processes and threads, new processes, windows and the GPU, executable
  * memory, more memory than its job allows, other sites' storage and cookies,
- * its site's web-GPU process (records that lie, objects it never made);
+ * other sites' pages as its own document (P10), its site's web-GPU process
+ * (records that lie, objects it never made); it leaves the network
+ * process's replies unread;
  * and it sends malformed messages to every server and scribbles on the
  * channels' shared memory.  Each attempt prints a line:
  *
@@ -44,6 +47,7 @@
 #include "proto.h"
 #include "spawn.h"
 #include "site.h"
+#include "store_core.h"       /* STORE_QUOTA_BYTES */
 #include "gpu_wire.h"
 
 static int g_attempts, g_escaped, g_failed;
@@ -489,21 +493,25 @@ static void storage(void) {
     /* Its cookies file is the network process's alone. */
     blocked_or("read its own site's cookies file", store(TS_READ, NULL, "cookies", NULL, 0, got, sizeof(got)), got);
     blocked_or("write its own site's cookies file", store(TS_WRITE, NULL, "cookies", "x", 1, NULL, 0), "written");
-    /* Over its quota (64 MB). */
-    uint32_t big = 65u << 20;
+    /* Over its quota (64 MB), by a byte: still within the channel's limit, so
+     * the storage service itself refuses it.  (More than that is past the
+     * limit, and the service drops the channel.) */
+    uint32_t big = (uint32_t)STORE_QUOTA_BYTES + 1;
     char *blob = (char *)calloc(1, big);
     if (blob) {
-        blocked_or("write 65 MB (the quota is 64 MB)", store(TS_WRITE, NULL, "escape/big", blob, big, NULL, 0),
-                   "written");
+        blocked_or("write 64 MB and a byte (the quota is 64 MB)",
+                   store(TS_WRITE, NULL, "escape/big", blob, big, NULL, 0), "written");
         free(blob);
     }
     store(TS_DELETE, NULL, "escape/own", NULL, 0, NULL, 0);
 }
 
 /* A request through the network process, saying it is for mode (an
- * HTTP_MODE_*) from initiator; the body into out. */
-static bool fetch_as(const char *url, const char *method, uint32_t mode, const char *initiator, char *out,
-                     uint32_t cap) {
+ * HTTP_MODE_*) from initiator; the body into out, the reply's NET_* into
+ * *ok and its URL (where it ended, or where to go) into where.  False if
+ * there was no reply. */
+static bool fetch_reply(const char *url, const char *method, uint32_t mode, const char *initiator, char *out,
+                        uint32_t cap, uint32_t *ok, char *where, uint32_t where_cap) {
     NetRequest q;
     memset(&q, 0, sizeof(q));
     q.id = ++g_id;
@@ -520,15 +528,30 @@ static bool fetch_as(const char *url, const char *method, uint32_t mode, const c
     uint8_t *m = call(&g_net, TN_REQUEST, &q, sizeof(q), buf, q.method_len + q.url_len + q.initiator_len, NULL, 0,
                       q.id, &len);
     NetResponse r;
+    *ok = NET_FAILED;
+    if (out && cap) out[0] = 0;
+    if (where && where_cap) where[0] = 0;
     if (!m || len < sizeof(r)) return false;
     memcpy(&r, m, sizeof(r));
-    uint64_t body_at = sizeof(r) + (uint64_t)r.headers_len + r.error_len;
+    uint64_t body_at = sizeof(r) + (uint64_t)r.url_len + r.headers_len + r.error_len;
     if (out && cap) {
         uint32_t n = body_at + r.body_len <= len && r.body_len < cap ? r.body_len : 0;
         memcpy(out, m + body_at, n);
         out[n] = 0;
     }
-    return r.ok != 0;
+    if (where && where_cap) {
+        uint32_t n = sizeof(r) + (uint64_t)r.url_len <= len && r.url_len < where_cap ? r.url_len : 0;
+        memcpy(where, m + sizeof(r), n);
+        where[n] = 0;
+    }
+    *ok = r.ok;
+    return true;
+}
+
+static bool fetch_as(const char *url, const char *method, uint32_t mode, const char *initiator, char *out,
+                     uint32_t cap) {
+    uint32_t ok;
+    return fetch_reply(url, method, mode, initiator, out, cap, &ok, NULL, 0) && ok == NET_OK;
 }
 
 static bool fetch(const char *url, const char *method, char *out, uint32_t cap) {
@@ -550,7 +573,7 @@ static void network(void) {
     const char *cookies = "";
     if (m && len >= sizeof(r)) {
         memcpy(&r, m, sizeof(r));
-        uint64_t at = sizeof(r) + (uint64_t)r.headers_len + r.error_len;
+        uint64_t at = sizeof(r) + (uint64_t)r.url_len + r.headers_len + r.error_len;
         if (at + r.body_len <= len) {
             m[at + r.body_len] = 0;
             cookies = (const char *)m + at;
@@ -567,7 +590,7 @@ static void network(void) {
     if (m && len >= sizeof(r)) {
         memcpy(&r, m, sizeof(r));
         leaked = r.body_len > 0;
-        uint64_t at = sizeof(r) + (uint64_t)r.headers_len + r.error_len;
+        uint64_t at = sizeof(r) + (uint64_t)r.url_len + r.headers_len + r.error_len;
         if (at + r.body_len <= len) snprintf(got, sizeof(got), "%.*s", (int)r.body_len, m + at);
     }
     blocked_or("read another site's document.cookie", leaked, got);
@@ -603,6 +626,66 @@ static void network(void) {
     blocked_or("fetch file:///C:/Windows/win.ini", fetch("file:///C:/Windows/win.ini", "GET", got, sizeof(got)) &&
                                                        strstr(got, "fonts") != NULL,
                got);
+}
+
+/* P10: its own document (a navigation) is of its own site.  Another site's
+ * page, through a redirect from its own site or asked for outright, isn't
+ * given to it: the reply says where it went, for the UI to open in a tab of
+ * that site.  A redirect within its site is followed, relative Location
+ * included, and the reply says where it ended. */
+static void documents(void) {
+    const char *port = getenv("CYBER_ESCAPE_PORT");
+    if (!port) port = "38517";
+    char url[PROTO_URL_MAX + 1], target[256], expect[256], got[4096], where[2048];
+    uint32_t ok;
+    snprintf(target, sizeof(target), "http://127.0.0.1:%s/page?from-escape-redirect", port);
+    snprintf(url, sizeof(url), "http://localhost:%s/redirect?to=%s", port, target);
+    bool any = fetch_reply(url, "GET", HTTP_MODE_NAVIGATE, "", got, sizeof(got), &ok, where, sizeof(where));
+    blocked_or("be given another site's document through a redirect from its own",
+               ok == NET_OK && strstr(got, "<html") != NULL, got);
+    must("that redirect is answered with where it went", any && ok == NET_ELSEWHERE && !strcmp(where, target));
+    any = fetch_reply(target, "GET", HTTP_MODE_NAVIGATE, "", got, sizeof(got), &ok, where, sizeof(where));
+    blocked_or("be given another site's document by asking for it", ok == NET_OK && strstr(got, "<html") != NULL,
+               got);
+    must("that request is answered with where to go", any && ok == NET_ELSEWHERE && !strcmp(where, target));
+    snprintf(url, sizeof(url), "http://localhost:%s/dir/sub/redirect?to=../rel", port);
+    snprintf(expect, sizeof(expect), "http://localhost:%s/dir/rel", port);
+    any = fetch_reply(url, "GET", HTTP_MODE_NAVIGATE, "", got, sizeof(got), &ok, where, sizeof(where));
+    must("a relative redirect within its site is followed, and the reply says where it ended",
+         any && ok == NET_OK && !strcmp(got, "in-dir") && !strcmp(where, expect));
+}
+
+/* Replies left unread (SANDBOX_DESIGN.md 8.7.2): many requests for 1 MB
+ * each, never read.  The network process must go on serving the other tabs
+ * at once (it used to hold a worker for 30 s per reply) and stop serving
+ * this one; the test script checks both.  Last on this channel. */
+static void unread_replies(void) {
+    const char *port = getenv("CYBER_ESCAPE_PORT");
+    if (!port) port = "38517";
+    char url[256], buf[512];
+    snprintf(url, sizeof(url), "http://localhost:%s/big", port);
+    NetRequest q;
+    memset(&q, 0, sizeof(q));
+    q.method_len = 4;
+    q.url_len = (uint32_t)strlen(url) + 1;
+    q.mode = HTTP_MODE_NO_CORS;
+    memcpy(buf, "GET", 4);
+    memcpy(buf + 4, url, q.url_len);
+    int sent = 0, stalled = 0;
+    for (int i = 0; i < 600 && stalled < 5; i++) {      /* (stalled: it stopped reading us) */
+        q.id = ++g_id;
+        if (big_send(&g_net, TN_REQUEST, &q, sizeof(q), buf, q.method_len + q.url_len, NULL, 0, 200)) {
+            sent++;
+            stalled = 0;
+        } else {
+            stalled++;
+        }
+    }
+    note("left its replies unread", "the test script checks the network process stopped serving it and served the "
+         "next tabs");
+    printf("[escape] sent %d requests for 1 MB, reading none of the replies\n", sent);
+    fflush(stdout);
+    Sleep(5000);
 }
 
 /* ---- malformed messages and shared memory ------------------------------------------ */
@@ -1082,6 +1165,7 @@ int main(int argc, char **argv) {
     memory();
     storage();
     network();
+    documents();
     gpu();
     webgpu();
 
@@ -1097,6 +1181,7 @@ int main(int argc, char **argv) {
     snprintf(url, sizeof(url), "http://localhost:%s/ping", getenv("CYBER_ESCAPE_PORT") ? getenv("CYBER_ESCAPE_PORT")
                                                                                        : "38517");
     must("the network process answers after them", fetch(url, "GET", got, sizeof(got)) && !strcmp(got, "pong"));
+    unread_replies();
 
     /* Broken framing and rings: the servers drop the channel; the test
      * script checks they live on and serve the next tabs. */

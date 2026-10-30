@@ -5,17 +5,27 @@
 #
 # Starts the test server (server.js) and the browser (cb_coord.exe) with a
 # UI script that opens a page of each of two sites, then a hostile tab
-# (cb_escape.exe, run in a tab's sandbox in place of cb_tab.exe for the URL
-# ending in #escape), then a page of each site again.  It passes when:
+# (cb_escape.exe, run in a tab's sandbox in place of cb_tab.exe), then a page
+# of each site again.  The coordinator picks the hostile tab from its own
+# environment alone: CYBER_TAB_EXE names the executable, CYBER_TAB_EXE_URL
+# the one URL whose first tab runs it (its "#escape" is only a name; a URL
+# a tab asks for chooses nothing).  The tabs before and after it stay
+# cb_tab.exe, so one run shows the servers it attacked still work.  It
+# passes when:
 #   - every attempt of the hostile tab was blocked and its checks worked;
 #   - no file was planted in the other site's folder;
 #   - no tab was started for the file: and other non-http URLs it asked for;
+#   - only that one tab ran the hostile executable: a later tab on another
+#     URL ending in #escape is an ordinary one;
 #   - the network process, the storage service, the relay and the GPU process
 #     survived (the coordinator reports it if one ends) and still work: the GPU
 #     process drew the next pages (the UI's last screenshot), and the last
 #     localhost page's localStorage counter and cookies carry on from the first;
 #   - the cookie it set for the other site reached none of that site's
 #     requests;
+#   - the network process stopped serving it once it left its replies
+#     unread (and served the next pages, as above), and never fetched the
+#     other site's page it tried to get as its own document;
 #   - the UI lived on (its last screenshot was saved);
 #   - no tab's AppContainer profile outlived the browser.
 # Before it starts, it plants what the hostile tab looks for: a canary file
@@ -58,6 +68,9 @@ wait 1500
 log escape-start
 open http://localhost:$port/#escape
 wait 90000
+open http://127.0.0.1:$port/#escape
+waitload 30000
+wait 1500
 open http://localhost:$port/
 waitload 30000
 wait 2000
@@ -69,7 +82,8 @@ quit
 EOF
 logs="$build/logs"
 touch "$tmp/start"      # tab logs older than this are from earlier runs
-export CYBER_TAB_EXE=cb_escape.exe
+export CYBER_TAB_EXE=cb_escape.exe CYBER_TAB_EXE_URL="http://localhost:$port/#escape"
+export MSYS2_ENV_CONV_EXCL=CYBER_TAB_EXE_URL     # the URL as written, not as a path
 export CYBER_ESCAPE_PORT=$port CYBER_ESCAPE_OTHER=$other
 export CYBER_ESCAPE_READ="$(win "$tmp/canary.txt");$(win "$sites/$other/escape_canary");$(win "$sites/$other/cookies");C:\\Windows\\System32\\config\\SAM;$(win "$build/cb_tab.exe")"
 export CYBER_ESCAPE_WRITE="$(win "$build");$(win "$tmp");$(win "$sites");$(win "$sites/$own");$(win "$sites/$other")"
@@ -89,6 +103,8 @@ check "every attempt blocked, every check worked" $(echo "$done_line" | grep -q 
 check "nothing planted in the other site's folder" $([ ! -e "$sites/$other/escape_planted" ]; echo $?)
 check "no tab for a non-http URL" \
     $(! grep -h -E "^\[tab [0-9]+\] [^ ]+ \([0-9]+x[0-9]+\)$" $tab_logs | grep -v -q "\] http"; echo $?)
+check "only the configured tab ran the hostile executable" \
+    $([ "$(grep -l "^\[escape\] tab" $tab_logs | wc -l)" = 1 ]; echo $?)
 check "the coordinator ended normally" $([ "$coord" = 0 ]; echo $?)
 check "the network, storage, relay, GPU and web-GPU processes lived (a web-GPU one may end, idle, with 0)" \
     $(! grep -v "web-GPU process [0-9]* ended (0)" "$tmp/coord.txt" | grep -q "ended"; echo $?)
@@ -100,6 +116,11 @@ check "storage and cookies work after the attack (counter $first -> $last)" \
 check "the other site's requests never carried the planted cookie" \
     $(grep "^127.0.0.1:$port" "$tmp/requests.log" | grep -v -e "/echo" -e "from-escape" | grep -q planted; [ $? != 0 ]; echo $?)
 check "the other site's last page loaded" $([ "$(grep -c "^127.0.0.1:$port GET /ping" "$tmp/requests.log")" -ge 2 ]; echo $?)
+check "the network process stopped serving the tab that left its replies unread" \
+    $(grep -qE "^\[net\] tab [0-9]+: (too many replies it hasn't taken|it doesn't take its replies); it is served no more" \
+          "$logs/net.log"; echo $?)
+check "no other site's document was fetched for the hostile tab's navigations" \
+    $(! grep -q "^127.0.0.1:$port GET /page?from-escape-redirect" "$tmp/requests.log"; echo $?)
 check "the UI lived through the hostile tab (its last screenshot)" $([ -s "$tmp/after.bmp" ]; echo $?)
 check "no tab profile outlived the browser" $(! ls "$LOCALAPPDATA/Packages" | grep -q "^cyberbrowser\.tab\."; echo $?)
 sed 's/^/  coordinator: /' "$tmp/coord.txt"

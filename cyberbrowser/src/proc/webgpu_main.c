@@ -241,6 +241,7 @@ static void grant(const CsGrant *g) {
         return;
     }
     c->tab = g->client;
+    c->rx.limit = BIG_MAX;  /* WebGL/WebGPU uploads (bufferData, texImage2D, writeBuffer) have no smaller cap */
     g_clients[slot] = c;
     fprintf(stderr, "[webgpu] serving tab %u\n", c->tab);
 }

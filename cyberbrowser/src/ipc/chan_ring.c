@@ -62,6 +62,11 @@ static void ring_read(const uint8_t *ring, uint32_t size, uint64_t pos, uint8_t 
     for (uint32_t i = first; i < n; i++) dst[i] = ring[i - first];
 }
 
+int chan_ring_header_ok(uint32_t magic, uint32_t ring_bytes) {
+    return magic == CHAN_MAGIC && ring_bytes >= CHAN_RING_MIN && ring_bytes <= CHAN_RING_MAX &&
+           (ring_bytes & (ring_bytes - 1)) == 0;
+}
+
 int chan_ring_put(uint8_t *ring, uint32_t size, uint64_t head, uint64_t tail, uint16_t type,
                   const uint8_t *payload, uint32_t len, uint64_t *new_tail) {
     if (len > CHAN_MSG_MAX) return -1;

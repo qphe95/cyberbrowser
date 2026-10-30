@@ -1061,6 +1061,14 @@ JSClassDef js_location_class_def = {
     .gc_mark   = js_location_mark,
 };
 
+// The origin: scheme and host, with the port unless it is the scheme's default
+static void set_origin(LocationData *loc) {
+    bool dflt = !loc->port[0] || (!strcmp(loc->protocol, "http:") && !strcmp(loc->port, "80")) ||
+                (!strcmp(loc->protocol, "https:") && !strcmp(loc->port, "443"));
+    if (dflt) snprintf(loc->origin, sizeof(loc->origin), "%s//%s", loc->protocol, loc->hostname);
+    else snprintf(loc->origin, sizeof(loc->origin), "%s//%s:%s", loc->protocol, loc->hostname, loc->port);
+}
+
 // Parse URL into components - simple parser for standard URLs
 static void parse_url(const char *url, LocationData *loc) {
     // Start with empty components
@@ -1151,7 +1159,7 @@ static void parse_url(const char *url, LocationData *loc) {
     strncpy(loc->href, url, sizeof(loc->href) - 1);
     
     // Construct origin
-    snprintf(loc->origin, sizeof(loc->origin), "%s//%s", loc->protocol, loc->hostname);
+    set_origin(loc);
 }
 
 // Reconstruct href from components
@@ -1177,7 +1185,7 @@ static void rebuild_href(LocationData *loc) {
     }
     
     // Rebuild origin
-    snprintf(loc->origin, sizeof(loc->origin), "%s//%s", loc->protocol, loc->hostname);
+    set_origin(loc);
 }
 
 // Get LocationData from JS object

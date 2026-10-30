@@ -39,40 +39,28 @@ int big_recv(Chan *c, BigRx *rx) {
     for (;;) {
         int r = chan_recv(c, &rx->part);
         if (r <= 0) return r;
-        const uint8_t *p = rx->part.data;
-        uint32_t n = rx->part.len;
-        if (rx->part.type != BIG_MORE) {
-            if (rx->busy || n < 4) return -1;
-            uint32_t total;
-            memcpy(&total, p, 4);
-            if (total > BIG_MAX || n - 4 > total) return -1;
-            rx->type = rx->part.type;
-            rx->total = total;
-            rx->have = 0;
-            rx->busy = true;
-            p += 4;
-            n -= 4;
-        } else if (!rx->busy) {
-            return -1;
-        }
-        if (n > rx->total - rx->have) return -1;
-        /* The buffer grows with what arrives, not with what the sender
-         * claims: a peer that announces 256 MB and stops costs us little. */
-        if (rx->have + n + 1 > rx->cap) {
-            uint32_t cap = rx->cap ? rx->cap : 4096;
-            while (cap < rx->have + n + 1) cap = cap > BIG_MAX / 2 ? BIG_MAX + 1 : cap * 2;
+        BigAsm s = { rx->type, rx->total, rx->have, rx->busy };
+        uint32_t need = 0;
+        int got = big_core_part(&s, rx->limit, rx->part.type, rx->part.data, rx->part.len, rx->buf, rx->cap, &need);
+        if (got == BIG_GROW) {
+            /* The buffer grows with what arrives, not with what the sender
+             * claims: a peer that announces 256 MB and stops costs us little.
+             * need is at most the limit plus one (big_core.h). */
+            uint32_t most = big_core_limit(rx->limit) + 1, cap = rx->cap ? rx->cap : 4096;
+            if (cap > most) cap = most;
+            while (cap < need) cap = cap > most / 2 ? most : cap * 2;
             uint8_t *nb = (uint8_t *)realloc(rx->buf, cap);
             if (!nb) return -1;
             rx->buf = nb;
             rx->cap = cap;
+            got = big_core_part(&s, rx->limit, rx->part.type, rx->part.data, rx->part.len, rx->buf, rx->cap, &need);
         }
-        memcpy(rx->buf + rx->have, p, n);
-        rx->have += n;
-        if (rx->have == rx->total) {
-            rx->buf[rx->total] = 0;
-            rx->busy = false;
-            return 1;
-        }
+        if (got < 0 || got == BIG_GROW) return -1;
+        rx->type = s.type;
+        rx->total = s.total;
+        rx->have = s.have;
+        rx->busy = s.busy != 0;
+        if (got == BIG_DONE) return 1;
     }
 }
 

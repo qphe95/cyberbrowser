@@ -113,6 +113,7 @@ set(BE_SOURCES
     src/raster_cpu.c
     src/raster_page.c
     src/tls_client.c
+    src/proc/net_policy.c
     src/http_download.c
     
     # Platform abstraction
@@ -491,6 +492,7 @@ if(BE_PLATFORM_WINDOWS)
         src/ipc/chan.c
         src/ipc/chan_ring.c
         src/ipc/bigmsg.c
+        src/ipc/big_core.c
         src/proc/spawn.c
     )
     target_include_directories(cb_ipc PUBLIC
@@ -502,20 +504,26 @@ if(BE_PLATFORM_WINDOWS)
     add_executable(chan_bench src/proc/chan_bench.c)
     target_link_libraries(chan_bench PRIVATE cb_ipc)
 
-    # The coordinator: its core (coord_core.c) is pure C with no Win32 calls.
-    add_executable(cb_coord src/proc/coordinator.c src/proc/coord_core.c src/proc/site.c src/proc/sandbox.c)
+    # The coordinator: its core (coord_core.c) and its plans (coord_plan.c)
+    # are pure C with no Win32 calls.
+    add_executable(cb_coord src/proc/coordinator.c src/proc/coord_core.c src/proc/coord_plan.c src/proc/site.c
+                   src/proc/sandbox.c)
     target_link_libraries(cb_coord PRIVATE cb_ipc userenv bcrypt)
     target_compile_options(cb_coord PRIVATE -Wall -Wextra)
 
-    # Tests of the pure parts: sites, the storage rules, the coordinator's and
-    # the relay's cores, the GPU process's decoder.
-    add_executable(proc_tests src/proc/proc_tests.c src/proc/coord_core.c src/proc/site.c src/proc/store_core.c
-                   src/proc/loop_core.c src/proc/gpu_decode.c src/proc/net_policy.c)
+    # Tests of the pure parts: sites, the storage rules, the coordinator's core
+    # and plans, the relay's core, the GPU process's decoder and uploads, the
+    # UI's reading of tabs, the network policy and decoder, the web-GPU
+    # process's decoders.
+    add_executable(proc_tests src/proc/proc_tests.c src/proc/coord_core.c src/proc/coord_plan.c src/proc/site.c
+                   src/proc/store_core.c src/proc/loop_core.c src/proc/gpu_decode.c src/proc/gpu_input.c
+                   src/proc/ui_core.c src/proc/net_policy.c src/proc/net_decode.c src/proc/webgl_decode.c
+                   src/proc/webgpu_decode.c)
     target_link_libraries(proc_tests PRIVATE cb_ipc)
     target_compile_options(proc_tests PRIVATE -Wall -Wextra)
 
     # The UI: windows and input, no engine.
-    add_executable(cb_ui WIN32 src/proc/ui_main.c)
+    add_executable(cb_ui WIN32 src/proc/ui_main.c src/proc/ui_core.c)
     target_link_libraries(cb_ui PRIVATE cb_ipc user32 gdi32)
     target_compile_options(cb_ui PRIVATE -Wall -Wextra)
 
@@ -532,7 +540,8 @@ if(BE_PLATFORM_WINDOWS)
     endif()
 
     # The network process: HTTP and TLS from the engine library, no JS.
-    add_executable(cb_net src/proc/net_main.c src/proc/loop_client.c src/proc/net_policy.c src/proc/site.c)
+    # (Its policy core, net_policy.c, is in the library: tls_client.c applies PNA with it.)
+    add_executable(cb_net src/proc/net_main.c src/proc/loop_client.c src/proc/net_decode.c src/proc/site.c)
     target_include_directories(cb_net PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_include_directories(cb_net BEFORE PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/win32)
     target_link_libraries(cb_net PRIVATE cyberbrowser_lib cb_ipc)
@@ -565,7 +574,7 @@ if(BE_PLATFORM_WINDOWS)
             VERBATIM)
         list(APPEND GPU_SHADER_INCS ${GPU_SHADER_OUT}/${s}.inc)
     endforeach()
-    add_executable(cb_gpu src/proc/gpu_main.c src/proc/gpu_decode.c src/proc/gpu_vk.c src/raster_cpu.c
+    add_executable(cb_gpu src/proc/gpu_main.c src/proc/gpu_decode.c src/proc/gpu_input.c src/proc/gpu_vk.c src/raster_cpu.c
                    ${GPU_SHADER_INCS})
     target_include_directories(cb_gpu PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -582,7 +591,8 @@ if(BE_PLATFORM_WINDOWS)
     # third_party/prebuilt/files; the build copies them there.
     set(PREBUILT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/prebuilt/files)
     add_executable(cb_webgpu src/proc/webgpu_main.c src/proc/webgl_backend.c src/proc/webgl_gen.c
-                   src/proc/webgpu_wgpu.c src/proc/gpu_blocklist.c src/proc/site.c)
+                   src/proc/webgl_decode.c src/proc/webgpu_wgpu.c src/proc/webgpu_decode.c src/proc/gpu_blocklist.c
+                   src/proc/site.c)
     target_include_directories(cb_webgpu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${PREBUILT_DIR})
     target_link_libraries(cb_webgpu PRIVATE cb_ipc)
     target_compile_options(cb_webgpu PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
@@ -598,7 +608,7 @@ if(BE_PLATFORM_WINDOWS)
     # Its record decoders under random records (tests/webgpu/webgpu_fuzz.c),
     # unsandboxed, next to cb_webgpu so it finds the same libraries.
     add_executable(cb_webgpu_fuzz tests/webgpu/webgpu_fuzz.c src/proc/webgl_backend.c src/proc/webgl_gen.c
-                   src/proc/webgpu_wgpu.c src/proc/gpu_blocklist.c)
+                   src/proc/webgl_decode.c src/proc/webgpu_wgpu.c src/proc/webgpu_decode.c src/proc/gpu_blocklist.c)
     target_include_directories(cb_webgpu_fuzz PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${PREBUILT_DIR})
     target_compile_options(cb_webgpu_fuzz PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
     target_link_options(cb_webgpu_fuzz PRIVATE -static)

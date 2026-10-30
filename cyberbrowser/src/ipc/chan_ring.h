@@ -29,6 +29,16 @@ typedef struct ChanMsg {
         CHAN_RING_MIN <= size <= CHAN_RING_MAX && (size & (size - 1)) == 0;
  */
 
+#define CHAN_MAGIC 0x6e616863u      /* "chan" */
+
+/* Whether a channel's shared header, as read once by chan_attach (the peer
+ * can rewrite it), describes a channel this side may map: the magic, and a
+ * ring size that chan_ring_put and chan_ring_take accept. */
+/*@ assigns \nothing;
+    ensures \result <==> magic == CHAN_MAGIC && ring_size_ok(ring_bytes);
+ */
+int chan_ring_header_ok(uint32_t magic, uint32_t ring_bytes);
+
 /* Put a message at tail of a ring whose consumer is at head: 1 put (and
  * *new_tail is past it), 0 no room yet, -1 the counters are impossible (the
  * peer corrupted them). */

@@ -109,6 +109,11 @@ enum {
     WEBGL_OP_SPECIAL = 256,
 };
 
+/* Their arguments' lengths, by op (0: not a plain call): the grammar the
+ * proved walker (webgl_decode.c) checks each record against. */
+#define WEBGL_PLAIN_OPS 101
+#define WEBGL_PLAIN_LENS { 0, 4, 8, 8, 8, 8, 8, 16, 4, 8, 8, 16, 4, 16, 4, 4, 16, 4, 32, 32, 4, 4, 4, 8, 8, 4, 4, 12, 20, 4, 4, 0, 0, 16, 20, 4, 4, 8, 4, 4, 8, 16, 8, 16, 12, 16, 4, 8, 12, 16, 12, 12, 8, 12, 16, 20, 8, 12, 16, 20, 4, 4, 8, 12, 16, 20, 28, 16, 8, 4, 12, 28, 8, 8, 4, 40, 16, 32, 36, 16, 24, 28, 4, 0, 20, 0, 4, 20, 0, 12, 12, 20, 24, 8, 12, 16, 20, 12, 8, 20, 20, 24 }
+
 /* The GLES entry points the plain calls use (X(name, return, parameters)). */
 #define WEBGL_GEN_PROCS(X) \
     X(glActiveTexture, void, (GLenum)) \

@@ -29,6 +29,7 @@
 #include "proto.h"
 #include "spawn.h"
 #include "site.h"
+#include "store_core.h"       /* STORE_QUOTA_BYTES */
 
 #include "platform.h"
 #include "quickjs.h"
@@ -364,6 +365,7 @@ static CONDITION_VARIABLE g_net_cv;
 static Pending *g_pending;
 static volatile LONG g_net_id;
 static volatile bool g_net_broken;
+static char g_elsewhere[PROTO_URL_MAX + 1];     /* our document went to another site: there */
 
 static DWORD WINAPI net_receiver(void *arg) {
     (void)arg;
@@ -452,17 +454,36 @@ static bool net_request(const char *url, const char *method, const char *body, s
         return false;
     }
     memcpy(&r, m, sizeof(r));
-    if ((uint64_t)sizeof(r) + r.headers_len + r.error_len + r.body_len != len) {
+    if ((uint64_t)sizeof(r) + r.url_len + r.headers_len + r.error_len + r.body_len != len) {
         free(m);
         snprintf(err, err_len, "malformed response from the network process");
         return false;
     }
-    const uint8_t *p = m + sizeof(r);
+    const char *final_url = (const char *)m + sizeof(r);
+    const uint8_t *p = m + sizeof(r) + r.url_len;
     if (status) *status = r.status;
-    if (!r.ok) {
+    if (r.ok == NET_ELSEWHERE && rc.mode == HTTP_MODE_NAVIGATE && r.url_len && r.url_len <= PROTO_URL_MAX) {
+        /* Our document is another site's (a redirect went there): the UI
+         * navigates there, in a tab of that site (main). */
+        snprintf(g_elsewhere, sizeof(g_elsewhere), "%.*s", (int)r.url_len, final_url);
+        snprintf(err, err_len, "another site's document: %s", g_elsewhere);
+        free(m);
+        return false;
+    }
+    if (r.ok != NET_OK) {
         snprintf(err, err_len, "%.*s", (int)r.error_len, (const char *)p + r.headers_len);
         free(m);
         return false;
+    }
+    /* Where it ended, after redirects: the document's URL (http_last_url). */
+    if (r.url_len) {
+        char *u = (char *)malloc((size_t)r.url_len + 1);
+        if (u) {
+            memcpy(u, final_url, r.url_len);
+            u[r.url_len] = 0;
+            http_set_last_url(u);
+            free(u);
+        }
     }
     out->headers = (char *)malloc((size_t)r.headers_len + 1);
     out->data = (char *)malloc((size_t)r.body_len + 1);
@@ -489,10 +510,10 @@ static char *net_cookie_get(const char *url) {
     char *s = NULL;
     if (m && len >= sizeof(r)) {
         memcpy(&r, m, sizeof(r));
-        if (r.ok && (uint64_t)sizeof(r) + r.headers_len + r.error_len + r.body_len == len) {
+        if (r.ok == NET_OK && (uint64_t)sizeof(r) + r.url_len + r.headers_len + r.error_len + r.body_len == len) {
             s = (char *)malloc((size_t)r.body_len + 1);
             if (s) {
-                memcpy(s, m + sizeof(r) + r.headers_len + r.error_len, r.body_len);
+                memcpy(s, m + sizeof(r) + r.url_len + r.headers_len + r.error_len, r.body_len);
                 s[r.body_len] = 0;
             }
         }
@@ -521,6 +542,9 @@ static char g_site[SITE_MAX];            /* the page's site: its frames from oth
 static bool store_call(uint16_t type, const char *path, const void *data, uint32_t dlen,
                        char **out, size_t *out_len) {
     if (!g_have_store) return false;
+    /* The service would refuse it (its quota), and a message past the quota
+     * is past its channel's limit: it would drop the channel instead. */
+    if (dlen > STORE_QUOTA_BYTES) return false;
     StoreRequest r = { ++g_store_id, 0, (uint32_t)strlen(path), dlen };
     if (!big_send(&g_store, type, &r, sizeof(r), path, r.path_len, data, dlen, 5000)) return false;
     for (;;) {
@@ -681,9 +705,22 @@ int main(int argc, char **argv) {
     page_prepare(url);
     JSContextHandle ctx = page_engine_context();
     JS_Eval(ctx, CLICK_JS, sizeof(CLICK_JS) - 1, "<tab-click>", JS_EVAL_TYPE_GLOBAL);
-    if (strcmp(url, "about:blank") == 0) {
+    bool blank = strcmp(url, "about:blank") == 0;
+    bool loaded = blank || page_load();
+    if (blank) {
         page_request_layout();
-    } else if (!page_load()) {
+    } else if (!loaded && g_elsewhere[0]) {
+        /* Another site's document (SANDBOX_DESIGN.md P10): not ours to run.
+         * The UI navigates there, which ends this process. */
+        fprintf(stderr, "[tab %u] the document is at %s, another site's: navigating there\n", g_tab, g_elsewhere);
+        static uint8_t msg[sizeof(TuNavigate) + PROTO_URL_MAX];
+        TuNavigate nav = { 0 };
+        size_t n = strlen(g_elsewhere);
+        memcpy(msg, &nav, sizeof(nav));
+        memcpy(msg + sizeof(nav), g_elsewhere, n);
+        chan_send(&g_chan, TU_NAVIGATE, msg, (uint32_t)(sizeof(nav) + n), 1000);
+        for (;;) { drain(); wait_input(INFINITE); }
+    } else if (!loaded) {
         send_state(TAB_LOAD_FAILED);
         snprintf(g_title, sizeof(g_title), "Failed to load");
         chan_send(&g_chan, TU_TITLE, g_title, (uint32_t)strlen(g_title), 1000);

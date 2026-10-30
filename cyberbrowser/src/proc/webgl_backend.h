@@ -25,20 +25,9 @@ typedef long long GLintptr, GLsizeiptr;
 typedef unsigned long long GLuint64;
 typedef struct __GLsync *GLsync;
 
-/* The kinds of objects a tab names by id. */
-enum {
-    WEBGL_BUFFER = 0, WEBGL_FRAMEBUFFER, WEBGL_RENDERBUFFER, WEBGL_TEXTURE, WEBGL_SHADER, WEBGL_PROGRAM,
-    WEBGL_LOCATION, WEBGL_VERTEX_ARRAY, WEBGL_QUERY, WEBGL_SAMPLER, WEBGL_SYNC, WEBGL_TRANSFORM_FEEDBACK,
-    WEBGL_KINDS
-};
-
-#define WEBGL_MAX_IDS 65536         /* per kind, per context */
-#define WEBGL_NO_NAME 0x7fff0000u   /* a name GLES never gave: for an id that names nothing */
-
-typedef struct WebglLocation {
-    GLuint program;                 /* the program it was asked of */
-    GLint location;
-} WebglLocation;
+/* The kinds of objects, their ids, the ops, and the proved walk over the
+ * records (webgl_decode.c). */
+#include "webgl_decode.h"
 
 typedef struct WebglCtx {
     uint32_t id;                    /* the tab's */
@@ -86,9 +75,9 @@ WebglCtx *webgl_create(uint32_t id, int version, uint32_t w, uint32_t h, uint32_
 void webgl_destroy(WebglCtx *c);
 bool webgl_resize(WebglCtx *c, uint32_t w, uint32_t h);
 
-/* Run records (len bytes); results of queries are appended to *out (grown
- * with realloc; *out_len bytes).  False if a record is malformed: the rest
- * is dropped. */
+/* Run records (len bytes), each as webgl_next accepts it; results of
+ * queries are appended to *out (grown with realloc; *out_len bytes).  False
+ * if a record is malformed: the rest is dropped. */
 bool webgl_run(WebglCtx *c, const uint8_t *recs, uint32_t len, uint8_t **out, uint32_t *out_len, uint32_t *out_cap);
 
 /* The drawing buffer, RGBA top-down, into px (w * h * 4). */

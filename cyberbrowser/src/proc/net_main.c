@@ -11,20 +11,37 @@
  * file through the storage service.  CYBER_REPLAY and CYBER_RECORD work here,
  * as in the single-process browser.
  *
- * Each request says what it is for and which document asks (NetRequest's
- * mode and initiator: the tab's word).  The network process then enforces:
+ * What a tab sends is read by net_decode.c, and every decision is
+ * net_policy.c's (both proved); this file extracts what they look at (sites,
+ * origins, header values) and keeps the books.  Each request says what it is
+ * for and which document asks (NetRequest's mode and initiator: the tab's
+ * word).  The network process then enforces:
+ *   - P10: the page's own document is of the tab's site.  A navigation to
+ *     another site, or a redirect to one (not followed), is answered
+ *     NET_ELSEWHERE with that URL, and the tab asks the UI to go there, in a
+ *     tab of that site.
  *   - Private Network Access: a tab's address space is that of the
  *     connection its document came over (until then, its site's host's);
  *     its other requests connect only to addresses no more private
- *     (tls_set_space_limit, net_policy.c).  Its own documents are exempt.
+ *     (tls_set_space_limit, net_space_allows).  Its own documents are exempt.
  *   - ORB: a no-cors response from another origin reaches the tab only if
  *     orb_verdict allows it (images, media, scripts, styles, ...).
  *   - CORS: a cors response from another origin only with an
- *     Access-Control-Allow-Origin naming the initiator (or *).
+ *     Access-Control-Allow-Origin naming the initiator (or *; not * and
+ *     with Access-Control-Allow-Credentials: true when the jar's cookies
+ *     went with it).
  * Frame documents pass both, as they must while frames share their
  * embedder's process (SANDBOX_DESIGN.md section 9).  An initiator counts
  * only if it is of the tab's site or an origin the tab loaded a frame
- * document from; else the request is taken as the page's.
+ * document from; else the request is taken as the page's.  Every reply
+ * carries the URL the request ended at, after redirects.
+ *
+ * One tab can't hold up the others: its requests wait in a bounded queue
+ * (refused beyond it), it runs at most CLIENT_RUNNING_MAX of the workers at
+ * once, and its replies go out through a thread of its own, so a tab that
+ * doesn't read them holds only that thread; past CLIENT_OUT_MAX replies (or
+ * CLIENT_OUT_BYTES_MAX bytes) unsent, or a part not taken in
+ * SEND_TIMEOUT_MS, it is served no more.
  *
  * CYBER_PNA_PUBLIC_PORTS=P,Q (tests): loopback addresses on those ports
  * count as public. */
@@ -43,13 +60,27 @@
 #include "platform.h"
 #include "http_download.h"
 #include "loop_client.h"
+#include "net_decode.h"
 #include "net_policy.h"
 #include "site.h"
 #include "tls_space.h"
 #include "url_whatwg.h"
 
+_Static_assert(HTTP_MODE_NO_CORS == NET_MODE_NO_CORS && HTTP_MODE_CORS == NET_MODE_CORS &&
+               HTTP_MODE_NAVIGATE == NET_MODE_NAVIGATE && HTTP_MODE_FRAME == NET_MODE_FRAME &&
+               NET_MODE_FRAME == NET_MODE_MAX, "net_policy.c's modes are http_download.h's");
+_Static_assert(sizeof(NetRequest) == NET_REQUEST_FIXED, "net_decode.c reads NetRequest's fields by offset");
+_Static_assert(NET_INITIATOR_MAX == NET_ORIGIN_MAX, "an initiator fits a frame origin");
+
 #define MAX_CLIENTS 64
-#define WORKERS 16
+#define WORKERS 32
+#define CLIENT_RUNNING_MAX 16               /* workers one tab may hold at once */
+#define CLIENT_QUEUED_MAX 256               /* requests one tab may have waiting for a worker */
+#define CLIENT_QUEUED_BYTES_MAX (256u << 20)
+#define QUEUED_MAX 2048                     /* all tabs' */
+#define CLIENT_OUT_MAX 256                  /* replies waiting to go to one tab */
+#define CLIENT_OUT_BYTES_MAX (512ull << 20)
+#define SEND_TIMEOUT_MS 30000               /* for each part of a reply */
 
 /* A site's cookie jar.  Opaque tabs (about:blank) get a jar of their own
  * that is never saved. */
@@ -60,19 +91,33 @@ typedef struct Site {
     struct Site *next;
 } Site;
 
+/* A reply waiting to be sent. */
+typedef struct Out {
+    uint8_t *head;                  /* NetResponse + url */
+    uint32_t head_len;
+    char *err;                      /* a failure's */
+    HttpBuffer b;                   /* a success's headers and body, taken over */
+    struct Out *next;
+} Out;
+
 typedef struct Client {
     uint32_t tab;
     char site[PROTO_SITE_MAX];          /* its badge ("" = opaque) */
     volatile LONG space;                /* NET_SPACE_*: where its document came from */
     SRWLOCK frames_lock;
-    char *frames[64];                   /* origins it loaded frame documents from */
-    int nframes;
+    NetFrames frames;                   /* origins it loaded frame documents from */
     HttpCookieJar *jar;
     Chan chan;                      /* side 1: the network process */
-    CRITICAL_SECTION send_lock;     /* workers answer concurrently */
-    volatile LONG refs;             /* the table's, the reader's and each job's */
-    volatile LONG dead;
-    HANDLE reader;
+    volatile LONG refs;             /* the table's, the reader's, the sender's and each job's */
+    volatile LONG dead;             /* revoked, or served no more */
+    HANDLE reader, sender;
+    uint32_t queued, running;       /* its jobs (under g_jobs_lock) */
+    uint64_t queued_bytes;
+    CRITICAL_SECTION out_lock;      /* its replies, for the sender */
+    CONDITION_VARIABLE out_cv;
+    Out *out_head, *out_tail;
+    uint32_t out_n;
+    uint64_t out_bytes;
 } Client;
 
 typedef struct Job {
@@ -92,13 +137,20 @@ static Client *g_clients[MAX_CLIENTS];
 
 static CRITICAL_SECTION g_jobs_lock;
 static CONDITION_VARIABLE g_jobs_cv;
-static Job *g_jobs_head, *g_jobs_tail;
+static Job *g_jobs_head, **g_jobs_tailp = &g_jobs_head;
+static uint32_t g_queued;
+
+static void out_free(Out *o) {
+    free(o->head);
+    free(o->err);
+    http_free_buffer(&o->b);
+    free(o);
+}
 
 static void client_release(Client *c) {
     if (InterlockedDecrement(&c->refs) == 0) {
         chan_close(&c->chan);
-        DeleteCriticalSection(&c->send_lock);
-        for (int i = 0; i < c->nframes; i++) free(c->frames[i]);
+        DeleteCriticalSection(&c->out_lock);
         free(c);
     }
 }
@@ -137,8 +189,13 @@ static HttpCookieJar *site_jar(const char *label) {
     for (Site *s = g_sites; s; s = s->next)
         if (!strcmp(s->label, label)) return s->jar;
     Site *s = (Site *)calloc(1, sizeof(Site));
+    if (!s) return NULL;
     snprintf(s->label, sizeof(s->label), "%s", label);
     s->jar = http_cookie_jar_new();
+    if (!s->jar) {
+        free(s);
+        return NULL;
+    }
     uint8_t *data;
     uint32_t len;
     if (store_call(TS_READ, label, "cookies", NULL, 0, &data, &len))
@@ -162,16 +219,99 @@ static void save_jars(void) {
     }
 }
 
-/* ---- serving a tab ------------------------------------------------------------- */
+/* ---- replies ------------------------------------------------------------------- */
 
-static void respond(Client *c, uint32_t id, bool ok, int status, const HttpBuffer *b, const char *err) {
-    NetResponse r = { id, ok, status, ok && b->headers ? (uint32_t)b->headers_size : 0,
-                      ok ? 0 : (uint32_t)strlen(err), ok && b->data ? (uint32_t)b->size : 0 };
-    EnterCriticalSection(&c->send_lock);
-    if (!c->dead)
-        big_send(&c->chan, NT_RESPONSE, &r, sizeof(r), ok ? b->headers : err, ok ? r.headers_len : r.error_len,
-                 ok ? b->data : NULL, r.body_len, 30000);
-    LeaveCriticalSection(&c->send_lock);
+/* Stop serving c: its reader and sender end, its jobs are skipped.  (The
+ * coordinator's revocation releases the table's reference later.) */
+static void client_stop(Client *c, const char *why) {
+    if (InterlockedExchange(&c->dead, 1) == 0 && why)
+        fprintf(stderr, "[net] tab %u: %s; it is served no more\n", c->tab, why);
+    SetEvent(chan_event(&c->chan));     /* wake its reader */
+    EnterCriticalSection(&c->out_lock);
+    WakeAllConditionVariable(&c->out_cv);
+    LeaveCriticalSection(&c->out_lock);
+}
+
+/* Queue a reply for c's sender.  ok: NET_OK (b's headers and body are taken
+ * over), NET_FAILED (err), NET_ELSEWHERE (url).  url: where the request
+ * ended (NULL: none). */
+static void reply(Client *c, uint32_t id, uint32_t ok, int status, const char *url, HttpBuffer *b, const char *err) {
+    Out *o = (Out *)calloc(1, sizeof(Out));
+    size_t ulen = url ? strlen(url) : 0;
+    if (o) o->head = (uint8_t *)malloc(sizeof(NetResponse) + ulen);
+    if (o && ok != NET_OK) o->err = strdup(err ? err : "request failed");
+    if (!o || !o->head || (ok != NET_OK && !o->err)) {
+        if (o) out_free(o);
+        if (b) http_free_buffer(b);
+        client_stop(c, "out of memory for a reply");
+        return;
+    }
+    if (ok == NET_OK && b) {
+        o->b = *b;
+        memset(b, 0, sizeof(*b));
+    }
+    NetResponse r = { id, ok, status, ok == NET_OK && o->b.headers ? (uint32_t)o->b.headers_size : 0,
+                      ok != NET_OK ? (uint32_t)strlen(o->err) : 0,
+                      ok == NET_OK && o->b.data ? (uint32_t)o->b.size : 0, (uint32_t)ulen };
+    memcpy(o->head, &r, sizeof(r));
+    if (ulen) memcpy(o->head + sizeof(r), url, ulen);
+    o->head_len = (uint32_t)(sizeof(r) + ulen);
+    uint64_t size = (uint64_t)o->head_len + r.headers_len + r.error_len + r.body_len;
+    EnterCriticalSection(&c->out_lock);
+    bool full = c->out_n >= CLIENT_OUT_MAX || c->out_bytes + size > CLIENT_OUT_BYTES_MAX;
+    bool queued = !c->dead && !full;
+    if (queued) {
+        if (c->out_tail) c->out_tail->next = o; else c->out_head = o;
+        c->out_tail = o;
+        c->out_n++;
+        c->out_bytes += size;
+        WakeAllConditionVariable(&c->out_cv);
+    }
+    LeaveCriticalSection(&c->out_lock);
+    if (!queued) {
+        out_free(o);
+        if (full) client_stop(c, "too many replies it hasn't taken");
+    }
+}
+
+/* A tab's replies, in order.  A tab that doesn't take them holds only this
+ * thread. */
+static DWORD WINAPI sender(void *arg) {
+    Client *c = (Client *)arg;
+    for (;;) {
+        EnterCriticalSection(&c->out_lock);
+        while (!c->out_head && !c->dead) SleepConditionVariableCS(&c->out_cv, &c->out_lock, INFINITE);
+        Out *o = c->dead ? NULL : c->out_head;
+        if (o) {
+            NetResponse r;
+            memcpy(&r, o->head, sizeof(r));
+            c->out_head = o->next;
+            if (!c->out_head) c->out_tail = NULL;
+            c->out_n--;
+            c->out_bytes -= (uint64_t)o->head_len + r.headers_len + r.error_len + r.body_len;
+        }
+        LeaveCriticalSection(&c->out_lock);
+        if (!o) break;
+        NetResponse r;
+        memcpy(&r, o->head, sizeof(r));
+        bool ok = r.ok == NET_OK;
+        bool sent = big_send(&c->chan, NT_RESPONSE, o->head, o->head_len, ok ? o->b.headers : o->err,
+                             ok ? r.headers_len : r.error_len, ok ? o->b.data : NULL, r.body_len, SEND_TIMEOUT_MS);
+        out_free(o);
+        if (!sent) client_stop(c, "it doesn't take its replies");
+    }
+    /* What is left is never sent. */
+    EnterCriticalSection(&c->out_lock);
+    for (Out *o = c->out_head, *n; o; o = n) {
+        n = o->next;
+        out_free(o);
+    }
+    c->out_head = c->out_tail = NULL;
+    c->out_n = 0;
+    c->out_bytes = 0;
+    LeaveCriticalSection(&c->out_lock);
+    client_release(c);
+    return 0;
 }
 
 /* ---- what a request may reach and read ------------------------------------------ */
@@ -218,7 +358,7 @@ static void url_site(const char *url, char *out) {
         out[0] = 0;
 }
 
-/* The origin of url, malloc'd ("null" if it has none). */
+/* The origin of url, malloc'd ("null" if it has none; NULL out of memory). */
 static char *url_origin(const char *url) {
     WUrl u;
     if (wurl_parse(url, strlen(url), NULL, &u) != 0) return strdup("null");
@@ -247,195 +387,265 @@ static bool header_value(const char *hdrs, size_t len, const char *name, char *o
     return false;
 }
 
-/* Whether the tab may read this response: ORB for no-cors, CORS for cors,
- * when it comes from another origin than the initiator's (the page's
- * site, with no initiator).  Navigations and frames pass. */
-/* Whether a tab may speak for initiator: an origin of its own site, or of a
- * frame it loaded. */
-static bool initiator_ok(Client *c, const char *initiator) {
+#define U8(s) ((const uint8_t *)(s))
+
+/* P10 (net_doc_verdict) for a request of mode for url, from c. */
+static int doc_verdict(const Client *c, int mode, const char *url) {
     char site[SITE_MAX];
-    url_site(initiator, site);
-    if (site[0] && !strcmp(site, c->site)) return true;
-    bool found = false;
-    AcquireSRWLockShared(&c->frames_lock);
-    for (int i = 0; i < c->nframes && !found; i++) found = !strcmp(c->frames[i], initiator);
-    ReleaseSRWLockShared(&c->frames_lock);
-    return found;
+    url_site(url, site);
+    return net_doc_verdict(mode, U8(c->site), (uint32_t)strlen(c->site), U8(site), (uint32_t)strlen(site));
+}
+
+/* A redirect of a navigation is followed only within the tab's site; the
+ * first one out is kept, to send the tab there. */
+typedef struct Redirects {
+    const Client *c;
+    char elsewhere[2048];
+} Redirects;
+
+static bool same_site_only(const char *next, void *user) {
+    Redirects *r = (Redirects *)user;
+    if (doc_verdict(r->c, NET_MODE_NAVIGATE, next) == NET_DOC_OK) return true;
+    snprintf(r->elsewhere, sizeof(r->elsewhere), "%s", next);
+    return false;
 }
 
 static void frame_loaded(Client *c, const char *url) {
     char *o = url_origin(url);
+    if (!o) return;
     AcquireSRWLockExclusive(&c->frames_lock);
-    bool have = false;
-    for (int i = 0; i < c->nframes && !have; i++) have = !strcmp(c->frames[i], o);
-    if (!have && c->nframes < 64) c->frames[c->nframes++] = o;
-    else free(o);
+    net_frames_add(&c->frames, U8(o), (uint32_t)strnlen(o, NET_ORIGIN_MAX + 1));
     ReleaseSRWLockExclusive(&c->frames_lock);
+    free(o);
 }
 
-static bool may_read(Client *c, int mode, const char *initiator, const char *final_url, int status,
-                     const HttpBuffer *b, char *why, size_t why_len) {
-    if (mode == HTTP_MODE_NAVIGATE || mode == HTTP_MODE_FRAME) return true;
-    if (initiator[0] && !initiator_ok(c, initiator)) initiator = "";
-    bool cross;
-    if (initiator[0]) {
-        char *o = url_origin(final_url);
-        cross = strcmp(o, initiator) != 0;
-        free(o);
-    } else {
-        char site[SITE_MAX];
-        url_site(final_url, site);
-        cross = strcmp(site, c->site) != 0;
-    }
-    if (!cross) return true;
-    const char *h = b->headers ? b->headers : "";
-    size_t hl = b->headers ? b->headers_size : 0;
-    if (mode == HTTP_MODE_CORS) {
-        char acao[512];
-        if (!header_value(h, hl, "access-control-allow-origin", acao, sizeof(acao))) {
-            snprintf(why, why_len, "CORS: %s has no Access-Control-Allow-Origin", final_url);
-            return false;
-        }
-        if (!strcmp(acao, "*") || (initiator[0] && !strcmp(acao, initiator))) return true;
-        if (!initiator[0]) {
-            char site[SITE_MAX];
-            url_site(acao, site);
-            if (site[0] && !strcmp(site, c->site)) return true;
-        }
-        snprintf(why, why_len, "CORS: %s allows %s only", final_url, acao);
+/* Whether the tab may read this response (net_may_read); why if not. */
+static bool may_read(Client *c, int mode, const char *initiator, const char *final_url, bool credentialed,
+                     int status, const HttpBuffer *b, char *why, size_t why_len) {
+    char init_site[SITE_MAX] = "", final_site[SITE_MAX], acao_site[SITE_MAX] = "";
+    char acao[512] = "", acac[64] = "", mime[512] = "", xcto[64] = "";
+    if (initiator[0]) url_site(initiator, init_site);
+    url_site(final_url, final_site);
+    char *final_origin = url_origin(final_url);
+    if (!final_origin) {
+        snprintf(why, why_len, "out of memory");
         return false;
     }
-    char mime[512] = "", xcto[64] = "";
+    const char *h = b->headers ? b->headers : "";
+    size_t hl = b->headers ? b->headers_size : 0;
+    bool have_acao = header_value(h, hl, "access-control-allow-origin", acao, sizeof(acao));
+    if (have_acao) url_site(acao, acao_site);
+    header_value(h, hl, "access-control-allow-credentials", acac, sizeof(acac));
     header_value(h, hl, "content-type", mime, sizeof(mime));
     header_value(h, hl, "x-content-type-options", xcto, sizeof(xcto));
-    bool nosniff = !_stricmp(xcto, "nosniff");
-    if (orb_verdict((const uint8_t *)mime, (uint32_t)strlen(mime), nosniff, status, (const uint8_t *)(b->data ? b->data : ""),
-                    b->data ? (uint32_t)(b->size < 0xffffffffu ? b->size : 0xffffffffu) : 0) == ORB_ALLOW)
-        return true;
-    snprintf(why, why_len, "ORB: %s (%s) is not for another origin to read", final_url, mime[0] ? mime : "no type");
+    NetRead r = {
+        mode, U8(c->site), (uint32_t)strlen(c->site), U8(initiator), (uint32_t)strlen(initiator),
+        U8(init_site), (uint32_t)strlen(init_site), &c->frames,
+        U8(final_origin), (uint32_t)strlen(final_origin), U8(final_site), (uint32_t)strlen(final_site),
+        credentialed, have_acao, U8(acao), (uint32_t)strlen(acao), U8(acao_site), (uint32_t)strlen(acao_site),
+        U8(acac), (uint32_t)strlen(acac), U8(mime), (uint32_t)strlen(mime), !_stricmp(xcto, "nosniff"), status,
+        U8(b->data ? b->data : ""), b->data ? (uint32_t)(b->size < 0xffffffffu ? b->size : 0xffffffffu) : 0,
+    };
+    AcquireSRWLockShared(&c->frames_lock);
+    int v = net_may_read(&r);
+    ReleaseSRWLockShared(&c->frames_lock);
+    free(final_origin);
+    switch (v) {
+    case NET_READ_OK: return true;
+    case NET_READ_NO_ACAO: snprintf(why, why_len, "CORS: %s has no Access-Control-Allow-Origin", final_url); break;
+    case NET_READ_ACAO: snprintf(why, why_len, "CORS: %s allows %s only", final_url, acao); break;
+    case NET_READ_CREDENTIALS:
+        snprintf(why, why_len, "CORS: %s is not for reading with credentials (Access-Control-Allow-Origin %s, "
+                 "-Credentials %s)", final_url, acao, acac[0] ? acac : "none");
+        break;
+    case NET_READ_ORB:
+        snprintf(why, why_len, "ORB: %s (%s) is not for another origin to read", final_url, mime[0] ? mime : "no type");
+        break;
+    default: snprintf(why, why_len, "no such mode"); break;
+    }
     return false;
 }
 
+/* ---- serving a tab ------------------------------------------------------------- */
+
 /* A TN_REQUEST, on a worker thread. */
 static void run_request(Client *c, const uint8_t *m, uint32_t len) {
-    NetRequest q;
-    if (len < sizeof(q)) return;
-    memcpy(&q, m, sizeof(q));
-    uint64_t need = (uint64_t)sizeof(q) + q.method_len + q.url_len + q.headers_len + q.initiator_len + q.body_len;
-    const char *method = (const char *)m + sizeof(q);
-    const char *url = method + q.method_len;
-    const char *hdrs = url + q.url_len;
-    const char *initiator = hdrs + q.headers_len;
-    const char *body = initiator + q.initiator_len;
-    if (need != len || q.method_len == 0 || q.url_len == 0 || q.nheaders > 64 || q.mode > HTTP_MODE_FRAME ||
-        method[q.method_len - 1] || url[q.url_len - 1] || (q.headers_len && hdrs[q.headers_len - 1]) ||
-        (q.initiator_len && initiator[q.initiator_len - 1]) || q.initiator_len > 512) {
-        respond(c, q.id, false, 0, NULL, "malformed request");
+    NetReq q;
+    if (!net_decode_request(m, len, &q)) {
+        uint32_t id = 0;
+        if (len >= 4) memcpy(&id, m, 4);
+        reply(c, id, NET_FAILED, 0, NULL, NULL, "malformed request");
         return;
     }
-    if (!q.initiator_len) initiator = "";
-    const char *headers[64];
-    size_t nh = 0;
-    for (const char *h = hdrs; h < hdrs + q.headers_len && nh < q.nheaders; h += strlen(h) + 1) headers[nh++] = h;
+    /* (Each string is NUL-terminated in m: net_decode_request.) */
+    const char *method = (const char *)m + q.method, *url = (const char *)m + q.url;
+    const char *initiator = (const char *)m + q.initiator;
+    const char *headers[NET_HEADERS_MAX];
+    for (uint32_t i = 0; i < q.nheaders; i++) headers[i] = (const char *)m + q.header[i];
+    /* The jar's cookies go with it unless it brings its own Cookie header
+     * (empty: none), or it is a preflight (http_download.c). */
+    bool credentialed = _stricmp(method, "OPTIONS") != 0;
+    for (uint32_t i = 0; i < q.nheaders; i++)
+        if (!_strnicmp(headers[i], "Cookie:", 7)) credentialed = false;
+    /* P10: the page's document is of the tab's site; else it goes there in
+     * a tab of its own. */
+    bool doc = q.mode == HTTP_MODE_NAVIGATE;
+    if (doc && doc_verdict(c, (int)q.mode, url) != NET_DOC_OK) {
+        fprintf(stderr, "[net] tab %u: %s is another site's: elsewhere\n", c->tab, url);
+        reply(c, q.id, NET_ELSEWHERE, 0, url, NULL, "another site's document");
+        return;
+    }
     /* Its document goes anywhere; everything else no more private than
      * where the document came from. */
-    bool doc = q.mode == HTTP_MODE_NAVIGATE;
+    Redirects rd = { c, "" };
+    if (doc) http_set_redirect_filter(same_site_only, &rd);
     tls_set_space_limit(doc ? -1 : (int)c->space);
     tls_reset_last_space();
     http_cookie_jar_use(c->jar);
     HttpBuffer b = { 0 };
     int status = 0;
     char err[512] = "";
-    bool ok = http_request_to_memory(url, method, q.body_len ? body : NULL, q.body_len, headers, nh,
-                                     &b, &status, err, sizeof(err));
+    bool ok = http_request_to_memory(url, method, q.body_len ? (const char *)m + q.body : NULL, q.body_len, headers,
+                                     q.nheaders, &b, &status, err, sizeof(err));
     http_cookie_jar_use(NULL);
     tls_set_space_limit(-1);
+    http_set_redirect_filter(NULL, NULL);
     char final_url[2048];
     snprintf(final_url, sizeof(final_url), "%s", http_last_url()[0] ? http_last_url() : url);
-    if (ok && doc && tls_last_space() >= 0) {
-        char site[SITE_MAX];
-        url_site(final_url, site);
-        if (!strcmp(site, c->site)) InterlockedExchange(&c->space, tls_last_space());
+    if (!ok && rd.elsewhere[0]) {
+        fprintf(stderr, "[net] tab %u: %s redirects to %s, another site's: elsewhere\n", c->tab, url, rd.elsewhere);
+        reply(c, q.id, NET_ELSEWHERE, 0, rd.elsewhere, NULL, "redirected to another site");
+        http_free_buffer(&b);
+        return;
     }
+    /* (The filter saw every hop; P10 is checked on where it ended all the same.) */
+    if (ok && doc && doc_verdict(c, (int)q.mode, final_url) != NET_DOC_OK) {
+        fprintf(stderr, "[net] tab %u: %s ended at %s, another site's: elsewhere\n", c->tab, url, final_url);
+        reply(c, q.id, NET_ELSEWHERE, 0, final_url, NULL, "another site's document");
+        http_free_buffer(&b);
+        return;
+    }
+    if (ok && doc && tls_last_space() >= 0) InterlockedExchange(&c->space, tls_last_space());
     if (ok && q.mode == HTTP_MODE_FRAME) frame_loaded(c, final_url);
     char why[2600];
-    if (ok && !may_read(c, (int)q.mode, initiator, final_url, status, &b, why, sizeof(why))) {
+    if (ok && !may_read(c, (int)q.mode, initiator, final_url, credentialed, status, &b, why, sizeof(why))) {
         fprintf(stderr, "[net] tab %u: %s\n", c->tab, why);
         ok = false;
         snprintf(err, sizeof(err), "%.500s", why);
     }
-    respond(c, q.id, ok, status, &b, err[0] ? err : "request failed");
+    reply(c, q.id, ok ? NET_OK : NET_FAILED, status, ok ? final_url : NULL, &b, err[0] ? err : "request failed");
     http_free_buffer(&b);
+}
+
+/* The first job whose tab isn't at CLIENT_RUNNING_MAX (under g_jobs_lock). */
+static Job **next_job(void) {
+    Job **pp = &g_jobs_head;
+    while (*pp && (*pp)->client->running >= CLIENT_RUNNING_MAX) pp = &(*pp)->next;
+    return *pp ? pp : NULL;
 }
 
 static DWORD WINAPI worker(void *arg) {
     (void)arg;
     for (;;) {
         EnterCriticalSection(&g_jobs_lock);
-        while (!g_jobs_head) SleepConditionVariableCS(&g_jobs_cv, &g_jobs_lock, INFINITE);
-        Job *j = g_jobs_head;
-        g_jobs_head = j->next;
-        if (!g_jobs_head) g_jobs_tail = NULL;
+        Job **pp;
+        while (!(pp = next_job())) SleepConditionVariableCS(&g_jobs_cv, &g_jobs_lock, INFINITE);
+        Job *j = *pp;
+        *pp = j->next;
+        if (g_jobs_tailp == &j->next) g_jobs_tailp = pp;
+        Client *c = j->client;
+        c->queued--;
+        c->queued_bytes -= j->len;
+        g_queued--;
+        c->running++;
         LeaveCriticalSection(&g_jobs_lock);
-        if (!j->client->dead) run_request(j->client, j->msg, j->len);
-        client_release(j->client);
+        if (!c->dead) run_request(c, j->msg, j->len);
+        EnterCriticalSection(&g_jobs_lock);
+        c->running--;
+        if (c->queued) WakeAllConditionVariable(&g_jobs_cv);   /* its next may go now */
+        LeaveCriticalSection(&g_jobs_lock);
+        client_release(c);
         free(j->msg);
         free(j);
     }
     return 0;
 }
 
+/* A TN_REQUEST, for the workers (rx's buffer taken over), or refused when
+ * the queue is full. */
+static void enqueue(Client *c, BigRx *rx) {
+    Job *j = (Job *)malloc(sizeof(Job));
+    EnterCriticalSection(&g_jobs_lock);
+    bool room = j && c->queued < CLIENT_QUEUED_MAX && g_queued < QUEUED_MAX &&
+                c->queued_bytes + rx->total <= CLIENT_QUEUED_BYTES_MAX;
+    if (room) {
+        j->client = c;
+        j->len = rx->total;
+        j->msg = rx->buf;
+        j->next = NULL;
+        rx->buf = NULL;
+        rx->cap = 0;
+        InterlockedIncrement(&c->refs);
+        *g_jobs_tailp = j;
+        g_jobs_tailp = &j->next;
+        c->queued++;
+        c->queued_bytes += j->len;
+        g_queued++;
+        WakeConditionVariable(&g_jobs_cv);
+    }
+    LeaveCriticalSection(&g_jobs_lock);
+    if (!room) {
+        free(j);
+        uint32_t id = 0;
+        if (rx->total >= 4) memcpy(&id, rx->buf, 4);
+        reply(c, id, NET_FAILED, 0, NULL, NULL, "too many requests");
+    }
+}
+
 static void cookie_get(Client *c, const uint8_t *m, uint32_t len) {
-    NetCookieGet g;
-    if (len <= sizeof(g)) return;
-    memcpy(&g, m, sizeof(g));
-    const char *url = (const char *)m + sizeof(g);      /* big_recv NUL-terminates */
+    uint32_t id, ulen;
+    if (!net_decode_cookie_get(m, len, &id, &ulen)) return;
+    char *url = (char *)malloc((size_t)ulen + 1);
+    if (!url) return;
+    memcpy(url, m + 4, ulen);
+    url[ulen] = 0;
     http_cookie_jar_use(c->jar);
     const char *s = http_cookie_get_for_document(url);
-    HttpBuffer b = { (char *)(s ? s : ""), s ? strlen(s) : 0, NULL, 0 };
-    respond(c, g.id, true, 200, &b, NULL);
+    HttpBuffer b = { strdup(s ? s : ""), s ? strlen(s) : 0, NULL, 0 };
     http_cookie_jar_use(NULL);
+    free(url);
+    if (b.data) reply(c, id, NET_OK, 200, NULL, &b, NULL);
+    else reply(c, id, NET_FAILED, 0, NULL, NULL, "out of memory");
 }
 
 static void cookie_set(Client *c, const uint8_t *m, uint32_t len) {
-    const char *url = (const char *)m;
-    size_t ulen = strnlen(url, len);
-    if (ulen >= len) return;
+    uint32_t ulen, llen;
+    if (!net_decode_cookie_set(m, len, &ulen, &llen)) return;
+    char *line = (char *)malloc((size_t)llen + 1);
+    if (!line) return;
+    memcpy(line, m + ulen + 1, llen);
+    line[llen] = 0;
     http_cookie_jar_use(c->jar);
-    http_cookie_set_for_document(url, url + ulen + 1);
+    http_cookie_set_for_document((const char *)m, line);       /* (the URL ends with its NUL) */
     http_cookie_jar_use(NULL);
+    free(line);
 }
 
 /* A tab's channel: requests go to the workers, cookies are answered here. */
 static DWORD WINAPI reader(void *arg) {
     Client *c = (Client *)arg;
     BigRx rx = { 0 };
+    rx.limit = BIG_MAX / 2 + (4u << 20);   /* a tab sends bodies up to BIG_MAX / 2 (tab_main.c), plus 4 MB of URL and headers */
     while (!c->dead) {
         int r = big_recv(&c->chan, &rx);
         if (r < 0) {
-            fprintf(stderr, "[net] tab %u: channel broken\n", c->tab);
+            client_stop(c, "channel broken");
             break;
         }
         if (r == 0) { chan_wait(&c->chan, 1000); continue; }
-        if (rx.type == TN_REQUEST) {
-            Job *j = (Job *)malloc(sizeof(Job));
-            j->client = c;
-            j->len = rx.total;
-            j->msg = rx.buf;                /* taken over */
-            j->next = NULL;
-            rx.buf = NULL;
-            rx.cap = 0;
-            InterlockedIncrement(&c->refs);
-            EnterCriticalSection(&g_jobs_lock);
-            if (g_jobs_tail) g_jobs_tail->next = j; else g_jobs_head = j;
-            g_jobs_tail = j;
-            WakeConditionVariable(&g_jobs_cv);
-            LeaveCriticalSection(&g_jobs_lock);
-        } else if (rx.type == TN_COOKIE_GET) {
-            cookie_get(c, rx.buf, rx.total);
-        } else if (rx.type == TN_COOKIE_SET) {
-            cookie_set(c, rx.buf, rx.total);
-        }
+        if (rx.type == TN_REQUEST) enqueue(c, &rx);
+        else if (rx.type == TN_COOKIE_GET) cookie_get(c, rx.buf, rx.total);
+        else if (rx.type == TN_COOKIE_SET) cookie_set(c, rx.buf, rx.total);
     }
     big_free(&rx);
     client_release(c);
@@ -469,11 +679,26 @@ static void grant(const CsGrant *g) {
     snprintf(c->site, sizeof(c->site), "%s", g->site);
     c->space = g->site[0] ? site_space(g->site) : NET_SPACE_PUBLIC;
     c->jar = g->site[0] ? site_jar(g->site) : http_cookie_jar_new();
-    InitializeCriticalSection(&c->send_lock);
+    if (!c->jar) {                      /* out of memory: not served */
+        chan_close(&c->chan);
+        free(c);
+        return;
+    }
     InitializeSRWLock(&c->frames_lock);
-    c->refs = 2;                        /* the table's and the reader's */
+    InitializeCriticalSection(&c->out_lock);
+    InitializeConditionVariable(&c->out_cv);
+    c->refs = 3;                        /* the table's, the reader's and the sender's */
     g_clients[slot] = c;
+    c->sender = CreateThread(NULL, 0, sender, c, 0, NULL);
+    if (!c->sender) {
+        c->dead = 1;
+        client_release(c);              /* (the sender's) */
+    }
     c->reader = CreateThread(NULL, 0, reader, c, 0, NULL);
+    if (!c->reader) {
+        client_stop(c, "no thread to read it");
+        client_release(c);              /* (the reader's) */
+    }
     fprintf(stderr, "[net] serving tab %u (%s)\n", c->tab, g->site[0] ? g->site : "opaque");
 }
 
@@ -481,9 +706,9 @@ static void revoke(uint32_t tab) {
     for (int i = 0; i < MAX_CLIENTS; i++) {
         Client *c = g_clients[i];
         if (!c || c->tab != tab) continue;
-        c->dead = 1;
-        SetEvent(chan_event(&c->chan));     /* wake its reader */
+        client_stop(c, NULL);           /* wakes its reader and sender */
         if (c->reader) CloseHandle(c->reader);
+        if (c->sender) CloseHandle(c->sender);
         g_clients[i] = NULL;
         client_release(c);
         fprintf(stderr, "[net] stopped serving tab %u\n", tab);

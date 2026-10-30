@@ -18,6 +18,7 @@
 #endif
 #include <time.h>
 #include "platform.h"
+#include "proc/net_policy.h"
 
 #include "mbedtls/error.h"
 
@@ -382,8 +383,10 @@ void tls_set_space_limit(int limit) { t_space_limit = limit; }
 int tls_last_space(void) { return t_last_space; }
 void tls_reset_last_space(void) { t_last_space = -1; }
 
+/* P9's decision is the proved one (net_policy.c): the thread's limit is the
+ * client's space, space (-1: unknown) the target's.  No limit: anything. */
 static bool space_allowed(int space) {
-    return t_space_limit < 0 || (space >= 0 && space <= t_space_limit);
+    return t_space_limit < 0 || net_space_allows(t_space_limit, space);
 }
 
 static void space_refused(const char *host, const char *port, char *err, size_t errLen) {

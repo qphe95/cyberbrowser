@@ -71,7 +71,8 @@ bool store_rel_path_ok(const char *rel, uint32_t len);
     ensures \result ==> \exists integer n; 1 <= n < SITE_MAX && site[n] == 0 &&
         n + 1 + rel_len < cap &&
         (\forall integer i; 0 <= i < n ==> out[i] == site[i]) && out[n] == '/' &&
-        (\forall integer i; 0 <= i < rel_len ==> out[n + 1 + i] == rel[i]) && out[n + 1 + rel_len] == 0;
+        (\forall integer i; 0 <= i < rel_len ==> out[n + 1 + i] == rel[i]) && out[n + 1 + rel_len] == 0 &&
+        (\forall integer i; 0 <= i < n + 1 + rel_len ==> out[i] != 0);
  */
 bool store_join(const char *site, const char *rel, uint32_t rel_len, char *out, uint32_t cap);
 
@@ -93,5 +94,83 @@ bool store_allowed(const char *client_site, const char *target_site, const char 
     ensures \result ==> old_size <= used && used - old_size + new_size <= STORE_QUOTA_BYTES;
  */
 bool store_quota_ok(uint64_t used, uint64_t old_size, uint64_t new_size);
+
+/* ---- a client's requests (M9, SANDBOX_DESIGN.md section 8.7.3) ---------------- */
+
+/* TS_READ, TS_WRITE and TS_DELETE (proto.h), as a client sends them:
+ *   id, site_len, path_len, data_len     four little-endian uint32 (StoreRequest)
+ *   site                                 site_len bytes, no NUL, under SITE_MAX:
+ *                                        only the network process names one
+ *   path                                 path_len bytes, at most STORE_PATH_MAX
+ *   data                                 data_len bytes (TS_WRITE's content)
+ * and nothing after. */
+#define STORE_REQ_HEAD 16
+
+enum {
+    STORE_REQ_SHORT = 0,            /* not even a header: no answer */
+    STORE_REQ_BAD,                  /* the lengths don't add up: refused (q->id) */
+    STORE_REQ_REFUSED,              /* well formed, not allowed (or too long a path): refused */
+    STORE_REQ_OK,                   /* allowed: path names the file */
+};
+
+typedef struct StoreReq {
+    uint32_t id;
+    char target[SITE_MAX];          /* the site acted on, NUL-terminated */
+    char rel[STORE_PATH_MAX + 1];   /* the path in it, NUL-terminated */
+    uint32_t rel_len;
+    uint32_t data_off, data_len;    /* the data: msg[data_off .. data_off + data_len - 1] */
+    char joined[SITE_MAX + STORE_PATH_MAX + 2];   /* store_join's "<target>/<rel>" */
+} StoreReq;
+
+/*@ logic integer le32{L}(uint8_t *p) = p[0] + p[1] * 0x100 + p[2] * 0x10000 + p[3] * 0x1000000;
+
+    // The header's lengths add up to the message's, each in range.
+    predicate req_ok{L}(uint8_t *m, integer len) =
+        len >= STORE_REQ_HEAD && le32(m + 4) < SITE_MAX && le32(m + 8) <= STORE_PATH_MAX &&
+        STORE_REQ_HEAD + le32(m + 4) + le32(m + 8) + le32(m + 12) == len;
+
+    // path (UTF-16) is root, '\', the site label, '\', then rel with '/' as '\', NUL-terminated.
+    predicate wpath{L}(uint16_t *path, integer cap, uint16_t *root, integer rn, char *site, char *rel, integer rl) =
+        \exists integer n; 1 <= n < SITE_MAX && site[n] == 0 && rn + 2 + n + rl < cap &&
+            (\forall integer i; 0 <= i < rn ==> path[i] == root[i]) && path[rn] == '\\' &&
+            (\forall integer i; 0 <= i < n ==> path[rn + 1 + i] == site[i]) && path[rn + 1 + n] == '\\' &&
+            (\forall integer i; 0 <= i < rl ==> path[rn + 2 + n + i] == (rel[i] == '/' ? '\\' : rel[i])) &&
+            path[rn + 2 + n + rl] == 0;
+ */
+
+/* Decode a request (len bytes at m) from a client badged client_site (NULL
+ * for the network process; "" for an opaque origin, which may do nothing),
+ * decide it, and make the file's path: root (root_len UTF-16 units: the
+ * service's browser_data\sites), '\', then store_join's "<site>/<path>"
+ * with '\' for '/', into path (cap units).  The path is refused rather than
+ * cut short if it doesn't fit.  Pure: the shim only opens what path names
+ * (P4). */
+/*@ requires \valid_read(m + (0 .. len - 1));
+    requires client_site == \null || \valid_read(client_site + (0 .. SITE_MAX - 1));
+    requires \valid_read(root + (0 .. root_len - 1));
+    requires \valid(q) && \valid(path + (0 .. cap - 1));
+    requires \separated(q, path + (0 .. cap - 1), m + (0 .. len - 1), root + (0 .. root_len - 1));
+    requires client_site != \null ==> \separated(q, path + (0 .. cap - 1), client_site + (0 .. SITE_MAX - 1));
+    requires \separated(path + (0 .. cap - 1), m + (0 .. len - 1), root + (0 .. root_len - 1));
+    assigns *q, path[0 .. cap - 1];
+    ensures STORE_REQ_SHORT <= \result <= STORE_REQ_OK;
+    ensures \result == STORE_REQ_SHORT <==> len < STORE_REQ_HEAD;
+    ensures \result != STORE_REQ_SHORT ==> q->id == le32(m);
+    ensures \result >= STORE_REQ_REFUSED <==> req_ok(m, len);
+    ensures \result >= STORE_REQ_REFUSED ==>
+        q->rel_len == le32(m + 8) && q->data_len == le32(m + 12) &&
+        q->data_off == STORE_REQ_HEAD + le32(m + 4) + le32(m + 8) && q->data_off + q->data_len == len &&
+        q->target[SITE_MAX - 1] == 0 && q->rel[q->rel_len] == 0;
+    // P4: what the shim opens is the file store_allowed and store_join approved.
+    ensures \result == STORE_REQ_OK ==>
+        label_ok(&q->target[0]) && rel_ok(&q->rel[0], q->rel_len) &&
+        (\forall integer i; 0 <= i < q->rel_len ==> q->rel[i] == (char)m[STORE_REQ_HEAD + le32(m + 4) + i]) &&
+        (client_site != \null ==> same_label(client_site, &q->target[0]) && !is_cookies(&q->rel[0], q->rel_len)) &&
+        (client_site == \null ==> is_cookies(&q->rel[0], q->rel_len) &&
+            \forall integer i; 0 <= i < le32(m + 4) ==> q->target[i] == (char)m[STORE_REQ_HEAD + i]) &&
+        wpath(path, cap, root, root_len, &q->target[0], &q->rel[0], q->rel_len);
+ */
+int store_decode(const uint8_t *m, uint32_t len, const char *client_site, const uint16_t *root, uint32_t root_len,
+                 StoreReq *q, uint16_t *path, uint32_t cap);
 
 #endif

@@ -1,0 +1,40 @@
+# eva-loop (cb_loop.exe, loop_main.c): alarms beyond common.explained.
+# Format and judgements: see common.explained.
+
+# IMPRECISION.  The core's state is a static (g_state) that only loop_init
+# and loop_step write; loop_init establishes loop_ok and ids_unique and
+# loop_step keeps them (their postconditions, proved by WP).  Eva can't
+# evaluate quantified predicates over the 60 connections.
+loop_main.c:step: precondition of loop_step: loop_ok(s) ∧ ids_unique(s)
+
+# IMPRECISION.  perform and the sock_* functions index g_socks with an
+# action's slot.  loop_step's postcondition (act_ok) gives every socket
+# action (LA_CONNECT, LA_SOCK_SEND, LA_SOCK_CLOSE) a slot in [0, 60), and an
+# LA_SOCK_SEND 1 to LOOP_DATA_MAX bytes, which is out's size; LA_NET_SEND's
+# slot (-1 in loop_core.c) is never used.  Eva keeps the actions' kinds and
+# slots apart, so it sees -1 possible for the socket actions, and from there
+# writes to k->out that may land anywhere in g_socks (the Boolean fields'
+# "trap representation" alarms).  sock_flush sends out[out_off .. out_len)
+# with out_off < out_len <= LOOP_DATA_MAX (its loop condition), bytes
+# perform copied in.
+loop_main.c:perform: mem_access: \valid(&k->out_len)
+loop_main.c:perform: precondition of memcpy: valid_dest: valid_or_empty(dest, n)
+loop_main.c:perform: precondition of memcpy: valid_src: valid_read_or_empty(src, n)
+loop_main.c:sock_close: mem_access: \valid_read(&k->s)
+loop_main.c:sock_connect: mem_access: \valid(&k->s)
+loop_main.c:sock_flush: mem_access: \valid_read(&k->out_len)
+loop_main.c:sock_flush: mem_access: \valid_read(&k->out_off)
+loop_main.c:sock_flush: precondition of send: buf: \valid_read(buf + (0 .. len - 1)) ∧ \initialized(buf + (0 .. len - 1))
+loop_main.c:sock_flush: precondition of send: len: len ≥ 0
+loop_main.c:sock_pump: bool_value: k->eof ≡ 0 ∨ k->eof ≡ 1
+loop_main.c:sock_pump: bool_value: k->readable ≡ 0 ∨ k->readable ≡ 1
+
+# IMPRECISION.  main's wait: waits[0 .. n-1] and slot_of[0 .. n-1] are all
+# written just before WaitForMultipleObjects(n, ...), with 1 <= n <= 62;
+# afterwards j runs from the index it returned (below n, else `continue`)
+# to n - 1, and WSAEnumNetworkEvents fills ne before it is read.  Eva merges
+# the states for different n (and with them which entries are written).
+loop_main.c:loop_main: initialization: \initialized(&ne.iErrorCode[4])
+loop_main.c:loop_main: initialization: \initialized(&ne.lNetworkEvents)
+loop_main.c:loop_main: initialization: \initialized(&slot_of[j])
+loop_main.c:loop_main: precondition of WaitForMultipleObjects: handles_set: \initialized(lpHandles + (0 .. nCount - 1))

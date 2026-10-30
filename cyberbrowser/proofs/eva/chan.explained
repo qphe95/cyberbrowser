@@ -1,0 +1,12 @@
+# eva-chan: alarms in the driver itself (drv_chan.c); the rest are in
+# common.explained.  Format: see there.
+
+# IMPRECISION.  After big_recv returned 1, buf holds total + 1 bytes or more,
+# all written (the parts copied in, then buf[total] = 0): see big_recv in
+# common.explained.  The driver reads buf[0] (when total > 0) and
+# buf[total].
+drv_chan.c:main: dangling_pointer: ¬\dangling(&main_rx.buf)
+drv_chan.c:main: initialization: \initialized(main_rx.buf + 0)
+drv_chan.c:main: initialization: \initialized(main_rx.buf + main_rx.total)
+drv_chan.c:main: mem_access: \valid_read(main_rx.buf + 0)
+drv_chan.c:main: mem_access: \valid_read(main_rx.buf + main_rx.total)

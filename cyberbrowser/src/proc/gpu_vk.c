@@ -772,8 +772,9 @@ static bool vk_present(HWND hwnd, uint32_t w, uint32_t h, GpuTarget *t, int32_t 
 
 static Buf g_readback;
 
-static bool vk_readback(GpuTarget *t, uint8_t *out, uint32_t *w, uint32_t *h) {
+static bool vk_readback(GpuTarget *t, uint8_t *out, size_t cap, uint32_t *w, uint32_t *h) {
     VkDeviceSize bytes = (VkDeviceSize)t->img.w * t->img.h * 4;
+    if (bytes > cap) return false;
     if (!buf_need(&g_readback, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT) || !begin()) return false;
     barrier(g_cb, t->img.img, &t->img.layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     VkBufferImageCopy c;

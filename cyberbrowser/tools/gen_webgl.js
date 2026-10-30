@@ -150,6 +150,11 @@ CALLS.forEach((c, i) => { h += `    WEBGL_OP_${c[0].toUpperCase()} = ${FIRST_OP 
 h += `    WEBGL_OP_SPECIAL = 256,
 };
 
+/* Their arguments' lengths, by op (0: not a plain call): the grammar the
+ * proved walker (webgl_decode.c) checks each record against. */
+#define WEBGL_PLAIN_OPS ${FIRST_OP + CALLS.length - 1}
+#define WEBGL_PLAIN_LENS { ${[...Array(FIRST_OP).fill(0), ...CALLS.map(size)].join(', ')} }
+
 /* The GLES entry points the plain calls use (X(name, return, parameters)). */
 #define WEBGL_GEN_PROCS(X) \\
 `;

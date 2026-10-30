@@ -124,8 +124,16 @@ typedef struct HttpRequestContext {
 void http_request_context_set(int mode, const char *initiator);
 void http_request_context_get(HttpRequestContext *out);
 
-/* The URL the last request on this thread ended at (after redirects). */
+/* The URL the last request on this thread ended at (after redirects).  A
+ * remote (HttpRemote) sets it from its answer with http_set_last_url. */
 const char *http_last_url(void);
+void http_set_last_url(const char *url);
+
+/* Redirects on this thread go to filter first (NULL: none): false and the
+ * request stops there, failing.  A relative Location is resolved against
+ * the URL it came from; more than 20 hops fail. */
+typedef bool (*HttpRedirectFilter)(const char *next_url, void *user);
+void http_set_redirect_filter(HttpRedirectFilter filter, void *user);
 
 /* Android-specific functions - only available on Android */
 #ifdef BE_PLATFORM_ANDROID

@@ -1243,6 +1243,88 @@ a change proves only what it touches. Steps 1, 2 and 4 are like M4's work. Step 
 decoders are the largest. If they would hold up the rest, they can follow as their own
 milestone.
 
+### 8.8 As built in M9
+
+What a tab sends each privileged process is now read by proved code, and the coordinator's
+choice of which handle goes into which process is proved. The details are in `notes/m9/`
+(one file per part).
+
+**New proved cores** (`tools/prove.sh` targets):
+
+| Target | Core | What it shows | Goals |
+|---|---|---|---|
+| `chan` | `big_core.c` | a message is assembled only from its own parts, within the channel's limit, never past its buffer | 616 (with `chan_ring.c`) |
+| `plan` | `coord_plan.c` | a tab's process gets only its own slot's channels; a server's end goes only to that server, badged with the slot's label; a web-GPU channel only from its own site's process; an exit is paired with the process that ended | 4,362 |
+| `net` | `net_policy.c`, `net_decode.c` | P10 (below); CORS, initiators and the frame list; `TN_REQUEST` and the cookie messages decoded to a grammar | 4,541 |
+| `store` | `store_core.c` | `store_decode`: the request read to its grammar, and the path opened is the one P4 allowed | see below |
+| `gpu_input` | `gpu_input.c` | atlases, images and the frame header read to their grammars; a slot or image is marked uploaded only when its pixels are in place | 749 |
+| `ui` | `ui_core.c` | the UI's reading of every tab message; when a tab may open a tab | 237 |
+| `webgl` | `webgl_decode.c` | WebGL records: known ops, each at its layout's length; ids name only the context's own objects | 1,350 |
+| `webgpu` | `webgpu_decode.c` | the value-tree parser (now iterative) and record framing stay inside the input; ids name only the client's live objects; map ranges without overflow | 2,590 |
+
+**P10.** A document a tab is given (`HTTP_MODE_NAVIGATE`) is from the tab's own site. For any
+other mode the core places no limit (frames may be any site's, as in section 9.1). The
+network process refuses another site's document with its final URL (`NET_ELSEWHERE`), at the
+request, at each redirect hop and at the end, and the tab asks the UI to navigate there. The
+coordinator then starts a tab of that site. `Protocol.tla` models it: invariant `DocTrue`, and
+`RedirectsFollowed` (a refused navigation is followed).
+
+**Findings fixed** (section 8.7.2):
+- **The cross-site redirect was real.** An open redirect on site A ran site B's page as A.
+- Pages take their URL after redirects, and a relative `Location` resolves (there was no hop
+  limit either: now 20).
+- PNA goes through the proved `net_space_allows`.
+- The `#escape` trigger is gone: the test hook comes from the coordinator's own environment
+  only (`CYBER_TAB_EXE`, `CYBER_TAB_EXE_URL`), once.
+- A half-made atlas is no longer marked uploaded.
+- One tab can't stall the others:
+  - the network process has bounded queues and a sender thread per tab;
+  - storage has a one-reply queue per client, and drops a client whose reply hasn't moved
+    for 10 s;
+  - a tab opens a new tab only once per click it was sent.
+- The storage service drops a broken network-process client; the relay no longer drops events.
+- Each channel has a limit on what it holds (storage 64 MB, network 132 MB, GPU and web-GPU
+  256 MB). The tab doesn't send storage a write over its quota.
+
+**Found along the way, fixed:**
+- the GPU process read an unset scroll value when presenting a frame;
+- a WebGPU canvas texture destroyed through one id was still used through another;
+- a NaN map offset converted to an integer;
+- an unchecked name length from ANGLE;
+- `location.origin` without its port;
+- a screenshot buffer sized from the tab but filled at the render target's size;
+- unchecked allocations (cookie jars, storage usage);
+- long install paths leaving the data folder's path without a NUL.
+
+**Eva** (`tools/prove.sh eva`, or `eva-<process>`). It runs on each process's shim with
+stubbed Windows calls:
+- `proofs/eva/include` declares about 150 Windows functions with contracts (trusted), on
+  a MinGW machine description;
+- `proofs/eva/drv_*.c` drive each process;
+- the proved cores run as they are; the libraries outside M9 (HTTP/TLS, rasterizers, ANGLE,
+  wgpu) are models.
+
+A run fails on any alarm not listed, with its reason, in `proofs/eva/<process>.explained`.
+
+**Not finished:**
+- **The proofs.** Every WP target was proved by the agent that wrote it except `store`, whose
+  final run was cut off with 8 of 6,323 goals open. Re-proving all of them together on this
+  code was under way at this commit: `chan` 616/616 is confirmed.
+- **Eva.** Only the channels (17 alarms, all explained) and the relay (21, explained) have
+  final runs. Storage, the coordinator, GPU, web-GPU, UI and network need runs on the merged
+  code and their alarms classified, so `eva` is not in `all`. The web-GPU process's
+  WebGL/WebGPU executors (`webgl_backend.c`, `webgpu_wgpu.c`) are modelled, not analysed.
+- **The model check.** `Protocol.cfg` checks safety with redirects off (6,502,489 states);
+  `ProtocolLive.cfg` checks them, with liveness (252,227 states).
+
+**Trusted after M9** (section 8.4 otherwise unchanged):
+- the Windows calls behind the coordinator's operations, named with their contracts in
+  `coordinator.c`;
+- `bigmsg.c`'s copying and `realloc` around `big_core`;
+- the shims' extraction of origins and header values for the network policy;
+- storage's `send_reply` framing;
+- the Windows stub contracts Eva relies on.
+
 ## 9. Iframes from other sites
 
 In the first phases a cross-site iframe runs in its embedder's process, as in browsers before
@@ -1331,7 +1413,7 @@ memory of an idle tab process (about:blank). Things that would reduce it, in ord
 | M6 | Multiple windows; dragging tabs out and between windows; compositor scrolling | Drag works while a video plays, without a reload (done) |
 | M7 | Cross-site iframe partitioning, ORB, Private Network Access | Frames from other sites load with their storage and cookies apart; the network process enforces ORB, CORS and PNA; the escape tests pass (done) |
 | M8 | Web-GPU process: WebGPU on `wgpu-native`, WebGL 1 and 2 on ANGLE (pinned prebuilt DLLs), on the GPU; shared canvas textures; the driver block list and feature limits; fuzzing | The WebGPU and WebGL conformance suites pass at a level to be set then; a crashing web-GPU process takes down only its canvases; on a blocked driver the APIs are unavailable |
-| M9 | Proving the shims (section 8.7): every privileged process's decoding of what a tab sends, and the coordinator's handing out of handles, in proved code; the rest of each shim free of undefined behavior (Eva); the findings of section 8.7.2 fixed first | All goals proved, Eva with no open alarm on the shims it covers; the escape tests pass with the new attacks; replays unchanged |
+| M9 | Proving the shims (sections 8.7, 8.8): every privileged process's decoding of what a tab sends, and the coordinator's handing out of handles, in proved code; the rest of each shim free of undefined behavior (Eva); the findings of section 8.7.2 fixed first | All goals proved, Eva with no open alarm on the shims it covers; the escape tests pass with the new attacks; replays unchanged |
 | Later | Out-of-process iframes; JIT process; GPU video decode | |
 
 The single-process mode (`--single-process`, and what the replay harness uses) stays through
@@ -1826,6 +1908,28 @@ WebGPU on wgpu-native, on the GPU (section 5.7.2).
   - wgpu-native still leaks a device's memory in a few cases a page can bring about, a submit
     refused while a buffer is mapped among them. They end with the site's process.
   - The record decoders are fuzzed, not proved (section 5.7 plans that next).
+
+**M9 (done but for the proofs' and Eva's final runs):** the shims around the cores (section
+8.8).
+- **Proofs:** eight targets new or extended (section 8.8's table), about 21,000 goals. `chan`
+  was re-proved on the merged code; the others as each part was built (`store` unconfirmed).
+- **Tests:** on the merged build, with the machine quiet:
+  - `proc_tests`: 319,610 checks;
+  - the escape tests: 14 of 14 checks, 81 attempts, 0 escaped. The hostile tab also tries
+    cross-site redirects of its own navigation and floods the network process with replies it
+    never reads;
+  - the sites tests, including where pages land after redirects;
+  - the web-GPU tests (1,000 fuzz batches);
+  - the window tests, including dragging a tab back into its first window, which failed in
+    M8;
+  - the unit tests.
+- **Conformance:** with the M8 fixes, WebGL 1 passes 41,955 of 53,952 checks (77.8%), and 725
+  of 971 pages pass every check. On a sample of 67 pages, the stricter record grammar changed
+  no result.
+- **The replays** weren't re-measured for M9.
+- **A note on WSL:** Eva runs with high precision can take several GB each; three at once
+  filled WSL's memory and hung it, and the hung VM slowed the web-GPU process's adapter
+  requests from 1 s to 30 s. `PROVE_JOBS` stays at 3 or less for `eva`.
 
 **Not in M1** (later milestones, or not yet planned):
 - Typing into the page (forms, text fields).

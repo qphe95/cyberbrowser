@@ -135,6 +135,13 @@ void loop_init(LoopState *s);
         e->kind == LE_SOCK_DATA && out->a[k].len == 4 + e->len &&
         \at(s->c[e->slot].state, Old) == LS_OPEN && u32le(&out->a[k].data[0]) == \at(s->c[e->slot].id, Old) &&
         \forall integer j; 0 <= j < e->len ==> out->a[k].data[4 + j] == e->data[j];
+    // (M9) Only a message from the network process leads to a connect or a
+    // socket write: the actions after which the shim can have another event
+    // to step (a connect that failed at once, a write that finished or failed).
+    // So the events a message leads to lead to nothing more, and the shim's
+    // queue of them (loop_main.c step) needs LOOP_MAX_ACTIONS places.
+    ensures e->kind != LE_NET_MESSAGE ==>
+        \forall integer k; 0 <= k < out->n ==> out->a[k].kind == LA_SOCK_CLOSE || out->a[k].kind == LA_NET_SEND;
  */
 void loop_step(LoopState *s, const LoopEvent *e, LoopActions *out);
 

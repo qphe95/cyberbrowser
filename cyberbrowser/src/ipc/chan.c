@@ -3,8 +3,6 @@
 
 #include <string.h>
 
-#define CHAN_MAGIC 0x6e616863u      /* "chan" */
-
 /* One direction.  The producer owns tail, the consumer owns head and
  * waiting (the consumer is about to sleep); each in its own cache line. */
 typedef struct ChanRing {
@@ -39,7 +37,7 @@ static bool map(Chan *c, uint32_t ring_bytes) {
 
 bool chan_create(Chan *c, uint32_t ring_bytes) {
     memset(c, 0, sizeof(*c));
-    if (ring_bytes < CHAN_RING_MIN || ring_bytes > CHAN_RING_MAX || (ring_bytes & (ring_bytes - 1))) return false;
+    if (!chan_ring_header_ok(CHAN_MAGIC, ring_bytes)) return false;
     size_t bytes = section_bytes(ring_bytes);
     c->section = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
                                     (DWORD)((uint64_t)bytes >> 32), (DWORD)bytes, NULL);
@@ -61,14 +59,17 @@ bool chan_attach(Chan *c, HANDLE section, HANDLE ev0, HANDLE ev1, int side) {
     c->ev[0] = ev0;
     c->ev[1] = ev1;
     c->side = side ? 1 : 0;
-    /* Map the header first to learn the ring size, then the whole section. */
+    /* Map the header first to learn the ring size, then the whole section.
+     * The peer can rewrite the header at any time: each field is read once,
+     * into a private copy, which the proved chan_ring_header_ok checks.  From
+     * then on only that copy (c->ring_bytes) sizes the rings; the shared
+     * header is never read again. */
     ChanShared *probe = (ChanShared *)MapViewOfFile(section, FILE_MAP_READ, 0, 0, sizeof(ChanShared));
     if (!probe) return false;
-    uint32_t magic = probe->magic, ring_bytes = probe->ring_bytes;
+    uint32_t magic = __atomic_load_n(&probe->magic, __ATOMIC_RELAXED);
+    uint32_t ring_bytes = __atomic_load_n(&probe->ring_bytes, __ATOMIC_RELAXED);
     UnmapViewOfFile(probe);
-    if (magic != CHAN_MAGIC || ring_bytes < CHAN_RING_MIN ||
-        ring_bytes > CHAN_RING_MAX || (ring_bytes & (ring_bytes - 1)))
-        return false;
+    if (!chan_ring_header_ok(magic, ring_bytes)) return false;
     return map(c, ring_bytes);
 }
 
@@ -96,7 +97,7 @@ bool chan_send(Chan *c, uint16_t type, const void *payload, uint32_t len, DWORD 
     uint64_t tail = r->tail;        /* ours: only we write it */
     uint64_t new_tail = 0;
     DWORD start = GetTickCount();
-    for (int spins = 0;; spins++) {
+    for (int spins = 0;; spins += spins < 1000) {     /* (stops counting at 1000: no overflow) */
         uint64_t head = __atomic_load_n(&r->head, __ATOMIC_ACQUIRE);
         int put = chan_ring_put(c->data[c->side], c->ring_bytes, head, tail, type, (const uint8_t *)payload, len,
                                 &new_tail);

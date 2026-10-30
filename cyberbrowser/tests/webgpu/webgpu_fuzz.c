@@ -96,10 +96,53 @@ static void gl_arity(WebglCtx *c) {
             if (webgl_exec_plain(c, op, zeros, n)) { g_arity[op] = n / 4; break; }
 }
 
+/* A special op or query as its grammar (webgl_forms) allows, so that the
+ * executor behind the walker is reached: random words in its head, with
+ * the count, flag or kind its form reads in range, and a tail of the
+ * form's shape. */
+static void gl_grammatical(uint32_t op) {
+    WebglForm f = webgl_forms[op - WEBGL_OP_SPECIAL];
+    uint32_t head[16] = { 0 }, tail = 0, cap = f.cap > 4096 ? 4096 : f.cap;
+    for (uint32_t i = 0; i < f.head / 4 && i < 16; i++) head[i] = word();
+    uint32_t *at = &head[f.at / 4];
+    switch (f.form) {
+    case F_DATA: tail = below(8) ? below(64) : below(9000); break;
+    case F_STR: case F_NAMES: tail = below(48); break;
+    case F_WORDS: tail = 4 * below(cap + 1); break;
+    case F_COUNTED: *at = below(cap + 1); break;
+    case F_HAS: case F_BUFDATA:
+        *at = below(2);
+        tail = *at ? below(64) : 0;
+        if (f.form == F_BUFDATA) { if (*at) { head[2] = tail; head[3] = 0; } }
+        break;
+    case F_UNIFORM: *at = 1 + below(21); tail = 4 * webgl_uniform_per[*at] * below(4); break;
+    case F_ATTRIB: *at = 1 + below(6); tail = 4 * webgl_attrib_per[*at]; break;
+    default: break;
+    }
+    u32(op);
+    u32(f.head + tail);
+    put(head, f.head);
+    if (f.form == F_STR || f.form == F_NAMES) {
+        static const char *SRC[] = { "void main(){gl_Position=vec4(0);}", "a_position", "u_color", "GL_OES_texture_float",
+                                     "#version 300 es\nin vec4 p;void main(){gl_Position=p;}" };
+        const char *s = SRC[below(5)];
+        uint32_t l = (uint32_t)strlen(s) < tail ? (uint32_t)strlen(s) : tail;
+        put(s, l);
+        for (uint32_t i = l; i < tail; i++) u8(f.form == F_NAMES && below(6) == 0 ? 0 : (uint8_t)('a' + below(26)));
+    } else {
+        for (uint32_t i = 0; i < tail; i++) u8((uint8_t)(below(3) ? rnd() : 0));
+    }
+}
+
 /* Every special op and query, and a plain op at random (of its length,
  * mostly); now and then a length that lies, or an op that isn't one. */
 static void gl_record(void) {
     uint32_t op, words, extra;
+    if (below(3) == 0) {
+        op = below(2) ? 256 + below(21) : 300 + below(41);
+        gl_grammatical(op);
+        return;
+    }
     switch (below(8)) {
     case 0: case 1: case 2: case 3: case 4:
         op = 1 + below(101);

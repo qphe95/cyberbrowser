@@ -148,7 +148,7 @@ enum {
     TN_REQUEST = 1,     /* NetRequest + method, url, headers, initiator (each NUL-terminated) + body */
     TN_COOKIE_GET,      /* NetCookieGet + url: document.cookie */
     TN_COOKIE_SET,      /* url, NUL, cookie line: document.cookie = ... */
-    NT_RESPONSE,        /* NetResponse + headers + error + body */
+    NT_RESPONSE,        /* NetResponse + url + headers + error + body */
 };
 
 typedef struct NetRequest {
@@ -164,11 +164,20 @@ typedef struct NetCookieGet {
     uint32_t id;
 } NetCookieGet;
 
+/* NetResponse.ok */
+enum {
+    NET_FAILED = 0,     /* error: why */
+    NET_OK = 1,         /* url: where it ended, after redirects */
+    NET_ELSEWHERE = 2,  /* the page's document is another site's (SANDBOX_DESIGN.md P10): url is where
+                           it went, for the UI to navigate to in a tab of that site */
+};
+
 typedef struct NetResponse {
     uint32_t id;
-    uint32_t ok;
+    uint32_t ok;                /* NET_* */
     int32_t status;
     uint32_t headers_len, error_len, body_len;
+    uint32_t url_len;           /* (no NUL) */
 } NetResponse;
 
 /* ---- clients <-> storage service (bigmsg.h messages) --------------------- */

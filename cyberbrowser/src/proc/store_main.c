@@ -10,9 +10,15 @@
  * %LOCALAPPDATA%\cyberbrowser\browser_data\sites).  The coordinator
  * grants it a channel per tab, badged with the tab's site, and one to the
  * network process.  A client names files by paths relative to its site's
- * folder; store_core.c decides what is allowed, and every file is opened
- * refusing reparse points and hard links and checked to really be inside that
- * folder.  Writes replace a file whole, within the site's quota.
+ * folder; store_core.c reads each request, decides what is allowed and makes
+ * the file's path, and every file is opened refusing reparse points and hard
+ * links and checked to really be inside that folder.  Writes replace a file
+ * whole, within the site's quota.
+ *
+ * It is one thread for every client, so it never waits on one: a reply goes
+ * as far as the client's channel has room and the rest later, and that
+ * client's next request waits until it has all gone.  A client that leaves a
+ * reply unread for REPLY_STALL_MS is dropped (SANDBOX_DESIGN.md 8.7.2).
  *
  * M2 returns a file's content on a read rather than a read-only handle to it
  * (section 3.3): the files written so far are small. */
@@ -30,6 +36,20 @@
 #include "store_core.h"
 
 #define MAX_CLIENTS 62              /* + the control channel: 63 waits */
+#define REPLY_STALL_MS 10000        /* a reply no part of which goes for this long: drop the client */
+#define RETRY_MAX_MS 250            /* the longest wait before trying a full channel again */
+
+/* A reply on its way: StoreResult + data, sent as far as the client's ring
+ * has room, the rest later (send_reply). */
+typedef struct Reply {
+    bool busy;
+    bool started;                   /* its first part (type, total size) is sent */
+    StoreResult head;
+    uint8_t *data;                  /* owned */
+    uint32_t len, sent;             /* of head + data */
+    DWORD progress;                 /* when a part last went */
+    DWORD retry_at, backoff;        /* when to try again, after the channel was full */
+} Reply;
 
 typedef struct Client {
     uint32_t id;
@@ -37,6 +57,7 @@ typedef struct Client {
     char site[SITE_MAX];            /* a tab's badge; "" = opaque: nothing allowed */
     Chan chan;                      /* side 1: the storage service */
     BigRx rx;
+    Reply out;                      /* while busy, its next request waits in its channel */
 } Client;
 
 /* Bytes each site uses, counted from its folder when first needed. */
@@ -66,9 +87,14 @@ static bool writable_dir(const wchar_t *dir) {
 
 static bool make_root(const wchar_t *base) {
     wchar_t p[MAX_PATH];
+    /* Microsoft's _snwprintf leaves no NUL when it cuts short: refuse a base too long. */
+    int n = _snwprintf(g_root, MAX_PATH, L"%lsbrowser_data\\sites", base);
+    if (n < 0 || n >= MAX_PATH) {
+        g_root[0] = 0;
+        return false;
+    }
     _snwprintf(p, MAX_PATH, L"%lsbrowser_data", base);
     CreateDirectoryW(p, NULL);
-    _snwprintf(g_root, MAX_PATH, L"%lsbrowser_data\\sites", base);
     CreateDirectoryW(g_root, NULL);
     return writable_dir(g_root);
 }
@@ -110,13 +136,6 @@ static bool init_root(const char *root_hex) {
     if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
     fwprintf(stderr, L"[store] root %ls\n", g_root);
     return ok;
-}
-
-/* "site/a/b" (checked by store_join) as root\site\a\b. */
-static void to_path(const char *joined, wchar_t *out, size_t cap) {
-    size_t o = (size_t)_snwprintf(out, cap, L"%ls\\", g_root);
-    for (const char *p = joined; *p && o + 1 < cap; p++) out[o++] = *p == '/' ? L'\\' : (wchar_t)*p;
-    out[o] = 0;
 }
 
 /* Is the open file inside root\site\ (no link led elsewhere), a plain file
@@ -177,6 +196,7 @@ static Usage *usage_of(const char *site) {
     for (Usage *u = g_usage; u; u = u->next)
         if (!strcmp(u->site, site)) return u;
     Usage *u = (Usage *)calloc(1, sizeof(Usage));
+    if (!u) return NULL;
     snprintf(u->site, sizeof(u->site), "%s", site);
     wchar_t dir[MAX_PATH * 2];
     _snwprintf(dir, MAX_PATH * 2, L"%ls\\%hs", g_root, site);
@@ -188,9 +208,65 @@ static Usage *usage_of(const char *site) {
 
 /* ---- requests -------------------------------------------------------------------- */
 
-static void reply(Client *c, uint32_t id, bool ok, const void *data, uint32_t len) {
-    StoreResult r = { id, ok, ok ? len : 0 };
-    big_send(&c->chan, ST_RESULT, &r, sizeof(r), ok ? data : NULL, ok ? len : 0, NULL, 0, 10000);
+/* Send what is left of c's reply while its ring has room: big_send's framing
+ * (the first part has the type and the total size, the rest BIG_MORE), but
+ * resumable, so the single-threaded service never waits on one client.  A
+ * full ring costs one try of at most a timer tick (chan_send's shortest
+ * wait); the next try comes after a growing pause.  True once it's all gone. */
+static bool send_reply(Client *c) {
+    static uint8_t part[CHAN_MSG_MAX];
+    Reply *o = &c->out;
+    while (o->busy) {
+        uint32_t used = 0;
+        if (!o->started) {
+            memcpy(part, &o->len, 4);
+            used = 4;
+        }
+        uint32_t n = o->len - o->sent;
+        if (n > CHAN_MSG_MAX - used) n = CHAN_MSG_MAX - used;
+        for (uint32_t k = 0; k < n;) {      /* bytes sent .. sent + n of head + data */
+            uint32_t at = o->sent + k, piece;
+            if (at < sizeof(o->head)) {
+                piece = (uint32_t)sizeof(o->head) - at < n - k ? (uint32_t)sizeof(o->head) - at : n - k;
+                memcpy(part + used + k, (const uint8_t *)&o->head + at, piece);
+            } else {
+                piece = n - k;
+                memcpy(part + used + k, o->data + (at - sizeof(o->head)), piece);
+            }
+            k += piece;
+        }
+        DWORD now = GetTickCount();
+        if (!chan_send(&c->chan, o->started ? BIG_MORE : ST_RESULT, part, used + n, 0)) {
+            o->backoff = o->backoff ? (o->backoff * 2 < RETRY_MAX_MS ? o->backoff * 2 : RETRY_MAX_MS) : 1;
+            o->retry_at = now + o->backoff;
+            return false;
+        }
+        o->started = true;
+        o->sent += n;
+        o->progress = now;
+        o->backoff = 0;
+        if (o->sent == o->len) {
+            free(o->data);
+            memset(o, 0, sizeof(*o));
+        }
+    }
+    return true;
+}
+
+/* Answer c: data (owned, NULL if none) goes with the reply and is freed
+ * once sent. */
+static void reply(Client *c, uint32_t id, bool ok, uint8_t *data, uint32_t len) {
+    Reply *o = &c->out;
+    memset(o, 0, sizeof(*o));
+    o->head.id = id;
+    o->head.ok = ok;
+    o->head.data_len = ok && data ? len : 0;
+    o->data = ok ? data : NULL;
+    if (!ok) free(data);
+    o->len = (uint32_t)sizeof(o->head) + o->head.data_len;
+    o->busy = true;
+    o->progress = GetTickCount();
+    send_reply(c);
 }
 
 static bool do_read(const wchar_t *path, const char *site, uint8_t **data, uint32_t *len) {
@@ -217,6 +293,7 @@ static uint64_t file_size(const wchar_t *path) {
 
 static bool do_write(const wchar_t *path, const char *site, const uint8_t *data, uint32_t len) {
     Usage *u = usage_of(site);
+    if (!u) return false;               /* out of memory */
     uint64_t old = file_size(path);
     if (!store_quota_ok(u->used, old > u->used ? u->used : old, len)) return false;
     if (!make_parents(path)) return false;
@@ -245,50 +322,32 @@ static bool do_delete(const wchar_t *path, const char *site) {
     uint64_t old = file_size(path);
     if (!DeleteFileW(path)) return false;
     Usage *u = usage_of(site);
-    u->used -= old > u->used ? u->used : old;
+    if (u) u->used -= old > u->used ? u->used : old;
     return true;
 }
 
+/* A request: store_decode (proved) reads it, decides it and makes the path;
+ * this opens only that path. */
 static void request(Client *c, uint16_t type, const uint8_t *m, uint32_t len) {
-    StoreRequest q;
-    if (len < sizeof(q)) return;
-    memcpy(&q, m, sizeof(q));
-    if ((uint64_t)sizeof(q) + q.site_len + q.path_len + q.data_len != len || q.site_len >= SITE_MAX ||
-        q.path_len > STORE_PATH_MAX) {
-        reply(c, q.id, false, NULL, 0);
-        return;
-    }
-    char target[SITE_MAX], rel[STORE_PATH_MAX + 1];
-    const uint8_t *p = m + sizeof(q);
-    if (q.site_len) {
-        memcpy(target, p, q.site_len);
-        target[q.site_len] = 0;
-    } else {
-        snprintf(target, sizeof(target), "%s", c->site);
-    }
-    memcpy(rel, p + q.site_len, q.path_len);
-    rel[q.path_len] = 0;
-    const uint8_t *data = p + q.site_len + q.path_len;
-    const char *client_site = c->kind == GRANT_NET ? NULL : c->site;
-    char joined[SITE_MAX + STORE_PATH_MAX + 2];
-    if ((client_site && !client_site[0]) || !store_allowed(client_site, target, rel, q.path_len) ||
-        !store_join(target, rel, q.path_len, joined, sizeof(joined))) {
-        fprintf(stderr, "[store] client %u: refused %s/%s\n", c->id, target, rel);
-        reply(c, q.id, false, NULL, 0);
-        return;
-    }
+    static StoreReq q;
     wchar_t path[MAX_PATH * 2];
-    to_path(joined, path, MAX_PATH * 2);
+    int v = store_decode(m, len, c->kind == GRANT_NET ? NULL : c->site, g_root, (uint32_t)wcslen(g_root), &q, path,
+                         MAX_PATH * 2);
+    if (v == STORE_REQ_SHORT) return;
+    if (v != STORE_REQ_OK) {
+        if (v == STORE_REQ_REFUSED) fprintf(stderr, "[store] client %u: refused %s/%s\n", c->id, q.target, q.rel);
+        reply(c, q.id, false, NULL, 0);
+        return;
+    }
     if (type == TS_READ) {
         uint8_t *out = NULL;
         uint32_t olen = 0;
-        bool ok = do_read(path, target, &out, &olen);
+        bool ok = do_read(path, q.target, &out, &olen);
         reply(c, q.id, ok, out, olen);
-        free(out);
     } else if (type == TS_WRITE) {
-        reply(c, q.id, do_write(path, target, data, q.data_len), NULL, 0);
+        reply(c, q.id, do_write(path, q.target, m + q.data_off, q.data_len), NULL, 0);
     } else if (type == TS_DELETE) {
-        reply(c, q.id, do_delete(path, target), NULL, 0);
+        reply(c, q.id, do_delete(path, q.target), NULL, 0);
     }
 }
 
@@ -310,21 +369,28 @@ static void grant(const CsGrant *g) {
     }
     c->id = g->client;
     c->kind = g->kind;
+    c->rx.limit = (uint32_t)(sizeof(StoreRequest) + SITE_MAX + STORE_PATH_MAX + STORE_QUOTA_BYTES);  /* request()'s largest; data over the quota fails */
     if (g->kind == GRANT_TAB) memcpy(c->site, g->site, SITE_MAX);
     g_clients[slot] = c;
     fprintf(stderr, "[store] serving %s %u (%s)\n", c->kind == GRANT_NET ? "the network process" : "tab",
             c->id, c->site[0] ? c->site : "-");
 }
 
+static void drop(int i) {
+    Client *c = g_clients[i];
+    if (!c) return;
+    chan_close(&c->chan);
+    big_free(&c->rx);
+    free(c->out.data);
+    free(c);
+    g_clients[i] = NULL;
+}
+
+/* The coordinator's revocation names a tab.  (A client that breaks its
+ * channel, a tab or the network process, is dropped by its slot.) */
 static void revoke(uint32_t id) {
-    for (int i = 0; i < MAX_CLIENTS; i++) {
-        Client *c = g_clients[i];
-        if (!c || c->kind != GRANT_TAB || c->id != id) continue;
-        chan_close(&c->chan);
-        big_free(&c->rx);
-        free(c);
-        g_clients[i] = NULL;
-    }
+    for (int i = 0; i < MAX_CLIENTS; i++)
+        if (g_clients[i] && g_clients[i]->kind == GRANT_TAB && g_clients[i]->id == id) drop(i);
 }
 
 int main(int argc, char **argv) {
@@ -354,13 +420,32 @@ int main(int argc, char **argv) {
             }
         }
         if (r < 0) return 1;
+        /* Each client's requests, one at a time: the next is read only once
+         * the last one's reply is sent.  A client that leaves a reply unread
+         * holds up only itself, and is dropped after REPLY_STALL_MS. */
+        DWORD wait_ms = INFINITE;
         for (int i = 0; i < MAX_CLIENTS; i++) {
             Client *c = g_clients[i];
-            int got;
-            while (c && (got = big_recv(&c->chan, &c->rx)) > 0) request(c, c->rx.type, c->rx.buf, c->rx.total);
-            if (c && got < 0) {
+            if (!c) continue;
+            DWORD now = GetTickCount();
+            if (c->out.busy && (int32_t)(now - c->out.retry_at) >= 0 && !send_reply(c) &&
+                now - c->out.progress > REPLY_STALL_MS) {
+                fprintf(stderr, "[store] client %u left its reply unread for %u ms: dropped\n", c->id,
+                        (unsigned)(now - c->out.progress));
+                drop(i);
+                continue;
+            }
+            int got = 0;
+            while (!c->out.busy && (got = big_recv(&c->chan, &c->rx)) > 0) request(c, c->rx.type, c->rx.buf, c->rx.total);
+            if (got < 0) {
                 fprintf(stderr, "[store] client %u broke its channel\n", c->id);
-                revoke(c->id);
+                drop(i);
+                continue;
+            }
+            if (c->out.busy) {
+                int32_t left = (int32_t)(c->out.retry_at - GetTickCount());
+                DWORD ms = left < 1 ? 1 : (DWORD)left;
+                if (ms < wait_ms) wait_ms = ms;
             }
         }
         fflush(stderr);
@@ -370,10 +455,10 @@ int main(int argc, char **argv) {
         waits[n++] = chan_event(&g_ctl);
         for (int i = 0; i < MAX_CLIENTS; i++) {
             if (!g_clients[i]) continue;
-            if (!chan_arm(&g_clients[i]->chan)) ready = true;
+            if (!chan_arm(&g_clients[i]->chan) && !g_clients[i]->out.busy) ready = true;
             waits[n++] = chan_event(&g_clients[i]->chan);
         }
-        if (!ready) WaitForMultipleObjects((DWORD)n, waits, FALSE, INFINITE);
+        if (!ready) WaitForMultipleObjects((DWORD)n, waits, FALSE, wait_ms);
         chan_disarm(&g_ctl);
         for (int i = 0; i < MAX_CLIENTS; i++)
             if (g_clients[i]) chan_disarm(&g_clients[i]->chan);

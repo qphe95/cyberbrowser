@@ -326,45 +326,27 @@ static uint32_t *table(WebglCtx *c, int kind) {
     return c->names[kind];
 }
 
+/* The lookups are webgl_decode.c's (proved): only this context's tables,
+ * never out of them. */
 GLuint webgl_name(WebglCtx *c, int kind, uint32_t id) {
-    if (id == 0) return 0;
-    uint32_t *t = id < WEBGL_MAX_IDS ? table(c, kind) : NULL;
-    return t && t[id] ? t[id] : WEBGL_NO_NAME;
+    return webgl_name_of(c->names, (uint32_t)kind, id);
 }
 
 GLint webgl_location(WebglCtx *c, uint32_t id) {
-    if (!id || id >= WEBGL_MAX_IDS || !c->locations) return -1;
-    return c->locations[id].program ? c->locations[id].location : -1;
+    return webgl_location_of(c->locations, id);
 }
 
 bool webgl_location_ok(WebglCtx *c, uint32_t id) {
     if (!id) return true;                   /* null: the call does nothing */
     GLint cur = 0;
     p_glGetIntegervRobustANGLE(GL_CURRENT_PROGRAM, 1, NULL, &cur);
-    if (id < WEBGL_MAX_IDS && c->locations && c->locations[id].program && c->locations[id].program == (GLuint)cur)
+    if (webgl_location_of(c->locations, id) != -1 && c->locations[id].program == (GLuint)cur)
         return true;
     if (!c->pending_error) c->pending_error = GL_INVALID_OPERATION;
     return false;
 }
 
 /* ---- the special records ---------------------------------------------------------------- */
-
-enum {
-    OP_CREATE = 256, OP_DELETE, OP_SHADER_SOURCE, OP_BIND_ATTRIB_LOCATION, OP_BUFFER_DATA, OP_BUFFER_SUB_DATA,
-    OP_TEX_IMAGE_2D, OP_TEX_SUB_IMAGE_2D, OP_COMPRESSED_TEX_IMAGE_2D, OP_COMPRESSED_TEX_SUB_IMAGE_2D,
-    OP_UNIFORM_V, OP_VERTEX_ATTRIB_V, OP_TEX_IMAGE_3D, OP_TEX_SUB_IMAGE_3D, OP_DRAW_BUFFERS, OP_CLEAR_BUFFER_V,
-    OP_INVALIDATE_FRAMEBUFFER, OP_TRANSFORM_FEEDBACK_VARYINGS, OP_PIXEL_STOREI, OP_FENCE_SYNC, OP_WAIT_SYNC,
-    /* Queries: each appends its result. */
-    OP_GET_ERROR = 300, OP_GET_INTEGER, OP_GET_FLOAT, OP_GET_BOOLEAN, OP_GET_STRING, OP_GET_SHADER_PARAM,
-    OP_GET_SHADER_INFO_LOG, OP_GET_PROGRAM_PARAM, OP_GET_PROGRAM_INFO_LOG, OP_GET_UNIFORM_LOCATION,
-    OP_GET_ATTRIB_LOCATION, OP_GET_ACTIVE_ATTRIB, OP_GET_ACTIVE_UNIFORM, OP_READ_PIXELS, OP_CHECK_FRAMEBUFFER_STATUS,
-    OP_IS_OBJECT, OP_GET_TEX_PARAM, OP_GET_BUFFER_PARAM, OP_GET_RENDERBUFFER_PARAM, OP_GET_FRAMEBUFFER_ATTACHMENT_PARAM,
-    OP_GET_SHADER_PRECISION, OP_GET_UNIFORM, OP_GET_VERTEX_ATTRIB, OP_GET_VERTEX_ATTRIB_OFFSET, OP_GET_QUERY_PARAM,
-    OP_GET_SAMPLER_PARAM, OP_GET_SYNC_PARAM, OP_CLIENT_WAIT_SYNC, OP_GET_BUFFER_SUB_DATA, OP_GET_INDEXED,
-    OP_GET_FRAG_DATA_LOCATION, OP_GET_UNIFORM_BLOCK_INDEX, OP_GET_ACTIVE_UNIFORM_BLOCK_PARAM,
-    OP_GET_ACTIVE_UNIFORM_BLOCK_NAME, OP_GET_UNIFORM_INDICES, OP_GET_ACTIVE_UNIFORMS, OP_GET_TRANSFORM_FEEDBACK_VARYING,
-    OP_GET_INTERNALFORMAT_PARAM, OP_REQUEST_EXTENSION, OP_GET_EXTENSIONS, OP_GET_RESET_STATUS,
-};
 
 /* Results: appended to a growing buffer. */
 typedef struct Out {
@@ -391,20 +373,27 @@ static void put(Out *o, const void *p, uint32_t n) {
 }
 static void put_u32(Out *o, uint32_t v) { put(o, &v, 4); }
 static void put_bytes(Out *o, const void *p, uint32_t n) { put_u32(o, n); put(o, p, n); }
-static void put_str(Out *o, const char *s) { put_bytes(o, s ? s : "", s ? (uint32_t)strlen(s) : 0); }
+/* A string of ours or ANGLE's, at most cap bytes of it (webgl_forms counts
+ * a query's reply with these caps). */
+static void put_str_max(Out *o, const char *s, size_t cap) {
+    size_t n = s ? strlen(s) : 0;
+    if (n > cap) n = cap;
+    put_bytes(o, s ? s : "", (uint32_t)n);
+}
+static void put_str(Out *o, const char *s) { put_str_max(o, s, WEBGL_ANGLE_STR_MAX); }
 
-/* A NUL-terminated copy of n bytes (a name or a source), or NULL. */
+/* A NUL-terminated copy of n bytes (a name or a source the walker checked:
+ * at most WEBGL_STR_MAX, no NUL), or NULL. */
 static char *str(const uint8_t *p, uint32_t n) {
-    if (n > (4u << 20)) return NULL;
-    char *s = (char *)malloc(n + 1);
+    char *s = (char *)malloc((size_t)n + 1);
     if (!s) return NULL;
     memcpy(s, p, n);
     s[n] = 0;
-    return memchr(s, 0, n) ? (free(s), (char *)NULL) : s;
+    return s;
 }
 
 static void create(WebglCtx *c, uint32_t kind, uint32_t id, uint32_t arg) {
-    if (kind >= WEBGL_KINDS || kind == WEBGL_LOCATION || kind == WEBGL_SYNC || !id || id >= WEBGL_MAX_IDS) return;
+    if (kind >= WEBGL_KINDS || kind == WEBGL_LOCATION || kind == WEBGL_SYNC || !webgl_id_ok(id)) return;
     uint32_t *t = table(c, (int)kind);
     if (!t || t[id]) return;                    /* each id once */
     GLuint name = 0;
@@ -424,7 +413,7 @@ static void create(WebglCtx *c, uint32_t kind, uint32_t id, uint32_t arg) {
 }
 
 static void destroy(WebglCtx *c, uint32_t kind, uint32_t id) {
-    if (kind >= WEBGL_KINDS || !id || id >= WEBGL_MAX_IDS) return;
+    if (kind >= WEBGL_KINDS || !webgl_id_ok(id)) return;
     if (kind == WEBGL_SYNC) {
         if (c->syncs && c->syncs[id]) { p_glDeleteSync(c->syncs[id]); c->syncs[id] = NULL; }
         return;
@@ -449,7 +438,7 @@ static void destroy(WebglCtx *c, uint32_t kind, uint32_t id) {
 }
 
 static GLboolean is_object(WebglCtx *c, uint32_t kind, uint32_t id) {
-    if (kind == WEBGL_SYNC) return id && id < WEBGL_MAX_IDS && c->syncs && c->syncs[id];
+    if (kind == WEBGL_SYNC) return webgl_id_ok(id) && c->syncs && c->syncs[id];
     if (kind >= WEBGL_KINDS || kind == WEBGL_LOCATION) return 0;
     GLuint n = webgl_name(c, (int)kind, id);
     if (!n || n == WEBGL_NO_NAME) return 0;
@@ -469,7 +458,7 @@ static GLboolean is_object(WebglCtx *c, uint32_t kind, uint32_t id) {
 }
 
 static GLsync sync_of(WebglCtx *c, uint32_t id) {
-    return id && id < WEBGL_MAX_IDS && c->syncs ? c->syncs[id] : NULL;
+    return webgl_id_ok(id) && c->syncs ? c->syncs[id] : NULL;
 }
 
 /* An info log, whole. */
@@ -483,7 +472,7 @@ static void put_log(Out *o, GLuint obj, bool program) {
         if (program) p_glGetProgramInfoLog(obj, n, NULL, log);
         else p_glGetShaderInfoLog(obj, n, NULL, log);
     }
-    put_str(o, log);
+    put_str_max(o, log, WEBGL_LOG_MAX);
     free(log);
 }
 
@@ -506,9 +495,13 @@ static void put_active(Out *o, int which, GLuint prog, GLuint index) {
     put_str(o, type ? name : "");
 }
 
-/* Bytes a texture upload of w x h x d of format/type may read: the tab
- * sends what it has; ANGLE is told that size, and refuses short data. */
-static bool run_special(WebglCtx *c, uint32_t op, const uint8_t *p, uint32_t n, Out *o) {
+/* One special record or query, as webgl_next accepted it: its grammar
+ * (webgl_forms) is checked, p[0 .. n) is inside the batch, and count is
+ * the form's.  NEED restates each layout's fixed words, as a check of these
+ * offsets against the table's heads.  Bytes a texture upload of w x h x d
+ * of format/type may read: the tab sends what it has; ANGLE is told that
+ * size, and refuses short data. */
+static bool run_special(WebglCtx *c, uint32_t op, const uint8_t *p, uint32_t n, uint32_t count_, Out *o) {
 #define NEED(k) if (n < (k)) return false
     switch (op) {
     case OP_CREATE: NEED(12); create(c, rd_u32(p), rd_u32(p + 4), rd_u32(p + 8)); return true;
@@ -581,14 +574,11 @@ static bool run_special(WebglCtx *c, uint32_t op, const uint8_t *p, uint32_t n, 
         uint32_t loc_id = rd_u32(p), kind = rd_u32(p + 4);
         GLboolean tr = rd_u32(p + 8) != 0;
         const void *v = p + 12;
-        uint32_t bytes = n - 12;
-        /* kind: 1..4 float vec, 5..8 int, 9..12 uint, 13.. matrices
-         * (2, 3, 4, 2x3, 3x2, 2x4, 4x2, 3x4, 4x3). */
-        static const uint8_t per[] = { 0, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 4, 9, 16, 6, 6, 8, 8, 12, 12 };
-        if (kind == 0 || kind >= sizeof(per) || bytes % (4u * per[kind])) return false;
+        /* kind (1..21, webgl_uniform_per): 1..4 float vec, 5..8 int, 9..12
+         * uint, 13.. matrices; count values of it follow, exactly. */
         if (!webgl_location_ok(c, loc_id)) return true;
         GLint loc = webgl_location(c, loc_id);
-        GLsizei count = (GLsizei)(bytes / (4u * per[kind]));
+        GLsizei count = (GLsizei)count_;
         switch (kind) {
         case 1: p_glUniform1fv(loc, count, v); break;
         case 2: p_glUniform2fv(loc, count, v); break;
@@ -617,10 +607,9 @@ static bool run_special(WebglCtx *c, uint32_t op, const uint8_t *p, uint32_t n, 
     case OP_VERTEX_ATTRIB_V: {          /* index, kind (1..4 float, 5 int4, 6 uint4); values */
         NEED(8);
         uint32_t idx = rd_u32(p), kind = rd_u32(p + 4);
-        static const uint8_t per[] = { 0, 1, 2, 3, 4, 4, 4 };
-        if (kind == 0 || kind > 6 || n - 8 < 4u * per[kind]) return false;
-        float v[4];
-        memcpy(v, p + 8, 4u * per[kind]);
+        float v[4];                     /* count_: webgl_attrib_per[kind] words, exactly */
+        if (count_ > 4) return false;
+        memcpy(v, p + 8, 4u * count_);
         switch (kind) {
         case 1: p_glVertexAttrib1fv(idx, v); break;
         case 2: p_glVertexAttrib2fv(idx, v); break;
@@ -893,7 +882,7 @@ static bool run_special(WebglCtx *c, uint32_t op, const uint8_t *p, uint32_t n, 
         GLsizei len = 0;
         p_glGetActiveUniformBlockName(webgl_name(c, WEBGL_PROGRAM, rd_u32(p)), rd_u32(p + 4), sizeof(name), &len, name);
         name[sizeof(name) - 1] = 0;
-        name[len] = 0;
+        if (len >= 0 && len < (GLsizei)sizeof(name)) name[len] = 0;
         put_str(o, name);
         return true;
     }
@@ -980,15 +969,20 @@ static bool run_special(WebglCtx *c, uint32_t op, const uint8_t *p, uint32_t n, 
 bool webgl_run(WebglCtx *c, const uint8_t *recs, uint32_t len, uint8_t **out, uint32_t *out_len, uint32_t *out_cap) {
     if (!make_current(c)) return false;
     Out o = { out, out_len, out_cap, false };
-    for (uint32_t at = 0; at + 8 <= len; ) {
-        uint32_t op = rd_u32(recs + at), n = rd_u32(recs + at + 4);
-        if (n > len - at - 8) return false;
-        const uint8_t *p = recs + at + 8;
-        bool ok = op < WEBGL_OP_SPECIAL ? webgl_exec_plain(c, op, p, n) : run_special(c, op, p, n, &o);
+    /* Each record as the proved walker accepts it; replied bounds what the
+     * queries so far appended (at most WEBGL_REPLY_MAX in all). */
+    uint32_t at = 0, replied = *out_len <= WEBGL_REPLY_MAX ? *out_len : WEBGL_REPLY_MAX;
+    WebglRec r;
+    int got;
+    while ((got = webgl_next(recs, len, at, replied, &r)) > 0) {
+        const uint8_t *p = recs + r.at;
+        bool ok = r.op < WEBGL_OP_SPECIAL ? webgl_exec_plain(c, r.op, p, r.n)
+                                          : run_special(c, r.op, p, r.n, r.count, &o);
         if (!ok || o.failed) return false;
-        at += 8 + n;
+        replied += r.reply;
+        at = r.at + r.n;
     }
-    return true;
+    return got == 0;
 }
 
 bool webgl_read_frame(WebglCtx *c, uint8_t *px) {

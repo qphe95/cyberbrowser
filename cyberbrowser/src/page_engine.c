@@ -307,14 +307,45 @@ static void finish_browser_context(void) {
     gc_core_stop_thread();
 }
 
+/* Reflect url in window.location, document.domain and document.baseURI.
+ * (The URL goes in as a string value, never as script text.) */
+static void reflect_location(const char *url) {
+    static const char js[] =
+        "if (window.location) { window.location.href = globalThis.__cyber_doc_url; "
+        "if (document) { document.domain = window.location.hostname; "
+        "document.baseURI = window.location.href; } } "
+        "delete globalThis.__cyber_doc_url;";
+    JS_SetPropertyStr(g_ctx, JS_GetGlobalObject(g_ctx), "__cyber_doc_url", JS_NewString(g_ctx, url));
+    GCValue r = JS_Eval(g_ctx, js, sizeof(js) - 1, "<set_location>", JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(r)) JS_GetException(g_ctx);
+}
+
+/* The document's URL is where its request ended, after redirects
+ * (http_last_url): its location, and the base of its relative URLs
+ * (g_cyber_start_url).  Set before any of it is parsed. */
+static void set_document_url(const char *url) {
+    if (!url || !url[0] || (g_cyber_start_url && !strcmp(url, g_cyber_start_url))) return;
+    char *u = strdup(url);              /* (never freed: other threads may hold it) */
+    if (!u) return;
+    printf("Redirected to %s\n", u);
+    g_cyber_start_url = u;
+    reflect_location(u);
+}
+
 typedef struct PageObserver {
     HtmlPreloadScan *scan;
     HtmlPageStream *page;
+    bool url_set;                       /* set_document_url done */
 } PageObserver;
 
 /* The page as it arrives: first what it will fetch, then parse and run. */
 static void page_observe(void *user, const char *data, size_t len) {
     PageObserver *o = (PageObserver *)user;
+    if (!o->url_set) {
+        /* (Before its scripts make requests of their own on this thread.) */
+        o->url_set = true;
+        set_document_url(http_last_url());
+    }
     if (o->scan) html_preload_scan_feed(o->scan, data, len);
     if (o->page) html_page_stream_feed(o->page, data, len);
 }
@@ -347,7 +378,7 @@ static char *fetch_start_page(const char *url, size_t *out_size, HtmlPageStream 
      * downloading while the rest of it does (CYBER_PRELOAD_SCAN=0: once it
      * is all here, as before). */
     const char *ps = cyber_getenv("CYBER_PRELOAD_SCAN");
-    PageObserver obs = { ps && ps[0] == '0' ? NULL : html_preload_scan_begin(), page };
+    PageObserver obs = { ps && ps[0] == '0' ? NULL : html_preload_scan_begin(), page, false };
     HttpRequestContext was;
     http_request_context_get(&was);
     http_request_context_set(HTTP_MODE_NAVIGATE, "");
@@ -355,6 +386,7 @@ static char *fetch_start_page(const char *url, size_t *out_size, HtmlPageStream 
         ? http_get_to_memory_observed(url, headers, nheaders, &buffer, error, sizeof(error), page_observe, &obs)
         : http_get_to_memory_with_headers(url, headers, nheaders, &buffer, error, sizeof(error));
     http_request_context_set(was.mode, was.initiator);
+    if (ok && !obs.url_set) set_document_url(http_last_url());     /* (nothing observed: no script ran) */
     html_preload_scan_end(obs.scan);
     if (!ok || !buffer.data || buffer.size == 0) {
         printf("FATAL: Failed to fetch start page: %s\n", error);
@@ -771,15 +803,7 @@ void page_prepare(const char *url) {
     /* Reflect the start URL in window.location so the engine reports the
      * correct origin, host, and pathname instead of a hardcoded default.
      * Also sync document.domain and document.baseURI to the resolved URL. */
-    {
-        char loc_script[1024];
-        snprintf(loc_script, sizeof(loc_script),
-                 "if (window.location) { window.location.href = %s%s%s; "
-                 "if (document) { document.domain = window.location.hostname; "
-                 "document.baseURI = window.location.href; } }",
-                 "\"", start_url, "\"");
-        JS_Eval(g_ctx, loc_script, strlen(loc_script), "<set_location>", JS_EVAL_TYPE_GLOBAL);
-    }
+    reflect_location(start_url);
 
     /* Enable dynamic <script src> loading before the initial page scripts run.
      * YouTube lazy-loads modules (including player modules and the masthead

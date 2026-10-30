@@ -30,8 +30,9 @@ typedef struct GpuBackend {
     /* Show target rows [src_y, src_y + h) in window hwnd (its client area:
      * w x h), white where the target has none. */
     bool (*present)(HWND hwnd, uint32_t w, uint32_t h, GpuTarget *t, int32_t src_y);
-    /* The target's pixels, BGRX top-down, into out (its w * h * 4 bytes). */
-    bool (*readback)(GpuTarget *t, uint8_t *out, uint32_t *w, uint32_t *h);
+    /* The target's pixels, BGRX top-down, into out (cap bytes; false if its
+     * w * h * 4 don't fit). */
+    bool (*readback)(GpuTarget *t, uint8_t *out, size_t cap, uint32_t *w, uint32_t *h);
     /* Window hwnd shows nothing any more: drop what presenting to it took. */
     void (*window_gone)(HWND hwnd);
 } GpuBackend;

@@ -11,7 +11,9 @@
  * the GPU process presents its active tab's frames into (UG_WINDOW); until it
  * has (GU_SHOWN), it stays hidden and the UI shows "Loading..." or what went
  * wrong.  The UI sends the active tab the user's input.  Following a link or
- * typing a URL replaces the tab's process with a new one.
+ * typing a URL replaces the tab's process with a new one.  What a tab sends
+ * is read by ui_core.c (proved); a tab opens a new tab only for a click the
+ * user gave it.
  *
  * Dragging a tab moves it: along its strip, onto another window's strip, or
  * out of every strip into a window of its own.  The tab's process doesn't
@@ -38,6 +40,7 @@
 #include "bigmsg.h"
 #include "proto.h"
 #include "spawn.h"
+#include "ui_core.h"
 
 #define MAX_TABS 60
 #define MAX_WINS 8
@@ -64,6 +67,7 @@ typedef struct Tab {
     uint32_t scroll_seq;
     TuFrame frame;
     DWORD last_frame_tick;
+    UiGesture gesture;          /* its process's last click, for opening a tab */
 } Tab;
 
 typedef struct Win {
@@ -150,6 +154,7 @@ static void start_process(Tab *t) {
     t->shown = false;
     t->title[0] = 0;
     t->scroll_seq = 0;
+    memset(&t->gesture, 0, sizeof(t->gesture));
     UcOpenTab o = { t->id, (uint32_t)content_w(w), (uint32_t)content_h(w) };
     size_t n = strlen(t->url);
     memcpy(msg, &o, sizeof(o));
@@ -466,54 +471,44 @@ static void from_coord(const ChanMsg *m) {
     }
 }
 
+/* A tab's message, as ui_tab_message (proved) reads it. */
 static void from_tab(Tab *t, const ChanMsg *m) {
-    switch (m->type) {
-    case TU_FRAME: {
-        if (m->len != sizeof(TuFrame)) return;
-        TuFrame f;
-        memcpy(&f, m->data, sizeof(f));
-        if (f.width == 0 || f.height == 0 || f.width > SURFACE_MAX_W || f.height > SURFACE_MAX_H) return;
-        t->frame = f;
+    static UiTabMsg u;
+    switch (ui_tab_message(m->type, m->data, m->len, &u)) {
+    case TU_FRAME:
+        t->frame = u.frame;
         t->last_frame_tick = GetTickCount();
         if (!t->has_frame) {
             t->has_frame = true;
             show_content(&g_wins[t->win]);
         }
         return;
-    }
     case TU_TITLE:
-        if (m->len > PROTO_TITLE_MAX) return;
-        memcpy(t->title, m->data, m->len);
-        t->title[m->len] = 0;
+        memcpy(t->title, u.text, u.text_len + 1);
         update_tab(t);
         return;
-    case TU_STATE: {
-        if (m->len != sizeof(TuState)) return;
-        TuState s;
-        memcpy(&s, m->data, sizeof(s));
-        t->state = s.state == TAB_LOADED ? ST_LOADED : s.state == TAB_LOAD_FAILED ? ST_FAILED : ST_LOADING;
+    case TU_STATE:
+        t->state = u.state == TAB_LOADED ? ST_LOADED : u.state == TAB_LOAD_FAILED ? ST_FAILED : ST_LOADING;
         InvalidateRect(g_wins[t->win].wnd, NULL, FALSE);
         return;
-    }
     case TU_WANT_WEBGPU: {
         /* For this tab only: the id is the channel's, not the tab's word. */
         UcTab w = { t->id };
         chan_send(&g_coord, UC_WEBGPU, &w, sizeof(w), 1000);
         return;
     }
-    case TU_NAVIGATE: {
-        if (m->len <= sizeof(TuNavigate) || m->len > sizeof(TuNavigate) + PROTO_URL_MAX) return;
-        TuNavigate n;
-        memcpy(&n, m->data, sizeof(n));
-        char url[PROTO_URL_MAX + 1];
-        uint32_t ulen = m->len - (uint32_t)sizeof(n);
-        memcpy(url, m->data + sizeof(n), ulen);
-        url[ulen] = 0;
-        ui_log("[ui] tab %u navigates to %s%s", t->id, url, n.new_tab ? " (new tab)" : "");
-        if (n.new_tab) open_tab_in(t->win, url);
-        else navigate(t, url);
+    case TU_NAVIGATE:
+        /* A new tab only for a click the user gave this tab (ui_core.h). */
+        if (u.new_tab && !ui_may_open_tab(&t->gesture, GetTickCount())) {
+            ui_log("[ui] tab %u may not open a tab now (no click): %s", t->id, u.text);
+            return;
+        }
+        ui_log("[ui] tab %u navigates to %s%s", t->id, u.text, u.new_tab ? " (new tab)" : "");
+        if (u.new_tab) open_tab_in(t->win, u.text);
+        else navigate(t, u.text);
         return;
-    }
+    default:
+        return;
     }
 }
 
@@ -738,7 +733,8 @@ static bool save_shot(const Win *w, const char *path) {
 
 static void send_active(Win *w, uint16_t type, const void *p, uint32_t n) {
     Tab *t = active_tab(w);
-    if (t && t->started) chan_send(&t->chan, type, p, n, 100);
+    if (t && t->started && chan_send(&t->chan, type, p, n, 100) && type == UT_CLICK)
+        ui_gesture(&t->gesture, GetTickCount());    /* lets it open one tab */
 }
 
 /* To the tab and, so the content moves at once, to the GPU process. */

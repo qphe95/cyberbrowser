@@ -456,6 +456,12 @@ static void frame_load(Frame *f) {
     bool blank = !strncmp(url, "about:", 6);         /* an empty document, from nowhere */
     bool fetched = !blank && http_get_to_memory(url, &buf, err, sizeof(err));
     http_request_context_set(was.mode, was.initiator);
+    /* The frame's document is where it ended, after redirects: its origin,
+     * location and base URL are that URL's. */
+    if (fetched && http_last_url()[0]) {
+        snprintf(url, sizeof(url), "%s", http_last_url());
+        snprintf(f->url, sizeof(f->url), "%s", url);
+    }
     if (!frame_new_realm(f)) {
         http_free_buffer(&buf);
         return;

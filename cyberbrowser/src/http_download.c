@@ -448,6 +448,20 @@ const char *http_last_url(void) {
     return t_last_url;
 }
 
+void http_set_last_url(const char *url) {
+    snprintf(t_last_url, sizeof(t_last_url), "%s", url ? url : "");
+}
+
+#define HTTP_REDIRECTS_MAX 20
+static __thread int t_redirects;            /* hops followed so far in this request */
+static __thread HttpRedirectFilter t_redirect_filter;
+static __thread void *t_redirect_filter_user;
+
+void http_set_redirect_filter(HttpRedirectFilter filter, void *user) {
+    t_redirect_filter = filter;
+    t_redirect_filter_user = user;
+}
+
 void http_cookie_set_for_request(const char *url, const char *set_cookie_header) {
     if (!url || !set_cookie_header || g_remote) return;
     cookie_set_internal(url, set_cookie_header, false);
@@ -1581,9 +1595,33 @@ retry_connection:
                 redirect_url[i++] = *location++;
             }
             redirect_url[i] = '\0';
-            
+            /* A relative Location is relative to this hop's URL. */
+            char *abs = wurl_resolve(url, redirect_url);
+            if (!abs || strlen(abs) >= sizeof(redirect_url)) {
+                snprintf(err, errLen, "Bad redirect to %.200s", redirect_url);
+                free(abs);
+                free(outBuffer->data);
+                free(outBuffer->headers);
+                memset(outBuffer, 0, sizeof(*outBuffer));
+                return false;
+            }
+            snprintf(redirect_url, sizeof(redirect_url), "%s", abs);
+            free(abs);
+
             LOGI("Redirect to: %s", redirect_url);
-            
+            /* A loop, or the thread's filter (the network process: a page's
+             * document doesn't follow a redirect to another site), stops it. */
+            bool refused = t_redirects >= HTTP_REDIRECTS_MAX ||
+                           (t_redirect_filter && !t_redirect_filter(redirect_url, t_redirect_filter_user));
+            if (refused) {
+                if (t_redirects >= HTTP_REDIRECTS_MAX) snprintf(err, errLen, "Too many redirects");
+                else snprintf(err, errLen, "Redirect to %.200s not followed", redirect_url);
+                free(outBuffer->data);
+                free(outBuffer->headers);
+                memset(outBuffer, 0, sizeof(*outBuffer));
+                return false;
+            }
+
             if (strstr(redirect_url, "accounts.google.com") ||
                 strstr(redirect_url, "ServiceLogin") ||
                 strstr(redirect_url, "/signin") ||
@@ -1603,9 +1641,12 @@ retry_connection:
         outBuffer->headers = NULL;
         outBuffer->headers_size = 0;
             outBuffer->data = NULL;
-            return http_request_with_method(redirect_url, method, postData, postDataLen,
-                                            custom_headers, custom_header_count,
-                                            outBuffer, outStatus, err, errLen, cookies, state, bodyStream);
+            t_redirects++;
+            bool ok = http_request_with_method(redirect_url, method, postData, postDataLen,
+                                               custom_headers, custom_header_count,
+                                               outBuffer, outStatus, err, errLen, cookies, state, bodyStream);
+            t_redirects--;
+            return ok;
         }
     }
     
@@ -1821,9 +1862,12 @@ static bool http_request_with_method(const char *url, const char *method,
         }
         (void)cookies;
         (void)state;
+        /* (The remote sets where it ended: http_set_last_url.) */
+        snprintf(t_last_url, sizeof(t_last_url), "%s", url);
         return g_remote->request(url, method ? method : "GET", postData, postDataLen,
                                  custom_headers, custom_header_count, outBuffer, outStatus, err, errLen);
     }
+    if (url) snprintf(t_last_url, sizeof(t_last_url), "%s", url);   /* (also when url_map serves it) */
     if (outBuffer && !bodyStream && url && (!method || strcmp(method, "GET") == 0)) {
         const char *path = url_map_lookup(url);
         if (path) return url_map_serve(path, outBuffer, outStatus, err, errLen);
